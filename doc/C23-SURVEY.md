@@ -5153,3 +5153,148 @@ that include it). Outside gate_key: `bin/ci`, `bin/lib/ci/fresh.bash`, `bin/lib/
   read before its budget ends. (a) Run the round trip's night command with `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB` (T.7) and let
   CS281 (a)'s compiled reader end it; (b) skip an `:eval-limits` file's read in the default mode (its known entry judged without
   it). *Recommended: (a)*.
+
+## As built: CS282, the round trip's `--record` without gcc (2026-11-08, branch `c-rt-record`)
+
+Decided by the user (2026-11-08): CS282 (a). On `c-rt-record` at next bd33e27cc, light, with main's stage 0.
+
+- **The rule.** `bin/repr-c roundtrip --record` no longer implies gcc (only `--record-gcc`, `--record-orig`, `--verify-orig` and
+  `ARBACE_C_JUDGE=gcc` do). Without gcc it reads and judges levels 1 and 2 as the default judge does and takes levels 3 and 4 and gcc's
+  acceptance from the results file's recorded rows (`test/repr/c/roundtrip-results.edn`, `REPR_C_RESULTS_FILE`), the oracle tier's
+  record: the judge's new verb `judge-recorded WORK RESULTS ID...` (`arbace.repr.c.rtcheck/judge`'s third argument). `load-recorded`
+  parses a row's reason (read, l3, l4, gcc, class), `recorded-levels` turns l3 and l4 back into the driver's `obj.tsv` and `run.tsv`
+  rows `judge-row` reads (`equal`/`differ`, `orig-fails`, `print-rejected`; `same`/`differ`), and the acceptance is gcc's recorded
+  one (`test/repr/c/parse-gcc.tsv`, `load-gcc`). The record (`record`), the second judgment and the results file
+  (`arbace.repr.c.results`) then run as under gcc, so the known entries only levels 3-4 or gcc's acceptance gave stay known by
+  their rows (no deferral list): c23-named-loops-1's level 3, tcc-pp's 12.S and 13.S `port-only-rejects`, the `:objects` entries.
+- **Levels 3-4 are kept only where they still say something.** A file not read now, or not read when the row was recorded (zlib
+  infback.c and inflate.c, `refused:split-declaration` before CDF.8), has no recorded level 3: it is judged on levels 1-2, except
+  that a known entry of a class only levels 3-4 give (`oracle-classes`: `:objects`, `:objects-macro-body`, `:run-address`,
+  `:print-grammar`, the driver's deferral list) keeps it known ("levels 3-4 not recorded: the oracle tier's"). A row known by such a
+  class whose entry the known file no longer holds (removed after the row: 808d08d60 removed reverse-complement-5.c's
+  `:run-address` when gcc's runs passed it) has its levels 3-4 dropped, else the record would fail a file the oracle tier passed.
+  A file whose levels 1-2 changed keeps its recorded levels 3-4 (fprintf-1's: level 1 equal now, levels 3-4 as recorded): the
+  oracle tier's next record measures the new print.
+- **Controls.** The `:roundtrip` control (levels 3-4 crossed) is left in such a run (no object file); the level 1 and 2 controls
+  run as before.
+- **The known file's order.** `record` writes each corpus's entries sorted by name (they came out in hash order for corpora of more
+  than eight entries; the record of a few corpora reordered the others').
+- **fprintf-1's rows tidied.** `bin/repr-c roundtrip --corpus torture-execute --only` (fprintf-1.c, fprintf-chk-1.c), then
+  `rtcheck judge-recorded` on that run: both pass (read ok, l1 equal, l2 equal, l3 equal, l4 same, gcc agree); the two rows of the
+  results file replaced by `arbace.repr.c.results/rows`' (an `--only` run never records, so by hand, the rest of the file as it
+  was). `bin/reap --record` (C print 4,768 to 4,770 passing, 0 problems) and `bin/crops-score --record` (`--judge --strict`: 0
+  problems).
+- **Checked.** The test `roundtrip-record-keeps-oracle-levels-under-own-verdict` (test/c/judge_test.ae; seven made-up files: a
+  level-3 class kept, a fixed print passing on its recorded levels, gcc's acceptance kept, a new file, a recorded level 4 that fails,
+  an unread row's class kept, a removed entry's row dropped) with the round trip's and the token record's tests: 6 tests, 60
+  assertions, 0 failures. `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB bin/repr-c roundtrip --corpus tcc-pp,zlib,gcc-va-opt,benchmarksgame
+  --record` (101 files, about 4 minutes): exit 0, 98 pass, 3 known, the known file unchanged; the rows' changes were the three
+  above (reverse-complement-5.c passes, zlib infback.c passes, inflate.c known `:objects-macro-body`) and the worktree's longer path
+  clipping four details: not committed, the night's record makes them. `bin/gate --plan`: reap and crops-score rerun.
+- **Rekeys.** `arbace/repr/c/rtcheck.ae` (embedded: gate_key); outside it `bin/lib/repr-c/roundtrip`, `test/`.
+- **The night** (in place of T.7's step 5, the main session's, under the heavy lock): `REPR_C_THREADS=2 GOMEMLIMIT=1800MiB
+  bin/heavy-lock bin/repr-c roundtrip --record` (every corpus; no gcc; expect exit 3 only for a failing file of no class, printed),
+  then `bin/reap --record` and `bin/crops-score --record`. The oracle tier's record stays `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip
+  --record` by hand.
+
+## As built: C's completeness, the deferred classes measured on the checkout's ci (2026-11-08, branch `c-compl`)
+
+The brief (2026-11-08): raise C's crops-score completeness (95.1%, 98.7% without by design) by the largest deferred and pending
+classes, fixed in ci, repr/c and cf2g, measured light on the affected cases (`--only`) with the checkout's ci (`bin/lib/ci/fresh.bash`,
+T.1). On `c-compl` from next 5ec43f7b7, main's stage 0, the worktree's own musl forms (`bin/ci musl read`, 28 minutes at
+`CI_THREADS=2`).
+
+### CC.1 What the deferred classes held
+
+Sixty of the 167 deferred items were stale: the eval and AOT records were made by stage 0's embedded (seed) ci (T.1), so
+`:complex-int` (10 + 10, CS105's complex integers), `:vla` (3 + 3, queue 165's sizeof of a VLA), `:missing-builtin` (2 + 2, CS277),
+`:signals` (2, CS191 (a)), `:complit-static` (1), `:threads` (1, CS276 (b)) and the twelve `:ci-run-consolidation` cases pass with
+the checkout's ci, as does the dg record's c23-stdint-1 (`:parse-gap`). Two complex-integer programs (c23-imaginary-constants-5, -7)
+now meet the by-design refusal of `_Complex _Float128` and `_Complex _Float16` (SPEC §14), as they should. The rest, fixed:
+
+| class (level) | cases | cause | fix |
+|---|---|---|---|
+| `:checker` (eval, AOT) | torture-execute/align-3.c | `__alignof__` of a function declared `aligned(256)` and defined without it gave the type's 1 | the checker's entries keep `:dalign`, the declaration's alignment merged over every declaration of the identifier (gcc's DECL_ALIGN through duplicate_decls: aligned attributes and alignment specifiers), and `alignof` of a name reads it (c-typeck.cc's c_alignof_expr, DECL_P); the builder's `obj-align` honours it too (a variable's GNU aligned attribute laid out, as gcc does) |
+| `:checker` (eval, AOT) | gcc-embed-run/embed-12.c | an initializer overwritten by a later designator still ran its side effects (`foo (0)` aborts) | `fill-list` keeps each subobject's stores as one entry keyed by its element or member index (a union's members one key): a later whole write drops the earlier entry, its side effects with it, as gcc's output_init_element does ("initialized field with side-effects overwritten"; C23 6.7.11 leaves it unspecified); a write into a part of a subobject keeps the earlier one |
+| `:wrong-reason` (read, dg) | c23-bool-errors-1, -2 | "two or more data types" where gcc names the keyword | `bad-specs-msg`: gcc's declspecs_add_type, the first type word after another (long, short, signed, unsigned and _Complex are modifiers) when it is `bool` or `_Bool`: "'bool' cannot be defined via 'typedef'" in a typedef, else "cannot be used here" |
+| `:wrong-reason` | c23-tag-enum-6 | a redefinition of an enumeration without a fixed type held its values to nothing | C23 6.7.3.3: the redefinition has the first definition's underlying type, every value (an implicit one too) held to it: "enumerator value outside the range of underlying type" |
+| `:wrong-reason` | c23-nullptr-6 | `[nullptr] = 1` gave "not an integer constant expression" | an array designator's index that is not of integer type: c-typeck.cc's set_init_index, "array index in initializer not of integer type" |
+| `:wrong-reason` | c23-attr-reproducible-3, -unsequenced-3 | one diagnostic where gcc gives two | a standard attribute that takes no arguments given some: "expected ')'" before its "does not take any arguments" (noreturn-3 takes either) |
+| `:wrong-reason` | c23-switch-1 | the range's conversions and overlap unsaid | do_case's pedwarn "conversion of 'V' to 'T' in range expression changes value to 'W'" for a range bound the controlling type cannot hold (gcc's type names, `gcc-int-name`), and c_add_case_label's "duplicate (or overlapping) case value" for a range |
+| `:wrong-reason` | c-c++-common/cpp/embed-9 | `#embed <file>` without `--embed-dir` said "No such file or directory" | libcpp's search_path_head: no chain to search, "no include path in which to search for NAME", not fatal |
+| `:read-refused` (dg), `:converter-gap` and `:cc-grammar` (print) | the six of dfp/c23-constants-3, -4, c23-decimal64x-1..4 | the converter knew the suffixes df, dd and dl only | C23's d32, d64, d128 and d64x (libcpp's cpp_classify_number) read as the decimal types, `_Decimal64x`'s constant printed `d64x`; `c/include/float.h` defines Annex H.11's `DEC64X_` characteristics under `__STDC_WANT_IEC_60559_TYPES_EXT__` (decimal64x-4). At eval the run programs constants-3 and decimal64x-4 pass (their constants folded), decimal64x-1 and -3 are refused by design (`_Decimal64x`, SPEC §14) |
+
+The dg record's `test/c/dg-wording.edn` `:wrong-reason` list loses the eight files.
+
+### CC.2 How it was checked (light, main's stage 0, the checkout's ci)
+
+| command | result |
+|---|---|
+| `bin/ci dg --only` (the record's 44 failing files) | 15 pass (8 wrong-reason, 6 decimal, c23-stdint-1), the rest in their classes |
+| `bin/ci dg --essential` | 92 of 92 |
+| `bin/ci check --only` (34 deferred or refused programs) | 29 recorded failures pass; 95_bitfields `:read`, four by design |
+| `bin/ci check --aot --only` (43) | 38 recorded failures pass (c23-complit-2 among them); 95_bitfields `:read`, four by design |
+| `bin/ci check --only test/c/essential-check.txt`, `--aot --only test/c/essential-aot.txt` | 0 failing |
+| `bin/repr-c roundtrip --corpus gcc-c23-sub --only` (the six decimal files) | levels 1 and 2 equal, gcc agrees (levels 3-4 the oracle tier's, CS282 (a)) |
+| `bin/repr-c check --c23` | 59 pass, 3 expected, 0 failing |
+| `bin/ci annotations --only` (15 files using `__alignof__` of names and the dg fixes' files) | 15 pass or known, none failing |
+| `bin/ci judge-test` | 106 tests, 489 assertions, 0 failures (`message-as-verdict`'s wording count 13 to 5) |
+
+The `--only` runs' rows were merged into `test/c/check-linux-amd64.edn`, `check-aot-linux-amd64.edn`, `check-dg-linux-amd64.edn` and
+the round trip's results file (the rest as recorded; the night's whole records replace them), `test/c/check-known.edn` loses its four
+stale entries (align-3, embed-12, binary-trees-5, c23-complit-2) and `test/repr/c/roundtrip-known.edn` the six decimal files.
+`bin/reap --record` (0 problems), `bin/crops-score --record`: C 95.1% to 95.9% (98.7% to 99.6% without by design), maturity 100,
+independence 99.7. Cells: read 5,216 / 231 / 36 (deferred 51 to 36), eval 2,150 / 123 / 1 (30 to 1), AOT 2,158 / 115 / 1 (39 to 1),
+print 4,776 / 3 / 41 (47 to 41).
+
+The musl forms cache was read under the worktree's repr/c before its last edits (the #embed message, the decimal suffixes, the
+printer's `d64x`), and its key then written for the edited tree by hand (musl's sources use none of them): a light shortcut, the
+night's `bin/ci musl read` reads it properly.
+
+### CC.3 Rekeys
+
+Embedded (gate_key, the gate's builds; stage 0 evaluates them, T.1): `arbace/c/check.ae`, `arbace/c/build.ae`,
+`arbace/repr/c/convert.ae`, `pp.ae`, `print.ae`. `c/include/float.h` (the sysroot's key: the token check's digests of the files that
+include it move, the night's token record rewrites them). Outside it: `test/`.
+
+### CC.4 The night's commands
+
+T.7's list as night 9 runs it (`.tmp/night9/run.sh`, step c) covers these changes: `bin/ci musl read`, the token and tree records,
+annotations, `bin/repr-c roundtrip --record`, `bin/ci check --record`, `check --aot --record`, `dg --record`, the removal patch of
+`:ci-run-consolidation`, `bin/reap --record`, `bin/crops-score --record`. Expected: no regression, C at about 95.9% (99.6%), the
+remaining deferred items the classes CC.5 names. The token record also takes float.h's new digests.
+
+### CC.5 Left
+
+- Eval and AOT: 95_bitfields (`:read`, CS278 (a), decided, not built here: the re-entered copies share one `MAIN#again` CFile, whose
+  groups are parsed once, so a copy's `#pragma pack` cannot be placed by file offset; it needs the pragma stamped in stream order,
+  CS290 below).
+- Read (36): `:decl-diag` 9, `:pp-diag` 8, `:wrong-reason` 5 (the parser's own wording of syntax errors, c23-attr-syntax-6/-7 and
+  gnu23-attr-syntax-3; embed-3's per-fault diagnostics; bool-errors-3's regexes), `:read-refused` 4 (CS291), `:pedantic-diag` 2,
+  `:eval-depth` 5 and `:parse-gap` 1 (the parse check), `:absolute-name`, `:undiagnosed`.
+- Print (41): `:converter-gap` 10, `:eval-limits` 9 (the evaluated reader's budget and stack: gone with a compiled repr/c, CS281
+  (a)), `:cc-grammar` 6, `:macro-context` 6, `:print-grammar` 6, `:objects-macro-body` 2, `:split-declaration` 2.
+
+### Proposed (2026-11-08): CS290-CS292
+
+- **CS290 The re-entered copy's pragmas in stream order (CS278 (a)'s mechanism).** The copies of a self-including file are one
+  `MAIN#again` CFile, so offsets do not tell them apart. (a) The preprocessor, under `*reentry*`, keeps a copy's `#pragma` lines
+  as gcc does, in the token stream: the pragma attached to the next token it delivers (an identity map the parser carries to that
+  token's PTok), and block-items writes a `c/pragma` before the item that starts with it; the checker runs `pragma-pack!` for a
+  statement-level `c/pragma` and lays out by the current pack state (gcc applies `#pragma pack` anywhere); (b) name each re-entry
+  `MAIN#again#N` (a CFile each, parsed again) and place by offset within it; (c) leave 95_bitfields in `:read`. Cost: (a) about a
+  day, (b) half a day but every name check of `#again` changes, (c) none. *Recommended: (a)*: it is gcc's own mechanism (deferred
+  pragmas are tokens) and also gives a main-file `#pragma pack` inside a function body its effect, which the checker ignores today.
+- **CS291 The converter's refusals in error tests.** Four dg files and four round-trip files are refused before any diagnostic:
+  an empty character constant (`u8''`), `0b` without digits, a function definition through a typedef or `auto`. (a) The converter
+  writes a form for the bad construct with its diagnostic as metadata (`:c/error`, the way `:c/bad-specs` carries the specifiers)
+  and goes on, the checker reports it at its line, the print writes the original spelling back (`:c/text`); (b) keep the refusals
+  (`:read-refused`, `:converter-gap`). Cost: (a) a day for the three constructs with their sibling lines (c23-utf8char-3 wants four
+  lexical diagnostics, c23-auto-3 and c23-constexpr-3 about thirty declaration ones, so (a) moves the files from "refused" to
+  "missed" before it passes them); (b) none. *Recommended: (a) for the two lexical ones (utf8char-3, binary-constants-3: lexical
+  errors cpp_classify_number and lex_charconst give), (b) for the declarator files until `:decl-diag` is taken up.*
+- **CS292 The parser's syntax-error wording against gcc's.** c23-attr-syntax-6, -7 and gnu23-attr-syntax-3 are `:wrong-reason`
+  only because the parser says cc's "unexpected ':', expected ']'" where gcc says "expected ']' before ':'". (a) A dg-wording family
+  mapping the one to the other (the same diagnosis at the same token; CS200 (a)'s families are for exactly this); (b) the parser's
+  messages in gcc's words (the parse check compares them with cc's: no); (c) keep them `:wrong-reason`. Cost: (a) an hour; (c) none.
+  *Recommended: (a)*: the read cell's deferred 36 to 33.

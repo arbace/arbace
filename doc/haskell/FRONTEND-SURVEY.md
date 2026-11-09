@@ -1481,6 +1481,79 @@ checkout's store, `.tmp/oracle-packs/haskell-ifaces-ghc-9.14.1/`, and the mirror
   **re-record the pack whenever a corpus grows (`--record-ifaces`)**, until HF10 makes the front end write the libraries' interfaces
   itself; (b) the closure of every exposed module of the 41 packages (about 2,000 interfaces, about 60 MB). *Recommended: (a)*.
 
+## As built: HFS-I2 (a) (2026-11-08, branch `hs-inputs`, from `next` bd33e27cc)
+
+The user's decision HFS-I2 (a): the read stage's inputs derived, the configure products and the package database first (data), then
+hsc2hs's C program on ci. Built in that order, each part compared byte for byte with the pack `haskell-native-inputs-ghc-9.14.1` (the
+oracle tier); doc/haskell/NATIVE.md, "The native reads' inputs: derived", has the members and how each is made.
+
+### What was built
+
+- **`arbace.repr.haskell.target`** (`bin/repr-haskell target derive`): the tree in the pack's layout from the tarball, musl's tarball
+  and `test/haskell/target/installation.edn` (the installation's names and choices, each with its reason). The settings file in
+  hadrian's order; the 47 package records by **`arbace.repr.haskell.cabal`**, a port of Cabal-syntax 3.16's field parser, conditions,
+  free text and `showInstalledPackageInfo` (each unit's `.cabal`, `.cabal.in` or `.buildinfo.in` finalized for x86_64 Linux with
+  hadrian's flags), then the bindist's `patchpackageconf`; the units' installed headers by their `install-includes`; ghcversion.h,
+  ghcplatform.h, the event headers (gen_event_types.py's rules), HsIntegerGmp.h, ghc-gmp.h, musl's stdc-predef.h.
+- **`arbace.repr.haskell.configure`** (`target probe [--verify]`): the seven configure headers by config.status's rewrite of each
+  template over `test/haskell/target/answers.edn`, which the probe computes on Arbace's C target: each check's kind from its autoheader
+  comment or a rule of the configure.ac (`manual-rules`), headers in musl's tree and `c/include`, functions among libc.a's definitions
+  (musl's forms index and a scan of its `src/ldso` and assembly sources), 308 compile tests by ci's checker (`bin/ci diagnose`), the
+  constants' and htypes' types by `bin/ci annot` (the checker accepts a pointer in an integer constant expression and a double cast to
+  a pointer: the type, not the compile test, decides FP_COMPUTE_INT's failure and FPTOOLS_CHECK_HTYPE's CUIntPtr), four value programs
+  by `bin/ci run`. The probe takes about an hour, nearly all of it the compile tests.
+- **`arbace.repr.haskell.constants`**: deriveConstants. Its `wanteds` are read from the tarball's `utils/deriveConstants/Main.hs` and
+  expanded by the DSL's definitions; the C file of `char derivedConstantX[1 + EXPR]` arrays is checked by ci's checker and the arrays'
+  sizes read from `bin/ci annot` where Main.hs reads nm's (building the RTS's headers is refused: SpinLock.h's inline assembly).
+- **`arbace.repr.haskell.hsc2hs`** (`target hsc`): hsc2hs 0.68.10's direct mode ported (the parser, the C program, the utilities'
+  file), the program built and run by `bin/ci run`; with DerivedConstants.h into `.tmp/repr-haskell/target/hsc`, kept by key, about 40
+  seconds a module.
+- `bin/repr-haskell`: the native reads take the derived tree (`REPR_HASKELL_INPUTS=pack` the pack); a member the derivation has not made
+  yet (before `target hsc` has run) is the pack's and named in the tree's `BORROWED`; `target compare` (the oracle tier's step
+  `haskell-target-oracle`, `test/gate/crops/haskell.edn`). `haskell-roundtrip` runs `target hsc` first; the two Haskell read steps
+  declare C's inputs (musl's pin, `bin/ci`, `c/target/`).
+
+### Results (light: one process, under 2 GiB, `ARBACE_HOST_EXE` main's stage 0)
+
+- **The oracle tier** (`bin/repr-haskell target compare`): 335 of the pack's 337 members byte for byte (an `.hspp.edn` on its
+  `:hsc2hs`), none differing; the two left are GHCi/FFI.hsc's (below, HFS-I11). In order of building: the records, settings and
+  headers 147; the configure answers 156; DerivedConstants.h and the 89 .hsc modules 335.
+- **The reads** (stubs `ghc ghc-pkg runghc ghci hsc2hs gcc cc clang cpp c99 ld` first on PATH, exiting 99; none was called):
+  `REPR_HASKELL_ONLY_PACKAGES='unix ghc-heap hpc haskeline'` and `'directory process time'` `bin/repr-haskell read --reader native
+  --corpus`: the 166 modules' native dumps byte for byte those read from the pack (`REPR_HASKELL_INPUTS=pack`); `roundtrip --text
+  --layout` over the seven packages: 166 of 166 equal at the tree, layout and text levels, 61 of them .hsc modules, 60 CPP module views.
+- **Times**: `target derive` 24 s; `target hsc` 46 min (DerivedConstants.h about 3 min, then about 30 s a module); `target probe`
+  about 65 min (the compile tests 60).
+- **Scores** (`bin/crops-score --crop haskell`): before 96.3 / 100 / 74.9 (read 0.804), after 96.3 / 100 / 78.8 (read 1.000: 1,344
+  modules by their own inputs, 1 by the pack, (1344 + 0.5) / 1345 = 0.9996); `test/crops/scores.edn` recorded.
+
+### Proposed (HFS-I8 to HFS-I10)
+
+- **HFS-I8 Where the hsc2hs outputs live for the gate.** `target hsc` takes about an hour of ci on a fresh tree (90 modules, one
+  process, under 2 GiB). (a) **As built: made by `haskell-roundtrip`, kept by key in the checkout's `.tmp/`** (a night in the main
+  checkout pays it once per change of the tarball, the derivation or hsc2hs.ae; the clean run pays it every time, light); (b) a pack
+  of Arbace's own outputs in the store (`bin/oracle-records`'s format, recorded by `target hsc`, verified by a rerun in the oracle
+  tier): the clean run free of the hour, a record to keep; (c) the outputs committed (about 0.9 MB) with `target hsc --verify`.
+  *Recommended: (a)*, (b) if the clean run's budget (GT8) objects.
+- **HFS-I9 The probe's place.** `target probe --verify` (about an hour of ci's checker) is in the oracle tier's `haskell-target-oracle`.
+  (a) **As built: by hand at a tag, and whenever `configure.ae`, `answers.edn`, musl's pin or `c/` changes** (the answers are committed;
+  no read recomputes them); (b) a `--full` step keyed on those inputs (it runs only when they change). *Recommended: (b)*: no toolchain
+  runs in it, and the key keeps it off most nights.
+- **HFS-I10 The installation's identities.** The units' ids (Hadrian's 4-digit hashes), the ABI directory's and the 44 ABI fingerprints
+  are recorded facts (`installation.edn`): the reads quote the ids and the directory in their `:cpp` records; no read consumes an ABI
+  hash, which is only in the records for the byte comparison. (a) **Keep them as facts** (names of the installation, as the corpus's
+  -I paths already are); (b) port Hadrian's `Hadrian.Haskell.Hash` (the ids from the packages' sources and flags); (c) leave the
+  fingerprints out of the derived records (the comparison then differs in one line of 44 records). *Recommended: (a)*; (b) once the
+  front end compiles the boot libraries (HF9, HF10), which needs the ids it would then compute.
+- **HFS-I11 GHCi/FFI.hsc's libffi.** Its C includes `<ffi.h>`, libffi's generated header (the installation's system libffi), which
+  neither musl nor the tarball holds; the module's hsc2hs output stays the pack's (BORROWED), 1 of the 1,345 modules. (a) libffi 3.x's
+  release tarball pinned in the main checkout's `.tmp/` (as musl's) and `ffi.h` and `ffitarget.h` derived for x86_64 as its configure
+  makes them (`ffi.h.in`'s substitutions: a few values), then the module made on ci; about half a day; (b) Arbace's own `ffi.h` in
+  `c/include` (the types and constants GHCi/FFI.hsc reads: `ffi_cif`, `ffi_type`, `FFI_DEFAULT_ABI`, the ABI enum) from the libffi
+  ABI for x86_64 written anew; (c) keep the record. *Recommended: (a)*, the faithful one; the fetch is the main session's.
+- Beside them, for C's crop: ci's checker accepts `enum { v = ((void (*)(int))0) }` and `(timer_t)0.2` (a pointer in an integer
+  constant expression, a floating value cast to a pointer), which gcc rejects; recorded here for the C line's agenda (the probe works
+  around it with the declarations' types).
 ## As built: HF9 (first slice) (2026-11-08, branch `hs-hf9`, from next 835891150)
 
 By an agent on the main host by day (the light tier: no gate, no build of Arbace, every process under about 1.6 GB, at most two
@@ -1697,6 +1770,127 @@ So of the 21, 18 wait for the helper (an oracle-side change, HF9-P2 and HF9-P5),
   HF9-P1's; *recommended: HF9-P1 (a)*, the results recorded (`--record test/haskell/lib-check-ghc-internal.edn`, from this
   slice's end) and the step's budget the night's.
 
+## Decided (the user, 2026-11-08, about 19:45: HF9-P1 to P8)
+
+HF9-P1 (a) with HF9-P8: lib-check a recorded check (`test/haskell/lib-check-ghc-internal.edn`), the interfaces packed as an oracle
+pack, a `--full` step that fails when a module gets worse. HF9-P2 (b) with HF9-P5 (a): a second helper verb that dumps hidden
+modules' interfaces, every type constructor including the unexported ones and the imported pattern synonyms' types, so that the
+packs keyed by the current helper stay valid; built on the host's GHC 9.14.1, pinned. HF9-P6 (a): kinds erased, the two
+kind-blocked modules in a recorded class. HF9-P7 (a): Data, Generic and Lift's derived methods with slice 7. (HF9-P3 (a) and
+HF9-P4 (a) were decided before the second slice.) Then lib-check again over the 18 modules the helper limited, from the new verb's
+dumps.
+
+## As built: HF9-P1, P2, P5, P6, P7, P8 (2026-11-08, branch `hs-props`, from `mac/hs-hf9` 7ed40299a with `mac/hs-hes84`)
+
+By an agent on the main host, the light tier (every process under about 1.5 GiB, at most two at once; stage 0
+`/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated); the night's host load made the runs slow, not heavy.
+
+### The second interface verb (HF9-P2 (b), HF9-P5 (a))
+
+- `tools/hsdump/iface2/Iface2.hs`: an executable of its own, `hsdump-iface2 iface2 -o OUTDIR --libdir DIR [--ghc FLAG... --files]
+  MODULE...`, under its own version (`iface2Version`, 1). It is compiled with `tools/hsdump/HsRn.hs`, its export list opened in a
+  copy (`bin/repr-haskell`'s `build_iface2`, into `.tmp/hsdump/iface2/`, kept by its own key: `hsr_iface2_hash`, the SHA-256 of
+  `tools/hsdump/iface2/*.hs`, `HsRn.hs` and `GHC_VERSION`, with the ghc unit), so its forms are the iface verb's own (`thingF`,
+  `typeF`, `nameF`, `availF`, the closure's rule) and nothing of `tools/hsdump/*.hs` changed: `hsr_helper_hash` (the glob
+  `tools/hsdump/*.hs`, which does not reach `iface2/`) and every pack keyed by it (haskell-ifaces, -stg-progs, -stg-libs, the
+  dumps) are as they were. The helper refuses no GHC of its own (it is linked against the host's ghc library, the pin checked by
+  the build's `ghc_check`).
+- What it adds to the iface verb's output, each GHC's own answer:
+  - **hidden modules**: a module `findModule` refuses (GHC-87110) is found among the units' `unitHiddenModules` (ghc-internal's
+    first) and its interface read by `getModuleInfo`, which loads a package module's interface by its `Module` whatever its
+    exposure (`getPackageModuleInfo`, `hscGetModuleInterface`);
+  - **every type constructor of the module**: the interface's declarations are in the external package state once it is loaded
+    (`eps_PTE`), every TyCon among them (GHC.Iface.Tidy keeps all of them); the ones the module does not export are added to
+    `(hsiface/things ...)`, as `thingF` writes them, but not classes (their methods would enter the judge's comparison), implicit
+    things or family instances' representation tycons. So `CodeBuffer#` and `CodingBuffer#` of GHC.Internal.IO.Encoding.Types,
+    synonyms its exported types use, now expand in their importers;
+  - **pattern synonyms' signatures**: `(patsyn NAME {:univ [TV...] :req [T...] :ex [TV...] :prov [T...] :args [T...] :res T
+    :fields [...] :builder T|nil})`, `patSynSig`'s parts (GHC.Core.PatSyn) and the builder's type, where the iface verb writes
+    `(patsyn NAME)` alone. GHC's pretty-printed pattern type is left out: it names variables by their uniques, which differ
+    between two sessions.
+  - the header `(hsiface/module "M" {:unit "U" :verb "iface2" :iface2 1})`.
+- The elaborator reads it (`arbace.repr.haskell.typecheck`'s `add-things!`): an imported pattern synonym with a signature enters
+  `*patsyns*` (tcPatSynPat's input: the universals instantiated, the required context wanted, the existentials skolems, the
+  provided context given) and, with a builder, `*genv*` (the builder type `forall univ ex. (req, prov) => args -> res`, as a local
+  synonym's). A `(patsyn NAME)` without one is skipped as before.
+
+### lib-check as a recorded check (HF9-P1 (a), HF9-P8)
+
+- `bin/repr-haskell lib-check` reads its interfaces from the pack **haskell-lib-ifaces-ghc-9.14.1**
+  (`test/haskell/records/haskell-lib-ifaces-ghc-9.14.1.sha256` and `.tsv`, the store of `test/oracle-records/oracle.bash`): its members
+  `pool/M.iface.edn` (every interface a closure names) and `closure/M.txt` (each module's closure as the helper dumped it), each keyed
+  by `hsr_iface2_hash`; a key that is not the current one is STALE, an absent pin UNRECORDED, a member off its digest REFUSED, each a
+  failure, and a module of the run whose closure the pack lacks UNRECORDED. No GHC runs. `--live` makes the closures with the
+  iface2 verb (the oracle tier), `--live --record-pack` packs them (the other modules' closures of a pinned pack kept; class B,
+  `:host ghc`), `--live --verb iface` measures with the first verb as HF9's slices did. `--verify-pack [--sample N]` (the kind
+  `lib-ifaces` of `test/oracle-records/kinds.edn`): N modules' closures dumped afresh and compared with the pack file by file in a
+  normal form (`bin/lib/repr-haskell/iface-norm.awk`: GHC's uniques, of type variables, Core binders and pretty-printed local
+  names, differ between sessions and order the sorted things, so each is renumbered by its first appearance on its line and the
+  lines are sorted; the first runs, which compared bytes, found GHC.Internal.Types', Tuple's and Bits' interfaces "different"), a difference reported
+  rather than failed when GHC moved (ORS6 (a)), then the crossed pair (one module's fresh interface against another's packed one,
+  which must differ). The work directory is `.tmp/repr-haskell/lib-check/VERB/PKG/`.
+- `--record FILE` writes the results with a header (`arbace.repr.haskell.libcheck`'s `record`; a partial run, `--only` or
+  `--every`, replaces its modules' rows); `--judge FILE` (`judge`) fails when a module is worse than its row (its stage ranks lower:
+  `:ok` > `:errors` > `:typecheck` > `:rename` > `:timeout`; or at the same stage fewer binders equal, more GHC's only, or more
+  errors), when a whole run lacks a recorded module or has one the record lacks, or when a module that does not pass is in no class
+  of `test/haskell/divergences-lib-check.edn`; a better module is reported (re-record it), never a failure. The negative control
+  (GTS81 (a)), `test/haskell/lib-check-controls.tsv`: GHC.Internal.Data.Either judged against GHC.Internal.Data.Maybe's interface
+  with Maybe's module name put in Either's place (`control`): the judge must not find it equal (it finds 9 binders GHC's only).
+- The gate step `haskell-lib-check` (`test/gate/steps.edn`, `:phase :full`, `:mem-gib 2`, after haskell-read-essential, on stage 0
+  alone; its pins the corpus, the native inputs and the new pack; its control the controls file): `bin/repr-haskell lib-check
+  --judge test/haskell/lib-check-ghc-internal.edn`, about 12 minutes in one process. The Makefile's `repr-haskell-lib-check` runs
+  it, `repr-haskell-lib-check-record` records the pack and the measure by hand.
+- The record `test/haskell/lib-check-ghc-internal.edn` (266 rows, ghc-internal's every module now: the 248 of HF9's second slice and
+  the 18 hidden ones) is provisional until the night: 227 rows are the second slice's end (the first verb, live), the 39 modules
+  run today the iface2 verb's. The pack is not recorded yet (it needs every closure of the package: the night's, by hand), so the
+  step fails UNRECORDED until then.
+
+### Kinds and derived methods (HF9-P6 (a), HF9-P7 (a))
+
+- `test/haskell/divergences-lib-check.edn`, goi's format: `:kinds` (deferred; HF9-P6 (a)): GHC.Internal.Generics (SingKind k),
+  Data.Typeable.Internal (TypeRep's kind arithmetic and levity) and, found today, Data.Dynamic (dynApply's `typeRep @Type` against
+  `typeRepKind tr`: a kind instantiated through an invisible binder, under Fun's provided `k ~ Type`; its other errors left with
+  the patterns' types); `:default-signatures` (deferred): GHC.Internal.Exception.Context, found once its hidden imports' names
+  resolved: the default method of `class ExceptionAnnotation` is checked at the method's type, not at its default signature's
+  (`Show a =>`), so its Show is not given (GHC types `$dm` at the default signature, its context's dictionaries parameters an
+  instance passes: GHC.Tc.TyCl.Class, GHC.Tc.TyCl.Instance's mkDefMethBind); the instance's side is the desugaring's, so with slice
+  7; `:th-quotes` (deferred): TH.Lift's brackets, section 3.9.
+- HF9-P7 (a): nothing built; gen_Data_binds, GHC.Tc.Deriv.Generics' `Rep` instances with `from` and `to`, and gen_Lift_binds go
+  with slice 7 (desugaring and STG of the new forms), where STG needs them; the measure judges the instances' heads and contexts,
+  which are entered.
+
+### lib-check before and after on the 18 modules the helper limited
+
+The second slice's end (its record) against today's run (the iface2 verb, live, 39 modules: the 18, Event.Internal, Either and
+Maybe, and the 18 hidden modules):
+
+| module | before (the iface verb) | after (the iface2 verb) |
+|---|---|---|
+| Conc.IO | 9 errors (unrenamed:qual 9) | ok, 10 of 10 equal |
+| Data.Typeable | 44 errors (unrenamed, no-con-type, Show) | ok, all equal |
+| Event.IntTable | 20 errors (unrenamed) | ok, all equal |
+| Event.Manager | 101 errors (unrenamed, Monoid, Eq) | ok, all equal |
+| Event.Thread | 32 errors (unrenamed) | ok, all equal |
+| Event.TimerManager | 37 errors | ok, all equal |
+| Event.TimeOut | 9 errors (deriving:rep-dict) | ok, all equal |
+| Exception.Context | 5 errors (unrenamed, GADT, Show) | 1 error (unsolved Show: `:default-signatures`), 9 of 9 equal |
+| IO.Handle.Lock | 3 errors (unrenamed) | ok, all equal |
+| Type.Reflection.Unsafe | 1 error (unrenamed) | ok, all equal |
+| Unicode | 6 errors (unrenamed) | ok, 52 of 52 equal |
+| IO.Encoding | 2 errors (unify: CodeBuffer#) | ok, 21 of 21 equal |
+| IO.Encoding.Iconv | 1 error | ok, all equal |
+| IO.Encoding.Latin1 | 38 errors | ok, all equal |
+| IO.Encoding.UTF8 | 47 errors | ok, all equal |
+| IO.Encoding.UTF16 | 50 errors | ok, all equal |
+| IO.Encoding.UTF32 | 44 errors | ok, all equal |
+| Data.Dynamic | 4 errors (no-con-type, GADT, Typeable 2: the pattern synonym Fun's type missing) | 2 errors (Typeable 2: `:kinds`), 7 of 7 equal |
+| (Event.Internal) | ok, 3 of 7 equal | ok, 7 of 7 equal |
+
+So 16 of the 18 pass now (and Event.Internal's types are equal); the two left are the elaborator's, not the helper's. The 18
+hidden modules (Event.Arr, Array, EPoll, IntVar, KQueue, PSQ, Poll; IO.Handle.Lock.Flock, LinuxOFD, NoOp, Windows;
+StaticPtr.Internal; Unicode.Bits, Char.DerivedCoreProperties and the five UnicodeData tables), out of the measure before, all pass
+(76 of 76 binders). ghc-internal as recorded: **266 modules, 261 without an error and every type equal** (was 248 judged, 227 and
+226), binders 5,067 of 5,068 equal; the five left in their classes (`:kinds` 3, `:default-signatures` 1, `:th-quotes` 1).
 ## As built: HF10 (first slice) (2026-11-08, branch `hs-hf10`, from `mac/hs-hf9` 7ed40299a)
 
 By an agent on the main host by day (the light tier: no gate, no build of Arbace, every process under about 1.6 GB, at most two
@@ -1817,6 +2011,24 @@ methods, Num's instances, Integer's and Natural's arithmetic, Types and Tuple's 
 
 | check | result |
 |---|---|
+| `bin/repr-haskell lib-check --live --only` the 39 modules (the iface2 verb) | 37 pass, 2 in a class; `--judge` against the record: 0 worse, the control differs (9 GHC's only) |
+| the same from a test pack (`ARBACE_ORACLE_PACKS` a scratch store, `--live --record-pack`, then the pack read with no GHC, `--judge`) | the same results, 0 worse, the control differs |
+| `--verify-pack --sample 4` against that pack | 4 modules, 233 interfaces equal in the normal form, the crossed pair differs |
+| the judge's own negatives: one binder fewer equal, a module out of its class | worse, unclassed: exit 1 |
+| `gate.crops check` | 0 problems |
+| `bin/repr-haskell typecheck-check` (the elaborator after `add-things!`'s pattern synonyms) | 24 of 24 modules equal, the negative control differs (13 of 24) |
+| `bin/gate --full --plan` | haskell-lib-check planned (a light `:full` chain beside the serial run) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` | Haskell eval 797 / 64 / 47, AOT 137 / 1 / 1 (HES87 (a)); 0 problems; Haskell 96.6 / 100 / 74.9 to 96.3 / 100 / 74.9 (completeness 0.9661 to 0.9632) |
+
+### Night (the main session's, by hand at the oracle tier: GHC 9.14.1)
+
+1. `bin/repr-haskell lib-check --live --record-pack --record test/haskell/lib-check-ghc-internal.edn` (the iface2 verb over every
+   module of ghc-internal: two helper sessions a module, about 4 s each, then the measure, one process, about 12 minutes; the pack
+   haskell-lib-ifaces-ghc-9.14.1 pinned and the record rewritten from one run), `bin/repr-haskell lib-check --verify-pack --sample 8`,
+   then add `test/haskell/records/haskell-lib-ifaces-ghc-9.14.1.sha256` to haskell-lib-check's `:pins` in `test/gate/steps.edn`; a
+   commit of its own naming :ghc's identity; `bin/oracle-records mirror --push`.
+2. `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (the step's command, no GHC): 0 worse, the control
+   differs; a module that moved with the whole run's interfaces (the 227 rows recorded with the first verb) is then the record's.
 | `bin/repr-haskell lib-stg` (the 55 modules, one process, about 3 minutes) | 53 compiled, 2 STG stops; **595 of 1,149** exported bindings equal to GHC's `-O0` (435 of 1,004 at the slice's first measure); 9 of 36 modules with bindings all equal; the negative control (Base against its rotated reference) 0 of 171 equal |
 | `bin/repr-haskell lib-stg --run` | 59 of 63 on the pack, 59 of 63 with the own bindings, 0 lost |
 | `bin/repr-haskell typecheck-check` | 24 of 24 modules equal, the control 13 of 24 (after the bang patterns and the dictionary names) |
@@ -2006,3 +2218,92 @@ The record `test/haskell/lib-stg-results.edn` keeps each module's stage and coun
 - **HF10-P10 The list past level 30.** (a) **first the Simplifier's time on `utf8_decode` (profile the iteration, the
   case-of-case and join point duplication against GHC's dump), then the levels 31 to 60 into `test/haskell/lib-stg.txt` as they
   hold**; 1 to 2 days; (b) the levels as they are, UTF8 recorded `:timeout`. *Recommended: (a)*: the same cost would hit a program.
+
+## Decided (the user, 2026-11-08: HFS-I8 to HFS-I11)
+
+- **HFS-I8 (a)**: the hsc2hs outputs made by `haskell-roundtrip` (`target hsc` first), kept by key in the checkout's `.tmp/`; the clean
+  run pays the hour (light). As built with HFS-I2 (a); nothing to change.
+- **HFS-I9 (b)**: `target probe --verify` a `--full` step keyed on what it reads, out of the oracle tier (below).
+- **HFS-I10 (a)**: the units' ids, the ABI directory and the 44 ABI fingerprints stay facts of `installation.edn` (names of the
+  installation, as the corpus's -I paths are); Hadrian's hash ported when the front end compiles the boot libraries (HF9, HF10).
+- **HFS-I11 (a)**: libffi 3.x's release tarball pinned, `ffi.h` and `ffitarget.h` derived for x86_64 as its configure makes them,
+  GHCi/FFI.hsc made on ci (below). The fetch: the user allowed it for this one tarball.
+
+## As built: HFS-I9 (b), HFS-I11 (a) (2026-11-08, branch `hs-hfsi9`, from `next` 5ec43f7b7)
+
+### HFS-I11 (a): the system's libffi
+
+- **The pin**: `test/haskell/target/libffi.edn`: libffi 3.8.0, the latest 3.x release on 2026-11-08 (GitHub's release v3.8.0, published
+  2026-08-08), https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz, 1,581,626 bytes, SHA-256
+  `7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4` (equal to the digest GitHub's release API lists for the asset),
+  SHA-512 recorded beside; fetched once into the main checkout's `.tmp/repr-haskell/libffi/` (a new, empty directory), the path a
+  worktree and the clean clone take it from (`haskell_take`). 3.8.0 is also the host's Alpine package (libffi-dev 3.8.0-r0), the one the
+  pack's hsc2hs run read. MIT: LICENSE.md ("libffi: MIT License"), doc/ARBACE.md.
+- **The derivation** (`arbace.repr.haskell.target`'s `libffi-vars` and `libffi-headers`): the tarball is data (only `configure.ac`,
+  `include/ffi.h.in`, `src/x86/ffitarget.h` and `LICENSE` are extracted, into `.tmp/repr-haskell/target/libffi`; no configure, no make,
+  no code of it runs). config.status's AC_CONFIG_FILES substitutions of `ffi.h.in`, each value by its rule: `VERSION` and
+  `FFI_VERSION_STRING` AC_INIT's version (3.8.0), `FFI_VERSION_NUMBER` X*10000 + Y*100 + Z (30800), `TARGET` configure.host's
+  `x86_64-*-*` rule (X86_64, sizeof(size_t) 8 from `c/target/abi.edn`; TARGETDIR x86), `HAVE_LONG_DOUBLE` 1 (configure.host sets none for
+  x86; sizeof(long double) 16 differs from double's 8), `FFI_EXEC_TRAMPOLINE_TABLE` 0 (only `*arm*-apple-*`, `aarch64-apple-*`); an
+  `@VAR@` left unsubstituted is an error. `ffitarget.h` is `src/x86/ffitarget.h`, as configure's config command copies it. The host
+  `x86_64-alpine-linux-musl` is the pin's `:host`. Both headers are byte for byte the host's `/usr/include/ffi.h` and `ffitarget.h`
+  (checked by hand, 2026-11-08: Alpine's configure of the same release).
+- **Where they go**: `sysroot/usr/include/ffi.h` and `ffitarget.h` of the derived tree, where libffi-dev installs them; named in the
+  tree's new `SYSTEM` file, which `target compare` leaves out (the host system's headers: the pack, GHC's installation, holds none of
+  them). `target hsc` gives every module's C program the derived tree's `sysroot/usr/include` last, as gcc's `/usr/include` was for
+  hsc2hs on the host; and it now runs `bin/ci musl ensure` first (a fresh tree had no forms cache: its three ghci modules failed with
+  "no index.edn", found here).
+- **Results** (light, one process, about 1 GiB): `REPR_HASKELL_ONLY_PACKAGES=ghci bin/repr-haskell target hsc`: 3 of 3 modules made on
+  ci, 2 min 11 s; GHCi/FFI.hs byte for byte the pack's (SHA-256 `3abe5950...`, the record's `:hsc2hs :output`). The derived tree with
+  the 90 modules made on ci (89 from the hs-inputs run, the ghci three from this one) against the pack: `target compare` **337 of 337
+  equal, 0 differ, 0 missing, 0 extra, 0 borrowed**, libffi's 2 the system's. Nothing of the read stage is borrowed any more.
+- **Score** (`bin/crops-score --crop haskell`): read 0.9996 to 1.000 (`:cases {:self 1345 :recorded 0}`); Haskell 96.6 / 100 / 78.8
+  (independence 0.78840 to 0.78847: unchanged at the record's four places, `test/crops/scores.edn` as it was; `--judge --strict` 0
+  problems).
+
+### HFS-I9 (b): the probe as a `--full` step
+
+- **`bin/repr-haskell-target`** (new; `src`, `probe [--verify]`): the probe and the tarball's extraction moved out of `bin/repr-haskell`
+  so that the step's key is its own (a script in `bin/`, as the planner's `:cmd` check reads `bin/NAME`); `bin/repr-haskell target probe`
+  and its `target_src` run it. Make: `make repr-haskell-target-probe`.
+- **`haskell-target-probe`** (`test/gate/steps.edn`, `:phase :full`, 2 GiB, hosts `:stage0 :go`): `bin/repr-haskell-target probe
+  --verify`, keyed on the script, `inputs.bash`, `arbace/repr/haskell/configure.ae`, `test/haskell/target/answers.edn`, the pins of the
+  GHC tarball (`corpus-ghc-9.14.1.edn`) and musl (`test/c/corpora.edn`), C's tools and target (`bin/ci`, `bin/lib/ci/`, `bin/lib/repr-c/`,
+  `arbace/c{.ae,/}`, `arbace/repr/c{.ae,/}`, `c/`, `test/c/host/`, `test/c/records/`, `:c-run`, `:c2j-runtime`; 186 files): no Haskell
+  change but those reruns it. Its control is waived (the fresh answers against the committed file: a differing answer is its finding).
+  `bin/gate --full --plan`: `run haskell-target-probe key 8549e6f01260, 186 files; never passed`, among the light chains beside the
+  serial run. `gate.crops check`: 0 problems.
+- **The oracle tier**: `haskell-target-oracle` (`test/gate/crops/haskell.edn`) keeps `target hsc && target compare`; spliced into `test/gate/steps.edn`'s oracle tier by night 10's merge stage (branch `night10-fixes`, `gate.crops splice` of that step alone: its step, its `:crops :haskell` entry and its waiver).
+- **The probe's run** (the moved script, whole, by day: one process, 0.9 GiB peak): `bin/repr-haskell target probe --verify` (through
+  `bin/repr-haskell-target probe --verify`), 308 compile tests, "the answers as committed", 36 min (65 on hs-inputs' first run).
+
+## Decided (the user, 2026-11-08, later: HFS-I12, HFS-I13)
+
+- **HFS-I12 (a)**: the probe gets a negative control of two planted compile tests. Built ("As built: HFS-I12 (a)").
+- **HFS-I13 (a)**: keep the clean run's two hours of ci (light, beside the serial run) until GT8's budget for the clean run objects.
+  Nothing to build.
+
+## As built: HFS-I12 (a) (2026-11-08, branch `hs-hfsi9`, from 88af58be2)
+
+- **The control**: `test/haskell/target/controls/control-no.c` (`#include <stdlib.h>` and `void unsetenv(const char *);`, a
+  conflicting declaration, the shape of the probe's own `compiles` checks) must be answered "no", and `control-yes.c` (stdlib.h
+  and a function using `abs`) "yes". `bin/repr-haskell-target controls` runs the two through `bin/ci diagnose` as the probe runs
+  the 308 and reads the result as `arbace.repr.haskell.configure/compile-errors` does (a `FILE.c:LINE:` line on the file means
+  no); either answer flipped, exit 1 naming it. `probe` runs it first, so a flip fails in about 20 seconds instead of after the
+  36 minutes. `REPR_HASKELL_CONTROLS=DIR` names another directory (the flips below).
+- **The step**: `haskell-target-probe`'s waiver in `:controls` is replaced by `"test/haskell/target/controls/control-no.c"`, and
+  the directory joins its `:inputs` (so the control is in its key: `bin/gate --full --plan` shows 188 files, never passed).
+  `gate.crops check`: 0 problems; `test/gate/crops-test.bash`: ok.
+- **Checked, light**: the real controls: "control-no.c answered no, control-yes.c answered yes", exit 0. The no-test replaced by the
+  yes-test: "control-no.c was answered yes (it must be no)", exit 1. The yes-test replaced by the no-test: "control-yes.c was
+  answered no (it must be yes)", exit 1.
+- **The whole probe** (by day, `bin/repr-haskell-target probe --verify`): the controls passed first, then the 308 compile tests, types and values: "the answers as committed", 33 min wall (40 min CPU), one process.
+- **Why not planted among the 308**: the answers file reads only the 308 by name, so a planted pair would be harmless there too,
+  but a failure would show only after the long diagnose run; a separate early run costs one more 20-second ci start.
+
+- **HFS-I12 The probe's negative control.** The step is waived. (a) **A control check in the plan**: one compile test the probe must
+  answer "no" (a header that does not exist, a function musl lacks) and one it must answer "yes", planted beside the 308, the probe
+  failing when either flips; a few minutes; (b) keep the waiver. *Recommended: (a)*, cheap, and it tests ci's checker as the probe uses it.
+- **HFS-I13 The clean run's hour of `target hsc`.** With HFS-I8 (a) and the probe's hour, a clean run of Haskell's steps pays two hours of
+  ci (light, beside the serial run). (a) Keep; (b) HFS-I8 (b) (Arbace's own outputs as a pack, verified by a rerun in the oracle tier).
+  *Recommended: (a)* until GT8's budget for the clean run objects.

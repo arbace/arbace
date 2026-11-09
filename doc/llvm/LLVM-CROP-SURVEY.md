@@ -1286,6 +1286,365 @@ samples, `.o2` 41, `.lto` 50, `.win` 44: the builds clang accepted), the nine C+
    `bin/reap --record`, the read and judge facts recounted (read stays 1: the pack is pinned input in the crop's language, LLS27 (a);
    the judge gains the families' own verdicts and opt's records at 0.5), the gate's `llvm-read` and `llvm-print` taking the new
    families as parts. The numbers change once (new inputs: the corners dropped, the builds clang 23.1.5's).
+## As built: LLS31 (a), the pack rt's verb and families (2026-11-08, branch `llvm-rt-pack`)
+
+Decided by the user 2026-11-07, built on next `7696e50da` (clang 23.1.5 since cpp-repin). The day's part of "LLS31 (a): the pack rt,
+planned": the verb, the mutant sets, the families with controls, proved on subsets. The pack itself, its records and the cells' switch
+are the night's (below). Corrections to the plan: the first records held **41** torture programs, not 42 (the 41 `.o2` ids). Five of
+them are not in gcc 9.1.0's execute but are in gcc 15.2.0's: `alias-access-path-2`, `pr110165-1`, `pr119071`, `pr93582`, `pr99751`.
+The first records' fitted sets were 340 indices each (0-339 and 1000-1339, 315 mutants each, of the base family's 17 kinds), not "315 0"
+and "315 315". The held-out sets were 600 indices each (500000-500599 and 600000-600599, every kind).
+
+**`test/llvm/rt-builds.tsv`** (`bin/llvmi rt-list`, from the ids of `test/llvm/check-roundtrip-linux-amd64.edn`) has 257 modules, one line
+each with ID, SOURCE and BUILD:
+- the 41 torture programs from the pinned gcc 15.2.0 tarball (`gcc15:NAME.c`, `test/c/corpora.edn`'s `:gcc-15.2.0`, the main checkout's
+  `.tmp/c1/gcc/`), in the builds the first records had: `g0` 41, `g2` 41, `o2` 41, `lto` 41, `win` 39;
+- the nine C++ samples (`checkout:test/cpp/samples/NAME.cpp`): `g0`, `g2`, `lto` for all nine, `win` for five, `mac` for nine;
+- Rust's `test/rust/sample/shapes.rs` as `rs.g0`, `rs.g2` and `rs.lt`;
+- `stress1`-`stress10`.
+
+The 21 corner modules are dropped. The four `hw-*` stay committed (`test/llvm/hw.list`).
+
+**`bin/llvmi ir-make rt`** builds each line (`rt_compile`), as `modules` builds the tx lines:
+- torture: `clang -O0 -g` | `-O2 -g` | `-O2` | `-O2 -flto` | `-O2 --target=x86_64-pc-windows-msvc`, gnu17, `-w -fno-strict-aliasing`,
+  the tx flags;
+- C++: `clang++` with the same five builds, c++23, where `mac` is `-O0 --target=x86_64-apple-macosx -nostdlibinc -nostdinc++` on the
+  headers made without g++ (`cpp_full_sysroot`: the host has no macOS SDK, and the host's libstdc++ is not read);
+- Rust: `rustc -C opt-level=0 -g` | `-C opt-level=2 -g` | `-C opt-level=2 -C lto=fat`, with `-C codegen-units=1 --emit=llvm-ir`
+  (fat LTO writes one module; thin writes two);
+- stress: `llvm-stress -size=60 -seed=N`.
+
+Every build takes `-ffile-prefix-map=DIR/= -fdebug-compilation-dir=.` (`--remap-path-prefix` for rustc), so no checkout's path
+reaches the IR: without the flag, `-g`'s `DIFile` directory is the working directory.
+
+The verb then makes Arbace's mutants (`bin/repr-llvm mutants`, `arbace.repr.llvm.mutate`, the first records' kinds). Their input is
+the pack's modules followed by `hw.list`, in that order. The sets, `rt_mutant_sets`:
+
+| set | N | first index | family | input |
+|---|---|---|---|---|
+| a | 340 | 0 | base | modules |
+| b | 340 | 1000 | base | modules |
+| h1 | 600 | 500000 | all | modules |
+| h2 | 600 | 600000 | all | modules |
+| ctl | 1 | 900016 | base | hw |
+| ctlh | 1 | 900050 | base | hw |
+| ctlu | 1 | 900055 | base | hw |
+
+`ctl` and `ctlh` are `:noterm` mutants (index 2 mod 17): `hw-dbg.noterm.900016` and `hw-notes.noterm.900050`. `ctlu` is `:undef`
+(7 mod 17): `hw-implicit.undef.900055`. They are the verify controls' subjects and references, known by day whatever the pack holds.
+
+The pack `test/llvm/ir/rt.tar.xz` holds `ID.ll` and `mut/NAME.KIND.K.ll`. Its manifest `rt.tsv` gives ID, SOURCE, SOURCE-SHA256 and
+IR-SHA256; a mutant's SOURCE is `mutant-SET:BASE` and its SOURCE-SHA256 is the base's IR digest. Beside it are `rt.tar.xz.sha256`
+and `rt.cmd`. The tar is deterministic, as tx's is. `ir-make rt --mutants` makes the mutants again from the pack's modules, with no
+compiler. The mutants are packed rather than made at check time: they are judged against opt's record by digest, so a later change
+to the reader or the printer would otherwise make the whole set stale.
+
+The mutator's forms cache now holds at most four modules (it held them all). The mutants are unchanged: a subset made before and
+after the change is the same pack byte for byte. The subset's peak fell from 1.49 to 0.67 GB; the whole pack's 261 modules would
+not fit in 2 GiB.
+
+**`bin/repr-llvm check`** has four new families, read from the pack (`rt_pack`: the pack is checked against its pin and extracted once
+into `.tmp/repr-llvm/rt/PIN`; a checkout source whose digest is not the manifest's makes it stale, an error):
+
+| family | modules |
+|---|---|
+| `roundtrip-rt` | the 257 modules |
+| `text-rt` | the 257 modules |
+| `verify-rt` | the 257 modules, `hw.list`, and sets a, b, ctl |
+| `verify-rt-heldout` | sets h1, h2, ctlh, ctlu |
+
+The records are `test/llvm/check-{roundtrip,text,verify,verify-heldout}-rt-linux-amd64.edn`. A first `--record` writes their header.
+The families have no `--essential` subset. `hw-*` are left out of `roundtrip-rt` and `text-rt` because `roundtrip-llvmtest` and
+`text-llvmtest` already count them. `bin/repr-llvm rt-lists DIR` writes the lists, with absolute paths, for the oracle tier's records.
+
+The controls (`test/repr/llvm/*-controls.txt`) follow. A line whose names a list lacks is left, as before.
+
+| control | crossing | expected |
+|---|---|---|
+| `_control/rt-g0-vs-o2` | `20000224-1.g0` against `.o2` | the forms differ |
+| `_control/rt-stress1-vs-stress2` | `stress1` against `stress2` | the text differs |
+| `_control/rt-noterm-vs-valid` | `hw-dbg.noterm.900016` against `20000224-1.g0`'s opt reference | the verdict differs |
+| `_control/rt-noterm-vs-undef` | `hw-notes.noterm.900050` against `hw-implicit.undef.900055`'s | the message differs |
+
+**The reader: one rule ported.** A held-out mutant of the subset (`rs.g2.attr-returned.500016`, `metadata returned !5236` in a call)
+showed that `parseParameterList` was not followed. In LLParser a metadata argument takes no attributes, and its value is
+parseMetadataAsValue's: a word that is not a type (an attribute, or `null`) gets parseValueAsMetadata's "expected metadata operand" at
+that word. `arbace/repr/llvm/read.ae`'s `parse-args` now does the same. llvm-as 23.1.5 agrees on `metadata null` and on
+`metadata noundef !{}`. Arbace took both before.
+
+**Proved (light; stage 0, `REPR_LLVM_THREADS=2`):**
+
+| check | result |
+|---|---|
+| `bin/llvmi rt-list` | 257 modules; run twice, the same file |
+| `ir-make rt` on 17 ids (`LLVMI_RT_ONLY`: 20000224-1 in its five builds, pr119071.g0, auto in five, io.mac, io.g0, rs.g2, rs.lt, stress1, stress2), 20 mutants a set (`LLVMI_RT_MUT_N=20`) | 17 modules, 83 mutants; made twice from scratch, the same `rt.tsv` and `rt.tar.xz` byte for byte (`--mutants` again: the same); 1 min 30 s, 1.49 GB with the old cache, 0.67 GB with the bounded one |
+| `check roundtrip-rt` on that pack | 17 of 17 forms equal, 17 of 17 prints taken by the verifier, `rt-g0-vs-o2` fails as it must; 40 s, 0.79 GB |
+| `check text-rt` | 17 of 17 byte for byte, `rt-stress1-vs-stress2` fails as it must; 0.71 GB |
+| `check verify-rt` (`REPR_LLVM_JUDGE=live`) | 62 of 62 verdicts, 41 of 41 messages and 62 of 62 whole stderr as opt 23.1.5's; `rt-noterm-vs-valid` fails as it must |
+| `check verify-rt-heldout` (`REPR_LLVM_JUDGE=live`) | 41 of 42 before the reader's fix (the one above), 42 of 42 after; `rt-noterm-vs-undef` fails as it must |
+| `rs.g0` alone (27,924 lines, the largest module) | round trip equal, the verifier's verdict the same; 83 s, 0.84 GB |
+| unchanged by the reader's fix | `check roundtrip-llvmtest` 304/304, `verify-llvmtest` 792/806, `verify-probes` 472/478, `text-llvmtest` 304/304 (0 failing against the records); `bin/llvmi check --essential` 10 of 10, 4 controls fail; `test/repr/llvm/controls-test.bash` all ok |
+| `bin/reap --record` | `test/reap/matrix.edn` gains the four sources as absent; `bin/reap`: 0 problems |
+
+Without records, the subset's checks print "not recorded" for every module, as they must until the night records them.
+
+**The cells.** `test/reap/cells.edn` names the four families as sources with `:until "LLS31 (a)'s night: ..."`. They print "not recorded
+yet" without a problem. The three retired `:beside` sources stay until the records exist; an `:until` whose file exists is then a
+problem, which forces the switch.
+
+### ORS30 (a): LLVM IR's oracle tier (built here)
+
+The fragment `test/gate/crops/llvm-oracle.edn`, spliced by hand into `test/gate/steps.edn`'s oracle tier (the crops entry `:llvm`, the
+controls), has two steps on the hosts `[:stage0 :llvm :cxx]`:
+- **`llvm-live`**: `bin/repr-llvm check {part}` with `REPR_LLVM_JUDGE=live` (clang -c's objects and llvm-as's bitcode, opt's verdict
+  and stderr), with the parts `roundtrip-llvmtest` and `verify-probes`. Measured: roundtrip-llvmtest passes 304 of 304 (256 objects and
+  304 bitcode equal), 1 min 41 s, 0.67 GB; verify-probes 472 of 478, as recorded. `verify-llvmtest` is not a part: its record is the
+  tests' own verdicts, and live opt judges every module by opt's whole stderr, where 30 of its 792 passes differ.
+- **`llvm-records-verify`**: `bin/repr-llvm records-verify --sample 25`, a new verb. It records every 25th entry of `ref-opt23.edn` and
+  `ref-rt23.edn` again into scratch records and compares them entry for entry. Each entry is `equal`, `input`, `print`, `address` (a
+  stderr that prints a value by its address), `moved` (another LLVM: reported, not failed, ORS6 (a)) or `differs` (a failure).
+  `:stderr-bytes` holds the raw path and is not compared. The verb also checks a crossed pair, which must differ (ORS7 (a)). Measured
+  on LLVM 23.1.5 against the 23.1.4 records: 52 opt entries (50 equal, 2 address) and 13 rt entries equal, 21 s, 0.5 GB.
+
+`gate.crops check` finds 0 problems, `test/gate/crops-test.bash` and `costs-test.bash` pass, and `bin/gate --oracle --plan` plans the
+three parts. The rt families join `llvm-live` as parts once their records exist.
+
+### The night's commands (LLS31 (a))
+
+Light (each process under 1 GB, measured on the subset), no heavy lock:
+
+    bin/llvmi ir-make rt                                   # clang 23.1.5, clang++, rustc 1.99.1, llvm-stress; then the mutants (Arbace):
+                                                           # about 257 builds and 2,483 mutant indices; expect 257 modules and about 2,300 mutants
+    git add test/llvm/ir/rt.*                              # the pack, its pin, manifest and command
+    bin/repr-llvm rt-lists .tmp/llvm/rt-lists
+    bin/repr-llvm record-opt .tmp/llvm/rt-lists/verify-rt.list .tmp/llvm/rt-lists/verify-rt-heldout.list   # opt's records, test/llvm/ref-opt23.edn
+    REPR_LLVM_THREADS=2 bin/repr-llvm record-rt .tmp/llvm/rt-lists/roundtrip-rt.list .tmp/llvm/rt-rec    # clang's and llvm-as's judges, ref-rt23.edn
+    for f in roundtrip-rt text-rt verify-rt verify-rt-heldout; do REPR_LLVM_THREADS=2 bin/repr-llvm check $f --record; done
+
+Then, by day:
+- in `test/reap/cells.edn`, remove the four `:until` keys and the three retired `:beside` sources, and delete their records
+  (`check-roundtrip`, `check-text`, `check-verify` and `check-verify-heldout-linux-amd64.edn`; `rt-builds.tsv` stays the source);
+- run `bin/reap --record`;
+- recount `test/crops/independence.edn`'s read and judge for LLVM IR;
+- add the parts `roundtrip-rt`, `verify-rt` and `verify-rt-heldout` to `llvm-read`, and `text-rt` to `llvm-print`;
+- add `roundtrip-rt`, `verify-rt` and `verify-rt-heldout` to `llvm-live`.
+
+**Expected.** Read:
+
+| family | expected |
+|---|---|
+| roundtrip-rt | 257 of 257 |
+| verify-rt | 261 modules about 261 of 261, the fitted mutants about 99 % (the old 905 of 912) |
+| verify-rt-heldout | about 96 % (the old 1,040 of 1,082) |
+
+So about 1,568 + 2,500 cases at about 98 %. Print: 304 + 257. Completeness stays about 96 (the old families were at these rates).
+Maturity stays 100: the four families have controls. Independence: read 1, and the judge gains the rt families' opt records at 0.5
+(about 2,600 of them): (2,068 + 0.5 x (948 + 2,600)) / (3,016 + 2,600), about 0.68 by the case-weighted rule, so independence goes
+from 96.9 to about 93.6. That is LLS33 below.
+
+### Proposed (llvm-rt-pack)
+
+- **LLS33 The rt families' judge.** The mutants and the pack's modules have no own verdict: opt's record (0.5) judges them, and their
+  number moves the judge from 0.843 to about 0.68.
+  - (a) Count them as LLS31 (b) did: beside, at the read level only. Cost: none. The read cell is unchanged.
+  - (b) Give each mutant an own verdict. The mutator knows the rule it broke, so each kind could write its expected verdict (invalid)
+    and LLParser's or the Verifier's message family. The verdict is then Arbace's own (1), and opt only checks the message (the oracle
+    tier). Cost: a day, a table of 41 kinds to messages (the Verifier's text, ported).
+  - (c) Accept the drop.
+  - *Recommended: (b)*, with (c) meanwhile. The mutants test LLVM's rules, and their expected rejection is known by construction.
+- **LLS34 The pack's C++ for win.** Four of the nine C++ samples have no `win` build (no MSVC headers), as in the first records.
+  - (a) Build them against the headers made without g++, as `mac` is. Cost: minutes; the IR is then a GNU STL for an MSVC triple, an
+    odd but valid input.
+  - (b) Keep the first records' set.
+  - *Recommended: (b)*.
+
+## Decided (the user, 2026-11-08): LLS33 (b), LLS34 (b)
+
+- **LLS33 (b):** each rt-family mutant gets its own verdict from the mutator's rule. The mutator knows the rule it broke, so each of
+  its 41 kinds writes the expected verdict and the message family of LLParser or the Verifier. The texts are ported from the pinned
+  llvm-project-23.1.5 tarball. The verdict is then Arbace's own (1); opt's record only checks the message, at the oracle tier.
+- **LLS34 (b):** the pack keeps the first records' set: no `win` build for the four C++ samples without MSVC headers.
+
+## As built: LLS33 (b), the mutants' own verdicts (2026-11-08, branch `llvm-lls33`)
+
+Built on next `5ec43f7b7` (llvm-rt-pack merged). The pack itself is still the night's (LLS31 (a)): this changes what the night records,
+not what is recorded now.
+
+**The verdict line.** `bin/repr-llvm mutants` (`arbace.repr.llvm.mutate`) now writes each mutant's own verdict as its first line:
+
+    ; MUTANT: KIND VERDICT LAYER: MESSAGE      (VERDICT invalid or debug)
+    ; MUTANT: KIND valid
+    ; MUTANT: KIND unknown: WHY
+
+`debug` is a module whose only fault is its debug info, which opt strips with a warning (exit 0). `valid` is a change LLVM's rules
+accept, such as an attribute on an intrinsic's declaration, which AutoUpgrade replaces. `unknown` means the kind cannot tell; such a
+mutant is judged by opt's record, as before. The rest of the mutant is unchanged, byte for byte: the expectation draws no random number.
+MESSAGE is a fragment of the first message, as llvm/test's CHECK lines declare one. Where LLVM names the mutant's own values (an LLParser
+naming error), the message is whole.
+
+**Who computes it.** Each kind attaches what it changed to the mutant's forms as metadata (the function, block and item, the attribute
+and its site, the bundle set, the field). `arbace.repr.llvm.expect` then derives the expectation from the rule:
+- LLParser's naming is ported as `parse-sim`: `PerFunctionState`'s `getVal`, `setInstName`, `defineBB`, `checkValueID`,
+  `checkValidVariableType` and `finishFunction` over the mutant's text order. So the kinds that move or rename a value know the
+  parser's first error from the mutant's own text, including the renumbering kinds' own slips (an `entrybr` that leaves a stale
+  `%0` gets `'%0' is not a basic block`).
+- The Verifier's checks are taken in its visiting order: `visitFunction` before the blocks, `visitBasicBlock`'s phi checks before the
+  instructions, each instruction's own visit before `visitInstruction`. Also its dominance rules: no dominance in an unreachable block,
+  none of a value wrapped in metadata.
+- For attributes, `verifyParameterAttrs` and `verifyFunctionAttrs` are ported check by check: the exclusive groups, the nine pairs,
+  `typeIncompatible` (Attributes.cpp:2483), nest, returned, sret, the swift attributes and inalloca. So are the function attributes'
+  pairs and values (allocsize, allockind, vscale_range, frame-pointer, the unsigned ones, sign-return-address,
+  branch-target-enforcement), and LLParser's placement and value checks (Attributes.td's `FnAttr`, `ParamAttr` and `RetAttr`). Two
+  more rules come from LLParser: a function's attribute groups replace a written attribute of the same kind, and a call of an old
+  debug intrinsic becomes a debug record.
+
+The module calls none of `arbace.repr.llvm.verify`'s checks, only its structural helpers (an instruction's operands and result type).
+Each message has its source line (`msgs`, P: LLParser.cpp, V: Verifier.cpp of 23.1.5).
+
+**The judge.** `own_verdicts` reads the line. `verify-check` then holds the mutant to it:
+- `valid` is met by Arbace's valid alone. An llvm/test file's `valid` still accepts `debug`.
+- `invalid` and `debug` are met by the same verdict, with MESSAGE found in verify's output.
+
+The negative control `rt-noterm-vs-undef` now crosses two own verdicts: the `:undef` mutant's message, `use of undefined value
+'%nosuch.value'`, is not in the `:noterm` mutant's output. `bin/repr-llvm mutants-oracle LIST WORK` is the oracle tier's check of the
+lines. Against opt's record (`:first`) or live opt's whole stderr (`REPR_LLVM_JUDGE=live`), it compares the verdict and the message per
+mutant and sums the results by kind.
+
+**A verifier bug found.** The first comparison found `arbace.repr.llvm.verify` taking `metadata i32 %nosuch.value` (an `:undef` mutant
+of a `llvm.dbg.value` call) as valid. LLParser resolves a local wrapped in metadata as any operand (parseValueAsMetadata,
+LLParser.cpp:3352, 6750): a forward reference, so the mutant gets `use of undefined value`. `use-value` now resolves locals wrapped in
+metadata, in calls' metadata arguments, debug records and DIArgList. verify-llvmtest (792 of 806), verify-probes (472 of 478),
+roundtrip-llvmtest and text-llvmtest (304 of 304) are as recorded, as is `bin/llvmi check --essential` (10 of 10, 4 controls fail);
+`test/repr/llvm/controls-test.bash` all ok.
+
+**Proved (light; stage 0, `REPR_LLVM_THREADS=2`, the stubs first on PATH, no LLVM tool called).** The day's inputs are 41 modules:
+- 21 of the tx pack's (O0 and O2);
+- the four `hw-*`;
+- 16 llvm/test files with landing pads, funclets or debug info.
+
+An llvm/test file whose own verdict is `debug` was left out: the kinds assume a valid base, as the pack's modules are. The mutants were
+made at the pack's set indices: a (340 from 0) and b (340 from 1000) of the base family, and 600 from 500000 and 600 from 600000 of
+every kind; `bin/repr-llvm mutants LIST OUT N FIRST [base]`. Each set took about 1 min and 0.56 GB.
+
+| check | result |
+|---|---|
+| own verdicts | base family 676 of 680 (99.4%), every kind 1,020 of 1,192 (85.6%) |
+| `verify-check` in own mode (1,872 mutants; 2 min, 1.1 GB) | all 1,696 own verdicts met by Arbace's verifier, 1,567 of 1,567 rejections with the declared message |
+| `REPR_LLVM_JUDGE=live mutants-oracle` (the oracle tier, by hand: opt 23.1.5) | 1,696 of 1,696 own verdicts as opt's, verdict and message (opt's whole stderr); 176 unknown, judged by opt as before (about 6 min, 0.5 GB) |
+| the families unchanged by the verifier's fix | verify-llvmtest 792 of 806, verify-probes 472 of 478, roundtrip-llvmtest and text-llvmtest 304 of 304, 0 failing against the records; `bin/llvmi check --essential` 10 of 10 (4 controls fail); `test/repr/llvm/controls-test.bash` all ok |
+
+Two earlier passes found what the kinds now say. First, the `:undef` metadata case above: Arbace's verifier was wrong. Second, a
+DILocation that only an old `llvm.dbg.declare` call uses. That call is a debug record by the time the Verifier runs, so opt says
+`location requires a valid scope` (V:1076), not V:3335's message. Arbace's verifier had the same slip: its `*inst-locs*` now skips those
+calls and functions without a subprogram (V:3313).
+
+**The 41 kinds.** Each kind's verdict, as written, with its day numbers (1,872 mutants; "as opt" is the oracle run's):
+
+| kind | family | the verdict the kind writes | day's mutants | own | as Arbace's verifier | as opt (live) |
+|---|---|---|---|---|---|---|
+| `type` | base | LLParser's naming over the new type (`'%x' defined with type 'A' but expected 'B'`, a forward reference's type), then the instruction's own: ret's result type (P:7927), select's operands, a cast's opcode (P:8572), a call's signature against an intrinsic's (V:3850); a load, store or binop no use sees: valid | 68 | 68 | 68 | 68 |
+| `hoist` | base | parse-sim (numbering, P:3598); a real operand defined among the items jumped over: `Instruction does not dominate all uses!` (V:5211); only metadata uses, or an unreachable block: valid | 68 | 68 | 68 | 68 |
+| `noterm` | base | `expected instruction opcode` (P:7626) before a label or `}`; an unlabelled next block read as the same block, the text parse-simmed again; a function's only block emptied: `function body requires at least one basic block` (P:7373) | 68 | 67 | 67 | 67 |
+| `phiblock` | base | `use of undefined value '%nosuch.bb'` (P:3969); another block: `PHI node entries do not match predecessors!` (V:3409), `PHI node ` when that block has another entry (V:3402 or V:3409 by the sorted order) | 68 | 68 | 68 | 68 |
+| `phimove` | base | parse-sim; the item now above the phi uses it: dominance, else `PHI nodes not grouped at top of basic block!` (V:3804) | 68 | 68 | 68 | 68 |
+| `align` | base | `alignment is not a power of two` (P:2525) | 69 | 69 | 69 | 69 |
+| `linkage` | base | `invalid linkage for function declaration` (P:7099); a global: `symbol with local linkage must have default visibility` (P:1432), the printer's last :linkage and :visibility the ones read | 70 | 70 | 70 | 70 |
+| `undef` | base | `use of undefined value '%nosuch.value'` (P:3969), also inside metadata | 70 | 70 | 70 | 70 |
+| `dupdef` | base | parse-sim: `multiple definition of local value named 'x'` (P:4113) or the numbering (P:3598) | 70 | 70 | 70 | 70 |
+| `lpad` | base | parse-sim; an invoke of an earlier block unwinding there: `The unwind destination does not have an exception handling instruction!` (V:4253); else dominance or `LandingPadInst not the first non-PHI instruction in the block.` (V:4885) | 70 | 70 | 70 | 70 |
+| `intrinsic` | base | `Intrinsic called with incompatible signature` (V:3850); undeclared or variadic: unknown | 70 | 70 | 70 | 70 |
+| `hoistr` | base | as hoist, renumbered: dominance | 70 | 69 | 69 | 69 |
+| `phimover` | base | as phimove, renumbered | 70 | 70 | 70 | 70 |
+| `lpadr` | base | as lpad, renumbered | 70 | 70 | 70 | 70 |
+| `entrybr` | base | parse-sim (a stale number: `'%0' is not a basic block`, P:1859), else `Entry block to function must not have predecessors!` (V:3222) | 70 | 70 | 70 | 70 |
+| `phicount` | base | `PHINode should have one entry for each predecessor of its parent basic block!` (V:3383) | 70 | 70 | 70 | 70 |
+| `selfref` | base | parse-sim (`instruction forward referenced with type 'T'`, P:4100), else `Only PHI nodes may reference their own value!` (V:5670) in a reachable block; a block with EH pads: unknown | 70 | 68 | 68 | 68 |
+| `attr-type` | attrs | LLParser's placement; then verifyParameterAttrs (V:2064): the groups, the pairs, `' applied to incompatible type!` (typeIncompatible); a metadata argument: `expected metadata operand` (P:6797); an intrinsic's declaration: valid (AutoUpgrade.cpp:2001) | 30 | 30 | 30 | 30 |
+| `attr-pair` | attrs | the pair's check in V:2064 or V:2241 order (`Attributes 'zeroext and signext' are incompatible!`, `Attribute 'optnone' requires 'noinline'!`, ...); P:7193 for sret on a first parameter | 30 | 29 | 29 | 29 |
+| `attr-place` | attrs | `this attribute does not apply to return values|parameters|functions` (P:2116, P:2118, P:1832) | 30 | 30 | 30 | 30 |
+| `attr-dup` | attrs | V:2241's per-parameter order: `More than one parameter has attribute nest!`, returned's compatibility, `Cannot have multiple 'sret'|'swiftself'|'swifterror'|'swiftasync' parameters!`; swifterror's uses: unknown | 30 | 30 | 30 | 30 |
+| `attr-returned` | attrs | `Incompatible argument and return types for 'returned' attribute` (V:2241, also a varargs call's extra arguments V:3985) | 30 | 30 | 30 | 30 |
+| `attr-value` | attrs | LLParser's values (P:2616, P:2659, P:2929, initializes' range list); V:2241's (vscale_range, allocsize, allockind, frame-pointer, the unsigned ones, sign-return-address, branch-target-enforcement); a group's attribute of the same key wins (P:240) | 30 | 28 | 28 | 28 |
+| `attr-immarg` | attrs | `immarg attribute only applies to intrinsics` (V:2241); a call of an intrinsic: `immarg may not apply only to call sites` (V:3929) | 30 | 19 | 19 | 19 |
+| `cc-def` | cc | visitFunction's switch (V:3076-3135): void return, sret, byval, preallocated, inalloca, varargs, x86_intrcc's byval; fastcc without varargs: valid; an old debug intrinsic's declaration: valid | 30 | 30 | 30 | 30 |
+| `cc-call` | cc | `calling convention does not permit calls` (V:3854, CallingConv.h:308) | 30 | 30 | 30 | 30 |
+| `musttail` | musttail | P:3364 in a varargs caller; verifyMustTailCall's order (V:4165-4236); ABI attributes to compare: unknown | 30 | 30 | 30 | 30 |
+| `bundle` | bundles | visitCallBase's bundle loop (V:4030-4103), `Direct call cannot have a ptrauth bundle`, the convergencectrl token; an unknown tag: valid | 30 | 30 | 30 | 30 |
+| `intr-decl` | intrinsics | unknown: AutoUpgrade (upgradeIntrinsicFunction1) may rewrite the declaration | 30 | 0 | 0 | 0 |
+| `intr-arg` | intrinsics | `immarg operand has non-immediate parameter` (V:3936), lifetime's pointer, `expected metadata operand`; an intrinsic visitIntrinsicCall checks: unknown; else valid | 30 | 30 | 30 | 30 |
+| `intr-rename` | intrinsics | unknown, as intr-decl | 30 | 0 | 0 | 0 |
+| `funclet` | funclets | the personality dropped: as personality; the other changes: unknown | 21 | 9 | 9 | 9 |
+| `personality` | funclets | the first EH instruction's `... needs to be in a function with a personality.` (V:4880, 4904, 4922, 4957, 5137) | 28 | 28 | 28 | 28 |
+| `unwind-dest` | funclets | `The unwind destination does not have an exception handling instruction!` (V:4253) | 28 | 28 | 28 | 28 |
+| `md-attach` | metadata | unknown: the attachment rules not ported | 28 | 0 | 0 | 0 |
+| `md-edit` | metadata | `incorrect number of operands in module flag` (V:1915), `... in llvm.ident metadata` (V:1793); other nodes: unknown | 28 | 18 | 18 | 18 |
+| `di-drop` | debug | `missing required field 'F'` (P:5755, the REQUIRED fields); an optional field: unknown | 28 | 11 | 11 | 11 |
+| `di-retarget` | debug | a DILocation's scope: debug `DILocation's scope must be a DILocalScope` (V:3335) for an instruction's, `location requires a valid scope` (V:1076) for a record's; other fields: unknown | 28 | 8 | 8 | 8 |
+| `di-record` | debug | debug `invalid #dbg record variable` (V:7168), `invalid #dbg record expression` (V:7172); `invalid debug location` (P:347) | 28 | 22 | 22 | 22 |
+| `di-attach` | debug | a function's: debug `function !dbg attachment must be a subprogram` (V:3244); an instruction's, a global's: unknown | 28 | 23 | 23 | 23 |
+| `di-version` | debug | debug `ignoring debug info with an invalid version (N)` (AutoUpgrade.cpp:6052, DiagnosticInfo.cpp:121) | 28 | 28 | 28 | 28 |
+| all | | | 1872 | 1696 | 1696 | 1696 |
+
+The unknowns, 176 of 1,872, are the kinds or cases whose rule is not ported:
+- `md-attach` (28): visitInstruction's and visitMDNode's metadata rules;
+- `intr-decl` and `intr-rename` (30 each): AutoUpgrade's `upgradeIntrinsicFunction1` may rewrite a declaration whose signature it does
+  not take, as for `llvm.ctlz.i32` with one argument;
+- `di-drop` and `di-retarget`: an optional field, or a field other than a DILocation's scope;
+- funclet operand changes (12), md-edit of an attachment's node (10), `attr-immarg` on an immediate or an aggregate (11), a few
+  debug record and attachment cases, two self references in EH blocks.
+
+They stay on opt's record (0.5).
+
+**Independence.** The checkout's facts are unchanged: the rt families are not recorded, and `bin/crops-score --crop llvm` before and
+after gives LLVM IR independence 96.9 (judge 0.843). The projection on the night's records (`test/crops/independence.edn`'s comment):
+
+| | judge | independence |
+|---|---|---|
+| without LLS33 | (2582 + 0.5 x 3092) / 5674 = 0.728 | 94.6 |
+| with it | (4288 + 0.5 x 1386) / 5674 = 0.878 | 97.6 |
+
+The night's counts replace both.
+
+### The night's commands (LLS33 (b), lane LA after LLS31 (a)'s)
+
+LLS31 (a)'s commands are unchanged, but `ir-make rt` must run on a tree with this branch (next after its merge): its mutator writes the
+verdict lines into the pack. If LLS31 (a)'s night runs first, `bin/llvmi ir-make rt --mutants` makes the mutants again without a
+compiler (light, about 10 min), and `record-opt` then records them afresh (the lines change their digests). After the records:
+
+    bin/repr-llvm rt-lists .tmp/llvm/rt-lists
+    REPR_LLVM_JUDGE=record bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt.list .tmp/llvm/mo-rt                  # the oracle tier: each own verdict against opt's :first
+    REPR_LLVM_JUDGE=record bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt-heldout.list .tmp/llvm/mo-rt-heldout
+    REPR_LLVM_JUDGE=live bin/repr-llvm mutants-oracle .tmp/llvm/rt-lists/verify-rt-heldout.list .tmp/llvm/mo-live        # opt's whole stderr (light, ~3 min)
+
+A difference in `mutants-oracle` is a rule to fix in `arbace.repr.llvm.expect` (by day), not a record to take. The two `check verify-rt*
+--record` runs then hold each mutant to its own verdict. A row that fails there is Arbace's verifier disagreeing with the rule: a
+verifier bug to fix, or a class. Then by day: the judge recount for `test/crops/independence.edn`: the mutants whose line is not
+`unknown` (`grep -L 'unknown:'` over the pack's `mut/`) count 1, the rest 0.5.
+
+### Proposed (llvm-lls33)
+
+- **LLS35 `mutants-oracle` in the oracle tier.**
+  - (a) A part of `llvm-records-verify` (`test/gate/crops/llvm-oracle.edn`) over the pack's two mutant lists against the record, once
+    the pack is recorded. Cost: a fragment edit, seconds a run.
+  - (b) By hand at tags.
+  - *Recommended: (a).*
+- **LLS36 The unknown kinds.**
+  - (a) Port what they need:
+    - for `intr-decl` and `intr-rename`, `upgradeIntrinsicFunction1`'s name rules and `isSignatureValid`'s messages (`intr.ae` has
+      the matcher);
+    - for `md-attach`, visitInstruction's attachment checks (!range, !prof, !nonnull, !align, !dereferenceable, !noundef,
+      !invariant.load, !fpmath, !tbaa);
+    - for `di-drop` and `di-retarget`, the visitDI* field rules.
+
+    Cost: about a day. It would take the held-out sets from 85.6% to about 97%, and the judge to about 0.90.
+  - (b) Leave them on opt's record (0.5).
+  - *Recommended: (a)*, `md-attach` and `intr-*` first (88 of the 176).
+- **LLS37 A mutant of an invalid base.**
+  - (a) At check time, a mutant whose base module does not pass its own row is judged by opt's record, its verdict line ignored.
+    Cost: an awk join in `verify-check`.
+  - (b) Nothing: the pack's bases are clang's output, and verify-rt's module rows show them valid.
+  - *Recommended: (b)* while only the pack is mutated; (a) if another corpus is.
+
 ## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
 
 What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go

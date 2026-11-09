@@ -251,23 +251,78 @@
     {:name nm :read read :l1 l1 :l2 l2 :l3 l3 :l4 l4 :accept accept :detail detail
      :status (cond (empty? bad) "pass" known "known" :else "fail") :bad bad :class (:class known)}))
 
+;; CS282 (a) (the user, 2026-11-08): the round trip's --record under each test's own verdict (no gcc). Levels 3 and 4 and gcc's
+;; acceptance are the oracle tier's, recorded by hand under ARBACE_C_JUDGE=gcc; the default mode's record reruns levels 1 and 2
+;; and takes the rest from the results file's recorded rows, as the token check's record keeps its :gcc level (T.5).
+
+(defn load-recorded
+  "The oracle tier's levels of corpus `id` in a results file (test/repr/c/roundtrip-results.edn's rows [\"CORPUS NAME\" RESULT
+  \"STATUS: read R, l1 X, l2 Y, l3 Z, l4 W, gcc A[, class C]...\"]): {name {:read R :l3 Z :l4 W :accept A :class C}}; {} without
+  the file."
+  [^String f ^String id]
+  (if-not (.exists (java.io.File. f))
+    {}
+    (into {} (for [[cid _ why] (read-string (slurp f))
+                   :let [i (.indexOf ^String cid " ")]
+                   :when (and (pos? i) (= id (subs cid 0 i)))
+                   :let [m (re-find #"^\w+: read ([^,]*), l1 [^,]*, l2 [^,]*, l3 ([^,]*), l4 ([^,]*), gcc ([a-z-]+)" (str why))
+                         c (second (re-find #", gcc [a-z-]+, class ([a-z0-9-]+)" (str why)))]
+                   :when m]
+               [(subs cid (inc i)) (cond-> {:read (nth m 1) :l3 (nth m 2) :l4 (nth m 3) :accept (nth m 4)}
+                                     c (assoc :class (keyword c)))]))))
+
+(def oracle-classes
+  "The known classes only levels 3 and 4 give (the driver's no-gcc deferral names the same)."
+  #{:objects :objects-macro-body :run-address :print-grammar})
+
+(defn recorded-levels
+  "A file's levels 3 and 4 from its recorded row `r` (load-recorded) as the driver's obj.tsv and run.tsv rows judge-row reads,
+  [obj run]: both nil when the file is not read now or was not read then (no object compiled), or has no row."
+  [r ^String read]
+  (if-not (and r (= read "ok") (= "ok" (:read r)))
+    [nil nil]
+    [(case (:l3 r)
+       ("equal" "differ") ["0" "0" (:l3 r)]
+       "orig-fails" ["1" "-" "-"]
+       "print-rejected" ["0" "1" "-"]
+       nil)
+     (when (#{"same" "differ"} (:l4 r)) ["-" "-" (:l4 r)])]))
+
 (defn judge
   "The corpus `id`'s levels judged (WORK/ID/forms.tsv, obj.tsv and run.tsv, the driver's): WORK/ID/
-  files.tsv and report.edn, the summary printed; 1 when a file fails or a known entry is stale."
-  [^String work ^String id]
+  files.tsv and report.edn, the summary printed; 1 when a file fails or a known entry is stale. With `recorded` (a results
+  file; CS282 (a), the default mode's --record) levels 3 and 4 are the file's recorded rows' (recorded-levels) and the
+  acceptance gcc's recorded one (test/repr/c/parse-gcc.tsv): the oracle tier's, kept."
+  ([^String work ^String id] (judge work id nil))
+  ([^String work ^String id ^String recorded]
   (let [d (str work "/" id)
         man (read-string (slurp "test/c/corpora.edn"))
         corpus (first (filter #(= (:id %) (keyword id)) (:corpora man)))
         run? (= :run (:action corpus))
         rows (map (fn [l] (str/split l #"\t" -1)) (remove str/blank? (str/split-lines (slurp (str d "/forms.tsv")))))
-        obj (read-tsv (str d "/obj.tsv"))
-        run (read-tsv (str d "/run.tsv"))
-        gcc (load-acceptance)
         known-all (read-string (slurp known-file))
+        ;; a row known by a class only levels 3-4 give whose entry the known file no longer holds: the entry was removed after
+        ;; the row (the oracle tier found it passing, 808d08d60's reverse-complement-5.c), so the row's levels 3-4 are dropped
+        rec (when recorded
+              (let [ks (get-in known-all [:roundtrip (keyword id)] {})]
+                (into {} (for [[nm r] (load-recorded recorded id)]
+                           [nm (if (and (oracle-classes (:class r)) (not (contains? ks nm))) (dissoc r :l3 :l4) r)]))))
+        lv (fn [r] (recorded-levels (get rec (first r)) (second r)))
+        obj (if rec (into {} (for [r rows :let [o (first (lv r))] :when o] [(first r) o])) (read-tsv (str d "/obj.tsv")))
+        run (if rec (into {} (for [r rows :let [o (second (lv r))] :when o] [(first r) o])) (read-tsv (str d "/run.tsv")))
+        gcc (if rec (load-gcc) (load-acceptance))
         ;; GT8: a partial run (--only) holds the known entries of its files alone to account for them
         names (results/partial-names work id)
         known (results/in-run (get-in known-all [:roundtrip (keyword id)] {}) names)
         js (mapv (fn [r] (judge-row r (get obj (first r)) (get run (first r)) (get gcc [id (first r)]) (get known (first r)) run?)) rows)
+        ;; CS282 (a): a file of no recorded level 3 (not read when the oracle tier recorded it) whose entry's class only levels 3
+        ;; and 4 give stays known by it, as the driver's no-gcc judgment defers it: the oracle tier's to judge again
+        js (if-not rec js
+             (mapv (fn [j] (let [k (get known (:name j))]
+                             (if (and (= "pass" (:status j)) k (oracle-classes (:class k)) (not (contains? obj (:name j))))
+                               (assoc j :status "known" :class (:class k) :detail "levels 3-4 not recorded: the oracle tier's")
+                               j)))
+                   js))
         failing (filter #(= "fail" (:status %)) js)
         stale (for [[nm _] known :when (not (some #(and (= (:name %) nm) (= (:status %) "known")) js))] nm)
         unclassed (for [[nm k] known :when (not (contains? (:classes known-all) (:class k)))] nm)
@@ -289,7 +344,9 @@
     (results/print-failing id (concat (for [j failing] [(:name j) (str "levels " (str/join "," (map name (:bad j))) ": read " (:read j)
                                                                          ", l1 " (:l1 j) ", l2 " (:l2 j) ", l3 " (:l3 j) ", l4 " (:l4 j) " " (:detail j))]))
                               (for [nm stale] [nm "known entry stale"]))
-    (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
+    (when rec (println (str id ": levels 3-4 and gcc's acceptance from " recorded " (the oracle tier's rows, CS282 (a)): "
+                            (count (filter #(contains? obj (first %)) rows)) " files with a recorded level 3")))
+    (if (or (seq failing) (seq stale) (seq unclassed)) 1 0))))
 
 ;; GTS81 (a): the negative controls of the round trip (test/c/controls.edn, :level :roundtrip): the subject's own row (read,
 ;; levels 1 and 2, its acceptance) with its levels 3 and 4 crossed, its print's object file and run against the reference's
@@ -444,7 +501,7 @@
                "{:classes\n {" (str/join "\n  " (for [[k v] (sort-by key (:classes known))] (str k " " (pr-str v)))) "}\n"
                " :roundtrip\n {"
                (str/join "\n  " (for [[c es] (sort (:roundtrip known))]
-                                  (str c "\n  {" (str/join "\n   " (for [[f e] es] (str (pr-str f) " " (pr-str e)))) "}")))
+                                  (str c "\n  {" (str/join "\n   " (for [[f e] (sort-by key es)] (str (pr-str f) " " (pr-str e)))) "}")))
                "}}\n"))
     (println "recorded" known-file)
     (doseq [l @left] (println (str "repr-c roundtrip --record: no class: " l)))
@@ -456,16 +513,19 @@
 (defn -main [cmd & args]
   (case cmd
     "forms" (let [[work & ids] args] (doseq [id ids] (forms work id)) (shutdown-agents))
-    "judge" (let [[work & ids] args
-                  st (reduce max 0 (map #(judge work %) ids))
-                  ;; GTS81 (a): the negative controls (test/c/controls.edn, :roundtrip), no row of files.tsv or the counts
-                  cs (into (roundtrip-controls work ids) (text-controls work ids))]
-              (doseq [r cs] (println (str "FAIL " (first r) "\t" (nth r 2))))
-              (shutdown-agents)
-              (System/exit (if (seq cs) 1 st)))
+    ("judge" "judge-recorded")
+    (let [[work & ids] (if (= cmd "judge") args (cons (first args) (drop 2 args)))
+          recorded (when (= cmd "judge-recorded") (second args))
+          st (reduce max 0 (map #(judge work % recorded) ids))
+          ;; GTS81 (a): the negative controls (test/c/controls.edn, :roundtrip), no row of files.tsv or the counts; under
+          ;; judge-recorded the :roundtrip ones are left (no object in the run: obj.tsv absent)
+          cs (into (roundtrip-controls work ids) (text-controls work ids))]
+      (doseq [r cs] (println (str "FAIL " (first r) "\t" (nth r 2))))
+      (shutdown-agents)
+      (System/exit (if (seq cs) 1 st)))
     "record" (let [[work & ids] args
                    n (record work ids)]
                (shutdown-agents)
                ;; 3: the known file written, failing files of no class left out of it (the caller judges and fails)
                (System/exit (if (pos? n) 3 0)))
-    (do (println "rtcheck: forms, judge or record") (System/exit 2))))
+    (do (println "rtcheck: forms, judge, judge-recorded WORK RESULTS ID... or record") (System/exit 2))))

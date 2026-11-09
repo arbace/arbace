@@ -386,7 +386,54 @@ and the corpus's plan: a change to any is STALE until it is recorded again.
 What would make these 1 (no toolchain's product read): the configure products and `MachDeps.h`, `ghcautoconf.h`, `ghcplatform.h`
 derived from the target's facts (they are a few dozen `#define`s of sizes and features), the installation's package database
 from the corpus's own `.cabal` files, and hsc2hs's run on ci (the C program hsc2hs writes, run by Arbace's C interpreter, as
-`bin/hsi`'s programs' own C already is): FRONTEND-SURVEY's proposal HFS-I2.
+`bin/hsi`'s programs' own C already is): FRONTEND-SURVEY's proposal HFS-I2, decided (a) and built (the next section): the pack is
+the oracle tier's since, `REPR_HASKELL_INPUTS=pack`.
+
+## The native reads' inputs: derived (HFS-I2 (a), 2026-11-08, branch `hs-inputs`)
+
+The user's decision of 2026-11-07 (doc/haskell/FRONTEND-SURVEY.md, HFS-I2 (a)): the inputs the pack above held are derived, data
+first, then hsc2hs's C program on ci. Since this branch the native reads (`read --corpus`, the round trip, `bin/hsi check`'s RTS
+headers through `native-libdir`) read the tree `bin/repr-haskell target derive` makes (`.tmp/repr-haskell/target/derived`, kept by
+the key of its inputs); `REPR_HASKELL_INPUTS=pack` reads the pack as before (the oracle tier's). Its inputs are the corpus's
+pinned tarball (the parts `tsrc_paths` names, extracted into `.tmp/repr-haskell/target/src`), musl 1.2.6's pinned tarball (C's,
+`bin/ci musl prepare`), and `test/haskell/target/`: `installation.edn` (the installation's names and choices: the units' ids and
+ABI hashes, the ABI directory, the triples, the toolchain's commands the settings file names, the .buildinfo and GMP
+substitutions; each fact's reason in the file) and `answers.edn` (the configure answers, computed). No GHC and no C compiler runs.
+
+| member | made by | from |
+|---|---|---|
+| `settings` | `arbace.repr.haskell.target/settings-text`: hadrian's `generateSettings` order (bindist Makefile's `lib/settings`) | the facts' `:toolchain`, the triple, `c/target/abi.edn`'s word size, base's unit id |
+| `package.conf.d/*.conf` (47) | `arbace.repr.haskell.cabal`: Cabal-syntax 3.16's field parser and conditions (each unit's `.cabal` or `.cabal.in`, finalized for x86_64 Linux with hadrian's flags; the `.buildinfo.in` before the library's fields), its free text, `showInstalledPackageInfo` (ipiFieldGrammar's order, `renderFields` over `arbace.repr.haskell.doc`); the reexports resolved over the dependencies' records; then the bindist's `patchpackageconf` | the tarball's `.cabal` files, the facts' ids and ABI hashes (a unit without modules: the empty fingerprint) |
+| the units' installed headers | each `.cabal`'s `install-includes` found in its `include-dirs` | the tarball (89 of the RTS's and the libraries') |
+| `ghcversion.h`, `ghcplatform.h`, `HsIntegerGmp.h`, `ghc-gmp.h` | hadrian's and configure's `@VAR@` substitutions | the project version, the triples, the GMP facts |
+| `rts/EventLogConstants.h`, `rts/EventTypes.h` | `rts/gen_event_types.py`'s two outputs, its table read from the tarball | the tarball |
+| the configure headers (`ghcautoconf.h`, `HsBaseConfig.h`, `EventConfig.h`, `HsTimeConfig.h`, `HsUnixConfig.h`, `HsDirectoryConfig.h`, `HsProcessConfig.h`) | `arbace.repr.haskell.configure`: config.status's rewrite of each template (`ghcautoconf.h`: `rts/configure.ac`'s guard and PACKAGE_ undo) | `answers.edn` |
+| `DerivedConstants.h` | `arbace.repr.haskell.constants`: deriveConstants' `wanteds` read from the tarball's `utils/deriveConstants/Main.hs` and expanded by its definitions, its C file of `char derivedConstantX[1 + EXPR]` checked by ci's checker, the arrays' sizes read from `bin/ci annot` where Main.hs reads nm's, `writeHeader` | the tarball, the derived headers |
+| `hsc/PKG/X.hs` | `arbace.repr.haskell.hsc2hs`: hsc2hs 0.68.10's direct mode (HSCParser, C, DirectCodegen, UtilsCodegen), the C program and its utilities' file built and run by `bin/ci run` | the tarball's `.hsc` and `template-hsc.h`, the derived headers |
+| `hsc/PKG/X.hs.hspp.edn` | the record's `:hsc2hs` (command, version, file, the input's and output's SHA-256), as the native read takes it | |
+| `stdc-predef.h` | musl's own | musl's tarball |
+
+**The answers** (`bin/repr-haskell target probe`, run by `bin/repr-haskell-target probe`; `--verify` computes them again and compares, the `--full` step `haskell-target-probe` since HFS-I9 (b)). Each `#undef` of a template is a
+check; its autoheader comment names the autoconf macro that defines it (AC_CHECK_HEADERS, AC_CHECK_FUNCS, AC_CHECK_SIZEOF,
+AC_CHECK_ALIGNOF, AC_CHECK_MEMBERS, AC_CHECK_TYPES, AC_CHECK_DECLS, FP_CHECK_CONST, FPTOOLS_CHECK_HTYPE), and the others are the
+configure.ac's own AC_DEFINEs, ruled one by one in `configure.ae`'s `manual-rules` with the configure.ac's logic (HAVE_EPOLL: the
+header and epoll_ctl; HAVE_LIBRT: musl's empty librt and clock_gettime in libc; the I/O managers; the rts.cabal flags; AC_SYS_LARGEFILE;
+AC_USE_SYSTEM_EXTENSIONS). A header is present when musl's tree (`make install-headers`' layout) or Arbace's `c/include` holds it; a
+function when musl's sources define it (`bin/ci musl read`'s index); a declaration, member, type, macro or integer constant when ci's
+checker accepts the test's translation unit (`bin/ci diagnose`, AC_USE_SYSTEM_EXTENSIONS' defines and the product's headers before
+it); sizes, alignments, constants and FPTOOLS_CHECK_HTYPE's choice are printed by one program a product built and run by `bin/ci run`.
+The two facts of the build host, `/dev/ptmx` and `/dev/ptc` (AC_CHECK_FILE), are Linux's.
+
+**The comparison** (the oracle tier: `bin/repr-haskell target compare`, the derived tree against the pack member for member, an
+`.hspp.edn` on its `:hsc2hs`): 337 of the pack's 337 members equal (2026-11-08): the settings, the 47 records, the
+104 installed headers with DerivedConstants.h and the seven configure headers, the four configured/ files, stdc-predef.h, LIBDIR, and the
+90 .hsc modules with their records. GHCi/FFI.hsc's C includes libffi's `ffi.h` (rts.cabal's use-system-libffi: the system's libffi,
+neither musl's nor GHC's tarball's): since HFS-I11 (a) (FRONTEND-SURVEY's "As built: HFS-I9 (b), HFS-I11 (a)") `ffi.h` and `ffitarget.h`
+are derived from libffi 3.8.0's pinned release tarball (`test/haskell/target/libffi.edn`) as its configure makes them, into the tree's
+`sysroot/usr/include`, named in `SYSTEM` (the comparison leaves them out: the pack holds no system header but stdc-predef.h), and
+`target hsc` gives every module's program that directory last, as gcc's `/usr/include`. What the derivation does not make yet is taken from the pack when it is in the store
+and named in the tree's `BORROWED` (none once `target hsc` has run: `bin/repr-haskell target hsc` makes DerivedConstants.h and the
+90 modules, 46 minutes of ci on this host, one process, under 2 GiB; the night's or `haskell-roundtrip`'s first run).
 
 ## Messages
 

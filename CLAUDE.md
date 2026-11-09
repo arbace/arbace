@@ -323,6 +323,10 @@ Prior art:
     `test/oracle-records/`, `bin/oracle-records`; `bin/cppi record-ir` by hand, `CPPI_LIVE=1` live, no gcc unless `CPPI_GCC=1`), and the readers
     read libstdc++'s headers and gcc's include directory as `test/cpp/target.ae` makes them from the pinned gcc tarball and `cpp/target/`
     (`bin/repr-cpp target tree|answers|oracle`, with musl's headers from its tarball: `bin/lib/repr-cpp/sysroot.bash`, `REPR_CPP_HEADERS=arbace|libstdcxx|host`);
+    since cpp-target (2026-11-08; "As built: cpp-target", CP244 (b)) the token check's predefined macros, option deltas, `__has_` answers and
+    search list are Arbace's own C++ target's, `cpp/target/host` made by `test/cpp/predef.ae` from C's `c/target/abi.edn` and `cpp/target/dialect.edn`
+    (`bin/repr-cpp target gen|verify|host-oracle|option-lists`; `REPR_CPP_TARGET=gxx`: g++'s recorded `test/cpp/host`, the oracle tier's), and the
+    dg check's dg-error part (clang's Sema) and the round trips' clang levels are the oracle tier's (`cpp-dg-oracle`, `cpp-roundtrip-oracle`; ORS31 (a));
     the live parts wait in `test/gate/crops/cpp-oracle.edn` for the oracle tier.
     repr/cpp's native parser (doc/cpp/NATIVE.md, CX11): `read --reader native`, `bin/repr-cpp native-check LIST WORK` against clang's
     AST (`--tree`: the tree level, `arbace.repr.cpp.tcheck`, `test/repr/cpp/native-tree-known.edn`; its controls
@@ -341,7 +345,8 @@ Prior art:
     `menhir --check`, `judges-test --fixtures`); ocamlc's and ocdump's levels (`roundtrip --cmi`, `dumps`, `native-check`,
     `stdlib-check`, `typer-check`'s fresh dumps, `suite expect`) are the oracle tier's `ocaml-dumps` and `ocaml-oracle`
     (`test/gate/crops/ocaml-oracle.edn`, spliced into the planner's `:phase :oracle` at batch 4: `bin/gate --oracle`); the native library (`bin/oi stdlib`) types unix,
-    threads, str and compiler-libs' units too (`libs_native`; compiler-libs' `lexer.ml` only with `OI_OCAMLLEX=1`), and the
+    threads, str and compiler-libs' units too (`libs_native`; compiler-libs' `lexer.ml` by the native ocamllex, `arbace/repr/ocaml/ocamllex.ae`,
+    `bin/repr-ocaml ocamllex`, `ocamllex-check`, OC186 (a); `OI_OCAMLLEX=host` the host's), and the
     suite's native path keeps a unit's signature as data (`NAME.cmi.ae`, OC184 (a)).
     repr/ocaml reads natively (doc/ocaml/OCAML-SURVEY.md, "As built: the native reader"; the default of `read` and `roundtrip`
     since 2026-11-07, "As built: the crop's independence"; the helper `tools/ocdump` the oracle's, `--reader helper`): `arbace/repr/ocaml/menhir.ae` builds parser.mly's LALR(1) automaton as Menhir does into the
@@ -564,7 +569,15 @@ Prior art:
   print levels and goi's errorcheck and directory tests, every control judged from its subject's own run: "As built:
   GTS83-GTS87 (write-ahead)"; since GTS91 (a) also the read level's forms at `bin/java-check --forms verify`); `--full
   --concurrent` runs the chains at once under the big lock held once, the heavy steps on a lock of the
-  gate's own (GTS37 (a)); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
+  gate's own (GTS37 (a)), since GTS227 (a) in memory lanes; since 2026-11-08 (the user) every other gate admits its steps by
+  the essential memory lane (`bin/gate-lane`'s free mode: a step's `:mem-gib` against the host's MemAvailable less 2 GiB,
+  the running steps' declarations not yet taken held back, two big steps at once when they fit, never none while one
+  waits; then the heavy lock as before; `GATE_MEM_LANE=0` off; a peak over its declaration flagged in the summary;
+  doc/GATE-SURVEY.md, "As built: the essential memory lane"; since GTS249 (a) `--full --concurrent`'s lanes on the same free
+  rule, `GATE_LANE_RULE=budget` GTS227 (a)'s budget, the clean run's the budget until its first run in the lanes, GTS249 (b);
+  GTS248 (a), write-ahead: `GATE_LANE_SHARED=1` keeps the free lane's state for the host in the main checkout's
+  `.tmp/gate-lanes/` beside the store, the earlier gate's steps first, off by default until a night proves the lane: "As
+  built: GTS248, GTS249"); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
   --full --plan --builds`); the executables and javac's tool are kept by key in
   `ARBACE_GATE_EXES` (default the main checkout's `.tmp/gate-exe`), shared by the worktrees;
   the programs of goi, Java's interpreted level, the suite and the oracle run under CPU-time limits with

@@ -12,6 +12,11 @@
 # others keep the recorded run (0.5: a toolchain's record). No run: the trees and the record are read.
 #   --record   writes the list (by hand, beside a new record-ref)
 #   --check    the list against a fresh computation (exit 1 on a difference); default: prints the counts
+# HES87 (a): beside it, test/haskell/threaded-way.tsv (ID<TAB>WAYS): the testsuite's tests all.T runs only in threaded ways
+# (only_ways, every way a threaded one: threaded1, threaded2, nonmoving_thr, profthreaded) whose recorded normal-way run is not
+# their own verdict (its status not all.T's, or its stdout or stderr not the shipped file, a missing one empty): the
+# non-threaded RTS's refusal (an uncaught exception, "requires -threaded", another output). bin/hsi check records hsi's match
+# of such a run :threaded-way (deferred), not a pass, until HES84 (a)'s threaded references. --record and --check take it too.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -52,16 +57,42 @@ while IFS= read -r line; do
   own=$((own + 1))
 done < <(grep '^{' "$ref")
 LC_ALL=C sort -o "$work/new.tsv" "$work/new.tsv"
+# HES87 (a): the threaded-only tests whose recorded run is not their own verdict
+tw=$root/test/haskell/threaded-way.tsv
+grep -o ':dir "[^"]*", :name "[^"]*", .*(only_ways \[[^]]*\])' "$root/test/haskell/eval/testsuite-run.edn" |
+  sed 's/^:dir "\([^"]*\)", :name "\([^"]*\)".*(only_ways \[\([^]]*\)\])$/\1\t\2\t\3/' > "$work/ways.tsv" || true
+: > "$work/tw.tsv"
+while IFS=$'\t' read -r dir name ways; do
+  thr=1; for w in $ways; do case $w in *thr*) ;; *) thr=0 ;; esac; done
+  [ "$thr" = 1 ] || continue
+  id=testsuite/$dir/$name
+  line=$(grep -F "{:id \"$id\" " "$ref" || true); [ -n "$line" ] || continue
+  exit=$(awk -F'\t' -v i="$id" '$1 == i {print $3}' "$work/testsuite.tsv"); [ -n "$exit" ] || continue
+  rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$line")
+  rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$line"); rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$line")
+  d=$tests/$dir
+  [ "$rst" = "$exit" ] && [ "$(sha "$d/$name.stdout")" = "$rso" ] && [ "$(sha "$d/$name.stderr")" = "$rse" ] && continue
+  printf '%s\t%s\n' "$id" "$(echo $ways | tr -d '"' | tr ' ' ',')" >> "$work/tw.tsv"
+done < "$work/ways.tsv"
+LC_ALL=C sort -o "$work/tw.tsv" "$work/tw.tsv"
+twhdr() {
+  echo "# HES87 (a) (bin/hsi own-verdicts): the tests all.T runs only in threaded ways whose recorded normal-way run (test/haskell/ref-ghc914.edn)"
+  echo "# is not their own verdict: hsi's match of it is :threaded-way (deferred), not a pass. ID, all.T's only_ways"
+}
 hdr() {
   echo "# hsi's programs judged by their own verdict (bin/hsi own-verdicts; the user's decision of 2026-11-07): ID, the expected"
   echo "# status, the shipped expected stdout and stderr (relative to the test's directory; - an empty one); made from the trees and"
   echo "# test/haskell/ref-ghc914.edn, each listed one's shipped expectations equal to GHC 9.14.1's recorded run"
 }
 case $mode in
-  --record) { hdr; cat "$work/new.tsv"; } > "$list"; echo "own-verdicts: $own of $n programs recorded in $list" ;;
+  --record) { hdr; cat "$work/new.tsv"; } > "$list"; echo "own-verdicts: $own of $n programs recorded in $list"
+    { twhdr; cat "$work/tw.tsv"; } > "$tw"; echo "own-verdicts: $(wc -l < "$work/tw.tsv") threaded-only tests without their own verdict recorded in $tw" ;;
   --check)
     grep -v '^#' "$list" > "$work/old.tsv" || true
     if cmp -s "$work/old.tsv" "$work/new.tsv"; then echo "own-verdicts: $own of $n programs by their own verdict, the list current"
-    else echo "own-verdicts: the list differs from the trees and the record:"; diff "$work/old.tsv" "$work/new.tsv" | head -10; exit 1; fi ;;
+    else echo "own-verdicts: the list differs from the trees and the record:"; diff "$work/old.tsv" "$work/new.tsv" | head -10; exit 1; fi
+    grep -v '^#' "$tw" > "$work/tw-old.tsv" 2> "$work/tw.err" || true
+    if cmp -s "$work/tw-old.tsv" "$work/tw.tsv"; then echo "own-verdicts: $(wc -l < "$work/tw.tsv") threaded-only tests without their own verdict, $tw current"
+    else echo "own-verdicts: $tw differs from the trees and the record:"; diff "$work/tw-old.tsv" "$work/tw.tsv" | head -10; exit 1; fi ;;
   *) echo "own-verdicts: $own of $n programs would be judged by their own verdict (--record writes $list)" ;;
 esac

@@ -511,9 +511,9 @@
 
 (defn- obj-align
   "An object's alignment: its type's, raised by its alignment specifiers (the checker's :c/declared-align, 6.7.6;
-  queue 173)."
+  queue 173) and its declarations' aligned attributes (the checker's :dalign, gcc's DECL_ALIGN)."
   ^long [e t]
-  (max (long (align-of t)) (long (or (:c/declared-align (:m e)) 1))))
+  (max (long (align-of t)) (long (or (:c/declared-align (:m e)) 1)) (long (or (:dalign e) 1))))
 
 (defn- mem-loc-addr
   "A frame object's address node: its offset's, rounded up to :align-up when the frame's 16 bytes are not enough."
@@ -1929,44 +1929,56 @@
   this object's own braces (designators apply here); else elided (a designator ends it)."
   [t a els braced]
   (let [t (unq t)
-        out (ArrayList.)]
+        ;; each subobject's stores as one entry [key stores] (key: the element's index, the member's, a union's 0; nil for a
+        ;; write into a part of it): a later whole write of the same subobject drops the earlier entry, its side effects
+        ;; with it, as gcc's c-typeck.cc does (output_init_element's "initialized field with side-effects overwritten";
+        ;; C23 6.7.11p20 leaves unspecified whether they occur; embed-12)
+        ^ArrayList ents (ArrayList.)
+        ^HashMap at (HashMap.)
+        put! (fn [k st]
+               (let [k (if (number? k) (long k) k)]
+               (when (some? k)
+                 (when-let [x (.get at k)] (.set ents (int x) [nil []]))
+                 (.put at k (.size ents)))
+               (.add ents [k st])))
+        out (fn [] (vec (mapcat second ents)))]
     (case (:k t)
       :array
       (let [et (:of t) es (size-of et) n (:n t)]
         (loop [els els i 0]
           (cond
-            (empty? els) [(vec out) els]
-            (and n (>= i n) (not (and braced (or (keyword? (first els)) (and (seq? (first els)) (= 'at (first (first els)))))))) [(vec out) els]
+            (empty? els) [(out) els]
+            (and n (>= i n) (not (and braced (or (keyword? (first els)) (and (seq? (first els)) (= 'at (first (first els)))))))) [(out) els]
             :else
             (let [e (first els)]
               (if (and (seq? e) (= 'at (first e)))
                 (if-not braced
-                  [(vec out) els]
+                  [(out) els]
                   (let [[d & more] (rest e)
                         v (second els)
                         [lo hi] (if (vector? d) [(int-of (first d)) (int-of (second d))] [(int-of d) (int-of d)])]
                     (doseq [j (range lo (inc hi))]
                       (let [sa (addr+ a (* j es))]
                         (if (seq more)
-                          (.addAll out (first (fill-designated et sa more v)))
-                          (.addAll out (first (fill et sa [v] true))))))
+                          (put! nil (first (fill-designated et sa more v)))
+                          (put! j (first (fill et sa [v] true))))))
                     (recur (nnext els) (inc hi))))
                 (let [[st rst] (fill et (addr+ a (* i es)) els false)]
-                  (.addAll out st)
+                  (put! i st)
                   (recur rst (inc i))))))))
       (:struct :union)
       (let [subs (subobjects t)
             union? (= :union (:k t))]
         (loop [els els i 0]
           (cond
-            (empty? els) [(vec out) els]
+            (empty? els) [(out) els]
             :else
             (let [e (first els)
                   desig (cond (keyword? e) [e] (and (seq? e) (= 'at (first e))) (vec (rest e)))]
               (cond
-                (and desig (not braced)) [(vec out) els]
+                (and desig (not braced)) [(out) els]
                 (and desig (= braced :anon)
-                     (not (some #(= (first %) (first desig)) (anon-members t)))) [(vec out) els]
+                     (not (some #(= (first %) (first desig)) (anon-members t)))) [(out) els]
                 desig (let [k (first desig)
                             j (first (keep-indexed (fn [j s] (when (= (first s) k) j)) subs))
                             ;; a member of an anonymous member (6.7.11: its members are the struct's)
@@ -1981,25 +1993,24 @@
                           ;; the elements after go on in the anonymous member (gcc: {.b = 1, 2} gives c 2)
                           (let [[_ st off] (nth subs anon)
                                 [st2 rst] (fill-list st (addr+ a off) els :anon)]
-                            (.addAll out st2)
+                            (put! nil st2)
                             (recur rst (if union? (count subs) (inc anon))))
                           (let [[_ st off mm] (nth subs j)
                                 sa (addr+ a off)]
                             (if (> (count desig) 1)
-                              (.addAll out (first (fill-designated st sa (rest desig) v)))
-                              (if (:bits mm)
-                                (.addAll out (elem-store st a v mm))
-                                (.addAll out (first (fill st sa [v] true)))))
+                              (put! nil (first (fill-designated st sa (rest desig) v)))
+                              (put! (if union? 0 j)
+                                    (if (:bits mm) (elem-store st a v mm) (first (fill st sa [v] true)))))
                             (recur (nnext els) (inc j)))))
-                (or (>= i (count subs)) (and union? (pos? i))) [(vec out) els]
+                (or (>= i (count subs)) (and union? (pos? i))) [(out) els]
                 :else (let [[_ st off mm] (nth subs i)]
                         (if (:bits mm)
                           (let [x (first els)
                                 x (if (and (seq? x) (= 'init (first x))) (second x) x)]
-                            (.addAll out (elem-store st a x mm))
+                            (put! (if union? 0 i) (elem-store st a x mm))
                             (recur (next els) (inc i)))
                           (let [[st2 rst] (fill st (addr+ a off) els false)]
-                            (.addAll out st2)
+                            (put! (if union? 0 i) st2)
                             (recur rst (inc i))))))))))
       ;; a scalar in braces: its first element
       (let [[st rst] (fill t a els false)] [st rst]))))

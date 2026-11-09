@@ -55,7 +55,11 @@
     N/path): the directories holding them are read and printed, only the listed files are judged
     and counted, the known entries of the others are neither stale nor new, and the recorded :counts
     are not enforced (a partial run); --ids: the files the first half translates, one a line,
-    the universe a list is cut from"
+    the universe a list is cut from; --controls FILE (with --corpus): the negative controls of the
+    corpus (doc/GATE-SURVEY.md, GTS81 (a); [{:id :corpus :subject REL :reference REL}],
+    test/repr/clojure/roundtrip-controls.edn): what comes back of the subject judged against the
+    reference's original by the round trip's comparison and known entries, which must differ (a
+    control that passes: exit status 1; one whose files the run lacks is left)"
   (:require [arbace.repr.clojure.rules :as rules]
             [arbace.repr.clojure.text :as text]
             [arbace.java.io :as io]
@@ -287,6 +291,8 @@
               (into (sorted-map) (filter (fn [[rel _]] (contains? ds (parent-of rel)))) t-all))
             t-all)
         listed? (fn [rel] (or (nil? only) (contains? only rel)))
+        ;; :keep (the negative controls' files): their originals, and what comes back of the listed ones
+        kept (:keep opts #{})
         a (half v1 t opts)
         b (half v2 (:tree a) opts)
         ;; from Arbace, the printed tree's own round trip (Clojure -> Arbace -> Clojure)
@@ -323,15 +329,25 @@
                                   (= (get-in a [:tree out]) (get-in c [:tree (back2 out2)])))
                              {:why :not-read :at (first-difference orig txt)}
                              :else {:why :text :at (first-difference orig txt)})])]
-    {:files (+ (count results) (count (filter listed? (keys (:errors a)))))
-     :equal (count (remove second results))
-     :listed (when only (count (filter t-all only)))
-     :differ (into (sorted-map)
-                   (concat (filter second results)
-                           (for [[rel m] (:errors a) :when (listed? rel)] [rel {:why :error :at m}])
-                           ;; a file of the second half's errors
-                           (for [[out m] (:errors b) :let [rel ((:from a) out)] :when (listed? rel)]
-                             [rel {:why :error :at m}])))}))
+    (cond->
+      {:files (+ (count results) (count (filter listed? (keys (:errors a)))))
+       :equal (count (remove second results))
+       :listed (when only (count (filter t-all only)))
+       :differ (into (sorted-map)
+                     (concat (filter second results)
+                             (for [[rel m] (:errors a) :when (listed? rel)] [rel {:why :error :at m}])
+                             ;; a file of the second half's errors
+                             (for [[out m] (:errors b) :let [rel ((:from a) out)] :when (listed? rel)]
+                               [rel {:why :error :at m}])))}
+      ;; :keep's files: :texts {rel {:orig TEXT :back TEXT}}, the original, and what comes back of a listed one
+      (seq kept)
+      (assoc :texts (merge-with merge
+                                (into {} (for [rel kept :when (t rel)] [rel {:orig (slurp (t rel))}]))
+                                (into {} (for [[out rel] (:from a)
+                                               :when (and (contains? kept rel) (listed? rel))
+                                               :let [out2 (back out)]
+                                               :when (and out2 (= out2 rel))]
+                                           [rel {:back (get-in b [:tree out2])}])))))))
 
 (defn ids
   "The files of the sources the first half of a round trip translates (their kind planned among
@@ -361,6 +377,7 @@
                             (assoc o :only (into #{} (comp (map str/trim) (remove #(or (str/blank? %) (str/starts-with? % "#"))))
                                                  (str/split-lines (slurp (first more) :encoding "UTF-8")))))
       (= a "--known") (recur (rest more) (assoc o :known (first more)))
+      (= a "--controls") (recur (rest more) (assoc o :controls (first more)))
       (= a "--corpus") (recur (rest more) (assoc o :corpus (keyword (first more))))
       (= a "--text") (recur (rest more) (update o :text conj (first more)))
       (= a "--kind") (recur (rest more) (assoc o :kind (keyword (first more))))
@@ -392,13 +409,41 @@
     (reduce (fn [acc src]
               (let [n (.getName (io/file src))
                     pre (str n "/")
-                    r (roundtrip [src] (if (:only opts)
-                                         (assoc opts :only (into #{} (keep #(when (str/starts-with? % pre) (subs % (count pre)))) (:only opts)))
-                                         opts))]
+                    strip (fn [xs] (into #{} (keep #(when (str/starts-with? % pre) (subs % (count pre)))) xs))
+                    r (roundtrip [src] (cond-> opts
+                                         (:only opts) (assoc :only (strip (:only opts)))
+                                         (:keep opts) (assoc :keep (strip (:keep opts)))))]
                 (-> acc (update :files + (:files r)) (update :equal + (:equal r))
                     (update :listed #(when (or % (:only opts)) (+ (or % 0) (or (:listed r) 0))))
-                    (update :differ into (for [[rel d] (:differ r)] [(str n "/" rel) d])))))
+                    (update :differ into (for [[rel d] (:differ r)] [(str n "/" rel) d]))
+                    (cond-> (:texts r) (update :texts (fnil into {}) (for [[rel x] (:texts r)] [(str n "/" rel) x]))))))
             {:files 0 :equal 0 :listed nil :differ (sorted-map)} sources)))
+
+(defn known-matches?
+  "Whether the known entry e ({:why WHY :at TEXT [:as NAME] [:reason TEXT]}) excuses the difference d: the same kind, at
+  the same first differing line, under the same name (run-roundtrip's judge), not whatever else the file does."
+  [e d]
+  (and (map? e) (= (:why e) (:why d)) (= (:at e) (:at d)) (= (:as e) (:as d))))
+
+(defn control-verdict
+  "A negative control of the round trip (doc/GATE-SURVEY.md, GTS81 (a); test/repr/clojure/roundtrip-controls.edn):
+  {:id :corpus :subject REL :reference REL}, the text that comes back of the subject judged by the round trip's own
+  comparison (byte for byte, the difference at its first differing line, then the known entries' judge known-matches?)
+  against the reference's original, which must differ and not be excused by the reference's known entry. r is the
+  round trip's result (its :texts and :differ), known the corpus's known entries. {:id :verdict :ok|:failed|:left :why}:
+  :left when the subject is not in the run (another corpus, --only), does not come back itself, or the reference is not
+  in the tree."
+  [c r known]
+  (let [{s :subject ref :reference} c
+        back (get-in r [:texts s :back])
+        orig (get-in r [:texts ref :orig])
+        d (when (and back orig) (when (not= orig back) {:why :text :at (first-difference orig back)}))]
+    (cond (nil? back) {:id (:id c) :verdict :left :why (str s " is not in this run or does not come back under its name")}
+          (contains? (:differ r) s) {:id (:id c) :verdict :left :why (str s " does not come back itself: " (name (:why ((:differ r) s))))}
+          (nil? orig) {:id (:id c) :verdict :left :why (str "no " ref " in the tree")}
+          (nil? d) {:id (:id c) :verdict :failed :why "the comparison passes what differs"}
+          (known-matches? (known ref) d) {:id (:id c) :verdict :failed :why (str "the known entry of " ref " excuses it")}
+          :else {:id (:id c) :verdict :ok :why (:at d)})))
 
 (defn- run-roundtrip
   "roundtrip's command: the counts, each difference with its reason from the known ones (an
@@ -415,7 +460,10 @@
             (doseq [src (:sources o), rel (ids [src] o)]
               (println (if (< (count (:sources o)) 2) rel (str (.getName (io/file src)) "/" rel))))
             (System/exit 0))
-        r (roundtrips (:sources o) o)
+        ;; the negative controls of the corpus (--controls FILE: [{:id :corpus :subject :reference}])
+        controls (when (and (:controls o) (:corpus o))
+                   (filter #(= (:corpus o) (:corpus %)) (read-string (slurp (:controls o)))))
+        r (roundtrips (:sources o) (cond-> o (seq controls) (assoc :keep (into #{} (mapcat (juxt :subject :reference)) controls))))
         known-all (if (:known o) (read-string (slurp (:known o))) {})
         known (get known-all (:corpus o) {})
         outside (into (sorted-map) (filter #(= :not-read (:why (val %))) (:differ r)))
@@ -423,8 +471,7 @@
         diff (apply dissoc (:differ r) (concat (keys outside) (keys one-way)))
         ;; a known entry is {:why WHY :at TEXT [:as NAME] [:reason TEXT]}: it excuses the difference it
         ;; describes (the same kind, at the same first differing line), not whatever else the file does
-        matches? (fn [rel] (let [e (known rel) d (diff rel)]
-                             (and (map? e) (= (:why e) (:why d)) (= (:at e) (:at d)) (= (:as e) (:as d)))))
+        matches? (fn [rel] (known-matches? (known rel) (diff rel)))
         new (remove matches? (keys diff))
         stale (remove #(contains? diff %) (filter #(or (nil? (:only o)) (contains? (:only o) %)) (keys known)))
         ;; the corpus's size as recorded in the known file's :counts: an empty, shrunken or
@@ -467,8 +514,16 @@
                        (format "%d outside read's image (texts read itself changes), " (count outside))
                        (format "%d .cljc back as their :clj reading, " (count one-way)))
                      (count diff) (- (count diff) (count new)) (count new) (count stale)))
-    (shutdown-agents) ; pmap's threads
-    (when (or (seq new) (seq stale) (seq count-errors)) (System/exit 1))))
+    ;; the controls, after the corpus: one that passes (the comparison passes what differs) fails the run
+    (let [vs (for [c controls] (control-verdict c r known))]
+      (doseq [v vs]
+        (println (str "  CONTROL " (case (:verdict v) :ok "ok" :failed "FAILED" :left "left") " " (:id v) " - " (:why v))))
+      (when (seq vs)
+        (println (format "  controls (%s): %d, %d hold, %d left, %d fail" (:controls o) (count vs)
+                         (count (filter #(= :ok (:verdict %)) vs)) (count (filter #(= :left (:verdict %)) vs))
+                         (count (filter #(= :failed (:verdict %)) vs)))))
+      (shutdown-agents) ; pmap's threads
+      (when (or (seq new) (seq stale) (seq count-errors) (some #(= :failed (:verdict %)) vs)) (System/exit 1)))))
 
 (defn -main [& args]
   (let [[cmd & args] args

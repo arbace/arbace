@@ -58,6 +58,8 @@
 #   bin/oi pins [--attest]         the pins of the known files (kind "status ") against test/ocaml/pins-attested.tsv, the digests of the runs they were
 #                                  made for (no run); --attest writes it from the last runs' rows
 #   bin/oi divergences [--aot]     the recorded results judged against the classes alone (no runs)
+#   bin/oi reap-switch [--apply]   OC185 (a): each native record (check-oi-native.edn ...) against its oracle twin's passes; --apply, when
+#                                  none has fewer, moves REAP's eval and AOT cells to them (test/ocaml/oc185.ae)
 #   bin/oi aot-lib                 AOT (O6, OC7 (a)): the stdlib's Lambda (bin/oi stdlib's) translated by
 #                                  arbace.o2j into Java forms over the runtime jdk/ocaml/, into .tmp/o6/lib/
 #                                  (kept by the translator's, the runtime's and the stdlib's key)
@@ -204,7 +206,9 @@ inc_ref() {
 run_redirected() {
   local e=$1 out=$2 kv i=0 n=0; shift 2
   local v=()
-  for kv in $e; do case $kv in @stdin=null) i=1 ;; @stderr=null) n=1 ;; *) v+=("$kv") ;; esac; done
+  # (@cstubs=FILES: the program's C stubs, the runner's own concern: oi_one's cstubs_nodes)
+  # (@helper=, @runs=, @hook=: header.awk's helper mode, oi_one's too)
+  for kv in $e; do case $kv in @stdin=null) i=1 ;; @stderr=null) n=1 ;; @*) ;; *) v+=("$kv") ;; esac; done
   [ $i = 1 ] && : > "$out.stdin"
   # (a subshell exports the variables: CMD may be a shell function)
   case $i$n in
@@ -238,7 +242,29 @@ complib_need() {
   for m in $COMPLIB_UNITS; do M="$(echo "${m:0:1}" | tr a-z A-Z)${m:1}"; [ -n "${seen[$M]:-}" ] && echo "$COMPLIB/$M.ae"; done
   return 0
 }
-export -f inc_I inc_units inc_dirs lib_missing inc_ref dump_required complib_need run_redirected env_vars
+# cstubs_nodes DIR FILES: the node program of a test's C stubs (FILES, comma-separated, in DIR) linked with oi's C runtime and musl by
+# test/ocaml/capi/cnodes.ae on the tools' host (the C API on ci), in .tmp/oi/cstubs/KEY.nodes, KEY the stubs', the runtime's and the
+# headers' sources and the target's; built once (a lock around the build: jobs of one check share it); its path on stdout. cstubs_nodes DIR
+# FILES --program: a C program of its own (a test's helper, OC201 (a)), linked with musl alone, for oi cmain
+cstubs_nodes() {
+  local dir=$1 files k out f mode=${3:-}
+  files=$(echo "$2" | tr ',' ' ')
+  k=$( { for f in $files; do sha256sum < "$dir/$f"; done
+         (cd "$root" && find test/ocaml/capi -type f | LC_ALL=C sort | xargs sha256sum); echo "${ARBACE_C_TARGET:-arbace} $mode"; } | sha256sum | cut -c1-20)
+  out=$OI_DIR/cstubs/$k.nodes
+  mkdir -p "$OI_DIR/cstubs"
+  (
+    flock 8
+    if [ ! -s "$out" ]; then
+      "$root/bin/ci" musl ensure > "$OI_DIR/cstubs/$k.musl.log" 2>&1 || { cat "$OI_DIR/cstubs/$k.musl.log" >&2; exit 1; }
+      ( . "$root/bin/lib/repr-c/sysroot.bash"; c_sysroot || exit 1
+        cd "$dir" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/ocaml/capi/cnodes.ae" "$root" "$out.new" $mode $files ) || exit 1
+      mv "$out.new" "$out"
+    fi
+  ) 8> "$OI_DIR/cstubs/build.lock" || return 1
+  echo "$out"
+}
+export -f inc_I inc_units inc_dirs lib_missing inc_ref dump_required complib_need run_redirected env_vars cstubs_nodes
 
 # oi's own level runs a program under limited_cpu: TIMEOUT seconds of CPU and a wall cap of four times that, as o2j_cpu (re-review 042's finding 1:
 # twice was a load band: a program needing more than half the cap in CPU timed out on a host slowed twofold)
@@ -338,8 +364,8 @@ stdlib_prepare() {
 native_key() {
   local s t e
   s=$(sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/stdlib/StdlibModules" "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unix_unix.ml" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$TOP/otherlibs/systhreads/thread.ml" "$TOP/otherlibs/systhreads/thread.mli" "$TOP/otherlibs/systhreads/event.ml" "$TOP/otherlibs/systhreads/event.mli" "$TOP/otherlibs/str/str.ml" "$TOP/otherlibs/str/str.mli" "$TOP"/utils/*.ml* "$TOP"/parsing/*.ml* "$TOP/build-aux/ocaml_version.m4") || { echo "oi: key: the stdlib's sources cannot be read" >&2; return 1; }
-  # the libraries' one host tool, ocamllex (compiler-libs' lexer.ml), taken or not (OI_OCAMLLEX)
-  s="$s ocamllex=${OI_OCAMLLEX:-0}"
+  # compiler-libs' lexer.ml: the native ocamllex's (OC186 (a), its sources among the typer's forms below) or the host's (OI_OCAMLLEX=host)
+  s="$s ocamllex=${OI_OCAMLLEX:-native}"
   t=$(cat "$root"/arbace/repr/ocaml/*.ae "$root"/arbace/repr/ocaml/typer/*.ae | sha256sum) || return 1
   e=$(sha256sum "$(arbace_exe)" | cut -d' ' -f1) || return 1
   { echo native; echo "$s"; echo "$t"; echo "$e"; cat "$0"; } | sha256sum | cut -d' ' -f1
@@ -430,8 +456,8 @@ STRLIB str - -"
 # libs_sources: the libraries' sources of the pinned tarball in their directories (UNIXLIB, THREADLIB, STRLIB, COMPLIB), as otherlibs'
 # Makefiles and ocamlcommon's take them: unix.ml is unix_unix.ml (the Unix implementation), config.ml config.fixed.ml (the bootstrap
 # configuration) and config.common.ml.in with the magic numbers of build-aux/ocaml_version.m4 (equal to the host's ocamlc -config, OT21 (b)),
-# parser.ml boot/menhir's with its MenhirLib renamed as the Makefile does, lexer.ml ocamllex's (the oracle's library; the native one only with
-# OI_OCAMLLEX=1: OCAML-SURVEY, "As built: the typer line's merge", Proposed OC186)
+# parser.ml boot/menhir's with its MenhirLib renamed as the Makefile does, lexer.ml generated from parsing/lexer.mll by the native ocamllex
+# (bin/repr-ocaml ocamllex, OC186 (a): byte for byte the host's ocamllex's, bin/repr-ocaml ocamllex-check; OI_OCAMLLEX=host: the host's)
 libs_sources() {
   rm -rf "$UNIXLIB" "$THREADLIB" "$STRLIB"; mkdir -p "$UNIXLIB" "$THREADLIB" "$STRLIB"
   cp "$TOP/otherlibs/unix/unix.mli" "$TOP/otherlibs/unix/unixLabels.mli" "$TOP/otherlibs/unix/unixLabels.ml" "$UNIXLIB/"
@@ -470,11 +496,11 @@ complib_sources() {
       config) cp "$U/config.mli" "$COMPLIB/" ;;
       camlinternalMenhirLib) cp "$B/menhirLib.ml" "$COMPLIB/$m.ml"; { echo '[@@@ocaml.warning "-67"]'; cat "$B/menhirLib.mli"; } > "$COMPLIB/$m.mli" ;;
       parser) sed 's/MenhirLib/CamlinternalMenhirLib/g' "$B/parser.ml" > "$COMPLIB/parser.ml"; sed 's/MenhirLib/CamlinternalMenhirLib/g' "$B/parser.mli" > "$COMPLIB/parser.mli" ;;
-      # lexer.ml is ocamllex's output: the oracle's library always runs it; the native library only with OI_OCAMLLEX=1 (the host's
-      # ocamllex, a toolchain tool at check time: without it the native compiler-libs lack Lexer and what needs it, a typer note
-      # of the programs that link them; Proposed OC186)
+      # lexer.ml is ocamllex's output: the native ocamllex's by default (OC186 (a), no host tool), the host's with OI_OCAMLLEX=host;
+      # the two are the same bytes (bin/repr-ocaml ocamllex-check --host)
       lexer) cp "$P/lexer.mli" "$COMPLIB/"
-        if [ "$OI_STDLIB" = ocamlc ] || [ "${OI_OCAMLLEX:-0}" = 1 ]; then ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: ocamllex parsing/lexer.mll"; fi ;;
+        if [ "${OI_OCAMLLEX:-native}" = host ]; then ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: ocamllex parsing/lexer.mll"
+        else "$root/bin/repr-ocaml" ocamllex -q -o "$COMPLIB/lexer.ml" "$P/lexer.mll" || die "stdlib: the native ocamllex on parsing/lexer.mll"; fi ;;
       *) if [ -f "$U/$m.mli" ]; then cp "$U/$m.mli" "$COMPLIB/"; [ -f "$U/$m.ml" ] && cp "$U/$m.ml" "$COMPLIB/"
          else cp "$P/$m.mli" "$COMPLIB/"; [ -f "$P/$m.ml" ] && cp "$P/$m.ml" "$COMPLIB/"; fi ;;
     esac
@@ -520,7 +546,7 @@ libs_native() {
     printf '%s %s %s %s\n' "$d" "$m" "$incs" "$nf" >> "$tasks"
   done <<< "$LIB_UNITS"
   for m in $COMPLIB_UNITS; do
-    if [ ! -f "$COMPLIB/$m.ml" ]; then echo "$m	no $m.ml (parsing/lexer.mll needs ocamllex: OI_OCAMLLEX=1, Proposed OC186)" >> "$COMPLIB/failed.txt"; continue; fi
+    if [ ! -f "$COMPLIB/$m.ml" ]; then echo "$m	no $m.ml (parsing/lexer.mll's ocamllex failed)" >> "$COMPLIB/failed.txt"; continue; fi
     printf '%s %s %s -\n' "$COMPLIB" "$m" "$COMPLIB" >> "$tasks"
   done
   # the units are typed independently (each reads the others' interfaces, not their Lambda): OI_LIB_JOBS processes at once (default 3)
@@ -576,7 +602,9 @@ forms_key() {
   if [ -n "${OI_GO_SRC:-}" ]; then
     find "$OI_GO_SRC" -name '*.go' -not -name '*_test.go' | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
   else
-    { find "$root/go/arbace/oi" "$root/test/ocaml/oi" -type f | LC_ALL=C sort | xargs sha256sum; sha256sum "$root/go/arbace/oi.ae"; } | sha256sum | cut -d' ' -f1
+    # the C API (go/arbace/oicapi) and ci's back end it loads the stubs into (go/arbace/ci, go/arbace/crt) are the driver's too
+    { find "$root/go/arbace/oi" "$root/go/arbace/oicapi" "$root/go/arbace/ci" "$root/go/arbace/crt" "$root/test/ocaml/oi" -type f | LC_ALL=C sort | xargs sha256sum
+      sha256sum "$root/go/arbace/oi.ae" "$root/go/arbace/oicapi.ae" "$root/go/arbace/ci.ae" "$root/go/arbace/crt.ae"; } | sha256sum | cut -d' ' -f1
   fi
 }
 
@@ -585,15 +613,20 @@ cmd_build() {
   local key; key=$(forms_key)
   if [ -x "$EXE" ] && [ "$(cat "$OI_DIR/bin/key" 2>&1)" = "$key" ]; then return 0; fi
   local mod=$OI_DIR/mod
-  rm -rf "$mod"; mkdir -p "$mod/oi/cmd/oi"
+  rm -rf "$mod"; mkdir -p "$mod/oi/cmd/oi" "$mod/oicapi" "$mod/ci" "$mod/crt"
   printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
   if [ -n "${OI_GO_SRC:-}" ]; then
     cp "$OI_GO_SRC"/oi/*.go "$mod/oi/"; rm -f "$mod"/oi/*_test.go
     cp "$OI_GO_SRC"/oi/cmd/oi/*.go "$mod/oi/cmd/oi/"
+    for p in oicapi ci crt; do cp "$OI_GO_SRC/$p"/*.go "$mod/$p/"; rm -f "$mod/$p"/*_test.go; done
   else
     local exe; exe=$(arbace_exe)
     ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/go/arbace/oi.ae" "$mod/oi" > "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print go/arbace/oi"; }
     ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/test/ocaml/oi/cmd.ae" "$mod/oi/cmd/oi" >> "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print the driver"; }
+    local p
+    for p in oicapi ci crt; do
+      ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/go/arbace/$p.ae" "$mod/$p" >> "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print go/arbace/$p"; }
+    done
   fi
   mkdir -p "$mod/oi/testdata"; cp "$root/test/ocaml/oi/testdata/"* "$mod/oi/testdata/"
   (cd "$mod" && GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" build -trimpath -o "$EXE" ./oi/cmd/oi) || die "go build"
@@ -664,7 +697,8 @@ cmd_corpus() {
   for r in $(cd "$TESTS" && find . -name '*.reference' | LC_ALL=C sort); do
     b=${r#./}; b=${b%.reference}
     [ -f "$TESTS/$b.ml" ] || continue
-    h=$(awk -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
+    # (the AOT levels read a test with C stubs as its class: the C API is oi's alone, the light and compiled levels' runtime has none)
+    h=$(awk -v aot="${AOT:-0}" -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
     # a program header.awk classes that the suite's reading runs (modules, readonly data files) is the suite corpus's alone (OT9's third
     # fix): one row a program across the two corpora, the REAP cell counting it once
     case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$TESTS/$b.ml") in run*) continue ;; esac ;; esac
@@ -739,15 +773,12 @@ cmd_record_ref() {
 }
 
 # oi_one ID FLAGS INCS ARGS ENV: dump and run on oi; "ID<TAB>STATUS<TAB>SHA<TAB>BYTES<TAB>SECONDS<TAB>NOTE"
-oi_one() {
-  local id=$1 flags=$2 incs=$3 args=$4 env=$5
-  local d=${RUN_DIR:-$OI_DIR/run}/$id src=$TESTS/$id.ml
-  rm -rf "$d"; mkdir -p "$d"
-  local base; base=$(basename "$id")
+# oi_dump D BASE FLAGS INCS: BASE.ml (in D) dumped as Lambda into D/U.ae (U the module's name), by the native typer (NATIVE=1) or
+# ocdump; status 0, else 1 with the row's reason (dump: ...) on the standard output
+oi_dump() {
+  local d=$1 base=$2 flags=$3 incs=$4
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
-  local units=""
   local I; I=$(inc_I "$incs")
-  cp "$src" "$d/"
   if [ "${NATIVE:-0}" = 1 ]; then
     # T11 (doc/ocaml/TYPER.md): typed and translated by Arbace's typer, no ocamlc; the flags it does not model are a note of the row
     local nf="" f
@@ -757,36 +788,116 @@ oi_one() {
         -unsafe) nf="$nf --unsafe" ;;
         # the format parser's legacy behaviour (Clflags.strict_formats false) is the port's only one (typer/fmt.ae)
         -no-strict-formats) ;;
-        *) printf '%s\t-\t-\t0\t0\tdump: typer: flag %s not modelled\n' "$id" "$f"; return ;;
+        *) echo "dump: typer: flag $f not modelled"; return 1 ;;
       esac
     done
     # the program's libraries (ocaml-libs4's unix, threads, str, compiler-libs and the testsuite's testing) by their sources' interfaces
     local inc=""; [ -n "$incs" ] && inc="--include $(inc_dirs "$incs")"
-    if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
+    if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> "typer-$base.err"); then
       # the error's message alone: Arbace's "Execution error (CLASS) at NS/FN (FILE:LINE)." and "Full report at: FILE" left out
-      printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$(typer_err_text "$d/typer.err")"; return
+      echo "dump: typer: $(typer_err_text "$d/typer-$base.err")"; return 1
     fi
   else
     (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae")
   fi
   if grep -q '^(ocaml/error' "$d/$u.ae"; then
-    printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')"; return
+    echo "dump: $(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')"; return 1
   fi
+  return 0
+}
+
+# oi_helper ID D NAME:FILE,... FLAGS INCS (OC201 (a), doc/ocaml/OCAML-SURVEY.md "As built: OC199-OC201"): a helper program the test's
+# header builds (header.awk's helper mode), written into the run's directory D as the executable NAME the test runs: C files alone, a C
+# program, read and linked by ci (test/ocaml/capi/cnodes.ae --program, Arbace's own C target, as the C stubs are) and run by oi's driver
+# (oi cmain: ci with the process's getpid and kill the host's, go/arbace/oicapi's RunMain; tools/cirun's crt refuses a kill of another pid);
+# C files and one .ml, an OCaml program dumped as the test's program is and run by oi with its C stubs on ci (OI_CSTUBS). Status 0, else
+# 1 with the row's reason on the standard output
+oi_helper() {
+  local id=$1 d=$2 spec=$3 flags=$4 incs=$5
+  local name=${spec%%:*} files f cs="" ml="" nodes src; src=$(dirname "$TESTS/$id")
+  files=$(echo "${spec#*:}" | tr ',' ' ')
+  for f in $files; do case $f in *.c) cs="$cs${cs:+,}$f" ;; *.ml) ml=${f%.ml} ;; esac; done
+  if [ -z "$ml" ]; then
+    nodes=$(cstubs_nodes "$src" "$cs" --program 2> "$d/helper-$name.err") \
+      || { echo "helper: $name: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/helper-$name.err" | tail -1 | head -c 200 | tr '\t' ' ')"; return 1; }
+    printf '#!/bin/sh\nexec %q cmain %q "$@"\n' "$EXE" "$nodes" > "$d/$name"
+  else
+    cp "$src/$ml.ml" "$d/"
+    local why; why=$(oi_dump "$d" "$ml" "$flags" "$incs") || { echo "helper: $name: $why"; return 1; }
+    local u; u=$(echo "${ml:0:1}" | tr a-z A-Z)${ml:1}
+    local units; units=$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')
+    local miss; miss=$(lib_missing $units)
+    [ -z "$miss" ] || { echo "helper: $name: dump: typer: $miss"; return 1; }
+    nodes=$(cstubs_nodes "$src" "$cs" 2> "$d/helper-$name.err") \
+      || { echo "helper: $name: cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/helper-$name.err" | tail -1 | head -c 200 | tr '\t' ' ')"; return 1; }
+    local lib=$LIB; [ "${NATIVE:-0}" = 1 ] && lib=${LIB_NATIVE:-$LIB}
+    { printf '#!/bin/sh\nOI_CSTUBS=%q; export OI_CSTUBS\nexec %q run %q' "$nodes" "$EXE" "$lib"
+      for f in $units; do printf ' %q' "$f"; done
+      printf ' %q -- "$@"\n' "$d/$u.ae"; } > "$d/$name"
+  fi
+  chmod +x "$d/$name"
+}
+export -f oi_dump oi_helper
+
+oi_one() {
+  local id=$1 flags=$2 incs=$3 args=$4 env=$5
+  local d=${RUN_DIR:-$OI_DIR/run}/$id src=$TESTS/$id.ml
+  rm -rf "$d"; mkdir -p "$d"
+  local base; base=$(basename "$id")
+  local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+  local units=""
+  cp "$src" "$d/"
+  local why; why=$(oi_dump "$d" "$base" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   units=$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')
   local miss; miss=$(lib_missing $units)
   if [ -n "$miss" ]; then printf '%s\t-\t-\t0\t0\tdump: typer: %s\n' "$id" "$miss"; return; fi
+  # the program's own C stubs: their node program built by ci (cached by the sources' key), loaded by oi beside the program; the helper
+  # programs its header builds (OC201 (a)), the runs beyond the first, the run hook (header.awk's helper mode)
+  local cs="" kv hk="" runs="" hs=()
+  for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; @helper=*) hs+=("${kv#@helper=}") ;; @runs=*) runs=${kv#@runs=} ;; @hook=*) hk=${kv#@hook=} ;; esac; done
+  if [ -n "$cs" ]; then
+    local nodes
+    if ! nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then
+      printf '%s\t-\t-\t0\t0\tcstubs: %s\n' "$id" "$(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')"; return
+    fi
+    env="$env OI_CSTUBS=$nodes"
+  fi
+  local h
+  for h in "${hs[@]}"; do
+    why=$(oi_helper "$id" "$d" "$h" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
+  done
   local st=0 t0 t1
   t0=$(date +%s.%N); times > "$d/cpu0"
   local lib=$LIB; [ "${NATIVE:-0}" = 1 ] && lib=${LIB_NATIVE:-$LIB}
-  (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $units "$u.ae" -- $args) || st=$?
+  if [ -n "$hk" ]; then
+    # ocamltest's hook TEST.run in place of the run action (its main.ml's install_hook, actions_helpers.ml's run_hook): sh runs it in the
+    # run's directory with the variables program (the test's program: oi on its dump, exec'd so the hook's $! is oi's pid) and output
+    { printf '#!/bin/sh\nexec %q run %q' "$EXE" "$lib"; for h in $units; do printf ' %q' "$h"; done; printf ' %q --' "$d/$u.ae"
+      for h in $args; do printf ' %q' "$h"; done; printf '\n'; } > "$d/program"; chmod +x "$d/program"
+    : > "$d/oi.out"
+    (cd "$d" && run_redirected "$env program=$d/program output=$d/oi.out" "$d/hook.out" limited_cpu "$TIMEOUT" "$(oi_wall)" sh "$TESTS/$id.$hk") || st=$?
+  else
+    (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $units "$u.ae" -- $args) || st=$?
+  fi
+  # the runs beyond the first (cloexec's arguments execv, then create_process), each judged against the same verdict as the first
+  # (ocamltest's check-program-output after each run): the row is the first run whose status or output differs from the first's, else the first
+  local r i=1 rst
+  for r in $(echo "$runs" | tr ',' ' '); do
+    i=$((i + 1)); rst=0
+    (cd "$d" && run_redirected "$env" "$d/oi.out.$i" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $units "$u.ae" -- $r) || rst=$?
+    if [ "$rst" != "$st" ] || ! cmp -s "$d/oi.out" "$d/oi.out.$i"; then
+      mv "$d/oi.out" "$d/oi.out.1"; cp "$d/oi.out.$i" "$d/oi.out"; st=$rst; break
+    fi
+  done
   t1=$(date +%s.%N); times > "$d/cpu1"
   local note=""
-  note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
+  note=$(cat "$d/oi.out" ${hk:+"$d/hook.out"} | grep -a -m1 -o 'oi: .*' | head -c 300 | tr '\t' ' ' || true)
   st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
   [ "$st" = 124 ] && note="timeout ${TIMEOUT}s"
+  [ "$i" -gt 1 ] && [ -f "$d/oi.out.1" ] && note="run $i (arguments $r) differs from run 1${note:+; $note}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
-  # keep the outputs that differ, drop the dump (large)
-  rm -f "$d/$u.ae"
+  # keep the outputs that differ, drop the dumps (large)
+  rm -f "$d"/*.ae
 }
 
 # the key of an oi run: the driver's forms and the stdlib's (which holds ocdump's and this script's), so a check.tsv written
@@ -825,7 +936,8 @@ cmd_check() {
   if [ "$AOT" = 1 ]; then cmd_check_aot; return; fi
   if [ "$NATIVE" = 1 ]; then cmd_check_native; return; fi
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; need_tree; cmd_build
-  export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
+  # (cstubs_nodes, the C API's build, runs stage 0 from the checkout)
+  export -f oi_one limited_cpu arbace_exe; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$OI_DIR/check.tsv
   selected > "$OI_DIR/selected.tsv"; export OI_SELECTED=$OI_DIR/selected.tsv
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' "$OI_SELECTED" | xargs -0 -r -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
@@ -1262,19 +1374,30 @@ c2_programs() {
 
 cmd_check_compiled() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_aot_clib; cmd_build
-  export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
+  # the native path (TY24 (a), as the light level's: OC202): the programs typed by Arbace's typer (o2j_dump's), oi's column too
+  if [ "$NATIVE" = 1 ]; then
+    LIB_NATIVE=$LIB; TESTLIB_NATIVE=$TESTLIB; RUN_DIR=$OI_DIR/run-native
+    export OI_TYPER_THREADS=${OI_TYPER_THREADS:-1} OI_TYPER_GOMEMLIMIT=${OI_TYPER_GOMEMLIMIT:-1200MiB}
+    export -f typer_ns arbace_exe die native_dir o2j_dump; export NATIVE LIB_NATIVE TESTLIB_NATIVE RUN_DIR OI_STDLIB root TOP
+  fi
+  export -f oi_one limited_cpu arbace_exe; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   mkdir -p "$O2J"; rm -rf "$C2"; mkdir -p "$C2/run"
   selected > "$C2/selected.tsv"; export OI_SELECTED=$C2/selected.tsv
-  oi_rows_for "$OI_DIR/check.tsv" "$C2/oi.tsv" "$C2/selected.tsv" oi_one 4 "$OI_DIR/corpus.tsv"
+  local oirows=$OI_DIR/check.tsv; [ "$NATIVE" = 1 ] && oirows=$OI_DIR/check-native.tsv
+  oi_rows_for "$oirows" "$C2/oi.tsv" "$C2/selected.tsv" oi_one 4 "$OI_DIR/corpus.tsv"
   C2_OVERLAY=$(cd "$root" && ARBACE_HOST_EXE=$(arbace_exe) bin/jrt overlay | tail -1) || die "bin/jrt overlay"
   # the dumps, as the light level's (o2j_dump), into C2/run/ID
   local id kind flags incs args env base u d n=0
   : > "$C2/cprogs.list"; : > "$C2/progs.tsv"
   while IFS=$'\037' read -r id kind flags incs args env; do
     base=$(basename "$id"); u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}; d=$C2/run/$id
-    rm -rf "$d"; mkdir -p "$d"; cp "$TESTS/$id.ml" "$d/"
-    (cd "$d" && "$OCD" --mode lambda --simplify $flags $(inc_I "$incs") --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae" 2> dump.log) || true
-    rm -f "$d/$base.cmi" "$d/$base.cmo"
+    if [ "$NATIVE" = 1 ]; then
+      (O2J=$C2 o2j_dump "$id" "$flags" "$incs")
+    else
+      rm -rf "$d"; mkdir -p "$d"; cp "$TESTS/$id.ml" "$d/"
+      (cd "$d" && "$OCD" --mode lambda --simplify $flags $(inc_I "$incs") --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae" 2> dump.log) || true
+      rm -f "$d/$base.cmi" "$d/$base.cmo"
+    fi
     grep -q '^(ocaml/error' "$d/$u.ae" && continue
     n=$((n + 1))
     # the library units of its includes from ocaml.u (@UNIT: clib translated them once, OT26 (a)), not translated into its package
@@ -1297,8 +1420,14 @@ cmd_check_compiled() {
   [ "${O2J_KEEP:-}" = 1 ] || rm -f "$C2"/s*/prog
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
+  # the native path's record (OC202): test/ocaml/check-aot-compiled-native.edn once a --record writes it, the oracle path's until then
+  local res=$C2_RESULTS
+  if [ "$NATIVE" = 1 ] && { [ -f "$root/test/ocaml/check-aot-compiled-native.edn" ] || [ "$RECORD" = 1 ]; }; then
+    res=$root/test/ocaml/check-aot-compiled-native.edn
+    [ -f "$res" ] || cp "$C2_RESULTS" "$res"
+  fi
   O2J_LEVEL=compiled O2J_KNOWN=$root/test/ocaml/aot-compiled-known.edn O2J_SLOW=$root/test/ocaml/aot-compiled-slow.edn \
-    "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$C2/oi.tsv" "$C2_RESULTS" "$C2_CLASSES"
+    "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$C2/oi.tsv" "$res" "$C2_CLASSES"
 }
 
 # ---- the pins' evidence (re-review 049's finding 5, 056's finding 2): a known entry of kind "status " carries a prefix of the output's sha256; the
@@ -1453,6 +1582,9 @@ case $cmd in
   record-ref) cmd_record_ref "$@" ;;
   check) cmd_check "$@" ;;
   divergences) cmd_divergences "$@" ;;
+  # OC185 (a): REAP's eval and AOT cells to the native records once each has no fewer passes (test/ocaml/oc185.ae; --apply edits
+  # test/reap/cells.edn and test/crops/independence.edn)
+  reap-switch) (cd "$root" && "$(arbace_exe)" "$root/test/ocaml/oc185.ae" "$([ "${2:-}" = --apply ] && echo apply || echo compare)") ;;
   aot-cpu) o2j_cpu ;;
   pins) cmd_pins "$@" ;;
   own-verdicts) cmd_own_verdicts "$@" ;;

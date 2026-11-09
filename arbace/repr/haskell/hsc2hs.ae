@@ -1,0 +1,365 @@
+(ns arbace.repr.haskell.hsc2hs
+  "hsc2hs 0.68.10's direct mode in Arbace (HFS-I2 (a), its second part; doc/haskell/NATIVE.md, \"The native reads' inputs:
+  derived\"): an .hsc module parsed into text and special tokens (HSCParser.hs: the Haskell text's lexical cases, `#key
+  arg` and `#{key arg}`, C's continuation lines, LINE and COLUMN pragmas), the C program hsc2hs writes for it
+  (DirectCodegen.hs's outputDirect, C.hs's outHeaderCProg, outHeaderHs, outTokenHs, outTextHs, outEnum, showCString) and
+  its utilities' file (UtilsCodegen.hs), both over the tarball's data/template-hsc.h; the program is built and run by ci
+  (bin/ci run), not by a C compiler, and its output is the module hsc2hs makes. A port of the corpus's utils/hsc2hs
+  (GHC 9.14.1's tarball, BSD-3-Clause), rule for rule.
+
+    -m arbace.repr.haskell.hsc2hs gen OUTDIR FILE.hsc TEMPLATE [FLAG...]
+        OUTDIR/X_hsc_make.c and OUTDIR/X_hsc_utils.c for FILE.hsc (relative to the working directory, as hsc2hs names
+        it); FLAG: hsc2hs's -IDIR, --cflag=F (\"--cflag=-include --cflag=H\" pairs as gcc's -include H)"
+  (:require [arbace.string :as str])
+  (:import [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; The parser (HSCParser.hs). State: the text s, the index i, the position [file line col];
+;;; the output a StringBuilder. A failing alternative restores the index, the position and the
+;;; output's length (mplus).
+
+(deftype St [^String s ^longs i pos ^StringBuilder out])
+
+(defn- at ^long [^St st ^long k] (let [j (+ (aget ^longs (.-i st) 0) k)] (if (< j (count (.-s st))) (long (int (.charAt ^String (.-s st) (int j)))) -1)))
+(defn- eof? [^St st] (>= (aget ^longs (.-i st) 0) (count (.-s st))))
+
+(defn- upd [[f l c] ^long ch] (if (= ch 10) [f (inc l) 1] [f l (inc c)]))
+
+(defn- adv!
+  "consume one char, output it (satisfy)"
+  [^St st]
+  (let [ch (at st 0)]
+    (aset ^longs (.-i st) 0 (inc (aget ^longs (.-i st) 0)))
+    (reset! (.-pos st) (upd @(.-pos st) ch))
+    (.append ^StringBuilder (.-out st) (char ch))
+    ch))
+
+(defn- mark [^St st] [(aget ^longs (.-i st) 0) @(.-pos st) (.length ^StringBuilder (.-out st))])
+(defn- reset-to! [^St st [i p n]] (aset ^longs (.-i st) 0 (long i)) (reset! (.-pos st) p) (.setLength ^StringBuilder (.-out st) (int n)))
+
+(defn- alpha? [^long c] (and (>= c 0) (Character/isLetter (int c))))
+(defn- alnum? [^long c] (and (>= c 0) (Character/isLetterOrDigit (int c))))
+(defn- space? [^long c] (and (>= c 0) (or (= c 32) (<= 9 c 13) (Character/isSpaceChar (int c)))))
+(defn- digit? [^long c] (<= 48 c 57))
+(defn- hs-symbol? [^long c] (contains? #{33 35 36 37 38 42 43 46 47 60 61 62 63 64 92 94 124 45 126} c))
+(defn- ident-char? [^long c] (or (alnum? c) (= c 95) (= c 39)))
+
+(defn- many! [^St st p] (while (and (not (eof? st)) (p (at st 0))) (adv! st)))
+
+(defn- capture
+  "catchOutput_: run f, return what it output instead of outputting it"
+  [^St st f]
+  (let [sb ^StringBuilder (.-out st) n (.length sb)]
+    (f)
+    (let [o (subs (str sb) n)] (.setLength sb n) o)))
+
+(defn- hs-string! [^St st q]
+  (loop []
+    (let [c (at st 0)]
+      (cond
+        (= c -1) nil
+        (= c q) (adv! st)
+        (and (= c 92) (>= (at st 1) 0))
+        (if (space? (at st 1))
+          (do (adv! st) (many! st space?) (when (= (at st 0) 92) (adv! st)) (recur))
+          (do (adv! st) (adv! st) (recur)))
+        :else (do (adv! st) (recur))))))
+
+(defn- hs-comment! [^St st]
+  (loop []
+    (let [c (at st 0)]
+      (cond
+        (= c -1) nil
+        (and (= c 45) (= (at st 1) 125)) (do (adv! st) (adv! st))
+        (and (= c 123) (= (at st 1) 45)) (do (adv! st) (adv! st) (hs-comment! st) (recur))
+        :else (do (adv! st) (recur))))))
+
+(defn- ci-word! [^St st ^String w]
+  (every? (fn [ch] (let [c (at st 0)] (when (and (>= c 0) (= (Character/toLowerCase (int c)) (int ch))) (adv! st) true))) w))
+
+(defn- line-pragma!
+  "#LINE n \"file\" #-} after {-: sets the position (the next line is n of file); false when it does not match"
+  [^St st]
+  (when (= (at st 0) 35)
+    (adv! st) (many! st space?)
+    (when (ci-word! st "line")
+      (when (space? (at st 0))
+        (many! st space?)
+        (let [d (capture st #(many! st digit?))]
+          (.append ^StringBuilder (.-out st) d)
+          (when (and (seq d) (space? (at st 0)))
+            (many! st space?)
+            (when (= (at st 0) 34)
+              (adv! st)
+              (let [name (capture st #(many! st (fn [c] (not= c 34))))]
+                (.append ^StringBuilder (.-out st) name)
+                (when (= (at st 0) 34)
+                  (adv! st) (many! st space?)
+                  (when (and (= (at st 0) 35) (= (at st 1) 45) (= (at st 2) 125))
+                    (adv! st) (adv! st) (adv! st)
+                    (reset! (.-pos st) [name (dec (Long/parseLong d)) 1])
+                    true))))))))))
+
+(defn- column-pragma! [^St st]
+  (when (= (at st 0) 35)
+    (adv! st) (many! st space?)
+    (when (ci-word! st "column")
+      (when (space? (at st 0))
+        (many! st space?)
+        (let [d (capture st #(many! st digit?))]
+          (.append ^StringBuilder (.-out st) d)
+          (when (seq d)
+            (many! st space?)
+            (when (and (= (at st 0) 35) (= (at st 1) 45) (= (at st 2) 125))
+              (adv! st) (adv! st) (adv! st)
+              (let [[f l _] @(.-pos st)] (reset! (.-pos st) [f l (Long/parseLong d)]))
+              true)))))))
+
+(defn- unescape-hashes [^String s] (str/replace s "##" "#"))
+
+(defn- text!
+  "The Haskell text up to a special's #: [ended-by-hash?]"
+  [^St st]
+  (loop []
+    (let [c (at st 0)]
+      (cond
+        (= c -1) nil
+        (or (alpha? c) (= c 95)) (do (adv! st) (many! st ident-char?) (recur))
+        (hs-symbol? c)
+        (let [symb (capture st #(many! st hs-symbol?))]
+          (cond
+            (= symb "#") nil
+            (and (str/starts-with? symb "--") (every? #(= % \-) symb))
+            (do (.append ^StringBuilder (.-out st) symb) (many! st #(not= % 10)) (recur))
+            :else (do (.append ^StringBuilder (.-out st) (unescape-hashes symb)) (recur))))
+        (= c 34) (do (adv! st) (hs-string! st 34) (recur))
+        (and (= c 39) (= (at st 1) 92)) (do (adv! st) (hs-string! st 39) (recur))
+        (and (= c 39) (>= (at st 1) 0) (= (at st 2) 39)) (do (adv! st) (adv! st) (adv! st) (recur))
+        (and (= c 39) (space? (at st 1))) (do (adv! st) (adv! st) (many! st space?) (many! st ident-char?) (recur))
+        (= c 39) (do (adv! st) (many! st ident-char?) (recur))
+        (and (= c 123) (= (at st 1) 45))
+        (do (adv! st) (adv! st)
+            (let [m (mark st)]
+              (when-not (line-pragma! st)
+                (reset-to! st m)
+                (when-not (column-pragma! st)
+                  (reset-to! st m)
+                  (hs-comment! st))))
+            (recur))
+        :else (do (adv! st) (recur))))))
+
+;; C's side: a backslash-newline is skipped (fakeOutput []), the position moving over it
+(defn- skip-splices! [^St st]
+  (while (and (= (at st 0) 92) (= (at st 1) 10))
+    (aset ^longs (.-i st) 0 (+ 2 (aget ^longs (.-i st) 0)))
+    (reset! (.-pos st) (upd (upd @(.-pos st) 92) 10))))
+(defn- atc ^long [^St st ^long k]
+  ;; lookAheadC: the k-th char with the splices joined
+  (let [^String s (.-s st) n (count s)]
+    (loop [j (aget ^longs (.-i st) 0) k k]
+      (cond (>= j n) -1
+            (and (= (int (.charAt s (int j))) 92) (< (inc j) n) (= (int (.charAt s (int (inc j)))) 10)) (recur (+ j 2) k)
+            (zero? k) (long (int (.charAt s (int j))))
+            :else (recur (inc j) (dec k))))))
+(defn- advc! [^St st] (skip-splices! st) (adv! st))
+(defn- manyc! [^St st p] (loop [] (skip-splices! st) (when (and (not (eof? st)) (p (at st 0))) (adv! st) (recur))))
+
+(declare argument!)
+(defn- c-comment! [^St st] (loop [] (let [c (atc st 0)] (cond (= c -1) nil (and (= c 42) (= (atc st 1) 47)) (do (advc! st) (advc! st)) :else (do (advc! st) (recur))))))
+(defn- c-string! [^St st q] (loop [] (let [c (atc st 0)] (cond (= c -1) nil (= c q) (advc! st) (and (= c 92) (>= (atc st 1) 0)) (do (advc! st) (advc! st) (recur)) :else (do (advc! st) (recur))))))
+(defn- nested! [^St st q] (argument! st #(= % 10)) (if (= (atc st 0) q) (advc! st) (throw (ex-info (str "hsc2hs: " (pr-str (char q)) " expected") {}))))
+(defn- argument! [^St st eol]
+  (loop []
+    (let [c (atc st 0)]
+      (cond
+        (= c -1) nil
+        (eol c) (do (advc! st) (recur))
+        (= c 10) nil
+        (= c 34) (do (advc! st) (c-string! st 34) (recur))
+        (= c 39) (do (advc! st) (c-string! st 39) (recur))
+        (= c 40) (do (advc! st) (nested! st 41) (recur))
+        (= c 41) nil
+        (and (= c 47) (= (atc st 1) 42)) (do (advc! st) (advc! st) (c-comment! st) (recur))
+        (and (= c 47) (= (atc st 1) 47)) (do (advc! st) (advc! st) (manyc! st #(not= % 10)) (recur))
+        (= c 91) (do (advc! st) (nested! st 93) (recur))
+        (= c 93) nil
+        (= c 123) (do (advc! st) (nested! st 125) (recur))
+        (= c 125) nil
+        :else (do (advc! st) (recur))))))
+
+(defn- key-arg! [^St st eol]
+  (skip-splices! st)
+  (let [pos @(.-pos st)
+        key (capture st (fn []
+                          (if (let [c (atc st 0)] (or (alpha? c) (= c 95)))
+                            (do (advc! st) (manyc! st #(or (alnum? %) (= % 95))))
+                            (throw (ex-info "hsc2hs: hsc keyword or '{' expected" {:pos pos})))))]
+    (manyc! st #(or (and (space? %) (not= % 10)) (eol %)))
+    [:special pos key (capture st #(argument! st eol))]))
+
+(defn- special! [^St st]
+  (manyc! st #(and (space? %) (not= % 10)))
+  (if (= (atc st 0) 123)
+    (do (advc! st) (manyc! st space?)
+        (let [sp (key-arg! st #(= % 10))]
+          (if (= (atc st 0) 125) (advc! st) (throw (ex-info "hsc2hs: '}' expected" {})))
+          sp))
+    (key-arg! st (constantly false))))
+
+(defn parse
+  "An .hsc file's tokens: [:text pos text] and [:special pos key arg], pos [file line col]"
+  [^String text ^String file]
+  (let [st (St. text (long-array [0]) (atom [file 1 1]) (StringBuilder.))]
+    (loop [acc []]
+      (let [pos @(.-pos st)
+            t (capture st #(text! st))
+            acc (if (= t "") acc (conj acc [:text pos t]))]
+        (if (eof? st)
+          acc
+          (let [sp (special! st)] (.setLength ^StringBuilder (.-out st) 0) (recur (conj acc sp))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The C program (C.hs, DirectCodegen.hs)
+
+(defn show-c-string ^String [^String s]
+  (apply str (for [ch s :let [c (int ch)]]
+               (case ch
+                 \" "\\\"" \' "\\'" \? "\\?" \\ "\\\\"
+                 (cond
+                   (<= 32 c 126) (str ch)
+                   (= c 7) "\\a" (= c 8) "\\b" (= c 12) "\\f" (= c 10) "\\n\"\n           \"" (= c 13) "\\r"
+                   (= c 9) "\\t" (= c 11) "\\v"
+                   :else (str "\\" (quot c 64) (mod (quot c 8) 8) (mod c 8)))))))
+
+(def conditionals #{"if" "ifdef" "ifndef" "elif" "else" "endif" "error" "warning"})
+
+(defn- basename [^String f] (.getName (File. f)))
+
+(defn out-c-line [[f l _]] (str "#line " l " \"" (show-c-string (basename f)) "\"\n"))
+(defn out-hs-line [[f l _]] (str "    hsc_line (" (inc l) ", \"" (show-c-string (show-c-string f)) "\");\n"))
+
+(defn- join-lines [^String s] (str/join " \\\n" (str/split-lines s)))
+
+(defn out-header-c-prog [[_ pos key ^String arg]]
+  (case key
+    "include" (str (out-c-line pos) "#include " arg "\n")
+    "define" (str (out-c-line pos) "#define " arg "\n")
+    "undef" (str (out-c-line pos) "#undef " arg "\n")
+    "def" (if (or (str/starts-with? arg "struct ") (str/starts-with? arg "typedef ")) (str (out-c-line pos) arg "\n") "")
+    (cond
+      (conditionals key) (str (out-c-line pos) "#" key " " arg "\n")
+      (= key "let") (let [k (str/index-of arg "=")]
+                      (if (nil? k) ""
+                          (let [header (subs arg 0 k) body (subs arg (inc k))
+                                j (or (some #(when (space? (long (int (.charAt header (int %))))) %) (range (count header))) (count header))
+                                name (subs header 0 j) args (str/triml (subs header j))]
+                            (str (out-c-line pos) "#define hsc_" name "(" args ") hsc_printf (" (join-lines body) ");\n"))))
+      :else "")))
+
+(defn- good-for-opt-d? [^String arg]
+  (loop [i 0] (cond (>= i (count arg)) true (Character/isWhitespace (.charAt arg i)) true (= (.charAt arg i) \() false :else (recur (inc i)))))
+
+(defn out-header-hs [specials]
+  (apply str (for [[_ pos key ^String arg] specials]
+               (cond
+                 (= key "define") (if (good-for-opt-d? arg)
+                                    (let [k (some #(when (Character/isWhitespace (.charAt arg (int %))) %) (range (count arg)))
+                                          o (if k (str (subs arg 0 k) "=" (str/triml (subs arg (inc k)))) arg)]
+                                      (str "    hsc_printf (\"{-# OPTIONS_GHC %s #-}\\n\", \"" (show-c-string (str "-optc-D" o)) "\");\n"))
+                                    "")
+                 (conditionals key) (str (out-c-line pos) "#" key " " arg "\n")
+                 :else ""))))
+
+(defn- out-text [^String s] (str "    hsc_fputs (\"" (show-c-string s) "\", hsc_stdout());\n"))
+
+(defn out-text-hs
+  "outTextHs: [code [line-sync col-sync]] (COLUMN pragmas off: hsc2hs without --column)"
+  [[line-sync col-sync] pos ^String txt]
+  (let [n (count (take-while #(Character/isWhitespace (char %)) txt))
+        spaces (subs txt 0 n) rest (subs txt n)
+        update-line (if line-sync "" (out-hs-line pos))
+        update-col ""]
+    (if-let [k (str/index-of spaces "\n")]
+      [(str (out-text (subs spaces 0 (inc k))) update-line (out-text (str (subs spaces (inc k)) rest))) [true true]]
+      (let [k (str/index-of rest "\n")]
+        (cond
+          (= rest "") [(out-text spaces) [line-sync col-sync]]
+          (= k 0) [(out-text spaces) [line-sync col-sync]]
+          (nil? k) [(str (out-text spaces) update-col (out-text rest)) [line-sync true]]
+          :else [(str (out-text spaces) update-col (out-text (subs rest 0 (inc k))) update-line (out-text (subs rest (inc k)))) [true true]])))))
+
+(defn- parse-enum [^String arg]
+  (let [k (str/index-of arg ",")]
+    (when k
+      (let [t (subs arg 0 k) after (subs arg (inc k))
+            k2 (or (str/index-of after ",") (count after))
+            f (subs after 0 k2) after-f (subs after k2)]
+        [t f (loop [s after-f acc []]
+               (if (= s "") acc
+                   (let [s (subs s 1) k (or (str/index-of s ",") (count s))
+                         e (str/triml (subs s 0 k))
+                         j (str/index-of e "=")]
+                     (recur (subs s k) (conj acc (if j [(subs e 0 j) (subs e (inc j))] [nil e]))))))]))))
+
+(defn- out-enum [^String arg]
+  (if-let [[t f es] (parse-enum arg)]
+    (apply str (for [[hs c] es]
+                 (if hs
+                   (str "    hsc_enum (" t ", " f ", hsc_printf (\"%s\", \"" hs "\"), " c ");\n")
+                   (str "    hsc_enum (" t ", " f ", hsc_haskellize (\"" c "\"), " c ");\n"))))
+    ""))
+
+(defn out-tokens-hs [toks]
+  (first
+   (reduce (fn [[^String out [rs cs]] [k pos a b]]
+             (if (= k :text)
+               (let [[s st] (out-text-hs [rs cs] pos a)] [(str out s) st])
+               (let [s (cond
+                         (#{"include" "define" "undef" "def" "let"} a) ""
+                         (conditionals a) (str (out-c-line pos) "#" a " " b "\n")
+                         (= a "enum") (str (out-c-line pos) (out-enum b))
+                         :else (str (out-c-line pos) "    hsc_" a " (" b ");\n"))]
+                 [(str out s) [(and rs (= s "")) (and cs (= s ""))]])))
+           ["" [true true]] toks)))
+
+(defn c-program
+  "outputDirect's _hsc_make.c: name the file as hsc2hs normalises it, includes the -include files (gcc's, before the
+  first line: hsc2hs passes them as --cflag); the template and those files named by their names, found by ci through -I
+  of their directories"
+  [toks ^String name ^String template includes]
+  (let [specials (filter #(= :special (first %)) toks)]
+    (str (apply str (for [h includes] (str "#include \"" (basename h) "\"\n")))
+         "#include \"" (basename template) "\"\n"
+         (apply str (map out-header-c-prog specials))
+         "\nint main (void)\n{\n"
+         (if (some #(= "def" (nth % 2)) specials) "" (out-header-hs specials))
+         (out-hs-line [name 0 1])
+         (out-tokens-hs toks)
+         "    return 0;\n}\n")))
+
+(defn utils-program [^String template]
+  (str (str/join "\n"
+                 [(str "#include \"" (basename template) "\"\n") "" "#include <stddef.h>" "#include <string.h>" "#include <stdio.h>"
+                  "#include <stdarg.h>" "#include <ctype.h>" "" "int hsc_printf(const char *format, ...) {" "    int r;"
+                  "    va_list argp;" "    va_start(argp, format);" "    r = vprintf(format, argp);" "    va_end(argp);"
+                  "    return r;" "}" "" "int hsc_toupper(int c) {" "    return toupper(c);" "}" "" "int hsc_tolower(int c) {"
+                  "    return tolower(c);" "}" "" "int hsc_putchar(int c) {" "    return putchar(c);" "}" ""
+                  "int hsc_fputs(const char *s, void *stream) {" "    return fputs(s, (FILE *)stream);" "}" ""
+                  "void *hsc_stdout(void) {" "    return (void *)stdout;" "}"])
+       "\n"))
+
+(defn -main [& args]
+  (let [[verb out file template & flags] args]
+    (case verb
+      "gen" (let [toks (parse (slurp file) file)
+                  base (str/replace (basename file) #"\.hsc$" "")
+                  includes (loop [fs (seq flags) acc []]
+                             (cond (nil? fs) acc
+                                   (and (= (first fs) "--cflag=-include") (second fs)) (recur (nnext fs) (conj acc (subs (second fs) 8)))
+                                   :else (recur (next fs) acc)))]
+              (.mkdirs (File. ^String out))
+              (spit (str out "/" base "_hsc_make.c") (c-program toks file template includes))
+              (spit (str out "/" base "_hsc_utils.c") (utils-program template)))
+      (do (println "usage: -m arbace.repr.haskell.hsc2hs gen OUTDIR FILE.hsc TEMPLATE [FLAG...]") (System/exit 2)))))

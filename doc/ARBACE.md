@@ -67,6 +67,15 @@ code. Three kinds of things live here:
   Arbace's own (2026-11-04): written from the documented behaviour of `-traditional` and judged against Alpine's
   gcc 15.2.0 `cpp -traditional` as a black box (its output and line markers on probe inputs), no GCC code read
   or kept; `ast.ae`, `parse.ae`, `native.ae`, `mutate.ae`, `driver.ae` are Arbace's own;
+  `target.ae`, `configure.ae` and `hsc2hs.ae` (the native reads' inputs derived, HFS-I2 (a), 2026-11-08) port hadrian's
+  `src/Rules/Generate.hs` and `bindist/Makefile` (the settings file, the package records' patch), `rts/configure.ac`'s
+  ghcplatform.h and ghcautoconf.h steps, `rts/gen_event_types.py`, the packages' `configure.ac` defines with
+  `aclocal.m4`'s FPTOOLS_CHECK_HTYPE and FP_CHECK_CONST, and `utils/hsc2hs/src/{HSCParser,C,DirectCodegen,UtilsCodegen}.hs`
+  from the same tarball; `cabal.ae` ports Cabal-syntax 3.16.0.0's field parser, conditions, free text and
+  showInstalledPackageInfo (`libraries/Cabal/Cabal-syntax`, Cabal's BSD 3-Clause License);
+  `target.ae`'s `libffi-vars` and `libffi-headers` (HFS-I11 (a), 2026-11-08) port libffi 3.8.0's `configure.ac` and
+  `configure.host` substitution rules for ffi.h.in and the ffitarget.h copy (https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz,
+  SHA-256 `7da3e2d9...0c0db4`, `test/haskell/target/libffi.edn`'s pin; libffi's MIT License);
   `rename.ae`, the renamer of the front end (doc/haskell/FRONTEND-SURVEY.md, HF2), ports `mkOpAppRn`, `mkNegAppRn`,
   `mkConOpPatRn`, `mkHsOpTyRn` of `compiler/GHC/Rename/HsType.hs` and `compareFixity` of `compiler/GHC/Types/Fixity.hs`
   from the same tarball on 2026-11-05, reading the rest of `compiler/GHC/Rename/` as the specification, the file
@@ -176,6 +185,19 @@ code. Three kinds of things live here:
   Expat's notice (LICENSE.md: Expat's MIT License; the binding under the PSF License Agreement).
 - `llvm/` (`arbace.llvm.*`: llvmi, LLVM IR's evaluator, `arbace.llvm.run` and its judge `arbace.llvm.check`, and the C forms of the
   personality-free layer `llvm/rt/none.c.ae`; doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvmi") is Arbace's own.
+- `repr/cpp/diag.ae` (`arbace.repr.cpp.diag`, CX12: the C++ front end's diagnostics over the native parser's tree, doc/cpp/CPP-SURVEY.md,
+  "As built: CX12 (first slice)") is Arbace's own code whose diagnostics' texts are clang's (`clang/include/clang/Basic/DiagnosticSemaKinds.td`)
+  and whose rules follow clang's Sema (`SemaExpr.cpp`'s `DiagnoseEmptyLookup`, `SemaDecl.cpp`'s redeclaration checks), the LLVM Project
+  from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`), written by hand on 2026-11-08; the file carries clang's notice.
+  Its second slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (second slice)") reads `cpp/target/clang-builtins.edn`, clang's identifier
+  table made by `test/cpp/builtins.ae` from the same tarball's `Builtins*.td` and `TokenKinds.def` (CP270 (a); the reader carries clang's
+  notice), and its checker's rules in `cpp/sema.ae` (Arbace's own, after the standard's rules) and `cpp/template.ae` (the port of
+  SemaTemplateDeduction's MemberPointer case and method qualifiers), on only as a checker (`arbace.cpp.sema/checking?`), 2026-11-08.
+  Since CP290-CP294 (doc/cpp/CPP-SURVEY.md, "As built: CP290-CP294") also the rules of GNU attributes clang does not know, from the
+  native parser's `:_gattrs` data (strict_flex_array first), Arbace's own, clean-room from the GCC 15.2 manual's descriptions.
+  Since its fifth slice (doc/cpp/CPP-SURVEY.md, "As built: CX12 (fifth slice)") the constexpr checks `constexpr-bodies` and
+  `constexpr-redecls` after `SemaDeclCXX.cpp`'s CheckConstexprFunctionBody, CheckConstexprDeclStmt, CheckConstexprMissingReturn and
+  MergeCXXFunctionDecl (llvm-project-23.1.5), 2026-11-08.
 - `cpp/` (`arbace.cpp.*`, the C++ crop's eval: the lowering of LLVM forms to C forms, the code generator and its
   semantic analysis; doc/llvm/LOWER.md, doc/cpp/CODEGEN.md) is Arbace's own but for `cpp/template.ae`
   (`arbace.cpp.template`, templates, CODEGEN.md §G3), whose deduction ports parts of clang's
@@ -197,6 +219,10 @@ code. Three kinds of things live here:
   as Menhir 20250912 does and writes it as the generated `tables.ae`, `parser.ae` drives it as MenhirLib's engine
   (boot/menhir/menhirLib.ml of the same tarball) does (LICENSE.md: the OCaml Core System; Menhir and MenhirLib); the
   rest (the converter, the printer, the checks, `native.ae`) is Arbace's own.
+  ocamllex (2026-11-08, OC186 (a), "As built: ocamllex ported (OC186)"): `repr/ocaml/ocamllex.ae`
+  (`arbace.repr.ocaml.ocamllex`) ports the same tarball's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml,
+  common.ml, output.ml, main.ml; outputbis.ml's -ml mode not, Proposed OC191) with stdlib/set.ml's AVL trees, by hand, the file
+  carrying OCaml's notice (LICENSE.md: the OCaml Core System); its `check` verb is Arbace's own.
   Its native front end for oi (2026-11-05, doc/ocaml/TYPER.md), `repr/ocaml/typer.ae` and `repr/ocaml/typer/`
   (`arbace.repr.ocaml.typer.*`), ports from the same tarball typing/'s types.ml, btype.ml, ctype.ml, predef.ml,
   printtyp.ml, env.ml, typetexp.ml, typedecl.ml, datarepr.ml, patterns.ml, parmatch.ml, typecore.ml and typemod.ml's
@@ -248,7 +274,9 @@ code. Three kinds of things live here:
   (the collector's traversal, after `rustc_monomorphize/src/collector.rs`) and `tools/rsdump/mirdata.rs` (the helper's `mir`, `census` and
   `iface` modes, walking rustc_middle's `Body` as `pretty.rs` does) port rustc 1.99.1, the same revision and sources as above, by
   hand on 2026-11-05 (RF1-RF3, doc/rust/FRONTEND-SURVEY.md, "As built: RF1-RF3 (trial)"; LICENSE.md names the files; MIT OR
-  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13).
+  Apache-2.0); evaluated from the checkout, not embedded, out of `gate_key` (RFS13). On 2026-11-08 (RFP23 (b)) `codegen.ae` gained
+  `intrinsic.rs`' `volatile_load`/`volatile_store` (and the unaligned ones) and `rustc_codegen_llvm/src/consts.rs`' `codegen_static` for a
+  static whose bytes the allocation carries, the same revision.
   `arbace/rust/front/expand.ae` with `expand_format.ae` and `expand_derive.ae` (macro expansion: macro_rules! after
   `rustc_expand/src/mbe/`, the builtins after `rustc_builtin_macros/src/{format,assert,edition_panic,source_util,concat,cfg}.rs` and
   `rustc_parse_format`, the derives after `rustc_builtin_macros/src/deriving/`, cfg after `rustc_expand/src/config.rs`),
@@ -275,6 +303,36 @@ code. Three kinds of things live here:
   RF9a"; RF9b's second slice, the same day: ambiguity and where-clause candidates, normalization through the parameter environment and
   item bounds, CoerceMany, closure kinds, writeback's fix-ups, "As built: RF9b"; LICENSE.md names the files; MIT OR Apache-2.0);
   evaluated from the checkout, out of `gate_key` (RFS13).
+  `arbace/rust/front/mono.ae` (RFP23 (c), 2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RFP23 (c)": the run's facts natively)
+  ports rustc 1.99.1, the same revision and sources: `rustc_symbol_mangling/src/{lib,v0}.rs`, `rustc_span/src/def_id.rs`'s
+  StableCrateId, `rustc_middle/src/{mono.rs,ty/print/mod.rs,ty/instance.rs,ty/layout.rs}`, `rustc_mir_transform/src/cross_crate_inline.rs`,
+  `rustc_metadata/src/rmeta/{mod,encoder}.rs` (the rmeta's header and CrateRoot's first fields), `rustc_monomorphize/src/collector.rs`,
+  `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,wrapping_range.rs}` and `rustc_ty_utils/src/layout.rs`; with rustc-stable-hash
+  0.1.2's `src/{sip128,stable_hasher}.rs` (https://github.com/rust-lang/rustc-stable-hash, as rustc's Cargo.lock pins it); LICENSE.md
+  names the files (MIT OR Apache-2.0); `mono_check.ae` is Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
+  `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
+  `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
+  after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF10 (first slice)"; LICENSE.md names the files; MIT OR Apache-2.0); evaluated from the
+  checkout, out of `gate_key` (RFS13). RF10's second slice (2026-11-08, "As built: RF10 (second slice)") adds to `build.ae` the capture
+  analysis after `rustc_hir_typeck/src/{upvar,expr_use_visitor}.rs` and `rustc_passes/src/upvars.rs`, closure bodies, overloaded
+  operators, derefs and indexing, constants and allocations, canonical user type annotations (with `typeck.ae`'s part, after
+  `fn_ctxt/_impl.rs` and `method/confirm.rs`) and lint scopes, the same revision and sources; `capture_check.ae` is Arbace's own.
+  RF10's third slice (2026-11-08, "As built: RF10 (third slice)") ports into `build.ae` the rest of the match lowering after
+  `rustc_mir_build/src/builder/matches/{mod,match_pair,buckets,test,util}.rs` (or-patterns' subcandidates, guards and their fake
+  borrows, range, slice, string and scalar tests, let-else and `if let` after `builder/block.rs` and `lower_let_expr`), the
+  patterns of `thir/pattern/{mod,const_to_pat}.rs` (ranges, slices, `enumerate_and_adjust`), `construct_const` and statics'
+  references after `builder/mod.rs` and `thir/cx/expr.rs`, functional update and `write_box_via_move` after `builder/expr/into.rs`;
+  and `arbace/rust/front/passes.ae`, mir_built's passes after `rustc_mir_transform/src/{lib,lint_and_remove_uninhabited,simplify}.rs`,
+  the same revision and sources (LICENSE.md; MIT OR Apache-2.0).
+  RF10's fourth slice (2026-11-08, "As built: RF10 (fourth slice)") ports into `passes.ae` the passes from mir_promoted to runtime
+  MIR's cleanup after `rustc_mir_transform/src/{promote_consts,cleanup_post_borrowck,remove_noop_landing_pads,deref_separator,
+  add_call_guards,post_analysis_normalize,elaborate_drops,elaborate_drop,abort_unwinding_calls,erase_deref_temps,
+  elaborate_box_derefs,lower_intrinsics,remove_place_mention,patch}.rs`, `rustc_const_eval/src/check_consts/qualifs.rs`,
+  `rustc_mir_dataflow/src/{move_paths/{mod,builder}.rs,un_derefer.rs,drop_flag_effects.rs,impls/initialized.rs,framework/direction.rs}`
+  and `rustc_middle/src/ty/layout.rs`' `fn_can_unwind`, the same revision and sources; and into `build.ae` the float printing of
+  `rustc_apfloat` 0.2.3 (`src/ieee.rs`, `impl Display for IeeeFloat`; Apache-2.0 WITH LLVM-exception, from the cargo registry's
+  `rustc_apfloat-0.2.3+llvm-462a31f5a5ab`) (LICENSE.md).
   `arbace/rust/check.ae`'s own-verdict judge (`own-verdict`, `run-class`, `verdict-met?`) ports rustc 1.99.1's compiletest
   (`src/tools/compiletest/src/runtest/ui.rs`'s run checks, `directives.rs`'s directive lines; the pinned `rustc-1.99.1-src.tar.xz`),
   by hand on 2026-11-07 (rust-90, doc/rust/EVAL.md §13; LICENSE.md; MIT OR Apache-2.0); evaluated from the checkout.
@@ -288,7 +346,13 @@ code. Three kinds of things live here:
   `getMangledTypeStr` (2026-11-05); `repr/llvm/intr_table.ae` and `di_table.ae` are generated from the same release by
   `bin/llvm-corpus intrinsics` (llvm-tblgen `--dump-json` over `llvm/include/llvm/IR/Intrinsics*.td`) and `bin/llvm-corpus
   di-table` (`LLParser.cpp`'s `VISIT_MD_FIELDS`, `AsmWriter.cpp`'s field order, `BinaryFormat/Dwarf.def` and `Dwarf.h`,
-  `IR/DebugInfoFlags.def`); LICENSE.md: Apache 2.0 with LLVM Exceptions; the rest of repr/llvm is Arbace's own.
+  `IR/DebugInfoFlags.def`); `repr/llvm/expect.ae` (`arbace.repr.llvm.expect`, the mutants' own verdicts, LLS33 (b), 2026-11-08)
+  ports LLParser's naming (`PerFunctionState`: `getVal`, `setInstName`, `defineBB`, `checkValueID`, `checkValidVariableType`,
+  `finishFunction`) and carries the texts and orders of the LLParser and Verifier rules the mutator's 41 kinds break
+  (`LLParser.cpp`, `Verifier.cpp`, `AutoUpgrade.cpp`, `Attributes.cpp`'s `typeIncompatible`, `Attributes.td`'s placements,
+  `CallingConv.h`'s `isCallableCC`, `DiagnosticInfo.cpp`'s version message) of llvm-project 23.1.5 (the release tarball
+  `llvm-project-23.1.5.src.tar.xz`, `:llvmorg-23.1.5` in `test/cpp/corpora.edn`), each with its file and line; LICENSE.md:
+  Apache 2.0 with LLVM Exceptions; the rest of repr/llvm is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
@@ -338,6 +402,13 @@ depends on (`pom.xml`), as `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace
 from https://github.com/clojure/core.specs.alpha at `v0.6.133-alpha10`,
 `75875946b7e827a1cec91ce645d5e1dcfc475e49`), derived on 2026-10-07 by `bin/vendor-spec` (on that branch) and
 maintained by hand since; each file names its origin in a comment.
+
+Generated from data (SCS9 (c), 2026-11-08): `repr/scheme/category.ae` (the general categories) and
+`repr/scheme/unicode.ae` (the identifier ranges; since SCS13 (b) the whitespace too), since SCS12 (c) `repr/scheme/casefold.ae`
+(full case folding), and beside them si's `go/arbace/scm/unicode.ae` (all of these for si's runtime, the simple folding too), are
+made by `arbace.repr.scheme.ucd` (`bin/repr-scheme ucd gen`, `check`) from the Unicode Character Database 16.0.0
+(https://www.unicode.org/Public/16.0.0/ucd/ `UnicodeData.txt`, `extracted/DerivedGeneralCategory.txt`, `CaseFolding.txt`,
+pinned by SHA-256 in `test/scheme/ucd.edn`); each file says so in its docstring or header.
 
 The converted files keep their Java file's notice as a comment; which license covers which file
 is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and

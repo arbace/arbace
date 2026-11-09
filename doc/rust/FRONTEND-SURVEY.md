@@ -1450,3 +1450,702 @@ whatever the front end does before Tier S**, as RF10-RF11 move only the program'
 What rust-90 pinned instead: the programs' IR as packs (`test/rust/ir/`, `bin/rsi ir-pack`, the oracle tier), std's IR at its pin,
 and the ci leg's library keyed without the C toolchains (EVAL.md §13). The estimates of §7 stand: RF10 14-22 days, RF11 5-8, RF12
 35-60.
+
+## As built: RF10 (first slice), MIR from the native front end (2026-11-08)
+
+Branch `rust-rf10` (from next `bd33e27cc`), the user's order of 2026-11-07 (RES54 (a): RFP20 → RFP15 → RF10 → RF11 → RF12).
+
+### RFP20 and RFP15 first?
+
+Both were decided before RF10 (RFP20 (a), RFP21 (a)); neither is small, and neither is needed by RF10's first slice, so the slice was
+taken first on the single-file programs where neither applies, and both stay next in the decided order:
+
+- **RFP20** (closures' captures in the judge): the helper's `--typeck` dumps no captures, so the helper's `front.rs` grows (a
+  rebuild, ~15 s) and `upvar.rs`'s capture analysis (with `expr_use_visitor.rs`'s place projections, about 2,500 lines of rustc)
+  is ported and judged fact by fact: 2-3 days. RF10's slice refuses closures (`closure`, 21 bodies of the corpus), so it reads no
+  capture.
+- **RFP15** (`mod m;` files through expansion, resolution, lowering and collection, `--resolve` extended to every local file): "a
+  few days" by RFP21's own estimate; only the registry crates need it, and RF10's judge here runs on the synthetic corpus, the
+  samples and `test/rust/front/`, all single files.
+
+### What was built
+
+- `arbace/rust/front/build.ae` (`arbace.rust.front.build`, about 1,400 lines), ports of rustc 1.99.1 (`58cf8f9c3`) under MIT:
+  - **the region scope tree** (`rustc_hir_analysis/src/check/region.rs`: `resolve_block`, `resolve_stmt`, `resolve_expr`, `resolve_arm`,
+    `resolve_cond`, the terminating scopes, edition 2024's tail expressions and `if` rescopes) and `temporary_scope`
+    (`rustc_middle/src/middle/region.rs`);
+  - **THIR** (`thir/cx/expr.rs`'s `mirror_expr_inner`, `apply_adjustment` for NeverToAny, builtin derefs, borrows and pointer
+    coercions, `make_mirror_unadjusted` for literals (negated literals), paths, calls (constructors as aggregates), method calls,
+    operators, assignments, casts, fields, indexing, tuples, arrays, structs, blocks, `if`, loops, `break`/`continue` by their
+    target's scope, `return`, `match`, `let`; `thir/pattern`'s bindings, wildcards, constants, tuples, structs and variants (the
+    crate's and std's), references and the implicit dereferences of match ergonomics);
+  - **the builder** (`builder/`): `construct_fn` and `args_and_body`, `Scopes` with the drop trees (`DropTree`'s `assign_blocks` and
+    `link_blocks`, `build_exit_tree`, `diverge_cleanup`, `build_unwind_tree`), `in_scope`, `in_breakable_scope`,
+    `in_if_then_scope`, `break_scope`, `break_for_else`, `ast_block_stmts` with `let`'s remainder scopes and visibility scopes,
+    `expr_into_dest`, `stmt_expr`, `as_operand`, `as_temp`, `as_rvalue` with `build_binary_op`'s overflow, shift and division checks,
+    `as_place` with the bounds check, `then_else_break`, and **the match lowering** (`lower_match_tree`, `match_candidates`,
+    `test_candidates`, the buckets of `buckets.rs`, `perform_test`'s switches on discriminants, integers and booleans, the false
+    edges, `bind_matched_candidate_for_arm_body`, `place_into_pattern` for patterns in `let` and in parameters); `construct_const`
+    for explicit discriminants; user type annotations of `let`s;
+  - the body as MIR forms (doc/rust/MIR.md) at the `built` phase, printed by `arbace.rust.front.mir`.
+- typeck (`typeck.ae`) keeps its results by HIR id for the builder (`body-results`: each expression's type and adjustments, a method
+  call's callee, a pattern's type, binding mode and implicit dereferences), with RF10's questions (`with-solver`, `copy-type?`,
+  `implements-drop?`, the variants and their discriminants). Two fixes of the earlier stages it found: a `while`'s `break` is an
+  expression statement (rustc's `stmt_expr`), so typeck coerces it with NeverToAny; path patterns peel references (match ergonomics).
+  `typeck-check` (11,140 of 11,173) and `hir-check` (91 of 91) unchanged.
+- **The judge** `build_check.ae`, `bin/rust-front build-oracles` (rustc's `-Zdump-mir=built`, the helper as rustc, the oracle tier) and
+  `bin/rust-front build-check`: each body our pipeline builds (the native reader, our expansion, resolution, lowering, collection and
+  typeck; std's names and interface the only rustc data) printed, against rustc's built text byte for byte after the dump's header
+  line; a body equal but for the allocations rustc prints after it (a string constant's bytes, their ids the session's interning order)
+  is counted apart; a negative control differs.
+- **The run** `build_run.ae` and `bin/rust-front run-built FILE...`: the record (the oracle tier: the helper's `--mono-mir` dump and
+  rustc's executable's status, made once), then with `rustc`, `rustdoc` and `cargo` on `PATH` as stubs exiting 99: our built bodies with
+  CleanupPostBorrowck's changes (fake reads, place mentions and ascriptions removed; false edges and unwinds made gotos) and the abort
+  strategy's (unwind actions unreachable) take the place of the record's bodies of the same name, the facts that are not the body's own
+  carried over from the record (symbols, std's resolved callees, rustc's DefIds in types, the layouts; the layouts of unit, scalars and
+  scalar pairs the record lacks computed after `rustc_abi`), then `arbace.rust.back.codegen`, `bin/rsi lower`, gcc `-O0`, the run.
+  `RF10_CONTROL=1` (every Add a Sub) must differ.
+
+### Results
+
+- `bin/rust-front build-check` over `test/rust/front/a1`-`a7`: **47 of 54 bodies equal to rustc's built MIR byte for byte, 1 more but for
+  rustc's allocations text** (a1, a2, a4, a5 whole: integers with overflow, shift and division checks, `while` loops, `if` chains, `&&`, casts, structs, tuples, arrays with
+  bounds checks, references, enums with explicit discriminants and their `match`es, `Option<&i32>`, derived `Clone`); the rest: a
+  derive's `AssertParamIsClone` annotation whose span our expansion does not keep (4, RF4's derive spans), a static (`SINK`: refused,
+  and its own body not built), a string constant's allocation text (counted apart).
+- the corpus (the synthetic programs, `test/rust/sample`, `test/rust/eval`, `test/rust/front`: 88 programs, 510 bodies):
+  **92 of 510 bodies equal byte for byte, 4 more but for the allocations' text, 5 programs whole**; 54 differ, 136 refused (closures 35,
+  a path 75: 73 without a resolution, the desugarings' lang item functions (`for`'s `into_iter` and `next`, `?`'s `branch`) and
+  `format_args!`'s internals, 2 std's constants and statics, overloaded derefs and indexing 13, patterns 5, the rest one or
+  two), 224 not built (closures', constants', statics' and promoted bodies: the slice builds functions and discriminants). Light: about
+  20 minutes for the 88 programs in one process under 1.5 GB (`GOMEMLIMIT=1500MiB`), a sample in seconds.
+- **runs: the six no_std samples a1-a5 and a7 from Arbace's MIR give rustc's exit statuses (5, 212, 41, 17, 45, 21), every body of
+  each program ours, the stubs' log empty**; the control differs (a1: 156 for 5).
+
+What the slice refuses (the corpus's classes): closures (RFP20), overloaded operators, derefs and indexing (the trait method calls
+THIR makes of them), statics and constants' bodies, `let`-else, guards (the fake borrows), or-patterns, slices, float and char
+literals, drops elaborated (ElaborateDrops: the slice keeps built MIR's drops, right for the samples' unconditional ones), the
+`println!` family (`format_args!`'s lowering through `Arguments::new` with promoted constants: PromoteTemps). std programs are judged
+at the MIR level only: their runs would link the host's native std through rustc as the linker driver (`run-native`), which the stubs
+forbid; the ci leg's lowered std is the night's.
+
+### What eval and AOT can move under the decided scoring
+
+Nothing yet, and little before RF12: RES54 (a) scores a stage whose cases consume std's records 0.5, and every Rust program's run
+consumes std's MIR or IR (std's generic code is most of a program's mono items, RF1's census) until Tier S builds std from source.
+RF10's slices take the program's own bodies off rustc (the nine-in-266 functions of §2.4); the gate's `bin/rsi check` still runs rustc's
+IR packs. Even moved onto Arbace's MIR, the eval cell stays 0.5 while the symbols, instances and layouts come from the mono record (RF3's
+remaining ports) and std from its records (RF12). `bin/crops-score`: 75.0 / 95.8 / 80.0 before and after.
+
+### Remaining RF10 slices (estimates)
+
+1. Closures and their captures with RFP20 (upvar.rs, `insert_upvar_arg`, closure bodies): 3-4 days.
+2. Overloaded operators, derefs and indexing as THIR's method calls, statics and constants (construct_const, allocations), guards with
+   fake borrows, or-patterns, slices and ranges in patterns, floats and chars: 3-4 days.
+3. The semantic passes to runtime MIR (ElaborateDrops with drop flags, PromoteTemps, Derefer, AddCallGuards, AbortUnwindingCalls,
+   RemoveNoopLandingPads, the shims), judged against `-Zdump-mir` after each pass and rustc's runtime MIR: 4-6 days.
+4. `format_args!` and the `println!` family (PromoteTemps, `Arguments`' constructors) with drops' unwinding, so the synthetic corpus runs
+   through the ci leg: 2-3 days.
+5. CTFE (the clean interpreter over MIR forms, §3.8): 6-10 days, unchanged.
+Total about 18-27 days with CTFE, within §7's 14-22 for RF10 plus CTFE's share.
+
+### Proposed (RF10)
+
+- **RFP22 The order after the first slice.** Options: (a) **RFP20 (captures, judged) then RF10's slices 1-2 on the corpus, then
+  RFP15 with the crates' bodies as the next corpus, then slices 3-5**; (b) RFP15 next as decided (RFP21 (a)), then RFP20; (c) the passes
+  (slice 3) next so more programs run. *Recommended: (a)*: closures are the corpus's largest class and RFP20 is decided; RFP15 feeds
+  only the crates, whose bodies RF10 cannot yet build (their trait-heavy code needs slice 2).
+- **RFP23 The run's record.** The run takes symbols, instances and layouts from the helper's `--mono-mir` record (the oracle tier).
+  Options: (a) **keep it until RF3's layout, instance resolution and v0 symbols are ported (RFP1 (a)'s order), the record made by hand
+  like the IR packs**; (b) pin the records of the no_std samples as packs now (`test/rust/front/records/`, a few KB each) so
+  `run-built` needs no helper at check time; (c) port the v0 symbols and the layouts of the samples' types now. *Recommended: (b) then
+  (a)*: a light step could then run the six samples' MIR runs with no toolchain.
+- **RFP24 A gate step.** Options: (a) **none until RF11 (RFP4 (a)'s rule)**; (b) `build-check` over `test/rust/front/a*.rs` as an
+  essential step (about a minute, under 1.5 GB) with its oracle texts pinned. *Recommended: (a)*, (b) at RFP23 (b).
+
+## Decided (2026-11-08, the user: RFP22-RFP24)
+
+- **RFP22 (a):** RFP20's captures (judged fact by fact) first, then RF10's slices 1-2 on the corpus, then slice 3 (the passes to
+  runtime MIR); RFP15 with the crates' bodies after.
+- **RFP23 (b) then (c):** the run's symbols, instances and layouts recorded as packs first (`run-built` needing no helper at check
+  time), then ported (v0 symbols, instance resolution, layouts).
+- **RFP24 (a):** no Rust front-end gate step until RF11; (b), `build-check` over `test/rust/front/a*.rs` as an essential step, at
+  RFP23 (b).
+
+## As built: RF10 (second slice), closures, operators and the format machinery (2026-11-08)
+
+The slice follows RFP22 (a): RFP20's captures first (judged), then slices 1 and 2 on the corpus; slice 3 is next. format_args!'s
+lowering at the `built` phase belongs with slice 2's paths and literals here (its runtime half, PromoteTemps, stays in slice 4).
+
+Branch `rust-rf10b` (from next `5ec43f7b7`). The brief: RF10's next items in their stated order (slice 1, closures with RFP20, then
+slice 2), measured as the first slice measured (`bin/rust-front build-check`: each body our pipeline builds against rustc's
+`-Zdump-mir=built` text, byte for byte), the biggest group of failing bodies first. RFP22-RFP24 await the user and were not built.
+
+### The groups, biggest first
+
+The first slice's corpus (88 programs, 510 bodies) left 418 bodies unequal. Measured on it:
+1. **closures** (slice 1): 177 closure bodies not built and 35 parents refused on their closures, 212 bodies;
+2. **format_args!'s lowering** (slice 4's built-MIR half, taken out of order: it was the second group, 75 bodies refused as "a path",
+   and at the `built` phase it needs no PromoteTemps; the runtime half, promotion, stays in slice 4): `Arguments::new`, `from_str`,
+   `Argument::new_display` and friends, and with them **user type annotations**, which nearly every body that prints carries;
+3. slice 2's operator group: overloaded operators, derefs and indexing (31 refused, more differing), builtin indexing of slices;
+4. slice 2's literals and constants: floats, chars, byte strings, named constants (`i32::MAX`, `T::MIN`), array repeats;
+5. the long tail (lint scopes of `?`'s arms, `super let` and lifetime extension, drop-and-replace assignments, allocations).
+
+### What was built
+
+- **RFP20 (a), closures' captures judged fact by fact.** The helper's `--captures FILE` (`tools/rsdump/front.rs`'s `captures`): each
+  closure of the root file with its kind, `closure_min_captures` in the upvars' order (variable, place string, projections, capture
+  kind, mutability) and fake reads. `arbace.rust.front.build`'s port of rustc 1.99.1's `rustc_hir_typeck/src/upvar.rs`
+  (`closure_analyze`, `analyze_closure`, `process_collected_capture_information`, `compute_min_captures` with its field sort,
+  `restrict_capture_precision`, `restrict_precision_for_unsafe`, `restrict_repr_packed_field_ref_capture`,
+  `restrict_precision_for_drop_types`, `adjust_for_move_closure`, `adjust_for_non_move_closure`, `truncate_capture_for_optimization`,
+  `truncate_place_to_len_and_update_capture_kind`, `determine_capture_info`, `determine_place_ancestry_relation`,
+  `determine_capture_mutability`, `init_capture_kind_for_place` for editions before 2021), over `expr_use_visitor.rs` (`consume_body`,
+  `walk_expr`, `walk_stmt`, `walk_local`, `walk_block`, `walk_struct_expr`, `walk_adjustment`, `walk_autoref`, `walk_arm`, `walk_pat`,
+  `walk_captures`, `cat_expr` and its kinds, `cat_res`, `cat_projection`, `cat_deref`, `cat_overloaded_place`, `cat_pattern` with
+  `enumerate_and_adjust`) with `InferBorrowKind` as the delegate, and `rustc_passes/src/upvars.rs` (`upvars_mentioned`), nested closures
+  first. typeck notes the kind an expectation gives (`deduced-kind`); the analysis gives the rest. `bin/rust-front capture-oracles`
+  and `capture-check`: **173 of 174 closures equal** (kind, every capture, fake reads) over the 33 programs with closures; the one
+  left is a closure inside a user `macro_rules!` expansion whose span our expansion does not keep. A negative control differs.
+- **Closure bodies and closure expressions** (slice 1): THIR's `capture_upvar` and `convert_captured_hir_place` (the upvar places as
+  THIR, by value or borrowed `&`, `&mut`, `&uniq`), `UpvarRef` and its resolution through the captures
+  (`to_upvars_resolved_place_builder`, `find_capture_matching_projections`, `strip_prefix`), `insert_upvar_arg` (the captures'
+  debug info, `CapturedPlace::to_symbol`), the closure's environment argument by its kind, `as_rvalue`'s `Closure` with
+  `limit_capture_mutability`, the aggregate named by `upvars_mentioned` as rustc's printer names it, and the closure types' `Copy` and
+  `needs_drop` from their upvars. **Overloaded calls** (`f(x)` for `F: FnOnce`, `Box<dyn Fn>`, closures): THIR's
+  `<F as FnOnce<(A,)>>::call_once(f, (x,))`, the arguments' tuple, typeck noting the call's trait (`:fn-call`).
+- **Slice 2's operators:** `is_builtin_binop` and `overloaded_operator` (`<&i32 as Mul>::mul`, `<String as Add<&str>>::add`,
+  `PartialEq::eq` on autoref'd operands, `Neg`, `Not`), `overloaded_place` for explicit derefs and for overloaded deref adjustments
+  (`*Deref::deref(&x)`, `DerefMut::deref_mut` under a mutable autoref), overloaded indexing (`*Index::index(&v, i)`, `IndexMut`),
+  builtin slice indexing (`len_of_slice_or_array`'s `PtrMetadata`, the fake `&raw const (fake)` pointer, `add_fake_borrows_of_base`
+  and `read_fake_borrows` for nested indexes), `build_drop_and_replace` for assignments to places that need drop, `Repeat`.
+- **Constants:** float literals (rustc_apfloat's 17 or 9 significant digits), chars, byte strings (`escape_ascii`), named constants
+  (`NamedConst`: the crate's, std's, an associated one by its type, `const core::num::<impl i32>::MAX`), and **allocations**: each
+  string's or byte string's bytes interned per program (`allocate_bytes_dedup`), printed after the body as `write_allocation` does.
+- **User type annotations** (`write_user_type_annotation_from_args`, `canonicalize_user_type_annotation`, `is_identity`,
+  `instantiate_method_args`, the `TypeOf(PATH at <impl ...>)` printer): value paths (fresh arguments, a type-relative path's written
+  self type before its unification with the impl's), method turbofishes, `let` types as `Ty(..)` with their inference variables and
+  elided regions canonical, pushed as `declare_bindings`, `expr_into_pattern` and `ascribe_types` push them (the locals'
+  `UserTypeProjection`s with their field projections, `AscribeUserType` with `o` or `+`). Their spans: std's macro tokens now keep
+  their place in std's sources through expansion (`$crate::format_args_nl!(..)` at `macros.rs:148:28: 148:61`), a derive's
+  expression the derive path's span, a derive's assertion its field's.
+- **format_args!:** the lang items' associated functions in typeck (`Arguments::from_str`, `core::fmt::rt::Argument`, which std's
+  interface lacked: the helper's `--std-iface` now adds the lang item ADTs no public module reaches, with their inherent impls, and
+  enums' `#[repr]` and discriminants; `test/rust/front/std-iface.sha256` re-pinned, the old lines unchanged), the placeholders' spans.
+- **Scopes:** `maybe_new_source_scope` (a lint attribute's node, `?`'s `#[allow(unreachable_code)]` arms, opens a source scope),
+  `resolve_local`'s `super let` (not extended: its bindings in the enclosing expression's temporary scope) and lifetime extension
+  (`record_rvalue_scope_if_borrow_expr`, `record_subexpr_extended_temp_scopes`, `extended_temp_scopes` before `temporary_scope`).
+- Printing: MIR's types with every free region erased (`fn longest(_1: &str, ..)`), bound ones kept (`for<'a> fn(&'a char)`), the
+  object lifetime default of `&dyn Trait` in std's signatures.
+- The judge: a body equal but for its allocations' ids (the session's interning order, which follows rustc's order of building the
+  bodies, not the source's) is counted apart, after renumbering the ids by first appearance.
+
+### Results
+
+- `bin/rust-front build-check`, the 88 programs, 510 bodies: **92 → 361 bodies equal byte for byte, 25 more but for
+  the allocations' ids, 5 → 51 programs whole**; 42 differ, 26 refused (was 54 and 136), the rest not built
+  (constants' and statics' bodies, promoted ones). About 7 minutes in one process under 1.5 GB.
+- `test/rust/front/a1`-`a7`: 51 of 54 bodies equal and 1 more but for the allocations' ids (were 47 and 1), a1-a5 and a7 whole, a6's static `SINK` refused.
+- Checks of the earlier stages: `typeck-check` 11,140 → 11,144 of 11,173 (the helper's expansion), `--ours` 11,138 → 11,142;
+  `hir-check --ours` 90 of 91 and one but for whitespace (unchanged); `expand-check` 92 of 92 crates, 857 of 857 items (unchanged);
+  `run-built` the six no_std samples a1-a5, a7: 6 of 6 give rustc's status from Arbace's MIR, the stubs' log empty (unchanged).
+- `bin/crops-score`: Rust 75.0 / 95.8 / 80.0 before and after (RES54 (a): eval and AOT 0.5 while std's records are consumed).
+
+### What remains to RF12
+
+- RF10's slice 2 rest: or-patterns, guards with their fake borrows, slice and range patterns, `let`-else, `if let` chains in
+  `then_else_break`, statics and constants' own bodies (`construct_const`), functional update, qualified paths' annotations,
+  trait objects' casts, `?Sized` std ADTs' `needs_drop`; the user annotations of a few std paths (`Rc::strong_count`'s self type,
+  `<dyn Any>::downcast`).
+- By the decided order (RFP22 (a), RFP23): slice 3 (the passes to runtime MIR) next, then RFP23 (b)'s packs for `run-built` and
+  RFP24 (b)'s step, RFP23 (c)'s ports; slice 4's runtime half (PromoteTemps of the format machinery), slice 5 (CTFE); RFP15 for the
+  crates; RF11 (Tier U's first light); RF12 (std from source).
+
+### Proposed (RF10's second slice)
+
+- **RFP25 The allocations' ids.** Our ids follow our build order (items in definition order, a body before its closures); rustc's
+  follow the order the driver demands `mir_built` (a derived impl's before the user's impls, observed). Options: (a) **keep the class
+  "equal but for the allocations' ids" apart, judged with the ids renumbered** (as built); (b) port the driver's demand order
+  (`par_hir_body_owners`' order of borrowck and the queries that build MIR before it) so the ids are rustc's. *Recommended: (a)*: the
+  ids are an artifact of a session's query order, not of the body; (b) when slice 3 needs the session's order anyway.
+- **RFP26 The helper's std interface.** `--std-iface` gained lang item ADTs and enums' repr and discriminants (re-pinned twice today).
+  Options: (a) **keep it the helper's (the oracle tier's data, pinned), regenerated by the night's `front-oracles`**; (b) derive the
+  three facts natively from std's sources (the native reader over rust-src, RF4's expansion over core) and drop them from the dump.
+  *Recommended: (a)* until RF12 builds std from source, (b) with it.
+- **RFP27 The capture judge with RFP24 (b).** RFP24 (b) puts `build-check` over `test/rust/front/a*.rs` in the essential gate at
+  RFP23 (b). Options: (a) **add `capture-check` over the closures program and `test/rust/front/` to that step then, its oracle pinned
+  with the packs (seconds)**; (b) keep the capture judge by hand until RF11. *Recommended: (a)*.
+
+## Decided (2026-11-08, the user: RFP25-RFP27)
+
+- **RFP25 (a):** a body equal but for its allocations' ids stays a class of its own, judged with the ids renumbered.
+- **RFP26 (a):** std's interface facts (`--std-iface`: lang item ADTs, enums' repr and discriminants) stay the helper's pinned data,
+  regenerated by the night's `front-oracles`, until RF12 builds std from source.
+- **RFP27 (a):** `capture-check` (the closures program and `test/rust/front/`, its oracle pinned with the packs) joins RFP24 (b)'s
+  essential step when that step lands.
+
+## As built: RF10 (third slice), the rest of slice 2 and slice 3's first passes (2026-11-08)
+
+Branch `rust-rf10b` (continued from `d9a0245e2`), in the user's order (RFP22 (a)): slice 2's rest first, then slice 3, the passes to
+runtime MIR, judged against rustc's MIR after each pass (the helper as rustc, `-Zdump-mir`). RFP25-RFP27 decided (above);
+RFP23 (b)'s packs and RFP24 (b)'s step not built.
+
+### Slice 2's rest
+
+- **The match lowering, rule for rule** (`builder/matches/{mod,match_pair,buckets,test,util}.rs` of rustc 1.99.1): `FlatPat` and
+  `squash_inter_pat` (a binding pushed after its subpattern's), candidates with subcandidates, `match_candidates` with
+  `expand_and_match_or_candidates`, `create_or_subcandidates`, `merge_trivial_subcandidates`, `test_remaining_match_pairs_after_or`,
+  `sort_match_pairs`, `partition_candidates_into_buckets` with `choose_bucket_for_candidate`'s whole matrix (switch, switchInt with
+  the covering ranges of a prior failure bucket, if, slice lengths `==`/`>=`, ranges with `PatRange::contains` and `overlaps`,
+  string and scalar equality), `perform_test` for every test (`Le`/`Lt` range comparisons through an intermediate block, slice
+  lengths by `len_of_slice_or_array`, `<str as PartialEq>::eq` for string patterns), `lower_match_tree`'s false edges (a guard's
+  own on its otherwise block), `MatchTreeBranch::from_candidate` with `sub_branch_bindings`, `bind_pattern` (the first sub-branch's
+  drops scheduled), `bind_and_guard_matched_candidate` with `collect_fake_borrows` (shallow fake borrows of the tested places and
+  of bound places' dereferenced prefixes, `&fake shallow`), `bind_matched_candidate_for_guard` (each binding's reference for the
+  guard, `RefForGuard` locals declared beside the binding's with their debug info), `FakeRead(ForMatchGuard)`,
+  `FakeRead(ForGuardBinding)`, the guard's scope (`MatchGuard`) and `clear_match_arm_and_guard_scopes`, a guard's variables through
+  their references (`guard_context`), `fixed_temps` for the or-pattern sub-branches of one guard.
+- **Patterns** (`thir/pattern/{mod,const_to_pat}.rs`): ranges (`lower_pattern_range`, `a..=a` a constant, full ranges no test,
+  `i64::MIN` and `MAX` endpoints), slices and arrays (`prefix_slice_suffix`'s `ConstantIndex` and `Subslice`, `rest @ ..`), `..`
+  in tuple and tuple-struct patterns (`enumerate_and_adjust`), box patterns, `&str` constants as a dereference of a `str` constant,
+  or-patterns' later alternatives' bindings named by the first's; typeck peels references for range and slice patterns and types
+  range endpoints.
+- **let-else and `if let`** (`block.rs`' let-else: the else block built first, its end unreachable, `lower_let_expr` in an if-then
+  scope of the last remainder scope; `then_else_break`'s `Let`, its bindings in the `if`'s variable source scope); `while let` with it.
+- **Constants' and statics' own bodies** (`construct_const`: the region tree's `var_parent` none, temporaries unscheduled), static
+  references (`StaticRef`: `const {allocN: &T}`, `*mut T` for a mutable static, the static's allocation `alloc1 (static: S, size: 1,
+  align: 1)` with its bytes for literal, array and `&str` initializers, a pointer printed as `write_allocation_bytes` prints
+  provenance), **anonymous constants** of array lengths and repeat counts (`NAME::{constant#N}`, numbered per owner, a closure's its
+  own; the ones inside a macro call after the rest, as def collection meets them during expansion; a const parameter's path none).
+- **Expressions:** functional update (`AdtExprBase::Base`: the missing fields read from the base place), union aggregates,
+  `write_box_via_move` (`vec![..]`'s `(*b).1.0.0 = [..]` with no array temporary), unit variants cast to integers
+  (`discriminant_def_for_variant`: `Add(const E::A::{constant#0}, const 0_u8)`), `u8 as char`, pointer and fn-pointer casts,
+  closure and fn-item pointer coercions' kinds (`ClosureFnPointer(Safe)`, `ReifyFnPointer(Safe)`), byte literals, string literals
+  unescaped and printed as `<str as Debug>` prints, `u8::MAX`, empty allocations.
+- **Elsewhere:** the builtin `DiscriminantKind` projection (an enum's repr type, else u8) in typeck's normalization; a derive's
+  unresolved variant path by its constructor's kind; needs_drop of std ADTs by their Drop impls (a Drop impl is as generic as its
+  type) and of projections by their normal form; an inherent impl's own regions printed unerased in a value path
+  (`<(dyn Any + Send + 'static)>::downcast_ref`); a path's written arguments' elided regions canonical region variables.
+
+### Slice 3: the passes after MIR building
+
+`arbace/rust/front/passes.ae` (`arbace.rust.front.passes`) ports mir_built's passes that change a body after the `built` dump
+(`rustc_mir_transform/src/lib.rs`): `LintAndRemoveUninhabited` (a call into an uninhabited destination loses its return) and
+`SimplifyCfg-initial` (`simplify.rs`: `CfgSimplifier`'s predecessor counts over the preorder, `collapse_goto_chain`,
+`merge_successor`, `simplify_branch` off before the runtime phases, then `remove_dead_blocks` with the deduplication of empty
+unreachable blocks), over successors in `Terminator::successors`' order. `bin/rust-front build-oracles` now dumps
+`-Zdump-mir=built|SimplifyCfg-initial` (`RF_DUMP_MIR`), and `BUILD_PASS=SimplifyCfg-initial bin/rust-front build-check` judges our
+bodies through the passes against rustc's after the pass, byte for byte (a trivial constant has no pass dump: rustc skips its
+passes).
+
+### Results
+
+- `bin/rust-front build-check`, the 88 programs, 510 bodies: **361 → 415 bodies equal byte for byte, 25 → 29 more but for the
+  allocations' ids, 51 → 58 programs whole**; 42 → 31 differ, 26 → 13 refused (a cast 1, an expression 4, a closure's fake reads 1,
+  a path 4, a method call without its callee 1, a variable 1, an aggregate 1), 22 not built (thread-local statics' and macro-made
+  items' anonymous constants and closures, promoted bodies: was 81). About 7.5 minutes in one process under 1.5 GB.
+- `test/rust/front/a1`-`a7`: **54 of 54 bodies equal, all seven programs whole** (were 51 and 1, a6's static refused).
+- **Slice 3, `BUILD_PASS=SimplifyCfg-initial`: 379 of 475 bodies equal to rustc's MIR after SimplifyCfg-initial, 29 more but for
+  the allocations' ids, 3 but for their text, 56 programs whole** (475: the bodies rustc runs the passes on; trivial constants have
+  no pass dump); every body equal after `built` and not a trivial constant is equal after the pass but for the allocations' text.
+- Checks of the earlier stages, unchanged: `typeck-check` 11,144 of 11,173 (`--ours` 11,142), `hir-check --ours` 90 of 91 and one but
+  for whitespace, `expand-check` 92 of 92 crates and 857 of 857 items, `capture-check` 173 of 174 closures, `run-built` 6 of 6 no_std
+  samples from Arbace's MIR (the stubs' log empty). The negative controls differ.
+- `bin/crops-score`: Rust unchanged (no record of the cells changed; RES54 (a) scores eval and AOT 0.5 until RF12).
+
+### What remains to RF12
+
+- Slice 2's tail: the closures' fake reads (`FakeRead(ForLet(Some(DefId(0:19 ~ drops[c62a]::..))))`: a crate's `StableCrateId`
+  hash in the text, RFP29), `if let` guards, deref patterns, constant patterns of named constants, the derive's `Some(Ord::cmp(..))`
+  typeck gap, floats printed in exponent form (`1.0E+30f64`) and `f64::NAN`'s path, the private std ADTs' drops (RFP28),
+  statics' values beyond literals, arrays and `&str` (CTFE, slice 5), a `<static(DefId(..))>` constant (RFP29's hash again).
+- Slice 3's rest, in rustc's order: `PromoteTemps` with `SimplifyCfg-promote-consts` (mir_promoted), then the analysis-to-runtime
+  passes (`CleanupPostBorrowck`, `RemoveNoopLandingPads`, `SimplifyCfg-post-analysis`, `Derefer`, `CriticalCallEdges`,
+  `ElaborateDrops` with drop flags, `AbortUnwindingCalls`, `ElaborateBoxDerefs`, `LowerIntrinsics`, `RemovePlaceMention`,
+  `SimplifyCfg-pre-optimizations`), each judged against its dump as SimplifyCfg-initial is; then RFP23 (b)'s packs and RFP24 (b)'s
+  step with RFP27 (a); slice 4 (format_args!'s promotion), slice 5 (CTFE); RFP15; RF11; RF12.
+
+### Proposed (RF10's third slice)
+
+- **RFP28 The private std ADTs' fields.** `needs_drop` of a std ADT reached only as a private field (`FlattenCompat`,
+  `FloatErrorKind`, `JoinInner`) has no fields in `--std-iface`, so it is assumed to need drop (right for `JoinInner`, wrong for the
+  other two: 2 bodies). Options: (a) **the helper's `--std-iface` adds every ADT a public ADT's fields reach, transitively (a
+  rebuild of the helper, the interface re-pinned, only additions)**; (b) the helper records rustc's `needs_drop` answer per type the
+  corpus meets (a fact table, no fields); (c) keep the assumption until RF12. *Recommended: (a)*: the same kind of data as RFP26 (a)'s,
+  and typeck's field types of private ADTs need it too.
+- **RFP29 The crate hash in MIR text.** Two texts print a `DefId` with the crate's `StableCrateId` (`drops[c62a]`): a closure's fake
+  read's cause and a static's pointer constant. Options: (a) **compute `StableCrateId` as rustc does (the crate name and `-C metadata`
+  hashed with `StableHasher`, SipHasher13 over rustc's encoding) and the `DefIndex` in def-collection order**; (b) a class "equal but
+  for the crate hash", the hash and index renumbered as RFP25 (a) renumbers allocations; (c) refuse those bodies. *Recommended: (b)
+  now, (a) with RF11's v0 symbols (RFP23 (c)), which hash the same id*.
+
+## As built: RF10 (fourth slice), slice 3's passes to runtime MIR (2026-11-08)
+
+Branch `rust-rf10b` (continued from `8052a77c0`). The brief: the passes after mir_built in rustc's order, each judged against rustc's
+own dump after it, as SimplifyCfg-initial was; RFP28 and RFP29 await the user and were not built (the bodies they hold back are
+counted below); then slice 2's tail where no decision is needed.
+
+### The passes (`arbace/rust/front/passes.ae`)
+
+rustc 1.99.1's order (`rustc_mir_transform/src/lib.rs`: `mir_promoted`, `run_analysis_cleanup_passes`, `run_runtime_lowering_passes`,
+`run_runtime_cleanup_passes`), each a function over MIR forms, `passes/pipeline`:
+
+- **PromoteTemps** (`promote_consts.rs`, rule for rule): `collect_temps_and_candidates` (TempState over the reverse postorder, the MIR
+  visitor's place contexts as `Visitor::super_*` gives them, a projected place's context Projection), `Validator` (`validate_local`,
+  `validate_place` with the static and constant-index cases, `validate_operand`, `validate_ref`, `validate_rvalue` with the division
+  rules, `validate_call` with `#[rustc_promotable]` and const fns in initializers' safe blocks) over the qualifs of
+  `rustc_const_eval/src/check_consts/qualifs.rs` (`HasMutInterior` by Freeze, `NeedsDrop`, `in_rvalue`, `in_place`, `in_operand`;
+  a named constant's `mir_const_qualif` approximated by its type), and `Promoter` (`promote_candidate`, `promote_temp` for
+  statements and calls, keep_original for temporaries used twice, the promoted reference's local in the candidate's source scope,
+  the extra statements in reverse location order, the promoted-out temporaries' assignments, storage and drops removed). The
+  promoted bodies (`NAME::promoted[N]`) join the pipeline at ImpossibleClauses, as rustc's `promoted_mir` runs them, with their
+  allocations. The statements now carry their source scope as metadata (`build.ae`'s `push!`), the type forms their typeck type
+  (`ty-form`'s `:tc`), the locals whether they are user variables.
+- **SimplifyCfg** (all four: initial, promote-consts, post-analysis, pre-optimizations) with `strip_nops` first and `simplify_branch`
+  from the runtime phases on (`preserve_switch_reads` off); `remove_dead_blocks` on its own for AbortUnwindingCalls.
+- **CleanupPostBorrowck** (`cleanup_post_borrowck.rs`): AscribeUserType, FakeRead, fake borrows and drop hints `nop`, the two
+  pointer coercions `PtrToPtr`, false edges gotos, the user type annotations cleared.
+- **RemoveNoopLandingPads** (`remove_noop_landing_pads.rs`, when the session unwinds): the no-op landing pads in postorder, MirPatch's
+  resume block (the last statement-less resume block, else a new one), `unwind continue` for cleanup edges into them.
+- **Derefer** (`deref_separator.rs`): every place but debuginfo's with a deref past its first projection split through `deref_copy`
+  temporaries (MirPatch's `add_assign` and `apply`, stable by location), the temporaries marked as deref temporaries.
+- **AddCallGuards** (CriticalCallEdges): a call that may unwind into a cleanup returning to a block of several predecessors returns
+  through a new block.
+- **PostAnalysisNormalize** (`post_analysis_normalize.rs`): opaque types revealed, each by its defining function's hidden type (the
+  type of that function's body block in typeck's results); our typeck's opaque types carry no `OpaqueTy` id, so an opaque type is
+  matched by the signature outputs equal to it and left as it is when two functions define it alike (RFP33).
+- **ElaborateDrops** (`elaborate_drops.rs`, `elaborate_drop.rs`), with the dataflow it stands on: `MoveData::gather_moves`
+  (`move_paths/{mod,builder}.rs`: move paths of the places whose types need drop, first child newest, `move_path_for`'s stops at
+  references, destructors and slices, unions, `MovePathLookup::find`, the `UnDerefer` chains of deref temporaries; moves out,
+  StorageDead a move out, inits Deep or NonPanicPathOnly), `MaybeInitializedPlaces` (exclude_inactive_in_otherwise,
+  skipping_unreachable_unwind, precise_enum_drop_elaboration's mutable borrows and switch edges) and `MaybeUninitializedPlaces`
+  (mark_inactive_variants_as_uninit, the dead unwinds) to their fixpoints over `framework/direction.rs`' Forward edges
+  (`get_terminator_edges` before the terminator's effect, a call's return effect on its return edge, a switch's per-edge effects),
+  `drop_flag_effects.rs`; then `ElaborateDropsCtxt` (`collect_drop_flags`, `elaborate_drops`, the flags on init, for calls' returns,
+  arguments and locations) and `DropCtxt`'s drop styles (dead, static, conditional, open), `drop_flag_test_block`,
+  `drop_flag_reset_block`, `drop_ladder` with its unwind half-ladder, `open_drop_for_tuple`, `open_drop_for_adt` with
+  `open_drop_for_multivariant` and `adt_switch_block`, a destructor's `<T as Drop>::drop` call, Box's `open_drop_for_box_contents`;
+  arrays' and slices' drop loops and async drops are refused (none in the corpus).
+- **AbortUnwindingCalls** (`abort_unwinding_calls.rs` over `layout.rs`' `fn_can_unwind`): the intrinsics never unwind, a session
+  that aborts on panic unwinds nowhere but through foreign items, extern "C" bodies and calls by their ABI; then remove_dead_blocks.
+- **EraseDerefTemps** (`no_retag copy`), **ElaborateBoxDerefs** (`elaborate_box_derefs.rs`: `copy (b.0: Unique<T>) as *const T
+  (BoxDerefTransmute)`), **LowerIntrinsics** (`discriminant_value`, `unreachable`, `forget`, `assume`, the wrapping and unchecked
+  operators), **RemovePlaceMention**.
+- Identities where the corpus has nothing to change: ImpossibleClauses, Subtyper, AddMovesForPackedDrops, StateTransform.
+
+`#[rustc_promotable]` is a table of the nine functions rust-src 1.99.1's library marks (`ptr::null`, `ptr::null_mut`, `mem::size_of`,
+`mem::align_of`, the integers' `min_value`/`max_value`, `RangeInclusive::new`, `RawWaker::new`, `RawWakerVTable::new`), read from the
+pinned sources (RFP32).
+
+### The judge
+
+`bin/rust-front build-oracles` dumps every pass of the pipeline (`RF_DUMP_MIR`'s default, 21 passes; the 88 programs' dumps 193 MB,
+`.before.mir` with `.after.mir`), and `BUILD_PASS=NAME bin/rust-front build-check` runs the pipeline to NAME on every built body (in
+the builder's bindings, `build/*after-finish*`) and judges every pass to NAME against its own dump: a pass that rustc runs again in a
+later phase (RemoveNoopLandingPads, AddCallGuards) or in a shim is judged at its first phase's dump (`passes/pass-phase`).
+`BUILD_FIRST=1` prints each body's first pass where it is not equal; `PASS_TRACE=FILE` appends each pass as it starts. Built MIR is judged as before (`BUILD_PASS` unset).
+
+### Slice 2's tail
+
+- Floats printed as `rustc_apfloat`'s `Display` prints them (`ieee.rs`: the exact digits with the low ones past the precision's
+  bits discarded, half-up rounding, the scientific form past the width of 3: `1.0E+10f32`, `1.0E+30f64`, `1.2E-4f64`).
+- Coercion casts (`cast.rs`' `try_coercion_cast`): a cast to the type its operand already has is a Use (`7.5 as F`).
+- A derive's unresolved tuple-struct path is its constructor (`Id(Clone::clone(&self.0), ..)` an aggregate, not a call).
+- `if let` guards, deref patterns and named-constant patterns: none of the corpus's failing bodies needs them now (the patterns
+  program is whole but for its allocations' ids); not built.
+
+### Results
+
+- `BUILD_PASS=SimplifyCfg-pre-optimizations bin/rust-front build-check`, the 88 programs (about 8 minutes, one process under 1.8 GB
+  with `GOMEMLIMIT`), equal / but for the allocations' ids / of the bodies rustc dumps after the pass:
+
+  | pass | equal | ids | of |
+  |---|---|---|---|
+  | SimplifyCfg-initial | 382 | 29 | 475 |
+  | PromoteTemps, SimplifyCfg-promote-consts | 383 | 29 | 475 |
+  | ImpossibleClauses (the promoted bodies join) | 496 | 43 | 616 |
+  | CleanupPostBorrowck, SimplifyCfg-post-analysis, Derefer, AddCallGuards | 497 | 45 | 616 |
+  | RemoveNoopLandingPads (unwinding programs only) | 453 | 45 | 572 |
+  | PostAnalysisNormalize to RemovePlaceMention (each) | 497 | 44 | 616 |
+  | SimplifyCfg-pre-optimizations | 499 | 46 | 616 |
+
+  60 programs whole through every pass (was 56 after SimplifyCfg-initial). **No body is lost by a pass**: every body not equal after
+  a pass is already unequal at the built level (55 bodies first differ at SimplifyCfg-initial, as built MIR), but for two promoted
+  bodies whose `Option<_>` is typeck's gap (an unresolved `None` in `fmt` and `std`) and promoted bodies of parents not built.
+- Built MIR (`bin/rust-front build-check`): 415 → 418 of 510 equal, 29 but for the allocations' ids, 0 but for their text (was 3),
+  refused 13 → 12, 58 → 60 programs whole.
+- `test/rust/front/a1`-`a7`: 54 of 54 bodies equal at built, 52 of 52 after every pass (a5's two trivial constants have no pass
+  dumps), all seven whole (`make rust-front-pass-check`).
+- The bodies RFP28 holds back: `float-f32`'s and `float-f64`'s `main` (`Result<f32, ParseFloatError>` needs drop by our assumption:
+  `FloatErrorKind` has no fields in `--std-iface`), 2 bodies at every phase. RFP29's: `drops`' `main` (a closure's fake read names
+  the crate hash), refused, 1 body.
+- Checks of the earlier stages: `expand-check` 92 of 92 crates and 857 of 857 items, `hir-check --ours` 90 of 91 and one but for
+  whitespace (unchanged); `typeck-check --ours` 11,142 of 11,173; `capture-check` 173 of 174 closures; `run-built` 6 of 6 no_std samples from Arbace's MIR (the stubs' log empty). The negative controls differ.
+- `bin/crops-score`: Rust unchanged (no record of the cells changed).
+
+### What remains to RF12
+
+- Built MIR's 92 bodies (slice 2's tail, unchanged in kind): the unwind tree's block numbering in long bodies (`algorithms`,
+  `collections`, `errors`, `structs`), user type annotations of a few std paths (`Rc::strong_count`, `Result<..>` ascriptions in
+  `std` and `errors`), typeck's `Option<_>` and `{?}` gaps, qualified paths in expressions (`:qpath`), statics of thread locals,
+  const generics' paths; RFP28's two and RFP29's one.
+- The passes: arrays' and slices' open drops (drop loops), async drops, Subtyper's projections, AddMovesForPackedDrops,
+  StateTransform (coroutines), named constants' own qualifs (`mir_const_qualif` by dataflow over the constant's body); none is met
+  by the corpus yet.
+- Then, by the decided order: RFP23 (b)'s packs (now with every pass's dumps) and RFP24 (b)'s step with RFP27 (a); the optimization
+  passes rustc runs at `-C opt-level=0` (CheckAlignment to SimplifyCfg-final, the codegen's input); slice 4 (format_args!'s runtime
+  half), slice 5 (CTFE); RFP15; RF11; RF12.
+
+### Proposed (RF10's fourth slice)
+
+- **RFP30 The pass judge in the essential step.** RFP24 (b)'s step judges `test/rust/front/a*.rs`' built MIR. Options: (a) **the step
+  runs `BUILD_PASS=SimplifyCfg-pre-optimizations` over a1-a7 too (52 bodies through all 21 passes, about 40 s more), the packs
+  carrying their pass dumps' `.after.mir` files**; (b) keep the pass judge by hand (`make rust-front-pass-check`) until RF11.
+  *Recommended: (a)*: the passes are as deterministic as the builder, and they are what RF11's codegen will read.
+- **RFP31 The oracles' size.** The 88 programs' dumps are 193 MB (every pass's `.before.mir` beside its `.after.mir`; the
+  optimization passes' with them when `RF_DUMP_MIR=all`). Options: (a) **`build-oracles` keeps only the `.after.mir` files of the
+  listed passes (about half), the packs likewise**; (b) only the dumps that differ from the previous pass's (smaller, but the judge
+  then needs the chain); (c) as is. *Recommended: (a)*.
+- **RFP32 std's function attributes.** PromoteTemps needs `#[rustc_promotable]`, AbortUnwindingCalls `#[rustc_nounwind]`
+  (`NEVER_UNWIND`), const-fn promotion in initializers std's constness. As built: a table of the nine promotable functions read from
+  the pinned rust-src by hand, and the intrinsics' path as the only never-unwinding functions. Options: (a) **the helper's
+  `--std-iface` records these three attributes for every std function (pinned data as RFP26 (a)'s, regenerated by the night's
+  `front-oracles`)**; (b) read them natively from rust-src's library with the native reader (no rustc, but ahead of RF12's std
+  from source); (c) keep the table. *Recommended: (a) now, (b) with RF12*: the corpus meets only the table's functions, but std has
+  more `rustc_nounwind` functions than the intrinsics (`panic_nounwind`, `abort`), which a program calling them would show.
+- **RFP33 Opaque types' identity.** typeck's `[:opaque clauses]` carry no `OpaqueTy` id, so PostAnalysisNormalize reveals an opaque type
+  by the signatures equal to it (two functions returning `impl Fn(i32) -> i32` would be ambiguous and left unrevealed; generic
+  definers' hidden types are not substituted). Options: (a) **typeck's opaque type carries its OpaqueTy def id (collect already
+  makes the def), its hidden type recorded by the defining body's typeck (`TypeckResults::concrete_opaque_types`)**; (b) keep the
+  structural match. *Recommended: (a)*: it is rustc's representation and typeck-check judges it.
+
+## As built: RFP23 (b), RFP24 (b) (2026-11-08)
+
+Branch `rust-rf10b` (continued from `7c7fe2d63`), the user's decision of 2026-11-08: RFP23 (b) first (the run's symbols, instances and
+layouts recorded as packs, `run-built` needing no helper at check time), then RFP24 (b) with RFP27 (a) (`build-check` over
+`test/rust/front/a*.rs` an essential step, its oracle texts pinned, `capture-check` in it). RFP23 (c) (the ports) is next; RFP28-RFP33
+await the user and were not built.
+
+### The packs (`bin/lib/repr-rust/front-records.bash`)
+
+Four packs in the oracle-records format (doc/ORACLE-RECORDS-SURVEY.md §3.2, `test/oracle-records/oracle.bash`: a deterministic tar.xz
+in the store `.tmp/oracle-packs/`, its pin `test/rust/records/NAME.sha256` and manifest `NAME.tsv` committed), one kind each, made by hand
+on the host with rustc and the helper (`bin/rust-front records make [KIND...]`, ORS5 (a)), `:rustc b789fd432132e37d` (rustc 1.99.1,
+Alpine r0), the helper at `6378914b5a9b...` (`tools/rsdump`'s source digest):
+
+| Pack | What | Members | Raw | xz | SHA-256 |
+|---|---|---|---|---|---|
+| `rust-front-std` | the helper's `std-names.edn` and `std-iface.edn` (RFS4, RFP26 (a)), their digests `test/rust/front/std-*.sha256`'s (checked at the make) | 2 | 18.2 MB | 514,512 | `a0375288...` |
+| `rust-front-built` | rustc's MIR after mir_built and after each of the 21 passes to runtime MIR (`-Zdump-mir`, the `.after.mir` files: the judge reads no `.before.mir`, RFP31 (a)'s half) of a1-a7 | 1,108 | 0.97 MB | 24,580 | `9e3e5586...` |
+| `rust-front-captures` | the helper's `--captures` of `test/rust/synthetic/closures.rs` and the seven `test/rust/front/` programs with a closure (RFP27 (a)) | 8 | 2 KB | 840 | `bc8cd109...` |
+| `rust-front-mono` | `run-built`'s record of a1-a7 (RFP23 (b)): the helper's `--mono-mir` dump (each mono item's optimized body, its symbol and instance, std's and core's resolved callees, the layouts) and rustc's executable's exit status and output | 21 | 145 KB | 11,108 | `b44d85ab...` |
+
+The packs total 551 KB in the store; the committed side is the four pins and manifests, 208 KB (the built pack's manifest, one line a
+dump, 202 KB of it). An entry's key: the kind, the program's path and the SHA-256 of its bytes, the helper's source digest
+(`bin/repr-rust`'s `helper_hash`), the flags (`build-oracles`', `run-built`'s and `capture-oracles`' as they were) and, for `built`, the
+passes dumped; the toolchain's identity is the manifest's header's, not the key's, so the check computes keys with no rustc. A
+program the check needs whose key the manifest lacks is UNRECORDED, one whose key moved (the program, the helper's source or the
+flags changed) STALE: either fails (`rfr_stage`, checked: a2.rs with a comment appended is STALE, a missing program UNRECORDED). The
+mono record's one path, the checkout's in the locations' file names, is written `@ROOT@/` and put back at the read.
+`bin/rust-front records verify [KIND...] [--sample N]` makes every entry afresh into `.tmp/rust-front/records/verify/` and compares it
+member by member (ORS6 (a)'s verdict: under the identity the record names a difference fails, under another rustc it is reported),
+then each kind's crossed pair (ORS7 (a): the first program afresh against the second's member; std: the names against the
+interface), which must differ. Run here: 1, 7, 8 and 7 entries equal, the four controls differing. Kinds `rust front-std`,
+`front-built`, `front-captures`, `front-mono` in `test/oracle-records/kinds.edn` (`bin/oracle-records list`, `pins`, `verify rust`).
+
+### The readers
+
+- `bin/rust-front build-check --records [NAME...]` and `capture-check --records [NAME...]`: std's data and the captures linked from the
+  staged packs into `.tmp/rust-front/records/front/`, rustc's MIR the unpacked `rust-front-built`; no helper.
+- `bin/rust-front run-built [--records] [FILE...]` (default a1-a7): the record from `rust-front-mono` when the program is recorded at
+  its key; `--records` only from it (else the program fails); `RF_LIVE=1`, or a program not recorded, made live by the helper (by
+  hand, the oracle's way). The lowered C now runs on ci (`bin/ci run --std gnu23`: repr/c, ci's checker and builder, musl's forms,
+  cirun) instead of gcc -O0 (`RF10_CC=gcc` by hand), so the run needs no C compiler either; rustc, rustdoc, cargo, gcc, cc and clang
+  are stubs exiting 99 first on PATH (`RF10_STUBS=0`: not).
+- a6 runs now (it was left out: codegen refused it): `arbace.rust.back.codegen` takes `volatile_store` and `volatile_load` (and the
+  unaligned ones) as rustc_codegen_llvm's `intrinsic.rs` lowers them (`store volatile`/`load volatile` of the immediate, the
+  pointee's alignment, 1 unaligned), and a static the allocation's data defines (rustc's `codegen_static`: an internal global of its
+  bytes); `arbace.rust.front.build-run` turns our bodies' `(static-ptr ID)` into rustc's `(ptr allocS<ID> 0 8)` with the record's
+  static (its symbol, by the static's name) and our own evaluation of its initializer (the bytes of our allocation's text; writable,
+  the record not saying `mut`), and our `(raw-str ID)` and `(raw-bytes ID)` into rustc's `(slice allocB<ID> LEN)` and pointer with
+  an immutable memory allocation of their bytes (the record's own bodies keep theirs).
+
+### The essential step (RFP24 (b), RFP27 (a))
+
+`bin/rust-front essential` (`make rust-front-essential`): with rustc, rustdoc, cargo, gcc, cc and clang stubbed first on PATH,
+`build-check --records` (a1-a7), `capture-check --records` (closures and the seven `test/rust/front/` programs), `bin/ci musl ensure` (ci's musl forms
+current), `run-built --records` (a1-a7) and the run's negative control (`RF10_CONTROL=1` on a1: every Add a Sub, its status must differ from the
+record's); the three summary lines held to `test/rust/front/essential-known.txt` line for line (`--record` rewrites it, by hand), the
+crossed pairs of build-check (a body's text against another body's) and capture-check (a closure's line against another program's)
+and the run control differing (`test/rust/front/controls.edn`), the stubs' log empty. The gate step `rust-front-essential`
+(`test/gate/steps.edn`, chain `rust-essential` after `rsi-judge-test`; `:mem-gib 2`, `:hosts [:stage0 :go]`, the four pins and musl's
+`test/c/corpora.edn`, inputs `:rust :rust-helper :c :c-run` with `bin/rust-front` and `test/oracle-records/`; its control in
+`:controls`), and the oracle tier's `rust-front-records-verify` (`bin/repr-rust helper && bin/rust-front records verify`, `:phase
+:oracle`, `:hosts [:stage0 :rustc]`, its crossed pairs waived as the verify's own). `gate.crops check`: 0 problems; `bin/gate --plan`:
+`run rust-front-essential ... never passed`; `bin/gate --oracle --plan`: `run rust-front-records-verify`.
+RFP30 (the pass judge in the step) awaits the user: the step judges built MIR; the pack already holds every pass's dumps, so
+RFP30 (a) is the command's `BUILD_PASS=SimplifyCfg-pre-optimizations` and a line of the known file.
+
+### Results
+
+- `bin/rust-front essential` (and `--record`, which wrote `test/rust/front/essential-known.txt`), main's stage 0, with the six tools
+  stubbed: **build-check 54 of 54 bodies equal to rustc's built MIR byte for byte, 7 programs whole; capture-check 30 of 31 closures
+  equal; run-built 7 of 7 programs from Arbace's MIR give rustc's status and output** (a1-a7: 5, 212, 41, 17, 45, 6, 21; a6 newly), the
+  three controls differing (the run control a1: 156 for 5), the stubs' log empty; 6 min 21 s (`--record`) and 8 min 36 s (the check against the known file, with `bin/ci musl ensure`), peak
+  1.44 GB (`GOMEMLIMIT=1500MiB`):
+  build-check 54 s and 1.36 GB, capture-check 65 s and 1.38 GB, each run about 45 s (most of it ci reading the lowered C with
+  musl's forms). The one closure not equal is `expand1`'s `(|| $b)()` inside a `macro_rules!` body: rustc's span is the definition
+  site's (41:21-41:28), ours none (the closure's tokens joined across the macro's definition and its call site), so the closure has no
+  line; RFP34 below.
+- `RF10_CC=gcc bin/rust-front run-built --records`: the same 7 of 7 with gcc -O0 (3 min 18 s), so ci and gcc agree on the seven.
+- `bin/rust-front records verify`: every entry equal, the four crossed pairs differing; `bin/oracle-records pins`: the four packs in the
+  store with their members, the tampered control refused.
+- `gate.crops check`: 0 problems. `bin/crops-score --judge --strict`: Rust 75.0 / 95.8 / 80.0 unchanged (maturity's check families are
+  the REAP row's, 3 of 3 with controls, and no REAP cell reads the front end's checks; and the eval stage stays 0.5: every run still consumes the mono record's
+  symbols, instances, layouts and core's bodies, `test/crops/independence.edn`'s Rust eval and judge facts now name the step).
+
+### What remains
+
+- RFP23 (c), decided: the ports that take the mono record off the run: the v0 symbols (`rustc_symbol_mangling/src/v0.rs`, with
+  the crate hash RFP29 names), instance resolution (`Instance::resolve` and the collector's mono items, RF3's
+  `arbace.rust.back.collect` grown to the program's own items), and the layouts (`rustc_abi`'s `layout_of` for the samples' types,
+  started for scalars and pairs in `build_run.ae`). Then the run takes from the pack only core's bodies, the part RF12 removes.
+- RFP28-RFP33 await the user; the expansion's macro-site spans (RFP34).
+
+### Proposed (RFP23 (b), RFP24 (b))
+
+- **RFP34 Closures in `macro_rules!` bodies.** `expand1`'s closure `(|| $b)()` has rustc's span at the macro's definition (Span::to of
+  the closure's first and last tokens, both the definition's once `$b` is wrapped); our expansion joins a definition-site token with a
+  call-site one and the closure gets no root-file span, so capture-check cannot name it (1 of 31 in the step, 1 of 174 overall).
+  Options: (a) **port `Span::to`'s rule for tokens of different contexts (the outer expansion's span, `rustc_span/src/lib.rs`
+  `Span::to` with `find_ancestor_in_same_ctxt`) in RF4's expansion, so the closure's span is the definition site's**; (b) keep it a
+  known line of `essential-known.txt` until RF4's derive spans are taken up. *Recommended: (a)*, with RF4's derive spans (the same
+  machinery): about half a day, judged by capture-check and expand-check.
+- **RFP35 The packs' key and the helper.** The key holds the helper's whole source digest (as Haskell's and Rust's other records do), so
+  any change to `tools/rsdump` (a new mode for another check) makes all four packs STALE and fails `rust-front-essential` until they
+  are made again by hand on the host with rustc (30 s). Options: (a) **as built: the whole helper's digest**; (b) the digest of the
+  modes' sources only (`front.rs`, `mirdata.rs`, the driver), a change elsewhere keeping the packs; (c) no helper digest, freshness left
+  to the oracle tier's verify. *Recommended: (a)*: the records are the helper's outputs, a re-make costs 30 s, and (b) would trust a
+  hand-kept list of which files a mode reads.
+- **RFP36 The essential step's runs.** The seven runs are 5 to 7 of the step's 6.5 to 8.5 minutes (ci reads each program's lowered C with musl's
+  forms). Options: (a) **as built: all seven in the essential step**; (b) a1 and a6 (the scalar and the unwinding programs) in the
+  essential step, the seven in `--full`; (c) the runs batched into one ci session (`arbace.c.run nodes` over seven programs: one read of
+  musl's forms), about 2 minutes. *Recommended: (c) then (a)*: the same coverage at a third of the time; (b) if (c) waits.
+
+## As built: RFP23 (c) (2026-11-09)
+
+Branch `rust-rf10b` (continued from `88ad9637d`), the user's decision of 2026-11-08: after RFP23 (b)'s packs, port the run's facts so
+the runs stop reading rustc's mono record. RFP28-RFP36 await the user and were not built.
+
+### What was ported (`arbace/rust/front/mono.ae`)
+
+From rustc 1.99.1's sources (rust-src's `compiler/`, the same revision as every other port; LICENSE.md, doc/ARBACE.md):
+
+- **The crate's identity.** `StableCrateId::new` (`rustc_span/src/def_id.rs`) over rustc-stable-hash 0.1.2's SipHasher128 (SipHash-1-3,
+  128-bit; the stream of `str::hash`'s bytes and 0xFF, `"metadata"`, no `-C metadata`, `"exe"`, the compiler's `cfg_version`). For a1
+  it gives `0x799ecbb0b009f827`: `a1[799e]` in the DefIds and `Csarn Gkp3JIMJ_` in the symbols, as rustc's. `__rustc`'s disambiguator
+  (`mangle_internal_symbol`) is the same hash of `cfg_version` alone. Std's crates (core, alloc, std) are built with Cargo's
+  `-C metadata`, so their ids are read, not computed: `read-rmeta-root` decodes an `.rmeta`'s header (`METADATA_HEADER` v10, the
+  root's position, the version string) and `CrateRoot`'s first fields (the triple, the SVH, the name, `extra_filename`,
+  `stable_crate_id`) natively; `bin/rust-front std-crates` writes `test/rust/front/std-crates.edn` from the sysroot (by hand, where
+  rustc's sysroot is; `--check` compares: equal here), and the runs read that file, std's build identity as `rust-front-std` is its
+  interface.
+- **v0 symbols** (`rustc_symbol_mangling/src/{lib,v0}.rs`): `symbol_name_from_attrs` (a weak lang item's link name, `rust_begin_unwind`
+  through `mangle_internal_symbol`, `rust_eh_personality` kept, `no_mangle`), `compute_symbol_name`'s instantiating crate (generic
+  arguments, or `instantiation_mode` GloballyShared with conflicts: `rustc_middle/src/mono.rs` with `cross_crate_inlinable`'s attribute
+  rules and `requires_inline`), and the mangler itself: `default_print_def_path` (own generic arguments, a trait's without Self), impl
+  paths (`X`/`M`, the impl's disambiguator, self type and trait), types with their backrefs (`B`), array lengths, the base-62
+  integers, identifiers with punycode (RFC 3492's encoder, as the punycode crate). ReifyShims (`::{shim:reify#0}`) for a
+  `#[track_caller]` function as a constant.
+- **Mono items and callees** (`rustc_monomorphize/src/collector.rs`'s roots and uses, `Instance::try_resolve` for the calls the samples
+  make): the roots (non-generic local functions with an extern indicator, the entry), the calls of Arbace's own bodies (local items;
+  core's generic or inlinable functions as items whose bodies are core's), drops (`drop_glue::<T>` and the local `Drop::drop` it
+  calls); each callee's kind (item, intrinsic: `#[rustc_intrinsic]`), symbol, path, can-unwind (`#[rustc_nounwind]`, the ABI),
+  track-caller and `:external` (`should_encode_mir`: generic or cross-crate-inlinable), each call's caller location from the call
+  expression's span (the builder now keeps it on the callee operand's metadata). Core's attributes come from core's own sources
+  (rust-src's `library/core`, pinned by `tools/rsdump/apks.sha256`): the item found through the module tree (`mod` items, `#[path]`,
+  inline modules, an impl by its index) and read by repr/rust's native parser, `cfg_attr` evaluated for core's build; an item a macro
+  generates is not found and takes the default rules (judged).
+- **Layouts** (`rustc_abi/src/layout.rs`, `layout/simple.rs`, `lib.rs`'s Niche, `wrapping_range.rs`; `rustc_ty_utils/src/layout.rs`):
+  scalars with their valid ranges, thin and fat pointers (the struct tail's metadata), arrays, slices, `str`, fn items, tuples,
+  pattern types (`!null`), `univariant` with repr(Rust)'s field order (the alignment groups, niche sizes, the end-biased second try),
+  the newtype and scalar-pair ABIs, `layout_of_enum`'s niche-filling and tagged layouts (the discriminant's range, the tag's width by
+  the variants' first field's alignment, the common primitive's pair) and the choice between them, every type of the bodies with
+  collect_ty's closure (pointees, elements, struct fields), the helper's `mir/layouts` form.
+- **Def paths**: the instances' `DefId(0:N ~ a1[799e]::path)` and `Item(...)`, rustc's DefIndex by the def collector's order (the
+  injected extern crate and prelude import, a `#[derive]` item and its derived impls collected after the crate's other items, an
+  explicit discriminant's anonymous constant).
+
+### The judge (`bin/rust-front mono-check`, `arbace/rust/front/mono_check.ae`)
+
+Each native fact against the pack's record of the program, entry by entry; `--control`: one program's facts against another's record,
+which must differ. Over a1-a7 (main's stage 0, no helper, rustc or C compiler):
+
+| Fact | Equal | Note |
+|---|---|---|
+| local items' symbols | 47 of 47 | |
+| local items' def, DefId, instance, track-caller | 188 of 188 | |
+| callees (kind, symbol, def, can-unwind, track-caller, external, intrinsic) | 34 of 34 | |
+| caller locations | 33 of 34 | `panic!()`'s call inside its expansion: our span is the expansion's, rustc's the call site |
+| function constants' symbols (ReifyShims among them) | 33 of 33 | |
+| statics' symbols and DefIds | 1 of 1 | |
+| lang items' symbols | 113 of 113 | |
+| layouts of the record's tables | 221 of 223 | `core::fmt::rt::ArgumentType` and `Argument` (std's interface lacks the private enum) |
+| core's items the collector reaches from our bodies | 1 of 1 | a6's `write_volatile::<i32>`; 3 more (`precondition_check`, `is_aligned_to`, `drop_glue::<D>` through `write_volatile`'s body) are reached through core's bodies: the pack's, RF12's |
+
+The control (a1's facts against a2's record and back): 66 of 160 entries differ (symbols, callees, locations, DefIds; the lang items and core's layouts, the same in both, equal).
+
+### What the run takes now (`bin/rust-front run-built`, `arbace.rust.front.build-run`'s native path)
+
+The module is made from the collector's items: Arbace's bodies in its order with their native headers, callees, locations, function
+constants' and statics' symbols; the lang items' symbols, the layout table (native, a refused type's layout the record's when it has
+it); our own type forms (the record's DefIds no longer substituted). From the record: core's bodies (a6's four: RF12's part) and,
+per fact, what mono refuses, counted on the run's line (`build-run: a6: facts native callees 5/5, fn-symbols 5/5, langsyms 17/17,
+layouts 45/47, locs 4/5, statics 1/1, symbols 7/7; core's bodies from the pack 4`). a1-a5 and a7 take **no fact from the record**:
+it is read for rustc's status and output alone, the judge's reference. `RF_MONO=pack` runs RFP23 (b)'s path (every fact the record's).
+Results: `run-built --records` 7 of 7 programs give rustc's status and output with the native facts; the control (RF10_CONTROL=1) a1
+156 for 5.
+
+### The essential step
+
+`bin/rust-front essential` runs `mono-check` over a1-a7 after the runs (its summary line held to `essential-known.txt` with the other
+three: a regression in any native fact moves it) and its control (a1 and a2 crossed, `test/rust/front/controls.edn`'s
+`_control/mono/crossed`); `test/gate/steps.edn`'s step takes `tools/rsdump/apks.sha256` among its pins (rust-src's `library/` is read)
+and the `mono-check` line in its summary. The step's timing and peak are in the journal's entry.
+
+### Scores
+
+`test/crops/independence.edn`'s Rust eval fact names the native facts, its score unchanged at 0.5: the seven runs are not the eval
+cell's cases (rsi check's, on the IR packs), and the rule is the case-weighted mean over the REAP cells' cases (CROPS-SCORE.md, the
+user's decision of 2026-11-07). `bin/crops-score --judge --strict`: Rust unchanged.
+
+### What remains
+
+- RF12: core's bodies from source (a6's four), then a run takes nothing of the record.
+- The three facts mono refuses (RFP37, RFP38 below); core's attributes of macro-made items and core's MIR cost rule (RFP39).
+- RF11: rsi's cases from the front end's MIR, which moves the eval stage.
+
+### Proposed (RFP23 (c))
+
+- **RFP37 std's private ADTs.** `core::fmt::rt::ArgumentType` is not in std's interface (the helper's `--std-iface` writes the public
+  items and what they name by path, not a private enum a field names), so `Argument`'s and `ArgumentType`'s layouts are the record's
+  (2 of 223). Options: (a) **the helper writes every ADT a written field's type names, transitively, the pack `rust-front-std` made
+  again (30 s by hand, the oracle tier's verify)**; (b) collect core's ADTs from rust-src with the native front end (RF12's
+  collection of core, days); (c) keep the record's two. *Recommended: (a)*, (b) with RF12.
+- **RFP38 Caller locations inside macro expansions.** `panic!()`'s call to `core::panicking::panic` carries rustc's span of the macro's
+  call site (17:44); our expansion gives the inner call a foreign span (1 of 34). Options: (a) **port `Span::source_callsite`/
+  `ExpnData::call_site` in RF4's expansion: each expansion records its call site and a foreign span's caller location walks to it**
+  (with RFP34, the same machinery; half a day); (b) take the record's location for an expansion's call. *Recommended: (a)*.
+- **RFP39 core's codegen attributes.** As built they come from core's sources (inline, track_caller, rustc_nounwind, rustc_intrinsic),
+  a macro-made item (the `panic_const_*` lang items, `precondition_check`) taking the default rules and `cross_crate_inlinable`'s MIR
+  cost rule for an item without `#[inline]` not ported (no item of a1-a7 needs it). Options: (a) **as built, judged by mono-check**;
+  (b) decode core's rmeta tables (`codegen_fn_attrs`, `cross_crate_inlinable`, `optimized_mir`'s presence: rustc_metadata's
+  LazyTables) natively, the platform's facts as Java's crop reads class files; (c) core's attributes from our own collection of core
+  at RF12. *Recommended: (a) then (c)*; (b) only if RF12 slips, as it reads rustc's product.
+- **RFP40 mono-check's place.** As built it is in the essential step (about 1.5 minutes more). Options: (a) **as built**; (b) in
+  `--full` only, the essential step running the native runs alone; (c) folded into run-built (one pipeline run a program, the
+  check and the run sharing it: the step back to its earlier time). *Recommended: (c)* then (a): the same judge at no cost.
+- **RFP41 The front end's runs in the eval cell.** The native runs score nothing while they are not the cell's cases. Options:
+  (a) **as built: eval stays 0.5 until rsi's cases run from the front end's MIR (RF11)**; (b) count `run-built`'s programs as eval
+  cases now (6 at 1, 1 at 0.5 beside rsi's thousands: the mean moves by under 0.001). *Recommended: (a)*.

@@ -745,3 +745,43 @@ doc/ocaml/OCAML-SURVEY.md, "As built: the crop's independence".
   index out of bounds.
 - Left (the native libraries' refusals, `DIR/failed.txt`, 9 of compiler-libs' 44 units: `Lexer` without ocamllex (OC186), `Identifiable` (a functor body's earlier module, `T_set`, unbound), `Numbers` (`Set.Make(Int_base.T).t` against `Set.Make(T).t` through `with module :=`), `Local_store` (GADT constructors with inline records), `Consistbl` (an index error in a coercion), `Stable_matching` (a record field unbound), `Location` (a value less general than its specification), `Pprintast` (an optional argument's elimination), `Ast_mapper` (`Ppat_open`)): the units of compiler-libs that link a refused one fail as
   a typer note of the program.
+
+## 25. As built: compiler-libs typed natively (OC188 (a), 2026-11-08, branch `ocaml-lex`)
+
+With compiler-libs' `lexer.ml` made by the native ocamllex (OC186 (a), doc/ocaml/OCAML-SURVEY.md, "As built: ocamllex ported"), the
+nine refusals of §24 are gone: the native library builds all 49 units (unix, unixLabels, thread, event, str and compiler-libs' 44).
+Each fix is the typer's own rule, from OCaml 5.5.0's typing/:
+
+- **Typecore.disambiguate_by_ids** (`typecore.ae`'s `disambiguate-by-ids`): a record expression's or pattern's first label, without an
+  expected record type, chosen among the records that have every field it names, and when the record is closed (an expression
+  without `with`, a pattern without `_`) among those with no other field, when any (Stable_matching's `{ left; pairs; right }`
+  beside an inner record with `left` and `right`).
+- **Typecore's unify_kept** (Pexp_record with `with`): the copied expression's type is an instance of its own, each label's instance
+  unified with it; a kept field's type is shared between that instance and the result's (a fresh pair a label), an overridden one
+  is the result's alone: `let map f x = { x with txt = f x.txt }` is `('a -> 'b) -> 'a loc -> 'b loc` (Location).
+- **Env.normalize_module_path** of an application: its functor and its argument normalized (the argument laxly), so
+  `Set.Make(T).t` and `Stdlib__Set.Make(Int_base.T).t` meet when T is an alias of Int_base.T (Numbers' `include Int_base`) and
+  `Set.Make` an alias of `Stdlib__Set.Make`.
+- **Includemod.signatures' `Env.add_signature sig1`**: the implementation's modules and module types bound while its items are
+  compared, so a value's type that names an earlier module of the same signature (Identifiable.Make_map's `keys : 'a t -> T_set.t`)
+  expands.
+- **Exceptions with inline records (Record_extension)**: `exn-constructor` takes `[:Pcstr_record ...]`, registers the record as
+  `E.#record` with the representation `:extension`; the block is the exception's slot then the fields (translcore's `field-pos`,
+  matching's record division: a field at its position plus one; the construction `makeblock 0` of the slot and the fields; the
+  constructor's argument the block itself, as an inline record's) (Consistbl's `Inconsistency`).
+- **GADT constructors with inline records** (Datarepr): the record's type `t.C` over the variables of its fields in their order of
+  appearance (`:inline-params`, the record declaration's parameters), its result the constructor's; the pattern's existentials made
+  abstract as for any GADT constructor (Local_store's `Table : { ref: 'a ref; init: unit -> 'a } -> ref_and_reset`).
+- **Typecore.type_approx** of a recursive binding: before the bodies are typed, each binding's pattern type unified with the shape of
+  its expression (a function's parameters' labels, an optional one's `option`, through `let`, `match`, `try`, tuples, `if` and
+  sequences), so a use before the definition with labels (`binding ~is_method:true ctxt f` above `and binding ?(is_method=false)`) is
+  typed against them (Pprintast).
+- **Ppat_open**: `M.(p)` typed with M's components opened (Ast_mapper).
+
+## 26. As built: Ptyp_open (2026-11-08, branch `ocaml-compl`)
+
+- **Typetexp's Ptyp_open**: `M.(t)`, the type expression translated with M's components opened, as Ppat_open's pattern
+  (`env.ae`'s `transl-type*`). lib-bigarray/subarraystub's external (`Bigarray.(('a, 'b, c_layout) Array2.t)`) stopped the
+  typer at it ("type expression :Ptyp_open outside the slice"); the program types now (it runs on the C API on ci, doc/ocaml/
+  OCAML-SURVEY.md, "As built: the C API on ci"; its run is the speed class, below). The native library rebuilt with it, all 49
+  units of the other libraries as before; `bin/oi check --only-list test/ocaml/essential-check.txt` 58 of 58.
