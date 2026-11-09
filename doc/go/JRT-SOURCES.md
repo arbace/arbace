@@ -655,6 +655,21 @@ lines; jrt's `JceServices` and `JrtServices` gain GCMParameters' and MD4's const
 file (`ProviderConfigSasl.ae`; folded into `ProviderConfig.ae` by JCS232 (a), 2026-11-08), `GaloisCounterMode.ae` the two methods that used the cut `NIO_ACCESS`. Not converted yet
 (the night's).
 
+## The class-file API (F26, write-ahead, 2026-11-08)
+
+doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F26 (classfile)" (JCS260 (b), the user's decision of 2026-11-08).
+`test/jrt/jrt_sources.ae`'s `classfile-sources` takes 260 files and 58,652 lines, all KIND `share`, unpatched:
+
+- java.lang.classfile with its attribute, constantpool and instruction packages;
+- jdk.internal.classfile.impl (with the verifier) and components;
+- java.lang.constant's rest, jdk.internal.constant;
+- AccessFlag, ClassFileFormatVersion, TypeDescriptor, sun.invoke.util.Wrapper and VerifyError;
+- jdk.internal.access.JavaUtilCollectionAccess, which j2g's SharedSecrets accessors (`serial-accessors`) set from
+  `ImmutableCollections$Access`.
+
+jrt's `JavaLangAccess` gains `concat` (ConstantUtils' descriptors). j2g's support code adds `Class.getResource` and lists it
+and `getResourceAsStream` in Class's member table. Seven Go renames. No variant. Not converted yet (the night's).
+
 ## The committed forms (standalone S1, 2026-10-12)
 
 The user's decision D2 (doc/STANDALONE-SURVEY.md §4.2, §9.1 S1) reverses "regenerated on every

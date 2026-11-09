@@ -1682,3 +1682,69 @@ member of the world is a program root.
 
 **New proposals.** JCS290 (ConditionObject), JCS291 (an annotation's serial form), JCS292 (twins as a mechanism) and JCS293
 (Runtime.Version's Optional parts and parse). The night's commands are the triage section's.
+
+## 2026-11-08: F26, java.lang.classfile in the Go build's world (JCS260 (b); branch `java-classfile`, from mac/java-props a9aebc62f)
+
+The user decided JCS260 (b) on 2026-11-08: jdk26u's class-file API and its implementation come into the closure. The work
+was done by day under the light rules, so nothing was converted, translated or built. The source of all the Java is jdk26u
+at `baf63fb`, `src/java.base/share/classes`, read in place.
+
+**Measured first.** The corpus was scanned for tests that use the API (`test/java/ref-jdk26.edn`'s source sets naming
+java.lang.classfile, java.lang.constant, jdk.internal.classfile or AccessFlag). **44 tests** match, and the JDK passes all
+44:
+
+- 17 of javac's typeAnnotations;
+- 8 that parse their own class files;
+- 5 other javac tests and ByteCodeTest;
+- 6 that build a class and define it;
+- 5 of AccessFlag;
+- 2 of CallerSensitive, which read the JDK's class files.
+
+jdk26u's `test/jdk/jdk/classfile` (JUnit) is not in the corpus.
+
+**What came in.** `test/jrt/jrt_sources.ae`'s `classfile-sources`: 260 files, 58,652 lines.
+
+- The API itself: java.lang.classfile, with attribute, constantpool and instruction.
+- The implementation: jdk.internal.classfile.impl, with the verifier, and components.
+- java.lang.constant's rest and jdk.internal.constant.
+- What a constant-pool scan of their class files found missing from the gate executable's world: AccessFlag,
+  ClassFileFormatVersion, TypeDescriptor, sun.invoke.util.Wrapper, VerifyError and JavaUtilCollectionAccess.
+
+No variant was needed. The members that name java.lang.invoke's run-time classes are j2g's operation-level stubs.
+
+Alternatives considered, each against JCS260's "variants as few as possible":
+
+- variants that replace `listFromTrustedArray` by `List.of`, as ReferencePipeline's and Collectors' did before. Instead
+  SharedSecrets' accessor is j2g's (`serial-accessors`), which also serves Gatherers;
+- `MethodHandleInfo` into the closure for its constants. Its constants are themselves `MethodHandleNatives.Constants`'s, so
+  the edge's recording of it is the night's instead.
+
+Also changed:
+
+- jrt's `JavaLangAccess.concat` (StringConcatHelper.concat), on which every descriptor depends;
+- seven Go renames, found by a name check against the world, jrt's manifest and jrt's Go identifiers;
+- `Class.getResource` with Class's member table entries, F19's day finding, which javac's `ClassfileTestHelper` needs to load.
+
+**Checked by day.**
+
+- The joint javac check: 2,766 files, 0 errors.
+- `read-jdk --check`: 260 converted, 0 failed; without javac, 260 native, the forms the same.
+- j2g's world (`bin/jrt-convert vet --forms` with the port merged): 5,161 classes declared, none of the port failing. The
+  analysis of the 633 classes left 3 refusals, all of them the edge's MethodHandleInfo, Enum$EnumDesc and
+  VarHandle$VarHandleDesc. With those simulated in a scratch edge: 0.
+- jrt: `go vet` and `go test ./jrt` on the printed package, the new test included.
+- `bin/gate --plan`.
+
+The API's forms were also interpreted on the gate executable by a loader that enters all fourteen packages in one `do`
+(the interpreter cannot define cyclic packages one by one). A smoke program built, parsed, verified, transformed and
+printed classes and parsed javac's class files, and **its output equals the JDK's byte for byte**.
+
+The 44 tests ran the same way:
+
+- 3 pass, and 4 more with `Class.getResource`;
+- 18 need their own class files in `test.classes` (JCS300);
+- the rest stop at jrt's reflection (JCS301), at `defineClass` of bytes (JCS302), at javac on Arbace's options,
+  java.lang.invoke, or the `jrt:/` file system.
+
+The night's commands and the proposals JCS300-JCS305 are in doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F26
+(classfile)" and "Proposed (F26)".
