@@ -2644,3 +2644,60 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   coherent set was 35 of 63 on `-O2` interfaces), 8 with 70 modules Arbace's own STG whole, 0 lost; the whole own set 0 (krep$*, an
   unbound local). Records `test/haskell/lib-check-own-ghc-internal.edn`, `test/haskell/lib-stg-own-results.edn`. Proposals HF10-P11
   to P14 in the survey.
+
+## 2026-11-09 OC194 (a): ocamlyacc ported (branch `ocaml-yacc`, from next e6214cd13)
+
+The user accepted OC194 (a) (2026-11-09). Built by an agent in the light tier (one process at a time, no gate, no build).
+Source: OCaml 5.5.0's release tarball (https://caml.inria.fr/pub/distrib/ocaml-5.5/ocaml-5.5.0.tar.xz, SHA-256
+`fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`, the copy in `.tmp/repr-ocaml/ocaml-5.5.0`), its `yacc/`:
+main.c, reader.c, symtab.c, error.c, lr0.c, closure.c, warshall.c, lalr.c, mkpar.c, output.c, skeleton.c, verbose.c (wstr.c, Windows'
+wide strings, not), Berkeley yacc as OCaml adapted it ("Based on public-domain code from Berkeley Yacc", INRIA's LGPL 2.1 notice with
+the linking exception). The reference: the host's `/usr/bin/ocamlyacc` 5.5.0.
+
+- `arbace/repr/ocaml/ocamlyacc.ae` (`arbace.repr.ocaml.ocamlyacc`), a port by hand, rule for rule, evaluated on stage 0 as
+  `ocamllex.ae` is: the reader with its C details kept (a signed `char`, so a 0xFF byte is `EOF`; the reused line buffer that
+  `print_pos` reads under a stale position, modelled), LR(0), DeRemer and Pennello's LALR(1) as lalr.c writes it (`menhir.ae`'s
+  sets consulted, not reused, to keep the gotos' numbering), mkpar.c's conflicts and default reductions, output.c's packing
+  (`pack_vector`, `matching_vector`) and text, verbose.c's `.output`, main.c's command line and statuses (the `.output` left on an
+  error, the `.ml` and `.mli` removed). Alternatives: a fresh LALR(1) generator emitting the same tables (rejected: the packing
+  depends on byacc's state and goto numbering, so equality byte for byte needs its order anyway); Menhir's `--table` (another format).
+- `bin/repr-ocaml ocamlyacc` (the native tool) and `ocamlyacc-check [--host [--record]]`: the tarball's eight ocamlyacc grammars and
+  20 samples of Arbace's own (`test/ocaml/ocamlyacc/`, 13 of them error cases), plain and `-v`, and `cases.txt`'s 20 command lines:
+  76 runs, the files and messages by SHA-256 against `test/ocaml/ocamlyacc-expected.edn` (recorded from the host), a negative
+  control. `--host`: 76 of 76 equal byte for byte; the plain check 76 of 76, about 16 s, 440 MB. `make repr-ocaml-ocamlyacc-check`.
+- Mutants in scratch (a byte deleted, a token inserted, a span cut; 14 grammars; every other one with `-v`): 1,004 of 1,004 equal to
+  the host's (507 generate), with no fix needed.
+- Docs: doc/ocaml/OCAML-SURVEY.md "As built: OC194 (a)", doc/ARBACE.md, LICENSE.md. Not a gate step (left to the main session);
+  `tool-lexyacc/calc` can take `bin/repr-ocaml ocamlyacc -q calc_parser.mly` in place of the host's ocamlyacc.
+
+## 2026-11-09 OCaml's accepted proposals built: OC192, OC193, OC194's wiring, OC196, OC197, OC206, OC207; OC191 (b) recorded (branch `ocaml-props2`, from next `e6214cd13`)
+
+The user accepted OC191-OC197, OC206 and OC207 as recommended (~09:30; OC191 (b), the rest (a)). Built in the light tier (one
+check process at a time, `OI_JOBS=1`, `O2J_JOBS=1`, `OI_TYPER_GOMEMLIMIT=1200MiB`, main's stage 0); the host's OCaml 5.5.0 ran only
+the oracle path's ocdump dumps and the oracle-tier recording of ocamlyacc's record. Sources read: the OCaml 5.5.0 release tarball as
+pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c`'s `caml_parse_ocamlrunparam` and `scanmult`,
+`runtime/domain.c`'s `caml_domain_spawn` and `domain_create`'s failure, `runtime/caml/domain.h`'s `Max_domains_def` and
+`Max_domains_max`, `yacc/`, `testsuite/tests`' headers), ocamltest's actions as earlier entries cite them.
+
+- OC194 (a) by a subagent (branch `ocaml-yacc`, `b59f68e79`, cherry-picked as `a0369db49`): `arbace/repr/ocaml/ocamlyacc.ae`, a
+  port of `yacc/` (Berkeley yacc, public domain, under INRIA's LGPL 2.1 notice with the linking exception), `bin/repr-ocaml
+  ocamlyacc` and `ocamlyacc-check` (76 of 76 runs equal to the host's ocamlyacc byte for byte, 1,004 of 1,004 mutants). Wired here:
+  the gate step `ocaml-read-essential` runs `ocamlyacc-check`; the suite corpus generates a test's `.mly`/`.mll` modules natively
+  (`tool-lexyacc/calc` runs and passes); `bin/repr-ocaml`'s generators read and write in the caller's directory.
+- OC192 (a): finalisers at oi's level by Go finalisers (`go/arbace/oi/ext_final.ae`, resurrection as the collector's darkening) and
+  in the AOT runtime by weak references with a block's field array kept (`jdk/ocaml/ocaml/rt/ExtGc.ae`); finalise.c's batch order;
+  run at the forced collections and at the ticks. Alternatives considered: a mark of our own from the roots (impossible: the roots
+  are Go's and the Java forms interpreter's), keeping values strongly and never running (the old behaviour), Go's `weak` package for
+  the `first` table (no resurrection: the function needs the value).
+- OC193 (a): `OCAMLRUNPARAM`'s `d` in oi and the AOT runtime; header.awk passes a `d`-only `ocamlrunparam`.
+- OC196 (a): `:speed` deferred. OC197 (a): the four main `.mll` tests in the run corpus, ocamllex natively at check time;
+  `warnings/mnemonics` a class of its own (`:compiler-of-the-tree`, OT3 (a)).
+- OC206 (a): the OCaml helpers at the light level (translated and run with their test) and at the compiled level (a package of the
+  test's shard; built, not run here). OC207 (a): the hook control and signal in the essential list.
+- Measures (light, by list, both paths): run corpus 13 programs 12 pass at oi's level (mnemonics classed), essential list 59 of 59 with
+  both controls, suite pair 2 of 2, AOT light 17 programs 12 pass, 2 slow, 3 classed (quotecommand and finaliser_handover beyond the
+  light level's 120 s of CPU), AOT runtime regression sample 7 of 7; the AOT runtime fixed on the way: a created file's permissions
+  (`caml_sys_open`) and `2>&1` merged in `create_process`. Scores: OCaml completeness 81.75% to 82.49%, eval 465/207/0 to 477/195/4,
+  AOT 406/202/64 to 419/191/66, maturity 100%, independence 87.4%. Not run: the compiled level (the night's; OC206's compiled path built,
+  not proved). Proposed OC208 (`Unix.execv` at the AOT levels). Process note: the harness made the subagent's worktree inside
+  `/root/arbace/.tmp/mac-queue/.claude/worktrees/` (an isolation flag of the call); its commit was fetched from there.

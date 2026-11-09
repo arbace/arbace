@@ -1,0 +1,152 @@
+(in-ns 'go.arbace.oi) (go/file "ext_final.go" :imports [
+    [runtime "runtime"]
+    [sort "sort"]
+    [sync "sync"]
+    [atomic "sync/atomic"]
+    [time "time"]
+    [unsafe "unsafe"]])
+
+;; Finalisers (runtime/finalise.c; OC192 (a), the user 2026-11-09): Gc.finalise's and Gc.finalise_last's functions run once
+;; their values are unreachable. finalise.c keeps two tables, `first` (Gc.finalise: the function gets the value, which the
+;; collector keeps alive for it) and `last` (Gc.finalise_last: the function gets unit); at the end of a major cycle
+;; (caml_final_update_first, then caml_final_update_last) the entries whose values are unmarked move to the todo list, one
+;; batch a table, and caml_final_do_calls runs the todo list from each batch's end (the entries of a batch in the reverse of
+;; their registration), the `first` batch before the `last` one, never re-entered (running_finalisation_function), at the
+;; runtime's pending-action points. Here a value's reachability is Go's: a value with finalisers has one Go finaliser
+;; (runtime.SetFinalizer, which keeps the object for its function as the collector darkens it), whose call (on Go's
+;; finaliser goroutine) moves its entries to the fired list under finMu: its `first` entries, with the value, and when it had
+;; any its `last` entries wait for the value to be unreachable again (a new Go finaliser on the resurrected value: the
+;; `last` table is updated after the `first` values were darkened, so they survive that cycle); else its `last` entries,
+;; with unit. Gc.full_major, Gc.major, Gc.compact and Gc.minor collect (runtime.GC, then a sentinel's finaliser on a second
+;; cycle tells that the first cycle's finalisers were called: Go's finaliser goroutine calls them in the order they were
+;; queued) and run the fired entries; a thread's ticks run them too (finPending), as a major slice's end sets
+;; caml_set_action_pending. The fired entries of one collection are run as finalise.c runs a cycle's batches: `first`
+;; before `last`, each in the reverse of the registration order. Values without an address of their own (immediates are
+;; refused by Gc.finalise; floats and boxed integers are Go values in an interface) are accepted and never finalised, as
+;; OCaml's static data. Divergence (OC11 (a), the order): a value reachable only from another finalisable value is found
+;; unreachable one Go cycle later (Go's finalisers of a chain run one link a cycle), where OCaml's cycle finds both.
+
+(go/type finEntry "finEntry is one registration: the function, its order, its table.\n" (struct
+    ^{:tag Value} fn
+    ^{:tag uint64} seq
+    ^{:tag bool} last))
+
+(go/type finFired "finFired is an entry whose value was found unreachable: the function and its argument.\n" (struct
+    ^{:tag Value} fn
+    ^{:tag Value} arg
+    ^{:tag uint64} seq
+    ^{:tag bool} last))
+
+(go/type finSentinel "finSentinel is the object whose finaliser tells that a collection's finalisers were called (pointers in it: no tiny allocation).\n" (struct
+    ^{:tag (* int)} p
+    ^{:tag int} n))
+
+(go/var
+  [^sync/Mutex finMu]
+  [^{:tag uint64} finSeq]
+  [^atomic/Int32 finPending]
+  [^atomic/Int32 finCount])
+
+(go/var ^{:doc "finObjs are the registrations of the values with finalisers, by the value's address (Go's heap does not move).\n"} finObjs (make (map uintptr (slice finEntry))))
+
+(go/var ^{:tag (slice finFired) :doc "finQueue is the fired entries not yet run, in the order they will run.\n"} finQueue)
+
+(go/var ^{:tag (slice finFired) :doc "finBatch is the entries fired since the last sort (one collection's batches).\n"} finBatch)
+
+(go/func finAddr "finAddr is the address of a value's own allocation, 0 for a value that has none.\n" ^uintptr [^Value v]
+  (type-switch [x v]
+    (case [(* Block)] (return (conv uintptr (unsafe/Pointer x))))
+    (case [(* Bytes)] (return (conv uintptr (unsafe/Pointer x))))
+    (case [(* FloatArray)] (return (conv uintptr (unsafe/Pointer x))))
+    (case [(* Closure)] (return (conv uintptr (unsafe/Pointer x))))
+    (case [(* Custom)] (return (conv uintptr (unsafe/Pointer x))))
+    (case [(* Fiber)] (return (conv uintptr (unsafe/Pointer x)))))
+  0)
+
+(go/func finSet "finSet gives the value v (at address p) its Go finaliser.\n" [^Value v ^uintptr p]
+  (runtime/SetFinalizer v (fn [^any x] (finFire p x))))
+
+(go/func finalRegister "finalRegister is caml_final_register (last false) and caml_final_register_called_without_value (last true).\n" [^Value f ^Value v ^bool last]
+  (when [(values _ ok) (assert int v)] ok
+    (InvalidArg "Gc.finalise"))
+  (let [p (finAddr v)]
+    (when (== p 0)
+      (return))
+    (.Lock finMu)
+    (inc! finSeq)
+    (let [(values es had) (aget finObjs p)]
+      (aset finObjs p (append es (lit finEntry :fn f :seq finSeq :last last)))
+      (when (not had)
+        (.Add finCount 1)
+        (finSet v p)))
+    (.Unlock finMu)))
+
+(go/func finFire "finFire is a value's Go finaliser (on Go's finaliser goroutine): its entries fired, its `last` ones kept for a\nlater cycle when it had `first` ones.\n" [^uintptr p ^any x]
+  (.Lock finMu)
+  (defer (.Unlock finMu))
+  (let [es (aget finObjs p)
+        ^{:tag (slice finEntry)} rest nil
+        ^bool first false]
+    (range [_ e es]
+      (when (not (.-last e))
+        (set! first true)))
+    (range [_ e es]
+      (if (not (.-last e))
+        (set! finBatch (append finBatch (lit finFired :fn (.-fn e) :arg (conv Value x) :seq (.-seq e) :last false)))
+        (if first
+          (set! rest (append rest e))
+          (set! finBatch (append finBatch (lit finFired :fn (.-fn e) :arg Unit :seq (.-seq e) :last true))))))
+    (if (> (len rest) 0)
+      (do (aset finObjs p rest)
+          (finSet (conv Value x) p))
+      (do (delete finObjs p)
+          (.Add finCount -1)))
+    (.Store finPending 1)))
+
+(go/func finSort "finSort moves the fired entries of the latest collections to the queue's end: `first` before `last`, each in the\nreverse of the registration order (finalise.c's batches, run from their end). Under finMu.\n" []
+  (when (== (len finBatch) 0)
+    (return))
+  (sort/SliceStable finBatch (fn ^bool [^int i ^int j]
+    (let [a (aget finBatch i) b (aget finBatch j)]
+      (when (!= (.-last a) (.-last b))
+        (return (.-last b)))
+      (> (.-seq a) (.-seq b)))))
+  (set! finQueue (append finQueue (spread finBatch)))
+  (set! finBatch nil))
+
+(go/func finCollect "finCollect runs Go's collector so that the values unreachable now have their Go finalisers called (Gc.full_major,\nGc.major, Gc.compact, Gc.minor). Nothing when no value has a finaliser.\n" []
+  (when (== (.Load finCount) 0)
+    (return))
+  (runtime/GC)
+  (let [done (make (chan (struct)))
+        s (addr (lit finSentinel))]
+    (runtime/SetFinalizer s (fn [^{:tag (* finSentinel)} _] (close done)))
+    (runtime/GC)
+    (select
+      (case (<! done))
+      (case (<! (time/After (* 5 time/Second)))))))
+
+(go/method runFinalisers "runFinalisers is caml_final_do_calls: the fired entries run one by one, not when a finalisation function runs on this\nthread already; an exception of one ends the calls and is raised.\n" [^{:tag (* Thread)} th]
+  (when (.-infinal th)
+    (return))
+  (while true
+    (.Lock finMu)
+    (finSort)
+    (when (== (len finQueue) 0)
+      (.Store finPending 0)
+      (.Unlock finMu)
+      (return))
+    (let [d (aget finQueue 0)]
+      (set! finQueue (subslice finQueue 1))
+      (.Unlock finMu)
+      (.finCall th d))))
+
+(go/method finCall [^{:tag (* Thread)} th ^finFired d]
+  (set! (.-infinal th) true)
+  (defer ((fn [] (set! (.-infinal th) false))))
+  (.Apply th (.-fn d) (.-arg d)))
+
+(go/method fullMajor "fullMajor is a forced collection (Gc.full_major, Gc.major, Gc.compact, Gc.minor) and the finalisers it fires.\n" [^{:tag (* Thread)} th]
+  (finCollect)
+  (when (!= (.Load finPending) 0)
+    (.runFinalisers th)))

@@ -40,18 +40,20 @@ END {
   # ci when it has C files) and the runs beyond the first (@runs=ARGS,...). The first alternative is the run: the second
   # (setup-ocamlopt.byte-build-env) ends it. The AOT levels (aot=1) keep the class (their runtime has no C, and a helper is oi's).
   # OC204 (a) (OC195 (a), the user 2026-11-09): a helper of OCaml alone (myecho.ml, reflector.ml, cmdline_prog.ml) is one too.
+  # OC206 (a) (the user 2026-11-09): at the AOT levels (aot=1) too when the helpers are OCaml alone (readonly .ml files, no C): bin/oi's
+  # light level translates the helper as the test's program and runs it at that level, the compiled level builds it into the test's shard;
+  # a C helper stays oi's (its runtime is oi cmain's), the class it had.
   # Anything else in the alternative: the class it had (cls's roclass)
   helper = 0; roclass = ""; roseen = 0
-  if (aot != 1) {
-    hasbuild = 0; rofiles = ""
-    for (j = 1; j <= m; j++) {
-      s = trim(st[j])
-      if (s == "setup-ocamlc.byte-build-env") hasbuild = 1
-      if (s ~ /^readonly_files *= *"/) { rofiles = s; sub(/^[^"]*"/, "", rofiles); sub(/"[^"]*$/, "", rofiles); rofiles = trim(rofiles) }
-    }
-    if (hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  hasbuild = 0; rofiles = ""
+  for (j = 1; j <= m; j++) {
+    s = trim(st[j])
+    if (s == "setup-ocamlc.byte-build-env") hasbuild = 1
+    if (s ~ /^readonly_files *= *"/) { rofiles = s; sub(/^[^"]*"/, "", rofiles); sub(/"[^"]*$/, "", rofiles); rofiles = trim(rofiles) }
   }
-  hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.ml$/, "", hbase)
+  if (aot != 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  if (aot == 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.ml( +[A-Za-z0-9_]+\.ml)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
     if (helper) {
@@ -120,12 +122,18 @@ END {
       # the standard input empty and the standard error discarded (bin/oi's @stdin=null, @stderr=null in the run's environment field)
       if (key == "stdin" && val == "/dev/null") { env = env " @stdin=null"; continue }
       if (key == "stderr" && val == "/dev/null") { env = env " @stderr=null"; continue }
+      # a main .mll's ocamllex action (OC197 (a)): bin/oi's mll_gen runs the native ocamllex with -q, the flags every such test sets
+      if (key == "ocamllex_flags" && FILENAME ~ /\.mll$/ && trim(val) == "-q") continue
       if (key == "ocamlopt_flags" || key == "reason" || key == "exit_status" || key == "binary_modules") continue
       if (key == "arguments") { args = val; continue }
       # the program's own C stubs (the C API on ci, doc/ocaml/OCAML-SURVEY.md "As built: the C API on ci"): modules that are all C
       # files of the test's directory, built by ci beside the program (bin/oi's cstubs_nodes, the run's @cstubs=FILE,...); at the AOT
       # levels (-v aot=1) the class it was
       if (key == "modules" && aot != 1 && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
+      # OCAMLRUNPARAM's d (OC193 (a), the user 2026-11-09): oi and the AOT runtime read the domains' limit, so a header that sets d
+      # alone (parallel/max_domains1, max_domains2) runs with it in the environment (ocamltest's ocamlrunparam variable, OCAMLRUNPARAM's
+      # value: its leading comma an ignored option); the other parameters (b=, l=, ...) keep the class
+      if (key == "ocamlrunparam" && val ~ /^,?d=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
       if (key == "ocamlrunparam") { cls("ocamlrunparam " val) }
       cls(key " = " val)
     }
@@ -162,9 +170,9 @@ END {
   # directory's TEST.ACTION, when it exists, runs in place of the action's body (actions.ml's run). A run test uses run and
   # check-program-output, so TEST.run (@hook=run: swapchan's and tls's sort, delayintr's SIGINT) and TEST.check-program-output
   # (@check=check-program-output: signal's grep) are its hooks; bin/oi's runners run them as actions_helpers.ml's run_hook does
-  hook = FILENAME; sub(/\.ml$/, ".run", hook)
+  hook = FILENAME; sub(/\.mll?$/, ".run", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
-  hook = FILENAME; sub(/\.ml$/, ".check-program-output", hook)
+  hook = FILENAME; sub(/\.mll?$/, ".check-program-output", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
   if (args ~ /\$VAR/) { cls("arguments = " args) }
   # a test of C stubs that runs only native (int64-unboxing: its externals' bytecode names are "", the unboxed native ones the C's)

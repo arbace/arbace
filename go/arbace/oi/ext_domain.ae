@@ -1,11 +1,65 @@
 (in-ns 'go.arbace.oi) (go/file "ext_domain.go" :imports [
 
+    [fmt "fmt"]
+    [os "os"]
+    [strconv "strconv"]
     ^{:line 3} [sync "sync"]])
 
 ;; Domains, mutexes and conditions (runtime/domain.c, sync.c): the locks' state is guarded by
 ;; the interpreter's lock, and a thread that must wait waits on gilCond, which releases it.
 
 (go/var gilCond (sync/NewCond (addr gil)))
+
+;; OCAMLRUNPARAM's d, the domains at most (startup_aux.c's caml_parse_ocamlrunparam and scanmult; OC193 (a), the user 2026-11-09):
+;; Max_domains_def 128 on 64 bits, at least 1 and at most Max_domains_max 4096 (caml_fatal_error otherwise); a Domain.spawn beyond
+;; it fails as domain_create's does, Failure "failed to allocate domain: domain_create" (a slot is free again when its domain ends)
+(go/var ^{:tag int} maxDomainsParam)
+
+(go/func scanMult "scanMult is startup_aux.c's scanmult over the option's text after its letter: =N or =0xN, a k, M or G multiplier
+(sscanf's %u: the leading digits, 1 when there are none).
+" ^int [^string opt]
+  (let [^int val 1 ^byte mult 32 ^int i 0]
+    (when (and (< i (len opt)) (== (aget opt i) 61))
+      (inc! i)
+      (let [hex (and (< (+ i 1) (len opt)) (== (aget opt i) 48) (or (== (aget opt (+ i 1)) 120) (== (aget opt (+ i 1)) 88)))
+            ^int j i]
+        (when hex
+          (set! j (+ i 2)))
+        (let [^int k j]
+          (while (and (< k (len opt)) (or (and (>= (aget opt k) 48) (<= (aget opt k) 57)) (and hex (or (and (>= (aget opt k) 97) (<= (aget opt k) 102)) (and (>= (aget opt k) 65) (<= (aget opt k) 70))))))
+            (inc! k))
+          (when (> k j)
+            (let [base 10]
+              (when hex
+                (set! base 16))
+              (let [(values n err) (strconv/ParseUint (subslice opt j k) base 32)]
+                (when (== err nil)
+                  (set! val (conv int n))))))
+          (when (< k (len opt))
+            (set! mult (aget opt k))))))
+    (switch mult
+      (case [107] (return (* val 1024)))
+      (case [77] (return (* val 1024 1024)))
+      (case [71] (return (* val 1024 1024 1024))))
+    val))
+
+(go/func maxDomains "maxDomains is the domains at most, read once from OCAMLRUNPARAM (or CAMLRUNPARAM).
+" ^int []
+  (when (!= maxDomainsParam 0)
+    (return maxDomainsParam))
+  (let [d 128
+        (values opt ok) (os/LookupEnv "OCAMLRUNPARAM")]
+    (when (not ok)
+      (set! opt (os/Getenv "CAMLRUNPARAM")))
+    (for [i 0] (< i (len opt)) (inc! i)
+      (when (== (aget opt i) 100)
+        (set! d (scanMult (subslice opt (+ i 1))))))
+    (when (< d 1)
+      (panic (addr (lit FatalError :Msg "Fatal error: OCAMLRUNPARAM: max_domains(d) must be at least 1" :Code 2))))
+    (when (> d 4096)
+      (panic (addr (lit FatalError :Msg (fmt/Sprintf "Fatal error: OCAMLRUNPARAM: max_domains(d) is too large. The maximum value is %d." 4096) :Code 2))))
+    (set! maxDomainsParam d)
+    d))
 
 (go/type ocMutex (struct
     ^{:line 11 :tag bool} locked
@@ -81,6 +135,9 @@
           ^{:line 81} Unit)))
 
     (r "caml_domain_spawn" ^{:go/end 100} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+        ;; the main domain and the running ones fill the slots (OC193 (a))
+        (when (>= (+ (conv int (.Load domainsRun)) 1) (maxDomains))
+          (Failwith "failed to allocate domain: domain_create"))
         (let [ts (AsBlock (aget a 1))]
           (set! spawnMask (.-sigmask th))
           (SpawnDomain (aget a 0) ^{:go/end 99} (fn [^{:tag (* Thread)} dt ^Value exn]
