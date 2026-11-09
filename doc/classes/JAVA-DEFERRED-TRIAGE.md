@@ -6450,3 +6450,59 @@ comments of derive.ae's table keep the scripts' names, as the derivations' first
 --check`: 79 overlays, 0 not as derived, the control failing as it must. The overlays' text moves `jdk/provenance.edn`'s digests:
 the night's `bin/jrt-convert update` takes it with the rest (JCS257 (a)'s "at the next conversion"). The F1 services
 (`JceServices`, `RsaServices`, "the F1 scratch script gensvc.py/genjava.py") are not derive.ae's: hand-kept, unchanged.
+
+## JCS256 (a): `jrt-vet`, tomorrow's switch (branch `java-props2`, write-ahead)
+
+Decided (a), from the morning after the Java night's conversion is committed: until `jdk/forms` is the night's, `bin/jrt-convert
+vet` refuses what the variants already expect of the new world (on `java-props2` today, over the committed `jdk/forms` of
+2026-11-07: 145 variant files, 4,530 classes, 10 refused, among them `File`, `DatagramSocket`, `AbstractInterruptibleChannel` and
+`ProviderConfig`, and 2 variants whose classes are not yet in it), so the step is not in `test/gate/steps.edn` tonight. Tonight it
+is the Java night's (JCS256 (b)): `bin/jrt-convert vet --forms .tmp/jrt/conv --strict` after `bin/jrt-convert update`'s
+conversion, before the build. The switch, for the morning after (one commit, after `jrt-derive` in `test/gate/steps.edn`):
+
+```clojure
+  ;; JCS256 (a) (the user, 2026-11-09): jrt's Go-build variants vetted on j2g's world (bin/jrt-convert vet, test/jrt/vet.ae,
+  ;; JCS253): every variant file's classes entered from jdk/forms with their variants applied and analyzed as j2g's analysis
+  ;; does, a refusal not in test/jrt/vet-known.edn failing, a stale known row too (--strict); about 20 s at 1.5 GiB, stage 0
+  {:name jrt-vet :phase :essential :mem-gib 2 :cmd "bin/jrt-convert vet --strict"
+   :hosts [:stage0]
+   :inputs [:lib-tools "bin/lib/heavy.bash" "bin/lib/repr-java/host.bash" "bin/lib/javac-key.bash" "bin/jrt-convert"
+            "test/jrt/vet.ae" "test/jrt/vet-known.edn" "overlay/jdk/variants/" "jdk/forms/" "jdk/edge.edn" :tools]
+   :summary ["^jrt.vet:|^REFUSED|^MISSING|^stale" 6]}
+```
+
+Then `bin/gate --plan` (the table's names and inputs) and `bin/gate --audit jrt-vet` once, whose inputs the audit settles. It
+needs no executable (stage 0's j2g namespaces, the checkout's loaded where they differ: `:tools`).
+
+## As built: JCS283 (b), JCS324 (a): `bin/jrt-convert predict`, the night's world by day (branch `java-props2`)
+
+`bin/jrt-convert predict [--since REV] [--list FILE] [--missing RE] [--out DIR] [PATH...]` makes the scratch procedure of JMX-1's,
+F27's and JCS265 (b)'s days one light verb (into `$JRT_WORK/predict`, or `--out DIR`):
+
+1. **The closure's sources**, as the sources step makes them (`make_sources`: `DIR/src`, `DIR/sources.txt`).
+2. **What changed** against the committed conversion (`DIR/changed.txt`): the lines of the new `sources.txt` that `jdk/sources.txt`
+   lacks (a new file, or one whose kind moved), and the overlays of the closure changed since REV (default: the commit that last
+   wrote `jdk/forms`; derived overlays among them); with PATHs (below java.base's root), those files alone, the rest of the world
+   `jdk/forms`'. The closure's dropped files (`DIR/removed.txt`) leave the world. Generated sources (gensrc, jrtgen, the locales)
+   are the night's, not predicted.
+3. **The read**, as the convert step reads (`bin/repr-java read-jdk --check`, `--no-javac` by default, `REPR_JAVA_PATCH_ALL`, the
+   origins), of the changed files with their context: every overlay of the closure, and the closure's files of the changed files'
+   packages and of their other modules (`share:MODULE`); `GOMEMLIMIT=1500MiB`, two threads (`REPR_JAVA_THREADS`). A context file
+   that fails for its own context's absence is not the prediction's; a changed file not read is listed (`DIR/unread.txt`, status 1).
+4. **The world** (`DIR/world`): a copy of `jdk/forms`, each changed file's forms over it, its package file's loads merged (the
+   committed order, then the new ones), the dropped files' forms and loads removed.
+5. **On it**: `bin/jrt-convert vet --forms WORLD --classes CHANGED --others` with every variant file (JCS253, JCS313 (a)); j2g's
+   analysis of the whole world, `bin/j2g --analyze-only --jdk WORLD` with **`J2G_MISSING`** (JCS324 (a): the changed classes, or
+   `--missing RE`'s: what their translation would stub at the operation level; `DIR/j2g-findings.txt`, `DIR/j2g/report.edn`); and
+   with `--list FILE` those tests analyzed on the world (`bin/java-check --levels read,compiled --analyze-only`, `JRT_CONV=WORLD`,
+   shards of 30, two jobs; `DIR/check/results.tsv`; the executable `JAVA_CHECK_EXE`, else `J2G_GO_EXE`'s).
+
+Measured on `java-props2` (main's stage 0, the gate's executable of 2026-11-08 as `J2G_GO_EXE`, javac's tool of `javac-5ad35733`
+with `REPR_JAVA_STALE_OK=1`): `predict java/lang/reflect/AccessFlag.java jdk/internal/jrt/AccessFlagSupport.java` reads 203 files
+(201 converted: the locale overlays' two fail for their data, as in java-more's day), and vet refuses AccessFlag's five classes
+for `ClassFileFormatVersion` and `ClassFileAccess`, which the slice also holds: with them as PATHs (four files) the slice's 7
+classes analyze; j2g's analysis of the world 15 failures, all of today's committed `jdk/forms` (File, DatagramSocket, the variants
+of classes the conversion has not yet brought: the night's), no stub in the slice; `--list` t04830, t04835: both analyze, as
+java-more's prediction found. 191 s and 2.07 GB peak (j2g's `GOMEMLIMIT` 1800MiB), the java-check part 112 s at 2.05 GB.
+Without PATHs on today's branch the change is the night's whole conversion (1,058 files since `b6a6093af`): that read is the
+night's (`bin/jrt-convert update`), not the day's; `predict` by day is for a slice's files after a conversion is committed.
