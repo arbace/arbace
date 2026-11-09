@@ -176,6 +176,9 @@
 ;; file's (the code generator's mode: arbace.cpp.codegen binds it); a header construct the parser cannot read is dropped
 ;; (CPP_HDR_TRACE=1 prints each, its file and offset). Off: the headers skimmed for their names (the converter's mode)
 (def ^:dynamic *full-headers* false)
+;; P15 (b)'s full parse cache: on with CPP_FULL_CACHE=1, or where a caller binds this true (CP336 (a): the run checks' gen-batch,
+;; arbace.cpp.codegen); CPP_FULL_CACHE=0 keeps it off everywhere
+(def ^:dynamic *full-cache* false)
 
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
@@ -1568,13 +1571,30 @@
                            (and (< (inc j) e) (fold-op-token? (tok-at p (inc j))))))
                   true
                   :else (recur (inc j) d))))
-        (let [f (when (and *full-headers* (not (skim? p)))
+        (let [full? (and *full-headers* (not (skim? p)))
+              f (when full?
                   (let [r (tentatively p (fn [p] (let [f (parse-fold p)] [f (ix p)])))]
-                    (when (vector? r) r)))]
+                    (when (vector? r) r)))
+              e0 (let [s0 (ix p)] (skip-balanced! p) (let [e (ix p)] (seek! p s0) e))
+              ;; (CP332 (a), full-header mode: a parenthesized expression whose `...` the test took for a fold's is one
+              ;; when it does not parse as a fold and does as an expression, `(__constructible<_Elements...>())`: the pack
+              ;; expansion closes a template argument list, `...>` not a fold over >; tuple's constraints)
+              pe (when (and full? (not (and f (= (second f) e0))))
+                   (let [r (tentatively p (fn [p] (adv! p)
+                                            (let [x (with-gt p true (parse-expr p))]
+                                              (expect! p ")")
+                                              [x (ix p)])))]
+                     (when (and (vector? r) (= (second r) e0)) r)))]
+          (if pe
+            (do (adv! p)
+                (let [x (with-gt p true (parse-expr p))]
+                  (expect! p ")")
+                  (node p "ParenExpr" b (last-ix p) {:inner [x]})))
+            (do
           (skip-balanced! p)
           (cond-> (text-node p "CXXFoldExpr" b)
             ;; (the operands as data, the node the text it was: the tree compared with clang's unchanged)
-            (and f (= (second f) (ix p))) (assoc :_fold (first f))))
+            (and f (= (second f) (ix p))) (assoc :_fold (first f))))))
         :else (do (adv! p)
                   (let [x (with-gt p true (parse-expr p))]
                     (expect! p ")")
@@ -4047,6 +4067,8 @@
   ["__builtin_va_list" "__int128_t" "__uint128_t" "__NSConstantString" "__builtin_ms_va_list" "__size_t" "__signed_size_t"
    "__ptrdiff_t" "__bf16" "__fp16"])
 
+(def ^:private builtin-templates ["__type_pack_element" "__make_integer_seq"])
+
 (def ^:private skim-cache-min
   "The fewest header tokens worth a cache file."
   20000)
@@ -4115,7 +4137,8 @@
                        (recur (if (is? p "}") (do (adv! p) out) (into out (decl-or-decline p :top))))
                        out)))
         ;; (opt-in, CPP_FULL_CACHE=1: on the tools' host reading the table back costs about what parsing does, G5.2)
-        dir (when (and parts (= "1" (System/getenv "CPP_FULL_CACHE")) (>= k (long skim-cache-min))) (skim/cache-dir))]
+        on (case (System/getenv "CPP_FULL_CACHE") "1" true "0" false *full-cache*)
+        dir (when (and parts on (>= k (long skim-cache-min))) (skim/cache-dir))]
     (if-not dir
       [nil (run)]
       (let [t0 (System/nanoTime)
@@ -4150,6 +4173,9 @@
     (st! p SCOPE root) (st! p ROOT root) (st! p SKIM false) (st! p MTMPL (HashSet.)) (st! p DECLINES 0) (st! p GTOP true)
     (st! p UNNAMED 0) (st! p REASONS (HashMap.)) (st! p CLS nil) (st! p THDR nil) (st! p PATTRS (ArrayList.)) (st! p USES (ArrayList.)) (st! p DECLTYPES (HashMap.)) (st! p DIAGS (ArrayList.)) (st! p GATTRS (HashMap.))
     (doseq [nm builtin-types] (sc/declare! root {:k :type :name nm}))
+    ;; clang's builtin templates (BuiltinTemplateDecl: __type_pack_element<N, T...>, __make_integer_seq<Seq, T, N>), names in
+    ;; every scope as clang's ASTContext declares them; <bits/utility.h> uses them when __has_builtin answers 1 (CP332 (a))
+    (doseq [nm builtin-templates] (sc/declare! root {:k :type :name nm :tmpl true :builtin-tmpl true}))
     (let [[cached pre] (if *full-headers* (full-headers! p cache-parts) [(skim-headers! p cache-parts) []])
           nodes (loop [out (vec pre)]
                   (let [out (into out (decl-seq p :top))]

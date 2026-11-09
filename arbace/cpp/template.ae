@@ -123,7 +123,9 @@
   entity), a non-type parameter or a dependent expression of a signature, a pack of them ({:pack [...]})."
   [p a]
   (cond
-    (contains? a :pack) {:e :pack :kind (:kind p) :elems (:pack a) :pos -1}
+    ;; (a parameter pack's own type in a signature, {:k :tparam :pack true}, is a type, not a pack of arguments: an alias
+    ;; template's argument in a pack expansion's pattern, tuple<typename __decay_and_strip<_Elements>::__type...>; CP332 (a))
+    (and (contains? a :pack) (not (:k a))) {:e :pack :kind (:kind p) :elems (:pack a) :pos -1}
     (= :type (:kind p)) {:e :type :ty a :pos -1}
     ;; a template template parameter: the template, or in a signature the parameter itself
     (= :template (:kind p)) (if (:tmpl a) {:e :tmpl :tk :class :id (:tmpl a) :pos -1} {:e :ttp :i (:i a) :tid (:tid a) :pos -1})
@@ -828,7 +830,7 @@
     ;; a non-deduced expression (HoldInt<-N>): consistent with what the others deduced
     (= :texpr (:k p)) (let [v (subst-value p @b tid)]
                         (or (dependent-on? v tid) (same-arg? (if (number? v) {:val v} v) a)))
-    (and (map? p) (contains? p :pack)) (and (map? a) (contains? a :pack) (match-args b tid (:pack p) (:pack a)))
+    (and (map? p) (contains? p :pack) (not (:k p))) (and (map? a) (contains? a :pack) (not (:k a)) (match-args b tid (:pack p) (:pack a)))
     :else (deduce-by-type-match b tid p a #{} :none)))
 
 (defn- pack-pattern?
@@ -1351,6 +1353,7 @@
   "The class of the class template `tid` for the complete arguments `args`: an explicit specialization's, the most
   specialized matching partial specialization's, or the primary template's ([temp.spec.partial.match])."
   [tid args]
+  (sema/tick!)
   (or (when-let [cid (get-in @*tmpls* [tid :insts args])] {:k :class :id cid})
       (let [t (tmpl tid)]
         (if-let [node (get (:specs t) args)]
@@ -1373,10 +1376,46 @@
   (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)
       (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:tmpl (abi/cls (:id (:ty %))))) es)))
 
+(defn- type-pack-element
+  "clang's builtin template __type_pack_element<N, T...> (BuiltinTemplateDecl BTK__type_pack_element: the Nth type of the
+  pack, N < sizeof...(T)), which <bits/utility.h>'s _Nth_type uses when __has_builtin answers 1 (cpp/target's clang
+  half, CP248 (a)); dependent in a signature. CP332 (a): std::get<I>(tuple) and every tuple_element<I, tuple<...>>."
+  [scope forms]
+  (let [n (const-form scope (first forms))
+        ts (trait-args scope (rest forms))]
+    (cond
+      (or (map? n) (some dependent? ts)) {:k :tdep :trait "__type_pack_element" :base (first ts) :types ts :names [] :n n}
+      (and (integer? n) (< -1 (long n) (count ts))) (nth ts (long n))
+      :else (fail :template "__type_pack_element index " n " out of range for " (count ts) " types"))))
+
+(declare template-id)
+
+(defn- make-integer-seq
+  "clang's builtin template __make_integer_seq<Seq, T, N> (BTK__make_integer_seq): Seq<T, 0, 1, ..., N-1>, which
+  <bits/utility.h> uses for std::make_integer_sequence and _Build_index_tuple when __has_builtin answers 1; dependent
+  in a signature."
+  [scope [sf tf nf]]
+  (let [st (template-arg-of scope sf)
+        t (sema/resolve-type-form scope tf)
+        n (const-form scope nf)]
+    (cond
+      (or (map? n) (dependent? t) (= :ttp (:k st))) {:k :tdep :trait "__make_integer_seq" :base t :types [t] :names [] :n n}
+      (and (integer? n) (>= (long n) 0))
+      (let [tt (tmpl (:tmpl st))]
+        (instantiate-class (:tmpl st) (or (complete-args tt (resolve-args scope tt (cons tf (range (long n))) true))
+                                          (fail :template "__make_integer_seq's sequence"))))
+      :else (fail :template "__make_integer_seq of a negative length " n))))
+
 (defn template-id
   "The type a template-id form (<> name args...) names in `scope`: the class template's specialization for the
   resolved arguments (instantiated), or a dependent {:k :tspec} in a template's signature."
   [scope f]
+  (cond
+    (and (= '__type_pack_element (second f)) (empty? (sema/lookup scope "__type_pack_element")))
+    (type-pack-element scope (nnext f))
+    (and (= '__make_integer_seq (second f)) (empty? (sema/lookup scope "__make_integer_seq")))
+    (make-integer-seq scope (nnext f))
+    :else
   (let [[_ nm & forms] f
         [in nm] (if (map? nm) [(:in nm) (:name nm)] [nil nm])
         ;; (the qualified name's parts from its whole spelling: a symbol n/C/t may hold "C/t" as its name)
@@ -1409,7 +1448,7 @@
           ;; (:written and :qual no part of the type's identity: canonical drops them)
           (cond-> {:k :tspec :tmpl tid :name (:name t) :path (:path t) :args args :written written}
             (and (> (count parts) 1) (not in)) (assoc :qual (vec (butlast parts)))))
-        (instantiate-class tid (or (complete-args t args) (fail :template "missing template arguments for " nm))))))))))
+        (instantiate-class tid (or (complete-args t args) (fail :template "missing template arguments for " nm)))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Members defined outside their class template (template <class T> T Box<T>::get() {...})
@@ -1597,6 +1636,7 @@
   "The specialization of the function template `tid` for the complete arguments `args`: its declaration (the pattern
   declared in a scope binding the parameters; its definition analyzed when used), memoized."
   [tid args]
+  (sema/tick!)
   (or (get-in @*tmpls* [tid :insts args])
       (let [t (tmpl tid)
             ps (bind-scope (:scope t) (:params t) args nil)

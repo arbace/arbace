@@ -2080,8 +2080,13 @@
                             (or (not (abi/class? t)) (not (nontrivial-dtor? (:id t))) (trivial-dtor-body? (:id t)))))
                  (:fields (abi/cls cid))))))
 
-(defn- want-d0! "A virtual destructor's deleting variant, written once (as clang, when a vtable refers to it)." [fid]
-  (swap! *top* update :d0s conj-new fid))
+(defn- want-d0!
+  "A virtual destructor's deleting variant, written once (as clang, when a vtable refers to it): deferred among the
+  functions, in the order first referred to (P23 (a))."
+  [fid]
+  (when-not (some #(= fid %) (:d0s @*top*))
+    (swap! *top* update :d0s conj-new fid)
+    (swap! *top* update :queue conj [:d0 fid])))
 
 (defn- linkage-of [f]
   (cond
@@ -2689,21 +2694,36 @@
       (let [c (abi/cls cid)]
         (when (and (= "__fundamental_type_info" (:name c)) (= [[:ns "__cxxabiv1"]] (vec (:path c))))
           (fundamental-typeinfos!))))
-    (loop []
-      (let [q (:queue @*top*)
-            d0s (for [fid (:d0s @*top*) :when (not (contains? (:declared @*top*) [:d0 fid]))] fid)
-            todo (concat (for [g (:groups @*top*) :when (not (contains? (:declared @*top*) [:group g]))] [:group g])
-                         (for [c (:vtts @*top*) :when (not (contains? (:declared @*top*) [:vtt c]))] [:vtt c]))]
-        (when (or (seq q) (seq d0s) (seq todo))
-          (swap! *top* assoc :queue [])
-          (doseq [[fid v] q] (emit-fn! fid v))
-          (doseq [fid d0s] (swap! *top* update :declared conj [:d0 fid]) (emit-d0! (sema/fnd fid)))
-          ;; the vtable groups and VTTs the code refers to (their functions queued in turn)
-          (doseq [[k x :as key] todo]
-            (when-not (contains? (:declared @*top*) key)
-              (swap! *top* update :declared conj key)
-              (if (= k :group) (group! x) (vtt! x))))
-          (recur))))
+    ;; P23 (a): the order of clang's CodeGenModule (clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH
+    ;; LLVM-exception): the definitions that must be emitted written eagerly in order (EmitGlobal's MustBeEmitted), then
+    ;; EmitDeferred: the deferred vtables first (EmitDeferredVTables), then the deferred functions taken as a list, each
+    ;; written and, when it deferred more, EmitDeferred again at once (depth first, "related ones close together")
+    (let [emit-item! (fn [[fid v]]
+                       (if (= :d0 fid)
+                         (when-not (contains? (:declared @*top*) [:d0 v])
+                           (swap! *top* update :declared conj [:d0 v]) (emit-d0! (sema/fnd v)))
+                         (emit-fn! fid v)))
+          vt-todo (fn [] (concat (for [g (:groups @*top*) :when (not (contains? (:declared @*top*) [:group g]))] [:group g])
+                                 (for [c (:vtts @*top*) :when (not (contains? (:declared @*top*) [:vtt c]))] [:vtt c])))
+          vtables! (fn [] (loop []
+                            (when-let [todo (seq (vt-todo))]
+                              (doseq [[k x :as key] todo]
+                                (when-not (contains? (:declared @*top*) key)
+                                  (swap! *top* update :declared conj key)
+                                  (if (= k :group) (group! x) (vtt! x))))
+                              (recur))))
+          pending? (fn [] (or (seq (:queue @*top*)) (seq (vt-todo))))
+          eager (:queue @*top*)]
+      (swap! *top* assoc :queue [])
+      (doseq [x eager] (emit-item! x))
+      (letfn [(deferred! []
+                (vtables!)
+                (let [cur (:queue @*top*)]
+                  (swap! *top* assoc :queue [])
+                  (doseq [x cur]
+                    (emit-item! x)
+                    (when (pending?) (deferred!)))))]
+        (while (pending?) (deferred!))))
     ;; (every slot filled: a wanted group or VTT is written)
     (swap! *top* update :forms (fn [fs] (filterv #(not (and (vector? %) (= ::slot (first %)))) fs)))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
@@ -2894,12 +2914,15 @@
                  (println "generated"))
     ;; bin/cppi check's route (CPPI_ROUTE=ours|auto, bin/lib/cppi/route.bash): PATH<tab>STD<tab>OUT lines, each program's forms, IR and
     ;; lowering into OUT (gen.ll, or gen.refused), one process for the list; STD as g++ names it (gnu++17 read as c++17)
+    ;; (CP336 (a): with P15 (b)'s full parse cache on, CPP_FULL_CACHE=0 off: a program whose headers' tokens another's
+    ;; run already parsed reads that parse back, doc/cpp/CODEGEN.md G5.2)
     "gen-batch" (let [[lst] args]
+                  (binding [ps/*full-cache* true]
                   (doseq [l (str/split-lines (slurp lst)) :when (seq l)]
                     (let [[p std out a] (str/split l #"\t")
                           c (gen-one p (str/replace (or std "c++23") #"^gnu" "c") out (vec (remove str/blank? (str/split (or a "") #"\s+"))))]
                       (println (str out "\t" (if c (name c) "ok")))
-                      (flush)))
+                      (flush))))
                   (shutdown-agents) (System/exit 0))
     "judge" (let [[work known] args] (judge work known))
     "gen-judge" (let [[work refusals forms controls rec] args] (gen-judge work refusals forms controls (= rec "--record")))
