@@ -2968,3 +2968,27 @@ The same rehearsal found one interaction: on the merged tree `bin/gate --oracle 
 chain (the oracle tier runs one after another, ORS8 (a)). Checked on gate-lane2 with the fix merged: `bin/gate --oracle --plan`
 passes, `test/gate/lanes-test.bash` 50 checks, 0 failed. Alternative: printing no lanes for `--oracle` (rejected: the plan's
 budget lines are wanted there too).
+
+## 2026-11-09: Java's proposals of 2026-11-08 built (branch `java-props2`, from `java-night` 33d04049c)
+
+The user accepted the Java proposals of the day's branches (java-http, java-classfile, java-older, java-rmi, java-more) as
+recommended at about 06:15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided (the user, 2026-11-09, about 06:15)"). Built one commit a
+proposal, light (no build, no heavy lock; the prediction verb's runs at 2.07 GB):
+- JCS300 (c): `bin/java-check` compiles a test whose sources name java.lang.classfile or test.classes (57 at the pin) by javac on
+  Arbace into its test.classes, the directory on ARBACE_PATH (t08142 passes by day, t07651 as before). Alternative (b), every test
+  (+4 h a night), rejected by the user.
+- JCS285 (b): `bin/jrt build|test --package P` (`-p 1`, the printer under GOMEMLIMIT: the whole module's peak was the print's
+  4.6 GB, not go's compiles): jrt's tests in 1.6 GB.
+- JCS313 (a): `bin/jrt-convert vet --classes RE --forms-add DIR` (JCS254's hvet.ae reproduced: 4,918 classes, 373 analyzed, 0
+  refused). JCS283 (b) with JCS324 (a): `bin/jrt-convert predict` (the changed closure files read with their context, laid over
+  jdk/forms; vet, j2g --analyze-only with J2G_MISSING, a test list analyzed). JCS256 (a) written as tomorrow's switch (the step's
+  block in the triage), JCS256 (b) tonight; JCS257 (a): 18 overlay headers name test/jrt/derive.ae.
+- JCS304 (b) = JCS293: jdk26u's Runtime.Version.parse ported rule for rule into jrt (src/java.base/share/classes/java/lang/Runtime.java
+  at jdk26u baf63fb), with the build, any count of numbers, the deprecated accessors and the IgnoreOptional pair, checked against the
+  platform JDK's own output for 23 strings; version/pre/build/optional as j2g support methods. JCS320 (a): Thread.getAllStackTraces
+  over F13's facts. JCS280 (a): Parameter derived into the closure (synthesized parameters), getParameters as support methods.
+  JCS282 (b): the type annotation records against javac's as data, in bin/j2g-unit (29 of 29 but the known ElementType row).
+- Classes: JCS325 (a) `:rmi`, JCS326 (a) `:hotspot-diagnostic`, JCS284 `:hotspot-beans` and `:rmi-connectors`, JCS302 (a)
+  `:define-bytes`; the matrix's counts move with the night's records (bin/reap's problems on the branch: java-night's 11 plus the
+  classes' rows). JCS311 (a): the survey of @library and TestNG/JUnit in doc/classes/JAVA-CONFORMANCE-SURVEY.md (JCS330-JCS333
+  proposed). The rest recorded (JCS213, JCS281, JCS290-JCS292, JCS303, JCS305, JCS312, JCS321-JCS323), each for its stated time.
