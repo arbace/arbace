@@ -2242,3 +2242,20 @@ Branch `rust-props`, after the night's four, one commit a proposal.
   equal at built and after every pass (10 of 10 after ElaborateDrops and after SimplifyCfg-pre-optimizations, 2 bodies more);
   mono-check's layouts **223 of 223** (221: `ArgumentType`, `Argument`), a6's run with every layout native (47 of 47).
   `essential-known.txt` re-recorded (the mono line).
+
+### RFP32 (a): std's function attributes as the helper's data
+
+- `--std-iface`'s `si/fn` entries carry `:const` (`is_const_fn`), `:promotable` (`is_promotable_const_fn`: `#[rustc_promotable]` and a const
+  fn) and `:nounwind` (`codegen_fn_attrs`' `NEVER_UNWIND`: `#[rustc_nounwind]` and the intrinsics) for every std function it writes
+  (21,816: 11,265 const, 31 promotable, 302 never unwinding); `std-iface.sha256` re-pinned (the pack `rust-front-std` `5116eb09...`), the other
+  packs made again with their keys (the same bytes).
+- `arbace.rust.front.passes` reads them (`std-fn-attr`): PromoteTemps' `#[rustc_promotable]` (the hand table of nine functions, whose
+  `<impl i8>::min_value` spelling never met std's `{impl#N}` paths, is gone: the 31 include the 24 `min_value`/`max_value`), a std
+  const fn promoted in a const's or static's initializer (`is_const_fn`; only local const fns were), and `fn_can_unwind`'s
+  NEVER_UNWIND for std's functions (`panic_nounwind`, `abort`, ...; the intrinsics by their path only when the interface does not list
+  them).
+- The 88 programs through every pass (`BUILD_PASS=SimplifyCfg-pre-optimizations bin/rust-front build-check`, 7 min 17 s, with RFP28 and
+  RFP29): after SimplifyCfg-pre-optimizations **506 of 616 equal** (499 at RF10's fourth slice), 45 but for the allocations' ids, 2 but
+  for their text, 1 but for the crate hash, 19 differ, 11 refused, 32 not built; **63 programs whole** (60). The essential step's summary
+  unchanged (a1-a7 call none of them).
+- (b), the attributes read from rust-src's library natively, comes with RF12's std from source, as decided.

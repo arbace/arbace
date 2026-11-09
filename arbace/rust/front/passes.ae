@@ -441,14 +441,14 @@
 
 (defn- array-len [t] (when (= :array (first t)) (let [n (nth t 2)] (cond (number? n) n (= :cval (first n)) (let [v (second n)] (if (number? v) v (try (Long/parseLong (str/replace (str v) #"_usize$" "")) (catch Exception _ nil)))) :else nil))))
 
-(def ^:private promotable-fns
-  "The functions std marks #[rustc_promotable] (rust-src 1.99.1's library: ptr/mod.rs null and null_mut, mem/mod.rs size_of and
-  align_of, num/{int,uint}_macros.rs min_value and max_value, ops/range.rs RangeInclusive::new, task/wake.rs RawWaker::new and
-  RawWakerVTable::new), by their def paths"
-  #"^(core|std)::(ptr::null(_mut)?|mem::(size_of|align_of)|num::<impl [iu](8|16|32|64|128|size)>::(min|max)_value|ops::range::RangeInclusive::new|task::wake::(RawWaker|RawWakerVTable)::new)$")
+(defn- std-fn-attr
+  "RFP32 (a): an attribute std's interface records for a std function (the helper's --std-iface: :const, is_const_fn;
+  :promotable, is_promotable_const_fn, #[rustc_promotable]; :nounwind, NEVER_UNWIND), by its def path; nil when not std's"
+  [path attr]
+  (when (string? path) (get (get (:fns c/*si*) path) attr)))
 
 (defn- promotable-const-fn? [ft]
-  (and (= :fndef (first ft)) (string? (second ft)) (boolean (re-find promotable-fns (second ft)))))
+  (and (= :fndef (first ft)) (boolean (std-fn-attr (second ft) :promotable))))
 
 (defn- validate-candidates
   "validate_candidates: the candidates whose borrowed temporary is promotable (Validator's rules)"
@@ -553,8 +553,11 @@
                      ;; is not dead code
                      (or (promotable-const-fn? ft)
                          (and (#{:static :const} ck)
-                              (let [d (when (and (= :fndef (first ft)) (number? (second ft))) (c/def-of (second ft)))]
-                                (and d (map? (:node d)) (= :const (get-in (:node d) [:header :constness]))))
+                              (and (= :fndef (first ft))
+                                   (if (number? (second ft))
+                                     (let [d (c/def-of (second ft))] (and d (map? (:node d)) (= :const (get-in (:node d) [:header :constness]))))
+                                     ;; a std function: is_const_fn (RFP32 (a))
+                                     (boolean (std-fn-attr (second ft) :const))))
                               (contains? @safe bb))))))]
       (let [ok (vec (filter (fn [[bb i]]
                               (let [s (unwrap-dbg (nth (:stmts (nth (:blocks body) bb)) i))
@@ -873,10 +876,12 @@
     (second (re-find #"^core::intrinsics::([A-Za-z0-9_]+)$" (second t)))))
 
 (defn- fn-can-unwind?
-  "fn_can_unwind: a function never unwinds when it is NEVER_UNWIND (the intrinsics), or the session aborts on panic
+  "fn_can_unwind: a function never unwinds when it is NEVER_UNWIND (#[rustc_nounwind], the intrinsics: std's interface's :nounwind), or the session aborts on panic
   and it is not a foreign item, or its ABI is one that cannot (extern \"C\" and the like without -unwind)"
   [def-id abi foreign?]
-  (cond (and def-id (string? def-id) (re-find #"^core::intrinsics::" def-id)) false
+  (cond (and def-id (string? def-id) (std-fn-attr def-id :nounwind)) false
+        ;; an intrinsic std's interface does not list (RFP32 (a): the interface records NEVER_UNWIND for those it lists)
+        (and def-id (string? def-id) (not (contains? (:fns c/*si*) def-id)) (re-find #"^core::intrinsics::" def-id)) false
         (and def-id *panic-abort* (not foreign?)) false
         (and abi (not (#{"Rust" "rust-call"} abi))) (str/ends-with? abi "-unwind")
         :else (not *panic-abort*)))

@@ -716,9 +716,13 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
         }
         let sig = tcx.fn_sig(f).skip_binder().skip_binder();
         let ins: Vec<String> = sig.inputs().iter().map(|t| sty(tcx, *t)).collect();
+        // RFP32 (a): the attributes MIR's passes ask of a std function: const fn (is_const_fn: promotion in an initializer),
+        // #[rustc_promotable] (is_promotable_const_fn: PromoteTemps elsewhere), NEVER_UNWIND (#[rustc_nounwind] and the
+        // intrinsics: fn_can_unwind, AbortUnwindingCalls)
+        let never = tcx.codegen_fn_attrs(f).flags.contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::NEVER_UNWIND);
         let _ = writeln!(
             out,
-            "(si/fn {} {{{} {} :inputs [{}] :output {} :variadic {} :safety {} :abi {}}})",
+            "(si/fn {} {{{} {} :inputs [{}] :output {} :variadic {} :safety {} :abi {} :const {} :promotable {} :nounwind {}}})",
             q(&p),
             generics(f),
             preds(f),
@@ -726,7 +730,10 @@ pub fn std_iface<'tcx>(tcx: TyCtxt<'tcx>) -> String {
             sty(tcx, sig.output()),
             sig.c_variadic(),
             q(&format!("{:?}", sig.safety())),
-            q(&format!("{}", sig.abi()))
+            q(&format!("{}", sig.abi())),
+            tcx.is_const_fn(f),
+            tcx.is_promotable_const_fn(f),
+            never
         );
     }
     out
