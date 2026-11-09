@@ -2016,6 +2016,7 @@
         (when-let [[_ t] (and (:_extern n) (re-matches #"(?s)\s*(?:class|struct)\s+(.*?)\s*" (str (:_text n))))]
           (when-let [ty (sema/resolve-type scope t)]
             (when (abi/class? ty) (abi/update-cls! (:id ty) assoc :extern-inst true))))
+
         ;; extern template R f(params): the function template's specialization of that type (deduced from it,
         ;; [temp.explicit]/7) the library's
         (when (and (:_extern n) (:_fname n) (:_ftype n))
@@ -2035,7 +2036,7 @@
           pattern (first (filter #(#{"TypeAliasDecl" "VarDecl"} (:kind %)) (kids n)))
           tid (next-id)]
       (swap! *tmpls* assoc tid {:id tid :tk tk :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
-                                :pos (:_b n) :insts {}})
+                                :pos (:_b n) :insts {} :constraint (:requiresClause n)})
       (enter! scope (:name n) {:e :tmpl :tk tk :id tid :pos (long (or (:_b n) 0))})
       :template)
     "ClassTemplatePartialSpecializationDecl"
@@ -2397,20 +2398,28 @@
                 (try
                   (when-let [a (deduce-call dg [] dargs)]
                     (let [cs (guide-scope (:scope g) (:params g) a nil (:pattern-of g))
+                          ;; (CP320 (a): an alias template's guide f' is its class template's guide f with f's parameters
+                          ;; bound by the alias's deduction (:fscope); f's constraints judged there)
+                          [fs fargs] (if-let [f (:fscope g)] (f cs) [cs a])
                           ok (fn [rc] (or (nil? rc)
                                           (let [d (atom false)
-                                                v (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (sema/constraint-satisfied? cs rc))]
+                                                v (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (sema/constraint-satisfied? fs rc))]
                                             (cond v true @d (do (reset! u true) false) :else false))))]
                       (when (and (ok (:class-constraint (tmpl (:ctid g)))) (ok (:constraint g)) (ok (:trailing g)))
                         (let [ft (binding [sema/*cutoff* Long/MAX_VALUE] ((:mk g) cs))
                               cls (if (= :user (:kind g))
                                     (abi/unq (:ret ft))
                                     (let [ct (tmpl (:ctid g))]
-                                      (instantiate-class (:ctid g) (or (complete-args ct (subvec (vec a) 0 (count (:params ct)))) (fail :template "ctad: missing arguments")))))
-                              fid (next-id)]
-                          (swap! sema/*fns* assoc fid {:id fid :name (:name g) :kind :guide :ty {:k :fn :ps (vec (:ps ft)) :ret cls :va (:va ft)}
-                                                       :defaults (:defaults g) :tinst {:tid (:id g) :args a} :guide (:kind g)
-                                                       :explicit (:explicit g) :deleted-sure false})
+                                      (instantiate-class (:ctid g) (or (complete-args ct (subvec (vec fargs) 0 (count (:params ct)))) (fail :template "ctad: missing arguments")))))
+                              ;; (CP320 (a): the deducibility constraint and the alias's own constraints, the class the guide
+                              ;; returns for the alias; false a sure drop)
+                              cls (if-let [res (:result g)] (res cls) cls)
+                              _ (when (= :unsure cls) (reset! u true))
+                              fid (when (map? cls) (next-id))]
+                          (when fid
+                            (swap! sema/*fns* assoc fid {:id fid :name (:name g) :kind :guide :ty {:k :fn :ps (vec (:ps ft)) :ret cls :va (:va ft)}
+                                                         :defaults (:defaults g) :tinst {:tid (:id g) :args a} :guide (:kind g)
+                                                         :explicit (:explicit g) :deleted-sure false}))
                           fid))))
                   (catch arbace.lang.ExceptionInfo e
                     (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "guide" (:name g) (:kind g) "drops out:" (.getMessage e))))
@@ -2429,6 +2438,177 @@
         (when (and (= :tspec (:k q)) (= "initializer_list" (:name q)) (= [[:ns "std"]] (:path q)))
           (first (:args q)))))))
 
+;; CP320 (a): an alias template's guides ([over.match.class.deduct]/3, C++20; clang's C++17 extension), after clang's
+;; SemaTemplateDeductionGuide.cpp at llvmorg-23.1.5 (getRHSTemplateDeclAndArgs, BuildDeductionGuideForTypeAlias,
+;; DeclareImplicitDeductionGuidesForTypeAlias, DeclareAggregateDeductionGuideForTypeAlias, buildIsDeducibleConstraint).
+;; For each guide f of the class template C its defining-type-id names (aliases desugared), the template arguments of
+;; f's return type are deduced from the defining-type-id C<X...> ([temp.deduct.type], a parameter left undeduced
+;; allowed); f' has the alias's parameters those deductions name, then f's parameters left undeduced; its function
+;; parameters are f's with the deduced ones substituted; its constraints f's, conjoined with the alias's and with
+;; is_deducible: f' is viable only when the alias's arguments can be deduced back from the class it returns and give that
+;; class ([over.match.class.deduct]/3.3, [temp.deduct.type] as for a partial specialization). In the slice f' is built
+;; lazily: its :mk resolves the alias's C<X...> in the scope binding f''s parameters, deduces f's from it again and
+;; resolves f's signature there (:fscope gives that scope and f's arguments, where f's constraints are judged); :result
+;; is the deducibility check on the class f returns. A guide whose deduction from C<X...> fails can never return a
+;; specialization of the alias: no guide. A parameter with a default argument, or a deduction the slice cannot make,
+;; makes the guide unsure (nil :sig: the parser's deduction kept when no other guide decides).
+
+(defn- alias-rhs
+  "The alias template `at`'s defining-type-id with the alias's own parameters (symbolic), aliases substituted:
+  [class-template-id type] when it names a specialization of a class template, else nil."
+  [at]
+  (let [x (try (binding [sema/*cutoff* Long/MAX_VALUE] (sema/resolve-type (sym-scope at) (get-in (:pattern at) [:type :qualType])))
+               (catch arbace.lang.ExceptionInfo _ nil))
+        x (some-> x abi/unq)]
+    (cond (nil? x) nil
+          (and (= :tspec (:k x)) (:tmpl x)) [(:tmpl x) x]
+          (abi/class? x) (when-let [ct (:tmpl (abi/cls (:id x)))] [ct x]))))
+
+(defn- entity-arg
+  "The template argument a scope's entity for a parameter stands for (arg-entity's inverse)."
+  [e]
+  (case (:e e)
+    :type (:ty e)
+    :pack {:pack (:elems e)}
+    :nttp (cond-> {:k :tparam-v :i (:i e) :tid (:tid e)} (:pack e) (assoc :pack true))
+    :enumerator {:val (:val e) :ty (:ty e)}
+    :ttp {:k :ttp :i (:i e) :tid (:tid e)}
+    :tmpl (let [t (tmpl (:id e))] {:tmpl (:id e) :name (:name t) :path (:path t)})
+    :declconst {:decl (:decl e) :ty (:ty e) :null (:null e)}
+    :texpr (:x e)
+    (fail :template "ctad: an alias guide's parameter entity " (:e e))))
+
+(defn- guide-ret-pattern
+  "The template-id a class guide `g` returns, written with its own parameters (symbolic, its id): the user guide's
+  return type, else the class template's own C<T...>."
+  [g]
+  (let [gid (:id g)]
+    (if (= :user (:kind g))
+      (some-> (:ret (:sig g)) abi/unq)
+      (let [ct (tmpl (:ctid g))]
+        (binding [sema/*cutoff* Long/MAX_VALUE]
+          (abi/unq (sema/resolve-type (guide-scope (:scope g) (:params g) nil gid (:pattern-of g)) (self-text ct))))))))
+
+(defn- alias-deducible
+  "buildIsDeducibleConstraint's check (__is_deducible(A, R)) for the alias template `at` whose defining-type-id is `x`
+  (symbolic): the alias's arguments deduced from the class `cls` and the alias's own constraints (its parameters'
+  type-constraints, its requires-clause) satisfied by them: the arguments, false (a sure failure) or :unsure."
+  [at x cls]
+  (let [b (atom {}) u (atom false)
+        ok (binding [*unsure* u] (deduce-type b (:id at) x cls))]
+    (cond
+      @u :unsure
+      (not ok) false
+      :else
+      (let [args (try (finish-deduction at @b) (catch arbace.lang.ExceptionInfo _ ::unsure))]
+        (cond
+          (= ::unsure args) :unsure
+          (nil? args) false
+          :else
+          (let [as (bind-scope (:scope at) (:params at) args nil)
+                back (try (binding [sema/*cutoff* Long/MAX_VALUE] (abi/unq (sema/resolve-type as (get-in (:pattern at) [:type :qualType]))))
+                          (catch arbace.lang.ExceptionInfo _ ::unsure))]
+            (cond
+              (= ::unsure back) :unsure
+              (not= (canonical back) (canonical cls)) false
+              (not (type-constraints-satisfied? at args)) false
+              (:constraint at)
+              (let [d (atom false)
+                    v (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (sema/constraint-satisfied? as (:constraint at)))]
+                (cond v args @d :unsure :else false))
+              :else args)))))))
+
+(defn- deduce-from-rhs
+  "[over.match.class.deduct]/3's deduction of the guide `gid`'s return type R's template arguments from the alias's
+  defining-type-id X ([temp.deduct.type], deduction not failing when some stay undeduced): the same class template,
+  argument by argument, an argument that does not deduce left (clang's DeduceTemplateArguments with
+  NumberOfArgumentsMustMatch false); a pack expansion among them matched as a list. False when the templates differ."
+  [b gid R X]
+  (let [targs (fn [t] (cond (= :tspec (:k t)) [(:tmpl t) (:args t)]
+                            (abi/class? t) (let [c (abi/cls (:id t))] [(:tmpl c) (:targs c)])))
+        [rt ras] (targs R) [xt xas] (targs X)]
+    (boolean
+      (when (and rt (= rt xt))
+        (if (some #(pack-pattern? % gid) ras)
+          (match-args b gid ras xas)
+          (do (doseq [[p a] (map vector ras xas)]
+                (let [snap @b] (when-not (match-arg b gid p a) (reset! b snap))))
+              true))))))
+
+(defn- alias-result
+  "The :result of the alias template `at`'s guides: the class itself when the alias's arguments deduce back to it."
+  [at x]
+  (fn [cls] (let [r (alias-deducible at x cls)] (cond (false? r) false (= :unsure r) :unsure :else cls))))
+
+(defn- alias-guide
+  "The guide f' of the alias template `at` (its defining-type-id `x`, symbolic) from its class template's guide `g`
+  (registered), registered as a template; nil when f's return type cannot be deduced from `x` (never a specialization of
+  the alias). `result` maps the class f' returns to the deduced class (the alias's specialization: that class itself;
+  CP323's inherited guides: the derived class) or false or :unsure."
+  [at x g result]
+  (let [gid (:id g)
+        u (atom false)
+        R (when (:sig g) (try (guide-ret-pattern g) (catch arbace.lang.ExceptionInfo _ nil)))
+        b (atom {})
+        ok (when R (binding [*unsure* u] (try (deduce-from-rhs b gid R x) (catch arbace.lang.ExceptionInfo _ (reset! u true) false))))
+        unsure? (or (nil? R) @u)]
+    (when (or unsure? ok)
+      (let [atid (:id at)
+            deduced @b
+            refd (sort (distinct (mapcat #(tparams-in % atid) (vals deduced))))
+            undeduced (remove #(contains? deduced %) (range (count (:params g))))
+            ;; (f''s parameters keep their names, so that their default arguments resolve as written; one of f's that
+            ;; shares a name with the alias's is renamed, its default argument then unsure)
+            anames (into {} (for [i refd] [i (:name (nth (:params at) i))]))
+            taken (set (vals anames))
+            fnames (into {} (for [j undeduced :let [nm (:name (nth (:params g) j))]] [j (if (taken nm) (str "__arbace_f" j) nm)]))
+            params (vec (concat (for [i refd] (-> (nth (:params at) i) (dissoc :tc :tc-args)))
+                                (for [j undeduced] (assoc (nth (:params g) j) :name (fnames j)))))
+            unsure? (or unsure? (some :bound (vals deduced))
+                        (some (fn [j] (and (not= (fnames j) (:name (nth (:params g) j))) (:default (nth (:params g) j)))) undeduced)
+                        (not= (count params) (count (distinct (map :name params)))))
+            rhs-qt (get-in (:pattern at) [:type :qualType])
+            fscope (fn [s]
+                     (let [ent (fn [nm] (or (first (#'sema/own-names s nm)) (fail :template "ctad: an alias guide's parameter " nm)))
+                           aargs (vec (for [[i p] (map-indexed vector (:params at))]
+                                        (if (contains? anames i)
+                                          (entity-arg (ent (anames i)))
+                                          (case (:kind p)
+                                            :type (cond-> {:k :tparam :i i :tid atid :name (:name p)} (:pack p) (assoc :pack true))
+                                            :template {:k :ttp :i i :tid atid}
+                                            (cond-> {:k :tparam-v :i i :tid atid} (:pack p) (assoc :pack true))))))
+                           xs (abi/unq (sema/resolve-type (bind-scope (:scope at) (:params at) aargs nil) rhs-qt))
+                           b2 (atom {})
+                           _ (when-not (deduce-from-rhs b2 gid R xs) (fail :template "ctad: an alias guide's substitution"))
+                           fargs (vec (for [j (range (count (:params g)))]
+                                        (if (contains? @b2 j) (get @b2 j) (entity-arg (ent (fnames j))))))]
+                       [(guide-scope (:scope g) (:params g) fargs nil (:pattern-of g)) fargs]))
+            g2id (next-id)
+            g2 (cond-> (assoc (dissoc g :sig) :id g2id :params params :pattern-of nil :insts {}
+                              :mk (fn [s] ((:mk g) (first (fscope s))))
+                              :fscope fscope :result result :alias (:id at))
+                 true (dissoc :user-node))
+            sig (when-not unsure?
+                  (try (binding [sema/*cutoff* Long/MAX_VALUE]
+                         (dissoc ((:mk g2) (guide-scope (:scope g2) params nil g2id nil)) :cq))
+                       (catch arbace.lang.ExceptionInfo e
+                         (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "alias guide" (:name at) (:kind g) "not built:" (.getMessage e))))
+                         nil)))
+            g2 (assoc g2 :sig sig)]
+        (swap! *tmpls* assoc g2id g2)
+        g2))))
+
+(defn- alias-guides
+  "The alias template `at`'s guides from the class template's `gs` (DeclareImplicitDeductionGuidesForTypeAlias), with
+  [ctid x] its defining-type-id's (alias-rhs); kept on the alias while the class template's guides are the same."
+  [at [ctid x] gs]
+  (if (and (:ctad-src at) (identical? gs (:ctad-src at)))
+    (:ctad-guides at)
+    (let [res (alias-result at x)
+          ags (vec (keep #(alias-guide at x % res) gs))]
+      (upd-tmpl! (:id at) assoc :ctad-guides ags :ctad-src gs)
+      ags)))
+
 (defn ctad
   "The :ctad hook: the class a placeholder for the class template or alias template `tid` deduces from an initializer
   of `kind` (:direct, :copy, :list-direct, :list-copy) with `init` (the arguments' vector, an expression, an
@@ -2441,21 +2621,25 @@
             (fail :ctad "use of class template '" cname "' requires template arguments"))
         _ (when (= :alias (:tk t))
             (when (and (< (long sema/*cxx-year*) 20) sema/*pedantic-errors*)
-              (fail :ctad "class template argument deduction for alias templates is a C++20 extension ('" cname "')"))
-            (fail :template "ctad: an alias template's guides (" cname ")"))
+              (fail :ctad "class template argument deduction for alias templates is a C++20 extension ('" cname "')")))
+        ;; (CP320 (a): an alias template's guides are its defining-type-id's class template's, rewritten: alias-guides)
+        alias? (= :alias (:tk t))
+        rhs (when alias? (or (alias-rhs t) (fail :template "ctad: an alias template's defining-type-id (" cname ")")))
+        ctid (if alias? (first rhs) tid)
+        ct (tmpl ctid)
         list? (#{:list-direct :list-copy} kind)
         inits (cond list? (:items init) (vector? init) init :else [init])
         ;; (copy-initialization not from a list: the converting guides alone, [over.match.copy]/1, [over.match.ctor]/1)
         allow-explicit (not= :copy kind)
-        gs (class-guides tid)
+        gs (if alias? (alias-guides t rhs (class-guides ctid)) (class-guides tid))
         has-user (some #(= :user (:kind %)) gs)
-        _ (when (and (nil? (:pattern t)) (not has-user))
+        _ (when (and (nil? (:pattern ct)) (not has-user))
             (fail :ctad "template '" cname "' has no definition and no deduction guides"))
         ;; (C++23's inherited constructors' guides, [over.match.class.deduct]/1.10 (P2582), are not built: a class that
         ;; inherits constructors is not judged)
         inherits (some #(and (= "UsingDecl" (:kind %))
                              (let [[_ a b] (re-find #"(\w+)\s*(?:<[^;]*>)?\s*::\s*(\w+)\s*;?\s*$" (or (node-text %) ""))] (and a (= a b))))
-                       (kids (:pattern t)))
+                       (kids (:pattern ct)))
         cands (fn [only-list args]
                 (let [drops (atom {:sure-drops 0 :unsure-drops 0})
                       fids (vec (concat
@@ -2471,19 +2655,22 @@
                                    fid)
                                  ;; [over.match.class.deduct]/1.4: the aggregate deduction candidate
                                  (when (and (>= (long sema/*cxx-year*) 20) (not has-user) (not only-list) (seq inits)
-                                            (:pattern t) (aggregate-pattern? (:pattern t))
+                                            (:pattern ct) (aggregate-pattern? (:pattern ct))
                                             (or list? (= :direct kind)))
-                                   (let [ag (aggregate-guide tid inits)]
+                                   (let [ag (aggregate-guide ctid inits)]
                                      (cond
                                        (= :unsure ag) (do (swap! drops update :unsure-drops inc) nil)
                                        (nil? ag) nil
                                        :else (let [g (let [gid (next-id)
-                                                           g (assoc ag :id gid :tk :guide :name (str "<deduction guide for " cname ">") :insts {} :ctid tid)
+                                                           g (assoc ag :id gid :tk :guide :name (str "<deduction guide for " (:name ct) ">") :insts {} :ctid ctid)
                                                            sig (try (dissoc ((:mk g) (guide-scope (:scope g) (:params g) nil gid (:pattern-of g))) :cq)
                                                                     (catch arbace.lang.ExceptionInfo _ nil))]
                                                        (swap! *tmpls* assoc gid (assoc g :sig sig))
-                                                       (assoc g :sig sig))]
-                                               (when-let [fid (guide-candidate! g args nil drops)] [fid])))))))]
+                                                       (assoc g :sig sig))
+                                                   ;; (CP320 (a): DeclareAggregateDeductionGuideForTypeAlias, the aggregate guide rewritten)
+                                                   g (if alias? (alias-guide t (second rhs) g (alias-result t (second rhs))) g)]
+                                               (when g
+                                                 (when-let [fid (guide-candidate! g args nil drops)] [fid]))))))))]
                   [fids @drops]))
         unsure-fail (fn [why] (fail :template "ctad: " why " (" cname ")"))
         resolve (fn [[fids drops] args]
@@ -2507,7 +2694,7 @@
                             (not (some #(and (:sig %) (zero? (long (guide-min-args %)))) gs))
                             (not (and (= 1 (count inits)) (not= :init-list (:op (first inits)))
                                       (when-let [c (let [u (abi/unq (:ty (first inits)))] (when (abi/class? u) (:id u)))]
-                                        (some #(= tid (:tmpl (abi/cls %))) (class-and-bases c)))))))
+                                        (some #(= ctid (:tmpl (abi/cls %))) (class-and-bases c)))))))
             r1 (when try-list (resolve (cands true [init]) [init]))
             r (if (or (nil? r1) (= ::none r1)) (resolve (cands false inits) inits) r1)]
         (cond

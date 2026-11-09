@@ -5359,3 +5359,29 @@ Proof (light; the stubs first on PATH, `REPR_CPP_THREADS=2`; `.tmp/verd.ae` prin
 
 The whole part's record, recorded tonight, is read in the names' order; the night's second command (the record held) reads it again,
 and a third, shuffled, is the order's proof on the 4,597 (the night's commands below).
+
+## As built: CP320 (a), an alias template's guides (2026-11-09; branch `cpp-props4`)
+
+After clang's `clang/lib/Sema/SemaTemplateDeductionGuide.cpp` at llvmorg-23.1.5 (the pinned tarball's: getRHSTemplateDeclAndArgs,
+BuildDeductionGuideForTypeAlias, DeclareImplicitDeductionGuidesForTypeAlias, DeclareAggregateDeductionGuideForTypeAlias,
+buildIsDeducibleConstraint) and [over.match.class.deduct]/3, in `arbace.cpp.template` (Arbace's own, the checker and the code
+generator alike):
+
+- `alias-rhs`: the alias's defining-type-id resolved with its own parameters, aliases substituted (B = A<W> with A = C<V*, V*>
+  is C<W*, W*>): the class template and the type, else the deduction is the slice's unsure one (as before).
+- `alias-guide`, f' from each guide f of that class template (its constructors', C() when none, the copy deduction candidate,
+  the user's guides, the aggregate one for the initializer): f's return type's arguments deduced from C<X...> argument by argument
+  (`deduce-from-rhs`, an argument that does not deduce left, as clang's DeduceTemplateArguments with NumberOfArgumentsMustMatch
+  false; another class template: no guide); f''s template parameters the alias's that the deductions name, then f's left
+  undeduced (their names kept, so default arguments resolve as written; one sharing a name with the alias's renamed); its
+  signature f's with the deduced parameters substituted, built lazily (`:mk` resolves C<X...> in the scope binding f''s
+  parameters, deduces f's again, resolves f's signature there; `:fscope`, where f's constraints are judged).
+- `alias-deducible`, the is_deducible constraint and the alias's own: the alias's arguments deduced from the class the guide
+  returns (finish-deduction, defaults completed), C<X...> with them that same class, the alias parameters' type-constraints and
+  its requires-clause (recorded now on the alias template, `:constraint`) satisfied: else a sure drop.
+- `ctad` takes the alias's guides from the class template's (kept by the identity of the class's guide list), the aggregate
+  candidate rewritten as well; from C++17 on (C++17 with `-pedantic-errors` clang's C++20 extension error, as before).
+- Unsure (the parser's deduction kept when no other guide decides): a guide the slice cannot build, a deduced array bound, a
+  renamed parameter's default argument, an alias whose defining-type-id is no class template's specialization, a member alias
+  template named through its class (`T<double>::AFoo`, a type the slice does not resolve), and an alias template of a class
+  inheriting constructors at C++23.

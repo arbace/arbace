@@ -2617,3 +2617,16 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 - **Alternatives**: (b) a fresh process a file for the record (about twice the 80 minutes), not needed once the load is
   serialized; keying the shared tables by file was the other half of (a).
 
+## 2026-11-09: C++'s CP320 (a), an alias template's guides (branch `cpp-props4`)
+
+- **Built** (`arbace/cpp/template.ae`; after clang's SemaTemplateDeductionGuide.cpp at llvmorg-23.1.5, the pinned tarball:
+  getRHSTemplateDeclAndArgs, BuildDeductionGuideForTypeAlias, DeclareImplicitDeductionGuidesForTypeAlias,
+  DeclareAggregateDeductionGuideForTypeAlias, buildIsDeducibleConstraint): an alias template's guides f' from its
+  defining-type-id's class template's guides f (implicit, copy, user, aggregate), f's return type's arguments deduced from the
+  defining-type-id, f''s parameters the alias's it names and f's undeduced, its signature built lazily; the is_deducible
+  constraint and the alias's own constraints on the class a guide returns; from C++17 on.
+- **Why**: the user's decision CP320 (a) of 2026-11-09 (doc/cpp/CPP-SURVEY.md, "Proposed (CP320-CP324)").
+- **Measured**: probes `.tmp/p/al1-al3b.cpp` (seven deduced types right, the control's seven wrong ones refused); the 75 CTAD
+  files (`.tmp/fctad.txt`) with CP323: 21 → 28 (class-deduction-alias1, -alias2, -alias3, -alias8, -alias12, -alias16, -alias19).
+- **Left**: a member alias template named through its class (`T<double>::AFoo`), cpp1z/class-deduction-alias1's C++17-only
+  GCC error (clang accepts).
