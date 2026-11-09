@@ -258,7 +258,9 @@
                                   (swap! *frags* assoc nm it)
                                   (.add out (place nm :Ident nm false nil 0 :Alone (long (or (:mv-mark it) 0)) (:mv-orig it) (:mv-fspan it))))
                      :else (let [^Tok t (:t it)]
-                             (if (and (>= (.-lo t) 0) (zero? (long (:mark it))))
+                             ;; RF12: in the virtual file a root token too has a place of its own in each expansion (rustc's
+                             ;; NodeIds: `$arg` used twice is two nodes), its origin kept
+                             (if (and (>= (.-lo t) 0) (zero? (long (:mark it))) (not *virtual*))
                                (.add out t)
                                (.add out (place (tok-text t) (.-kind t) (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t) (:mark it)
                                                  (if (>= (.-lo t) 0) t (:orig it)) (:fspan it)))))))]
@@ -470,7 +472,9 @@
       (try (f (parser ctx))
            (catch Throwable e
              (if (identical? e ps/perr)
-               (throw (ex-info (str "expand: the parser: " (first (first errs))) {:expand true}))
+               (do (when (System/getenv "EXPAND_DEBUG")
+                     (let [^String t (.-text ^Src (:src ctx))] (println "EXPAND_DEBUG parse failed:" (pr-str (vec errs)) (subs t (.offsetByCodePoints t 0 (int (min (inc (long (:n0 ctx))) (.codePointCount t 0 (.length t)))))))))
+                   (throw (ex-info (str "expand: the parser: " (first (first errs))) {:expand true})))
                (throw e)))))))
 
 (def ^:private parse-pat* (fn [^P p] (ps/parse-pat-allow-top-guard p nil :recover-comma nil nil)))
@@ -565,7 +569,7 @@
   "A fragment of KIND parsed from elems at i: [ast next-i] or nil"
   [elems i kind]
   (let [rest-items (subvec elems i)
-        ctx (assemble rest-items)
+        ctx (virtualize (assemble rest-items))
         starts (:starts ctx)]
     (try
       (parse-with ctx
@@ -598,6 +602,11 @@
       (:tok pat) (when (and e (same-tok? (:tok pat) e)) [[(inc i) env]])
       (:group pat) (when (and e (:g e) (= (:g e) (:g (:group pat))))
                      (for [[j env'] (m-seq (:sub pat) 0 (:kids e) 0 env) :when (= j (count (:kids e)))] [(inc i) env']))
+      ;; RF12: a fragment an outer macro passes on (`$compiletime` as `$compiletime:block` again): matched whole, as rustc's
+      ;; nonterminal in its invisible group is by a matcher of its kind
+      (and (:var pat) (:frag e) (not= :tt (:kind pat))
+           (let [fk (:frag e) pk (:kind pat)] (or (= fk pk) (and (#{:expr :expr_2021} fk) (#{:expr :expr_2021} pk)))))
+      [[(inc i) (assoc env (:var pat) e)]]
       (:var pat)
       (case (:kind pat)
         :tt (when e [[(inc i) (assoc env (:var pat) [e])]])
@@ -702,6 +711,9 @@
                            :kids (transcribe (:sub p) env mark)}])
             (:var p) (let [b (get env (:var p) ::none)]
                        (cond (= b ::none) [(titem (ftok :Dollar nil nil nil 0 :Alone) mark) (titem (ftok :Ident (:var p) false nil 0 :Alone) mark)]
+                             ;; RF12: an item fragment after the transcriber's attributes (`#[$meta] $item`): its tokens, which the
+                             ;; parser takes with the attributes as one item (rustc's NtItem in an invisible group)
+                             (and (map? b) (= :item (:frag b)) (:items b)) (:items b)
                              (map? b) (if (:frag b) [(metavar-frag b p mark)] (throw (ex-info (str "expand: $" (:var p) " still repeating") {:expand true})))
                              :else b))
             (:rep p) (let [vs (filter #(map? (get env %)) (rep-vars (:rep p)))
@@ -719,12 +731,15 @@
   [mac input]
   (let [mark (fresh-mark)]
     (when *mark-crates*
-      (swap! *mark-crates* assoc mark (let [n (str (:name mac))] (if (str/includes? n "::") (first (str/split n #"::")) "crate"))))
+      (swap! *mark-crates* assoc mark (let [n (str (:name mac))] (if (str/includes? n "::") (first (str/split n #"::")) "crate")))
+      ;; RF12: a macro 2.0's tokens resolve at its definition (def-site hygiene)
+      (when-let [m (:def-site mac)] (swap! *mark-crates* assoc [:def-site mark] m)))
     (or (some (fn [[m t]]
                 (when-let [[_ env] (first (filter #(= (count input) (first %)) (m-seq m 0 input 0 {})))]
                   (transcribe t env mark)))
               (:arms mac))
-        (throw (ex-info (str "expand: no arm of " (:name mac) " matches") {:expand true})))))
+        (do (when (System/getenv "EXPAND_DEBUG") (println "EXPAND_DEBUG no arm of" (:name mac) "for" (items-text input)))
+            (throw (ex-info (str "expand: no arm of " (:name mac) " matches") {:expand true}))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Builtin macros

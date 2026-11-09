@@ -388,14 +388,41 @@
     [ip args (erase (c/subst (c/sty->ty (:self m)) args))
      (when-let [t (:trait m)] [(nth t 1) (erase (c/subst (mapv c/sty->ty (nth t 2)) args))])]))
 
+(def ^:private impl-index-cache (atom nil))
+
+(defn- impl-index
+  "RF12: the crate's impls' headers, computed once per crate (core's modules have hundreds of impls each)"
+  []
+  (let [k c/*defs* v @impl-index-cache]
+    (if (and v (identical? k (:k v)) (= (count @k) (:n v)))
+      (:impls v)
+      (let [impls (vec (for [d @k :when (str/starts-with? (str (:kind d)) "Impl")
+                             :let [[self-ty tr] (c/impl-header (:id d))]]
+                         {:id (:id d) :self self-ty :tr tr}))]
+        (reset! impl-index-cache {:k k :n (count @k) :impls impls})
+        impls))))
+
+(declare shallow)
+
+(defn- type-head
+  "A type's head for the impls' prefilter: its ADT, primitive or constructor; nil when it may be anything"
+  [t]
+  (when (vector? t)
+    (case (first t)
+      :adt [:adt (second t)] (:int :uint :float) [(first t) (second t)] (:bool :char :str :never) [(first t)]
+      (:ref :ptr :slice :array :tuple :fnptr :dyn) [(first t)]
+      nil)))
+
 (defn- local-impls
-  "The crate's impls: [id self-ty trait-ref] instantiated with fresh arguments"
-  [trait?]
-  (for [d (c/defs) :when (str/starts-with? (str (:kind d)) "Impl")
-        :let [[self-ty tr] (c/impl-header (:id d))]
-        :when (if trait? tr (nil? tr))]
-    (let [args (fresh-args (:id d))]
-      [(:id d) args (erase (c/subst self-ty args)) (when tr [(first tr) (erase (c/subst (second tr) args))])])))
+  "The crate's impls: [id self-ty trait-ref] instantiated with fresh arguments (of TRAIT when given; inherent ones whose
+  self type's head may be T's when given)"
+  [trait? & [trait t]]
+  (let [th (when t (type-head (shallow t)))]
+    (for [{:keys [id self tr]} (impl-index)
+          :when (if trait? (and tr (or (nil? trait) (= trait (first tr)))) (nil? tr))
+          :when (or (nil? th) (let [h (type-head self)] (or (nil? h) (= h th))))]
+      (let [args (fresh-args id)]
+        [id args (erase (c/subst self args)) (when tr [(first tr) (erase (c/subst (second tr) args))])]))))
 
 (defn- impl-item
   "An impl's item named NM: [def kind] (std's or the crate's)"
@@ -462,7 +489,7 @@
   selected)"
   [t trait & [targs]]
   (let [cands (if trait
-                (concat (for [x (local-impls true) :when (= trait (first (nth x 3)))] x)
+                (concat (local-impls true trait t)
                         ;; std's: those of the self type's key and the blanket ones (all when the type has no key)
                         (let [k (self-key t) by (get (:trait-impls-by c/*si*) trait)]
                           (for [ip (let [st (shallow t)]
@@ -476,7 +503,7 @@
                                            k (concat (get by k) (get by :blanket))
                                            :else (get (:trait-impls c/*si*) trait)))]
                             (std-impl-instance ip))))
-                (concat (local-impls false)
+                (concat (local-impls false nil t)
                         (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))]
     ;; candidate assembly and winnowing (select.rs): a goal with inference variables in it that two impls match is
     ;; ambiguous (no impl selected, nothing bound; the obligation stays pending), else the one impl that matches
@@ -708,6 +735,8 @@
     (vec (keep (fn [c] (when (= 'trait (head c)) (let [p (nth c 1)] (when-not (#{(c/lang "meta_sized") (c/lang "sized")} p) p))))
                (:predicates (get (:traits c/*si*) d))))))
 
+(def ^:dynamic *strict-params* false)   ; RF12: a parameter's clause holds by the parameter environment alone (copy-ty?)
+
 (defn holds?
   "Selection of a trait clause [TRAIT ARGS] (the solver's slice, RF8): Sized by the self type, a variable or a parameter
   assumed (an accepted program's obligation), else an impl whose header unifies and whose own clauses hold"
@@ -742,6 +771,8 @@
         (when (= 1 (count (distinct hits)))
           (binding [*depth* (inc (long *depth*))] (impls-for self tr (vec (rest args)))))
         true)
+      (and *strict-params* (= :param (first self)))
+      (boolean (some (fn [cl] (and (= :trait (first cl)) (= tr (first (second cl))) (= self (shallow (first (second (second cl))))))) (param-env)))
       (or (tvar? self) (= :param (first self)) (= [:unknown] self)) true
       ;; a cycle or a chain too deep: not proven (the old solver's overflow is an error, never a success)
       (> (long *depth*) 4) false
@@ -830,7 +861,7 @@
                          (or (when (#{"AssocFn"} k) (try-def def args)) (do (rollback! s2) nil))
                          (do (rollback! s2) nil))
                        nil)))
-                 (concat (local-impls false)
+                 (concat (local-impls false nil t)
                          (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
            (do (rollback! s) nil)))
      ;; traits in scope (assemble_extension_candidates_for_trait): Self a fresh variable, the method's self type unified
@@ -908,7 +939,7 @@
                           :else (do (rollback! s) nil))
                     (do (rollback! s) nil))
                   nil)))
-            (concat (local-impls false)
+            (concat (local-impls false nil t)
                     (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
       (some (fn [tr]
               (when-let [[def k] (trait-item tr nm)]
@@ -1599,7 +1630,9 @@
       :array (copy-ty? (second t))
       :infer (#{:int :float} (second t))
       :param (boolean (some (fn [cl] (and (= :trait (first cl)) (= (c/lang "copy") (first (second cl))) (= t (shallow (first (second (second cl))))))) (param-env)))
-      :adt (let [s (snapshot) r (impls-for t (c/lang "copy") [])] (rollback! s) (vector? r))
+      ;; RF12: the impl's clauses on a parameter by the parameter environment (`impl<T: Copy> Copy for MaybeUninit<T>` is not
+      ;; MaybeUninit<T>'s for a T without Copy), not assumed as an accepted program's obligations are
+      :adt (let [s (snapshot) r (binding [*strict-params* true] (impls-for t (c/lang "copy") []))] (rollback! s) (vector? r))
       false)))
 
 (defn- fact-of
@@ -1753,7 +1786,10 @@
                    (or (when-let [[def k] (and tr (trait-item tr nm))]
                          (let [targs (vec (cons bt (drop 1 (fresh-args tr))))]
                            (when *obligations* (swap! *obligations* conj [:trait [tr targs]]))
-                           (cond (= "AssocFn" (str k)) [:fndef def (into targs (drop (count targs) (fresh-args def)))]
+                           (cond (= "AssocFn" (str k)) (let [t [:fndef def (into targs (drop (count targs) (fresh-args def)))]]
+                                                         ;; RF12: the path's user type annotation (instantiate_value_path: TypeOf(def, args))
+                                                         (when *extra* (when-let [u (canonical-user-ty def (nth t 2) nil)] (note! e :user-ty u)))
+                                                         t)
                                  (and (str/starts-with? (str k) "AssocConst") (number? def)) (erase (c/subst (c/type-of def) targs))
                                  :else nil)))
                        [:unknown]))
