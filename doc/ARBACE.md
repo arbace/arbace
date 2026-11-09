@@ -115,7 +115,12 @@ code. Three kinds of things live here:
   unboxers), `constfold.ae` `Core/Opt/ConstantFold.hs`'s litEq, `tostg.ae` `Stg/Unarise.hs`'s unariseFunArgBinder (voidArgId),
   `Core/Opt/Arity.hs`'s mkEtaWW (CorePrep's eta binders) and CorePrep's maybeSaturate, `typecheck.ae` the solver's EvCsPushCall and
   `HsToCore/Binds.hs`'s dsEvBinds (superclass evidence bound once), `deriv.ae` `Tc/Deriv/Generate.hs`'s untag_Expr,
-  genPrimOpApp and eq_expr_with_tag_check as written; `libcheck.ae`'s HF10 verbs (`stg`, `merge`) are Arbace's own; `simpleopt.ae` (2026-11-06) ports
+  genPrimOpApp and eq_expr_with_tag_check as written; since HF10-P5, P8 and P10 (2026-11-09) `typecheck.ae` also follows
+  `compiler/GHC/HsToCore/Foreign/{Decl,C,Prim,Call}.hs` (dsFImport, dsCImport, dsFCall with mkWrapperName's capi wrappers, dsPrimCall,
+  dsFLabel, unboxArg, boxResult, resultWrapper, mk_alt), `tostg.ae` `compiler/GHC/Types/RepType.hs`'s unboxed sums' slots and
+  `Stg/Unarise.hs`'s mkUbxSum, unariseSumAlts and mapSumIdBinders, `simplify.ae` `Core/Opt/Simplify/Env.hs`'s lazy getSubst and
+  `Core/Opt/Simplify.hs`'s shortOutIndirections for top-level binders, `constfold.ae` ConstantFold's binary rules' two literals, from
+  the same tarball; `libcheck.ae`'s HF10 verbs (`stg`, `merge`, `judge-stg`, `record-stg`) are Arbace's own; `simpleopt.ae` (2026-11-06) ports
   `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
   unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
   `compiler/GHC/Core/Opt/ConstantFold.hs` with `Types/Literal.hs`'s conversions, both from the same tarball and carrying

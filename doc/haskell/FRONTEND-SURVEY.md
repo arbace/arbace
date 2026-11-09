@@ -2307,3 +2307,144 @@ The record `test/haskell/lib-stg-results.edn` keeps each module's stage and coun
 - **HFS-I13 The clean run's hour of `target hsc`.** With HFS-I8 (a) and the probe's hour, a clean run of Haskell's steps pays two hours of
   ci (light, beside the serial run). (a) Keep; (b) HFS-I8 (b) (Arbace's own outputs as a pack, verified by a rerun in the oracle tier).
   *Recommended: (a)* until GT8's budget for the clean run objects.
+
+## Decided (the user, 2026-11-09 ~06:15: HF10-P1 to HF10-P10, all as recommended)
+
+HF10-P1 (a), HF10-P2 (a), HF10-P3 (a) (after P5), HF10-P4 (a), HF10-P5 (a), HF10-P6 (a), HF10-P7 (a), HF10-P8 (a), HF10-P9 (b),
+HF10-P10 (a). Built the same day on branch `hs-props2` (below); P4, P7 and P9 are orders and leaves, recorded here: P4 (a) the
+behaviour-changing classes first (P5's foreign imports and P8's unboxed sums were the two that stopped modules or programs), then by
+count; P7 (a) the runs keep the pack's `-O2` data (unpacked fields) until P3's own interfaces make the set coherent; P9 (b) the
+constraint tuples' classes stay as they are until a corpus needs their dictionaries. P3 (a) waits for its own slice (3 to 5 days).
+
+## As built: HF10-P1, P2, P5, P6, P8, P10 (2026-11-09, branch `hs-props2`, from `hs-hf10` 5e30516fb with `mac/next` b15d4c73c merged)
+
+By an agent on the main host by day (the light tier: no gate but `--plan`, no build of Arbace, every process under about 1.5 GiB, at
+most two at once; stage 0 `/root/arbace/target/seed/amd64/arbace`, the checkout's sources evaluated). GHC ran by hand only to make
+the oracle packs (P1's, and the two P2 needs, below); every check below runs without it. One commit a proposal.
+
+### HF10-P1 (a): GHC's `-O0` STG as the pack `haskell-stg-libs-O0-ghc-9.14.1`
+
+- `HSI_DUMP_OPT=-O0 bin/hsi dumps --record --packages ghc-internal,base,ghc-prim,ghc-bignum`: the four packages compiled from the
+  pinned tarball as `bin/hsi dumps` compiles the installed libraries (HES6 (a)), at `-O0`; 510 members, 31.7 MB of forms, **1.9 MB
+  of xz**, read back by `arbace.repr.haskell.stg check` with 0 errors, byte for byte the first slice's `.tmp/hsi/dumps-O0`. Pinned by
+  `test/haskell/records/haskell-stg-libs-O0-ghc-9.14.1.sha256` with its manifest; the kind `stg-libs-O0` in
+  `test/oracle-records/kinds.edn` (verify: `HSI_DUMP_OPT=-O0 bin/hsi verify-libs {sample}`); mirrored (`bin/oracle-records mirror
+  --push`).
+- Keys: night10-fixes' rule (cherry-picked as d4d589c49): `dump_package`'s text hashed as the `-O2` it was, another level keyed
+  apart with the level in the key. `dump_package` is unchanged (its digest keys `haskell-stg-libs`: `bin/hsi libs-pack -O2` takes
+  the `-O2` pack as recorded).
+- `bin/hsi libs-pack [-O0|-O2]`: a level's pack unpacked, its keys checked, its directory printed (`hsi_libs_pack`, `hsi_libs_pin_of`
+  in `bin/lib/hsi/records.bash`); `verify-libs` at `HSI_DUMP_OPT`'s level. `lib-stg` reads its reference from the `-O0` pack and the
+  other packages from `haskell-stg-libs` (`LIB_STG_LIVE=1`: GHC live as before, `LIB_STG_REF`, `HSI_LIBS` other directories).
+
+### HF10-P2 (a): lib-stg as a recorded `--full` step
+
+- `bin/repr-haskell lib-stg --judge FILE` (`arbace.repr.haskell.libcheck judge-stg`): each module of the list against its row of
+  `test/haskell/lib-stg-results.edn` (`:stage :compared :equal :data-equal`; `--record FILE` writes it, `record-stg`); a module whose
+  stage drops (`:ok`, `:errors`, `:stg`, `:typecheck`, `:rename`, `:timeout`) or whose bindings equal to GHC's `-O0` drop fails, and
+  in a run of the whole list a module of one not in the other. Better is reported, never a failure.
+- The negative control: `test/haskell/lib-stg-controls.txt` names the module (GHC.Internal.Base) judged against its reference with
+  the exported bindings' closures rotated; none equal or the step fails (as the first slice's control, now from a file).
+- `--run` with `--judge`: run-check's programs on the pack's libraries and on the own set; a pass lost between them fails
+  (`compare-runs`), and so does a pass of `test/haskell/lib-stg-runs.txt` (the own set's passes, written by `--run --record`) lost,
+  so that both sets failing alike cannot pass.
+- No GHC: the plan's closures from `haskell-lib-ifaces-ghc-9.14.1` (HF9-P1's pack, recorded by hand today, below), the reference from
+  P1's pack, run-check's interfaces from `haskell-ifaces-ghc-9.14.1` (`REPR_HASKELL_RUN_IFACES=pack`, `bin/hsi ifaces-pack`; run-check
+  itself keeps the helper live by default).
+- The step `haskell-lib-stg` (`test/gate/steps.edn`, `--full`, needs `haskell-lib-check`, `:mem-gib 2`, `:hosts [:stage0 :go]`, the
+  five packs' and the corpus's pins, `:inputs [:lib-tools :tools :haskell :hsi]`, its control file in `:controls`); `bin/gate --full
+  --plan`: run, never passed. Its first pass is night 11's.
+- Two packs this needed, recorded by hand (GHC 9.14.1, `:ghc b9908216`): **`haskell-lib-ifaces-ghc-9.14.1`** (HF9-P1's write-ahead
+  pack: `bin/repr-haskell lib-check --live --record-pack`, 265 closures and 269 interfaces, 277 KB xz; its pin joins
+  `haskell-lib-check`'s `:pins`, as that step's comment planned) and **`haskell-ifaces-ghc-9.14.1` re-keyed**: HF9-P2's change to
+  `tools/hsdump` (0cdc76cec) had made every member STALE (so `bin/hsi check --front native` refused it on next too); recorded again,
+  its 440 members byte for byte the same, the pin unchanged, only the manifest's keys.
+
+### HF10-P10 (a): the Simplifier's time on `utf8_decode`
+
+Profiled by counting calls (a driver wrapping the Simplifier's functions, `.tmp/p10/prof.ae`): in 180 s of the first iteration of
+`GHC.Internal.IO.Encoding.UTF8`, `subst-expr-env` was called 427,758 times, `simpl-expr-f` 1,380. The cause: contOutArgs's
+substitution (GHC.Core.Opt.Simplify.Env's getSubst) converted every entry of the environment's substitution, and each ContEx entry by
+its own saved substitution, transitively; with the guards' nested continuations (case-of-case into join points, each saving the
+environment) that is exponential. GHC's `to_expr` is a lazy thunk of `mapVarEnv`: an entry nobody looks up is never computed, one looked
+up twice is computed once. Ported so (`simplify.ae`, `subst-expr-env`: only the keys the expression names, memoised per call). The
+module: past the 900 s limit, now **9.8 s**.
+
+### HF10-P6 (a): the bignum backend
+
+`REPR_HASKELL_BIGNUM=native` (`bin/repr-haskell`'s `corpus_bignum`, the rule of `test/haskell/eval/dump_plan.ae`): ghc-internal read
+with `-DBIGNUM_NATIVE`, `GHC.Internal.Bignum.Backend.GMP` left out, as GHC's reference and the installed libraries were built;
+`lib-check` reads so (`nd.bignum` marks the read, a different backend reads again). `test/haskell/lib-check-ghc-internal.edn`
+recorded again: 265 modules, 260 pass, the 5 in their classes, none worse.
+
+### HF10-P5 (a): foreign imports
+
+GHC 9.14.1's `GHC/HsToCore/Foreign/` ported into the elaborator's Core (`typecheck.ae`, `ds-fimport`): Decl.hs's dsFImport, C.hs's
+dsCImport and dsFCall (the CApiConv wrapper's name: mkWrapperName's `ghc_wrapper:N:UNIT:MODULE:SYM` z-encoded, N the module's counter),
+Prim.hs's dsPrimCall, dsFLabel; Call.hs's unboxArg (primitive, newtype, Bool, a product of one field), boxResult (IO's state threading,
+a pure call on `realWorld#`), resultWrapper and mk_alt. The call is a global of kind `ffi` (GHC's FCallId: its spec in the elaborator's
+`:fcalls`, its type the worker's); the wrapper has an INLINE unfolding of its arity (mkInlineUnfoldingWithArity), which the simple
+optimiser leaves alone; `tostg.ae` writes StgOpApp's `(ffi TARGET CONV SAFETY ATOMS REPS)` and `(primcall LABEL UNIT ATOMS REPS)` and the
+label `(label SYM :fun|:data)`. Not taken (left as before, the binding dropped): `"wrapper"` and dynamic imports, an argument of a
+three-field product (unboxArg's ByteArray# case). With it, the rules it met: Unarise keeps `realWorld#` as an argument (only void
+binders are `void#`; it had made every `realWorld#` `void#`), the representations of `Solo#` and `Unit#` (a call returning nothing:
+`:v`), shortOutIndirections of a top-level binder of the module (`free = _free`: GHC's isLocalId), and ConstantFold's binary rules on
+two literals only (`and# x` unsaturated had thrown the NullPointerException that stopped `Bignum.Primitives` and `Backend.Native`
+since the first slice).
+
+### HF10-P8 (a): unboxed sums
+
+`tostg.ae`: RepType's SlotTy, primRepSlot, slotPrimRep, fitsIn, ubxSumRepType and layoutUbxSum; Unarise's mkUbxSum (the tag an `Int#`
+literal, the field in its slot, the others ubxSumRubbishArg's: `absentSumFieldError`, `0`), unariseSumAlts and mapSumIdBinders (a case on
+a sum a case on its tuple, then on the tag, DEFAULT first). A construction takes the sum's type from the binding's result (its join
+points'), a case from its scrutinee's type; a field that needs castArg's cast is left as before. `wordIsPowerOf2#` and
+`bigNatIsPowerOf2#` are GHC's `-O0` STG now.
+
+### The measure
+
+`bin/repr-haskell lib-stg` (one process; the reference P1's pack, the closures HF9-P1's):
+
+| set | HF10's second slice | 2026-11-09 |
+|---|---:|---:|
+| `test/haskell/lib-stg.txt`'s 111 modules (levels 0 to 30, Backend.GMP out by P6) | 2,473 of 3,310; 2 STG stops, 1 with elaborator errors | **2,560 of 3,421**, all 111 `:ok` (14 modules better, none worse: Backend.Native and Primitives made STG, Unicode now without errors, BigNat 78 → 81, Float 150 → 160, Clock, Profiling, Magic, Prim.Ext, Stable, Foreign.Ptr ...) |
+| the other 154 modules of the plan (level 31 to the top) | 40 made before UTF8's timeout | 149 `:ok`, 5 with elaborator errors (Data.Dynamic, Data.Typeable.Internal, Exception.Context, Generics, TH.Lift: lib-check's classes), none over the limit (the slowest 84 s); 2,812 of 4,172 |
+| **the whole of ghc-internal (265 modules), the list since P10 (a)** | | **5,372 of 7,593**; 260 `:ok`, 5 with elaborator errors; 55 modules with every binding equal (of 239 with bindings) |
+
+The largest classes of first differences over the 265 (`summary.txt`): a closure set of another size (`"" / ""`, 1,193: the
+dictionaries' and methods' closures, the constraint tuples HF10-P9 (b) leaves), a constructor GHC makes static where ours is a
+closure (`(rcon / (closure`, 191), a case GHC keeps where ours let-binds (`(case / (let`, 149), updatable and re-entrant swapped (`:r /
+:u` 112, `:u / :r` 104), join points (`(case / (letne`, 46).
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn` (111 modules, against the second slice's record) | 2,560 of 3,421; 14 better, none worse; the control 0 of 171 |
+| `bin/repr-haskell lib-stg --record ... --run` (111 modules) | the runs 59 of 63 on the pack and 59 of 63 with 2,538 own bindings of 111 modules (2,451 of 109 before), 0 lost; `lib-stg-runs.txt` 60 lines |
+| `bin/repr-haskell lib-stg --record ... --run` (265 modules, 47 minutes) | 5,372 of 7,593; the runs 59 of 63 on the pack and 59 of 63 with 5,179 own exported bindings of 265 modules (31,190 of the pack's kept for its ABI), 0 lost; the control 0 of 171 |
+| `REPR_HASKELL_RUN_IFACES=pack bin/repr-haskell run-check` (after P10, and again after P5 and P8) | 59 of 63, 62 of 63 as recorded (the known `synthetic/primops-word`), the control fails as it must |
+| `bin/repr-haskell typecheck-check` | 24 of 24, the control 13 of 24 |
+| `bin/repr-haskell lib-check` (the record pack's run, 265 modules) and `libcheck judge` | 260 pass, 5 in their classes; none worse (Backend.GMP out) |
+| `bin/hsi libs-pack -O2` | the `-O2` pack's keys hold (`dump_package` unchanged) |
+| `bin/gate --full --plan` | `haskell-lib-check` and `haskell-lib-stg` run, never passed; the plan exits 0 |
+
+### What is left
+
+- **HF10-P3 (a), the front end's own interfaces**, the next slice (3 to 5 days): `typecheck/iface-text` writes a module's things and
+  instances but not yet what a library's importers read of GHC's interface (the exports, the fixities, the type constructors with
+  their data, the families, the DFun unfoldings: `hsiface/exports`, `fixities`, `fam`, `unfoldings`); then lib-check's plan with the
+  closures from the own interfaces bottom-up, judged against GHC's `-O0` `.hi` (the helper's `iface` on the reference build), and the
+  run on a coherent own `-O0` set without the merge.
+- The classes above (P4 (a)'s order): the static constructors and the thunk/function flags first (they change what runs), then the
+  closure sets.
+- P5's leftovers: `"wrapper"` and dynamic imports (none in the `-O0` reference), unboxArg's three-field ByteArray# product; P8's:
+  castArg's casts (a sum of an `Int8#` and a `Word#`), a sum constructed outside its binding's result.
+
+### Night commands (one process at a time, at most 1.5 GiB a process; `. .tmp/env.sh`)
+
+1. `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run` (the step `haskell-lib-stg`: 265 modules and the two
+   run-checks, about 47 minutes; no GHC).
+2. `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (the step `haskell-lib-check`, now on its pack).
+3. `REPR_HASKELL_RUN_IFACES=pack bin/repr-haskell run-check` and `bin/hsi check --front native` (the interfaces pack re-keyed).
+4. The oracle tier, by hand: `bin/oracle-records verify haskell stg-libs-O0 --sample 2` (GHC: the reference's two smallest packages
+   dumped again and compared).

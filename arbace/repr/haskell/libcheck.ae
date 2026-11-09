@@ -327,6 +327,63 @@
     ;; the exported bindings each side gives (the internal ones follow them)
     [(count (filter (fn [[f]] (ext? (nm f))) o2)) (count (filter #(ext? (nm %)) (mapcat (comp members first) kept)))])))
 
+;; HF10-P2 (a): lib-stg as a recorded check. A record row: {:name :stage :compared :equal :data-equal}; a module is worse
+;; when its stage drops (:ok, :errors, :stg, :typecheck, :rename, :timeout) or fewer of its exported bindings equal GHC's
+;; -O0 STG; better the other way (reported, never a failure: --record re-records).
+
+(def stg-stage-rank {:ok 5 :errors 4 :stg 3 :typecheck 2 :rename 1 :timeout 0})
+
+(defn- stg-row [r]
+  (into (sorted-map) (merge {:name (:name r) :stage (:stage r)}
+                            (if (:stg r) (select-keys (:stg r) [:compared :equal :data-equal])
+                                (select-keys r [:compared :equal :data-equal])))))
+
+(defn record-stg
+  "The results into lib-stg's record: a whole run replaces it, a partial one its modules' rows"
+  [results-file record-file partial? source]
+  (let [f (File. ^String record-file)
+        old (if (and partial? (.isFile f)) (read-results [record-file]) [])
+        new (read-results [results-file])
+        by (merge (into (sorted-map) (map (juxt :name stg-row) old)) (into {} (map (juxt :name stg-row) new)))]
+    (spit record-file
+          (str ";; HF10's lib-stg as a recorded check (HF10-P2 (a); bin/repr-haskell lib-stg --record; doc/haskell/FRONTEND-SURVEY.md,\n"
+               ";; \"As built: HF10-P1, HF10-P2\"): each module of test/haskell/lib-stg.txt through the front end in ghc-internal's unit,\n"
+               ";; its exported bindings with their closures judged against GHC's -O0 STG (" source "). One map a\n"
+               ";; module: :stage, :compared, :equal, :data-equal. --judge FILE fails on a module whose stage drops or whose equal count\n"
+               ";; drops, on a module of a whole run the record lacks or the other way. Read with the Clojure reader.\n"
+               (apply str (for [[_ r] by] (str (binding [*print-length* nil *print-level* nil] (pr-str r)) "\n")))))
+    (println (str "lib-stg: " (count new) " modules recorded into " record-file " (" (count by) " rows)"))))
+
+(defn judge-stg
+  "A lib-stg run's results against the record: exit status 1 when a module is worse, or (a whole run) one of either is
+  not in the other"
+  [record-file results-file whole?]
+  (let [rec (into {} (map (juxt :name stg-row) (read-results [record-file])))
+        rs (map stg-row (read-results [results-file]))
+        seen (set (map :name rs))
+        bad (atom 0) better (atom 0)
+        rank (fn [x] (stg-stage-rank (:stage x) -1))
+        eq (fn [x] (:equal x 0))]
+    (doseq [r rs]
+      (if-let [x (get rec (:name r))]
+        (let [[k why] (cond (< (rank r) (rank x)) [:worse (str "stage " (name (:stage x)) " -> " (name (:stage r)))]
+                            (< (eq r) (eq x)) [:worse (str "bindings equal " (eq x) " -> " (eq r) " of " (:compared r 0))]
+                            (> (rank r) (rank x)) [:better (str "stage " (name (:stage x)) " -> " (name (:stage r)))]
+                            (> (eq r) (eq x)) [:better (str "bindings equal " (eq x) " -> " (eq r) " of " (:compared r 0))]
+                            :else nil)]
+          (when k
+            (println (str "lib-stg judge: " (:name r) " " (name k) ": " why))
+            (if (= k :worse) (swap! bad inc) (swap! better inc))))
+        (when whole? (println (str "lib-stg judge: " (:name r) " is not in the record")) (swap! bad inc))))
+    (when whole?
+      (doseq [n (sort (keys rec)) :when (not (seen n))]
+        (println (str "lib-stg judge: " n " is recorded but was not judged")) (swap! bad inc)))
+    (println (str "lib-stg judge: " (count rs) " modules against " (count rec) " recorded, "
+                  (reduce + (map eq rs)) " of " (reduce + (map #(:compared % 0) rs)) " bindings equal (recorded "
+                  (reduce + (map eq (vals rec))) "); " @bad " worse or missing, " @better " better"
+                  (when (pos? @better) " (bin/repr-haskell lib-stg --record test/haskell/lib-stg-results.edn re-records them)")))
+    (when (pos? @bad) (System/exit 1))))
+
 (defn compare-runs
   "Two run-check results files (GHC's -O0 libraries, the own set): the passes lost and gained"
   [a b]
@@ -387,6 +444,8 @@
       "rank-stg" (rank-stg (read-results more))
       "replaceable" (replaceable (read-results [(first more)]) (or (second more) "all"))
       "compare-runs" (compare-runs (first more) (second more))
+      "judge-stg" (let [[rec res w] more] (judge-stg rec res (= w "whole")))
+      "record-stg" (let [[res rec w src] more] (record-stg res rec (not= w "whole") src))
       ;; merge MODE RESULTS OURS PACK OUT...: triples; one line a module, NAME OWN KEPT; MODE all (every own binding) or
       ;; equal (only the exported bindings equal to GHC's -O0, RESULTS' judge)
       "merge" (let [[mode res & trip] more

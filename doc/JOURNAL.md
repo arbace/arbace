@@ -3274,3 +3274,32 @@ levels class by header); `test/ocaml/testsuite_check.ae` gives them their AOT cl
 before the night's `oi-check`. Checks by list on both paths, the essential list with its control, own-verdicts --check, the five judgments
 and the rollup: 0 failing. Scores: OCaml completeness 81.58% to 81.75% (eval 460/211/0 to 465/207/0, AOT 405/203/63 to 406/202/64),
 maturity 100%, independence 87.4%. Proposed OC206 (the AOT levels' helpers), OC207 (a control that runs a hook).
+
+## 2026-11-09 HF10's accepted proposals built: P1, P2, P5, P6, P8, P10 (branch `hs-props2`, from `hs-hf10` 5e30516fb)
+
+The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in the light tier on the main host; GHC 9.14.1
+(`:ghc b9908216`) ran by hand only to record oracle packs. Sources: GHC 9.14.1's tarball as pinned by
+`test/haskell/corpus-ghc-9.14.1.edn` (`.tmp/ghc-src/`), `compiler/GHC/HsToCore/Foreign/{Decl,C,Prim,Call}.hs`,
+`compiler/GHC/Stg/Unarise.hs`, RepType's sum slots, `Core/Opt/Simplify/Env.hs`, `Core/Opt/Simplify.hs`, `Core/Opt/ConstantFold.hs`.
+
+- `mac/next` (b15d4c73c, which holds hs-hf10) merged in first for HF9-P1's lib-check pack machinery; night10-fixes' key rule
+  cherry-picked (d4d589c49) so the `-O2` pack stays keyed as recorded and `dump_package` unchanged.
+- HF10-P1 (a): the pack `haskell-stg-libs-O0-ghc-9.14.1` (510 members, 1.9 MB xz, byte for byte the first slice's reference),
+  `bin/hsi libs-pack`, the kind `stg-libs-O0`; lib-stg reads it. Alternative (b), GHC at each run, rejected by the user's decision.
+- Two more packs by hand, because P2's step must run without GHC: `haskell-lib-ifaces-ghc-9.14.1` (HF9-P1's write-ahead pack, now
+  recorded over the native-bignum read) and `haskell-ifaces-ghc-9.14.1` re-keyed (0cdc76cec's helper change had made it STALE; its
+  members unchanged). All mirrored (`bin/oracle-records mirror --push`).
+- HF10-P10 (a): the -O0 Simplifier's contOutArgs substitution was exponential (every saved substitution converted transitively);
+  ported GHC's lazy getSubst. UTF8 from over 900 s to 9.8 s; then every module of ghc-internal's plan compiles (265, the slowest
+  84 s), and the list became the whole package. Profiled with a call-counting driver in scratch (not committed).
+- HF10-P6 (a): `REPR_HASKELL_BIGNUM=native` for lib-check's read (dump_plan.ae's rule); lib-check's record re-recorded (265 modules).
+- HF10-P5 (a): foreign imports desugared after GHC's dsFImport/dsFCall/dsPrimCall/dsFLabel into Core with an FCallId-like global,
+  StgOpApp's `ffi`/`primcall` in tostg; with it realWorld# kept as an argument, Solo#/Unit# reps, shortOutIndirections of top-level
+  binders, ConstantFold's two-literal binary rules (the NPE behind the two STG stops). Alternative (b), the pack's bindings, rejected
+  by the decision.
+- HF10-P8 (a): unboxed sums in Unarise (ubxSumRepType, layoutUbxSum, mkUbxSum, unariseSumAlts); the construction's type taken from the
+  binding's result type, a limitation recorded.
+- HF10-P2 (a): `lib-stg --judge`/`--record`, the control file, the own set's recorded passes, the `--full` step `haskell-lib-stg`.
+- P4 (a), P7 (a), P9 (b) recorded as orders; P3 (a) not started (its first step's gap written down in the survey).
+- Measures: lib-stg over 265 modules 5,372 of 7,593 bindings equal to GHC's -O0 (the old list 2,473 → 2,560 of 3,421, none
+  worse); runs 59 of 63 on both sets, 0 lost; typecheck-check 24 of 24; run-check 59 of 63 as before.

@@ -15,7 +15,9 @@
 #   hsi_lib_keys               "PKG<TAB>KEY" for each package of the dumps plan (HSI_BIGNUM, default native)
 #   hsi_libs                   the colon-joined library directories: HSI_LIBS; HSI_LIVE=1: the dumps directories; else the pack's, its
 #                              keys checked
-#   hsi_record_libs DUMPDIR [PKG,...]    DUMPDIR/stg's packages (those named) packed into haskell-stg-libs (the others kept)
+#   hsi_libs_pack PIN          a libraries' pack unpacked, its keys checked at HSI_DUMP_OPT's level (hsi_libs_pin_of OPT names it)
+#   hsi_record_libs DUMPDIR [PKG,...]    DUMPDIR/stg's packages (those named) packed into haskell-stg-libs (the others kept); with
+#                              HSI_DUMP_OPT=-O0 into haskell-stg-libs-O0-ghc-9.14.1 (HF10-P1 (a))
 #   hsi_progs_dir              the unpacked haskell-stg-progs (checked), or fails
 #   hsi_ifaces_dir             the unpacked haskell-ifaces-ghc-9.14.1 (checked, every member keyed by the helper's identity), or fails
 #   hsi_record_ifaces DIR CMD  DIR's interfaces (M.iface.edn, reexports.edn) packed into haskell-ifaces-ghc-9.14.1
@@ -24,6 +26,12 @@
 # (reexports.edn), the native front end's input (bin/hsi check --front native); keyed by the helper's identity.
 . "$root/bin/lib/repr-haskell/records.bash"
 hsi_libs_pin=$root/test/haskell/records/haskell-stg-libs.sha256
+# HF10-P1 (a): GHC's -O0 STG of ghc-internal, base, ghc-prim and ghc-bignum, the reference of bin/repr-haskell lib-stg
+# (HSI_DUMP_OPT=-O0 bin/hsi dumps --record --packages ...), its keys the -O2 pack's with the level added
+hsi_libs_O0_pin=$root/test/haskell/records/haskell-stg-libs-O0-ghc-9.14.1.sha256
+hsi_libs_pin_of() { # OPT: the libraries' pin of a dump level (-O2: haskell-stg-libs; -O0: the reference's)
+  case ${1:--O2} in -O2) echo "$hsi_libs_pin" ;; -O0) echo "$hsi_libs_O0_pin" ;; *) echo "hsi: no pack of the libraries' STG at $1" >&2; return 1 ;; esac
+}
 hsi_progs_pin=$root/test/haskell/records/haskell-stg-progs.sha256
 hsi_ifaces_pin=$root/test/haskell/records/haskell-ifaces-ghc-9.14.1.sha256
 hsi_work=$root/.tmp/hsi
@@ -53,23 +61,29 @@ hsi_lib_keys() {
 hsi_libs() {
   if [ -n "${HSI_LIBS:-}" ]; then echo "$HSI_LIBS"; return 0; fi
   if [ -n "${HSI_LIVE:-}" ]; then echo "$hsi_work/dumps/stg:$hsi_work/dumps-extra/stg:$hsi_work/dumps-more/stg"; return 0; fi
-  local man=$(oracle_manifest "$hsi_libs_pin") u keys=$TMPDIR/hsi-libkeys.$$ pk want have
-  [ -f "$hsi_libs_pin" ] && [ -f "$man" ] || { echo "hsi: UNRECORDED: no $hsi_libs_pin (bin/hsi dumps --record, by hand on a host with GHC; HSI_LIVE=1 or --live the dumps directories)" >&2; return 1; }
-  u=$(oracle_unpack "$hsi_libs_pin") || return 1
+  HSI_DUMP_OPT=-O2 hsi_libs_pack "$hsi_libs_pin"
+}
+
+hsi_libs_pack() { # PIN: the pack's unpacked directory of PKG/M.stg.ae, every package keyed as the plan keys it now (at HSI_DUMP_OPT's level)
+  local pin=$1 man u keys=$TMPDIR/hsi-libkeys.$$ pk want have nm
+  man=$(oracle_manifest "$pin"); nm=$(oracle_pin_name "$pin")
+  [ -f "$pin" ] && [ -f "$man" ] || { echo "hsi: UNRECORDED: no $pin (${HSI_DUMP_OPT:+HSI_DUMP_OPT=$HSI_DUMP_OPT }bin/hsi dumps --record, by hand on a host with GHC; HSI_LIVE=1 or --live the dumps directories)" >&2; return 1; }
+  u=$(oracle_unpack "$pin") || return 1
   hsi_lib_keys > "$keys"
   # every package of the pack keyed as the plan keys it now
   while IFS=$'\t' read -r pk have; do
     want=$(awk -F'\t' -v p="$pk" '$1 == p {print $2}' "$keys")
-    [ -n "$want" ] || { echo "hsi: STALE $pk: the pack holds a package the plan no longer has" >&2; rm -f "$keys"; return 1; }
-    [ "$want" = "$have" ] || { echo "hsi: STALE $pk: its sources' pin, the helper, hsi dumps' flags or the plan changed since the record (bin/hsi dumps --record)" >&2; rm -f "$keys"; return 1; }
+    [ -n "$want" ] || { echo "hsi: STALE $nm $pk: the pack holds a package the plan no longer has" >&2; rm -f "$keys"; return 1; }
+    [ "$want" = "$have" ] || { echo "hsi: STALE $nm $pk: its sources' pin, the helper, hsi dumps' flags or the plan changed since the record (bin/hsi dumps --record)" >&2; rm -f "$keys"; return 1; }
   done < <(awk -F'\t' '!/^#/ && NF {split($1, a, "/"); if (!(a[1] in s)) {s[a[1]] = 1; print a[1] "\t" $2}}' "$man")
   rm -f "$keys"
-  echo "$u/$(oracle_pin_name "$hsi_libs_pin")"
+  echo "$u/$nm"
 }
 
 # hsi_record_libs DUMPDIR [PKG,...] [COMMAND]
 hsi_record_libs() {
-  local dd=$1 only=${2:-} how=${3:-} pin=$hsi_libs_pin stage=$hsi_work/records/libs name man d keys pk
+  local dd=$1 only=${2:-} how=${3:-} pin stage=$hsi_work/records/libs name man d keys pk
+  pin=$(hsi_libs_pin_of "${HSI_DUMP_OPT:--O2}") || return 1
   name=$(oracle_pin_name "$pin"); man=$(oracle_manifest "$pin")
   rm -rf "$stage"; mkdir -p "$stage/$name"; : > "$stage/ids"
   if [ -f "$man" ] && [ -f "$pin" ] && d=$(oracle_unpack "$pin" 2>"$TMPDIR/hsi-records.err"); then
@@ -84,7 +98,7 @@ hsi_record_libs() {
     rm -rf "${stage:?}/$name/$pk"; mkdir -p "$stage/$name/$pk"; cp "$dd/stg/$pk/"*.stg.ae "$stage/$name/$pk/"
     (cd "$stage/$name" && ls "$pk"/*.stg.ae) | while IFS= read -r m; do printf '%s\t%s\n' "$m" "$(awk -F'\t' -v p="$pk" '$1 == p {print $2}' "$keys")"; done >> "$stage/ids"
   done
-  oracle_make "$pin" "$stage" "$stage/ids" "${how:-bin/hsi dumps --record${only:+ --packages $only}}" ghc || return 1
+  oracle_make "$pin" "$stage" "$stage/ids" "${how:-${HSI_DUMP_OPT:+HSI_DUMP_OPT=$HSI_DUMP_OPT }bin/hsi dumps --record${only:+ --packages $only}}" ghc || return 1
   rm -rf "$stage"
 }
 
