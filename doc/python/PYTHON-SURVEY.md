@@ -5297,3 +5297,53 @@ sources on ci over the handles, file by file.
   - the C crop's layouts above;
   - the swapped and aligned structure cases;
   - a few messages.
+
+## As built: 250, the object model's edges: captures, BLAKE2's parameters, str.format, t-strings, _ast's keywords, the child's start (2026-11-09/10, the Mac VM, queue 250)
+
+The deferred classes `:pattern-captures`, `:hashlib-gaps`, `:str-protocol`, `:ast-objects` and `:error-display`, ported
+from CPython 3.14.10's own code (the pinned tarball) onto pyi; light samples only.
+
+- **compile.ae, pattern matching** (Python/codegen.c's pattern_context): a capture is no longer stored as its sub-pattern
+  matches. codegen_pattern_helper_store_name keeps the value on the stack, rotated beneath what the pattern still needs (the
+  depth above the case's subject, `*store-base*`; 3.10's ROT_N as SWAPs), codegen_pattern_or gives each alternative stores
+  of its own above its copy of the subject and reorders a matching alternative's captures into the first's order (control)
+  before rotating them beneath the outer pattern's items, and codegen_match_inner stores the names, in pc->stores' order,
+  only once the case's pattern has matched (before its guard). A failed alternative or case binds nothing; the fail ladder
+  pops the kept captures with the rest. A mapping's `**rest` is kept the same way.
+- **BLAKE2** (Modules/blake2module.c, Argument Clinic): leaf_size and node_offset by `_PyLong_UnsignedLong_Converter` and
+  `_PyLong_UnsignedLongLong_Converter` (longobject.c's UNSIGNED_INT_CONVERTER: `__index__`, a negative int a ValueError
+  "Cannot convert negative int", beyond 64 bits an OverflowError naming the C type), before blake2's own range checks.
+- **str.format** (Objects/stringlib/unicode_format.h, whole): MarkupIterator_next and parse_field (a `[` skips to its `]`, a
+  spec to its matching `}`), get_integer (Py_UNICODE_TODECIMAL's digits, Py_ssize_t's overflow), the FieldNameIterator,
+  field_name_split with AutoNumber, get_field_object, do_conversion's messages, build_string's recursion depth and
+  do_markup's order: one field parsed and rendered before the next is read, so `"{0[}".format()` is the parser's ValueError,
+  not an IndexError. `_string.formatter_parser` and `formatter_field_name_split` use the same iterators (read whole). A str's
+  spec with a space sign: "Space not allowed in string format specifier" (format_string_internal).
+- **t-strings** (Objects/templateobject.c, interpolationobject.c): `Template(*args)` (strs concatenated, an empty str
+  between interpolations and at either end, no keywords), `Interpolation(value, expression='', conversion=None,
+  format_spec='')` with _conversion_converter, and their `__reduce__` (`string.templatelib._template_unpickle`; the class),
+  so both pickle at every protocol.
+- **_ast's keywords** (Python/Python-ast.c): a `**` keyword that is no str. In CPython a C type's tp_call takes the kwargs
+  dict itself; only vectorcall's _PyStack_UnpackDict refuses "keywords must be strings". pyi's calls carry str names, so
+  CALL_FUNCTION_EX (eval loop and compiled loop) offers such a dict to `kwDictCall` before its TypeError: a node class whose
+  `__init__` is AST's is built and ast_type_init runs over the dict's keys as they are (== against the fields: a FakeStr
+  equal to a field is "got multiple values"; another key warned of, then setattr's TypeError), and a node's `__replace__`
+  refuses the key by its repr (ast_type_replace). Any other callable keeps the TypeError.
+- **The child's start** (Python/initconfig.c's sys_path_0, Objects/moduleobject.c, Python/ceval.c): `bin/pyi python`
+  passes -P and -I as PYI_SAFE_PATH; the runtime's start puts no first entry under -P, "" for -c and stdin, the working
+  directory for -m, else the script's directory, and sys.flags.safe_path is the command line's (bin/pyi run's programs and
+  the check's driver keep True, the reference driver's -P; -c's own override of sys.path[0] applies only without -P).
+  _PyModule_IsPossiblyShadowing returns 0 under -P;
+  module_getattro's and import_from's stdlib test is PySet_Contains(sys.stdlib_module_names, __name__) on the attribute as
+  it is now (None or deleted: no hint) with `__name__` itself, so a str subclass with `__hash__ = None` raises set's
+  TypeError. set's `__contains__` names an unhashable key as set_contains_key does.
+
+**The classes** (each test's own verdict, base b10b0b886 against the head, the 20 methods the five classes named run by
+`bin/pyi check --only`): `:pattern-captures` 2 to 0, `:hashlib-gaps` 2 to 0, `:str-protocol` 5 to 0 (test_format's last
+step, the space sign, passes run alone after the module run), all three dropped; `:ast-objects` 3 to 1 (the two non-str
+keyword tests pass; test_exceptions' two offset tests passed at the base already); `:error-display` 5 to 2 (test_import's
+three shadowing tests pass; test_encodings passed at the base already). Whole modules on the head, method for method
+against the base where both ran (test_import, test_str, test_format): no method lost.
+
+**Left**: test_ast's test_pickling (300 s), test_traceback's test_encoded_file (15 children) and test_import's
+test_script_shadowing_stdlib (14 children): each child's start under goi is about 30 s, past the driver's limit.
