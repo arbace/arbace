@@ -1188,3 +1188,16 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Alternatives considered**: (b) both, the code generator emitting explicit instantiations eagerly (left by the decision: clang's
   weak_odr definitions are a names-check matter); P2266's throw operand (left: the try-block scope rule needs the enclosing try
   blocks, which the slice does not track).
+
+## 2026-11-09: C++'s CP301 (a), a captureless generic lambda's conversion to a pointer to function (branch `cpp-props2`)
+
+- **Built**: the conversion function template of a generic lambda with no lambda-capture, specialized on use for the target
+  function type (the call operator's specialization deduced from its parameter types, its type required to be the target's), with
+  its static invoker; mangled as clang's specializations (`__invokeIiEEDaT_`, `cvPFDaT_EIiEEv`). With it: deduced return types with
+  a declarator (`auto&`, `auto&&`, `auto*`) deduced from the return statement; CP290's unsure rule narrowed to `auto...` closures.
+- **Measured**: the 51 generic-lambda dg-error files: 9 → 12 own passes (lambda-generic-cfun, -xcfun, param-type-mismatch-3, CP290's
+  withdrawn pass now sure), none lost, no new extra; the code generator's 142 samples as recorded; the probe's invokers generated
+  (their runs the night's codegen-check).
+- **Alternatives considered**: deducing from the target's return type too ([temp.deduct.conv] on the conversion's `auto (*)(T)`:
+  the specialization's deduced return type is compared instead, the same verdicts); `auto...` (left unsure, the closure's pack
+  against a function type's parameters).

@@ -1581,15 +1581,61 @@
         names (set (map #(:name (fnd %)) own))]
     (concat own (remove #(names (:name (fnd %))) (mapcat #(conv-fns (:cls %)) (:bases c))))))
 
+(declare deduced! method-call init-for var-node)
+
+(defn- glam-conv!
+  "CP301 (a): the conversion of a captureless generic lambda's closure (class `cid`) to a pointer to the function type
+  `F` ([expr.prim.lambda.closure]/9-10): the specialization of its conversion function template for F, made once per F,
+  returning the address of a static invoker (`__invoke`, a specialization of the invoker template as clang's, its
+  arguments the call operator's) that calls the call operator's specialization deduced from F's parameter types on a
+  closure object; nil when none is deduced or its type is not F (the result type is a pointer to the specialization's
+  type, which converts to no other pointer to function)."
+  [cid F]
+  (let [c (abi/cls cid)
+        {:keys [tid base-f]} (:glam-conv c)]
+    (when tid
+      (or (get (:glam-convs c) F)
+          ;; (the checker's position stays the conversion's: the call operator's specialization is analyzed here)
+          (when-let [fid (let [a *at* saved (some-> a deref)]
+                           (try (some-> (when-let [h (:glam-spec @hooks)] (h tid F)) deduced!) (finally (when a (reset! a saved)))))]
+            (let [f (fnd fid)
+                  ret (let [r (:ret (:ty f))] (if (= :auto (:k r)) abi/void r))
+                  ps (:ps (:ty f))
+                  t {:k :class :id cid}
+                  ;; (the target's own function type: the conversion's result type is exactly the parameter's)
+                  ft F]
+              (when (and (= (abi/unq ret) (abi/unq (:ret F))) (= (mapv abi/unq ps) (mapv abi/unq (:ps F))))
+                (let [ivid (next-id) cvid (next-id)
+                      ipids (vec (for [pt ps] (let [pid (next-id)] (swap! *vars* assoc pid {:id pid :name nil :ty pt :storage :param :fn ivid}) pid)))
+                      lv (next-id)
+                      _ (swap! *vars* assoc lv {:id lv :name nil :ty t :storage :local :fn ivid})
+                      _ (swap! *fns* assoc ivid (merge base-f {:id ivid :name "__invoke" :kind :method :static true :ty ft :param-names []
+                                                               :tinst (assoc (:tinst f) :tid [:invoke tid])}))
+                      call (method-call {:scope (:scope base-f)} fid {:op :var :id lv :ty t :cat :lv} (mapv var-node ipids) false)
+                      ret-s (if (abi/void? ret) {:s :return :void-e call} {:s :return :init (init-for ret call {:scope (:scope base-f)} :copy)})]
+                  (upd-fn! ivid assoc :params ipids :tbody {:s :block :items [{:s :decl :var lv :init {:i :none}} ret-s]})
+                  (swap! *fns* assoc cvid (merge base-f {:id cvid :name "operator function" :kind :conv :cq true :ty {:k :fn :ret (abi/ptr ft) :ps [] :va false}
+                                                        ;; (mangled as clang's specialization of the conversion function
+                                                        ;; template, `template <class T> operator auto (*)(T)() const`)
+                                                        :tinst (assoc (:tinst f) :tid [:conv tid] :tsig {:k :fn :ret nil :ps [] :va false})
+                                                        :mangle-ret (abi/ptr (let [sg (:tsig (:tinst f))] {:k :fn :ret (:ret sg) :ps (:ps sg) :va (boolean (:va sg))}))
+                                                        :param-names [] :params []
+                                                        :tbody {:s :block :items [{:s :return :init {:i :expr :e {:op :fnaddr :fn ivid :ty (abi/ptr ft) :cat :pr}}}]}}))
+                  (abi/update-cls! cid #(-> % (update :methods (fnil conj []) cvid) (assoc-in [:glam-convs F] cvid)))
+                  cvid))))))))
+
 (defn- conv-for
   "The conversion function of class `id` that converts best to the non-class type `t` (explicit ones when
   `explicit?`), or nil."
   [id t explicit? & [obj-c]]
+  ;; (CP301 (a): a captureless generic lambda's conversion to a pointer to function made for the target's function type)
+  (when (and (:glam-conv (abi/cls id)) (abi/ptr? (abi/unq t)) (abi/fn? (abi/unq (:to (abi/unq t)))))
+    (glam-conv! id (abi/unq (:to (abi/unq t)))))
   (let [cands (for [fid (conv-fns id)
                     :let [f (fnd fid)] :when (or explicit? (not (:explicit f)))
                     ;; (CX12, the checker: a const object's conversion functions are the const ones, the implicit object
-                    ;; parameter's binding, [over.match.funcs]/4-5)
-                    :when (or (not obj-c) (not (checking?)) (:cq (:ty f)))
+                    ;; parameter's binding, [over.match.funcs]/4-5; a closure's are const by :cq, CP301 (a))
+                    :when (or (not obj-c) (not (checking?)) (:cq f) (:cq (:ty f)))
                     ;; (CX12, the checker: in direct-initialization an explicit conversion function is a candidate only when
                     ;; it yields the type, or one a qualification conversion converts to it, [over.match.conv]/1.1)
                     :when (or (not explicit?) (not (:explicit f)) (not (checking?)) (abi/class? (abi/unq t))
@@ -1723,9 +1769,16 @@
         (cond
           (and unsure-drops (pos? (long unsure-drops)))
           (fail :overload "no viable function (a template's deduction unsure) among " (count (distinct cands)) " for " n0 " arguments")
-          ;; (CP290 (a): a generic lambda's closure has conversion function templates to pointers to function the slice does
-          ;; not declare: a candidate it may have made viable is not known not to be)
-          (and (checking?) (some (fn [[_ args]] (some #(when-let [i (class-id (:ty %))] (:glam (abi/cls i))) args)) cs))
+          ;; (CP290 (a): a generic lambda's closure's conversion function templates to pointers to function; since CP301 (a)
+          ;; made by glam-conv! for a captureless one (a capturing one has none), but for a parameter pack (auto...), whose
+          ;; deduction from a pointer to function the slice does not model: a candidate it may have made viable is not known
+          ;; not to be)
+          (and (checking?) (some (fn [[_ args]] (some #(when-let [i (class-id (:ty %))]
+                                                         (when-let [{:keys [tid]} (:glam-conv (abi/cls i))]
+                                                           (some (fn [P] (= :pack-exp (:k P)))
+                                                                 (:ps ((requiring-resolve 'arbace.cpp.template/sym-sig) ((requiring-resolve 'arbace.cpp.template/tmpl) tid))))))
+                                                      args))
+                                 cs))
           (fail :overload "no viable function (a generic lambda's conversion not modeled) among " (count (distinct cands)) " for " n0 " arguments")
           :else
           (fail :overload "no viable function among " (+ (count (distinct cands)) (long (or sure-drops 0))) " for " n0 " arguments: " (pr-str (map :ty (second (first cs)))))))
@@ -3124,6 +3177,11 @@
         _ (reset! (:sealed lam) true)
         ;; the init-captures' names in the specializations' bodies, the lambda's context for them
         _ (abi/update-cls! id assoc :glam (assoc lam :names (into {} (:names fs))) :glam-cutoff (long (or (:_b n) *cutoff*)))
+        ;; (CP301 (a): no lambda-capture, so a conversion function template to a pointer to function, its
+        ;; specializations made on use by glam-conv!; [expr.prim.lambda.closure]/9)
+        _ (when (str/blank? intro)
+            (abi/update-cls! id assoc :glam-conv {:tid tid :base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id])
+                                                                    :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}}))
         _ (finish-class! id)
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
             (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
@@ -3657,8 +3715,10 @@
     "NullStmt" {:s :null}
     "ReturnStmt" (let [[e] (kids n)
                        rt (:ret (:ty (fnd (:fn-id ctx))))
-                       pre (when (and e (= :auto (:k rt))) (p2266-xvalue (analyze ctx e)))
-                       rt (if (= :auto (:k rt))
+                       ;; (a deduced return type: auto, and since CP301 (a) auto&, auto&&, auto* -- a generic lambda's
+                       ;; `-> auto&` among them -- [dcl.spec.auto.general]/11)
+                       pre (when (and e (has-auto? rt)) (p2266-xvalue (analyze ctx e)))
+                       rt (if (has-auto? rt)
                             (let [t (if pre (deduce-auto rt pre) abi/void)] (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
                             rt)]
                    (cond

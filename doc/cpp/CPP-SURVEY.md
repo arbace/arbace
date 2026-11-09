@@ -4666,3 +4666,31 @@ read), the messages after the directives' texts.
   sample: none returns a reference to a local or an rvalue reference parameter).
 - Probes: `.tmp/t7/e1.cpp` (`template int g<int>(int)` of a body reading `t.x`: the error at the member access; `ok<long>`, `ok(double)`
   clean), `.tmp/t7/e2.cpp` (a pack's explicit arguments).
+
+### CP301 (a): a captureless generic lambda's conversion to a pointer to function
+
+- `arbace.cpp.sema/glam-conv!` ([expr.prim.lambda.closure]/9-10; [temp.deduct.conv]): a generic lambda with no lambda-capture
+  (`:glam-conv` on its closure: the call operator template and the members' base) has a conversion function template to a pointer
+  to function; `conv-for` (every conversion of a class object to a non-class type: initialization, the ics of a call's argument)
+  makes its specialization for a target pointer to the function type F: the call operator template's parameters deduced from F's
+  parameter types (the `:glam-spec` hook, deduction from each pair, a pack parameter not deduced), the specialization
+  instantiated and its return type deduced, and when its type is F's (the conversion's result is a pointer to the specialization's
+  type, which converts to no other pointer to function) a static invoker `__invoke` calling it on a closure object and the
+  conversion function returning the invoker's address, memoized per F; else no candidate (cpp1y/lambda-generic-cfun's `f2`, `h`'s
+  #4). The invoker and the conversion mangle as clang's specializations: `_ZZ4mainEN3$_08__invokeIiEEDaT_`,
+  `_ZZ4mainENK3$_0cvPFDaT_EIiEEv` (the conversion's type as the template writes it, abi's `:mangle-ret`). The checker's position
+  stays the conversion's while the specialization is analyzed; a closure's conversion is const by its `:cq`. CP290's rule (a call
+  no candidate takes with a generic closure among its arguments not diagnosed) now holds only for a closure whose call operator
+  has a parameter pack (`auto...`, whose deduction from a function type is not modeled); a capturing generic lambda has no
+  conversion, so such a call is sure.
+- Found with it: **a deduced return type with a declarator** (`auto&`, `auto&&`, `auto*`; a generic lambda's `-> auto&`) is
+  deduced from the return statement as plain `auto` was ([dcl.spec.auto.general]/11; `has-auto?`); `-> auto&` returning `*a` was
+  "a non-const reference to a temporary" (cpp1y/lambda-generic-cfun:20).
+- Measure: the 51 dg-error files of the whole part with a generic lambda (`.tmp/t7/f301.txt`; f9b81f1e3's tree against this
+  commit's, `.tmp/t7/tree301`, which holds CP305's P2266 too): own passes 9 → 12, gained cpp1y/lambda-generic-cfun and
+  lambda-generic-xcfun (17: no conversion to `char (*)(int)`, 18: `g` ambiguous between `int (*)(int)` and `char (*)(char)`, and
+  none on 15, 16, 19, 20, 23) and diagnostic/param-type-mismatch-3 (CP290's withdrawn pass back, now sure: `char (*)(int)` is no
+  conversion of `[](auto a) { return a; }`); none lost; extras 54 → 51 (elision7's three, CP305's), none new. The probe
+  `.tmp/t7/g1.cpp` (initializations, a call's argument, two parameters, a void one) generates the invokers and conversions
+  above; its run is the night's (codegen-check's clang and gcc). gen-list over the 142 samples by this commit's tree
+  (`.tmp/t7/g301`): 141 forms byte for byte the record's, rtti refused.
