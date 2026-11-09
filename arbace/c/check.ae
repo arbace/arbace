@@ -684,8 +684,10 @@
   [m packed max-align]
   (let [ta (long (align-of (:t m)))
         base (if (or packed (:mpacked m)) 1 ta)
-        base (if max-align (min base (long max-align)) base)]
-    (if (:align m) (max base (long (:align m))) base)))
+        a (if (:align m) (max base (long (:align m))) base)]
+    ;; CS290 (a): #pragma pack caps an aligned attribute's alignment too (gcc's layout_decl caps DECL_ALIGN by
+    ;; maximum_field_alignment whether the user set it or not; 95_bitfields' packed ALIGN tests)
+    (if max-align (min a (long max-align)) a)))
 
 (defn- layout!
   "Lays out the record `r`'s members [{:name :t :bits :align :packed}] as gcc 15.2 does on x86-64."
@@ -714,13 +716,17 @@
                     unit (*' 8 (long (or (size-of t) 4)))]
                 (cond
                   (zero? w)
-                  (do (swap! off #(align-up % (*' 8 (if max-align (min ta (long max-align)) ta))))
+                  ;; CS290 (a): a zero-width bit-field aligns to its type's alignment even under #pragma pack (gcc 15.2 on
+                  ;; x86-64, as 95_bitfields' packed tests 3 and 4 show: tcc's expected output is gcc's)
+                  (do (swap! off #(align-up % (*' 8 ta)))
                       (.add out (assoc m :off (quot @off 8) :bitoff 0)))
                   :else
                   ;; gcc's rule: the field lies within a window of its type's size that begins at a boundary of
                   ;; its type's alignment (for the integer types, whose size is their alignment, a unit of their
                   ;; type; for _BitInt(N > 64) a window of N's size on a 64-bit boundary)
-                  (do (when (and (not packed)
+                  ;; CS290 (a): under #pragma pack (a maximum field alignment) gcc's stor-layout place_field takes no such
+                  ;; window (its PCC_BITFIELD_TYPE_MATTERS rule asks maximum_field_alignment == 0): the field follows the last
+                  (do (when (and (not packed) (not max-align)
                                  (let [ab (*' 8 ta) o @off] (> (+' (- o (*' ab (quot o ab))) w) unit)))
                         (swap! off #(align-up % (*' 8 ta))))
                       (when (:align m) (swap! off #(align-up % (*' 8 a))))
@@ -779,7 +785,7 @@
       (do (when *auto-init* (err! (str "'" (name kind) " " tag "' declared in underspecified object initializer")))
           (let [r (new-rec kind tag)] (.put ^HashMap (:tags (top-scope)) tag r) r)))))
 
-(declare check-struct check-enum)
+(declare check-struct check-enum pragma-pack!)
 
 (defn- int-mode
   "mode_for_size_tree (size, MODE_INT, limit): the integer mode of `n` bytes, up to TImode, else BLKmode."
@@ -1082,8 +1088,10 @@
             packed (some #(= "packed" (first %)) as)
             al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)]
         (when al (.put r :min-align al))
-        (when (cx :pack) (feat! :cc-attr-layout))
-        (layout! r ms kind packed (cx :pack))
+        ;; CS290 (a): the pack state as it is now (a statement-level #pragma pack changes it inside a body)
+        (let [pk (:pack @(cx :pack-state))]
+          (when pk (feat! :cc-attr-layout))
+          (layout! r ms kind packed pk))
         ;; a variably modified definition's members (GNU's, CS106): the builder lays it out at run time where it stands,
         ;; finding its record by its body
         (when (and (seq body) (vm-type? {:k kind :rec r})) (record! body {:rec r :kind kind}))
@@ -2061,6 +2069,8 @@
           (emit! (call h args f))
           (case h
             c/id (emit! (ident-expr (second f)))
+            ;; CS291 (a): a constant gcc's lexer rejects (the converter's c/bad-lit): its message at its line, a value of its type
+            c/bad-lit (do (err! (nth f 3)) (emit! (res (parse-type (second f)) :v 0)))
             (+ - * / bit-and bit-or bit-xor and or)
             (if (= 1 n)
               (let [r (ex (first args)) t (decay (unq (:t r)))
@@ -2756,7 +2766,10 @@
                    (let [r (ex (first args))]
                      (when-let [rt (cx :fn-ret)] (ptr-conv! rt r "return")))
                    nil)
-          (c/define c/undef c/directive c/pragma c/include) nil
+          ;; CS290 (a): #pragma pack anywhere, gcc's (its pragmas are tokens): a statement-level c/pragma (a main-file pragma
+          ;; inside a body, placed by offset, or the re-entered copy's, placed by the stream) changes the pack state from here on
+          c/pragma (do (pragma-pack! s) nil)
+          (c/define c/undef c/directive c/include) nil
           (if (decl-form? s)
             (do (check-decl s) nil)
             (ex s))))
