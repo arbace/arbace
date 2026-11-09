@@ -1103,7 +1103,11 @@ covers what.
   heqClass's, eqClass's and coercibleClass's superclasses, the kinds' invisible binders of unboxedSoloTyCon, coercibleTyCon,
   eqTyCon, heqTyCon, anyTyCon) and the built-in families of `compiler/GHC/Builtin/Types/Literals.hs`, by hand on 2026-11-09, the
   file carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below); the
-  judge (`compare-ifaces`) and `libcheck.ae`'s HF10-P3 verbs (`own-order`, `own`, `rank-own`) are Arbace's own.
+  judge (`compare-ifaces`) and `libcheck.ae`'s HF10-P3 verbs (`own-order`, `own`, `rank-own`) are Arbace's own; HF10-P12's
+  `helper-core` too. HF10-P12 and P14 (2026-11-09): `simplify.ae`'s stable-unfolding mode (updModeForStableUnfoldings of
+  `compiler/GHC/Core/Opt/Simplify/Utils.hs`) and `rename.ae`'s `integral-fl` (generalizeOverLitVal of
+  `compiler/GHC/Rename/Pat.hs`) from the same tarball, under the notices those files carry; `libcheck.ae`'s `dm-unfoldings`,
+  `grow-closure` and `cabal-reexports` are Arbace's own.
 - `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
   ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
   `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,

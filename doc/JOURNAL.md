@@ -2790,3 +2790,27 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+
+## 2026-11-09: HF10-P11 to P14: the own interfaces a step, the default methods' unfoldings, base on the own pool (branch `hs-p11`, from next `6c3c87c02`)
+
+The user accepted HF10-P11 to P14 as recommended (P13 (b)). Recorded in doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P11 to
+P14". Ported from GHC 9.14.1 (the pinned `ghc-9.14.1-src.tar.xz`): makeCorePair's compulsory unfolding of a `$dm`
+(`compiler/GHC/HsToCore/Binds.hs`), simplStableUnfolding and updModeForStableUnfoldings (`Core/Opt/Simplify/Iteration.hs`,
+`Utils.hs`), generalizeOverLitVal (`Rename/Pat.hs`, NumDecimals).
+
+- P11 (a): the `--full` step `haskell-lib-check-own` (after `haskell-lib-check`, 2 GiB, no GHC; control the interface judge's).
+- P12 (a): `lib-check --ifaces own` runs a module that defines default methods through lib-stg's pipeline and writes each `$dm`'s
+  unfolding as its `-O0` Simplifier leaves it (154 of 156; 2 with a floated local keep the elaborator's Core), in the helper's
+  spelling; the Simplifier simplifies a stable unfolding in updModeForStableUnfoldings' mode. lib-stg on the own interfaces: 5,280
+  to 5,398 of 7,627 bindings equal to GHC's `-O0` (54 modules better, 0 worse), ahead of GHC's `-O2` interfaces (5,373 of 7,600,
+  unchanged). Alternative considered: GHC's Tidy-exposed unfoldings read from the pack (the `-O2` ones: not GHC's `-O0` view).
+- P14 (a): base on ghc-internal's own pool with no GHC closure: the driver grows each closure from the imports over the names the
+  interfaces mention (as `--make` loads on demand), maps ghc-prim's thirteen reexported modules from its `.cabal` (ghc-prim's
+  library is `Dummy.hs` and reexports), compiles in the installation's unit id. 235 of 241 modules elaborate, 0 missing
+  interfaces, 6,780 of 6,785 facts equal on the 113 modules the `haskell-ifaces` pack holds; lib-stg of base 531 of 1,024
+  bindings equal to GHC's `-O0`. Found on the way: NumDecimals (System.CPUTime.Posix's `1e12 :: Integer`), ported. Alternatives
+  considered: recording GHC's base closures with GHC (refused for this branch: GHC only at the oracle tier, HF10-P16 proposes it).
+- crops-score unchanged (Haskell independence 76.0): no case runs on own libraries yet. Proposed: HF10-P15 to P19 (base's step,
+  GHC's base interfaces for the judge, the next packages, Prim from primops.txt.pp, the first own cases).
+- Checks: hsi-essential's command (one job) 123 programs, 0 unclassed, the four controls fail; bin/gate --full --plan plans the
+  new step; the gate's costs, crops, cover and declared-env tests pass.

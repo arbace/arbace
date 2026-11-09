@@ -116,7 +116,11 @@ code. Three kinds of things live here:
   (2026-11-09) `ownface.ae` writes the front end's own interfaces after `compiler/GHC/Iface/Make.hs`'s mkIface_ and
   `Iface/Tidy.hs`'s addExternal and trimId at -O0, `Types/Id/Make.hs`'s dataConSrcToImplBang, `Builtin/Types.hs`'s wired-in
   definitions and `Builtin/Types/Literals.hs`'s built-in families, from the same tarball, carrying GHC's notice (its judge and
-  `libcheck.ae`'s `own-order`, `own`, `rank-own` Arbace's own), and `rename.ae` and `typecheck.ae` take an hs-boot file's
+  `libcheck.ae`'s `own-order`, `own`, `rank-own` Arbace's own; since HF10-P12 (2026-11-09) `simplify.ae` simplifies a stable
+  unfolding in `Core/Opt/Simplify/Utils.hs`'s updModeForStableUnfoldings' mode and `libcheck.ae` takes each `$dm`'s compulsory
+  unfolding (`HsToCore/Binds.hs`'s makeCorePair) after it; since HF10-P14 `rename.ae`'s `integral-fl` ports `Rename/Pat.hs`'s
+  generalizeOverLitVal (NumDecimals), and `libcheck.ae`'s closure growth and `cabal-reexports` are Arbace's own), and
+  `rename.ae` and `typecheck.ae` take an hs-boot file's
   signatures as its values (`Rename/Module.hs`'s rnSrcDecls, `Tc/Module.hs`'s tcHsBootSigs); `simpleopt.ae` (2026-11-06) ports
   `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
   unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
