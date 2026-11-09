@@ -477,15 +477,44 @@
       :cast (recur (:cont k) out)
       out)))
 
+(defn- occ-keys
+  "The keys of every variable occurrence in e (a superset of its free variables' keys: subst-expr replaces only the free ones)"
+  [e]
+  (let [acc (java.util.HashSet.)]
+    (letfn [(walk [e]
+              (cond (seq? e) (case (first e)
+                               lv (.add acc e)
+                               v (.add acc (second e))
+                               (doseq [x (rest e)] (walk x)))
+                    (vector? e) (doseq [x e] (walk x))
+                    :else nil))]
+      (walk e))
+    acc))
+
 (defn subst-expr-env
-  "GHC.Core.Subst.substExpr of the env's substitution"
+  "GHC.Core.Subst.substExpr of the env's substitution (getSubst, GHC.Core.Opt.Simplify.Env): a ContEx entry is substituted by
+  its own saved substitution when the expression names it, once per call (GHC's to_expr is a lazy thunk of mapVarEnv: an entry
+  no occurrence looks up is never computed, one looked up twice is computed once); computing every entry of every saved
+  substitution, transitively, was exponential in the depth of nested continuations (utf8_decode's guards)"
   [env e]
-  (let [m (into {} (for [[k sr] (:subst env)]
-                     [k (case (first sr)
-                          :done-id (second sr)
-                          :done-ex (second sr)
-                          :cont (subst-expr-env (assoc env :subst (second sr)) (nth sr 2)))]))]
-    (if (empty? m) e (c/subst-expr m e))))
+  (let [memo (java.util.IdentityHashMap.)]
+    (letfn [(conv [subst e]
+              (if (empty? subst)
+                e
+                (let [occ (occ-keys e)
+                      m (persistent!
+                         (reduce (fn [m k]
+                                   (if-let [sr (get subst k)]
+                                     (assoc! m k (case (first sr)
+                                                   :done-id (second sr)
+                                                   :done-ex (second sr)
+                                                   :cont (if (.containsKey memo sr)
+                                                           (.get memo sr)
+                                                           (let [r (conv (second sr) (nth sr 2))] (.put memo sr r) r))))
+                                     m))
+                                 (transient {}) occ))]
+                  (if (empty? m) e (c/subst-expr m e)))))]
+      (conv (:subst env) e))))
 
 ;;; exprIsConApp_maybe (GHC.Core.SimpleOpt), with the in-scope unfoldings
 
