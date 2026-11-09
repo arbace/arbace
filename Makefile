@@ -27,7 +27,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-scheme repr-scheme-roundtrip-record si-essential si-aot-essential scheme-read-essential scheme-essential \
   repr-python-lex-check repr-python-lex-record repr-python-pegen repr-python-pegen-check repr-python-parse-check repr-python-parse-record repr-python-ast-check repr-python-records-record repr-python-records-verify pyi-lib-test-record pyi-runtime-tables pyi-aot pyi-aot-check pyi-aot-check-record pyi-bench pyi-bench-record pyi-check pyi-check-record pyi-divergences pyi-cover pyi-c2j-check pyi-table-check pyi-clib-build pyi-clib-verify python-essential \
   oi-check-compiled check-makefile \
-  repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check oi-reap-switch \
+  repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
   repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
@@ -685,6 +685,8 @@ repr-ocaml-menhir: ## the native parser's LALR(1) tables built from parser.mly e
 repr-ocaml-ocamllex-check: ## OC186 (a): the native ocamllex over every .mll of the corpora and test/ocaml/ocamllex/, the outputs against the host's recorded ones (bin/repr-ocaml ocamllex-check; --host live)
 	bin/repr-ocaml ocamllex-check
 	bin/repr-ocaml menhir --verify
+repr-ocaml-ocamlyacc-check: ## OC194 (a): the native ocamlyacc over the tarball's ocamlyacc grammars and test/ocaml/ocamlyacc/, each plain and -v, the outputs and messages against the host's recorded ones (bin/repr-ocaml ocamlyacc-check; --host live)
+	bin/repr-ocaml ocamlyacc-check
 oi-stdlib: ## O5: the stdlib built by ocamlc in dependency order and its Lambda dumped for oi, into .tmp/oi/lib/ (bin/oi stdlib)
 	bin/oi stdlib
 oi-build: ## O5: oi's light driver, go/arbace/oi's forms printed by repr/go and built by TamaGo's go (bin/oi build)

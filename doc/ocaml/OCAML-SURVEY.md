@@ -3006,3 +3006,71 @@ fails there unless `86d8b6c47` is picked onto `next` first (`git cherry-pick 86d
   no control of `test/ocaml/controls.txt` runs a hook. (a) a `judge` control whose subject is signal and whose reference is another
   program's run, so the hook's verdict must part (ten minutes; `controls.txt` and the essential list gain signal, about 2 s); (b) none.
   *Recommended: (a)*.
+
+## As built: OC194 (a): ocamlyacc ported (2026-11-09, branch `ocaml-yacc`, from next `e6214cd13`)
+
+Under the day's light rules (one process at a time, under 2 GiB; no gate, no build of Arbace). OC194 was recommended (a) and accepted
+by the user (2026-11-09).
+
+**The port.** `arbace/repr/ocaml/ocamlyacc.ae` (`arbace.repr.ocaml.ocamlyacc`, evaluated on stage 0 like `ocamllex.ae`) ports OCaml
+5.5.0's `yacc/` (the release tarball, SHA-256 `fcc6ae66...f015ba`): Berkeley yacc as OCaml adapted it, each file "Based on
+public-domain code from Berkeley Yacc" and under INRIA's LGPL 2.1 notice with the linking exception (LICENSE.md, doc/ARBACE.md).
+File by file, rule for rule:
+- `main.c`: `getargs` (`-v`, `-q`, `-b PREFIX` and `-bPREFIX`, `--strict`, `--` and any other `--word` ending the options, `-`
+  for stdin, `-version`, `-vnum`, grouped `-vq`, the usage on anything else), the prefix (the input's name up to its last `.`),
+  `open_files`' order (the `.output`, `.ml`, `.mli` created in turn, a missing directory `f - cannot open` with status 2) and `done`'s
+  statuses: on an error the `.ml` and `.mli` are removed and the `.output` stays (empty, or whole after `--strict`'s refusal).
+  The three temporary files are buffers.
+- `reader.c` whole: `get_line` (CRLF to LF, a last line without its newline) with its line buffer modelled, so that `print_pos`
+  under a position from an earlier line (`add_symbol`'s `ecptr`) prints what the reused buffer holds past the new line's end, tabs
+  included; `#` line directives (`parse_line_directive`); `nextc` with `/* */`, `//`, OCaml's `(* *)` and `\` as `%`; `keyword`
+  (`%token`/`%term`, `%type`, `%left`, `%right`, `%nonassoc`/`%binary`, `%start`, `%{`, `%%`, `%<`, `%>`, `%0`, `%2`); `copy_text`
+  (its `need_newline`), the quoted strings, character literals (`process_apostrophe`'s four shapes), nested comments, `{id|...|id}`
+  and `{%ext|...|}` quoted strings; `get_tag` (`->` and brackets), `declare_tokens` (values, `EOF`'s 0, the warnings), `declare_types`,
+  `declare_start` (the entry counter), `output_token_type` (the constructors' line directives and columns in the `.ml` and `.mli`),
+  the grammar (`advance_to_start`, `start_rule`, `end_rule`, `add_symbol`, `mark_symbol`'s `%prec` and `%=`, `copy_action` with `$n`,
+  the bracket stack and its "Mismatched parentheses or braces"), `make_goal` (`%entry%`, the `'\NNN'` entry tokens, the entry
+  functions, the interface's `val`s, `is_polymorphic`), `check_symbols`, `pack_symbols` (the token values, those above 256 avoided),
+  `pack_grammar`, `print_grammar`. A C `char` is signed: a byte 0xFF reads as `EOF` where reader.c compares a `char` with it.
+- `symtab.c` (the symbols in their first appearance's order), `error.c` (every message, `print_pos`).
+- `lr0.c`, `closure.c`, `warshall.c`: derives, nullable, the first-derives sets, the closure as a merge, the states numbered as
+  `get_state` finds or makes them; `lalr.c`: DeRemer and Pennello's LALR(1) as written (`set_goto_map`, `map_goto`'s search,
+  `initialize_F`'s reads, `build_relations`' includes and lookback, `transpose`, `digraph`'s traversal, `compute_lookaheads`). The bit
+  sets are 64-bit words (byacc's 32): the relations are the same. `menhir.ae`'s machinery was consulted, not reused: lalr.c ported as
+  it is keeps the gotos' numbering the tables are built from.
+- `mkpar.c`: the actions' lists in byacc's order (`add_reduce`), `find_final_state`, `remove_conflicts` (precedence and associativity,
+  suppressed 1 and 2), "N rules never reduced", the conflicts' line, `sole_reduction`'s default reductions.
+- `output.c` and `skeleton.c`: `yytransl_const`/`yytransl_block`, `yylhs`, `yylen`, `yydefred`, `yydgoto` (`default_goto`,
+  `save_column`), `token_actions`, `sort_actions`, `pack_table` with `matching_vector` and `pack_vector` (the `lowzero` and `pos`
+  rules; `MAXTABLE`'s fatal), `yysindex`, `yyrindex`, `yygindex`, `yytablesize`, `yytable`, `yycheck`, `yynames_*`, `yyact` from the
+  actions with `copy_file`'s `# 0` rewritten to the next line's directive, the entry points, the trailer (`output_trailing_text`, the
+  raw bytes after `%%`), the line counter `outline`.
+- `verbose.c`: `-v`'s `.output` (the grammar, each state's conflicts, core, null rules, actions and gotos, the unused rules, the
+  conflicts by state, the totals).
+
+Not ported: `wstr.c` (Windows' wide strings); the `-r`, `-l`, `-t` and `-s` modes, whose flags OCaml's `main.c` never sets; the
+signals and the temporary files' names (in memory); `done`'s "I/O error"; after a line longer than 100 characters the reallocated
+buffer's uninitialised bytes are modelled as zeros (they matter only to a caret under a stale position).
+
+**The command and the check.** `bin/repr-ocaml ocamlyacc [-v] [-q] [--strict] [-b PREFIX] FILE.mly` is the native ocamlyacc (its
+files, messages and status). `bin/repr-ocaml ocamlyacc-check` runs, in one process, the tarball's eight ocamlyacc grammars
+(`lex/parser.mly`, `ocamldoc/odoc_parser.mly`, `odoc_text_parser.mly`, `debugger/debugger_parser.mly`, `ocamltest/tsl_parser.mly`,
+`testsuite/tools/parsecmm.mly`, `tool-lexyacc/parsecheck.mly`, `calc_parser.mly`; `parsing/parser.mly` is Menhir's) and the 20 samples
+of `test/ocaml/ocamlyacc/` (precedences and `%nonassoc`, an unresolved shift/reduce and reduce/reduce conflict, several `%start`, the
+error token, token values, quoted strings and character literals, rules never reduced, line directives and the old keywords, CRLF, a
+trailer without its newline, and 13 error cases), each plain and with `-v`, and `cases.txt`'s 20 command lines (`--strict`, `-q`,
+`-b`, `-vq`, `-version`, `-vnum`, the usages, a missing input, a missing output directory): 76 runs, each in a directory of its own,
+the files it leaves (`.ml`, `.mli`, `.output`) and its messages (status, stdout, stderr) by SHA-256 against
+`test/ocaml/ocamlyacc-expected.edn` (recorded by `--host --record` from the host's `/usr/bin/ocamlyacc` 5.5.0; the plain check runs no
+host tool), with a negative control (lex/parser.mly's `.ml` against odoc_parser.mly's record must differ).
+`make repr-ocaml-ocamlyacc-check`. Not a gate step yet (the main session wires it).
+
+**Results.** `--host`: 76 of 76 runs equal to the host's ocamlyacc byte for byte (the outputs and the messages). The plain check: 76
+of 76 against the record, the control failing as it must, about 16 s wall (10 s for the runs), 440 MB peak. Mutants (scratch, not
+committed; a byte deleted, a token inserted, a span cut, every other one with `-v`): 800 of eight grammars (calc_parser, lex/parser,
+tsl_parser, parsecmm, odoc_text_parser and the samples prec, entries, conflicts; two seeds) and 204 of six more (debugger_parser,
+odoc_parser, parsecheck, the samples directives, unused, crlf): 1,004 of 1,004 equal to the host's (507 that generate, 497 errors),
+none needing a fix.
+
+`tool-lexyacc/calc`'s parser natively: in the test's directory, `bin/repr-ocaml ocamlyacc -q calc_parser.mly` writes `calc_parser.ml`
+and `calc_parser.mli` beside it, the bytes of `ocamlyacc -q calc_parser.mly` (the line directives name the file as it is given).

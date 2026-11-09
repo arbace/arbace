@@ -108,6 +108,14 @@
 #                                 the .ml's and the messages' (status, stdout, stderr) SHA-256 against test/ocaml/ocamllex-expected.edn
 #                                 (the host's ocamllex's, recorded); a negative control (one file's output against another's record) must
 #                                 differ; --host (the oracle tier's): the host's ocamllex run beside, byte for byte, --record rewrites the record
+#   bin/repr-ocaml ocamlyacc [-v] [-q] [--strict] [-b PREFIX] FILE.mly   OC194 (a): ocamlyacc natively (arbace.repr.ocaml.ocamlyacc,
+#                                 yacc/ of OCaml 5.5.0 ported: the reader, LR(0), LALR(1), the conflicts, the packed tables, -v's .output),
+#                                 its command line, messages and statuses; no host tool
+#   bin/repr-ocaml ocamlyacc-check [--host [--record]]   the tarball's eight ocamlyacc grammars and test/ocaml/ocamlyacc/'s samples, each
+#                                 plain and with -v, and its cases.txt's command lines, run natively in .tmp/repr-ocaml/ocamlyacc/nat, the files
+#                                 each run leaves (.ml, .mli, .output) and its messages (status, stdout, stderr) by SHA-256 against
+#                                 test/ocaml/ocamlyacc-expected.edn (the host's ocamlyacc's, recorded); a negative control (one grammar's .ml
+#                                 against another's record) must differ; --host (the oracle tier's): the host's ocamlyacc beside, --record
 # The checks of O1 run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -1044,6 +1052,88 @@ cmd_ocamllex_check() {
   [ $diff = 0 ] && [ $missing = 0 ] && [ $bad = 0 ]
 }
 
+# ocamlyacc ARGS: the native ocamlyacc (OC194 (a))
+cmd_ocamlyacc() { rt_arbace_ns arbace.repr.ocaml.ocamlyacc yacc "$@"; }
+
+# yacc_manifest DIR KEY: a run's record line, `["ARGS" "MESSAGES-SHA" "FILE SHA" ...]`: the SHA-256 of DIR.out (status, stdout,
+# stderr) and of each file the run left in DIR but its input (DIR.in names it)
+yacc_manifest() {
+  local d=$1 key=$2 in rel line
+  in=$(cat "$d.in")
+  line="[\"$key\" \"$(sha256sum < "$d.out" | cut -d' ' -f1)\""
+  (cd "$d" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) > "$d.files"
+  while read -r rel; do
+    [ "$rel" = "$in" ] && continue
+    line="$line \"$rel $(sha256sum < "$d/$rel" | cut -d' ' -f1)\""
+  done < "$d.files"
+  echo "$line]"
+}
+
+# ocamlyacc-check [--host [--record]]: the native ocamlyacc over every ocamlyacc grammar of the tarball and test/ocaml/ocamlyacc/'s
+# samples, each plain and with -v, and cases.txt's command lines, against the host's recorded outputs (OC194 (a))
+cmd_ocamlyacc_check() {
+  local host="" record="" W="$root/.tmp/repr-ocaml/ocamlyacc" rec="$root/test/ocaml/ocamlyacc-expected.edn"
+  local S="$root/test/ocaml/ocamlyacc" n=0 k d src args key bad=0 f
+  while [ $# -gt 0 ]; do case $1 in --host) host=1 ;; --record) record=1 ;; *) echo "usage: bin/repr-ocaml ocamlyacc-check [--host [--record]]" >&2; return 2 ;; esac; shift; done
+  [ -z "$record" ] || [ -n "$host" ] || { echo "repr-ocaml: --record needs --host (the record is the host's ocamlyacc's)" >&2; return 2; }
+  cmd_corpus_fetch > "$root/.tmp/repr-ocaml/fetch.log" || { cat "$root/.tmp/repr-ocaml/fetch.log" >&2; return 1; }
+  rm -rf "$W"; mkdir -p "$W/nat" ${host:+"$W/ref"}
+  # the runs, KEY|SOURCE|PATH: ocamlyacc's arguments, the input's source (- none) and its path in the run's directory
+  : > "$W/cases.tsv"
+  for f in lex/parser.mly ocamldoc/odoc_parser.mly ocamldoc/odoc_text_parser.mly debugger/debugger_parser.mly ocamltest/tsl_parser.mly \
+           testsuite/tools/parsecmm.mly testsuite/tests/tool-lexyacc/parsecheck.mly testsuite/tests/tool-lexyacc/calc_parser.mly; do
+    printf '%s|%s|%s\n' "$f" "$TOP/$f" "$f" "-v $f" "$TOP/$f" "$f" >> "$W/cases.tsv"
+  done
+  for f in "$S"/*.mly; do f=${f##*/}; printf '%s|%s|%s\n' "$f" "$S/$f" "$f" "-v $f" "$S/$f" "$f" >> "$W/cases.tsv"; done
+  grep -v '^#' "$S/cases.txt" | while IFS='|' read -r src args; do
+    if [ "$src" = - ]; then printf '%s|-|-\n' "$args"; else printf '%s|%s|%s\n' "$args" "$S/$src" "$src"; fi
+  done >> "$W/cases.tsv"
+  : > "$W/list.txt"
+  while IFS='|' read -r key src f; do
+    k=$(printf '%03d' $n); n=$((n+1))
+    for d in nat ${host:+ref}; do
+      mkdir -p "$W/$d/$k"; echo "$f" > "$W/$d/$k.in"
+      if [ "$src" != - ]; then mkdir -p "$W/$d/$k/$(dirname "$f")"; cp "$src" "$W/$d/$k/$f"; fi
+    done
+    printf '%s\t%s\n' "$k" "$key" >> "$W/list.txt"
+  done < "$W/cases.tsv"
+  (cd "$W/nat" && rt_arbace_ns arbace.repr.ocaml.ocamlyacc check "$W/list.txt") > "$W/nat.log" 2>&1 || { tail -20 "$W/nat.log" >&2; return 1; }
+  if [ -n "$host" ]; then
+    command -v ocamlyacc > "$W/host.txt" || { echo "repr-ocaml: no ocamlyacc on PATH (--host is the oracle tier's)" >&2; return 1; }
+    ocamlyacc -version >> "$W/host.txt"
+    while IFS=$'\t' read -r k key; do
+      (set -f; cd "$W/ref/$k" && { st=0; ocamlyacc $key > "../$k.stdout" 2> "../$k.stderr" || st=$?
+        { echo "status $st"; echo "--- stdout"; cat "../$k.stdout"; echo "--- stderr"; cat "../$k.stderr"; } > "../$k.out"
+        rm -f "../$k.stdout" "../$k.stderr"; })
+      if [ "$(yacc_manifest "$W/ref/$k" "$key")" != "$(yacc_manifest "$W/nat/$k" "$key")" ]; then echo "DIFF $key ($W/ref/$k against $W/nat/$k)"; bad=$((bad+1)); fi
+    done < "$W/list.txt"
+    echo "ocamlyacc-check --host: $n runs, $((n-bad)) equal to the host's ocamlyacc byte for byte (the .ml, .mli, .output and the messages), $bad differ"
+    if [ -n "$record" ] && [ $bad = 0 ]; then
+      { echo ";; The host's ocamlyacc 5.5.0 over the tarball's ocamlyacc grammars and test/ocaml/ocamlyacc/ (bin/repr-ocaml ocamlyacc-check --host --record):"
+        echo ";; [ARGS SHA-256-OF-THE-MESSAGES \"FILE SHA-256\" ...], the messages: status, stdout, stderr; the files the run left but its input"
+        echo "["
+        while IFS=$'\t' read -r k key; do echo " $(yacc_manifest "$W/ref/$k" "$key")"; done < "$W/list.txt"
+        echo "]"; } > "$rec"
+      echo "ocamlyacc-check: recorded test/ocaml/ocamlyacc-expected.edn"
+    fi
+  fi
+  # the native runs against the record (no host tool), and the negative control: the first run's files (lex/parser.mly's) under
+  # the third's key (ocamldoc/odoc_parser.mly's), as if one grammar's tables were another's
+  local ok=0 diff=0 k1="" key1="" key2="" i=0
+  while IFS=$'\t' read -r k key; do
+    if grep -qxF " $(yacc_manifest "$W/nat/$k" "$key")" "$rec"; then ok=$((ok+1)); else echo "DIFF $key (against the record)"; diff=$((diff+1)); fi
+    if [ $i = 0 ]; then k1=$k; key1=$key; elif [ $i = 2 ]; then key2=$key; fi
+    i=$((i+1))
+  done < "$W/list.txt"
+  local rf got
+  rf=$(grep -F "[\"$key2\" " "$rec" | grep -o '"[^" ]*\.ml [0-9a-f]*"' | head -1 | awk '{print $2}' | tr -d '"')
+  got=$(sha256sum < "$W/nat/$k1/${key1%.mly}.ml" | cut -d' ' -f1)
+  if [ "$got" = "$rf" ]; then echo "ocamlyacc-check: the control ($key1's .ml against $key2's record) passes: it must not"; diff=$((diff+1));
+  else echo "ocamlyacc-check: control $key1's .ml against $key2's record fails as it must"; fi
+  echo "ocamlyacc-check: $ok of $n runs equal to the record (test/ocaml/ocamlyacc-expected.edn), $diff differ ($(tail -1 "$W/nat.log"))"
+  [ $diff = 0 ] && [ $bad = 0 ]
+}
+
 # the shipped build embeds nothing of repr/ocaml and nothing its keys (bin/lib/version.bash) do not name (review 008, finding 3)
 cmd_embed_check() {
   . "$root/bin/lib/version.bash"
@@ -1076,6 +1166,8 @@ case "${1:-}" in
   menhir) shift; cmd_menhir "$@" ;;
   ocamllex) shift; cmd_ocamllex "$@" ;;
   ocamllex-check) shift; cmd_ocamllex_check "$@" ;;
+  ocamlyacc) shift; cmd_ocamlyacc "$@" ;;
+  ocamlyacc-check) shift; cmd_ocamlyacc_check "$@" ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
   types) shift; cmd_dumps "types" "$@" ;;
