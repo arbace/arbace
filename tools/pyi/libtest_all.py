@@ -27,6 +27,10 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       tempfile's names) removed and logged into DIR/tmp-leftovers.log (the VM forbids /tmp). PYI_LIB_TEST_ONLY (PY7, bin/pyi
       check --only): the driver runs only the listed MODULE/TEST-ID of a module it names. PYI_LIB_TEST_DRIVER_EXE (PY7, bin/pyi
       cover): the driver compiled by pyi's AOT runs each module (on its loop), PYI_LIB_TEST_COVER/MODULE its GOCOVERDIR.
+  find --testdir DIR [--out FILE]
+      queue 240: the same discovery with no CPython: regrtest's findtests (Lib/test/libregrtest/findtests.py of the pinned
+      3.14.10, its SPLITTESTDIRS; copied below) over DIR, the tarball's Lib/test, sorted as cmd_list sorts; run by pyi
+      (bin/pyi runner find), the check's universe (bin/pyi check_universe), python3's list the oracle tier's
   owned --owners FILE --modules FILE [--invert]
       the modules of the list a family owns (FILE's FAMILY<TAB>REGEX lines), or with --invert the others
   table --dir DIR --summary FILE --out FILE [--owners FILE --modules FILE]
@@ -114,6 +118,58 @@ def cmd_list(args):
     with open(out, "w", encoding="utf-8") as o:
         o.write("".join(m + "\n" for m in mods))
     print("list: %d modules as regrtest finds them" % len(mods))
+
+
+# regrtest's discovery, copied from the pinned tarball's Lib/test/libregrtest/findtests.py (CPython 3.14.10, PSF license:
+# LICENSE.md's CPython entry): SPLITTESTDIRS and findtests, its annotations and its defaults' indirection dropped
+SPLITTESTDIRS = {
+    "test_asyncio",
+    "test_concurrent_futures",
+    "test_doctests",
+    "test_free_threading",
+    "test_future_stmt",
+    "test_gdb",
+    "test_inspect",
+    "test_pydoc",
+    "test_multiprocessing_fork",
+    "test_multiprocessing_forkserver",
+    "test_multiprocessing_spawn",
+}
+
+
+def findtests(testdir, exclude=(), split_test_dirs=SPLITTESTDIRS, base_mod=""):
+    """Return a list of all applicable test modules."""
+    tests = []
+    for name in os.listdir(testdir):
+        mod, ext = os.path.splitext(name)
+        if (not mod.startswith("test_")) or (mod in exclude):
+            continue
+        if base_mod:
+            fullname = f"{base_mod}.{mod}"
+        else:
+            fullname = mod
+        if fullname in split_test_dirs:
+            subdir = os.path.join(testdir, mod)
+            if not base_mod:
+                fullname = f"test.{mod}"
+            tests.extend(findtests(testdir=subdir, exclude=exclude,
+                                   split_test_dirs=split_test_dirs,
+                                   base_mod=fullname))
+        elif ext in (".py", ""):
+            tests.append(fullname)
+    return sorted(tests)
+
+
+def cmd_find(args):
+    testdir, out = arg(args, "--testdir"), arg(args, "--out")
+    mods = sorted(findtests(testdir))
+    text = "".join(m + "\n" for m in mods)
+    if out:
+        with open(out, "w", encoding="utf-8") as o:
+            o.write(text)
+        print("find: %d modules as regrtest's findtests finds them" % len(mods))
+    else:
+        sys.stdout.write(text)
 
 
 def cmd_refs(args):
@@ -514,7 +570,7 @@ def cmd_controls(args):
 
 def main():
     a = sys.argv[1:]
-    {"list": cmd_list, "refs": cmd_refs, "owned": cmd_owned, "fixrefs": cmd_fixrefs, "run": cmd_run, "table": cmd_table, "controls": cmd_controls}[a[0]](a[1:])
+    {"list": cmd_list, "find": cmd_find, "refs": cmd_refs, "owned": cmd_owned, "fixrefs": cmd_fixrefs, "run": cmd_run, "table": cmd_table, "controls": cmd_controls}[a[0]](a[1:])
 
 
 if __name__ == "__main__":
