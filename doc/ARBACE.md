@@ -449,8 +449,11 @@ and since SCS16 (b), 2026-11-09, `SpecialCasing.txt`, `DerivedCoreProperties.txt
 categories, properties and simple and full case mappings, in place of Go's `unicode` tables and Chez's answers; since SCS17 (c) the
 printers' escape ranges by doc/scheme/SPEC.md 7's rules; and since SCS21 (b), 2026-11-09, `auxiliary/WordBreakProperty.txt` (112,730 bytes,
 SHA-256 `476464e7...03779`, header `# WordBreakProperty-16.0.0.txt`, `# Date: 2024-07-29, 16:27:36 GMT`): UAX #29's Word_Break classes for
-si's `string-titlecase`, in place of a hand-written list; pinned by SHA-256 in `test/scheme/ucd.edn`); each file says so in its
-docstring or header.
+si's `string-titlecase`, in place of a hand-written list; since SCS23 (b) and SCS24 (b), 2026-11-09, `emoji/emoji-data.txt` (113,024 bytes,
+SHA-256 `f1365a51...2696a`, header `# emoji-data.txt`, `# Date: 2024-05-01, 21:25:24 GMT`): its Extended_Pictographic property for UAX #29's
+WB3c, and `auxiliary/WordBreakTest.txt` (298,862 bytes, SHA-256 `ad985d57...38e8`, header `# WordBreakTest-16.0.0.txt`, `# Date: 2024-04-30,
+21:48:43 GMT`): UAX #29's conformance cases, read (not copied) by si's unit test `go/arbace/scm/wordbreak_test.ae`; pinned by SHA-256 in
+`test/scheme/ucd.edn`); each file says so in its docstring or header.
 
 The converted files keep their Java file's notice as a comment; which license covers which file
 is stated only in [LICENSE.md](../LICENSE.md). Details, the renaming rules and how to build and

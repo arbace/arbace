@@ -28,7 +28,8 @@
 
 (go/func dcTitleCase ^bool [^rune r] (== (Category r) "Lt"))
 
-;; dcCased is Unicode's Cased, dcIgnorable its Case_Ignorable (DerivedCoreProperties.txt): the final sigma's context.
+;; dcCased is Unicode's Cased, dcIgnorable its Case_Ignorable (DerivedCoreProperties.txt). The final sigma's context is Case_Ignorable's
+;; and dcSigmaCased's (SCS22 (b), below string-titlecase's dcTitleCased).
 (go/func dcCased ^bool [^rune r] (IsCased r))
 
 (go/func dcIgnorable ^bool [^rune r] (IsCaseIgnorable r))
@@ -38,19 +39,19 @@
 
 (go/func dcFoldChar ^rune [^rune r] (FoldRune r))
 
-(go/func dcFinalSigma "dcFinalSigma is Unicode's Final_Sigma condition at rs[i].\n" ^bool [^{:tag (slice rune)} rs ^int i]
+(go/func dcFinalSigma "dcFinalSigma is Unicode's Final_Sigma condition at rs[i], with Chez Scheme 10.3.0's cased test (dcSigmaCased), a cased character never skipped as ignorable.\n" ^bool [^{:tag (slice rune)} rs ^int i]
   (let [before false after false]
     (for [j (- i 1)] (>= j 0) (dec! j)
       (watchdogTick)
-      (when (not (dcIgnorable (aget rs j)))
-        (set! before (dcCased (aget rs j)))
+      (when (or (dcSigmaCased (aget rs j)) (not (dcIgnorable (aget rs j))))
+        (set! before (dcSigmaCased (aget rs j)))
         (break)))
     (when (not before)
       (return false))
     (for [k (+ i 1)] (< k (len rs)) (inc! k)
       (watchdogTick)
-      (when (not (dcIgnorable (aget rs k)))
-        (set! after (dcCased (aget rs k)))
+      (when (or (dcSigmaCased (aget rs k)) (not (dcIgnorable (aget rs k))))
+        (set! after (dcSigmaCased (aget rs k)))
         (break)))
     (not after)))
 
@@ -90,9 +91,8 @@
 ;; SCS19-SCS21"). Cased here is Chez Scheme 10.3.0's, found by test/scheme/unicode/wordbreak-scan.sps: a character that has a case
 ;; mapping (UnicodeData.txt's simple uppercase, lowercase or titlecase one, or SpecialCasing.txt's), not Unicode's Cased property
 ;; (U+00AA, U+0138 and the modifier letters, Cased by Other_Lowercase or without a mapping, do not start a word's titlecasing).
-;; WB3c (ZWJ x Extended_Pictographic) is left out: emoji-data.txt is not pinned (SCS23 proposes it), and the one Extended_Pictographic
-;; character with a case mapping that is not an ALetter would be needed for a titlecase to see it (U+24C2, the circled M, which has
-;; one, is an ALetter; recorded as believed, not proved, until the file is pinned).
+;; WB3c (ZWJ x Extended_Pictographic) since SCS23 (b): IsExtPict is emoji/emoji-data.txt's property (unicode.ae); the scan's frame 9
+;; (a ZWJ c b) shows it wherever c is cased.
 
 (go/func wbIgnorable "wbIgnorable is whether the class c is Extend, Format or ZWJ (WB4: they belong to the character before).\n" ^bool [^int c]
   (or (== c wbExtend) (== c wbFormat) (== c wbZWJ)))
@@ -125,8 +125,8 @@
     (return -1))
   (aget wb k))
 
-(go/func dcWordBreak "dcWordBreak is whether UAX #29 puts a word boundary between the characters i-1 and i (0 < i < len(wb)) of the text whose Word_Break classes are wb: WB3 to WB16 in their order (WB1 and WB2 are the text's ends, WB3c is left out), the first that holds deciding.\n"
-  ^bool [^{:tag (slice int)} wb ^int i]
+(go/func dcWordBreak "dcWordBreak is whether UAX #29 puts a word boundary between the characters i-1 and i (0 < i < len(wb)) of the text rs whose Word_Break classes are wb: WB3 to WB16 in their order (WB1 and WB2 are the text's ends), the first that holds deciding.\n"
+  ^bool [^{:tag (slice rune)} rs ^{:tag (slice int)} wb ^int i]
   (let [a (aget wb (- i 1))
         b (aget wb i)]
     (when (and (== a wbCR) (== b wbLF))                          ; WB3
@@ -135,6 +135,8 @@
       (return true))
     (when (wbHard b)                                              ; WB3b
       (return true))
+    (when (and (== a wbZWJ) (IsExtPict (aget rs i)))              ; WB3c (SCS23 (b))
+      (return false))
     (when (and (== a wbWSegSpace) (== b wbWSegSpace))             ; WB3d
       (return false))
     (when (wbIgnorable b)                                         ; WB4
@@ -191,6 +193,15 @@
         (values _ t) (SpecialTitlecase r)]
     (or u d t)))
 
+;; dcSigmaCased is Chez's cased test in the final sigma's context (SCS22 (b), the user 2026-11-09; doc/scheme/SCHEME-SURVEY.md, "As built:
+;; SCS22-SCS24"), found by test/scheme/unicode/wordbreak-scan.sps's frames 7 and 8 over every scalar value: a character with a simple case
+;; mapping (UnicodeData.txt's uppercase, lowercase or titlecase one; SpecialCasing.txt's alone, as U+00DF's or U+FB01's, does not count),
+;; but U+1E9E (LATIN CAPITAL LETTER SHARP S, whose simple lowercase is U+00DF), which Chez does not count: a stated exception, its rule in
+;; Chez not known (the host has Chez's binary only). A character cased so is never looked past as Case_Ignorable (U+0345, both, ends
+;; the context: dcFinalSigma).
+(go/func dcSigmaCased ^bool [^rune r]
+  (and (!= r 0x1E9E) (or (!= (UpcaseRune r) r) (!= (DowncaseRune r) r) (!= (TitlecaseRune r) r))))
+
 (go/func dcTitle ^{:tag (slice rune)} [^{:tag (slice rune)} rs]
   (let [out (make (slice rune) 0 (len rs))
         n (len rs)
@@ -205,7 +216,7 @@
               ;; WB4's exception: U+0345 alone is not mapped to U+0399; after another character it is part of that one's word)
               plain (wbIgnorable (aget wb i))
               first true]
-          (while (and (< j n) (not (dcWordBreak wb j)))
+          (while (and (< j n) (not (dcWordBreak rs wb j)))
             (watchdogTick)
             (inc! j))
           (for [k i] (< k j) (inc! k)

@@ -4310,3 +4310,115 @@ the gate's coverage of `(rnrs unicode)` (two scans and their control, a part of 
   UAX #29's own WordBreakTest.txt (`auxiliary/WordBreakTest.txt`, a sixth file, the standard's conformance data: about 1,900 strings
   with their break positions), the whole algorithm judged on the standard's data, not on Chez's observable part; half a day plus a download.
   *Recommended: (b)* if the user wants the segmentation itself proved.
+
+## Decided (the user, 2026-11-09, about 11:10): SCS22 (b), SCS23 (b), SCS24 (b)
+
+As recommended. SCS22 (b): the final sigma's cased test by Chez's, U+1E9E a stated exception, the two sigma frames in the scan. SCS23 (b):
+`emoji/emoji-data.txt` pinned (fetched once), Extended_Pictographic generated, WB3c in `dcWordBreak`. SCS24 (b): a unit test of `dcWordBreak`
+over `auxiliary/WordBreakTest.txt` (fetched once). The acceptance covers both fetches (the user's fifth allowance); nothing in either file is run.
+
+## As built: SCS22-SCS24, the final sigma by Chez's cased test, WB3c, UAX #29's conformance test (2026-11-09, branch scheme-props4)
+
+From `mac/next` 4be141f28. The stubs (`chez`, `chibi-scheme`, the C, LLVM, OCaml, GHC, Rust and Python tools) first on `PATH`, logging any
+call; Chez only by hand, for the record (`CHEZ=/usr/bin/chez bin/si unicode-scan --record`).
+
+### The pins (SCS23 (b), SCS24 (b))
+
+Fetched once on 2026-11-09 from `https://www.unicode.org/Public/16.0.0/ucd/` into the main checkout's `.tmp/scheme/ucd-16.0.0/`:
+
+| file | bytes | SHA-256 | header |
+|---|---|---|---|
+| `emoji/emoji-data.txt` | 113,024 | `f1365a5173eee18e1f98b240cdc492e84a25f1ce7e0c9d1094eb29c41a22696a` | `# emoji-data.txt`, `# Date: 2024-05-01, 21:25:24 GMT` |
+| `auxiliary/WordBreakTest.txt` | 298,862 | `ad985d5721f3fa6b45495663dfe44180f2f68976100dee0ea7451ef1a8f838e8` | `# WordBreakTest-16.0.0.txt`, `# Date: 2024-04-30, 21:48:43 GMT` |
+
+Both in `test/scheme/ucd.edn`'s `:files` and `:bytes` (`bin/repr-scheme ucd fetch` fetches them by pin from now on, `pins check` holds them);
+origin in doc/ARBACE.md, LICENSE.md's Unicode License V3 entry names them (the test file is read, not copied into the tree).
+
+### SCS23 (b): Extended_Pictographic and WB3c
+
+`arbace.repr.scheme.ucd`'s `properties` reads emoji-data.txt's `Extended_Pictographic` lines (78 ranges merged; the file's other
+properties are not read) and `go-props` writes `extPictRanges` and `IsExtPict` into `go/arbace/scm/unicode.ae` (`bin/repr-scheme ucd gen`;
+the other three generated files unchanged; `ucd check` 4 of 4). `prim_char.ae`'s `dcWordBreak` takes the text's runes with its classes and
+gains WB3c in UAX #29's order, after WB3b and before WB3d: no boundary between a ZWJ and an Extended_Pictographic character, on the two
+characters themselves (before WB4 gives the ZWJ to the character before it).
+
+The scan's new frame 9, `a U+200D c b`, shows WB3c wherever c is cased: si with WB3c and si without it give the same 292,531 lines (0
+differ), and both equal Chez's. So the belief SCS21 recorded is now measured: no titlecase over a scalar value sees WB3c (the
+Extended_Pictographic characters with a case mapping, U+24C2 among them, are ALetters, which WB5 joins anyway). What proves WB3c is the
+conformance test below: without it 9 of WordBreakTest.txt's 4,378 positions differ.
+
+### SCS24 (b): UAX #29's conformance data
+
+`go/arbace/scm/wordbreak_test.ae` (`TestWordBreakUAX29`, in `scm.ae`'s test files): each line of WordBreakTest.txt (`÷ XXXX × YYYY ÷ ...`)
+is a string, and at each inner position `dcWordBreak` must say what the line says (÷ a boundary, × none; the ends are WB1 and WB2's).
+`bin/si unit` passes the pinned directory as `SI_UCD_DIR` (the main checkout's `.tmp/scheme/ucd-16.0.0`, from a worktree or the clean
+clone as `bin/repr-scheme` takes it; `ARBACE_SCHEME_UCD` overrides); unset, the test skips; set and the file missing or not 16.0.0's, it fails;
+fewer than 1,800 strings fails. Result: 1,826 strings, 4,378 inner positions, **0 differ**; with WB3c taken out (by hand, as the test's
+control), 9 differ. The whole of WB3 to WB16 is so judged on the standard's own data, beyond the part Chez's titlecase shows.
+
+### SCS22 (b): the final sigma by Chez's cased test
+
+The scan `test/scheme/unicode/wordbreak-scan.sps` gains frames 7 and 8, `string-downcase` of `U+0391 U+03A3 c` (the sigma final unless c is
+cased; c ignorable looked past) and of `U+0391 c U+03A3` (final when c is cased or ignorable). The first build, `dcFinalSigma` by the titlecasing
+test (`dcTitleCased`: any case mapping, SpecialCasing.txt's too), U+1E9E excepted, differed from Chez in 42 lines: U+00DF, U+0149, U+01F0,
+U+0390, U+03B0, U+0587, U+1E96 to U+1E9A, the Greek letters with only a SpecialCasing mapping (U+1F50 ...), the ligatures U+FB00 to U+FB17,
+and U+0345. So Chez's cased test in the sigma's context is narrower than its titlecasing one, and found from the data:
+
+- `dcSigmaCased`: a character with a **simple** case mapping (UnicodeData.txt's uppercase, lowercase or titlecase; a SpecialCasing.txt
+  mapping alone, as U+00DF's or U+FB01's, does not count), but U+1E9E (whose simple lowercase is U+00DF), which Chez does not count: the
+  stated exception, its rule in Chez not known (the host has Chez's binary only);
+- a character so cased is never looked past as Case_Ignorable: U+0345 (Mn, Case_Ignorable, and with a simple uppercase U+0399) ends the
+  context, so `ΑΣ` + U+0345 keeps σ, as Chez does.
+
+After: the scan's 292,531 lines equal Chez's byte for byte (`test/scheme/wordbreak-scan.edn` recorded again by Chez: SHA-256
+`e810ee9b...6c8aca`, `:differences []`); the first scan (`scan.sps`, recorded again in the same run) unchanged and equal. The control
+(`bin/si unicode-scan --control`) still differs in 8 and 1 lines, as it must. Real text is affected only where the sigma stands next to
+one of the 1,380 characters SCS22 listed (letters with no case, the ligatures, U+0345).
+
+### The numbers
+
+| command (stubs first) | result |
+|---|---|
+| `bin/si unit` | ok, `TestWordBreakUAX29` included (1,826 strings, 0 differ) |
+| `bin/si unicode-scan` | both scans equal Chez's records byte for byte (292,557 and 292,531 lines) |
+| `bin/si unicode-scan --control` | 8 and 1 lines differ, as a control must |
+| `bin/repr-scheme ucd check` | 4 of 4 generated files equal |
+| `bin/repr-scheme pins check` | held: 356 corpus files, the UCD's files (the two new ones included) and licenses at their SHA-256 (run with Chez on `PATH`: it reads Chez's identity, `chez --version`, the stubs' one call) |
+| `bin/si test --si` | 61 of 64 (3 known), 0 failing |
+| `bin/si check --only test/scheme/essential-check.txt` | 0 failing, the controls differ |
+| `bin/si check` (the 50 programs) | 45 pass, 10 non-pass items, 0 failing, the controls differ, judge-test ok |
+| `bin/si check --aot --only test/scheme/essential-aot.txt` | 12 of 13 the same as interpreted, 1 refused (as recorded), 0 differing |
+| `bin/si r7rs`, `bin/si srfi` | as before, their controls failing |
+| `bin/reap --record` | `test/reap/matrix.edn` unchanged (41 of 44 cells checked, 0 problems) |
+| `bin/crops-score --record`, `--judge --strict` | `test/crops/scores.edn` unchanged; 11 crops, 0 problems |
+| `bin/gate --full --plan` | the steps parse (exit 0); `si-essential` and `si-check`'s parts run |
+
+| `bin/crops-score --crop scheme` | before (4be141f28) | after |
+|---|---|---|
+| completeness | 97.4 (98.9 without by design) | 97.4 (98.9): no record moves; the scan's record is a check's, not a cell's |
+| maturity | 100.0 | 100.0 |
+| independence | 100.0 | 100.0: the unit test and the scans' check run on no toolchain host |
+
+What moved is not in the table: `string-downcase`'s final sigma now Chez's over every scalar value (frames 7 and 8, 0 of 292,531 lines
+differ), WB3c, and `dcWordBreak` proved on UAX #29's 1,826 conformance strings.
+
+### Night commands
+
+- The gate's `si-essential` (`bin/si unit` with `TestWordBreakUAX29`), `si-check` (both parts: `bin/si unicode-scan`, `--control`), `si-aot`,
+  `si-corpora`, `scheme-read` (its `pins check` part holds the two new pins), `reap`, `crops-score`.
+- `bin/si mats` and `bin/si ecraven` (heavy rotations, not run here): `string-downcase` with a sigma beside a letter of no case is the one
+  answer that moved; a change would show against `test/scheme/check-mats-linux-amd64.edn` and `check-ecraven-linux-amd64.edn` (none expected).
+- A clean clone's `bin/si unit` reads the UCD from the main checkout's `.tmp/scheme/ucd-16.0.0`: run `bin/repr-scheme ucd fetch` there first
+  only if the files are missing (they are fetched).
+
+### Proposed (scheme-props4)
+
+- **SCS25 U+1E9E's rule in Chez's final sigma.** The exception is stated, not explained: Chez counts every character with a simple mapping
+  as cased beside a sigma but U+1E9E. (a) leave it stated (as built); (b) read Chez 10.3.0's `unicode-char-cases.ss` and its generated
+  tables (Chez's source tarball, Apache-2.0, one more download, the user's allowance) to find the rule and replace the exception by it;
+  an hour plus a download. *Recommended: (a)*: one character, measured over every scalar value, and nothing else of si depends on it.
+- **SCS26 The conformance test's negative control in the gate.** `TestWordBreakUAX29`'s control (WB3c taken out: 9 positions must differ) was
+  run by hand. `si-essential`'s waiver covers the check's own controls, not this test. (a) leave by hand; (b) `bin/si unit --control`, as
+  `unicode-scan --control` does: the runtime copied to `.tmp/si-control`, WB3c's line dropped, the test run and required to report exactly 9
+  differing positions (another count fails), a part of `si-check.unicode` (about a minute: one more build of the copy). *Recommended: (b)*:
+  the conformance test then has a control in the gate, as every check family does (GTS81 (a)).
