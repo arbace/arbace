@@ -134,6 +134,74 @@
             (.put procs (Long/valueOf pid) (new Object/1 [p pumps]))
             (Long/valueOf pid))))))
 
+  ;; ---- exec (OC208 (b), doc/ocaml/OCAML-SURVEY.md "As built: OC208 (b)"): otherlibs/unix's execv.c, execve.c, execvp.c (OCaml
+  ;; 5.5.0) and oi's caml_unix_execv... (ext_signal.go: the standard channels flushed first, execvp's search as its lookPath). Java
+  ;; cannot replace its process; the compiled level's main (test/ocaml/o2j/main) can: its host serves the path execPath, a request
+  ;; written there and closed is its syscall.Exec, after the working directory (ExtSys/cwd) and the standard descriptors of Fd's
+  ;; table made the process's. Nothing serves execPath at the light level (a Java forms interpreter in stage 0): the open fails and
+  ;; the external is missing there, as before (OC208 (b): the light level keeps :unix-unported). Errors: Unix_error as the C
+  ;; library's (the host's close answers "ocaml-exec: errno N").
+
+  (field ^:static ^:final ^String execPath "/proc/self/ocaml-exec")
+
+  (method ^:static field ^void [^java.io.ByteArrayOutputStream o x]
+    (let [b (cast byte/1 x)]
+      (.write o b 0 (alength b))
+      (.write o 0)))
+
+  ;; an OCaml string array's strings, each C-safe (caml_unix_cstringvect: EINVAL naming the string)
+  (method ^:static cstrings ^ArrayList [v ^String fn]
+    (let [out (ArrayList.)]
+      (when (instance? Block v)
+        (let [f (.-f (cast Block v))]
+          (loop [^int i 0]
+            (when (< i (alength f))
+              (when (not (ExtSys/cSafe (aget f i))) (throw (ExtUnix/error 22 fn (Rt/utf8 (aget f i)))))
+              (.add out (aget f i))
+              (recur (unchecked-inc-int i))))))
+      out))
+
+  ;; standard descriptor i as the exec'd process is to have it: "" its own, "-" closed, "dN" a dup of the process's N, "fFLAGS:POS:PATH" a
+  ;; file of the table (r, w, a, rw: its access and append; POS its offset); a runtime pipe or socket has no descriptor of the OS
+  (method ^:static stdRedirect ^String [^int i ^String fn]
+    (let [d (Fd/get i)]
+      (cond
+        (nil? d) "-"
+        (> (.-std d) 0) (if (== (.-std d) (unchecked-inc-int i)) "" (java-str "d" (unchecked-dec-int (.-std d))))
+        (and (some? (.-raf d)) (some? (.-path d)))
+        (java-str "f" (cond (and (.-readable d) (.-writable d)) "rw" (.-append d) "a" (.-writable d) "w" :else "r")
+                  ":" (try (.getFilePointer (.-raf d)) (catch IOException e 0)) ":" (ExtSys/resolve (.-path d)))
+        :else (throw (Rt/unsupported (java-str fn " with a standard descriptor on a pipe or a socket"))))))
+
+  (method ^:static exec [^String fn path args envv ^boolean search]
+    (when (not (ExtSys/cSafe path)) (throw (ExtUnix/error 2 fn (Rt/utf8 path))))
+    (let [argv (ExtProc/cstrings args fn)
+          env (ExtProc/cstrings (if (some? envv) envv (ExtUnix/caml_unix_environment Rt/UNIT)) fn)
+          o (java.io.ByteArrayOutputStream.)]
+      (ExtProc/field o (Rt/ofUtf8 fn))
+      (ExtProc/field o (Rt/ofUtf8 ExtSys/cwd))
+      (ExtProc/field o (cast byte/1 path))
+      (ExtProc/field o (Rt/ofUtf8 (if search "1" "0")))
+      (ExtProc/field o (Rt/ofUtf8 (String/valueOf (.size argv))))
+      (loop [^int i 0] (when (< i (.size argv)) (ExtProc/field o (cast byte/1 (.get argv i))) (recur (unchecked-inc-int i))))
+      (ExtProc/field o (Rt/ofUtf8 (String/valueOf (.size env))))
+      (loop [^int i 0] (when (< i (.size env)) (ExtProc/field o (cast byte/1 (.get env i))) (recur (unchecked-inc-int i))))
+      (loop [^int i 0] (when (< i 3) (ExtProc/field o (Rt/ofUtf8 (ExtProc/stdRedirect i fn))) (recur (unchecked-inc-int i))))
+      (let [s (try (java.io.FileOutputStream. execPath) (catch IOException e nil))]
+        ;; the light level: no host serves the request
+        (when (nil? s) (throw (Rt/missing (java-str "caml_unix_" fn))))
+        (try (ExtIo/flushStd) (catch Throwable _ nil))
+        (Main/flushStd)
+        (let [msg (try (.write s (.toByteArray o)) (.close s) nil (catch IOException e (.getMessage e)))
+              k (if (some? msg) (.indexOf msg "errno ") -1)]
+          ;; the host's close returns only when the exec failed
+          (throw (ExtUnix/error (if (>= k 0) (Integer/parseInt (.trim (.substring msg (unchecked-add-int k 6)))) 5) fn (Rt/utf8 path)))))))
+
+  (method ^:public ^:static caml_unix_execv [path args] (ExtProc/exec "execv" path args nil false))
+  (method ^:public ^:static caml_unix_execve [path args env] (ExtProc/exec "execve" path args env false))
+  (method ^:public ^:static caml_unix_execvp [path args] (ExtProc/exec "execvp" path args nil true))
+  (method ^:public ^:static caml_unix_execvpe [path args env] (ExtProc/exec "execvpe" path args env true))
+
   (method ^:static status [^int code]
     (if (> code 128)
       (Block. 1 (new Object/1 [(ExtSys/caml_sys_rev_convert_signal_number (Long/valueOf (unchecked-subtract (long code) 128)))]))

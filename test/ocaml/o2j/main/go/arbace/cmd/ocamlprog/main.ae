@@ -2,12 +2,168 @@
 ;; OCaml programs translated by arbace.o2j into Java forms (each program's units in a package ocaml.p<N>, the library's in
 ;; ocaml.u) and by j2g into Go; main is the dispatcher's, ocaml.u.Shard (the program O2J_PROG names, the whole command line its
 ;; argv, argv.(0) O2J_ARGV0 when set), inside jrt.RunMain (the thread main). Given to bin/j2g with --main by bin/oi's compiled level.
+;;
+;; OC208 (b) (doc/ocaml/OCAML-SURVEY.md, "As built: OC208 (b)"): the program's host is jrt's (ProgramHost) with one file of its own,
+;; execPath, where the AOT runtime's Unix.execv and its kin (jdk/ocaml/ocaml/rt/ExtProc.ae, exec) write their request; its Close
+;; is the exec: the working directory and the standard descriptors made the program's, then syscall.Exec, as oi's ext_signal does.
+;; Java cannot replace its process; this main can, through jrt's file layer (HostFiles' Open, Write and Close), with no change to jrt.
 (in-ns 'go.arbace.cmd.ocamlprog)
 
-(go/file "main.go" :imports [[os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]])
+(go/file "main.go" :imports [[errors "errors"] [fmt "fmt"] [io "io"] [os "os"] [filepath "path/filepath"] [strconv "strconv"]
+                             [strings "strings"] [syscall "syscall"] [jrt "arbace/jrt"] [lang "arbace/lang"]])
+
+(go/const ^{:doc "execPath is the file ExtProc.exec writes its request to: a path no file system lets a program create, so that where\nno host serves it (the light level) the open fails.\n"}
+  execPath "/proc/self/ocaml-exec")
+
+(go/type execHost "execHost is jrt's host with execPath served (Open).\n" (struct jrt/Host))
+
+(go/method Open "Open is the host's, execPath a new request.\n" [^execHost h ^string name ^int flag ^uint32 perm] :results [jrt/HostFile error]
+  (when (== name execPath)
+    (return (addr (lit execFile)) nil))
+  (return (.Open (.-Host h) name flag perm)))
+
+(go/type execFile "execFile is a request being written: NUL-terminated fields (ExtProc.exec's).\n"
+  (struct ^{:tag (slice byte)} buf))
+
+(go/method Write [^{:tag (* execFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (set! (.-buf f) (append (.-buf f) (spread p)))
+  (return (len p) nil))
+
+(go/method Read [^{:tag (* execFile)} f ^{:tag (slice byte)} p] :results [int error]
+  (return 0 io/EOF))
+
+(go/method Seek [^{:tag (* execFile)} f ^int64 offset ^int whence] :results [int64 error]
+  (return (conv int64 (len (.-buf f))) nil))
+
+(go/func errnoError "errnoError is err as ExtProc.exec reads it: \"ocaml-exec: errno N\" (EIO when it carries none).\n" ^error [^error err]
+  (let [^syscall/Errno e syscall/EIO]
+    (errors/As err (addr e))
+    (fmt/Errorf "ocaml-exec: errno %d" (conv int e))))
+
+(go/func lookPath "lookPath is cmd found in PATH as execvp finds it, a name holding a slash itself (oi's, ext_signal's).\n"
+  ^string [^string cmd ^{:tag (slice string)} env]
+  (when (strings/Contains cmd "/")
+    (return cmd))
+  (let [path (os/Getenv "PATH")]
+    (range [_ kv env]
+      (when (strings/HasPrefix kv "PATH=")
+        (set! path (subslice kv 5))))
+    (when (== path "")
+      (set! path "/bin:/usr/bin"))
+    (range [_ dir (filepath/SplitList path)]
+      (when (== dir "")
+        (set! dir "."))
+      (let [p (filepath/Join dir cmd)
+            ^syscall/Stat_t st (zero syscall/Stat_t)]
+        (when (and (== (syscall/Stat p (addr st)) nil) (== (bit-and (.-Mode st) syscall/S_IFMT) syscall/S_IFREG)
+                   (== (syscall/Access p 1) nil))
+          (return p))))
+    cmd))
+
+(go/type request "request is an exec's request as fields: the function, the working directory, the path, whether to search PATH,\nthe arguments, the environment and the three standard descriptors' redirections.\n"
+  (struct ^string fn ^string cwd ^string path ^bool search ^{:tag (slice string)} argv ^{:tag (slice string)} env
+          ^{:tag (slice string)} std))
+
+(go/func parseRequest "parseRequest reads ExtProc.exec's fields.\n" [^{:tag (slice byte)} b] :results [request error]
+  (let [fs (strings/Split (conv string b) "\u0000")
+        i 0
+        ^request r (lit request)]
+    (when (or (< (len fs) 8) (!= (aget fs (- (len fs) 1)) ""))
+      (return r (errors/New "ocaml-exec: a malformed request")))
+    (let [next (fn ^string [] (let [s (aget fs i)] (inc! i) (return s)))
+          num (fn ^int [] (let [(values n err) (strconv/Atoi (next))] (when (!= err nil) (return -1)) (return n)))]
+      (set! (.-fn r) (next))
+      (set! (.-cwd r) (next))
+      (set! (.-path r) (next))
+      (set! (.-search r) (== (next) "1"))
+      (let [n (num)]
+        (when (or (< n 0) (> (+ i n) (len fs)))
+          (return r (errors/New "ocaml-exec: a malformed request")))
+        (set! (.-argv r) (subslice fs i (+ i n)))
+        (set! i (+ i n)))
+      (let [n (num)]
+        (when (or (< n 0) (!= (+ i n 4) (len fs)))
+          (return r (errors/New "ocaml-exec: a malformed request")))
+        (set! (.-env r) (subslice fs i (+ i n)))
+        (set! i (+ i n)))
+      (set! (.-std r) (subslice fs i (+ i 3)))
+      (return r nil))))
+
+(go/func redirect "redirect makes the standard descriptors the request names the process's: closed (-), a dup of another (dN, each\nsource saved first, so that a swap holds), a file at its offset (fFLAGS:POS:PATH).\n"
+  ^error [^{:tag (slice string)} std]
+  (let [^{:tag (array 3 int)} src (lit (array 3 int) -1 -1 -1)]
+    (range [i s std]
+      (when (strings/HasPrefix s "d")
+        (let [(values n err) (strconv/Atoi (subslice s 1))]
+          (when (!= err nil)
+            (return err))
+          (let [(values d err) (syscall/Dup n)]
+            (when (!= err nil)
+              (return err))
+            (aset src i d)))))
+    (range [i s std]
+      (when (== s "-")
+        (syscall/Close i)
+        (continue))
+      (when (strings/HasPrefix s "d")
+        (when [err (syscall/Dup2 (aget src i) i)] (!= err nil)
+          (return err))
+        (syscall/Close (aget src i))
+        (continue))
+      (when (strings/HasPrefix s "f")
+        (let [parts (strings/SplitN (subslice s 1) ":" 3)]
+          (when (!= (len parts) 3)
+            (return (errors/New "ocaml-exec: a malformed redirection")))
+          (let [flag syscall/O_RDONLY]
+            (switch (aget parts 0)
+              (case ["rw"] (set! flag syscall/O_RDWR))
+              (case ["w"] (set! flag syscall/O_WRONLY))
+              (case ["a"] (set! flag (bit-or syscall/O_WRONLY syscall/O_APPEND))))
+            (let [(values fd err) (syscall/Open (aget parts 2) flag 0)]
+              (when (!= err nil)
+                (return err))
+              (let [(values pos _) (strconv/ParseInt (aget parts 1) 10 64)]
+                (when (> pos 0)
+                  (syscall/Seek fd pos 0)))
+              (when [err (syscall/Dup2 fd i)] (!= err nil)
+                (return err))
+              (syscall/Close fd))))))
+    nil))
+
+(go/func restore "restore makes the saved descriptors the standard ones again (an exec that failed leaves the runtime's view: its own\nFd table holds the redirections).\n" [^{:tag (array 3 int)} saved]
+  (range [i fd saved]
+    (when (>= fd 0)
+      (syscall/Dup2 fd i)
+      (syscall/Close fd))))
+
+(go/method Close "Close is the exec: it returns only when the exec failed, its errno in the error, the working directory and the\nstandard descriptors as they were.\n" ^error [^{:tag (* execFile)} f]
+  (let [(values r err) (parseRequest (.-buf f))]
+    (when (!= err nil)
+      (return err))
+    (let [(values wd _) (os/Getwd)
+          ^{:tag (array 3 int)} saved (lit (array 3 int) -1 -1 -1)]
+      (range [i _ saved]
+        (let [(values d derr) (syscall/Dup i)]
+          (when (== derr nil)
+            (aset saved i d)
+            (syscall/CloseOnExec d))))
+      (when [cerr (os/Chdir (.-cwd r))] (!= cerr nil)
+        (restore saved)
+        (return (errnoError cerr)))
+      (when [rerr (redirect (.-std r))] (!= rerr nil)
+        (restore saved)
+        (os/Chdir wd)
+        (return (errnoError rerr)))
+      (let [prog (.-path r)]
+        (when (.-search r)
+          (set! prog (lookPath prog (.-env r))))
+        (let [xerr (syscall/Exec prog (.-argv r) (.-env r))]
+          (restore saved)
+          (os/Chdir wd)
+          (return (errnoError xerr)))))))
 
 (go/func main []
-  (jrt/SetHost (jrt/ProgramHost nil))
+  (jrt/SetHost (lit execHost :Host (jrt/ProgramHost nil)))
   (let [args (jrt/NewRefArray jrt/String_class (conv int32 (len os/Args)))]
     (range [i a os/Args]
       (aset (.-A args) i (jrt/Str a)))

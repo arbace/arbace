@@ -2790,3 +2790,32 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+
+## 2026-11-09: OCaml's independence: OC208 (b) built, the opam set's own verdicts (branch `ocaml-indep`, from next `6c3c87c02`)
+
+The brief: raise OCaml's independence (51.3 on next, after the 11-09 audit put every cell's record at 0.5); build OC208 as accepted
+(the user, 2026-11-09: (b), the recommendation); find what keeps eval, AOT and judge below 1 and remove a toolchain from check time;
+night 10 records the native read and print, not redone here. Recorded in doc/ocaml/OCAML-SURVEY.md, "As built: OC208 (b), the opam
+set's own verdicts", with the proposals OC209-OC211.
+
+- OC208 (b): `Unix.execv`, `execve`, `execvp`, `execvpe` in the AOT runtime (`jdk/ocaml/ocaml/rt/ExtProc.ae`), the C stubs' checks of
+  otherlibs/unix's `execv.c`, `execve.c`, `execvp.c` (OCaml 5.5.0, the pinned tarball) and oi's `ext_signal.go` behaviour (the standard
+  channels flushed, execvp's search as its lookPath). Java cannot exec, so the request is written to a path the compiled level's main
+  serves (`test/ocaml/o2j/main`: jrt's ProgramHost wrapped, `/proc/self/ocaml-exec`; Close chdirs to `ExtSys/cwd`, makes the standard
+  descriptors those of `Fd`'s table, `syscall.Exec`; a failure restores both and answers the errno). Alternatives: a native method of
+  the runtime implemented in Go (j2g resolves natives in jrt or the class's own package, so it needed a j2g or jrt change, both in every
+  key); exiting with a status and having main exec after RunMain (the runtime's `System/exit` ends the process inside jrt); OC208 (a)'s
+  spawn-wait-exit at both levels (the user chose (b)). At the light level nothing serves the path: the row stays `:unix-unported`.
+  Checked on a stub of jrt (exec with directory, environment and redirections; PATH search; errno 2 with the descriptors restored) and
+  at the light level by list; the compiled level's run is the night's (above the lane's 2 GiB).
+- The opam set's own verdicts (`test/ocaml/opam-verdicts.tsv`, `bin/oi`'s `own_verdicts`, the judges' `*` digest: the exit status
+  alone): the eight load programs by `test/ocaml/opam/load.reference`, astring's test and examples and uutf's test_uutf by exit status
+  (their packages' `Pkg.test` and `B0_ocaml.test`), astring's total by no output; pprint's and cmdliner's demonstrations stay on the
+  recorded run (OC211). A negative control at both suite levels. `bin/oi own-verdicts --check`: suite 100 of 121 at oi's level, 110 at
+  the AOT level, 0 differ. Alternatives: a report-line verdict for astring's and uutf's logs (the runner would rewrite their output, as
+  the hooks do; the packages' runners judge by status alone); expected outputs for the demonstrations (ocamlc's output copied: rejected).
+- Found: no OCaml gate step runs ocamlc or ocamlopt; eval and AOT are 0.5 by their cells' records (ocdump's path) until night 10's
+  native records and `bin/oi reap-switch --apply`; OC202's switch must take the compiled level's native record. The judge's recorded
+  cases left: 37 at oi's level, 16 at the AOT level (OC209-OC211).
+- Scores (`bin/crops-score --crop ocaml`): independence 51.3% to 51.4% (judge 0.563 to 0.570, its cases by `own-verdicts`); after
+  night 10's read and print records and the switch, about 99.9%.

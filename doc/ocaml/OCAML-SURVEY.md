@@ -3219,3 +3219,120 @@ to **477 / 195 / 4** (pass / design / deferred), AOT 406 / 202 / 64 to **419 / 1
   interpreter in stage 0, keeps the class): two hours, then the AOT cell's row moves with OC202's switch; (c) as now. *Recommended: (b)*
   (exact, as oi's, and the AOT cell is the compiled level's).
 
+
+## Decided (the user, 2026-11-09): OC208
+
+Relayed by the main session with the brief of the branch `ocaml-indep`: **OC208 (b)** as recommended (`Unix.execv` and its kin at the
+compiled level, through the shard's Go program; the light level keeps `:unix-unported`).
+
+## As built: OC208 (b), the opam set's own verdicts (2026-11-09, branch `ocaml-indep`, from next `6c3c87c02`)
+
+Under the light lane of night 10 (no gate, no build of the compiled level, each process under 2 GiB).
+
+**OC208 (b): exec at the compiled level.** otherlibs/unix's `execv.c`, `execve.c`, `execvp.c` (OCaml 5.5.0) as oi's `ext_signal.go`
+mirrors them, in the AOT runtime: `ExtProc`'s `caml_unix_execv`, `execve`, `execvp`, `execvpe` (`jdk/ocaml/ocaml/rt/ExtProc.ae`,
+`exec`). The C stubs' checks: a path that is not C-safe is `ENOENT`, an argument or environment string that is not is `EINVAL`
+naming it (`caml_unix_check_path`, `caml_unix_cstringvect`); the environment of `execv`/`execvp` is the program's (the process's with
+`ExtUnix`'s putenv overlay, as `caml_unix_environment`), the standard channels flushed first (oi's `flushStdQuiet`). Java cannot
+replace its process, so the request goes through jrt's file layer to the compiled level's main (`test/ocaml/o2j/main`, the crop's Go):
+its host is jrt's `ProgramHost` wrapped (`execHost`, the Host interface embedded) with one path of its own, `/proc/self/ocaml-exec`;
+the runtime writes its request there (NUL-terminated fields: the function, `ExtSys/cwd`, the path, whether to search `PATH`, the
+arguments, the environment, the three standard descriptors as `Fd`'s table has them: its own, closed, a dup of another standard one,
+or a file of the table at its offset), and the file's `Close` is the exec: the working directory (Java has no chdir: `ExtSys/cwd` made
+the process's), the standard descriptors made the table's (each source duplicated first, so that a swap holds), `PATH` searched for
+`execvp`/`execvpe` as oi's `lookPath`, `syscall.Exec`. A failed exec puts the descriptors and the directory back and returns
+`ocaml-exec: errno N`, which the runtime raises as `Unix_error` of that errno with the function and the path, as the C stub's
+`caml_uerror`. A standard descriptor on a runtime pipe or socket has no descriptor of the OS: `Rt/unsupported`. No change to jrt or
+j2g (the crop's paths only: no key moves). At the light level no host serves the path (stage 0's open of it fails), so the external
+is missing there as before: `o2j: external caml_unix_execv is not implemented`, `:unix-unported`.
+
+Checked: the main printed by repr/go (`bin/repr-go print --gofmt`), vetted and built by TamaGo's go against a stub of jrt's Host and
+`RunMain` (`.tmp/exectest`, a scratch module): an `execv` of `/bin/sh` with a working directory, an environment, the output on a file
+at its offset and the error output on the process's output runs in the new image with all four (`FOO=bar`, the directory printed,
+the file written, `toerr` on the output); an `execvp` of `sh` found through the request's `PATH`; a missing program gives `errno 2`
+with the standard descriptors back (the program's later output on its own output, not the file). The light level: `bin/oi check
+--aot --only-list` of `lib-unix/common/test_unix_cmdline` and `process_pid` (the runtime's forms with the new methods load and
+translate; the result below). Not run here: the compiled level itself (its shards' j2g runs are above the lane's 2 GiB): the night's
+`bin/oi check --aot --level compiled --only-list` of test_unix_cmdline proves the exec, then OC202's whole record.
+
+**The opam set's own verdicts.** Of the judge stage's cases judged by a recorded toolchain run, the opam set's programs were the
+largest share (23 of 49 at oi's level, 23 of 28 at the AOT level): `own_verdicts` gave none of them a verdict. By the user's rule of
+2026-11-07 ("the testsuite programs' assert and exit status"), `test/ocaml/opam-verdicts.tsv` gives one to the twelve that have it:
+the eight `load` programs by `test/ocaml/opam/load.reference` (`load.ml`, Arbace's own program, prints `loaded\n`), astring's `test` and
+`examples` (topkg's `Pkg.test` in its `pkg/pkg.ml`) and uutf's `test_uutf` (`B0_ocaml.test` in its `B0.ml`) by their exit status alone,
+as their packages' runners judge them (the output is the test's log: digest `*` in `OI_OWN`), and astring's `total` (definitions,
+nothing applied) by no output. pprint's `PPrintTest` and cmdliner's ten (its `B0.ml` marks the examples and `test_shell` `~run:false`:
+demonstrations, not tests) keep the recorded run. A negative control for the status verdicts at both suite levels:
+`_control/chorus-vs-astring-test` (cmdliner's example_chorus waits on its input, the timeout's 124, judged against astring's test's
+status 0: it must differ). `bin/oi own-verdicts --check`: run corpus 404 of 420 at oi's level, 415 at the AOT level (unchanged); suite
+corpus 88 to **100** of 121 at oi's level, 98 to **110** at the AOT level; own = recorded on every program both judges see, 0 differ.
+
+**The native path over the opam set: five of the typer's gaps, ported.** Running the opam set's own verdicts on the native path (the
+default since TY24 (a)) showed that the oracle path's record (`check-suite-oi.edn`) hides what the native typer refused: astring's and
+cmdliner's units did not type, so their programs were `dump` rows natively, and the suite's native record (OC185's twin) would have had
+fewer passes than the oracle's. Each gap ported from OCaml 5.5.0's typing/ (the pinned tarball), with a reproduction of a few lines:
+1. `Env`'s native `.cmi` (OC184 (a)): a unit read from `NAME.cmi.ae` now registers its type declarations under their own identifiers
+   (`register-sig-decls!`, submodules too), as typing its interface does: Includemod compares `t -> t -> bool` (astring_char's
+   `type t = char`) with `char -> char -> bool` through `t`'s declaration (`env.ae`, `find-unit`).
+2. `Typemod.transl_signature`'s `Signature_names.simplify`: a value item shadowed by a later one of its name is dropped (astring.mli's
+   `String.Set`: Set.S's `min_elt` included, then its own `min_elt : set -> string option`); values only, a signature's other items
+   cannot be shadowed but by an include's.
+3. The load path's order (`Load_path`): an `-I` directory's interface comes before the stdlib directory's for every unit but the
+   `Stdlib__` ones (astring's `test/testing.mli` beside the testsuite's `lib/testing.mli` in oi's library directory).
+4. `Typemod`'s `Psig_typesubst` (a signature's local substitution, `type arg := t`, cmdliner_def.mli's `Arg_info.Set`): translated
+   non-recursively, seen by the later items, substituted away at the signature's end (Subst's type functions), no item of its own;
+   before, the lenient reading of an interface left the module a hole.
+5. `Typecore`'s `turn_let_into_match`: `let K x = e in body` with a constructor, an open or a labelled tuple in its single pattern is
+   typed as `match e with K x -> body` (cmdliner_completion's `let (Conv conv) = ...`, `Conv` not in scope but by the expression's type).
+6. `Includemod.signatures`' `Env.add_signature sig1`: the implementation's type declarations registered as the compared signature has
+   them (an alias's target comes substituted by its path), so `'a Arg_conv.t` and `'a conv` meet (cmdliner_arg's `Conv`).
+And `Printtyp`'s cycles: `type-text` prints a recursive node as an `as 'r` alias instead of recurring without end (a message built for an
+error that the typer then catches overflowed the stack: cmdliner_manpage). Checked: `bin/oi typer-check` 79 of 79 (types, raw and
+simplified Lambda, runs), `bin/oi repl-check --native` 24 of 24, the native library rebuilt (`bin/oi stdlib`: 71 units and the 49 of the
+other libraries, none refused) and compared with its build before the five: seven units' Lambda differ only in identifiers' stamps and
+static exits' numbers (the same tokens once both are renumbered in order of appearance), the essential list (below), the suite sample
+(below).
+
+**What keeps eval, AOT and judge below 1** (no gate step of OCaml runs ocamlc or ocamlopt: `test/gate/crops/ocaml.edn`'s steps are on
+`:stage0` and `:go`; ocdump and the host's compilers are the oracle tier's): (1) eval and AOT, the cells' records: `check-oi.edn`,
+`check-suite-oi.edn`, `check-aot.edn`, `check-suite-aot.edn` were written on ocdump's path; the native twins (night 10's `--record`) and
+`bin/oi reap-switch --apply` (OC185) take them to 1, nothing to build; the AOT cell's move to the compiled level (OC202) must take
+`check-aot-compiled-native.edn`, not the oracle path's `check-aot-compiled.edn`, or the stage falls back to 0.5. (2) The judge: besides
+the read and print cells' records (night 10), the programs without an own verdict, judged by `ref-ocaml55.edn`/`ref-suite.edn`: now 37
+at oi's level (16 run, 21 suite) and 16 at the AOT level (5, 11): the native-only tests at oi's level (19: Proposed OC209), ocamltest's
+own processing (`own-verdict.edn`'s 7: OC210), the opam demonstrations (11 a level: OC211).
+
+**Scores** (`bin/crops-score --crop ocaml`, facts updated where the evidence holds: the judge's cases by `own-verdicts`): independence
+51.3% to 51.4% (judge 0.563 to 0.570). After night 10's native read and print records (read, print and the judge's read and print
+cases at 1) and the switch (eval, AOT 1): about 99.9% (judge 0.996); with OC209 (a) and OC210 (a) about 99.97%.
+
+**The night's commands** (after the merge; `OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`):
+1. `printf 'lib-unix/common/test_unix_cmdline\n' > .tmp/oc208.txt; bin/oi check --aot --level compiled --only-list .tmp/oc208.txt`
+   (OC208 (b): its row passes, judged by its own verdict; then the class's program list in `divergences-aot-compiled.edn` loses it).
+2. `bin/oi suite check --record` and `bin/oi suite check --aot --record` (the opam set's twelve judged by their own verdicts; both
+   controls must differ), or whatever night 10 recorded is judged again: the twelve's rows must stay `pass`.
+3. OC202's slot as before: `bin/oi check --aot --level compiled --record`, `bin/oi suite check --aot --level compiled --record`.
+4. `bin/oi own-verdicts --check`, `bin/reap --record`, `bin/crops-score --record`.
+
+## Proposed (OC209-OC211; options with costs, a recommendation each, none decided)
+
+- **OC209 The native-only tests at oi's level.** A test whose header runs it natively alone (`native;`, no `bytecode`) has no verdict
+  at oi's level by the rule of 2026-11-07, so 9 of the run corpus and 10 of the suite's are judged by ocamlc's recorded run. Their
+  `.reference` is the program's expected output; ocamlc's recorded run equals it for 15 of the 19 (measured from the records: the 4
+  others test what the native back end alone does: `typing-modules/struct_include_optimisation`, `asmcomp/optargs`,
+  `asmcomp/static_catch_unboxing` print other allocation counts under ocamlc, `callback/callback_effects_domains_gc` does not compile
+  with it). (a) Judge them at oi's level by the `.reference` too, the 4 listed in `own-verdict.edn` with their reason (recorded run): an
+  hour, eval's recorded cases 37 to 22; (b) as (a), the 4 classed by design at oi's level (`:native-only`, beside OC199 (b)'s) instead of
+  judged by ocamlc: no toolchain record left for them, 4 passes become classed; (c) as now. *Recommended: (a)* (the reference is the
+  test's own verdict where ocamlc agrees; the 4 keep a judge that sees them run).
+- **OC210 ocamltest's own processing.** `own-verdict.edn`'s 7: `tool-ocamltest/norm3` (ocamltest compares text with `\r\n`
+  normalised), `tool-ocamltest-var-expansion/subst1`, `subst2` (the header's `arguments` expanded with ocamltest's variables), and the
+  four backtraces (the `.reference` was made by ocamltest with paths and flags this runner does not reproduce). (a) Port ocamltest's
+  `Filecompare` normalisation (the runner keeps the output's digest after the normalisation it applies) and its `Variables` expansion
+  in header.awk (the run's arguments change: the record's rows too): half a day, 6 cases (3 a level) to own verdicts; the backtraces
+  stay; (b) as now. *Recommended: (a)*.
+- **OC211 The opam set's demonstrations.** pprint's `PPrintTest` and cmdliner's ten (examples printing their manual, `test_shell`) have
+  no verdict of their own: their packages do not run them as tests. (a) Keep them on the recorded run (11 cases a level at 0.5); (b)
+  write their expected outputs into `test/ocaml/opam/` as Arbace's own references: they would be ocamlc's output copied, a toolchain's
+  record under another name, not a verdict; (c) leave them out of the judged corpus (`class` rows, by design): the eval and AOT cells
+  lose 11 passes each. *Recommended: (a)* (0.15% of the judge's cases; (b) launders a record).

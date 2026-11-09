@@ -561,6 +561,43 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
 
+(defn- turn-let-into-match?
+  "Typecore.turn_let_into_match: the pattern holds a constructor, an open tuple or a labelled one (exists_ppat over
+  shallow_iter_ppat's children)"
+  [p]
+  (let [d (:ppat_desc p)]
+    (or (case (d 0)
+          :Ppat_construct true
+          :Ppat_tuple (or (= :Open (d 2)) (boolean (some (fn [[l _]] (some? l)) (d 1))))
+          false)
+        (boolean (some turn-let-into-match?
+                       (case (d 0)
+                         :Ppat_array (d 1)
+                         (:Ppat_or :Ppat_effect) [(d 1) (d 2)]
+                         :Ppat_variant (when (d 2) [(d 2)])
+                         :Ppat_tuple (map second (d 1))
+                         :Ppat_construct []
+                         (:Ppat_exception :Ppat_lazy) [(d 1)]
+                         :Ppat_alias [(d 1)]
+                         :Ppat_open [(d 2)]
+                         :Ppat_constraint [(d 1)]
+                         :Ppat_record (map second (d 1))
+                         []))))))
+
+(defn- vb-exp-constraint
+  "Typecore.vb_exp_constraint: the binding's expression with its constraint (a polymorphic one left to the pattern)"
+  [vb]
+  (let [c (:pvb_constraint vb) e (:pvb_expr vb)
+        eloc (:pexp_loc e)]
+    (cond
+      (nil? c) e
+      (and (= :Pvc_constraint (c 0)) (empty? (c 1)))
+      (if (= :Ptyp_poly ((:ptyp_desc (c 2)) 0)) e {:pexp_desc [:Pexp_constraint e (c 2)] :pexp_loc eloc})
+      (= :Pvc_coercion (c 0)) {:pexp_desc [:Pexp_coerce e (c 1) (c 2)] :pexp_loc eloc}
+      :else (reduce (fn [x n] {:pexp_desc [:Pexp_newtype n x] :pexp_loc eloc})
+                    {:pexp_desc [:Pexp_constraint e (c 2)] :pexp_loc eloc}
+                    (reverse (c 1))))))
+
 (declare type-expect type-function type-let type-cases split-effect-cases type-effect-cases type-binding-op type-andops type-moddep-fun)
 
 (defn type-exp [env sexp] (type-expect env sexp (ty/newvar)))
@@ -829,10 +866,19 @@
                        ;; Typecore's "terrible hack for format strings": the literal typed as its format's constructors
                        (type-expect env (assoc (fmt/type-format ((:pconst_desc (d 1)) 1)) :pexp_loc loc) expected)
                        (let [[c tf] (constant (d 1))] (ret [:Texp_constant c] (tf))))
-      :Pexp_let (let [eqs (atom [])
+      :Pexp_let (if (and (= :Nonrecursive (d 1)) (= 1 (count (d 2))) (empty? (:pvb_attributes (first (d 2))))
+                         (turn-let-into-match? (:pvb_pat (first (d 2)))))
+                  ;; OCaml 5.5's Typecore: `let K x = e in body` (a constructor, an open or labelled tuple in the pattern) typed as
+                  ;; `match e with K x -> body` (turn_let_into_match): the expression first, so that the pattern's constructor is
+                  ;; disambiguated by its type (cmdliner_completion's `let (Conv conv) = ...`, Conv not in scope)
+                  (let [vb (first (d 2))]
+                    (type-expect env {:pexp_desc [:Pexp_match (vb-exp-constraint vb) [{:pc_lhs (:pvb_pat vb) :pc_guard nil :pc_rhs (d 3)}]]
+                                      :pexp_loc loc}
+                                 expected))
+                (let [eqs (atom [])
                       [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
                       body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
-                  (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
+                  (mkexp [:Texp_let (d 1) vbs body] (:type body) loc)))
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
                                      [:Pfunction_body {:pexp_desc [:Pexp_constraint ((d 3) 1) (c 1)] :pexp_loc (:pexp_loc ((d 3) 1))}]
