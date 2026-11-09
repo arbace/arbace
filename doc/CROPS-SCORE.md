@@ -373,3 +373,13 @@ The independence audit of 2026-11-09 (`.tmp/indep-audit/` in the main checkout: 
   read, eval, AOT and print score **0.5** (the header's rule, as Haskell's front end over GHC's interfaces) until the platform is
   Arbace's own (its modules compiled from jdk26u's sources by javac on Arbace).
 - **The JVM running the frozen jar is exempt, like the jar** (`independence.edn`'s header). The JDK beyond that use counts.
+- **The audit's other corrections, applied on next.** OCaml's read, eval, print and judge: every record the cells read was made on
+  ocdump's path (`test/ocaml/read-results.edn` and `print-results.edn` of 1000db42c, "the oracle's parser, tools/ocdump",
+  `check-oi.edn`, `check-suite-oi.edn`), so read, eval and print 0.5 and the judge the case-weighted 0.563 until the night's
+  native `--record-results` and OC185's switch of the cells (then 1); OCaml 81.4 to 51.3. Haskell's 87 eval and 2 AOT programs with
+  C read the host's installed headers (`bin/hsi cnodes`, `test/haskell/eval/cnodes.ae` over `test/c/host`, no sysroot): 0, and
+  its judge counts the cells' interface level (recorded, 0.5) and layout level (own): Haskell 78.9 to 74.9. C++'s recorded
+  samples and runtime are 15, not 14. Python's facts were older than its scripts: read 1 (the native reader the default),
+  eval 0 (`bin/pyi check`'s driver is python3), AOT 1 (`check --aot` runs no python3; not recorded yet), print 1, judge 0:
+  Python 20.0 to 60.0. Java's judge: t08351, t08362 and t08376, added to `ref-jdk26.edn` after JCV1, had no line in
+  `test/java/verdicts.edn`; `bin/java-check verdicts` wrote it again (the three `:status`): 0.985.
