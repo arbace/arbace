@@ -1184,6 +1184,9 @@
         orig-line (fn [] (let [fs (vec (partition 2 (rest n)))] (some (fn [[k v]] (when (= (fname k) "line") v)) fs)))]
     (cond
       (contains? (get di-required kind) f) (llparser (str "missing required field '" f "'"))
+      ;; LLS40 (a): DICompileUnit's language or sourceLanguageName (P:6255)
+      (and (= kind "DICompileUnit") (= f "language") (not (contains? o "sourceLanguageName")))
+      (llparser "missing one of 'language' or 'sourceLanguageName', required for !DICompileUnit")
       (and (= f "file") (or (contains? di-types kind) (= kind "DISubprogram")))
       (let [l (orig-line)] (if (and (integer? l) (not (zero? (long l)))) (debugv "line specified with no file") valid))
       (and (= f "line") (or (contains? di-types kind) (= kind "DISubprogram"))) valid
@@ -1199,20 +1202,140 @@
 
 (def ^:private local-scopes #{"DISubprogram" "DILexicalBlock" "DILexicalBlockFile"})
 
+;; ---- LLS40 (a) (the user 2026-11-09): the scope chains, the variables' and locations' subprograms, the attachments, as the
+;; Verifier of llvm-project 23.1.5 walks them (Verifier.cpp's getSubprogram V:7094, visit(DbgVariableRecord) V:7137, verifyFnArgs
+;; V:7467, verifyFragmentExpression V:7425, visitFunction's VisitDebugLoc V:3313-3352, visitInstruction's !dbg V:5923,
+;; visitGlobalVariable's !dbg V:794, visitDISubprogram's retained nodes V:1525-1566, visitDILocalVariable V:1717).
+
+(defn- md-fields [m id] (let [n (md-node m id)] (when (seq? n) (di-fields n))))
+(defn- md-kind [m id] (di-kind (md-node m id)))
+(defn- md-distinct? [m id] (some #(and (= (first %) 'llvm/meta) (= (second %) id) (= true (:distinct (opts-of (drop 3 %))))) m))
+
+(defn- scope-sp
+  "getSubprogram (V:7094) of the local scope `id`: the DISubprogram up its chain of lexical blocks, nil when the chain breaks."
+  [m id]
+  (loop [id id k 0]
+    (when (and id (< k 64))
+      (case (md-kind m id)
+        "DISubprogram" id
+        ("DILexicalBlock" "DILexicalBlockFile") (recur (get (md-fields m id) "scope") (inc k))
+        nil))))
+
+(defn- inlined-at-scope
+  "DILocation::getInlinedAtScope: the scope of the last location of the inlinedAt chain from the location `id`."
+  [m id]
+  (loop [id id k 0]
+    (let [o (md-fields m id) ia (get o "inlinedAt")]
+      (if (and ia (< k 64) (= "DILocation" (md-kind m ia))) (recur ia (inc k)) (get o "scope")))))
+
+(defn- fn-dbg [f] (second (drop-while #(not= % '!dbg) (:md (opts-of (drop 4 f))))))
+(defn- inst-md [x] (let [v (vec (body x)) i (.indexOf ^java.util.List v :md)] (when (>= i 0) (get v (inc i)))))
+(defn- inst-dbg [x] (second (drop-while #(not= % '!dbg) (inst-md x))))
+(defn- inst-loop [x] (second (drop-while #(not= % '!llvm.loop) (inst-md x))))
+
+(defn- records-in [f] (for [b (blocks-of f) x (items-of b) :when (dbg-record? x)] (vec (body x))))
+
+(defn- fragment? [m e]
+  (let [n (if (seq? e) e (md-node m e))] (str/includes? (pr-str n) "DW_OP_LLVM_fragment")))
+
+(defn- module-fragments?
+  "A fragment expression anywhere: a record's, a global's (verifyFragmentExpression reads the variable's size through its type)."
+  [m]
+  (some (fn [f] (str/includes? (pr-str f) "DW_OP_LLVM_fragment")) m))
+
+(defn- tuple-ops [m id] (let [n (md-node m id)] (when (and (seq? n) (= '! (first n)) (vector? (second n))) (second n))))
+
+(defn- retainers
+  "The subprograms whose retainedNodes list names the node `id`."
+  [m id]
+  (for [f m :when (= (first f) 'llvm/meta) :let [n (nth f 2)] :when (= "DISubprogram" (di-kind n))
+        :let [r (get (di-fields n) "retainedNodes")] :when (some #{id} (tuple-ops m r))] (second f)))
+
+(defn- defines-with-sp [m] (filter #(and (= 'llvm/define (first %)) (fn-dbg %)) m))
+
+(defn- record-sp-check
+  "visit(DbgVariableRecord)'s scope check and verifyFnArgs for the records of `f` (V:7212-7222, V:7467): the first message or nil."
+  [m f]
+  (let [args (java.util.HashMap.)]
+    (some (fn [b]
+            (let [var (nth b 2 nil) loc (peek b)
+                  vsp (scope-sp m (get (md-fields m var) "scope")) lsp (scope-sp m (get (md-fields m loc) "scope"))]
+              (when (and vsp lsp)
+                (if (not= vsp lsp)
+                  "mismatched subprogram between #dbg record variable and DILocation"
+                  (let [argn (get (md-fields m var) "arg")]
+                    (when (and (integer? argn) (pos? (long argn)) (nil? (get (md-fields m loc) "inlinedAt")))
+                      (let [prev (.get args argn)]
+                        (.put args argn var)
+                        (when (and prev (not= prev var)) "conflicting debug info for argument"))))))))
+          (records-in f))))
+
+(defn- locs-check
+  "visitFunction's VisitDebugLoc (V:3313-3352) over the instructions' !dbg and llvm.loop locations of `f`, its subprogram `sp`: the
+  first message or nil."
+  [m f sp]
+  (let [seen (java.util.HashSet.)]
+    (some (fn [x]
+            (some (fn [dl]
+                    (when (and (= "DILocation" (md-kind m dl)) (.add seen dl))
+                      (let [parent (get (md-fields m dl) "scope")]
+                        (if-not (contains? local-scopes (md-kind m parent))
+                          "DILocation's scope must be a DILocalScope"
+                          (let [s (inlined-at-scope m dl)]
+                            (when (.add seen s)
+                              (let [psp (scope-sp m s)]
+                                (when (or (= s psp) (.add seen psp))
+                                  (when (not= psp sp) "!dbg attachment points at wrong subprogram for function")))))))))
+                  (cons (inst-dbg x) (rest (tuple-ops m (inst-loop x))))))
+          (for [b (blocks-of f) x (items-of b) :when (not (dbg-record? x))] x))))
+
+(defn- fn-scope-checks
+  "The functions' record and location checks, in the module's order: the first message or nil (the checks the retargets below can
+  move; a debug intrinsic's old call anywhere leaves it to opt: nil with :old)."
+  [m]
+  (some (fn [f] (or (locs-check m f (fn-dbg f)) (record-sp-check m f))) (defines-with-sp m)))
+
+(defn- old-calls? [m] (some (fn [f] (some #(old-dbg? (nth (body %) 2 nil)) (for [b (blocks-of f) x (items-of b)] x)))
+                            (filter #(= 'llvm/define (first %)) m)))
+
+(defn- scope-verdict
+  "A verdict from fn-scope-checks: its message as the debug info's, else valid; an old debug call or a fragment left to opt."
+  [m why]
+  (cond (old-calls? m) (unknown (str why ": an old debug intrinsic's call"))
+        :else (if-let [e (fn-scope-checks m)] (debugv e) valid)))
+
+(def ^:private set-base-encodings #{"DW_ATE_unsigned" "DW_ATE_signed" "DW_ATE_unsigned_char" "DW_ATE_signed_char" "DW_ATE_boolean"})
+
+(def ^:private cu-lists
+  "visitDICompileUnit's lists (V:1162-1214): the field, the message when it is no tuple."
+  {"enums" "invalid enum list" "retainedTypes" "invalid retained type list" "globals" "invalid global variable list"
+   "imports" "invalid imported entity list" "macros" "invalid macro list"})
+
 (defn- di-field-rule
   "LLS36 (a): the visitDI* check (Verifier.cpp of 23.1.5) of the field `f` of a `kind` node sent to a node of the kind `tk`, the
   rest of the node as before: debug info's (the Verifier's CheckDI, which opt strips with a warning), valid, or left to opt."
-  [kind f tk o]
+  [m id kind f tk o]
   (let [type? (contains? di-types tk) scope? (contains? di-scopes tk)
-        type-node? (contains? di-types kind)]
+        type-node? (contains? di-types kind) to (get o f)]
     (cond
       ;; visitDIType (V:1093) and visitDIScope (V:1089) for the types; visitDISubprogram (V:1510-1519), visitDIVariable (V:1693)
       (and (= f "scope") (or type-node? (= kind "DISubprogram") (#{"DILocalVariable" "DIGlobalVariable"} kind)) (not scope?))
       (debugv "invalid scope")
       (and (= f "file") (or type-node? (#{"DISubprogram" "DICompileUnit" "DILocalVariable" "DIGlobalVariable"} kind)) (not= tk "DIFile"))
       (debugv "invalid file")
-      (and (= f "scope") (#{"DISubprogram" "DIDerivedType" "DIBasicType" "DISubroutineType"} kind) (#{"DIFile" "DICompileUnit" "DINamespace" "DIModule"} tk))
+      ;; LLS40 (a): visitDIType's and visitDISubprogram's scope is any DIScope (V:1089, V:1510; ODR uniquing is off in opt)
+      (and (= f "scope") (or type-node? (= kind "DISubprogram")) scope?)
       valid
+      ;; LLS40 (a): visitDILocalVariable (V:1720) and the retained nodes of the subprograms that list it (V:1546-1566), visited first
+      (and (= kind "DILocalVariable") (= f "scope") scope?)
+      (if-not (contains? local-scopes tk)
+        (debugv (if (seq (retainers m id)) "invalid retained nodes, retained node is not local" "local variable requires a valid scope"))
+        (let [nsp (scope-sp m to)]
+          (cond (nil? nsp) (unknown "a local variable's scope chain without a subprogram")
+                (some #(not= % nsp) (retainers m id)) (debugv "invalid retained nodes, retained node does not belong to subprogram")
+                :else (scope-verdict m "a local variable's scope"))))
+      ;; LLS40 (a): visitDICompileUnit's lists must be tuples (V:1162-1214)
+      (and (= kind "DICompileUnit") (cu-lists f)) (debugv (cu-lists f))
       (and (= kind "DISubprogram") (= f "type")) (if (= tk "DISubroutineType") (unknown "another subroutine type") (debugv "invalid subroutine type"))
       (and (= kind "DISubprogram") (= f "containingType") (not type?)) (debugv "invalid containing type")
       (and (= kind "DISubprogram") (= f "declaration")) (debugv "invalid subprogram declaration")
@@ -1225,11 +1348,24 @@
       (and (#{"DILocalVariable" "DIGlobalVariable"} kind) (= f "type"))
       (cond (not type?) (debugv "invalid type ref")
             (and (= kind "DILocalVariable") (= tk "DISubroutineType")) (debugv "invalid type")
-            :else (unknown "a variable's type sent to another type"))
+            ;; LLS40 (a): any other type (visitDIVariable V:1693; the record's own check V:7203); a fragment reads its size
+            (module-fragments? m) (unknown "a variable's type sent to another type, a fragment's size")
+            :else valid)
       ;; visitDISubroutineType (V:1407), visitDICompositeType (V:1343-1348), visitDIDerivedType (V:1295)
       (and (= kind "DISubroutineType") (= f "types")) (debugv "invalid composite elements")
       (and (= kind "DICompositeType") (= f "elements")) (debugv "invalid composite elements")
       (and (#{"DICompositeType" "DIDerivedType"} kind) (= f "baseType") (not type?)) (debugv "invalid base type")
+      ;; LLS40 (a): visitDIDerivedType's set type's base (V:1278), else any type (V:1295, V:1343); a fragment reads the size
+      (and (#{"DICompositeType" "DIDerivedType"} kind) (= f "baseType"))
+      (cond (module-fragments? m) (unknown "a type's base sent to another type, a fragment's size")
+            (and (= kind "DIDerivedType") (str/includes? (str (get o "tag")) "DW_TAG_set_type"))
+            (let [tf (md-fields m to)]
+              (if (or (and (= tk "DICompositeType") (str/includes? (str (get tf "tag")) "DW_TAG_enumeration_type"))
+                      (= tk "DISubrangeType")
+                      (and (= tk "DIBasicType") (contains? set-base-encodings (str (get tf "encoding")))))
+                valid
+                (debugv "invalid set base type")))
+            :else valid)
       (and (= kind "DICompositeType") (= f "vtableHolder") (not type?)) (debugv "invalid vtable holder")
       :else (unknown (str "the field " f " of " kind)))))
 
@@ -1240,19 +1376,27 @@
   (let [kind (di-kind (nth (nth m i) 2)) tk (di-kind (md-node m to))]
     (if (and (= kind "DILocation") (= "scope" (fname field)))
       (let [id (second (nth m i))
-            md-dbg (fn [x] (second (drop-while #(not= % '!dbg) (:md (opts-of (drop 3 (body x)))))))
+            md-dbg inst-dbg
             fns (filter #(and (= 'llvm/define (first %)) (some #{'!dbg} (:md (opts-of (drop 4 %))))) m)
             items (for [f fns b (blocks-of f) x (items-of b)] x)]
         (cond
-          (contains? local-scopes tk) (unknown "a DILocation's scope sent to another local scope")
+          ;; LLS40 (a): another local scope: the walks of the functions' locations and records (V:3313, V:7212)
+          (contains? local-scopes tk)
+          (cond (contains? (md-fields m id) "atomGroup") (unknown "a key instruction's location (atomGroup) sent to another scope")
+                (and (= tk "DISubprogram") (not (str/includes? (str (get (md-fields m to) "spFlags")) "DISPFlagDefinition")))
+                (unknown "a location's scope sent to a subprogram declaration")
+                :else (scope-verdict m "a DILocation's scope"))
           ;; V:3335: visitFunction's walk of its instructions' !dbg locations comes before their visits
           ;; (a call of an old debug intrinsic is a debug record by then: its location is a record's)
           (some #(and (not (dbg-record? %)) (not (old-dbg? (nth (body %) 2 nil))) (= id (md-dbg %))) items) (debugv "DILocation's scope must be a DILocalScope")
           ;; V:1076 visitDILocation, from a debug record's location
           (some #(or (and (dbg-record? %) (= id (peek (vec (body %))))) (and (old-dbg? (nth (body %) 2 nil)) (= id (md-dbg %)))) items)
           (debugv "location requires a valid scope")
+          ;; LLS40 (a): an llvm.loop node's locations are walked as the instructions' (V:3357)
+          (some (fn [x] (some #{id} (rest (tuple-ops m (inst-loop x))))) (for [f fns b (blocks-of f) x (items-of b) :when (not (dbg-record? x))] x))
+          (debugv "DILocation's scope must be a DILocalScope")
           :else (unknown "a DILocation no instruction or record uses")))
-      (di-field-rule kind (fname field) tk (di-fields (nth (nth m i) 2))))))
+      (di-field-rule m (second (nth m i)) kind (fname field) tk (di-fields (nth (nth m i) 2))))))
 
 (defn ex-di-record
   "A debug record's variable, expression or location replaced by another node: the variable must be a DILocalVariable
@@ -1260,16 +1404,24 @@
   [m {:keys [k to head]} _]
   (let [tk (di-kind (md-node m to))]
     (case (long k)
-      2 (if (= tk "DILocalVariable") (unknown "a variable sent to another variable") (debugv "invalid #dbg record variable"))
+      2 (cond (not= tk "DILocalVariable") (debugv "invalid #dbg record variable")
+              ;; LLS40 (a): the scopes must agree and the arguments not conflict (V:7212-7222, V:7467); a fragment reads the size
+              (module-fragments? m) (unknown "a variable sent to another variable, a fragment's size")
+              :else (scope-verdict m "a variable sent to another variable"))
       3 (if (= tk "DIExpression") (unknown "an expression") (debugv "invalid #dbg record expression"))
       4 (cond (= head 'dbg_assign) (unknown "dbg_assign's assign id")
-              (= tk "DILocation") (unknown "a location sent to another location")
+              (= tk "DILocation") (scope-verdict m "a location sent to another location")
               :else (llparser "invalid debug location"))
       (unknown "the record's field"))))
 
 (defn ex-di-attach
-  "A function's !dbg attachment sent to another node: it must be a DISubprogram (V:3244, the debug info's)."
-  [m {:keys [case fi]} _]
+  "A function's !dbg attachment sent to another node: it must be a DISubprogram (V:3244, the debug info's); LLS40 (a): an
+  instruction's (LLParser's DILocation, then the walks of the locations) and a global's (a DIGlobalVariableExpression)."
+  [m {:keys [case fi at gi]} _]
+  (let [to-inst (when (= case :inst) (let [[fi bi ii] at] (inst-dbg (nth (items-of (nth (blocks-of (nth m fi)) bi)) ii))))
+        tk-inst (md-kind m to-inst)
+        to-global (when (= case :global) (second (drop-while #(not= % '!dbg) (:md (opts-of (drop 3 (nth m gi)))))))
+        tk-global (md-kind m to-global)]
   (if (= case :fn)
     (let [f (nth m fi) to (second (drop-while #(not= % '!dbg) (:md (opts-of (drop 4 f)))))
           tk (di-kind (md-node m to))
@@ -1279,9 +1431,22 @@
         (= 'llvm/declare (first f)) (cond distinct? (debugv "function declaration may only have a unique !dbg attachment")
                                           (= tk "DISubprogram") valid
                                           :else (unknown "a declaration's !dbg sent to a node that is no subprogram (the Verifier's cast)"))
-        (= tk "DISubprogram") (unknown "a subprogram attached to another function")
-        :else (debugv "function !dbg attachment must be a subprogram")))
-    (unknown "an instruction's or a global's !dbg")))
+        (not= tk "DISubprogram") (debugv "function !dbg attachment must be a subprogram")
+        ;; LLS40 (a): visitFunction's attachment checks (V:3239-3253), then its walk of the locations (V:3313)
+        (not (md-distinct? m to)) (debugv "function definition may only have a distinct !dbg attachment")
+        (some #(and (not (identical? % f)) (= to (fn-dbg %))) (filter #(= 'llvm/define (first %)) m))
+        (debugv "DISubprogram attached to more than one function")
+        :else (scope-verdict m "a subprogram attached to another function")))
+    (cond
+      (not (#{:inst :global} case)) (unknown "an instruction's or a global's !dbg")
+      ;; LLS40 (a): an instruction's !dbg must be a DILocation (LLParser, P:354), then the walks of the locations (V:3313)
+      (= case :inst) (cond (not= tk-inst "DILocation") (llparser "invalid !dbg metadata")
+                  (contains? (md-fields m to-inst) "atomGroup") (unknown "a key instruction's location (atomGroup)")
+                  :else (scope-verdict m "an instruction's !dbg sent to another location"))
+      ;; LLS40 (a): visitGlobalVariable (V:794)
+      (= case :global) (cond (not= tk-global "DIGlobalVariableExpression") (debugv "!dbg attachment of global variable must be a DIGlobalVariableExpression")
+                    (module-fragments? m) (unknown "a global's !dbg sent to another expression, a fragment's size")
+                    :else valid)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Intrinsic declarations (LLS36 (a)): LLParser's validateEndOfModule upgrades every function first (UpgradeCallsToIntrinsic,
@@ -1335,9 +1500,9 @@
       (p "experimental.stepvector.") "experimental.stepvector (AutoUpgrade.cpp:1559)"
       (p "flt.rounds") "flt.rounds (AutoUpgrade.cpp:1567)"
       (p "invariant.group.barrier") "invariant.group.barrier (AutoUpgrade.cpp:1575)"
-      (and (or (p "lifetime.start") (p "lifetime.end")) (= n 2)) "lifetime of two parameters (AutoUpgrade.cpp:1589)"
+      (and (or (p "lifetime.start") (p "lifetime.end")) (= n 2)) :life2
       (and (or (= s "lifetime.start.i64") (= s "lifetime.end.i64")) (= n 1)) "lifetime.*.i64 (AutoUpgrade.cpp:1598)"
-      (and (or (p "memcpy.") (p "memmove.") (p "memset.")) (= n 5)) "a memory intrinsic with its alignment parameter (AutoUpgrade.cpp:1621)"
+      (and (or (p "memcpy.") (p "memmove.") (p "memset.")) (= n 5)) :mem5
       (and (some p ["masked.load" "masked.gather" "masked.store" "masked.scatter"]) (= n 4)) "a masked intrinsic with its alignment (AutoUpgrade.cpp:1651)"
       (and (p "objectsize.") (#{2 3} n)) "objectsize of two or three parameters (AutoUpgrade.cpp:1806)"
       (and (p "ptr.annotation.") (= n 4)) "ptr.annotation of four parameters (AutoUpgrade.cpp:1818)"
@@ -1356,6 +1521,8 @@
     (cond
       (= r :ctlz) (let [t (first ps) e (if (and (seq? t) (#{'vector 'vscale} (first t))) (nth t 2) t)]
                     (if (and (symbol? e) (re-matches #"i[0-9]+" (name e))) :rebuilt [:ctlz-bad t]))
+      (= r :mem5) [:mem5]
+      (= r :life2) [:life2]
       (string? r) (unknown (str "AutoUpgrade rewrites the declaration and its calls: " r))
       ;; a literal non-packed struct return wanted (AutoUpgrade.cpp:1955): mutate's types are never named structs
       :else (when-let [e (intr/lookup nm)]
@@ -1560,6 +1727,47 @@
   [m d nm [f c]]
   (call-site-intrinsic m f c nm d true))
 
+;; LLS42 (a) (the user 2026-11-09): the memory intrinsics with their old alignment parameter (AutoUpgrade.cpp:1612-1641 of 23.1.5):
+;; memcpy./memmove. of five parameters declared again as the intrinsic over the first three (dest, src, len), memset. over the first
+;; and the third (dest, len), by getOrInsertDeclaration (the intrinsic's own type, its own attributes, at the module's end); the old
+;; declaration renamed and erased once its calls are upgraded. Each call by UpgradeIntrinsicCall's case (AutoUpgrade.cpp:5759): one of
+;; five arguments rewritten from them (its alignment a ConstantInt read as the pointers' align: left to opt); any other the default
+;; case (AutoUpgrade.cpp:5240): retargeted when its type is the new declaration's, else its callee cast, which the Verifier finds
+;; (V:3846, `Intrinsic called with incompatible signature`).
+
+(defn- mem5-upgraded
+  "The verdict of a declaration `g` named `nm` of type `fty` that the alignment upgrade declares again (above)."
+  [m g ^String nm fty]
+  (let [s (subs nm 5) memset? (str/starts-with? s "memset.")
+        base (str "llvm." (cond memset? "memset" (str/starts-with? s "memcpy.") "memcpy" :else "memmove"))
+        [p0 p1 p2] (vec (remove #{'&} (nth fty 2)))
+        ptr? #(or (= % 'ptr) (and (seq? %) (= 'ptr (first %))))
+        int? #(and (symbol? %) (re-matches #"i[0-9]+" (name %)))]
+    (cond
+      (str/includes? s "inline") (unknown "a memcpy.inline or memset.inline name the alignment rule takes as memcpy's or memset's")
+      (not (and (ptr? p0) (int? p2) (or memset? (ptr? p1)))) (unknown "the alignment upgrade over parameters of other types (getOrInsertDeclaration's overloads)")
+      :else
+      (let [nty (list 'fn 'void [p0 (if memset? 'i8 p1) p2 'i1])
+            calls (for [f (filter #(= 'llvm/define (first %)) m) c (calls-in f g)] c)]
+        (cond
+          (some #(= 5 (count (nth % 3))) calls) (unknown "a call of five arguments, rewritten from them (AutoUpgrade.cpp:5759)")
+          (some #(not= (call-fn-type %) nty) calls) (invalid :intr-sig)
+          :else (if-let [e (sig-error base nty)] (verifier e) valid))))))
+
+;; LLS42 (a): lifetime.start/end of two parameters, the old (size, ptr) form (AutoUpgrade.cpp:1589): declared again as the intrinsic
+;; over the second parameter's type; a call of two arguments rebuilt on its pointer (an alloca, through its casts) or erased
+;; (AutoUpgrade.cpp:5856: left to opt), any other by the default case, as above.
+(defn- life2-upgraded
+  [m g ^String nm fty]
+  (let [s (subs nm 5) base (if (str/starts-with? s "lifetime.start") "llvm.lifetime.start" "llvm.lifetime.end")
+        [_ p1] (vec (remove #{'&} (nth fty 2)))
+        nty (list 'fn 'void [p1])
+        calls (for [f (filter #(= 'llvm/define (first %)) m) c (calls-in f g)] c)]
+    (cond
+      (some #(= 2 (count (nth % 3))) calls) (unknown "a lifetime call of two arguments, rebuilt or erased (AutoUpgrade.cpp:5856)")
+      (some #(not= (call-fn-type %) nty) calls) (invalid :intr-sig)
+      :else (if-let [e (sig-error base nty)] (verifier e) valid))))
+
 (defn ex-intr-decl
   "An intrinsic's declaration with a parameter or the return type changed (its calls unchanged): AutoUpgrade first (a ctlz or
   cttz of one parameter is declared again and its calls rebuilt: valid); a signature that is valid under another mangling is
@@ -1570,6 +1778,8 @@
     (cond
       (= up :rebuilt) valid
       (map? up) up
+      (= up [:mem5]) (mem5-upgraded m g nm fty)
+      (= up [:life2]) (life2-upgraded m g nm fty)
       (vector? up) (unknown "ctlz/cttz upgraded over a non-integer, its calls rebuilt over their own arguments' types")
       (and (= up :remangled) (contains? call-upgrade-ids (:name (intr/lookup nm)))) (unknown "a remangled intrinsic whose calls UpgradeIntrinsicCall rewrites by its case")
       :else
@@ -1577,7 +1787,16 @@
         (cond
           (some #(not= (call-fn-type %) fty) cs) (invalid :intr-sig)
           (seq cs) (unknown "the calls' type is the declaration's")
-          (not= (nth d 3) (nth orig 3)) (unknown "the declaration visited before its calls, a parameter's attributes then checked")
+          ;; LLS42 (a): the declaration visited before its calls: an invalid signature keeps the attributes as written
+          ;; (AutoUpgrade.cpp:2001), so visitFunction's verifyFunctionAttrs (V:2064, the parameters in order) comes first, then
+          ;; isSignatureValid's message (V:3297); a valid one takes the intrinsic's own attributes
+          (not= (nth d 3) (nth orig 3))
+          (let [e (sig-error nm fty) ps (filter vector? (nth d 3))]
+            (cond (nil? e) (unknown "the declaration visited before its calls, its signature valid (the intrinsic's attributes)")
+                  (some #(let [t (vf/norm-type (first %))] (or (vec-t? t) (and (seq? t) (#{'struct 'packed 'array} (first t))))) ps)
+                  (unknown "the declaration visited before its calls, a vector or aggregate parameter's attributes")
+                  :else (or (some (fn [p] (when-let [x (param-attrs-check (vec (filter attr-item? (rest p))) (first p))] (verifier x))) ps)
+                            (verifier e))))
           (= up :remangled) (if (some #(seq (calls-in % g)) (filter #(= 'llvm/define (first %)) m)) (invalid :intr-sig) valid)
           :else (if-let [e (sig-error nm fty)] (verifier e) (unknown "the declaration's signature is valid")))))))
 
@@ -1590,6 +1809,8 @@
     (cond
       (= up :rebuilt) valid
       (map? up) up
+      (= up [:mem5]) (mem5-upgraded m to nm fty)
+      (= up [:life2]) (life2-upgraded m to nm fty)
       (vector? up) (ctlz-rebuilt m to nm (second up))
       ;; remangled: the calls retargeted to the new declaration (appended at the module's end), then visited as its calls
       (= up :remangled) (if (contains? call-upgrade-ids (:name (intr/lookup nm)))
