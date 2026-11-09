@@ -370,7 +370,9 @@ choice is the report, not Chez: both readers refuse a `<naninf>` not in lower ca
 and `nan.0`), a `<mantissa width>` after a radix other than 10 (`#x1|53`: only `<decimal 10>` takes one), and end a prefixed
 number's token at a `#` (a `<delimiter>`: `#e1#t` is `1` and `#t`, where Chez keeps the R5RS digit placeholder and refuses the
 token); in R7RS's syntax (si's `#!r7rs` and string ports in R7RS mode) and with Chez's own lexical syntax (`SI_CHEZ_LEXICAL`,
-the mats) si's runtime reads as before. Each is classed against Chez in `test/scheme/choices.edn` (`:chez-naninf-case`,
+the mats) si's runtime reads as before. Since SCS19 (b) (the user, 2026-11-09) `string->number` follows the reader (R6RS 11.7.4.3: the
+same syntax): in R6RS's syntax it answers `#f` for `+INF.0`, `#i-NaN.0`, `#x1|53`, `#b1|53` and `#e1#` (the same `r6rsRefused`); in
+R7RS's syntax, with Chez's lexical syntax and with the extended third argument (`(string->number s 10 #t)`, SMR4) it takes Chez's. Each is classed against Chez in `test/scheme/choices.edn` (`:chez-naninf-case`,
 `:chez-radix-mantissa-width`, `:chez-hash-after-prefixed-number`, with the 37 probes they cover; cases with `:rule :grammar`, no
 choice applying), `report-check` holds those probes to differ from Chez's dumps, and the check judges them by the report.
 

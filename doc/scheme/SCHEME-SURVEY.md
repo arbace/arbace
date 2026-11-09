@@ -4186,3 +4186,127 @@ The judge's cases: read 1,371 at 1 (1,249 probes, 115 files, 7 scans; none by a 
   (a) leave; (b) fetch `auxiliary/WordBreakProperty.txt` of UCD 16.0.0 by pin (a fourth file), generate the classes, and scan
   `string-titlecase` over every pair `a<c>b` with c a scalar value against Chez (about a day); (c) (b) without the scan.
   *Recommended: (b)*: titlecasing then follows the pin as the rest of `(rnrs unicode)` does, and the scan finds what the hand list misses.
+
+## Decided (the user, 2026-11-09, about 09:30): SCS19 (b), SCS20 (b), SCS21 (b)
+
+As recommended. SCS19 (b): si's `string->number` refuses the three forms in R6RS programs, measured first. SCS20 (b): `bin/si unicode-scan`
+a light part of the gate's `si-check`, with a negative control. SCS21 (b): `auxiliary/WordBreakProperty.txt` fetched once (the user's fourth
+allowance of the network, the only download), the word-break classes generated, a scan of `string-titlecase` over every pair `a<c>b`.
+
+## As built: SCS19-SCS21, string->number by the report, the Unicode scans in the gate, string-titlecase's word breaks from UAX #29 (2026-11-09, branch scheme-props3)
+
+From `mac/next` e6214cd13.
+
+### SCS19 (b): string->number in R6RS programs
+
+`go/arbace/scm/read.ae`'s `r6rsRefused` became the function `R6RSRefused(r7rs, tok)` (the method calls it with the reader's mode) and takes
+the third rule, a `#` after a prefix (`#e1#`: the reader's token never holds one in R6RS's syntax, so only `string->number`'s text can);
+`prim_number.ae`'s `string->number` answers `#f` when the text is past the grammar and the program's lexical mode is R6RS (`R7RS` false,
+the mode `ReadProgram` sets from the program), with two arguments or one; R7RS's mode, `ChezLex` and the extended third argument (`(string->number s 10 #t)`,
+SMR4) take Chez's as before. In an R6RS program: `+INF.0`, `#i-NaN.0`, `#x1|53`, `#b1|53`, `#e1#` answer `#f`; `+inf.0`, `-nan.0`, `1|53`
+(decimal), `#e1.5`, `#x10`, `1+inf.0i` are numbers as before. SPEC 12 says it; `reader_test.ae`'s `TestStringToNumberRefusals` holds it (R6RS,
+R7RS and the extended argument).
+
+Measured first, as the gate's `si-essential` takes it, before (this tree's parent) and after, every run's stdout, stderr and status compared
+file by file: `bin/si check` (the 50 programs: 45 pass, 10 non-pass items, 0 failing), `check --only test/scheme/essential-check.txt` (44 of 49),
+`r7rs` (1,232 tests, 1,230 pass), `srfi` (11 programs, 1,231 checks) and `chibi-tests`: 152 program runs and the r7rs, srfi and Chibi runs equal
+byte for byte (only the `.stamp` files, dates, differ): no program's output changes. The mats and ecraven (heavy, `si-mats`, `si-ecraven`) are
+not run here (night commands).
+
+### SCS21 (b): UAX #29's word breaks for string-titlecase
+
+The pin: `auxiliary/WordBreakProperty.txt` of UCD 16.0.0, fetched once on 2026-11-09 (the user's allowance) into the main checkout's
+`.tmp/scheme/ucd-16.0.0/auxiliary/`, 112,730 bytes, SHA-256 `476464e71a4b7b779b8ba7c5671f4338fea77da8e6b6b05fb82b3fdd14603779`, header
+`# WordBreakProperty-16.0.0.txt`, `# Date: 2024-07-29, 16:27:36 GMT`, 1,407 lines of data, in `test/scheme/ucd.edn`'s `:files` and `:bytes`
+(`pins check`: held; origin in doc/ARBACE.md, LICENSE.md: the Unicode License V3 already covers the database). Nothing in it is run.
+
+The generator (`arbace.repr.scheme.ucd`) reads it (`word-break`: the 19 values, an unknown one or a code point listed twice an error) and
+writes into `go/arbace/scm/unicode.ae` the constants `wbOther` ... `wbWSegSpace`, the 1,085 runs of a class but Other and `WordBreak`.
+`prim_char.ae` loses `dcWB`, `dcWordEnd` and the hand list; it gains `dcWordBreak`, UAX #29 (revision 45) rule for rule: WB3, WB3a, WB3b,
+WB3d, WB4 (Extend, Format and ZWJ belong to the character before, but not after the start or CR, LF, Newline: `wbBack`, `wbForward`),
+WB5 to WB13b with their lookahead and look-behind over the ignorables, WB15 and WB16 (Regional_Indicator pairs counted), WB999;
+WB1 and WB2 are the text's ends. `dcTitle` is Unicode's Default Case Conversion (3.13, toTitlecase): in each word the first cased character
+to titlecase, the characters after it to lowercase (the final sigma in context). Two things the scan found Chez does otherwise, kept as
+Chez's (SCS10's rule: si follows Chez where R6RS defers):
+
+- Chez's "cased" for titlecasing is a character that has a case mapping (UnicodeData.txt's simple uppercase, lowercase or titlecase one, or
+  SpecialCasing.txt's), not Unicode's Cased property: U+00AA, U+00BA, U+0138 (kra), U+018D and the modifier letters (Cased by
+  Other_Lowercase or with no mapping) do not take a word's titlecasing (`dcTitleCased`).
+- A word that starts with an Extend, Format or ZWJ (one at the start of the text or after CR, LF, Newline: WB4's exception) is copied: U+0345
+  alone stays U+0345, not U+0399.
+
+WB3c (ZWJ x Extended_Pictographic) is left out: it needs emoji-data.txt, which is not pinned (SCS23), and the one Extended_Pictographic
+character with a case mapping, U+24C2, is an ALetter, so no titlecase should see it (believed, not proved).
+
+The scan: `test/scheme/unicode/wordbreak-scan.sps`, a portable R6RS program run by Chez (`chez --program`) and by si: for each of the 292,531
+scalar values whose category is not Cn, one line of the `string-titlecase` of six frames, `a c b`, `1 c 2 b`, `a c U+0301 b`, `c a b`, `a c 1 b`
+and `1 c b` (a break before a cased letter is all titlecasing shows). Chez 10.3.0: 292,531 lines, 34 MB, 3 s, SHA-256 `016a9ec2...948fa6`
+(`test/scheme/wordbreak-scan.edn`, `:differences []`). Before (the hand list, the 6 frames): 109,258 lines differ. 107,661 are
+characters the list took for letters because they are Alphabetic where UAX #29 gives them another class (107,546 Lo, mostly CJK ideographs and
+Thai, 31 Lm, 62 Sk, 13 Nl, 6 Po, and one each of Pd, No and Cf: a word broken in Chez, not in si, in frames 1, 3 and 5), 1,597 are
+characters Cased with no mapping (780 Ll, 471 Lu, 266 Lm, 78 So, 2 Lo: frames 2, 4 and 6) and U+0345's frame 4 is the Extend rule. After:
+equal, byte for byte (si 23 s, 0.5 GB). `bin/si unicode-scan` (the first scan too): both equal.
+
+### SCS20 (b): the scans in the gate
+
+`bin/si unicode-scan` runs both scans (`--record` by hand: Chez runs them and each record is rewritten). `bin/si unicode-scan --control` is
+their negative control, no Chez: it copies the runtime to `.tmp/si-control`, replaces `IsNumeric` by the N categories (Go's
+`unicode.IsNumber` of before SCS16) and `WordBreak` of U+2027 (MidLetter) by Other, builds it apart (the Go cache shared), runs both scans on it
+and requires 8 lines of the first and 1 of the second to differ from the unchanged si's output (which the check holds to Chez's record);
+another count, 0 included, fails (measured: 8 and 1; 2 min). It is the part `unicode` of `si-check` in `test/gate/steps.edn` (and the
+fragment `test/gate/crops/scheme.edn`): `:parts [{:part programs} {:part unicode :cmd "bin/si unicode-scan && bin/si unicode-scan --control"}]`,
+`:mem-gib 2`, the step's inputs and hosts (`:stage0 :go`, no Chez), its waiver text naming the control. `bin/gate --full --plan`: the
+steps parse, `si-check.programs` and `si-check.unicode` run; `gate.crops check`: 0 problems. About 3 minutes a night.
+
+### The numbers
+
+`bin/si unit` ok (the test of SCS19 included); `test --si` 61 of 64 (3 known); `check --only test/scheme/essential-check.txt` 44 of 49, 0
+failing, controls differ; `r7rs` 1,230 of 1,232, `srfi` 1,231, as before; `check --aot --only test/scheme/essential-aot.txt` 11 of 13, 12 of 13 the
+same as interpreted; scheme-read-essential's command: 1,358 files and probes equal to their judge, round trip, spec-check, `corpora files`
+(220 files, 0 in neither a result nor a class); `bin/si unicode-scan` and `--control` as above; `bin/repr-scheme ucd check` 4 of 4;
+`pins check` held; `report-check` 1,249 probes (1,140 agree, 72 by the choices, 37 `:chez-past-report`), 115 files, as before (2.5 min); `bin/reap --record` unchanged (41 of 44 cells checked, 0 problems); `bin/crops-score --record` unchanged, `--judge --strict` 0 problems; `bin/gate --full --plan`: the steps parse.
+
+| `bin/crops-score --crop scheme` | before (e6214cd13) | after |
+|---|---|---|
+| completeness | 97.41 (98.88 without by design) | 97.41 (98.88): unchanged, no reading of a corpus moved |
+| maturity | 100.0 | 100.0 |
+| independence | 100.0 (judge 1.0) | 100.0 (judge 1.0): the scans' check runs on no toolchain host |
+
+What moved is not in the table: the string->number answer, string-titlecase's 109,258 lines of difference with Chez (now 0 of 292,531) and
+the gate's coverage of `(rnrs unicode)` (two scans and their control, a part of `si-check`).
+
+### Night commands
+
+- `bin/si check`, `bin/si check --aot` (50 and 52 programs; `--record` only if a row moved: none expected), `bin/si chibi-tests`, `bin/si r7rs`,
+  `bin/si srfi`: the gate's `si-check`, `si-aot`, `si-corpora`.
+- `bin/si mats` and `bin/si ecraven` (the rotations; heavy, not run here): `string->number` and `string-titlecase` are used by their programs;
+  a changed answer would show as a regression against `test/scheme/check-mats-linux-amd64.edn` and `check-ecraven-linux-amd64.edn`.
+- `bin/si unicode-scan` and `bin/si unicode-scan --control` (the part `si-check.unicode`; 50 s and 2 min); by hand with Chez,
+  `bin/si unicode-scan --record` (rewrites both records, none expected to change).
+- `bin/repr-scheme ucd check` and `pins check` (the scans part of `scheme-read`), `bin/repr-scheme report-check`.
+- The gate's `si-check` (both parts), `si-aot`, `si-corpora`, `si-ecraven`, `si-mats`, `scheme-read`, `reap`, `crops-score`.
+
+### Proposed
+
+- **SCS22 Chez's "cased" in the final sigma.** The scan's first version also held two frames of the final sigma (`(string-downcase "ΑΣ" c)`
+  and `(string-downcase "Α" c "Σ")`: the sigma is final unless a Cased character follows, and if a Cased one precedes), and si's answers
+  differ from Chez's in 1,380 lines (828 Ll, 472 Lu, 78 So, 2 Lo: U+00DF, U+0138, U+0149, U+018D, U+1E9E, the modifier letters, ...). The cause is
+  the one SCS21 found for titlecasing: Chez's cased test is a character with a case mapping (the data fit it for all but U+1E9E, whose
+  simple lowercase U+00DF Chez does not count: unexplained), where si's `dcFinalSigma` takes Unicode's Cased. (a) leave, class it
+  (`:chez-cased-is-mapped`, 1,380 characters; no real text is affected: they are letters with no case); (b) `dcFinalSigma` by Chez's test
+  with U+1E9E as a stated exception, the two frames in `wordbreak-scan.sps` (record rewritten), half a day; (c) (b) and Chez's source or a
+  denser probe to find U+1E9E's rule (the host has the binary only). *Recommended: (b)*: si then equals Chez on `string-downcase` too, as it
+  now does on `string-titlecase`.
+- **SCS23 Extended_Pictographic and WB3c.** `dcWordBreak` leaves WB3c (ZWJ x Extended_Pictographic) out: `emoji/emoji-data.txt` of UCD 16.0.0 is
+  not pinned, and by the believed fact that the only Extended_Pictographic character with a case mapping, U+24C2, is an ALetter, no
+  titlecase can see it. (a) leave (as built); (b) pin `emoji/emoji-data.txt` (a fifth UCD file, one more download, the Unicode License
+  already covers it), generate `Extended_Pictographic`, add WB3c and a frame that puts a ZWJ before every character (an hour or two);
+  the scan then proves the belief. *Recommended: (b)* when the next download is allowed: UAX #29 rule for rule, and the proof in place of
+  the belief.
+- **SCS24 The scans' corpus beyond a<c>b.** The word-break scan sees a break only before a cased letter, in six frames over one scalar value.
+  A denser probe would cover two scalar values (Hebrew_Letter with Double_Quote, WB7b, WB7c; Regional_Indicator pairs; WB11 and WB12's
+  digits around a MidNum): their breaks change no cased letter, so Chez's titlecase does not show them and the scan cannot judge them; the
+  rules are the report's (UAX #29's text), unit-tested only through the frames. (a) leave; (b) a Go unit test of `dcWordBreak` against
+  UAX #29's own WordBreakTest.txt (`auxiliary/WordBreakTest.txt`, a sixth file, the standard's conformance data: about 1,900 strings
+  with their break positions), the whole algorithm judged on the standard's data, not on Chez's observable part; half a day plus a download.
+  *Recommended: (b)* if the user wants the segmentation itself proved.
