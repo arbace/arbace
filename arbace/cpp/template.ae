@@ -1632,6 +1632,12 @@
           (= :class (:kind s)) (let [c (abi/cls (:cls s))] (recur (:outer c) (if (:tmpl c) (inc d) d)))
           :else (recur (:parent s) d))))
 
+(defn- decltype-failed?
+  "Whether the type `t` holds decltype-of's dependent stand-in for an operand that did not analyze."
+  [t]
+  (boolean (some #(and (map? %) (= :tdep (:k %)) (= "decltype" (get-in % [:base :name])))
+                 (tree-seq coll? #(if (map? %) (vals %) (seq %)) t))))
+
 (defn instantiate-fn
   "The specialization of the function template `tid` for the complete arguments `args`: its declaration (the pattern
   declared in a scope binding the parameters; its definition analyzed when used), memoized."
@@ -1652,6 +1658,16 @@
             _ (when-not (binding [sema/*constraint-doubt* d] (type-constraints-satisfied? t args)) (unsat "type-constraints"))
             fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (#'sema/declare-fn! ps (:pattern t)))
             _ (when-not fid (unsat "constraints"))
+            ;; (CP332 (a): a decltype in the signature that does not analyze with every argument bound is a substitution
+            ;; failure, [temp.deduct.general]/8 -- std::size(const _Container&) -> decltype(__cont.size()) for a pair,
+            ;; which ranges::size's __adl_size had taken for viable; decltype-of keeps it a dependent type only for a
+            ;; signature with parameters still unbound)
+            _ (when (and (not (dependent? args)) (decltype-failed? (:ty (sema/fnd fid))))
+                ;; (the declaration made is left unused: lazy, never a constructor candidate)
+                (upd-fn! fid assoc :lazy true :inline true)
+                (let [f (sema/fnd fid)]
+                  (when (= :ctor (:kind f)) (abi/update-cls! (:cls f) update :ctors (fn [cs] (vec (remove #{fid} cs))))))
+                (unsat "the signature's substitution"))
             ;; the specialization is found through its template, not by its name in the parameters' scope
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
         (when (and (sema/checking?) (:access t)) (upd-fn! fid assoc :access (:access t)))

@@ -1319,3 +1319,25 @@ parse refusal names the parser's reasons (`declined 2 constructs: declaration: a
 
 Samples of test/cpp/codegen written for them: `struct-bind`, `gnu-cond`, `va-class`, `agg-dmi`, `stmt-expr` (each `codegen-check`'s three levels at the
 oracle tier; the light half's digests recorded).
+
+## G5e. CP330 (a), CP332 (a), CP336 (a) and P23 (a) (branch `cpp-props5`, 2026-11-09)
+
+The user's acceptance of 2026-11-09 (CP325-CP337 and P23, each as recommended). The code generator's half; the checker's half
+(CP325, CP327-CP329, CP331) and the measures are in doc/cpp/CPP-SURVEY.md, "As built: cpp-props5".
+
+| what | asked by | as built |
+|---|---|---|
+| inheriting constructors ([namespace.udecl]/3, [class.inhctor.init]; CP330 (a)) | std::unique_ptr's `__uniq_ptr_data` (`using __uniq_ptr_impl<_Tp, _Dp>::__uniq_ptr_impl;`), runtime/hello.cpp | `ctor-init` takes the named bases' constructors as candidates for the code generator too (but copy, move and parameterless ones, [over.match.funcs]/8-9, and one with the parameter types of the class's own, [namespace.udecl]/15); the chosen one gives the class's inheriting constructor (`inheriting-ctor!`, made once per base constructor, no member of `:ctors`): the base constructor's parameters and default arguments, its definition (`analyze-implicit!`'s `:inh-from`) the base subobject initialized by the base constructor with the parameters forwarded (an lvalue reference's an lvalue, else an xvalue: static_cast<T&&>(p)) and the other subobjects as an implicit default constructor initializes them (`ctor-inits`' `:pre-inits`); mangled `CI1`/`CI2` and the base's name (Itanium §5.1.4.3's <ctor-dtor-name>, `abi/unqualified-name`). A virtual base's constructors are not inherited by this slice (refused as before) |
+| `__type_pack_element<N, T...>`, `__make_integer_seq<Seq, T, N>` (clang's BuiltinTemplateDecl; CP332 (a)) | <bits/utility.h>'s `_Nth_type` and `_Build_index_tuple` when `__has_builtin` answers 1 (cpp/target's clang half): every `std::get<I>(tuple)`, `tuple_element` | the native parser declares both names as templates in the global scope (the alias `using type = __type_pack_element<_Np, _Types...>;` had been declined, so `_Nth_type` had no member `type`); `template-id` resolves them: the Nth type of the pack, Seq<T, 0, ..., N-1>, dependent in a signature |
+| a pack parameter's own type as a template argument | `tuple<typename __decay_and_strip<_Elements>::__type...>` (make_tuple's return type): an alias template's argument in a pack expansion's pattern | `{:k :tparam :pack true}` is a type, not a pack of arguments (`arg-entity`, the deduction's `match-args` case, the mangling's `template-arg` read `:pack` as an argument pack) |
+| a mem-initializer and a functional cast whose one argument is a pack expansion ([temp.variadic]/5, [expr.type.conv]/2) | tuple's `_Inherited(std::forward<_UTypes>(__u)...)`, make_tuple's `__result_type(std::forward<_Elements>(__args)...)` | the expansion's arguments, as many as the pack has |
+| a parenthesized expression that is no fold | `requires (__constructible<_Elements...>())`: `...>` was taken for a fold over `>`, the constraint kept as text and every tuple constructor dropped | in full-header mode, a candidate fold that does not parse as one and parses as an expression is a ParenExpr (the skim mode's tree unchanged) |
+| if constexpr over a class ([stmt.if]/2: contextually converted to bool) | std::map's `_Rb_tree::_S_key`: `if constexpr (__is_invocable<...>{})` | the condition converted as a condition is (`to-bool`: the conversion function) and evaluated; the constant evaluation calls a constexpr member function of an empty class (nothing of its object can be read) |
+| the full parse cache in gen-batch (CP336 (a)) | the run checks' iostream programs, 60 to 450 s each | `arbace.repr.cpp.parse/*full-cache*`, bound true by gen-batch (CPP_FULL_CACHE=0 off, 1 on everywhere as before): G5.2's cache, keyed by the header run's tokens and the parser's sources |
+
+**P23 (a): EmitDeferred's order.** The module is written in clang's order (CodeGenModule::EmitGlobal, EmitDeferred and
+EmitDeferredVTables, clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH LLVM-exception; the order ported, no
+code): the definitions that must be emitted written first in order without recursion (the eager ones), then EmitDeferred: the
+deferred vtables (groups and VTTs) first, then the deferred functions taken as a list, each written and, when it deferred more,
+EmitDeferred again before the next (depth first); a virtual destructor's deleting variant (D0) is a deferred function like the
+others, in the order first referred to (it was written in rounds of its own).
