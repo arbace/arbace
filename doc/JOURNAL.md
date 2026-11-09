@@ -2223,3 +2223,26 @@ rustc's Cargo.lock pins, read from the host's Cargo registry copy). MIT OR Apach
   absent) and `bin/rust-front`'s `rf_libsrc_take` calls it when `$libsrc` is missing (`RF_MONO_LIB` still names another tree). Declared inputs
   need no change: `:rust` holds bin/repr-rust, take.bash and apks.sha256, the step pins apks.sha256, `bin/rust-front` is listed.
   Alternative: extracting in the step's command (rejected: the other callers, run-built and mono-check by hand, would still fail).
+
+## 2026-11-08: night 10's merge stage rehearsed; haskell-target-oracle spliced (branch `night10-fixes`, from `mac/hs-hfsi9` 11ecb9ffa)
+
+The second dry run of night 10's merge stage (`.tmp/night10/merge.sh next|java --dry`, a scratch worktree detached at mac/next
+5ec43f7b7 and then at mac/java-night 639d42ab9; nothing merged into next or main, nothing pushed but this branch) took the
+finished branches as they were on mac late on 2026-11-08 (go-tests, gate-lane2, cpp-compl, cpp-cx12, hs-hes84, hs-hf9,
+ocaml-compl, cpp-props, hs-props, hs-hf10, scheme-props, hs-hfsi9, llvm-lls33, controls-cg, c-compl, rust-rf10b into next; java-more,
+java-older, java-classfile, java-http and next onto java-night). The conflicts and their resolutions are recorded beside the script
+(`resolve-BRANCH-FILE.{ours,theirs,merged}`, used only for the exact two blobs they were made from). One by-day edit the branches
+left: `test/gate/crops/haskell.edn`'s `haskell-target-oracle` (HFS-I2 (a)'s `target hsc && target compare`, the oracle tier's) was
+never spliced into `test/gate/steps.edn`. Spliced here with `gate.crops splice` over a fragment holding that step alone (its step,
+its `:crops :haskell` entry, its waiver), as batch 4 spliced the rest of the fragment: `gate.crops check` 0 problems,
+`test/gate/crops-test.bash` ok, `bin/gate --oracle --plan` lists it (never passed). Alternatives: splicing the whole fragment again
+(rejected: its other steps are in the table already and would be twice); leaving it to a later batch (rejected: the oracle tier's
+next run would not compare the derived installation).
+
+The same rehearsal found one interaction: on the merged tree `bin/gate --oracle --plan` stops with a NullPointerException in
+`gate.lanes/hm` (test/gate/lanes.ae:148). gate-lane2 prints the lanes' schedule with every plan, and `simulate` scheduled only the
+`:essential` and `:full` phases, so the oracle tier's steps had no start. On `mac/gate-lane2` alone it fails the same way; on next
+(no lanes printed for that plan) it does not. Fixed in `simulate`: the `:oracle` phase scheduled after `:full`, its steps one
+chain (the oracle tier runs one after another, ORS8 (a)). Checked on gate-lane2 with the fix merged: `bin/gate --oracle --plan`
+passes, `test/gate/lanes-test.bash` 50 checks, 0 failed. Alternative: printing no lanes for `--oracle` (rejected: the plan's
+budget lines are wanted there too).

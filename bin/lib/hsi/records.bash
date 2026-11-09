@@ -34,8 +34,12 @@ hsi_ae() { ARBACE_PATH=$root "$("$root/bin/hsi" exe)" "$@"; }
 hsi_lib_keys() {
   local tb dt plan bn=${HSI_BIGNUM:-native} line name
   tb=$(hsi_ae -e "(println (:sha256 (:tarball (read-string (slurp \"$hsi_corpora_edn\")))))")
-  # what the dumps' flags depend on besides the plan: bin/hsi's functions that build them, the generated files the plan copies
-  dt=$(sed -n '/^unit_of() {/,/^}/p;/^prefix_rel() {/,/^}/p;/^strip_srcdir() {/,/^}/p;/^dump_package() {/,/^}/p' "$root/bin/hsi" | sha256sum | cut -c1-64)
+  # what the dumps' flags depend on besides the plan: bin/hsi's functions that build them, the generated files the plan copies.
+  # HF10's HSI_DUMP_OPT (dump_package's "${HSI_DUMP_OPT:--O2}", -O2 by default) read as the -O2 it was, so the default level's
+  # keys stay those of the record; another level (HF10's -O0 reference) keys apart, its level in the key
+  dt=$(sed -n '/^unit_of() {/,/^}/p;/^prefix_rel() {/,/^}/p;/^strip_srcdir() {/,/^}/p;/^dump_package() {/,/^}/p' "$root/bin/hsi" \
+    | sed 's/"\${HSI_DUMP_OPT:--O2}"/-O2/' | sha256sum | cut -c1-64)
+  [ "${HSI_DUMP_OPT:--O2}" = -O2 ] || dt="$dt opt ${HSI_DUMP_OPT}"
   plan=$TMPDIR/hsi-libplan.$$
   hsi_ae "$root/test/haskell/eval/dump_plan.ae" "$hsi_corpora_edn" "$bn" > "$plan"
   while IFS= read -r line; do

@@ -2273,7 +2273,7 @@ The record `test/haskell/lib-stg-results.edn` keeps each module's stage and coun
   change but those reruns it. Its control is waived (the fresh answers against the committed file: a differing answer is its finding).
   `bin/gate --full --plan`: `run haskell-target-probe key 8549e6f01260, 186 files; never passed`, among the light chains beside the
   serial run. `gate.crops check`: 0 problems.
-- **The oracle tier**: `haskell-target-oracle` (`test/gate/crops/haskell.edn`, not spliced yet) keeps `target hsc && target compare`.
+- **The oracle tier**: `haskell-target-oracle` (`test/gate/crops/haskell.edn`) keeps `target hsc && target compare`; spliced into `test/gate/steps.edn`'s oracle tier by night 10's merge stage (branch `night10-fixes`, `gate.crops splice` of that step alone: its step, its `:crops :haskell` entry and its waiver).
 - **The probe's run** (the moved script, whole, by day: one process, 0.9 GiB peak): `bin/repr-haskell target probe --verify` (through
   `bin/repr-haskell-target probe --verify`), 308 compile tests, "the answers as committed", 36 min (65 on hs-inputs' first run).
 
