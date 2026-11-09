@@ -985,7 +985,16 @@
                               (doseq [[mn es] (.entrySet ^java.util.HashMap (:names (:scope (abi/cls-of ft))))
                                       e es :when (#{:field :indirect} (:e e))]
                                 (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1})))))
-            (do (when (and (checking?) (= "FriendDecl" (:kind k))) (abi/update-cls! id assoc :has-friends true))
+            (do (when (and (checking?) (= "FriendDecl" (:kind k)))
+                  ;; (CP313 (a): the friends each class declares, clang's EffectiveContext's matching by them: a function's
+                  ;; or a function template's name, else a class, else unknown)
+                  (let [fd (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "FunctionTemplateDecl"} (:kind %)) (:inner k)))]
+                    (abi/update-cls! id #(cond-> (assoc % :has-friends true)
+                                           (and fd (string? (:name fd)) (seq (:name fd))) (update :friend-fns (fnil conj #{}) (:name fd))
+                                           (and (nil? fd) (or (get-in k [:type :qualType]) (some (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k))))
+                                           (assoc :friend-classes true)
+                                           (and (nil? fd) (nil? (get-in k [:type :qualType])) (not-any? (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k)))
+                                           (assoc :friend-unknown true)))))
                 (binding [*member-access* @access] (declare-node! cs k))))))
       (finish-class! id)
       (when-not nm (reset! *last-anon* t)))
@@ -1669,18 +1678,65 @@
         names (set (map #(:name (fnd %)) own))]
     (concat own (remove #(names (:name (fnd %))) (mapcat #(conv-fns (:cls %)) (:bases c))))))
 
+(declare deduced! method-call init-for var-node)
+
+(defn- glam-conv!
+  "CP301 (a): the conversion of a captureless generic lambda's closure (class `cid`) to a pointer to the function type
+  `F` ([expr.prim.lambda.closure]/9-10): the specialization of its conversion function template for F, made once per F,
+  returning the address of a static invoker (`__invoke`, a specialization of the invoker template as clang's, its
+  arguments the call operator's) that calls the call operator's specialization deduced from F's parameter types on a
+  closure object; nil when none is deduced or its type is not F (the result type is a pointer to the specialization's
+  type, which converts to no other pointer to function)."
+  [cid F]
+  (let [c (abi/cls cid)
+        {:keys [tid base-f]} (:glam-conv c)]
+    (when tid
+      (or (get (:glam-convs c) F)
+          ;; (the checker's position stays the conversion's: the call operator's specialization is analyzed here)
+          (when-let [fid (let [a *at* saved (some-> a deref)]
+                           (try (some-> (when-let [h (:glam-spec @hooks)] (h tid F)) deduced!) (finally (when a (reset! a saved)))))]
+            (let [f (fnd fid)
+                  ret (let [r (:ret (:ty f))] (if (= :auto (:k r)) abi/void r))
+                  ps (:ps (:ty f))
+                  t {:k :class :id cid}
+                  ;; (the target's own function type: the conversion's result type is exactly the parameter's)
+                  ft F]
+              (when (and (= (abi/unq ret) (abi/unq (:ret F))) (= (mapv abi/unq ps) (mapv abi/unq (:ps F))))
+                (let [ivid (next-id) cvid (next-id)
+                      ipids (vec (for [pt ps] (let [pid (next-id)] (swap! *vars* assoc pid {:id pid :name nil :ty pt :storage :param :fn ivid}) pid)))
+                      lv (next-id)
+                      _ (swap! *vars* assoc lv {:id lv :name nil :ty t :storage :local :fn ivid})
+                      _ (swap! *fns* assoc ivid (merge base-f {:id ivid :name "__invoke" :kind :method :static true :ty ft :param-names []
+                                                               :tinst (assoc (:tinst f) :tid [:invoke tid])}))
+                      call (method-call {:scope (:scope base-f)} fid {:op :var :id lv :ty t :cat :lv} (mapv var-node ipids) false)
+                      ret-s (if (abi/void? ret) {:s :return :void-e call} {:s :return :init (init-for ret call {:scope (:scope base-f)} :copy)})]
+                  (upd-fn! ivid assoc :params ipids :tbody {:s :block :items [{:s :decl :var lv :init {:i :none}} ret-s]})
+                  (swap! *fns* assoc cvid (merge base-f {:id cvid :name "operator function" :kind :conv :cq true :ty {:k :fn :ret (abi/ptr ft) :ps [] :va false}
+                                                        ;; (mangled as clang's specialization of the conversion function
+                                                        ;; template, `template <class T> operator auto (*)(T)() const`)
+                                                        :tinst (assoc (:tinst f) :tid [:conv tid] :tsig {:k :fn :ret nil :ps [] :va false})
+                                                        :mangle-ret (abi/ptr (let [sg (:tsig (:tinst f))] {:k :fn :ret (:ret sg) :ps (:ps sg) :va (boolean (:va sg))}))
+                                                        :param-names [] :params []
+                                                        :tbody {:s :block :items [{:s :return :init {:i :expr :e {:op :fnaddr :fn ivid :ty (abi/ptr ft) :cat :pr}}}]}}))
+                  (abi/update-cls! cid #(-> % (update :methods (fnil conj []) cvid) (assoc-in [:glam-convs F] cvid)))
+                  cvid))))))))
+
 (defn- conv-for
   "The conversion function of class `id` that converts best to the non-class type `t` (explicit ones when
   `explicit?`), or nil."
   [id t explicit? & [obj-c]]
+  ;; (CP301 (a): a captureless generic lambda's conversion to a pointer to function made for the target's function type)
+  (when (and (:glam-conv (abi/cls id)) (abi/ptr? (abi/unq t)) (abi/fn? (abi/unq (:to (abi/unq t)))))
+    (glam-conv! id (abi/unq (:to (abi/unq t)))))
   (let [cands (for [fid (conv-fns id)
                     :let [f (fnd fid)] :when (or explicit? (not (:explicit f)))
-                    ;; (CX12, the checker: a const object's conversion functions are the const ones, the implicit object
-                    ;; parameter's binding, [over.match.funcs]/4-5)
-                    :when (or (not obj-c) (not (checking?)) (:cq (:ty f)))
-                    ;; (CX12, the checker: in direct-initialization an explicit conversion function is a candidate only when
-                    ;; it yields the type, or one a qualification conversion converts to it, [over.match.conv]/1.1)
-                    :when (or (not explicit?) (not (:explicit f)) (not (checking?)) (abi/class? (abi/unq t))
+                    ;; (CX12: a const object's conversion functions are the const ones, the implicit object parameter's
+                    ;; binding, [over.match.funcs]/4-5; the checker's, since CP312 (a) the code generator's too)
+                    :when (or (not obj-c) (:cq f) (:cq (:ty f)))
+                    ;; (CX12: in direct-initialization an explicit conversion function is a candidate only when it yields
+                    ;; the type, or one a qualification conversion converts to it, [over.match.conv]/1.1; since CP312 (a) for
+                    ;; the code generator too)
+                    :when (or (not explicit?) (not (:explicit f)) (abi/class? (abi/unq t))
                               (= (abi/unq (abi/non-ref (:ret (:ty f)))) (abi/unq t)))
                     :let [rt (abi/non-ref (:ret (:ty f)))
                           r (if (= (abi/unq rt) (abi/unq t)) 0 (std-rank {:op :call :ty rt} rt t))] :when r]
@@ -1811,9 +1867,16 @@
         (cond
           (and unsure-drops (pos? (long unsure-drops)))
           (fail :overload "no viable function (a template's deduction unsure) among " (count (distinct cands)) " for " n0 " arguments")
-          ;; (CP290 (a): a generic lambda's closure has conversion function templates to pointers to function the slice does
-          ;; not declare: a candidate it may have made viable is not known not to be)
-          (and (checking?) (some (fn [[_ args]] (some #(when-let [i (class-id (:ty %))] (:glam (abi/cls i))) args)) cs))
+          ;; (CP290 (a): a generic lambda's closure's conversion function templates to pointers to function; since CP301 (a)
+          ;; made by glam-conv! for a captureless one (a capturing one has none), but for a parameter pack (auto...), whose
+          ;; deduction from a pointer to function the slice does not model: a candidate it may have made viable is not known
+          ;; not to be)
+          (and (checking?) (some (fn [[_ args]] (some #(when-let [i (class-id (:ty %))]
+                                                         (when-let [{:keys [tid]} (:glam-conv (abi/cls i))]
+                                                           (some (fn [P] (= :pack-exp (:k P)))
+                                                                 (:ps ((requiring-resolve 'arbace.cpp.template/sym-sig) ((requiring-resolve 'arbace.cpp.template/tmpl) tid))))))
+                                                      args))
+                                 cs))
           (fail :overload "no viable function (a generic lambda's conversion not modeled) among " (count (distinct cands)) " for " n0 " arguments")
           :else
           (fail :overload "no viable function among " (+ (count (distinct cands)) (long (or sure-drops 0))) " for " n0 " arguments: " (pr-str (map :ty (second (first cs)))))))
@@ -2244,11 +2307,17 @@
       {:op :deref :e {:op :load :e {:op :var :id id :ty t :cat :lv :raw true} :ty (abi/ptr (:to t)) :cat :pr} :ty (:to t) :cat :lv}
       {:op :var :id id :ty t :cat :lv})))
 
+(def ^:dynamic *unevaluated*
+  "CP304 (a): true while an unevaluated operand is analyzed (sizeof's, alignof's, noexcept's): an enclosing function's
+  variable named there is not odr-used, so a lambda does not capture it ([expr.prim.lambda.capture]/7-8); only its type is
+  read."
+  false)
+
 (defn- entity-expr [ctx es n]
   (let [e (first es)]
     (case (if (empty? es) :fn (:e e))
       :var (let [v (var* (:id e))]
-             (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)))
+             (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)) (not *unevaluated*))
                (capture-field ctx (:id e))
                (var-node (:id e))))
       :capfield (field-node (deref-node {:op :this :ty (:this-type ctx) :cat :pr}) (:cls (:lambda ctx)) (:i e))
@@ -2438,16 +2507,31 @@
       (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
                       {:codegen/refused :access :cx/node node})))))
 
+(defn- friend-may-grant?
+  "CP313 (a), clang's SemaAccess.cpp (llvmorg-23.1.5) EffectiveContext and GetFriendKind for a non-member function `f`
+  naming a member of class `cid`: whether a friend declaration could make it accessible -- `cid` declares a friend function
+  or function template of f's name (by name: an overload or a qualified friend counts, missed never wrong), or a friend it
+  could not classify; for a protected member ([class.protected]: a friend of a derived class may name it through the
+  derived class) any class derived from `cid` that declares a friend; a class's friend classes grant nothing to a
+  non-member function."
+  [cid f access]
+  (let [c (abi/cls cid)]
+    (boolean
+      (or (:friend-unknown c)
+          (contains? (:friend-fns c) (:name f))
+          (and (= :protected access)
+               (some (fn [d] (and (:has-friends d) (not= (:id d) cid) (abi/derived-from? (:id d) cid))) (vals @abi/*classes*)))))))
+
 (defn- check-access!
   "CX12 (the checker): [class.access]/1-2 for a member named in an expression: a private or protected member of class
-  `cid` named in a function that is no class's member (nor in a class's scope), where neither that class nor any other
-  of the unit declares a friend (a friend could be that function, or a friend of a derived class, [class.protected]):
-  inaccessible. Everything else (members, friends, templates' patterns, using-declarations) is not judged."
+  `cid` named in a function that is no class's member (nor in a class's scope): inaccessible unless a friend declaration
+  may grant it (CP313 (a), friend-may-grant?; before it, judged only where no class of the unit declared a friend).
+  Everything else (members, templates' patterns, using-declarations) is not judged."
   [ctx cid nm access]
   (when (and (checking?) (#{:private :protected} access) cid)
     (let [f (when-let [i (:fn-id ctx)] (fnd i))]
       (when (and f (not (:cls f)) (not (:this-type ctx)) (not (:tinst f))
-                 (not-any? :has-friends (vals @abi/*classes*)))
+                 (not (friend-may-grant? cid f access)))
         (fail :access "'" nm "' is a " (name access) " member of '" (:name (abi/cls cid)) "'")))))
 
 (defn- member-expr [ctx n]
@@ -2512,16 +2596,29 @@
       (upd-fn! fid dissoc :analyzing))
     fid))
 
+(declare cx-immediate-call!)
+
 (defn- method-call
   "A call of the method `fid` on the object glvalue `obj` with the typed arguments."
   [ctx fid obj args virtual-ok]
   (let [f (fnd (deduced! fid))
+        _ (cx-immediate-call! ctx f)
         o (when-not (:static f) (to-base-lv obj (:cls f)))]
     {:op :call :fn fid :obj o :args (call-args f args ctx) :virtual (and virtual-ok (:virtual f) (not (:static f)))
      :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
 
+(defn- cx-immediate-call!
+  "CP310 (b), the checker: an immediate invocation ([expr.const]/16: a call of an immediate function outside one) is a
+  constant expression, so one of a function whose own body the checker found not constant (a constexpr error in it) is
+  not, at the call."
+  [ctx f]
+  (when (and (checking?) (:consteval f) (:cx-imm-error f)
+             (not (some-> (:fn-id ctx) fnd :consteval)))
+    (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression")))
+
 (defn- fn-call [ctx fid args]
-  (let [f (fnd (deduced! fid))]
+  (let [f (fnd (deduced! fid))
+        _ (cx-immediate-call! ctx f)]
     {:op :call :fn fid :args (call-args f args ctx)
      :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
 
@@ -3143,6 +3240,10 @@
   (let [out (java.util.ArrayList.) seen (java.util.HashSet.)]
     (letfn [(walk [x]
               (cond
+                ;; CP304 (a): an unevaluated operand names no capture ([expr.prim.lambda.capture]/7-8: only a potentially
+                ;; evaluated expression odr-uses; [expr.context]/1: sizeof's, alignof's, noexcept's operands and a
+                ;; requires-expression are unevaluated; clang's tryCaptureVariable is not reached for them)
+                (and (map? x) (#{"UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "RequiresExpr" "SizeOfPackExpr"} (:kind x))) nil
                 (map? x) (do (cond
                                (and (= "DeclRefExpr" (:kind x)) (not (:qualifier x)) (not (:globalQualifier x)))
                                (let [nm (get-in x [:referencedDecl :name])]
@@ -3254,6 +3355,11 @@
         _ (reset! (:sealed lam) true)
         ;; the init-captures' names in the specializations' bodies, the lambda's context for them
         _ (abi/update-cls! id assoc :glam (assoc lam :names (into {} (:names fs))) :glam-cutoff (long (or (:_b n) *cutoff*)))
+        ;; (CP301 (a): no lambda-capture, so a conversion function template to a pointer to function, its
+        ;; specializations made on use by glam-conv!; [expr.prim.lambda.closure]/9)
+        _ (when (str/blank? intro)
+            (abi/update-cls! id assoc :glam-conv {:tid tid :base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id])
+                                                                    :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}}))
         _ (finish-class! id)
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
             (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
@@ -3379,7 +3485,7 @@
                        {:op :int :v (if (every? ok? (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
     ;; noexcept(e) ([expr.unary.noexcept]): e unevaluated, true when no function it calls may throw (an implicit or
     ;; defaulted special member counted as not throwing; G4)
-    "CXXNoexceptExpr" (let [x (analyze ctx (first (kids n)))
+    "CXXNoexceptExpr" (let [x (binding [*unevaluated* true] (analyze ctx (first (kids n))))
                             fns (atom #{})
                             walk (fn walk [x] (cond (map? x) (when-not (:kind x)
                                                                 (when (integer? (:fn x)) (swap! fns conj (:fn x)))
@@ -3588,7 +3694,7 @@
                        (when-not (#{:pack :varpack} (:e e)) (fail :pack "sizeof... of a non-pack " (:name n)))
                        {:op :int :v (count (or (:elems e) (:ids e))) :ty abi/ulong* :cat :pr})
     "UnaryExprOrTypeTraitExpr"
-    (let [t (if-let [at (get-in n [:argType :qualType])] (resolve-type (:scope ctx) at) (:ty (analyze ctx (first (kids n)))))
+    (let [t (if-let [at (get-in n [:argType :qualType])] (resolve-type (:scope ctx) at) (:ty (binding [*unevaluated* true] (analyze ctx (first (kids n))))))
           t (abi/non-ref t)]
       (case (:name n)
         "sizeof" {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr}
@@ -3649,6 +3755,27 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Statements
+
+(defn- p2266-xvalue
+  "C++23's P2266 ([expr.prim.id.unqual]/3 with [basic.lval]/4): in a return statement an id-expression naming an implicitly
+  movable entity -- an automatic variable or parameter of object type, or of rvalue reference type to an object type, not
+  volatile -- is an xvalue, whatever the return type (found with CP305's explicit instantiations, cpp23/elision7); the typed
+  expression `a` as one, or as it was."
+  [a]
+  (if (and (>= (long *cxx-year*) 23) (not= :xv (:cat a)))
+    (let [vid (case (:op a)
+                :var (:id a)
+                :deref (when (and (= :load (get-in a [:e :op])) (= :var (get-in a [:e :e :op])) (get-in a [:e :e :raw]))
+                         (get-in a [:e :e :id]))
+                nil)
+          v (when vid (var* vid))
+          vt (:ty v)]
+      (if (and v (#{:local :param} (:storage v)) (not (:static v)) (not (:v (abi/unq (abi/non-ref vt))))
+               (or (and (= :var (:op a)) (not (abi/ref? vt)))
+                   (and (= :deref (:op a)) (= :rref (:k vt)) (not (abi/fn? (:to vt))))))
+        (assoc a :cat :xv)
+        a))
+    a))
 
 (declare stmt)
 
@@ -3798,15 +3925,23 @@
                          st (if-let [h *on-refusal*]
                               (fn [x] (try (stmt c x)
                                            (catch arbace.lang.ExceptionInfo e
-                                             (if (:codegen/refused (ex-data e)) (do (h e (some-> *at* deref)) {:s :null}) (throw e)))))
+                                             (if (:codegen/refused (ex-data e))
+                                               (do ;; (CP310 (b): an immediate function whose body is not constant, its
+                                                   ;; invocations not either)
+                                                   (when (and (= :constexpr (:codegen/refused (ex-data e))) (:fn-id ctx) (:consteval (fnd (:fn-id ctx))))
+                                                     (upd-fn! (:fn-id ctx) assoc :cx-imm-error true))
+                                                   (h e (some-> *at* deref)) {:s :null})
+                                               (throw e)))))
                               #(stmt c %))]
                      {:s :block :items (vec (mapcat #(let [x (st %)] (if (vector? x) x [x])) (kids n)))})
     "DeclStmt" {:s :block :flat true :items (decl-stmt ctx n)}
     "NullStmt" {:s :null}
     "ReturnStmt" (let [[e] (kids n)
                        rt (:ret (:ty (fnd (:fn-id ctx))))
-                       pre (when (and e (= :auto (:k rt))) (analyze ctx e))
-                       rt (if (= :auto (:k rt))
+                       ;; (a deduced return type: auto, and since CP301 (a) auto&, auto&&, auto* -- a generic lambda's
+                       ;; `-> auto&` among them -- [dcl.spec.auto.general]/11)
+                       pre (when (and e (has-auto? rt)) (p2266-xvalue (analyze ctx e)))
+                       rt (if (has-auto? rt)
                             (let [t (if pre (deduce-auto rt pre) abi/void)] (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
                             rt)]
                    (cond
@@ -3817,7 +3952,8 @@
                      :else (let [a (analyze ctx e)
                                  ;; [class.copy.elision]/3: a returned local is an rvalue first
                                  a (if (and (= :var (:op a)) (#{:local :param} (:storage (var* (:id a)))) (abi/class? (abi/unq (:ty a))))
-                                     (assoc a :cat :xv :nrvo-var (:id a)) a)]
+                                     (assoc a :cat :xv :nrvo-var (:id a)) a)
+                                 a (p2266-xvalue a)]
                              {:s :return :init (if (and (checking?) (:nrvo-var a) (< (long *cxx-year*) 23))
                                                  ;; (CX12, the checker: before C++23, [class.copy.elision]/3 -- an overload
                                                  ;; resolution as an rvalue that fails, no viable or ambiguous, is done
@@ -4145,11 +4281,40 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The program
 
+(defn- immediate-address
+  "CP310 (b): the immediate function whose address the typed expression `e` is (a pointer to it, a pointer to member
+  function of it, through no-op conversions), or nil."
+  [e]
+  (case (:op e)
+    (:fnaddr :mptr-fn) (when-let [f (some-> (:fn e) fnd)] (when (:consteval f) f))
+    :cast (when (= :noop (:ck e)) (immediate-address (:e e)))
+    nil))
+
+(defn- returned-immediate
+  "CP310 (b): an immediate function the function `fid`'s return statements return the address of, or nil (its body as
+  analyzed)."
+  [fid]
+  (let [f (fnd fid)]
+    (some (fn [x] (when (and (map? x) (= :return (:s x)) (= :expr (get-in x [:init :i]))) (immediate-address (get-in x [:init :e]))))
+          (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (select-keys % [:items :then :else :body :init :s])) (seq %)) (:tbody f)))))
+
 (defn cx-check-constant!
   "CX12 (the checker): a constexpr variable's scalar initializer `i` evaluated ([dcl.constexpr]/10: a constant
   expression); an evaluation the program's own operation makes not constant (ub!) diagnosed at that operation, clang's
-  err_constexpr_var_requires_const_init. An evaluation the slice cannot do judges nothing."
+  err_constexpr_var_requires_const_init. An evaluation the slice cannot do judges nothing.
+  CP310 (b), [expr.const]/16-18: the result of a manifestly constant-evaluated initializer is no pointer to an immediate
+  function (a permitted result's constituent values do not refer to one): the initializer the address itself (g++'s
+  \"constant evaluation returns address of immediate function\") or an immediate invocation that returns one (\"immediate
+  evaluation returns ...\", its callee's return statement the address), at the variable."
   [v i]
+  (when (and (checking?) (:cx-constexpr v) (= :expr (:i i)))
+    (let [e (:e i)
+          imm (immediate-address e)
+          inv (when (and (nil? imm) (= :call (:op e)) (:consteval (fnd (:fn e)))) (returned-immediate (:fn e)))]
+      (when (or imm inv)
+        (throw (ex-info (str "codegen: constexpr variable '" (:name v) "' must be initialized by a constant expression ("
+                             (if imm "constant" "immediate") " evaluation returns address of immediate function '" (:name (or imm inv)) "')")
+                        {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})))))
   (when (and (checking?) (:cx-constexpr v) (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))))
     (try (ce-eval (:e i))
          (catch arbace.lang.ExceptionInfo x

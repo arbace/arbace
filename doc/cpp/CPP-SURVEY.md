@@ -4832,3 +4832,295 @@ in a wait loop's test; both only read, nothing written there, the commands not r
 c1-c6, v1, `one.sh`, `one.ae`, `dumpr.ae`, `sample.sh`, the runs `r1/` and `r2/` (the recorded one), `w1/` (the first step's files),
 `ctl/` (the control), `gen-base/` and `gen-new/` (the code generator's comparison), `*.log`), `base-tree/` (now 1443ba1c5's `arbace/`
 and `cpp/`), `llvm-src/` (SemaDeclCXX.cpp, SemaInit.cpp, SemaOverload.cpp, SemaTemplateDeduction.cpp added).
+
+## As built: CP300-CP314 (2026-11-09; branch `cpp-props2` from f9b81f1e3)
+
+The user's decisions of 2026-11-09 (about 06:15 UTC), all as recommended: CP300 (a), CP301 (a), CP302 (a), CP303 (a) with (b)'s
+order, CP304 (a), CP305 (a), CP310 (b) then (a), CP311 (a), CP312 (a), CP313 (a), CP314 (a). CP302 first (the night's), then the small ones, then
+the rest, one commit each (the sections below in the order built). The measure is the CX12 slices': the every-10th dg-error sample's own passes (454 supported files,
+`.tmp/t6/sample.sh`), each new pass read against its source (the no-false-credit review), and `gen-list` over test/cpp/codegen's
+142 samples before and after, the intended changes listed; every own run with the compilers' stubs first on PATH.
+
+### CP302 (a): the code generator's light half in the gate
+
+- `bin/cppi codegen-gen [WORK] [--record] [--only-list FILE]` (WORK default `.tmp/cppi/codegen-gen`; `make cppi-codegen-gen`):
+  `gen-list` over test/cpp/codegen's samples (the native parser, arbace.cpp.sema, arbace.cpp.codegen and the lowering, no clang, no
+  gcc, no run; libstdc++'s tree from the pinned gcc tarball as `bin/repr-cpp target` makes it), then `arbace.cpp.codegen/gen-judge`:
+  a refused sample's class (gen.refused's first field) against `test/cpp/codegen/refusals.edn` (`{NAME CLASS}`), a generated one's
+  `forms.ae` against its SHA-256 in `test/cpp/codegen/forms.sha256` (sha256sum's lines), a sample in neither record failing; each
+  verdict in WORK/results.tsv (`pass`, `forms-differ`, `refused`, `refusal-differs`, `generated`, `not-recorded`). `--record`
+  rewrites both records from a whole run (a change of the generated forms is a re-record, its samples named in the commit).
+- Its negative controls, `test/cpp/controls.edn`'s `:level :gen` entries (the other judges filter by level): arith's forms judged
+  against bank's recorded digest (`forms-differ`), rtti's refusal against arith's recorded forms (`refused`); one that passes fails
+  the step.
+- The `--full` step `cpp-codegen-gen` (`:mem-gib 2`, the chain cpp-full, on stage 0, inputs `:lib-tools :tools :cpp :c`, pins
+  test/cpp/corpora.edn and test/c/corpora.edn; its control test/cpp/controls.edn), in test/gate/crops/cpp.edn and
+  test/gate/steps.edn. The ten samples refused from a14d52531 to CP290 would have failed it the first night (`refused`, each
+  recorded generated).
+- Checked: `codegen-gen .tmp/cg1 --record` (4 min 38 s at one thread, about 1.4 GiB under GOMEMLIMIT=1400MiB): 142 samples, 141
+  generated, rtti refused (`codegen`, the `:dyncast` prvalue), the forms byte for byte those of a separate gen-list run of the same
+  tree (`.tmp/p0`); the judge on that run: 142 pass, both controls fail as they must; on a record with one digest changed and no
+  refusal recorded: `FAIL arith forms-differ`, `FAIL rtti not-recorded`, exit 1. `make check-makefile`, `gate.crops check .
+  test/gate/steps.edn` (0 problems), `bin/gate --full --plan` (`cpp-codegen-gen` planned, never passed), `bin/crops-score --crop cpp`
+  (76.1 / 100 / 67.8, unchanged: the step is one more `--full` step of an already full checklist).
+
+### CP314 (a): C++11's constexpr function body
+
+- `arbace.repr.cpp.diag/constexpr-bodies` (clang's CheckConstexprFunctionBody and CheckConstexprFunctionStmt before C++14, read
+  from the pinned llvm-project-23.1.5 tarball as in the fifth slice; g++ makes them errors, clang warns under -pedantic-errors): at
+  C++11, a constexpr function's body, beside null statements and declarations of static_assert, typedefs, alias declarations,
+  using-declarations and using-directives, is one return statement ("body of constexpr function 'f' not a return-statement"), a
+  constexpr constructor's nothing ("constexpr constructor does not have empty body"), at the body's closing brace as the corpus's
+  directives place g++'s; a nested compound statement is its own error at its brace ("compound-statement in constexpr function")
+  and its statements count as the body's (cpp0x/constexpr-compound: a return inside one is the return); a class template's
+  constructors are judged at their definition too (cpp0x/constexpr-ctor19), function templates not; a void function's body is
+  not judged (its return type is C++11's error, cpp0x/constexpr-function2). The local class or enumeration a declaration
+  statement defines (`typedef enum E {...} EE;`: the DeclStmt's EnumDecl) is not among the allowed declarations.
+- Measure: the every-10th sample 108 → 108 (no file of the sample at C++11 has these lines; the extras the same 92). The 25
+  dg-error files of the whole part naming constexpr with c++11_only or c++11_down directives with the CP303 files (63 in all,
+  `.tmp/t7/fA.txt`; f9b81f1e3's tree `.tmp/base2-tree` against this branch): gained cpp0x/constexpr-type-def1 (12 lines),
+  constexpr-diag5 (4), constexpr-ctor19 (2), constexpr-compound (2); no pass lost, the extras the same 25 lines (an extra at
+  constexpr-compound:9 in a first run, the body's return inside a compound statement, gone with the flattening).
+- No false credit: each gained line read; type-def1's are the local enumerations and classes its bodies define, diag5's the
+  constructors' `return;`, ctor19's S3 and S4 (a typedef defining an enumeration, a structure) and not S, S2 (a typedef, a null
+  statement), compound's the two braces. A probe of the valid forms (`.tmp/t7/v314.cpp` at c++11 and c++14: every allowed
+  declaration beside one return, a constructor with a typedef and a null statement, a conditional return, a function template)
+  gives no diagnostic. Not built: g++'s other C++11 body errors (the try blocks of cpp2a/constexpr-try1-5, which also want C++20's
+  try rules; constexpr-function2's side effects and argument rules).
+
+### CP303 (a): the next unknown GNU attributes
+
+(b)'s order, the attributes whose dg-error lines are in the whole part's failing files, then the rest; written from the GCC 15.2
+manual (gcc/doc/extend.texi of the pinned gcc-15.2.0.tar.xz: "Common Variable Attributes", "Common Type Attributes",
+"C++-Specific Variable, Function, and Type Attributes", "Statement Attributes") and the corpus's directives, clean-room (no GCC code
+read), the messages after the directives' texts.
+
+- The parser (`arbace.repr.cpp.parse`): a function declaration and a typedef now take their unknown GNU attributes as `:_gattrs`
+  as a variable and a field do (CP294 (a)), and every one of them those of the leading attribute-specifier-seq too (`[[gnu::x]] int
+  &f();`: the decl-specifiers' `:gb`, the seq's first token; their range began after it, so a leading `[[gnu::...]]` was missed); an
+  attribute written `[[gnu::x(...)]]` is marked `:std` (a standard attribute's syntax).
+- `gattr-rules`: **warn_if_not_aligned** (a threshold for a structure's field or a type): on a variable, a function or a bit-field
+  "'warn_if_not_aligned' may not be specified for 'NAME'" (a function as `R NAME(PARAMS)`, `(void)` printed `()`) at the
+  declarator's name (a rule's `{:at-decl true}`), and a bit-field of a typedef of the main file declared with it "cannot declare
+  bit-field 'NAME' with 'warn_if_not_aligned' type" at its name; **no_dangling** (an optional argument, an expression that
+  evaluates to true or false, on a class type, a function or a member function; elsewhere ignored, a warning): `[[gnu::no_dangling()]]`
+  "parentheses must be omitted if 'no_dangling' attribute argument list is empty", on a function two arguments "wrong number of
+  arguments specified for 'no_dangling' attribute", a string literal "'no_dangling' argument must be an expression that evaluates
+  to true or false".
+- Not built: **musttail** (its errors, "cannot tail-call: ...", are the middle end's tail-call pass at -O0, by the return types, the
+  callee's exceptions and the target's sibling calls: the code generator's level, not a declaration's text; the attribute is
+  clang's too, so the trees keep it); **transaction_safe, transaction_unsafe, transaction_wrap** (`-fgnu-tm`, the Transactional
+  Memory TS: its keywords `transaction_safe` as a virt-specifier-like suffix, `atomic_commit` blocks and `__transaction_atomic`,
+  none of which the native parser reads (tm/inherit2's syntax error), and their errors a call graph's safety analysis): a TS of its
+  own, left (26 dg-error files of tm/). no_dangling's argument rules that need the template's instantiation
+  (ext/attr-no-dangling7: an unexpanded pack, `T::x`, a non-constexpr call, a narrowing 20 to bool) are left.
+- Measure: the every-10th sample 108 → 108, the extras the same 92 (`.tmp/t7/rA`, with CP304 and CP305; no file of the sample
+  names these attributes); the 38 dg-error files of the whole part naming the four attributes
+  (with CP314's, `.tmp/t7/fA.txt`, f9b81f1e3's tree against this branch): gained pr53037-4 (4 lines), other/bitfield7 (2),
+  ext/attr-no-dangling2 (3); none lost, the extras the same 25 lines.
+- No false credit: pr53037-4's four lines are a variable's, a function's and a bit-field's attribute and a bit-field of the
+  attributed typedef `__u32`, each at its column; bitfield7's the unnamed and the named bit-field of `intwna`; no-dangling2's the
+  three argument rules, and none on its ignored uses (`[[no_dangling]]` without `gnu::`, a variable, a typedef, an enumeration, an
+  empty declaration, a label). The probe `.tmp/t7/v314.cpp` (a field and a type with warn_if_not_aligned, no_dangling on a class and
+  on functions with no and a `true` argument) gives no diagnostic.
+
+### CP304 (a): no captures from unevaluated operands
+
+- `arbace.cpp.sema`: the generic lambda's capture scan (`glam-names`) does not descend into sizeof's, alignof's and noexcept's
+  operands, a requires-expression or `sizeof...` ([expr.prim.lambda.capture]/7-8: only a potentially evaluated expression
+  odr-uses; [expr.context]/1); and the analysis of those operands (`*unevaluated*`, bound around them) reads an enclosing
+  function's variable without capturing it (`entity-expr`: its type is all an unevaluated operand needs), so a specialization
+  naming one there is no longer refused (`:sealed`) and a non-generic lambda's `[=]` no longer captures it either (clang's
+  tryCaptureVariable is not reached for them). typeid's operand stays evaluated (a polymorphic glvalue's is).
+- Measure: the probe `.tmp/t7/u1.cpp` (`[=](auto a) { return sizeof(d) + a + x + noexcept(q) + alignof(decltype(q)); }` and `[&](auto a)
+  { return sizeof(d) + a; }`): the closures 24 and 8 bytes before (x, d, q captured; d by reference), 4 and 1 after, clang's sizes
+  for the same program (its capture of x alone, the empty closure); the every-10th sample 108 → 108, the extras the same 92
+  (`.tmp/t7/rA`); `bin/cppi codegen-gen .tmp/t7/cgA` (this tree with CP303 and CP305): 142 of 142 as recorded, no sample's forms
+  changed (none names a variable only in an unevaluated operand of a lambda).
+
+### CP305 (a): explicit instantiation definitions in the checker
+
+- `arbace.cpp.template/explicit-fn-instantiation!` (the checker only, `sema/checking?`): an explicit instantiation definition of a
+  function template (`template R f<A...>(P...);`, [temp.explicit]/10) finds its specialization as an explicit specialization's is
+  ([temp.deduct.decl]: the written arguments after the name, `explicit-args`, then deduction from the declared type) and, when one
+  template gives one, instantiates it and makes its definition eager (entered in the order, as a used lazy definition is), so its
+  body is analyzed and its errors judged. A declaration the slice cannot resolve is left; the code generator's explicit
+  instantiations stay emitted when used (clang emits them weak_odr: the names check). `CPP_EXPLICIT_TRACE` traces a refusal.
+- Found with it, **C++23's P2266** ([expr.prim.id.unqual]/3, [basic.lval]/4; `arbace.cpp.sema/p2266-xvalue`): in a return statement
+  an id-expression naming an implicitly movable entity (an automatic variable or a parameter of object type, or of rvalue
+  reference to object type, not volatile) is an xvalue at C++23, whatever the return type, deduced ones (`-> auto`, `auto&&`)
+  too. cpp23/elision7's `template X&& f2<X>(X&&)` instantiated `return x;` and reported a copy (an extra); P2266 binds it, and
+  makes `int& f6(int&& n) { return n; }` the error the test expects. Not built: P2266's throw operand (its try-block scope
+  condition: the slice does not track the enclosing try blocks).
+- Measure: the 69 dg-error files of the whole part with an explicit instantiation of a function (`.tmp/t7/f305.txt`; f9b81f1e3's tree
+  against this commit's, `.tmp/t7/tree305`): own passes 2 → 2, the extras 9 → 6 (elision7's 15, 30 and 43 gone, none new); the 34
+  files of C++23's elision and the implicit-move warnings (`.tmp/t7/f2266.txt`): 0 → 0 passes, extras 5 → 2, none new; the
+  every-10th sample with CP305's first half 108 → 108 (`.tmp/t7/rA`); concepts-lambda19 (CP290's withdrawn pass) is still not
+  judged: its error, a call of a lambda whose requires-clause fails, is not one the checker makes. The code generator: gen-list
+  over the 142 samples by this commit's tree (`.tmp/t7/g305`): 141 forms byte for byte the record's, rtti refused (P2266 changes no
+  sample: none returns a reference to a local or an rvalue reference parameter).
+- Probes: `.tmp/t7/e1.cpp` (`template int g<int>(int)` of a body reading `t.x`: the error at the member access; `ok<long>`, `ok(double)`
+  clean), `.tmp/t7/e2.cpp` (a pack's explicit arguments).
+
+### CP301 (a): a captureless generic lambda's conversion to a pointer to function
+
+- `arbace.cpp.sema/glam-conv!` ([expr.prim.lambda.closure]/9-10; [temp.deduct.conv]): a generic lambda with no lambda-capture
+  (`:glam-conv` on its closure: the call operator template and the members' base) has a conversion function template to a pointer
+  to function; `conv-for` (every conversion of a class object to a non-class type: initialization, the ics of a call's argument)
+  makes its specialization for a target pointer to the function type F: the call operator template's parameters deduced from F's
+  parameter types (the `:glam-spec` hook, deduction from each pair, a pack parameter not deduced), the specialization
+  instantiated and its return type deduced, and when its type is F's (the conversion's result is a pointer to the specialization's
+  type, which converts to no other pointer to function) a static invoker `__invoke` calling it on a closure object and the
+  conversion function returning the invoker's address, memoized per F; else no candidate (cpp1y/lambda-generic-cfun's `f2`, `h`'s
+  #4). The invoker and the conversion mangle as clang's specializations: `_ZZ4mainEN3$_08__invokeIiEEDaT_`,
+  `_ZZ4mainENK3$_0cvPFDaT_EIiEEv` (the conversion's type as the template writes it, abi's `:mangle-ret`). The checker's position
+  stays the conversion's while the specialization is analyzed; a closure's conversion is const by its `:cq`. CP290's rule (a call
+  no candidate takes with a generic closure among its arguments not diagnosed) now holds only for a closure whose call operator
+  has a parameter pack (`auto...`, whose deduction from a function type is not modeled); a capturing generic lambda has no
+  conversion, so such a call is sure.
+- Found with it: **a deduced return type with a declarator** (`auto&`, `auto&&`, `auto*`; a generic lambda's `-> auto&`) is
+  deduced from the return statement as plain `auto` was ([dcl.spec.auto.general]/11; `has-auto?`); `-> auto&` returning `*a` was
+  "a non-const reference to a temporary" (cpp1y/lambda-generic-cfun:20).
+- Measure: the 51 dg-error files of the whole part with a generic lambda (`.tmp/t7/f301.txt`; f9b81f1e3's tree against this
+  commit's, `.tmp/t7/tree301`, which holds CP305's P2266 too): own passes 9 → 12, gained cpp1y/lambda-generic-cfun and
+  lambda-generic-xcfun (17: no conversion to `char (*)(int)`, 18: `g` ambiguous between `int (*)(int)` and `char (*)(char)`, and
+  none on 15, 16, 19, 20, 23) and diagnostic/param-type-mismatch-3 (CP290's withdrawn pass back, now sure: `char (*)(int)` is no
+  conversion of `[](auto a) { return a; }`); none lost; extras 54 → 51 (elision7's three, CP305's), none new. The probe
+  `.tmp/t7/g1.cpp` (initializations, a call's argument, two parameters, a void one) generates the invokers and conversions
+  above; its run is the night's (codegen-check's clang and gcc). gen-list over the 142 samples by this commit's tree
+  (`.tmp/t7/g301`): 141 forms byte for byte the record's, rtti refused.
+
+### CP300 (a): function templates that differ only by their constraints
+
+- `arbace.cpp.template` (clang's SemaConcept.cpp at llvmorg-23.1.5: NormalizedConstraint, IsAtLeastAsConstrained and `subsumes`
+  over the disjunctive and conjunctive normal forms, read from the pinned tarball; [temp.constr.normal], [temp.constr.order]):
+  `normal-form` normalizes a constraint expression (`&&`, `||`, parentheses; a concept-id replaced by its concept's
+  constraint-expression with the parameter mapping of its arguments, resolved in the binding scope so a nested concept's
+  arguments are the outer template's parameters; any other expression an atomic constraint keyed by its expression's position --
+  the same expression of the same concept's definition -- and its mapping, canonical: each template's parameters by their index);
+  `associated-constraints` conjoins a function template's type-constraints' immediately-declared constraints, its requires-clause
+  and its trailing requires-clause; `subsumes?` is clang's (every disjunctive clause of P against every conjunctive clause of Q,
+  an atom in common; a form of more than 64 clauses not ordered); `more-constrained-fn?`. **The tie-break** ([temp.func.order]/6):
+  `more-specialized-fn?` of two templates at least as specialized as each other, alike in their packs and parameter kinds,
+  takes the more constrained. **The redeclaration's identity** ([temp.over.link]/7): `declare-template` takes a declaration for an
+  earlier template only when their constraints are spelled alike (`constraint-spelling`: the type-constraints, the
+  requires-clause's and the trailing one's text, the parameters' names by position), so `template <class T> requires A<T> int
+  f(T)` and `... requires B<T> int f(T)` are two templates (the later one replaced the earlier before). `CPP_CONSTRAINT_TRACE` prints
+  the forms compared.
+- Measure: the 263 dg-error files of concepts/ and cpp2a/concepts* (`.tmp/t7/f300.txt`; CP301's tree against this commit's):
+  own passes 47 → 50, gained cpp2a/concepts-ca107 (13: `f<0>()` ordered through concept C's atom reached by Add1 and AddOne with
+  the same mapping; 30: `f2<0>()` ambiguous, `2 * N` and `N * 2` two mappings), concepts-pr67427 (`distance` ambiguous: the two
+  templates' Sentinel atoms map their parameters in other positions) and concepts1 (`decl1` declared by a type-constraint and by
+  a requires-clause: two templates, the same atom, ambiguous); none lost; extras 145 → 139 (gone: concepts-ca107:13,
+  concepts-complete1:18, -complete2:23, -complete3:16, concepts-fn1:79-80, calls that subsumption now orders), none new. The
+  probe `.tmp/t7/c2.cpp` (A and B = A && requires, a type-constraint against none, a trailing requires-clause redeclared) generates
+  the calls of the more constrained specializations (`_Z1fIiQ1BIT_EEiS0_`, `_Z1kITk1AlEiT_`). gen-list over the 142 samples
+  (`.tmp/t7/g300`): 141 forms byte for byte the record's, rtti refused.
+- Not built: [over.match.best]/2.6's more constrained non-template functions (a class template's members with trailing
+  requires-clauses of the same signature); a parameter pack's atoms (`C<Ts>...`, a fold-expanded constraint) stay opaque atoms.
+
+### CP310 (b): immediate functions' addresses and invocations
+
+- `arbace.cpp.sema` ([expr.const]/16-18; the checker only): a constexpr variable's initializer (manifestly constant-evaluated)
+  whose result is the address of an immediate function -- the initializer the address itself, `foo`, `&foo`, `&S::foo` (a
+  virtual one too), through no-op conversions (`immediate-address`), "constant evaluation returns address of immediate function",
+  or an immediate invocation whose callee's return statement returns one (`returned-immediate`, the callee's body as analyzed),
+  "immediate evaluation returns ..." -- is diagnosed at the variable (both under the constexpr variable rule, the dg lines'
+  texts in the message); and an immediate invocation (a call of a consteval function outside one, `cx-immediate-call!`, function
+  and member calls) of a function whose own body the checker found not constant (a constexpr error in it: `:cx-imm-error`, set
+  when a statement of a consteval function is refused by a constexpr rule) is "call to consteval function 'f' is not a constant
+  expression" at the call (the diag rule `:constexpr`).
+- Measure: the 84 dg-error files of cpp2a/consteval*, cpp2a/constexpr-* and cpp23's consteval files (`.tmp/t7/f310.txt`; CP300's tree
+  against this commit's): own passes 5 → 7, gained cpp2a/consteval24 (20-26: the seven escapes, four direct and three through
+  `baz`, `qux`, `corge`; 30: `auto a = bar ();` of the function whose body holds them) and consteval22 (33, 34: `foo ()` and
+  `bar ()` returning `&S::foo`, `&S::bar`; 31's `static_assert (baz () == 3)` inside an immediate function clean); none lost; the
+  extras the same 31. The rules are the checker's alone (`checking?`): the code generator's output is unchanged by construction.
+- Not built (CP310 (a), after the night's whole-part record): the errors inside called constexpr functions, each kind placed as
+  g++ places it (the inner operation's line for undefined operations and non-constant reads, the call for a function that can
+  never be constant); an immediate function's address escaping through an aggregate or a non-constexpr variable's initializer.
+
+### CP312 (a): the fifth slice's conversion rules for the code generator
+
+- `arbace.cpp.sema/conv-for`: a const object's conversion functions are its const ones ([over.match.funcs]/4-5) and, in
+  direct-initialization, an explicit conversion function is a candidate only when it yields the type ([over.match.conv]/1.1), for
+  the code generator too (the fifth slice's rules were the checker's alone); a function is const by its `:cq` or its type's.
+- Measure: the probe `.tmp/t7/c312.cpp` (a const and a non-const `operator int` on a const and a non-const object; an explicit
+  `operator int` beside `operator long` for `long z(b)`): CP310's tree called the non-const `_ZN1AcviEv` on the const object, this
+  commit's the const `_ZNK1AcviEv` as clang does, the non-const object's and `operator long`'s calls unchanged; gen-list over the
+  142 samples (`.tmp/t7/g312`): 141 forms byte for byte the record's, rtti refused (no sample converts a const object with both);
+  the checker's verdicts unchanged by construction (its rules as before). codegen-check (clang and gcc live) is the night's.
+
+### CP313 (a), first part: access with friends, for non-member functions
+
+- `arbace.cpp.sema` (clang's SemaAccess.cpp at llvmorg-23.1.5: EffectiveContext, GetFriendKind, MatchesFriend, read from the pinned
+  tarball): each class records its friends as it is declared (`:friend-fns`, the names of its friend functions and function
+  templates, qualified ones by their last name; `:friend-classes`; `:friend-unknown` for one it cannot classify); `check-access!`
+  judges a private or protected member named in a non-member function whenever no friend declaration may grant it
+  (`friend-may-grant?`: the member's class befriends a function of that name, by name so an overload or a qualified friend counts
+  and a miss is never a wrong error, or declares an unclassified friend; for a protected member any class derived from it
+  that declares a friend, [class.protected]), instead of only in units where no class declares a friend (the third slice's gate).
+  A class's friend classes grant nothing to a non-member function. Checker only.
+- Measure: the every-10th sample 109 → 109, the extras the same 92 (`.tmp/t7/rG`); the 22 dg-error files of the whole part with
+  friends and an access directive (`.tmp/t7/f313.txt`, the previous commit's tree against this one): 0 → 0 passes, the same one
+  extra. The probe `.tmp/t7/a1.cpp` (a class template's hidden friend and friend template, a non-template class's friend function, a
+  derived class's friend naming a protected member): the one error where the standard has it (`bad`'s `p.q`), none on the friends.
+- Not built (the rest of CP313 (a), for the second pass): the contexts that are members (a member function of a friend class, a
+  nested class, a lambda in a member), [class.protected]'s object-expression rule for a derived class's friends and members,
+  using-declarations' own access (cpp2a/using-enum-1), structured bindings' access (cpp1z/decomp4), the injected-class-name
+  through a private base (lookup/scoped15), a constructor template's access in a member's context (template/access19) and the
+  type-access checks' gate (`check-type-access!`, still "no class declares a friend"). Each is its own part of SemaAccess, none
+  reached by the friend matching alone.
+
+### Not built in this pass: CP311 (a), CP310 (a), the rest of CP313 (a)
+
+- **CP311 (a), class template argument deduction with initializers**: the parser's `arbace.repr.cpp.sema/ctad` (the trees' types)
+  deduces from constructors and the copy candidate but bails on user deduction guides, packs, value parameters and several
+  guides; the code generator's Sema has CTAD only from defaults (the fifth slice). The port of SemaTemplateDeductionGuide.cpp
+  (clang's implicit guides per constructor, the copy deduction candidate, aggregate deduction candidates, user guides, overload
+  resolution among them by the existing deduction and [over.match.best]'s guide tie-breaks), with codegen-check for the
+  generated programs, is the second pass's first item (about two days by the proposal).
+- **CP310 (a)**: the errors inside called constexpr functions placed by kind, once the night's whole-part record gives their
+  counts (the decision's "then").
+- **CP313 (a)**'s remaining contexts: listed in its section above.
+
+### Checked (light; clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld and as stubs exiting 99 first on PATH, their log empty)
+
+| check | result |
+|---|---|
+| the every-10th sample by the own front end (`.tmp/t6/sample.sh`; runs `.tmp/t7/r314`, `rA`, `rF`, `rG`) | 108 → 109 own passes (cpp2a/consteval24, CP310 (b)); no earlier pass lost; the extras the same 92 lines; about 9-10 min a run at two threads |
+| `own .tmp/t7/rG --clang .tmp/s10/cl --record` (the committed record) | 454 rows, 109 passes |
+| the features' files of the whole part, each proposal's tree against its base (`.tmp/t5/subm.sh`, lists `.tmp/t7/f*.txt`) | CP314 +4, CP303 +3, CP305 extras -3, CP301 +3, CP300 +3 (extras -6), CP310 +2, CP313 0; no pass lost, no new extra |
+| the code generator: `bin/cppi codegen-gen` (this branch's step, `.tmp/t7/cgF`) and gen-list by each proposal's tree (`.tmp/t7/g305`, `g301`, `g300`, `g312`) | 142 of 142 as recorded each time: no sample's forms changed (the intended changes are the probes': CP301's invokers, CP300's specializations, CP312's const conversion, CP304's closures) |
+| the dg control (`bin/repr-cpp dg --corpus dg-error --front native --only` dr2082, dr1423) | `_control/dg/dr2082-vs-dr1423 fails as it must` |
+| `make check-makefile`; `gate.crops check . test/gate/steps.edn`; `bin/gate --full --plan` | pass; 0 problems; `cpp-codegen-gen` and `cpp-dg.dg-error-own` planned |
+| `bin/crops-score --crop cpp`; `--record`; `--judge --strict` | 76.1 / 100 / 67.8 (read 0.656: 109 own-judged dg cases); scores.edn unchanged (the fourth decimal); 0 refuted, 0 problems |
+
+### The numbers (bin/crops-score --crop cpp)
+
+| measure | before (f9b81f1e3) | after (the sample's record) | after the night (the whole part recorded) |
+|---|---|---|---|
+| completeness | 76.1 (96.5 without by design) | 76.1 (96.5) | 76.1 |
+| maturity | 100.0 | 100.0 (one more `--full` step with its control) | 100.0 |
+| independence | 67.82 (read 0.656) | 67.82 (read 0.656: 109 own-judged dg cases) | about 69.3 (read about 0.733: about 1,104 of the 4,597 own-judged, the sample's 24.0%) |
+
+### The night's commands (one process at a time; `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB REPR_CPP_THREADS=2`)
+
+```
+bin/cppi codegen-gen                                                           # cpp-codegen-gen's command, about 5 min: 142 of 142 as recorded, both controls fail as they must
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the 4,597 files by Arbace's front end, about 80 min at two threads; writes test/cpp/check-dg-own-linux-amd64.edn
+# then test/crops/independence.edn's C++ read fact: :cases {:dg-own [N 1] :dg-clang [M 0.5]} with N the record's passes, M = 4597 - N; bin/crops-score --record
+bin/repr-cpp dg --corpus dg-error --front native                               # cpp-dg.dg-error-own's command: the record held
+bin/cppi codegen-check .tmp/cppi/codegen-check                                 # clang and gcc live: 141 of 142 expected (no sample changed)
+bin/cppi codegen /root/arbace/.tmp/worktrees/cpp-cx12/.tmp/t7/g1.cpp .tmp/cppi/cg-g1  # CP301's probe built and run by gcc with the runtime: "4 5 3 5"
+bin/cppi codegen /root/arbace/.tmp/worktrees/cpp-cx12/.tmp/t7/c2.cpp .tmp/cppi/cg-c2   # CP300's probe: status (1 + 20 + 500 + 6000 + 7) & 255 = 128
+bin/repr-cpp native-check samples                                              # clang live: :_gattrs on functions and typedefs are :_ keys, the trees as they were
+```
+
+### Slips, scratch
+
+Three slips against the day's rules, all in throwaway reads of scratch, nothing written: a `grep ... 2>/dev/null` over the
+worktree's logs, a `ls ... 2>/dev/null` in a search for the parser's CTAD, and a leftover `diff <(echo) <(echo) >/dev/null` in an
+inspection command; none repeated after noticing. Scratch in the worktree's `.tmp/`: `t7/` (the probes `u1`, `g1`-`g6`, `c1`-`c3`,
+`c312`, `e1`, `e2`, `l19`, `a1`, `v314`; the lists `f*.txt`; the feature runs `f*b`/`f*n`; the sample runs `r314`, `rA`, `rF`, `rG`;
+the trees `tree300`, `tree301`, `tree305`, `tree310`, `treeH`; the code generator runs `cg1`, `cgA`, `cgF`, `g300`, `g301`, `g305`,
+`g312`; `cmp.sh`, `gencmp2.sh`, `onem.sh`, `gent.sh`, `hunks.py`, `hunks2.py`), `base2-tree/` (f9b81f1e3's tree), `p0/`, `cg1/`.

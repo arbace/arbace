@@ -3042,3 +3042,127 @@ doc/ARBACE.md name them.
 The entry "the rest of RFP28-RFP41 built" names `rust-front-built` `3f84e0a6` and `rust-front-captures` `e41dfc4e`: those were made while
 the sample was `a8.rs`; renamed `opaque1.rs` (kept out of the mono kind) the packs were made again, `c7005a5a` and `19e9947c`, the pins
 committed with RFP33 (a). `bin/oracle-records pins`: the four Rust front packs in the store as their manifests say.
+
+## 2026-11-09: C++'s CP302 (a), the code generator's light half in the gate (branch `cpp-props2`, from f9b81f1e3)
+
+- **Decided** by the user (2026-11-09, about 06:15 UTC): CP300-CP305 and CP310-CP314 as recommended (doc/cpp/CPP-SURVEY.md, "As
+  built: CP290-CP294" and "As built: CX12 (fifth slice)", their "Proposed"); CP302 first, for the night.
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", CP302 (a)): `bin/cppi codegen-gen` (gen-list over test/cpp/codegen's 142
+  samples, no clang or gcc; `arbace.cpp.codegen/gen-judge`), the records `test/cpp/codegen/refusals.edn` (rtti) and
+  `test/cpp/codegen/forms.sha256` (141 digests of forms.ae), two `:level :gen` negative controls in test/cpp/controls.edn, the
+  `--full` step `cpp-codegen-gen` (`:mem-gib 2`, chain cpp-full) in test/gate/crops/cpp.edn and test/gate/steps.edn, `make
+  cppi-codegen-gen`. Why: the ten samples refused from a14d52531 (2026-11-04) went unnoticed four days, since only codegen-check
+  (clang and gcc live) generated them.
+- **Alternatives considered**: (b) the step in the essential gate (5 minutes a gate, rejected by the decision); digests of gen.c too
+  (left: the lowering has its own steps, and a lowering change would re-record every sample); comparing the refusal's message (left:
+  the class is the decision, the message may name generated symbols).
+- **Checked**: the recorded run and a second gen-list run byte for byte; the judge passes the record, fails a changed digest and an
+  unrecorded refusal; both controls fail as they must; `make check-makefile`, `gate.crops check`, `bin/gate --full --plan`,
+  `bin/crops-score --crop cpp` (unchanged). One slip: a throwaway `grep ... 2>/dev/null` over scratch logs (only read).
+
+## 2026-11-09: C++'s CP314 (a), C++11's constexpr function body (branch `cpp-props2`)
+
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", CP314 (a)): in `arbace.repr.cpp.diag/constexpr-bodies`, at C++11 a
+  constexpr function's body is one return statement beside null statements, static_assert, typedefs, aliases and using-declarations
+  and -directives, a constructor's nothing (clang's CheckConstexprFunctionStmt's C++11 cases, llvm-project-23.1.5 from the pinned
+  tarball; the corpus's g++ errors placed at the closing brace), nested compound statements their own error and flattened, a class
+  template's constructors judged too.
+- **Measured**: the every-10th sample unchanged (108 own passes, 92 extras); the C++11 constexpr files of the whole part: four gained
+  (cpp0x/constexpr-type-def1, -diag5, -ctor19, -compound), none lost, no new extra. Each line read; valid probes clean.
+- **Alternatives considered**: judging function templates' bodies at their definition (left: the corpus shows g++ doing it only for
+  a class template's constructor, cpp0x/constexpr-ctor19); clang's placement at the statement (rejected: the dg lines are g++'s).
+
+## 2026-11-09: C++'s CP303 (a), the next unknown GNU attributes (branch `cpp-props2`)
+
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", CP303 (a)): the parser keeps a function's and a typedef's unknown GNU
+  attributes as `:_gattrs` (a variable's and a field's since CP294 (a)), those of a leading attribute-specifier-seq too, and marks
+  `[[gnu::x(...)]]` as a standard attribute's syntax; `gattr-rules` gain warn_if_not_aligned (not on a variable, a function or a
+  bit-field; no bit-field of a type declared with it) and no_dangling (its argument rules), written from the GCC 15.2 manual
+  (gcc/doc/extend.texi of the pinned tarball) and the corpus's directives, clean-room.
+- **Not built**, with reasons: musttail (the middle end's tail-call errors), transaction_safe/_unsafe/_wrap (the TM TS under
+  -fgnu-tm, its keywords not parsed); no_dangling's template-dependent argument rules.
+- **Measured**: the every-10th sample unchanged (108, 92 extras); the attributes' 38 dg-error files of the whole part: three gained
+  (pr53037-4, other/bitfield7, ext/attr-no-dangling2), none lost, no new extra; each line read, valid probes clean.
+- **Alternatives considered**: (b) alone (the failing files' attributes only: the same two built, musttail and TM left for the
+  same reasons); placing warn_if_not_aligned's errors at the attribute as CP294's (rejected: the directives' columns are the
+  declarator's).
+
+## 2026-11-09: C++'s CP304 (a), no captures from unevaluated operands (branch `cpp-props2`)
+
+- **Built**: the generic lambda's capture scan skips sizeof's, alignof's, noexcept's operands, requires-expressions and `sizeof...`;
+  their analysis (`*unevaluated*`) reads an enclosing variable without capturing it, for generic and non-generic lambdas
+  ([expr.prim.lambda.capture]/7-8).
+- **Measured**: the probe's closures 24 → 4 and 8 → 1 bytes, as clang lays them out; the sample unchanged (108, 92 extras); the code
+  generator's 142 samples as recorded.
+- **Alternatives considered**: typeid's operand unevaluated too (left: a polymorphic glvalue's is evaluated, and the slice's
+  analysis does not decide it before the scan).
+
+## 2026-11-09: C++'s CP305 (a), explicit instantiation definitions in the checker, and C++23's P2266 (branch `cpp-props2`)
+
+- **Built**: the checker instantiates a function template's explicit instantiation definition (its written arguments, then
+  deduction from the declared type) and analyzes the definition there ([temp.explicit]/10); the code generator unchanged. Found
+  with it, C++23's P2266: a returned implicitly movable entity is an xvalue whatever the return type (cpp23/elision7's
+  instantiation reported a copy that P2266 makes a move; `int& f(int&& n) { return n; }` now the expected error).
+- **Measured**: the 69 files with explicit instantiations of functions: passes 2 → 2, extras 9 → 6 (elision7's three); the 34 elision
+  and implicit-move files: extras 5 → 2, none new; the code generator's 142 samples as recorded.
+- **Alternatives considered**: (b) both, the code generator emitting explicit instantiations eagerly (left by the decision: clang's
+  weak_odr definitions are a names-check matter); P2266's throw operand (left: the try-block scope rule needs the enclosing try
+  blocks, which the slice does not track).
+
+## 2026-11-09: C++'s CP301 (a), a captureless generic lambda's conversion to a pointer to function (branch `cpp-props2`)
+
+- **Built**: the conversion function template of a generic lambda with no lambda-capture, specialized on use for the target
+  function type (the call operator's specialization deduced from its parameter types, its type required to be the target's), with
+  its static invoker; mangled as clang's specializations (`__invokeIiEEDaT_`, `cvPFDaT_EIiEEv`). With it: deduced return types with
+  a declarator (`auto&`, `auto&&`, `auto*`) deduced from the return statement; CP290's unsure rule narrowed to `auto...` closures.
+- **Measured**: the 51 generic-lambda dg-error files: 9 → 12 own passes (lambda-generic-cfun, -xcfun, param-type-mismatch-3, CP290's
+  withdrawn pass now sure), none lost, no new extra; the code generator's 142 samples as recorded; the probe's invokers generated
+  (their runs the night's codegen-check).
+- **Alternatives considered**: deducing from the target's return type too ([temp.deduct.conv] on the conversion's `auto (*)(T)`:
+  the specialization's deduced return type is compared instead, the same verdicts); `auto...` (left unsure, the closure's pack
+  against a function type's parameters).
+
+## 2026-11-09: C++'s CP300 (a), constraint subsumption (branch `cpp-props2`)
+
+- **Built**: constraints' normal forms (concept-ids expanded with their parameter mappings, atoms by expression and mapping),
+  clang's subsumption over DNF and CNF (SemaConcept.cpp at llvmorg-23.1.5, from the pinned tarball), the more constrained template
+  as [temp.func.order]/6's tie-break, and the constraints in a redeclaration's identity ([temp.over.link]/7, by their spelling).
+- **Measured**: the 263 concepts dg-error files: 47 → 50 own passes (concepts-ca107, -pr67427, concepts1), none lost, extras 145 →
+  139, none new; the code generator's 142 samples as recorded; a probe's calls take the more constrained specializations.
+- **Alternatives considered**: the redeclaration's identity by normal forms (rejected: two declarations' own atoms are never
+  identical, so a declaration and its definition would be two templates); clang's caching of normal forms (left: the slice's
+  candidate sets are small).
+
+## 2026-11-09: C++'s CP310 (b), immediate functions' addresses and invocations (branch `cpp-props2`)
+
+- **Built** (the checker): a constexpr variable initialized by an immediate function's address, directly or returned by an
+  immediate invocation, is an error at the variable ([expr.const]/16-18); an immediate invocation of a consteval function whose body
+  the checker found not constant is an error at the call.
+- **Measured**: the 84 consteval and constexpr dg-error files of cpp2a and cpp23: 5 → 7 own passes (consteval24, consteval22),
+  none lost, no new extra; the code generator unaffected (checker-only rules).
+- **Left**: CP310 (a), the in-call errors by kind, until the night's whole-part record gives their counts (the decision's order).
+
+## 2026-11-09: C++'s CP312 (a), the conversion rules for the code generator (branch `cpp-props2`)
+
+- **Built**: `conv-for`'s const-object and explicit-conversion rules (CX12's fifth slice, the checker's) for the code generator too.
+- **Measured**: a probe's const object now converts by the const conversion function, as clang's IR does; the code generator's 142
+  samples as recorded; the checker unchanged.
+
+## 2026-11-09: C++'s CP313 (a), first part: access with friends for non-member functions (branch `cpp-props2`)
+
+- **Built** (the checker): classes record their friend functions, friend templates and friend classes; a member named in a
+  non-member function is judged unless a friend declaration may grant it (by name; a derived class's friends for a protected one),
+  no longer only in units without friends (SemaAccess.cpp's EffectiveContext and friend matching, llvmorg-23.1.5).
+- **Measured**: the sample unchanged (109, 92 extras); the 22 access-with-friends files unchanged; a probe correct.
+- **Left** for the second pass: member contexts, [class.protected]'s object rule, using-declarations', structured bindings' and the
+  injected-class-name's access, constructor templates in members, the type-access gate.
+
+## 2026-11-09: C++'s proposals of the day, recorded (branch `cpp-props2`)
+
+- **Recorded**: test/cpp/check-dg-own-linux-amd64.edn from the sample's last run (454 rows, 109 passes: 108 and cpp2a/consteval24),
+  the C++ read fact (`:dg-own [109 1] :dg-clang [4488 0.5]`), test/crops/scores.edn (unchanged at its precision: C++ 76.1 / 100 /
+  67.8). `bin/cppi codegen-gen` on the branch's head: 142 of 142 as recorded, both controls failing as they must; the dg control
+  fails as it must; `make check-makefile`, `gate.crops check`, `bin/gate --full --plan`, `bin/crops-score --judge --strict` pass.
+- **Left** for the second pass (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", "Not built in this pass"): CP311 (a), CP310 (a)
+  after the night's record, CP313 (a)'s member contexts and the other access forms.
+- **Slips**: three throwaway reads with `/dev/null` or a process substitution (the survey's "Slips"); nothing written there.
