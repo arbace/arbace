@@ -162,12 +162,23 @@
     (when (and (seq es) (every? some? rs))
       (vec (distinct (apply concat rs))))))
 
+(def ^:private sysprop-opt
+  "JCS335 (a): a system property of a main action (`-Dk=v`, `-Dk`), passed to the run on both sides."
+  #"^-D[^=\s]+(=.*)?$")
+
+(defn run-props
+  "JCS335 (a): a main action's system properties (its -D options), each as -Dk=v (`-Dk` as -Dk=, the same empty
+  value java gives it)."
+  [opts]
+  (vec (for [o opts :when (re-matches sysprop-opt o)] (if (str/includes? o "=") o (str o "=")))))
+
 (defn- run-mode-ok? [modes]
   (every? #(or (= % "othervm") (re-matches #"timeout=\d+" %)) modes))
 
 (defn- categorize1
   "A description's category (the survey's §3.1, the first that fits) and its actions. WIDE (the library and
-  framework corpora's :base, JCS334 (a)): module-exports' wide entries."
+  framework corpora's :base, JCS334 (a), JCS335 (a)): module-exports' wide entries, and -D options beside the dropped
+  JIT ones (not :run-vmopts)."
   [desc wide]
   (let [has (fn [t] (some #(= t (first %)) desc))
         acts (vec (for [[t v] desc :when (#{"run" "compile" "build" "clean"} t)] (action t v)))
@@ -191,7 +202,7 @@
               (some #(not= "main" (:kind %)) runs) :other
               (not (every? #(run-mode-ok? (:modes %)) mains)) :other
               (some #(seq (:modes %)) compiles) :other
-              (some #(not (re-matches jit-opt %)) (mapcat :opts mains)) :run-vmopts
+              (some #(not (or (re-matches jit-opt %) (and wide (re-matches sysprop-opt %)))) (mapcat :opts mains)) :run-vmopts
               (seq (mapcat :opts mains)) :run-jitopts
               (seq compiles) :run-compile
               :else :run-plain)]
@@ -284,7 +295,11 @@
                 :let [cls (str/replace (or (:class ru) base) "${test.main.class}" base)
                       fw (#{"testng" "junit"} (:kind ru))]]
             (str "run\t" (or (some #(second (re-matches #"timeout=(\d+)" %)) (:modes ru)) "120") "\t"
-                 (if fw (str framework-runner "\t" fw "\t" cls) cls) "\t" (str/join "\t" (:args ru))))))
+                 (if fw (str framework-runner "\t" fw "\t" cls) cls) "\t" (str/join "\t" (:args ru))))
+          ;; JCS335 (a): the system properties of run I (its -D options; the library and framework corpora's), given
+          ;; to java and to run.ae before the class on both sides
+          (for [[i ru] (map-indexed vector runs) :let [ps (run-props (:opts ru))] :when (seq ps)]
+            (str/join "\t" (concat ["props" i] ps)))))
 
 ;; JCS330 (a): jtreg's @library (openjdk/jtreg's tag specification): each value a directory, relative to the
 ;; test's directory, or with a leading / relative to the test suite's root (the nearest directory holding
@@ -434,7 +449,7 @@
                   acts (:actions r)
                   base (str/replace (.getName ^File (:file r)) #"\.java$" "")
                   ;; the main actions, those equal once their JIT options are dropped run once
-                  runs (or (seq (vals (into (sorted-map) (map-indexed (fn [i r] [[(:class r) (:args r)] (assoc r :i i)]) (filter #(= :run (:tag %)) acts)))))
+                  runs (or (seq (vals (into (sorted-map) (map-indexed (fn [i r] [[(:class r) (:args r) (run-props (:opts r))] (assoc r :i i)]) (filter #(= :run (:tag %)) acts)))))
                            [{:class base :args [] :modes [] :opts []}])
                   runs (sort-by #(:i % 0) runs)
                   compiles (filter #(= :compile (:tag %)) acts)
@@ -444,6 +459,8 @@
                   fw (= :framework (:category r))
                   skip (cond (not (compile-opts-ok? opts)) (str "@compile options: " (str/join " " opts))
                              (some #(str/includes? % "${") (mapcat :args runs)) "a substitution in @run's arguments"
+                             ;; JCS335 (a): a system property naming jtreg's substitutions (${test.src} ...)
+                             (some #(str/includes? % "${") (mapcat (comp run-props :opts) runs)) "a substitution in @run's system properties"
                              ;; a main class of a module (java.base/PKG.Main: the test patches the module)
                              (some #(str/includes? (str (:class %)) "/") runs) "a module-qualified main class"
                              ;; JCS330 (a): a library that is no directory (a jar, or none at the place jtreg looks)
@@ -516,7 +533,9 @@
                                args (remove str/blank? args)
                                ;; JCS331 (a): the framework runner's test class, renamed as a main class is
                                args (if (= cls framework-runner) (cons (first args) (cons (qual (second args)) (drop 2 args))) args)]]
-                     (str/join "\t" (concat [i tmo (qual cls)] args))))))
+                     (str/join "\t" (concat [i tmo (qual cls)] args))))
+      ;; JCS335 (a): run I's system properties (props.tsv: I, then each -Dk=v)
+      (write-lines (str d "/props.tsv") (for [ps (pm "props")] (str/join "\t" ps)))))
   (println "java-check rename: done"))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -578,6 +597,8 @@
                           g #(ffirst (pm %))
                           ren (tsv (str d "/rename.tsv"))
                           runs (tsv (str d "/runs.tsv"))
+                          ;; JCS335 (a): each run's system properties, by its index
+                          props (into {} (for [[i & ps] (tsv (str d "/props.tsv"))] [i (vec ps)]))
                           jst (slurp1 (str d "/javac.exit"))
                           base (second (first (pm "root")))
                           rs (vec (for [[i tmo cls & args] runs
@@ -593,7 +614,8 @@
                                               :err (or (clean (r "err1") work id base) "")
                                               :det (and (= e1 e2) (= o1 o2))}
                                        masked? (assoc :out-masked (subs m1 0 16)
-                                                      :det-masked (and (= e1 e2) (= m1 m2)))))))
+                                                      :det-masked (and (= e1 e2) (= m1 m2)))
+                                       (seq (props i)) (assoc :props (props i))))))
                           status* (cond (g "skip") [:skip (g "skip")]
                                        (empty? (lines (str d "/sources.txt"))) [:skip (str "the source set: " (or (slurp1 (str d "/sources.err")) "javac failed"))]
                                        (= "!" (ffirst ren)) [:skip (second (first ren))]
@@ -716,6 +738,9 @@
                              (str/join "\t" (concat ["run" i (:exit r) (:out r) (:out-len r) (if (:det r) "1" "0")
                                                       (or (:out-masked r) "-") (if (:det-masked r) "1" "0") (:main r)]
                                                      (:args r))))
+                           ;; JCS335 (a): run I's system properties
+                           (for [[i r] (map-indexed vector (:runs t)) :when (seq (:props r))]
+                             (str/join "\t" (concat ["props" i] (:props r))))
                            ;; GTS81 (a): the controls whose subject the test is: their reference's first
                            ;; action's expected status and stdout, its class files' digest
                            (for [[c r r0] cs]
