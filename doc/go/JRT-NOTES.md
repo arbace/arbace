@@ -1148,7 +1148,12 @@ build constraints.
   `VirtualThread[#22,name]/runnable`.
 - **`getStackTrace()`**: the current thread's Java frames (phase 1's frame mapping); another
   thread's stack cannot be read from Go, so it is empty.
-- **The context class loader** is not there (`ClassLoader` is reworked, JAVA-SURFACE.md).
+- **The context class loader** is not there (`ClassLoader` is reworked, JAVA-SURFACE.md). Since F27 (2026-11-08,
+  doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; java.rmi's transport sets it around each call):
+  `getContextClassLoader` and `setContextClassLoader` are jdk26u's, a field of the Thread set by its constructor to the
+  creating thread's loader and by `setContextClassLoader` (no security manager, no check); an adopted thread's (the main
+  thread's) is the system class loader, as the JVM's main thread's. jrt has no thread groups: the JDK classes that make
+  threads in a group (sun.rmi.runtime.RuntimeUtil, JMX's communicator admins) are derived without one.
 
 ## Thread locals
 
@@ -1996,6 +2001,32 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
   The JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on its standard error; the Go executable
   does not (NT2).
 
+## `java.home` (JCS233 (a), 2026-11-08)
+
+doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233". Until JCS233 `java.home` was `""`: jrt's own readers take
+the JDK image's files as embedded resources (Security's `loadMaster`, `ZoneInfoFile`'s, `NetProperties`',
+`LogManager`'s variants), but the JDK's code and tests that open `${java.home}/...` as files found nothing.
+
+- **The directory** (`go/arbace/jrt/javahome.ae`): `$XDG_CACHE_HOME/arbace/java-home/KEY` (an absolute
+  `XDG_CACHE_HOME`, else `$HOME/.cache/...`), KEY the first 20 hex digits of the SHA-256 over the embedded files'
+  names and bytes. It holds `javaHomeFiles`, the image's paths jdk/data has: `conf/{logging,net}.properties`,
+  `conf/security/java.security`, `conf/security/policy/` (README.txt, limited's three and unlimited's two
+  policies), `lib/security/cacerts` (JCS140 (a)) and `lib/tzdb.dat`; a file the executable does not embed is left out
+  (and out of the key).
+- **When.** At the first read of the property (`System.getProperty("java.home")`, `getProperties`, `StaticProperty`'s
+  initializer): `initProps` puts a sentinel String in the table, `System_GetProperty_String__String` replaces it by
+  `JavaHome`'s answer. RT.doInit's `System.getProperties()` reads every property, so every start pays it: about
+  0.26 ms once the directory exists (`BenchmarkJavaHome`: the hash of 360 KB and a stat; the resources' inflation
+  beside it in a built executable).
+- **How.** Written once: the files below `KEY.tmp-RANDOM` beside it (0644, directories 0755, through the Host
+  interface), renamed to `KEY`; a process whose rename finds the directory there removes its copy and takes it (8
+  first readers at once share one directory: `TestJavaHome`). An existing `KEY` directory is not checked again.
+- **Overrides.** `ARBACE_JAVA_HOME` names a directory used as is (nothing written); `JAVA_TOOL_OPTIONS`'
+  `-Djava.home=...` and `System.setProperty` replace the value as any property's.
+- **Without it** (no cache directory, a host that cannot write one, the box; no file embedded): `""`, as before, and
+  `JceSecurity` falls back to the unlimited policy (CryptoAllPermission) instead of throwing as the JDK without its
+  policy files does.
+
 ## `arbace.core.server`
 
 Embedded in the executable (embed.ae no longer leaves it out), with one namespace variant,
@@ -2190,7 +2221,10 @@ All accepted by the user 2026-10-10 and folded where they belong (J2G-SPEC §16,
   JRT-SOURCES.md ("The closure as grown", Files).*
 - **FS2 (decision) `java.nio.file` as jrt's own `Path`, `Files` and `HostPath`** (above,
   Decisions), and no `RandomAccessFile`. *Accepted 2026-10-10; it stays here, in Decisions, and
-  J2G-SPEC §4.1 refers to it.*
+  J2G-SPEC §4.1 refers to it.* *Reversed by F9 (the user's decision of 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md,
+  "As built: F9 (write-ahead)"): jdk26u's own `java.nio.file` and sun.nio.fs's Linux provider over jrt's Go
+  natives (`go/arbace/jrt/nio_fs_linux.ae`) and native memory (`nativemem.ae`); `Path`, `Files`, `HostPath` and
+  `GlobPatterns` removed from `overlay/jdk`.*
 - **FS3 (J2G-SPEC §9.4, the host interface) An optional `HostFS` beside `Host`.** A host's
   file system calls beyond `Host`'s are a second interface a host may implement
   (`CurrentHostFS`); jrt's natives fall back to the JDK's failure results without it. Keeps
@@ -4160,3 +4194,14 @@ written only when `java/io/ObjectStreamClass` is in the world. (2) jrt: `ClassIn
 (deftype, defrecord, proxy) has no `SerialNew` (its fields are slots): a defrecord's serialization is the case to build
 next (`Compiler$Dyn`'s allocation without constructor). Then Clojure's suite's `serialization` (9 tests) and
 `test-proxy-non-serializable`, and Java's `serialization` class.
+
+**In the world (JCS167 (a), the user's decision of 2026-11-07; branch `java-serial`, 2026-11-08).** The staging's
+(1)-(3) are built: the Java in `overlay/jdk/java.base` (the variants made by `variants.py`, which now keeps jdk26u's
+JavaLangAccess and SharedSecrets calls and leaves ObjectOutputStream unvaried), `serial.ae` in jrt with
+`ClassInfo.SerialNew`, the sources in `jrt_sources.ae`'s `serial-sources`; and beyond it, jrt's `Field` writes a final
+instance field made accessible (the JDK's rule) and has the typed accessors, j2g's tables list a Serializable class's
+serial members, RTA reaches the hooks, `serial-super` follows ReflectionFactory's rule entire, SharedSecrets'
+serialization accessors are j2g's, and an interpreted class's allocation is the interpreter's
+(`Compiler$CF$Rt.serialPlan`) with j2g's `cfSerialFor` for the world's part. The design, its table of the JVM's
+services and jrt's answers, the checks and the night's commands: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+JCS167 (write-ahead)". (4), Clojure's types, is its slice 8.

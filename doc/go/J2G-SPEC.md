@@ -565,6 +565,43 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
   `java.net.URLClassLoader`, which java.classpath extends, was on the list until it joined the
   world (amendment FX6, accepted 2026-10-10: jrt's own Java, finding resources as the JDK's and
   loading no classes; JRT-NOTES.md, "Resources by URL"; §10.3).
+- **Refusals at the unresolved class** (amendment JCS69 (b), decided 2026-10-25, built 2026-11-08:
+  doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-25): JCS60-JCS69"). A class of the inputs
+  whose header or members name a class neither the forms, jrt nor the edge has fails at that step
+  (`header: ...`, `members: Unknown type: X (the import q.X)`, the import named as JCS44 (a) names it)
+  and is **not analyzed**: `arbace.j2g.world/load-world` marks it analyzed with that failure
+  (`:analysis-failed`, so that reachability makes it unavailable and an outer class analyzing its
+  member classes in place skips it). Until then its analysis ran on the members the failed step had
+  left without a type and stopped at the first conversion with an empty target (`Cannot convert
+  initializer of field  of type "J" to `, `value of method  of type :null`), a symptom that sorted
+  before the cause and became the compiled level's refusal (`:j2g-unresolved`, 236 tests). An analysis
+  failure of another class naming such a class (`No accessible constructor of p.C$D`, `No static field
+  f in p/C`: the missing members) carries its cause, `(because p/C$D: members: ...)`
+  (`world/unresolved-cause`). A test refused so falls in the world's classes by the area of the class
+  named (test/java/divergences.edn). The runtime's and javac's builds have no header or members
+  failure, so their translations do not change. Unit tests: `bin/j2g-unit` (test/j2g/unit.ae, the
+  fixture test/j2g/unit/unresolved).
+- **The analysis alone** (JCS265 (b), decided 2026-11-08, built 2026-11-08: doc/classes/JAVA-CONFORMANCE-SURVEY.md,
+  "As built: JCS265 (b)"). `bin/j2g --analyze-only` runs the load (`w/load-world`: read, enter, headers,
+  members, bridges, analysis, the variants applied) and stops: nothing is reached, translated or written but
+  `OUT/report.edn`, `{:analyze-only true :files N :classes N :analysis-failures [[class msg] ...] :variants
+  {...} :times {:load s}}`, the failures in a translation's report's format, each also printed (`j2g:
+  analysis failure CLASS: MSG`); the status is 0 whatever failed, and `--program` embeds nothing. Its
+  default `GOMEMLIMIT` is 1800MiB (a translation's 20GiB) and it takes no heavy lock: jdk/forms with a batch
+  of tests stays within 2 GiB (about 2.0 GB peak with 5 or 30 tests, a load of about 1 minute), where a
+  translation of one test does not. `J2G_SOURCES` names namespaces loaded from the checkout before j2g's
+  (`arbace.classes.analyze` on an executable whose analysis is older than the checkout's). `bin/java-check
+  --levels read,compiled --analyze-only --save DIR [--shard-size 30]` runs it a shard at a time over jdk/forms
+  and the tests' forms alone (no runtime forms, no compiled namespaces: a jtreg test names none of them),
+  attributes the failures as the compiled level's refusals (`java.check/refusals`), and saves each test as
+  `refused` (j2g's reason) or `analyzed` (none of its classes refused; what translation, Go or the run
+  would meet is not measured): the day's light measurement, never judged or recorded. Unit test: bin/j2g-unit's
+  `analyze-only` checks. Since F27, `J2G_MISSING` (a regex of internal names) adds `:missing` to the report, `[class
+  reason]` pairs, each printed (`j2g: missing in CLASS: REASON`): what the translation of the classes it names would
+  stub at the operation level (`arbace.j2g.code/missing-reason` over every node of their analyzed bodies: a member jrt's
+  hand-written classes lack, `jrt lacks java.lang.Thread.getContextClassLoader()...`, a class outside the world), the
+  scan of jrt's classes as the translation adjusts it (`world-scan`: the support code's String, Class, Module and
+  System members), every class of the world counted as translated.
 
 ### 4.2 Go packages
 
@@ -792,6 +829,9 @@ providers' key classes named as the API's interfaces: `com/sun/crypto/provider/D
 `DHPrivateKey` ...), and `sun/security/provider/DSAKeyPairGenerator`, `DSAPrivateKey`,
 `DSAPublicKey` → `Sun_DSAKeyPairGenerator`, `Sun_DSAPrivateKey`, `Sun_DSAPublicKey`
 (java.security.interfaces' are `DSAKeyPairGenerator` ...).
+Since F23 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F23 (write-ahead)") SASL's: `com/sun/security/sasl/Provider` →
+`Sasl_Provider` (`java.security.Provider` is `Provider`), `com/sun/security/sasl/digest/FactoryImpl` and
+`com/sun/security/sasl/ntlm/FactoryImpl` → `Digest_FactoryImpl`, `Ntlm_FactoryImpl`.
 The check runs after translation (`arbace.j2g.checks`) over every Go package's package-level
 names and every type's method names, across j2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is
@@ -1231,7 +1271,9 @@ Erased, as the analyzer erases them: a type variable is its bound's Go type, a p
 type its class's. The analyzer has already written the erasure casts javac's `TransTypes`
 inserts (classes/SPEC.md §5.5), which are `C_Cast` calls here. `Signature` attributes have no
 counterpart; generic reflection is cut (JAVA-SURFACE.md): its methods that jrt keeps return
-plain `Class` objects (§12, amendment R16).
+plain `Class` objects (§12, amendment R16; R16's reversal for declaration annotations, F14's
+first slice, leaves this as it is: the `Signature` strings, which the analysis has as `:sig`,
+are F14's generic-signatures slice).
 
 ### 5.11 Class objects and member tables
 
@@ -2075,11 +2117,13 @@ each check; j2g may generate them later.
   `altMetafactory` makes the lambda's class implement them; javac's cast to `Serializable`
   after such a lambda then succeeds (`Comparator.comparing`, `thenComparing`,
   `Map.Entry.comparingByKey`) (amendment JB5, accepted 2026-10-10). Serializability itself is
-  cut (§12).
+  cut (§12); since JCS169 (a) a serializable lambda is made by its site's factory of its captured values and its
+  adapter's `writeReplace` answers a `SerializedLambda` (`arbace.j2g.code/serial-lambda-val`).
 - `FromFn` in the functional interface's class (§5.11) wraps an `IFn` into the adapter, `Fn`
   calling `invoke`: that is how jrt's `Reflector` support adapts a Clojure function passed where
   a functional interface is expected, without `java.lang.reflect.Proxy` (cut).
-  `Proxy.newProxyInstance` throws `UnsupportedOperationException`; the `Reflector` variant's
+  `Proxy.newProxyInstance` throws `UnsupportedOperationException` (since JCS170 (a) it makes a class over `Dyn`,
+  §12's amendment, but `Reflector` keeps the adapters); the `Reflector` variant's
   `boxArg` calls `jrt.AdaptFn(paramType, arg)`, which is the interface's `FromFn`. j2g therefore
   generates the adapter and sets `FromFn` for every interface `Compiler.FISupport` may adapt,
   the `@FunctionalInterface` ones, whether or not a lambda targets it, and
@@ -2380,7 +2424,8 @@ j2g compiles them statically (`arbace.j2g.vh`):
   volatile one; a weak compare-and-set never fails spuriously. Java allows both.
 - **Views of byte arrays** (amendment SC1, accepted 2026-10-10). A constant handle may also be
   `MethodHandles.byteArrayViewVarHandle(int[].class or long[].class, ByteOrder.BIG_ENDIAN or
-  LITTLE_ENDIAN)`, with or without `.withInvokeExactBehavior()`: its plain `get` and `set` are
+  LITTLE_ENDIAN)` (or, since F23, `ByteOrder.nativeOrder()`, little-endian on both of the Go build's targets, amd64 and
+  arm64: `ChaCha20Cipher.asLongView`), with or without `.withInvokeExactBehavior()`: its plain `get` and `set` are
   jrt's `VhView{Get,Set}{Int,Long}{BE,LE}`, with the view's bounds check and message (the index
   below the array's length less the element's size less one, else
   `ArrayIndexOutOfBoundsException` with that reduced length); its other access modes are
@@ -3268,11 +3313,42 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
   call in translated code is a translation error.
 - **Serialization** (`writeReplace`, `readObject`, serializable lambdas' `$deserializeLambda$`):
   cut with `ObjectInputStream`/`ObjectOutputStream`; their members are cut by variants. For good.
+  Amended by JCS167 (a) (the user, 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167
+  (write-ahead)"): serialization is ported, jdk26u's object streams in the world; j2g lists a
+  Serializable class's serial members in its table, reaches their hooks and writes its allocation
+  (`C_SerialNew`, `cfSerialFor`); serializable lambdas and proxies stay out until JCS169, JCS170. Amended by JCS169 (a)
+  and JCS170 (a) (the user, 2026-11-08; the triage's "As built: JCS169 (write-ahead)", "As built: JCS170 (write-ahead)"):
+  a serializable lambda's site registers with jrt's `jdk.internal.jrt.SerialLambdas` (§7.11's adapter gains `Ser` and
+  `writeReplace`), and `java.lang.reflect.Proxy` makes its classes over `Dyn` (§5.12, `Compiler$ProxySupport`).
 - **Annotations at run time** and generic reflection (`getAnnotation`, `ParameterizedType`)
   (amendment R16, accepted 2026-10-08):
   - no annotations are kept: `isAnnotationPresent` is false, except
     `isAnnotationPresent(FunctionalInterface)`, answered by `ClassInfo.FromFn != nil` (§7.11),
     which `Compiler.FISupport` needs;
+  - **R16 reversed for declaration annotations** (F14's first slice, 2026-11-08, JCS94 (b)'s
+    amendment; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F14 (first slice, write-ahead)"):
+    j2g records each translated class's RUNTIME-visible declaration annotations and an
+    annotation type's element defaults as data, `ClassInfo.Annots` (a `--program`'s own classes
+    their members' and parameters' too), in the format `arbace.classes.annot` writes and
+    `go/arbace/jrt/annotation.ae` decodes; every annotation type gets a Go type of its
+    annotations, `C_ann` (embedding `jrt.AnnotationObj`: AnnotationInvocationHandler's
+    equals, hashCode, toString; a method a member) made by `ClassInfo.AnnNew`, in place of the
+    JDK's Proxy; Class, Method, Constructor and Field answer `getAnnotation`,
+    `getAnnotations`, `getDeclaredAnnotations`, `getAnnotationsByType` (with @Inherited and
+    @Repeatable), `isAnnotationPresent` from it, `FunctionalInterface` by FromFn as before
+    besides; java.lang.annotation.Annotation and java.lang.reflect.AnnotatedElement are jrt's
+    hand-written interfaces. The bullets below (generic reflection, exception types) still hold;
+    type annotations, `Parameter` and `AccessFlag` are F14's later slices;
+  - **R16 reversed for type annotations** (JCS271 (b), 2026-11-08; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+    JCS271 (b) (write-ahead)"): the same data holds each class's and member's RuntimeVisibleTypeAnnotations
+    attribute as the class file holds it (`Y` records, its bytes in hex) and the constant pool entries it indexes
+    (`N` records), so that jdk26u's TypeAnnotationParser, AnnotationParser and AnnotatedTypeFactory, translated,
+    read them through jrt's own `jdk.internal.reflect.ConstantPool` (`jdk.internal.jrt.TypeAnnotationData`'s
+    natives decode the records); j2g writes the `getAnnotated*` methods of jrt's Class, Method, Constructor and
+    Field (`arbace.j2g.out/support-forms`, with their member table entries) over `jdk.internal.jrt.
+    TypeAnnotationSupport` once TypeAnnotationParser is translated; their annotations are the JDK's Proxy
+    objects (AnnotationParser.annotationForMap over §5.12's `Dyn`), where declaration annotations stay `C_ann`;
+    likewise `accessFlags` (JCS273: jrt's `AccessFlagSupport` once `AccessFlag` is translated);
   - generic reflection returns plain `Class` objects: `getGenericInterfaces` and
     `getGenericSuperclass` give the classes in a `Type[]` and as a `Type`, so no
     `ParameterizedType` is ever seen (`HashMap.comparableClassFor` finds none and orders tree
@@ -3280,6 +3356,12 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
     `getTypeParameters` and `getGenericParameterTypes` are cut;
   - `getExceptionTypes` is empty and `Method.toString` has no throws clause
     (`NewInstanceExpr`'s `exclasses` feed only the class writer, which the evaluator has not).
+    Reversed for the Java forms' classes: F25 recorded a program's and the interpreter's Exceptions attributes (the `E`
+    records of `go/arbace/jrt/classdata.ae`), and since F27 (JCS240 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+    F27 (write-ahead)") j2g writes them for every class it translates, the JDK's too (`arbace.classes.annot/throws-lines`,
+    `class-data`'s `:throws`), so that java.rmi's `Util.checkMethod` sees the JDK's remote interfaces declare
+    `RemoteException`; jrt's hand-written classes keep none (their member tables have no throws), nor do Clojure's
+    evaluated fns;
 - **Modules and packages** as run-time objects (`Module`, `Package`), the security manager.
 - **Finalization** (V8), thread groups and priorities (V10).
 - **Locales** (amendment R17, accepted 2026-10-08; refines JAVA-SURFACE.md decision 2): the
@@ -4176,7 +4258,8 @@ folded into the text above, marked "(amendment Xn, accepted 2026-10-08)" where t
   every `@FunctionalInterface` interface: §5.11, §7.11, §10.1, §12. R14 the API additions: §11.
   R15 j2g's list of classes with declared members (`java.util.Random`): §5.11, Q13. R16 no
   annotations but `FunctionalInterface`, generic reflection as plain `Class` objects, no
-  exception types: §5.10, §12. R17 the default locale `en_US` with root data: §12. R18 three
+  exception types: §5.10, §12 (declaration annotations kept since F14's first slice, 2026-11-08:
+  §12's note). R17 the default locale `en_US` with root data: §12. R18 three
   charsets: §12, V9. R19 `standin_reflect.ae` among the stand-ins: §4.3.
 - **Phase 2a (T):** T11 `RegisterGoType` and `Unsafe`'s offsets: §5.11, §9.2. T12
   `AtomicInteger` and `AtomicLong` embed `Object` until `Number` is translated: §5.3. T13 the

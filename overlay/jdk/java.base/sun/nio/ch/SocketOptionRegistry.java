@@ -25,7 +25,7 @@
  *
  */
 // Arbace (overlay/jdk, F10 of doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"): jdk26u's
-// template with Linux's constants, derived by .tmp/f10/genopts.py in place of the C preprocessor.
+// template with Linux's constants, derived by test/jrt/derive.ae in place of the C preprocessor.
 // AUTOMATICALLY GENERATED FILE - DO NOT EDIT
 
 package sun.nio.ch;

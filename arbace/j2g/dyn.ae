@@ -33,11 +33,19 @@
   methods convert: HostExpr.emitUnboxArg)."
   {"I" "intCast" "J" "longCast" "D" "doubleCast" "F" "floatCast" "S" "shortCast" "B" "byteCast"})
 
+(def proxy-support
+  "java.lang.reflect.Proxy's classes (JCS170 (a)): the method jrt's ProxyClassFor is (Compiler$ProxySupport's)."
+  ["arbace/lang/Compiler$ProxySupport" "proxyClass" "([Ljava/lang/Class;)Ljava/lang/Class;"])
+
 (defn roots
-  "What Dyn's code calls besides the world's interfaces: reachability roots."
+  "What Dyn's code calls besides the world's interfaces: reachability roots (RT's casts; jrt's
+  ProxyClassFor, JCS170)."
   []
-  (for [[r nme] rt-casts]
-    ["arbace/lang/RT" nme (str "(Ljava/lang/Object;)" r)]))
+  (concat
+    (for [[r nme] rt-casts]
+      ["arbace/lang/RT" nme (str "(Ljava/lang/Object;)" r)])
+    (when (a/decl (first proxy-support))
+      [proxy-support])))
 
 (defn enabled?
   "Is the evaluator's Dyn API in this world (translated)?"
@@ -49,9 +57,11 @@
 (defn interfaces
   "The interfaces Dyn implements: every public interface translated (not an annotation) or
   hand-written in jrt with a cast function (Future: core's future-call reifies it; jrt's instance
-  checks of them make the nominal check, jrt.dynNominal), with every interface they extend that the world has."
+  checks of them make the nominal check, jrt.dynNominal), with every interface they extend that the world has.
+  Since JCS170 also a program's own non-public interfaces (nm/own-class?, in package lang with Dyn), which a
+  java.lang.reflect.Proxy may implement."
   [T]
-  (let [base (filter #(and (m/interface? %) (public? %)
+  (let [base (filter #(and (m/interface? %) (or (public? %) (nm/own-class? %))
                            ;; not a compiled namespace's (S6, SA142): its package imports lang
                            (not (nm/compiled-pkg? (m/pkg %)))
                            ;; nor the interfaces of compiled fns' code (S6, SA141)
@@ -729,9 +739,35 @@ classes) and that have no fn yet: the fn factory makes of their name.\n"
                   (let [(values nme ok) (aget (.-Own dc) k)]
                     (when (and ok (== (aget (.-Slots dc) i) nil))
                       (aset (.-Slots dc) i (IFn_Cast (.Invoke_O__O factory (jrt/Str nme)))))))))
+       ;; java.lang.reflect.Proxy's classes (JCS170 (a); Compiler$ProxySupport): a class made at run time
+       ;; extending Proxy, without fields (the handler its objects' field 0, Proxy's h to reflection: jrt's
+       ;; serial_classes.ae), registered as a proxy class, allocated for deserialization with no handler
+       (list 'go/func (symbol (native-name "defineJavaProxy" "(Ljava/lang/String;[Ljava/lang/Class;I)Ljava/lang/Class;"))
+             (with-meta [(tag 'name '(* jrt/String)) (tag 'interfaces '(* jrt/RefArray)) (tag 'modifiers 'int32)]
+               {:tag '(* jrt/Class)})
+             (list 'let ['c (list (symbol (native-name "defineClass" "(Ljava/lang/String;[Ljava/lang/Class;[Ljava/lang/String;)Ljava/lang/Class;"))
+                                  'name 'interfaces nil)
+                         'dc '(dynClassOf c)
+                         'info '(.Info c)]
+                   '(set! (.-Super info) jrt/Proxy_class)
+                   '(set! (.-Modifiers info) modifiers)
+                   '(set! (.-Go info) "arbace/lang.Dyn (java.lang.reflect.Proxy)")
+                   '(set! (.-SerialNew info) (fn ^any [] (return (newDyn dc (make (slice any) 1)))))
+                   '(jrt/RegisterProxyClass c)
+                   'c))
        (list 'go/func (symbol (native-name "superMarker" "()Ljava/lang/Object;"))
              (with-meta [] {:tag 'any})
              'dynSuper)
+       ;; jrt's Proxy.newProxyInstance and getProxyClass ask Compiler$ProxySupport.proxyClass (JCS170)
+       (if (m/translated? (first proxy-support))
+         (list 'go/func 'dynSetProxyHook "dynSetProxyHook gives jrt's Proxy its classes (ProxyClassFor: Compiler$ProxySupport.proxyClass).\n"
+               (with-meta [] {:tag 'bool})
+               (list 'set! 'jrt/ProxyClassFor
+                     (m/class-sym :lang (first proxy-support)
+                                  (str "_" (nm/method-base (second proxy-support) (nth proxy-support 2)))))
+               true)
+         '(go/func dynSetProxyHook "dynSetProxyHook: Proxy has no classes (Compiler$ProxySupport is not in this world).\n" ^bool [] false))
+       '(go/var ^bool dynProxyHooked (dynSetProxyHook))
        (list 'go/func 'dynSubFor
              "dynSubFor: the slot table and constructors of the proxies of class c (nil: c has no DynSub type).\n"
              [(tag 'c '(* jrt/Class))] :results '[(map string int32) (func [(* DynClass)] [(slice jrt/CtorInfo)]) (map string string)]

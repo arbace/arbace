@@ -209,6 +209,13 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; annotations (§4.4), kept as data for the emitter: [{:type desc :visible bool :values ...}]
 
+(def ^:dynamic *lenient*
+  "When true, an annotation whose type or values cannot be resolved (a type outside the world, an
+  undeclared fact of the edge) is left out of annotations-now instead of failing: the run-time
+  annotations' encoder (arbace.classes.annot, F14) records what resolves."
+  false)
+
+
 (defn- retention [n]
   (if-let [d (decl n)]
     (let [r (some (fn [[k v]] (when (and (symbol? k) (= "java/lang/annotation/Retention"
@@ -234,7 +241,7 @@
 (defn- ann-value [scope desc v]
   (cond
     (t/array? desc)
-    {:array (mapv #(ann-value scope (t/elem-type desc) %) (if (vector? v) v [v]))}
+    {:array (mapv #(ann-value scope (t/elem-type desc) %) (if (vector? v) v [v])) :desc (t/elem-type desc)}
 
     (and (seq? v) (symbol? (first v)))      ; nested annotation (B {:k v})
     (let [an (or (resolve-class-sym scope (first v)) (fail (str "Unknown annotation: " (first v))))]
@@ -249,7 +256,12 @@
     nil
 
     (= desc "Ljava/lang/Class;")
-    {:class (type-desc scope v)}
+    ;; a primitive class as the converter writes it, Integer/TYPE (int.class), Void/TYPE
+    {:class (or (when (and (symbol? v) (= "TYPE" (name v)))
+                  ({"Boolean" "Z" "Byte" "B" "Character" "C" "Short" "S" "Integer" "I" "Long" "J"
+                    "Float" "F" "Double" "D" "Void" "V"}
+                   (str/replace (str (namespace v)) #"^java\.lang\." "")))
+                (type-desc scope v))}
 
     (and (symbol? v) (namespace v) (t/class-desc? desc) (not= desc t/string-desc)
          (let [en (t/desc->internal desc)] (has? (:flags (env/info en)) Opcodes/ACC_ENUM)))
@@ -294,7 +306,9 @@
   "Declaration annotations in metadata m for declaration context `context` (an ElementType
   name): those without @Target or whose @Target includes it."
   [scope m context]
-  (delay (vec (filter #(let [ts (annotation-targets (t/desc->internal (:type %)))]
+  (delay (vec (filter #(let [ts (if *lenient*
+                                  (try (annotation-targets (t/desc->internal (:type %))) (catch Exception _ nil))
+                                  (annotation-targets (t/desc->internal (:type %))))]
                          (or (nil? ts) (ts context)
                              ;; an annotation interface is a type too
                              (and (= context "ANNOTATION_TYPE") (ts "TYPE"))))
@@ -344,20 +358,34 @@
                                bounds))))
                   tps)))))
 
+(defn- annotation-now [scope k v]
+  (let [n (or (resolve-class-sym scope k) (fail (str "Unknown annotation type: " k)))
+        r (retention n)]
+    (when (not= r :source)
+      {:type (t/internal->desc n)
+       :visible (= r :runtime)
+       :values (cond
+                 (true? v) {}
+                 (map? v) (into {} (for [[ek ev] v]
+                                     [(name ek) (ann-value scope (element-type n (name ek)) ev)]))
+                 :else {"value" (ann-value scope (element-type n "value") v)})})))
+
 (defn annotations-now
   [scope m]
   (vec (for [[k v] m
              :when (symbol? k)
-             :let [n (or (resolve-class-sym scope k) (fail (str "Unknown annotation type: " k)))
-                   r (retention n)]
-             :when (not= r :source)]
-         {:type (t/internal->desc n)
-          :visible (= r :runtime)
-          :values (cond
-                    (true? v) {}
-                    (map? v) (into {} (for [[ek ev] v]
-                                        [(name ek) (ann-value scope (element-type n (name ek)) ev)]))
-                    :else {"value" (ann-value scope (element-type n "value") v)})})))
+             :let [a (if *lenient*
+                       (try (annotation-now scope k v) (catch Exception _ nil))
+                       (annotation-now scope k v))]
+             :when a]
+         a)))
+
+(defn element-default
+  "The analyzed default (ann-value's form) of annotation element method mm (its :default,
+  §4.12), or nil when it has none."
+  [mm]
+  (when (:has-default mm)
+    (ann-value (:scope mm) (second (t/parse-method-desc (:desc mm))) (:default mm))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; declaring classes

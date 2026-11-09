@@ -1,8 +1,9 @@
 /*
  * Arbace (overlay/jdk, F10 of doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F10a"): jdk26u's
  * sun.nio.ch.Net (baf63fb) with its natives given bodies over jdk.internal.jrt.HostChannels
- * (go/arbace/jrt/channels.ae, ports of Net.c's), derived by .tmp/f10/gennet.py (the triage's
- * derivation); multicast (DatagramChannelImpl's) waits for F10b. The derivation's changes:
+ * (go/arbace/jrt/channels.ae, ports of Net.c's), derived by test/jrt/derive.ae (the triage's
+ * derivation); since F10b ("As built: F10b") multicast's natives (joinOrDrop4/6, blockOrUnblock4/6,
+ * setInterface4/6, getInterface4/6) too, by hand, over HostChannels' ports of Net.c's. The changes:
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 /*
@@ -788,7 +789,11 @@ public class Net {
 
     private static int joinOrDrop4(boolean join, FileDescriptor fd, int group, int interf, int source)
         throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        int n = HostChannels.joinOrDrop40(IOUtil.fdVal(fd), join, group, interf, source, err);
+        if (n == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], "setsockopt failed");
+        return n;
     }
 
     /**
@@ -812,7 +817,11 @@ public class Net {
     private static int blockOrUnblock4(boolean block, FileDescriptor fd, int group,
                                               int interf, int source)
         throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        int n = HostChannels.blockOrUnblock40(IOUtil.fdVal(fd), block, group, interf, source, err);
+        if (n == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], null);
+        return n;
     }
 
     /**
@@ -835,7 +844,11 @@ public class Net {
 
     private static int joinOrDrop6(boolean join, FileDescriptor fd, byte[] group, int index, byte[] source)
         throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        int n = HostChannels.joinOrDrop60(IOUtil.fdVal(fd), join, group, index, source, err);
+        if (n == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], "setsockopt failed");
+        return n;
     }
 
     /**
@@ -858,23 +871,39 @@ public class Net {
 
     static int blockOrUnblock6(boolean block, FileDescriptor fd, byte[] group, int index, byte[] source)
         throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        int n = HostChannels.blockOrUnblock60(IOUtil.fdVal(fd), block, group, index, source, err);
+        if (n == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], null);
+        return n;
     }
 
     static void setInterface4(FileDescriptor fd, int interf) throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        if (HostChannels.setInterface0(IOUtil.fdVal(fd), false, interf, err) == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], null);
     }
 
     static int getInterface4(FileDescriptor fd) throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        int[] value = new int[1];
+        if (HostChannels.getInterface0(IOUtil.fdVal(fd), false, value, err) == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], null);
+        return value[0];
     }
 
     static void setInterface6(FileDescriptor fd, int index) throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        if (HostChannels.setInterface0(IOUtil.fdVal(fd), true, index, err) == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], null);
     }
 
     static int getInterface6(FileDescriptor fd) throws IOException {
-        throw multicast();
+        int[] err = new int[1];
+        int[] value = new int[1];
+        if (HostChannels.getInterface0(IOUtil.fdVal(fd), true, value, err) == HostChannels.THROWN)
+            throw HostChannels.socketException(err[0], null);
+        return value[0];
     }
 
     private static void initIDs() {
@@ -974,10 +1003,6 @@ public class Net {
         if (HostChannels.address0(IOUtil.fdVal(fd), local, addr, port, err) == HostChannels.THROWN)
             throw HostChannels.socketException(err[0], null);
         return port[0];
-    }
-
-    private static IOException multicast() {
-        return new SocketException("Multicast on channels is not in the Go build (F10b)");
     }
 
     private static AssertionError shouldNotReachHere() {

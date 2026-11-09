@@ -6248,6 +6248,29 @@
 
       (method ^:public ^:static setHost ^void [^Host h] (set! HOST h))
 
+      ;; the public method of o's class with key (its name and descriptor, "value()I"), or nil:
+      ;; a call of an interpreted interface's method on an object of the world implementing it
+      ;; (jrt's annotation objects of an interpreted annotation type: F14)
+      (method ^:public ^:static receiverMethod ^java.lang.reflect.Method [o ^String key]
+        (let [ms (.getMethods (.getClass o))
+              n (alength ms)]
+          (loop [^int i 0]
+            (when (< i n)
+              (let [^java.lang.reflect.Method m (aget ms i)
+                    sb (StringBuilder.)]
+                (.append sb (.getName m))
+                (.append sb "(")
+                (let [ps (.getParameterTypes m)]
+                  (loop [^int j 0]
+                    (when (< j (alength ps))
+                      (.append sb (.descriptorString ^Class (aget ps j)))
+                      (recur (unchecked-inc-int j)))))
+                (.append sb ")")
+                (.append sb (.descriptorString (.getReturnType m)))
+                (if (.equals (.toString sb) key)
+                  m
+                  (recur (unchecked-inc-int i))))))))
+
       ;; Object.clone of o when it is an object of an interpreted class whose superclasses are
       ;; interpreted up to Object: a new object of its class, its fields o's (a shallow copy,
       ;; JLS 20.1.6 of old); CloneNotSupportedException when its class is not Cloneable. nil for
@@ -6392,6 +6415,71 @@
             (.invoke ctor o args)
             o)))
 
+      ;; JCS167 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167 (write-ahead)"): an
+      ;; interpreted Serializable class k's serialization constructor, as
+      ;; jdk.internal.reflect.ReflectionFactory.newConstructorForSerialization (jdk26u) finds it:
+      ;; up k's interpreted superclasses while Serializable, each with a superclass constructor
+      ;; accessible to it (superHasAccessibleConstructor), to the first non-serializable one S:
+      ;; S's no-argument constructor (a Meth), not private and, unless public or protected, in
+      ;; k's package; or, past the interpreted classes, the nearest class of the world (a Class:
+      ;; the host's serialInit part, j2g's cfSerialFor, decided ahead of time). nil: none (the
+      ;; JDK's null constructor, InvalidClassException "no valid constructor" when read)
+      (method ^:public ^:static serialPlan [^Klass k]
+        (let [^:mutable ^Klass prev k
+              ^:mutable ^Klass s (.-sup k)]
+          (loop []
+            (if (nil? s)
+                ;; the rest of the chain is the world's
+                (let [w (.-superClass prev)]
+                  (if (.serialSuper HOST w) w nil))
+                (if (not (Rt/superCtorAccessible prev s))
+                    nil
+                    (if (.implementsClass s Serializable)
+                        (do (set! prev s)
+                            (set! s (.-sup s))
+                            (recur))
+                        (let [c (cast Meth (.get (.-ctors s) "()V"))]
+                          (cond
+                            (nil? c) nil
+                            (not (== 0 (bit-and-int (.-flags c) 0x0002))) nil
+                            (and (== 0 (bit-and-int (.-flags c) 0x0005))
+                                 (not (.equals (Rt/packageOf (.-name k)) (Rt/packageOf (.-name s))))) nil
+                            :else c))))))))
+
+      ;; the package of binary name n
+      (method ^:public ^:static packageOf ^String [^String n]
+        (let [i (.lastIndexOf n ".")]
+          (if (< i 0) "" (.substring n 0 i))))
+
+      ;; ReflectionFactory.superHasAccessibleConstructor(prev), s its interpreted superclass: in
+      ;; prev's package any non-private constructor of s, else s public or protected with a public
+      ;; or protected constructor
+      (method ^:public ^:static superCtorAccessible ^boolean [^Klass prev ^Klass s]
+        (let [same (.equals (Rt/packageOf (.-name prev)) (Rt/packageOf (.-name s)))
+              it (.iterator (.values (.-ctors s)))]
+          (if (and (not same) (== 0 (bit-and-int (.-flags s) 0x0005)))
+              false
+              (loop []
+                (if (.hasNext it)
+                    (let [c (cast Meth (.next it))]
+                      (if (if same
+                              (== 0 (bit-and-int (.-flags c) 0x0002))
+                              (not (== 0 (bit-and-int (.-flags c) 0x0005))))
+                          true
+                          (recur)))
+                    false)))))
+
+      ;; an object of k made by its serialization constructor (plan: serialPlan's): k
+      ;; initialized and allocated, its fields zero, then the plan's constructor run on it, k's
+      ;; own and its serializable superclasses' not
+      (method ^:public ^:static serialNew [^Klass k plan]
+        (.init k)
+        (let [o (.alloc HOST k)]
+          (if (instance? Meth plan)
+              (.invoke (cast Meth plan) o (new Object/1 0))
+              (.serialInit HOST o (cast Class plan)))
+          o))
+
       ;; the arguments of a call into the callee's frame g, by the parameters' kinds; false
       ;; when an argument jumped
       (method ^:public ^:static args ^boolean [^Meth m ^Node/1 args ^Frame f ^Frame g]
@@ -6469,11 +6557,21 @@
         (throw (UnsupportedOperationException. (java-str "field " name))))
       ;; k is an enum: its constants are values()'s
       (method ^:public setEnum ^void [this ^Klass k ^Meth values] nil)
+      ;; k's RUNTIME-visible annotations, as data (arbace.classes.annot; F14)
+      (method ^:public annotations ^void [this ^Klass k ^String data] nil)
       ;; k is a member class of outer (simple: its simple name, nil for an anonymous class)
       (method ^:public outer ^void [this ^Klass k ^Class outer ^String simple] nil)
       ;; k's members published so far forgotten, to be published again (a sibling class its
       ;; members' types named is defined since: doc/STANDALONE-NOTES.md, SA90 (b))
-      (method ^:public clearMembers ^void [this ^Klass k] nil))
+      (method ^:public clearMembers ^void [this ^Klass k] nil)
+      ;; JCS167: k's objects are made for deserialization by f (no arguments: the object)
+      (method ^:public setSerialNew ^void [this ^Klass k ^IFn f] nil)
+      ;; JCS168: k's default serialVersionUID, computed from its declaration (arbace.classes.suid)
+      (method ^:public setSerialUID ^void [this ^Klass k ^long suid] nil)
+      ;; whether c, the nearest superclass of the world of an interpreted Serializable class,
+      ;; allows its serialization constructor, and that constructor's part run on o
+      (method ^:public serialSuper ^boolean [this ^Class c] (identical? c Object))
+      (method ^:public serialInit ^void [this o ^Class c] nil))
 
     ;; the JVM's stand-in for classes made at run time: objects are Obj (tests only)
     (defclass ^:public ^:static Obj
@@ -7385,6 +7483,8 @@
       (field ^Thread initThread)
       ;; a Clojure fn's class (arbace.lang.AFunction, RestFn): its objects are FnObj
       (field ^:public ^boolean fnClass)
+      ;; a record class (Class.isRecord; JCS167)
+      (field ^:public ^boolean record)
       ;; an interface that declares a default method: initialized with a class implementing it
       ;; (JLS 12.4.1, 12.4.2 step 7; JC4b)
       (field ^:public ^boolean hasDefaults)
@@ -7776,6 +7876,14 @@
                 (try
                   (return (.superCall Rt/HOST o c key vs))
                   (catch UnsupportedOperationException _ nil))))
+            ;; a method of an interpreted interface on an object of the world implementing it: the
+            ;; receiver class's public method of that key (an annotation of an interpreted
+            ;; annotation type, jrt's object: F14)
+            (let [m (Rt/receiverMethod o key)]
+              (when (some? m)
+                (try
+                  (return (.invoke m o vs))
+                  (catch Throwable e (throw (Rt/unwrap e))))))
             (throw (AbstractMethodError. (java-str (.getName (.getClass o)) "." key))))
           ;; Object.clone of an interpreted object (this.clone() without an override)
           (when (and (identical? (.getDeclaringClass rm) Object) (.equals (.getName rm) "clone"))
@@ -8716,7 +8824,7 @@
           (CFGo/defineClass (.-name k)
                             (if (some? (.-sup k)) (.-cls (.-sup k)) (.-superClass k))
                             all (bit-and-int (.-flags k) (bit-not-int 0x20))
-                            (int (cond (.-iface k) 1 (.-fnClass k) 2 :else 0))
+                            (int (cond (.-iface k) 1 (.-fnClass k) 2 (.-record k) 3 :else 0))
                             k)))
 
       (method ^:public alloc [this ^CF$Klass k]
@@ -8760,6 +8868,19 @@
       (method ^:public clearMembers ^void [this ^CF$Klass k]
         (CFGo/clearMembers (.-cls k)))
 
+      (method ^:public setSerialNew ^void [this ^CF$Klass k ^IFn f]
+        (CFGo/setSerialNew (.-cls k) f))
+
+      (method ^:public setSerialUID ^void [this ^CF$Klass k ^long suid]
+        (CFGo/setSerialUID (.-cls k) suid))
+
+      (method ^:public serialSuper ^boolean [this ^Class c]
+        (or (identical? c Object) (CFGo/serialSuper c)))
+
+      (method ^:public serialInit ^void [this o ^Class c]
+        (when-not (identical? c Object)
+          (CFGo/serialInit o c)))
+
       (method ^:public ctor ^void [this ^CF$Klass k ^CF$Meth m]
         (CFGo/addCtor (.-cls k) (.-params m) (.-flags m) (CF$CtorFn. m)))
 
@@ -8778,6 +8899,9 @@
           (when (nil? c)
             (throw (UnsupportedOperationException. (java-str "field " name " of " (.getName (.getClass o)) " is not in the Go build"))))
           (CFGo/superField o c name set v)))
+
+      (method ^:public annotations ^void [this ^CF$Klass k ^String data]
+        (CFGo/setAnnotations (.-cls k) data))
 
       (method ^:public setEnum ^void [this ^CF$Klass k ^CF$Meth values]
         (CFGo/setEnum (.-cls k)
@@ -8823,7 +8947,17 @@
     ;; the members published so far forgotten (and reflection's lists computed from them)
     (method ^:public ^:static ^:native clearMembers ^void [^Class c])
     ;; an enum class: its Kind, and Enum.valueOf's constants (values's fn)
-    (method ^:public ^:static ^:native setEnum ^void [^Class c ^IFn values]))
+    (method ^:public ^:static ^:native setEnum ^void [^Class c ^IFn values])
+    ;; JCS167: c's objects made for deserialization by f (ClassInfo.SerialNew, jdk.internal.jrt.SerialAlloc);
+    ;; whether superclass c of the world allows an interpreted class's serialization constructor
+    ;; (j2g's cfSerialFor), and its part run on o
+    (method ^:public ^:static ^:native setSerialNew ^void [^Class c ^IFn f])
+    ;; JCS168: c's default serialVersionUID (ClassInfo.SerialUID, jdk.internal.jrt.SerialAlloc.defaultSUID)
+    (method ^:public ^:static ^:native setSerialUID ^void [^Class c ^long suid])
+    (method ^:public ^:static ^:native serialSuper ^boolean [^Class c])
+    (method ^:public ^:static ^:native serialInit ^void [o ^Class c])
+    ;; the class's annotations as data (jrt.SetAnnotations; F14)
+    (method ^:public ^:static ^:native setAnnotations ^void [^Class c ^String data]))
 
   (defclass ^:public ^:static Frame
     ;; the locals of one invocation, by LocalBinding.idx
@@ -9251,7 +9385,209 @@
 
     ;; a proxy's superclass methods that reflection does not list (the protected ones of
     ;; jrt's classes: ThreadLocal.initialValue) and that have no fn: (factory name) is theirs
-    (method ^:public ^:static ^:native fillProxySlots ^void [^Class c ^IFn factory]))
+    (method ^:public ^:static ^:native fillProxySlots ^void [^Class c ^IFn factory])
+
+    ;; java.lang.reflect.Proxy's class (JCS170 (a), Compiler$ProxySupport): a class named name extending
+    ;; java.lang.reflect.Proxy with these modifiers, implementing the interfaces, without fields (the
+    ;; handler is its objects' field 0, Proxy's h to reflection), registered with jrt as a proxy class
+    ;; (Proxy.isProxyClass) and allocated for deserialization with no handler (Proxy's h read into it)
+    (method ^:public ^:static ^:native defineJavaProxy ^Class [^String name ^Class/1 interfaces
+                                                               ^int modifiers]))
+
+  ;; java.lang.reflect.Proxy over Dyn (JCS170 (a), the user's decision of 2026-11-08;
+  ;; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS170 (write-ahead)"): jrt's Proxy.newProxyInstance
+  ;; and getProxyClass ask proxyClass (jrt.ProxyClassFor, set by j2g_dyn.go). A proxy class is a class
+  ;; made at run time (Dyn: its methods for every public interface of the world; reflection's member
+  ;; table for an interpreted interface), each of its methods a ProxyFn calling the handler, as
+  ;; jdk26u's ProxyGenerator writes them: Object's hashCode, equals and toString first, then each
+  ;; interface's non-static methods in order, one method per signature (name and parameters) and return
+  ;; type, its Method the first interface's (Object's for those three), its exceptions those compatible
+  ;; with every duplicate's (collectCompatibleTypes); the rules of ProxyBuilder's validation and naming
+  ;; (jdk.proxy1.$ProxyN for public interfaces, the package of the non-public ones; one class per list
+  ;; of interfaces). jdk26u's java/lang/reflect/Proxy.java and ProxyGenerator.java (baf63fb; Copyright
+  ;; (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md) are the rules'
+  ;; source; the code is Arbace's
+  (defclass ^:public ^:static ProxySupport
+    (field ^:static ^:final ^HashMap CACHE (HashMap.))
+
+    (field ^:static ^:final ^java.util.concurrent.atomic.AtomicLong NEXT
+           (java.util.concurrent.atomic.AtomicLong.))
+
+    ;; Proxy.getProxyClass's class of the interfaces (List.of's NullPointerException for a null one)
+    (method ^:public ^:static proxyClass ^Class [^Class/1 interfaces]
+      (let [ifs (.clone interfaces)]
+        (for-each [^Class i ifs] (java.util.Objects/requireNonNull i))
+        (let [key (Arrays/asList ifs)
+              ^:mutable ^Class c nil]
+          (locking CACHE
+            (set! c (cast Class (.get CACHE key)))
+            (when (nil? c)
+              (set! c (Compiler$ProxySupport/define ifs))
+              (.put CACHE key c)))
+          c)))
+
+    ;; ProxyBuilder's validation and naming, then ProxyGenerator's methods
+    (method ^:static define ^Class [^Class/1 ifs]
+      (when (> (alength ifs) 65535)
+        (throw (IllegalArgumentException. (java-str "interface limit exceeded: " (alength ifs)))))
+      (let [seen (HashSet.)
+            ^:mutable ^String pkg nil]
+        (for-each [^Class i ifs]
+          (when-not (.isInterface i)
+            (throw (IllegalArgumentException. (java-str (.getName i) " is not an interface"))))
+          (when (.isHidden i)
+            (throw (IllegalArgumentException. (java-str (.getName i) " is a hidden interface"))))
+          (when (.isSealed i)
+            (throw (IllegalArgumentException. (java-str (.getName i) " is a sealed interface"))))
+          (when-not (.add seen i)
+            (throw (IllegalArgumentException. (java-str "repeated interface: " (.getName i))))))
+        (for-each [^Class i ifs]
+          (when-not (Modifier/isPublic (.getModifiers i))
+            (let [p (.getPackageName i)]
+              (when (and (some? pkg) (not (.equals pkg p)))
+                (throw (IllegalArgumentException. "cannot have non-public interfaces in different packages")))
+              (set! pkg p))))
+        (let [public (nil? pkg)
+              p (if public "jdk.proxy1" pkg)
+              num (.getAndIncrement NEXT)
+              name (if (.isEmpty p) (java-str "$Proxy" num) (java-str p ".$Proxy" num))
+              ms (java.util.LinkedHashMap.)]
+          (Compiler$ProxySupport/add ms (.getMethod Object "hashCode" (new Class/1 0)))
+          (Compiler$ProxySupport/add ms (.getMethod Object "equals" (new Class/1 [Object])))
+          (Compiler$ProxySupport/add ms (.getMethod Object "toString" (new Class/1 0)))
+          (for-each [^Class i ifs]
+            (for-each [^java.lang.reflect.Method m (.getMethods i)]
+              (when-not (Modifier/isStatic (.getModifiers m))
+                (Compiler$ProxySupport/add ms m))))
+          (for-each [^List l (.values ms)]
+            (Compiler$ProxySupport/checkReturnTypes l))
+          (let [c (Compiler$Dyn/defineJavaProxy name ifs
+                                                (if public (bit-or-int Modifier/PUBLIC Modifier/FINAL) Modifier/FINAL))]
+            (Compiler$Dyn/defineCtor c (new Class/1 [java.lang.reflect.InvocationHandler]) nil)
+            (for-each [^List l (.values ms)]
+              (for-each [^Object/1 pm l]
+                (let [m (cast java.lang.reflect.Method (aget pm 0))]
+                  (Compiler$Dyn/setMethod c (.getName m) (.getParameterTypes m) (.getReturnType m)
+                                          (Compiler$ProxyFn. m (cast Class/1 (aget pm 1)))))))
+            c))))
+
+    ;; addProxyMethod: by signature (name and parameter descriptors), a method per return type, [Method
+    ;; exceptions]; a duplicate of the same return type narrows the exceptions to the compatible ones
+    (method ^:static add ^void [^java.util.LinkedHashMap ms ^java.lang.reflect.Method m]
+      (let [sb (StringBuilder. (.getName m))]
+        (.append sb "(")
+        (for-each [^Class t (.getParameterTypes m)] (.append sb (Compiler$ProxySupport/descriptor t)))
+        (.append sb ")")
+        (let [sig (.toString sb)
+              ^:mutable ^List l (cast List (.get ms sig))
+              ex (.getExceptionTypes m)]
+          (when (nil? l)
+            (set! l (ArrayList.))
+            (.put ms sig l))
+          (for-each [^Object/1 pm l]
+            (when (identical? (.getReturnType (cast java.lang.reflect.Method (aget pm 0))) (.getReturnType m))
+              (let [legal (ArrayList.)
+                    old (cast Class/1 (aget pm 1))]
+                (Compiler$ProxySupport/collectCompatibleTypes ex old legal)
+                (Compiler$ProxySupport/collectCompatibleTypes old ex legal)
+                (aset pm 1 (.toArray legal (new Class/1 0)))
+                (return))))
+          (.add l (new Object/1 [m ex])))))
+
+    (method ^:static collectCompatibleTypes ^void [^Class/1 from ^Class/1 with ^List list]
+      (for-each [^Class fc from]
+        (when-not (.contains list fc)
+          (loop [^int j 0]
+            (when (< j (alength with))
+              (if (.isAssignableFrom (aget with j) fc)
+                  (.add list fc)
+                  (recur (unchecked-inc-int j))))))))
+
+    ;; checkReturnTypes: the return types of one signature's methods, one assignable to all the others
+    (method ^:static checkReturnTypes ^void [^List methods]
+      (when (>= (.size methods) 2)
+        (let [uncovered (ArrayList.)
+              sig (Compiler$ProxySupport/signature (cast java.lang.reflect.Method (aget (cast Object/1 (.get methods 0)) 0)))]
+          (for-each [^Object/1 pm methods]
+            (let [nt (.getReturnType (cast java.lang.reflect.Method (aget pm 0)))]
+              (when (.isPrimitive nt)
+                (throw (IllegalArgumentException.
+                         (java-str "methods with same signature " sig " but incompatible return types: "
+                                   (.getName nt) " and others"))))
+              (let [^:mutable covered false
+                    ^:mutable added false
+                    it (.listIterator uncovered)]
+                (loop []
+                  (when (and (not covered) (.hasNext it))
+                    (let [u (cast Class (.next it))]
+                      (cond
+                        (.isAssignableFrom nt u) (set! covered true)
+                        (.isAssignableFrom u nt) (if added (.remove it) (do (.set it nt) (set! added true)))))
+                    (recur)))
+                (when (and (not covered) (not added)) (.add uncovered nt)))))
+          (when (> (.size uncovered) 1)
+            (throw (IllegalArgumentException.
+                     (java-str "methods with same signature " sig " but incompatible return types: " uncovered)))))))
+
+    (method ^:static signature ^String [^java.lang.reflect.Method m]
+      (let [sb (StringBuilder. (.getName m))]
+        (.append sb "(")
+        (for-each [^Class t (.getParameterTypes m)] (.append sb (Compiler$ProxySupport/descriptor t)))
+        (.append sb ")")
+        (.toString sb)))
+
+    (method ^:static descriptor ^String [^Class c]
+      (cond
+        (.isArray c) (java-str "[" (Compiler$ProxySupport/descriptor (.getComponentType c)))
+        (identical? c Integer/TYPE) "I" (identical? c Long/TYPE) "J" (identical? c Boolean/TYPE) "Z" (identical? c Byte/TYPE) "B"
+        (identical? c Character/TYPE) "C" (identical? c Short/TYPE) "S" (identical? c Float/TYPE) "F" (identical? c Double/TYPE) "D"
+        (identical? c Void/TYPE) "V"
+        :else (java-str "L" (.replace (.getName c) \. \/) ";")))
+
+    ;; the wrapper class of primitive class c
+    (method ^:static wrapper ^Class [^Class c]
+      (cond
+        (identical? c Integer/TYPE) Integer (identical? c Long/TYPE) Long (identical? c Boolean/TYPE) Boolean (identical? c Byte/TYPE) Byte
+        (identical? c Character/TYPE) Character (identical? c Short/TYPE) Short (identical? c Float/TYPE) Float :else Double)))
+
+  ;; a proxy's method (JCS170): the handler's invoke with the proxy, the Method and the arguments (null for
+  ;; none); an exception the method may throw (an Error, a RuntimeException, one its exceptions allow)
+  ;; propagates, another is wrapped in UndeclaredThrowableException (only when the method's exceptions are
+  ;; known: the member tables keep no throws clauses, JCS240); the result is the return type's (null
+  ;; for a primitive NullPointerException, another type ClassCastException), as ProxyGenerator's code does
+  (defclass ^:public ^:static ProxyFn
+    :extends RestFn
+    (field ^:public ^:final ^java.lang.reflect.Method m)
+    (field ^:public ^:final ^Class/1 ex)
+    (constructor ^:public [this ^java.lang.reflect.Method m ^Class/1 ex]
+      (set! (.-m this) m)
+      (set! (.-ex this) ex))
+    (method ^:public getRequiredArity ^int [this] 1)
+    (method ^:protected doInvoke [this proxy args]
+      (let [a (RT/seqToArray (RT/seq args))
+            h (cast java.lang.reflect.InvocationHandler (Compiler$Dyn/getField proxy 0))
+            ^:mutable r nil]
+        (try
+          (set! r (.invoke h proxy m (if (== (alength a) 0) nil a)))
+          (catch Throwable t
+            ;; the member tables keep no throws clauses (jrt's Method.getExceptionTypes is empty): a
+            ;; method whose exceptions are not known lets every exception through (JCS240)
+            (if (or (instance? Error t) (instance? RuntimeException t) (== (alength ex) 0)
+                    (Compiler$ProxyFn/declared ex t))
+                (throw (Util/sneakyThrow t))
+                (throw (java.lang.reflect.UndeclaredThrowableException. t)))))
+        (let [rt (.getReturnType m)]
+          (cond
+            (identical? rt Void/TYPE) nil
+            (.isPrimitive rt) (do (when (nil? r) (throw (NullPointerException.)))
+                                  (.cast (Compiler$ProxySupport/wrapper rt) r))
+            :else (.cast rt r)))))
+
+    (method ^:static declared ^boolean [^Class/1 ex ^Throwable t]
+      (loop [^int i 0]
+        (if (< i (alength ex))
+            (if (.isInstance (aget ex i) t) true (recur (unchecked-inc-int i)))
+            false))))
 
   (defclass ^:public ^:static Evaluator
     ;; what RecurExpr returns to its loop or fn method

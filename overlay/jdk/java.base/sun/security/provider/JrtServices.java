@@ -178,6 +178,9 @@ public final class JrtServices {
                     return new SHA3.SHAKE128Hash();
                 case "sun.security.provider.SHA3$SHAKE256Hash":
                     return new SHA3.SHAKE256Hash();
+                // MD4's own provider (MD4.getInstance, NTLM's; doc/classes/JAVA-DEFERRED-TRIAGE.md, F23)
+                case "sun.security.provider.MD4":
+                    return new MD4();
                 default:
                     Object o = com.sun.crypto.provider.JceServices.newInstance(className);
                     return o != null ? o : sun.security.rsa.RsaServices.newInstance(className);

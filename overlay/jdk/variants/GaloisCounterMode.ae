@@ -1,10 +1,114 @@
 ;; Go-build variant of com.sun.crypto.provider.GaloisCounterMode (J2G-SPEC §4.6;
-;; doc/classes/JAVA-DEFERRED-TRIAGE.md, F1): read by j2g only. The JavaNioAccess of SharedSecrets (direct
-;; buffers' addresses and sessions, outside the Go build's world, as ZipUtils') is cut, so that the
-;; class initializes: its only users are the direct-buffer branches of overlapDetection and of the
-;; decryption's output, which a Go build's buffer (heap only) never takes. Copyright (c) the Arbace
-;; authors; Eclipse Public License 1.0.
+;; doc/classes/JAVA-DEFERRED-TRIAGE.md, F1, "As built: F15 (security)"): read by j2g only. The JavaNioAccess
+;; of SharedSecrets (direct buffers' addresses and sessions, outside the Go build's world, as ZipUtils')
+;; is cut, so that the class initializes, and so are its two users, which j2g's analysis refused (the
+;; executable's report: "GaloisCounterMode: Unable to resolve symbol: NIO_ACCESS", every AES/GCM
+;; cipher then outside the closed world): GCMEngine.overlapDetection(ByteBuffer, ByteBuffer)'s branch
+;; for two direct buffers always copies (a Go build's buffer is never direct, jrt's DirectByteBuffer
+;; answering isDirect false), and GCMDecrypt.doFinal(ByteBuffer, ByteBuffer) zeroes an output without an
+;; array through its put, where the JDK sets its memory by address. The methods keep jdk26u's code but
+;; those branches, as repr/java converts it (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2
+;; with the Classpath Exception: LICENSE.md); the rest Copyright (c) the Arbace authors; Eclipse Public
+;; License 1.0.
 (in-ns 'com.sun.crypto.provider)
 
 (j2g/variant GaloisCounterMode
   (j2g/cut (field ^:private ^:static ^:final ^JavaNioAccess NIO_ACCESS)))
+
+(j2g/variant GaloisCounterMode$GCMEngine
+  (method overlapDetection ^ByteBuffer [this ^ByteBuffer src ^ByteBuffer dst]
+    (cond
+      (and (.isDirect src) (.isDirect dst))
+        nil ; the direct buffers' branch: copied below (a Go build's buffer is never direct)
+      (and (not (.isDirect src)) (not (.isDirect dst)))
+        (when-not (.isReadOnly src)
+          (when-not (identical? (.array src) (.array dst)) (return dst))
+          (when (>= (unchecked-add-int (.position src) (.arrayOffset src))
+                    (unchecked-add-int (.position dst) (.arrayOffset dst)))
+            (set! inPlaceArray (not encryption))
+            (return dst)))
+      :else (return dst))
+    (let [tmp (.duplicate dst)
+          bb (ByteBuffer/allocate (.remaining dst))]
+      (.limit tmp (.limit dst))
+      (.position tmp (.position dst))
+      (.put bb tmp)
+      (.flip bb)
+      (set! originalDst dst)
+      bb)))
+
+(j2g/variant GaloisCounterMode$GCMDecrypt
+  (method ^:public doFinal :throws [IllegalBlockSizeException
+                                    AEADBadTagException
+                                    ShortBufferException] ^int [this ^ByteBuffer src
+                                                                ^:mutable ^ByteBuffer dst]
+    (let [^:mutable ^ByteBuffer tag nil
+          ct (.duplicate src)
+          ^:mutable ^ByteBuffer buffer nil
+          ^:mutable len (unchecked-subtract-int (.remaining ct) tagLenBytes)]
+      (when-not (== (.getBufferedLength this) 0)
+        (set! buffer (ByteBuffer/wrap (.getBuffer (.-ibuffer this)) 0 (.size (.-ibuffer this))))
+        (set! len (unchecked-add-int len (.remaining buffer))))
+      (when (< len 0)
+        (throw (AEADBadTagException.
+                 (java-str "Input data too short to contain an expected tag length of "
+                           tagLenBytes
+                           "bytes"))))
+      (.checkDataLength this len)
+      (when (> len (.remaining dst))
+        (throw (ShortBufferException.
+                 (java-str "Output buffer too small, must be at least " len " bytes long"))))
+      (cond
+        (>= (.remaining ct) tagLenBytes)
+          (do
+            (set! tag (.duplicate src))
+            (.position tag (unchecked-subtract-int (.limit ct) tagLenBytes))
+            (.limit ct (unchecked-subtract-int (.limit ct) tagLenBytes)))
+        (some? buffer)
+          (do
+            (set! tag (ByteBuffer/allocate tagLenBytes))
+            (let [limit (unchecked-subtract-int
+                          (.remaining buffer)
+                          (unchecked-subtract-int tagLenBytes (.remaining ct)))]
+              (.mark buffer)
+              (.position buffer limit)
+              (.put tag buffer)
+              (.reset buffer)
+              (.limit buffer limit)
+              (.put tag ct)
+              (.flip tag)))
+        :else
+          (throw (AEADBadTagException.
+                   (java-str "Input data too short to contain an expected tag length of "
+                             tagLenBytes
+                             "bytes"))))
+      (set! dst (.overlapDetection this src dst))
+      (.mark dst)
+      (.processAAD this)
+      (set! len (.doLastBlock this (DecryptOp. (.-gctr this) (.-ghash this)) buffer ct dst))
+      (let [^:mutable block (GaloisCounterMode/getLengthBlock (.-sizeOfAAD this) len)]
+        (.update (.-ghash this) block)
+        (set! block (.digest (.-ghash this)))
+        (.doFinal (GCTR. blockCipher (.-preCounterBlock this)) block 0 tagLenBytes block 0)
+        (let [^:mutable ^int mismatch 0]
+          (loop [^int i 0]
+            (when (< i tagLenBytes)
+              (set! mismatch (bit-or-int mismatch (bit-xor-int (.get tag) (aget block i))))
+              (recur (unchecked-inc-int i))))
+          (when-not (== mismatch 0)
+            (.reset dst)
+            (when-not (.-inPlaceArray this)
+              (if (.hasArray dst)
+                  (let [ofs (unchecked-add-int (.arrayOffset dst) (.position dst))]
+                    (Arrays/fill (.array dst) ofs (unchecked-add-int ofs len) (unchecked-byte 0)))
+                  (let [p (.position dst)]
+                    ;; a buffer without an array (never direct in the Go build): zeroed through its put
+                    (loop [^int i 0]
+                      (when (< i len)
+                        (.put dst (unchecked-add-int p i) (unchecked-byte 0))
+                        (recur (unchecked-inc-int i)))))))
+            (throw (AEADBadTagException. "Tag mismatch")))
+          (.position src (.limit src))
+          (set! engine nil)
+          (.restoreDst this dst)
+          len)))))
