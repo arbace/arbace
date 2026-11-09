@@ -6376,3 +6376,33 @@ JCS254's day check analyzed a new slice's classes (385) on the committed world p
   committed ones (the day's `read-jdk --check` output); an hour, documented in the triage's checklist for new slices.
 - (b) Left as the scratch script.
 - *Recommended: (a)*.
+
+## Decided (the user, 2026-11-09, about 06:15: the Java proposals of 2026-11-08's branches)
+
+All as recommended: JCS280 (a), JCS281 (b), JCS282 (b), JCS283 (b), JCS284 (the remote connectors deferred with RMI, HotSpot's
+beans by design), JCS285 (b), JCS290 (b), JCS291 (a) if a test asks, JCS292 (b), JCS293 and JCS304 as one port (JCS304 (b)),
+JCS300 (c), JCS301 (b), JCS302 (a), JCS303 (b), JCS305 (b), JCS311 (a), JCS312 (b), JCS313 (a), JCS320 (a), JCS321 (a) when
+measured, JCS322 (b), JCS323 (a) after the night, JCS324 (a) folded into JCS283's verb, JCS325 (a), JCS326 (a); JCS256 (a) from
+the morning after the conversion is committed, JCS257 (a) with it; JCS213: the lookup as built (the hook not needed). Built on the
+branch `java-props2` (from `java-night`), one commit a proposal; the sections below.
+
+## As built: JCS300 (c): the test's own class files at interp and compiled (branch `java-props2`, write-ahead)
+
+`bin/java-check`'s `classes_test` chooses the tests as F6's `tool_test` chooses the tool tests: a source line of the test's that is
+no comment line names `java.lang.classfile` or `test.classes` (`cf_re`). At the platform's pin that is 57 tests of the corpora
+(36 name the API, 18 `test.classes`, 3 both): the 18 of F26's table that read their class files, the tests that write into
+`test.classes` (t05046's and t08142's jars), the launcher tests that start `java -cp ${test.classes}`, and the API's tests.
+`check_one` compiles such a test's renamed sources, once the read passed and when the levels hold interp or compiled, by javac on
+Arbace (`bin/repr-java javac`, the tool of `REPR_JAVA_EXE`) with the options `record_runs` gives the JDK's javac for the
+reference (`-nowarn -XDsuppressNotes -implicit:none` and the test's own) into `WORK/classes/ID`, the directory both sides pass
+as `test.classes`. `run_actions` puts that directory on `ARBACE_PATH` after the forms, so `ClassPathResources` and the support
+methods' `ResourceOrPath` (`Class.getResource`, `getResourceAsStream`) find `X.class` as the JDK's class path does. A javac
+failure is said on stderr (the log `RUN/ID/test-classes.log`) and leaves the directory empty: the test runs as before. A
+committed-forms run (`--essential`) has no sources and compiles nothing (none of the 57 is essential).
+
+By day, on the gate's executable (F26's port is not in it yet): t07651 passes as before with its classes; t08142 (`B6449504`,
+its jar written under `test.classes`) passes where the record says fail; t05046 gets past its missing directory to
+`ClassNotFoundException: Foo` (a URLClassLoader over a jar). The night's whole-corpus rerun takes it with no new command: the
+Java night's `bin/java-check --levels interp` and `--levels compiled` runs with `REPR_JAVA_EXE` set compile the 57 (a tool run
+each, 2 to 10 s). Expected: F26's 18 can pass at interp once the API is in the world (the night's build); the rows of t08142 and
+the launcher tests may move (recorded by the night, not by day).
