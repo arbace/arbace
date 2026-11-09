@@ -2756,7 +2756,9 @@
         (when (and (di-file-checked k) (set? :file) (not= "DIFile" (kind-of (:file fs)))) (apply verr :di/node "invalid file" (N :file)))
         (when (and (#{"DIGlobalVariable" "DILocalVariable" "DITemplateTypeParameter"} k) (set? :type) (not (di-type-kinds (kind-of (:type fs)))))
           (apply verr :di/node "invalid type ref" (N :type)))
-        (when (and (#{"DISubprogram" "DICompositeType" "DIDerivedType" "DIGlobalVariable"} k) (set? :scope) (not (scope-kinds (kind-of (:scope fs)))))
+        ;; visitDIVariable (V:1692) for a local variable too (LLS36 (a)): a scope that is no DIScope is `invalid scope` before
+        ;; visitDILocalVariable's local scope
+        (when (and (#{"DISubprogram" "DICompositeType" "DIDerivedType" "DIGlobalVariable" "DILocalVariable"} k) (set? :scope) (not (scope-kinds (kind-of (:scope fs)))))
           (apply verr :di/node "invalid scope" (N :scope)))
         (when (and (#{"DIDerivedType" "DICompositeType"} k) (set? :baseType) (not (di-type-kinds (kind-of (:baseType fs)))))
           (apply verr :di/node "invalid base type" (N :baseType)))
@@ -2822,7 +2824,13 @@
                                        (let [b (body x)]
                                          (if (dbg-record? b)
                                            (doseq [r (md-refs-in (rest b))] (push! r))
-                                           (doseq [r (md-refs-in (:md (nth (split-inst b) 2)))] (push! r))))))
+                                           (do (doseq [r (md-refs-in (:md (nth (split-inst b) 2)))] (push! r))
+                                               ;; LLS36 (a): a call of an old debug intrinsic is a debug record by the Verifier's
+                                               ;; time (AutoUpgrade's upgradeDbgIntrinsicToDbgRecord): its variable and
+                                               ;; expression are visited as a record's
+                                               (when-let [c (callee-of b)]
+                                                 (when (and (global? c) (re-matches #"llvm\.dbg\.(declare|value|assign)" (global-key c)))
+                                                   (doseq [r (md-refs-in (nth (second (split-inst b)) 2 nil))] (push! r)))))))))
         llvm/global (doseq [r (md-refs-in (drop 3 f))] (push! r))
         nil))
     (loop []
@@ -2973,7 +2981,9 @@
                    (binding [*ctx* {:fn f}]
                      (when (and (= (first f) 'llvm/define) (not= "DISubprogram" (di-kind spn)))
                        (verr :di/function "function !dbg attachment must be a subprogram" :fn [:mdv sp]))
-                     (when (and (= (first f) 'llvm/declare) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition"))
+                     ;; V:3202: a declaration's !dbg must not be distinct (LLS36 (a): the node's distinctness, whatever its kind;
+                     ;; a distinct subprogram is a definition, LLParser's rule)
+                     (when (and (= (first f) 'llvm/declare) (or (contains? *distinct* sp) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition")))
                        (verr :di/function "function declaration may only have a unique !dbg attachment" :fn [:mdv sp])))))
                 (when (and sp (= "DISubprogram" (di-kind spn)) (= (first f) 'llvm/define))
                   (visiting (doseq [[_ l & items] (numbered-blocks f) x items]
@@ -3282,7 +3292,11 @@
                                          (= hd 'phi) true
                                          :else (< (long dii) ii))]
                                 (when-not ok (visiting (verr :verifier/dominance "Instruction does not dominate all uses!" [:inst dx] :inst))))))))
-                      (let [[_ _ io] (split-inst b)] (check-inst-metadata (apply hash-map (:md io)) hd (result-type b) b))
+                      ;; LLS36 (a): a call of an old debug intrinsic is a debug record by the Verifier's time (upgradeDbgIntrinsicToDbgRecord):
+                      ;; its attachments but !dbg are gone with the call
+                      (let [[_ _ io] (split-inst b) c (callee-of b)]
+                        (when-not (and c (global? c) (re-matches #"llvm\.dbg\.(declare|value|assign|label)" (global-key c)))
+                          (check-inst-metadata (apply hash-map (:md io)) hd (result-type b) b)))
                       (when (= hd 'invoke)
                         (let [[_ _ io] (split-inst b) u (get (:idx g) (local-key (:unwind io)))]
                           (when (and u (not (eh-pad? (drop 2 (nth blocks u)))))
