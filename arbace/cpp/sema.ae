@@ -917,7 +917,16 @@
                               (doseq [[mn es] (.entrySet ^java.util.HashMap (:names (:scope (abi/cls-of ft))))
                                       e es :when (#{:field :indirect} (:e e))]
                                 (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1})))))
-            (do (when (and (checking?) (= "FriendDecl" (:kind k))) (abi/update-cls! id assoc :has-friends true))
+            (do (when (and (checking?) (= "FriendDecl" (:kind k)))
+                  ;; (CP313 (a): the friends each class declares, clang's EffectiveContext's matching by them: a function's
+                  ;; or a function template's name, else a class, else unknown)
+                  (let [fd (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "FunctionTemplateDecl"} (:kind %)) (:inner k)))]
+                    (abi/update-cls! id #(cond-> (assoc % :has-friends true)
+                                           (and fd (string? (:name fd)) (seq (:name fd))) (update :friend-fns (fnil conj #{}) (:name fd))
+                                           (and (nil? fd) (or (get-in k [:type :qualType]) (some (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k))))
+                                           (assoc :friend-classes true)
+                                           (and (nil? fd) (nil? (get-in k [:type :qualType])) (not-any? (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k)))
+                                           (assoc :friend-unknown true)))))
                 (binding [*member-access* @access] (declare-node! cs k))))))
       (finish-class! id)
       (when-not nm (reset! *last-anon* t)))
@@ -2410,16 +2419,31 @@
       (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
                       {:codegen/refused :access :cx/node node})))))
 
+(defn- friend-may-grant?
+  "CP313 (a), clang's SemaAccess.cpp (llvmorg-23.1.5) EffectiveContext and GetFriendKind for a non-member function `f`
+  naming a member of class `cid`: whether a friend declaration could make it accessible -- `cid` declares a friend function
+  or function template of f's name (by name: an overload or a qualified friend counts, missed never wrong), or a friend it
+  could not classify; for a protected member ([class.protected]: a friend of a derived class may name it through the
+  derived class) any class derived from `cid` that declares a friend; a class's friend classes grant nothing to a
+  non-member function."
+  [cid f access]
+  (let [c (abi/cls cid)]
+    (boolean
+      (or (:friend-unknown c)
+          (contains? (:friend-fns c) (:name f))
+          (and (= :protected access)
+               (some (fn [d] (and (:has-friends d) (not= (:id d) cid) (abi/derived-from? (:id d) cid))) (vals @abi/*classes*)))))))
+
 (defn- check-access!
   "CX12 (the checker): [class.access]/1-2 for a member named in an expression: a private or protected member of class
-  `cid` named in a function that is no class's member (nor in a class's scope), where neither that class nor any other
-  of the unit declares a friend (a friend could be that function, or a friend of a derived class, [class.protected]):
-  inaccessible. Everything else (members, friends, templates' patterns, using-declarations) is not judged."
+  `cid` named in a function that is no class's member (nor in a class's scope): inaccessible unless a friend declaration
+  may grant it (CP313 (a), friend-may-grant?; before it, judged only where no class of the unit declared a friend).
+  Everything else (members, templates' patterns, using-declarations) is not judged."
   [ctx cid nm access]
   (when (and (checking?) (#{:private :protected} access) cid)
     (let [f (when-let [i (:fn-id ctx)] (fnd i))]
       (when (and f (not (:cls f)) (not (:this-type ctx)) (not (:tinst f))
-                 (not-any? :has-friends (vals @abi/*classes*)))
+                 (not (friend-may-grant? cid f access)))
         (fail :access "'" nm "' is a " (name access) " member of '" (:name (abi/cls cid)) "'")))))
 
 (defn- member-expr [ctx n]

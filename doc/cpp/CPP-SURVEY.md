@@ -4754,3 +4754,24 @@ read), the messages after the directives' texts.
   commit's the const `_ZNK1AcviEv` as clang does, the non-const object's and `operator long`'s calls unchanged; gen-list over the
   142 samples (`.tmp/t7/g312`): 141 forms byte for byte the record's, rtti refused (no sample converts a const object with both);
   the checker's verdicts unchanged by construction (its rules as before). codegen-check (clang and gcc live) is the night's.
+
+### CP313 (a), first part: access with friends, for non-member functions
+
+- `arbace.cpp.sema` (clang's SemaAccess.cpp at llvmorg-23.1.5: EffectiveContext, GetFriendKind, MatchesFriend, read from the pinned
+  tarball): each class records its friends as it is declared (`:friend-fns`, the names of its friend functions and function
+  templates, qualified ones by their last name; `:friend-classes`; `:friend-unknown` for one it cannot classify); `check-access!`
+  judges a private or protected member named in a non-member function whenever no friend declaration may grant it
+  (`friend-may-grant?`: the member's class befriends a function of that name, by name so an overload or a qualified friend counts
+  and a miss is never a wrong error, or declares an unclassified friend; for a protected member any class derived from it
+  that declares a friend, [class.protected]), instead of only in units where no class declares a friend (the third slice's gate).
+  A class's friend classes grant nothing to a non-member function. Checker only.
+- Measure: the every-10th sample 109 → 109, the extras the same 92 (`.tmp/t7/rG`); the 22 dg-error files of the whole part with
+  friends and an access directive (`.tmp/t7/f313.txt`, the previous commit's tree against this one): 0 → 0 passes, the same one
+  extra. The probe `.tmp/t7/a1.cpp` (a class template's hidden friend and friend template, a non-template class's friend function, a
+  derived class's friend naming a protected member): the one error where the standard has it (`bad`'s `p.q`), none on the friends.
+- Not built (the rest of CP313 (a), for the second pass): the contexts that are members (a member function of a friend class, a
+  nested class, a lambda in a member), [class.protected]'s object-expression rule for a derived class's friends and members,
+  using-declarations' own access (cpp2a/using-enum-1), structured bindings' access (cpp1z/decomp4), the injected-class-name
+  through a private base (lookup/scoped15), a constructor template's access in a member's context (template/access19) and the
+  type-access checks' gate (`check-type-access!`, still "no class declares a friend"). Each is its own part of SemaAccess, none
+  reached by the friend matching alone.

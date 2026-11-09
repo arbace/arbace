@@ -1227,3 +1227,12 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Built**: `conv-for`'s const-object and explicit-conversion rules (CX12's fifth slice, the checker's) for the code generator too.
 - **Measured**: a probe's const object now converts by the const conversion function, as clang's IR does; the code generator's 142
   samples as recorded; the checker unchanged.
+
+## 2026-11-09: C++'s CP313 (a), first part: access with friends for non-member functions (branch `cpp-props2`)
+
+- **Built** (the checker): classes record their friend functions, friend templates and friend classes; a member named in a
+  non-member function is judged unless a friend declaration may grant it (by name; a derived class's friends for a protected one),
+  no longer only in units without friends (SemaAccess.cpp's EffectiveContext and friend matching, llvmorg-23.1.5).
+- **Measured**: the sample unchanged (109, 92 extras); the 22 access-with-friends files unchanged; a probe correct.
+- **Left** for the second pass: member contexts, [class.protected]'s object rule, using-declarations', structured bindings' and the
+  injected-class-name's access, constructor templates in members, the type-access gate.
