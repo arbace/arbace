@@ -1139,3 +1139,15 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
 - **Checked**: the recorded run and a second gen-list run byte for byte; the judge passes the record, fails a changed digest and an
   unrecorded refusal; both controls fail as they must; `make check-makefile`, `gate.crops check`, `bin/gate --full --plan`,
   `bin/crops-score --crop cpp` (unchanged). One slip: a throwaway `grep ... 2>/dev/null` over scratch logs (only read).
+
+## 2026-11-09: C++'s CP314 (a), C++11's constexpr function body (branch `cpp-props2`)
+
+- **Built** (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", CP314 (a)): in `arbace.repr.cpp.diag/constexpr-bodies`, at C++11 a
+  constexpr function's body is one return statement beside null statements, static_assert, typedefs, aliases and using-declarations
+  and -directives, a constructor's nothing (clang's CheckConstexprFunctionStmt's C++11 cases, llvm-project-23.1.5 from the pinned
+  tarball; the corpus's g++ errors placed at the closing brace), nested compound statements their own error and flattened, a class
+  template's constructors judged too.
+- **Measured**: the every-10th sample unchanged (108 own passes, 92 extras); the C++11 constexpr files of the whole part: four gained
+  (cpp0x/constexpr-type-def1, -diag5, -ctor19, -compound), none lost, no new extra. Each line read; valid probes clean.
+- **Alternatives considered**: judging function templates' bodies at their definition (left: the corpus shows g++ doing it only for
+  a class template's constructor, cpp0x/constexpr-ctor19); clang's placement at the statement (rejected: the dg lines are g++'s).

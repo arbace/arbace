@@ -4541,8 +4541,8 @@ and `cpp/`), `llvm-src/` (SemaDeclCXX.cpp, SemaInit.cpp, SemaOverload.cpp, SemaT
 ## As built: CP300-CP314 (2026-11-09; branch `cpp-props2` from f9b81f1e3)
 
 The user's decisions of 2026-11-09 (about 06:15 UTC), all as recommended: CP300 (a), CP301 (a), CP302 (a), CP303 (a) with (b)'s
-order, CP304 (a), CP305 (a), CP310 (b) then (a), CP311 (a), CP312 (a), CP313 (a), CP314 (a). Built in that order but CP302 first
-(the night's), one commit each. The measure is the CX12 slices': the every-10th dg-error sample's own passes (454 supported files,
+order, CP304 (a), CP305 (a), CP310 (b) then (a), CP311 (a), CP312 (a), CP313 (a), CP314 (a). CP302 first (the night's), then the small ones, then
+the rest, one commit each (the sections below in the order built). The measure is the CX12 slices': the every-10th dg-error sample's own passes (454 supported files,
 `.tmp/t6/sample.sh`), each new pass read against its source (the no-false-credit review), and `gen-list` over test/cpp/codegen's
 142 samples before and after, the intended changes listed; every own run with the compilers' stubs first on PATH.
 
@@ -4568,3 +4568,27 @@ order, CP304 (a), CP305 (a), CP310 (b) then (a), CP311 (a), CP312 (a), CP313 (a)
   refusal recorded: `FAIL arith forms-differ`, `FAIL rtti not-recorded`, exit 1. `make check-makefile`, `gate.crops check .
   test/gate/steps.edn` (0 problems), `bin/gate --full --plan` (`cpp-codegen-gen` planned, never passed), `bin/crops-score --crop cpp`
   (76.1 / 100 / 67.8, unchanged: the step is one more `--full` step of an already full checklist).
+
+### CP314 (a): C++11's constexpr function body
+
+- `arbace.repr.cpp.diag/constexpr-bodies` (clang's CheckConstexprFunctionBody and CheckConstexprFunctionStmt before C++14, read
+  from the pinned llvm-project-23.1.5 tarball as in the fifth slice; g++ makes them errors, clang warns under -pedantic-errors): at
+  C++11, a constexpr function's body, beside null statements and declarations of static_assert, typedefs, alias declarations,
+  using-declarations and using-directives, is one return statement ("body of constexpr function 'f' not a return-statement"), a
+  constexpr constructor's nothing ("constexpr constructor does not have empty body"), at the body's closing brace as the corpus's
+  directives place g++'s; a nested compound statement is its own error at its brace ("compound-statement in constexpr function")
+  and its statements count as the body's (cpp0x/constexpr-compound: a return inside one is the return); a class template's
+  constructors are judged at their definition too (cpp0x/constexpr-ctor19), function templates not; a void function's body is
+  not judged (its return type is C++11's error, cpp0x/constexpr-function2). The local class or enumeration a declaration
+  statement defines (`typedef enum E {...} EE;`: the DeclStmt's EnumDecl) is not among the allowed declarations.
+- Measure: the every-10th sample 108 → 108 (no file of the sample at C++11 has these lines; the extras the same 92). The 25
+  dg-error files of the whole part naming constexpr with c++11_only or c++11_down directives with the CP303 files (63 in all,
+  `.tmp/t7/fA.txt`; f9b81f1e3's tree `.tmp/base2-tree` against this branch): gained cpp0x/constexpr-type-def1 (12 lines),
+  constexpr-diag5 (4), constexpr-ctor19 (2), constexpr-compound (2); no pass lost, the extras the same 25 lines (an extra at
+  constexpr-compound:9 in a first run, the body's return inside a compound statement, gone with the flattening).
+- No false credit: each gained line read; type-def1's are the local enumerations and classes its bodies define, diag5's the
+  constructors' `return;`, ctor19's S3 and S4 (a typedef defining an enumeration, a structure) and not S, S2 (a typedef, a null
+  statement), compound's the two braces. A probe of the valid forms (`.tmp/t7/v314.cpp` at c++11 and c++14: every allowed
+  declaration beside one return, a constructor with a typedef and a null statement, a conditional return, a function template)
+  gives no diagnostic. Not built: g++'s other C++11 body errors (the try blocks of cpp2a/constexpr-try1-5, which also want C++20's
+  try rules; constexpr-function2's side effects and argument rules).
