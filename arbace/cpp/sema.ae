@@ -1815,6 +1815,7 @@
     (second (first (sort-by first cands)))))
 
 (def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
+(def ^:dynamic *conv-tmpl-cache* nil) ; atom {[class arg-type cat value op] bool}: a converting constructor template converts
 
 (defn ics
   "The implicit conversion sequence of the argument `e` (a typed expression or {:op :init-list}) to the parameter type `p`."
@@ -1864,13 +1865,28 @@
         *no-user* nil
         ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
         (and (class-id at) (conv-for (class-id at) (abi/unq pt) false (:c at))) {:rank 3}
-        :else (when (some (fn [cid] (let [f (fnd cid)]
-                                      (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
-                                           (not (let [p0 (first (:ps (:ty f)))] (and (abi/ref? p0) (= (class-id (:to p0)) (:id pt)))))
-                                           (<= (- (count (:ps (:ty f))) (count (filter some? (:defaults f)))) 1)
-                                           (let [r (binding [*no-user* true] (ics e (first (:ps (:ty f)))))] (and r (< (long (:rank r)) 3))))))
-                          (ctor-candidates (:id pt)))
-                {:rank 3}))
+        :else (let [converts? (fn [cid] (let [f (fnd cid)]
+                                          (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
+                                               (not (let [p0 (first (:ps (:ty f)))] (and (abi/ref? p0) (= (class-id (:to p0)) (:id pt)))))
+                                               (<= (- (count (:ps (:ty f))) (count (filter some? (:defaults f)))) 1)
+                                               (let [r (binding [*no-user* true] (ics e (first (:ps (:ty f)))))] (and r (< (long (:rank r)) 3))))))]
+                (when (or (some converts? (ctor-candidates (:id pt)))
+                          ;; (a converting constructor template's specialization for the argument, [over.match.copy]/1.1 with
+                          ;; [temp.deduct.call]: std::basic_string's C++17 `template<typename = _RequireAllocator<_Alloc>>
+                          ;; basic_string(const _CharT*, const _Alloc& = _Alloc())`, a literal given to a const string&; tried
+                          ;; only when no constructor that is no template converts; cpp-route)
+                          (when-let [h (:ctor-candidates @hooks)]
+                            (when-not (= :init-list (:op e))
+                              ;; (by the class and the argument's type, category and, for a null pointer constant, value: a
+                              ;; program asks the same conversion many times, and each asks deduction and instantiation)
+                              (let [k [(:id pt) (:ty e) (:cat e) (when (= :int (:op e)) (:v e)) (:op e)]
+                                    c *conv-tmpl-cache*]
+                                (if-some [v (when c (get @c k))]
+                                  v
+                                  (let [v (boolean (some converts? (binding [*no-user* true] (h (:id pt) [e]))))]
+                                    (when c (swap! c assoc k v))
+                                    v))))))
+                  {:rank 3})))
       (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false (:c at))) {:rank 3})
       (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
       :else (let [r (std-rank e (:ty (rv e)) pt)
@@ -2572,12 +2588,33 @@
                       (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)))))
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
+(def ^:private implicit-alloc-fns
+  ;; [basic.stc.dynamic.general]/2: the global allocation and deallocation functions implicitly declared in each translation
+  ;; unit (those that name no std type; their mangled names _Znwm, _Znam, _ZdlPv, _ZdaPv, _ZdlPvm, _ZdaPvm)
+  {"operator new" ["void *(unsigned long)" ["unsigned long"]]
+   "operator new[]" ["void *(unsigned long)" ["unsigned long"]]
+   "operator delete" [["void (void *) noexcept" ["void *"]] ["void (void *, unsigned long) noexcept" ["void *" "unsigned long"]]]
+   "operator delete[]" [["void (void *) noexcept" ["void *"]] ["void (void *, unsigned long) noexcept" ["void *" "unsigned long"]]]})
+
+(defn- implicit-alloc!
+  "The implicit global declarations of the allocation or deallocation function `nm` entered in the root scope, the first
+  time a name expression names one that no declaration (<new>'s) has declared (cpp-route: g++.dg's cpp0x/defaulted19a.C,
+  ::operator new (t) without <new>)."
+  [nm]
+  (let [d (implicit-alloc-fns nm)
+        ds (if (string? (first d)) [d] d)]
+    (doseq [[qt ps] ds]
+      (declare-fn! *root* {:kind "FunctionDecl" :name nm :type {:qualType qt}
+                           :inner (mapv (fn [t] {:kind "ParmVarDecl" :type {:qualType t}}) ps)}))))
+
 (defn- name-expr [ctx n]
   (let [nm (get-in n [:referencedDecl :name])
         [g q] (ref-qualifier n)
-        es (if (or g (seq q))
-             (lookup-qualified (:scope ctx) (conj q nm) g)
-             (lookup (:scope ctx) nm))
+        lk #(if (or g (seq q))
+              (lookup-qualified (:scope ctx) (conj q nm) g)
+              (lookup (:scope ctx) nm))
+        es (lk)
+        es (if (and (empty? es) (empty? q) (implicit-alloc-fns nm)) (do (implicit-alloc! nm) (lk)) es)
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
     ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
@@ -4886,7 +4923,8 @@ protected:
   [nodes proot ^String src]
   (let [root (new-scope :ns nil :path [])]
   (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
-            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})]
+            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})
+            *conv-tmpl-cache* (atom {})]
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
        (fn []
