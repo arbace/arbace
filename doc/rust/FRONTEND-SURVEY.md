@@ -2277,3 +2277,21 @@ Branch `rust-props`, after the night's four, one commit a proposal.
   before: the alike pair and the generic definer left unrevealed). `closures`' `compose` (a generic definer): `differ` → `but for the
   allocations' ids`. `typeck-check --ours closures collect1`: 493 of 497 facts, unchanged. The essential step's lines move to 8
   programs (built 62 of 62, the passes 60 of 60, capture-check 33 of 34), recorded.
+
+### RFP34 (a), RFP38 (a): the expansion's spans
+
+- RFP34 (a): `transcribe.rs`' `mk_delimited` gives a fragment substituted for `$var` (not `tt`) an invisible group whose delimiters'
+  span is the definition's `$var`, marked with the expansion's mark. Our transcription now keeps it (`expand/metavar-frag`: the
+  transcriber's `$` and name items, `:mv-orig` over the root file's `$var`, `:mv-fspan` for a std macro's, `:mv-mark`), and the
+  fragment's placeholder is placed with that mark and place (it had mark 0 and no place). A span the parser joins from a definition's
+  token to the fragment is then the definition's, as `Span::to` (`rustc_span/src/lib.rs`' `prepare_to_combine`: the same context) makes
+  it: `expand1`'s `(|| $b)()` closure has rustc's 41:21-41:28 (it had none). Not ported: `try_metavars`' metavariable spans of `tt`
+  substitutions (`maybe_use_metavar_location`) and the different-context fallback (`a_is_callsite`); no sample meets them.
+- RFP38 (a): `span_as_caller_location` (`rustc_middle/src/mir/consts.rs`) reads a call's location at `expansion_cause`
+  (`rustc_span/src/hygiene.rs`: the call sites walked to the root's, `include!` stopping it). Lowering keeps an expansion's
+  expression's mark (`:expn-mark`), the builder carries it (`mk`), and the call's caller span is the mark's root call site
+  (`build/caller-span` over expand's `*sites*`, which `build-check/with-program` now binds and hands over as `build/*expn-sites*`).
+  `a6`'s `panic!()`: 17:44, rustc's.
+- Results: capture-check **174 of 174** closures over every program (173), the essential step's 34 of 34; mono-check's locations **34 of
+  34** (33); `hir-check --ours` 90 of 91 and one but for whitespace, `typeck-check --ours` 11,142 of 11,173: unchanged.
+  `essential-known.txt` re-recorded.
