@@ -4242,3 +4242,81 @@ the night: `sun.reflect.misc.MethodUtil` (5 files), `JavaBeansAccess`, `newPlatf
 annotation tests, **11 analyze** (t04830, t04831, t04835; t04731, t04733, t04734, t04738-t04742); t04723 and t04832 name
 java.lang.reflect.Parameter (JCS280). Analyzing is not passing: translation, Go and the run are the night's.
 
+
+## Survey (JCS311 (a)): `@library` and the TestNG/JUnit runs (2026-11-09, branch `java-props2`)
+
+Decided (a) by the user on 2026-11-09 (doc/classes/JAVA-DEFERRED-TRIAGE.md, JCS311): a survey of the two jtreg features the
+check does not reach, its first corpus java.net.http's client, then a runner. This section is the survey; the runner is
+proposed below (JCS330-JCS333) and waits for the night's record of JCS254's 8 http tests.
+
+### What the corpora hold, measured
+
+`bin/java-check scan` at the platform's pin (16,546 test descriptions under the corpora's areas, 4,936 in the corpora; the
+categories are §3.1's, the first that fits): **`:run-lib` 3,996** (a main run that names an `@library`), **`:framework` 2,217**
+(a `@run testng` or `@run junit` action) and `:driver` 1,775 (jtreg's driver mode, mostly hotspot's ProcessTools tests). None of
+the three is in a corpus today (`test/java/corpora.edn` takes `:run-plain`, `:run-compile`, `:run-jitopts`, `:compile-fail-ref`).
+By area, the framework tests are java/lang 399, java/net 426, java/util 303, java/text 114, java/nio 98, java/io 82, jdk/incubator
+78, java/foreign 64, jdk/classfile 52, langtools 205; the library tests langtools 903, jdk/jfr 590, hotspot 461, com/sun 245,
+java/net 178, java/lang 142, javax/net 129, java/nio 99, sun/net 93, java/util 88. java.net.http's `test/jdk/java/net/httpclient`:
+378 tests, 259 with an `@library`, 93 of the rest under TestNG or JUnit.
+
+The libraries named (`@library` values over jdk/, langtools/ and hotspot's runtime): `/test/lib` 4,561 (jdk.test.lib, 212
+files), `/tools/lib` 658 (langtools' toolbox), `/java/awt/regtesthelpers` 628 (desktop, out of the corpora), `../../lib` 335,
+`/tools/javac/lib` 328, `/test/jdk` 285, `..` 263, `/test/jdk/java/net/httpclient/lib` 227 (the HTTP/1.1, HTTP/2 and HTTP/3 test
+servers). The frameworks: `@run testng` 1,500 actions (784 `othervm`), `@run junit` 1,150 (378 `othervm`); the imports, TestNG's
+`annotations.Test` 1,209, `DataProvider` 571, `Assert` (static or not) 971, `BeforeTest` 205; JUnit 5's (Jupiter) `api.Test` 754,
+`params.ParameterizedTest` 527, `MethodSource` 464, `Assertions` 710, `TestInstance` 193.
+
+### What jtreg does
+
+- **`@library L`**: L (relative to the test's directory, or absolute from the test suite's root) joins the test's source path;
+  jtreg compiles what the test's sources need from it (implicitly, or as `@build` names) into one classes directory per library
+  shared by the tests of a run, and puts it on the run's class path. Library classes keep their packages (`jdk.test.lib.Asserts`),
+  unlike the check's renaming of a test's own files into `package tNNNNN`.
+- **`@run testng C` / `@run junit C`**: jtreg's own runner (its TestNG and JUnit jars, not in jdk26u) loads C, runs its test
+  methods (TestNG: `@Test`, `@DataProvider`, the `@Before*`/`@After*` lifecycle, `expectedExceptions`; JUnit 5: `@Test`,
+  `@ParameterizedTest` with `@MethodSource`/`@ValueSource`/`@CsvSource`, `@BeforeAll`/`@BeforeEach`, `@TestInstance`), and the
+  test passes when no test method fails; the summary is printed, not compared.
+
+### The check's design for them (the runner's shape)
+
+1. **Libraries read once, kept in their packages.** The read level's source set gets the libraries on javac's `-sourcepath`
+   (record_sources: the JDK's javac -verbose tells which library files a test compiles); the library files are read by repr/java
+   into a forms tree of their own per library and its source digest (`WORK/libs/KEY`, cached as the tests' forms are), not
+   renamed, and that tree joins `ARBACE_PATH` after the test's forms (as JCS300 (c)'s classes directory does). The JDK's
+   reference runs compile and run them alike (record_runs: the library classes on `-cp`).
+2. **A framework runner of Arbace's own**, Java (jrt's own, `overlay/jdk/javac`-style test support under `test/java/runner/`,
+   read into forms and loaded before the test), clean-room from the frameworks' documented behaviour: it finds a class's test
+   methods by reflection (F14's run-time annotations: `getAnnotation` on methods, which the world has since F14), orders them as
+   TestNG does (by name unless `priority`/`dependsOnMethods`) or as JUnit 5's default `MethodOrderer`, feeds `@DataProvider` and
+   `@MethodSource` rows, runs the lifecycle methods, and exits 0 when none failed (the test's own verdict, JCV1's rule). The two
+   assertion APIs (`org.testng.Assert`, `org.junit.jupiter.api.Assertions`) as source-compatible classes of the subset the corpus
+   imports (assertEquals, assertTrue, assertThrows, ... measured from the imports).
+3. **The reference**: the JDK runs the same runner (the check's own classes on its class path), so a test's two runs are of the
+   same harness; jtreg's own runner is not involved (its verdict is the same rule).
+
+### Costs and risks
+
+- Libraries: an hour or two in `bin/java-check` and `java.check` (the source path, the cache, ARBACE_PATH); jdk.test.lib's 212
+  files read once (about a minute); risk: library code reaches by-design features (process launching, `ProcessTools`, the
+  `jdk.test.whitebox` API): those tests fall into the existing by-design classes.
+- The runner: a day for TestNG's and JUnit 5's common subset, then by measurement; risk: frameworks lean on reflection
+  (parameterized types of `@MethodSource` arguments, `Iterator<Object[]>` providers), which F25's and F14's reflection cover but
+  the night's records will say.
+- The corpus grows by up to about 6,200 tests (`:run-lib` and `:framework`; `:driver` stays out: it launches JVMs): the
+  whole-corpus night's interp level by about 2.3 times at today's rate, so a new corpus is added an area at a time.
+
+### Proposed (JCS311's survey: JCS330-JCS333)
+
+- **JCS330** The libraries in the check. (a) as in step 1 (an afternoon), first corpus java.net.http's `:run-lib` 259 with
+  `/test/lib` and `httpclient/lib`; (b) only `/test/lib` (jdk.test.lib) first, the per-directory helpers later. *Recommended:
+  (a)*, after the night records JCS254's 8.
+- **JCS331** The framework runner. (a) Arbace's own runner and assertion classes (step 2), TestNG first (java/net, java/util), then
+  JUnit 5; (b) vendor TestNG (Apache 2.0) and JUnit 5 (EPL 2.0) as Java forms: complete behaviour, but tens of thousands of lines
+  and their dependencies (jcommander, opentest4j, apiguardian) in the test world. *Recommended: (a)*, (b) if (a)'s
+  measurements show behaviour the subset cannot reach.
+- **JCS332** New corpora by area: `java-net-http-lib` and `java-net-http-framework` first (`test/java/corpora.edn`, the
+  categories `:run-lib` and `:framework` admitted per corpus), measured by day on samples, recorded by night. (a) yes; (b) one
+  corpus for all of `:run-lib` at once. *Recommended: (a)*.
+- **JCS333** `othervm` (1,162 framework actions, a fresh JVM per test in jtreg): (a) ignored, as the check runs every test in a
+  fresh process anyway; (b) by design. *Recommended: (a)*.
