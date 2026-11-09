@@ -5488,3 +5488,91 @@ CC.4's list covers it: `bin/ci musl read`, `bin/ci dg --record` (expected: c23-a
     risk of a stale cache if the sample misses a change.
   - (b) Keep the key. *Recommended: (b).*
 design), maturity 100, independence 99.7.
+
+## Decided (the user, 2026-11-09, about 11:10): CS294 (a), CS295 (b)
+
+- **CS294 (a):** the checker gives gcc's implicit-int diagnostic for an identifier list's parameter that no declaration names, and
+  gnu23-attr-syntax-3 leaves `:wrong-reason`.
+- **CS295 (b):** the musl forms' key stays repr/c's sources.
+
+## As built: CS294 (a), CS295 (b) (2026-11-09, branch `c-props3`)
+
+On `c-props3` from `mac/next` 4be141f28, main's stage 0, the checkout's ci, the stubs (`gcc cc clang clang++ g++ cpp cc1
+x86_64-alpine-linux-musl-gcc` and the other crops' tools) first on `PATH`.
+
+### CS294 (a): the cause, two parts
+
+gnu23-attr-syntax-3's line 12, `void f(x, y) int x; [[]] int y; { }`, wants `expected` and `type of 'y' defaults to 'int'`. The checker
+gave the parse error and `conflicting types for 'f'`, never the second: two things differed from gcc.
+
+- **The parser's recovery kept the declaration.** CS160's rule in `declaration-list-opt` (an old-style parameter's declaration list)
+  reported the C23 attributes (`unexpected '[', expected declaration specifiers`) and then parsed `int y;` after them, so `y` was declared.
+  gcc's old-style parameter loop takes a declaration whose specifiers cannot start (attributes may not begin them there) as an error and
+  skips it to the end of the statement, so `y` stays undeclared (its behaviour by the test's expectation: the defaulted `y` is only
+  possible if `int y;` was skipped). The rule now does the same, under `*recover*` only (the dg check's mode): after the message,
+  `skip-to-end-of-block-or-statement!` drops the tokens up to and including the `;` outside braces (or the `}` closing braces opened
+  there, or a `}` at depth 0; the end of the file stops it), the rule of gcc's skip as its diagnostics show it. Outside `*recover*` nothing
+  changes (the token, tree and round-trip checks read without it).
+- **The checker had no implicit-int diagnostic for parameters.** `check-defn` (`arbace/c/check.ae`) now gives, for an old-style
+  definition's parameter whose type no declaration gave (the converter's `:c/implicit-int` on it), `type of 'Y' defaults to 'int'` at the
+  declarator's line: an error since C99 (gcc's permerror of `-Wimplicit-int`, which `-w` does not silence), none under `-fpermissive`
+  (gcc's warning then, silenced by the dg options' `-w`) or in C90 (a warning). The run check builds with `:permissive true` (its
+  references are gcc's `-fpermissive -w` builds), so no run test meets it.
+
+The checker's `conflicting types for 'f'` on line 12 stays as an extra message on an expected line (the dg judge takes the line's
+expected regexes, each matched by one of its messages): gcc gives none because its recovery on line 10 (`void (*f(a, b) [[]])() ...`)
+drops the whole declaration, while CS160's rule there reports and goes on, declaring `f`. That is CS296 below.
+
+`test/c/dg-wording.edn` loses gnu23-attr-syntax-3's `:wrong-reason` entry; `test/c/judge_test.ae`'s count of that table 3 to 2.
+
+### CS295 (b)
+
+Nothing changes: the musl forms' key is repr/c's sources, so this branch's parser change rereads musl once (below, and the night's).
+
+### How it was checked (light, stubs first on PATH)
+
+| command | result |
+|---|---|
+| `bin/ci dg --only` gnu23-attr-syntax-3 (before) | `:wrong-reason`: line 12's messages the parse error and `conflicting types for 'f'` |
+| `bin/ci dg --only` gnu23-attr-syntax-2, -3, the dg files with an old-style definition (c23-old-style-definition-1 to -6, bitint-1, c23-align-1, c23-nullptr-6, c23-stdarg-2, c23-tag-9) and the control's bitint-75, c23-attr-syntax-3 | 15 of 15 pass; gnu23-attr-syntax-3 passes (line 12: the parse error, `conflicting types for 'f'`, `type of 'y' defaults to 'int'`); -2 (`-fpermissive`) gets no implicit-int error, as gcc; the control differs as it must |
+| `bin/ci dg --only` the other dg files with `-fpermissive` (bitint-36, c23-tag-5) | 2 of 2 pass |
+| `bin/ci judge-test` (its ensure read musl whole, the forms' key moved: 56 minutes at `CI_THREADS=2`) | 106 tests, 489 assertions, 0 failures (the wording table's count 3 to 2, changed here) |
+| `bin/ci dg --essential` | 92 of 92 |
+| `bin/repr-c check --c23` | 62 files, 59 pass, 3 expected failures, 0 failing |
+| `bin/ci check --only test/c/essential-check.txt` | 0 failing, the controls differ as they must |
+| `bin/ci check --aot --only test/c/essential-aot.txt` | 0 failing, the controls differ; compiled against interpreted 9 both pass, 1 neither |
+| `bin/reap --record`, `bin/crops-score --record` | no record changes (the dg record is the night's): C's scores as before |
+| `bin/crops-score --judge --strict` | 11 crops, 0 problems |
+| `bin/gate --full --plan` | parses (exit 0) |
+| the stubs' log | empty (no gcc, cc1 or clang call) |
+
+Crops-score before and after: unchanged (completeness 96.0%, 99.6% without by design; maturity 100; independence 99.7), since the dg
+record still holds gnu23-attr-syntax-3 as `:wrong-reason`; the night's `bin/ci dg --record` then `bin/reap --record` moves C's read cell by
+its one line (the file leaves `:wrong-reason`, the class's last attribute file: `:wrong-reason` 3 to 2, c23-bool-errors-3 and embed-3).
+
+### Rekeys
+
+Embedded (gate_key): `arbace/repr/c/parse.ae`, `arbace/c/check.ae`. Outside: `test/c/dg-wording.edn`, `test/c/judge_test.ae`, the docs. The
+parser change moves the musl forms' key (CS295 (b): kept; `bin/ci musl read`, here by judge-test's ensure).
+
+### The night's commands
+
+`bin/ci musl read`, `bin/ci dg --record` (expected: gnu23-attr-syntax-3 passes, the record's `:wrong-reason` rows 3 to 2; no other dg file
+moves: the recovery and the diagnostic change only an old-style definition's declaration list under `*recover*`, measured on every such
+file of the dg corpora above), `bin/ci check --record` and `check --aot --record` only if a row moves (none expected: the run check is
+`:permissive`), then `bin/reap --record`, `bin/crops-score --record`.
+
+### Proposed (c-props3)
+
+- **CS296 A declarator gcc cannot finish drops its whole declaration (gnu23-attr-syntax-2's and -3's line 10).** CS160's rule in the
+  declarator (`unexpected '[', expected ')'` after an identifier list) reports and goes on, so `f` is declared and line 12 adds `conflicting
+  types for 'f'`, a message gcc does not give (its declaration-or-definition parser returns on a failed declarator and skips to the end of
+  the statement, then reports the `{` that follows). The line passes either way (an extra message on an expected line).
+  - (a) Under `*recover*`, mark the external declaration whose declarator failed and leave it out of the forms (the converter takes the
+    mark), then skip as gcc does. Cost: an hour or two, parse.ae and convert.ae (embedded; the musl key moves once more, CS295 (b)).
+  - (b) Keep the extra message. *Recommended: (b)* until another file needs it: no verdict moves, and the dg judge reads expected lines
+    by their regexes.
+- **CS297 `-Wno-implicit-int` and `-Wno-error=implicit-int` in the dg options.** The new diagnostic follows `-fpermissive` and the
+  standard; gcc also drops or downgrades it for these two options. No file of the C23 corpora uses them today.
+  - (a) Read both options in `arbace.repr.c.host`'s file options and pass them to the checker (`:no-implicit-int`). Cost: half an hour.
+  - (b) Leave it. *Recommended: (a)* with the next checker change, so the rule is gcc's whole.

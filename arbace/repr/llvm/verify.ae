@@ -1546,6 +1546,18 @@
         (when-let [[_ ps] (intrinsic-entry nm)]
           (not= ps (old-form-pattern nm ps n))))))
 
+(defn- upgraded-fty
+  "LLS42 (a): the type of the declaration AutoUpgrade makes for an old memcpy/memmove/memset with its alignment parameter or an
+  old lifetime of two parameters (AutoUpgrade.cpp:1589, 1612-1641: getOrInsertDeclaration over the old one's types), nil for any
+  other; [type old-arity]."
+  [^String nm fty]
+  (let [ps (vec (remove #{'&} (nth fty 2))) n (count ps)]
+    (cond
+      (and (re-find #"^llvm\.lifetime\.(start|end)\." nm) (= n 2)) [(list 'fn 'void [(ps 1)]) 2]
+      (and (re-find #"^llvm\.(memcpy|memmove)\." nm) (not (re-find #"inline" nm)) (= n 5)) [(list 'fn 'void [(ps 0) (ps 1) (ps 2) 'i1]) 5]
+      (and (re-find #"^llvm\.memset\." nm) (not (re-find #"inline" nm)) (= n 5)) [(list 'fn 'void [(ps 0) 'i8 (ps 2) 'i1]) 5]
+      :else nil)))
+
 (defn- check-intrinsic-signature
   "The Verifier's Intrinsic::isSignatureValid over the declared type `fty` of the intrinsic `nm`: the pin's table entry
   (arbace.repr.llvm.intr's port of matchIntrinsicType); a declaration in one of AutoUpgrade's old forms is upgraded, not
@@ -2773,8 +2785,19 @@
           (apply verr :di/node "invalid scope" (N :scope)))
         (when (and (#{"DIDerivedType" "DICompositeType"} k) (set? :baseType) (not (di-type-kinds (kind-of (:baseType fs)))))
           (apply verr :di/node "invalid base type" (N :baseType)))
+        ;; LLS40 (a): visitDICompileUnit's lists in its order (V:1162-1214)
+        (when (and (= k "DICompileUnit") (set? :enums) (not (tuple? (:enums fs)))) (apply verr :di/node "invalid enum list" (N :enums)))
+        (when (and (= k "DICompileUnit") (set? :retainedTypes) (not (tuple? (:retainedTypes fs)))) (apply verr :di/node "invalid retained type list" (N :retainedTypes)))
         (when (and (= k "DICompileUnit") (set? :globals) (not (tuple? (:globals fs)))) (apply verr :di/node "invalid global variable list" (N :globals)))
+        (when (and (= k "DICompileUnit") (set? :imports) (not (tuple? (:imports fs)))) (apply verr :di/node "invalid imported entity list" (N :imports)))
+        (when (and (= k "DICompileUnit") (set? :macros) (not (tuple? (:macros fs)))) (apply verr :di/node "invalid macro list" (N :macros)))
         (when (and (= k "DISubprogram") (set? :retainedNodes) (not (tuple? (:retainedNodes fs)))) (apply verr :di/node "invalid retained nodes list" (N :retainedNodes)))
+        ;; LLS40 (a): the retained local variables' and labels' scopes (V:1546-1566)
+        (when (and (= k "DISubprogram") (set? :retainedNodes) (tuple? (:retainedNodes fs)))
+          (doseq [op (md-ops (:retainedNodes fs)) :when (#{"DILocalVariable" "DILabel"} (kind-of op))]
+            (let [rs (:scope (di-fields (node-of op)))]
+              (when-not (local-scope-kinds (kind-of rs)) (apply verr :di/node "invalid retained nodes, retained node is not local" (N :retainedNodes)))
+              (when (and (di-sp rs) (not= (di-sp rs) id)) (apply verr :di/node "invalid retained nodes, retained node does not belong to subprogram" (N :retainedNodes))))))
         (when (and (= k "DISubroutineType") (set? :types) (not (tuple? (:types fs)))) (apply verr :di/node "invalid composite elements" (N :types)))
         (when (and (#{"DICompositeType" "DIDerivedType" "DISubprogram" "DISubrangeType"} k) (not (contains? fs :file)) (some? (:line fs)) (not (zero? (long (:line fs)))))
           (verr :di/node "line specified with no file" [:md id] (str (:line fs))))
@@ -2795,7 +2818,12 @@
                                       (let [sp (di-sp (:scope fs))]
                                         (not (and sp (= true (:keyInstructions (di-fields (node-of sp))))))))
                              (apply verr :di/node "DbgLoc uses atomGroup but DISubprogram doesn't have Key Instructions enabled" (N :scope))))
-          "DILocalVariable" (when-not (local-scope-kinds (kind-of (:scope fs))) (apply verr :di/node "local variable requires a valid scope" (N :scope)))
+          ;; a variable a subprogram retains: the subprogram, reached first from its function (the Verifier's walk), says so first
+          "DILocalVariable" (when-not (or (local-scope-kinds (kind-of (:scope fs)))
+                                          (some (fn [[_ n]] (and (= "DISubprogram" (di-kind n))
+                                                                 (some #{id} (md-ops (:retainedNodes (di-fields n))))))
+                                                *meta*))
+                              (apply verr :di/node "local variable requires a valid scope" (N :scope)))
           "DILexicalBlock" (when (and (some? (:column fs)) (not (zero? (long (:column fs)))) (zero? (long (or (:line fs) 0))))
                              (verr :di/node "cannot have column info without line info"))
           "DISubprogram"
@@ -2984,19 +3012,30 @@
                     (when (and v (some? (get *meta* v)) (= "DIGlobalVariable" (di-kind (get *meta* v))))
                       (visiting (binding [*ctx* {:md v}] (check-di-node v (get *meta* v)))))))
                 (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
-            (doseq [f forms :when (#{'llvm/define 'llvm/declare} (first f))]
+            (doseq [:let [attached (java.util.HashMap.)]
+                    f forms :when (#{'llvm/define 'llvm/declare} (first f))]
               (let [o (apply hash-map (drop 4 f)) md (apply hash-map (:md o))
-                    sp (get md '!dbg) spn (node-of sp)]
+                    sp (get md '!dbg) spn (node-of sp)
+                    nerr (.size ^java.util.List *errs*)]
                 (when sp
                   (visiting
                    (binding [*ctx* {:fn f}]
                      (when (and (= (first f) 'llvm/define) (not= "DISubprogram" (di-kind spn)))
                        (verr :di/function "function !dbg attachment must be a subprogram" :fn [:mdv sp]))
+                     ;; LLS40 (a): V:3245-3253, a definition's subprogram distinct and attached to it alone (the module's order)
+                     (when (= (first f) 'llvm/define)
+                       (when-not (contains? *distinct* sp)
+                         (verr :di/function "function definition may only have a distinct !dbg attachment" :fn))
+                       (let [g (.get attached sp)]
+                         (when (and g (not (identical? g f)))
+                           (verr :di/function "DISubprogram attached to more than one function" [:mdv sp] :fn))
+                         (.put attached sp f)))
                      ;; V:3202: a declaration's !dbg must not be distinct (LLS36 (a): the node's distinctness, whatever its kind;
                      ;; a distinct subprogram is a definition, LLParser's rule)
                      (when (and (= (first f) 'llvm/declare) (or (contains? *distinct* sp) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition")))
                        (verr :di/function "function declaration may only have a unique !dbg attachment" :fn [:mdv sp])))))
-                (when (and sp (= "DISubprogram" (di-kind spn)) (= (first f) 'llvm/define))
+                ;; a failed attachment check ends visitFunction before its walk of the locations (V:3313)
+                (when (and sp (= "DISubprogram" (di-kind spn)) (= (first f) 'llvm/define) (= nerr (.size ^java.util.List *errs*)))
                   (visiting (doseq [[_ l & items] (numbered-blocks f) x items]
                     (let [b (body x)]
                       (if (dbg-record? b)
@@ -3238,8 +3277,13 @@
                       (when-let [c (callee-of b)]
                         (when (and (global? c) (str/starts-with? (global-key c) "llvm."))
                           (let [d (.get *gdefs* (global-key c)) [_ ps] (split-inst b)]
-                            (when (and d (= (:kind d) :function) (not= (:fty d) (call-fty (first ps) (nth ps 2)))
-                                       (not (old-form-decl? (global-key c) (:fty d))))
+                            (when (and d (= (:kind d) :function)
+                                       (let [cf (call-fty (first ps) (nth ps 2))]
+                                         (if-let [[uf n] (upgraded-fty (global-key c) (:fty d))]
+                                           ;; LLS42 (a): a call of another arity than the old form's takes UpgradeIntrinsicCall's
+                                           ;; default case (AutoUpgrade.cpp:5240): its callee cast to the new declaration
+                                           (and (not= n (count (nth ps 2))) (not= uf cf))
+                                           (and (not= (:fty d) cf) (not (old-form-decl? (global-key c) (:fty d)))))))
                               (verr :verifier/intrinsic-call "Intrinsic called with incompatible signature"))
                             (when (re-find #"^llvm\.ptrmask\." (global-key c))
                               (let [[a m] (map #(norm-type (first %)) (nth ps 2))]
