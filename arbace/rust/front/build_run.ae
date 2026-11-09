@@ -11,7 +11,8 @@
 
     -main FRONT-DIR RECORD OUT NAME [--panic-abort]   RECORD the helper's mono dump; OUT the dump with our bodies; prints
                                                        one line per body (ours, or the record's and why)"
-  (:require [arbace.rust.front.build-check :as bc] [arbace.rust.front.mir :as mir] [arbace.string :as str])
+  (:require [arbace.rust.front.build-check :as bc] [arbace.rust.front.mir :as mir] [arbace.rust.front.mono :as mono]
+            [arbace.rust.front.build :as build] [arbace.string :as str])
   (:import [java.io File]))
 
 (defn- read-forms [s] (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
@@ -86,7 +87,7 @@
                          x)))
         unwind (fn [u] (if abort? '(unreachable) u))
         loc (list 'loc "?" 0 0)
-        fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x))) (get (:tys facts) (second x) x) x))
+        fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x)) (:tys facts)) (get (:tys facts) (second x) x) x))
         fix-const (fn [x] (if (and (seq? x) (= 'const (first x)) (get (:fsym facts) (second x)) (not (some #{:fn-symbol} x)))
                             (concat x [:fn-symbol (get (:fsym facts) (second x))])
                             x))
@@ -95,8 +96,10 @@
                  false-edge (list 'goto (second t))
                  false-unwind (list 'goto (second t))
                  call (let [[_ f args dest target u] t
-                            [cal l] (or (get (:callee facts) (second f))
-                                        (throw (ex-info (str "no callee in the record for " (second f)) {})))]
+                            [cal l] (if-let [nat (:native-call facts)]
+                                      (nat f)
+                                      (or (get (:callee facts) (second f))
+                                          (throw (ex-info (str "no callee in the record for " (second f)) {}))))]
                         (list 'call f args dest target (unwind u) cal l 0))
                  assert (let [[_ c e m target u] t] (list 'assert c e m target (unwind u) loc 0))
                  drop (let [[_ p target u r d] t] (list 'drop p target (unwind u) r d nil))
@@ -104,7 +107,7 @@
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
     (-> (walk (comp fix-static fix-const fix-ty)
-          (merge (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])
+          (merge (if (:header facts) ((:header facts) rec) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg]))
                  {:args (:args ours) :ret (:ret ours)
                   :locals (:locals ours)
                   :scopes (mapv (fn [[p _]] [p nil nil nil false]) (:scopes ours))
@@ -139,7 +142,14 @@
         {:size (* al (quot (+ off (first b) (dec al)) al)) :align al :abi (list 'pair (nth a 2) (nth b 2) off) :fields [0 off] :variants '(single 0) :uninhabited false})
       :else nil)))
 
+(declare native-main pack-main)
+
 (defn -main [front-dir record out n & flags]
+  (if-let [crates (System/getenv "RF_MONO_CRATES")]
+    (apply native-main crates front-dir record out n flags)
+    (apply pack-main front-dir record out n flags)))
+
+(defn pack-main [front-dir record out n & flags]
   (let [abort? (some #{"--panic-abort"} flags)
         forms (read-forms (slurp record))
         rec-bodies (for [f forms :when (= 'mir/body (first f))] (second f))
@@ -170,5 +180,91 @@
           new-forms (for [f new-forms] (if (= 'mir/layouts (first f)) (list 'mir/layouts (vec (sort-by first (concat (second f) extra)))) f))]
       (spit out (with-out-str (doseq [f new-forms] (prn f)))))
     (doseq [l @lines] (println l))
+    (println (format "build-run: %s: %d of %d bodies ours" n (count (filter #(str/starts-with? % "ours") @lines)) (count @lines)))
+    (System/exit 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; RFP23 (c): the run's facts from arbace.rust.front.mono (no record but core's bodies and, per fact, what mono refuses)
+
+(defn native-main
+  "The run's module from Arbace's own facts: the mono items, symbols, callees and caller locations, the function constants',
+  statics' and lang items' symbols, the layouts; a fact mono refuses taken from the record (counted); core's bodies the
+  record's (RF12); our bodies' own type forms (no record's DefIds)"
+  [crates front-dir record out n & flags]
+  (let [abort? (some #{"--panic-abort"} flags)
+        forms (read-forms (slurp record))
+        rec-bodies (for [f forms :when (= 'mir/body (first f))] (second f))
+        rfacts (record-facts rec-bodies)
+        rec-callees (atom {})
+        _ (doseq [b rec-bodies] (walk (fn [x] (when (and (seq? x) (= 'call (first x)) (> (count x) 7)) (swap! rec-callees update (second (second x)) (fnil conj []) [(nth x 6) (nth x 7)])) x) (dissoc b :alloc-data)))
+        rec-statics (into {} (for [f forms :when (= 'mir/static (first f)) :let [m (second f)]]
+                               [(str/replace (last (str/split (str (:def m)) #"::")) #"\)$" "") m]))
+        rec-layouts (into {} (second (some #(when (= 'mir/layouts (first %)) %) forms)))
+        rec-langs (or (second (some #(when (= 'mir/langsyms (first %)) %) forms)) {})
+        tally (atom {})
+        fact! (fn [k native?] (swap! tally update k (fnil (fn [[a b]] [(if native? (inc a) a) (inc b)]) [0 0])))
+        lines (atom [])
+        result
+        (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")]
+          (bc/build-program front-dir n
+            (fn [bodies]
+              (let [facts (mono/program-facts n bodies)
+                    root-file build/*root-file*
+                    ours (into {} (for [[nm b err] bodies] [nm [b err]]))
+                    native-call (fn [f]
+                                  (let [txt (second f) c (get (:callees facts) txt)
+                                        sp (:call-span (meta f))
+                                        recs (get @rec-callees txt)
+                                        cal (if (and c (not (mono/error? c))) (do (fact! :callees true) (list 'callee c))
+                                                (do (fact! :callees false) (or (ffirst recs) (throw (ex-info (str "no callee for " txt) {})))))
+                                        l (if (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
+                                              (do (fact! :locs false) (or (second (first recs)) (list 'loc "?" 0 0))))]
+                                    [cal l]))
+                    fsym (into {} (for [[txt s] (:fsyms facts)]
+                                    [txt (if (mono/error? s) (do (fact! :fn-symbols false) (get (:fsym rfacts) txt)) (do (fact! :fn-symbols true) s))]))
+                    statics (into {} (for [[nm m] rec-statics]
+                                       [nm (let [o (get (:statics facts) nm)] (if (map? o) (do (fact! :statics true) o) (do (fact! :statics false) m)))]))
+                    header (fn [rec]
+                             (let [o (get (:items facts) (:name rec))]
+                               (if (and (map? o) (not (mono/error? o)))
+                                 (do (fact! :symbols true) (assoc (dissoc o :name) :phase "optimized" :name (:name rec)))
+                                 (do (fact! :symbols false) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])))))
+                    nf {:fsym fsym :statics statics :native-call native-call :header header}
+                    local? (fn [b] (str/starts-with? (str (:def-id b)) "DefId(0:"))
+                    ext-syms (set (map :symbol (:ext-items facts)))
+                    new-forms
+                    (doall
+                     (for [f forms]
+                       (case (first f)
+                         mir/body (let [rec (second f) [b err] (get ours (:name rec))]
+                                    (cond
+                                      (and b (local? rec))
+                                      (try (let [r (runtime-body b rec nf abort?)
+                                                 r (if (System/getenv "RF10_CONTROL") (walk #(if (= "Add" %) "Sub" (if (= "AddWithOverflow" %) "SubWithOverflow" %)) r) r)
+                                                 r (assoc r :phase "arbace-built+cleanup")]
+                                             (swap! lines conj (str "ours   " (:name rec)))
+                                             (list 'mir/body r))
+                                           (catch Throwable e (swap! lines conj (str "record " (:name rec) " (" (.getMessage e) ")")) f))
+                                      :else (do (swap! lines conj (str "record " (:name rec) " (" (cond err err (ext-syms (:symbol rec)) "core's body, reached by the collector"
+                                                                                                     :else "core's body, reached through core's bodies") ")"))
+                                                (fact! :core-bodies false)
+                                                f)))
+                         mir/static (let [m (second f) nm (str/replace (last (str/split (str (:def m)) #"::")) #"\)$" "")]
+                                      (list 'mir/static (merge m (select-keys (get statics nm) [:symbol :def]))))
+                         mir/langsyms (list 'mir/langsyms (into {} (for [[ln s] rec-langs]
+                                                                     [ln (let [o (get (:langsyms facts) ln)] (if (and o (not (mono/error? o))) (do (fact! :langsyms true) o) (do (fact! :langsyms false) s)))])))
+                         f)))
+                    our-forms (mono/ty-forms (keep first (vals ours)))
+                    core-forms (mono/ty-forms (for [f new-forms :when (= 'mir/body (first f)) :let [b (second f)] :when (not= "arbace-built+cleanup" (:phase b))] (dissoc b :alloc-data)))
+                    lt ((:layouts-of facts) (concat our-forms core-forms))
+                    table (into (sorted-map)
+                                (concat (for [[t l] lt :when (not (mono/error? l))] [t l])
+                                        (for [[t l] rec-layouts :when (let [o (get lt t)] (or (nil? o) (mono/error? o)))] [t l])))]
+                (doseq [t (keys rec-layouts)] (fact! :layouts (let [o (get lt t)] (and o (not (mono/error? o))))))
+                (for [f new-forms] (if (= 'mir/layouts (first f)) (list 'mir/layouts (vec table)) f))))))]
+    (spit out (with-out-str (doseq [f result] (prn f))))
+    (doseq [l @lines] (println l))
+    (println (str "build-run: " n ": facts native " (str/join ", " (for [[k [a b]] (sort @tally) :when (not= k :core-bodies)] (str (name k) " " a "/" b)))
+                  "; core's bodies from the pack " (second (get @tally :core-bodies [0 0]))))
     (println (format "build-run: %s: %d of %d bodies ours" n (count (filter #(str/starts-with? % "ours") @lines)) (count @lines)))
     (System/exit 0)))
