@@ -96,6 +96,11 @@ code. Three kinds of things live here:
   frozendict (`frozendict.ae`), `Modules/mathintegermodule.c`, `take_bytes`, `ImportError_repr`, the slots and shared
   descriptors of `Objects/typeobject.c`, the UTF-8 mode of `Python/preconfig.c` and `Modules/unicodedata.c`'s 3.15 parts,
   its UCD 17.0.0 tables taken from the generated headers into `builtins_unicodedata_table315.ae`.
+  Since queue 239 (2026-11-09, doc/python/PY315-SURVEY.md, "As built: 239") `python/scope.ae` and `python/compile.ae` port
+  the same tarball's `Python/symtable.c`, `Python/codegen.c`, `Python/compile.c` and `Python/ast_preprocess.c` deltas
+  (lazy imports' checks and IMPORT_NAME's flag, starred comprehension elements, `**` in dict comprehensions, the
+  annotations' order and qualname, `+NUMBER` patterns) under REPR_PYTHON_VERSION=3.15, and the runtime its lazy imports
+  (`Objects/lazyimportobject.c`, `Python/import.c`'s lazy half: `go/arbace/py/lazyimport.ae`).
   pyi's module `pyexpat` (`go/arbace/pyexpat.ae` and `go/arbace/pyexpat/`, package `arbace/pyexpat`, queue 202e, 2026-11-04) ports the same tarball's
   `Modules/pyexpat.c`, and the Go forms it imports, `go/arbace/expat.ae` and `go/arbace/expat/` (package `arbace/expat`,
   outside `arbace/` but recorded here with the binding), port the tarball's vendored Expat 2.9.0 (`Modules/expat/`:

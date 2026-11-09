@@ -222,6 +222,16 @@ covers what.
   8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), by hand: Copyright (c) 2001 Python Software
   Foundation, All Rights Reserved, under the PSF License Agreement for Python 3.15 (its LICENSE the same bytes as
   3.14.10's, text below); the Unicode data under the Unicode License v3 as CPython distributes it.
+- `go/arbace/py/lazyimport.ae`, and the Python 3.15 parts of `import.ae`, `eval.ae`, `aot.ae`, `func.ae`, `sys.ae`,
+  `registry.ae`, `load.ae` and `bytecode.ae` (queue 239, 2026-11-09; doc/python/PY315-SURVEY.md, "As built: 239": lazy
+  imports under REPR_PYTHON_VERSION=3.15), and the 3.15 parts of `arbace/python/scope.ae` and `compile.ae`: ports of
+  CPython 3.15.2's `Objects/lazyimportobject.c`, `Python/import.c`'s lazy imports, `Python/ceval.c`'s
+  `_PyEval_LazyImportName` and the reification of `_PyEval_LoadGlobalStackRef` and `_PyEval_LoadName`,
+  `Objects/moduleobject.c`'s getattr, `Python/sysmodule.c`'s lazy-import API, `Python/initconfig.c`'s
+  `config_init_lazy_imports`, `Python/bltinmodule.c`'s `__lazy_import__`, `Lib/types.py`'s fallback as `_types`, and
+  `Python/symtable.c`'s, `Python/codegen.c`'s, `Python/compile.c`'s and `Python/ast_preprocess.c`'s 3.15 deltas, from the
+  same release tarball, by hand: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
+  License Agreement for Python 3.15 (text below).
 - `go/arbace/py/builtins_ssl.ae`, `builtins_ssl_cert.ae` and `builtins_ssl_conn.ae` (queue 209, PYS22 (a): pyi's module
   `_ssl` over Go's crypto/tls; doc/python/PYTHON-SURVEY.md, "As built: 209"): written after CPython 3.14.10's
   `Modules/_ssl.c`, `Modules/clinic/_ssl.c.h`, `Modules/_ssl/cert.c` and `Modules/_ssl/distrusted_spki.h` (its digests
