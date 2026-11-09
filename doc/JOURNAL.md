@@ -1485,3 +1485,29 @@ compiler stubs first on PATH (their log empty). doc/cpp/CPP-SURVEY.md, "Decided 
   empty grep argument and a `2>/dev/null` in a wait loop (the survey's "Slips"). Proposed CP310 (constexpr errors inside calls and
   immediate functions' addresses), CP311 (CTAD with initializers), CP312 (the conversion rules for the code generator), CP313
   (access in units with friends), CP314 (C++11's constexpr function body).
+
+## 2026-11-08: HES84 (b) and HES85 (a), the threaded ways kept in their class and nofib's C in record-ref (branch `hs-hes84`, from next 5af7d0058)
+
+By the user's decisions of 2026-11-08 (HES84 (b), HES85 (a); doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES84 (b), HES85 (a)").
+Sources studied: nofib at its pinned commit (`.tmp/hsi/nofib`, `test/haskell/eval-corpora.edn`'s `:nofib` pin): `mk/ghc-paths.mk`
+(`ALL_SRCS`, `SRCS`, `EXCLUDED_SRCS`, `C_SRCS`), `mk/target.mk`, the Makefiles of the nine program directories with C;
+GHC 9.14.1's testsuite (`test/haskell/eval/testsuite-run.edn`, the tests whose `only_ways` names only threaded ways).
+
+- HES84 (b): no code; `:threaded-only`'s `:decided` names it. What it leaves judged against the normal way: 14 tests of the core,
+  7 passing, four of them on the normal way's refusal or another output than the shipped one (T21651, ffi014, hs_try_putmvar003,
+  numsparks001): HES87 proposed.
+- HES85 (a): `bin/lib/hsi/record-ref`'s nofib plan passes `nofib_c_srcs`, the C nofib's make links (`C_SRCS`: the Makefile's
+  `SRCS` when it sets one, else the directory's sources less `EXCLUDED_SRCS`): callback001, callback002 and fft2. Alternative
+  considered: every `.c` of the directory, as `bin/hsi check`'s plan and the proposal's text had it, rejected: six Makefiles set
+  `SRCS` to leave a C version out (paraffins' has its own `main`), so GHC would fail to link them at the next whole record.
+  Recorded by GHC 9.14.1 by hand (`bin/hsi record-ref --corpus nofib --only nofib/smp/callback001,nofib/smp/callback002`): both
+  status 0, callback001 its shipped `.faststdout`; with fft2 and paraffins added, every line as committed but its seconds.
+  `bin/hsi own-verdicts --record`: 587 of 908. hsi: callback001 passes by its own verdict (recorded); callback002 passes by hand at
+  3 GiB (0.71 GB resident at 300,000 callbacks), stopped by the light 2 GiB cap: it waits in `:no-reference` for the night's record.
+- `test/crops/independence.edn`'s judge cases from the records (eval 587 own, 321 recorded); `bin/reap --record` (eval 801 / 64 / 43),
+  `bin/crops-score --record`: Haskell 96.6 / 100 / 74.9 (0.9659 to 0.9661; independence 0.7492 to 0.7494). Independence stays near 75
+  until the native front end's STG is the eval and AOT cells' source (HFS-I1).
+- Checks: own-verdicts current, hsi-essential's command 123 of 123 with the controls, `bin/hsi divergences` 0 unclassed, `bin/reap`
+  and `bin/crops-score --judge --strict` 0 problems.
+- Proposed: HES86 (bin/hsi check's nofib C by the same rule, at the next haskell-stg-progs recording), HES87 (the four threaded-only
+  passes on a refusal into a deferred class).
