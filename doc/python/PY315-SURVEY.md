@@ -405,3 +405,104 @@ expression inlined (with 3.14's `tuple`/`all`/`any`, 229's tail); the exit block
 because the iterator's NULL makes them 5 instructions (pyi's compiler's flow! inlines at the IR's 4: compile.ae, the
 `return` inside a `for` after a chained comparison); a non-inlined comprehension's own `GET_ITER` (none in the samples);
 the annotations' order (P3).
+
+## Design: 239, the language switch (P3 and P4b as one, the user's PYS26, 2026-11-08)
+
+The user (PYS26, 2026-11-08 evening): build P3 and P4b now, against the 3.15.2 oracle, behind the switch of 236-238
+(`REPR_PYTHON_VERSION=3.15`); 3.14 stays the default and its records unchanged; the move of the default is decided later.
+One switch: what the reader reads under 3.15 the compiler compiles and the runtime runs; under 3.14 no form, IR or
+answer changes (every 3.15 branch is behind `lex/*minor*` in the compiler, `py315()` in the runtime).
+
+- **P3, the compiler** (3.15.2's `symtable.c` and `codegen.c`, `compile.c`, `ast_preprocess.c` deltas, ported where
+  pyi's port of 3.14.10 has the same code): `scope.ae` keeps `ste_in_try_block` and `check_lazy_import_context`'s three
+  errors, `lazy from ... import *`, "duplicate parameter", the `<lambda>`/`<listcomp>`... block names (`_Py_STR(anon_*)`)
+  and `ste_function_name` (a function's `__annotate__` is `f.__annotate__`); `compile.ae` gives `IMPORT_NAME` its flag
+  (IR ARG `[NAME-INDEX FLAG]` under 3.15 only, 1 lazy, 2 forced eager by `_PyCompile_InExceptionHandler`, a non-module
+  scope or `import *`, 0 left to the mode; 3.14's ARG stays the index, so 3.14's IR is byte for byte the same), the
+  module-scope and `*` errors of codegen, a starred element of a list, set or generator comprehension
+  (`LIST_EXTEND`/`SET_UPDATE` at the element's depth, a generator's inner loop of yields) and `**` in a dict
+  comprehension (`DICT_UPDATE`), the positional-only annotations first, `+NUMBER` keys of mapping patterns folded
+  (`fold_const_match_patterns`). No new IR operation: `ir/verify`, the loader's `decodeArg`, the AOT's static imports and
+  the bytecode view (its `IMPORT_NAME` oparg is now the compiler's flag, not 238's recomputation) read the pair.
+- **P4b, lazy imports** (3.15.2's `Objects/lazyimportobject.c`, `Python/import.c`'s lazy half, ceval.c's
+  `_PyEval_LazyImportName`, `_PyEval_LazyImportFrom`, `_PyEval_LoadGlobalStackRef`'s and `_PyEval_LoadName`'s
+  reification, `moduleobject.c`'s getattr, `sysmodule.c`'s API, `initconfig.c`'s option): a Go type `lazy_import`
+  (`types.LazyImportType`) with CPython's fields (root: builtins, absolute name, fromlist; projection: source and
+  attribute; the declaring code and lasti; active), `IMPORT_NAME`'s flag read by the one import operation the eval
+  loop and the AOT share (the AOT runs `import-name` by `AotExec`, so one implementation), reification at the one place
+  each load of a global or a name ends (the eval loop's `loadGlobalAt`/`loadNameGlobal`/the dict-or-global and
+  dict-or-deref loads, and the AOT's `AotLoadGlobal(V)`/`AotLoadName(V)` helpers, which call the same functions), the
+  module's `__getattribute__` (`_Py_module_getattro_impl`: a lazy value reified, pending submodules loaded),
+  `sys.lazy_modules`, `sys.set_lazy_imports`/`get_lazy_imports` (`"normal"`, `"all"`), `sys.flags.lazy_imports`, the filter
+  (`set_lazy_imports_filter(f)`, `f(importer, name, fromlist)`), `builtins.__lazy_import__`, `__lazy_modules__`,
+  `-X lazy_imports=` and `PYTHON_LAZY_IMPORTS`, `ImportCycleError`. A lazy object exists only under 3.15 (only a lazy
+  import makes one), so 3.14's paths pay one type test where a value is read, nothing else.
+- **Judged** against the 3.15.2 oracle on its own tests (each module before and after), 3.14 by the same samples on
+  base and head. Out of this task: P6-P8.
+
+## As built: 239, the language switch (P3 and P4b, 2026-11-09, the Mac VM)
+
+As designed above (Design: 239), behind `REPR_PYTHON_VERSION=3.15`; under 3.14 the IR, the answers and the samples are
+as before (run, below).
+
+- **P3** (`arbace/python/scope.ae`, `compile.ae`, `ir.ae`, `aot.ae`; ported from 3.15.2's `symtable.c`, `codegen.c`,
+  `compile.c`, `ast_preprocess.c`): the lazy-import context errors (try/except, function, class, `lazy from ... import *`)
+  at the statement, "duplicate parameter", the `<lambda>`, `<listcomp>`, `<setcomp>`, `<dictcomp>`, `<genexpr>` block
+  names, `ste_function_name` (`f.__annotate__`, `C.m.__annotate__`), `IMPORT_NAME`'s flag as the IR's `[NAME FLAG]`
+  (the view's oparg is now the compiler's: 238's recomputation `irEagerImport` removed), "lazy imports only allowed in
+  module scope" and "cannot lazy import *", starred comprehension elements and `**` in dict comprehensions, the
+  positional-only annotations first, `+NUMBER` mapping-pattern keys. compile()'s `module=` (keyword-only, str or None)
+  goes to the warnings the compile emits (`warn_explicit(..., module=)`).
+- **P4b** (`go/arbace/py/lazyimport.ae` and hooks in `import.ae`, `eval.ae`, `aot.ae`, `func.ae`, `sys.ae`, `registry.ae`,
+  `builtins.ae`, `builtins_exec.ae`, `builtins_imp.ae`): the design's list, plus: the mode `all` is set after the
+  start's imports (`init_interp_main`) and never applies while importlib installs (pyi installs it at the first import,
+  CPython before any mode); hasattr's lookup and the fromlist's are CPython's `suppress=1` (a pending child then
+  imported by its name); `_imp._set_lazy_attributes`; `_types` under 3.15 (Lib/types.py's fallback derivations and
+  `LazyImportType`), so 3.14's and 3.15's `types.py` both take `from _types import *`; `__cached__` no longer set.
+  The AOT runs `import-name` and `import-from` by `AotExec`, and its load helpers call the eval loop's, so the compiled
+  and the interpreted paths share one implementation (run: the probes below by `bin/pyi aot`, the children of
+  test_lazy_import by `bin/pyi run`).
+- **Hierarchical import locks** (3.15.2's `_bootstrap._resolve_parents`) are Lib: pyi runs importlib's
+  `_bootstrap.py` from the pinned Lib, so they come with 3.15's Lib (P7); nothing in the runtime.
+- **An inlined comprehension's saved names** (`codegen_push_inlined_comprehension_locals`, found by test_unpack_ex's and
+  test_named_expressions' walrus cases): under 3.15 a `DEF_NONLOCAL` name is not saved and a saved name that is not the
+  comprehension's local (an assignment expression's target at module level, `GLOBAL_EXPLICIT` there) resolves by its
+  scope; 3.14 keeps its old (wrong) answer, `y` unbound after `[(y := i), ...]` at module level, until the user decides.
+
+**Counts** (run on the VM; 3.15.2's test modules over 3.14.10's Lib/test, `bin/pyi aot` of libtest.py under the switch,
+as 237's; own verdict; base 413d54d06 with the switch set):
+
+| module (3.15.2's) | oracle: ok / methods | base: ok (methods) | head: ok (methods) | head agrees |
+|---|---:|---:|---:|---:|
+| test_lazy_import | 165 / 166 | 2 (166) | 153 (166), 155 with the two fixed after the run | 152 |
+| test_syntax | 109 / 109 | 39 (48) | 93 (109): the 16 others `cpython_only` | 93 |
+| test_named_expressions | 74 / 74 | 59 (74) | 74 (74) | 74 |
+| test_patma | 343 / 343 | 323 (328) | 338 (343) | 338 |
+| test_unpack_ex (doctests) | 6 / 6 | 0 (1) | 5 (6) | 5 |
+| test_listcomps | 65 / 65 | 64 (66) | 64 (65) | 64 |
+| test_grammar, test_setcomps, test_dictcomps | 75, 2, 10 | 75, 2, 10 | 75, 2, 10 | all |
+| test_type_annotations, test_genexps | 49, 1 | 43, 0 | 43, 0 | 43, 0 |
+
+test_lazy_import's run (59 min: its 130 subprocess tests start `bin/pyi python`, interpreted) put the package where the
+children find it (copied into the worktree's 3.14.10 Lib/test for the run and removed after: a probe's need until 3.15's
+Lib is pyi's); its oracle skips `test_deeply_dotted_name` (the VM build's C stack segfaults there; pyi passes it). Its
+non-passes: `test_retry_after_recursive_access` and `test_concurrent_reification_same_module_high_contention`, fixed
+after the run (`IMPORT_FROM`'s suppressed lookup; `import_ensure_initialized`), each run alone on the head by the
+oracle's script (pass; the committed forms before the fixes fail); the four `_testcapi` skips; the two `LazyImportDisTests`
+(3.14.10's `dis.py` under the switch; with 3.15.2's beside them both pass); the three `LazyImportFinalizationTests` (a
+`__del__` at the interpreter's end: pyi's finalization class); `test_add_lazy_to_exec_builtins_after_specialization` and
+`test_cached_import_releases_builtins` (3.14 gaps, run: a function made by exec does not read the globals'
+`__builtins__`; the interpreted runtime keeps an exec namespace's builtins alive, the compiled one does not).
+The other modules' non-passes are 3.14's (the same methods fail under 3.14) or need 3.15's Lib (test_patma's two
+runtime-checkable protocols: 3.15's typing; its jump-threading test: 3.15's dis), and test_unpack_ex's 3.15 message
+for a `keys()` returning a non-iterable (P6).
+
+**3.14 unchanged** (run, base and head, no switch): `make python-essential` the same lines (check --aot 21 programs: 20
+pass, 1 classed); 3.14.10's test_grammar, test_listcomps, test_patma, test_import, test_importlib, test_types,
+test_type_annotations, test_syntax, test_dis equal method for method; `PYI_SMOKE_ONLY='^(f-flags|g-math-int|f-intbytes|e-gen)'
+bin/pyi runtime check` every package printed and read again the same, every table and control as before, 4 programs and
+1 session equal.
+
+Not done: compile()'s `module=` in `ast.parse` and `symtable` (their 3.15 Lib passes it), unicodedata's and the other P4a
+rests, the `{**x}` 3.15 messages, the lazy-import parts of `pickle`/`copy` of modules and `import *` of placeholders (no
+3.15.2 test reaches them), the 3.15 Lib itself (P7: hierarchical locks, `_find_and_load_lazy_submodule`); P6-P8.
