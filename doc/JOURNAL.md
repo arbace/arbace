@@ -2600,3 +2600,33 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   the checker, the read's order-dependence, C++23's inherited constructors' guides, using-declarations' access for functions.
 - **Slips**: three throwaway commands against the day's rules (a mistyped `sed -i` naming the null device, a wait loop with `pgrep`
   and a discarded output, a process substitution in an inspection command); listed in the survey's "Slips, scratch".
+
+## 2026-11-09: C++'s programs by Arbace's own route, the refusals' biggest groups closed and the switch prepared (branch `cpp-route`)
+
+- **Measured** (the run corpora's 82 programs, bin/cppi check's lists: samples, runtime, gxx-dg-run's every-25th; `arbace.cpp.codegen
+  gen-batch` as `cppi_ir_route` runs it, no clang): 45 generated at the day's start (e6214cd13), **53** on the branch; the refusals by
+  cause in doc/cpp/CPP-SURVEY.md, "As built: cpp-route". The sampling by our route alone (`CPPI_ROUTE=ours bin/cppi check --corpus
+  gxx-dg-run --sample 25`, no clang): 45 generated and run on ci, **44 pass by their own verdict**, 1 the oracle-text class as under
+  clang, none runs wrong; two of the passes (special/initp1.C, cpp0x/defaulted19a.C) are programs clang rejects. Under auto the
+  sampling projects to 62 passes (clang's record 60), none lost. The samples' and runtime's runs are the night's (ci's builder and the
+  runtime's read pass 2.3 GB with their iostream units).
+- **Built** (doc/cpp/CODEGEN.md, G5d; arbace/cpp/sema.ae, codegen.ae, template.ae, arbace/repr/cpp/parse.ae): structured bindings;
+  GNU's `x ?: y`; [expr.cond]'s class-to-scalar operands and same-type rule; aggregates' default member initializers in place with
+  their `this`; value-initialized list fills; lists bound to references; deduction from a reference-typed expression's type; function
+  template redeclarations by their non-type parameters' types; clang's type-parameter test (std::pair's C++17 constructors were declined
+  by the parser); default construction and implicit conversions by constructor templates; explicit template arguments kept for
+  argument-dependent lookup; classes through an ellipsis and va_arg of them (the psABI's §3.5.7); the implicit global allocation
+  functions; `__decltype` at a declaration's start (std::sort); the unexpanded-pack diagnosis for a non-type parameter's type. Four
+  samples of test/cpp/codegen (struct-bind, gnu-cond, va-class, agg-dmi). Tooling: runtime-ci's incremental read no longer drops read.tsv
+  when nothing changed, and `CPPI_CI_CHUNK` reads the runtime in chunks.
+- **Why**: the user's CP240 (b), CP263 (a) and P21 (b) (2026-11-07, 2026-11-08): C++'s eval and AOT count 0.5 while the programs run from
+  clang's recorded IR.
+- **Checked**: codegen-gen: 148 of 149 forms a0c6ad347's byte for byte, the 149th (recursion's bool conditional, now clang's `phi i1`)
+  intended; the record, stale on next since G5c's merges (120 of 149), recorded again: 153 of 153. The dg check's own front end on the
+  every-10th sample: 117 own passes as recorded after cpp0x/variadic170.C's diagnosis (it had passed by a parser decline).
+- **Not done** (proposed CP330-CP336 in the survey): inheriting constructors (std::unique_ptr), std::tuple's constructors, coroutines,
+  GNU vector types, the checker's structured bindings, the eval and AOT facts' weighting after the switch, the generation's time.
+- **Alternatives considered**: running the day's samples and runtime by gcc on the lowered C (the oracle tier's judge, not allowed for
+  an own measure); counting the generated programs without running them (no credit without the run); taking the night8 run's whole ci
+  library (its reader is older): only the 13 units no day process could read were taken, their lowered C byte for byte the checkout's.
+- **Slips**: one process substitution in a throwaway comparison; one kill loop that matched its own shell. Recorded in the survey.

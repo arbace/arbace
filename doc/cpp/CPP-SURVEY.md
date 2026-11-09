@@ -5317,3 +5317,181 @@ an inspection command. Scratch in the worktree's `.tmp/`: `p/` (the probes), `t/
 SemaTemplateDeduction.cpp added), the apply scripts `apply*.py`. `.tmp/t/subm.sh` (copied from `cpp-cx12`'s scratch) did not pass `TREE`
 on to its reads at first: `fctad-b` ran before any edit of the tree, so it is the base it is named for; the access list's base
 (`facc-b`) was run again once the script passed it, and `facc-n`, its first run, is the one whose scoped15 row CP322 names.
+
+## As built: cpp-route (2026-11-09; branch `cpp-route` from next a0c6ad347, begun on e6214cd13)
+
+The user's decided path: CP240 (b) (2026-11-07: the run checks' programs by Arbace's own route, `CPPI_ROUTE=auto`, our code
+generator where it builds and clang's pack otherwise), CP263 (a) (ours-refused deferred once auto is the default) and P21 (b) (the
+runtime on auto after the night's runs hold). By day, light: main's stage 0 (`ARBACE_HOST_EXE`), at most two processes of at most
+about 2 GiB (a watcher killing a process tree past 2.3 GB), `CPPI_THREADS=1`, `CPPI_JOBS=1`, compiler stubs exiting 99 first on PATH
+(clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld, as, opt, llvm-as, lli, llc; their log empty), no gate but `--plan`.
+The rules built are doc/cpp/CODEGEN.md's G5d.
+
+### The measure: the run corpora's programs by our route
+
+The programs of bin/cppi check's lists (bin/lib/cppi/lists.bash): samples (7), runtime (8) and gxx-dg-run's every-25th sampling (67),
+82 in all (the record's: test/cpp/check-linux-amd64.edn and check-every-25-linux-amd64.edn), each through `arbace.cpp.codegen
+gen-batch` as `cppi_ir_route` runs it, no clang. "Generated": our IR made; "refused": its class (gen.refused).
+
+| corpus | generated, e6214cd13 (the day's start) | generated, cpp-route | refused, cpp-route |
+|---|---|---|---|
+| samples (7) | 5 | 6 (io.cpp: std::sort's `__decltype`) | 1: coroutine.cpp (CoyieldExpr) |
+| runtime (8) | 2 | 2 | 6: hello (inheriting constructors: std::unique_ptr's `using __uniq_ptr_impl::__uniq_ptr_impl`, CP330), deferred (GNU's `__complex__`: std::complex<long double>'s `_M_value`), library (the parser: a parameter's type), atomics (`__atomic_thread_fence`), threads, thread-throw (std::thread's pack expansions) |
+| gxx-dg-run every 25th (67) | 38 | 45 | 22 |
+| all (82) | 45 | 53 | 29 |
+
+The refusals by cause (each program by its first refusal):
+
+| cause | e6214cd13 | cpp-route | programs left |
+|---|---|---|---|
+| coroutines (CoawaitExpr, CoyieldExpr, `__builtin_coro_*`, coroutine_traits) | 7 | 7 | pr106188, co-await-20-do-while-cond, co-yield-02-loop, class-02-templ-parm, lambda-04-templ-parm, pr95519-01-initial-suspend, samples/coroutine |
+| GNU vector types (and a vector compound literal) | 5 | 5 | tmplattr5, vshuf-v16hi, is_aggregate, vector1, attribute-test-1 |
+| the native parser's declines | 4 | 4 | explicit-obj-default2 and subscript12 (C++23's explicit object parameters, multidimensional subscripts), vbase8-10 (a declaration without a type), library |
+| pack expansions in expressions and types | 3 | 3 | embed-26 (an #embed's pack), pr77550 (a pack-expand type form), thread-throw |
+| threads (std::thread's) | 2 | 2 | atomics (`__atomic_thread_fence`), threads |
+| BinaryConditionalOperator | 2 | 0 | (cond3, pr83252 generate) |
+| CXXDefaultInitExpr, ImplicitValueInitExpr | 3 | 0 | (pr79937-3, initlist-throw2, unroll1 generate) |
+| structured bindings (DecompositionDecl) | 1 | 0 | (decomp1 generates) |
+| classes through an ellipsis | 1 | 0 | (deferred.cpp passes it; refused later by `__complex__`) |
+| the implicit global operator new | 1 | 0 | (defaulted19a generates) |
+| std::sort's statement decline, std::string from a literal, std::pair's C++17 constructors | (io, hello) | 0 | (io generates; hello refused later: CP330) |
+| singles | 8 | 8 | ucnid-1 (UCN identifiers), builtin-clear-padding-4, range-for14 (a range-for's ADL begin/end over a non-array, non-member class), null-8 (GCCAsmStmt), thread_local12e (a thread-local's dynamic initialization: clang's TLS wrapper), spaceship-synth4 (a class operand with two conversion functions), hello, deferred |
+
+### Run equal: the sampling by our route alone
+
+`CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --sample 25` (no clang at all: every program our IR or a build failure, ir.status 98),
+on ci with the lowered runtime, judged by each program's own verdict (test/cpp/selfref.ae: 205 of 225 reference cases) against the
+recorded sampling: **45 generated, 45 built and run: 44 pass by their own verdict, 1 fails** (template/pretty1.C, the class
+oracle-text by either route: `__PRETTY_FUNCTION__`'s text is the compiler's); the 22 refused are build failures there (the
+regressions the run lists are those, by design of `ours`). Two of the 44 are improvements on clang's record: special/initp1.C and
+cpp0x/defaulted19a.C, both oracle-rejected by clang (clang refuses `init_priority (10)` and `new A[5]` of a class whose destructor is
+deleted, [expr.new]/27, which g++ accepts and runs; the test's verdict is g++'s run's). No program our route generates runs wrong.
+
+Under `auto` the sampling is then: 42 programs by our route passing (the 44 less opt/unroll1.C and torture/pr50189.C, whose
+dg-options auto gives clang), the 2 option programs and 18 refused programs by clang's pack as recorded (pass), 4 refused that clang
+also rejects (abi/vbase8-10.C, cpp/embed-26.C, init/vector1.C, torture/vshuf-v16hi.C: `ours-refused`, deferred, CP263 (a)), and
+pretty1 as recorded: **62 pass (clang's record: 60), no recorded pass lost**, 4 deferred, 1 oracle-text.
+
+`CPPI_ROUTE=ours bin/cppi check --aot --corpus gxx-dg-run --sample 25` (cf2g's Go built by TamaGo's go, `CPPI_GO_P=1 CPPI_SHARD=2`):
+AOT_RESULT
+
+The samples' and the runtime corpus's runs are the night's: their programs link the runtime's iostream, locale and string units,
+whose checked forms ci's builder holds (`nodes-list` passed 2.3 GB on the samples before its first program ran), and the lowered
+runtime's read (`bin/cppi runtime-ci`) holds one unit past 2.3 GB alone (c++20/tzdb.cc, 3.5 MB of lowered C: 854 s and its peak in
+night8's run). For the day's sampling the runtime's ci library was read here in chunks (`CPPI_CI_CHUNK`, below) for 186 of its 199
+units; the 13 heaviest (tzdb, format, sstream-inst, print, text_encoding, the experimental filesystem's six, contract and cx-rt),
+whose lowered C is byte for byte the checkout's, were taken from night8's read of them (reader key f0143f74, the checkout's 27d5c730:
+repr/c's changes since are the re-entry pragmas, #embed and the converter's C23 forms, none in lowered C); the night reads them afresh.
+
+### Fixed on the way (tooling)
+
+- `bin/cppi runtime-ci`'s incremental read: with no unit changed it dropped every row of read.tsv (`awk 'NR == FNR ...'` over an empty
+  first file: NR == FNR held for read.tsv's rows), so every unit was read again; FILENAME == ARGV[1] now.
+- `CPPI_CI_CHUNK=N`: the lowered runtime read N units a process (read-lib keeps what read.tsv says is read; the chunks only the units not
+  read), the index made at the end; the reader's heap grows with the units one process reads (the 199 at once pass 3 GB).
+
+### The code generator's samples (codegen-check's light half)
+
+`bin/cppi codegen-gen` (gen-list over test/cpp/codegen, no clang or gcc): next a0c6ad347 itself was 120 of 149 as recorded (29 not:
+test/cpp/codegen/forms.sha256 predates G5c's merges, which changed 21 samples' forms and added 8 unrecorded samples, and rtti, recorded
+refused, now generates). This branch against a0c6ad347's run, sample by sample: **148 of the 149 forms byte for byte a0c6ad347's**; the
+one difference is intended: recursion's `b ? true : f()` is a `phi i1` and its bool's store, clang's (before a `phi i32` of the bools
+promoted, [expr.cond]/7.1); the 4 new samples generate. `codegen-gen --record`: 153 of 153 generated, none refused (refusals.edn `{}`,
+forms.sha256's 153 digests), so the `--full` step cpp-codegen-gen passes again.
+
+### The dg check's own front end (CX12's record)
+
+`bin/repr-cpp dg --corpus dg-error --front native --sample 10` (the checker is sema's, which these rules touch): 454 files, own pass 117
+as recorded, one regression found and fixed: cpp0x/variadic170.C had passed its dg-error line only by the parser's decline of
+`template <typename A<T::value>::type>` as a type parameter; with the parameter read as clang reads it, the parser now diagnoses the
+unexpanded pack as clang does (`--only` it: own pass 1). The checker's structured bindings stay cpp-props3's (the rules checked, the
+declaration refused: CP331).
+
+### The switch, prepared (CP240 (b))
+
+- The default flip, one line, when the night's comparison holds: `bin/lib/cppi/route.bash`'s `cppi_route_default=clang` becomes
+  `cppi_route_default=auto` (bin/lib/cppi/check's and check-aot's headers already name route.bash's default; CP263 (a)'s ours-refused
+  class is in test/cpp/divergences.edn).
+- independence.edn's C++ eval and AOT facts after the night's records (written when it holds; the checked-in facts stay 0.5 until then,
+  since the gate's runs are clang's until the flip): `:cases {:own-route [N 1] :pack [M 0.5]}`, N the recorded passes whose route
+  file says ours (`WORK/files/ID/route`), M = 82 - N. Measured today: N = 42 of the sampling's 67 (the samples' 6 and the runtime's 2
+  that generate are the night's runs); projected N = 42 to 50, so eval and AOT 0.756 to 0.805 each by the brief's split (CP333 (a)),
+  or the mean with the runtime's (G5c's model: 0.5 now, 0.657 with P21 (b)) by CP333 (b).
+
+| measure | next a0c6ad347 | cpp-route (facts unchanged) | after the night's switch, CP333 (a) | after it, CP333 (b) with P21 (b) |
+|---|---|---|---|---|
+| completeness | 76.1 | 76.1 | about 76.4 (the sampling's eval and AOT 60 to 62 passes, 6 oracle-rejected to 4 deferred) | the same |
+| maturity | 100.0 | 100.0 | 100.0 | 100.0 |
+| independence | 67.84 (read 0.657, eval 0.5, AOT 0.5, print 1, judge 0.735) | 67.84 | 78.1 to 80.0 (eval and AOT 0.756 to 0.805) | 75.4 to 77.1 (eval and AOT 0.707 to 0.731) |
+
+### The night's commands (one process at a time, at most about 1.5 GiB unless named; stubs first on PATH but where named)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace CPPI_JOBS=1 CPPI_THREADS=1 CPPI_CI_MEMLIMIT=3GiB
+bin/cppi runtime-build && bin/cppi runtime-ci                     # the checkout's key (records mode, no gcc); runtime-ci about 3 GB, 40 min
+bin/cppi route-compare                                            # samples and runtime: clang then auto; exit 0 = no clang pass lost
+bin/cppi route-compare --aot
+bin/cppi route-compare --corpus gxx-dg-run --sample 25            # expect auto 62 (clang 60), 4 ours-refused (deferred)
+bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25
+# all four exit 0: route.bash's cppi_route_default=auto (the one line), then the records written by the new default:
+bin/cppi check --record && bin/cppi check --aot --record
+bin/cppi check --corpus gxx-dg-run --sample 25 --record && bin/cppi check --aot --corpus gxx-dg-run --sample 25 --record
+# (equivalently before the flip: CPPI_ROUTE=auto bin/cppi check --record, CPPI_ROUTE=auto bin/cppi check --aot --record, and the samplings')
+# then independence.edn's eval and AOT :cases {:own-route [N 1] :pack [M 0.5]} (N: the records' passes routed ours), bin/reap --record,
+# bin/crops-score --record; P21 (b): bin/cppi's cppi_runtime_route_default=auto after G5c.8's runs (CODEGEN.md) hold
+bin/cppi codegen-gen                                              # cpp-codegen-gen: 153 of 153 as recorded
+bin/repr-cpp dg --corpus dg-error --front native                  # cpp-dg.dg-error-own: the record held (variadic170 by its diagnosis)
+bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2           # the oracle tier (clang and gcc live): the 4 new samples' runs against clang's route's
+```
+
+### Proposed (CP330-CP336)
+
+- **CP330: inheriting constructors (`using B::B`, [namespace.udecl]/3, [class.inhctor.init]).** std::unique_ptr's storage,
+  `__uniq_ptr_data`, inherits `__uniq_ptr_impl`'s constructors, so every unique_ptr at C++17 and later is refused (runtime/hello.cpp's
+  last refusal; libstdc++'s shared_ptr and function too). (a) Sema's inherited constructors (found by lookup, the base's
+  constructors as candidates of the derived class with the derived's other subobjects default-initialized) and clang's code: at -O0 an
+  inherited constructor call is a call of the derived class's inheriting constructor, mangled `C1`/`C2` with the base (Itanium
+  §5.1.4.3's `CI1 <base>`/`CI2`), its body the base constructor's call and the members' initializers; about a day. (b) As now.
+  **Recommended: (a).**
+- **CP331: structured bindings in the checker.** The code generator models them; the checker (CX12) still checks cpp-props3's rules and
+  refuses the declaration. (a) The checker analyzes the modelled declaration too (its uses then checked; the dg own record measured on
+  the every-10th sample and recorded at night); (b) as now. **Recommended: (a)** after the night's own record.
+- **CP332: std::tuple's constructors.** `std::tuple<int, char, long> t(4, 'z', 6L)`, `std::make_tuple`, map's `operator[]` (its
+  `forward_as_tuple`) find no viable constructor (their `requires` over packs, `__valid_args<_UElements...>()`, and C++17's
+  `_TCC<...>::template _ConstructibleTuple<...>()`); the next group of the library's programs after CP330. (a) Trace and fix them as
+  std::pair's were (this branch); (b) as now. **Recommended: (a).**
+- **CP333: the eval and AOT facts after the switch.** (a) The brief's split: a program our route runs to its verdict 1, one from clang's
+  pack 0.5 (projected 78.1 to 80.0); (b) G5c's model: the mean of the programs' split and the runtime's (0.5, 0.657 with P21 (b)),
+  since a program by our route still links a runtime of clang's IR (projected 75.4 to 77.1). **Recommended: (b)**: the runtime is
+  half of what runs, and (b) moves with P21 (b) and P22.
+- **CP334: coroutines by our route** (7 of the 29 refusals, the largest group): clang's coroutine lowering at -O0 (CoroSplit's frame,
+  resume and destroy, the `llvm.coro.*` intrinsics, which the lowering refuses: `:coroutine`). (a) Our code generator emits the split
+  functions itself (the frame a struct, resume and destroy switches, as LLVM's CoroSplit makes them at -O0), no `llvm.coro.*`; about two
+  days. (b) Defer; auto keeps clang's pack for them. **Recommended: (b)** until CP330 and CP332.
+- **CP335: GNU vector types** (5): (a) `vector_size` types as LLVM vectors and their lowering to C (gcc's vector extension in the
+  lowered C is the oracle tier's only; ci would need vectors); (b) defer, clang's pack. **Recommended: (b).**
+- **CP336: the generation's time.** Our route parses each program's headers in full: 60 to 450 s for the samples' and runtime's
+  iostream programs (hello 454 s at one thread), 1 to 15 s for most of g++.dg's; the samples' and runtime's 15 programs add about 25
+  minutes to cpp-check's and cpp-aot's runs under auto. (a) P15's full parse cache (`CPP_FULL_CACHE=1`, G5.2) on for the run checks'
+  gen-batch, keyed as the skim cache; (b) accept. **Recommended: (a)**, measured at night.
+
+### Checked (light; the stubs first on PATH, their log empty)
+
+| check | result |
+|---|---|
+| gen-batch over the 82 programs at e6214cd13 and at the branch | 45 and 53 generated (tables above); 909 s and 1,272 s at one thread, 1.5 GB |
+| `CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --sample 25` | 45 generated, 44 pass, 1 oracle-text; 22 refused; 1.6 GB |
+| `CPPI_ROUTE=ours bin/cppi check --corpus samples,runtime` | not run: nodes-list passed 2.3 GB (the night's) |
+| `bin/cppi runtime-build` (records mode) | 198 of 198, 1.1 GB, 11 min |
+| `CPPI_CI_CHUNK=5 bin/cppi runtime-ci` | 186 of 199 units read under 1.4 GB; the 13 heaviest past 2.3 GB alone (above) |
+| `bin/cppi codegen-gen`, `--record` | 148 of 149 a0c6ad347's forms, recursion intended; 153 of 153 recorded |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10`; `--only` variadic170 | 117 own passes as recorded, 1 regression; fixed: 1 of 1 |
+| probes (`.tmp/micro/`): std::pair's default and (const T1&, const T2&) constructors at C++17, the trait chain of `__is_implicitly_default_constructible`, structured bindings over arrays, structs, pairs, std::sort at C++23, std::string from a literal | generate |
+
+### Slips, scratch
+
+One process substitution, `diff <(...) <(...)`, in a throwaway comparison of unit lists, against the day's rules; one kill loop matched
+its own shell's command line (a pattern in the loop's text) and ended the shell, no other process touched. Scratch in the worktree's
+`.tmp/`: `g0/`, `g3/`, `g4/` (the generation runs), `chk-ours/`, `chk-ours25/`, `aot-ours25/` (the runs), `cg1/`-`cg4/` (codegen-gen),
+`base/` (a0c6ad347's worktree and its `cg0/`), `micro/` (the probes), `probe/` (the native tree's dump), `m/` (the lists), `stubs/`,
+`memwatch.sh`, `gen*.sh`, `mklists.sh`, `ps.sh`, and the runtime `cppi/runtime/` (its ci library, 13 units from night8's).
