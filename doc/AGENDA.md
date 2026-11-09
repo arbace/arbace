@@ -61,7 +61,10 @@ Six crops are above 90 on all three. What the others still need:
   serialization JCS167, the test library JCS330-JCS339) land with tonight's conversion; their gains count only once night
   11 records the whole corpus. Next: F15 (java.lang.invoke, `java-invoke`, for the next Java night), JCV11 (b) (the print
   cell judged by the round trip's own checks, class files a sub-level), the rest of
-  [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking.
+  [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking. Independence 59.7: read, eval, AOT and print
+  0.5 while the platform is the JDK build's (the user's ruling, 2026-11-09); `java-indep` (JCS341-JCS343 built, for the
+  11-11 merge) measures the own platform (`bin/javac-vendor classes modules`) and proposes JCS359 (the platform made by javac on
+  Arbace and consumed: Java to 99.7), JCS360, JCS361.
 - **C++** (completeness, independence): read 1,182 and print 1,665 by design are most of the gap (96.8 without them); the
   print cell moves to the own round trip (CP243 (a): its records tonight, the judge 0.735 → about 0.90). Independence: the
   read stage 0.66 and eval and AOT 0.5 (the programs run from clang's IR packs); CX12's own front end (`dg --front

@@ -96,7 +96,10 @@
 #                             WORK/jdk-originals; JRT_WORK_RT names others), with the round
 #                             trip's javac options (bin/lib/repr-java/roundtrip, -g:none); and
 #                             java.base (JFS2 (a)): jdk26u's java.base as the JDK build compiles it,
-#                             also compared with the build's own class files. In WORK/classes/
+#                             also compared with the build's own class files; modules (JCS359's
+#                             first step): every module of the platform (JAVAC_VENDOR_MODULES: some) as
+#                             the JDK build compiles it, by javac on Arbace alone, against the build's
+#                             class files (no JVM; WORK/classes/modules/summary.tsv). In WORK/classes/
 #   bin/javac-vendor platform [DIR]
 #                             the platform made into DIR (default WORK/platform) and checked
 #                             against OUT/platform.sha256; prints DIR (repr/java on Arbace,
@@ -560,16 +563,79 @@ base_corpus() {
   [ $st = 0 ] && [ $d1 = 0 ] && [ $d2 = 0 ]
 }
 
+# module_opts B MODULE: the javac options the build compiled MODULE with (opts), from its batch's command line
+# (jdk/modules/MODULE/_the.MODULE_batch.cmdline, the build tree's own file, split as the shell that ran it
+# split it), the javacserver's arguments less the diagnostics' (-Xlint, -Xdoclint, -Werror), the dependency
+# plugin's and the server's -XD options, -cp, -d, -h and the file list: 63 modules take java.base's but
+# -XDstringConcat=inline, four with it, jdk.internal.vm.ci -source 25 and -parameters
+module_opts() {
+  local f=$1/jdk/modules/$2/_the.$2_batch.cmdline
+  opts=()
+  [ -f "$f" ] || return 1
+  eval "set -- $(cat "$f")"
+  while [ $# -gt 0 ] && [ "$1" != javacserver.Main ]; do shift; done
+  shift 2
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -Xlint*|-Xdoclint*|-Werror|-XDinternalAPIPath=*|-XDLOG_LEVEL=*|-XDmodifiedInputs=*|'-Xplugin:depend '*|@*) shift ;;
+      -cp|-d|-h) shift 2 ;;
+      *) opts+=("$1"); shift ;;
+    esac
+  done
+}
+
+# modules_corpus: every module of the platform (JAVAC_VENDOR_MODULES: some, by name) compiled by javac on Arbace
+# as the JDK build compiles it (the module's batch file list and options, module_opts), from jdk26u's sources and the build
+# tree's generated ones alone (--module-source-path, --system none: no class file read), each against the
+# build's class files byte for byte but its module-info.class (rewritten after javac, base_corpus); no JVM:
+# the build's classes are the JDK's javac's. The first step of an own platform (doc/classes/
+# JAVA-CONFORMANCE-SURVEY.md, JCS359); WORK/classes/modules/MODULE, a line a module in
+# WORK/classes/modules/summary.tsv (MODULE FILES BUILD-CLASSES ARBACE-CLASSES RESULT MS PEAK-KB)
+modules_corpus() {
+  local c b m w st=0 r n1 n2 t0 t1 ms kb all=() mods
+  c=$(conf); b=$(dirname "$c")
+  mkdir -p "$work/classes/modules"
+  : > "$work/classes/modules/summary.tsv"
+  mods=${JAVAC_VENDOR_MODULES:-$(platform_modules)}
+  local opts=()
+  for m in $mods; do
+    module_opts "$b" "$m"
+    w=$work/classes/modules/$m
+    rm -rf "$w"; mkdir -p "$w/arbace" "$w/build"
+    [ -f "$b/jdk/modules/$m/_the.${m}_batch.filelist" ] || { echo "   $m: no batch file list in the build tree"; printf '%s\t-\t-\t-\tno-list\t-\t-\n' "$m" >> "$work/classes/modules/summary.tsv"; st=1; continue; }
+    grep -v '^$' "$b/jdk/modules/$m/_the.${m}_batch.filelist" > "$w/files.list"
+    t0=$(date +%s%N)
+    r=ok
+    (cd "$w" && TMPDIR=$work/tmp busybox time -v "$javac_exe" "$work/javac.ae" "${opts[@]}" -d "$w/arbace" "@$w/files.list") > "$w/arbace.log" 2> "$w/arbace.err" || r=failed
+    t1=$(date +%s%N); ms=$(( (t1 - t0) / 1000000 ))
+    kb=$(sed -n 's/.*Maximum resident set size (kbytes): *//p' "$w/arbace.err" | tail -1)
+    (cd "$b/jdk/modules" && find "$m" -name '*.class' ! -path "$m/module-info.class" | while read -r f; do mkdir -p "$w/build/$(dirname "$f")"; ln -s "$b/jdk/modules/$f" "$w/build/$f"; done)
+    n1=$(find -L "$w/build" -name '*.class' | wc -l); n2=$(find "$w/arbace" -name '*.class' ! -name module-info.class | wc -l)
+    if [ $r = ok ]; then
+      if diff -r -x module-info.class "$w/build/$m" "$w/arbace/$m" > "$w/build.diff" 2>&1; then r=equal; else r=differ; fi
+    fi
+    [ $r = equal ] || st=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$m" "$(wc -l < "$w/files.list")" "$n1" "$n2" "$r" "$ms" "${kb:--}" >> "$work/classes/modules/summary.tsv"
+    echo "   $m: $(wc -l < "$w/files.list") files, $n1 classes in the build (but module-info), $n2 by javac on Arbace: $r ($ms ms, peak ${kb:-?} kB)"
+    # the module's class files are kept only when they differ (the evidence); an equal module's are the build's
+    [ $r != equal ] || rm -rf "$w/arbace" "$w/build"
+  done
+  awk -F'\t' '{n[$5]++} END {printf "   modules: %d; ", NR; for (k in n) printf "%s %d ", k, n[k]; print ""}' "$work/classes/modules/summary.tsv"
+  return $st
+}
+
 # classes CORPUS...: javac on Arbace against the JVM's javac (JN3)
 classes() {
   local c st=0 frozen orig
-  . "$root/bin/lib/java26.bash"; arbace_use_java26 || return 1   # the reference javac: Java 26
+  # the reference javac: Java 26 (but for the modules corpus alone, which compares with the build's classes)
+  if [ "$*" != modules ]; then . "$root/bin/lib/java26.bash"; arbace_use_java26 || return 1; fi
   javac_exe=${JAVAC_EXE:-$root/target/arbace-go/amd64/arbace-javac}
   [ -x "$javac_exe" ] || fail "no $javac_exe (bin/arbace-go --build-java, or JAVAC_EXE)"
   mkdir -p "$work/classes" "$work/tmp"
   printf '(System/exit (jdk.internal.jrt.javac.Main/run (into-array String *command-line-args*)))\n' > "$work/javac.ae"
   platform "$work/platform" || return 1
-  echo "== javac on Arbace ($javac_exe) against the JVM's ($(javac -version 2>&1)); the platform ${out#$root/}/platform.sha256"
+  if [ "$*" = modules ]; then echo "== javac on Arbace ($javac_exe) against the JDK build's class files; the platform ${out#$root/}/platform.sha256"
+  else echo "== javac on Arbace ($javac_exe) against the JVM's ($(javac -version 2>&1)); the platform ${out#$root/}/platform.sha256"; fi
   for c in "$@"; do
     case $c in
       baseline)
@@ -593,7 +659,8 @@ classes() {
         # of the build's options: -h (the native headers), -Xplugin:depend and the -XD options of
         # its javacserver, -Xlint:all, -Xdoclint and -Werror (diagnostics only)
         base_corpus || st=1 ;;
-      *) fail "no corpus $c (baseline, samples, jdk, java.base)" ;;
+      modules) modules_corpus || st=1 ;;
+      *) fail "no corpus $c (baseline, samples, jdk, java.base, modules)" ;;
     esac
   done
   return $st

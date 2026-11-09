@@ -167,7 +167,8 @@
 #                      the survey's §3.1 categories), each test's source set as javac -sourcepath DIR
 #                      parses it, the files renamed, compiled by the JDK's javac (as the test's
 #                      @compile options say; and with -g:none ... for the classes level), each main
-#                      action run twice (in an empty .tmp/java-check/w/ID, -Dtest.src=DIR -Dtest.classes=...,
+#                      action run twice (in an empty .tmp/java-check/w/ID, -Dtest.src=DIR -Dtest.classes=... and jtreg's other
+#                      standard properties, test.jdk, test.root, test.name, test.file, ..., JCS341 (a),
 #                      HotSpot's JIT options dropped, -Xmx2g, 60 s; stdout's digest and length with the
 #                      run's places masked, JCS70 (a), also with identity hash codes masked, JCS17 (b);
 #                      "-" for the digests of a run the two runs disagreed on, JCS80 (a); stderr's first
@@ -245,6 +246,22 @@ check_pin() {
   local c
   c=$(git -C "$jdk" rev-parse HEAD 2>&1) || { echo "java-check: no jdk26u checkout $jdk (JDK)" >&2; return 1; }
   grep -q "$c" "$root/jdk/javac/platform.sha256" || { echo "java-check: $jdk is at $c, not the platform's pin (jdk/javac/platform.sha256)" >&2; return 1; }
+}
+
+# jtreg_props JDKHOME BASE PATH CLS (JCS341 (a)): jtreg's standard system properties beside test.src and
+# test.classes, as jtreg gives every run of a test: test.jdk (JDKHOME: the JDK's home on the reference's
+# side, on Arbace's WORK/no-jdk, a path that is no JDK, so that a test launching a JVM or a JDK tool fails
+# into the class it would anyway), test.root (the directory of the TEST.ROOT above the test's file, else
+# the file's own), test.name (the file's path from test.root, without a #id), test.file (BASE/PATH, the
+# test's file), test.vm.opts and test.java.opts (empty: the check gives a run no VM options) and
+# test.class.path (CLS, test.classes); one -Dk=v a line
+jtreg_props() {
+  local jh=$1 base=$2 rel=${3%%#*} cls=$4 f r
+  f=$base/$rel; r=$(dirname "$f")
+  while [ "$r" != "$base" ] && [ "$r" != / ] && [ ! -f "$r/TEST.ROOT" ]; do r=$(dirname "$r"); done
+  [ -f "$r/TEST.ROOT" ] || r=$(dirname "$f")
+  printf '%s\n' "-Dtest.jdk=$jh" "-Dtest.root=$r" "-Dtest.name=${f#"$r"/}" "-Dtest.file=$f" -Dtest.vm.opts= -Dtest.java.opts= \
+    "-Dtest.class.path=$cls"
 }
 
 # the classes' digest: the SHA-256 of the sha256sum listing of the class files under DIR
@@ -347,8 +364,11 @@ record_runs() {
   : > "$work/empty"
   # the run's directories (JCS19 (b)): the working directory and the temporary one named alike
   # on both sides (run_dirs), the class files under test.classes
-  local w tmp
+  local w tmp tprops=()
   read -r w tmp <<< "$(run_dirs "$id")"
+  # JCS341 (a): jtreg's standard properties, test.jdk the JDK's home (the plan's path, relative to its root's place)
+  mapfile -t tprops <<< "$(jtreg_props "$JAVA_CHECK_JDK" "$(awk -F'\t' '$1=="root"{print $3}' "$d/plan.tsv")" \
+                                       "$(awk -F'\t' '$1=="path"{print $2}' "$d/plan.tsv")" "$cls_dir")"
   while IFS=$'\t' read -r -a x; do
     i=${x[0]}; cls=${x[2]}
     # JCS335 (a): the run's system properties (props.tsv: I, then each -Dk=v), before the class as jtreg gives them
@@ -357,7 +377,7 @@ record_runs() {
     for k in "" 2; do
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
       st=0; (cd "$w" && TMPDIR=$tmp timeout -k 5 "$(jdk_run_limit "${x[1]}")" java -Xmx2g ${jexp[@]+"${jexp[@]}"} -cp "$cls_dir" -Dtest.src="$dir" -Dtest.classes="$cls_dir" \
-               -Djava.io.tmpdir="$tmp" ${jprops[@]+"${jprops[@]}"} "$cls" "${x[@]:3}" < "$work/empty" > "$d/out" 2> "$d/err") || st=$?
+               "${tprops[@]}" -Djava.io.tmpdir="$tmp" ${jprops[@]+"${jprops[@]}"} "$cls" "${x[@]:3}" < "$work/empty" > "$d/out" 2> "$d/err") || st=$?
       echo $st > "$d/run$i.exit$k"
       # the run's directories masked (JCS70 (a)); a mark when they were in stdout
       mask_dirs "$w" "$tmp" < "$d/out" > "$d/out.m"
@@ -400,7 +420,7 @@ record_ref() {
     [ -s "$list" ] || { echo "java-check --record-ref: --only '$only' plans no test (it is matched against each plan's text and each test's id)" >&2; return 1; }
   fi
   echo "== java-check: the source sets of $(wc -l < "$list") tests (javac -verbose -sourcepath), $jobs at a time" >&2
-  export -f src_of src_rel record_sources record_runs jdk_run_limit classes_sha first_line mask_hashes mask_dirs run_dirs
+  export -f src_of src_rel record_sources record_runs jtreg_props jdk_run_limit classes_sha first_line mask_hashes mask_dirs run_dirs
   export root work classes_opts_s="${classes_opts[*]}"
   xargs -a "$list" -P "$jobs" -I{} bash -c 'record_sources "$1"' _ {}
   jc rename "$work" > "$work/rename.txt"
@@ -720,6 +740,10 @@ judge_own() {
     return 0
   fi
   if [ "$st" = 97 ]; then printf 'fail\tan uncaught exception in another thread (jtreg'"'"'s rule): %s\n' "$(grep -m1 '^java-check: uncaught: ' "$err" | sed 's/^java-check: uncaught: //' | tr '\t' ' ' | cut -c1-300)"; return 0; fi
+  # JCS342 (a): an uncaught jtreg.SkippedException (jdk.test.lib's: the test cannot run here) is jtreg's skip, as on the JDK's side
+  if [ "$st" != 0 ] && first_line "$err" | grep -qE '^Exception in thread "[^"]*" jtreg\.SkippedException\b'; then
+    printf 'skip\t%s\n' "$(first_line "$err" | sed -E 's/^Exception in thread "[^"]*" //')"; return 0
+  fi
   if [ "$st" != 0 ]; then printf 'fail\tstatus %s (expected 0): %s%s\n' "$st" "$(first_line "$err")" "$(root_cause "$err")"; return 0; fi
 }
 
@@ -778,6 +802,10 @@ run_actions() {
   [ -z "${ARBACE_COVER_DIR:-}" ] || [ "$level" != interp ] || exe=$cover_rexe
   read -r w tmp <<< "$(run_dirs "$id")"
   tmo=$(test_limit "$(awk -F'\t' '$1 == "test" { print $2; exit }' "$p/plan.tsv")")
+  # JCS341 (a): jtreg's standard properties (jtreg_props), test.jdk WORK/no-jdk: no JDK on Arbace's side
+  local tprops=() tbase=$jdktest
+  [ "$(awk -F'\t' '$1=="root"{print $2}' "$p/plan.tsv")" != checkout ] || tbase=$root
+  mapfile -t tprops <<< "$(jtreg_props "$work/no-jdk" "$tbase" "$(awk -F'\t' '$1 == "test" { print $2; exit }' "$p/plan.tsv")" "$work/classes/$id")"
   while [ -z "$res" ] && IFS=$'\t' read -r -a x; do
     [ "${x[0]}" = run ] || continue
     i=${x[1]}
@@ -794,7 +822,7 @@ run_actions() {
       st=0; (cd "$w" && export TMPDIR="$tmp" && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } \
                && { [ ! -f "$p/classes.dir" ] || export ARBACE_PATH=${ARBACE_PATH:+$ARBACE_PATH:}$(cat "$p/classes.dir"); } \
                && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env "java-$level" "$id"); } && limited "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
-               -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" ${props[@]+"${props[@]}"} -- "${x[@]:9}" \
+               -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" "${tprops[@]}" -Djava.io.tmpdir="$tmp" ${props[@]+"${props[@]}"} -- "${x[@]:9}" \
                < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
       ojr=""
       if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
@@ -1386,7 +1414,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe${texe:+; the tests naming the javac API on $texe})" >&2
-  export -f src_of tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
+  export -f src_of tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions jtreg_props run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe texe tplatform tool_re cf_re reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
@@ -1714,7 +1742,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit compiled_one run_actions jtreg_props judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"

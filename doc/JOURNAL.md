@@ -3659,3 +3659,31 @@ night (not tonight's).
   `test-private-reflection`, `test-inner-ctor-annotations` with their controls); `bin/jrt test --package jrt` ok; `bin/reap` 0
   problems; `bin/crops-score --judge --strict` 0 problems; `bin/gate --plan` exit 0. The runs of t07686, t07677 and t04758 need
   the night's executable: the night's commands are in the triage's "As built: JCS350, JCS351, JCS353".
+
+## 2026-11-09: JCS340-JCS343, JCS357, JCS358 built; Java's independence and the own platform (branch `java-indep`)
+
+The user accepted JCS340 (a), JCS341 (a), JCS342 (a), JCS343 (a), JCS357 (b), JCS358 (b) (about 14:20) and ruled that the
+platform's class files are a toolchain's product, 0.5 in independence. Branch `java-indep` from `java-night` f4be0ea61, with
+`java-testlib2` (3185e9d98) and `java-invoke2` (3abb92b82) merged (each a journal conflict only: both sides' entries kept, in
+order). Built in the light lane (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS340-JCS343, JCS357, JCS358"):
+
+- JCS341 (a): `bin/java-check`'s `jtreg_props`: jtreg's `test.jdk` (the JDK's home on the reference, `WORK/no-jdk` on Arbace),
+  `test.root`, `test.name`, `test.file`, `test.vm.opts`, `test.java.opts`, `test.class.path` on both sides. Of the committed
+  reference, 9 tests name one; the JDK recorded again (by hand, the oracle, 77 s): t07740 and t08311 go from fail to pass on the
+  JDK; not committed (they need rows at every level, the compiled one a j2g run): the night's commands.
+- JCS342 (a): `java.check/gather` records an uncaught `jtreg.SkippedException` as `:skip`; `judge_own` judges it `skip` on
+  Arbace, the class `:jtreg-skip`.
+- JCS343 (a): the class `:renamed-names`. JCS340 (a), JCS357 (b), JCS358 (b): as built.
+- Independence: `bin/crops-score --crop java` 59.7% before and after (read, eval, AOT, print 0.5 by the ruling, judge 0.986). The
+  only honest lever is the platform itself; as its first step, decision-free, `bin/javac-vendor classes modules`: every module
+  compiled by javac on Arbace as the build compiles it (its batch's options parsed from the build's command line) against the
+  build's class files. By day java.logging equal, jdk.zipfs and java.prefs one anonymous class each differing by
+  LocalVariableTable names (`arg0` in the build's javacserver). Proposed JCS359 (an own platform: the modules, the 16 modules'
+  generated sources on the tool, the descriptors, the platform assembled and consumed; Java to 99.7%), JCS360 (javac on
+  Arbace's output as it is, the differences known), JCS361 (the 207 `:stdout` tests' judge; as is).
+- Checks: `bin/java-check --essential` on `next`'s gate executable 428 of 428, 0 regressions; `bin/reap` 0 problems;
+  `bin/crops-score --judge --strict` 0 problems.
+
+Alternatives considered: committing the two re-recorded reference lines without their level rows (the REAP cells would lose
+cases until the night: no); renaming string literals for JCS343 (the user chose (a)); scoring the platform 1 because java.base's
+class files by javac on Arbace already equal the build's (JN3.5): the ruling says the platform must be Arbace's own, consumed.

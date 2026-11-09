@@ -7002,3 +7002,9 @@ its own (`(this$0, superOuter, args..., captured...)`); the interpreter sets the
 (`super-outer-fields`), so JCS351 publishes such a constructor without it, and a reflective construction leaves it null. (a) The
 super-outer parameter published and set (`implicit` gains a third group: the superclass's field), half a day with a fixture;
 (b) as built. **Recommended: (b)**: an anonymous class is not constructed reflectively in the corpus.
+
+## Decided (the user, 2026-11-09, about 14:20): JCS357, JCS358
+
+JCS357 (b) and JCS358 (b), as recommended: as built until a test reads a local or anonymous class's constructor parameter
+annotations, or constructs an anonymous class with an inner superclass reflectively. Nothing built (branch `java-indep`;
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS340-JCS343, JCS357, JCS358").
