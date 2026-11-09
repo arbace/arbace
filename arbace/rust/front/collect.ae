@@ -122,6 +122,7 @@
 (def ^:dynamic *std* {})
 (def ^:dynamic *si* {})   ; std's interface for type checking (load-std-iface), when loaded
 (def ^:dynamic *root-crate* "std")   ; the crate an injected extern crate item names (core in a no_std crate)
+(def ^:dynamic *root-crate-override* nil)   ; RF12: core's own modules name core
 
 (defn- path-segs [^String p] (str/split p #"::"))
 (defn path-parent [^String p] (let [i (.lastIndexOf p "::")] (when (pos? i) (subs p 0 i))))
@@ -160,6 +161,13 @@
 
 (defn subst* [x args] (cond (map? x) (into {} (for [[k v] x] [k (subst* v args)])) (vector? x) (subst x args) :else x))
 
+(def ^:dynamic *local-paths* nil)   ; RF12: atom {std-path local-def-id}: core's interface paths of the root file's own definitions
+
+(defn loc
+  "RF12: an interface def path the root file defines itself, as its local def (the same definition, one identity)"
+  [p]
+  (or (when (and *local-paths* (string? p)) (get @*local-paths* p)) p))
+
 (def ^:private anon-ids (atom 0))   ; each elided lifetime of a signature its own anonymous region
 
 (defn sty->ty
@@ -169,7 +177,7 @@
     param [:param (nth s 1) (nth s 2)]
     prim (get prim-tys (second s) [:err (second s)])
     never [:never]
-    adt [:adt (nth s 1) (mapv sty->ty (nth s 2))]
+    adt [:adt (loc (nth s 1)) (mapv sty->ty (nth s 2))]
     tuple [:tuple (mapv sty->ty (second s))]
     ref (let [r (sty->ty (list 'lt (nth s 1)))
               inner (nth s 3)
@@ -182,7 +190,7 @@
     ptr [:ptr (nth s 1) (sty->ty (nth s 2))]
     slice [:slice (sty->ty (second s))]
     array [:array (sty->ty (nth s 1)) (let [n (nth s 2)] (if (seq? n) [:cparam (nth n 1) (nth n 2)] [:cval n]))]
-    projection [:proj (nth s 1) (mapv sty->ty (nth s 2))]
+    projection [:proj (loc (nth s 1)) (mapv sty->ty (nth s 2))]
     lt (let [n (second s)]
          (cond (= n "'static") [:re-static]
                (= n "'_") [:re-erased]
@@ -1080,9 +1088,18 @@
       [:value nm]
       [:type nm])))
 
+(defn- core-local?
+  "RF12: building core, its own definitions of other files (std's interface paths `core::...`) are the local crate's: no
+  visible path, the default path from the crate's root, which prints nothing"
+  [p]
+  (and resolve/*crate-path* (string? p) (or (= p "core") (str/starts-with? p "core::"))))
+
+(defn- root-print [] (if-let [cp resolve/*crate-path*] (if (= cp "core") "" (subs cp 6)) ""))
+
 (defn- visible-path
   "try_print_visible_def_path for another crate's definition, or nil"
   [p]
+  (when-not (core-local? p)
   (let [vpm (get (:vpm *std*) *root-crate*)]
     (loop [p p callers #{} suffix ()]
       (cond
@@ -1096,7 +1113,7 @@
             (let [nm (if (and (= :type ns) (not= vp actual))
                        (some #(when (and (= p (:path %)) (not= "_" (:name %))) (:name %)) (:children (get (:mods *std*) vp)))
                        nm)]
-              (when nm (recur vp (conj callers vp) (cons nm suffix))))))))))
+              (when nm (recur vp (conj callers vp) (cons nm suffix)))))))))))
 
 (defn- characteristic-def [t]
   (case (first t)
@@ -1136,8 +1153,8 @@
   [p]
   (if-let [parent (path-parent p)]
     (let [pre (print-def-path parent [])]
-      (if (re-find #"\{constructor#\d+\}$" p) pre (str pre "::" (path-name p))))
-    p))
+      (if (re-find #"\{constructor#\d+\}$" p) pre (str pre (when (seq pre) "::") (path-name p))))
+    (if (core-local? p) "" p)))
 
 (declare sty->ty)
 
@@ -1189,7 +1206,7 @@
       ;; by its header, from std's interface)
       (and (string? def) (empty? args)) (or (visible-path def) (if (re-find #"\{impl#\d+\}$" def) (print-ext-impl-path def []) (ext-default-path def)))
       (and (string? def) (re-find #"\{impl#\d+\}$" def)) (print-ext-impl-path def args)
-      (and (number? def) (= :crate (first (:data (def-of def))))) ""
+      (and (number? def) (= :crate (first (:data (def-of def))))) (root-print)
       (and (number? def) (= :impl (first (:data (def-of def))))) (print-impl-path def args)
       :else
       (let [g (generics-any def)
@@ -1209,7 +1226,7 @@
           (str (print-path-with-qualified (first parent-args) [parent parent-args]) "::" (if (number? def) (data-sym (def-of def)) (path-name def)))
           ctor? (print-def-path parent parent-args)
           (string? def) (let [pre (print-def-path parent parent-args)]
-                          (if (re-find #"\{constructor#\d+\}$" def) pre (str pre "::" (path-name def))))
+                          (if (re-find #"\{constructor#\d+\}$" def) pre (str pre (when (seq pre) "::") (path-name def))))
           :else (let [pre (print-def-path parent parent-args) s (data-sym (def-of def))]
                   (str pre (when (seq pre) "::") s)))))))
 
@@ -1723,12 +1740,24 @@
       (#(let [cs (safe (fn [] (mapv print-clause (explicit-clauses id))))]
           (cond (string? cs) (assoc % :predicates [cs]) (seq cs) (assoc % :predicates cs) :else %))))))
 
+(defn- local-paths
+  "RF12: each definition's path as core's interface names it (the root file's module CP and the names to it; none under an
+  impl, a body or a closure)"
+  [cp]
+  (into {} (for [d @*defs*
+                 :let [names (loop [d d acc ()]
+                               (cond (= :crate (first (:data d))) acc
+                                     (#{:type :value} (first (:data d))) (when-let [p (:parent d)] (recur (def-of p) (cons (second (:data d)) acc)))
+                                     :else nil))]
+                 :when (and (seq names) (not= :crate (first (:data d))) (not (#{"Fn" "Closure"} (:kind (def-of (:parent d))))))]
+             [(str cp "::" (str/join "::" names)) (:id d)])))
+
 (defn with-crate
   "Collection's context for a crate (its definitions collected), F called within it (RF9's type checking runs there)"
   [hir res std {:keys [source edition si]} f]
   (binding [*std* std
             *si* (or si {})
-            *root-crate* (if (some #(= "NoStd" (:parsed %)) (:attrs hir)) "core" "std")
+            *root-crate* (or *root-crate-override* (if (some #(= "NoStd" (:parsed %)) (:attrs hir)) "core" "std"))
             *defs* (atom [{:id 0 :data [:crate] :kind "Mod" :module true}])
             *disamb* (atom {})
             *by-span* (atom {})
@@ -1739,7 +1768,14 @@
             *edition* (or edition 2024)
             *src* (when source (resolve/source-index source))]
     (doseq [it (:items hir)] (collect-item! 0 it))
-    (f)))
+    ;; RF12: impls' disambiguators in rustc's DefIndex order (the expansion's :order), not the expanded tree's
+    (when (some #(:order (:node %)) @*defs*)
+      (doseq [[_ ds] (group-by :parent (filter #(= :impl (first (:data %))) @*defs*))
+              :when (some #(:order (:node %)) ds)]
+        (doseq [[k d] (map-indexed vector (sort-by #(or (:order (:node %)) Long/MAX_VALUE) ds))]
+          (update-def! (:id d) assoc :disamb k))))
+    (binding [*local-paths* (when-let [cp resolve/*crate-path*] (atom (local-paths cp)))]
+      (f))))
 
 (defn defs "The collected definitions (within with-crate)" [] @*defs*)
 

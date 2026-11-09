@@ -3008,8 +3008,11 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Bodies (mod.rs: construct_fn, args_and_body)
 
+(def ^:dynamic *span-origin* nil)   ; RF12: a span of a macro's output -> its place (arbace.rust.front.expand/virtual-origin)
+
 (defn- span-text [sp]
-  (cond (and (vector? sp) (= 5 (count sp))) (let [[f l1 c1 l2 c2] sp] (str f ":" l1 ":" c1 ": " l2 ":" c2))
+  (cond (and *span-origin* (vector? sp) (= 4 (count sp)) (*span-origin* sp)) (span-text (*span-origin* sp))
+        (and (vector? sp) (= 5 (count sp))) (let [[f l1 c1 l2 c2] sp] (str f ":" l1 ":" c1 ": " l2 ":" c2))
         (vector? sp) (let [[l1 c1 l2 c2] sp] (str *root-file* ":" l1 ":" c1 ": " l2 ":" c2))
         :else "?"))
 
@@ -3059,8 +3062,8 @@
                "")
      :user-types (vec (for [{:keys [span ty text]} (:user-types s)]
                         (if text text
-                        (let [[l1 c1 l2 c2] span t (ty-text ty)]
-                          (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ", inferred_ty: " t)))))}))
+                        (let [t (ty-text ty)]
+                          (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " (span-text span) ", inferred_ty: " t)))))}))
 
 (defn uninhabited-adt?
   "An ADT with no variant (the crate's enums, std's Infallible), the slice's uninhabited ADTs"
@@ -3085,13 +3088,15 @@
     (if (and p (str/starts-with? (str (:kind p)) "Impl") (sequential? (:span (:node p))))
       (let [[l1 c1 l2 c2] (:span (:node p))
             ;; def_span: an impl's header, to its self type (its where clause) when the item's text is the root file's
-            [l2 c2] (let [st (:span (:self-ty (:node p)))
+            [l2 c2] (let [st (or (:mv-span (:self-ty (:node p))) (:span (:self-ty (:node p))))
                           wh (keep :span (:where (:generics (:node p))))]
                       (if (and (sequential? st) (= l1 (first st)) (not (some #{:derive} [(:derive (:node p))])))
                         (let [e (or (last (sort (map (fn [x] [(nth x 2) (nth x 3)]) wh))) [(nth st 2) (nth st 3)])]
                           (if (pos? (compare [l2 c2] e)) e [l2 c2]))
                         [l2 c2]))]
-        (str "<impl at " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ">::" (second (:data d))))
+        ;; the impl's parent's path first (an impl in a module or a body: `hint::<impl at ..>::f`; the crate root's prints nothing)
+        (let [pre (binding [c/*in-value* true] (c/print-def-path (:parent p) []))]
+          (str pre (when (seq pre) "::") "<impl at " (span-text [l1 c1 l2 c2]) ">::" (second (:data d)))))
       (binding [c/*in-value* true] (c/print-def-path (:id d) [])))))
 
 (defn build-discriminant
@@ -3223,6 +3228,13 @@
                                      (:captures info))))]
     (tc/with-solver root
       (fn []
+        (let [;; RF12: typeck's liberated signature is normalized (`-> <usize as Add>::Output` is `-> usize`)
+              norm (fn [t] (if (and (not closure?) (vector? t))
+                             (try (let [n (tc/normalize-deep t)] (when (and (System/getenv "BUILD_NORM") (= :proj (first n))) (prn :norm t)) n)
+                                  (catch Throwable e (when (System/getenv "BUILD_TRACE") (.printStackTrace e)) t))
+                             t))
+              sig (if closure? sig (-> sig (update :inputs #(mapv norm %)) (update :output norm)))
+              ret (:output sig)]
         (binding [*edition* ed
                   *self-var* nil *names* {}
                   *res* res
@@ -3234,7 +3246,9 @@
                   *tree* (binding [*edition* ed] (scope-tree pats body-expr))
                   *b* (atom {:blocks [] :locals [{:ty ret :mut true :scope 0}] :source-scopes [] :source-scope 0 :debug []
                              :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
-                             :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
+                             :block-context [] :check-overflow (boolean (or (:overflow-checks opts)
+                                                                               ;; Builder::new: `#[rustc_inherit_overflow_checks]` checks too
+                                                                               (some #(= "rustc_inherit_overflow_checks" (:unparsed %)) (:attrs (:node d)))))})]
           (let [params (mapv (fn [p t] {:pat (lower-pattern (:pat p)) :ty t}) (:params n) (:inputs sig))
                 params (if closure? (into [{:pat nil :ty env-ty}] params) params)
                 _ (when-let [sp (first (filter #(= "self" (:name (:pat %))) params))] (set! *self-var* (:var (:pat sp))))
@@ -3275,7 +3289,7 @@
                   (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
                     (when-let [r (nth blocks 0)] (terminate! r '(resume))))
                   ret-block)))
-            (finish d name :fn (count params) ret)))))))
+            (finish d name :fn (count params) ret))))))))
 
 (defn- upvar-symbol-fields
   "CapturedPlace::to_symbol's field names (`x__field`), derefs ignored"

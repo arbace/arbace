@@ -1,0 +1,359 @@
+;; RF12's first slice (doc/rust/FRONTEND-SURVEY.md, "As built: RF12 (first slice)"): the front end over core's own sources
+;; (rust-src 1.99.1's library/core, pinned by tools/rsdump/apks.sha256), module by module. The module tree follows
+;; rustc_expand/src/module.rs (mod_file_path, #[path], the directory ownership of mod.rs and lib.rs), cfg evaluated for
+;; core's build (rustc 1.99.1's --print cfg for x86_64-alpine-linux-musl at -C opt-level=0 -C overflow-checks=off);
+;; rustc is dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
+
+(ns arbace.rust.front.core-check
+  "RF12's measure: each module file of core read by the native reader, expanded (core's own macro_rules! from its sources,
+  textual scope approximated crate-wide), resolved, lowered, collected, type checked and its bodies built, the rest of
+  core (the items of the other files) from std's interface; each body's built MIR against rustc's own built MIR of core
+  (the oracle: rustc -Zdump-mir=built over the same sources, by hand, `bin/rust-front core-oracle`), the failures by stage
+  and cause.
+
+    bin/rust-front core-check [--list] [MODULE-FILE...]    (CORE_VERBOSE=1: each body's verdict)"
+  (:require [arbace.repr.rust.lex :as lx]
+            [arbace.repr.rust.parse :as ps]
+            [arbace.repr.rust.native :as nat]
+            [arbace.rust.front.expand :as ex]
+            [arbace.rust.front.resolve :as resolve]
+            [arbace.rust.front.lower :as lower]
+            [arbace.rust.front.collect :as collect]
+            [arbace.rust.front.typeck :as tc]
+            [arbace.rust.front.build :as build]
+            [arbace.rust.front.passes :as passes]
+            [arbace.string :as str])
+  (:import [java.io File]))
+
+(defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
+(defn- head [x] (when (seq? x) (first x)))
+
+;; ---------------------------------------------------------------------------------------------
+;; core's cfg (rustc --print cfg, RUSTC_BOOTSTRAP=1, -C opt-level=0 -C overflow-checks=off: debug assertions on, ub_checks on)
+
+(def core-cfg
+  {"debug_assertions" true "fmt_debug" #{"full"} "panic" #{"unwind"} "relocation_model" #{"pic"} "target_abi" #{""}
+   "target_arch" #{"x86_64"} "target_endian" #{"little"} "target_env" #{"musl"} "target_family" #{"unix"}
+   "target_feature" #{"fxsr" "sse" "sse2" "x87"}
+   "target_has_atomic" #{true "8" "16" "32" "64" "ptr"} "target_has_atomic_load_store" #{true "8" "16" "32" "64" "ptr"}
+   "target_has_atomic_primitive_alignment" #{"8" "16" "32" "64" "ptr"}
+   "target_has_reliable_f128" true "target_has_reliable_f16" true "target_has_reliable_f16_math" true
+   "target_has_threads" true "target_object_format" #{"elf"} "target_os" #{"linux"} "target_pointer_width" #{"64"}
+   "target_thread_local" true "target_vendor" #{"alpine"} "ub_checks" true "unix" true
+   "libc_unstable_musl_v1_2" true "libc_unstable_musl_v1_2_3" true})
+
+;; ---------------------------------------------------------------------------------------------
+;; Reading a file
+
+(defn parse-file
+  "A file of core read by the native reader: its items, edition 2024 (core's)"
+  [^String f]
+  (let [src (lx/source (slurp f))
+        {:keys [tree toks mt]} (binding [ps/*errs* (java.util.ArrayList.)] (ps/parse-file src 2024))]
+    (nat/out tree src toks mt 2024)))
+
+(defn- attr-path-name [a]
+  (let [k (fget a :kind)]
+    (when (and (seq? k) (= 'Normal (first k)))
+      (let [segs (fget (fget (fget (second k) :item) :path) :segments)]
+        (when (= 1 (count segs)) (second (fget (first segs) :ident)))))))
+
+(defn- path-attr [attrs]
+  (some (fn [a] (when (= "path" (attr-path-name a))
+                  (let [args (fget (fget (second (fget a :kind)) :item) :args)]
+                    (when (= 'Eq (head args)) (str (fget (second (fget (fget args :expr) :kind)) :symbol))))))
+        attrs))
+
+(defn- cfg-on?
+  "Whether an item's cfg attributes hold for core's build (its cfg_attr ones are the expansion's)"
+  [it]
+  (let [attrs (vec (remove #(= "cfg_attr" (attr-path-name %)) (fget it :attrs)))
+        it (apply list (first it) (mapcat (fn [[k v]] [k (if (= k :attrs) attrs v)]) (partition 2 (rest it))))]
+    (binding [ex/*cfg-names* core-cfg] (some? (ex/cfg-item it)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The module tree (rustc_expand/src/module.rs: mod_dir_path, default_submod_path)
+
+(defn module-files
+  "core's out-of-line modules: [{:path \"core::num::wrapping\" :file F :dir D}] in the order the crate's expansion loads
+  them (depth first); the arch modules of stdarch and portable-simd marked :vendored"
+  [^String lib-dir]
+  (let [out (atom [])]
+    (letfn [(walk [path ^String file ^String dir items inline-dir]
+              (doseq [it items
+                      :let [k (fget it :kind)]
+                      :when (and (= 'Mod (head k)) (cfg-on? it))]
+                (let [[_ _ idf mk] k nm (second idf)
+                      p (str path "::" nm)
+                      pa (path-attr (fget it :attrs))
+                      sub-dir (str (or inline-dir dir) "/" nm)]
+                  (if (= 'Loaded (head mk))
+                    (if (= 'Yes (nth mk 2))
+                      ;; an inline module: its children's files under DIR/NAME (or #[path] relative to the parent's dir)
+                      (walk p file dir (second mk) (if pa (str (or inline-dir dir) "/" pa) sub-dir))
+                      (walk p file dir (second mk) sub-dir))
+                    (let [base (or inline-dir dir)
+                          f (cond pa (str base "/" pa)
+                                  (.exists (File. (str base "/" nm ".rs"))) (str base "/" nm ".rs")
+                                  :else (str base "/" nm "/mod.rs"))
+                          fd (if (or pa (re-find #"/mod\.rs$" f)) (.getParent (File. ^String f)) (str base "/" nm))
+                          ;; a #[path] file not named mod.rs owns no directory but its own (module.rs: DirOwnership)
+                          fd (if (and pa (not (re-find #"/mod\.rs$" f))) (.getParent (File. ^String f)) fd)
+                          canon (.getCanonicalPath (File. ^String f))]
+                      (when (.exists (File. ^String f))
+                        (swap! out conj {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))})
+                        (walk p canon fd (fget (parse-file canon) :items) nil)))))))]
+      (let [lib (.getCanonicalPath (File. (str lib-dir "/core/src/lib.rs")))]
+        (swap! out conj {:path "core" :file lib})
+        (walk "core" lib (.getParent (File. lib)) (fget (parse-file lib) :items) nil)))
+    @out))
+
+;; ---------------------------------------------------------------------------------------------
+;; core's macro_rules! from its sources
+
+(defn rel-path "A file of the copy of library/ as rustc's remapped path names it" [^String file]
+  (if-let [m (re-find #"/(?:lib|library)/((core|stdarch|portable-simd)/.*)$" file)] (str "library/" (second m)) file))
+
+(defn- foreign-spans
+  "A macro definition's tokens with their spans written as places in FILE ((span FILE l1 c1 l2 c2 0)): the expansion
+  takes them as foreign tokens with their definition's place"
+  [x ^String file]
+  (cond (vector? x) (if (and (= 4 (count x)) (every? number? x))
+                      (list 'span file (nth x 0) (nth x 1) (nth x 2) (nth x 3) 0)
+                      (mapv #(foreign-spans % file) x))
+        (seq? x) (apply list (map #(foreign-spans % file) x))
+        :else x))
+
+(defn file-macros
+  "The macro_rules! definitions of a file's items (inline modules' too, fn bodies' not): [[name def]]"
+  [items ^String file]
+  (let [acc (atom [])]
+    (letfn [(walk [items]
+              (doseq [it items :let [k (fget it :kind)] :when (cfg-on? it)]
+                (case (head k)
+                  MacroDef (let [[_ idf md] k]
+                             ;; macro_rules! and macros 2.0 (`pub(crate) macro const_eval_select { .. }`), not the builtins
+                             (when (not (some #(= "rustc_builtin_macro" (attr-path-name %)) (fget it :attrs)))
+                               (swap! acc conj [(second idf) {:file file :body (foreign-spans (second (fget (fget md :body) :tokens)) (rel-path file))}])))
+                  Mod (let [mk (nth k 3)] (when (= 'Loaded (head mk)) (walk (second mk))))
+                  nil)))]
+      (walk items))
+    @acc))
+
+(defn macro-table
+  "name -> [{:file :body}] over the files"
+  [files]
+  (reduce (fn [m {:keys [file]}]
+            (reduce (fn [m [nm d]] (update m nm (fnil conj []) d)) m (file-macros (fget (parse-file file) :items) file)))
+          {} files))
+
+(defn macros-for
+  "The macro table as the expansion's std macros for a file: each name's definition from the nearest file (the same file
+  excluded: the file's own are its user macros), by the longest common directory prefix"
+  [table ^String file]
+  (into {} (for [[nm ds] table
+                 :let [ds (remove #(= file (:file %)) ds)]
+                 :when (seq ds)]
+             (let [common (fn [^String a ^String b] (count (take-while true? (map = a b))))
+                   d (apply max-key #(common file (:file %)) ds)]
+               [nm {:name nm :arms (try (ex/macro-arms (ex/dump-tts->items (:body d) 0)) (catch Throwable _ []))}]))))
+
+
+;; ---------------------------------------------------------------------------------------------
+;; core's names from its sources (build_reduced_graph's definitions of each module, as the helper's --std-names writes
+;; them: {MODULE {:kind K :children [{:ns :name :kind :path}]}}): the items written in the files, cfg evaluated, macros not
+;; expanded (a macro's items stay std's interface's), imports not followed (re-exports stay the interface's)
+
+(defn- item-name [k] (some #(when (and (seq? %) (= 'id (first %))) (second %)) (concat (rest k) (when (seq? (second k)) (rest (second k))))))
+
+(defn- ctor-kind [data] (case (head data) Tuple "Fn" Unit "Const" nil))
+
+(defn file-names
+  "The definitions of a file's module PATH (and of its inline modules, enums and traits): {path {:kind :children}}"
+  [items ^String path]
+  (let [acc (atom {})
+        add! (fn [m kind c] (swap! acc update m (fn [e] (-> (or e {:kind kind :children []}) (update :children conj c)))))]
+    (letfn [(walk [items m]
+              (swap! acc update m #(or % {:kind "Mod" :children []}))
+              (doseq [it items :let [k (fget it :kind)] :when (and (seq? k) (cfg-on? it))]
+                (let [nm (case (head k)
+                           (Fn Const Static TyAlias Trait) (second (fget (second k) :ident))
+                           (Struct Union Enum Mod) (second (nth k (if (= 'Mod (head k)) 2 1)))
+                           nil)
+                      p (when nm (str m "::" nm))]
+                  (case (head k)
+                    Fn (add! m "Mod" {:ns :value :name nm :kind "Fn" :path p})
+                    Const (when (not= "_" nm) (add! m "Mod" {:ns :value :name nm :kind "Const { is_type_const: false }" :path p}))
+                    Static (add! m "Mod" {:ns :value :name nm :path p
+                                          :kind (str "Static { safety: Safe, mutability: " (if (= 'Mut (fget (second k) :mutability)) "Mut" "Not") ", nested: false }")})
+                    TyAlias (add! m "Mod" {:ns :type :name nm :kind "TyAlias" :path p})
+                    (Struct Union) (do (add! m "Mod" {:ns :type :name nm :kind (str (head k)) :path p})
+                                       (when-let [ck (and (= 'Struct (head k)) (ctor-kind (nth k 3)))]
+                                         (add! m "Mod" {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))
+                    Enum (do (add! m "Mod" {:ns :type :name nm :kind "Enum" :path p})
+                             (swap! acc update p #(or % {:kind "Enum" :children []}))
+                             (doseq [v (fget (nth k 3) :variants) :when (cfg-on? v)]
+                               (let [vn (second (fget v :ident)) vp (str p "::" vn)]
+                                 (add! p "Enum" {:ns :type :name vn :kind "Variant" :path vp})
+                                 (when-let [ck (ctor-kind (fget v :data))]
+                                   (add! p "Enum" {:ns :value :name vn :kind (str "Ctor(Variant, " ck ")") :path (str vp "::{constructor#0}")})))))
+                    Trait (do (add! m "Mod" {:ns :type :name nm :kind "Trait" :path p})
+                              (swap! acc update p #(or % {:kind "Trait" :children []}))
+                              (doseq [a (fget (second k) :items) :let [ak (fget a :kind)] :when (and (seq? ak) (cfg-on? a))]
+                                (let [an (second (fget (second ak) :ident))]
+                                  (case (head ak)
+                                    Fn (add! p "Trait" {:ns :value :name an :kind "AssocFn" :path (str p "::" an)})
+                                    Const (add! p "Trait" {:ns :value :name an :kind "AssocConst { is_type_const: false }" :path (str p "::" an)})
+                                    Type (add! p "Trait" {:ns :type :name an :kind "AssocTy" :path (str p "::" an)})
+                                    nil))))
+                    Mod (do (add! m "Mod" {:ns :type :name nm :kind "Mod" :path p})
+                            (let [mk (nth k 3)] (when (= 'Loaded (head mk)) (walk (second mk) p))))
+                    nil))))]
+      (walk items path))
+    @acc))
+
+(defn crate-index
+  "core's macro table and names over its (non-vendored) module files"
+  [files]
+  (reduce (fn [acc {:keys [file path]}]
+            (let [items (fget (parse-file file) :items)]
+              (-> acc
+                  (update :macros (fn [m] (reduce (fn [m [nm d]] (update m nm (fnil conj []) d)) m (file-macros items file))))
+                  (update :names (fn [n] (merge-with (fn [a b] (update a :children into (:children b))) n (file-names items path)))))))
+          {:macros {} :names {}} files))
+
+(defn with-core-names
+  "std's names with core's own definitions added where the interface lacks them (its private items)"
+  [std-names names]
+  (reduce (fn [m [p {:keys [kind children]}]]
+            (let [e (get m p {:kind kind :children []})
+                  have (set (map (juxt :ns :name) (:children e)))]
+              (assoc m p (update e :children into (remove #(have [(:ns %) (:name %)]) children)))))
+          std-names names))
+
+;; ---------------------------------------------------------------------------------------------
+;; One module file through the pipeline
+
+(declare body-key)
+
+(defn- rel-module [^String p] (if (= p "core") "" (str (subs p 6) "::")))
+
+(defn- stage [stages k f]
+  (try (let [v (f)] (swap! stages assoc k :ok) v)
+       (catch Throwable e
+         (swap! stages assoc k (str (or (:what (ex-data e)) (.getMessage e) e)))
+         (when (System/getenv "CORE_TRACE") (.printStackTrace e))
+         (throw (ex-info "stage" {::stage k ::cause e})))))
+
+(def ^:private const-kind? (fn [d] (let [k (str (:kind d))] (and (or (str/starts-with? k "Const") (str/starts-with? k "Static") (str/starts-with? k "AssocConst"))
+                                                                  (:expr (:node d))))))
+
+(defn run-module
+  "A module file's bodies: {:stages {stage :ok|message} :bodies [[name body-or-nil error-or-nil detail]]}"
+  [{:keys [path file]} table names std-file std si ^String lib-dir]
+  (let [stages (atom {})
+        only (some-> (System/getenv "CORE_ONLY") re-pattern)
+        rel-file (rel-path file)
+        out (atom [])]
+    (try
+      (binding [ex/*cfg-names* core-cfg ex/*virtual* (atom nil) ex/*prelude-crate* "core" ex/*def-order* (atom 0)
+                resolve/*crate-path* path collect/*root-crate-override* "core"]
+        (let [mc (atom {}) sites (atom {})
+              crate (stage stages :expand
+                           #(binding [ex/*mark-crates* mc ex/*sites* sites]
+                              (ex/expand-file file 2024 (merge (ex/load-std-macros std-file) (macros-for table file)))))
+              vtext (ex/virtual-text)
+              res (stage stages :resolve #(resolve/resolve-crate crate names {:source vtext}))
+              res-map (into {} (for [[_ s rs] res] [s rs]))
+              _ (when-let [d (System/getenv "CORE_DUMP")]
+                  (.mkdirs (File. ^String d))
+                  (spit (str d "/" (str/replace path "::" "-") ".vtext.rs") vtext)
+                  (spit (str d "/" (str/replace path "::" "-") ".res.edn") (with-out-str (doseq [r res] (prn r)))))
+              hir (stage stages :lower #(lower/lower-crate crate res-map {:file rel-file :mark-crates @mc :std-generics (lower/load-std-generics std-file)}))]
+          (binding [tc/*root-file* rel-file build/*root-file* rel-file build/*expn-sites* @sites build/*span-origin* ex/virtual-origin]
+            (stage stages :collect
+                   #(collect/with-crate hir res-map std {:source vtext :edition 2024 :si si}
+                      (fn []
+                        (swap! stages assoc :collect :ok)
+                        (binding [build/*allocs* (atom {:next 1 :ids {}}) passes/*opaque-cache* (atom {}) passes/*panic-abort* false]
+                          (doseq [d (collect/defs)
+                                  :when (or (and (#{"Fn" "AssocFn"} (:kind d)) (:body (:node d)))
+                                            (= "Closure" (:kind d)) (const-kind? d))]
+                            (let [nm (try (build/mir-name d) (catch Throwable e (when (System/getenv "CORE_TRACE") (.printStackTrace e)) (str "?" (:id d))))]
+                              (when (or (nil? only) (re-find only nm))
+                              (swap! out conj
+                                     (try [[nm (body-key path d)] (if (const-kind? d)
+                                                (build/build-const d {:overflow-checks false :edition 2024})
+                                                (build/build-body d {:overflow-checks false :edition 2024 :root-cache (atom {})})) nil]
+                                          (catch Throwable e
+                                            (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
+                                            [[nm (body-key path d)] nil (str (or (:what (ex-data e)) (.getMessage e) e)) (pr-str (:x (ex-data e)))])))))))))))))
+      (catch Throwable e (when-not (::stage (ex-data e)) (swap! stages assoc :driver (str e)))))
+    {:stages @stages :bodies @out}))
+
+(defn body-key
+  "A body's def path with its disambiguators as -Zdump-mir names its file (`hint-{impl#0}-to_llvm`)"
+  [path d]
+  (let [segs (loop [d d acc ()]
+               (let [[k n] (:data d)]
+                 (case k
+                   :crate acc
+                   (:type :value) (recur (collect/def-of (:parent d)) (cons n acc))
+                   :impl (recur (collect/def-of (:parent d)) (cons (str "{impl#" (:disamb d) "}") acc))
+                   :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
+                   (recur (collect/def-of (:parent d)) acc))))]
+    (str/join "-" (concat (when (not= path "core") (rest (str/split path #"::"))) segs))))
+
+;; ---------------------------------------------------------------------------------------------
+;; rustc's built MIR of core (core-oracle's index: FILE TAB NAME)
+
+(defn load-oracle
+  "rustc's bodies by their file's key (`hint-{impl#0}-to_llvm`)"
+  [^String dir]
+  (let [lines (str/split-lines (slurp (str dir "/index.tsv")))]
+    (into {} (for [l lines :let [[f _] (str/split l #"\t")]
+                   :when (str/ends-with? f ".1-1-000.built.after.mir")]
+               [(subs f 5 (- (count f) (count ".1-1-000.built.after.mir"))) (str dir "/mir/" f)]))))
+
+(defn- oracle-text [f]
+  (let [t (slurp f) body (subs t (inc (str/index-of t "\n")))]
+    (if (str/starts-with? body "\n") (subs body 1) body)))
+
+(defn -main [lib-dir & args]
+  (binding [ex/*cfg-names* core-cfg]
+    (case (first args)
+      "--list" (doseq [m (module-files lib-dir)] (println (:path m) (:file m) (if (:vendored m) "vendored" "")))
+      "--check"
+      (let [[_ front-dir oracle-dir modules-file & files] args
+            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v] (str/split l #" ")]] [f {:path p :file f :vendored (= v "vendored")}]))
+            std-file (str front-dir "/std-names.edn")
+            std (collect/load-std std-file)
+            si (collect/load-std-iface (str front-dir "/std-iface.edn"))
+            oracle (load-oracle oracle-dir)
+            judge @(requiring-resolve 'arbace.rust.front.build-check/judge-row)
+            print-text (fn [b] (try (build/print-built b) (catch Throwable e (str "print failed: " e))))
+            index (let [cache (File. (str oracle-dir "/../index.edn"))]
+                    (if (.exists cache)
+                      (read-string (slurp cache))
+                      (let [t (crate-index (remove :vendored (vals mods)))]
+                        (println "core-check: core's index over" (count (remove :vendored (vals mods))) "files:" (count (:macros t)) "macros," (count (:names t)) "modules")
+                        (spit cache (pr-str t)) t)))
+            table (:macros index)
+            names (with-core-names (resolve/load-std-names std-file) (:names index))
+            verbose (System/getenv "CORE_VERBOSE")
+            totals (atom {})]
+        (doseq [f files :let [m (get mods (.getCanonicalPath (File. ^String f)))]]
+          (let [{:keys [stages bodies]} (run-module m table names std-file std si lib-dir)
+                rows (for [[[nm k] b err detail] bodies
+                           :let [w (get oracle k)]]
+                       (if (nil? w) [:no-oracle nm k] (judge nm (oracle-text w) (when b (print-text b)) err detail)))
+                fr (frequencies (map first rows))]
+            (swap! totals #(merge-with + % fr))
+            (println (format "core-check: %s stages %s bodies %d %s" (:path m) (pr-str stages) (count bodies) (pr-str fr)))
+            (when-let [d (System/getenv "CORE_DUMP")]
+              (.mkdirs (File. ^String d))
+              (doseq [[[_ k] b] bodies :when b] (spit (str d "/" k ".mir") (print-text b))))
+            (when verbose (doseq [r rows :when (not= :equal (first r))] (println "  " (pr-str r))))
+            (println "  refusals:" (pr-str (frequencies (for [r rows :when (= :refused (first r))] (nth r 2)))))))
+        (println "core-check: total" (pr-str @totals))))
+    (System/exit 0)))
