@@ -6515,3 +6515,25 @@ classes (20 s, 1.0 GB); `bin/jrt-convert derive --check` 79 overlays, 0 not as d
 ok (1.6 GB) and `bin/jrt build --arch amd64 --package jrt` (go vet) clean; `bin/gate --plan` 50 essential steps, no table error.
 `bin/reap` judges 15 problems where `java-night` has 11 before the night's records: the four are `:rmi`'s class counts (10 interp,
 8 compiled from `:net`, the cells' sums unchanged), recorded by the night's `bin/reap --record` with the rest.
+
+## As built: JCS304 (b), JCS293: `Runtime.Version.parse` and its parts, one port (branch `java-props2`)
+
+jrt's hand-written `Runtime$Version` (go/arbace/jrt/system.ae) gains jdk26u's `Version.parse` ported rule for rule
+(`Runtime_Version_Parse_String__Runtime_Version`): null a NullPointerException; `isSimpleNumber`'s shortcut (digits, the first not
+0; the empty string too, whose `Integer.parseInt` throws); `VersionPattern.VSTR_PATTERN` as a Go regexp, anchored as
+`Matcher.matches`; each number by `Integer.parseInt` (`NumberFormatException` "For input string: \"S\"" above `MAX_VALUE`); the
+build; the three `IllegalArgumentException`s of `+`. The struct keeps the numbers of any count (`nums`, beside the four), the build
+(`compareTo`'s `compareBuild`, `equals`, `hashCode`'s `Optional<Integer>`, `toString`'s `+BUILD`), and the deprecated `major`,
+`minor`, `security`. `bin/jrt manifest` (the frozen JVM's reflection) adds `parse`, `major`, `minor`, `security` to the manifest and
+the member tables, nothing else moving. `version()`, `pre()`, `build()` and `optional()` return translated `List` and `Optional`:
+j2g's support methods on `*Runtime_Version` (arbace/j2g/out.ae's support forms, `Optional.of`/`empty`, `Integer.valueOf`,
+`List.of`), named in `world-scan` so that j2g translates their calls, their callees rooted in main.ae, and entered into
+`Runtime$Version`'s member table for the interpreter (the support table's init), as `String.describeConstable` is.
+
+Checked by day: `TestRuntimeVersionParse` (jrt) holds 11 valid strings (toString, the four numbers, the count, pre, build,
+optional, hashCode) and 12 invalid ones (each message), the exceptions' classes and compareTo/equals with builds, against the
+platform's jdk26u build's `java` (a probe of 2026-11-09, `.tmp/verref/V.java` on the branch's worktree: its output is the test's
+table); `TestRuntimeVersion` unchanged; `bin/jrt test --arch amd64 --package jrt` and `build --package jrt` (vet) clean;
+`bin/j2g-unit` passes (the changed j2g namespaces load). The support methods are compiled by the night's build only (no day
+build): expected, RuntimeTests' Version/Basic (t04598) passes at interp and compiled, and `ClassFileFormatVersion.runtimeVersion()`
+(F26) is no longer a stub.
