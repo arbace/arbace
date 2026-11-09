@@ -2604,10 +2604,10 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
 ## 2026-11-09: C++'s programs by Arbace's own route, the refusals' biggest groups closed and the switch prepared (branch `cpp-route`)
 
 - **Measured** (the run corpora's 82 programs, bin/cppi check's lists: samples, runtime, gxx-dg-run's every-25th; `arbace.cpp.codegen
-  gen-batch` as `cppi_ir_route` runs it, no clang): 45 generated at the day's start (e6214cd13), **54** on the branch; the refusals by
+  gen-batch` as `cppi_ir_route` runs it, no clang): 45 generated at the day's start (e6214cd13), **55** on the branch; the refusals by
   cause in doc/cpp/CPP-SURVEY.md, "As built: cpp-route". The sampling by our route alone (`CPPI_ROUTE=ours bin/cppi check --corpus
   gxx-dg-run --sample 25`, no clang): 45 generated and run on ci, **44 pass by their own verdict**, 1 the oracle-text class as under
-  clang, none runs wrong; two of the passes (special/initp1.C, cpp0x/defaulted19a.C) are programs clang rejects. Under auto the
+  clang, none runs wrong (two more built after, range-for14 and ucnid-1, pass alone); two of the passes (special/initp1.C, cpp0x/defaulted19a.C) are programs clang rejects. Under auto the
   sampling projects to 62 passes (clang's record 60), none lost. The samples' and runtime's runs are the night's (ci's builder and the
   runtime's read pass 2.3 GB with their iostream units).
 - **Built** (doc/cpp/CODEGEN.md, G5d; arbace/cpp/sema.ae, codegen.ae, template.ae, arbace/repr/cpp/parse.ae): structured bindings;
@@ -2616,7 +2616,7 @@ The user accepted HF10-P1 to P10 as recommended (~06:15). Built by an agent in t
   template redeclarations by their non-type parameters' types; clang's type-parameter test (std::pair's C++17 constructors were declined
   by the parser); default construction and implicit conversions by constructor templates; explicit template arguments kept for
   argument-dependent lookup; classes through an ellipsis and va_arg of them (the psABI's §3.5.7); the implicit global allocation
-  functions; `__decltype` at a declaration's start (std::sort); GNU's statement expressions and a range-for's init-statement; the
+  functions; `__decltype` at a declaration's start (std::sort); GNU's statement expressions and a range-for's init-statement; universal character names in identifiers (CP337 (b)); the
   unexpanded-pack diagnosis for a non-type parameter's type. Five samples of test/cpp/codegen (struct-bind, gnu-cond, va-class,
   agg-dmi, stmt-expr). Tooling: runtime-ci's incremental read no longer drops read.tsv
   when nothing changed, and `CPPI_CI_CHUNK` reads the runtime in chunks.
