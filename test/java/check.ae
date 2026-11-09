@@ -131,26 +131,44 @@
 ;; JCS136 (a), JCS142 (a): the internal packages the REPL's world makes visible (jdk/repl-exports.txt, which j2g's
 ;; repl-visible? reads too): a test whose @modules entries are all `java.base/PKG` of that list stays in its category
 ;; (not :run-modules), its entries kept as the javac options `--add-exports=java.base/PKG=ALL-UNNAMED`, which the
-;; JDK's javac and java (--record-ref) and javac on Arbace take as the test's own exports
+;; JDK's javac and java (--record-ref) and javac on Arbace take as the test's own exports. JCS334 (a): the file's lines
+;; `MOD/PKG` (java.net.http's internal packages, and java.base's that java.net.http's tests name) are the library and
+;; framework corpora's alone (`wide`): a test of those corpora may name them, `--add-exports=MOD/PKG=ALL-UNNAMED`; the
+;; plain corpora read the unprefixed lines only, as before
+
+(def ^:private repl-export-lines
+  (delay (vec (for [l (lines "jdk/repl-exports.txt") :let [l (str/trim (str/replace l #"#.*$" ""))] :when (seq l)] l))))
 
 (def ^:private repl-exports
-  (delay (set (for [l (lines "jdk/repl-exports.txt") :let [l (str/trim (str/replace l #"#.*$" ""))] :when (seq l)] l))))
+  "JCS136 (a), JCS142 (a): java.base's packages of every corpus (the unprefixed lines)."
+  (delay (set (remove #(str/includes? % "/") @repl-export-lines))))
+
+(def ^:private repl-exports-wide
+  "JCS334 (a): every line as MOD/PKG (an unprefixed line java.base's), the library and framework corpora's."
+  (delay (set (for [l @repl-export-lines] (if (str/includes? l "/") l (str "java.base/" l))))))
 
 (defn- module-exports
-  "The package exports of a description's @modules entries when every entry is java.base/PKG of the REPL's list
-  (JCS136 (a)), else nil (an entry of another module or package: the test stays :run-modules)."
-  [desc]
+  "The package exports of a description's @modules entries, [[MOD PKG] ...], when every entry is java.base/PKG of the
+  REPL's list (JCS136 (a)), else nil (an entry of another module or package: the test stays :run-modules). WIDE (the
+  library and framework corpora's, JCS334 (a)): also MOD/PKG of the file's prefixed lines."
+  [desc wide]
   (let [es (vec (for [[t v] desc :when (= t "modules") m (str/split (str/trim v) #"\s+") :when (seq m)] m))
-        pk (fn [m] (second (re-matches #"java\.base/([\w.]+)" m)))]
-    (when (and (seq es) (every? #(@repl-exports (pk %)) es))
-      (mapv pk es))))
+        one (fn [m]
+              (if-let [[_ mod pk] (re-matches #"([\w.]+)/([\w.]+)" m)]
+                (when (or (and (= mod "java.base") (@repl-exports pk)) (and wide (@repl-exports-wide m)))
+                  [[mod pk]])
+                nil))
+        rs (map one es)]
+    (when (and (seq es) (every? some? rs))
+      (vec (distinct (apply concat rs))))))
 
 (defn- run-mode-ok? [modes]
   (every? #(or (= % "othervm") (re-matches #"timeout=\d+" %)) modes))
 
 (defn- categorize1
-  "A description's category (the survey's §3.1, the first that fits) and its actions."
-  [desc]
+  "A description's category (the survey's §3.1, the first that fits) and its actions. WIDE (the library and
+  framework corpora's :base, JCS334 (a)): module-exports' wide entries."
+  [desc wide]
   (let [has (fn [t] (some #(= t (first %)) desc))
         acts (vec (for [[t v] desc :when (#{"run" "compile" "build" "clean"} t)] (action t v)))
         runs (filter #(= :run (:tag %)) acts)
@@ -167,7 +185,7 @@
               (some #(some #{"fail"} (:modes %)) compiles) :compile-fail
               (and (empty? runs) (seq compiles)) :compile-only
               (has "library") :run-lib
-              (and (has "modules") (not (module-exports desc))) :run-modules
+              (and (has "modules") (not (module-exports desc wide))) :run-modules
               (has "requires") :run-requires
               (or (has "enablePreview") (has "clean")) :other
               (some #(not= "main" (:kind %)) runs) :other
@@ -191,11 +209,12 @@
   is one of its :base categories (the libraries and the framework runner are what the check adds, the rest of
   the description as for the plain runs)."
   [desc]
-  (let [r (categorize1 desc)]
+  (let [r (categorize1 desc false)]
     (assoc r :base
            (if (#{:run-lib :framework} (:category r))
              (:category (categorize1 (vec (for [[t v] desc :when (not= t "library")]
-                                            [t (if (= t "run") (str/replace-first v #"^(?:testng|junit)(?=[/\s]|$)" "main") v)]))))
+                                            [t (if (= t "run") (str/replace-first v #"^(?:testng|junit)(?=[/\s]|$)" "main") v)]))
+                                     true))
              (:category r)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -363,8 +382,20 @@
             (for [[i a] (map-indexed vector acts)]
               (str/join "\t" (concat ["act" i (:kind a) (if (seq (:modes a)) (str/join "/" (:modes a)) "-")] (:toks a)))))))
 
+;; JCS337 (a): the corpora by night. A corpus with :night N joins the scan once test/java/corpora.edn's :night is N or
+;; more (JAVA_CHECK_NIGHT overrides it for a run by hand: a sample of a later night's corpus, its reference lines not
+;; committed); one without :night is always in. The night that records corpus N raises the file's :night to N and records
+;; it whole (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS334-JCS339"): until then its tests take no id
+
+(defn active-corpora
+  "The corpora of the file's map M that the scan takes (JCS337 (a)): those whose :night is at most the file's :night
+  (or JAVA_CHECK_NIGHT's)."
+  [{:keys [corpora night]}]
+  (let [n (or (some-> (System/getenv "JAVA_CHECK_NIGHT") not-empty Long/parseLong) night 0)]
+    (filter #(<= (:night % 0) n) corpora)))
+
 (defn scan [jdktest corpora-file ref work]
-  (let [{:keys [corpora]} (read-edn corpora-file)
+  (let [corpora (active-corpora (read-edn corpora-file))
         rts (roots corpora jdktest)
         old (into {} (for [t (ref-tests ref)] [(:test t) (:id t)]))
         next-id (atom (inc (reduce max 0 (map id-num (vals old)))))
@@ -432,7 +463,7 @@
                             (str "root\t" (name (:root-kind r)) "\t" (:root r))]
                            (if (= :compile-fail-ref (:category r))
                              (diag-plan (:desc r))
-                             (run-plan skip (distinct (concat opts (for [p (module-exports (:desc r))] (str "--add-exports=java.base/" p "=ALL-UNNAMED"))))
+                             (run-plan skip (distinct (concat opts (for [[m p] (module-exports (:desc r) lib-or-fw)] (str "--add-exports=" m "/" p "=ALL-UNNAMED"))))
                                        (.getName ^File (:file r)) compiles acts runs base srcroots)))))
     (write-lines (str work "/record.list") (map :id sel))
     ;; the counts, by area and category
