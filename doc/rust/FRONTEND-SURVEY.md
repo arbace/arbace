@@ -2707,3 +2707,30 @@ record's optimized bodies have them inlined). Proposed as RF12-P6.
 - **RF12-P7 The interface pass at night over all of core.** Options: (a) **the night's core-check over the 35 modules with
   `CORE_IFACE_FILES` naming every non-vendored module (about an hour more), the essential step keeping its six**; (b) only the listed
   modules. *Recommended: (a)*: the bodies then see every private item of core, not the slice's.
+
+## As built: RF12-P6's preparation and RF12-P7's slot (2026-11-09, evening)
+
+The user's decisions (2026-11-09): RF12-P6 (a), RF12-P7 (a) in night 11.
+
+- **RF12-P7**: `core-check` takes `CORE_IFACE_FILES=all` (every non-vendored module file of core) and `CORE_IFACE_ONLY=1` (the interface
+  pass alone, its `native-iface.edn` for a later `CORE_IFACE=cache`). Night 11's slot `.tmp/night11/slots/rust-core.sh` (lane LB, after
+  rust-rf10b; outside the repository): rust-src extracted in the lane's worktree from the main checkout's pinned apk, the pass over all of
+  core, then the slice's modules from the pack with that interface, GOMAXPROCS=2, GOMEMLIMIT=1800MiB, the toolchains stubbed; records
+  nothing. Estimated 150 minutes; the whole-core pass's peak is the night's measure.
+- **RF12-P6's first condition met for a6**: of a6's four core bodies, the three with source bodies now build equal to rustc's built
+  MIR: `ptr::write_volatile`, its `precondition_check` and `<impl *const T>::is_aligned_to` (the latter two but for the allocations'
+  ids). `ptr::const_ptr` and `ptr::mut_ptr` join the slice's list (37 modules; the pack `rust-core-built` made again, `b2ac8230...`).
+  The fourth, `drop_glue`, is a shim without a source body. What made them equal: the native interface reading `ub_checks`' private
+  functions (the pass before the bodies), `format_args!`'s place in a core macro's definition read through the virtual file (`panic!`'s
+  `Arguments::from_str` annotation, `library/core/src/panic.rs:62:38: 62:72`), and type-relative and qualified paths keeping their place.
+- **RF12-P6 itself, not built yet**: putting those bodies into a6's run (RF11's `build_run.ae`). Three parts remain:
+  - the body's forms printed for the program's crate: today they are printed in core's crate context, with crate-relative names, local
+    definitions and core's caller locations;
+  - instantiation by the mono item: our bodies are generic built MIR, and the run takes rustc's optimized instances (`::<i32>`);
+  - the callees those bodies reach, collected and built natively: `check_language_ub`, `align_of`, `const_eval_select`'s
+    `runtime`/`compiletime` — rustc's optimized record inlines them.
+  mono-check's `core-closure 0 of 3` moves with the third. Next slice.
+- Results: the 37 modules (`bin/rust-front core-check --records`, 28 min with the interface pass, 2.40 GB peak): **5,108 of 5,767 bodies
+  equal** to rustc's built MIR, 71 more but for the allocations, 381 differ, 217 refused, 74 without a body of rustc's by their key;
+  `ptr::const_ptr` 39 of 78, `ptr::mut_ptr` 46 of 87. `bin/rust-front core-essential` and `bin/rust-front essential` still equal their
+  known files.

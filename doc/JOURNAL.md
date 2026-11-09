@@ -2844,3 +2844,14 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   core body translated from core's crate context into the program's, instantiated (`::<i32>`) and its callees collected natively;
   proposed as RF12-P6 with the night's whole-core interface pass (RF12-P7).
 - Every run under 2.5 GB (GOMEMLIMIT 2400MiB), one core-check at a time, no network.
+
+## 2026-11-09: RF12-P6's preparation, RF12-P7's night slot (branch `rust-rf12`)
+
+- The user decided RF12-P6 (a) and RF12-P7 (a) (night 11). The slot `.tmp/night11/slots/rust-core.sh` was written: `CORE_IFACE_FILES=all`,
+  `CORE_IFACE_ONLY=1` (new in core-check), then the slice's modules with the cached interface; GOMAXPROCS=2, GOMEMLIMIT=1800MiB (lane LB's
+  2 GiB a process), stubbed toolchains, records nothing; `# EST: 150`.
+- P6's first condition, a6's core bodies equal to rustc's built MIR, met for the three with source bodies (`write_volatile`, its
+  `precondition_check`, `is_aligned_to`; `drop_glue` is a shim): `ptr::const_ptr` and `ptr::mut_ptr` added to the slice (37 modules, the
+  pack remade), `format_args!`'s place inside core's own macros read through the virtual file. Carrying the bodies into the run
+  (printing for the program's crate, instantiation, native callees) is not built: the next slice, on RF11's `build_run.ae`.
+- The 37 modules: 5,108 of 5,767 bodies equal (+71 but for the allocations); both essential checks equal their known files.
