@@ -4,7 +4,8 @@
   classes left the night's world because their variants, parsed by day, failed j2g's analysis (the build's
   report, :analysis-failures), and their dependants went with them unseen until a whole-corpus run.
 
-    bin/jrt-convert vet [--forms DIR] [--variants DIR] [--known FILE] [--strict] [--others] [FILE...]
+    bin/jrt-convert vet [--forms DIR] [--forms-add DIR]... [--variants DIR] [--classes RE] [--known FILE] [--strict]
+                        [--others] [FILE...]
 
   The committed world (jdk/forms, or --forms DIR: the conversion's output, .tmp/jrt/conv after bin/jrt-convert;
   every variant file of overlay/jdk/variants, or --variants DIR's, applied) entered, declared and resolved as j2g's
@@ -17,7 +18,15 @@
   failure of another class is not this check's (the whole-program run's report has it). A known row no failure
   matches is reported stale (a failure with --strict); --others lists the other classes' failures too, as
   j2g's report would (the committed world's: the declarations a variant's class depends on). The classes that are not from source (jrt's hand-written
-  classes) come from j2g's edge, jdk/edge.edn, as in j2g's run."
+  classes) come from j2g's edge, jdk/edge.edn, as in j2g's run.
+
+  JCS313 (a) (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS313 (a)\"), a new slice's classes by day: --classes RE
+  analyzes the classes whose top-level internal name (java/net/http/HttpClient) RE finds, beside the variants' (with
+  --classes and no FILE, no variant file's: the slice alone); their failures are listed under the file name
+  \"--classes\" (a known row [\"--classes\" CLASS PREFIX WHY] holds one). --forms-add DIR (repeated) lays DIR's forms
+  over the world's (--forms, default jdk/forms), a file of DIR replacing the one at its path below the root and adding
+  the rest: the day's read of the slice (bin/repr-java read-jdk --check's output, or a read of the new files) over the
+  committed conversion, without a whole conversion."
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.classes.env :as env]
@@ -28,6 +37,21 @@
 
 (def ^:private ^:dynamic *variants-dir* "overlay/jdk/variants")
 (def ^:private ^:dynamic *forms-dir* "jdk/forms")
+(def ^:private ^:dynamic *forms-add* [])
+(def ^:private ^:dynamic *classes-re* nil)
+
+(defn- rel-path [root f]
+  (let [r (str (.getCanonicalPath (io/file root)) "/") p (.getCanonicalPath (io/file f))]
+    (if (str/starts-with? p r) (subs p (count r)) p)))
+
+(defn- world-files
+  "The world's forms files: *forms-dir*'s, then each of *forms-add*'s laid over them by their path below its root
+  (JCS313 (a)), in the order of their paths."
+  []
+  (let [m (reduce (fn [m root]
+                    (into m (for [f (w/source-files {:root root :tree true})] [(rel-path root f) f])))
+                  (sorted-map) (cons *forms-dir* *forms-add*))]
+    (vec (vals m))))
 
 (defn- ae-files [dir]
   (sort (filter #(str/ends-with? (str %) ".ae") (.listFiles (io/file dir)))))
@@ -61,7 +85,7 @@
         cs (atom {})
         unit {:order (atom []) :counters (atom {}) :switch-maps (atom {}) :switch-holders (atom {})
               :source-tried (atom #{}) :assert-holders (atom {}) :holder-first (atom {})}
-        files (w/source-files {:root *forms-dir* :tree true})
+        files (world-files)
         parsed (vec (for [f files]
                       (try (let [forms (w/read-forms f)] {:file f :forms forms :ns (#'w/ns-of-forms forms)})
                            (catch Exception e (fail! f (str "read: " (.getMessage e))) {:file f :forms [] :ns nil}))))
@@ -100,7 +124,9 @@
         (doseq [n names]
           (try (#'a/mark-enum-abstract! n) (catch Throwable e (fail! n (str "enum: " (.getMessage e))))))
         ;; analyze the variants' classes alone (their nests: a member class's analysis is its holder's part)
-        (let [vtops (set (map top-of (mapcat val by-file)))
+        (let [cre *classes-re*
+              re-tops (when cre (set (filter #(re-find cre %) (map top-of names))))
+              vtops (into (set (map top-of (mapcat val by-file))) re-tops)
               targets (filter #(vtops (top-of %)) names)]
           (doseq [n targets :when (a/decl n)]
             (try (a/analyze-class! n)
@@ -110,10 +136,12 @@
             {:classes (count names)
              :variants (select-keys @applied (filter ours (keys @applied)))
              :missing (vec (for [[f ns] by-file n ns :when (not (contains? @applied n))] [f n]))
+             :re-classes (count (filter #(contains? re-tops (top-of %)) names))
              :others (vec (remove (comp ours first) @failed))
              :failed (vec (for [[n msg] @failed :when (ours n)]
                             [(or (file-of n) (file-of (top-of n))
-                                 (some (fn [[f ns]] (when (some #(= (top-of %) (top-of n)) ns) f)) by-file))
+                                 (some (fn [[f ns]] (when (some #(= (top-of %) (top-of n)) ns) f)) by-file)
+                                 "--classes")
                              n msg]))}))))))
 
 (defn- read-edn [f] (with-open [r (java.io.PushbackReader. (io/reader f))] (read r)))
@@ -122,14 +150,26 @@
   (let [opt (fn [k] (second (drop-while #(not= k %) args)))
         known-file (or (opt "--known") "test/jrt/vet-known.edn")
         strict? (some #{"--strict"} args)
-        names (remove (set (concat ["--known" "--strict" "--others" "--forms" "--variants"] (when-let [k (opt "--known")] [k]))) args)
+        ;; the values of the options that take one (--forms-add repeated), and the variant files named
+        valued #{"--known" "--forms" "--variants" "--classes" "--forms-add"}
+        [names adds] (loop [as args names [] adds []]
+                       (cond (empty? as) [names adds]
+                             (= "--forms-add" (first as)) (recur (nnext as) names (conj adds (second as)))
+                             (valued (first as)) (recur (nnext as) names adds)
+                             (#{"--strict" "--others"} (first as)) (recur (next as) names adds)
+                             :else (recur (next as) (conj names (first as)) adds)))
+        cre (some-> (opt "--classes") re-pattern)
+        _ (doseq [d adds] (when-not (.isDirectory (io/file d)) (throw (ex-info (str "jrt.vet: --forms-add " d ": no directory") {}))))
         vdir (or (opt "--variants") *variants-dir*)
-        files (binding [*variants-dir* vdir] (variant-files (remove (set [(opt "--forms") (opt "--variants")]) names)))
+        ;; --classes alone (no FILE): the slice's classes, no variant file's
+        files (if (and cre (empty? names)) [] (binding [*variants-dir* vdir] (variant-files names)))
         t0 (System/nanoTime)
         ;; the classes outside the forms from the edge (jdk/edge.edn), no Java forms sources from the class path,
         ;; as j2g's run binds them (arbace.j2g.main/run)
         e (edge/read-edge "jdk/edge.edn")
-        {:keys [failed variants missing classes others]} (binding [*forms-dir* (or (opt "--forms") *forms-dir*)
+        {:keys [failed variants missing classes others re-classes]} (binding [*forms-dir* (or (opt "--forms") *forms-dir*)
+                                                                   *forms-add* adds
+                                                                   *classes-re* cre
                                                                    *variants-dir* vdir
                                                                    env/*declared* (:classes e)
                                                                    edge/*edge* e
@@ -138,7 +178,7 @@
         _ (when (some #{"--others"} args)
             (doseq [[n msg] others] (println (str "other    " n ": " msg))))
         known (if (.isFile (io/file known-file)) (read-edn known-file) [])
-        scope (set (map #(.getName (io/file %)) files))
+        scope (cond-> (set (map #(.getName (io/file %)) files)) cre (conj "--classes"))
         used (atom #{})
         bad (atom 0)]
     (doseq [[f n] missing]
@@ -152,7 +192,9 @@
             (doseq [c (distinct (map #(str/replace (second %) "." "/") (re-seq #"(?:in|of) ([A-Za-z_][\w.$]*)" msg)))
                     [_ m] (filter #(= c (first %)) others)]
               (println (str "   after  " c ": " m))))))
-    (doseq [f (sort scope)
+    (when (and cre (not-any? #(= "--classes" (first %)) failed))
+      (println (str "ok       --classes " (opt "--classes") ": " re-classes " classes")))
+    (doseq [f (sort (disj scope "--classes"))
             :let [mine (filter #(= f (first %)) failed)
                   vs (w/read-variants [(io/file vdir f)])]
             :when (empty? mine)]
@@ -162,7 +204,9 @@
     (let [stale (remove #(@used %) (filter #(scope (first %)) known))]
       (doseq [k stale] (println (str "stale    " (pr-str (vec (take 3 k))))))
       (when strict? (swap! bad + (count stale)))
-      (println (str "jrt.vet: " (count files) " variant files, " classes " classes declared, " @bad " refused"
+      (println (str "jrt.vet: " (count files) " variant files, "
+                    (when cre (str re-classes " classes of --classes, "))
+                    classes " classes declared, " @bad " refused"
                     (when (seq stale) (str ", " (count stale) " known rows stale"))
                     (format " (%.1f s)" (/ (- (System/nanoTime) t0) 1e9))))
       (System/exit (if (pos? @bad) 1 0)))))

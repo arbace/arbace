@@ -6416,3 +6416,27 @@ in 17 s; under `--package` it runs with `GOMEMLIMIT=1500MiB` (unless set), 1.7 G
 `time -v`, every process of the run): `bin/jrt test --arch amd64 --package jrt -count=1` 1.59 GB peak, 38 s (`ok arbace/jrt
 5.0s`); `bin/jrt build --arch amd64 --package jrt` (go build and go vet) 1.59 GB, 51 s; go's compile and test of `./jrt` alone
 from a cold cache 0.94 GB, 30 s. Without `--package` nothing changes (the night's `bin/jrt test`).
+
+## As built: JCS313 (a): `bin/jrt-convert vet --classes RE [--forms-add DIR]...` (branch `java-props2`)
+
+`jrt.vet` (test/jrt/vet.ae) takes the day's check of a new slice that JCS254 ran as a scratch copy (`hvet.ae`):
+
+- `--classes RE`: the classes whose top-level internal name RE finds (`java/net/http/HttpClient`) are analyzed beside the variants'
+  (j2g's `analyze-class!`, bodies and all, as the variants' are). Without a variant FILE named, no variant file is: the slice alone.
+  Their failures are listed as `REFUSED  --classes: CLASS: MESSAGE`; a known row `["--classes" CLASS PREFIX WHY]` of
+  `test/jrt/vet-known.edn` holds one. The summary counts them (`N classes of --classes`).
+- `--forms-add DIR` (repeated): DIR's forms laid over the world's (`--forms`, default `jdk/forms`) by their path below the root: a
+  file of DIR replaces the world's at the same path, the rest are added. DIR is the day's read of the slice's new and changed
+  files (bin/repr-java read of them, or `read-jdk --check`'s output), not a whole conversion.
+
+Proved on `java-props2` against JCS254's day result: the 15 entries in which java-http's day forms
+(`.tmp/http/forms`) differ from `jdk/forms` (java.net.http, jdk.internal.net.http, the JCE's and Kerberos's files,
+`SystemLoggers`), 173 files, as DIR: `bin/jrt-convert vet --classes '^(java/net/http|jdk/internal/net/http)/' --forms-add DIR
+--others` declares 4,918 classes (hvet's own count), analyzes the 373 classes of the two packages and refuses none, in 20 s at
+1.45 GB. With only the two packages as DIR it refuses 113 (`Unknown type: SystemLoggers$Logger`): the slice's other files are
+part of what DIR must hold. `bin/jrt-convert vet` alone is unchanged (the same files in the same order).
+
+**The checklist for a slice that adds sources** (each step light): (1) the closure's files added (test/jrt/jrt_sources.ae) and the
+joint javac check (`all9-run.sh`); (2) the new and changed files read by day into DIR (their forms at their paths below a forms
+root); (3) `bin/jrt-convert vet --classes RE --forms-add DIR --others`, RE the slice's packages: no refusal, or each one in the
+slice's own triage with its fix; (4) the night's conversion and build as usual.
