@@ -90,7 +90,15 @@ code. Three kinds of things live here:
   algorithms, carrying GHC's notice), `stgcmp.ae` is Arbace's own; since HF10's first slice (2026-11-08) `tostg.ae` also follows `compiler/GHC/CoreToStg/Prep.hs`'s
   speculative evaluation (mkNonRecFloat, decideFloatInfo, cpeArgArity) with `compiler/GHC/Core/Utils.hs`'s exprOkForSpecEval and
   `compiler/GHC/CoreToStg.hs`'s mkStgAltType, and `desugar.ae` `compiler/GHC/HsToCore/Match.hs`'s tidy_bang_pat and matchBangs and
-  `compiler/GHC/Core/Make.hs`'s bindNonRec, from the same tarball; `libcheck.ae`'s HF10 verbs (`stg`, `merge`) are Arbace's own; `simpleopt.ae` (2026-11-06) ports
+  `compiler/GHC/Core/Make.hs`'s bindNonRec, from the same tarball; since HF10's second slice (2026-11-09) `core.ae` also follows
+  `compiler/GHC/Core/Utils.hs`'s exprType and `Core/DataCon.hs`'s dataConInstArgTys (the binders' types), `simplify.ae`
+  `compiler/GHC/HsToCore/Binds.hs`'s makeCorePair (default methods' compulsory unfoldings), `Core/Opt/Simplify/Iteration.hs`'s
+  simplStableUnfolding (Note [Eta-expand stable unfoldings]) and prepareRhs, `Core/Utils.hs`'s combineIdenticalAlts,
+  `Core/Opt/Simplify/Inline.hs`'s is_more_evald and `Types/Id/Make.hs`'s data constructor wrappers (mkDataConRep's
+  unboxers), `constfold.ae` `Core/Opt/ConstantFold.hs`'s litEq, `tostg.ae` `Stg/Unarise.hs`'s unariseFunArgBinder (voidArgId),
+  `Core/Opt/Arity.hs`'s mkEtaWW (CorePrep's eta binders) and CorePrep's maybeSaturate, `typecheck.ae` the solver's EvCsPushCall and
+  `HsToCore/Binds.hs`'s dsEvBinds (superclass evidence bound once), `deriv.ae` `Tc/Deriv/Generate.hs`'s untag_Expr,
+  genPrimOpApp and eq_expr_with_tag_check as written; `libcheck.ae`'s HF10 verbs (`stg`, `merge`) are Arbace's own; `simpleopt.ae` (2026-11-06) ports
   `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
   unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
   `compiler/GHC/Core/Opt/ConstantFold.hs` with `Types/Literal.hs`'s conversions, both from the same tarball and carrying
