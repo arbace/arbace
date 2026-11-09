@@ -421,6 +421,7 @@
 (def ^:dynamic *cons* nil)      ; atom {NAME {:arity n :tycon NAME :fields [...] :tag n}}
 (def ^:dynamic *tycons* nil)    ; atom {TYCON {:flavour data|newtype :cons [NAME...]}} (HF5-HF6: the match compiler's and STG's)
 (def iface-cache (atom {}))
+(def ^:dynamic *iface-files* nil) ; {MODULE path}: interfaces named one by one beside the directories' (HF10-P3's closures)
 (def ^:dynamic *unfoldings* nil) ; atom {NAME core}: the INLINE default methods' unfoldings (hsiface/unfoldings)
 
 (defn- strs [n] (vec (map #(if (symbol? %) (name %) %) n)))
@@ -537,8 +538,10 @@
   "Every interface of the directories: things and instances"
   []
   (wired!)
-  (let [bys (vec (for [d *ifdirs* :let [fs (.listFiles (File. ^String d))] :when fs
-                       ^File f (sort-by #(.getName ^File %) fs) :when (str/ends-with? (.getName f) ".iface.edn")]
+  (let [bys (vec (for [^File f (concat (for [d *ifdirs* :let [fs (.listFiles (File. ^String d))] :when fs
+                                             ^File f (sort-by #(.getName ^File %) fs) :when (str/ends-with? (.getName f) ".iface.edn")]
+                                         f)
+                                       (for [[_ p] (sort-by key *iface-files*) :let [f (File. ^String p)] :when (.isFile f)] f))]
                    ;; keyed by the canonical path: a closure directory of links into one pool (lib-check) reads each
                    ;; file once
                    (let [k [(.getCanonicalPath f) (.lastModified f)]
@@ -2281,12 +2284,15 @@
                               (when eqns {:eqns (binding [fam/*family?* (fn [x] (contains? @*families* x))]
                                                   (fam/compute-incomps eqns))})))))))
 
+(def ^:dynamic *own-fam-insts* nil) ; atom [[FAMILY eqn]...]: the module's own open family instances (HF10-P3: its interface's)
+
 (defn- tyfam-inst!
   "A type family instance (TyFamInstDecl ext eqn): an equation of its open family"
   [tfi]
   (when *families*
-    (let [e (arg tfi 2)]
-      (swap! *families* update (nm (arg e 2)) (fn [old] (update (merge {:flavour :open} old) :eqns (fnil conj []) (fam-eqn e)))))))
+    (let [e (arg tfi 2) eqn (fam-eqn e)]
+      (when *own-fam-insts* (swap! *own-fam-insts* conj [(nm (arg e 2)) eqn]))
+      (swap! *families* update (nm (arg e 2)) (fn [old] (update (merge {:flavour :open} old) :eqns (fnil conj []) eqn))))))
 
 (defn- free-tvs
   "The type variables of t not bound by a forall inside it"
@@ -2615,7 +2621,10 @@
         tvs (zipmap tvn (map (fn [x] [:tv x]) names))
         supers (vec (keep (fn [c] (let [p (hs-type tvs c)] (when (= :tc (first p)) [(second p) (nth p 2)])))
                           (let [c (arg d 2)] (when (and (seq? c) (= 'Just (first c))) (lval (second c))))))
-        methods (atom [])]
+        methods (atom [])
+        ;; the functional dependencies by parameter position, as an interface's are read (add-things!)
+        fundeps (vec (for [fd (arg d 6) :let [fv (lval fd)] :when (= 'FunDep (con fv))]
+                       [(mapv #(.indexOf ^java.util.List tvn (nm %)) (arg fv 2)) (mapv #(.indexOf ^java.util.List tvn (nm %)) (arg fv 3))]))]
     ;; a method's own signature, not its default's (DefaultSignatures' `default lift :: (r ~ ..., Quote m) => ...` types
     ;; the default method alone: GHC.Tc.TyCl.Class's tcClassSigs keeps the two apart)
     (doseq [s (arg d 7) :let [sv (lval s)] :when (and (= 'ClassOpSig (con sv)) (not (true? (arg sv 2))))
@@ -2628,7 +2637,7 @@
             n (nm nl)]
         (swap! methods conj n)
         (swap! *genv* assoc n [:forall names [[cn (mapv (fn [x] [:tv x]) names)]] mt])))
-    (swap! *classes* assoc cn {:tvs names :supers supers :methods @methods
+    (swap! *classes* assoc cn {:tvs names :supers supers :methods @methods :fundeps fundeps
                                :defaults (into {} (for [b (arg d 8) :let [n (bind-name b)] :when n]
                                                     [n (ext-name "var" m (str "$dm" (occ n)))]))
                                :binds (arg d 8)})))
@@ -2981,7 +2990,7 @@
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
-              *implic-eqs* (atom []) *patsyns* (atom {})
+              *implic-eqs* (atom []) *patsyns* (atom {}) *own-fam-insts* (atom [])
               *defaults* (some (fn [d] (let [v (lval d)]
                                          (when (and (= 'DefD (con v)) (= 'DefaultDecl (con (arg v 2))))
                                            (mapv #(hs-type {} %) (last (arg v 2))))))
@@ -3016,9 +3025,13 @@
                   (let [e (arg dfi 1) fname (nm (arg e 2))
                         pats (vec (for [a (arg e 4) :when (and (seq? a) (= 'HsValArg (first a)))] (arg a 2)))
                         tvn (tv-names-of [(arg e 3) pats])
-                        pts (fn [tvs] (mapv #(hs-type tvs %) pats))]
-                    (data-decl! m e {:tn (ext-name "tc" m (str "R:" (occ fname) (head-occs (pts {}))))
-                                     :tvn tvn :res-of (fn [tvs] [:tc fname (pts tvs)]) :defn (arg e 6)}))))
+                        pts (fn [tvs] (mapv #(hs-type tvs %) pats))
+                        rep (ext-name "tc" m (str "R:" (occ fname) (head-occs (pts {}))))
+                        names (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) tvn)]
+                    ;; its family instance for the interface (FamInst's fi_rhs: the representation tycon at its variables)
+                    (swap! *own-fam-insts* conj [fname {:tvs names :lhs (pts (zipmap tvn (map (fn [x] [:tv x]) names)))
+                                                        :rhs [:tc rep (mapv (fn [x] [:tv x]) names)] :data true}])
+                    (data-decl! m e {:tn rep :tvn tvn :res-of (fn [tvs] [:tc fname (pts tvs)]) :defn (arg e 6)}))))
             ;; foreign imports: their signature is their type
             ;; HF10-P5 (a): desugared as GHC's dsFImport does (ds-fimport); one it does not take stays the placeholder tostg drops
             fimports (vec (for [d decls :let [v (lval d)] :when (and (= 'ForD (con v)) (= 'ForeignImport (con (arg v 2))))
@@ -3111,6 +3124,16 @@
          ;; the foreign imports desugared (an INLINE unfolding of their arity, mkInlineUnfoldingWithArity)
          :fimports (set (for [[_ b e] fimports :when (not (and (seq? e) (= 'lit (first e))))] b))
          :kind-arity @*kind-arity*
+         ;; HF10-P3: what the module's own interface writes beyond the above (arbace.repr.haskell.ownface): its families,
+         ;; its open family instances, its pattern synonyms, its values' types (constructors, methods, foreign imports,
+         ;; selectors) and its instances, zonked while the metas are bound
+         :families (into {} (filter (fn [[n _]] (= m (nmod n))) @*families*))
+         :fam-insts @*own-fam-insts*
+         :patsyns (into {} (filter (fn [[n _]] (= m (nmod n))) @*patsyns*))
+         :own-genv (into {} (for [[n t] @*genv* :when (= m (nmod n))] [n (zonk t)]))
+         :own-insts (vec (for [i @*insts* :when (= m (nmod (:dfun i)))]
+                           (assoc i :ctx (mapv (fn [[c ts]] [c (mapv zonk ts)]) (:ctx i))
+                                    :head [(first (:head i)) (mapv zonk (second (:head i)))])))
          :errors @*errors*}))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -3218,6 +3241,29 @@
               *kind-arity* (when ka (atom (kind-arities things ka)))]
       (add-things! things)
       [@*genv* @*syns*])))
+
+;; HF10-P3: an interface's facts as the elaborator reads them (load-ifaces!' readers over one interface's forms), for the
+;; judge of the front end's own interfaces against GHC's (arbace.repr.haskell.ownface)
+(defn iface-facts
+  "One interface's facts as the elaborator reads them: {:genv :cons :classes :tycons :syns :families :patsyns :insts},
+  its types read with the invisible kind arities ka (merged with those its own things give)"
+  [forms ka]
+  (let [by (into {} (map (fn [x] [(first x) x]) forms))
+        things (second (get by 'hsiface/things))]
+    (binding [*genv* (atom {}) *classes* (atom {}) *cons* (atom {}) *syns* (atom {}) *tycons* (atom {})
+              *families* (atom {}) *patsyns* (atom {}) *insts* (atom [])
+              *kind-arity* (atom (kind-arities things ka))]
+      (add-things! things)
+      (add-fam-instances! (second (get by 'hsiface/fam-instances)))
+      (add-instances! (second (get by 'hsiface/instances)))
+      {:genv @*genv* :cons @*cons* :classes @*classes* :tycons @*tycons* :syns @*syns* :families @*families*
+       :patsyns @*patsyns* :insts @*insts* :kind-arity @*kind-arity*})))
+
+(declare canon-type)
+(defn canon
+  "A closed type in the judge's canonical form (canon-type: synonyms of syns expanded, variables by first occurrence)"
+  [syns t]
+  (canon-type syns t))
 
 ;; dictionary terms of erased Core: what the evidence projection keeps
 

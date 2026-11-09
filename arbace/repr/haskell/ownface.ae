@@ -1,0 +1,292 @@
+(ns arbace.repr.haskell.ownface
+  "HF10-P3 (doc/haskell/FRONTEND-SURVEY.md, \"As built: HF10-P3 (first slice)\"): the front end's own interfaces. A
+  module renamed (arbace.repr.haskell.rename) and elaborated (arbace.repr.haskell.typecheck) writes what its importers
+  read of it, as GHC's GHC.Iface.Make's mkIface_ writes a ModIface's mi_exports, mi_fixities, mi_decls and mi_insts
+  (and GHC.Iface.Tidy decides what is exposed), in the forms the renamer's and the elaborator's interface readers take
+  (the helper's iface2 verb's: hsiface/exports, fixities, things, instances, unfoldings, fam-instances), so a library
+  compiled bottom-up imports its own interfaces where it imported GHC's.
+
+  What is written, GHC 9.14.1's rule for each (the spec: GHC's compiler/GHC/Iface/{Make,Tidy}.hs, GHC/Types/Id/Make.hs,
+  BSD-3, LICENSE.md \"GHC\"):
+  - exports: the renamer's AvailInfos (mi_exports), the module's own fixities (mi_fixities: its fixity declarations);
+  - things (mi_decls; the iface2 verb's selection: every exported thing the module defines, and every type constructor it
+    defines that it does not export, not a class): ids with their types (a class's methods too: their ClassOpIds),
+    data constructors with their source arity (dataConSourceArity: the fields, not the dictionaries), their field labels,
+    their wrapper types (forall univ ex. ctx => fields -> T), their source bangs and their implementation bangs as -O0
+    decides them (dataConSrcToImplBang with bang_opt_unbox_disable: an UNPACK pragma is not honoured, HsStrict True),
+    their tags; type constructors (data, newtype, synonym with its right-hand side, family with its flavour and a closed
+    family's equations), each with a kind of its arity (the elaborator trusts kinds: FRONTEND-SURVEY §3.4, HF9-P4 (a)),
+    classes with their methods, superclasses, variables, functional dependencies and default methods, pattern synonyms
+    with patSynSig's parts and their builders' types;
+  - instances (mi_insts): each dictionary function with its type; family instances (mi_fam_insts) with their
+    equations, a data instance's with its representation tycon;
+  - unfoldings: none. At -O0 GHC.Iface.Tidy's addExternal exposes no unfolding but a compulsory one
+    (opt_expose_unfoldings = ExposeNone with -fomit-interface-pragmas, which -O0 implies), and an importer at -O0 reads
+    none but a compulsory one (tcIdInfo with -fignore-interface-pragmas): the default methods' INLINE unfoldings the
+    helper's interfaces carry are -O2's.
+
+  A type is written so that the elaborator's reader (typecheck/conv-type) gives back the type the writer held: the
+  invisible kind arguments the reader drops (a type constructor's kind arity, the unboxed tuples' and sums'
+  representations, FUN's multiplicity and representations) are written as placeholders; the module's own type
+  constructors have none (their kinds are written without invisible binders, so their kind arity is 0 when read).
+
+  The judge (compare-ifaces): an own interface against GHC's of the same module, both read by the elaborator's readers
+  (typecheck/iface-facts) and compared fact by fact: the avails, the fixities, each value's type, each constructor's
+  arity, fields, tag and tycon, each class's variables, superclasses, methods, functional dependencies and defaults, each
+  type constructor's flavour and constructors, each synonym's and family's definition, each instance's type, each family
+  instance; types in the judge's canonical form (typecheck/canon)."
+  (:require [arbace.string :as str]
+            [arbace.set :as set]
+            [arbace.repr.haskell.typecheck :as tc])
+  (:import [java.io File]))
+
+(defn- ext? [n] (and (vector? n) (= "ext" (nth n 0))))
+(defn- nmod [n] (when (ext? n) (nth n 2)))
+(defn- occ [n] (if (ext? n) (nth n 3) (str n)))
+(def ^:private ns-str tc/name-str)
+(defn- vec* [xs] (str "[" (str/join " " xs) "]"))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types as the reader takes them
+
+(def ^:private many "(tycon-app (ext data \"GHC.Internal.Types\" \"Many\") [])")
+(def ^:private kind-type "(tycon-app (ext tc \"GHC.Internal.Types\" \"Type\") [])")
+(def ^:private ph "(tycon-app (ext tc \"GHC.Internal.Types\" \"Type\") [])") ; an erased kind or representation argument
+(def ^:private prim-fun "(ext tc \"GHC.Internal.Prim\" \"FUN\")")
+
+(declare type-form)
+
+(defn- pred-form
+  "A predicate [CLASS [TYPE...]] (a variable constraint [:cvar [t]]) as a constraint type"
+  [ka [c ts]]
+  (if (= :cvar c) (type-form ka (first ts)) (type-form ka [:tc c ts])))
+
+(defn- tc-args
+  "A type constructor's arguments as the reader expects them: its invisible arguments (kind arity ka, or the positions
+  [n :pos]) as placeholders, an unboxed tuple's or sum's representations"
+  [ka n as]
+  (let [o (nth n 3)]
+    (cond
+      (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"(Tuple|Sum)[0-9]+#" o)) (concat (repeat (count as) ph) as)
+      (get ka [n :pos]) (let [ps (get ka [n :pos])]
+                          (loop [i 0 as (seq as) out []]
+                            (cond (contains? ps i) (recur (inc i) as (conj out ph))
+                                  (seq as) (recur (inc i) (rest as) (conj out (first as)))
+                                  :else out)))
+      (pos? (get ka n 0)) (concat (repeat (get ka n) ph) as)
+      :else as)))
+
+(defn type-form
+  "A type of the elaborator's as the iface2 verb's typeF form, kind arities ka"
+  [ka t]
+  (case (first t)
+    :tv (str "(tv " (pr-str (second t)) ")")
+    :mv (str "(tv " (pr-str (str "m" (second t))) ")")
+    :tc (let [n (second t) as (nth t 2)]
+          (cond
+            (and (= tc/fun-tc n) (= 2 (count as)))
+            (str "(fun t " many " " (type-form ka (first as)) " " (type-form ka (second as)) ")")
+            (= tc/fun-tc n) (str "(tycon-app " prim-fun " " (vec* (concat [many ph ph] (map #(type-form ka %) as))) ")")
+            (keyword? n) (str "(tv " (pr-str (str n)) ")")
+            :else (str "(tycon-app " (ns-str n) " " (vec* (map #(if (string? %) % (type-form ka %)) (tc-args ka n as))) ")")))
+    :app (str "(app " (type-form ka (nth t 1)) " " (type-form ka (nth t 2)) ")")
+    :forall (let [body (reduce (fn [acc p] (str "(fun c " many " " (pred-form ka p) " " acc ")"))
+                               (type-form ka (nth t 3)) (reverse (nth t 2)))]
+              (reduce (fn [acc v] (str "(forall " (pr-str v) " specified " kind-type " " acc ")")) body (reverse (nth t 1))))
+    :lit (str "(lit " (pr-str (second t)) ")")
+    (str "(lit " (pr-str (str t)) ")")))
+
+(defn- kind-of-arity
+  "A kind of n visible arguments, Type -> ... -> Type (the elaborator trusts kinds: an own type constructor has no
+  invisible binder)"
+  [n]
+  (reduce (fn [acc _] (str "(fun t " many " " kind-type " " acc ")")) kind-type (range n)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The wired-in things (GHC.Builtin.Types): GHC knows them without an interface, and where its definition and the source's
+;;; declaration differ the compiler's wins (Note [Drop wired-in things] in GHC.Iface.Tidy: never written, never read). The
+;;; source of GHC.Internal.Types declares `data Multiplicity = Many | One`, GHC's multiplicityTyCon is [oneDataCon,
+;;; manyDataCon]; `class a ~~ b`, `class a ~ b` and `class Coercible a b` have no superclass in the source, heqClass's and
+;;; eqClass's is the primitive equality (~#), coercibleClass's the representational one (~R#)
+
+(def ^:private wired-cons
+  {["ext" "tc" "GHC.Internal.Types" "Multiplicity"] [["ext" "data" "GHC.Internal.Types" "One"] ["ext" "data" "GHC.Internal.Types" "Many"]]})
+
+(def ^:private wired-supers
+  {["ext" "tc" "GHC.Internal.Types" "~~"] ["ext" "tc" "GHC.Internal.Prim" "~#"]
+   ["ext" "tc" "GHC.Internal.Types" "~"] ["ext" "tc" "GHC.Internal.Prim" "~#"]
+   ["ext" "tc" "GHC.Internal.Types" "Coercible"] ["ext" "tc" "GHC.Internal.Prim" "~R#"]})
+
+(defn- wired
+  "The elaborator's result with GHC.Builtin.Types' definitions in place of the source's"
+  [r]
+  (let [r (reduce (fn [r [tn cs]]
+                    (if (get-in r [:tycons tn])
+                      (-> (assoc-in r [:tycons tn :cons] cs)
+                          (update :cons (fn [m] (reduce (fn [m [i c]] (if (get m c) (assoc-in m [c :tag] (inc i)) m)) m (map-indexed vector cs)))))
+                      r))
+                  r wired-cons)]
+    (reduce (fn [r [cn sc]]
+              (if-let [info (get-in r [:classes cn])]
+                (assoc-in r [:classes cn :supers] [[sc (mapv (fn [v] [:tv v]) (:tvs info))]])
+                r))
+            r wired-supers)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The writer
+
+(defn- impl-bang
+  "dataConSrcToImplBang at -O0 (bang_opt_unbox_disable): a strict field HsStrict, True when an UNPACK pragma asked
+  (shouldUnpackArgTy's answer not taken: the pragma alone), else lazy"
+  [strict? src]
+  (cond (not strict?) "Lazy"
+        (str/includes? (str src) "UNPACK") "StrictNotUnpacked(True)"
+        :else "StrictNotUnpacked(False)"))
+
+(defn- parse-things [texts] (keep (fn [t] (try (read-string t) (catch Throwable _ nil))) texts))
+
+(defn- strs [n] (mapv #(if (symbol? %) (name %) %) n))
+
+(defn own-iface-text
+  "The module's own interface: rr the renamer's result, r the elaborator's; unit the package's unit id"
+  [rr r unit]
+  (let [r (wired r)
+        m (:module r)
+        ka (or (:kind-arity r) {})
+        tf (fn [t] (type-form ka t))
+        own? (fn [n] (and (ext? n) (= m (nmod n))))
+        exported (set (filter own? (:exported r)))
+        genv (:own-genv r)
+        types (:types r)
+        cons (into {} (filter (fn [[n _]] (own? n)) (:cons r)))
+        tycons (into {} (filter (fn [[n _]] (own? n)) (:tycons r)))
+        rn-things (parse-things (:things rr))
+        src-bangs (into {} (for [t rn-things :when (and (seq? t) (= 'datacon (first t)))] [(strs (second t)) (:src-bangs (nth t 6 {}))]))
+        classes (:classes r)
+        patsyns (:patsyns r)
+        ids (for [n (sort-by ns-str exported)
+                  :when (contains? #{"var" "fld"} (nth n 1))
+                  :when (not (contains? patsyns n))
+                  :let [t (or (get types n) (get genv n))] :when t]
+              (str "(id " (ns-str n) " \"\" " (tf t) " {})"))
+        datacons (for [n (sort-by ns-str exported) :when (= "data" (nth n 1))
+                       :let [info (get cons n) t (get genv n)] :when (and info t (not (contains? patsyns n)))]
+                   (let [d (:dicts info 0) bangs (get src-bangs n [])
+                         strict (drop d (:strict info))]
+                     (str "(datacon " (ns-str n) " \"\" " (- (:arity info) d) " " (vec* (map (comp pr-str occ) (:fields info))) " " (tf t)
+                          " {:src-bangs " (vec* (map pr-str bangs))
+                          " :impl-bangs " (vec* (map-indexed (fn [i s] (pr-str (impl-bang s (nth bangs i nil)))) strict))
+                          " :tag " (:tag info 1) "})")))
+        tycon-forms (for [[n ti] (sort-by (comp ns-str key) tycons) :when (not (str/starts-with? (occ n) "R:"))]
+                      (let [ar (count (:tvs ti))]
+                        (str "(tycon " (ns-str n) " \"\" " (:flavour ti) " " (vec* (map ns-str (:cons ti))) " " (kind-of-arity ar)
+                             " {:roles " (vec* (repeat ar "representational")) " :arity " ar "})")))
+        syn-forms (for [[n [tvs rhs]] (sort-by (comp ns-str key) (:syns r)) :when (own? n)]
+                    (str "(tycon " (ns-str n) " \"\" synonym [] " (kind-of-arity (count tvs))
+                         " {:roles " (vec* (repeat (count tvs) "representational")) " :arity " (count tvs)
+                         " :synonym [" (vec* (map pr-str tvs)) " " (tf rhs) "]})"))
+        fam-forms (for [[n f] (sort-by (comp ns-str key) (:families r))]
+                    (let [ar (:arity f 0)]
+                      (str "(tycon " (ns-str n) " \"\" family [] " (kind-of-arity ar)
+                           " {:roles " (vec* (repeat ar "nominal")) " :arity " ar
+                           " :family " (name (:flavour f :open))
+                           (when (= :closed (:flavour f))
+                             (str " :equations " (vec* (for [e (:eqns f)]
+                                                         (str "(eqn " (vec* (map pr-str (:tvs e))) " " (vec* (map tf (:lhs e))) " " (tf (:rhs e)) ")")))))
+                           "})")))
+        class-forms (for [[n info] (sort-by (comp ns-str key) classes) :when (contains? exported n)]
+                      (str "(class " (ns-str n) " [] "
+                           (vec* (for [mn (:methods info) :let [t (get genv mn)] :when t] (str "(" (ns-str mn) " \"\" " (tf t) ")")))
+                           " " (vec* (map #(pred-form ka %) (:supers info)))
+                           " {:tvs " (vec* (map pr-str (:tvs info)))
+                           " :fundeps " (vec* (for [[l rr*] (:fundeps info)]
+                                                (vec* [(vec* (map #(pr-str (nth (:tvs info) % "?")) l)) (vec* (map #(pr-str (nth (:tvs info) % "?")) rr*))])))
+                           " :defaults " (vec* (for [[mn d] (sort-by (comp ns-str key) (:defaults info))] (str "[" (ns-str mn) " " (ns-str d) "]")))
+                           " :ats []})"))
+        patsyn-forms (for [[n ps] (sort-by (comp ns-str key) patsyns) :when (contains? exported n)]
+                       (str "(patsyn " (ns-str n)
+                            " {:univ " (vec* (map pr-str (:univ ps))) " :req " (vec* (map #(pred-form ka %) (:req ps)))
+                            " :ex " (vec* (map pr-str (:ex ps))) " :prov " (vec* (map #(pred-form ka %) (:prov ps)))
+                            " :args " (vec* (map tf (:args ps))) " :res " (tf (:res ps))
+                            " :fields " (vec* (map (comp pr-str occ) (:fields ps)))
+                            " :builder " (if-let [b (get genv n)] (tf b) "nil") "})"))
+        insts (for [{:keys [dfun tvs ctx head]} (:own-insts r)]
+                (str "(instance " (ns-str dfun) " " (tf [:forall tvs ctx [:tc (first head) (second head)]]) ")"))
+        head-occ (fn [t] (case (first t) :tc (occ (second t)) :tv (first (str/split (second t) #"_")) :app (recur (second t)) ""))
+        fis (for [[fam e] (:fam-insts r)]
+              (let [ax (if (:data e) (str "D:" (occ (second (:rhs e))) "0") (str "D:R:" (occ fam) (apply str (map head-occ (:lhs e)))))]
+                (str "(fam-instance (ext tc " (pr-str m) " " (pr-str ax) ") " (ns-str fam) " " (vec* (map tf (:lhs e))) " " (tf (:rhs e)) ")")))]
+    (str "(hsiface/module " (pr-str m) " {:unit " (pr-str unit) " :verb \"own\" :own 1})\n"
+         "(hsiface/exports [" (str/join "\n  " (:exports rr)) "])\n"
+         "(hsiface/fixities [" (str/join "\n  " (for [[n [p d]] (sort-by (comp ns-str key) (:fixities rr))]
+                                                  (str "(fixity " (nth n 1) " " (pr-str (nth n 3)) " " p " " d ")"))) "])\n"
+         "(hsiface/things [" (str/join "\n  " (sort (concat ids datacons tycon-forms syn-forms fam-forms class-forms patsyn-forms))) "])\n"
+         "(hsiface/instances [" (str/join "\n  " (sort insts)) "])\n"
+         "(hsiface/unfoldings [])\n"
+         "(hsiface/fam-instances [" (str/join "\n  " (sort fis)) "])\n")))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The judge
+
+(defn- read-forms [text] (read-string (str "[" text "]")))
+
+(defn- section [forms k] (some (fn [f] (when (and (seq? f) (= k (first f))) (second f))) forms))
+
+(defn ka-of-pool
+  "The invisible kind arities of every interface of a directory of GHC's interfaces (each name's arity is global: one
+  table for the run)"
+  [dir]
+  (let [things (vec (for [^File f (sort-by #(.getName ^File %) (.listFiles (File. ^String dir)))
+                          :when (str/ends-with? (.getName f) ".iface.edn")
+                          t (section (read-forms (slurp f)) 'hsiface/things)] t))]
+    (tc/kind-arities things {})))
+
+(defn compare-ifaces
+  "An own interface's text against GHC's of the module: {:facts n :equal n :missing n :extra n :diff [...]
+  :by {SECTION [equal facts]}}; syns the elaborator's synonyms (for the canonical forms), own-ka and ghc-ka the kind
+  arities each is read with"
+  [own-text ghc-text syns own-ka ghc-ka]
+  (let [of (read-forms own-text) gf (read-forms ghc-text)
+        m (second (first gf))
+        mine? (fn [n] (= m (nth n 2 nil)))
+        avail (fn [a] [(strs (nth a 1)) (sort (map strs (nth a 2)))])
+        fix (fn [f] [(name (nth f 1)) (nth f 2) (nth f 3) (name (nth f 4))])
+        ofa (tc/iface-facts of own-ka) gfa (tc/iface-facts gf ghc-ka)
+        syns (merge syns (:syns gfa) (:syns ofa))
+        cn (fn [t] (try (tc/canon syns t) (catch Throwable e [:canon-error (ex-message e)])))
+        pred-t (fn [[c ts]] (if (= :cvar c) (first ts) [:tc c ts]))
+        acc (atom {:facts 0 :equal 0 :missing 0 :extra 0 :diff [] :by {}})
+        fact! (fn [sec k g o]
+                (swap! acc (fn [a]
+                             (let [eq (= g o)]
+                               (-> a (update :facts inc) (update :equal + (if eq 1 0))
+                                   (update-in [:by sec] (fn [[e n]] [(+ (or e 0) (if eq 1 0)) (inc (or n 0))]))
+                                   (cond-> (not eq) (update :diff (fn [d] (if (< (count d) 12) (conj d {:section sec :name k :ghc g :ours o}) d)))))))))
+        cmp-map (fn [sec gm om f]
+                  (doseq [[k g] gm]
+                    (if (contains? om k) (fact! sec k (f g) (f (get om k)))
+                        (do (swap! acc update :missing inc) (fact! sec k :present :absent))))
+                  (doseq [k (keys om) :when (not (contains? gm k))] (swap! acc update :extra inc)))
+        sets (fn [sec g o]
+               (doseq [x g] (fact! sec x true (contains? o x)))
+               (swap! acc update :extra + (count (remove g o))))]
+    (sets :exports (set (map avail (section gf 'hsiface/exports))) (set (map avail (section of 'hsiface/exports))))
+    (sets :fixities (set (map fix (section gf 'hsiface/fixities))) (set (map fix (section of 'hsiface/fixities))))
+    (cmp-map :types (into {} (filter (comp mine? key) (:genv gfa))) (:genv ofa) cn)
+    (cmp-map :datacons (into {} (filter (comp mine? key) (:cons gfa))) (:cons ofa)
+             (fn [c] (select-keys c [:arity :fields :tag :tycon])))
+    (cmp-map :classes (into {} (filter (comp mine? key) (:classes gfa))) (:classes ofa)
+             (fn [c] {:ntvs (count (:tvs c)) :supers (mapv (comp cn pred-t) (:supers c)) :methods (set (:methods c))
+                      :fundeps (:fundeps c) :defaults (:defaults c)}))
+    (cmp-map :tycons (into {} (filter (comp mine? key) (:tycons gfa))) (:tycons ofa) (fn [t] (select-keys t [:flavour :cons])))
+    (cmp-map :synonyms (into {} (filter (comp mine? key) (:syns gfa))) (into {} (filter (comp mine? key) (:syns ofa)))
+             (fn [[tvs rhs]] (cn [:forall (vec tvs) [] rhs])))
+    (cmp-map :families (into {} (filter (comp mine? key) (:families gfa))) (into {} (filter (comp mine? key) (:families ofa)))
+             (fn [f] {:flavour (:flavour f) :arity (:arity f)
+                      :eqns (set (for [e (:eqns f)] (cn [:forall (vec (:tvs e)) [] [:tc ["eqn"] (conj (vec (:lhs e)) (:rhs e))]])))}))
+    (cmp-map :patsyns (into {} (filter (comp mine? key) (:patsyns gfa))) (:patsyns ofa)
+             (fn [p] (cn [:forall (into (vec (:univ p)) (:ex p)) (into (vec (:req p)) (:prov p))
+                          (reduce (fn [acc a] (tc/fn-ty a acc)) (:res p) (reverse (:args p)))])))
+    (cmp-map :instances (into {} (map (juxt :dfun identity) (:insts gfa))) (into {} (map (juxt :dfun identity) (:insts ofa)))
+             (fn [{:keys [tvs ctx head]}] (cn [:forall (vec tvs) (vec ctx) [:tc (first head) (second head)]])))
+    @acc))
