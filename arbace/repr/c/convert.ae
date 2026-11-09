@@ -280,9 +280,47 @@
 (defn- bits-for ^long [v signed]
   (let [b (.bitLength (biginteger v))] (if signed (inc (max b 1)) (max b 1))))
 
+(def ^:private int-suffixes
+  "The integer suffixes cpp_interpret_int_suffix takes (gcc 15.2 libcpp/expr.cc), lower-cased, with GNU's i/j."
+  #{"" "u" "l" "ul" "lu" "ll" "ull" "llu" "wb" "uwb" "wbu"})
+
+(defn bad-binary-constant
+  "CS291 (a): gcc's diagnostic for a constant spelt with a binary prefix (`0b`, `0B`) that libcpp's cpp_classify_number
+  (gcc 15.2 libcpp/expr.cc) rejects, else nil: the radix is 2 only when a binary digit follows the prefix (else the `0` is
+  octal and the rest its suffix); a decimal point or an exponent makes it floating (\"invalid prefix \"0b\" for floating
+  constant\"); a digit beyond 1, \"invalid digit \"D\" in binary constant\"; then the integer suffix."
+  [^String text]
+  (when (re-find #"^0[bB]" text)
+    (let [n (count text)
+          radix2 (and (> n 2) (#{\0 \1} (.charAt text 2)))
+          start (if radix2 2 1)
+          [i maxd float?] (loop [i start maxd 0 fl false]
+                            (if (< i n)
+                              (let [c (.charAt text i)]
+                                (cond (Character/isDigit c) (recur (inc i) (max maxd (- (int c) (int \0))) fl)
+                                      (= c \') (recur (inc i) maxd fl)
+                                      (= c \.) (recur (inc i) maxd true)
+                                      (and (not radix2) (#{\e \E} c)) [i maxd true]
+                                      :else [i maxd fl]))
+                              [i maxd fl]))
+          suffix (subs text i)]
+      (cond
+        (and radix2 float?) "invalid prefix \"0b\" for floating constant"
+        (and radix2 (>= (long maxd) 2)) (str "invalid digit \"" maxd "\" in binary constant")
+        float? nil
+        (not (contains? int-suffixes (str/replace (str/lower-case suffix) #"[ij]" ""))) (str "invalid suffix \"" suffix "\" on integer constant")
+        :else nil))))
+
+(defn- bad-lit
+  "CS291 (a): a constant gcc's lexer rejects, as a form: its type, its spelling (printed back as written) and gcc's message,
+  which the checker reports at its line (arbace.c.check's c/bad-lit)."
+  [t ^String text ^String msg]
+  (list 'c/bad-lit t text msg))
+
 (defn int-literal
   "An integer constant's form (§8.1): the value, or (lit T v) when its type is not the decimal default."
   [^String text]
+  (if-let [msg (bad-binary-constant text)] (bad-lit 'int text msg)
   (let [[digits suffix hex bin] (int-suffix text)
         _ (when (and (or hex bin) (<= (count digits) 2)) (refuse :literal (str "invalid suffix on integer constant " text)))
         imag (when (re-find #"[ij]" suffix) true)
@@ -301,7 +339,7 @@
                (let [cands (or (candidates suffix (or hex bin oct)) (refuse :literal (str "integer suffix " suffix)))
                      t (or (first (filter #(fits % v) cands)) (last cands))]
                  (if (= t (decimal-type v)) (num-form v) (list 'lit t (num-form v)))))]
-    (if imag (list 'imaginary form) form)))
+    (if imag (list 'imaginary form) form))))
 
 (defn- shortest-double [^double d] (Double/parseDouble (Double/toString d)))
 
@@ -328,6 +366,7 @@
 (defn float-literal
   "A floating constant's form (§8.3)."
   [^String text]
+  (if-let [msg (bad-binary-constant text)] (bad-lit 'int text msg)
   ;; an integer imaginary constant (GNU's 2i: _Complex int), which cc's parser takes as a floating one: the integer's form
   (if (re-matches #"(0[xXbB][0-9a-fA-F']+|[0-9']+)[uUlL]*[ijIJ][uUlL]*" text)
     (int-literal text)
@@ -356,7 +395,7 @@
                       (and (not hex) (zero? (.compareTo (java.math.BigDecimal. (Double/toString d)) (java.math.BigDecimal. ^String body)))) (shortest-double d)
                       :else exact)))
         form (if t (list 'lit t v) v)]
-    (if imag (list 'imaginary form) form))))
+    (if imag (list 'imaginary form) form)))))
 
 ;; Character constants and string literals: their code units
 
@@ -426,11 +465,26 @@
 
 (defn- char-form [^long v] (if (and (>= v 0) (< v 0xD800)) (char v) v))
 
+(defn- bad-u8-char
+  "CS291 (a): gcc's diagnostic for a u8 character constant (C23 6.4.4.5) that libcpp's lexer and cpp_interpret_charconst
+  (gcc 15.2 libcpp/charset.cc) reject, else nil: empty, an escape beyond a byte (hex or octal \"escape sequence out of range\",
+  convert_hex, convert_oct), more than one character (\"multi-character literal cannot have an encoding prefix\"), a character
+  whose UTF-8 takes more than one code unit (\"character not encodable in a single code unit\"), in that order."
+  [^String body us]
+  (cond
+    (empty? us) "empty character constant"
+    (some #(and (not (vector? %)) (> (long %) 0xff)) us) (if (str/includes? body "\\x") "hex escape sequence out of range" "octal escape sequence out of range")
+    (> (count us) 1) "multi-character literal cannot have an encoding prefix"
+    (and (vector? (first us)) (>= (long (second (first us))) 0x80)) "character not encodable in a single code unit"
+    :else nil))
+
 (defn char-literal
   "A character constant's form (§8.2)."
   [^String text]
   (let [[pfx q] (prefix-of text)
-        body (subs q 1 (dec (count q)))]
+        body (subs q 1 (dec (count q)))
+        bad (when (= pfx "u8") (bad-u8-char body (escape-units body true)))]
+    (if bad (bad-lit 'unsigned-char text bad)
     (case pfx
       ""  (let [us (escape-units body false)
                 bytes (mapcat #(if (vector? %) (utf8-bytes (second %)) [(bit-and (long %) 0xff)]) us)
@@ -448,7 +502,7 @@
           "L" (char-form v)
           "u8" (list 'lit 'unsigned-char (if (< v 0x80) (char v) v))
           "u" (list 'lit 'unsigned-short (char-form v))
-          "U" (list 'lit 'unsigned (char-form v)))))))
+          "U" (list 'lit 'unsigned (char-form v))))))))
 
 (defn- valid-utf8-runs
   "Bytes as Go forms' byte-string parts: maximal valid UTF-8 runs as strings, other bytes as integers."
@@ -1279,6 +1333,16 @@
         pending (atom nil)]
     (doseq [[i bi] (map-indexed vector bis)]
       (doseq [df (dirs-at owner i)] (.add out [:stmt df]))
+      ;; CS290 (a): ci's read (*include-inside*): the re-entered copy's pragmas before this item's first token, as statement-level
+      ;; c/pragma forms in the stream's order (gcc's deferred pragmas are tokens: a #pragma pack inside a body takes effect there)
+      (when *include-inside*
+        (when-let [^java.util.ArrayDeque pq (cx :pragmas)]
+          (loop []
+            (when-let [[sq texts] (.peekFirst pq)]
+              (when (<= (long sq) (aget (rng bi) 0))
+                (.pollFirst pq)
+                (doseq [t texts] (.add out [:stmt (list 'c/pragma t)]))
+                (recur))))))
       (when-let [[t j] (.get multi i)] (reset! pending [(.size out) t j]))
       ;; an item an #include inside the body brought in is the directive's; under *include-inside* (ci's read, CS275 (b)) the
       ;; body's own item, as the libc's tables are the declaration's
@@ -1853,7 +1917,10 @@
         (refuse :self-include "the main file includes itself: its tokens are the main file's twice"))
       (binding [*cx* {:ranges ranges :main-file main-file :main-name main-name :main-bytes main-bytes :std std
                       :pieces parse/strlit-pieces :typedefs (atom {}) :claimed (HashSet.)
-                      :unit-of-off unit-of-off :line-starts (line-starts main-bytes)}]
+                      :unit-of-off unit-of-off :line-starts (line-starts main-bytes)
+                      ;; CS290 (a): the re-entered copy's pragmas, [seq [text ...]] in seq order (the parser's :pragmas), placed by
+                      ;; block-items before the item of the first token after them (ci's read)
+                      :pragmas (java.util.ArrayDeque. ^java.util.Collection (vec (:pragmas r)))}]
         (compute-ranges! ranges tree)
         (let [groups (when main-file (compute-groups! (tu-tokens tree)))
               eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))

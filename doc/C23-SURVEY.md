@@ -5298,3 +5298,114 @@ remaining deferred items the classes CC.5 names. The token record also takes flo
   mapping the one to the other (the same diagnosis at the same token; CS200 (a)'s families are for exactly this); (b) the parser's
   messages in gcc's words (the parse check compares them with cc's: no); (c) keep them `:wrong-reason`. Cost: (a) an hour; (c) none.
   *Recommended: (a)*: the read cell's deferred 36 to 33.
+
+## Decided (the user, 2026-11-09): CS290 (a), CS291 (a) and (b), CS292 (a)
+
+- **CS290 (a):** the re-entered copy's `#pragma` lines are carried in the token stream (the parser attaches them to the next token,
+  the converter writes `c/pragma` before that item), and the checker applies them at statement level by the current pack state.
+- **CS291:** (a) for c23-utf8char-3 and c23-binary-constants-3: the converter writes the bad construct with its diagnostic, the checker
+  reports it, the printer writes the original back; (b) for c23-auto-3 and c23-constexpr-3: the refusals stay (`:read-refused`) until
+  `:decl-diag` is taken up.
+- **CS292 (a):** a dg-wording family for the parser's syntax-error wording.
+
+## As built: CS290 (a), CS291, CS292 (a) (2026-11-09, branch `c-props`)
+
+On `c-props` from `mac/c-compl` 35744df5e, main's stage 0, the checkout's ci (`bin/lib/ci/fresh.bash`).
+
+### CP.1 CS290 (a): pragmas in stream order, and `#pragma pack` at statement level
+
+- **The preprocessor** (`arbace.repr.c.pp`): under `*reentry*`, a `#pragma` line whose file is a re-entered main file (`MAIN#again`)
+  is also kept, its text, in a list the stream hands out (`stream`'s `:pragmas`, emptied at each call).
+- **The parser** (`arbace.repr.c.parse`): at each token it pulls it takes the pragmas run since the last one, recorded as `[seq
+  [text ...]]`. That is gcc's mechanism (its deferred pragmas are tokens). The seqs move with the tokens when `__func__`'s tokens are
+  injected, as the entries' already did. The parse's result gives them as `:pragmas`.
+- **The converter**: in ci's read (`*include-inside*`), `block-items` writes `(c/pragma text)` before the first item whose first token
+  comes after the pragma. The text levels (round trips, token and tree checks) do not bind `*reentry*`, so their output is unchanged.
+- **The checker**:
+  - a statement-level `c/pragma` runs `pragma-pack!`, which used to run only at the top level; this also gives a main-file
+    `#pragma pack` inside a body (placed by its offset) its effect;
+  - a record is laid out by the pack state as it is at its definition, not as it was at the top-level form's start.
+
+  Three layout rules under `#pragma pack` came out of 95_bitfields' packed and aligned tests, after gcc 15.2's stor-layout and
+  layout_decl (no code copied; tcc's expected output is gcc's):
+  - bit-fields take no "window of the type's size" (gcc's PCC_BITFIELD_TYPE_MATTERS rule asks maximum_field_alignment == 0);
+  - a zero-width bit-field still aligns to its type's full alignment;
+  - an `aligned` attribute's alignment is capped by the pack too.
+- **The back end** (`go/arbace/ci`: IBitLoad and IBitStore, and aot's BitLoad and BitStore): a packed bit-field that runs past its
+  64-bit unit (a 63-bit `long long` at bit 2) reads and writes its last bits in the next byte.
+
+### CP.2 CS291: the converter's refusals in error tests
+
+- **(a)** A constant gcc's lexer rejects is the form `(c/bad-lit T "spelling" "message")` (doc/c/SPEC.md §8):
+  - `bad-binary-constant` follows libcpp's cpp_classify_number for a binary prefix: radix 2 only when a binary digit follows, a point
+    or exponent makes it floating; the messages are `invalid suffix "S" on integer constant`, `invalid digit "D" in binary constant`
+    and `invalid prefix "0b" for floating constant`;
+  - `bad-u8-char` follows cpp_interpret_charconst and the escapes' range checks for a `u8` constant: empty, an escape beyond a byte,
+    several characters, or one whose UTF-8 is more than one code unit.
+
+  The checker reports the message at its line. The printer writes the spelling back.
+- **(b)** c23-auto-3 and c23-constexpr-3 keep their refusals: about thirty declaration diagnostics each, the `:decl-diag` class's
+  work.
+
+### CP.3 CS292 (a): the parser's syntax-error wording
+
+`test/c/dg-wording.edn` gains the family `:syntax-expected-before`: gcc's `expected '\]' before ':'` against the parser's (cc's)
+`unexpected ':', expected ']'`, the same error at the same token, for c23-attr-syntax-6 and -7. As measured:
+- **-7 passes.**
+- **-6 stays `:wrong-reason`**, narrowed to its lines 48 and 84. After the failed paste of `JOIN2(:,:)`, gcc reads `: :` and gives the
+  syntax error; the parser gives the paste error and the pedwarns but no syntax error on those lines.
+- **gnu23-attr-syntax-3 stays `:wrong-reason`.** Its regex `expected` already matches the parser's message. The line's difference is
+  gcc's `type of 'y' defaults to 'int'` against the checker's `conflicting types for 'f'`: a declaration diagnostic, not wording.
+
+So the read cell's deferred goes 36 to 33: -7 here, utf8char-3 and binary-constants-3 by CS291 (a).
+
+### CP.4 How it was checked (light, main's stage 0, the stubs first on PATH: no gcc)
+
+| command | result |
+|---|---|
+| `bin/ci check --only` (95_bitfields) | passes (recorded `:fail known read`): the 149 lines of its expected output; before, the packed tests unpacked |
+| `bin/ci check --aot --only` (95_bitfields) | passes (recorded `:fail known read`) |
+| `bin/ci run .tmp/pk/pk.c` (a main-file `#pragma pack(push,1)` and `pop` inside `main`) | `8 5 8`, gcc's layout (before: `8 8 8`) |
+| `bin/ci dg --only` (utf8char-3, binary-constants-3, attr-syntax-6, -7, gnu23-attr-syntax-3) | 3 of 5 pass (the first two were `refused`, -7 `:wrong-reason`); -6 and gnu23-attr-syntax-3 `:wrong-reason` (CP.3) |
+| `bin/repr-c roundtrip --corpus gcc-c23 --only` (utf8char-3, binary-constants-3) | levels 1 and 2 equal, acceptance as gcc's record (was `refused:literal`, `:converter-gap`) |
+| `bin/ci dg --essential` | 92 of 92 |
+| `bin/ci check --only test/c/essential-check.txt`, `--aot --only test/c/essential-aot.txt` | 0 failing, the controls differ |
+| `bin/repr-c check --c23` | 59 pass, 3 expected, 0 failing |
+| `bin/ci judge-test` | 106 tests, 489 assertions, 0 failures (`message-as-verdict`'s wording count 5 to 4) |
+| the stubs' log (gcc, cc, clang, g++, cpp exiting 99) | empty |
+
+The `--only` rows were merged into `test/c/check-linux-amd64.edn`, `check-aot-linux-amd64.edn`, `check-dg-linux-amd64.edn` and
+`test/repr/c/roundtrip-results.edn` (the night's whole records replace them); `test/c/check-known.edn` loses 95_bitfields and
+`test/repr/c/roundtrip-known.edn` the two CS291 files.
+
+The musl forms cache: this branch's changes to repr/c moved its key, so the worktree re-read it (`bin/ci musl read`, CI_THREADS=2).
+The read was cut by a timeout at 1,300 of 1,331 files. Its 3,165 files were byte-identical to c-compl's cache (read on the base tree),
+so that cache's index was taken and the key written for this tree (`.tmp/rekey.sh`). The night's `bin/ci musl read` reads it whole.
+
+### CP.5 Rekeys
+
+Embedded (gate_key): `arbace/repr/c/pp.ae`, `parse.ae`, `convert.ae`, `print.ae`, `arbace/c/check.ae`, `go/arbace/ci/expr.ae`,
+`aot.ae` (ci's Go: the C executables and cirun rebuild). Outside it: `test/c/dg-wording.edn`, the docs. repr/c's change moves the musl
+forms' key (the night's `bin/ci musl read`).
+
+### CP.6 The night's commands
+
+CC.4's list (T.7, night 9's step c) covers these: `bin/ci musl read`, the token and tree records, `bin/ci annotations --record`,
+`bin/repr-c roundtrip --record`, `bin/ci check --record`, `check --aot --record`, `dg --record`, `bin/reap --record`, `bin/crops-score
+--record`. Expected: 95_bitfields passes at eval and AOT; the dg record's c23-utf8char-3, c23-binary-constants-3 and c23-attr-syntax-7
+pass (`:read-refused` 4 to 2, `:wrong-reason` 5 to 4); the round trip of the two CS291 files reaches levels 1 and 2 (they leave the
+`:converter-gap` class of `test/repr/c/roundtrip-known.edn`, already removed here). The rest as recorded. With the `--only` rows merged,
+`bin/reap --record` gives the C cells: read 5,219 / 231 / 33 (deferred 36 to 33), eval 2,151 / 123 / 0 (1 to 0), AOT 2,159 / 115 / 0
+(1 to 0), print 4,778 / 3 / 39 (41 to 39).
+
+### Proposed (c-props)
+
+- **CS293 A failed paste's tokens at the parser (c23-attr-syntax-6's lines 48 and 84).** After `pasting ":" and ":" does not give a
+  valid preprocessing token`, gcc reads the two `:` and reports the syntax error; the parser reports none on the line.
+  - (a) Find why the parser's error is lost after the preprocessor's paste error (the two tokens are delivered separately, with a
+    space between), and give it as on line 49. Cost: an hour or two.
+  - (b) Keep the line in `:wrong-reason`.
+  - *Recommended: (a).*
+
+Scores (`bin/crops-score --record`, `--judge --strict` 0 problems): C's completeness 95.92% to 95.96% (99.59% to 99.64% without by
+design), maturity 100, independence 99.7.

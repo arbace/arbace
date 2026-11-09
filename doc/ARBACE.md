@@ -365,8 +365,13 @@ code. Three kinds of things live here:
   `finishFunction`) and carries the texts and orders of the LLParser and Verifier rules the mutator's 41 kinds break
   (`LLParser.cpp`, `Verifier.cpp`, `AutoUpgrade.cpp`, `Attributes.cpp`'s `typeIncompatible`, `Attributes.td`'s placements,
   `CallingConv.h`'s `isCallableCC`, `DiagnosticInfo.cpp`'s version message) of llvm-project 23.1.5 (the release tarball
-  `llvm-project-23.1.5.src.tar.xz`, `:llvmorg-23.1.5` in `test/cpp/corpora.edn`), each with its file and line; LICENSE.md:
-  Apache 2.0 with LLVM Exceptions; the rest of repr/llvm is Arbace's own.
+  `llvm-project-23.1.5.src.tar.xz`, `:llvmorg-23.1.5` in `test/cpp/corpora.edn`), each with its file and line; since LLS36 (a)
+  (2026-11-09) also `AutoUpgrade.cpp`'s `upgradeIntrinsicFunction1` name rules, `UpgradeIntrinsicFunction` and
+  `UpgradeIntrinsicCall`'s cases, `Intrinsics.cpp`'s `remangleIntrinsicFunction`, the Verifier's visitInstruction attachment checks
+  (`verifyRangeLikeMetadata`, `visitProfMetadata`, `visitDereferenceableMetadata`, the alias scope lists, TBAA's first), its
+  visitIntrinsicCall cases of ptrmask and is.fpclass, its visitDI* field rules and visitFunction's declaration `!dbg` rule, and
+  `DebugInfo.cpp`'s StripDebugInfo reachability, of the same release; LICENSE.md: Apache 2.0 with LLVM Exceptions; the rest of
+  repr/llvm is Arbace's own.
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go

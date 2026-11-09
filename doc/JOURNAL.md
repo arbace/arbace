@@ -3166,3 +3166,50 @@ committed with RFP33 (a). `bin/oracle-records pins`: the four Rust front packs i
 - **Left** for the second pass (doc/cpp/CPP-SURVEY.md, "As built: CP300-CP314", "Not built in this pass"): CP311 (a), CP310 (a)
   after the night's record, CP313 (a)'s member contexts and the other access forms.
 - **Slips**: three throwaway reads with `/dev/null` or a process substitution (the survey's "Slips"); nothing written there.
+
+## 2026-11-09: LLS35 (a), LLS36 (a), LLS37 (b): the mutants' oracle in the oracle tier, the unknown kinds' rules (branch `llvm-props`, from `mac/llvm-lls33` 60026c61b)
+
+The user decided LLVM IR's three proposals as recommended (2026-11-09 morning). LLS35 (a): `bin/repr-llvm records-verify` (the oracle
+tier's `llvm-records-verify`) ends with `mutants-oracle` over the pack rt's two mutant lists against opt's record, when the pack exists;
+the step's command line is unchanged (only a comment and its waiver), so the night's slot patch `llvm-cells.patch` still applies.
+LLS36 (a): `arbace.repr.llvm.expect` ports, from llvm-project 23.1.5 (`llvm-project-23.1.5.src.tar.xz`, the pin; Apache-2.0 with LLVM
+exceptions): AutoUpgrade.cpp's upgradeIntrinsicFunction1 name rules, UpgradeIntrinsicFunction and UpgradeIntrinsicCall's cases with
+Intrinsics.cpp's remangleIntrinsicFunction, then the Verifier's order for intrinsic declarations (V:3846 at the first caller, V:5952's
+ptrmask and is.fpclass cases, V:3297's isSignatureValid message through intr.ae's matcher); visitInstruction's attachment checks
+(V:5779-5913 with verifyRangeLikeMetadata, visitProfMetadata, the alias scopes, align, dereferenceable, TBAA's first); the visitDI*
+field rules (V:1074-1723), a declaration's `!dbg` (V:3202) and StripDebugInfo's reachability (a debug fault in a node kept after the
+strip is a hard error). The mutator attaches the three kinds' changes as metadata (no random number drawn: the mutants' bodies are
+llvm-lls33's byte for byte, 900 compared). The comparisons found four rules Arbace's verifier lacked (a local variable's non-DIScope
+scope, an old debug intrinsic's call's metadata arguments as a record's, that call's attachments dropped, a declaration's distinct
+`!dbg`), fixed. Measured light (stage 0, the stubs first; live opt by hand as the oracle): the day's 1,872 mutants 1,694 to 1,818 own
+verdicts (97.1%), every one as Arbace's verifier and opt; a held-out set never looked at (h2, 900 of the intrinsics, metadata and
+debug families at 800000) 458 to 815 own (90.6%), all 815 as both; a first held-out set (h1, at 700000) read once, which showed 10 own
+verdicts of the first rules wrong against opt (fixed). The families the verifier's fixes touch as recorded (verify-llvmtest 792 of 806,
+verify-probes 472 of 478, roundtrip- and text-llvmtest 304 of 304), `bin/llvmi check --essential` 10 of 10, controls-test all ok.
+LLS37 (b): nothing. Alternatives considered: a new gate part for the mutants (a `:parts` line on llvm-records-verify; rejected, it
+would change the slot patch's context), porting module flags' and visitIntrinsicCall's other cases now (proposed as LLS38, LLS39).
+Details: doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS35 (a), LLS36 (a)".
+
+## 2026-11-09: CS290 (a), CS291 (a)/(b), CS292 (a): pragmas in stream order, the lexer's rejections as diagnostics, a dg-wording family (branch `c-props`, from `mac/c-compl` 35744df5e)
+
+The user decided C's three proposals as recommended (2026-11-09 morning). CS290 (a): under `*reentry*` the preprocessor keeps a
+re-entered main file's `#pragma` texts and hands them to the parser with the next token (`stream`'s `:pragmas`), the parser records
+them by token seq (moved with the tokens when `__func__`'s are injected), and ci's read (`*include-inside*`) writes `c/pragma` before
+the body item that token starts; the checker runs a statement-level `c/pragma` (so a main-file `#pragma pack` in a body counts too)
+and lays a record out by the pack state at its definition. 95_bitfields' packed and aligned tests then showed three layout rules
+under `#pragma pack`, taken after gcc 15.2's stor-layout place_field and layout_decl (no code copied): no type-size window for
+bit-fields when a maximum field alignment is set, a zero-width bit-field aligning to its type's full alignment, an aligned
+attribute capped by the pack; and ci's back end (IBitLoad/IBitStore, aot's BitLoad/BitStore) reads and writes a packed bit-field's
+bits past its 64-bit unit in the next byte. 95_bitfields passes at eval and AOT. CS291 (a): `(c/bad-lit T spelling message)` for
+the constants gcc's lexer rejects (a binary prefix after libcpp's cpp_classify_number; a u8 character constant after
+cpp_interpret_charconst), reported by the checker, printed back as written: c23-utf8char-3 and c23-binary-constants-3 pass dg and
+the round trip's levels 1 and 2; (b): c23-auto-3 and c23-constexpr-3 keep their refusals. CS292 (a): the family
+`:syntax-expected-before` in `test/c/dg-wording.edn`: c23-attr-syntax-7 passes; -6 keeps two lines in `:wrong-reason` (no syntax
+error after a failed paste: proposed as CS293) and gnu23-attr-syntax-3 stays (a declaration diagnostic, not wording). Checked light
+(stubs first, no gcc): the affected cases `--only`, dg `--essential` 92 of 92, the essential eval and AOT lists 0 failing, `bin/repr-c
+check --c23` 59 / 3 / 0, `bin/ci judge-test` 0 failures; the `--only` rows merged into the records. The musl forms cache re-read for
+the new key was cut by a timeout at 1,300 of 1,331 files; its 3,165 files equal c-compl's byte for byte, whose index and the new
+key completed it (the night re-reads). C: completeness 95.92% to 95.96% (99.59% to 99.64% without by design), the read cell's deferred
+36 to 33, eval and AOT 1 to 0, print 41 to 39. Alternatives considered: naming each re-entry `MAIN#again#N` (CS290 (b), rejected by
+the decision), the parser's messages in gcc's words (CS292 (b): the parse check compares them with cc's). Details: doc/C23-SURVEY.md,
+"As built: CS290 (a), CS291, CS292 (a)".
