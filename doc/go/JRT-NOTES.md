@@ -2001,6 +2001,32 @@ SOCKS and HTTP impls, the resolver providers and `isReachable` stay out.
   The JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on its standard error; the Go executable
   does not (NT2).
 
+## `java.home` (JCS233 (a), 2026-11-08)
+
+doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233". Until JCS233 `java.home` was `""`: jrt's own readers take
+the JDK image's files as embedded resources (Security's `loadMaster`, `ZoneInfoFile`'s, `NetProperties`',
+`LogManager`'s variants), but the JDK's code and tests that open `${java.home}/...` as files found nothing.
+
+- **The directory** (`go/arbace/jrt/javahome.ae`): `$XDG_CACHE_HOME/arbace/java-home/KEY` (an absolute
+  `XDG_CACHE_HOME`, else `$HOME/.cache/...`), KEY the first 20 hex digits of the SHA-256 over the embedded files'
+  names and bytes. It holds `javaHomeFiles`, the image's paths jdk/data has: `conf/{logging,net}.properties`,
+  `conf/security/java.security`, `conf/security/policy/` (README.txt, limited's three and unlimited's two
+  policies), `lib/security/cacerts` (JCS140 (a)) and `lib/tzdb.dat`; a file the executable does not embed is left out
+  (and out of the key).
+- **When.** At the first read of the property (`System.getProperty("java.home")`, `getProperties`, `StaticProperty`'s
+  initializer): `initProps` puts a sentinel String in the table, `System_GetProperty_String__String` replaces it by
+  `JavaHome`'s answer. RT.doInit's `System.getProperties()` reads every property, so every start pays it: about
+  0.26 ms once the directory exists (`BenchmarkJavaHome`: the hash of 360 KB and a stat; the resources' inflation
+  beside it in a built executable).
+- **How.** Written once: the files below `KEY.tmp-RANDOM` beside it (0644, directories 0755, through the Host
+  interface), renamed to `KEY`; a process whose rename finds the directory there removes its copy and takes it (8
+  first readers at once share one directory: `TestJavaHome`). An existing `KEY` directory is not checked again.
+- **Overrides.** `ARBACE_JAVA_HOME` names a directory used as is (nothing written); `JAVA_TOOL_OPTIONS`'
+  `-Djava.home=...` and `System.setProperty` replace the value as any property's.
+- **Without it** (no cache directory, a host that cannot write one, the box; no file embedded): `""`, as before, and
+  `JceSecurity` falls back to the unlimited policy (CryptoAllPermission) instead of throwing as the JDK without its
+  policy files does.
+
 ## `arbace.core.server`
 
 Embedded in the executable (embed.ae no longer leaves it out), with one namespace variant,

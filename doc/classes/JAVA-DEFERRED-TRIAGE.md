@@ -6139,3 +6139,240 @@ SharedSecrets' accessor was outside the world. With F26 it is inside.
 - **(b)** Remove them once the night's smoke proves the accessor. jdk26u's own code then runs: `toList` over
   `listFromTrustedArrayNullsAllowed`.
 - *Recommended: (b)*, the morning after the night's build.
+
+## As built: JCS233 (a) with JCS140 (a): `java.home`, the crypto policy, cacerts (2026-11-08; branch `java-http`, write-ahead)
+
+Branch `java-http` from `mac/java-props` (`a9aebc62f`), by day under the light rules: nothing converted, translated or built;
+the night's commands below. jdk26u at `baf63fb`.
+
+| part | what |
+|---|---|
+| `java.home` | `go/arbace/jrt/javahome.ae` (new): a directory per key, `$XDG_CACHE_HOME/arbace/java-home/KEY` (else `$HOME/.cache/...`), KEY the first 20 hex digits of the SHA-256 of the embedded files' names and bytes, written at the first read of the property (a temporary directory renamed into place; a loser of the race takes the winner's); `ARBACE_JAVA_HOME` overrides; `""` when none can be had (the box). doc/go/JRT-NOTES.md, "`java.home`". The decision's `$XDG_CACHE_HOME/arbace/KEY/` gained the subdirectory `java-home/`, so that the cache can hold other things later |
+| the files | `javaHomeFiles`, at the image's paths: `conf/logging.properties`, `conf/net.properties`, `conf/security/java.security`, `conf/security/policy/` (README.txt; limited's `default_US_export`, `default_local`, `exempt_local`; unlimited's `default_US_export`, `default_local`), `lib/security/cacerts`, `lib/tzdb.dat` |
+| the property | `system.ae`'s `initProps` puts the sentinel `javaHomeUnset`; `System_GetProperty_String__String` replaces it by `JavaHome` on the first read; `-Djava.home=...` (JAVA_TOOL_OPTIONS) and `setProperty` win as for any property |
+| the data step | `bin/jrt-convert`'s generate: `conf/security/policy/` copied from `src/java.base/share/conf/security/policy/` as `GendataCryptoPolicy.gmk` installs it; `lib/security/cacerts` copied from the JDK build's `images/jdk/lib/security/cacerts` (JCS140 (a): GenerateCacerts needs KeyStore and CertificateFactory, which javac's tool's world lacks), `generated.edn`'s `:data` naming it `:build-image`; the step fails without a build image |
+| the crypto policy | jrt's `JceSecurity` (overlay) gains jdk26u's `setupJurisdictionPolicies`, its static initializer, `getDefaultPolicy`, `getExemptPolicy` and `isRestricted` (the template's, `@@JCE_DEFAULT_POLICY@@` as `unlimited`, the build's UNLIMITED_CRYPTO default); without java.home the unlimited policy as before. `JceSecurityManager` (overlay) answers jdk26u's `getDefaultPermission` (no class has a code base in the Go build, so the JDK's walk would return the same). jca-sources + `javax/crypto/CryptoPermissions`, `CryptoPolicyParser` |
+| not changed | `Security.ae`'s `loadMaster` (the embedded resource: it works without java.home); `ZoneInfoFile`'s, `NetProperties`' and `LogManager`'s variants; `FilePaths`, `TrustStoreManager`, `KeyStoreUtil`, `AnchorCertificates` are jdk26u's and now find `${java.home}/lib/security/cacerts` |
+
+**Light checks.**
+- The joint javac check (`.tmp/night7/all9-run.sh`): 2,508 files (2,506 on `java-props`), **0 errors**, 5,329 classes.
+- `bin/repr-java read-jdk --check` of `JceSecurity`, `JceSecurityManager`, `CryptoPermissions`, `CryptoPolicyParser` (with the two
+  of JCS230) as a patch of java.base: 6 converted, 0 failed, 0 javac errors; `--no-javac`: 6 native, 0 fallbacks, the forms
+  identical byte for byte.
+- `bin/jrt build --arch all` (go build and vet, linux/amd64 and arm64): `arbace/jrt` clean; `bin/jrt test --arch amd64`: `arbace/jrt` ok
+  (5.1 s; the crops' `expat`, `pyexpat`, `hs`, `oi` fail by themselves, as on `next`). New: `TestJavaHome` (no cache directory,
+  `ARBACE_JAVA_HOME`, no embedded file; the key's directory, its files and only the list's, made once, `HOME`'s `.cache`, another
+  key for other data, eight concurrent first readers sharing one directory, no temporary left), `TestJavaHomeProperty` (the
+  first read, `setProperty`, `-Djava.home`), `BenchmarkJavaHome` (0.26 ms a start once the directory exists). Negative control:
+  the key cut to 16 digits fails `TestJavaHome` ("the directory: ...").
+- The policy's code on the JDK: the overlay's `JceSecurity` and `JceSecurityManager` with jdk26u's `CryptoPermission`,
+  `CryptoAllPermission`, `CryptoPermissions`, `CryptoPolicyParser` in a scratch package (`.tmp/jcs233/`, java.home read as the
+  property), run on jdk26u's JDK for TestUnlimited's eleven cases: `use_default`, `unlimited`, `unlimited/` give AES and RC5
+  unlimited and not restricted, `limited` 128 and restricted, the seven others "Can not initialize cryptographic mechanism",
+  as TestUnlimited expects. The interpreter cannot run the scratch copy (it cannot extend `java.security.Permission` yet), so
+  the Go build's run of it is the night's.
+
+**Expected yield** (interp; compiled the same where j2g translates them): `javax/crypto/CryptoPermissions/CryptoPolicyFallback`
+(t07905), `TestUnlimited` (t07906, eleven runs), `javax/net/ssl/sanity/CacertsExplorer` (t08012), `sun/security/rsa/TestCACerts`
+(t08242): **4**, and `sun/security/lib/cacerts/VerifyCACerts` (t08202) with JCS235 (a)'s HashSet, 5 touched. At risk: TestCACerts'
+110 signature checks at the interpreted level's speed; `Files.newDirectoryStream`'s glob (F9's provider) and `CryptoPolicyParser`'s
+reflective `RC2ParameterSpec`/`RC5ParameterSpec` constructors (the limited policy) in the Go build, unchecked by day.
+
+**Beyond the tests.** Every `TrustManagerFactory.init((KeyStore) null)` and `SSLContext.getDefault()` now has the JDK's
+anchors: PKIX validation against public CAs as on the JDK (no network at check time, so the corpus does not show it).
+
+**The night's commands** (in the night's worktree with this branch merged):
+
+```sh
+/root/arbace/.tmp/night7/all9-run.sh $PWD                     # 0 errors
+# jdk/ converted afresh: + CryptoPermissions, CryptoPolicyParser (and JCS230's two, JCS254's); jdk/data + 7 files
+# (conf/security/policy/*, lib/security/cacerts); generated.edn :data "lib/security/cacerts" :build-image
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update && bin/jrt modules
+bin/jrt-convert vet --strict                                  # JceSecurity's users unchanged; no refusal
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# a smoke: expect "home /…/arbace/java-home/<20 hex> true", "aes 2147483647", "limited 128", "anchors <about 110>"
+X=target/arbace-go/amd64/arbace
+$X -e '(println "home" (System/getProperty "java.home") (.exists (java.io.File. (str (System/getProperty "java.home") "/lib/security/cacerts"))))
+       (println "aes" (javax.crypto.Cipher/getMaxAllowedKeyLength "AES"))
+       (println "anchors" (count (.getAcceptedIssuers (first (.getTrustManagers (doto (javax.net.ssl.TrustManagerFactory/getInstance "PKIX") (.init nil)))))))'
+$X -e '(java.security.Security/setProperty "crypto.policy" "limited") (println "limited" (javax.crypto.Cipher/getMaxAllowedKeyLength "AES"))'
+JAVA_CHECK_EXE=$PWD/$X J2G_GO_EXE=$PWD/$X JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 4 \
+  --only 'jdk/(javax/crypto/CryptoPermissions|javax/net/ssl/sanity|sun/security/rsa/TestCACerts|sun/security/lib/cacerts)' \
+  --save .tmp/jcs233-night/check
+```
+
+**Fallbacks.** (1) j2g refusing `CryptoPolicyParser` (its reflection) or `CryptoPermissions` (serialization's fields): the report
+names it; the fallback is the old `JceSecurity` and `JceSecurityManager` (the policy unlimited; TestUnlimited fails, the other
+three still pass on java.home alone). (2) A start that cannot write its cache (a read-only home): java.home `""`, as before.
+
+## As built: JCS230 (b): Kerberos's permissions, the rest by design (2026-11-08; branch `java-http`, write-ahead)
+
+- **The permissions.** `test/jrt/jrt_sources.ae`'s `kerberos-sources`: jdk26u's (`baf63fb`)
+  `src/java.security.jgss/share/classes/javax/security/auth/kerberos/DelegationPermission.java` and `ServicePermission.java`,
+  KIND `share:java.security.jgss` (translated into java.base's tree as java.security.sasl's are), 933 lines. Each file holds its
+  collection (`KrbDelegationPermissionCollection`, `KrbServicePermissionCollection`), so the proposal's "4 files" are 2. They
+  need only `BasicPermission`, `Permission`, `PermissionCollection` (F4) and the object streams (JCS167); no variant, no Go. Go
+  names: the four simple names collide with nothing in `jdk/forms`, `overlay/` or jrt.
+- **The class.** `test/java/divergences.edn`'s `:kerberos`, `:kind :design`, `:levels [:interp :compiled]`, after
+  `:design-also-compiled` and before `:j2g-unresolved` and `:security` (which the same tests' reasons match): `:tests` the five by
+  design (t05298 `java/security/Principal/Implies`, which builds a `KerberosPrincipal`; t08051 `KerberosHashEqualsTest`, t08052
+  `KerberosNullsAndDestroyTest`, t08199 `krb5/NullStringToKey`, t08201 `krb5/etype/UnsupportedKeyType`), and `:match` the
+  Kerberos API's other classes, `sun.security.krb5`, `org.ietf.jgss` and `sun.security.jgss` (not the two permissions: a
+  permission test failing for another cause is not hidden). Checked on stage 0: the file reads (89 classes), the regex finds
+  "javax.security.auth.kerberos.EncryptionKey" and "Unable to resolve class: KerberosPrincipal", not "DelegationPermission" or
+  "ServicePermission".
+- **Light checks.** The joint javac check: 2,510 files, 0 errors, 5,333 classes. `read-jdk --check` (with JCS233's four): 0 failed,
+  0 javac errors; `--no-javac`: native, identical.
+- **Expected yield**: `javax/security/auth/kerberos/` DelegationPermissionCollection (t08048), DelegationPermissionHash (t08049),
+  DelegationPermissionInit (t08050), ServicePermissionCollection (t08054), ServicePermissionTest (t08055): **5 pass** at interp
+  and compiled; the other 5 move from deferred to by design (completeness's denominator unchanged, the strict count by 5).
+- **The night's**: the conversion (`jdk/forms/javax/security/auth/kerberos/` + 2 files), `bin/jrt modules` (javax.security.auth.kerberos
+  as java.security.jgss's), the edge (`javax.security.auth.kerberos` exported), the build, then
+  `bin/java-check --levels interp,compiled --only 'jdk/(javax/security/auth/kerberos|sun/security/krb5|java/security/Principal)'`.
+
+## As built: JCS254 (b): java.net.http's client without HTTP/3 (2026-11-08; branch `java-http`, write-ahead)
+
+F10b's datagram channels are on `java-props` (this branch's base), as the decision's "after F10b" asks; HTTP/3 stays out all
+the same (option (b)), so nothing here needs them. jdk26u at `baf63fb`, `src/java.net.http/share/classes` (313 files, 101,314
+lines).
+
+**What comes in.** `test/jrt/jrt_sources.ae`'s `http-client-sources`: the module but `jdk.internal.net.http.http3`, `.quic`,
+`.qpack`, the eleven `Http3*` classes, `HttpQuicConnection` and `H3FrameOrderVerifier` (156 files, 51k lines, out): **155 files,
+49,719 lines** (`java.net.http`'s API 13 less package-info, `jdk.internal.net.http` 57, `common` 27, `frame` 18, `hpack` 22,
+`websocket` 18), KIND `share:java.net.http`; 140 listed, 15 derived overlays (below); **385 classes**. HTTP/1.1, HTTP/2 (frames,
+HPACK, ALPN over F3's SSLEngine), WebSocket, the body handlers, publishers and subscribers, authentication, cookies, redirects,
+proxies; over F10a's `SocketChannel` and `Selector` and F16's `java.util.concurrent` (`Flow`, `CompletableFuture`).
+
+**The cut, as derivations** (`test/jrt/derive.ae`'s `http-derivations`, JCS166 (a)'s mechanism, `bin/jrt-convert derive
+--check`): the decision named variants, but the joint javac check and the read see jdk26u's Java, where a file naming
+`Http3ClientImpl` does not compile without it; a derived overlay is the cut at the source level, exact and re-derivable.
+The client a JDK has when its `SSLContext` is not QUIC compatible (`HttpClientImpl.client3 == null`) is the model: every
+HTTP/3 path is the JDK's own "no HTTP/3" path.
+
+| overlay | change |
+|---|---|
+| `HttpClientImpl` | `isQuicCompatible` false, `client3` an `Object` that stays null, its stop and abort gone; the selector manager's thread `new Thread(selmgr, name)` + `setDaemon(true)` (jrt has no `Thread.Builder.OfPlatform`, no `inheritInheritableThreadLocals`; the JDK's default is a virtual thread, a daemon) |
+| `ExchangeImpl` | `attemptHttp3Exchange` through the HTTP/3 `createExchangeImpl` cut (one block); `get`'s HTTP/3 branch fails with "HTTP3 is not supported" (unreachable: `MultiExchange` downgrades first, `sendAsync` fails an `HTTP_3_URI_ONLY` request first) |
+| `Exchange`, `HttpConnection`, `Response` | no `HttpQuicConnection`: the aborter's QUIC connection never set, no HTTP/3 connection, no QUIC TLS session |
+| `AltSvcProcessor` | `Http3ClientProperties.ALTSVC_ALLOW_LOCAL_HOST_ORIGIN` read in place (the same property and default) |
+| `common/Log` | the QUIC packets' and frames' logging cut (the ten `quic` imports, `isLogging(QuicFrame)` to `quicPacketInLoggable`, `logQuicPacketOut/In`) |
+| `common/Log`, `Logger`, `DebugLogger`, `Utils`, `hpack/HPACK`, `Http1Response`, `WindowController`, `RawChannelTube` | `System.Logger` as `jdk.internal.jrt.SystemLoggers.Logger`, `System.getLogger` as `SystemLoggers.getLogger` (F24's, JCS155 (b); dropped with JCS250 (a)) |
+| `HttpClientFacade`, `RawChannelTube` | no `Cleaner` (not in the Go build): the selector manager notices a collected facade at its next wake-up (`NODEADLINE`, 3 s, as the JDK's loop does); WebSocket's debug-only `CleanupChecker` not registered |
+
+**j2g's names** (`arbace/j2g/names.ae`): `Hc_HttpClient`, `Hc_ExchangeImpl`, `Hc_HeaderParser`, `Hc_HeaderParser_ParserIterator`,
+`Hc_HttpConnection`, `Hc_Stream`, `Hc_Logger`, `Hc_Utils`, `Hc_ISO_8859_1`, `Hc_StringReader`, `Hc_StringWriter`: the 385 classes'
+Go names against the closure's 5,718 classes (javac's class files, nested and anonymous ones included) and jrt's 305 Go types,
+these eleven the collisions.
+
+**Light checks.**
+- The closure (F1's scan, `.tmp/http/closure2.py`, the overlays first): outside the world and the set only `Object`, `Class` (jrt's)
+  and `MethodHandles`/`VarHandle` (`Http1Response$ClientRefCountTracker.STATE`, `Stream.DEREGISTERED`: `findVarHandle` constants,
+  J2G-SPEC §8.5).
+- The joint javac check: **2,665 files, 0 errors**, 5,718 classes (23 s, 1.0 GB). Negative control: `HttpClientImpl`'s overlay moved
+  away, 63 errors, exit 1.
+- `bin/jrt-convert derive --check`: **39 overlays** (24 + 15), 0 not as derived, its own control passing.
+- The read: `bin/repr-java read-jdk --check` of the 155 with SystemLoggers and java.util.logging (175 files): 175 converted, 0 failed,
+  0 javac errors (26 s, 1.4 GB); `--no-javac`: 175 native, 0 fallbacks, the forms identical; 1.33 MB of forms for the module.
+- **j2g's analysis by day** (`.tmp/http/vetns/jrt/hvet.ae`, `bin/jrt-convert vet`'s `jrt.vet` with the targets a regex): the committed
+  `jdk/forms` with the day's read of the 175 (and UndeclaredThrowableException, JCS170's, not converted yet) entered, declared,
+  resolved and bridged as j2g does, then every class of `java.net.http` and `jdk.internal.net.http` analyzed: **385 classes, 0
+  refused** (4,908 in the world; 24 s, 1.67 GB). Its first run refused `HttpClientImpl` ("Unknown class:
+  java.lang.Thread$Builder$OfPlatform"), which the derivation's thread fixed. The same run with JCS233's and JCS230's classes:
+  `DelegationPermission`, `ServicePermission`, `CryptoPermissions`, `CryptoPolicyParser`, `JceSecurityManager` analyze;
+  `JceSecurity` waits for F9's `DirectoryIteratorException` (in the sources, converted tonight).
+
+**Expected yield**: `:net`'s 8 (`jdk/java/net/httpclient/` HeadersTest t05071, HeadersTest2 t05072, Http1ChunkedTest t05073,
+HttpRequestBuilderTest t05074, InterruptedBlockingSend t05075, ShortRequestBody t05076, TimeoutOrdering t05077, `http2/Timeout`
+t05078): the builders' tests need no server; the others a `ServerSocket` (or an `SSLServerSocket`, http2/Timeout) on the loopback
+address. About **6 at interp** (the timing tests, TimeoutOrdering and InterruptedBlockingSend, at risk at the interpreted speed),
+about 6 compiled. Beyond the corpus: `HttpClient` is the JDK's HTTP API, for every program of the Go build.
+
+**JCS135, the closure's growth**: +49,719 Java lines (+6.5% on the closure's ~760k), the executable about +7 MB by F4's ratio.
+
+**The night's commands** (in the night's worktree with this branch merged; heavy ones under `bin/heavy-lock`):
+
+```sh
+/root/arbace/.tmp/night7/all9-run.sh $PWD                       # 2,665 files (+ the night's other branches), 0 errors
+bin/jrt-convert derive --check                                  # 39 overlays, 0 not as derived
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update     # + 140 share:java.net.http, 15 overlays; 0 failed
+bin/jrt modules                                                 # java.net.http, jdk.internal.net.http.* as java.net.http's
+bin/jrt-convert vet --strict
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge   # java.net.http exported
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+grep -A12 ':analysis-failures' target/arbace-go/amd64/j2g/report.edn   # none of java/net/http, jdk/internal/net/http
+# a smoke on loopback: jdk.httpserver's server (F24) and the client; expect "200 ok HTTP_1_1"
+target/arbace-go/amd64/arbace -e '(import (quote (com.sun.net.httpserver HttpServer HttpHandler)) (quote (java.net InetSocketAddress InetAddress URI))
+    (quote (java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers)))
+  (let [s (HttpServer/create (InetSocketAddress. (InetAddress/getLoopbackAddress) 0) 0)]
+    (.createContext s "/" (reify HttpHandler (handle [_ x] (let [b (.getBytes "ok")] (.sendResponseHeaders x 200 (alength b))
+                                                            (with-open [o (.getResponseBody x)] (.write o b))))))
+    (.start s)
+    (let [c (HttpClient/newHttpClient)
+          r (.send c (.build (HttpRequest/newBuilder (URI. (str "http://127.0.0.1:" (.getPort (.getAddress s)) "/")))) (HttpResponse$BodyHandlers/ofString))]
+      (println (.statusCode r) (.body r) (.version r)))
+    (.stop s 0))'
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 4 \
+  --only 'jdk/java/net/httpclient/' --save .tmp/jcs254-night/check
+```
+
+**Risks and fallbacks.** (1) A refusal in the whole world the day's analysis did not see (the night's world is newer): the report
+names it; a fix is a derivation more; the fallback drops `http-client-sources`' line and the 15 overlays (the renames stay harmless).
+(2) The HTTP/2 tests' TLS (ALPN `h2` over F3's SSLEngine). (3) The selector manager's loop at the interpreted level (its select
+wakes at least every 3 s).
+
+**What is left of java.net.http**: HTTP/3 and QUIC (JCS254 (a): 156 files over F10b's `DatagramChannel` and the JDK's QUIC TLS
+engine, `sun.security.ssl.QuicTLSEngineImpl`, which F3's forms already hold), when a corpus test needs it. Of
+`test/jdk/java/net/httpclient`'s 378 tests the corpus holds these 8: 259 name an `@library` (the test library's HTTP/1.1, HTTP/2
+and HTTP/3 servers, `/test/jdk/java/net/httpclient/lib`, and `/test/lib`), and most of the other 119 run as TestNG or JUnit
+tests (63 and 30 `@run` lines), which the corpus's categories leave out: JCS311 below.
+
+## Proposed (java-http: JCS233, JCS230, JCS254)
+
+Numbered from JCS310 (JCS258-JCS309 left to the day's other branches).
+
+### JCS310 Where the checks' java.home goes
+
+jrt writes java.home under `$XDG_CACHE_HOME` or `$HOME/.cache` (JCS233 (a)'s "the user's cache"), so every gate step, Java
+check and test run that reads `java.home` writes one directory per data key (about 360 KB) into the host user's cache, outside
+the checkout and the clean run's fresh clone; RT.doInit's `System.getProperties()` reads it at every start.
+- (a) `ARBACE_CACHE_HOME`, read by jrt before `XDG_CACHE_HOME` (Arbace's cache root alone: Go's own build cache, which reads
+  `XDG_CACHE_HOME` when `GOCACHE` is unset, is not moved), set by `bin/lib/tmpdir.bash` to the checkout's `.tmp/cache` when unset:
+  the checks write only inside the checkout, the clean run inside its clone. An hour; `TestJavaHome` gains the variable.
+- (b) As built: the user's cache for everything; a few keys a week (the data changes with the conversion).
+- *Recommended: (a)*: the checks' outputs stay in `.tmp/`, as the rest of the scratch does.
+
+### JCS311 java.net.http's jtreg tests that use the test library
+
+`test/jdk/java/net/httpclient` has 378 tests; the corpus holds 8 (JCS254's). 259 name an `@library` (the HTTP/1.1, HTTP/2 and
+HTTP/3 test servers of `/test/jdk/java/net/httpclient/lib`, `jdk.test.lib`), and 93 of the rest run under TestNG or JUnit:
+the corpus's categories (`:run-plain`, `:run-compile`, `:run-jitopts`, `:compile-fail-ref`) take neither.
+- (a) A survey of `@library` and TestNG/JUnit runs for Java's check (JC-level: the libraries' sources read and loaded with the test,
+  TestNG's and JUnit's runners as forms or a minimal runner of Arbace's own that reports as jtreg does), its first corpus the
+  HTTP client's: 1-2 days of survey, then the runner; hundreds of tests across `jdk/` beyond these.
+- (b) Deferred: the 8 stand for the client until the check takes libraries.
+- *Recommended: (a)* as its own survey, after the Java night records JCS254's 8: the libraries are the largest part of jtreg the
+  check does not reach.
+
+### JCS312 Security's `loadMaster` from java.home
+
+With java.home a directory (JCS233), jdk26u's `Security.SecPropLoader.loadMaster` could read `${java.home}/conf/security/java.security`
+as the JDK does, and `Security.ae`'s `loadMaster` variant (the embedded resource) could go.
+- (a) The variant dropped: the JDK's code; but a Go build without java.home (the box, a read-only home) then has no security
+  properties at all and every provider lookup fails.
+- (b) The variant kept: the resource is the same bytes as the file; the JDK's own readers of the file (the tests, `FilePaths`) read
+  java.home's.
+- *Recommended: (b)*.
+
+### JCS313 `bin/jrt-convert vet --classes RE`
+
+JCS254's day check analyzed a new slice's classes (385) on the committed world plus the day's read, by a scratch copy of
+`jrt.vet` whose targets are a regex (`.tmp/http/vetns/jrt/hvet.ae`): 24 s, 1.67 GiB, and it found what the night would have
+(`Thread.Builder.OfPlatform`, fixed the same day). Any slice that adds sources has the same need.
+- (a) `vet --classes RE [--forms-add DIR...]`: the classes matching RE analyzed beside the variants', DIRs' forms laid over the
+  committed ones (the day's `read-jdk --check` output); an hour, documented in the triage's checklist for new slices.
+- (b) Left as the scratch script.
+- *Recommended: (a)*.

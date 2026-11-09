@@ -1748,3 +1748,38 @@ The 44 tests ran the same way:
 
 The night's commands and the proposals JCS300-JCS305 are in doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F26
 (classfile)" and "Proposed (F26)".
+
+## 2026-11-08 (java-http): JCS233 (a) with JCS140 (a), JCS230 (b), JCS254 (b) built by day
+
+Branch `java-http` from `mac/java-props` (`a9aebc62f`), the user's decisions of 2026-11-08 (doc/classes/JAVA-DEFERRED-TRIAGE.md,
+"Decided (the user, 2026-11-08, about 19:45 ...)"), by day under the light rules: nothing converted, translated or built; one
+commit per proposal. Sources: openjdk/jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`.
+
+**JCS233 (a), JCS140 (a)** (`4fa9fa9a7`; triage "As built: JCS233 (a) with JCS140 (a)"). `java.home` is a directory jrt writes at
+the property's first read: `go/arbace/jrt/javahome.ae`, `$XDG_CACHE_HOME/arbace/java-home/KEY` (else `$HOME/.cache`), KEY 20 hex
+digits of the SHA-256 of the embedded files' names and bytes, written below a temporary name and renamed into place;
+`ARBACE_JAVA_HOME` overrides; `""` when none can be had. The files are the image's `conf/{logging,net}.properties`,
+`conf/security/java.security`, `conf/security/policy/` and `lib/{security/cacerts,tzdb.dat}`; `bin/jrt-convert`'s data step
+copies the policies (`src/java.base/share/conf/security/policy`, as GendataCryptoPolicy.gmk installs them) and the JDK build
+image's `lib/security/cacerts` (GenerateCacerts cannot run on javac's tool; `generated.edn` names it `:build-image`). jrt's
+`JceSecurity` takes the template's `setupJurisdictionPolicies` (`@@JCE_DEFAULT_POLICY@@` as `unlimited`) and `JceSecurityManager`
+jdk26u's `getDefaultPermission`; `CryptoPermissions`, `CryptoPolicyParser` join jca-sources. Alternatives: JCS233 (b) (a virtual
+directory in jrt's file layer) and (c), not chosen by the user; the key at build time (JCS310's neighbour, not needed: 0.26 ms a
+start). Checks: jrt's `TestJavaHome`, `TestJavaHomeProperty` with a negative control, `BenchmarkJavaHome`; the policy code run on
+the JDK in a scratch package gives TestUnlimited's eleven answers. Expected: 4 tests (t07905, t07906, t08012, t08242), VerifyCACerts
+(t08202) with JCS235 (a).
+
+**JCS230 (b)** (`6d7e804e8`; "As built: JCS230 (b)"). `kerberos-sources`: jdk26u's `src/java.security.jgss/share/classes/javax/
+security/auth/kerberos/{DelegationPermission,ServicePermission}.java` (each holds its collection). `test/java/divergences.edn`'s
+`:kerberos` (`:design`) names the other five tests and matches the Kerberos API's other classes, krb5 and GSS. Expected: 5 pass.
+
+**JCS254 (b)** (`3a888f62e`; "As built: JCS254 (b)"). `http-client-sources`: 140 of `src/java.net.http/share/classes`, and 15 overlays
+derived by `test/jrt/derive.ae`'s `http-derivations` (a `cut` op added: text from a start to an end marker, each once): HTTP/3 cut to
+the JDK's own path for a client without HTTP/3 (`client3` null), System.Logger as F24's `SystemLoggers.Logger`, no Cleaner, the
+selector manager a daemon `Thread(Runnable, String)`. Derived overlays rather than j2g variants, a deviation from the decision's
+word: the joint javac check and the read compile jdk26u's Java, where the HTTP/3 names must be gone at the source. HTTP/3's 156 files
+out. j2g renames `Hc_*` (11 collisions). Checks: joint javac 2,665 files 0 errors (control 63 errors), `derive --check` 39 overlays,
+`read-jdk --check` and `--no-javac` identical, and j2g's analysis of the 385 classes by day on the committed world with the day's
+read (a scratch copy of `jrt.vet`, JCS313): 0 refused after the thread fix. Expected: about 6 of `:net`'s 8.
+
+Proposals JCS310-JCS313 in the triage's "Proposed (java-http ...)". The night's commands are in each "As built".

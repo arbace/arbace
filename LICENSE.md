@@ -793,6 +793,33 @@ covers what.
   `LogManager.ae`'s `LoggingProviderAccess` keep the jdk26u members they replace as repr/java converts them (the same
   license), with the changes they name. Their jdk26u sources join `jdk/forms/` (the converted closure, under the same
   license): 38 of httpserver-sources (`src/jdk.httpserver/share/classes`).
+- java.home, the crypto policy and the trust anchors (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS233"; recorded
+  by the rule of B7): since JCS233 (a) `overlay/jdk/java.base/javax/crypto/JceSecurity.java` also holds jdk26u's
+  `setupJurisdictionPolicies`, its static initializer, `getDefaultPolicy`, `getExemptPolicy` and `isRestricted`
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/javax/crypto/JceSecurity.java.template`, its
+  `@@JCE_DEFAULT_POLICY@@` as `unlimited`), and `JceSecurityManager.java` jdk26u's `getCryptoPermission` (but the code
+  base's walk) and `getDefaultPermission` (`javax/crypto/JceSecurityManager.java`): Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below), the rest Arbace's
+  own; jca-sources' `javax/crypto/CryptoPermissions.java` and `CryptoPolicyParser.java` join `jdk/forms/` under the same
+  license. The resource data `jdk/data/conf/security/policy/` (README.txt and the limited and unlimited policies,
+  `src/java.base/share/conf/security/policy/`) and `jdk/data/lib/security/cacerts` (the JDK build's image file, made by
+  `make/modules/java.base/Gendata.gmk`'s GenerateCacerts from `src/java.base/share/data/cacerts/`, jdk26u's CA list:
+  public certificates, under the same license as jdk26u's tree) are jdk26u's; `go/arbace/jrt/javahome.ae` and its test
+  are Arbace's own (Eclipse Public License 1.0).
+- Kerberos's permissions (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS230"; recorded by the rule of B7):
+  kerberos-sources' 2 files, jdk26u's (https://github.com/openjdk/jdk26u at `baf63fb`)
+  `src/java.security.jgss/share/classes/javax/security/auth/kerberos/DelegationPermission.java` and
+  `ServicePermission.java`, join `jdk/forms/` (the converted closure): Copyright (c) Oracle and/or its affiliates, under
+  the GNU General Public License version 2 with the Classpath Exception (text below).
+- java.net.http's client (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS254 (b)"; recorded by the rule of B7): the 15
+  overlays `overlay/jdk/java.base/jdk/internal/net/http/{HttpClientImpl,ExchangeImpl,Exchange,HttpConnection,Response,AltSvcProcessor,Http1Response,WindowController,RawChannelTube,HttpClientFacade}.java`,
+  `common/{Log,Logger,DebugLogger,Utils}.java` and `hpack/HPACK.java` are jdk26u's files of the same names
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.net.http/share/classes/jdk/internal/net/http/`) with the exact
+  replacements and cuts `test/jrt/derive.ae` makes (each file's header says so), and `test/jrt/derive.ae`'s
+  `http-derivations` hold text of those files as its OLD strings: Copyright (c) Oracle and/or its affiliates, under the
+  GNU General Public License version 2 with the Classpath Exception (text below), the derivation Arbace's own. Their
+  jdk26u sources join `jdk/forms/` (the converted closure, under the same license): 140 of http-client-sources
+  (`src/java.net.http/share/classes`).
 - jrt's derivations as data (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS251 (a), JCS253"; recorded by the rule
   of B7): `test/jrt/derive.ae`'s tables hold, as the OLD and NEW strings of its replacements, text of jdk26u's files
   (https://github.com/openjdk/jdk26u at `baf63fb`: `src/java.base/share/classes/sun/nio/ch/Net.java`,
