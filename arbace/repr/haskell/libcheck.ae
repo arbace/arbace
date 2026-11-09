@@ -13,7 +13,9 @@
             [arbace.repr.haskell.typecheck :as tc]
             [arbace.repr.haskell.tostg :as tostg]
             [arbace.repr.haskell.stgcmp :as stgcmp]
-            [arbace.repr.haskell.ownface :as ownface])
+            [arbace.repr.haskell.ownface :as ownface]
+            [arbace.repr.haskell.core :as c]
+            [arbace.repr.haskell.cabal :as cabal])
   (:import [java.io File]))
 
 (defn- msg [^Throwable e] (str/replace (str (.getName (class e)) ": " (ex-message e)) #"\s+" " "))
@@ -202,50 +204,128 @@
               nxt (or (first ready) (first (sort-by prio left)))]
           (recur (conj done nxt) (conj out nxt) (disj left nxt)))))))
 
+(def ^:private iface-refs-cache (atom {}))
+
+(defn- iface-refs
+  "The modules an interface file's names mention ((ext NS \"M\" ...)), read once a process"
+  [f]
+  (or (get @iface-refs-cache f)
+      (let [r (set (map second (re-seq #"\(ext [a-z]+ \"([^\"]+)\"" (slurp f))))]
+        (swap! iface-refs-cache assoc f r) r)))
+
+(defn- grow-closure
+  "The module names seeds and every module an interface of the set mentions, to a fixed point (file-of a module's
+  interface file or nil: a module with none is kept, unresolved, for the closure's count), nm left out"
+  [seeds file-of nm]
+  (loop [have (set (remove #(= % nm) seeds)) todo (vec have)]
+    (if (empty? todo)
+      (vec (sort have))
+      (let [x (peek todo) todo (pop todo)
+            f (file-of x)
+            new (when f (remove #(or (= % nm) (contains? have %) (nil? (file-of %))) (iface-refs f)))]
+        (recur (into have new) (into todo new))))))
+
+(defn cabal-reexports
+  "HF10-P14 (a): a package's reexported modules ({NEW ORIG}) from its .cabal file's library (Cabal's ModuleReexport items,
+  `orig as new`; a bare item keeps its name, another package's module of the same name, and is left out): ghc-prim's
+  GHC.Prim is GHC.Internal.Prim, as ghc-pkg's exposed-modules `GHC.Prim from ghc-internal:GHC.Internal.Prim` say"
+  [cabal-file]
+  (let [items (cabal/parse (slurp cabal-file))
+        lib (some #(when (and (= (:section %) "library") (str/blank? (:args %))) %) items)
+        ws (vec (mapcat #(cabal/words-of (:lines %)) (filter #(= (:field %) "reexported-modules") (:body lib))))]
+    (loop [ws ws acc {}]
+      (if-let [w (first ws)]
+        (let [orig (str/replace w #"^[A-Za-z0-9-]+:" "")]
+          (if (= "as" (second ws))
+            (recur (drop 3 ws) (assoc acc (nth ws 2) orig))
+            (recur (rest ws) acc)))
+        acc))))
+
+(defn- dm-unfoldings
+  "HF10-P12 (a): the module's default methods' compulsory unfoldings after its own -O0 Simplifier, as GHC's -O0 interface
+  carries them (GHC.HsToCore.Binds' makeCorePair gives each $dm mkCompulsoryUnfolding' of its right-hand side; the
+  Simplifier's simplStableUnfolding simplifies the template in updModeForStableUnfoldings' mode, so a call the module
+  defines is inlined into it: Classes' $dm/= is `case x == y of False -> True; True -> False`, not `not (x == y)`; GHC.Iface.Tidy's
+  addExternal exposes it). The module through the pipeline lib-stg runs (desugared, the simple optimiser, the Simplifier:
+  tostg/module-stg), only when it defines a default method; each $dm's unfolding written in the helper's spelling
+  (ownface/helper-core). A template with a free local (a binding the Simplifier floated to the top level, which GHC's
+  Tidy would externalise) keeps the elaborator's Core. {:n DMS :simplified n :kept [...] :fail MSG :unfs {$dm core}}"
+  [r unit libunits srcfile boot?]
+  (let [m (:module r)
+        dms (set (for [[cn info] (:classes r) :when (= m (nth cn 2 nil)) [_ d] (:defaults info)] d))]
+    (when (and (seq dms) (not boot?) (not= "0" (System/getenv "LIB_CHECK_DM_SIMPL")))
+      (let [prog (try (binding [tostg/*unit* unit tc/*unit* unit] (tostg/module-stg r libunits srcfile)) @tostg/last-prog
+                      (catch Throwable e {:fail (msg e)}))]
+        (if (map? prog)
+          {:n (count dms) :simplified 0 :fail (:fail prog)}
+          (let [got (for [[_ b _] prog :when (and (vector? b) (contains? dms b))
+                          :let [u (c/real-unf b)] :when (c/compulsory-unf? u)]
+                      [(vec b) (c/tmpl u)])
+                ok (into {} (for [[d t] got :when (empty? (c/free-locals t))] [d (ownface/helper-core t)]))]
+            {:n (count dms) :simplified (count ok)
+             :kept (vec (sort (map #(nth % 3) (remove (set (keys ok)) dms))))
+             :unfs ok}))))))
+
 (defn- own-one
   "One line of own-order's: the closure's own interfaces linked (the full module's, else its boot file's; GHC.Internal.Prim
   the wired-in interface, GHC's own: GHC.Builtin.Utils' ghcPrimIface, made from primops.txt.pp, not compiled), renamed,
   elaborated, its own interface written into OUT/pool (a boot file's into OUT/boot), judged: its binders' types against
   GHC's interface of the module, its interface against GHC's fact by fact"
-  [[kind nm dump giface cl] out wired gka unit units]
+  [[kind nm dump giface cl] out wired gka unit units libunits dep-pools aliases]
   (let [boot? (= kind "boot")
+        giface (when-not (contains? #{nil "" "-"} giface) giface)
         lnfile (str out "/ln/" nm (when boot? ".boot") ".txt")
         w (str out "/work/" nm (when boot? ".boot"))
         local (str w "/ifl")
         _ (do (.mkdirs (File. ^String local)) (.mkdirs (File. (str out "/ln"))))
-        members (remove str/blank? (str/split (or cl "") #","))
-        src (fn [x] (let [p (str out "/pool/" x ".iface.edn") b (str out "/boot/" x ".iface.edn")]
+        src (fn [x] (let [p (str out "/pool/" x ".iface.edn") b (str out "/boot/" x ".iface.edn")
+                          dp (some (fn [d] (let [f (str d "/" x ".iface.edn")] (when (.isFile (File. f)) f))) dep-pools)]
                       (cond (.isFile (File. p)) [:own p]
                             (.isFile (File. b)) [:boot b]
+                            dp [:dep dp]
                             (= x "GHC.Internal.Prim") [:wired (str wired "/" x ".iface.edn")]
                             :else [:missing nil])))
+        members0 (remove str/blank? (str/split (or cl "") #","))
+        ;; HF10-P14 (a): a package above another (base on ghc-internal's own pool, --dep-pools): the closure is not GHC's but
+        ;; grown as GHC's --make loads interfaces on demand, from the module's imports (and their in-package closures,
+        ;; own-order's) over the names each interface found mentions, to a fixed point
+        members (if (empty? dep-pools)
+                  members0
+                  (grow-closure (map #(get aliases % %) (concat members0 (map first (imports-of dump)) ["GHC.Internal.Control.Monad.Fail"]))
+                                (fn [x] (second (src x))) nm))
         got (for [x members :when (not= x nm)] [x (src x)])
         files (into {} (for [[x [_ p]] got :when p] [x (.getCanonicalPath (File. ^String p))]))
         _ (spit lnfile (apply str (map #(str % "\n") (vals (sort-by key files)))))
         closure {:own (count (filter #(= :own (first (second %))) got)) :boot (count (filter #(= :boot (first (second %))) got))
+                 :dep (count (filter #(= :dep (first (second %))) got))
                  :wired (count (filter #(= :wired (first (second %))) got))
                  ;; a member the package compiles later (not a dependency: lib-check's closures add MonadFail's interface and
                  ;; the modules its interface names to every module's) and one it never compiles (another package's)
                  :later (count (filter (fn [[x [k]]] (and (= k :missing) (contains? units x))) got))
                  :missing (vec (sort (keep (fn [[x [k]]] (when (and (= k :missing) (not (contains? units x))) x)) got)))}
         base {:name nm :kind (keyword kind) :closure closure}
+        ;; the packages' reexported modules, as the installation's database names them, for the renamer
+        _ (when (seq aliases) (spit (str local "/reexports.edn") (pr-str aliases)))
         rr (try (binding [rn/*ifdirs* [local] rn/*iface-files* files rn/*projection?* false] (rn/rename-file dump nil local))
                 (catch Throwable e {:fail (msg e)}))]
     (if (:fail rr)
       (merge base {:stage :rename :msg (:fail rr)})
-      (let [r (try (binding [tc/*ifdirs* [local] tc/*iface-files* files tc/*srcfile* nm tc/*unit* unit] (tc/typecheck-module (:tree rr)))
+      (let [;; the source path GHC is given (patError's and SrcLoc's text, in the Core an unfolding carries): lib-stg's
+            srcfile (str "libraries/" unit "/src/" (str/replace nm "." "/") ".hs")
+            r (try (binding [tc/*ifdirs* [local] tc/*iface-files* files tc/*srcfile* srcfile tc/*unit* unit] (tc/typecheck-module (:tree rr)))
                    (catch Throwable e (when (System/getenv "LIB_CHECK_TRACE") (.printStackTrace e)) {:fail (msg e)}))]
         (if (:fail r)
           (merge base {:stage :typecheck :msg (:fail r)})
-          (let [text (try (ownface/own-iface-text rr r unit) (catch Throwable e {:fail (msg e)}))
+          (let [dms (dm-unfoldings r unit libunits srcfile boot?)
+                text (try (ownface/own-iface-text rr r unit (:unfs dms)) (catch Throwable e {:fail (msg e)}))
                 _ (when (string? text)
                     (let [d (File. (str out (if boot? "/boot" "/pool")))]
                       (.mkdirs d)
                       (spit (str d "/" nm ".iface.edn.part") text)
                       (.renameTo (File. (str d "/" nm ".iface.edn.part")) (File. (str d "/" nm ".iface.edn")))))
                 errs (:errors r)
-                c (when-not boot? (try (tc/compare-with-iface (assoc r :kind-arity gka) giface) (catch Throwable e {:fail (msg e)})))
-                ic (when (and (string? text) (not boot?))
+                c (when (and giface (not boot?)) (try (tc/compare-with-iface (assoc r :kind-arity gka) giface) (catch Throwable e {:fail (msg e)})))
+                ic (when (and (string? text) giface (not boot?))
                      (try (ownface/compare-ifaces text (slurp giface) (:syns r) (:kind-arity r) gka) (catch Throwable e {:fail (msg e)})))]
             (merge base
                    {:stage (if (seq errs) :errors :ok)
@@ -253,6 +333,7 @@
                     :n-errors (count errs)
                     :features (frequencies (map feature-of errs))}
                    (when (map? text) {:write (:fail text)})
+                   (when (:n dms) {:dm (dissoc dms :unfs)})
                    (cond (nil? c) nil
                          (:fail c) {:judge (:fail c)}
                          :else {:types {:compared (:compared c) :equal (- (:compared c) (count (:diff c))) :missing (count (:missing c))}
@@ -271,7 +352,7 @@
         by (apply merge-with (fn [[a b] [c d]] [(+ a c) (+ b d)]) (map #(get-in % [:iface :by] {}) full))
         cls (fn [k] (reduce + (map #(get-in % [:closure k] 0) rs)))]
     (println (str "lib-check --ifaces own: " (count full) " modules and " (- (count rs) (count full)) " boot files; closures: "
-                  (cls :own) " own interfaces, " (cls :boot) " boot, " (cls :wired) " wired-in (GHC.Internal.Prim), " (cls :later) " compiled later (not dependencies), "
+                  (cls :own) " own interfaces, " (cls :boot) " boot, " (cls :dep) " of the packages below, " (cls :wired) " wired-in (GHC.Internal.Prim), " (cls :later) " compiled later (not dependencies), "
                   (reduce + (map #(count (get-in % [:closure :missing] [])) rs)) " missing"
                   " (" (pr-str (into (sorted-map) (frequencies (mapcat #(get-in % [:closure :missing]) rs)))) ")"))
     (println (str "  interfaces: " (sum :equal) " of " (sum :facts) " facts equal to GHC's; " (sum :missing) " GHC's only, "
@@ -592,6 +673,12 @@
       "own-order" (own-order (first more))
       "own" (let [limit (* 1000 (Long/parseLong (get opts "--timeout" "900")))
                   gka (ownface/ka-of-pool (get opts "--ghc-pool"))
+                  ;; the libraries' STG directories the Simplifier reads other modules' constructors from (lib-stg's --libs)
+                  libunits (tostg/units-of (remove empty? (str/split (or (get opts "--libs") "") #",")))
+                  ;; HF10-P14 (a): the own pools of the packages below (base's: ghc-internal's)
+                  dep-pools (vec (remove empty? (str/split (or (get opts "--dep-pools") "") #",")))
+                  ;; the reexported modules of the packages below (their .cabal files: ghc-prim's GHC.Prim ...)
+                  aliases (apply merge {} (map cabal-reexports (remove empty? (str/split (or (get opts "--cabals") "") #","))))
                   unit (get opts "--unit" "ghc-internal")
                   units (set (for [l (str/split-lines (slurp (get opts "--units" (get opts "--order")))) :when (not (str/blank? l))]
                                (second (str/split l #"\t"))))]
@@ -599,7 +686,7 @@
                       :when (not (str/blank? line))]
                 (let [t0 (System/currentTimeMillis)
                       cols (str/split line #"\t")
-                      task (future (own-one cols out (get opts "--wired") gka unit units))
+                      task (future (own-one cols out (get opts "--wired") gka unit units libunits dep-pools aliases))
                       r0 (deref task limit nil)
                       r (assoc (or r0 {:name (second cols) :kind (keyword (first cols)) :stage :timeout})
                                :ms (- (System/currentTimeMillis) t0))]

@@ -39,6 +39,9 @@
 #                  the other packages the -O2 pack's; own, the same with every ghc-internal module the front end made STG of
 #                  replaced by its own STG whole (a module it did not make keeps GHC's -O0; LIB_STG_REPLACE=equal: only the
 #                  modules whose every binding equals GHC's). A pass of ghc0 lost on own fails
+#   --package base HF10-P14 (a): with --ifaces own, base's modules (lib-check --package base --ifaces own's plan: every module)
+#                  in the installation's unit, judged against GHC's -O0 STG of base; no --run yet; the control
+#                  test/haskell/lib-stg-controls-base.txt
 #
 # Environment: LIB_STG_REUSE=1 (the last run's STG and results kept, --run alone), LIB_STG_REF (GHC's -O0 STG, a directory of
 # PKG/M.stg.ae; default the pack haskell-stg-libs-O0-ghc-9.14.1; LIB_STG_LIVE=1: .tmp/hsi/dumps-O0/stg, made when missing by
@@ -49,7 +52,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
-only=$root/test/haskell/lib-stg.txt every="" jobs=1 record="" judge="" run="" ids=() whole=whole ifaces=ghc
+only=$root/test/haskell/lib-stg.txt every="" jobs=1 record="" judge="" run="" ids=() whole=whole ifaces=ghc pkg=ghc-internal
 while [ $# -gt 0 ]; do
   case $1 in
     --only) only=$2; whole=partial; shift 2 ;;
@@ -58,15 +61,28 @@ while [ $# -gt 0 ]; do
     --record) record=$2; shift 2 ;;
     --judge) judge=$2; shift 2 ;;
     --ifaces) ifaces=$2; shift 2 ;;
+    --package) pkg=$2; shift 2 ;;
     --run) run=1; shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do ids+=("$1"); shift; done ;;
     *) echo "lib-stg: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 w=$root/.tmp/repr-haskell/lib-stg
 lc=$root/.tmp/repr-haskell/lib-check/iface2/ghc-internal
-own=$root/.tmp/repr-haskell/lib-check/own/ghc-internal
+own=$root/.tmp/repr-haskell/lib-check/own/$pkg
+# HF10-P14 (a): --package base (with --ifaces own): base compiled on ghc-internal's and its own interfaces (lib-check --package
+# base --ifaces own's plan and pool), every module of the plan, judged against GHC's -O0 STG of base; no --run yet
+# the unit id the package is compiled as: ghc-internal's is wired in (-this-unit-id ghc-internal); another's the installation's
+# (test/haskell/target/installation.edn's :units, HFS-I10 (a)), which GHC's names and Typeable's module records spell
+unit=$pkg
+if [ "$pkg" != ghc-internal ]; then
+  unit=$(sed -n "s/^ *\"$pkg\" {:id \"\([^\"]*\)\".*/\1/p" "$root/test/haskell/target/installation.edn" | head -1)
+  [ -n "$unit" ] || { echo "lib-stg: no unit id of $pkg in test/haskell/target/installation.edn" >&2; exit 1; }
+  [ "$ifaces" = own ] || { echo "lib-stg: --package $pkg needs --ifaces own" >&2; exit 2; }
+  [ -z "$run" ] || { echo "lib-stg: --package $pkg: no --run yet (the programs run over ghc-internal's sets)" >&2; exit 2; }
+  [ "$whole" = partial ] || every=1
+fi
 if [ "$ifaces" = own ]; then
-  w=$root/.tmp/repr-haskell/lib-stg-own
+  w=$root/.tmp/repr-haskell/lib-stg-own; [ "$pkg" = ghc-internal ] || w=$w/$pkg
   [ -s "$own/plan.txt" ] || { echo "lib-stg --ifaces own: no own closures ($own/plan.txt): bin/repr-haskell lib-check --ifaces own first" >&2; exit 1; }
 fi
 mkdir -p "$w"
@@ -112,7 +128,7 @@ for s in "$out"/shard.??; do
      tail -n +$((done + 1)) "$s" > "$s.rest"
      [ -s "$s.rest" ] || break
      GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.repr.haskell.libcheck stg --plan "$s.rest" -o "$out" \
-       --libs "$lj" --ref "$ref/ghc-internal" --timeout "${LIB_CHECK_TIMEOUT:-900}" >> "$s.edn" 2>> "$s.err" && break
+       --libs "$lj" --ref "$ref/$pkg" --unit "$unit" --timeout "${LIB_CHECK_TIMEOUT:-900}" >> "$s.edn" 2>> "$s.err" && break
      [ "$(wc -l < "$s.edn")" -gt "$done" ] || break
    done) &
   pids+=($!)
@@ -127,9 +143,10 @@ st=0
 [ -z "$judge" ] || arbace_tool -m arbace.repr.haskell.libcheck judge-stg "$judge" "$w/results.edn" "$whole" | tee "$w/judge.txt" || st=1
 # the negative control (GTS81 (a)): the largest module's own STG judged against its reference with the exported bindings'
 # closures rotated must find none equal where the true judgment finds some
-ctl=$(grep -v '^#' "$root/test/haskell/lib-stg-controls.txt" | awk 'NF {print $1; exit}')
-if [ -f "$out/stg/ghc-internal/$ctl.stg.ae" ] && [ -f "$ref/ghc-internal/$ctl.stg.ae" ]; then
-  c=$(arbace_tool -m arbace.repr.haskell.stgcmp "$ref/ghc-internal/$ctl.stg.ae" "$out/stg/ghc-internal/$ctl.stg.ae" --control)
+cf=$root/test/haskell/lib-stg-controls.txt; [ "$pkg" = ghc-internal ] || cf=$root/test/haskell/lib-stg-controls-$pkg.txt
+ctl=$(grep -v '^#' "$cf" | awk 'NF {print $1; exit}')
+if [ -f "$out/stg/$unit/$ctl.stg.ae" ] && [ -f "$ref/$pkg/$ctl.stg.ae" ]; then
+  c=$(arbace_tool -m arbace.repr.haskell.stgcmp "$ref/$pkg/$ctl.stg.ae" "$out/stg/$unit/$ctl.stg.ae" --control)
   echo "lib-stg: the negative control ($ctl, its reference rotated): $c" | tee -a "$w/summary.txt"
   case $c in "control 0 of "*) ;; *) echo "lib-stg: the negative control found equal bindings: the judge does not tell bindings apart" >&2; exit 1 ;; esac
 elif [ -n "$judge" ]; then echo "lib-stg: the negative control ($ctl) not run: no STG or reference" >&2; exit 1
