@@ -35,6 +35,7 @@
 ;; ((fn [ex node]) called with the refusal and that node, the analysis going on with the next entry); nil: off
 (def ^:dynamic *at* nil)
 (def ^:dynamic *on-refusal* nil)
+(def ^:dynamic *pedantic-errors* false) ; CP311 (a): -pedantic-errors given, an extension's diagnostic an error (the checker)
 ;; CX12 (second slice): the checker's rules that the code generator does not apply (on with *on-refusal*: a program the
 ;; checker reads may be ill-formed; the code generator's programs are not, and its analysis stays as it was)
 (defn checking? [] (some? *on-refusal*))
@@ -437,6 +438,50 @@
     (let [t @*last-anon*] (cond-> t (re-find #"^const " s) (assoc :c true)))
   (try (resolve-type-form scope (ct/parse-type s))
        (catch arbace.lang.ExceptionInfo e (if (:codegen/refused (ex-data e)) (throw e) (fail :type "type " s ": " (.getMessage e))))))))
+
+;; CP311 (a): class template argument deduction ([dcl.type.class.deduct]): a placeholder for a deduced class type, a
+;; template-name with no argument list, deduced from the initializer by arbace.cpp.template/ctad (the :ctad hook)
+(defn ctad-template
+  "The class or alias template the placeholder `s` (a type's spelling: a template-name, maybe qualified and
+  cv-qualified, no argument list) names in `scope` where no type of that name is found (the injected-class-name is a
+  type), as [tid #{cv}], or nil."
+  [scope s]
+  (when (and (string? s) (:ctad @hooks))
+    (let [f (try (ct/parse-type (strip-type-attrs s)) (catch Exception _ nil))
+          [f cv] (loop [f f cv #{}] (if (and (seq? f) (#{'const 'volatile} (first f))) (recur (second f) (conj cv (first f))) [f cv]))]
+      (when (and (symbol? f) (not (builtin-syms f)) (not= 'auto f))
+        (let [parts (name-parts f)
+              es (try (if (= 1 (count parts)) (lookup scope (first parts)) (lookup-qualified scope parts))
+                      (catch arbace.lang.ExceptionInfo _ nil))]
+          (when (and (seq es) (nil? (type-entity es)))
+            (when-let [e (first (filter #(and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) es))]
+              [(:id e) cv])))))))
+
+(defn ctad-compound!
+  "CP311 (a), the checker: a variable's type `s` that does not resolve and holds a placeholder for a deduced class type
+  inside a compound type (a pointer, a reference, an array, a function's parameter or return: [dcl.type.class.deduct]/2
+  allows the placeholder only as the whole declared type; clang's err_deduced_class_template_compound_type)."
+  [scope s]
+  (when (and (checking?) (string? s) (:ctad @hooks))
+    (let [f (try (ct/parse-type (strip-type-attrs s)) (catch Exception _ nil))
+          syms (fn syms [x] (cond (symbol? x) [x]
+                                  (and (seq? x) (= '<> (first x))) (mapcat syms (nnext x))
+                                  (sequential? x) (mapcat syms x)
+                                  :else []))]
+      (when (and (seq? f) (not (#{'const 'volatile '<>} (first f))))
+        (when (some #(ctad-template scope (str %)) (syms f))
+          (fail :ctad "cannot form a compound type of a deduced class template specialization type (" s ")"))))))
+
+(defn ctad-compound-var
+  "CP311 (a), the checker: {:ty :ctad-error} for a variable whose type `qt` is ctad-compound!'s error (the variable
+  declared with a dependent placeholder type, the error raised at its initialization), else nil."
+  [scope n qt]
+  (when (checking?)
+    (when-not (try (resolve-type scope qt) (catch arbace.lang.ExceptionInfo _ nil))
+      (try (ctad-compound! scope qt) nil
+           (catch arbace.lang.ExceptionInfo e
+             (when (= :ctad (:codegen/refused (ex-data e)))
+               {:ty {:k :dep :name "<deduction failed>"} :ctad-error (ex-info (.getMessage e) (assoc (ex-data e) :cx/node n))}))))))
 
 (defn- method-const? [^String qt] (boolean (re-find #"\)\s*const(\s|$|&)" qt)))
 (defn- method-volatile? [^String qt] (boolean (re-find #"\)\s*(?:const\s*)?volatile(\s|$|&)" qt)))
@@ -862,10 +907,18 @@
             (declare-fn! scope (assoc n :name "operator==" :type {:qualType (str/replace (str qt) #"^\s*auto\b" "bool")})))))
     id)))
 
+(declare ctad-var)
+
 (defn- declare-var!
   [scope n storage]
-  (let [ty (resolve-type scope (get-in n [:type :qualType]))
+  (let [qt (get-in n [:type :qualType])
         q (qualifier-before n)
+        ;; (CP311 (a): a deduced class type, deduced from the initializer analyzed as global-init would)
+        ct (when (empty? q) (ctad-template scope (or (:_ctad n) qt)))
+        cv (when ct (binding [*cutoff* Long/MAX_VALUE]
+                      (ctad-var (cond-> {:scope scope :statics (atom [])} (and (checking?) (= :ns (:kind scope))) (assoc :cx-global true)) n ct qt)))
+        cv (or cv (when (empty? q) (ctad-compound-var scope n qt)))
+        ty (if cv (:ty cv) (resolve-type scope qt))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
@@ -888,6 +941,7 @@
                :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
                :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
+               :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv)
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
                ;; thread_local, _Thread_local, __thread ([basic.stc.thread]; G5c: libsupc++'s eh_globals.cc)
                :tls (boolean (:tls n))
@@ -993,6 +1047,13 @@
                                            (and fd (string? (:name fd)) (seq (:name fd))) (update :friend-fns (fnil conj #{}) (:name fd))
                                            (and (nil? fd) (or (get-in k [:type :qualType]) (some (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k))))
                                            (assoc :friend-classes true)
+                                           ;; (the rest of CP313 (a): a friend class's name, its last component, matched by name)
+                                           (nil? fd)
+                                           (update :friend-class-names (fnil conj #{})
+                                                   (or (some (fn [x] (when (= "ClassTemplateDecl" (:kind x)) (:name x))) (:inner k))
+                                                       (some-> (get-in k [:type :qualType]) (str/replace #"<.*$" "") (str/replace #"^\s*(?:class|struct|union)\s+" "")
+                                                               (str/split #"::") last str/trim)
+                                                       ""))
                                            (and (nil? fd) (nil? (get-in k [:type :qualType])) (not-any? (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k)))
                                            (assoc :friend-unknown true)))))
                 (binding [*member-access* @access] (declare-node! cs k))))))
@@ -1000,7 +1061,7 @@
       (when-not nm (reset! *last-anon* t)))
     t))
 
-(declare declare-node*!)
+(declare declare-node*! cx-access!)
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
@@ -1087,7 +1148,17 @@
                       [_ target] (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
                       parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
                       es (lookup-qualified scope parts (str/starts-with? (str/trim target) "::"))]
-                  (doseq [e es] (enter! scope (last parts) (assoc e :pos (long (or (:_b n) 0))))))
+                  ;; (the rest of CP313 (a): a using-declaration names its members with their access where they were found,
+                  ;; [namespace.udecl]/19, and gives them its own as members of its class, [class.access]/... ; enumerators
+                  ;; and types alone, the others keep their own)
+                  (when (and (checking?) (not (header-node? n)))
+                    (doseq [e es :when (and (:ucls e) (#{:enumerator :type} (:e e)))]
+                      (try (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
+                           (catch arbace.lang.ExceptionInfo x
+                             (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))])))))
+                  (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
+                                                             (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
+                                                             (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
     ;; (CX12, the checker: a namespace-scope static_assert of the main file checked in the analysis' order)
     "StaticAssertDecl" (when (and (checking?) (= :ns (:kind scope)) (not (header-node? n)))
                          (swap! *order* conj [:sassert {:node n :scope scope}]))
@@ -1971,15 +2042,118 @@
 
 (declare aggr-subs)
 
+;; The rest of CP313 (a): clang's SemaAccess.cpp (llvmorg-23.1.5) for the checker: EffectiveContext (the classes and the
+;; function a use is in), GetFriendKind (by name: a friend the slice cannot match grants, so a miss is never a wrong error),
+;; HasAccess with [class.protected]'s object rule, and the naming class's path to the member's class ([class.access.base]
+;; /5: a member's access as a member of a derived class, through the bases' access specifiers, or through an accessible
+;; base); a use the slice does not model -- a template's specialization, a closure's or a local class's member, a member
+;; named through two paths -- is not judged.
+
+(defn- cx-enclosing-classes
+  "The class `cid` and the classes it is nested in ([class.access.nest]: a nested class is a member, with its enclosing
+  classes' access), or nil for a closure or a local class (not judged)."
+  [cid]
+  (loop [c cid out #{}]
+    (let [cl (abi/cls c)]
+      (when (and cl (not (:lambda cl)))
+        (let [out (conj out c)
+              s (loop [s (:outer cl)] (if (and s (= :tparams (:kind s))) (recur (:parent s)) s))]
+          (cond (or (nil? s) (= :ns (:kind s))) out
+                (and (= :class (:kind s)) (:cls s)) (recur (:cls s) out)
+                :else nil))))))
+
+(defn cx-context
+  "EffectiveContext of the analysis context `ctx`: {:records :fn}, the classes the use is a member of (the function's
+  class, or the class a member's initializer is analyzed in, with their enclosing classes) and the function; nil when
+  the slice does not judge it."
+  [ctx]
+  (let [f (some-> (:fn-id ctx) fnd)]
+    (cond
+      (:lambda ctx) nil
+      (and f (:tinst f)) nil
+      f (if-let [cid (:cls f)] (when-let [rs (cx-enclosing-classes cid)] {:records rs :fn f}) {:records #{} :fn f})
+      :else (if-let [cid (:cls (:scope ctx))] (when-let [rs (cx-enclosing-classes cid)] {:records rs}) {:records #{}}))))
+
+(defn- cx-friend-of?
+  "GetFriendKind: whether class `c` may befriend the context `cx`: a friend function of its function's name, a friend
+  class among its classes by name, or a friend the slice did not classify."
+  [c cx]
+  (let [cl (abi/cls c)]
+    (boolean (or (:friend-unknown cl)
+                 (and (:fn cx) (contains? (:friend-fns cl) (:name (:fn cx))))
+                 (and (:friend-classes cl)
+                      (or (contains? (:friend-class-names cl) "")
+                          (some #(contains? (:friend-class-names cl) (:name (abi/cls %))) (:records cx))))))))
+
+(defn- cx-member-ok?
+  "HasAccess ([class.access]/2, [class.protected]): a member of class `nc` with access `a` (as a member of nc) named in
+  the context `cx`; `obj` the object expression's class for a non-static member, else nil: a protected member through a
+  class D derived from nc that the context is a member or friend of needs an object of D or of a class derived from it."
+  [cx nc a obj]
+  (or (= :public a)
+      (contains? (:records cx) nc)
+      (cx-friend-of? nc cx)
+      (and (= :protected a)
+           (boolean (some (fn [d] (and (not= d nc) (abi/derived-from? d nc)
+                                       (or (nil? obj) (= obj d) (abi/derived-from? obj d))))
+                          (concat (:records cx)
+                                  (keep (fn [[id c]] (when (and (:has-friends c) (cx-friend-of? id cx)) id)) @abi/*classes*)))))))
+
+(defn- cx-paths [from to]
+  (if (= from to) [[]] (mapcat (fn [b] (map #(cons [from b] %) (cx-paths (:cls b) to))) (:bases (abi/cls from)))))
+
+(defn cx-access-ok?
+  "Whether a member of class `dc` with access `a` named through the class `nc` (dc or a class derived from it) is
+  accessible in the context `cx` ([class.access.base]/5): true, false, or nil when the slice does not know (two paths)."
+  [cx dc a nc obj]
+  (if (= nc dc)
+    (cx-member-ok? cx dc a obj)
+    (let [ps (cx-paths nc dc)]
+      (when (= 1 (count ps))
+        (let [steps (vec (first ps))
+              cs (conj (mapv first steps) dc)
+              sp (mapv #(:access (second %)) steps)
+              rank {:public 0 :protected 1 :private 2}
+              ;; the access of a member declared in cs[j] with access a0 as a member of cs[i] (:none: inaccessible there)
+              acc (fn acc [i j a0] (if (= i j) a0
+                                     (let [x (acc (inc i) j a0)]
+                                       (if (#{:none :private} x) :none (if (> (long (rank (sp i))) (long (rank x))) (sp i) x)))))
+              direct (fn [i j a0] (let [ai (acc i j a0)] (and (not= :none ai) (cx-member-ok? cx (cs i) ai obj))))
+              ;; (cs[k] an accessible base of cs[i]: an invented public member of it accessible as a member of cs[i])
+              base-ok? (fn base-ok? [i k]
+                         (or (direct i k :public)
+                             (boolean (some (fn [l] (and (base-ok? l k) (base-ok? i l))) (range (inc i) k)))))
+              ok? (fn ok? [i j a0]
+                    (or (direct i j a0)
+                        (boolean (some (fn [k] (and (ok? k j a0) (base-ok? i k))) (range (inc i) (inc j))))))]
+          (ok? 0 (dec (count cs)) a))))))
+
+(defn- cx-access!
+  "The checker: a member `nm` of class `dc` with access `a`, named through class `nc` (nil: dc) with the object of class
+  `obj` (nil for a static member, a type, a constructor), inaccessible in the context of `ctx`: the error."
+  [ctx dc nm a nc obj]
+  (when (and (checking?) dc a)
+    (let [nc (if (and nc (or (= nc dc) (abi/derived-from? nc dc))) nc dc)]
+      (when (or (not= :public a) (not= nc dc))
+        (when-let [cx (cx-context ctx)]
+          (when (false? (cx-access-ok? cx dc a nc obj))
+            (if (= :public a)
+              (fail :access "'" nm "' is a member of '" (:name (abi/cls dc)) "', an inaccessible base of '" (:name (abi/cls nc)) "'")
+              (fail :access "'" nm "' is a " (name a) " member of '" (:name (abi/cls dc)) "'"))))))))
+
 (defn- cx-ctor-access!
-  "CX12 (the checker): the constructor an initialization `r` calls, private or protected, in a namespace-scope variable's
-  initializer (ctx :cx-global): inaccessible ([class.access]/1-2; [class.protected] needs a derived class's member)."
+  "CX12 (the checker): the constructor an initialization `r` calls, private or protected, inaccessible in its context
+  ([class.access]/1-2; [class.protected]: a protected one through a derived class's member or friend; the rest of CP313
+  (a): every context cx-context judges, a constructor template's specialization with its template's access; before it,
+  a namespace-scope variable's initializer alone)."
   [ctx r]
-  (when (and (:cx-global ctx) (map? r))
+  (when (and (checking?) (map? r))
     (when-let [fid (or (when (= :ctor (:i r)) (:fn r)) (when (= :ctor (:i (:then r))) (:fn (:then r))))]
       (let [f (fnd fid)]
         (when (and (#{:private :protected} (:access f)) (:cls f) (not (:implicit f)))
-          (fail :access "'" (:name f) "' is a " (name (:access f)) " member of '" (:name (abi/cls (:cls f))) "'")))))
+          (if (:cx-global ctx)
+            (fail :access "'" (:name f) "' is a " (name (:access f)) " member of '" (:name (abi/cls (:cls f))) "'")
+            (cx-access! ctx (:cls f) (:name f) (:access f) nil nil))))))
   r)
 
 (defn- class-init
@@ -2313,6 +2487,8 @@
   read."
   false)
 
+(declare check-access!)
+
 (defn- entity-expr [ctx es n]
   (let [e (first es)]
     (case (if (empty? es) :fn (:e e))
@@ -2321,9 +2497,19 @@
                (capture-field ctx (:id e))
                (var-node (:id e))))
       :capfield (field-node (deref-node {:op :this :ty (:this-type ctx) :cat :pr}) (:cls (:lambda ctx)) (:i e))
-      :field (field-node (cx-via (deref-node (this-expr ctx)) (cx-naming-class ctx n)) (:cls e) (:i e))
+      :field (let [tc (some-> (:fn-id ctx) fnd :cls)]
+               ;; (the rest of CP313 (a): a member named in a member function, its access through the naming class)
+               (when (and (checking?) tc (not (:lambda ctx)))
+                 (check-access! ctx (:cls e) (get-in n [:referencedDecl :name]) (:access (nth (:fields (abi/cls (:cls e))) (:i e)))
+                                (or (cx-naming-class ctx n) tc) tc))
+               (field-node (cx-via (deref-node (this-expr ctx)) (cx-naming-class ctx n)) (:cls e) (:i e)))
       :indirect (reduce (fn [o [c i]] (field-node o c i)) (cx-via (deref-node (this-expr ctx)) (cx-naming-class ctx n)) (:chain e))
-      :enumerator {:op :int :v (:val e) :ty (:ty e) :cat :pr}
+      :enumerator (do (when (:ucls e)
+                        ;; (the rest of CP313 (a): an enumerator a class's using-declaration names, its access there; the naming
+                        ;; class the qualifier's, else the class the name is looked up from when derived from it)
+                        (let [nc (or (cx-naming-class ctx n) (:cls (:scope ctx)) (some-> (:fn-id ctx) fnd :cls))]
+                          (cx-access! ctx (:ucls e) (get-in n [:referencedDecl :name]) (:uaccess e) nc nil)))
+                      {:op :int :v (:val e) :ty (:ty e) :cat :pr})
       ;; a pointer or reference non-type template parameter bound to a function or a variable (CODEGEN.md G3)
       :declconst (let [[k id] (:decl e) t (:ty e)]
                    (cond
@@ -2339,7 +2525,10 @@
                     (if-let [h (:var-template @hooks)] (var-node (h ctx e n)) (fail :template "a variable template"))
                     (cond-> {:op :fnset :fns (mapv :id (filter #(= :fn (:e %)) es)) :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) es))
                              :name (get-in n [:referencedDecl :name]) :ty {:k :overload} :cat :lv :implicit-this true}
-                      (cx-naming-class ctx n) (assoc :cx-qcls (cx-naming-class ctx n)))))
+                      (cx-naming-class ctx n) (assoc :cx-qcls (cx-naming-class ctx n))
+                      ;; (the rest of CP313 (a): a member function named in a member function, judged at the call)
+                      (and (checking?) (some-> (:fn-id ctx) fnd :cls) (not (:lambda ctx)))
+                      (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)))))
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
 (defn- name-expr [ctx n]
@@ -2478,6 +2667,14 @@
   (let [es (class-lookup cid nm)]
     (when (seq es) [(first (first es)) (mapv (comp :id second) (filter #(= :fn (:e (second %))) es)) (second (first es))])))
 
+(defn- cx-type-friend?
+  "The rest of CP313 (a): whether a friend declaration may grant a member type of class `cid` with access `acc` (the
+  class declares a friend, or for a protected one a class derived from it does), in place of the third slice's gate (no
+  class of the unit declaring a friend)."
+  [cid acc]
+  (boolean (or (:has-friends (abi/cls cid))
+               (and (= :protected acc) (some (fn [d] (and (:has-friends d) (abi/derived-from? (:id d) cid))) (vals @abi/*classes*))))))
+
 (defn- check-type-access!
   "CX12 (the checker): [class.access]/1-2 for the member types a declaration's type names by a qualified name (A::X with
   X a private or protected typedef of the class A), in a declaration that is no class member's (a variable at namespace
@@ -2486,16 +2683,15 @@
   declaration, A::X A::v, is not judged: only unqualified declarators). `node` the declaration (its position)."
   [scope ^String text node]
   ;; (CX12, fifth slice: a template-id's member type, Beta<0>::Y, its class the qualifier resolved as a type)
-  (when (and (checking?) text (str/includes? text "<") (not-any? :has-friends (vals @abi/*classes*)))
+  (when (and (checking?) text (str/includes? text "<"))
     (when-let [[_ q nm] (re-matches #"(?:const\s+)?([A-Za-z_][\w:]*<[^<>]*>)\s*::\s*([A-Za-z_]\w*)\s*" text)]
       (let [cid (try (class-id (resolve-type scope q)) (catch arbace.lang.ExceptionInfo _ nil))
             es (when cid (.get ^java.util.HashMap (:names (:scope (abi/cls cid))) nm))
             acc (some #(when (= :type (:e %)) (:access %)) es)]
-        (when (#{:private :protected} acc)
+        (when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))
           (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
                           {:codegen/refused :access :cx/node node}))))))
-  (when (and (checking?) text (str/includes? text "::") (not (str/includes? text "<"))
-             (not-any? :has-friends (vals @abi/*classes*)))
+  (when (and (checking?) text (str/includes? text "::") (not (str/includes? text "<")))
     (doseq [[_ q nm] (re-seq #"((?:[A-Za-z_][A-Za-z_0-9]*::)+)([A-Za-z_][A-Za-z_0-9]*)" text)
             :let [parts (vec (remove str/blank? (str/split q #"::")))
                   ce (try (first (filter #(= :type (:e %)) (lookup-qualified scope parts))) (catch arbace.lang.ExceptionInfo _ nil))
@@ -2503,7 +2699,7 @@
             :when cid
             :let [es (.get ^java.util.HashMap (:names (:scope (abi/cls cid))) nm)
                   acc (some #(when (= :type (:e %)) (:access %)) es)]
-            :when (#{:private :protected} acc)]
+            :when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))]
       (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
                       {:codegen/refused :access :cx/node node})))))
 
@@ -2527,12 +2723,15 @@
   `cid` named in a function that is no class's member (nor in a class's scope): inaccessible unless a friend declaration
   may grant it (CP313 (a), friend-may-grant?; before it, judged only where no class of the unit declared a friend).
   Everything else (members, templates' patterns, using-declarations) is not judged."
-  [ctx cid nm access]
-  (when (and (checking?) (#{:private :protected} access) cid)
-    (let [f (when-let [i (:fn-id ctx)] (fnd i))]
-      (when (and f (not (:cls f)) (not (:this-type ctx)) (not (:tinst f))
-                 (not (friend-may-grant? cid f access)))
-        (fail :access "'" nm "' is a " (name access) " member of '" (:name (abi/cls cid)) "'")))))
+  ([ctx cid nm access]
+   (when (and (checking?) (#{:private :protected} access) cid)
+     (let [f (when-let [i (:fn-id ctx)] (fnd i))]
+       (when (and f (not (:cls f)) (not (:this-type ctx)) (not (:tinst f))
+                  (not (friend-may-grant? cid f access)))
+         (fail :access "'" nm "' is a " (name access) " member of '" (:name (abi/cls cid)) "'")))))
+  ;; (the rest of CP313 (a): with the naming class and the object's class, in every context cx-context judges)
+  ([ctx cid nm access nc obj]
+   (cx-access! ctx cid nm access nc obj)))
 
 (defn- member-expr [ctx n]
   (let [[objn] (kids n)
@@ -2556,6 +2755,11 @@
               (when m (vec (map str/trim (remove str/blank? (split-scope (second m))))))))
         qcid (when (seq q) (let [e (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q)))] (class-id (:ty e))))]
     (when-not cid (fail :member "member of a non-class"))
+    ;; (the rest of CP313 (a): o.B::m names B by its injected-class-name found in o's class, a member of it through the
+    ;; bases, [basic.lookup.qual]/1 and [class.access.base]/5: inaccessible through a private base; ::B::m does not)
+    (when (and (checking?) qcid (not= qcid cid) (= 1 (count q)) (abi/derived-from? cid qcid)
+               (not (re-find #"(?:\.|->)\s*::" (or (node-text n) ""))))
+      (cx-access! ctx qcid (first q) :public cid nil))
     (let [[fcid fids e] (if (str/starts-with? (str nm) "~")
                           ;; an explicit destructor call (p->~T(), [class.dtor]/14): the class's destructor
                           (let [k (or qcid cid) d (:dtor (abi/cls k))] (when d [k [d] {:e :fn :id d}]))
@@ -2563,7 +2767,7 @@
           fids (if qcid fids fids)]
       (cond
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))))))
-        (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))))
+        (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
                               (field-node (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) (:cls e) (:i e)))
         (= :indirect (:e e)) (reduce (fn [o [c i]] (field-node o c i)) (if (= :pr (:cat obj)) (materialize obj) obj) (:chain e))
         (= :var (:e e)) {:op :comma :l obj :r (var-node (:id e)) :ty (:ty (var* (:id e))) :cat :lv}
@@ -2571,7 +2775,7 @@
         (let [tm (vec (keep (fn [[_ x]] (when (= :tmpl (:e x)) (:id x))) (class-lookup (or qcid cid) nm)))
               t (or (node-text n) "")]
           (cond-> {:op :fnset :fns fids :tmpls tm :name nm :obj (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) :ty {:k :overload} :cat :lv :qualified (boolean qcid)}
-            (checking?) (assoc :member-access true)
+            (checking?) (assoc :member-access true :cx-nc (or qcid cid) :cx-obj cid)
             (and (seq tm) (:_wn n) (:explicitTemplateArgs n)) (assoc :targs-text (written-targs n nm) :targs-scope (:scope ctx))
             (and (seq tm) (not (:_wn n)) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
@@ -2797,7 +3001,7 @@
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
                  fid (binding [*drops* (meta tcands)] (resolve-overload (distinct cands) args obj))
                  f (fnd fid)
-                 _ (when (:member-access callee) (check-access! ctx (:cls f) (:name f) (:access f)))
+                 _ (when (:member-access callee) (check-access! ctx (:cls f) (:name f) (:access f) (:cx-nc callee) (when-not (:static f) (:cx-obj callee))))
                  std-builtin (when (and (= 1 (count args)) (= [[:ns "std"]] (:path f)) (not (:cls f)))
                                (std-builtins (:name f)))]
              (cond
@@ -3368,6 +3572,17 @@
 
 (declare analyze-node)
 
+(defn- ctad-expr
+  "CP311 (a): T(args) or T{...} with T the placeholder `ct` ([tid #{cv}]) for a deduced class type ([expr.type.conv]/1:
+  the type deduced as for a variable direct-initialized by the initializer), a temporary of it."
+  [ctx n ct]
+  (let [ks (kids n)
+        [kind a] (if (and (= "CXXFunctionalCastExpr" (:kind n)) (= "InitListExpr" (:kind (first ks))))
+                   [:list-direct (analyze ctx (first ks))]
+                   [:direct (analyze-args ctx ks)])
+        t ((:ctad @hooks) ctx (first ct) kind a)]
+    {:op :temp-obj :init (init-for t a ctx (cond (map? a) :list (empty? a) :value :else :direct)) :ty t :cat :pr}))
+
 (defn analyze
   "The typed expression of the tree node `n` in the context `ctx` ({:scope :fn :this-type ...})."
   [ctx n]
@@ -3631,14 +3846,18 @@
           (let [[p ix] (if (abi/ptr? (:ty (rv a))) [(rv a) (rv i)] [(rv i) (rv a)])]
             {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv}))))
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
+    (if-let [ct (when (= "CXXFunctionalCastExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
+      (ctad-expr ctx n ct)
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
           [k] (kids n)
           t (if (and (#{:xvalue "xvalue"} (:valueCategory n)) (not (abi/ref? t))) (abi/rref t) t)
           t (if (and (= "lvalue" (:valueCategory n)) (not (abi/ref? t))) (abi/lref t) t)]
       (if (and (= "CXXFunctionalCastExpr" (:kind n)) (abi/class? (abi/unq t)))
         {:op :temp-obj :init (init-for t (if (= "InitListExpr" (:kind k)) (analyze ctx k) [(analyze ctx k)]) ctx :direct) :ty (abi/unq t) :cat :pr}
-        (cast-expr ctx t (analyze ctx k) true)))
+        (cast-expr ctx t (analyze ctx k) true))))
     ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
+    (if-let [ct (when-not (= "CXXConstructExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
+      (ctad-expr ctx n ct)
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
           ;; (CX12, fifth slice: T(...) naming a member type, its access as a declaration's, check-type-access!)
           _ (when (checking?)
@@ -3647,7 +3866,7 @@
           args (analyze-args ctx (kids n))]
       (if (abi/class? (abi/unq t))
         {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
-        (if (empty? args) {:op :zero-val :ty t :cat :pr} (cast-expr ctx t (first args) true))))
+        (if (empty? args) {:op :zero-val :ty t :cat :pr} (cast-expr ctx t (first args) true)))))
     "CXXScalarValueInitExpr" (let [qt (get-in n [:type :qualType])
                                    t (resolve-type (:scope ctx) qt)]
                                ;; (CX12, fifth slice: T() naming a member type, its access as a declaration's, check-type-access!)
@@ -3779,20 +3998,59 @@
 
 (declare stmt)
 
+(declare analyze-args)
+
+(defn- ctad-init
+  "CP311 (a): a variable's initializer analyzed for class template argument deduction, [kind init]: kind :direct,
+  :copy, :list-direct or :list-copy ([dcl.init.general]/15-16, [dcl.init.list]/1), init the arguments' vector, the
+  expression or the init-list."
+  [ctx n]
+  (let [init (init-kid n)]
+    (case (when init (:init n))
+      ;; (no initializer: deduced as from an empty parenthesized list, default-initialized)
+      nil [:direct []]
+      "call" [:direct (if (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init)) [(analyze ctx init)])]
+      "list" [:list-direct (analyze ctx init)]
+      (let [a (analyze ctx init)] [(if (= :init-list (:op a)) :list-copy :copy) a]))))
+
+(defn- ctad-var
+  "CP311 (a): {:ty :ctad-init} for a variable declared with the placeholder `ct` ([tid #{cv}]) for a deduced class type
+  ([dcl.type.class.deduct]/1): the type the :ctad hook deduces from the analyzed initializer (kept for the variable's
+  initialization, analyzed once), else -- the slice not sure, or for the code generator also a program it finds
+  ill-formed -- the parser's own deduction when it made one (`qt` spelled with the arguments, the tree's type)."
+  [ctx n ct qt]
+  (let [[kind a] (ctad-init ctx n)
+        r (try {:ty ((:ctad @hooks) ctx (first ct) kind a)} (catch arbace.lang.ExceptionInfo e {:err e}))
+        fallback (fn [] (cond
+                          (and (:_ctad n) (not= qt (:_ctad n))) (try (resolve-type (:scope ctx) qt) (catch arbace.lang.ExceptionInfo _ nil))
+                          ;; (no initializer: the template's default arguments alone, T<>, as the checker tried before)
+                          (and (nil? (init-kid n)) (checking?) (re-matches #"[A-Za-z_]\w*" (str qt)))
+                          (try (resolve-type (:scope ctx) (str qt "<>")) (catch arbace.lang.ExceptionInfo _ nil))))]
+    (cond
+      (:ty r) {:ty (cond-> (:ty r) ((second ct) 'const) (assoc :c true) ((second ct) 'volatile) (assoc :v true)) :ctad-init a}
+      ;; (the checker: the program's error, raised where the variable is initialized, the variable declared with a
+      ;; dependent placeholder type so that its uses report nothing more, as clang marks the declaration invalid)
+      (and (checking?) (= :ctad (:codegen/refused (ex-data (:err r)))))
+      {:ty {:k :dep :name "<deduction failed>"} :ctad-error (ex-info (.getMessage ^Throwable (:err r)) (assoc (ex-data (:err r)) :cx/node n))}
+      :else (if-let [t (fallback)] {:ty t :ctad-init a} (throw (:err r))))))
+
 (defn- local-var! [ctx n storage]
   (let [qt (get-in n [:type :qualType])
-        ty (try (resolve-type (:scope ctx) qt)
+        ct (ctad-template (:scope ctx) (or (:_ctad n) qt))
+        cv (if ct (ctad-var ctx n ct qt) (ctad-compound-var (:scope ctx) n qt))
+        ty (if cv (:ty cv) (try (resolve-type (:scope ctx) qt)
                 (catch arbace.lang.ExceptionInfo x
                   ;; (CX12, the checker: a class template's name as the type of a variable with no initializer,
                   ;; [dcl.type.class.deduct]: class template argument deduction from no argument, [over.match.class.deduct],
                   ;; succeeds with the template's default arguments alone -- the slice tries T<>, every parameter defaulted)
                   (if (and (checking?) (nil? (init-kid n)) (re-matches #"[A-Za-z_]\w*" (str qt)))
                     (try (resolve-type (:scope ctx) (str qt "<>")) (catch arbace.lang.ExceptionInfo _ (throw x)))
-                    (throw x))))
+                    (throw x)))))
         id (next-id)
         ;; (thread_local at block scope implies static, [dcl.stc]/4)
         st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
         v (cond-> {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n)) :tls (boolean (:tls n))}
+            cv (assoc :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv))
             (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
         v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)]
@@ -3815,6 +4073,10 @@
 (defn- decl-init
   "A local declaration's initializer from its node (`:init` c, call or list)."
   [ctx id n]
+  ;; (CP311 (a): a deduction that failed, the program's error, the local variable declared all the same)
+  (when-let [e (:ctad-error (var* id))]
+    (when (#{:local :static-local} (:storage (var* id))) (enter! (:scope ctx) (or (:name n) "") {:e :var :id id}))
+    (throw e))
   (let [t (:ty (var* id))
         init (init-kid n)
         t (if (and (abi/arr? t) (nil? (:n t)) init)
@@ -3825,8 +4087,15 @@
             t)
         pre (when (and init (has-auto? t) (not (#{"call" "list"} (:init n)))) (analyze ctx init))
         t (if pre (deduce-auto t pre) t)
-        _ (upd-var! id assoc :ty t)]
+        _ (upd-var! id assoc :ty t)
+        ;; (CP311 (a): the initializer a deduced class type was deduced from, analyzed once)
+        ci (:ctad-init (var* id))]
+    (when (and ci *at* (:range (init-kid n))) (reset! *at* (init-kid n)))
     (cond
+      ci (case (:init n)
+           "call" (init-for t ci ctx :direct)
+           "list" (init-for t ci ctx :list)
+           (init-for t ci ctx (if (= :init-list (:op ci)) :list :copy)))
       pre (init-for t pre ctx (if (= :init-list (:op pre)) :list :copy))
       (nil? init) (init-for t nil ctx :default)
       (= "call" (:init n)) (init-for t (if (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init)) [(analyze ctx init)]) ctx :direct)
@@ -3834,6 +4103,52 @@
       :else (let [a (analyze ctx init)] (init-for t a ctx (if (= :init-list (:op a)) :list :copy))))))
 
 (declare check-static-assert!)
+
+(defn- cx-decomposition!
+  "The rest of CP313 (a), the checker: [dcl.struct.bind]/4 for a structured binding declaration `d` whose initializer is
+  of a class type E that is not tuple-like (no std::tuple_size in the unit; clang's checkMemberDecomposition with
+  findDecomposableBaseClass): E's non-static data members all direct members of E or of one base class of E (else
+  \"both it and its base class\" or \"its base classes\" have them), no anonymous union or struct member among them,
+  each accessible as a member of E in the context, and as many as the names; an array's elements as many as the names."
+  [ctx d]
+  (when (and (checking?) (not (some-> (:fn-id ctx) fnd :tinst)))
+    (let [init (first (remove #(= "BindingDecl" (:kind %)) (kids d)))
+          names (filter #(= "BindingDecl" (:kind %)) (kids d))
+          a (when init (analyze ctx init))
+          a (if (= :init-list (:op a)) (when (= 1 (count (:items a))) (first (:items a))) a)
+          t (when (and a (:ty a)) (abi/unq (abi/non-ref (:ty a))))
+          tuple-like? (seq (try (lookup-qualified *root* ["std" "tuple_size"]) (catch arbace.lang.ExceptionInfo _ nil)))
+          err (fn [& m] (throw (ex-info (apply str "codegen: " m) {:codegen/refused :decomp :cx/node d})))
+          data (fn [c] (remove #(and (:bits %) (nil? (:name %))) (:fields (abi/cls c))))]
+      (cond
+        (and t (abi/arr? t) (:n t) (not= (long (:n t)) (count names)))
+        (err "type decomposes into " (:n t) " elements, but " (count names) " names were provided")
+        (and t (abi/class? t) (not tuple-like?) (not (abi/dynamic? (:id t))))
+        (let [E (:id t)
+              holder (fn holder [c]
+                       (let [bs (map :cls (:bases (abi/cls c)))]
+                         (if (seq (data c))
+                           (do (when-let [b (first (filter #(some? (holder %)) bs))]
+                                 (err "cannot decompose class type '" (:name (abi/cls c)) "': both it and its base class '" (:name (abi/cls b)) "' have non-static data members"))
+                               c)
+                           (let [hs (distinct (keep holder bs))]
+                             (cond (empty? hs) nil
+                                   (> (count hs) 1) (err "cannot decompose class type '" (:name (abi/cls c)) "': its base classes '" (:name (abi/cls (first hs))) "' and '" (:name (abi/cls (second hs))) "' have non-static data members")
+                                   :else (first hs))))))
+              h (holder E)
+              fs (if h (vec (data h)) [])]
+          ;; (a closure type's members are the implementation's: err_decomp_decl_lambda)
+          (when (and h (:lambda (abi/cls h)))
+            (err "cannot decompose lambda closure type '" (:name (abi/cls h)) "'"))
+          (when-let [an (first (filter :anon fs))]
+            (err "cannot decompose class type '" (:name (abi/cls E)) "' because it has an anonymous " (if (:union (abi/cls (:id (abi/unq (:ty an))))) "union" "struct") " member"))
+          (doseq [f fs :when (#{:private :protected} (:access f))]
+            (when-let [cx (cx-context ctx)]
+              (when (false? (cx-access-ok? cx h (:access f) E nil))
+                (err "cannot decompose inaccessible member '" (:name (abi/cls h)) "::" (:name f) "' of '" (:name (abi/cls E)) "'"))))
+          (when (not= (count fs) (count names))
+            (err "type '" (:name (abi/cls E)) "' decomposes into " (count fs) " elements, but " (count names) " names were provided")))
+        :else nil))))
 
 (defn- decl-stmt [ctx n]
   (vec (for [d (kids n)]
@@ -3871,6 +4186,8 @@
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
            "StaticAssertDecl" (do (when-not (some-> (:fn-id ctx) fnd :tinst) (check-static-assert! ctx d)) {:s :null})
+           ;; (the rest of CP313 (a): a structured binding declaration's rules checked, the declaration not modelled)
+           "DecompositionDecl" (do (cx-decomposition! ctx d) (fail :decl "local declaration " (:kind d)))
            (fail :decl "local declaration " (:kind d))))))
 
 (defn- block-ctx [ctx] (assoc ctx :scope (new-scope :block (:scope ctx))))
@@ -4455,6 +4772,8 @@ protected:
                                                           :deleted-sure (boolean (and (checking?) (re-find #"call to a deleted function" (str (.getMessage e))))))
                                                  (throw e)))))
                                     :else nil)))
+                          ;; (the rest of CP313 (a): an error found while declaring, reported in order)
+                          :cx-error (when-let [h *on-refusal*] (h id nil))
                           ;; (CX12, the checker: a namespace-scope static_assert)
                           :sassert (if-let [h *on-refusal*]
                                      (try (check-static-assert! {:scope (:scope id) :statics (atom [])} (:node id))

@@ -1579,7 +1579,12 @@ covers what.
   `DeduceTemplateBases`, `checkDeducedTemplateArguments`, `isForwardingReference`,
   `hasInconsistentOrSupersetQualifiersOf` and `isAtLeastAsSpecializedAs`, and `clang/lib/AST/ItaniumMangle.cpp`'s
   `mangleTemplatePrefix`, `mangleTemplateArgs`, `mangleTemplateParameter`, `mangleIntegerLiteral`, the return-type
-  rule of `mangleFunctionEncodingBareType` and the `sr` form of `mangleUnresolvedPrefix`, under the Apache License
+  rule of `mangleFunctionEncodingBareType` and the `sr` form of `mangleUnresolvedPrefix`, and since CP311 (a)
+  (doc/cpp/CPP-SURVEY.md, "As built: CP311 (a) and the rest of CP313 (a)", 2026-11-09) `arbace/cpp/template.ae`'s
+  class template argument deduction, after `clang/lib/Sema/SemaTemplateDeductionGuide.cpp`'s
+  `DeclareImplicitDeductionGuides`, `transformConstructor`, `buildSimpleDeductionGuide` and
+  `DeclareAggregateDeductionGuideFromInitList` and `clang/lib/Sema/SemaInit.cpp`'s
+  `DeduceTemplateSpecializationFromInitializer` at `llvmorg-23.1.5` (the tarball pinned in `test/cpp/corpora.edn`), under the Apache License
   2.0 with the LLVM Exceptions (section "LLVM (clang)" below), the files carrying clang's notice; and
   `arbace/cpp/inline.ae` (doc/cpp/CODEGEN.md G5, the user's decision P16 (a), 2026-11-05): a port of LLVM's
   AlwaysInliner at the same commit, `llvm/lib/Transforms/IPO/AlwaysInliner.cpp`'s `AlwaysInlineImpl`,

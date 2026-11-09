@@ -1251,3 +1251,10 @@ generate lack the explicit instantiations their unit exists for (limits.cc 506 n
 template work of G5b). The 51 refused by class: parse 11, name 10, type 7, string 6, template 3, init 3, expr 3, overload 2, crash 2, virtual,
 stmt, pp, conversion 1 each. 27 min in one process at GOMEMLIMIT 1400 MiB. Next (P22 (a)): the 13 under `CPPI_RUNTIME_OURS` by name
 (runtime_ours takes a prefix; a list of units would let `auto` take exactly these), then the terminate pad and the chrono constructors.
+
+## CP311 (a): G3c's class template argument deduction (2026-11-09, branch `cpp-props3`)
+
+G3.8's "class template argument deduction" and G3c's CTAD are built in `arbace.cpp.template/ctad` (the `:ctad` hook): the implicit
+guides from the constructors, `C()`, the copy deduction candidate, the user's deduction guides and C++20's aggregate candidate,
+deduced and chosen as clang's DeduceTemplateSpecializationFromInitializer does, for variables, `T(...)` and `T{...}`; where the
+slice is unsure the parser's own deduction stays the type. doc/cpp/CPP-SURVEY.md, "As built: CP311 (a) and the rest of CP313 (a)".
