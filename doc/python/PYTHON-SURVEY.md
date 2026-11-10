@@ -5923,3 +5923,31 @@ sqlite3 tests the full run's module id `test_sqlite3/...` classes (this harness 
 pass, 275 classed, 3 failing, those two and test_base64's test_b64encode (on the base too). Proofs: `t/check263.sh mvcast`,
 `p315`, `arr315` (references from 3.14.10 and 3.15.2, PASS on the head, FAIL on the base, negative controls failing), the
 got_eof probe's five answers equal to 3.15.2's.
+
+## As built: 266, bytes and bytearray: `:bytes-gaps` closed (2026-11-10, the Mac VM, queue 266)
+
+262's finding 1: test_bytes ran on pyi for the first time with 54 failing methods, `:bytes-gaps`. Ported from CPython 3.14.10's
+Objects/bytesobject.c, bytearrayobject.c, bytes_methods.c and stringlib (split.h, join.h) into `go/arbace/py/bytes.ae`,
+`bytearray.ae`, `bytesmethods.ae` (and small hunks of `percent.ae`, `float.ae`, `sys.ae`, `builtins_codecs.ae`); by cause:
+- **the two panics**: `bytearray_ass_subscript` reads the index, then the value (`_getbytevalue`, whose `__index__` may clear the
+  bytearray, gh-91153), then checks the bounds; `resize` and the constructors past `maxBytesAlloc` (2^32) are MemoryError
+  (`bytes(sys.maxsize)`: OverflowError "byte string is too large", as `_PyBytes_FromSize`).
+- **constructors**: `_getbytevalue` (an `__index__`'s own error propagates, an int too large for a long is ValueError), the order
+  of `bytes_new_impl` and `bytearray___init___impl` (encoding/errors messages, `__bytes__` looked up for every class and a None one
+  called, `_PyObject_LookupSpecial` runs a property), `PyBytes_FromObject`'s buffer/iterable path (`__buffer__` classes too),
+  an emptied bytearray first (a failing list or tuple leaves it empty).
+- **find, rfind, index, rindex, count, startswith, endswith**: clinic's `slice_index` (clipped, `_PyEval_SliceIndex`'s TypeError),
+  `ADJUST_INDICES` (a start past the end stays: nothing matches, not even an empty sub), `parse_args_finds_byte`, tailmatch,
+  `bytes.__contains__` (`_Py_bytes_contains`) for both types.
+- **split, rsplit, removeprefix, removesuffix, partition**: stringlib's split with the whitespace remainder kept as CPython keeps it,
+  rsplit from the right, buffer arguments with "a bytes-like object is required, not 'X'".
+- **fromhex** (`_PyBytes_FromHex`: bytes-like input, error positions, subclasses), **maketrans**, **join** (`PySequence_Fast`, size
+  recheck after each `__buffer__`), **extend** (the size read before the buffer, clamped; `can't extend bytearray with X`),
+  slice assignment (`can assign only bytes, buffers, or iterables of ints`), a shrink in place, `__alloc__`, `sys.getsizeof` of a
+  bytearray, `__doc__`, bytearray's repr (an escaped quote), `%` (`format_obj`, `byte_converter`, `__rmod__`), `float(bytearray)`.
+- **`-X dev`'s `unicode_check_encoding_errors`**: `checkEncodingErrors` in `codecEncodeText`/`codecDecodeText` (a LookupError for an
+  unknown encoding or error handler even for an empty or ASCII text); `sys.flags.dev_mode` follows it.
+Result (`bin/pyi lib-test test_bytes`, interpreted): 325 methods, 308 pass, 17 classed (buffer-exports 4, cpython-only 2,
+skipped-by-test 8, testcapi 3), 0 failing; `:bytes-gaps` is removed from `divergences.edn` and `divergences-315.edn`. Proof: the probe
+`t/probe.py` (1,950 lines of bytes and bytearray answers against python3 3.14.10): 438 lines differ on the base, 0 on the head, run
+and aot.
