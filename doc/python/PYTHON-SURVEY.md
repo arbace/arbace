@@ -5575,3 +5575,16 @@ modules beside them); the night's record decides. test_subprocess's member is a 
 table-check --configs tamago/amd64,tamago/arm64`, a sampled `bin/pyi runtime check`, `test-251-stack.bash` (report 251), and
 `bin/pyi lib-test test_range test_iter test_with test_sys_settrace` in both worktrees: every method's outcome the same (588
 methods), the four modules' wall 309 s at base, 195 s at the head.
+
+## As built: 252f, the codec registry imports `encodings` before its first use, under 3.14 too (2026-11-10, the Mac VM, queue 252f)
+
+252's finding 4, the user's DECISION 4 (a): `codecEnsureEncodings` (was `codecEnsureEncodings315`, `go/arbace/py/builtins_codecs.ae`)
+runs under 3.14 as under 3.15, at the registry's first `register` or `lookup`. CPython imports `encodings` in
+`_PyCodec_InitRegistry` (3.14.10's Python/codecs.c, line 1573 on; the interpreter's start), so its search function is first even
+when a program registers one before any lookup: `codecs.register(lambda n: None); codecs.lookup("koi8_r")` gave `LookupError` in
+pyi, `koi8-r` in CPython. The old lazy import (`if len(r.search) == 0`) went: with the registry initialized, an empty search list
+raises "no codec search functions registered" as `_PyCodec_Lookup` does. The import stays lazy (first use, not interpreter start):
+the one visible difference is `"encodings" in sys.modules` before any codec use (CPython True, pyi False; a Low). 3.15's
+`normalizestring` stays gated under 3.15. Checks: `lib-test test_codecs test_codeccallbacks` the same at base and head (332
+methods: 310 pass, 22 classed, 0 failing; test_codecs 266, test_codeccallbacks 44), `make python-essential`, `bin/pyi runtime
+vet`, `table-check`, 252's `t252-binascii.sh`; no record or class in `divergences.edn` names a test this changes.
