@@ -173,6 +173,21 @@ obj_list() {
     mkdir -p "$lists"; : > "$lists/synthetic.list"
     for f in "$root"/test/asm/obj/*.s; do n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/synthetic.list"; done
     echo "repr-asm: synthetic: $(wc -l < "$lists/synthetic.list") files"
+  elif [ "$1" = mc-x86-obj ]; then
+    # MC/X86's object tests (-filetype=obj) for x86-64 ELF: the files whose first RUN lines name x86-64 and no option the object
+    # assembler does not take (split-file, --defsym, -mcpu, -mattr, the relaxation, CREL and padding options, Intel syntax,
+    # error tests, the x32 ABI); assembled with -triple x86_64-linux-musl
+    local d=$src/llvm-project-23.1.5.src/llvm/test/MC/X86 f r
+    [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; return 1; }
+    mkdir -p "$lists"; : > "$lists/mc-x86-obj.list"
+    for f in $(grep -l -e 'filetype=obj' -e 'filetype obj' -r --include='*.s' "$d" | LC_ALL=C sort); do
+      r=$(grep 'RUN:' "$f" | head -3 | tr '\n' ' ')
+      printf '%s\n' "$r" | grep -q -e x86_64 -e x86-64 || continue
+      printf '%s\n' "$r" | grep -q -e split-file -e -defsym -e 'not llvm-mc' -e -x86-asm-syntax=intel -e -mcpu -e -mattr \
+        -e -relax-relocations -e -crel -e -x86-pad -e -x86-align -e gnux32 && continue
+      n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/mc-x86-obj.list"
+    done
+    echo "repr-asm: mc-x86-obj: $(wc -l < "$lists/mc-x86-obj.list") files"
   else
     make_list "$1"
   fi
@@ -362,7 +377,7 @@ case ${1:-} in
       echo " :objects"
       echo " {"
       while IFS=$'\t' read -r n p _; do
-        "$mc" -triple x86_64-linux-musl -filetype=obj "$p" -o "$o/$n.o" 2>"$o/$n.err" || { echo "repr-asm object-record: llvm-mc refuses $n" >&2; continue; }
+        "$mc" -triple x86_64-linux-musl -filetype=obj "$p" -o "$o/$n.o" 2>"$o/$n.err" || { echo "repr-asm object-record: llvm-mc refuses $n (left out)" >&2; continue; }
         "$mc" -triple x86_64-linux-musl -filetype=obj "$p" -o "$o/$n.2.o" 2>"$o/$n.err"
         cmp -s "$o/$n.o" "$o/$n.2.o" || { echo "repr-asm object-record: $n differs between two runs" >&2; exit 1; }
         printf '  "%s" {:sha256 "%s" :bytes %s\n   :hex "%s"}\n' "$n" "$(sha256sum "$o/$n.o" | cut -d' ' -f1)" "$(stat -c %s "$o/$n.o")" "$(od -An -v -tx1 "$o/$n.o" | tr -d ' \n')"
@@ -374,7 +389,7 @@ case ${1:-} in
   object-check)
     shift; record=; ids=()
     for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
-    [ ${#ids[@]} -gt 0 ] || ids=(musl synthetic)
+    [ ${#ids[@]} -gt 0 ] || ids=(musl synthetic mc-x86-obj)
     export REPR_ASM_TABLE=$root/asm/amd64/table.edn
     fails=0 works=()
     for id in "${ids[@]}"; do
@@ -382,13 +397,17 @@ case ${1:-} in
       (cd "$root" && sha256sum -c --quiet "${rec%.edn}.sha256") || { echo "FAIL: repr-asm object-check: ${rec#$root/} is not its pin" >&2; exit 1; }
       obj_list "$id"
       work=$root/.tmp/repr-asm/obj/$id; rm -rf "$work"; mkdir -p "$work"
-      arbace_tool -m arbace.asm.amd64.obj check "$lists/$id.list" "$work" "$rec" || fails=$((fails + 1))
+      # the files llvm-mc assembled when the record was made (a file it refuses has no object to judge against)
+      grep -o '^  "[^"]*"' "$rec" | tr -d ' "' > "$work/recorded.txt"
+      awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/recorded.txt" "$lists/$id.list" > "$work/list"
+      arbace_tool -m arbace.asm.amd64.obj check "$work/list" "$work" "$rec" || fails=$((fails + 1))
       works+=("$work")
       # the negative controls: a file's object judged against another file's record must differ
       while read -r cid subj ref; do
         case $cid in ''|'#'*) continue ;; esac
         [ "${subj%%/*}" = "$id" ] || continue
         sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/$id.list")
+        [ -n "$sp" ] || { echo "control $cid: left (not in this run)"; continue; }
         v=$(arbace_tool -m arbace.asm.amd64.obj control "$sp" "${ref#*/}" "$rec" | tail -1)
         if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
       done < "$root/test/asm/controls-object.txt"
