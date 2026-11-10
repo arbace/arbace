@@ -1160,7 +1160,15 @@
                                            (let [t la]
                                              (cond (= :enum (:k t)) (when-not (:name (get @abi/*enums* (:id t))) (swap! abi/*enums* assoc-in [(:id t) :name] nm) t)
                                                    (abi/class? t) (when-not (:name (abi/cls (:id t))) (abi/update-cls! (:id t) assoc :name nm) t)))))]
-                               (mode-type n (or t0 own (resolve-type scope qt)))))
+                               (mode-type n (or t0 own
+                                                (try (resolve-type scope qt)
+                                                     ;; (CP332 (a), the checker: __type_pack_element's index refused, the error
+                                                     ;; reported in the analysis' order at the alias, the declaration going on)
+                                                     (catch arbace.lang.ExceptionInfo x
+                                                       (if (and (checking?) (= :pack-element (:codegen/refused (ex-data x))))
+                                                         (do (swap! *order* conj [:cx-error (ex-info (.getMessage x) (update (ex-data x) :cx/node #(or % n)))])
+                                                             abi/int*)
+                                                         (throw x))))))))
                        :pos (long (or (:_b n) 0))}
                 ;; (CX12, the checker: a member typedef's access)
                 (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
@@ -1420,10 +1428,13 @@
                 ;; G5c: the value converted to the cast's type ([conv.integral]/3: modulo 2^N for an unsigned one), so that
                 ;; libstdc++'s __numeric_traits_integer<unsigned>::__is_signed, (_Value)(-1) < 0, is false
                 :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) (ce-wrap (:ty e) v) (fail :const "constant cast")))
-                :unop (let [v (ev (:e e))] (case (:o e) "-" (- (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
+                ;; (CP325 (a): 64-bit arithmetic wraps, as the unsigned types' modulo 2^N does; a signed overflow is the
+                ;; program's error, which this evaluation does not judge -- parse/enum4.C's 9223372036854775807ULL * 2 + 1 had
+                ;; thrown Java's ArithmeticException, a crash of the analysis)
+                :unop (let [v (ev (:e e))] (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
                 :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))
                              u (and (abi/integral? (:ty e)) (not (abi/signed? (:ty e))))
-                             r (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b)
+                             r (case (:o e) "+" (unchecked-add a b) "-" (unchecked-subtract a b) "*" (unchecked-multiply a b)
                                      "/" (if u (Long/divideUnsigned a b) (quot a b)) "%" (if u (Long/remainderUnsigned a b) (rem a b))
                                      "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
                                      "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)

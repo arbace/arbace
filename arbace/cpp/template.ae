@@ -1376,17 +1376,25 @@
   (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)
       (some #(when (and (= :type (:e %)) (abi/class? (:ty %))) (:tmpl (abi/cls (:id (:ty %))))) es)))
 
+(def ^:dynamic *alias-node* nil) ; the alias template's declaration being substituted (its errors' position)
+
 (defn- type-pack-element
   "clang's builtin template __type_pack_element<N, T...> (BuiltinTemplateDecl BTK__type_pack_element: the Nth type of the
   pack, N < sizeof...(T)), which <bits/utility.h>'s _Nth_type uses when __has_builtin answers 1 (cpp/target's clang
   half, CP248 (a)); dependent in a signature. CP332 (a): std::get<I>(tuple) and every tuple_element<I, tuple<...>>."
   [scope forms]
-  (let [n (const-form scope (first forms))
+  (let [bad (fn [& m] (throw (ex-info (apply str "codegen: " m)
+                                       (cond-> {:codegen/refused :pack-element} *alias-node* (assoc :cx/node *alias-node*)))))
+        n (try (const-form scope (first forms))
+               (catch arbace.lang.ExceptionInfo _ (bad "__type_pack_element's index is not an integral constant expression")))
         ts (trait-args scope (rest forms))]
     (cond
+      (and (map? n) (or (contains? n :decl) (contains? n :tmpl))) (bad "__type_pack_element's index is not an integral constant expression")
       (or (map? n) (some dependent? ts)) {:k :tdep :trait "__type_pack_element" :base (first ts) :types ts :names [] :n n}
-      (and (integer? n) (< -1 (long n) (count ts))) (nth ts (long n))
-      :else (fail :template "__type_pack_element index " n " out of range for " (count ts) " types"))))
+      (not (integer? n)) (bad "__type_pack_element's index is not an integral constant expression")
+      (neg? (long n)) (bad "__type_pack_element's index " n " is negative")
+      (< (long n) (count ts)) (nth ts (long n))
+      :else (bad "__type_pack_element's index " n " is out of range for " (count ts) " types"))))
 
 (declare template-id)
 
@@ -1435,7 +1443,8 @@
       (if (= :alias (:tk t))
         ;; an alias template's specialization is its pattern's type with the arguments substituted ([temp.alias]/2)
         (let [args (or (complete-args t args) (fail :template "missing template arguments for " nm))]
-          (sema/resolve-type (bind-scope (:scope t) (:params t) args nil) (get-in (:pattern t) [:type :qualType])))
+          (binding [*alias-node* (when (:range (:pattern t)) (:pattern t))]
+            (sema/resolve-type (bind-scope (:scope t) (:params t) args nil) (get-in (:pattern t) [:type :qualType]))))
       (if (dependent? args)
         ;; the defaults completed in a scope binding the dependent arguments before them (G4: enable_if<C>, the
         ;; headers' defaulted parameters); one that cannot be (a dependent value) is refused
