@@ -5588,3 +5588,36 @@ the one visible difference is `"encodings" in sys.modules` before any codec use 
 `normalizestring` stays gated under 3.15. Checks: `lib-test test_codecs test_codeccallbacks` the same at base and head (332
 methods: 310 pass, 22 classed, 0 failing; test_codecs 266, test_codeccallbacks 44), `make python-essential`, `bin/pyi runtime
 vet`, `table-check`, 252's `t252-binascii.sh`; no record or class in `divergences.edn` names a test this changes.
+
+## As built: 265, the read and print cells' results files; the five runtime tables made by Arbace (2026-11-10, the Mac VM, queue 265)
+
+**The results files (completeness).** The writers of `test/python/{roundtrip,full,lex-check,parse-check}-results.edn`
+(`arbace.repr.python.results`, queue 201's R1) were in place: `--record` writes a row `["CORPUS FILE" :pass|:known|:fail REASON]` for
+every file run, and `test/reap/cells.edn`'s Python read and print cells read them (`:c-known`, `:results`, the three read checks one
+`:count-once` group). The cells counted no pass because no `--record` run's files were ever committed (the night's `records record`
+runs the checks without `--record`). Two writer defects, fixed: a whole run kept its corpus's rows of files it did not run (a file
+gone, a mutant of another pool stayed a pass), now replaced, a partial run (`--only-list`) keeps them; and the tree check's shared
+row (`:lines` and `:full`) passed on one mode alone, now `:pending` ("full: not run") until both ran, which `bin/reap` holds a
+problem (a row neither pass nor known). Proved on samples, lex-errors and syntax-errors (VM records, not committed): `bin/reap`
+counts their passes, a `:pending` row is a problem. The night's commands, all live (mutants have no records):
+`REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --record`, `... roundtrip --text --record`, `... lex-check --record`, `...
+parse-check --record`, `... parse-check --full --record`; expected cells: read 3,670 / 66 / 0 (3,736 files: samples 6, stdlib 720,
+site-packages 921, lib-test 1,153, lex-errors 62, syntax-errors 874; the mutants not counted), print 2,795 / 5 / 0 (2,800 files).
+
+**The five runtime tables (independence).** `builtins_{opcode,errno,fcntl,socket,posix}_table.go`, recorded by
+`tools/pyi/*_table.py` from CPython's own modules (python3 at record time), are made by Arbace at check time:
+`tools/pyi/runtime_tables.ae` on stage 0, `bin/pyi runtime gen-tables` (Python's essential chain, `pyi-runtime-tables`; `make
+python-essential`). Each module's own C is preprocessed by repr/c's preprocessor (`arbace.repr.c.pp`) with its constant-adding calls
+made markers (`PyModule_AddIntMacro`, `PyModule_AddIntConstant`, `add_errcode`, `INTRINSIC_FUNC_ENTRY`, `ADD_NB_OP`, the metadata
+table's entries), the values evaluated as C's integer constant expressions (casts, `sizeof` on LP64, enumerators), for x86_64 and
+aarch64. Sources: the CPython 3.14.10 tarball; musl 1.2.6's (the C crop's pin; its install's header layout composed: `alltypes.h`
+by `mkalltypes.sed`'s rules, `bits/syscall.h`; `__strerror.h`, `sysconf.c`, `fpathconf.c`, `confstr.c` by their own rules); Go's
+`zerrors_linux_{amd64,arm64}.go` (a name Go declares on both with musl's value is written `syscall.NAME`; one whose values differ
+`archConst`: posix_table.py's hand-listed MUSL_ARCH, O_ACCMODE, O_LARGEFILE, O_TMPFILE, now derived); for fcntl, socket and posix
+Alpine's `pyconfig.h` (python3 3.14.10-r1's), Linux's UAPI headers (linux-headers 7.2.1-r0) and BlueZ's (bluez-headers 5.87-r0),
+the oracle's build inputs, pinned in `tools/pyi/header-apks.sha256` for both architectures. All five are byte for byte the committed
+files, gofmt'd by TamaGo's gofmt; each table's control changes one source fact in a copy of the sources (BINARY_OP's HAS_ARG_FLAG,
+EPERM's strerror text, F_ADD_SEALS, AI_NUMERICSERV, `_SC_CLK_TCK`) and must differ. `bin/pyi runtime tables` (the oracle tier)
+checks the five python3 generators against the same files. `pyconfig.h` is CPython's configure output on Alpine's builder: whether
+it counts as a pinned input (eval and AOT 1) or a toolchain's record (0.5, as C's configured musl) is the user's call (report 265's
+DECISION); the patch scores 0.5 until then.
