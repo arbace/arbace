@@ -64,7 +64,7 @@ Six crops are above 90 on all three. What the others still need:
   [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking.
 - **C++** (completeness, independence): read 1,182 and print 1,665 by design are most of the gap (96.8 without them); the
   print cell is on the own round trip on `cpp-print-own` (CP243 (a): the records made by day, print 48.3 → 99.5, the judge
-  0.735 → 0.907; CP342 the 15 forms-differ left). Independence: the
+  0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the
   read stage 0.66 and eval and AOT 0.5 (the programs run from clang's IR packs); CX12's own front end (`dg --front
   native`, tonight's record) and CP240 (b), the programs by the own route without clang's IR (`cpp-route`), lift them
   ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md), [cpp/CODEGEN.md](cpp/CODEGEN.md)).
@@ -162,7 +162,7 @@ items below are the ones whose work is still ahead or tied to a night.
   F10b's asynchronous channels after the night's records; JCS190's flip after the night's comparison; JCS231 after F9;
   JCS261 waits; JCS274 (`:nio`'s rest reclassified after the record); JCV11 (b) (reopens RPS9 (a)); JCV12 (b); JCS180
   later; F15 (JCS350-JCS356) for the next Java night.
-- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243 (a) built on `cpp-print-own` (to merge); CP342 new; CP250 when
+- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243 (a) built on `cpp-print-own` (to merge), CP352 on `cpp-cp352` (the five valid-code reader gaps; to merge); CP250 when
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above).
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
   OC191-OC207 (above).

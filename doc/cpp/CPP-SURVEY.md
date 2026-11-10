@@ -5882,3 +5882,60 @@ Edited `bin/lib/repr-cpp/roundtrip` while a run of it was reading it (bash reads
 libstdcxx-testsuite-every-40 run died at its judge (`ool: command not found`) after 47 minutes and was run again; one
 `grep ... /dev/null` in a throwaway command. Scratch in the worktree's `.tmp/`: `repr-cpp-roundtrip/KEY/` (the runs), `repr-cpp-dg/`,
 `rt-*.log`, `chk-*.log`.
+
+## As built: CP352 (2026-11-10; branch `cpp-cp352` from mac/cpp-print-own 806ab6625)
+
+(The report that found these called them "CP342"; the plan's decided CP342 is another item, so this is CP352.) CP243 (a)'s "Proposed
+(CP342)" (a): the reader's gaps on valid code, five files of the own judge's 15 forms-differ, fixed in `arbace/repr/cpp/parse.ae`
+alone (the printer needed no change). The light lane as the day before (`REPR_CPP_THREADS=2 GOMEMLIMIT=1800MiB`, one run at a time,
+no clang, no g++, no gate; clang by hand once, below).
+
+### The five fixes
+
+- **asan/pr82792.C** (`__attribute ((fallthrough));`, the spelling without the trailing underscores): a statement began an attribute
+  list only at `__attribute__` (`parse-statement`), so `__attribute` was read as a declaration (an empty `(let [] ...)` wrapper around the
+  next label, and the attribute lost). A statement's attribute now opens at `__attribute` followed by `(` too. The statement is
+  clang's AttributedStmt, printed `[[fallthrough]];`.
+- **cpp0x/scoped_enum7.C** (`template <typename T> enum A<T>::E : T { e };`, ill-formed: an enumeration is no template): clang's tree
+  has the EnumDecl alone, the forms had no place for the header, and the print `enum A<T>::E : T { e };` made `T` unknown, so the
+  second read declined. `wrap-template`'s enum case is a NativeDecline over the whole declaration (header included): the text form
+  reads again as itself.
+- **cpp0x/trailing5.C** (`auto baz() -> struct C {} {}`, ill-formed): the class defined in the trailing return type had no place in the
+  function's forms, the print `auto baz() -> C {}` named an undeclared `C`. `parse-type-id` in the `:trailing` context declines
+  (NativeDecline, the declaration's text) when the type specifiers define a class or an enumeration.
+- **cpp2a/paren-init33.C** (`a1({1})`, a member initializer of an array type: C++20's parenthesized aggregate initialization): the
+  native read kept the braced list as written (`(a1 1)`), the print's `a1{1}` (the same semantic list: clang's AST for both is the
+  one InitListExpr with the element's nested implicit list, checked by hand with `clang++ -ast-dump`) read with the nested list
+  (`(a1 (cpp/init-list 1))`). `paren-init` designates (the semantic form of `sema/semantic-list`) a braced list for an array
+  as the brace form does.
+- **modules/cpp-11.C** (`#define bob fred;`, then `export module foo:bar.bob;`, ill-formed): the module name's later identifiers
+  were consumed one token at a time, so the macro's expansion `fred;` ended the declaration at its own `;` and the written `;` stood
+  a null declaration, which the print then expanded again (two nulls). `module-name!` takes a later identifier a macro's expansion
+  begins as the macro's name, its whole expansion consumed (as it did for the first identifier, P3034R1).
+
+The four ill-formed ones are still no clang oracle's concern (the own judge has no oracle); each fix keeps its file's own round trip
+exact, which is what the print cell asks.
+
+### The records
+
+| record | before | after |
+|---|---|---|
+| gxx-dg-every-10 (`roundtrip-corpus ... --judge own --record-results`, whole run, 14 min) | 1,796 pass, 11 forms-differ | 1,801 pass, 6 forms-differ |
+| gxx-old-deja-every-10, c-c++-common-every-10 | 320 + 3, 326 | unchanged against their records |
+| gxx-modules-all (`dg --corpus modules --rt-judge own --record`) | 1,180 + 1 | unchanged (the module-name change moves none of its 1,181) |
+| gxx-modules-every-10 | 119 | unchanged |
+| libstdcxx-testsuite-every-40 (49 min) | 244 | unchanged (244 of 244) |
+
+Also gxx-dg-essential 33 of 33, the samples 9 of 9 with the control `_control/bitfields-vs-io` failing as it must, `bin/cppi
+codegen-gen` 154 of 154 (the two controls failing as they must). The 6 left: `coroutines/ramp-return-a.C`, `cpp0x/attr-no_unique_address1.C`,
+`cpp0x/lambda/lambda-err3.C`, `parse/semicolon3.C`, `parse/template30.C`, `template/crash106.C` (dg-error files whose error recovery the
+forms do not keep), old-deja's 3, and `modules/target-aarch64-1_a.C` (aarch64-only): CP342 (b) of the plan's reading, not this
+item's.
+
+### Slips
+
+`nohup ... > /dev/null` for the first background sequence (a `/dev/null` against the day's rules). Scratch: `.tmp/rt-five/` (the five files'
+run, `.tmp/five.list`), `.tmp/cp352/` (the sequences' logs).
+
+`bin/reap --record` (print cell: 15 deferred to 10 forms-differ, 3,871 pass), `bin/crops-score --record` (cpp completeness 89.1 to 89.2, print
+3,866 to 3,871 pass / 15 deferred; with the meant 97.8 to 97.8, independence 71.3 unchanged), `--judge --strict`: 0 problems.

@@ -2846,3 +2846,20 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   the clang judge's); fixing them now (CP342, doc/cpp/CPP-SURVEY.md, "As built: CP243 (a)").
 - **Slips**: `bin/lib/repr-cpp/roundtrip` edited while a run read it (the 47-minute libstdcxx run lost, run again); one `/dev/null`
   in a throwaway grep.
+
+## 2026-11-10: the five reader gaps of the own judge's forms-differ, CP352 (branch `cpp-cp352`)
+
+- **What**: five files of the 15 forms-differ of C++'s print cell (own judge), fixed in `arbace/repr/cpp/parse.ae`: a statement's
+  `__attribute (...)` (asan/pr82792.C), an enum under a template header (cpp0x/scoped_enum7.C) and a class defined in a trailing return
+  type (cpp0x/trailing5.C) as the declaration's text (NativeDecline: the forms have no place for either, and the print named what
+  the original defined), an array member's `a({...})` in the semantic list form `a{...}` has (cpp2a/paren-init33.C; clang's AST
+  for both is one InitListExpr, checked by hand with `clang++ -ast-dump`), a macro-named module partition's expansion consumed with its
+  `;` (modules/cpp-11.C). gxx-dg-every-10 recorded again from a whole run (1,801 pass, 6 forms-differ; was 1,796 and 11),
+  gxx-modules-all, gxx-modules-every-10, old-deja, c-c++-common unchanged, gxx-dg-essential 33 of 33, the samples 9 of 9 with their
+  control, codegen-gen 154 of 154. The report that found them said "CP342", which is the plan's other decided item: called CP352.
+- **Why**: the five are bugs on valid-looking code (decision-free), the rest of the 15 are dg-error files whose error recovery the forms
+  do not keep, and one aarch64-only file: left alone.
+- **Alternatives considered**: for the enum, keeping the template header in the forms (no form for it; clang's tree has none either) or
+  the printer writing one (it cannot know); for trailing5, hoisting the defined class beside the function (the tag's node would need a
+  place in the declarator's result: left for when valid code needs it, a type may not be defined in a trailing return type).
+- **Slips**: one `> /dev/null` on a background `nohup`.
