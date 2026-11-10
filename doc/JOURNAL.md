@@ -2855,3 +2855,31 @@ night 10's native-path gaps".
   record_equation, not ported) and opam/sexplib0/load (a GADT's inline record), both native-path classes until ported.
 - Checks: the lists above by `bin/oi check`, `suite check` and `check --aot` `--only-list`; typer-check 79 of 79 at the three
   levels; stdlib-check 71 of 71; the oi-essential and oi-divergences steps' commands (essential 59 of 59, repl-check 24 of 24, own-verdicts 0 differ); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's native path, the last two of night 10's gaps (branch `ocaml-indep3`, from `ocaml-indep2` `660185ddd`)
+
+The brief: close lib-sys/immediate64 and opam/sexplib0/load on the native path, in a light lane, judged by list, no `--record`.
+Recorded in doc/ocaml/TYPER.md, "28. As built: Ctype's pattern mode and the or-pattern's equations"; the new choice OC212.
+
+- immediate64: `include Sys.Immediate64.Make(Int)(Int64)` then `match repr with Immediate -> ...`, where `repr : t repr` and
+  `Immediate : Int.t repr`: OCaml 5.5.0's Ctype.unify3 in pattern mode equates the abstract `t` with `int`, because
+  is_instantiable (typing/ctype.ml) admits every nullary abstract public type without a manifest, not only the locally abstract
+  ones the port admitted. Ported from typing/ctype.ml into the port's mismatch hook (`typecore.ae`'s `add-equation`): unify3's
+  pattern-mode cases (two instantiable types, one, a constructor against another type), reify, record_equation (its pairs kept,
+  read by nothing: -principal's warning is not ported) and mcomp with its helpers (`types.ae`, the brief's ~200 lines). The
+  predefined abstract types are Type_external in 5.5 (typing/predef.ml): recognised by path, so `int` is no instantiable type and
+  `int` against a tuple is incompatible (typer-check's t72_gadt_exhaustive caught the first draft, which took them for abstract:
+  a Match_failure handler came back). As Typecore.solve_Ppat_construct, the pattern mode only for a generalized constructor; Parmatch's
+  possible-constructor test takes the same rule without equations. Alternative: the old local-abstract rule plus a special case
+  for abstract types of the current structure (not OCaml's rule, which has no such distinction since 5.x).
+- sexplib0: the diagnosis's "GADT inline record" was not the cause. Reduced by hand to a 40-line program (`let (Field {kind; conv;
+  _}) = fields in match kind, s with ... | (Required | Default _ | Omit_nil | Sexp_option | Sexp_list), _ -> ...`), which the
+  ocaml-indep2 typer refuses with the night's message and the host's ocaml accepts: an or-pattern's alternatives shared one set of
+  GADT equations, so `Sexp_option`'s `a = 'x option` met `Sexp_list`'s `'y list`. Typecore's Ppat_or types each alternative in a
+  copy of the pattern environment (Pattern_env.copy); ported: each alternative's equations dropped after it.
+- Approximations left, OC212 (recommended (a), keep them): Path.scope by stamps, the predefined types by path, has_injective_univars
+  and the row backtracking not modelled, a foreign abstract type's non-injective parameters unified.
+- Checks (none `--record`): `bin/oi suite check --only-list` and `suite check --aot --only-list` (immediate64, sexplib0/load: 2 of 2
+  pass at each level, by their own verdicts); typer-check 79 of 79 at the three levels and their runs; stdlib-check 71 of 71; `bin/oi
+  test`; repl-check --native 24 of 24; the essential list 59 of 59; own-verdicts 0 differ; the four oi-divergences commands (0 failing
+  not in a class); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).

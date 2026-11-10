@@ -823,3 +823,32 @@ misc/hamming pass natively: their translated program is the oracle path's byte f
 of CPU" is the limit's edge, md5 117 s and hamming 134 s wall here, not a native-path gap), typer-check 79 of 79, stdlib-check
 71 of 71, the oi-essential step's commands. Left on the native path: lib-sys/immediate64 (Ctype's pattern-mode unification of
 an abbreviation with an abstract type: mcomp and record_equation, not ported) and opam/sexplib0/load (a GADT's inline record).
+
+## 28. As built: Ctype's pattern mode and the or-pattern's equations (2026-11-10, branch `ocaml-indep3`, from `ocaml-indep2`'s `660185ddd`)
+
+The two native-path gaps §27 left, each from OCaml 5.5.0's typing/ (the pinned tarball):
+
+- **Ctype.unify3's pattern mode** (`typecore.ae`'s `add-equation`, the hook `types.ae` calls on a mismatch, `*gadt-equation*`): the
+  heads expanded, two instantiable types (Ctype.is_instantiable: a nullary abstract public type without a manifest, `ty/instantiable`;
+  no longer only the locally abstract ones) give the deeper scoped one the other as its equation (Path.scope by the identifiers'
+  stamps, OC212); one instantiable type is equated with the other, reified (Ctype.reify: its type variables made fresh abstract types
+  `$'a`); a type constructor against another type is accepted, both reified, unless Ctype.mcomp finds them incompatible
+  (record_equation's pairs kept in `*equated-types*` when bound: only -principal's warning reads them, not ported). Ctype.mcomp and
+  its helpers (mcomp_list, _fields, _kind, _row, _type_decl, _variant_description, _record_description; `ty/mcomp`, `ty/mcomp?`) are
+  ported over the port's types; the predefined abstract types count as Type_external (`ty/decl-kind`: datatypes for is_datatype,
+  injective, two different ones incompatible), as predef.ml declares them. As Typecore.solve_Ppat_construct, only a generalized
+  constructor's result is unified in pattern mode (another's by the plain unification). Parmatch's possible-constructor test (the
+  counter-examples) takes the same rule without adding equations. lib-sys/immediate64 (`repr`'s `Int.t repr` against the included
+  abstract `t repr`: `t` instantiable, equated with `int`).
+- **Ppat_or's equations** (`type-pat`): each alternative typed in a copy of the pattern environment (Pattern_env.copy), its GADT
+  equations dropped after it, as Typecore's Ppat_or. opam/sexplib0/load: in `sexp_conv_record.ml`'s `(Required | ... | Sexp_option |
+  Sexp_list | Sexp_array)` the alternatives' equations on `a` and the existential accumulated (`a = 'x option`, then `'y list` against
+  it); the inline record §27 named was not the cause (reduced to a 40-line program, which the old typer refused and ocaml accepts).
+
+Not modelled (OC212): has_injective_univars, the backtracking of a failed row unification in pattern mode, the reification of an
+abstract type's non-injective parameters.
+
+Checked: `bin/oi suite check --only-list` and `suite check --aot --only-list` (both programs pass at both levels, by their own verdicts),
+typer-check 79 of 79 at the three levels, stdlib-check 71 of 71, repl-check --native 24 of 24, the essential list 59 of 59,
+own-verdicts 0 differing, the four oi-divergences commands, `bin/reap`, `bin/crops-score --judge --strict`. Night 10's native-path list
+is closed; the native records are night 12's, after the merge.

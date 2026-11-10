@@ -3330,7 +3330,7 @@ cases at 1) and the switch (eval, AOT 1): about 99.9% (judge 0.996); with OC209 
 3. OC202's slot as before: `bin/oi check --aot --level compiled --record`, `bin/oi suite check --aot --level compiled --record`.
 4. `bin/oi own-verdicts --check`, `bin/reap --record`, `bin/crops-score --record`.
 
-## Proposed (OC209-OC211; options with costs, a recommendation each, none decided)
+## Proposed (OC209-OC212; options with costs, a recommendation each, none decided)
 
 - **OC209 The native-only tests at oi's level.** A test whose header runs it natively alone (`native;`, no `bytecode`) has no verdict
   at oi's level by the rule of 2026-11-07, so 9 of the run corpus and 10 of the suite's are judged by ocamlc's recorded run. Their
@@ -3352,3 +3352,14 @@ cases at 1) and the switch (eval, AOT 1): about 99.9% (judge 0.996); with OC209 
   write their expected outputs into `test/ocaml/opam/` as Arbace's own references: they would be ocamlc's output copied, a toolchain's
   record under another name, not a verdict; (c) leave them out of the judged corpus (`class` rows, by design): the eval and AOT cells
   lose 11 passes each. *Recommended: (a)* (0.15% of the judge's cases; (b) launders a record).
+- **OC212 Ctype's pattern mode: what the port approximates.** `ocaml-indep3` (doc/ocaml/TYPER.md §28) ports unify3's pattern-mode
+  cases, is_instantiable, mcomp, reify and record_equation into the port's hook (`types.ae`'s `*gadt-equation*`, called on a
+  mismatch) rather than OCaml's Pattern uenv; four things are approximated: Path.scope (which of two instantiable types gets the
+  equation) by the identifiers' stamps (a later one deeper, a predefined or library one the lowest); the predefined abstract types,
+  Type_external in OCaml 5.5, recognised by path (`decl-kind`) with their declarations left `[:abstract]`; has_injective_univars and the
+  backtracking of a failed row unification (`Tvariant` against `Tvariant`) not modelled; the non-injective parameters of an abstract
+  type in a foreign module unified, not reified. (a) Keep them, each documented where it is, a program that needs one the cue to port
+  it; (b) port Ident's scopes (every identifier its creation level, Path.scope from them) and turn the predefined declarations into
+  `[:external name]` (every `:abstract` test in the typer reviewed: a day, a risk to typer-check's 79 and the stdlib's 71); (c) port the
+  Pattern uenv itself (unify_eq_set, the injectivity rule, the Expression-first retry of unify_gadt): two to three days, the hook
+  retired. *Recommended: (a)* (no program of the corpora needs more; the night's native records will show one that does).

@@ -170,16 +170,60 @@
 
 (def ^:dynamic *equations* "The GADT equations of the case being typed: an atom of [path previous-declaration]" nil)
 
-(defn- add-equation [t1 t2]
-  (let [local (fn [t] (let [d (ty/desc t)]
-                        (when (and (= :Tconstr (d 0)) (empty? (d 2)))
-                          (let [decl (env/find-decl (d 1))]
-                            (when (and (:local-abstract decl) (nil? (:manifest decl))) [(d 1) decl])))))]
-    (when *equations*
-      (when-let [[p decl t] (or (when-let [[p d] (local t1)] [p d t2]) (when-let [[p d] (local t2)] [p d t1]))]
-        (swap! *equations* conj [p decl])
-        (env/add-decl! p (assoc decl :manifest t))
-        true))))
+(defn- path-scope
+  "Path.scope, approximated: an identifier of the program by its stamp (a later one is scoped deeper), a predefined,
+  global or library one the lowest"
+  [p]
+  (let [id (ty/path-head p)]
+    (if (or (:global id) (:predef id) (nil? (:stamp id)) (>= (:stamp id) ty/unit-stamp-base)) 0 (:stamp id))))
+
+(defn- reify!
+  "Ctype.reify: the type variables of t made fresh abstract types ($'a, or $), which a GADT equation may name"
+  [t]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (ty/repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (let [d (ty/desc t)]
+                          (if (= :Tvar (d 0))
+                            (let [p (new-local-type (if (d 1) (str "$'" (d 1)) "$"))]
+                              (ty/link! t (ty/newty2 (ty/level t) [:Tconstr p []])))
+                            (run! go (ty/children d)))))))]
+      (go t))))
+
+(def ^:dynamic *equated-types*
+  "Ctype's record_equation: the pairs of types a GADT pattern's unification took as equal (an atom), read by -principal's
+  warning (not ported), or nil" nil)
+
+(defn- record-equation! [t1 t2] (when *equated-types* (swap! *equated-types* conj [t1 t2])))
+
+(defn- add-gadt-equation!
+  "Ctype.add_gadt_equation: the abstract type of path p (declaration decl) given the manifest t for the case"
+  [p decl t]
+  (swap! *equations* conj [p decl])
+  (env/add-decl! p (assoc decl :manifest t)))
+
+(defn- add-equation
+  "Ctype.unify3's pattern mode (OCaml 5.5.0, typing/ctype.ml), on a mismatch of t1 and t2 (their heads expanded): two
+  instantiable types, the deeper scoped one equated with the other; one instantiable type equated with the other,
+  reified; a type constructor against another type, both reified, accepted unless Ctype.mcomp finds them incompatible
+  (record_equation). True when the mismatch is no error"
+  [t1 t2]
+  (when (and *equations* t1 t2)
+    (let [t1 (ty/repr (ty/expand-head t1)) t2 (ty/repr (ty/expand-head t2))
+          i1 (ty/instantiable t1) i2 (ty/instantiable t2)]
+      (cond
+        (and i1 i2) (let [[[p decl] dest] (if (> (path-scope (first i1)) (path-scope (first i2))) [i1 t2] [i2 t1])]
+                      (record-equation! t1 t2)
+                      (add-gadt-equation! p decl dest)
+                      true)
+        i1 (do (reify! t2) (record-equation! t1 t2) (add-gadt-equation! (first i1) (second i1) t2) true)
+        i2 (do (reify! t1) (record-equation! t1 t2) (add-gadt-equation! (first i2) (second i2) t1) true)
+        (or (= :Tconstr ((ty/desc t1) 0)) (= :Tconstr ((ty/desc t2) 0)))
+        (do (reify! t1) (reify! t2)
+            (try (ty/mcomp t1 t2) (record-equation! t1 t2) true
+                 (catch arbace.lang.ExceptionInfo e (if (= :incompatible (:unify (ex-data e))) false (throw e)))))
+        :else false))))
 
 (defn- undo-equations! [eqs] (doseq [[p decl] (reverse eqs)] (env/add-decl! p decl)))
 (defn instance-constructor-pattern
@@ -318,7 +362,11 @@
       :Ppat_construct
       (let [c (lookup-constr env (:txt (d 1)) expected)
             [targs tres] (instance-constructor-pattern c)
-            _ (binding [ty/*gadt-equation* add-equation] (unify! tres expected "pattern"))
+            ;; Typecore.solve_Ppat_construct: a generalized constructor's result unified in pattern mode (unify_gadt), another's
+            ;; by the plain unification
+            _ (if (:res c)
+                (binding [ty/*gadt-equation* add-equation] (unify! tres expected "pattern"))
+                (unify! tres expected "pattern"))
             sarg (when-let [a (d 2)] (second a))
             sargs (cond
                     (nil? sarg) []
@@ -344,9 +392,15 @@
       :Ppat_array (let [t (ty/newvar)]
                     (unify! (ty/type-array t) expected "pattern")
                     (mk [:Tpat_array (mapv #(type-pat env % t vars) (d 1))] expected))
-      :Ppat_or (let [p1 (type-pat env (d 1) expected vars)
+      ;; Typecore's Ppat_or: each alternative typed in a copy of the pattern environment (Pattern_env.copy), its GADT
+      ;; equations dropped after it
+      :Ppat_or (let [n (when *equations* (count @*equations*))
+                     drop! (fn [] (when n
+                                    (undo-equations! (drop n @*equations*))
+                                    (swap! *equations* #(vec (take n %)))))
+                     p1 (try (type-pat env (d 1) expected vars) (finally (drop!)))
                      v2 (atom [])
-                     p2 (type-pat env (d 2) expected v2)
+                     p2 (try (type-pat env (d 2) expected v2) (finally (drop!)))
                      m (into {} (map (fn [[n id t]] [n [id t]]) @vars))
                      ren (into {} (map (fn [[n id t]] (let [[id1 t1] (get m n)] (when t1 (unify! t t1 "pattern")) [id id1])) @v2))]
                  (mk [:Tpat_or p1 (pm/alpha-pat ren p2)] expected))
