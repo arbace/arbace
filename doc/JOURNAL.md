@@ -3240,3 +3240,37 @@ features, amending ARS5 (a); Go's optab is code, Arm's specification waits for i
 go1.27.1 GOROOT `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm/{tables,condition,condition_util,decode,inst}.go`, `inst.json`,
 `src/cmd/internal/obj/arm64/{sysRegEnc,asm7}.go`; llvm-project-23.1.5's `llvm/test/MC/AArch64` (the corpus). LICENSE.md and
 doc/ARBACE.md record the generated table's and the ports' origins (Go's BSD 3-Clause License).
+
+## 2026-11-10 assembly: the asm branches integrated, `asm-merged` (from `mac/asm-tg` `69ca9140d`, with `mac/asm-ax4b` `abc8c2b97` and `mac/asm-ar2` `da6bfe8f8`)
+
+One branch for the 11-11 merge in place of the three, on the light lane (stage 0, one run at a time, under 2 GiB, no lock; llvm-mc and
+llvm-tblgen 23.1.5 by hand only), every finding of `.tmp/merge-1111/REVIEW2.md` §0-§3 fixed (doc/asm/AMD64-SURVEY.md, "As built: the
+asm branches integrated"). Merges: asm-ax4b into asm-tg (conflicts `arbace/asm/amd64/asm.ae`, the survey, AGENDA, JOURNAL), then
+asm-ar2 (conflicts `bin/repr-asm`, the Makefile's `.PHONY`, JOURNAL); both sides kept in the documents, in date order.
+
+The REX conflict: asm-tg's `rex-kind` kept, asm-ax4b's `rex?` dropped, and the fixup kind read from the prefix's kind as llvm-mc 23.1.5
+chooses it (`llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`'s emitMemModRMByte, `X86ELFObjectWriter.cpp`'s getRelocType64,
+`X86AsmBackend.cpp`, `X86FixupKinds.h`, from `.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, extracted into the worktree's `.tmp/`;
+written again, no code copied): `_rex2` kinds give CODE_4_GOTPCRELX, CODE_4_GOTTPOFF and CODE_4_GOTPC32_TLSDESC, ADD64's NDD/NF memory
+forms `_relax_evex` (CODE_6_GOTTPOFF; GOTPCREL stays plain). Ported rather than classed `:apx` (REVIEW2's fallback): the source was
+at hand and the cases few. With APX encoded the object check reached the 11 tests ax4b had classed `:unsupported-apx`; 10 were
+llvm-mc's objects at once, `tlsdesc-64` showed `call *a@tlscall(base)`'s zero displacement (S_TLSCALL, FK_NONE at the
+instruction's start), ported too. New synthetic object `test/asm/obj/apx-relocs.s` holds all of these kinds, recorded by llvm-mc
+by hand (`object-record synthetic`: the six existing objects byte for byte unchanged).
+
+The rest: `bin/repr-asm`'s `table` and `encode-check` by `--arch` (arm64's `table [--check]` now `table gen|check`, the Makefile and
+SPEC with it; the generated `arbace/repr/asm/arm64/table.ae`'s header line names the new spelling, `table check` byte for byte); AX4's
+AXS37-AXS41 renumbered AXS40-AXS44 in the survey, AGENDA and this branch's own journal entries above (not yet on `next`; asm-ax4's
+commit messages keep the old numbers; AX5's design, `.tmp/plans/AX5-DESIGN.md`, names only the collision, and starts at AXS51,
+consistent); the link and object controls `left` when vacuous; AR2's `--record` merged per corpus, refused with problems, and a
+"recorded, not run" check; busybox awk in the table oracle; LICENSE.md and doc/ARBACE.md on `arbace/asm/`'s two meanings.
+
+Results on the merged tree: AX1's and AR1's round trips unchanged; encode-check 106,074 of 106,075 met (texts 107,451, cross 86,350 of
+87,103), 0 failing; arm64 encode 7,685 of 12,298, print 12,156, 0 failing (recorded: counts unchanged, three reasons newer than
+ar2's record, which asm-ar2's own tree reproduces today); `table check` byte for byte on both arches, `table oracle` by hand all
+equal; object-check 80 of 86 byte for byte (was 68 of 85), 0 failing, recorded; run-check 18 of 18, record unchanged; `bin/reap`
+(0 problems), `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: keeping `rex?` set from `(= kind :rex)` as REVIEW2 suggested (the same, but `rex-kind` is already bound before the memory
+operand is encoded, so the volatile adds nothing); classing APX GOTPCREL `:apx` (rejected: llvm-mc's kinds were small to port and
+`gotpcrelx.s`, `tlsdesc-64` and `elf-reloc-tls` check them). `asm-ax4c` was not pushed when this was finished: it merges on top.

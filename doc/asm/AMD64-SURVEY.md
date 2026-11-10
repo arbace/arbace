@@ -1151,3 +1151,51 @@ commit messages of `asm-ax4` keep the old numbers.
 - **AXS50 The next slice.** (a) the decoder (x86asm converted by repr/go's reader, `MC/Disassembler/X86`'s 13,545 decodings, the
   objects read back to forms), AX4's remaining exit; (b) more run tests first (a generator by instruction family, §10's synthetic
   programs). *Recommended: (a)*, then (b) with x86i (AX5).
+
+## As built: the asm branches integrated (2026-11-10; branch `asm-merged`)
+
+One assembly branch for the 11-11 merge: `asm-merged`, from `asm-tg` (`69ca9140d`: AX1, AR1, AX2's four slices, AX3, AXS37/38)
+with `asm-ax4b` (`abc8c2b97`: AX4's objects, linker and run check) and then `asm-ar2` (`da6bfe8f8`: AR2's A64 table and encoder)
+merged into it, every finding of the second review of the 11-11 merges (`.tmp/merge-1111/REVIEW2.md` §0-§3) fixed and every check
+run again on the merged tree. On the light lane (stage 0, one run at a time, under 2 GiB, no lock; llvm-mc and llvm-tblgen 23.1.5 by
+hand only). `asm-ax4c` (AX4c, the decoder) was not pushed when this branch was finished: it merges on top.
+
+- **The REX conflict** (`asm.ae`, REVIEW2 §0.1): asm-tg's `emitREXPrefix` (`rex-kind`: `:rex`, `:rex2` or nil) kept, asm-ax4b's
+  `rex?` volatile dropped; `riprel-kind` reads the prefix's kind and chooses X86MCCodeEmitter 23.1.5's fixup kinds (ported, not
+  classed): `reloc_riprel_4byte_movq_load{,_rex2}`, `_relax`, `_relax_rex`, `_relax_rex2`, and `_relax_evex` for ADD64's NDD and NF
+  memory forms; `obj.ae`'s relocation types as X86ELFObjectWriter maps them (GOTPCREL: GOTPCRELX, REX_GOTPCRELX, CODE_4_GOTPCRELX;
+  GOTTPOFF: CODE_4_GOTTPOFF, CODE_6_GOTTPOFF; TLSDESC: CODE_4_GOTPC32_TLSDESC; EVEX's GOTPCREL stays R_X86_64_GOTPCREL, as LLVM's).
+  With APX encoded, the object check reached `tlsdesc-64` and found one more gap: `call *a@tlscall(base)` is mod 0 with no
+  displacement and an FK_NONE fixup at the instruction's start (emitMemModRMByte's S_TLSCALL case), now ported. The linker leaves the
+  CODE_4/CODE_6 types to its `:reloc` class (lld relaxes them; not yet here). A new synthetic object, `test/asm/obj/apx-relocs.s`,
+  holds every one of these kinds (recorded by llvm-mc 23.1.5 by hand; `gotpcrelx.s`, outside the corpus, equal by hand too).
+- **AX4's records on the new table and encoder** (§0.2): object-check and run-check run on the merged tree, both recorded from
+  passing runs. The object record changes by the 11 tests ax4b had classed `:unsupported-apx` (now `:pass`) and the new synthetic
+  file; the run record is unchanged.
+- **`bin/repr-asm`** (§0.3): `table` and `encode-check` dispatch by `--arch` (amd64 by default: `table gen|check|oracle`; arm64:
+  `table gen|check`, AR2's `table [--check]` renamed, with the Makefile's targets, SPEC §7 and §12); the amd64-only verbs refuse
+  `--arch arm64`; the Makefile's `.PHONY` keeps both lines.
+- **AXS numbering** (§0.4): AX4's first slice's AXS37-AXS41 are AXS40-AXS44 (above; the journal's entries of this branch edited before
+  they reach `next`, `asm-ax4`'s commit messages keep the old numbers); AXS45-AXS50 (AX4b), AXS51-AXS62 (AX5's design) and AX4c's
+  from AXS63 unchanged.
+- **Controls** (§2.2, §2.3): `arbace.asm.link/control` and `arbace.asm.amd64.obj/control` return `left`, a failing control, when the
+  subject did not run or assemble or the reference has no verdict or record (probed: each gives `left`); object-check fails a control
+  whose subject is not in its corpus's list; `controls-run.txt`'s header counts its four.
+- **AR2's record** (§3.1, §3.2): `encode-check --record` merges the run's corpora's rows into the record (the other corpora's kept)
+  and is refused from a run with a problem; without `--record` a recorded file of the run's corpora that the run did not judge fails
+  ("recorded, not run": probed with `arm-poe2` left out of the list). Recorded from the merged tree: counts and non-pass set
+  unchanged, three rejected lines' reasons (`umov w1, v0.d[0]`) newer than the record (asm-ar2's own tree gives the same today).
+- **Low** (§1.1, §2.4, §0.7): the table oracle's alias half decodes `\xNN` without gawk's `strtonum` (busybox awk; the oracle run by
+  hand passes every part); `object_judge.ae`'s docstring names `:unsupported-crash`; LICENSE.md and doc/ARBACE.md say that
+  `arbace/asm/` was ASM's path until 2026-10-12 and holds the assembly crop's assembler since 2026-11-10.
+
+| check (merged tree) | result |
+|---|---|
+| AX1's round trip (amd64) | musl 32/32, `MC/X86` 609/621, `MC/AsmParser` 140/157, the rest classed; 3 controls fail as they must |
+| AR1's round trip (arm64) | musl 15/15, libgcc 7/7, box 7/7, Go's testdata 5/5, `MC/AArch64` 400/409, the rest error tests; 6 controls |
+| `encode-check` (amd64) | 106,074 of 106,075 stated encodings met (EVEX 71,212, VEX 18,717, legacy 14,353, XOP 1,792; `:no-run` 1); texts 107,451 of 108,601; cross 86,350 of 87,103; error lines 80 of 130; 0 failing; 20 controls |
+| `--arch arm64 encode-check` | encode 7,685 of 12,298, print 12,156 of 12,227, reject 5,030 lines classed; 0 failing; 6 controls |
+| `table check` (amd64), `--arch arm64 table check` | byte for byte, both; `table oracle` by hand: every part equal |
+| `object-check` | **80 of 86** byte for byte (musl 32/32, synthetic 7/7, `mc-x86-obj` 41/47; `:unsupported-directive` 5, `:unsupported-debug-line` 1); 0 failing; 5 controls |
+| `run-check` | 18 of 18 by their own verdicts; 4 controls |
+| `bin/reap`, `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`, `make check-makefile` | pass (reap: 0 problems) |

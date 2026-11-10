@@ -201,6 +201,13 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   printed back 12,156 of 12,227 (66 hexadecimal spellings); the 188 error tests' 5,030 `error:` lines classed (refused without
   LLVM's message, feature-gated, relocations). Proposed ARS24-ARS29 (ARS24: LLVM's AArch64 `.td` for the extensions and registers,
   amending ARS5 (a): the user's). Next: ARS24's table, the print by argument kind, the input lines.
+- Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
+  asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
+  resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
+  `bin/repr-asm`'s verbs by `--arch`, AX4's AXS37-AXS41 renumbered AXS40-AXS44, the vacuous controls `left`, AR2's record merged per
+  corpus with "recorded, not run", busybox awk, ASM's old path), every check run again: encode 106,074 met, arm64 7,685, objects 80
+  of 86 byte for byte (the 11 APX object tests now equal), runs 18 of 18, none failing. `asm-ax4c` (the decoder) merges on top when
+  pushed (not yet when this branch was finished).
 
 ## Decided, not built yet
 
