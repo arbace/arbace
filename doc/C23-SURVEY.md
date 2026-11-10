@@ -5650,3 +5650,27 @@ judge-test's ensure). Outside: `test/c/run/`, `test/c/judge/implicit-int-param.c
   the attribute. (a) Read the option in `arbace.repr.c.host`'s file options and default `:ms` from it; half an hour, the musl key
   moves again. (b) Leave it until a test or a program uses it (none of the corpora does; Python's ctypes asks the attribute).
   *Recommended: (b).*
+
+## As built: musl's index and its lock (2026-11-10, branch `c-musl-lock`, from `c-props4`)
+
+Night 10's c-check recorded about 2,000 false fails (`undefined function __libc_start_main`, status 139): next's
+`.tmp/ci-musl/forms/index.edn` listed 936 of the cache's 1,331 sources (.tmp/night10/DIAGNOSIS.md, section 1). Cause: g-gate1's
+concurrent steps each ran `bin/ci musl ensure` with no lock, `arbace.c.musl/index` was "made once and kept" (it never looked at
+the cache again once index.edn existed), and the next `musl read` found the key fresh and kept the stale index.
+- `arbace/c/musl.ae`, `index`: the kept index is used only when its keys equal the sources the cache holds (the `.c.ae` files of
+  `sources`); else it is made again from the cache, written through a temporary name and renamed. Chosen over deleting index.edn in
+  `read-all`: it repairs an index damaged by anything (a crash, a hand copy), not only by a read in this process, and costs one
+  directory listing per use.
+- `bin/lib/ci/musl`: `read` holds an flock on `FORMS.lock` (beside the cache) around prepare, the key check, the `rm -rf`, the
+  read, the index and the key write, so a second reader waits and finds the cache fresh; `fresh()` also needs index.edn and as many
+  units in it as the cache holds (cheap: a count of ` {:defs ` against the `.c.ae` files). A stale index alone does not reread the cache
+  (`keyok` is the key's check): `read-all` reads what is missing and `index` is made again. `ensure` takes no lock itself (it calls
+  `read`; flock is not reentrant).
+- `test/c/musl-lock-test.bash`: on a copy of a complete cache, a partial index (one unit), a missing index, and two readers (the
+  first holds the lock by `CI_MUSL_HOLD`; the second must wait and end after it).
+- Rekey: `arbace/c/musl.ae` is in the forms key, so one musl read, as c-props4's change to repr/c already asks (no second one on
+  top of it).  `arbace/c/musl.ae` is also in `gate_key` (arbace/c, embedded), as c-props4's changes already are.
+- Proved on the branch (a copy of main's complete cache, its key written as the checkout's, index corrupted to one unit): `bin/ci musl
+  fresh` fails, `ensure` repairs it without rereading (74 s), `bin/ci run` of torture-execute/20000314-1.c exits 0; `bin/ci check --only`
+  four torture files pass; c-check-essential's command exits 0; `bin/reap` 41 of 44, 0 problems; `bin/crops-score --judge --strict` 0 problems;
+  `test/c/musl-lock-test.bash` ok (the second reader waited 153 s behind the first's lock, held 6 s: the index build ran after it).

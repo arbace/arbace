@@ -12,7 +12,7 @@
 #            arbace/c/musl.ae), the host (test/c/host) and configure's generated headers, and a read whose key differs rereads the whole cache
 #   verify-derived  the oracle tier: the headers prepare derives without a compiler (Arbace's target, the default;
 #            ARBACE_C_TARGET=gcc: gcc's configure) against gcc's configure's, byte for byte
-#   fresh    exit 0 when the cache's key is the checkout's; `ensure`: prepare, then read when the key differs
+#   fresh    exit 0 when the cache's key is the checkout's and its index lists the units the cache holds; `ensure`: prepare, then read when the key differs
 #   pack     ORS9 (a) (doc/ORACLE-RECORDS-SURVEY.md): gcc's configure's products (config.mak, alltypes.h, syscall.h, version.h)
 #            made afresh in scratch and packed as c-musl-1.2.6-x86_64 (test/c/records/), by hand on the host with gcc; under
 #            ARBACE_C_TARGET=gcc prepare takes them from the pack, and configures with gcc only when the store lacks it
@@ -28,7 +28,13 @@ forms=${CI_MUSL_FORMS:-$d/forms}
 key() { (cd "$root" && { find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host c/target -type f | LC_ALL=C sort | xargs sha256sum
                          for h in "$m/obj/include/bits/alltypes.h" "$m/obj/include/bits/syscall.h"; do
                            [ -f "$h" ] && sha256sum < "$h"; done; true; } | sha256sum | cut -d' ' -f1); }
-fresh() { [ -f "$forms/key" ] && [ "$(cat "$forms/key")" = "$(key)" ]; }
+# fresh: the key is the checkout's and the index exists and lists as many units as the cache holds (night 10, DIAGNOSIS §1: concurrent
+# ensures left a partial index.edn that a fresh key hid)
+keyok() { [ -f "$forms/key" ] && [ "$(cat "$forms/key")" = "$(key)" ]; }
+fresh() {
+  keyok && [ -f "$forms/index.edn" ] || return 1
+  [ "$(grep -o ' {:defs ' "$forms/index.edn" | wc -l)" -eq "$(find "$forms/src" -name '*.c.ae' | wc -l)" ]
+}
 # the target description the reader reads musl with (arbace.repr.c.host/load-host): Arbace's c/target, or gcc's recorded
 # answers under ARBACE_C_TARGET=gcc (bin/lib/repr-c/sysroot.bash's c_target_host)
 . "$root/bin/lib/repr-c/sysroot.bash"
@@ -157,9 +163,15 @@ case ${1:-} in
   fresh) fresh ;;
   ensure) "$0" prepare && { fresh || "$0" read; } ;;
   read)
+    # one reader at a time (flock on FORMS.lock beside the cache; CI_MUSL_HOLD seconds: a test hook): the fresh check, the rm -rf, the
+    # read, the index and the key write are one step; the others wait, find the cache fresh and read nothing (the lock is not
+    # taken by ensure: it calls read, and flock's lock is not reentrant)
+    mkdir -p "$(dirname "$forms")"; exec 9>"$forms.lock"; flock 9
+    [ -z "${CI_MUSL_HOLD:-}" ] || sleep "$CI_MUSL_HOLD"  # test hook: holds the lock, so a second reader's wait shows
     "$0" prepare
     k=$(key)
-    if ! fresh; then
+    # a stale index alone does not reread the cache: read-all reads what is missing and index makes the index again
+    if ! keyok; then
       [ -d "$forms" ] && echo "musl: the forms cache's key is not the checkout's (repr/c or the host changed): reread" >&2
       rm -rf "$forms"
     fi

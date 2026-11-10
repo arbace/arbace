@@ -2803,3 +2803,14 @@ Microsoft layout rules, no gcc source read, every rule's case measured with the 
 programs' gcc runs, check and AOT rows; REAP's C eval and AOT +2. Alternative considered for CS297: computing the option in
 `arbace.c` alone to keep musl's forms key (rejected: the decision names the host's file options; the key's move costs one musl
 read). Proposed: CS298 (`-mms-bitfields`). Recorded in doc/C23-SURVEY.md, "As built: CS296 (b), CS297 (a), the ms_struct request".
+
+
+## 2026-11-10: musl's forms index repaired by `index` and locked by `read` (branch `c-musl-lock`, from `c-props4` `883115fd0`)
+
+Night 10's c-check/c-aot false fails were a stale `index.edn` in next's musl forms cache (936 of 1,331 sources, no
+`__libc_start_main`), diagnosed in .tmp/night10/DIAGNOSIS.md section 1: concurrent `bin/ci musl ensure` runs in g-gate1 without a lock, and
+`arbace.c.musl/index` never rebuilt an existing index. Fixed on `c-props4` (it already moves the forms key through repr/c, so
+the one musl read serves both): `index` is rebuilt when its keys differ from the cached sources, `bin/lib/ci/musl read` holds an
+flock around the whole read, `fresh` needs a complete index; `test/c/musl-lock-test.bash`. Alternative for the index considered:
+`read-all` deleting index.edn whenever it reads anything (rejected: repairs only what this process broke). Recorded in
+doc/C23-SURVEY.md, "As built: musl's index and its lock".
