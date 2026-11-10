@@ -888,3 +888,76 @@ gas's mode, the streamer's directives.
 - **AXS36 The Intel forms' operand order.** (a) as built: Intel's forms in the text's order and AT&T's reversed, so both are the SDM's
   order and the machine level is one; (b) Intel's reversed too, a form being the text's syntax in a fixed order. *Recommended: (a)*: the
   survey's machine-level forms (AXS2 (a)) want the one order, and the AT&T reader already makes it.
+
+## As built: AX2 (fourth slice, APX; 2026-11-10; branch `asm-ax2d`)
+
+On the light lane (stage 0, one run at a time, under 1.5 GiB, no lock, no LLVM tool in any check), AXS17-AXS36 still unanswered and
+followed as recommended where they touch this slice (AXS27 (a): APX after EVEX and the CHECK text; AXS33 (a): VEX's map 7 with APX).
+llvm-project 23.1.5's `X86MCCodeEmitter.cpp` (X86OpcodePrefixHelper's REX2 and EVEX with APX's bits, determineOptimalKind,
+emitVEXOpcodePrefix's forms with the new data destination and the conditional operands, emitREXPrefix, emitOpcodePrefix's REX2 M bit,
+encodeInstruction's IsND skips), `X86BaseInfo.h` (hasNewDataDest, getMemoryOperandNo, needSIB, isApxExtendedReg, canUseApxExtendedReg),
+`X86AsmParser.cpp` (MatchRegisterByName's UseApxExtendedReg, parseCFlagsOp, the pseudo prefixes `{rex2}` and `{nf}`,
+checkTargetMatchPredicate, processInstruction's replaceWithCCMPCTEST, validateInstruction's high byte registers),
+`X86EncodingOptimization.cpp` (optimizeShiftRotateWithImmediateOne), `X86InstPrinterCommon.cpp` (printInstFlags' `{nf}`) and
+`llvm/lib/TableGen/TGParser.cpp` (ParseObjectBody's ApplyLetStack), read from the pinned tarball and written again in Arbace; no code
+copied. doc/asm/AMD64.md §1 and §3 describe what was built.
+
+- **The matcher**: the extended GPRs `%r16`-`%r31` taken (the 64-bit-only rule kept), an instruction matched with one only when
+  canUseApxExtendedReg says so; `{dfv=of,sf,zf,cf}` read as CCMP's and CTEST's flags immediate (its two messages); `{nf}` as
+  ForcedNoFlag (CFCMOV excepted); `{rex2}` a REX2 lower bound; `{evex} cmp`/`test` matched in 64-bit mode and rewritten to `ccmpt`/`ctest
+  {dfv=}` (the flag `{evex}` dropped, as LLVM drops IP_USE_EVEX); validateInstruction's `can't encode 'ah' in an instruction requiring
+  EVEX/REX2/REX prefix`.
+- **The encoder**: REX2 (`D5`, M R4 X4 B4 W R X B) when a register's bit 4 is set, for JMPABS, PUSHP and POPP (ExplicitREX2) or under
+  `{rex2}`, its M bit the 0F escape; EVEX's prefix rewritten form by form after emitVEXOpcodePrefix with APX's bits (B4 of a GPR rm or base,
+  not inverted; X4 of a GPR index in EVEX.U; a vector rm's X and a VSIB's V' only for vector registers; the new data destination in vvvv and
+  V'; NF in aaa's bit 2; the flags in vvvv and the condition in V' and aaa), the memory operand's number and the forms' operand walk with
+  the new data destination skipped, SIB for `%r20` and `%r28` as bases (needSIB), VEX's maps 4-7 (map 7: USERMSR's and MSR_IMM's
+  `urdmsr $123, %r9`, AXS33; map 5: AMX-FP8's `tdpbf8ps`).
+- **The table regenerated** for two causes the slice found (`table check` byte for byte): Arbace's TableGen now applies the let stack around
+  a class's definition to the class (ParseObjectBody's ApplyLetStack; AMX-FP8's `let Constraints = "$src1 = $dst" in { class AMX_FP8_BASE
+  ... }` had left TDPBF8PS and its three siblings without their tie, so the matchable's conversion had `[:z]` where llvm-tblgen has the tied
+  operand: the oracle compared the matchables' classes, not their conversions); and `:insns` holds the instructions processInstruction
+  rewrites matchables into (optimizeShiftRotateWithImmediateOne's ROL8r1_ND and its siblings, DisassembleOnly, so no matchable names them).
+  The 24 lines that change are those 4 instructions' entries and conversions and the 12 shifts' entries; the rest is unchanged.
+- **The check**: a CHECK text is an instruction's line also when its first word is a matcher's mnemonic (`ccmpbw`): AXS31 (a)'s rule took
+  the first word of the AsmString's text, which for CCMP, CTEST, CFCMOV and SETZU is `ccmp`, `ctest`, ... before printCondCode, and so
+  had classed 2,322 APX texts `:directive` in AX3's record, where a wrong print would not fail (found by the new print control
+  `_control-print/apx-ccmp-imm-hex`, which passed under the old rule); the text level's own `:apx` rule (an APX register or prefix in
+  the text) removed: an unmet APX text now fails. `bin/repr-asm encode-check --record` now also requires every control to fail as it must
+  (it wrote the record from a run whose control did not). `REPR_ASM_ENC_ROWS=1` writes every classed encoding row into `fails.tsv`.
+- **The cross-syntax judge**: a new by-design class, `:disassemble-only` (12): `rolb $1, %al, %bl` is ROL8r1_ND, which prints `rol bl,
+  al` in Intel and no Intel matchable reads (llvm-mc 23.1.5 by hand: `error: invalid operand for instruction`).
+- **Controls**: `apx-add-att` against `apx-sub-att` at the three levels, `apx-ccmp-att` against `apx-ctest-att` (encodings) and
+  `apx-ccmp-att` printed in hex (texts); each fails as it must (20 controls in all).
+
+| `MC/X86` | AX3 | AX2 (fourth slice) | failing |
+|---|---|---|---:|
+| stated encodings (106,075) | 99,509 met; `:apx` 6,565, `:no-run` 1 | **106,074 met** (EVEX 71,212, VEX 18,717, legacy 14,353, XOP 1,792); `:no-run` 1 | 0 |
+| CHECK texts (108,601) | 100,884 met; `:apx` 4,245, `:directive` 2,425, `:other-tool` 772, ... | **107,451 met**; `:other-tool` 772, `:comment` 119, `:directive` 102, `:unread` 74, `:lfi` 61, `:options` 13, `:other-target` 7, `:fixup` 1, `:local-label` 1 | 0 |
+| cross-syntax | 82,765 of 83,505 | **86,350 of 87,103**; `:ambiguous` 566, `:pcrel-imm` 118, `:mask-operand` 33, `:other-instruction` 21, `:disassemble-only` 12, `:dollar-name` 2, `:local-label` 1 | 0 |
+| error tests' `error:` lines | 74 of 130 | 80 of 130 | 50 pending |
+
+`:apx` is empty at both levels (kept for an APX form not taken); the 102 `:directive` texts left are directives, labels, data lines and
+`x86_64-asm-match`'s matcher trace; `jge Ltmp0` (`intel-syntax-directional-label`), a `:directive` while `jge` was no known mnemonic,
+is now `:local-label` (the text judge names an unmet text's class by the nearest statement, now the earlier of two as near). The first subset run (the 146 files that held `:apx` rows) met all but 28 encodings, of two causes, both
+the table's (above); the first whole run met every encoding and text and failed only the record's stated counts (the cross judge's rows grew
+with the instructions now matched); the record was written from the fourth (the second wrote one with a control passing, the third
+failed `jge Ltmp0` before its class's tie-break above). AX1's and AR1's round trips give the same rows; `bin/reap`,
+`bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` pass. The encode check takes about 6
+minutes on a loaded host (four threads, under 1.5 GiB); `table gen` 2.7 minutes, 1.2 GiB.
+
+Not built in this slice: gas's mode, relaxation, the streamer's directives, the error tests' remaining messages (50 lines), MASM.
+
+### Proposed (AX2, fourth slice)
+
+- **AXS37 The table oracle's reach.** `bin/repr-asm table oracle` compares MatchTable0/1's mnemonics, instructions and classes, so a
+  conversion that differs (TDPBF8PS's missing tie) passes it. (a) extend it to the conversions (llvm-tblgen's `ConversionTable` and
+  `ConvertFn`'s kinds, the tied operands) and to the encoding fields of `:insns` (`-gen-instr-info`'s TSFlags decoded), by hand as now;
+  (b) as built. *Recommended: (a)*: the encoder reads those fields and the oracle is the only independent look at them.
+- **AXS38 TableGen's let order for defs.** TGParser applies the let stack before a def's body (ParseObjectBody), Arbace's TableGen after it
+  (a body's `let` of a field an outer `let` sets keeps the outer value here, the body's in LLVM). (a) follow TGParser for defs too and show
+  the table unchanged (`table check`) or explain each change; (b) keep it until a record differs. *Recommended: (a)*: the class case above
+  shows such gaps hide in the conversions, which the oracle does not see yet.
+- **AXS39 The `:directive` rule after the matchers' mnemonics.** (a) as built: a text is an instruction's line when its first word is a
+  printed mnemonic, a matcher's mnemonic, a prefix or a comparison mnemonic; (b) by content alone (AXS31 (b)). *Recommended: (a)* until AX4
+  prints the streamer's lines: the rule's gap was a missing source of mnemonics, now the matcher's own.

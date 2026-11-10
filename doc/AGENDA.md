@@ -171,7 +171,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   Intel variant (MatchTable1, llvm-tblgen's 22,609 rows by hand) and printed as X86IntelInstPrinter does: round trip 609 of `MC/X86`'s
   621 (464 before), stated encodings 99,509 met (81,966), CHECK texts 100,884 met (82,838), the new cross-syntax judge 82,765 of 83,505
   AT&T instructions read back from their Intel print, the rest llvm-mc's own asymmetries; none failing at any level, `:intel` empty.
-  Proposed AXS34-AXS36. Next: the machine-level forms (AXS26), then APX; the streamer's directives with AX4.
+  Proposed AXS34-AXS36. `asm-ax2d` (on `asm-ax3`; "As built: AX2 (fourth slice, APX)"): APX matched, encoded and printed (REX2,
+  `%r16`-`%r31`, EVEX map 4's NDD, NF, CCMP/CTEST with `{dfv=}`, `{rex2}`, `{nf}`, `{evex} cmp`, PUSH2/POP2, PPX, JMPABS) and VEX's maps
+  5 and 7 (AXS33): stated encodings 106,074 of 106,075 met (99,509), CHECK texts 107,451 (100,884), cross-syntax 86,350 of 87,103,
+  none failing, `:apx` empty; the table regenerated (TableGen's let around a class, the shifts by 1 of NDD forms), the `:directive`
+  rule taught the matchers' mnemonics (it had hidden 2,322 APX texts). Proposed AXS37-AXS39. Next: the machine-level forms (AXS26);
+  the streamer's directives with AX4.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

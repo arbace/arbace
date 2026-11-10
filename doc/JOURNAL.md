@@ -3062,3 +3062,38 @@ rows; `bin/reap` (0 problems), `bin/crops-score --judge --strict`, `test/gate/ga
 Considered: reading Intel memory operands as a tree with the registers inside (kept the state machine's reading: registers out of the
 sum, the value the calculator's, which `_g0[rbp + 1 + (2*5) - 3 + 1<<1]` needs); the cross judge on encodings (AXS34 (b)); a lexer option
 for MASM's integers (AXS35). Proposed: AXS34-AXS36 (doc/asm/AMD64-SURVEY.md, "Proposed (AX3)").
+
+## 2026-11-10 amd64 assembly: AX2's fourth slice, APX matched, encoded and printed, and VEX's map 7 (branch `asm-ax2d`, from `mac/asm-ax3` `55d62a05d`)
+
+AX2's last encoding family (doc/asm/AMD64-SURVEY.md, "As built: AX2 (fourth slice, APX)") on the light lane (stage 0, one run at a time,
+under 1.5 GiB, no lock; llvm-mc only by hand as the oracle), AXS17-AXS36 unanswered and followed as recommended (AXS27 (a): APX after EVEX
+and the CHECK text; AXS33 (a): VEX's map 7 with APX). Sources read and written again in Arbace (no code copied), from llvm-project 23.1.5's
+release tarball (`test/asm/corpora.edn`'s `:llvmorg-23.1.5`): `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`
+(X86OpcodePrefixHelper: REX2, EVEX's R4/B4/X4/V4, setBB2, setXX2, setV2, setNF, setSC, determineOptimalKind; emitVEXOpcodePrefix,
+emitREXPrefix, emitOpcodePrefix, encodeInstruction's IsND), `X86BaseInfo.h` (hasNewDataDest, getMemoryOperandNo, needSIB,
+isApxExtendedReg, isX86_64ExtendedReg, canUseApxExtendedReg), `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (MatchRegisterByName,
+parseCFlagsOp, parseInstruction's pseudo prefixes, checkTargetMatchPredicate, processInstruction's replaceWithCCMPCTEST,
+validateInstruction), `X86EncodingOptimization.cpp` (optimizeShiftRotateWithImmediateOne), `X86InstPrinterCommon.cpp` (printInstFlags),
+`llvm/lib/TableGen/TGParser.cpp` (ParseObjectBody, ApplyLetStack).
+
+Built: `arbace.asm.amd64.asm`: the extended GPRs, canUseApxExtendedReg, `{dfv=}`, `{nf}` with CFCMOV's exception, `{rex2}`, `{evex}
+cmp`/`test` as CCMP/CTEST, the high byte check, REX2, EVEX's prefix rewritten with APX's bits, the new data destination in the forms and
+the memory operand's number, SIB for `%r20`/`%r28`, VEX's maps 4-7. `arbace.asm.tablegen`: the let stack around a class's definition
+applied to it (AMX-FP8's tie was lost); `arbace.asm.amd64.gen`: `:insns` with processInstruction's shift-by-1 targets (ROL8r1_ND ...,
+DisassembleOnly); `asm/amd64/table.edn` regenerated (24 lines: those 4 + 12 instructions). `arbace.asm.amd64.check`: an instruction text
+known by the matchers' mnemonics too (the `:directive` rule had hidden 2,322 APX texts: `ccmpbw`'s print begins with `ccmp` and a print
+method), the text level's `:apx` rule removed, the nearest-statement tie broken to the earlier, the cross class `:disassemble-only`,
+`REPR_ASM_ENC_ROWS`. `bin/repr-asm encode-check --record` requires the controls to fail as they must (it had recorded from a run whose new
+control passed). Five APX controls (`controls-encode.txt` 2, `controls-print.txt` 2, `controls-cross.txt` 1); class texts updated
+(`divergences-encode.edn`, `divergences-print.edn`, `divergences-cross.edn`); doc/asm/AMD64.md §1, §3.
+
+Results (`MC/X86`, 621 files): stated encodings 106,074 of 106,075 met (99,509; the one left no run judges), EVEX 71,212, VEX 18,717
+(USERMSR's and MSR_IMM's map 7, AMX-FP8's map 5), legacy 14,353, XOP 1,792; CHECK texts 107,451 of 108,601 (100,884), `:apx` empty,
+`:directive` 102 (2,425); cross-syntax 86,350 of 87,103 AT&T instructions (82,765 of 83,505), the new by-design `:disassemble-only` 12
+(`rol bl, al`, which llvm-mc 23.1.5 itself rejects, checked by hand); error lines 80 of 130 (74); none failing at any level, recorded.
+The first subset run (146 files) left 28 encodings, both causes the table's; `table check` byte for byte; AX1's and AR1's round trips the
+same rows; `bin/reap`, `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: keeping the shifts' 8-bit NDD forms out of the table and encoding them by a rule (rejected: the table is the encoder's only
+source of fields); changing TableGen's let order for defs too (left as AXS38: the table oracle does not see conversions, AXS37).
+Proposed: AXS37-AXS39 (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, fourth slice)").

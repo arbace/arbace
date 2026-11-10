@@ -223,7 +223,10 @@
 (def ^:private mnemonics-of
   (memoize (fn [t]
              (into #{"lock" "rep" "repne" "notrack" "{nf}" "{vex}" "{vex2}" "{vex3}" "{evex}" "{disp8}" "{disp32}" "callq" "data32"}
-                   (concat (for [[_ i] (:insns t) k [:print :print-intel] :let [f (first (k i))] :when (string? f)]
+                   ;; the matchers' mnemonics too: a print that starts with a print method's text (CCMP's, CTEST's, CFCMOV's
+                   ;; and SETZU's condition code, `ccmp` + `b` + `w`) is read by its matchable's mnemonic (`ccmpbw`)
+                   (concat (map first (concat (:match t) (:match-intel t)))
+                           (for [[_ i] (:insns t) k [:print :print-intel] :let [f (first (k i))] :when (string? f)]
                              (first (str/split f #"[\s]")))
                            (for [[_ ps] (:print-aliases-intel t) [fr] ps :when (string? (first fr))] (first (str/split (first fr) #"\s")))
                            (for [[_ ps] (:print-aliases t) [fr] ps :when (string? (first fr))] (first (str/split (first fr) #"\s"))))))))
@@ -262,11 +265,12 @@
               (if hit
                 (recur (rest cs) (long (first hit)) (long (second hit)) (conj res [l :pass (:asm (second (nth outs (first hit))))]))
                 (let [rest-outs (subvec outs (min k n))
-                      e (when (seq rest-outs) (second (apply min-key #(Math/abs (- (long (first %)) (long l))) rest-outs)))]
+                      ;; the nearest statement, the earlier one of two as near (a CHECK written after its instruction)
+                      e (when (seq rest-outs)
+                          (second (reduce (fn [a b] (if (< (Math/abs (- (long (first b)) (long l))) (Math/abs (- (long (first a)) (long l)))) b a))
+                                          rest-outs)))]
                   (recur (rest cs) k off
                          (conj res [l (cond (not (instruction-text? t)) :directive
-                                            ;; an APX register or pseudo prefix named in the text: APX's, as the encodings'
-                                            (re-find #"(?:%|\b)r(1[6-9]|2[0-9]|3[01])[bwd]?\b|\{(nf|rex2|dfv=[^}]*)\}|\{evex\}\s+(cmp|test)" t) :apx
                                             (nil? e) :unpaired (:unsupported e) (:unsupported e) (:error e) :rejected
                                             (:punsup e) (:punsup e) :else :mismatch)
                                     (when e (or (:asm e) (:error e) (:what e) (:pwhat e)))])))))))))))
@@ -279,6 +283,9 @@
         (vector? x) (mapv norm x)
         (map? x) (into {} (map (fn [[k v]] [k (norm v)]) x))
         :else x))
+
+;; the instructions the matchers' tables name (MatchTable0 and MatchTable1)
+(def ^:private matchable-insts (memoize (fn [t] (into #{} (map #(nth % 2)) (concat (:match t) (:match-intel t))))))
 
 (defn cross-judge
   "The cross-syntax judge (doc/asm/AMD64-SURVEY.md §5, §8.1; AX3): each AT&T statement's machine instruction printed in Intel
@@ -311,6 +318,9 @@
                                         (filter vector? (:print-intel (get (:insns x/*t*) (:inst e)))))]
                    (cond
                      (and (some :error rs) pcrel-imm?) [l :pcrel-imm (str txt " | " (:error (first (filter :error rs))))]
+                     ;; an instruction no matchable names (processInstruction's ROL8r1_ND, DisassembleOnly): no reading prints it
+                     (and (some :error rs) (not (contains? (matchable-insts x/*t*) (:inst e))))
+                     [l :disassemble-only (str txt " | " (:error (first (filter :error rs))))]
                      (some :error rs) [l :rejected (str txt " | " (:error (first (filter :error rs))))]
                      (some :unsupported rs) [l (:unsupported (first (filter :unsupported rs))) txt]
                      (and (= 1 (count ok)) (same? (first ok))) [l :pass txt]
@@ -382,7 +392,7 @@
      :xfails (vec (for [[l c d] @cross :when (or (System/getenv "REPR_ASM_TEXT_ROWS") (#{:mismatch :rejected :crash :intel-unread} c))] [l c (str d)]))
      :tfails (vec (for [[l c o] txt :when (or (System/getenv "REPR_ASM_TEXT_ROWS") (#{:mismatch :rejected :crash :unpaired} c))] [l c (str o)]))
      :errors (let [es (keep :errors results)] (when (seq es) [(reduce + (map first es)) (reduce + (map second es))]))
-     :fails (vec (for [[l c sts] enc :when (#{:mismatch :rejected :crash} c)]
+     :fails (vec (for [[l c sts] enc :when (or (#{:mismatch :rejected :crash} c) (and (System/getenv "REPR_ASM_ENC_ROWS") (not= c :pass)))]
                    [l c (str/join " | " (map #(or (:text %) (:error %) (:what %)) sts))]))}))
 
 (defn control

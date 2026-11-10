@@ -15,7 +15,8 @@ Generated, committed, checked by regeneration (`bin/repr-asm table gen|check`; t
   144,000 lines in 106 files), from the release tarball pinned in `test/asm/corpora.edn` (`:tables`), extracted with the corpora
   by `bin/repr-asm corpus extract`.
 - **TableGen** (`arbace.asm.tablegen`): the language read and evaluated after `TGLexer.cpp`, `TGParser.cpp`, `Record.cpp` and
-  ProgRef: the preprocessor's `#ifdef`, classes with template arguments (positional and named), defs, multiclasses and
+  ProgRef: the preprocessor's `#ifdef`, classes with template arguments (positional and named; the let stack around a class's
+  definition applied after its superclasses, ParseObjectBody's ApplyLetStack, since AX2's fourth slice), defs, multiclasses and
   `defm` (several multiclasses in one defm, the defm's classes after them), `let` (fields and bit ranges), `foreach`,
   `defvar`, `defset`, `if`, values (bits, lists, dags, `!` operators, `!cond`, anonymous records `C<...>`), names pasted with
   `#`. A record's fields are made as TGParser makes them (superclasses in order, a later one's field overriding; the body;
@@ -33,7 +34,8 @@ Generated, committed, checked by regeneration (`bin/repr-asm table gen|check`; t
   asm operand rendered, a tied operand copied, an alias's fixed register or immediate). The `MnemonicAlias` records
   (`applyMnemonicAliases`), the assembler predicates, the registers (AsmName, HWEncoding) and each instruction's encoding
   fields (`X86Inst`: opcode, format, map, prefix, operand and address size, encoding, immediate, the VEX/EVEX bits,
-  `CD8_Scale`, the operands and ties). Since the third slice the printer's fields too (after `AsmWriterInst.cpp` and
+  `CD8_Scale`, the operands and ties) of the matchables' instructions and of those processInstruction rewrites them into
+  (optimizeShiftRotateWithImmediateOne's shifts by 1). Since the third slice the printer's fields too (after `AsmWriterInst.cpp` and
   `AsmWriterEmitter.cpp`): each instruction's `:print`, its AT&T AsmString (variant 0) parsed into literal fragments and
   `[MI-OPERAND PRINT-METHOD]` for each `$operand` (the Operand's or RegisterOperand's `PrintMethod`, else `printOperand`), and
   `:print-aliases`, printAliasInstr's patterns (InstAliases of `EmitPriority` 1 or more with no more operands than their
@@ -66,8 +68,15 @@ rendered into L'L with EVEX.b, `{sae}` a token: L'L zero), the broadcast's `{1to
 displacement compressed by `CD8_Scale` (`isDispOrCDisp8`: disp8*N when aligned and in range, else disp32); the matcher takes
 `%xmm16`-`%xmm31`, `%ymm16`-`%ymm31`, `%zmm`, `%k0`-`%k7` (the 64-bit-only ones refused outside 64-bit mode, as
 `MatchRegisterByName` does), the opmask and `{z}` decorations, the mask pairs of `vp2intersect` (`addMaskPairOperands`) and
-the `{evex}` pseudo prefix (`checkTargetMatchPredicate`). Not yet: APX (REX2, map 4's NDD, NF, CCMP/CTEST, `%r16`-`%r31`,
-`{rex2}`, `{evex} cmp`), relaxation (llvm-mc's `-show-encoding` prints the unrelaxed instruction, so the stated encodings need
+the `{evex}` pseudo prefix (`checkTargetMatchPredicate`). Since AX2's fourth slice APX: the extended GPRs `%r16`-`%r31` at each width
+(UseApxExtendedReg: an instruction takes them when canUseApxExtendedReg says so, EVEX or the legacy maps OB and TB but XSAVE*/XRSTOR*),
+REX2 (`D5`, its M R4 X4 B4 W R X B; chosen when a register's bit 4 is set, for the ExplicitREX2 instructions JMPABS, PUSHP and POPP, or
+by `{rex2}`; its M bit the 0F escape), EVEX map 4 with APX's fields (B4 of a GPR rm or base, not inverted; X4 of an index in EVEX.U; the
+new data destination in vvvv, hasNewDataDest, skipped by the forms' operand walk; NF in aaa's bit 2; CCMP's and CTEST's `{dfv=...}` in
+vvvv and their condition in V' and aaa), `{nf}` (checkTargetMatchPredicate's ForcedNoFlag, CFCMOV excepted), `{evex} cmp`/`test` as
+`ccmpt`/`ctest {dfv=}` (replaceWithCCMPCTEST), the shift by 1 of an NDD form (ROL8r1_ND, DisassembleOnly, in the table for it),
+validateInstruction's high byte registers with EVEX, REX2 or REX (`can't encode 'ah' ...`), and VEX's maps 5 and 7 (AMX-FP8, USERMSR,
+MSR_IMM). Not yet: relaxation (llvm-mc's `-show-encoding` prints the unrelaxed instruction, so the stated encodings need
 none; objects do, AX4), gas's mode (`:gnu`, AXS5).
 
 ## 4. The check (`arbace.asm.amd64.check`, `bin/repr-asm encode-check`)
