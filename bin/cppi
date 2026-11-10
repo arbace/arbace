@@ -515,8 +515,10 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by r
     if [ "$(cat "$out/ci/reader-key" 2>"$TMPDIR/cppi-cikey.err")" = "$rk" ] && [ -f "$out/ci/units.sha256" ] && [ -f "$out/ci/read.tsv" ]; then
       # the same reader: only the units whose lowered C changed are read again (read-lib keeps the rows read.tsv says are read;
       # the index is made again from every unit), seconds after a lowering change that touches a few units, not the whole read
-      awk -F'\t' 'NR == FNR { old[$1] = $2; next } old[$1] != $2 { print $1 }' "$out/ci/units.sha256" "$TMPDIR/cppi-ci-sums.$$" > "$TMPDIR/cppi-ci-changed.$$"
-      awk -F'\t' 'NR == FNR { ch[$1] = 1; next } !($1 in ch)' "$TMPDIR/cppi-ci-changed.$$" "$out/ci/read.tsv" > "$out/ci/read.tsv.new"
+      # (FILENAME, not NR == FNR: with no unit changed the first file is empty, and NR == FNR held for read.tsv's rows, which
+      # were all dropped, so every unit was read again; cpp-route)
+      awk -F'\t' 'FILENAME == ARGV[1] { old[$1] = $2; next } old[$1] != $2 { print $1 }' "$out/ci/units.sha256" "$TMPDIR/cppi-ci-sums.$$" > "$TMPDIR/cppi-ci-changed.$$"
+      awk -F'\t' 'FILENAME == ARGV[1] { ch[$1] = 1; next } !($1 in ch)' "$TMPDIR/cppi-ci-changed.$$" "$out/ci/read.tsv" > "$out/ci/read.tsv.new"
       mv "$out/ci/read.tsv.new" "$out/ci/read.tsv"; rm -f "$out/ci/key"
       echo "runtime-ci: reading $(wc -l < "$TMPDIR/cppi-ci-changed.$$") changed units of the lowered runtime into $out/ci" >&2
     else
@@ -524,8 +526,28 @@ runtime_ci() { # runtime_ci [OUT]: OUT/ci, the lowered runtime's units read by r
       echo "runtime-ci: reading the lowered runtime into $out/ci (about 3 minutes)" >&2
     fi
     mv "$TMPDIR/cppi-ci-list.$$" "$out/ci/list.tsv"; rm -f "$TMPDIR/cppi-ci-changed.$$"
+    # CPPI_CI_CHUNK=N (cpp-route): the units read N at a time, a process each (read-lib keeps the units read.tsv says are read), so
+    # that the reader's heap, which grows with the units one process reads (about 3 GB for the 199), stays under the day's 2 GiB
+    if [ -n "${CPPI_CI_CHUNK:-}" ]; then
+      # (the units read.tsv does not say are read, alone: a chunk of read units costs a process start and the index)
+      rm -rf "$out/ci/chunks"; mkdir -p "$out/ci/chunks"
+      awk -F'\t' 'FILENAME == ARGV[1] { if ($2 == "ok") ok[$1] = 1; next } !($1 in ok)' "$out/ci/read.tsv" "$out/ci/list.tsv" > "$out/ci/chunks/todo" 2>"$TMPDIR/cppi-ci-todo.err" \
+        || cp "$out/ci/list.tsv" "$out/ci/chunks/todo"
+      split -l "$CPPI_CI_CHUNK" "$out/ci/chunks/todo" "$out/ci/chunks/c."
+      : > "$out/ci/read.log"
+      for c in "$out"/ci/chunks/c.*; do
+        [ -f "$c" ] || continue
+        (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci" "$c" "${CPPI_JOBS:-4}") >> "$out/ci/read.log" 2>&1
+        echo "runtime-ci: chunk $(basename "$c") read" >&2
+      done
+      # the index of every unit: read-lib over the whole list, nothing left to read
+      (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci" "$out/ci/list.tsv" "${CPPI_JOBS:-4}") >> "$out/ci/read.log" 2>&1 \
+        || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/read.log" | tail -5 >&2; exit 1; }
+      rm -rf "$out/ci/chunks"
+    else
     (cd "$root" && GOMEMLIMIT=${CPPI_CI_MEMLIMIT:-6GiB} arbace_tool -m arbace.cpp.run read-lib "$out/ci" "$out/ci/list.tsv" "${CPPI_JOBS:-4}") > "$out/ci/read.log" 2>&1 \
       || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$out/ci/read.log" | tail -5 >&2; exit 1; }
+    fi
     # ci's overrides (test/cpp/runtime/ci/*.c, arbace.cpp.run's libs-fn links them before the runtime): C for ci of what the
     # lowered runtime does in a way ci cannot (clang's inline va_arg)
     mkdir -p "$out/ci/over"

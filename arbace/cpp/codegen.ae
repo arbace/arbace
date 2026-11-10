@@ -319,6 +319,8 @@
 (def ^:dynamic *extend-now* false) ; the temporary being pushed is the one a declared reference binds
 
 (def ^:dynamic *extend-root* nil)
+(def ^:dynamic *this-val* nil) ; an aggregate's default member initializer: [*f* the aggregate's address], its `this` in that function
+(def ^:dynamic *opaque* {})  ; GNU's x ?: y: the opaque values bound ({id operand}: a glvalue's address or a scalar's value)
 (def ^:dynamic *decl-e* nil) ; the prvalue a declared variable is initialized from (a std::initializer_list's array extended) ; the complete temporary a declared reference binds through subobjects ([class.temporary])
 
 (defn- extend-root
@@ -557,15 +559,26 @@
   "A call by the plan (sig-plan) of the function type `ft`: the parameters' initializers' operands coerced, the object
   `obj`, the result's (a class's into `dest`)."
   [plan callee va ft inits obj dest nounwind & [vtt]]
-  (let [vals (arg-values (:ps ft) inits)
+  (let [;; a class through the ellipsis (sema's :va-ty) passed as a parameter of its type would be, the registers counted on
+        ;; from the declared ones (clang's X86_64ABIInfo::computeInfo classifies the variadic arguments alike); the call's
+        ;; type stays the declared prototype's
+        xs (drop (count (:ps ft)) inits)
+        aplan (if (some :va-ty xs)
+                (sig-plan (:ret ft) (concat (:ps ft) (map #(or (:va-ty %) (:ty (:e %))) xs)) (some? obj) (some? vtt))
+                plan)
+        aps (vec (concat (:ps ft) (map :va-ty xs)))
+        vals (arg-values aps inits)
+        plan* plan
+        plan aplan
         args (vec (apply concat
                          (map-indexed (fn [i [t v]]
                                         (let [pp (nth (:params plan) i nil)]
                                           (case (:k pp)
-                                            :regs (coerce-out! v (:parts pp) (abi/size-of (nth (:ps ft) i)))
+                                            :regs (coerce-out! v (:parts pp) (abi/size-of (nth aps i)))
                                             :ignore []
                                             [(vec (concat [t] (:attrs pp) [v]))])))
                                       vals)))
+        plan plan*
         args (vec (concat (when (= :sret (:ret-k plan)) [['ptr dest]]) (when obj [['ptr obj]]) (when vtt [['ptr vtt]]) args))
         ret (:ret plan)
         fty (if va (list 'fn ret (conj (:ps plan) '&)) ret)
@@ -839,6 +852,83 @@
         (begin! le)
         (when t (val! (list 'phi t [a fa] [b fb])))))))
 
+(defn- va-arg-class!
+  "The address of va_arg(ap, T)'s argument for a class T (clang's X86_64ABIInfo::EmitVAArg, the psABI's §3.5.7): a class
+  passed in registers read from the register save area (its eightbytes copied into a temporary unless they are one
+  register class's consecutive slots) when gp_offset and fp_offset leave room for all of them, else, as a MEMORY class,
+  from the overflow area, which advances by its size rounded to eight."
+  [e]
+  (let [t (:ty e)
+        c (class-pass t)
+        _ (when (= :ignore c) (fail :va "va_arg of an empty class"))
+        _ (when (or (= :ind c) (> (long (abi/align-of t)) 8))
+            (when-not (byval-class? t) (fail :va "va_arg of a non-trivial class")))
+        _ (when (> (long (abi/align-of t)) 8) (fail :va "va_arg of an over-aligned class"))
+        ap (emit-rv (:e e))
+        mem! (fn []
+               (let [oa (offset! ap 8)
+                     ov (val! (list 'load 'ptr ['ptr oa] :align 8))
+                     n (* 8 (quot (+ (long (abi/size-of t)) 7) 8))]
+                 (emit! (list 'store ['ptr (val! (list 'getelementptr 'i8 ['ptr ov] ['i32 n]))] ['ptr oa] :align 8))
+                 ov))]
+    (if (= :ind c)
+      (mem!)
+      (let [ni (count (filter #(= :integer (first %)) c)) ns (- (count c) ni)
+            gp (when (pos? ni) (val! (list 'load 'i32 ['ptr ap] :align 4)))
+            fpa (offset! ap 4)
+            fp (when (pos? ns) (val! (list 'load 'i32 ['ptr fpa] :align 4)))
+            g-ok (when gp (val! (list 'icmp :ule 'i32 gp (- 48 (* 8 ni)))))
+            f-ok (when fp (val! (list 'icmp :ule 'i32 fp (- 176 (* 16 ns)))))
+            fits (cond (and g-ok f-ok) (val! (list 'and 'i1 g-ok f-ok)) g-ok g-ok :else f-ok)
+            lr (new-label "vaarg.in_reg") lm (new-label "vaarg.in_mem") le (new-label "vaarg.end")]
+        (condbr! fits lr lm)
+        (begin! lr)
+        (let [rsa (val! (list 'load 'ptr ['ptr (offset! ap 16)] :align 8))
+              ga (when gp (val! (list 'getelementptr 'i8 ['ptr rsa] ['i32 gp])))
+              fa (when fp (val! (list 'getelementptr 'i8 ['ptr rsa] ['i32 fp])))
+              ar (if (or (zero? ns) (and (zero? ni) (= 1 ns)))
+                   (or ga fa)
+                   ;; mixed classes, or two SSE eightbytes (16 bytes apart in the save area): assembled in a temporary
+                   (let [tmpa (alloca! (list 'array (abi/size-of t) 'i8) (max 8 (long (abi/align-of t))))]
+                     (loop [ps (seq c) i 0 gi 0 si 0]
+                       (when ps
+                         (let [p (first ps) pt (part-ltype p) sse? (= :sse (first p))
+                               src (if sse? (offset! fa (* 16 si)) (offset! ga (* 8 gi)))
+                               v (val! (list 'load pt ['ptr src] :align 8))]
+                           (emit! (list 'store [pt v] ['ptr (offset! tmpa (* 8 i))] :align 8))
+                           (recur (next ps) (inc i) (if sse? gi (inc gi)) (if sse? (inc si) si)))))
+                     tmpa))]
+          (when gp (emit! (list 'store ['i32 (val! (list 'add 'i32 gp (* 8 ni)))] ['ptr ap] :align 4)))
+          (when fp (emit! (list 'store ['i32 (val! (list 'add 'i32 fp (* 16 ns)))] ['ptr fpa] :align 4)))
+          (let [fr (:label @*f*)]
+            (br! le) (close-block!) (start! lm)
+            (let [ov (mem!) fm (:label @*f*)]
+              (begin! le)
+              (val! (list 'phi 'ptr [ar fr] [ov fm])))))))))
+
+(declare emit-stmt unwind-to! cleanup-depth)
+
+(defn- stmt-expr!
+  "GNU's statement expression (sema's :stmt-expr): its statements in a scope of their own, the last expression's value kept in
+  a temporary while the scope's cleanups run (clang's CodeGenFunction::EmitCompoundStmtWithoutScope's last value)."
+  [e]
+  (let [x (:e e) t (when x (abi/unq (:ty x))) slot (when (and x (not (abi/void? t))) (slot! t))
+        d (cleanup-depth)]
+    (doseq [s (:items e)] (emit-stmt s))
+    (when x (let [v (with-full (emit-rv x))] (when slot (store! t v slot))))
+    (when-not (:term @*f*) (unwind-to! d))
+    (swap! *f* update :cleanups #(subvec % 0 d))
+    (when slot (load! t slot))))
+
+(defn- bind-opaque!
+  "GNU's `x ?: y` (sema's :bind-opaque): x emitted once, a glvalue as its address and a scalar as its value (clang's
+  OpaqueValueMapping), then the conditional operator over it by `f`."
+  [e f]
+  (let [x (:e e) v (if (#{:lv :xv} (:cat x)) (emit-lv x) (emit-rv x))]
+    (binding [*opaque* (assoc *opaque* (:id e) v)] (f (:body e)))))
+
+(defn- opaque-of [e] (let [v (get *opaque* (:id e) ::none)] (if (= ::none v) (fail :codegen "an unbound opaque value") v)))
+
 (defn- incdec! [e]
   (let [t (abi/unq (:ty e)) a (emit-lv (:e e)) old (load! t a)
         nv (cond
@@ -1051,7 +1141,7 @@
     :decay (emit-lv (:e e))
     :fnaddr (want-fn! (:fn e))
     :addr (emit-lv (:e e))
-    :this (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8))
+    :this (or (when (identical? (first *this-val*) *f*) (second *this-val*)) (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8)))
     :unop (let [v (emit-rv (:e e)) t (:ty e)]
             (case (:o e)
               "+" v
@@ -1087,6 +1177,9 @@
     :cassign (load! (:ty e) (emit-lv e))
     :incdec (let [r (incdec! e)] (if (:post e) r (load! (:ty e) r)))
     :comma (do (emit-rv (:l e)) (emit-rv (:r e)))
+    :bind-opaque (bind-opaque! e emit-rv)
+    :stmt-expr (stmt-expr! e)
+    :opaque (if (#{:lv :xv} (:cat e)) (fail :codegen "an opaque glvalue as a prvalue") (opaque-of e))
     :call (if (= :pr (:cat e))
             (call! (:fn e) (when (:obj e) (emit-lv (:obj e))) (:args e) nil (:virtual e))
             (load! (:ty e) (emit-lv e)))
@@ -1178,6 +1271,7 @@
     ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
     ;; area while gp_offset <= 40 (fp_offset <= 160), else from the overflow area
     :va-arg (let [t (:ty e)
+                  _ (when (abi/class? t) (fail :va "va_arg of a class as a scalar"))
                   sse (abi/floating? t)
                   _ (when (or (abi/class? t) (= :ldouble (abi/bn t)) (> (long (abi/size-of t)) 8)) (fail :va "va_arg of " (pr-str t)))
                   ap (emit-rv (:e e))
@@ -1347,6 +1441,8 @@
                a)
     :incdec (if (:post e) (fail :codegen "postfix as an lvalue") (incdec! e))
     :comma (do (emit-rv (:l e)) (emit-lv (:r e)))
+    :bind-opaque (bind-opaque! e emit-lv)
+    :opaque (if (#{:lv :xv} (:cat e)) (opaque-of e) (fail :codegen "an opaque prvalue as a glvalue"))
     :cond (cond-branches! e emit-lv 'ptr)
     :call (if (= :pr (:cat e))
             (materialize! e)
@@ -1371,6 +1467,8 @@
     :mcall (mcall! e addr)
     :cond (cond-branches! e #(emit-into % addr) nil)
     :comma (do (emit-rv (:l e)) (emit-into (:r e) addr))
+    :bind-opaque (bind-opaque! e #(emit-into % addr))
+    :va-arg (memcpy! addr (va-arg-class! e) (abi/size-of (:ty e)))
     ;; <compare>'s orderings: one signed char ([cmp.categories]: libstdc++'s _M_value), a built-in three-way
     ;; comparison's -1, 0, 1 (partial_ordering's unordered 2) or a constant
     :ord (emit! (list 'store ['i8 (:v e)] ['ptr addr] :align 1))
@@ -1435,7 +1533,9 @@
                     subs (concat (map-indexed (fn [i b] [#(offset! addr (nth (:bases l) i)) {:k :class :id (:cls b)}]) (:bases c))
                                  (map (fn [i] [#(field-place addr cid i) (:ty (nth (:fields c) i))]) (or (:fields-used init) (range (count (:fields c))))))]
                 (when (abi/dynamic? cid) (fail :codegen "an aggregate with a vptr"))
-                (doseq [[[place st] it] (map vector subs (:items init))] (emit-init (place) st it))))
+                (doseq [[[place st] it] (map vector subs (:items init))]
+                  ;; (a default member initializer's `this` is the aggregate's address, sema's :agg-this)
+                  (if (:agg-this it) (binding [*this-val* [*f* addr]] (emit-init (place) st it)) (emit-init (place) st it)))))
       (fail :codegen "initializer " (:i init)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -2627,7 +2727,8 @@
   ([^String path ^String std args]
   (binding [sema/*cxx-year* (sema/cxx-year std) sema/*main-name* (.getName (java.io.File. path)) sema/*main-dir* (.getParent (.getAbsoluteFile (java.io.File. path))) ps/*full-headers* (not= "0" (System/getenv "CPP_FULL_HEADERS"))]
     (let [u (native/parse-file path (.getName (java.io.File. path)) std (vec args))
-          _ (when (pos? (long (:declines u 0))) (fail :parse "the native parser declined " (:declines u) " constructs"))
+          _ (when (pos? (long (:declines u 0))) (fail :parse "the native parser declined " (:declines u) " constructs"
+                                                           (when (seq (:reasons u)) (str ": " (str/join "; " (for [[w n] (sort-by key (:reasons u))] (str w " x" n)))))))
           ;; G5c: a preprocessor error (an #error, an include not found) is the compile's failure, as clang's: a header
           ;; that is not read left the declarations after it unparsed (libsupc++'s eh_*.cc through unwind-cxx.h's
           ;; "unwind.h" emitted nothing)
