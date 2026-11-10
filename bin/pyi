@@ -96,6 +96,11 @@
 #                                  run, controls, table: the check's; PYI_RUNNER=python3 or pyi another runner)
 #   bin/pyi script SCRIPT [ARGS...]  queue 240: a script of tools/pyi or tools/pydump compiled by pyi's AOT the same way and run
 #                                  (tools/pydump/syntax_cases.py at check time: no python3); PYI_RUNNER=pyi or python3 another
+#   bin/pyi universe [--check]     queue 256: Lib/test's universe as data, test/python/universe-cpython314.edn (the modules and
+#                                  test ids of CPython 3.14.10's recorded runs, the tests they skipped on the recording platform;
+#                                  test/python/universe.ae on stage 0, no python3; record-ref writes it after Lib/test's
+#                                  references): check's inventory (libtest_judge.ae --universe, no outcome read), refused when
+#                                  its key is not its inputs'; --check: written afresh, compared byte for byte, a control
 #   bin/pyi divergences [--table | --methods] [--results FILE...]
 #                                  PY7: the record's non-passes classified by test/python/divergences.edn, no run (GR10, as
 #                                  bin/goi divergences): a non-pass in no class, or a :tests name another class takes first, fails
@@ -199,6 +204,8 @@ COSTS_ALL="$root/test/python/ref-costs-lib-test-all.edn"
 DIV="$root/test/python/divergences.edn"
 CHECK_RECORD="${PYI_CHECK_RECORD:-$root/test/python/check-lib-test-linux-amd64.edn}"
 CONTROLS="$root/test/python/controls.edn"
+# queue 256: Lib/test's universe as data (bin/pyi universe), the check's inventory
+UNIVERSE="$root/test/python/universe-cpython314.edn"
 die() { echo "pyi: $*" >&2; exit 1; }
 
 arbace_exe() {
@@ -436,6 +443,8 @@ cmd_record_ref() {
       *) die "no corpus $id (programs, language-core, lib-test-all, lib-test-*)" ;;
     esac
   done
+  # queue 256: the universe follows Lib/test's references (written afresh after a lib-test corpus is recorded)
+  if [ -z "$check" ] && printf '%s\n' "${ids[@]}" | grep -q '^\(language-core\|lib-test-.*\)$'; then cmd_universe || rc=1; fi
   return $rc
 }
 
@@ -1145,6 +1154,36 @@ cmd_lib_test_all() {
   return $rc
 }
 
+# queue 256: Lib/test's universe as data (doc/python/PYTHON-SURVEY.md, "As built: 256"): test/python/universe-cpython314.edn,
+# the modules and test ids CPython 3.14.10's recorded runs name (the references, bin/pyi record-ref) and the tests they skipped
+# on the recording platform, a line a module, written by test/python/universe.ae on stage 0 (no python3), keyed by the
+# SHA-256 of the generator and the references (universe_key); bin/pyi check's own verdict takes its inventory from it
+# (libtest_judge.ae --universe: no CPython outcome read) and refuses a universe whose key is not its inputs'
+universe_refs() { echo "$REF_LT"; ls "$root"/test/python/ref-cpython314-lib-test-*.edn; }
+universe_key() { cat "$root/test/python/universe.ae" $(universe_refs) | sha256sum | cut -c1-16; }
+universe_write() { "$(arbace_exe)" "$root/test/python/universe.ae" --key "$(universe_key)" --out "$1" $(universe_refs); }
+# universe_current: dies unless the committed universe's key is its inputs' (the references changed: bin/pyi universe)
+universe_current() {
+  [ -f "$UNIVERSE" ] || die "no $UNIVERSE (bin/pyi universe)"
+  local have; have=$(sed -n 's/^;; key \([0-9a-f]*\)$/\1/p' "$UNIVERSE" | head -1)
+  [ "$have" = "$(universe_key)" ] || die "the universe ${UNIVERSE#$root/} is stale: key ${have:-none}, its inputs' $(universe_key) (bin/pyi universe)"
+}
+# universe [--check]: the universe written (bin/pyi record-ref does it after Lib/test's references); --check: written afresh
+# into WORK and compared byte for byte, then its negative control (a universe written from one reference less must differ)
+cmd_universe() {
+  if [ "${1:-}" = --check ]; then
+    mkdir -p "$WORK"; universe_write "$WORK/universe-check.edn" >/dev/null
+    local bad=0
+    if cmp -s "$WORK/universe-check.edn" "$UNIVERSE"; then echo "universe --check: ${UNIVERSE#$root/} equal, byte for byte, to the one written afresh ($(sed -n 's/^;; \([0-9]* modules, .*\)$/\1/p' "$UNIVERSE"))"
+    else echo "universe --check: ${UNIVERSE#$root/} differs from the one written afresh (bin/pyi universe):"; diff "$WORK/universe-check.edn" "$UNIVERSE" | cut -c1-200 | head -6; bad=1; fi
+    "$(arbace_exe)" "$root/test/python/universe.ae" --key "$(universe_key)" --out "$WORK/universe-control.edn" $(universe_refs | tail -n +2) >/dev/null
+    if cmp -s "$WORK/universe-control.edn" "$UNIVERSE"; then echo "control passed: universe --check: a universe without ${REF_LT#$root/} judged equal"; bad=1
+    else echo "control failed as it must: universe --check: a universe without ${REF_LT#$root/} differs"; fi
+    return $bad
+  fi
+  universe_write "$UNIVERSE"
+}
+
 # PY7 (queue 201): the check over Lib/test (doc/python/PYTHON-SURVEY.md, "As built: PY7 (the check)").
 # check_universe: every module of the check, MODULE<TAB>CORPUS, in the corpora's order: the lib-test corpora of
 # corpora.edn (language-core, stdlib-tests, lib-test-asyncio: the families') and lib-test-all (the others less the
@@ -1172,11 +1211,11 @@ check_universe() {
   fi
   cat "$u"
 }
-# universe_diff: the universe against the references' :module lines (what CPython's recorded runs named), printed only
+# universe_diff: the universe against the recorded universe's modules (queue 256: the references' :module lines, what
+# CPython's recorded runs named), printed only
 universe_diff() {
   local r="$WORK/universe-refs.txt"
-  { grep -h '^{:id "[^"]*" :module true' "$REF_LT" "$root/test/python/ref-cpython314-lib-test-asyncio.edn" | sed 's/^{:id "\([^"]*\)".*/\1/'
-    sed -n 's/^{:id "\([^"/]*\)" :module true.*/\1/p' "$REF_ALL"; } | LC_ALL=C sort -u > "$r"
+  sed -n 's/^{:module "\([^"]*\)".*/\1/p' "$UNIVERSE" | LC_ALL=C sort -u > "$r"
   cut -f1 "$WORK/universe.tsv" | LC_ALL=C sort -u > "$r.u"
   local more; more=$(comm -23 "$r.u" "$r" | wc -l)
   echo "pyi check: the universe, $(wc -l < "$r.u") modules by findtests on pyi; $more no reference names (judged by their own verdict alone), $(comm -13 "$r.u" "$r" | wc -l) named by the references not in it$(comm -13 "$r.u" "$r" | head -4 | sed 's/^/ /' | tr -d '\n')"
@@ -1211,6 +1250,9 @@ cmd_check_lib() {
   # the oracle's runs and the cover run (its own AOT module, WORK/aot-cover) keep python3's runner
   [ -z "$oracle$cover" ] || runner=pyall
   local refs=(--ref "$REF_LT"); local r; for r in "$root"/test/python/ref-cpython314-lib-test-*.edn; do refs+=(--ref "$r"); done
+  # queue 256: the inventory from the recorded universe (its key checked first); the references only for --verdict ref
+  universe_current
+  local uni=(--universe "$UNIVERSE")
   if [ -n "$judge" ]; then
     d=$(cd "$caller_pwd" && cd "$judge" && pwd)
     [ -f "$d/modules.tsv" ] || die "check --judge: no $d/modules.tsv"
@@ -1244,7 +1286,7 @@ cmd_check_lib() {
     if [ -n "$only" ]; then cp "$WORK/check-only.txt" "$d/only.txt"; else rm -f "$d/only.txt"; fi
   fi
   [ ! -f "$d/only.txt" ] || onlyf="$d/only.txt"
-  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --name "pyi check" --dir "$d" --modules "$d/modules.tsv" "${refs[@]}" --verdict "$verdict" \
+  "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --name "pyi check" --dir "$d" --modules "$d/modules.tsv" "${refs[@]}" "${uni[@]}" --verdict "$verdict" \
     ${onlyf:+--only "$onlyf"} --save "$d/results.tsv" \
     $(if [ -n "$oracle" ]; then echo --no-classes; else echo --classes "$DIV" --record "$CHECK_RECORD"; fi) ${record:+--write-record} > "$d/judge.log" || rc=$?
   grep -v '^  FAIL \|^   failing: \|^pyi check test' "$d/judge.log" || true
@@ -1252,7 +1294,7 @@ cmd_check_lib() {
   echo "pyi check: $(grep -c '^   failing: ' "$d/judge.log") methods failing (listed in $d/judge.log)"
   if [ -z "$oracle" ]; then
     local refsc; refsc=$(printf '%s\n' "${refs[@]}" | grep -v '^--ref$' | paste -sd,)
-    $runner controls --dir "$d" --controls "$CONTROLS" --ref "$refsc" --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --verdict "$verdict" || rc=1
+    $runner controls --dir "$d" --controls "$CONTROLS" --ref "$refsc" --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" "${uni[@]}" --verdict "$verdict" || rc=1
   fi
   return $rc
 }
@@ -2112,5 +2154,6 @@ case "${1:-}" in
   table-check) shift; mkdir -p "$WORK"; cmd_table_check "$@" ;;
   runner) shift; mkdir -p "$WORK"; if [ $# -eq 0 ]; then runner_exe; else pyrun "$@"; fi ;;
   script) shift; mkdir -p "$WORK"; cmd_script "$@" ;;
+  universe) shift; cmd_universe "$@" ;;
   *) sed -n '2,/^# Environment:/p' "$0"; exit 2 ;;
 esac

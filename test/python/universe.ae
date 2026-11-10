@@ -1,0 +1,74 @@
+;; queue 256: Lib/test's universe as data (bin/pyi universe; doc/python/PYTHON-SURVEY.md, "As built: 256"): which modules and
+;; which test methods of the pinned tarball's Lib/test CPython 3.14.10 runs, and the tests it skipped on the recording platform,
+;; one line a module, written into test/python/universe-cpython314.edn from CPython's recorded runs (the references,
+;; test/python/ref-cpython314-lib-test*.edn, bin/pyi record-ref: regrtest --list-tests and each module's JUnit). No outcome
+;; but a skip's is kept, and the judge reads none: bin/pyi check's own verdict takes its inventory (which tests exist) from
+;; here, not from files that hold CPython's outcomes, and refuses a universe whose key is not its inputs' (bin/pyi universe
+;; --check: written afresh and compared byte for byte).
+;;
+;; usage: arbace test/python/universe.ae --key KEY --out FILE REF...
+;;   KEY   the SHA-256 (16 hex) of this file and the REFs' text, in the order given (bin/pyi's universe_key)
+;;
+;; A module's line: {:module M :tests [T ...] :cpython-skips {T REASON ...}}
+;;   M      a reference's :module line's id (regrtest's name; a split directory's family module as libtest.py names it)
+;;   :tests the ids T of its tests ("M/T" the check's method ids), sorted: every reference line of M but its :module line
+;;          and the runner's :excluded (regrtest's JUnit named no test), the :excluded of the machine and of the two runs'
+;;          disagreements kept (they exist; libtest_judge.ae's read-inventory, the same rule)
+;;   :cpython-skips  the tests of :tests CPython's recorded run skipped (:outcome :skipped), with the reason: the platform's
+;;          skips (Windows only, a resource regrtest's -u none leaves off, a C module the build lacks); information for the
+;;          classes (the morning's classing, 259's script), not read by the judge
+(require '[arbace.string :as str])
+
+(defn parse-args [args]
+  (loop [a args o {:refs []}]
+    (if-let [x (first a)]
+      (case x
+        "--key" (recur (nnext a) (assoc o :key (second a)))
+        "--out" (recur (nnext a) (assoc o :out (second a)))
+        (recur (next a) (update o :refs conj x)))
+      o)))
+
+(def opts (parse-args *command-line-args*))
+(when-not (and (:key opts) (:out opts) (seq (:refs opts)))
+  (throw (ex-info "usage: arbace test/python/universe.ae --key KEY --out FILE REF..." {})))
+
+(def entries
+  (for [p (:refs opts)
+        l (str/split-lines (slurp p))
+        :when (str/starts-with? l "{:id ")]
+    (read-string l)))
+
+(defn runner-excluded? [m] (str/starts-with? (str (:excluded m)) "runner: regrtest's JUnit names"))
+
+(def modules (set (for [m entries :when (:module m)] (:id m))))
+
+(def tests
+  (reduce (fn [acc m]
+            (let [[mod t] (str/split (:id m) #"/" 2)]
+              (update acc mod (fnil conj (sorted-map)) [t (when (= :skipped (:outcome m)) (str (:reason m)))])))
+          {}
+          (for [m entries :when (and (not (:module m)) (str/includes? (str (:id m)) "/") (not (runner-excluded? m)))] m)))
+
+(def all-mods (sort (into modules (keys tests))))
+
+(defn line [mod]
+  (let [ts (get tests mod)
+        skips (into (sorted-map) (for [[t r] ts :when r] [t r]))]
+    (str "{:module " (pr-str mod) " :tests [" (str/join " " (map pr-str (keys ts))) "]"
+         (when (seq skips) (str " :cpython-skips {" (str/join " " (for [[t r] skips] (str (pr-str t) " " (pr-str r)))) "}"))
+         "}")))
+
+(spit (:out opts)
+      (str ";; Lib/test's universe (queue 256; doc/python/PYTHON-SURVEY.md, \"As built: 256\"): the modules and test methods of the\n"
+           ";; pinned tarball's Lib/test that CPython 3.14.10 runs (regrtest --list-tests, each module's JUnit), and the tests it\n"
+           ";; skipped on the recording platform (linux/amd64) with their reasons, one line a module, as test/python/universe.ae\n"
+           ";; writes them from CPython's recorded runs (" (str/join ", " (map #(last (str/split % #"/")) (:refs opts))) ").\n"
+           ";; bin/pyi check's own verdict reads its inventory from here (no outcome); bin/pyi universe writes it, bin/pyi universe\n"
+           ";; --check writes it afresh and compares byte for byte; the check refuses one whose key is not its inputs'. Read with the\n"
+           ";; Clojure reader, a map a line.\n"
+           ";; key " (:key opts) "\n"
+           ";; " (count all-mods) " modules, " (reduce + (map #(count (get tests %)) all-mods)) " tests, "
+           (reduce + (map (fn [m] (count (filter second (get tests m)))) all-mods)) " skipped by CPython\n"
+           (apply str (for [m all-mods] (str (line m) "\n")))))
+(println (str "universe: " (:out opts) " written, " (count all-mods) " modules, "
+              (reduce + (map #(count (get tests %)) all-mods)) " tests"))
