@@ -39,6 +39,11 @@
 
 (declare expr fstring-parts)
 
+(def ^:dynamic *string-repr*
+  "nil, or a function of a string's node giving its text: ast_unparse's repr of the value, the source's spelling not kept
+  (from __future__ import annotations; queue 225)"
+  nil)
+
 (defn- fstring [h parts o]
   (let [prefix (get o :prefix (if (= h 'joined-str) "f" "t"))
         q (get o :quote "\"")]
@@ -137,14 +142,14 @@
   (cond
     (symbol? x) (str x)
     (integer? x) (str x)
-    (string? x) (str "\"" x "\"")
+    (string? x) (if *string-repr* (*string-repr* x) (str "\"" x "\""))
     (seq? x)
     (let [[h p o _] (node x)]
       (case h
         name (ident (first p))
         const (str (first p))
         (int float imag) (first p)
-        (str bytes) (string-token h (first p) o)
+        (str bytes) (if (and *string-repr* (= h 'str)) (*string-repr* x) (string-token h (first p) o))
         (joined-str template-str) (fstring h (first p) o)
         str-concat (paren (str/join " " (map #(expr % 18) (rest x))) 17 level)
         bool-op (let [[op vs] p
@@ -175,7 +180,10 @@
         list-comp (str "[" (expr (first p) 2) " " (comprehension-text (second p)) "]")
         set-comp (str "{" (expr (first p) 2) " " (comprehension-text (second p)) "}")
         generator-exp (str "(" (expr (first p) 2) " " (comprehension-text (second p)) ")")
-        dict-comp (str "{" (expr (first p) 3) ": " (expr (second p) 3) " " (comprehension-text (nth p 2)) "}")
+        ;; 3.15's {**d for d in ...} (queue 236): no value
+        dict-comp (if (nil? (second p))
+                    (str "{**" (expr (first p) 2) " " (comprehension-text (nth p 2)) "}")
+                    (str "{" (expr (first p) 3) ": " (expr (second p) 3) " " (comprehension-text (nth p 2)) "}"))
         await (paren (str "await " (expr (first p) 18)) 17 level)
         yield (paren (if (some? (first p)) (str "yield " (expr (first p) 0)) "yield") 1 level)
         yield-from (paren (str "yield from " (expr (first p) 2)) 1 level)
@@ -322,11 +330,12 @@
              (when-let [e (:else o)] (block "else:" e ind))
              (when-let [f (:finally o)] (block "finally:" f ind))))
       assert (line (str "assert " (expr (first p) 2) (when (some? (second p)) (str ", " (expr (second p) 2)))))
-      import (line (str "import " (str/join ", " (map #(let [[_ [nm] ao _] (if (seq? %) (node %) [nil [%] {} {}])]
+      ;; :lazy (3.15's PEP 810, queue 236): lazy import, lazy from
+      import (line (str (when (:lazy o) "lazy ") "import " (str/join ", " (map #(let [[_ [nm] ao _] (if (seq? %) (node %) [nil [%] {} {}])]
                                                        (str (ident nm) (when-let [a (:as ao)] (str " as " (ident a)))))
                                                      (first p)))))
       import-from (let [[md names] p]
-                    (line (str "from " (apply str (repeat (:level o 0) ".")) (when (some? md) (ident md)) " import "
+                    (line (str (when (:lazy o) "lazy ") "from " (apply str (repeat (:level o 0) ".")) (when (some? md) (ident md)) " import "
                                (str/join ", " (map #(let [[_ [nm] ao _] (if (seq? %) (node %) [nil [%] {} {}])]
                                                       (str (ident nm) (when-let [a (:as ao)] (str " as " (ident a)))))
                                                     names)))))

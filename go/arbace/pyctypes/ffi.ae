@@ -1,0 +1,375 @@
+;; Package pyctypes is pyi's ctypes (queue 244; doc/python/PYTHON-SURVEY.md, "As built: 244"). This file is libffi's
+;; part, played by ci (Arbace's C interpreter): a call interface (ffi_cif) over C types (ffi_type), a call of a C
+;; function of the world's program by its address with its arguments' bytes (ffi_call), and closures, Go functions
+;; with a C function's address that C code calls (ffi_prep_closure_loc). The world is a C program over one address
+;; space (arbace/clib: musl and the libraries a ctypes program loads, linked as one node program), so a pointer
+;; ctypes holds is an address C dereferences as is.
+;;
+;; The argument and result values are bytes as libffi has them (avalue[i] points at an argument of its type's size;
+;; an integral result narrower than a word fills a word, widened by its signedness, libffi's ffi_arg), so a port of
+;; Modules/_ctypes/callproc.c and callbacks.c calls this as CPython calls libffi. ci's own calling convention is not
+;; the psABI's: every argument is a typed value (an integer, a floating value, or an aggregate's bytes copied into
+;; the callee's frame) and an aggregate result is written through a hidden first argument, so no register
+;; classification (libffi's x86-64 examine_argument) is needed; ffi_prep_cif's layout of an aggregate is the target's
+;; (the System V rules: each field at its alignment, the size rounded to the largest), the same as ci's builder's.
+(in-ns 'go.arbace.pyctypes) ^{:go/comments [[1 1 "// Package pyctypes is pyi's ctypes (queue 244; doc/python/PYTHON-SURVEY.md, \"As built: 244\"). This file is libffi's"] [2 1 "// part, played by ci (Arbace's C interpreter): a call interface (ffi_cif) over C types (ffi_type), a call of a C"] [3 1 "// function of the world's program by its address with its arguments' bytes (ffi_call), and closures, Go functions"] [4 1 "// with a C function's address that C code calls (ffi_prep_closure_loc). The world is a C program over one address"] [5 1 "// space (arbace/clib: musl and the libraries a ctypes program loads, linked as one node program), so a pointer"] [6 1 "// ctypes holds is an address C dereferences as is."] [7 1 "//"] [8 1 "// The argument and result values are bytes as libffi has them (avalue[i] points at an argument of its type's size;"] [9 1 "// an integral result narrower than a word fills a word, widened by its signedness, libffi's ffi_arg), so a port of"] [10 1 "// Modules/_ctypes/callproc.c and callbacks.c calls this as CPython calls libffi. ci's own calling convention is not"] [11 1 "// the psABI's: every argument is a typed value (an integer, a floating value, or an aggregate's bytes copied into"] [12 1 "// the callee's frame) and an aggregate result is written through a hidden first argument, so no register"] [13 1 "// classification (libffi's x86-64 examine_argument) is needed; ffi_prep_cif's layout of an aggregate is the target's"] [14 1 "// (the System V rules: each field at its alignment, the size rounded to the largest), the same as ci's builder's."] [29 1 "// Kind is a C type's class, libffi's FFI_TYPE_*."] [43 1 "// Ty is a C type as libffi's ffi_type: its size and alignment, and an aggregate's elements (the fields in order,"] [44 1 "// an array's elements repeated; a union is given by ctypes as a struct of its largest member's elements, as"] [45 1 "// Modules/_ctypes/stgdict.c does) with their offsets once laid out."] [54 1 "// The scalar types of ci's target (x86-64, LP64): long double is double (doc/c/SPEC.md §12.5, CS35), 8 bytes,"] [55 1 "// aligned to 8, as on a target whose long double is double."] [72 1 "// ErrBadTypedef and ErrBadArgType are ffi_prep_cif's FFI_BAD_TYPEDEF and FFI_BAD_ARGTYPE."] [78 1 "// Struct is an aggregate of elems, laid out (libffi's initialize_aggregate): each element at the next offset its"] [79 1 "// alignment allows, the size rounded up to the largest alignment."] [118 1 "// CIF is a call interface, ffi_cif: the result's type, the arguments' types, and for a variadic function the"] [119 1 "// number of its fixed arguments (NFixed = len(Args) for a function that is not)."] [126 1 "// PrepCIF is ffi_prep_cif: the interface of a function of the fixed arguments args returning ret."] [129 1 "// PrepCIFVar is ffi_prep_cif_var: a variadic function's interface, its first nfixed arguments fixed; a variable"] [130 1 "// argument must be of a promoted type (no float, no integer narrower than int), else FFI_BAD_ARGTYPE."] [155 1 "// RetSize is the bytes rvalue must hold: a word for an integral result narrower than one (ffi_arg), else the type's."] [166 1 "// toArg is the ci value of an argument of type t whose bytes are b (an aggregate's bytes copied to at, in the"] [167 1 "// world's memory, first)."] [183 1 "// fromArg writes the value a of type t as bytes into b: an integral one widened to a word when word is set (a"] [184 1 "// result, ffi_arg), an aggregate's bytes read at its address."] [229 1 "// World is the C program a ctypes process calls into: one library host (arbace/clib's Lib, its ci program and"] [230 1 "// address space) and its closures."] [236 1 "// NewWorld is the world over the loaded program l."] [239 1 "// push reserves n bytes, aligned to 16, below the C thread's stack pointer, for an aggregate argument or result"] [240 1 "// (as a caller's frame holds them); the caller restores the stack pointer."] [247 1 "// Call is ffi_call: the function at the address fn called with the arguments' bytes avalue (one a parameter, each of"] [248 1 "// its type's size), its result's bytes written into rvalue (cif.RetSize() of them). A C fault or exit inside it ends"] [249 1 "// the process as it would end CPython's (arbace/clib's rule)."] [285 1 "// guard runs f, a C fault or exit inside it ending the process as CPython's would end (arbace/clib's Lib.guard),"] [286 1 "// the C thread's stack restored when f panics with anything else (a Python exception a closure raised through C"] [287 1 "// is not one: closures catch theirs, callbacks.c's rule)."] [310 1 "// Closure is a Go function with a C function's address, ffi_closure: C code calling Addr() calls Fn with the"] [311 1 "// arguments' bytes (as avalue) and the result's bytes to fill (cif.RetSize() of them)."] [319 1 "// NewClosure is ffi_prep_closure_loc: a function of the world's program, of the interface cif, whose body is fn."] [334 1 "// Addr is the closure's code address (a C function pointer's value)."] [337 1 "// Free is ffi_closure_free: the address may be given to the next closure; a call through it until then faults."] [349 1 "// call is the closure's native: the call's values made bytes (an aggregate result's address is the hidden first"] [350 1 "// argument), Fn run, its result's bytes made the value C receives."]] :go/pos {:name [15 9] :package [15 1]} :go/semis [[82 22] [104 23] [138 24] [145 23] [292 20] [323 21]]} (go/file "ffi.go" :doc "Package pyctypes is pyi's ctypes (queue 244; doc/python/PYTHON-SURVEY.md, \"As built: 244\"). This file is libffi's\npart, played by ci (Arbace's C interpreter): a call interface (ffi_cif) over C types (ffi_type), a call of a C\nfunction of the world's program by its address with its arguments' bytes (ffi_call), and closures, Go functions\nwith a C function's address that C code calls (ffi_prep_closure_loc). The world is a C program over one address\nspace (arbace/clib: musl and the libraries a ctypes program loads, linked as one node program), so a pointer\nctypes holds is an address C dereferences as is.\n\nThe argument and result values are bytes as libffi has them (avalue[i] points at an argument of its type's size;\nan integral result narrower than a word fills a word, widened by its signedness, libffi's ffi_arg), so a port of\nModules/_ctypes/callproc.c and callbacks.c calls this as CPython calls libffi. ci's own calling convention is not\nthe psABI's: every argument is a typed value (an integer, a floating value, or an aggregate's bytes copied into\nthe callee's frame) and an aggregate result is written through a hidden first argument, so no register\nclassification (libffi's x86-64 examine_argument) is needed; ffi_prep_cif's layout of an aggregate is the target's\n(the System V rules: each field at its alignment, the size rounded to the largest), the same as ci's builder's.\n" :imports [
+
+
+    ^{:go/apos {1 [18 2]} :go/pos {:lparen [17 8] :rparen [27 1] :tok-pos [17 1]}} [binary "encoding/binary"]
+    ^{:go/apos {1 [19 2]}} [errors "errors"]
+    ^{:go/apos {1 [20 2]}} [fmt "fmt"]
+    ^{:go/apos {1 [21 2]}} [math "math"]
+    ^{:go/apos {1 [22 2]}} [os "os"]
+
+    ^{:go/apos {1 [24 2]}} [ci "arbace/ci"]
+    ^{:go/apos {1 [25 2]}} [clib "arbace/clib"]
+    ^{:go/apos {1 [26 2]}} [crt "arbace/crt"]])
+
+
+
+^{:go/pos {:doc [29 1] :tok-pos [30 1]}} (go/type ^{:go/pos {:name-pos [30 6]}} Kind "Kind is a C type's class, libffi's FFI_TYPE_*.\n" ^{:go/pos {:name-pos [30 11]}} byte)
+
+^{:go/pos {:lparen [32 7] :rparen [41 1] :tok-pos [32 1]}} (go/const
+  [^{:tag ^{:go/pos {:name-pos [33 8]}} Kind :val 0 :go/pos {:name-pos [33 2]}} KVoid ^{:go/pos {:name-pos [33 15]}} iota]
+  [^{:val 1 :go/pos {:name-pos [34 2]}} KSInt]
+  [^{:val 2 :go/pos {:name-pos [35 2]}} KUInt]
+  [^{:val 3 :go/pos {:name-pos [36 2]}} KFloat]
+  [^{:val 4 :go/pos {:name-pos [37 2]}} KDouble]
+  [^{:val 5 :go/pos {:name-pos [38 2]}} KLongDouble]
+  [^{:val 6 :go/pos {:name-pos [39 2]}} KPointer]
+  [^{:val 7 :go/pos {:name-pos [40 2]}} KStruct])
+
+
+
+
+
+^{:go/pos {:doc [43 1] :tok-pos [46 1]}} (go/type ^{:go/pos {:name-pos [46 6]}} Ty "Ty is a C type as libffi's ffi_type: its size and alignment, and an aggregate's elements (the fields in order,\nan array's elements repeated; a union is given by ctypes as a struct of its largest member's elements, as\nModules/_ctypes/stgdict.c does) with their offsets once laid out.\n" ^{:go/pos {:lbrace [46 16] :rbrace [52 1] :struct [46 9]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [47 8]}} Kind :go/pos {:name-pos [47 2]}} Kind
+    ^{:tag ^{:go/pos {:name-pos [48 8]}} uint64 :go/pos {:name-pos [48 2]}} Size
+    ^{:tag ^{:go/pos {:name-pos [49 8]}} uint64 :go/pos {:name-pos [49 2]}} Align
+    ^{:tag ^{:go/pos {:lbrack [50 8]}} (slice ^{:go/pos {:star [50 10]}} (* ^{:go/pos {:name-pos [50 11]}} Ty)) :go/pos {:name-pos [50 2]}} Elems
+    ^{:tag ^{:go/pos {:lbrack [51 8]}} (slice ^{:go/pos {:name-pos [51 10]}} uint64) :go/pos {:name-pos [51 2]}} Offs))
+
+
+
+
+^{:go/pos {:doc [54 1] :lparen [56 5] :rparen [70 1] :tok-pos [56 1]}} (go/var "The scalar types of ci's target (x86-64, LP64): long double is double (doc/c/SPEC.md §12.5, CS35), 8 bytes,\naligned to 8, as on a target whose long double is double.\n"
+  [^{:go/pos {:name-pos [57 2]}} TVoid ^{:go/pos {:op-pos [57 16]}} (addr ^{:go/acolon {2 [57 24] 4 [57 37] 6 [57 47]} :go/apos {2 [57 20] 4 [57 33] 5 [57 39] 6 [57 42] 7 [57 49]} :go/pos {:lbrace [57 19] :rbrace [57 50]}} (lit ^{:go/pos {:name-pos [57 17]}} Ty :Kind ^{:go/pos {:name-pos [57 26]}} KVoid :Size 1 :Align 1))]
+  [^{:go/pos {:name-pos [58 2]}} TUInt8 ^{:go/pos {:op-pos [58 16]}} (addr ^{:go/acolon {2 [58 24] 4 [58 37] 6 [58 47]} :go/apos {2 [58 20] 4 [58 33] 5 [58 39] 6 [58 42] 7 [58 49]} :go/pos {:lbrace [58 19] :rbrace [58 50]}} (lit ^{:go/pos {:name-pos [58 17]}} Ty :Kind ^{:go/pos {:name-pos [58 26]}} KUInt :Size 1 :Align 1))]
+  [^{:go/pos {:name-pos [59 2]}} TSInt8 ^{:go/pos {:op-pos [59 16]}} (addr ^{:go/acolon {2 [59 24] 4 [59 37] 6 [59 47]} :go/apos {2 [59 20] 4 [59 33] 5 [59 39] 6 [59 42] 7 [59 49]} :go/pos {:lbrace [59 19] :rbrace [59 50]}} (lit ^{:go/pos {:name-pos [59 17]}} Ty :Kind ^{:go/pos {:name-pos [59 26]}} KSInt :Size 1 :Align 1))]
+  [^{:go/pos {:name-pos [60 2]}} TUInt16 ^{:go/pos {:op-pos [60 16]}} (addr ^{:go/acolon {2 [60 24] 4 [60 37] 6 [60 47]} :go/apos {2 [60 20] 4 [60 33] 5 [60 39] 6 [60 42] 7 [60 49]} :go/pos {:lbrace [60 19] :rbrace [60 50]}} (lit ^{:go/pos {:name-pos [60 17]}} Ty :Kind ^{:go/pos {:name-pos [60 26]}} KUInt :Size 2 :Align 2))]
+  [^{:go/pos {:name-pos [61 2]}} TSInt16 ^{:go/pos {:op-pos [61 16]}} (addr ^{:go/acolon {2 [61 24] 4 [61 37] 6 [61 47]} :go/apos {2 [61 20] 4 [61 33] 5 [61 39] 6 [61 42] 7 [61 49]} :go/pos {:lbrace [61 19] :rbrace [61 50]}} (lit ^{:go/pos {:name-pos [61 17]}} Ty :Kind ^{:go/pos {:name-pos [61 26]}} KSInt :Size 2 :Align 2))]
+  [^{:go/pos {:name-pos [62 2]}} TUInt32 ^{:go/pos {:op-pos [62 16]}} (addr ^{:go/acolon {2 [62 24] 4 [62 37] 6 [62 47]} :go/apos {2 [62 20] 4 [62 33] 5 [62 39] 6 [62 42] 7 [62 49]} :go/pos {:lbrace [62 19] :rbrace [62 50]}} (lit ^{:go/pos {:name-pos [62 17]}} Ty :Kind ^{:go/pos {:name-pos [62 26]}} KUInt :Size 4 :Align 4))]
+  [^{:go/pos {:name-pos [63 2]}} TSInt32 ^{:go/pos {:op-pos [63 16]}} (addr ^{:go/acolon {2 [63 24] 4 [63 37] 6 [63 47]} :go/apos {2 [63 20] 4 [63 33] 5 [63 39] 6 [63 42] 7 [63 49]} :go/pos {:lbrace [63 19] :rbrace [63 50]}} (lit ^{:go/pos {:name-pos [63 17]}} Ty :Kind ^{:go/pos {:name-pos [63 26]}} KSInt :Size 4 :Align 4))]
+  [^{:go/pos {:name-pos [64 2]}} TUInt64 ^{:go/pos {:op-pos [64 16]}} (addr ^{:go/acolon {2 [64 24] 4 [64 37] 6 [64 47]} :go/apos {2 [64 20] 4 [64 33] 5 [64 39] 6 [64 42] 7 [64 49]} :go/pos {:lbrace [64 19] :rbrace [64 50]}} (lit ^{:go/pos {:name-pos [64 17]}} Ty :Kind ^{:go/pos {:name-pos [64 26]}} KUInt :Size 8 :Align 8))]
+  [^{:go/pos {:name-pos [65 2]}} TSInt64 ^{:go/pos {:op-pos [65 16]}} (addr ^{:go/acolon {2 [65 24] 4 [65 37] 6 [65 47]} :go/apos {2 [65 20] 4 [65 33] 5 [65 39] 6 [65 42] 7 [65 49]} :go/pos {:lbrace [65 19] :rbrace [65 50]}} (lit ^{:go/pos {:name-pos [65 17]}} Ty :Kind ^{:go/pos {:name-pos [65 26]}} KSInt :Size 8 :Align 8))]
+  [^{:go/pos {:name-pos [66 2]}} TFloat ^{:go/pos {:op-pos [66 16]}} (addr ^{:go/acolon {2 [66 24] 4 [66 38] 6 [66 48]} :go/apos {2 [66 20] 4 [66 34] 5 [66 40] 6 [66 43] 7 [66 50]} :go/pos {:lbrace [66 19] :rbrace [66 51]}} (lit ^{:go/pos {:name-pos [66 17]}} Ty :Kind ^{:go/pos {:name-pos [66 26]}} KFloat :Size 4 :Align 4))]
+  [^{:go/pos {:name-pos [67 2]}} TDouble ^{:go/pos {:op-pos [67 16]}} (addr ^{:go/acolon {2 [67 24] 4 [67 39] 6 [67 49]} :go/apos {2 [67 20] 4 [67 35] 5 [67 41] 6 [67 44] 7 [67 51]} :go/pos {:lbrace [67 19] :rbrace [67 52]}} (lit ^{:go/pos {:name-pos [67 17]}} Ty :Kind ^{:go/pos {:name-pos [67 26]}} KDouble :Size 8 :Align 8))]
+  [^{:go/pos {:name-pos [68 2]}} TLongDouble ^{:go/pos {:op-pos [68 16]}} (addr ^{:go/acolon {2 [68 24] 4 [68 43] 6 [68 53]} :go/apos {2 [68 20] 4 [68 39] 5 [68 45] 6 [68 48] 7 [68 55]} :go/pos {:lbrace [68 19] :rbrace [68 56]}} (lit ^{:go/pos {:name-pos [68 17]}} Ty :Kind ^{:go/pos {:name-pos [68 26]}} KLongDouble :Size 8 :Align 8))]
+  [^{:go/pos {:name-pos [69 2]}} TPointer ^{:go/pos {:op-pos [69 16]}} (addr ^{:go/acolon {2 [69 24] 4 [69 40] 6 [69 50]} :go/apos {2 [69 20] 4 [69 36] 5 [69 42] 6 [69 45] 7 [69 52]} :go/pos {:lbrace [69 19] :rbrace [69 53]}} (lit ^{:go/pos {:name-pos [69 17]}} Ty :Kind ^{:go/pos {:name-pos [69 26]}} KPointer :Size 8 :Align 8))])
+
+
+
+^{:go/pos {:doc [72 1] :lparen [73 5] :rparen [76 1] :tok-pos [73 1]}} (go/var "ErrBadTypedef and ErrBadArgType are ffi_prep_cif's FFI_BAD_TYPEDEF and FFI_BAD_ARGTYPE.\n"
+  [^{:go/pos {:name-pos [74 2]}} ErrBadTypedef ^{:go/apos {1 [74 29]} :go/pos {:lparen [74 28] :rparen [74 71]}} (^{:go/pos {:dot [74 24] :name-pos [74 25] :x-pos [74 18]}} errors/New "ffi_prep_cif failed with FFI_BAD_TYPEDEF")]
+  [^{:go/pos {:name-pos [75 2]}} ErrBadArgType ^{:go/apos {1 [75 29]} :go/pos {:lparen [75 28] :rparen [75 71]}} (^{:go/pos {:dot [75 24] :name-pos [75 25] :x-pos [75 18]}} errors/New "ffi_prep_cif failed with FFI_BAD_ARGTYPE")])
+
+
+
+
+^{:go/pos {:doc [78 1] :func [80 1] :lbrace [80 31] :rbrace [86 1] :return [85 2]}} (go/func ^{:go/pos {:name-pos [80 6]}} Struct "Struct is an aggregate of elems, laid out (libffi's initialize_aggregate): each element at the next offset its\nalignment allows, the size rounded up to the largest alignment.\n" ^{:tag ^{:go/pos {:star [80 27]}} (* ^{:go/pos {:name-pos [80 28]}} Ty) :go/pos {:closing [80 25] :opening [80 12]}} [& ^{:tag ^{:go/pos {:ellipsis [80 19]}} (slice ^{:go/pos {:star [80 22]}} (* ^{:go/pos {:name-pos [80 23]}} Ty)) :go/pos {:name-pos [80 13]}} elems]
+  (let [^{:go/pos {:name-pos [81 2] :tok-pos [81 4]}} t ^{:go/pos {:op-pos [81 7]}} (addr ^{:go/acolon {2 [81 15] 4 [81 31]} :go/apos {2 [81 11] 4 [81 26]} :go/pos {:lbrace [81 10] :rbrace [81 38]}} (lit ^{:go/pos {:name-pos [81 8]}} Ty :Kind ^{:go/pos {:name-pos [81 17]}} KStruct :Elems ^{:go/pos {:name-pos [81 33]}} elems))]
+    ^{:go/pos {:if [82 2] :lbrace [82 35] :rbrace [84 2]}} (when [^{:go/pos {:name-pos [82 5] :tok-pos [82 9]}} err ^{:go/pos {:dot [82 13] :lparen [82 20] :name-pos [82 14] :rparen [82 21]}} (.layout ^{:go/pos {:name-pos [82 12]}} t)] ^{:go/apos {2 [82 31]} :go/pos {:op-pos [82 28]}} (!= ^{:go/pos {:name-pos [82 24]}} err nil)
+      ^{:go/pos {:lparen [83 8] :rparen [83 12]}} (^{:go/pos {:name-pos [83 3]}} panic ^{:go/pos {:name-pos [83 9]}} err))
+
+    ^{:go/pos {:name-pos [85 9]}} t))
+
+
+^{:go/pos {:func [88 1] :lbrace [88 29] :rbrace [114 1] :return [113 2]}} (go/method ^{:go/pos {:name-pos [88 14]}} layout ^{:tag ^{:go/pos {:name-pos [88 23]}} error :go/pos {:closing [88 21] :opening [88 20] :recv-closing [88 12] :recv-opening [88 6]}} [^{:tag ^{:go/pos {:star [88 9]}} (* ^{:go/pos {:name-pos [88 10]}} Ty) :go/pos {:name-pos [88 7]}} t]
+  ^{:go/pos {:if [89 2] :lbrace [89 23] :rbrace [94 2]}} (when ^{:go/pos {:op-pos [89 12]}} (!= ^{:go/pos {:dot [89 6] :name-pos [89 7]}} (.-Kind ^{:go/pos {:name-pos [89 5]}} t) ^{:go/pos {:name-pos [89 15]}} KStruct)
+    ^{:go/pos {:if [90 3] :lbrace [90 34] :rbrace [92 3]}} (when ^{:go/pos {:op-pos [90 18]}} (or ^{:go/apos {2 [90 16]} :go/pos {:op-pos [90 13]}} (== ^{:go/pos {:dot [90 7] :name-pos [90 8]}} (.-Size ^{:go/pos {:name-pos [90 6]}} t) 0) ^{:go/apos {2 [90 32]} :go/pos {:op-pos [90 29]}} (== ^{:go/pos {:dot [90 22] :name-pos [90 23]}} (.-Align ^{:go/pos {:name-pos [90 21]}} t) 0))
+      ^{:go/pos {:return [91 4]}} (return ^{:go/pos {:name-pos [91 11]}} ErrBadTypedef))
+
+    ^{:go/apos {1 [93 10]} :go/pos {:return [93 3]}} (return nil))
+
+  ^{:go/pos {:if [95 2] :lbrace [95 23] :rbrace [97 2]}} (when ^{:go/apos {2 [95 21]} :go/pos {:op-pos [95 18]}} (== ^{:go/pos {:lparen [95 8] :rparen [95 16]}} (^{:go/pos {:name-pos [95 5]}} len ^{:go/pos {:dot [95 10] :name-pos [95 11]}} (.-Elems ^{:go/pos {:name-pos [95 9]}} t)) 0)
+    ^{:go/pos {:return [96 3]}} (return ^{:go/pos {:name-pos [96 10]}} ErrBadTypedef))
+
+  ^{:go/apos {5 [113 9]}} (let [^{:go/pos {:tok-pos [98 2]}} (values ^{:tag ^{:go/pos {:name-pos [98 14]}} uint64 :go/pos {:name-pos [98 6]}} off ^{:tag ^{:go/pos {:name-pos [98 14]}} uint64 :go/pos {:name-pos [98 11]}} al) ^{:go/apos {1 [98 23] 2 [98 26]}} (values 0 1)]
+    ^{:go/pos {:tok-pos [99 9]}} (set! ^{:go/pos {:dot [99 3] :name-pos [99 4]}} (.-Offs ^{:go/pos {:name-pos [99 2]}} t) ^{:go/pos {:lparen [99 15] :rparen [99 38]}} (^{:go/pos {:name-pos [99 11]}} make ^{:go/pos {:lbrack [99 16]}} (slice ^{:go/pos {:name-pos [99 18]}} uint64) ^{:go/pos {:lparen [99 29] :rparen [99 37]}} (^{:go/pos {:name-pos [99 26]}} len ^{:go/pos {:dot [99 31] :name-pos [99 32]}} (.-Elems ^{:go/pos {:name-pos [99 30]}} t))))
+    ^{:go/pos {:for [100 2] :lbrace [100 28] :range [100 14] :rbrace [111 2] :tok-pos [100 11]}} (range [^{:go/pos {:name-pos [100 6]}} i ^{:go/pos {:name-pos [100 9]}} e ^{:go/pos {:dot [100 21] :name-pos [100 22]}} (.-Elems ^{:go/pos {:name-pos [100 20]}} t)]
+      ^{:go/pos {:if [101 3] :lbrace [101 15] :rbrace [103 3]}} (when ^{:go/apos {2 [101 11]} :go/pos {:op-pos [101 8]}} (== ^{:go/pos {:name-pos [101 6]}} e nil)
+        ^{:go/pos {:return [102 4]}} (return ^{:go/pos {:name-pos [102 11]}} ErrBadTypedef))
+
+      ^{:go/pos {:if [104 3] :lbrace [104 36] :rbrace [106 3]}} (when [^{:go/pos {:name-pos [104 6] :tok-pos [104 10]}} err ^{:go/pos {:dot [104 14] :lparen [104 21] :name-pos [104 15] :rparen [104 22]}} (.layout ^{:go/pos {:name-pos [104 13]}} e)] ^{:go/apos {2 [104 32]} :go/pos {:op-pos [104 29]}} (!= ^{:go/pos {:name-pos [104 25]}} err nil)
+        ^{:go/pos {:return [105 4]}} (return ^{:go/pos {:name-pos [105 11]}} err))
+
+      ^{:go/pos {:tok-pos [107 7]}} (set! ^{:go/pos {:name-pos [107 3]}} off ^{:go/pos {:lparen [107 16] :rparen [107 29]}} (^{:go/pos {:name-pos [107 9]}} alignUp ^{:go/pos {:name-pos [107 17]}} off ^{:go/pos {:dot [107 23] :name-pos [107 24]}} (.-Align ^{:go/pos {:name-pos [107 22]}} e)))
+      ^{:go/pos {:lbrack [108 9] :rbrack [108 11] :tok-pos [108 13]}} (aset ^{:go/pos {:dot [108 4] :name-pos [108 5]}} (.-Offs ^{:go/pos {:name-pos [108 3]}} t) ^{:go/pos {:name-pos [108 10]}} i ^{:go/pos {:name-pos [108 15]}} off)
+      ^{:go/pos {:tok-pos [109 7]}} (set! ^{:go/pos {:name-pos [109 3]}} off + ^{:go/pos {:dot [109 11] :name-pos [109 12]}} (.-Size ^{:go/pos {:name-pos [109 10]}} e))
+      ^{:go/pos {:tok-pos [110 6]}} (set! ^{:go/pos {:name-pos [110 3]}} al ^{:go/pos {:lparen [110 11] :rparen [110 23]}} (^{:go/pos {:name-pos [110 8]}} max ^{:go/pos {:name-pos [110 12]}} al ^{:go/pos {:dot [110 17] :name-pos [110 18]}} (.-Align ^{:go/pos {:name-pos [110 16]}} e))))
+
+    ^{:go/pos {:tok-pos [112 18]}} (set! (values ^{:go/pos {:dot [112 3] :name-pos [112 4]}} (.-Size ^{:go/pos {:name-pos [112 2]}} t) ^{:go/pos {:dot [112 11] :name-pos [112 12]}} (.-Align ^{:go/pos {:name-pos [112 10]}} t)) (values ^{:go/pos {:lparen [112 27] :rparen [112 35]}} (^{:go/pos {:name-pos [112 20]}} alignUp ^{:go/pos {:name-pos [112 28]}} off ^{:go/pos {:name-pos [112 33]}} al) ^{:go/pos {:name-pos [112 38]}} al))
+    nil))
+
+
+^{:go/pos {:func [116 1] :lbrace [116 34] :rbrace [116 63] :return [116 36]}} (go/func ^{:go/pos {:name-pos [116 6]}} alignUp ^{:tag ^{:go/pos {:name-pos [116 27]}} uint64 :go/pos {:closing [116 25] :opening [116 13]}} [^{:tag ^{:go/pos {:name-pos [116 19]}} uint64 :go/pos {:name-pos [116 14]}} n ^{:tag ^{:go/pos {:name-pos [116 19]}} uint64 :go/pos {:name-pos [116 17]}} a] ^{:go/pos {:op-pos [116 59]}} (* ^{:go/pos {:op-pos [116 55]}} (/ ^{:go/apos {2 [116 52]} :go/parens [[[116 43] [116 53]]] :go/pos {:op-pos [116 50]}} (- ^{:go/pos {:op-pos [116 46]}} (+ ^{:go/pos {:name-pos [116 44]}} n ^{:go/pos {:name-pos [116 48]}} a) 1) ^{:go/pos {:name-pos [116 57]}} a) ^{:go/pos {:name-pos [116 61]}} a))
+
+
+
+^{:go/pos {:doc [118 1] :tok-pos [120 1]}} (go/type ^{:go/pos {:name-pos [120 6]}} CIF "CIF is a call interface, ffi_cif: the result's type, the arguments' types, and for a variadic function the\nnumber of its fixed arguments (NFixed = len(Args) for a function that is not).\n" ^{:go/pos {:lbrace [120 17] :rbrace [124 1] :struct [120 10]}} (struct
+    ^{:tag ^{:go/pos {:star [121 9]}} (* ^{:go/pos {:name-pos [121 10]}} Ty) :go/pos {:name-pos [121 2]}} Ret
+    ^{:tag ^{:go/pos {:lbrack [122 9]}} (slice ^{:go/pos {:star [122 11]}} (* ^{:go/pos {:name-pos [122 12]}} Ty)) :go/pos {:name-pos [122 2]}} Args
+    ^{:tag ^{:go/pos {:name-pos [123 9]}} int :go/pos {:name-pos [123 2]}} NFixed))
+
+
+
+^{:go/pos {:doc [126 1] :func [127 1] :lbrace [127 50] :rbrace [127 95] :return [127 52]}} (go/func ^{:go/pos {:name-pos [127 6]}} PrepCIF "PrepCIF is ffi_prep_cif: the interface of a function of the fixed arguments args returning ret.\n" ^{:go/pos {:closing [127 34] :opening [127 13]}} [^{:tag ^{:go/pos {:star [127 18]}} (* ^{:go/pos {:name-pos [127 19]}} Ty) :go/pos {:name-pos [127 14]}} ret & ^{:tag ^{:go/pos {:ellipsis [127 28]}} (slice ^{:go/pos {:star [127 31]}} (* ^{:go/pos {:name-pos [127 32]}} Ty)) :go/pos {:name-pos [127 23]}} args] :results ^{:go/pos {:closing [127 48] :opening [127 36]}} [^{:go/pos {:star [127 37]}} (* ^{:go/pos {:name-pos [127 38]}} CIF) ^{:go/pos {:name-pos [127 43]}} error] ^{:go/pos {:ellipsis [127 90] :lparen [127 69] :rparen [127 93]}} (^{:go/pos {:name-pos [127 59]}} PrepCIFVar ^{:go/pos {:lparen [127 73] :rparen [127 78]}} (^{:go/pos {:name-pos [127 70]}} len ^{:go/pos {:name-pos [127 74]}} args) ^{:go/pos {:name-pos [127 81]}} ret (spread ^{:go/pos {:name-pos [127 86]}} args)))
+
+
+
+^{:go/pos {:doc [129 1] :func [131 1] :lbrace [131 65] :rbrace [153 1]}} (go/func ^{:go/pos {:name-pos [131 6]}} PrepCIFVar "PrepCIFVar is ffi_prep_cif_var: a variadic function's interface, its first nfixed arguments fixed; a variable\nargument must be of a promoted type (no float, no integer narrower than int), else FFI_BAD_ARGTYPE.\n" ^{:go/pos {:closing [131 49] :opening [131 16]}} [^{:tag ^{:go/pos {:name-pos [131 24]}} int :go/pos {:name-pos [131 17]}} nfixed ^{:tag ^{:go/pos {:star [131 33]}} (* ^{:go/pos {:name-pos [131 34]}} Ty) :go/pos {:name-pos [131 29]}} ret & ^{:tag ^{:go/pos {:ellipsis [131 43]}} (slice ^{:go/pos {:star [131 46]}} (* ^{:go/pos {:name-pos [131 47]}} Ty)) :go/pos {:name-pos [131 38]}} args] :results ^{:go/pos {:closing [131 63] :opening [131 51]}} [^{:go/pos {:star [131 52]}} (* ^{:go/pos {:name-pos [131 53]}} CIF) ^{:go/pos {:name-pos [131 58]}} error]
+  ^{:go/pos {:if [132 2] :lbrace [132 38] :rbrace [134 2]}} (when ^{:go/pos {:op-pos [132 16]}} (or ^{:go/apos {2 [132 14]} :go/pos {:op-pos [132 12]}} (< ^{:go/pos {:name-pos [132 5]}} nfixed 0) ^{:go/pos {:op-pos [132 26]}} (> ^{:go/pos {:name-pos [132 19]}} nfixed ^{:go/pos {:lparen [132 31] :rparen [132 36]}} (^{:go/pos {:name-pos [132 28]}} len ^{:go/pos {:name-pos [132 32]}} args)))
+    ^{:go/apos {1 [133 10]} :go/pos {:return [133 3]}} (return nil ^{:go/pos {:name-pos [133 15]}} ErrBadArgType))
+
+  ^{:go/pos {:if [135 2] :lbrace [135 16] :rbrace [137 2]}} (when ^{:go/apos {2 [135 12]} :go/pos {:op-pos [135 9]}} (== ^{:go/pos {:name-pos [135 5]}} ret nil)
+    ^{:go/apos {1 [136 10]} :go/pos {:return [136 3]}} (return nil ^{:go/pos {:name-pos [136 15]}} ErrBadTypedef))
+
+  ^{:go/pos {:if [138 2] :lbrace [138 37] :rbrace [140 2]}} (when [^{:go/pos {:name-pos [138 5] :tok-pos [138 9]}} err ^{:go/pos {:dot [138 15] :lparen [138 22] :name-pos [138 16] :rparen [138 23]}} (.layout ^{:go/pos {:name-pos [138 12]}} ret)] ^{:go/apos {2 [138 33]} :go/pos {:op-pos [138 30]}} (!= ^{:go/pos {:name-pos [138 26]}} err nil)
+    ^{:go/apos {1 [139 10]} :go/pos {:return [139 3]}} (return nil ^{:go/pos {:name-pos [139 15]}} err))
+
+  ^{:go/pos {:for [141 2] :lbrace [141 25] :range [141 14] :rbrace [151 2] :tok-pos [141 11]}} (range [^{:go/pos {:name-pos [141 6]}} i ^{:go/pos {:name-pos [141 9]}} a ^{:go/pos {:name-pos [141 20]}} args]
+    ^{:go/pos {:if [142 3] :lbrace [142 34] :rbrace [144 3]}} (when ^{:go/pos {:op-pos [142 15]}} (or ^{:go/apos {2 [142 11]} :go/pos {:op-pos [142 8]}} (== ^{:go/pos {:name-pos [142 6]}} a nil) ^{:go/pos {:op-pos [142 25]}} (== ^{:go/pos {:dot [142 19] :name-pos [142 20]}} (.-Kind ^{:go/pos {:name-pos [142 18]}} a) ^{:go/pos {:name-pos [142 28]}} KVoid))
+      ^{:go/apos {1 [143 11]} :go/pos {:return [143 4]}} (return nil ^{:go/pos {:name-pos [143 16]}} ErrBadTypedef))
+
+    ^{:go/pos {:if [145 3] :lbrace [145 36] :rbrace [147 3]}} (when [^{:go/pos {:name-pos [145 6] :tok-pos [145 10]}} err ^{:go/pos {:dot [145 14] :lparen [145 21] :name-pos [145 15] :rparen [145 22]}} (.layout ^{:go/pos {:name-pos [145 13]}} a)] ^{:go/apos {2 [145 32]} :go/pos {:op-pos [145 29]}} (!= ^{:go/pos {:name-pos [145 25]}} err nil)
+      ^{:go/apos {1 [146 11]} :go/pos {:return [146 4]}} (return nil ^{:go/pos {:name-pos [146 16]}} err))
+
+    ^{:go/pos {:if [148 3] :lbrace [148 94] :rbrace [150 3]}} (when ^{:go/pos {:op-pos [148 18]}} (and ^{:go/pos {:op-pos [148 8]}} (>= ^{:go/pos {:name-pos [148 6]}} i ^{:go/pos {:name-pos [148 11]}} nfixed) ^:go/paren ^{:go/parens [[[148 21] [148 92]]] :go/pos {:op-pos [148 39]}} (or ^{:go/pos {:op-pos [148 29]}} (== ^{:go/pos {:dot [148 23] :name-pos [148 24]}} (.-Kind ^{:go/pos {:name-pos [148 22]}} a) ^{:go/pos {:name-pos [148 32]}} KFloat) ^{:go/pos {:op-pos [148 79]}} (and ^:go/paren ^{:go/parens [[[148 42] [148 77]]] :go/pos {:op-pos [148 59]}} (or ^{:go/pos {:op-pos [148 50]}} (== ^{:go/pos {:dot [148 44] :name-pos [148 45]}} (.-Kind ^{:go/pos {:name-pos [148 43]}} a) ^{:go/pos {:name-pos [148 53]}} KSInt) ^{:go/pos {:op-pos [148 69]}} (== ^{:go/pos {:dot [148 63] :name-pos [148 64]}} (.-Kind ^{:go/pos {:name-pos [148 62]}} a) ^{:go/pos {:name-pos [148 72]}} KUInt)) ^{:go/apos {2 [148 91]} :go/pos {:op-pos [148 89]}} (< ^{:go/pos {:dot [148 83] :name-pos [148 84]}} (.-Size ^{:go/pos {:name-pos [148 82]}} a) 4))))
+      ^{:go/apos {1 [149 11]} :go/pos {:return [149 4]}} (return nil ^{:go/pos {:name-pos [149 16]}} ErrBadArgType)))
+
+
+  ^{:go/apos {2 [152 53]} :go/pos {:return [152 2]}} (return ^{:go/pos {:op-pos [152 9]}} (addr ^{:go/acolon {2 [152 17] 4 [152 28] 6 [152 42]} :go/apos {2 [152 14] 4 [152 24] 6 [152 36]} :go/pos {:lbrace [152 13] :rbrace [152 50]}} (lit ^{:go/pos {:name-pos [152 10]}} CIF :Ret ^{:go/pos {:name-pos [152 19]}} ret :Args ^{:go/pos {:name-pos [152 30]}} args :NFixed ^{:go/pos {:name-pos [152 44]}} nfixed)) nil))
+
+
+
+^{:go/pos {:doc [155 1] :func [156 1] :lbrace [156 32] :rbrace [164 1] :return [163 2]}} (go/method ^{:go/pos {:name-pos [156 15]}} RetSize "RetSize is the bytes rvalue must hold: a word for an integral result narrower than one (ffi_arg), else the type's.\n" ^{:tag ^{:go/pos {:name-pos [156 25]}} uint64 :go/pos {:closing [156 23] :opening [156 22] :recv-closing [156 13] :recv-opening [156 6]}} [^{:tag ^{:go/pos {:star [156 9]}} (* ^{:go/pos {:name-pos [156 10]}} CIF) :go/pos {:name-pos [156 7]}} c]
+  ^{:go/pos {:lbrace [157 20] :rbrace [162 2] :switch [157 2]}} (switch ^{:go/pos {:dot [157 14] :name-pos [157 15]}} (.-Kind ^{:go/pos {:dot [157 10] :name-pos [157 11]}} (.-Ret ^{:go/pos {:name-pos [157 9]}} c))
+    ^{:go/pos {:case [158 2] :colon [158 12]}} (case [^{:go/pos {:name-pos [158 7]}} KVoid]
+      ^{:go/apos {1 [159 10]} :go/pos {:return [159 3]}} (return 0))
+    ^{:go/pos {:case [160 2] :colon [160 29]}} (case [^{:go/pos {:name-pos [160 7]}} KSInt ^{:go/pos {:name-pos [160 14]}} KUInt ^{:go/pos {:name-pos [160 21]}} KPointer]
+      ^{:go/apos {1 [161 10]} :go/pos {:return [161 3]}} (return 8)))
+
+  ^{:go/pos {:dot [163 14] :name-pos [163 15]}} (.-Size ^{:go/pos {:dot [163 10] :name-pos [163 11]}} (.-Ret ^{:go/pos {:name-pos [163 9]}} c)))
+
+
+
+
+^{:go/pos {:doc [166 1] :func [168 1] :lbrace [168 59] :rbrace [181 1] :return [180 2]}} (go/func ^{:go/pos {:name-pos [168 6]}} toArg "toArg is the ci value of an argument of type t whose bytes are b (an aggregate's bytes copied to at, in the\nworld's memory, first).\n" ^{:tag ^{:go/pos {:dot [168 54] :name-pos [168 55] :x-pos [168 52]}} ci/Arg :go/pos {:closing [168 50] :opening [168 11]}} [^{:tag ^{:go/pos {:star [168 14]}} (* ^{:go/pos {:dot [168 18] :name-pos [168 19] :x-pos [168 15]}} crt/Mem) :go/pos {:name-pos [168 12]}} m ^{:tag ^{:go/pos {:star [168 26]}} (* ^{:go/pos {:name-pos [168 27]}} Ty) :go/pos {:name-pos [168 24]}} t ^{:tag ^{:go/pos {:lbrack [168 33]}} (slice ^{:go/pos {:name-pos [168 35]}} byte) :go/pos {:name-pos [168 31]}} b ^{:tag ^{:go/pos {:name-pos [168 44]}} uint64 :go/pos {:name-pos [168 41]}} at]
+  ^{:go/pos {:lbrace [169 16] :rbrace [178 2] :switch [169 2]}} (switch ^{:go/pos {:dot [169 10] :name-pos [169 11]}} (.-Kind ^{:go/pos {:name-pos [169 9]}} t)
+    ^{:go/pos {:case [170 2] :colon [170 12]}} (case [^{:go/pos {:name-pos [170 7]}} KSInt]
+      ^{:go/pos {:return [171 3]}} (return ^{:go/acolon {2 [171 18] 4 [171 26]} :go/apos {2 [171 17] 3 [171 20] 4 [171 25]} :go/pos {:lbrace [171 16] :rbrace [171 43]}} (lit ^{:go/pos {:dot [171 12] :name-pos [171 13] :x-pos [171 10]}} ci/Arg :K \i :I ^{:go/pos {:lparen [171 32] :rparen [171 42]}} (^{:go/pos {:name-pos [171 28]}} sext ^{:go/pos {:name-pos [171 33]}} b ^{:go/pos {:dot [171 37] :name-pos [171 38]}} (.-Size ^{:go/pos {:name-pos [171 36]}} t)))))
+    ^{:go/pos {:case [172 2] :colon [172 22]}} (case [^{:go/pos {:name-pos [172 7]}} KUInt ^{:go/pos {:name-pos [172 14]}} KPointer]
+      ^{:go/pos {:return [173 3]}} (return ^{:go/acolon {2 [173 18] 4 [173 26]} :go/apos {2 [173 17] 3 [173 20] 4 [173 25]} :go/pos {:lbrace [173 16] :rbrace [173 50]}} (lit ^{:go/pos {:dot [173 12] :name-pos [173 13] :x-pos [173 10]}} ci/Arg :K \i :I ^{:go/pos {:lparen [173 33] :rparen [173 49]}} (conv ^{:go/pos {:name-pos [173 28]}} int64 ^{:go/pos {:lparen [173 38] :rparen [173 48]}} (^{:go/pos {:name-pos [173 34]}} zext ^{:go/pos {:name-pos [173 39]}} b ^{:go/pos {:dot [173 43] :name-pos [173 44]}} (.-Size ^{:go/pos {:name-pos [173 42]}} t))))))
+    ^{:go/pos {:case [174 2] :colon [174 13]}} (case [^{:go/pos {:name-pos [174 7]}} KFloat]
+      ^{:go/pos {:return [175 3]}} (return ^{:go/acolon {2 [175 18] 4 [175 26]} :go/apos {2 [175 17] 3 [175 20] 4 [175 25]} :go/pos {:lbrace [175 16] :rbrace [175 88]}} (lit ^{:go/pos {:dot [175 12] :name-pos [175 13] :x-pos [175 10]}} ci/Arg :K \f :F ^{:go/pos {:lparen [175 35] :rparen [175 87]}} (conv ^{:go/pos {:name-pos [175 28]}} float64 ^{:go/pos {:lparen [175 56] :rparen [175 86]}} (^{:go/pos {:dot [175 40] :name-pos [175 41] :x-pos [175 36]}} math/Float32frombits ^{:go/pos {:dot [175 76] :lparen [175 83] :name-pos [175 77] :rparen [175 85]}} (.Uint32 ^{:go/pos {:dot [175 63] :name-pos [175 64] :x-pos [175 57]}} binary/LittleEndian ^{:go/pos {:name-pos [175 84]}} b))))))
+    ^{:go/pos {:case [176 2] :colon [176 27]}} (case [^{:go/pos {:name-pos [176 7]}} KDouble ^{:go/pos {:name-pos [176 16]}} KLongDouble]
+      ^{:go/pos {:return [177 3]}} (return ^{:go/acolon {2 [177 18] 4 [177 26]} :go/apos {2 [177 17] 3 [177 20] 4 [177 25]} :go/pos {:lbrace [177 16] :rbrace [177 79]}} (lit ^{:go/pos {:dot [177 12] :name-pos [177 13] :x-pos [177 10]}} ci/Arg :K \f :F ^{:go/pos {:lparen [177 48] :rparen [177 78]}} (^{:go/pos {:dot [177 32] :name-pos [177 33] :x-pos [177 28]}} math/Float64frombits ^{:go/pos {:dot [177 68] :lparen [177 75] :name-pos [177 69] :rparen [177 77]}} (.Uint64 ^{:go/pos {:dot [177 55] :name-pos [177 56] :x-pos [177 49]}} binary/LittleEndian ^{:go/pos {:name-pos [177 76]}} b))))))
+
+  ^{:go/pos {:lparen [179 6] :rparen [179 34]}} (^{:go/pos {:name-pos [179 2]}} copy ^{:go/pos {:dot [179 8] :lparen [179 10] :name-pos [179 9] :rparen [179 21]}} (.W ^{:go/pos {:name-pos [179 7]}} m ^{:go/pos {:name-pos [179 11]}} at ^{:go/pos {:dot [179 16] :name-pos [179 17]}} (.-Size ^{:go/pos {:name-pos [179 15]}} t)) ^{:go/pos {:lbrack [179 25] :rbrack [179 33]}} (subslice ^{:go/pos {:name-pos [179 24]}} b _ ^{:go/pos {:dot [179 28] :name-pos [179 29]}} (.-Size ^{:go/pos {:name-pos [179 27]}} t)))
+  ^{:go/acolon {2 [180 17] 4 [180 28] 6 [180 38]} :go/apos {2 [180 16] 3 [180 19] 4 [180 24] 6 [180 34]} :go/pos {:lbrace [180 15] :rbrace [180 46]}} (lit ^{:go/pos {:dot [180 11] :name-pos [180 12] :x-pos [180 9]}} ci/Arg :K \m :Addr ^{:go/pos {:name-pos [180 30]}} at :Size ^{:go/pos {:dot [180 41] :name-pos [180 42]}} (.-Size ^{:go/pos {:name-pos [180 40]}} t)))
+
+
+
+
+^{:go/pos {:doc [183 1] :func [185 1] :lbrace [185 64] :rbrace [209 1]}} (go/func ^{:go/pos {:name-pos [185 6]}} fromArg "fromArg writes the value a of type t as bytes into b: an integral one widened to a word when word is set (a\nresult, ffi_arg), an aggregate's bytes read at its address.\n" ^{:go/pos {:closing [185 62] :opening [185 13]}} [^{:tag ^{:go/pos {:star [185 16]}} (* ^{:go/pos {:dot [185 20] :name-pos [185 21] :x-pos [185 17]}} crt/Mem) :go/pos {:name-pos [185 14]}} m ^{:tag ^{:go/pos {:star [185 28]}} (* ^{:go/pos {:name-pos [185 29]}} Ty) :go/pos {:name-pos [185 26]}} t ^{:tag ^{:go/pos {:dot [185 37] :name-pos [185 38] :x-pos [185 35]}} ci/Arg :go/pos {:name-pos [185 33]}} a ^{:tag ^{:go/pos {:lbrack [185 45]}} (slice ^{:go/pos {:name-pos [185 47]}} byte) :go/pos {:name-pos [185 43]}} b ^{:tag ^{:go/pos {:name-pos [185 58]}} bool :go/pos {:name-pos [185 53]}} word]
+  ^{:go/pos {:lbrace [186 16] :rbrace [208 2] :switch [186 2]}} (switch ^{:go/pos {:dot [186 10] :name-pos [186 11]}} (.-Kind ^{:go/pos {:name-pos [186 9]}} t)
+    ^{:go/pos {:case [187 2] :colon [187 12]}} (case [^{:go/pos {:name-pos [187 7]}} KVoid])
+    ^{:go/pos {:case [188 2] :colon [188 29]}} (case [^{:go/pos {:name-pos [188 7]}} KSInt ^{:go/pos {:name-pos [188 14]}} KUInt ^{:go/pos {:name-pos [188 21]}} KPointer]
+      (let [^{:go/pos {:name-pos [189 3] :tok-pos [189 5]}} v ^{:go/pos {:lparen [189 14] :rparen [189 18]}} (conv ^{:go/pos {:name-pos [189 8]}} uint64 ^{:go/pos {:dot [189 16] :name-pos [189 17]}} (.-I ^{:go/pos {:name-pos [189 15]}} a))
+          ^{:go/pos {:name-pos [190 3] :tok-pos [190 5]}} n ^{:go/pos {:dot [190 9] :name-pos [190 10]}} (.-Size ^{:go/pos {:name-pos [190 8]}} t)]
+        ^{:go/pos {:else-lbrace [193 10] :else-rbrace [195 3] :if [191 3] :lbrace [191 22] :rbrace [193 3]}} (if ^{:go/pos {:op-pos [191 13]}} (== ^{:go/pos {:dot [191 7] :name-pos [191 8]}} (.-Kind ^{:go/pos {:name-pos [191 6]}} t) ^{:go/pos {:name-pos [191 16]}} KSInt)
+          ^{:go/pos {:tok-pos [192 6]}} (set! ^{:go/pos {:name-pos [192 4]}} v ^{:go/pos {:lparen [192 14] :rparen [192 29]}} (conv ^{:go/pos {:name-pos [192 8]}} uint64 ^{:go/pos {:lparen [192 19] :rparen [192 28]}} (^{:go/pos {:name-pos [192 15]}} sext ^{:go/pos {:lparen [192 22] :rparen [192 24]}} (^{:go/pos {:name-pos [192 20]}} le ^{:go/pos {:name-pos [192 23]}} v) ^{:go/pos {:name-pos [192 27]}} n)))
+
+          ^{:go/pos {:tok-pos [194 6]}} (set! ^{:go/pos {:name-pos [194 4]}} v ^{:go/pos {:lparen [194 12] :rparen [194 21]}} (^{:go/pos {:name-pos [194 8]}} zext ^{:go/pos {:lparen [194 15] :rparen [194 17]}} (^{:go/pos {:name-pos [194 13]}} le ^{:go/pos {:name-pos [194 16]}} v) ^{:go/pos {:name-pos [194 20]}} n)))
+
+        ^{:go/pos {:if [196 3] :lbrace [196 11] :rbrace [198 3]}} (when ^{:go/pos {:name-pos [196 6]}} word
+          ^{:go/apos {2 [197 8]} :go/pos {:tok-pos [197 6]}} (set! ^{:go/pos {:name-pos [197 4]}} n 8))
+
+        (let [^{:tag ^{:go/apos {1 [199 10]} :go/pos {:lbrack [199 9]}} (array 8 ^{:go/pos {:name-pos [199 12]}} byte) :go/pos {:name-pos [199 7] :tok-pos [199 3]}} w (zero ^{:go/apos {1 [199 10]} :go/pos {:lbrack [199 9]}} (array 8 ^{:go/pos {:name-pos [199 12]}} byte))]
+          ^{:go/pos {:dot [200 22] :lparen [200 32] :name-pos [200 23] :rparen [200 40]}} (.PutUint64 ^{:go/pos {:dot [200 9] :name-pos [200 10] :x-pos [200 3]}} binary/LittleEndian ^{:go/pos {:lbrack [200 34] :rbrack [200 36]}} (subslice ^{:go/pos {:name-pos [200 33]}} w) ^{:go/pos {:name-pos [200 39]}} v)
+          ^{:go/pos {:lparen [201 7] :rparen [201 16]}} (^{:go/pos {:name-pos [201 3]}} copy ^{:go/pos {:name-pos [201 8]}} b ^{:go/pos {:lbrack [201 12] :rbrack [201 15]}} (subslice ^{:go/pos {:name-pos [201 11]}} w _ ^{:go/pos {:name-pos [201 14]}} n)))))
+    ^{:go/pos {:case [202 2] :colon [202 13]}} (case [^{:go/pos {:name-pos [202 7]}} KFloat]
+      ^{:go/pos {:dot [203 22] :lparen [203 32] :name-pos [203 23] :rparen [203 66]}} (.PutUint32 ^{:go/pos {:dot [203 9] :name-pos [203 10] :x-pos [203 3]}} binary/LittleEndian ^{:go/pos {:name-pos [203 33]}} b ^{:go/pos {:lparen [203 52] :rparen [203 65]}} (^{:go/pos {:dot [203 40] :name-pos [203 41] :x-pos [203 36]}} math/Float32bits ^{:go/pos {:lparen [203 60] :rparen [203 64]}} (conv ^{:go/pos {:name-pos [203 53]}} float32 ^{:go/pos {:dot [203 62] :name-pos [203 63]}} (.-F ^{:go/pos {:name-pos [203 61]}} a)))))
+    ^{:go/pos {:case [204 2] :colon [204 27]}} (case [^{:go/pos {:name-pos [204 7]}} KDouble ^{:go/pos {:name-pos [204 16]}} KLongDouble]
+      ^{:go/pos {:dot [205 22] :lparen [205 32] :name-pos [205 23] :rparen [205 57]}} (.PutUint64 ^{:go/pos {:dot [205 9] :name-pos [205 10] :x-pos [205 3]}} binary/LittleEndian ^{:go/pos {:name-pos [205 33]}} b ^{:go/pos {:lparen [205 52] :rparen [205 56]}} (^{:go/pos {:dot [205 40] :name-pos [205 41] :x-pos [205 36]}} math/Float64bits ^{:go/pos {:dot [205 54] :name-pos [205 55]}} (.-F ^{:go/pos {:name-pos [205 53]}} a))))
+    ^{:go/pos {:case [206 2] :colon [206 9]}} (default
+      ^{:go/pos {:lparen [207 7] :rparen [207 30]}} (^{:go/pos {:name-pos [207 3]}} copy ^{:go/pos {:name-pos [207 8]}} b ^{:go/pos {:dot [207 12] :lparen [207 14] :name-pos [207 13] :rparen [207 29]}} (.R ^{:go/pos {:name-pos [207 11]}} m ^{:go/pos {:dot [207 16] :name-pos [207 17]}} (.-Addr ^{:go/pos {:name-pos [207 15]}} a) ^{:go/pos {:dot [207 24] :name-pos [207 25]}} (.-Size ^{:go/pos {:name-pos [207 23]}} t))))))
+
+
+
+^{:go/pos {:func [211 1] :lbrace [211 26] :rbrace [215 1] :return [214 2]}} (go/func ^{:go/pos {:name-pos [211 6]}} le ^{:tag ^{:go/pos {:lbrack [211 19]}} (slice ^{:go/pos {:name-pos [211 21]}} byte) :go/pos {:closing [211 17] :opening [211 8]}} [^{:tag ^{:go/pos {:name-pos [211 11]}} uint64 :go/pos {:name-pos [211 9]}} v]
+  (let [^{:tag ^{:go/apos {1 [212 9]} :go/pos {:lbrack [212 8]}} (array 8 ^{:go/pos {:name-pos [212 11]}} byte) :go/pos {:name-pos [212 6] :tok-pos [212 2]}} w (zero ^{:go/apos {1 [212 9]} :go/pos {:lbrack [212 8]}} (array 8 ^{:go/pos {:name-pos [212 11]}} byte))]
+    ^{:go/pos {:dot [213 21] :lparen [213 31] :name-pos [213 22] :rparen [213 39]}} (.PutUint64 ^{:go/pos {:dot [213 8] :name-pos [213 9] :x-pos [213 2]}} binary/LittleEndian ^{:go/pos {:lbrack [213 33] :rbrack [213 35]}} (subslice ^{:go/pos {:name-pos [213 32]}} w) ^{:go/pos {:name-pos [213 38]}} v)
+    ^{:go/pos {:lbrack [214 10] :rbrack [214 12]}} (subslice ^{:go/pos {:name-pos [214 9]}} w)))
+
+
+^{:go/pos {:func [217 1] :lbrace [217 38] :rbrace [221 1] :return [220 2]}} (go/func ^{:go/pos {:name-pos [217 6]}} zext ^{:tag ^{:go/pos {:name-pos [217 31]}} uint64 :go/pos {:closing [217 29] :opening [217 10]}} [^{:tag ^{:go/pos {:lbrack [217 13]}} (slice ^{:go/pos {:name-pos [217 15]}} byte) :go/pos {:name-pos [217 11]}} b ^{:tag ^{:go/pos {:name-pos [217 23]}} uint64 :go/pos {:name-pos [217 21]}} n]
+  (let [^{:tag ^{:go/apos {1 [218 9]} :go/pos {:lbrack [218 8]}} (array 8 ^{:go/pos {:name-pos [218 11]}} byte) :go/pos {:name-pos [218 6] :tok-pos [218 2]}} w (zero ^{:go/apos {1 [218 9]} :go/pos {:lbrack [218 8]}} (array 8 ^{:go/pos {:name-pos [218 11]}} byte))]
+    ^{:go/pos {:lparen [219 6] :rparen [219 18]}} (^{:go/pos {:name-pos [219 2]}} copy ^{:go/pos {:lbrack [219 8] :rbrack [219 10]}} (subslice ^{:go/pos {:name-pos [219 7]}} w) ^{:go/pos {:lbrack [219 14] :rbrack [219 17]}} (subslice ^{:go/pos {:name-pos [219 13]}} b _ ^{:go/pos {:name-pos [219 16]}} n))
+    ^{:go/pos {:dot [220 28] :lparen [220 35] :name-pos [220 29] :rparen [220 40]}} (.Uint64 ^{:go/pos {:dot [220 15] :name-pos [220 16] :x-pos [220 9]}} binary/LittleEndian ^{:go/pos {:lbrack [220 37] :rbrack [220 39]}} (subslice ^{:go/pos {:name-pos [220 36]}} w))))
+
+
+^{:go/pos {:func [223 1] :lbrace [223 37] :rbrace [227 1] :return [226 2]}} (go/func ^{:go/pos {:name-pos [223 6]}} sext ^{:tag ^{:go/pos {:name-pos [223 31]}} int64 :go/pos {:closing [223 29] :opening [223 10]}} [^{:tag ^{:go/pos {:lbrack [223 13]}} (slice ^{:go/pos {:name-pos [223 15]}} byte) :go/pos {:name-pos [223 11]}} b ^{:tag ^{:go/pos {:name-pos [223 23]}} uint64 :go/pos {:name-pos [223 21]}} n]
+  (let [^{:go/pos {:name-pos [224 2] :tok-pos [224 4]}} v ^{:go/pos {:lparen [224 11] :rparen [224 16]}} (^{:go/pos {:name-pos [224 7]}} zext ^{:go/pos {:name-pos [224 12]}} b ^{:go/pos {:name-pos [224 15]}} n)
+      ^{:go/pos {:name-pos [225 2] :tok-pos [225 4]}} s ^{:go/apos {1 [225 7]} :go/pos {:op-pos [225 10]}} (- 64 ^{:go/apos {1 [225 12]} :go/pos {:op-pos [225 13]}} (* 8 ^{:go/pos {:name-pos [225 14]}} n))]
+    ^{:go/pos {:op-pos [226 21]}} (>> ^{:go/pos {:lparen [226 14] :rparen [226 19]}} (conv ^{:go/pos {:name-pos [226 9]}} int64 ^{:go/pos {:op-pos [226 16]}} (<< ^{:go/pos {:name-pos [226 15]}} v ^{:go/pos {:name-pos [226 18]}} s)) ^{:go/pos {:name-pos [226 24]}} s)))
+
+
+
+
+^{:go/pos {:doc [229 1] :tok-pos [231 1]}} (go/type ^{:go/pos {:name-pos [231 6]}} World "World is the C program a ctypes process calls into: one library host (arbace/clib's Lib, its ci program and\naddress space) and its closures.\n" ^{:go/pos {:lbrace [231 19] :rbrace [234 1] :struct [231 12]}} (struct
+    ^{:tag ^{:go/pos {:star [232 7]}} (* ^{:go/pos {:dot [232 12] :name-pos [232 13] :x-pos [232 8]}} clib/Lib) :go/pos {:name-pos [232 2]}} L
+    ^{:tag ^{:go/pos {:lbrack [233 7]}} (slice ^{:go/pos {:star [233 9]}} (* ^{:go/pos {:dot [233 12] :name-pos [233 13] :x-pos [233 10]}} ci/Func)) :go/pos {:name-pos [233 2]}} free))
+
+
+
+^{:go/pos {:doc [236 1] :func [237 1] :lbrace [237 35] :rbrace [237 57] :return [237 37]}} (go/func ^{:go/pos {:name-pos [237 6]}} NewWorld "NewWorld is the world over the loaded program l.\n" ^{:tag ^{:go/pos {:star [237 28]}} (* ^{:go/pos {:name-pos [237 29]}} World) :go/pos {:closing [237 26] :opening [237 14]}} [^{:tag ^{:go/pos {:star [237 17]}} (* ^{:go/pos {:dot [237 22] :name-pos [237 23] :x-pos [237 18]}} clib/Lib) :go/pos {:name-pos [237 15]}} l] ^{:go/pos {:op-pos [237 44]}} (addr ^{:go/acolon {2 [237 52]} :go/apos {2 [237 51]} :go/pos {:lbrace [237 50] :rbrace [237 55]}} (lit ^{:go/pos {:name-pos [237 45]}} World :L ^{:go/pos {:name-pos [237 54]}} l)))
+
+
+
+^{:go/pos {:doc [239 1] :func [241 1] :lbrace [241 39] :rbrace [245 1] :return [244 2]}} (go/method ^{:go/pos {:name-pos [241 17]}} push "push reserves n bytes, aligned to 16, below the C thread's stack pointer, for an aggregate argument or result\n(as a caller's frame holds them); the caller restores the stack pointer.\n" ^{:tag ^{:go/pos {:name-pos [241 32]}} uint64 :go/pos {:closing [241 30] :opening [241 21] :recv-closing [241 15] :recv-opening [241 6]}} [^{:tag ^{:go/pos {:star [241 9]}} (* ^{:go/pos {:name-pos [241 10]}} World) :go/pos {:name-pos [241 7]}} w ^{:tag ^{:go/pos {:name-pos [241 24]}} uint64 :go/pos {:name-pos [241 22]}} n]
+  (let [^{:go/pos {:name-pos [242 2] :tok-pos [242 4]}} t ^{:go/pos {:dot [242 10] :name-pos [242 11]}} (.-T ^{:go/pos {:dot [242 8] :name-pos [242 9]}} (.-L ^{:go/pos {:name-pos [242 7]}} w))]
+    ^{:go/pos {:tok-pos [243 7]}} (set! ^{:go/pos {:dot [243 3] :name-pos [243 4]}} (.-SP ^{:go/pos {:name-pos [243 2]}} t) ^{:go/apos {2 [243 23]} :go/pos {:op-pos [243 20]}} (bit-and-not ^{:go/parens [[[243 9] [243 18]]] :go/pos {:op-pos [243 15]}} (- ^{:go/pos {:dot [243 11] :name-pos [243 12]}} (.-SP ^{:go/pos {:name-pos [243 10]}} t) ^{:go/pos {:name-pos [243 17]}} n) 15))
+    ^{:go/pos {:dot [244 10] :name-pos [244 11]}} (.-SP ^{:go/pos {:name-pos [244 9]}} t)))
+
+
+
+
+
+^{:go/pos {:doc [247 1] :func [250 1] :lbrace [250 75] :rbrace [283 1]}} (go/method ^{:go/pos {:name-pos [250 17]}} Call "Call is ffi_call: the function at the address fn called with the arguments' bytes avalue (one a parameter, each of\nits type's size), its result's bytes written into rvalue (cif.RetSize() of them). A C fault or exit inside it ends\nthe process as it would end CPython's (arbace/clib's rule).\n" ^{:go/pos {:closing [250 73] :opening [250 21] :recv-closing [250 15] :recv-opening [250 6]}} [^{:tag ^{:go/pos {:star [250 9]}} (* ^{:go/pos {:name-pos [250 10]}} World) :go/pos {:name-pos [250 7]}} w ^{:tag ^{:go/pos {:star [250 26]}} (* ^{:go/pos {:name-pos [250 27]}} CIF) :go/pos {:name-pos [250 22]}} cif ^{:tag ^{:go/pos {:name-pos [250 35]}} uint64 :go/pos {:name-pos [250 32]}} fn ^{:tag ^{:go/pos {:lbrack [250 50]}} (slice ^{:go/pos {:name-pos [250 52]}} byte) :go/pos {:name-pos [250 43]}} rvalue ^{:tag ^{:go/pos {:lbrack [250 65]}} (slice ^{:go/pos {:lbrack [250 67]}} (slice ^{:go/pos {:name-pos [250 69]}} byte)) :go/pos {:name-pos [250 58]}} avalue]
+  ^{:go/pos {:if [251 2] :lbrace [251 34] :rbrace [253 2]}} (when ^{:go/pos {:op-pos [251 17]}} (!= ^{:go/pos {:lparen [251 8] :rparen [251 15]}} (^{:go/pos {:name-pos [251 5]}} len ^{:go/pos {:name-pos [251 9]}} avalue) ^{:go/pos {:lparen [251 23] :rparen [251 32]}} (^{:go/pos {:name-pos [251 20]}} len ^{:go/pos {:dot [251 27] :name-pos [251 28]}} (.-Args ^{:go/pos {:name-pos [251 24]}} cif)))
+    ^{:go/pos {:lparen [252 8] :rparen [252 110]}} (^{:go/pos {:name-pos [252 3]}} panic ^{:go/apos {1 [252 21]} :go/pos {:lparen [252 20] :rparen [252 109]}} (^{:go/pos {:dot [252 12] :name-pos [252 13] :x-pos [252 9]}} fmt/Sprintf "pyctypes: ffi_call with %d arguments, the interface has %d" ^{:go/pos {:lparen [252 86] :rparen [252 93]}} (^{:go/pos {:name-pos [252 83]}} len ^{:go/pos {:name-pos [252 87]}} avalue) ^{:go/pos {:lparen [252 99] :rparen [252 108]}} (^{:go/pos {:name-pos [252 96]}} len ^{:go/pos {:dot [252 103] :name-pos [252 104]}} (.-Args ^{:go/pos {:name-pos [252 100]}} cif)))))
+
+  (let [^{:go/pos {:name-pos [254 2] :tok-pos [254 4]}} l ^{:go/pos {:dot [254 8] :name-pos [254 9]}} (.-L ^{:go/pos {:name-pos [254 7]}} w)
+      ^{:go/pos {:name-pos [255 2] :tok-pos [255 4]}} m ^{:go/pos {:dot [255 8] :name-pos [255 9]}} (.-M ^{:go/pos {:name-pos [255 7]}} l)
+      ^{:go/pos {:name-pos [256 2] :tok-pos [256 4]}} t ^{:go/pos {:dot [256 8] :name-pos [256 9]}} (.-T ^{:go/pos {:name-pos [256 7]}} l)]
+    ^{:go/pos {:dot [257 3] :lparen [257 9] :name-pos [257 4] :rparen [282 3]}} (.guard ^{:go/pos {:name-pos [257 2]}} w ^{:go/pos {:func [257 10] :lbrace [257 17] :rbrace [282 2]}} (fn ^{:go/pos {:closing [257 15] :opening [257 14]}} []
+        (let [^{:go/pos {:name-pos [258 3] :tok-pos [258 6]}} sp ^{:go/pos {:dot [258 10] :name-pos [258 11]}} (.-SP ^{:go/pos {:name-pos [258 9]}} t)]
+          ^{:go/pos {:defer [259 3]}} (defer ^{:go/pos {:lparen [259 29] :rparen [259 30]}} (^{:go/pos {:func [259 9] :lbrace [259 16] :rbrace [259 28]}} (fn ^{:go/pos {:closing [259 14] :opening [259 13]}} [] ^{:go/pos {:tok-pos [259 23]}} (set! ^{:go/pos {:dot [259 19] :name-pos [259 20]}} (.-SP ^{:go/pos {:name-pos [259 18]}} t) ^{:go/pos {:name-pos [259 25]}} sp))))
+          (let [^{:go/pos {:name-pos [260 3] :tok-pos [260 8]}} args ^{:go/apos {2 [260 26]} :go/pos {:lparen [260 15] :rparen [260 42]}} (^{:go/pos {:name-pos [260 11]}} make ^{:go/pos {:lbrack [260 16]}} (slice ^{:go/pos {:dot [260 20] :name-pos [260 21] :x-pos [260 18]}} ci/Arg) 0 ^{:go/apos {2 [260 41]} :go/pos {:op-pos [260 40]}} (+ ^{:go/pos {:lparen [260 32] :rparen [260 39]}} (^{:go/pos {:name-pos [260 29]}} len ^{:go/pos {:name-pos [260 33]}} avalue) 1))
+              ^{:tag ^{:go/pos {:name-pos [261 12]}} uint64 :go/pos {:name-pos [261 7] :tok-pos [261 3]}} sret (zero ^{:go/pos {:name-pos [261 12]}} uint64)]
+            ^{:go/pos {:if [262 3] :lbrace [262 30] :rbrace [265 3]}} (when ^{:go/pos {:op-pos [262 19]}} (== ^{:go/pos {:dot [262 13] :name-pos [262 14]}} (.-Kind ^{:go/pos {:dot [262 9] :name-pos [262 10]}} (.-Ret ^{:go/pos {:name-pos [262 6]}} cif)) ^{:go/pos {:name-pos [262 22]}} KStruct)
+              ^{:go/pos {:tok-pos [263 9]}} (set! ^{:go/pos {:name-pos [263 4]}} sret ^{:go/pos {:dot [263 12] :lparen [263 17] :name-pos [263 13] :rparen [263 30]}} (.push ^{:go/pos {:name-pos [263 11]}} w ^{:go/pos {:dot [263 25] :name-pos [263 26]}} (.-Size ^{:go/pos {:dot [263 21] :name-pos [263 22]}} (.-Ret ^{:go/pos {:name-pos [263 18]}} cif))))
+              ^{:go/pos {:tok-pos [264 9]}} (set! ^{:go/pos {:name-pos [264 4]}} args ^{:go/pos {:lparen [264 17] :rparen [264 54]}} (^{:go/pos {:name-pos [264 11]}} append ^{:go/pos {:name-pos [264 18]}} args ^{:go/acolon {2 [264 32] 4 [264 40]} :go/apos {2 [264 31] 3 [264 34] 4 [264 39]} :go/pos {:lbrace [264 30] :rbrace [264 53]}} (lit ^{:go/pos {:dot [264 26] :name-pos [264 27] :x-pos [264 24]}} ci/Arg :K \i :I ^{:go/pos {:lparen [264 47] :rparen [264 52]}} (conv ^{:go/pos {:name-pos [264 42]}} int64 ^{:go/pos {:name-pos [264 48]}} sret)))))
+
+            ^{:go/pos {:for [266 3] :lbrace [266 31] :range [266 16] :rbrace [272 3] :tok-pos [266 13]}} (range [^{:go/pos {:name-pos [266 7]}} i ^{:go/pos {:name-pos [266 10]}} at ^{:go/pos {:dot [266 25] :name-pos [266 26]}} (.-Args ^{:go/pos {:name-pos [266 22]}} cif)]
+              (let [^{:tag ^{:go/pos {:name-pos [267 12]}} uint64 :go/pos {:name-pos [267 8] :tok-pos [267 4]}} tmp (zero ^{:go/pos {:name-pos [267 12]}} uint64)]
+                ^{:go/pos {:if [268 4] :lbrace [268 26] :rbrace [270 4]}} (when ^{:go/pos {:op-pos [268 15]}} (== ^{:go/pos {:dot [268 9] :name-pos [268 10]}} (.-Kind ^{:go/pos {:name-pos [268 7]}} at) ^{:go/pos {:name-pos [268 18]}} KStruct)
+                  ^{:go/pos {:tok-pos [269 9]}} (set! ^{:go/pos {:name-pos [269 5]}} tmp ^{:go/pos {:dot [269 12] :lparen [269 17] :name-pos [269 13] :rparen [269 25]}} (.push ^{:go/pos {:name-pos [269 11]}} w ^{:go/pos {:dot [269 20] :name-pos [269 21]}} (.-Size ^{:go/pos {:name-pos [269 18]}} at))))
+
+                ^{:go/pos {:tok-pos [271 9]}} (set! ^{:go/pos {:name-pos [271 4]}} args ^{:go/pos {:lparen [271 17] :rparen [271 52]}} (^{:go/pos {:name-pos [271 11]}} append ^{:go/pos {:name-pos [271 18]}} args ^{:go/pos {:lparen [271 29] :rparen [271 51]}} (^{:go/pos {:name-pos [271 24]}} toArg ^{:go/pos {:name-pos [271 30]}} m ^{:go/pos {:name-pos [271 33]}} at ^{:go/pos {:lbrack [271 43] :rbrack [271 45]}} (aget ^{:go/pos {:name-pos [271 37]}} avalue ^{:go/pos {:name-pos [271 44]}} i) ^{:go/pos {:name-pos [271 48]}} tmp)))))
+
+            (let [^{:go/pos {:name-pos [273 3] :tok-pos [273 5]}} f ^{:go/pos {:dot [273 11] :lparen [273 18] :name-pos [273 12] :rparen [273 21]}} (.FuncAt ^{:go/pos {:dot [273 9] :name-pos [273 10]}} (.-P ^{:go/pos {:name-pos [273 8]}} l) ^{:go/pos {:name-pos [273 19]}} fn)
+                ^{:go/pos {:name-pos [274 3] :tok-pos [274 5]}} r ^{:go/pos {:dot [274 11] :lparen [274 16] :name-pos [274 12] :rparen [274 27]}} (.Call ^{:go/pos {:dot [274 9] :name-pos [274 10]}} (.-P ^{:go/pos {:name-pos [274 8]}} l) ^{:go/pos {:name-pos [274 17]}} t ^{:go/pos {:name-pos [274 20]}} f ^{:go/pos {:name-pos [274 23]}} args)]
+              ^{:go/pos {:lbrace [275 23] :rbrace [281 3] :switch [275 3]}} (switch ^{:go/pos {:dot [275 17] :name-pos [275 18]}} (.-Kind ^{:go/pos {:dot [275 13] :name-pos [275 14]}} (.-Ret ^{:go/pos {:name-pos [275 10]}} cif))
+                ^{:go/pos {:case [276 3] :colon [276 13]}} (case [^{:go/pos {:name-pos [276 8]}} KVoid])
+                ^{:go/pos {:case [277 3] :colon [277 15]}} (case [^{:go/pos {:name-pos [277 8]}} KStruct]
+                  ^{:go/pos {:lparen [278 8] :rparen [278 40]}} (^{:go/pos {:name-pos [278 4]}} copy ^{:go/pos {:name-pos [278 9]}} rvalue ^{:go/pos {:dot [278 18] :lparen [278 20] :name-pos [278 19] :rparen [278 39]}} (.R ^{:go/pos {:name-pos [278 17]}} m ^{:go/pos {:name-pos [278 21]}} sret ^{:go/pos {:dot [278 34] :name-pos [278 35]}} (.-Size ^{:go/pos {:dot [278 30] :name-pos [278 31]}} (.-Ret ^{:go/pos {:name-pos [278 27]}} cif)))))
+                ^{:go/pos {:case [279 3] :colon [279 10]}} (default
+                  ^{:go/apos {5 [280 35]} :go/pos {:lparen [280 11] :rparen [280 39]}} (^{:go/pos {:name-pos [280 4]}} fromArg ^{:go/pos {:name-pos [280 12]}} m ^{:go/pos {:dot [280 18] :name-pos [280 19]}} (.-Ret ^{:go/pos {:name-pos [280 15]}} cif) ^{:go/pos {:name-pos [280 24]}} r ^{:go/pos {:name-pos [280 27]}} rvalue true))))))))))
+
+
+
+
+
+
+
+^{:go/pos {:doc [285 1] :func [288 1] :lbrace [288 33] :rbrace [308 1]}} (go/method ^{:go/pos {:name-pos [288 17]}} guard "guard runs f, a C fault or exit inside it ending the process as CPython's would end (arbace/clib's Lib.guard),\nthe C thread's stack restored when f panics with anything else (a Python exception a closure raised through C\nis not one: closures catch theirs, callbacks.c's rule).\n" ^{:go/pos {:closing [288 31] :opening [288 22] :recv-closing [288 15] :recv-opening [288 6]}} [^{:tag ^{:go/pos {:star [288 9]}} (* ^{:go/pos {:name-pos [288 10]}} World) :go/pos {:name-pos [288 7]}} w ^{:tag ^{:go/pos {:func [288 25]}} (func ^{:go/pos {:closing [288 30] :opening [288 29]}} []) :go/pos {:name-pos [288 23]}} f]
+  (let [^{:go/pos {:name-pos [289 2] :tok-pos [289 4]}} t ^{:go/pos {:dot [289 10] :name-pos [289 11]}} (.-T ^{:go/pos {:dot [289 8] :name-pos [289 9]}} (.-L ^{:go/pos {:name-pos [289 7]}} w))
+      ^{:go/pos {:tok-pos [290 17]}} (values ^{:go/pos {:name-pos [290 2]}} sp ^{:go/pos {:name-pos [290 6]}} top ^{:go/pos {:name-pos [290 11]}} depth) (values ^{:go/pos {:dot [290 21] :name-pos [290 22]}} (.-SP ^{:go/pos {:name-pos [290 20]}} t) ^{:go/pos {:dot [290 27] :name-pos [290 28]}} (.-Top ^{:go/pos {:name-pos [290 26]}} t) ^{:go/pos {:dot [290 34] :name-pos [290 35]}} (.-Depth ^{:go/pos {:name-pos [290 33]}} t))]
+    ^{:go/pos {:defer [291 2]}} (defer ^{:go/pos {:lparen [306 3] :rparen [306 4]}} (^{:go/pos {:func [291 8] :lbrace [291 15] :rbrace [306 2]}} (fn ^{:go/pos {:closing [291 13] :opening [291 12]}} []
+          ^{:go/pos {:if [292 3] :lbrace [292 31] :rbrace [305 3]}} (when [^{:go/pos {:name-pos [292 6] :tok-pos [292 8]}} r ^{:go/pos {:lparen [292 18] :rparen [292 19]}} (^{:go/pos {:name-pos [292 11]}} recover)] ^{:go/apos {2 [292 27]} :go/pos {:op-pos [292 24]}} (!= ^{:go/pos {:name-pos [292 22]}} r nil)
+            ^{:go/pos {:tok-pos [293 25]}} (set! (values ^{:go/pos {:dot [293 5] :name-pos [293 6]}} (.-SP ^{:go/pos {:name-pos [293 4]}} t) ^{:go/pos {:dot [293 11] :name-pos [293 12]}} (.-Top ^{:go/pos {:name-pos [293 10]}} t) ^{:go/pos {:dot [293 18] :name-pos [293 19]}} (.-Depth ^{:go/pos {:name-pos [293 17]}} t)) (values ^{:go/pos {:name-pos [293 27]}} sp ^{:go/pos {:name-pos [293 31]}} top ^{:go/pos {:name-pos [293 36]}} depth))
+            ^{:go/pos {:guard-dot [294 17] :guard-lparen [294 18] :guard-rparen [294 23] :guard-tok [294 13] :lbrace [294 25] :rbrace [303 4] :switch [294 4]}} (type-switch [^{:go/pos {:name-pos [294 11]}} x ^{:go/pos {:name-pos [294 16]}} r]
+              ^{:go/pos {:case [295 4] :colon [295 18]}} (case [^{:go/pos {:star [295 9]}} (* ^{:go/pos {:dot [295 13] :name-pos [295 14] :x-pos [295 10]}} crt/Exit)]
+                ^{:go/pos {:if [296 5] :lbrace [296 22] :rbrace [298 5]}} (when ^{:go/apos {2 [296 20]} :go/pos {:op-pos [296 17]}} (!= ^{:go/pos {:dot [296 9] :name-pos [296 10]}} (.-Signal ^{:go/pos {:name-pos [296 8]}} x) 0)
+                  ^{:go/pos {:lparen [297 13] :rparen [297 28]}} (^{:go/pos {:dot [297 8] :name-pos [297 9] :x-pos [297 6]}} os/Exit ^{:go/apos {1 [297 14]} :go/pos {:op-pos [297 18]}} (+ 128 ^{:go/pos {:dot [297 21] :name-pos [297 22]}} (.-Signal ^{:go/pos {:name-pos [297 20]}} x))))
+
+                ^{:go/pos {:lparen [299 12] :rparen [299 19]}} (^{:go/pos {:dot [299 7] :name-pos [299 8] :x-pos [299 5]}} os/Exit ^{:go/pos {:dot [299 14] :name-pos [299 15]}} (.-Code ^{:go/pos {:name-pos [299 13]}} x)))
+              ^{:go/pos {:case [300 4] :colon [300 19]}} (case [^{:go/pos {:star [300 9]}} (* ^{:go/pos {:dot [300 13] :name-pos [300 14] :x-pos [300 10]}} crt/Fault)]
+                ^{:go/apos {2 [301 28]} :go/pos {:lparen [301 16] :rparen [301 111]}} (^{:go/pos {:dot [301 8] :name-pos [301 9] :x-pos [301 5]}} fmt/Fprintf ^{:go/pos {:dot [301 19] :name-pos [301 20] :x-pos [301 17]}} os/Stderr "Fatal Python error: %s at %#x in the C world (%s)\n" ^{:go/pos {:dot [301 84] :name-pos [301 85]}} (.-Msg ^{:go/pos {:name-pos [301 83]}} x) ^{:go/pos {:dot [301 91] :name-pos [301 92]}} (.-Addr ^{:go/pos {:name-pos [301 90]}} x) ^{:go/pos {:dot [301 103] :lparen [301 109] :name-pos [301 104] :rparen [301 110]}} (.Trace ^{:go/pos {:dot [301 101] :name-pos [301 102]}} (.-P ^{:go/pos {:dot [301 99] :name-pos [301 100]}} (.-L ^{:go/pos {:name-pos [301 98]}} w))))
+                ^{:go/pos {:lparen [302 12] :rparen [302 24]}} (^{:go/pos {:dot [302 7] :name-pos [302 8] :x-pos [302 5]}} os/Exit ^{:go/apos {1 [302 13]} :go/pos {:op-pos [302 17]}} (+ 128 ^{:go/pos {:dot [302 20] :name-pos [302 21]}} (.-Sig ^{:go/pos {:name-pos [302 19]}} x)))))
+
+            ^{:go/pos {:lparen [304 9] :rparen [304 11]}} (^{:go/pos {:name-pos [304 4]}} panic ^{:go/pos {:name-pos [304 10]}} r)))))
+
+
+    ^{:go/pos {:lparen [307 3] :rparen [307 4]}} (^{:go/pos {:name-pos [307 2]}} f)))
+
+
+
+
+^{:go/pos {:doc [310 1] :tok-pos [312 1]}} (go/type ^{:go/pos {:name-pos [312 6]}} Closure "Closure is a Go function with a C function's address, ffi_closure: C code calling Addr() calls Fn with the\narguments' bytes (as avalue) and the result's bytes to fill (cif.RetSize() of them).\n" ^{:go/pos {:lbrace [312 21] :rbrace [317 1] :struct [312 14]}} (struct
+    ^{:tag ^{:go/pos {:star [313 6]}} (* ^{:go/pos {:name-pos [313 7]}} CIF) :go/pos {:name-pos [313 2]}} CIF
+    ^{:tag ^{:go/pos {:func [314 6]}} (func ^{:go/pos {:closing [314 36] :opening [314 10]}} [^{:tag ^{:go/pos {:lbrack [314 15]}} (slice ^{:go/pos {:name-pos [314 17]}} byte) :go/pos {:name-pos [314 11]}} ret ^{:tag ^{:go/pos {:lbrack [314 28]}} (slice ^{:go/pos {:lbrack [314 30]}} (slice ^{:go/pos {:name-pos [314 32]}} byte)) :go/pos {:name-pos [314 23]}} args]) :go/pos {:name-pos [314 2]}} Fn
+    ^{:tag ^{:go/pos {:star [315 6]}} (* ^{:go/pos {:dot [315 9] :name-pos [315 10] :x-pos [315 7]}} ci/Func) :go/pos {:name-pos [315 2]}} f
+    ^{:tag ^{:go/pos {:star [316 6]}} (* ^{:go/pos {:name-pos [316 7]}} World) :go/pos {:name-pos [316 2]}} w))
+
+
+
+^{:go/pos {:doc [319 1] :func [320 1] :lbrace [320 83] :rbrace [332 1] :return [331 2]}} (go/method ^{:go/pos {:name-pos [320 17]}} NewClosure "NewClosure is ffi_prep_closure_loc: a function of the world's program, of the interface cif, whose body is fn.\n" ^{:tag ^{:go/pos {:star [320 74]}} (* ^{:go/pos {:name-pos [320 75]}} Closure) :go/pos {:closing [320 72] :opening [320 27] :recv-closing [320 15] :recv-opening [320 6]}} [^{:tag ^{:go/pos {:star [320 9]}} (* ^{:go/pos {:name-pos [320 10]}} World) :go/pos {:name-pos [320 7]}} w ^{:tag ^{:go/pos {:star [320 32]}} (* ^{:go/pos {:name-pos [320 33]}} CIF) :go/pos {:name-pos [320 28]}} cif ^{:tag ^{:go/pos {:func [320 41]}} (func ^{:go/pos {:closing [320 71] :opening [320 45]}} [^{:tag ^{:go/pos {:lbrack [320 50]}} (slice ^{:go/pos {:name-pos [320 52]}} byte) :go/pos {:name-pos [320 46]}} ret ^{:tag ^{:go/pos {:lbrack [320 63]}} (slice ^{:go/pos {:lbrack [320 65]}} (slice ^{:go/pos {:name-pos [320 67]}} byte)) :go/pos {:name-pos [320 58]}} args]) :go/pos {:name-pos [320 38]}} fn]
+  (let [^{:go/pos {:name-pos [321 2] :tok-pos [321 4]}} c ^{:go/pos {:op-pos [321 7]}} (addr ^{:go/acolon {2 [321 19] 4 [321 28] 6 [321 35]} :go/apos {2 [321 16] 4 [321 26] 6 [321 34]} :go/pos {:lbrace [321 15] :rbrace [321 38]}} (lit ^{:go/pos {:name-pos [321 8]}} Closure :CIF ^{:go/pos {:name-pos [321 21]}} cif :Fn ^{:go/pos {:name-pos [321 30]}} fn :w ^{:go/pos {:name-pos [321 37]}} w))
+      ^{:tag ^{:go/pos {:star [322 8]}} (* ^{:go/pos {:dot [322 11] :name-pos [322 12] :x-pos [322 9]}} ci/Func) :go/pos {:name-pos [322 6] :tok-pos [322 2]}} f (zero ^{:go/pos {:star [322 8]}} (* ^{:go/pos {:dot [322 11] :name-pos [322 12] :x-pos [322 9]}} ci/Func))]
+    ^{:go/pos {:else-lbrace [325 9] :else-rbrace [328 2] :if [323 2] :lbrace [323 29] :rbrace [325 2]}} (if [^{:go/pos {:name-pos [323 5] :tok-pos [323 7]}} n ^{:go/pos {:lparen [323 13] :rparen [323 20]}} (^{:go/pos {:name-pos [323 10]}} len ^{:go/pos {:dot [323 15] :name-pos [323 16]}} (.-free ^{:go/pos {:name-pos [323 14]}} w))] ^{:go/apos {2 [323 27]} :go/pos {:op-pos [323 25]}} (> ^{:go/pos {:name-pos [323 23]}} n 0)
+      ^{:go/pos {:tok-pos [324 13]}} (set! (values ^{:go/pos {:name-pos [324 3]}} f ^{:go/pos {:dot [324 7] :name-pos [324 8]}} (.-free ^{:go/pos {:name-pos [324 6]}} w)) (values ^{:go/pos {:lbrack [324 21] :rbrack [324 25]}} (aget ^{:go/pos {:dot [324 16] :name-pos [324 17]}} (.-free ^{:go/pos {:name-pos [324 15]}} w) ^{:go/apos {2 [324 24]} :go/pos {:op-pos [324 23]}} (- ^{:go/pos {:name-pos [324 22]}} n 1)) ^{:go/pos {:lbrack [324 34] :rbrack [324 39]}} (subslice ^{:go/pos {:dot [324 29] :name-pos [324 30]}} (.-free ^{:go/pos {:name-pos [324 28]}} w) _ ^{:go/apos {2 [324 38]} :go/pos {:op-pos [324 37]}} (- ^{:go/pos {:name-pos [324 36]}} n 1))))
+
+      (let [^{:go/pos {:name-pos [326 3] :tok-pos [326 5]}} p ^{:go/pos {:dot [326 11] :name-pos [326 12]}} (.-P ^{:go/pos {:dot [326 9] :name-pos [326 10]}} (.-L ^{:go/pos {:name-pos [326 8]}} w))]
+        ^{:go/pos {:tok-pos [327 5]}} (set! ^{:go/pos {:name-pos [327 3]}} f ^{:go/apos {3 [327 26]} :go/pos {:dot [327 8] :lparen [327 11] :name-pos [327 9] :rparen [327 28]}} (.Fn ^{:go/pos {:name-pos [327 7]}} p ^{:go/pos {:lparen [327 15] :rparen [327 23]}} (^{:go/pos {:name-pos [327 12]}} len ^{:go/pos {:dot [327 17] :name-pos [327 18]}} (.-Funcs ^{:go/pos {:name-pos [327 16]}} p)) ""))))
+
+    ^{:go/pos {:tok-pos [329 11]}} (set! ^{:go/pos {:dot [329 3] :name-pos [329 4]}} (.-Native ^{:go/pos {:name-pos [329 2]}} f) ^{:go/pos {:dot [329 14] :name-pos [329 15]}} (.-call ^{:go/pos {:name-pos [329 13]}} c))
+    ^{:go/pos {:tok-pos [330 6]}} (set! ^{:go/pos {:dot [330 3] :name-pos [330 4]}} (.-f ^{:go/pos {:name-pos [330 2]}} c) ^{:go/pos {:name-pos [330 8]}} f)
+    ^{:go/pos {:name-pos [331 9]}} c))
+
+
+
+^{:go/pos {:doc [334 1] :func [335 1] :lbrace [335 33] :rbrace [335 53] :return [335 35]}} (go/method ^{:go/pos {:name-pos [335 19]}} Addr "Addr is the closure's code address (a C function pointer's value).\n" ^{:tag ^{:go/pos {:name-pos [335 26]}} uint64 :go/pos {:closing [335 24] :opening [335 23] :recv-closing [335 17] :recv-opening [335 6]}} [^{:tag ^{:go/pos {:star [335 9]}} (* ^{:go/pos {:name-pos [335 10]}} Closure) :go/pos {:name-pos [335 7]}} c] ^{:go/pos {:dot [335 45] :lparen [335 50] :name-pos [335 46] :rparen [335 51]}} (.Addr ^{:go/pos {:dot [335 43] :name-pos [335 44]}} (.-f ^{:go/pos {:name-pos [335 42]}} c)))
+
+
+^{:go/pos {:doc [337 1] :func [338 1] :lbrace [338 26] :rbrace [347 1]}} (go/method ^{:go/pos {:name-pos [338 19]}} Free "Free is ffi_closure_free: the address may be given to the next closure; a call through it until then faults.\n" ^{:go/pos {:closing [338 24] :opening [338 23] :recv-closing [338 17] :recv-opening [338 6]}} [^{:tag ^{:go/pos {:star [338 9]}} (* ^{:go/pos {:name-pos [338 10]}} Closure) :go/pos {:name-pos [338 7]}} c]
+  ^{:go/pos {:if [339 2] :lbrace [339 16] :rbrace [341 2]}} (when ^{:go/apos {2 [339 12]} :go/pos {:op-pos [339 9]}} (== ^{:go/pos {:dot [339 6] :name-pos [339 7]}} (.-f ^{:go/pos {:name-pos [339 5]}} c) nil)
+    ^{:go/pos {:return [340 3]}} (return))
+
+  ^{:go/pos {:tok-pos [342 13]}} (set! ^{:go/pos {:dot [342 5] :name-pos [342 6]}} (.-Native ^{:go/pos {:dot [342 3] :name-pos [342 4]}} (.-f ^{:go/pos {:name-pos [342 2]}} c)) ^{:go/pos {:func [342 15] :lbrace [342 49] :rbrace [344 2]}} (fn ^{:tag ^{:go/pos {:dot [342 44] :name-pos [342 45] :x-pos [342 42]}} ci/Arg :go/pos {:closing [342 40] :opening [342 19]}} [^{:go/pos {:star [342 20]}} (* ^{:go/pos {:dot [342 23] :name-pos [342 24] :x-pos [342 21]}} ci/Thread) ^{:go/pos {:lbrack [342 32]}} (slice ^{:go/pos {:dot [342 36] :name-pos [342 37] :x-pos [342 34]}} ci/Arg)]
+      ^{:go/pos {:lparen [343 8] :rparen [343 87]}} (^{:go/pos {:name-pos [343 3]}} panic ^{:go/pos {:op-pos [343 9]}} (addr ^{:go/acolon {2 [343 23] 4 [343 42] 6 [343 59]} :go/apos {2 [343 20] 4 [343 38] 6 [343 56] 7 [343 61]} :go/pos {:lbrace [343 19] :rbrace [343 86]}} (lit ^{:go/pos {:dot [343 13] :name-pos [343 14] :x-pos [343 10]}} crt/Fault :Sig ^{:go/pos {:dot [343 28] :name-pos [343 29] :x-pos [343 25]}} crt/SIGSEGV :Addr ^{:go/pos {:dot [343 47] :lparen [343 52] :name-pos [343 48] :rparen [343 53]}} (.Addr ^{:go/pos {:dot [343 45] :name-pos [343 46]}} (.-f ^{:go/pos {:name-pos [343 44]}} c)) :Msg "call of a freed closure")))))
+
+  ^{:go/pos {:tok-pos [345 11]}} (set! ^{:go/pos {:dot [345 5] :name-pos [345 6]}} (.-free ^{:go/pos {:dot [345 3] :name-pos [345 4]}} (.-w ^{:go/pos {:name-pos [345 2]}} c)) ^{:go/pos {:lparen [345 19] :rparen [345 33]}} (^{:go/pos {:name-pos [345 13]}} append ^{:go/pos {:dot [345 23] :name-pos [345 24]}} (.-free ^{:go/pos {:dot [345 21] :name-pos [345 22]}} (.-w ^{:go/pos {:name-pos [345 20]}} c)) ^{:go/pos {:dot [345 31] :name-pos [345 32]}} (.-f ^{:go/pos {:name-pos [345 30]}} c)))
+  ^{:go/apos {2 [346 8]} :go/pos {:tok-pos [346 6]}} (set! ^{:go/pos {:dot [346 3] :name-pos [346 4]}} (.-f ^{:go/pos {:name-pos [346 2]}} c) nil))
+
+
+
+
+^{:go/pos {:doc [349 1] :func [351 1] :lbrace [351 60] :rbrace [376 1] :return [375 2]}} (go/method ^{:go/pos {:name-pos [351 19]}} call "call is the closure's native: the call's values made bytes (an aggregate result's address is the hidden first\nargument), Fn run, its result's bytes made the value C receives.\n" ^{:tag ^{:go/pos {:dot [351 55] :name-pos [351 56] :x-pos [351 53]}} ci/Arg :go/pos {:closing [351 51] :opening [351 23] :recv-closing [351 17] :recv-opening [351 6]}} [^{:tag ^{:go/pos {:star [351 9]}} (* ^{:go/pos {:name-pos [351 10]}} Closure) :go/pos {:name-pos [351 7]}} c ^{:tag ^{:go/pos {:star [351 26]}} (* ^{:go/pos {:dot [351 29] :name-pos [351 30] :x-pos [351 27]}} ci/Thread) :go/pos {:name-pos [351 24]}} t ^{:tag ^{:go/pos {:lbrack [351 43]}} (slice ^{:go/pos {:dot [351 47] :name-pos [351 48] :x-pos [351 45]}} ci/Arg) :go/pos {:name-pos [351 38]}} args]
+  (let [^{:go/pos {:name-pos [352 2] :tok-pos [352 4]}} m ^{:go/pos {:dot [352 8] :name-pos [352 9]}} (.-M ^{:go/pos {:name-pos [352 7]}} t)
+      ^{:go/pos {:name-pos [353 2] :tok-pos [353 6]}} cif ^{:go/pos {:dot [353 10] :name-pos [353 11]}} (.-CIF ^{:go/pos {:name-pos [353 9]}} c)
+      ^{:tag ^{:go/pos {:name-pos [354 11]}} uint64 :go/pos {:name-pos [354 6] :tok-pos [354 2]}} sret (zero ^{:go/pos {:name-pos [354 11]}} uint64)]
+    ^{:go/pos {:if [355 2] :lbrace [355 29] :rbrace [357 2]}} (when ^{:go/pos {:op-pos [355 18]}} (== ^{:go/pos {:dot [355 12] :name-pos [355 13]}} (.-Kind ^{:go/pos {:dot [355 8] :name-pos [355 9]}} (.-Ret ^{:go/pos {:name-pos [355 5]}} cif)) ^{:go/pos {:name-pos [355 21]}} KStruct)
+      ^{:go/pos {:tok-pos [356 14]}} (set! (values ^{:go/pos {:name-pos [356 3]}} sret ^{:go/pos {:name-pos [356 9]}} args) (values ^{:go/pos {:lparen [356 22] :rparen [356 32]}} (conv ^{:go/pos {:name-pos [356 16]}} uint64 ^{:go/pos {:dot [356 30] :name-pos [356 31]}} (.-I ^{:go/apos {2 [356 28]} :go/pos {:lbrack [356 27] :rbrack [356 29]}} (aget ^{:go/pos {:name-pos [356 23]}} args 0))) ^{:go/apos {2 [356 40]} :go/pos {:lbrack [356 39] :rbrack [356 42]}} (subslice ^{:go/pos {:name-pos [356 35]}} args 1))))
+
+    (let [^{:go/pos {:name-pos [358 2] :tok-pos [358 5]}} av ^{:go/pos {:lparen [358 12] :rparen [358 36]}} (^{:go/pos {:name-pos [358 8]}} make ^{:go/pos {:lbrack [358 13]}} (slice ^{:go/pos {:lbrack [358 15]}} (slice ^{:go/pos {:name-pos [358 17]}} byte)) ^{:go/pos {:lparen [358 26] :rparen [358 35]}} (^{:go/pos {:name-pos [358 23]}} len ^{:go/pos {:dot [358 30] :name-pos [358 31]}} (.-Args ^{:go/pos {:name-pos [358 27]}} cif)))]
+      ^{:go/pos {:for [359 2] :lbrace [359 30] :range [359 15] :rbrace [365 2] :tok-pos [359 12]}} (range [^{:go/pos {:name-pos [359 6]}} i ^{:go/pos {:name-pos [359 9]}} at ^{:go/pos {:dot [359 24] :name-pos [359 25]}} (.-Args ^{:go/pos {:name-pos [359 21]}} cif)]
+        (let [^{:go/pos {:name-pos [360 3] :tok-pos [360 5]}} b ^{:go/pos {:lparen [360 12] :rparen [360 36]}} (^{:go/pos {:name-pos [360 8]}} make ^{:go/pos {:lbrack [360 13]}} (slice ^{:go/pos {:name-pos [360 15]}} byte) ^{:go/apos {2 [360 34]} :go/pos {:lparen [360 24] :rparen [360 35]}} (^{:go/pos {:name-pos [360 21]}} max ^{:go/pos {:dot [360 27] :name-pos [360 28]}} (.-Size ^{:go/pos {:name-pos [360 25]}} at) 8))]
+          ^{:go/pos {:if [361 3] :lbrace [361 20] :rbrace [363 3]}} (when ^{:go/pos {:op-pos [361 8]}} (< ^{:go/pos {:name-pos [361 6]}} i ^{:go/pos {:lparen [361 13] :rparen [361 18]}} (^{:go/pos {:name-pos [361 10]}} len ^{:go/pos {:name-pos [361 14]}} args))
+            ^{:go/apos {5 [362 31]} :go/pos {:lparen [362 11] :rparen [362 36]}} (^{:go/pos {:name-pos [362 4]}} fromArg ^{:go/pos {:name-pos [362 12]}} m ^{:go/pos {:name-pos [362 15]}} at ^{:go/pos {:lbrack [362 23] :rbrack [362 25]}} (aget ^{:go/pos {:name-pos [362 19]}} args ^{:go/pos {:name-pos [362 24]}} i) ^{:go/pos {:name-pos [362 28]}} b false))
+
+          ^{:go/pos {:lbrack [364 5] :rbrack [364 7] :tok-pos [364 9]}} (aset ^{:go/pos {:name-pos [364 3]}} av ^{:go/pos {:name-pos [364 6]}} i ^{:go/pos {:lbrack [364 12] :rbrack [364 21]}} (subslice ^{:go/pos {:name-pos [364 11]}} b _ ^{:go/pos {:dot [364 16] :name-pos [364 17]}} (.-Size ^{:go/pos {:name-pos [364 14]}} at)))))
+
+      (let [^{:go/pos {:name-pos [366 2] :tok-pos [366 5]}} rv ^{:go/pos {:lparen [366 12] :rparen [366 42]}} (^{:go/pos {:name-pos [366 8]}} make ^{:go/pos {:lbrack [366 13]}} (slice ^{:go/pos {:name-pos [366 15]}} byte) ^{:go/apos {2 [366 40]} :go/pos {:lparen [366 24] :rparen [366 41]}} (^{:go/pos {:name-pos [366 21]}} max ^{:go/pos {:dot [366 28] :lparen [366 36] :name-pos [366 29] :rparen [366 37]}} (.RetSize ^{:go/pos {:name-pos [366 25]}} cif) 8))]
+        ^{:go/pos {:lparen [367 6] :rparen [367 13]}} (^{:go/pos {:dot [367 3] :name-pos [367 4]}} (.-Fn ^{:go/pos {:name-pos [367 2]}} c) ^{:go/pos {:name-pos [367 7]}} rv ^{:go/pos {:name-pos [367 11]}} av)
+        ^{:go/pos {:lbrace [368 22] :rbrace [374 2] :switch [368 2]}} (switch ^{:go/pos {:dot [368 16] :name-pos [368 17]}} (.-Kind ^{:go/pos {:dot [368 12] :name-pos [368 13]}} (.-Ret ^{:go/pos {:name-pos [368 9]}} cif))
+          ^{:go/pos {:case [369 2] :colon [369 12]}} (case [^{:go/pos {:name-pos [369 7]}} KVoid]
+            ^{:go/pos {:return [370 3]}} (return ^{:go/acolon {2 [370 18]} :go/apos {2 [370 17] 3 [370 20]} :go/pos {:lbrace [370 16] :rbrace [370 23]}} (lit ^{:go/pos {:dot [370 12] :name-pos [370 13] :x-pos [370 10]}} ci/Arg :K \i)))
+          ^{:go/pos {:case [371 2] :colon [371 14]}} (case [^{:go/pos {:name-pos [371 7]}} KStruct]
+            ^{:go/pos {:lparen [372 7] :rparen [372 50]}} (^{:go/pos {:name-pos [372 3]}} copy ^{:go/pos {:dot [372 9] :lparen [372 11] :name-pos [372 10] :rparen [372 30]}} (.W ^{:go/pos {:name-pos [372 8]}} m ^{:go/pos {:name-pos [372 12]}} sret ^{:go/pos {:dot [372 25] :name-pos [372 26]}} (.-Size ^{:go/pos {:dot [372 21] :name-pos [372 22]}} (.-Ret ^{:go/pos {:name-pos [372 18]}} cif))) ^{:go/pos {:lbrack [372 35] :rbrack [372 49]}} (subslice ^{:go/pos {:name-pos [372 33]}} rv _ ^{:go/pos {:dot [372 44] :name-pos [372 45]}} (.-Size ^{:go/pos {:dot [372 40] :name-pos [372 41]}} (.-Ret ^{:go/pos {:name-pos [372 37]}} cif))))
+            ^{:go/pos {:return [373 3]}} (return ^{:go/acolon {2 [373 18] 4 [373 26]} :go/apos {2 [373 17] 3 [373 20] 4 [373 25]} :go/pos {:lbrace [373 16] :rbrace [373 39]}} (lit ^{:go/pos {:dot [373 12] :name-pos [373 13] :x-pos [373 10]}} ci/Arg :K \i :I ^{:go/pos {:lparen [373 33] :rparen [373 38]}} (conv ^{:go/pos {:name-pos [373 28]}} int64 ^{:go/pos {:name-pos [373 34]}} sret)))))
+
+        ^{:go/apos {4 [375 31]} :go/pos {:lparen [375 14] :rparen [375 32]}} (^{:go/pos {:name-pos [375 9]}} toArg ^{:go/pos {:name-pos [375 15]}} m ^{:go/pos {:dot [375 21] :name-pos [375 22]}} (.-Ret ^{:go/pos {:name-pos [375 18]}} cif) ^{:go/pos {:name-pos [375 27]}} rv 0)))))

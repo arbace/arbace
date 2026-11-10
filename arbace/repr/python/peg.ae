@@ -2,7 +2,10 @@
 ;; de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032): Parser/pegen.c (the token buffer, keywords, the memo,
 ;; the token functions, lookahead helpers), Parser/action_helpers.c (the grammar's helpers) and the parts of
 ;; Parser/string_parser.c the parser's nodes need, Copyright (c) 2001 Python Software Foundation, All Rights Reserved,
-;; under the PSF License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License Agreement for Python 3.14").
+;; under the PSF License Agreement for Python 3.14 (LICENSE.md, "CPython: the PSF License Agreement for Python 3.14"). Since
+;; queue 236 also from CPython 3.15.2 (https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tar.xz, SHA-256
+;; 8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de): Parser/action_helpers.c's
+;; _PyPegen_checked_from_import, _warn_relative_import_of_lazy and _PyPegen_raise_error_for_missing_comma, the same notice.
 
 (ns arbace.repr.python.peg
   "The runtime of Python's generated parser (arbace.repr.python.parser; doc/python/PYTHON-SURVEY.md, \"As built: PY9b\"):
@@ -35,14 +38,14 @@
   (^Parser [^String text keywords soft type-comments no-fake]
   (let [p (Parser. (lex/lexer text false type-comments true no-fake) (java.util.ArrayList.) (long-array 9) (java.util.HashMap.)
                    keywords (set soft) (java.util.ArrayList.) (object-array [(int-array 1024)]))]
-    (aset ^longs (.-st p) 4 14)
+    (aset ^longs (.-st p) 4 (long lex/*minor*))
     p)))
 
 (defn set-feature-version
   "compile()'s _feature_version (PyCF_ONLY_AST): the minor version the grammar's CHECK_VERSIONs hold the source to (a
-  negative one is the current, 14)"
+  negative one is the current: 14, or 15 under arbace.repr.python.lex/*minor*, queue 236)"
   [^Parser p ^long v]
-  (aset ^longs (.-st p) 4 (if (neg? v) 14 v))
+  (aset ^longs (.-st p) 4 (if (neg? v) (long lex/*minor*) v))
   p)
 
 (defn set-single
@@ -348,6 +351,13 @@
   (when-let [t (expect p lex/NUMBER)]
     (when (and (< (aget ^longs (.-st p) 4) 6) (str/includes? (:string t) "_"))
       (RAISE-SYNTAX-ERROR p "Underscores in numeric literals are only supported in Python 3.6 and greater"))
+    ;; PyLong_FromString's limit is the run's (sys.set_int_max_str_digits): a decimal integer past the lowest limit, 640
+    ;; digits, is judged by the runtime at the location _PyPegen_number_token raises its SyntaxError
+    (when (and lex/*warnings* (> (count (:string t)) 640) (re-matches #"[0-9_]+" (:string t)))
+      (let [n (count (str/replace (:string t) "_" ""))
+            e (try (RAISE-ERROR-KNOWN-LOCATION p :SyntaxError (:lineno t) -1 (:end_lineno t) -1 "%s" "")
+                   (catch arbace.lang.ExceptionInfo x (:python-error (ex-data x))))]
+        (when (> n 640) (lex/add-warning! "IntLimit" (str n) (:lineno t) e))))
     {:t :Constant :value [(number-kind (:string t)) (:string t)] :kind nil :lineno (:lineno t) :col_offset (:col_offset t)
      :end_lineno (:end_lineno t) :end_col_offset (:end_col_offset t)}))
 
@@ -500,6 +510,55 @@
     (aset ^longs (.-st p) 3 1)
     (lex/set-barry! (.-lx p)))
   (into {:t :ImportFrom :module module :names names :level level} ex))
+
+(declare check-legacy-stmt)
+
+;; Python 3.15's import helpers (queue 236; action_helpers.c of 3.15.2: _PyPegen_checked_from_import,
+;; _warn_relative_import_of_lazy, _PyPegen_raise_error_for_missing_comma)
+
+(defn- warn-relative-import-of-lazy
+  "_warn_relative_import_of_lazy: `from . lazy import x` (a space between the dots and the name) warned of as the
+  transposition of `lazy from . import x`, at the module's name; not in the second pass"
+  [^Parser p dots module]
+  (when (and lex/*warnings* (not (call-invalid? p)))
+    (let [d (last dots)]
+      (when-not (and (c= (:end_lineno d) (:lineno module)) (c= (:end_col_offset d) (:col_offset module)))
+        (let [b (apply str (repeat (seq-count-dots dots) "."))
+              msg (str "'from " b " lazy import' is the same as 'from " b "lazy import'; did you mean 'lazy from " b " import'?")
+              ;; _PyErr_EmitSyntaxWarning's error under an "error" filter: _PyErr_RaiseSyntaxError's, the columns the
+              ;; node's UTF-8 offsets plus one, the text the file's line (PyErr_ProgramTextObject: none for a string)
+              e ["SyntaxError" msg (:lineno module) (inc (long (:col_offset module))) (:end_lineno module)
+                 (inc (long (:end_col_offset module))) nil]]
+          (lex/add-warning! "SyntaxWarning" msg (:lineno module) e))))))
+
+(defn checked-from-import
+  "_PyPegen_checked_from_import (3.15): the dots counted, `lazy from __future__` refused, barry_as_FLUFL's flag set as
+  _PyPegen_checked_future_import did, `from . lazy import` warned of; an ImportFrom with is_lazy 1 or 0"
+  [^Parser p dots module-name names lazy ex]
+  (let [module (:id module-name) level (seq-count-dots dots)]
+    (cond
+      (and (c= level 0) (= module "__future__"))
+      (do (when lazy (syntax-error-at p lazy "lazy from __future__ import is not allowed"))
+          (when (some #(= "barry_as_FLUFL" (:name %)) names)
+            (aset ^longs (.-st p) 3 1)
+            (lex/set-barry! (.-lx p))))
+      (and (pos? level) (nil? lazy) (= module "lazy"))
+      (warn-relative-import-of-lazy p dots module-name))
+    (into {:t :ImportFrom :module module :names names :level level :is_lazy (if lazy 1 0)} ex)))
+
+(defn raise-error-for-missing-comma
+  "_PyPegen_raise_error_for_missing_comma (3.15): nothing for a legacy statement or outside brackets; a multi-line `a`
+  (a string concatenation) pointed at on its last line"
+  [^Parser p a b]
+  (cond
+    (check-legacy-stmt p a) nil
+    (c= 0 (:level (token-at p (dec (mark p))))) nil
+    (> (long (:end_lineno a)) (long (:lineno a)))
+    (RAISE-ERROR-KNOWN-LOCATION p :SyntaxError (:end_lineno a) (:col_offset a) (:end_lineno a) (:end_col_offset a)
+                                "invalid syntax. Perhaps you forgot a comma?")
+    :else
+    (RAISE-ERROR-KNOWN-LOCATION p :SyntaxError (:lineno a) (:col_offset a) (:end_lineno b) (:end_col_offset b)
+                                "invalid syntax. Perhaps you forgot a comma?")))
 
 (defn check-barry-as-flufl
   "_PyPegen_check_barry_as_flufl: 0 when the token is the flags' spelling of not-equal"
@@ -666,6 +725,72 @@
                     (do (.append sb \\) (.append sb d) (recur (+ i 2)))))))))
         (chars (str sb))))))
 
+(defn- first-invalid-escape
+  "_PyUnicode_DecodeUnicodeEscapeInternal2's and _PyBytes_DecodeEscape2's first_invalid_escape_ptr: the index in `s`, a
+  buffer already checked by decode-check, of the first character after a backslash that starts no escape, or of an
+  octal escape above 0o377; nil when there is none"
+  [^String s bytes?]
+  (let [n (.length s)
+        oct? (fn [^long i] (and (< i n) (<= 48 (int (.charAt s i)) 55)))]
+    (loop [i 0]
+      (when (< i n)
+        (if (or (not= (.charAt s i) \\) (>= (inc i) n))
+          (recur (inc i))
+          (let [c (.charAt s (inc i)) j (+ i 2)]
+            (case c
+              (\newline \\ \' \" \b \f \t \n \r \v \a) (recur j)
+              (\0 \1 \2 \3 \4 \5 \6 \7)
+              (let [e (cond (not (oct? j)) j (not (oct? (inc j))) (inc j) :else (+ j 2))]
+                (if (and (== e (+ j 2)) (> (Integer/parseInt (subs s (inc i) e) 8) 0377))
+                  (inc i)
+                  (recur (long e))))
+              \x (recur (+ j 2))
+              (\u \U \N)
+              (cond bytes? (inc i)
+                    (= c \u) (recur (+ j 4))
+                    (= c \U) (recur (+ j 8))
+                    :else (recur (inc (long (.indexOf s "}" (int j))))))
+              (inc i))))))))
+
+(defn- utf8-len ^long [^String s] (alength (.getBytes s "UTF-8")))
+
+(defn- warn-invalid-escape
+  "warn_invalid_escape_sequence (string_parser.c): the buffer's first invalid escape, for the token t (TYPE :middle or
+  :end, an f-string's parts: the tokenizer has warned of a backslash before a brace), as a warning at its line, the
+  SyntaxError it becomes under an \"error\" filter at its column. The line and column are counted in the buffer from
+  the token's, the token's opening quotes added on its first line, as the C does"
+  [^Parser p ^String buffer bytes? t type]
+  (when (and lex/*warnings* (not (call-invalid? p)))
+    (when-let [i (first-invalid-escape buffer bytes?)]
+      (let [c (.charAt buffer (int i))]
+        (when-not (and type (or (= c \{) (= c \})))
+          (let [octal (<= (int \4) (int c) (int \7))
+                esc (if octal (subs buffer i (min (.length buffer) (+ i 3))) (str c))
+                what (if octal "invalid octal escape sequence" "invalid escape sequence")
+                msg (str "\"\\" esc "\" is an " what ". Such sequences will not work in the future. Did you mean \"\\\\" esc "\"? A raw string is also an option.")
+                err (str "\"\\" esc "\" is an " what ". Did you mean \"\\\\" esc "\"? A raw string is also an option.")
+                before (subs buffer 0 i)
+                nl (.lastIndexOf before "\n")
+                lineno (+ (long (:lineno t)) (count (filter #(= % \newline) before)))
+                col (if (neg? nl)
+                      (+ (long (:col_offset t)) (utf8-len before))
+                      (utf8-len (subs before (inc nl))))
+                ^String tok (:string t)
+                quotes (if (not= lineno (:lineno t))
+                         0
+                         (let [q0 (when (seq tok) (first tok))]
+                           (if (#{\' \"} q0) (count (take-while #(= % q0) tok)) 0)))
+                col (+ col quotes)
+                e (try (RAISE-ERROR-KNOWN-LOCATION p :SyntaxError lineno (dec col) lineno (inc col) "%s" err)
+                       (catch arbace.lang.ExceptionInfo x (:python-error (ex-data x))))]
+            (lex/add-warning! (if (>= (long (aget ^longs (.-st p) 4)) 12) "SyntaxWarning" "DeprecationWarning") msg lineno e)))))))
+
+(defn- warn-decoded
+  "A body decoded as _PyPegen_decode_string does (not raw): its invalid escape warned of"
+  [p bytes? raw? ^String body t type]
+  (when (and lex/*warnings* (not raw?) (str/includes? body "\\"))
+    (warn-invalid-escape p (if bytes? body (escape-transform body)) bytes? t type)))
+
 (defn constant-from-string
   "_PyPegen_constant_from_string: a bytes literal's non-ASCII characters and the escapes' errors raised"
   [p t]
@@ -674,6 +799,7 @@
       (syntax-error-at p t "bytes can only contain ASCII literal characters"))
     (when-let [[w m] (decode-check bytes? raw? body)]
       (raise-error p "SyntaxError" false "(%s) %U" w m))
+    (warn-decoded p bytes? raw? body t nil)
     (let [v (decode-value body bytes? raw?)]
       (cond-> {:t :Constant :value (if bytes? [:bytes] [:str]) :kind (when (str/starts-with? (:string t) "u") "u")
                :lineno (:lineno t) :col_offset (:col_offset t) :end_lineno (:end_lineno t) :end_col_offset (:end_col_offset t)}
@@ -690,17 +816,20 @@
   [^Parser p t]
   (when-let [[w m] (decode-check false (lex/raw-fstring? (.-lx p)) (:string t))]
     (throw (ex-info m {:python-error [(if (= w "unicode error") "UnicodeDecodeError" "ValueError") m nil nil nil nil nil]})))
+  (warn-decoded p false (lex/raw-fstring? (.-lx p)) (:string t) t :middle)
   (-> (constant-from-token p t) (dissoc :middle) (assoc :sv (decode-value (:string t) false (lex/raw-fstring? (.-lx p))))))
 
 (defn- decode-fstring-parts
-  "_get_resized_exprs' _PyPegen_decode_fstring_part: each literal part decoded (its value :sv), its error at the part"
-  [p a raw]
+  "_get_resized_exprs' _PyPegen_decode_fstring_part: each literal part decoded (its value :sv), its error at the part,
+  its invalid escape warned of from the end token b, as the C passes it"
+  [p a raw b]
   (let [is-raw (boolean (re-find #"[rR]" (:string a)))]
     (mapv (fn [x]
             (if (and (= :Constant (:t x)) (:middle x))
               (let [^String m (:middle x) m (if (#{"{{" "}}"} m) (subs m 0 1) m)]
                 (when-let [[w msg] (decode-check false is-raw m)]
                   (syntax-error-at p x "(%s) %U" w msg))
+                (warn-decoded p false is-raw m b :end)
                 (assoc x :sv (decode-value m false is-raw)))
               x))
           raw)))
@@ -711,11 +840,11 @@
   (vec (mapcat (fn [x] (if (and (= :JoinedStr (:t x)) (:debug-pair x)) (:values x) [x])) raw)))
 
 (defn joined-str [p a raw b]
-  {:t :JoinedStr :values (flat-values (decode-fstring-parts p a raw)) :lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b)
+  {:t :JoinedStr :values (flat-values (decode-fstring-parts p a raw b)) :lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b)
    :end_col_offset (:end_col_offset b)})
 
 (defn template-str [p a raw b]
-  {:t :TemplateStr :values (flat-values (decode-fstring-parts p a raw)) :lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b)
+  {:t :TemplateStr :values (flat-values (decode-fstring-parts p a raw b)) :lineno (:lineno a) :col_offset (:col_offset a) :end_lineno (:end_lineno b)
    :end_col_offset (:end_col_offset b)})
 
 (defn concatenate-strings [p strings ex]

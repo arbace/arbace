@@ -187,6 +187,9 @@
 (defmethod read-source :results [src]
   (let [rows (read-edn (:file src))]
     {:pass (count (filter #(= :pass (second %)) rows)) :ids (mapv first rows)
+     ;; bin/pyi check's record by each test's own verdict (queue 234; its header's "(verdict own)"): its methods are the
+     ;; inventory and the tests pyi's run reported (queue 259, case-problems)
+     :own-verdict (and (:py-ref-modules src) (str/includes? (slurp (path (:file src))) "\n;; (verdict own)\n"))
      :entries (vec (for [[id r why] rows :when (not= :pass r)] (entry id r why)))}))
 
 (defn- c-results-problems
@@ -487,6 +490,17 @@
                 :when (and (:id x) (not (:module x)) (or (contains? x :status) (and (:outcome x) (not (:excluded x)))))]
             (:id x))))))
 
+(def ^:private py-inventory-ids
+  (memoize
+   (fn [files]
+     ;; Lib/test's inventory (test/python/libtest_judge.ae's read-inventory, the own verdict's methods, queue 234): every
+     ;; reference line's id, :excluded ones too, but the :module lines and the runner's lines that name no test
+     (set (for [f files x (read-forms f)
+                :let [id (:id x)]
+                :when (and id (not (:module x)) (str/includes? (str id) "/")
+                           (not (str/starts-with? (str (:excluded x)) "runner: regrtest's JUnit names")))]
+            id)))))
+
 ;; Python's row (queue 201, PY10; doc/python/PYTHON-SURVEY.md §10.1, "As built: PY10"): bin/pyi check --aot's record
 ;; (test/python/check-aot-linux-ARCH.edn, arbace.python.aot's judge: one map a line, :id, :result :pass, :classed (:class
 ;; :as-pyi, :reference-excluded or a class of test/python/divergences-aot.edn) or :failed, :reason, :pyi-ms, :pyi-differs)
@@ -533,6 +547,13 @@
     (let [want (cond (:ref src) (ref-ids (:ref src) (= :diagnostics (:level src)))
                      ;; Python's (:py-ref, a file or several): the programs every one; Lib/test's methods those of the
                      ;; modules the record holds (:py-ref-modules: the record is per corpus, a module's methods all or none)
+                     ;; by the own verdict (queue 259): the inventory of the record's modules, every one; the record's
+                     ;; other methods are the tests pyi's run reported beside it (pyi-only ids, a module's MODULE/* row): no
+                     ;; reference names them, and they are not extra cases
+                     (and (:py-ref src) (:own-verdict r))
+                     (let [all (py-inventory-ids (let [x (:py-ref src)] (if (vector? x) x [x])))
+                           mods (set (map #(first (str/split (str %) #"/" 2)) ids))]
+                       (set (filter #(mods (first (str/split % #"/" 2))) all)))
                      (:py-ref src) (let [all (py-ref-ids (let [x (:py-ref src)] (if (vector? x) x [x])))]
                                      (if (:py-ref-modules src)
                                        (let [mods (set (map #(first (str/split (str %) #"/" 2)) ids))]
@@ -559,7 +580,7 @@
             (when (seq miss)
               [(str (:name src) ": " (count miss) " cases of " (or (:ref src) (:py-ref src) (:same-cases src) (:ref-runs src))
                     " not in " (:file src) ": " (some-of miss))])
-            (when (seq extra)
+            (when (and (seq extra) (not (:own-verdict r)))
               [(str (:name src) ": " (count extra) " cases of " (:file src) " not in "
                     (or (:ref src) (:py-ref src) (:same-cases src) (:ref-runs src)) ": " (some-of extra))]))))))))
 

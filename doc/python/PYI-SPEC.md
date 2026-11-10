@@ -80,6 +80,9 @@ A parameter that is also a cell keeps its local slot; the machine copies it into
 strings, doubles, `{:imag DOUBLE}`, `{:bytes [..]}`, `{:tuple [..]}`, `:ellipsis`, `{:code ..}`, and a string with a `\N{NAME}` escape as `{:joined [part {:named "NAME"} ...]}` (the name's lookup in
 Unicode's data is the runtime's, §6).
 
+`:threaded` (queue 229) lists the jumps flow!'s jump threading made: the runtime's view of CPython's bytecode needs them
+(`bytecode.go`: jump_thread's new jump has no handler in the exception table); the machine ignores it.
+
 ### 3.2 Instructions
 
 An instruction is `[OP ARG]`. A jump's `ARG` is an instruction index. `arbace.python.ir/ops` lists every operation
@@ -329,6 +332,10 @@ lines, and `CellParams` (a cell that is a parameter, copied in on entry). An ins
 `Op` has one constant per operation of `arbace.python.ir/ops`, in the order of their names (`opNames`), each with its
 owner (`opOwners`, §9); `bin/pyi runtime check` requires the two lists equal. Constants PY5b0 does not load (doubles,
 `{:imag}`, `{:bytes}`, `{:joined}`, ints beyond 64 bits) go through `loadConstHook`, PY5b's to replace.
+
+The view of CPython's bytecode (`bytecode.go`, `bytecode_flow.go`, `bytecode_asm.go`, `bytecode_table.go`; queue 229): made from
+the IR the first time `co_code`, `co_consts`, `co_linetable`, `co_exceptiontable`, `co_positions`, `co_lines`, `co_stacksize`,
+`f_lasti` or `tb_lasti` is asked, cached on the `Code`. The machine never reads it. `marshal` keeps pyi's own `co_code`.
 
 ### 7.3 The registry and `builtins` (`registry.go`, `builtins.go`)
 

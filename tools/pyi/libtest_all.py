@@ -12,7 +12,9 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       after refs.py record: an entry no unittest driver can name excluded, "runner: regrtest's JUnit names no test id"
       (a testcase of no name, or the number a test rebound its id attribute to: test__interpreters), and one whose
       reason names the checkout's paths or their length (AF_UNIX's limit) excluded, "machine: its reason names the
-      checkout's paths"
+      checkout's paths"; a reason naming another path of the machine (under /root, /home, /tmp, /Users: Alpine's build
+      directory) kept, the path's head written <home>/ and the like (queue 235: a record holds no host path; idempotent,
+      rerun on a committed reference rewrites those lines alone)
   run --root ROOT --modules FILE --dir DIR [--jobs N] [--test-timeout S] [--module-timeout S] [--oracle LIB] [--tmp-base D]
       each module through test/python/libtest_run.py, by pyi (ROOT/bin/pyi run) or with --oracle by python3 (the
       control: PYTHONPATH LIB): DIR/MODULE.out, .err, .status in test/python/libtest_judge.ae's format. A test that
@@ -25,6 +27,10 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       tempfile's names) removed and logged into DIR/tmp-leftovers.log (the VM forbids /tmp). PYI_LIB_TEST_ONLY (PY7, bin/pyi
       check --only): the driver runs only the listed MODULE/TEST-ID of a module it names. PYI_LIB_TEST_DRIVER_EXE (PY7, bin/pyi
       cover): the driver compiled by pyi's AOT runs each module (on its loop), PYI_LIB_TEST_COVER/MODULE its GOCOVERDIR.
+  find --testdir DIR [--out FILE]
+      queue 240: the same discovery with no CPython: regrtest's findtests (Lib/test/libregrtest/findtests.py of the pinned
+      3.14.10, its SPLITTESTDIRS; copied below) over DIR, the tarball's Lib/test, sorted as cmd_list sorts; run by pyi
+      (bin/pyi runner find), the check's universe (bin/pyi check_universe), python3's list the oracle tier's
   owned --owners FILE --modules FILE [--invert]
       the modules of the list a family owns (FILE's FAMILY<TAB>REGEX lines), or with --invert the others
   table --dir DIR --summary FILE --out FILE [--owners FILE --modules FILE]
@@ -32,7 +38,9 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       failing (the judge's summary.tsv), the first cause of its failing methods; then the causes summed over modules
   controls --dir DIR --controls FILE --ref REF[,REF...] --judge CMD...
       GTS81 (a)'s negative controls: each pair's subject run judged as the reference module (its files copied under the
-      reference's name into DIR/_controls/ID) by the judge with no classes; the judge must fail. Exit 1 when a control
+      reference's name into DIR/_controls/ID) by the judge with no classes; the judge must fail. A pair with :flip true
+      (queue 234, the own verdict's): the subject's first ok test judged alone must pass, and with its outcome made a
+      failure must fail. Exit 1 when a control
       passes ("control passed") or was not judged; a control whose subject was not run is printed and left.
 """
 import collections
@@ -112,6 +120,58 @@ def cmd_list(args):
     print("list: %d modules as regrtest finds them" % len(mods))
 
 
+# regrtest's discovery, copied from the pinned tarball's Lib/test/libregrtest/findtests.py (CPython 3.14.10, PSF license:
+# LICENSE.md's CPython entry): SPLITTESTDIRS and findtests, its annotations and its defaults' indirection dropped
+SPLITTESTDIRS = {
+    "test_asyncio",
+    "test_concurrent_futures",
+    "test_doctests",
+    "test_free_threading",
+    "test_future_stmt",
+    "test_gdb",
+    "test_inspect",
+    "test_pydoc",
+    "test_multiprocessing_fork",
+    "test_multiprocessing_forkserver",
+    "test_multiprocessing_spawn",
+}
+
+
+def findtests(testdir, exclude=(), split_test_dirs=SPLITTESTDIRS, base_mod=""):
+    """Return a list of all applicable test modules."""
+    tests = []
+    for name in os.listdir(testdir):
+        mod, ext = os.path.splitext(name)
+        if (not mod.startswith("test_")) or (mod in exclude):
+            continue
+        if base_mod:
+            fullname = f"{base_mod}.{mod}"
+        else:
+            fullname = mod
+        if fullname in split_test_dirs:
+            subdir = os.path.join(testdir, mod)
+            if not base_mod:
+                fullname = f"test.{mod}"
+            tests.extend(findtests(testdir=subdir, exclude=exclude,
+                                   split_test_dirs=split_test_dirs,
+                                   base_mod=fullname))
+        elif ext in (".py", ""):
+            tests.append(fullname)
+    return sorted(tests)
+
+
+def cmd_find(args):
+    testdir, out = arg(args, "--testdir"), arg(args, "--out")
+    mods = sorted(findtests(testdir))
+    text = "".join(m + "\n" for m in mods)
+    if out:
+        with open(out, "w", encoding="utf-8") as o:
+            o.write(text)
+        print("find: %d modules as regrtest's findtests finds them" % len(mods))
+    else:
+        sys.stdout.write(text)
+
+
 def cmd_refs(args):
     pypath, mods, work, out = arg(args, "--pypath"), read_list(arg(args, "--modules")), os.path.abspath(arg(args, "--work")), arg(args, "--out")
     # the work directory absolute: refs.py runs regrtest in WORK/lt/MODULE with --junit-xml under WORK; the runs' own
@@ -156,9 +216,13 @@ def cmd_refs(args):
     sys.exit(1 if any(rcs) else 0)
 
 
+# an absolute path of the machine (crops-score's :abs-path; queue 235)
+HOST_PATH = re.compile(r"(?<![A-Za-z0-9_.@<>-])/(root|home|tmp|Users)/")
+
+
 def cmd_fixrefs(args):
     ref, root = arg(args, "--ref"), os.path.abspath(arg(args, "--root"))
-    lines, n_id, n_path = [], 0, 0
+    lines, n_id, n_path, n_host = [], 0, 0, 0
     for l in open(ref, encoding="utf-8"):
         m = re.match(r'\{:id "([^"/]*)/([^"]*)" (:outcome .*)\}$', l.rstrip("\n"))
         if m:
@@ -166,12 +230,16 @@ def cmd_fixrefs(args):
             if tid == "None" or tid.isdigit():  # a doctest's id (typing.get_args) is an id
                 l = '{:id "%s/%s" :excluded "runner: regrtest\'s JUnit names no test id"}\n' % (m.group(1), tid)
                 n_id += 1
-            elif root in body or "path too long" in body:
+            elif root in body or "<checkout>/" in body or "path too long" in body:
                 l = '{:id "%s/%s" :excluded "machine: its reason names the checkout\'s paths"}\n' % (m.group(1), tid)
                 n_path += 1
+            elif HOST_PATH.search(body):
+                # queue 235: another path of the machine (Alpine's build directory, /tmp) written as <home>/, <tmp>/...
+                l = '{:id "%s/%s" %s}\n' % (m.group(1), tid, HOST_PATH.sub(r"<\1>/", body))
+                n_host += 1
         lines.append(l)
     open(ref, "w", encoding="utf-8").write("".join(lines))
-    print("fixrefs: %d entries of no test id and %d naming the checkout's paths excluded" % (n_id, n_path))
+    print("fixrefs: %d entries of no test id and %d naming the checkout's paths excluded, %d other paths of the machine written host-free" % (n_id, n_path, n_host))
 
 
 def last_line(text):
@@ -414,7 +482,8 @@ def cmd_table(args):
     if os.path.exists(jl):
         causes, cmods = collections.Counter(), collections.defaultdict(set)
         for l in open(jl, encoding="utf-8", errors="replace"):
-            mm = re.match(r"  FAIL ([^/]+)/\S+: (.*?) \(CPython \w+\)( -- no class.*)?$", l.rstrip("\n"))
+            # the recorded-run judge's lines name CPython's outcome, the own verdict's (queue 234) none
+            mm = re.match(r"  FAIL ([^/]+)/\S+: (.*?)(?: \(CPython \w+\))?(?: -- .*)?$", l.rstrip("\n"))
             if mm:
                 k = cause_key(re.sub(r"^(import|crash|stopped-in) ", r"\1: ", mm.group(2)))
                 causes[k] += 1
@@ -440,15 +509,47 @@ def cmd_controls(args):
     judge = args[args.index("--judge") + 1:]
     import ast
     text = open(controls, encoding="utf-8").read()
-    pairs = re.findall(r'\{:id "([^"]+)" :subject "([^"]+)" :reference "([^"]+)"', text)
+    pairs = re.findall(r'\{:id "([^"]+)" :subject "([^"]+)" :reference "([^"]+)"( :flip true)?', text)
     bad = 0
-    for cid, subj, refm in pairs:
+    for cid, subj, refm, flip in pairs:
         if not os.path.exists(os.path.join(d, subj + ".status")):
             print("control %s: subject %s not run, left" % (cid, subj))
             continue
         cd = os.path.join(d, "_controls", cid)
         shutil.rmtree(cd, ignore_errors=True)
         os.makedirs(cd)
+        if flip:
+            # queue 234: the verdict's own control: the subject's first ok test judged alone (--only) must pass, and the
+            # same run with that test's outcome made a failure must fail: the judge reads each test's own verdict
+            rows = open(os.path.join(d, subj + ".out"), encoding="utf-8", errors="replace").read().split("\n")
+            k = next((i for i, l in enumerate(rows) if l.split("\t")[:1] == ["CASE"] and l.split("\t")[2:3] == ["ok"]), None)
+            if k is None:
+                print("control not judged: %s (%s has no ok test to flip)" % (cid, subj))
+                bad += 1
+                continue
+            tid = rows[k].split("\t")[1]
+            with open(os.path.join(cd, "only.txt"), "w", encoding="utf-8") as f:
+                f.write("%s/%s\n" % (subj, tid))
+            res = []
+            for tag, out in (("as run", rows), ("flipped", rows[:k] + ["CASE\t%s\tfailure\tthe control's flipped outcome" % tid] + rows[k + 1:])):
+                sd = os.path.join(cd, tag.replace(" ", "-"))
+                os.makedirs(sd)
+                with open(os.path.join(sd, subj + ".out"), "w", encoding="utf-8") as f:
+                    f.write("\n".join(out))
+                for ext in ("err", "status"):
+                    src = os.path.join(d, subj + "." + ext)
+                    if os.path.exists(src):
+                        shutil.copy(src, os.path.join(sd, subj + "." + ext))
+                p = subprocess.run(judge + ["--dir", sd, "--only", os.path.join(cd, "only.txt")] + sum((["--ref", r] for r in ref.split(",")), [])
+                                   + ["--no-classes", subj], capture_output=True, text=True)
+                summ = [l for l in p.stdout.split("\n") if l.startswith("lib-test " + subj + ":")]
+                res.append((tag, p.returncode, summ[0] if summ else (p.stderr or p.stdout)[-300:]))
+            if res[0][1] != 0 or res[1][1] == 0 or len(res) != 2:
+                print("control %s: %s %s not sharp: as run exit %d (%s), flipped exit %d (%s)" % (cid, subj, tid, res[0][1], res[0][2], res[1][1], res[1][2]))
+                bad += 1
+            else:
+                print("control %s failed as it must: %s's %s flipped to a failure: %s (as run: %s)" % (cid, subj, tid, res[1][2], res[0][2]))
+            continue
         for ext in ("out", "err", "status"):
             src = os.path.join(d, subj + "." + ext)
             if os.path.exists(src):
@@ -469,7 +570,7 @@ def cmd_controls(args):
 
 def main():
     a = sys.argv[1:]
-    {"list": cmd_list, "refs": cmd_refs, "owned": cmd_owned, "fixrefs": cmd_fixrefs, "run": cmd_run, "table": cmd_table, "controls": cmd_controls}[a[0]](a[1:])
+    {"list": cmd_list, "find": cmd_find, "refs": cmd_refs, "owned": cmd_owned, "fixrefs": cmd_fixrefs, "run": cmd_run, "table": cmd_table, "controls": cmd_controls}[a[0]](a[1:])
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror
+  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -877,15 +877,22 @@ pyi-clib-build: ## queue 208: a C library core of pyi (tools/pyi/clib/LIB) built
 pyi-clib-verify: ## queue 208: the C library's node program built afresh, equal to the committed go/arbace/clib/LIB byte for byte (bin/pyi-clib verify; LIB=bzip2)
 	bin/pyi-clib verify $(or $(LIB),bzip2)
 
+pyi-bytecode-check: ## queue 229: code objects of the view of CPython's bytecode against python3's (bin/pyi bytecode-check)
+	bin/pyi bytecode-check
+
 python-essential: ## PY10: Python's essential chain as the gate's proposed steps run it (doc/python/PY11-PREP.md): the spec, the samples, both round trips and the front end on samples, synthetic and errors, then test/python/essential-aot.txt compiled and on the loop (bin/repr-python, bin/pyi; about a minute warm)
 	bin/repr-python spec-check
 	bin/repr-python samples
 	bin/repr-python roundtrip samples
 	bin/repr-python roundtrip --text samples
 	bin/pyi gen --check
+	bin/pyi golden
 	bin/pyi scope-check samples synthetic errors
 	bin/pyi compile-check --full samples synthetic errors
 	bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt
+
+pyi-golden: ## queue 247: the programs' own verdict: test/python/golden's reviewed expected outputs against their reviews, CPython's recorded runs and the awk models, with negative controls (bin/pyi golden; seconds)
+	bin/pyi golden
 
 pyi-bench: ## PY8: pyperformance's pure benchmarks run by CPython, compiled and on the loop, the seconds (bin/pyi bench)
 	bin/pyi bench

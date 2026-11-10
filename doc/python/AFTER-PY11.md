@@ -273,6 +273,8 @@ runs with the same wheels installed into a virtual environment under `.tmp/` by 
   - the oracle's libraries move too. python3 links the system's expat, libmpdec, sqlite, xz, bz2, zlib, libffi and
     openssl (run: `apk info -R python3`), and PY11-PREP's `:host-ids` hashes only `python3` and `libpython`.
 
+*Queue 233 (2026-11-08) surveyed the delta again, file by file, in `PY315-SURVEY.md` (3.15.2 fetched and pinned there); its findings and proposals supersede 3.2-3.4's estimates.*
+
 ### 3.2 The delta, measured (run on the two tarballs; 3.15.2 read, never run)
 
 | what | 3.14.10 | 3.15.2 | changed |
