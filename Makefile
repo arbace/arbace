@@ -21,6 +21,8 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
   repr-asm-extract repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
+  repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle \
+  repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -534,6 +536,24 @@ repr-asm-encode-record: ## amd64's encoding check recorded into test/asm/encode-
 	bin/repr-asm encode-check --record $(CORPORA)
 repr-asm-print-oracle: ## the oracle tier's, by hand: amd64's printed instructions against the host's llvm-mc 23.1.5, file by file (bin/repr-asm print-oracle)
 	bin/repr-asm print-oracle
+repr-asm-object: ## amd64's object assembler: FILE assembled into an ELF64 object as llvm-mc -filetype=obj writes it (bin/repr-asm object FILE OUT; FILE=..., OUT=...)
+	bin/repr-asm object $(FILE) $(OUT)
+repr-asm-object-check: ## amd64's objects judged against llvm-mc 23.1.5's recorded ones (musl, synthetic, mc-x86-obj) against test/asm/object-results-amd64.edn, the classes and the controls (bin/repr-asm object-check [CORPUS...]; CORPORA=...)
+	bin/repr-asm object-check $(CORPORA)
+repr-asm-object-record: ## amd64's object check recorded into test/asm/object-results-amd64.edn (bin/repr-asm object-check --record [CORPUS...]; CORPORA=...)
+	bin/repr-asm object-check --record $(CORPORA)
+repr-asm-object-oracle: ## the oracle tier's, by hand: a corpus's objects recorded by the host's llvm-mc 23.1.5 into test/asm/records/ and pinned (bin/repr-asm object-record CORPUS; CORPUS=musl|synthetic|mc-x86-obj)
+	bin/repr-asm object-record $(CORPUS)
+repr-asm-link: ## Arbace's static linker: ELF64 objects linked into a static x86-64 executable as lld lays one out (bin/repr-asm link OBJS... -o OUT; OBJS=..., OUT=...)
+	bin/repr-asm link $(OBJS) -o $(OUT)
+repr-asm-link-dump: ## an executable read back canonically: entry, segments, sections, symbols (bin/repr-asm link-dump EXE; EXE=...)
+	bin/repr-asm link-dump $(EXE)
+repr-asm-run-check: ## test/asm/run/'s programs assembled and linked by Arbace, run by the CPU and judged by their own verdicts, against test/asm/run-results-amd64.edn, the classes and the controls (bin/repr-asm run-check)
+	bin/repr-asm run-check
+repr-asm-run-record: ## the run check recorded into test/asm/run-results-amd64.edn (bin/repr-asm run-check --record)
+	bin/repr-asm run-check --record
+repr-asm-link-oracle: ## the oracle tier's, by hand: the host's ld (ld.lld when present, else ld.bfd) links the run check's objects, runs and canonical views compared (bin/repr-asm link-oracle)
+	bin/repr-asm link-oracle
 repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
 repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)

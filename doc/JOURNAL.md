@@ -3124,3 +3124,77 @@ cross-syntax 86,350 of 87,103, error lines 80 of 130, none failing, every contro
 arm64: AR2's generator reads Go's sources, not TableGen: unaffected. Considered: comparing TSFlags from `-gen-instr-info` instead of
 `-print-records`' fields (rejected: TSFlags leaves out ignoresVEX_L, IgnoresW, isCommutable, isPseudo and the operands); keeping the forward
 tie form since the encoder resolves either (rejected: the table is to be llvm-tblgen's, and the oracle now holds it to that).
+
+## 2026-11-10 amd64 assembly: AX4's first slice, ELF64 objects written as llvm-mc writes them and read back (branch `asm-ax4`, from `mac/asm-ax3` `55d62a05d`)
+
+AX4 of doc/asm/AMD64-SURVEY.md §12, its first slice (§7.3's writer and reader), on the light lane (stage 0, one run at a time, no lock;
+llvm-mc 23.1.5 only by hand, to record the references). Sources read and written again in Arbace (no code copied), all from
+llvm-project 23.1.5's release tarball (`test/asm/corpora.edn`'s `:llvmorg-23.1.5`, sha256 fb50b1ea..., the MC and X86 MCTargetDesc
+sources extracted into the worktree's `.tmp/` for reading): `llvm/lib/MC/ELFObjectWriter.cpp` (ELFWriter::writeObject,
+computeSymbolTable, isInSymtab, writeSymbol, mergeTypeForSet, recordRelocation, useSectionSymbol, writeRelocations,
+writeSectionHeaders), `StringTableBuilder.cpp` (multikeySort's tail order, the tail merge), `MCObjectStreamer.cpp` (fragments,
+emitInstruction, emitValueImpl, emitFill, emitNops, emitValueToAlignment, emitCodeAlignment, changeSection, emitLabel),
+`MCELFStreamer.cpp` (initSections, emitSymbolAttribute, CombineSymbolTypes, emitCommonSymbol, emitLocalCommonSymbol, emitIdent),
+`MCAssembler.cpp` (layout, layoutSection, relaxOnce with Stretch, relaxAlign, relaxInstruction, evaluateFixup), `MCDwarf.cpp`
+(FrameEmitterImpl: EmitCIE, EmitFDE, emitCFIInstruction, encodeAdvanceLoc, CIEKey), `MCSymbolELF.cpp` (getBinding),
+`MCStreamer.cpp` (emitCFIStartProc), `MCParser/ELFAsmParser.cpp` (parseSectionArguments, the defaults by name),
+`MCParser/AsmParser.cpp` (parseDirectiveFill, parseDirectiveSpace), `llvm/lib/Target/X86/MCTargetDesc/X86AsmBackend.cpp`
+(mayNeedRelaxation, fixupNeedsRelaxationAdvanced, relaxInstruction, evaluateFixup's PC-relative bias, applyFixup, writeNopData,
+getMaximumNopSize), `X86ELFObjectWriter.cpp` (getType64, getRelocType64, needsRelocateWithSymbol), `X86MCCodeEmitter.cpp`
+(emitImmediate, emitMemModRMByte's fixup kinds, isPCRel32Branch), `X86EncodingOptimizationForImmediate.def`, and
+`lib/Target/X86/X86InstrControl.td` (JMP_2/4, JCC_2/4).
+
+Built: `arbace/asm/elf.ae` (`arbace.asm.elf`: the ELF64 writer, a reader, the canonical view) and `arbace/asm/amd64/obj.ae`
+(`arbace.asm.amd64.obj`: the object assembler); `arbace.asm.amd64.asm`'s fixups carry their expression, kind, PC-relativity and offset
+(additive; AddCCFrm's JCC_4 to a symbol takes reloc_branch_4byte_pcrel); `bin/repr-asm object|object-dump|object-check|object-record`,
+the Makefile's `repr-asm-object*`; `test/asm/obj/*.s` (six synthetic tests of Arbace's own), `test/asm/records/obj-{musl,synthetic,
+mc-x86-obj}-llvm-mc-23.1.5.edn` with their `.sha256` (llvm-mc's objects, each made twice and compared, recorded by hand with the host's
+llvm-mc 23.1.5, `-triple x86_64-linux-musl -filetype=obj`), `test/asm/object-results-amd64.edn`, `divergences-object.edn`,
+`controls-object.txt`, `object_judge.ae`; doc/asm/AMD64.md §7, the survey's "As built: AX4 (first slice)", SPEC.md §7, LICENSE.md and
+doc/ARBACE.md.
+
+Results: musl 1.2.6's 32 objects and the 6 synthetic ones equal to llvm-mc's byte for byte; `MC/X86`'s object tests for x86-64 ELF,
+47 recorded: 30 byte for byte, 17 classed (APX 11, `.macro`/`.ifdef`/`.rept`/`.reloc` 5, `.loc` 1), none failing; five negative
+controls fail as they must. The encode check (99,509 met, 0 failing), AX1's and AR1's round trips, `bin/reap` (0 problems),
+`bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` unchanged and passing. Found and
+fixed on the way: the relaxed branches' encodings missing from the table, JCC_4's kind, absolute variables' binding, aliases' type and
+size, section names read as expressions, SHF_LINK_ORDER, section names as symbols, variables followed through, fills as fragments. A first
+survey run held `large-bss`'s 2^52-byte `.bss` as bytes and grew to 5 GiB before it was stopped by hand (above the lane's 2 GiB): fills
+are fragments since, never bytes in a SHT_NOBITS section, and a fill above 64 MiB elsewhere is classed.
+
+Considered: packs in the store for the references (AXS40 (b): kept for corpora above a megabyte), the MC tests' CHECK lines as the judge
+(AXS40 (c): needs the decoder for llvm-objdump `-d`), recomputing fixup kinds outside the encoder (AXS41 (b)). Proposed: AXS40-AXS44.
+Next (AXS43 (a)): the static linker and the first runs by the CPU, then the decoder.
+
+## 2026-11-10 amd64 assembly: AX4's second slice, Arbace's static linker and the first programs run by the CPU (branch `asm-ax4b`, from `mac/asm-ax4` `bbe9638e5`)
+
+Done on the light lane (stage 0, one run at a time, under 2 GiB, no lock). Studied: llvm-project 23.1.5's `lld/ELF/` from the pinned
+`.tmp/llvm/llvm-project-23.1.5.src.tar.xz` (SHA-256 `fb50b1ea...`, test/asm/corpora.edn's pin; extracted into the worktree's `.tmp/lld/`,
+never committed): `Driver.cpp`, `InputFiles.cpp` (initializeSymbols, the COMDAT rule), `SymbolTable.cpp`, `Symbols.cpp` (resolve,
+getSymVA, computeBinding), `LinkerScript.cpp` (getOutputSectionName, assignAddresses, the relro padding), `Writer.cpp` (getSectionRank,
+isRelroSection, createPhdrs, fixSectionAlignments, computeFileOffset, setPhdrs, removeEmptyPTLoad, demoteAndCopyLocalSymbols),
+`OutputSections.cpp` (commitSection, finalizeInputSections), `SyntheticSections.cpp` (EhFrameSection, GotSection, GotPltSection,
+RelroPaddingSection, sortSymTabSymbols), `InputSection.cpp` (getRelocTargetVA, getTlsTpOffset), `Relocations.cpp` (RelocScan::process),
+`Arch/X86_64.cpp` (getRelExpr, scanSectionImpl, relocate, adjustGotPcExpr, relaxGot, relaxGotNoPic, relaxTlsIeToLe, relaxOnce). Written
+again by hand in Arbace; no code copied.
+
+Built: `arbace/asm/link.ae` (`arbace.asm.link`: the static linker, ELF64 objects → a static ET_EXEC as lld lays one out with no script;
+the run check's builder, verdicts and controls; the canonical view of an executable for the oracle); `arbace.asm.elf`'s reader gives each
+relocation its target section's index (`:target`, additive); `bin/repr-asm link|link-dump|run-check|link-oracle`; the Makefile's
+`repr-asm-link`, `-link-dump`, `-run-check`, `-run-record`, `-link-oracle`; `test/asm/run/` (18 tests of Arbace's own with their verdicts
+in their headers, helpers and second objects in `lib/`; four take musl 1.2.6's `crti.s`, `crtn.s`, `memcpy.s`, `memmove.s`, `memset.s`,
+`setjmp.s`, `longjmp.s` from its pinned tarball, assembled by Arbace), `test/asm/run-results-amd64.edn`, `divergences-run.edn`,
+`controls-run.txt`, `run_judge.ae`; doc/asm/AMD64.md §8, the survey's "As built: AX4 (second slice)", LICENSE.md, doc/ARBACE.md.
+
+Results: 18 of 18 programs assembled, linked and run by the CPU meet their own verdicts (16 runs: §3's P4 among them, exit 42 and
+`hello`; two link refusals in lld's words); the four negative controls fail as they must; about 12 s, 0.75 GiB. The oracle by hand: no
+ld.lld on the host, so GNU ld 2.45.1 (`ld.bfd -static`) linked the same objects: all 16 runs identical, the canonical differences all by
+cause (its script and `-z separate-code`, its wider GOT relaxation, no PT_PHDR/PT_GNU_STACK, linker symbols always global, hidden globals
+kept global). The object check (68 of 85 byte for byte), the encode check, AX1's and AR1's round trips, `bin/reap`, `bin/crops-score
+--judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` unchanged and passing.
+
+Considered: static PIE first (rejected: ET_EXEC is lld's default and needs no self-relocation code in a freestanding program), linking
+musl's `libc.a` (not possible without compiling its C at check time: AX7, AXS47), lld's hash-sharded order of merged pieces (AXS49),
+judging by GNU ld's executables (rejected: another linker's layout, kept as the by-hand oracle), lld itself as the byte reference (not
+installed; AXS46). Proposed AXS45-AXS50 (AX4's first slice's are AXS40-AXS44 since the merge, `asm-merged`).
+Next (AXS50 (a)): the decoder (x86asm), AX4's remaining exit.
