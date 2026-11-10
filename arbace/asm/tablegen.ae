@@ -236,13 +236,26 @@
       (do (adv p)
           (let [ty (when (eat p "<") (let [t (parse-type p)] (expect p :punct ">") t))]
             (expect p :punct "(")
+            (cond
+              ;; !switch(X, CASE: VALUE, ..., DEFAULT) (AArch64's .td; TGParser's ParseOperation, tgtok::XSwitch)
+              (= v "switch")
+              (let [x (parse-value p)
+                    _ (expect p :punct ",")
+                    [cs dflt] (loop [out []]
+                                (let [c (parse-value p)]
+                                  (if (eat p ":")
+                                    (let [out (conj out [c (parse-value p)])]
+                                      (if (eat p ",") (recur out) (do (expect p :punct ")") [out nil])))
+                                    (do (eat p ",") (expect p :punct ")") [out c]))))]
+                [:switch x cs dflt])
+              :else
             (if (= v "cond")
               (let [cs (loop [out []]
                          (if (eat p ")") out
                              (let [c (parse-value p) _ (expect p :punct ":") x (parse-value p) out (conj out [c x])]
                                (if (eat p ",") (recur out) (do (expect p :punct ")") out)))))]
                 [:cond cs])
-              [:bang v ty (parse-list p "(" ")")])))
+              [:bang v ty (parse-list p "(" ")")]))))
       :id
       (case v
         "true" (do (adv p) [:int 1])
@@ -537,6 +550,7 @@
       "substr" (let [[s a n] (mapv e args) s (vstr s) a (as-int a) n (if (some? n) (as-int n) (count s))]
                  (subs s (min a (count s)) (min (count s) (+ a n))))
       "find" (let [[s t a] (mapv e args)] (.indexOf ^String s ^String t (int (if a (as-int a) 0))))
+      "match" (let [[s r] (mapv e args)] (if (re-find (re-pattern (vstr r)) (vstr s)) 1 0))
       "tolower" (str/lower-case (e (first args)))
       "toupper" (str/upper-case (e (first args)))
       "cast" (let [v (e (first args))]
@@ -572,6 +586,9 @@
                     (mapv f seq)))
       "filter" (let [[v l x] args n (second v)]
                  (vec (filter #(not (zero? (long (as-int (ev x {:vars {n {:v %}} :up scope} rec))))) (e l))))
+      ;; !sort(VAR, LIST, KEY): the list sorted by each element's key (Target.td's SubtargetFeature Implies), stably
+      "sort" (let [[v l x] args n (second v)]
+               (vec (sort-by #(let [k (ev x {:vars {n {:v %}} :up scope} rec)] (if (string? k) k (as-int k))) (e l))))
       "foldl" (let [[init l a v x] args an (second a) vn (second v)]
                 (reduce (fn [acc it] (ev x {:vars {an {:v acc} vn {:v it}} :up scope} rec)) (e init) (e l)))
       "repr" (pr-str (e (first args)))
@@ -616,6 +633,10 @@
                  (catch arbace.lang.ExceptionInfo e
                    (if (:expr (ex-data e)) (throw e)
                        (throw (ex-info (str (.getMessage e) " in " (subs (pr-str x) 0 (min 300 (count (pr-str x))))) (assoc (ex-data e) :expr true)))))))
+    :switch (let [[_ y cs d] x v (ev y scope rec)]
+              (if-let [[_ r] (first (filter (fn [[c]] (veq v (ev c scope rec))) cs))]
+                (ev r scope rec)
+                (if d (ev d scope rec) (fail "!switch: no case holds"))))
     :cond (first (or (some (fn [[c v]] (when-not (zero? (long (as-int (ev c scope rec)))) [(ev v scope rec)])) (second x))
                      (fail "!cond: no condition holds")))
     :inst (let [[_ c pos named] x

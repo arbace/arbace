@@ -9,7 +9,7 @@
   classes test/asm/divergences-encode-arm64.edn and the record test/asm/encode-results-arm64.edn: each file's counts of lines
   and passes a level, and every non-pass by ID, equal to the record's (--record rewrites it)."
   (:require [arbace.repr.asm :as asm]
-            [arbace.repr.asm.arm64.enc :as enc]
+            [arbace.repr.asm.arm64.lenc :as enc]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable Future]))
 
@@ -73,8 +73,10 @@
 (defn- ws ^String [^String s] (str/trim (str/replace s #"\s+" " ")))
 
 (defn judge-text
-  "One CHECK text's levels: {:encode [RESULT REASON] :print [RESULT REASON]}."
-  [^String text d bytes]
+  "One CHECK text's levels: {:encode [RESULT REASON] :print [RESULT REASON]}; the print spells the immediates by the kinds of
+  the row that encodes the text (ARS25), in hexadecimal throughout under `imm-hex?` (the run's -print-imm-hex)."
+  ([text d bytes] (judge-text text d bytes false))
+  ([^String text d bytes imm-hex?]
   (let [forms (try (asm/read-text text d) (catch Exception e (str "read: " (.getMessage e))))]
     (if (string? forms)
       {:encode [:fail forms] :print [:fail forms]}
@@ -97,9 +99,13 @@
                          :operands [:fail (str "operands: " (ws text))]
                          [:fail (.getMessage x)]))
                      (catch Exception x [:fail (str "crash: " x)])))
-         :print (try (let [out (asm/print-text forms d)]
+         :print (try (let [row (when (= 1 (count forms)) (try (:row (enc/encode f)) (catch Exception _ nil)))
+                           forms (if (and (seq? f) (symbol? (first f)) (not (str/starts-with? (str (first f)) ".")) (nil? (namespace (first f))))
+                                   [(enc/print-kinds f row imm-hex?)]
+                                   forms)
+                           out (asm/print-text forms d)]
                        (if (= (ws out) (ws text)) [:pass ""] [:fail (str "print: " (ws out) " (stated: " (ws text) ")")]))
-                     (catch Exception x [:fail (str "print: crash " x)]))}))))
+                     (catch Exception x [:fail (str "print: crash " x)]))})))))
 
 (defn stated
   "The text and bytes line `i` of `lines` states: [_ TEXT BYTES INPUT?] (TEXT nil when it states none; INPUT? when TEXT is the
@@ -117,11 +123,18 @@
               (when-let [t (paired-input lines i)] [nil t bs true])
               [nil nil bs])))))
 
+(declare run-lines prefix-base)
+
 (defn check-file
   "The rows of one file: [ID LEVEL RESULT REASON], LEVEL :encode or :print."
   [n ^String path flags]
   (let [d {:arch :arm64 :syntax (if (flags "apple") :apple :gnu)}
-        lines (vec (str/split-lines (asm/latin1 path)))]
+        lines (vec (str/split-lines (asm/latin1 path)))
+        runs (run-lines lines)
+        imm-hex? (fn [^String l] (let [[_ p] (re-matches text-re l)
+                                      p (prefix-base p)
+                                      r (first (filter #((:prefixes %) p) runs))]
+                                  (boolean (:imm-hex? r))))]
     (vec
      (mapcat
       (fn [[i ^String l]]
@@ -130,14 +143,102 @@
                 [_ text bytes input?] (stated lines i)]
             (if-not text
               [[id :encode :fail "read: no CHECK text before the encoding"]]
-              (let [res (map #(judge-text % d bytes) (fc-texts text))
+              (let [hx (imm-hex? l)
+                    res (map #(judge-text % d bytes hx) (fc-texts text))
                     pick (fn [k] (or (first (filter #(= :pass (first (k %))) res)) (first res)))
                     e (:encode (pick :encode))
                     p (:print (pick :print))]
                 (if input? [(into [id :encode] e)] [(into [id :encode] e) (into [id :print] p)]))))))
       (map-indexed vector lines)))))
 
+(defn run-lines
+  "The test's RUN lines, continuations joined: [{:not? B :mcpu CPU :mattr [...] :prefixes #{...}}], the llvm-mc runs only."
+  [lines]
+  (let [runs (reduce (fn [acc ^String l]
+                       (if-let [[_ t] (re-find #"RUN:\s?(.*)$" l)]
+                         (if (and (seq acc) (str/ends-with? (str/trim (peek acc)) "\\"))
+                           (conj (pop acc) (str (subs (str/trim (peek acc)) 0 (dec (count (str/trim (peek acc))))) " " t))
+                           (conj acc t))
+                         acc))
+                     [] lines)]
+    (let [pfx-of (fn [^String fc] (let [p (mapcat #(str/split % #",") (map second (re-seq #"--?check-prefix(?:es)?[= ]([A-Za-z0-9_,-]+)" fc)))]
+                                    (if (seq p) p ["CHECK"])))
+          ;; a FileCheck run of its own reading a file an llvm-mc run wrote (`> %t.1 2> %t.2`, then `FileCheck ... < %t.2`)
+          readers (for [^String r runs :when (and (not (str/includes? r "llvm-mc")) (str/includes? r "FileCheck"))
+                        :let [[_ f] (re-find #"<\s*(%t[\w.]*)" r)] :when f]
+                    [f (pfx-of r)])]
+      (vec (for [^String r runs :when (str/includes? r "llvm-mc")]
+             (let [[mc fc] (let [i (.indexOf r "|")] (if (neg? i) [r ""] [(subs r 0 i) (subs r i)]))
+                   outs (set (map second (re-seq #"\d?>\s*(%t[\w.]*)" mc)))
+                   pfx (concat (when (str/includes? fc "FileCheck") (pfx-of fc))
+                               (mapcat (fn [[f p]] (when (outs f) p)) readers))]
+               {:not? (boolean (re-find #"\bnot\s+llvm-mc" mc))
+                :imm-hex? (boolean (re-find #"(?<![-\w])-print-imm-hex" mc))
+                :mcpu (second (re-find #"-mcpu[= ]([\w.-]+)" mc))
+                :mattr (vec (mapcat #(str/split % #",") (map second (re-seq #"-mattr[= ]([^\s]+)" mc))))
+                :prefixes (set (if (seq pfx) pfx ["CHECK"]))}))))))
+
+(defn features-for
+  "The enabled features of the run (an error run first) whose FileCheck prefixes take `prefix`, else of the first run."
+  [runs ^String prefix]
+  (let [prefix (str/replace prefix #"-(NEXT|SAME|DAG|NOT|LABEL|EMPTY|COUNT-\d+)$" "")
+        r (or (first (filter #(and (:not? %) ((:prefixes %) prefix)) runs))
+              (first (filter #((:prefixes %) prefix) runs))
+              (first runs))]
+    (enc/features-of (:mcpu r) (:mattr r))))
+
+(defn- collapse ^String [^String s] (str/trim (str/replace s #"\s+" " ")))
+
+(defn message-meets?
+  "LLVM's error fragment (FileCheck's text after `error:`) found in our message, white space collapsed, as FileCheck finds it."
+  [^String msg ^String fragment]
+  (boolean (some #(str/includes? (collapse msg) (collapse %)) (fc-texts fragment))))
+
+(defn input-file
+  "The input level (ARS29): each input instruction paired with the encoding line FileCheck matches it to, in order, under the
+  first check prefix whose encoding lines are as many as the file's input instructions (a line that reads to one instruction
+  form, not a directive or a label); each input encoded and judged by that line's stated bytes. [ID :input RESULT REASON], ID
+  the input's line; none when no prefix pairs."
+  [n ^String path flags]
+  (let [d {:arch :arm64 :syntax (if (flags "apple") :apple :gnu)}
+        lines (vec (str/split-lines (asm/latin1 path)))
+        inputs (vec (for [[i ^String l] (map-indexed vector lines)
+                          :let [t (str/trim l)]
+                          :when (and (seq t) (not (re-find #"^(//|;|#|@)" t)))
+                          :let [fs (try (asm/read-text t d) (catch Exception _ nil))
+                                f (first fs)]
+                          :when (and (= 1 (count fs)) (seq? f) (symbol? (first f)) (nil? (namespace (first f)))
+                                     (not (str/starts-with? (str (first f)) ".")))]
+                      [i f]))
+        enc-lines (for [[i ^String l] (map-indexed vector lines)
+                        :when (re-find #"encoding:\s*\[" l)
+                        :let [[_ p] (re-matches text-re l)]
+                        :when p]
+                    [i (prefix-base p) (last (or (re-matches alone-re l) (re-matches line-re l)))])
+        by-prefix (group-by second enc-lines)
+        order (distinct (map second enc-lines))
+        pfx (first (filter #(= (count (by-prefix %)) (count inputs)) order))]
+    (when (and pfx (seq inputs))
+      (vec (for [[[i f] [_ _ bytes]] (map vector inputs (by-prefix pfx))]
+             (let [id (str n ":" (inc i))
+                   exp (expected (str bytes))]
+               (if (nil? exp)
+                 [id :input :fail "mismatch: the stated encoding is not four bytes"]
+                 (try
+                   (let [{:keys [word]} (enc/encode f) [m v] exp]
+                     (if (= (bit-and (long word) (long m)) (long v))
+                       [id :input :pass ""]
+                       [id :input :fail (format "mismatch: %08x, stated %08x (mask %08x)" word v m)]))
+                   (catch arbace.lang.ExceptionInfo x
+                     (case (:asm/refused (ex-data x))
+                       nil [id :input :fail (str "crash: " (.getMessage x))]
+                       :operands [id :input :fail (str "operands: " (ws (asm/print-text [f] d)))]
+                       [id :input :fail (.getMessage x)]))
+                   (catch Exception x [id :input :fail (str "crash: " x)])))))))))
+
 (def error-re #"^\s*(?://|;|#|@)\s*([A-Za-z0-9_,-]+):\s*(?:[^ ]*:\d+:\d+: )?error:\s*(.*?)\s*$")
+
+(defn- prefix-base ^String [p] (str/replace (str p) #"-(NEXT|SAME|DAG|NOT|LABEL|EMPTY|COUNT-\d+)$" ""))
 
 (defn rejected-text
   "The instruction an `error:` line at `i` is about: the CHECK line after it that echoes the source (`CHECK-ERROR-NEXT: add
@@ -146,7 +247,9 @@
   (let [lines (vec lines)
         nxt (when (< (inc i) (count lines)) (re-matches text-re (lines (inc i))))
         t (when nxt (nth nxt 2))]
-    (if (and t (not (re-find #"^(error|warning|note):|^\^|^\{\{" t)) (not (str/includes? (str (second nxt)) "RUN")))
+    ;; the echo is the next line under the error's own prefix; a line under another (`CHECK-UNKNOWN: 19017440 <unknown>`) is not
+    (if (and t (not (re-find #"^(error|warning|note):|^\^|^\{\{" t)) (not (str/includes? (str (second nxt)) "RUN"))
+             (= (prefix-base (second nxt)) (prefix-base (second (re-matches text-re (lines i))))))
       t
       (loop [j (dec i)]
         (when (>= j 0)
@@ -157,19 +260,26 @@
 
 (defn reject-file
   "The reject level's rows of an error test (its RUN lines run `not llvm-mc`): each `error:` line's instruction read and encoded,
-  [ID :reject RESULT REASON]: `rejected: ...` when repr/asm refuses it (LLVM's message not given: AR2 gives none yet),
-  `accepted: MESSAGE | TEXT` when it encodes, `no-text: MESSAGE` when the line names no instruction."
+  [ID :reject RESULT REASON], under the features of the run that checks the line's prefix (ARS26): a pass when repr/asm refuses
+  it with a message LLVM's fragment is found in (ARS27), else `rejected: OURS | LLVM: FRAGMENT`; `accepted: MESSAGE | TEXT` when
+  it encodes, `no-text: MESSAGE` when the line names no instruction, `unchecked: PREFIX` when no RUN line checks its prefix."
   [n ^String path flags]
   (let [d {:arch :arm64 :syntax (if (flags "apple") :apple :gnu)}
-        lines (vec (str/split-lines (asm/latin1 path)))]
+        lines (vec (str/split-lines (asm/latin1 path)))
+        runs (run-lines lines)]
     (vec
      (for [[i ^String l] (map-indexed vector lines)
            :let [[_ pfx msg] (re-matches error-re l)]
            :when (and msg (not (str/starts-with? pfx "RUN")))]
+      (binding [enc/*features* (features-for runs pfx)]
        (let [id (str n ":" (inc i))
              t (rejected-text lines i)]
-         (if-not t
+         (cond
+           ;; a prefix no RUN line's FileCheck checks states no verdict (`CHECK-ERROR-AARCH64:` in a file run with ERROR and ERROR-ARM64)
+           (not (some #((:prefixes %) (prefix-base pfx)) runs)) [id :reject :fail (str "unchecked: " (prefix-base pfx))]
+           (not t)
            [id :reject :fail (str "no-text: " msg)]
+           :else
            (let [t (first (fc-texts t))
                  forms (try (asm/read-text t d) (catch Exception e (str "read: " (.getMessage e))))]
              (cond
@@ -182,9 +292,12 @@
                     [id :reject :fail (str "accepted: " msg " | " (ws t))]
                     (catch arbace.lang.ExceptionInfo x
                       (if (:asm/refused (ex-data x))
-                        [id :reject :fail (str "rejected: " (.getMessage x))]
+                        (let [m (or (:asm/message (ex-data x)) (.getMessage x))]
+                          (if (message-meets? m msg)
+                            [id :reject :pass ""]
+                            [id :reject :fail (str "rejected: " m " | LLVM: " msg)]))
                         [id :reject :fail (str "crash: " (.getMessage x))]))
-                    (catch Exception x [id :reject :fail (str "crash: " x)]))))))))))
+                    (catch Exception x [id :reject :fail (str "crash: " x)])))))))))))
 
 (defn- pool-map [f xs]
   (let [pool (Executors/newFixedThreadPool (Integer/parseInt (or (System/getenv "REPR_ASM_THREADS") "4")))
@@ -195,7 +308,7 @@
 
 (defn classify [classes [id lvl res why]]
   (when-not (= res :pass)
-    (some (fn [c] (when (and (or (nil? (:level c)) (= (:level c) lvl))
+    (some (fn [c] (when (and (or (nil? (:level c)) (= (:level c) lvl) (and (set? (:level c)) ((:level c) lvl)))
                              (or (some #(re-find % (str why)) (:match c)) (some #{id} (:ids c))))
                     (:id c)))
           classes)))
@@ -239,6 +352,26 @@
         "same" "differs")
       "left")))
 
+(defn control-message
+  "A negative control of the reject level (`_control/msg-...`): SUBJECT's error line's instruction refused, under its run's
+  features, and its message judged against REFERENCE's error fragment: `differs` (as it must), `same`, or `left`."
+  [items subject reference]
+  (let [paths (into {} (map (fn [[n p fl]] [n [p fl]]) items))
+        at (fn [^String id] (let [k (.lastIndexOf id ":") [p fl] (paths (subs id 0 k))]
+                              (when p [(vec (str/split-lines (asm/latin1 p))) (dec (Long/parseLong (subs id (inc k)))) fl])))
+        [ls i fl] (at subject)
+        [rls ri] (at reference)
+        [_ pfx _] (when ls (re-matches error-re (ls i)))
+        [_ _ frag] (when rls (re-matches error-re (rls ri)))
+        t (when pfx (rejected-text ls i))]
+    (if (and t frag)
+      (let [d {:arch :arm64 :syntax (if (fl "apple") :apple :gnu)}
+            m (binding [enc/*features* (features-for (run-lines ls) pfx)]
+                (try (enc/encode (first (asm/read-text (first (fc-texts t)) d))) nil
+                     (catch arbace.lang.ExceptionInfo x (or (:asm/message (ex-data x)) (.getMessage x)))))]
+        (if (and m (message-meets? m frag)) "same" "differs"))
+      "left")))
+
 (defn -main
   "encheck RESULTS CLASSES CONTROLS RECORD? CORPUS=LIST..."
   [results classes-path controls record & lists]
@@ -249,17 +382,17 @@
                           fl (set (str/split (or fl "") #" "))]
                     :when (not (fl "other-arch"))]
                 [(str c "/" n) p fl])
-        rows (vec (apply concat (pool-map (fn [[n p fl]] (concat (check-file n p fl) (when (fl "reject") (reject-file n p fl)))) items)))
+        rows (vec (apply concat (pool-map (fn [[n p fl]] (concat (check-file n p fl) (input-file n p fl) (when (fl "reject") (reject-file n p fl)))) items)))
         classes (read-string (slurp classes-path))
         problems (atom [])
         by (fn [lvl] (frequencies (for [r rows :when (= lvl (second r))] (or (classify classes r) (when (= :pass (nth r 2)) :pass) :unclassed))))]
-    (doseq [lvl [:encode :print :reject]]
+    (doseq [lvl [:encode :print :input :reject]]
       (let [b (by lvl)]
         (println (str "repr-asm encode-check " (name lvl) ": " (reduce + (vals b)) " lines, " (get b :pass 0) " pass"
                       (apply str (for [[k n] (sort-by str (dissoc b :pass))] (str ", " n " " (name k))))))))
     (doseq [l (str/split-lines (slurp controls)) :when (and (seq l) (not (str/starts-with? l "#")))
             :let [[cid subj ref] (str/split l #"\s+")
-                  v (control items subj ref)]]
+                  v (if (str/starts-with? cid "_control/msg-") (control-message items subj ref) (control items subj ref))]]
       (if (= v "differs")
         (println (str "control " cid ": fails as it must"))
         (swap! problems conj (str "control " cid ": " v))))
@@ -289,6 +422,7 @@
             (swap! problems conj (str "recorded, not run: " f)))
           (doseq [x (sort (remove old-np new-np))] (swap! problems conj (str "was :pass, now not: " (pr-str x))))
           (doseq [x (sort (remove new-np old-np))] (swap! problems conj (str "passes, recorded not (record it): " (pr-str x)))))))
+    (when-let [f (System/getenv "REPR_ASM_PROBLEMS")] (spit f (str/join "\n" @problems)))
     (doseq [p (take 40 @problems)] (println (str "FAIL: " p)))
     (when (> (count @problems) 40) (println (str "FAIL: ... " (- (count @problems) 40) " more")))
     (shutdown-agents)

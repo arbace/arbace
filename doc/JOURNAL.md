@@ -3471,3 +3471,53 @@ Considered: a SoftFloat port now (AXS83 (b)); the VEX tables restricted to BMI's
 
 Rule slips: one command used process substitutions (`<(...)`, a no-op `cmp` loop and a `diff` of a printed file against its source);
 one test read `/dev/stdin` through a here-string. Harmless.
+
+## 2026-11-10 arm64 assembly: AR2's second slice, LLVM's AArch64 records by Arbace's TableGen (branch `asm-ar2b`, from `mac/asm-merged` `9f880b7ab`)
+
+The user decided ARS24 (a) at about 10:30 UTC, amending ARS5 (a): arm64's encodings beyond ARMv8.0, the system registers, PSTATE
+fields, operations and features from LLVM's AArch64 `.td` files in the pinned llvm-project 23.1.5 tarball
+(`.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, test/asm/corpora.edn's `:llvmorg-23.1.5`), read by Arbace's own TableGen; and ARS25-ARS29
+(a): print operands by argument kind, feature sets from each test's RUN line, LLVM's messages on refusal (the reject level judged by
+the fragment), the per-line record kept until AR10, the input lines encoded with their CHECK lines. Built on the light lane (stage 0,
+under 1.5 GiB, one run at a time, no lock, nothing fetched).
+
+What was done, in order:
+- Extracted from the tarball (test/asm/corpora.edn's new `:tables` entry `:aarch64-td`): `llvm/lib/Target/AArch64/*.td`,
+  `llvm/include/llvm/TableGen/*.td` and `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`, beside X86's. Arbace's TableGen
+  (`arbace/asm/tablegen.ae`) needed three operators X86's files never used: `!switch` (AArch64InstrFormats.td's
+  ChangeElementTypeToInteger), `!match` (AArch64SystemOperands.td's TLBIPEntry) and `!sort` (Target.td's SubtargetFeature `Implies`),
+  added after llvm/docs/TableGen/ProgRef.rst; AArch64.td then loads, 67,124 records in 36 s at 1.4 GiB. amd64's `table check` still
+  byte for byte.
+- `arbace/asm/arm64/gen.ae` writes `asm/arm64/table.edn`. The encoding is read as CodeEmitterGen reads `Inst`: before evaluating it,
+  each unset `bits<n>`/`bit` field of the record is given bits naming itself (`[Rd 0]`...), so the slices `let Inst{4-0} = Rd;` copy
+  them; a field partly set (`let scale{5} = 1;`, FP16's scaled conversions, found by a mismatch) keeps its set bits. The drop list
+  keeps PatFrags and ComplexPattern (imm0_7 and addsub_shifted_imm64 are Operands too). The system operands' features read Requires,
+  ExtraRequires and RequiresStr together. showMatchError's literal messages and ExtensionDefs' names are read from
+  AArch64AsmParser.cpp as text. By hand, llvm-tblgen 23.1.5 `-print-records` (2 s): the same 7,484 instructions, AsmStrings and
+  encodings, 0 differences (`bin/repr-asm --arch arm64 table oracle`, `test/asm/table_oracle_arm64.ae`).
+- `arbace/repr/asm/arm64/lenc.ae`: Go's table first, then LLVM's matchables of the mnemonic as templates of the operands' text. Each
+  failure found by the encode check led to a rule from AArch64AsmParser.cpp: AltNames (`v0`) only for NEON's vector classes (`str v0`
+  is refused), an alias's own operand types and its argument used twice (cinc's `src`), the inverted condition `inv_ccode`, register
+  pairs with `x30, xzr` and `x31`, GPR64sp0's `[xN, #0]` for every matchable of a mnemonic that has one (tryParseGPR64sp0Operand
+  parses before the matcher; `ldr x4, [x9, #0], #4` stays refused), `$A$B` as a vector index or two operands, parseSysAlias with its
+  REG_OPTIONAL rule (FEAT_TLBID) and parseSyspAlias with TLBIP's D128/TLBID rule (AArch64BaseInfo), sxt/uxt's twiddles, MOPS's rules.
+  Go's add/sub immediate learnt tryParseImmWithOptionalShift (`add w3, w4, #4194304` is `#1024, lsl #12`): the first slice's contrary
+  note came from `CHECK-ERROR-AARCH64:`, a prefix no RUN line of basic-a64-diagnostics checks; the reject level now judges only lines a
+  run checks (59 `:unchecked-prefix`).
+- `encheck.ae`: RUN lines parsed (`-mcpu`, `-mattr`, the prefixes, a separate FileCheck run reading `%t.N`), the reject level under the
+  features of the run that checks the line, judged by LLVM's fragment (`message-meets?`); the echo of an error is the next line under
+  the error's own prefix (`CHECK-UNKNOWN: ... <unknown>` was read as an instruction); the print by kind (ARS25; the forms' `(hex N W)`
+  printed by `arm64/gnu.ae`); the input level (ARS29).
+
+Counts (`bin/repr-asm --arch arm64 encode-check`, 0 failing, about 26 s and 0.9 GiB; recorded from that run): encode 12,290 of 12,298
+(was 7,685; 7 `:check-text`, 1 `:directive`), print 12,222 of 12,227 (was 12,156), input 6,212 of 6,212 (new), reject 4,176 of 5,030
+with LLVM's fragment (was 0; 484 `:message`, 265 `:no-instruction`, 59 `:unchecked-prefix`, 31 `:relocation`, 14 `:feature-gate`, 1
+`:operand-spelling`); eleven controls (five new: LDADD/LDADDA, FADD/FSUB in FP16, two TLBI operations, two system registers, a
+message against another line's fragment), each failing as it must. Also run: `bin/repr-asm --arch arm64 table check` (both tables, 53 s,
+1.5 GiB), `bin/repr-asm table check` (amd64, byte for byte, 147 s, 1.3 GiB), AR1's round trips on both arches (as recorded), `make
+check-makefile`.
+
+Considered: generating the matcher as AsmMatcherEmitter does (operand classes ordered, the matchables sorted; too large for one slice,
+the structural matcher meets every stated encoding); LLVM's matcher first with Go's table as the cross-check (kept for ARS30: the base
+lines keep the first slice's rows); the features at the encode and input levels too (their lines' features are also the tests'
+`.arch` directives, ARS31). Proposed ARS30-ARS32 (doc/asm/ARM64-SURVEY.md).

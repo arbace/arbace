@@ -206,6 +206,13 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   printed back 12,156 of 12,227 (66 hexadecimal spellings); the 188 error tests' 5,030 `error:` lines classed (refused without
   LLVM's message, feature-gated, relocations). Proposed ARS24-ARS29 (ARS24: LLVM's AArch64 `.td` for the extensions and registers,
   amending ARS5 (a): the user's). Next: ARS24's table, the print by argument kind, the input lines.
+- Assembly, arm64: `asm-ar2b` (on `asm-merged`; AR2's second slice, doc/asm/ARM64-SURVEY.md, "As built: AR2 (second slice)"; ARS24-ARS29
+  (a), the user's of 2026-11-10): LLVM's AArch64.td read by Arbace's TableGen into `asm/arm64/table.edn` (7,484 instructions, 3,053
+  aliases, 1,657 system registers, the features and processors, AArch64AsmParser's messages; `table check` byte for byte, `table
+  oracle` against llvm-tblgen 0 differences), the matcher and encoder over it after Go's table, feature sets from the RUN lines, LLVM's
+  messages, the print by kind, the input level: encode 12,290 of 12,298 (was 7,685), print 12,222 of 12,227 (was 12,156), input 6,212
+  of 6,212 (new), reject 4,176 of 5,030 with LLVM's fragment (was 0), none failing, eleven controls. Proposed ARS30-ARS32. Next: the
+  base cross level (ARS30), the directives' features (ARS31), the parser's messages (ARS32); AR3's decoder.
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,

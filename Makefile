@@ -23,7 +23,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
   repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle \
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
-  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
+  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
   x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
   repr-rust-native-check \
@@ -589,10 +589,12 @@ x86i-decode-record: ## x86i's decode check recorded into test/asm/x86i-decode-re
 	bin/repr-asm x86i-decode-check --record
 repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
-repr-asm-table-arm64: ## A64's encoding table regenerated from Go's arm64asm and cmd/internal/obj/arm64 (bin/repr-asm --arch arm64 table gen)
+repr-asm-table-arm64: ## A64's encoding tables regenerated: Go's arm64asm and cmd/internal/obj/arm64's, and LLVM's AArch64 records by Arbace's TableGen (bin/repr-asm --arch arm64 table gen)
 	bin/repr-asm --arch arm64 table gen
-repr-asm-table-check-arm64: ## the committed A64 table equal to a fresh generation from TamaGo's GOROOT (bin/repr-asm --arch arm64 table check)
+repr-asm-table-check-arm64: ## the committed A64 tables equal to a fresh generation from TamaGo's GOROOT and llvm-project 23.1.5's AArch64 .td (bin/repr-asm --arch arm64 table check)
 	bin/repr-asm --arch arm64 table check
+repr-asm-table-oracle-arm64: ## the oracle tier's, by hand: the LLVM table's instructions, AsmStrings and encodings against the host's llvm-tblgen 23.1.5 (bin/repr-asm --arch arm64 table oracle)
+	bin/repr-asm --arch arm64 table oracle
 repr-asm-encode-check-arm64: ## AR2's encode check: MC/AArch64's stated encodings, CHECK texts and error lines against test/asm/encode-results-arm64.edn, its classes and controls (bin/repr-asm --arch arm64 encode-check [CORPUS...]; CORPORA=...)
 	bin/repr-asm --arch arm64 encode-check $(CORPORA)
 repr-asm-encode-record-arm64: ## AR2's encode check recorded into test/asm/encode-results-arm64.edn (bin/repr-asm --arch arm64 encode-check --record)
