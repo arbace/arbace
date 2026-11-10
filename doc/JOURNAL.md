@@ -3648,3 +3648,33 @@ From `.tmp/night12/DIAGNOSIS-N11.md` (rows cpp-route, rejected/cpp-dg, lb-dg-ref
   `.tmp/cpp-gcc`).
 - Not done here, left by the slot (diagnosis): independence.edn's own-route cases (the slot's `ours` counter printed 0; read the `route`
   files first). Checks: `bin/reap` 0 problems (41 of 44 cells), `bin/crops-score --record`, `--judge --strict` exit 0.
+
+## 2026-11-10: C++'s CP338 (a) and CP350 (a), the run corpora's refusals by our route (branch `cpp-cp338`)
+
+- **What**: the user's decisions of 2026-11-10 (about 10:30 UTC: CP338 (a) and CP344-CP351 as recommended), on a branch from
+  mac/cpp-props5 57dd92021. In CP338 (a)'s order (the parser's declines, the threads, the singles, `__complex__`): `main()` with no
+  type as GCC's grokdeclarator takes it (a pedantic diagnostic, dropped without -pedantic-errors); a forward-declared class's scope
+  looking in its definition's (iosfwd's streambuf typedef); C++23's multidimensional subscript; the fences and the lock-free queries;
+  GNU's asm statement parsed into its parts, the empty barrier generated as clang does; `__builtin_clear_padding` as clang 23 writes
+  it; the defaulted secondary comparisons (they had been emitted `unreachable`) and `!=`'s rewritten candidate when none is viable;
+  variable templates' partial specializations and their constants in a type's text; `sizeof...` in a type's text; an alias template
+  as `__make_integer_seq`'s sequence; a non-type pack's parameter type in its own template's scope; ADL through inline namespaces;
+  a main file's typedef of a not-yet-defined template's specialization declared again later; packs through a template template
+  parameter. CP350 (a): under `auto` a program goes to our route when every option is one it models (-D, -U, -I, -fexceptions,
+  -fno-exceptions), and every program by ours is given its options. Clang's behaviour was read from clang 23.1.5's recorded IR (the
+  pack cpp-ir-gxx-dg-run) and clang/lib/CodeGen's CGBuiltin.cpp and CGStmt.cpp at llvmorg-23.1.5 (Apache-2.0 WITH LLVM-exception),
+  GCC's from gcc/cp/decl.cc at gcc-15.2.0 (the pinned tarball); no code ported.
+- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (S5a of the plan).
+- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: CP338 (a) and CP350 (a)"): the 82 programs by our route 57 → 62 generated (none
+  lost); codegen-gen 154 of 154 unchanged; the dg every-10th sample 121 → 122 own passes (variadic-ttp3), none lost; `bin/reap` 0
+  problems after recording the matrix again (cpp-props5's CP328 class move, the same at the base); `bin/crops-score --judge --strict`
+  0 problems. The new programs' runs: see the survey (the lowered runtime is a long build; its outcome below or the night's).
+- **Not built**: explicit object parameters, the TLS wrapper, `__complex__`, std::thread's tuple constraints, shared_ptr's
+  `__has_esft_base` SFINAE, pr77550's `_CharT`, library.cpp's variant and any (each refused further on now).
+- **Alternatives considered**: implicit int for any function (GCC 15 makes it a permerror, no-type-2.C); emitting no code for
+  `__builtin_clear_padding` (behaviour the same here, but not clang's IR); deferring every main-file declaration that names an
+  incomplete template (only typedefs and aliases are, as no instantiation is needed for them).
+- **Proposed**: CP355 (-fstrict-enums, -fno-threadsafe-statics modelled), CP353 (CP338's next slices' order), CP354 (the measuring
+  lists' duplicates).
+- **Slips**: two process substitutions (`diff <(sort ...)`) in a throwaway comparison early on, against the day's rules; the first
+  runtime build attempt stopped at the disk rule (83%), retried when the disk was at 78%.

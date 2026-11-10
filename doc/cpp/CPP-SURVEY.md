@@ -5939,3 +5939,129 @@ run, `.tmp/five.list`), `.tmp/cp352/` (the sequences' logs).
 
 `bin/reap --record` (print cell: 15 deferred to 10 forms-differ, 3,871 pass), `bin/crops-score --record` (cpp completeness 89.1 to 89.2, print
 3,866 to 3,871 pass / 15 deferred; with the meant 97.8 to 97.8, independence 71.3 unchanged), `--judge --strict`: 0 problems.
+
+## Decided (the user, 2026-11-10, about 10:30 UTC: CP338-CP351)
+
+CP338 (a), and CP344-CP351 as recommended: CP344 (a), CP345 (a), CP346 (b), CP347 (a) (conditional on CP340's night measure),
+CP348 (a), CP349 (a), CP350 (a) (inside CP338), CP351 (a) (after CP348). CP339-CP343 are cpp-props5's and the plan's
+(.tmp/plans/CPP-90-PLAN.md) and stand as proposed there.
+
+## As built: CP338 (a) and CP350 (a) (2026-11-10; branch `cpp-cp338` from mac/cpp-props5 57dd92021)
+
+Light, by day's rules: main's stage 0 (`ARBACE_HOST_EXE`), one run at a time of at most about 2 GiB (`GOMEMLIMIT=1800MiB`,
+`REPR_CPP_THREADS=2`, the watcher of cpp-props5 killing a process tree past 2.3 GB), the compiler stubs first on PATH (their log
+empty), no gate. The run corpora's 82 programs (cpp-props5's lists: the samples 7, the runtime 8, gxx-dg-run's every-25th 67) by
+our route, in the order CP338 (a) gives: the parser's declines first, then the threads, the singles, `__complex__`.
+
+### What was built
+
+- **The parser's declines.**
+  - abi/vbase8-10.C: `main()` with no type is an int function and a pedantic diagnostic, as GCC's grokdeclarator takes it (a pedwarn:
+    an error under -pedantic-errors, diagnostic/no-type-1.C, nothing under -w); another name with no type stays the declined
+    permerror (no-type-2.C). clang rejects both, so the program passes by our route alone. The parser's pedantic diagnostics are
+    syntax errors whose reason starts `pedantic: `, dropped by `arbace.repr.cpp.diag/diagnose` without -pedantic-errors.
+  - runtime/library.cpp: a class declared before its definition (iosfwd's `template <...> class basic_streambuf;`), whose entity a
+    typedef took as its target (`typedef basic_streambuf<char> streambuf;`), now looks in the definition's scope: `int_type` in a
+    class derived from std::streambuf is a type. The program then reaches the analysis; it is still refused there (below).
+  - cpp23/subscript12.C: C++23's multidimensional subscript (P2128R6), `a[]` and `a[i, j, k]` an operator[] call of that many
+    arguments (the parser's expression-list at C++23 and later; sema's `ArraySubscriptExpr` of other than two kids an operator call,
+    the static operator[] of P1169R4 as a static member's call). Generated.
+  - cpp23/explicit-obj-default2.C (explicit object parameters, P0847R7) is not built: the parser, the overload resolution's object
+    parameter, the defaulted assignment and the mangling's `H` are each a part; about a day.
+- **The threads.** `__atomic_thread_fence` and `__atomic_signal_fence` as clang's EmitBuiltinExpr emits them (nothing for relaxed, a
+  fence at a constant order, a switch to the orders' blocks for one known at run time, `syncscope("singlethread")` for the signal
+  fence); `__atomic_always_lock_free` and `__atomic_is_lock_free` folded for a constant size and a null pointer (1, 2, 4, 8 bytes
+  lock-free). std::thread's `_Indices` (a block-scope alias of `_Build_index_tuple<tuple_size<_Tuple>::value>::__type`): three
+  causes fixed, `sizeof...(pack)` in a type's text (a base's argument, tuple_size's `integral_constant<size_t, sizeof...(_Elements)>`),
+  an alias template as `__make_integer_seq`'s sequence (`_IdxTuple`, substituted as [temp.alias]/2 says), and a non-type pack's
+  parameter type resolved in its template's own scope (`template<size_t... _Indexes> struct _Index_tuple` named from another
+  namespace). `"t" + std::to_string(id)` (threads.cpp's arithmetic on a class): argument-dependent lookup now takes an inline
+  namespace's enclosing namespace ([basic.lookup.argdep]/3: std::__cxx11's std, where operator+(const _CharT*, const basic_string&)
+  is), for functions and function templates. The three programs are still refused further on: atomics.cpp at
+  `__enable_shared_from_this_base` (shared_ptr's `__has_esft_base`: a `__void_t<decltype(...)>` partial specialization whose
+  decltype must fail for SFINAE), threads.cpp and thread-throw.cpp at `__and_<_Bn...>` in std::thread's constructor's tuple
+  constraints.
+- **The singles.**
+  - ubsan/null-8.C: GNU's asm statement parsed into its parts (qualifiers, template, outputs, inputs, clobbers, labels; the parser's
+    `GCCAsmStmt` with `:_asm` and the operands as its kids, as clang's), and the one the lowering keeps generated, a compiler barrier
+    (an empty template, no outputs or labels, register inputs): `call void asm sideeffect "", "r,~{memory},~{dirflag},~{fpsr},~{flags}"`,
+    as clang's IR has it; any other asm statement a refusal.
+  - torture/builtin-clear-padding-4.C: `__builtin_clear_padding` as clang 23 writes it at -O0, each byte of the object that holds no
+    part of its value (the vptr, fields, non-virtual bases and the complete object's virtual bases occupy theirs; x87's long double
+    its first 10) a `store i8 0` through `getelementptr i8, ptr p, i32 off`, aligned as the offset is within the object's alignment;
+    a bit-field or a union refused. The stores are clang's, byte for byte (offsets 9-15, alignments 1 2 1 4 1 2 1).
+  - cpp2a/spaceship-synth4.C: the defaulted secondary comparisons ([class.compare.secondary]/2: `!=` as `!(x == y)`, a relational
+    as `(x <=> y) @ 0`), which had been emitted as `unreachable` (a defaulted `operator<` "generated" so before); and an operator
+    call with no viable candidate takes `a != b`'s rewritten candidate `!(a == b)` ([over.match.oper]/3.4: a class's defaulted
+    operator!= visible in a defaulted <=>'s body hid std::strong_ordering's rewritten !=). Generated; its functions are clang's.
+  - pr77550.C: four causes fixed on the way (a template template parameter's arguments with a pack expansion, `_Op<_Args...>` of a
+    partial specialization's `__void_t<_Op<_Args...>>`; a main file's typedef naming a class template's specialization before the
+    template or its explicit specialization is defined, declared again after each later top-level declaration as the headers' are;
+    the variable templates below), and refused at `_CharT` further on.
+  - tls/thread_local12e.C (clang's TLS wrapper and init functions for a dynamically initialized thread_local) is not built: `_ZTW`,
+    `_ZTH`, `__tls_init` and the lowering's `_Thread_local`, about a day.
+- **Variable templates.** A variable template's partial specialization is kept as a class template's is (its arguments as written
+  after its name, matched and ordered when a specialization is named), and a variable template's specialization in a constant of a
+  type's text is its initializer's value (`variant<_Types...>::__not_in_place_tag<_Tp>` in its converting constructor's
+  enable_if_t; `__detail::__variant::__accepted_index<_Tp, _Variant, void_t<_FUN_type<_Tp, _Variant>>>`). library.cpp's
+  `std::variant<int, double> v = 1;` then reaches `_FUN_type`'s overload set (`_Build_FUNs`' inherited `_S_fun`s), and with it
+  removed `std::any a = 1;` refuses likewise: library.cpp is several such slices away.
+- **`__complex__`** (runtime/deferred.cpp, `complex<long double>`'s `_M_value`): not built; GNU complex types in the code generator
+  (their {T, T} layout, `__real__`/`__imag__`, clang's `__mulxc3` and `__divxc3` calls) are about two days.
+- **CP350 (a)**: `bin/lib/cppi/route.bash`'s `cppi_route_modelled`: under `auto` a program goes to our route when every option of
+  its ARGS is one it models (the preprocessor's -D, -U and -I; -fexceptions and -fno-exceptions, whose predefined macros the target's
+  option deltas follow), and every program by ours is given its ARGS (gen-batch's fourth column; before, `ours` dropped them).
+  -std= is the list's STD, and -O*, -w and -pedantic never reach ARGS (`cppi_opts`). Of the 82, opt/unroll1.C (-fno-exceptions)
+  now goes to ours under auto; torture/pr50189.C (-fstrict-enums) stays clang's: -fstrict-enums is not in the decided list (an
+  optimizer hint with no -O0 effect, a proposal below). Of the libstdcxx corpus every program's `-I util` is modelled.
+- `CPP_GEN_WHERE=1`: gen-one prints a refusal's last analyzed node's place (sema's `*at*`).
+
+### Checked (light)
+
+| check | result |
+|---|---|
+| gen-batch over the run corpora's 82 programs at the head (`.tmp/G3`; each program generated twice, cpp-props5's lists holding the corpora's `.all` files beside them, as G2's did) | **62 generated** (cpp-props5's G2: 57, every one of them still generated), 20 refused; the five new: abi/vbase8-10.C, cpp23/subscript12.C, cpp2a/spaceship-synth4.C, torture/builtin-clear-padding-4.C, ubsan/null-8.C; 5,040 s, peak 1,770 MB |
+| the 20 refused | coroutines 7 and GNU vector types 5 (with attribute-test-1's vector compound literal) as CP334 (b), CP335 (b) leave them; explicit-obj-default2 and thread_local12e (not built, above); library.cpp (variant's `_FUN_type`, then any), deferred.cpp (`__complex__`), atomics.cpp (`__has_esft_base`), threads.cpp and thread-throw.cpp (`__and_<_Bn...>`), pr77550.C (`_CharT`): each refused further on than at cpp-props5 |
+| CP350 (a): opt/unroll1.C by our route with its `-fno-exceptions` (gen-batch's fourth column) | generated (19 s) |
+| probes (`.tmp/p/`): fences (fence.cpp: clang's switch at a run-time order), asm, clear_padding, defaulted secondary comparisons (ss1-ss6), packs through a template template parameter (pk3-pk9), a typedef before its template (ct1, ct2), block-scope aliases (la1-la4), ADL through an inline namespace (str2-str5), tuple_size and index tuples (ts1-ts3, ix1-ix4, nd1-nd8), variant's `__not_in_place_tag` (var1), `__and_v` (av1, av2) | generate (not run) |
+| null-8, builtin-clear-padding-4 and spaceship-synth4 against clang 23.1.5's recorded IR (the pack cpp-ir-gxx-dg-run, by hand) | the asm call's constraint string, the padding stores (offsets and alignments) and the defined functions are clang's |
+| `bin/cppi codegen-gen` | 154 of 154 as recorded, forms.sha256 unchanged (the two negative controls fail as they must) |
+| the dg every-10th sample (`.tmp/sample.sh`; `sB` the base 57dd92021 in `.tmp/base`, `sD` the head) | 121 → **122** own passes: cpp0x/variadic-ttp3.C gained, none lost |
+| `bin/reap` | 0 problems after `--record`: the matrix had kept cpp-props5's two dg classes before CP328 (a) moved two files from `clang-accepts` to `gxx-only-rules`, the same 2 problems at the base; `test/reap/matrix.edn` recorded again for that alone |
+| `bin/crops-score --judge --strict` | 0 problems |
+
+No program was run: the lowered runtime's build stopped at the light tier's disk rule (`bin/cppi`'s `disk_ok`, 80%; the host's disk at 83%),
+so the five newly generated programs' runs by their own verdicts are the night's (below). The compiler stubs' log is empty.
+
+### Proposed (CP353-CP355)
+
+- **CP355: -fstrict-enums and -fno-threadsafe-statics among the modelled options.** Neither changes a program's behaviour at -O0 (an
+  optimizer's range assumption; a guard a single-threaded program does not need). (a) Add them to `cppi_route_modelled` (torture/
+  pr50189.C, warn/pr33738*.C, opt/static6.C to ours under auto); (b) keep CP350's list. **Recommended: (a)**.
+- **CP353: CP338's next slices**, by programs gained per day: std::thread's tuple constraints (`__and_<_Bn...>`, 2 programs:
+  threads.cpp, thread-throw.cpp), `__void_t<decltype(...)>`'s SFINAE in a partial specialization (atomics.cpp's `__has_esft_base`),
+  the TLS wrapper (thread_local12e), explicit object parameters (explicit-obj-default2), then pr77550's `_CharT`, `__complex__`
+  (deferred.cpp) and library.cpp's variant/any. (a) In that order inside S5a; (b) after S5b. **Recommended: (a)**.
+- **CP354: the generation's duplicate programs.** cpp-props5's measuring lists (`.tmp/m/*.tsv`) held each corpus twice, so G2 and G3
+  generated every program twice (G3's 5,040 s is about twice the work). (a) The measures from now on over one list (`sort -u`); (b) as is.
+  **Recommended: (a)** (CP340's night measure especially).
+
+### The night's commands (after this branch's merge; one process at a time, about 2-3 GiB)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace REPR_CPP_THREADS=2 GOMEMLIMIT=1800MiB CPPI_JOBS=1 CPPI_THREADS=1
+CPPI_CI_CHUNK=20 CPPI_CI_MEMLIMIT=1800MiB bin/cppi runtime-ci               # the lowered runtime (needs the disk under 80%, or CPPI_DISK_MAX)
+printf '%s\n' gxx-dg-run/abi/vbase8-10.C gxx-dg-run/cpp23/subscript12.C gxx-dg-run/cpp2a/spaceship-synth4.C \
+  gxx-dg-run/torture/builtin-clear-padding-4.C gxx-dg-run/ubsan/null-8.C gxx-dg-run/opt/unroll1.C > .tmp/cp338-new.txt
+CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --only .tmp/cp338-new.txt # the five new programs (and unroll1 with its option) by their own verdicts
+CPPI_ROUTE=ours bin/cppi check --aot --corpus gxx-dg-run --only .tmp/cp338-new.txt
+bin/cppi route-compare --corpus gxx-dg-run --sample 25                      # auto against clang: vbase8-10 an improvement (clang rejects it), no pass lost
+bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25
+bin/repr-cpp dg --corpus dg-error --front native --record                   # the own record (CP342's), variadic-ttp3 and no-type-1/2 through the parser's pedantic diagnostic
+```
+
+### The work's scratch
+
+`.tmp/`: `G3/` (the 82 at the head), `t1/`-`t3/`, `lib1/`, `lib2/`, `lnv/`, `v1/`, `o1/` (generation runs of parts), `p/` (the probes), `pr1/`,
+`q1/`-`q8/`, `s1/`-`s4/`, `cp/`, `pk/`, `var1/` (the probes' runs), `cg/` (codegen-gen), `sB/`, `sD/` (the dg samples), `base/` (57dd92021's
+worktree), `m/` (cpp-props5's lists), `stubs/`, `env.sh`, `gen*.sh`, `gi.sh`, `gp.sh`, `g82.sh`, `sample*.sh`, `memwatch.sh`, `mw.sh`.
