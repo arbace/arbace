@@ -2814,3 +2814,12 @@ P14". Ported from GHC 9.14.1 (the pinned `ghc-9.14.1-src.tar.xz`): makeCorePair'
   GHC's base interfaces for the judge, the next packages, Prim from primops.txt.pp, the first own cases).
 - Checks: hsi-essential's command (one job) 123 programs, 0 unclassed, the four controls fail; bin/gate --full --plan plans the
   new step; the gate's costs, crops, cover and declared-env tests pass.
+
+## 2026-11-10 hs-p11: lib-stg --ifaces own --run defaults to LIB_STG_REPLACE=equal; the 50 of 63 explained
+
+- `bin/lib/repr-haskell/lib-stg`: the own branch took `${LIB_STG_REPLACE:-all}` (0 of 63 on own, exit 1); now `equal`, `all` still explicit.
+  Proof, no variable: `lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`, exit 0, 27 min 54 s, 1.7 GiB: 5,398 of 7,627
+  equal, 76 own modules and 191 GHC's, 50 of 63 on each side, 0 lost, 0 gained. The survey's night command updated.
+- 50 against run-check.edn's 53: the same ten programs fail on both sides in two runs (deterministic): compiled against the `-O2` pack's
+  interfaces, run on the `-O0` sets, which lack names such as `ioException3`. The ten alone on the `-O2` pack: 10 of 10 pass. Not load, not a
+  bug of the branch; noted in the survey.

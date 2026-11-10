@@ -2746,7 +2746,18 @@ unified with FUN). The 5 instances: the derived instances' contexts (`Generic (W
 2. `bin/repr-haskell lib-check --package base --ifaces own --judge test/haskell/lib-check-own-base.edn` and
    `bin/repr-haskell lib-stg --package base --ifaces own --judge test/haskell/lib-stg-own-base-results.edn` (about 7 minutes).
 3. `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run` (the 63 programs on the two coherent
-   sets, about 50 minutes) and the step `haskell-lib-stg` (`bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run`).
+   sets, about 28 minutes since HF10-P3's second night: `--ifaces own --run` replaces the `equal` modules by default, `LIB_STG_REPLACE=all`
+   explicit for every own binding) and the step `haskell-lib-stg` (`bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run`).
+
+Measured 2026-11-10 (`.tmp/r7.log`, no variable): `lib-stg --ifaces own --judge ... --run` exits 0 in 27 min 54 s, 1.7 GiB peak: 5,398 of 7,627
+bindings equal, 76 ghc-internal modules own whole and 191 GHC's `-O0`, **50 of 63 programs on each side, 0 lost, 0 gained**. Why 50 and not
+the 53 of `run-check.edn` (or the 59 of the `lib-stg --run` slice): the two sides of `--ifaces own --run` are the coherent `-O0` sets, and the
+programs are compiled against the `-O2` pack's interfaces (`REPR_HASKELL_RUN_IFACES=pack`), whose names (`ioException3`, `prettySrcLoc`'s
+workers) the `-O0` STG does not define: ten programs (samples/Exc, LibBytes, LibIO, LibMisc, LibPosix, LibSystem, LibText, Trace,
+synthetic/runtime-exceptions, runtime-stm) stop at "no binding of ghc-internal:GHC.Internal.IO.Exception/ioException3" or a case on an Int64
+in `prettySrcLoc`, identically on both sides and in the earlier run (`r3`, under load of another night): deterministic, not load. The same ten
+alone on the `-O2` pack: 10 of 10 pass (46 s). The 50 is the baseline of the `-O0` sets; closing it needs the programs compiled against the
+own interfaces of the same `-O0` ABI (a later slice), not a change of the checks.
 
 ### Proposed (HF10-P15 to HF10-P19; options with costs, a recommendation each, none decided)
 
