@@ -2980,3 +2980,34 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
 - core-check: 5,538 (RF13d) -> 5,551 by the causes (`CORE_IFACE_EXTRA=`, RF13d's index) -> 5,576 with RFP52 (a) and a fresh
   index; no module lost an equal body at either step. `bin/rust-front core-essential` and `essential` equal to their known
   files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes. doc/rust/FRONTEND-SURVEY.md, "As built: RF13e".
+
+## 2026-11-10: RF14, RFP48 (a): trait resolution in mono; RFP49 (a) begun (branch `rust-rf14`, from `mac/rust-rf13e` `db5fe592e`)
+
+- RFP48 (a), decided by the user on 2026-11-10 (RFP48-RFP61 (a), relayed by the main session): Instance::resolve's
+  resolve_associated_item for mono, after rustc 1.99.1's rustc_ty_utils/src/instance.rs and rustc_trait_selection's
+  specialize/mod.rs and specialization_graph (the pinned rust-src's `compiler/`): `arbace.rust.front.typeck/resolve-assoc-fn`
+  (the applying impls, the specialization chain leaf first by their headers, the item from the nearest impl that defines it at
+  the impl's arguments and the method's own, else the trait's default body; an overlap without a most specialized impl and an
+  impl argument nothing determines refused), `arbace.rust.front.mono/resolve-instance` (the Fn traits' builtin candidates:
+  a closure's body or ClosureOnceShim by the closure's kind from its built body's self, FnPtrShim), used by the callee facts,
+  the calls' function constants, the collector, the external items and the vtables (std's impls, generic impls and default
+  bodies; VTableShim and a supertrait with parameters still refused). Alternatives considered: rustc's full specialization
+  graph with its where-clause implication (the header test suffices where two impls both apply to a concrete goal: coherence
+  admitted them as specializations; an overlap the header test cannot order is refused), keeping the record's facts (RFP48
+  (b), not decided).
+- Found on the way, each after rustc's code: v0's `<Self as Trait>::` qualification (default_print_def_path's
+  trait_qualify_parent), trait objects, local closures and fn pointers in v0; impl disambiguators in rustc's order of
+  definitions (a derive's impls after the crate's other items); `#[track_caller]` inherited from the trait's method
+  (codegen_fn_attrs); core's attributes of a trait's provided method and of an impl found by its header's names (std's
+  interface's against the source's, where the file's order is not rustc's disambiguators'); a call's function constant whose
+  callee's attributes core's sources do not show refused as its callee is.
+- RFP49 (a), the first part: build-run hands mono the function constants of the record's std bodies; the local functions and
+  closures they reach at no type argument join the collector's items (closures' bodies items too). The rest (generic local
+  instances reached through std: `quicksort::<f64>`, `<Dog as Animal>::describe`) needs our generic bodies instantiated, next.
+- Measured, light (one process at a time, under 2 GiB): the mono facts against the record over 8 synthetic programs, before
+  (`db5fe592e` in a worktree of its own) and after: callees equal 406 -> 592 of 710, function constants' symbols 368 -> 557, the
+  native callees 731 -> 964 of about 990 (refusals 263 -> 29); `rsi-build` over the 67 synthetic programs: 48 own (47:
+  `patterns`), the native callees 4,079 of 4,524 (3,503 of 4,288), vtables 25 of 32 (0 of 7); `bin/rust-front essential` and
+  `core-essential` equal to their known files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes (Rust
+  unchanged). `rsi-build` keeps each batch's mono-check lines (`mono-all.log`). doc/rust/FRONTEND-SURVEY.md, "As built: RF14
+  (RFP48)", with the night's commands (the whole plan again, rsi-native over the new own program, `bin/rsi check --front own`).

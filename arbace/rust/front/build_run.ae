@@ -520,6 +520,7 @@
         rec-layouts (into {} (second (some #(when (= 'mir/layouts (first %)) %) forms)))
         rec-langs (or (second (some #(when (= 'mir/langsyms (first %)) %) forms)) {})
         tally (atom {})
+        refusals (atom {})
         fact! (fn [k native?] (swap! tally update k (fnil (fn [[a b]] [(if native? (inc a) a) (inc b)]) [0 0])))
         lines (atom [])
         judged (atom [])
@@ -528,7 +529,16 @@
                   mono/*native-attrs* (if (System/getenv "RF_CORE_PACK") {} (into {} (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)])))]
           (bc/build-program front-dir n
             (fn [bodies]
-              (let [facts (mono/program-facts n bodies)
+              (let [;; RFP49 (a): the function constants of the record's std instances' bodies, whose local instances mono's
+                    ;; collector adds (rustc's std bodies are the pack's, RF12's part; what they reach of ours is mono's)
+                    std-calls (let [acc (java.util.LinkedHashSet.)]
+                                (doseq [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))]
+                                  (walk (fn [x] (when (and (seq? x) (= 'fndef (first x)) (string? (second x)) (vector? (nth x 2 nil)))
+                                                  (.add acc [(second x) (nth x 2)]))
+                                          x)
+                                        (dissoc b :alloc-data)))
+                                (vec acc))
+                    facts (mono/program-facts n bodies std-calls)
                     ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                 (native-core-plan (for [x (:ext-items facts) :let [rec (some #(when (= (:symbol x) (:symbol %)) %) rec-bodies)] :when rec]
@@ -588,7 +598,10 @@
                                               ;; codegen calls the operand's value
                                               (not= 'const (first f)) nil
                                               (and c (not (mono/error? c))) (do (fact! :callees true) (list 'callee c))
-                                              :else (do (fact! :callees false) (or (ffirst recs) (throw (ex-info (str "no callee for " txt) {})))))
+                                              :else (do (fact! :callees false)
+                                                        ;; RF14: the refusals by their reason (mono's message, a run's `callee refusals` line)
+                                                        (swap! refusals update (if (mono/error? c) (str/replace (str (second c)) #"\s+" " ") "no fact") (fnil inc 0))
+                                                        (or (ffirst recs) (throw (ex-info (str "no callee for " txt) {})))))
                                         cl (:call-loc (meta f))
                                         l (cond (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
                                                 ;; RF12-P6: a native core body's call: its place in core's sources
@@ -690,12 +703,14 @@
                   (doall (for [f new-forms] (cond (= 'mir/layouts (first f)) (list 'mir/layouts (vec table))
                                                   (= 'mir/body (first f)) (list 'mir/body (fix (second f)))
                                                   :else f))))))))]
-    {:forms result :lines @lines :tally @tally :judged @judged}))
+    {:forms result :lines @lines :tally @tally :judged @judged :refusals @refusals}))
 
 (defn- run-lines
   "The run's lines of a module: each body's (ours, or the record's and why), the facts' tally, the bodies' count"
-  [n {:keys [lines tally]}]
+  [n {:keys [lines tally refusals]}]
   (concat lines
+          ;; RF14: the callee facts mono refused, by reason (the record's taken)
+          (for [[why k] (sort-by (comp - val) refusals)] (str "build-run: " n ": callee refused " k " " (subs why 0 (min 160 (count why)))))
           [(str "build-run: " n ": facts native " (str/join ", " (for [[k [a b]] (sort tally) :when (not (#{:core-bodies :bodies} k))] (str (name k) " " a "/" b)))
                 (let [[a b] (get tally :core-bodies [0 0])] (str "; core's bodies from the pack " (- b a) (when (pos? a) (str ", built natively " a))))
                 (when-let [[_ b] (get tally :bodies)] (str "; our bodies from the pack " b)))

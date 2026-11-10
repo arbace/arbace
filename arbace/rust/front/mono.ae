@@ -11,7 +11,8 @@
 ;; the tagged layout), layout/simple.rs (unit, never_type, scalar, scalar_pair), lib.rs (Niche::available, Niche::reserve,
 ;; Integer::fit_signed, fit_unsigned, for_align), wrapping_range.rs (smallest_range_containing)},
 ;; compiler/rustc_ty_utils/src/layout.rs (layout_of_uncached) and compiler/rustc_middle/src/ty/layout.rs (discr_range_of_repr),
-;; for x86_64's data layout; and rustc-stable-hash 0.1.2 (https://github.com/rust-lang/rustc-stable-hash, src/sip128.rs,
+;; for x86_64's data layout, compiler/rustc_ty_utils/src/instance.rs (resolve_associated_item's impl and Fn candidates, RF14) and
+;; compiler/rustc_codegen_ssa/src/codegen_attrs.rs (track_caller inherited from a trait's method); and rustc-stable-hash 0.1.2 (https://github.com/rust-lang/rustc-stable-hash, src/sip128.rs,
 ;; src/stable_hasher.rs: SipHasher128, StableHasher's writes) as its Cargo.lock pins it. rustc and rustc-stable-hash are
 ;; dual-licensed MIT OR Apache-2.0 (LICENSE.md, "Rust (rustc 1.99.1)").
 
@@ -206,6 +207,9 @@
   (or (= p *instance-def*) (contains? (:fns c/*si*) p) (contains? (:consts c/*si*) p)
       (some? (re-find #"^(Fn|AssocFn|Static|Const)" (str (get (:kinds c/*std*) p))))))
 
+(declare rustc-def-index)
+(def ^:dynamic *def-order* nil)   ; atom: {id rustc-index}
+
 (defn def-key
   "def_key: {:parent DEF :data [:type N]|[:value N]|[:impl]|[:closure]|[:ctor]|[:anon]|[:crate] :dis K}"
   [d]
@@ -213,7 +217,15 @@
     (vector? d) {:data [:crate] :parent nil :dis 0}
     (number? d) (let [x (c/def-of d)]
                   {:data (let [[k n] (:data x)] (if (= k :crate) [:crate] [k (some-> n str)]))
-                   :parent (let [p (:parent x)] (if (= 0 p) [:crate (:name *local*)] p)) :dis (or (:disamb x) 0)})
+                   :parent (let [p (:parent x)] (if (= 0 p) [:crate (:name *local*)] p))
+                   ;; RF14: an impl's disambiguator is its place among its parent's impls in rustc's order of definitions (a
+                   ;; derive's impls after the crate's other items: rustc-def-index), not the source's
+                   :dis (if (and (= :impl (first (:data x))) *def-order*)
+                          (let [i (rustc-def-index d)]
+                            (count (filter #(and (= (:parent x) (:parent %)) (= :impl (first (:data %))) (not= d (:id %))
+                                                 (< (long (rustc-def-index (:id %))) (long i)))
+                                           (c/defs))))
+                          (or (:disamb x) 0))})
     :else (let [segs (str/split d #"::") last-seg (peek segs)
                 parent (if (= 2 (count segs)) [:crate (first segs)] (str/join "::" (pop segs)))]
             (if (= 1 (count segs))
@@ -249,7 +261,19 @@
 (defn- pos-of [m] (.length ^StringBuilder (:sb m)))
 (defn- backref! [m i] (push! m (str "B" (integer-62 (- i 2)))))
 
-(declare print-def-path! print-type! print-const!)
+(declare print-def-path! print-type! print-const! def-kind generic-def? item-name-of local-trait-by-path form->ty)
+
+(defn closure-def
+  "RF14: the local closure whose type's text (typeck's `{closure@FILE:L:C: L:C}`) is TEXT: its definition's id, or nil"
+  [^String text]
+  (when-let [[_ a b c d] (re-find #":(\d+):(\d+): (\d+):(\d+)\}$" text)]
+    (let [want (mapv parse-long [a b c d])]
+      (let [cls (filter #(= "Closure" (:kind %)) (c/defs))]
+        ;; typeck's fn_decl_span of the closure (past `move`), when the source is at hand; else the node's start
+        (or (some (fn [d] (when (= want (some->> (try (#'tc/closure-decl-span (:node d)) (catch Throwable _ nil)) (take 4) (mapv long))) (:id d))) cls)
+            (some (fn [d] (let [sp (:span (:node d))]
+                            (when (and (vector? sp) (= (subvec want 0 2) (mapv long (take 2 sp)))) (:id d))))
+                  cls))))))
 
 (defn- path-append-ns! [m prefix! ns dis nm]
   (push! m (str "N" ns)) (prefix!) (push! m (disambiguator dis)) (push! m (ident nm)))
@@ -310,8 +334,14 @@
             (if (seq own)
               (print-generic-args! m #(print-def-path! m d parent-args) own)
               (print-def-path! m d parent-args)))
-          (let [ns (case (first data) :type "t" :value "v" :closure "C" :ctor "c" :anon "K" :opaque "i")]
-            (path-append-ns! m #(print-def-path! m parent parent-args) ns dis (if (#{:type :value} (first data)) (second data) ""))))))))
+          (let [ns (case (first data) :type "t" :value "v" :closure "C" :ctor "c" :anon "K" :opaque "i")
+                ;; RF14: a trait's item at its arguments under `<Self as Trait>::` (trait_qualify_parent: the item has Self, its
+                ;; parent is the trait, every parent argument given)
+                tq? (and (seq args) (not= :closure (first data)) (pos? pc) (= (count parent-args) pc) (= "Trait" (def-kind parent)))]
+            (path-append-ns! m (if tq?
+                                 #(do (push! m "Y") (print-type! m (first parent-args)) (print-def-path! m parent parent-args))
+                                 #(print-def-path! m parent parent-args))
+                             ns dis (if (#{:type :value} (first data)) (second data) ""))))))))
 
 (defn- print-def-path! [m d args]
   (let [k [d (vec args)]]
@@ -343,6 +373,28 @@
             :slice (do (push! m "S") (print-type! m (second t)))
             :tuple (do (push! m "T") (doseq [x (second t)] (print-type! m x)) (push! m "E"))
             (:adt :fndef) (print-def-path! m (second t) (nth t 2))
+            ;; RF14: a trait object (print_dyn_existential: the principal at a dummy Self, each projection `p` and its name and
+            ;; term, the auto traits, then the region, erased: `L_`); one with bound regions (a binder's `G`) refused
+            :dyn (let [{:keys [principal projections autos]} (second t)]
+                   (when (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t))
+                     (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
+                   (push! m "D")
+                   (when principal (print-def-path! m (first principal) (into [[:dummy-self]] (second principal))))
+                   (doseq [[ad _ term] projections] (push! m "p") (push! m (ident (item-name-of ad))) (print-type! m term))
+                   (doseq [a autos] (print-def-path! m a []))
+                   (push! m "E") (push! m "L_"))
+            ;; RF14: a fn pointer (`F`, `U` when unsafe, its inputs, `E`, its output); another ABI's or one with bound regions
+            ;; (a binder's `G`) refused
+            :fnptr (let [{:keys [inputs output safety abi]} (second t)]
+                     (when (or abi (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t)))
+                       (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
+                     (push! m "F") (when (= :unsafe safety) (push! m "U"))
+                     (doseq [x inputs] (print-type! m x)) (push! m "E") (print-type! m output))
+            ;; RF14: a local closure (its def by its start, the line and column its type's text begins with) in a non-generic function
+            :closure (let [d (closure-def (second t))]
+                       (when (or (nil? d) (generic-def? (loop [x (:parent (c/def-of d))] (if (= "Closure" (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x))))
+                         (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
+                       (print-def-path! m d []))
             (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
           (swap! (:types m) assoc t start))))))
 
@@ -896,6 +948,41 @@
 
 (def ^:private attr-cache (atom {}))
 
+(defn- src-header-names
+  "RF14: the names an impl's header gives in the source (each path's last segment in its trait reference and self type, their
+  generic arguments' too; no lifetime)"
+  [impl]
+  (let [k (second (fget impl :kind)) acc (java.util.HashSet.)]
+    (doseq [x (tree-seq coll? seq [(fget k :of_trait) (fget k :self_ty)])]
+      ;; the type constructors (`&str` and `&mut str` apart)
+      (when (seq? x)
+        (case (str (first x))
+          "Ref" (.add acc (if (= 'Mut (try (fget (nth x 2) :mutbl) (catch Throwable _ nil))) "&mut" "&"))
+          "Ptr" (.add acc "*") "Slice" (.add acc "[]") "Array" (.add acc "[;]") "Tup" (.add acc "()")
+          nil))
+      ;; a path's last segment (`ops::FromResidual` names FromResidual)
+      (when (and (seq? x) (= 'Path (first x)) (even? (count (rest x))) (some #{:segments} x))
+        (when-let [id (try (fget (last (fget x :segments)) :ident) (catch Throwable _ nil))]
+          (let [nm (when (seq? id) (second id))] (when (and (string? nm) (not (str/starts-with? nm "'"))) (.add acc nm))))))
+    (set acc)))
+
+(defn- si-header-names
+  "RF14: the same names in std's interface's header of the impl IP (each ADT's and the trait's last segment, the primitives',
+  the parameters')"
+  [ip]
+  (when-let [m (get (:impls c/*si*) ip)]
+    (let [acc (java.util.HashSet.)]
+      (doseq [x (tree-seq coll? seq [(:self m) (:trait m)])]
+        (when (seq? x)
+          (case (str (first x))
+            ("adt" "trait") (.add acc (c/path-name (second x)))
+            "prim" (.add acc (str (second x)))
+            "param" (.add acc (str (nth x 2)))
+            "ref" (.add acc (if (true? (nth x 2)) "&mut" "&"))
+            "ptr" (.add acc "*") "slice" (.add acc "[]") "array" (.add acc "[;]") "tuple" (.add acc "()")
+            nil)))
+      (set acc))))
+
 (defn ext-attrs
   "core's (or alloc's) item at the def path P: its attribute names, or nil when the sources do not hold it as an item"
   [^String p]
@@ -910,12 +997,30 @@
                     (let [s (first segs)]
                       (cond
                         (nil? (next segs)) (some #(when (= s (fn-item-name %)) (attr-strings (fget % :attrs))) items)
+                        ;; RF14: a trait's method (its default body's attributes)
+                        (and (= 1 (count (rest segs)))
+                             (some #(and (= 'Trait (item-kind %)) (= s (second (fget (second (fget % :kind)) :ident)))) items))
+                        (let [tr (some #(when (and (= 'Trait (item-kind %)) (= s (second (fget (second (fget % :kind)) :ident)))) %) items)]
+                          (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) (fget (second (fget tr :kind)) :items)))
                         (re-matches #"\{impl#\d+\}" s)
                         (let [i (parse-long (re-find #"\d+" s))
                               impl (nth (filter #(= 'Impl (item-kind %)) items) i nil)
-                              its (fget (second (fget impl :kind)) :items)]
+                              its (fget (second (fget impl :kind)) :items)
+                              ;; RF14: the impl named by its header (std's interface's) where the file's order is not rustc's
+                              ;; disambiguators' (cfg'd or macro-made impls before it)
+                              want (si-header-names (str/join "::" (butlast (str/split p #"::"))))
+                              fits? (fn [im] (or (nil? want) (= want (src-header-names im))))
+                              by-header (when want
+                                          (let [hs (for [im (filter #(= 'Impl (item-kind %)) items)
+                                                         :when (fits? im)
+                                                         f (fget (second (fget im :kind)) :items)
+                                                         :when (= (second segs) (fn-item-name f))]
+                                                     f)]
+                                            (when (= 1 (count hs)) (first hs))))]
                           (when (= 1 (count (rest segs)))
-                            (or (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) its)
+                            (or (when (and impl (fits? impl)) (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) its))
+                                (when by-header (attr-strings (fget by-header :attrs)))
+                                (when-not want (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) its))
                                 ;; RF13: the impls' order in the file is not rustc's disambiguators' everywhere (alloc's vec/mod.rs
                                 ;; counts a `const impl` that rustc's {impl#1} does not): a function the file's impls name once
                                 (let [hits (for [im (filter #(= 'Impl (item-kind %)) items)
@@ -945,13 +1050,36 @@
 
 (def ^:dynamic *native-attrs* {})   ; RF12-P6: core's definitions' attributes from core-check's export (a nested fn's too)
 
-(defn attrs-of
-  "{:names #{...} :known BOOL}: a definition's codegen attributes (known false: an item core's sources did not show)"
+(defn- impl-trait-method
+  "RF14: a trait impl's method's trait method (the trait's item of its name), or nil"
   [d]
+  (try
+    (if (number? d)
+      (let [x (c/def-of d) im (c/def-of (:parent x))]
+        (when (str/starts-with? (str (:kind im)) "Impl")
+          (when-let [tr (first (second (c/impl-header (:id im))))]
+            (let [nm (str (second (:data x)))]
+              (if (number? tr)
+                (some #(when (and (= tr (:parent %)) (= nm (str (second (:data %))))) (:id %)) (c/defs))
+                (str tr "::" nm))))))
+      (when-let [ip (let [pp (c/path-parent d)] (when (re-find #"\{impl#\d+\}$" (str pp)) pp))]
+        (when-let [t (:trait (get (:impls c/*si*) ip))] (str (nth t 1) "::" (c/path-name d)))))
+    (catch Throwable _ nil)))
+
+(defn- attrs-of* [d]
   (cond
     (number? d) {:names (set (local-attrs d)) :known true}
     (contains? *native-attrs* d) {:names (set (get *native-attrs* d)) :known true}
     :else (let [a (ext-attrs d)] {:names (set a) :known (some? a)})))
+
+(defn attrs-of
+  "{:names #{...} :known BOOL}: a definition's codegen attributes (known false: an item core's sources did not show); a trait
+  impl's method inherits its trait method's #[track_caller] (codegen_fn_attrs, RF14)"
+  [d]
+  (let [a (attrs-of* d)]
+    (if-let [tm (when-not ((:names a) "track_caller") (impl-trait-method d))]
+      (if ((:names (attrs-of* tm)) "track_caller") (update a :names conj "track_caller") a)
+      a)))
 
 (defn- weak-link [names] (some #(when (str/starts-with? % "lang:") (get weak-lang (subs % 5))) names))
 (defn- extern-indicator? [names] (boolean (or (names "no_mangle") (some #(str/starts-with? % "export_name") names) (names "rustc_std_internal_symbol") (weak-link names))))
@@ -1043,7 +1171,6 @@
 
 (defn- subtree? [ds root id] (loop [x id] (cond (nil? x) false (= x root) true :else (recur (:parent (nth ds x))))))
 
-(def ^:dynamic *def-order* nil)   ; atom: {id rustc-index}
 
 (defn rustc-def-index
   "The DefIndex rustc gives a local definition: the def collector's order with what our collection does not keep (the
@@ -1081,7 +1208,7 @@
 (defn intrinsic? [d] (and (string? d) (contains? (:names (attrs-of d)) "rustc_intrinsic")))
 
 (defn- fn-abi [d]
-  (if (number? d) (or (:abi (c/fn-sig d)) "Rust")
+  (if (number? d) (or (:abi (try (c/fn-sig d) (catch Throwable _ nil))) "Rust")
       (str/replace (str (:abi (get (:fns c/*si*) d))) "\"" "")))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1190,27 +1317,69 @@
          :can-unwind (and (not (names "rustc_nounwind")) (boolean (or (#{"Rust" "rust-call" "rust-cold" ""} abi) (re-find #"unwind" abi))))
          :track-caller false :slot slot}))))
 
+(defn- trait-method? [d]
+  (if (number? d) (= "Trait" (:kind (c/def-of (:parent (c/def-of d))))) (= "Trait" (get (:kinds c/*std*) (c/path-parent d)))))
+
+(def ^:dynamic *closure-kinds* nil)   ; RF14: atom, a closure type's text -> :fn | :fn-mut | :fn-once (its body's self)
+
+(def ^:private fn-trait-kind {"core::ops::function::Fn" :fn "core::ops::function::FnMut" :fn-mut "core::ops::function::FnOnce" :fn-once})
+
+(def ^:private builtin-traits
+  #{"core::ops::function::FnOnce" "core::ops::function::FnMut" "core::ops::function::Fn" "core::clone::Clone"})
+
+(defn resolve-instance
+  "RF14 (RFP48 (a)): Instance::try_resolve's instance of the call of D at ARGS: a trait method's resolved by its impl
+  (resolve_associated_item: the impl's item at the impl's arguments, else the trait's default body; arbace.rust.front.typeck's
+  resolve-assoc-fn), any other function itself: [DEF ARGS]; a builtin candidate (closures' Fn traits, Clone's shims) and what
+  the resolution leaves refused"
+  [d args]
+  (if-not (trait-method? d)
+    [d args]
+    (let [tr (if (number? d) (:parent (c/def-of d)) (c/path-parent d))
+          self (first (filter type-arg? args))
+          fk (get fn-trait-kind tr)]
+     (cond
+      ;; the Fn traits' builtin candidates (resolve_associated_item's closure and fn pointer arms): a closure's body when its
+      ;; kind is the trait's or Fn called as FnMut, else ClosureOnceShim; a function item's or pointer's FnPtrShim
+      (and fk (vector? self) (= :closure (first self)))
+      (let [ck (or (when *closure-kinds* (get @*closure-kinds* (second self))) (throw (ex-info "mono: a closure's kind (its body not built)" {:fact :callee})))
+            cd (or (closure-def (second self)) (throw (ex-info "mono: a closure's definition" {:fact :callee})))]
+        (cond (or (= ck fk) (and (= ck :fn) (= fk :fn-mut))) [cd []]
+              (= fk :fn-once) [d args "closure-once-shim"]
+              :else (throw (ex-info "mono: a closure of a lesser kind" {:fact :callee}))))
+      (and fk (vector? self) (#{:fndef :fnptr} (first self))) [d args "fnptr-shim"]
+      :else
+     (let [r (try (tc/resolve-assoc-fn tr d (vec args))
+                 (catch Throwable e (throw (ex-info (str "mono: a trait method's resolution (" (.getMessage e) ")") {:fact :callee}))))]
+      (cond (:builtin r) (throw (ex-info (str "mono: a builtin candidate (" (if (string? tr) tr "a local trait") " for " (first (or self [:none])) ")") {:fact :callee}))
+            :else [(:def r) (erase-regions (:args r))]))))))
+
+(defn- call-fsym
+  "A call's function constant's symbol (the helper's :fn-symbol): its resolved instance's, a #[track_caller] one's ReifyShim;
+  RF14: an item whose attributes core's sources do not show refused, as its callee fact is"
+  [cd args]
+  (let [[cd args] (resolve-instance cd (erase-regions args))]
+    (when (and *unknown-refused* (string? cd) (str/starts-with? cd "core::") (not (intrinsic? cd)) (not (:known (attrs-of cd))))
+      (throw (ex-info (str "mono: " cd "'s attributes are not in core's sources (a macro-made item)") {:fact :callee})))
+    (if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args args}))))
+
 (defn callee-fact
   "Instance::try_resolve's callee as the helper writes it: {:kind :symbol :def :can-unwind :track-caller [:intrinsic] [:external]}
-  (a virtual call's with its vtable :slot, RFP44 (a))"
-  [[_ d args]]
-  (or (virtual-fact d (erase-regions args))
-      (do
+  (a virtual call's with its vtable :slot, RFP44 (a); RF14: a trait method's by its impl)"
+  [[_ d0 args0]]
+  (or (virtual-fact d0 (erase-regions args0))
+      (let [[d args shim] (resolve-instance d0 (erase-regions args0))]
   (when (and *unknown-refused* (string? d) (str/starts-with? d "core::") (not (intrinsic? d)) (not (:known (attrs-of d))))
     (throw (ex-info (str "mono: " d "'s attributes are not in core's sources (a macro-made item)") {:fact :callee})))
-  (when (and (number? d) (= "Trait" (:kind (c/def-of (:parent (c/def-of d))))))
-    (throw (ex-info "mono: a trait method's resolution" {:fact :callee})))
-  (when (and (string? d) (= "Trait" (get (:kinds c/*std*) (c/path-parent d))))
-    (throw (ex-info "mono: a trait method's resolution" {:fact :callee})))
   (let [args (erase-regions args)
         {:keys [names]} (attrs-of d)]
     (if (intrinsic? d)
       {:kind "intrinsic" :symbol "" :def (print-path d) :can-unwind false :track-caller false :intrinsic (item-name-of d)}
       (let [abi (fn-abi d)]
-        (cond-> {:kind "item" :symbol (instance-symbol {:def d :args args}) :def (print-path d)
+        (cond-> {:kind (or shim "item") :symbol (instance-symbol (cond-> {:def d :args args} shim (assoc :shim shim))) :def (print-path d)
                  :can-unwind (and (not (names "rustc_nounwind")) (boolean (or (#{"Rust" "rust-call" "rust-cold" ""} abi) (re-find #"unwind" abi))))
                  :track-caller (boolean (names "track_caller"))}
-          (not (mir-available? d)) (assoc :external true))))))))
+          (and (not shim) (not (mir-available? d))) (assoc :external true))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the record's type forms as types (for the layouts of the types core's bodies use), and the types' texts
@@ -1238,6 +1407,8 @@
              (mapv arg args)])
       fndef [:fndef nil (mapv arg (nth st 2))]
       fnptr [:fnptr {}]
+      ;; RF14: a closure by its type's text (a local one's `{closure@FILE:L:C: L:C}`, typeck's)
+      closure [:closure (second f) {}]
       (throw (ex-info (str "mono: the type form " (pr-str st)) {:fact :layout})))))
 
 (defn- text-of [t]
@@ -1346,7 +1517,7 @@
                st (:tc (meta src)) tt (:tc (meta tgt))
                c (when st (pointee (erase-regions st))) d (when tt (pointee (erase-regions tt)))]
          :when (and c d (= :dyn (first d)) (not= :dyn (first c)) (first (:principal (second d))))]
-     [(second src) (second tgt) c (first (:principal (second d)))])))
+     [(second src) (second tgt) c (first (:principal (second d))) (vec (second (:principal (second d))))])))
 
 (defn- local-impl-method
   "The local impl of trait TR for the type C: its associated function named NM, or nil"
@@ -1364,12 +1535,29 @@
   [c tr]
   (keep (fn [[k m]] (when (= :method k) (local-impl-method c (method-trait m) (method-name m)))) (vtable-entries tr)))
 
+(defn- vtable-instance
+  "RF14: a vtable entry's instance, {:def :args}: the method M of the object's principal TR (at TARGS, its arguments after Self)
+  for C, resolved (resolve-instance); a by-value receiver (a VTableShim) and a supertrait with parameters refused"
+  [c tr targs m]
+  (let [mt (method-trait m)
+        ntr (count (filter #(not= :lifetime (:kind %)) (c/all-params (c/generics-any mt))))
+        args (cond (= mt tr) (into [c] targs)
+                   (= 1 ntr) [c]
+                   :else (throw (ex-info "mono: a supertrait's method with arguments in a vtable" {:fact :vtable})))
+        [d a] (resolve-instance m args)
+        recv (first (:inputs (if (number? d) (c/fn-sig d) (get (:fns c/*si*) d))))]
+    (when (and (number? d) (not (#{:ref :ptr} (first recv))))
+      (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable})))
+    (when (and (string? d) (seq? recv) (not (#{"ref" "ptr"} (str (first recv)))))
+      (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable})))
+    {:def d :args a}))
+
 (defn vtable-alloc
   "RFP44 (a): the vtable of C as a TR object, as vtable_allocation_provider lays it out: drop_in_place's function (null when
   C's drop glue is empty), size, align, then each entry's function; {:entries [[:fn SYMBOL] | [:null] | [:usize N]] :glue C?};
   a method that is not a local impl's own function (a default body, std's impls: trait resolution, which mono does not port,
   or a by-value self's vtable shim) refuses it"
-  [c tr]
+  [c tr & [targs]]
   (let [l (layout-of c)]
     {:glue (when (build/needs-drop? c) c)
      :entries (vec (for [[k m] (vtable-entries tr)]
@@ -1378,22 +1566,54 @@
                        :size [:usize (long (:size l))]
                        :align [:usize (long (:align l))]
                        :vptr (throw (ex-info "mono: a supertrait's vtable pointer" {:fact :vtable}))
-                       :method (let [im (or (local-impl-method c (method-trait m) (method-name m))
-                                            (throw (ex-info (str "mono: " (print-path m) " for " (build/ty-text c) ": not a local impl's function") {:fact :vtable})))
-                                     g (c/generics-of im)]
-                                 (when (some #(#{:type :const} (:kind %)) (c/all-params g))
-                                   (throw (ex-info "mono: a generic impl's method in a vtable" {:fact :vtable})))
-                                 (let [sig (c/fn-sig im) recv (first (:inputs sig))]
-                                   (when-not (#{:ref :ptr} (first recv))
-                                     (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable}))))
-                                 [:fn (instance-symbol {:def im :args []})]))))}))
+                       :method (if-let [im (local-impl-method c (method-trait m) (method-name m))]
+                                 (let [g (c/generics-of im)]
+                                   (when (some #(#{:type :const} (:kind %)) (c/all-params g))
+                                     (throw (ex-info "mono: a generic impl's method in a vtable" {:fact :vtable})))
+                                   (let [sig (c/fn-sig im) recv (first (:inputs sig))]
+                                     (when-not (#{:ref :ptr} (first recv))
+                                       (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable}))))
+                                   [:fn (instance-symbol {:def im :args []})])
+                                 ;; RF14: the entry's instance by trait resolution (an impl's method, std's or a generic one, or the
+                                 ;; trait's default body), the method's trait the object's principal or one without parameters of
+                                 ;; its own (its arguments C alone)
+                                 [:fn (instance-symbol (vtable-instance c tr targs m))]))))}))
+
+(defn- enclosing-fn [d] (loop [x d] (if (= "Closure" (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x)))
+
+(defn- local-instance?
+  "RF14: a local function's or closure's instance the collector builds from our bodies: no type argument, a closure's
+  enclosing function not generic, not a trait's default body (its Self an argument)"
+  [d args]
+  (and (number? d) (#{"Fn" "AssocFn" "Closure"} (:kind (c/def-of d))) (not (trait-method? d)) (empty? (filter type-arg? args))
+       (or (not= "Closure" (:kind (c/def-of d))) (not (generic-def? (enclosing-fn d))))))
+
+(defn- std-call
+  "RFP49 (a): a record body's function constant (fndef PATH [ARG-FORMS]) as [DEF ARGS]: a trait method of std's (PATH printed as
+  def_path_str prints it: `std::fmt::Display::fmt`) or of the crate's, its arguments' types by form->ty"
+  [^String path forms]
+  (let [tp (c/path-parent path) mn (c/path-name path)
+        segs (str/split tp #"::")
+        tr (or (local-trait-by-path tp) (when (#{"std" "core" "alloc"} (first segs)) (#'c/std-path-def (vec segs))))
+        m (cond (number? tr) (some #(when (and (= tr (:parent %)) (= "AssocFn" (:kind %)) (= mn (str (second (:data %))))) (:id %)) (c/defs))
+                (string? tr) (some (fn [[nm k p]] (when (and (= k "AssocFn") (= nm mn)) p)) (:items (get (:traits c/*si*) tr))))]
+    (when-not m (throw (ex-info (str "mono: no trait method " path) {:fact :callee})))
+    [m (erase-regions (mapv (fn [f] (if (and (seq? f) (= 'lt (first f))) [:re-erased] (form->ty f))) forms))]))
 
 (defn program-facts
-  "Within build-program's bindings: the program's native facts over its built BODIES ([[name body err] ...])"
-  [n bodies]
-  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+  "Within build-program's bindings: the program's native facts over its built BODIES ([[name body err] ...]); STD-CALLS (RFP49
+  (a)): the record's std bodies' function constants [PATH ARG-FORMS], whose local instances the collector adds"
+  [n bodies & [std-calls]]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil) *closure-kinds* (atom {})]
    (tc/with-solver (solver-def) (fn []
     (let [ours (into {} (for [[nm b] bodies :when b] [nm b]))
+          ;; RF14: each closure's kind by its built body's self (`&C` Fn, `&mut C` FnMut, `C` FnOnce)
+          _ (reset! *closure-kinds*
+                    (into {} (for [[_ b] ours :let [t (some-> (nth (:locals b) 1 nil) :ty meta :tc erase-regions)] :when (vector? t)
+                                   :let [[k cl] (cond (and (= :ref (first t)) (vector? (nth t 3)) (= :closure (first (nth t 3)))) [(if (nth t 2) :fn-mut :fn) (nth t 3)]
+                                                      (= :closure (first t)) [:fn-once t])]
+                                   :when cl]
+                               [(second cl) k])))
           src (slurp build/*root-file*)
           no-std? (boolean (re-find #"(?m)^#!\[no_std\]" src))
           fn-defs (filter #(and (#{"Fn" "AssocFn"} (:kind %)) (:body (:node %))) (c/defs))
@@ -1402,15 +1622,29 @@
                       :when (and (not (generic-def? (:id d))) (or (extern-indicator? nm) (and (not (re-find #"(?m)^#!\[no_main\]" src))
                                                                                                (= "main" (str (second (:data d)))) (= 0 (:parent d)))))]
                   (:id d))
-          by-def (into {} (for [d fn-defs] [(:id d) (name-of d)]))
+          ;; RF14: closures' bodies too (a closure is an instance when it is called or reaches std's bodies)
+          by-def (into {} (for [d (concat fn-defs (filter #(and (= "Closure" (:kind %)) (:body (:node %))) (c/defs)))] [(:id d) (name-of d)]))
+          ;; RFP49 (a): the local instances std's bodies reach: each trait method's call or function constant of the record's
+          ;; std instances' bodies (STD-CALLS: [PATH ARG-FORMS]) resolved by mono, those that are a local function's or
+          ;; closure's at no type argument (a generic one's instantiation is not ported)
+          std-roots (distinct (for [[path forms] std-calls
+                                    :let [r (try (let [[d args] (std-call path forms)] (resolve-instance d args)) (catch Throwable _ nil))]
+                                    :when r :let [[rd rargs shim] r]
+                                    :when (and (nil? shim) (local-instance? rd rargs))]
+                                rd))
           ;; the collector: from the roots through the calls of our bodies (core's bodies' own uses are the pack's)
-          items (loop [todo (vec roots) seen #{} acc []]
+          items (loop [todo (vec (concat roots std-roots)) seen #{} acc []]
                   (if-let [d (first todo)]
                     (if (contains? seen d)
                       (recur (subvec todo 1) seen acc)
                       (let [b (get ours (by-def d))
                             calls (when b (keep #(call-fndef (:term %)) (:blocks b)))
                             next-local (concat (for [[_ cd args] calls :when (and (number? cd) (empty? (filter type-arg? args)))] cd)
+                                               ;; RF14: a trait method's call resolved to a local impl's method at no type argument
+                                               (for [[_ cd args] calls :when (trait-method? cd)
+                                                     :let [r (try (resolve-instance cd (erase-regions args)) (catch Throwable _ nil)) [rd rargs] r]
+                                                     :when (and (nil? (nth r 2 nil)) (local-instance? rd rargs))]
+                                                 rd)
                                                (for [t (drop-tys b) x (drop-fns t)] x)
                                                ;; RF13: the local functions it reifies to function pointers
                                                (for [blk (:blocks b) st (:stmts blk)
@@ -1424,15 +1658,24 @@
                                                (for [[_ _ c tr] (when b (dyn-casts b))
                                                      m (try (vtable-methods c tr) (catch Throwable _ nil))
                                                      :when (empty? (filter #(#{:type :const} (:kind %)) (c/all-params (c/generics-of m))))]
-                                                 m))]
+                                                 m)
+                                               ;; RF14: a vtable's entries resolved to a local function at no type argument
+                                               (for [[_ _ c tr targs] (when b (dyn-casts b))
+                                                     [k m] (try (vtable-entries tr) (catch Throwable _ nil)) :when (= :method k)
+                                                     :let [i (try (vtable-instance c tr targs m) (catch Throwable _ nil))]
+                                                     :when (and i (local-instance? (:def i) (:args i)))]
+                                                 (:def i)))]
                         (recur (into (subvec todo 1) next-local) (conj seen d) (conj acc d))))
                     acc))
-          ext-items (distinct (for [d items :let [b (get ours (by-def d))] :when b t (map :term (:blocks b)) :let [[_ cd args] (call-fndef t)]
+          ext-items (distinct (for [d items :let [b (get ours (by-def d))] :when b t (map :term (:blocks b)) :let [ft (call-fndef t)] :when ft
+                                    :let [[cd args] (let [[_ cd args] ft]
+                                                      ;; RF14: a trait method's instance by its impl (the record's when mono refuses it)
+                                                      (if (trait-method? cd) (or (try (resolve-instance cd (erase-regions args)) (catch Throwable _ nil)) [cd args]) [cd args]))]
                                     :when (and (string? cd) (not (intrinsic? cd)) (mir-available? cd))]
                                 {:def cd :args (erase-regions args)}))
           ;; {body-name [[TARGET-TEXT vtable-or-error] ...]} in the body's order (the runtime body's casts take them in turn)
           vtables (into {} (for [d items :let [b (get ours (by-def d))] :when b :let [cs (dyn-casts b)] :when (seq cs)]
-                             [(by-def d) (vec (for [[_ tt c tr] cs] [tt (try-fact #(vtable-alloc c tr))]))]))
+                             [(by-def d) (vec (for [[_ tt c tr targs] cs] [tt (try-fact #(vtable-alloc c tr targs))]))]))
           glue (distinct (concat (for [d items :let [b (get ours (by-def d))] :when b t (drop-tys b) g (drop-glues t)] g)
                                  (for [[_ vs] vtables [_ v] vs :when (and (map? v) (not (error? v)) (:glue v)) g (drop-glues (:glue v))] g)))
           ext-items (concat ext-items (for [t glue] {:def (c/lang "drop_glue") :args [t] :shim :drop-glue}))
@@ -1444,7 +1687,7 @@
                              [(second (second t)) (try-fact #(callee-fact ft))]))
           fsyms (into {} (for [d items :let [b (get ours (by-def d))] :when b blk (:blocks b) :let [t (:term blk) ft (call-fndef t)] :when ft
                                :let [[_ cd args] ft] :when (not (intrinsic? cd))]
-                           [(second (second t)) (try-fact #(if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args (erase-regions args)})))]))
+                           [(second (second t)) (try-fact #(call-fsym cd args))]))
           ;; RF13: a function item reified to a function pointer (`dbl as fn(i32) -> i32`): its instance's symbol by the
           ;; constant's text, as a call's
           fsyms (into fsyms (for [d items :let [b (get ours (by-def d))] :when b blk (:blocks b) st (:stmts blk)
@@ -1486,7 +1729,7 @@
                                               ((:names (attrs-of def)) "track_caller") (assoc :track-caller true)))]))
          :callees (into {} (for [[txt ft] calls] [txt (try-fact #(callee-fact ft))]))
          :fsyms (into {} (for [[txt [_ cd args]] calls :when (not (intrinsic? cd))]
-                           [txt (try-fact #(if ((:names (attrs-of cd)) "track_caller") (reify-mangle cd args) (instance-symbol {:def cd :args (erase-regions args)})))]))})))))
+                           [txt (try-fact #(call-fsym cd args))]))})))))
 
 (defn record-slots
   "RFP44 (a): within build-program's bindings, record-virtual-slot over KEYS [[METHOD-PATH DYN-TEXT] ...]: {key slot-or-nil}"

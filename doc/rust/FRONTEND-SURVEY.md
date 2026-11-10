@@ -3144,3 +3144,87 @@ rust-src's `compiler/`); then RFP52 (a), decided by the user on 2026-11-10, meas
 - Others: `array::clone`'s `DefId(0:5755 ..)` (a DefIndex), `encode_utf8_raw`'s never temporaries, `encode_utf8_raw_unchecked`,
   `transmute_prefix`'s nested struct, `downcast_unchecked_*`'s cast user types, `cell::clone`, `assert_coerce_unsized`,
   `swap_nonoverlapping_bytes`, `get_or_try_insert_with`, `flatten_ref`, cmp's `smallest`/`largest` (macro impl spans).
+
+## As built: RF14 (RFP48): trait resolution in mono; RFP49 (a) begun (2026-11-10)
+
+Branch `rust-rf14` (from `mac/rust-rf13e` `db5fe592e`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH` 2 or 3). The user decided RFP48-RFP61 (a) on 2026-11-10; this slice builds RFP48 (a) and the first part of RFP49 (a).
+
+### RFP48 (a): Instance::resolve for trait methods
+
+- **Impl candidates** (`arbace.rust.front.typeck/resolve-assoc-fn`, after rustc 1.99.1's rustc_ty_utils/src/instance.rs
+  resolve_associated_item and rustc_trait_selection's specialize/mod.rs and specialization_graph): the impls of the trait (the
+  crate's and std's interface's, by the self type's key) whose header unifies with the concrete trait reference and whose
+  clauses hold; with several (specialization), the chain ordered leaf first by `specializes` (an impl's header at its own
+  parameters an instance of the other's), the leaf required to specialize every other (else refused: "overlapping impls"); the
+  item from the first impl of the chain that defines it, at the impl's arguments and the method's own (rebase_onto), else the
+  trait's default body at the call's arguments; an impl argument its header does not determine refused.
+- **Builtin candidates** (`arbace.rust.front.mono/resolve-instance`): the Fn traits on a closure (its body when the closure's
+  kind is the trait's or Fn called as FnMut, else `ClosureOnceShim`, the `closure-once-shim` callee) and on a function item or
+  pointer (`FnPtrShim`, `fnptr-shim`); the closure's kind read from its built body's self (`&C`, `&mut C`, `C`). Clone's shims
+  and the other builtin impls stay refused ("a builtin candidate").
+- **The facts that use it**: each call's callee and function constant's symbol (`callee-fact`, `call-fsym`), the collector's
+  local items (a trait call resolved to a local function at no type argument), the external items (`:ext-items`: the resolved
+  instance, so RF12-P6's native core plan matches more of the record's std bodies), and the vtables (`vtable-alloc`: an entry
+  that is not a local impl's own method resolved, its instance's symbol: std's impls, generic impls, default bodies; a by-value
+  receiver's VTableShim and a supertrait with parameters still refused).
+- **Found on the way**: v0's trait-qualified paths (default_print_def_path's `trait_qualify_parent`: `<Self as Trait>::item`,
+  `Y`), trait objects (`D`, the principal at a dummy Self, `p` projections, auto traits, `L_`), local closures (by their
+  `{closure@..}` text, typeck's fn_decl_span) and fn pointers (`F`); an impl's disambiguator in rustc's order of definitions (a
+  derive's impls after the crate's other items, as rustc-def-index orders them; the source's order gave `<V2 as Add>::add`
+  `s9_` for rustc's `s2_`); `#[track_caller]` inherited by a trait impl's method from its trait's method (codegen_fn_attrs:
+  `<Grid as Index>::index`); core's attributes of a trait's provided method (`Iterator::map`) and of an impl whose file order is
+  not rustc's disambiguator (the impl found by its header's names, std's interface's against the source's: `impl From<&str> for
+  String` among string.rs' 82 impls); a call's function constant whose callee's attributes core's sources do not show refused
+  as its callee is (`checked_add`'s macro-made impl).
+
+### RFP49 (a), the first part: the collector through std's bodies
+
+`build-run`'s native run hands mono the function constants of the record's std instances' bodies (`(fndef PATH [ARGS])`, rustc's
+std bodies: RF12's part); mono resolves each trait method's (PATH as def_path_str prints it, std's trait through its modules, the
+arguments by `form->ty`, a local closure by its text) and adds the local functions and closures it reaches at no type argument
+to the collector's items (closures' bodies now items too). A generic local function or a closure of a generic one reached only
+through std (an instantiation of our bodies, as RF12-P6 instantiates core's) is not ported yet: RFP49's rest.
+
+### Results
+
+- **The mono facts against the record** (`rsi-build`'s mono-check of the same run, each batch's lines now kept in
+  `mono-all.log`), the 8 programs RF13 left with the most refused callees (traits, closures, drops, errors, structs, strings,
+  algorithms, patterns; `RF11_BATCH=2`), before (`db5fe592e` in a worktree of its own, the same logging) and after RFP48 (a):
+  callees equal **406 -> 592** of 710, function constants' symbols 368 -> 557 of 564/567, core's items reached 314 -> 483 (all
+  equal), mono items' symbols 40 -> 50 of 128; the native callee facts 731 -> 964 of 987/993 (the refusals 263 -> 29: 21 core
+  items whose attributes core's sources do not show, macro-made, 6 calls with no fact, 2 `Box<dyn Fn>`'s `Fn` impl); no
+  callee fact mono gives differs from the record's (MONO_VERBOSE over traits, errors, structs, patterns: the differences left are
+  facts mono does not give).
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; about 75 minutes): **48 of 67 own** (47 at RF13: `patterns` now, through RFP49's
+  first part: `<Shape as Debug>::fmt`, reached through std's formatting bodies). The native callees 4,079 of 4,524 (RF13: 3,503 of
+  4,288), the vtables 25 of 32 (0 of 7); the function constants' symbols 1,739 of 2,135 (1,911 of 1,982: those whose callee's
+  attributes core's sources do not show are now refused, as their callee is: the record's, where the default rules gave
+  `checked_add`'s and `<&i32 as Rem>::rem`'s wrong symbol). The programs RF13 stopped at "a local instance not collected" now stop
+  later: errors, float-f32, float-f64, strings and panic-explicit at a promoted constant in `main` (`promoted: a constant's
+  value`, `an rvalue binop`), fmt at a callee of `Argument::new_debug::<Option<_>>` (an uninferred type in our body), and the
+  rest at a generic local instance reached through std (algorithms' `quicksort::<f64>`, traits' `<Dog as Animal>::describe`,
+  structs' `<[Token]>::len`, main-err's `<Failure as Debug>::fmt` through a generic, panic-assert-eq's `assert_failed::<i32, i32>`,
+  drops' drop glue): RFP49's rest; the vector ABI 4 (RFP58), `casts`' unevaluated constant, `closures`' reified closure
+  (RFP50), `panic-hashmap-index`'s `tlsref`.
+- `bin/rust-front essential` equals its known file (6 min 27 s; the staged records copied from another worktree name its paths:
+  re-staged); `bin/rust-front core-essential` equals its own (564 of 567, 8 min 43 s; core's caches copied from another worktree name its
+  paths: rewritten); `bin/reap` 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict` exit 0, Rust 75.0 / 75.0 /
+  95.8 / 80.0, unchanged (RFP43 (a): an own case still scores 0.5).
+
+### Left (RFP49's rest and the rest of RFP48)
+
+- Generic local instances reached only through std's bodies (`quicksort::<f64>`, a trait's default body at a local Self,
+  `<[Token]>::len`): mono's collector would instantiate our generic bodies at the arguments std's bodies give (RF12-P6's way for
+  core's); the next part of RFP49 (a).
+- RFP48: Clone's shims and the other builtin impls (a `CloneShim`, `Box<dyn Fn>`'s `Fn` impl through the object's own
+  candidate), a vtable's by-value receiver (VTableShim) and a supertrait with parameters; core items whose attributes a macro
+  makes (the integers' and slices' iterator impls, `default_impl!`, `forward_ref_binop!`) are the record's, as before.
+
+### The night's commands (none run here)
+
+- RFP46 (a)'s whole plan again, now with RFP48 and RFP49's first part: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build`
+  (samples and synthetic, about 30-60 minutes, 2.4 GB a process; the samples' processes above that), then `bin/rust-front
+  rsi-native` by hand over the own programs (rustc as the linker driver) to confirm the new own program (`patterns`) runs as
+  rustc's recorded run, then `bin/rsi check --front own --corpus samples,synthetic` (RFP42 (a)).
