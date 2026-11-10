@@ -2898,3 +2898,7 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
   considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
   the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
+
+## 2026-11-10: gate-crops-fix: rust-core-essential in the rust crop
+
+Night 11's first gate (next dc6a55df2) failed only `gate-tests`: costs-test said ":crops: rust-core-essential is in no crop" (rust-rf12's merge, 0c22b1f1b, added the essential step without listing it in test/gate/steps.edn's :crops :rust). gate-reads-test and gate-tests-test run bin/gate-tests nested and failed only with it. Fix: rust-core-essential added to the :rust vector (after rust-front-essential; the step lives in steps.edn, no fragment under test/gate/crops/ names it). Proof: costs-test, crops-test, gate-reads-test and gate-tests-test pass; `bin/gate --plan` plans; `bin/reap` 41 of 44 cells checked, 0 problems.
