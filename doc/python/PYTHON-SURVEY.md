@@ -5757,3 +5757,38 @@ types (format, shape, strides, len, bytes, items, slices, casts, hash, equality)
 a view across `resize`, `from_buffer` and `from_buffer_copy` of ctypes objects, against python3 3.14.10's run; its negative
 control judges the run against a mutated reference, which must fail. PASS on the head, FAIL on the base (every `memoryview` of
 a ctypes object a TypeError).
+
+## As built: 264, a number dunder set to None is called, as CPython's slots call it (2026-11-10, the Mac VM, queue 264)
+
+256's finding 4, 259f's class `:inplace-slot-none`. CPython 3.14.10's `update_one_slot` (Objects/typeobject.c) gives a class
+whose `__iadd__` (or `__add__`, `__radd__`, any number dunder) is None the generic slot like any other value (only `__hash__`
+= None is special), and the slot calls what it finds: `SLOT1` (`slot_nb_inplace_*`) by `vectorcall_method`, `SLOT1BINFULL`
+(`slot_nb_add` ... `slot_nb_divmod`, `slot_nb_power`'s binary and ternary halves) by `vectorcall_maybe`, whose NotImplemented
+answers a *missing* method only. So `x += 1` with `__iadd__ = None` raises TypeError ('NoneType' object is not callable): no
+fallback to `__add__` (`binary_iop1` returns the slot's error), and `x + 1` with `__add__ = None`, `1 + x` with
+`__radd__ = None`, `pow(x, 2, 3)` with `__pow__ = None` and `divmod` with `__divmod__`/`__rdivmod__` = None raise the same.
+pyi's class slots dispatch through `callSpecialOr` (`go/arbace/py/class.ae`), which took a None for a missing method; it now
+answers NotImplemented only when the type has no such attribute, and `builtinDivmod` (`builtins.ae`) goes through it instead of
+`CallSpecial` (which keeps skipping None for its other callers: abs, round, `__fspath__` ...). The interpreted loop
+(`eval.go`'s in-place op) and the compiled path (`AotInplace`, `AotBinary`) reach it through `InPlaceOp`/`BinaryOp`; their
+int/float fast path (`numberFast`) is untouched and runs first, so the common case does no more work. test_augassign's
+testCustomMethods1 passes and `:inplace-slot-none` leaves `test/python/divergences.edn`. Proof: a probe of every in-place dunder
+(set to None with and without the binary one, inherited and blocked in a subclass, on a list subclass, set after the class
+statement and deleted again), every binary and reflected one, the ternary pow, divmod and `operator.iadd`, 139 lines equal to
+`python3 -I -B`'s interpreted (`bin/pyi run`) and compiled (`bin/pyi aot`), 109 of them different on the base; a negative
+control (a reference with the first case changed to the base's fallback) differs. A second probe of the built-in subclasses
+(int, float, str, tuple, set, dict) agrees too.
+
+Found on the way (the brief's `lib-test test_binop`, on the base too, in no class): `doRichCompare` (`abstract.ae`) tried b's
+swapped method first only when b's class is a proper subclass of a's that overrides it (`overridesReflected`, since PY5c), then
+a's, then b's again. CPython's do_richcompare (Objects/object.c) tries b's first whenever b's class is a proper subclass of a's,
+overriding or not, and keeps `checked_reverse_op` so it does not try it a second time. test_binop's test_comparison_orders logged
+`['C.__eq__', 'B.__eq__', 'C.__eq__']` for `B() == C()`, and `B() <= D()` with D overriding nothing logged `['B.__le__',
+'B.__ge__']` where CPython logs `['B.__ge__', 'B.__le__']`. Both rules are ported (their own commits); the method passes, as does test_compare's
+test_ne_low_priority (`['Derived.__ne__', 'Base.__eq__', 'Derived.__ne__']`, the same double try, also in no class), and a
+probe of `==`, `!=`, `<=` and `<` over unrelated classes, an overriding and a non-overriding subclass agrees with `python3 -I -B`
+interpreted and compiled.
+Checks: `lib-test test_augassign test_binop test_descr test_class test_compare test_richcmp`, 251 methods, the base 217 pass, 32
+classed, 2 failing, the head 220 pass, 31 classed, 0 failing, method by method exactly the three above from failure to ok;
+`make python-essential`, `bin/pyi runtime vet`, `table-check --configs tamago/amd64,tamago/arm64`, and a sample of `runtime
+check` (live oracle: 9 programs and 1 session equal, controls failing as they must).
