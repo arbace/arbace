@@ -4672,6 +4672,55 @@ nothing here moves it, by the ruling; JCS359 does.
   read level's cache) or the differences be JCS360's. (b) (1) and (4) with the build tree's generated sources and descriptors copied,
   their provenance recorded: still a consumed toolchain product, 0.5 by the header's rule: a waypoint, no gain. (c) As is.
   *Recommended: (a)*, staged, (1)'s night measure first.
+
+**Measured 2026-11-10 (day)** (JCS359 (a)(1), javac's tool `javac-5ad357331dbc`, `GOMEMLIMIT=1800MiB`, one module a run, `bin/javac-vendor classes modules`, `JAVAC_VENDOR_MODULES` one module; serial, about 12 minutes of runs; java.logging, jdk.zipfs and java.prefs above are not repeated). Every module's peak stayed under 1.8 GB (java.net.http 1.78 GB, java.sql.rowset 1.77 GB, java.xml.crypto 1.74 GB).
+
+| module | files | classes | by javac on Arbace | result | ms | peak MB | differing classes |
+|---|---|---|---|---|---|---|---|
+| jdk.nio.mapmode | 3 | 1 | 1 | equal | 9392 | 1061 |  |
+| java.transaction.xa | 5 | 3 | 3 | equal | 10226 | 1050 |  |
+| jdk.editpad | 3 | 3 | 3 | equal | 16464 | 1517 |  |
+| jdk.internal.ed | 3 | 3 | 3 | equal | 10357 | 1077 |  |
+| java.instrument | 10 | 10 | 10 | equal | 9637 | 1087 |  |
+| jdk.unsupported.desktop | 8 | 11 | 11 | equal | 16542 | 1497 |  |
+| java.scripting | 14 | 12 | 12 | equal | 9395 | 1105 |  |
+| jdk.unsupported | 9 | 12 | 12 | equal | 10018 | 1109 |  |
+| jdk.naming.rmi | 8 | 12 | 12 | equal | 11761 | 1190 |  |
+| jdk.jstatd | 11 | 13 | 13 | equal | 10904 | 1135 |  |
+| jdk.net | 9 | 14 | 14 | differ | 10793 | 1098 | `ExtendedSocketOptions$1` |
+| jdk.security.jgss | 16 | 15 | 15 | equal | 12889 | 1241 |  |
+| jdk.attach | 15 | 18 | 18 | equal | 10327 | 1122 |  |
+| jdk.management.jfr | 15 | 20 | 20 | equal | 11902 | 1322 |  |
+| java.management.rmi | 16 | 22 | 22 | equal | 12607 | 1382 |  |
+| jdk.accessibility | 18 | 22 | 22 | equal | 19307 | 1530 |  |
+| java.datatransfer | 18 | 24 | 24 | equal | 11017 | 1122 |  |
+| jdk.naming.dns | 16 | 25 | 25 | equal | 10752 | 1238 |  |
+| jdk.security.auth | 30 | 25 | 25 | equal | 14972 | 1495 |  |
+| java.smartcardio | 22 | 31 | 31 | equal | 10316 | 1187 |  |
+| java.security.sasl | 30 | 34 | 34 | differ | 11008 | 1220 | `NTLMServer$1` |
+| jdk.management.agent | 30 | 41 | 41 | differ | 13536 | 1486 | `LocalRMIServerSocketFactory$1` |
+| jdk.management | 29 | 45 | 45 | equal | 10577 | 1272 |  |
+| jdk.sctp | 33 | 45 | 45 | equal | 10560 | 1169 |  |
+| jdk.jcmd | 41 | 51 | 51 | equal | 11592 | 1175 |  |
+| java.sql.rowset | 56 | 53 | 53 | equal | 39680 | 1724 |  |
+| jdk.internal.opt | 52 | 62 | 62 | equal | 11749 | 1166 |  |
+| jdk.internal.jvmstat | 61 | 66 | 66 | equal | 10947 | 1132 |  |
+| jdk.jartool | 28 | 73 | 73 | differ | 14266 | 1487 | `Main$Hasher$1` |
+| java.sql | 78 | 77 | 77 | equal | 11200 | 1212 |  |
+| jdk.httpserver | 58 | 88 | 88 | equal | 13296 | 1317 |  |
+| jdk.xml.dom | 94 | 89 | 89 | equal | 11269 | 1106 |  |
+| jdk.dynalink | 67 | 90 | 90 | equal | 11937 | 1318 |  |
+| java.rmi | 105 | 136 | 136 | differ | 13102 | 1417 | `SslRMIServerSocketFactory$1` |
+| jdk.crypto.cryptoki | 82 | 151 | 151 | equal | 14427 | 1538 |  |
+| java.naming | 204 | 244 | 244 | equal | 14919 | 1502 |  |
+| jdk.charsets | 125 | 281 | 281 | equal | 12692 | 1425 |  |
+| java.xml.crypto | 272 | 400 | 400 | equal | 19139 | 1699 |  |
+| java.management | 328 | 427 | 427 | differ | 18126 | 1486 | `JMXConnectorFactory$1` |
+| jdk.jdi | 254 | 548 | 548 | differ | 15683 | 1506 | `Commands$AsyncExecution$1`, `VMConnection$1`, `AbstractLauncher$Helper$1`, `AbstractLauncher$Helper$2` |
+| java.net.http | 313 | 712 | 712 | equal | 22413 | 1736 |  |
+
+41 modules, 4009 classes: 34 modules equal, 7 differ, in 10 anonymous classes in all (jdk.jdi 4, listed: `Commands$AsyncExecution$1`, `VMConnection$1`, `AbstractLauncher$Helper$1`, `$2`; one more each in the other six). Cause of every one, checked with `javap -v` on the build's and Arbace's class: the anonymous class's method parameter names in the LocalVariableTable (and their Utf8 constants) are `arg0, arg1, ...` in the build and the source's names (`options`, `descriptor`, `location`, ...) on Arbace, nothing else differs: JCS360's case, as for jdk.zipfs and java.prefs. Not measured (over the day's light budget or larger): java.base, java.desktop, jdk.localedata, jdk.compiler and the other big modules, java.xml, jdk.jfr, jdk.jlink, jdk.jshell, jdk.javadoc, jdk.internal.vm.ci, jdk.graal.compiler, jdk.hotspot.agent and the jdk.crypto.ec, java.se and jdk.graal.compiler.management shells (no or one class). Evidence for JCS360 (a): in 41 measured modules 10 classes of 4,009 differ, all by parameter names of an anonymous class's inherited method.
+
 - **JCS360** Where javac on Arbace's from-source output differs from the build's class files (by day: an anonymous class's
   LocalVariableTable names, `arg0` in the build, the source's names on Arbace; the night lists all): (a) the own platform is javac on
   Arbace's output as it is, each differing class listed with its reason in a known file (`jdk/javac/platform-own-known.edn`) and the
