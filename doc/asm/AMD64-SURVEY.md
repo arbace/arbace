@@ -743,3 +743,16 @@ Not built in this slice: the CHECK text (AXS27's second step), APX (its third), 
   *Recommended: (b)*, as AXS27 (a) orders it: the CHECK text judges every met encoding's instruction a second time (the matcher's
   choice, not only its bytes), which APX's NDD and NF forms need as much as the rest.
 
+- **AXS29 The CHECK text's shape (the next slice).** What it takes, measured on this slice: the table's instructions with their
+  AT&T AsmString and each operand's `PrintMethod` (printOperand, printMemReference's `print*mem`, printU8Imm, printSTiRegOperand,
+  printCondCode, printRoundingControl, printSrcIdx/DstIdx, printMemOffset, printPCRelImm), the `InstAlias` records with
+  `EmitPriority` above 0 (about 400 in X86's `.td`: X86's InstAlias prints by default, its quiet ones say `0`) and their operand
+  conditions after `AsmWriterEmitter.cpp`'s printAliasInstr, `X86ATTInstPrinter::printInst`'s special cases (callq, data32,
+  printVecCompareInstr's `vcmp`/`vpcmp`/`vpcom` mnemonics) and `X86InstPrinterCommon`'s flags (lock, rep, `{vex3}`, `{evex}`,
+  `{disp32}`), MCExpr's printing for symbolic operands. Options: (a) the table regenerated with those fields (the matchables
+  untouched, so `table oracle`'s MatchTable0 row for row still holds; llvm-tblgen `-gen-asm-writer` a second oracle by hand for
+  the alias table), the text judged as the encodings are (each non-encoding CHECK line matched forward over the printed
+  instructions, FileCheck's whitespace folding), its classes apart (`:print-alias`, `:directive` for CHECK lines of directives and
+  labels), recorded beside the encodings' rows; (b) a FileCheck emulation over llvm-mc's whole output (text and encoding on one
+  line, CHECK-NEXT, CHECK-SAME, CHECK-NOT), replacing AXS25's pairing. *Recommended: (a) first*: it keeps the encodings' record
+  and judge as they are; (b) once the text is printed equal, as a stricter judge of both.
