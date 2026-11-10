@@ -2805,7 +2805,8 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   mangled CI1/CI2 <base>, Itanium §5.1.4.3), std::tuple and std::map's operator[] (CP332 (a): clang's builtin templates
   `__type_pack_element` and `__make_integer_seq` in the native parser and the templates, a pack parameter's type as an alias's argument,
   pack expansions as one argument, a misread fold, if constexpr over a class, a failing decltype in a bound signature a substitution
-  failure), runtime/hello.cpp now generated; the full parse cache in gen-batch (CP336 (a)); the module's order as clang's (P23 (a):
+  failure), runtime/hello.cpp now generated; the full parse cache in gen-batch (CP336 (a), measured slower on a hit than the parse,
+  557 s against 378 s on samples/io.cpp, so off by default: CP341); the module's order as clang's (P23 (a):
   functions placed at first reference as llvm::Functions are when created, EmitDeferred depth first; the order read from
   clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH LLVM-exception, no code ported). CP333 (b), CP334 (b),
   CP335 (b): nothing to build now; CP337 (b) was cpp-route's.
@@ -2813,7 +2814,7 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   and the library's tuples were the next group), and the read's own record counts the dg files Arbace's front end judges alone.
 - **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: cpp-props5"): the dg every-10th sample 121 → 121 own passes, the same files (two
   regressions found and fixed on the way); 75 files with structured bindings, inheriting constructors and alias20: 12 → 13; the run
-  corpora's 82 programs by our route: 55 → 56 generated, then hello.cpp; codegen-gen 154 of 154 recorded again for P23's order (the
+  corpora's 82 programs by our route: 55 → 57 generated (embed-26, hello.cpp), none lost; codegen-gen 154 of 154 recorded again for P23's order (the
   forms otherwise the same); P23 against clang's IR of 17 samples by hand: vtables in clang's order 3 → 13, functions' common
   subsequence 44% → 79%. No run check (the lowered runtime's read is heavy; the runs are the night's). `bin/crops-score --crop cpp`
   unchanged (76.3 / 100 / 67.8): the facts move only with the night's records (the dg own record, the switch).
@@ -2821,6 +2822,6 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   references placed later, the positions are creation order, so it was dropped); diagnosing a failed decltype at the call instead of
   dropping the candidate (wrong for SFINAE, [temp.deduct.general]/8); a future with a timeout for CP329 (the goroutine would run on).
 - **Proposed**: CP338 (the run corpora's remaining refusals), CP339 (landing pads' cleanups at the scope's end), CP340 (the generation's
-  time at night).
+  time at night), CP341 (the full cache's format, or none).
 - **Slips**: two process substitutions (`paste <(...)`, `diff <(...)`) and one `>/dev/null` in throwaway comparisons, against the day's
   rules; a `bin/cppi runtime-build` attempt was refused by the permission layer during night 10's heavy work and not retried.

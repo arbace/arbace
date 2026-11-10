@@ -5742,7 +5742,9 @@ our route are the night's).
   `(__constructible<_Elements...>())` read as a fold; if constexpr over a class; a signature's decltype that does not analyze with every
   argument bound a substitution failure, std::size of a pair). `__type_pack_element`'s index is checked (not a constant, negative, out
   of range) and its errors reported at the alias (ext/type_pack_element2.C, an own pass by the parser's decline before, holds by them).
-- **CP336 (a)**: gen-batch with P15 (b)'s full parse cache on (CPP_FULL_CACHE=0 off).
+- **CP336 (a)**, built and measured: gen-batch can read P15 (b)'s full parse cache (`ps/*full-cache*`), but a hit costs more than the
+  parse it saves on the tools' host (samples/io.cpp: 378 s parsing, 557 s reading the 6 MB table back, the forms byte for byte the
+  same), so it is off by default (`CPP_GEN_FULL_CACHE=1` on): CP341.
 - **P23 (a)**: the module in clang's order (CODEGEN.md G5e): each function placed at its first reference, as an llvm::Function takes its
   place in the module when created, the personality at the first landing pad, `__clang_call_terminate` before the declarations its body
   names, the eager definitions first and then the deferred ones depth first.
@@ -5756,7 +5758,7 @@ our route are the night's).
 | the dg every-10th sample (`.tmp/sample.sh`: `sA` the base, `sC` the head) | 121 → 121 own passes, the same files; 2 regressions found on the way (`sB`: ext/type_pack_element2.C by the parser now reading `__type_pack_element`, parse/enum4.C by CP325's crash) and fixed |
 | the 75 files with a structured binding, an inheriting constructor or alias20 (`.tmp/flist.txt`; `fl-b` on a69c3b10a, `fl-n`) | 12 → 13 own passes (class-deduction-alias20), none lost; decomp11's crash fixed after |
 | gen-batch over the run corpora's 82 programs (`.tmp/G1`, before CP332's last fixes) | 56 generated (cpp-route: 55): embed-26 now generates; runtime/hello.cpp generated after (`.tmp/g22`) |
-| gen-batch over the 82 at the head (`.tmp/G2`) | SEE-G2 |
+| gen-batch over the 82 at the head (`.tmp/G2`) | **57 generated** (cpp-route's 55, all of them still generated: embed-26 and runtime/hello.cpp added), 25 refused: coroutines 7, GNU vector types 5, the native parser's declines 4, threads 3 (atomics, threads, thread-throw), deferred's `__complex__`, and singles (spaceship-synth4, attribute-test-1's vector compound literal, pr77550, thread_local12e, builtin-clear-padding-4, null-8); 4,073 s at `GOMAXPROCS=4`, the full cache warm from `G1`, peak 2,086 MB (hello.cpp, the one program past 2 GiB) |
 | probes (`.tmp/p/`): inheriting constructors (inh1), std::unique_ptr (uptr1), std::tuple and make_tuple (tup1-tup3), std::map (map1, map2), a pack-typed alias argument (pk1, pk2), a constexpr if over a class (ce1) | generate (none was run: the runs are the night's) |
 | `bin/cppi codegen-gen` | at the base 154 of 154 as recorded; at P23's head 97 of 154 (57 forms moved by the order alone: 151 the same forms as a set, 3 differing only in the always-inliner's `.iN` numbering); `--record`: 154 of 154 generated, forms.sha256 recorded again |
 | P23 against clang 23.1.5's -O0 IR of 17 samples with vtables (cpp-codegen-fix's, kept in the main checkout's `.tmp/keep/`, by hand) | vtable and VTT definitions in clang's order 3 → 13 of 17; functions and declarations: the longest common subsequence 44.3% → 78.8% of the common names, 2 samples exact (dtors, tmpl-virtual) |
@@ -5765,9 +5767,9 @@ What is left of P23's order: a destructor named by a landing pad's cleanup is pl
 call that may throw) and clang's where the scope's cleanups are popped (at its end); a complete-object constructor and destructor of
 the runtime's classes are declared C2/D2 where clang declares C1/D1 (constructor aliases).
 
-### Proposed (CP338-CP340)
+### Proposed (CP338-CP341)
 
-- **CP338: the remaining refusals of the run corpora** (after this branch, 26 of 82): coroutines 7 and vector types 5 stay deferred
+- **CP338: the remaining refusals of the run corpora** (after this branch, 25 of 82): coroutines 7 and vector types 5 stay deferred
   (CP334 (b), CP335 (b)); the native parser's declines 4 (explicit object parameters, multidimensional subscripts, vbase8-10, library),
   threads 3 (atomics' `__atomic_thread_fence`, threads' arithmetic on a class, thread-throw's `_Indices`), singles 5. (a) Take them in
   that order of programs gained, the parser's first; (b) stop at auto's switch. **Recommended: (a).**
@@ -5776,7 +5778,10 @@ the runtime's classes are declared C2/D2 where clang declares C1/D1 (constructor
   forms recorded again; (b) leave it. **Recommended: (b)** until the codegen records pack (P23's condition) exists to hold the order.
 - **CP340: generation time.** The 82 programs took 5,928 s in one process at `GOMAXPROCS=2` and `GOMEMLIMIT=1400MiB` (cpp-route
   measured 1,272 s with more processors); runtime/hello.cpp alone 1,884 s with threads.cpp. (a) Measure at night with the
-  full cache warm (CP336) and `GOMAXPROCS` unset; (b) as is. **Recommended: (a)** (night commands below).
+  full cache cold and `GOMAXPROCS` unset; (b) as is. **Recommended: (a)** (night commands below).
+- **CP341: CP336's cache does not pay.** Reading the full parse's table back (skim's object table, gzip) is slower than the parse on the
+  tools' host. (a) Leave it off (as now) and take generation time from the parse itself (CP340); (b) a cheaper table format (no gzip,
+  the nodes as the reader's own forms), about a day, measured on io.cpp and hello.cpp; (c) drop the full cache. **Recommended: (a)**.
 
 ### The night's commands (after cpp-route's slot of night 11 and this branch's merge; one process at a time, about 2 GiB)
 
