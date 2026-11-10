@@ -1,0 +1,503 @@
+(ns arbace.asm.amd64.decode-check
+  "AX4's decode check (doc/asm/AMD64.md §9, doc/asm/AMD64-SURVEY.md §8.1-§8.2): the decoder (arbace.asm.amd64.decode)
+  judged three ways, with no llvm-mc:
+
+  - MC/Disassembler/X86's tests by their own CHECK lines: each test's RUN lines give its runs (the triple's mode, the
+    output variant, --print-imm-hex, --show-encoding, --hex, the FileCheck prefixes), its byte stream is read as llvm-mc
+    --disassemble reads one (tools/llvm-mc/Disassembler.cpp: tokens, comments, `[...]` atomic blocks, `invalid input
+    token`), decoded instruction by instruction (`invalid instruction encoding` for what does not decode), printed by
+    arbace.asm.amd64.print, and the CHECK lines held to that output as FileCheck holds them (CHECK, -NEXT, -SAME, -EMPTY,
+    -NOT, --implicit-check-not, {{regex}}, blanks collapsed);
+  - the round trip: every encoding encode-check meets (MC/X86's stated encodings) decoded back to the instruction the
+    matcher made, with its operands (a symbol's operand any value);
+  - musl 1.2.6's objects as arbace.asm.amd64.obj writes them, their code sections decoded back to the instructions of
+    their assembled forms, in order.
+
+  Each unmet CHECK line, round trip or object instruction is classed by its cause (test/asm/divergences-decode.edn)."
+  (:require [arbace.repr.asm :as asm]
+            [arbace.asm.amd64.asm :as x]
+            [arbace.asm.amd64.decode :as d]
+            [arbace.asm.amd64.print :as p]
+            [arbace.asm.amd64.check :as c]
+            [arbace.asm.amd64.obj :as obj]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the runs of a disassembler test
+
+(defn runs
+  "The llvm-mc --disassemble runs of the test: [{:input NAME-OR-nil :mode M :prefixes [...] :intel? :imm-hex? :encoding?
+  :hex? :markup? :error? :implicit-not [...]}] (:input nil: the file itself, else a split-file part)."
+  [^String src]
+  (vec (for [r (#'c/run-lines src)
+             :let [pieces (str/split r #"\|")
+                   mc (first (filter #(re-find #"llvm-mc\b" %) pieces))
+                   fc (first (filter #(re-find #"FileCheck" %) pieces))]
+             :when (and mc fc (re-find #"-?-(disassemble|mdis)\b" mc))
+             :let [input (if (re-find #"%s" mc) nil (second (re-find #"(?:--hex|-disassemble|--disassemble|--mdis)\s+(?:\S+\s+)*?([\w.-]+\.s)\b" mc)))
+                   input (or input (second (re-find #"\s([\w-]+\.s)(\s|$)" mc)))]]
+         {:input input :mode (#'c/mode-of r) :prefixes (#'c/prefixes-of fc)
+          :intel? (boolean (or (re-find #"output-asm-variant[= ]1" mc) (re-find #"x86-asm-syntax[= ]intel" mc)))
+          :imm-hex? (boolean (re-find #"print-imm-hex" mc)) :encoding? (boolean (re-find #"-?-show-encoding" mc))
+          :hex? (boolean (re-find #"--hex" mc)) :markup? (boolean (re-find #"--mdis" mc))
+          :error? (boolean (re-find #"(^|\s)not\s+llvm-mc" r))
+          :implicit-not (mapv second (re-seq #"--implicit-check-not[= ](\S+)" fc))})))
+
+(defn split-parts
+  "A split-file test's parts: {NAME TEXT}."
+  [^String src]
+  (loop [ls (str/split-lines src) cur nil out {}]
+    (if (empty? ls)
+      out
+      (let [l (first ls)]
+        (if-let [[_ n] (re-matches #"^(?:#|//)--- (\S+)\s*$" l)]
+          (recur (rest ls) n (assoc out n ""))
+          (recur (rest ls) cur (if cur (update out cur str l "\n") out)))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; llvm-mc --disassemble's reading of the input (Disassembler.cpp: SkipToToken, byteArrayFromString, disassemble)
+
+(defn- hex-digit ^long [c] (let [v (Character/digit (char c) 16)] v))
+
+(defn- int-token
+  "StringRef::getAsInteger(0): a byte's value, or nil."
+  [^String s]
+  (let [[radix t] (cond (re-matches #"0[xX][0-9a-fA-F]+" s) [16 (subs s 2)]
+                        (re-matches #"0[bB][01]+" s) [2 (subs s 2)]
+                        (re-matches #"0[oO][0-7]+" s) [8 (subs s 2)]
+                        (re-matches #"0[0-7]+" s) [8 (subs s 1)]
+                        (re-matches #"[0-9]+" s) [10 s]
+                        :else [nil nil])]
+    (when radix
+      (let [v (try (Long/parseLong ^String t (int radix)) (catch Throwable _ nil))]
+        (when (and v (<= 0 (long v) 255)) v)))))
+
+(defn read-stream
+  "The input's byte groups as llvm-mc reads them: [{:bytes [B ...] :pos [OFFSET ...] :atomic B}] and the errors
+  [[OFFSET MESSAGE] ...]."
+  [^String s hex?]
+  (let [n (.length s)
+        groups (java.util.ArrayList.)
+        errors (java.util.ArrayList.)
+        skip (fn [^long i]
+               (loop [i i]
+                 (cond (>= i n) i
+                       (#{\space \tab \return \newline \,} (.charAt s i)) (recur (inc i))
+                       (= \# (.charAt s i)) (let [j (.indexOf s "\n" (int i))] (if (neg? j) n (recur j)))
+                       :else i)))]
+    (loop [i (skip 0) atomic false]
+      (if (>= i n)
+        (do (when atomic (.add errors [n "unclosed atomic block"])) {:groups (vec groups) :errors (vec errors)})
+        (let [ch (.charAt s i)]
+          (cond
+            (= ch \[) (do (when atomic (.add errors [i "nested atomic blocks make no sense"])) (recur (skip (inc i)) true))
+            (= ch \]) (do (when-not atomic (.add errors [i "attempt to close atomic block without opening"])) (recur (skip (inc i)) false))
+            :else
+            ;; byteArrayFromString: tokens until `[` or `]`
+            (let [bs (java.util.ArrayList.) ps (java.util.ArrayList.)
+                  j (loop [i i]
+                      (let [i (skip i)]
+                        (if (or (>= i n) (#{\[ \]} (.charAt s i)))
+                          i
+                          (let [e (loop [k i] (if (and (< k n) (not (#{\space \tab \newline \return \, \# \[ \]} (.charAt s k)))) (recur (inc k)) k))
+                                v (subs s i e)]
+                            (if hex?
+                              (if (< (count v) 2)
+                                (do (.add errors [i "expected two hex digits"]) [:stop e])
+                                (let [c0 (hex-digit (.charAt v 0)) c1 (hex-digit (.charAt v 1))]
+                                  (if (or (neg? c0) (neg? c1))
+                                    (do (.add errors [i "invalid input token"]) [:stop (+ i 2)])
+                                    (do (.add bs (+ (* 16 c0) c1)) (.add ps i) (recur (+ i 2))))))
+                              (if-let [b (int-token v)]
+                                (do (.add bs b) (.add ps i) (recur e))
+                                (do (.add errors [i "invalid input token"])
+                                    (.clear bs) (.clear ps)
+                                    (recur (let [k (.indexOf s "\n" (int i))] (if (neg? k) n k))))))))))
+                  [stop j] (if (vector? j) j [nil j])]
+              (when (pos? (.size bs)) (.add groups {:bytes (vec bs) :pos (vec ps) :atomic atomic}))
+              (recur (long (if stop j j)) atomic))))))))
+
+(defn- line-col [^String s ^long off]
+  (let [pre (subs s 0 (min off (count s)))
+        l (inc (count (filter #(= % \newline) pre)))
+        c (inc (- off (inc (.lastIndexOf pre "\n"))))]
+    [l c]))
+
+(defn- src-line [^String s ^long off]
+  (let [a (inc (.lastIndexOf s "\n" (int (max 0 (dec off))))) b (let [k (.indexOf s "\n" (int off))] (if (neg? k) (count s) k))]
+    (subs s a b)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; a run's output
+
+(def ^:private apx-text #"(?:%|\b)r(1[6-9]|2[0-9]|3[01])[bwd]?\b|\{(nf|rex2|dfv=[^}]*)\}|\{evex\}\s+(cmp|test)")
+
+(defn run-output
+  "The lines llvm-mc writes for the run (instructions, diagnostics): [{:text LINE :line SOURCE-LINE :entry ENTRY}]."
+  [^String name ^String s r]
+  (let [{:keys [groups errors]} (read-stream s (:hex? r))
+        mode (long (:mode r))
+        diag (fn [^long off ^String kind ^String msg]
+               (let [[l col] (line-col s off) sl (src-line s off)]
+                 [{:text (str name ":" l ":" col ": " kind ": " msg) :line l :diag true}
+                  {:text sl :line l :diag true}
+                  {:text (str (apply str (repeat (dec (long col)) " ")) "^") :line l :diag true}]))
+        out (java.util.ArrayList.)]
+    (doseq [[off m] errors] (.addAll out (diag off "error" m)))
+    (doseq [{bs :bytes ps :pos atomic :atomic} groups]
+      (loop [i 0]
+        (when (< i (count bs))
+          (let [e (try (d/decode bs i mode) (catch Throwable ex {:crash (str ex) :size 1 :fail true}))
+                l (first (line-col s (nth ps i)))]
+            (if (:fail e)
+              (do (.addAll out (map #(assoc % :entry (assoc e :undecoded true)) (diag (nth ps i) "warning" "invalid instruction encoding")))
+                  (when-not atomic (recur (+ i (max 1 (long (:size e)))))))
+              (let [pr (try {:asm (binding [p/*t* x/*t* p/*intel* (:intel? r) p/*imm-hex* (:imm-hex? r)]
+                                    (p/print-inst (:inst e) (:mi e) (:flags e) mode))}
+                            (catch arbace.lang.ExceptionInfo ex
+                              (if-let [cl (:print/unsupported (ex-data ex))] {:punsup cl :asm (str "<" (name cl) ">")} (throw ex))))
+                    enc (when (:encoding? r)
+                          (let [er (try (binding [x/*intel* false] (x/encode (:inst e) (:mi e) mode (:flags e)))
+                                        (catch Throwable ex {:enc-error (str ex)}))]
+                            (if (:bytes er) (str "\t# " (x/encoding-text er)) "\t# <no encoding>")))
+                    txt (str (:asm pr) enc)]
+                (.add out {:text txt :line l :entry (merge e pr)})
+                (recur (+ i (long (:size e))))))))))
+    (vec out)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; FileCheck
+
+(defn- canon ^String [^String s] (str/replace s #"[ \t]+" " "))
+
+(defn pattern
+  "FileCheck's pattern: {{regex}} as it is, the literal rest quoted, horizontal blanks one space."
+  [^String t]
+  (let [t (canon (str/trim t))
+        parts (loop [i 0 out []]
+                (let [j (.indexOf t "{{" (int i))]
+                  (if (neg? j)
+                    (conj out [:lit (subs t i)])
+                    (let [k (.indexOf t "}}" (int (+ j 2)))]
+                      (if (neg? k) (conj out [:lit (subs t i)])
+                          (recur (+ k 2) (conj out [:lit (subs t i j)] [:re (subs t (+ j 2) k)])))))))]
+    (re-pattern (apply str (map (fn [[k s]] (if (= k :re) (str "(?:" s ")") (java.util.regex.Pattern/quote s))) parts)))))
+
+(defn filecheck
+  "The CHECK lines `cs` ([LINE KIND CONTENT]) held to the output lines as FileCheck holds them: [[LINE RESULT OUT-INDEX]],
+  RESULT :pass, :fail, :not-found (a -NOT that matched) or :var (a FileCheck variable, not taken)."
+  [cs outs implicit-not]
+  (let [;; the output's last newline ends an empty last line (FileCheck's buffer)
+        lines (conj (mapv #(canon (:text %)) outs) "")
+        n (count lines)
+        res (java.util.ArrayList.)
+        matched (java.util.HashSet.)
+        find-in (fn [p ^long li ^long col] (let [s ^String (nth lines li) m (re-matcher p s)] (when (.find m (int (min col (count s)))) [(.start m) (.end m)])))]
+    (loop [cs cs li 0 col 0 nots [] started false]
+      (if (empty? cs)
+        (do (doseq [[l p] nots]
+              (.add res [l (if (some (fn [k] (find-in p k (if (= k li) col 0))) (range li n)) :not-found :pass) nil]))
+            (doseq [w implicit-not :let [hit (some (fn [k] (when (and (not (.contains matched k)) (.contains ^String (nth lines k) w)) k)) (range n))]]
+              (.add res [0 (if hit :not-found :pass) hit]))
+            (vec res))
+        (let [[l kind content] (first cs)
+              t (str/trim content)]
+          (cond
+            (re-find #"\[\[" t) (do (.add res [l :var nil]) (recur (rest cs) li col nots started))
+            (= kind "-NOT") (recur (rest cs) li col (conj nots [l (pattern t)]) started)
+            (= kind "-EMPTY")
+            (let [k (if started (inc li) li)]
+              (if (and (< k n) (= "" (str/trim (nth lines k))))
+                (do (.add res [l :pass k]) (recur (rest cs) k (count (nth lines k)) [] true))
+                (do (.add res [l :fail (when (< k n) k)]) (recur (rest cs) li col nots started))))
+            :else
+            (let [p (pattern t)
+                  hit (case kind
+                        "-NEXT" (let [k (if started (inc li) li)] (when (< k n) (when-let [m (find-in p k 0)] [k m])))
+                        "-SAME" (when (< li n) (when-let [m (find-in p li col)] [li m]))
+                        (some (fn [k] (when-let [m (find-in p k (if (= k li) col 0))] [k m])) (range li n)))]
+              (if hit
+                (let [[k [st en]] hit]
+                  ;; the -NOTs between the last match and this one
+                  (doseq [[nl np] nots]
+                    (.add res [nl (if (some (fn [j] (let [s ^String (nth lines j)
+                                                          from (if (= j li) col 0) to (if (= j k) st (count s))
+                                                          m (re-matcher np (subs s (min from (count s)) (max (min from (count s)) (min to (count s)))))]
+                                                      (.find m)))
+                                            (range li (inc (long k))))
+                                    :not-found :pass) nil]))
+                  (.add matched k)
+                  (.add res [l :pass k])
+                  (recur (rest cs) (long k) (long en) [] true))
+                (do (.add res [l :fail nil]) (recur (rest cs) li col nots started))))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; a disassembler test
+
+(defn- classify
+  "The cause of an unmet CHECK line at `l`: the output entry of the bytes written under it."
+  [^String content outs ^long l]
+  (let [es (filter :entry outs)
+        e (:entry (or (first (filter #(>= (long (:line %)) l) es)) (last es)))]
+    (cond
+      (nil? e) :unpaired
+      (:crash e) :crash
+      (:undecoded e) (if (re-find apx-text content) :apx-undecoded :undecoded)
+      (:punsup e) (:punsup e)
+      (re-find apx-text content) :apx
+      :else :mismatch)))
+
+(defn dis-file
+  "One test's row: {:stated N :met N :by {CLASS N} :fails [[LINE CLASS CONTENT OUTPUT]]}."
+  [^String name ^String path]
+  (let [src (asm/latin1 path)
+        parts (split-parts src)
+        seen (java.util.HashSet.)
+        results
+        (vec (for [r (runs src)
+                   :let [cs (vec (remove (fn [[l]] (.contains seen l)) (c/checks src (:prefixes r))))
+                         _ (doseq [[l] cs] (.add seen l))
+                         cs (vec (remove (fn [[_ k]] (re-find #"^-COUNT" k)) cs))]
+                   :when (seq cs)]
+               (cond
+                 (:markup? r) (vec (for [[l _ ct] cs] [l :markup ct nil]))
+                 (nil? (:mode r)) (vec (for [[l _ ct] cs] [l :other-target ct nil]))
+                 :else
+                 (let [[iname text] (if (:input r) [(:input r) (get parts (:input r) "")] [path src])
+                       outs (run-output iname text r)
+                       res (filecheck cs outs (:implicit-not r))
+                       content (into {} (map (fn [[l _ ct]] [l ct]) cs))]
+                   (vec (for [[l v k] res]
+                          (let [ct (get content l (str "--implicit-check-not"))]
+                            (case v
+                              :pass [l :pass ct nil]
+                              :var [l :filecheck-var ct nil]
+                              :not-found [l :mismatch ct (when k (:text (nth outs k)))]
+                              (let [cl (classify ct outs l)
+                                    e (:entry (first (filter #(and (:entry %) (>= (long (:line %)) (long l))) outs)))]
+                                [l cl ct (or (:asm e) (when (:undecoded e) "<undecoded>"))])))))))))
+        all (vec (apply concat results))
+        by (frequencies (map second all))]
+    {:stated (count all) :met (get by :pass 0) :by (dissoc by :pass)
+     :fails (vec (for [[l cl ct o] all :when (not= cl :pass)] [l cl ct o]))}))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the round trip: MC/X86's met encodings decoded back
+
+(defn- text-bytes
+  "The bytes of an `encoding: [...]` text, a fixup's letter 0: [BYTES FIXUPS?]."
+  [^String t]
+  (let [xs (str/split (second (re-find #"encoding: \[([^\]]*)\]" t)) #",")]
+    [(mapv (fn [^String b] (if (.startsWith b "0x") (Long/parseLong (subs b 2) 16) 0)) xs)
+     (boolean (some #(not (.startsWith ^String % "0x")) xs))]))
+
+(def ^:private prefix-insts #{"LOCK_PREFIX" "REP_PREFIX" "REPNE_PREFIX" "XACQUIRE_PREFIX" "XRELEASE_PREFIX" "CS_PREFIX" "DS_PREFIX"
+                              "ES_PREFIX" "FS_PREFIX" "GS_PREFIX" "SS_PREFIX" "DATA16_PREFIX" "REX64_PREFIX"})
+
+(defn- same-bits?
+  "Two immediates of the same bits at the narrowest width both fit (the matcher keeps `$243` of an 8-bit immediate,
+  the decoder sign-extends it to -13 as translateImmediate does)."
+  [a b]
+  (and (integer? a) (integer? b)
+       (some (fn [^long w] (let [lo (- (bit-shift-left 1 (dec w))) hi (dec (bit-shift-left 1 w)) m (dec (bit-shift-left 1 w))]
+                             (and (<= lo (long a) hi) (<= lo (long b) hi) (= (bit-and (long a) m) (bit-and (long b) m)))))
+             [8 16 32])))
+
+(defn- same-operands?
+  "The decoded operands against the matcher's: equal, an expression (a symbol's) any immediate, an immediate the same bits."
+  [dmi ami]
+  (and (= (count dmi) (count ami))
+       (every? (fn [[a b]] (or (= a b) (and (contains? b :expr) (contains? a :imm)) (same-bits? (:imm a) (:imm b))))
+               (map vector dmi ami))))
+
+(defn round-trip-one
+  "An assembled instruction `e` (its :inst :mi :text :mode) decoded back: :pass, :prefix-split (llvm-mc's lone prefix
+  instruction first: a LOCK at the start), :other-form (another instruction that encodes to the same bytes) or the class
+  of the difference."
+  [e]
+  (let [[bs fix?] (text-bytes (:text e))
+        mode (long (:mode e))
+        ;; a stream goes on after the instruction: an int3 after it when it does not decode alone (readPrefixes peeks the byte
+        ;; after a two-byte BOUND, 62 /r, for EVEX's third byte), dropped again
+        dec (fn [bs] (try (d/decode-all bs mode) (catch Throwable ex [{:fail true :crash (str ex)}])))
+        ds (let [ds (dec bs)]
+             (if (some :fail ds)
+               (let [ds2 (dec (conj bs 0xcc)) l (last ds2)]
+                 (if (and (= "INT3" (:inst l)) (= (count bs) (:off l)) (not-any? :fail ds2)) (vec (butlast ds2)) ds))
+               ds))
+        main (last ds)
+        pre (butlast ds)]
+    (cond
+      (some :crash ds) [:crash (:crash (first (filter :crash ds)))]
+      (some :fail ds) [(if (re-find #"_ND|_NF|_EVEX|CCMP|CTEST|CFCMOV|PUSH2|POP2|JMPABS|REX2" (str (:inst e))) :apx-undecoded :undecoded) ""]
+      (and (= (:inst main) (:inst e)) (same-operands? (:mi main) (:mi e)))
+      (if (every? #(prefix-insts (:inst %)) pre) (if (seq pre) [:prefix-split ""] [:pass ""]) [:mismatch (pr-str (map :inst ds))])
+      ;; another instruction: the same bytes when encoded again
+      :else
+      (let [re (try (x/encode (:inst main) (:mi main) mode (:flags main)) (catch Throwable _ nil))
+            whole (vec (mapcat (fn [dd] (let [r (try (x/encode (:inst dd) (:mi dd) mode (:flags dd)) (catch Throwable _ nil))]
+                                          (if (:bytes r) (map #(if (= % :fixup) 0 %) (:bytes r)) [:none])))
+                               ds))]
+        (cond
+          (and (not fix?) (= whole bs)) [:other-form (str (:inst e) " -> " (:inst main))]
+          ;; xchg of the accumulator with itself (66 90, or 90 in 16-bit's 66 90): LLVM's tables keep NOOP against XCHG*ar
+          (and (= "NOOP" (:inst main)) (#{"XCHG16ar" "XCHG32ar"} (:inst e))) [:llvm-nop (:inst e)]
+          ;; a SIB without base nor index in 64-bit mode: no EIZ (translateRMMemory's rule), the address-size prefix printed
+          (and (= (:inst main) (:inst e)) (some #(= "EIZ" (:reg %)) (:mi e)) (contains? (:flags main) :addr32)) [:eiz-dropped (:inst e)]
+          (and fix? re (= (count whole) (count bs))) [:other-form (str (:inst e) " -> " (:inst main))]
+          :else [:mismatch (str (:inst e) " " (pr-str (:mi e)) " -> " (pr-str (map (juxt :inst :mi) ds)))])))))
+
+(defn rt-file
+  "The round trip of one MC/X86 file: each encoding the encode check meets decoded back: {:stated :met :by :fails}."
+  [^String path & [mode-override]]
+  (let [src (asm/latin1 path)
+        rs (c/runs src)
+        starts (#'c/line-starts src)
+        read-of (memoize (fn [syn] (try {:items (asm/read-items src {:arch :amd64 :syntax syn})} (catch Throwable _ nil))))
+        seen (java.util.HashSet.)
+        met (vec (for [r rs
+                       :let [cs (vec (remove (fn [[l]] (.contains seen l)) (c/checks src (:prefixes r))))
+                             _ (doseq [[l] cs] (.add seen l))]
+                       :when (and (seq cs) (:encoding? r) (:mode r))
+                       :let [rd (read-of (if (:intel? r) :intel :att))]
+                       :when rd
+                       :let [stmts (binding [x/*intel* (:intel? r)] (c/assemble-file (:items rd) starts (:mode r)))]
+                       [l cl sts] (#'c/judge-encodings cs stmts)
+                       :when (= cl :pass)]
+                   [l (first sts)]))
+        res (vec (for [[l e] met] (let [[cl detail] (round-trip-one (cond-> e mode-override (assoc :mode mode-override)))] [l cl detail])))
+        by (frequencies (map second res))]
+    {:stated (count res) :met (+ (long (get by :pass 0)) (long (get by :prefix-split 0)) (long (get by :other-form 0)))
+     :by (into {} (remove (fn [[k]] (#{:pass :prefix-split :other-form} k)) by))
+     ;; met another way: llvm-mc's lone LOCK first, another instruction of the same bytes
+     :also (into (sorted-map) (filter (fn [[k]] (#{:prefix-split :other-form} k)) by))
+     :fails (vec (for [[l cl dt] res :when (not (#{:pass :prefix-split :other-form} cl))] [l cl dt]))}))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; musl's objects read back
+
+(def ^:private relaxed {"JCC_1" "JCC_4" "JMP_1" "JMP_4"})
+
+(defn obj-file
+  "A file assembled into an object (arbace.asm.amd64.obj), its code sections decoded in order and held to the file's
+  instructions as the matcher makes them (a branch relaxed to its long form, an expression's operand any immediate):
+  {:stated :met :by :fails}."
+  [^String path & [expected]]
+  (let [src (asm/latin1 path)
+        items (asm/read-items src asm/amd64)
+        o (obj/assemble items)
+        ;; the instructions held to: the file's own, or another file's (a negative control)
+        items (if expected (asm/read-items (asm/latin1 expected) asm/amd64) items)]
+    (if-not (:bytes o)
+      {:stated 0 :met 0 :by {(or (:unsupported o) :assemble-error) 1} :fails [[0 :assemble-error (str (:error o) (:what o))]]}
+      (let [ob (elf/read-object (:bytes o))
+            code (vec (mapcat (fn [s] (map #(bit-and (long %) 0xff) (:data s)))
+                              (filter #(pos? (bit-and (long (:flags %)) elf/SHF_EXECINSTR)) (:sections ob))))
+            ds (d/decode-all code 64)
+            ;; the assembled instructions, in order (mode 64, as the object check assembles musl): an FWAIT before an
+            ;; instruction that asks for one, a `rep` written alone on the next instruction as llvm-mc reads it back
+            as (vec (for [[f] items :when (and (seq? f) (symbol? (first f)) (not= "asm" (namespace (first f))))
+                          r (x/assemble-insn f 64 {}) :when (:inst r)
+                          r (if (:wait r) [{:inst "WAIT" :mi []} r] [r])]
+                      r))
+            as (loop [as as out []]
+                 (if (empty? as) out
+                     (let [[a b] as]
+                       (if (and b (#{"REP_PREFIX" "REPNE_PREFIX"} (:inst a)))
+                         (recur (drop 2 as) (conj out (assoc b :flag (if (= "REP_PREFIX" (:inst a)) :rep :repne))))
+                         (recur (rest as) (conj out a))))))
+            n (min (count ds) (count as))
+            res (vec (for [k (range (max (count ds) (count as)))]
+                       (let [dd (get ds k) a (get as k)]
+                         (cond
+                           (nil? a) [k :extra (pr-str (:inst dd))]
+                           (nil? dd) [k :missing (:inst a)]
+                           (:fail dd) [k :undecoded (:inst a)]
+                           (and (:flag a) (not (contains? (:flags dd) (:flag a)))) [k :mismatch (str (:inst a) " without " (:flag a))]
+                           (and (#{(:inst a) (relaxed (:inst a))} (:inst dd)) (same-operands? (:mi dd) (:mi a))) [k :pass ""]
+                           :else [k :mismatch (str (:inst a) " " (pr-str (:mi a)) " -> " (:inst dd) " " (pr-str (:mi dd)))]))))
+            by (frequencies (map second res))]
+        {:stated (count res) :met (get by :pass 0) :by (dissoc by :pass)
+         :fails (vec (for [[l cl dt] res :when (not= cl :pass)] [l cl dt]))}))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the lists and the verbs
+
+(defn- pmap-rows [rows f]
+  (let [threads (Integer/parseInt (or (System/getenv "REPR_ASM_THREADS") "4"))
+        pool (Executors/newFixedThreadPool threads)
+        t (x/table)
+        futs (mapv (fn [row] (.submit pool ^Callable (fn [] (binding [x/*t* t]
+                                                              [(first row) (try (f row) (catch Throwable e {:stated 0 :met 0 :by {:crash 1} :crash (str e)}))]))))
+                   rows)
+        res (mapv #(.get ^Future %) futs)]
+    (.shutdown pool)
+    res))
+
+(defn- write-rows [work kind res]
+  (spit (str work "/" kind ".tsv")
+        (apply str (for [[n r] res] (str n "\t" (pr-str (into (sorted-map) (dissoc r :fails :crash))) "\n"))))
+  (spit (str work "/" kind "-fails.tsv")
+        (apply str (for [[n r] res [l cl a b] (:fails r)]
+                     (str n "\t" l "\t" (name cl) "\t" (str/replace (str a) #"[\t\n]" " ") "\t" (str/replace (str b) #"[\t\n]" " ") "\n"))))
+  (let [st (reduce + (map (comp :stated second) res)) met (reduce + (map (comp :met second) res))
+        by (apply merge-with + {} (map (comp :by second) res))]
+    (println (str "repr-asm decode-check: " kind ": " met " of " st " met; the rest " (pr-str (into (sorted-map) by))))
+    (doseq [[n r] res :when (:crash r)] (println (str "repr-asm decode-check: " kind ": " n " crashed: " (:crash r))))))
+
+(defn check
+  "check DIS-LIST RT-LIST OBJ-LIST WORK: the three levels into WORK/{dis,rt,obj}.tsv and their -fails.tsv."
+  [dis-list rt-list obj-list work]
+  (.mkdirs (java.io.File. ^String work))
+  (let [rows (fn [l] (vec (for [ln (str/split-lines (slurp l)) :when (seq ln)] (str/split ln #"\t"))))]
+    (when (seq dis-list) (write-rows work "dis" (pmap-rows (rows dis-list) (fn [[n p]] (dis-file n p)))))
+    (when (seq rt-list) (write-rows work "rt" (pmap-rows (rows rt-list) (fn [[n p]] (rt-file p)))))
+    (when (seq obj-list) (write-rows work "obj" (pmap-rows (rows obj-list) (fn [[n p]] (obj-file p)))))))
+
+(defn control
+  "A negative control: `dis SUBJECT REFERENCE` the subject test's bytes read and judged against the reference's first run
+  and CHECK lines; `rt PATH MODE` the file's met encodings decoded in another mode. `differs` when a check goes unmet (as
+  it must), else `same`."
+  [kind a b]
+  (binding [x/*t* (x/table)]
+    (case kind
+      "dis" (let [rsrc (asm/latin1 b) ssrc (asm/latin1 a)
+                  r (first (filter #(and (:mode %) (not (:markup? %)) (nil? (:input %))) (runs rsrc)))
+                  cs (vec (remove (fn [[_ k]] (re-find #"^-COUNT" k)) (c/checks rsrc (:prefixes r))))
+                  res (filecheck cs (run-output a ssrc r) (:implicit-not r))]
+              (if (every? #(#{:pass :var} (second %)) res) "same" "differs"))
+      "rt" (let [r (rt-file a (Long/parseLong b))] (if (= (:met r) (:stated r)) "same" "differs"))
+      "obj" (let [r (obj-file a b)] (if (= (:met r) (:stated r)) "same" "differs")))))
+
+(defn -main [verb & args]
+  (case verb
+    "check" (apply check args)
+    "control" (println (apply control args))
+    ;; decode MODE HEX...: each instruction of the bytes, decoded and printed (bin/repr-asm decode)
+    "decode" (let [[mode & hs] args
+                   [mode intel?] (if (= "intel" (first hs)) [mode true] [mode false])
+                   hs (if intel? (rest hs) hs)
+                   bs (vec (mapcat (fn [^String h] (let [h (str/replace h #"^0x|[, ]" "")]
+                                                     (if (<= (count h) 2) [(Long/parseLong h 16)]
+                                                         (map #(Long/parseLong (apply str %) 16) (partition 2 h)))))
+                                   hs))
+                   m (Long/parseLong mode)]
+               (binding [x/*t* (x/table)]
+                 (doseq [e (d/decode-all bs m)]
+                   (println (if (:fail e)
+                              (str "<invalid instruction encoding at " (:off e) ">")
+                              (str (binding [p/*t* x/*t* p/*intel* intel?] (p/print-inst (:inst e) (:mi e) (:flags e) m))
+                                   "\t# " (:inst e) " " (pr-str (:mi e)) (when (seq (:flags e)) (str " " (pr-str (:flags e))))))))))
+    ;; decode-object OBJ: each code section of an ELF64 object decoded and printed
+    "decode-object" (let [[path] args]
+                      (binding [x/*t* (x/table)]
+                        (doseq [s (:sections (elf/read-file path)) :when (pos? (bit-and (long (:flags s)) elf/SHF_EXECINSTR))]
+                          (println (str (:name s) ":"))
+                          (doseq [e (d/decode-all (mapv #(bit-and (long %) 0xff) (:data s)) 64)]
+                            (println (str (format "%6x:" (:off e))
+                                          (if (:fail e) "\t<invalid instruction encoding>"
+                                              (binding [p/*t* x/*t*] (p/print-inst (:inst e) (:mi e) (:flags e) 64)))))))))))

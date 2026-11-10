@@ -189,7 +189,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   pieces, `.eh_frame`, `.got` with GOTPCRELX relaxed, TLS, program headers, `bin/repr-asm link`), and `bin/repr-asm run-check`:
   `test/asm/run/`'s 18 programs (P4's, musl's crti/crtn, string and setjmp functions among them) assembled, linked and run by the CPU,
   18 of 18 by their own verdicts; GNU ld by hand agrees on every run. Freestanding only (musl's libc.a waits for AX7). Proposed
-  AXS45-AXS50. Next: the decoder (x86asm, AXS50 (a)), the machine-level forms (AXS26), the streamer's directives.
+  AXS45-AXS50.
+  `asm-ax4c` (on `asm-ax4b`; AX4's third slice, "As built: AX4 (third slice)", doc/asm/AMD64.md §9): the decoder, LLVM's X86
+  disassembler rebuilt from the table (not x86asm: AXS63), `bin/repr-asm decode|decode-object|decode-check`: MC/Disassembler/X86's 186
+  tests 24,441 of 24,445 CHECK lines (4 `--mdis` classed), every encoding encode-check meets decoded back (99,505 of 99,509, 4 by
+  design), musl's objects read back (479 of 479); eight controls; a TableGen fix (`let` around a `class`). AX4's exit met. Proposed
+  AXS63-AXS67. Next: AX5's x86i over this decoder (AXS67 (a)).
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
@@ -206,8 +211,11 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
   `bin/repr-asm`'s verbs by `--arch`, AX4's AXS37-AXS41 renumbered AXS40-AXS44, the vacuous controls `left`, AR2's record merged per
   corpus with "recorded, not run", busybox awk, ASM's old path), every check run again: encode 106,074 met, arm64 7,685, objects 80
-  of 86 byte for byte (the 11 APX object tests now equal), runs 18 of 18, none failing. `asm-ax4c` (the decoder) merges on top when
-  pushed (not yet when this branch was finished).
+  of 86 byte for byte (the 11 APX object tests now equal), runs 18 of 18, none failing. Then `asm-ax4c` (the decoder) merged on top:
+  one `let`-around-`class` fix kept (asm-tg's), the table regenerated from the resolved generator, the table oracle taught `:dis`
+  (20,718 of 20,718; `-gen-disassembler`'s instructions the table's 20,715 `:dis` ones), the decode check re-recorded on the merged
+  table: `dis` 24,441 of 24,445, `rt` 106,070 of 106,074 (APX now encoded: 6,565 more than ax4c's), `obj` 479 of 479, none failing.
+  Next: the 11-11 merge of `asm-merged`; then AX5's x86i over the decoder (AXS67 (a)).
 
 ## Decided, not built yet
 

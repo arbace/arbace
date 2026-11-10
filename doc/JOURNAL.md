@@ -3274,3 +3274,77 @@ equal; object-check 80 of 86 byte for byte (was 68 of 85), 0 failing, recorded; 
 Considered: keeping `rex?` set from `(= kind :rex)` as REVIEW2 suggested (the same, but `rex-kind` is already bound before the memory
 operand is encoded, so the volatile adds nothing); classing APX GOTPCREL `:apx` (rejected: llvm-mc's kinds were small to port and
 `gotpcrelx.s`, `tlsdesc-64` and `elf-reloc-tls` check them). `asm-ax4c` was not pushed when this was finished: it merges on top.
+## 2026-11-10 amd64 assembly: AX4's third slice, the decoder, LLVM's X86 disassembler rebuilt from the table (branch `asm-ax4c`, from `mac/asm-ax4b` `abc8c2b97`)
+
+
+Done on the light lane (stage 0, one run at a time, under 2 GiB, no lock; no LLVM tool at check time). Studied: llvm-project 23.1.5 from
+the pinned `.tmp/llvm/llvm-project-23.1.5.src.tar.xz` (SHA-256 `fb50b1ea...`, test/asm/corpora.edn's pin; extracted into the worktree's
+`.tmp/llvm-read/`, never committed): `llvm/lib/Target/X86/Disassembler/X86Disassembler.cpp` and `X86DisassemblerDecoder.h`,
+`llvm/include/llvm/Support/X86DisassemblerDecoderCommon.h`, `llvm/utils/TableGen/X86RecognizableInstr.cpp`, `X86DisassemblerTables.cpp`,
+`X86ModRMFilters.h`, `llvm/lib/Target/X86/MCTargetDesc/X86MCTargetDesc.cpp` (needsAddressSizeOverride), `X86InstPrinterCommon.cpp`
+(printInstFlags, printPCRelImm), `llvm/tools/llvm-mc/Disassembler.cpp`; and Go's `golang.org/x/arch/x86/x86asm` in TamaGo's GOROOT
+(`src/cmd/vendor/`, pinned by seed/goroot.sha256), weighed and not used. Written again by hand in Arbace; no code copied.
+
+Decision (the brief's choice, the coordinator's note of AX5-DESIGN's AXS53 (a) concurring): the decoder is LLVM's disassembler rebuilt
+from `asm/amd64/table.edn`, not x86asm converted. LLVM's decodes into the table's own instruction records and MCInst operands, so AX2's
+printer prints them and AX2's encoder re-encodes them unchanged, and LLVM-equal results follow from LLVM's rules (contexts, ranks,
+inheritance, its corrections in getInstructionID); x86asm decodes into its own ops and argument shapes and would need a map onto the
+table's instructions and LLVM's choices besides its 17,000 lines of tables. The disassembler's tables are made at first use, per opcode
+type, context and opcode, from the table; nothing generated beyond the table is committed (AXS64 proposes checking them by hand against
+llvm-tblgen's `-gen-disassembler`).
+
+Built: `arbace/asm/amd64/decode.ae` (`arbace.asm.amd64.decode`), `arbace/asm/amd64/decode_check.ae` (`arbace.asm.amd64.decode-check`:
+llvm-mc's byte stream, FileCheck's matching, the three levels, controls, `decode` and `decode-object`), `test/asm/decode_judge.ae`,
+`test/asm/decode-results-amd64.edn`, `divergences-decode.edn`, `controls-decode.txt`; `bin/repr-asm decode|decode-object|decode-check`;
+the Makefile's `repr-asm-decode`, `-decode-object`, `-decode-check`, `-decode-record`; `test/asm/corpora.edn`'s `:decode-corpora`
+(`llvm/test/MC/Disassembler/X86`, extracted by `corpus extract`); the generator lists the disassembler's instructions (`:dis` with the
+mode predicate; 250 added, `_REV` and other ForceDisassemble ones) and reads `ForceDisassemble` and `isAsmParserOnly`; the printer prints
+`addr32`/`addr16` for the decoder's flag; the encoder's `memory-operand` public. A TableGen fix: the `let` stack around a `class` applies to
+it (TGParser's ParseObjectBody), which AMX-FP8's `TDP*F8PS` need for their `$src1 = $dst` tie (four instructions of the table change).
+doc/asm/AMD64.md §9, the survey's "As built: AX4 (third slice)", LICENSE.md, doc/ARBACE.md.
+
+Results: MC/Disassembler/X86's 186 tests: 24,441 of 24,445 CHECK lines met by their own judges, the 4 others `--mdis`'s markup (classed
+deferred); the round trip: 99,505 of the 99,509 encodings encode-check meets decode back to the matcher's instruction (16 with llvm-mc's
+lone LOCK first, 66 another instruction of the same bytes), 3 `xchg` of the accumulator with itself read as `nop` and 1 `(,%eiz)` read
+without EIZ, both LLVM's own readings (classed by design); musl's 32 objects: 479 of 479 instructions read back. Eight negative controls
+fail as they must. About 6 minutes, under 1.5 GiB. The encode check, object check, run check, AX1's and AR1's round trips and the table
+check unchanged and passing.
+
+Considered: x86asm converted (above); the tables generated and committed (AXS64); `--mdis` (AXS66). Proposed AXS63-AXS67 (numbered from
+AXS63: AX5-DESIGN holds AXS51-AXS62). Next (AXS67 (a)): AX5's x86i over this decoder.
+
+## 2026-11-10 assembly: the decoder merged into `asm-merged` (`mac/asm-ax4c` `49bd71464` into `asm-merged` `ae0373fab`)
+
+Done on the light lane (stage 0, one run at a time, under 1.5 GiB a process, no lock; llvm-tblgen 23.1.5 by hand only), so that the
+11-11 merge takes one assembly branch. `git merge mac/asm-ax4c`; its merge base is `asm-ax4b`'s `abc8c2b97`, so ax4c's table and checks
+predate asm-tg's 763 conversion fixes and AX2d's APX. Conflicts and resolutions:
+
+- `arbace/asm/tablegen.ae`: both branches had fixed `let` around a `class` the same way (TGParser's ParseObjectBody: the let stack
+  applied after the superclasses, before the body; asm-tg's AXS38 work as `:frames`, ax4c's as `:lets` with `apply-frames` declared).
+  One implementation kept, asm-tg's (LLVM's order, the one asm-tg's `table oracle` already proves); ax4c's dropped.
+- `arbace/asm/amd64/gen.ae`: asm-tg's `used-insns` (processInstruction's shifts by 1 of NDD forms) kept, ax4c's `dis?` and
+  `dis-insns` (X86RecognizableInstr's shouldBeEmitted, the mode predicate) added beside it.
+- `asm/amd64/table.edn`: not merged by hand; regenerated by `bin/repr-asm table gen` from the resolved generator, `table check` byte
+  for byte (20,718 instructions, 20,715 with `:dis`).
+- `bin/repr-asm`: ax4c's `decode`, `decode-object` and `decode-check` are amd64's (asm-merged's `--arch` dispatch refuses them with
+  `--arch arm64`); their help lines before arm64's. Makefile `.PHONY`: both lines. AGENDA, the survey and the journal: both texts
+  (journal entries in date order, this one last); `asm.ae`, `print.ae`, `corpora.edn`, AMD64.md, LICENSE.md, ARBACE.md merged cleanly.
+
+The table oracle (asm-tg's AXS37 `insns` part) failed on the merged table: 20,715 rows differed by ax4c's `:dis` key, which it did not
+derive. Now it does, from llvm-tblgen's `-print-records` (the extract adds each def's superclasses, `isCodeGenOnly`, `ForceDisassemble`,
+`isAsmParserOnly` and `Predicates`; `test/asm/table_oracle.ae` applies RecognizableInstr's rule): every part equal, 20,718 of 20,718
+`:insns` rows. By hand, AXS64 (c) in part: `llvm-tblgen -gen-disassembler`'s `modRMTable` names exactly the table's 20,715 `:dis`
+instructions (the decisions per context and opcode not compared yet).
+
+The decode check rerun on the merged tree, 0 failing, then `--record`ed: `dis` 24,441 of 24,445 (4 `:markup`) and `obj` 479 of 479,
+unchanged; `rt` 106,070 of 106,074 (ax4c: 99,505 of 99,509): encode-check now meets AX2d's APX and the AMX-FP8, MOVRS, MSR-immediate and
+USERMSR encodings, and the decoder reads all 6,565 more back; 145 `rt/` rows rise, none falls, the same four by design (3 `:llvm-nop`,
+1 `:eiz-dropped`); the eight controls fail as they must (about 5.5 minutes, 1.5 GiB). The rest on the merged tree, all as before:
+encode-check 106,074 of 106,075 met (texts 107,451, cross 86,350, errors 80 of 130; 20 controls), object-check 80 of 86 (5 controls),
+run-check 18 of 18 (4 controls), AX1's round trip (musl 32/32, `MC/X86` 609/621, `MC/AsmParser` 140/157), AR1's (all corpora as
+recorded), `--arch arm64 encode-check` (7,685 of 12,298, print 12,156), `bin/reap` (0 problems), `bin/crops-score --judge --strict`,
+`test/gate/gate-key-crops-test.bash`, `make check-makefile`.
+
+Considered: keeping ax4c's `:lets` instead (the same semantics, but asm-tg's is the one the conversions oracle was proven with);
+merging the generated table textually (rejected: the generator is the source); dropping `:dis` from the oracle's comparison (rejected:
+deriving it from LLVM's records checks the generator's rule).

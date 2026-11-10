@@ -259,3 +259,45 @@ by hand only).
 
 Not yet: archives (musl's `libc.a` needs its C compiled: AX7), shared objects and dynamic linking (AXS11), static PIE, TLS GD/LD/TLSDESC
 relaxation, `--gc-sections`, ICF, linker scripts, the merge pieces' order by lld's hash shards (Arbace's: first seen).
+
+## 9. The decoder (AX4, third slice)
+
+`arbace.asm.amd64.decode` (`arbace/asm/amd64/decode.ae`) reads machine code back into the machine instructions the encoder encodes:
+the table's instruction and its MCInst operands (`{:reg R}`, `{:imm V}`; a memory operand's five), with the flags the printer reads,
+as LLVM's X86 disassembler decodes them (llvm-project 23.1.5's `lib/Target/X86/Disassembler/X86Disassembler.cpp`, read from the
+pinned tarball and written again in Arbace; doc/asm/AMD64-SURVEY.md, "As built: AX4 (third slice)"). No LLVM tool runs in it.
+
+- **The tables** (TableGen's `-gen-disassembler`, made here from `asm/amd64/table.edn` at their first use, lazily): the table holds
+  every instruction the disassembler emits (X86RecognizableInstr's shouldBeEmitted: not Pseudo's form, not codegen-only unless
+  ForceDisassemble, not asm-parser-only; `:dis` 0, 32 or 64 for its mode predicate, In64BitMode or Not64BitMode/In32BitMode). Each
+  one's instruction context (`insnContext`), ModRM filter (`emitDecodePath`'s Dumb, Mod, Extended, ExtendedRM and Exact filters),
+  opcodes (eight for AddRegFrm, sixteen for the condition-code forms) and operand specifiers (`emitInstructionSpecifier`: each
+  operand's encoding and type, a tied operand a DUP of its source, the compressed displacement's scale); a decision, the 256
+  ModRM bytes' instructions of an opcode type, a context and an opcode, is filled as `setTableFields` fills it, the instructions in
+  the enum's order (pseudos first, then by name), a context taking an instruction when it inherits from the instruction's
+  (`inheritsFrom` with noPrefix, VEX_LIG, WIG and AdSize64, LLVM's defaults in its recursive calls kept), a later instruction
+  replacing an earlier one unless the earlier's context outranks it (the contexts' ranks of X86DisassemblerDecoderCommon.h), NOOP
+  kept against XCHG*ar. A decision is one entry when its 256 are the same (no ModRM read).
+- **The decoder**: readPrefixes (legacy prefixes, the first LOCK and xacquire/xrelease's F2/F3 left as instructions of their own, the
+  mandatory prefix, REX, REX2, VEX2, VEX3, XOP and EVEX with LES/LDS/BOUND/POP outside 64-bit mode), readOpcode (the maps, 3DNow!'s
+  ModRM before its opcode), getInstructionID (the attribute mask, the context it names, the W bit outside 64-bit mode, the
+  absolute moves' and umonitor's prefixes, OpSize's 16-bit equivalent, `90` with REX.B), readModRM and readSIB (16-, 32- and 64-bit
+  addressing, RIP, the extension bits of REX, REX2 and EVEX), readOperands (each specifier: registers fixed up by type, VSIB,
+  immediates, the register in an immediate, vvvv, the opmask, the rounding control, the condition code and flags), and the
+  translation into the MCInst (immediates sign-extended by encoding, EIZ/RIZ, the string instructions' indexes, the offsets'
+  segment), its flags (`:lock`, `:rep`, `:repne` when not mandatory; `:addr32`/`:addr16` when the operands do not need the
+  address-size prefix, X86_MC::needsAddressSizeOverride, printed by printInstFlags). `decode-all` reads a byte stream as llvm-mc
+  does, an undecodable instruction skipped by its bytes read (at least one).
+- **Printing** is §5's printer, unchanged but for the decoder's address-size flags.
+- **The check** (`arbace.asm.amd64.decode-check`, `bin/repr-asm decode-check [--record] [dis|rt|obj]`): `dis`, MC/Disassembler/X86's
+  tests (`test/asm/corpora.edn`'s `:decode-corpora`) by their own CHECK lines: each run's options (the triple's mode, the output
+  variant, `--print-imm-hex`, `--show-encoding` re-encoded by the encoder, `--hex`, split-file parts), the input read as llvm-mc's
+  `Disassembler.cpp` reads it (tokens, `#` comments, `[...]` atomic blocks, its errors), decoded, printed, the CHECK lines held to
+  that output as FileCheck holds them (CHECK, -NEXT, -SAME, -EMPTY, -NOT, `--implicit-check-not`, `{{regex}}`, blanks collapsed);
+  `rt`, the round trip: every encoding encode-check meets in MC/X86 decoded back to the matcher's instruction and operands (a
+  symbol's operand any immediate; LLVM's lone LOCK first and another instruction of the same bytes counted apart); `obj`, musl
+  1.2.6's files assembled into objects by §7's assembler, their code sections decoded and held to the files' instructions in order
+  (a branch relaxed to its long form). Rows `test/asm/decode-results-amd64.edn`, classes `test/asm/divergences-decode.edn`,
+  controls `test/asm/controls-decode.txt`. `bin/repr-asm decode MODE [intel] HEX...` and `decode-object OBJ` by hand.
+
+Not yet: `--mdis`'s markup printer; FileCheck's variables (`[[...]]`); a symbolizer (llvm-objdump's targets and relocations).

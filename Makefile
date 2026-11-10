@@ -24,6 +24,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle \
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
+  repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -555,6 +556,14 @@ repr-asm-run-record: ## the run check recorded into test/asm/run-results-amd64.e
 	bin/repr-asm run-check --record
 repr-asm-link-oracle: ## the oracle tier's, by hand: the host's ld (ld.lld when present, else ld.bfd) links the run check's objects, runs and canonical views compared (bin/repr-asm link-oracle)
 	bin/repr-asm link-oracle
+repr-asm-decode: ## amd64's decoder (LLVM's X86 disassembler rebuilt from the table): bytes decoded and printed as llvm-mc --disassemble prints them (bin/repr-asm decode MODE HEX...; MODE=16|32|64, HEX=...)
+	bin/repr-asm decode $(or $(MODE),64) $(HEX)
+repr-asm-decode-object: ## an ELF64 object's code sections decoded and printed (bin/repr-asm decode-object OBJ; OBJ=...)
+	bin/repr-asm decode-object $(OBJ)
+repr-asm-decode-check: ## amd64's decoder judged with no llvm-mc: MC/Disassembler/X86's tests by their own CHECK lines, MC/X86's met encodings decoded back, musl's objects read back to their instructions, against test/asm/decode-results-amd64.edn, the classes and the controls (bin/repr-asm decode-check [LEVEL...]; LEVELS=dis|rt|obj)
+	bin/repr-asm decode-check $(LEVELS)
+repr-asm-decode-record: ## the decode check recorded into test/asm/decode-results-amd64.edn (bin/repr-asm decode-check --record [LEVEL...]; LEVELS=...)
+	bin/repr-asm decode-check --record $(LEVELS)
 repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
 repr-asm-table-arm64: ## A64's encoding table regenerated from Go's arm64asm and cmd/internal/obj/arm64 (bin/repr-asm --arch arm64 table gen)
