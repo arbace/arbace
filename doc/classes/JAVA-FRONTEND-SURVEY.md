@@ -6817,3 +6817,50 @@ The helper's re-review (report 019) left two of the four partly closed; each fix
   Tested on a copy of the functions under joker with the enum stubbed from those forms: no difference as committed, and a tag
   added to the enum is reported. Its run on javac's tool (the assertion at the first read) is JN10p.5's, with the rest of the
   half; `javac_tree.ae` is in the reader hash and the tool's key, so this edit joins the batched rewrite.
+
+## As built: JN9 fixes from G1 (2026-11-10)
+
+Ghidra's G1 read proof (the Ghidra demo's read of its Java by `bin/repr-java read --no-javac`, against javac's read) found two
+places where the native provider's forms differ from javac's. Its repros hold no Ghidra code; each case is now a sample of
+Arbace's own (`test/repr/java/java/sample/`), with a control, and each fix ports javac's rule (jdk26u at `baf63fb`).
+
+- **A void method's reference against a value descriptor** (`MrefVoid.java`). `run(Runnable)` and `<T> T run(Supplier<T>)`
+  called with `this::work`, `work` void: javac picks `run(Runnable)`, the provider picked `run(Supplier)`. The rule,
+  `Attr.checkReferenceCompatible` (`src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Attr.java:3830-3849`):
+  `incompatibleReturnType` starts as the referent's return type, is cleared when the descriptor returns void, or when both
+  return a value and the referent's (captured) is compatible with the descriptor's; else the reference is reported
+  incompatible. A void referent against a value descriptor is therefore an error (JLS 15.13.2), which in the overload phase
+  (the reference is exact, not stuck, so pertinent to applicability) makes `run(Supplier)` inapplicable. The provider's
+  `mref-check` (`arbace/repr/java/expr.ae`) skipped the check when the referent was void; it now errors as javac does. The
+  control, `run(this::value)` with a `String` method: both apply, and `Supplier<T>` is the more specific (JLS 15.12.2.5, the
+  other descriptor's return void): javac and the provider pick `run(Supplier)`.
+- **An inherited static field reached through two static on-demand imports** (`StarBase`, `StarSub`, `StarImports`,
+  `StarImportsBase`). With `import static sample.StarBase.*; import static sample.StarSub.*;` javac names `MASK` (declared by
+  `StarBase`, inherited by `StarSub`) `StarSub/MASK`; the provider named it `StarBase/MASK`, and the other way round in the
+  control. The rule, `Resolve.findVar` (`comp/Resolve.java:1551-1569`): the field found in the star import scope is cloned with
+  `sc.getOrigin(sym).owner` as its owner; `StarImportScope.importAll` prepends each import's `FilterImportScope`
+  (`code/Scope.java:897`) and `CompoundScope.getOrigin` answers the first sub-scope that includes the symbol
+  (`Scope.java:1102-1108`), so the origin is the last static on-demand import in the source that includes the field. The single
+  imports' scope appends (`NamedImportScope.appendScope`, `Scope.java:809-810`): the first single import, as the provider
+  already did. `decls/find-var` (`arbace/repr/java/decls.ae`) now walks the static on-demand imports last first. The control,
+  `StarImportsBase` (the imports the other way round): `StarBase/MASK`. Static methods were already javac's in both orders
+  (`find-fun`'s select-best keeps the later clone where javac's `mostSpecific` keeps the first of the same base symbol over the
+  prepended scopes, `Resolve.java:2077-2089`): the samples' `twice` holds them to it.
+
+Checks (stage 0, javac's tool `javac-5ad357331dbcd7cfb0fd` with the checkout's repr/java evaluated, light, one at a time):
+before the fix the new samples differ in `MrefVoid`, `StarImports` and `StarImportsBase` (the negative control:
+`nojavac-check --corpus samples` FAILED with the fix reverted); after it `attr-check --corpus samples` 4,079 facts equal, 0
+different, 3 declined (the known ones), `nojavac-check --corpus samples` 24 files, 21 native, 3 fallbacks (the known ones),
+`nojavac-check --corpus baseline` 183 of 183 native, every file equal (1.9 GB peak), `front-check --corpus samples,baseline`
+equal; the repros' six files read without javac equal javac's. `bin/repr-java check --update` wrote the five samples' expected
+forms (the baseline's unchanged) and `roundtrip --corpus samples --text --record` their round trip: forms, ae, text, anew pass;
+the classes level of `StarImports` and `StarImportsBase` differs in the constant pool's order alone (the original's static
+imports enter `StarSub` first; the same code), recorded in `samples-known.edn`; the judging run then passes. A hazard met: the
+round trip's reasons come from `javap` on the PATH (`roundtrip.ae`'s `javap-code`); the host's `/usr/bin/javap` does not read
+Java 26's class files, so a `--record` under it rewrote every known reason as "the constant pool's order": recorded again with
+jdk26u's image's `bin` first on the PATH.
+
+Not run (over the light lane's 2 GiB a process; the night's): `nojavac-check` and `attr-check` over `jdk` (7.6 GB) and `javac`
+(3.6 GB) and `jdk26u`; and, the reader hash moved (`expr.ae`, `decls.ae`), the four provenance writers (`bin/jrt-convert update`,
+`bin/javac-vendor convert`, `bin/clojure-tests --java-fixtures update`, `bin/java-check --forms update`), until which the
+essential `provenance` step fails on this branch, with GTS137 (a)'s `bin/repr-java check --jdk` at this reader change.

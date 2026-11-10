@@ -149,6 +149,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
 - Java: `java-invoke2` (JCS350-JCS356 on F15), `java-testlib2` (JCS334-JCS339).
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).
 - Reviews: today's merged code on `next` (patches for the owners) and an audit of the independence facts.
+- repr/java: `java-nread-g1` (the native provider's two fixes from Ghidra's G1 read proof: a void method's reference against
+  Supplier, an inherited static field through two static on-demand imports; samples `MrefVoid`, `Star*`). Its night: the four
+  provenance writers (the reader hash moved), nojavac-check and attr-check over jdk, javac and jdk26u, `bin/repr-java check --jdk`.
 
 ## Decided, not built yet
 
