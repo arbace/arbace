@@ -1033,7 +1033,62 @@
   [t v]
   (if (= :bool (abi/bn (abi/underlying (abi/unq t)))) (if (boolean? v) (if v 1 0) (val! (list 'zext 'i1 v 'i8))) v))
 
+(defn- occupied-bytes!
+  "CP338 (a): the bytes of an object of type `t` at offset `off` that hold its value representation marked in `occ`: a
+  scalar's (x87's long double its first 10), an array's elements', a class's vptr, fields and non-virtual bases, its virtual
+  bases' in the complete object (`complete?`). A bit-field or a union refused."
+  [^booleans occ t ^long off complete?]
+  (let [t (abi/unq t)]
+    (case (:k t)
+      :arr (let [n (long (:n t)) es (abi/size-of (:of t))] (dotimes [i n] (occupied-bytes! occ (:of t) (+ off (* i es)) true)))
+      :class (let [id (:id t) c (abi/cls id) l (abi/layout id)]
+               (when (:union c) (fail :expr "__builtin_clear_padding of a union"))
+               (when (abi/dynamic? id) (dotimes [i 8] (aset occ (+ off i) true)))
+               (doseq [[b o] (map vector (:bases c) (:bases l)) :when (and o (not (:virtual b)))]
+                 (occupied-bytes! occ {:k :class :id (:cls b)} (+ off (long o)) false))
+               (doseq [[f o] (map vector (:fields c) (:fields l))]
+                 (when (:bits f) (fail :expr "__builtin_clear_padding of a bit-field"))
+                 (occupied-bytes! occ (:ty f) (+ off (long o)) true))
+               (when complete?
+                 (doseq [[v o] (:vbases l)] (occupied-bytes! occ {:k :class :id v} (+ off (long o)) false))))
+      (let [n (if (= :ldouble (abi/bn t)) 10 (abi/size-of t))] (dotimes [i n] (aset occ (+ off i) true))))))
+
+(defn- emit-clear-padding!
+  "CP338 (a): __builtin_clear_padding(p) as clang 23's EmitBuiltinClearPadding writes it at -O0: each byte of *p that holds
+  no part of its value a store of i8 0 through getelementptr i8 (an i32 offset), aligned as that offset is within the
+  object's alignment."
+  [e]
+  (let [t (:to e) n (abi/size-of t) a (abi/align-of t)
+        occ (boolean-array n)
+        p (emit-rv (:p e))]
+    (occupied-bytes! occ t 0 true)
+    (dotimes [i n]
+      (when-not (aget occ i)
+        (let [al (if (zero? i) a (min a (Long/lowestOneBit i)))
+              q (if (zero? i) p (val! (list 'getelementptr 'i8 ['ptr p] ['i32 i])))]
+          (emit! (list 'store ['i8 0] ['ptr q] :align al)))))
+    nil))
+
+(defn- emit-fence!
+  "CP338 (a): __atomic_thread_fence and __atomic_signal_fence as clang's EmitBuiltinExpr emits them: nothing for a relaxed
+  order, else a fence at the order (a signal fence's syncscope \"singlethread\"); an order known at run time a switch whose
+  default is the continuation."
+  [e]
+  (let [ss (when (= :sfence (:which e)) "singlethread")
+        f! (fn [o] (emit! (if ss (list 'fence o :syncscope ss) (list 'fence o))))]
+    (if-some [oc (:oc e)]
+      (case (long oc) (1 2) (f! :acquire) 3 (f! :release) 4 (f! :acq_rel) 5 (f! :seq_cst) nil)
+      (let [v (emit-rv (:o e))
+            lc (new-label "atomic.continue")
+            blocks [[:acquire (new-label "acquire") [1 2]] [:release (new-label "release") [3]]
+                    [:acq_rel (new-label "acqrel") [4]] [:seq_cst (new-label "seqcst") [5]]]]
+        (emit! (list 'switch 'i32 v lc (vec (for [[_ l ks] blocks k ks] ['i32 k l]))))
+        (close-block!)
+        (doseq [[o l] blocks] (start! l) (f! o) (br! lc) (close-block!))
+        (start! lc)))))
+
 (defn- emit-atomic! [e]
+  (if (#{:fence :sfence} (:which e)) (emit-fence! e)
   (let [vt (:vt e) lt (abi/llvm-type vt) a (abi/size-of vt)
         p (emit-rv (:p e))
         which (:which e)
@@ -1096,7 +1151,7 @@
                  (if (:oc e)
                    (fails (or (cabi-orders (long (:oc e))) :monotonic))
                    (by-order! nil (:o e) false false fails))))
-    (when res (load! (:ty e) res))))
+    (when res (load! (:ty e) res)))))
 
 (defn- emit-bitop! [e]
   (let [t (abi/unq (:ty (:e e))) lt (abi/llvm-type t) x (emit-rv (:e e))
@@ -1281,6 +1336,7 @@
                  nil))
     :exn-ptr (:exn-adj @*f*)
     :alloca (val! (list 'alloca 'i8 :count ['i64 (emit-rv (:e e))] :align 16))
+    :clear-padding (emit-clear-padding! e)
     :atomic (emit-atomic! e)
     :bitop (emit-bitop! e)
     ;; va_arg as clang's X86_64ABIInfo::EmitVAArg writes it for one INTEGER or SSE eightbyte: from the register save
@@ -1656,6 +1712,13 @@
 (defn- emit-stmt* [s]
   (case (:s s)
     :null nil
+    ;; (CP338 (a): an empty asm statement, clang's EmitAsmStmt: the inputs' constraints, the clobbers `~{memory}` (cc is
+    ;; x86's flags, which the target adds anyway), then x86's own ~{dirflag},~{fpsr},~{flags}; nounwind)
+    :asm (let [vs (mapv (fn [e] [(abi/llvm-type (abi/unq (:ty e))) (emit-rv e)]) (:ins s))
+               cs (str/join "," (concat (map (constantly "r") (:ins s))
+                                        (keep #(when (= "memory" %) "~{memory}") (:clobbers s))
+                                        ["~{dirflag}" "~{fpsr}" "~{flags}"]))]
+           (emit! (list 'call 'void (list 'asm "" cs :sideeffect) vs :attrs [:nounwind])))
     :block (if (:flat s)
              (doseq [x (:items s)] (emit-stmt x))
              (let [d (cleanup-depth)] (doseq [x (:items s)] (emit-stmt x)) (when-not (:term @*f*) (unwind-to! d)) (swap! *f* update :cleanups #(subvec % 0 d))))
@@ -2781,6 +2844,8 @@
   OUT/gen.refused (the class and the message); the class or nil."
   [^String path ^String std ^String out & [args]]
   (.mkdirs (java.io.File. out))
+  ;; (CPP_GEN_WHERE=1: a refusal's last analyzed node's place on stderr, sema's *at* bound for it)
+  (binding [sema/*at* (when (System/getenv "CPP_GEN_WHERE") (atom nil))]
   (try
     (let [forms (gen-file path std (or args []))]
       (spit (str out "/forms.ae") (llvm/module-text (llvm/ns-name-of "gen.ll") forms))
@@ -2793,7 +2858,9 @@
       (let [c (or (:codegen/refused (ex-data e)) :crash)]
         (spit (str out "/gen.refused") (str (name c) "\t" (str/replace (str (.getMessage e)) #"[\t\n]" " ") "\n"))
         (when (= c :crash) (binding [*out* *err*] (println path) (.printStackTrace e)))
-        c))))
+        (when-let [a sema/*at*] (binding [*out* *err*] (println "refused at" (pr-str (:range @a)) (:kind @a))
+                                                     (when (= "2" (System/getenv "CPP_GEN_WHERE")) (.printStackTrace e))))
+        c)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; bin/cppi codegen-check: the judge

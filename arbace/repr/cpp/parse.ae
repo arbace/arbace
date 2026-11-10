@@ -1767,9 +1767,18 @@
       (is? p "[") (if (is-at? p 1 "[")
                     x
                     (do (adv! p)
-                        (let [i (with-gt p true (if (is? p "{") (parse-braced-init p) (parse-expr p)))]
-                          (expect! p "]")
-                          (recur (node p "ArraySubscriptExpr" (nb x) (last-ix p) {:inner [x i]})))))
+                        ;; (CP338 (a): C++23's multidimensional subscript, P2128R6: `a[]` and `a[i, j, k]` an operator[] call of
+                        ;; that many arguments, [expr.sub]/1's expression-list; before C++23 the comma is the comma operator)
+                        (if (>= (long (.-year p)) 2023)
+                          (let [is (with-gt p true
+                                     (if (is? p "]") []
+                                         (loop [out [(if (is? p "{") (parse-braced-init p) (parse-assign-expr p))]]
+                                           (if (accept! p ",") (recur (conj out (if (is? p "{") (parse-braced-init p) (parse-assign-expr p)))) out))))]
+                            (expect! p "]")
+                            (recur (node p "ArraySubscriptExpr" (nb x) (last-ix p) (cond-> {:inner (into [x] is)} (not= 1 (count is)) (assoc :_multi true)))))
+                          (let [i (with-gt p true (if (is? p "{") (parse-braced-init p) (parse-expr p)))]
+                            (expect! p "]")
+                            (recur (node p "ArraySubscriptExpr" (nb x) (last-ix p) {:inner [x i]}))))))
       (is? p "(") (let [as (call-args p x (paren-args p))] (recur (node p "CallExpr" (nb x) (last-ix p) {:inner (into [(sync-builtin p (unresolved-call p x as) as)] as)})))
       (is? p ".") (recur (member-node p x false))
       (is? p "->") (recur (member-node p x true))
@@ -1912,6 +1921,50 @@
   (when-let [^ArrayList d (stv p DIAGS)]
     (when (main-tok? p i)
       (let [^T t (tok-at p i)] (.add d [(.-o t) why (.-s t)])))))
+
+(defn- pedantic-diag!
+  "CP338 (a): a main-file diagnostic GCC gives as a pedwarn (an error under -pedantic-errors alone), the construct taken:
+  kept as a syntax error whose reason starts `pedantic: `, which arbace.repr.cpp.diag/diagnose drops without -pedantic-errors."
+  [^P p ^long i ^String why]
+  (soft-diag! p i (str "pedantic: " why)))
+
+(defn- parse-asm-parts
+  "CP338 (a): an asm statement from its keyword to its `)`: {:volatile :inline :goto :template S :outputs [[name constraint]]
+  :inputs [...] :clobbers [S] :labels [S] :inner [output operands..., input operands...]} (the strings' values as the
+  literal's node gives them, quoted). Throws (a perr) on what it does not parse."
+  [^P p]
+  (adv! p)
+  (let [qs (loop [qs #{}]
+             (let [s (ts (cur p))]
+               (if (#{"volatile" "__volatile__" "__volatile" "inline" "__inline__" "__inline" "goto"} s)
+                 (do (adv! p) (recur (conj qs (case s ("volatile" "__volatile__" "__volatile") :volatile ("inline" "__inline__" "__inline") :inline :goto))))
+                 qs)))
+        _ (expect! p "(")
+        lit (fn [] (if (identical? :str (tk (cur p))) (:value (parse-string-literal p)) (perr p "an asm string")))
+        tmpl (lit)
+        ;; the sections' separators: `:` each, `::` two
+        colons (atom 0)
+        sep! (fn [] (cond (and (pos? (long @colons)) (swap! colons dec)) true
+                          (is? p "::") (do (adv! p) (reset! colons 1) true)
+                          (is? p ":") (do (adv! p) true)
+                          :else false))
+        section (fn [one] (if (or (is? p ")") (is? p ":") (is? p "::") (pos? (long @colons))) []
+                            (loop [out [(one)]] (if (accept! p ",") (recur (conj out (one))) out))))
+        operand (fn [] (let [nm (when (accept! p "[") (let [s (ts (cur p))] (adv! p) (expect! p "]") s))
+                             c (lit)
+                             _ (expect! p "(")
+                             x (parse-expr p)]
+                         (expect! p ")")
+                         [nm c x]))
+        outs (if (sep!) (section operand) [])
+        ins (if (sep!) (section operand) [])
+        clob (if (sep!) (section lit) [])
+        labels (if (sep!) (section (fn [] (let [s (ts (cur p))] (adv! p) s))) [])]
+    (when (pos? (long @colons)) (perr p "an asm section"))
+    (expect! p ")")
+    {:volatile (boolean (:volatile qs)) :inline (boolean (:inline qs)) :goto (boolean (:goto qs)) :template tmpl
+     :outputs (mapv (fn [[n c _]] [n c]) outs) :inputs (mapv (fn [[n c _]] [n c]) ins) :clobbers clob :labels labels
+     :inner (vec (concat (map #(nth % 2) outs) (map #(nth % 2) ins)))}))
 
 (defn- skip-statement!
   "The cursor from a statement's first token `b` to after its end: its ; at depth 0, or the } closing a block it opened
@@ -2115,7 +2168,12 @@
                 s (if (is? p "}") (node p "NullStmt" (last-ix p) (last-ix p) {}) (statement-or-decline p))]
             (node p "LabelStmt" b (ne s) {:name (.-s t) :inner [s]})))
       (or (t= t "asm") (t= t "__asm__") (t= t "__asm"))
-      (do (skip-until! p #{";"}) (let [e (last-ix p)] (expect! p ";") (node p "GCCAsmStmt" b e {})))
+      ;; (CP338 (a): GNU's asm statement's parts for the code generator, clang's GCCAsmStmt: the qualifiers, the template,
+      ;; the outputs' and inputs' constraints and operands, the clobbers and goto labels; in a header skimmed, or past
+      ;; what is parsed here, the statement's tokens skipped as before)
+      (let [a (when-not (skim? p) (try (parse-asm-parts p) (catch arbace.lang.ExceptionInfo _ (seek! p b) nil)))]
+        (when-not a (skip-until! p #{";"}))
+        (let [e (last-ix p)] (expect! p ";") (node p "GCCAsmStmt" b e (if a {:_asm (dissoc a :inner) :inner (:inner a)} {}))))
       (or (and (t= t "[") (is-at? p 1 "[")) (t= t "__attribute__") (and (t= t "__attribute") (is-at? p 1 "(")))
       (let [as (attr-nodes p)]
         (if (block-decl-start? p)
@@ -2810,6 +2868,13 @@
                            :dep (boolean (or (and hdr (pos? (long (:n hdr)))) (some #(:dep (:ent %)) (stv p CLS))))}
                     tmpl (assoc :tmpl true :tps (:params hdr)))
               _ (when tmpl (.put ^HashMap (:info ent) :tparams (tparam-records p (:params hdr))))
+              ;; (CP338 (a): a class declared before its definition, whose entity a typedef took as its target then
+              ;; (iosfwd's `typedef basic_streambuf<char> streambuf;`): the declaration's scope looks in the
+              ;; definition's, so that a member named through the typedef is found, `int_type` in a class derived from
+              ;; std::streambuf, runtime/library.cpp)
+              _ (when (and nm simple (nil? (:args lp)))
+                  (let [old (sc/find-in (sc/decl-scope (scope p)) nm true)]
+                    (when (and (:incomplete old) (:scope old) (not (identical? (:scope old) cs))) (sc/add-base! (:scope old) cs))))
               _ (when (and nm simple (nil? (:args lp))) (declare! p ent))
               _ (when nm (sc/declare! cs (cond-> (assoc ent :tag false)
                                           tmpl (assoc :inj (:names hdr))
@@ -3116,6 +3181,13 @@
                        (when (:conv lp) (:conv lp))
                        (when (or ctor (:dtor lp) guide) {:t :b :w ["void"]})
                        (when (and (= ctx :member) (is? p ":")) {:t :b :w ["int"]})
+                       ;; (CP338 (a): `main()` with no type, as GCC's grokdeclarator takes it: an int function and a
+                       ;; pedantic diagnostic, an error under -pedantic-errors (diagnostic/no-type-1.C), nothing under -w
+                       ;; (abi/vbase8-10.C); another name with no type stays the declined permerror, no-type-2.C. clang
+                       ;; rejects both)
+                       (when (and (= ctx :top) qn (= 1 (count chain)) (= 1 (count (:parts qn))) (= "main" (:s lp)) fs)
+                         (pedantic-diag! p (long (:i lp)) "ISO C++ forbids declaration of 'main' with no type")
+                         {:t :b :w ["int"]})
                        (perr p "a declaration without a type"))
               ty (build-type base d)
               ni (if qn (long (:i lp)) (ix p))

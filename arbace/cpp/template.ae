@@ -414,7 +414,7 @@
   (let [es (sema/lookup scope nm)]
     (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es)))
 
-(declare static-call-value)
+(declare static-call-value packs-named)
 
 (defn eval-text
   "The value of a constant expression's text in `scope` (integers, the operators, parentheses, the conditional
@@ -459,6 +459,12 @@
                   ;; a functional cast to a builtin type: bool(x), int(x)
                   (and (contains? cast-types t) (= "(" (peek)))
                   (do (next!) (let [v (expr 0)] (next!) (cast-to t v)))
+                  ;; (CP338 (a): sizeof...(pack) in a type's text, a base's argument: tuple_size<tuple<_Elements...>>'s
+                  ;; integral_constant<size_t, sizeof...(_Elements)>; the count of the pack's elements, dependent when unbound)
+                  (and (= t "sizeof") (= "..." (peek)))
+                  (let [_ (next!) _ (next!) nm (str/trim (run "(" ")"))
+                        [[_ e]] (packs-named scope [nm])]
+                    (if e (count (or (:elems e) (:ids e))) {:k :texpr :o "sizeof..." :name nm}))
                   (= t "sizeof") (let [_ (next!)
                                        ty (abi/non-ref (sema/resolve-type scope (run "(" ")")))]
                                    (if (dependent? ty) {:k :texpr :o "sizeof" :type ty} (abi/size-of ty)))
@@ -519,7 +525,7 @@
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
         v))))
 
-(declare resolve-args complete-args instantiate-fn)
+(declare resolve-args complete-args instantiate-fn var-template-inst)
 
 (defn- static-call-value
   "The value of a call without arguments of a constexpr static member function, or of a specialization of a static
@@ -566,6 +572,16 @@
     ;; a type trait's value (G4: __is_same(T, U))
     (and (seq? f) (= 'fn (first f)) (vector? (second f)) (symbol? (nth f 2 nil)) (contains? value-traits (str (nth f 2))))
     (trait-value scope (str (nth f 2)) (second f))
+    ;; (CP338 (a): a variable template's specialization, its arguments not dependent: the specialization's constant
+    ;; initializer; libstdc++'s variant<_Types...>::__not_in_place_tag<_Tp> in its converting constructor's enable_if_t)
+    (and (seq? f) (= '<> (first f)) (symbol? (second f)) (nil? (namespace (second f)))
+         (some #(and (= :tmpl (:e %)) (= :var (:tk %))) (sema/lookup scope (name (second f)))))
+    (let [e (first (filter #(and (= :tmpl (:e %)) (= :var (:tk %))) (sema/lookup scope (name (second f)))))
+          t (tmpl (:id e))
+          args (or (complete-args t (resolve-args scope t (vec (nnext f)) false)) (fail :template "the template arguments of " (:name t)))
+          _ (when (some dependent? args) (fail :template "constant " (pr-str f)))
+          v (sema/var* (var-template-inst t args))]
+      (if (and (:c (:ty v)) (:init v)) (sema/const-int (or (:def-scope v) scope) (:init v)) (fail :template "not a constant: " (pr-str f))))
     ;; a call without arguments of a static member (function template's specialization), G5c
     (and (seq? f) (= 'fn (first f)) (= [] (second f)) (let [c (nth f 2 nil)] (and (seq? c) (#{'cpp/scope '<>} (first c)))))
     (static-call-value scope (nth f 2))
@@ -745,7 +761,15 @@
                             (if (= :type (:kind p))
                               (expand-type-pack scope (second f))
                               (let [packs (packs-named scope [(name (second f))])]
-                                (if (seq packs) (vec (:elems (second (first packs)))) [(value-arg (const-form scope (second f)) nil (param-type scope p))])))
+                                (if (seq packs) (vec (:elems (second (first packs))))
+                                  ;; (CP338 (a): the parameter's type in the template's own scope, as resolve-arg's: IT's
+                                  ;; `template<sz... I>` named from another namespace, std::_Index_tuple<_Ind...> of std::thread)
+                                  [(value-arg (const-form scope (second f)) nil
+                                              (param-type (let [i (min (count out) (dec np))]
+                                                            (or (try (bind-scope (:scope t) (subvec ps 0 i) (subvec out 0 i) nil)
+                                                                     (catch arbace.lang.ExceptionInfo _ nil))
+                                                                scope))
+                                                          p))])))
                             ;; a non-type parameter's type may name the parameters before it (template <class T, T v>)
                             [(resolve-arg scope p f (let [i (min (count out) (dec np))]
                                                       (try (bind-scope (:scope t) (subvec ps 0 i) (subvec out 0 i) nil)
@@ -1409,9 +1433,15 @@
     (cond
       (or (map? n) (dependent? t) (= :ttp (:k st))) {:k :tdep :trait "__make_integer_seq" :base t :types [t] :names [] :n n}
       (and (integer? n) (>= (long n) 0))
-      (let [tt (tmpl (:tmpl st))]
-        (instantiate-class (:tmpl st) (or (complete-args tt (resolve-args scope tt (cons tf (range (long n))) true))
-                                          (fail :template "__make_integer_seq's sequence"))))
+      (let [tt (tmpl (:tmpl st))
+            args (or (complete-args tt (resolve-args scope tt (cons tf (range (long n))) true))
+                     (fail :template "__make_integer_seq's sequence"))]
+        (if (= :alias (:tk tt))
+          ;; (CP338 (a): an alias template's sequence, <bits/utility.h>'s _Build_index_tuple<_Num>'s
+          ;; __make_integer_seq<_IdxTuple, size_t, _Num> with _IdxTuple<_Tp, _Idx...> = _Index_tuple<_Idx...>: its pattern's
+          ;; type with the arguments substituted, [temp.alias]/2)
+          (sema/resolve-type (bind-scope (:scope tt) (:params tt) args nil) (get-in (:pattern tt) [:type :qualType]))
+          (instantiate-class (:tmpl st) args)))
       :else (fail :template "__make_integer_seq of a negative length " n))))
 
 (defn template-id
@@ -1435,7 +1465,13 @@
     (if (and ttp (not (tmpl-of-entity (take-while #(not= :ttp (:e %)) es))))
       ;; TT<args> in a signature: a dependent template-id whose template is a parameter
       {:k :tspec :ttp {:k :ttp :i (:i ttp) :tid (:tid ttp)} :name (name nm) :path []
-       :args (mapv #(if (number? %) {:val (long %) :ty abi/int*} (if (and (seq? %) (= 'cpp/text (first %))) (sema/resolve-type scope (second %)) (sema/resolve-type-form scope %))) forms)}
+       ;; (CP338 (a): a pack expansion among them, Op<A...> of a partial specialization's __void_t<_Op<_Args...>>, pr77550:
+       ;; the pack's elements, or the dependent {:k :pack-exp})
+       :args (vec (mapcat #(cond (number? %) [{:val (long %) :ty abi/int*}]
+                                 (and (seq? %) (= 'cpp/text (first %))) [(sema/resolve-type scope (second %))]
+                                 (and (seq? %) (= 'pack-expand (first %))) (expand-type-pack scope (second %))
+                                 :else [(sema/resolve-type-form scope %)])
+                          forms))}
     (let [tid (or (tmpl-of-entity es) (fail :template "not a template: " nm))
         t (tmpl tid)]
     (when-not (#{:class :alias} (:tk t)) (fail :template "not a class or alias template: " nm))
@@ -1703,7 +1739,8 @@
    (for [a args
          :let [t (abi/unq (abi/non-ref (:ty a)))] :when (abi/class? t)
          :let [outer (loop [s (:outer (abi/cls (:id t)))] (if (#{:ns} (:kind s)) s (recur (:parent s))))]
-         e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names outer nm)) :when (and (= :tmpl (:e e)) (= :fn (:tk e)))]
+         ns (sema/adl-nss outer)
+         e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names ns nm)) :when (and (= :tmpl (:e e)) (= :fn (:tk e)))]
      (:id e))))
 
 (defn- too-few-args?
@@ -1785,10 +1822,26 @@
   [ctx e n]
   (let [t (tmpl (:id e))
         args (or (complete-args t (or (explicit-args t (sema/written-targs n (:name t)) (:scope ctx)) [])) (fail :template "missing template arguments for " (:name t)))]
+    (var-template-inst t args)))
+
+(declare partial-match more-specialized-partial?)
+
+(defn- var-template-inst
+  "The variable template `t`'s specialization for the complete arguments `args`, declared once: the most specialized
+  matching partial specialization's (CP338 (a), [temp.spec.partial.match] as for a class; libstdc++'s
+  __detail::__variant::__accepted_index<_Tp, _Variant, void_t<_FUN_type<_Tp, _Variant>>>), else the primary's."
+  [t args]
+  (let [t (tmpl (:id t))
+        ms (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t))
+        best (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms)
+        _ (when (and (seq ms) (not= 1 (count best))) (fail :template "ambiguous partial specializations of " (:name t)))
+        [pattern params bound] (if-let [[pt b] (first best)]
+                                 [(first (filter #(= "VarDecl" (:kind %)) (kids (:node pt)))) (:params pt) b]
+                                 [(:pattern t) (:params t) args])]
     (or (get-in @*tmpls* [(:id t) :insts args])
-        (let [ps (bind-scope (:scope t) (:params t) args nil)
-              vid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-var! ps (:pattern t) :global))]
-          (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))
+        (let [ps (bind-scope (:scope t) params bound nil)
+              vid (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/declare-var! ps pattern :global))]
+          (.remove ^java.util.HashMap (:names ps) (:name pattern))
           (upd-var! vid assoc :tinst {:tid (:id t) :args args :name (:name t)} :linkonce true :defined false :pending-def true
                     :internal (boolean (:internal ps)) :internal-l false)
           (upd-tmpl! (:id t) assoc-in [:insts args] vid)
@@ -1806,6 +1859,15 @@
                           i))
                 (range 1 (dec (count ts))))]
     (when-not i (fail :template "partial specialization's arguments"))
+    (first (ct/template-args ts (+ 2 i)))))
+
+(defn- var-text-args
+  "CP338 (a): a variable template's partial specialization's arguments as written after its name, parsed from its text."
+  [n]
+  (let [ts (vec (ct/tokens (node-text n)))
+        i (some (fn [i] (when (and (= (:name n) (nth (get ts i) 1 nil)) (= "<" (nth (get ts (inc i)) 1 nil))) i))
+                (range 0 (dec (count ts))))]
+    (when-not i (fail :template "a variable template's partial specialization's arguments"))
     (first (ct/template-args ts (+ 2 i)))))
 
 (defn- find-template [scope nm tk]
@@ -2127,6 +2189,19 @@
       (swap! *tmpls* assoc tid {:id tid :tk tk :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
                                 :pos (:_b n) :insts {} :constraint (:requiresClause n)})
       (enter! scope (:name n) {:e :tmpl :tk tk :id tid :pos (long (or (:_b n) 0))})
+      :template)
+    ;; (CP338 (a): a variable template's partial specialization, kept as a class template's is: its arguments as written
+    ;; after its name, matched when a specialization is named, var-template-inst)
+    "VarTemplatePartialSpecializationDecl"
+    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :var (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary variable template " (:name n)))
+          t (tmpl tid)
+          pid (next-id)
+          params (tparams n)
+          ss (bind-scope (:scope t) params nil pid)
+          forms (var-text-args n)
+          args (resolve-args ss t forms true)]
+      (upd-tmpl! tid update :partials (fnil conj [])
+                 {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t) :forms forms :tmpl t})
       :template)
     "ClassTemplatePartialSpecializationDecl"
     (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary template " (:name n)))
