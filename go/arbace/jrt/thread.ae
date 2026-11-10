@@ -115,7 +115,8 @@ arbace_local.go): the box's vCPUs.\n"
     (SetUncaughtExceptionHandler_Thread_UncaughtExceptionHandler__V [^Thread_UncaughtExceptionHandler h])
     (GetStackTrace__StackTraceElement1 ^{:tag (* RefArray)} [])
     (GetContextClassLoader__ClassLoader ^ClassLoader_I [])
-    (SetContextClassLoader_ClassLoader__V [^ClassLoader_I cl])))
+    (SetContextClassLoader_ClassLoader__V [^ClassLoader_I cl])
+    (GetThreadGroup__ThreadGroup ^{:tag (* ThreadGroup)} [])))
 
 (go/const
   [^{:tag int32 :val 0} threadNew 0]
@@ -171,7 +172,10 @@ its first interpreted call\n"} Interp
 the thread is blocked on (AbstractInterruptibleChannel.blockedOn), or nil (JCS162)\n"} nioBlocker
           ^{:tag (Volatile ClassLoader_I) :doc "jdk26u's Thread.contextClassLoader (F27): the creating thread's at construction\n"} ccl
           ^{:tag atomic/Bool :doc "ccl was set (a constructor or setContextClassLoader); an adopted thread's is the
-system class loader, as the JVM's main thread's\n"} cclSet))
+system class loader, as the JVM's main thread's\n"} cclSet
+          ^{:tag bool :doc "made with inheritInheritableThreadLocals false: start copies no inheritable values\n"} noInherit
+          ^{:tag (* ThreadGroup) :doc "jdk26u's holder.threadGroup (JCS322 (a), threadgroup.ae): the creating thread's
+group or the constructor's; an adopted thread's the main group\n"} group))
 
 (go/var Thread_class
   (Define (addr (lit ClassInfo :Name "java.lang.Thread" :Kind KindClass :Modifiers AccPublic
@@ -221,10 +225,73 @@ current thread is one, as Java's.\n"
   (set! (.-target t) task)
   (let [cur (CurrentThread)]
     (.Store (.-daemon t) (.Load (.-daemon cur)))
+    ;; jdk26u's Thread(ThreadGroup, ...): the creating thread's group, the priority within its maximum (JCS322)
+    (set! (.-group t) (.-group cur))
+    (when (== (.-group t) nil)
+      (set! (.-group t) mainThreadGroup))
+    (.Store (.-priority t) (min (.Load (.-priority cur)) (.Load (.-maxPriority (.-group t)))))
     ;; jdk26u's Thread(ThreadGroup, String, int, Runnable, long, AccessControlContext): the context class
     ;; loader is the parent's (F27)
     (.Store (.-ccl t) (.Impl_GetContextClassLoader__ClassLoader cur cur))
     (.Store (.-cclSet t) true)))
+
+;; the constructors taking a thread group (JCS322 (a)): jdk26u's Thread(ThreadGroup, Runnable, String, long,
+;; boolean) and the shorter ones (a null group: the current thread's; the stack size is a hint Go ignores)
+(go/method Ctor_ThreadGroup_Runnable [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g task (genThreadName) 0 true))
+(go/method Ctor_ThreadGroup_String [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^{:tag (* String)} name]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g nil name 0 true))
+(go/method Ctor_ThreadGroup_Runnable_String
+  [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g task name 0 true))
+(go/method Ctor_ThreadGroup_Runnable_String_J
+  [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack]
+  (.Ctor_ThreadGroup_Runnable_String_J_Z t this g task name stack true))
+(go/method Ctor_ThreadGroup_Runnable_String_J_Z
+  "Ctor_ThreadGroup_Runnable_String_J_Z is Thread(group, task, name, stackSize, inheritInheritableThreadLocals):
+in group (null: the current thread's), the priority within the group's maximum; without inheritance the
+inheritable thread locals start empty (Impl_Start__V copies them only when noInherit is false).\n"
+  [^{:tag (* Thread)} t ^Thread_I this ^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack
+   ^bool inherit]
+  (.Ctor_Runnable_String t this task name)
+  (when (!= g nil)
+    (set! (.-group t) g)
+    (.Store (.-priority t) (min (.Load (.-priority t)) (.Load (.-maxPriority g)))))
+  (set! (.-noInherit t) (not inherit)))
+
+(go/func Thread_New_ThreadGroup_Runnable ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable t t g task) t))
+(go/func Thread_New_ThreadGroup_String ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^{:tag (* String)} name]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_String t t g name) t))
+(go/func Thread_New_ThreadGroup_Runnable_String
+  ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable_String t t g task name) t))
+(go/func Thread_New_ThreadGroup_Runnable_String_J
+  ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable_String_J t t g task name stack) t))
+(go/func Thread_New_ThreadGroup_Runnable_String_J_Z
+  ^{:tag (* Thread)} [^{:tag (* ThreadGroup)} g ^Runnable task ^{:tag (* String)} name ^int64 stack ^bool inherit]
+  (let [t (addr (lit Thread))] (.Ctor_ThreadGroup_Runnable_String_J_Z t t g task name stack inherit) t))
+
+(go/method Impl_GetThreadGroup__ThreadGroup
+  "Impl_GetThreadGroup__ThreadGroup is getThreadGroup(): null once the thread terminated, the virtual threads'
+group for a virtual thread, else its group (JCS322 (a)).\n"
+  ^{:tag (* ThreadGroup)} [^{:tag (* Thread)} t ^Thread_I this]
+  (cond
+    (== (.Load (.-state t)) threadTerminated) (return nil)
+    (.-virtual t) (return virtualThreadGroup)
+    (== (.-group t) nil) (return mainThreadGroup))
+  (.-group t))
+(go/method GetThreadGroup__ThreadGroup ^{:tag (* ThreadGroup)} [^{:tag (* Thread)} t]
+  (.Impl_GetThreadGroup__ThreadGroup t t))
+
+(go/func Thread_ActiveCount__I
+  "Thread_ActiveCount__I is Thread.activeCount(): the current thread's group's activeCount().\n" ^int32 []
+  (.ActiveCount__I (.GetThreadGroup__ThreadGroup (CurrentThread))))
+(go/func Thread_Enumerate_Thread1__I
+  "Thread_Enumerate_Thread1__I is Thread.enumerate(list): the current thread's group's enumerate(list).\n"
+  ^int32 [^{:tag (* RefArray)} list]
+  (.Enumerate_Thread1__I (.GetThreadGroup__ThreadGroup (CurrentThread)) list))
 
 ;; markers and generated members
 (go/method Self_Thread ^{:tag (* Thread)} [^{:tag (* Thread)} t] t)
@@ -248,9 +315,13 @@ current thread is one, as Java's.\n"
   [^{:tag (* Thread)} t ^Thread_I this]
   (when (not (.CompareAndSwap (.-state t) threadNew threadAlive))
     (panic (IllegalThreadStateException_New)))
-  (let [cur (CurrentThread)]
-    ;; InheritableThreadLocal: the child's values are the parent's, through childValue
-    (range [k v (.-inheritable cur)]
+  (let [cur (CurrentThread)
+        inh (.-inheritable cur)]
+    ;; InheritableThreadLocal: the child's values are the parent's, through childValue (none for a thread made
+    ;; with inheritInheritableThreadLocals false, JCS322)
+    (when (.-noInherit t)
+      (set! inh nil))
+    (range [k v inh]
       (when (== (.-inheritable t) nil)
         (set! (.-inheritable t) (make (map (* ThreadLocal) any))))
       (aset (.-inheritable t) k (.ChildValue_O__O (.-self k) v))))
@@ -425,6 +496,10 @@ current thread is interrupted. A thread never started is not alive: join returns
   (when (or (< p 1) (> p 10))
     (panic (IllegalArgumentException_New)))
   (when (not (.-virtual t))
+    ;; jdk26u's: within the group's maximum (JCS322)
+    (let [g (.Impl_GetThreadGroup__ThreadGroup t this)]
+      (when (and (!= g nil) (> p (.Load (.-maxPriority g))))
+        (set! p (.Load (.-maxPriority g)))))
     (.Store (.-priority t) p)))
 
 (go/method Impl_GetId__J ^int64 [^{:tag (* Thread)} t ^Thread_I this] (.-tid t))
@@ -507,8 +582,8 @@ empty array.\n"
   (NewRefArray StackTraceElement_class 0))
 
 (go/method Impl_ToString__String
-  "Impl_ToString__String is Thread.toString: Thread[#id,name,priority,group] (the group is
-main for every platform thread), VirtualThread[#id,name]/state for a virtual one.\n"
+  "Impl_ToString__String is Thread.toString: Thread[#id,name,priority,group] (the group's name,
+empty once terminated: JCS322), VirtualThread[#id,name]/state for a virtual one.\n"
   ^{:tag (* String)} [^{:tag (* Thread)} t ^Thread_I this]
   (let [id (strconv/FormatInt (.-tid t) 10)
         n (.String (.Load (.-name t)))]
@@ -522,9 +597,10 @@ main for every platform thread), VirtualThread[#id,name]/state for a virtual one
           (case [threadAlive] (set! s (+ s "runnable")))
           (default (set! s (+ s "terminated"))))
         (return (Str s))))
-    (let [g ",main]"]
-      (when (== (.Load (.-state t)) threadTerminated)
-        (set! g ",]"))
+    (let [g ",]"
+          tg (.Impl_GetThreadGroup__ThreadGroup t this)]
+      (when (!= tg nil)
+        (set! g (+ "," (.String (.-name tg)) "]")))
       (Str (+ "Thread[#" id "," n "," (strconv/Itoa (conv int (.Load (.-priority t)))) g)))))
 
 (go/method Impl_GetContextClassLoader__ClassLoader
@@ -610,6 +686,7 @@ the goroutine ends).\n"
   (let [t (addr (lit Thread))
         n (allocNum)]
     (newThreadStruct t t)
+    (set! (.-group t) mainThreadGroup)
     (when (== name nil)
       (set! name (genThreadName)))
     (.Store (.-name t) name)
@@ -767,6 +844,8 @@ threads, runs the shutdown hooks (as the JVM's DestroyJavaVM does) and returns t
     (.Store (.-daemon t) false)
     ;; the main thread is live from here (management.ae), as the JVM's from its start
     (liveAdd t)
+    ;; the thread "Reference Handler" alive from the start, as the JVM's (reference.ae, F17)
+    (startReferenceHandler)
     (keepAlive)
     (let [exc (runCatching run)
           status 0]
