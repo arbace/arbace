@@ -3668,7 +3668,8 @@ From `.tmp/night12/DIAGNOSIS-N11.md` (rows cpp-route, rejected/cpp-dg, lb-dg-ref
 - **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: CP338 (a) and CP350 (a)"): the 82 programs by our route 57 → 62 generated (none
   lost); codegen-gen 154 of 154 unchanged; the dg every-10th sample 121 → 122 own passes (variadic-ttp3), none lost; `bin/reap` 0
   problems after recording the matrix again (cpp-props5's CP328 class move, the same at the base); `bin/crops-score --judge --strict`
-  0 problems. The new programs' runs: see the survey (the lowered runtime is a long build; its outcome below or the night's).
+  0 problems. The lowered runtime built by day (198 of 198, peak 2,945 MB in the ci read's chunks) and the five new programs with
+  opt/unroll1.C (its -fno-exceptions) run by our route: 6 of 6 pass by their own verdicts (vbase8-10 a gain: clang rejects it).
 - **Not built**: explicit object parameters, the TLS wrapper, `__complex__`, std::thread's tuple constraints, shared_ptr's
   `__has_esft_base` SFINAE, pr77550's `_CharT`, library.cpp's variant and any (each refused further on now).
 - **Alternatives considered**: implicit int for any function (GCC 15 makes it a permerror, no-type-2.C); emitting no code for

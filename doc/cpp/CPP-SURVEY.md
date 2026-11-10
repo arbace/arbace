@@ -6030,8 +6030,10 @@ our route, in the order CP338 (a) gives: the parser's declines first, then the t
 | `bin/reap` | 0 problems after `--record`: the matrix had kept cpp-props5's two dg classes before CP328 (a) moved two files from `clang-accepts` to `gxx-only-rules`, the same 2 problems at the base; `test/reap/matrix.edn` recorded again for that alone |
 | `bin/crops-score --judge --strict` | 0 problems |
 
-No program was run: the lowered runtime's build stopped at the light tier's disk rule (`bin/cppi`'s `disk_ok`, 80%; the host's disk at 83%),
-so the five newly generated programs' runs by their own verdicts are the night's (below). The compiler stubs' log is empty.
+| the lowered runtime (`bin/cppi runtime-build`, then `runtime-ci` with `CPPI_CI_CHUNK=20`, `CPPI_CI_MEMLIMIT=1800MiB`, `CPPI_JOBS=1`; `.tmp/cppi/runtime`) | 198 units, 198 pass; 1,112 s and 6,013 s in all, peak 2,945 MB (the ci read's chunks; under the 3 GB the brief allows). A first attempt had stopped at the light tier's disk rule (`disk_ok`, 80%: the disk at 83%), retried at 78% |
+| the five new programs and opt/unroll1.C (with -fno-exceptions) run by our route: `CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --only .tmp/cp338-new.txt` (`.tmp/chk`) | **6 of 6 pass** (their own verdicts, test/cpp/selfref.ae); the IR of all six by ours, peak 1,780 MB. vbase8-10 is a gain over clang's route (`:oracle-rejected` in the every-25th record) |
+
+The compiler stubs' log is empty: no clang, g++ or LLVM tool ran.
 
 ### Proposed (CP353-CP355)
 
@@ -6050,11 +6052,9 @@ so the five newly generated programs' runs by their own verdicts are the night's
 
 ```
 export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace REPR_CPP_THREADS=2 GOMEMLIMIT=1800MiB CPPI_JOBS=1 CPPI_THREADS=1
-CPPI_CI_CHUNK=20 CPPI_CI_MEMLIMIT=1800MiB bin/cppi runtime-ci               # the lowered runtime (needs the disk under 80%, or CPPI_DISK_MAX)
 printf '%s\n' gxx-dg-run/abi/vbase8-10.C gxx-dg-run/cpp23/subscript12.C gxx-dg-run/cpp2a/spaceship-synth4.C \
   gxx-dg-run/torture/builtin-clear-padding-4.C gxx-dg-run/ubsan/null-8.C gxx-dg-run/opt/unroll1.C > .tmp/cp338-new.txt
-CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --only .tmp/cp338-new.txt # the five new programs (and unroll1 with its option) by their own verdicts
-CPPI_ROUTE=ours bin/cppi check --aot --corpus gxx-dg-run --only .tmp/cp338-new.txt
+CPPI_ROUTE=ours bin/cppi check --aot --corpus gxx-dg-run --only .tmp/cp338-new.txt   # the AOT level of the six (the eval level passed by day)
 bin/cppi route-compare --corpus gxx-dg-run --sample 25                      # auto against clang: vbase8-10 an improvement (clang rejects it), no pass lost
 bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25
 bin/repr-cpp dg --corpus dg-error --front native --record                   # the own record (CP342's), variadic-ttp3 and no-type-1/2 through the parser's pedantic diagnostic
