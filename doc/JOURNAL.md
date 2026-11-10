@@ -2976,3 +2976,29 @@ intern.c, weak.c; the tests named below). OCAML-SURVEY.md, "As built: OC216 (a)"
   runtime-objects/Tests (12); weak_array_par pass to `:speed`. The light AOT level: gctweaks, reachable_words, pr7168,
   test_compact_full, fuzzy, Tests (6); stackoverflow to `:light-depth`. Recorded `--only-list --record`, ocamlc's path (`--ocdump`,
   the matrix's sources until OC185's switch) and the native one (check-oi-native.edn).
+
+## 2026-11-10: OCaml's OC216 (a), the rest: AF_UNIX sockets and the OS's signals at the compiled level (branch `ocaml-s4`, from `ocaml-s3` `b45b8aa4f`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The part of OC216 (a) (the user, 2026-11-10) `ocaml-s3` left:
+OT23 (a) and OT24 (a) reversed at the compiled level. Sources: OCaml 5.5.0's tarball, otherlibs/unix's socket.c, socketpair.c,
+socketaddr.c, accept.c, bind.c, connect.c, listen.c, shutdown.c, getsockname.c, getpeername.c, sendrecv.c, sockopt.c, select.c,
+kill.c, runtime/signals.c, as oi's ext_unix_sock.go and ext_signal.go port them. OCAML-SURVEY.md, "As built: OC216 (a), the rest".
+
+- The route: the compiled main serves `/proc/self/ocaml-host` beside OC208's exec file, a request/reply of length-prefixed fields; the
+  AOT runtime's new `HostSys` asks it, its `Sock` keeps a PF_UNIX socket or a socketpair as the OS's descriptor there (streams
+  `HSockIn`/`HSockOut` in Fd's table), and `ExtSignal` sends kill(2) to another process and has the OS's signals for a handler waited
+  for by a thread (`sigwait`) and posted as pending. No change to jrt or j2g (crop paths only). Alternatives considered: jrt's
+  `HostChannels` natives (IP only, a key move and a re-seed for AF_UNIX: no); Java's UnixDomainSocketAddress (jrt has no FileSystems,
+  F9, and Java's has neither datagrams nor abstract names: no); a poll of pending signals at every tick (a host round trip a tick: no,
+  a waiting thread and the Gil's yield instead).
+- The light level is unchanged in behaviour (no host in stage 0): the recvfrom programs stay `:unix-java` there; the class's text says so,
+  and at the compiled level it keeps them until the night's compiled run proves them.
+- Checked: the main's Go printed, vetted and tested in a scratch module (recvfrom's scenarios, a socketpair, a stream socket's calls,
+  sigaction/kill/sigwait); the runtime's new forms at the light level over the signal and socket programs (two type errors of the new
+  forms found and fixed first).
+- The three timeouts OC216 left unrecorded, rerun at load 13-19 (`cat /proc/loadavg` under 20): regression/pr7798 and
+  weak-ephe-final/ephetest3 at the light AOT level are over the CPU limit twice in a row (the limit is CPU time, not wall: OC216's
+  counters and weak keys, not the load); their aot-known.edn entries' kind is now "timeout " in their `:gc-and-memory` class and
+  they are recorded so (check-aot.edn). misc/darkening_work at oi's level timed out at load 15 and finished at load 13 with its
+  recorded class's output: at the CPU limit's edge; its record is unchanged (a first try recorded the finished run under a "timeout "
+  entry, an unclassed failure: reverted).

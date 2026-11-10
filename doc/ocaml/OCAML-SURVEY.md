@@ -3615,3 +3615,71 @@ test/ocaml/oc216-compiled.txt` and `bin/heavy-lock bin/oi suite check --aot --le
 test/ocaml/oc216-suite-compiled.txt` (the moved programs; o2j's new methods in every class); the passes then `--record`ed with the same
 lists, aot-compiled-known.edn's entries of the passing ones out (reachable_words, gctweaks, pr5233, weaklifetime, weaktest,
 test_compact_full, fuzzy, Tests), a failure's class the day after.
+
+## As built: OC216 (a), the rest (2026-11-10, branch `ocaml-s4`, from `ocaml-s3` `b45b8aa4f`)
+
+Under a light lane (no gate, each process under 2 GiB, one run at a time), the part of OC216 (a) left by `ocaml-s3`: AF_UNIX sockets
+and the OS's signals at the compiled level (OT23 (a) and OT24 (a) reversed there). Sources: OCaml 5.5.0's tarball, otherlibs/unix's
+socket.c, socketpair.c, socketaddr.c (get_sockaddr, alloc_sockaddr: Linux's abstract names, an unnamed peer an empty path), accept.c,
+bind.c, connect.c, listen.c, shutdown.c, getsockname.c, getpeername.c, sendrecv.c (recv, recvfrom, send, sendto), sockopt.c (the
+boolean and integer options' tables), select.c and kill.c, and runtime/signals.c (caml_install_signal_handler), read as oi's
+`ext_unix_sock.go` and `ext_signal.go` port them; the tests lib-unix/unix-socket/recvfrom{,_unix,_linux}.ml.
+
+**The route** (as OC208's exec and OC215's C API): the compiled program's main (`test/ocaml/o2j/main`, the crop's Go) serves a second
+file of its own, `/proc/self/ocaml-host`, through jrt's host (`execHost`'s Open; no change to jrt or j2g, no key moves). The AOT
+runtime's `HostSys` (`jdk/ocaml/ocaml/rt/HostSys.ae`) opens it per request, writes the request and reads the reply: fields, each a u32
+big-endian length and its bytes, the request's operation first, the reply "ok" and its results or "e" and the errno, which HostSys
+raises as `Unix_error (errno, fn, "")` as the C stubs' `caml_uerror`. The main makes the system call on its goroutine (`hostDo`:
+socket, socketpair, bind, connect, listen, accept, shutdown, getsockname, getpeername, read, write, recv, recvfrom, send, sendto,
+close, setsockopt, getsockopt, poll, kill, sigaction, sigwait). Where no host serves the file (the light level: the Java forms
+interpreted on stage 0) the probe's open fails (`HostSys/avail` false) and the runtime keeps its light behaviour.
+
+- *Sockets* (`Sock.ae`): `Unix.socket PF_UNIX` and `Unix.socketpair` make a socket of the OS (a `Sock` with `host` and `os`, its
+  entry of Fd's table with the streams `HSockIn`/`HSockOut` over the host's read and write, `HSockIn`'s close the descriptor's), so
+  Unix.read, write, channels, dup and close reach it as a java.net socket's streams; bind, connect, listen, accept, shutdown,
+  getsockname, getpeername, recv, send, the new `caml_unix_recvfrom` and `caml_unix_sendto` (and `_native`), setsockopt and
+  getsockopt (the boolean and integer kinds) and select's readiness (`poll`, select(2) with no wait) are the host's for it. The calls
+  that may block (accept, connect, recv, recvfrom, send, sendto, a stream's read and write) release the Gil. An address crosses as
+  "u" and the path (an abstract name's leading NUL is Go's leading @ in the main, and back) or "i", the port and the address. TCP
+  sockets stay java.net's (OT9's fix 6) at both levels. At the light level PF_UNIX is EPROTONOSUPPORT and socketpair a missing
+  external, as before.
+- *Signals* (`ExtSignal.ae`, `ExtSys.ae`): Sys.signal's action is also the OS's (`sigaction`: os/signal's Notify into the main's
+  channel for a handler, Ignore, Reset for the default; `ExtSignal/hostAction` from `caml_install_signal_handler`); the first
+  handler starts a daemon thread that waits in `sigwait` for the next signal the OS delivers and records it as pending under the Gil
+  (`ExtSignal/post`), delivered at the ticks as a program's own; while it waits `Rt/tick` lets it take the Gil every 128 turns
+  (`ExtSignal/watching`, as a running domain is). `Unix.kill` of another process is the OS's kill(2) (EPERM at the light level, as
+  before); a program's signals to itself stay the runtime's mirror (fix 7's), so the mask, sigpending, sigwait and sigsuspend are
+  unchanged. Not built: the interruption of a blocking host call by a signal (EINTR); no program of the lists needs it.
+
+**Checked (light).** The main printed by repr/go into a scratch module with stubs of jrt and lang (OC215's `.tmp/capichk` layout),
+`go vet` clean, and a Go test of `hostFile` written as the runtime writes it: recvfrom_unix's and recvfrom_linux's scenarios (a
+datagram to the socket itself, from an unbound socket to the empty path, from an abstract name back as "\000..."), getsockname of an
+abstract name, EBADF on a closed descriptor, a socketpair's write, poll and read, a stream socket's bind, listen, connect, accept,
+send, recv, getpeername, setsockopt and getsockopt (SO_TYPE), shutdown's end of file, sigaction with kill and sigwait, Ignore,
+Reset, and kill of a missing pid (ESRCH): all pass. The runtime's forms load and translate at the light level: `bin/oi check --aot
+--only-list` of the signal and socket programs that passed there (lib-sys/signal, lib-unix/kill/unix_kill, close_during_flush,
+threadsigmask, eintr, channel_of, pr5325, pr4466, lib-threads/sockets: 9 of 9 pass, as recorded) and `suite check --aot --only-list` of
+catch_break, sigwait, lib-unix/common/append (pass) and the two recvfrom programs (`:unix-java`, as recorded: the light level has no
+host). The first run found two type errors of the new forms (a long given to `OutputStream.write(int)`, an `alength` of an untyped
+local): every program ended with no result until fixed.
+
+**The three timeouts OC216 left unrecorded** (rerun with the load under 20, at 13-19): regression/pr7798 and weak-ephe-final/ephetest3
+at the light AOT level are over the CPU limit twice in a row: the limit is CPU time, so not the load but OC216's counters and weak keys
+(the programs run the collections and the weak work they wait for). Their aot-known.edn entries' kind is "timeout " in their
+`:gc-and-memory` class, recorded (`check --aot --ocdump --only-list --record`: check-aot.edn). misc/darkening_work at oi's level timed out
+at load 15 and finished at load 13 with its recorded output (`known gc: the major collector's work`): at the CPU limit's edge, its
+record unchanged.
+
+**Results (light).** No program moves at oi's or the light AOT level (the light level has no host; oi had sockets and signals already):
+completeness 83.6% before and after (without by design 96.3%), the matrix and test/crops/scores.edn unchanged. The plan's 2 AOT
+programs (recvfrom_unix, recvfrom_linux, and their compiled cells) are the night's.
+
+**Checks (light).** `bin/reap --record` 0 problems (the matrix unchanged), `bin/crops-score --record` and `--judge --strict` 0 problems,
+the four oi-divergences commands 0 failing, `bin/oi test`, typer-check 79 of 79, the essential list 59 of 59 with its controls,
+own-verdicts --check 0 differing, repl-check --native.
+
+**The night's (compiled level, j2g above 2 GiB).** `bin/heavy-lock bin/oi check --aot --level compiled --only-list
+test/ocaml/oc216-compiled.txt` and `bin/heavy-lock bin/oi suite check --aot --level compiled --only-list
+test/ocaml/oc216-suite-compiled.txt` (the lists now with the signal and socket programs and recvfrom_unix, recvfrom_linux); the passes
+`--record`ed with the same lists, recvfrom_unix's and recvfrom_linux's entries out of aot-compiled-known.edn when they pass (and the
+`:unix-java` class of the compiled levels then empty), a failure's class the day after.

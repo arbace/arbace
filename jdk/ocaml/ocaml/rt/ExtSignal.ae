@@ -7,6 +7,11 @@
 ;; sigsuspend over the pending set; a pending signal with the default action ends the process with status 128 + its number (the
 ;; ones whose default is to be ignored are dropped). Signals sent to another process, and the interruption of the other blocking calls
 ;; (sockets, sleeps), stay oi's.
+;; OC216 (a), the rest (doc/ocaml/OCAML-SURVEY.md, "As built: OC216 (a), the rest"): at the compiled level the main's host (HostSys)
+;; serves the OS's side as oi's ext_signal.go has it (otherlibs/unix's kill.c, runtime/signals.c's caml_install_signal_handler): a
+;; kill of another process is the OS's kill(2); a signal given a handler (or ignored, or given back its default) is the OS's too
+;; (os/signal's Notify, Ignore, Reset in the main), and a thread of the runtime (watch) waits for the OS's signals and records each
+;; as pending, delivered as the program's own are; while it waits Rt/tick lets it take the Gil (watching).
 
 (in-ns 'ocaml.rt)
 
@@ -16,6 +21,27 @@
   ;; the alarm: its generation (a new alarm cancels the last) and its time (System/currentTimeMillis), 0 when none is armed
   (field ^:static ^long alarmGen 0)
   (field ^:static ^long alarmAt 0)
+  ;; the OS's signals' thread (HostSys's sigwait) started
+  (field ^:public ^:static ^boolean watching false)
+
+  ;; Sys.signal's action for signal n (0 default, 1 ignore, 2 a handler) made the OS's, at the compiled level; the watching thread
+  ;; started at the first handler
+  (method ^:public ^:static hostAction ^void [^long n ^long act]
+    (when (and (HostSys/avail) (> n 0) (< n 65))
+      (HostSys/call "sigaction" (new Object/1 ["sigaction" (Long/valueOf n) (Long/valueOf act)]))
+      (when (and (== act 2) (not watching))
+        (set! watching true)
+        (let [t (Thread. (lambda Runnable []
+                           (loop []
+                             (let [k (try (HostSys/num (HostSys/call "sigwait" (new Object/1 ["sigwait"])) 0)
+                                          (catch Throwable e (long -1)))]
+                               (when (> k 0)
+                                 (Gil/lock)
+                                 (ExtSignal/post k)
+                                 (Gil/unlock)
+                                 (recur))))))]
+          (.setDaemon t true)
+          (.start t)))))
 
   (method ^:static bit ^long [^long n] (bit-shift-left 1 n))
 
@@ -74,9 +100,13 @@
   (method ^:public ^:static caml_unix_kill [pid s]
     (let [p (Rt/l pid)
           n (ExtSys/convertSignal (Rt/l s))]
-      (when (not (or (== p 0) (== p (.pid (ProcessHandle/current)))))
-        (throw (ExtUnix/error 1 "kill" "")))
       (when (or (< n 0) (>= n 65)) (throw (ExtUnix/error 22 "kill" "")))
+      (when (not (or (== p 0) (== p (.pid (ProcessHandle/current)))))
+        ;; another process: the OS's kill(2) through the host, EPERM where none serves (the light level)
+        (when (not (HostSys/avail)) (throw (ExtUnix/error 1 "kill" "")))
+        (HostSys/call "kill" (new Object/1 ["kill" (Long/valueOf p) (Long/valueOf n)]))
+        (ExtSignal/process)
+        (return Rt/UNIT))
       (when (== n 9) (System/exit 137))
       (ExtSignal/post n)
       (ExtSignal/process)
