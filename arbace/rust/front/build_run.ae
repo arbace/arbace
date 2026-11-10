@@ -171,6 +171,50 @@
                                                          :init (apply str (repeat (count bytes) "1")) :relocs []}])
                              (apply list (concat (take 3 x) [(list 'ptr (symbol a) 0 8)] (drop 4 x))))
                            x))))
+        ;; RFP44 (a): an unsizing cast to a trait object carries its vtable's allocation (codegen's pair's second half): mono's
+        ;; (vtable-alloc: the entries laid out natively), else the record's cast of the same types in the same body (counted)
+        rec-vts (atom (reduce (fn [m [k v]] (update m k (fnil conj []) v)) {}
+                              (for [blk (:blocks rec) st (:stmts blk) :when (and (seq? st) (= 'assign (first st)))
+                                    :let [rv (nth st 2 nil)] :when (and (seq? rv) (= 'cast (first rv)))
+                                    :let [i (.indexOf ^java.util.List rv :vtable)] :when (pos? i)]
+                                [(second (nth rv 3)) (nth rv (inc i))])))
+        rec-allocs (into {} (:alloc-data rec))
+        rec-closure (fn [id] (loop [todo [(str id)] seen #{}]
+                               (if-let [a (first todo)]
+                                 (if (contains? seen a) (recur (rest todo) seen)
+                                     (recur (concat (rest todo) (map (comp str second) (:relocs (get rec-allocs a)))) (conj seen a)))
+                                 seen)))
+        vt-count (atom 0)
+        ;; this body's dyn casts' vtables from mono, in the body's order (program-facts' :vtables): taken in turn by target type
+        vt-queue (atom (get (:vtables facts) (:name ours)))
+        take-vt! (fn [tgt] (let [q @vt-queue i (first (keep-indexed (fn [i [t _]] (when (= t tgt) i)) q))]
+                             (if i (do (reset! vt-queue (vec (concat (subvec q 0 i) (subvec q (inc i))))) (second (nth q i))) ::none)))
+        fix-cast (fn [x]
+                   (if (and (seq? x) (= 'cast (first x)) (str/starts-with? (str (second x)) "PointerCoercion(Unsize")
+                            (not (some #{:vtable} x)) (seq? (nth x 3 nil)) (:vtables facts))
+                     (let [tgt (second (nth x 3))
+                           nv (take-vt! tgt)]
+                       (cond
+                         (= ::none nv) x
+                         (and (map? nv) (not (mono/error? nv)))
+                         (let [k (swap! vt-count inc) a (str "allocV" k)
+                               es (:entries nv)
+                               fns (keep-indexed (fn [i [kind v]] (when (= :fn kind) [i (str "allocV" k "f" i) v])) es)]
+                           (when-let [f (:vtable! facts)] (f true))
+                           (doseq [[_ fa sym] fns] (swap! static-data conj [fa {:kind :fn :symbol sym}]))
+                           (swap! static-data conj [a {:kind :memory :align 8 :mutable false
+                                                       :bytes (apply str (for [[kind v] es b (if (= :usize kind) (le-bytes v 8) (repeat 8 0))] (format "%02x" b)))
+                                                       :init (apply str (repeat (* 8 (count es)) "1"))
+                                                       :relocs (vec (for [[i fa _] fns] [(* 8 i) fa]))}])
+                           (concat x [:vtable (symbol a)]))
+                         :else
+                         (if-let [id (first (get @rec-vts tgt))]
+                           (do (swap! rec-vts update tgt (comp vec rest))
+                               (when-let [f (:vtable! facts)] (f false))
+                               (doseq [a (rec-closure id)] (when-let [v (get rec-allocs a)] (swap! static-data conj [a v])))
+                               (concat x [:vtable id]))
+                           (throw (ex-info (str "no vtable for a cast to " tgt ": " (second nv)) {})))))
+                     x))
         unwind (fn [u] (if abort? '(unreachable) u))
         loc (list 'loc "?" 0 0)
         fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x)) (:tys facts)) (get (:tys facts) (second x) x) x))
@@ -200,7 +244,7 @@
                  t))
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
-    (-> (walk (comp fix-uneval fix-static fix-const fix-ty)
+    (-> (walk (comp fix-cast fix-uneval fix-static fix-const fix-ty)
           (merge (if (:header facts) ((:header facts) rec) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg]))
                  {:args (:args ours) :ret (:ret ours)
                   :locals (:locals ours)
@@ -548,6 +592,7 @@
                                          (if (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
                                              (do (fact! :locs false) (list 'loc "?" 0 0)))))
                     nf {:fsym fsym :statics statics :native-call native-call :header header :assert-loc assert-loc
+                        :vtables (:vtables facts) :vtable! (fn [native?] (fact! :vtables native?))
                         :const! (fn [native?] (fact! :consts native?))}
                     local? (fn [b] (str/starts-with? (str (:def-id b)) "DefId(0:"))
                     ext-syms (set (map :symbol (:ext-items facts)))
@@ -608,7 +653,26 @@
                                         (for [[t o] lt :when (mono/error? o) :let [l (get rec-layouts t)] :when l] [t l])))]
                 ;; a layout mono refuses is the record's when the record has its type (counted), else no body needs it
                 (doseq [[t o] lt] (if (mono/error? o) (when (contains? rec-layouts t) (fact! :layouts false)) (fact! :layouts true)))
-                (doall (for [f new-forms] (if (= 'mir/layouts (first f)) (list 'mir/layouts (vec table)) f)))))))]
+                ;; RFP44 (a): a virtual call's slot, where the callee (the record's) has none: from the call's method path and its
+                ;; receiver's dyn type, the trait's vtable entries (mono's vtable-entries)
+                (let [vkey (fn [t] (when (and (seq? t) (= 'call (first t)) (> (count t) 6))
+                                     (let [ci (nth t 6)]
+                                       (when (and (seq? ci) (map? (second ci)) (= "virtual" (:kind (second ci))) (nil? (:slot (second ci))))
+                                         (let [fty (nth (second t) 2 nil) st (when (seq? fty) (nth fty 2 nil))]
+                                           (when (and (seq? st) (= 'fndef (first st)))
+                                             [(second st) (second (first (nth st 2)))]))))))
+                      ks (distinct (for [f new-forms :when (= 'mir/body (first f)) blk (:blocks (second f)) :let [k (vkey (:term blk))] :when k] k))
+                      slots (if (seq ks) (mono/record-slots n ks) {})
+                      fix (fn [b] (update b :blocks (fn [bs] (mapv (fn [blk] (if-let [k (vkey (:term blk))]
+                                                                                 (if-let [sl (get slots k)]
+                                                                                   (do (fact! :vslots true)
+                                                                                       (assoc blk :term (let [t (:term blk)] (apply list (concat (take 6 t) [(list 'callee (assoc (second (nth t 6)) :slot sl))] (drop 7 t))))))
+                                                                                   (do (fact! :vslots false) blk))
+                                                                                 blk))
+                                                                             bs))))]
+                  (doall (for [f new-forms] (cond (= 'mir/layouts (first f)) (list 'mir/layouts (vec table))
+                                                  (= 'mir/body (first f)) (list 'mir/body (fix (second f)))
+                                                  :else f))))))))]
     {:forms result :lines @lines :tally @tally :judged @judged}))
 
 (defn- run-lines
@@ -650,7 +714,9 @@
 (defn- emit-and-lower
   "The module at DIR/NAME.mono.edn through codegen and rsi's lowering: nil, or why not"
   [dir n]
-  (let [[st what] ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n *std-linked*)]
+  ;; RF13: a failure past codegen (the printer's) is the program's refusal, not the batch's end
+  (let [[st what] (try ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n *std-linked*)
+                       (catch Throwable e [:unsupported (str "the module's printing: " (.getMessage e))]))]
     (if (not= st :ok)
       (str "codegen refused (" (name st) " " what ")")
       (when-let [why (lower-c dir n)] (str "rsi's lowering refused (" why ")")))))

@@ -485,6 +485,12 @@
                 {:pair [{:ty "ptr" :v (ag id)} {:ty "i64" :v n}]})
       "indirect" (let [[_ id off] v] (ind id off l))
       "zst" nil
+      ;; RF13: a type-level constant (a valtree) of &str: its text's bytes in a global of their own (rustc's const_str)
+      "tyconst" (let [txt (str (second v))]
+                  (if (and (str/starts-with? txt "\"") (= "str" (ty-kind (pointee-type t))))
+                    (let [s (read-string txt) n (count (.getBytes ^String s "UTF-8"))]
+                      {:pair [{:ty "ptr" :v (ag [:str s])} {:ty "i64" :v n}]})
+                    (unsupported (str "const tyconst " txt))))
       (unsupported (str "const " (first v))))))
 
 (defn fn-callee [f]
@@ -564,9 +570,16 @@
                           ("ref" "ptr") (pointee-type t)
                           "adt" (let [a (first (nth (ty-struct t) 3))] (when (and (seq? a) (= "ty" (name (first a)))) a))
                           nil))
-        pf (pointee from) pt (pointee to)]
-    (when (and pf pt (= "array" (ty-kind pf)) (= "slice" (ty-kind pt)))
-      (Long/parseLong (nth (ty-struct pf) 2)))))
+        pf (pointee from) pt (pointee to)
+        ;; RF13: a struct whose tail is unsized (PolymorphicIter<[T; N]> to PolymorphicIter<[T]>): the length of the type argument
+        ;; that goes from an array to a slice (the struct's unsized tail field: its metadata is the slice's)
+        tail (fn tail [a b]
+               (cond (and (= "array" (ty-kind a)) (= "slice" (ty-kind b))) (Long/parseLong (nth (ty-struct a) 2))
+                     (and (= "adt" (ty-kind a)) (= "adt" (ty-kind b)) (= (nth (ty-struct a) 2) (nth (ty-struct b) 2)))
+                     (some (fn [[x y]] (when (and (seq? x) (seq? y) (= "ty" (name (first x))) (not= (second x) (second y))) (tail x y)))
+                           (map vector (nth (ty-struct a) 3) (nth (ty-struct b) 3)))
+                     :else nil))]
+    (when (and pf pt) (tail pf pt))))
 
 (defn pair-align
   "The align attribute of component `i` of a fat reference's pair: a slice reference's data pointer (its element's alignment),
@@ -624,8 +637,13 @@
   of the dump's bodies kept in the globals (`set-def-symbols!`)."
   [g name t]
   (let [code (get int-codes (second t))
-        pre (str "_RINvNtCskxcxmcSlRLD_4core10intrinsics" (count name) name code "E")]
-    (when code (first (filter #(.startsWith ^String % pre) (get-in g [:defsyms (str "std::intrinsics::" name)]))))))
+        ;; core's crate hash is the build's (the host's std, rsi's std build): any
+        pre (re-pattern (str "^_RINvNtCs[0-9A-Za-z]+_4core10intrinsics" (count name) name code "E"))
+        syms (get-in g [:defsyms (str "std::intrinsics::" name)])]
+    (cond code (first (filter #(re-find pre %) syms))
+          ;; RF13: a monomorphic intrinsic's fallback body (type_id_eq): its one instance
+          (= 1 (count syms)) (first syms)
+          :else nil)))
 
 (defn set-def-symbols!
   "Keep the symbols of the dump's bodies by definition path."
@@ -680,6 +698,10 @@
         mergeable (fn [t] (let [ss (successors t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
         alloc-sym! (fn alloc-sym! [id]
+                     (if (and (vector? id) (= :str (first id)))
+                       ;; RF13: a string constant's bytes (const-val's tyconst)
+                       (let [bs (.getBytes ^String (second id) "UTF-8")]
+                         (intern-const! gl (list 'array (count bs) 'i8) (list 'c-string (apply str (map #(char (bit-and % 255)) bs))) 1))
                      (let [a (get allocs (str id))]
                        (case (:kind a)
                          :fn (let [sy (symbol "g" (:symbol a))]
@@ -704,7 +726,9 @@
                                  init (:init a)
                                  byte (fn [i] (Integer/parseInt (subs bs (* 2 i) (+ 2 (* 2 i))) 16))
                                  n (quot (count bs) 2)
-                                 relocs (sort-by first (:relocs a))
+                                 ;; RF13: a relocation to a TypeId's allocation (GlobalAlloc::TypeId, :other) keeps its bytes as an
+                                 ;; integer (consts.rs: the provenance dropped, the offset's bytes the hash)
+                                 relocs (sort-by first (remove #(= :other (:kind (get allocs (str (second %))))) (:relocs a)))
                                  ;; a run of bytes [from to): undef when uninitialized, zeroinitializer when all zero, else the bytes
                                  run (fn [from to]
                                        (let [ty (list 'array (- to from) 'i8)]
@@ -732,12 +756,12 @@
                                      tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
                                      vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
                                  (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))
-                         (unsupported "allocation of this kind"))))
+                         (unsupported "allocation of this kind")))))
         ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
         alloc-const! (fn [id off l]
                        (let [a (get allocs (str id))
                              bs (:bytes a)
-                             relocs (into {} (:relocs a))
+                             relocs (into {} (remove #(= :other (:kind (get allocs (str (second %))))) (:relocs a)))
                              rd (fn [o sc]
                                   (if-let [t (get relocs o)]
                                     {:ty "ptr" :v (alloc-sym! t)}
@@ -762,7 +786,8 @@
                            (unsupported "indirect constant of this layout"))))
         st (volatile! {:n 0 :skip #{} :bbs {} :bb-order [] :vals {} :allocas {} :start []})
         fresh! (fn [] (let [n (:n @st)] (vswap! st assoc :n (inc n)) (symbol (str "%t" n))))
-        emit! (fn [bb f] (vswap! st update-in [:bbs bb] (fnil conj []) f) nil)
+        ;; a MIR block's code continues in the last block a statement made (the repeat loop's repeat_loop_next): :redir
+        emit! (fn [bb f] (let [bb (get (:redir @st) bb bb)] (vswap! st update-in [:bbs bb] (fnil conj []) f)) nil)
         llbb! (fn [b] (let [nm (if (zero? b) "start" (str "bb" b))]
                         (when-not (some #{nm} (:bb-order @st)) (vswap! st update :bb-order conj nm))
                         (symbol (str "%" nm))))
@@ -1182,6 +1207,9 @@
                                      (cond
                                        (and (empty? (place-projs p)) (not (contains? mem l)))
                                        (get-discr! bb (get-in @st [:vals l]) ply dsc)
+                                       ;; RF13: a field of an SSA local (the analysis lets field projections stay SSA): its operand
+                                       (and (not (contains? mem l)) (every? #(= "field" (proj-kind %)) (place-projs p)))
+                                       (get-discr! bb (operand! bb (list 'copy p)) ply dsc)
                                        :else
                                        (get-discr! bb (place-of! bb p) ply dsc)))
                     ("use" "use-noretag") (operand! bb (second r))
@@ -1233,6 +1261,18 @@
                                    (when-not (get-in @gl [:decls sy]) (declare! gl sy 'void []))
                                    {:ty "ptr" :v sy})
                                  (unsupported "reified function without a symbol"))
+                               ;; RF13: a trait object to the same trait object (a coercion of its lifetime: rustc's unsize_ptr
+                               ;; keeps the old metadata when the principal is the same)
+                               (and (.startsWith ^String kind "PointerCoercion(Unsize") (not (some #{:vtable} r))
+                                    (let [dyn-text (fn [t] (let [p (case (ty-kind t)
+                                                                     ("ref" "ptr") (pointee-type t)
+                                                                     "adt" (let [a (first (nth (ty-struct t) 3))] (when (and (seq? a) (= "ty" (name (first a)))) a))
+                                                                     nil)]
+                                                             (when (and p (str/includes? (str (second p)) "dyn "))
+                                                               (-> (str (second p)) (str/replace #"^\((.*)\)$" "$1") (str/replace #" \+ '[A-Za-z_]+" "")))))
+                                          a (dyn-text (ty-of o)) b (dyn-text t)]
+                                      (and a (= a b))))
+                               (operand! bb o)
                                (and (.startsWith ^String kind "PointerCoercion(Unsize") (some #{:vtable} r))
                                (let [v (operand! bb o)
                                      vt (second (drop-while #(not= :vtable %) r))]
@@ -1253,6 +1293,9 @@
                                             (= (map :imm (take 2 (:pair fl))) (map :imm (take 2 (:pair tl))))) v
                                        (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :ptr (:prim (:scalar fl))) (= :int (:prim (:scalar tl))))
                                        (let [r (fresh!)] (emit! bb (list '= r (list 'ptrtoint 'ptr (:v v) (symbol (:imm (:scalar tl)))))) {:ty (:imm (:scalar tl)) :v r})
+                                       ;; RF13: a memory value read as a scalar or a pair of the target type (OperandValue::Ref loaded)
+                                       (and (= :memory (:kind fl)) (#{:scalar :pair} (:kind tl)) (= (:size fl) (:size tl)) (:ref v))
+                                       (load-place! bb (assoc (:ref v) :ly tl))
                                        (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :int (:prim (:scalar fl))) (= :ptr (:prim (:scalar tl))))
                                        (if (number? (:v v))
                                          ;; a constant expression, not an instruction
@@ -1331,19 +1374,54 @@
                                           pl (place-of! bb p)
                                           v (operand! bb (nth r 2))]
                                       (store-val! bb {:ptr (:ptr pl) :align (:align pl) :ly fl} v))
-                                    ;; [x; N]: a memset for a zero or a byte element (the loop for the rest is not taken)
+                                    ;; RF13: a transmute between memory layouts of one size into a memory place (codegen_transmute's
+                                    ;; OperandValue::Ref: the bytes copied)
+                                    (and (= "cast" (name (first r))) (#{"Transmute" "BoxDerefTransmute"} (second r)) (not ssa-dest) (= :memory (:kind dly))
+                                         (= :memory (:kind (layout lt (ty-of (nth r 2))))) (= (:size dly) (:size (layout lt (ty-of (nth r 2))))))
+                                    (let [pl (place-of! bb p)
+                                          v (operand! bb (nth r 2))]
+                                      (memcpy! bb pl (or (:ref v) (unsupported "transmute of a memory value not in a place")) (:size dly)))
+                                    ;; [x; N] (rvalue.rs' Rvalue::Repeat): a memset when the element is an integer constant whose bytes are
+                                    ;; all one byte, or a byte (i8, a bool) value; else builder.rs' write_operand_repeatedly, the loop
+                                    ;; repeat_loop_header / repeat_loop_body / repeat_loop_next storing the element at each index, the MIR
+                                    ;; block's later code continued in repeat_loop_next
                                     (= "repeat" (name (first r)))
                                     (let [n (Long/parseLong (str (nth r 2)))]
                                       (when-not (or (zst? dly) (zero? n))
                                         (let [pl (place-of! bb p)
                                               v (operand! bb (second r))
-                                              zero? (and v (or (= 0 (:v v)) (= 'false (:v v))))
+                                              _ (when-not v (unsupported "repeat of a zero-sized element"))
+                                              same-byte (fn [x bits]
+                                                          (when (and (integer? x) (pos? bits) (zero? (mod bits 8)))
+                                                            (let [u (mod (bigint x) (reduce * 1N (repeat bits 2N)))
+                                                                  b0 (mod u 256)]
+                                                              (when (every? #(= b0 (mod (quot u (reduce * 1N (repeat (* 8 %) 256N))) 256)) (range (quot bits 8)))
+                                                                (long b0)))))
+                                              fill (cond (and (string? (:ty v)) (= 'true (:v v))) 1
+                                                         (and (string? (:ty v)) (= 'false (:v v))) 0
+                                                         (= "i1" (:ty v)) (let [z (fresh!)] (emit! bb (list '= z (list 'zext 'i1 (:v v) 'i8))) z)
+                                                         (= "i8" (:ty v)) (if (integer? (:v v)) (long (mod (bigint (:v v)) 256)) (:v v))
+                                                         (and (string? (:ty v)) (re-matches #"i\d+" (:ty v)))
+                                                         (same-byte (:v v) (Long/parseLong (subs (:ty v) 1)))
+                                                         :else nil)
                                               nm (symbol "g" "llvm.memset.p0.i64")]
-                                          (when-not v (unsupported "repeat of a zero-sized element"))
-                                          (when-not (or zero? (= "i8" (:ty v)) (= "i1" (:ty v))) (unsupported "repeat loop"))
-                                          (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
-                                          (let [fill (cond zero? 0 (= 'true (:v v)) 1 (= "i1" (:ty v)) (let [z (fresh!)] (emit! bb (list '= z (list 'zext 'i1 (:v v) 'i8))) z) :else (:v v))]
-                                            (emit! bb (list 'call 'void nm [['ptr (list :align (:align pl)) (:ptr pl)] ['i8 fill] ['i64 (:size dly)] ['i1 'false]]))))))
+                                          (if (some? fill)
+                                            (do (declare! gl nm 'void [['ptr] ['i8] ['i64] ['i1]])
+                                                (emit! bb (list 'call 'void nm [['ptr (list :align (:align pl)) (:ptr pl)] ['i8 fill] ['i64 (:size dly)] ['i1 'false]])))
+                                            (let [el (layout lt (second (ty-struct (place-type body p))))
+                                                  cur (get (:redir @st) bb bb)
+                                                  hdr (new-block! "repeat_loop_header") bdy (new-block! "repeat_loop_body") nxt (new-block! "repeat_loop_next")
+                                                  i (fresh!) k (fresh!) off (fresh!) ep (fresh!) nx (fresh!)]
+                                              (emit! bb (list 'br (symbol (str "%" hdr))))
+                                              (emit! hdr (list '= i (list 'phi 'i64 [0 (symbol (str "%" cur))] [nx (symbol (str "%" bdy))])))
+                                              (emit! hdr (list '= k (list 'icmp :ult 'i64 i n)))
+                                              (emit! hdr (list 'br 'i1 k (symbol (str "%" bdy)) (symbol (str "%" nxt))))
+                                              (emit! bdy (list '= off (list 'mul :nuw 'i64 i (:size el))))
+                                              (emit! bdy (list '= ep (list 'getelementptr :inbounds 'i8 ['ptr (:ptr pl)] ['i64 off])))
+                                              (store-val! bdy {:ptr ep :align (restrict-align (:align pl) (:size el)) :ly el} v)
+                                              (emit! bdy (list '= nx (list 'add :nuw 'i64 i 1)))
+                                              (emit! bdy (list 'br (symbol (str "%" hdr))))
+                                              (vswap! st assoc-in [:redir bb] nxt))))))
                                     ssa-dest (when-let [v (rvalue! bb r dly)] (assign! bb p v))
                                     ;; rustc codegens the destination place before the rvalue
                                     :else (let [pl (if (zst? dly) nil (place-of! bb p))
@@ -1574,7 +1652,7 @@
                         "call" (let [[_ f args dest target unwind callee-info0 fn-loc scope] t
                                      ci0 (when (and (seq? callee-info0) (map? (second callee-info0))) (second callee-info0))
                                      ;; the intrinsics rustc's LLVM backend leaves to their fallback bodies are calls of that instance
-                                     fb (when (and (= "intrinsic" (:kind ci0)) (#{"rotate_left" "rotate_right"} (:intrinsic ci0)))
+                                     fb (when (and (= "intrinsic" (:kind ci0)) (#{"rotate_left" "rotate_right" "type_id_eq"} (:intrinsic ci0)))
                                           (fallback-symbol @gl (:intrinsic ci0) (ty-of (first args))))
                                      callee-info (if fb (list 'callee (assoc ci0 :kind "item" :symbol fb)) callee-info0)
                                      ci (when (and (seq? callee-info) (map? (second callee-info))) (second callee-info))
@@ -1639,6 +1717,35 @@
                                                                  :else (let [r (fresh!)] (emit! bb (list '= r (list 'trunc (symbol (:ty sh)) (:v sh) ity))) {:ty (:imm sc) :v r})))]
                                                  (call! (if (= intrinsic "rotate_left") "fshl" "fshr") [[ity (:v x)] [ity (:v x)] [ity (:v shc)]])))]
                                        (assign! bb dest v)
+                                       (when target (br-or-merge bb t target)))
+                                     ;; RF13: catch_unwind (rustc_codegen_llvm's codegen_gnu_try): a call of the module's internal
+                                     ;; __rust_try (the try function invoked on the data, its unwind caught by a catch-all landing pad
+                                     ;; that calls the catch function: i1 true), defined once in the module
+                                     "catch_unwind"
+                                     (let [[f d c] (map #(operand! bb %) (take 3 args))
+                                           tr (symbol "g" "__rust_try") r (fresh!)]
+                                       (when-not (get-in @gl [:statics tr])
+                                         (vswap! gl assoc-in [:statics tr]
+                                                 (list 'llvm/define tr 'i1 [['ptr '%0] ['ptr '%1] ['ptr '%2]]
+                                                       :linkage :internal :ret-attrs [:zeroext] :unnamed-addr :unnamed_addr
+                                                       :personality ['ptr (symbol "g" "rust_eh_personality")]
+                                                       :body [(list 'block '%entry-block (list 'invoke 'void '%0 [['ptr '%1]] :to '%then :unwind '%catch))
+                                                              (list 'block '%then '(ret i1 false))
+                                                              (list 'block '%catch
+                                                                    (list '= '%3 (list 'landingpad (list 'struct 'ptr 'i32) (list 'catch 'ptr 'null)))
+                                                                    (list '= '%4 (list 'extractvalue [(list 'struct 'ptr 'i32) '%3] 0))
+                                                                    (list 'call 'void '%2 [['ptr '%1] ['ptr '%4]])
+                                                                    '(ret i1 true))])))
+                                       (emit! bb (list '= r (list 'call 'i1 tr [['ptr (:v f)] ['ptr (:v d)] ['ptr (:v c)]])))
+                                       (assign! bb dest (if (= "i1" (:imm (:scalar (layout lt (place-type body dest)))))
+                                                          {:ty "i1" :v r}
+                                                          (let [z (fresh!)] (emit! bb (list '= z (list 'zext 'i1 r 'i32))) {:ty "i32" :v z})))
+                                       (when target (br-or-merge bb t target)))
+                                     ;; RF13: exact_div (intrinsic.rs: `sdiv exact` / `udiv exact` by the operands' signedness)
+                                     "exact_div"
+                                     (let [sc (scalar-of-op (first args)) x (operand! bb (first args)) y (operand! bb (second args)) r (fresh!)]
+                                       (emit! bb (list '= r (list (if (:signed sc) 'sdiv 'udiv) :exact (symbol (:imm sc)) (:v x) (:v y))))
+                                       (assign! bb dest {:ty (:imm sc) :v r})
                                        (when target (br-or-merge bb t target)))
                                      ("ptr_offset_from_unsigned" "ptr_offset_from")
                                      (let [a (operand! bb (first args)) b (operand! bb (second args))
@@ -1732,6 +1839,24 @@
                                        (emit! bb (list 'store [(symbol (:ty v)) (:v v)] ['ptr (:v d)] :volatile true
                                                        :align (if (= intrinsic "unaligned_volatile_store") 1 (:align el))))
                                        (when target (br-or-merge bb t target)))
+                                     ;; typed_swap_nonoverlapping at -O0 (mir/intrinsic.rs: not optimizing, the fallback body is not used):
+                                     ;; builder.rs' typed_place_swap: the left value loaded (a memory value copied to an alloca first),
+                                     ;; the right copied over the left, the value stored into the right
+                                     "typed_swap_nonoverlapping"
+                                     (let [x (operand! bb (first args)) y (operand! bb (second args))
+                                           el (layout lt (second (ty-struct (ty-of (first args)))))
+                                           xp {:ptr (:v x) :align (:align el) :ly el} yp {:ptr (:v y) :align (:align el) :ly el}]
+                                       (case (:kind el)
+                                         :zst nil
+                                         (:scalar :pair) (let [tmp (load-place! bb xp)]
+                                                           (store-val! bb xp (load-place! bb yp))
+                                                           (store-val! bb yp tmp))
+                                         :memory (let [sc (scratch! (:size el) (:align el)) tp {:ptr sc :align (:align el) :ly el}]
+                                                   (memcpy! bb tp xp (:size el))
+                                                   (memcpy! bb xp yp (:size el))
+                                                   (memcpy! bb yp tp (:size el)))
+                                         (unsupported "typed_swap_nonoverlapping of this layout"))
+                                       (when target (br-or-merge bb t target)))
                                      ("volatile_load" "unaligned_volatile_load")
                                      (let [s (operand! bb (first args))
                                            el (layout lt (second (ty-struct (ty-of (first args)))))
@@ -1769,16 +1894,49 @@
                                            (emit! bb (list '= r (list 'call ft iname [[ft (:v x)] [ft (:v y)]])))
                                            (assign! bb dest {:ty (name ft) :v r})
                                            (when target (br-or-merge bb t target)))
-                                         (unsupported (str "intrinsic " intrinsic)))))
-                                 (let [callee (if (and (not= "const" (name (first f))) (not (and ci (= "item" (:kind ci)))))
-                                                (let [v (operand! bb f)] (:v v))
-                                                (call-symbol f callee-info))
+                                         ;; fmaf32 / fmaf64 (and fmuladd): LLVM's llvm.fma / llvm.fmuladd of the three operands
+                                         (if-let [[_ fn* w] (re-matches #"(fma|fmuladd)f(32|64)" intrinsic)]
+                                           (let [ft (if (= w "32") 'float 'double)
+                                                 iname (symbol "g" (str "llvm." fn* ".f" w))
+                                                 [x y z] (map #(operand! bb %) (take 3 args)) r (fresh!)]
+                                             (declare! gl iname ft [[ft] [ft] [ft]])
+                                             (emit! bb (list '= r (list 'call ft iname [[ft (:v x)] [ft (:v y)] [ft (:v z)]])))
+                                             (assign! bb dest {:ty (name ft) :v r})
+                                             (when target (br-or-merge bb t target)))
+                                         ;; powif32 / powif64: LLVM's llvm.powi.f32.i32 / llvm.powi.f64.i32 (intrinsic.rs' simple_intrinsic)
+                                         (if-let [[_ w] (re-matches #"powif(32|64)" intrinsic)]
+                                           (let [ft (if (= w "32") 'float 'double)
+                                                 iname (symbol "g" (str "llvm.powi.f" w ".i32"))
+                                                 x (operand! bb (first args)) y (operand! bb (second args)) r (fresh!)]
+                                             (declare! gl iname ft [[ft] ['i32]])
+                                             (emit! bb (list '= r (list 'call ft iname [[ft (:v x)] ['i32 (:v y)]])))
+                                             (assign! bb dest {:ty (name ft) :v r})
+                                             (when target (br-or-merge bb t target)))
+                                           (unsupported (str "intrinsic " intrinsic)))))))
+                                 (let [;; RFP44 (a): a virtual call (InstanceKind::Virtual): the receiver's data pointer is the first argument,
+                                       ;; the function its vtable's slot (meth.rs' VirtualIndex::get_fn: a load at slot x 8 bytes)
+                                       virt (when (= "virtual" (:kind ci))
+                                              (let [slot (or (:slot ci) (unsupported "virtual call without a vtable slot"))
+                                                    rv (operand! bb (first args))
+                                                    [dp vp] (or (:pair rv) (unsupported "virtual call on a receiver that is not a pair"))
+                                                    g (fresh!) fp (fresh!)]
+                                                (if (zero? slot)
+                                                  (emit! bb (list '= fp (list 'load 'ptr ['ptr (:v vp)] :align 8)))
+                                                  (do (emit! bb (list '= g (list 'getelementptr :inbounds 'i8 ['ptr (:v vp)] ['i64 (* 8 slot)])))
+                                                      (emit! bb (list '= fp (list 'load 'ptr ['ptr g] :align 8)))))
+                                                {:fn fp :data dp}))
+                                     callee (cond virt (:fn virt)
+                                                  (and (not= "const" (name (first f))) (not (and ci (= "item" (:kind ci)))))
+                                                  (let [v (operand! bb f)] (:v v))
+                                                  :else (call-symbol f callee-info))
                                      can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)
                                      dl0 (let [d (nth lay (place-local dest))] (if (seq (place-projs dest)) (layout lt (place-type body dest)) d))
                                      sret-tmp (when (and (indirect? dl0) (= :pair (:kind dl0)) (empty? (place-projs dest)) (not (contains? mem (place-local dest))))
                                                 (let [tmp (scratch! (:size dl0) (:align dl0))] {:ptr tmp :align (:align dl0) :ly dl0}))
                                      sret-pl (when (indirect? dl0) (or sret-tmp (place-of! bb dest)))
-                                     argfs (vec (mapcat #(arg-forms bb %) args))
+                                     argfs (if virt
+                                             (vec (cons ['ptr (:v (:data virt))] (mapcat #(arg-forms bb %) (rest args))))
+                                             (vec (mapcat #(arg-forms bb %) args)))
                                      argfs (if sret-pl (into [['ptr (list :sret (list 'array (:size dl0) 'i8)) (list :align (:align dl0)) (:ptr sret-pl)]] argfs) argfs)
                                      argfs (if (and (seq? callee-info) (map? (second callee-info)) (:track-caller (second callee-info)))
                                              (conj argfs ['ptr (list :align 8) (caller-location! fn-loc scope)])
