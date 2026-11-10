@@ -1,0 +1,45 @@
+(ns asm.object-judge
+  "bin/repr-asm object-check's judgment (doc/asm/AMD64-SURVEY.md §7.3, §8.2, AX4): a run's rows (WORK/obj.tsv: NAME RESULT
+  DETAIL, RESULT :pass when Arbace's object is llvm-mc's byte for byte, :canonical when the sections' bytes, the symbols and
+  the relocations are, else the part that differs or the class of what was not assembled) against the record
+  test/asm/object-results-amd64.edn ([ID RESULT DETAIL], ID CORPUS/NAME): every file of the run recorded and every recorded
+  file of the run's corpora run, every recorded :pass still a :pass, no failure (:sections, :symbols, :relocs, :error,
+  :no-record, :crash), every other result a class of test/asm/divergences-object.edn; with RECORD the corpora's rows are
+  rewritten from the run (refused when it holds a failure)."
+  (:require [arbace.string :as str]))
+
+(def header
+  (str ";; repr/asm's object check (bin/repr-asm object-check; doc/asm/AMD64-SURVEY.md §7.3, AX4): each file of the corpora assembled\n"
+       ";; into an ELF64 object by Arbace (arbace.asm.amd64.obj) and judged against llvm-mc 23.1.5's object recorded in\n"
+       ";; test/asm/records/: :pass byte for byte, else its class (test/asm/divergences-object.edn). Written by\n"
+       ";; `bin/repr-asm object-check --record`. Read with the Clojure reader.\n"))
+
+(def failing #{:sections :symbols :relocs :error :no-record :unsupported-crash})
+
+(defn main [results works classes-path record]
+  (let [run (vec (for [w (str/split works #" ") :let [corpus (.getName (java.io.File. ^String w))]
+                       l (str/split-lines (slurp (str w "/obj.tsv"))) :when (seq l)
+                       :let [[n c d] (str/split l #"\t" -1)]]
+                   [(str corpus "/" n) (keyword c) (or d "")]))
+        corpora (set (map #(first (str/split (first %) #"/")) run))
+        old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
+        in-run? (fn [[id]] (contains? corpora (first (str/split id #"/"))))
+        oldm (into {} (map (fn [[i c]] [i c]) (filter in-run? old)))
+        classes (set (map :id (read-string (slurp classes-path))))
+        problems (atom [])]
+    (println (str "repr-asm object-check: " (count (filter #(= :pass (second %)) run)) " of " (count run)
+                  " objects equal to llvm-mc's byte for byte; " (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))))
+    (doseq [[i c d] run]
+      (cond (failing c) (swap! problems conj (str "failing: " i " " (name c) " " d))
+            (and (not= c :pass) (not (classes c))) (swap! problems conj (str "unclassed: " i " " (name c) " " d))))
+    (if (and (seq record) (empty? @problems))
+      (let [rows (sort-by first (concat (remove in-run? old) run))]
+        (spit results (str header "[\n" (apply str (map (fn [r] (str (pr-str r) "\n")) rows)) "]\n"))
+        (println (str "repr-asm: recorded " (count run) " rows into " results)))
+      (do (doseq [[i c] run :let [o (oldm i)]]
+            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
+                  (and (= o :pass) (not= c :pass)) (swap! problems conj (str i ": " (name c) ", recorded :pass"))))
+          (doseq [[i] (filter in-run? old) :when (not (some #(= i (first %)) run))] (swap! problems conj (str "recorded, not run: " i)))))
+    (doseq [p @problems] (println (str "FAIL: " p)))
+    (when (empty? @problems) (println "repr-asm object-check: ok"))
+    (when (seq @problems) (System/exit 1))))

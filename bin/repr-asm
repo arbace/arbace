@@ -53,6 +53,20 @@
 #                                                    cross-syntax judge: each AT&T instruction printed in Intel and read back to the same
 #                                                    machine instruction (the rows' :cross, classes test/asm/divergences-cross.edn,
 #                                                    controls test/asm/controls-cross.txt)
+#   bin/repr-asm object FILE.s OUT.o                 amd64's object assembler (AX4): FILE assembled into an ELF64 relocatable object
+#                                                    as llvm-mc -filetype=obj writes it (arbace.asm.amd64.obj over the encoder,
+#                                                    arbace.asm.elf's writer; no llvm-mc)
+#   bin/repr-asm object-dump OBJ                     an ELF64 object read back by Arbace's reader (arbace.asm.elf): its sections'
+#                                                    bytes, symbols and relocations, a line each
+#   bin/repr-asm object-check [CORPUS]               each file of the corpus (default musl) assembled and judged against llvm-mc
+#                                                    23.1.5's object recorded in test/asm/records/obj-CORPUS-llvm-mc-23.1.5.edn
+#                                                    (pinned by its .sha256; never runs llvm-mc): byte for byte, else its sections,
+#                                                    symbols and relocations, against test/asm/object-results-amd64.edn, every
+#                                                    non-pass in a class of test/asm/divergences-object.edn, the negative controls
+#                                                    of test/asm/controls-object.txt failing; --record rewrites the results
+#   bin/repr-asm object-record [CORPUS]              the oracle tier's, by hand: the record made by the host's llvm-mc 23.1.5
+#                                                    (REPR_ASM_MC; -triple x86_64-linux-musl -filetype=obj), each object twice
+#                                                    and compared (verify), the pin rewritten
 set -euo pipefail
 arch=amd64 args=()
 while [ $# -gt 0 ]; do case $1 in --arch) arch=$2; shift 2 ;; *) args+=("$1"); shift ;; esac; done
@@ -151,6 +165,17 @@ make_list() {
     fi
   done < "$TMPDIR/asm-files.txt"
   echo "repr-asm: $id: $(wc -l < "$lists/$id.list") files"
+}
+
+# obj_list ID: the object check's list: a corpus of test/asm/corpora.edn, or `synthetic`, Arbace's own object tests test/asm/obj/*.s
+obj_list() {
+  if [ "$1" = synthetic ]; then
+    mkdir -p "$lists"; : > "$lists/synthetic.list"
+    for f in "$root"/test/asm/obj/*.s; do n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/synthetic.list"; done
+    echo "repr-asm: synthetic: $(wc -l < "$lists/synthetic.list") files"
+  else
+    make_list "$1"
+  fi
 }
 
 # rows WORK ID: the check's rows [ID RESULT REASON], ID CORPUS/NAME
@@ -320,6 +345,57 @@ case ${1:-} in
       fi
     done
     echo "repr-asm print-oracle: $files files, $same with llvm-mc's very lines; $lines lines printed, $extra of them not llvm-mc's (diff $o/NAME.llvm $o/NAME.ours)" ;;
+  object) shift; export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.obj object "$@" ;;
+  object-dump) shift; arbace_tool -m arbace.asm.amd64.obj dump "$@" ;;
+  object-record)
+    shift; id=musl; [ $# -gt 0 ] && [ "${1#--}" = "$1" ] && id=$1
+    mc=${REPR_ASM_MC:-/usr/lib/llvm23/bin/llvm-mc}
+    "$mc" --version | grep -q 'LLVM version 23.1.5' || { echo "repr-asm object-record: $mc is not llvm-mc 23.1.5" >&2; exit 1; }
+    obj_list "$id"
+    rec=$root/test/asm/records/obj-$id-llvm-mc-23.1.5.edn o=$root/.tmp/repr-asm/obj-record/$id; rm -rf "$o"; mkdir -p "$o" "${rec%/*}"
+    {
+      echo ";; llvm-mc 23.1.5's objects of the corpus $id (the oracle tier's, by hand: bin/repr-asm object-record $id), each file"
+      echo ";; assembled by \`llvm-mc -triple x86_64-linux-musl -filetype=obj\`, twice, the two byte for byte; the object as hex"
+      echo ";; with its SHA-256. Read by bin/repr-asm object-check (no llvm-mc); the file is pinned by its .sha256. Read with the"
+      echo ";; Clojure reader."
+      echo "{:tool \"llvm-mc 23.1.5\" :triple \"x86_64-linux-musl\" :corpus :$id"
+      echo " :objects"
+      echo " {"
+      while IFS=$'\t' read -r n p _; do
+        "$mc" -triple x86_64-linux-musl -filetype=obj "$p" -o "$o/$n.o" 2>"$o/$n.err" || { echo "repr-asm object-record: llvm-mc refuses $n" >&2; continue; }
+        "$mc" -triple x86_64-linux-musl -filetype=obj "$p" -o "$o/$n.2.o" 2>"$o/$n.err"
+        cmp -s "$o/$n.o" "$o/$n.2.o" || { echo "repr-asm object-record: $n differs between two runs" >&2; exit 1; }
+        printf '  "%s" {:sha256 "%s" :bytes %s\n   :hex "%s"}\n' "$n" "$(sha256sum "$o/$n.o" | cut -d' ' -f1)" "$(stat -c %s "$o/$n.o")" "$(od -An -v -tx1 "$o/$n.o" | tr -d ' \n')"
+      done < "$lists/$id.list"
+      echo " }}"
+    } > "$rec"
+    (cd "$root" && sha256sum "test/asm/records/${rec##*/}") > "${rec%.edn}.sha256"
+    echo "repr-asm object-record: $(grep -c ':sha256' "$rec") objects into ${rec#$root/}, pinned" ;;
+  object-check)
+    shift; record=; ids=()
+    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    [ ${#ids[@]} -gt 0 ] || ids=(musl synthetic)
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    fails=0 works=()
+    for id in "${ids[@]}"; do
+      rec=$root/test/asm/records/obj-$id-llvm-mc-23.1.5.edn
+      (cd "$root" && sha256sum -c --quiet "${rec%.edn}.sha256") || { echo "FAIL: repr-asm object-check: ${rec#$root/} is not its pin" >&2; exit 1; }
+      obj_list "$id"
+      work=$root/.tmp/repr-asm/obj/$id; rm -rf "$work"; mkdir -p "$work"
+      arbace_tool -m arbace.asm.amd64.obj check "$lists/$id.list" "$work" "$rec" || fails=$((fails + 1))
+      works+=("$work")
+      # the negative controls: a file's object judged against another file's record must differ
+      while read -r cid subj ref; do
+        case $cid in ''|'#'*) continue ;; esac
+        [ "${subj%%/*}" = "$id" ] || continue
+        sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/$id.list")
+        v=$(arbace_tool -m arbace.asm.amd64.obj control "$sp" "${ref#*/}" "$rec" | tail -1)
+        if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+      done < "$root/test/asm/controls-object.txt"
+    done
+    judge=(-e "(do (load-file \"$root/test/asm/object_judge.ae\") nil)" -e "(asm.object-judge/main \"$root/test/asm/object-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-object.edn\" \"${record:-}\")")
+    arbace_tool "${judge[@]}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
   divergences)
     arbace_tool -e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"${2:-$results}\" \"$classes\" \"\" \"\")" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2; exit 2 ;;

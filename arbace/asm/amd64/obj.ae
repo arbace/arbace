@@ -1,0 +1,754 @@
+(ns arbace.asm.amd64.obj
+  "amd64's object assembler (doc/asm/AMD64-SURVEY.md §7.3, AX4): a file's forms (AX1's reading) assembled into an ELF64
+  relocatable object as LLVM's MC writes it with llvm-mc -filetype=obj, after llvm-project 23.1.5's MCObjectStreamer.cpp and
+  MCELFStreamer.cpp (sections, fragments, labels, symbol attributes, common symbols), ELFAsmParser.cpp (the section directive
+  and its defaults), AsmParser.cpp (the data, fill and alignment directives, assignments), MCAssembler.cpp (layout, the
+  relaxation to a fixed point with its stretch, the fixups evaluated), X86AsmBackend.cpp (the relaxable instructions, the
+  PC-relative adjustment, the NOP padding), X86EncodingOptimizationForImmediate.def (the long immediate forms),
+  X86ELFObjectWriter.cpp (the relocation types) and ELFObjectWriter.cpp (the symbol table's membership and bindings, the
+  relocations against section symbols), Apache-2.0 WITH LLVM-exception, written again in Arbace. The instructions are
+  arbace.asm.amd64.asm's (AX2's matcher and encoder, its fixups with their kinds); the file layout is arbace.asm.elf's.
+
+  `assemble` gives {:bytes BYTES} or {:unsupported CLASS :what TEXT} (what this slice does not assemble yet: :cfi, a
+  directive, an instruction's class) or {:error MESSAGE}."
+  (:require [arbace.repr.asm :as asm]
+            [arbace.asm.amd64.asm :as x]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- unsupported [cls what] (throw (ex-info (str what) {:obj/unsupported cls})))
+(defn- fail [msg] (throw (ex-info (str msg) {:obj/error msg})))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the relaxable instructions (X86AsmBackend::mayNeedRelaxation, getRelaxedOpcode; X86EncodingOptimizationForImmediate.def)
+
+(def ^:private long-imm
+  (let [pairs (fn [sfx & ps] (for [[l s] (partition 2 ps) x sfx] [(str s x) (str l x)]))
+        five ["" "_EVEX" "_NF" "_ND" "_NF_ND"]]
+    (into {}
+          (concat
+           (pairs [""] "CMP16mi" "CMP16mi8" "CMP16ri" "CMP16ri8" "CMP32mi" "CMP32mi8" "CMP32ri" "CMP32ri8" "CMP64mi32" "CMP64mi8"
+                  "CMP64ri32" "CMP64ri8" "CCMP16mi" "CCMP16mi8" "CCMP16ri" "CCMP16ri8" "CCMP32mi" "CCMP32mi8" "CCMP32ri" "CCMP32ri8"
+                  "CCMP64mi32" "CCMP64mi8" "CCMP64ri32" "CCMP64ri8" "PUSH16i" "PUSH16i8" "PUSH32i" "PUSH32i8" "PUSH64i32" "PUSH64i8")
+           (apply pairs five (mapcat (fn [op] [(str op "16mi") (str op "16mi8") (str op "16ri") (str op "16ri8") (str op "32mi") (str op "32mi8")
+                                               (str op "32ri") (str op "32ri8") (str op "64mi32") (str op "64mi8") (str op "64ri32") (str op "64ri8")])
+                                     ["ADD" "AND" "OR" "SUB" "XOR"]))
+           (pairs ["" "_EVEX" "_NF"] "IMUL16rmi" "IMUL16rmi8" "IMUL16rri" "IMUL16rri8" "IMUL32rmi" "IMUL32rmi8" "IMUL32rri" "IMUL32rri8"
+                  "IMUL64rmi32" "IMUL64rmi8" "IMUL64rri32" "IMUL64rri8")
+           (apply pairs ["" "_EVEX" "_ND"] (mapcat (fn [op] [(str op "16mi") (str op "16mi8") (str op "16ri") (str op "16ri8") (str op "32mi") (str op "32mi8")
+                                                             (str op "32ri") (str op "32ri8") (str op "64mi32") (str op "64mi8") (str op "64ri32") (str op "64ri8")])
+                                                   ["ADC" "SBB"]))))))
+
+(defn- relaxed-opcode [^String inst ^long mode]
+  (case inst
+    "JCC_1" (if (= mode 16) "JCC_2" "JCC_4")
+    "JMP_1" (if (= mode 16) "JMP_2" "JMP_4")
+    (get long-imm inst)))
+
+;; the relaxed branches' encodings: JMP_2, JMP_4, JCC_2, JCC_4 are isCodeGenOnly or not matchable, so the table (the matchables'
+;; instructions) lacks them; their fields after X86InstrControl.td
+(def ^:private relaxed-insns
+  (let [b {:adsize "AdSizeX" :defs 0 :enc "EncNormal" :explicit "NoExplicitOpPrefix" :prefix "NoPrfx"}]
+    {"JMP_2" (assoc b :form "RawFrm" :imm "Imm16PCRel" :map "OB" :opcode 0xE9 :ops [["dst" "brtarget16" 1]] :opsize "OpSize16")
+     "JMP_4" (assoc b :form "RawFrm" :imm "Imm32PCRel" :map "OB" :opcode 0xE9 :ops [["dst" "brtarget32" 1]] :opsize "OpSize32")
+     "JCC_2" (assoc b :form "AddCCFrm" :imm "Imm16PCRel" :map "TB" :opcode 0x80 :ops [["dst" "brtarget16" 1] ["cond" "ccode" 1]] :opsize "OpSize16")
+     "JCC_4" (assoc b :form "AddCCFrm" :imm "Imm32PCRel" :map "TB" :opcode 0x80 :ops [["dst" "brtarget32" 1] ["cond" "ccode" 1]] :opsize "OpSize32")}))
+
+(def ^:private obj-tables (atom {}))
+(defn- obj-table []
+  (let [t (x/table)]
+    (or (get @obj-tables t) (let [u (update t :insns merge relaxed-insns)] (reset! obj-tables {t u}) u))))
+
+(defn- may-relax? [^String inst mi]
+  (or (#{"JCC_1" "JMP_1"} inst)
+      (and (long-imm inst)
+           (let [skip (if (.startsWith inst "CCMP") 2 0)] (some? (:expr (nth mi (- (count mi) 1 skip))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the state: sections of chunks (a data chunk, a relaxable instruction, an alignment), symbols
+
+(defn- new-ctx []
+  {:sections (java.util.ArrayList.)       ; atoms {:name :type :flags :entsize :align :chunks ArrayList :index :group :comdat}
+   :by-key (java.util.HashMap.)
+   :symbols (java.util.LinkedHashMap.)    ; name -> atom
+   :order (java.util.ArrayList.)          ; registration order (names)
+   :registered (java.util.HashSet.)
+   :cur (volatile! nil) :prev (volatile! nil) :stack (volatile! [])
+   :locals (java.util.HashMap.)           ; local label N -> instances defined
+   :tmp (volatile! 0)
+   :syms (volatile! {})                   ; assignments for the matcher (name -> expression)
+   :files (java.util.ArrayList.)
+   :mode (volatile! 64) :intel (volatile! false)})
+
+(defn- sym-name ^String [s]
+  (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s)) :else (fail (str "not a symbol: " (pr-str s)))))
+
+(defn- symbol! [ctx ^String n]
+  (let [^java.util.LinkedHashMap m (:symbols ctx)]
+    (or (.get m n)
+        (let [a (atom {:name n :type 0 :vis 0 :temp (.startsWith n ".L")})] (.put m n a) a))))
+
+(defn- register! [ctx ^String n]
+  (symbol! ctx n)
+  (when (.add ^java.util.HashSet (:registered ctx) n) (.add ^java.util.ArrayList (:order ctx) n)))
+
+(defn- default-flags [^String nm]
+  (let [pre (fn [^String p] (or (= nm p) (.startsWith nm (str p "."))))]
+    (cond (or (pre ".rodata") (= nm ".rodata1")) elf/SHF_ALLOC
+          (or (= nm ".fini") (= nm ".init") (pre ".text")) (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR)
+          (or (pre ".data") (= nm ".data1") (pre ".bss") (pre ".init_array") (pre ".fini_array") (pre ".preinit_array"))
+          (bit-or elf/SHF_ALLOC elf/SHF_WRITE)
+          (or (pre ".tdata") (pre ".tbss")) (bit-or elf/SHF_ALLOC elf/SHF_WRITE elf/SHF_TLS)
+          :else 0)))
+
+(defn- default-type [^String nm]
+  (let [pre (fn [^String p] (or (= nm p) (.startsWith nm (str p "."))))]
+    (cond (.startsWith nm ".note") 7 (pre ".init_array") 14 (pre ".bss") elf/SHT_NOBITS (pre ".tbss") elf/SHT_NOBITS
+          (pre ".fini_array") 15 (pre ".preinit_array") 16 :else elf/SHT_PROGBITS)))
+
+(defn- new-chunk [kind m] (atom (assoc m :kind kind :offset 0)))
+(defn- data-chunk [] (new-chunk :data {:bytes (java.util.ArrayList.) :fixups (java.util.ArrayList.)}))
+
+(defn- add-chunk! [sec c]
+  (let [^java.util.ArrayList cs (:chunks @sec)]
+    (swap! c assoc :order (.size cs) :sec (:index @sec))
+    (.add cs c)
+    c))
+
+(defn- cur-sec [ctx] @(:cur ctx))
+
+(defn- cur-data! [ctx]
+  (let [sec (cur-sec ctx) ^java.util.ArrayList cs (:chunks @sec) l (when (pos? (.size cs)) (.get cs (dec (.size cs))))]
+    (if (and l (= :data (:kind @l))) l (add-chunk! sec (data-chunk)))))
+
+(defn- ensure-align! [sec ^long a] (swap! sec update :align #(max (long %) a)))
+
+(defn- switch! [ctx sec]
+  (vreset! (:prev ctx) (cur-sec ctx))
+  (vreset! (:cur ctx) sec))
+
+(defn- section! [ctx ^String nm type flags entsize group comdat]
+  (let [k [nm group]
+        ^java.util.HashMap by (:by-key ctx)
+        sec (or (.get by k)
+                (let [^java.util.ArrayList ss (:sections ctx)
+                      s (atom {:name nm :type type :flags flags :entsize (or entsize 0) :align 1 :chunks (java.util.ArrayList.)
+                               :index (long (.size ss)) :group group :comdat comdat})]
+                  (.put by k s) (.add ss s)
+                  (when group (register! ctx group))
+                  ;; the section's symbol (STT_SECTION, LOCAL), registered when the section first is
+                  (let [key (str "\u0000section:" (.size ss))]
+                    (register! ctx key)
+                    (swap! (symbol! ctx key) assoc :section-sym (:index @s) :temp false :bind elf/STB_LOCAL :type elf/STT_SECTION
+                           :chunk nil))
+                  (add-chunk! s (data-chunk))
+                  s))]
+    (switch! ctx sec)
+    sec))
+
+(defn- sec-sym-name [^long i] (str "\u0000section:" (inc i)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; expressions: the item's local labels and `.` made symbols, then MCValue's evaluation
+
+(defn- tmp! [ctx] (str ".Ltmp" (vswap! (:tmp ctx) inc) "\u0000"))
+
+(defn- label! [ctx ^String n]
+  (let [s (symbol! ctx n)]
+    (when (or (:chunk @s) (:var @s)) (fail (str "invalid symbol redefinition")))
+    (register! ctx n)
+    (let [c (cur-data! ctx)]
+      (swap! s assoc :chunk c :off (.size ^java.util.ArrayList (:bytes @c)))
+      (when (pos? (bit-and (long (:flags @(cur-sec ctx))) elf/SHF_TLS)) (swap! s assoc :type elf/STT_TLS)))
+    s))
+
+(defn- local-name [ctx n ^long k] (str ".Lloc" n "\u0000" k))
+
+(defn- resolve-expr
+  "The expression with `.` a temporary label at the current position and `1f`/`1b` their labels' symbols."
+  [ctx e]
+  (cond
+    (and (seq? e) (= 'asm/dot (first e))) (let [n (tmp! ctx)] (label! ctx n) (symbol n))
+    (and (seq? e) (= 'local (first e)))
+    (let [[_ n d] e k (long (or (.get ^java.util.HashMap (:locals ctx) n) 0))]
+      (symbol (local-name ctx n (if (= d :f) (inc k) k))))
+    (seq? e) (apply list (map #(resolve-expr ctx %) e))
+    (vector? e) (mapv #(resolve-expr ctx %) e)
+    (map? e) (into {} (map (fn [[k v]] [k (resolve-expr ctx v)]) e))
+    :else e))
+
+(defn- visit-syms!
+  "Registers the symbols an expression names, left to right (MCStreamer::visitUsedExpr)."
+  [ctx e]
+  (cond (symbol? e) (register! ctx (name e))
+        (and (seq? e) (= 'sym (first e))) (register! ctx (str (second e)))
+        (and (seq? e) (= 'at (first e))) (visit-syms! ctx (second e))
+        (seq? e) (doseq [a (rest e)] (visit-syms! ctx a))
+        :else nil))
+
+(defn- sym-offset
+  "[SECTION OFFSET] of a defined symbol (an alias followed), :abs VALUE for an absolute one, or nil when undefined."
+  [ctx s depth]
+  (when (> (long depth) 32) (fail "cyclic dependency"))
+  (let [m @s]
+    (cond (:section-sym m) [(:section-sym m) 0]
+          (:chunk m) (let [c @(:chunk m)] [(:sec c) (+ (long (:offset c)) (long (:off m)))])
+          (:common m) nil
+          (:var m) (let [v ((resolve 'arbace.asm.amd64.obj/value) ctx (:var m) (inc (long depth)))]
+                     (cond (and (nil? (:add v)) (nil? (:sub v))) [:abs (:c v)]
+                           (and (:add v) (nil? (:sub v))) (when-let [[sc o] (sym-offset ctx (:add v) (inc (long depth)))]
+                                                            (if (= sc :abs) [:abs (+ (long o) (long (:c v)))] [sc (+ (long o) (long (:c v)))]))
+                           :else nil))
+          :else nil)))
+
+(defn value
+  "MCValue of the expression: {:add SYMBOL-ATOM :sub SYMBOL-ATOM :c CONSTANT :spec SPECIFIER}, symbols assigned a constant
+  folded, a difference of two symbols defined in one section folded (the layout's offsets)."
+  [ctx e depth]
+  (let [cv (fn [v] (when (and (nil? (:add v)) (nil? (:sub v))) (:c v)))
+        k (fn [c] {:c c})]
+    (cond
+      (integer? e) (k (long e))
+      (or (symbol? e) (and (seq? e) (= 'sym (first e))))
+      (let [s (symbol! ctx (sym-name e)) m @s]
+        (if (and (:var m) (not (:chunk m)))
+          (let [v (value ctx (:var m) (inc (long depth)))]
+            ;; a variable equated to an expression with a symbol stays a reference to it (getBaseSymbol), an absolute one folds
+            (if (cv v) v (if (and (:add v) (nil? (:sub v)) (zero? (long (:c v)))) v {:add s :c 0})))
+          {:add s :c 0}))
+      (and (seq? e) (= 'at (first e)))
+      (assoc (value ctx (second e) depth) :spec (str/upper-case (str (nth e 2))))
+      (and (seq? e) (= 2 (count e)))
+      (let [v (value ctx (second e) depth) c (cv v)]
+        (case (first e)
+          + v
+          - (cond c (k (- (long c)))
+                  (and (:add v) (nil? (:sub v))) {:sub (:add v) :c (- (long (:c v)))}
+                  :else (unsupported :expression (pr-str e)))
+          (if c (k (case (first e) bnot (bit-not (long c)) lnot (if (zero? (long c)) 1 0))) (unsupported :expression (pr-str e)))))
+      (seq? e)
+      (let [[op a b] e va (value ctx a depth) vb (value ctx b depth) ca (cv va) cb (cv vb)]
+        (cond
+          (and ca cb (not (#{'+ '-} op)))
+          (k (long (or (x/const-value (list op ca cb) {}) (unsupported :expression (pr-str e)))))
+          (= op '+) (cond (and (:add va) (:add vb)) (unsupported :expression (pr-str e))
+                          (and (:sub va) (:sub vb)) (unsupported :expression (pr-str e))
+                          :else {:add (or (:add va) (:add vb)) :sub (or (:sub va) (:sub vb)) :c (+ (long (:c va)) (long (:c vb)))
+                                 :spec (or (:spec va) (:spec vb))})
+          (= op '-) (let [r {:add (:add va) :sub (:add vb) :c (- (long (:c va)) (long (:c vb))) :spec (:spec va)}]
+                      (when (or (:sub va) (:sub vb) (and (:add vb) (nil? (:add va)) false)) (unsupported :expression (pr-str e)))
+                      ;; A - B with both in one section: a constant at the layout
+                      (let [oa (when (:add r) (sym-offset ctx (:add r) depth)) ob (when (:sub r) (sym-offset ctx (:sub r) depth))]
+                        (cond (and oa ob (= (first oa) (first ob)) (not= :abs (first oa)))
+                              {:c (+ (long (:c r)) (- (long (second oa)) (long (second ob))))}
+                              (and (:sub r) (= (:add r) (:sub r))) {:c (:c r)}
+                              :else r)))
+          :else (unsupported :expression (pr-str e))))
+      :else (unsupported :expression (pr-str e)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; emitting
+
+(defn- bytes! [ctx bs]
+  (let [^java.util.ArrayList b (:bytes @(cur-data! ctx))] (doseq [v bs] (.add b (bit-and (long v) 0xff)))))
+
+(defn- emit-value! [ctx e ^long size]
+  (let [e (resolve-expr ctx e)
+        _ (visit-syms! ctx e)
+        c (x/const-value e @(:syms ctx))]
+    (if c
+      (bytes! ctx (for [i (range size)] (bit-shift-right (long c) (* 8 i))))
+      (let [ch (cur-data! ctx) ^java.util.ArrayList b (:bytes @ch)]
+        (.add ^java.util.ArrayList (:fixups @ch) [(.size b) size e nil false 0])
+        (dotimes [_ size] (.add b 0))))))
+
+(defn- align! [ctx ^long a fill ^long fsize max nops?]
+  (let [sec (cur-sec ctx)]
+    (when-not (and (pos? a) (zero? (bit-and a (dec a)))) (fail "alignment must be a power of 2"))
+    (add-chunk! sec (new-chunk :align {:align a :fill (long (or fill 0)) :fsize fsize :max (if (and max (pos? (long max))) (long max) a)
+                                       :nops nops? :mode @(:mode ctx)}))
+    (ensure-align! sec a)))
+
+(defn- code-section? [sec] (pos? (bit-and (long (:flags @sec)) elf/SHF_EXECINSTR)))
+
+(defn- emit-insn! [ctx f]
+  (let [f (resolve-expr ctx f)
+        mode @(:mode ctx)
+        rs (binding [x/*intel* @(:intel ctx)] (x/assemble-insn f mode @(:syms ctx)))]
+    (doseq [r rs]
+      (cond
+        (:error r) (fail (:error r))
+        (:unsupported r) (unsupported (:unsupported r) (str (:what r)))
+        :else
+        (do (doseq [o (:mi r)] (when-let [e (:expr o)] (visit-syms! ctx e)))
+            (when (:wait r) (bytes! ctx [0x9b]))
+            (if (may-relax? (:inst r) (:mi r))
+              (do (add-chunk! (cur-sec ctx) (new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r}))
+                  nil)
+              (let [ch (cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
+                (doseq [v (:bytes r)] (.add b (if (= v :fixup) 0 v)))
+                (doseq [[off size e kind pcrel adj] (:fixups r)]
+                  (.add ^java.util.ArrayList (:fixups @ch) [(+ base (long off)) size e kind pcrel adj])))))))))
+
+(defn- type-of [t]
+  (let [t (cond (and (seq? t) (#{'at 'pct} (first t))) (str (second t)) (string? t) t :else (str t))]
+    (case (str/lower-case t)
+      ("function" "stt_func") elf/STT_FUNC ("object" "stt_object") elf/STT_OBJECT ("tls_object" "stt_tls") elf/STT_TLS
+      ("common" "stt_common") elf/STT_OBJECT ("notype" "stt_notype") elf/STT_NOTYPE ("gnu_indirect_function") 10
+      (unsupported :directive (str ".type " t)))))
+
+(defn- combine-type [t1 t2]
+  (loop [ts [0 1 2 10 6]] (cond (empty? ts) t2 (= t1 (first ts)) t2 (= t2 (first ts)) t1 :else (recur (rest ts)))))
+
+(defn- bind! [ctx n b]
+  (register! ctx n)
+  (swap! (symbol! ctx n) assoc :bind b))
+
+(defn- string-bytes [^String s] (map #(bit-and (long (int %)) 0xff) s))
+
+(defn- expr-text
+  "A section's name read as an expression (`.note.GNU-stack` is (- .note.GNU stack)), as its tokens spell it (parseSectionName)."
+  ^String [e]
+  (cond (string? e) e
+        (or (symbol? e) (integer? e)) (str e)
+        (and (seq? e) (= 'sym (first e))) (str (second e))
+        (and (seq? e) (= 3 (count e)) ('#{+ - * / % | &} (first e))) (str (expr-text (second e)) (first e) (expr-text (nth e 2)))
+        (and (seq? e) (= 2 (count e)) ('#{- +} (first e))) (str (first e) (expr-text (second e)))
+        :else (unsupported :section-name (pr-str e))))
+
+(defn- directive! [ctx f]
+  (let [h (name (first f)) args (rest f)
+        cv (fn [e] (let [e (resolve-expr ctx e)] (or (x/const-value e @(:syms ctx)) (unsupported :expression (str "." h " " (pr-str e))))))]
+    (case h
+      "text" (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
+      "data" (section! ctx ".data" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_WRITE) 0 nil false)
+      "bss" (section! ctx ".bss" elf/SHT_NOBITS (bit-or elf/SHF_ALLOC elf/SHF_WRITE) 0 nil false)
+      ("section" "pushsection")
+      (let [[nm fl ty & more] args
+            nm (expr-text nm)
+            _ (when (= h "pushsection") (vswap! (:stack ctx) conj [(cur-sec ctx) @(:prev ctx)]))
+            extra (when (string? fl)
+                    (reduce (fn [a c] (bit-or (long a) (long (case c \a elf/SHF_ALLOC \x elf/SHF_EXECINSTR \w elf/SHF_WRITE
+                                                                   \M elf/SHF_MERGE \S elf/SHF_STRINGS \T elf/SHF_TLS \G elf/SHF_GROUP
+                                                                   \e 0x80000000 \o 0x80 \R 0x200000
+                                                                   (unsupported :section-flag (str c))))))
+                            0 fl))
+            flags (bit-or (long (default-flags nm)) (long (or extra 0)))
+            tname (when ty (cond (and (seq? ty) (#{'at 'pct} (first ty))) (str (second ty)) :else (str ty)))
+            type (if tname
+                   (case tname "progbits" elf/SHT_PROGBITS "nobits" elf/SHT_NOBITS "note" 7 "init_array" 14 "fini_array" 15
+                         "preinit_array" 16 "unwind" 0x70000001 (unsupported :section-type tname))
+                   (default-type nm))
+            merge? (pos? (bit-and flags elf/SHF_MERGE))
+            group? (pos? (bit-and flags elf/SHF_GROUP))
+            [entsize more] (if merge? [(cv (first more)) (rest more)] [0 more])
+            [group comdat] (if group? [(sym-name (first more)) (= 'comdat (second more))] [nil false])]
+        (when (some #{'unique} (map #(when (symbol? %) %) more)) (unsupported :section-unique (pr-str f)))
+        (section! ctx nm type flags entsize group comdat))
+      "previous" (when-let [p @(:prev ctx)] (switch! ctx p))
+      "popsection" (let [st @(:stack ctx)]
+                     (when (empty? st) (fail ".popsection without corresponding .pushsection"))
+                     (let [[s p] (peek st)] (vswap! (:stack ctx) pop) (vreset! (:cur ctx) s) (vreset! (:prev ctx) p)))
+      ("globl" "global") (doseq [s args] (bind! ctx (sym-name s) elf/STB_GLOBAL))
+      "weak" (doseq [s args] (bind! ctx (sym-name s) elf/STB_WEAK))
+      "local" (doseq [s args] (bind! ctx (sym-name s) elf/STB_LOCAL))
+      ("hidden" "protected" "internal")
+      (doseq [s args] (register! ctx (sym-name s)) (swap! (symbol! ctx (sym-name s)) assoc :vis ({"hidden" 2 "protected" 3 "internal" 1} h)))
+      "type" (let [[s t] args n (sym-name s)]
+               (register! ctx n) (swap! (symbol! ctx n) update :type #(combine-type % (type-of t))))
+      "size" (let [[s e] args] (swap! (symbol! ctx (sym-name s)) assoc :size-expr (resolve-expr ctx e)))
+      ("byte") (doseq [e args] (emit-value! ctx e 1))
+      ("short" "value" "2byte" "word" "hword") (doseq [e args] (emit-value! ctx e 2))
+      ("long" "int" "4byte") (doseq [e args] (emit-value! ctx e 4))
+      ("quad" "8byte") (doseq [e args] (emit-value! ctx e 8))
+      "ascii" (doseq [s args] (bytes! ctx (string-bytes s)))
+      ("asciz" "string") (doseq [s args] (bytes! ctx (concat (string-bytes s) [0])))
+      ("zero" "skip" "space") (let [[n v] args] (bytes! ctx (repeat (cv n) (if v (cv v) 0))))
+      "fill" (let [[n sz v] args n (cv n) sz (if sz (min 8 (long (cv sz))) 1) v (if v (cv v) 0)]
+               (dotimes [_ n] (bytes! ctx (for [i (range sz)] (if (< i 4) (bit-shift-right (long v) (* 8 i)) 0)))))
+      ("align" "balign" "p2align" "balignw" "balignl" "p2alignw" "p2alignl")
+      (let [[a fl mx] args
+            a (long (cv a))
+            a (if (.startsWith h "p2") (bit-shift-left 1 a) (if (zero? a) 1 a))
+            fsize (cond (.endsWith h "w") 2 (.endsWith h "l") 4 :else 1)]
+        (if (and (code-section? (cur-sec ctx)) (nil? fl))
+          (align! ctx a 0 1 (when mx (cv mx)) true)
+          (align! ctx a (when fl (cv fl)) fsize (when mx (cv mx)) false)))
+      ("comm" "lcomm")
+      (let [[s size al] args n (sym-name s) size (long (cv size)) al (if al (long (cv al)) 1) sym (symbol! ctx n)]
+        (register! ctx n)
+        (when (= h "lcomm") (swap! sym assoc :bind elf/STB_LOCAL))
+        (when-not (:bind @sym) (swap! sym assoc :bind elf/STB_GLOBAL))
+        (swap! sym assoc :type elf/STT_OBJECT :size-expr size)
+        (if (= elf/STB_LOCAL (:bind @sym))
+          (let [cur (cur-sec ctx) prev @(:prev ctx)]
+            (section! ctx ".bss" elf/SHT_NOBITS (bit-or elf/SHF_ALLOC elf/SHF_WRITE) 0 nil false)
+            (align! ctx al 0 1 nil false)
+            (label! ctx n)
+            (bytes! ctx (repeat size 0))
+            (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev))
+          (swap! sym assoc :common [size al])))
+      ("set" "equ" "=")
+      (let [[s e] args n (sym-name s) e (resolve-expr ctx e) sym (symbol! ctx n)]
+        (when (:chunk @sym) (fail "redefinition of a label"))
+        (visit-syms! ctx e)
+        (register! ctx n)
+        (swap! sym assoc :var e)
+        (vswap! (:syms ctx) assoc n e))
+      "file" (when (and (= 1 (count args)) (string? (first args))) (.add ^java.util.ArrayList (:files ctx) (first args)))
+      "ident" (let [cur (cur-sec ctx) prev @(:prev ctx)
+                    sec (section! ctx ".comment" elf/SHT_PROGBITS (bit-or elf/SHF_MERGE elf/SHF_STRINGS) 1 nil false)]
+                (when-not (:seen-ident @sec) (bytes! ctx [0]) (swap! sec assoc :seen-ident true))
+                (bytes! ctx (concat (string-bytes (first args)) [0]))
+                (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev))
+      "code16" (vreset! (:mode ctx) 16) "code32" (vreset! (:mode ctx) 32) "code64" (vreset! (:mode ctx) 64)
+      "intel_syntax" (vreset! (:intel ctx) true) "att_syntax" (vreset! (:intel ctx) false)
+      ("loc" "cfi_sections") nil
+      (if (.startsWith h "cfi_")
+        (unsupported :cfi (str "." h))
+        (unsupported :directive (str "." h))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; layout and relaxation (MCAssembler::layout, relaxOnce, relaxFragment)
+
+(defn- chunk-size ^long [c]
+  (let [m @c]
+    (case (:kind m)
+      :data (.size ^java.util.ArrayList (:bytes m))
+      :relax (count (:bytes (:enc m)))
+      :align (long (:size m 0)))))
+
+(defn- relax-align! [c ^long offset]
+  (let [m @c a (long (:align m)) pad (mod (- a (mod offset a)) a)]
+    (swap! c assoc :size (if (> pad (long (:max m))) 0 pad))))
+
+(declare defined?)
+;; MCSymbolELF::getBinding: the binding set, else LOCAL when defined (a label, a section, a variable whose value is), else GLOBAL
+(defn- binding-of [ctx s] (let [m @s] (or (:bind m) (if (or (:chunk m) (:section-sym m) (and (:var m) (defined? ctx s))) elf/STB_LOCAL elf/STB_GLOBAL))))
+
+(defn- defined? [ctx s] (some? (sym-offset ctx s 0)))
+
+(defn- eval-fixup
+  "evaluateFixup: [VALUE RESOLVED MCVALUE] of the fixup [OFF SIZE EXPR KIND PCREL ADJ] in chunk c (at fixup offset FOFF in its
+  section), with the relaxation's stretch."
+  [ctx c [off size e kind pcrel adj] ^long stretch]
+  (let [v (value ctx (if (zero? (long adj)) e (list '+ e adj)) 0)
+        v (if pcrel (update v :c #(- (long %) (case (long size) 1 1 2 2 4))) v)
+        cm @c
+        foff (+ (long (:offset cm)) (long off))
+        oa (when (:add v) (sym-offset ctx (:add v) 0))
+        ob (when (:sub v) (sym-offset ctx (:sub v) 0))
+        later? (fn [s] (when-let [ch (:chunk @s)] (and (= (:sec @ch) (:sec cm)) (> (long (:order @ch)) (long (:order cm))))))
+        val (cond-> (long (:c v))
+              oa (+ (long (second oa)))
+              ob (- (long (second ob))))
+        val (if pcrel
+              (cond-> (- val foff)
+                (and (:add v) (later? (:add v))) (+ stretch)
+                (and (:sub v) (later? (:sub v))) (- stretch))
+              val)
+        resolved (if pcrel
+                   (boolean (and (:add v) (nil? (:sub v)) oa (not= :abs (first oa)) (= (first oa) (:sec cm))
+                                 (= elf/STB_LOCAL (binding-of ctx (:add v))) (not= 10 (:type @(:add v)))))
+                   (and (nil? (:add v)) (nil? (:sub v))))]
+    [val resolved v]))
+
+(defn- needs-relax? [ctx c ^long stretch]
+  (let [m @c]
+    (and (may-relax? (:inst m) (:mi m))
+         (some (fn [fx]
+                 (let [[val resolved v] (eval-fixup ctx c fx stretch)]
+                   (if resolved
+                     (or (not (<= -128 (long val) 127)) (some? (:spec v)))
+                     (not (and (= 1 (long (second fx))) (:add v) (= "ABS8" (:spec v)))))))
+               (:fixups (:enc m))))))
+
+(defn- relax! [c]
+  (let [m @c inst (relaxed-opcode (:inst m) (:mode m))
+        enc (binding [x/*t* (obj-table)] (x/encode inst (:mi m) (:mode m) (disj (set (:flags m)) :use-vex :use-vex2 :use-evex)))]
+    (swap! c assoc :inst inst :enc enc)))
+
+(defn- layout! [ctx]
+  (doseq [sec (:sections ctx)]
+    (let [^java.util.ArrayList cs (:chunks @sec)]
+      ;; layoutSection, then relaxOnce until no offset moves
+      (loop [o 0 i 0] (when (< i (.size cs)) (let [c (.get cs i)] (swap! c assoc :offset o) (when (= :align (:kind @c)) (relax-align! c o))
+                                                (recur (+ o (chunk-size c)) (inc i)))))
+      (loop [iters 0]
+        (let [changed (volatile! false)]
+          (loop [o 0 i 0]
+            (when (< i (.size cs))
+              (let [c (.get cs i) old (long (:offset @c)) stretch (- o old)]
+                (when-not (= o old) (vreset! changed true))
+                (swap! c assoc :offset o)
+                (case (:kind @c)
+                  :align (relax-align! c o)
+                  :relax (when (needs-relax? ctx c stretch) (relax! c))
+                  nil)
+                (recur (+ o (chunk-size c)) (inc i)))))
+          (when (and @changed (< iters (+ 2 (.size cs)))) (recur (inc iters))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the relocations (X86ELFObjectWriter::getRelocType, ELFObjectWriter::recordRelocation)
+
+(def ^:private tls-specs #{"GOTTPOFF" "INDNTPOFF" "NTPOFF" "GOTNTPOFF" "TLSCALL" "TLSDESC" "TLSGD" "TLSLD" "TLSLDM" "TPOFF" "DTPOFF"})
+
+(defn- reloc-type [kind ^long size spec pcrel]
+  (let [spec (if (= kind :branch) "PLT" spec)
+        rt (case kind
+             (:signed :signed-relax) (if (and (nil? spec) (not pcrel)) :32s :32)
+             (:riprel :riprel-relax :riprel-relax-rex :riprel-movq-load :branch) :32
+             (case size 1 :8 2 :16 4 :32 8 :64))
+        bad (fn [] (unsupported :relocation (str spec " " rt)))]
+    (case spec
+      (nil "ABS8") (case rt :64 (if pcrel 24 1) :32 (if pcrel 2 10) :32s 11 :16 (if pcrel 13 12) :8 (if pcrel 15 14))
+      "GOT" (case rt :64 (if pcrel 29 27) :32 (if pcrel 26 3) (bad))
+      "GOTOFF" (if (= rt :64) 25 (bad))
+      "TPOFF" (case rt :64 18 :32 23 (bad))
+      "DTPOFF" (case rt :64 17 :32 21 (bad))
+      "SIZE" (case rt :64 33 :32 32 (bad))
+      "TLSCALL" 35 "TLSDESC" 34
+      "TLSGD" (if (= rt :32) 19 (bad)) "GOTTPOFF" (if (= rt :32) 22 (bad)) "TLSLD" (if (= rt :32) 20 (bad))
+      "PLT" (if (= rt :32) 4 (bad))
+      "GOTPCREL" (if (= rt :32) (case kind :riprel-relax 41 (:riprel-relax-rex :riprel-movq-load) 42 9) (bad))
+      "GOTPCREL_NORELAX" (if (= rt :32) 9 (bad))
+      "PLTOFF" (if (= rt :64) 31 (bad))
+      (bad))))
+
+(defn- apply-fixups!
+  "Each chunk's fixups evaluated at the final layout: the resolved ones written into its bytes, the rest relocations
+  {:offset :sym KEY :type :addend} of their section."
+  [ctx]
+  (let [relocs (java.util.HashMap.)]
+    (doseq [sec (:sections ctx) c (:chunks @sec) :when (#{:data :relax} (:kind @c))]
+      (let [m @c
+            bs (if (= :data (:kind m)) (:bytes m) (java.util.ArrayList. ^java.util.Collection (map #(if (= % :fixup) 0 %) (:bytes (:enc m)))))
+            fxs (if (= :data (:kind m)) (:fixups m) (:fixups (:enc m)))]
+        (doseq [fx fxs]
+          (let [[off size _ kind pcrel] fx
+                [val resolved v] (eval-fixup ctx c fx 0)
+                resolved (and resolved (nil? (:spec v)))
+                foff (+ (long (:offset m)) (long off))
+                put! (fn [^long x] (dotimes [i size] (.set ^java.util.ArrayList bs (+ (long off) i) (bit-and (bit-shift-right x (* 8 i)) 0xff))))]
+            (when (and (:add v) (tls-specs (:spec v))) (swap! (:add v) assoc :type elf/STT_TLS))
+            (if resolved
+              (put! val)
+              (let [add (:add v)
+                    _ (when (and add (:temp @add) (not (defined? ctx add)))
+                        (fail (str "Undefined temporary symbol " (:name @add))))
+                    [pcrel addend] (if-let [sub (:sub v)]
+                                     (let [ob (sym-offset ctx sub 0)]
+                                       (when-not (and ob (= (first ob) (:sec m))) (unsupported :relocation "a difference across sections"))
+                                       [true (+ (long (:c v)) (- foff (long (second ob))))])
+                                     [pcrel (long (:c v))])
+                    type (reloc-type kind size (:spec v) pcrel)
+                    am (when add @add)
+                    oa (when add (sym-offset ctx add 0))
+                    sec-sym? (and add (= elf/STB_LOCAL (binding-of ctx add)) oa (not= :abs (first oa))
+                                  (not= 10 (:type am))
+                                  (let [ts @(.get ^java.util.ArrayList (:sections ctx) (first oa)) fl (long (:flags ts))]
+                                    (and (not (and (pos? (bit-and fl elf/SHF_MERGE)) (not (zero? addend))))
+                                         (zero? (bit-and fl elf/SHF_TLS))))
+                                  (not (#{"GOT" "PLT" "GOTPCREL" "GOTPCREL_NORELAX"} (:spec v))))
+                    [key addend] (cond sec-sym? [(sec-sym-name (first oa)) (+ addend (long (second oa)))]
+                                       add [(:name am) addend]
+                                       :else [nil addend])]
+                (when key (swap! (symbol! ctx key) assoc :used-in-reloc true))
+                (put! 0)
+                (.put relocs (:sec m) (conj (vec (.get relocs (:sec m))) {:offset foff :sym key :type type :addend addend}))))))
+        (when (= :relax (:kind m)) (swap! c assoc :final (vec bs)))))
+    relocs))
+
+(defn- nops ^java.util.List [^long n ^long mode]
+  (let [n32 [[0x90] [0x66 0x90] [0x0f 0x1f 0x00] [0x0f 0x1f 0x40 0x00] [0x0f 0x1f 0x44 0x00 0x00] [0x66 0x0f 0x1f 0x44 0x00 0x00]
+             [0x0f 0x1f 0x80 0 0 0 0] [0x0f 0x1f 0x84 0 0 0 0 0] [0x66 0x0f 0x1f 0x84 0 0 0 0 0] [0x66 0x2e 0x0f 0x1f 0x84 0 0 0 0 0]]
+        n16 [[0x90] [0x66 0x90] [0x8d 0x74 0x00] [0x8d 0xb4 0x00 0x00]]
+        mx (if (= mode 16) 4 15)
+        out (java.util.ArrayList.)]
+    (loop [n n]
+      (when (pos? n)
+        (let [l (min n mx) pre (if (> l 10) (- l 10) 0)]
+          (dotimes [_ pre] (.add out 0x66))
+          (doseq [b ((if (= mode 16) n16 n32) (dec (- l pre)))] (.add out b))
+          (recur (- n l)))))
+    out))
+
+(defn- section-bytes ^bytes [sec]
+  (let [o (java.io.ByteArrayOutputStream.)]
+    (doseq [c (:chunks @sec) :let [m @c]]
+      (case (:kind m)
+        :data (doseq [b (:bytes m)] (.write o (int b)))
+        :relax (doseq [b (:final m)] (.write o (int b)))
+        :align (let [n (long (:size m 0))]
+                 (if (:nops m)
+                   (doseq [b (nops n (:mode m))] (.write o (int b)))
+                   (dotimes [i n] (.write o (int (bit-and (bit-shift-right (long (:fill m)) (* 8 (mod i (long (:fsize m))))) 0xff))))))))
+    (.toByteArray o)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the file
+
+;; a variable's base symbol (getBaseSymbol): its value's symbol when it is SYMBOL + CONSTANT
+(defn- base-of [ctx m]
+  (when (and (:var m) (not (:chunk m)))
+    (let [v (value ctx (:var m) 0)] (when (and (:add v) (nil? (:sub v))) (:add v)))))
+
+;; writeSymbol: the type merged with the base's (mergeTypeForSet), the size inherited from it when unset
+(defn- merged-type [ctx m]
+  (let [t (long (:type m))]
+    (if-let [b (base-of ctx m)]
+      (let [bt (long (:type @b))]
+        (case t 10 (if (#{2 1 0 6} bt) 10 bt) 2 (if (#{1 0 6} bt) 2 bt) 1 (if (= bt 0) 1 bt) 6 (if (#{1 0 10 2} bt) 6 bt) bt))
+      t)))
+
+(defn- base-size [ctx m] (when-let [b (base-of ctx m)] (:size-expr @b)))
+
+(defn- in-symtab? [ctx m]
+  (cond (:used-in-reloc m) true
+        (:section-sym m) false
+        (and (:var m) (not (:chunk m)) (not (defined? ctx (atom m)))
+             (let [v (value ctx (:var m) 0)] (or (:add v) (:sub v))))
+        false
+        (:temp m) false
+        :else true))
+
+(defn assemble
+  "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
+  {:unsupported CLASS :what TEXT}, or {:error MESSAGE}."
+  [items & [{:keys [mode] :or {mode 64}}]]
+  (binding [x/*t* (obj-table)]
+    (try
+      (let [ctx (new-ctx)]
+        (vreset! (:mode ctx) mode)
+        ;; initSections: .text, aligned to 4 by an empty code alignment
+        (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
+        (vreset! (:prev ctx) nil)
+        (align! ctx 4 0 1 nil true)
+        (doseq [[f] items :when (seq? f)]
+          (let [h (first f)]
+            (cond
+              (= h 'asm/label)
+              (let [l (second f)]
+                (if (integer? l)
+                  (let [k (inc (long (or (.get ^java.util.HashMap (:locals ctx) l) 0)))]
+                    (label! ctx (local-name ctx l k))
+                    (.put ^java.util.HashMap (:locals ctx) l k))
+                  (label! ctx (sym-name l))))
+              (#{'asm/= 'asm/== 'asm/set 'asm/equ} h) (directive! ctx (cons 'asm/= (rest f)))
+              (= "asm" (namespace h)) (directive! ctx f)
+              :else (emit-insn! ctx f))))
+        (layout! ctx)
+        (let [relocs (apply-fixups! ctx)
+              secs (vec (:sections ctx))
+              sec-out (vec (for [s secs :let [m @s]]
+                             (cond-> {:name (:name m) :type (:type m) :flags (:flags m) :align (:align m) :entsize (:entsize m)
+                                      :relocs (.get ^java.util.HashMap relocs (:index m)) :group (:group m) :comdat (:comdat m)}
+                               (= elf/SHT_NOBITS (:type m)) (assoc :size (reduce + (map chunk-size (:chunks m))) :data (byte-array 0))
+                               (not= elf/SHT_NOBITS (:type m)) (assoc :data (section-bytes s)))))
+              syms (vec (for [n (:order ctx) :let [s (symbol! ctx n) m @s] :when (in-symtab? ctx m)]
+                          (let [o (sym-offset ctx s 0)
+                                size (when-let [e (or (:size-expr m) (base-size ctx m))] (let [v (value ctx e 0)]
+                                                                    (if (or (:add v) (:sub v)) (unsupported :size (pr-str e)) (:c v))))]
+                            (when (and (:temp m) (not o) (not (:section-sym m))) (fail (str "Undefined temporary symbol " n)))
+                            {:key n :name (if (:section-sym m) (:name @(nth secs (:section-sym m))) n)
+                             :section-sym (some? (:section-sym m))
+                             :bind (binding-of ctx s) :type (merged-type ctx m) :other (:vis m)
+                             :shndx (cond (:common m) :common (nil? o) :undef (= :abs (first o)) :abs :else (first o))
+                             :value (cond (:common m) (second (:common m)) o (second o) :else 0)
+                             :size (or size 0)})))]
+          ;; a group's signature symbol keyed for the group's sh_info
+          {:bytes (elf/write-object {:machine elf/EM_X86_64 :osabi 0 :sections sec-out
+                                     :symbols (mapv #(cond-> % true (assoc :key (:key %))) syms)
+                                     :files (vec (:files ctx))})}))
+      (catch arbace.lang.ExceptionInfo ex
+        (let [d (ex-data ex)]
+          (cond (:obj/unsupported d) {:unsupported (:obj/unsupported d) :what (.getMessage ex)}
+                (:obj/error d) {:error (:obj/error d)}
+                :else (throw ex)))))))
+
+(defn assemble-file [^String path]
+  (assemble (asm/read-items (asm/latin1 path) asm/amd64)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the judge: an object against llvm-mc's recorded one
+
+(defn- hex->bytes ^bytes [^String h]
+  (let [n (quot (.length h) 2) b (byte-array n)]
+    (dotimes [i n] (aset-byte b i (unchecked-byte (Long/parseLong (subs h (* 2 i) (+ 2 (* 2 i))) 16))))
+    b))
+
+(defn- sha256 ^String [^bytes b]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") b)] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) d))))
+
+(defn compare-objects
+  "[RESULT DETAIL]: :pass (byte for byte), :canonical (the sections' bytes, the symbols and the relocations equal, the
+  layout not), :sections, :symbols, :relocs (the first that differs, with its first difference)."
+  [^bytes ours ^bytes ref]
+  (if (java.util.Arrays/equals ours ref)
+    [:pass ""]
+    (let [a (elf/canonical (elf/read-object ours)) b (elf/canonical (elf/read-object ref))
+          diff (fn [k] (let [xa (k a) xb (k b)]
+                         (when (not= xa xb)
+                           (let [i (or (first (filter #(not= (nth xa % nil) (nth xb % nil)) (range (max (count xa) (count xb))))) 0)]
+                             (str (name k) " #" i ": ours " (pr-str (nth xa i nil)) " llvm-mc's " (pr-str (nth xb i nil)))))))]
+      (if-let [[k d] (first (keep (fn [k] (when-let [d (diff k)] [k d])) [:sections :symbols :relocs]))]
+        [k d]
+        [:canonical (str (alength ours) " bytes against " (alength ref))]))))
+
+(defn- read-record [^String path]
+  (let [r (read-string (slurp path))] r))
+
+(defn check-list
+  "Each NAME<tab>PATH of the list assembled and judged against the record's object of NAME: WORK/obj.tsv (NAME RESULT
+  DETAIL), each object in WORK/NAME.o."
+  [lst work record]
+  (let [rec (read-record record)
+        objs (:objects rec)
+        rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
+        _ (.mkdirs (java.io.File. ^String work))
+        res (vec (for [[n p] rows]
+                   (let [r (try (assemble-file p) (catch Throwable e {:unsupported :crash :what (str e)}))
+                         want (get objs n)]
+                     (cond
+                       (:error r) [n :error (:error r)]
+                       (:unsupported r) [n (keyword (str "unsupported-" (name (:unsupported r)))) (:what r)]
+                       (nil? want) [n :no-record ""]
+                       :else (let [bs ^bytes (:bytes r)
+                                   ref (hex->bytes (:hex want))]
+                               (java.nio.file.Files/write (.toPath (java.io.File. (str work "/" n ".o"))) bs
+                                                          ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0))
+                               (when-not (= (sha256 ref) (:sha256 want)) (fail (str n ": the record's bytes are not its digest")))
+                               (let [[c d] (compare-objects bs ref)] [n c d]))))))]
+    (spit (str work "/obj.tsv") (apply str (for [[n c d] res] (str n "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))))
+    (let [f (frequencies (map second res))]
+      (println (str "repr-asm object-check: " (get f :pass 0) " of " (count res) " objects equal to llvm-mc's byte for byte; "
+                    (pr-str (into (sorted-map) (dissoc f :pass))))))
+    res))
+
+(defn control
+  "A negative control: SUBJECT's object judged against REFERENCE's record: `differs` as it must, else `same`."
+  [subj-path ref-name record]
+  (let [rec (read-record record) r (assemble-file subj-path)]
+    (if-let [bs (:bytes r)]
+      (let [[c] (compare-objects bs (hex->bytes (:hex (get (:objects rec) ref-name))))] (if (= c :pass) "same" "differs"))
+      "differs")))
+
+(defn -main
+  "object IN.s OUT.o: the object written (exit 1 with the class when it cannot be); dump OBJ: an object read back, canonically;
+  check LIST WORK RECORD; control SUBJECT REFNAME RECORD."
+  [verb & args]
+  (case verb
+    "object" (let [[in out] args r (assemble-file in)]
+               (if-let [bs (:bytes r)]
+                 (java.nio.file.Files/write (.toPath (java.io.File. ^String out)) ^bytes bs
+                                            ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0))
+                 (do (binding [*out* *err*] (println (str "repr-asm object: " in ": " (if (:error r) (str "error: " (:error r))
+                                                                                         (str (name (:unsupported r)) ": " (:what r))))))
+                     (System/exit 1))))
+    "dump" (let [o (elf/canonical (elf/read-file (first args)))]
+             (doseq [k [:sections :symbols :relocs] r (k o)] (println (name k) (pr-str r))))
+    "check" (let [res (apply check-list args)] (shutdown-agents) (System/exit (if (some #(#{:error :no-record} (second %)) res) 1 0)))
+    "control" (println (apply control args)))
+  (shutdown-agents))

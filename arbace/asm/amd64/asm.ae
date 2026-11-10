@@ -439,6 +439,19 @@
 (defn- imm-size ^long [info]
   (case (:imm info)
     ("Imm8" "Imm8PCRel" "Imm8Reg") 1 ("Imm16" "Imm16PCRel") 2 ("Imm32" "Imm32PCRel" "Imm32S") 4 "Imm64" 8 0))
+(defn- imm-kind [info] (when (= "Imm32S" (:imm info)) :signed))
+;; an expression that is a symbol's reference with no specifier (isPCRel32Branch's MCSymbolRefExpr)
+(defn- symbol-ref? [e] (or (symbol? e) (and (seq? e) (#{'sym 'local} (first e)))))
+;; emitMemModRMByte's RIP-relative fixup kind (AX4): the relaxable GOT loads by opcode, for a symbol's reference alone
+(def ^:private riprel-relax
+  #{"ADC32rm" "ADD32rm" "AND32rm" "CMP32rm" "MOV32rm" "OR32rm" "SBB32rm" "SUB32rm" "TEST32mr" "XOR32rm" "CALL64m" "JMP64m"
+    "TAILJMPm64" "TEST64mr" "ADC64rm" "ADD64rm" "AND64rm" "CMP64rm" "OR64rm" "SBB64rm" "SUB64rm" "XOR64rm" "LEA64r"})
+(defn- riprel-kind [inst disp rex?]
+  (let [e (:expr disp)]
+    (cond (not (or (symbol-ref? e) (and (seq? e) (= 'at (first e)) (symbol-ref? (second e)) (= 3 (count e))))) :riprel
+          (= inst "MOV64rm") :riprel-movq-load
+          (riprel-relax inst) (if rex? :riprel-relax-rex :riprel-relax)
+          :else :riprel)))
 (defn- imm-pcrel? [info] (contains? #{"Imm8PCRel" "Imm16PCRel" "Imm32PCRel"} (:imm info)))
 
 (defn- low-byte-ext? [r] (#{"SPL" "BPL" "SIL" "DIL"} r))
@@ -577,11 +590,14 @@
         mem-op (if (neg? mem-no) -1 (+ mem-no bias))
         constant! (fn [^long v ^long size] (dotimes [i size] (byte! (bit-shift-right v (* 8 i)))))
         ;; emitImmediate: a constant, or a fixup (its bytes zero, shown as its letter)
-        imm! (fn [o ^long size pcrel?]
+        ;; a fixup is [OFFSET SIZE EXPR KIND PCREL ADJ] (AX4: the object writer's; KIND X86MCCodeEmitter's fixup kind, nil for
+        ;; FK_Data_SIZE, ADJ the ImmOffset added to EXPR)
+        imm! (fn [o ^long size pcrel? & [kind adj]]
                (if (and (some? (:imm o)) (not pcrel?))
                  (constant! (:imm o) size)
-                 (do (.add fixups [(.size out) size])
+                 (do (.add fixups [(.size out) size (if (some? (:imm o)) (:imm o) (:expr o)) kind (boolean pcrel?) (or adj 0)])
                      (dotimes [_ size] (.add out :fixup)))))
+        rex? (volatile! false)
         m64 (= mode 64)
         ;; prefixes (emitPrefixImpl)
         _ (when (>= mem-op 0) (when-let [s (reg (+ mem-op 4))] (byte! (seg-prefix s))))
@@ -636,6 +652,7 @@
                   w (if (fl :w) 1 0)]
               (when (or (pos? (+ (long r) (long x) (long b) w)) lower)
                 (when hi (fail "can't encode high byte register in REX-prefixed instruction"))
+                (vreset! rex? true)
                 (byte! (bit-or 0x40 (bit-shift-left w 3) (bit-shift-left (long r) 2) (bit-shift-left (long x) 1) (long b))))))
         _ (when (and (fl :w) (not m64) (not vex?)) (fail "REX.W requires 64-bit mode"))
         _ (when-not vex? (case (:map info) ("TB" "T8" "TA" "ThreeDNow") (byte! 0x0F) nil))
@@ -657,7 +674,8 @@
                      c8 (d8 dv)]
                  (cond
                    (#{"RIP" "EIP"} base)
-                   (do (modrm 0 rf 5) (imm! disp 4 false))
+                   (do (modrm 0 rf 5) (imm! disp 4 (some? (:expr disp)) (riprel-kind inst disp @rex?)
+                                            (if (and (:expr disp) (pos? (imm-size info))) (- (imm-size info)) 0)))
                    (or (and (= mode 32) (= adsize "AdSize16")) (mem16? m))
                    (if base
                      (let [t16 {3 7 5 6 6 4 7 5}
@@ -683,7 +701,7 @@
                          (nil? base) (do (modrm 0 rf 5) (imm! disp 4 false))
                          (and (not= bn 5) (= 0 dv) no-disp) (modrm 0 rf bn)
                          (and (some? c8) disp8-ok) (do (modrm 1 rf bn) (imm! {:imm c8} 1 false))
-                         :else (do (modrm 2 rf bn) (imm! disp 4 false)))
+                         :else (do (modrm 2 rf bn) (imm! disp 4 false (if (= inst "MOV32rm") :signed-relax :signed))))
                        (let [[dsz bno] (cond
                                          (nil? base) (do (modrm 0 rf 4) [4 5])
                                          (and (= 0 dv) no-disp (not= bn 5)) (do (modrm 0 rf 4) [0 bn])
@@ -692,7 +710,7 @@
                              ss ({1 0 2 1 4 2 8 3} scale)
                              xn (if index (rnum index) 4)]
                          (byte! (bit-or (long bno) (bit-shift-left (long xn) 3) (bit-shift-left (long ss) 6)))
-                         (when (pos? (long dsz)) (imm! (if (= 1 (long dsz)) {:imm c8} disp) dsz false))))))))
+                         (when (pos? (long dsz)) (imm! (if (= 1 (long dsz)) {:imm c8} disp) dsz false (when (= 4 (long dsz)) :signed)))))))))
         cc (fn [^long i] (long (:imm (op i))))
         c0 (aget cur 0)
         form (:form info)
@@ -700,14 +718,18 @@
         next-cur
         (case form
           ("RawFrmDstSrc" "RawFrmSrc" "RawFrmDst" "PrefixByte") (do (byte! base-op) c0)
-          "AddCCFrm" (do (vreset! nops-used (dec nops)) (byte! (+ base-op (cc (dec nops)))) c0)
+          "AddCCFrm" (do (vreset! nops-used (dec nops)) (byte! (+ base-op (cc (dec nops))))
+                         ;; RawFrm's case after the fallthrough: JCC_4 to a symbol's reference, reloc_branch_4byte_pcrel
+                         (if (and m64 (= "JCC_4" inst) (symbol-ref? (:expr (op c0))))
+                           (do (imm! (op c0) 4 true :branch) (inc c0))
+                           c0))
           "RawFrm" (do (byte! base-op)
                        (if (and m64 (#{"CALL64pcrel32" "JMP_4" "JCC_4"} inst) (:expr (op c0)))
-                         (do (imm! (op c0) 4 true) (inc c0))
+                         (do (imm! (op c0) 4 true (when (symbol-ref? (:expr (op c0))) :branch)) (inc c0))
                          c0))
-          "RawFrmMemOffs" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info)) (+ c0 2))
-          "RawFrmImm8" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info)) (imm! (op (inc c0)) 1 false) (+ c0 2))
-          "RawFrmImm16" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info)) (imm! (op (inc c0)) 2 false) (+ c0 2))
+          "RawFrmMemOffs" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info) (imm-kind info)) (+ c0 2))
+          "RawFrmImm8" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info) (imm-kind info)) (imm! (op (inc c0)) 1 false) (+ c0 2))
+          "RawFrmImm16" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info) (imm-kind info)) (imm! (op (inc c0)) 2 false) (+ c0 2))
           "AddRegFrm" (do (byte! (+ base-op (rnum (reg c0)))) (inc c0))
           "MRMDestReg" (let [s (+ c0 1 v4)] (byte! base-op) (modrm 3 (rnum (reg s)) (rnum (reg c0))) (inc s))
           ("MRMDestMem" "MRMDestMemFSIB") (let [s (+ c0 5 v4)] (byte! base-op) (mem! c0 (rnum (reg s)) (= form "MRMDestMemFSIB")) (inc s))
@@ -745,7 +767,7 @@
               (byte! v))
             (loop [c (long next-cur)]
               (when (< c (- (long @nops-used) (if (fl :2cc) 2 0)))
-                (imm! (op c) (imm-size info) (imm-pcrel? info))
+                (imm! (op c) (imm-size info) (imm-pcrel? info) (imm-kind info))
                 (recur (inc c)))))
         _ (when (= (:map info) "ThreeDNow") (byte! (:opcode info)))]
     (when (> (.size out) 15) (fail "instruction length exceeds the limit of 15"))

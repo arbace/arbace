@@ -1,0 +1,246 @@
+(ns arbace.asm.elf
+  "ELF64 relocatable objects, written and read (doc/asm/AMD64-SURVEY.md §7.3, AX4; shared with arm64, §13's AS5): the
+  writer lays an object out as LLVM's MC does (llvm-project 23.1.5, llvm/lib/MC/ELFObjectWriter.cpp's ELFWriter::writeObject,
+  computeSymbolTable, writeRelocations, writeSectionHeaders; StringTableBuilder.cpp's tail-merged string table), Apache-2.0
+  WITH LLVM-exception, written again in Arbace; the reader reads any ELF64 little-endian object back into data (the
+  header, the sections and their bytes, the symbols, the relocations), the judge's view of an object.
+
+  The writer takes what the assembler decided (arbace.asm.amd64.obj): the sections in their order, each
+  {:name :type :flags :align :entsize :data BYTES (or :size for SHT_NOBITS) :relocs [{:offset :sym KEY :type :addend}] :link
+  :info}, the symbols in their registration order, each {:key KEY :name :bind :type :other :shndx (a section's position in
+  :sections, or :abs, :common, :undef) :value :size :section-sym}, and the file names of `.file`."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def SHT_NULL 0) (def SHT_PROGBITS 1) (def SHT_SYMTAB 2) (def SHT_STRTAB 3) (def SHT_RELA 4) (def SHT_NOBITS 8)
+(def SHT_GROUP 17)
+(def SHF_WRITE 1) (def SHF_ALLOC 2) (def SHF_EXECINSTR 4) (def SHF_MERGE 0x10) (def SHF_STRINGS 0x20) (def SHF_INFO_LINK 0x40)
+(def SHF_GROUP 0x200) (def SHF_TLS 0x400)
+(def STB_LOCAL 0) (def STB_GLOBAL 1) (def STB_WEAK 2)
+(def STT_NOTYPE 0) (def STT_OBJECT 1) (def STT_FUNC 2) (def STT_SECTION 3) (def STT_FILE 4) (def STT_TLS 6)
+(def SHN_UNDEF 0) (def SHN_ABS 0xfff1) (def SHN_COMMON 0xfff2)
+(def EM_X86_64 62)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; bytes
+
+(defn- latin1-bytes ^bytes [^String s] (.getBytes s "ISO-8859-1"))
+
+
+(defn- out ^java.io.ByteArrayOutputStream [] (java.io.ByteArrayOutputStream.))
+(defn- pos ^long [^java.io.ByteArrayOutputStream o] (long (.size o)))
+(defn- le! [^java.io.ByteArrayOutputStream o ^long v ^long n] (dotimes [i n] (.write o (int (bit-and (bit-shift-right v (* 8 i)) 0xff)))))
+(defn- bytes! [^java.io.ByteArrayOutputStream o ^bytes b] (.write o b 0 (alength b)))
+(defn- zeros! [^java.io.ByteArrayOutputStream o ^long n] (dotimes [_ n] (.write o 0)))
+(defn- align-to ^long [^long x ^long a] (if (<= a 1) x (* a (quot (+ x (dec a)) a))))
+(defn- align! ^long [^java.io.ByteArrayOutputStream o ^long a]
+  (let [p (pos o) q (align-to p a)] (zeros! o (- q p)) q))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the string table (StringTableBuilder, kind ELF: optimized, tail-merged)
+
+(defn- tail-compare
+  "multikeySort's order: strings compared from their last character, a string that ends first the smaller; the table
+  holds them greatest first."
+  [^String a ^String b]
+  (let [la (.length a) lb (.length b)]
+    (loop [i 0]
+      (let [ca (if (< i la) (int (.charAt a (- la i 1))) -1)
+            cb (if (< i lb) (int (.charAt b (- lb i 1))) -1)]
+        (cond (> ca cb) -1
+              (< ca cb) 1
+              (= ca -1) 0
+              :else (recur (inc i)))))))
+
+(defn strtab
+  "The ELF string table of the names (finalize with Optimize): {:bytes BYTES :offsets {NAME OFFSET}}; \"\" is 0."
+  [names]
+  (let [ss (sort tail-compare (distinct names))
+        o (out)
+        _ (.write o 0)
+        offs (loop [ss ss prev nil m {}]
+               (if (empty? ss)
+                 m
+                 (let [^String s (first ss)]
+                   (if (and prev (.endsWith ^String prev s))
+                     (recur (rest ss) prev (assoc m s (- (pos o) (.length s) 1)))
+                     (let [p (pos o)] (bytes! o (latin1-bytes s)) (.write o 0) (recur (rest ss) s (assoc m s p)))))))]
+    {:bytes (.toByteArray o) :offsets (assoc offs "" 0)}))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the writer (ELFWriter::writeObject)
+
+(defn write-object
+  "The bytes of the ELF64 relocatable object `obj` ({:machine :osabi :sections :symbols :files}), as ELFWriter lays it out:
+  the header, each section's data aligned (a section followed in the table by its .rela when it has relocations, a group's
+  section before its first member), the groups' contents, .symtab (locals first: STT_FILE before them, then the rest in
+  registration order), the relocations, .strtab, the section headers."
+  ^bytes [{:keys [machine osabi sections symbols files] :or {machine 62 osabi 0}}]
+  (let [o (out)
+        ;; the section table: .strtab first (its index the header's e_shstrndx)
+        table (java.util.ArrayList.)
+        add! (fn [s] (.add table s) (.size table))
+        strtab-idx (add! {:name ".strtab" :type SHT_STRTAB :flags 0 :align 1})
+        ;; the header, e_shoff and e_shnum patched at the end
+        _ (do (bytes! o (byte-array [0x7f 0x45 0x4c 0x46 2 1 1])) (.write o (int osabi)) (zeros! o 8)
+              (le! o 1 2) (le! o machine 2) (le! o 1 4) (le! o 0 8) (le! o 0 8) (le! o 0 8) (le! o 0 4)
+              (le! o 64 2) (le! o 0 2) (le! o 0 2) (le! o 64 2) (le! o 0 2) (le! o strtab-idx 2))
+        ordinal (java.util.HashMap.)
+        groups (java.util.LinkedHashMap.)
+        rels (java.util.ArrayList.)
+        offsets (java.util.HashMap.)
+        _ (doseq [[i s] (map-indexed vector sections)]
+            (let [start (align! o (long (:align s 1)))
+                  _ (when-not (= SHT_NOBITS (:type s)) (bytes! o (:data s)))
+                  end (pos o)
+                  g (:group s)
+                  gidx (when g (or (get groups g)
+                                   (let [k (add! {:name ".group" :type SHT_GROUP :flags 0 :align 4 :entsize 4 :group-of g :comdat (:comdat s)})]
+                                     (.put groups g k) k)))
+                  si (add! (assoc s :offsets [start end]))]
+              (.put ordinal (long i) si)
+              (when (seq (:relocs s))
+                (let [ri (add! {:name (str ".rela" (:name s)) :type SHT_RELA
+                                :flags (if (pos? (bit-and (long (:flags s)) SHF_GROUP)) SHF_GROUP SHF_INFO_LINK)
+                                :align 8 :entsize 24 :rela-of i})]
+                  (.add rels [ri i])
+                  (when gidx (.put offsets [:members gidx] (conj (vec (get offsets [:members gidx])) si ri)))))
+              (when (and gidx (not (seq (:relocs s)))) (.put offsets [:members gidx] (conj (vec (get offsets [:members gidx])) si)))))
+        ;; the groups' contents
+        _ (doseq [[_ gi] groups]
+            (let [start (align! o 4) g (.get table (dec (long gi)))]
+              (le! o (if (:comdat g) 1 0) 4)
+              (doseq [m (get offsets [:members gi])] (le! o m 4))
+              (.set table (dec (long gi)) (assoc g :offsets [start (pos o)]))))
+        ;; the symbol table
+        symtab-idx (add! {:name ".symtab" :type SHT_SYMTAB :flags 0 :align 8 :entsize 24})
+        names (concat (map :name table) files (keep #(when-not (:section-sym %) (:name %)) symbols))
+        {sbytes :bytes soff :offsets} (strtab names)
+        locals (filter #(= STB_LOCAL (:bind %)) symbols)
+        globals (remove #(= STB_LOCAL (:bind %)) symbols)
+        index (java.util.HashMap.)
+        sym-start (align! o 8)
+        shndx (fn [s] (let [x (:shndx s)] (case x :abs SHN_ABS :common SHN_COMMON :undef SHN_UNDEF (get ordinal (long x)))))
+        sym! (fn [^long nm ^long info ^long other ^long ndx ^long value ^long size]
+               (le! o nm 4) (.write o (int info)) (.write o (int other)) (le! o ndx 2) (le! o value 8) (le! o size 8))
+        _ (sym! 0 0 0 0 0 0)
+        nidx (volatile! 1)
+        _ (doseq [f files] (sym! (get soff f) (bit-or STT_FILE (bit-shift-left STB_LOCAL 4)) 0 SHN_ABS 0 0) (vswap! nidx inc))
+        _ (doseq [s (concat locals globals)]
+            (.put index (:key s) @nidx) (vswap! nidx inc)
+            (sym! (if (:section-sym s) 0 (get soff (:name s)))
+                  (bit-or (long (:type s)) (bit-shift-left (long (:bind s)) 4)) (long (or (:other s) 0)) (long (shndx s))
+                  (long (or (:value s) 0)) (long (or (:size s) 0))))
+        last-local (+ 1 (count files) (count locals))
+        sym-end (pos o)
+        _ (.set table (dec (long symtab-idx)) (assoc (.get table (dec (long symtab-idx))) :offsets [sym-start sym-end] :link strtab-idx :info last-local))
+        ;; the relocations
+        _ (doseq [[ri i] rels]
+            (let [start (align! o 8)]
+              (doseq [r (:relocs (nth sections i))]
+                (le! o (:offset r) 8)
+                (le! o (bit-or (bit-shift-left (long (if (:sym r) (get index (:sym r)) 0)) 32) (long (:type r))) 8)
+                (le! o (:addend r) 8))
+              (.set table (dec (long ri)) (assoc (.get table (dec (long ri))) :offsets [start (pos o)] :link symtab-idx :info (get ordinal (long i))))))
+        ;; the groups' headers: sh_link .symtab, sh_info the signature symbol
+        _ (doseq [[g gi] groups]
+            (.set table (dec (long gi)) (assoc (.get table (dec (long gi))) :link symtab-idx :info (get index g))))
+        str-start (pos o)
+        _ (bytes! o sbytes)
+        _ (.set table (dec (long strtab-idx)) (assoc (.get table (dec (long strtab-idx))) :offsets [str-start (pos o)]))
+        sh-off (align! o 8)
+        shdr! (fn [^long nm ^long type ^long flags ^long off ^long size ^long link ^long info ^long al ^long es]
+                (le! o nm 4) (le! o type 4) (le! o flags 8) (le! o 0 8) (le! o off 8) (le! o size 8) (le! o link 4) (le! o info 4)
+                (le! o al 8) (le! o es 8))
+        _ (shdr! 0 0 0 0 0 0 0 0 0)
+        _ (doseq [s table]
+            (let [[a b] (:offsets s)]
+              (shdr! (get soff (:name s)) (:type s) (:flags s 0) a (if (= SHT_NOBITS (:type s)) (long (:size s 0)) (- (long b) (long a)))
+                     (long (or (:link s) 0)) (long (or (:info s) 0)) (long (:align s 1)) (long (or (:entsize s) 0)))))
+        bs (.toByteArray o)
+        put! (fn [^long at ^long v ^long n] (dotimes [i n] (aset-byte bs (+ at i) (unchecked-byte (bit-shift-right v (* 8 i))))))]
+    (put! 40 sh-off 8)
+    (put! 60 (inc (.size table)) 2)
+    bs))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the reader
+
+(defn- u ^long [^bytes b ^long at ^long n]
+  (loop [i (dec n) v 0] (if (neg? i) v (recur (dec i) (bit-or (bit-shift-left v 8) (bit-and (long (aget b (+ at i))) 0xff))))))
+
+(defn- cstr ^String [^bytes b ^long at]
+  (loop [e at] (if (or (>= e (alength b)) (zero? (aget b e))) (String. b (int at) (int (- e at)) "ISO-8859-1") (recur (inc e)))))
+
+(defn read-object
+  "An ELF64 little-endian object's bytes as data: {:header {:class :data :osabi :type :machine :flags :shstrndx} :sections
+  [{:index :name :type :flags :offset :size :link :info :align :entsize :data BYTES}] :symbols [{:index :name :value :size
+  :bind :type :other :shndx}] :relocs [{:section NAME :offset :type :sym INDEX :addend}]}."
+  [^bytes b]
+  (when-not (and (> (alength b) 64) (= 0x7f (aget b 0)) (= (int \E) (aget b 1)) (= 2 (aget b 4)) (= 1 (aget b 5)))
+    (throw (ex-info "not an ELF64 little-endian object" {:elf/error :not-elf64})))
+  (let [shoff (u b 40 8) shnum (u b 60 2) shstrndx (u b 62 2)
+        raw (vec (for [i (range shnum) :let [h (+ shoff (* 64 i))]]
+                   {:index i :name-off (u b h 4) :type (u b (+ h 4) 4) :flags (u b (+ h 8) 8) :offset (u b (+ h 24) 8)
+                    :size (u b (+ h 32) 8) :link (u b (+ h 40) 4) :info (u b (+ h 44) 4) :align (u b (+ h 48) 8)
+                    :entsize (u b (+ h 56) 8)}))
+        shstr (:offset (nth raw shstrndx))
+        secs (vec (for [s raw]
+                    (-> s
+                        (assoc :name (cstr b (+ (long shstr) (long (:name-off s))))
+                               :data (if (= SHT_NOBITS (:type s)) (byte-array 0)
+                                         (java.util.Arrays/copyOfRange b (int (:offset s)) (int (+ (long (:offset s)) (long (:size s)))))))
+                        (dissoc :name-off))))
+        symtab (first (filter #(= SHT_SYMTAB (:type %)) secs))
+        syms (when symtab
+               (let [stroff (:offset (nth secs (:link symtab)))]
+                 (vec (for [i (range (quot (long (:size symtab)) 24)) :let [h (+ (long (:offset symtab)) (* 24 i)) info (u b (+ h 4) 1)]]
+                        {:index i :name (cstr b (+ (long stroff) (u b h 4))) :bind (bit-shift-right info 4) :type (bit-and info 15)
+                         :other (u b (+ h 5) 1) :shndx (u b (+ h 6) 2) :value (u b (+ h 8) 8) :size (u b (+ h 16) 8)}))))
+        relocs (vec (for [s secs :when (= SHT_RELA (:type s)) i (range (quot (long (:size s)) 24))
+                          :let [h (+ (long (:offset s)) (* 24 i)) info (u b (+ h 8) 8)]]
+                      {:section (:name (nth secs (:info s))) :offset (u b h 8) :type (bit-and info 0xffffffff)
+                       :sym (unsigned-bit-shift-right info 32) :addend (u b (+ h 16) 8)}))]
+    {:header {:class (aget b 4) :data (aget b 5) :osabi (aget b 7) :type (u b 16 2) :machine (u b 18 2) :flags (u b 48 4)
+              :shstrndx shstrndx}
+     :sections secs :symbols (or syms []) :relocs relocs}))
+
+(defn read-file [^String path] (read-object (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path)))))
+
+(def reloc-names
+  "R_X86_64_* by number (llvm/include/llvm/BinaryFormat/ELFRelocs/x86_64.def)."
+  {0 "R_X86_64_NONE" 1 "R_X86_64_64" 2 "R_X86_64_PC32" 3 "R_X86_64_GOT32" 4 "R_X86_64_PLT32" 5 "R_X86_64_COPY"
+   6 "R_X86_64_GLOB_DAT" 7 "R_X86_64_JUMP_SLOT" 8 "R_X86_64_RELATIVE" 9 "R_X86_64_GOTPCREL" 10 "R_X86_64_32"
+   11 "R_X86_64_32S" 12 "R_X86_64_16" 13 "R_X86_64_PC16" 14 "R_X86_64_8" 15 "R_X86_64_PC8" 16 "R_X86_64_DTPMOD64"
+   17 "R_X86_64_DTPOFF64" 18 "R_X86_64_TPOFF64" 19 "R_X86_64_TLSGD" 20 "R_X86_64_TLSLD" 21 "R_X86_64_DTPOFF32"
+   22 "R_X86_64_GOTTPOFF" 23 "R_X86_64_TPOFF32" 24 "R_X86_64_PC64" 25 "R_X86_64_GOTOFF64" 26 "R_X86_64_GOTPC32"
+   27 "R_X86_64_GOT64" 28 "R_X86_64_GOTPCREL64" 29 "R_X86_64_GOTPC64" 30 "R_X86_64_GOTPLT64" 31 "R_X86_64_PLTOFF64"
+   32 "R_X86_64_SIZE32" 33 "R_X86_64_SIZE64" 34 "R_X86_64_GOTPC32_TLSDESC" 35 "R_X86_64_TLSDESC_CALL" 36 "R_X86_64_TLSDESC"
+   37 "R_X86_64_IRELATIVE" 41 "R_X86_64_GOTPCRELX" 42 "R_X86_64_REX_GOTPCRELX" 43 "R_X86_64_CODE_4_GOTPCRELX"
+   44 "R_X86_64_CODE_4_GOTTPOFF" 45 "R_X86_64_CODE_4_GOTPC32_TLSDESC" 46 "R_X86_64_CODE_5_GOTPCRELX"
+   47 "R_X86_64_CODE_5_GOTTPOFF" 48 "R_X86_64_CODE_5_GOTPC32_TLSDESC" 49 "R_X86_64_CODE_6_GOTPCRELX"
+   50 "R_X86_64_CODE_6_GOTTPOFF" 51 "R_X86_64_CODE_6_GOTPC32_TLSDESC"})
+
+(defn- hex [^bytes b] (apply str (map #(format "%02x" (bit-and (long %) 0xff)) b)))
+
+(defn canonical
+  "An object read back, as the judge compares it: the sections that hold contents (not .strtab, .symtab, .rela, groups) by
+  name with their type, flags, alignment, entry size and bytes (hex; a SHT_NOBITS one its size); the symbols but the null
+  one as [NAME BIND TYPE VISIBILITY SECTION VALUE SIZE] (a section symbol named by its section); the relocations as
+  [SECTION OFFSET TYPE SYMBOL ADDEND], in order."
+  [o]
+  (let [secs (:sections o)
+        sname (fn [^long i] (cond (= i SHN_ABS) "*ABS*" (= i SHN_COMMON) "*COM*" (= i 0) "*UND*" :else (:name (nth secs i))))
+        syms (:symbols o)
+        ]
+    {:sections (vec (for [s secs :when (not (#{SHT_NULL SHT_STRTAB SHT_SYMTAB SHT_RELA SHT_GROUP} (:type s)))]
+                      [(:name s) (:type s) (:flags s) (:align s) (:entsize s)
+                       (if (= SHT_NOBITS (:type s)) (:size s) (hex (:data s)))]))
+     :symbols (vec (for [s (rest syms)]
+                     [(if (= STT_SECTION (:type s)) (sname (:shndx s)) (:name s)) (:bind s) (:type s) (bit-and (long (:other s)) 3)
+                      (sname (:shndx s)) (:value s) (:size s)]))
+     :relocs (vec (for [r (:relocs o)]
+                    (let [s (nth syms (:sym r) nil)]
+                      [(:section r) (:offset r) (get reloc-names (:type r) (:type r))
+                       (cond (nil? s) "" (= STT_SECTION (:type s)) (sname (:shndx s)) :else (:name s)) (:addend r)])))}))
