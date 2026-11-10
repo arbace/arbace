@@ -5621,3 +5621,94 @@ EPERM's strerror text, F_ADD_SEALS, AI_NUMERICSERV, `_SC_CLK_TCK`) and must diff
 checks the five python3 generators against the same files. `pyconfig.h` is CPython's configure output on Alpine's builder: whether
 it counts as a pinned input (eval and AOT 1) or a toolchain's record (0.5, as C's configured musl) is the user's call (report 265's
 DECISION); the patch scores 0.5 until then.
+
+## As built: 253, the interpreter's end: Py_FinalizeEx and finalize_modules (2026-11-10, the Mac VM, queue 253; 241's DECISION 2 (a))
+
+Ported from CPython 3.14.10's Python/pylifecycle.c (`_Py_Finalize`, `finalize_modules` and its helpers, `flush_std_files`,
+`finalize_subinterpreters`), Objects/moduleobject.c (`_PyModule_ClearDict`), Python/gc.c (`PyGC_Collect`,
+`_PyGC_CollectNoFail`, `_PyGC_DumpShutdownStats`), Python/import.c (`_PyImport_FiniExternal`) and Python/_warnings.c's
+shutdown path, into `go/arbace/py/pylifecycle.go` (new) and its call sites. One function, `(*Interp).Finalize(status)`, ends
+every run: `RunModule`'s exits (the main module's end, SystemExit, an uncaught exception, a SyntaxError of the main file) and
+the REPL's; the interpreted loop (goi) and the compiled one (AOT) share it.
+
+- **The order** (`_Py_Finalize`): `threading._shutdown()`; the finalizer queue drained (`_Py_FinishPendingCalls`'s place); the
+  atexit functions; the subinterpreters left open ended with CPython's RuntimeWarning; then `sys.is_finalizing()` true and the
+  other threads stopped: a thread that takes the GIL from then on hangs (`gilState.final`, PyThread_hang_thread's); sys.stdout
+  and sys.stderr flushed (a failed flush of sys.stdout: "Exception ignored while flushing sys.stdout" and exit status 120;
+  pyi's standard stream's `flush` now raises its write error as OSError); `gc.collect()`'s collection unless `gc.disable()`,
+  `gc.callbacks` called; `sys.path_importer_cache` and `sys.path_hooks` set to None; `finalize_modules`; the streams flushed again.
+- **`finalize_modules`**: `builtins._` and sys's `path argv ps1 ps2 last_exc last_type last_value last_traceback
+  __interactivehook__ meta_path` set to None, `sys.stdin/stdout/stderr` restored from `__stdin__`...; every module of sys.modules
+  set to None in its order (the weak list kept) and the dictionary cleared; the builtins restored to the interpreter's first
+  copy (`Interp.builtinsCopy`, taken at `NewInterp` less site's `exit quit copyright credits license help`); the collection;
+  `gc.garbage` reported (ResourceWarning "gc: N uncollectable objects at shutdown"); the modules still alive cleared, the latest
+  imported first, by `_PyModule_ClearDict`'s two passes (one leading underscore, then all but `__builtins__`), a collection
+  after each pass; sys's dictionary, then the builtins', cleared the same way; the last collection.
+- **Which modules are dead at the collection.** CPython frees the dictionaries of the modules nothing reaches any more as cyclic
+  garbage, so their objects' `__del__` run with every global in place (test_sys' `test_is_finalizing`, test_threading's
+  `test_main_thread_during_shutdown`). pyi asks it in two parts. `exitMark` marks what CPython's interpreter state still reaches
+  once sys.modules is empty: sys and its dictionary, the restored builtins, the codecs' registry, `gc.callbacks` and
+  `gc.garbage`, the warnings module's filters, and what they reach by Python's references (`exitRefs`: 241's `cyTraverse` for
+  every object, a heap class's namespace, bases and MRO, an instance's class, a module's dictionary, a weak reference's callback
+  but not its referent, the Go fields of the runtime's other types by reflection). A module that held a module object is
+  "alive" (cleared in the weak list's pass), a dictionary reached without its module is left as it is (CPython's dead module
+  whose functions are still referenced), and every other module's dictionary (but the runtime's own modules') is given to the
+  cycle collector as dead (`cyForced`): it is probed as garbage and an edge into it reaches nothing, so what those dictionaries
+  alone hold, through nodes, is found and finalized in PEP 442's order, while Go's collector still vetoes anything held another
+  way. That second part matters because pyi's classes are held by the runtime's registries (241's finding 2): Go alone would keep
+  every module that defines a class. The dictionaries are not cleared afterwards (CPython's `tp_clear`): what they hold through no
+  node (a class's attribute, a Go container's item) is left alone, silent rather than finalized with its globals gone.
+- **At the shutdown's moments**: an import raises `ImportError("sys.meta_path is None, Python is likely shutting down")` once
+  `meta_path` is None; a traceback printed by the Go display shows no source lines (CPython's import of io fails); the unraisable
+  hook writes nothing once `sys.stderr` is None; a warning raised by the runtime (an unawaited coroutine, ResourceWarning, the
+  shutdown's own) goes through `finalWarn`, _warnings.c's C path (the filters kept from the warnings module, else the
+  interpreter's defaults; "<sys>:0: RuntimeWarning: coroutine 'f' was never awaited" when no frame runs); `sysAttr` and
+  `sysModule` read the interpreter's own sys module (`Interp.sysMod`, interp->sysdict) rather than sys.modules' entry;
+  `_thread.start_new_thread`/`start_joinable_thread` raise PythonFinalizationError "can't create new thread at interpreter
+  shutdown" and a join of a running thread "cannot join thread at interpreter shutdown" (gh-123940), as _threadmodule.c.
+- **The collections' order** (`cyOrder`): a collection's trash runs its finalizers and weak callbacks as CPython's lists hold
+  it, containers before what they hold (its collector moves what a container reaches behind it): breadth first from what
+  nothing else in the trash holds (the dead module dictionaries first, in sys.modules' order, then by the records' order,
+  `finTrack.seq`), through the slots in their order; no longer Go's map order (`gc.collect()` too). An unclosed text file is
+  finalized before its buffer and its raw file, so its data is flushed at exit, as CPython's io does. At the shutdown a weak
+  reference that the interpreter state no longer reaches is in the trash itself: no callback (handle_weakrefs).
+- **io and warnings, C in CPython**: pyi runs `_pyio` and `_py_warnings`, whose code imports at the moment CPython's C needs
+  no import (`_pyio`'s `_dealloc_warn` imports warnings before it closes the file). At the shutdown an import made by their
+  code (`cImplModules`) is answered from the modules finalize_modules took out, `warnings` by a stand-in whose `warn` is
+  `finalWarn`, and their frames are not counted for a warning's stacklevel (C has none: "<sys>:0: ResourceWarning: unclosed
+  file ..." under `-W always`); any other code's import fails as CPython's does.
+- **Cost**: a shutdown collection runs only when a tracked object has work or weak callbacks due, and after a module
+  dictionary's pass only when a value it dropped reaches such an object (`exitReachesWork`, not through modules); a program importing asyncio,
+  unittest, json, re, threading, typing, dataclasses, logging, tempfile and subprocess (114 module dictionaries given dead, 22
+  alive) ends in 0.62 s compiled on the VM, the same with or without an object to finalize; under goi a program printing a traceback ends in 24.5 s against the
+  base's 23 s (36 s before the pass filter). `PYI_GC_DEBUG=1` lists each module's
+  state at the shutdown and each collection.
+
+**Not ported** (Lows in the report): Py_EndInterpreter's `finalize_modules` (a subinterpreter's end runs its atexit functions
+only, as before), the daemon threads' frames (CPython clears them; their goroutines keep them), `-v`'s cleanup lines,
+`_PySignal_Fini`, the order of several deaths in one collection beyond `cyOrder`'s approximation of CPython's gc lists, an
+object reachable from a dead module only through a class or a Go value (not finalized), a pure-Python
+`warnings.warn` from a `__del__` at shutdown (pyi's warnings is `_py_warnings`, whose `warn_explicit` imports linecache: the
+ImportError CPython's own Python implementation would raise; CPython's C `_warnings` prints the warning). Under goi (the
+runtime interpreted) an object the main module's last statements handled can stay in goi's registers and miss the shutdown's
+collection (test_gc's ordinary-module test, an unclosed file written last: `:finalization-goi`, W2).
+
+**The classes** (each test's own verdict, sampled on the VM): `:sys-module` 4 to 2 (test_is_finalizing, test_issue20602);
+`:gc-collector` 23 to 19 (test_gc's test_gc_main_module_at_shutdown and test_global_del_SystemExit, test_threading's
+test_main_thread_during_shutdown served; test_gc_ordinary_module_at_shutdown to `:finalization-goi`: it passes compiled, its
+child runs on goi); `:finalization` 63 to 59 (test_struct's test_struct_cleans_up_at_runtime_shutdown, test_threading's
+test_join_daemon_thread_in_finalization, test_join_finished_daemon_thread_in_finalization, test_start_new_thread_at_finalization);
+test_module's test_module_finalization_at_shutdown, failing in no class at the base, passes; `:finalization-collect` stays 8 (its
+tests are collections at run time, not at exit); divergences-aot.edn's `:finalization-goi` (synth/datamodel/del.py) stays, both
+runs now print the rest at exit in different orders.
+
+**The samples** (the VM): `.tmp/q253/t/check253.sh ROOT` (26 exit cases compiled against CPython 3.14's runs, stdout, stderr,
+status and a file the case leaves unclosed; its control: e3's run judged by e1's reference): PASS on the head, FAIL at the base
+c25cce1d1 (21 differ). `bin/pyi lib-test --aot` of test_gc, test_finalization, test_weakref (216 methods), test_module,
+test_struct, test_linecache, test_tempfile, test_exceptions, test_traceback (735): every method's verdict the base's or better
+(test_tempfile's TestMktemp.test_basic fails at both, a shared TMPDIR). `bin/pyi lib-test-all --fresh test_sys test_warnings
+test_threading test_atexit`: 0 failing but test_atexit's test_general, which fails at the base too (its child's atexit tests).
+`make python-essential` (golden 127 programs, check --aot 20 pass, 1 classed), `bin/pyi runtime vet`, `bin/pyi table-check
+--configs tamago/amd64,tamago/arm64`: ok. `bin/pyi runtime check` with `PYI_SMOKE_ONLY` (20 programs: asyncio, coroutines,
+generators, subprocess, threads, signals, io, struct, the REPL session): the forms printed and read again the same, 20 equal,
+the REPL equal, the controls fail.
