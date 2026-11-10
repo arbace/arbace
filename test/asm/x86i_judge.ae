@@ -167,10 +167,34 @@
                            (first (judge-decode mixed))))))]
     (cond (nil? r) "left" (= r :pass) "same" :else "differs")))
 
-(defn main [results work lst classes-path record]
+(defn- names-of
+  "The program names of the list (NAME<tab>PATH lines)."
+  [lst]
+  (set (for [l (str/split-lines (slurp lst)) :when (seq l)] (first (str/split l #"\t")))))
+
+(defn- row-name [id] (second (str/split id #"/" 2)))
+
+(defn compare-problems
+  "AXS89 (a): the run's rows held to the recorded ones OLD ([[ID CLASS DETAIL]...]): a row not recorded, a recorded :pass that is
+  not, and a recorded row not run (the run's programs' rows: OLD is cut to them by the caller for a partial run)."
+  [run old]
+  (let [oldm (into {} (map (fn [[i c]] [i c]) old))
+        ran (set (map first run))]
+    (vec (concat (for [[i c] run :let [o (oldm i)] :when (nil? o)] (str "not recorded: " i))
+                 (for [[i c] run :let [o (oldm i)] :when (and o (= o :pass) (not= c :pass))] (str i ": " (name c) ", recorded :pass"))
+                 (for [[i] old :when (not (ran i))] (str "recorded, not run: " i))))))
+
+(defn main
+  "The judgment. PARTIAL (non-empty: --only's run): judged on what it ran, the recorded rows cut to the programs of the list, and
+  the slice-foreign control (AXS89 (a)): the same run held to the recorded rows of the programs it did not run, which must fail
+  (`not recorded`); recording needs the whole set."
+  ([results work lst classes-path record] (main results work lst classes-path record ""))
+  ([results work lst classes-path record partial]
   (let [run (rows work lst)
-        old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
-        oldm (into {} (map (fn [[i c]] [i c]) old))
+        partial? (seq partial)
+        names (names-of lst)
+        all-old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
+        old (if partial? (filterv (fn [[i]] (names (row-name i))) all-old) all-old)
         classes (set (map :id (read-string (slurp classes-path))))
         problems (atom [])
         xs (filter #(str/starts-with? (first %) "x86i/") run)
@@ -184,29 +208,42 @@
                   (count (filter #(= :pass (second %)) ls)) " of " (count ls) " lockstep-equal in sys mode; "
                   (count (filter #(= :pass (second %)) ss)) " of " (count ss) " in step mode; "
                   (count (filter #(= :pass (second %)) lds)) " of " (count lds) " loaded as Linux loads them; "
-                  (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))))
+                  (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))
+                  (when partial? (str "; a slice of " (count names) " of the recorded programs"))))
     (doseq [[i c dt] run]
       (cond (failing c) (swap! problems conj (str "failing: " i " " (name c) " " dt))
             (and (not= c :pass) (not (classes c))) (swap! problems conj (str "unclassed: " i " " (name c) " " dt))))
-    (if (and (seq record) (empty? @problems))
+    (if (and (seq record) (not partial?) (empty? @problems))
       (do (spit results (str header "[\n" (apply str (map (fn [r] (str (pr-str r) "\n")) (sort-by first run))) "]\n"))
           (println (str "repr-asm: recorded " (count run) " rows into " results)))
-      (do (doseq [[i c] run :let [o (oldm i)]]
-            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
-                  (and (= o :pass) (not= c :pass)) (swap! problems conj (str i ": " (name c) ", recorded :pass"))))
-          (doseq [[i] old :when (not (some #(= i (first %)) run))] (swap! problems conj (str "recorded, not run: " i)))))
+      (swap! problems into (compare-problems run old)))
+    (when partial?
+      ;; the negative control of a partial run: the same run judged against another slice's reference must fail
+      (let [foreign (filterv (fn [[i]] (not (names (row-name i)))) all-old)
+            fp (compare-problems run foreign)]
+        (if (and (seq foreign) (some #(str/starts-with? % "not recorded: ") fp))
+          (println (str "control slice-foreign: fails as it must (" (count (filter #(str/starts-with? % "not recorded: ") fp)) " of its rows not in the other slices' reference)"))
+          (swap! problems conj (str "control slice-foreign: the run judged against the other programs' recorded rows did not fail (" (count foreign) " rows)")))))
     (doseq [p @problems] (println (str "FAIL: " p)))
     (when (empty? @problems) (println "repr-asm x86i-check: ok"))
-    (when (seq @problems) (System/exit 1))))
+    (when (seq @problems) (System/exit 1)))))
 
 (defn controls
-  "Each control of FILE (ID KIND SUBJECT REFERENCE): its verdict printed; the count of controls that did not differ."
-  [work lst file]
-  (let [bad (atom 0)]
-    (doseq [l (str/split-lines (slurp file)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
-      (let [[id kind subj ref] (str/split l #"\s+")
-            v (control work lst kind subj ref)]
-        (if (= v "differs")
-          (println (str "control " id ": fails as it must"))
-          (do (swap! bad inc) (println (str "FAIL: control " id ": " v))))))
-    (when (pos? @bad) (System/exit 1))))
+  "Each control of FILE (ID KIND SUBJECT REFERENCE): its verdict printed; the count of controls that did not differ.
+  PARTIAL (non-empty: --only's run, AXS89 (a)): a control whose subject, or for verdict, cpu and decode whose reference
+  program, is not in the list is not judged (its programs were not run), the count printed."
+  ([work lst file] (controls work lst file ""))
+  ([work lst file partial]
+   (let [bad (atom 0) skipped (atom 0) judged (atom 0)
+         names (when (seq partial) (names-of lst))]
+     (doseq [l (str/split-lines (slurp file)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
+       (let [[id kind subj ref] (str/split l #"\s+")]
+         (if (and names (not (and (names subj) (or (not (#{"verdict" "cpu" "decode"} kind)) (names ref)))))
+           (swap! skipped inc)
+           (let [v (control work lst kind subj ref)]
+             (swap! judged inc)
+             (if (= v "differs")
+               (println (str "control " id ": fails as it must"))
+               (do (swap! bad inc) (println (str "FAIL: control " id ": " v))))))))
+     (when names (println (str "controls: " @judged " judged, " @skipped " of other slices' programs not judged")))
+     (when (pos? @bad) (System/exit 1)))))

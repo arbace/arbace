@@ -3569,3 +3569,22 @@ nightly obj only); keeping every `--full` part nightly (594% of the share; the s
 is full); counting arm64's encode level in a cell (beside AOT until arm64's AOT exists). Proposed AXS89-AXS90 (doc/asm/AMD64-SURVEY.md, "Proposed (AX10)": x86i-check and encode-check at night).
 
 Rule slips: none known (no lock, no gate run but `--plan` and `--costs`, one check at a time, the memory checked before each).
+
+## 2026-11-10 asm-axs89: x86i-check rotated, encode-check nightly (AXS89 (a), AXS90 (a); branch `asm-axs89` from `mac/asm-ax10` 00ded8184)
+
+Decided by the user the same day. Done: `bin/repr-asm x86i-check --only LIST` (a file of program names; the slice's programs run, each with its
+lockstep's sys and step modes, judged on what it ran: the recorded rows cut to the list, the coverage not held, the controls whose programs are
+outside not judged, `--record` refused), with the negative control `slice-foreign` in `test/asm/x86i_judge.ae` (the run held to the other
+programs' recorded rows must fail); `test/asm/subsets.edn` (the map `:all`, 13 quick programs); `x86i-check`'s part `all` out of `:clean-only`
+with `:rotate` (GT8.4: the subset nightly, a seventh of the rest a night by the planner's hash, whole in `--full`), in `test/gate/crops/asm.edn`
+and `test/gate/steps.edn`; `asm-amd64-encode.mc-x86` out of `:clean-only`. Measured by hand (`/usr/bin/time -v`): whole 8 min 39 s, 1.3 GiB; the
+subset 38 s; slice 6 (the heaviest by run time, 5 programs) 2 min 28 s, 1.2 GiB. `bin/gate --full --costs`: asm-amd64 full 22 min 58 s, 338% of its
+half share (it counts x86i-check whole); as the night runs it 17 min 25 s the heaviest night, 256%: over, because of encode-check (9 min 31 s);
+proposed AXS91 (encode in sevenths, about 122%). Considered: slices cut by hand to 2-3 minutes (the planner's slices are hash slices, the period
+fixed at 7; the planner not changed); `:always` for the controls' subjects (the slices would hold 20 programs each: a partial run judges the
+controls whose programs it ran instead). Checks: `gate.crops check` 0 problems; `bin/gate --plan`, `--nightly --plan` (nights 3 and 6),
+`--full --plan`, `--oracle --plan` without a table error; costs-test, crops-test, rotation-test (65), rotation-controls-test, lanes-test (50),
+gate-key-crops-test pass.
+
+Rule slips: the background launch of the two slice measures redirected to `/dev/null` (`> /dev/null 2>&1` on the `nohup`); no other.
+

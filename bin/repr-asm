@@ -125,7 +125,7 @@
 #                                                    held to (or recorded into) test/asm/x86i/synth-digests.edn
 #   bin/repr-asm x86i gen|gen-check                  x86i's decode tables, go/arbace/x86i/dectab.ae, made from asm/amd64/table.edn
 #                                                    by arbace.asm.amd64.dgen; gen-check: the committed file equal to a fresh one
-#   bin/repr-asm x86i-check [--record]               test/asm/run/'s programs assembled and linked by Arbace, each run by the CPU
+#   bin/repr-asm x86i-check [--record|--only LIST]   test/asm/run/'s programs assembled and linked by Arbace, each run by the CPU
 #                                                    and by x86i (timeouts $REPR_ASM_RUN_TIMEOUT, 10 s, and 60 s): x86i's run
 #                                                    judged by the program's own verdict and against the CPU's (status, stdout,
 #                                                    stderr), its code decoded by x86i's decoder against arbace.asm.amd64.decode,
@@ -136,7 +136,10 @@
 #                                                    executed, WORK/coverage.txt, against test/asm/x86i-coverage-amd64.txt);
 #                                                    rows against test/asm/x86i-results-amd64.edn, classes
 #                                                    test/asm/divergences-x86i.edn, the negative controls of
-#                                                    test/asm/controls-x86i.txt failing; WORK .tmp/repr-asm/x86i
+#                                                    test/asm/controls-x86i.txt failing; WORK .tmp/repr-asm/x86i; --only LIST (AXS89 (a):
+#                                                    program names, a line each) runs those alone, judged on what it ran (the others'
+#                                                    rows left, the coverage not held, the controls of programs outside not judged, and
+#                                                    slice-foreign: the run against the others' recorded rows, which must fail)
 #   bin/repr-asm x86i-decode-check [--record]        AX5.5, AXS70 (b): x86i's Go decoder against arbace.asm.amd64.decode over the
 #                                                    decode check's 64-bit corpora (MC/X86's met encodings, MC/Disassembler/X86's
 #                                                    byte strings), each decoded alone (x86i decode-hex); rows against
@@ -627,6 +630,7 @@ case ${1:-} in
     fails=0
     while IFS=$'\t' read -r n c _; do
       [ "$c" = built ] || continue
+      t_prog=$SECONDS
       chmod +x "$work/$n"
       st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" "./$n" > "$n.out" 2> "$n.err") || st=$?
       echo "$st" > "$work/$n.status"
@@ -716,19 +720,37 @@ case ${1:-} in
     # AX5.2: each test of test/asm/run/ assembled and linked by Arbace into WORK/NAME (as run-check), run by the CPU (WORK/NAME.status,
     # .out, .err) and by x86i (WORK/NAME.x86i.*), decoded by x86i (WORK/NAME.dec), the injected runs the controls name
     # (WORK/NAME.inject-FAMILY-FLAG.*); judged by test/asm/x86i_judge.ae
-    shift; record=
-    for a in "$@"; do case $a in --record) record=1 ;; *) echo "repr-asm x86i-check [--record]" >&2; exit 2 ;; esac; done
+    # AXS89 (a): --only LIST (a file of program names, one a line, as the gate's rotation writes its list) runs those programs alone,
+    # each with its lockstep's sys and step modes, judged on what it ran: the recorded rows of the others are left, the coverage
+    # is not held, the controls whose programs are not in the list are not judged, and one more control, slice-foreign, judges the
+    # run against the recorded rows of the programs it did not run, which must fail; --record needs the whole set
+    shift; record=; only=
+    while [ $# -gt 0 ]; do case $1 in
+      --record) record=1 ;;
+      --only) [ $# -ge 2 ] && [ -f "$2" ] || { echo "repr-asm x86i-check --only LIST: LIST is a file of program names" >&2; exit 2 ; }; only=$2; shift ;;
+      *) echo "repr-asm x86i-check [--record] [--only LIST]" >&2; exit 2 ;; esac; shift; done
+    [ -z "$record" ] || [ -z "$only" ] || { echo "repr-asm x86i-check: --record records the whole set: no --only" >&2; exit 2; }
     export REPR_ASM_TABLE=$root/asm/amd64/table.edn
     work=$root/.tmp/repr-asm/x86i; rm -rf "$work"; mkdir -p "$work" "$lists"
     : > "$lists/x86i.list"
     # the synthetic programs (AX5.4): written by test/asm/x86i/gen.ae into WORK/synth, their digests the recorded ones
     "$0" x86i synth "$work/synth"
     for f in "$root"/test/asm/run/*.s "$root"/test/asm/x86i/*.s "$work"/synth/*.s; do n=${f##*/}; printf '%s\t%s\n' "${n%.s}" "$f" >> "$lists/x86i.list"; done
+    if [ -n "$only" ]; then
+      unknown=$(awk -F'\t' 'FNR == NR { if ($0 != "") want[$0] = 1; next } { have[$1] = 1 } END { for (n in want) if (!(n in have)) print n }' "$only" "$lists/x86i.list")
+      [ -z "$unknown" ] || { echo "repr-asm x86i-check: --only names programs that do not exist:" $unknown >&2; exit 2; }
+      awk -F'\t' 'FNR == NR { want[$0] = 1; next } $1 in want' "$only" "$lists/x86i.list" > "$lists/x86i.list.slice"
+      mv "$lists/x86i.list.slice" "$lists/x86i.list"
+      [ -s "$lists/x86i.list" ] || { echo "repr-asm x86i-check: --only LIST is empty" >&2; exit 2; }
+    fi
+    t_start=$SECONDS; : > "$work/times.tsv"
     arbace_tool -m arbace.asm.link build "$lists/x86i.list" "$work" "$src/musl-1.2.6"
     x86i_light
+    t_progs0=$SECONDS
     ctl=$root/test/asm/controls-x86i.txt
     while IFS=$'\t' read -r n c _; do
       [ "$c" = built ] || continue
+      t_prog=$SECONDS
       chmod +x "$work/$n"
       st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" "./$n" > "$n.out" 2> "$n.err") || st=$?
       echo "$st" > "$work/$n.status"
@@ -754,7 +776,9 @@ case ${1:-} in
             (cd "$work" && X86I_INJECT=$ref X86I_STEP_LIMIT=200000 GOMAXPROCS=1 timeout 120 "$x86i_exe" trace --mode $m "./$n" > "$n.$kind-${ref/:/-}" 2>&1) || true ;;
         esac
       done < "$ctl"
+      printf '%s\t%s\n' "$n" "$((SECONDS - t_prog))" >> "$work/times.tsv"
     done < "$work/build.tsv"
+    echo "repr-asm x86i-check: $(wc -l < "$lists/x86i.list" | tr -d ' ') programs${only:+ (--only $only)}: built in $((t_progs0 - t_start))s, run in $((SECONDS - t_progs0))s (WORK/times.tsv: each program's seconds)"
     fails=0
     # the per-run coverage (AX5.5): the instructions the families claim (x86i claimed) against those the runs executed (their
     # .cov), the claimed ones never executed listed by family in WORK/coverage.txt; held to (or recorded into)
@@ -771,13 +795,15 @@ case ${1:-} in
       { echo "# x86i's per-run coverage (bin/repr-asm x86i-check --record; AX5.5): by family, the claimed instructions executed by the"
         echo "# check's programs, then those never executed. Written by the check; an instruction executed here and not in a later run fails it."
         cat "$work/coverage.txt"; } > "$cov"
+    elif [ -n "$only" ]; then
+      echo "repr-asm x86i-check: coverage of this slice only, not held to the record"
     elif [ -f "$cov" ]; then
       lost=$(awk 'FNR == NR { if ($0 !~ /^#/) for (i = 6; i <= NF; i++) was[$i] = 1; next } { for (i = 6; i <= NF; i++) if (!($i in was)) print $i }' "$cov" "$work/coverage.txt")
       if [ -n "$lost" ]; then echo "FAIL: x86i-check: coverage: executed when recorded, not now:" $lost; fails=$((fails + 1)); fi
     fi
     judge=(-e "(do (load-file \"$root/test/asm/x86i_judge.ae\") nil)")
-    arbace_tool "${judge[@]}" -e "(asm.x86i-judge/controls \"$work\" \"$lists/x86i.list\" \"$ctl\")" || fails=$((fails + 1))
-    arbace_tool "${judge[@]}" -e "(asm.x86i-judge/main \"$root/test/asm/x86i-results-amd64.edn\" \"$work\" \"$lists/x86i.list\" \"$root/test/asm/divergences-x86i.edn\" \"${record:-}\")" || fails=$((fails + 1))
+    arbace_tool "${judge[@]}" -e "(asm.x86i-judge/controls \"$work\" \"$lists/x86i.list\" \"$ctl\" \"${only:+partial}\")" || fails=$((fails + 1))
+    arbace_tool "${judge[@]}" -e "(asm.x86i-judge/main \"$root/test/asm/x86i-results-amd64.edn\" \"$work\" \"$lists/x86i.list\" \"$root/test/asm/divergences-x86i.edn\" \"${record:-}\" \"${only:+partial}\")" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
   x86i-decode-check)
     # AX5.5, AXS70 (b): x86i's Go decoder against arbace.asm.amd64.decode over the decode check's corpora in 64-bit mode (MC/X86's

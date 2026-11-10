@@ -1591,3 +1591,41 @@ Numbering from AXS89.
   step mode's cost spread over nights. *Recommended: (c)*, a small change to bin/repr-asm, then the part nightly.
 - **AXS90 encode-check at night.** (a) as built: `:clean-only`; (b) by corpus file rotation (`encode-check` takes corpora, not files).
   *Recommended: (a)* until the share is measured from passes.
+
+## As built: AXS89, AXS90 (2026-11-10; branch `asm-axs89`, on `asm-ax10`)
+
+The user decided on 2026-11-10 (the brief's lettering: its (a) for both): AXS89, x86i-check's `--only LIST` and its programs' rotation (the
+survey's option (c) above), and AXS90, encode-check from `:clean-only` into the nightly `--full` (whole: the survey's options named no such
+choice; (b), a rotation by corpus file, is not built). On the light lane, one check at a time.
+
+- **`bin/repr-asm x86i-check --only LIST`**: LIST a file of program names (a line each; the names of `test/asm/run/`, `test/asm/x86i/` and the
+  synthetic programs; an unknown name or an empty list refused). The slice's programs are assembled, linked and run, each with its lockstep's
+  sys and step modes, its decode and its loader judge; the rest is judged on what it ran: `test/asm/x86i_judge.ae`'s `main` cuts the recorded
+  rows to the list's programs ("recorded, not run" only among them), the per-run coverage is printed and not held to the record (a slice
+  executes a part of it), a control whose subject (for verdict, cpu and decode also whose reference program) is not in the list is not judged
+  (the count printed: the subset 15 of 23 judged, a slice of 5 programs 2), `--record` refuses `--only`. The negative control of a partial
+  run, `slice-foreign` (the user's): the same run held to the recorded rows of the programs it did not run must fail (`not recorded`); it prints
+  `control slice-foreign: fails as it must (N of its rows not in the other slices' reference)`, and the check fails when it does not. The shell
+  now writes each program's seconds into `WORK/times.tsv` and prints the build's and the run's seconds. Without `--only` the verb is as before
+  (the whole run, tried: 43 of 43 programs by their verdicts but `cpuid`'s two by design, rows equal, 18 controls and the coverage held).
+- **The rotation** (`test/gate/crops/asm.edn`, `test/gate/steps.edn`: `x86i-check`'s part `all` loses `:clean-only` and gains `:rotate {:only
+  "--only {list}" :universe "test/asm/x86i-results-amd64.edn" :subset "test/asm/subsets.edn" :id-re ... :failed-re ...}`; the id is the
+  program's name, the five rows of a program one id, `:failed-re` reads `FAIL: failing: x86i/NAME ...`): GT8.4's mechanism as Scheme's and
+  OCaml's (`test/asm/subsets.edn`: the map `{:id :all :subset [...]}`): a subset every night (`x86i-check.all.sub`: the 13 quick programs
+  that hold the controls' subjects and references: p4-hello, exit-status, calls, loop-sum, tls, relocs-data, weak, comdat, musl-string,
+  musl-setjmp, two-objects, string, misc), and one of seven slices of the other 30 a night (`x86i-check.all.sK`, a program's K the first 8 hex
+  digits of the SHA-256 of its name mod 7, the planner's own); `--full` runs the whole set and the clean run's whole tier too (`GATE_CLEAN_WHOLE`
+  as every rotated part). Not built: slices cut by hand to a time (the planner's slices are its hash's: with this subset they hold 6, 43, 20,
+  21, 19, 48 and 69 seconds of run each by `times.tsv`, the heaviest, `alu`, `synth-bit` and three quick ones, being slice 6).
+  `bin/gate --nightly --plan` (GATE_NIGHT=3 and 6) names `x86i-check.all.sub` (13 files) and `.s3` or `.s6` (5 files); `--full --plan` the whole
+  `x86i-check.all`, `--oracle --plan` no table error.
+- **AXS90**: `asm-amd64-encode.mc-x86` no longer `:clean-only` (the nightly whole, 9 min 31 s).
+- **Measured** (by hand, `/usr/bin/time -v`, one at a time on stage 0, the memory checked first; the encode check's and the other asm
+  steps' numbers the earlier measures', `.tmp/gate/NAME.mem` of `asm-ax10`): x86i-check whole 8 min 39 s (asm-ax10 measured 14 min 44 s, another
+  load; 1.3 GiB; build 173 s, runs 228 s), the subset 38 s (1.0 GiB), slice 6 (5 programs) 2 min 28 s (1.2 GiB: build 34 s, run 62 s,
+  the rest the synthetic programs' generation, the light driver and the judge). A night is the subset and a slice: 38 s plus about 1 min
+  30 s on average (an estimate from `times.tsv`), 3 min 6 s the heaviest. `bin/gate --full --costs`: asm-amd64's full tier 22 min 58 s, 338% of
+  half a share (6 min 48 s), because `--costs` counts the whole `x86i-check.all` (it does not know the rotation: Scheme's and OCaml's rotated
+  parts have the same blind spot); counted as the night runs it, 16 min 29 s on average (242%) and 17 min 25 s the heaviest night (256%).
+  The encode check is the cost: without it the night is 6 min 58 s (102%). Proposed (AXS91): encode-check rotated by corpus file in sevenths
+  (about 1 min 22 s a night, the night at about 8 min 20 s, 122%), or the share raised.

@@ -200,7 +200,13 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   print), both crops in crops-score (x86-64 97.9 / 100.0 / 100.0, arm64 49.9 / 91.7 / 60.0), their gate steps spliced from
   `test/gate/crops/asm.edn` and `asm-oracle.edn` (five essential, about 1 min 20 s a chain; `--full` 4 min 48 s nightly with encode,
   table, decode dis and rt and x86i-check `:clean-only`; the oracle tier on `:llvm-mc`), half a share each (`:crops` 11). Next: the
-  first passes (two each bind the share, GTS222), AXS89 (x86i-check nightly), AX5.6, AR3.
+  first passes (two each bind the share, GTS222), AX5.6, AR3.
+  `asm-axs89` (on `asm-ax10`; the user's of 2026-11-10, doc/asm/AMD64-SURVEY.md, "As built: AXS89, AXS90"): `bin/repr-asm x86i-check --only LIST`
+  (judged on what it ran, with its slice-foreign control), `test/asm/subsets.edn` (13 quick programs nightly, the rest a seventh a night,
+  GT8.4's rotation) and `x86i-check` nightly (a night 38 s and 1 min 30 s on average, 3 min 6 s the heaviest slice; whole 8 min 39 s);
+  `asm-amd64-encode` out of `:clean-only` into the nightly (9 min 31 s). asm-amd64's full tier is 17 min 25 s the heaviest night (256% of
+  half a share, 6 min 48 s; `--costs` says 338%, it does not know the rotation): over, by the encode check. Proposed AXS91: encode-check
+  rotated in sevenths (the night at about 8 min 20 s, 122%), or a larger share.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
