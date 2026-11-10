@@ -354,6 +354,8 @@
 (defn- ty-of [e] (or (:ty (r-of e)) (unsupported "an expression without a type" (:kind e))))
 
 (declare mirror-expr mirror-block mirror-block* lower-pattern)
+(def ^:dynamic *as-cast-src* nil)   ; RF13b: [hir-id span] of a cast's operand (apply_adjustment's is_from_as_cast)
+
 
 (defn- local-res [path] (let [r (first (:res path))] (when (= 'local (first r)) (second r))))
 
@@ -389,6 +391,11 @@
         (cond (tc/std-variant p) [(c/path-parent p) (tc/variant-index p) p (kind p)]
               (get (:adts c/*si*) p) [p 0 p (kind p)]
               :else nil))
+      ;; RF13b: `Self(..)` in an impl of a tuple or unit struct (Res::SelfCtor): the self type's constructor
+      :self-alias
+      (let [st c/*self-ty*]
+        (when-let [ctor (and (vector? st) (= :adt (first st)) (number? (second st)) (:ctor (c/def-of (second st))))]
+          [(second st) 0 (second st) (if (str/includes? (str (:kind (c/def-of ctor))) "Fn") :fn :const)]))
       nil)))
 
 (def ^:dynamic *loops* nil)   ; the enclosing loops and labeled blocks, innermost first
@@ -573,8 +580,9 @@
       :addr-of (if (:raw e)
                  (mk e :raw-borrow ty :mutbl (boolean (:mutbl e)) :arg (mirror-expr (:expr e)))
                  (mk e :borrow ty :bk (if (:mutbl e) :mut :shared) :arg (mirror-expr (:expr e))))
-      :cast (let [src (:expr e)]
-              (cond (or (:coercion-cast (r-of src))
+      :cast (let [src (:expr e)
+                  mirror-expr (fn [x] (binding [*as-cast-src* [(:hir-id src) (:span e)]] (mirror-expr x)))
+                  c (cond (or (:coercion-cast (r-of src))
                         ;; check_cast's try_coercion_cast of a cast to the type the expression already has (CoercionCast:
                         ;; `7.5 as F`, the literal typed F by ExpectCastableToType), raw pointers apart (PointerCast)
                         (let [st (adjusted-ty src)] (and (= (tc/erase-ty st) (tc/erase-ty ty))
@@ -599,15 +607,18 @@
                                     :rhs lit}
                                    lit)]
                       (mk e :cast ty :source source))
-                    :else (let [c (mk e :cast ty :source (mirror-expr src))]
-                            ;; RF12: a cast's user-provided type (ValueTypeAscription over the cast)
-                            (if-let [u (:cast-user-ty (r-of e))]
-                              (mk e :value-type-ascription ty :source c :user-ty u :uspan (:span (:ty e)))
-                              c))))
+                    :else (mk e :cast ty :source (mirror-expr src)))]
+              ;; RF12: a cast's user-provided type (ValueTypeAscription over the cast; RF13b: over a coercion cast's Use too)
+              (if-let [u (:cast-user-ty (r-of e))]
+                (mk e :value-type-ascription ty :source c :user-ty u :uspan (:span (:ty e)))
+                c))
       :drop-temps (mk e :use ty :source (mirror-expr (:expr e)))
       :field (let [bt (let [x (r-of (:expr e)) t (:ty x)] (reduce (fn [_ [_ tt]] tt) t (:adj x)))
                    [vid vi] (if (= :adt (first bt))
-                              (let [d (second bt)] (if (number? d) [(tc/single-variant d) 0] (unsupported "a std field")))
+                              ;; RF13b: another module's struct (core's `Range` in slice/index.rs): its interface's fields
+                              (let [d (second bt)] (cond (number? d) [(tc/single-variant d) 0]
+                                                         (and (string? d) (not (tc/enum? d)) (get (:adts c/*si*) d)) [d 0]
+                                                         :else (unsupported "a std field")))
                               [nil 0])
                    idx (if vid (field-index vid (:ident e)) (parse-long (str (:ident e))))]
                (mk e :field ty :lhs (mirror-expr (:expr e)) :variant vi :name idx))
@@ -704,6 +715,7 @@
                        (assoc base :k :borrow :bk (if (nth target 2) :mut :shared) :arg x))
       (str/starts-with? (str k) "Pointer")
       (assoc base :k :pointer-coercion :source x
+             :from-cast (and (some? (:hir-id e)) (= (:hir-id e) (first *as-cast-src*)))
              :cast (cond (and (= :closure (first (:ty x))) (= :fnptr (first target))) "ClosureFnPointer(Safe)"
                          (and (= :fndef (first (:ty x))) (= :fnptr (first target))) "ReifyFnPointer(Safe)"
                          (and (#{:ref :ptr} (first (:ty x))) (= :ptr (first target)) (= (last (:ty x)) (last target))) "MutToConstPointer"
@@ -1708,7 +1720,7 @@
               (let [[bb s] (as-operand bb scope src :no)]
                 [bb (list 'cast (cast-kind st* (:ty x)) (op-form s) (ty-form (:ty x)))])))
     :pointer-coercion (let [[bb s] (as-operand bb scope (:source x) :no)]
-                        [bb (list 'cast (str "PointerCoercion(" (:cast x) ", Implicit)") (op-form s) (ty-form (:ty x)))])
+                        [bb (list 'cast (str "PointerCoercion(" (:cast x) (if (:from-cast x) ", AsCast)" ", Implicit)")) (op-form s) (ty-form (:ty x)))])
     :repeat (let [n (c/print-const (:count x))]
               (if (= "0" (str n))
                 (unsupported "a zero-length repeat")
@@ -2276,18 +2288,27 @@
 
 (defn- str-eq-fn [] [:fndef "core::cmp::PartialEq::eq" [[:str] [:str]]])
 
+(defn- switch-bits
+  "RF13b: a SwitchInt value as SwitchTargets holds it (u128 bits: an i8 discriminant's -1 is 255)"
+  [v t]
+  (if (and (integer? v) (neg? v) (signed? t))
+    (+ v (pow2 (int-bits (second t))))
+    v))
+
 (defn- perform-test!
   "perform_test: TEST of PLACE at BB, each branch to its target block (else OTHERWISE)"
   [bb otherwise place test targets]
   (let [target (fn [br] (or (some (fn [[b blk]] (when (= b br) blk)) targets) otherwise))]
     (case (first test)
       :switch (let [adt (second test)
-                    vals (keep (fn [[vi d]] (when-let [b (some (fn [[br blk]] (when (= br [:variant vi]) blk)) targets)] [d b]))
+                    dty (tc/discr-ty adt)
+                    vals (keep (fn [[vi d]] (when-let [b (some (fn [[br blk]] (when (= br [:variant vi]) blk)) targets)] [(switch-bits d dty) b]))
                                (map-indexed vector (tc/discriminant-values adt)))
                     d (temp! (tc/discr-ty adt))]
                 (assign! bb d (list 'discriminant (place-form place)))
                 (terminate! bb (list 'switch (op-form [:move d]) (vec vals) (target [:failure]))))
-      :switch-int (let [vals (keep (fn [[br blk]] (when (= :const (first br)) [(second (nth (second br) 3)) blk])) targets)]
+      :switch-int (let [pt (place-ty place)
+                        vals (keep (fn [[br blk]] (when (= :const (first br)) [(switch-bits (second (nth (second br) 3)) pt) blk])) targets)]
                     (terminate! bb (list 'switch (op-form [:copy place]) (vec vals) (target [:failure]))))
       :if (terminate! bb (list 'switch (op-form [:copy place]) [[0 (target [:failure])]] (target [:success])))
       :string-eq (let [succ (target [:success]) fail (target [:failure])
@@ -2664,7 +2685,9 @@
   (let [bt (p-ty pl)]
     (case (first bt)
       :tuple [(parse-long (str (:ident e))) 0]
-      :adt (let [d (second bt)] (if (number? d) [(field-index (tc/single-variant d) (:ident e)) 0] (unsupported "a std field")))
+      :adt (let [d (second bt)] (cond (number? d) [(field-index (tc/single-variant d) (:ident e)) 0]
+                                      (and (string? d) (not (tc/enum? d)) (get (:adts c/*si*) d)) [(field-index d (:ident e)) 0]
+                                      :else (unsupported "a std field")))
       (unsupported "a field of" bt))))
 
 (defn- cat-overloaded-place [e base]
@@ -3155,6 +3178,10 @@
       ;; RF12: a closure: its body's owner's name (an impl's method `<impl at ..>::cmp`), then `{closure#N}`
       (and p (= "Closure" (:kind d)) (#{"Fn" "AssocFn" "Closure"} (:kind p)))
       (str (mir-name p) "::{closure#" (:disamb d) "}")
+      ;; RF13b: an item nested in a function (assert_unsafe_precondition!'s `precondition_check`): its owner's name, then its
+      ;; own (the forced impl filename reaches through the whole path)
+      (and p (#{"Fn" "AssocFn"} (:kind d)) (#{"Fn" "AssocFn"} (:kind p)))
+      (str (mir-name p) "::" (second (:data d)))
       (and p (str/starts-with? (str (:kind p)) "Impl") (sequential? (:span (:node p))))
       (let [[l1 c1 l2 c2] (:span (:node p))
             ;; def_span: an impl's header, to its self type (its where clause) when the item's text is the root file's
@@ -3165,7 +3192,9 @@
                           (if (pos? (compare [l2 c2] e)) e [l2 c2]))
                         [l2 c2]))]
         ;; the impl's parent's path first (an impl in a module or a body: `hint::<impl at ..>::f`; the crate root's prints nothing)
-        (let [pre (binding [c/*in-value* true] (c/print-def-path (:parent p) []))]
+        (let [pp (c/def-of (:parent p))
+              ;; RF13b: an impl inside a function (`write_default`'s Guard): the function's own MIR name first
+              pre (if (and pp (#{"Fn" "AssocFn"} (:kind pp))) (mir-name pp) (binding [c/*in-value* true] (c/print-def-path (:parent p) [])))]
           (str pre (when (seq pre) "::") "<impl at " (span-text [l1 c1 l2 c2]) ">::" (second (:data d)))))
       :else (binding [c/*in-value* true] (c/print-def-path (:id d) [])))))
 

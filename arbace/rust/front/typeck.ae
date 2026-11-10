@@ -1005,8 +1005,11 @@
       ;; no-op when the previous type's is 'static or the new one's own
       (and (= :ref (first f)) (= :ref (first t)) (= (nth f 2) (nth t 2)) (not (nth f 2))
            (or (and (= (second f) (second t)) (not= [:re-erased] (second f)))
-               (and *use-lub* (= [:re-static] (second t)))))
-      (unify from to)
+               (and *use-lub* (= [:re-static] (second t))))
+           ;; RF13b: only when the types are the same (`self` of type &&T returned as &T, the elided region its own, is
+           ;; deref-coerced: `&(*(*_1))`)
+           (let [sn (snapshot)] (or (unify from to) (do (rollback! sn) false))))
+      true
       ;; RF12: *mut T to *const T: Pointer(MutToConstPointer) (coerce_raw_ptr)
       (and (= :ptr (first f)) (= :ptr (first t)) (second f) (not (second t)))
       (let [ok (unify (nth f 2) (nth t 2))]
@@ -1640,6 +1643,9 @@
       ;; RF12: the impl's clauses on a parameter by the parameter environment (`impl<T: Copy> Copy for MaybeUninit<T>` is not
       ;; MaybeUninit<T>'s for a T without Copy), not assumed as an accepted program's obligations are
       :adt (let [s (snapshot) r (binding [*strict-params* true] (impls-for t (c/lang "copy") []))] (rollback! s) (vector? r))
+      ;; RF13b: a rigid projection by its where clauses, then its item bounds (`<T as Pointee>::Metadata: Copy`)
+      :proj (boolean (or (some (fn [cl] (and (= :trait (first cl)) (= (c/lang "copy") (first (second cl))) (= t (shallow (first (second (second cl))))))) (param-env))
+                         (alias-implements? t (c/lang "copy"))))
       false)))
 
 (defn- fact-of
@@ -1813,12 +1819,15 @@
                        ;; RF12: `<dyn Any + Send>::is::<T>` (no trait): the type's associated function, as a type-relative
                        ;; path's, its turbofish applied
                        (when (and (nil? tr) (= 1 (count segs)) (not (#{:err :unknown} (first bt))))
+                         (binding [*assoc-const* (atom nil)]
                          (when-let [t (probe-assoc-fn bt nm)]
+                           ;; RF13b: an inherent associated constant (`<$t>::MIN` in Wrapping's impls): NamedConst
+                           (when (and *extra* @*assoc-const*) (note! e :named-const @*assoc-const*))
                            (let [t (apply-turbofish {:kind :path :path {:segs segs}} t)]
                              (when (and *extra* (= :fndef (first t)))
                                (let [ip (impl-item-of (second t))]
                                  (when-let [u (canonical-user-ty (second t) (nth t 2) (when ip [ip bt]))] (note! e :user-ty u))))
-                             t)))
+                             t))))
                        [:unknown]))
           :path (do (doseq [seg (:segs (:path e)) a (:args (:args seg)) :when (and (map? (:const a)) (not (:node a)))] (anon-const! (:const a) true))
                     (binding [*user-self* (atom nil) *assoc-const* (atom nil)]
@@ -1873,7 +1882,8 @@
                       (do (when-not (#{"<<" ">>"} op) (unify lt rt))
                           (if (#{"==" "!=" "<" "<=" ">" ">="} op) [:bool] lt))
                       :else (overloaded-binop e op lt rt)))
-          :unary (let [t (check-expr (:expr e) (when (#{"-" "!"} (:op e)) expected))
+          :unary (let [t (binding [*mutable-place* (and *mutable-place* (= "*" (:op e)) (#{:unary :field :index :path} (:kind (:expr e))))]
+                           (check-expr (:expr e) (when (#{"-" "!"} (:op e)) expected)))
                        s (shallow t)]
                    (case (:op e)
                      ;; a builtin deref of a reference or pointer, else an overloaded one (Deref, DerefMut on an assigned
@@ -1896,7 +1906,9 @@
                      [:unknown]))
           :addr-of (let [ex (some-> expected shallow)
                          inner-ex (when (and ex (= :ref (first ex))) (nth ex 3))
-                         t (check-expr (:expr e) inner-ex)]
+                         ;; RF13b: `&mut *x.borrow_mut()`: an overloaded deref under a mutable borrow is DerefMut
+                         ;; (convert_place_derefs_to_mutable)
+                         t (binding [*mutable-place* (boolean (:mutbl e))] (check-expr (:expr e) inner-ex))]
                      (if (:raw e) [:ptr (:mutbl e) t] [:ref [:re-erased] (:mutbl e) t]))
           ;; check_expr_cast: the operand checked with ExpectCastableToType (a literal takes the type, a block does not
                   ;; coerce to it)
@@ -2010,7 +2022,8 @@
                                        (binding [*env* (conj *env* @env)]
                                          (when (:guard a) (check-expr (:guard a) [:bool]))
                                          [(:body a) (check-expr (:body a) expected)])))))]
-                   (lub! arms (when (and expected (not (tvar? (shallow expected)))) expected)))
+                   ;; RF13b: a match without arms is `!` (check_expr_match), coerced where it is used (NeverToAny)
+                   (if (empty? arms) [:never] (lub! arms (when (and expected (not (tvar? (shallow expected)))) expected))))
           :let (let [t (check-expr (:init e) nil) env (atom {})]
                  (check-pat (:pat e) t env :none)
                  (set! *env* (conj *env* @env))
@@ -2252,6 +2265,8 @@
                 (and (= :adt (first f)) (= :adt (first t)) (= (second f) (second t)) (#{"alloc::boxed::Box" "alloc::rc::Rc" "alloc::sync::Arc"} (second f))
                      (= :dyn (first (shallow (first (nth t 2))))))
                 (and (#{:fndef :closure} (first f)) (= :fnptr (first t)))
+                ;; RF13b: *mut T to *const T (coerce_raw_ptr: `self as _` to *const T)
+                (and (= :ptr (first f)) (= :ptr (first t)) (second f) (not (second t)))
                 (and (= :ref (first f)) (= :ref (first t)) (nth f 2) (not (nth t 2))))
         (let [sn (snapshot)] (when-not (coerce! x from to) (rollback! sn)))))))
 

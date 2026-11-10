@@ -313,6 +313,7 @@
                                   :kind (str "Static { safety: Safe, mutability: " (if (:mutbl it) "Mut" "Not") ", nested: false }")})]
                 (walk-body! (:expr it) id))
       :ty-alias (add-def! {:parent parent :data [:type nm] :kind "TyAlias" :node it :ident-span isp})
+      :foreign-ty (add-def! {:parent parent :data [:type nm] :kind "ForeignTy" :node it :ident-span isp})
       :mod (let [id (add-def! {:parent parent :data [:type nm] :kind "Mod" :node it :ident-span isp :module true})]
              (doseq [x (:items it)] (collect-item! id x)))
       ;; a module's imports, for the names an expansion's paths use (their resolutions are not in the oracle's data)
@@ -694,6 +695,19 @@
                   (some #(when (= nm (:name %)) %) (:children (get (:mods *std*) m))))]
         (when c (recur (:path c) (rest rest-names)))))))
 
+(defn- local-of-ext
+  "RF13b: an interface path the root file defines itself (a constructor's by its variant or struct), its local def id"
+  [p]
+  (when (and *local-paths* (string? p))
+    (let [ctor? (re-find #"::\{constructor#\d+\}$" p)
+          base (if ctor? (subs p 0 (str/last-index-of p "::")) p)
+          id (get @*local-paths* base)]
+      ;; as the resolver's local resolutions: a constructor by its variant or struct, with the constructor's kind
+      (when (number? id)
+        (if ctor?
+          (when-let [c (:ctor (def-of id))] [id (:kind (def-of c))])
+          [id (:kind (def-of id))])))))
+
 (defn res-def
   "A path's resolution as [:local ID KIND] [:ext PATH KIND] [:prim N] [:param P] [:self-alias] [:self-param] or nil"
   [path]
@@ -706,7 +720,11 @@
     (case (head r)
       def (let [k (second r) p (nth r 2)
                 p (if k p (or (std-path-def (path-segs p)) p))]
-            [:ext p (or k (ext-kind p))])
+            (if-let [[lid lk] (local-of-ext p)]
+              ;; RF13b: core's own definition named through its interface path (a prelude's `Ok`, `None` in result.rs and
+              ;; option.rs): the local definition, as rustc's one DefId
+              [:local lid lk]
+              [:ext p (or k (ext-kind p))]))
       local-def (let [k (second r) sp (nth r 2)]
                   (case k
                     ("TyParam" "ConstParam") [:param (scope-param (:ident (peek (:segs path))))]
@@ -902,6 +920,7 @@
                (case k
                  ("Struct" "Enum" "Union") [:adt id (adt-args id (:args last-seg))]
                  "TyAlias" (local-alias-ty id (adt-args id (:args last-seg)))
+                 "ForeignTy" [:adt id []]
                  [:err (str "local " k)]))
       (or (type-relative path) [:err (str "unresolved " (pr-str (mapv :ident (:segs path))) " " (pr-str (:res path)))]))))
 
@@ -1063,7 +1082,7 @@
 
 (def ^:dynamic *in-value* false)
 
-(declare print-ty print-def-path print-arg name-binder fn-sig ctor-sig fndef-sig)
+(declare print-ty print-def-path print-arg name-binder fn-sig ctor-sig fndef-sig print-dyn)
 
 (def ^:dynamic *erased-regions* false)   ; RF10: MIR's constants print every free region erased ('_)
 
@@ -1168,7 +1187,11 @@
         in-self (when-let [c (characteristic-def self-ty)] (= (def-parent c) parent))
         in-trait (when tr (= (def-parent (first tr)) parent))]
     (if (or in-self in-trait)
-      (print-path-with-qualified self-ty tr)
+      ;; RF13b: an inherent impl of a trait object (`impl dyn Any`): its type_of's object lifetime is not erased (MIR's
+      ;; `<(dyn any::Any + 'static)>::is::<T>`)
+      (if (and (nil? tr) (= :dyn (first self-ty)) (= [:re-static] (nth self-ty 2)))
+        (generic-delimiters (fn [] (binding [*erased-regions* false] (print-dyn (second self-ty) (nth self-ty 2)))))
+        (print-path-with-qualified self-ty tr))
       (let [pre (print-def-path parent [])]
         (str pre (when (seq pre) "::")
              (generic-delimiters (fn [] (str "impl " (when tr (str (print-def-path (first tr) (second tr)) " for ")) (print-ty self-ty)))))))))

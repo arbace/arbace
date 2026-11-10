@@ -2886,3 +2886,23 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
 - Synthetic corpus: 47 of 67 own (the same 47); Rust's score unchanged (RFP43 (a)). Proposed RFP48 (trait resolution in mono), RFP49
   (the collector through std's bodies), RFP50 (closures' shims). doc/rust/FRONTEND-SURVEY.md, "As built: RF13 (first slice)".
 - Light lane: one process at a time, under 2 GiB a process (`RF11_PROCS=2`, `GOMEMLIMIT` 1800-2000MiB), no network.
+
+## 2026-11-10: RF13b, more of core's bodies equal to rustc's built MIR (branch `rust-rf13b`, from `mac/rust-rf13` `bd6a6ca6f`)
+
+- RF12-P6's six bodies left now equal: `mut_ptr::cast_const` (check_cast's try_coercion_cast of `*mut T` to `*const T`, the operand's
+  pointer coercion `AsCast` as THIR's apply_adjustment marks a cast's operand), `slice::as_ptr`/`as_mut_ptr` (the cast's user type
+  over a coercion cast's `Use`), `ptr::metadata::from_raw_parts`/`_mut` (a rigid projection Copy by its item bounds), `<DynMetadata>
+  ::size_of`/`align_of` (foreign types: `extern { type VTable; }` resolved, lowered, collected as `ForeignTy`; rustc 1.99.1's
+  rustc_resolve build_reduced_graph_for_foreign_item and rustc_ast_lowering's foreign items as the model). Their lowering was
+  contained, so no proposal was needed.
+- Widened over core-check's 37 modules, the largest classes of RF12's non-equal bodies by cause, each after rustc's code: a
+  prelude's variant of the root file's own enum mapped to the local definition (result.rs, option.rs: the largest class), a trait
+  object's inherent impl printed with its object lifetime, nested items' MIR names through their owner, `match x {}` as `!`, the
+  no-op reference coercion only for the same type, DerefMut under `&mut`, another module's struct fields from the interface,
+  `<$t>::MIN` as NamedConst, `Self(..)` as the constructor, SwitchInt's values as u128 bits, rustc's disambiguator in a body's key
+  (`do_panic#1`), `[const]` bounds printed. Alternatives considered: judging the duplicate `do_panic` keys as ambiguous (the oracle
+  has `#N` files, so the key was ours to fix) and normalizing SwitchInt's values in the printer only (the built MIR then still
+  disagreed with codegen's `const-switch-bits`, which reads constants as bits).
+- core-check: 5,398 equal (5,108 at RF12), 114 more but for the allocations (71), 148 differ (381), 117 refused (217). The known
+  files unchanged: `bin/rust-front core-essential` (564 of 567) and `bin/rust-front essential`. doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF13b, core's bodies equal to rustc's built MIR".

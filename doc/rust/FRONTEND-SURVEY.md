@@ -2884,3 +2884,65 @@ In the order they depend on each other, each one process at a time:
   `dyn Fn` vtable need shim.rs' ClosureOnceShim and VTableShim bodies, which only the record has (local, so not taken). Options:
   (a) **build the two shims natively (shim.rs: a call of the closure's body with its environment by reference or by value)**, after
   RFP48; (b) take the record's shim bodies for local closures (a record body in our module). *Recommended: (a)*.
+
+## As built: RF13b, core's bodies equal to rustc's built MIR (2026-11-10)
+
+Branch `rust-rf13b` (from `mac/rust-rf13` `bd6a6ca6f`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`).
+Every fix below follows rustc 1.99.1's own code (the pinned rust-src and rustc's sources as RF12 read them); none needs a choice.
+
+### RF12-P6's six bodies left
+
+- **`mut_ptr::cast_const`** (`self as _`): check_cast's `try_coercion_cast` now takes `*mut T` to `*const T` (coerce_raw_ptr, the
+  operand's `Pointer(MutToConstPointer)`), the cast's `_` unified with the return type; a raw pointer's coercion stays a PtrToPtr
+  cast (not a CoercionCast, as check_cast keeps it), and the operand's pointer coercion prints `AsCast` (THIR's
+  `apply_adjustment`: `is_from_as_cast` when the expression's parent is a cast).
+- **`slice::as_ptr` / `as_mut_ptr`** (`self as *const [T] as *const T`): the cast's user type (`ValueTypeAscription`) is put over a
+  coercion cast's `Use` too, as `make_mirror_unadjusted` does for every branch.
+- **`ptr::metadata::from_raw_parts` / `_mut`**: a rigid projection is Copy by its where clauses and its item bounds
+  (`<T as Pointee>::Metadata: Copy`), so the operand is `copy`.
+- **`<DynMetadata<Dyn>>::size_of` / `align_of`** (and `vtable_ptr`): foreign types (`unsafe extern "C" { type VTable; }`): the
+  resolver defines a foreign block's types (`ForeignTy`, build_reduced_graph_for_foreign_item), lowering gives each its own item
+  and owner (`:foreign-ty`), the collector a def (`ForeignTy`, its path `ptr::metadata::VTable`), the type an ADT without
+  arguments. The block's functions and statics are still not defined (none of the 37 modules calls one).
+
+All six now equal to rustc's built MIR (`bin/rust-front core-check` over `ptr/mut_ptr.rs`, `slice/mod.rs`, `ptr/metadata.rs`
+with the full oracle).
+
+### The largest classes of RF12's non-equal bodies, by cause
+
+- **A prelude's variant of the root file's own enum** (`Ok`, `Err`, `Some`, `None` in result.rs and option.rs): resolved through
+  core's prelude to the interface path, it was std's ADT, so the pattern's bindings and the constructor's arguments stayed
+  inference variables (`let _3: _`, `Option::<_>::None`). `res-def` now maps an interface path the root file defines (`*local-paths*`)
+  to the local definition, a constructor by its variant or struct with the constructor's kind (rustc's one DefId). The largest
+  class: result 36 → 57, option 53 → 92 equal, and method probes through those bindings (`<A as Iterator>::next` on `&mut A`).
+- **A trait object's inherent impl** (`impl dyn Any`): its self type's object lifetime is type_of's, not erased
+  (`<(dyn any::Any + 'static)>::is::<T>`).
+- **Items nested in a function** (`assert_unsafe_precondition!`'s `precondition_check`, an impl inside a method): their MIR name is
+  the owner's with the forced impl filename through the whole path (`slice::index::<impl at ..>::get_unchecked::precondition_check`).
+- **A match without arms** (`match *self {}`) is `!` (check_expr_match), coerced where used: NeverToAny's temporary.
+- **The no-op reference coercion only for the same type**: `self` (`&&T`) returned as `&T` with the elided region its own is
+  deref-coerced (`&(*(*_1))`), no longer unified.
+- **An overloaded deref under `&mut`** (`&mut *self.borrow_mut()`) is DerefMut (convert_place_derefs_to_mutable; also `&mut v[i]`'s
+  IndexMut).
+- **Another module's struct fields** (core's `Range` in slice/index.rs): read from the interface's fields (RF12's 55 refusals "a
+  std field").
+- **An inherent associated constant through a qualified self type** (`<$t>::MIN` in Wrapping's impls): NamedConst; `Self(..)` in an
+  impl of a tuple struct the constructor's aggregate (Res::SelfCtor).
+- **SwitchInt's values as SwitchTargets holds them** (u128 bits: an i8 discriminant's -1 is 255; codegen sign-extends as before).
+- **Two items of one name under one parent** (const_panic!'s `do_panic`s): their key carries rustc's disambiguator (`do_panic#1`),
+  as -Zdump-mir names their files; each is now judged against its own dump.
+- `[const]` and `const` bounds kept in lowering and printed in an impl Trait parameter's name (`impl [const] FnOnce(T) -> bool`);
+  a format placeholder's span from a user macro's literal kept at the root's place; `assert!`'s message from a run of root tokens a
+  macro passed on is their text.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (about 50 minutes under the host's load, the interface pass 20 of them,
+  under 2.5 GB): **5,398 equal** to rustc's built MIR (5,108 at RF12), 114 more but for the allocations (71), 148 differ (381), 117
+  refused (217), 74 without a body of rustc's by their key. No module lost an equal body.
+- What is left, by cause (`[:differ ...]` rows): the format placeholder span through core's `panic!` macros (`span: ?` in
+  `Argument::new_display`/`new_debug`'s user types, 26), user types' canonical variables for an impl's parameters
+  (`NonZero<^c_0>` for `NonZero<u8>`, 13), Copy of local ADTs whose Copy impl is in the root file (`PhantomData`, `MaybeUninit`:
+  `move` for `copy`, 4), `assert!`'s message through `debug_assert!` (6), array lengths not evaluated (`16 / size_of::<*const ()>()`,
+  2), `IntoIterator::into_iter` not inserted for `from_iter`'s argument (2); refusals: paths to private associated constants
+  (`T::IS_ZST`, `Self::SIZE`, 48 "a path"), method calls without their callee (28), and desugarings lowering marks `:err` (25).

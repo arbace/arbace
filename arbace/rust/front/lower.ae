@@ -268,6 +268,8 @@
                   ga (:args (peek (:segs path)))]
               {:trait path
                :polarity (fv (fv p :modifiers) :polarity)
+               ;; RF13b: `[const] Trait`, `const Trait` (BoundConstness), as HIR's pretty printer writes them
+               :constness (let [c (fv (fv p :modifiers) :constness)] (case (if (seq? c) (first c) c) Maybe :maybe Always :always nil))
                :bound-params (vec (fv p :bound_generic_params))
                :bound-names (vec (keep #(id-name (fv % :ident)) (fv p :bound_generic_params)))
                ;; Fn sugar's elided input lifetimes are the poly trait ref's fresh late-bound parameters
@@ -530,6 +532,14 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; format_args! (format.rs: flatten_format_args, inline_literals, expand_format_args' bytecode)
 
+(defn- placeholder-span
+  "RF13b: a placeholder's span: the root's [l1 c1 l2 c2], also of a format string a user's macro_rules! passed on
+  (`(span \"<expansion>\" l1 c1 l2 c2 M)` at the literal's root positions)"
+  [s]
+  (cond (vector? s) s
+        (and (seq? s) (= 'span (first s)) (= "<expansion>" (second s)) (pos? (long (nth s 2 0)))) (vec (take 4 (drop 2 s)))
+        :else s))
+
 (defn- fa-template [fa]
   (vec (for [pc (fv fa :template)]
          (case (head pc)
@@ -538,9 +548,9 @@
                              cnt (fn [c] (when-let [c (some-val c)]
                                            (if (= 'Literal (head c)) {:n (second c)}
                                                {:arg (let [i (fv (second c) :index)] (if (= 'Ok (head i)) (second i) -1))
-                                                :span (some-val (fv (second c) :span))})))]
+                                                :span (placeholder-span (some-val (fv (second c) :span)))})))]
                          {:arg (let [i (fv a :index)] (if (= 'Ok (head i)) (second i) -1))
-                          :span (some-val (fv p :span))
+                          :span (placeholder-span (some-val (fv p :span)))
                           :trait (fv p :format_trait)
                           :width (cnt (fv o :width)) :precision (cnt (fv o :precision))
                           :align (some-val (fv o :alignment)) :fill (some-> (some-val (fv o :fill)) second)
@@ -847,7 +857,7 @@
                                              :bounds (mapv lower-bound (fv t :bounds)) :ty (some-> (some-val (fv t :ty)) lower-ty)}))
         (merge base {:kind :err})))))
 
-(defn lower-item [it]
+(defn- lower-item-1 [it]
   (let [k (fv it :kind) sp (span-of it) attrs (lower-attrs (fv it :attrs)) vis (vis-of it)]
     (if (= 'Use (head k))
       (mapv (fn [u] (with-owner (node (assoc u :node :item)))) (use-items (second k) [] sp attrs vis))
@@ -890,6 +900,18 @@
              MacroDef (merge base {:kind :macro :ident (id-name (second k)) :def (nth k 2)})
              ForeignMod (merge base {:kind :foreign-mod :unsupported true})
              (merge base {:kind :err :ast (head k)}))])))))
+
+(defn lower-item
+  "RF13b: an item, and a foreign block's types after it as items of their own (each its own owner, as rustc's
+  foreign items are), `{:kind :foreign-ty}`"
+  [it]
+  (let [k (fv it :kind)]
+    (if (= 'ForeignMod (head k))
+      (into (lower-item-1 it)
+            (for [fi (fv (second k) :items) :let [fk (fv fi :kind)] :when (= 'TyAlias (head fk))]
+              (with-owner {:node :item :span (span-of fi) :attrs (lower-attrs (fv fi :attrs)) :vis (vis-of fi) :hir-id (next-id)
+                           :kind :foreign-ty :ident (id-name (fv (second fk) :ident))})))
+      (lower-item-1 it))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The crate
