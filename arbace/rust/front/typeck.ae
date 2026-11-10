@@ -62,6 +62,9 @@
   values of one written type are not the same type (the reborrows CoerceMany's LUB adds); bound regions kept"
   [t]
   (cond (and (vector? t) (#{:re-static :re-early :re-erased :re-var} (first t))) [:re-var (swap! *next-var* inc)]
+        ;; RF13e: a body's late-bound region (ReLateParam: the signature's `&[T]` liberated) is free too; one bound inside
+        ;; the type (a fn pointer's binder) kept
+        (and (vector? t) (= :re-bound (first t)) (not= :inner (nth t 2 nil))) [:re-var (swap! *next-var* inc)]
         (and (vector? t) (= :infer (first t))) t
         (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (generalize %) (map? %) (into {} (for [[k v] %] [k (generalize v)])) :else %) (rest t)))
         (vector? t) (mapv generalize t)
@@ -136,6 +139,7 @@
 (def ^:dynamic *facts* nil)  ; atom [fact]
 (def ^:dynamic *env* nil)    ; the bindings in scope: [{name type}] innermost last
 (def ^:dynamic *ret* nil)    ; the body's return type
+(def ^:dynamic *ret-pushed* nil)   ; RF13e: atom, the expressions the body's return coercion (a CoerceMany) has taken
 (def ^:dynamic *loops* nil)
 (def ^:dynamic *mutable-place* false)   ; checking an assignment's left side (IndexMut, &mut autoref)  ; atom: the enclosing loops' break types, innermost first
 
@@ -747,6 +751,8 @@
       (= (or (c/ext-of-local tr) tr) (c/lang "sized")) (not (unsized? self))
       ;; (RF13c: in marker.rs these are the root file's own traits)
       (#{(c/lang "meta_sized") (c/lang "pointee_sized")} (or (c/ext-of-local tr) tr)) true
+      ;; RF13e: Destruct holds for every type (its builtin candidate; the `[const]` bounds' constness is not checked here)
+      (= (or (c/ext-of-local tr) tr) (c/lang "destruct")) true
       (dyn-implements? self tr) true
       ;; an alias's item bounds (assemble_candidates_from_projected_tys)
       (alias-implements? self tr) true
@@ -759,6 +765,10 @@
           (unify-all (vec (:inputs sig)) (vec (second tup)))
           true))
       (and (#{:closure :fndef :fnptr} (first self)) (#{"core::clone::Clone" "core::marker::Copy"} tr)) true
+      ;; RF13e: the builtin Copy and Clone of tuples and arrays (builtin_copy_clone_conditions: their elements'), `()`
+      ;; among them (`Result<(), fmt::Error>: Copy`)
+      (and (#{:tuple :array} (first self)) (#{"core::clone::Clone" "core::marker::Copy"} (or (c/ext-of-local tr) tr)))
+      (every? #(holds? [tr [%]]) (if (= :tuple (first self)) (second self) [(second self)]))
       ;; an integer or float variable: the one impl among the integral (floating) ones that unifies, selected (the index
       ;; `v[0]`'s `{integer}: SliceIndex<[T]>` makes it usize)
       (and (tvar? self) (#{:int :float} (second self)) (<= (long *depth*) 4))
@@ -827,6 +837,19 @@
           (for [p (or *scope-traits* (keys (:traits c/*si*)))
                 :let [m (get (:traits c/*si*) p)]
                 :when (some #(= nm (first %)) (:items m))] p)))
+
+(defn- alias-trait-bound-args
+  "RF13e: a projection's item bound of TR (std's from its interface): the bound's trait arguments at the projection's
+  (`<T as DiscriminantKind>::Discriminant: PartialEq`'s [the projection, the projection]); nil when none names TR"
+  [self tr]
+  (when (= :proj (first self))
+    (let [[_ sad sargs] self
+          bounds (if (number? sad)
+                   (try (c/item-bounds sad) (catch Throwable _ []))
+                   (vec (for [[_ _ p bs] (:items (get (:traits c/*si*) (c/path-parent sad))) :when (= p sad)
+                              b bs :when (= 'trait (head b))]
+                          [:trait [(nth b 1) (mapv c/sty->ty (nth b 2))]])))]
+      (some (fn [cl] (when (and (= :trait (first cl)) (= tr (first (second cl)))) (erase (c/subst (second (second cl)) (vec sargs))))) bounds))))
 
 (defn- alias-implements?
   "An alias self type's item bounds name the trait: a projection's (the crate's associated type's bounds, std's from
@@ -1071,6 +1094,17 @@
       ;; coercing into a type variable: sup(?T, FROM), the value generalized (its free regions fresh variables)
       (and (tvar? t) (= :ty (second t)) (not (tvar? f))) (bind! t (generalize f))
       :else (unify from to))))
+
+(defn- ret-coerce!
+  "RF13e: the return coercion (ret_coercion, a CoerceMany): the first expression (a `return`'s or the body's) coerced to
+  the return type, a later one by try_find_coercion_lub, whose fast path leaves a type equal to the merged one alone"
+  [e ty]
+  (if (or (nil? *ret-pushed*) (zero? (long @*ret-pushed*)))
+    (coerce! e ty *ret*)
+    (let [prev (deep *ret*)]
+      (when-not (= prev (deep ty))
+        (binding [*use-lub* true] (coerce! e ty prev)))))
+  (when *ret-pushed* (swap! *ret-pushed* inc)))
 
 (defn- lub!
   "CoerceMany: the arms' common type, the expectation's when there is one, else a fresh variable's; the first arm coerced
@@ -1452,6 +1486,10 @@
                    (some (fn [cl] (when (and (= :trait (first cl)) (= tr (first (second cl))) (= (shallow lt) (shallow (first (second (second cl))))))
                                     (let [sn (snapshot)] (if (unify rt (second (second (second cl)))) true (do (rollback! sn) nil)))))
                          (param-env)))
+                 ;; RF13e: a rigid projection by its item bounds (`<T as DiscriminantKind>::Discriminant: PartialEq`, the
+                 ;; alias bound candidate)
+                 (when-let [bargs (alias-trait-bound-args (shallow lt) tr)]
+                   (let [sn (snapshot)] (if (unify rt (second bargs)) true (do (rollback! sn) nil))))
                  (impls-for (shallow lt) tr [rt])
                  ;; the rhs coerced to the impl's Rhs (`String + &String`: &str by deref coercion)
                  (let [rv (fresh :ty) sn (snapshot)]
@@ -1672,8 +1710,8 @@
         ret (if (:output e) (body-ty (:output e)) (or out (fresh :ty)))
         env (atom {})]
     (doseq [[p t] (map vector (:params e) ptys)] (check-pat (:pat p) t env :none))
-    (binding [*env* (conj *env* @env) *ret* ret *loops* nil]
-      (let [bt (check-expr (:body e) ret)] (coerce! (:body e) bt ret)))
+    (binding [*env* (conj *env* @env) *ret* ret *ret-pushed* (atom 0) *loops* nil]
+      (let [bt (check-expr (:body e) ret)] (ret-coerce! (:body e) bt)))
     (let [sp (closure-decl-span e)
           text (if (and sp *root-file*) (str "{closure@" *root-file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}") "{closure}")]
       (when *closures* (swap! *closures* conj {:text text :node e :env *env* :kind (deduced-kind expected)}))
@@ -1836,6 +1874,11 @@
 (defn- mut-borrow!
   "E's fact's last Borrow adjustment made mutable (`&` to `&mut`)"
   [e]
+  ;; RF13e: the builder's table too (its adjustments are what THIR applies: `bytes[a..b].copy_from_slice(..)`'s IndexMut)
+  (when (and *extra* (:hir-id e))
+    (swap! *extra* (fn [m] (if-let [j (last (keep-indexed (fn [j [k t]] (when (and (= "Borrow" k) (= :ref (first t))) j)) (get-in m [(:hir-id e) :adj])))]
+                             (update-in m [(:hir-id e) :adj j 1] (fn [t] (assoc t 2 true)))
+                             m))))
   (swap! *facts* (fn [fs] (let [i (last (keep-indexed (fn [i f] (when (and (= (:span f) (:span e)) (= (:kind f) (get kind-names (:kind e)))) i)) fs))]
                             (if-let [j (and i (last (keep-indexed (fn [j [k t]] (when (and (= "Borrow" k) (= :ref (first t))) j)) (:adj (nth fs i)))))]
                               (update-in fs [i :adj j 1] (fn [t] (assoc t 2 true)))
@@ -1851,6 +1894,8 @@
     :unary (when (= "*" (:op e)) (mut-borrow! (:expr e)) (place-mutable! (:expr e)))
     nil))
 
+(declare variants-any variant-name)
+
 (defn check-expr
   "check_expr_with_expectation: E's type (recorded), EXPECTED a type or nil"
   [e expected]
@@ -1859,6 +1904,27 @@
           :lit (lit-ty (:lit e) expected)
           ;; RF13c: an inline const: its value checked in the enclosing body (InlineConst shares its parent's typeck root)
           :const-block (check-expr (:expr e) expected)
+          ;; RF13e: check_expr_offset_of: each field's (container, variant, field) indices (an enum's variant then its field,
+          ;; a struct's or a tuple's field), the container the previous field's type; the expression a usize
+          :offset-of (let [idx (loop [cur (deep-normalize (body-ty (:container e))) fs (seq (:fields e)) acc []]
+                                 (if-let [f (first fs)]
+                                   (let [t (shallow cur)
+                                         fidx (fn [fields nm] (first (keep-indexed (fn [i [n ft]] (when (= n nm) [i ft])) fields)))]
+                                     (case (first t)
+                                       :adt (let [adt (second t) args (nth t 2)]
+                                              (if (enum? adt)
+                                                (let [vs (map #(if (map? %) (or (:path %) (:id %)) %) (variants-any adt))
+                                                      vi (first (keep-indexed (fn [i v] (when (= f (variant-name v)) i)) vs))
+                                                      [fi ft] (when vi (fidx (adt-fields (nth (vec vs) vi) args) (second fs)))]
+                                                  (if fi (recur ft (nnext fs) (conj acc [t vi fi])) acc))
+                                                (let [[fi ft] (fidx (adt-fields adt args) f)]
+                                                  (if fi (recur ft (next fs) (conj acc [t 0 fi])) acc))))
+                                       :tuple (let [i (parse-long f) tys (second t)]
+                                                (if (and i (< i (count tys))) (recur (nth tys i) (next fs) (conj acc [t 0 i])) acc))
+                                       acc))
+                                   acc))]
+                       (note! e :offset-of idx)
+                       [:uint "usize"])
           ;; a type-relative value path whose type has generic arguments (`Pair::<u8, 4>::len`): resolve_fully_qualified_call
           ;; on the lowered self type
           :type-relative (let [_ (doseq [l (ty-consts (:qself e))] (anon-const! l true))
@@ -2108,7 +2174,7 @@
                    (when (and b (not @b)) (reset! b unit))
                    [:never])
           :continue [:never]
-          :ret (do (when-let [x (:expr e)] (let [t (check-expr x *ret*)] (coerce! x t *ret*))) [:never])
+          :ret (do (when-let [x (:expr e)] (let [t (check-expr x *ret*)] (ret-coerce! x t))) [:never])
           :match (let [st (check-expr (:expr e) nil)
                        arms (vec (for [a (:arms e)]
                                    (binding [*env* (conj *env* {})]
@@ -2144,6 +2210,15 @@
               [:unknown]))]
     (record! e ty)))
 
+(defn- re-infer
+  "RF13e: a body-written type's erased (elided) regions each a fresh region variable"
+  [t]
+  (cond (= [:re-erased] t) [:re-var (swap! *next-var* inc)]
+        (and (vector? t) (= :re-bound (first t)) (= :inner (nth t 2 nil))) t
+        (and (vector? t) (keyword? (first t))) (into [(first t)] (map #(cond (vector? %) (re-infer %) (map? %) (into {} (for [[k v] %] [k (re-infer v)])) :else %) (rest t)))
+        (vector? t) (mapv re-infer t)
+        :else t))
+
 (defn- check-stmt [s]
   (case (:kind s)
     :let (let [_ (doseq [l (ty-consts (:ty s))] (anon-const! l true))
@@ -2153,7 +2228,9 @@
                ;; check_decl_initializer: the initializer coerced to the local's type (a fresh variable without a type
                ;; annotation, which a block initializer takes as its coercion target)
                t (if-let [init (:init s)]
-                   (let [lt (or decl (fresh :ty)) x (check-expr init lt)] (coerce! init x lt) lt)
+                   ;; RF13e: the declared type's elided regions fresh region variables (FnCtxt::re_infer), so an
+                   ;; initializer whose type is the local's own (`let s: &[U] = unsafe { transmute(x) }`) is no reborrow
+                   (let [lt (or (some-> decl re-infer) (fresh :ty)) x (check-expr init lt)] (coerce! init x lt) lt)
                    (or decl (fresh :ty)))
                env (atom {})]
            (check-pat (:pat s) t env :none)
@@ -2224,6 +2301,14 @@
       :range (doseq [x [(:lo p) (:hi p)] :when x] (unify (check-expr x ex) ex))
       (:tuple-struct :struct :path)
       (let [rd (if (:lang (:path p)) (when-let [lp (c/lang (:ident (first (:segs (:path p)))))] [:ext lp "Variant"]) (c/res-def (:path p)))]
+        ;; RF13e: `Self { .. }` (`let Self { start, end, exhausted } = self`): the impl's self type's struct at its arguments
+        ;; (Res::SelfTyAlias), whichever crate's
+        (when (and (= :self-alias (first rd)) (#{:struct :tuple-struct} (:kind p)) (= :adt (first (shallow (erase c/*self-ty*)))))
+          (let [st (shallow (erase c/*self-ty*)) fs (adt-fields (second st) (nth st 2))]
+            (unify ex st)
+            (case (:kind p)
+              :tuple-struct (doseq [[sp [_ ft]] (map vector (:pats p) fs)] (check-pat sp ft env dbm))
+              :struct (let [m (into {} fs)] (doseq [f (:fields p)] (check-pat (:pat f) (get m (:ident f) [:unknown]) env dbm))))))
         (when (= :ext (first rd))
           (let [vp (let [x (second rd)] (if (re-find #"\{constructor#\d+\}$" x) (c/path-parent x) x))]
             (when-let [[t vk args] (std-struct-ty vp)]
@@ -2235,7 +2320,14 @@
                             (doseq [[i f] (map-indexed vector (:fields p))]
                               (check-pat (:pat f) (or (get m (:ident f)) (second (nth fs i nil)) [:unknown]) env dbm)))
                   nil)))))
-        (when (= :local (first rd))
+        ;; RF13e: a path to the crate's constant (`UNUSED =>`): the pattern has the constant's type; an integer one's value
+        ;; for the constant pattern (const evaluation of its expression of literals)
+        (when (and (= :local (first rd)) (= :path (:kind p)) (str/starts-with? (str (nth rd 2)) "Const"))
+          (let [d (c/def-of (second rd)) t (erase (c/type-of (second rd)))]
+            (unify ex t)
+            (when-let [v (and (#{:int :uint} (first (shallow t))) (some-> (:expr (:node d)) c/const-int-value))]
+              (note! p :const-value v))))
+        (when (and (= :local (first rd)) (not (and (= :path (:kind p)) (str/starts-with? (str (nth rd 2)) "Const"))))
           (let [[_ id k] rd d (c/def-of id)
                 ;; a constructor's resolution finds its variant (the same identifier) or struct
                 vid (cond (= "Variant" k) id
@@ -2426,12 +2518,12 @@
                                 nil)))
                           h)
                         out)]
-            (binding [*env* [@env] *ret* out *anon-order* (body-const-order (:body n) @*anon-consts*)]
+            (binding [*env* [@env] *ret* out *ret-pushed* (atom 0) *anon-order* (body-const-order (:body n) @*anon-consts*)]
               (let [t (check-block (:body n) out)
                     be {:kind :block :span (:span (:body n)) :hir-id [(first (:hir-id n)) :body]}]
                 ;; the body's block expression is a fact of its own, coerced to the return type
                 (record! be t)
-                (coerce! be t out)
+                (ret-coerce! be t)
                 t))))
           (let [_ (doseq [l (ty-consts (:ty n))] (anon-const! l false))
                 t (erase (c/type-of (:id d)))]

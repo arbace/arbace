@@ -565,9 +565,20 @@
       :const-block (if-let [d *body-def*]
                      (mk e :named-const ty :text (str (binding [c/*in-value* true c/*erased-regions* true]
                                                         (c/print-def-path d (c/identity-args (c/generics-of d))))
-                                                      "::{constant#" (:index e) "}"))
+                                                      ;; (RF13e: an inline const's own, `f::<T>::{constant#0}::{constant#0}`)
+                                                      (apply str (map #(str "::{constant#" % "}") (or (:index-path e) [(:index e)])))))
                      (unsupported "an inline const outside a body"))
       :path (mirror-path e ty)
+      ;; RF13e: thir cx's OffsetOf: a call of the offset_of intrinsic (`offset_of::<C>(variant, field)`, not from HIR, its
+      ;; fn_span the expression's) a field, their sum for several, `0_usize` for none
+      :offset-of (let [idx (or (:offset-of (r-of e)) (unsupported "an offset_of without its indices"))
+                       u32-lit (fn [n] (mk e :literal [:uint "u32"] :lit {:lit-kind "Integer" :symbol (str n)} :neg false))
+                       call (fn [[ct v f]]
+                              (mk e :call usize-ty :fun {:k :zst-literal :ty [:fndef (c/lang "offset_of") [ct]] :span (:span e) :tsi (:hir-id e)}
+                                  :args [(u32-lit v) (u32-lit f)] :from-hir false :fn-span (:span e)))]
+                   (if (empty? idx)
+                     (mk e :literal usize-ty :lit {:lit-kind "Integer" :symbol "0"} :neg false)
+                     (reduce (fn [l x] (mk e :binary usize-ty :op (get bin-ops "+") :lhs l :rhs (call x))) (call (first idx)) (rest idx))))
       :type-relative (if (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e)) (unsupported "a type-relative path" (first ty)))
       ;; RF12: a qualified path to a trait's function (`<T as Clone>::clone`): its function item, as a type-relative one's
       :qpath (cond (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
@@ -865,6 +876,10 @@
                      {:k :range :ty ty :range {:lo lo :hi hi :end end :ty ty}}))
           :tuple {:k :leaf :ty ty :subpatterns (tuple-subpats (:pats p) (count (second ty)))}
           (:tuple-struct :struct :path)
+          (if-let [v (:const-value r)]
+            ;; RF13e: a path to the crate's integer constant (`UNUSED =>`): const_to_pat's constant, its value as const
+            ;; evaluation gives its expression of literals
+            {:k :constant :ty ty :value (int-const v ty)}
           (let [[adt vi vid] (or (ctor-info (:path p)) (unsupported "a pattern path" (:path p)))
                 subs (case (:kind p)
                        :tuple-struct (tuple-subpats (:pats p) (count (tc/all-fields-of-variant vid)))
@@ -872,7 +887,7 @@
                        [])]
             (if (tc/enum? adt)
               {:k :variant :ty ty :adt adt :variant vi :vid vid :subpatterns subs}
-              {:k :leaf :ty ty :subpatterns subs}))
+              {:k :leaf :ty ty :subpatterns subs})))
           (:ref :box) {:k :deref :ty ty :sub (lower-pattern (:pat p))}
           :or {:k :or :ty ty :pats (or-canonical (mapv lower-pattern (:pats p)))}
           :slice (let [ps (:pats p)
@@ -3342,18 +3357,24 @@
                 (when-let [r (nth blocks 0)] (terminate! r '(resume))))
               (finish d (mir-name d) kind 0 t))))))))
 
+(defn inline-const-suffix
+  "RF13e: an inline const's disambiguators after its fn's path (`::{constant#0}`, `::{constant#0}::{constant#0}` for one
+  inside another)"
+  [e]
+  (apply str (map #(str "::{constant#" % "}") (or (:index-path e) [(:index e)]))))
+
 (defn inline-consts
-  "RF13d: a fn's inline consts (ExprKind::ConstBlock in its own body, not a closure's nor another inline const's): their
-  HIR expressions, in the order of their `{constant#N}`"
+  "RF13d: a fn's inline consts (ExprKind::ConstBlock in its own body, not a closure's): their HIR expressions, in the order
+  of their `{constant#N}`; RF13e: an inline const's own inline consts too (offset_of!'s in a `const { assert!(..) }`)"
   [d]
   (let [acc (atom [])]
-    (letfn [(w [x] (cond (map? x) (cond (= :const-block (:kind x)) (swap! acc conj x)
+    (letfn [(w [x] (cond (map? x) (cond (= :const-block (:kind x)) (do (swap! acc conj x) (w (:expr x)))
                                          (= :closure (:kind x)) nil
                                          :else (doseq [v (vals x)] (w v)))
                          (sequential? x) (doseq [v x] (w v))
                          :else nil))]
       (w (:body (:node d))))
-    (sort-by :index @acc)))
+    (sort-by #(or (:index-path %) [(:index %)]) (fn [a b] (compare (vec a) (vec b))) @acc)))
 
 (defn build-inline-const
   "RF13d: construct_const for an inline const (`const { MaybeUninit::uninit() }`) of the fn D: its block into the return
@@ -3363,11 +3384,11 @@
   (let [{:keys [res closures]} (root-analysis d (or (:edition opts) 2024) (:root-cache opts))
         x (:expr e)
         t (tc/erase-ty (or (:ty (get res (:hir-id e))) (unsupported "an inline const without a type")))
-        name (str (mir-name d) "::{constant#" (:index e) "}")]
+        name (str (mir-name d) (inline-const-suffix e))]
     (tc/with-solver d
       (fn []
         (binding [*edition* (or (:edition opts) 2024) *res* res *self-var* nil *names* {}
-                  *body-def* nil
+                  *body-def* (:id d)   ; (RF13e: its own inline consts named under the fn's path)
                   *closure-info* closures *upvars* #{} *captures* []
                   *tree* (binding [*rt* (atom {:parent {} :var {} :cx {:parent nil :var-parent nil}})]
                            (enter-scope! [(:hir-id x) :call-site])

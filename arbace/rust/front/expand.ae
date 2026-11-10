@@ -466,12 +466,34 @@
                 (when (and (seq? idf) (str/starts-with? (str (second idf)) "__rf_g")) (second idf)))))
       nil)))
 
+(defn- offset-of-fields
+  "RF13e: parse_floating_field_access over an expression fragment (offset_of!'s `$($fields:expr)+`): its field chain's
+  idents (`Some.0`: Some, 0), as the parser takes them from the nonterminal's expression; nil when it is not one"
+  [ast]
+  (loop [cur ast out ()]
+    (let [k (when (and (seq? cur) (= 'Expr (first cur))) (nth cur 2 nil))]
+      (cond (and (seq? k) (= 'Field (first k))) (recur (nth k 1) (cons (nth k 2) out))
+            (and (seq? k) (= 'Lit (first k)) (= 'Integer (:kind (apply hash-map (rest (second k))))))
+            (cons (list 'id (str (:symbol (apply hash-map (rest (second k)))))) out)
+            (and (seq? k) (= 'Path (first k)) (= 'None (second k)))
+            (let [segs (:segments (apply hash-map (rest (nth k 2 nil))))]
+              (when (= 1 (count segs)) (cons (:ident (apply hash-map (rest (first segs)))) out)))
+            :else nil))))
+
 (defn cout
   "The parser's tree out of an assembled array, as the dump writes it, the fragments put back"
   [ctx x]
   (let [^Src src (:src ctx) ed (long (:ed *root*)) frags @*frags*]
     (letfn [(o [x]
-              (cond (seq? x) (let [y (apply list (map o x))]
+              (cond (and (seq? x) (= 'OffsetOf (first x)) (vector? (nth x 2 nil)))
+                    ;; RF13e: a field that is an expression fragment: its chain's idents in its place
+                    (let [y (apply list (map o x))]
+                      (apply list (concat (butlast y)
+                                          [(vec (mapcat (fn [f] (or (when (and (seq? f) (= 'id (first f)) (str/starts-with? (str (second f)) "__rf_g"))
+                                                                      (some-> (get frags (str (second f))) :ast offset-of-fields))
+                                                                    [f]))
+                                                        (last y)))])))
+                    (seq? x) (let [y (apply list (map o x))]
                                (if-let [nm (frag-name y)]
                                  (if-let [f (get frags nm)]
                                    ;; RF12: a type fragment keeps its placeholder's place (the metavariable's, for an impl's def_span)

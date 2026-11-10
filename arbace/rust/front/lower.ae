@@ -63,17 +63,22 @@
   `{constant#N}`: identity map from the AST form to N. A closure's, a nested item's and an anonymous constant's own
   contents have other parents."
   [f]
-  (let [m (java.util.IdentityHashMap.) n (atom -1)]
-    (letfn [(w [x] (cond (seq? x)
-                         (case (first x)
-                           AnonConst (.put m x (swap! n inc))
-                           Item nil
-                           (if (and (= 'Expr (first x)) (= 'Closure (head (fv x :kind))))
-                             nil
-                             (doseq [y (rest x)] (w y))))
-                         (vector? x) (doseq [y x] (w y))
-                         :else nil))]
-      (w (fv f :generics)) (w (fv f :sig)) (w (fv f :body)))
+  ;; RF13e: an anonymous constant's own anonymous constants are its children (`f::{constant#0}::{constant#0}`: offset_of!'s
+  ;; inline const in an inline const), each mapped to its path of disambiguators from the fn
+  (let [m (java.util.IdentityHashMap.)]
+    (letfn [(w [x pre n]
+              (cond (seq? x)
+                    (case (first x)
+                      AnonConst (let [path (conj pre (swap! n inc))]
+                                  (.put m x path)
+                                  (let [n2 (atom -1)] (doseq [y (rest x)] (w y path n2))))
+                      Item nil
+                      (if (and (= 'Expr (first x)) (= 'Closure (head (fv x :kind))))
+                        nil
+                        (doseq [y (rest x)] (w y pre n))))
+                    (vector? x) (doseq [y x] (w y pre n))
+                    :else nil))]
+      (let [n (atom -1)] (w (fv f :generics) [] n) (w (fv f :sig) [] n) (w (fv f :body) [] n)))
     m))
 
 (defn- next-id [] (when *owner* [(first @*owner*) (second (swap! *owner* update 1 inc))]))
@@ -346,7 +351,9 @@
 
 (defn- const-like? [rs]
   (some (fn [r] (and (#{'def 'local-def} (first r))
-                     (let [k (str (second r))] (or (str/starts-with? k "Ctor(") (= k "Const") (= k "AssocConst") (= k "Static")))))
+                     (let [k (str (second r))] (or (str/starts-with? k "Ctor(") (= k "Const") (= k "AssocConst") (= k "Static")
+                                                ;; RF13e: DefKind::Const as rustc 1.99 prints it (`Const { is_type_const: false }`)
+                                                (str/starts-with? k "Const {") (str/starts-with? k "AssocConst {")))))
         rs))
 
 (defn lower-pat [p]
@@ -474,10 +481,12 @@
       Block (let [[_ b l] k] (ex {:kind :block :block (lower-block b) :label (label-name l)}))
       ;; RF13c: an inline const (`const { intrinsics::type_name::<T>() }`): its value's expression, typed with the
       ;; enclosing body's (one typeck root), its `{constant#N}` by the fn's DefCollector order
-      ConstBlock (let [anon (second k) n (when *anon-index* (.get ^java.util.IdentityHashMap *anon-index* anon))]
-                   (if (some? n)
-                     (ex {:kind :const-block :expr (lower-expr (fv anon :value)) :index n})
+      ConstBlock (let [anon (second k) path (when *anon-index* (.get ^java.util.IdentityHashMap *anon-index* anon))]
+                   (if (some? path)
+                     (ex {:kind :const-block :expr (lower-expr (fv anon :value)) :index (peek path) :index-path path})
                      (ex {:kind :err :ast 'ConstBlock})))
+      ;; RF13e: `builtin # offset_of(Container, fields)` (offset_of!'s expansion): hir::ExprKind::OffsetOf
+      OffsetOf (ex {:kind :offset-of :container (lower-ty (second k)) :fields (mapv id-name (nth k 2))})
       ;; RF13c: a try block without a `?` of its own (lower_expr_try_block: its tail wrapped in `Try::from_output`, the
       ;; lang item's call); with one, whose break to the catch scope is not lowered yet, still an error
       TryBlock (let [b (second k)
