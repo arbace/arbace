@@ -388,7 +388,12 @@ code. Three kinds of things live here:
   slice ("As built: AX2 (third slice)"): `amd64/print.ae` (`arbace.asm.amd64.print`) after `X86ATTInstPrinter.cpp`,
   `X86InstPrinterCommon.cpp`, `X86MCAsmInfo.cpp`'s specifier names, `llvm/lib/MC/MCInstPrinter.cpp`, `MCExpr.cpp`, `MCSymbol.cpp`
   and `MCAsmInfo.cpp`, and `gen.ae`'s printer fields after `llvm/utils/TableGen/AsmWriterEmitter.cpp` and
-  `Common/AsmWriterInst.cpp`; no code is copied.
+  `Common/AsmWriterInst.cpp`; no code is copied. AX4's first slice (2026-11-10, doc/asm/AMD64-SURVEY.md, "As built: AX4 (first
+  slice)"): `asm/elf.ae` (`arbace.asm.elf`: the ELF64 writer after `llvm/lib/MC/ELFObjectWriter.cpp`'s ELFWriter and
+  `StringTableBuilder.cpp`, and a reader of Arbace's own) and `asm/amd64/obj.ae` (`arbace.asm.amd64.obj`: the object assembler after
+  `MCObjectStreamer.cpp`, `MCELFStreamer.cpp`, `MCAssembler.cpp`'s layout and relaxation, `MCDwarf.cpp`'s FrameEmitterImpl,
+  `MCParser/ELFAsmParser.cpp`, `MCParser/AsmParser.cpp`'s data and alignment directives, `X86AsmBackend.cpp`,
+  `X86ELFObjectWriter.cpp`, `X86EncodingOptimizationForImmediate.def`), written by hand after the same tarball; no code is copied.
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

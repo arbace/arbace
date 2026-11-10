@@ -171,7 +171,8 @@ prints canonically. `:end` is the text after the last item when it is not the ca
 (the dialect the header's), `corpus extract|lists`, `roundtrip [--record] [CORPUS...]`, `divergences`; the Makefile's `repr-asm-*`
 (`ARCH=`, `repr-asm-roundtrip-arm64`, `repr-asm-record-arm64`). Since AX2 (doc/asm/AMD64.md): `table gen|check|oracle` (amd64's
 instruction table) and `encode-check [--record] [CORPUS...]` (the stated encodings by their own CHECK lines); the forms stay this
-spec's, the machine level a view the matcher makes (AXS26).
+spec's, the machine level a view the matcher makes (AXS26). Since AX4: `object FILE OUT` (an ELF64 object as llvm-mc writes it), `object-dump`,
+`object-check [--record] [CORPUS...]` and `object-record CORPUS` (doc/asm/AMD64.md §7).
 
 ## 8. The judges of AX1 and AR1 (own verdicts only)
 

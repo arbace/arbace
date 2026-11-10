@@ -3062,3 +3062,44 @@ rows; `bin/reap` (0 problems), `bin/crops-score --judge --strict`, `test/gate/ga
 Considered: reading Intel memory operands as a tree with the registers inside (kept the state machine's reading: registers out of the
 sum, the value the calculator's, which `_g0[rbp + 1 + (2*5) - 3 + 1<<1]` needs); the cross judge on encodings (AXS34 (b)); a lexer option
 for MASM's integers (AXS35). Proposed: AXS34-AXS36 (doc/asm/AMD64-SURVEY.md, "Proposed (AX3)").
+
+## 2026-11-10 amd64 assembly: AX4's first slice, ELF64 objects written as llvm-mc writes them and read back (branch `asm-ax4`, from `mac/asm-ax3` `55d62a05d`)
+
+AX4 of doc/asm/AMD64-SURVEY.md §12, its first slice (§7.3's writer and reader), on the light lane (stage 0, one run at a time, no lock;
+llvm-mc 23.1.5 only by hand, to record the references). Sources read and written again in Arbace (no code copied), all from
+llvm-project 23.1.5's release tarball (`test/asm/corpora.edn`'s `:llvmorg-23.1.5`, sha256 fb50b1ea..., the MC and X86 MCTargetDesc
+sources extracted into the worktree's `.tmp/` for reading): `llvm/lib/MC/ELFObjectWriter.cpp` (ELFWriter::writeObject,
+computeSymbolTable, isInSymtab, writeSymbol, mergeTypeForSet, recordRelocation, useSectionSymbol, writeRelocations,
+writeSectionHeaders), `StringTableBuilder.cpp` (multikeySort's tail order, the tail merge), `MCObjectStreamer.cpp` (fragments,
+emitInstruction, emitValueImpl, emitFill, emitNops, emitValueToAlignment, emitCodeAlignment, changeSection, emitLabel),
+`MCELFStreamer.cpp` (initSections, emitSymbolAttribute, CombineSymbolTypes, emitCommonSymbol, emitLocalCommonSymbol, emitIdent),
+`MCAssembler.cpp` (layout, layoutSection, relaxOnce with Stretch, relaxAlign, relaxInstruction, evaluateFixup), `MCDwarf.cpp`
+(FrameEmitterImpl: EmitCIE, EmitFDE, emitCFIInstruction, encodeAdvanceLoc, CIEKey), `MCSymbolELF.cpp` (getBinding),
+`MCStreamer.cpp` (emitCFIStartProc), `MCParser/ELFAsmParser.cpp` (parseSectionArguments, the defaults by name),
+`MCParser/AsmParser.cpp` (parseDirectiveFill, parseDirectiveSpace), `llvm/lib/Target/X86/MCTargetDesc/X86AsmBackend.cpp`
+(mayNeedRelaxation, fixupNeedsRelaxationAdvanced, relaxInstruction, evaluateFixup's PC-relative bias, applyFixup, writeNopData,
+getMaximumNopSize), `X86ELFObjectWriter.cpp` (getType64, getRelocType64, needsRelocateWithSymbol), `X86MCCodeEmitter.cpp`
+(emitImmediate, emitMemModRMByte's fixup kinds, isPCRel32Branch), `X86EncodingOptimizationForImmediate.def`, and
+`lib/Target/X86/X86InstrControl.td` (JMP_2/4, JCC_2/4).
+
+Built: `arbace/asm/elf.ae` (`arbace.asm.elf`: the ELF64 writer, a reader, the canonical view) and `arbace/asm/amd64/obj.ae`
+(`arbace.asm.amd64.obj`: the object assembler); `arbace.asm.amd64.asm`'s fixups carry their expression, kind, PC-relativity and offset
+(additive; AddCCFrm's JCC_4 to a symbol takes reloc_branch_4byte_pcrel); `bin/repr-asm object|object-dump|object-check|object-record`,
+the Makefile's `repr-asm-object*`; `test/asm/obj/*.s` (six synthetic tests of Arbace's own), `test/asm/records/obj-{musl,synthetic,
+mc-x86-obj}-llvm-mc-23.1.5.edn` with their `.sha256` (llvm-mc's objects, each made twice and compared, recorded by hand with the host's
+llvm-mc 23.1.5, `-triple x86_64-linux-musl -filetype=obj`), `test/asm/object-results-amd64.edn`, `divergences-object.edn`,
+`controls-object.txt`, `object_judge.ae`; doc/asm/AMD64.md §7, the survey's "As built: AX4 (first slice)", SPEC.md §7, LICENSE.md and
+doc/ARBACE.md.
+
+Results: musl 1.2.6's 32 objects and the 6 synthetic ones equal to llvm-mc's byte for byte; `MC/X86`'s object tests for x86-64 ELF,
+47 recorded: 30 byte for byte, 17 classed (APX 11, `.macro`/`.ifdef`/`.rept`/`.reloc` 5, `.loc` 1), none failing; five negative
+controls fail as they must. The encode check (99,509 met, 0 failing), AX1's and AR1's round trips, `bin/reap` (0 problems),
+`bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` unchanged and passing. Found and
+fixed on the way: the relaxed branches' encodings missing from the table, JCC_4's kind, absolute variables' binding, aliases' type and
+size, section names read as expressions, SHF_LINK_ORDER, section names as symbols, variables followed through, fills as fragments. A first
+survey run held `large-bss`'s 2^52-byte `.bss` as bytes and grew to 5 GiB before it was stopped by hand (above the lane's 2 GiB): fills
+are fragments since, never bytes in a SHT_NOBITS section, and a fill above 64 MiB elsewhere is classed.
+
+Considered: packs in the store for the references (AXS37 (b): kept for corpora above a megabyte), the MC tests' CHECK lines as the judge
+(AXS37 (c): needs the decoder for llvm-objdump `-d`), recomputing fixup kinds outside the encoder (AXS38 (b)). Proposed: AXS37-AXS41.
+Next (AXS40 (a)): the static linker and the first runs by the CPU, then the decoder.

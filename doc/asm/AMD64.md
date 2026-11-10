@@ -135,3 +135,50 @@ The check (§4): each run reads the file in its own syntax (`-x86-asm-syntax=int
 of the pipe). The cross-syntax judge (`cross-judge`): every matched instruction of the file's first AT&T run printed in Intel, read back
 and matched in the statement's mode with the file's constant symbols, the same instruction and operands (quoted and bare names one);
 the rows' `:cross`, the classes `test/asm/divergences-cross.edn`, the controls `test/asm/controls-cross.txt` (`control-cross`).
+
+## 7. Objects (AX4, first slice)
+
+`arbace.asm.amd64.obj` assembles a file's forms into an ELF64 relocatable object as `llvm-mc -filetype=obj` writes it, and
+`arbace.asm.elf` writes the object and reads any ELF64 object back (doc/asm/AMD64-SURVEY.md §7.3; "As built: AX4 (first slice)").
+
+- **The streamer** (MCObjectStreamer, MCELFStreamer): sections by name and group, made by `.text`, `.data`, `.bss`, `.section`
+  (ELFAsmParser's defaults by name, the flags `awxMSTGoeR`, the types, the merge size, the linked-to symbol of `o`, the comdat group),
+  `.pushsection`/`.popsection`/`.previous`; each section a list of chunks as MC's fragments are: data (bytes and fixups), a relaxable
+  instruction, an alignment, a fill (`.zero`, `.skip`, `.space`, `.fill`, `.lcomm`'s zeros), NOPs (`.nops`); `.text` made first and aligned
+  to 4 by an empty code alignment (initSections). Labels (local `1:` labels and `.` as temporary symbols), `.globl`, `.weak`, `.local`,
+  `.hidden`, `.protected`, `.internal`, `.type` (CombineSymbolTypes), `.size`, `.comm`, `.lcomm`, assignments (`=`, `.set`, `.equ`: a
+  variable, its value followed), `.byte` ... `.quad`, `.ascii`, `.asciz`, `.string`, `.align` (bytes on ELF), `.balign`, `.p2align` and
+  their `w`/`l` forms (code alignment with NOPs in an executable section without a fill), `.even`, `.file` (STT_FILE), `.ident`
+  (`.comment`), `.code16/32/64`. A symbol is registered in MC's order (its first label, attribute or use).
+- **The instructions**: arbace.asm.amd64.asm's encoder, whose fixups carry X86MCCodeEmitter's kinds (FK_Data_N, reloc_signed_4byte and
+  `_relax`, the RIP-relative kinds with the GOTPCRELX choices by opcode, reloc_branch_4byte_pcrel for `call`/`jmp`/`jcc` to a symbol's
+  reference) and the RIP-relative bias of a following immediate. An instruction that may need relaxation (JCC_1, JMP_1, the short
+  immediate forms of X86EncodingOptimizationForImmediate.def with a symbolic immediate) is a chunk of its own; the rest is data.
+- **The layout** (MCAssembler::layout, relaxOnce): the sections laid out, then relaxed to a fixed point, each pass forward with the
+  stretch of a later target; a branch relaxed when its target is not resolved (a global or undefined symbol, another section) or out of
+  a signed byte, or has a specifier; JCC_2/JMP_2 in 16-bit code. The relaxed branches' encodings (codegen-only in the table) are given
+  after X86InstrControl.td.
+- **The fixups** (evaluateFixup, X86AsmBackend, X86ELFObjectWriter, ELFObjectWriter::recordRelocation): the PC-relative bias (-1, -2,
+  -4), resolved within a section for a local symbol, else a relocation: its type by kind, size and specifier (PC32, PLT32, 32, 32S, 64,
+  PC64, 16, 8, GOTPCREL, GOTPCRELX, REX_GOTPCRELX, GOT32/64, GOTPC32/64, GOTOFF64, TPOFF32/64, DTPOFF32/64, SIZE32/64, TLSGD, TLSLD,
+  GOTTPOFF, TLSDESC, TLSDESC_CALL, PLTOFF64), against the section symbol for a defined local unless the specifier needs the symbol, a
+  mergeable section's nonzero addend or a TLS section forbid it; a difference with its subtrahend in the fixup's section PC-relative.
+- **CFI** (MCDwarf's FrameEmitterImpl, emitted after the layout): `.cfi_startproc [simple]`, `.cfi_endproc`, `def_cfa`,
+  `def_cfa_offset`, `adjust_cfa_offset`, `def_cfa_register`, `offset`, `rel_offset`, `val_offset`, `restore`, `undefined`,
+  `same_value`, `register`, `remember_state`, `restore_state`, `escape`, `gnu_args_size`, `signal_frame`, `return_column`,
+  `personality`, `lsda` into `.eh_frame` (SHT_X86_64_UNWIND): the frames sorted by their CIE's key, a CIE for each (augmentation `zPLRS`,
+  x86-64's initial frame state), an FDE for each (PC-relative `sdata4`), the advances from the final offsets.
+- **The file** (`arbace.asm.elf`, ELFWriter): `.strtab` first (StringTableBuilder's tail-merged table, sorted by reversed names),
+  each section's data aligned with its `.rela` after it in the table, the groups' sections, `.symtab` (STT_FILE, then the locals, then
+  the rest in registration order; MC's membership: a symbol used by a relocation, else not temporary nor a section's), the
+  relocations, the string table, the section headers.
+- **The reader** (`read-object`): any ELF64 little-endian object's header, sections and bytes, symbols and relocations; `canonical`,
+  the judge's view (the sections with contents, the symbols, the relocations, by name).
+- **The check** (`bin/repr-asm object-check`): each file of `musl`, `synthetic` (`test/asm/obj/*.s`, Arbace's own) and `mc-x86-obj`
+  (MC/X86's object tests for x86-64 ELF) assembled and held to llvm-mc 23.1.5's object recorded in `test/asm/records/obj-CORPUS-llvm-mc-
+  23.1.5.edn` (made by hand, `object-record`, each object twice; pinned by its `.sha256`, checked first): byte for byte, else its sections,
+  symbols and relocations compared (`:canonical` when only the layout differs); rows `test/asm/object-results-amd64.edn`, classes
+  `test/asm/divergences-object.edn`, controls `test/asm/controls-object.txt` (a file's object against another's record).
+
+Not yet: `.debug_line` (`.loc`), `.reloc`, macros and conditional assembly (AXS32), APX (the encoder's), `.symver`, `.weakref`,
+COMDAT groups beyond the one tested, x32 and i386 objects, the linker and the decoder (AX4's next slices).

@@ -888,3 +888,68 @@ gas's mode, the streamer's directives.
 - **AXS36 The Intel forms' operand order.** (a) as built: Intel's forms in the text's order and AT&T's reversed, so both are the SDM's
   order and the machine level is one; (b) Intel's reversed too, a form being the text's syntax in a fixed order. *Recommended: (a)*: the
   survey's machine-level forms (AXS2 (a)) want the one order, and the AT&T reader already makes it.
+
+## As built: AX4 (first slice, 2026-11-10; branch `asm-ax4`)
+
+On the light lane (stage 0, one run at a time, under 2 GiB, no lock, no LLVM tool in any check; llvm-mc 23.1.5 by hand to record the
+references), AXS17-AXS36 still unanswered and followed as recommended where they touch this slice. The slice is §7.3's writer and reader,
+not yet the linker nor the decoder. llvm-project 23.1.5's MC (MCObjectStreamer, MCELFStreamer, MCAssembler, MCDwarf's FrameEmitterImpl,
+ELFAsmParser, AsmParser's directives, ELFObjectWriter, StringTableBuilder) and X86's back end (X86AsmBackend, X86ELFObjectWriter,
+X86MCCodeEmitter's fixup kinds, X86EncodingOptimizationForImmediate.def) read from the pinned tarball and written again in Arbace; no
+code copied. doc/asm/AMD64.md §7 describes what was built.
+
+- **`arbace.asm.elf`** (`arbace/asm/elf.ae`, shared with arm64 by design: AS5): the ELF64 writer as ELFWriter lays an object out
+  (`.strtab` first and tail-merged, sections with their `.rela`, groups, `.symtab` with STT_FILE and the locals first) and a reader of any
+  ELF64 little-endian object (sections and bytes, symbols, relocations), with the judge's canonical view.
+- **`arbace.asm.amd64.obj`** (`arbace/asm/amd64/obj.ae`): the object assembler over AX2's encoder: sections, chunks as MC's fragments,
+  symbols in MC's registration order with their bindings, types, visibility, sizes, commons and variables; the data, fill, NOP and
+  alignment directives; the relaxation of branches and short immediates to a fixed point with MC's stretch; the fixups evaluated and the
+  relocations X86ELFObjectWriter chooses (section symbols as ELFObjectWriter converts them); CFI into `.eh_frame`.
+- **The encoder** (`arbace.asm.amd64.asm`, a small additive change): each fixup now carries its expression, X86MCCodeEmitter's kind,
+  PC-relativity and ImmOffset (`[OFF SIZE EXPR KIND PCREL ADJ]`; the first two as before), and AddCCFrm's JCC_4 to a symbol is
+  reloc_branch_4byte_pcrel. The encode check is unchanged (99,509 met, 100,884 texts, 82,765 cross, 0 failing).
+- **`bin/repr-asm object FILE OUT`**, `object-dump OBJ`, `object-check [--record] [CORPUS...]`, `object-record CORPUS` (the oracle tier's,
+  by hand); the Makefile's `repr-asm-object`, `repr-asm-object-check`, `repr-asm-object-record`, `repr-asm-object-oracle`.
+- **The references**: llvm-mc 23.1.5's objects (`-triple x86_64-linux-musl -filetype=obj`, each made twice and compared) recorded as small
+  pinned records in the checkout, `test/asm/records/obj-{musl,synthetic,mc-x86-obj}-llvm-mc-23.1.5.edn` (hex with each SHA-256; the file
+  pinned by its `.sha256`, checked before it is read), not packs in the store (AXS37). The check never runs llvm-mc.
+
+| corpus | files | equal to llvm-mc's object byte for byte | classed | failing |
+|---|---:|---:|---|---:|
+| musl 1.2.6's x86-64 `.s` | 32 | **32** | none | 0 |
+| synthetic (`test/asm/obj/`: data, branches, relocations, sections, NOPs, CFI) | 6 | **6** | none | 0 |
+| `MC/X86`'s `-filetype=obj` tests for x86-64 ELF (47 llvm-mc assembles of 52 selected) | 47 | **30** | 11 `:unsupported-apx`, 5 `:unsupported-directive` (`.macro`, `.ifdef`, `.rept`, `.reloc` twice), 1 `:unsupported-debug-line` | 0 |
+
+So every object Arbace writes is llvm-mc's, byte for byte (no `:canonical` row left): 68 of 85, the rest classed by what is not
+assembled yet. Controls (`test/asm/controls-object.txt`): five, a file's object against another's record, each failing as it must. The
+check takes about 46 s (three corpora, one process each, under 1.5 GiB). What the runs found on the way, all fixed: the relaxed
+branches' encodings are not in the table (JMP_4/JCC_4 codegen-only: their fields given after X86InstrControl.td), JCC_4's fixup kind
+(PLT32, not PC32), absolute variables' LOCAL binding and aliases' inherited type and size, a section name read as an expression
+(`.note.GNU-stack`), SHF_LINK_ORDER's linked-to section, a section's name as its section symbol (`.GOT64@GOT`), variables followed
+through (`bar = foo + 4`), and fills as fragments (`large-bss`'s 2^52-byte `.bss`, first held as bytes, stopped at 5 GiB by hand).
+AX1's and AR1's round trips give the same rows; `bin/reap` (0 problems), `bin/crops-score --judge --strict`,
+`test/gate/gate-key-crops-test.bash` and `make check-makefile` pass.
+
+Not built in this slice: the static linker and the runs by the CPU (P4's program, the synthetic programs), the decoder (x86asm converted)
+and with it "musl's objects read back to their forms" (here read back to their sections, symbols and relocations only), `MC/Disassembler/X86`,
+`.debug_line`, `.reloc`, macros and conditionals in the object assembler (AXS32), the MC tests' own CHECK lines as the judge (AXS37 (c)).
+
+### Proposed (AX4, first slice)
+
+- **AXS37 The object check's reference.** (a) as built: llvm-mc's objects recorded by hand as small pinned records in the checkout
+  (`test/asm/records/`, 175 KB of hex for 85 objects), the check byte for byte, then canonical; (b) packs in the store
+  (`bin/oracle-records`, ORS's conventions) for larger corpora (gcc `-S` outputs, AX6); (c) the MC tests' own CHECK lines
+  (llvm-readobj's and llvm-objdump's text printed from Arbace's reader), a test's own verdict. *Recommended: (a) now, (b) from the first
+  corpus above a megabyte, and (c) for `MC/X86` once the decoder prints llvm-objdump's `-d` (64 of the 114 tests check its text)*: (c) is
+  the independent judge the score counts, (a) the stricter one meanwhile.
+- **AXS38 The fixups' shape.** (a) as built: the encoder's fixup vector grows to `[OFF SIZE EXPR KIND PCREL ADJ]`, the first two fields
+  unchanged for the encode check; (b) a separate pass recomputing kinds from the instruction. *Recommended: (a)*: the kinds are chosen
+  where X86MCCodeEmitter chooses them, and the other users read only the offset and size.
+- **AXS39 The object check in the gate.** (a) at AX10 with the row: an essential step over musl and synthetic (about 25 s, 1.5 GiB),
+  `mc-x86-obj` in `--full`; (b) now. *Recommended: (a)*, as AXS21 (a).
+- **AXS40 The next slice.** (a) the static linker (`ET_EXEC`, then static PIE; §7.3) and the first runs by the CPU (P4's program, the
+  synthetic programs, musl's crt and string functions linked against a harness), then the decoder; (b) the decoder first (x86asm
+  converted by repr/go's reader, `MC/Disassembler/X86`'s 13,545 decodings, the objects read back to forms). *Recommended: (a)*: the
+  exit criterion "run by the CPU with their own verdicts" needs only the writer built here, and the decoder is a conversion of its own.
+- **AXS41 `.debug_line`.** (a) `.loc`/`.file N` into `.debug_line` as MCDwarfLineTable writes it (DWARF 5 by default) with the next
+  slice; (b) when a corpus needs it (gcc and clang `-S` output with `-g`). *Recommended: (b)*: no corpus of AX4's exit needs it.
