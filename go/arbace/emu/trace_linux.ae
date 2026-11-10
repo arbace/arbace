@@ -8,7 +8,8 @@
     ^{:line 8} [runtime "runtime"]
     ^{:line 9} [strconv "strconv"]
     ^{:line 10} [strings "strings"]
-    ^{:line 11} [syscall "syscall"]])
+    ^{:line 11} [syscall "syscall"]
+    ^{:line 12} [unsafe "unsafe"]])
 
 
 ;; The tracer (AX5-DESIGN §3, AXS56-AXS58): a native process of the same executable under ptrace, started with ASLR off
@@ -18,28 +19,32 @@
 
 
 (go/type Tracee "Tracee is the native process.\n" (struct
-    ^{:line 21 :tag int} Pid
-    ^{:line 22 :tag syscall/PtraceRegs} Regs
-    ^{:line 23 :tag (* os/File)} mem
+    ^{:line 22 :tag int} Pid
+    ^{:line 23 :tag syscall/PtraceRegs} Regs
+    ^{:line 24 :tag (* os/File)} mem
 
-    ^{:line 25 :tag bool :doc "the end: Exited with Status, or Signaled with Sig\n"} Exited
-    ^{:line 26 :tag bool} Signaled
-    ^{:line 27 :tag int} Status
-    ^{:line 28 :tag int} Sig))
+    ^{:line 26 :tag bool :doc "the end: Exited with Status, or Signaled with Sig\n"} Exited
+    ^{:line 27 :tag bool} Signaled
+    ^{:line 28 :tag int} Status
+    ^{:line 29 :tag int} Sig
+
+    ^{:line 31 :tag int :doc "the last signal stop's si_code and si_addr (StepOnce, SigInfo)\n"} SigCode
+    ^{:line 32 :tag uint64} SigAddr))
 
 
 
 (go/const "Stops.\n"
-  ^{:line 33} [^{:val 1} StopSyscall (+ iota 1)] ; a system call's entry or exit
-  ^{:line 34} [^{:val 2} StopSignal] ; a signal (Sig) about to be delivered
-  ^{:line 35} [^{:val 3} StopExit]) ; the process ended
+  ^{:line 37} [^{:val 1} StopSyscall (+ iota 1)] ; a system call's entry or exit
+  ^{:line 38} [^{:val 2} StopSignal] ; a signal (Sig) about to be delivered
+  ^{:line 39} [^{:val 3} StopExit] ; the process ended
+  ^{:line 40} [^{:val 4} StopStep]) ; a single step done (StepOnce: the trap of the trace flag)
 
 
 (go/const ^{:val 262144} addrNoRandomize 0x0040000)
 
 
 
-^{:go/end 67} (go/func StartTracee "StartTracee starts path with argv and env, stdin, stdout and stderr from files, stopped after its exec; the calling goroutine\nis locked to its thread until the tracee ends (every later call must come from it).\n" [^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env ^{:tag (slice uintptr)} files] :results [(* Tracee) error]
+^{:go/end 72} (go/func StartTracee "StartTracee starts path with argv and env, stdin, stdout and stderr from files, stopped after its exec; the calling goroutine\nis locked to its thread until the tracee ends (every later call must come from it).\n" [^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env ^{:tag (slice uintptr)} files] :results [(* Tracee) error]
   (runtime/LockOSThread)
   (when [(values _ _ e) (syscall/RawSyscall syscall/SYS_PERSONALITY addrNoRandomize 0 0)] (!= e 0)
     (return nil e))
@@ -49,7 +54,7 @@
       (return nil err))
 
     (let [t (addr (lit Tracee :Pid pid))
-        ^{:line 52 :tag syscall/WaitStatus} ws (zero syscall/WaitStatus)]
+        ^{:line 57 :tag syscall/WaitStatus} ws (zero syscall/WaitStatus)]
       (when [(values _ err) (syscall/Wait4 pid (addr ws) 0 nil)] (!= err nil)
         (return nil err))
 
@@ -67,40 +72,40 @@
 
 
 
-^{:go/end 70} (go/method GetRegs "GetRegs reads the registers into Regs.\n" ^error [^{:tag (* Tracee)} t] (syscall/PtraceGetRegs (.-Pid t) (addr (.-Regs t))))
+^{:go/end 75} (go/method GetRegs "GetRegs reads the registers into Regs.\n" ^error [^{:tag (* Tracee)} t] (syscall/PtraceGetRegs (.-Pid t) (addr (.-Regs t))))
 
 
-^{:go/end 73} (go/method SetRegs "SetRegs writes Regs.\n" ^error [^{:tag (* Tracee)} t] (syscall/PtraceSetRegs (.-Pid t) (addr (.-Regs t))))
+^{:go/end 78} (go/method SetRegs "SetRegs writes Regs.\n" ^error [^{:tag (* Tracee)} t] (syscall/PtraceSetRegs (.-Pid t) (addr (.-Regs t))))
 
 
-^{:go/end 80} (go/method Read "Read reads n bytes of the tracee's memory at addr.\n" [^{:tag (* Tracee)} t ^uint64 addr ^int n] :results [(slice byte) error]
+^{:go/end 85} (go/method Read "Read reads n bytes of the tracee's memory at addr.\n" [^{:tag (* Tracee)} t ^uint64 addr ^int n] :results [(slice byte) error]
   (let [b (make (slice byte) n)
       (values _ err) (.ReadAt (.-mem t) b (conv int64 addr))]
     (return b err)))
 
 
 
-^{:go/end 86} (go/method Write "Write writes b into the tracee's memory at addr.\n" ^error [^{:tag (* Tracee)} t ^uint64 addr ^{:tag (slice byte)} b]
+^{:go/end 91} (go/method Write "Write writes b into the tracee's memory at addr.\n" ^error [^{:tag (* Tracee)} t ^uint64 addr ^{:tag (slice byte)} b]
   (let [(values _ err) (.WriteAt (.-mem t) b (conv int64 addr))]
-    ^{:line 85} err))
+    ^{:line 90} err))
 
 
 
-^{:go/end 110} (go/method Maps "Maps are the tracee's mappings: [lo, hi) and the name (/proc/PID/maps).\n" [^{:tag (* Tracee)} t] :results [(slice (array 3 string)) error]
+^{:go/end 115} (go/method Maps "Maps are the tracee's mappings: [lo, hi) and the name (/proc/PID/maps).\n" [^{:tag (* Tracee)} t] :results [(slice (array 3 string)) error]
   (let [(values f err) (os/Open (+ "/proc/" (strconv/Itoa (.-Pid t)) "/maps"))]
     (when (!= err nil)
       (return nil err))
 
     (defer (.Close f))
     (let [^{:tag (slice (array 3 string))} out (zero (slice (array 3 string)))
-        ^{:line 96} sc (bufio/NewScanner f)]
+        ^{:line 101} sc (bufio/NewScanner f)]
       (while (.Scan sc)
         (let [fs (strings/Fields (.Text sc))]
           (when (< (len fs) 5)
             (continue))
 
           (let [(values lo hi _) (strings/Cut (aget fs 0) "-")
-              ^{:line 103} name ""]
+              ^{:line 108} name ""]
             (when (>= (len fs) 6)
               (set! name (aget fs 5)))
 
@@ -111,14 +116,14 @@
 
 
 
-^{:go/end 119} (go/method Resume "Resume continues the tracee to its next system call stop (PTRACE_SYSCALL), delivering sig (0: none), and waits for the\nnext stop: StopSyscall, StopSignal (Sig) or StopExit.\n" [^{:tag (* Tracee)} t ^int sig] :results [int error]
+^{:go/end 124} (go/method Resume "Resume continues the tracee to its next system call stop (PTRACE_SYSCALL), delivering sig (0: none), and waits for the\nnext stop: StopSyscall, StopSignal (Sig) or StopExit.\n" [^{:tag (* Tracee)} t ^int sig] :results [int error]
   (when [err (syscall/PtraceSyscall (.-Pid t) sig)] (!= err nil)
     (return 0 err))
 
   (.wait t))
 
 
-^{:go/end 146} (go/method wait [^{:tag (* Tracee)} t] :results [int error]
+^{:go/end 151} (go/method wait [^{:tag (* Tracee)} t] :results [int error]
   (let [^syscall/WaitStatus ws (zero syscall/WaitStatus)]
     (when [(values _ err) (syscall/Wait4 (.-Pid t) (addr ws) 0 nil)] (!= err nil)
       (return 0 err))
@@ -146,7 +151,7 @@
 
 
 
-^{:go/end 154} (go/method Kill "Kill ends the tracee.\n" [^{:tag (* Tracee)} t]
+^{:go/end 159} (go/method Kill "Kill ends the tracee.\n" [^{:tag (* Tracee)} t]
   (when (and (not (.-Exited t)) (not (.-Signaled t)))
     (syscall/Kill (.-Pid t) syscall/SIGKILL)
     (.wait t)))
@@ -154,7 +159,7 @@
 
 
 
-^{:go/end 170} (go/method StackRange "StackRange is the tracee's [stack] mapping.\n" [^{:tag (* Tracee)} t] :results [uint64 uint64 error]
+^{:go/end 175} (go/method StackRange "StackRange is the tracee's [stack] mapping.\n" [^{:tag (* Tracee)} t] :results [uint64 uint64 error]
   (let [(values ms err) (.Maps t)]
     (when (!= err nil)
       (return 0 0 err))
@@ -167,3 +172,96 @@
 
 
     (return 0 0 (errors/New "tracee: no [stack]"))))
+
+
+
+(go/const "ptrace requests syscall's API lacks.\n"
+  ^{:line 179} [^{:val 9} ptraceSingleStep 9]
+  ^{:line 180} [^{:val 14} ptraceGetFPRegs 14]
+  ^{:line 181} [^{:val 16898} ptraceGetSigInfo 0x4202])
+
+
+^{:go/breaks [[4 188]] :go/end 189} (go/func ptrace ^error [^int req ^int pid ^uintptr addr ^uintptr data]
+  (when [(values _ _ e) (syscall/Syscall6 syscall/SYS_PTRACE (conv uintptr req) (conv uintptr pid) addr data 0 0)] (!= e 0)
+    (return e))
+
+  nil)
+
+
+
+
+
+
+
+^{:go/end 214} (go/method StepOnce "StepOnce executes one instruction of the tracee (PTRACE_SINGLESTEP), delivering sig (0: none), and waits: StopStep when\nthe trace flag's trap stopped it (si_code TRAP_TRACE, or a system call's return), StopSignal (Sig, SigCode, SigAddr) for any\nother signal (an int3's SIGTRAP among them: si_code SI_KERNEL), StopExit when it ended. Under single-step a signal's\ndelivery stops at the handler's first instruction (StopStep).\nA SIGTRAP is taken for the step's own trap without asking its si_code unless info is set (the instruction may trap itself).\n" [^{:tag (* Tracee)} t ^int sig ^bool info] :results [int error]
+  (when [err (ptrace ptraceSingleStep (.-Pid t) 0 (conv uintptr sig))] (!= err nil)
+    (return 0 err))
+
+  (let [(values s err) (.wait t)]
+    (when (or (!= err nil) (!= s StopSignal))
+      (return s err))
+
+    (when (and (== (.-Sig t) (conv int syscall/SIGTRAP)) (not info))
+      (return StopStep nil))
+
+    (when [err (.SigInfo t)] (!= err nil)
+      (return 0 err))
+
+    (when (and (== (.-Sig t) (conv int syscall/SIGTRAP)) (!= (.-SigCode t) 0x80) (> (.-SigCode t) 0))
+      (return StopStep nil))
+
+    (return StopSignal nil)))
+
+
+
+^{:go/end 228} (go/method SigInfo "SigInfo reads the pending signal's si_code and si_addr (PTRACE_GETSIGINFO).\n" ^error [^{:tag (* Tracee)} t]
+  ^{:go/breaks [[6 227]]} (let [^{:tag (array 128 byte)} b (zero (array 128 byte))]
+    (when [err (ptrace ptraceGetSigInfo (.-Pid t) 0 (conv uintptr (conv unsafe/Pointer (addr (aget b 0)))))] (!= err nil)
+      (return err))
+
+    (set! (.-SigCode t) (conv int (conv int32 (bit-or (conv uint32 (aget b 8)) (<< (conv uint32 (aget b 9)) 8) (<< (conv uint32 (aget b 10)) 16) (<< (conv uint32 (aget b 11)) 24)))))
+    (set! (.-SigAddr t) 0)
+    (for [k 7] (>= k 0) (dec! k)
+      (set! (.-SigAddr t) (bit-or (<< (.-SigAddr t) 8) (conv uint64 (aget b (+ 16 k))))))
+
+    nil))
+
+
+
+^{:go/end 235} (go/method FPRegs "FPRegs reads the tracee's FXSAVE image (PTRACE_GETFPREGS: 512 bytes; MXCSR at 24, XMM0-15 at 160).\n" [^{:tag (* Tracee)} t] :results [(array 512 byte) error]
+  (let [^{:tag (array 512 byte)} b (zero (array 512 byte))
+      ^{:line 233} err (ptrace ptraceGetFPRegs (.-Pid t) 0 (conv uintptr (conv unsafe/Pointer (addr (aget b 0)))))]
+    (return b err)))
+
+
+
+(go/type Mapping "Mapping is one line of /proc/PID/maps.\n" (struct
+    ^{:line 239 :tag uint64} Lo ^uint64 Hi
+    ^{:line 240 :tag string} Perm ; rwxp
+    ^{:line 241 :tag string} Name))
+
+
+
+^{:go/end 268} (go/method Mappings "Mappings are the tracee's mappings.\n" [^{:tag (* Tracee)} t] :results [(slice Mapping) error]
+  (let [(values f err) (os/Open (+ "/proc/" (strconv/Itoa (.-Pid t)) "/maps"))]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close f))
+    (let [^{:tag (slice Mapping)} out (zero (slice Mapping))
+        ^{:line 252} sc (bufio/NewScanner f)]
+      (while (.Scan sc)
+        (let [fs (strings/Fields (.Text sc))]
+          (when (< (len fs) 5)
+            (continue))
+
+          (let [(values lo hi _) (strings/Cut (aget fs 0) "-")
+              ^{:line 259} m (lit Mapping :Perm (aget fs 1))]
+            (set! (values (.-Lo m) _) (strconv/ParseUint lo 16 64))
+            (set! (values (.-Hi m) _) (strconv/ParseUint hi 16 64))
+            (when (>= (len fs) 6)
+              (set! (.-Name m) (aget fs 5)))
+
+            (set! out (append out m)))))
+
+      (return out (.Err sc)))))

@@ -4,6 +4,7 @@
 # OPS x SIZES (doc/asm/AMD64-SURVEY.md, "As built: AX5.2"); edit the loop's output only by regenerating it.
 # exit: 0
 # judge: cpu
+# step-limit: 500000 (AX5.3: the step mode compares the first 500,000 instructions, the sys mode the rest)
 # with: lib/hex.s
 	.globl	_start
 	.text

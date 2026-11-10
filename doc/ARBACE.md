@@ -412,7 +412,8 @@ code. Three kinds of things live here:
   "As built: AX4 (third slice)"). AX5.2 (2026-11-10, "As built: AX5.2"): `asm/amd64/dgen.ae` (`arbace.asm.amd64.dgen`: x86i's decode
   tables, the decisions `decode.ae` makes for 64-bit mode's legacy and REX maps written out as the Go forms data
   `go/arbace/x86i/dectab.ae`), written by hand; x86i's Go forms (`go/arbace/x86i`, `go/arbace/emu`, outside `arbace/`) were written
-  as Go and converted by repr/go's native reader (doc/asm/AMD64.md §10; LICENSE.md).
+  as Go and converted by repr/go's native reader (doc/asm/AMD64.md §10; LICENSE.md); AX5.3 and AX5.4 (2026-11-10, "As built: AX5.3 and
+  AX5.4") the same way (`signal.ae`, `sem_bit.ae` new), and `test/asm/x86i/gen.ae` (`asm.x86i-gen`, the synthetic programs) by hand.
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

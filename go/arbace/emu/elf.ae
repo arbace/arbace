@@ -11,23 +11,26 @@
   ^{:line 11} [^{:val 8388608} StackSize (<< 8 20)]
   ^{:line 12} [^{:val 93824992231424} PIEBase 0x555555554000]
   ^{:line 13} [^{:val 140737354133504} MmapTop (- StackTop (<< 128 20))]
-  ^{:line 14} [^{:val 4096} minSigStk 0x1000]
-  ^{:line 15} [^{:val 395049983} hwcapModel 0x178bfbff]) ; CPUID.1:EDX of x86i's model (AT_HWCAP)
+
+
+  ^{:line 16} [^{:val 32768 :doc "VdsoSize is the vdso's and vvar's pages Linux maps at the top of mmap's area (Linux 6.18: vvar 4 pages, vvar_vclock 2,\nvdso 2; the step mode's loader judge holds it to the native's maps): x86i maps no vdso, its first mmap below them\n"} VdsoSize (* 8 pageSize)]
+  ^{:line 17} [^{:val 4096} minSigStk 0x1000]
+  ^{:line 18} [^{:val 395049983} hwcapModel 0x178bfbff]) ; CPUID.1:EDX of x86i's model (AT_HWCAP)
 
 
 
 (go/type Image "Image is a loaded executable.\n" (struct
-    ^{:line 20 :tag uint64} Entry
-    ^{:line 21 :tag uint64} Phdr ; the program headers' address (AT_PHDR)
-    ^{:line 22 :tag uint64} Phent
-    ^{:line 23 :tag uint64} Phnum
-    ^{:line 24 :tag uint64} BrkBase)) ; the page after the highest PT_LOAD
+    ^{:line 23 :tag uint64} Entry
+    ^{:line 24 :tag uint64} Phdr ; the program headers' address (AT_PHDR)
+    ^{:line 25 :tag uint64} Phent
+    ^{:line 26 :tag uint64} Phnum
+    ^{:line 27 :tag uint64} BrkBase)) ; the page after the highest PT_LOAD
 
 
 
 (go/var ^{:doc "ErrDynamic: the executable names an interpreter (AXS11's :dynamic).\n"} ErrDynamic (errors/New "dynamic executable (PT_INTERP): not run by x86i"))
 
-^{:go/end 42} (go/func permOf ^uint8 [^uint32 f]
+^{:go/end 45} (go/func permOf ^uint8 [^uint32 f]
   (let [^uint8 p (zero uint8)]
     (when (!= (bit-and f PF_R) 0)
       (set! p bit-or PermR))
@@ -38,11 +41,11 @@
     (when (!= (bit-and f PF_X) 0)
       (set! p bit-or PermX))
 
-    ^{:line 41} p))
+    ^{:line 44} p))
 
 
 
-^{:go/end 109} (go/func LoadELF "LoadELF maps the static executable at path: each PT_LOAD page-aligned with its permissions, its file bytes then zeros.\n" [^{:tag (* AS)} a ^string path] :results [(* Image) error]
+^{:go/end 126} (go/func LoadELF "LoadELF maps the static executable at path: each PT_LOAD page-aligned with its permissions, its file bytes then zeros.\n" [^{:tag (* AS)} a ^string path] :results [(* Image) error]
   (let [(values f err) (ReadELF path)]
     (when (!= err nil)
       (return nil err))
@@ -75,8 +78,8 @@
                     (set! first p))
 
                   (let [start (bit-and-not (+ base (.-Vaddr p)) pageMask)
-                      ^{:line 78} end (bit-and-not (+ base (.-Vaddr p) (.-Memsz p) pageMask) pageMask)
-                      ^{:line 79} perm (permOf (.-Flags p))]
+                      ^{:line 81} end (bit-and-not (+ base (.-Vaddr p) (.-Memsz p) pageMask) pageMask)
+                      ^{:line 82} perm (permOf (.-Flags p))]
                     ;; a page an earlier segment holds: shared, its permissions joined
                     (while (and (< start end) (.Mapped a start pageSize))
                       (set! (aget (.-perm a) start) bit-or perm)
@@ -90,15 +93,29 @@
                       (.Map a start (- end start) perm "load"))
 
                     (.flush a)
-                    (let [data (.Bytes f (.-Off p) (.-Filesz p))]
-                      (when (== data nil)
-                        (return nil (errors/New "segment outside the file")))
+                    (when (== (.Bytes f (.-Off p) (.-Filesz p)) nil)
+                      (return nil (errors/New "segment outside the file")))
 
-                      (when (not (.WriteBytes a (+ base (.-Vaddr p)) data))
-                        (return nil (errors/New "segment not mapped")))
+                    ;; as Linux maps it: the file's whole pages from the segment's page-aligned offset (the bytes before the segment
+                    ;; in its first page and after it in its last are the file's), then, when the segment is longer in memory, its
+                    ;; last file page zeroed past the file's part
+                    (when (> (.-Filesz p) 0)
+                      (let [lead (bit-and (+ base (.-Vaddr p)) pageMask)
+                          ^{:line 104} fo (- (.-Off p) lead)
+                          ^{:line 105} n (- (pageUp (+ (.-Off p) (.-Filesz p))) fo)]
+                        (when (> (+ fo n) (conv uint64 (len (.-Data f))))
+                          (set! n (- (conv uint64 (len (.-Data f))) fo)))
 
-                      (when [e (bit-and-not (+ base (.-Vaddr p) (.-Memsz p) pageMask) pageMask)] (> e (.-BrkBase img))
-                        (set! (.-BrkBase img) e))))))))
+                        (when (not (.WriteBytes a (- (+ base (.-Vaddr p)) lead) (subslice (.-Data f) fo (+ fo n))))
+                          (return nil (errors/New "segment not mapped")))
+
+                        (when (> (.-Memsz p) (.-Filesz p))
+                          (let [e (+ base (.-Vaddr p) (.-Filesz p))]
+                            (.WriteBytes a e (make (slice byte) (- (pageUp e) e)))))))
+
+
+                    (when [e (bit-and-not (+ base (.-Vaddr p) (.-Memsz p) pageMask) pageMask)] (> e (.-BrkBase img))
+                      (set! (.-BrkBase img) e)))))))
 
 
 

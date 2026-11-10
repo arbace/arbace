@@ -1364,3 +1364,86 @@ Numbering from AXS68 (AX4c used AXS63-AXS67).
 one package at a time with the tables stubbed, under a watcher that kills the session past 2 GiB (`.tmp/memwatch.sh`), at most
 1.54 GB, and dgen now writes each table as one literal; (2) two commands named `/dev/fd/1` and `/dev/null` (a `sed` whose output
 went nowhere, a `cp` of a file to `/dev/null`), harmless but against the rule.
+
+## As built: AX5.3 and AX5.4 (2026-11-10; branch `asm-ax5b`)
+
+On the light lane (stage 0 and TamaGo's go, one run at a time, every conversion and check under a 2 GiB watcher; no lock, no gate), on
+`asm-ax5` (`5c7142cdf`). AXS74 (a): AX5.3's rest first (the step mode, the loader's judge, the bisection), then as much of AX5.4 as the
+slice allowed: the rest of the integer ISA AX5-DESIGN §1 names but BMI and ADX (AX5.5's, with their VEX contexts), signal handlers,
+and the synthetic programs. doc/asm/AMD64.md §10 describes what was built.
+
+- **The step mode** (`x86i trace --mode step`, AXS56 (a)): the native process single-stepped by PTRACE_SINGLESTEP, x86i stepped beside
+  it, compared after every instruction: the registers, RIP, the status flags and DF but the bits the last flag-setting instruction
+  left undefined (AXS72 (a): the instruction's own; the native's undefined bits then copied into x86i, AXS76), FS and GS bases, the
+  bytes the instruction stored (x86i's address space logs each store; the bytes read back from the native), XMM and MXCSR when the
+  instruction names an XMM register, and the writable mappings every 4,096 instructions and at each system call but write(2); mmap's
+  address and the break's start are x86i's own there, held to the native's. Single-stepping's artifacts are rules, each named in
+  doc/asm/AMD64.md §10 (`rep` per iteration, a `lock` LLVM decodes apart, TF in `pushfq`'s word and in a syscall's R11, rt_sigreturn's
+  orig_rax, the forced SIGTRAP of each step's trap, cpuid's and rdtsc's answers).
+- **The loader's judge** (AXS57 (a)): every trace's second line; x86i's own initial stack and registers against the native's at its
+  exec, masked: AT_HWCAP, AT_HWCAP2, AT_MINSIGSTKSZ and the kernel's AT_RSEQ_FEATURE_SIZE and AT_RSEQ_ALIGN (and AT_HWCAP3/4); the
+  vdso's auxv entry x86i omits; and the vdso's and vvar's eight pages below mmap's top (`emu.VdsoSize`, the layout's first mmap below
+  them). It found a loader bug at once: Linux maps a segment's whole file pages, so the bytes before `.data` in its page are the file's
+  (the ELF header's `0x7f 'E' 'L' 'F'` at 0x202000 in `misc`), not zeros; `emu.LoadELF` maps them so now.
+- **The bisection** (`x86i trace --mode bisect`): the sys mode, and at a difference the sys mode again to the last system call both
+  agreed on and the step mode from there: the first differing instruction with its text and family, in under a second for `alu`'s
+  injected `shift:of` (8.6 million instructions, the difference at instruction 1,572,701, `SHL8r1 AL AL`). The sys mode now also compares
+  the bytes write(2) writes (a difference used to show only as "stdout differs" at the end, which no system call bisects).
+- **AX5.4's families**: rcl, rcr, shld, shrd (shift); bt, bts, btr, btc, bsf, bsr, tzcnt, lzcnt, popcnt (a new family, bit); enter,
+  xlatb, movbe, rdtscp; cpuid's model (leaf 0, 1 with POPCNT and MOVBE, 0x80000000, 0x80000001 with LZCNT, SYSCALL, NX, LM; AXS59).
+- **Signals with handlers**: rt_sigaction, rt_sigprocmask, sigaltstack and rt_sigreturn in x86i's layer (crt untouched, AXS52 (a);
+  crt's table and mask kept in step, so a kill of the process itself reaches x86i through crt's `Handler` hook), the x86-64 frame laid
+  out from the psABI and musl's `arch/x86_64/bits/signal.h` (vendored already, MIT), with the thread's last trap (TRAPNO, ERR, CR2 kept
+  stale as Linux keeps them: found by the CPU's run), RF in a fault's saved RFLAGS (found by the lockstep), uc_stack's stored flags (not
+  whether the stack is in use: found by the lockstep). The lockstep delivers the native first and takes the host's XSAVE size from its
+  frame (AXS77).
+- **The synthetic programs** (AXS60 (a)): `test/asm/x86i/gen.ae` (seeded) writes five programs (bit, rotc, shiftd, cond, misc; 82,437
+  lines, 3.1 million instructions) into the check's work directory; their digests are committed (`test/asm/x86i/synth-digests.edn`,
+  `bin/repr-asm x86i synth DIR [--record]`). Each case sets the flags by popfq and the operands (edge values and seeded ones, a
+  register's upper bits filled), runs one instruction, and writes the result and the flags the SDM defines for it. Beside them two
+  hand-written programs: `signals.s` (seven faults caught and resumed, the alternate stack, a kill while blocked delivered when
+  unblocked) and `cpuid.s` (the model's answers as its stated stdout; `# cpu: cpuid`).
+
+| check | result |
+|---|---|
+| `bin/repr-asm x86i-check` (`x86i/`) | **34 of 35** programs by their own verdicts and equal to the CPU's runs (16 of `test/asm/run/`, 14 of `test/asm/x86i/`, 5 synthetic); `cpuid` by its stated verdict, the class `:cpuid` against the CPU |
+| `decode/` | 35 of 35 (85,633 instructions) as `arbace.asm.amd64.decode` decodes them |
+| `lockstep/` (sys) | 34 of 35 equal, `cpuid` the class `:cpuid` |
+| `step/` | **35 of 35** equal in the step mode (every instruction compared; `alu` and `muldiv` their first 500,000, `# step-limit`) |
+| `loader/` | 35 of 35: x86i's own initial state as Linux's |
+| controls (`test/asm/controls-x86i.txt`) | **18** fail as they must: AX5.2's ten, `step` ×3 (`misc` `shift:of`, `string` `string:df`, `synth-bit` `bit:cf`: caught at an instruction of the family), `bisect` ×3 (`alu` `shift:of`, `calls` `alu:cf`, `synth-rotc` `shift:cf`: bisected to one), `loader` ×2 |
+| `bin/repr-asm x86i gen-check`, run-check, `bin/reap`, `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`, `make check-makefile` | pass (run 18 of 18; reap 41 of 44 cells checked, 0 problems) |
+
+The step mode runs at 20,000-37,000 instructions a second on an idle host (25,000 for `signals`, 33,000 for `synth-rotc`) and 5,000-11,000
+under the night's load (the recorded check ran beside night 11: 15.5 minutes, 1.3 GiB at its peak); a system call costs the most (a
+write's single step and the memory comparison).
+
+### Proposed (AX5.3, AX5.4)
+
+Numbering from AXS75.
+
+- **AXS75 The step mode's reach.** (a) as built: every program in both modes, the step mode bounded by a header (`# step-limit: N`, alu's
+  and muldiv's 500,000; the rest in sys mode); (b) the step mode for the synthetic and the essential programs only (the design's words),
+  sys for the rest. *Recommended: (a)*: whole runs in step mode cost minutes only for the long hand-written ones, and the bound is stated
+  where it applies.
+- **AXS76 The undefined flags in the step mode.** (a) as built: masked in the compare, then the native's copied into x86i, so a later
+  reader (pushfq, adc, a condition) sees the same bits in both; (b) masked only, a later reader's difference then a finding to class.
+  *Recommended: (a)*: the masks still come from the SDM, never from the CPU (the design's risk), and x86i's own runs keep its fixed values.
+- **AXS77 The fpstate's size in a frame.** (a) as built: x86i's model's (`XSaveModel`, 580 bytes: FXSAVE, the XSAVE header, the end's
+  magic word) in its own runs, the host's in the lockstep (from the native's first frame), the host's XSAVE components x86i does not model
+  copied after MXCSR and XMM are compared; (b) the model's always, the native's frames compared shifted. *Recommended: (a)*.
+- **AXS78 Single-stepping's signal artifacts.** (a) as built: x86i follows the traced native in step mode (SIGTRAP unblocked by each
+  step's forced trap, the thread's last trap #DB), so a SIGTRAP handler is judged in both modes; (b) SIGTRAP handlers judged in sys mode
+  only. *Recommended: (a)*: the rule is the kernel's documented forced-signal behaviour, and only the step mode applies it.
+- **AXS79 The layout's vdso pages.** (a) as built: x86i reserves Linux 6.18's eight vdso and vvar pages below mmap's top, held to the
+  native's maps by the loader's judge (a kernel that maps another size fails it, naming the span); (b) the native's mmap addresses always
+  taken (the sys mode's way), the layout never judged. *Recommended: (a)*.
+- **AXS80 tzcnt and the model.** (a) as built: tzcnt runs as BMI1's (this CPU's behaviour, which the lockstep holds x86i to) while the
+  model claims BMI1 only at AX5.5 with andn and the rest; (b) claim BMI1 now and refuse its VEX forms as `:unimplemented`.
+  *Recommended: (a)* until AX5.5, a slice away.
+- **AXS81 The next slice.** (a) AX5.5: the VEX contexts in dgen, BMI1/2 and ADX, cmpxchg16b, rdrand/rdseed/rdpid, SSE/SSE2 with MXCSR's
+  flags (AXS62 (a)), the per-run coverage, and AXS70 (b)'s decode level; (b) AX5.6's musl harnesses first. *Recommended: (a)*.
+
+**Rule slips**: three wait loops used a process substitution (`<(...)`) in a `grep`, against the rule; harmless (they read the
+check's and the conversion's logs). One command ran `x86i trace` without the worktree's TMPDIR exported, so its temporary files went to /tmp (removed by the
+run itself).

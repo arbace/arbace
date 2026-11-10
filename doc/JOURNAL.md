@@ -3388,3 +3388,46 @@ masks (AXS72 (b): the SDM's per-instruction rule built instead).
 Rule slips: the first conversion of all three packages at once peaked at 11.6 GB (the decode tables as a 9,000-piece string
 concatenation); every later read one package at a time, the tables stubbed, under a 2 GiB watcher (peak 1.54 GB), and dgen writes each
 table as one literal. Two commands named `/dev/fd/1` and `/dev/null`.
+
+## 2026-11-10 amd64 assembly: AX5.3's rest and AX5.4, x86i's step mode, loader's judge, bisection, the integer ISA's rest and signal handlers (branch `asm-ax5b`, from `mac/asm-ax5` `5c7142cdf`)
+
+AXS74 (a) as the main session directed: AX5.3's rest, then AX5.4 as far as the slice allowed. Light lane: stage 0 and TamaGo's go 1.27.1
+alone, one run at a time, every repr/go read and check under a watcher killing the process tree past 2 GiB (peaks 1.54 GB for the
+reads, 1.3 GB for the check); no lock, no gate, no network, nothing installed; only Arbace-built synthetic and hand-written programs
+run, with timeouts. doc/asm/AMD64-SURVEY.md, "As built: AX5.3 and AX5.4"; doc/asm/AMD64.md §10.
+
+What was built (Go written in `.tmp`, converted to forms by `bin/repr-go read --goos linux --goarch amd64` a package at a time with the
+decode tables stubbed, AXS68 (a)):
+- `go/arbace/emu`: the tracer's single step (PTRACE_SINGLESTEP with a signal, PTRACE_GETSIGINFO, PTRACE_GETFPREGS by raw ptrace calls),
+  the mappings with permissions, a store log in the address space, the fault's kind (read, write, fetch); `LoadELF` maps a segment's
+  whole file pages as Linux does; mmap's first address below the vdso's eight pages (`VdsoSize`).
+- `go/arbace/x86i`: the step mode, the loader's judge and the bisection in `lockstep_linux`; `sem_bit` (rcl rcr shld shrd, the bit
+  family bt bts btr btc bsf bsr tzcnt lzcnt popcnt, enter, xlatb, movbe, rdtscp); cpuid's model widened (POPCNT, MOVBE, LZCNT, SYSCALL,
+  NX, LM); `signal` (rt_sigaction, rt_sigprocmask, sigaltstack, rt_sigreturn, the x86-64 frame, fault and kill delivery, the
+  alternate stack); the faults' siginfo and trap state.
+- The driver: `trace --mode sys|step|bisect`, `X86I_STEP_LIMIT`, `X86I_INJECT=loader:random`.
+- `test/asm/x86i/gen.ae` and `bin/repr-asm x86i synth DIR [--record]` (Makefile `x86i-synth`; `x86i-trace` takes `MODE`): five synthetic
+  programs (bit, rotc, shiftd, cond, misc), their digests in `test/asm/x86i/synth-digests.edn`; `test/asm/x86i/signals.s`, `cpuid.s`
+  (`# cpu: cpuid`, judged by its stated stdout, the class `:cpuid` against the CPU and in sys mode); `alu.s` and `muldiv.s` bounded in
+  step mode (`# step-limit: 500000`).
+- `bin/repr-asm x86i-check`: the rows `step/NAME` and `loader/NAME`, the synthetic programs, the controls `step`, `bisect`, `loader`;
+  `bin/repr-asm corpus extract` into the worktree's `.tmp/asm/src` (`REPR_ASM_SRC`), the main checkout's copy being gone.
+
+Results: x86i-check 34 of 35 programs equal to the CPU's runs and by their verdicts (cpuid `:cpuid`), 35 of 35 decoded alike
+(85,633 instructions), 34 of 35 sys-equal (cpuid `:cpuid`), 35 of 35 step-equal, 35 of 35 loaded as Linux loads them; 18 controls
+fail as they must; recorded (175 rows). gen-check, run-check, `bin/reap`, `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`,
+`make check-makefile` as the survey's section records. The step mode: 20,000-37,000 instructions a second idle, 5,000-11,000 beside the
+night's runs.
+
+Found: Linux's segment pages carry the file's bytes before and after a segment (x86i zeroed them); the vdso's pages at mmap's top; a
+fault's saved RFLAGS has RF; the frame's uc_stack.ss_flags are the stored flags; TRAPNO, ERR and CR2 are the thread's last trap's;
+under single-step each step's forced SIGTRAP unblocks SIGTRAP and becomes the last trap; a pending signal is reported before the next
+instruction, a step after the syscall that unblocked it.
+
+Considered: comparing the writable mappings at every system call (dropped for write(2), which only reads memory: synth-cond's 57,232
+writes); learning the host's XSAVE size from CPUID (not available without assembly or cgo; the native's first frame gives it);
+judging SIGTRAP handlers in sys mode only (AXS78 (b)); stated stdout for the synthetic programs (AXS71 (a) kept: the CPU's run).
+Proposed AXS75-AXS81.
+
+Rule slips: three wait loops used process substitution (`<(...)`); one `x86i trace` loop ran without the worktree's TMPDIR, its
+temporary files in /tmp removed by the run itself.

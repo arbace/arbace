@@ -21,7 +21,7 @@
 
 
 ^{:go/end 26} (go/func usage []
-  (fmt/Fprintln os/Stderr "usage: x86i run [--stats] EXE [ARG...] | x86i decode-text EXE | x86i trace --mode sys EXE [ARG...]")
+  (fmt/Fprintln os/Stderr "usage: x86i run [--stats] EXE [ARG...] | x86i decode-text EXE | x86i trace --mode sys|step|bisect EXE [ARG...]")
   (os/Exit 2))
 
 
@@ -42,10 +42,10 @@
         (os/Exit (run args stats))))
     (case ["trace"]
       (let [args (subslice os/Args 2)]
-        (when (or (< (len args) 3) (!= (aget args 0) "--mode") (!= (aget args 1) "sys"))
+        (when (or (< (len args) 3) (!= (aget args 0) "--mode") ^:go/paren (and (!= (aget args 1) "sys") (!= (aget args 1) "step") (!= (aget args 1) "bisect")))
           (usage))
 
-        (os/Exit (trace (subslice args 2)))))
+        (os/Exit (trace (aget args 1) (subslice args 2)))))
     (case ["decode-text"]
       (decodeText (aget os/Args 2)))
     (default
@@ -53,7 +53,7 @@
 
 
 
-^{:go/end 89} (go/func run ^int [^{:tag (slice string)} argv ^bool stats]
+^{:go/end 90} (go/func run ^int [^{:tag (slice string)} argv ^bool stats]
   (let [as (emu/NewAS)
       (values img err) (emu/LoadELF as (aget argv 0))]
     (when (!= err nil)
@@ -75,20 +75,21 @@
               (return 2)))
 
 
-          (let [c (x86i/New as k (.-Entry img) sp)
-              ^{:line 79} t0 (time/Now)]
-            (.Run c)
-            (when stats
-              (let [el (time/Since t0)]
-                (fmt/Fprintf os/Stderr "x86i: %d instructions in %v (%.1f M/s)\n" (.-Steps c) el (/ (conv float64 (.-Steps c)) (.Seconds el) 1000000.0))))
+          (let [c (x86i/New as k (.-Entry img) sp)]
+            (set! (.-Pid c) 1000) ; crt's process id (a kill's siginfo), user 0
+            (let [t0 (time/Now)]
+              (.Run c)
+              (when stats
+                (let [el (time/Since t0)]
+                  (fmt/Fprintf os/Stderr "x86i: %d instructions in %v (%.1f M/s)\n" (.-Steps c) el (/ (conv float64 (.-Steps c)) (.Seconds el) 1000000.0))))
 
-            (when (and (!= (.-Signal c) 0) ^:go/paren (or (strings/HasPrefix (.-Reason c) ":unimplemented") (!= (os/Getenv "X86I_VERBOSE") "")))
-              (fmt/Fprintf os/Stderr "x86i: signal %d: %s\n" (.-Signal c) (.-Reason c)))
+              (when (and (!= (.-Signal c) 0) ^:go/paren (or (strings/HasPrefix (.-Reason c) ":unimplemented") (!= (os/Getenv "X86I_VERBOSE") "")))
+                (fmt/Fprintf os/Stderr "x86i: signal %d: %s\n" (.-Signal c) (.-Reason c)))
 
-            (.Status c)))))))
+              (.Status c))))))))
 
 
-^{:go/end 118} (go/func decodeText [^string path]
+^{:go/end 119} (go/func decodeText [^string path]
   (let [(values f err) (emu/ReadELF path)]
     (when (!= err nil)
       (fmt/Fprintf os/Stderr "x86i: %v\n" err)
@@ -102,8 +103,8 @@
         (let [b (.Bytes f (.-Off s) (.-Size s))]
           (for [off 0] (< off (len b)) _
             (let [(values in r) (x86i/Decode (subslice b off (min (+ off 15) (len b))) true)
-                ^{:line 105} n (max (conv int (.-Len in)) 1)
-                ^{:line 106} text (.Text in)]
+                ^{:line 106} n (max (conv int (.-Len in)) 1)
+                ^{:line 107} text (.Text in)]
               (switch r
                 (case [x86i/DecInvalid]
                   (set! text "!invalid"))
@@ -117,21 +118,61 @@
       (.WriteString os/Stdout (.String out)))))
 
 
-^{:go/end 138} (go/func trace ^int [^{:tag (slice string)} argv]
+^{:go/end 179} (go/func trace ^int [^string mode ^{:tag (slice string)} argv]
   (when [s (os/Getenv "X86I_INJECT")] (!= s "")
     (when [err (x86i/Inject s)] (!= err nil)
       (fmt/Fprintln os/Stderr "x86i:" err)
       (return 2)))
 
 
-  ^{:go/breaks [5]} (let [(values r err) (x86i/Lockstep (aget argv 0) argv (os/Environ))]
-    (when (!= err nil)
-      (fmt/Fprintf os/Stderr "x86i trace: %v\n" err)
-      (return 2))
+  (let [opts (lit x86i/LockstepOpts :StepFrom -1)]
+    (when (== mode "step")
+      (set! opts (lit x86i/LockstepOpts :Step true))
+      (when [s (os/Getenv "X86I_STEP_LIMIT")] (!= s "")
+        (fmt/Sscan s (addr (.-StepLimit opts)))))
 
-    (when (.-Equal r)
-      (fmt/Printf "x86i trace sys: equal: %d system calls, %d instructions, status %d\n" (.-Syscalls r) (.-Steps r) (.-Status r))
-      (return 0))
 
-    (fmt/Printf "x86i trace sys: DIFF after %d instructions: %s\n" (.-Steps r) (.-Diff r))
-    1))
+    (let [t0 (time/Now)
+        (values r err) (x86i/Lockstep (aget argv 0) argv (os/Environ) opts)]
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "x86i trace: %v\n" err)
+        (return 2))
+
+      (let [^{:tag (* x86i/LockstepResult)} sys (zero (* x86i/LockstepResult))]
+        (when (and (== mode "bisect") (not (.-Equal r)))
+          ;; the sys mode's difference bisected: the sys mode to the last system call both agreed on, then the step mode
+          (set! sys r)
+          (let [from (max (- (.-DiffSyscall r) 1) 0)]
+            (when (== (.-DiffSyscall r) 0)
+              (set! from (.-Syscalls r)))
+
+            (set! t0 (time/Now))
+            (when [(set! (values r err) (x86i/Lockstep (aget argv 0) argv (os/Environ) (lit x86i/LockstepOpts :Step true :StepFrom from)))] (!= err nil)
+              (fmt/Fprintf os/Stderr "x86i trace: %v\n" err)
+              (return 2))))
+
+
+        (let [el (time/Since t0)
+            ^{:line 156} st 0]
+          (switch
+            (case [(and (!= sys nil) (!= (.-Inst r) ""))]
+              (fmt/Printf "x86i trace bisect: DIFF at %#x %s (family %s), after %d instructions; sys: %s; step: %s\n" (.-At r) (.-Inst r) (.-Family r) (.-Steps r) (.-Diff sys) (.-Diff r))
+              (set! st 1))
+            (case [(!= sys nil)]
+              (fmt/Printf "x86i trace bisect: DIFF not bisected to an instruction; sys: %s; step: %s\n" (.-Diff sys) (.-Diff r))
+              (set! st 1))
+            (case [(and (.-Equal r) (== mode "step"))]
+              (fmt/Printf "x86i trace step: equal: %d instructions compared (of %d), %d system calls, status %d, %.0f instructions/s\n" (.-Stepped r) (.-Steps r) (.-Syscalls r) (.-Status r) (/ (conv float64 (.-Stepped r)) (.Seconds el))))
+            (case [(.-Equal r)]
+              (fmt/Printf "x86i trace %s: equal: %d system calls, %d instructions, status %d\n" mode (.-Syscalls r) (.-Steps r) (.-Status r)))
+            (default
+              (fmt/Printf "x86i trace %s: DIFF after %d instructions: %s\n" mode (.-Steps r) (.-Diff r))
+              (set! st 1)))
+
+          (if (== (.-Loader r) "")
+            (fmt/Println "x86i loader: equal")
+            (do
+              (fmt/Printf "x86i loader: DIFF: %s\n" (.-Loader r))
+              (set! st 1)))
+
+          ^{:line 178} st)))))

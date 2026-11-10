@@ -1,0 +1,268 @@
+(ns asm.x86i-gen
+  "x86i's synthetic programs (AX5.4; AX5-DESIGN §5 stage 3, AXS60 (a); doc/asm/AMD64.md §10): a seeded generator writing one
+  assembly program a family, each case straight-line code that sets the flags (popfq), the operands (edge values of the
+  operand's size and seeded randoms, a register's upper bits filled to show what a write keeps), runs one instruction and
+  writes its result and the flags the SDM defines for it (pushfq, masked) as hex (lib/hex.s's put_hex2, put_mem). Their
+  verdict is the CPU's run (`# judge: cpu`, AXS9 (a)) and the lockstep's step mode (every instruction compared). The
+  programs are written to a directory (`.tmp`), never committed: their names and SHA-256 digests are,
+  test/asm/x86i/synth-digests.edn (`bin/repr-asm x86i synth DIR [--record]`).
+
+  Families: bit (bt bts btr btc on registers and memory, the offset by register, signed, and by immediate; bsf bsr tzcnt lzcnt
+  popcnt), rotc (rcl rcr at the four sizes, by 1, CL and an immediate, on registers and memory, CF in both ways), shiftd (shld
+  shrd at 16, 32 and 64 bits, by CL and an immediate, on registers and memory), cond (every setcc and cmovcc over every
+  combination of CF ZF SF OF PF set by popfq, and after the instructions whose flags x86i computes lazily), misc (enter's
+  nesting levels, xlatb, movbe both ways, bswap, cmpxchg's both outcomes at each size, xadd)."
+  (:require [arbace.string :as str])
+  (:import (java.security MessageDigest)))
+
+(def seed 0x5ead5eed)
+
+(defn- rng
+  "A seeded sequence of 64-bit values (a 64-bit LCG, the high bits mixed down)."
+  [s]
+  (rest (iterate (fn [x] (unchecked-add (unchecked-multiply x 6364136223846793005) 1442695040888963407)) s)))
+
+(defn- mix [x] (bit-xor x (unsigned-bit-shift-right x 29)))
+
+(defn- h64 [v] (str "0x" (format "%x" v)))
+
+(def reg-d {1 "%bl" 2 "%bx" 4 "%ebx" 8 "%rbx"})
+(def reg-s {1 "%dl" 2 "%dx" 4 "%edx" 8 "%rdx"})
+(def suf {1 "b" 2 "w" 4 "l" 8 "q"})
+
+(defn- mask-of [w] (if (= w 8) -1 (dec (bit-shift-left 1 (* 8 w)))))
+
+(defn- edges
+  "The edge values of size w (as 64-bit patterns of the operand's bits) and n seeded ones."
+  [w rs n]
+  (let [m (mask-of w) sb (bit-shift-left 1 (dec (* 8 w)))]
+    (concat [0 1 -1 (unchecked-dec sb) sb 0x80 0x7f 2 (bit-and 0x5555555555555555 m) (bit-and -0x5555555555555556 m)]
+            (map #(bit-and (mix %) m) (take n rs)))))
+
+(def upper 0x7766554433221100)
+
+(defn- fill-reg
+  "The register's 64 bits: the operand's value below, a pattern above (what an 8- or 16-bit write keeps)."
+  [w v]
+  (if (= w 8) v (bit-or (bit-and v (mask-of w)) (bit-and upper (bit-not (mask-of w))))))
+
+(defn- lines [& xs] (apply str (map #(str "\t" % "\n") (flatten xs))))
+
+(defn- set-flags [fl] [(str "pushq $" (h64 fl)) "popfq"])
+
+(defn- out-flags
+  "The result (rdi) and the flags masked (rsi), written."
+  [result-reg fmask]
+  ["pushfq" "pop %rsi" (str "and $" (h64 fmask) ", %rsi") (str "mov " result-reg ", %rdi") "call put_hex2"])
+
+(def all-flags 0x8d5)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; bit
+
+(defn- bit-family []
+  (let [rs (atom (rng (+ seed 1)))
+        take! (fn [n] (let [x (take n @rs)] (swap! rs #(drop n %)) x))
+        out (StringBuilder.)]
+    (doseq [w [2 4 8] op ["bt" "bts" "btr" "btc"] fl [0 0x41]]
+      ;; register destination, register offset (masked to the size) and immediate offset
+      (doseq [v (take 4 (edges w (take! 2) 2)) off (concat [0 1 (dec (* 8 w)) (* 8 w) (+ 3 (* 8 w))] (map #(bit-and % 0xff) (take! 2)))]
+        (.append out (lines (set-flags fl) (str "mov $" (h64 (fill-reg w v)) ", %rbx") (str "mov $" (h64 off) ", %rdx")
+                            (str op (suf w) " " (reg-s w) ", " (reg-d w)) (out-flags "%rbx" 0x41)))
+        (.append out (lines (set-flags fl) (str "mov $" (h64 (fill-reg w v)) ", %rbx")
+                            (str op (suf w) " $" (bit-and off 0xff) ", " (reg-d w)) (out-flags "%rbx" 0x41))))
+      ;; memory destination, register offset signed beyond the operand (the bit string), and immediate
+      (doseq [off (concat [0 1 -1 -8 -9 (* 8 w) (- (* 8 w)) 100 -100 255 -256] (map #(- (bit-and % 0x1ff) 256) (take! 3)))]
+        (.append out (lines (str "mov $" (h64 (mix (first (take! 1)))) ", %rax") "call fill" (set-flags fl)
+                            (str "mov $" (h64 off) ", %rdx")
+                            (str op (suf w) " " (reg-s w) ", area+64(%rip)")
+                            "pushfq" "pop %rsi" "and $0x41, %rsi" "xor %edi, %edi" "call put_hex2"
+                            "lea area+24(%rip), %rdi" "mov $80, %esi" "call put_mem"))))
+    (doseq [w [2 4 8] op ["bsf" "bsr" "tzcnt" "lzcnt" "popcnt"] v (edges w (take! 6) 6)]
+      (let [m (case op ("bsf" "bsr") 0x40 ("tzcnt" "lzcnt") 0x41 all-flags)]
+        (.append out (lines (set-flags 0x8d5) "mov $0x5555555555555555, %rbx" (str "mov $" (h64 (fill-reg w v)) ", %rdx")
+                            (str op (suf w) " " (reg-s w) ", " (reg-d w)) (out-flags "%rbx" m)))
+        (.append out (lines (set-flags 0) "mov $0x5555555555555555, %rbx" (str "mov $" (h64 (fill-reg w v)) ", %rax")
+                            "mov %rax, area(%rip)"
+                            (str op (suf w) " area(%rip), " (reg-d w)) (out-flags "%rbx" m)))))
+    (str out)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; rcl, rcr
+
+(defn- rotc-family []
+  (let [rs (atom (rng (+ seed 2)))
+        take! (fn [n] (let [x (take n @rs)] (swap! rs #(drop n %)) x))
+        out (StringBuilder.)]
+    (doseq [w [1 2 4 8] op ["rcl" "rcr"] cf [0 1] v (take 6 (edges w (take! 2) 2))
+            n [0 1 2 7 8 9 15 16 17 31 32 33 63 64 65 255]]
+      (let [cm (if (= w 8) 63 31) mn (bit-and n cm)
+            ;; OF defined for a masked count of 0 (unchanged) or 1; the other flags unchanged, CF defined
+            m (if (<= mn 1) all-flags (bit-and all-flags (bit-not 0x800)))
+            fl (bit-or cf 0x8c4)]
+        (.append out (lines (set-flags fl) (str "mov $" (h64 (fill-reg w v)) ", %rbx") (str "mov $" n ", %ecx")
+                            (str op (suf w) " %cl, " (reg-d w)) (out-flags "%rbx" m)))
+        (when (= n 1)
+          (.append out (lines (set-flags fl) (str "mov $" (h64 (fill-reg w v)) ", %rbx")
+                              (str op (suf w) " " (reg-d w)) (out-flags "%rbx" m))))
+        (when (#{2 9 33} n)
+          (.append out (lines (set-flags fl) (str "mov $" (h64 (fill-reg w v)) ", %rax") "mov %rax, area(%rip)"
+                              (str op (suf w) " $" n ", area(%rip)") (out-flags "area(%rip)" m))))))
+    (str out)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; shld, shrd
+
+(defn- shiftd-family []
+  (let [rs (atom (rng (+ seed 3)))
+        take! (fn [n] (let [x (take n @rs)] (swap! rs #(drop n %)) x))
+        out (StringBuilder.)]
+    (doseq [w [2 4 8] op ["shld" "shrd"] [a b] (partition 2 (take 12 (edges w (take! 4) 4)))
+            n (if (= w 2) [0 1 2 8 15 16] (concat [0 1 2 (dec (* 8 w)) 33] (when (= w 8) [32 63 64 65])))]
+      (let [mn (bit-and n (if (= w 8) 63 31))
+            m (cond (zero? mn) all-flags (= mn 1) 0x8c5 :else 0xc5)]
+        (.append out (lines (set-flags 0x8d5) (str "mov $" (h64 (fill-reg w a)) ", %rbx") (str "mov $" (h64 (fill-reg w b)) ", %rdx")
+                            (str "mov $" n ", %ecx") (str op (suf w) " %cl, " (reg-s w) ", " (reg-d w)) (out-flags "%rbx" m)))
+        (.append out (lines (set-flags 0) (str "mov $" (h64 (fill-reg w a)) ", %rbx") (str "mov $" (h64 (fill-reg w b)) ", %rdx")
+                            (str op (suf w) " $" n ", " (reg-s w) ", " (reg-d w)) (out-flags "%rbx" m)))
+        (when (odd? mn)
+          (.append out (lines (set-flags 0) (str "mov $" (h64 (fill-reg w a)) ", %rax") "mov %rax, area(%rip)"
+                              (str "mov $" (h64 (fill-reg w b)) ", %rdx") (str "mov $" n ", %ecx")
+                              (str op (suf w) " %cl, " (reg-s w) ", area(%rip)") (out-flags "area(%rip)" m))))))
+    (str out)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; setcc, cmovcc
+
+(def ccs ["o" "no" "b" "ae" "e" "ne" "be" "a" "s" "ns" "p" "np" "l" "ge" "le" "g"])
+
+(defn- conds
+  "Every setcc into a byte (a byte register then stored, or memory directly) and every cmovcc at 16, 32 and 64 bits (register
+  and memory sources) into a word, the flags as the producer left them (nothing between touches them: mov alone), then both
+  written."
+  []
+  [(for [[i cc] (map-indexed vector ccs)]
+     (if (even? i)
+       [(str "set" cc " %al") (str "mov %al, ccb+" i "(%rip)")]
+       [(str "set" cc " ccb+" i "(%rip)")]))
+   "mov $0x1111111111111111, %r8"
+   (for [[i cc] (map-indexed vector ccs) :let [w ([2 4 8] (mod i 3)) r ({2 "%si" 4 "%esi" 8 "%rsi"} w)]]
+     ["mov $0x3333333333333333, %rsi"
+      (if (even? i)
+        (str "cmov" cc " " ({2 "%r8w" 4 "%r8d" 8 "%r8"} w) ", " r)
+        (str "cmov" cc " cmovsrc(%rip), " r))
+      (str "mov %rsi, cmo+" (* 8 i) "(%rip)")])
+   "lea ccb(%rip), %rdi" "mov $16, %esi" "call put_mem"
+   "lea cmo(%rip), %rdi" "mov $128, %esi" "call put_mem"])
+
+(defn- cond-family []
+  (let [rs (atom (rng (+ seed 4)))
+        take! (fn [n] (let [x (take n @rs)] (swap! rs #(drop n %)) x))
+        out (StringBuilder.)]
+    ;; popfq: every combination of CF PF ZF SF OF
+    (doseq [k (range 32)]
+      (let [fl (bit-or (if (bit-test k 0) 1 0) (if (bit-test k 1) 4 0) (if (bit-test k 2) 0x40 0) (if (bit-test k 3) 0x80 0)
+                       (if (bit-test k 4) 0x800 0))]
+        (.append out (lines (set-flags fl) (conds)))))
+    ;; the lazy flags' producers: cmp, sub, add, adc, sbb, test, and, inc, dec, neg, shl by 1, sahf, popcnt (flags all
+    ;; defined but AF, which no condition reads)
+    (doseq [w [1 2 4 8] [a b] (partition 2 (edges w (take! 6) 6))
+            p ["cmp" "sub" "add" "adc" "sbb" "test" "and" "inc" "dec" "neg" "shl1"]]
+      (let [ins (case p
+                  ("cmp" "sub" "add" "adc" "sbb" "test" "and") (str p (suf w) " " (reg-s w) ", " (reg-d w))
+                  ("inc" "dec" "neg") (str p (suf w) " " (reg-d w))
+                  "shl1" (str "shl" (suf w) " " (reg-d w)))]
+        (.append out (lines (set-flags (if (odd? (count p)) 1 0)) (str "mov $" (h64 (fill-reg w a)) ", %rbx")
+                            (str "mov $" (h64 (fill-reg w b)) ", %rdx") ins (conds)))))
+    (doseq [v [0 1 0x40 0x41 0x80 0xd5 0xff 0x14]]
+      (.append out (lines (set-flags 0x800) (str "mov $" v ", %ah") "sahf" (conds))))
+    (str out)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; misc
+
+(defn- misc-family []
+  (let [rs (atom (rng (+ seed 5)))
+        take! (fn [n] (let [x (take n @rs)] (swap! rs #(drop n %)) x))
+        out (StringBuilder.)]
+    ;; enter: the nesting levels (the frame pointers copied from RBP's chain in area), RSP and RBP after it, the words pushed
+    (doseq [level [0 1 2 3 5 31 32 33] size [0 8 24 0x1234]]
+      (.append out (lines "mov $0x0102030405060708, %rax" "call fill" "mov %rsp, %r12" "mov %rbp, %r13"
+                          "lea area+184(%rip), %rbp" "lea stk+4096(%rip), %rsp"
+                          (str "enter $" size ", $" level)
+                          "lea stk+4096(%rip), %rdi" "sub %rsp, %rdi" "lea stk+4096(%rip), %rsi" "sub %rbp, %rsi"
+                          "lea stk+4096(%rip), %r14" "mov %r12, %rsp" "mov %r13, %rbp" "call put_hex2"
+                          "lea -64(%r14), %rdi" "mov $64, %esi" "call put_mem")))
+    ;; xlatb
+    (doseq [al [0 1 0x7f 0x80 0xff 0x33]]
+      (.append out (lines "mov $0x1122334455667788, %rax" "call fill" "lea area(%rip), %rbx" (str "mov $" (h64 (bit-or 0x1234500 al)) ", %rax")
+                          "xlatb" "mov %rax, %rdi" "xor %esi, %esi" "call put_hex2")))
+    ;; movbe both ways, bswap
+    (doseq [w [2 4 8] v (take 5 (edges w (take! 3) 3))]
+      (.append out (lines (str "mov $" (h64 (fill-reg w v)) ", %rax") "mov %rax, area(%rip)" "mov $0x5555555555555555, %rbx"
+                          (str "movbe area(%rip), " (reg-d w)) (str "mov $" (h64 (fill-reg w (mix v))) ", %rdx")
+                          (str "movbe " (reg-s w) ", area+8(%rip)") "mov %rbx, %rdi" "mov area+8(%rip), %rsi" "call put_hex2"))
+      (when (> w 2)
+        (.append out (lines (str "mov $" (h64 (fill-reg w v)) ", %rbx") (str "bswap " (reg-d w)) "mov %rbx, %rdi" "xor %esi, %esi" "call put_hex2"))))
+    ;; cmpxchg: equal (the source stored, ZF) and not (the accumulator loaded), xadd, at each size
+    (doseq [w [1 2 4 8] [a b] (partition 2 (take 6 (edges w (take! 2) 2))) eq [true false]]
+      (let [acc ({1 "%al" 2 "%ax" 4 "%eax" 8 "%rax"} w)]
+        (.append out (lines (str "mov $" (h64 (fill-reg w a)) ", %rbx") "mov %rbx, area(%rip)"
+                            (str "mov $" (h64 (fill-reg w (if eq a b))) ", %rax") (str "mov $" (h64 (fill-reg w b)) ", %rdx")
+                            (str "cmpxchg" (suf w) " " (reg-s w) ", area(%rip)") "pushfq" "pop %rsi" "and $0x8d5, %rsi"
+                            "mov area(%rip), %rdi" "call put_hex2" "mov %rax, %rdi" "xor %esi, %esi" "call put_hex2"
+                            (str "xadd" (suf w) " " (reg-s w) ", area(%rip)") "pushfq" "pop %rsi" "and $0x8c5, %rsi"
+                            "mov area(%rip), %rdi" "call put_hex2" "mov %rdx, %rdi" "xor %esi, %esi" "call put_hex2"))
+        acc))
+    (str out)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+
+(def families
+  [["bit" "bt bts btr btc on registers and memory, bsf bsr tzcnt lzcnt popcnt" bit-family]
+   ["rotc" "rcl rcr at the four sizes, by 1, CL and an immediate, CF in both ways" rotc-family]
+   ["shiftd" "shld shrd at 16, 32 and 64 bits, by CL and an immediate, on registers and memory" shiftd-family]
+   ["cond" "every setcc and cmovcc over the flags popfq sets and after the lazily computed producers" cond-family]
+   ["misc" "enter's nesting levels, xlatb, movbe, bswap, cmpxchg, xadd" misc-family]])
+
+(defn- program [nm what body]
+  (str "# x86i's synthetic program synth-" nm " (AX5.4; test/asm/x86i/gen.ae, seed " (h64 seed) "; not committed: its digest is,\n"
+       "# test/asm/x86i/synth-digests.edn): " what ". The verdict: exit 0, stdout the CPU's; the lockstep's step mode.\n"
+       "# exit: 0\n# judge: cpu\n# with: lib/hex.s\n"
+       "\t.globl\t_start\n\t.text\n_start:\n\tand\t$-16, %rsp\n"
+       body
+       "\txor\t%edi, %edi\n\tcall\tsys_exit\n\n"
+       "# fill(rax): area's 24 words, word i = rax xor (i * 0x0101010101010101)\n"
+       "fill:\n\tlea\tarea(%rip), %rdi\n\txor\t%ecx, %ecx\n1:\tmov\t%rcx, %rdx\n\tmov\t$0x0101010101010101, %r8\n"
+       "\timul\t%r8, %rdx\n\txor\t%rax, %rdx\n\tmov\t%rdx, (%rdi,%rcx,8)\n\tinc\t%ecx\n\tcmp\t$24, %ecx\n\tjne\t1b\n\tret\n\n"
+       "\t.data\n\t.align\t16\npad:\t.zero\t256\narea:\t.zero\t512\nccb:\t.zero\t16\ncmo:\t.zero\t128\ncmovsrc:\t.quad\t0x2222222222222222\n"
+       "\t.bss\n\t.align\t16\nstk:\t.zero\t4096\n"))
+
+(defn- sha256 [^String s]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md (.getBytes s "UTF-8"))))))
+
+(defn gen
+  "Writes the programs into DIR (DIR/synth-NAME.s, lib/hex.s beside them) and returns {NAME digest}."
+  [dir hex]
+  (.mkdirs (java.io.File. (str dir "/lib")))
+  (spit (str dir "/lib/hex.s") (slurp hex))
+  (into (sorted-map)
+        (for [[nm what f] families :let [text (program nm what (f))]]
+          (do (spit (str dir "/synth-" nm ".s") text)
+              [(str "synth-" nm) (sha256 text)]))))
+
+(defn main
+  "bin/repr-asm x86i synth DIR [--record]: the programs written; their digests against DIGESTS (or recorded)."
+  [dir hex digests record]
+  (let [d (gen dir hex)
+        header (str ";; x86i's synthetic programs' digests (bin/repr-asm x86i synth; test/asm/x86i/gen.ae, AX5.4, AXS60 (a)): each\n"
+                    ";; program's name and its text's SHA-256, the programs written to .tmp and never committed. Read with the\n"
+                    ";; Clojure reader.\n")]
+    (doseq [[n h] d] (println (str n " " h)))
+    (if (seq record)
+      (do (spit digests (str header (pr-str d) "\n")) (println (str "x86i synth: recorded " (count d) " digests")))
+      (let [old (if (.exists (java.io.File. ^String digests)) (read-string (slurp digests)) {})]
+        (if (= old d)
+          (println (str "x86i synth: " (count d) " programs, their digests the recorded ones"))
+          (do (println "FAIL: x86i synth: the programs' digests differ from test/asm/x86i/synth-digests.edn") (System/exit 1)))))))

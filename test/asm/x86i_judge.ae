@@ -17,12 +17,13 @@
             [arbace.asm.amd64.decode :as d]))
 
 (def header
-  (str ";; x86i's check (bin/repr-asm x86i-check; doc/asm/AMD64.md §10, AX5.2): each program of test/asm/run/ Arbace assembled and\n"
-       ";; linked, run by x86i and judged by its header's verdict and against the CPU's run (x86i/NAME), and its code decoded by x86i's\n"
-       ";; decoder against arbace.asm.amd64.decode (decode/NAME): :pass, else a class of test/asm/divergences-x86i.edn. Written by\n"
-       ";; `bin/repr-asm x86i-check --record`. Read with the Clojure reader.\n"))
+  (str ";; x86i's check (bin/repr-asm x86i-check; doc/asm/AMD64.md §10, AX5.2-AX5.4): each program of test/asm/run/, test/asm/x86i/ and\n"
+       ";; the synthetic ones Arbace assembled and linked, run by x86i and judged by its header's verdict and against the CPU's run\n"
+       ";; (x86i/NAME), its code decoded by x86i's decoder against arbace.asm.amd64.decode (decode/NAME), the lockstep's sys mode\n"
+       ";; (lockstep/NAME) and step mode (step/NAME), the loader's judge (loader/NAME): :pass, else a class of\n"
+       ";; test/asm/divergences-x86i.edn. Written by `bin/repr-asm x86i-check --record`. Read with the Clojure reader.\n"))
 
-(def failing #{:verdict :cpu :timeout :decode :missing :lockstep})
+(def failing #{:verdict :cpu :timeout :decode :missing :lockstep :step :loader})
 
 (defn- slurp-or [^String p d] (if (.exists (java.io.File. p)) (slurp p) d))
 
@@ -87,6 +88,15 @@
              :when (some #(re-matches #"#\s*judge:\s*cpu\s*" %) (take-while #(str/starts-with? % "#") (str/split-lines (slurp p))))]
          n)))
 
+(defn cpuid-marked
+  "The programs of the list whose header says `# cpu: cpuid` (AX5.4): they branch on or write cpuid's answer, which x86i gives
+  from its model and this CPU from itself (it cannot fault cpuid), so their CPU-compared run and the sys mode's lockstep are
+  the class :cpuid (by design, AXS58 (a)); their own verdict and the step mode (the native's answer overwritten) judge them."
+  [lst]
+  (set (for [l (str/split-lines (slurp lst)) :when (seq l) :let [[n p] (str/split l #"\t")]
+             :when (some #(re-matches #"#\s*cpu:\s*cpuid\s*" %) (take-while #(str/starts-with? % "#") (str/split-lines (slurp p))))]
+         n)))
+
 (defn- wants
   "Each program's verdict [EXIT STDOUT-HEX], the stdout nil for one the CPU judges."
   [work lst]
@@ -99,17 +109,29 @@
   (let [l (str/trim (first (str/split-lines (slurp-or path "(no trace)\n"))))]
     [(str "lockstep/" n) (if (str/includes? l "sys: equal:") :pass :lockstep) (str/replace l #"^x86i trace sys: (equal: )?" "")]))
 
+(defn judge-step
+  "The lockstep's step mode's row of n (AX5.3, `x86i trace --mode step`'s first line): :pass when equal, else :step; with its
+  loader row (the second line, the loader's judge: x86i's own initial stack against the native's): :pass, else :loader."
+  [n ^String path]
+  (let [[l ld] (map str/trim (concat (str/split-lines (slurp-or path "(no trace)\n")) ["(no loader judge)"]))
+        ld (if (str/starts-with? ld "x86i loader:") ld "(no loader judge)")]
+    [[(str "step/" n) (if (str/includes? l "step: equal:") :pass :step)
+      (str/replace (str/replace l #"^x86i trace step: (equal: )?" "") #", \d+ instructions/s$" "")]
+     [(str "loader/" n) (if (= ld "x86i loader: equal") :pass :loader) (str/replace ld #"^x86i loader: (equal)?" "")]]))
+
 (defn rows
   "The run's rows: x86i/NAME and decode/NAME for each program WORK/build.tsv says was built."
   [work lst]
-  (let [built (read-tsv (str work "/build.tsv")) want (wants work lst)]
+  (let [built (read-tsv (str work "/build.tsv")) want (wants work lst) cpuid (cpuid-marked lst)
+        by-cpuid (fn [n [id r dt]] (if (and (cpuid n) (#{:cpu :lockstep} r)) [id :cpuid dt] [id r dt]))]
     (vec (apply concat
                 (for [[n [c]] (sort-by key built) :when (= c "built")]
                   (let [[r dt] (judge-run (run-of work n "x86i.") (run-of work n "") (want n))
                         dec (str work "/" n ".dec")
                         [dr ddt k] (if (.exists (java.io.File. dec)) (judge-decode (str/split-lines (slurp dec))) [:missing "no decode-text" 0])]
-                    [[(str "x86i/" n) r dt] [(str "decode/" n) dr (if (= dr :pass) (str k " instructions") ddt)]
-                     (judge-trace n (str work "/" n ".trace"))]))))))
+                    (into [(by-cpuid n [(str "x86i/" n) r dt]) [(str "decode/" n) dr (if (= dr :pass) (str k " instructions") ddt)]
+                           (by-cpuid n (judge-trace n (str work "/" n ".trace")))]
+                          (judge-step n (str work "/" n ".step")))))))))
 
 (defn control
   "A negative control: `verdict` (SUBJECT's x86i run judged by REFERENCE's verdict), `cpu` (SUBJECT's x86i run against
@@ -125,6 +147,17 @@
             "cpu" (let [cpu (run-of work ref "")] (when (and x cpu) (first (judge-run x cpu (want subj)))))
             "lockstep" (let [p (str work "/" subj ".trace-" (str/replace ref ":" "-"))]
                          (when (.exists (java.io.File. p)) (second (judge-trace subj p))))
+            ("step" "bisect") (let [p (str work "/" subj "." kind "-" (str/replace ref ":" "-"))
+                                    fam (first (str/split ref #":"))]
+                                (when (.exists (java.io.File. p))
+                                  (let [l (first (str/split-lines (slurp p)))]
+                                    (cond (not (str/includes? l "DIFF")) :pass
+                                          ;; the difference must name an instruction of the injected family
+                                          (str/includes? l (if (= kind "step") (str " (" fam "): ") (str "(family " fam ")"))) :differs
+                                          :else :pass))))
+            "loader" (let [p (str work "/" subj ".loader-" (str/replace ref ":" "-"))]
+                       (when (.exists (java.io.File. p))
+                         (if (some #(str/starts-with? % "x86i loader: DIFF") (str/split-lines (slurp p))) :differs :pass)))
             "inject" (let [xi (run-of work subj (str "inject-" (str/replace ref ":" "-") ".")) cpu (run-of work subj "")] (when (and xi cpu) (first (judge-run xi cpu (want subj)))))
             "decode" (let [a (str work "/" subj ".dec") b (str work "/" ref ".dec")]
                        (when (and (.exists (java.io.File. a)) (.exists (java.io.File. b)))
@@ -142,11 +175,15 @@
         problems (atom [])
         xs (filter #(str/starts-with? (first %) "x86i/") run)
         ds (filter #(str/starts-with? (first %) "decode/") run)
-        ls (filter #(str/starts-with? (first %) "lockstep/") run)]
+        ls (filter #(str/starts-with? (first %) "lockstep/") run)
+        ss (filter #(str/starts-with? (first %) "step/") run)
+        lds (filter #(str/starts-with? (first %) "loader/") run)]
     (println (str "repr-asm x86i-check: " (count (filter #(= :pass (second %)) xs)) " of " (count xs)
                   " programs run by x86i meet their own verdicts and equal the CPU's runs; "
                   (count (filter #(= :pass (second %)) ds)) " of " (count ds) " decoded as arbace.asm.amd64.decode decodes them; "
                   (count (filter #(= :pass (second %)) ls)) " of " (count ls) " lockstep-equal in sys mode; "
+                  (count (filter #(= :pass (second %)) ss)) " of " (count ss) " in step mode; "
+                  (count (filter #(= :pass (second %)) lds)) " of " (count lds) " loaded as Linux loads them; "
                   (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))))
     (doseq [[i c dt] run]
       (cond (failing c) (swap! problems conj (str "failing: " i " " (name c) " " dt))

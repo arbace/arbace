@@ -17,38 +17,49 @@
   ^{:line 17} [^{:val 8 :doc "PermCode marks a page x86i holds decoded instructions of: a store into it goes the slow way and invalidates them.\n"} PermCode 8])
 
 
+
+(go/const "The kinds of access a fault was.\n"
+  ^{:line 22} [^{:val 0} FaultRead iota]
+  ^{:line 23} [^{:val 1} FaultWrite]
+  ^{:line 24} [^{:val 2} FaultFetch])
+
+
 (go/const ^{:val 4096} pageSize 4096)
 (go/const ^{:val 4095} pageMask (- pageSize 1))
 
 (go/type tlbEntry (struct
-    ^{:line 24 :tag uint64} page ; the page's address + 1 (0: empty)
-    ^{:line 25 :tag (slice byte)} b ; the page's bytes
-    ^{:line 26 :tag uint8} perm))
+    ^{:line 31 :tag uint64} page ; the page's address + 1 (0: empty)
+    ^{:line 32 :tag (slice byte)} b ; the page's bytes
+    ^{:line 33 :tag uint8} perm))
 
 
 
 (go/type AS "AS is a process's address space.\n" (struct
-    ^{:line 31 :tag (* crt/Mem)} M
-    ^{:line 32 :tag (map uint64 uint8)} perm ; by page address
-    ^{:line 33 :tag (array 256 tlbEntry)} tlb
-    ^{:line 34 :tag (func [^uint64 page])} OnCode ; a store into a PermCode page: the decoded instructions there are stale
+    ^{:line 38 :tag (* crt/Mem)} M
+    ^{:line 39 :tag (map uint64 uint8)} perm ; by page address
+    ^{:line 40 :tag (array 256 tlbEntry)} tlb
+    ^{:line 41 :tag (func [^uint64 page])} OnCode ; a store into a PermCode page: the decoded instructions there are stale
 
-    ^{:line 36 :tag uint64 :doc "the last fault: its address and whether it was a write or a fetch\n"} FaultAddr))
+    ^{:line 43 :tag uint64 :doc "the last fault: its address and whether it was a write or a fetch\n"} FaultAddr
+    ^{:line 44 :tag uint8} FaultKind ; FaultRead, FaultWrite, FaultFetch
+
+    ^{:line 46 :tag bool :doc "Log, when set, records each store's address and size in Stores (the lockstep's step mode compares the bytes stored)\n"} Log
+    ^{:line 47 :tag (slice uint64)} Stores))
 
 
 
-^{:go/end 42} (go/func NewAS "NewAS is an empty address space (crt's Mem without its stack: the loader maps Linux's).\n" ^{:tag (* AS)} []
+^{:go/end 53} (go/func NewAS "NewAS is an empty address space (crt's Mem without its stack: the loader maps Linux's).\n" ^{:tag (* AS)} []
   (addr (lit AS :M (new crt/Mem) :perm (lit (map uint64 uint8)))))
 
 
-^{:go/end 48} (go/method flush [^{:tag (* AS)} a]
+^{:go/end 59} (go/method flush [^{:tag (* AS)} a]
   (range [i (.-tlb a)]
     (aset (.-tlb a) i (lit tlbEntry))))
 
 
 
 
-^{:go/breaks [[5 57]] :go/end 58} (go/method Mapped "Mapped reports whether any page of [base, base+size) is mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size]
+^{:go/breaks [[5 68]] :go/end 69} (go/method Mapped "Mapped reports whether any page of [base, base+size) is mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size]
   (for [p (bit-and-not base pageMask)] (< p (+ base size)) (set! p + pageSize)
     (when [(values _ ok) (aget (.-perm a) p)] ok
       (return true)))
@@ -58,7 +69,7 @@
 
 
 
-^{:go/end 67} (go/method Map "Map maps [base, base+size) (page-aligned) with zero bytes and the permissions perm.\n" [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm ^string name]
+^{:go/end 78} (go/method Map "Map maps [base, base+size) (page-aligned) with zero bytes and the permissions perm.\n" [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm ^string name]
   (.Map (.-M a) base size (== (bit-and perm PermW) 0) name)
   (for [p base] (< p (+ base size)) (set! p + pageSize)
     (aset (.-perm a) p perm))
@@ -67,7 +78,7 @@
 
 
 
-^{:go/end 81} (go/method Unmap "Unmap removes [base, base+size) (page-aligned).\n" [^{:tag (* AS)} a ^uint64 base ^uint64 size]
+^{:go/end 92} (go/method Unmap "Unmap removes [base, base+size) (page-aligned).\n" [^{:tag (* AS)} a ^uint64 base ^uint64 size]
   (.Unmap (.-M a) base size)
   (for [p base] (< p (+ base size)) (set! p + pageSize)
     (when [(values pr ok) (aget (.-perm a) p)] ok
@@ -81,7 +92,7 @@
 
 
 
-^{:go/breaks [7] :go/end 99} (go/method Protect "Protect sets the permissions of the mapped pages of [base, base+size); false when a page is not mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm]
+^{:go/breaks [7] :go/end 110} (go/method Protect "Protect sets the permissions of the mapped pages of [base, base+size); false when a page is not mapped.\n" ^bool [^{:tag (* AS)} a ^uint64 base ^uint64 size ^uint8 perm]
   (for [p base] (< p (+ base size)) (set! p + pageSize)
     (when [(values _ ok) (aget (.-perm a) p)] (not ok)
       (return false)))
@@ -99,10 +110,21 @@
 
 
 
-^{:go/end 102} (go/method Perm "Perm is the page's permissions (0: unmapped).\n" ^uint8 [^{:tag (* AS)} a ^uint64 addr] (aget (.-perm a) (bit-and-not addr pageMask)))
+^{:go/end 121} (go/method Writable "Writable are the writable pages' addresses, in no order (the lockstep's comparison of the writable segments).\n" ^{:tag (slice uint64)} [^{:tag (* AS)} a]
+  (let [^{:tag (slice uint64)} out (zero (slice uint64))]
+    (range [p pr (.-perm a)]
+      (when (!= (bit-and pr PermW) 0)
+        (set! out (append out p))))
 
 
-^{:go/end 111} (go/method MarkCode "MarkCode marks the page as holding decoded instructions.\n" [^{:tag (* AS)} a ^uint64 addr]
+    ^{:line 120} out))
+
+
+
+^{:go/end 124} (go/method Perm "Perm is the page's permissions (0: unmapped).\n" ^uint8 [^{:tag (* AS)} a ^uint64 addr] (aget (.-perm a) (bit-and-not addr pageMask)))
+
+
+^{:go/end 133} (go/method MarkCode "MarkCode marks the page as holding decoded instructions.\n" [^{:tag (* AS)} a ^uint64 addr]
   (let [p (bit-and-not addr pageMask)]
     (when [(values pr ok) (aget (.-perm a) p)] (and ok (== (bit-and pr PermCode) 0))
       (aset (.-perm a) p (bit-or pr PermCode))
@@ -111,7 +133,7 @@
 
 
 
-^{:go/end 120} (go/method ClearCode "ClearCode unmarks the page.\n" [^{:tag (* AS)} a ^uint64 addr]
+^{:go/end 142} (go/method ClearCode "ClearCode unmarks the page.\n" [^{:tag (* AS)} a ^uint64 addr]
   (let [p (bit-and-not addr pageMask)]
     (when [(values pr ok) (aget (.-perm a) p)] ok
       (aset (.-perm a) p (bit-and-not pr PermCode))
@@ -120,9 +142,9 @@
 
 
 
-^{:go/end 140} (go/method entry "entry is the TLB entry of the page holding addr, nil when unmapped.\n" ^{:tag (* tlbEntry)} [^{:tag (* AS)} a ^uint64 addr]
+^{:go/end 162} (go/method entry "entry is the TLB entry of the page holding addr, nil when unmapped.\n" ^{:tag (* tlbEntry)} [^{:tag (* AS)} a ^uint64 addr]
   (let [p (bit-and-not addr pageMask)
-      ^{:line 125} e (addr (aget (.-tlb a) (bit-and (>> p 12) 255)))]
+      ^{:line 147} e (addr (aget (.-tlb a) (bit-and (>> p 12) 255)))]
     (when (== (.-page e) (+ p 1))
       (return e))
 
@@ -136,12 +158,12 @@
 
         (let [o (- p (.-Base s))]
           (set! @e (lit tlbEntry :page (+ p 1) :b (subslice (.-B s) o (+ o pageSize) (+ o pageSize)) :perm pr))
-          ^{:line 139} e)))))
+          ^{:line 161} e)))))
 
 
 
 
-^{:go/end 150} (go/method Bytes "Bytes is the page's bytes from addr to the page's end, nil when unmapped (no permission checked: the loader's and the\nkernel's own access).\n" ^{:tag (slice byte)} [^{:tag (* AS)} a ^uint64 addr]
+^{:go/end 172} (go/method Bytes "Bytes is the page's bytes from addr to the page's end, nil when unmapped (no permission checked: the loader's and the\nkernel's own access).\n" ^{:tag (slice byte)} [^{:tag (* AS)} a ^uint64 addr]
   (let [e (.entry a addr)]
     (when (== e nil)
       (return nil))
@@ -150,12 +172,13 @@
 
 
 
-^{:go/end 183} (go/method Read "Read reads size (1, 2, 4, 8) bytes little-endian at addr; false (FaultAddr set) when a byte is not readable.\n" [^{:tag (* AS)} a ^uint64 addr ^int size] :results [uint64 bool]
+^{:go/end 206} (go/method Read "Read reads size (1, 2, 4, 8) bytes little-endian at addr; false (FaultAddr set) when a byte is not readable.\n" [^{:tag (* AS)} a ^uint64 addr ^int size] :results [uint64 bool]
   (let [o (bit-and addr pageMask)]
     (when (<= (+ o (conv uint64 size)) pageSize)
       (let [e (.entry a addr)]
         (when (or (== e nil) (== (bit-and (.-perm e) PermR) 0))
           (set! (.-FaultAddr a) addr)
+          (set! (.-FaultKind a) FaultRead)
           (return 0 false))
 
         (let [b (subslice (.-b e) o)]
@@ -183,11 +206,12 @@
 
 
 
-^{:go/breaks [[5 194]] :go/end 195} (go/method Probe "Probe reports whether size bytes at addr are writable (FaultAddr set when not).\n" ^bool [^{:tag (* AS)} a ^uint64 addr ^int size]
+^{:go/breaks [[5 218]] :go/end 219} (go/method Probe "Probe reports whether size bytes at addr are writable (FaultAddr set when not).\n" ^bool [^{:tag (* AS)} a ^uint64 addr ^int size]
   (range [_ p (lit (slice uint64) addr (- (+ addr (conv uint64 size)) 1))]
     (let [e (.entry a p)]
       (when (or (== e nil) (== (bit-and (.-perm e) PermW) 0))
         (set! (.-FaultAddr a) p)
+        (set! (.-FaultKind a) FaultWrite)
         (return false))))
 
 
@@ -195,12 +219,16 @@
 
 
 
-^{:go/end 223} (go/method Write "Write writes size bytes of v little-endian at addr; false (FaultAddr set, nothing written) when a byte is not writable.\n" ^bool [^{:tag (* AS)} a ^uint64 addr ^int size ^uint64 v]
-  ^{:go/breaks [[5 222]]} (let [o (bit-and addr pageMask)]
+^{:go/end 254} (go/method Write "Write writes size bytes of v little-endian at addr; false (FaultAddr set, nothing written) when a byte is not writable.\n" ^bool [^{:tag (* AS)} a ^uint64 addr ^int size ^uint64 v]
+  (when (.-Log a)
+    (set! (.-Stores a) (append (.-Stores a) addr (conv uint64 size))))
+
+  (let [o (bit-and addr pageMask)]
     (when (<= (+ o (conv uint64 size)) pageSize)
       (let [e (.entry a addr)]
         (when (or (== e nil) (== (bit-and (.-perm e) PermW) 0))
           (set! (.-FaultAddr a) addr)
+          (set! (.-FaultKind a) FaultWrite)
           (return false))
 
         (when (and (!= (bit-and (.-perm e) PermCode) 0) (!= (.-OnCode a) nil))
@@ -216,29 +244,33 @@
     (when (not (.Probe a addr size))
       (return false))
 
-    (for [k 0] (< k size) (inc! k)
-      (.Write a (+ addr (conv uint64 k)) 1 (>> v (* 8 k))))
+    ^{:go/breaks [5]} (let [log (.-Log a)]
+      (set! (.-Log a) false)
+      (for [k 0] (< k size) (inc! k)
+        (.Write a (+ addr (conv uint64 k)) 1 (>> v (* 8 k))))
 
-    true))
+      (set! (.-Log a) log)
+      true)))
 
 
 
 
-^{:go/end 238} (go/method Fetch "Fetch copies up to len(buf) executable bytes at addr into buf: the count copied (it stops at the first byte that is not\nexecutable; FaultAddr is that byte's address).\n" ^int [^{:tag (* AS)} a ^uint64 addr ^{:tag (slice byte)} buf]
+^{:go/end 270} (go/method Fetch "Fetch copies up to len(buf) executable bytes at addr into buf: the count copied (it stops at the first byte that is not\nexecutable; FaultAddr is that byte's address).\n" ^int [^{:tag (* AS)} a ^uint64 addr ^{:tag (slice byte)} buf]
   (let [n 0]
     (while (< n (len buf))
       (let [e (.entry a (+ addr (conv uint64 n)))]
         (when (or (== e nil) (== (bit-and (.-perm e) PermX) 0))
           (set! (.-FaultAddr a) (+ addr (conv uint64 n)))
+          (set! (.-FaultKind a) FaultFetch)
           (return n))
 
         (set! n + (copy (subslice buf n) (subslice (.-b e) (bit-and (+ addr (conv uint64 n)) pageMask))))))
 
-    ^{:line 237} n))
+    ^{:line 269} n))
 
 
 
-^{:go/end 252} (go/method ReadBytes "ReadBytes copies n bytes at addr (no permission checked), false when a page is unmapped.\n" [^{:tag (* AS)} a ^uint64 addr ^int n] :results [(slice byte) bool]
+^{:go/end 284} (go/method ReadBytes "ReadBytes copies n bytes at addr (no permission checked), false when a page is unmapped.\n" [^{:tag (* AS)} a ^uint64 addr ^int n] :results [(slice byte) bool]
   (let [out (make (slice byte) 0 n)]
     (while (< (len out) n)
       (let [b (.Bytes a (+ addr (conv uint64 (len out))))]
@@ -252,7 +284,7 @@
 
 
 
-^{:go/breaks [[5 265]] :go/end 266} (go/method WriteBytes "WriteBytes copies b to addr (no permission checked), false when a page is unmapped.\n" ^bool [^{:tag (* AS)} a ^uint64 addr ^{:tag (slice byte)} b]
+^{:go/breaks [[5 297]] :go/end 298} (go/method WriteBytes "WriteBytes copies b to addr (no permission checked), false when a page is unmapped.\n" ^bool [^{:tag (* AS)} a ^uint64 addr ^{:tag (slice byte)} b]
   (while (> (len b) 0)
     (let [p (.Bytes a addr)]
       (when (== p nil)

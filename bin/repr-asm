@@ -104,10 +104,20 @@
 #                                                    SIGILL, named on stderr (:unimplemented); X86I_INJECT=FAMILY:FLAG flips the
 #                                                    flag after each instruction of the family (the negative controls' fault)
 #   bin/repr-asm x86i decode-text EXE                its code sections as x86i's decoder decodes them, an instruction a line
-#   bin/repr-asm x86i trace --mode sys EXE [ARG...]  the lockstep's sys mode (AX5.3): EXE run natively under ptrace (ASLR off,
-#                                                    the vdso hidden) and on x86i from the native's initial state, compared at
-#                                                    each system call (registers, flags the SDM defines, FS, the result; the
-#                                                    world's results copied); `equal` or the first difference
+#   bin/repr-asm x86i trace --mode sys|step|bisect EXE [ARG...]
+#                                                    the lockstep (AX5.3): EXE run natively under ptrace (ASLR off, the vdso
+#                                                    hidden) and on x86i from the native's initial state; sys: compared at each
+#                                                    system call (registers, flags the SDM defines, FS, the bytes written, the
+#                                                    result; the world's results copied); step: single-stepped, compared after
+#                                                    every instruction (registers, RIP, the flags the instruction left defined,
+#                                                    FS, GS, the bytes it stored, XMM and MXCSR when it names them, the writable
+#                                                    mappings every 4,096 and at each system call, mmap's and brk's layout;
+#                                                    X86I_STEP_LIMIT=N: the rest in sys mode); bisect: sys, and a difference
+#                                                    stepped from the last system call both agreed on to its instruction; then
+#                                                    the loader's judge (x86i's own initial stack against the native's)
+#   bin/repr-asm x86i synth DIR [--record]           x86i's synthetic programs (AX5.4, AXS60 (a)): one a family (bit, rotc, shiftd,
+#                                                    cond, misc), written into DIR by test/asm/x86i/gen.ae (seeded), their digests
+#                                                    held to (or recorded into) test/asm/x86i/synth-digests.edn
 #   bin/repr-asm x86i gen|gen-check                  x86i's decode tables, go/arbace/x86i/dectab.ae, made from asm/amd64/table.edn
 #                                                    by arbace.asm.amd64.dgen; gen-check: the committed file equal to a fresh one
 #   bin/repr-asm x86i-check [--record]               test/asm/run/'s programs assembled and linked by Arbace, each run by the CPU
@@ -115,7 +125,8 @@
 #                                                    judged by the program's own verdict and against the CPU's (status, stdout,
 #                                                    stderr), its code decoded by x86i's decoder against arbace.asm.amd64.decode,
 #                                                    the lockstep's sys mode (x86i trace --mode sys: the native run under ptrace
-#                                                    compared at each system call) equal;
+#                                                    compared at each system call) and step mode (every instruction; a header's
+#                                                    `# step-limit: N` bounds it) equal, the loader's judge equal;
 #                                                    rows against test/asm/x86i-results-amd64.edn, classes
 #                                                    test/asm/divergences-x86i.edn, the negative controls of
 #                                                    test/asm/controls-x86i.txt failing; WORK .tmp/repr-asm/x86i
@@ -628,7 +639,10 @@ case ${1:-} in
       trace) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" trace "$@" ;;
       gen) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen gen "$root/go/arbace/x86i/dectab.ae" ;;
       gen-check) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen check "$root/go/arbace/x86i/dectab.ae" ;;
-      *) echo "repr-asm x86i light|run EXE [ARG...]|decode-text EXE|trace --mode sys EXE [ARG...]|gen|gen-check" >&2; exit 2 ;;
+      synth) shift; [ $# -ge 1 ] || { echo "repr-asm x86i synth DIR [--record]" >&2; exit 2; }
+        rec=; [ "${2:-}" = --record ] && rec=1
+        arbace_tool -e "(do (load-file \"$root/test/asm/x86i/gen.ae\") nil)" -e "(asm.x86i-gen/main \"$1\" \"$root/test/asm/x86i/lib/hex.s\" \"$root/test/asm/x86i/synth-digests.edn\" \"$rec\")" ;;
+      *) echo "repr-asm x86i light|run EXE [ARG...]|decode-text EXE|trace --mode sys|step|bisect EXE [ARG...]|gen|gen-check|synth DIR [--record]" >&2; exit 2 ;;
     esac ;;
   x86i-check)
     # AX5.2: each test of test/asm/run/ assembled and linked by Arbace into WORK/NAME (as run-check), run by the CPU (WORK/NAME.status,
@@ -639,7 +653,9 @@ case ${1:-} in
     export REPR_ASM_TABLE=$root/asm/amd64/table.edn
     work=$root/.tmp/repr-asm/x86i; rm -rf "$work"; mkdir -p "$work" "$lists"
     : > "$lists/x86i.list"
-    for f in "$root"/test/asm/run/*.s "$root"/test/asm/x86i/*.s; do n=${f##*/}; printf '%s\t%s\n' "${n%.s}" "$f" >> "$lists/x86i.list"; done
+    # the synthetic programs (AX5.4): written by test/asm/x86i/gen.ae into WORK/synth, their digests the recorded ones
+    "$0" x86i synth "$work/synth"
+    for f in "$root"/test/asm/run/*.s "$root"/test/asm/x86i/*.s "$work"/synth/*.s; do n=${f##*/}; printf '%s\t%s\n' "${n%.s}" "$f" >> "$lists/x86i.list"; done
     arbace_tool -m arbace.asm.link build "$lists/x86i.list" "$work" "$src/musl-1.2.6"
     x86i_light
     ctl=$root/test/asm/controls-x86i.txt
@@ -652,6 +668,9 @@ case ${1:-} in
       echo "$st" > "$work/$n.x86i.status"
       "$x86i_exe" decode-text "$work/$n" > "$work/$n.dec"
       (cd "$work" && GOMAXPROCS=1 timeout 60 "$x86i_exe" trace --mode sys "./$n" > "$n.trace" 2>&1) || true
+      # the step mode (AX5.3): every instruction compared; a program's header may bound it (`# step-limit: N`, the rest in sys mode)
+      lim=$(sed -n 's/^#[[:space:]]*step-limit:[[:space:]]*\([0-9]*\).*/\1/p' "$(awk -F'\t' -v n="$n" '$1==n{print $2}' "$lists/x86i.list")" | head -1)
+      (cd "$work" && X86I_STEP_LIMIT=${lim:-0} GOMAXPROCS=1 timeout 240 "$x86i_exe" trace --mode step "./$n" > "$n.step" 2>&1) || true
       while read -r cid kind subj ref; do
         case $cid in ''|'#'*) continue ;; esac
         [ "$subj" = "$n" ] || continue
@@ -662,6 +681,9 @@ case ${1:-} in
             echo "$st" > "$work/$n.$sfx.status" ;;
           lockstep)
             (cd "$work" && X86I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$x86i_exe" trace --mode sys "./$n" > "$n.trace-${ref/:/-}" 2>&1) || true ;;
+          step|bisect|loader)
+            m=$kind; [ "$kind" = loader ] && m=sys
+            (cd "$work" && X86I_INJECT=$ref X86I_STEP_LIMIT=200000 GOMAXPROCS=1 timeout 120 "$x86i_exe" trace --mode $m "./$n" > "$n.$kind-${ref/:/-}" 2>&1) || true ;;
         esac
       done < "$ctl"
     done < "$work/build.tsv"

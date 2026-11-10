@@ -221,7 +221,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   paths, no key moves): the decoder from the table (`arbace.asm.amd64.dgen`), the core integer families, lazy flags, Linux's loader and
   stack, the lockstep's sys mode over ptrace; `bin/repr-asm x86i-check`: 28 of 28 programs (test/asm/run's 16 and test/asm/x86i's 12)
   equal to the CPU's runs and by their verdicts, decoded alike by both decoders, lockstep-equal; ten controls. Proposed AXS68-AXS74.
-  Next: AX5.3's rest (step mode, the loader's judge, the bisection; AXS74 (a)), then AX5.4.
+  `asm-ax5b` (on `asm-ax5`; AX5.3's rest and AX5.4, "As built: AX5.3 and AX5.4"): the lockstep's step mode (every instruction
+  compared over ptrace's single step), the loader's judge (it found Linux's segment pages carry the file's bytes), the bisection of a
+  sys-mode difference to its instruction; rcl rcr shld shrd, the bit family, enter, xlatb, movbe, rdtscp, cpuid's model; signal
+  handlers with Linux's frames, sigaltstack, rt_sigreturn; five seeded synthetic programs (`bin/repr-asm x86i synth`). x86i-check:
+  35 programs, 34 equal to the CPU (cpuid `:cpuid`), 35 of 35 step-equal and loaded as Linux loads them; 18 controls. Proposed
+  AXS75-AXS81. Next: AX5.5 (VEX contexts, BMI, ADX, SSE/SSE2, coverage; AXS81 (a)), then AX5.6's musl harnesses.
 
 ## Decided, not built yet
 

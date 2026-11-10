@@ -25,7 +25,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
-  x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-check x86i-record \
+  x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -571,12 +571,14 @@ x86i-run: ## a static x86-64 executable run on x86i: its status, or 128 + the si
 	bin/repr-asm x86i run $(EXE) $(ARGS)
 x86i-decode-text: ## an executable's code sections as x86i's decoder decodes them (bin/repr-asm x86i decode-text EXE; EXE=...)
 	bin/repr-asm x86i decode-text $(EXE)
-x86i-trace: ## the lockstep's sys mode: EXE run natively under ptrace and on x86i, compared at each system call (bin/repr-asm x86i trace --mode sys EXE; EXE=...)
-	bin/repr-asm x86i trace --mode sys $(EXE)
+x86i-trace: ## the lockstep: EXE run natively under ptrace and on x86i, compared at each system call (MODE=sys), each instruction (MODE=step), or bisected to the first differing instruction (MODE=bisect) (bin/repr-asm x86i trace --mode MODE EXE; EXE=...)
+	bin/repr-asm x86i trace --mode $(or $(MODE),sys) $(EXE)
 x86i-gen: ## x86i's decode tables go/arbace/x86i/dectab.ae made from asm/amd64/table.edn (bin/repr-asm x86i gen)
 	bin/repr-asm x86i gen
 x86i-gen-check: ## x86i's decode tables regenerated and compared with the committed file (bin/repr-asm x86i gen-check)
 	bin/repr-asm x86i gen-check
+x86i-synth: ## x86i's synthetic programs, one a family, written into .tmp/x86i/synth, their digests against test/asm/x86i/synth-digests.edn (bin/repr-asm x86i synth DIR)
+	bin/repr-asm x86i synth .tmp/x86i/synth
 x86i-check: ## test/asm/run/'s programs run on x86i, judged by their verdicts and against the CPU's runs, decoded against arbace.asm.amd64.decode, with the controls (bin/repr-asm x86i-check)
 	bin/repr-asm x86i-check
 x86i-record: ## x86i's check recorded into test/asm/x86i-results-amd64.edn (bin/repr-asm x86i-check --record)

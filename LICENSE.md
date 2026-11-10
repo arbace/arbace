@@ -1395,7 +1395,9 @@ covers what.
   same tarball, licence and manner; no code is copied. The rest of `go/arbace/x86i` (the families, the flags, the lockstep) and
   `go/arbace/emu` are Arbace's own, written from the Intel 64 and IA-32 Architectures Software Developer's Manual (vol. 2) and the AMD64
   Architecture Programmer's Manual (vol. 3) as references, nothing copied from them, and from the System V AMD64 psABI and the Linux
-  man pages (getauxval(3), ptrace(2), personality(2)), not from the kernel's source.
+  man pages (getauxval(3), ptrace(2), personality(2)), not from the kernel's source. AX5.3 and AX5.4 (the step mode, the signal
+  frames, the families rcl to movbe) likewise; the signal frame's layout from the psABI and musl 1.2.6's `arch/x86_64/bits/signal.h`
+  (MIT, section "musl: MIT License"), nothing copied; `test/asm/x86i/gen.ae` and the programs it writes are Arbace's own.
 - The same namespaces' arm64 part (AR1, doc/asm/ARM64-SURVEY.md): `arm64/gnu.ae`'s operand grammar follows LLVM's
   `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` and `lex.ae`'s AArch64 dialects its
   `MCTargetDesc/AArch64MCAsmInfo.cpp` (the same tarball and licence); `plan9.ae`'s operand grammar follows Go 1.27.1's

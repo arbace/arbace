@@ -302,7 +302,7 @@ pinned tarball and written again in Arbace; doc/asm/AMD64-SURVEY.md, "As built: 
 
 Not yet: `--mdis`'s markup printer; FileCheck's variables (`[[...]]`); a symbolizer (llvm-objdump's targets and relocations).
 
-## 10. x86i, the x86-64 integer machine (AX5.2, AX5.3's sys mode)
+## 10. x86i, the x86-64 integer machine (AX5.2-AX5.4)
 
 x86i interprets a static x86-64 Linux executable's integer instructions (doc/asm/AMD64-SURVEY.md, "As built: AX5.2"; the design
 AX5-DESIGN, AXS51-AXS62, decided by the user 2026-11-10). It is Go forms built alone by TamaGo's go, a light driver as si's and
@@ -345,8 +345,9 @@ oi's are (AXS51 (a)), out of every key (`arbace_crop_paths`): no Arbace build re
   gettimeofday, time, getrandom, getpid, gettid, getppid, uname, sched_getaffinity), mmap's address and the break's start taken
   from it; a signal compared by number and RIP; at the end the status, stdout and stderr. The verdict: `equal`, or the first
   difference.
-- **The driver** (`test/asm/x86i-driver`, `x86idriver`): `run [--stats] EXE [ARG...]`, `decode-text EXE`, `trace --mode sys EXE`;
-  `X86I_INJECT=FAMILY:FLAG` flips the flag after each instruction of the family (the negative controls' fault). `bin/repr-asm x86i
+- **The driver** (`test/asm/x86i-driver`, `x86idriver`): `run [--stats] EXE [ARG...]`, `decode-text EXE`, `trace --mode sys|step|bisect EXE`;
+  `X86I_INJECT=FAMILY:FLAG` flips the flag after each instruction of the family (the negative controls' fault; `loader:random` alters
+  x86i's own stack for the loader's judge). `bin/repr-asm x86i
   light` prints the forms by repr/go and builds them by TamaGo's go into `.tmp/x86i/x86i` (seconds); `x86i run|decode-text|trace`.
 - **The check** (`bin/repr-asm x86i-check [--record]`, `test/asm/x86i_judge.ae`): `test/asm/run/`'s programs and x86i's own
   hand-written ones (`test/asm/x86i/`: `alu.s`, `muldiv.s`, `string.s`, `misc.s`, eight `fault-*.s`; `# judge: cpu` in a header:
@@ -357,5 +358,51 @@ oi's are (AXS51 (a)), out of every key (`arbace_crop_paths`): no Arbace build re
   another's verdict or against another's CPU run, a decoding held to another's bytes, injected faults the CPU's run and the
   lockstep must catch).
 
-Not yet (AX5.3-AX5.6): the `step` mode, the loader's judge and the bisection; rcl/rcr, shld/shrd, the bit family, enter, signal
-handlers and frames; BMI, ADX, SSE/SSE2; musl's harnesses.
+- **The lockstep's step mode, the bisection and the loader's judge** (AX5.3, AXS56 (a), AXS57 (a), AXS72 (a)): `trace --mode step`
+  single-steps the native process (PTRACE_SINGLESTEP from the tracing thread, pure Go) and compares after every instruction the
+  sixteen registers, RIP, the status flags and DF less those the last flag-setting instruction left undefined (the SDM's rule for that
+  instruction, not a family's; the native's undefined bits are then copied into x86i so the two stay one state), FS's and GS's bases,
+  the bytes the instruction stored (x86i's store log, read back from the native), XMM and MXCSR when the instruction names an XMM
+  register (PTRACE_GETFPREGS), and the writable mappings every 4,096 instructions and at each system call but write(2) (a page one maps
+  writable and the other does not is a difference). mmap's address and the break's start are x86i's own choice there, held to the
+  native's (the layout; the vdso's and vvar's eight pages below mmap's top, `emu.VdsoSize`, judged against the native's maps).
+  Single-stepping's artifacts handled by rule: a `rep` instruction traps after each iteration (stepped until RIP moves), a prefix LLVM
+  decodes as an instruction of its own (`lock` before an instruction it decodes apart) is one native step, `pushfq` stores TF (cleared
+  in the native's word), a syscall's R11 holds TF (cleared), rt_sigreturn's orig_rax is -1, each step's trap is a SIGTRAP the kernel
+  forces (it unblocks SIGTRAP and is the thread's last trap, #DB: x86i's mask and trap state follow), cpuid's native answer overwritten
+  with x86i's model's, rdtsc's and rdtscp's copied from the native. `X86I_STEP_LIMIT=N` ends the step mode after N instructions, the
+  rest in sys mode (a header's `# step-limit: N`: alu, muldiv). `trace --mode bisect` runs the sys mode and, at a difference, the sys
+  mode again to the last system call both agreed on and the step mode from there: the first differing instruction, decoded, with its
+  family. The sys mode also compares the bytes write(2) writes. The loader's judge (every trace's second line): x86i's own initial
+  stack (`emu.Stack` with the native's AT_RANDOM bytes) against the native's at its exec: the registers at the entry (zero but RSP,
+  RIP the entry, the flags clear), argc, argv's and envp's addresses, the auxv in order (AT_HWCAP, AT_HWCAP2, AT_MINSIGSTKSZ and the
+  kernel's AT_RSEQ_* masked; AT_SYSINFO_EHDR x86i omits), the strings' bytes, RSP by the entries x86i omits. It found the loader's
+  first difference: Linux maps a segment's whole file pages, so the bytes before a segment in its first page (the ELF header before
+  `.data`) are the file's, not zeros (`emu.LoadELF` now maps them so).
+- **AX5.4's families**: shift's rcl and rcr (the count modulo 9 and 17 for bytes and words) and shld and shrd (a 16-bit count beyond 16
+  leaves the result and flags undefined: x86i computes the 32-bit concatenation, :vendor); bit: bt bts btr btc (a register offset into
+  memory reaches beyond the operand, signed, in operand-sized steps), bsf bsr (a zero source sets ZF and leaves the destination, the
+  APM's choice), tzcnt lzcnt popcnt; enter with its nesting levels; xlatb; movbe; rdtscp. cpuid answers x86i's model (AXS59): leaf 0 the
+  vendor "ArbaceX86iVM" and the highest leaf 1, leaf 1's EDX `0x178bfbff` (AT_HWCAP) and ECX POPCNT and MOVBE, 0x80000001's LZCNT,
+  SYSCALL, NX and LM; tzcnt runs as BMI1's though the model claims BMI1 only with its VEX forms (AX5.5).
+- **Signals with handlers** (`signal`): rt_sigaction, rt_sigprocmask and sigaltstack are x86i's own (crt's table and mask kept in step
+  through it, so crt's kill of the process itself reaches x86i's hook: pending, delivered at the next instruction's boundary);
+  a fault with a handler, or a pending signal, gets the frame Linux builds on x86-64 (the restorer, the ucontext with uc_stack, the
+  mcontext's 23 registers with ERR, TRAPNO, OLDMASK and CR2 (the thread's last trap's, CR2 the last page fault's: a later frame shows
+  them stale, as Linux's), the fpstate's address, the mask, the siginfo with si_code and si_addr or a kill's sender, the fpstate an
+  XSAVE image of the model's size, `XSaveModel`; RFLAGS saved with RF for a fault), below the red zone or on the alternate stack
+  (SA_ONSTACK), 16-aligned less 8; RDI, RSI, RDX the signal, siginfo and ucontext, RAX 0, DF and TF cleared, the mask with sa_mask and
+  the signal (SA_NODEFER, SA_RESETHAND); rt_sigreturn restores the registers, the user flags, the mask, MXCSR and XMM, the alternate
+  stack. A fault blocked or with no handler kills the process. The lockstep delivers the native first (single-stepped into the
+  handler: its fpstate's address gives the host's XSAVE size, which x86i's frame then takes) and compares the frame byte for byte, the
+  fpstate's MXCSR and XMM, the rest of it (the host's XSAVE components) copied.
+- **The synthetic programs** (`test/asm/x86i/gen.ae`, AXS60 (a)): `bin/repr-asm x86i synth DIR [--record]` writes one program a family
+  (bit, rotc, shiftd, cond: every setcc and cmovcc over the 32 combinations of CF PF ZF SF OF and after the lazily computed producers,
+  misc: enter, xlatb, movbe, bswap, cmpxchg, xadd), seeded, into `.tmp`; their digests in `test/asm/x86i/synth-digests.edn`. x86i-check
+  writes them into its work directory and judges them with the rest: the CPU's run and both lockstep modes.
+- **The check** adds the rows `step/NAME` (the step mode equal) and `loader/NAME` (the loader's judge), the hand-written `signals.s` and
+  `cpuid.s` (`# cpu: cpuid`: its own stated stdout, the model's; its CPU-compared run and sys mode the class `:cpuid`), and the controls
+  `step`, `bisect` (an injected fault caught at, or bisected to, an instruction of its family) and `loader` (`X86I_INJECT=loader:random`).
+
+Not yet (AX5.5-AX5.6): BMI, ADX, cmpxchg16b, rdrand/rdseed/rdpid, SSE/SSE2 and the VEX contexts; per-run coverage (the opcodes executed
+against the families' claims); musl's harnesses.
