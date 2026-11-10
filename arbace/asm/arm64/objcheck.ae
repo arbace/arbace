@@ -1,0 +1,284 @@
+(ns arbace.asm.arm64.objcheck
+  "AR4's object verdict (doc/asm/ARM64-SURVEY.md §4.4, ARS9 (c)'s own-verdict half): MC/AArch64's object tests judged by their
+  own CHECK lines, no LLVM tool. Each test's RUN lines (continuations joined) that assemble with -filetype=obj for an ELF
+  triple and pipe the object to a viewer give a run: the object is Arbace's (arbace.asm.arm64.obj), the viewer's text is
+  Arbace's view of it in that tool's format (llvm-objdump -d and -r, llvm-readobj -r: the stated bytes and relocations), and
+  the run's CHECK lines (its prefixes) are held to the view as FileCheck holds them (arbace.asm.amd64.decode-check's
+  FileCheck subset). A disassembly's line is held to its stated bytes alone (offset and word, or the data's bytes): its text
+  is the decoder's, AR3's (the class :decoder-text). A run that states an error (`not llvm-mc`) is met when the object
+  assembler refuses the file with the stated fragment. Every line is a case: met, or classed by cause (the object assembler's
+  class, the view not built, :decoder-text, FileCheck's variables)."
+  (:require [arbace.repr.asm :as asm]
+            [arbace.asm.arm64.obj :as obj]
+            [arbace.asm.amd64.decode-check :as dc]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the runs
+
+(defn run-lines
+  "The test's RUN lines, continuations joined."
+  [^String src]
+  (loop [ls (str/split-lines src) cur nil out []]
+    (if (empty? ls)
+      (if cur (conj out cur) out)
+      (let [l (first ls)]
+        (if-let [[_ r] (re-find #"RUN:\s*(.*)$" l)]
+          (let [c (if cur (str cur " " r) r)]
+            (if (re-find #"\\\s*$" c)
+              (recur (rest ls) (str/replace c #"\\\s*$" "") out)
+              (recur (rest ls) nil (conj out c))))
+          (recur (rest ls) cur out))))))
+
+(defn- elf-triple? [^String t]
+  (and t (not (re-find #"(?i)darwin|apple|ios|macos|win|coff|ilp32|arm64_32|_be|arm64ec" t))))
+
+(defn- prefixes-of [^String fc]
+  (let [ps (concat (mapcat #(str/split % #",") (map second (re-seq #"--?check-prefix(?:es)?[= ]+(\S+)" fc))))]
+    (if (seq ps) (vec ps) ["CHECK"])))
+
+(defn runs
+  "The object runs of a test: [{:tool :objdump-d|:objdump-r|:readobj-r|KEYWORD :opts TEXT :prefixes [...] :error? :defsym?}]."
+  [^String src]
+  (vec (for [r (run-lines src)
+             :let [pieces (mapv str/trim (str/split r #"\|"))
+                   mc (first pieces)
+                   triple (second (re-find #"-m?triple[= ]*(\S+)" mc))]
+             :when (and (re-find #"llvm-mc\b" mc) (re-find #"filetype[= ]obj" mc) (elf-triple? triple))
+             :let [fc (first (filter #(re-find #"FileCheck" %) pieces))
+                   viewer (first (filter #(re-find #"^llvm-(objdump|readobj|readelf|dwarfdump|nm)\b" %) (rest pieces)))]
+             :when fc]
+         {:error? (boolean (re-find #"^not\s" mc))
+          :split? (boolean (re-find #"split-file|%t/" r))
+          :prefixes (prefixes-of fc)
+          :implicit-not (mapv second (re-seq #"--implicit-check-not[= ](\S+)" fc))
+          :viewer viewer
+          :tool (cond (nil? viewer) :no-viewer
+                      (and (re-find #"^llvm-objdump" viewer) (re-find #"(^|\s)-[a-zA-Z]*d" viewer)) :objdump-d
+                      (and (re-find #"^llvm-objdump" viewer) (re-find #"(^|\s)-r\b" viewer)) :objdump-r
+                      (and (re-find #"^llvm-readobj" viewer) (re-find #"(^|\s)(-r|--relocs|--relocations)\b" viewer)
+                           (not (re-find #"(^|\s)(-S|--sections|-s|--symbols|--section-data)\b" viewer))) :readobj-r
+                      :else (keyword (str "view-" (first (str/split viewer #"\s+")))))})))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the views (llvm-objdump's and llvm-readobj's formats, the lines CHECK lines hold to)
+
+(defn- value-text [o r]
+  (let [syms (:symbols o) s (nth syms (:sym r) nil)
+        nm (cond (nil? s) "*ABS*" (= elf/STT_SECTION (:type s)) (:name (nth (:sections o) (:shndx s))) :else (:name s))
+        a (long (:addend r))]
+    [nm a]))
+
+(defn- reloc-name [t] (get obj/reloc-names t (str "Unknown (" t ")")))
+
+(defn view-objdump-r [o]
+  (concat [(str "<stdin>:\tfile format elf64-littleaarch64") ""]
+          (mapcat (fn [rs]
+                    (concat [(str "RELOCATION RECORDS FOR [" (:section (first rs)) "]:") "OFFSET           TYPE                     VALUE"]
+                            (for [r rs :let [[nm a] (value-text o r)]]
+                              (format "%016x %-24s %s" (:offset r) (reloc-name (:type r))
+                                      (str nm (cond (pos? a) (str "+0x" (Long/toHexString a)) (neg? a) (str "-0x" (Long/toHexString (- a))) :else ""))))
+                            [""]))
+                  (partition-by :section (:relocs o)))))
+
+(defn view-readobj-r [o]
+  (concat ["Relocations ["]
+          (mapcat (fn [rs]
+                    (let [r0 (first rs)
+                          ri (some #(when (and (= elf/SHT_RELA (:type %)) (= (:info %) (:target r0))) (:index %)) (:sections o))]
+                      (concat [(str "  Section (" ri ") .rela" (:section r0) " {")]
+                              (for [r rs :let [[nm a] (value-text o r)]]
+                                (str "    0x" (str/upper-case (Long/toHexString (:offset r))) " " (reloc-name (:type r)) " "
+                                     (if (= nm "*ABS*") "-" nm) " 0x" (str/upper-case (Long/toHexString a))))
+                              ["  }"])))
+                  (partition-by :section (:relocs o)))
+          ["]"]))
+
+(defn view-objdump-d
+  "llvm-objdump -d's lines without the instructions' text: each section with code, its symbols' labels, each word (or the
+  data's bytes under $d), and with `relocs?` the relocations after the word they fall in."
+  [o relocs?]
+  (let [secs (:sections o) syms (:symbols o)]
+    (concat
+     [(str "<stdin>:\tfile format elf64-littleaarch64")]
+     (mapcat
+      (fn [s]
+        (let [i (:index s) ^bytes d (:data s)
+              in-sec (filter #(and (= (:shndx %) i) (not= elf/STT_SECTION (:type %)) (not= elf/STT_FILE (:type %))) syms)
+              maps (sort-by :value (filter #(re-matches #"\$[xd](\..*)?" (:name %)) in-sec))
+              labels (into (sorted-map) (for [x in-sec :when (not (re-matches #"\$[xd](\..*)?" (:name x)))] [(:value x) (:name x)]))
+              labels (if (empty? labels) {0 (:name s)} labels)
+              data-at? (fn [^long off] (let [m (last (filter #(<= (long (:value %)) off) maps))] (and m (str/starts-with? (:name m) "$d"))))
+              rs (filter #(= (:target %) i) (:relocs o))
+              n (alength d)]
+          (concat
+           ["" (str "Disassembly of section " (:name s) ":")]
+           (loop [off 0 out []]
+             (if (>= off n)
+               out
+               (let [lab (when-let [l (get labels off)] ["" (format "%016x <%s>:" off l)])
+                     k (min 4 (- n off))
+                     bs (for [j (range k)] (bit-and (long (aget d (+ off j))) 0xff))
+                     line (if (or (data-at? off) (< k 4))
+                            (format "%8x: %s" off (str/join " " (map #(format "%02x" %) bs)))
+                            (format "%8x: %08x" off (reduce (fn [a [j b]] (bit-or a (bit-shift-left (long b) (* 8 j)))) 0 (map-indexed vector bs))))
+                     rl (when relocs?
+                          (for [r rs :when (<= off (long (:offset r)) (+ off 3)) :let [[nm a] (value-text o r)]]
+                            (format "\t\t%016x:  %s\t%s" (:offset r) (reloc-name (:type r))
+                                    (str nm (cond (pos? a) (str "+0x" (Long/toHexString a)) (neg? a) (str "-0x" (Long/toHexString (- a))) :else "")))))]
+                 (recur (+ off k) (-> out (into lab) (conj line) (into rl)))))))))
+      (filter #(and (pos? (bit-and (long (:flags %)) elf/SHF_EXECINSTR)) (pos? (alength ^bytes (:data %)))) secs)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the CHECK lines
+
+(defn check-lines
+  "The CHECK lines of `prefixes`: [[LINE KIND CONTENT]] in order, KIND \"\" or -NEXT, -SAME, -NOT, -EMPTY, -LABEL, -DAG."
+  [^String src prefixes]
+  (let [alt (str/join "|" (map #(java.util.regex.Pattern/quote %) prefixes))
+        re (re-pattern (str "(?:^|[^A-Za-z0-9_-])(" alt ")(-NEXT|-SAME|-NOT|-EMPTY|-LABEL|-DAG|-COUNT-\\d+)?:(.*)$"))]
+    (vec (keep-indexed (fn [i l] (when-let [[_ _ k c] (re-find re l)] [(inc i) (or k "") c])) (str/split-lines src)))))
+
+(def ^:private hex-line #"^\s*(?:([0-9a-f]+):\s+([0-9a-f]{8}|[0-9a-f]{2}(?: [0-9a-f]{2}){0,3})|([0-9a-f]{8}|[0-9a-f]{2}(?: [0-9a-f]{2}){1,3}))(?=\s|$)")
+
+(defn bytes-only
+  "A disassembly's CHECK content held to its stated bytes alone: the offset and word (or data bytes) as the view prints them,
+  the content as it is when it is not an instruction's line (a label, a relocation, a header), nil when it states only text."
+  [^String c]
+  (let [t (str/trim c)]
+    (cond (or (re-find #"R_AARCH64_|<.*>:|Disassembly of section|file format" t) (= t "")) c
+          (re-find #"\{\{|\[\[" (or (second (re-find #"^(\S+)" t)) "")) nil
+          ;; a bare word (8 digits) or two bytes at least: a mnemonic spelled in hex digits (`dc`, `add`) is not one
+          :else (when-let [[_ off h h2] (re-find hex-line t)]
+                  (if off (str off ": " h) h2)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; a test
+
+(defn- canon-lines [ls] (mapv (fn [l] {:text l}) ls))
+
+(defn judge-run
+  "One run's CHECK lines against the object `r` (arbace.asm.arm64.obj/assemble's result): [[LINE RESULT]]."
+  [^String src run r]
+  (let [cs (check-lines src (:prefixes run))
+        unsupported (fn [] (keyword (str "unsupported-" (name (:unsupported r)))))]
+    (cond
+      (empty? cs) []
+      (:split? run) (mapv (fn [[l]] [l :split-file]) cs)
+      (:error? run)
+      (let [msg (str (or (:error r) (:what r) ""))]
+        (mapv (fn [[l k c]]
+                (let [frag (second (re-find #"error:\s*(.*?)\s*$" c))]
+                  [l (cond (:bytes r) :error-accepted
+                           (nil? frag) :pass
+                           (str/includes? (str/lower-case msg) (str/lower-case (str/trim frag))) :pass
+                           :else :message)]))
+              cs))
+      (not (:bytes r)) (mapv (fn [[l]] [l (if (:error r) :object-error (unsupported))]) cs)
+      (#{:objdump-d :objdump-r :readobj-r} (:tool run))
+      (let [o (elf/read-object (:bytes r))
+            view (case (:tool run)
+                   :objdump-d (view-objdump-d o (boolean (re-find #"(^|\s)-[a-zA-Z]*r" (:viewer run))))
+                   :objdump-r (view-objdump-r o)
+                   :readobj-r (view-readobj-r o))
+            ;; a disassembly's lines held to their bytes; the text alone is the decoder's
+            cs2 (if (= :objdump-d (:tool run))
+                  ;; a line dropped for its text: a -SAME after it is dropped with it, a -NEXT after it is held as a CHECK (its
+                  ;; anchor, the dropped line's, is unknown)
+                  (loop [cs cs prev-dropped false out []]
+                    (if (empty? cs)
+                      out
+                      (let [[l k c] (first cs)
+                            c2 (cond (= k "-NOT") c (and prev-dropped (= k "-SAME")) nil :else (bytes-only c))
+                            k2 (if (and prev-dropped (= k "-NEXT")) "" k)]
+                        (recur (rest cs) (nil? c2) (conj out [l k2 c2])))))
+                  cs)
+            judged (filterv #(some? (nth % 2)) cs2)
+            res (into {} (map (fn [[l rr]] [l rr]) (dc/filecheck judged (canon-lines view) (:implicit-not run))))]
+        (vec (for [[l _ c] cs2]
+               [l (cond (nil? c) :decoder-text
+                        :else (case (get res l :fail) :pass :pass :var :filecheck-var :not-found :fail :fail))])))
+      :else (mapv (fn [[l]] [l (:tool run)]) cs))))
+
+(defn file-row
+  "A test's row: {:stated N :met N :by {CLASS N}} over its object runs' CHECK lines."
+  [^String path]
+  (let [src (asm/latin1 path)
+        rs (runs src)
+        r (try (obj/assemble-file path) (catch Throwable e {:unsupported :crash :what (str e)}))
+        res (mapcat #(try (judge-run src % r)
+                          (catch Throwable e (binding [*out* *err*] (println (str "repr-asm object-verdict: " path ": " e)))
+                            (mapv (fn [[l]] [l :view-crash]) (check-lines src (:prefixes %)))))
+                    rs)
+        f (frequencies (map second res))]
+    {:stated (count res) :met (get f :pass 0) :by (into (sorted-map) (dissoc f :pass))}))
+
+(defn control
+  "A negative control: SUBJECT's object judged by REFERENCE's CHECK lines (its runs): `differs` as it must when a line is not
+  met, `same` when every one is, `left` when the reference states nothing or the subject does not assemble."
+  [subj ref]
+  (let [src (asm/latin1 ref) r (obj/assemble-file subj)
+        res (mapcat #(judge-run src % r) (runs src))]
+    (cond (or (empty? res) (not (:bytes r))) "left"
+          (every? #(= :pass (second %)) (filter #(#{:pass :fail} (second %)) res))
+          (if (some #(= :fail (second %)) res) "differs" "same")
+          :else "differs")))
+
+(defn check
+  "Each NAME<tab>PATH of LIST: WORK/objverdict.edn, rows [CORPUS/NAME {:stated :met :by}]."
+  [lst corpus work]
+  (let [rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l) :let [[n p] (str/split l #"\t")]]
+                    [(str corpus "/" n) (file-row p)]))
+        tot (fn [k] (reduce + 0 (map (comp k second) rows)))
+        by (apply merge-with + (map (comp :by second) rows))]
+    (.mkdirs (java.io.File. ^String work))
+    (spit (str work "/objverdict.edn") (pr-str rows))
+    (println (str "repr-asm object-verdict: " (count rows) " files, " (tot :stated) " CHECK lines of their object runs, " (tot :met)
+                  " met; " (pr-str (into (sorted-map) by))))
+    rows))
+
+(def failing #{:fail :object-error :view-crash :unsupported-crash})
+
+(def header
+  (str ";; repr/asm's arm64 object verdict (bin/repr-asm --arch arm64 object-verdict; doc/asm/ARM64-SURVEY.md, AR4): MC/AArch64's object\n"
+       ";; tests (the corpus mc-aarch64-obj) assembled by Arbace (arbace.asm.arm64.obj), each object run's CHECK lines held to Arbace's\n"
+       ";; view of the object in the run's viewer's format (llvm-objdump -d's bytes and relocations, -r, llvm-readobj -r), no LLVM tool:\n"
+       ";; [CORPUS/NAME {:stated :met :by}], :by the unmet lines by class (test/asm/divergences-object-arm64.edn). Written by\n"
+       ";; `bin/repr-asm --arch arm64 object-verdict --record`. Read with the Clojure reader.\n"))
+
+(defn judge
+  "The run's rows (WORK/objverdict.edn) against RESULTS: every file recorded and run, none meeting fewer lines than recorded,
+  every unmet line in a class of CLASSES and none failing; RECORD rewrites RESULTS from a run with no problem. The problems."
+  [results work classes-path record]
+  (let [run (read-string (slurp (str work "/objverdict.edn")))
+        old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
+        oldm (into {} old)
+        classes (set (map :id (read-string (slurp classes-path))))
+        problems (atom [])]
+    (doseq [[i r] run [c n] (:by r)]
+      (cond (failing c) (swap! problems conj (str "failing: " i " " n " " (name c)))
+            (not (classes c)) (swap! problems conj (str "unclassed: " i " " n " " (name c)))))
+    (if (and (seq record) (empty? @problems))
+      (do (spit results (str header "[\n" (apply str (map (fn [[i r]] (str (pr-str [i (update r :by #(into (sorted-map) %))]) "\n")) (sort-by first run))) "]\n"))
+          (println (str "repr-asm: recorded " (count run) " rows into " results)))
+      (do (doseq [[i r] run :let [o (oldm i)]]
+            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
+                  (< (long (:met r)) (long (:met o))) (swap! problems conj (str i ": " (:met r) " met, recorded " (:met o)))))
+          (doseq [[i] old :when (not (some #(= i (first %)) run))] (swap! problems conj (str "recorded, not run: " i)))))
+    (doseq [p @problems] (println (str "FAIL: " p)))
+    (when (empty? @problems) (println "repr-asm object-verdict: ok"))
+    @problems))
+
+(defn -main [verb & args]
+  (case verb
+    "check" (apply check args)
+    "judge" (when (seq (apply judge args)) (shutdown-agents) (System/exit 1))
+    "control" (println (apply control args))
+    "row" (prn (file-row (first args)))
+    "lines" (let [src (asm/latin1 (first args)) r (obj/assemble-file (first args))]
+              (doseq [run (runs src) [l res] (judge-run src run r) :when (not= res :pass)]
+                (println l res (nth (str/split-lines src) (dec (long l)))))))
+  (shutdown-agents))
