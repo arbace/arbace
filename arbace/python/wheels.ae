@@ -3,16 +3,28 @@
   format alone (PEP 427, PEP 491's .data schemes), no pip and no Python, run by bin/pyi wheels as
   -m arbace.python.wheels VERB ..., evaluated from the checkout on the tools' host:
 
-    list --pins FILE
-        each pin a line: FILE URL SHA256 BYTES SAMPLE SCRIPT (tab-separated; - for none), for bin/pyi wheels
-    install --pins FILE --cache DIR --site DIR
+    list --pins FILE [--set KEY]
+        each pin a line: FILE URL SHA256 BYTES SAMPLE SCRIPT (tab-separated; - for none), for bin/pyi wheels; KEY the
+        pins file's vector (wheels, the default, or test-wheels: queue 232, what the suites need beyond the pins)
+    suites --pins FILE
+        each suite of :suites a line (queue 232): NAME FILE URL SHA256 BYTES ROOT RUNNER ARGS (tab-separated, ARGS
+        space-separated), for bin/pyi wheels fetch and suite
+    install --pins FILE --cache DIR --site DIR [--set KEY]
         every pinned wheel of the cache (DIR/FILE, its SHA-256 and size the pin's) installed into a new site, built in a
         temporary directory beside SITE and renamed to it; SITE already there: nothing done
     install-one --wheel FILE --site DIR
         one wheel into DIR (no pin): the negative controls' and the comparison with pip's layout
-    verify --pins FILE --cache DIR --site DIR
+    verify --pins FILE --cache DIR --site DIR [--set KEY]
         every cached wheel against its pin, the site's distributions the pins', every installed file against its
         distribution's RECORD
+
+    outcomes --runner unittest|pytest --log FILE
+        a suite run's log (unittest -v's or pytest -v's) as its tests' outcomes, a line each: ID OUTCOME (tab-separated;
+        OUTCOME passed, failed, error, skipped, xfail or xpass), in the log's order (queue 232)
+    judge --suite NAME --divergences FILE --cpython FILE --pyi FILE
+        two outcomes files, test for test: equal, classed (the first class of FILE whose :tests names
+        \"wheels-NAME/ID\" or one of whose :match finds \"pyi OUTCOME cpython OUTCOME\", a test's outcomes joined by +;
+        a test absent on one side is \"none\") or failing; exit 1 when one fails (queue 232)
 
   A site: lib/ (purelib and platlib, on sys.path through PYI_SITE), bin/ (scripts, console scripts' launchers),
   include/NAME/ (headers), data at its root. A wheel whose tags are not py3-none-any, whose WHEEL is not 1.x or not
@@ -231,12 +243,82 @@
                     (.getBytes ^String (csv-text (conj @written [(rel (str "lib/" record-name)) "" ""])) "UTF-8"))
         {:name dname :version dver :info info :files (count @written)}))))
 
+;; ---- the suites (queue 232) ----
+
+(def ^:private unittest-line #"^(.*) \.\.\. (ok|FAIL|ERROR|skipped.*|expected failure|unexpected success)$")
+(def ^:private pytest-line #"^(\S.*::.*?) (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)( \(.*)?$")
+
+(defn- log-outcomes [runner ^String text]
+  (vec
+    (for [line (str/split-lines text)
+          :let [line (str/replace line #"\s+\[ *[0-9]+%\]$" "")
+                m (case runner
+                    "unittest" (when-let [[_ id o] (re-find unittest-line line)]
+                                 ;; "test_x (module.Class.test_x)": the id in parentheses
+                                 [(or (second (re-find #"^\S+ \((\S+)\)$" id)) id) (cond (= o "ok") "passed" (= o "FAIL") "failed" (= o "ERROR") "error"
+                                           (str/starts-with? o "skipped") "skipped"
+                                           (= o "expected failure") "xfail" :else "xpass")])
+                    "pytest" (when-let [[_ id o] (re-find pytest-line line)] [id (str/lower-case o)])
+                    (fail "--runner " runner ": unittest or pytest"))]
+          :when m]
+      m)))
+
+;; a file's outcomes: [ids in the file's order, {id [outcome ...]}]
+(defn- read-outcomes [f]
+  (reduce (fn [[ids m] line]
+            (let [[id o] (str/split line #"\t" 2)]
+              (cond (not (seq o)) [ids m]
+                    (contains? m id) [ids (update m id conj o)]
+                    :else [(conj ids id) (assoc m id [o])])))
+          [[] {}] (str/split-lines (slurp f))))
+
+(defn- ordered-ids [cids pids]
+  (let [seen (java.util.LinkedHashSet.)]
+    (doseq [id (concat cids pids)] (.add seen id))
+    (vec seen)))
+
+(defn- own-pass?
+  "A test's own verdict (queue 234): every outcome pyi's run gave it passed, or an expected failure"
+  [os]
+  (and (seq os) (every? #{"passed" "xfail"} os)))
+
+(defn- do-judge
+  "verdict own (queue 234, the default): each test of pyi's run by its own outcome (passed and xfail pass; the line
+  \"pyi OUTCOME\"), no CPython outcome read; ref: pyi's outcomes against CPython's (\"pyi OUTCOME cpython OUTCOME\")"
+  [suite divs cf pf verdict]
+  (let [own? (not= "ref" verdict)
+        classes (filter #(or (nil? (:verdict %)) (= (name (:verdict %)) (if own? "own" "ref"))) (read-string (slurp divs)))
+        [cids c] (if own? [[] {}] (read-outcomes cf)) [pids p] (read-outcomes pf)
+        ids (ordered-ids cids pids)
+        out (fn [m id] (if-let [os (get m id)] (str/join "+" os) "none"))
+        res (for [id ids
+                  :let [co (out c id) po (out p id)]]
+              (if (if own? (own-pass? (get p id)) (= co po))
+                [:equal id]
+                (let [line (if own? (str "pyi " po) (str "pyi " po " cpython " co))
+                      tid (str "wheels-" suite "/" id)
+                      k (first (for [k classes
+                                     :when (or (some #{tid} (:tests k))
+                                               (some #(re-find % line) (:match k)))]
+                                 (:id k)))]
+                  (if k [:classed id line k] [:failing id line]))))
+        n (frequencies (map first res))]
+    (doseq [[kind id line k] res :when (not= kind :equal)]
+      (println (str "  " (if (= kind :classed) (str "classed " k) "FAIL") " " id ": " line)))
+    (println (str "suite " suite ": " (count ids) " tests; " (get n :equal 0) (if own? " pass, " " equal, ") (get n :classed 0) " classed, "
+                  (get n :failing 0) " failing (" (if own? "by their own verdict" (str "CPython's " (count c))) ", pyi's " (count p) ")"))
+    (when (pos? (get n :failing 0)) (System/exit 1))))
+
 ;; ---- pins ----
 
-(defn- read-pins [f]
-  (let [ws (:wheels (read-string (slurp f)))]
-    (when-not (seq ws) (fail f ": no :wheels"))
-    ws))
+(defn- read-pins
+  ([f] (read-pins f nil))
+  ([f k]
+   (let [k (keyword (or k "wheels"))
+         ws (get (read-string (slurp f)) k)]
+     (when-not (#{:wheels :test-wheels} k) (fail "--set " (name k) ": wheels or test-wheels"))
+     (when-not (seq ws) (fail f ": no " k))
+     ws)))
 
 (defn- cached [cache {:keys [file sha256 bytes]}]
   (let [f (File. ^String cache ^String file)]
@@ -246,9 +328,9 @@
         (fail f ": SHA-256 " h ", " (alength b) " bytes; pinned " sha256 ", " bytes " bytes (bin/pyi wheels fetch fetches it again)")))
     f))
 
-(defn- do-install [pins cache site]
+(defn- do-install [pins cache site k]
   (let [site (File. ^String site)
-        ws (read-pins pins)]
+        ws (read-pins pins k)]
     (if (.isDirectory site)
       (println (str "  " (.getPath site) ": installed already"))
       (let [tmp (File. (.getParentFile (.getAbsoluteFile site)) (str (.getName site) ".tmp-" (System/nanoTime)))]
@@ -277,8 +359,8 @@
               installer (let [f (File. lib (str info "/INSTALLER"))] (when (.isFile f) (slurp f)))]
           {:info info :files (count rows) :bad (cond-> bad (not= installer "arbace-pyi\n") (conj "INSTALLER"))})))))
 
-(defn- do-verify [pins cache site]
-  (let [ws (read-pins pins)
+(defn- do-verify [pins cache site k]
+  (let [ws (read-pins pins k)
         _ (doseq [w ws] (cached cache w))
         _ (println (str "  " (count ws) " wheels in the cache as pinned"))
         site (File. ^String site)
@@ -307,14 +389,22 @@
         opts (into {} (map vec (partition 2 more)))]
     (try
       (case verb
-        "list" (doseq [w (read-pins (opts "--pins"))]
+        "list" (doseq [w (read-pins (opts "--pins") (opts "--set"))]
                  (println (str/join "\t" [(:file w) (:url w) (:sha256 w) (:bytes w) (or (:sample w) "-")
                                           (if (:script w) (str/join " " (:script w)) "-")])))
-        "install" (do-install (opts "--pins") (opts "--cache") (opts "--site"))
+        "suites" (let [ss (:suites (read-string (slurp (opts "--pins"))))]
+                   (when-not (seq ss) (fail (opts "--pins") ": no :suites"))
+                   (doseq [s ss]
+                     (println (str/join "\t" [(:name s) (:file s) (:url s) (:sha256 s) (:bytes s) (:root s)
+                                              (name (:runner s)) (str/join " " (:args s))]))))
+        "outcomes" (doseq [[id o] (log-outcomes (opts "--runner") (slurp (opts "--log")))]
+                     (println (str id "\t" o)))
+        "judge" (do-judge (opts "--suite") (opts "--divergences") (opts "--cpython") (opts "--pyi") (or (opts "--verdict") "own"))
+        "install" (do-install (opts "--pins") (opts "--cache") (opts "--site") (opts "--set"))
         "install-one" (let [r (install-wheel (File. ^String (opts "--wheel")) (File. ^String (opts "--site")))]
                         (println (str "  " (:info r) ": " (:files r) " files")))
-        "verify" (do-verify (opts "--pins") (opts "--cache") (opts "--site"))
-        (do (println "usage: -m arbace.python.wheels list|install|install-one|verify ...") (System/exit 2)))
+        "verify" (do-verify (opts "--pins") (opts "--cache") (opts "--site") (opts "--set"))
+        (do (println "usage: -m arbace.python.wheels list|suites|outcomes|judge|install|install-one|verify ...") (System/exit 2)))
       (catch Throwable e
         (if (:wheels (ex-data e))
           (do (binding [*out* *err*] (println (str "pyi wheels: " (.getMessage e)))) (System/exit 1))
