@@ -43,13 +43,33 @@
       (= 'imm h) (list 'imm (operand ctx vals (second x)))
       (#{'mem 'wb} h) (apply list h (map #(operand ctx vals %) (rest x)))
       (= 'spec h) (let [sp (str/lower-case (str (second x)))]
-                    ;; a GOT entry is the linker's, made for a relocation: the eval has none (deferred)
-                    (when (str/starts-with? sp "got") (o/unsupported :got (pr-str x)))
                     (when (str/starts-with? sp "tlsdesc") (o/unsupported :tls-model (pr-str x)))
                     (list 'spec (second x) (fold ctx vals (nth x 2))))
       (= 'lit h) (o/unsupported :literal-pool (pr-str x))
       (and (symbol? x) (contains? non-labels (str/lower-case (name x)))) x
       :else (fold ctx vals x))))
+
+(defn- got-fixups
+  "A GOT reference's relocation on the placeholder word (adrp :got:, ldr :got_lo12:; their initial exec TLS forms :gottprel:,
+  :gottprel_lo12:): the linker makes the GOT entry the form then names, as it makes AOT's; the placeholder's bits are the
+  relocation's, never read. The kind is the mnemonic's (the operand's field), not an encoded word's."
+  [ctx f]
+  (let [m (str/lower-case (name (first f)))
+        ops (rest f)
+        spec-of (fn [op] (cond (= 'spec (head op)) op
+                               (#{'mem 'wb 'imm} (head op)) (first (keep #(when (= 'spec (head %)) %) (rest op)))
+                               :else nil))
+        sp (first (keep spec-of ops))
+        s (when sp (str/lower-case (str (second sp))))]
+    (if (and s (or (str/starts-with? s "got") ))
+      (let [kind (case m
+                   "adrp" [:adrp21]
+                   "ldr" (let [r (str (second (first ops)))] [:ldst12 (if (str/starts-with? r "w") 4 8)])
+                   (o/unsupported :got (pr-str f)))
+            e (list 'at (nth sp 2) s)]
+        (o/visit-syms! ctx e)
+        [[0 4 e kind (= kind [:adrp21]) 0]])
+      [])))
 
 (defn- arch
   "arbace.asm.arm64.obj's part with the eval's instructions: each recorded into `recs` as [CHUNK OFFSET FORM VALS] and
@@ -60,11 +80,12 @@
          :emit-insn! (fn [ctx f]
                        (let [f (#'a64/const-subst ctx (o/resolve-expr ctx f))
                              vals (volatile! [])
+                             fxs (got-fixups ctx f)
                              f (apply list (first f) (map #(operand ctx vals %) (rest f)))]
                          ;; the symbols the operands name registered, as the fixups' are (the object's symbol table names
                          ;; the undefined ones, which the linker resolves)
                          (doseq [v @vals s [(:add v) (:sub v)] :when s] (o/register! ctx (:name @s)))
-                         (#'a64/emit-word! ctx 0 [])
+                         (#'a64/emit-word! ctx 0 fxs)
                          (let [ch (o/cur-data! ctx)]
                            (vswap! recs conj [ch (- (.size ^java.util.ArrayList (:bytes @ch)) 4) f @vals]))))
          :after-layout (fn [ctx]
@@ -105,13 +126,21 @@
           r)))))
 
 (defn- subst
-  "The form with each (val K) its value (addr V); a TP-relative specifier's value the offset from the thread pointer."
-  [f vals tp]
+  "The form with each (val K) its value (addr V); a TP-relative specifier's value the offset from the thread pointer; a GOT
+  specifier's the GOT entry's address (:got: its page, :got_lo12: its low 12 bits; :gottprel: likewise, the entry holding the
+  TP offset)."
+  [f vals tp gotv]
   (cond (and (seq? f) (= 'val (first f))) (list 'addr (nth vals (second f)))
+        (and (seq? f) (= 'spec (first f)) (str/starts-with? (str/lower-case (str (second f))) "got"))
+        (let [s (str/lower-case (str (second f))) e (nth f 2)
+              k (when (and (seq? e) (= 'val (first e))) (second e))
+              v (when k (gotv k))]
+          (when-not v (o/unsupported :got (str "a GOT entry the linker did not make: " (pr-str f))))
+          (if (str/includes? s "lo12") (list 'spec 'lo12 (list 'addr v)) (list 'addr v)))
         (and (seq? f) (= 'spec (first f)) (str/starts-with? (str/lower-case (str (second f))) "tprel"))
         (let [e (nth f 2)]
           (list 'spec (second f) (if (and (seq? e) (= 'val (first e))) (tp (nth vals (second e))) e)))
-        (seq? f) (apply list (map #(subst % vals tp) f))
+        (seq? f) (apply list (map #(subst % vals tp gotv) f))
         :else f))
 
 (defn forms-text
@@ -132,7 +161,14 @@
                  (let [vs (mapv (fn [{:keys [add sub c]}]
                                   (- (+ (long (or (va fi add) 0)) (long c)) (long (or (va fi sub) 0))))
                                 vals)]
-                   (str (Long/toHexString (long a)) "\t" (pr-str (subst f vs tp)) "\n"))))))))
+                   (str (Long/toHexString (long a)) "\t"
+                        (pr-str (subst f vs tp (fn [k] (let [{:keys [add sub c]} (nth vals k)]
+                                                         (when (and add (nil? sub) (zero? (long c)))
+                                                           (case (first add)
+                                                             :global ((:got layout) (second add))
+                                                             :local ((:got-local layout) fi (second add) (nth add 2))
+                                                             nil))))))
+                        "\n"))))))))
 
 (defn- write-bytes [^String path ^bytes b]
   (java.nio.file.Files/write (.toPath (java.io.File. path)) b ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
