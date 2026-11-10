@@ -86,12 +86,13 @@
         (fail (str "invalid register name")))))
 
 (defn- check-reg-mode [r ^long mode]
+  ;; X86AsmParser::MatchRegisterByName: GR64, the REX byte registers and isX86_64ExtendedReg's (r8-r31, xmm8-31, ymm8-31,
+  ;; zmm8-31, cr8-15, dr8-15) outside 64-bit mode
   (when (and (not= mode 64)
-             (or (in-class? r "GR64") (#{"SIL" "DIL" "BPL" "SPL" "RIP"} r)
-                 (re-matches #"R([89]|1[0-5])[DWB]?|XMM(8|9|1[0-5])|YMM(8|9|1[0-5])|CR(8|9|1[0-5])|DR(8|9|1[0-5])" r)))
+             (or (in-class? r "GR64") (#{"SIL" "DIL" "BPL" "SPL" "RIP" "RIZ"} r)
+                 (re-matches #"R([89]|[12][0-9]|3[01])[DWB]?(H)?|[XYZ]MM([89]|[12][0-9]|3[01])|CR(8|9|1[0-5])|DR(8|9|1[0-5])" r)))
     (fail (str "register %" (str/lower-case (first (get (:regs *t*) r))) " is only available in 64-bit mode")))
-  (when (re-matches #"R(1[6-9]|2[0-9]|3[01])[DWB]?" r) (unsupported :apx (str "register " r)))
-  (when (re-matches #"[XYZ]MM(1[6-9]|2[0-9]|3[01])|ZMM\d+|K[0-7]" r) (unsupported :evex (str "register " r))))
+  (when (re-matches #"R(1[6-9]|2[0-9]|3[01])[DWB]?" r) (unsupported :apx (str "register " r))))
 
 (defn- check-base-index
   "CheckBaseRegAndIndexRegAndScale's rules on a memory operand's registers."
@@ -124,7 +125,13 @@
                     (cons {:k :reg :reg r} (deco m)))
               imm [{:k :imm :e (second x) :v (const-value (second x) syms)}]
               ind (cons {:k :tok :t "*"} (operands [(second x)] mode syms))
-              rc (unsupported :evex (str "{" (second x) "}"))
+              ;; ParseRoundingModeOp: {rn-sae} ... {rz-sae} an immediate (X86::STATIC_ROUNDING), {sae} a token
+              rc (let [t (str (second x))]
+                   (cond (= t "sae") [{:k :tok :t "{sae}"}]
+                         (re-matches #"r[nduz]-sae" t) (let [v ({"rn" 0 "rd" 1 "ru" 2 "rz" 3} (subs t 0 2))] [{:k :imm :e v :v v}])
+                         (.startsWith (str/lower-case t) "dfv=") (unsupported :apx (str "{" t "}"))
+                         (.startsWith t "r") (fail "Invalid rounding mode.")
+                         :else (fail "unknown token in expression")))
               mem (let [m (second x)
                         rg (fn [r] (cond (nil? r) nil
                                          (and (seq? r) (= 'asm/eq (first r))) (let [v (get syms (name (second r)))]
@@ -198,7 +205,8 @@
       "isMemConstOffs64" (and (mem-offs? o) (= 64 (:mode o)) (some? (:dv o)) (not (int32? (:dv o))))
       "isGR32orGR64" (and (= :reg (:k o)) (or (in-class? (:reg o) "GR32") (in-class? (:reg o) "GR64")))
       "isGR16orGR32orGR64" (and (= :reg (:k o)) (or (in-class? (:reg o) "GR16") (in-class? (:reg o) "GR32") (in-class? (:reg o) "GR64")))
-      ("isVK2Pair" "isVK4Pair" "isVK8Pair" "isVK16Pair") (and (= :reg (:k o)) (in-class? (:reg o) (subs m 2 (- (count m) 4))))
+      ;; VK2, VK4, VK8 and VK16 are each K0-K7
+      ("isVK2Pair" "isVK4Pair" "isVK8Pair" "isVK16Pair") (and (= :reg (:k o)) (in-class? (:reg o) "VK1"))
       (if-let [[_ ms sz] (re-matches #"isMemOffs(16|32|64)_(8|16|32|64)" m)]
         (and (mem-offs? o) (= (Long/parseLong ms) (long (:mode o))) (mm (Long/parseLong sz)))
         (unsupported :operand-class m)))))
@@ -234,6 +242,8 @@
       "addMemOffsOperands" [(ex (:disp o) (:dv o)) {:reg (:seg o)}]
       "addGR32orGR64Operands" [{:reg (if (in-class? (:reg o) "GR64") (sub-reg (:reg o) 32) (:reg o))}]
       "addGR16orGR32orGR64Operands" [{:reg (if (or (in-class? (:reg o) "GR32") (in-class? (:reg o) "GR64")) (sub-reg (:reg o) 16) (:reg o))}]
+      ;; K0_K1, K2_K3, ...: the pair's encoding is its even register's
+      "addMaskPairOperands" [{:reg (str "K" (bit-and (reg-enc (:reg o)) 6))}]
       (unsupported :render m))))
 
 (defn- convert
@@ -424,6 +434,65 @@
                          (bit-shift-left (bit-and 1 (bit-not (long b))) 5) mm))
           (byte! (bit-or (bit-shift-left w 7) last))))))
 
+(defn- evex-prefix!
+  "emitVEXOpcodePrefix for EVEX (X86OpcodePrefixHelper's EVEX: 62, P0-P2): R, X, B, R', V' and vvvv from the form's
+  operands, aaa from the opmask, z, L'L, b and W from the instruction, L'L the rounding control's with EVEX.b on a
+  register form. APX's parts (B4, X4, NDD, NF, the conditional operands) are left to APX's slice."
+  [info mi ^long bias ^long mem-op byte!]
+  (let [fl (set (:flags info))
+        v4 (fl :4v)
+        k? (fl :k)
+        enc (fn [^long i] (reg-enc (:reg (nth mi i))))
+        bit (fn ^long [^long v ^long sh] (bit-and 1 (bit-shift-right v sh)))
+        st (volatile! {:r 0 :r2 0 :x 0 :b 0 :vvvv 0 :v2 0 :aaa 0 :l (if (fl :l) 1 0) :l2 (if (fl :l2) 1 0)})
+        put! (fn [k v] (vswap! st assoc k v))
+        rr2! (fn [i] (let [e (enc i)] (put! :r (bit e 3)) (put! :r2 (bit e 4))))
+        bb2! (fn [i] (put! :b (bit (enc i) 3)))
+        xx2! (fn [i] (put! :x (bit (enc i) 3)))
+        x4! (fn [i] (put! :x (bit (enc i) 4)))
+        v2! (fn [i] (when-not v4 (put! :v2 (bit (enc i) 4))))
+        vv2! (fn [i] (let [e (enc i)] (put! :vvvv (bit-and 15 e)) (put! :v2 (bit e 4))))
+        aaa! (fn [i] (put! :aaa (bit-and 7 (enc i))))
+        cur (volatile! bias)
+        nxt! (fn [] (let [c (long @cur)] (vreset! cur (inc c)) c))
+        rc (volatile! nil)
+        mem! (fn [] (bb2! mem-op) (xx2! (+ mem-op 2)))]
+    (case (:form info)
+      "MRMDestMem4VOp3CC" (do (rr2! (nxt!)) (mem!) (vswap! cur + 5) (vv2! (nxt!)))
+      ("RawFrm" "MRM_C0") nil
+      ("MRMDestMem" "MRMDestMemCC" "MRMDestMemFSIB")
+      (do (mem!) (v2! (+ mem-op 2)) (vswap! cur + 5) (when k? (aaa! (nxt!))) (when v4 (vv2! (nxt!))) (rr2! (nxt!)))
+      ("MRMSrcMem" "MRMSrcMemCC" "MRMSrcMemFSIB")
+      (do (rr2! (nxt!)) (when k? (aaa! (nxt!))) (when v4 (vv2! (nxt!))) (mem!) (v2! (+ mem-op 2)))
+      "MRMSrcMem4VOp3" (do (rr2! (nxt!)) (mem!) (vv2! (+ (long @cur) 5)))
+      ("MRMXmCC" "MRM0m" "MRM1m" "MRM2m" "MRM3m" "MRM4m" "MRM5m" "MRM6m" "MRM7m")
+      (do (when v4 (vv2! (nxt!))) (when k? (aaa! (nxt!))) (mem!) (v2! (+ mem-op 2)))
+      ("MRMSrcReg" "MRMSrcRegCC")
+      (do (rr2! (nxt!)) (when k? (aaa! (nxt!))) (when v4 (vv2! (nxt!))) (let [c (nxt!)] (bb2! c) (x4! c))
+          (when (fl :b) (vreset! rc (if (fl :rc) (long (:imm (peek mi))) 0))))
+      "MRMSrcReg4VOp3" (do (rr2! (nxt!)) (bb2! (nxt!)) (vv2! (nxt!)))
+      ("MRMDestReg" "MRMDestRegCC")
+      (do (let [c (nxt!)] (bb2! c) (x4! c)) (when k? (aaa! (nxt!))) (when v4 (vv2! (nxt!))) (rr2! (nxt!))
+          (when (fl :b) (vreset! rc 0)))
+      "MRMr0" (rr2! (nxt!))
+      ("MRMXrCC" "MRM0r" "MRM1r" "MRM2r" "MRM3r" "MRM4r" "MRM5r" "MRM6r" "MRM7r")
+      (do (when v4 (vv2! (nxt!))) (when k? (aaa! (nxt!))) (let [c (nxt!)] (bb2! c) (x4! c)))
+      (unsupported :form (str "EVEX " (:form info))))
+    (when-let [r @rc] (put! :l (bit-and 1 (long r))) (put! :l2 (bit (long r) 1)))
+    (let [{:keys [r r2 x b vvvv v2 aaa l l2]} @st
+          inv (fn ^long [v] (bit-and 1 (bit-not (long v))))
+          mmm (case (:map info) "TB" 1 "T8" 2 "TA" 3 "T_MAP5" 5 "T_MAP6" 6 "T_MAP7" 7 (unsupported :form (str "EVEX map " (:map info))))
+          pp (case (:prefix info) "PD" 1 "XS" 2 "XD" 3 0)
+          w (if (fl :w) 1 0)
+          x2 (if (fl :u) 1 0)
+          z (if (and k? (fl :z)) 1 0)
+          eb (if (fl :b) 1 0)]
+      (byte! 0x62)
+      (byte! (bit-or (bit-shift-left (inv r) 7) (bit-shift-left (inv x) 6) (bit-shift-left (inv b) 5) (bit-shift-left (inv r2) 4) (long mmm)))
+      (byte! (bit-or (bit-shift-left w 7) (bit-shift-left (bit-and 15 (bit-not (long vvvv))) 3) (bit-shift-left (inv x2) 2) (long pp)))
+      (byte! (bit-or (bit-shift-left z 7) (bit-shift-left (long l2) 6) (bit-shift-left (long l) 5) (bit-shift-left eb 4)
+                     (bit-shift-left (inv v2) 3) (long aaa))))))
+
 (defn encode
   "The bytes of the machine instruction `inst` with operands `mi` in `mode` and `flags` (#{:lock :rep :repne :notrack
   :disp8 :disp32 :rex ...}): {:bytes [B or :fixup-letter ...]}."
@@ -431,12 +500,13 @@
   (let [info (get (:insns *t*) inst)
         fl (set (:flags info))
         _ (when (contains? fl :pseudo) (unsupported :pseudo inst))
-        _ (when (= "EncEVEX" (:enc info)) (unsupported :evex inst))
-        vex? (#{"EncVEX" "EncXOP"} (:enc info))
-        v4 (if (fl :4v) 1 0)
+        evex? (= "EncEVEX" (:enc info))
+        _ (when (and evex? (or (= "T_MAP4" (:map info)) (fl :nf) (fl :2cc))) (unsupported :apx inst))
+        vex? (#{"EncVEX" "EncXOP" "EncEVEX"} (:enc info))
+        v4 (+ (if (fl :4v) 1 0) (if (and evex? (fl :k)) 1 0))
         i8reg? (= "Imm8Reg" (:imm info))
         _ (when (= "ExplicitREX2" (:explicit info)) (unsupported :apx inst))
-        _ (when (#{"T_MAP4" "T_MAP5" "T_MAP6" "T_MAP7"} (:map info)) (unsupported :apx inst))
+        _ (when (and (not evex?) (#{"T_MAP4" "T_MAP5" "T_MAP6" "T_MAP7"} (:map info))) (unsupported :apx inst))
         out (java.util.ArrayList.)
         fixups (java.util.ArrayList.)
         byte! (fn [^long b] (.add out (bit-and b 0xff)))
@@ -482,7 +552,7 @@
             "RawFrmMemOffs" (when-let [s (reg 1)] (byte! (seg-prefix s)))
             nil)
         ;; emitOpcodePrefix (or emitVEXOpcodePrefix)
-        _ (when vex? (vex-prefix! info mi mode bias mem-op flags byte!))
+        _ (when vex? (if evex? (evex-prefix! info mi bias mem-op byte!) (vex-prefix! info mi mode bias mem-op flags byte!)))
         _ (when (and (not vex?) (= (:opsize info) (if (= mode 16) "OpSize32" "OpSize16"))) (byte! 0x66))
         _ (when (and (not vex?) (or (fl :lock) (flags :lock))) (byte! 0xF0))
         _ (when (and (not vex?) (or (fl :notrack) (flags :notrack))) (byte! 0x3E))
@@ -516,10 +586,18 @@
         i8 (volatile! nil)
         base-op (if (= (:map info) "ThreeDNow") 0x0F (long (:opcode info)))
         modrm (fn [^long md ^long rf ^long rm] (byte! (bit-or rm (bit-shift-left rf 3) (bit-shift-left md 6))))
+        ;; isDispOrCDisp8: a displacement as a disp8, compressed by EVEX's CD8_Scale (disp8*N): the byte's value or nil
+        cd8 (long (if evex? (or (:cd8 info) 0) 0))
+        d8 (fn [dv] (when (some? dv)
+                      (let [dv (long dv)]
+                        (cond (zero? cd8) (when (int8? dv) dv)
+                              (not (zero? (bit-and dv (dec cd8)))) nil
+                              :else (let [q (quot dv cd8)] (when (int8? q) q))))))
         ;; emitMemModRMByte
         mem! (fn [^long m ^long rf & [force-sib]]
                (let [disp (op (+ m 3)) base (reg m) index (reg (+ m 2)) scale (long (:imm (op (inc m))))
-                     dv (:imm disp)]
+                     dv (:imm disp)
+                     c8 (d8 dv)]
                  (cond
                    (#{"RIP" "EIP"} base)
                    (do (modrm 0 rf 5) (imm! disp 4 false))
@@ -547,17 +625,17 @@
                        (cond
                          (nil? base) (do (modrm 0 rf 5) (imm! disp 4 false))
                          (and (not= bn 5) (= 0 dv) no-disp) (modrm 0 rf bn)
-                         (and (some? dv) disp8-ok (int8? dv)) (do (modrm 1 rf bn) (imm! disp 1 false))
+                         (and (some? c8) disp8-ok) (do (modrm 1 rf bn) (imm! {:imm c8} 1 false))
                          :else (do (modrm 2 rf bn) (imm! disp 4 false)))
                        (let [[dsz bno] (cond
                                          (nil? base) (do (modrm 0 rf 4) [4 5])
                                          (and (= 0 dv) no-disp (not= bn 5)) (do (modrm 0 rf 4) [0 bn])
-                                         (and (some? dv) disp8-ok (int8? dv)) (do (modrm 1 rf 4) [1 bn])
+                                         (and (some? c8) disp8-ok) (do (modrm 1 rf 4) [1 bn])
                                          :else (do (modrm 2 rf 4) [4 bn]))
                              ss ({1 0 2 1 4 2 8 3} scale)
                              xn (if index (rnum index) 4)]
                          (byte! (bit-or (long bno) (bit-shift-left (long xn) 3) (bit-shift-left (long ss) 6)))
-                         (when (pos? (long dsz)) (imm! disp dsz false))))))))
+                         (when (pos? (long dsz)) (imm! (if (= 1 (long dsz)) {:imm c8} disp) dsz false))))))))
         cc (fn [^long i] (long (:imm (op i))))
         c0 (aget cur 0)
         form (:form info)
@@ -578,6 +656,7 @@
           ("MRMDestMem" "MRMDestMemFSIB") (let [s (+ c0 5 v4)] (byte! base-op) (mem! c0 (rnum (reg s)) (= form "MRMDestMemFSIB")) (inc s))
           "MRMDestMem4VOp3CC" (do (byte! (+ base-op (cc 8))) (mem! (inc c0) (rnum (reg 0))) (+ c0 5 3))
           "MRMSrcReg" (let [s (+ c0 1 v4)]
+                        (when (and evex? (fl :rc)) (vswap! nops-used dec))
                         (byte! base-op) (modrm 3 (rnum (reg c0)) (rnum (reg s)))
                         (if i8reg? (do (vreset! i8 (reg-enc (reg (inc s)))) (+ s 2)) (inc s)))
           "MRMSrcReg4VOp3" (do (byte! base-op) (modrm 3 (rnum (reg c0)) (rnum (reg (inc c0)))) (+ c0 3))
@@ -783,7 +862,9 @@
                     (= :rex (:force opts)) (conj :rex))
             _ (when (some #(not (#{"lock" "rep" "repe" "repz" "repne" "repnz" "notrack"} %)) pfx)
                 (unsupported :prefix-word (str/join " " pfx)))
-            _ (when (#{:evex :rex2} (:force opts)) (unsupported :forced-encoding (name (:force opts))))
+            _ (when (= :rex2 (:force opts)) (unsupported :apx "{rex2}"))
+            ;; {evex} cmp/test: CCMP/CTEST (processInstruction's replaceWithCCMPCTEST), APX's
+            _ (when (and (= :evex (:force opts)) (= mode 64) (re-matches #"(cmp|test)[bwlq]?" n)) (unsupported :apx (str "{evex} " n)))
             flags (cond-> flags (= :vex3 (:force opts)) (conj :vex3))
             wait (fpu-wait n)
             n (or wait n)

@@ -2952,3 +2952,36 @@ asked for the generator to be Arbace's; the oracle comparison makes it as trustw
 "Proposed (AX2)"): AXS23 (the generator Arbace's), AXS24 (the regeneration in `--full`), AXS25 (FileCheck's order for the
 pairing), AXS26 (the machine level as a second view now, the read forms rewritten with the CHECK-text slice), AXS27 (EVEX next).
 No code copied (LICENSE.md, doc/ARBACE.md); the table is a derived work of LLVM's `.td` files under their licence.
+
+## 2026-11-10 amd64 assembly: AX2's second slice, EVEX in the matcher and the encoder (branch `asm-ax2b`, from `mac/asm-ax2` `7e909ad83`)
+
+AXS27 (a) followed provisionally (EVEX next; AXS23-AXS27 unanswered). Studied, not copied: llvm-project 23.1.5 (the pinned
+tarball, `test/asm/corpora.edn`'s `:llvmorg-23.1.5`) `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`
+(X86OpcodePrefixHelper's EVEX fields and `emit`, `emitVEXOpcodePrefix`'s EVEX cases form by form, `isDispOrCDisp8`,
+`emitMemModRMByte`, `encodeInstruction`'s writemask and rounding-operand skips), `X86BaseInfo.h` (`isX86_64ExtendedReg`,
+`isApxExtendedReg`), `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (`MatchRegisterByName`'s 64-bit-only registers,
+`ParseRoundingModeOp`, the pseudo prefixes, `checkTargetMatchPredicate`'s `{evex}`, `replaceWithCCMPCTEST`) and `X86Operand.h`
+(`isVK*Pair`, `addMaskPairOperands`).
+
+- `arbace.asm.amd64.asm`: `evex-prefix!` (62 and P0-P2: R, X, B, R' with inverted bits, mmm from the map (TB, T8, TA, maps 5-7), W,
+  vvvv and V', U, pp, z, L'L, b, aaa; L'L from the rounding control on a register form with EVEX.b, zero for `{sae}`); the
+  encoder's operand skips count the writemask; the EVEX_RC operand left out of the immediates; disp8*N from the table's
+  `CD8_Scale` in both ModRM paths (no compression in 16-bit addressing, as LLVM). The matcher: `%xmm16`-`%xmm31`, `%ymm16`-`%ymm31`,
+  `%zmm`, `%k` taken (outside 64-bit mode the 64-bit-only ones refused with llvm-mc's message), `{rn-sae}`-`{rz-sae}` as the
+  immediates 0-3, `{sae}` a token, `vp2intersect`'s mask pairs (every `VK*Pair` set is K0-K7; the pair's encoding its even
+  register's), `{evex}`. What stays APX's is classed `:apx` by its cause: map 4, NF, the two conditional operands, `{dfv=...}`
+  (any case), `{rex2}`, `{evex} cmp`/`test` in 64-bit mode, `%r16`-`%r31`.
+- `test/asm/encode-results-amd64.edn` recorded from a run with 0 failing; `divergences-encode.edn`: `:evex` and
+  `:forced-encoding` empty and kept, `:apx` widened; `controls-encode.txt`: a fourth control, `avx512bw-64-att` against
+  `avx512dq-att`, fails as it must.
+
+Results: of `MC/X86`'s 106,075 stated encodings 81,966 met (was 32,673): legacy 13,753, VEX 17,215 (+87, the opmask instructions
+the first slice refused for their `%k` registers), XOP 1,792, EVEX 49,206; 24,109 classed (Intel 20,725 for AX3, APX 3,383, no run 1);
+none failing; error lines 63 of 108 met (was 60). The first run over the 132 EVEX files met 49,969 and rejected 169, two causes
+(`isVK2Pair` looked for a register class the table does not name; `{dFV=...}` in upper case), both fixed. Table check byte for byte
+(not regenerated: its fields held EVEX's bits); AX1's and AR1's round trips the same rows; `bin/reap` (0 problems), `bin/crops-score
+--judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass. llvm-mc not run: the tests' own CHECK lines judge.
+
+Considered: one port of `emitVEXOpcodePrefix` for VEX, XOP and EVEX together in place of the first slice's VEX function, rejected
+for this slice (the VEX path's 17,128 met lines unchanged by construction); EVEX's APX fields (B4, X4, NDD, NF) left to APX.
+Proposed (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, second slice)"): AXS28 (the CHECK text before APX, as AXS27 (a) orders it).

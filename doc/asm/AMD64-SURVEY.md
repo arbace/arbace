@@ -707,3 +707,39 @@ Each with options, the recommended one named.
 - **AXS27 EVEX and APX next.** (a) EVEX (disp8*N from `CD8_Scale`, masks, broadcast, rounding: 50,000-odd of the classed lines)
   then the CHECK text, then APX; (b) the CHECK text first. *Recommended: (a)*: the classes are the measure of "equal or classed",
   and the table already holds EVEX's fields.
+
+## As built: AX2 (second slice, 2026-11-10; branch `asm-ax2b`)
+
+On the light lane, AXS23-AXS27 still unanswered and followed as recommended (AXS27 (a): EVEX first). doc/asm/AMD64.md §3
+describes what was built: the EVEX prefix after `X86MCCodeEmitter::emitVEXOpcodePrefix` and `X86OpcodePrefixHelper::emit`
+(llvm-project 23.1.5), the opmask, `{z}`, broadcast, embedded rounding and `{sae}`, disp8*N from the table's `CD8_Scale`
+(`isDispOrCDisp8`), EVEX's maps 5-7, the AVX-512 registers and operand classes in the matcher (`MatchRegisterByName`'s 64-bit-only
+registers, `ParseRoundingModeOp`, `isVK*Pair` and `addMaskPairOperands`), and `{evex}` (`checkTargetMatchPredicate`). The table
+was not regenerated: its encoding fields already held EVEX's bits (`table check` byte for byte).
+
+| `MC/X86` (621 files) | stated | met | classed | failing |
+|---|---:|---:|---|---:|
+| first slice | 106,075 | 32,673: legacy 13,753, VEX 17,128, XOP 1,792 | 73,402: `:evex` 50,896, `:intel` 20,725, `:forced-encoding` 1,175, `:apx` 605, `:no-run` 1 | 0 |
+| **second slice** | 106,075 | **81,966**: legacy 13,753, VEX 17,215, XOP 1,792, **EVEX 49,206** | 24,109: `:intel` 20,725, `:apx` 3,383, `:no-run` 1 | **0** |
+| error tests' `error:` lines | 108 | 60 → 63 | | 45 pending |
+
+Every EVEX encoding the encoder produces is the test's: on the first run over the 132 files that held `:evex` or
+`:forced-encoding` lines, 49,969 met and 169 rejected, all of one cause each: `vp2intersect`'s mask pair (`isVK2Pair` looked for a
+class `VK2` the table does not name: the pairs' sets are `VK1`'s, K0-K7) and a `{dFV=...}` in another case; both fixed, none left.
+VEX gains 87 lines: the opmask instructions (`kmov`, `kand`, ... VEX-encoded) whose `%k` registers the first slice refused as EVEX's. The classes `:evex`
+and `:forced-encoding` are empty and kept; what EVEX cannot take yet is APX's and moves to `:apx` by its finer cause: EVEX's map 4
+(NDD, NF, CCMP and CTEST, their `{dfv=...}`), `%r16`-`%r31`, `{rex2}` and `{evex} cmp`/`test` (CCMP's alias). A fourth negative
+control (`avx512bw-64-att`'s statements against `avx512dq-att`'s CHECK lines) fails as it must. The table check regenerates the
+table byte for byte; AX1's and AR1's round trips give the same rows (`roundtrip: ok` on both architectures); `bin/reap` (0
+problems), `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` pass. The encode
+check takes about 1.7 minutes (four threads, under 1.5 GiB).
+
+Not built in this slice: the CHECK text (AXS27's second step), APX (its third), Intel syntax (AX3), gas's mode, relaxation.
+
+### Proposed (AX2, second slice)
+
+- **AXS28 APX's place.** (a) APX next in AX2 (REX2, map 4's promoted forms with NDD and NF, CCMP/CTEST's flags, the EGPRs in
+  ModRM, SIB, REX2 and EVEX's B4/X4), the encoder's last family, 3,383 lines; (b) the CHECK text first (AXS27 (a)'s order).
+  *Recommended: (b)*, as AXS27 (a) orders it: the CHECK text judges every met encoding's instruction a second time (the matcher's
+  choice, not only its bytes), which APX's NDD and NF forms need as much as the rest.
+

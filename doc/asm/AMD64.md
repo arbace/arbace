@@ -2,7 +2,7 @@
 
 The machine half of the x86-64 crop (doc/asm/AMD64-SURVEY.md §7.2, §8.2; the forms are doc/asm/SPEC.md's). AX2's first slice:
 the instruction table generated from LLVM's TableGen files by Arbace's own TableGen, the AT&T matcher and the encoder of the
-legacy, VEX and XOP encodings, and the check of `MC/X86`'s stated encodings by their own CHECK lines. No LLVM tool runs in any
+legacy, VEX and XOP encodings (EVEX since its second slice), and the check of `MC/X86`'s stated encodings by their own CHECK lines. No LLVM tool runs in any
 of it; llvm-tblgen and llvm-mc are the oracle tier's, by hand.
 
 ## 1. The table (`asm/amd64/table.edn`)
@@ -54,8 +54,16 @@ VEX2, `int $3`, shifts by 1). `.code16gcc` matches as 32-bit.
 operand-size, `lock` and mandatory prefixes, REX (W, R, X, B; `%spl`-`%dil`), VEX2 or VEX3 (`determineOptimalKind`) and
 XOP, the maps, every legacy and VEX format, ModRM, SIB and the displacement's choices (none, disp8, disp32; 16-bit
 addressing; RIP-relative), the immediates, `Imm8Reg`, and fixups (a symbolic value's bytes shown as llvm-mc shows them,
-`A`, `B`, ...). Not yet: EVEX (AVX-512, AVX10), APX (REX2, maps 4-7), relaxation (llvm-mc's `-show-encoding` prints the
-unrelaxed instruction, so the stated encodings need none; objects do, AX4), gas's mode (`:gnu`, AXS5).
+`A`, `B`, ...). Since AX2's second slice EVEX too (AVX-512, AVX10, AVX512-FP16's maps 5 and 6, map 7): `emitVEXOpcodePrefix`'s
+EVEX operands form by form (R and R' of ModRM.reg, B and X of ModRM.rm, X of a memory index and V' of a VSIB index, vvvv and
+V', aaa from the opmask), the instruction's W, z, L'L, b and U, the embedded rounding (`{rn-sae}`...`{rz-sae}` an immediate
+rendered into L'L with EVEX.b, `{sae}` a token: L'L zero), the broadcast's `{1toN}` (its own instruction, EVEX.b), and the
+displacement compressed by `CD8_Scale` (`isDispOrCDisp8`: disp8*N when aligned and in range, else disp32); the matcher takes
+`%xmm16`-`%xmm31`, `%ymm16`-`%ymm31`, `%zmm`, `%k0`-`%k7` (the 64-bit-only ones refused outside 64-bit mode, as
+`MatchRegisterByName` does), the opmask and `{z}` decorations, the mask pairs of `vp2intersect` (`addMaskPairOperands`) and
+the `{evex}` pseudo prefix (`checkTargetMatchPredicate`). Not yet: APX (REX2, map 4's NDD, NF, CCMP/CTEST, `%r16`-`%r31`,
+`{rex2}`, `{evex} cmp`), relaxation (llvm-mc's `-show-encoding` prints the unrelaxed instruction, so the stated encodings need
+none; objects do, AX4), gas's mode (`:gnu`, AXS5).
 
 ## 4. The check (`arbace.asm.amd64.check`, `bin/repr-asm encode-check`)
 

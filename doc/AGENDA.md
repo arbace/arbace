@@ -159,7 +159,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   checked by regeneration; llvm-tblgen's `MatchTable0` its oracle by hand, 23,014 of 23,014 rows), the AT&T matcher and the
   encoder of the legacy, VEX and XOP encodings, `bin/repr-asm table gen|check|oracle` and `encode-check`: `MC/X86`'s stated
   encodings judged by their own CHECK lines, every non-pass classed (EVEX and APX the largest, Intel for AX3). Proposed
-  AXS23-AXS27. Next: EVEX, then the CHECK text (the AT&T print from the AsmString) and the machine-level forms (AXS26), APX.
+  AXS23-AXS27. `asm-ax2b` (on `asm-ax2`; "As built: AX2 (second slice)"): EVEX encoded (opmasks, `{z}`, broadcast, rounding and
+  `{sae}`, disp8*N, maps 5-7, `{evex}`): 81,966 of 106,075 stated encodings met (EVEX 49,206), none failing, the rest Intel (AX3)
+  and APX. Proposed AXS28. Next: the CHECK text (the AT&T print from the AsmString) and the machine-level forms (AXS26), then APX.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
