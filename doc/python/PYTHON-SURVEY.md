@@ -5864,3 +5864,62 @@ memory is C's, their slots C functions; `heaptype_relative.c`, `vectorcall_limit
 natives of `:capi-port`, and `_testcapi` itself: it uses the full API, whose macros read objects' layouts (`PyTuple_GET_ITEM`'s
 `ob_item`, `PyBytes_AS_STRING`, `PyFloat_AS_DOUBLE`, the compact unicode's data), which proxies of a head alone cannot give
 (the DECISION of the report); `_testinternalcapi` by design (244-4 (a)).
+
+## As built: 263, P6's second pass and the shaped memoryview cast (2026-11-10, the Mac VM, queue 263)
+
+The main host's proposal P6 (queue 260-264's P4): 252's first pass of 3.15.2's module changes left the modules below behind
+the switch; this pass ports what their 3.15 tests ask, each change gated by `py315()` unless marked "both", from CPython
+3.15.2's Modules/ (the VM's oracle build, `.tmp/oracle315`), and 3.14.10's memoryobject.c for the cast:
+
+- **memoryview.cast with a shape** (both): `memoryview_cast_impl`, `cast_to_1D`, `cast_to_ND`, every format
+  `get_native_fmtchar` accepts, assignment to a full multi-index and to a 0-dim view, count and index on N-D views; under
+  3.15 the Zf/Zd formats and 3.15's error message.
+- **struct**: 3.15.2's `s_new`/`s_init` split (the FutureWarning and DeprecationWarning paths, `set_format`'s non-ASCII
+  ValueError, the uninitialised struct's AttributeError), Zf and Zd; pack_into's and unpack_from's Py_ssize_t offsets
+  raise OverflowError (unpack_from under 3.14 too: 3.14.10's clinic converts it, pyi gave IndexError).
+- **resource**: unsigned RLIM_INFINITY, RLIM_SAVED_CUR/MAX, a -1 limit's DeprecationWarning, prlimit through the same
+  rlim2py; the limits by PyNumber_Index (both).
+- **math**: fmax, fmin, signbit, isnormal, issubnormal; loghelper with a huge `__index__`.
+- **zlib**: crc32_combine and adler32_combine (zlib 1.3's multmodp/x2nmodp, adler32_combine_), `__version__` deprecated.
+- **mmap**: an anonymous map's size(), trackfd=False's ValueError, find's start unclamped, flush(offset, size=-1, *, flags)
+  with MS_*.
+- **ssl**: `_SSLSocket.group()`, `SSLContext.set_groups`/`get_groups` (Go's CurveIDs), load_cert_chain's OSError with its
+  filename, and got_eof_error (gh-148292: after an SSLEOFError, read, write and do_handshake raise it again).
+- **array**: typecodes 'e', 'Zf', 'Zd' (get, set, byteswap, repr, reduce, mformat codes 22-27 and the reconstructor).
+- **_sqlite3**: connect, Connection and five methods with 3.15.2's positional-only and keyword-only parameters.
+
+3.15's classes live in `test/python/divergences-315.edn` (252's DECISION 3 (a); the user's decision (a) on 263's DECISION,
+2026-11-10): a copy of `divergences.edn` followed by a section marked `;; 3.15.2's own classes (queue 263)`, which the flip
+keeps while the copy above it is refreshed. Its classes: `:unicodedata-315` (deferred: block, the grapheme, InCB and
+Extended_Pictographic properties, iter_graphemes), `:ssl-sigalgs-315`, `:ssl-ciphersuites-315`, `:ssl-ktls-315` (design: Go's
+crypto/tls neither sets nor reports signature algorithms, does not configure TLS 1.3's suites, has no kTLS),
+`:memoryview-formats-315` (test_compare_equal, an array's view of format 'B'). `:ssl-go-tls` (both files) takes
+test_wrong_cert_tls13: Go's server sends bad_certificate for any error its VerifyConnection callback returns where OpenSSL
+sends unknown_ca; the client passes only when the race gives it EOF first (1 run of 6 on the head, 0 of 6 on the base), so the
+3.14 count of the head's first measure (166 against the base's 167) was this flake.
+
+Counts (the VM, `bin/pyi aot test/python/libtest.py MODULE`, each test's own verdict: pyi ok / methods, the oracle's ok;
+3.14: python3 3.14.10, 3.15: the 3.15.2 build):
+
+| module | 3.14 base | 3.14 head | 3.15 base | 3.15 head | oracle 3.14 / 3.15 |
+|---|---|---|---|---|---|
+| test_memoryview | 105 / 171 | 106 / 171 | 105 / 173 | 107 / 173 | 152 / 154 |
+| test_base64 | 37 / 41 | 39 / 41 | 64 / 67 | 66 / 67 | 41 / 67 |
+| test_buffer | 5 / 95 | 5 / 95 | 5 / 97 | 5 / 97 | 93 / 95 |
+| test_struct | 39 / 44 | 39 / 44 | 33 / 47 | 42 / 47 | 44 / 47 |
+| test_resource | 13 / 13 | 13 / 13 | 11 / 14 | 14 / 14 | 13 / 14 |
+| test_math | 83 / 89 | 83 / 89 | 74 / 89 | 84 / 89 | 85 / 86 |
+| test_array | 847 / 893 | 847 / 893 | 866 / 1098 | 1043 / 1098 | 893 / 1098 |
+| test_zlib | 75 / 79 | 75 / 79 | 75 / 88 | 84 / 88 | 77 / 86 |
+| test_mmap | 45 / 53 | 45 / 53 | 42 / 55 | 47 / 55 | 45 / 47 |
+| test_sqlite3.test_dbapi | 201 / 205 | 201 / 205 | 201 / 206 | 202 / 206 | 205 / 206 |
+| test_sqlite3.test_userfunctions | | | 66 / 74 | 72 / 74 | - / 72 |
+| test_ssl | 167 / 206 | 166 / 206 (flake) | 153 / 222 | 158 / 222 | 189 / 204 |
+| test_unicodedata | 53 / 61 | 53 / 61 | 55 / 73 | 55 / 73 | 56 / 66 |
+
+test_sqlite3's regression (38 / 38) and types (46 / 48) and test_select (5 / 6) are equal on both. Judged against the classes
+(`test/python/libtest_judge.ae --verdict own`), the 3.15 head's 16 modules: 2,068 pass, 325 classed, 2 failing, the two
+sqlite3 tests the full run's module id `test_sqlite3/...` classes (this harness ran the submodule); the 3.14 head's 12: 1,672
+pass, 275 classed, 3 failing, those two and test_base64's test_b64encode (on the base too). Proofs: `t/check263.sh mvcast`,
+`p315`, `arr315` (references from 3.14.10 and 3.15.2, PASS on the head, FAIL on the base, negative controls failing), the
+got_eof probe's five answers equal to 3.15.2's.
