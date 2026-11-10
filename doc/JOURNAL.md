@@ -2914,3 +2914,11 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   record's body for them. Against core-oracle's full dump (by hand) the 10 of `str`, `slice` and `fmt` are equal. RF12-P6's "43 of 48"
   was measured against the full dump. Proposed RFP51 (a): a list of the export's modules added to the pack at the oracle tier.
   doc/rust/FRONTEND-SURVEY.md, "As built: RF13b".
+
+2026-11-10, rust-rf13b (review fix, .tmp/merge-1111/REVIEW2.md §4 items 1 and 2): the UI programs' names (`rfr_name`: `ui-tests%ui%...`) are
+used where rsi-build's outputs are read: `bin/rust-front rsi-native` and `bin/lib/rsi/check`'s `--front own` (the same naming
+inline). A missing own IR is a failure now (check: x.refused and ir.status 1, never the pack's IR with front.tsv saying own;
+rsi-native: a counted failure line). rsi-build counts the programs skipped for want of a record in the pack ("N skipped (no
+record in the pack)"). Proof: `bin/rust-front essential` passes, equal to essential-known.txt (known.diff empty, 3m50s, stub
+calls 0); a fabricated UI id (tests/ui/abi/foo#bar.rs) with front.tsv "own" and no .ours.ll names the same directory as
+rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch these two files (checked), so they rebase clean.
