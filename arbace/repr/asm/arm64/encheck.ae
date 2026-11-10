@@ -209,17 +209,20 @@
         (for [[f rs] (group-by (comp file-of first) rows)]
           [f (into {} (for [[lvl xs] (group-by second rs)] [lvl [(count xs) (count (filter #(= :pass (nth % 2)) xs))]]))])))
 
-(defn- write-record [^String path rows]
+(defn- write-record [^String path files non-pass]
   (spit path
         (str ";; repr/asm's arm64 encode check (bin/repr-asm --arch arm64 encode-check; doc/asm/SPEC.md §12, AR2): every MC/AArch64 line\n"
              ";; that states an encoding, encoded from its CHECK text and printed back to it. :files each file's [LINES PASSES] a level;\n"
-             ";; :non-pass every line that does not pass, [ID LEVEL REASON]. Written by `encode-check --record`. Read with the Clojure reader.\n"
+             ";; :non-pass every line that does not pass, [ID LEVEL REASON]. Written by `encode-check --record` (a run's corpora's rows\n"
+             ";; replaced, the other corpora's kept). Read with the Clojure reader.\n"
              "{:files\n {\n"
-             (apply str (for [[f s] (summary rows)] (str "  " (pr-str f) " " (pr-str (into (sorted-map) s)) "\n")))
+             (apply str (for [[f s] (sort-by key files)] (str "  " (pr-str f) " " (pr-str (into (sorted-map) s)) "\n")))
              " }\n :non-pass\n [\n"
-             (apply str (for [[id lvl res why] (sort-by (juxt first second) rows) :when (not= res :pass)]
+             (apply str (for [[id lvl why] (sort-by (juxt first second) non-pass)]
                           (str "  [" (pr-str id) " " lvl " " (pr-str why) "]\n")))
              " ]}\n")))
+
+(defn- corpus-of [^String f] (subs f 0 (max 0 (.indexOf f "/"))))
 
 (defn control
   "A negative control: SUBJECT's text (CORPUS/NAME:LINE) encoded against REFERENCE's stated bytes, judged as the check judges a
@@ -262,17 +265,30 @@
         (swap! problems conj (str "control " cid ": " v))))
     (doseq [r rows :when (and (not= :pass (nth r 2)) (not (classify classes r)))]
       (swap! problems conj (str "unclassed: " (first r) " " (name (second r)) " " (nth r 3))))
-    (if (seq record)
-      (do (write-record results rows) (println (str "repr-asm: recorded " (count rows) " rows into " results)))
-      (let [old (read-string (slurp results))
-            sm (summary rows)
-            run-files (set (keys sm))
-            old-np (set (for [[id lvl] (:non-pass old) :when (run-files (file-of id))] [id lvl]))
-            new-np (set (for [[id lvl res] rows :when (not= res :pass)] [id lvl]))]
-        (doseq [[f s] sm :when (not= s (get (:files old) f))]
-          (swap! problems conj (str "counts differ: " f " " (pr-str s) ", recorded " (pr-str (get (:files old) f)))))
-        (doseq [x (sort (remove old-np new-np))] (swap! problems conj (str "was :pass, now not: " (pr-str x))))
-        (doseq [x (sort (remove new-np old-np))] (swap! problems conj (str "passes, recorded not (record it): " (pr-str x))))))
+    ;; the record: the run's corpora's rows against it, or (RECORD, from a run with no problem so far) replaced by them, the other
+    ;; corpora's rows kept
+    (let [old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) {:files {} :non-pass []})
+          sm (summary rows)
+          corpora (set (for [cl lists] (first (str/split cl #"=" 2))))
+          in-run? (fn [^String id] (contains? corpora (corpus-of id)))
+          new-np (set (for [[id lvl res] rows :when (not= res :pass)] [id lvl]))]
+      (if (seq record)
+        (if (seq @problems)
+          (swap! problems conj (str "not recorded: the run has " (count @problems) " problems"))
+          (let [files (merge (into {} (remove (fn [[f]] (in-run? f)) (:files old))) sm)
+                np (concat (remove (fn [[id]] (in-run? (file-of id))) (:non-pass old))
+                           (for [[id lvl res why] rows :when (not= res :pass)] [id lvl why]))]
+            (write-record results files np)
+            (println (str "repr-asm: recorded " (count rows) " rows of " (count sm) " files (" (str/join ", " (sort corpora))
+                          ") into " results ", the other corpora's " (count (remove (fn [[f]] (in-run? f)) (:files old))) " files kept"))))
+        (let [old-np (set (for [[id lvl] (:non-pass old) :when (in-run? (file-of id))] [id lvl]))]
+          (doseq [[f s] sm :when (not= s (get (:files old) f))]
+            (swap! problems conj (str "counts differ: " f " " (pr-str s) ", recorded " (pr-str (get (:files old) f)))))
+          ;; a recorded file of the run's corpora that the run did not judge (dropped from the list, a new flag, no line now)
+          (doseq [f (sort (for [[f] (:files old) :when (and (in-run? f) (not (contains? sm f)))] f))]
+            (swap! problems conj (str "recorded, not run: " f)))
+          (doseq [x (sort (remove old-np new-np))] (swap! problems conj (str "was :pass, now not: " (pr-str x))))
+          (doseq [x (sort (remove new-np old-np))] (swap! problems conj (str "passes, recorded not (record it): " (pr-str x)))))))
     (doseq [p (take 40 @problems)] (println (str "FAIL: " p)))
     (when (> (count @problems) 40) (println (str "FAIL: ... " (- (count @problems) 40) " more")))
     (shutdown-agents)

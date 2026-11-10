@@ -24,7 +24,8 @@ covers what.
   - ASM, under the BSD 3-Clause License (the package renamed from `org.objectweb.asm`, by way
     of `clojure.asm`, to `arbace.asm`), was `arbace/asm/` and `arbace/asm.ae` until 2026-10-12,
     when it left main with the JVM's bytecode back end (doc/STANDALONE-NOTES.md, S4; it remains
-    on the branch `arbace-for-java-26`). No file of main is derived from it now; its license
+    on the branch `arbace-for-java-26`). Since 2026-11-10 `arbace/asm/` holds the assembly crop's
+    assembler instead (Apache-2.0 WITH LLVM-exception, below), nothing of ASM. No file of main is derived from it now; its license
     stays below for the JVM jars main uses or used, which embed it (`seed/arbace-seed.jar`
     while it was committed, until S4, 2026-10-12, now on the branch `arbace-for-java-26`, and the
     frozen jar of `arbace-for-java-26-v4`, the oracle's reference, built from its tag), and for
