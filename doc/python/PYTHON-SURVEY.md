@@ -5469,3 +5469,41 @@ outcomes and all) for its ids. 256 makes that inventory a record of its own.
   the patch): main-ro's facts 80.0% (judge 0, stale); 258's patch 79.4%; 256's patch 79.4%, judge 0.971 with `:cases {:self 51638
   :recorded 3187}`: 240's 48,546 inventory methods counted 710 ids twice (12 modules both lib-test's and lib-test-all's references
   record), 47,836 distinct.
+
+## As built: 257, the read cell judged from records: the round trip's levels 2 and 3 (2026-11-10, the Mac VM, queue 257)
+
+The brief asked that every check of the read cell judge from data, not from CPython live. At the base most already did (queue 240,
+records mode the default): lex-check and parse-check read CPython's tokens and trees from the python-pydump packs (240r's, the
+essential corpora's members committed), syntax-errors' cases are judged by their own verdicts, and the round trips' levels 1 and 4
+are each file's own. One part did not: in records mode the round trip's levels 2 (ast.dump) and 3 (the normalized code) were not
+judged at all (`compare --deferred`, "the oracle tier's"), so the round trip's 30 `:code-lines` files passed there while the
+record (`roundtrip --record`, live) classes them.
+
+- **The print's rows, a pack per corpus** (`tools/pydump/records.bash`): `python-pydump-printed-CORPUS`, the rows alone
+  (`tree/REL.row`: CPython's status, ast.dump's digest, the normalized code's, marshal's) of each file the round trip printed,
+  keyed as every entry is, by the input's bytes (the printed file's) and pydump.py's. `pyrec_read` and `pyrec_stage` take an empty
+  OUT for the rows alone; verify mode compares them row by row, its crossed pair on the rows. `printed-samples` is essential (its
+  members committed under `test/python/records/essential/printed-samples/` by the main host's record).
+- **`bin/repr-python roundtrip`, mode :lines:** mode record stages the print's rows, mode verify checks them; records mode, once
+  `test/python/records/python-pydump-printed-CORPUS.sha256` is pinned, reads the originals' tree rows (python-pydump-CORPUS, as
+  parse-check does) and the print's (`rt_recorded_levels`, `rt_levels`: each native row given CPython's columns; a row of no
+  record or other bytes refused) and judges levels 2 and 3 as live does: "level 2 (ast) N, level 3 (code) M (CPython's,
+  recorded)". A missing or stale entry fails the run (UNRECORDED, STALE; a member that differs from its manifest REFUSED), as every
+  record. Without the pin the run says "levels 2 and 3 the oracle tier's: no record of the print" and judges as before, so the
+  branch stays green until the main host records. Level 5 (`--text`, marshal) stays the oracle tier's: given level 4 (the same
+  bytes under the same name) it checks CPython's determinism, not Arbace.
+- **The levels' own negative control** (`arbace.repr.python`'s compare, live and records alike): controls-read.edn's pair, the
+  reference's original against its own print's dump (level 1 equal) with the subject's print's digests, which must fail at level
+  2 or 3 ("roundtrip (levels 2 and 3) control ...: failed as it must: level ast"). The existing control fails at level 1 first and
+  never reached levels 2 and 3.
+- **Verdicts unchanged:** live mode is as before (the new control aside). Records mode now gives live's verdicts: on a 14-file sample
+  of lib-test, site-packages and stdlib (with test_patma.py, support/__init__.py and packaging/version.py, three `:code-lines`
+  files, and bad_coding.py, `:rejected`) the lines equal live's but for their wording; on the base records mode passed the three.
+- **Proof (the VM, run):** the print's rows recorded by hand with the VM's python3 3.14.10 in a scratch worktree, never committed;
+  240r's samples tree rows equal byte for byte to the VM's (the record's manifest unchanged); then with python3, python and
+  python3.14 stubs first on PATH: python-read-essential's command passes, the stubs' log empty; `records verify` 0 differ.
+- **Independence:** no case moves (the round trip's files are read's 3,115, already judged by CPython's records at 0.5); the
+  judge stays 0.971 (51,638 own, 3,187 recorded), independence 79.4%; the facts' evidence refreshed
+  (`.tmp/q257/257-independence.patch`, superseding 256's).
+- **The night's command (main host, python3):** `REPR_PYTHON_ORACLE=record bin/repr-python roundtrip samples stdlib site-packages
+  lib-test`, then commit the four `python-pydump-printed-*` pins and manifests and `essential/printed-samples/` (report 257).
