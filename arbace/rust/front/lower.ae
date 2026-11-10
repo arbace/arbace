@@ -280,7 +280,7 @@
   (let [k (fv t :kind) sp (span-of t)]
     (node
      (merge
-      {:node :ty :span sp}
+      (cond-> {:node :ty :span sp} (fv t :mv-span) (assoc :mv-span (fv t :mv-span)))
       (cond
         (= 'Infer k) {:kind :infer}
         (= 'Never k) {:kind :never}
@@ -298,6 +298,8 @@
                 {:kind :ref :lifetime (cond lname lname *sig* "'_" :else nil) :unwritten (nil? lname) :mt (lower-mt mt)})
           PinnedRef {:kind :err}
           Ptr {:kind :ptr :mt (lower-mt (second k))}
+          ;; RF12: a pattern type (`pattern_type!(*const T is !null)`)
+          Pat {:kind :pat :ty (lower-ty (second k)) :pat (str/trim (str (nth k 2)))}
           Slice {:kind :slice :ty (lower-ty (second k))}
           ;; :len-span: the length's own span, of any file (RF7 prints an unevaluated length by its source text)
           Array {:kind :array :ty (lower-ty (second k)) :len (lower-expr (fv (nth k 2) :value)) :len-span (fv (fv (nth k 2) :value) :span)}
@@ -748,7 +750,8 @@
 ;; Items (item.rs)
 
 (defn- lower-generics [g]
-  {:params (vec (for [p (fv g :params)]
+  {:where-span (let [sp (span-of (fv g :where_clause))] (when (and (vector? sp) (seq (fv (fv g :where_clause) :predicates))) sp))
+   :params (vec (for [p (fv g :params)]
                   (let [k (fv p :kind)]
                     {:name (id-name (fv p :ident))
                      :kind (cond (= 'Lifetime k) :lifetime (= 'Type (head k)) :type (= 'Const (head k)) :const :else :type)
@@ -758,11 +761,13 @@
                      :bounds (mapv lower-bound (fv p :bounds))})))
    :where (vec (for [pr (fv (fv g :where_clause) :predicates)]
                  (let [k (fv pr :kind)]
-                   (case (head k)
-                     BoundPredicate (let [b (second k)] {:ty (lower-ty (fv b :bounded_ty)) :bounds (mapv lower-bound (fv b :bounds))
-                                                         :bound-params (vec (fv b :bound_generic_params))})
-                     RegionPredicate (let [b (second k)] {:lifetime (second (fv b :lifetime)) :bounds (mapv lower-bound (fv b :bounds))})
-                     {:other true}))))})
+                   ;; RF12: each predicate's span (an impl's def_span runs to its where clause's last predicate)
+                   (cond-> (case (head k)
+                             BoundPredicate (let [b (second k)] {:ty (lower-ty (fv b :bounded_ty)) :bounds (mapv lower-bound (fv b :bounds))
+                                                                 :bound-params (vec (fv b :bound_generic_params))})
+                             RegionPredicate (let [b (second k)] {:lifetime (second (fv b :lifetime)) :bounds (mapv lower-bound (fv b :bounds))})
+                             {:other true})
+                     (vector? (span-of pr)) (assoc :span (span-of pr))))))})
 
 (defn- implicit-self [params]
   ;; the first parameter `self`, `mut self`, `&self`, `&mut self` with an ImplicitSelf type
@@ -847,7 +852,8 @@
     (if (= 'Use (head k))
       (mapv (fn [u] (with-owner (node (assoc u :node :item)))) (use-items (second k) [] sp attrs vis))
       (with-owner
-        (let [base {:node :item :span sp :attrs attrs :vis vis :hir-id (next-id)}]
+        (let [base (cond-> {:node :item :span sp :attrs attrs :vis vis :hir-id (next-id)}
+                     (fv it :rf-order) (assoc :order (fv it :rf-order)))]
           [(case (head k)
              ExternCrate (merge base {:kind :extern-crate :orig (some-val (second k)) :ident (id-name (nth k 2))})
              Fn (merge base {:kind :fn} (lower-fn (second k)))

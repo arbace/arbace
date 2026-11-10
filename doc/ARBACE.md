@@ -337,6 +337,14 @@ code. Three kinds of things live here:
   `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,wrapping_range.rs}` and `rustc_ty_utils/src/layout.rs`; with rustc-stable-hash
   0.1.2's `src/{sip128,stable_hasher}.rs` (https://github.com/rust-lang/rustc-stable-hash, as rustc's Cargo.lock pins it); LICENSE.md
   names the files (MIT OR Apache-2.0); `mono_check.ae` is Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
+  `arbace/rust/front/core_check.ae` (RF12's first slice, 2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF12 (first slice)": the
+  front end over core's own module files) ports rustc 1.99.1, the same revision and sources: `rustc_expand/src/module.rs` (the module
+  tree, `#[path]`, directory ownership), and with it in `expand.ae` `rustc_expand/src/mbe/{metavar_expr,transcribe}.rs` (metavariable
+  expressions), `mbe/macro_rules.rs` (macros 2.0's arms), `rustc_builtin_macros/src/cfg_select.rs`, `rustc_expand/src/expand.rs`
+  (fully_expand_fragment's order, the DefIndex order of a fragment's items), in `resolve.ae` `rustc_resolve/src/late.rs` (a trait's
+  self rib around its generics) and `rustc_span/src/hygiene.rs` (a macro 2.0's def-site context), in `build.ae`
+  `rustc_mir_build/src/builder/mod.rs` (`#[rustc_inherit_overflow_checks]`); LICENSE.md names the files (MIT OR Apache-2.0); the
+  driver's judging and core's native interface are Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
   RFP28-RFP41 (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: the rest of RFP28-RFP41") port into `build.ae`, `passes.ae`,
   `collect.ae`, `lower.ae` and `expand.ae`, from rustc 1.99.1, the same revision and sources: `rustc_middle/src/ty/print/pretty.rs`'
   `pretty_print_const_scalar_ptr`, `rustc_mir_build/src/builder/expr/as_rvalue.rs`' closure fake reads, `rustc_middle/src/mir/consts.rs`'

@@ -1130,6 +1130,14 @@ covers what.
   casts after `compiler/rustc_codegen_ssa/src/mir/rvalue.rs`; `build_run.ae`'s values of core's integer constants follow
   `library/core/src/num/{int_macros,uint_macros}.rs`' definitions of MIN, MAX and BITS. `eval-promoted` and the rsi switch
   (`bin/rust-front rsi-build`, `bin/lib/rsi/check`'s `--front own`) are Arbace's own, under the Eclipse Public License 1.0.
+- `arbace/rust/front/core_check.ae` and RF12's first slice's edits (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF12 (first
+  slice)"), from rustc 1.99.1, the same revision and sources and under the same terms (MIT): `compiler/rustc_expand/src/module.rs` (the
+  module tree), `compiler/rustc_expand/src/mbe/{metavar_expr,transcribe,macro_rules}.rs` and `compiler/rustc_expand/src/expand.rs`
+  (metavariable expressions, macros 2.0's arms, the expansion's order) in `expand.ae`, `compiler/rustc_builtin_macros/src/cfg_select.rs`,
+  `compiler/rustc_resolve/src/late.rs` and `compiler/rustc_span/src/hygiene.rs` (a trait's self rib, def-site hygiene) in `resolve.ae`,
+  `compiler/rustc_mir_build/src/builder/mod.rs` (`#[rustc_inherit_overflow_checks]`) in `build.ae`. The driver's judge, core's index and
+  its native interface, `bin/lib/repr-rust/core-build.bash` and `test/rust/front/core-modules.txt` are Arbace's own, under the Eclipse
+  Public License 1.0.
 - The proposals RFP28-RFP41 (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: the rest of RFP28-RFP41"), from rustc 1.99.1, the same
   revision and sources and under the same terms (MIT): `build.ae`'s byte-array static constants after `compiler/rustc_middle/src/ty/
   print/pretty.rs` (`pretty_print_const_scalar_ptr`) and a closure's fake reads after `compiler/rustc_mir_build/src/builder/expr/

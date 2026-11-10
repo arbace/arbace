@@ -648,7 +648,9 @@
          (= s "auto") (if (is-at? p 1 "(") :ambig :true)
          (contains? builtin-kws s) (cond (is-at? p 1 "(") :ambig (is-at? p 1 "{") braced :else :true)
          (contains? attr-kws s) :true
-         (= s "decltype") (let [b (ix p)]
+         ;; (GNU's __decltype too, libstdc++'s spelling in the heap and algorithm bodies: `__decltype(...) __cmp(...);`
+         ;; was read as an expression statement and declined; cpp-route)
+         (#{"decltype" "__decltype"} s) (let [b (ix p)]
                             (adv! p)
                             (let [ok (and (is? p "(") (skip-balanced! p))
                                   r (cond (not ok) :error
@@ -3309,8 +3311,14 @@
       (let [b (ix p)
             [n nm]
             (cond
+              ;; a type parameter by clang's isStartOfTemplateTypeParameter ([temp.param]/2): class or typename followed by
+              ;; ..., ",", >, >> or =, or by an identifier and then ",", >, >> or =; otherwise (typename enable_if<...>::type
+              ;; = true, typename X::y, class N::C) the type of a non-type parameter (cpp-route: std::pair's C++17
+              ;; constructors, whose template headers were declined from typename enable_if< on)
               (and (or (is? p "class") (is? p "typename"))
-                   (not (and (is? p "typename") (or (is-at? p 1 "::") (and (identical? :id (tk (nxt p 1))) (is-at? p 2 "::"))))))
+                   (let [tp-end? (fn [k] (or (is-at? p k ",") (is-at? p k ">") (is-at? p k ">>") (is-at? p k "=")))]
+                     (or (is-at? p 1 "...") (tp-end? 1)
+                         (and (identical? :id (tk (nxt p 1))) (tp-end? 2)))))
               (let [kw (ts (cur p))]
                 (adv! p)
                 (let [pack (accept! p "...")
@@ -3354,12 +3362,25 @@
               (let [ds (parse-decl-specs p :tparam)
                     base (or (ds-type ds) (perr p "a template parameter"))
                     d (parse-declarator p :either)
+                    de (ix p)
                     ty (build-type base d)
                     qn (:name (last (name-chain d)))
                     nm (name-plain qn)
                     ni (if qn (long (:i (peek (:parts qn)))) (ix p))
                     dflt (when (accept! p "=") (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-cond-expr p))))
                     pack (or (:pack d) (= :pk (:t ty)))]
+                ;; CX12's checker (clang's DiagnoseUnexpandedParameterPack for a non-type parameter's type, [temp.variadic]/7):
+                ;; an enclosing template's parameter pack named in the type with no ... in it (g++.dg's cpp0x/variadic170.C,
+                ;; `template <typename A<T::value>::type>` in B<typename... T>, which the parser declined until typename
+                ;; enable_if<...>::type was read as a type; cpp-route)
+                (when-not pack
+                  (let [b (long (:b ds)) e (long (if qn (dec ni) de))]
+                    (when (not-any? #(t= (tok-at p %) "...") (range b e))
+                      (when-let [i (first (filter (fn [i] (let [^T t (tok-at p i)]
+                                                            (and (identical? :id (.-k t))
+                                                                 (let [en (sc/lookup (scope p) (.-s t))] (and (:tparam en) (:pack en))))))
+                                                  (range b e)))]
+                        (soft-diag! p i (str "non-type template parameter type contains unexpanded parameter pack '" (ts (tok-at p i)) "'"))))))
                 (when nm (sc/declare! (scope p) {:k :var :name nm :tparam true :ty ty}))
                 [(node p "NonTypeTemplateParmDecl" (:b ds) (last-ix p)
                        (cond-> {:loc (loc p ni) :type {:qualType (qt (param-type (if (and (= :pk (:t ty)) (not (:pack (:ent base))) (not (:pack (:q (:qn base))))) (:of ty) ty)))}
