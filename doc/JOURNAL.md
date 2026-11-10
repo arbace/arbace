@@ -3067,3 +3067,27 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
   `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict`
   exit 0, Rust unchanged. The 6 left and their causes in doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))", with the night's
   commands.
+
+## 2026-11-10: RF17, RF16's causes: four programs own, closures' first part (branch `rust-rf17`, from `mac/rust-rf16` `ee2eca54d`)
+
+- RF16's "Left" taken cheapest first, after rustc 1.99.1 (the pinned rust-src's `compiler/`): local constants evaluated as codegen's
+  eval_mir_constant does (the `const` item's construct_const body interpreted by `eval-promoted` in a value mode, in runtime and
+  promoted bodies), a variant's explicit discriminant in a runtime body, a static holding a pointer (codegen_static's
+  const_alloc_to_llvm: a packed struct with its relocations) for structs; a local trait's associated constant resolved to the
+  impl's (resolve_associated_item; typeck's `resolve-assoc-fn` takes associated constants) and a generic function's closure at its
+  instance's arguments (ClosureArgs' parent_args in mono's closure types, v0 and Instance::resolve's Fn arm) for generics; two
+  closure types of one closure unify by definition (typeck compared their signatures by `=`, which failed FlatMap's
+  `F::Output == U`: RF16's "a method call without its callee" in iterators was this `flat_map(..).collect()`, not the blanket
+  impl's `unzip_check`), v0 of a closure type never a backref to its own closures' parent path, and std's tuple constructors used
+  as function values built as shim.rs' build_ctor (the record's `mir/external`) for iterators; `Variants::Empty` in codegen
+  (a zero-sized aggregate, a `poison` discriminant) for casts; a reified closure's ClosureOnceShim symbol (RFP50 (a)'s first
+  part) for closures. Alternatives considered: the record's evaluated constants (`const 4_usize`; a record fact where the
+  interpreter exists), the record's ctor shims (none: the helper does not dump them), comparing closure types by text alone in
+  unification (the signatures' variables then stay apart; equating them is typeck's own identity of the two).
+- Stopped at closures' rest (RFP62: opaque types in mono and closures' vtable entries, about two days) and panic-assert-eq (RFP63:
+  upstream monomorphizations, std's exported generic instances), both written up in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **65 own** (RF16 61; 44
+  minutes): structs, generics, iterators, casts; native callees 4,516 of 4,978 (4,275 of 4,739), constants 205 of 205 (191 of 197),
+  mono-check's callees against the record 1,992 of 2,414 (1,865). `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict` exit 0, Rust unchanged.
+  The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".

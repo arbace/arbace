@@ -185,9 +185,11 @@ items below are the ones whose work is still ahead or tied to a night.
   types read from the library's sources, vectors indirect in codegen, the generic SIMD intrinsics; ci and `gate_key` unmoved),
   the HashMap programs' next causes (a constant function pointer's call, a spread memory field, thread-local statics), promoted
   constants further (`ptr::null`, `size_of`, checked operators and asserts, unsizing casts with vtables): 61 of 67 own.
-  Next: local constants evaluated (structs, then generics' associated constant), a generic closure's v0 type (generics), a
-  blanket impl's method call (iterators), upstream monomorphizations (panic-assert-eq, with RFP57), RFP50, casts' variants; the
-  night: the whole plan's rsi-build, rsi-native over the 13 own programs RF15 and RF16 added, `rsi check --front own`.
+  RF17 (`rust-rf17` on rust-rf16, "As built: RF17"): RF16's causes (local constants and an associated constant evaluated, a
+  static with a pointer, generic closures at their parent's arguments in mono, closure types' unification and v0, std's
+  constructors' shims, `Variants::Empty`, a reified closure's ClosureOnceShim symbol): 65 of 67 own. Next: RFP62 (opaque types in
+  mono, closures' vtable entries: closures), RFP63 (upstream monomorphizations: panic-assert-eq); the night: the whole plan's
+  rsi-build, rsi-native over the own programs RF15-RF17 added, `rsi check --front own`.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above).
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records

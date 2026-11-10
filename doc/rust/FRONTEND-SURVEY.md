@@ -3447,3 +3447,115 @@ before any run. Only `arbace/rust/` changes (in `arbace_crop_paths`): ci, `arbac
   own programs (rustc as the linker driver) to confirm the new own programs (collections, fmt, panic-hashmap-index, rc-refcell, traits) run as rustc's recorded runs:
   the vector code through rsi's lowering and the thread-local static against std's lowered library, then `bin/rsi check
   --front own --corpus samples,synthetic` (RFP42 (a)).
+
+## As built: RF17: RF16's causes, four programs own and closures' first part (2026-11-10)
+
+Branch `rust-rf17` (from `mac/rust-rf16` `ee2eca54d`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH=3`, the toolchains stubbed). RF16's caches were copied into the worktree and their absolute paths rewritten
+(`rust-rf16/` to `rust-rf17/`) before any run. Only `arbace/rust/` changes (in `arbace_crop_paths`): ci, `arbace/cpp/lower.ae` and
+`gate_key` do not move. RF16's causes were taken cheapest first, as its "Left" lists them; every rule follows rustc 1.99.1's
+own code (the pinned rust-src's `compiler/`).
+
+### structs: local constants
+
+- **A local constant evaluated** (`build-run`'s `local-const`, codegen's eval_mir_constant of an unevaluated `const` item): the
+  item's body as construct_const builds it (build-check's bodies already hold it) interpreted by `eval-promoted` in a value mode
+  (`_0` holds the value, not a borrow; its fake reads and user type ascriptions skipped, its `false-edge`s followed), a scalar's
+  bytes the operand's `(scalar BITS SIZE)`; in a runtime body and inside a promoted body (`LIMIT` in both); each constant once.
+- **A variant's explicit discriminant in a runtime body** (`Color::Green as u8`: THIR's cast of a unit variant, its anonymous
+  constant `Color::Green::{constant#0}`), mono's `variant-discriminant`, as RF15 evaluated it in promoted bodies.
+- **A static holding a pointer** (`static GREETING: &str = "hi"`): its initializer's relocations read back from our allocation's
+  text (`╾allocN<imm>╼`, `alloc-bytes+relocs`), each pointee its own allocation; codegen defines such a static as
+  codegen_static's const_alloc_to_llvm does (a packed struct, the bytes between the relocations and each pointer the allocation
+  it points at).
+
+### generics: an associated constant, a generic function's closure
+
+- **`<i32 as Zero>::ZERO`** (a local trait's associated constant, in a promoted body): the builder keeps the constant's
+  definition and arguments (`:nc`); `mono/resolve-const` resolves it as resolve_associated_item does (typeck's
+  `resolve-assoc-fn`, which now takes a trait's associated constant to the impl's constant of its name), and the impl's
+  constant's body is evaluated as above.
+- **A generic function's closure at its instance's arguments**: mono's instances substitute a closure type's parent arguments
+  (`closed-closures`: `[:closure TEXT SIG ARGS]`, ClosureArgs' parent_args; the signature substituted too), and a record's
+  closure form keeps them (its closure arguments less the three synthetic ones); v0 prints such a closure's path at them
+  (`pair_up::<&str, i32>::{closure#0}`), and Instance::resolve's Fn-trait arm resolves to the closure's body at them, so the
+  collector reaches `pair_up::<&str, i32>::{closure#0}` through std's `Map`.
+
+### iterators: a closure's type in unification and in v0, constructors' shims
+
+- **Two closure types of one closure unify** (typeck): a closure type is its definition at its parent's arguments; its
+  signature's variables are equated, not compared by `=` (which saw two ids of one variable and failed FlatMap's
+  `F::Output == U`, so `.flat_map(..).collect()` had no method: RF16's "a method call without its callee", which was this call,
+  not the blanket impl's `unzip_check`).
+- **v0 of a closure type is not a backref to its own closures' parent path**: a closure type's key is its definition at its whole
+  closure arguments, the parent path of its own closures is printed at their parent arguments (generics_of takes a closure's
+  parent from the typeck root), so `FlatMap<.., Map<.., {closure#0}>, {closure}>` prints the outer closure in full, as rustc's
+  symbol does.
+- **Constructors' shims** (`mono/ctor-shim-body`): a std ADT's tuple constructor used as a function value and instantiated in the
+  program's crate (`ControlFlow::<i32>::Break`, `Result::<(), NonZero<usize>>::Err`: the record's `mir/external`, rustc's
+  build_ctor shim whose MIR the helper does not dump) is built as shim.rs' build_ctor builds it (`_0 = ADT::V(move _1, ..);
+  return`), its path the item's def_path_str less its generic arguments, its arguments the function constant's; the fact
+  `ctor-shims`.
+
+### casts: an uninhabited type's variants
+
+- Codegen's `Variants::Empty` (`ControlFlow<NeverShortCircuitResidual, Infallible>`, array `map`'s `try_map`): an aggregate of it
+  is a zero-sized operand, nothing stored; its discriminant codegen_get_discr's `poison`.
+
+### closures: RFP50 (a)'s first part, then RFP62
+
+- A closure reified as a function pointer (`fnptr(|x| x - 1, 4)`, `[("add", |a, b| a + b), ..]`: ClosureFnPointer) carries its
+  ClosureOnceShim's symbol (`mono/closure-once-symbol`: Instance::resolve_closure at FnOnce, `<{closure} as FnOnce<(ARGS,)>>::
+  call_once` at the program's crate), the shim's body the record's (core's `FnOnce::call_once`); the fact `closure-shims`.
+  codegen then takes `closures`; its next causes are four closures the collector does not reach: three returned as
+  `impl Fn` (`make_adder`'s, `make_counter`'s, `compose`'s: mono has no opaque types) and one in a `Box<dyn Fn>` vtable
+  (`main::{closure#12}`: the vtable is the record's). RFP62 below.
+
+### Results
+
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; 44 minutes): **65 of 67 own** (RF16 61): structs, generics, iterators, casts.
+  The native facts (build-run's, summed): callees 4,275 of 4,739 -> 4,516 of 4,978, constants 191 of 197 -> 205 of 205,
+  function constants' symbols 1,798 of 2,215 -> 1,925 of 2,340, layouts 42,788 -> 42,792 of 45,860, symbols 258 -> 266 (all
+  native), constructors' shims 2 of 2, closure shims 3 of 3, vtables 35 of 46 (unchanged); mono-check's against the record
+  (`mono-all.log`, summed): callees 1,865 -> 1,992 of 2,414, function constants' symbols 1,789 of 2,204 -> 1,916 of 2,329, core
+  items 1,870 -> 2,022 (all equal), items 464 of 1,119 -> 468 of 1,124, symbols 228 -> 230 of 272, layouts unchanged
+  (42,334 of 45,483).
+- The 2 left: closures (four closures the collector does not reach: RFP62) and panic-assert-eq (`assert_failed::<i32, i32>`,
+  std's upstream instance: RFP63).
+- `bin/rust-front essential` equals its known file (3 min 51 s; no line moved); `bin/rust-front core-essential` equals its own
+  (564 of 567, 4 min 51 s); `bin/reap` 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict` exit 0, Rust 75.0 /
+  75.0 / 95.8 / 80.0, unchanged (RFP43 (a): an own case still scores 0.5 until S6's switch).
+
+### RFP62 Closures behind opaque types and in vtables (`closures`)
+
+`closures`' last four closures are reached only through an `impl Fn` return (`make_adder`, `make_counter`, `compose`: the call
+`add5(1)` is `<opaque as Fn<(i32,)>>::call`) and through a `Box<dyn Fn() -> usize>`'s vtable (a closure's `call`, `call_mut` and
+`call_once` entries: the last a VTableShim of its ClosureOnceShim). Mono has no opaque types: their identity (RFP33 (a)) is
+typeck's, but neither their hidden types (the defining body's typeck results) nor `RevealAll`'s normalization in mono's
+instances, layouts and symbols; and `vtable-alloc` refuses shims. Options: (a) **reveal opaque types in mono (type_of of an
+opaque: its defining body's hidden type, substituted at the opaque's arguments; every type mono instantiates normalized under
+RevealAll before layouts, resolution and v0) and build closures' vtable entries natively (the body's own `call`/`call_mut`,
+`call_once` as `VTableShim(ClosureOnceShim)`'s symbol with the record's shim body, as RF17 took the reified pointer's)**, about two
+days (opaque types reach layouts, symbols and resolution at once; a check over the samples' `impl Trait` programs too); (b) take
+the record's items for closures reached only through opaque types and vtables (a record fact per such closure). *Recommended:
+(a)*: `impl Trait` returns are common in the samples, and the vtable part is small once the shim symbols are mono's.
+
+### RFP63 Upstream monomorphizations (`panic-assert-eq`)
+
+rustc's share-generics (on at -O0): an instance an upstream crate already exports is that crate's symbol, not instantiated in the
+program (`core::panicking::assert_failed::<i32, i32>`, which std exports: the record's callee names std's copy). Mono instantiates
+it in the program's crate, so the module declares a local instance it never defines. Natively this needs
+`upstream_monomorphizations`: each upstream crate's exported generic instances (its metadata's `exported_symbols`). Options: (a)
+**the helper's std interface dump also lists std's exported generic instances (def path and arguments, from
+`tcx.exported_generic_symbols`/`upstream_monomorphizations`), recorded with the interface (the oracle tier's, as
+`std-iface.edn` is), and mono resolves an instance to the upstream crate's symbol when listed**, about a day plus a re-record of
+the interface pack at night; (b) read the exported symbols from the rlibs' metadata natively (RFP57's native interfaces), larger;
+(c) keep the record's callee for such instances (a counted record fact). *Recommended: (a)*, (b) once RFP57 is built.
+
+### The night's commands (none run here)
+
+- RFP46 (a)'s whole plan again, now with RF17: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build` (samples and synthetic), then
+  `bin/rust-front rsi-native` by hand over the own programs (rustc as the linker driver) to confirm the new own programs (structs,
+  generics, iterators, casts; with RF15's and RF16's) run as rustc's recorded runs (the native constructors' shims, the static
+  with a pointer, the uninhabited `poison` discriminant), then `bin/rsi check --front own --corpus samples,synthetic` (RFP42 (a)).
