@@ -2802,3 +2802,11 @@ cooperative atomics ported into `arbace/repr/llvm/verify.ae` (LLVM 23.1.5's Veri
 Alternatives: recording only the re-run rows (`bin/llvmi check --record` takes no `--only`), so the whole levels were run, in the
 light lane (one run at a time, under 1.5 GB). ci's namespaces were not changed (they are embedded, in `gate_key`); llvmi's are crop
 paths. Scheme (SCS27 proposed) and C (the long tail of the checker and the converter, a case each) were looked at and left.
+
+## 2026-11-10, llvm-compl2: the review's findings (REVIEW.md, .tmp/merge-1111/REVIEW.md, section 2)
+
+bin/llvmi sources bin/lib/ci/fresh.bash and calls c_ci_fresh only while the file exists (the re-seed window's R deletes it; 2.1); its
+CI_AOT_LIB default takes the main checkout by `${root%%/.tmp/worktrees/*}` as bin/lib/ci/check-aot does, so a clean run no longer reads
+the main checkout's warm cache (2.2); verify.ae's vp.splice tests the vector type before `(nth rt 1)`, and require-logical-pointer? and
+amdgcn-triple? are computed once per module (`*mod-facts*`; 2.3). Proofs: bin/llvmi check --essential 10 of 10, controls fail;
+test/repr/llvm/controls-test.bash; repr-llvm check verify-llvmtest/verify-probes --essential; bin/reap; bin/crops-score --judge --strict.

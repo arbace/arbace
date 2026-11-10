@@ -48,7 +48,7 @@
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
-(declare verr)
+(declare verr require-logical-pointer-scan)
 
 (defn- soft!
   "CheckFailed: the failure recorded, the check goes on."
@@ -79,6 +79,8 @@
 (def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
 (def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
 (def ^:dynamic *all-forms* [])
+;; per module (llvm-compl2, REVIEW.md 2.3): the module-wide facts the instruction rules ask, computed at most once
+(def ^:dynamic *mod-facts* (atom {}))
 (def ^:dynamic *cur-fn* nil)   ; the name of the function LLParser is parsing   ; the module's forms (the Verifier's module-wide lookups)
 (def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
 (def ^:dynamic *partial* false)
@@ -1756,14 +1758,22 @@
            (let [[_ ps] (split-inst db) c (second (strip-flags ps))] (or (nil? c) (not (vector? c)) (not (local? (peek c)))))))))
 
 ;; llvm-compl2: module-wide facts some instruction rules read
+(defn- once [k f]
+  (let [m @*mod-facts*]
+    (if (contains? m k) (get m k) (let [v (f)] (swap! *mod-facts* assoc k v) v))))
+
 (defn- require-logical-pointer? []
+  (once :require-logical-pointer #(require-logical-pointer-scan)))
+
+(defn- require-logical-pointer-scan []
   (boolean
    (some (fn [f] (let [[_ id v] (md-ops f)]
                    (and (= (md-str id) "require-logical-pointer") (md-int-op? v) (not (zero? (.signum ^java.math.BigInteger (md-int-val v)))))))
          (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) *all-forms*))))
 
 (defn- amdgcn-triple? []
-  (boolean (some #(when (= (first %) 'llvm/triple) (str/starts-with? (str (second %)) "amdgcn")) *all-forms*)))
+  (once :amdgcn-triple
+        (fn [] (boolean (some (fn [x] (when (= (first x) 'llvm/triple) (str/starts-with? (str (second x)) "amdgcn"))) *all-forms*)))))
 
 (defn- check-intrinsic-call
   "Verifier::visitIntrinsicCall: the rules of particular intrinsics at their calls (each visit ends at its first failure)."
@@ -1877,8 +1887,8 @@
       (let [rt (result-type b) idx (arg 2)
             vr (attr-of (group-items (:attrs fo)) "vscale_range")
             lo (if vr (Long/parseLong (first (re-seq #"[0-9]+" (str (second vr))))) 1)
-            vl (* (long (nth rt 1)) lo)]
-        (when (and (vec-type? rt) (integer? idx)
+            vl (when (vec-type? rt) (* (long (nth rt 1)) lo))]
+        (when (and vl (integer? idx)
                    (not (or (and (neg? (long idx)) (<= (- (long idx)) vl)) (and (>= (long idx) 0) (< (long idx) vl)))))
           (verr :verifier/intrinsic-call "The splice index exceeds the range [-VL, VL-1] where VL is the known minimum number of elements in the vector" :inst)))
       "llvm.experimental.gc.statepoint"
@@ -3680,6 +3690,7 @@
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
             *all-forms* forms
+            *mod-facts* (atom {})
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
             *distinct* (set (keep #(when (and (= (first %) 'llvm/meta) (:distinct (apply hash-map (drop 3 %)))) (second %)) forms))
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")
