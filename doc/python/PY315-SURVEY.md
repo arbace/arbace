@@ -506,3 +506,46 @@ bin/pyi runtime check` every package printed and read again the same, every tabl
 Not done: compile()'s `module=` in `ast.parse` and `symtable` (their 3.15 Lib passes it), unicodedata's and the other P4a
 rests, the `{**x}` 3.15 messages, the lazy-import parts of `pickle`/`copy` of modules and `import *` of placeholders (no
 3.15.2 test reaches them), the 3.15 Lib itself (P7: hierarchical locks, `_find_and_load_lazy_submodule`); P6-P8.
+
+## Design: 252, the move's next parts (P6, P7, P8 behind the switch, 2026-11-10, the Mac VM)
+
+The brief of 252: P6, P7 and P8 in order, behind `REPR_PYTHON_VERSION=3.15`; 3.14 the default, its behaviour and records
+unchanged; when 3.15 becomes the default and which records move with it are the user's (the DECISIONs below), so 252 builds
+only what every answer to them shares, and nothing that changes 3.14.
+
+- **The standard library moves with the switch** (P7's first part, taken first because P6's measure needs it; 1.1: no
+  option keeps 3.14's Lib under the 3.15 language). Under 3.15 pyi runs 3.15.2's `Lib` and lib-test reads 3.15.2's
+  `Lib/test` (`bin/pyi`'s `pytop`, one place for every verb), `sys.version`, `version_info`, `hexversion` and
+  `implementation` are 3.15.2's, `cache_tag` `arbace-315` (pyi's `.pyc` files of the two versions apart),
+  `stdlib_module_names` 3.15.2's (`Python/stdlib_module_names.h`: `_math_integer` and `profiling` in, the `sre_*` out),
+  sysconfig's `VERSION` 3.15. 237-239 probed 3.15.2's test files copied over 3.14.10's `Lib/test`; from 252 a 3.15 test
+  runs in its own tree, as the main host's night will run it.
+- **P6, first pass: what 3.15.2's Lib asks of the C modules** (1.5's list, measured, not guessed): every top-level module
+  of 3.15.2's Lib imported under pyi (the oracle imports all 165), the names Lib imports from the C modules that 3.14's did
+  not (a scan of both trees' `from _x import y` and `_x.y`), then the changed modules' own 3.15.2 tests as samples, each
+  delta ported from 3.15.2's C source behind `py315()`. The rest of 1.5's list (the deltas only the tests see) is
+  measured by the main host's 3.15 night (P7), not guessed here.
+- **P7's tooling**: lib-test's discovery from the tree's own `SPLITTESTDIRS` (`libregrtest/findtests.py`'s set: 3.15.2
+  splits `test_io` and `test_os`, 1.6's id moves; 3.14.10's list unchanged), the check's universe keyed by the tree, and
+  every record's file chosen by version (`ref-cpython315*.edn`, `universe-cpython315.edn`; `-315` for the version-less
+  names: `ref-costs*-315.edn`, `divergences*-315.edn`, `check-lib-test-linux-amd64-315.edn`), 236's naming for
+  repr-python's; none is recorded on the VM (the records rule), so under 3.15 they are absent until the main host's
+  night.
+- **P8**: 239 needed no new IR operation (`IMPORT_NAME`'s flag rides its ARG; the AOT runs `import-name`/`import-from` by
+  `AotExec`, its global and name loads call the eval loop's `loadGlobalAt`/`loadNameGlobal`, which reify). 252 checks that
+  this still holds on 251's and 216's paths (the inline caches of `loadGlobalAt0` return the dict's value, reified after;
+  251's attribute fast path takes instances only, never modules) and proves it on the compiled path by the lazy probes,
+  now over 3.15.2's own Lib.
+
+DECISION: When does 3.15 become pyi's and repr/python's default?
+- (a) After the milestone's tag (`arbace-reaps-4-crops-v1`), on a records night of the main host: it builds 3.15.2 from the pin (its own oracle, amd64, the compile flags recorded in `tools/pydump/`), records the 3.15 references with `REPR_PYTHON_VERSION=3.15` into the `*315*` files 252 names, and one reviewed commit flips the default (`version.go`'s `versionMinor`, `lex/*minor*`, bin/pyi's and bin/repr-python's checks) (recommended): the milestone's records stay 3.14's; the move is one commit with its records; cost: one night of 3.15 runs, a review of the counts by class.
+- (b) When Alpine edge ships python3 3.15 (PYS26 (a)'s first trigger): the oracle an apk again, no build to pin; the date is unknown (edge still 3.14.10-r1).
+- (c) Before the tag: the milestone carries 3.15; night 11's 3.14 records are redone; the tag's date moves.
+
+DECISION: Which records move at the flip, and does 3.14 stay checked after it?
+- (a) All of Python's move: the `*315*` files become the records; the 3.14 files and the `py315()`/`*minor*` branches leave main once a night shows the 3.15 records reproduce (3.14 kept at the tag); `REPR_PYTHON_VERSION=3.14` works until then (recommended): one record set and one night; cost: a task removing the 3.14 branches.
+- (b) Both stay: 3.14 a second configuration with its own records, judged every night: Python's night time doubles (lib-test-all twice), the branches stay.
+
+DECISION: The 3.15 classes: a file of their own or one file?
+- (a) `divergences-315.edn` (and `-aot-315`), started at the flip from a copy of 3.14's and edited by the 3.15 night's results; 252's paths already name it (recommended): the classes move with their records, 3.14's file untouched until (a) of the previous DECISION retires it.
+- (b) One `divergences.edn`, each class marked `:python "3.14"`/`"3.15"` where it applies to one only: one place to edit; cost: the judge learns the key, and 3.14's file changes now.
