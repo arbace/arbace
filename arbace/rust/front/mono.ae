@@ -404,10 +404,17 @@
                      (push! m "F") (when (= :unsafe safety) (push! m "U"))
                      (doseq [x inputs] (print-type! m x)) (push! m "E") (print-type! m output))
             ;; RF14: a local closure (its def by its start, the line and column its type's text begins with) in a non-generic function
+            ;; (RF17: a generic function's closure at its instance's arguments, `[:closure TEXT SIG ARGS]` (closed-closures):
+            ;; default_print_def_path's closure arm, the parent's path at the parent's arguments)
             :closure (let [d (closure-def (second t))]
-                       (when (or (nil? d) (generic-def? (loop [x (:parent (c/def-of d))] (if (= "Closure" (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x))))
+                       (when (or (nil? d) (and (nil? (nth t 3 nil))
+                                               (generic-def? (loop [x (:parent (c/def-of d))] (if (= "Closure" (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x)))))
                          (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
-                       (print-def-path! m d []))
+                       ;; (RF17: not through the paths' cache: a closure type's key is its definition at its whole closure
+                       ;; arguments (the synthetic kind, signature and upvars after its parent's), never the key its own
+                       ;; closures' paths print it under, at their parent arguments, which generics_of takes from the typeck
+                       ;; root: `FlatMap<.., Map<.., {closure#0}>, {closure}>` prints the outer closure in full, no backref)
+                       (default-print-def-path! m d (or (nth t 3 nil) [])))
             (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
           (swap! (:types m) assoc t start))))))
 
@@ -880,7 +887,7 @@
     (if-let [l (get @*layouts* t)] l (let [l (layout-of* t)] (swap! *layouts* assoc t l) l))))
 
 (declare solver-def)
-(declare local-adt-by-path)
+(declare local-adt-by-path enclosing-fn)
 (defn variant-discriminant
   "RF15: within build-program's bindings, the explicit discriminant of the local enum's variant at PATH (`Color::Green`, its
   anonymous constant `Color::Green::{constant#0}`), as discriminant-values reads it; else nil"
@@ -1562,7 +1569,7 @@
       (and fk (vector? self) (= :closure (first self)))
       (let [ck (or (when *closure-kinds* (get @*closure-kinds* (second self))) (throw (ex-info "mono: a closure's kind (its body not built)" {:fact :callee})))
             cd (or (closure-def (second self)) (throw (ex-info "mono: a closure's definition" {:fact :callee})))]
-        (cond (or (= ck fk) (and (= ck :fn) (= fk :fn-mut))) [cd []]
+        (cond (or (= ck fk) (and (= ck :fn) (= fk :fn-mut))) [cd (or (nth self 3 nil) [])]   ; (RF17: a generic function's closure at its arguments)
               (= fk :fn-once) [d args "closure-once-shim"]
               :else (throw (ex-info "mono: a closure of a lesser kind" {:fact :callee}))))
       (and fk (vector? self) (#{:fndef :fnptr} (first self))) [d args "fnptr-shim"]
@@ -1629,7 +1636,12 @@
       fndef [:fndef nil (mapv arg (nth st 2))]
       fnptr [:fnptr {}]
       ;; RF14: a closure by its type's text (a local one's `{closure@FILE:L:C: L:C}`, typeck's)
-      closure [:closure (second f) {}]
+      ;; (RF17: a generic function's closure with its parent's arguments, the record's closure arguments less the three
+      ;; synthetic ones (kind, signature, upvars): closed-closures' form)
+      closure (let [d (closure-def (second f)) cargs (nth st 2 nil)]
+                (if (and d (vector? cargs) (>= (count cargs) 3) (generic-def? (enclosing-fn d)))
+                  [:closure (second f) {} (mapv arg (drop-last 3 cargs))]
+                  [:closure (second f) {}]))
       ;; RF15: a record's trait object (`(dyn)`: its text alone) whose principal is a local trait without parameters and no
       ;; auto trait (`dyn Animal`), as a std call's argument
       dyn (let [[_ p] (re-matches #"dyn ([A-Za-z_][A-Za-z0-9_:]*)" (str (second f)))
@@ -1807,7 +1819,7 @@
                                  ;; its own (its arguments C alone)
                                  [:fn (instance-symbol (vtable-instance c tr targs m))]))))}))
 
-(defn- enclosing-fn [d] (loop [x d] (if (= "Closure" (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x)))
+(defn enclosing-fn [d] (loop [x d] (if (= "Closure" (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x)))
 
 (defn- local-instance?
   "RF14: a local function's or closure's instance the collector builds from our bodies: no type argument, a closure's
@@ -1864,8 +1876,26 @@
                                               :else (instantiate* v args norm))]))
     :else x))
 
+(defn- closed-closures
+  "RF17: a type at an instance's ARGS whose closure types of a generic function (`[:closure TEXT SIG]`, typeck's, without the
+  parent's arguments) are that function's closures at ARGS: `[:closure TEXT SIG' ARGS]`, SIG' substituted (a closure type's
+  generic arguments are its parent's, rustc's ClosureArgs' parent_args; the instance being the closure's function's or one of
+  its closures', whose arguments are the function's), as v0 prints and Instance::resolve resolves them"
+  [t args]
+  (cond
+    (and (vector? t) (= :closure (first t)) (= 3 (count t)))
+    (let [d (closure-def (second t))]
+      (if (and d (generic-def? (enclosing-fn d)))
+        [:closure (second t) (erase-regions (c/subst* (nth t 2) args)) (vec args)]
+        t))
+    (and (vector? t) (keyword? (first t))) (let [y (into [(first t)] (map #(cond (vector? %) (closed-closures % args) (map? %) (into {} (for [[mk v] %] [mk (closed-closures v args)])) :else %) (rest t)))]
+                                             (if (= y t) t y))
+    (vector? t) (mapv #(closed-closures % args) t)
+    :else t))
+
 (defn- instantiate-body [b args]
-  (instantiate* b args (fn [t] (let [t (erase-regions (c/subst t args))] (erase-regions (try (tc/normalize-deep t) (catch Throwable _ t)))))))
+  (instantiate* b args (fn [t] (let [t (erase-regions (c/subst t args))]
+                                 (closed-closures (erase-regions (try (tc/normalize-deep t) (catch Throwable _ t))) args)))))
 
 (defn instance-name
   "RF15: a generic instance's body name: its definition's MIR name and its type arguments"
@@ -2067,3 +2097,46 @@
     (tc/with-solver (solver-def)
       (fn [] (when (and (= :adt (first t)) (number? (second t)) (= [t] (vec (drop-glues t))))
                (local-drop-impl t))))))
+
+(defn resolve-const
+  "RF17: a local trait's associated constant D at ARGS (`<i32 as Zero>::ZERO`) resolved to the impl's constant, as
+  resolve_associated_item resolves it for CTFE: [DEF ARGS], else nil (a trait's default value, or what the resolution leaves)"
+  [n d args]
+  (try (binding [*local* (local-crate n)]
+        (tc/with-solver (solver-def)
+         (fn [] (when (trait-method? d)
+                  (let [[d' a' shim] (resolve-instance d args)] (when (and (not shim) (not= d' d)) [d' a']))))))
+       (catch Throwable _ nil)))
+
+(defn ctor-shim-body
+  "RF17: a std ADT's tuple constructor used as a function value and instantiated in the program's crate (the record names it
+  `mir/external`: rustc builds its MIR as a shim, shim.rs' build_ctor, which the helper does not dump): its body built as
+  build_ctor builds it, `_0 = ADT::V(move _1, ..); return`, from the function constant's type (fndef PATH ARG-FORMS); PATH is
+  def_path_str's (`std::ops::ControlFlow::Break`). The body map codegen takes (no :symbol), or nil when PATH names no std
+  ADT's tuple constructor"
+  [n ^String path arg-forms]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn []
+        (let [args (erase-regions (mapv (fn [f] (if (and (seq? f) (= 'lt (first f))) [:re-erased] (form->ty f))) arg-forms))
+              std-def (fn [p] (#'c/std-path-def (vec (str/split p #"::"))))
+              whole (std-def path)
+              [adt vid] (if (and (string? whole) (get (:adts c/*si*) whole))
+                          [whole whole]
+                          (let [ad (std-def (c/path-parent path))]
+                            (when (and (string? ad) (tc/enum? ad))
+                              [ad (some #(let [p (if (map? %) (:path %) %)] (when (= (c/path-name path) (c/path-name p)) p)) (tc/variants-any ad))])))]
+          (when (and adt vid (= "fn" (tc/variant-ctor-kind vid)))
+            (let [vidx (if (tc/enum? adt) (tc/variant-index vid) 0)
+                  fields (tc/all-fields-of-variant vid)
+                  ftys (mapv #(erase-regions (c/subst (second %) args)) fields)
+                  ret [:adt adt args]
+                  tf (fn [t] (build/ty-form t))
+                  kind (list 'adt (binding [c/*in-value* true] (c/print-def-path vid args)) "fn" (mapv (comp str first) fields)
+                             (binding [c/*in-value* false] (c/print-def-path adt [])) vidx (vec (for [a args] (if (c/region? a) '(lt) (tf a)))))]
+              {:def path :kind :fn :args (count ftys) :ret (tf ret)
+               :locals (vec (cons {:mut true :scope 0 :ty (tf ret)} (for [t ftys] {:mut false :scope 0 :ty (tf t)})))
+               :scopes [[nil nil nil nil false]] :debug []
+               :blocks [{:cleanup false :stmts [(list 'assign '(place 0) (list 'aggregate kind (vec (for [i (range (count ftys))] (list 'move (list 'place (inc i)))))))]
+                         :after-dbg [] :term '(return)}]
+               :allocs "" :alloc-data []})))))))

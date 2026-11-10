@@ -720,10 +720,31 @@
                                    ;; internal, writable when the static is mutable); else the module's other unit defines it
                                    (when-let [bs (:bytes a)]
                                      (let [n (quot (count bs) 2)
-                                           v (if (every? #{\0} bs) 'zeroinitializer
-                                                 (list 'c-string (apply str (map #(char (Integer/parseInt (subs bs (* 2 %) (+ 2 (* 2 %))) 16)) (range n)))))]
-                                       (vswap! gl assoc-in [:statics sy]
-                                               (list 'llvm/global sy (list 'array n 'i8) v :linkage :internal :constant (not (:mutable a)) :align (:align a)))))
+                                           byte-str (fn [from to] (apply str (map #(char (Integer/parseInt (subs bs (* 2 %) (+ 2 (* 2 %))) 16)) (range from to))))
+                                           run (fn [from to] (let [ty (list 'array (- to from) 'i8)]
+                                                               [ty (if (every? #{\0} (subs bs (* 2 from) (* 2 to))) 'zeroinitializer (list 'c-string (byte-str from to)))]))
+                                           relocs (sort-by first (:relocs a))]
+                                       (when-not (get-in @gl [:statics sy])
+                                         ;; (a placeholder first: a static whose pointers lead back to it)
+                                         (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array n 'i8) 'zeroinitializer :linkage :internal :align (:align a)))
+                                         (if (empty? relocs)
+                                           (vswap! gl assoc-in [:statics sy]
+                                                   (list 'llvm/global sy (list 'array n 'i8) (second (run 0 n)) :linkage :internal :constant (not (:mutable a)) :align (:align a)))
+                                           ;; RF17: a static holding pointers (`static GREETING: &str = "hi"`): codegen_static's
+                                           ;; const_alloc_to_llvm, the bytes between the relocations and each pointer the
+                                           ;; allocation it points at, a packed struct
+                                           (let [segs (loop [pos 0 rs relocs out []]
+                                                        (cond
+                                                          (and (empty? rs) (= pos n)) out
+                                                          (empty? rs) (conj out (run pos n))
+                                                          :else (let [[off tid] (first rs)]
+                                                                  (recur (+ off 8) (rest rs)
+                                                                         (cond-> out (> off pos) (conj (run pos off)) true (conj [:ptr tid]))))))
+                                                 tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
+                                                 vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
+                                             (vswap! gl assoc-in [:statics sy]
+                                                     (list 'llvm/global sy (apply list 'packed tys) (apply list 'packed vals)
+                                                           :linkage :internal :constant (not (:mutable a)) :align (:align a))))))))
                                    ;; RF13: another crate's static (std's WHITESPACE_MAP) declared external, as rustc's codegen unit
                                    ;; declares it
                                    (when-not (or (:bytes a) (get-in @gl [:statics sy]))
@@ -1104,6 +1125,9 @@
                     (let [vr (:variants dly)]
                       (case (:kind vr)
                         :single nil
+                        ;; RF17: an uninhabited zero-sized type (`ControlFlow<NeverShortCircuitResidual, Infallible>`, Variants::Empty):
+                        ;; its aggregate is a zero-sized operand, nothing stored (codegen_rvalue_operand's OperandRef of a ZST)
+                        :empty nil
                         :multiple
                         (let [tag (:tag vr) tf (:tag-field vr)]
                           (when (:uninhabited (nth (:vs vr) v)) (unsupported "uninhabited variant"))
@@ -1166,6 +1190,8 @@
                      (let [vr (:variants ly)]
                        (case (:kind vr)
                          :single {:ty (:imm dsc) :v (as-num (sext-const (:bits dsc) (if-let [d (:discrs ly)] (nth d (:index vr)) 0)))}
+                         ;; RF17: an uninhabited type (Variants::Empty): codegen_get_discr's poison (no value can be there)
+                         :empty {:ty (:imm dsc) :v 'poison}
                          :multiple
                          (let [tag (:tag vr) tf (:tag-field vr)
                                tv (if (:ptr pl-or-val)

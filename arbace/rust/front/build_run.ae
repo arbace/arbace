@@ -183,6 +183,25 @@
       (throw (ex-info (str "a layout's variants " (pr-str vs)) {})))
     {:bytes (vec (map int buf)) :align (:align l) :relocs (vec (sort-by first @relocs))}))
 
+(defn- alloc-bytes+relocs
+  "RF17: our allocation ID's bytes and its pointers (write_allocation's `╾allocN<imm>╼`, a pointer's 8 bytes): {:bytes [B...]
+  :relocs [[OFFSET N]]}, else nil"
+  [ours id]
+  (when-let [t (get (:alloc-texts ours) id)]
+    (let [toks (for [l (rest (str/split-lines (str/trim t)))
+                     :when (str/includes? l "│")
+                     :let [l (str/trim l) l (if (str/starts-with? l "0x") (subs l (+ 2 (str/index-of l "│"))) l)
+                           hex (subs l 0 (str/last-index-of l "│"))]
+                     b (remove str/blank? (str/split (str/trim hex) #"\s+"))]
+                 b)]
+      (loop [ts toks bytes [] relocs []]
+        (if-let [b (first ts)]
+          (cond (re-matches #"[0-9a-f]{2}" b) (recur (rest ts) (conj bytes (Integer/parseInt b 16)) relocs)
+                (re-matches #"╾─*alloc(\d+)<imm>─*╼" b)
+                (recur (rest ts) (into bytes (repeat 8 0)) (conj relocs [(count bytes) (parse-long (second (re-matches #"╾─*alloc(\d+)<imm>─*╼" b)))]))
+                :else (throw (ex-info (str "allocation " id ": " b) {})))
+          {:bytes bytes :relocs relocs})))))
+
 (defn eval-promoted
   "RF11 (RF10's slice 5's first part): a promoted constant's body evaluated as rustc's CTFE evaluates it into its allocation, for
   the promoted bodies of straight-line assignments of scalar constants (std's integer constants by std-const-value), copies of
@@ -192,6 +211,10 @@
   pointer to its bytes' allocation, RAW-ALLOC's [ALLOC LEN]: the fat pointer's relocation)"
   ([pb] (eval-promoted pb nil nil nil nil nil nil))
   ([pb raw-alloc nest-alloc unit-variant anon-discr vt-alloc layout-of]
+   (eval-promoted pb raw-alloc nest-alloc unit-variant anon-discr vt-alloc layout-of nil false))
+  ;; RF17: LOCAL-CONST, a local constant's value by its text ((scalar BITS SIZE), else nil); VALUE?: PB is a constant's own body
+  ;; (construct_const's: _0 holds the value, not a borrow), its result _0's value
+  ([pb raw-alloc nest-alloc unit-variant anon-discr vt-alloc layout-of local-const value?]
   (let [env (atom {}) result (atom nil)
         no (fn [what x] (throw (ex-info (str "promoted: " what (when (System/getenv "RF_PROMOTED_TRACE") (str " " (pr-str x)))) {:x x})))
         loc-of (fn [p] (if (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p) (no "a projected place" p)))
@@ -204,7 +227,7 @@
                                                     (when-let [d (anon-discr vp)]
                                                       (when-let [[k bits] (scalar-kind tyf)]
                                                         (list 'scalar (mod (bigint d) (reduce * 1N (repeat bits 2N))) (quot bits 8))))))
-                                v (if (and (seq? v) (= 'unevaluated (first v))) (or (std-const-value text) (discr-v) (no "an unevaluated constant" o)) v)]
+                                v (if (and (seq? v) (= 'unevaluated (first v))) (or (std-const-value text) (discr-v) (when local-const (local-const text tyf v)) (no "an unevaluated constant" o)) v)]
                             (cond
                               (and (seq? v) (= 'scalar (first v)))
                               (let [[_ bits size] v] {:bytes (le-bytes bits size) :align (scalar-align size) :ty tyf})
@@ -287,7 +310,9 @@
       (let [blk (nth (:blocks pb) bi)]
         (doseq [st (:stmts blk)]
           (case (first st)
-            (storage-live storage-dead nop) nil
+            ;; (RF17: a constant's built body keeps its fake reads and user type ascriptions, which CTFE ignores)
+            (storage-live storage-dead nop fake-read place-mention) nil
+            raw (when-not (str/starts-with? (str (second st)) "AscribeUserType") (no "a statement" st))
             assign (let [[_ p rv] st l (loc-of p)]
                      (case (first rv)
                        use (swap! env assoc l (operand (second rv)))
@@ -338,8 +363,8 @@
             (no "a statement" st)))
         (let [t (:term blk)]
           (case (first t)
-            return (or @result (no "no borrow in _0" pb))
-            goto (recur (second t) (conj seen bi))
+            return (if value? (or (get @env 0) (no "no value in _0" pb)) (or @result (no "no borrow in _0" pb)))
+            (goto false-edge false-unwind) (recur (second t) (conj seen bi))
             ;; RF16: an assertion (a checked operator's overflow flag): its target when the condition is the expected value,
             ;; else the CTFE's error (the promoted fails to evaluate)
             assert (let [[_ c expected _ target] t v (operand c)]
@@ -398,9 +423,16 @@
                              a (str "allocS" id)]
                          (swap! static-data conj [a (merge {:kind :static :symbol (:symbol st) :def (:def st)}
                                                            ;; its initializer from our own allocation (the static's evaluated bytes)
-                                                           (when-let [bs (alloc-bytes ours id)]
+                                                           ;; (RF17: with its pointers, each to its own allocation's bytes: `&str`'s)
+                                                           (when-let [{bs :bytes rs :relocs} (alloc-bytes+relocs ours id)]
                                                              {:bytes (apply str (map #(format "%02x" %) bs))
                                                               :align (parse-long (or (second (re-find #"align: (\d+)\)" (get (:alloc-texts ours) id))) "1"))
+                                                              :relocs (vec (for [[off tid] rs]
+                                                                             (let [tb (or (alloc-bytes ours tid) (throw (ex-info (str "no bytes for allocation " tid) {})))
+                                                                                   ta (str "allocB" tid)]
+                                                                               (swap! static-data conj [ta {:kind :memory :align 1 :mutable false :bytes (apply str (map #(format "%02x" %) tb))
+                                                                                                            :init (apply str (repeat (count tb) "1")) :relocs []}])
+                                                                               [off ta])))
                                                               :mutable true}))])   ; the record does not say `mut`; writable either way at -O0
                          (list 'ptr (symbol a) 0 8))
                        (if (and (seq? x) (#{'raw-str 'raw-bytes} (first x)))
@@ -428,7 +460,7 @@
                                                                             :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
                                                 a))
                                  {:keys [bytes align relocs]} (try (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
-                                                                                  (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts))
+                                                                                  (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts) (:local-const facts) false)
                                                                    (catch Throwable e (when-let [f (:const! facts)] (f false))
                                                                      (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
                                                                      (throw e)))
@@ -506,7 +538,7 @@
         fix-ty (fn [x] (if (and (seq? x) (= 'ty (first x)) (:tys facts)) (get (:tys facts) (second x) x) x))
         ;; RF11: std's integer constants (std-const-value); another unevaluated named constant is left (codegen refuses it)
         fix-uneval (fn [x] (if (and (seq? x) (= 'const (first x)) (seq? (nth x 3 nil)) (= 'unevaluated (first (nth x 3))) (nil? (nth (nth x 3) 3 nil)))
-                             (if-let [v (std-const-value (second x))]
+                             (if-let [v (or (std-const-value (second x)) (when-let [lc (:local-const facts)] (lc (second x) (nth x 2) (nth x 3))))]
                                (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [v] (drop 4 x))))
                                (do (when-let [f (:const! facts)] (f false)) x))
                              x))
@@ -851,6 +883,37 @@
                                                    (assoc :native-core-syms native-syms)))
                     _ (reset! judged (vec (for [[rn rforms] judge] [rn (mc/judge n bodies facts (mc/record-entries rforms) rforms)])))
                     root-file (or *loc-file* build/*root-file*)
+                    ;; RF17: the program's own constants (a `const` item's body, construct_const's, by its text `const NAME`), each
+                    ;; evaluated once as CTFE evaluates it (eval-promoted over its built body, _0's value): a scalar's (scalar BITS
+                    ;; SIZE), else nil (left unevaluated: codegen refuses it)
+                    const-bodies (into {} (for [[nm b _] bodies :when (and b (= :const (:kind b)))] [(str "const " nm) b]))
+                    const-by-def (into {} (for [[_ b _] bodies :when (and b (= :const (:kind b)) (number? (:id (:def b))))] [(:id (:def b)) b]))
+                    const-vals (atom {})
+                    local-const (fn local-const [text tyf v]
+                                  (if-let [[_ vp] (and (not (contains? const-bodies text)) (re-matches #"const (.+)::\{constant#\d+\}" text))]
+                                    ;; a variant's explicit discriminant (`Color::Green as u8`: THIR's cast of a unit variant, its
+                                    ;; anonymous constant), as eval-promoted's
+                                    (when-let [d (try (mono/variant-discriminant n vp) (catch Throwable _ nil))]
+                                      (when-let [[_ bits] (scalar-kind tyf)]
+                                        (list 'scalar (mod (bigint d) (reduce * 1N (repeat bits 2N))) (quot bits 8))))
+                                  (when-let [b (or (get const-bodies text)
+                                                   ;; a local trait's associated constant (`<i32 as Zero>::ZERO`): the impl's
+                                                   ;; constant, by resolve_associated_item (the constant's definition and arguments
+                                                   ;; kept by the builder)
+                                                   (when-let [[d args] (:nc (meta v))]
+                                                     (when (number? d)
+                                                       (when-let [[d' args'] (mono/resolve-const n d args)]
+                                                         (when (empty? (remove c/region? args')) (get const-by-def d'))))))]
+                                    (if (contains? @const-vals text)
+                                      (get @const-vals text)
+                                      (let [v (try (let [{:keys [bytes relocs ty]} (eval-promoted b nil nil nil nil nil nil local-const true)]
+                                                     (when (and (empty? relocs) (scalar-kind (or ty (:ret b))) (seq bytes))
+                                                       (list 'scalar (bytes->int bytes) (count bytes))))
+                                                   (catch Throwable e
+                                                     (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
+                                                     nil))]
+                                        (swap! const-vals assoc text v)
+                                        v)))))
                     ;; RF11: with BUILD_PASS (the batch's SimplifyCfg-pre-optimizations), each body after the ported passes to
                     ;; runtime MIR (arbace.rust.front.passes: PromoteTemps, ElaborateDrops, ElaborateBoxDerefs, ...), as codegen
                     ;; reads rustc's; a pass's error is the body's
@@ -911,6 +974,9 @@
                         :anon-discr (fn [vp] (try (mono/variant-discriminant n vp) (catch Throwable _ nil)))
                         ;; RF16: a type's layout, mono's (a promoted `size_of::<T>()`)
                         :layout-of (fn [tyf] (mono/type-layout-form n tyf))
+                        ;; RF17: a local constant (`const LIMIT: usize = 4`) evaluated as codegen's eval_mir_constant evaluates it:
+                        ;; its built body (construct_const's) interpreted by eval-promoted, a scalar's bytes its (scalar BITS SIZE)
+                        :local-const local-const
                         :unit-variant (fn [tyf vidx fields]
                                         (let [l (try (mono/type-layout-form n tyf)
                                                      ;; a layout mono refuses: the record's, as the module's table takes it
@@ -948,6 +1014,38 @@
                                         (catch Throwable e
                                           (swap! lines conj (str "record core's bodies (a native one failed at run time: " (.getMessage e) ")"))
                                           nil)))
+                    ;; RF17: a std ADT's tuple constructor used as a function value and instantiated in the program's crate (the
+                    ;; record's `mir/external`: rustc's build_ctor shim, whose MIR the helper does not dump), built natively
+                    ;; (mono/ctor-shim-body) from the function constant naming it in the record's bodies
+                    crate-tok (let [cn (str/replace (str n) "-" "_")]
+                                (some (fn [b] (when (local? b) (re-find (re-pattern (str "Cs[0-9A-Za-z]+_" (count cn) cn)) (str (:symbol b))))) rec-bodies))
+                    fndef-of (let [acc (atom {})]
+                               (doseq [b rec-bodies]
+                                 (walk (fn [x] (when (and (seq? x) (= 'const (first x)) (some #{:fn-symbol} x))
+                                                 (let [sy (second (drop-while #(not= :fn-symbol %) x)) tyf (nth x 2 nil) st (when (seq? tyf) (nth tyf 2 nil))]
+                                                   (when (and (seq? st) (= 'fndef (first st))) (swap! acc assoc sy [(second st) (nth st 2)]))))
+                                         x)
+                                       (dissoc b :alloc-data)))
+                               @acc)
+                    ctor-forms (doall
+                                (for [f forms :when (= 'mir/external (first f))
+                                      :let [{:keys [symbol def]} (second f)]
+                                      :when (and crate-tok (str/ends-with? (str symbol) crate-tok) (get fndef-of symbol))
+                                      :let [[fp afs] (get fndef-of symbol)
+                                            ;; the constructor's path from the item's def_path_str less its generic arguments
+                                            ;; (`std::result::Result::<(), ..>::Err`), the constant's own a re-export's
+                                            ;; (`std::prelude::v1::Err`)
+                                            p (loop [cs (seq (str def)) depth 0 out (StringBuilder.)]
+                                                (if-let [ch (first cs)]
+                                                  (cond (and (zero? depth) (= [\: \: \<] (take 3 cs))) (recur (drop 3 cs) 1 out)
+                                                        (pos? depth) (recur (rest cs) (case ch \< (inc depth) \> (dec depth) depth) out)
+                                                        :else (recur (rest cs) depth (.append out ch)))
+                                                  (str out)))
+                                            b (try (or (mono/ctor-shim-body n p afs) (mono/ctor-shim-body n fp afs)) (catch Throwable e (swap! lines conj (str "record " def " (the constructor's shim: " (.getMessage e) ")")) nil))]
+                                      :when b]
+                                  (do (swap! lines conj (str "native " def " (a constructor's shim, built natively)"))
+                                      (fact! :ctor-shims true)
+                                      (list 'mir/body (assoc b :symbol symbol :name def :phase "arbace-native-ctor" :instance (str "Shim(Ctor(" def "))"))))))
                     native-taken (if native-forms native-syms #{})
                     _ (doseq [[h _] core-items :when native-forms] (swap! lines conj (str "native " (:name h))) (fact! :core-bodies true))
                     ;; the module from the collector's items: our bodies, then core's bodies (the record's: RF12), the statics,
@@ -962,6 +1060,7 @@
                             (list 'mir/body rec)))
                       ;; RF12-P6: core's bodies built natively (each instance of the closure once)
                       (or native-forms [])
+                      ctor-forms
                       (for [[nm m] (:statics facts) :when (map? m)] (list 'mir/static m))
                       [(list 'mir/layouts [])]
                       [(list 'mir/langsyms (into {} (for [ln (distinct (concat (keys (:langsyms facts)) (keys rec-langs)))]
