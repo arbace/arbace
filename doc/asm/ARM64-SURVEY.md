@@ -893,3 +893,111 @@ Each with options, the recommended named; none taken.
 - **ARS37 The next slice.** (a) the views not built (llvm-readobj -S/--symbols, llvm-readelf -s, llvm-objdump -t: 127 lines),
   `.reloc`, the PAuth relocations, literal pools; (b) AR3's decoder first (the 1,947 text lines and the objects read back).
   *Recommended: (b)*, the plan's order, then (a) by count.
+
+## As built: AR5 (2026-11-10; branch `272-asm-arm64-ar5`, from `c193e8176`; queue task 272, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max: a real arm64 CPU, Linux 6.18), stage 0 and TamaGo's
+go, one run at a time, under 2.2 GiB (the conversions by repr/go's native reader; every check under 1 GiB); no LLVM or GNU tool.
+a64i's semantics are written from the Arm ARM's pseudocode (DDI 0487: AddWithCarry, DecodeBitMasks, the bitfield moves,
+ConditionHolds, the exclusives' monitor, the LSE operations); no code copied.
+
+- **The frame shared** (SH5, AXS51 (a)): `go/arbace/emu` gains arm64's part (`emu/arm64.ae`): Linux's arm64 layout with ASLR
+  off as this VM's `/proc/PID/maps` and auxv show it (the stack's top 1<<48, mmap's area 128 MiB below, vvar and vdso 6 pages),
+  the initial stack Linux builds for an arm64 process (the auxv in Linux 6.18's order, platform "aarch64"; no AT_SYSINFO_EHDR),
+  and **Linux's system calls by name**: one table of names with arm64's generic numbers and x86-64's, the kernel layer and
+  crt's `Sys` serving both by name (`SyscallByName`); `LoadELF` takes AArch64. x86i's files unchanged (it builds as before, its
+  checks are the main host's); the tracer `emu.Tracee` is shared (its registers by PTRACE_GETREGSET NT_PRSTATUS on arm64).
+- **`go/arbace/a64i`** (written as Go, converted by repr/go's native reader for linux/arm64, `lockstep_other` for every other
+  host, AXS68 (a)'s way): `Inst`, one record after the aliases; the decoder (`Decode`: the Arm ARM's encoding classes:
+  data processing immediate and register, branches, exceptions and system, loads and stores with exclusives, ordered and LSE,
+  the SIMD&FP registers' loads and stores; SIMD and FP arithmetic `:unimplemented`); the forms' front end (`FromForm`: an
+  instruction's form as arbace.repr.asm reads it, its symbolic operands already values, lowered by the Arm ARM's alias rules:
+  mov's wide, inverted and bitmask choice, cmp/cmn/tst/neg/ngc/mvn, the shifts and extends, ubfx/sbfiz/bfi/bfxil, cset/cinc/
+  cneg, mul/smull/umnegl, stadd and the st forms, ldr's literal and register offsets); one execution for both (`exec`); the
+  thread's state (X0-X30, SP, PC, NZCV, TPIDR_EL0, FPCR, FPSR, the SIMD&FP registers' 128 bits for their loads and stores, the
+  exclusive monitor: the address and size a load-exclusive marks, cleared by clrex, a store-exclusive and a store into it);
+  SVC by name, faults as Linux's signals (SIGSEGV, SIGBUS for SP's and the exclusives' alignment, SIGILL, SIGTRAP), the default
+  dispositions only. About 12-17 million instructions a second.
+- **eval: the forms laid out, never encoded** (§4.2): `arbace.asm.arm64.eval` runs the shared object assembler with arm64's
+  part but each instruction a placeholder of four zero bytes and no fixup, its form kept with its place (arbace.asm.obj's new
+  hook `:after-layout`); the linker (`arbace.asm.link`, its new option `:layout`) places the sections and symbols; each form's
+  symbolic operands become their values at that layout (`(addr V)`; `:lo12:`, `:abs_gN:`, `:tprel_*:` around it); a GOT
+  reference (`:got:`, `:gottprel:` and their `_lo12`) carries its relocation on the placeholder, its kind by the mnemonic, so the
+  linker makes the same GOT as AOT's and the form names the entry. The eval executable is AOT's layout byte for byte but its
+  instruction words zero; `a64i run --forms NAME.forms NAME.eval` executes the forms by address (a fetch with no form is the
+  class `:code-as-data`).
+- **AOT's runs**: the linked bytes decoded by a64i (`a64i run NAME`), beside AR4's runs by the CPU; and `a64i forms-check`: every
+  instruction's form lowered at its address equal to the word AOT linked there decoded (the encoder, the linker's relocation
+  and the decoder held to the forms; the static half of "eval and AOT meet").
+- **The lockstep** (AXS56-AXS58's design, arm64's side; `a64i trace --mode sys|step|bisect`): the program run natively under
+  ptrace (ASLR off, stdout and stderr to /dev/null) and on a64i from the native's own initial state (its [stack] mapping's
+  bytes, AT_SYSINFO_EHDR made AT_IGNORE in both, its registers), compared at each system call in the sys mode (X0-X30 but x7,
+  ptrace's entry/exit mark, SP, PC, NZCV, the bytes write(2) writes, the writable memory) or after every instruction in the
+  step mode (PTRACE_SINGLESTEP: the registers, NZCV, the bytes the instruction stored, TPIDR_EL0 by NT_ARM_TLS after an MSR or
+  MRS); the world list's answers (read's bytes, clock_gettime's, getrandom's, the ids, openat's and close's results) the
+  native's, copied into a64i. Single-stepping's artifacts, each a rule: the first step after a stepped SVC reports before its
+  instruction (stepped again, once); brk's SIGTRAP comes as the step's own trap with the PC unmoved; an exclusive load ends the
+  step mode until the next system call (a single-stepped store-exclusive always fails: the step's exception clears the monitor),
+  the region compared there. The bisection: the sys mode, then at a difference the sys mode again to the last system call both
+  agreed on and the step mode from there, the first differing instruction with its family. The loader's judge: a64i's own
+  initial stack (emu.StackA64) against Linux's: argc, argv and envp, the auxv's types and values (AT_HWCAP*, AT_MINSIGSTKSZ,
+  AT_RSEQ_* masked: the CPU's and the kernel's), the strings above AT_RANDOM byte for byte.
+- **The programs**: `test/asm/a64i/` (57, `lib/out.s` printing x0 in hexadecimal and NZCV), an instruction family each with
+  its stated output: add/sub immediate, shifted and extended, adc/sbc, cmp/cmn, neg, logical immediate (element sizes 2-64) and
+  shifted, tst/mvn, the wide moves and mov's aliases, mov between registers and SP, ubfm, sbfm, bfm, extr/ror, the variable
+  shifts, adr/adrp, b/bl, b.cond under each NZCV, cbz/cbnz, tbz/tbnz, br/blr/ret, csel's four, cset's aliases, ccmp/ccmn, rbit/rev,
+  clz/cls, udiv/sdiv (by zero, the overflow), madd/msub, the long and high multiplies, ldr/str by unsigned, unscaled, pre- and
+  post-indexed and register offsets, the sign-extending loads, literals, pairs, ldxr/stxr, the acquire/release and pair
+  exclusives, ldar/stlr/ldapr, LSE's ldadd, ldclr/ldeor/ldset, the min/max, swp, cas/casp, the system registers with hints and
+  barriers, Linux's openat/read/write/close, brk/mmap/munmap/mprotect, clock_gettime/getpid, five faults (null load, udf, brk,
+  SP misaligned, a store into text), exit's status and the SIMD&FP registers' loads and stores; with `test/asm/run-arm64/`'s 15
+  runnable programs, 72. Their stated stdout was taken from this CPU's run once (`# stdout:` lines), then a64i, eval and AOT, and
+  the lockstep hold to it; div's 60 lines also agree with a model written apart (probed).
+
+| check (bin/a64i check = bin/repr-asm --arch arm64 a64i-check, 34 s, 0.75 GiB) | result |
+|---|---|
+| eval/ (the forms laid out and lowered, by the stated verdict) | **72 of 72** |
+| aot/ (the linked bytes decoded, by the stated verdict) | **72 of 72** |
+| forms/ (each form equal to its decoded word) | 72 of 72 programs, 24,340 instructions |
+| cpu/ (a64i's AOT run equal to this CPU's: status, stdout, stderr) | **72 of 72** |
+| sys/ (the lockstep at each system call) | **72 of 72** |
+| step/ (after every instruction; 625,339 instructions stepped at about 32,000 a second) | **72 of 72** |
+| loader/ | 72 of 72 |
+| controls (`test/asm/controls-a64i.txt`) | **18** fail as they must: verdict ×2, aot ×2, cpu, forms ×2, inject ×4 (alu:c, logic:z, ldst:x, lse:x), sys ×2 (alu:c, excl:x), step ×3 (alu:v, lse:x, cond:x: caught at an instruction of the family), bisect ×2 (mul:x, bitfield:x) |
+
+On a host that is not arm64 the check runs eval, AOT, the forms and the controls that need no CPU; the CPU's, the lockstep's and
+the loader's rows recorded here stand (the judge does not ask them there). **The cells**: `[:asm-arm64 :eval]` the eval, cpu, sys
+and step rows (the loader and the forms beside): 288 pass, none deferred; `[:asm-arm64 :aot]` gains the aot rows (2,161 pass / 592
+deferred). `bin/reap --record`: 49 of 52 cells checked, 0 problems. **crops-score**: arm64 assembly 69.4 / 95.8 / 80.0 → **94.6 /
+100.0 / 100.0** (eval's independence 1: a64i and the stated verdicts, the CPU as the second judge), `--judge --strict` 0
+problems. **The gate**: the essential step `a64i-essential` (`bin/a64i check`, :mem-gib 1, about 34 s here with the lockstep; on
+the main host the eval and AOT runs alone), its input group `:a64i`, its controls; `gate.crops check` 0 problems. a64i is in
+`arbace_crop_paths`, the audit's `crop-rules` and `gate-key-crops-test.bash`'s list (no key moves).
+
+What found on the way: a store-exclusive to another address than the monitored one succeeds on the M2 (IMPLEMENTATION DEFINED;
+a64i requires the marked address and size: the program avoids the case); the first step after a stepped SVC; AR2's encoder
+crashes on `eon x0, x1, #1` (Math/decrementExact's overflow) and does not take `bfc` (lows). Not built: SIMD and FP arithmetic,
+signal handlers and arm64's rt_sigframe (`:signals`), threads (`:threads`), TLSDESC in the eval (`:eval-tls-model`), the per-run
+coverage's record (`--coverage` writes it, nothing judges it yet), Go's programs and musl's harnesses (AR6, AR7).
+
+### Proposed (AR5)
+
+Each with options, the recommended named; none taken.
+
+- **ARS38 The lockstep driver's sharing.** (a) as built: the tracer (`emu.Tracee`) shared, a64i's loop its own (arm64's registers,
+  the exclusive and step rules), x86i's untouched; the common loop (sys, step, bisect, the memory and world list) moved into
+  `emu` behind an arch interface at AR6, x86i moved onto it with the main host's x86i-check as its proof; (b) the move now,
+  unverified for x86i on the VM. *Recommended: (a)*.
+- **ARS39 The eval's layout.** (a) as built: AOT's object assembler and linker lay the forms out (placeholders, the GOT's
+  relocations), so eval and AOT share every address and `forms-check` compares them instruction by instruction; (b) a layout of
+  the eval's own (no linker): independent addresses, no static comparison. *Recommended: (a)*: the linker's placing is not
+  what eval tests; the relocations' values are, and the forms compute those themselves.
+- **ARS40 The programs' stated outputs.** (a) as built: taken once from this CPU's run into the headers, held by a64i (eval and
+  AOT) and the lockstep, models probed for a sample; (b) self-checking programs (each result compared with a constant in the
+  program, exit 0). *Recommended: (a)*, (b) for the synthetic generator (as x86i's AXS60).
+- **ARS41 The CPU's rows on the main host.** (a) as built: recorded by the VM, standing on the main host (no arm64 CPU there; ptrace
+  is not qemu-user's), rerun at each AR task on the VM; (b) qemu-aarch64 for the cpu rows only (an emulation, labelled).
+  *Recommended: (a)*.
+- **ARS42 The next slice.** (a) AR6: FP and SIMD arithmetic with FPCR/FPSR, the signal frame, musl's harnesses; (b) the coverage's
+  record and a synthetic generator (AXS60's) for the integer families first. *Recommended: (b)* (small, it hardens what AR5 built),
+  then (a).
