@@ -122,6 +122,9 @@
                            :chunk nil))
                   (add-chunk! s (data-chunk))
                   s))]
+    ;; a code section is aligned to the arch's least instruction alignment (MCAsmInfo's MinInstAlignment: AArch64's 4)
+    (when (and (:min-inst-align *arch*) (pos? (bit-and (long (:flags @sec)) elf/SHF_EXECINSTR)))
+      (ensure-align! sec (:min-inst-align *arch*)))
     (switch! ctx sec)
     sec))
 
@@ -522,7 +525,7 @@
         (swap! sym assoc :var e)
         (vswap! (:syms ctx) assoc n e))
       "file" (if (and (= 1 (count args)) (string? (first args)))
-               (.add ^java.util.ArrayList (:files ctx) (first args))
+               (.add ^java.util.ArrayList (:files ctx) [(first args) (.size ^java.util.ArrayList (:order ctx))])
                (unsupported :debug-line (str ".file " (pr-str args))))
       "ident" (let [cur (cur-sec ctx) prev @(:prev ctx)
                     sec (section! ctx ".comment" elf/SHT_PROGBITS (bit-or elf/SHF_MERGE elf/SHF_STRINGS) 1 nil false)]
@@ -630,9 +633,11 @@
         (doseq [fx fxs]
           (let [[off size _ kind pcrel] fx
                 [val resolved v] (eval-fixup ctx c fx 0)
-                resolved (and resolved (nil? (:spec v)) (not (when-let [f (:force-reloc? *arch*)] (f kind))))
+                resolved (and resolved
+                              (or (nil? (:spec v)) (boolean (when-let [f (:resolve-spec? *arch*)] (f (:spec v)))))
+                              (not (when-let [f (:force-reloc? *arch*)] (f kind))))
                 foff (+ (long (:offset m)) (long off))
-                put! (fn [^long x reloc?] ((:put-fixup! *arch*) bs off size kind x reloc?))]
+                put! (fn [^long x reloc?] ((:put-fixup! *arch*) bs off size kind x reloc? (:spec v)))]
             (when (and (:add v) ((:tls-specs *arch*) (:spec v))) (swap! (:add v) assoc :type elf/STT_TLS))
             (if resolved
               (put! val false)
@@ -752,14 +757,18 @@
                             (when (and (:temp m) (not o) (not (:section-sym m))) (fail (str "Undefined temporary symbol " n)))
                             {:key n :name (or (:out-name m) (if (:section-sym m) (:name @(nth secs (:section-sym m))) n))
                              :section-sym (some? (:section-sym m))
-                             :bind (binding-of ctx s) :type (merged-type ctx m) :other (:vis m)
+                             :bind (binding-of ctx s) :type (merged-type ctx m)
+                             :other (bit-or (long (or (:vis m) 0)) (long (or (:st-other m) 0)))
                              :shndx (cond (:common m) :common (nil? o) :undef (= :abs (first o)) :abs :else (first o))
                              :value (cond (:common m) (second (:common m)) o (second o) :else 0)
                              :size (or size 0)})))]
           ;; a group's signature symbol keyed for the group's sh_info
           {:bytes (elf/write-object {:machine (:machine *arch*) :osabi 0 :sections sec-out
                                      :symbols (mapv #(cond-> % true (assoc :key (:key %))) syms)
-                                     :files (vec (:files ctx))})}))
+                                     ;; each STT_FILE before the local symbols registered after its .file (the first before all)
+                                     :files (let [reg (into {} (map-indexed (fn [i n] [n i]) (:order ctx)))]
+                                              (vec (for [[f pos] (:files ctx)]
+                                                     [f (count (filter #(< (long (reg (:key %) -1)) (long pos)) syms))])))})}))
       (catch arbace.lang.ExceptionInfo ex
         (let [d (ex-data ex)]
           (cond (:obj/unsupported d) {:unsupported (:obj/unsupported d) :what (.getMessage ex)}
