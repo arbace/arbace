@@ -30,11 +30,18 @@
 (def PT_LOAD 1) (def PT_PHDR 6) (def PT_TLS 7) (def PT_GNU_STACK 0x6474e551) (def PT_GNU_RELRO 0x6474e552)
 (def PF_X 1) (def PF_W 2) (def PF_R 4)
 
-(def image-base "X86_64's defaultImageBase" 0x200000)
-(def max-page "defaultMaxPageSize" 4096)
-(def common-page "defaultCommonPageSize" 4096)
+(def ^:dynamic *arch*
+  "The target (lld's TargetInfo): :machine, :name, :image-base (defaultImageBase), :max-page (defaultMaxPageSize), :common-page,
+  :trap (the fill of a code section's gaps, trapInstr). x86-64's by default; AArch64's (AR4) `aarch64`."
+  {:machine 62 :name "x86-64" :image-base 0x200000 :max-page 4096 :common-page 4096 :trap 0xcc})
+
+(def aarch64
+  "AArch64's TargetInfo (lld/ELF/Arch/AArch64.cpp): defaultImageBase 0x200000 (a 2 MiB superpage), defaultMaxPageSize 64 KiB,
+  trapInstr 0xd4d4d4d4."
+  {:machine 183 :name "AArch64" :image-base 0x200000 :max-page 65536 :common-page 4096 :trap 0xd4})
 (def link-comment "the linker's line in .comment (lld's is its version)" "Linker: Arbace (arbace.asm.link)")
 
+(def ^:private a64-reloc-names (delay @(requiring-resolve 'arbace.asm.arm64.obj/reloc-names)))
 (defn- fail [msg] (throw (ex-info (str msg) {:link/error (str msg)})))
 (defn- unsupported [cls what] (throw (ex-info (str what) {:link/unsupported cls})))
 
@@ -63,7 +70,7 @@
   (let [o (try (elf/read-object b) (catch Exception _ (fail (str path ": not an ELF64 object"))))
         h (:header o)]
     (when-not (= 1 (:type h)) (if (= 3 (:type h)) (unsupported :shared (str path ": a shared object")) (fail (str path ": not a relocatable object"))))
-    (when-not (= elf/EM_X86_64 (:machine h)) (fail (str path ": not an x86-64 object")))
+    (when-not (= (:machine *arch*) (:machine h)) (fail (str path ": not an " (:name *arch*) " object")))
     {:idx fi :path path :o o
      :relocs (group-by :target (:relocs o))}))
 
@@ -206,7 +213,9 @@
   {:unsupported CLASS :what TEXT}."
   [inputs & [{:keys [entry] :or {entry "_start"}}]]
   (try
-    (let [files (vec (map-indexed (fn [i [p b]] (read-input i p b)) inputs))
+    (let [image-base (long (:image-base *arch*)) max-page (long (:max-page *arch*)) common-page (long (:common-page *arch*))
+          aarch64? (= 183 (:machine *arch*))
+          files (vec (map-indexed (fn [i [p b]] (read-input i p b)) inputs))
           ;; COMDAT: the first group of a signature kept, the members of a later one discarded
           seen (java.util.HashSet.)
           discarded (java.util.HashSet.)
@@ -256,6 +265,7 @@
                      (if (= elf/STB_LOCAL (:bind s)) [:local fi si] [:global (:name s)])))
           ;; the relocations scanned: the GOT's entries and GOTPCRELX's relaxation (RelocScan::process, adjustGotPcExpr)
           got (java.util.LinkedHashMap.)
+          tls-got (java.util.HashSet.)
           decisions (java.util.HashMap.)
           flags (volatile! #{})
           absolute-or-tls? (fn [[k a b]]
@@ -271,6 +281,15 @@
                     [ri r] (map-indexed vector rs)]
               (let [t (long (:type r)) fi (:idx f) ref (symref fi (:sym r))
                     ^bytes d (:data (sec-of files fi i)) off (long (:offset r))]
+                (if aarch64?
+                  ;; AArch64 (RelocScan for AArch64::getRelExpr): a GOT entry for the GOT's relocations and initial exec's (kept,
+                  ;; not relaxed to local exec: the entry holds the offset from the thread pointer)
+                  (case t
+                    (0x135 0x137 0x138 0x139) (when-not (.containsKey got ref) (.put got ref (.size got)))
+                    (0x21d 0x21e 0x21f) (do (when-not (.containsKey got ref) (.put got ref (.size got))) (.add tls-got ref))
+                    (0x200 0x201 0x202 0x203 0x204 0x205 0x206 0x207 0x208 0x209 0x20a 0x230 0x231 0x232 0x233 0x234 0x235 0x236 0x237 0x238 0x239)
+                    (unsupported :tls-gd-ld (str (get @a64-reloc-names t t) " (TLS GD/LD/TLSDESC)"))
+                    nil)
                 (case t
                   (9 41 42) ;; GOTPCREL, GOTPCRELX, REX_GOTPCRELX
                   (let [op (when (>= off 2) (bit-and (long (aget d (- off 2))) 0xff))
@@ -285,7 +304,7 @@
                   (3 27) (do (when-not (.containsKey got ref) (.put got ref (.size got))) (vswap! flags conj :gotplt))
                   (25 26 29 31) (vswap! flags conj :gotplt)
                   (19 20 34 35 36) (unsupported :tls-gd-ld (str "R_X86_64_" (get elf/reloc-names t t) " (TLS GD/LD/TLSDESC to LE)"))
-                  nil)))
+                  nil))))
           _ (when (or (pos? (.size got)) (contains? @flags :got))
               (add-item! (osec! ".got" elf/SHT_PROGBITS 0) {:kind :got} {:type elf/SHT_PROGBITS :flags (bit-or elf/SHF_ALLOC elf/SHF_WRITE) :align 8 :entsize 0}))
           _ (when (contains? @flags :gotplt)
@@ -529,17 +548,21 @@
           got-va (fn [ref] (+ (long (.get addr (first @got-off))) (long (second @got-off)) (* 8 (long (.get got ref)))))
           gotplt-va (fn [] (+ (long (.get addr (first @gotplt-off))) (long (second @gotplt-off))))
           ;; getTlsTpOffset for x86-64 (variant II): the offset in the segment, less its size and the alignment's padding
-          tp-off (fn [^long off] (- off (long tls-memsz) (bit-and (- (- (long tls-start)) (long tls-memsz)) (dec (long tls-align)))))
+          tp-off (if aarch64?
+                   ;; variant I (AArch64): the offset in the segment after the TCB's two words, aligned to the segment
+                   (fn [^long off] (+ off (align-up 16 (long tls-align))))
+                   (fn [^long off] (- off (long tls-memsz) (bit-and (- (- (long tls-start)) (long tls-memsz)) (dec (long tls-align))))))
           ;; the output sections' bytes
           buf (fn [o] (let [b (byte-array (long (:size o)))]
-                        (when (:exec (.get contents (:name o))) (java.util.Arrays/fill b (unchecked-byte 0xcc)))
+                        (when (:exec (.get contents (:name o))) (java.util.Arrays/fill b (unchecked-byte (:trap *arch*))))
                         (doseq [[p ^bytes d] (:parts (.get contents (:name o)))] (System/arraycopy d 0 b (int p) (alength d)))
                         b))
           bufs (into {} (for [o order :when (not= elf/SHT_NOBITS (:type o))] [(:name o) (buf o)]))
           ;; the GOT's entries: S (no dynamic relocation in a static executable)
           _ (when @got-off
               (doseq [[ref i] got]
-                (put! (bufs (first @got-off)) (+ (long (second @got-off)) (* 8 (long i))) (sym-va ref 0) 8)))
+                (put! (bufs (first @got-off)) (+ (long (second @got-off)) (* 8 (long i)))
+                      (if (.contains tls-got ref) (tp-off (sym-va ref 0)) (sym-va ref 0)) 8)))
           ;; the relocations applied (X86_64::relocate)
           apply! (fn [^bytes b ^long at ^long p r ref decision]
                    (let [t (long (:type r)) a (long (:addend r)) tname (get elf/reloc-names t t)
@@ -593,6 +616,49 @@
                                   :else (fail "R_X86_64_GOTTPOFF must be used in MOVQ or ADDQ instructions only"))
                             (put! b at (+ v 4) 4))
                        (unsupported :reloc (str "relocation " tname)))))
+          ;; AArch64::relocate: the value into the instruction's field, with lld's range and alignment checks
+          a64-apply! (fn [^bytes b ^long at ^long p r ref _decision]
+                       (let [t (long (:type r)) a (long (:addend r)) tname (get @a64-reloc-names t t)
+                             range! (fn [^long v ^long lo ^long hi] (when-not (<= lo v hi) (fail (str "relocation " tname " out of range: " v " is not in [" lo ", " hi "]"))) v)
+                             align! (fn [^long v ^long n] (when-not (zero? (mod v n)) (fail (str "improper alignment for relocation " tname ": 0x" (Long/toHexString v) " is not aligned to " n " bytes"))) v)
+                             set-w! (fn [^long mask ^long bits] (put! b at (bit-or (bit-and (u32 b at) (bit-not mask)) (bit-and bits mask)) 4))
+                             imm19! (fn [^long v] (set-w! 0xffffe0 (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5)))
+                             adr! (fn [^long v] (set-w! 0x60ffffe0 (bit-or (bit-shift-left (bit-and v 3) 29) (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5))))
+                             page (fn [^long x] (bit-and x (bit-not 0xfff)))
+                             s+a (fn [] (long (target-va ref a)))
+                             imm12! (fn [^long v] (set-w! 0x3ffc00 (bit-shift-left (bit-and v 0xfff) 10)))
+                             ldst! (fn [^long v ^long sh] (set-w! 0x3ffc00 (bit-shift-left (bit-shift-right (bit-and v 0xfff) sh) 10)))
+                             movw! (fn [^long v ^long g] (set-w! 0x1fffe0 (bit-shift-left (bit-and (bit-shift-right v (* 16 g)) 0xffff) 5)))
+                             tp (fn [] (+ (long (tp-off (sym-va ref 0))) a))]
+                         (case t
+                           0 nil
+                           0x101 (put! b at (s+a) 8)
+                           0x102 (put! b at (range! (s+a) -2147483648 4294967295) 4)
+                           0x103 (put! b at (range! (s+a) -32768 65535) 2)
+                           0x104 (put! b at (- (s+a) p) 8)
+                           0x105 (put! b at (range! (- (s+a) p) -2147483648 4294967295) 4)
+                           0x106 (put! b at (range! (- (s+a) p) -32768 65535) 2)
+                           (0x11a 0x11b) (set-w! 0x3ffffff (bit-shift-right (align! (range! (- (s+a) p) -134217728 134217727) 4) 2))
+                           (0x111 0x118) (imm19! (align! (range! (- (s+a) p) -1048576 1048575) 4))
+                           0x117 (set-w! 0x7ffe0 (bit-shift-left (bit-and (bit-shift-right (align! (range! (- (s+a) p) -32768 32767) 4) 2) 0x3fff) 5))
+                           0x112 (adr! (range! (- (s+a) p) -1048576 1048575))
+                           (0x113 0x114) (adr! (bit-shift-right (cond-> (- (page (s+a)) (page p)) (= t 0x113) (range! -4294967296 4294967295)) 12))
+                           0x115 (imm12! (s+a))
+                           0x116 (ldst! (s+a) 0) 0x11c (ldst! (align! (s+a) 2) 1) 0x11d (ldst! (align! (s+a) 4) 2)
+                           0x11e (ldst! (align! (s+a) 8) 3) 0x12b (ldst! (align! (s+a) 16) 4)
+                           (0x107 0x108) (movw! (s+a) 0) (0x109 0x10a) (movw! (s+a) 1) (0x10b 0x10c) (movw! (s+a) 2) 0x10d (movw! (s+a) 3)
+                           ;; the GOT's: the entry's address
+                           (0x137 0x21d) (adr! (bit-shift-right (range! (- (page (+ (long (got-va ref)) a)) (page p)) -4294967296 4294967295) 12))
+                           (0x138 0x21e) (ldst! (align! (+ (long (got-va ref)) a) 8) 3)
+                           (0x135 0x21f) (imm19! (align! (range! (- (+ (long (got-va ref)) a) p) -1048576 1048575) 4))
+                           ;; local exec
+                           0x225 (imm12! (bit-shift-right (range! (tp) 0 0xffffff) 12))
+                           0x226 (imm12! (range! (tp) 0 4095))
+                           0x227 (imm12! (tp))
+                           (0x220) (movw! (tp) 2) (0x221 0x222) (movw! (tp) 1) (0x223 0x224) (movw! (tp) 0)
+                           (0x228 0x229) (ldst! (tp) 0) (0x22a 0x22b) (ldst! (tp) 1) (0x22c 0x22d) (ldst! (tp) 2) (0x22e 0x22f) (ldst! (tp) 3)
+                           (0x23a 0x23b) (ldst! (tp) 4)
+                           (unsupported :reloc (str "relocation " tname)))))
           _ (doseq [f files [i rs] (:relocs f) :when (live? (:idx f) i)
                     :let [fi (:idx f) s (sec-of files fi i)]
                     :when (and (not (zero? (bit-and (long (:flags s)) elf/SHF_ALLOC))) (not= elf/SHT_NOBITS (:type s)))
@@ -610,10 +676,10 @@
                         out (when rec (.get ^java.util.HashMap (:offs eh) [fi i (first rec)]))]
                     (when out
                       (let [at (+ (long (second @eh-off)) (long out) (- (long (:offset r)) (long (first rec))))]
-                        (apply! (bufs (first @eh-off)) at (+ (long (.get addr (first @eh-off))) at) r ref nil))))
+                        ((if aarch64? a64-apply! apply!) (bufs (first @eh-off)) at (+ (long (.get addr (first @eh-off))) at) r ref nil))))
                   (let [[n p] (.get place [fi i])
                         at (+ (long p) (long (:offset r)))]
-                    (apply! (bufs n) at (+ (long (.get addr n)) at) r ref (.get decisions [fi i ri]))))))
+                    ((if aarch64? a64-apply! apply!) (bufs n) at (+ (long (.get addr n)) at) r ref (.get decisions [fi i ri]))))))
           ;; the symbol table (demoteAndCopyLocalSymbols, finalizeSections, sortSymTabSymbols)
           shidx (into {} (map-indexed (fn [i o] [(:name o) (inc (long i))]) order))
           out-shndx (fn [fi shndx] (let [[n] (.get place [fi shndx])] (long (shidx n))))
@@ -707,7 +773,7 @@
                          (do (binding [*out* *err*] (println (str "repr-asm link: warning: cannot find entry symbol " entry "; not setting start address"))) 0)))]
       ;; the ELF header (writeEhdr, writeHeader)
       (System/arraycopy (byte-array [0x7f 0x45 0x4c 0x46 2 1 1 0]) 0 out 0 8)
-      (put! out 16 2 2) (put! out 18 elf/EM_X86_64 2) (put! out 20 1 4) (put! out 24 entry-va 8) (put! out 32 64 8) (put! out 40 shoff 8)
+      (put! out 16 2 2) (put! out 18 (:machine *arch*) 2) (put! out 20 1 4) (put! out 24 entry-va 8) (put! out 32 64 8) (put! out 40 shoff 8)
       (put! out 48 0 4) (put! out 52 64 2) (put! out 54 56 2) (put! out 56 (count phdrs) 2) (put! out 58 64 2) (put! out 60 nsec 2)
       (put! out 62 (+ (count order) 2) 2)
       (doseq [[i [type fl off va fs ms al]] (map-indexed vector phdrs)]
@@ -772,8 +838,8 @@
 (defn build-tests
   "Each NAME<tab>PATH of LIST: its sources assembled and linked into WORK/NAME; WORK/build.tsv: NAME RESULT DETAIL (built,
   else the class of what failed), WORK/want.tsv: NAME EXIT STDOUT-HEX."
-  [lst work musl]
-  (let [assemble (requiring-resolve 'arbace.asm.amd64.obj/assemble-file)
+  [lst work musl & [arch]]
+  (let [assemble (requiring-resolve (if (= arch "arm64") 'arbace.asm.arm64.obj/assemble-file 'arbace.asm.amd64.obj/assemble-file))
         rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
         res (vec (for [[n p] rows]
                    (let [v (verdict (slurp p))
@@ -898,12 +964,14 @@
   REFERENCE."
   [verb & args]
   (case verb
-    "link" (let [[out & objs] args r (link-files objs)]
+    "link" (let [[out & objs] args
+                 [objs arch] (if (= "--arm64" (first objs)) [(rest objs) aarch64] [objs *arch*])
+                 r (binding [*arch* arch] (link-files objs))]
              (if-let [bs (:bytes r)]
                (write-bytes out bs)
                (do (binding [*out* *err*] (println (str "repr-asm link: " (if (:error r) (str "error: " (:error r)) (str (name (:unsupported r)) ": " (:what r))))))
                    (System/exit 1))))
-    "build" (apply build-tests args)
+    "build" (let [[lst work musl arch] args] (binding [*arch* (if (= arch "arm64") aarch64 *arch*)] (build-tests lst work musl arch)))
     "verdicts" (apply verdicts args)
     "control" (println (apply control args))
     "compare" (apply compare-exes args)
