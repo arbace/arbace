@@ -6,6 +6,7 @@
   byte for byte. `-main` is bin/repr-asm's read, print and the Arbace half of its round trip."
   (:require [arbace.repr.asm.gnu :as gnu]
             [arbace.repr.asm.amd64.att :as att]
+            [arbace.repr.asm.amd64.intel :as intel]
             [arbace.repr.asm.arm64.gnu :as a64]
             [arbace.repr.asm.plan9 :as p9]
             [arbace.repr.asm.lex :as lex]
@@ -35,16 +36,22 @@
 
 (defn- lex-dialect [d]
   (case (:syntax d)
-    :att nil
+    (:att :intel) nil
     :gnu {:hash :start}
     :apple {:hash :start :semi :comment :sep "%%"}
     :plan9 {:hash :start :high true :p9 true}))
 
-(defn- insn-text-of [d] (case (:syntax d) :att att/insn-text (:gnu :apple) a64/insn-text :plan9 p9/insn-text))
+;; amd64's two syntaxes: an instruction printed in the syntax in force where it stands (gnu/*syntax*, moved by `.intel_syntax` and
+;; `.att_syntax` as the items are printed in order)
+(defn- amd64-insn-text ^String [f]
+  (if (= :intel (some-> gnu/*syntax* deref)) (intel/insn-text f) (att/insn-text f)))
+
+(defn- insn-text-of [d] (case (:syntax d) (:att :intel) amd64-insn-text (:gnu :apple) a64/insn-text :plan9 p9/insn-text))
 
 (defmacro ^:private in-dialect [d & body]
   `(let [d# ~d]
      (binding [lex/*dialect* (lex-dialect d#)
+               gnu/*syntax* (volatile! (if (= :intel (:syntax d#)) :intel :att))
                gnu/*raw* (if (#{:gnu :apple} (:syntax d#)) (into gnu/raw-directives gnu/raw-text-directives) gnu/raw-directives)]
        ~@body)))
 
@@ -61,7 +68,8 @@
   ([^String src d]
    (in-dialect d
      (case (:syntax d)
-       :att (gnu/read-items src (fn [ts i] (att/read-insn src ts i)))
+       (:att :intel) (gnu/read-items src (fn [ts i] (att/read-insn src ts i))
+                                     {:syntax (:syntax d) :intel (fn [ts i] (intel/read-insn src ts i))})
        (:gnu :apple) (gnu/read-items src (fn [ts i] (a64/read-insn src ts i (:cpp d)))
                                      {:cpp (:cpp d) :raw gnu/raw-text-directives :req true})
        :plan9 (gnu/read-items src (fn [ts i] (p9/read-insn ts i)) {:cpp true})))))
@@ -185,7 +193,7 @@
                     rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
                     res (pool-map (fn [[n p fl]]
                                     (let [fl (set (str/split (or fl "") #" "))
-                                          d (dialect arch (cond (fl "plan9") "plan9" (fl "apple") "apple") p)]
+                                          d (dialect arch (cond (fl "plan9") "plan9" (fl "apple") "apple" (fl "intel") "intel") p)]
                                       (into [n] (check-one p (str work "/ae/" n ".ae") d))))
                                   rows)]
                 (spit-latin1 (str work "/check.tsv")

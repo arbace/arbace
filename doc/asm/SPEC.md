@@ -93,8 +93,9 @@ around a binary operator and parentheses only where the precedence needs them.
 
 A directive's name is lower case in the form (`.TEXT` is `(asm/text)`; the spelling is the layer's). Macro bodies and invocations
 are text because gas expands them as text (`\arg`, `\()`, altmacro's `%expr` and `<str>`); AX2's assembler expands them as LLVM's
-AsmParser does (AXS19). `.intel_syntax` switches the reader to Intel syntax, which AX1 refuses (class `:intel`, AX3) until
-`.att_syntax`.
+AsmParser does (AXS19). `.intel_syntax noprefix` switches the reader to Intel syntax (§5a, AX3) until `.att_syntax`; a file whose first llvm-mc run reads it with
+`-x86-asm-syntax=intel` is read in Intel from its start (the header's `:syntax :intel`). The printer follows the same switches, so each
+instruction prints in the syntax it was read in.
 
 ## 5. AT&T instructions (`arbace.repr.asm.amd64.att`)
 
@@ -120,6 +121,38 @@ the same statement: `lock`, `rep`, `repz`, `notrack`, `data16`, `rex64`, a segme
 So the forms of AX1 are the syntax level in the machine's operand order. AX2 makes them the machine level (AXS2 (a), the user's
 decision of 2026-11-09): the table resolves the mnemonic to the opcode and its width (`movl` to `(mov {:w 32} ...)`, `cmovl` to a
 condition, not a suffix), and the spelling moves into the layer (AXS17).
+
+## 5a. Intel instructions (`arbace.repr.asm.amd64.intel`, AX3)
+
+llvm-mc's `.intel_syntax noprefix` (no MASM, no MS inline assembly), after X86AsmParser's parseIntelOperand, ParseIntelExpression and its
+IntelExprStateMachine. `(MNEMONIC ATTRS? OPERAND ...)`: the mnemonic as written, lower case (Intel's carry no size suffix), ATTRS AT&T's
+(`:pseudo`, `:prefix`; Intel also takes `acquire`, `release`), the operands **in the text's order**, which is the SDM's (destination first):
+the two syntaxes' forms share their operand order. `short` after a jump is skipped.
+
+| text | operand |
+|---|---|
+| `eax`, `RAX`, `st(1)`, `zmm1 {k5} {z}` | `(reg eax)`, `(reg rax)`, `(reg st 1)`, `(reg zmm1 {:k k5, :z true})` |
+| `4*3+1`, `offset foo+4`, `len` (a constant `.set` before) | `(imm (+ (* 4 3) 1))`, `(imm (+ foo 4))`, `(imm len)` |
+| `dword ptr [rax + 4*rbx + 8]` | `(mem {:size 32, :base rax, :index rbx, :scale 4, :disp 8})` |
+| `[rbx*4 + rax]`, `_g0[rbp + 1<<1]`, `[ebx].4` | `(mem {:base rax, :index rbx, :scale 4})`, `(mem {:base rbp, :disp (+ _g0 (<< 1 1))})`, `(mem {:base ebx, :disp 4})` |
+| `fs:320`, `QWORD PTR FS:[320]`, `foo` (a label), `jmp foo` | `(mem {:seg fs, :disp 320, :bare true})`, `(mem {:size 64, :seg fs, :disp 320})`, `(mem {:disp foo, :bare true})` |
+| `qword ptr [rax]{1to8}`, `{rn-sae}` | `(mem {:size 64, :base rax, :bcst 8})`, `(rc "rn-sae")` |
+
+The expression's precedence is the infix calculator's (`|` 0, `^` 1, `&` 2, `<<` `>>` 4, `+` `-` 5, `*` `/` `%` 6, left associative; the
+named `or xor and shl shr mod not` in lower or upper case), the forms of §3 (`^` is `xor`, `~` and `not` are `bnot`). The registers are
+taken out of the sum as the state machine takes them: a register times a constant is the index with its `:scale`, another register the base,
+then the index; the rest of the value is the displacement, the registers counted 0 (`[rax - 4]` is `:disp -4`; nothing left, no `:disp`).
+`:size` comes from `byte` ... `zmmword ptr` (`float` and `long` 32, `fword` 48, `double` and `mmword` 64, `xword` and `tbyte` 80); `:bare`
+marks a memory operand written without brackets, which for `jmp` and `call` (with no `ptr`) is the direct branch target.
+
+**MASM's symbol rule** (P3), as llvm-mc applies it: an operand without brackets, segment or register is an immediate unless it names a
+symbol that is not a constant at that point of the file; a symbol assigned a constant before (`x = 6`, `.set`, `.equ`, folded as AsmParser
+folds them) is inlined as parsePrimaryExpr inlines it, so `mov edx, len` is an immediate after `len = 6` and a load from `len` before it or
+when `len` is a label; `offset SYM` is always an immediate. The machine level (AX2's matcher) computes the value as the state machine
+does: one symbol plus the rest folded to an integer (`_g0 + 18`).
+
+The canonical text is X86IntelInstPrinter's layout: `dword ptr fs:[rax + 4*rbx + 8]` (`- N` for a negative displacement after a register),
+an immediate's symbols after `offset`, the size words of `print*mem`.
 
 ## 6. Mode :full (`arbace.repr.asm.full`)
 

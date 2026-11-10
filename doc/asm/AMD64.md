@@ -108,3 +108,30 @@ llvm-mc's `.Ltmp` name) and the location counter.
 
 By hand (`bin/repr-asm print-oracle`, the oracle tier): every AT&T file's printed lines against the host's llvm-mc 23.1.5 run with
 the file's triple, file by file.
+
+## 6. Intel syntax (AX3)
+
+The table's Intel variant (§1): `:match-intel` (MatchTable1, llvm-tblgen's row for row by hand), `:aliases-intel`,
+`:print-aliases-intel` and each instruction's `:print-intel`, made by the same generator with variant 1's flattening, the empty
+register prefix (an isolated token naming a register is a singleton class) and `;` as the comment delimiter.
+
+The matcher (`arbace.asm.amd64.asm`, `*intel*` true for a statement read in Intel, `*variant*` the table): the operands in the text's
+order; parseIntelOperand's address swaps (an index with RIP drops the base; without a written scale ESP/RSP as index and a vector register
+as base swap; SI/DI as base with BX/BP as index swap; a scale with a 16-bit index refused); the value as the expression state machine
+computes it (one symbol plus the rest folded, `intel-value`; two symbols refused); a bracketed or sized `jmp`/`call` target not a direct
+branch (`isAbsMem`); matchAndEmitIntelInstruction (`call`, `jmp`, `push`, `pop` with an unsized memory operand at the pointer's width; a
+push of a constant that fits matched in AT&T's table with the mode's suffix; an unsized memory operand tried at 8 ... 512 bits, each new
+instruction a match; one match wins, more is `ambiguous operand size for instruction`); the comparison predicate taken from the mnemonic
+appended last; the string instructions' defaults in Intel's order; `xlat mem8` as `xlatb`.
+
+The printer (`arbace.asm.amd64.print`, `*intel*` true for `-output-asm-variant=1`): X86IntelInstPrinter's printOperand (no `%` or `$`,
+an expression after `offset`), printMemReference (`seg:[base + scale*index + disp]`, ` - N` after a register), the `print*mem` size words,
+printSrcIdx, printDstIdx (`es:[...]`), printMemOffs, printU8Imm, printSTiRegOperand, printVecCompareInstr's Intel layout (destination and
+mask first, the memory size its encoding implies), printAliasInstr from `:print-aliases-intel`, and Intel output's quoting of register
+names and keywords (populateReservedIdentifiers).
+
+The check (§4): each run reads the file in its own syntax (`-x86-asm-syntax=intel` in the run's own command), `.intel_syntax` and
+`.att_syntax` switch it statement by statement, and the CHECK texts are held to the printer of the run's output variant (the last llvm-mc
+of the pipe). The cross-syntax judge (`cross-judge`): every matched instruction of the file's first AT&T run printed in Intel, read back
+and matched in the statement's mode with the file's constant symbols, the same instruction and operands (quoted and bare names one);
+the rows' `:cross`, the classes `test/asm/divergences-cross.edn`, the controls `test/asm/controls-cross.txt` (`control-cross`).

@@ -3022,3 +3022,43 @@ expression). `table check` byte for byte; AX1's and AR1's round trips the same r
 Considered: AXS29 (b), FileCheck emulated over the streamer's whole output, left for AX4 (the directives' printer); classing the
 unmet texts by the nearest statement alone (the encodings' rule), kept but preceded by the text's own kind, since a text's content
 says whether it can be an instruction's line. Proposed (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, third slice)"): AXS30-AXS33.
+
+## 2026-11-10 amd64 assembly: AX3, Intel syntax read, matched and printed, and the cross-syntax judge (branch `asm-ax3`, from `mac/asm-ax2c` `030627ff5`)
+
+AX3 of doc/asm/AMD64-SURVEY.md §12 on the light lane (stage 0, one run at a time, under 1.5 GiB, no lock; llvm-mc and llvm-tblgen only
+by hand as oracles). Sources read and written again in Arbace (no code copied), all from llvm-project 23.1.5's release tarball
+(`test/asm/corpora.edn`'s `:llvmorg-23.1.5`, sha256 fb50b1ea...): `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (parseIntelOperand,
+ParseIntelMemoryOperandSize, ParseIntelExpression, IntelExprStateMachine, InfixCalculator and OpPrecedence, ParseIntelNamedOperator,
+ParseIntelOffsetOperator, ParseIntelDotOperator, ParseRoundingModeOp, HandleAVX512Operand, MatchRegisterByName, ParseRegister,
+AddDefaultSrcDestOperands, parseInstruction's Intel branches and xlat, matchAndEmitIntelInstruction, ParseDirective's `.intel_syntax`),
+`X86Operand.h` (isAbsMem's MaybeDirectBranchDest, isMemUnsized), `llvm/lib/Target/X86/MCTargetDesc/X86IntelInstPrinter.{cpp,h}`,
+`X86InstPrinterCommon.cpp` (printExprOperand, printVKPair), `X86MCTargetDesc.cpp` (populateReservedIdentifiers), `X86MCAsmInfo.cpp`
+(isValidX86UnquotedName), `llvm/utils/TableGen/AsmMatcherEmitter.cpp` (the parser variants, tokenizeAsmString's isolated tokens,
+extractSingletonRegisterForAsmOperand, validate's comment delimiter) and `AsmWriterEmitter.cpp` (printAliasInstr per writer),
+`llvm/lib/MC/MCParser/AsmParser.cpp` (parseExpression's folding, parsePrimaryExpr's inlining of a constant variable: MASM's symbol rule
+as llvm-mc applies it).
+
+Built: `arbace.asm.amd64.gen` makes the table's Intel variant (`:match-intel`, `:aliases-intel`, `:print-aliases-intel`, `:print-intel`;
+`asm/amd64/table.edn` regenerated, its AT&T parts unchanged); `bin/repr-asm table oracle` compares MatchTable1 and X86GenAsmWriter1's
+aliases too. `arbace.repr.asm.amd64.intel` (new): the Intel reader and canonical printer; `arbace.repr.asm.gnu` keeps the assignments read
+so far (`*equ*`) and the syntax in force while printing (`*syntax*`), and reads Intel statements with the Intel reader; `arbace.repr.asm`
+takes the dialect `:syntax :intel`. `arbace.asm.amd64.asm`: Intel's operands, Sym + Imm, matchAndEmitIntelInstruction, `xlat`.
+`arbace.asm.amd64.print`: the Intel printer. `arbace.asm.amd64.check`: each run read in its own syntax and printed in its output's,
+the cross-syntax judge and `control-cross`; `test/asm/encode_judge.ae` judges and records `:cross`; `test/asm/judge.ae` names a file's
+class by its id first. `bin/repr-asm`: a file is Intel when its first llvm-mc run reads it so (the run's own command), the cross controls.
+New: `test/asm/divergences-cross.edn`, `test/asm/controls-cross.txt`; two Intel controls each in `controls-encode.txt` and
+`controls-print.txt`. doc/asm/SPEC.md §5a, doc/asm/AMD64.md §6.
+
+Results (`MC/X86`): round trip 609 of 621 files (464 before; the rest 9 error tests, 2 `-masm-integers` tests under `:lexer-option`,
+1 not input), `MC/AsmParser` 140 of 157 (139); stated encodings 99,509 of 106,075 met (81,966; the rest APX 6,565 and one no run),
+CHECK texts 100,884 of 108,601 (82,838), the cross-syntax judge 82,765 of 83,505 AT&T instructions (the rest by design: 566 ambiguous,
+118 branches to a constant, 32 standalone masks, 21 read as another instruction, 2 `$` names, 1 local label), error lines 74 of 130
+(63 of 108); none failing at any level, recorded from that run (`encode-results-amd64.edn`, `roundtrip-results-amd64.edn`). The first
+runs failed one text (Sym plus a negative Imm printed `+-`, now LLVM's subtraction) and 41 cross cases: the judge used the run's mode
+after `.code32` (fixed) and the rest were llvm-mc's own, checked by hand with llvm-mc 23.1.5 and classed. Oracles by hand: llvm-tblgen
+MatchTable0 23,014 and MatchTable1 22,609 rows, the two writers' aliases 3 and 3. `table check` byte for byte; AR1's round trip the same
+rows; `bin/reap` (0 problems), `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: reading Intel memory operands as a tree with the registers inside (kept the state machine's reading: registers out of the
+sum, the value the calculator's, which `_g0[rbp + 1 + (2*5) - 3 + 1<<1]` needs); the cross judge on encodings (AXS34 (b)); a lexer option
+for MASM's integers (AXS35). Proposed: AXS34-AXS36 (doc/asm/AMD64-SURVEY.md, "Proposed (AX3)").

@@ -52,16 +52,22 @@
                :let [;; the FileCheck reading this run's output: on the same line, else a later one reading its %t
                      fc (if (re-find #"FileCheck" r) r
                             (first (filter #(and (re-find #"FileCheck" %) (re-find #"<\s*%t(\s|$)" %)) (drop (inc i) rs))))
-                     err? (boolean (re-find #"(^|\s)not\s+llvm-mc" r))]
+                     err? (boolean (re-find #"(^|\s)not\s+llvm-mc" r))
+                     ;; the run's own command: the piece of the pipe that runs llvm-mc on the file
+                     own (or (first (filter #(and (re-find #"llvm-mc\b" %) (re-find #"%s" %)) (str/split r #"\|"))) r)
+                     ;; the llvm-mc whose output is checked: the last of the pipe (a print read again: AX3's round trips)
+                     out (or (last (filter #(re-find #"llvm-mc\b" %) (str/split r #"\|"))) r)]
                :when fc]
            {:mode (mode-of r) :prefixes (prefixes-of fc) :error? err?
-            :intel? (boolean (re-find #"x86-asm-syntax[= ]intel" r))
+            :intel? (boolean (re-find #"x86-asm-syntax[= ]intel" own))
             :encoding? (boolean (re-find #"-?-show-encoding" r))
             :obj? (boolean (re-find #"filetype[= ]obj" r))
             ;; what llvm-mc prints: AT&T unless the output variant is Intel's; immediates in hex with --print-imm-hex; the
             ;; output read by another tool (objdump, readobj) or with options that change the instructions
-            :out-intel? (boolean (or (re-find #"output-asm-variant[= ]1" r)
-                                     (and (re-find #"x86-asm-syntax[= ]intel" r) (not (re-find #"output-asm-variant[= ]0" r)))))
+            :out-intel? (boolean (or (re-find #"output-asm-variant[= ]1" out)
+                                     (and (re-find #"x86-asm-syntax[= ]intel" out) (not (re-find #"output-asm-variant[= ]0" out)))))
+            ;; the output read again by another llvm-mc (`llvm-mc -output-asm-variant=1 %s | llvm-mc -x86-asm-syntax=intel`)
+            :piped? (boolean (re-find #"llvm-mc[^|]*%s[^|]*\|\s*(not\s+)?llvm-mc" r))
             :imm-hex? (boolean (re-find #"print-imm-hex" r))
             ;; a triple whose rewriter changes the instructions (X86MCLFIRewriter's x86_64_lfi)
             :lfi? (boolean (re-find #"-m?triple[= ]+\S*lfi" r))
@@ -116,34 +122,37 @@
 
 (defn assemble-file
   "[[LINE ENCODINGS] ...] for each instruction statement in `mode`: ENCODINGS a vector of {:text \"encoding: [...]\"} or
-  {:error MSG} or {:unsupported C}."
+  {:error MSG} or {:unsupported C}. The statements are in the syntax arbace.asm.amd64.asm/*intel* says at the start, then as
+  `.intel_syntax` and `.att_syntax` switch it."
   [items starts ^long mode]
-  (loop [items items mode mode syms {} out [] gcc false]
+  (loop [items items mode mode syms {} out [] gcc false intel x/*intel*]
     (if (empty? items)
       out
       (let [[f s _] (first items)]
         (cond
-          (not (seq? f)) (recur (rest items) mode syms out gcc)
+          (not (seq? f)) (recur (rest items) mode syms out gcc intel)
           (insn? f)
-          (let [es (vec (mapcat (fn [r] (cond (:bytes r) (cond->> [(merge {:text (x/encoding-text r) :inst (:inst r)}
+          (let [es (vec (mapcat (fn [r] (cond (:bytes r) (cond->> [(merge {:text (x/encoding-text r) :inst (:inst r) :mi (:mi r) :pflags (:pflags r) :mode mode}
                                                                          (print-of (:inst r) (:mi r) (:pflags r) mode))]
-                                                            (:wait r) (cons (merge {:text "encoding: [0x9b]" :inst "WAIT"}
+                                                            (:wait r) (cons (merge {:text "encoding: [0x9b]" :inst "WAIT" :mi [] :pflags #{} :mode mode}
                                                                                    (print-of "WAIT" [] #{} mode))))
                                                :else [r]))
-                                (try (binding [x/*gcc* gcc] (x/assemble-insn f mode syms))
+                                (try (binding [x/*gcc* gcc x/*intel* intel] (x/assemble-insn f mode syms))
                                      (catch Throwable e [{:unsupported :crash :what (str (pr-str f) ": " e)}]))))]
-            (recur (rest items) mode syms (conj out [(line-of starts s) es]) gcc))
+            (recur (rest items) mode syms (conj out [(line-of starts s) es]) gcc intel))
           :else
           (let [h (name (first f))]
             (case h
-              "code16" (recur (rest items) 16 syms out false)
-              "code16gcc" (recur (rest items) 16 syms out true)
-              "code32" (recur (rest items) 32 syms out false)
-              "code64" (recur (rest items) 64 syms out false)
+              "code16" (recur (rest items) 16 syms out false intel)
+              "code16gcc" (recur (rest items) 16 syms out true intel)
+              "code32" (recur (rest items) 32 syms out false intel)
+              "code64" (recur (rest items) 64 syms out false intel)
+              "intel_syntax" (recur (rest items) mode syms out gcc true)
+              "att_syntax" (recur (rest items) mode syms out gcc false)
               ("=" "set" "equ")
               (let [[_ a b] f nm (cond (symbol? a) (name a) (and (seq? a) (= 'sym (first a))) (second a))]
-                (recur (rest items) mode (if nm (assoc syms nm b) syms) out gcc))
-              (recur (rest items) mode syms out gcc))))))))
+                (recur (rest items) mode (if nm (assoc syms nm b) syms) out gcc intel))
+              (recur (rest items) mode syms out gcc intel))))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; judging a file
@@ -214,8 +223,9 @@
 (def ^:private mnemonics-of
   (memoize (fn [t]
              (into #{"lock" "rep" "repne" "notrack" "{nf}" "{vex}" "{vex2}" "{vex3}" "{evex}" "{disp8}" "{disp32}" "callq" "data32"}
-                   (concat (for [[_ i] (:insns t) :let [f (first (:print i))] :when (string? f)]
+                   (concat (for [[_ i] (:insns t) k [:print :print-intel] :let [f (first (k i))] :when (string? f)]
                              (first (str/split f #"[\s]")))
+                           (for [[_ ps] (:print-aliases-intel t) [fr] ps :when (string? (first fr))] (first (str/split (first fr) #"\s")))
                            (for [[_ ps] (:print-aliases t) [fr] ps :when (string? (first fr))] (first (str/split (first fr) #"\s"))))))))
 
 (defn- instruction-text?
@@ -256,10 +266,64 @@
                   (recur (rest cs) k off
                          (conj res [l (cond (not (instruction-text? t)) :directive
                                             ;; an APX register or pseudo prefix named in the text: APX's, as the encodings'
-                                            (re-find #"%r(1[6-9]|2[0-9]|3[01])[bwd]?\b|\{(nf|rex2|dfv=[^}]*)\}|\{evex\}\s+(cmp|test)" t) :apx
+                                            (re-find #"(?:%|\b)r(1[6-9]|2[0-9]|3[01])[bwd]?\b|\{(nf|rex2|dfv=[^}]*)\}|\{evex\}\s+(cmp|test)" t) :apx
                                             (nil? e) :unpaired (:unsupported e) (:unsupported e) (:error e) :rejected
                                             (:punsup e) (:punsup e) :else :mismatch)
                                     (when e (or (:asm e) (:error e) (:what e) (:pwhat e)))])))))))))))
+
+(defn- norm
+  "An MCInst's operands with every quoted name as a symbol (`\"rsi\"` and rsi are one name)."
+  [x]
+  (cond (and (seq? x) (= 'sym (first x)) (= 2 (count x))) (symbol (second x))
+        (seq? x) (apply list (map norm x))
+        (vector? x) (mapv norm x)
+        (map? x) (into {} (map (fn [[k v]] [k (norm v)]) x))
+        :else x))
+
+(defn cross-judge
+  "The cross-syntax judge (doc/asm/AMD64-SURVEY.md §5, §8.1; AX3): each AT&T statement's machine instruction printed in Intel
+  syntax by the Intel printer, read back by the Intel reader and matched by the Intel matcher in the same mode with the same
+  constant symbols, must be the same machine instruction (instruction and operands). [[LINE CLASS DETAIL] ...]: :pass, or a
+  failure (:mismatch another instruction, :rejected the matcher's error, :unread the reader's refusal, :crash), or the class
+  of what the printer does not print (its :print/unsupported class)."
+  [stmts ^long mode items]
+  (let [syms (into {} (keep (fn [[f]] (when (and (seq? f) (#{'asm/= 'asm/set 'asm/equ} (first f)))
+                                         (let [[_ a b] f] (when (symbol? a) [(name a) b]))))
+                            items))]
+    (vec (for [[l es] stmts e es :when (:inst e)]
+           (try
+             (let [mode (long (or (:mode e) mode))
+                   txt (binding [p/*t* x/*t* p/*intel* true p/*imm-hex* false] (p/print-inst (:inst e) (:mi e) (or (:pflags e) #{}) mode))
+                   fs (try (mapv first (asm/read-items txt {:arch :amd64 :syntax :intel}))
+                           (catch Throwable ex [:unread (.getMessage ex)]))]
+               (cond
+                 ;; a symbol whose name starts with `$` (AT&T's `$foo` in an expression): Intel has no `$`
+                 (and (= :unread (first fs)) (re-find #"[\[ +\-]\$[A-Za-z_]" txt)) [l :dollar-name (str txt " | " (second fs))]
+                 (= :unread (first fs)) [l :intel-unread (str txt " | " (second fs))]
+                 ;; a standalone mask operand (AVX512PF's `{k1}, [...]`): Intel's operand parser takes `{` for a rounding mode
+                 (re-find #"\t\{k[0-7]\}," txt) [l :mask-operand txt]
+                 :else
+                 (let [rs (vec (mapcat (fn [f] (binding [x/*intel* true] (x/assemble-insn f mode syms))) fs))
+                       ok (filter :inst rs)
+                       same? (fn [o] (and (= (:inst e) (:inst o)) (= (norm (:mi e)) (norm (:mi o)))))
+                       intel-of (fn [o] (binding [p/*t* x/*t* p/*intel* true p/*imm-hex* false] (p/print-inst (:inst o) (:mi o) (or (:pflags o) #{}) mode)))
+                       pcrel-imm? (some (fn [[k pm]] (and (= pm "printPCRelImm") (contains? (nth (:mi e) k nil) :imm)))
+                                        (filter vector? (:print-intel (get (:insns x/*t*) (:inst e)))))]
+                   (cond
+                     (and (some :error rs) pcrel-imm?) [l :pcrel-imm (str txt " | " (:error (first (filter :error rs))))]
+                     (some :error rs) [l :rejected (str txt " | " (:error (first (filter :error rs))))]
+                     (some :unsupported rs) [l (:unsupported (first (filter :unsupported rs))) txt]
+                     (and (= 1 (count ok)) (same? (first ok))) [l :pass txt]
+                     ;; a prefix word printed as its own line (rex64, data16): the instruction after it the statement's
+                     (and (seq ok) (same? (last ok))) [l :pass txt]
+                     ;; another instruction whose Intel print is the same text: Intel's spelling names both
+                     (and (seq ok) (= txt (intel-of (last ok)))) [l :ambiguous (str txt " | " (:inst (last ok)) " for " (:inst e))]
+                     ;; another instruction, its print another text (`call [rax]` for lcall, `mov ax, cs` read as mov eax, cs)
+                     (and (seq ok) (not= (:inst e) (:inst (last ok)))) [l :other-instruction (str txt " | " (:inst (last ok)) " for " (:inst e))]
+                     :else [l :mismatch (str txt " | " (pr-str (map (juxt :inst :mi) ok)) " for " (:inst e) " " (pr-str (:mi e)))]))))
+             (catch arbace.lang.ExceptionInfo ex
+               (if-let [c (:print/unsupported (ex-data ex))] [l c (.getMessage ex)] [l :crash (str ex)]))
+             (catch Throwable ex [l :crash (str ex)]))))))
 
 (defn check-file
   "One file's row: {:stated N :met N :by {CLASS N} :errors [MET STATED] :fails [[LINE CLASS DETAIL] ...]}."
@@ -268,8 +332,10 @@
         rs (runs src)
         all-enc (count (filter (fn [l] (and (re-find #"encoding: \[" l) (re-find #"[A-Za-z0-9_-]+(-NEXT|-SAME)?:.*encoding:" l)))
                                (str/split-lines src)))
-        read (try {:items (asm/read-items src asm/amd64)}
-                  (catch Throwable e {:refused (if (= :intel (:asm/refused (ex-data e))) :intel :unread)}))
+        ;; the file read in a run's syntax (AT&T, or Intel's: -x86-asm-syntax=intel), once each
+        read-of (memoize (fn [syn] (try {:items (asm/read-items src {:arch :amd64 :syntax syn})}
+                                        (catch Throwable e {:refused (if (= :intel (:asm/refused (ex-data e))) :intel :unread)}))))
+        cross (volatile! nil)
         starts (line-starts src)
         ;; each CHECK line once: the first run that names its prefix judges it
         seen (java.util.HashSet.)
@@ -277,21 +343,25 @@
                            :let [cs (vec (remove (fn [[l]] (.contains seen l)) (checks src (:prefixes r))))
                                  _ (doseq [[l] cs] (.add seen l))]
                            :when (seq cs)]
-                       (let [txt-cs (when-not (:error? r)
+                       (let [read (read-of (if (:intel? r) :intel :att))
+                             txt-cs (when-not (:error? r)
                                       (vec (filter (fn [[_ k c]] (and (not (#{"-NOT" "-EMPTY"} k)) (not (re-find #"^-COUNT" k)) (text-part c))) cs)))
                              txt-as (fn [cls] (vec (for [[l] txt-cs] [l cls])))]
                        (cond
-                         (or (:intel? r) (= :intel (:refused read)))
+                         (= :intel (:refused read))
                          {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l :intel])) :txt (txt-as :intel)}
                          (:refused read)
                          {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l (:refused read)])) :txt (txt-as (:refused read))}
                          (nil? (:mode r))
                          {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l :other-target])) :txt (txt-as :other-target)}
                          :else
-                         (let [stmts (binding [p/*imm-hex* (:imm-hex? r)] (assemble-file (:items read) starts (:mode r)))]
+                         (let [stmts (binding [p/*imm-hex* (:imm-hex? r) p/*intel* (:out-intel? r) x/*intel* (:intel? r)]
+                                       (assemble-file (:items read) starts (:mode r)))]
+                           ;; the cross-syntax judge on the first AT&T run that is no error test
+                           (when (and (nil? @cross) (not (:intel? r)) (not (:error? r)) (not (:lfi? r)))
+                             (vreset! cross (cross-judge stmts (:mode r) (:items read))))
                            {:enc (if (:encoding? r) (judge-encodings cs stmts) (vec (for [[l _ c] cs :when (enc-content c)] [l :not-shown])))
-                            :txt (cond (:out-intel? r) (txt-as :intel)
-                                       (:other-tool? r) (txt-as :other-tool)
+                            :txt (cond (:other-tool? r) (txt-as :other-tool)
                                        (:options? r) (txt-as :options)
                                        (:lfi? r) (txt-as :lfi)
                                        :else (judge-text txt-cs stmts (:encoding? r)))
@@ -308,6 +378,8 @@
      :fam (frequencies (for [[_ c sts] enc :when (= c :pass)]
                          (case (:enc (get (:insns x/*t*) (:inst (first sts)))) "EncVEX" :vex "EncXOP" :xop "EncEVEX" :evex :legacy)))
      :text {:stated (count txt) :met (get tby :pass 0) :by (dissoc tby :pass)}
+     :cross (when-let [c @cross] (let [f (frequencies (map second c))] {:stated (count c) :met (get f :pass 0) :by (dissoc f :pass)}))
+     :xfails (vec (for [[l c d] @cross :when (or (System/getenv "REPR_ASM_TEXT_ROWS") (#{:mismatch :rejected :crash :intel-unread} c))] [l c (str d)]))
      :tfails (vec (for [[l c o] txt :when (or (System/getenv "REPR_ASM_TEXT_ROWS") (#{:mismatch :rejected :crash :unpaired} c))] [l c (str o)]))
      :errors (let [es (keep :errors results)] (when (seq es) [(reduce + (map first es)) (reduce + (map second es))]))
      :fails (vec (for [[l c sts] enc :when (#{:mismatch :rejected :crash} c)]
@@ -318,10 +390,10 @@
   judge): `differs` when a stated encoding is not met (as it must), else `same`."
   [^String subject ^String reference]
   (let [src (asm/latin1 reference)
-        items (asm/read-items (asm/latin1 subject) asm/amd64)
-        starts (line-starts (asm/latin1 subject))
         r (first (filter :encoding? (runs src)))
-        stmts (assemble-file items starts (:mode r))
+        items (asm/read-items (asm/latin1 subject) {:arch :amd64 :syntax (if (:intel? r) :intel :att)})
+        starts (line-starts (asm/latin1 subject))
+        stmts (binding [x/*intel* (:intel? r)] (assemble-file items starts (:mode r)))
         enc (judge-encodings (checks src (:prefixes r)) stmts)]
     (if (every? #(= :pass (second %)) enc) "same" "differs")))
 
@@ -332,11 +404,30 @@
   [^String subject ^String reference & [hex]]
   (let [src (asm/latin1 reference)
         ssrc (asm/latin1 subject)
-        r (first (filter #(and (not (:error? %)) (not (:intel? %)) (not (:out-intel? %)) (:mode %)) (runs src)))
-        stmts (binding [p/*imm-hex* (= hex "hex")] (assemble-file (asm/read-items ssrc asm/amd64) (line-starts ssrc) (:mode r)))
+        r (first (filter #(and (not (:error? %)) (:mode %)) (runs src)))
+        stmts (binding [p/*imm-hex* (= hex "hex") p/*intel* (:out-intel? r) x/*intel* (:intel? r)]
+                (assemble-file (asm/read-items ssrc {:arch :amd64 :syntax (if (:intel? r) :intel :att)}) (line-starts ssrc) (:mode r)))
         cs (vec (filter (fn [[_ k c]] (and (not (#{"-NOT" "-EMPTY"} k)) (text-part c))) (checks src (:prefixes r))))
         res (judge-text cs stmts (:encoding? r))]
     (if (some #{:mismatch :unpaired :rejected} (map second res)) "differs" "same")))
+
+(defn control-cross
+  "A negative control of the cross-syntax judge: the SUBJECT's AT&T statements printed in Intel and read back, held to the
+  REFERENCE's machine instructions in order by the judge's own comparison: `differs` when one is not the same (as it must),
+  else `same`."
+  [^String subject ^String reference]
+  (let [stmts-of (fn [^String path]
+                   (let [src (asm/latin1 path)
+                         r (first (filter #(and (not (:error? %)) (not (:intel? %)) (:mode %)) (runs src)))]
+                     [(:mode r) (vec (for [[_ es] (assemble-file (asm/read-items src asm/amd64) (line-starts src) (:mode r)) e es :when (:inst e)] e))]))
+        [mode ss] (stmts-of subject)
+        [_ rs] (stmts-of reference)
+        back (vec (for [e ss]
+                    (let [txt (binding [p/*t* x/*t* p/*intel* true] (p/print-inst (:inst e) (:mi e) (or (:pflags e) #{}) (long (:mode e mode))))
+                          o (last (filter :inst (mapcat #(binding [x/*intel* true] (x/assemble-insn % (long (:mode e mode)) {}))
+                                                        (try (mapv first (asm/read-items txt {:arch :amd64 :syntax :intel})) (catch Throwable _ [])))))]
+                      [(:inst o) (norm (:mi o))])))]
+    (if (= back (mapv (fn [e] [(:inst e) (norm (:mi e))]) rs)) "same" "differs")))
 
 (defn- check-list [lst work]
   (let [rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
@@ -355,9 +446,12 @@
                        (str n "\t" (:stated r) "\t" (:met r) "\t" (pr-str (into (sorted-map) (:by r))) "\t" (pr-str (:errors r))
                             "\t" (pr-str (into (sorted-map) (:fam r)))
                             "\t" (pr-str (some-> (:text r) (update :by #(into (sorted-map) %)) (->> (into (sorted-map)))))
+                            "\t" (pr-str (some-> (:cross r) (update :by #(into (sorted-map) %)) (->> (into (sorted-map)))))
                             (when (:crash r) (str "\tcrash: " (str/replace (:crash r) #"[\t\n]" " "))) "\n"))))
     (spit (str work "/fails.tsv")
           (apply str (for [[n r] res [l c d] (:fails r)] (str n "\t" l "\t" (name c) "\t" d "\n"))))
+    (spit (str work "/cross-fails.tsv")
+          (apply str (for [[n r] res [l c d] (:xfails r)] (str n "\t" l "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))))
     (spit (str work "/print-fails.tsv")
           (apply str (for [[n r] res [l c d] (:tfails r)] (str n "\t" l "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))))
     (let [st (reduce + (map (comp :stated second) res)) met (reduce + (map (comp :met second) res))
@@ -369,6 +463,9 @@
       (let [ts (keep (comp :text second) res)]
         (println (str "repr-asm encode-check: print level: " (reduce + (map :met ts)) " of " (reduce + (map :stated ts))
                       " CHECK texts met; the rest " (pr-str (into (sorted-map) (apply merge-with + (map :by ts)))))))
+      (let [ts (keep (comp :cross second) res)]
+        (println (str "repr-asm encode-check: cross-syntax: " (reduce + (map :met ts)) " of " (reduce + (map :stated ts))
+                      " AT&T instructions read back from Intel; the rest " (pr-str (into (sorted-map) (apply merge-with + (map :by ts)))))))
       (println (str "repr-asm encode-check: error tests' error lines " (reduce + (map first es)) " of " (reduce + (map second es)) " met"))
       (when-let [cs (seq (filter (comp :crash second) res))]
         (println (str "repr-asm encode-check: " (count cs) " files crashed: " (str/join " " (map first cs))))))))
@@ -381,6 +478,7 @@
     "check" (apply check-list args)
     "control" (println (apply control args))
     "control-print" (println (binding [x/*t* (x/table)] (apply control-print args)))
+    "control-cross" (println (binding [x/*t* (x/table)] (apply control-cross args)))
     ;; print-list LIST OUT: for the oracle by hand (llvm-mc's output beside), each file's first AT&T run's printed
     ;; instructions into OUT/NAME.txt (a line each, <ERROR> or <CLASS> for one not printed) and its llvm-mc options into
     ;; OUT/NAME.run
@@ -400,8 +498,8 @@
                                             (str (or (:asm e) (when (:error e) "<ERROR>") (str "<" (name (or (:unsupported e) (:punsup e) :none)) ">")) "\n"))))
                          (spit (str out "/" n ".run") (str (or trip "x86_64") (when (:imm-hex? r) " --print-imm-hex") "\t" path "\n"))))))
     ;; show FILE [MODE]: each statement's printed line and encoding (a debugging aid, beside llvm-mc by hand)
-    "show" (let [[path mode] args src (asm/latin1 path)]
-             (binding [x/*t* (x/table)]
-               (doseq [[l es] (assemble-file (asm/read-items src asm/amd64) (line-starts src) (Long/parseLong (or mode "64"))) e es]
+    "show" (let [[path mode syn out] args src (asm/latin1 path) intel? (= syn "intel")]
+             (binding [x/*t* (x/table) x/*intel* intel? p/*intel* (= out "intel")]
+               (doseq [[l es] (assemble-file (asm/read-items src {:arch :amd64 :syntax (if intel? :intel :att)}) (line-starts src) (Long/parseLong (or mode "64"))) e es]
                  (println (str l ": " (or (:asm e) (:punsup e)) "  # " (or (:text e) (:error e) (:unsupported e))))))))
   (shutdown-agents))

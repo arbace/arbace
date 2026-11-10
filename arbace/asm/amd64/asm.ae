@@ -25,6 +25,7 @@
     (assoc t
            :classes classes
            :by-mn (reduce (fn [m e] (update m (first e) (fnil conj []) e)) {} (:match t))
+           :by-mn-intel (reduce (fn [m e] (update m (first e) (fnil conj []) e)) {} (:match-intel t))
            :by-asm by-asm)))
 
 (def ^:private tables (atom {}))
@@ -37,6 +38,10 @@
 (def ^:dynamic *t* nil)
 ;; .code16gcc: 16-bit mode, matched as 32-bit (X86AsmParser's Code16GCC)
 (def ^:dynamic *gcc* false)
+;; the statement's syntax: Intel's forms (arbace.repr.asm.amd64.intel, the operands in the text's order) when true (AX3)
+(def ^:dynamic *intel* false)
+;; the matcher's variant: MatchTable0 (AT&T) or MatchTable1 (Intel), with its mnemonic aliases
+(def ^:dynamic *variant* 0)
 
 (defn- reg-enc ^long [r] (if r (long (second (get (:regs *t*) r))) 0))
 (defn- in-class? [r ^String cls] (contains? (get (:classes *t*) (str "reg:" cls)) r))
@@ -112,9 +117,43 @@
       (and (not m64) (#{"RIP" "EIP"} b)) (fail "IP-relative addressing requires 64-bit mode")
       :else nil)))
 
+;; parseIntelOperand's value: the expression state machine keeps one symbol (Sym) and computes the rest as an integer (Imm),
+;; the symbol counted 0, constant symbols inlined; the operand's expression is Sym + Imm
+(defn- symbol-leaves [e syms]
+  (cond (or (symbol? e) (and (seq? e) (#{'sym 'at 'local} (first e))))
+        (if (and (not (and (seq? e) (#{'at 'local} (first e)))) (const-value e syms)) [] [e])
+        (seq? e) (vec (mapcat #(symbol-leaves % syms) (rest e)))
+        :else []))
+
+(defn- intel-value
+  "Sym + Imm of an Intel operand's expression `e` (IntelExprStateMachine): an integer when it has no symbol."
+  [e syms]
+  (let [ls (distinct (symbol-leaves e syms))]
+    (cond
+      (empty? ls) (or (const-value e syms) e)
+      (> (count ls) 1) (fail "cannot use more than one symbol in memory operand")
+      :else (let [sym (first ls)
+                  zero (fn z [x] (cond (= x sym) 0 (seq? x) (if (#{'sym 'at 'local} (first x)) x (apply list (first x) (map z (rest x)))) :else x))
+                  v (const-value (zero e) syms)]
+              (cond (nil? v) e (zero? (long v)) sym (neg? (long v)) (list '- sym (- (long v))) :else (list '+ sym v))))))
+
+(defn- intel-mem
+  "parseIntelOperand's address: an index with the base RIP drops the base; with no scale written, ESP or RSP as the index and a
+  vector register as the base swap with the other; SI or DI as the base with BX or BP the index swap (CheckBaseRegAndIndexReg
+  shares AT&T's order)."
+  [base index scale-written?]
+  (let [vec? (fn [r] (and r (re-matches #"[XYZ]MM\d+" r)))
+        base (if (and index (= base "RIP")) nil base)
+        [base index] (if (and (not scale-written?) (not (#{"ESP" "RSP"} base)) (#{"ESP" "RSP"} index)) [index base] [base index])
+        [base index] (if (and (not scale-written?) (not (vec? index)) (vec? base)) [index base] [base index])
+        _ (when (and scale-written? index (in-class? index "GR16")) (fail "16-bit addresses cannot have a scale"))
+        [base index] (if (and (#{"SI" "DI"} base) (#{"BX" "BP"} index)) [index base] [base index])]
+    [base index]))
+
 (defn- operands
-  "The X86Operands of the form's operands (the SDM's order in the form, the text's here)."
-  [ops mode syms]
+  "The X86Operands of the form's operands (the SDM's order in the form, the text's here: AT&T's reversed, Intel's as they
+  are); `mn` the mnemonic (Intel's jmp and call: a bracketed or sized memory operand is no direct branch target)."
+  [ops mode syms & [mn]]
   (vec (mapcat
         (fn [x]
           (let [deco (fn [m] (concat (when-let [k (:k m)] [{:k :tok :t "{"} {:k :reg :reg (reg-of (list 'reg k))} {:k :tok :t "}"}])
@@ -127,9 +166,10 @@
             (case (first x)
               reg (let [r (reg-of x) m (first (filter map? (rest x)))]
                     (check-reg-mode r mode)
+                    (when (and *intel* (= r "RIP")) (fail "rip can only be used as a base register"))
                     (cons {:k :reg :reg r} (deco m)))
-              imm [{:k :imm :e (second x) :v (const-value (second x) syms)}]
-              ind (cons {:k :tok :t "*"} (operands [(second x)] mode syms))
+              imm (let [e (if *intel* (intel-value (second x) syms) (second x))] [{:k :imm :e e :v (const-value e syms)}])
+              ind (cons {:k :tok :t "*"} (operands [(second x)] mode syms mn))
               ;; ParseRoundingModeOp: {rn-sae} ... {rz-sae} an immediate (X86::STATIC_ROUNDING), {sae} a token
               rc (let [t (str (second x))]
                    (cond (= t "sae") [{:k :tok :t "{sae}"}]
@@ -148,21 +188,25 @@
                                   (reg-val (get syms (name (:disp m)))))
                         m (if eq-base (-> m (assoc :base (list 'asm/eq (:disp m))) (dissoc :disp)) m)
                         base (rg (:base m)) index (rg (:index m))
+                        [base index] (if *intel* (intel-mem base index (contains? m :scale)) [base index])
                         seg (cond (:seg m) (reg-of (list 'reg (:seg m)))
                                   (:segsym m) (or (reg-val (get syms (name (:segsym m)))) (fail "invalid register name")))
                         scale (if (contains? m :scale) (const-value (:scale m) syms) 1)
-                        disp (if (contains? m :disp) (:disp m) 0)]
+                        disp (if (contains? m :disp) (:disp m) 0)
+                        disp (if *intel* (intel-value disp syms) disp)]
                     (doseq [r [base index]] (when r (check-reg-mode r mode)))
                     ;; (%dx) alone: ParseMemOperand's DX register operand (in, out, ins, outs), not an address
                     (when-not (and (= base "DX") (nil? index) (nil? seg) (not (contains? m :scale))
                                    (= 0 (const-value disp syms)))
                       (check-base-index base index (= mode 64)))
                     (when-not (#{1 2 4 8} scale) (fail "scale factor in address must be 1, 2, 4 or 8"))
-                    (concat [{:k :mem :seg seg :base base :index index :scale scale :disp disp :dv (const-value disp syms)
-                              :size 0 :mode mode}]
+                    (concat [(cond-> {:k :mem :seg seg :base base :index index :scale scale :disp disp :dv (const-value disp syms)
+                                      :size (or (:size m) 0) :mode mode}
+                               ;; Intel's jmp and call: MaybeDirectBranchDest false with ptr or brackets
+                               (and *intel* (#{"jmp" "call"} mn) (or (:size m) (not (:bare m)))) (assoc :nodirect true))]
                             (when-let [b (:bcst m)] [{:k :tok :t (str "{1to" b "}")}])
                             (deco m)))))))
-        (reverse ops))))
+        (if *intel* ops (reverse ops)))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the classes' predicates (X86Operand.h)
@@ -174,7 +218,7 @@
 (defn- int32? [^long v] (<= -2147483648 v 2147483647))
 
 (defn- mem? [o ^long size] (and (= :mem (:k o)) (or (zero? (long (:size o))) (= size (long (:size o))))))
-(defn- abs-mem? [o] (and (= :mem (:k o)) (nil? (:seg o)) (nil? (:base o)) (nil? (:index o)) (= 1 (:scale o))))
+(defn- abs-mem? [o] (and (= :mem (:k o)) (nil? (:seg o)) (nil? (:base o)) (nil? (:index o)) (= 1 (:scale o)) (not (:nodirect o))))
 (defn- mem-offs? [o] (and (= :mem (:k o)) (nil? (:base o)) (nil? (:index o)) (= 1 (:scale o))))
 (defn- disp0? [o] (= 0 (:dv o)))
 (defn- src-idx? [o] (and (= :mem (:k o)) (nil? (:index o)) (= 1 (:scale o)) (#{"RSI" "ESI" "SI"} (:base o)) (disp0? o)))
@@ -302,10 +346,10 @@
 (defn- match-impl
   "[:ok ENTRY MI] or [:fail KIND DATA] for the mnemonic `mn` and the operands."
   [^String mn ops mode opts]
-  (let [mn (let [as (get (:aliases *t*) mn)
+  (let [mn (let [as (get (if (= 1 *variant*) (:aliases-intel *t*) (:aliases *t*)) mn)
                  feats (features mode)]
              (or (some (fn [[ps to]] (when (every? #(pred-holds? % feats) ps) to)) as) mn))
-        es (get (:by-mn *t*) mn)]
+        es (get (if (= 1 *variant*) (:by-mn-intel *t*) (:by-mn *t*)) mn)]
     (if (empty? es)
       [:fail :mnemonic nil]
       (let [feats (features mode)]
@@ -763,9 +807,11 @@
                 ops))))))))
 
 (defn- defaults
-  "The string instructions' default operands (AddDefaultSrcDestOperands, VerifyAndAdjustOperands), the in/out (%dx) as DX."
+  "The string instructions' default operands (AddDefaultSrcDestOperands, VerifyAndAdjustOperands: Intel's in the text's
+  order, destination first), the in/out (%dx) as DX."
   [^String n ops ^long mode]
   (let [c (count ops)
+        verify-adjust (fn [ops final] (verify-adjust ops (if (and *intel* (= 2 (count final))) (vec (reverse final)) final)))
         ops (cond
               (and (#{"outb" "outsb" "outw" "outsw" "outl" "outsl" "out" "outs"} n) (= c 2)) (assoc ops 1 (dx-reg (ops 1)))
               (and (#{"inb" "insb" "inw" "insw" "inl" "insl" "in" "ins"} n) (= c 2)) (assoc ops 0 (dx-reg (ops 0)))
@@ -816,10 +862,56 @@
           (= 1 (count (filter #(= :operand (second %)) rs))) (fail "invalid operand for instruction")
           :else (fail "unknown use of instruction mnemonic without a size suffix"))))))
 
+(defn- missing-text [feats] (str "instruction requires: " (str/join " " (map #(second (get (:preds *t*) %)) feats))))
+
+(defn- match-intel
+  "matchAndEmitIntelInstruction: call, jmp, push and pop take an unsized memory operand at the pointer's width; push of a
+  constant that fits it is matched first in AT&T's table with the mode's suffix; an unsized memory operand is tried at each
+  size (8 ... 512), each new instruction a match; exactly one match wins, more is an ambiguous size."
+  [^String n ops ^long mode opts]
+  (let [ptr (if (and *gcc* (= mode 16)) 16 mode)
+        ptr (case (long ptr) 16 16 32 32 64)
+        ui (first (keep-indexed (fn [i o] (when (and (= :mem (:k o)) (zero? (long (:size o)))) i)) ops))
+        ops (if (and ui (#{"call" "jmp" "push" "pop"} n)) (assoc-in ops [ui :size] ptr) ops)
+        unsized (when (and ui (zero? (long (:size (ops ui))))) ui)
+        ms (transient [])
+        last-inst (volatile! nil)
+        add! (fn [r] (let [i (if (= :ok (first r)) (nth (second r) 2) @last-inst)]
+                       (when (or (zero? (count ms)) (not= i @last-inst)) (conj! ms r))
+                       (vreset! last-inst i)))]
+    (when (and (= n "push") (= 1 (count ops)) (= :imm (:k (ops 0))) (some? (:v (ops 0))))
+      (let [v (long (:v (ops 0)))
+            fits (or (= ptr 64)
+                     (and (>= v (- (bit-shift-left 1 (dec ptr)))) (< v (bit-shift-left 1 (dec ptr))))
+                     (and (>= v 0) (< v (bit-shift-left 1 ptr))))]
+        (when fits
+          (let [r (binding [*variant* 0] (match-impl (str n ({64 "q" 32 "l" 16 "w"} ptr)) ops mode opts))]
+            (conj! ms r)
+            (when (= :ok (first r)) (vreset! last-inst (nth (second r) 2)))))))
+    (when unsized
+      (doseq [sz [8 16 32 64 80 128 256 512]]
+        (let [r (binding [*variant* 1] (match-impl n (assoc-in ops [unsized :size] sz) mode opts))
+              i (if (= :ok (first r)) (nth (second r) 2) @last-inst)]
+          (when (or (zero? (count ms)) (not= i @last-inst)) (conj! ms r))
+          (vreset! last-inst i))))
+    (when (zero? (count ms)) (conj! ms (binding [*variant* 1] (match-impl n ops mode opts))))
+    (let [ms (persistent! ms)
+          oks (filter #(= :ok (first %)) ms)
+          cnt (fn [k] (count (filter #(= k (second %)) ms)))]
+      (cond
+        (= :mnemonic (second (peek ms))) (fail (str "invalid instruction mnemonic '" n "'"))
+        (= 1 (count oks)) (first oks)
+        (> (count oks) 1) (fail (str "ambiguous operand size for instruction '" n "'"))
+        (= 1 (cnt :unsupported)) (fail "unsupported instruction")
+        (= 1 (cnt :feature)) (fail (missing-text (nth (last (filter #(= :feature (second %)) ms)) 2)))
+        (= 1 (cnt :operand)) (fail "invalid operand for instruction")
+        :else (fail "unknown instruction mnemonic")))))
+
 (def ^:private fpu-wait {"finit" "fninit" "fsave" "fnsave" "fstcw" "fnstcw" "fstcww" "fnstcw" "fstenv" "fnstenv"
                          "fstsw" "fnstsw" "fstsww" "fnstsw" "fclex" "fnclex"})
 
-(def ^:private prefix-insns #{"cs" "ds" "es" "fs" "gs" "ss" "rex64" "data32" "data16" "addr32" "addr16" "xacquire" "xrelease"})
+(def ^:private prefix-insns #{"cs" "ds" "es" "fs" "gs" "ss" "rex64" "data32" "data16" "addr32" "addr16" "xacquire" "xrelease"
+                                "acquire" "release"})
 
 (declare assemble-one)
 
@@ -882,11 +974,15 @@
             wait (fpu-wait n)
             n (or wait n)
             [n cmpp] (patch-name n)
-            xs (operands ops mode syms)
-            xs (if cmpp (vec (cons {:k :imm :e cmpp :v cmpp} xs)) xs)
+            xs (operands ops mode syms (str/replace n #"\.d(8|32)$" ""))
+            ;; the predicate taken from the mnemonic: AT&T's first operand, Intel's last
+            xs (if cmpp (if *intel* (conj xs {:k :imm :e cmpp :v cmpp}) (vec (cons {:k :imm :e cmpp :v cmpp} xs))) xs)
             n (if (and (#{"fsub" "fdiv" "fsubr" "fdivr"} n) (empty? xs)) (str n "p") n)
             xs (defaults n xs mode)
-            n (if (and (= n "movsd") (empty? ops)) "movsl" n)
+            n (if (and (= n "movsd") (empty? ops) (not *intel*)) "movsl" n)
+            ;; xlat mem8: xlatb (the operand only gives the size)
+            [n xs] (if (and (#{"xlat" "xlatb"} n) (= 1 (count xs)) (= :mem (:k (xs 0))) (#{0 8} (long (:size (xs 0)))))
+                     ["xlatb" []] [n xs])
             ;; mov %seg, %r16/%r32: the 32-bit register (16 in 16-bit mode)
             [n xs] (if (and (#{"mov" "movw" "movl"} n) (= 2 (count xs)) (= :reg (:k (xs 0))) (= :reg (:k (xs 1)))
                             (in-class? (:reg (xs 1)) "SEGMENT_REG")
@@ -894,7 +990,7 @@
                      [(if (and (not= n "mov") (= (nth n 3) (if (= mode 16) \l \w))) (if (= mode 16) "movw" "movl") n)
                       (assoc xs 0 {:k :reg :reg (sub-reg (:reg (xs 0)) (if (= mode 16) 16 32))})]
                      [n xs])
-            [_ e mi] (match-att n xs mode opts)
+            [_ e mi] (if *intel* (match-intel n xs mode opts) (binding [*variant* 0] (match-att n xs mode opts)))
             [inst mi] (process (nth e 2) mi flags)]
         ;; the MCInst's flags for the printer (matchAndEmitInstruction's IP_USE_VEX, IP_USE_VEX2, IP_USE_EVEX)
         (cond-> (assoc (encode inst mi mode flags)

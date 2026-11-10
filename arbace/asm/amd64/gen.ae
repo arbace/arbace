@@ -122,6 +122,37 @@
                        (do (when in (.add out (subs s prev i))) (recur (inc i) i true)))
             :else (recur (inc i) prev true)))))))
 
+(defn tokenize-isolated
+  "tokenizeAsmString's tokens with their IsIsolatedToken: [[TOKEN ISOLATED] ...] (X86's variants: no break characters,
+  `[]*!` tokenizing, blank, tab and comma separating), `${name}` as `$name`."
+  [^String s]
+  (let [out (java.util.ArrayList.) n (.length s)
+        tokch #{\[ \] \* \!} sep #{\space \tab \,}
+        add! (fn [t iso] (.add out [(if (and (.startsWith ^String t "${") (.endsWith ^String t "}")) (str "$" (subs t 2 (dec (count t)))) t) iso]))]
+    (loop [i 0 prev 0 in false iso true]
+      (if (>= i n)
+        (do (when (and in (< prev n)) (add! (subs s prev) iso)) (vec out))
+        (let [c (.charAt s i)]
+          (cond
+            (tokch c) (do (when in (add! (subs s prev i) iso))
+                          (add! (str c) (if in false iso))
+                          (recur (inc i) (inc i) false true))
+            (sep c) (do (when in (add! (subs s prev i) iso)) (recur (inc i) (inc i) false true))
+            (= c \\) (do (when in (add! (subs s prev i) false))
+                         (add! (subs s (inc i) (+ i 2)) (if in false iso))
+                         (recur (+ i 2) (+ i 2) false false))
+            (= c \$) (let [iso2 (if in false iso)]
+                       (when in (add! (subs s prev i) iso))
+                       (if (and (< (inc i) n) (= \{ (.charAt s (inc i))))
+                         (let [e (.indexOf s "}" (int i))]
+                           (add! (subs s i (inc e)) iso2)
+                           (recur (inc e) (inc e) false false))
+                         (recur (inc i) i false iso2)))
+            :else (recur (inc i) prev true iso)))))))
+
+;; the two parser variants of X86.td (ATTAsmParserVariant, IntelAsmParserVariant): number, name, register prefix, comment
+(def variants {0 {:no 0 :name "att" :prefix "%" :comment "#"} 1 {:no 1 :name "intel" :prefix "" :comment ";"}})
+
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; operands
 
@@ -218,14 +249,15 @@
   another) left out. A condition is [:ignore], [:imm V], [:reg R] (nil: no register), [:rc CLASS [REG ...]],
   [:tied OPERAND] or [:custom OPERAND-RECORD]; the fragments are asm-writer's, an operand [MI-OPERAND PRINT-METHOD]
   (nil: printOperand)."
-  [aliases operand-list ties set-of]
+  ([aliases operand-list ties set-of] (print-aliases aliases operand-list ties set-of 0))
+  ([aliases operand-list ties set-of variant]
   (let [iap (fn [a]
               (let [res (f a "ResultInst")
                     ri (tg/dag-op res)
                     ol (operand-list ri)
                     tie (ties (f ri "Constraints"))
-                    flat-inst (flatten-variant (f ri "AsmString") 0)
-                    flat (unescape-alias (flatten-variant (f a "AsmString") 0))]
+                    flat-inst (flatten-variant (f ri "AsmString") variant)
+                    flat (unescape-alias (flatten-variant (f a "AsmString") variant))]
                 (when (>= (count-operands flat-inst) (count-operands flat))
                   (let [listed (vec (remove (fn [o] (and (= 1 (:n o))
                                                          (when-let [t (some #(when (= (:name %) (tie (:name o))) %) ol)]
@@ -284,7 +316,7 @@
                                                      x))
                                          iaps)]
                 :when (seq uniq)]
-            [rname (mapv (juxt :frags :n :conds) uniq)]))))
+            [rname (mapv (juxt :frags :n :conds) uniq)])))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the classes (AsmMatcherInfo::buildClassInfo, buildRegisterClasses, buildOperandClasses)
@@ -326,29 +358,35 @@
                        (tg/subclass? v "Operand") [:user (:name (ucls (fname v "ParserMatchClass")))]
                        :else (throw (ex-info (str "no class for " (rn v)) {}))))
           ;; a matchable from an AT&T string, operand lookup by name
-          matchable (fn [kind name ^String s op-of res-preds]
-                      (let [toks (tokenize (flatten-variant s 0))
-                            mn (str/lower-case (first toks))
-                            ops (mapv (fn [t]
+          ;; a matchable from the variant `v`'s string, operand lookup by name; a singleton register: AT&T's `%NAME`, Intel's
+          ;; an isolated token that names a register (extractSingletonRegisterForAsmOperand)
+          matchable (fn [v kind name ^String s op-of res-preds]
+                      (let [toks (tokenize-isolated (flatten-variant s (:no v)))
+                            mn (str/lower-case (ffirst toks))
+                            single (fn [^String t iso]
+                                     (when iso
+                                       (if (= "" (:prefix v))
+                                         (reg-names (str/lower-case t))
+                                         (when (.startsWith t "%") (reg-names (str/lower-case (subs t 1)))))))
+                            ops (mapv (fn [[t iso]]
                                         (cond
                                           (.startsWith ^String t "$") (let [o (op-of (subs t 1))]
                                                                         (when-not o (throw (ex-info (str name ": unknown operand " t) {})))
                                                                         {:asm t :class (class-of (:rec o))})
-                                          (and (.startsWith ^String t "%") (reg-names (str/lower-case (subs t 1))))
-                                          {:asm t :class [:single (reg-names (str/lower-case (subs t 1)))]}
+                                          (single t iso) {:asm t :class [:single (single t iso)]}
                                           :else {:asm t :class [:token t]}))
                                       (rest toks))]
                         {:kind kind :name name :mn mn :ops ops :preds res-preds}))
-          ms-insn (for [r insns
+          ms-insn-of (fn [v] (for [r insns
                         :let [s (f r "AsmString")]
                         :when (and (string? s) (not= "" s)
                                    (not= 1 (bit (f r "isCodeGenOnly")))
-                                   (#{"" "att"} (f r "AsmVariantName")))
+                                   (#{"" (:name v)} (f r "AsmVariantName")))
                         :let [ol (operand-list r)
                               by-name (into {} (map (juxt :name identity) ol))
-                              flat (flatten-variant s 0)]
-                        :when (not (.contains flat "#"))
-                        :let [m (try (matchable :insn (tg/rec-name r) s by-name (preds r))
+                              flat (flatten-variant s (:no v))]
+                        :when (not (.contains flat ^String (:comment v)))
+                        :let [m (try (matchable v :insn (tg/rec-name r) s by-name (preds r))
                                      (catch arbace.lang.ExceptionInfo e {:skip (.getMessage e)}))]
                         :when (not (:skip m))
                         ;; tied operands written twice: not matched (validate)
@@ -363,11 +401,11 @@
                                                   (map (fn [j] [:t (+ (:ix t) j)]) (range (:n o)))
                                                   (repeat (:n o) [:z]))))
                                             ol))]
-                      (assoc m :inst (tg/rec-name r) :conv conv :id (tg/rec-id r) :pos (= 1 (bit (f r "HasPositionOrder"))))))
+                      (assoc m :inst (tg/rec-name r) :conv conv :id (tg/rec-id r) :pos (= 1 (bit (f r "HasPositionOrder")))))))
           insn-by-name (into {} (map (juxt tg/rec-name identity) insns))
-          ms-alias (for [a aliases
+          ms-alias-of (fn [v] (for [a aliases
                          :let [s (f a "AsmString") res (f a "ResultInst")]
-                         :when (and (string? s) (#{"" "att"} (f a "AsmVariantName")) (not (.contains (flatten-variant s 0) "#")))
+                         :when (and (string? s) (#{"" (:name v)} (f a "AsmVariantName")) (not (.contains (flatten-variant s (:no v)) ^String (:comment v))))
                          :let [ri (tg/dag-op res)
                                ol (operand-list ri)
                                tie (ties (f ri "Constraints"))
@@ -378,7 +416,7 @@
                                               ol)
                                args (tg/dag-args res)
                                arg-of (into {} (keep (fn [[v nm]] (when nm [nm {:rec v :n 1}])) args))
-                               m (try (matchable :alias (tg/rec-name a) s arg-of (preds a))
+                               m (try (matchable v :alias (tg/rec-name a) s arg-of (preds a))
                                       (catch Throwable e {:skip (.getMessage e)}))]
                          :when (and (not (:skip m)) (= (count listed) (count args)))]
                      (let [asm-ix (into {} (keep-indexed (fn [k o] (when (.startsWith ^String (:asm o) "$") [(subs (:asm o) 1) k])) (:ops m)))
@@ -394,10 +432,11 @@
                                                  (let [t (some #(when (= (:name %) (tie (:name o))) %) ol)]
                                                    (map (fn [j] [:t (+ (:ix t) j)]) (range (:n o))))))
                                              ol))]
-                       (assoc m :inst (tg/rec-name ri) :conv conv :id (tg/rec-id ri) :pos (= 1 (bit (f ri "HasPositionOrder"))))))
-          ms (vec (concat ms-insn ms-alias))
+                       (assoc m :inst (tg/rec-name ri) :conv conv :id (tg/rec-id ri) :pos (= 1 (bit (f ri "HasPositionOrder")))))))
+          ms (vec (concat (ms-insn-of (variants 0)) (ms-alias-of (variants 0))))
+          ms-intel (vec (concat (ms-insn-of (variants 1)) (ms-alias-of (variants 1))))
           ;; the classes used
-          used (distinct (mapcat (fn [m] (map :class (:ops m))) ms))
+          used (distinct (mapcat (fn [m] (map :class (:ops m))) (concat ms ms-intel)))
           rc-set (fn [n] (set-of (tg/lookup-def n)))
           rc-names (into {} (for [rc rcs] [(tg/rec-name rc) (set (set-of rc))]))
           ;; a register class's ValueName: the named classes of the same set, joined (in record order)
@@ -450,7 +489,18 @@
                              (not= (count (:preds a)) (count (:preds b))) (> (count (:preds a)) (count (:preds b)))
                              :else false))))))
           sorted (stable-sort before ms)
-          used-insns (distinct (map :inst sorted))
+          sorted-intel (stable-sort before ms-intel)
+          used-insns (distinct (map :inst (concat sorted sorted-intel)))
+          match-row (fn [m] [(:mn m) (mapv (fn [o] (class-key (:class o))) (:ops m))
+                             (:inst m) (:conv m) (:preds m) (when (= :alias (:kind m)) (:name m))])
+          ;; MnemonicAlias (applyMnemonicAliases) of a variant: FROM -> [[PREDICATES TO] ...], the conditional ones first, in record order
+          mnemonic-aliases (fn [vname]
+                             (let [ms (for [r (sort-by tg/rec-name recs)
+                                            :when (and (tg/subclass? r "MnemonicAlias") (#{"" vname} (f r "AsmVariantName")))]
+                                        [(f r "FromMnemonic") (preds r) (f r "ToMnemonic")])]
+                               (into (sorted-map) (for [[from xs] (group-by first ms)]
+                                                    [from (vec (concat (for [[_ p to] xs :when (seq p)] [p to])
+                                                                       (for [[_ p to] xs :when (empty? p)] [p to])))]))))
           enc (fn [r]
                 (let [m {:opcode (fint r "Opcode") :form (fname r "Form") :map (fname r "OpMap") :prefix (fname r "OpPrefix")
                          :opsize (fname r "OpSize") :adsize (fname r "AdSize") :enc (fname r "OpEnc") :imm (fname r "ImmT")
@@ -466,6 +516,7 @@
                   (cond-> (into {} (remove (fn [[k v]] (or (nil? v) (and (= k :cd8) (zero? (long v))))) m))
                     (seq flags) (assoc :flags (vec flags))
                     true (assoc :print (asm-writer (flatten-variant (f r "AsmString") 0) (into {} (map (juxt :name identity) ol))))
+                    true (assoc :print-intel (asm-writer (flatten-variant (f r "AsmString") 1) (into {} (map (juxt :name identity) ol))))
                     true (assoc :ops (mapv (fn [o] [(:name o) (rn (:rec o)) (:n o)]) ol)
                                 :defs (count (tg/dag-args (f r "OutOperandList"))))
                     (seq tie) (assoc :ties (vec (for [o ol :let [t (tie (:name o))] :when t
@@ -487,17 +538,14 @@
                                                      (f r "PredicateName")]]))
        :insns (into (sorted-map) (for [n used-insns] [n (enc (insn-by-name n))]))
        ;; MnemonicAlias (applyMnemonicAliases): FROM -> [[PREDICATES TO] ...], the conditional ones first, in record order
-       :aliases (let [ms (for [r (sort-by tg/rec-name recs)
-                               :when (and (tg/subclass? r "MnemonicAlias") (#{"" "att"} (f r "AsmVariantName")))]
-                           [(f r "FromMnemonic") (preds r) (f r "ToMnemonic")])]
-                  (into (sorted-map) (for [[from xs] (group-by first ms)]
-                                       [from (vec (concat (for [[_ p to] xs :when (seq p)] [p to])
-                                                          (for [[_ p to] xs :when (empty? p)] [p to])))])))
+       :aliases (mnemonic-aliases "att")
        ;; the printer's aliases (printAliasInstr), by the instruction they print
        :print-aliases (print-aliases aliases operand-list ties set-of)
-       :match (mapv (fn [m] [(:mn m) (mapv (fn [o] (class-key (:class o))) (:ops m))
-                             (:inst m) (:conv m) (:preds m) (when (= :alias (:kind m)) (:name m))])
-                    sorted)}))))
+       :match (mapv match-row sorted)
+       ;; the Intel variant (AX3): its mnemonic aliases, printAliasInstr of X86GenAsmWriter1 and MatchTable1
+       :aliases-intel (mnemonic-aliases "intel")
+       :print-aliases-intel (print-aliases aliases operand-list ties set-of 1)
+       :match-intel (mapv match-row sorted-intel)}))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the committed form
@@ -537,6 +585,18 @@
     (line " :match")
     (line " [")
     (doseq [m (:match t)] (line "  " (pr-str m)))
+    (line " ]")
+    (line " :aliases-intel")
+    (line " {")
+    (doseq [[k v] (:aliases-intel t)] (line "  " (pr-str k) " " (pr-str v)))
+    (line " }")
+    (line " :print-aliases-intel")
+    (line " {")
+    (doseq [[k v] (:print-aliases-intel t)] (line "  " (pr-str k) " " (pr-str v)))
+    (line " }")
+    (line " :match-intel")
+    (line " [")
+    (doseq [m (:match-intel t)] (line "  " (pr-str m)))
     (line " ]}")
     (str sb)))
 

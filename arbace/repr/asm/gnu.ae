@@ -298,6 +298,13 @@
             (and (> k 1) (= \return (.charAt src (int (dec k)))) (= \\ (.charAt src (int (- k 2))))) (recur (inc k))
             :else (if (and (pos? k) (= \return (.charAt src (int (dec k))))) (dec k) k)))))
 
+(def ^:dynamic *equ*
+  "The assignments read so far (`x = e`, `.set x, e`, `.equ x, e`): name -> expression, for Intel's symbol rule."
+  {})
+
+;; the syntax in force while items are printed in order (`.intel_syntax`, `.att_syntax`), a volatile bound by the caller
+(def ^:dynamic *syntax* nil)
+
 (defn read-items
   "The items of an assembly text: [[FORM START END] ...]. `insn` reads an instruction: (insn TOKENS I STATE) -> FORM;
   `state` an atom of {:syntax :att|:intel :macros #{...}}. `opts`: {:cpp true} for a text of the C preprocessor (a `.S`,
@@ -306,7 +313,7 @@
   {:req true} AArch64's `NAME .req REGISTER` (asm/reg-alias NAME REGISTER)."
   ([^String src insn] (read-items src insn nil))
   ([^String src insn opts]
-  (let [state (atom {:syntax :att :macros #{} :defines #{}})
+  (let [state (atom {:syntax (or (:syntax opts) :att) :macros #{} :defines #{} :equ {}})
         cpp? (:cpp opts)
         raw (into raw-directives (:raw opts))
         cur (volatile! 0)]
@@ -383,6 +390,7 @@
             (let [[e j] (parse-expr ts (+ i 2) true)
                   x (case (lex/kind t) :string (list 'sym (lex/value t)) :dot (list 'asm/dot) (sym-form (lex/value t)))]
               (when (< (long j) n) (fail "junk after an assignment" {:at j}))
+              (when (= :ident (lex/kind t)) (swap! state assoc-in [:equ (lex/value t)] e))
               (recur (long next) (conj! out [(list (if (lex/punct? (tok ts (inc i)) "=") 'asm/= 'asm/==) x e)
                                              (lex/start t) (lex/end (peek ts))])))
 
@@ -402,6 +410,8 @@
                              (if (re-matches #"[A-Za-z_][A-Za-z0-9_.$]*" d)
                                (apply list (symbol "asm" d) (parse-dir-args ts (inc i)))
                                (apply list 'asm/directive d (parse-dir-args ts (inc i)))))]
+                  (when (and (#{"set" "equ"} d) (seq? form) (= 3 (count form)) (symbol? (second form)))
+                    (swap! state assoc-in [:equ (name (second form))] (nth form 2)))
                   (case d
                     "intel_syntax" (swap! state assoc :syntax :intel)
                     "att_syntax" (swap! state assoc :syntax :att)
@@ -410,9 +420,11 @@
                   (recur (long next) (conj! out [form (lex/start t) (lex/end (peek ts))])))))
 
             :else
-            (do (when (= :intel (:syntax @state))
+            (do (when (and (= :intel (:syntax @state)) (not (:intel opts)))
                   (fail "Intel syntax (AX3)" {:class :intel}))
-                (recur (long next) (conj! out [(insn ts i) (lex/start t) (lex/end (peek ts))]))))))))
+                (recur (long next) (conj! out [(binding [*equ* (:equ @state)]
+                                                  (if (= :intel (:syntax @state)) ((:intel opts) ts i) (insn ts i)))
+                                               (lex/start t) (lex/end (peek ts))]))))))))
     (catch arbace.lang.ExceptionInfo e
       (let [line (inc (count (filter #(= \newline %) (subs src 0 (int @cur)))))]
         (throw (ex-info (str (.getMessage e) " (line " line ")") (ex-data e)))))))))
@@ -424,6 +436,8 @@
   "An item's canonical text (no indentation); `insn-text` prints an instruction."
   ^String [f insn-text]
   (let [h (first f)]
+    (when *syntax*
+      (case h asm/intel_syntax (vreset! *syntax* :intel) asm/att_syntax (vreset! *syntax* :att) nil))
     (cond
       (= h 'asm/label) (let [x (second f)] (str (if (integer? x) (str x) (name-text x)) ":"))
       (#{'asm/= 'asm/==} h) (str (name-text (second f)) (if (= h 'asm/=) " = " " == ") (expr-text (nth f 2)))

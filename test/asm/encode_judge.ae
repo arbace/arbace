@@ -13,21 +13,24 @@
        ";; llvm-mc): :stated, :met, the rest by class (:by, test/asm/divergences-encode.edn), the error tests' `error:` lines met of stated\n"
        ";; (:errors), the met encodings by the instruction's encoding (:fam); the print level (AX2's third slice) under :text, its CHECK texts\n"
        ";; (each CHECK line's text before an `encoding:`) held to the instructions printed in AT&T syntax: :stated, :met, the rest by class\n"
-       ";; (:by, test/asm/divergences-print.edn). Written by `bin/repr-asm encode-check --record`. Read with the Clojure reader.\n"))
+       ";; (:by, test/asm/divergences-print.edn), in Intel syntax for the runs that print Intel (AX3); the cross-syntax judge (AX3) under\n"
+       ";; :cross, each AT&T instruction printed in Intel and read back to the same machine instruction: :stated, :met, the rest by class\n"
+       ";; (:by, test/asm/divergences-cross.edn). Written by `bin/repr-asm encode-check --record`. Read with the Clojure reader.\n"))
 
-(def failing #{:mismatch :rejected :crash :unpaired})
+(def failing #{:mismatch :rejected :crash :unpaired :intel-unread})
 
 (defn- read-run [work corpus]
   (vec (for [l (str/split-lines (slurp (str work "/encode.tsv"))) :when (seq l)
-             :let [[n st met by errs fam text crash] (str/split l #"\t")]]
+             :let [[n st met by errs fam text cross crash] (str/split l #"\t")]]
          [(str corpus "/" n)
           (cond-> {:stated (Long/parseLong st) :met (Long/parseLong met) :by (read-string by)}
             (not= "nil" errs) (assoc :errors (read-string errs))
             (and fam (not= "{}" fam)) (assoc :fam (read-string fam))
             (and text (not= "nil" text)) (assoc :text (read-string text))
+            (and cross (not= "nil" cross)) (assoc :cross (read-string cross))
             crash (assoc :crash crash))])))
 
-(defn main [results works classes-path record & [pclasses-path]]
+(defn main [results works classes-path record & [pclasses-path xclasses-path]]
   (let [run (vec (mapcat (fn [w] (read-run w (.getName (java.io.File. ^String w)))) (str/split works #" ")))
         corpora (set (map #(first (str/split (first %) #"/")) run))
         old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
@@ -36,6 +39,7 @@
         runm (into {} run)
         classes (set (map :id (read-string (slurp classes-path))))
         pclasses (if pclasses-path (set (map :id (read-string (slurp pclasses-path)))) #{})
+        xclasses (if xclasses-path (set (map :id (read-string (slurp xclasses-path)))) #{})
         problems (atom [])
         tot (fn [k] (reduce + (map (comp k second) run)))]
     (println (str "repr-asm encode-check: " (tot :met) " of " (tot :stated) " stated encodings met, "
@@ -46,19 +50,25 @@
     (let [ts (keep (comp :text second) run)]
       (println (str "repr-asm encode-check: the print level: " (reduce + (map :met ts)) " of " (reduce + (map :stated ts))
                     " CHECK texts met, the rest " (pr-str (into (sorted-map) (apply merge-with + (map :by ts)))))))
+    (let [ts (keep (comp :cross second) run)]
+      (println (str "repr-asm encode-check: the cross-syntax judge: " (reduce + (map :met ts)) " of " (reduce + (map :stated ts))
+                    " AT&T instructions read back from their Intel print, the rest " (pr-str (into (sorted-map) (apply merge-with + (map :by ts)))))))
     (doseq [[i r] run]
       (doseq [k (keys (:by (:text r))) :when (not (pclasses k))] (swap! problems conj (str "unclassed (print): " i " " k)))
+      (doseq [k (keys (:by (:cross r))) :when (not (xclasses k))] (swap! problems conj (str "unclassed (cross): " i " " k)))
       (when (:crash r) (swap! problems conj (str "crash: " i " " (:crash r))))
       (doseq [k (keys (:by r)) :when (not (classes k))] (swap! problems conj (str "unclassed: " i " " k))))
     ;; a record is written only from a run with no failure at either level
     (when (seq record)
       (doseq [[i r] run c failing]
         (when (pos? (long (get (:by r) c 0))) (swap! problems conj (str "not recordable: " i " " (name c) " " (get (:by r) c))))
-        (when (pos? (long (get (:by (:text r)) c 0))) (swap! problems conj (str "not recordable: " i " print level " (name c) " " (get (:by (:text r)) c))))))
+        (when (pos? (long (get (:by (:text r)) c 0))) (swap! problems conj (str "not recordable: " i " print level " (name c) " " (get (:by (:text r)) c))))
+        (when (pos? (long (get (:by (:cross r)) c 0))) (swap! problems conj (str "not recordable: " i " cross-syntax " (name c) " " (get (:by (:cross r)) c))))))
     (if (and (seq record) (empty? @problems))
       (let [rows (sort-by first (concat (remove in-run? old) run))]
         (spit results (str header "[\n" (apply str (map (fn [[i r]] (str "[" (pr-str i) " " (pr-str (into (sorted-map) (cond-> (update r :by #(into (sorted-map) %))
-                                                                                 (:text r) (update :text (fn [t] (into (sorted-map) (update t :by #(into (sorted-map) %)))))))) "]\n")) rows)) "]\n"))
+                                                                                 (:text r) (update :text (fn [t] (into (sorted-map) (update t :by #(into (sorted-map) %)))))
+                                                                                 (:cross r) (update :cross (fn [t] (into (sorted-map) (update t :by #(into (sorted-map) %)))))))) "]\n")) rows)) "]\n"))
         (println (str "repr-asm: recorded " (count run) " rows into " results)))
       (do
         (doseq [[i r] run :let [o (oldm i)]]
@@ -75,6 +85,12 @@
                     (when (< (long (or (:met rt) 0)) (long (:met ot))) (swap! problems conj (str i ": print level met " (:met rt) ", recorded " (:met ot))))
                     (doseq [c failing :when (> (long (get (:by rt) c 0)) (long (get (:by ot) c 0)))]
                       (swap! problems conj (str i ": print level " (name c) " " (get (:by rt) c) ", recorded " (get (:by ot) c 0))))))
+                (let [ox (:cross o) rx (:cross r)]
+                  (when ox
+                    (when (not= (:stated ox) (:stated rx)) (swap! problems conj (str i ": cross-syntax stated " (:stated rx) ", recorded " (:stated ox))))
+                    (when (< (long (or (:met rx) 0)) (long (:met ox))) (swap! problems conj (str i ": cross-syntax met " (:met rx) ", recorded " (:met ox))))
+                    (doseq [c failing :when (> (long (get (:by rx) c 0)) (long (get (:by ox) c 0)))]
+                      (swap! problems conj (str i ": cross-syntax " (name c) " " (get (:by rx) c) ", recorded " (get (:by ox) c 0))))))
                 (when (and (:errors o) (< (long (first (:errors r [0 0]))) (long (first (:errors o)))))
                   (swap! problems conj (str i ": error lines met " (first (:errors r)) ", recorded " (first (:errors o))))))))
         (doseq [[i] oldm :when (not (contains? runm i))] (swap! problems conj (str "recorded, not run: " i)))))

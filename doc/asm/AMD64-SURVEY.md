@@ -816,3 +816,75 @@ Not built in this slice: the asm streamer's directives, labels and comments (cla
 - **AXS33 VEX map 7 under `:apx`.** USERMSR's and MSR_IMM's VEX map 7 forms (`urdmsr $123, %r9`) are classed `:apx` at both levels
   though they are VEX: (a) encode VEX map 7 with APX's slice and keep the class until then; (b) a class of its own now. *Recommended:
   (a)*: a handful of lines, and the APX slice touches the same map decoding.
+
+## As built: AX3 (2026-11-10; branch `asm-ax3`)
+
+On the light lane (stage 0, one run at a time, under 1.5 GiB, no lock, no LLVM tool in any check), AXS17-AXS33 still unanswered and
+followed as recommended where they touch this slice. llvm-project 23.1.5's X86AsmParser Intel path (parseIntelOperand,
+ParseIntelMemoryOperandSize, ParseIntelExpression with IntelExprStateMachine and InfixCalculator, ParseIntelDotOperator,
+HandleAVX512Operand, matchAndEmitIntelInstruction, parseInstruction's Intel branches), X86IntelInstPrinter.{cpp,h},
+X86MCTargetDesc.cpp's populateReservedIdentifiers and AsmMatcherEmitter.cpp's variant handling (tokenizeAsmString's isolated tokens,
+extractSingletonRegisterForAsmOperand with an empty register prefix) read from the pinned tarball and written again in Arbace; no code
+copied. doc/asm/SPEC.md §5a and doc/asm/AMD64.md describe what was built.
+
+- **The table regenerated** with the Intel variant (`arbace.asm.amd64.gen`): `:match-intel` (MatchTable1: each instruction and
+  InstAlias of the variants `""` and `intel`, the string flattened to variant 1, a singleton register any isolated token naming one,
+  `;` the comment delimiter), `:aliases-intel` (the MnemonicAliases of `intel`), `:print-aliases-intel` (X86GenAsmWriter1's
+  printAliasInstr) and each instruction's `:print-intel` (its variant-1 AsmString's fragments). The AT&T parts are unchanged
+  (`:match` row for row, the classes, `:insns` but the new field). Oracle by hand (`bin/repr-asm table oracle`, extended): llvm-tblgen's
+  MatchTable0 23,014 of 23,014 rows and **MatchTable1 22,609 of 22,609** in the same order, printAliasInstr 3 of 3 for each writer.
+  `table check` byte for byte (2.6 minutes, 1.3 GiB).
+- **The reader** (`arbace.repr.asm.amd64.intel`): Intel instructions into forms in the text's order (the SDM's, as AT&T's reversed
+  forms are), `ptr` sizes, segment overrides, `[base + index*scale + disp]` and its spellings (`16[rbx]`, `[eax][ebx*4]`, `[ebx].4`),
+  the calculator's precedence, the registers taken out of the sum as the state machine takes them, decorations, rounding operands, `short`,
+  `acquire`/`release`; MASM's symbol rule (P3) as llvm-mc applies it, the constants assigned so far inlined (`gnu/*equ*`). A file is read
+  in Intel when its first llvm-mc run reads it so (`-x86-asm-syntax=intel` or `-x86-asm-syntax intel`, in that run's own command, not a
+  later llvm-mc of the pipe), and `.intel_syntax`/`.att_syntax` switch the reader and the printer item by item.
+- **The matcher**: Intel's operands (no reversal, the address swaps of parseIntelOperand, `rip` refused as an operand, `:nodirect` for a
+  bracketed or sized `jmp`/`call` target), Sym + Imm as the state machine computes it (`intel-value`), matchAndEmitIntelInstruction (the
+  pointer-sized `call`/`jmp`/`push`/`pop`, push of a constant matched in AT&T's table, the unsized memory operand tried at each size, the
+  ambiguous-size and other messages), the comparison predicate appended last, the string instructions' defaults in Intel order, `xlat
+  mem8` as `xlatb` (both syntaxes).
+- **The printer**: X86IntelInstPrinter (printOperand with `offset`, printMemReference, the `print*mem` size words, the string indexes,
+  the memory offsets, printU8Imm, printSTiRegOperand, printVecCompareInstr's Intel layout, the Intel aliases), Intel's quoting of
+  reserved identifiers.
+- **The cross-syntax judge** (`cross-judge`, a third level of `encode-check`, the rows' `:cross`): every matched instruction of each
+  file's first AT&T run printed in Intel, read back by the Intel reader and matched in the same mode must be the same machine instruction;
+  `test/asm/divergences-cross.edn` (the by-design classes are llvm-mc's own, each with its oracle by hand), `test/asm/controls-cross.txt`
+  (three controls), and two Intel controls each in `controls-encode.txt` and `controls-print.txt`; all fail as they must.
+
+| `MC/X86` | AX2 (third slice) | AX3 | failing |
+|---|---|---|---:|
+| round trip (621 files) | 464 pass, 152 `:intel` | **609 pass**; 9 error tests, 2 lexer options (`-masm-integers`), 1 not input | 0 |
+| stated encodings (106,075) | 81,966 met; `:intel` 20,725, `:apx` 3,383 | **99,509 met** (EVEX 64,953, VEX 18,693, legacy 14,071, XOP 1,792); `:apx` 6,565, `:no-run` 1 | 0 |
+| CHECK texts (108,601) | 82,838 met; `:intel` 21,318 | **100,884 met**; `:apx` 4,245, `:directive` 2,425, `:other-tool` 772, `:comment` 119, `:unread` 74, `:lfi` 61, `:options` 13, other 8 | 0 |
+| cross-syntax (83,505 AT&T instructions) | none | **82,765 read back**; `:ambiguous` 566, `:pcrel-imm` 118, `:mask-operand` 32, `:other-instruction` 21, `:dollar-name` 2, `:local-label` 1 | 0 |
+| error tests' `error:` lines | 63 of 108 | 74 of 130 (more files read) | 56 pending |
+
+`MC/AsmParser`: 140 of 157 pass (139 before; `directive_seh`'s AT&T file no longer taken for Intel by a later llvm-mc of its pipe).
+`:intel` is now empty at all three levels (kept for an Intel file the reader refuses). The first whole encode run met every Intel
+encoding but printed one text wrong (`msg+-89793`: Sym + a negative Imm is LLVM's subtraction) and the first cross run failed 41: the
+judge took the run's mode for statements after `.code32` (fixed: each statement's own mode), and the rest were llvm-mc's own, confirmed by
+hand with llvm-mc 23.1.5 (`-output-asm-variant=1`, then `-x86-asm-syntax=intel`): `vgatherpf0dps {k1}, ...`, `[3+$foo@ABS8]`, `je 0`,
+`call [rax]` for `lcall`, `mov ax, cs`, `pop ss` read as POPSS16, `vmovups.s` printed as `vmovups`. AR1's round trip gives the same rows;
+`bin/reap` (0 problems), `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` pass. The
+encode check with its two text levels takes about 1.6 minutes (four threads, under 1.5 GiB).
+
+Not built in this slice: MASM (`-masm-integers`, `.MODEL`, MS inline assembly's identifiers), the error tests' remaining messages, APX,
+gas's mode, the streamer's directives.
+
+### Proposed (AX3)
+
+- **AXS34 The cross-syntax judge's by-design classes.** The judge's verdict is the machine instruction read back from the Intel print;
+  llvm-mc itself fails it where its Intel printer writes text its parser reads otherwise. (a) as built: the judge classes such a case by
+  a rule on the instruction and its print (`:ambiguous` the same text, `:other-instruction` another opcode, `:pcrel-imm`,
+  `:mask-operand`, `:dollar-name`), by design, each class's examples checked against llvm-mc by hand; (b) the judge compares encodings
+  instead of instructions (hides `_REV` and the masked immediates but not the far jumps); (c) a recorded list of the cases llvm-mc fails,
+  made by the oracle tier. *Recommended: (a)*: the rules are the printer's and parser's own asymmetries, a bug of Arbace's printer or
+  reader that keeps the opcode and changes an operand still fails (`:mismatch`), and the oracle by hand confirms each class.
+- **AXS35 MASM integers.** `-masm-integers` (`10h`, `0B0h`; `intel-syntax-hex`, `pr27884`): (a) a lexer option of the reader when a RUN
+  line names it, AsmLexer's LexMasmIntegers ported; (b) keep them under `:lexer-option` with `-motorola-integers`. *Recommended: (b)*
+  until a corpus beyond these two tests needs it.
+- **AXS36 The Intel forms' operand order.** (a) as built: Intel's forms in the text's order and AT&T's reversed, so both are the SDM's
+  order and the machine level is one; (b) Intel's reversed too, a form being the text's syntax in a fixed order. *Recommended: (a)*: the
+  survey's machine-level forms (AXS2 (a)) want the one order, and the AT&T reader already makes it.
