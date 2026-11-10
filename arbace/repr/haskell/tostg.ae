@@ -295,6 +295,17 @@
           :else [:L]))
       [:L])))
 
+(defn- newtype-unwrap
+  "A newtype's application as its representation type (instNewTyCon_maybe; STG sees through newtypes), else nil"
+  [t]
+  (when (= :tc (first t))
+    (let [[_ n args] t i (get (:tycons *r*) n)]
+      (when (= 'newtype (:flavour i))
+        (when-let [ct (let [c (first (:cons i))] (or (get (:genv *r*) c) (get (:types *r*) c)))]
+          (let [[tvs body] (if (= :forall (first ct)) [(nth ct 1) (nth ct 3)] [[] ct])]
+            (when (fun-ty? body)
+              (@#'tc/subst (if args (zipmap tvs args) {}) (first (nth body 2))))))))))
+
 (defn- result-type
   "A type after n arguments (dictionary arguments first), or nil"
   [t n]
@@ -305,6 +316,11 @@
           (cond (zero? k) t
                 (= :forall (first t)) (recur (nth t 3) k)
                 (fun-ty? t) (recur (second (nth t 2)) (dec k))
+                ;; a synonym of a function type (HF10-P20: Latin1's DecodeBuffer# = ... -> DecodingBuffer#, itself
+                ;; State# RealWorld -> (# ... #))
+                (not= t (expand-syn t)) (recur (expand-syn t) k)
+                ;; a newtype of one (ST s a = ST (STRep s a))
+                (newtype-unwrap t) (recur (newtype-unwrap t) k)
                 :else nil)))))
 
 (defn- arg-types
@@ -312,7 +328,63 @@
   [t]
   (loop [t (strip-forall t) out []]
     (cond (fun-ty? t) (recur (strip-forall (second (nth t 2))) (conj out (first (nth t 2))))
+          (not= t (expand-syn t)) (recur (strip-forall (expand-syn t)) out)
           :else out)))
+
+(def ^:private kinded-results
+  "HF10-P20, interim: the results of Unsafe.Coerce's representation-polymorphic coercions, whose type variables the
+  signatures kind (a :: TYPE AddrRep), (a :: UnliftedType): the elaborator keeps no type variable's kind (its interfaces
+  write Type), so their representations are named here until kinds are kept (the class `kinds` of P20's tail)"
+  {["GHC.Internal.Unsafe.Coerce" "unsafeCoerceAddr"] [:tc ["ext" "tc" "GHC.Internal.Prim" "Addr#"] []]
+   ["GHC.Internal.Unsafe.Coerce" "unsafeCoerceUnlifted"] [:tc ["ext" "tc" "GHC.Internal.Prim" "ByteArray#"] []]})
+
+(defn- app-type
+  "The type of f applied to args (dictionary arguments first), or nil: the declared result after the arguments; when the
+  result is a type variable before they run out, the variable instantiated by an earlier argument whose declared type
+  ends in it after n arrows: that argument's own type after n arguments (GHC's instantiation; HF10-P20: GHC.Magic's
+  inline, lazy, oneShot, a -> a, bigNatCompare's `inline bignat_compare a b`, an Int#, was taken for a lifted value and
+  bound by a thunk; runRW#'s (State# RealWorld -> o) -> o at runST's STRep s a, an unboxed pair)"
+  [f args]
+  (let [t (cond (and (seq? f) (= 'v (first f))) (or (get (:genv *r*) (second f)) (get (:types *r*) (second f)))
+                (lv? f) (get (:ltypes *r*) f)
+                ;; a cast function (a newtype's field matched: ST's m |> co :: STRep s a): the coercion's target
+                (and (seq? f) (= 'cast (first f)) (map? (nth f 2 nil))) (:r (nth f 2)))]
+    (when t
+      (or (when (and (seq? f) (= 'v (first f)) (vector? (second f)) (seq args))
+            (get kinded-results [(nth (second f) 2) (nth (second f) 3)]))
+          (let [r0 (result-type t (count args))] (when (and r0 (not= :tv (first (strip-forall r0)))) r0))
+          (let [t0 (if (= :forall (first t)) t [:forall [] [] t])
+                p (count (nth t0 2))
+                ats (arg-types t)
+                ;; the arrows from an argument's declared type to the variable v: n, or nil
+                ends-in (fn [at v] (loop [x (strip-forall at) n 0]
+                                     (cond (= x v) n
+                                           (fun-ty? x) (recur (strip-forall (second (nth x 2))) (inc n))
+                                           (not= x (expand-syn x)) (recur (strip-forall (expand-syn x)) n)
+                                           :else nil)))
+                ;; an argument's own type (a variable's, a global's, an application's)
+                type-of (fn [a] (cond (and (seq? a) (= 'app (first a))) (app-type (second a) (nth a 2))
+                                      (and (seq? a) (= 'v (first a))) (or (get (:genv *r*) (second a)) (get (:types *r*) (second a)))
+                                      (lv? a) (get (:ltypes *r*) a)
+                                      (and (seq? a) (= 'cast (first a)) (map? (nth a 2 nil))) (:r (nth a 2))))]
+            (some (fn [k]
+                    (let [r (result-type t k)]
+                      (when (and r (= :tv (first (strip-forall r))))
+                        (let [v (strip-forall r)]
+                          (some (fn [[i at]]
+                                  (when-let [n (ends-in at v)]
+                                    (let [a (nth args (+ p i))]
+                                      (if (zero? n)
+                                        ;; the argument is the result itself, applied to the rest
+                                        (if (and (seq? a) (= 'app (first a)))
+                                          (app-type (second a) (into (vec (nth a 2)) (drop k args)))
+                                          (app-type a (vec (drop k args))))
+                                        (when-let [ta (type-of a)]
+                                          (when-let [o (result-type ta n)]
+                                            (if (= k (count args)) o (result-type o (- (count args) k)))))))))
+                                (map-indexed vector (take (- k p) ats)))))))
+                  (range (inc p) (inc (count args)))))
+          (result-type t (count args))))))
 
 (def ^:dynamic *lreps* nil)   ; atom {(lv ...) reps}: the desugarer's binders' representations, from their right-hand sides
 
@@ -340,14 +412,14 @@
                 (and (head? f 'v) (usum-con (second f)) *body-type*
                      (let [t (expand-syn (strip-forall *body-type*))] (and (= :tc (first t)) (sum-tc? (second t)))))
                 (type-reps *body-type*)
-                (head? f 'v) (if-let [t (some-> (global-type (second f)) (result-type (count args)))] (type-reps t) [:L])
-                (lv? f) (if-let [t (some-> (get (:ltypes *r*) f) (result-type (count args)))] (type-reps t) [:L])
+                (or (head? f 'v) (lv? f) (head? f 'cast)) (if-let [t (app-type f args)] (type-reps t) [:L])
                 :else [:L]))
     case (let [alts (nth e 3)] (if (seq alts) (expr-reps (nth (first alts) 3)) [:L]))
     (let letrec) (expr-reps (nth e 2))
     [:L]))
 
 (def ^:dynamic *multi* nil)   ; atom {(lv ...) [[name rep]...]}: an unboxed tuple's binder unarised into its components
+(def ^:dynamic *njoins* nil)  ; atom #{name}: the nullary join points' names (a jump is an application, not their value)
 (def ^:dynamic *mcomps* nil)  ; atom {(lv ...) [reps...]}: its components' representations, the void ones too
 
 (defn- tuple-ty? [t] (let [t (strip-forall t)] (and (= :tc (first t)) (= "GHC.Internal.Types" (nth (second t) 2)) (re-matches #"Tuple[0-9]+#|Solo#|Unit#" (nth (second t) 3)))))
@@ -359,8 +431,7 @@
     lv (get @*mcomps* e)
     app (let [[_ f args] e
               t (cond (and (head? f 'v) (unboxed-con? (second f))) :con
-                      (head? f 'v) (some-> (global-type (second f)) (result-type (count args)))
-                      (lv? f) (some-> (get (:ltypes *r*) f) (result-type (count args))))]
+                      (or (head? f 'v) (lv? f) (head? f 'cast)) (app-type f args))]
           (cond (= :con t) (mapv expr-reps args)
                 (and t (tuple-ty? t)) (mapv type-reps (nth (strip-forall t) 2))
                 (and t (let [t (strip-forall t)] (and (= :tc (first t)) (sum-tc? (second t)))))
@@ -524,7 +595,11 @@
     (not= [:L] (expr-reps a))
     (let [rs (expr-reps a) r (reps->rep rs) n (fresh "sat")]
       (swap! *reps* assoc n r)
-      [n [[:case n r (expr a)]]])
+      ;; a void argument (a State# token's computation): evaluated by a case on (##), the argument void# (Unarise
+      ;; erases the void binder; HF10-P20: bignat_quotrem's mwaTrimZeroes# result passed on was an unbound sat)
+      (if (empty? rs)
+        [(void-atom) [[:case n :v (expr a) '(multi 0)]]]
+        [n [[:case n r (expr a)]]]))
     ;; an argument of lifted lets around a value: the lets float out of it (CorePrep's cpeArg, wantFloatNested: lazy
     ;; floats and a value)
     (and (head? a 'let) (let [inner (loop [x a] (if (and (head? x 'let) (= 1 (count (second x)))) (recur (nth x 2)) x))]
@@ -554,7 +629,8 @@
                 ;; a case float (CorePrep's CaseBound Float): marked, so that a case on it floats it out of its scrutinee;
                 ;; the floats of its own right-hand side float out with it (cpeArg's floats join the enclosing ones)
                 (float-scrut ex
-                  (fn [ex] (with-meta (list 'case ex [x rep] (or at (if (vector? rep) (list 'multi (count rep)) (prim-alt rep))) [(list 'alt :default [] b)])
+                  (fn [ex] (with-meta (list 'case ex [x rep] (or at (if (vector? rep) (list 'multi (count rep)) (prim-alt rep)))
+                                            [(list 'alt (if (= '(multi 0) at) (unboxed-name 0) :default) [] b)])
                              {:float true}))))
               (list 'let (list 'bind [n :L] r) b)))
           body (reverse bnds)))
@@ -566,8 +642,7 @@
   [a]
   (when (head? a 'app)
     (let [[_ f args] a
-          t (cond (head? f 'v) (some-> (global-type (second f)) (result-type (count args)))
-                  (lv? f) (some-> (get (:ltypes *r*) f) (result-type (count args))))]
+          t (when (or (head? f 'v) (lv? f) (head? f 'cast)) (app-type f args))]
       (when (and t (tuple-ty? t)) (mapv type-reps (nth (strip-forall t) 2))))))
 
 (defn- with-atoms
@@ -886,6 +961,9 @@
         e (or (sum-rewrite e) e)]
     (case (first e)
       lv (cond (contains? @*joins* (local-name e)) (list 'app (local-name e) [(void-atom)])
+               ;; a nullary join point's jump, whatever its body's representation (HF10-P20: bignat_gcd's void $j was
+               ;; returned as (##), its body never run)
+               (contains? @*njoins* (local-name e)) (list 'app (local-name e) [])
                ;; a variable of a void type returned: Unarise's (##)
                (empty? (local-reps e)) (list 'con (unboxed-name 0) [])
                :else (list 'app (local-name e) []))
@@ -905,6 +983,7 @@
             (let [[_ f fe] (first (second e)) fname (local-name f)
                   [bs body] (if (head? fe 'lam) [(second fe) (nth fe 2)] [[] fe])]
               ;; a nullary join point's binder has its body's type (typePrimRep of the join's result)
+              (when (empty? bs) (swap! *njoins* conj fname))
               (float-past-join (list 'bind [fname (if (empty? bs) (reps->rep (expr-reps body)) :L)] (list 'closure :j :fvs (binders bs) (expr body))) (expr (nth e 2))))
           (if (and (= 1 (count (second e))) (fail-var? (second (first (second e)))))
             ;; a failure handler shared by several alternatives: a join point over the void argument (GHC's
@@ -939,7 +1018,10 @@
                       (swap! *reps* assoc n r)
                       (if (= b (list 'app n []))
                         (expr e2)
-                        (float-scrut (expr e2) (fn [se] (list 'case se [n r] (if (> (count rs) 1) (list 'multi (count rs)) (prim-alt r)) [(list 'alt :default [] b)])))))
+                        (float-scrut (expr e2) (fn [se] (if (empty? rs)
+                                                          ;; a void binder: a case on (##) (Unarise; HF10-P20)
+                                                          (list 'case se [n :v] '(multi 0) [(list 'alt (unboxed-name 0) [] b)])
+                                                          (list 'case se [n r] (if (> (count rs) 1) (list 'multi (count rs)) (prim-alt r)) [(list 'alt :default [] b)]))))))
                     (and (lv? x) (spec-eval e2))
                     (let [n (local-name x)]
                       (swap! *reps* assoc n :L)
@@ -1002,9 +1084,21 @@
                                                       (list 'alt :default [] (expr body)))
                                 (unboxed-con? c)
                                 (let [comps (or (expr-comps s) (mapv local-reps xs))
-                                      bs (vec (keep (fn [[x rs]] (let [_ (swap! *lreps* assoc x rs)]
-                                                              (when (seq rs) (let [n (local-name x) r (reps->rep rs)] (swap! *reps* assoc n r) [n r]))))
-                                                    (map vector xs (concat comps (repeat [:L])))))]
+                                      bs (vec (mapcat (fn [[x rs]]
+                                                        (swap! *lreps* assoc x rs)
+                                                        (cond
+                                                          (empty? rs) []
+                                                          ;; a component of several representations (a nested unboxed
+                                                          ;; tuple, (# (# q1, q0 #), r #)): one binder each, the
+                                                          ;; component's binder standing for them (Unarise; HF10-P20:
+                                                          ;; Native's case on quotRemWord3# bound 2 of its 3 values)
+                                                          (and (> (count rs) 1) (lv? x))
+                                                          (let [cs (vec (for [r rs] (let [n (fresh "ubx")] (swap! *reps* assoc n r) [n r])))]
+                                                            (swap! *mcomps* assoc x (mapv vector rs))
+                                                            (swap! *multi* assoc x cs)
+                                                            cs)
+                                                          :else (let [n (local-name x) r (reps->rep rs)] (swap! *reps* assoc n r) [[n r]])))
+                                                      (map vector xs (concat comps (repeat [:L])))))]
                                   (list 'alt (unboxed-name (count bs)) bs (expr body)))
                                 :else (let [reps (con-reps c)
                                             bs (mapv (fn [x r] (let [n (local-name x)] (swap! *reps* assoc n r) [n r]))
@@ -1066,6 +1160,9 @@
               (do (float! rs) (list 'rcon (gname c) (rename rs)))))
           (rhs e)))
       (and (head? f 'v) (newtype-selector? (second f))) (rhs e)
+      ;; a primop's or a foreign call's application is no function call (HF10-P20: Real's divZeroError = raise# e was
+      ;; an application of raise#, which has no binding)
+      (and (head? f 'v) (or (primop? (second f)) (= "ffi" (nth (second f) 1)) (unboxed-con? (second f)))) (rhs e)
       (or (lv? f) (head? f 'v))
       (let [rs (mapv atom-of args)]
         (if (some (fn [[_ bs]] (some #(= :case (first %)) bs)) rs)
@@ -1188,15 +1285,71 @@
 
 (def last-prog (atom nil)) ; the last module's Core as module-stg translated it (the Simplifier's output when it runs)
 
+(defn- unsafe-coerce-name? [g occ]
+  (and (vector? g) (= "GHC.Internal.Unsafe.Coerce" (nth g 2)) (= occ (nth g 3))))
+
+(defn- unsafe-proof? [e]
+  (or (and (seq? e) (= 'v (first e)) (unsafe-coerce-name? (second e) "unsafeEqualityProof"))
+      (and (seq? e) (= 'app (first e)) (empty? (nth e 2)) (unsafe-proof? (second e)))))
+
+(defn- drop-unsafe-coerce
+  "Unsafe.Coerce's magic (GHC.HsToCore's patchMagicDefns, CorePrep's cpeExpr; HF10-P20): unsafeCoerce# applied is its
+  argument (its compulsory unfolding \\x -> case unsafeEqualityProof of UnsafeRefl -> x: Exts' atomicModifyMutVar#'s
+  unboxed triple was unarised into unsafeCoerce#'s arguments); a case on unsafeEqualityProof is its alternative's body
+  (unsafeCoerce, unsafeCoerceAddr, unsafeCoerceUnlifted returned the proof)"
+  [x]
+  (cond
+    (seq? x) (let [y (apply list (map drop-unsafe-coerce x))]
+               (cond
+                 (and (= 'app (first y)) (seq? (second y)) (= 'v (first (second y)))
+                      (unsafe-coerce-name? (second (second y)) "unsafeCoerce#") (seq (nth y 2)))
+                 (let [[a & more] (nth y 2)] (if more (list 'app a (vec more)) a))
+                 (and (= 'case (first y)) (unsafe-proof? (second y)) (= 1 (count (nth y 3)))
+                      (vector? (second (first (nth y 3)))) (unsafe-coerce-name? (second (first (nth y 3))) "UnsafeRefl"))
+                 (nth (first (nth y 3)) 3)
+                 :else (with-meta y (meta x))))
+    (vector? x) (with-meta (mapv drop-unsafe-coerce x) (meta x))
+    :else x))
+
+(defn- drop-proof-matches
+  "CorePrep's case on unsafeEqualityProof dropped, at the elaborator's match (match [unsafeEqualityProof] [(clause
+  [(pcon UnsafeRefl ...)] body)]): the body (HF10-P20: unsafeCoerce returned the proof)"
+  [x]
+  (cond
+    (seq? x) (let [y (apply list (map drop-proof-matches x))]
+               (if (and (= 'match (first y)) (vector? (second y)) (= 1 (count (second y))) (unsafe-proof? (first (second y)))
+                        (= 1 (count (nth y 2)))
+                        (let [[_ ps _] (first (nth y 2))]
+                          (and (= 1 (count ps)) (seq? (first ps)) (= 'pcon (first (first ps)))
+                               (unsafe-coerce-name? (second (first ps)) "UnsafeRefl"))))
+                 (nth (first (nth y 2)) 2)
+                 (with-meta y (meta x))))
+    (vector? x) (with-meta (mapv drop-proof-matches x) (meta x))
+    :else x))
+
+(defn- patch-magic-defns
+  "patchMagicDefns: unsafeEqualityProof's right-hand side UnsafeRefl (its source is the loop `case
+  unsafeEqualityProof of UnsafeRefl -> UnsafeRefl`, HF10-P20: a run looped allocating)"
+  [prog]
+  (mapv (fn [[_ b e :as bd]]
+          (if (unsafe-coerce-name? b "unsafeEqualityProof")
+            (list 'bind b (list 'v ["ext" "data" "GHC.Internal.Unsafe.Coerce" "UnsafeRefl"]))
+            bd))
+        prog))
+
 (defn module-stg
   "The desugared program as STG forms (a vector of top-level forms, the header first)"
   [r units file]
-  (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {}) *joins* (atom #{}) *lreps* (atom {}) *multi* (atom {}) *mcomps* (atom {})]
+  (binding [*r* r *units* units *names* (atom {}) *n* (atom 0) *reps* (atom {}) *joins* (atom #{}) *lreps* (atom {}) *multi* (atom {}) *mcomps* (atom {}) *njoins* (atom #{})]
     (let [simpl? (not= "0" (System/getenv "REPR_HASKELL_SIMPL"))
+          r (update r :core drop-proof-matches)
           prog0 (binding [arbace.repr.haskell.simpleopt/*unlifted?* (fn [e] (not= [:L] (expr-reps e)))
                           ds/*casts* simpl?
                           ds/*unboxed-tuple?* (fn [e] (some? (expr-comps e)))]
                   (ds/desugar-program r))
+          ;; the match variables' types (HF10-P20: desugar's fresh-types)
+          r (update r :ltypes merge @ds/fresh-types)
+          _ (set! *r* r)
           exported (ds/program-exported r prog0)
           [prog new-types raw] (if simpl?
                              (simpl/simplify-module r prog0 (into exported (:rule-names r))
@@ -1205,6 +1358,7 @@
                                                      :con-strict con-strict
                                                      :con-reps con-reps})
                              [prog0 {} prog0])
+          prog (drop-unsafe-coerce (patch-magic-defns prog))
           _ (reset! last-prog raw)
           _ (set! *r* (update r :ltypes merge new-types))
           r *r*

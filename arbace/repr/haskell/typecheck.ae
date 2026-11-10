@@ -1216,6 +1216,7 @@
                  ;; a pattern that can fail (the renamer attached MonadFail's fail to the statement): fail in the monad
                  (if-let [fl (implicit-name v "fail" nil)]
                    (let [[tf cf] (var-occ env fl (lsp (arg v 2)) "a do statement") ds (fresh-lv "ds")]
+                     (note-type! ds a)
                      (unify tf (fn-ty (list-ty (con-ty tc-char)) tr))
                      [r (app* cb [ce (list 'lam [ds] (list 'match [ds] [(list 'clause [pc] cr)
                                                                         (list 'clause [(list 'pwild)] (app* cf [(fail-msg "'do' block" (lsp (arg v 2)))]))]))])])
@@ -1382,7 +1383,10 @@
                  (unify tf (reduce (fn [acc [t _]] (fn-ty t acc)) r (reverse rs)))
                  [r (app* cf (mapv second rs))])
       RecordCon (let [cn (nm (arg v 2))
-                      [ct _] (instantiate (get @*genv* cn))
+                      ;; the constructor's context (an existential's class constraints: Handle__'s RawIO, IODevice,
+                      ;; BufferedIO, Typeable) wanted, its evidence the first arguments (HF10-P20: the record
+                      ;; construction built Handle__ without its four dictionaries)
+                      [ct cpreds] (instantiate (get @*genv* cn))
                       flds (:fields (get @*cons* cn))
                       [argts res] (loop [t ct as []] (let [t (prune t)] (if (and (= :tc (first t)) (= fun-tc (second t))) (recur (second (nth t 2)) (conj as (first (nth t 2)))) [as t])))
                       given (into {} (map (fn [fb] (let [fbv (lval fb) f (nm (arg (lval (arg fbv 2)) 2))
@@ -1403,7 +1407,8 @@
                                       given (partition 2 (nth (lval (second dd)) 2)))
                               given)]
                   [res (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
-                             (mapv (fn [f] (or (get given f) (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError")) [(list 'lit (occ f))]))) flds))])
+                             (into (mapv want! cpreds)
+                                   (mapv (fn [f] (or (get given f) (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError")) [(list 'lit (occ f))]))) flds)))])
       RecordUpd (let [[te ce] (infer env (arg v 2))
                       fbs (arg (arg v 3) 2)
                       upd (mapv (fn [fb] (let [fbv (lval fb) f (nm (arg (lval (arg fbv 2)) 2))
@@ -1416,9 +1421,12 @@
                   [te (list 'case ce (fresh-lv "wild")
                             (mapv (fn [[cn info]]
                                     (let [xs (mapv (fn [f] (fresh-lv (occ f))) (:fields info))
+                                          ;; the constructor's context's evidence bound by the alternative and given back
+                                          ;; to the new value (HF10-P20: an existential's dictionaries, Handle__'s)
+                                          ds (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) (second (instantiate (get @*genv* cn))))
                                           m (into {} upd)]
-                                      (list 'alt cn xs (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
-                                                             (mapv (fn [f x] (get m f x)) (:fields info) xs)))))
+                                      (list 'alt cn (into ds xs) (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
+                                                                       (into ds (mapv (fn [f x] (get m f x)) (:fields info) xs))))))
                                   cons*))])
       ;; deriving's nodes (arbace.repr.haskell.deriv): a constructor's tag as an Int, the constructor of a tag, a primop on Ints
       ;; the tag: GHC's dataToTag# (the primop dataToTagLarge#, which evaluates its argument), boxed as the Int the
@@ -1933,6 +1941,9 @@
             core (cond (zero? n) (second (first clauses))
                        simple? (list 'lam (first (first clauses)) (second (first clauses)))
                        :else (let [ds (vec (repeatedly n #(fresh-lv "ds")))]
+                               ;; the match's binders typed as the arguments (HF10-P20: a State# or Int# argument matched
+                               ;; by equations was taken for a lifted one by tostg, ascii_decode's state token)
+                               (doseq [[d t] (map vector ds args)] (note-type! d t))
                                (list 'lam ds (list 'match ds (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)))))]
         [ty core]))))
 
@@ -2089,7 +2100,9 @@
             params (mapv dict-param req')]
         (binding [*level* (inc *level*) *wanteds* ws *given-eqs* (scope-givens) *scoped-tvs* (merge *scoped-tvs* skol)]
           (assume-eqs! req')
-          (let [[env1 _] (tc-pat env (arg psb 4) (subst m res))]
+          (let [[env1 pc] (tc-pat env (arg psb 4) (subst m res))]
+            ;; the pattern's core and its variables, the record selectors' (mkPatSynRecSelBinds)
+            (swap! *patsyns* update n assoc :pat pc :vars (mapv lv argns))
             (doseq [[x at] (map vector argns args) :let [e (get env1 x)] :when (:mono e)] (unify (:mono e) (subst m at)))
             (doseq [p prov] (want! (sp p)))
             (retry-implications! false)))
@@ -2108,13 +2121,13 @@
               (solve-with-givens! @bws (super-closure (mapv vector bpreds (mapv dict-param bpreds))))))))
       ;; tcInferPatSynDecl: the pattern inferred, its type closed over its metas
       (let [t (binding [*level* (inc *level*)] (fresh-meta))
-            [env1 _] (binding [*level* (inc *level*) *wanteds* ws] (tc-pat env (arg psb 4) t))
+            [env1 pc] (binding [*level* (inc *level*) *wanteds* ws] (tc-pat env (arg psb 4) t))
             args (mapv #(or (:mono (get env1 %)) (fresh-meta)) argns)
             gen (vec (distinct (mapcat metas-of (cons t args))))
             names (mapv (fn [i] (str "p" i)) gen)]
         (doseq [[i nn] (map vector gen names)] (swap! *metas* assoc-in [i :ref] [:tv nn]))
         (doseq [w @ws] (swap! *wanteds* conj w))
-        (let [info {:univ names :req [] :ex [] :prov [] :args (mapv zonk args) :res (zonk t) :fields fields}]
+        (let [info {:univ names :req [] :ex [] :prov [] :args (mapv zonk args) :res (zonk t) :fields fields :pat pc :vars (mapv lv argns)}]
           (swap! *patsyns* assoc n info)
           (swap! *genv* assoc n (builder-type info)))))
     nil))
@@ -3242,8 +3255,12 @@
                           (list 'bind f (list 'v (tuple-con 0)))
                         (let [ds (fresh-lv "ds")
                               alts (vec (for [[cn info] (map vector cs infos) :when (some #(= f %) (:fields info))]
-                                          (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info))]
-                                            (list 'alt cn xs (nth xs (.indexOf ^java.util.List (:fields info) f))))))
+                                          (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info))
+                                                ;; the constructor's context's evidence first (an existential's
+                                                ;; dictionaries; HF10-P20: Handle__'s selectors took its four
+                                                ;; dictionaries for fields)
+                                                ds (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) (second (instantiate (get @*genv* cn))))]
+                                            (list 'alt cn (into ds xs) (nth xs (.indexOf ^java.util.List (:fields info) f))))))
                               alts (if (< (count alts) (count cs))
                                      (into [(list 'alt :default []
                                                   (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recSelError"))
@@ -3251,6 +3268,23 @@
                                            alts)
                                      alts)]
                           (list 'bind f (list 'lam [ds] (list 'case ds (fresh-lv "wild") alts)))))))
+            ;; the pattern synonyms' record selectors (GHC.Tc.TyCl.PatSyn's mkPatSynRecSelBinds: a match on the synonym,
+            ;; the field's variable, else recSelError); a synonym with a context left (HF10-P20: Encoding.Types'
+            ;; BufferCodec{encode, ...} had no selector bindings)
+            sels (into sels
+                       (for [[pn info] (sort-by (comp str key) @*patsyns*)
+                             :when (and (= m (nmod pn)) (seq (:fields info)) (empty? (:req info)) (empty? (:prov info)) (:pat info))
+                             [i f] (map-indexed vector (:fields info))]
+                         (let [ds (fresh-lv "ds")]
+                           (when-not (get @*genv* f)
+                             (swap! *genv* assoc f [:forall (vec (:univ info)) [] (fn-ty (:res info) (nth (:args info) i))]))
+                           ;; the synonym's own pattern matched (its matcher's body), the field's variable returned
+                           (list 'bind f (list 'lam [ds]
+                                               (list 'match [ds]
+                                                     [(list 'clause [(:pat info)] (nth (:vars info) i))
+                                                      (list 'clause [(list 'pwild)]
+                                                            (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recSelError"))
+                                                                  [(list 'lit (str (pr-str (occ f)) "#"))]))]))))))
             ;; the deferred family equalities retried, as GHC's solver iterates to a fixed point; one still stuck is
             ;; left (trusted)
             _ (retry-implications! true)
