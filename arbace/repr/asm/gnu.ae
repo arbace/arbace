@@ -42,6 +42,15 @@
               'xor "^" '& "&" '* "*" '/ "/" '% "%" '<< "<<" '>> ">>"})
 (def op-prec (into {} (map (fn [[_ [s p]]] [s p]) binops)))
 
+;; Plan 9's shifts of a register (arm64's R1->3, an arithmetic shift, and R1@>3, a rotation), at the shifts' precedence
+(def p9-binops (assoc binops "->" ['-> 6] "@>" ['at> 6]))
+(def p9-op-text (assoc op-text '-> "->" 'at> "@>"))
+(def p9-op-prec (assoc op-prec '-> 6 'at> 6))
+
+(defn- p9? [] (:p9 lex/*dialect*))
+;; AArch64's dialects (GNU and Apple): `%NAME(E)` a data directive's specifier, `X@AUTH(KEY,DISC,addr)` a signed pointer, `$d:`
+(defn- a64? [] (and (= :start (:hash lex/*dialect*)) (not (:p9 lex/*dialect*))))
+
 (declare parse-expr parse-primary)
 
 (defn- tok [ts ^long i] (when (< i (count ts)) (nth ts i)))
@@ -56,7 +65,18 @@
       :float [(list 'float (lex/value t)) (inc i)]
       :dot [(list 'asm/dot) (inc i)]
       :string [(if dir? (lex/value t) (list 'sym (lex/value t))) (inc i)]
-      :ident [(sym-form (lex/value t)) (inc i)]
+      :ident (if (p9?)
+               ;; Plan 9's names: `·f`, `f<>` (a file's static), `f<ABIInternal>` (an ABI's): (id TEXT) when no symbol holds it
+               (let [n (tok ts (inc i)) m (tok ts (+ i 2)) o (tok ts (+ i 3))
+                     [nm j] (cond
+                              (and (lex/punct? n "<>") (not (lex/ws? n))) [(str (lex/value t) "<>") (+ i 2)]
+                              (and (lex/punct? n "<") (not (lex/ws? n)) m (= :ident (lex/kind m)) (not (lex/ws? m))
+                                   (lex/punct? o ">") (not (lex/ws? o)))
+                              [(str (lex/value t) "<" (lex/value m) ">") (+ i 4)]
+                              :else [(lex/value t) (inc i)])
+                     f (sym-form nm)]
+                 [(if (symbol? f) f (list 'id nm)) j])
+               [(sym-form (lex/value t)) (inc i)])
       :punct
       (case (lex/value t)
         "(" (let [[e j] (parse-expr ts (inc i) dir?)]
@@ -76,10 +96,14 @@
               (if (and n (= :ident (lex/kind n)) (not (lex/ws? n)))
                 [(sym-form (str "$" (lex/value n))) (+ i 2)]
                 (fail "unexpected $" {:at i})))
-        "%" (let [n (tok ts (inc i))]
-              (if (and dir? n (= :ident (lex/kind n)) (not (lex/ws? n)))
+        "%" (let [n (tok ts (inc i)) o (tok ts (+ i 2))]
+              (cond
+                (and dir? n (= :ident (lex/kind n)) (not (lex/ws? n)) (a64?) (lex/punct? o "(") (not (lex/ws? o)))
+                (let [[e j] (parse-expr ts (+ i 3) dir?)]
+                  (if (lex/punct? (tok ts j) ")") [(list 'pct (sym-form (lex/value n)) e) (inc (long j))] (fail "expected )" {:at j})))
+                (and dir? n (= :ident (lex/kind n)) (not (lex/ws? n)))
                 [(list 'pct (sym-form (lex/value n))) (+ i 2)]
-                (fail "unexpected %" {:at i})))
+                :else (fail "unexpected %" {:at i})))
         (fail (str "unexpected " (lex/value t)) {:at i}))
       (fail (str "unexpected token " (pr-str (lex/value t))) {:at i}))))
 
@@ -93,7 +117,16 @@
     (if (and (lex/punct? n "@") (not (lex/ws? n)) m (#{:ident :int} (lex/kind m)) (not (lex/ws? m))
              (not (and (seq? x) (= 2 (count x)) (#{'- '+ 'bnot 'lnot 'at 'pct} (first x))))
              (not (and (seq? x) (= 'at (first x)))))
-      [(list 'at x (if (= :int (lex/kind m)) (lex/value m) (sym-form (lex/value m)))) (+ (long j) 2)]
+      (let [mod (if (= :int (lex/kind m)) (lex/value m) (sym-form (lex/value m)))
+            o (tok ts (+ (long j) 2))]
+        (if (and (a64?) (lex/punct? o "(") (not (lex/ws? o)))
+          (let [[es k] (loop [k (+ (long j) 3) es []]
+                         (let [[e k] (parse-expr ts k dir?) n (tok ts k)]
+                           (cond (lex/punct? n ",") (recur (inc (long k)) (conj es e))
+                                 (lex/punct? n ")") [(conj es e) (inc (long k))]
+                                 :else (fail "expected , or )" {:at k}))))]
+            [(list 'at x mod es) k])
+          [(list 'at x mod) (+ (long j) 2)]))
       [x j])))
 
 (defn parse-expr
@@ -103,7 +136,7 @@
    (let [[lhs j] (parse-primary ts i dir?)]
      (loop [lhs lhs j (long j)]
        (let [t (tok ts j)
-             [op p] (when (and t (= :punct (lex/kind t))) (get binops (lex/value t)))]
+             [op p] (when (and t (= :punct (lex/kind t))) (get (if (p9?) p9-binops binops) (lex/value t)))]
          (if (and op (>= (long p) minp))
            (let [[rhs k] (parse-expr ts (inc j) dir? (inc (long p)))]
              (recur (list op lhs rhs) (long k)))
@@ -130,8 +163,8 @@
 (defn name-text ^String [x] (cond (symbol? x) (name x) (= x '(asm/dot)) "." :else (str-text (second x))))
 
 (defn- prec ^long [e]
-  (if (and (seq? e) (op-prec (first e)) (= 3 (count e)))
-    (long (op-prec (first e)))
+  (if (and (seq? e) (p9-op-prec (first e)) (= 3 (count e)))
+    (long (p9-op-prec (first e)))
     (if (and (seq? e) (#{'- '+ 'bnot 'lnot} (first e)) (= 2 (count e))) 7 8)))
 
 (declare expr-text)
@@ -145,11 +178,15 @@
             (let [[h a b] e]
               (cond
                 (= h 'sym) (str-text a)
+                (= h 'id) a
                 (= h 'local) (str a (name b))
                 (= h 'float) a
                 (= h 'asm/dot) "."
-                (= h 'at) (if (= 3 (count e)) (str (expr-text* a 8) "@" (if (integer? b) (str b) (name-text b))) (str "@" (name-text a)))
-                (= h 'pct) (str "%" (name-text a))
+                (= h 'at) (if (>= (count e) 3)
+                            (str (expr-text* a 8) "@" (if (integer? b) (str b) (name-text b))
+                                 (when (= 4 (count e)) (str "(" (str/join "," (map expr-text (nth e 3))) ")")))
+                            (str "@" (name-text a)))
+                (= h 'pct) (str "%" (name-text a) (when (= 3 (count e)) (str "(" (expr-text b) ")")))
                 (= 2 (count e))
                 (let [o (case h - "-" + "+" bnot "~" lnot "!")
                       s (expr-text* a 7)]
@@ -157,8 +194,8 @@
                                  (and (seq? a) (#{'- '+ 'bnot 'lnot} (first a)) (= 2 (count a))))
                            (str "(" s ")") s)))
                 :else
-                (let [p (long (op-prec h))]
-                  (str (expr-text* a p) (op-text h) (expr-text* b (inc p))))))
+                (let [p (long (p9-op-prec h))]
+                  (str (expr-text* a p) (p9-op-text h) (expr-text* b (inc p))))))
             :else (fail (str "no text for " (pr-str e)) {}))]
     (if (< (prec e) ctx) (str "(" t ")") t)))
 
@@ -169,6 +206,10 @@
 
 ;; the directives whose arguments are kept as text (their language is not expressions)
 (def raw-directives #{"ifc" "ifnc" "ifb" "ifnb" "print" "symver" "secure_log_unique" "abort" "irp" "irpc" "irpw" "macro" "rept" "rep"})
+;; the directives some architecture keeps as text (AArch64's .arch, .arch_extension, .cpu: names with + and -), printed as text
+(def raw-text-directives #{"arch" "arch_extension" "cpu" "fpu"})
+;; the directives printed as text: raw-directives, and an architecture's own (bound by arbace.repr.asm for arm64)
+(def ^:dynamic *raw* raw-directives)
 ;; the blocks whose body is text, their nesting and end
 (def blocks {"macro" [#{"macro"} #{"endm" "endmacro"}]
              "rept" [#{"rept" "rep" "irp" "irpc" "irpw"} #{"endr"}]
@@ -237,17 +278,49 @@
         (>= (long next) (.length src)) (fail "unterminated block" {:class :unterminated})
         :else (recur (long next) depth)))))
 
+(defn- line-start? [^String src ^long pos]
+  ;; the offset of a cpp line's `#` when the line from `pos` (a line's start) is one (blanks before it), else nil
+  (when (or (zero? pos) (= \newline (.charAt src (int (dec pos)))))
+    (loop [i pos]
+      (when (< i (.length src))
+        (let [c (.charAt src (int i))]
+          (cond (or (= c \space) (= c \tab)) (recur (inc i))
+                (= c \#) i
+                :else nil))))))
+
+(defn- cpp-line-end
+  "The end of the cpp line whose `#` is at `i`: its newline (not included), a line ended by `\\` continued."
+  ^long [^String src ^long i]
+  (loop [i i]
+    (let [k (.indexOf src "\n" (int i))]
+      (cond (neg? k) (.length src)
+            (and (pos? k) (= \\ (.charAt src (int (dec k))))) (recur (inc k))
+            (and (> k 1) (= \return (.charAt src (int (dec k)))) (= \\ (.charAt src (int (- k 2))))) (recur (inc k))
+            :else (if (and (pos? k) (= \return (.charAt src (int (dec k))))) (dec k) k)))))
+
 (defn read-items
   "The items of an assembly text: [[FORM START END] ...]. `insn` reads an instruction: (insn TOKENS I STATE) -> FORM;
-  `state` an atom of {:syntax :att|:intel :macros #{...}}."
-  [^String src insn]
-  (let [state (atom {:syntax :att :macros #{}})
+  `state` an atom of {:syntax :att|:intel :macros #{...}}. `opts`: {:cpp true} for a text of the C preprocessor (a `.S`,
+  Plan 9's): a line whose first character but blanks is `#` an item (asm/cpp-line TEXT), a statement that starts with a
+  name it #defines or with NAME( (asm/cpp-invoke NAME ARGS); {:raw #{...}} more directives whose arguments are text;
+  {:req true} AArch64's `NAME .req REGISTER` (asm/reg-alias NAME REGISTER)."
+  ([^String src insn] (read-items src insn nil))
+  ([^String src insn opts]
+  (let [state (atom {:syntax :att :macros #{} :defines #{}})
+        cpp? (:cpp opts)
+        raw (into raw-directives (:raw opts))
         cur (volatile! 0)]
    (try
     (loop [pos 0 out (transient [])]
       (vreset! cur pos)
       (if (>= pos (.length src))
         (persistent! out)
+        (if-let [h (when cpp? (line-start? src pos))]
+          (let [e (cpp-line-end src h)
+                text (subs src (int (inc (long h))) (int e))
+                m (re-find #"^\s*define\s+([A-Za-z_][A-Za-z0-9_]*)" text)]
+            (when m (swap! state update :defines conj (second m)))
+            (recur (long e) (conj! out [(list 'asm/cpp-line text) h e])))
         (let [{:keys [toks next]} (lex/lex-statement src pos)
               ts toks
               n (count ts)
@@ -262,6 +335,10 @@
                             (recur (conj! out [(list 'asm/label (list 'sym (subs src (int (lex/start t)) (int (lex/end (tok ts (+ i 2)))))))
                                                (lex/start t) (lex/end (tok ts (+ i 3)))])
                                    (+ i 4))
+                            (and (a64?) (lex/punct? t "$") c (= :ident (lex/kind c)) (not (lex/ws? c))
+                                 (lex/punct? (tok ts (+ i 2)) ":"))
+                            (recur (conj! out [(list 'asm/label (sym-form (str "$" (lex/value c)))) (lex/start t) (lex/end (tok ts (+ i 2)))])
+                                   (+ i 3))
                             (and t (#{:ident :int :string} (lex/kind t)) (lex/punct? c ":"))
                             (recur (conj! out [(list 'asm/label (case (lex/kind t)
                                                                   :ident (sym-form (lex/value t))
@@ -273,6 +350,21 @@
               t (tok ts i)]
           (cond
             (nil? t) (recur (long next) out)
+
+            ;; a cpp macro's invocation (a name the text #defines, or NAME( with no blank)
+            (and cpp? (= :ident (lex/kind t))
+                 (or (contains? (:defines @state) (lex/value t))
+                     (and (lex/punct? (tok ts (inc i)) "(") (not (lex/ws? (tok ts (inc i)))))))
+            (let [args (str/trim (raw-of src ts (inc i)))]
+              (recur (long next) (conj! out [(if (= "" args)
+                                                (list 'asm/cpp-invoke (sym-form (lex/value t)))
+                                                (list 'asm/cpp-invoke (sym-form (lex/value t)) args))
+                                              (lex/start t) (lex/end (peek ts))])))
+
+            ;; AArch64's register alias: NAME .req REGISTER
+            (and (:req opts) (= :ident (lex/kind t)) (some-> (tok ts (inc i)) lex/value str/lower-case (= ".req")))
+            (recur (long next) (conj! out [(apply list 'asm/reg-alias (sym-form (lex/value t)) (parse-dir-args ts (+ i 2)))
+                                           (lex/start t) (lex/end (peek ts))]))
 
             ;; a macro's invocation
             (and (#{:ident} (lex/kind t)) (contains? (:macros @state) (lex/value t)))
@@ -305,7 +397,7 @@
                   (when (= d "macro")
                     (let [m (first (str/split head #"[\s,]+"))] (swap! state update :macros conj m)))
                   (recur (long (lex/end et)) (conj! out [(list (symbol "asm" d) head body (dir-name et)) (lex/start t) (lex/end et)])))
-                (let [form (if (raw-directives d)
+                (let [form (if (raw d)
                              (if (= "" head) (list (symbol "asm" d)) (list (symbol "asm" d) head))
                              (if (re-matches #"[A-Za-z_][A-Za-z0-9_.$]*" d)
                                (apply list (symbol "asm" d) (parse-dir-args ts (inc i)))
@@ -320,12 +412,13 @@
             :else
             (do (when (= :intel (:syntax @state))
                   (fail "Intel syntax (AX3)" {:class :intel}))
-                (recur (long next) (conj! out [(insn ts i) (lex/start t) (lex/end (peek ts))])))))))
+                (recur (long next) (conj! out [(insn ts i) (lex/start t) (lex/end (peek ts))]))))))))
     (catch arbace.lang.ExceptionInfo e
       (let [line (inc (count (filter #(= \newline %) (subs src 0 (int @cur)))))]
-        (throw (ex-info (str (.getMessage e) " (line " line ")") (ex-data e))))))))
+        (throw (ex-info (str (.getMessage e) " (line " line ")") (ex-data e)))))))))
 
 (defn label? [f] (and (seq? f) (= 'asm/label (first f))))
+(defn cpp-line? [f] (and (seq? f) (= 'asm/cpp-line (first f))))
 
 (defn item-text
   "An item's canonical text (no indentation); `insn-text` prints an instruction."
@@ -335,17 +428,21 @@
       (= h 'asm/label) (let [x (second f)] (str (if (integer? x) (str x) (name-text x)) ":"))
       (#{'asm/= 'asm/==} h) (str (name-text (second f)) (if (= h 'asm/=) " = " " == ") (expr-text (nth f 2)))
       (= h 'asm/invoke) (str (name-text (second f)) (when (> (count f) 2) (str " " (nth f 2))))
+      (= h 'asm/cpp-line) (str "#" (second f))
+      (= h 'asm/cpp-invoke) (let [a (when (> (count f) 2) (nth f 2))]
+                              (str (name-text (second f)) (when a (if (.startsWith ^String a "(") a (str " " a)))))
+      (= h 'asm/reg-alias) (str (name-text (second f)) " .req " (subs (args-text (nnext f)) (min 1 (count (args-text (nnext f))))))
       (and (symbol? h) (= "asm" (namespace h)))
       (let [d (name h)]
         (cond
           (blocks d) (let [[_ head body end] f] (str "." d (when (seq head) (str " " head)) body "." end))
-          (raw-directives d) (str "." d (when (> (count f) 1) (str " " (second f))))
+          (*raw* d) (str "." d (when (> (count f) 1) (str " " (second f))))
           (= 1 (count f)) (str "." d)
           (= d "directive") (str "." (second f) (args-text (nnext f)))
           :else (str "." d (args-text (rest f)))))
       :else (insn-text f))))
 
-(defn canon-gap ^String [^long k f] (str (when (pos? k) "\n") (when-not (label? f) "\t")))
+(defn canon-gap ^String [^long k f] (str (when (pos? k) "\n") (when-not (or (label? f) (cpp-line? f)) "\t")))
 (defn canon-end ^String [forms] (if (seq forms) "\n" ""))
 
 (defn print-items

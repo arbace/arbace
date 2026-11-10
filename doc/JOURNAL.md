@@ -2868,3 +2868,33 @@ AXS20 (split-file tests as parts), AXS21 (the gate step and the row at AX10), AX
 Sources studied: llvm-project-23.1.5.src.tar.xz's `llvm/lib/MC/MCParser/{AsmLexer,AsmParser,ELFAsmParser}.cpp`,
 `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `llvm/lib/Target/X86/MCTargetDesc/X86MCAsmInfo.cpp` (Apache-2.0 WITH
 LLVM-exception; rules followed by hand, no code copied; LICENSE.md and doc/ARBACE.md name them).
+
+## 2026-11-10 arm64 assembly: AR1, repr/asm's arm64 reader and :full print (branch `asm-ar1`, from `mac/asm-ax1` `ab91839f8`)
+
+AR1 of doc/asm/ARM64-SURVEY.md §12 on AX1's shell, on the light lane (stage 0, under 1.5 GiB, no lock, no assembler run, nothing
+fetched or installed). The lexer takes a dialect (LLVM 23.1.5's `AArch64MCAsmInfo.cpp`: ELF's and COFF's `//`, `#` a comment only at
+a statement's start as `AsmLexer::LexToken` has it, else an immediate's `#`; Darwin's `;` and `%%`; Plan 9's bytes above 127 in names,
+`->`, `@>`); the shell reads a `.S`'s cpp lines and macro invocations as items, `NAME .req REG`, `$d:`, `%pltpcrel(f)`,
+`f@AUTH(ia,42)` and `.arch`'s text; the header's map names the dialect. `arbace.repr.asm.arm64.gnu` reads A64's operands after
+`AArch64AsmParser.cpp` (registers with kinds and predicate qualifiers, `#` immediates, `:spec:` specifiers, `=` literals, memory with
+`!`, lists and ranges, indexes, shifts and extends) in the text's order; `arbace.repr.asm.plan9` reads Plan 9's text lexically after
+Go 1.27.1's `cmd/asm/internal/asm/parse.go` (`(p9/MNEMONIC ...)`, groups `(addr E [..] [..])`, lists, indexes, DATA's `/N`).
+`bin/repr-asm --arch arm64`, six arm64 corpora in `test/asm/corpora.edn` (musl's aarch64 `.s`, libgcc's aarch64 `.S` from the pinned
+gcc 15.2.0 tarball, `MC/AArch64`'s top level and `MC/AsmParser/AArch64` from the llvm-project 23.1.5 tarball, the box's arm64 `.s`, Go's
+`cmd/asm` testdata in TamaGo's GOROOT at `seed/goroot.sha256`'s go1.27.1), `test/asm/roundtrip-results-arm64.edn`,
+`divergences-read-arm64.edn`, `controls-arm64.txt`, the Makefile's arm64 targets.
+
+Results (`bin/repr-asm --arch arm64 roundtrip`, about 18 s): musl 15/15, libgcc 7/7, `MC/AArch64` 400/409 (39 files in Apple's
+spelling by their triples), `MC/AsmParser/AArch64` 0/1, the box 7/7, Go's testdata 5/5; the ten not passing are error tests whose
+RUN lines say llvm-mc rejects them, class `:error-test`; six negative controls fail as they must. AX1's amd64 round trip rerun: the same
+810 rows and every `.ae` text byte for byte AX1's. Fixed on the way: `bin/repr-asm divergences` (AX1's) named no corpus and so judged
+every row "not recorded"; it now takes every corpus of the results.
+
+Considered and proposed (doc/asm/ARM64-SURVEY.md, "Proposed (AR1)"): ARS17 (the syntax level in the text's order until AR2; a `#`
+normalised now needs the operand classes), ARS18 (Plan 9 lexically in `p9/`; reversing its operands is not right for every
+instruction), ARS19 (a `.S` read as the preprocessor's text; preprocessing first loses the source), ARS20 (flat record names with
+`-arm64`), ARS21 (Apple's spelling by the RUN lines' triples), ARS22 (the extensions' 1,942 files read now, encodings at AR11: measured by hand, 1,938 pass, 4 error tests),
+ARS23 (a byte a character in Plan 9's UTF-8 names). Sources studied: llvm-project-23.1.5.src.tar.xz's
+`llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`, `llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCAsmInfo.cpp`,
+`llvm/lib/MC/MCParser/AsmLexer.cpp`, `llvm/include/llvm/MC/MCAsmInfo.h`; TamaGo's go1.27.1 `src/cmd/asm/internal/{asm,lex}`; the Mac VM's
+inventory (queue 255) for the oracle tier to come. No code copied (LICENSE.md, doc/ARBACE.md).

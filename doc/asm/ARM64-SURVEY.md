@@ -570,3 +570,73 @@ Each a DECISION with options and the recommended one.
   specification packages and their licences; sail-arm (`https://github.com/rems-project/sail-arm`); Ghidra's AARCH64 SLEIGH;
   dynarmic, yaxpeax-arm, capstone; Arm's ABI documents (`https://github.com/ARM-software/abi-aa`: AAPCS64, AAELF64); the
   M2's features (no SVE, SME or MTE).
+
+## As built: AR1 (2026-11-10; branch `asm-ar1`, from `mac/asm-ax1` `ab91839f8`)
+
+The user's decisions of 2026-11-09 (two crops in one directory, GNU first, byte for byte and a canonical print, Plan 9 through Go's
+`cmd/asm` later, readers first) and AX1's shell (doc/asm/AMD64-SURVEY.md, "As built: AX1"; AXS17-AXS22 followed as recommended,
+provisionally). Built on the light lane (stage 0, under 1.5 GiB, no lock, no assembler run, nothing fetched):
+
+- The shell's dialects: `lex.ae` takes `*dialect*` (AArch64's ELF and COFF: `//`, `#` a comment only at a statement's start, else an
+  immediate's punctuator; Darwin's `;` comments and `%%` separator; Plan 9's identifiers with bytes above 127, `->` and `@>`); `gnu.ae`
+  reads a `.S`'s cpp lines and macro invocations as items (`asm/cpp-line`, `asm/cpp-invoke`), `NAME .req REG` (`asm/reg-alias`),
+  `$d:`, `%pltpcrel(f)`, `f@AUTH(ia,42)`, `.arch`'s text; the header's map is the dialect (`{:arch :arm64 :syntax :gnu|:apple|:plan9
+  :cpp true}`), which `print` and the `.ae`'s read take. AX1's amd64 path is unchanged: its 810 rows and every one of its `.ae` texts
+  are byte for byte the same.
+- `arbace.repr.asm.arm64.gnu` (`arbace/repr/asm/arm64/gnu.ae`): A64's operands after AArch64AsmParser, in the text's order
+  (doc/asm/SPEC.md §10); `arbace.repr.asm.plan9` (`arbace/repr/asm/plan9.ae`): Plan 9's text lexically, `(p9/MNEMONIC ...)` in the
+  text's order (§11).
+- `bin/repr-asm --arch arm64` (`read --syntax`, `roundtrip`, `divergences`, `corpus lists`); the Makefile's `ARCH=`,
+  `repr-asm-roundtrip-arm64`, `repr-asm-record-arm64`, `repr-asm-divergences`; `test/asm/corpora.edn`'s six arm64 corpora (`:arch
+  :arm64`; the pins `:gcc-15.2.0`, C's, and `:tamago-go`, read in place, its `VERSION` checked); `test/asm/roundtrip-results-arm64.edn`
+  (444 rows), `divergences-read-arm64.edn`, `controls-arm64.txt` (six). `bin/repr-asm divergences` judged every row "not recorded"
+  (AX1's: no corpus named): it now takes every corpus of the results.
+
+| corpus | files | pass (read, `:full` byte for byte, `.ae` back equal, canonical re-read equal with no layer) | classed |
+|---|---:|---:|---|
+| musl 1.2.6 `src/*/aarch64`, `crt/aarch64` (13 `.s`, `memcpy.S`, `memset.S`) | 15 (585 lines) | **15** (470 items) | none |
+| libgcc 15.2.0 `config/aarch64/*.S` (lse.S, crti.S, crtn.S, SME's four) | 7 (751 lines) | **7** (448 items) | none |
+| `MC/AArch64`'s top level (408 `.s`, one split-file test as two parts; 39 in Apple's spelling by their triples) | 409 (71,665 lines) | **400** (19,106 items) | 9 `:error-test` |
+| `MC/AsmParser/AArch64` | 1 | 0 | 1 `:error-test` |
+| the box's arm64 `.s` (Plan 9) | 7 (4,957 lines) | **7** (4,738 items) | none |
+| Go 1.27.1's `cmd/asm` testdata `arm64*.s` (Plan 9) | 5 (6,295 lines) | **5** (5,940 items) | none |
+
+So the plan's exit holds: the 408 base files (the 8 `.ll` and `lit.local.cfg` of the 417 are not assembly), musl's 15, libgcc's 7, the
+box's 7 and Go's 5 print back byte for byte in `:full` and read again to the same forms; the rest (the ten error tests llvm-mc rejects
+as their RUN lines say, which repr/asm rejects at the syntax level: a trailing comma, `{v0.8B-}`, `;;` as two separators, `=())`, `@`
+without a name, ...) classed. 179 of the 188 error tests read: their errors are the operands' classes and ranges, AR2's. Six negative
+controls fail as they must. The run takes about 18 s (four threads).
+
+What differs from the plan: the forms are the syntax level in the text's order until AR2's tables (ARS17); Plan 9's are lexical, in
+`p9/` (ARS18); a `.S` is read as the preprocessor's text, not preprocessed (ARS19); the records are flat files with an `-arm64` suffix
+beside AX1's (ARS20). Not built: the gate step and the row (AR10, as AXS21 (a)), the CHECK-text judge and the encoder (AR2).
+
+## Proposed (AR1)
+
+ARS1-ARS16 (§13): the user decided ARS1, ARS2, ARS3, ARS5, ARS6, ARS7, ARS9, ARS12, ARS15, ARS16 with AXS's (2026-11-09). New with AR1
+(each with options, the recommended named; taken provisionally as (a)):
+
+- **ARS17 arm64's forms until AR2.** (a) the syntax level in the text's order: the mnemonic as written, `(imm E)` for `#E` and the bare
+  expression for an unprefixed operand, registers `(reg NAME KIND? {:pred P}?)`; AR2's table resolves aliases and classes, the recorded
+  forms rewritten then (AXS17 (a)'s rule); (b) `#` normalised now (a bare `4` as `(imm 4)`), which needs the operand class to tell a
+  bare immediate from a label (`b 4`); (c) the survey's sketch, registers as bare symbols, which a label named like a register would
+  confuse. *Recommended: (a)*.
+- **ARS18 Plan 9 at AR1.** (a) lexically, `(p9/MNEMONIC ...)` in the text's order with registers as names, groups and lists as written:
+  every testdata and box file reads and prints back now; AR8 reads them through Go's `cmd/asm` (ARS3 (a)) and bridges to A64 forms;
+  (b) operands reversed into A64's order now, which is not a reversal for every instruction (`CSEL EQ, R1, R2, R3`, `CASPW`); (c) leave
+  Plan 9 to AR8. *Recommended: (a)*.
+- **ARS19 `.S` files.** (a) read as the C preprocessor's text (its lines `asm/cpp-line`, its macros' invocations `asm/cpp-invoke`,
+  `NAME(...)` in an operand `cpp-call`), printed back byte for byte; the assembler (AR2-AR4) takes the text repr/c's preprocessor makes
+  (`arbace.repr.c.pp`, SH3) with the arch's macros as data; (b) preprocess first and read the result, which loses the source's text
+  and its macros. *Recommended: (a)* for read and print, (b)'s preprocessing as the assembler's input.
+- **ARS20 The records' names.** (a) flat beside AX1's: `test/asm/roundtrip-results-arm64.edn`, `divergences-read-arm64.edn`,
+  `controls-arm64.txt`, one `corpora.edn` with `:arch`; (b) the survey's `test/asm/arm64/` directory now (and AX1's moved to
+  `test/asm/amd64/`). *Recommended: (a)* until AR10's row, which may move both arches' at once.
+- **ARS21 Apple's spelling.** (a) chosen per file by its RUN lines (every triple Darwin's) and named in the header (`:syntax :apple`);
+  (b) a corpus of its own. *Recommended: (a)*: 39 base files, all pass.
+- **ARS22 The extensions' 1,942 files (SVE, SME, ... in `MC/AArch64`'s 17 directories).** (a) left to AR11 as planned; (b) read and
+  printed at AR1's level now, a corpus `mc-aarch64-ext` beside `mc-aarch64`, the encodings staying AR11's. Measured by hand with AR1's
+  reader (`check --arch arm64` over a list of them, not recorded): **1,938 of 1,942 pass** in 14 s, the 4 others error tests (`not
+  llvm-mc`). *Recommended: (b)*: the read cell then covers the row's whole llvm/test at no cost to the budget.
+- **ARS23 UTF-8 in Plan 9's names.** (a) a byte a character, as every repr/asm text (Go's `·` is two characters in the form's string);
+  (b) Plan 9's texts decoded as UTF-8. *Recommended: (a)*: one reading for every dialect, byte for byte by construction.

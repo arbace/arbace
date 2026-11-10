@@ -375,6 +375,14 @@ code. Three kinds of things live here:
   `parseMacroLikeBody` (a block's body as text, nested blocks counted), `amd64/att.ae` `X86AsmParser.cpp`'s AT&T operand
   grammar (`ParseOperand`, `ParseMemOperand`, the AVX-512 decorations); no code is copied (LICENSE.md); evaluated from
   the checkout.
+- `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
+  doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
+  2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand
+  shapes: registers with their kinds, `#` immediates, `:spec:` specifiers, `[...]` and `!`, `{...}` lists and ranges,
+  indexes, shifts and extends, `=` literals) and `MCTargetDesc/AArch64MCAsmInfo.cpp` (ELF's and COFF's `//`, Darwin's `;` and
+  `%%`; `AsmLexer.cpp`'s `#` at a statement's start), and after Go 1.27.1's `src/cmd/asm/internal/asm/parse.go` and
+  `cmd/asm/internal/lex` (TamaGo's GOROOT, `seed/goroot.sha256`) for Plan 9's operand shapes; no code is copied
+  (LICENSE.md); evaluated from the checkout.
 - `repr/llvm.ae` and `repr/llvm/` (repr/llvm, LLVM IR to LLVM forms and back and its verifier, `arbace.repr.llvm` and
   `arbace.repr.llvm.*`; doc/llvm/SPEC.md, doc/llvm/LLVM-CROP-SURVEY.md): the verifier `repr/llvm/verify.ae` and the
   reader's LLParser errors in `repr/llvm/read.ae` reimplement checks of llvm-project at `llvmorg-23.1.4` (the release

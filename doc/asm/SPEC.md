@@ -1,9 +1,11 @@
-# Assembly forms: the spec (draft, AX1)
+# Assembly forms: the spec (draft, AX1, AR1)
 
 Status: draft of AX1 (doc/asm/AMD64-SURVEY.md §4.2, §12), 2026-11-09/10. It settles the forms' frame both assembly crops share
 (`:asm-amd64` and `:asm-arm64`, the user's decision of 2026-11-09: AXS1, ARS1/SH1) and the amd64 part AX1 reads: GNU as's
 directive language and AT&T syntax. What AX1 leaves to later milestones is marked (AX2: the instruction table and the machine level;
-AX3: Intel syntax; AX9: Plan 9). The namespaces are `arbace.repr.asm.*` (`arbace/repr/asm{.ae,/}`), the command `bin/repr-asm`.
+AX3: Intel syntax; AX9: Plan 9). AR1 (doc/asm/ARM64-SURVEY.md §12, 2026-11-10) adds arm64's part: GNU syntax in ELF's and Apple's
+spellings (§10) and Plan 9's text lexically (§11), on the same shell. The namespaces are `arbace.repr.asm.*` (`arbace/repr/asm{.ae,/}`),
+the command `bin/repr-asm`.
 
 ## 1. A file
 
@@ -21,7 +23,10 @@ A file's `.ae` text is a header form, then one item a line, then in mode `:full`
 #_(asm/layer {:at {0 ["" ".global expm1l" 1861780259], ...}, :n 46})
 ```
 
-The header is `asm/unit`, not the survey's `asm/file`: `.file` is a directive, `(asm/file ...)` its item (AXS18). The items are not
+The header is `asm/unit`, not the survey's `asm/file`: `.file` is a directive, `(asm/file ...)` its item (AXS18). Its map is the
+text's dialect, which reading the `.ae` back and printing it take from it: `{:arch :amd64 :syntax :att}` (AX1), `{:arch :arm64
+:syntax :gnu}` (ELF and COFF), `:syntax :apple` (Darwin's spelling: `;` comments), `:syntax :plan9` (Go's assembler), with `:cpp true`
+for a text of the C preprocessor (a `.S` file; Plan 9's always: §4's `asm/cpp-line` and `asm/cpp-invoke`). The items are not
 nested in the header, so a file is a sequence of top-level forms like repr/llvm's. A text is read as ISO-8859-1 (a character a
 byte) and written back the same way.
 
@@ -39,6 +44,12 @@ GNU as's tokens as LLVM's AsmLexer makes them for an x86 ELF target (llvm-projec
 - strings `"..."` with gas's escapes (`\b \f \n \r \t \" \\`, `\ooo` octal, `\xhh` hex, any other character itself);
 - punctuators `, ( ) [ ] { } $ % * + - / : ~ ! = < > | & ^ @ \` and `<< >> <= >= <> == != && || ->`.
 
+The arm64 dialects (AR1, LLVM's `AArch64MCAsmInfo.cpp`): ELF's and COFF's comment string is `//` and `#` is a line comment only at
+a statement's start (`AsmLexer::LexToken`: so a `.S`'s cpp lines and `# 1 "f.c"` markers), elsewhere the punctuator of an immediate;
+Darwin's is `;` with `%%` the separator. Plan 9's (Go's `cmd/asm/internal/lex`): `//` and `/* */`, `;` the separator, a byte above
+127 an identifier's character (Go's `·` U+00B7 and `∕` U+2215 in UTF-8, which the ISO-8859-1 reading sees as two or three
+characters, kept as such in the `.ae`), `->` and `@>` punctuators.
+
 A character no token starts with (a byte outside ASCII outside a comment or string, a `\` outside a macro's body) is a token
 `:other` that refuses the statement (unless the statement invokes a macro: its arguments are text).
 
@@ -55,6 +66,8 @@ A character no token starts with (a byte outside ASCII outside a comment or stri
 | `.` | `(asm/dot)` |
 | `foo@PLT`, `(a+b)@GOTPCREL`, `f@8` | `(at foo PLT)`, `(at (+ a b) GOTPCREL)`, `(at f 8)` |
 | `@function`, `%function` (in a directive) | `(at function)`, `(pct function)` |
+| `%pltpcrel(f)`, `f@AUTH(ia,42,addr)` (arm64's data directives), `$d:` (arm64's mapping symbol) | `(pct pltpcrel f)`, `(at f AUTH [ia 42 addr])`, `(asm/label $d)` |
+| Plan 9's `R1->3`, `R1@>3`, `·f`, `f<>`, `f<ABIInternal>` | `(-> R1 3)`, `(at> R1 3)` (the shifts' precedence), `(id "·f")` (its bytes), `(id "f<>")`, `(id "f<ABIInternal>")` (`id` when no symbol holds the name; printed as written) |
 | `-4`, `-x`, `+x`, `~x`, `!x` | `-4` (a negative integer), `(- x)`, `(+ x)`, `(bnot x)`, `(lnot x)` |
 | `a OP b` | `(OP a b)`, OP one of `\|\| && == != < <= > >= + - \| ornot xor & * / % << >>` (`<>` is `!=`, `^` is `xor`, binary `!` is `ornot`) |
 
@@ -73,6 +86,9 @@ around a binary operator and parentheses only where the precedence needs them.
 | `.ifc a,b` and the other text directives | `(asm/ifc "a,b")`: `.ifc .ifnc .ifb .ifnb .print .symver .secure_log_unique .abort` keep their arguments as text |
 | `.macro m a=1` ... `.endm` | `(asm/macro "m a=1" BODY "endm")`: BODY the text between the header's last token and the end directive; also `.rept`/`.rep`, `.irp`, `.irpc`, `.irpw` (ended by `.endr`), each nesting its own kind |
 | `m 1, 2` (a macro defined above in the file) | `(asm/invoke m "1, 2")`: the arguments as text |
+| `#include "x.h"`, `# define S b` (`:cpp`: a line whose first character but blanks is `#`, `\`-continued lines with it) | `(asm/cpp-line "include \"x.h\"")`: the text after `#`, printed at the line's start |
+| `CAS`, `SYMBOL_TYPE(_init, function)` (`:cpp`: a statement that starts with a name the text `#define`s, or with `NAME(` and no blank) | `(asm/cpp-invoke CAS)`, `(asm/cpp-invoke SYMBOL_TYPE "(_init, function)")`: the rest as text |
+| `fred .req x0` (arm64) | `(asm/reg-alias fred x0)` |
 | an instruction | the architecture's (§5) |
 
 A directive's name is lower case in the form (`.TEXT` is `(asm/text)`; the spelling is the layer's). Macro bodies and invocations
@@ -118,22 +134,69 @@ prints canonically. `:end` is the text after the last item when it is not the ca
 
 ## 7. Commands
 
-`bin/repr-asm read [--full] FILE [-o OUT.ae]`, `print [--full] FILE.ae [-o OUT]`, `corpus extract|lists`, `roundtrip [--record]
-[CORPUS...]`, `divergences`; the Makefile's `repr-asm-*`.
+`bin/repr-asm [--arch amd64|arm64] read [--syntax att|gnu|apple|plan9] [--full] FILE [-o OUT.ae]`, `print [--full] FILE.ae [-o OUT]`
+(the dialect the header's), `corpus extract|lists`, `roundtrip [--record] [CORPUS...]`, `divergences`; the Makefile's `repr-asm-*`
+(`ARCH=`, `repr-asm-roundtrip-arm64`, `repr-asm-record-arm64`).
 
-## 8. The judges of AX1 (own verdicts only)
+## 8. The judges of AX1 and AR1 (own verdicts only)
 
-Each file of `test/asm/corpora.edn`'s corpora is read in `:full`; its `.ae` text read back gives the same forms and layer; the
-forms printed with the layer give the original byte for byte; the canonical print read again gives the same forms and an empty
-layer. A file whose four hold is `:pass` in `test/asm/roundtrip-results-amd64.edn`; every other is in a class of
-`test/asm/divergences-read.edn` (`:intel`, `:error-test`, `:error-input`, `:lexer-option`, `:other-arch`, `:not-input`), each
-named from the test's own RUN lines (`not llvm-mc`, `-x86-asm-syntax=intel`, a triple, the file given to llvm-mc or not).
-split-file tests are read as their parts (`NAME.PART`), as llvm-mc reads them. The negative controls (`test/asm/controls.txt`):
-a file's `.ae` printed back must differ from another file's original. No assembler runs; gas and llvm-mc are the oracle tier's,
-from AX2 on (the stated encodings and CHECK texts are AX2's own verdicts).
+Each file of `test/asm/corpora.edn`'s corpora of the architecture is read in `:full`; its `.ae` text read back gives the same header,
+forms and layer; the forms printed with the layer give the original byte for byte; the canonical print read again gives the same forms
+and an empty layer. A file whose four hold is `:pass` in `test/asm/roundtrip-results-ARCH.edn`; every other is in a class of
+`test/asm/divergences-read.edn` (amd64: `:intel`, `:error-test`, `:error-input`, `:lexer-option`, `:other-arch`, `:not-input`) or
+`test/asm/divergences-read-arm64.edn` (arm64: `:error-test`, `:other-arch`, `:not-input`), each named from the test's own RUN lines
+(`not llvm-mc`, `-x86-asm-syntax=intel`, a triple, the file given to llvm-mc or not; for arm64 a file whose triples are all Darwin's is
+read in Apple's spelling). split-file tests are read as their parts (`NAME.PART`), as llvm-mc reads them. The negative controls
+(`test/asm/controls.txt`, `controls-arm64.txt`): a file's `.ae` printed back must differ from another file's original. No assembler
+runs; gas and llvm-mc are the oracle tier's, from AX2 and AR2 on (the stated encodings and CHECK texts are their own verdicts).
 
 ## 9. Later
 
 AX2: the table from LLVM's `.td` (AXS4 (a)), the matcher's acceptance and messages, the machine-level forms; the canonical
-print against `MC/X86`'s CHECK lines. AX3: Intel syntax, the cross-syntax judge. arm64 (AR1): the same frame, its operands under
-`arbace.repr.asm.arm64`. AX9: Plan 9's `p9/` forms.
+print against `MC/X86`'s CHECK lines. AX3: Intel syntax, the cross-syntax judge. AR2: arm64's tables (Go's optab and arm64asm,
+ARS5 (a)), the aliases resolved, the machine-level forms and LLVM's InstPrinter spelling against `MC/AArch64`'s CHECK lines. AR8 and
+AX9: Plan 9 through Go's own assembler (ARS3 (a), AXS15 (a)), its forms bridged to the machine level.
+
+## 10. arm64's GNU syntax (`arbace.repr.asm.arm64.gnu`, AR1)
+
+`(MNEMONIC OPERAND ...)`: the mnemonic as written, lower case (`add`, `b.eq`, `ld1b`, `smstart`); the operands **in the text's order**,
+which for A64 is the Arm ARM's (destination first): unlike AT&T, nothing is reversed. AR1 is the syntax level, as AX1's amd64 forms
+are (AXS17 (a), ARS17): `mov` is not yet `orr` or `movz`, a bare `4` is not yet an immediate; AR2's table resolves the aliases and the
+operand classes.
+
+| text | operand |
+|---|---|
+| `x0`, `W1`, `sp`, `xzr`, `fp`, `lr`, `q0`, `z31`, `p7`, `pn8`, `za`, `za1h`, `zt0` | `(reg x0)`, `(reg w1)` (lower case; the spelling is the layer's), ... |
+| `v0.4s`, `z0.d`, `za0h.s`, `p0.b` | `(reg v0 :4s)`, `(reg z0 :d)`, `(reg za0h :s)`, `(reg p0 :b)` (the kind after the first `.`) |
+| `p0/z`, `p0/m` | `(reg p0 {:pred z})`, `(reg p0 {:pred m})` |
+| `#4`, `#-1.25`, `#(1<<12)`, `#:lo12:sym` | `(imm 4)`, `(imm (- (float "1.25")))`, `(imm (<< 1 12))`, `(imm (spec lo12 sym))` |
+| `:got:sym`, `:abs_g1_nc:x+4` | `(spec got sym)`, `(spec abs_g1_nc (+ x 4))`: a relocation's specifier over the expression after it |
+| `=0x1234`, `=sym` | `(lit 4660)`, `(lit sym)` (the literal pool's pseudo operand) |
+| `[x0]`, `[x0, #16]`, `[x1, x2, lsl #3]`, `[x0, #1, mul vl]` | `(mem (reg x0))`, `(mem (reg x0) (imm 16))`, `(mem (reg x1) (reg x2) (shift lsl (imm 3)))`, ... |
+| `[x0, #16]!`, `x2!` (MOPS) | `(wb (mem (reg x0) (imm 16)))`, `(wb (reg x2))`; `[x0], #16` is a memory operand and an immediate |
+| `{v0.4s, v1.4s}`, `{z0.d - z3.d}`, `{za}` | `(rlist (reg v0 :4s) (reg v1 :4s))`, `(rlist (range (reg z0 :d) (reg z3 :d)))`, `(rlist (reg za))` |
+| `v0.s[1]`, `{v0.s, v1.s}[1]`, `za0h.s[w12, 0]`, `za.d[w8, 0:1, vgx2]` | `(elt (reg v0 :s) 1)`, `(elt (rlist ...) 1)`, `(elt (reg za0h :s) (reg w12) 0)`, `(elt (reg za :d) (reg w8) (range 0 1) vgx2)` |
+| `lsl #12`, `uxtw`, `sxtw #2`, `msl 8`, `mul vl` | `(shift lsl (imm 12))`, `(shift uxtw)`, `(shift sxtw (imm 2))`, `(shift msl 8)`, `(shift mul vl)` |
+| `x(tmp0)` (in a `.S`: a cpp macro's call) | `(cpp-call x "tmp0")` |
+| `foo`, `1f`, `eq`, `vmalle1is`, `CNTVCT_EL0`, `c7`, `4` | the expression itself: a label, a condition, an operation's or a system register's name (case kept), a bare immediate |
+
+The canonical text is llvm-mc's layout (a tab after the mnemonic, `, ` between operands, `{ a, b }` with blanks inside the braces as
+LLVM's InstPrinter writes lists, `{ a - b }` for a range, integers in decimal); AR2 holds it to the `CHECK:` lines. `.arch`,
+`.arch_extension`, `.cpu` and `.fpu` keep their arguments as text (`armv8.2-a+crypto` is not an expression).
+
+## 11. Plan 9's syntax, lexically (`arbace.repr.asm.plan9`, AR1)
+
+`(p9/MNEMONIC OPERAND ...)`: the mnemonic as written (Plan 9's are upper case, `MOVD`, `MOVD.W`, `TEXT`, `DATA`, `GLOBL`), the operands
+**in the text's order** (Plan 9's, source first), registers as the names they are (`R1`, `V0.S4`, `ZR`, `RSP`): a lexical reading,
+which reads and prints back every text Go's assembler takes without knowing what the operands are; AR8 bridges it to the machine level
+through Go's own assembler (ARS3 (a)).
+
+| text | operand |
+|---|---|
+| `R1`, `V0.S4`, `R1<<3`, `R1->3`, `R1.UXTW<<2`, `NOSPLIT\|NOFRAME` | an expression: `R1`, `V0.S4`, `(<< R1 3)`, `(-> R1 3)`, `(<< R1.UXTW 2)`, `(\| NOSPLIT NOFRAME)` |
+| `$1`, `$-8`, `$0-24`, `$(3<<20)`, `$"abc"`, `$f(SB)` | `(imm 1)`, `(imm -8)`, `(imm (- 0 24))`, `(imm (addr [(<< 3 20)]))`, `(imm "abc")`, `(imm (addr f [SB]))` |
+| `8(RSP)`, `(R1)(R2<<3)`, `·f(SB)`, `(R6, R7)`, `(VL*4)(RSP)` | `(addr 8 [RSP])`, `(addr [R1] [(<< R2 3)])`, `(addr (id "·f") [SB])`, `(addr [R6 R7])`, `(addr [(* VL 4)] [RSP])` |
+| `[V0.B16, V1.B16]`, `[Z4.B-Z7.B]` | `(rlist V0.B16 V1.B16)`, `(rlist (- Z4.B Z7.B))` |
+| `V0.D[1]`, `x+0(SB)/8`, `*R1` | `(elt V0.D 1)`, `(size (addr (+ x 0) [SB]) 8)`, `(ind R1)` |
+
+A parenthesized group is always a group, never an expression's parentheses, so `$(1)` and `(R1)` print back as written.

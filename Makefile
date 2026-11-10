@@ -19,7 +19,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check cppi-codegen-gen \
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
-  repr-asm-extract repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record \
+  repr-asm-extract repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -507,18 +507,24 @@ cppi-divergences: ## the recorded C++ run check judged against its classes (bin/
 	bin/cppi divergences
 cppi-divergences-aot: ## the recorded C++ AOT check judged against its classes (bin/cppi divergences --aot)
 	bin/cppi divergences --aot
-repr-asm-extract: ## repr/asm's corpora (musl 1.2.6's x86-64 .s, llvm/test's MC/AsmParser and MC/X86) out of their pinned tarballs (bin/repr-asm corpus extract)
+repr-asm-extract: ## repr/asm's corpora (musl 1.2.6's x86-64 and aarch64 .s, llvm/test's MC/AsmParser, MC/X86 and MC/AArch64, libgcc's aarch64 .S) out of their pinned tarballs (bin/repr-asm corpus extract)
 	bin/repr-asm corpus extract
-repr-asm-lists: ## repr/asm's corpus lists, split-file parts and RUN-line flags (bin/repr-asm corpus lists)
-	bin/repr-asm corpus lists
-repr-asm-read: ## an assembly file's forms as .ae text, mode :full (bin/repr-asm read --full FILE; FILE=...)
-	bin/repr-asm read --full $(FILE)
+repr-asm-lists: ## repr/asm's corpus lists, split-file parts and RUN-line flags (bin/repr-asm [--arch ARCH] corpus lists; ARCH=amd64|arm64)
+	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) corpus lists
+repr-asm-read: ## an assembly file's forms as .ae text, mode :full (bin/repr-asm read --full FILE; FILE=..., ARCH=amd64|arm64, SYNTAX=att|gnu|apple|plan9)
+	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) read $(if $(SYNTAX),--syntax $(SYNTAX)) --full $(FILE)
 repr-asm-print: ## an .ae text of assembly forms printed back, its layer kept (bin/repr-asm print --full FILE; FILE=...)
 	bin/repr-asm print --full $(FILE)
-repr-asm-roundtrip: ## repr/asm's round trip over its corpora against test/asm/roundtrip-results-amd64.edn, the classes and the negative controls (bin/repr-asm roundtrip [CORPUS...]; CORPORA=...)
+repr-asm-roundtrip: ## repr/asm's amd64 round trip over its corpora against test/asm/roundtrip-results-amd64.edn, the classes and the negative controls (bin/repr-asm roundtrip [CORPUS...]; CORPORA=...)
 	bin/repr-asm roundtrip $(CORPORA)
-repr-asm-record: ## repr/asm's round trip recorded into test/asm/roundtrip-results-amd64.edn (bin/repr-asm roundtrip --record [CORPUS...]; CORPORA=...)
+repr-asm-record: ## repr/asm's amd64 round trip recorded into test/asm/roundtrip-results-amd64.edn (bin/repr-asm roundtrip --record [CORPUS...]; CORPORA=...)
 	bin/repr-asm roundtrip --record $(CORPORA)
+repr-asm-roundtrip-arm64: ## repr/asm's arm64 round trip (GNU, Apple's spelling, Plan 9 lexically) against test/asm/roundtrip-results-arm64.edn, its classes and controls (bin/repr-asm --arch arm64 roundtrip [CORPUS...]; CORPORA=...)
+	bin/repr-asm --arch arm64 roundtrip $(CORPORA)
+repr-asm-record-arm64: ## repr/asm's arm64 round trip recorded into test/asm/roundtrip-results-arm64.edn (bin/repr-asm --arch arm64 roundtrip --record [CORPUS...]; CORPORA=...)
+	bin/repr-asm --arch arm64 roundtrip --record $(CORPORA)
+repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
+	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
 repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)
 	bin/repr-llvm check $(FAMILY)
 repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)

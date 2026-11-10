@@ -1,0 +1,169 @@
+(ns arbace.repr.asm.arm64.gnu
+  "repr/asm's GNU syntax for arm64 (doc/asm/SPEC.md §10; doc/asm/ARM64-SURVEY.md §2.1, §4.1, AR1): an instruction's text
+  into its form and back, after LLVM's AArch64AsmParser (llvm-project 23.1.5,
+  llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp, Apache-2.0 WITH LLVM-exception) for the operands' grammar. AR1
+  reads the syntax: the mnemonic as written (lower case: `add`, `b.eq`, `ld1b`), the operands in the text's order, which
+  is the Arm ARM's (destination first); AR2's table resolves the aliases and the operand classes.
+
+  (MNEMONIC OPERAND ...). An operand: (reg NAME KIND? {:pred P}?) a register (`x0`, `v0.4s` (reg v0 :4s), `p0/z`
+  (reg p0 {:pred z})); (imm E) `#E`; (spec NAME E) `:NAME:E`, a relocation's specifier; (lit E) `=E`; (mem OP ...)
+  `[OP, ...]`; (wb X) `X!`, a memory operand's or a register's writeback; (rlist OP ...) `{OP, ...}`; (range A B) `A-B`
+  in a list and `A:B` in an index; (elt X OP ...) `X[OP, ...]`; (shift NAME AMOUNT?) `lsl #3`, `uxtw`, `mul vl`;
+  (cpp-call NAME TEXT) `NAME(TEXT)` in a `.S`; a bare expression (a label, an immediate written without `#`, a condition,
+  a system register's name)."
+  (:require [arbace.repr.asm.lex :as lex]
+            [arbace.repr.asm.gnu :as gnu]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- tok [ts ^long i] (when (< i (count ts)) (nth ts i)))
+
+(def shifts #{"lsl" "lsr" "asr" "ror" "msl" "uxtb" "uxth" "uxtw" "uxtx" "sxtb" "sxth" "sxtw" "sxtx" "mul"})
+
+(def ^:private reg-re
+  ;; the register names of A64 and its extensions (AArch64AsmParser's matchRegisterNameAlias and its vector, SVE and SME
+  ;; kinds): general, vector, scalar FP/SIMD, SVE's Z and P, SME's ZA tiles and ZT0
+  #"(?i)(?:[xw](?:[0-9]|[12][0-9]|30)|sp|wsp|xzr|wzr|fp|lr|[vbhsdqz](?:[0-9]|[12][0-9]|3[01])|pn?(?:[0-9]|1[0-5])|za(?:[0-7]?[hv]?)?|zt0)")
+
+(defn register
+  "[NAME KIND] when the identifier `s` names a register (KIND the suffix after its first `.`, a keyword, or nil)."
+  [^String s]
+  (let [k (.indexOf s ".")
+        n (if (neg? k) s (subs s 0 k))
+        kind (when-not (neg? k) (subs s (inc k)))]
+    (when (and (re-matches reg-re n)
+               (or (nil? kind) (re-matches #"[0-9]*[a-zA-Z]" kind)))
+      [(symbol (str/lower-case n)) (when kind (keyword (str/lower-case kind)))])))
+
+(declare parse-operand)
+
+(defn- expect [ts ^long i p]
+  (when-not (lex/punct? (tok ts i) p) (gnu/fail (str "expected " p) {:at i}))
+  (inc i))
+
+(defn- parse-value
+  "[E I] an immediate's or a bare operand's value at `i`: :NAME:E (a specifier), NAME(TEXT) in a `.S`, else an expression."
+  [^String src ts ^long i cpp?]
+  (let [t (tok ts i) n (tok ts (inc i)) m (tok ts (+ i 2))]
+    (cond
+      (and (lex/punct? t ":") n (= :ident (lex/kind n)) (lex/punct? m ":"))
+      (let [[e j] (gnu/parse-expr ts (+ i 3) false)]
+        [(list 'spec (symbol (str/lower-case (lex/value n))) e) j])
+
+      (and cpp? t (= :ident (lex/kind t)) (lex/punct? n "(") (not (lex/ws? n)))
+      (let [j (loop [j (+ i 2) depth 0]
+                (let [x (tok ts j)]
+                  (cond (nil? x) (gnu/fail "expected ) of a macro's call" {:at j})
+                        (lex/punct? x "(") (recur (inc j) (inc depth))
+                        (and (lex/punct? x ")") (zero? depth)) j
+                        (lex/punct? x ")") (recur (inc j) (dec depth))
+                        :else (recur (inc j) depth))))]
+        [(list 'cpp-call (gnu/sym-form (lex/value t)) (str/trim (subs src (int (lex/end n)) (int (lex/start (nth ts j))))))
+         (inc (long j))])
+
+      :else (gnu/parse-expr ts i false))))
+
+(defn- parse-list
+  "[[OP ...] I] operands separated by `,` up to the closing `close`; with `ranges` a `-` (lists) or `:` (indexes) between
+  two makes (range A B)."
+  [^String src ts ^long i close range-p cpp?]
+  (if (lex/punct? (tok ts i) close)
+    [[] (inc i)]
+    (loop [i i out []]
+      (let [[x j] (parse-operand src ts i cpp?)
+            [x j] (if (and range-p (lex/punct? (tok ts j) range-p))
+                    (let [[y k] (parse-operand src ts (inc (long j)) cpp?)] [(list 'range x y) k])
+                    [x j])
+            n (tok ts j)]
+        (cond
+          (lex/punct? n ",") (recur (inc (long j)) (conj out x))
+          (lex/punct? n close) [(conj out x) (inc (long j))]
+          :else (gnu/fail (str "expected , or " close) {:at j}))))))
+
+(defn- postfix
+  "[X I] the operand `x` with what follows it at `i`: an index `[...]`, a predicate's qualifier `/z` or `/m`."
+  [^String src ts x ^long i cpp?]
+  (loop [x x i i]
+    (let [t (tok ts i) n (tok ts (inc i))]
+      (cond
+        (lex/punct? t "[")
+        (let [[ps j] (parse-list src ts (inc i) "]" ":" cpp?)] (recur (apply list 'elt x ps) (long j)))
+        (lex/punct? t "!") (recur (list 'wb x) (inc i))
+        (and (lex/punct? t "/") n (= :ident (lex/kind n)) (= 'reg (first x)) (not (map? (last x))))
+        (recur (concat x [{:pred (symbol (str/lower-case (lex/value n)))}]) (+ i 2))
+        :else [(if (seq? x) (apply list x) x) i]))))
+
+(defn parse-operand
+  "[FORM I] the operand at `i`."
+  [^String src ts ^long i cpp?]
+  (let [t (tok ts i)
+        n (tok ts (inc i))
+        _ (when-not t (gnu/fail "an operand expected" {:at i}))
+        [x j] (cond
+                (lex/punct? t "#") (let [[e j] (parse-value src ts (inc i) cpp?)] [(list 'imm e) j])
+                (lex/punct? t "=") (let [[e j] (parse-value src ts (inc i) cpp?)] [(list 'lit e) j])
+                (lex/punct? t "[")
+                (let [[ps j] (parse-list src ts (inc i) "]" nil cpp?)] [(apply list 'mem ps) j])
+                (lex/punct? t "{")
+                (let [[ps j] (parse-list src ts (inc i) "}" "-" cpp?)] [(apply list 'rlist ps) j])
+                (and (= :ident (lex/kind t)) (register (lex/value t))
+                     (not (and cpp? (lex/punct? n "(") (not (lex/ws? n)))))
+                (let [[r k] (register (lex/value t))] [(if k (list 'reg r k) (list 'reg r)) (inc i)])
+                (and (= :ident (lex/kind t)) (shifts (str/lower-case (lex/value t)))
+                     (or (nil? n) (lex/punct? n ",") (lex/punct? n "]") (lex/punct? n "}") (lex/punct? n "#")
+                         (and (lex/ws? n) (#{:int :ident :local} (lex/kind n)))))
+                (let [s (symbol (str/lower-case (lex/value t)))]
+                  (if (or (nil? n) (lex/punct? n ",") (lex/punct? n "]") (lex/punct? n "}"))
+                    [(list 'shift s) (inc i)]
+                    (let [[a k] (parse-operand src ts (inc i) cpp?)] [(list 'shift s a) k])))
+                :else (parse-value src ts i cpp?))]
+    (postfix src ts x j cpp?)))
+
+(defn read-insn
+  "An instruction's form from the statement's tokens `ts` at `i`."
+  [^String src ts ^long i cpp?]
+  (let [t (tok ts i)
+        _ (when-not (and t (= :ident (lex/kind t))) (gnu/fail "expected a mnemonic" {:at i}))
+        mn (symbol (str/lower-case (lex/value t)))
+        ops (loop [i (inc i) ops []]
+              (if (>= i (count ts))
+                ops
+                (let [[x j] (parse-operand src ts i cpp?)
+                      n (tok ts j)]
+                  (cond
+                    (nil? n) (conj ops x)
+                    (lex/punct? n ",") (if (>= (inc (long j)) (count ts)) (gnu/fail "an operand expected after ," {:at j}) (recur (inc (long j)) (conj ops x)))
+                    :else (gnu/fail (str "unexpected " (pr-str (lex/value n)) " after an operand") {:at j})))))]
+    (apply list mn ops)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; canonical text
+
+(defn- value-text ^String [e]
+  (cond
+    (and (seq? e) (= 'spec (first e))) (str ":" (name (second e)) ":" (gnu/expr-text (nth e 2)))
+    (and (seq? e) (= 'cpp-call (first e))) (str (gnu/name-text (second e)) "(" (nth e 2) ")")
+    :else (gnu/expr-text e)))
+
+(defn operand-text ^String [x]
+  (if-not (seq? x)
+    (value-text x)
+    (case (first x)
+      reg (let [[_ r & more] x
+                k (first (filter keyword? more))
+                m (first (filter map? more))]
+            (str (name r) (when k (str "." (name k))) (when-let [p (:pred m)] (str "/" (name p)))))
+      imm (str "#" (value-text (second x)))
+      lit (str "=" (value-text (second x)))
+      mem (str "[" (str/join ", " (map operand-text (rest x))) "]")
+      wb (str (operand-text (second x)) "!")
+      rlist (str "{ " (str/join ", " (map operand-text (rest x))) " }")
+      range (let [[_ a b] x] (str (operand-text a) (if (and (seq? a) (#{'reg 'elt} (first a))) " - " ":") (operand-text b)))
+      elt (let [[_ y & ps] x] (str (operand-text y) "[" (str/join ", " (map operand-text ps)) "]"))
+      shift (let [[_ s a] x] (str (name s) (when (> (count x) 2) (str " " (operand-text a)))))
+      (value-text x))))
+
+(defn insn-text ^String [f]
+  (let [[mn & ops] f]
+    (str (name mn) (when (seq ops) (str "\t" (str/join ", " (map operand-text ops)))))))

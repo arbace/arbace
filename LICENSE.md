@@ -1363,6 +1363,14 @@ covers what.
   for rule, under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below). Its test corpora
   (`llvm/test/MC/{X86,AsmParser}`, extracted into `.tmp/`, never committed) are under the same licence; musl 1.2.6's
   `.s` files, read as a corpus, under musl's MIT licence (section "musl: MIT License").
+- The same namespaces' arm64 part (AR1, doc/asm/ARM64-SURVEY.md): `arm64/gnu.ae`'s operand grammar follows LLVM's
+  `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` and `lex.ae`'s AArch64 dialects its
+  `MCTargetDesc/AArch64MCAsmInfo.cpp` (the same tarball and licence); `plan9.ae`'s operand grammar follows Go 1.27.1's
+  `src/cmd/asm/internal/asm/parse.go` (TamaGo's GOROOT, pinned by `seed/goroot.sha256`; section "Go: BSD 3-Clause License").
+  No code is copied. Read as corpora, never committed: `llvm/test/MC/AArch64` (LLVM's licence), musl 1.2.6's aarch64 `.s`
+  (MIT), Go's `cmd/asm` testdata (BSD-3-Clause), the box's arm64 `.s` (its own files' licences, box/README.md), and gcc
+  15.2.0's `libgcc/config/aarch64/*.S` from the pinned tarball (GPL-3.0-or-later with the GCC Runtime Library Exception 3.1:
+  read and printed back as test data, never ported).
 - `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
   a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
   SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s

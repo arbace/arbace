@@ -154,6 +154,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   assembly forms and prints it back byte for byte; musl 32/32, `MC/AsmParser` 139/157 and `MC/X86` 464/621 pass, the rest classed
   (Intel for AX3, the error tests for AX2). Proposed AXS17-AXS22. Next: AX2 (LLVM's `.td` table, the machine-level forms, the
   stated encodings and CHECK texts), then arm64's AR1 on the same frame.
+- Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
+  and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
+  `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
+  ARS17-ARS23. Next: AR2 (Go's optab and arm64asm as tables, the aliases, the stated encodings and CHECK texts).
 
 ## Decided, not built yet
 

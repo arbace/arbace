@@ -1,16 +1,22 @@
 #!/bin/bash
-# repr/asm, assembly's bridge (doc/asm/SPEC.md; doc/asm/AMD64-SURVEY.md §4, §5, §10, AX1): GNU as's text in AT&T syntax for
-# amd64 as assembly forms and back, arbace.repr.asm on the tools' host (evaluated from the checkout: a crop's namespace,
+# repr/asm, assembly's bridge (doc/asm/SPEC.md; doc/asm/AMD64-SURVEY.md §4, §5, §10, AX1; doc/asm/ARM64-SURVEY.md §4.1, AR1): GNU
+# as's text in AT&T syntax for amd64, and for arm64 in GNU syntax (ELF, Apple's spelling) and Plan 9's (lexically), as assembly
+# forms and back, arbace.repr.asm on the tools' host (evaluated from the checkout: a crop's namespace,
 # bin/lib/version.bash's arbace_crop_paths). No assembler runs: every judge is the text's own (the forms read again equal,
 # mode :full printed back byte for byte); gas and llvm-mc are the oracle tier's (AX2 on).
 #
-#   bin/repr-asm read [--full] FILE.s [-o OUT.ae]    FILE's assembly forms as .ae text (a header, an item a line); --full: mode
-#                                                    :full, the text's layer kept in the .ae's last line
+#   --arch amd64|arm64 (anywhere; default amd64)    the architecture: its corpora, record, classes and controls (amd64's
+#                                                    test/asm/{roundtrip-results-amd64,divergences-read,controls}, arm64's
+#                                                    test/asm/{roundtrip-results-arm64,divergences-read-arm64,controls-arm64})
+#   bin/repr-asm read [--syntax S] [--full] FILE.s [-o OUT.ae]  FILE's assembly forms as .ae text (a header, an item a line);
+#                                                    --full: mode :full, the text's layer kept in the .ae's last line; S att
+#                                                    (amd64), gnu, apple or plan9 (arm64); a .S is read as the C preprocessor's
 #   bin/repr-asm print [--full] FILE.ae [-o OUT.s]   the forms printed canonically; --full: with the layer, the original text
 #                                                    byte for byte
 #   bin/repr-asm corpus extract                      the corpora of test/asm/corpora.edn out of their pinned tarballs (musl
-#                                                    1.2.6's, llvm-project 23.1.5's) into $REPR_ASM_SRC (default MAIN/.tmp/asm/src),
-#                                                    each tarball's SHA-256 checked against its pin first
+#                                                    1.2.6's, llvm-project 23.1.5's, gcc 15.2.0's) into $REPR_ASM_SRC (default
+#                                                    MAIN/.tmp/asm/src), each tarball's SHA-256 checked against its pin first (Go's
+#                                                    testdata are read in place in $ARBACE_GOROOT, the box's in the checkout)
 #   bin/repr-asm corpus lists [CORPUS...]            each corpus's list (NAME<tab>PATH) into .tmp/repr-asm/lists/CORPUS.list
 #   bin/repr-asm roundtrip [--record] [CORPUS...]    each file of each corpus (default: every corpus of test/asm/corpora.edn): read
 #                                                    in :full, the .ae text read back (forms and layer equal), printed back byte for
@@ -21,6 +27,10 @@
 #                                                    controls of test/asm/controls.txt fail; WORK .tmp/repr-asm/rt/CORPUS
 #   bin/repr-asm divergences [RESULTS]               the results' non-passes judged against the classes (none unclassed)
 set -euo pipefail
+arch=amd64 args=()
+while [ $# -gt 0 ]; do case $1 in --arch) arch=$2; shift 2 ;; *) args+=("$1"); shift ;; esac; done
+set -- "${args[@]+"${args[@]}"}"
+case $arch in amd64|arm64) ;; *) echo "repr-asm: --arch amd64|arm64" >&2; exit 2 ;; esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
@@ -29,20 +39,23 @@ main=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)
 case $root in */.tmp/gate-clean/*) main=${root%%/.tmp/gate-clean/*} ;; esac
 src=${REPR_ASM_SRC:-$main/.tmp/asm/src}
 corpora=$root/test/asm/corpora.edn
-results=$root/test/asm/roundtrip-results-amd64.edn
-classes=$root/test/asm/divergences-read.edn
-controls=$root/test/asm/controls.txt
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+results=$root/test/asm/roundtrip-results-$arch.edn
+case $arch in
+  amd64) classes=$root/test/asm/divergences-read.edn controls=$root/test/asm/controls.txt ;;
+  *) classes=$root/test/asm/divergences-read-$arch.edn controls=$root/test/asm/controls-$arch.txt ;;
+esac
 lists=$root/.tmp/repr-asm/lists
 
 edn() { arbace_tool -e "(let [c (read-string (slurp \"$corpora\"))] $1)"; }
 
-# corpus_ids: the corpora's ids, in order
-corpus_ids() { edn '(doseq [x (:corpora c)] (println (name (:id x))))'; }
+# corpus_ids: the corpora's ids of the architecture, in order
+corpus_ids() { edn "(doseq [x (:corpora c) :when (= (or (:arch x) :amd64) :$arch)] (println (name (:id x))))"; }
 
 extract() {
   local id tar sum top want
   mkdir -p "$src"
-  edn '(doseq [[k p] (:pins c)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$TMPDIR/asm-pins.txt"
+  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$TMPDIR/asm-pins.txt"
   while read -r id tar sum top; do
     [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host (a fetch by its pin, the user's)" >&2; return 1; }
     want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
@@ -56,24 +69,44 @@ extract() {
   done < "$TMPDIR/asm-pins.txt"
 }
 
-# make_list ID: the corpus's files (its :dir under src, its :match and not its :exclude), NAME<tab>PATH
+# make_list ID: the corpus's files (its :dir under its :root, src by default, $ARBACE_GOROOT for :goroot, the checkout for
+# :checkout; its :match and not its :exclude), NAME<tab>PATH<tab>FLAGS
 make_list() {
-  local id=$1 dir match exclude
-  read -r dir match exclude < <(edn "(let [x (first (filter #(= (:id %) :$id) (:corpora c)))] (println (:dir x) (:match x) (or (:exclude x) \"^\$\")))")
-  [ -d "$src/$dir" ] || { echo "repr-asm: $src/$dir missing: bin/repr-asm corpus extract" >&2; return 1; }
+  local id=$1 dir match exclude rt syn base
+  read -r dir match exclude rt syn < <(edn "(let [x (first (filter #(= (:id %) :$id) (:corpora c)))] (println (:dir x) (:match x) (or (:exclude x) \"^\$\") (name (or (:root x) :src)) (name (or (:syntax x) :default))))")
+  case $rt in
+    goroot) base=$goroot
+      [ "$(head -1 "$goroot/VERSION" 2>"$TMPDIR/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
+        { echo "repr-asm: $goroot/VERSION is not the pin's (seed/goroot.sha256's toolchain)" >&2; return 1; } ;;
+    checkout) base=$root ;;
+    *) base=$src ;;
+  esac
+  [ -d "$base/$dir" ] || { echo "repr-asm: $base/$dir missing: bin/repr-asm corpus extract" >&2; return 1; }
   mkdir -p "$lists"
   local sd=$root/.tmp/repr-asm/split/$id f n p flags
   rm -rf "$sd"
   : > "$lists/$id.list"
-  (cd "$src/$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | grep -E "$match" | grep -vE "$exclude" || true) > "$TMPDIR/asm-files.txt"
+  (cd "$base/$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | grep -E "$match" | grep -vE "$exclude" || true) > "$TMPDIR/asm-files.txt"
   while read -r f; do
-    p=$src/$dir/$f n=${f%.[sS]}; n=${n//\//-}
+    p=$base/$dir/$f n=${f%.[sS]}; n=${n//\//-}
     # the test's own verdict and target from its RUN lines (llvm/test's lit tests): reject when one runs `not llvm-mc`, other-arch
     # when its triples name no x86
+    if [ "$arch" = amd64 ]; then
     flags=$(awk '/RUN:/ { r = r " " $0 } END { f = ""; if (r ~ /not llvm-mc/) f = f " reject"
                  if (r ~ /-triple|-mtriple|--triple/ && r !~ /(i[3-6]86|x86_64|x86-64|amd64)/) f = f " other-arch"
                  if (r ~ /-x86-asm-syntax=intel/) f = f " intel"
                  if (r != "" && r !~ /llvm-mc[^|]*%s/ && r !~ /split-file/) f = f " not-input"; print f }' "$p")
+    else
+    # arm64: apple when every triple the RUN lines name is Darwin's (`;` comments), other-arch when none is AArch64's
+    flags=$(awk '/RUN:/ { r = r " " $0 } END { f = ""; if (r ~ /not llvm-mc/) f = f " reject"
+                 n = 0; a = 0; d = 0; s = r
+                 while (match(s, /-?-m?triple[= ]+[^ ]+/)) { t = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+                   sub(/^-?-m?triple[= ]+/, "", t); n++; if (t ~ /^(aarch64|arm64)/) a++; if (t ~ /(apple|darwin|ios|macos)/) d++ }
+                 if (n > 0 && a == 0) f = f " other-arch"
+                 if (n > 0 && d == n) f = f " apple"
+                 if (r != "" && r !~ /llvm-mc[^|]*%s/ && r !~ /split-file/) f = f " not-input"; print f }' "$p")
+    fi
+    [ "$syn" = plan9 ] && flags="$flags plan9"
     if grep -qE '^(#|//)--- ' "$p"; then
       # a split-file test (`split-file %s %t`): its parts are the files llvm-mc reads, each listed as NAME.PART
       mkdir -p "$sd/$n"
@@ -103,7 +136,7 @@ rows() {
 }
 
 case ${1:-} in
-  read|print) arbace_tool -m arbace.repr.asm "$@" ;;
+  read|print) v=$1; shift; arbace_tool -m arbace.repr.asm "$v" --arch "$arch" "$@" ;;
   corpus)
     case ${2:-} in
       extract) extract ;;
@@ -118,7 +151,7 @@ case ${1:-} in
     for id in "${ids[@]}"; do
       make_list "$id"
       work=$root/.tmp/repr-asm/rt/$id; rm -rf "$work"; mkdir -p "$work"
-      arbace_tool -m arbace.repr.asm check "$lists/$id.list" "$work"
+      arbace_tool -m arbace.repr.asm check --arch "$arch" "$lists/$id.list" "$work"
       rows "$work" "$id" "$lists/$id.list" >> "$all"
     done
     fails=0
@@ -137,5 +170,5 @@ case ${1:-} in
     [ $fails = 0 ] ;;
   divergences)
     arbace_tool -e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"${2:-$results}\" \"$classes\" \"\" \"\")" ;;
-  *) sed -n '2,30p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac
