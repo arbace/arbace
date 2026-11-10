@@ -3644,3 +3644,18 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
   considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
   the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
+
+## 2026-11-10: j2g's dyn forms split for the frozen JVM (branch `java-dyn-fix`, from `java-night` 49fbfee1e)
+
+- Night 11's Java retry stopped at `bin/javac-vendor convert`'s edge step (`bin/j2g --program --record-edge` on the frozen v4 jar):
+  `MethodTooLargeException` compiling `arbace.j2g.dyn/forms` (dyn.ae:416): the JVM compiler hoists a fn's quoted constants into its
+  class's `<clinit>`, at most 64 KB of bytecode, and JCS170 (a) (15293a6cc: `defineJavaProxy`, the Proxy hook) took `forms` over it
+  (its parent's dyn.ae loads on the jar). Stage 0 and the Go build compile it to Go, with no such limit; only the frozen JVM, which
+  loads the checkout's j2g as `.clj` links (bin/lib/frozen.bash), fails.
+- Fix: `forms`'s literal parts moved verbatim into three private fns, `core-forms`, `native-forms`, `proxy-forms` (each its own class),
+  `forms` concatenating them in the same order. Alternatives considered: loading the forms as data at run time (a new file to embed
+  and key) and a smaller split (two parts would leave the natives near the limit).
+- Proofs: `(require 'arbace.j2g.dyn)` on the frozen jar (`frozen_java tools`, one JVM, -Xmx1500m) fails before, loads after; on stage 0
+  the old and new `forms` with the world stubbed (interfaces, slot keys, method and sub forms, proxy classes, `m/translated?`) give the
+  same forms printed with metadata but the reader's `:line`/`:column`, which `arbace.j2g.out/clean` drops, and `out/file-text` of
+  j2g_dyn.go byte for byte equal (17,900 characters).
