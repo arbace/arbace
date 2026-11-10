@@ -141,7 +141,7 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
 
 ## Being built today (2026-11-09; light, sample checks; for the second merge pass or later)
 
-- C: `c-props3` (CS294, CS295). C++: `cpp-props4` (CP320-CP324), `cpp-route` (CP240 (b)), `cpp-codegen-fix` (the vtables
+- C: `c-props3` (CS294, CS295), `c-props4` (CS296 (b), CS297 (a), the Mac's ms_struct request). C++: `cpp-props4` (CP320-CP324), `cpp-route` (CP240 (b)), `cpp-codegen-fix` (the vtables
   in a deterministic order, the codegen record 149 of 149: `cpp-codegen-gen` fails on `next` without it).
 - Haskell: `hs-p3` (HF10-P3, the own interfaces). Rust: `rust-rf11` (RF11's first slice).
 - OCaml: `ocaml-props2` (OC191-OC197, OC206, OC207). Scheme: `scheme-props4` (SCS22-SCS24). LLVM IR: `llvm-props3`

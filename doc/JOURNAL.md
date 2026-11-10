@@ -2790,3 +2790,16 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+
+## 2026-11-09: CS296 (b), CS297 (a), and ms_struct for the Mac VM's ctypes (branch `c-props4`, from next `6c3c87c02`)
+
+The user accepted c-props3's proposals as recommended (about 14:20) and passed on the Mac VM's request (report 244, item 4).
+CS296 (b): nothing changes. CS297 (a): `-Wno-implicit-int` and `-Wno-error=implicit-int` read by `arbace.repr.c.host` and passed
+to the checker, which then gives no implicit-int error (gcc 15.2 by hand: none, or a warning); `judge_test.ae`'s
+`implicit-int-options`. The request: `#pragma pack(push, n)` in a function body was already gcc's since CS290 (a) (measured 9 as
+gcc; `test/c/run/pack-in-body.c`); GNU's `ms_struct` implemented in the checker's layout (`ms-layout!`) from gcc's manual's
+Microsoft layout rules, no gcc source read, every rule's case measured with the host's gcc 15.2 by hand
+(`test/c/run/ms-struct.c`, self-checking: 23 differences before, 0 after, interpreted and compiled). Records: ci-run's two
+programs' gcc runs, check and AOT rows; REAP's C eval and AOT +2. Alternative considered for CS297: computing the option in
+`arbace.c` alone to keep musl's forms key (rejected: the decision names the host's file options; the key's move costs one musl
+read). Proposed: CS298 (`-mms-bitfields`). Recorded in doc/C23-SURVEY.md, "As built: CS296 (b), CS297 (a), the ms_struct request".
