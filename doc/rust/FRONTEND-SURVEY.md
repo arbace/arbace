@@ -2824,3 +2824,63 @@ name; `bin/rust-front rsi-native panic-vec-remove`: status 101, its outputs as r
   `RSI_STD_DIR`; `test/rust/runtime/std.edn` takes it with the night's re-pin (the runtime's key holds std.edn: changing it by day
   would make every runtime stale).
 - **RFP42**: not buildable by day (no lowered std on this host, RES60 (a)); its night command below.
+
+### The night's commands (lane LB or the oracle tier; none run here)
+
+In the order they depend on each other, each one process at a time:
+
+1. RFP47 (a), the oracle tier (rustc, Cargo, clang): `RSI_STD_DIR=.tmp/rsi/std-remap
+   RSI_STD_REMAP=/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library bin/rsi std-build --update` (the last build here: cargo 38 s,
+   IR 2 s, 103 units), then `grep -c '/rustc/58cf8f9c' .tmp/rsi/std-remap/ir/core/*.ll` (the panics' paths named
+   as the recorded runs name them), then std.edn's `:rustflags` takes the remap (a commit: the runtime's key moves) and
+   `bin/rsi runtime-ci` makes std's lowered library (about four hours, 6 GiB: RES60 (a)), `bin/rust-front std-crates --rsi` and
+   `bin/rust-front records make rsi` (the pack again, 3 minutes).
+2. RFP42 (a): `bin/rust-front rsi-build` (RFP46 (a): the whole plan at `RF11_BATCH=6`, `RF11_PROCS=4`, about 30 minutes, 2.4 GB a
+   process; the samples' processes above that), then `bin/rsi check --front own --corpus samples,synthetic`; when every own case
+   passes or is classed, `--front own` the default of `rsi-check` and `rsi-essential` for those corpora and the record re-recorded.
+3. RFP45 (a): `bin/repr-rust corpus fetch rustc-1.99.1-ui` (the UI sources; network), `RF_RSI_UI=40 bin/rust-front records make
+   rsi` (about 93 programs, the helper as rustc: about 5 minutes, 3 MB xz more in the pack), `RF_RSI_UI=40 bin/rust-front rsi-build
+   ui-...` by edition (the names of `rsi-plan.ui40.tsv`), then `bin/rsi check --front own --corpus run` over them.
+
+### Results
+
+- `bin/rust-front rsi-build` over the synthetic corpus (67 programs, main's stage 0, `RF11_PROCS=2`, `RF11_BATCH=4`, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; 40 minutes): **47 of 67 own**, the same 47 as RF11's run; the 20 others now stop
+  later. Their first refusals before → after: virtual calls 5, unsizing to `dyn` 3, the repeat loop 2, `powi` 2, `typed_swap` 1
+  (13, all past) → a local instance not collected 11 (RFP49: `algorithms`, `drops`, `errors`, `float-f32`, `float-f64`, `fmt`,
+  `main-err`, `patterns`, `strings`, `structs`, `traits`), the vector ABI 4 (`collections`, `generics`, `iterators`, `rc-refcell`:
+  hashbrown's SSE2 groups), `tlsref` 1, an unevaluated named constant 1 (`casts`), a closure's function pointer 1 (`closures`,
+  RFP50), and two `main`s not ours (`panic-assert-eq`'s path, `panic-explicit`'s `&str` promoted constant). In the 14 programs
+  this slice worked on, the vtables' and virtual calls' facts: 8 of 8 virtual slots native where the callee was ours, the record's
+  virtual callees' slots computed (`vslots` 2 of 2 to 4 of 4 a program), the casts' vtables the record's (`vtables` 0 of 2 to 0 of 3:
+  every one needed a default method, a closure's shim or std's impl: RFP48, RFP50).
+- The native leg (`bin/rust-front rsi-native`, by hand: rustc as the linker driver): **44 of 47 give rustc's recorded run** (43
+  before: `panic-vec-remove`); the three left are RFP47's std paths (`overflow-abs-i64`, `overflow-pow-i32`, `panic-alloc`).
+- `bin/rust-front essential` equals its known file (5 min 50 s), `bin/rust-front core-essential` equals its own (564 of 567, 10
+  min), `bin/reap` 41 of 44 cells checked, 0 problems, `bin/crops-score --judge --strict` exit 0; Rust 75.0 / 75.0 / 95.8 / 80.0,
+  unchanged (RFP43 (a): an own case still scores 0.5). `bin/rsi check --essential` (a 4 GiB `--full` step) was not run: it needs
+  std's lowered library, which this host does not have, and this slice does not touch its path (`bin/rsi std-build` only under
+  `RSI_STD_REMAP`).
+- Not reached (item 2 of the brief): the core bodies still not equal to rustc's built MIR (`mut_ptr::cast_const`,
+  `slice::as_ptr`/`as_mut_ptr`, `ptr::metadata::from_raw_parts`/`_mut`, `<DynMetadata>::size_of`/`align_of`; the last needs
+  foreign types, `extern { type VTable; }`, which lowering marks unsupported).
+
+### Proposed (RF13's first slice)
+
+- **RFP48 Trait resolution in mono.** Every call of a trait method and every vtable entry that is not a local impl's own method is
+  still the record's fact (`callee-fact` refuses "a trait method's resolution"; `vtable-alloc` refuses default methods, std's impls
+  and shims). Options: (a) **port Instance::resolve's `resolve_associated_item` for impl candidates (the local impls, std's
+  `si/impl`s of the interface, the trait's default body instantiated with the impl's arguments) and the builtin candidates mono
+  meets (closures' Fn traits, `Clone` of Copy types, drop glue), the facts refused only for what it leaves**, 2-3 days; (b) keep the
+  record's facts until RF12's std slices. *Recommended: (a)*: it is the largest share of the refused callee facts (synthetic:
+  about a third of each program's callees), and RF12's std bodies need it too.
+- **RFP49 The collector through std's bodies.** Three programs pass codegen and the lowering but miss a local instance the module
+  declares (generic local functions instantiated inside std's bodies, closures passed to std's adapters, derived methods reached
+  through a vtable in std's bodies), now refused as `a local instance not collected`. Options: (a) **mono's collector walks the
+  record's std instances' bodies for the local definitions they name (by their DefId and arguments) and builds those instances
+  from our bodies (generic ones instantiated as RF12-P6 instantiates core's)**; (b) roots from the record's mono items (the
+  record's instance list: a fact of rustc's). *Recommended: (a)*.
+- **RFP50 Closures' function-pointer and vtable shims.** `ClosureFnPointer` (`closures`) and a closure's `FnOnce::call_once` in a
+  `dyn Fn` vtable need shim.rs' ClosureOnceShim and VTableShim bodies, which only the record has (local, so not taken). Options:
+  (a) **build the two shims natively (shim.rs: a call of the closure's body with its environment by reference or by value)**, after
+  RFP48; (b) take the record's shim bodies for local closures (a record body in our module). *Recommended: (a)*.

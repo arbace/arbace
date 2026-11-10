@@ -2865,3 +2865,24 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
   considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
   the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
+
+## 2026-11-10: RF13's first slice, RFP42-RFP47's light parts (branch `rust-rf13`, from `mac/rust-rf12` `0c22b1f1b`)
+
+- RFP44 (a): vtables natively in `arbace.rust.front.mono` (`vtable-entries`, a port of rustc 1.99.1's
+  `rustc_trait_selection/src/traits/vtable.rs` `prepare_vtable_segments` and `own_existential_vtable_entries`; MIT or Apache-2.0):
+  a virtual call's slot from the object's principal (`callee-fact`'s `:slot`), the record's virtual callees' slots from their method
+  path and printed `dyn`; codegen's virtual call (meth.rs' `VirtualIndex::get_fn`); our unsizing casts' vtables laid out natively when
+  every entry is a local impl's own method, else the record's cast of the same type in the same body. Alternative considered: RFP44
+  (b), the helper dumping slots (a rebuild and the packs again): not needed, the slot is the trait's items'.
+- Codegen's gaps the programs reached next, fixed: the repeat loop, powi, fma, exact_div, typed_swap_nonoverlapping, catch_unwind
+  (`__rust_try` in the module), type_id_eq, TypeId constants, `&str` valtrees, struct-tail unsizing, memory transmutes, SSA fields'
+  discriminants, function-pointer calls, reified local functions, external statics, promoted `[x; N]` and unit/newtype structs.
+- `panic-vec-remove`'s fault: `Vec::remove`'s `#[track_caller]` was not found (alloc's `vec/mod.rs` impl order is not rustc's
+  `{impl#N}`); a function the file's impls name once now found by name. The native leg 44 of 47 (43 before).
+- `rsi-build` now refuses a module that declares a local instance it does not define (the link would fail; found by `rsi-native` on
+  three programs that had passed codegen): 11 programs, RFP49.
+- Prepared for the night, not run: RFP45 (a)'s UI sampling (`RF_RSI_UI=40` in the rsi kind and `rsi-build`), RFP47 (a)'s
+  `RSI_STD_REMAP` in `bin/rsi std-build` (std.edn left alone: the runtime's key holds it). RFP42 (a) waits for the night's lowered std.
+- Synthetic corpus: 47 of 67 own (the same 47); Rust's score unchanged (RFP43 (a)). Proposed RFP48 (trait resolution in mono), RFP49
+  (the collector through std's bodies), RFP50 (closures' shims). doc/rust/FRONTEND-SURVEY.md, "As built: RF13 (first slice)".
+- Light lane: one process at a time, under 2 GiB a process (`RF11_PROCS=2`, `GOMEMLIMIT` 1800-2000MiB), no network.
