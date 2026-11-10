@@ -878,7 +878,7 @@ PAuth ABI's relocations, TLS GD/LD/TLSDESC in the linker, the decoder (AR3), lld
 Each with options, the recommended named; none taken.
 
 - **ARS33 The disassembly's text in the AOT cell.** (a) as built: beside the cell (AR3's decoder judges it; its 1,947 lines
-  then join the decode level's cell, read or AOT as AX4c's `dis` did); (b) counted deferred in the AOT cell (77.9% → 45.2%).
+  then join the decode level's cell, read or AOT as AX4c's `dis` did); (b) counted deferred in the AOT cell (77.9% → 45.1%).
   *Recommended: (a)*: the object's own cases are its bytes and relocations.
 - **ARS34 Where the arm64 runs run.** (a) the gate's essential `asm-arm64-run-essential` on the main host under qemu-aarch64
   (an emulation, said so; host id `:qemu-aarch64` in `:host-ids` to key it), the native runs recorded by the Mac VM (this task's
