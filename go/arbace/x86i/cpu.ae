@@ -1,0 +1,309 @@
+;; Package x86i is Arbace's x86-64 machine (doc/asm/AMD64.md §10; AX5-DESIGN, AXS51-AXS62): a Linux process's integer
+;; instructions interpreted over emu's address space and kernel, decoded by LLVM's X86 disassembler rebuilt from the table
+;; (decode.go over dgen's dectab.go), each mnemonic's family hand-written from the Intel SDM and the AMD APM as references
+;; (sem.go), the flags computed lazily (flags.go). An instruction no family claims raises SIGILL with the class
+;; :unimplemented, never a silent wrong result.
+(in-ns 'go.arbace.x86i) (go/file "cpu.go" :doc "Package x86i is Arbace's x86-64 machine (doc/asm/AMD64.md §10; AX5-DESIGN, AXS51-AXS62): a Linux process's integer\ninstructions interpreted over emu's address space and kernel, decoded by LLVM's X86 disassembler rebuilt from the table\n(decode.go over dgen's dectab.go), each mnemonic's family hand-written from the Intel SDM and the AMD APM as references\n(sem.go), the flags computed lazily (flags.go). An instruction no family claims raises SIGILL with the class\n:unimplemented, never a silent wrong result.\n" :imports [
+
+
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [emu "arbace/emu"]])
+
+
+
+(go/const "Stop reasons.\n"
+  ^{:line 17} [^{:val 0} stepOK iota]
+  ^{:line 18} [^{:val 1} stopExit]
+  ^{:line 19} [^{:val 2} stopSignal])
+
+
+
+(go/const "Signals x86i raises.\n"
+  ^{:line 24} [^{:val 4} SIGILL 4]
+  ^{:line 25} [^{:val 5} SIGTRAP 5]
+  ^{:line 26} [^{:val 8} SIGFPE 8]
+  ^{:line 27} [^{:val 11} SIGSEGV 11])
+
+
+
+(go/type CPU "CPU is the machine's state.\n" (struct
+    ^{:line 32 :tag (array 16 uint64)} R
+    ^{:line 33 :tag uint64} RIP
+    ^{:line 34 :tag Flags} F
+    ^{:line 35 :tag uint64} FS
+    ^{:line 36 :tag uint64} GS
+    ^{:line 37 :tag (array 16 (array 2 uint64))} X ; XMM (not yet executed: AX5.5)
+
+    ^{:line 39 :tag (* emu/AS)} AS
+    ^{:line 40 :tag (* emu/Kernel)} K
+    ^{:line 41 :tag uint64} Steps
+    ^{:line 42 :tag (map uint64 (* Inst))} cache
+    ^{:line 43 :tag (map uint64 (slice uint64))} byPage
+    ^{:line 44 :tag (array 15 byte)} fetch
+
+    ^{:line 46 :tag uint64} next ; the address after the instruction executing
+
+
+    ^{:line 49 :tag int :doc "the end: the exit status, or the signal and its reason\n"} ExitCode
+    ^{:line 50 :tag int} Signal
+    ^{:line 51 :tag string} Reason
+    ^{:line 52 :tag uint64} SigAddr))
+
+
+
+^{:go/end 63} (go/func New "New is a machine for the process in as with kernel k, at entry with the stack pointer sp.\n" ^{:tag (* CPU)} [^{:tag (* emu/AS)} as ^{:tag (* emu/Kernel)} k ^uint64 entry ^uint64 sp]
+  (let [c (addr (lit CPU :AS as :K k :RIP entry :cache (lit (map uint64 (* Inst))) :byPage (lit (map uint64 (slice uint64)))))]
+    (aset (.-R c) 4 sp)
+    (set! (.-raw (.-F c)) 0x202)
+    (set! (.-op (.-F c)) fRaw)
+    (set! (.-OnCode as) (.-invalidate c))
+    ^{:line 62} c))
+
+
+^{:go/end 71} (go/method invalidate [^{:tag (* CPU)} c ^uint64 page]
+  (range [_ a (aget (.-byPage c) page)]
+    (delete (.-cache c) a))
+
+  (delete (.-byPage c) page)
+  (.ClearCode (.-AS c) page))
+
+
+
+^{:go/end 77} (go/method raise "raise ends the run with signal sig.\n" ^int [^{:tag (* CPU)} c ^int sig ^uint64 addr ^string reason]
+  (set! (values (.-Signal c) (.-SigAddr c) (.-Reason c)) (values sig addr reason))
+  ^{:line 76} stopSignal)
+
+
+^{:go/end 105} (go/method decodeAt [^{:tag (* CPU)} c ^uint64 rip] :results [(* Inst) int]
+  (let [n (.Fetch (.-AS c) rip (subslice (.-fetch c)))]
+    (when (== n 0)
+      (return nil (.raise c SIGSEGV rip (fmt/Sprintf "fetch from %#x" rip))))
+
+    (let [(values in r) (Decode (subslice (.-fetch c) _ n) false)]
+      (switch r
+        (case [DecOK]
+          (when (> (conv int (.-Len in)) n)
+            (return nil (.raise c SIGSEGV (.-FaultAddr (.-AS c)) "fetch"))))
+
+        (case [DecUnsupported]
+          (return nil (.raise c SIGILL rip (fmt/Sprintf ":unimplemented encoding % x at %#x" (subslice (.-fetch c) _ (min n 4)) rip))))
+        (default
+          (when (and (< n 15) (== (.Perm (.-AS c) (+ rip (conv uint64 n))) 0))
+            (return nil (.raise c SIGSEGV (+ rip (conv uint64 n)) "fetch")))
+
+          (return nil (.raise c SIGILL rip (fmt/Sprintf "invalid instruction % x at %#x" (subslice (.-fetch c) _ (min n 4)) rip)))))
+
+      (bind in)
+      (aset (.-cache c) rip in)
+      (for [p (bit-and-not rip 4095)] (<= p (bit-and-not (- (+ rip (conv uint64 (.-Len in))) 1) 4095)) (set! p + 4096)
+        (aset (.-byPage c) p (append (aget (.-byPage c) p) rip))
+        (.MarkCode (.-AS c) p))
+
+      (return in stepOK))))
+
+
+
+^{:go/end 125} (go/method Step "Step executes one instruction.\n" ^int [^{:tag (* CPU)} c]
+  (let [in (aget (.-cache c) (.-RIP c))]
+    (when (== in nil)
+      (let [^int r (zero int)]
+        (when [(set! (values in r) (.decodeAt c (.-RIP c)))] (== in nil)
+          (return r))))
+
+
+    (set! (.-next c) (+ (.-RIP c) (conv uint64 (.-Len in))))
+    (let [r ((.-exec in) c in)]
+      (when (== r stepOK)
+        (inc! (.-Steps c))
+        (when (and (!= injFam 0) (== (.-fam in) injFam))
+          (.Put (.-F c) (bit-xor (.Get (.-F c)) injBit) injBit)))
+
+
+      ^{:line 124} r)))
+
+
+
+^{:go/end 134} (go/method Run "Run executes until the process ends: stopExit (ExitCode) or stopSignal (Signal, Reason).\n" ^int [^{:tag (* CPU)} c]
+  (while true
+    (when [r (.Step c)] (!= r stepOK)
+      (return r))))
+
+
+
+
+
+^{:go/end 142} (go/method Status "Status is the process's status as a shell sees it: the exit code, or 128 + the signal.\n" ^int [^{:tag (* CPU)} c]
+  (when (!= (.-Signal c) 0)
+    (return (+ 128 (.-Signal c))))
+
+  (.-ExitCode c))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; operands
+
+^{:go/end 157} (go/func mask ^uint64 [^uint8 size]
+  (switch size
+    (case [1]
+      (return 0xff))
+    (case [2]
+      (return 0xffff))
+    (case [4]
+      (return 0xffffffff)))
+
+  (bit-not (conv uint64 0)))
+
+
+^{:go/end 159} (go/func signBit ^uint64 [^uint8 size] ^uint64 (<< 1 (- (* 8 (conv uint size)) 1)))
+
+^{:go/end 171} (go/func sx ^uint64 [^uint64 v ^uint8 size]
+  (switch size
+    (case [1]
+      (return (conv uint64 (conv int64 (conv int8 v)))))
+    (case [2]
+      (return (conv uint64 (conv int64 (conv int16 v)))))
+    (case [4]
+      (return (conv uint64 (conv int64 (conv int32 v))))))
+
+  ^{:line 170} v)
+
+
+
+^{:go/end 179} (go/method reg "reg reads register r of the size (r 16-19: AH, CH, DH, BH).\n" ^uint64 [^{:tag (* CPU)} c ^uint8 r ^uint8 size]
+  (when (>= r 16)
+    (return (bit-and (>> (aget (.-R c) (- r 16)) 8) 0xff)))
+
+  (bit-and (aget (.-R c) r) (mask size)))
+
+
+
+^{:go/end 194} (go/method setReg "setReg writes register r: a 32-bit write zeroes the upper half, 8- and 16-bit writes keep the rest.\n" [^{:tag (* CPU)} c ^uint8 r ^uint8 size ^uint64 v]
+  (switch
+    (case [(>= r 16)]
+      (aset (.-R c) (- r 16) (bit-or (bit-and-not (aget (.-R c) (- r 16)) 0xff00) (<< (bit-and v 0xff) 8))))
+    (case [(== size 8)]
+      (aset (.-R c) r v))
+    (case [(== size 4)]
+      (aset (.-R c) r (bit-and v 0xffffffff)))
+    (default
+      (let [m (mask size)]
+        (aset (.-R c) r (bit-or (bit-and-not (aget (.-R c) r) m) (bit-and v m)))))))
+
+
+
+
+^{:go/end 218} (go/method ea "ea is the memory operand's address.\n" ^uint64 [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^{:tag (* Opnd)} o]
+  (let [^uint64 a (zero uint64)]
+    (cond (== (.-Base o) RIP)
+      (set! a (.-next c))
+      (>= (.-Base o) 0)
+      (set! a (aget (.-R c) (.-Base o))))
+
+    (when (>= (.-Index o) 0)
+      (set! a + (* (aget (.-R c) (.-Index o)) (conv uint64 (.-Scale o)))))
+
+    (set! a + (conv uint64 (.-Disp o)))
+    (when (.-AdSize32 in)
+      (set! a bit-and 0xffffffff))
+
+    (switch (.-Seg o)
+      (case [5]
+        (set! a + (.-FS c)))
+      (case [6]
+        (set! a + (.-GS c))))
+
+    ^{:line 217} a))
+
+
+
+^{:go/end 223} (go/method fault "fault is a memory access's fault: SIGSEGV at the address.\n" ^int [^{:tag (* CPU)} c ^uint64 addr]
+  (.raise c SIGSEGV addr (fmt/Sprintf "access at %#x" addr)))
+
+
+
+^{:go/end 241} (go/method load "load reads the operand at its size (or size when the operand has none); ok false: a fault (raised).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^{:tag (* Opnd)} o ^uint8 size] :results [uint64 bool]
+  (switch (.-K o)
+    (case [OReg]
+      (return (.reg c (.-Reg o) size) true))
+    (case [OImm]
+      (return (bit-and (conv uint64 (.-Imm o)) (mask size)) true))
+    (case [OMem]
+      (let [a (.ea c in o)
+          (values v ok) (.Read (.-AS c) a (conv int size))]
+        (when (not ok)
+          (.fault c (.-FaultAddr (.-AS c))))
+
+        (return v ok))))
+
+  (panic (+ "x86i: load of operand kind " (fmt/Sprint (.-K o)))))
+
+
+
+^{:go/end 257} (go/method store "store writes the operand; ok false: a fault (raised).\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^{:tag (* Opnd)} o ^uint8 size ^uint64 v]
+  (switch (.-K o)
+    (case [OReg]
+      (.setReg c (.-Reg o) size v)
+      (return true))
+    (case [OMem]
+      (when (not (.Write (.-AS c) (.ea c in o) (conv int size) v))
+        (.fault c (.-FaultAddr (.-AS c)))
+        (return false))
+
+      (return true)))
+
+  (panic (+ "x86i: store to operand kind " (fmt/Sprint (.-K o)))))
+
+
+
+^{:go/breaks [[6 268]] :go/end 269} (go/method probe "probe: whether the operand can be written (a memory destination checked before anything commits).\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^{:tag (* Opnd)} o ^uint8 size]
+  (when (!= (.-K o) OMem)
+    (return true))
+
+  (when (not (.Probe (.-AS c) (.ea c in o) (conv int size)))
+    (.fault c (.-FaultAddr (.-AS c)))
+    (return false))
+
+  true)
+
+
+^{:go/end 279} (go/method push ^bool [^{:tag (* CPU)} c ^uint64 v ^uint8 size]
+  ^{:go/breaks [4]} (let [sp (- (aget (.-R c) 4) (conv uint64 size))]
+    (when (not (.Write (.-AS c) sp (conv int size) v))
+      (.fault c (.-FaultAddr (.-AS c)))
+      (return false))
+
+    (aset (.-R c) 4 sp)
+    true))
+
+
+^{:go/end 289} (go/method pop [^{:tag (* CPU)} c ^uint8 size] :results [uint64 bool]
+  (let [(values v ok) (.Read (.-AS c) (aget (.-R c) 4) (conv int size))]
+    (when (not ok)
+      (.fault c (.-FaultAddr (.-AS c)))
+      (return 0 false))
+
+    (set! (aget (.-R c) 4) + (conv uint64 size))
+    (return v true)))
+
+
+
+(go/var ^{:tag uint8 :doc "injection (X86I_INJECT=FAMILY:FLAG, the negative controls' fault): after each instruction of the family, the flag flipped\n"} injFam)
+(go/var ^uint64 injBit)
+
+
+^{:go/end 310} (go/func Inject "Inject sets the injected fault from its spec FAMILY:FLAG (FLAG one of cf pf af zf sf of df).\n" ^error [^string spec]
+  (let [(values fam flag ok) (strings/Cut spec ":")
+      ^{:line 298} bitsOf (lit (map string uint64) ["cf" CF] ["pf" PF] ["af" AF] ["zf" ZF] ["sf" SF] ["of" OF] ["df" DF])
+      (values b okb) (aget bitsOf flag)]
+    (when (or (not ok) (not okb))
+      (return (fmt/Errorf "X86I_INJECT: FAMILY:FLAG, not %q" spec)))
+
+    (range [i n FamilyNames]
+      (when (and (== n fam) (!= i famNone))
+        (set! (values injFam injBit) (values (conv uint8 i) b))
+        (return nil)))
+
+
+    (fmt/Errorf "X86I_INJECT: no family %q" fam)))

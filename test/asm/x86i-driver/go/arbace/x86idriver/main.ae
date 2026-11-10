@@ -1,0 +1,109 @@
+;; Command x86idriver is x86i's light driver (doc/asm/AMD64.md §10; AX5-DESIGN §6, AXS51 (a)): arbace/x86i, arbace/emu and
+;; arbace/crt built alone by TamaGo's go, no Arbace build.
+;;
+;;	x86i run [--stats] EXE [ARG...]   the static executable run on x86i: its exit status, or 128 + the signal that ended it
+;;	                                  (an instruction x86i does not implement: SIGILL, named on stderr)
+;;	x86i decode-text EXE              its code sections decoded instruction by instruction: ADDR HEX TEXT (the decode judge's)
+(in-ns 'go.arbace.x86idriver) (go/file "main.go" :doc "Command x86idriver is x86i's light driver (doc/asm/AMD64.md §10; AX5-DESIGN §6, AXS51 (a)): arbace/x86i, arbace/emu and\narbace/crt built alone by TamaGo's go, no Arbace build.\n\n\tx86i run [--stats] EXE [ARG...]   the static executable run on x86i: its exit status, or 128 + the signal that ended it\n\t                                  (an instruction x86i does not implement: SIGILL, named on stderr)\n\tx86i decode-text EXE              its code sections decoded instruction by instruction: ADDR HEX TEXT (the decode judge's)\n" :imports [
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [rand "math/rand/v2"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [time "time"]
+
+    ^{:line 16} [crt "arbace/crt"]
+    ^{:line 17} [emu "arbace/emu"]
+    ^{:line 18} [x86i "arbace/x86i"]])
+
+
+^{:go/end 24} (go/func usage []
+  (fmt/Fprintln os/Stderr "usage: x86i run [--stats] EXE [ARG...] | x86i decode-text EXE")
+  (os/Exit 2))
+
+
+^{:go/end 46} (go/func main []
+  (when (< (len os/Args) 3)
+    (usage))
+
+  (switch (aget os/Args 1)
+    (case ["run"]
+      (let [args (subslice os/Args 2)
+          ^{:line 33} stats false]
+        (when (== (aget args 0) "--stats")
+          (set! (values stats args) (values true (subslice args 1))))
+
+        (when (== (len args) 0)
+          (usage))
+
+        (os/Exit (run args stats))))
+    (case ["decode-text"]
+      (decodeText (aget os/Args 2)))
+    (default
+      (usage))))
+
+
+
+^{:go/end 81} (go/func run ^int [^{:tag (slice string)} argv ^bool stats]
+  (let [as (emu/NewAS)
+      (values img err) (emu/LoadELF as (aget argv 0))]
+    (when (!= err nil)
+      (fmt/Fprintf os/Stderr "x86i: %s: %v\n" (aget argv 0) err)
+      (return 127))
+
+    (let [^{:tag (array 16 byte)} rnd (zero (array 16 byte))] ; AT_RANDOM's bytes
+      (range [i rnd]
+        (aset rnd i (conv byte (rand/Uint32))))
+
+      (let [sp (emu/Stack as img argv (os/Environ) rnd)
+          ^{:line 60} sys (crt/NewSys (.-M as) os/Stdin os/Stdout os/Stderr)]
+        (set! (.-Args sys) argv)
+        (set! (.-Env sys) (os/Environ))
+        (let [k (emu/NewKernel as img sys)]
+          (when [s (os/Getenv "X86I_INJECT")] (!= s "")
+            (when [err (x86i/Inject s)] (!= err nil)
+              (fmt/Fprintln os/Stderr "x86i:" err)
+              (return 2)))
+
+
+          (let [c (x86i/New as k (.-Entry img) sp)
+              ^{:line 71} t0 (time/Now)]
+            (.Run c)
+            (when stats
+              (let [el (time/Since t0)]
+                (fmt/Fprintf os/Stderr "x86i: %d instructions in %v (%.1f M/s)\n" (.-Steps c) el (/ (conv float64 (.-Steps c)) (.Seconds el) 1000000.0))))
+
+            (when (and (!= (.-Signal c) 0) ^:go/paren (or (strings/HasPrefix (.-Reason c) ":unimplemented") (!= (os/Getenv "X86I_VERBOSE") "")))
+              (fmt/Fprintf os/Stderr "x86i: signal %d: %s\n" (.-Signal c) (.-Reason c)))
+
+            (.Status c)))))))
+
+
+^{:go/end 110} (go/func decodeText [^string path]
+  (let [(values f err) (emu/ReadELF path)]
+    (when (!= err nil)
+      (fmt/Fprintf os/Stderr "x86i: %v\n" err)
+      (os/Exit 1))
+
+    (let [out (addr (lit strings/Builder))]
+      (range [_ s (.-Sections f)]
+        (when (or (== (bit-and (.-Flags s) emu/SHF_EXECINSTR) 0) (!= (.-Type s) emu/SHT_PROGBITS))
+          (continue))
+
+        (let [b (.Bytes f (.-Off s) (.-Size s))]
+          (for [off 0] (< off (len b)) _
+            (let [(values in r) (x86i/Decode (subslice b off (min (+ off 15) (len b))) true)
+                ^{:line 97} n (max (conv int (.-Len in)) 1)
+                ^{:line 98} text (.Text in)]
+              (switch r
+                (case [x86i/DecInvalid]
+                  (set! text "!invalid"))
+                (case [x86i/DecUnsupported]
+                  (set! text "!unsupported")))
+
+              (fmt/Fprintf out "%x\t%x\t%s\n" (+ (.-Addr s) (conv uint64 off)) (subslice b off (+ off n)) text)
+              (set! off + n)))))
+
+
+      (.WriteString os/Stdout (.String out)))))

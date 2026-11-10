@@ -1,0 +1,107 @@
+(ns arbace.asm.amd64.dgen
+  "x86i's decode tables (doc/asm/AMD64.md §10, AX5.2; AX5-DESIGN §2, AXS53 (a)): the decisions of arbace.asm.amd64.decode, LLVM's X86
+  disassembler rebuilt from asm/amd64/table.edn (X86RecognizableInstr's and X86DisassemblerTables' rules), written out as Go forms
+  data for go/arbace/x86i's decoder (go/arbace/x86i/dectab.ae): the legacy and REX opcode maps of 64-bit mode (one byte, 0F, 0F38,
+  0F3A), every instruction context those maps reach, each opcode's ModRM decision, and each instruction a decision names with its
+  Intel mnemonic and its operand specifiers (emitInstructionSpecifier's encoding and type, the operand's size by its record). The
+  VEX, EVEX, XOP and REX2 maps are not in it yet (x86i's decoder refuses them: SIGILL, `:unimplemented`).
+
+  `gen` writes the file, `check` compares a fresh generation with the committed one (as goi's gen_nodes)."
+  (:require [arbace.asm.amd64.asm :as x]
+            [arbace.asm.amd64.decode :as d]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; the attribute bits x86i's decoder sets in 64-bit mode for the legacy maps (decode's attr: xs 2, xd 4, rexw 8, opsize 16,
+;; adsize 32), packed into five bits in this order
+(def ^:private mask-bits [[1 2] [2 4] [4 8] [8 16] [16 32]])
+
+(defn- ctx-of-mask [^long m5]
+  (#'d/context-of (reduce (fn [acc [b a]] (if (pos? (bit-and m5 (long b))) (bit-or acc (long a)) acc)) 1 mask-bits)))
+
+(def otypes [:onebyte :twobyte :t38 :t3a])
+
+(def enc-codes [nil :reg :rm :sib :vsib :ib :iw :id :io :iv :ia :irc :rb :rw :rd :ro :rv :cf :cc :fp :vvvv :writemask :si :di :dup])
+(def type-codes [nil :rv :r8 :r16 :r32 :r64 :m :imm :uimm8 :xmm :ymm :zmm :st :rel :mm64 :msib :segmentreg :debugreg :controlreg
+                 :srcidx :dstidx :moffs :vk :vk-pair :mvsibx :mvsiby :mvsibz :bndr :tmm])
+
+(defn- size-of
+  "The operand's size in bytes by its record name (0: none or any)."
+  ^long [^String s]
+  (cond
+    (re-matches #"GR8|i8mem|i8imm|u8imm|u4imm|brtarget8|i8imm_brtarget|srcidx8|dstidx8|offset(16|32|64)_8" s) 1
+    (re-matches #"GR16|i16mem|i16imm|i16i8imm|i16u8imm|brtarget16|i16imm_brtarget|srcidx16|dstidx16|offset(16|32|64)_16|SEGMENT_REG" s) 2
+    (re-matches #"GR32|GR32orGR64|i32mem|i32imm|i32i8imm|i32u8imm|brtarget32|i32imm_brtarget|srcidx32|dstidx32|offset(16|32|64)_32|f32mem|ssmem" s) 4
+    (re-matches #"GR64|i64mem|i64imm|i64i32imm|i64i8imm|i64u8imm|i64i32imm_brtarget|srcidx64|dstidx64|offset(16|32|64)_64|f64mem|sdmem|VR64" s) 8
+    (re-matches #"f80mem" s) 10
+    (re-matches #"VR128|VR128X|FR128|FR32|FR64|FR32X|FR64X|FR16X|i128mem|f128mem" s) 16
+    :else 0))
+
+(defn- mnemonic [i]
+  (let [p (first (:print-intel i))]
+    (if (string? p) (first (str/split (str/trim p) #"[\t ]")) "")))
+
+(defn- hex2 [^long v] (let [s (Long/toHexString v)] (if (< (count s) 2) (str "0" s) s)))
+
+(defn- spec-hex
+  "The specifiers as hex, three bytes an operand: the encoding's code, the type's code, the size (or a dup's operand)."
+  [i specs]
+  (apply str
+         (map-indexed (fn [k s]
+                        (let [[_ rec] (nth (:ops i) k)]
+                          (if (nil? s)
+                            "000000"
+                            (str (hex2 (.indexOf ^java.util.List enc-codes (:enc s)))
+                                 (hex2 (max 0 (.indexOf ^java.util.List type-codes (:type s))))
+                                 (hex2 (if (= :dup (:enc s)) (long (:of s)) (size-of rec)))))))
+                      specs)))
+
+(defn data
+  "The tables: {:ctx [CTX-INDEX by 5-bit mask] :ctxs [NAME] :index [DECISION by otype ctx opcode] :decisions [[ID...]]
+  :insns [[NAME MNEMONIC SPECS-HEX]]} (IDs from 1; 0 none)."
+  [t]
+  (binding [x/*t* t]
+    (let [tb (#'d/tables-of t)
+          ctx-names (mapv ctx-of-mask (range 32))
+          ctxs (vec (distinct ctx-names))
+          ids (java.util.LinkedHashMap.)
+          id-of (fn [n] (if (nil? n) 0 (or (.get ids n) (let [k (inc (.size ids))] (.put ids n k) k))))
+          decs (java.util.LinkedHashMap.)
+          dec-of (fn [v] (or (.get decs v) (let [k (.size decs)] (.put decs v k) k)))
+          index (vec (for [ot otypes c ctxs op (range 256)]
+                       (let [dd (#'d/get-decision tb ot c op)]
+                         (dec-of (if (:one dd) [(id-of (first (:ids dd)))] (mapv id-of (:ids dd)))))))
+          insns (vec (for [n (keys ids)]
+                       (let [i (assoc (get (:insns t) n) :name n)
+                             specs (try @(get (:specs tb) n) (catch arbace.lang.ExceptionInfo e (if (:decode/table (ex-data e)) :bad (throw e))))]
+                         [n (mnemonic i) (if (= specs :bad) "!" (spec-hex i specs))])))]
+      {:ctx (mapv #(.indexOf ^java.util.List ctxs %) ctx-names) :ctxs ctxs :index index :decisions (vec (keys decs)) :insns insns})))
+
+(defn- hex4 [^long v] (let [s (Long/toHexString v)] (str (subs "0000" (count s)) s)))
+
+(defn forms
+  "dectab.ae's text."
+  [t]
+  (let [{:keys [ctx ctxs index decisions insns]} (data t)]
+    (str ";; x86i's decode tables (doc/asm/AMD64.md §10): LLVM's X86 disassembler's decisions for the legacy and REX maps of 64-bit mode,\n"
+         ";; made from asm/amd64/table.edn by arbace.asm.amd64.dgen (bin/repr-asm x86i gen): do not edit.\n"
+         "(in-ns 'go.arbace.x86i)\n\n(go/file \"dectab.go\")\n\n"
+         "(go/const\n"
+         "  [^{:tag string :doc \"decCtxNames are the instruction contexts, by index.\\n\"} decCtxNames " (pr-str (str/join " " ctxs)) "]\n"
+         "  [^{:tag string :doc \"decCtx is the context's index (two hex digits) by the attribute mask (xs 1, xd 2, rexw 4, opsize 8, adsize 16).\\n\"} decCtx "
+         (pr-str (apply str (map hex2 ctx))) "]\n"
+         "  [^{:tag string :doc \"decIndex is the decision's number (four hex digits) by map (one byte, 0F, 0F38, 0F3A), context and opcode.\\n\"} decIndex\n    "
+         (pr-str (apply str (map hex4 index))) "]\n"
+         "  [^{:tag string :doc \"decDecisions are the ModRM decisions, a line each: one instruction ID, or 256 by ModRM byte (four hex digits each).\\n\"} decDecisions\n    "
+         (pr-str (str/join "\n" (map #(apply str (map hex4 %)) decisions))) "]\n"
+         "  [^{:tag string :doc \"decInsns are the instructions by ID (from 1), a line each: NAME MNEMONIC SPECIFIERS (three bytes an operand: encoding, type, size or dup).\\n\"} decInsns\n    "
+         (pr-str (str/join "\n" (map #(str/join " " %) insns))) "])\n")))
+
+(defn -main [verb & [path]]
+  (let [t (x/table) text (forms t)]
+    (case verb
+      "gen" (do (spit path text) (println "dgen:" path (count text) "bytes"))
+      "check" (if (= text (slurp path))
+                (println "dgen:" path "is the table's")
+                (do (println "FAIL: dgen:" path "differs from a fresh generation (bin/repr-asm x86i gen)") (System/exit 1))))))

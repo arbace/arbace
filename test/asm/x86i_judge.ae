@@ -1,0 +1,146 @@
+(ns asm.x86i-judge
+  "bin/repr-asm x86i-check's judgment (doc/asm/AMD64.md §10, doc/asm/AMD64-SURVEY.md \"As built: AX5.2\"; AX5-DESIGN §4): each program
+  of test/asm/run/ that Arbace assembled and linked is run by the CPU and by x86i (the light driver), and judged twice, both own
+  judges (AXS9 (a), AXS45 (b)): x86i's run by the verdict the program's header states (exit status, stdout), and x86i's run equal
+  to the CPU's (status, stdout, stderr). Beside it, the decode judge: every instruction of the program's code sections as x86i's
+  Go decoder decodes it (`x86i decode-text`) equal to arbace.asm.amd64.decode's decoding of the same bytes (the instruction, its
+  MCInst operands, lock/rep/repne).
+
+  Rows `[ID RESULT DETAIL]`, ID x86i/NAME or decode/NAME, against test/asm/x86i-results-amd64.edn; every other result a class of
+  test/asm/divergences-x86i.edn (:unimplemented: x86i raised SIGILL for an instruction no family claims, never a silent wrong
+  result); with RECORD the rows are rewritten from the run (refused when it holds a failure). The negative controls
+  (test/asm/controls-x86i.txt) are judged by `control`."
+  (:require [arbace.string :as str]
+            [arbace.asm.amd64.decode :as d]))
+
+(def header
+  (str ";; x86i's check (bin/repr-asm x86i-check; doc/asm/AMD64.md §10, AX5.2): each program of test/asm/run/ Arbace assembled and\n"
+       ";; linked, run by x86i and judged by its header's verdict and against the CPU's run (x86i/NAME), and its code decoded by x86i's\n"
+       ";; decoder against arbace.asm.amd64.decode (decode/NAME): :pass, else a class of test/asm/divergences-x86i.edn. Written by\n"
+       ";; `bin/repr-asm x86i-check --record`. Read with the Clojure reader.\n"))
+
+(def failing #{:verdict :cpu :timeout :decode :missing})
+
+(defn- slurp-or [^String p d] (if (.exists (java.io.File. p)) (slurp p) d))
+
+(defn- bytes-hex [^String p]
+  (if (.exists (java.io.File. p))
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (java.nio.file.Files/readAllBytes (.toPath (java.io.File. p)))))
+    ""))
+
+(defn- read-tsv [path] (into {} (for [l (str/split-lines (slurp path)) :when (seq l) :let [[n & r] (str/split l #"\t" -1)]] [n (vec r)])))
+
+(defn- run-of
+  "A run's [STATUS STDOUT-HEX STDERR] from WORK/NAME.SUFFIX{status,out,err} (SUFFIX \"\" the CPU's, \"x86i.\" x86i's), nil when absent."
+  [work n suffix]
+  (let [st (str work "/" n "." suffix "status")]
+    (when (.exists (java.io.File. st))
+      [(str/trim (slurp st)) (bytes-hex (str work "/" n "." suffix "out")) (slurp-or (str work "/" n "." suffix "err") "")])))
+
+(defn judge-run
+  "x86i's run of n against the verdict [EXIT STDOUT-HEX] and the CPU's run: [RESULT DETAIL]."
+  [x cpu [want-exit want-out]]
+  (let [[st out err] x [cst cout cerr] cpu]
+    (cond (nil? x) [:missing "x86i did not run"]
+          (= st "124") [:timeout "x86i killed after the time limit"]
+          (str/includes? err ":unimplemented") [:unimplemented (str/trim (last (str/split-lines err)))]
+          (not= st want-exit) [:verdict (str "exit " st ", stated " want-exit)]
+          (not= out want-out) [:verdict (str "stdout " (subs out 0 (min 64 (count out))) ", stated " (subs want-out 0 (min 64 (count want-out))))]
+          (nil? cpu) [:missing "the CPU's run is missing"]
+          (not= st cst) [:cpu (str "exit " st ", the CPU's " cst)]
+          (not= out cout) [:cpu "stdout differs from the CPU's"]
+          (not= err cerr) [:cpu "stderr differs from the CPU's"]
+          :else [:pass ""])))
+
+;; the decode judge
+
+(defn- hex->bytes [^String h] (vec (for [k (range 0 (count h) 2)] (Long/parseLong (subs h k (+ k 2)) 16))))
+
+(defn arbace-text
+  "arbace.asm.amd64.decode's decoding of the bytes as `x86i decode-text` writes an instruction."
+  [bs]
+  (let [r (d/decode bs 0 64)]
+    (if (:fail r)
+      "!invalid"
+      (str (:inst r)
+           (apply str (for [o (:mi r)] (str " " (if (contains? o :reg) (or (:reg o) "-") (:imm o)))))
+           (let [fl (filter (:flags r) [:lock :rep :repne])] (when (seq fl) (str " /" (str/join "," (map name fl)))))))))
+
+(defn judge-decode
+  "x86i's decoding (the lines of `x86i decode-text`) against arbace.asm.amd64.decode's of the same bytes: [RESULT DETAIL N]."
+  [lines]
+  (let [rows (for [l lines :when (seq l)] (str/split l #"\t" -1))
+        bad (first (for [[addr h text] rows
+                         :let [want (arbace-text (hex->bytes h))]
+                         :when (not= text want)]
+                     (str addr " " h ": x86i " text ", arbace.asm.amd64.decode " want)))]
+    (if bad [:decode bad (count rows)] [:pass "" (count rows)])))
+
+(defn rows
+  "The run's rows: x86i/NAME and decode/NAME for each program WORK/build.tsv says was built."
+  [work]
+  (let [built (read-tsv (str work "/build.tsv")) want (read-tsv (str work "/want.tsv"))]
+    (vec (apply concat
+                (for [[n [c]] (sort-by key built) :when (= c "built")]
+                  (let [[r dt] (judge-run (run-of work n "x86i.") (run-of work n "") (want n))
+                        dec (str work "/" n ".dec")
+                        [dr ddt k] (if (.exists (java.io.File. dec)) (judge-decode (str/split-lines (slurp dec))) [:missing "no decode-text" 0])]
+                    [[(str "x86i/" n) r dt] [(str "decode/" n) dr (if (= dr :pass) (str k " instructions") ddt)]]))))))
+
+(defn control
+  "A negative control: `verdict` (SUBJECT's x86i run judged by REFERENCE's verdict), `cpu` (SUBJECT's x86i run against
+  REFERENCE's CPU run), `decode` (SUBJECT's decode-text against arbace's decoding of REFERENCE's bytes, line by line) or
+  `inject` (SUBJECT's run under X86I_INJECT=REFERENCE, WORK/SUBJECT.inject-FAMILY-FLAG.*, against its own CPU run): `differs` as it must, else `same`;
+  `left` when the subject or the reference is missing."
+  [work kind subj ref]
+  (let [want (read-tsv (str work "/want.tsv"))
+        x (run-of work subj "x86i.")
+        r (case kind
+            "verdict" (when (and x (want ref)) (first (judge-run x (run-of work subj "") (want ref))))
+            "cpu" (let [cpu (run-of work ref "")] (when (and x cpu) (first (judge-run x cpu (want subj)))))
+            "inject" (let [xi (run-of work subj (str "inject-" (str/replace ref ":" "-") ".")) cpu (run-of work subj "")] (when (and xi cpu) (first (judge-run xi cpu (want subj)))))
+            "decode" (let [a (str work "/" subj ".dec") b (str work "/" ref ".dec")]
+                       (when (and (.exists (java.io.File. a)) (.exists (java.io.File. b)))
+                         (let [la (str/split-lines (slurp a)) lb (str/split-lines (slurp b))
+                               ;; subject's texts beside the reference's bytes
+                               mixed (map (fn [x y] (let [[_ _ t] (str/split x #"\t" -1) [ad h] (str/split y #"\t" -1)] (str ad "\t" h "\t" t))) la lb)]
+                           (first (judge-decode mixed))))))]
+    (cond (nil? r) "left" (= r :pass) "same" :else "differs")))
+
+(defn main [results work classes-path record]
+  (let [run (rows work)
+        old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
+        oldm (into {} (map (fn [[i c]] [i c]) old))
+        classes (set (map :id (read-string (slurp classes-path))))
+        problems (atom [])
+        xs (filter #(str/starts-with? (first %) "x86i/") run)
+        ds (filter #(str/starts-with? (first %) "decode/") run)]
+    (println (str "repr-asm x86i-check: " (count (filter #(= :pass (second %)) xs)) " of " (count xs)
+                  " programs run by x86i meet their own verdicts and equal the CPU's runs; "
+                  (count (filter #(= :pass (second %)) ds)) " of " (count ds) " decoded as arbace.asm.amd64.decode decodes them; "
+                  (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))))
+    (doseq [[i c dt] run]
+      (cond (failing c) (swap! problems conj (str "failing: " i " " (name c) " " dt))
+            (and (not= c :pass) (not (classes c))) (swap! problems conj (str "unclassed: " i " " (name c) " " dt))))
+    (if (and (seq record) (empty? @problems))
+      (do (spit results (str header "[\n" (apply str (map (fn [r] (str (pr-str r) "\n")) (sort-by first run))) "]\n"))
+          (println (str "repr-asm: recorded " (count run) " rows into " results)))
+      (do (doseq [[i c] run :let [o (oldm i)]]
+            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
+                  (and (= o :pass) (not= c :pass)) (swap! problems conj (str i ": " (name c) ", recorded :pass"))))
+          (doseq [[i] old :when (not (some #(= i (first %)) run))] (swap! problems conj (str "recorded, not run: " i)))))
+    (doseq [p @problems] (println (str "FAIL: " p)))
+    (when (empty? @problems) (println "repr-asm x86i-check: ok"))
+    (when (seq @problems) (System/exit 1))))
+
+(defn controls
+  "Each control of FILE (ID KIND SUBJECT REFERENCE): its verdict printed; the count of controls that did not differ."
+  [work file]
+  (let [bad (atom 0)]
+    (doseq [l (str/split-lines (slurp file)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
+      (let [[id kind subj ref] (str/split l #"\s+")
+            v (control work kind subj ref)]
+        (if (= v "differs")
+          (println (str "control " id ": fails as it must"))
+          (do (swap! bad inc) (println (str "FAIL: control " id ": " v))))))
+    (when (pos? @bad) (System/exit 1))))

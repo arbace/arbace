@@ -1,0 +1,108 @@
+(in-ns 'go.arbace.emu) (go/file "elf.go" :imports [
+
+
+    ^{:line 4} [errors "errors"]])
+
+
+
+
+(go/const "Linux's x86-64 layout with ASLR off (the psABI §3.4 and the process's own /proc/PID/maps, never the kernel's source):\nthe stack's top, the base of a static PIE, the top of mmap's area (128 MiB below the stack's top: the stack's gap).\n"
+  ^{:line 10} [^{:val 140737488351232} StackTop 0x7ffffffff000]
+  ^{:line 11} [^{:val 8388608} StackSize (<< 8 20)]
+  ^{:line 12} [^{:val 93824992231424} PIEBase 0x555555554000]
+  ^{:line 13} [^{:val 140737354133504} MmapTop (- StackTop (<< 128 20))]
+  ^{:line 14} [^{:val 4096} minSigStk 0x1000]
+  ^{:line 15} [^{:val 395049983} hwcapModel 0x178bfbff]) ; CPUID.1:EDX of x86i's model (AT_HWCAP)
+
+
+
+(go/type Image "Image is a loaded executable.\n" (struct
+    ^{:line 20 :tag uint64} Entry
+    ^{:line 21 :tag uint64} Phdr ; the program headers' address (AT_PHDR)
+    ^{:line 22 :tag uint64} Phent
+    ^{:line 23 :tag uint64} Phnum
+    ^{:line 24 :tag uint64} BrkBase)) ; the page after the highest PT_LOAD
+
+
+
+(go/var ^{:doc "ErrDynamic: the executable names an interpreter (AXS11's :dynamic).\n"} ErrDynamic (errors/New "dynamic executable (PT_INTERP): not run by x86i"))
+
+^{:go/end 42} (go/func permOf ^uint8 [^uint32 f]
+  (let [^uint8 p (zero uint8)]
+    (when (!= (bit-and f PF_R) 0)
+      (set! p bit-or PermR))
+
+    (when (!= (bit-and f PF_W) 0)
+      (set! p bit-or PermW))
+
+    (when (!= (bit-and f PF_X) 0)
+      (set! p bit-or PermX))
+
+    ^{:line 41} p))
+
+
+
+^{:go/end 109} (go/func LoadELF "LoadELF maps the static executable at path: each PT_LOAD page-aligned with its permissions, its file bytes then zeros.\n" [^{:tag (* AS)} a ^string path] :results [(* Image) error]
+  (let [(values f err) (ReadELF path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (!= (.-Machine f) EM_X86_64)
+      (return nil (errors/New "not an x86-64 executable")))
+
+    (let [^uint64 base (zero uint64)]
+      (switch (.-Type f)
+        (case [ET_EXEC])
+        (case [ET_DYN]
+          (set! base PIEBase))
+        (default
+          (return nil (errors/New "not an executable"))))
+
+      (let [img (addr (lit Image :Entry (+ base (.-Entry f)) :Phent 56 :Phnum (conv uint64 (len (.-Progs f)))))]
+        (range [_ p (.-Progs f)]
+          (when (== (.-Type p) PT_INTERP)
+            (return nil ErrDynamic)))
+
+
+        (let [^{:tag (* Prog)} first (zero (* Prog))]
+          (range [i (.-Progs f)]
+            (let [p (addr (aget (.-Progs f) i))]
+              (switch (.-Type p)
+                (case [PT_PHDR]
+                  (set! (.-Phdr img) (+ base (.-Vaddr p))))
+                (case [PT_LOAD]
+                  (when (== first nil)
+                    (set! first p))
+
+                  (let [start (bit-and-not (+ base (.-Vaddr p)) pageMask)
+                      ^{:line 78} end (bit-and-not (+ base (.-Vaddr p) (.-Memsz p) pageMask) pageMask)
+                      ^{:line 79} perm (permOf (.-Flags p))]
+                    ;; a page an earlier segment holds: shared, its permissions joined
+                    (while (and (< start end) (.Mapped a start pageSize))
+                      (set! (aget (.-perm a) start) bit-or perm)
+                      (set! start + pageSize))
+
+                    (while (and (< start end) (.Mapped a (- end pageSize) pageSize))
+                      (set! (aget (.-perm a) (- end pageSize)) bit-or perm)
+                      (set! end - pageSize))
+
+                    (when (< start end)
+                      (.Map a start (- end start) perm "load"))
+
+                    (.flush a)
+                    (let [data (.Bytes f (.-Off p) (.-Filesz p))]
+                      (when (== data nil)
+                        (return nil (errors/New "segment outside the file")))
+
+                      (when (not (.WriteBytes a (+ base (.-Vaddr p)) data))
+                        (return nil (errors/New "segment not mapped")))
+
+                      (when [e (bit-and-not (+ base (.-Vaddr p) (.-Memsz p) pageMask) pageMask)] (> e (.-BrkBase img))
+                        (set! (.-BrkBase img) e))))))))
+
+
+
+          (when (and (== (.-Phdr img) 0) (!= first nil)) ; the headers inside the first PT_LOAD
+            (set! (.-Phdr img) (+ (- (+ base (.-Vaddr first)) (.-Off first)) (.-Phoff f))))
+
+          (return img nil))))))

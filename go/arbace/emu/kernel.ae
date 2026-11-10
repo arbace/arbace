@@ -1,0 +1,123 @@
+(in-ns 'go.arbace.emu) (go/file "kernel.go" :imports [
+
+
+    ^{:line 4} [crt "arbace/crt"]])
+
+
+
+
+
+(go/type Kernel "Kernel is the part of Linux's x86-64 system calls the machine's process needs beyond crt's (AXS52 (a)): the program\nbreak and the anonymous mappings at Linux's addresses, with their permissions; exit and exit_group; clone, fork,\nvfork and execve refused (one thread, AX5). Everything else is crt's Sys.Syscall, over the same Mem.\n" (struct
+    ^{:line 11 :tag (* AS)} AS
+    ^{:line 12 :tag (* crt/Sys)} Sys
+    ^{:line 13 :tag uint64} BrkBase
+    ^{:line 14 :tag uint64} Brk
+    ^{:line 15 :tag uint64} MmapNext))
+
+
+
+(go/const "Linux's errno values the layer returns.\n"
+  ^{:line 20} [^{:val 12} eNOMEM 12]
+  ^{:line 21} [^{:val 22} eINVAL 22]
+  ^{:line 22} [^{:val 38} eNOSYS 38]
+  ^{:line 23} [^{:val 19} eNODEV 19]
+  ^{:line 24} [^{:val 9} eBADF 9])
+
+
+
+^{:go/end 30} (go/func NewKernel "NewKernel is the kernel of the program in a, its break from img.\n" ^{:tag (* Kernel)} [^{:tag (* AS)} a ^{:tag (* Image)} img ^{:tag (* crt/Sys)} sys]
+  (addr (lit Kernel :AS a :Sys sys :BrkBase (.-BrkBase img) :Brk (.-BrkBase img) :MmapNext MmapTop)))
+
+
+^{:go/end 32} (go/func pageUp ^uint64 [^uint64 n] (bit-and-not (+ n pageMask) pageMask))
+
+^{:go/end 46} (go/func protPerm ^uint8 [^uint64 prot]
+  (let [^uint8 p (zero uint8)]
+    (when (!= (bit-and prot 1) 0)
+      (set! p bit-or PermR))
+
+    (when (!= (bit-and prot 2) 0)
+      (set! p bit-or (bit-or PermW PermR)))
+
+    (when (!= (bit-and prot 4) 0)
+      (set! p bit-or (bit-or PermX PermR)))
+
+    ^{:line 45} p))
+
+
+
+(go/type Exited "Exited is a system call that ended the process.\n" (struct ^int Code))
+
+
+^{:go/end 111} (go/method Syscall "Syscall performs system call n: its result (a value >= 0, or -errno), or the process's end.\n" [^{:tag (* Kernel)} k ^uint64 n ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6] :results [^int64 ret ^{:tag (* Exited)} exit]
+  (switch n
+    (case [60 231] ; exit, exit_group: one thread
+      (return 0 (addr (lit Exited (conv int (bit-and a1 255))))))
+    (case [12] ; brk
+      (when (or (< a1 (.-BrkBase k)) (> a1 (+ (.-BrkBase k) (<< 1 30))))
+        (return (conv int64 (.-Brk k)) nil))
+
+      (let [(values old nw) (values (pageUp (.-Brk k)) (pageUp a1))]
+        (cond (> nw old) (do
+            (when (.Mapped (.-AS k) old (- nw old))
+              (return (conv int64 (.-Brk k)) nil))
+
+            (.Map (.-AS k) old (- nw old) (bit-or PermR PermW) "brk"))
+          (< nw old)
+          (.Unmap (.-AS k) nw (- old nw)))
+
+        (set! (.-Brk k) a1)
+        (return (conv int64 a1) nil)))
+    (case [9] ; mmap(addr, len, prot, flags, fd, off)
+      (let [size (pageUp a2)]
+        (when (or (== size 0) (!= (bit-and a1 pageMask) 0))
+          (return (- eINVAL) nil))
+
+        (when (== (bit-and a4 0x20) 0) ; MAP_ANONYMOUS: file mappings not yet
+          (return (- eNODEV) nil))
+
+        (let [addr a1]
+          (cond (!= (bit-and a4 0x10) 0) ; MAP_FIXED
+            (.Unmap (.-AS k) addr size)
+            (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (- StackTop StackSize))) (do
+              (set! addr (- (.-MmapNext k) size))
+              (while (.Mapped (.-AS k) addr size)
+                (set! addr - pageSize))
+
+              (set! (.-MmapNext k) addr)))
+
+          (.Map (.-AS k) addr size (protPerm a3) "mmap")
+          (return (conv int64 addr) nil))))
+    (case [11] ; munmap
+      (when (or (!= (bit-and a1 pageMask) 0) (== a2 0))
+        (return (- eINVAL) nil))
+
+      (.Unmap (.-AS k) a1 (pageUp a2))
+      (return 0 nil))
+    (case [10] ; mprotect
+      (when (!= (bit-and a1 pageMask) 0)
+        (return (- eINVAL) nil))
+
+      (when (not (.Protect (.-AS k) a1 (pageUp a2) (protPerm a3)))
+        (return (- eNOMEM) nil))
+
+      (return 0 nil))
+    (case [25] ; mremap
+      (return (- eNOMEM) nil))
+    (case [56 57 58 59 435] ; clone, fork, vfork, execve, clone3: one thread, no exec (AX5)
+      (return (- eNOSYS) nil)))
+
+  (.passthru k n a1 a2 a3 a4 a5 a6))
+
+
+^{:go/end 124} (go/method passthru [^{:tag (* Kernel)} k ^uint64 n ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6] :results [^int64 ret ^{:tag (* Exited)} exit]
+  (defer (^{:go/end 122} (fn []
+        (when [r (recover)] (!= r nil)
+          (when [(values e ok) (assert (* crt/Exit) r)] ok
+            (set! (values ret exit) (values 0 (addr (lit Exited (.-Code e)))))
+            (return))
+
+          (panic r)))))
+
+
+  (return (.Syscall (.-Sys k) (conv int64 n) a1 a2 a3 a4 a5 a6) nil))
