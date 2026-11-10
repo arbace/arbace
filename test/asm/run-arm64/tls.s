@@ -10,11 +10,11 @@ _start:
 	add	x0, x0, :lo12:block
 	msr	tpidr_el0, x0
 	mrs	x19, tpidr_el0
-	add	x2, x19, #:tprel_hi12:a, lsl #12
+	add	x2, x19, #:tprel_hi12:a
 	add	x2, x2, #:tprel_lo12_nc:a
 	mov	x3, #3
 	str	x3, [x2]
-	add	x2, x19, #:tprel_hi12:b, lsl #12
+	add	x2, x19, #:tprel_hi12:b
 	add	x2, x2, #:tprel_lo12_nc:b
 	mov	x3, #4
 	str	x3, [x2]

@@ -79,6 +79,8 @@
   (let [syms @(:syms ctx)]
     (letfn [(walk [x]
               (cond (symbol? x) (if-let [c (and (contains? syms (name x)) (o/const-value x syms))] c x)
+                    ;; a literal beyond a long is its 64 bits (MCExpr's int64_t arithmetic)
+                    (and (integer? x) (not (instance? Long x))) (.longValue (biginteger x))
                     (#{'reg 'shift 'elt 'rlist} (head x)) x
                     (seq? x) (apply list (first x) (map walk (rest x)))
                     :else x))]
@@ -257,7 +259,12 @@
              (= k :ldst12) (ldst-reloc scale spec)
              (= k :movw) (get movw-relocs spec)
              (= k :tlsdesc-call) "TLSDESC_CALL")]
-    (or (get reloc-numbers nm) (bad))))
+    (or (get reloc-numbers nm)
+        ;; a specifier the table does not hold (the PAuth ABI's :got_auth:, ...) is not written yet; a known one on the wrong
+        ;; instruction is LLVM's error
+        (if (and spec (not (re-matches #"(lo12|abs|pg_hi21(_nc)?|got(_lo12|page_lo15)?|gottprel(_lo12|_g1|_g0_nc)?|tlsdesc(_lo12)?|tlsgd|tlsld|(d)?tprel_(hi12|lo12(_nc)?|g[0-2](_nc)?)|dtprel|abs_g[0-3](_s|_nc)?|prel_g[0-3](_nc)?|gotoff_g[0-3](_nc)?|tlsdesc_off_g1|tlsdesc_off_g0_nc|plt|gotpcrel)" spec)))
+          (o/unsupported :relocation-specifier (str ":" spec ":"))
+          (bad)))))
 
 ;; needsRelocateWithSymbol: a specifier with S_GOT's bit (GOT, GOTTPREL, DTPREL, TPREL and their parts) or PLT, GOTPCREL
 (defn- keep-symbol? [spec]
@@ -337,7 +344,10 @@
   (binding [o/*arch* arch] (o/assemble items)))
 
 (defn assemble-file [^String path]
-  (assemble (asm/read-items (asm/latin1 path) (asm/dialect "arm64" nil path))))
+  (let [items (try (asm/read-items (asm/latin1 path) (asm/dialect "arm64" nil path))
+                   (catch arbace.lang.ExceptionInfo e
+                     (if (= :syntax (:asm/refused (ex-data e))) {:unsupported :syntax :what (.getMessage e)} (throw e))))]
+    (if (map? items) items (assemble items))))
 
 (defn check-list [lst work record] (binding [o/*arch* arch] (o/check-list assemble-file lst work record)))
 (defn control [subj-path ref-name record] (binding [o/*arch* arch] (o/control assemble-file subj-path ref-name record)))
