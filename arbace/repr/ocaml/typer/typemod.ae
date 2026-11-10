@@ -527,55 +527,82 @@
 
 (defn- nondep
   "Mtype.nondep_supertype for an anonymous argument: the result's types that name the parameter (bound to a fresh
-  module of the argument's type) replaced by their expansions; one with no expansion cannot be erased"
+  module of the argument's type) replaced by their expansions (Ctype.nondep_type_rec); one with no expansion cannot be
+  erased. A type declaration in a covariant position is Ctype.nondep_type_decl's: a kind that cannot be erased made
+  abstract, a manifest that cannot be erased expanded through private abbreviations too (the declaration made private),
+  else dropped; anywhere else (a value, an exception, a contravariant declaration) the error stands"
   [pid arg-mty mty]
   (let [id (ty/ident-create (:name pid))
         _ (env/add-module! id {:path [:Pident id] :mty arg-mty :addr nil})
         mty (env/subst-mty {pid [:Pident id]} mty)]
     (letfn [(mention? [p] (case (p 0) :Pident (= (p 1) id) :Pdot (mention? (p 1)) :Papply (or (mention? (p 1)) (mention? (p 2)))))
-            (nd-type [memo t]
-              (let [t (ty/repr t)]
-                (or (get @memo t)
-                    (let [d (ty/desc t)]
-                      (cond
-                        (= :Tvar (d 0)) t
-                        (and (= :Tconstr (d 0)) (mention? (d 1)))
-                        (let [e (binding [ty/*find-type* env/find-decl] (ty/expand-head t))]
-                          (when (identical? e t)
-                            (type-error (str "This functor application's result has a type of its anonymous argument: "
-                                             (env/path-name (d 1)))))
-                          (nd-type memo e))
-                        :else (let [n (ty/newty2 (ty/level t) [:Tvar nil])]
-                                (swap! memo assoc t n)
-                                (swap! n assoc :desc (ty/map-desc #(nd-type memo %) d))
-                                n))))))
-            (nd-items [items]
+            (expand [t priv]
+              ;; Ctype.try_expand_safe (priv: try_expand_safe_opt): the head's abbreviations expanded, a private
+              ;; abstract one's only with priv (Env.find_type_expansion's condition); nil when none expands
+              (loop [t (ty/repr t) n 0]
+                (let [d (ty/desc t)
+                      decl (when (= :Tconstr (d 0)) (env/find-decl (d 1)))]
+                  (if (and decl (:manifest decl) (or priv (not (:private decl)) (not= :abstract ((:kind decl) 0))))
+                    (recur (ty/repr (ty/subst (:params decl) (d 2) (:manifest decl))) (inc n))
+                    (when (pos? n) t)))))
+            (nd-type
+              ([memo t] (nd-type memo false t))
+              ([memo priv t]
+               (let [t (ty/repr t)]
+                 (or (get @memo t)
+                     (let [d (ty/desc t)]
+                       (cond
+                         (= :Tvar (d 0)) t
+                         (and (= :Tconstr (d 0)) (mention? (d 1)))
+                         (if-let [e (expand t priv)]
+                           (nd-type memo priv e)
+                           (type-error (str "This functor application's result has a type of its anonymous argument: "
+                                            (env/path-name (d 1)))
+                                       {::cannot-erase true}))
+                         :else (let [n (ty/newty2 (ty/level t) [:Tvar nil])]
+                                 (swap! memo assoc t n)
+                                 (swap! n assoc :desc (ty/map-desc #(nd-type memo priv %) d))
+                                 n)))))))
+            (erase? [e] (::cannot-erase (ex-data e)))
+            (nd-decl [co d]
+              (let [k (:kind d) m (atom {})
+                    k' (try (case (k 0)
+                              :variant [:variant (mapv #(update % :args (fn [as] (mapv (fn [x] (nd-type m x)) as))) (k 1))]
+                              :record [:record (mapv #(update % :type (fn [x] (nd-type m x))) (k 1)) (k 2)]
+                              k)
+                            (catch arbace.lang.ExceptionInfo e (if (and co (erase? e)) [:abstract] (throw e))))
+                    [tm priv] (if-let [t (:manifest d)]
+                                (try [(nd-type m t) (:private d)]
+                                     (catch arbace.lang.ExceptionInfo e
+                                       (if (and co (erase? e))
+                                         (try [(nd-type (atom {}) true t) true]
+                                              (catch arbace.lang.ExceptionInfo e2 (if (erase? e2) [nil (:private d)] (throw e2))))
+                                         (throw e))))
+                                [nil (:private d)])]
+                (assoc d :manifest tm :kind k' :private priv)))
+            (nd-items [co items]
               (mapv (fn [item]
                       (case (item 0)
                         :val (assoc item 3 (nd-type (atom {}) (item 3)))
                         :type [:type (mapv (fn [[n p d]]
-                                             (let [m (atom {}) k (:kind d)
-                                                   d' (assoc d :manifest (some->> (:manifest d) (nd-type m))
-                                                             :kind (case (k 0)
-                                                                     :variant [:variant (mapv #(update % :args (fn [as] (mapv (fn [x] (nd-type m x)) as))) (k 1))]
-                                                                     :record [:record (mapv #(update % :type (fn [x] (nd-type m x))) (k 1)) (k 2)]
-                                                                     k))]
+                                             (let [d' (nd-decl co d)]
                                                (env/add-decl! p d')
                                                [n p d']))
                                            (item 1))]
                         :exn (let [m (atom {})] (assoc item 3 (update (item 3) :args (fn [as] (mapv #(nd-type m %) as)))))
-                        :module (assoc item 3 (nd-mty (item 3)))
+                        :module (assoc item 3 (nd-mty co (item 3)))
                         item))
                     items))
-            (nd-mty [m]
+            (nd-mty [co m]
+              ;; co: Mtype's variance, Co at the top (nondep_supertype), Contra in a functor's parameter
               (let [m (if (and (= :Mty_ident (m 0)) (mention? (m 1))) (env/scrape m) m)]
                 (case (m 0)
-                  :Mty_signature [:Mty_signature (nd-items (m 1))]
-                  :Mty_functor [:Mty_functor (when-let [[i a] (m 1)] [i (nd-mty a)]) (nd-mty (m 2))]
-                  :Mty_alias (if (mention? (m 1)) (nd-mty (env/scrape m)) m)
+                  :Mty_signature [:Mty_signature (nd-items co (m 1))]
+                  :Mty_functor [:Mty_functor (when-let [[i a] (m 1)] [i (nd-mty (not co) a)]) (nd-mty co (m 2))]
+                  :Mty_alias (if (mention? (m 1)) (nd-mty co (env/scrape m)) m)
                   m)))]
       (let [m (env/scrape mty)]
-        (if (= :Mty_signature (m 0)) [:Mty_signature (nd-items (env/rename-items (m 1)))] (nd-mty m))))))
+        (if (= :Mty_signature (m 0)) [:Mty_signature (nd-items true (env/rename-items (m 1)))] (nd-mty true m))))))
 
 (defn- path-of-module
   "Typemod.path_of_module: the path of a module expression that is one"

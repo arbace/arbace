@@ -157,7 +157,7 @@ suite_dump() {
 suite_dump_native() {
   local d=$1 flags=$2 incs=$3 units=$4 u n b U nf="" f inc
   for f in $flags; do
-    case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -no-strict-formats) ;;
+    case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -no-strict-formats) ;;
       *) echo "typer: flag $f not modelled" > "$d/error"; return ;; esac
   done
   # the program's libraries (unix, threads, str, compiler-libs, testing) after its own directory, by their sources' interfaces
