@@ -542,6 +542,18 @@
                                (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [v] (drop 4 x))))
                                (do (when-let [f (:const! facts)] (f false)) x))
                              x))
+        ;; RF17 (RFP50 (a)'s first part): a closure reified as a function pointer (ClosureFnPointer) carries its ClosureOnceShim's
+        ;; symbol (mono's), whose body is the record's (a shim of core's FnOnce::call_once)
+        fix-closure-ptr (fn [x]
+                          (if (and (seq? x) (= 'cast (first x)) (str/starts-with? (str (second x)) "PointerCoercion(ClosureFnPointer")
+                                   (not (some #{:fn-symbol} x)) (:closure-fnptr facts))
+                            (let [op (nth x 2)
+                                  tyf (cond (and (seq? op) (= 'const (first op))) (nth op 2 nil)
+                                            (and (seq? op) (#{'copy 'move} (first op)) (seq? (second op)) (= 2 (count (second op))))
+                                            (:ty (nth (:locals ours) (second (second op)) nil)))
+                                  sy (when tyf ((:closure-fnptr facts) tyf))]
+                              (if sy (concat x [:fn-symbol sy]) x))
+                            x))
         fix-const (fn [x] (if (and (seq? x) (= 'const (first x)) (get (:fsym facts) (second x)) (not (some #{:fn-symbol} x)))
                             (concat x [:fn-symbol (get (:fsym facts) (second x))])
                             x))
@@ -562,7 +574,7 @@
                  t))
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
-    (-> (walk (comp fix-cast fix-uneval fix-static fix-const fix-ty)
+    (-> (walk (comp fix-closure-ptr fix-cast fix-uneval fix-static fix-const fix-ty)
           (merge (if (:header facts) ((:header facts) rec) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg]))
                  {:args (:args ours) :ret (:ret ours)
                   :locals (:locals ours)
@@ -977,6 +989,9 @@
                         ;; RF17: a local constant (`const LIMIT: usize = 4`) evaluated as codegen's eval_mir_constant evaluates it:
                         ;; its built body (construct_const's) interpreted by eval-promoted, a scalar's bytes its (scalar BITS SIZE)
                         :local-const local-const
+                        ;; RF17: a closure's reified pointer's symbol (its ClosureOnceShim's), counted
+                        :closure-fnptr (fn [tyf] (let [s (try (mono/closure-once-symbol n tyf) (catch Throwable _ nil))]
+                                                   (fact! :closure-shims (some? s)) s))
                         :unit-variant (fn [tyf vidx fields]
                                         (let [l (try (mono/type-layout-form n tyf)
                                                      ;; a layout mono refuses: the record's, as the module's table takes it
