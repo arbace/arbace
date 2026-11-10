@@ -549,3 +549,75 @@ DECISION: Which records move at the flip, and does 3.14 stay checked after it?
 DECISION: The 3.15 classes: a file of their own or one file?
 - (a) `divergences-315.edn` (and `-aot-315`), started at the flip from a copy of 3.14's and edited by the 3.15 night's results; 252's paths already name it (recommended): the classes move with their records, 3.14's file untouched until (a) of the previous DECISION retires it.
 - (b) One `divergences.edn`, each class marked `:python "3.14"`/`"3.15"` where it applies to one only: one place to edit; cost: the judge learns the key, and 3.14's file changes now.
+
+## As built: 252, the move's next parts (P6, P7, P8 behind the switch, 2026-11-10, the Mac VM)
+
+As designed above (Design: 252), behind `REPR_PYTHON_VERSION=3.15`; under 3.14 no answer, record or IR changes (run,
+below). The three DECISIONs of the design stay open for the user; nothing built depends on their answers but the 3.15
+files' names, which no 3.14 path reads.
+
+- **P7's first part, the standard library under the switch** (`bin/pyi`'s `pytop`, `stdlib_lib`, `tarball_test`,
+  `corpus_modules`): 3.15.2's `Lib` on sys.path and its `Lib/test` for lib-test; `sys.version` `3.15.2 (pyi, Arbace)
+  [Go]`, `version_info` `(3, 15, 2, 'final', 0)`, `hexversion` `0x030f02f0`, `implementation.cache_tag` `arbace-315`,
+  `stdlib_module_names` 3.15.2's 296 (`sys.ae`), sysconfig's `VERSION` `3.15` (`builtins_sysconfigdata.ae`). Under the
+  switch a run in a fresh worktree extracts 3.15.2's tree (3.14's still `env -u`'s, as 237 made it).
+- **P6, first pass: what 3.15.2's Lib asks of pyi's C modules**, found by importing every top-level module of 3.15.2's Lib
+  (165; the oracle imports all) and by a scan of both trees' imports of C-module names, each ported from 3.15.2's C:
+  - `binascii` (`builtins_binascii315.ae`, new; `Modules/binascii.c`): `b2a_base32`/`a2b_base32`, `b2a_ascii85`/
+    `a2b_ascii85`, `b2a_base85`/`a2b_base85` (Base85 and Z85 by `alphabet=`), `b2a_base64`'s `padded=`, `wrapcol=`,
+    `alphabet=`, `a2b_base64`'s `padded=`, `alphabet=`, `ignorechars=`, `canonical=` and the strict mode's default by
+    `ignorechars`, `a2b_hex`/`unhexlify`'s `ignorechars=`, the ten alphabets as constants, the reverse tables cached per
+    alphabet as the module state's `reverse_table_cache`, every message; `hexlify`'s `bytes_per_sep` a `Py_ssize_t`. 3.15's
+    `base64` is these functions (`b64encode` calls `b2a_base64(padded=, wrapcol=)`), so base64, email and http need them.
+  - `_sre`: `Pattern.prefixmatch` and `Scanner.prefixmatch`, `match` their alias with `prefixmatch()`'s messages (re,
+    json, argparse, traceback, tokenize, unittest, urllib.parse, asyncio, decimal did not import without it).
+  - `_codecs._normalize_encoding` (`encodings` imports it: subprocess did not import), `_Py_normalize_encoding` without
+    the lower casing, the strict UTF-8 encoder's error for a surrogate.
+  - `_ssl`: `get_sigalgs()` (Go's crypto/tls signature schemes by OpenSSL's names) and `HAS_PSK_TLS13` False (ssl did not
+    import); `posix._clearenv` (`os.environ.clear`'s fast path).
+  - `_ctypes`: an unknown `_type_` is 3.15's one AttributeError, which 3.15's ctypes catches around its complex types
+    (`"Zd"`, `"Zf"`, `"Zg"`): pyi's ffi has no complex types (as a CPython built without them), so ctypes imports.
+  - `{**x}`, `f(**x)`, `dict(x)` and `update(x)` with a `keys()` that returns a non-iterable: 3.15's `%T.keys() must return
+    an iterable, not %T` (`abstract.c`'s `method_output_as_list`; 239's leftover of test_unpack_ex).
+  - `codecs.lookup`'s normalization back to 3.15.2's `normalizestring` (ASCII letters lower case, spaces to hyphens: the
+    search functions see `test.aaa-8`, not 3.14's `test.aaa_8`), and `encodings` imported before the registry's first use
+    (CPython imports it at start; pyi imported it only while no search function was registered, so one registered before
+    any lookup hid every built-in codec: a 3.14 gap too, left to the user's call in 252's report).
+- **P7's tooling**: `tools/pyi/libtest_all.py find` reads the tree's own `SPLITTESTDIRS` (3.15.2 splits `test_io` and
+  `test_os`: 560 modules against 3.14.10's 538, the list of 3.14.10 byte for byte as before), the check's universe keyed by
+  the tree under 3.15 only, every record's path by version (`RECV`, `RECS`). The records themselves are the main host's.
+- **P8**: no new IR operation, as 239 found; the compiled paths checked on this base (216's register loop, 251's fast
+  paths): `t252-lazy-aot.sh` (a hot loop's load-global cache over a placeholder, a closure, a class body, another module's
+  attribute, a deleted and rebound lazy name, `sys.lazy_modules`) prints the oracle's text by `aot` and by `run`.
+
+**Counts** (run on the VM; 3.15.2's tests in their own tree, `bin/pyi aot test/python/libtest.py MODULE` under the switch,
+own verdict; the base 7e3db54e9 by 237-239's overlay on 3.14.10's Lib, as those tasks measured):
+
+| module (3.15.2's) | oracle ok / methods | base ok | head ok | head agrees |
+|---|---:|---:|---:|---:|
+| test_binascii | 220 / 237 | 48 | 220 | 237 |
+| test_base64 | 67 / 67 | 34 | 63 | 63 |
+| test_re | 164 / 168 | 145 | 151 | 155 |
+| test_codecs | 275 / 288 | | 266 | 279 |
+| test_unpack_ex (doctests) | 6 / 6 | 5 (239) | 6 | 6 |
+| test_struct | 47 / 47 | | 32 | 32 |
+| test_json | 230 / 233 | | import fails | 0 |
+
+The non-passes left: the `cpython_only` and `_testinternalcapi` skips (PYS15, the existing classes); test_base64's
+`test_encodebytes`/`test_decodebytes` (memoryview's shaped `cast` keeps one dimension, under 3.14 too: 252's report) and
+its `test_b16encode_wrapcol` (hexlify's `Py_ssize_t`, fixed after the run); test_re's three 3.14 failures; test_struct's
+new `Struct` construction (`__new__` does the work, `__init__` deprecated: 3.15.2's `_struct.c`, P6's second pass);
+test_json's package does not import under 3.14 either (no `_json`, `cjson.JSONDecodeError = ...` on None).
+Every top-level module of 3.15.2's Lib imports but `curses` and `symtable` (no `_curses`, `_symtable`: 3.14's gaps).
+
+**3.14 unchanged** (run, no switch): `p/feat314.py` (no 3.15 name, the version, `stdlib_module_names`, sysconfig, the old
+messages) the same on base and head; `make python-essential` the same lines (check --aot 21 programs: 20 pass, 1 classed);
+`bin/pyi table-check --configs tamago/amd64,tamago/arm64` ok; `bin/pyi runtime vet` rc 0; `REPR_PYTHON_ORACLE=live
+PYI_SMOKE_ONLY='^(f-flags|g-math-int|f-intbytes|e-gen|c-locale|f-binascii|g-re)' bin/pyi runtime check` every package
+printed and read again the same, every table and control as they must, 7 programs and 1 session equal; 3.14.10's discovery
+byte for byte. 239's `t239-p3.sh` and `t239-lazy.sh` pass on the head (with 3.15.2's Lib now under the switch).
+
+Not done (P6's second pass, measured by the main host's first 3.15 night rather than by hand): `_struct`'s construction,
+`_json` (absent by design), `resource`'s unsigned `RLIM_INFINITY` and `RLIM_SAVED_*` (read: `py2rlim`, `rlim2py`), `math`,
+`_datetime`'s twin, `_pickle`'s, `array`, `zlib.crc32_combine`, `mmap`, `sqlite3`, `_ssl`'s groups and sigalgs setters,
+`socket`, `select`, unicodedata's rest (237); the records themselves (the `*315*` files) with DECISION 1.
