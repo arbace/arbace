@@ -809,3 +809,87 @@ AOT "no check yet" until a64i (AR5) and the ELF writer, linker and runs (AR4), t
 (49.9 / 91.7 / 60.0); the gate steps `asm-arm64-read-essential` (the round trip, 33 s), `asm-arm64-print-essential` (the encode check,
 45 s), `--full` `asm-arm64-table`, the oracle tier's `asm-arm64-table-oracle`; a print-level control (`_control/print-`, four pairs,
 `arbace.repr.asm.arm64.encheck/control-print`), the encode controls judging the encode and input levels.
+
+## As built: AR4 (2026-11-10; branch `271-asm-arm64-ar4`, from `mac/asm-ax10` `00ded8184`; queue task 271, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64, the user's M2 Max: real arm64 cores): stage 0, one run at a time, under 1 GiB,
+no lock, no LLVM tool in any check; llvm-mc 23.1.5 (Alpine's llvm23, the VM's) by hand only, to record the objects of the
+byte-for-byte level (the oracle tier's). MC/AArch64 read from a sparse checkout of llvmorg-23.1.5 (commit `392dfff9`, the
+tarball's tag; the tarball itself is not on the VM). llvm-project 23.1.5's AArch64 back end (AArch64MCCodeEmitter,
+AArch64AsmBackend, AArch64ELFObjectWriter, AArch64ELFStreamer, AArch64AsmParser's directives) and lld/ELF/Arch/AArch64.cpp
+read and written again in Arbace; no code copied.
+
+- **The object assembler shared** (SH4): amd64's `arbace.asm.amd64.obj` split along the architecture into `arbace.asm.obj`
+  (sections, symbols, data, CFI and `.eh_frame`, layout, fixups, the file, the judge) and its `*arch*` (encoding and relaxation,
+  the PC bias, the resolved fixup's write, the relocation types, the arch's directives, the code padding, the DWARF registers
+  and the CIE, the mapping symbols); amd64's objects and executables unchanged byte for byte (musl 32, synthetic 7, the run
+  check's 16 executables). ELFObjectWriter's STT_FILE placement for several `.file`s (the first first, each later one before
+  the locals registered after it) and st_other's bits beyond the visibility (`.variant_pcs`) are the shared writer's.
+- **`arbace.asm.arm64.obj`**: AR2's encoder (`lenc`: Go's table, then LLVM's records) gives each instruction's word and the
+  operands it leaves to fixups; the fixup's kind is read off the word's class (B/BL, B.cond and CBZ, TBZ, LDR literal, ADR, ADRP,
+  ADD/SUB immediate, LDST unsigned offset with its scale, MOVZ/MOVN/MOVK), its specifier from the operand (`:lo12:`, `:got:`,
+  `:abs_g1_s:`, ...). adjustFixupValue (ranges, alignment, MOVW's absolute groups with MOVN for a negative signed one, HI12's
+  implied LSL #12), ADRP always relocated, getRelocType (by kind and specifier, LLVM's error otherwise),
+  needsRelocateWithSymbol (S_GOT's bit, PLT, GOTPCREL), the mapping symbols `$x`/`$d` (per section, STT_TLS in a TLS section,
+  before the instruction's symbols), `.inst`, `.tlsdesccall`, `.word` 4 bytes, `.xword`, `.align` a power of 2,
+  `.variant_pcs`, `.cfi_negate_ra_state`, MinInstAlignment 4, NOPs `d503201f` after zero bytes, the CIE (data alignment -4,
+  x30, `DW_CFA_def_cfa sp, 0`; `.eh_frame` PROGBITS, its `$d`).
+- **The encoder's gaps the objects found** (AR2's `lenc`, additive): `isSImm9OffsetFB` (LDR's LDUR aliases), the complement of
+  addLogicalImmNotOperands (BIC/ORN's immediates; before, BIC encoded the immediate itself), `uxtw Xd, Wn` (GPR32as64),
+  TIndexHint's `nb` (POE2, TEV). The encode check's levels unchanged but the reject level, 4,176 → 4,182 (recorded).
+- **`arbace.asm.link` for AArch64** (lld's TargetInfo: image base 0x200000, max page 64 KiB, trap `d4d4d4d4`): AArch64::relocate
+  for what the objects emit (CALL26/JUMP26, CONDBR19, TSTBR14, LD_PREL_LO19, ADR_PREL_LO21, ADR_PREL_PG_HI21, ADD and LDST
+  lo12, MOVW_UABS/SABS (writeSMovWImm), ABS/PREL 16/32/64, the GOT's ADR_GOT_PAGE/LD64_GOT_LO12_NC/GOT_LD_PREL19, initial exec
+  through a GOT entry holding the TP offset (not relaxed to local exec), local exec's ADD/MOVW/LDST TPREL), TLS variant I;
+  `.eh_frame`'s locals dropped with its synthetic merge.
+- **`bin/repr-asm --arch arm64`**: `object`, `object-dump`, `object-check`, `object-record` (llvm-mc `-triple aarch64-linux-musl
+  -mattr=+all`), `object-verdict`, `run-check`, `link`.
+
+| level | judged | met | classed | failing |
+|---|---:|---:|---|---:|
+| object, llvm-mc 23.1.5's objects byte for byte: musl 1.2.6's 13 aarch64 `.s` | 13 | **13** | none (memcpy.S, memset.S: the C preprocessor's, ARS19; llvm-mc refuses them as they are: not recorded) | 0 |
+| object, the synthetic files (`test/asm/obj-arm64/`: every relocation specifier written, data and mapping symbols, CFI) | 3 | **3** | none | 0 |
+| object, MC/AArch64's 123 ELF object tests (110 llvm-mc assembles with every feature) | 110 | **86** | 14 `:unsupported-directive` (`.aeabi_subsection` 10, `.reloc` 2, `.macro`, `.single`), 4 `:unsupported-instruction`, 2 `:unsupported-relocation-specifier` (`:got_auth:`), 2 `:unsupported-syntax`, 1 `:unsupported-fixup-kind`, 1 `:unsupported-expression` | 0 |
+| object verdict, the same 123 tests' object runs by their own CHECK lines (llvm-objdump -d's offsets, words, data bytes and relocations, -r, llvm-readobj -r) | 2,538 lines | **1,970** | 111 directive, 106 relocation specifier, 97 `:message`, 86/27/7/9 views not built (readobj -S..., objdump -t..., readelf, dwarfdump), 46 fixup kind, 34 instruction, 32 syntax, 7 expression, 3 `:error-accepted`, 2 `:filecheck-var`, 1 `:no-viewer` | 0 |
+| beside: the disassembly runs' text (AR3's decoder) | 1,947 lines | — | `:decoder-text` | — |
+| run: `test/asm/run-arm64/`'s 17 programs, assembled and linked by Arbace, run by the VM's arm64 CPU, by their own verdicts | 17 | **17** | none | 0 |
+
+The run tests (Arbace's own; their verdicts in their headers): `p4-hello`, `exit-status`, `loop-sum`, `calls`, `data-bss`,
+`two-objects` (CALL26/JUMP26, ADRP with ADD and LDST, ABS64, PREL32, the GOT for a function, data and an absolute, MOVW_UABS
+G0-G3), `weak`, `comdat`, `merge-strings`, `eh-frame`, `tls` (local and initial exec, TPIDR_EL0 set by the program), `linker-symbols`,
+`relocs-data`, `musl-crti` (musl's crti/crtn), `musl-setjmp` (musl's setjmp/longjmp), and the two link refusals `undefined` and
+`duplicate`. Negative controls, each failing as it must: four of the object check (`controls-object-arm64.txt`), four of the object
+verdict (`controls-objverdict-arm64.txt`), four of the run check (`controls-run-arm64.txt`).
+
+**The AOT cell** (`test/reap/cells.edn`'s `[:asm-arm64 :aot]`): the run check, the object verdict and the object check (the encode
+level beside): 2,089 pass, 592 deferred, none failing (77.9%); `bin/reap` 0 problems. **The gate**: the essential steps
+`asm-arm64-object-essential`, `asm-arm64-objverdict-essential` and `asm-arm64-run-essential` (each under 1 GiB, about 25 s
+together, `:controls`); `gate.crops check` 0 problems. **crops-score**: arm64 assembly 49.9 / 91.7 / 60.0 → **69.4 / 95.8 /
+80.0** (AOT's independence 1: Arbace's assembler and linker, the CPU's runs, the tests' own lines), `--judge --strict` 0 problems.
+
+What differs from the plan: the object verdict judges the stated bytes and relocations; a disassembly's text is AR3's and stays
+beside the cell (ARS33); MC/AArch64's object tests are 123 by the ELF runs' triples (the plan's 146 counted every `-filetype=obj`
+file of the top level but Darwin's); the run check needs an arm64 CPU (the VM's) or an emulator on the main host (ARS34); musl's
+two `.S` wait for the preprocessor (ARS35). Not built: literal pools, the build attributes (`.ARM.attributes`), `.reloc`, the
+PAuth ABI's relocations, TLS GD/LD/TLSDESC in the linker, the decoder (AR3), lld's byte-level reference (no lld on the VM).
+
+### Proposed (AR4)
+
+Each with options, the recommended named; none taken.
+
+- **ARS33 The disassembly's text in the AOT cell.** (a) as built: beside the cell (AR3's decoder judges it; its 1,947 lines
+  then join the decode level's cell, read or AOT as AX4c's `dis` did); (b) counted deferred in the AOT cell (77.9% → 45.2%).
+  *Recommended: (a)*: the object's own cases are its bytes and relocations.
+- **ARS34 Where the arm64 runs run.** (a) the gate's essential `asm-arm64-run-essential` on the main host under qemu-aarch64
+  (an emulation, said so; host id `:qemu-aarch64` in `:host-ids` to key it), the native runs recorded by the Mac VM (this task's
+  record) and rechecked there at each AR task; (b) the step on the VM only (the main host's gate skips it as an absent host);
+  (c) qemu-aarch64 recorded as the oracle tier's only. *Recommended: (a)*, with the host id added on the main host (not done
+  here: the main host's qemu is not the VM's).
+- **ARS35 musl's `.S`.** (a) repr/c's preprocessor (`arbace.repr.c.pp`) with AArch64's predefined macros as data (SH3), its
+  text assembled (ARS19 (b)); (b) leave them out until AR6's libc. *Recommended: (a)* in the next slice.
+- **ARS36 Label differences as immediates** (`mov x0, #(b - a)`, `add w0, w1, #(end - start)`: MC folds them when both labels are
+  in one fragment). (a) folded by the object assembler when both are defined before the instruction in one data chunk, else a
+  fixup LLVM would refuse; (b) classed. *Recommended: (a)*: 34 lines and 4 files.
+- **ARS37 The next slice.** (a) the views not built (llvm-readobj -S/--symbols, llvm-readelf -s, llvm-objdump -t: 127 lines),
+  `.reloc`, the PAuth relocations, literal pools; (b) AR3's decoder first (the 1,947 text lines and the objects read back).
+  *Recommended: (b)*, the plan's order, then (a) by count.
