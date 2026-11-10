@@ -19,7 +19,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check cppi-codegen-gen \
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
-  repr-asm-extract repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
+  repr-asm-extract repr-asm-pins repr-asm-ensure asm-essential asm-amd64-essential asm-arm64-essential repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
   repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle \
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
@@ -515,6 +515,15 @@ cppi-divergences-aot: ## the recorded C++ AOT check judged against its classes (
 	bin/cppi divergences --aot
 repr-asm-extract: ## repr/asm's corpora (musl 1.2.6's x86-64 and aarch64 .s, llvm/test's MC/AsmParser, MC/X86 and MC/AArch64, libgcc's aarch64 .S) out of their pinned tarballs (bin/repr-asm corpus extract)
 	bin/repr-asm corpus extract
+repr-asm-pins: ## the assembly crops' pins: each tarball of test/asm/corpora.edn against its SHA-256, nothing extracted (bin/repr-asm corpus check; bin/gate --pins)
+	bin/repr-asm corpus check
+repr-asm-ensure: ## repr/asm's corpora extracted once for test/asm/corpora.edn's content, under a lock (bin/repr-asm corpus ensure; the gate's steps)
+	bin/repr-asm corpus ensure
+asm-amd64-essential: ## the x86-64 assembly crop's essential gate steps by hand (AX10): the round trip of musl and MC/AsmParser, the run check, the object check of musl and the synthetic files (test/gate/crops/asm.edn)
+	bin/repr-asm corpus ensure && bin/repr-asm roundtrip musl mc-asmparser && bin/repr-asm run-check && bin/repr-asm object-check musl && bin/repr-asm object-check synthetic
+asm-arm64-essential: ## the arm64 assembly crop's essential gate steps by hand (AX10): the arm64 round trip and encode check (test/gate/crops/asm.edn)
+	bin/repr-asm corpus ensure && bin/repr-asm --arch arm64 roundtrip && bin/repr-asm --arch arm64 encode-check
+asm-essential: asm-amd64-essential asm-arm64-essential ## both assembly crops' essential steps by hand (AX10)
 repr-asm-lists: ## repr/asm's corpus lists, split-file parts and RUN-line flags (bin/repr-asm [--arch ARCH] corpus lists; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) corpus lists
 repr-asm-read: ## an assembly file's forms as .ae text, mode :full (bin/repr-asm read --full FILE; FILE=..., ARCH=amd64|arm64, SYNTAX=att|gnu|apple|plan9)

@@ -3521,3 +3521,51 @@ Considered: generating the matcher as AsmMatcherEmitter does (operand classes or
 the structural matcher meets every stated encoding); LLVM's matcher first with Go's table as the cross-check (kept for ARS30: the base
 lines keep the first slice's rows); the features at the encode and input levels too (their lines' features are also the tests'
 `.arch` directives, ARS31). Proposed ARS30-ARS32 (doc/asm/ARM64-SURVEY.md).
+
+## 2026-11-10 Assembly: AX10, the two assembly crops join REAP and crops-score (branch `asm-ax10`, from `mac/asm-ax5c` `f05515abf`)
+
+The user decided on 2026-11-10 to bring AX10 forward, reversing CSP7 (the CROPS-90 roadmap had kept assembly out of
+`test/crops/crops.edn` until AX10, so that no crop under 90 joined with read and print alone): the x86-64 crop `:asm-amd64` joins the
+REAP matrix and crops-score with its four cells, the arm64 crop `:asm-arm64` with read and print checked and eval and AOT "no check
+yet", as Python's waited; the gate steps AXS21 (a), AXS42 (a), AXS65 (a), AXS73 (a) and AXS87 (a) had left to AX10 move forward with it.
+
+The base: `mac/asm-ax5c` (`f05515abf`, carrying `asm-merged`, AX5's slices) with `mac/asm-ar2b` (`8744bfdba`, arm64's LLVM-table encoder)
+merged; both sit on `asm-merged`; the conflicts (bin/repr-asm's help, this journal) kept both sides. Every asm check was rerun after the
+merge on stage 0, one at a time, none failing: the round trips (amd64 1 min 24 s, 1.0 GiB; arm64 33 s), arm64's table check and
+encode check, amd64's encode check (9 min 31 s, 1.4 GiB), decode check (dis 5 min 39 s, rt 2 min 1 s, obj 37 s), object check (musl,
+synthetic, mc-x86-obj), run check (23 s), x86i-check (14 min 44 s, 1.25 GiB), x86i-decode-check (1 min 42 s), the table and x86i's
+decode tables (3 min 10 s and 31 s).
+
+Built (doc/asm/AMD64-SURVEY.md, "As built: AX10"; doc/CROPS-SCORE.md, "Decided (the user, 2026-11-10)"):
+- `test/reap/cells.edn`: the rows `:asm-amd64` ("x86-64 asm") and `:asm-arm64` ("arm64 asm"); `test/reap/main.ae`: the readers
+  `:asm-rows`, `:asm-counts` and `:asm-arm64` over bin/repr-asm's records, each non-pass taken by the class its own judge found
+  (`:class-id`); `:by-design` maps to `:design`, `:pending` to nothing (a case in one fails). x86-64: read 25,222 / 1 / 32, eval 127 / 2 / 0,
+  AOT 98 / 0 / 6, print 194,582 / 1,532 / 400; arm64: read 6,646 / 0 / 10, print 12,656 / 5 / 10, eval and AOT no check yet (AR5, AR4).
+  `bin/reap --record`: 47 of 52 cells checked, 0 problems.
+- arm64's print level had no control of its own (the encode controls judge the encoding): `arbace.repr.asm.arm64.encheck/control-print`
+  and four `_control/print-` pairs in `test/asm/controls-encode-arm64.txt`, each failing as it must; a self-pair, tried once, was
+  reported "same" and failed the check.
+- `test/crops/crops.edn`: the two crops with a control rule per check family (10 of 10 and 4 of 4) and `:llvm-mc` among the toolchain
+  hosts; `test/crops/independence.edn`: x86-64's five stages 1 (judge 0.9998: the object check's 86 files against llvm-mc's recorded
+  objects at 0.5, 221,916 cases by their own verdicts), arm64's read, print and judge 1, eval and AOT 0 (no stage yet). `crops.score`'s
+  record reader took a crop id of letters alone (a hyphenated id read "not recorded" after `--record`): `[a-z][a-z0-9-]*` now.
+  `bin/crops-score --record`; `--judge --strict` 0 problems. x86-64 assembly: completeness 97.9% (98.5% without by design), maturity
+  100.0%, independence 100.0%; arm64 assembly: 49.9% (49.9%), 91.7%, 60.0%.
+- The gate: `test/gate/crops/asm.edn` and `asm-oracle.edn`, spliced into `test/gate/steps.edn` (`gate.crops splice`): essential
+  `asm-amd64-read-essential`, `asm-amd64-run-essential`, `asm-amd64-object-essential` (1 min 20 s, 0.8 GiB at most) and
+  `asm-arm64-read-essential`, `asm-arm64-print-essential` (1 min 18 s, 0.9 GiB); `--full` `asm-amd64-roundtrip`, `-decode` (obj nightly;
+  dis and rt `:clean-only`), `-object`, `x86i-decode`, `asm-arm64-table` nightly, and `asm-amd64-encode`, `asm-amd64-table` and `x86i-check`
+  as `:clean-only` parts (nightly 4 min 48 s, 71% of half a share; with them it was 40 min 24 s, 594%); the oracle tier's print-oracle,
+  table oracles and link-oracle on a new host `:llvm-mc` (llvm-mc, llvm-tblgen, ld.lld). `:budgets`: `:new-crops` with the two, `:shares`
+  0.5 each (AXS16 (a), ARS15), `:crops` 11; `:crop-pins` `bin/repr-asm corpus check` (new, with `corpus ensure`: the corpora extracted once
+  per `test/asm/corpora.edn`, under a lock). `gate.crops check` 0 problems; `bin/gate --plan`, `--full --plan`, `--oracle --plan` with no
+  table error; costs-test, crops-test (its expected pins and chains extended with the two crops), gate-key-crops-test pass. The costs
+  were measured by hand (`/usr/bin/time -v`), written as the worktree's `.tmp/gate/NAME.mem` for `bin/gate --costs`; no pass recorded.
+- Makefile: `repr-asm-pins`, `repr-asm-ensure`, `asm-amd64-essential`, `asm-arm64-essential`, `asm-essential`.
+
+Considered: x86i-check as the essential step AXS73 (a) planned (about 50 s then; 14 min 44 s now, the step mode over 43 programs: over
+the 2-minute chain limit, so `--full`, then `:clean-only` for the share); the decode check's dis level essential (AXS65 (a), 5 min 39 s:
+nightly obj only); keeping every `--full` part nightly (594% of the share; the share binds only after two passes, GTS222, but the night
+is full); counting arm64's encode level in a cell (beside AOT until arm64's AOT exists). Proposed AXS89-AXS90 (doc/asm/AMD64-SURVEY.md, "Proposed (AX10)": x86i-check and encode-check at night).
+
+Rule slips: none known (no lock, no gate run but `--plan` and `--costs`, one check at a time, the memory checked before each).

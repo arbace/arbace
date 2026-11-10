@@ -17,6 +17,9 @@
 #                                                    1.2.6's, llvm-project 23.1.5's, gcc 15.2.0's) into $REPR_ASM_SRC (default
 #                                                    MAIN/.tmp/asm/src), each tarball's SHA-256 checked against its pin first (Go's
 #                                                    testdata are read in place in $ARBACE_GOROOT, the box's in the checkout)
+#   bin/repr-asm corpus check                        each pinned tarball's SHA-256 against its pin, nothing extracted (bin/gate --pins)
+#   bin/repr-asm corpus ensure                       corpus extract once for test/asm/corpora.edn's content (a stamp beside the
+#                                                    corpora), under a lock: the gate's steps (AX10)
 #   bin/repr-asm corpus lists [CORPUS...]            each corpus's list (NAME<tab>PATH) into .tmp/repr-asm/lists/CORPUS.list
 #   bin/repr-asm roundtrip [--record] [CORPUS...]    each file of each corpus (default: every corpus of test/asm/corpora.edn): read
 #                                                    in :full, the .ae text read back (forms and layer equal), printed back byte for
@@ -221,6 +224,32 @@ extract() {
   done < "$TMPDIR/asm-pins.txt"
 }
 
+# check_pins: every pinned tarball on this host with its pin's SHA-256 (AX10: the crops' pins, bin/gate --pins); no extraction
+check_pins() {
+  local id tar sum top want n=0
+  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$TMPDIR/asm-pins.txt"
+  while read -r id tar sum top; do
+    [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host" >&2; return 1; }
+    want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
+    [ "$want" = "$sum" ] || { echo "repr-asm: $tar's SHA-256 $want is not the pin's $sum" >&2; return 1; }
+    n=$((n + 1))
+  done < "$TMPDIR/asm-pins.txt"
+  echo "repr-asm corpus check: $n tarballs equal to their pins"
+}
+
+# ensure: the corpora extracted into $src once for test/asm/corpora.edn's content (a stamp of its SHA-256 beside them), under a lock
+# so that the gate's steps that need them do not extract at once (AX10)
+ensure() {
+  local stamp=$src/.corpora.sha256 want
+  want=$(sha256sum "$corpora" | cut -d' ' -f1)
+  mkdir -p "$src"
+  (
+    flock 9
+    if [ "$(cat "$stamp" 2>"$TMPDIR/asm-stamp.err")" = "$want" ]; then echo "repr-asm corpus ensure: $src current"; exit 0; fi
+    extract && echo "$want" > "$stamp"
+  ) 9>"$src.lock"
+}
+
 # make_list ID: the corpus's files (its :dir under its :root, src by default, $ARBACE_GOROOT for :goroot, the checkout for
 # :checkout; its :match and not its :exclude), NAME<tab>PATH<tab>FLAGS
 make_list() {
@@ -327,8 +356,10 @@ case ${1:-} in
   corpus)
     case ${2:-} in
       extract) extract ;;
+      check) check_pins ;;
+      ensure) ensure ;;
       lists) shift 2; ids=("$@"); [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(corpus_ids); for id in "${ids[@]}"; do make_list "$id"; done ;;
-      *) echo "repr-asm corpus extract|lists [CORPUS...]" >&2; exit 2 ;;
+      *) echo "repr-asm corpus extract|check|ensure|lists [CORPUS...]" >&2; exit 2 ;;
     esac ;;
   roundtrip)
     shift; record=; ids=()

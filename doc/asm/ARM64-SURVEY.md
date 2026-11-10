@@ -799,3 +799,13 @@ Each with options, the recommended named; none taken.
   pairs, vector kinds and lists), the matchables in AsmMatcherEmitter's order for the near-miss choice; (b) `:message` kept.
   *Recommended: (a)* in slices, by count.
 
+
+## As built: AR10's row, with AX10 (2026-11-10; branch `asm-ax10`)
+
+Brought forward with AX10 by the user (doc/asm/AMD64-SURVEY.md, "As built: AX10"; doc/CROPS-SCORE.md, "Decided (the user,
+2026-11-10)"): the row `:asm-arm64` in `test/reap/cells.edn` with read (AR1's round trip, 434 of 444, and AR2's input level, 6,212 of
+6,212; the reject level beside) and print (AR2's print level, 12,222 of 12,227, and the round trip's mode `:full`) checked, eval and
+AOT "no check yet" until a64i (AR5) and the ELF writer, linker and runs (AR4), the encode level beside AOT; the crop in crops-score
+(49.9 / 91.7 / 60.0); the gate steps `asm-arm64-read-essential` (the round trip, 33 s), `asm-arm64-print-essential` (the encode check,
+45 s), `--full` `asm-arm64-table`, the oracle tier's `asm-arm64-table-oracle`; a print-level control (`_control/print-`, four pairs,
+`arbace.repr.asm.arm64.encheck/control-print`), the encode controls judging the encode and input levels.

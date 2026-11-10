@@ -1526,3 +1526,68 @@ Numbering from AXS82.
 **Rule slips**: one command ran process substitutions (`<(...)`: a leftover no-op `cmp` loop and a `diff` comparing a printed file
 with its source) and one test fed `x86i decode-hex` from `/dev/stdin` (a here-string), both against the rule and both harmless; every other wait loop polled a
 log file.
+
+## As built: AX10 (2026-11-10; branch `asm-ax10`)
+
+The user decided on 2026-11-10 to bring AX10 forward (reversing the roadmap's CSP7, which had kept assembly out of `crops.edn` until
+AX10; doc/CROPS-SCORE.md, "Decided (the user, 2026-11-10)"), with the gate steps AXS21 (a), AXS42 (a), AXS65 (a), AXS73 (a) and AXS87
+(a) had left to it. On the light lane, on `mac/asm-ax5c` (`f05515abf`) with `mac/asm-ar2b` (`8744bfdba`) merged (both on `asm-merged`;
+the conflicts in `bin/repr-asm`'s help and the journal, both sides kept), every asm check rerun after the merge, none failing.
+
+- **The REAP rows** (`test/reap/cells.edn`, `:asm-amd64` "x86-64 asm" and `:asm-arm64` "arm64 asm", 13 rows, 52 cells): three readers in
+  `test/reap/main.ae` take bin/repr-asm's records with the class each check's own judge found (`:class-id`): `:asm-rows` (rows
+  `[ID RESULT REASON]`: the round trips, by REASON as `test/asm/judge.ae` classifies; the object, run, x86i and x86i-decode checks, whose
+  RESULT is the class), `:asm-counts` (encode-check's and decode-check's per-file `{:stated :met :by}`, the file's own level or `:text` or
+  `:cross`; stated must be met plus the classes) and `:asm-arm64` (the arm64 encode check's `{:files :non-pass}` at a level, classed as
+  `arbace.repr.asm.arm64.encheck` classifies). The classes' `:by-design` is `:design`; `:pending` ("a failure to fix") maps to nothing, so a
+  case in one fails the matrix. The cells:
+  - x86-64 read: the round trip (810 files) and decode-check's dis level (MC/Disassembler/X86, 24,445 CHECK lines): 25,222 / 1 / 32.
+  - x86-64 eval: x86i-check's programs by their verdicts and the CPU's runs, the lockstep's sys and step modes (43 programs each):
+    127 / 2 / 0 (`cpuid`, by design); beside it the loader's judge, x86i's decoder on the programs and x86i-decode-check (163 of 487 files,
+    324 `:encoding-deferred`).
+  - x86-64 AOT: run-check (18 of 18) and object-check (80 of 86, 6 deferred): 98 / 0 / 6; beside it encode-check's 106,074 of 106,075
+    encodings and decode-check's rt and obj levels.
+  - x86-64 print: encode-check's print level (107,451 of 108,601 CHECK texts), the cross-syntax judge (86,350 of 87,103) and the round
+    trip's mode `:full`: 194,582 / 1,532 / 400.
+  - arm64 read: AR1's round trip (434 of 444) and AR2's input level (6,212 of 6,212): 6,646 / 0 / 10; the reject level beside (4,176 of
+    5,030, the rest classed).
+  - arm64 print: AR2's print level (12,222 of 12,227) and the round trip's mode `:full`: 12,656 / 5 / 10.
+  - arm64 eval and AOT: no check yet (a64i, AR5; arm64's ELF, linker and runs, AR4), the encode level (12,290 of 12,298) beside AOT.
+  `bin/reap`: 47 of 52 cells checked, 0 problems; `test/reap/matrix.edn` recorded.
+- **Controls** (GTS81 (a)): every check family already had its own (`test/asm/controls*.txt`) but arm64's print level, whose judge
+  the encode controls do not reach: `arbace.repr.asm.arm64.encheck/control-print` (`_control/print-...`: the subject's CHECK text read and
+  printed as the print level prints it, held to the reference's text) and four pairs in `test/asm/controls-encode-arm64.txt` (two ADD
+  extends, LDR against STR, FADD against FSUB in FP16, two system registers); each fails as it must, and a self-pair, tried once, is
+  reported "same" and fails the check.
+- **crops-score** (`test/crops/crops.edn`: the two crops, their steps `^(asm-amd64|x86i)-` and `^(asm-arm64|a64i)-`, a control rule
+  per check family; `independence.edn`: the stages; the host `:llvm-mc` a toolchain host): x86-64 assembly completeness 97.9% (98.5%
+  without by design), maturity 100.0%, independence 100.0% (judge 0.9998: 221,916 cases by their own verdicts, the object check's 86
+  files against llvm-mc's recorded objects); arm64 assembly 49.9% (49.9%), 91.7% (two of four cells), 60.0% (eval and AOT 0, no
+  stage yet). `crops.score`'s record reader took a crop id of letters alone; it takes hyphens now.
+- **The gate** (`test/gate/crops/asm.edn`, `asm-oracle.edn`, spliced into `test/gate/steps.edn` by `gate.crops splice`): essential
+  `asm-amd64-read-essential` (musl and MC/AsmParser's round trip), `asm-amd64-run-essential`, `asm-amd64-object-essential` (musl and
+  synthetic, AXS42 (a)) in the chain `asm-amd64-essential`, `asm-arm64-read-essential` (the whole arm64 round trip) and
+  `asm-arm64-print-essential` (the whole encode check) in `asm-arm64-essential`; `--full` `asm-amd64-roundtrip`, `asm-amd64-encode`,
+  `asm-amd64-decode` (parts dis, rt, obj), `asm-amd64-object` (parts musl, synthetic, mc-x86-obj), `asm-amd64-table` (`table check`,
+  `x86i gen-check`), `x86i-check`, `x86i-decode`, `asm-arm64-table`; the oracle tier's `asm-amd64-print-oracle`, `asm-amd64-table-oracle`,
+  `asm-amd64-link-oracle`, `asm-arm64-table-oracle` on the host `:llvm-mc` (llvm-mc, llvm-tblgen, ld.lld). Every step on stage 0 (and
+  TamaGo's go where x86i's light driver or Go's testdata are read), each with `:mem-gib` and a control file or a waiver (the table
+  checks: a generation compared byte for byte). AXS73's essential x86i-check is `--full`: it measured 14 min 44 s (the step mode of 43
+  programs), not AXS73's 50 s; AXS65's decode check likewise (dis 5 min 39 s). `bin/repr-asm corpus check` (the pins, `:crop-pins`) and
+  `corpus ensure` (the corpora extracted once per `test/asm/corpora.edn`, under a lock) are new; the steps call `ensure`. Budget: half a
+  share each (AXS16 (a), ARS15), `:budgets :crops` 11.
+- **The budget measured** (by hand, `/usr/bin/time -v`, one at a time, written as `.tmp/gate/NAME.mem` for `bin/gate --costs`; no pass
+  recorded): the essential chains 1 min 20 s (amd64: 10 s, 23 s, 47 s; 0.8 GiB at most) and 1 min 18 s (arm64: 33 s, 45 s; 0.9 GiB),
+  under GTS215's 2 minutes and 3 GiB. `--full` whole was 40 min 24 s for amd64, 594% of half a share (6 min 48 s); the heavy parts are
+  `:clean-only` (encode-check 9 min 31 s, decode dis 5 min 39 s and rt 2 min 1 s, the tables 3 min 41 s, x86i-check 14 min 44 s), the
+  night's 4 min 48 s (71%); arm64's table 1 min 28 s (22%). Every step's peak under 1.5 GiB.
+
+### Proposed (AX10)
+
+Numbering from AXS89.
+
+- **AXS89 x86i-check at night.** (a) as built: `:clean-only` (the eval cell's only check runs at the clean run and by hand, `make
+  x86i-check`); (b) nightly whole, over the share; (c) `x86i-check --only LIST` and a rotation of its programs (GT8.4's `:rotate`), the
+  step mode's cost spread over nights. *Recommended: (c)*, a small change to bin/repr-asm, then the part nightly.
+- **AXS90 encode-check at night.** (a) as built: `:clean-only`; (b) by corpus file rotation (`encode-check` takes corpora, not files).
+  *Recommended: (a)* until the share is measured from passes.

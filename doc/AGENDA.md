@@ -195,6 +195,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   tests 24,441 of 24,445 CHECK lines (4 `--mdis` classed), every encoding encode-check meets decoded back (99,505 of 99,509, 4 by
   design), musl's objects read back (479 of 479); eight controls; a TableGen fix (`let` around a `class`). AX4's exit met. Proposed
   AXS63-AXS67. Next: AX5's x86i over this decoder (AXS67 (a)).
+- Assembly, AX10 (`asm-ax10`, on `asm-ax5c` with `asm-ar2b` merged; the user's of 2026-11-10, CSP7 reversed; doc/asm/AMD64-SURVEY.md,
+  "As built: AX10"): the rows `:asm-amd64` and `:asm-arm64` in REAP (47 of 52 cells checked, 0 problems: x86-64 all four, arm64 read and
+  print), both crops in crops-score (x86-64 97.9 / 100.0 / 100.0, arm64 49.9 / 91.7 / 60.0), their gate steps spliced from
+  `test/gate/crops/asm.edn` and `asm-oracle.edn` (five essential, about 1 min 20 s a chain; `--full` 4 min 48 s nightly with encode,
+  table, decode dis and rt and x86i-check `:clean-only`; the oracle tier on `:llvm-mc`), half a share each (`:crops` 11). Next: the
+  first passes (two each bind the share, GTS222), AXS89 (x86i-check nightly), AX5.6, AR3.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

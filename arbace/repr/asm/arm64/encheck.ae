@@ -72,6 +72,17 @@
 
 (defn- ws ^String [^String s] (str/trim (str/replace s #"\s+" " ")))
 
+(defn- printed
+  "The print level's text of FORMS (one CHECK text read): an instruction printed with the immediates spelled by the kinds of the
+  row that encodes it (ARS25), in hexadecimal under IMM-HEX?; else the forms printed as they are."
+  ^String [forms d imm-hex?]
+  (let [f (first forms)
+        row (when (= 1 (count forms)) (try (:row (enc/encode f)) (catch Exception _ nil)))
+        forms (if (and (seq? f) (symbol? (first f)) (not (str/starts-with? (str (first f)) ".")) (nil? (namespace (first f))))
+                [(enc/print-kinds f row imm-hex?)]
+                forms)]
+    (asm/print-text forms d)))
+
 (defn judge-text
   "One CHECK text's levels: {:encode [RESULT REASON] :print [RESULT REASON]}; the print spells the immediates by the kinds of
   the row that encodes the text (ARS25), in hexadecimal throughout under `imm-hex?` (the run's -print-imm-hex)."
@@ -99,11 +110,7 @@
                          :operands [:fail (str "operands: " (ws text))]
                          [:fail (.getMessage x)]))
                      (catch Exception x [:fail (str "crash: " x)])))
-         :print (try (let [row (when (= 1 (count forms)) (try (:row (enc/encode f)) (catch Exception _ nil)))
-                           forms (if (and (seq? f) (symbol? (first f)) (not (str/starts-with? (str (first f)) ".")) (nil? (namespace (first f))))
-                                   [(enc/print-kinds f row imm-hex?)]
-                                   forms)
-                           out (asm/print-text forms d)]
+         :print (try (let [out (printed forms d imm-hex?)]
                        (if (= (ws out) (ws text)) [:pass ""] [:fail (str "print: " (ws out) " (stated: " (ws text) ")")]))
                      (catch Exception x [:fail (str "print: crash " x)]))})))))
 
@@ -352,6 +359,22 @@
         "same" "differs")
       "left")))
 
+(defn control-print
+  "A negative control of the print level (`_control/print-...`, AX10): SUBJECT's CHECK text (CORPUS/NAME:LINE) read and printed as
+  the print level prints it, held to REFERENCE's CHECK text: `differs` (as it must), `same`, or `left` (a line or text not found)."
+  [items subject reference]
+  (let [paths (into {} (map (fn [[n p fl]] [n [p fl]]) items))
+        at (fn [^String id] (let [k (.lastIndexOf id ":") [p fl] (paths (subs id 0 k))]
+                              (when p (let [lines (vec (str/split-lines (asm/latin1 p)))]
+                                        [(stated lines (dec (Long/parseLong (subs id (inc k))))) fl]))))
+        [[_ text] fl] (at subject)
+        [[_ rtext]] (at reference)]
+    (if (and text rtext)
+      (let [d {:arch :arm64 :syntax (if (fl "apple") :apple :gnu)}
+            out (try (printed (asm/read-text (first (fc-texts text)) d) d false) (catch Exception _ nil))]
+        (cond (nil? out) "left" (= (ws out) (ws (first (fc-texts rtext)))) "same" :else "differs"))
+      "left")))
+
 (defn control-message
   "A negative control of the reject level (`_control/msg-...`): SUBJECT's error line's instruction refused, under its run's
   features, and its message judged against REFERENCE's error fragment: `differs` (as it must), `same`, or `left`."
@@ -392,7 +415,9 @@
                       (apply str (for [[k n] (sort-by str (dissoc b :pass))] (str ", " n " " (name k))))))))
     (doseq [l (str/split-lines (slurp controls)) :when (and (seq l) (not (str/starts-with? l "#")))
             :let [[cid subj ref] (str/split l #"\s+")
-                  v (if (str/starts-with? cid "_control/msg-") (control-message items subj ref) (control items subj ref))]]
+                  v (cond (str/starts-with? cid "_control/msg-") (control-message items subj ref)
+                    (str/starts-with? cid "_control/print-") (control-print items subj ref)
+                    :else (control items subj ref))]]
       (if (= v "differs")
         (println (str "control " cid ": fails as it must"))
         (swap! problems conj (str "control " cid ": " v))))
