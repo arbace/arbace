@@ -5712,3 +5712,48 @@ test_threading test_atexit`: 0 failing but test_atexit's test_general, which fai
 --configs tamago/amd64,tamago/arm64`: ok. `bin/pyi runtime check` with `PYI_SMOKE_ONLY` (20 programs: asyncio, coroutines,
 generators, subprocess, threads, signals, io, struct, the REPL session): the forms printed and read again the same, 20 equal,
 the REPL equal, the controls fail.
+
+## As built: 260, ctypes objects export their buffer (PEP 3118) (2026-11-10, the Mac VM, queue 260)
+
+244's follow-up 1 (the VM's proposal P1): CPython 3.14.10's `PyCData_NewGetBuffer` (Modules/_ctypes/_ctypes.c) on 249's
+`BufferExports`, and what memoryview needs of it.
+
+- **pyctypes** (`go/arbace/pyctypes/ctypes.go`): `CData` embeds a `BufferExports` and answers `Exports()`, so memoryview's
+  managed buffer counts its views; nothing calls `Refuse`: CPython's `CDataObject` has no `ob_exports` and `ctypes.resize`
+  refuses nothing (a view of a resized object reads the object's memory as it is at each access). `BytesLike` and
+  `WritableBytes` are the object's memory in the C world in place (b_ptr, b_size: `bytes(c_int(1))`, `binascii.hexlify(obj)`,
+  `bytearray(create_string_buffer(3))`, a write through `memoryview(d).cast("B")` changes `d`); `BufferShape` is the view's
+  format (the StgInfo's, "B" when it has none: a union, an incomplete structure), its shape (ndim its length) and its itemsize
+  (the innermost array item type's size, `PyCData_item_type`). `memoryview_at` is `PyMemoryView_FromMemory` over the world's
+  memory (writes seen both ways, read-only on request, "memoryview_at: size is negative (or overflowed)"); it was a copy.
+- **The format strings as _ctypes.c makes them**: `_ctypes_alloc_format_string_for_type`'s codes (ctypes' own but `l`/`L` as
+  `q`/`Q` on LP64: `c_char_p` "<z", `c_wchar` "<u", `c_void_p` "<P"; pyi had "<P" and "<w"); a pointer's format with its item's
+  shape and "B" for an incomplete item (`PyCPointerType_SetProto`: "&(2)<h", "&B"); the swapped simple types named `NAME_be`
+  with the class's `__qualname__` (`create_other_endian_type`, `st->swapped_suffix`); `StructUnionType_init` sets `_fields_`
+  through `PyObject_SetAttr`, so `_endian.py`'s `_swapped_meta.__setattr__` gives a `BigEndianStructure`'s fields their swapped
+  types ("T{>q:x:>d:y:}"; pyi laid out the class's own fields, so a big-endian structure stored native-endian values: the
+  aligned and byte-swapped structure tests, which had been put down to `_align_` and nesting, were this).
+- **memoryview** (`go/arbace/py/memoryview.go`, a commit of its own: its core is PY6's 1-D bytes view): a view of a
+  `BufferShaper` carries the exporter's format, itemsize and shape, C-contiguous (`len`: "0-dim memory has no length";
+  `shape`, `strides`, `ndim`, `itemsize`; memory_subscript's 0-dim rules, items by index and tuple of indices, a contiguous slice
+  of the first dimension; `adjust_fmt`'s NotImplementedError "memoryview: unsupported format <i" for a format that is not a
+  native single character, as CPython's, which leaves ctypes' formats to the struct module; `tolist` over the shape;
+  `cast_to_1D`'s checks of a shaped source; `memory_richcompare`'s shapes and a format the struct module cannot unpack making
+  views unequal, a view itself included). Kept to what export needs: the shaped cast is queue 263's.
+
+**Counts** (each test's own verdict; `bin/pyi lib-test-all --fresh test_ctypes`, goi): base b672a5810 621 methods, 491 pass, 130
+classed (`:ctypes-port` 66); head 531 pass, 90 classed (`:ctypes-port` 26), 0 failing. The 40 that pass: test_pickling's 12,
+test_pep3118's 2, test_byteswap's 12 (the five endian tests, the struct and union cases, the field alignment ones),
+test_aligned_structures' 7, test_array_in_pointer's 2, test_memfunctions' 2 (`memoryview_at`), test_buffers'
+`test_buffer_interface`, test_struct_fields' two `test_5`. `bin/pyi lib-test test_memoryview test_array`: 944 to 945 pass
+(test_memoryview's `OtherTest.test_ctypes_cast`, out of `:ctypes-port`), no method lost, the 7 failing the base's. Left in
+`:ctypes-port` (26 test_ctypes tests and 2 outside): the C crop's layouts (Packed1-3, msvc bit fields), bit fields over unions
+and swapped uint32, the pointer caches, `test_bad_length`, `test_max_field_size_gh126937`, `from_address` of an array's memory and
+`from_buffer` of one (Go memory, by design), the issue18060 ABI tests, `test_values`' tables, `test_typeerror`, `_objects`,
+`test_open`'s errno, `test_c_char_p`'s keep object, `test_swapped_type_creation`, `test_p2a_objects`.
+
+**The check** `.tmp/q260/t/check260.sh ROOT` (not committed; the report's appendix): `probe260.py`, 478 lines over 30 ctypes
+types (format, shape, strides, len, bytes, items, slices, casts, hash, equality), the cast writes, `memoryview_at`, pickling,
+a view across `resize`, `from_buffer` and `from_buffer_copy` of ctypes objects, against python3 3.14.10's run; its negative
+control judges the run against a mutated reference, which must fail. PASS on the head, FAIL on the base (every `memoryview` of
+a ctypes object a TypeError).
