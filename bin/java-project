@@ -1,0 +1,438 @@
+#!/bin/bash
+# A Java project read by modules (doc/go/BUILD.md, "Java sources by module"; GH2 (a), GH3 (a): the Ghidra case
+# study's A1, A2, A3 and A11): a program.edn's :java map (or a plan file holding the same map) names
+# modules of Java sources, Maven artifacts read from their sources jars, and binary jars on the class
+# path; each module's sources are made (an artifact's sources jar unpacked at the release's
+# multi-release layer, cut to what its roots reach when it gives :closure), compiled by javac on
+# Arbace (A11) and read by repr/java (A1), each step cached by the key of its inputs. The data side
+# is the namespace java.project (test/java/project.ae, on the tools' host).
+#
+#   bin/java-project plan MODEL [OPTIONS]          the resolved plan (WORK/plan.tsv's lines)
+#   bin/java-project sources MODEL WORK [OPTIONS]  each module's sources and resources (A2, A3) and the
+#                                                  binary jars unpacked as class path directories (A11)
+#   bin/java-project classes MODEL WORK [OPTIONS]  then each module compiled by javac on Arbace into
+#                                                  WORK/classes/MODULE (A11)
+#   bin/java-project read MODEL WORK [OPTIONS]     then each module read by repr/java into WORK/forms/MODULE
+#                                                  (A1), merged into WORK/forms (a package split over
+#                                                  modules: its namespace's loads united), the
+#                                                  resources into WORK/resources
+#   bin/java-project test                          the fixtures (test/java/project/, test/programs/java-project),
+#                                                  with their negative controls
+# MODEL: a directory holding program.edn, or a plan file. OPTIONS:
+#   --base DIR            the directory the model's relative paths are under (default MODEL's)
+#   --root NAME=DIR       the model's $NAME/... paths (repeatable)
+#   --repository DIR      the Maven repository (default the model's :repository, ARBACE_MAVEN_REPO)
+#   --only M,...          these modules (with read: their dependencies' sources are made too)
+#   --check front|nread   with read: each module also read from both trees (read --front both: the
+#                         native trees' forms equal to javac's trees', front-check's level) or
+#                         without javac (read --no-javac: the forms equal to javac's read, nread's
+#                         level), the differing files listed in WORK/check-LEVEL/MODULE.differ
+#   --no-classes          with read: no javac compilation
+#   --chunk N             with read: a module of more than N files read by several processes, whole
+#                         packages of about N files each, the module's tree on each one's source path
+#                         (memory; JAVA_PROJECT_CHUNK)
+# Every step writes WORK/log/MODULE.STEP.log and .time (busybox time -v: the peak memory); a summary
+# line a step. A step whose key (WORK/keys/MODULE.STEP) is unchanged is skipped.
+# Environment: REPR_JAVA_EXE (bin/repr-java's: javac's tool executable), ARBACE_HOST_EXE (the
+# tools' host), ARBACE_MAVEN_REPO.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+. "$root/bin/lib/host.bash"
+
+usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
+verb=${1:-}; [ $# -gt 0 ] && shift || usage
+if [ "$verb" = test ]; then exec "$root/test/java/project/test.bash" "$@"; fi
+model=${1:-}; [ -n "$model" ] || usage; shift
+work=
+if [ "$verb" != plan ]; then work=${1:-}; [ -n "$work" ] || usage; shift; fi
+base= only= check= no_classes= chunk=${JAVA_PROJECT_CHUNK:-0} plan_opts=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --base) base=$2; shift 2 ;;
+    --root|--repository) plan_opts+=("$1" "$2"); shift 2 ;;
+    --only) only=,$2,; shift 2 ;;
+    --check) check=$2; shift 2
+             case $check in front|nread) ;; *) echo "java-project: --check front or nread" >&2; exit 2 ;; esac ;;
+    --no-classes) no_classes=1; shift ;;
+    --chunk) chunk=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
+case $verb in plan|sources|classes|read) ;; *) usage ;; esac
+if [ -d "$model" ]; then mfile=$model/program.edn; [ -n "$base" ] || base=$model
+else mfile=$model; [ -n "$base" ] || base=$(dirname "$model"); fi
+[ -f "$mfile" ] || { echo "java-project: no model $mfile" >&2; exit 2; }
+mfile=$(cd "$(dirname "$mfile")" && pwd)/$(basename "$mfile")
+base=$(cd "$base" && pwd)
+[ -n "${ARBACE_MAVEN_REPO:-}" ] && ! printf '%s\n' "${plan_opts[@]}" | grep -qx -- --repository \
+  && plan_opts+=(--repository "$ARBACE_MAVEN_REPO")
+
+jp() { arbace_tool -p "$root/test" -m java.project "$@"; }
+
+if [ "$verb" = plan ]; then jp plan "$mfile" "$base" "${plan_opts[@]}"; exit $?; fi
+
+case $work in /*) ;; *) work=$PWD/$work ;; esac
+mkdir -p "$work/log" "$work/keys"
+jp plan "$mfile" "$base" "${plan_opts[@]}" > "$work/plan.tsv" || exit 1
+
+# the plan in arrays: P[MODULE:KEY] the key's values, tab-separated; mods in dependency order
+declare -A P
+mods=()
+while IFS=$'\t' read -r -a f; do
+  case ${f[0]} in
+    module) m=${f[1]}; mods+=("$m") ;;
+    end) ;;
+    *) P[$m:${f[0]}]=$(IFS=$'\t'; echo "${f[*]:1}") ;;
+  esac
+done < "$work/plan.tsv"
+vals() { local v=${P[$1:$2]:-}; [ -z "$v" ] || tr '\t' '\n' <<< "$v"; }
+selected() { [ -z "$only" ] || [[ $only == *,$1,* ]]; }
+
+# the modules a step runs on: --only's, and with sources/read their dependencies
+want=()
+for m in "${mods[@]}"; do
+  if selected "$m"; then want+=("$m"); continue; fi
+  for o in "${mods[@]}"; do
+    if selected "$o" && vals "$o" deps | grep -qx "$m"; then want+=("$m"); break; fi
+  done
+done
+[ ${#want[@]} -gt 0 ] || { echo "java-project: no module of $only in the plan" >&2; exit 2; }
+
+sha() { sha256sum | cut -c1-64; }
+files_digest() { (cd "$1" && find . -type f | LC_ALL=C sort | xargs -r -d '\n' sha256sum) | sha; }
+self_digest() { cat "$0" "$root/test/java/project.ae" | sha; }
+exe=${REPR_JAVA_EXE:-$root/target/arbace-go/$(arbace_host_arch)/arbace-javac}
+exe_id=
+tool_id() { # javac's tool and repr/java's checkout sources (a changed namespace loads from the checkout)
+  [ -n "$exe_id" ] || exe_id=$({ sha256sum < "$exe"; cat "$root"/arbace/repr/java.ae; find "$root/arbace/repr/java" -type f | LC_ALL=C sort | xargs cat; } | sha)
+  echo "$exe_id"
+}
+key_same() { [ -f "$work/keys/$1" ] && [ "$(cat "$work/keys/$1")" = "$2" ]; }
+peak() { cat "$@" | sed -n 's/.*Maximum resident set size (kbytes): \([0-9]*\).*/\1/p' | sort -n | tail -1 | awk '{printf "%.2f GiB", $1/1048576}'; }
+timed() { local t=$1; shift; /usr/bin/time -v -o "$t" "$@"; }
+release_of() { local r=${P[$1:release]:-}; echo "${r:-26}"; }
+release_opts() { local r=${P[$1:release]:-}; [ -z "$r" ] || printf '%s\n' -source "$r" -target "$r"; }
+
+# unpack JAR RELEASE DEST: the jar's entries, the multi-release layers META-INF/versions/9..RELEASE laid
+# over the base in order (as javac's file manager reads a multi-release jar for a release), the
+# versions directory removed
+unpack() {
+  local jar=$1 rel=$2 dest=$3 v
+  [ -f "$jar" ] || { echo "java-project: no jar $jar" >&2; return 1; }
+  rm -rf "$dest.part"; mkdir -p "$dest.part"
+  unzip -q -o "$jar" -d "$dest.part" || { echo "java-project: unzip failed: $jar" >&2; return 1; }
+  if [ -d "$dest.part/META-INF/versions" ]; then
+    for v in $(ls "$dest.part/META-INF/versions" | grep -E '^[0-9]+$' | sort -n); do
+      [ "$v" -le "$rel" ] || continue
+      cp -a "$dest.part/META-INF/versions/$v/." "$dest.part/"
+    done
+    rm -rf "$dest.part/META-INF/versions"
+  fi
+  rm -rf "$dest"; mv "$dest.part" "$dest"
+}
+
+# jar_dir JAR RELEASE: the jar unpacked as a class path directory (WORK/jars, by its digest and the
+# release), printed
+jar_dir() {
+  local jar=$1 rel=$2 d h
+  h=$(sha < "$jar")
+  d=$work/jars/${h:0:20}-r$rel
+  if [ ! -f "$d.done" ]; then unpack "$jar" "$rel" "$d" && echo "$jar" > "$d.done" || return 1; fi
+  echo "$d"
+}
+
+# the module's source roots (after sources), its class path's jar directories
+src_roots() { cat "$work/src/$1.roots"; }
+jar_dirs() { local j; vals "$1" jars | while IFS= read -r j; do jar_dir "$j" "$(release_of "$1")"; done; }
+dep_src() { local d; vals "$1" deps | while IFS= read -r d; do src_roots "$d"; done; }
+join_path() { paste -sd: -; }
+
+# java_files ROOT...: the .java files under the roots (module-info.java aside: the class path)
+java_files() { local r; for r in "$@"; do find "$r" -name '*.java' ! -name module-info.java; done | LC_ALL=C sort; }
+
+# resolve_roots TREE PATTERN...: the files the closure's patterns name (p.C, p.*, p.**, **), relative
+resolve_roots() {
+  local t=$1 p d; shift
+  for p in "$@"; do
+    case $p in
+      '**') (cd "$t" && find . -name '*.java' ! -name module-info.java | sed 's|^\./||') ;;
+      *.\*\*) d=${p%.\*\*}; d=${d//.//}; [ ! -d "$t/$d" ] || (cd "$t" && find "$d" -name '*.java') ;;
+      *.\*) d=${p%.\*}; d=${d//.//}; [ ! -d "$t/$d" ] || (cd "$t" && find "$d" -maxdepth 1 -name '*.java') ;;
+      *) d=${p//.//}
+         while [ -n "$d" ] && [ ! -f "$t/$d.java" ]; do [[ $d == */* ]] && d=${d%/*} || d=; done
+         [ -n "$d" ] && echo "$d.java" || echo "MISSING:$p" ;;
+    esac
+  done | LC_ALL=C sort -u
+}
+
+# closure M TREE: A3, the files the roots reach (javac's -implicit:class over TREE), less those naming
+# a type javac cannot find, round by round (a file left out makes the files naming it fail next);
+# WORK/closure/M/src the kept files, WORK/closure/M/report.edn the report
+closure() {
+  local m=$1 tree=$2 c=$work/closure/$1 round=0 roots opt files st cp sp hard pats
+  rm -rf "$c"; mkdir -p "$c"
+  cp -al "$tree" "$c/tree" 2>&1 || cp -a "$tree" "$c/tree"
+  : > "$c/left.tsv"
+  vals "$m" roots > "$c/roots.txt"
+  cp=$(jar_dirs "$m" | join_path)
+  sp=$( { echo "$c/tree"; dep_src "$m"; } | join_path)
+  while :; do
+    round=$((round + 1))
+    [ $round -le 50 ] || { echo "java-project: $m: the closure does not settle in 50 rounds" >&2; return 1; }
+    mapfile -t pats < "$c/roots.txt"
+    mapfile -t hard < <(resolve_roots "$c/tree" "${pats[@]}")
+    if printf '%s\n' "${hard[@]}" | grep -q '^MISSING:'; then
+      echo "java-project: $m: roots with no file (or left out): $(printf '%s\n' "${hard[@]}" | sed -n 's/^MISSING://p' | paste -sd' ' -)" >&2; return 1
+    fi
+    mapfile -t pats < <(vals "$m" optional)
+    mapfile -t opt < <(resolve_roots "$c/tree" "${pats[@]}" | grep -v '^MISSING:' || true)
+    files=$(printf '%s\n' "${hard[@]}" "${opt[@]}" | grep . | LC_ALL=C sort -u | sed "s|^|$c/tree/|")
+    [ -n "$files" ] || { echo "java-project: $m: the closure's roots name no file" >&2; return 1; }
+    printf '%s\n' "$files" > "$c/files.list"
+    rm -rf "$c/classes"; mkdir -p "$c/classes"
+    st=0
+    (cd "$c" && timed "$c/round$round.time" "$root/bin/repr-java" javac -proc:none -implicit:class -verbose -nowarn \
+       -Xmaxerrs 100000 -encoding UTF-8 $(release_opts "$m") $(vals "$m" javac) \
+       -sourcepath "$sp" ${cp:+-cp "$cp"} -d "$c/classes" "@$c/files.list") > "$c/round$round.log" 2>&1 || st=$?
+    jp closure-scan "$c/round$round.log" "$c/tree" > "$c/round$round.scan" || return 1
+    if ! grep -q '^error' "$c/round$round.scan"; then
+      [ $st = 0 ] || { tail -20 "$c/round$round.log" >&2; echo "java-project: $m: javac failed without an error of the closure's files ($c/round$round.log)" >&2; return 1; }
+      break
+    fi
+    # the first error of each failing file; a root's is the closure's failure
+    awk -F'\t' '$1 == "error" && !seen[$2]++' "$c/round$round.scan" | while IFS=$'\t' read -r _ f cause nm msg; do
+      printf '%s\t%s\t%s\t%s\t%s\n' "$round" "$f" "$cause" "$nm" "$msg" >> "$c/left.tsv"
+    done
+    for f in $(awk -F'\t' -v r=$round '$1 == r {print $2}' "$c/left.tsv"); do
+      if printf '%s\n' "${hard[@]}" | grep -qx "$f"; then
+        echo "java-project: $m: the root $f does not resolve: $(awk -F'\t' -v f="$f" '$2 == f {print $3 " " $4 ": " $5}' "$c/left.tsv" | tail -1)" >&2
+        : > "$c/kept.txt"
+        jp closure-report "$c/report.edn" "$m" "$round" "$c/left.tsv" "$c/kept.txt" "$c/roots.txt" || true
+        return 1
+      fi
+      rm -f "$c/tree/$f"
+    done
+  done
+  # kept: what javac parsed of the tree, and the roots
+  { awk -F'\t' '$1 == "parsed" {print $2}' "$c/round$round.scan"; sed "s|^$c/tree/||" "$c/files.list"; } | LC_ALL=C sort -u > "$c/kept.txt"
+  rm -rf "$c/src"; mkdir -p "$c/src"
+  (cd "$c/tree" && xargs -r -d '\n' cp --parents -t "$c/src" < "$c/kept.txt")
+  jp closure-report "$c/report.edn" "$m" "$round" "$c/left.tsv" "$c/kept.txt" "$c/roots.txt" || return 1
+  echo "  $m: closure: $(wc -l < "$c/kept.txt") files kept, $(wc -l < "$c/left.tsv") left out, $round rounds ($c/report.edn)"
+}
+
+# mr_report M: an artifact's binary jar's versioned classes (layers up to the release) whose source the
+# sources jar lacks at that layer: WORK/src/M.mr.edn (the sources read are the base's for those)
+mr_report() {
+  local m=$1 bin srcj rel
+  bin=$(vals "$m" binary-jar); srcj=$(vals "$m" sources-jar); rel=$(release_of "$m")
+  [ -f "$bin" ] || { echo "{:module \"$m\" :binary-jar :absent}" > "$work/src/$m.mr.edn"; return 0; }
+  unzip -Z1 "$srcj" | grep '^META-INF/versions/' | sort > "$work/src/$m.mr-src.txt" || true
+  { echo "{:module \"$m\" :release $rel"
+    echo " :versioned-without-sources"
+    echo " ["
+    unzip -Z1 "$bin" | sed -n 's|^META-INF/versions/\([0-9]*\)/\(.*\)\.class$|\1 \2|p' | while read -r v cls; do
+      [ "$v" -le "$rel" ] || continue
+      [ "${cls##*/}" != module-info ] || continue
+      top=${cls%%\$*}
+      grep -qx "META-INF/versions/$v/$top.java" "$work/src/$m.mr-src.txt" || echo "  \"META-INF/versions/$v/$cls.class\""
+    done | LC_ALL=C sort -u
+    echo " ]}"; } > "$work/src/$m.mr.edn"
+}
+
+# sources M: WORK/src/M.roots (the source roots), WORK/resources/M (resources :jar)
+sources() {
+  local m=$1 k t0=$SECONDS
+  if [ "${P[$m:kind]}" = src ]; then
+    vals "$m" src | while IFS= read -r d; do [ -d "$d" ] || { echo "java-project: $m: no source directory $d" >&2; exit 1; }; done || return 1
+    vals "$m" src > "$work/src/$m.roots"
+    return 0
+  fi
+  local srcj rel tree
+  srcj=$(vals "$m" sources-jar); rel=$(release_of "$m")
+  [ -f "$srcj" ] || { echo "java-project: $m: no sources jar $srcj (${P[$m:coord]})" >&2; return 1; }
+  k=$( { echo sources; sha < "$srcj"; [ ! -f "$(vals "$m" binary-jar)" ] || sha < "$(vals "$m" binary-jar)"; echo "$rel"
+         vals "$m" roots; echo --; vals "$m" optional; vals "$m" javac; vals "$m" jars
+         vals "$m" resources-jar; for d in $(vals "$m" deps); do cat "$work/keys/$d.sources" 2>&1 || src_roots "$d"; done
+         [ -z "$(vals "$m" roots)$(vals "$m" optional)" ] || tool_id; self_digest; } | sha)
+  if key_same "$m.sources" "$k" && [ -f "$work/src/$m.roots" ]; then return 0; fi
+  tree=$work/src/$m
+  unpack "$srcj" "$rel" "$tree" || return 1
+  mr_report "$m"
+  if [ -n "$(vals "$m" roots)$(vals "$m" optional)" ]; then
+    closure "$m" "$tree" || return 1
+    echo "$work/closure/$m/src" > "$work/src/$m.roots"
+  else
+    echo "$tree" > "$work/src/$m.roots"
+  fi
+  if [ "${P[$m:resources-jar]:-}" = yes ]; then
+    # the binary jar's build outputs as resources: every entry but classes, the manifest, Maven's
+    # metadata, signatures and the versions directory (the layer chosen)
+    local bj r=$work/resources/$m
+    bj=$(jar_dir "$(vals "$m" binary-jar)" "$rel") || return 1
+    rm -rf "$r"; mkdir -p "$r"
+    (cd "$bj" && find . -type f ! -name '*.class' ! -path ./META-INF/MANIFEST.MF ! -path './META-INF/maven/*' \
+        ! -name '*.SF' ! -name '*.RSA' ! -name '*.DSA' ! -name '*.EC' | sed 's|^\./||' | LC_ALL=C sort) > "$r.list"
+    (cd "$bj" && xargs -r -d '\n' cp --parents -t "$r" < "$r.list")
+  fi
+  echo "$k" > "$work/keys/$m.sources"
+  echo "  $m: sources ${P[$m:coord]}, release $rel ($((SECONDS - t0)) s)"
+}
+
+# classes M: javac on Arbace, the module's files against its dependencies' classes and the jars (A11)
+classes() {
+  local m=$1 k cp out=$work/classes/$1 st=0 t0=$SECONDS
+  mapfile -t roots < "$work/src/$m.roots"
+  cp=$( { for d in $(vals "$m" deps); do echo "$work/classes/$d"; done; jar_dirs "$m"; } | join_path)
+  k=$( { echo classes; for r in "${roots[@]}"; do files_digest "$r"; done; for d in $(vals "$m" deps); do cat "$work/keys/$d.classes"; done
+         vals "$m" jars | xargs -r -d '\n' sha256sum; vals "$m" javac; release_opts "$m"; tool_id; self_digest; } | sha)
+  if key_same "$m.classes" "$k"; then echo "  $m: classes cached"; return 0; fi
+  java_files "${roots[@]}" > "$work/log/$m.classes.list"
+  rm -rf "$out"; mkdir -p "$out"
+  (cd "$work" && timed "$work/log/$m.classes.time" "$root/bin/repr-java" javac -proc:none -implicit:none -nowarn -XDsuppressNotes \
+     -Xmaxerrs 100000 -encoding UTF-8 $(release_opts "$m") $(vals "$m" javac) \
+     -sourcepath "$(printf '%s\n' "${roots[@]}" | join_path)" ${cp:+-cp "$cp"} -d "$out" "@$work/log/$m.classes.list") \
+     > "$work/log/$m.classes.log" 2>&1 || st=$?
+  if [ $st != 0 ]; then
+    grep -m 20 'error:' "$work/log/$m.classes.log" >&2 || tail -20 "$work/log/$m.classes.log" >&2
+    echo "java-project: $m: javac on Arbace failed ($work/log/$m.classes.log)" >&2; return 1
+  fi
+  echo "$k" > "$work/keys/$m.classes"
+  echo "  $m: classes: $(wc -l < "$work/log/$m.classes.list") files, $(find "$out" -name '*.class' | wc -l) classes ($((SECONDS - t0)) s, peak $(peak "$work/log/$m.classes.time"))"
+}
+
+# read_module M: repr/java's read of the module's files (one root: the roots linked into one tree),
+# its dependencies' sources on the source path, the jars on the class path; the forms' headers name
+# each file as MODULE/PATH (--origins)
+read_module() {
+  local m=$1 k cp sp tree out=$work/forms/$1 st=0 t0=$SECONDS r i n
+  mapfile -t roots < "$work/src/$m.roots"
+  if [ ${#roots[@]} = 1 ]; then tree=${roots[0]}
+  else
+    tree=$work/merged/$m; rm -rf "$tree"; mkdir -p "$tree"
+    for r in "${roots[@]}"; do cp -al "$r/." "$tree/" 2>&1 || cp -a "$r/." "$tree/"; done
+  fi
+  cp=$(jar_dirs "$m" | join_path)
+  sp=$( { echo "$tree"; dep_src "$m"; } | join_path)
+  k=$( { echo read; files_digest "$tree"; for d in $(vals "$m" deps); do src_roots "$d" | while read -r r; do files_digest "$r"; done; done
+         vals "$m" jars | xargs -r -d '\n' sha256sum; vals "$m" javac; release_opts "$m"; echo "$check $chunk"; tool_id; self_digest; } | sha)
+  if key_same "$m.read" "$k" && [ -d "$out" ]; then echo "  $m: forms cached"; return 0; fi
+  (cd "$tree" && java_files . | sed 's|^\./||') > "$work/log/$m.files"
+  awk -v m="$m" 'BEGIN {print "{"} {printf "\"%s\" \"%s/%s\"\n", $0, m, $0} END {print "}"}' "$work/log/$m.files" > "$work/log/$m.origins.edn"
+  # the read's javac takes the text as UTF-8 (its file manager): an -encoding option is dropped
+  local jopts=() o skip=
+  for o in -sourcepath "$sp" ${cp:+-cp "$cp"} $(release_opts "$m") $(vals "$m" javac); do
+    if [ -n "$skip" ]; then skip=; continue; fi
+    [ "$o" != -encoding ] || { skip=1; continue; }
+    jopts+=(--javac "$o")
+  done
+  # the chunks (--chunk N): whole packages packed into lists of about N files, each read by a process
+  # of its own with the module's whole tree on the source path (a module too large for one process's
+  # memory); one chunk without --chunk
+  local cdir=$work/chunks/$m
+  rm -rf "$cdir" "$out"; mkdir -p "$cdir"
+  n=$(wc -l < "$work/log/$m.files")
+  if [ "${chunk:-0}" -gt 0 ] && [ "$n" -gt "$chunk" ]; then
+    awk -F/ -v OFS=/ '{d=$0; sub(/\/[^\/]*$/, "", d); if (!(d in c)) o[++k]=d; c[d]++; f[d]=f[d] $0 "\n"}
+      END {for (i=1; i<=k; i++) printf "%d\t%s\n", c[o[i]], o[i]}' "$work/log/$m.files" > "$cdir/packages.tsv"
+    awk -F'\t' -v N="$chunk" 'BEGIN {i=1} {if (s > 0 && s + $1 > N) {i++; s=0} s+=$1; print i "\t" $2}' "$cdir/packages.tsv" > "$cdir/chunks.tsv"
+    for i in $(cut -f1 "$cdir/chunks.tsv" | sort -nu); do
+      awk -F'\t' -v i="$i" '$1 == i {print $2}' "$cdir/chunks.tsv" | while IFS= read -r d; do
+        awk -v d="$d" '{x=$0; sub(/\/[^\/]*$/, "", x); if (x == d) print}' "$work/log/$m.files"; done > "$cdir/$i.list"
+    done
+  else
+    cp "$work/log/$m.files" "$cdir/1.list"
+  fi
+  local lists; lists=$(ls "$cdir" | sed -n 's/^\([0-9]*\)\.list$/\1/p' | sort -n)
+  : > "$work/log/$m.read.log"; [ "$check" != nread ] || : > "$work/log/$m.nread.log"
+  for i in $lists; do
+    mapfile -t paths < "$cdir/$i.list"
+    [ "$(echo "$lists" | wc -l)" -gt 1 ] || paths=()
+    local L=$cdir/$i st1=0
+    case $check in
+      front)
+        (cd "$work" && timed "$L.read.time" "$root/bin/repr-java" read --check --front both --split \
+           --native-out "$L.native" --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "$tree" "${paths[@]}") \
+           > "$L.read.log" 2>&1 || st1=$? ;;
+      nread)
+        (cd "$work" && timed "$L.read.time" "$root/bin/repr-java" read --check --front javac \
+           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "$tree" "${paths[@]}") > "$L.read.log" 2>&1 || st1=$?
+        (cd "$work" && timed "$L.nread.time" "$root/bin/repr-java" read --check --no-javac \
+           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.native" "$tree" "${paths[@]}") > "$L.nread.log" 2>&1 || { [ $st1 != 0 ] || st1=$?; }
+        cat "$L.nread.log" >> "$work/log/$m.nread.log" ;;
+      *)
+        (cd "$work" && timed "$L.read.time" "$root/bin/repr-java" read --check \
+           --origins "$work/log/$m.origins.edn" "${jopts[@]}" "$L.forms" "$tree" "${paths[@]}") > "$L.read.log" 2>&1 || st1=$? ;;
+    esac
+    cat "$L.read.log" >> "$work/log/$m.read.log"
+    [ $st1 = 0 ] || st=$st1
+  done
+  jp merge-forms "$out" $(for i in $lists; do echo "$cdir/$i.forms"; done) || st=1
+  case $check in
+    front|nread)
+      local nat=$work/check-$check/$m
+      rm -rf "$nat"; mkdir -p "$work/check-$check"
+      jp merge-forms "$nat" $(for i in $lists; do echo "$cdir/$i.native"; done) || st=1
+      cmp_trees "$out" "$nat" "$work/check-$check/$m.differ" ;;
+  esac
+  # the javac side's summaries summed (each chunk's first summary line)
+  local sum; sum=$(for i in $lists; do grep -E -m1 '^[0-9]+ Java files, ' "$cdir/$i.read.log"; done \
+    | sed -E 's/^([0-9]+) Java files, ([0-9]+) converted, ([0-9]+) failed, ([0-9]+) javac errors.*/\1 \2 \3 \4/' \
+    | awk '{a+=$1; b+=$2; c+=$3; d+=$4} END {printf "%d Java files, %d converted, %d failed, %d javac errors", a, b, c, d}')
+  local nch; nch=$(echo "$lists" | wc -l)
+  if [ $st != 0 ] || grep -q '^FAILED\| [1-9][0-9]* failed' "$work/log/$m.read.log"; then
+    grep -m 10 '^FAILED\|^javac: ' "$work/log/$m.read.log" >&2 || tail -10 "$work/log/$m.read.log" >&2
+    echo "java-project: $m: the read failed ($sum; $work/log/$m.read.log)" >&2; return 1
+  fi
+  local extra=
+  case $check in
+    front) extra="; both trees: $(wc -l < "$work/check-front/$m.differ") files differ" ;;
+    nread) extra="; without javac: $(wc -l < "$work/check-nread/$m.differ") files differ, $(grep -o 'no javac: [^;]*' "$work/log/$m.nread.log" \
+             | sed -E 's/no javac: ([0-9]+) files, ([0-9]+) native, ([0-9]+) fallbacks.*/\1 \2 \3/' \
+             | awk '{a+=$1; b+=$2; c+=$3} END {printf "%d files, %d native, %d fallbacks to javac", a, b, c}') (peak $(peak $cdir/*.nread.time))" ;;
+  esac
+  echo "$k" > "$work/keys/$m.read"
+  echo "  $m: forms: $sum ($((SECONDS - t0)) s, $nch process$( [ "$nch" = 1 ] || echo es), peak $(peak $cdir/*.read.time)$extra)"
+  case $check in front|nread) [ ! -s "$work/check-$check/$m.differ" ] || { echo "java-project: $m: the forms differ ($work/check-$check/$m.differ)" >&2; return 1; } ;; esac
+}
+
+# cmp_trees A B OUT: the forms files that differ (the reports aside), one a line
+cmp_trees() {
+  diff -rq -x 'repr-java-*.edn' "$1" "$2" 2>&1 | sed "s|^Files $1/\(.*\) and .* differ\$|\1|" > "$3" || true
+}
+
+mkdir -p "$work/src" "$work/resources" "$work/classes" "$work/forms"
+status=0
+echo "java-project: $verb ${#want[@]} modules (${want[*]}) from $mfile"
+for m in "${want[@]}"; do sources "$m" || { status=1; break; }; done
+if [ $status = 0 ] && { [ "$verb" = classes ] || { [ "$verb" = read ] && [ -z "$no_classes" ] && [ -z "$check" ]; }; }; then
+  for m in "${want[@]}"; do classes "$m" || { status=1; break; }; done
+fi
+if [ $status = 0 ] && [ "$verb" = read ]; then
+  for m in "${want[@]}"; do
+    if [ -n "$only" ] && ! selected "$m"; then continue; fi
+    read_module "$m" || status=1
+  done
+  if [ -z "$only" ] && [ $status = 0 ]; then
+    rm -rf "$work/forms.all"
+    jp merge-forms "$work/forms.all" $(for m in "${want[@]}"; do echo "$work/forms/$m"; done) || status=1
+    # the resources: the modules' directories and the artifacts' build outputs; a services file in two
+    # modules concatenated, any other file in two modules an error
+    rm -rf "$work/resources.all"; mkdir -p "$work/resources.all"
+    for m in "${want[@]}"; do
+      for r in $(vals "$m" resources) $( [ ! -d "$work/resources/$m" ] || echo "$work/resources/$m"); do
+        (cd "$r" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while IFS= read -r f; do
+          o=$work/resources.all/$f
+          if [ -e "$o" ]; then
+            case $f in META-INF/services/*) cat "$r/$f" >> "$o" ;;
+                       *) cmp -s "$r/$f" "$o" || { echo "java-project: the resource $f in two modules ($m's differs)" >&2; exit 1; } ;; esac
+          else mkdir -p "$(dirname "$o")"; cp "$r/$f" "$o"; fi
+        done || status=1
+      done
+    done
+    echo "java-project: the forms merged in $work/forms.all ($(find "$work/forms.all" -name '*.ae' | wc -l) files), the resources in $work/resources.all ($(find "$work/resources.all" -type f | wc -l) files)"
+  fi
+fi
+exit $status

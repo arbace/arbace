@@ -149,6 +149,8 @@
 #                     holding arbace, aot/ and aot.key, as ARBACE_GATE_EXES/KEY20/amd64), when its
 #                     compiled namespaces' key is the checkout's; ARBACE_PROGRAM_KEEP=1 keeps the
 #                     program's intermediate trees (c2j's, j2g's, the work modules)
+#   ARBACE_PROGRAM_JAVA_ARGS  --build-program of a program.edn with :java: bin/java-project's options (its
+#                     --root NAME=DIR and --repository DIR); its read needs javac's tool (REPR_JAVA_EXE)
 #   ARBACE_HOST_EXE   the executable that runs the build's Arbace tools, j2g and repr/go (bin/lib/
 #                     host.bash; default stage 0, target/seed/<arch>/arbace, which bin/seed --build
 #                     makes from the seed when missing); J2G_GO_EXE and REPR_GO_EXE name one per tool
@@ -488,24 +490,29 @@ build_java() {
 #                (go.P) compiled through a goi table of the program's own (a package goi's checker refuses is a
 #                build error); without, a Go program
 #                built by arbace.build.go alone
+#   :java        (program.edn) Java sources by module, Maven artifacts sources-first, jars on the class
+#                path (doc/go/BUILD.md, "Java sources by module"): read by bin/java-project into forms
+#                j2g translates with java/'s (ARBACE_PROGRAM_JAVA_ARGS: its --root, --repository)
 #   runs/        the program's runs for --check (bin/build-go test's format)
 # The executable: target/arbace-go/programs/NAME/ARCH/NAME (-o OUT: there too), cached by the key
 # of what it is built from (programs/NAME/key)
 
 programs=$dir/programs
 
-# program_edn DIR: program.edn's :main, :main-class and :name, one per line (empty when absent),
+# program_edn DIR: program.edn's :main, :main-class and :name, one per line (empty when absent), then
+# "java" when it has :java (Java sources by module: bin/java-project),
 # read by the tools' host with the Clojure reader; status 1 on an unknown key
 program_edn() {
   local exe
   exe=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || return 1
   "$exe" -e "(let [f (java.io.File. \"$1/program.edn\")
       m (if (.isFile f) (read-string (slurp f)) {})
-      bad (remove #{:main :main-class :name :module :go} (keys m))]
+      bad (remove #{:main :main-class :name :module :go :java} (keys m))]
   (when-not (map? m) (println \"program.edn: not a map\") (System/exit 1))
   (when (seq bad) (println \"program.edn: unknown keys\" (vec bad)) (System/exit 1))
   (when (and (:main m) (:main-class m)) (println \"program.edn: :main and :main-class\") (System/exit 1))
-  (doseq [k [:main :main-class :name]] (println (str (get m k \"\")))))"
+  (doseq [k [:main :main-class :name]] (println (str (get m k \"\"))))
+  (println (if (:java m) \"java\" \"\")))"
 }
 
 # program_key SRC GOTABLE: what the executable of SRC is built from (beside the base's executable
@@ -516,7 +523,7 @@ program_key() {
     (cd "$1" && find . -type f ! -path './runs/*' | LC_ALL=C sort | xargs -d '\n' sha256sum)
     arbace_runtime_key "$root"
     (cd "$root" && find x509roots jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
-     sha256sum bin/arbace-go bin/lib/program.bash bin/j2g bin/build-go)
+     sha256sum bin/arbace-go bin/lib/program.bash bin/j2g bin/build-go bin/java-project test/java/project.ae)
     cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION"; echo "${ARBACE_GO_SYMBOLS:-}"; } | sha256sum | cut -c1-64
 }
 
@@ -540,7 +547,8 @@ build_program() {
   if ! program_edn "$src" > "$edn" 2>&1; then
     echo "arbace-go --build-program: $src/$(head -1 "$edn")" >&2; rm -f "$edn"; return 1
   fi
-  { read -r main; read -r cls; read -r name; } < "$edn"
+  local javap
+  { read -r main; read -r cls; read -r name; read -r javap; } < "$edn"
   rm -f "$edn"
   [ -n "$name" ] || name=$(basename "$src")
   w=$programs/$name
@@ -552,6 +560,7 @@ build_program() {
     for a in src java; do
       [ ! -d "$src/$a" ] || { echo "arbace-go --build-program: $src/$a/ needs :main or :main-class (program.edn)" >&2; return 1; }
     done
+    [ -z "$javap" ] || { echo "arbace-go --build-program: $src: :java needs :main or :main-class (program.edn)" >&2; return 1; }
     for a in ${parch//,/ }; do
       mkdir -p "$w/$a"
       echo "== bin/build-go $a (a Go program: $src)" >&2
@@ -609,7 +618,21 @@ build_program() {
     (cd "$root" && GOI_EXE=$base_exe bin/goi table --out "$gotable") > "$w/gotable.log" 2>&1 \
       || { tail -20 "$w/gotable.log" >&2; echo "arbace-go: goi's table failed ($w/gotable.log)" >&2; return 1; }
   fi
-  local key; key=$(program_key "$src" "$gotable")
+  # :java (doc/go/BUILD.md, "Java sources by module"): the modules' sources read by repr/java on javac's
+  # tool (bin/java-project read, each module's step cached by its key; ARBACE_PROGRAM_JAVA_ARGS: its
+  # --root and --repository options), their forms merged as one of j2g's inputs, their resources embedded
+  local jproj=
+  if [ -n "$javap" ]; then
+    jproj=$w/java-project
+    local jargs=()
+    [ -z "${ARBACE_PROGRAM_JAVA_ARGS:-}" ] || read -r -a jargs <<< "$ARBACE_PROGRAM_JAVA_ARGS"
+    echo "== bin/java-project read $src $jproj --no-classes ${jargs[*]:-}" >&2
+    "$root/bin/java-project" read "$src" "$jproj" --no-classes ${jargs[@]+"${jargs[@]}"} > "$w/java-project.log" 2>&1 \
+      || { tail -20 "$w/java-project.log" >&2; echo "arbace-go: $name: the Java sources were not read ($w/java-project.log)" >&2; return 1; }
+    grep '^  ' "$w/java-project.log" >&2
+  fi
+  local key; key=$( { program_key "$src" "$gotable"
+                      [ -z "$jproj" ] || (cd "$jproj" && find forms.all resources.all -type f | LC_ALL=C sort | xargs -r -d '\n' sha256sum) ; } | sha256sum | cut -c1-64)
   local cached=1
   for a in ${parch//,/ }; do [ -x "$w/$a/$name" ] || cached=; done
   if [ -n "$cached" ] && [ -f "$w/key" ] && [ "$(cat "$w/key")" = "$key" ]; then
@@ -630,6 +653,7 @@ build_program() {
   fi
   # java/'s package namespaces embedded as no-op loaders (RPS93 (c))
   [ ! -d "$src/java" ] || j2g_in+=(--java-namespaces "$src/java")
+  [ -z "$jproj" ] || j2g_in+=(--java-namespaces "$jproj/forms.all" --resources "$jproj/resources.all")
   if [ -n "$ssrc" ]; then
     # the program's namespaces (src/'s)
     # compiled by c2j on the base's executable, as bin/arbace-go --build-java compiles repr/java's
@@ -681,6 +705,7 @@ build_program() {
     j2g_in+=(--input "$w/aot")
   fi
   [ ! -d "$src/java" ] || j2g_in+=(--input "$src/java")
+  [ -z "$jproj" ] || j2g_in+=(--input "$jproj/forms.all")
   t1=$(date +%s)
   echo "== bin/j2g --program ${j2g_in[*]} (on $base_exe)" >&2
   program_j2g "$base_exe" "$w/j2g.log" "$w/j2g" "${j2g_in[@]}" --gotable "$gotable" \

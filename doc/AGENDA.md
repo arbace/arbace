@@ -149,6 +149,11 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
 - Java: `java-invoke2` (JCS350-JCS356 on F15), `java-testlib2` (JCS334-JCS339).
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).
 - Reviews: today's merged code on `next` (patches for the owners) and an audit of the independence facts.
+- Ghidra (G1, the demo repository `arbace-ghidra`): `ghidra-read` (A1, A2, A3, A11: `bin/java-project`, `program.edn`'s
+  `:java`, doc/go/BUILD.md "Java sources by module"; the gate's `java-project` step), `ghidra-run` (A4-A7). Night: the
+  demo's `bin/read-g1 --check nread --modules SoftwareModeling` (about 9 GiB); `test/programs/java-project`'s first build
+  (`--build-program --check java-project`, a whole-program j2g). Open: the two native-provider findings of the read half
+  (the journal, 2026-11-10).
 
 ## Decided, not built yet
 

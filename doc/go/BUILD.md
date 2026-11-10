@@ -376,3 +376,97 @@ DIR/
   loaded).
   `--check` builds each for the host's architecture and runs its runs as `bin/build-go test` does,
   an Arbace program's with `ARBACE_LOAD_TIMES=1`: none of its own sources may load from source.
+
+### Java sources by module (2026-11-10, write-ahead: the Ghidra case study's A1, A2, A3, A11)
+
+The design note before the build (GH2 (a), GH3 (a) of `.tmp/plans/GHIDRA-CASE-STUDY.md`; its first user
+is the demo repository `arbace-ghidra`'s `plan/softwaremodeling.edn`, but nothing here is Ghidra's: the rule
+is that a piece serves another large Java program unchanged, and each is tested by Arbace's own fixtures).
+
+Until now `java/` held Java **forms**: a program written in Java had to be read by `bin/repr-java read`
+by hand, one tree, with no dependencies but the platform. A large Java program is modules of sources
+in a graph, Maven artifacts by pin, per-module javac options and resources. `program.edn` takes them as
+data, `:java`:
+
+```clojure
+{:main-class demo.app.Main
+ :java {:release 25                       ; -source/-target and the multi-release layer (default: none, layer 26)
+        :javac ["-encoding" "UTF-8"]      ; every module's javac options, before its own
+        :repository "maven"               ; a Maven repository (its layout): the artifacts' jars
+        :modules
+        [{:name "util" :src ["util/src"] :resources ["util/res"]}
+         {:name "toylib" :artifact "org.example:toylib:1.0"        ; read from its sources jar (A2)
+          :resources :jar                                           ; its binary jar's build outputs
+          :artifacts ["org.example:toyapi:1.0"]                     ; binary jars: the class path alone (A11)
+          :closure {:roots ["org.example.toylib.Greeter"]           ; what resolves from these (A3)
+                    :optional ["org.example.toylib.ext.*"]}}
+         {:name "app" :src ["app/src"] :deps ["util" "toylib"] :artifacts ["org.example:toyapi:1.0"]}]}}
+```
+
+- **A module** (A1) is `:src` (source directories; a path is under DIR, absolute, or `$NAME/...` under a
+  root the command line names, `--root NAME=DIR`: a tree outside the program, a generator's output),
+  or `:artifact` (a coordinate `group:artifact:version`, its `-sources.jar` in the repository). `:deps`
+  are modules (transitively: Gradle's `api` edges), `:artifacts` binary jars (transitively too),
+  `:javac` its own options, `:release` its own release, `:resources` directories embedded at their
+  paths. Unknown keys, a dependency that is not a module, a cycle and a module named twice are errors.
+- **Each step is cached** by the key of its inputs (the files' digests, its dependencies' keys, the
+  options, javac's tool executable and repr/java's checkout sources, the tool's own sources), in a
+  work directory: `sources` (the source roots; an artifact's jar unpacked), `classes` (javac on
+  Arbace, `WORK/classes/M`, against its dependencies' classes and the jars), `read` (repr/java,
+  `WORK/forms/M`, its dependencies' **sources** on javac's source path and the jars on its class path:
+  the read needs no compilation, and a dependency's file that does not compile never stops a module
+  that does not name it). The forms' headers name each file `MODULE/PATH` (read's `--origins`), so the
+  forms do not depend on where the work directory is. The modules' forms are merged into one tree for
+  j2g (`WORK/forms.all`; a package split over modules, as class-path programs have them, gets one
+  namespace file with the loads of both), the resources likewise (`WORK/resources.all`; a
+  `META-INF/services` file in two modules concatenated, any other file in two modules an error unless
+  equal).
+- **An artifact sources-first** (A2): its sources jar unpacked with the release's multi-release layer
+  laid over the base (`META-INF/versions/9..R`, in order, as javac's file manager reads a multi-release
+  jar for a release). A binary jar's versioned classes whose source the sources jar lacks (log4j's
+  `META-INF/versions/9` classes are compiled from a source set its sources jar does not carry) are
+  listed in `WORK/src/M.mr.edn`: the base's sources are what is read, and the list says where the
+  program differs from the jar. `:resources :jar` takes the binary jar's build outputs as resources
+  (every entry of the chosen layer but classes, the manifest, Maven's metadata and signatures: an
+  annotation processor's `Log4j2Plugins.dat`, `META-INF/services/*`, native-image metadata), since
+  regenerating them would need the processor run.
+- **Compile what resolves** (A3): `:closure` cuts an artifact's sources to what its roots reach.
+  `:roots` must resolve (classes); `:optional` are taken when they resolve (`p.C`, `p.*`, `p.**`,
+  `**`). javac on Arbace compiles the roots with `-implicit:class` over the unpacked tree on the source
+  path (javac's own closure: every file a reached type is declared in), `-verbose` naming the files it
+  parsed; a file with an error (a type or a package javac cannot find, or any other error) is removed
+  and the compilation run again, so a file naming a removed file fails next (the cascade) until a run
+  has no error; a root that fails is the step's failure. The report is data,
+  `WORK/closure/M/report.edn`: the roots, the rounds, the files kept, each file left out with its round,
+  its cause (`:absent` and the name javac could not find, `:left-out` when that name is a file left out
+  before, `:other` with javac's message) and the absent names counted. javac's default diagnostics are
+  read (the full path, `symbol:` lines), not `-XDrawDiagnostics` (which prints the file's name alone).
+- **Jars on the class path** (A11): unpacked into directories (`WORK/jars/DIGEST-rR`, by the jar's
+  digest and the release, the multi-release layer chosen as above), which javac on Arbace takes on
+  `-cp`. Chosen over a zip-reading javac file manager (`overlay/jdk/javac/.../jdk/internal/jrt/javac/
+  FileManager.java` serves directories alone, JFS5 (b)) because every reader of the class path reads
+  directories: javac on Arbace, repr/java's native provider (`arbace.repr.java.decls`' registry takes
+  the class path's directories, and `read --no-javac` is the nread level), j2g's `--resources` and the
+  runtime's class-path resources; one unpacking serves them all, it changes nothing of javac's world
+  (no tool rebuild, no key moved), and the multi-release choice is made once, visibly. A zip file
+  manager stays possible (jrt has `ZipFile` since JC6b) when a program's jars are too many to unpack.
+  A binary-only artifact is for compiling against: its classes are not translated (they have no
+  forms); a class-retention annotation jar (jspecify's kind) is the common case, and the forms keep
+  the annotations as written.
+- **The commands.** `bin/java-project plan|sources|classes|read MODEL WORK` (MODEL a program's
+  directory or a plan file holding the same map; `--root`, `--repository`, `--only M,...`, `--check
+  front|nread`: each module also read from the native trees, the forms equal to javac's trees' as
+  `bin/repr-java front-check` requires, or read without javac, as the nread level requires; `--chunk N`:
+  a module of more than N files read by several processes, whole packages each, the module's tree on
+  each one's source path, the forms equal to one process's: a large module within one process's memory), the data
+  side `java.project` (`test/java/project.ae`, on the tools' host). `bin/arbace-go --build-program DIR`
+  runs `read` when `program.edn` has `:java` and takes `WORK/forms.all` as j2g's input (with `java/`
+  when present) and `WORK/resources.all` as resources.
+- **The fixtures**: `test/programs/java-project` (two modules of sources with a split package, a
+  library read from its toy sources jar at release 25's layer and cut to its closure, a binary-only
+  annotations jar; its toy repository made by `test/java/project/make-jars` from
+  `test/java/project/jars/`, byte for byte again with `--check`) and `bin/java-project test`
+  (`test/java/project/test.bash`): the closure's report, the layer chosen, the multi-release list, the
+  merged package, the forms equal from both trees and without javac, and the negative controls (a model
+  with an unknown key, a cycle or `:closure` on a source module refused; a root that names an absent
+  type fails; the app without the annotations jar does not compile; release 10 reads the base layer).

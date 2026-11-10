@@ -1,0 +1,66 @@
+#!/bin/bash
+# The toy Maven repository of test/programs/java-project (bin/java-project's fixture; doc/go/BUILD.md,
+# "Java sources by module"), made from test/java/project/jars/: the annotation-only artifact
+# org.example:toyapi:1.0 (a binary jar, no sources jar: A11's class path jar) and the library
+# org.example:toylib:1.0 (its sources jar with META-INF/versions/11 and 99 sources; its binary jar
+# multi-release, with a release 11 class whose source the sources jar lacks, a services file and a
+# properties file: A2's build outputs), the classes compiled by javac on Arbace, the jars zipped
+# with fixed times in a sorted order (byte for byte the same each time).
+#   test/java/project/make-jars           write them into test/programs/java-project/maven
+#   test/java/project/make-jars --check   make them afresh and compare with the committed ones
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+src=$root/test/java/project/jars
+repo=$root/test/programs/java-project/maven
+out=$repo
+if [ "${1:-}" = --check ]; then out=$(mktemp -d); fi
+w=$(mktemp -d)
+javac() { "$root/bin/repr-java" javac -proc:none -nowarn -XDsuppressNotes -encoding UTF-8 -source 25 -target 25 "$@"; }
+# zipdir DIR JAR: DIR's files, sorted, fixed times, no extra attributes
+zipdir() {
+  local d=$1 jar=$2
+  find "$d" -exec touch -h -d '2026-01-01 00:00:00 UTC' {} +
+  mkdir -p "$(dirname "$jar")"; rm -f "$jar"
+  (cd "$d" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | TZ=UTC zip -q -X -D "$jar" -@)
+}
+manifest() { printf 'Manifest-Version: 1.0\r\n%s\r\n' "$1" > "$2"; }
+
+# toyapi
+mkdir -p "$w/toyapi/META-INF"
+javac -d "$w/toyapi" $(find "$src/toyapi/src" -name '*.java' | LC_ALL=C sort)
+manifest "Created-By: arbace test/java/project/make-jars" "$w/toyapi/META-INF/MANIFEST.MF"
+zipdir "$w/toyapi" "$out/org/example/toyapi/1.0/toyapi-1.0.jar"
+
+# toylib's sources jar
+s=$w/toylib-sources
+mkdir -p "$s/META-INF"
+cp -a "$src/toylib/src/." "$s/"
+for v in 11 99; do mkdir -p "$s/META-INF/versions/$v"; cp -a "$src/toylib/versions/$v/." "$s/META-INF/versions/$v/"; done
+manifest "Created-By: arbace test/java/project/make-jars" "$s/META-INF/MANIFEST.MF"
+zipdir "$s" "$out/org/example/toylib/1.0/toylib-1.0-sources.jar"
+
+# toylib's binary jar: the base classes (but the extension naming the absent Jackson, which its own
+# build compiled against Jackson: the jar here does not need them), the versions' classes, the resources
+b=$w/toylib
+mkdir -p "$b/META-INF/maven/org.example/toylib"
+javac -cp "$w/toyapi" -d "$b" $(find "$src/toylib/src" -name '*.java' ! -name 'Json*' | LC_ALL=C sort)
+for v in 11 99; do
+  mkdir -p "$b/META-INF/versions/$v"
+  javac -cp "$b:$w/toyapi" -d "$b/META-INF/versions/$v" $(find "$src/toylib/versions/$v" $( [ $v != 11 ] || echo "$src/toylib/bin-only/11") -name '*.java' | LC_ALL=C sort)
+done
+cp -a "$src/toylib/res/." "$b/"
+manifest "Multi-Release: true" "$b/META-INF/MANIFEST.MF"
+printf 'groupId=org.example\nartifactId=toylib\nversion=1.0\n' > "$b/META-INF/maven/org.example/toylib/pom.properties"
+zipdir "$b" "$out/org/example/toylib/1.0/toylib-1.0.jar"
+rm -rf "$w"
+
+if [ "$out" != "$repo" ]; then
+  st=0
+  for f in org/example/toyapi/1.0/toyapi-1.0.jar org/example/toylib/1.0/toylib-1.0-sources.jar org/example/toylib/1.0/toylib-1.0.jar; do
+    if cmp -s "$out/$f" "$repo/$f"; then echo "make-jars: $f the same"; else echo "make-jars: $f DIFFERS"; st=1; fi
+  done
+  rm -rf "$out"
+  exit $st
+fi
+echo "make-jars: the toy repository written in $repo"
