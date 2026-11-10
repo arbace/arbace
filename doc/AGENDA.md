@@ -181,9 +181,13 @@ items below are the ones whose work is still ahead or tied to a night.
   (the local non-generic instances std's bodies reach): 48 of 67 synthetic programs own (47). RF15 (`rust-rf15` on rust-rf14,
   "As built: RF15"): RFP49 (a)'s rest (generic local instances: our bodies instantiated; std's vtables' local functions),
   promoted constants (operators, casts, strings, variants, layouts), LowerSliceLenCalls, overloaded `+=`: 56 of 67 own.
-  Next: RFP58 (its design note: 1.5-2 days, the 4 HashMap programs), more of CTFE in promoted bodies (fmt, structs, traits),
-  upstream monomorphizations (panic-assert-eq, with RFP57), RFP50; the night: the whole plan's rsi-build, rsi-native over the
-  8 new own programs, `rsi check --front own`.
+  RF16 (`rust-rf16` on rust-rf15, "As built: RF16 (RFP58 (a))"): RFP58 (a) built (repr(simd) layouts in mono, the private SIMD
+  types read from the library's sources, vectors indirect in codegen, the generic SIMD intrinsics; ci and `gate_key` unmoved),
+  the HashMap programs' next causes (a constant function pointer's call, a spread memory field, thread-local statics), promoted
+  constants further (`ptr::null`, `size_of`, checked operators and asserts, unsizing casts with vtables): 61 of 67 own.
+  Next: local constants evaluated (structs, then generics' associated constant), a generic closure's v0 type (generics), a
+  blanket impl's method call (iterators), upstream monomorphizations (panic-assert-eq, with RFP57), RFP50, casts' variants; the
+  night: the whole plan's rsi-build, rsi-native over the 13 own programs RF15 and RF16 added, `rsi check --front own`.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above).
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records

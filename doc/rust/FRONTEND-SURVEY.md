@@ -3348,3 +3348,102 @@ reach hashbrown's SSE2 group through std's HashMap: the record's bodies of `hash
   own programs (rustc as the linker driver) to confirm the 8 new own programs (algorithms, drops, errors, float-f32, float-f64,
   main-err, panic-explicit, strings) run as rustc's recorded runs, then `bin/rsi check --front own --corpus samples,synthetic`
   (RFP42 (a)).
+
+## As built: RF16 (RFP58 (a)): the vector ABI; the HashMap programs' next causes; promoted constants further (2026-11-10)
+
+Branch `rust-rf16` (from `mac/rust-rf15` `f9cabe9be`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH=3`). RF15's caches were copied into the worktree and their absolute paths rewritten (`rust-rf15/` to `rust-rf16/`)
+before any run. Only `arbace/rust/` changes (in `arbace_crop_paths`): ci, `arbace/cpp/lower.ae` and `gate_key` do not move.
+
+### RFP58 (a): the vector ABI
+
+- **The definitions std's interface lacks** (`arbace.rust.front.mono/src-adt`): a private std ADT a public one reaches
+  (`core::core_arch::simd::Simd`, `core::core_arch::x86::__m128i`, hashbrown's `Group`) read from the library's own sources
+  (`RF_MONO_LIB`, rust-src 1.99.1's `library/`) as `ext-attrs` finds an item: the module tree from the crate's root (core,
+  alloc, std, or a dependency in `library/vendor`), a module a macro declares (hashbrown's `cfg_if!`) by rustc's default file;
+  a struct item with its `#[repr(simd)]`, its generic parameters and its fields' types (a parameter, a primitive, an array
+  `[T; N]`, a path through the module's `use` items, their cfg evaluated against core's build, resolved by std's names), else
+  stdarch's `types!` (core_arch/src/macros.rs: `pub struct NAME(LEN x ELEM);` expands to `#[repr(simd)] pub struct
+  NAME([ELEM; LEN])`). Such an ADT's layout is now mono's where it was the record's: the 4 programs' layouts equal to the
+  record's 16,055 -> 16,336 (collections 6,916 -> 7,043 of 7,539).
+- **Layout** (`mono/simd-layout`, after rustc_ty_utils' layout_of_uncached `def.repr().simd()` and rustc_abi's
+  `LayoutCalculator::simd_type`, 1.99.1): the element and count from the one array field, the element a scalar, the size N times
+  the element's aligned as LLVM aligns a vector of that size (x86_64's data layout: 8 and 16 bytes; else the next power of two),
+  `BackendRepr::SimdVector`, one field at 0, the element's niche; univariant's newtype rule takes a vector field's ABI as a
+  scalar's (`Group`). The layout form writes it `(vector ELEMENT N)` (the helper prints `(other)`): `__m128i` and `Group`
+  `(vector (int 64 true ..) 2)`, `Simd<i8, 16>` `(vector (int 8 true ..) 16)`. A record's const argument (`(cst "16")`) is read
+  as `[:cval "16"]` (form->ty), so `Simd<i8, 16>`'s layout and its instances resolve.
+- **Codegen** (`arbace.rust.back.codegen`): a vector layout is `:memory` with its `:vector` (element, count): rustc_target's
+  `adjust_for_rust_abi` makes a SimdVector argument and return indirect (`make_indirect`), which is codegen's rule for a memory
+  aggregate larger than a pointer: the same signatures as rustc's (`ptr align 16 %a`, `ptr sret([16 x i8]) align 16`, checked
+  against the IR pack's `_mm_cmpeq_epi8`, `_mm_movemask_epi8`, `Group::match_full`). The generic SIMD intrinsics as
+  rustc_codegen_llvm's `generic_simd_intrinsic` emits them, each vector operand loaded from its memory and the result stored:
+  `simd_splat` (insertelement into poison, a zero-mask shufflevector), `simd_eq/ne/lt/le/gt/ge` (icmp, signed or not by the
+  element, or fcmp's ordered predicates, then sext of `<N x i1>`), `simd_or/and/xor/add/sub`, `simd_bitmask` (lshr by the
+  element's width less one, trunc to `<N x i1>`, bitcast to `iN`, then zext or trunc to the result). A transmute between two
+  memory layouts of one size (`__m128i` to `Simd<i8, 16>`) is the same bytes. rsi's lowering (`arbace.cpp.lower`, LL5's
+  scalarized vectors) takes them unchanged.
+
+### The HashMap programs' next causes (found by the vector ABI, built)
+
+- **A call through a constant function pointer** (core's quicksort passes `partition_lomuto_branchless_cyclic` as
+  `(ptr allocN 0 8)` of a fn allocation, no callee fact): called through the operand's value.
+- **A spread argument's memory field** (a `"rust-call"` closure shim's tuple of one non-zero-sized memory field): by pointer or
+  as the integer of its size, as the caller passes the tuple (a tuple of several memory fields stays refused).
+- **Thread-local statics** (`(tlsref MUT PATH)`: std's `RandomState::new`'s `thread_local!` KEYS, in every HashMap program):
+  codegen_rvalue_operand's ThreadLocalRef, `llvm.threadlocal.address.p0` of the static declared `external thread_local` as
+  rustc's codegen unit declares another crate's; its symbol mono's v0 of the static's def path (the body's DefId, then the
+  name; `std-static-symbol`), equal in shape to rustc's (`_RNvNCNKNvNvMNtNtCs.._3std4hash6randomNtBa_11RandomState3new4KEYS0s_0
+  23___RUST_STD_INTERNAL_VAL`); an item nested in a function body that std's names do not list, named in upper case, is in the
+  value namespace (rustc's non_upper_case_globals: thread_local!'s `const KEYS`). build-run counts it as the fact `tlsrefs`.
+
+### Promoted constants further (RF15's list)
+
+- fmt: a call in a promoted body, `std::ptr::null::<u8>()` (`without_provenance(0)`: 8 zero bytes); `mem::size_of::<T>()` and
+  `align_of` by T's layout (mono's).
+- Checked operators (`AddWithOverflow`, `SubWithOverflow`, `MulWithOverflow`: `(T, bool)` with its fields kept for `_2.0` and
+  `_2.1`) and their `assert` terminator (structs' `Color::Blue as i32 + 1`, an implicit discriminant after an explicit one).
+- traits' `&[&Dog, &Bird(1)]` as `&[&dyn Animal]`: an unsizing cast in a promoted body, the pointer then its vtable's allocation;
+  PromoteTemps moves the cast out of the body mono saw, so mono's vtables now carry each cast's source type and the promoted
+  cast takes the body's vtable of its target and source (the body's own casts too, by source first). A nested borrow
+  (`&_5` in a promoted body) is now kept in its local (RF15 built the value and dropped it: "a reborrow of a local not assigned").
+
+### Results
+
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; 48 minutes): **61 of 67 own** (RF15 56): collections and rc-refcell (the
+  vector ABI, the constant function pointer, the spread argument, the thread-local static), panic-hashmap-index (the
+  thread-local static: RF15's `tlsref`), fmt (the promoted `ptr::null` call) and traits (the promoted unsizing cast and its
+  vtable). The native facts (build-run's, summed): callees 4,275 of 4,739 (unchanged), vtables 29 of 36 -> 35 of 46 (the
+  promoted casts' and traits' now-built `main`'s), layouts 42,388 -> 42,788 of 45,856, constants 179 -> 191 of 197, thread-local
+  statics 5 of 5; mono-check's against the record (`mono-all.log`, summed): layouts 41,946 -> 42,334 of 45,483, every other fact
+  unchanged (callees 1,865 of 2,414, fn-symbols 1,789 of 2,204, core items 1,870 of 1,870). The SIMD types' layouts count as
+  differing from the record's `(other)`.
+- The 6 left: generics (`pair_up::<&str, i32>::{closure#0}`, a generic function's closure reached through std's `Map`, its v0
+  type refused: "v0 of the type [:closure ...]" with parameters, and `<i32 as Zero>::ZERO`, a local trait's associated constant
+  in a promoted body), iterators (`main` is the record's: "a method call without its callee", `v.iter().unzip_check()` through a
+  blanket impl of a local trait for std's `Iter`), structs (local constants: `const LIMIT`, unevaluated in our MIR, in a promoted
+  body and in `main`), panic-assert-eq (upstream monomorphizations, RF15's), casts (a layout's variants codegen does not take),
+  closures (RFP50's reified closure).
+- `bin/rust-front essential` equals its known file (4 min 22 s; no line moved: the essential programs reach no SIMD type, no
+  thread-local static and none of the new promoted forms); `bin/rust-front core-essential` equals its own (564 of 567, 4 min 55 s);
+  `bin/reap` 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict` exit 0, Rust 75.0 / 75.0 / 95.8 / 80.0,
+  unchanged (RFP43 (a): an own case still scores 0.5 until S6's switch).
+
+### Left (the next causes, cheapest first)
+
+- structs: local constants evaluated (a `const` item's body built and evaluated as a promoted body is, `eval-promoted`'s
+  interpreter; its uses in `main` then constants), the cheapest: the interpreter exists.
+- generics: a generic closure's type in v0 at its instance's arguments (the closure's parent's arguments substituted), and a
+  local trait's associated constant (`<i32 as Zero>::ZERO`, the impl's constant's body evaluated, with structs' part).
+- iterators: a method call through a blanket impl of a local trait (`impl<I: Iterator<Item = &i32>> UnzipCheck for I`) in the
+  builder (typeck's method callee), then its instance at `Iter<i32>`.
+- casts: codegen of a layout's variants; closures: RFP50; panic-assert-eq: upstream monomorphizations (RFP57's interfaces).
+
+### The night's commands (none run here)
+
+- RFP46 (a)'s whole plan again, now with RF16: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build` (samples and synthetic,
+  about 30-60 minutes, 2.4 GB a process; the samples' processes above that), then `bin/rust-front rsi-native` by hand over the
+  own programs (rustc as the linker driver) to confirm the new own programs (collections, fmt, panic-hashmap-index, rc-refcell, traits) run as rustc's recorded runs:
+  the vector code through rsi's lowering and the thread-local static against std's lowered library, then `bin/rsi check
+  --front own --corpus samples,synthetic` (RFP42 (a)).

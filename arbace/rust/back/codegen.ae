@@ -52,9 +52,14 @@
                            (= ak "scalar") :scalar
                            (= ak "pair") :pair
                            (= ak "memory") :memory
+                           ;; RFP58 (a): a SIMD vector (BackendRepr::SimdVector) is in memory between its operations, and the Rust
+                           ;; ABI passes and returns it indirectly (rustc_target's adjust_for_rust_abi: make_indirect), as a
+                           ;; memory aggregate larger than a pointer
+                           (= ak "vector") :memory
                            :else (unsupported (str "abi " ak)))}
         (= ak "scalar") (assoc :scalar (scalar-of (second abi)))
         (= ak "pair") (assoc :pair [(scalar-of (second abi)) (scalar-of (nth abi 2)) (nth abi 3)])
+        (= ak "vector") (assoc :vector {:elem (scalar-of (second abi)) :n (nth abi 2)})
         true (assoc :variants (parse-variants (:variants e)) :discrs (:discrs e))))))
 
 (defn zst? [l] (= :zst (:kind l)))
@@ -357,6 +362,7 @@
                          "aggregate" (doseq [o (nth r 2)] (visit-operand o loc))
                          "discriminant" (visit-place (second r) :copy loc)
                          "repeat" (visit-operand (second r) loc)
+                         "tlsref" nil
                          (unsupported (str "rvalue " (first r)))))]
     (doseq [a (range 1 (inc (:args body)))] (define! a [:arg]))
     (doseq [b order]
@@ -1300,6 +1306,10 @@
                                        ;; RF13: a memory value read as a scalar or a pair of the target type (OperandValue::Ref loaded)
                                        (and (= :memory (:kind fl)) (#{:scalar :pair} (:kind tl)) (= (:size fl) (:size tl)) (:ref v))
                                        (load-place! bb (assoc (:ref v) :ly tl))
+                                       ;; RFP58 (a): between two memory layouts of one size (a SIMD vector's types, `__m128i` and
+                                       ;; `Simd<i8, 16>`): the same bytes, copied where the value is stored
+                                       (and (= :memory (:kind fl)) (= :memory (:kind tl)) (= (:size fl) (:size tl)) (:ref v))
+                                       {:ref (assoc (:ref v) :ly tl :ty t :align (min (:align (:ref v)) (:align tl)))}
                                        (and (= :scalar (:kind fl)) (= :scalar (:kind tl)) (= :int (:prim (:scalar fl))) (= :ptr (:prim (:scalar tl))))
                                        (if (number? (:v v))
                                          ;; a constant expression, not an instruction
@@ -1345,6 +1355,16 @@
                                              meta)]
                                   {:pair [{:ty "ptr" :v (:ptr pl)} meta]})
                                 (let [pl (place-of! bb p)] {:ty "ptr" :v (:ptr pl)}))))
+                    ;; RF16: a thread-local static's address (codegen_rvalue_operand's ThreadLocalRef: llvm.threadlocal.address of
+                    ;; the static, declared `external thread_local` as rustc's codegen unit declares another crate's), its symbol the
+                    ;; module's (build-run's, from mono)
+                    "tlsref" (let [sym (or (nth r 3 nil) (unsupported "a thread-local static without its symbol"))
+                                   sy (symbol "g" sym) nm (symbol "g" "llvm.threadlocal.address.p0") res (fresh!)]
+                               (when-not (get-in @gl [:statics sy])
+                                 (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :thread-local true :align 1)))
+                               (declare! gl nm 'ptr [['ptr]])
+                               (emit! bb (list '= res (list 'call 'ptr nm [['ptr sy]])))
+                               {:ty "ptr" :v res})
                     (unsupported (str "rvalue " (first r)))))
         statement-inner! (fn [bb s]
                      (case (name (first (stmt-of s)))
@@ -1666,6 +1686,61 @@
                                    (when target (br-or-merge bb t target))
                                  (if intrinsic
                                    (case intrinsic
+                                     ;; RFP58 (a): the generic SIMD intrinsics stdarch's sse2.rs and core_arch's Simd use, as rustc_codegen_llvm's
+                                     ;; generic_simd_intrinsic (intrinsic.rs, 1.99.1) emits them: each vector operand loaded from its memory,
+                                     ;; the result stored to the destination's
+                                     ("simd_splat" "simd_eq" "simd_ne" "simd_lt" "simd_le" "simd_gt" "simd_ge" "simd_or" "simd_and" "simd_xor"
+                                      "simd_add" "simd_sub" "simd_bitmask")
+                                     (let [vty (fn [l] (let [v (or (:vector l) (unsupported (str intrinsic " of a non-vector")))]
+                                                         (list 'vector (:n v) (symbol (:imm (:elem v))))))
+                                           load-vec (fn [o] (let [l (layout lt (ty-of o)) v (operand! bb o)
+                                                                  pl (or (:ref v) (unsupported (str intrinsic ": a vector not in memory")))
+                                                                  r (fresh!)]
+                                                              (emit! bb (list '= r (list 'load (vty l) ['ptr (:ptr pl)] :align (:align pl))))
+                                                              [l r]))
+                                           dl (layout lt (place-type body dest))
+                                           store-vec! (fn [r] (let [pl (place-of! bb dest)]
+                                                                (emit! bb (list 'store [(vty dl) r] ['ptr (:ptr pl)] :align (:align pl)))))]
+                                       (case intrinsic
+                                         ;; insertelement into poison at 0, then a shufflevector by a zero mask
+                                         "simd_splat"
+                                         (let [x (operand! bb (first args)) t (vty dl) e (symbol (:imm (:elem (:vector dl)))) i (fresh!) r (fresh!)]
+                                           (emit! bb (list '= i (list 'insertelement [t 'poison] [e (:v x)] ['i32 0])))
+                                           (emit! bb (list '= r (list 'shufflevector [t i] [t 'poison] [(list 'vector (:n (:vector dl)) 'i32) 'zeroinitializer])))
+                                           (store-vec! r))
+                                         ;; a comparison: icmp (fcmp) to <N x i1>, then sext to the result's elements
+                                         ("simd_eq" "simd_ne" "simd_lt" "simd_le" "simd_gt" "simd_ge")
+                                         (let [[l a] (load-vec (first args)) [_ b] (load-vec (second args))
+                                               el (:elem (:vector l)) c (fresh!) r (fresh!) n (:n (:vector l))
+                                               op (subs intrinsic 5)
+                                               cmp (if (= :float (:prim el))
+                                                     (list 'fcmp ({"eq" :oeq "ne" :une "lt" :olt "le" :ole "gt" :ogt "ge" :oge} op) (vty l) a b)
+                                                     (list 'icmp (if (:signed el)
+                                                                   ({"eq" :eq "ne" :ne "lt" :slt "le" :sle "gt" :sgt "ge" :sge} op)
+                                                                   ({"eq" :eq "ne" :ne "lt" :ult "le" :ule "gt" :ugt "ge" :uge} op))
+                                                           (vty l) a b))]
+                                           (emit! bb (list '= c cmp))
+                                           (emit! bb (list '= r (list 'sext (list 'vector n 'i1) c (vty dl))))
+                                           (store-vec! r))
+                                         ("simd_or" "simd_and" "simd_xor" "simd_add" "simd_sub")
+                                         (let [[l a] (load-vec (first args)) [_ b] (load-vec (second args)) r (fresh!)]
+                                           (emit! bb (list '= r (list (symbol (subs intrinsic 5)) (vty l) a b)))
+                                           (store-vec! r))
+                                         ;; each element's most significant bit (lshr by its width less one, trunc to <N x i1>) as an
+                                         ;; N-bit integer, widened or narrowed to the result's
+                                         "simd_bitmask"
+                                         (let [[l a] (load-vec (first args)) el (:elem (:vector l)) n (:n (:vector l)) w (:bits el)
+                                               s (fresh!) tr (fresh!) bc (fresh!)
+                                               dsc (or (:scalar dl) (unsupported "simd_bitmask to a non-integer"))
+                                               ity (symbol (str "i" n))]
+                                           (emit! bb (list '= s (list 'lshr (vty l) a (list 'splat [(symbol (:imm el)) (dec w)]))))
+                                           (emit! bb (list '= tr (list 'trunc (vty l) s (list 'vector n 'i1))))
+                                           (emit! bb (list '= bc (list 'bitcast (list 'vector n 'i1) tr ity)))
+                                           (assign! bb dest (let [tb (:bits dsc)]
+                                                              (cond (= tb n) {:ty (:imm dsc) :v bc}
+                                                                    (> tb n) (let [z (fresh!)] (emit! bb (list '= z (list 'zext ity bc (symbol (:imm dsc))))) {:ty (:imm dsc) :v z})
+                                                                    :else (let [z (fresh!)] (emit! bb (list '= z (list 'trunc ity bc (symbol (:imm dsc))))) {:ty (:imm dsc) :v z}))))))
+                                       (when target (br-or-merge bb t target)))
                                      "abort" (do (declare! gl (symbol "g" "llvm.trap") 'void [])
                                                  (emit! bb (list 'call 'void (symbol "g" "llvm.trap") []))
                                                  (if target (br-or-merge bb t target) (emit! bb '(unreachable))))
@@ -1932,6 +2007,10 @@
                                      callee (cond virt (:fn virt)
                                                   (and (not= "const" (name (first f))) (not (and ci (= "item" (:kind ci)))))
                                                   (let [v (operand! bb f)] (:v v))
+                                                  ;; RF16: a constant function pointer (`(ptr allocN 0 8)` of a fn allocation: core's sort
+                                                  ;; passes `partition_lomuto_branchless_cyclic` as a const fn pointer), called through it
+                                                  (and (= "const" (name (first f))) (nil? (fn-callee f)) (nil? ci))
+                                                  (let [v (operand! bb f)] (:v v))
                                                   :else (call-symbol f callee-info))
                                      can-unwind (if (and (seq? callee-info) (map? (second callee-info))) (:can-unwind (second callee-info)) true)
                                      dl0 (let [d (nth lay (place-local dest))] (if (seq (place-projs dest)) (layout lt (place-type body dest)) d))
@@ -2011,6 +2090,18 @@
                                            :pair (let [[sa sb _] (:pair fl)]
                                                    (store-val! "start" fp {:pair [{:ty (:imm sa) :v (n 0)} {:ty (:imm sb) :v (n 1)}]})
                                                    (param-forms fl nil [(n 0) (n 1)]))
+                                           ;; RF16: a memory field, when it is the tuple's one field that is not zero-sized (the tuple's
+                                           ;; layout is then the field's, and the caller passes the tuple as that memory aggregate): by
+                                           ;; pointer, copied into its place, or as the integer of its size
+                                           :memory (if (not= 1 (count (remove #(zst? (layout lt %)) tys)))
+                                                     (unsupported "memory aggregate in a spread argument of several fields")
+                                                     (let [nm (n nil)]
+                                                       (if (indirect? fl)
+                                                         (do (memcpy! "start" fp {:ptr nm :align (:align fl)} (:size fl))
+                                                             [['ptr (list :align (:align fl)) nm]])
+                                                         (let [ci (cast-int fl)]
+                                                           (store-cast! "start" ci nm fp (:size fl))
+                                                           [[ci nm]]))))
                                            (unsupported "memory aggregate in a spread argument"))))
                                      (range) tys)))
                            (case (:kind ly)

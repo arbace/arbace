@@ -3039,3 +3039,31 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
   line rewritten (every fact equal); `core-essential` equal to its known file (564 of 567); `bin/reap` 0 problems;
   `bin/crops-score --judge --strict` exit 0, Rust unchanged. RFP58 (the vector ABI) is not small: its design note in
   doc/rust/FRONTEND-SURVEY.md, "As built: RF15", with the night's commands.
+
+## 2026-11-10: RF16, RFP58 (a): the vector ABI; the HashMap programs' next causes; promoted constants further (branch `rust-rf16`, from `mac/rust-rf15` `f9cabe9be`)
+
+- RFP58 (a) as RF15's design note planned it, after rustc 1.99.1 (the pinned rust-src's `compiler/`): mono lays out
+  `#[repr(simd)]` types (rustc_ty_utils' layout_of_uncached and rustc_abi's `simd_type`: `(vector ELEMENT N)`, the newtype rule
+  for `Group`); the three types std's interface lacks (`core::core_arch::simd::Simd`, `core::core_arch::x86::__m128i`,
+  hashbrown's `Group`) are read from the library's own sources (rust-src's `library/`, `library/vendor/hashbrown-0.17.1`; stdarch's
+  `types!` read as `library/stdarch/crates/core_arch/src/macros.rs` writes it), a field's path resolved through the module's `use`
+  items and std's names. Codegen keeps a vector in memory and passes it indirectly (rustc_target's `adjust_for_rust_abi`; the
+  signatures equal the IR pack's) and emits the six intrinsics, and the rest of the generic family's simple ones, as
+  rustc_codegen_llvm's `generic_simd_intrinsic` does; rsi's lowering (LL5's scalarized vectors) takes them, so ci, the lowering
+  and `gate_key` do not move (only `arbace/rust/`, in `arbace_crop_paths`). Alternatives considered: vectors as immediates in
+  registers (the design note's guess; rustc passes them indirectly in the Rust ABI, so memory is both simpler and rustc's), the
+  helper printing the layout (the oracle tier's, not the run's), a table of the three types (the sources say it).
+- The vector ABI unblocked the HashMap programs as far as their next causes, built: a call through a constant function pointer
+  (core's quicksort), a spread argument's memory field, thread-local statics (`tlsref`: `llvm.threadlocal.address` of the static
+  declared `external thread_local`, its symbol mono's v0 of the static's def path; upper-case nested items in the value
+  namespace, rustc's non_upper_case_globals).
+- Promoted constants further (RF15's list): `ptr::null::<T>()` and `mem::size_of`/`align_of` calls, checked operators with their
+  fields and `assert`, an unsizing cast to a trait object with its vtable (mono's vtables now carry the cast's source type, since
+  PromoteTemps moves the cast out of the body mono saw); a nested borrow kept in its local (RF15 dropped it). On the tools' host a
+  `cond` whose branches `recur` did not compile as tail calls in `eval-promoted`'s loop: nested `if`s.
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **61 own** (RF15 56; 48
+  minutes): collections, rc-refcell, panic-hashmap-index, fmt, traits; native callees 4,275 of 4,739 (unchanged), vtables 35 of 46
+  (29 of 36), layouts 42,788 of 45,856 (42,388), thread-local statics 5 of 5. `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict`
+  exit 0, Rust unchanged. The 6 left and their causes in doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))", with the night's
+  commands.

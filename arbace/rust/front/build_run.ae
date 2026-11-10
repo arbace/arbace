@@ -190,8 +190,8 @@
   CTFE's: the rest of slice 5). RF15: arithmetic, unary operators and numeric casts on scalars (rustc_const_eval's
   binary_op, unary_op and cast: integers wrapped, floats IEEE as Rust's), and a string's or byte string's constant (a
   pointer to its bytes' allocation, RAW-ALLOC's [ALLOC LEN]: the fat pointer's relocation)"
-  ([pb] (eval-promoted pb nil nil nil nil))
-  ([pb raw-alloc nest-alloc unit-variant anon-discr]
+  ([pb] (eval-promoted pb nil nil nil nil nil nil))
+  ([pb raw-alloc nest-alloc unit-variant anon-discr vt-alloc layout-of]
   (let [env (atom {}) result (atom nil)
         no (fn [what x] (throw (ex-info (str "promoted: " what (when (System/getenv "RF_PROMOTED_TRACE") (str " " (pr-str x)))) {:x x})))
         loc-of (fn [p] (if (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p) (no "a projected place" p)))
@@ -215,7 +215,12 @@
                                   {:bytes (vec (concat (repeat 8 0) (le-bytes n 8))) :align 8 :relocs [[0 a]] :ty tyf}
                                   {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 a]] :ty tyf}))
                               :else (no "a constant's value" o)))
-                    (copy move) (or (get @env (loc-of (second o))) (no "a local not assigned" o))
+                    (copy move) (let [p (second o)]
+                                  (if (and (seq? p) (= 3 (count p)) (seq? (nth p 2)) (= 'field (first (nth p 2))))
+                                    ;; RF16: a field of a value whose fields are kept (a checked operator's (T, bool))
+                                    (let [v (or (get @env (second p)) (no "a local not assigned" o))]
+                                      (or (nth (:parts v) (second (nth p 2)) nil) (no "a field of a value without its fields" o)))
+                                    (or (get @env (loc-of p)) (no "a local not assigned" o))))
                     (no "an operand" o)))
         sk (fn [x tyf] (or (scalar-kind tyf) (no "a non-scalar operand" x)))
         binop (fn [rv dst-ty]
@@ -239,6 +244,21 @@
                             "Eq" (cmp #(== x y)) "Ne" (cmp #(not (== x y))) "Lt" (cmp #(< x y)) "Le" (cmp #(<= x y))
                             "Gt" (cmp #(> x y)) "Ge" (cmp #(>= x y))
                             (no (str "a binop " op) rv))}))
+        layout-or-nil (fn [tyf] (try (layout-of tyf) (catch Throwable _ nil)))
+        ;; RF16: a checked operator (AddWithOverflow, SubWithOverflow, MulWithOverflow: rustc_const_eval's
+        ;; binary_op's overflowing_binary_op): (T, bool), the wrapped value at 0 and the overflow flag after it, the tuple's
+        ;; size T's rounded to its alignment; its fields kept for a projection (`_2.0`, `_2.1`)
+        checked (fn [rv dst-ty]
+                  (let [[_ op a b] rv va (operand a) vb (operand b)
+                        ka (sk rv (:ty va)) x (scalar-val ka (:bytes va)) y (scalar-val (sk rv (:ty vb)) (:bytes vb))
+                        exact (case op "AddWithOverflow" (+ x y) "SubWithOverflow" (- x y) "MulWithOverflow" (* x y))
+                        vb* (val-bytes ka exact)
+                        ovf (if (== exact (scalar-val ka vb*)) 0 1)
+                        al (scalar-align (quot (second ka) 8))
+                        size (* al (quot (+ (count vb*) 1 (dec al)) al))]
+                    {:ty dst-ty :align al
+                     :bytes (vec (concat vb* [ovf] (repeat (- size (count vb*) 1) 0)))
+                     :parts [{:bytes vb* :align al :ty (:ty va)} {:bytes [ovf] :align 1 :ty '(ty "bool" bool)}]}))
         unop (fn [rv dst-ty]
                (let [[_ op a] rv va (operand a) k (sk rv (:ty va)) x (scalar-val k (:bytes va))]
                  {:ty dst-ty :align (:align va)
@@ -247,6 +267,13 @@
                            "Not" (if (= :bool (first k)) (val-bytes k (if (zero? x) 1 0)) (val-bytes k (.not (biginteger x))))
                            (no (str "a unop " op) rv))}))
         cast (fn [rv]
+               (if (str/starts-with? (str (second rv)) "PointerCoercion(Unsize")
+                 ;; RF16: a thin pointer to a trait object (`&Dog as &dyn Animal`): the pointer, then its vtable's allocation (mono's,
+                 ;; as the runtime body's casts take theirs)
+                 (let [[_ _ a tyf] rv va (operand a)
+                       vt (or (when vt-alloc (vt-alloc (second tyf) (second (:ty va)))) (no "an unsizing cast without its vtable" rv))]
+                   (when-not (= 8 (count (:bytes va))) (no "an unsizing cast of a fat pointer" rv))
+                   {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (repeat 8 0))) :relocs (conj (vec (:relocs va)) [8 vt])})
                (let [[_ kind a tyf] rv va (operand a) ks (sk rv (:ty va)) kd (sk rv tyf) x (scalar-val ks (:bytes va))]
                  {:ty tyf :align (scalar-align (quot (second kd) 8))
                   :bytes (case kind
@@ -254,7 +281,7 @@
                            "IntToFloat" (val-bytes kd (if (= 32 (second kd)) (float (.doubleValue (biginteger x))) (.doubleValue (biginteger x))))
                            "FloatToFloat" (val-bytes kd (if (= 32 (second kd)) (float x) (double x)))
                            "FloatToInt" (val-bytes kd (f->int kd x))
-                           (no (str "a cast " kind) rv))}))]
+                           (no (str "a cast " kind) rv))})))]
     (loop [bi 0 seen #{}]
       (when (seen bi) (no "a loop" bi))
       (let [blk (nth (:blocks pb) bi)]
@@ -264,7 +291,7 @@
             assign (let [[_ p rv] st l (loc-of p)]
                      (case (first rv)
                        use (swap! env assoc l (operand (second rv)))
-                       binop (swap! env assoc l (binop rv (local-ty l)))
+                       binop (swap! env assoc l (if (str/ends-with? (str (second rv)) "WithOverflow") (checked rv (local-ty l)) (binop rv (local-ty l))))
                        unop (swap! env assoc l (unop rv (local-ty l)))
                        cast (swap! env assoc l (cast rv))
                        aggregate (let [[_ kind ops] rv]
@@ -303,8 +330,9 @@
                                ;; RF15: `&*p` of a pointer local: the same pointer (a reborrow)
                                deref? (swap! env assoc l (assoc (or (get @env (second tp)) (no "a reborrow of a local not assigned" rv)) :ty (local-ty l)))
                                ;; RF15: a borrow of another local: its value an allocation of its own (CTFE's intern, a nested allocation)
+                               ;; (RF16: kept in the local, as the other borrows are)
                                nest-alloc (let [v (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv))]
-                                            {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (nest-alloc v)]] :ty (local-ty l)})
+                                            (swap! env assoc l {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (nest-alloc v)]] :ty (local-ty l)}))
                                :else (no "a borrow but _0's" rv)))
                        (no (str "an rvalue " (first rv)) rv)))
             (no "a statement" st)))
@@ -312,6 +340,28 @@
           (case (first t)
             return (or @result (no "no borrow in _0" pb))
             goto (recur (second t) (conj seen bi))
+            ;; RF16: an assertion (a checked operator's overflow flag): its target when the condition is the expected value,
+            ;; else the CTFE's error (the promoted fails to evaluate)
+            assert (let [[_ c expected _ target] t v (operand c)]
+                     (if (= (boolean expected) (not (every? zero? (:bytes v))))
+                       (recur target (conj seen bi))
+                       (no "an assertion that fails" t)))
+            ;; RF16: a call of core's `ptr::null::<T>()` or `ptr::null_mut::<T>()` (a thin T: library/core/src/ptr/mod.rs,
+            ;; `without_provenance(0)`, the null pointer's 8 zero bytes), then its target; another call is the CTFE's
+            call (let [[_ f _ dest target] t
+                       txt (str (when (seq? f) (second f)))]
+                   ;; (nested ifs: the tools' host refused this loop's recurs inside a cond as not in tail position)
+                   (if (and target (re-matches #"(std|core)::ptr::null(_mut)?::<[^\[]*>" txt) (not (re-find #"dyn |\[|\bstr\b" txt)))
+                     (do (swap! env assoc (loc-of dest) {:bytes (vec (repeat 8 0)) :align 8 :ty (local-ty (loc-of dest))})
+                         (recur target (conj seen bi)))
+                     ;; `mem::size_of::<T>()` and `mem::align_of::<T>()` (intrinsics::size_of and align_of, as CTFE evaluates them:
+                     ;; T's layout, mono's), a usize
+                     (if (and target layout-of (re-matches #"(std|core)::mem::(size_of|align_of)::<.+>" txt))
+                       (let [ft (nth f 2 nil) st (when (seq? ft) (nth ft 2 nil)) ta (when (and (seq? st) (= 'fndef (first st))) (first (nth st 2 nil)))
+                             l (or (when ta (layout-or-nil ta)) (no "a call of size_of without its type's layout" t))]
+                         (swap! env assoc (loc-of dest) {:bytes (le-bytes (if (str/includes? txt "size_of") (:size l) (:align l)) 8) :align 8 :ty (local-ty (loc-of dest))})
+                         (recur target (conj seen bi)))
+                       (no "a call" t))))
             (no "a terminator" t))))))))
 
 (defn- slice-len-fn? [d]
@@ -340,6 +390,7 @@
   static (its symbol, by the static's name) as rustc's optimized MIR gives it: (ptr allocS<ID> 0 8) with that allocation's data"
   [ours rec facts abort?]
   (let [static-data (atom [])
+        vt-fn (atom (fn [_ _] nil))   ; RF16: a promoted constant's casts' vtables (set below)
         fix-static (fn [x]
                      (if (and (seq? x) (= 'static-ptr (first x)))
                        (let [id (second x) nm (static-name ours id)
@@ -376,7 +427,8 @@
                                                 (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
                                                                             :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
                                                 a))
-                                 {:keys [bytes align relocs]} (try (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts))
+                                 {:keys [bytes align relocs]} (try (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
+                                                                                  (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts))
                                                                    (catch Throwable e (when-let [f (:const! facts)] (f false))
                                                                      (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
                                                                      (throw e)))
@@ -402,26 +454,45 @@
         vt-count (atom 0)
         ;; this body's dyn casts' vtables from mono, in the body's order (program-facts' :vtables): taken in turn by target type
         vt-queue (atom (get (:vtables facts) (:name ours)))
-        take-vt! (fn [tgt] (let [q @vt-queue i (first (keep-indexed (fn [i [t _]] (when (= t tgt) i)) q))]
+        ;; (RF16: by its source's type too when the cast's operand is a plain local, else the first of its target's)
+        take-vt! (fn [tgt src] (let [q @vt-queue
+                                     i (or (when src (first (keep-indexed (fn [i [t _ s]] (when (and (= t tgt) (= s src)) i)) q)))
+                                           (first (keep-indexed (fn [i [t _]] (when (= t tgt) i)) q)))]
                              (if i (do (reset! vt-queue (vec (concat (subvec q 0 i) (subvec q (inc i))))) (second (nth q i))) ::none)))
+        ;; a native vtable's allocations (its entries' function allocations, then the table): its name
+        vt-alloc! (fn [nv]
+                    (let [k (swap! vt-count inc) a (str "allocV" k)
+                          es (:entries nv)
+                          fns (keep-indexed (fn [i [kind v]] (when (= :fn kind) [i (str "allocV" k "f" i) v])) es)]
+                      (when-let [f (:vtable! facts)] (f true))
+                      (doseq [[_ fa sym] fns] (swap! static-data conj [fa {:kind :fn :symbol sym}]))
+                      (swap! static-data conj [a {:kind :memory :align 8 :mutable false
+                                                  :bytes (apply str (for [[kind v] es b (if (= :usize kind) (le-bytes v 8) (repeat 8 0))] (format "%02x" b)))
+                                                  :init (apply str (repeat (* 8 (count es)) "1"))
+                                                  :relocs (vec (for [[i fa _] fns] [(* 8 i) fa]))}])
+                      a))
+        ;; RF16: a promoted constant's cast (PromoteTemps moved it out of the body mono saw) takes the body's vtable of its
+        ;; target and source types
+        _ (reset! vt-fn (fn [tgt src]
+                          (let [q @vt-queue
+                                i (first (keep-indexed (fn [i [t _ s]] (when (and (= t tgt) (= s src)) i)) q))]
+                            (when i
+                              (reset! vt-queue (vec (concat (subvec q 0 i) (subvec q (inc i)))))
+                              (let [nv (second (nth q i))]
+                                (if (and (map? nv) (not (mono/error? nv)))
+                                  (vt-alloc! nv)
+                                  (do (when-let [f (:vtable! facts)] (f false)) nil)))))))
         fix-cast (fn [x]
                    (if (and (seq? x) (= 'cast (first x)) (str/starts-with? (str (second x)) "PointerCoercion(Unsize")
                             (not (some #{:vtable} x)) (seq? (nth x 3 nil)) (:vtables facts))
                      (let [tgt (second (nth x 3))
-                           nv (take-vt! tgt)]
+                           op (nth x 2) pl (when (and (seq? op) (#{'copy 'move} (first op))) (second op))
+                           src (when (and (seq? pl) (= 2 (count pl))) (second (:ty (nth (:locals ours) (second pl) nil))))
+                           nv (take-vt! tgt src)]
                        (cond
                          (= ::none nv) x
                          (and (map? nv) (not (mono/error? nv)))
-                         (let [k (swap! vt-count inc) a (str "allocV" k)
-                               es (:entries nv)
-                               fns (keep-indexed (fn [i [kind v]] (when (= :fn kind) [i (str "allocV" k "f" i) v])) es)]
-                           (when-let [f (:vtable! facts)] (f true))
-                           (doseq [[_ fa sym] fns] (swap! static-data conj [fa {:kind :fn :symbol sym}]))
-                           (swap! static-data conj [a {:kind :memory :align 8 :mutable false
-                                                       :bytes (apply str (for [[kind v] es b (if (= :usize kind) (le-bytes v 8) (repeat 8 0))] (format "%02x" b)))
-                                                       :init (apply str (repeat (* 8 (count es)) "1"))
-                                                       :relocs (vec (for [[i fa _] fns] [(* 8 i) fa]))}])
-                           (concat x [:vtable (symbol a)]))
+                         (concat x [:vtable (symbol (vt-alloc! nv))])
                          :else
                          (if-let [id (first (get @rec-vts tgt))]
                            (do (swap! rec-vts update tgt (comp vec rest))
@@ -838,6 +909,8 @@
                         :const! (fn [native?] (fact! :consts native?))
                         ;; RF15: a promoted ADT value's bytes (an enum's variant: `&Color::Blue`, `&Some(1.5)`) from mono's layout
                         :anon-discr (fn [vp] (try (mono/variant-discriminant n vp) (catch Throwable _ nil)))
+                        ;; RF16: a type's layout, mono's (a promoted `size_of::<T>()`)
+                        :layout-of (fn [tyf] (mono/type-layout-form n tyf))
                         :unit-variant (fn [tyf vidx fields]
                                         (let [l (try (mono/type-layout-form n tyf)
                                                      ;; a layout mono refuses: the record's, as the module's table takes it
@@ -920,9 +993,25 @@
                                                                                    (do (fact! :vslots false) blk))
                                                                                  blk))
                                                                              bs))))]
-                  (doall (for [f new-forms] (cond (= 'mir/layouts (first f)) (list 'mir/layouts (vec table))
-                                                  (= 'mir/body (first f)) (list 'mir/body (fix (second f)))
-                                                  :else f))))))))]
+                  ;; RF16: a thread-local static a body names (`(tlsref MUT PATH)`, a nested static of the body's own item, std's
+                  ;; RandomState::new's KEYS) given its symbol, mono's v0 of the static's def path (the body's DefId's, then its name)
+                  (let [tls (fn [b]
+                              (let [did (when-let [[_ k p] (re-find #"^DefId\((\d+):\d+ ~ (.*)\)$" (str (:def-id b)))]
+                                          (when (not= "0" k) (str/replace p #"\[[0-9a-f]+\]" "")))]
+                                (update b :blocks
+                                        (fn [bs]
+                                          (walk (fn [x]
+                                                  (if (and (seq? x) (= 'tlsref (first x)) (= 3 (count x)) did
+                                                           (str/starts-with? (str (nth x 2)) (str (:def b) "::")))
+                                                    (let [p (str did (subs (str (nth x 2)) (count (str (:def b)))))
+                                                          sym (try (mono/std-static-symbol n p) (catch Throwable _ nil))]
+                                                      (fact! :tlsrefs (some? sym))
+                                                      (if sym (concat x [sym]) x))
+                                                    x))
+                                                bs)))))]
+                    (doall (for [f new-forms] (cond (= 'mir/layouts (first f)) (list 'mir/layouts (vec table))
+                                                    (= 'mir/body (first f)) (list 'mir/body (tls (fix (second f))))
+                                                    :else f)))))))))]
     {:forms result :lines @lines :tally @tally :judged @judged :refusals @refusals}))
 
 (defn- run-lines
