@@ -5711,7 +5711,7 @@ CP335 (b), CP336 (a), CP337 (b) (built on `cpp-route`), and doc/cpp/CODEGEN.md's
 Light, by day's rules in night 10's light lane: main's stage 0 (`ARBACE_HOST_EXE`), one run at a time of at most about 2 GiB
 (`GOMEMLIMIT=1400MiB`, a watcher killing a process tree past 2.3 GB; the one program past 2 GiB is named below), `REPR_CPP_THREADS=2`,
 compiler stubs exiting 99 first on PATH (clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld, as, opt, llvm-as, lli,
-llc; their log empty at the end), no gate but `--plan`, no run check (the lowered runtime's read is a heavy job: the programs' runs by
+llc; their log's 5 lines all from two early attempts, `bin/ci run` on a lowered probe and `bin/cppi runtime-key`'s identity probes (`--version`, `-print-prog-name`), none from a measure below), no gate but `--plan`, no run check (the lowered runtime's read is a heavy job: the programs' runs by
 our route are the night's).
 
 ### What was built
