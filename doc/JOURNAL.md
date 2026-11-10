@@ -2804,3 +2804,9 @@ from the fixed seed 1200000, own verdicts held to Arbace's verifier, two crossed
 of 900 own, all met (8 min, 0.7 GB); expect-test 42 cases and 12 controls; the essential read and print families as recorded;
 crops-score unchanged (LLVM IR 96.4 / 97.9 / 100 / 96.9). Alternatives: keeping LLS43 on opt's record (b), the held-out sets
 only in worktrees (LLS45 (b)). Recorded in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS43 (a), LLS44 (b), LLS45 (a)".
+
+2026-11-10, llvm-props4 (review fix, .tmp/merge-1111/REVIEW2.md §7 item 1): `bin/repr-llvm heldout-check` gets floors: n = 900
+(`REPR_LLVM_HELDOUT_N`) and at least 880 own verdicts (`REPR_LLVM_HELDOUT_MIN_OWN`; 886 of 900 recorded, a margin of 6 for a
+mutator or rule change; a collapse of the own verdicts, which left bad = 0 and the controls failing for the wrong reason, now
+fails). Proof: the run passes (900 mutants, 886 own, 5 min); with `REPR_LLVM_HELDOUT_MIN_OWN=887` it fails, "886 own verdicts,
+fewer than the floor 887", exit 1. Alternative: a record file of the count; an env floor beside the controls was enough.
