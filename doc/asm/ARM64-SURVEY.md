@@ -640,3 +640,74 @@ ARS1-ARS16 (§13): the user decided ARS1, ARS2, ARS3, ARS5, ARS6, ARS7, ARS9, AR
   llvm-mc`). *Recommended: (b)*: the read cell then covers the row's whole llvm/test at no cost to the budget.
 - **ARS23 UTF-8 in Plan 9's names.** (a) a byte a character, as every repr/asm text (Go's `·` is two characters in the form's string);
   (b) Plan 9's texts decoded as UTF-8. *Recommended: (a)*: one reading for every dialect, byte for byte by construction.
+
+## As built: AR2 (first slice) (2026-11-10; branch `asm-ar2`, from `mac/asm-ar1` `6b8d79358`)
+
+The user's decisions of 2026-11-09 (ARS5 (a): Go's tables and arm64asm, Arm's specification only after its licence; one encoder mode
+per reference; readers first, then encoders) and ARS17-ARS23 followed as recommended, provisionally. Built on the light lane (stage 0,
+under 0.6 GiB, no lock, no assembler run, nothing fetched): arm64asm is not fetched, it is vendored in TamaGo's GOROOT
+(`src/cmd/vendor/golang.org/x/arch/arm64/arm64asm`, golang.org/x/arch `v0.27.1-0.20260521044007-9c1a596a2c97`), pinned with it by
+`seed/goroot.sha256`.
+
+- **The table** (`arbace/repr/asm/arm64/table.ae`, generated, committed; `bin/repr-asm --arch arm64 table gen`, `table check` byte for
+  byte, `make repr-asm-table-arm64`, `repr-asm-table-check-arm64`): Arbace's own generator `arbace.repr.asm.arm64.tablegen` reads Go's
+  source as text: arm64asm's `tables.go` (1,208 rows: mask, value, op, argument kinds, alias condition, the Arm syntax line),
+  `condition.go` (93 alias conditions, Go expressions parsed by Go's precedence and written as Arbace functions over the word; their
+  helpers, `condition_util.go`, ported by hand in `bits.ae`), `inst.go`'s `sysInstsAttrs` (106 DC and TLBI operations), `inst.json`'s
+  should-be-one bits (30 rows: LDAR's Rs, SMULH's Ra, ...; tables.go's masks leave them out), and `cmd/internal/obj/arm64`'s
+  `sysRegEnc.go` (431 system registers with their access).
+- **The encoder** (`arbace.repr.asm.arm64.enc`, doc/asm/SPEC.md §12): the inverse of arm64asm's `decodeArg`, by argument kind (312
+  kinds, every one built: registers by class and field, shifted and extended registers, the addressing modes, PC-relative labels and
+  their fixups, conditions, the add/sub, logical (bitmask), move-wide, bitfield, floating-point and SIMD-modified immediates, the shift
+  immediates by element size, the vector arrangements, elements and register lists, system registers and operations, barriers,
+  prefetch operations); the rows tried in arm64asm's order with LLVM's preferences and conventions where they differ (MOV's
+  immediate MOVZ, MOVN, then ORR; fixMOVZ's MOVN for TLS relocations; the aliases' second pass; the unpredictable forms refused);
+  Apple's older NEON spelling read.
+- **The check** (`arbace.repr.asm.arm64.encheck`; `bin/repr-asm --arch arm64 encode-check [--record]`, `make
+  repr-asm-encode-check-arm64`, `repr-asm-encode-record-arm64`): each MC/AArch64 line that states an encoding judged by its own stated
+  bytes, the CHECK text printed back, each error test's `error:` lines rejected; `test/asm/encode-results-arm64.edn`,
+  `divergences-encode-arm64.edn` (13 classes by cause), `controls-encode-arm64.txt` (six controls, each fails as it must). About 16 s,
+  0.53 GiB peak.
+
+| level | lines | met | classed (by cause) | failing |
+|---|---:|---:|---|---:|
+| encode: the stated encodings of the 408 base files and AsmParser/AArch64 | 12,298 | **7,685** | 2,299 `:sysreg-name`, 1,787 `:extension`, 326 `:fp16`, 144 `:sysop-name`, 49 `:extension-operands`, 7 `:check-text`, 1 `:directive` | 0 |
+| print: the CHECK text printed canonically (white space as FileCheck matches it) | 12,227 | **12,156** | 66 `:print-radix`, 5 `:check-text` | 0 |
+| reject: the `error:` lines of the 188 error tests (187 base files and AsmParser/AArch64's) | 5,030 | 0 with LLVM's fragment | 4,527 `:message` (refused, no LLVM message yet), 211 `:feature-gate`, 26 `:relocation`, 1 `:operand-spelling`, 265 `:no-instruction` | 0 |
+
+So the base A64, FP and NEON encodings arm64asm's table holds are met: every stated encoding of an ARMv8.0 instruction whose operands
+Go's tables name encodes to the stated bytes, and what does not is a later extension's (its mnemonic, its operands, FP16), a system
+register or operation Go's tables do not name, or a CHECK line that states no instruction. The AR2 row's exit is met for the base
+instructions; the extensions' encodings, LLVM's messages and the hexadecimal spelling are its next slices (ARS24-ARS27). AR1's round
+trips are unchanged (arm64 444 rows, amd64 810, every control failing as it must).
+
+What differs from the plan: the encoder's input is the CHECK text (LLVM's canonical print), the input line only where a block of
+encodings states no text (ARS29); the alias resolution is the encoder's, the forms stay the syntax level (ARS17 (a)) until the
+print by argument kind (ARS25); no feature sets (ARS26). Not built: the gate step and the row (AR10, as AXS21 (a)); Plan 9's
+encodings (AR8); the decoder (AR3).
+
+## Proposed (AR2)
+
+Each with options, the recommended named; none taken.
+
+- **ARS24 The encodings beyond ARMv8.0, the system registers and operations.** arm64asm stops at ARMv8.0 (no LSE, RCPC, PAuth, BTI,
+  MTE, FP16, dot products, ...; not even HVC and SMC), and Go's `sysRegEnc.go` names 431 registers where LLVM's tests name about
+  1,360. (a) LLVM's `AArch64InstrFormats.td`, `AArch64InstrInfo.td` and `AArch64SystemOperands.td` from the pinned
+  llvm-project 23.1.5 tarball (Apache-2.0 WITH LLVM-exception, as AXS4 (a) takes X86's), the instructions, system registers, PSTATE
+  fields, operations and their features as data, arm64asm's table kept as the cross-check for ARMv8.0; (b) Go's
+  `cmd/internal/obj/arm64` optab (`asm7.go`): its encodings are code, not data, and Go's assembler's subset (no MTE's DC, few
+  sysregs); (c) Arm's machine-readable A64 specification (ARS5 (b)) once its licence is checked. *Recommended: (a)* (it amends ARS5
+  (a): the user's decision).
+- **ARS25 The canonical print by argument kind.** (a) the print takes the kind of the row that encodes an operand and spells it as
+  LLVM's InstPrinter does (hexadecimal for logical immediates and MOVI's 64-bit pattern, the preferred alias), the 66 `:print-radix`
+  then met; (b) AR1's decimal print kept and the class kept. *Recommended: (a)*.
+- **ARS26 Feature sets.** (a) each test's `-mattr`/`-mcpu` read from its RUN line and the features of an instruction or register
+  checked (ARS24 (a)'s data), the 211 `:feature-gate` lines then rejected; (b) no features (every encoding accepted). *Recommended:
+  (a)* after ARS24.
+- **ARS27 LLVM's messages.** (a) the refusals given AArch64AsmParser's diagnostics by cause and operand class (the `.td`'s
+  `DiagnosticType`s and the parser's strings), the reject level then judged by the fragment; (b) `:message` kept. *Recommended: (a)*
+  after ARS24.
+- **ARS28 The record's size.** The encode record lists every non-pass by line (0.77 MB). (a) kept until AR10's row; (b) each file's
+  counts by class and a digest of its non-passes. *Recommended: (a)*.
+- **ARS29 The inputs too.** (a) the next slice pairs each input instruction with its CHECK line (in order, per check prefix) and
+  encodes the input as well (the hand-written spellings, the aliases LLVM resolves); (b) CHECK texts only. *Recommended: (a)*.

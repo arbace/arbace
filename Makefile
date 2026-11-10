@@ -23,6 +23,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
   repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle \
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
+  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -556,6 +557,14 @@ repr-asm-link-oracle: ## the oracle tier's, by hand: the host's ld (ld.lld when 
 	bin/repr-asm link-oracle
 repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
+repr-asm-table-arm64: ## A64's encoding table regenerated from Go's arm64asm and cmd/internal/obj/arm64 (bin/repr-asm --arch arm64 table gen)
+	bin/repr-asm --arch arm64 table gen
+repr-asm-table-check-arm64: ## the committed A64 table equal to a fresh generation from TamaGo's GOROOT (bin/repr-asm --arch arm64 table check)
+	bin/repr-asm --arch arm64 table check
+repr-asm-encode-check-arm64: ## AR2's encode check: MC/AArch64's stated encodings, CHECK texts and error lines against test/asm/encode-results-arm64.edn, its classes and controls (bin/repr-asm --arch arm64 encode-check [CORPUS...]; CORPORA=...)
+	bin/repr-asm --arch arm64 encode-check $(CORPORA)
+repr-asm-encode-record-arm64: ## AR2's encode check recorded into test/asm/encode-results-arm64.edn (bin/repr-asm --arch arm64 encode-check --record)
+	bin/repr-asm --arch arm64 encode-check --record $(CORPORA)
 repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)
 	bin/repr-llvm check $(FAMILY)
 repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)

@@ -1392,6 +1392,14 @@ covers what.
   (MIT), Go's `cmd/asm` testdata (BSD-3-Clause), the box's arm64 `.s` (its own files' licences, box/README.md), and gcc
   15.2.0's `libgcc/config/aarch64/*.S` from the pinned tarball (GPL-3.0-or-later with the GCC Runtime Library Exception 3.1:
   read and printed back as test data, never ported).
+- The same namespaces' A64 encoder (AR2, doc/asm/ARM64-SURVEY.md, "As built: AR2 (first slice)"): `arm64/table.ae` is generated
+  data from Go 1.27.1's GOROOT (TamaGo's, pinned by `seed/goroot.sha256`): `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm/`'s
+  `tables.go` (the rows), `condition.go` (the alias conditions, translated into Arbace), `inst.go` (`sysInstsAttrs`) and `inst.json`
+  (the should-be-one bits), golang.org/x/arch at `v0.27.1-0.20260521044007-9c1a596a2c97` as GOROOT's `cmd/vendor/modules.txt`
+  names it, and `src/cmd/internal/obj/arm64/sysRegEnc.go` (the system registers); `arm64/bits.ae` ports arm64asm's
+  `condition_util.go`; `arm64/enc.ae` inverts `decode.go`'s `decodeArg` kind by kind (written by hand, no code copied).
+  golang.org/x/arch's `LICENSE` is Go's BSD 3-Clause License word for word but its first line, `Copyright 2015 The Go Authors.`
+  (section "Go: BSD 3-Clause License"). Its check reads `llvm/test/MC/AArch64` as a corpus, never committed (LLVM's licence).
 - `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
   a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
   SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s
