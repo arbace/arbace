@@ -2906,3 +2906,11 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
 - core-check: 5,398 equal (5,108 at RF12), 114 more but for the allocations (71), 148 differ (381), 117 refused (217). The known
   files unchanged: `bin/rust-front core-essential` (564 of 567) and `bin/rust-front essential`. doc/rust/FRONTEND-SURVEY.md, "As built:
   RF13b, core's bodies equal to rustc's built MIR".
+
+## 2026-11-10: RF13b's core-export, RFP51 proposed
+
+- `bin/rust-front core-export` on RF13b's front end: 32 of 32 exported bodies equal where the pack `rust-core-built` holds rustc's
+  body; the 16 of `str`, `slice`, `fmt` and `num` have none in the pack (it holds core-check's 37 modules), so the run keeps the
+  record's body for them. Against core-oracle's full dump (by hand) the 10 of `str`, `slice` and `fmt` are equal. RF12-P6's "43 of 48"
+  was measured against the full dump. Proposed RFP51 (a): a list of the export's modules added to the pack at the oracle tier.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13b".
