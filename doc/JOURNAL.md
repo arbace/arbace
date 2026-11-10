@@ -2823,3 +2823,10 @@ P14". Ported from GHC 9.14.1 (the pinned `ghc-9.14.1-src.tar.xz`): makeCorePair'
 - 50 against run-check.edn's 53: the same ten programs fail on both sides in two runs (deterministic): compiled against the `-O2` pack's
   interfaces, run on the `-O0` sets, which lack names such as `ioException3`. The ten alone on the `-O2` pack: 10 of 10 pass. Not load, not a
   bug of the branch; noted in the survey.
+
+2026-11-10, hs-p11 (review fix, .tmp/merge-1111/REVIEW2.md §5 items 1 and 3): ran `bin/repr-haskell lib-check --ifaces own --judge
+test/haskell/lib-check-own-ghc-internal.edn` (the new --full step haskell-lib-check-own's command; 8m22s): "265 modules against 265
+recorded; 0 worse, missing or unclassed, 0 better", the control differs as it must (0 of 19 facts equal), exit 0. P12 and NumDecimals
+move nothing the record counts, so nothing is re-recorded (the ratchet has nothing to take). Base mode (`--package base --ifaces
+own`): a missing ghc-prim.cabal is an error (exit 2, with the verb that fetches the corpus), no longer an empty list of
+reexported modules that passes; only the new line changed, bash -n, base's mode not run here (its pools are the night's).
