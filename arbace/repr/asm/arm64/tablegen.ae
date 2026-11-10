@@ -1,0 +1,166 @@
+(ns arbace.repr.asm.arm64.tablegen
+  "AR2's table generator (doc/asm/ARM64-SURVEY.md, \"As built: AR2 (first slice)\"; ARS5 (a)): A64's encoding table made from Go's
+  own sources in TamaGo's GOROOT (pinned by seed/goroot.sha256), read as text:
+  - golang.org/x/arch/arm64/arm64asm (vendored in GOROOT at src/cmd/vendor/golang.org/x/arch/arm64/arm64asm): tables.go's
+    instFormats (each row's mask, value, op, argument kinds, alias condition and the Arm syntax line above it), condition.go's
+    alias conditions (Go expressions, translated into Arbace functions over the instruction word), inst.go's sysInstsAttrs (the
+    DC, IC, AT and TLBI operations);
+  - inst.json (beside them, Arm's encodings as arm64asm's generator read them): the bits that should be one, `(1)`, which
+    instFormats' masks leave out (LDAR's Rs, SMULH's Ra, ...);
+  - cmd/internal/obj/arm64/sysRegEnc.go: SystemReg (the system registers' names and their op0:op1:CRn:CRm:op2 bits).
+  `generate` writes arbace/repr/asm/arm64/table.ae; `bin/repr-asm --arch arm64 table [--check]` runs it (--check: the committed
+  table equal byte for byte to a fresh generation)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def asm-dir "src/cmd/vendor/golang.org/x/arch/arm64/arm64asm")
+(def obj-dir "src/cmd/internal/obj/arm64")
+
+;; --- tables.go: the rows
+
+(defn rows-of
+  "tables.go's instFormats: [MASK VALUE OP [ARG ...] COND SYNTAX] in table order (COND nil when the row has none)."
+  [^String text]
+  (let [body (subs text (.indexOf text "var instFormats"))]
+    (vec (for [[_ syn m v op args c] (re-seq #"// ([^\n]*)\n\t\{(0x[0-9a-f]+), (0x[0-9a-f]+), (\w+), instArgs\{([^}]*)\}, (\w+)\}" body)]
+           [(Long/parseLong (subs m 2) 16) (Long/parseLong (subs v 2) 16) op
+            (vec (remove empty? (map str/trim (str/split args #","))))
+            (when-not (= c "nil") c) syn]))))
+
+;; --- condition.go: Go expressions to Arbace
+
+(defn- tokens [^String s]
+  (re-seq #"0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|>>|<<|==|!=|<=|>=|&&|\|\||[-+&|^!<>(),]" s))
+
+(def ^:private binops
+  ;; Go's precedence: 5 * / % << >> & &^, 4 + - | ^, 3 == != < <= > >=, 2 &&, 1 ||
+  {">>" [5 'bit-shift-right] "<<" [5 'bit-shift-left] "&" [5 'bit-and]
+   "+" [4 '+] "-" [4 '-] "|" [4 'bit-or] "^" [4 'bit-xor]
+   "==" [3 '=] "!=" [3 'not=] "<" [3 '<] "<=" [3 '<=] ">" [3 '>] ">=" [3 '>=]
+   "&&" [2 'and] "||" [1 'or]})
+
+(declare parse-expr)
+
+(defn- parse-unary [ts]
+  (let [[t & r] ts]
+    (cond
+      (= t "!") (let [[e r] (parse-unary r)] [(list 'not e) r])
+      (= t "-") (let [[e r] (parse-unary r)] [(list '- e) r])
+      (= t "^") (let [[e r] (parse-unary r)] [(list 'bit-not e) r])
+      (= t "(") (let [[e r] (parse-expr r 0)] (assert (= (first r) ")")) [e (rest r)])
+      (re-matches #"0x[0-9a-fA-F]+" t) [(Long/parseLong (subs t 2) 16) r]
+      (re-matches #"[0-9]+" t) [(Long/parseLong t) r]
+      (and (re-matches #"[A-Za-z_]\w*" t) (= (first r) "("))
+      (let [[args r] (loop [r (rest r) args []]
+                       (if (= (first r) ")") [args (rest r)]
+                           (let [[e r] (parse-expr r 0)]
+                             (recur (if (= (first r) ",") (rest r) r) (conj args e)))))]
+        [(if (= t "uint8") (list 'bit-and (first args) 0xff) (apply list (symbol "b" t) args)) r])
+      (= t "instr") ['x r]
+      (re-matches #"sys_[A-Z]+" t) [(keyword t) r]
+      :else (throw (ex-info (str "tablegen: unexpected token " t) {})))))
+
+(defn parse-expr [ts minp]
+  (loop [[lhs r] (parse-unary ts)]
+    (let [[p f] (binops (first r))]
+      (if (and p (> p minp))
+        (let [[rhs r] (parse-expr (rest r) p)] (recur [(list f lhs rhs) r]))
+        [lhs r]))))
+
+(defn conds-of
+  "condition.go's functions: [NAME FORM], FORM the Arbace expression over the word `x`."
+  [^String text]
+  (vec (for [[_ n e] (re-seq #"func (\w+)\(instr uint32\) bool \{\n\treturn ([^\n]*)\n\}" text)]
+         (let [[f r] (parse-expr (tokens e) 0)]
+           (assert (empty? r) (str "tablegen: " n ": trailing " (vec r)))
+           [n f]))))
+
+;; --- inst.go: sysInstsAttrs; sysRegEnc.go: SystemReg
+
+(defn sysops-of [^String text]
+  (vec (for [[_ op1 cn cm op2 t n o] (re-seq #"\{(\d+), (\d+), (\d+), (\d+)\}:\s*\{sys_(\w+), \"(\w+)\", (true|false)\}" text)]
+         [n (keyword (str/lower-case t)) (Long/parseLong op1) (Long/parseLong cn) (Long/parseLong cm) (Long/parseLong op2) (= o "true")])))
+
+(defn sysregs-of [^String text]
+  (vec (for [[_ n e f] (re-seq #"\{\"(\w+)\", REG_\w+, (0x[0-9a-f]+), ([A-Z_| ]+)\}" text)]
+         [n (Long/parseLong (subs e 2) 16) (keyword (str/lower-case (str/replace (str/trim f) #"\s*\|\s*" "+")))])))
+
+;; --- inst.json: the bits that should be one, (1), which instFormats' masks leave out
+
+(defn sbo-of
+  "inst.json's rows with (1) bits: [OP FIXED-MASK FIXED-VALUE SBO-MASK], each field of Bits a bit (0, 1, (1), (0)), a constant
+  (`10:2`) or a named field (`Rn:5`), from bit 31 down; OP the Syntax's first word."
+  [^String text]
+  (vec (for [[_ bits syn] (re-seq #"\"Bits\":\"([^\"]*)\",\"Arch\":\"[^\"]*\",\"Syntax\":\"([^\"]*)\"" text)
+             :when (str/includes? bits "(1)")]
+         (let [[fm fv sm] (reduce (fn [[fm fv sm pos] ^String f]
+                                    (let [[_ c w] (re-matches #"(.*):(\d+)" f)
+                                          w (if w (Long/parseLong w) 1)
+                                          pos (- pos w)
+                                          k (or c f)]
+                                      (cond
+                                        (= f "(1)") [fm fv (bit-or sm (bit-shift-left 1 pos)) pos]
+                                        (re-matches #"[01]+" k) [(bit-or fm (bit-shift-left (dec (bit-shift-left 1 w)) pos))
+                                                                 (bit-or fv (bit-shift-left (Long/parseLong k 2) pos)) sm pos]
+                                        :else [fm fv sm pos])))
+                                  [0 0 0 32] (str/split bits #"\|"))]
+           [(first (str/split syn #" ")) fm fv sm]))))
+
+;; --- the generated namespace
+
+(defn- hex [^long n] (str "0x" (format "%08x" n)))
+
+(defn generate
+  "The text of arbace/repr/asm/arm64/table.ae from the GOROOT at `goroot`."
+  ^String [^String goroot]
+  (let [tables (slurp (str goroot "/" asm-dir "/tables.go"))
+        rows (rows-of tables)
+        conds (conds-of (slurp (str goroot "/" asm-dir "/condition.go")))
+        sysops (sysops-of (slurp (str goroot "/" asm-dir "/inst.go")))
+        sysregs (sysregs-of (slurp (str goroot "/" obj-dir "/sysRegEnc.go")))
+        sbo (sbo-of (slurp (str goroot "/" asm-dir "/inst.json")))
+        hit? (fn [[op fm fv]] (some (fn [[_ v o]] (and (= o op) (= (bit-and v fm) fv))) rows))
+        used (set (keep #(nth % 4) rows))]
+    (doseq [x sbo] (assert (hit? x) (str "tablegen: inst.json's " (first x) " (1) bits match no row")))
+    (assert (= (count rows) (count (re-seq #"\n\t\{0x" (subs tables (.indexOf tables "var instFormats"))))) "tablegen: a row not read")
+    (str
+     ";; GENERATED by arbace.repr.asm.arm64.tablegen (bin/repr-asm --arch arm64 table) from TamaGo's GOROOT (go1.27.1, pinned by\n"
+     ";; seed/goroot.sha256): " asm-dir "/{tables,condition,inst}.go, inst.json and\n"
+     ";; " obj-dir "/sysRegEnc.go. Do not edit: regenerate. BSD-3-Clause (The Go Authors; LICENSE.md).\n"
+     "(ns arbace.repr.asm.arm64.table\n"
+     "  \"A64's encoding table, from Go's arm64asm and cmd/internal/obj/arm64 (generated: arbace.repr.asm.arm64.tablegen).\"\n"
+     "  (:require [arbace.repr.asm.arm64.bits :as b]))\n\n"
+     ";; instFormats in table order: [MASK VALUE OP [ARG ...] COND SYNTAX]\n"
+     "(def rows\n  [\n"
+     (apply str (for [[m v op args c syn] rows]
+                  (str "   [" (hex m) " " (hex v) " " (pr-str op) " " (pr-str args) " " (pr-str c) " " (pr-str syn) "]\n")))
+     "  ])\n\n"
+     ";; condition.go's alias conditions over the instruction word x\n"
+     "(def conds\n  {\n"
+     (apply str (for [[n f] conds :when (used n)] (str "   " (pr-str n) " (fn [^long x] " (pr-str f) ")\n")))
+     "  })\n\n"
+     ";; inst.json's bits that should be one: [OP FIXED-MASK FIXED-VALUE SBO-MASK], a row of OP whose value has FIXED-VALUE\n"
+     ";; under FIXED-MASK sets SBO-MASK's bits that no argument sets\n"
+     "(def sbo\n  [\n"
+     (apply str (for [[o fm fv sm] sbo] (str "   [" (pr-str o) " " (hex fm) " " (hex fv) " " (hex sm) "]\n")))
+     "  ])\n\n"
+     ";; inst.go's sysInstsAttrs: [NAME KIND OP1 CRN CRM OP2 HAS-OPERAND]\n"
+     "(def sysops\n  [\n"
+     (apply str (for [s sysops] (str "   " (pr-str s) "\n")))
+     "  ])\n\n"
+     ";; sysRegEnc.go's SystemReg: [NAME ENC ACCESS], ENC op0:op1:CRn:CRm:op2 at bits 5-20\n"
+     "(def sysregs\n  [\n"
+     (apply str (for [[n e f] sysregs] (str "   [" (pr-str n) " " (hex e) " " f "]\n")))
+     "  ])\n")))
+
+(defn -main [& args]
+  (let [[goroot out check] args
+        text (generate goroot)]
+    (if (= check "--check")
+      (if (= text (slurp out))
+        (println (str "repr-asm table: " out " equal to a fresh generation"))
+        (do (println (str "FAIL: repr-asm table: " out " differs from a fresh generation (bin/repr-asm --arch arm64 table)"))
+            (System/exit 1)))
+      (do (spit out text) (println (str "repr-asm table: wrote " out))))
+    (shutdown-agents)))

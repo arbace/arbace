@@ -158,6 +158,13 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
   ARS17-ARS23. Next: AR2 (Go's optab and arm64asm as tables, the aliases, the stated encodings and CHECK texts).
+- Assembly, arm64: `asm-ar2` (on `asm-ar1`; AR2's first slice, doc/asm/ARM64-SURVEY.md, "As built: AR2 (first slice)"): A64's table
+  generated from Go's arm64asm and `sysRegEnc.go` in TamaGo's GOROOT (`bin/repr-asm --arch arm64 table --check`), the encoder over
+  all 312 argument kinds, `encode-check` judged by the tests' own stated bytes: `MC/AArch64`'s 12,298 stated encodings 7,685 met,
+  the rest classed (later extensions, FP16, system registers and operations Go's tables do not name), none failing; CHECK texts
+  printed back 12,156 of 12,227 (66 hexadecimal spellings); the 188 error tests' 5,030 `error:` lines classed (refused without
+  LLVM's message, feature-gated, relocations). Proposed ARS24-ARS29 (ARS24: LLVM's AArch64 `.td` for the extensions and registers,
+  amending ARS5 (a): the user's). Next: ARS24's table, the print by argument kind, the input lines.
 
 ## Decided, not built yet
 

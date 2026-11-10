@@ -200,3 +200,29 @@ through Go's own assembler (ARS3 (a)).
 | `V0.D[1]`, `x+0(SB)/8`, `*R1` | `(elt V0.D 1)`, `(size (addr (+ x 0) [SB]) 8)`, `(ind R1)` |
 
 A parenthesized group is always a group, never an expression's parentheses, so `$(1)` and `(R1)` print back as written.
+
+## 12. arm64's encoder (`arbace.repr.asm.arm64.enc`, AR2, first slice)
+
+`encode` takes an instruction form of §10 and gives its 32-bit word, the operands left as fixups (a symbol, `:lo12:sym`,
+`sym@PAGEOFF`: the field zero) and the row it used, or refuses with a cause (`:no-mnemonic`, `:operands`, `:arg-kind`,
+`:unpredictable`). The table, `arbace.repr.asm.arm64.table`, is generated (`bin/repr-asm --arch arm64 table`, `--check`) from Go's
+golang.org/x/arch/arm64/arm64asm as TamaGo's GOROOT vendors it (`tables.go`'s 1,208 rows: mask, value, op, argument kinds, alias
+condition; `condition.go`'s conditions as Arbace functions over the word; `inst.go`'s DC and TLBI operations; `inst.json`'s
+should-be-one bits) and `cmd/internal/obj/arm64/sysRegEnc.go`'s 431 system registers (ARS5 (a)). The rows of the mnemonic are tried in
+arm64asm's order (MOV's immediate as LLVM prefers it: MOVZ's alias, MOVN's, ORR's); each argument kind consumes operands and sets
+fields (the inverse of arm64asm's `decodeArg`); a row whose fields conflict, whose operands are left over, whose should-be-one bits
+are unset or whose condition fails is skipped; a second pass takes the aliases LLVM prints where arm64asm's decoder prefers another
+(`lsl w3, w2, #0`, `bfi x0, xzr, #5, #9`). LLVM's conventions where its bytes differ from the architecture's choice: MOVZ with a TLS
+relocation is MOVN's opcode (fixMOVZ), the constrained-unpredictable forms are refused (a load pair into one register, a written-back
+base that is the transfer's register, an exclusive store's status that is a source), a bare symbolic immediate is not a relocation.
+Apple's older NEON spelling (`ld1.8b {v0}, [x1]`, `shrn.8b v0, v0, #1`) is read as the suffix on the first operand and the
+candidates (the suffix, widened, narrowed, 16b) on the others.
+
+The judges (`bin/repr-asm --arch arm64 encode-check`, `arbace.repr.asm.arm64.encheck`; own verdicts, no llvm-mc): over
+`llvm/test/MC/AArch64`'s base files, (encode) every line that states an encoding, its CHECK text (each alternative of a FileCheck
+`{{a|b}}`, a class `{{[wx]}}`, an optional group) or, for a block of text-less `CHECK: encoding:` lines, the input line it pairs
+with, encoded to the stated bytes on every stated bit (a fixup's `A` bits unstated); (print) the CHECK text's forms printed
+canonically equal to it, white space collapsed; (reject) each error test's `error:` lines: the instruction the line echoes or
+follows refused. Records `test/asm/encode-results-arm64.edn` (each file's lines and passes a level, every non-pass by
+`CORPUS/NAME:LINE`), classes `test/asm/divergences-encode-arm64.edn` (a `mismatch:` or `crash:` is in none), negative controls
+`test/asm/controls-encode-arm64.txt` (a line's text against another line's bytes).

@@ -2898,3 +2898,45 @@ ARS23 (a byte a character in Plan 9's UTF-8 names). Sources studied: llvm-projec
 `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`, `llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCAsmInfo.cpp`,
 `llvm/lib/MC/MCParser/AsmLexer.cpp`, `llvm/include/llvm/MC/MCAsmInfo.h`; TamaGo's go1.27.1 `src/cmd/asm/internal/{asm,lex}`; the Mac VM's
 inventory (queue 255) for the oracle tier to come. No code copied (LICENSE.md, doc/ARBACE.md).
+
+## 2026-11-10 arm64 assembly: AR2's first slice, A64's table and encoder (branch `asm-ar2`, from `mac/asm-ar1` `6b8d79358`)
+
+AR2 of doc/asm/ARM64-SURVEY.md §12, its first slice, on the light lane (stage 0, 0.53 GiB peak, no lock, no assembler run, nothing
+fetched or installed), beside AX2 on `asm-ax2` (shared files touched additively: SPEC.md's new §12, bin/repr-asm's new verbs `table`
+and `encode-check`, new Makefile targets, new records with the `-arm64` suffix). The user's ARS5 (a): Go's tables and arm64asm.
+arm64asm needed no fetch: TamaGo's GOROOT vendors golang.org/x/arch at `v0.27.1-0.20260521044007-9c1a596a2c97`
+(`src/cmd/vendor/golang.org/x/arch/arm64/arm64asm`, `modules.txt`), pinned with the toolchain by `seed/goroot.sha256`; the host's
+module cache and /usr/lib/go hold other copies, not used.
+
+Built: `arbace.repr.asm.arm64.tablegen` reads arm64asm's `tables.go` (1,208 rows), `condition.go` (93 alias conditions, Go
+expressions parsed by Go's precedence into Arbace functions over the word), `inst.go`'s `sysInstsAttrs` (106 DC and TLBI operations),
+`inst.json`'s should-be-one bits (30 rows; tables.go's masks leave them out, so SMULH's Ra and LDAR's Rs were zero until they were
+read) and `cmd/internal/obj/arm64/sysRegEnc.go` (431 system registers) into the committed `arbace/repr/asm/arm64/table.ae`
+(`bin/repr-asm --arch arm64 table --check`: byte for byte). `bits.ae` ports `condition_util.go`. `arbace.repr.asm.arm64.enc` inverts
+`decode.go`'s `decodeArg` for every one of the 312 argument kinds, the rows of a mnemonic tried in arm64asm's order. LLVM's own
+choices, found by the check and followed: MOV's immediate MOVZ, then MOVN, then ORR (arm64asm's decode order prefers ORR's alias);
+MOVZ with a TLS relocation encoded as MOVN (`AArch64MCCodeEmitter`'s fixMOVZ: `tprel_gN`, `dtprel_gN`, `gottprel_g1`); a
+relocation's specifier sets MOVZ's half-word; a bare symbolic immediate is not a relocation; no immediate shifted unasked
+(`add w5, w6, #0x1000` rejected); the constrained-unpredictable forms refused (`validateInstruction`); an alias's tied register
+(CNEG, ROR, MOV's ORR) filled; a second pass for the aliases LLVM prints where arm64asm's decoder prefers another (`lsl w3, w2,
+#0`, BFI before BFC); Apple's older NEON spelling (`shrn.8b v0, v0, #1`: the suffix the first operand's, the others widened,
+narrowed or 16b); TBZ's bit 31 from the bit number, an X register with a bit below 32 allowed.
+
+The check (`arbace.repr.asm.arm64.encheck`, `bin/repr-asm --arch arm64 encode-check`): each line stating an encoding, its CHECK text
+(each alternative of FileCheck's `{{a|b}}`, `{{[wx]}}`, optional groups), the text one line up for a `CHECK-ENCODING:` line, the
+input line for a block of text-less `CHECK: encoding:` lines after a block of inputs of the same size, encoded to the stated bytes
+(a fixup's `A` bits unstated; `0x90'A'` the byte with the fixup's bits zero); the CHECK text printed back (white space as FileCheck
+matches it); each error test's `error:` lines, the instruction echoed after or written before, refused. Results: encode 7,685 of
+12,298 met, classed 2,299 `:sysreg-name`, 1,787 `:extension`, 326 `:fp16`, 144 `:sysop-name`, 49 `:extension-operands`, 7
+`:check-text`, 1 `:directive`, failing 0; print 12,156 of 12,227, classed 66 `:print-radix`, 5 `:check-text`; reject 5,030 lines of
+188 error tests, classed 4,527 `:message` (refused, LLVM's message not given), 211 `:feature-gate`, 26 `:relocation`, 1
+`:operand-spelling`, 265 `:no-instruction`. Six negative controls fail as they must. AR1's round trips rerun unchanged (arm64, amd64).
+
+Considered: `go/arbace` goi running arm64asm's Decode as the oracle (a decoder, not an encoder; AR3's); encoding by search over the
+decoder (the 19- and 26-bit fields rule it out); joining inst.json to tables.go by syntax (their spellings differ: by op and fixed
+bits instead). Proposed (doc/asm/ARM64-SURVEY.md, "Proposed (AR2)"): ARS24 (LLVM's AArch64 `.td` for the extensions, registers and
+features, amending ARS5 (a); Go's optab is code, Arm's specification waits for its licence), ARS25 (the print by argument kind), ARS26
+(feature sets from the RUN lines), ARS27 (LLVM's messages), ARS28 (the record's size), ARS29 (the input lines too). Sources: TamaGo's
+go1.27.1 GOROOT `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm/{tables,condition,condition_util,decode,inst}.go`, `inst.json`,
+`src/cmd/internal/obj/arm64/{sysRegEnc,asm7}.go`; llvm-project-23.1.5's `llvm/test/MC/AArch64` (the corpus). LICENSE.md and
+doc/ARBACE.md record the generated table's and the ports' origins (Go's BSD 3-Clause License).
