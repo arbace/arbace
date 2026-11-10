@@ -111,7 +111,7 @@
 #                                  of the runtime (go/arbace/py), each module on its loop with its GOCOVERDIR (run: the main
 #                                  host's night); blocks: tools/covsubset's block sets per module; subset: the modules of every
 #                                  covered block, one per class, the controls (bin/cover subset); --write: corpora.edn's :subset
-#   bin/pyi runtime print|read|vet|check|tables
+#   bin/pyi runtime print|read|vet|check|tables|gen-tables
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
 #                                  read back into go/arbace/py (read; go/arbace/libm, go/arbace/expat and go/arbace/pyexpat,
@@ -133,6 +133,11 @@
 #                                  tables: the two generators alone (the oracle tier's); queue 238: also the bytecode view's
 #                                  tables (tools/pyi/bytecode_table.py, 3.14.10's and --suffix 315's; opcode_table.py --suffix
 #                                  315 by the 3.15.2 oracle), each 3.15 one with its negative control (3.14.10's made into it)
+#                                  gen-tables [TABLE...] (queue 265): builtins_{opcode,errno}_table.go made by Arbace from the pinned
+#                                  CPython 3.14.10 and musl 1.2.6 tarballs (tools/pyi/runtime_tables.ae on stage 0: the modules' own
+#                                  C, errnomodule.c's add_errcode calls, _opcode's metadata, preprocessed by repr/c's preprocessor),
+#                                  gofmt'd, byte for byte the printed runtime's; a control per table (one source fact changed must
+#                                  differ); no python3 (tools/pyi/{opcode,errno}_table.py: the oracle tier's)
 #   bin/pyi aot FILE.py [ARGS...]  PY8: FILE compiled by pyi's AOT (arbace.python.aot: the IR to Go forms over go/arbace/py, its
 #                                  module-level imports compiled ahead; printed by repr/go, built by TamaGo's go in
 #                                  .tmp/repr-python/pyi/aot/mod) and run; source compiled at run time by the host's compiler
@@ -1597,8 +1602,81 @@ cmd_runtime() {
       python3 -I -S -B "$root/tools/pyi/cjkcodecs_table.py" "$top" "$t/src/py/builtins_cjk_table.go" --check \
         && echo "runtime: builtins_cjk_table.go is cjkcodecs_table.py's from the tarball's headers" || { echo "runtime: builtins_cjk_table.go DIFFERS"; rc=1; }
       return $rc ;;
-    *) die "usage: bin/pyi runtime print|read|vet|check|tables" ;;
+    gen-tables) shift; runtime_gen_tables "$@" ;;
+    *) die "usage: bin/pyi runtime print|read|vet|check|tables|gen-tables" ;;
   esac
+}
+
+# musl_src: musl 1.2.6's release tarball (test/c/corpora.edn's :musl-1.2.6, the C crop's pin) checked by its SHA-256 and
+# extracted into $WORK/musl/musl-1.2.6 (queue 265: the runtime tables' libc headers and strerror table); the tarball from
+# bin/lib/ci/musl's place, the main checkout's C1 fetch, or fetched; its directory printed
+musl_src() {
+  local d="$WORK/musl" m="$WORK/musl/musl-1.2.6" url sum tb cmain
+  url=$(sed -n '/:musl-1.2.6/,/:top/s/^ *:url "\(.*\)"/\1/p' "$root/test/c/corpora.edn")
+  sum=$(sed -n '/:musl-1.2.6/,/:top/s/^ *:sha256 "\(.*\)"/\1/p' "$root/test/c/corpora.edn")
+  [ -f "$m/.pinned" ] && [ "$(cat "$m/.pinned")" = "$sum" ] && { echo "$m"; return 0; }
+  cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
+  tb=${CI_MUSL_TARBALL:-$root/.tmp/ci-musl/musl-1.2.6.tar.gz}
+  [ -f "$tb" ] || tb=$cmain/.tmp/c1/musl/musl-1.2.6.tar.gz
+  mkdir -p "$d"
+  if [ ! -f "$tb" ]; then
+    tb=$d/musl-1.2.6.tar.gz
+    wget -q -O "$tb.part" "$url" || { rm -f "$tb.part"; die "musl: fetching $url failed"; }
+    mv "$tb.part" "$tb"
+  fi
+  echo "$sum  $tb" | sha256sum -c --quiet >&2 || die "musl: $tb does not match test/c/corpora.edn's pin"
+  rm -rf "$m"; tar -xzf "$tb" -C "$d" && echo "$sum" > "$m/.pinned"
+  echo "$m"
+}
+
+# the runtime tables Arbace makes (queue 265): table, the printed runtime's file, the sources the generator reads (CPython's
+# tree, musl's: the negative control's overlay copies them)
+RT_GEN_TABLES="opcode errno"
+RT_GEN_CPY="Include/opcode_ids.h Include/opcode.h Include/internal/pycore_opcode_metadata.h Include/internal/pycore_intrinsics.h
+  Include/internal/pycore_ceval.h Python/intrinsics.c Python/ceval.c Modules/_opcode.c Lib/_opcode_metadata.py Modules/errnomodule.c"
+
+# runtime_gen_tables [TABLE...] (queue 265): go/arbace/py's tables tools/pyi/*_table.py recorded from CPython's own modules,
+# made by Arbace (tools/pyi/runtime_tables.ae on stage 0: the modules' C sources preprocessed by repr/c's preprocessor
+# against the pinned headers) from the pinned CPython 3.14.10 tarball and musl 1.2.6's, gofmt'd by TamaGo's gofmt and
+# compared with the printed runtime's file byte for byte; then each table's negative control (GTS81 (a)): the same
+# generator over the sources with one fact changed (opcode: BINARY_OP's metadata without HAS_ARG_FLAG; errno: musl's
+# strerror text of EPERM) must differ from the committed file. No python3: the python3 generators are the oracle tier's
+# (bin/pyi runtime tables, where the oracle runs live)
+runtime_gen_tables() {
+  local tables=("$@") t="$WORK/runtime-gen" top="$root/.tmp/repr-python/Python-3.14.10" musl rc=0 tb f
+  [ ${#tables[@]} -gt 0 ] || read -ra tables <<< "$RT_GEN_TABLES"
+  [ -d "$top/Lib" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
+  musl=$(musl_src) || return 1
+  rm -rf "$t"; mkdir -p "$t/out" "$t/ctl/out"; runtime_print "$t/src"
+  gen() { (cd "$root" && ARBACE_PATH="$root" "$(arbace_exe)" "$root/tools/pyi/runtime_tables.ae" --cpython "$1" --musl "$2" "$3" "${@:4}") \
+            2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; }; return "${PIPESTATUS[0]}"; }
+  gen "$top" "$musl" "$t/out" "${tables[@]}" || return 1
+  for tb in "${tables[@]}"; do
+    f=builtins_${tb}_table.go
+    tamago_go gofmt "$t/out/$f" > "$t/out/$f.fmt" || { rc=1; continue; }
+    if cmp -s "$t/out/$f.fmt" "$t/src/py/$f"; then
+      echo "runtime: $f is Arbace's from the pinned sources (tools/pyi/runtime_tables.ae $tb), byte for byte"
+    else
+      echo "runtime: $f DIFFERS from Arbace's (diff $t/out/$f.fmt $t/src/py/$f)"; rc=1
+    fi
+  done
+  # the controls: copies of the sources read, one fact changed in each
+  local c="$t/ctl/cpython" m="$t/ctl/musl"
+  for f in $RT_GEN_CPY; do mkdir -p "$c/$(dirname "$f")"; cp "$top/$f" "$c/$f"; done
+  mkdir -p "$m"; cp -r "$musl/include" "$musl/arch" "$m/"; mkdir -p "$m/src/errno"; cp "$musl/src/errno/__strerror.h" "$m/src/errno/"
+  sed -i 's/^\(    \[BINARY_OP\] = { true, INSTR_FMT_IBC0000, \)HAS_ARG_FLAG | /\1/' "$c/Include/internal/pycore_opcode_metadata.h"
+  sed -i 's/^E(EPERM, *"Operation not permitted")/E(EPERM, "Operation not allowed")/' "$m/src/errno/__strerror.h"
+  gen "$c" "$m" "$t/ctl/out" "${tables[@]}" >/dev/null || { echo "control not judged: runtime gen-tables: the generator failed on the controls' sources"; return 1; }
+  for tb in "${tables[@]}"; do
+    f=builtins_${tb}_table.go
+    tamago_go gofmt "$t/ctl/out/$f" > "$t/ctl/out/$f.fmt" 2>/dev/null
+    if cmp -s "$t/ctl/out/$f.fmt" "$t/src/py/$f"; then
+      echo "control passed: runtime gen-tables $tb: a changed source made the committed table"; rc=1
+    else
+      echo "runtime gen-tables control $tb (one source fact changed): differs as it must"
+    fi
+  done
+  return $rc
 }
 
 # ucd315_check DIR (queue 237): DIR's builtins_unicodedata_table315.go (UCD 17.0.0, the 3.15 switch's) against

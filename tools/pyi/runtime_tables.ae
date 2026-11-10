@@ -1,0 +1,344 @@
+;; tools/pyi/runtime_tables.ae (queue 265; doc/python/PYTHON-SURVEY.md, "As built: 265"): go/arbace/py's runtime tables that
+;; tools/pyi/*_table.py recorded from CPython's own modules (python3 at record time), made by Arbace from pinned sources, by the
+;; rules CPython's modules apply when they initialize: each module's constants as its C source adds them, preprocessed by
+;; arbace.repr.c.pp (repr/c's port of cc's preprocessor) against the pinned headers, the values evaluated here.
+;;
+;; Run on stage 0 (ARBACE_PATH at the checkout): EXE tools/pyi/runtime_tables.ae OPTION... OUT TABLE...
+;;   --cpython DIR   the pinned CPython 3.14.10 tarball's tree (tools/pydump/PYTHON_VERSION, test/python/corpora.edn's
+;;                   :cpython-3.14.10)
+;;   --musl DIR      musl 1.2.6's tarball's tree (test/c/corpora.edn's :musl-1.2.6, the C crop's pin): its headers as musl's
+;;                   install composes them (obj/include/bits/alltypes.h made here by tools/mkalltypes.sed's three rules,
+;;                   arch/ARCH/bits over arch/generic/bits, include/), for x86_64 and aarch64; src/errno/__strerror.h
+;;   --goroot DIR    TamaGo's GOROOT (seed/goroot.sha256): src/syscall/zerrors_linux_{amd64,arm64}.go, the names Go's syscall
+;;                   declares (written as syscall.NAME, each architecture compiling its own value), as the python3 generators
+;;   --work DIR      the preprocessor's translation units, kept for reading
+;; OUT the directory the tables' Go is written into (not gofmt'd: bin/pyi runtime gen-tables formats it with TamaGo's gofmt
+;; and compares it with the printed runtime's file byte for byte). TABLE: opcode, errno (the two made so far).
+;;
+;; opcode (tools/pyi/opcode_table.py's builtins_opcode_table.go): _opcode's predicates over Include/internal/
+;; pycore_opcode_metadata.h's _PyOpcode_opcode_metadata (IS_VALID_OPCODE, OPCODE_HAS_*, pycore_opcode_utils.h's
+;; IS_BLOCK_PUSH_OPCODE) for each opcode below 512 that is valid or in Lib/_opcode_metadata.py's opmap; the intrinsics' names
+;; (Python/intrinsics.c's INTRINSIC_FUNC_ENTRY tables), the special methods' (Python/ceval.c's _Py_SpecialMethods' _Py_ID
+;; names by SPECIAL_ index) and the binary operators' (Modules/_opcode.c's ADD_NB_OP list by NB_ index).
+;; errno (errno_table.py's builtins_errno_table.go): Modules/errnomodule.c's errno_exec, its add_errcode calls preprocessed
+;; against musl's <errno.h> (errorcode's entry of a number the last call's name, as _add_errcode's dict); strerror's texts by
+;; musl's own table (src/errno/__strerror.h through strerror.c's rule: the entry of the number, the last one of a number, else
+;; entry 0's), the same on both architectures (checked).
+(require '[arbace.repr.c.pp :as pp] '[arbace.string :as str])
+(import '[java.io File])
+
+(defn- fail! [& xs] (throw (ex-info (apply str xs) {})))
+
+(defn- lines [^String f] (str/split-lines (slurp f)))
+
+(defn- region
+  "The lines of file `f` from the first that matches `from` (included) to the first after it that matches `to` (excluded)"
+  [f from to]
+  (let [ls (lines f)
+        start (or (first (keep-indexed (fn [i l] (when (re-find from l) i)) ls)) (fail! f ": no line matches " from))
+        end (or (first (keep-indexed (fn [i l] (when (and (> i start) (re-find to l)) i)) ls)) (fail! f ": no end " to))]
+    (str/join "\n" (subvec (vec ls) start end))))
+
+(defn- defines
+  "The one-line #define lines of file `f` whose name matches `re`"
+  [f re]
+  (str/join "\n" (for [l (lines f) :let [[_ n] (re-find #"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)[\s(]" (str l " "))]
+                       :when (and n (re-find re n))]
+                   l)))
+
+;; ---- musl's headers as its install composes them
+
+(defn- alltypes
+  "musl's obj/include/bits/alltypes.h: tools/mkalltypes.sed over arch/ARCH/bits/alltypes.h.in and include/alltypes.h.in"
+  [musl arch]
+  (str/join "\n"
+            (for [f [(str musl "/arch/" arch "/bits/alltypes.h.in") (str musl "/include/alltypes.h.in")]
+                  l (lines f)]
+              (if-let [[_ k a b] (or (when-let [[_ x y] (re-matches #"TYPEDEF (.*) ([^ ]*);" l)] [nil "" x y])
+                                     (when-let [[_ x y] (re-matches #"STRUCT * ([^ ]*) (.*);" l)] [nil "struct_" x y])
+                                     (when-let [[_ x y] (re-matches #"UNION * ([^ ]*) (.*);" l)] [nil "union_" x y]))]
+                (let [[decl nm] (if (= k "") [(str "typedef " a " " b ";") b] [(str (subs k 0 (dec (count k))) " " a " " b ";") a])]
+                  (str "#if defined(__NEED_" k nm ") && !defined(__DEFINED_" k nm ")\n" decl "\n#define __DEFINED_" k nm "\n#endif\n"))
+                l))))
+
+(def ^:private arches {:amd64 "x86_64" :arm64 "aarch64"})
+
+(defn- predefined
+  "gcc's predefined macros (test/c/host/predefined/gnu17.h, recorded from the C crop's x86_64 gcc), for arm64 with x86's own
+  macros replaced by aarch64's: musl's and Linux's arch-specific headers are chosen by directory, not by these"
+  [goarch]
+  (let [t (slurp "test/c/host/predefined/gnu17.h")]
+    (if (= goarch :amd64)
+      t
+      (str (str/join "\n" (remove #(re-find #"__(x86_64|amd64|SSE|MMX|FXSR|code_model|SEG_)" %) (str/split-lines t)))
+           "\n#define __aarch64__ 1\n#define __ARM_ARCH 8\n"))))
+
+(defn- sysroot
+  "The search list of musl's headers for `goarch` (the composed alltypes.h written under WORK)"
+  [opts goarch]
+  (let [musl (:musl opts) arch (arches goarch)
+        obj (str (:work opts) "/musl-" arch "/include")]
+    (.mkdirs (File. (str obj "/bits")))
+    (spit (str obj "/bits/alltypes.h") (alltypes musl arch))
+    [obj (str musl "/arch/" arch) (str musl "/arch/generic") (str musl "/include")]))
+
+(defn- preprocess
+  "The text of translation unit `text` (written as WORK/NAME) preprocessed for `goarch` with search list `sys`"
+  [opts goarch sys name text]
+  (let [f (str (:work opts) "/" name)]
+    (spit f text)
+    (let [r (pp/preprocess {:predefined (predefined goarch) :include [] :iquote [] :sys sys :std :gnu17 :has {} :base "."} f)]
+      (when (seq (:errors r)) (fail! name ": the preprocessor's errors: " (str/join "; " (take 5 (:errors r)))))
+      (pp/text r))))
+
+;; ---- the markers and their values
+
+(defn- tokens
+  "C's tokens of `s` (after preprocessing): numbers, identifiers, string and character literals, punctuators"
+  [s]
+  (re-seq #"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[A-Za-z_][A-Za-z0-9_]*|0[xX][0-9A-Fa-f]+[uUlL]*|[0-9]+[uUlL]*|<<|>>|<=|>=|==|!=|&&|\|\||->|[-+*/%&|^~!()<>?:,;{}\[\].=]" s))
+
+(defn- markers
+  "Each call `tag`(ARG, ...) in the token sequence `ts`: [[ARG-TOKENS ...] ...], the arguments split at the top level's commas"
+  [ts tag]
+  (loop [ts (vec ts) i 0 out []]
+    (if (>= i (count ts))
+      out
+      (if (and (= (ts i) tag) (= (get ts (inc i)) "("))
+        (let [[args j] (loop [j (+ i 2) depth 0 cur [] args []]
+                         (let [t (ts j)]
+                           (cond
+                             (and (= t ")") (zero? depth)) [(conj args cur) (inc j)]
+                             (and (= t ",") (zero? depth)) (recur (inc j) depth [] (conj args cur))
+                             (#{"(" "[" "{"} t) (recur (inc j) (inc depth) (conj cur t) args)
+                             (#{")" "]" "}"} t) (recur (inc j) (dec depth) (conj cur t) args)
+                             :else (recur (inc j) depth (conj cur t) args))))]
+          (recur ts j (conj out args)))
+        (recur ts (inc i) out)))))
+
+(defn- c-string
+  "The bytes of C string literals `ts` (adjacent ones concatenated) as a string"
+  [ts]
+  (str/join (for [t ts]
+              (do (when-not (str/starts-with? t "\"") (fail! "not a string literal: " t))
+                  (-> (subs t 1 (dec (count t)))
+                      (str/replace #"\\(x[0-9A-Fa-f]+|[0-7]{1,3}|.)"
+                                   (fn [[_ e]]
+                                     (cond (str/starts-with? e "x") (str (char (Long/parseLong (subs e 1) 16)))
+                                           (re-matches #"[0-7]+" e) (str (char (Long/parseLong e 8)))
+                                           :else (case e "n" "\n" "t" "\t" "r" "\r" "a" "\u0007" "b" "\b" "f" "\f" "v" "\u000b" e)))))))))
+
+(def ^:private type-words #{"int" "unsigned" "signed" "long" "short" "char" "__u32" "__u16" "__u8" "__s32" "__u64" "__s64"
+                            "uint32_t" "uint16_t" "uint8_t" "int32_t" "int64_t" "uint64_t" "size_t" "mode_t" "const"})
+
+(defn- cast-fn [words]
+  (let [u? (some #{"unsigned" "__u32" "__u16" "__u8" "__u64" "uint32_t" "uint16_t" "uint8_t" "uint64_t" "size_t" "mode_t"} words)
+        bits (cond (some #{"char" "__u8" "uint8_t"} words) 8
+                   (some #{"short" "__u16" "uint16_t"} words) 16
+                   (some #{"long" "__u64" "__s64" "uint64_t" "int64_t" "size_t"} words) 64
+                   :else 32)]
+    (fn [^long v]
+      (if (= bits 64)
+        v
+        (let [m (dec (bit-shift-left 1 bits)) x (bit-and v m)]
+          (if (or u? (< x (bit-shift-left 1 (dec bits)))) x (- x (bit-shift-left 1 bits))))))))
+
+(defn- c-number [^String t]
+  (let [s (str/replace t #"[uUlL]+$" "")]
+    (cond (re-matches #"0[xX][0-9A-Fa-f]+" s) (Long/parseUnsignedLong (subs s 2) 16)
+          (re-matches #"0[0-7]*" s) (if (= s "0") 0 (Long/parseLong (subs s 1) 8))
+          :else (Long/parseLong s))))
+
+(defn- c-eval
+  "The value of integer constant expression `ts` (tokens), identifiers from `env` (enumerators); nil when it is not one"
+  [ts env]
+  (let [ts (vec ts) pos (atom 0)
+        peek (fn [] (get ts @pos)) next! (fn [] (let [t (peek)] (swap! pos inc) t))
+        expect (fn [t] (when-not (= (next!) t) (throw (ex-info "syntax" {}))))
+        bin {"*" [10 *] "/" [10 quot] "%" [10 rem] "+" [9 +] "-" [9 -] "<<" [8 bit-shift-left] ">>" [8 bit-shift-right]
+             "<" [7 #(if (< %1 %2) 1 0)] ">" [7 #(if (> %1 %2) 1 0)] "<=" [7 #(if (<= %1 %2) 1 0)] ">=" [7 #(if (>= %1 %2) 1 0)]
+             "==" [6 #(if (= %1 %2) 1 0)] "!=" [6 #(if (not= %1 %2) 1 0)] "&" [5 bit-and] "^" [4 bit-xor] "|" [3 bit-or]
+             "&&" [2 #(if (and (not= 0 %1) (not= 0 %2)) 1 0)] "||" [1 #(if (or (not= 0 %1) (not= 0 %2)) 1 0)]}]
+    (letfn [(unary []
+              (let [t (next!)]
+                (cond
+                  (nil? t) (throw (ex-info "end" {}))
+                  (= t "-") (- (long (unary)))
+                  (= t "+") (unary)
+                  (= t "~") (bit-not (long (unary)))
+                  (= t "!") (if (zero? (long (unary))) 1 0)
+                  (and (= t "(") (type-words (peek)))
+                  (let [ws (loop [ws []] (if (= (peek) ")") (do (next!) ws) (recur (conj ws (next!)))))]
+                    ((cast-fn ws) (unary)))
+                  (= t "(") (let [v (expr 0)] (expect ")") v)
+                  (re-matches #"[0-9].*" t) (c-number t)
+                  (re-matches #"'.'" t) (long (int (.charAt ^String t 1)))
+                  (contains? env t) (get env t)
+                  :else (throw (ex-info (str "not a constant: " t) {})))))
+            (expr [^long min]
+              (loop [l (unary)]
+                (let [op (peek) [p f] (get bin op)]
+                  (cond
+                    (and p (> (long p) min)) (do (next!) (recur (f l (expr p))))
+                    (and (= op "?") (> 0.5 min)) (do (next!) (let [a (expr 0)] (expect ":") (let [b (expr 0)] (if (zero? (long l)) b a))))
+                    :else l))))]
+      (try (let [v (expr -1)] (when (= @pos (count ts)) (long v)))
+           (catch Exception _ nil)))))
+
+(defn- enumerators
+  "The enumerators of every enum of preprocessed text `s`, by name (each one's value, its predecessor's plus one when not given)"
+  [s]
+  (let [ts (vec (tokens s))]
+    (loop [i 0 env {}]
+      (if (>= i (count ts))
+        env
+        (if (= (ts i) "enum")
+          (let [j (if (= (get ts (+ i 1)) "{") (+ i 1) (when (= (get ts (+ i 2)) "{") (+ i 2)))]
+            (if-not j
+              (recur (inc i) env)
+              (let [[env k] (loop [k (inc j) env env prev -1]
+                              (let [nm (ts k)]
+                                (if (= nm "}")
+                                  [env k]
+                                  (let [[vts k2] (if (= (get ts (inc k)) "=")
+                                                   (loop [m (+ k 2) depth 0 acc []]
+                                                     (let [t (ts m)]
+                                                       (cond (and (zero? depth) (#{"," "}"} t)) [acc m]
+                                                             (= t "(") (recur (inc m) (inc depth) (conj acc t))
+                                                             (= t ")") (recur (inc m) (dec depth) (conj acc t))
+                                                             :else (recur (inc m) depth (conj acc t)))))
+                                                   [nil (inc k)])
+                                        v (if vts (c-eval vts env) (inc (long prev)))
+                                        env (if v (assoc env nm v) env)
+                                        k3 (if (= (get ts k2) ",") (inc k2) k2)]
+                                    (recur k3 env (or v prev))))))]
+                (recur (inc k) env))))
+          (recur (inc i) env))))))
+
+(defn- values
+  "[[NAME VALUE] ...] of the markers `tag`(NAME-STRING, EXPR) in preprocessed text `s`, in order"
+  [s tag]
+  (let [env (enumerators s)]
+    (vec (for [[nm e] (markers (tokens s) tag)
+               :let [n (c-string nm) v (c-eval e env)]]
+           (if (nil? v) (fail! tag ": " n "'s value is no constant: " (str/join " " e)) [n v])))))
+
+;; ---- opcode
+
+(defn- go-strs [xs] (str/join ", " (map #(str "\"" % "\"") xs)))
+
+(defn- table-opcode [opts]
+  (let [py (:cpython opts)
+        inc-dir (str py "/Include/internal")
+        ids (defines (str py "/Include/opcode_ids.h") #"^[A-Z_0-9]+$")
+        meta-text (preprocess opts :amd64 [] "opcode-meta.c"
+                              (str ids "\n"
+                                   (defines (str inc-dir "/pycore_opcode_metadata.h") #"^(HAS_[A-Z_0-9]+_FLAG|INSTR_FMT_[A-Za-z0-9_]+)$") "\n"
+                                   "#define true 1\n#define false 0\n"
+                                   "#define __pyop__(op, v, fmt, flags) __pym__(op, v, flags)\n"
+                                   (str/replace (region (str inc-dir "/pycore_opcode_metadata.h")
+                                                        #"^const struct opcode_metadata _PyOpcode_opcode_metadata\[" #"^};")
+                                                #"(?m)^\s*\[([A-Z_0-9]+)\] = \{ ([^,]+), ([^,]+), ([^}]+) \},$" "__pyop__($1, $2, $3, $4)")
+                                   "\n"
+                                   ;; IS_BLOCK_PUSH_OPCODE's opcodes
+                                   "__pyb__(SETUP_FINALLY) __pyb__(SETUP_WITH) __pyb__(SETUP_CLEANUP)\n"))
+        ts (tokens meta-text)
+        size (or (some->> (re-find #"_PyOpcode_opcode_metadata\[(\d+)\]" (slurp (str inc-dir "/pycore_opcode_metadata.h"))) second Long/parseLong)
+                 (fail! "no metadata size"))
+        md (into {} (for [[op v flags] (markers ts "__pym__")] [(c-eval op {}) [(c-eval v {}) (c-eval flags {})]]))
+        block (set (for [[op] (markers ts "__pyb__")] (c-eval op {})))
+        opmap (set (for [[_ v] (re-seq #"(?m)^    '[A-Za-z_0-9]+': (\d+),$" (region (str py "/Lib/_opcode_metadata.py") #"^opmap = \{" #"^\}"))]
+                     (Long/parseLong v)))
+        valid? (fn [op] (and (< op size) (when-let [[v] (md op)] (not= 0 (long v)))))
+        rows (for [op (range 512)
+                   :when (or (valid? op) (opmap op))
+                   :let [flags (long (second (md op [0 0])))
+                         preds [(bit-and flags 1) (bit-and flags 2) (bit-and flags 4) (bit-and flags 8) (bit-and flags 16)
+                                (bit-and flags 32) (if (block op) 1 0)]
+                         bits (reduce + (map-indexed (fn [i p] (if (and (valid? op) (not= 0 (long p))) (bit-shift-left 1 i) 0)) preds))]]
+               (str op ":" bits ":" (if (valid? op) 1 0)))
+        intr (fn [arr hdr-re]
+               (let [t (preprocess opts :amd64 [] (str "intrinsics-" arr ".c")
+                                   (str (defines (str inc-dir "/pycore_intrinsics.h") hdr-re) "\n"
+                                        "#define INTRINSIC_FUNC_ENTRY(N, F) __pyi__(N, #N)\n"
+                                        (region (str py "/Python/intrinsics.c") (re-pattern (str "^_PyIntrinsics_" arr "\\[\\] = \\{")) #"^};")))]
+                 (mapv second (sort-by first (for [[n s] (markers (tokens t) "__pyi__")] [(c-eval n {}) (c-string s)])))))
+        special (let [t (preprocess opts :amd64 [] "special.c"
+                                    (str (defines (str inc-dir "/pycore_ceval.h") #"^SPECIAL_") "\n"
+                                         "#define _Py_ID(n) #n\n"
+                                         (str/replace (region (str py "/Python/ceval.c") #"^const _Py_SpecialMethod _Py_SpecialMethods\[\] = \{" #"^};")
+                                                      #"(?m)^    \[(SPECIAL_[A-Z_]+)\] = \{\s*\n\s*\.name = &(_Py_ID\([a-z_]+\)),"
+                                                      "__pys__($1, $2) {")))]
+                  (mapv second (sort-by first (for [[n s] (markers (tokens t) "__pys__")] [(c-eval n {}) (c-string s)]))))
+        nb (let [t (preprocess opts :amd64 [] "nb-ops.c"
+                               (str (defines (str py "/Include/opcode.h") #"^NB_") "\n"
+                                    "#define ADD_NB_OP(NUM, STR) __pyn__(NUM, #NUM, STR)\n"
+                                    (region (str py "/Modules/_opcode.c") #"^\s*ADD_NB_OP\(NB_ADD," #"^#undef ADD_NB_OP")))]
+             (mapv rest (sort-by first (for [[n s op] (markers (tokens t) "__pyn__")] [(c-eval n {}) (c-string s) (c-string op)]))))]
+    (str "// Code generated by tools/pyi/opcode_table.py from CPython 3.14.10's _opcode; DO NOT EDIT.\n\n"
+         "package py\n\n"
+         "// opcodeRows are OP:FLAGS:VALID, FLAGS a bit per has_arg, has_const, has_name, has_jump, has_free, has_local, has_exc.\n"
+         "const opcodeRows = \"" (str/join " " rows) "\"\n\n"
+         "var opcodeIntrinsic1 = []string{" (go-strs (intr "UnaryFunctions" #"^(INTRINSIC_|MAX_INTRINSIC_1)")) "}\n\n"
+         "var opcodeIntrinsic2 = []string{" (go-strs (intr "BinaryFunctions" #"^(INTRINSIC_|MAX_INTRINSIC_2)")) "}\n\n"
+         "var opcodeSpecialMethods = []string{" (go-strs special) "}\n\n"
+         "var opcodeNbOps = [][2]string{" (str/join ", " (for [[a b] nb] (str "{\"" a "\", \"" b "\"}"))) "}\n")))
+
+;; ---- errno
+
+(defn- errno-of
+  "errno_exec's add_errcode calls ([[NAME CODE] ...], in order) and musl's strerror ({code text} and the unknown code's text) for goarch"
+  [opts goarch]
+  (let [py (:cpython opts) sys (sysroot opts goarch)
+        calls (values (preprocess opts goarch sys (str "errno-" (name goarch) ".c")
+                                  (str "#define _GNU_SOURCE 1\n#include <errno.h>\n"
+                                       "#define add_errcode(name, code, comment) __pyc__(name, code);\n"
+                                       (region (str py "/Modules/errnomodule.c") #"^#ifdef ENODEV$" #"^    Py_DECREF\(error_dict\);")))
+                      "__pyc__")
+        st (preprocess opts goarch (conj sys (str (:musl opts) "/src/errno")) (str "strerror-" (name goarch) ".c")
+                       "#include <errno.h>\n#define E(n, s) __pye__(n, s);\n#include <__strerror.h>\n")
+        msgs (reduce (fn [m [n s]] (assoc m (c-eval n {}) (c-string s))) {} (markers (tokens st) "__pye__"))]
+    {:calls calls :strerror (fn [c] (get msgs c (get msgs 0)))}))
+
+(defn- go-quote [s] (str "\"" (-> s (str/replace "\\" "\\\\") (str/replace "\"" "\\\"")) "\""))
+
+(defn- table-errno [opts]
+  (let [{:keys [calls strerror]} (errno-of opts :amd64)
+        arm (errno-of opts :arm64)
+        _ (when-not (and (= calls (:calls arm)) (every? #(= (strerror %) ((:strerror arm) %)) (cons 99999 (map second calls))))
+            (fail! "errno: amd64's and arm64's differ"))
+        by-name (into {} calls)
+        names (sort (keys by-name))
+        codes (sort (distinct (vals by-name)))
+        errorcode (reduce (fn [m [n c]] (assoc m c n)) {} calls)]
+    (str "// Code generated by tools/pyi/errno_table.py from CPython 3.14.10's errno; DO NOT EDIT.\n\n"
+         "package py\n\n"
+         "// errnoTable are errno's names and numbers, in name order.\n"
+         "var errnoTable = []struct {\n\tname string\n\tv    int\n}{\n"
+         (str/join (for [n names] (str "\t{\"" n "\", " (by-name n) "},\n")))
+         "}\n\n"
+         "// errnoCodes are errno.errorcode: each number's name.\n"
+         "var errnoCodes = map[int]string{\n"
+         (str/join (for [c codes] (str "\t" c ": \"" (errorcode c) "\",\n")))
+         "}\n\n"
+         "// strerrorTexts are C's strerror of each errno number (musl's).\n"
+         "var strerrorTexts = map[int]string{\n"
+         (str/join (for [c codes] (str "\t" c ": " (go-quote (strerror c)) ",\n")))
+         "}\n\n"
+         "// strerrorUnknown is strerror's text of a number it does not know.\n"
+         "const strerrorUnknown = \"" (strerror 99999) "\"\n")))
+
+;; ---- the command
+
+(let [[opts tables] (loop [as *command-line-args* opts {}]
+                      (if (and (seq as) (str/starts-with? (first as) "--"))
+                        (recur (drop 2 as) (assoc opts (keyword (subs (first as) 2)) (second as)))
+                        [opts as]))
+      [out & tables] tables
+      opts (update opts :work #(or % (str out "/work")))
+      makers {"opcode" ["builtins_opcode_table.go" table-opcode] "errno" ["builtins_errno_table.go" table-errno]}]
+  (.mkdirs (File. ^String (:work opts)))
+  (doseq [t tables]
+    (let [[f mk] (or (makers t) (fail! "no table " t ": " (str/join ", " (keys makers))))]
+      (spit (str out "/" f) (mk opts))
+      (println (str "runtime_tables: " f " made from the pinned sources")))))
