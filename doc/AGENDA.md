@@ -150,8 +150,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   pass, the night-10 list closed; night 12 records the native records after the merge); `ocaml-s1` on it (2026-11-10: OC213 (a),
   the read cell's 61 testsuite rejections judged by their own tests, `bin/repr-ocaml own-read`, all pass; OC214 (a), the quoted
   strings' bytes, the print rows at the night's `--record-results testsuite opam-re`; OC209 (a), OC210 (a), the own verdicts' rest;
-  completeness 82.5 to 83.0 on its base; found: asmcomp/regression_value_kinds refused by the native typer, an or-pattern's
-  equation, for the typer's next slice). `ocaml-props2` (OC191-OC197, OC206, OC207). Scheme: `scheme-props4` (SCS22-SCS24). LLVM IR: `llvm-props3`
+  completeness 82.5 to 83.0 on its base); `ocaml-s2` on it (2026-11-10: regression_value_kinds fixed, TYPER.md §29, Typecore's
+  Ppat_constraint and the alias's type; OC215 (a) with OC199 (a), the C API at the compiled level: CApi over a file the main serves,
+  oicapi's hooks and CallRaw, the C API's shards; built and checked light, its compiled runs the night's: `bin/oi check --aot --level
+  compiled --only-list test/ocaml/capi-compiled.txt` under the big lock, then the failures' classes). `ocaml-props2` (OC191-OC197, OC206, OC207). Scheme: `scheme-props4` (SCS22-SCS24). LLVM IR: `llvm-props3`
   (LLS40-LLS42).
 - Java: `java-invoke2` (JCS350-JCS356 on F15), `java-testlib2` (JCS334-JCS339).
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).
@@ -171,8 +173,8 @@ items below are the ones whose work is still ahead or tied to a night.
 - **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243, the own judge the default after tonight's records; CP250 when
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above).
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
-  OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, then OC215,
-  OC216, OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.
+  OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
+  on `ocaml-s2` (its compiled runs a night's), then OC216, OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.
 - **Haskell** ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md)): HES83 (b) (the own verdict where a
   `.stdout` ships, GHC's references at the oracle tier); HF9-P7 with slice 7; HF10-P3 (above); HF10's lib-stg measures on
   night 11.

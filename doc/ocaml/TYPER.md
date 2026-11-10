@@ -852,3 +852,32 @@ Checked: `bin/oi suite check --only-list` and `suite check --aot --only-list` (b
 typer-check 79 of 79 at the three levels, stdlib-check 71 of 71, repl-check --native 24 of 24, the essential list 59 of 59,
 own-verdicts 0 differing, the four oi-divergences commands, `bin/reap`, `bin/crops-score --judge --strict`. Night 10's native-path list
 is closed; the native records are night 12's, after the merge.
+
+## 29. As built: Ppat_constraint's type and the alias's (2026-11-10, branch `ocaml-s2`, from `ocaml-s1`'s `d87ed4a2c`)
+
+asmcomp/regression_value_kinds (`(type a)`, `match ty, x with Float, Right { foo = (((3.5 : a) as a) : float) } | _, Left a -> ...`)
+was refused ("This pattern has type a but an expression was expected of type float"). Not §28's per-alternative equations: those
+are OCaml 5.5.0's (typecore.ml's Ppat_or: `Pattern_env.copy` of the outer environment for each alternative, `penv2` copied before
+`p1` is typed, the variables unified by `enter_orpat_variables` in the outer `!!penv`, the equations gone). The cause was the
+constraint pattern. Typecore's Ppat_constraint (solve_Ppat_constraint) unifies the constraint's type with the expected one, types the
+inner pattern against the constraint's type (`expected_ty'`) and gives the pattern the constraint's type, with the constraint kept
+in `pat_extra`; build_as_type_extra (an alias's variable's type) takes a ground constraint's type as it is, and otherwise unifies the
+inner pattern's own as-type with an instance of it. The port typed the inner pattern against the expected type and dropped the
+constraint, so the alias `a` got `float` (the record field's type, through `Float`'s equation) in the first alternative and `a` in the
+second, and the or-pattern's unification of the variables, in the environment without the equation, failed. Now (`typecore.ae`):
+`:Ppat_constraint` types the inner pattern against the constraint's type and returns it with `:type` the constraint's and
+`:constraints` (the extras, outermost first); `build-as-type` takes the first constraint's type when it is ground (`ty/free-vars?`,
+Ctype.closed_type_expr) and otherwise unifies the inner as-type with it (instance_unshared copies only generic variables, which a
+pattern's constraint has none of, so the unification is with the constraint's type itself); `:Ppat_alias`'s pattern has its inner
+pattern's type (`q.pat_type`), not the expected one. Under no GADT equation the types are equal, so no other dump changes.
+
+Checked: `bin/oi suite check --only-list` and `suite check --aot --only-list` of regression_value_kinds, lib-sys/immediate64 and
+opam/sexplib0/load (3 of 3 at both levels, by their own verdicts), typer-check 79 of 79 at the three levels, stdlib-check 71 of 71,
+repl-check --native, the essential list 59 of 59, own-verdicts 0 differing, the four oi-divergences commands.
+
+**OC199 (a)'s typer half** (doc/ocaml/OCAML-SURVEY.md, "As built: OC215"): an external whose bytecode name is `""` and that has a
+native one (`external ( + ) : int64 -> int64 -> int64 = "" "test_int64_add" [@@unboxed]`) is a primitive named
+`native:NAME:ARGS:RESULT` in the dump (`env/prim-native`, Primitive.parse_declaration's native_repr: `v` a value, `I` `i` `n` an
+unboxed int64, int32, nativeint, `F` an unboxed float, `t` an untagged int; the declaration's `[@@unboxed]`/`[@@untagged]` and each
+type's `[@unboxed]`/`[@untagged]`). ocamlc prints `""` there (printlambda's prim_name) and cannot run such a program; no other external
+changes, so the oracle's dumps are untouched.

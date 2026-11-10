@@ -3468,3 +3468,70 @@ the judge's cases (own-verdicts --check: run 415 + suite 107 of 541 own at oi's 
 2. The native records (night 12's): the suite's `check-suite-oi-native.edn` will show asmcomp/regression_value_kinds as `dump` until the
    typer's or-pattern fix.
 3. `bin/oi own-verdicts --check`, `bin/reap --record`, `bin/crops-score --record`.
+
+## As built: OC215 (a) with OC199 (a), the C API at the compiled level (2026-11-10, branch `ocaml-s2`, from `ocaml-s1` `d87ed4a2c`)
+
+Under a light lane (no gate, each process under 2 GiB, one run at a time): the route built and checked as far as no j2g run goes; the
+compiled level's runs, which need j2g and the shards' Go builds (above 2 GiB), are the night's. The light level keeps `:c-api` (its
+runtime is Java forms interpreted on stage 0: no ci beside it) until the embedding, as OC215 (a) says.
+
+**The route.** The compiled program is the runtime's Java forms translated by j2g with a main package of Go forms
+(`test/ocaml/o2j/main`), which can link Go packages the Java world cannot name. So the boundary is oi's, unchanged in kind: a program's
+values cross as oi's values, mirrors of the Java runtime's, and `arbace/oicapi` copies the mirrors into ci's memory and back exactly as
+it does for oi (the C API on ci, above). The Java runtime and the main speak through a file the main's host serves
+(`/proc/self/ocaml-capi`, as OC208's exec request): the runtime writes a message and reads its reply, and drives; the C runs on a
+goroutine of its own, so that a callback or a named value the C asks for is a reply to the runtime, which answers with its next message.
+Nothing in Go calls into the translated code (no j2g names in the main), and nothing of jrt changes (no key moves). The pieces:
+
+- `jdk/ocaml/ocaml/rt/CApi.ae` (with `CBlock.ae`, loaded by `rt.ae` after BaOps): `CApi/call` (an external the runtime does not
+  implement), `CApi/prim` (another primitive name: the translator's `unsupported` before), `CApi/nativeCall` (OC199 (a)); the wire
+  form's writer and reader, the session's nodes by id (an outermost call's; identity kept, updates both ways at every crossing: a block's
+  fields, a string's bytes, a float array, a bigarray's elements), callbacks (`Rt/ap`; an OCaml exception answered `E`; another
+  throwable kept and rethrown once the C call unwound), named values (`Rt/named`), the C's exit (`Exit`), its custom blocks kept for the
+  run by address. Where no host serves the file (the light level) the open fails and the external is missing, or the primitive
+  unsupported, with the messages as before.
+- `arbace/o2j.ae`: an external outside the runtime's table is `(ocaml.rt.CApi/call NAME args)`, another unknown primitive
+  `(ocaml.rt.CApi/prim NAME args)`, the typer's `native:NAME:ARGS:RESULT` `(ocaml.rt.CApi/nativeCall NAME REPRS args)`; the missing
+  externals are still noted (`lib-missing.txt`, `clib-missing.txt`).
+- `test/ocaml/o2j/capi/go/arbace/cmd/ocamlprog/capi.ae` (the main with the C API; its tree's `ocamlprog.ae` lists `capi.go` beside
+  `main.go`): the host's wrapper (`hostWrap`, `atEnd` in `main.ae`: nil in the plain main), the wire form over oi's values (a Java closure
+  a mirror `oi.Closure`, another Java object an opaque `oi.Custom`, oi's predefined exceptions sent as fail.h's index so the runtime's own
+  `Rt/Failure` and its kin come back), the workers, the session; `OI_CSTUBS` names the node program as for oi; the C's stdio flushed at
+  the end.
+- `go/arbace/oicapi`: the hooks `Apply` and `Named` (nil: oi's thread and table, as before), `Has`, `Call` (a stub outside oi's thread),
+  `CallRaw` (OC199 (a): the arguments and the result by their representations: an unboxed int64, int32 or nativeint as the word, an
+  unboxed float as a floating argument, an untagged int, a value encoded).
+- OC199 (a)'s typer half (TYPER.md §29): an external whose bytecode name is `""` is named `native:NAME:ARGS:RESULT` in the dump
+  (`env/prim-native`, Primitive's native_repr); no other dump changes.
+- `bin/oi`: header.awk's level 2 (`aot=2`, the compiled level) keeps a test's `@cstubs` (the light level, 1, its class); the compiled
+  level builds the node program (`cstubs_nodes`, as oi's), puts `OI_CSTUBS` in the run's environment and the program in a shard of its
+  own (progs.tsv's ninth field; `C2_CAPI`), whose j2g gets a second `--main`, `C2/capi-main` (`c2_capi_main`: the capi tree, and
+  `go/arbace/oi` and `oicapi` as Go forms; ci and crt are j2g's own copies); `test/ocaml/capi-compiled.txt`, the 25 programs of the AOT
+  cell's `:c-api` class, for the by-list run.
+
+**Checks (light).** The main package's Go, printed by repr/go with the printed `oi`, `oicapi`, `ci` and `crt` and stand-ins for `jrt`
+and `lang`, builds and vets; a fake runtime written in Go speaks the protocol to the main's file over callback/test1's node program
+(OI_CSTUBS): a stub with no definition answered `N`; `mycallback2` asks a callback of the closure node with 3 and 4, answered 7, ends
+`R 7`; `mypushroot` returns the same string node with the callback's store into it as its update; `mycallback1`'s callback raises a block
+of the runtime's, which comes back as the same node (`E`); the session ends with its call (scratch, `.tmp/capichk`). At the light level:
+CApi loads and the missing externals' rows are unchanged (`bin/oi check --aot --only-list`: testfork, fork_cleanup, test_unix_cmdline,
+two passes; `bin/oi aot-run` of int64-unboxing: `primitive  is not supported`, the oracle's dump's empty name, as before); o2j translates
+`native:test_int64_add:II:I` to `(CApi/nativeCall "test_int64_add" "III" ...)`; `bin/oi run-native` of int64-unboxing names the
+native primitive. oi's 21 C API programs at eval unchanged by oicapi's hooks (`bin/oi check --only-list`: 19 pass, intext and intext_par
+in `:marshal-closures` as recorded), the essential list 59 of 59 with its controls, typer-check 79 of 79, stdlib-check 71 of 71,
+repl-check --native, own-verdicts 0 differing, the four oi-divergences commands 0 failing, `bin/reap` 0 problems, `bin/crops-score
+--judge --strict` 0 problems.
+
+**Not proved here (the night's).** The Java half has not run against the main: its first run is the compiled level's by-list run. The
+programs that pass become passes of the compiled records; the ones that do not keep a class (`:c-api` matches only the light level's
+`class header:` rows, so a failing compiled run needs its class the day after: the plan's +22 is the estimate, 20 eval passes plus
+int64-unboxing and unboxed-primitive-args at best; subarraystub's speed and intext's Closures stay by design; delayintr's and cloexec's
+C helpers keep their header's class at the AOT levels, header.awk's helper mode).
+
+**The night's commands** (each process at most 2 GiB but j2g's shards, which are heavy: under the big lock, `bin/heavy-lock`):
+1. `bin/oi stdlib` (the typer's §29 moved the native library's key; about 9 minutes).
+2. `bin/heavy-lock bin/oi check --aot --level compiled --only-list test/ocaml/capi-compiled.txt` (the 25: a shard or two of C API
+   programs; `O2J_KEEP=1` keeps the executables for a rerun by hand), then by hand `bin/oi divergences --compiled`; a program that fails
+   is read in `.tmp/o6/compiled/run/ID/o2j.out`.
+3. With night 12's OC202 records: `bin/heavy-lock bin/oi check --aot --level compiled --record` (whole: the C API programs among the
+   shards), `bin/oi suite check --aot --level compiled --record`, then `bin/reap --record`, `bin/crops-score --record`.

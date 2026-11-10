@@ -747,6 +747,8 @@ cmd_corpus() {
   # the headers alone: the tarball, no ocamlc and no ocdump (the oracle's paths call need_tree themselves)
   mkdir -p "$OI_DIR"; need_source
   local out=$OI_DIR/corpus.tsv r b h
+  # header.awk's level: 0 oi's, 1 the light AOT level, 2 the compiled level (OC215 (a): its main runs a test's C stubs)
+  local aotv=${AOT:-0}; [ "$aotv" = 1 ] && [ "${LEVEL:-light}" = compiled ] && aotv=2
   : > "$out"
   # the tests with a .reference, and (OC203 (a)) those whose check is their check-program-output hook (ocamltest's check of the
   # output then the hook's, not the reference's: lib-threads/signal)
@@ -755,7 +757,7 @@ cmd_corpus() {
     b=${r#./}
     [ -f "$TESTS/$b.ml" ] || [ -f "$TESTS/$b.mll" ] || continue
     # (the AOT levels read a test with C stubs as its class: the C API is oi's alone, the light and compiled levels' runtime has none)
-    h=$(awk -v aot="${AOT:-0}" -f "$root/bin/lib/oi/header.awk" "$(test_src "$b")")
+    h=$(awk -v aot="$aotv" -f "$root/bin/lib/oi/header.awk" "$(test_src "$b")")
     # a program header.awk classes that the suite's reading runs (modules, readonly data files) is the suite corpus's alone (OT9's third
     # fix): one row a program across the two corpora, the REAP cell counting it once
     case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$(test_src "$b")") in run*) continue ;; esac ;; esac
@@ -1461,6 +1463,8 @@ c2_build() {
   local s=$1; shift
   local p od
   rm -rf "$s/forms" "$s/j2g" "$s/prog"; mkdir -p "$s/forms/ocaml/rt" "$s/forms/ocaml/u"
+  # a shard of programs with C stubs (C2_CAPI=1, OC215 (a)): the main with the C API (c2_capi_main's tree after the plain one)
+  local capi_main=""; [ "${C2_CAPI:-0}" = 1 ] && capi_main="--main $C2/capi-main"
   cp "$O2J_RT"/*.ae "$s/forms/ocaml/rt/"
   for p in "$@"; do
     od=$(awk -F'\t' -v p="ocaml.$p" '$1 == p {print $2}' "$C2/cprogs.list")
@@ -1471,7 +1475,7 @@ c2_build() {
   done
   o2j shard "$s/forms" $(printf 'ocaml.%s ' "$@") > "$s/shard.log" 2>&1 || { echo "o2j shard: $(tail -1 "$s/shard.log")" > "$s/why"; return 1; }
   (cd "$root" && J2G_GO_EXE=$(arbace_exe) GOMAXPROCS=${O2J_BUILD_PROCS:-4} J2G_JOBS=2 GOMEMLIMIT=${O2J_J2G_MEM:-1700MiB} \
-     /usr/bin/time -f '%e s %M KB' -o "$s/j2g.time" bin/j2g --jdk jdk/forms --input "$s/forms" --root 'ocaml.u.Shard#main' --main test/ocaml/o2j/main --out "$s/j2g") > "$s/j2g.log" 2>&1 \
+     /usr/bin/time -f '%e s %M KB' -o "$s/j2g.time" bin/j2g --jdk jdk/forms --input "$s/forms" --root 'ocaml.u.Shard#main' --main test/ocaml/o2j/main $capi_main --out "$s/j2g") > "$s/j2g.log" 2>&1 \
     || { echo "j2g: $(grep -v '^\s' "$s/j2g.log" | tail -1 | head -c 200)" > "$s/why"; return 1; }
   # a class of the program's that j2g could not analyze (its report's failures name ocaml/ classes) is the shard's failure
   if grep -q '"class ocaml/[^"]*failed analysis' "$s/j2g/report.edn"; then
@@ -1527,24 +1531,27 @@ c2_programs() {
   # ProcessBuilder's JDK classes, 6.1 GB for five such programs)
   local size=${O2J_SHARD:-8} cap=${O2J_SHARD_BYTES:-0} ucap=${O2J_SHARD_UNIX:-3} k=0 pkgs=() bytes=0 b nu=0 hasu
   : > "$C2/shards.tsv"
-  local hps hp
-  while IFS=$'\037' read -r id p d args env a0 hasu hps; do
+  # OC215 (a): the programs with C stubs (the ninth field 1) in shards of their own, built with the C API's main (C2_CAPI)
+  local hps hp capi shcapi=0
+  while IFS=$'\037' read -r id p d args env a0 hasu hps capi; do
     grep -q -F "refused	$d/out	" "$C2/translate.log" && continue
     [ -s "$d/helper.why" ] && continue
+    capi=${capi:-0}
     b=$(c2_bytes "$p" "$d")
-    if [ ${#pkgs[@]} -gt 0 ] && { { [ "$cap" -gt 0 ] && [ $((bytes + b)) -gt "$cap" ]; } || { [ "$hasu" = 1 ] && [ "$nu" -ge "$ucap" ]; }; }; then
-      k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0
+    if [ ${#pkgs[@]} -gt 0 ] && { { [ "$cap" -gt 0 ] && [ $((bytes + b)) -gt "$cap" ]; } || { [ "$hasu" = 1 ] && [ "$nu" -ge "$ucap" ]; } || [ "$capi" != "$shcapi" ]; }; then
+      k=$((k + 1)); C2_CAPI=$shcapi c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0
     fi
+    shcapi=$capi
     pkgs+=("$p"); bytes=$((bytes + b)); [ "$hasu" = 1 ] && nu=$((nu + 1))
     # its helpers' packages beside it (OC206 (a)): the same shard, one program
     for hp in $hps; do pkgs+=("${hp%%:*}"); done
-    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0; fi
+    if [ ${#pkgs[@]} = "$size" ]; then k=$((k + 1)); C2_CAPI=$shcapi c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; pkgs=(); bytes=0; nu=0; fi
   done < "$C2/progs.tsv"
-  if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; fi
+  if [ ${#pkgs[@]} -gt 0 ]; then k=$((k + 1)); C2_CAPI=$shcapi c2_shard "$C2/s$k" "${pkgs[@]}"; c2_measure "$C2/s$k" "$bytes"; fi
   if [ "${O2J_PLAN_ONLY:-}" = 1 ]; then echo "oi: compiled: $k shards planned (O2J_PLAN_ONLY): $C2/plan.tsv, $C2/shards.tsv" >&2; return 0; fi
   # the runs: each program alone, in its directory (C2/run/ID), argv.(0) its dump as the light level's
   local prog st t0 t1 note r kv
-  while IFS=$'\037' read -r id p d args env a0 hasu hps; do
+  while IFS=$'\037' read -r id p d args env a0 hasu hps capi; do
     if [ -s "$d/helper.why" ]; then printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$(cat "$d/helper.why")" >> "$outnew"; continue; fi
     r=$(grep -m1 -F "refused	$d/out	" "$C2/translate.log" | cut -f3 || true)
     [ -n "$r" ] || r=$(awk -F'\t' -v p="$p" '$1 == p {print $2}' "$C2/refused.tsv" | head -1)
@@ -1579,6 +1586,18 @@ c2_programs() {
   done < "$C2/progs.tsv"
 }
 
+# c2_capi_main: C2/capi-main, the main's tree with the C API (OC215 (a)): test/ocaml/o2j/capi (capi.go and the package's listing with
+# it) and the packages arbace/oi and arbace/oicapi as Go forms (j2g copies ci and crt into every program itself)
+c2_capi_main() {
+  local m=$C2/capi-main p
+  rm -rf "$m"; mkdir -p "$m/go/arbace"
+  cp -r "$root/test/ocaml/o2j/capi/go" "$m/"
+  for p in oi oicapi; do
+    cp "$root/go/arbace/$p.ae" "$m/go/arbace/"
+    mkdir -p "$m/go/arbace/$p"; cp "$root/go/arbace/$p"/*.ae "$m/go/arbace/$p/"
+  done
+}
+
 cmd_check_compiled() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_aot_clib; cmd_build
   # the native path (TY24 (a), as the light level's: OC202): the programs typed by Arbace's typer (o2j_dump's), oi's column too
@@ -1593,6 +1612,7 @@ cmd_check_compiled() {
   local oirows=$OI_DIR/check.tsv; [ "$NATIVE" = 1 ] && oirows=$OI_DIR/check-native.tsv
   oi_rows_for "$oirows" "$C2/oi.tsv" "$C2/selected.tsv" oi_one 4 "$OI_DIR/corpus.tsv"
   C2_OVERLAY=$(cd "$root" && ARBACE_HOST_EXE=$(arbace_exe) bin/jrt overlay | tail -1) || die "bin/jrt overlay"
+  c2_capi_main
   # the dumps, as the light level's (o2j_dump), into C2/run/ID
   local id kind flags incs args env base u d n=0
   : > "$C2/cprogs.list"; : > "$C2/progs.tsv"
@@ -1625,8 +1645,16 @@ cmd_check_compiled() {
         hps="$hps${hps:+ }p$n:$hn"
       done < "$d/helpers.txt" ;;
     esac
+    # the program's own C stubs (OC215 (a)): their node program built by ci as oi's (cstubs_nodes), OI_CSTUBS in the run's
+    # environment, the ninth field 1 (a shard of its own, with the C API's main); a build that fails is the program's row
+    local cs="" kv capi=0 nodes
+    for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
+    if [ -n "$cs" ] && [ ! -s "$d/helper.why" ]; then
+      if nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes"; capi=1
+      else echo "cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')" > "$d/helper.why"; fi
+    fi
     # the seventh field: 1 for a program that includes unix (OT25 (a): at most O2J_SHARD_UNIX of them a shard)
-    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$pn" "$d" "$args" "$env" "$d/$u.ae" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" "$hps" >> "$C2/progs.tsv"
+    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$pn" "$d" "$args" "$env" "$d/$u.ae" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" "$hps" "$capi" >> "$C2/progs.tsv"
   done < <(awk -F'\t' '$2 == "run"' "$C2/selected.tsv" | tr '\t' '\037')
   local out=$C2/check.tsv
   : > "$out.new"

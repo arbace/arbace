@@ -2916,3 +2916,31 @@ as "As built: OC213, OC214, OC209, OC210". A light lane: no gate, each process u
 - Scores: completeness 82.5% to 83.0% (read 3,082 to 3,143), independence 51.4% to 51.5% (judge 0.570 to 0.576). Checks: own-verdicts
   --check 0 differ; the four oi-divergences commands 0 failing; `bin/reap --record` 0 problems; `bin/crops-score --record`, `--judge
   --strict` 0 problems; `roundtrip --text samples stdlib`; the 61 files' round trip unchanged.
+
+## 2026-11-10: OCaml's or-pattern regression and OC215 (a) with OC199 (a), the C API at the compiled level (branch `ocaml-s2`, from `ocaml-s1` `d87ed4a2c`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). Sources: OCaml 5.5.0's tarball (typing/typecore.ml's type_pat
+Ppat_or, Ppat_constraint, Ppat_alias, solve_Ppat_constraint, build_as_type and build_as_type_extra; typing/primitive.ml's
+parse_declaration and native_repr).
+
+- asmcomp/regression_value_kinds (found by `ocaml-s1`'s OC209 re-judge): §28's per-alternative equations were not the cause; they are
+  OCaml's (each alternative typed in a `Pattern_env.copy` of the outer environment, the variables unified in the outer one). The port's
+  Ppat_constraint typed the inner pattern against the expected type and dropped the constraint, so `((3.5 : a) as a)` under `Float`'s
+  equation gave the alias `float` where OCaml gives it `a` (the constraint's type, build_as_type_extra's ground case), and the
+  or-pattern's variables then disagreed outside the equation. Ported: the inner pattern typed against the constraint, the pattern's type
+  the constraint's, the constraint kept as an extra for build_as_type; an alias's pattern has its inner pattern's type (TYPER.md §29).
+  Alternative considered: keeping the equations of an alternative for the or-pattern's variable unification; rejected, OCaml does not.
+- OC215 (a) (the user, 2026-11-10, amending OC198): the compiled level's main links `arbace/oicapi` and oi's values serve as mirrors of
+  the Java runtime's (OCAML-SURVEY.md, "As built: OC215"). The bridge is a file the main's host serves, as OC208's exec: the runtime
+  writes and drives, the C runs on a goroutine so that its callbacks and named values are replies the runtime answers. Alternatives
+  considered: (1) the value conversion in Go over j2g's translated classes (names like `J_ocaml_rt_Block_J`): the main would depend on
+  j2g's naming and on jrt's array and boxing types, unprovable without a j2g run; (2) a Java static method the Go side calls for each
+  callback (`lang.J_ocaml_rt_CApi_J_...`): the same dependence, and j2g may prune a method only Go calls; (3) natives in jrt: a jrt change
+  moves the runtime key and the gate (not a crop path). The file and the goroutine need neither.
+- OC199 (a): an external with no bytecode name is `native:NAME:ARGS:RESULT` in the native typer's dump (Primitive's native_repr letters),
+  o2j calls it through `CApi/nativeCall`, oicapi's `CallRaw` passes unboxed words and floats.
+- Checked light: the main's Go builds and vets (printed with oi, oicapi, ci, crt and stand-ins for jrt and lang); a fake runtime in Go
+  drives the main's file over callback/test1's stubs (callbacks, identity, updates, exceptions, a missing stub); the light level's rows
+  of missing externals unchanged; oi's C API programs unchanged; typer-check, stdlib-check, the essential list, own-verdicts, the four
+  oi-divergences commands. The compiled runs (j2g, above 2 GiB) are the night's: `bin/oi check --aot --level compiled --only-list
+  test/ocaml/capi-compiled.txt` under the big lock, then the classes of what does not pass.

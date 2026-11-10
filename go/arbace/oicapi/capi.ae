@@ -52,6 +52,35 @@
 
 (go/var ^{:tag (* capi)} the)
 
+;; The AOT runtime's boundary (OC215 (a), doc/ocaml/OCAML-SURVEY.md "As built: OC215"): the compiled level's main
+;; (test/ocaml/o2j/capi) holds the program's values as oi's values (mirrors of the Java runtime's) and calls a stub through
+;; Call; a callback and a named value are then the Java runtime's, through these two hooks (nil: oi's own).
+
+(go/var ^{:tag (func [oi/Value (slice oi/Value)] [oi/Value oi/Value]) :doc "Apply, when set, applies a callback's closure f to vs in place of oi's thread: its result, or the OCaml exception it\nraised (exn, else nil).\n"}
+  Apply)
+
+(go/var ^{:tag (func [string] [oi/Value bool]) :doc "Named, when set, is caml_named_value in place of oi's table.\n"}
+  Named)
+
+(go/func namedValue "namedValue is caml_named_value: Named's, else oi's.\n" [^string name] :results [oi/Value bool]
+  (when (!= Named nil)
+    (return (Named name)))
+  (return (oi/NamedValue name)))
+
+(go/func Has "Has tells whether the loaded stubs define the C function name.\n" ^bool [^string name]
+  (when (== the nil)
+    (return false))
+  (let [f (aget (.-ByName (.-p the)) name)]
+    (return (and (!= f nil) (!= (.-Code f) nil)))))
+
+(go/func CallRaw "CallRaw calls the stubs' native function name with the representations reprs (Primitive's native_repr, one a\nletter: v a value, I an unboxed int64, i an unboxed int32, n an unboxed nativeint, F an unboxed float, t an untagged int; the\narguments' then the result's: OC199 (a)), its arguments oi's values: a value as Call passes it, the others as the words or\nfloats themselves.\n"
+  ^oi/Value [^string name ^string reprs ^{:tag (slice oi/Value)} a]
+  (.callRaw the (aget (.-ByName (.-p the)) name) reprs a))
+
+(go/func Call "Call calls the stubs' function name with the arguments a (oi's values) outside oi's thread: Load first, and Has(name).\nIt raises (a panic of *oi.Exn) what the C raises; a callback is Apply's.\n"
+  ^oi/Value [^string name ^{:tag (slice oi/Value)} a]
+  (.call the nil (aget (.-ByName (.-p the)) name) a))
+
 (go/func Load "Load loads the node program at path: its commands, the natives of the boundary, its static initializers, musl initialized\nas __libc_start_main would (__init_libc), the runtime's own initialization; then oi's externals fall back on its functions.\n"
   ^error [^string path ^{:tag (slice string)} argv]
   (let [(values text err) (os/ReadFile path)]
@@ -475,7 +504,7 @@
         (aset (.-seen c) a (.-pass c))
         (.write c a (aget (.-toGo c) a)))))
   (range [name slot (.-named c)]
-    (when [(values v ok) (oi/NamedValue name)] ok
+    (when [(values v ok) (namedValue name)] ok
       (.Store64 (.-m c) slot (.encode c v)))))
 
 (go/method fromCAll "fromCAll reads every copy of the call into its value (the C returned, raised or calls back).\n" [^{:tag (* capi)} c]
@@ -538,6 +567,49 @@
         (.fromCAll c)
         (.decode c (conv uint64 (.-I r)))))))
 
+(go/method callRaw "callRaw is call with the representations reprs (CallRaw's): a value encoded, an unboxed or untagged argument as\nitself, the result likewise.\n"
+  ^oi/Value [^{:tag (* capi)} c ^{:tag (* ci/Func)} f ^string reprs ^{:tag (slice oi/Value)} a]
+  (let [t (.-Main (.-p c))
+        sp (.-SP t)
+        top (.-Top t)
+        depth (.-Depth t)]
+    (inc! (.-depth c))
+    (when (== (.-depth c) 1)
+      (.toCAll c))
+    (defer ((fn []
+              (let [r (recover)]
+                (set! (.-SP t) sp)
+                (set! (.-Top t) top)
+                (set! (.-Depth t) depth)
+                (dec! (.-depth c))
+                (when (== (.-depth c) 0)
+                  (.reset c))
+                (when (!= r nil)
+                  (when [(values flt ok) (assert (* crt/Fault) r)] ok
+                    (oi/Internalf "a C stub's fault: %s at %#x" (.-Msg flt) (.-Addr flt)))
+                  (when [(values ex ok) (assert (* crt/Exit) r)] ok
+                    (panic (addr (lit oi/ExitSignal :Code (.-Code ex)))))
+                  (panic r))))))
+    (inc! (.-pass c))
+    (let [args (make (slice ci/Arg) (len a))]
+      (range [i v a]
+        (switch (aget reprs i)
+          (case [\F] (aset args i (lit ci/Arg :K \f :F (oi/AsFloat v))))
+          (case [\I] (aset args i (lit ci/Arg :K \i :I (assert int64 v))))
+          (case [\n] (aset args i (lit ci/Arg :K \i :I (conv int64 (assert oi/Nativeint v)))))
+          (case [\i] (aset args i (lit ci/Arg :K \i :I (conv int64 (assert int32 v)))))
+          (case [\t] (aset args i (lit ci/Arg :K \i :I (conv int64 (oi/AsInt v)))))
+          (default (aset args i (lit ci/Arg :K \i :I (conv int64 (.encode c v)))))))
+      (let [r (.Call (.-p c) t f args)]
+        (.fromCAll c)
+        (switch (aget reprs (len a))
+          (case [\F] (return (.-F r)))
+          (case [\I] (return (.-I r)))
+          (case [\n] (return (conv oi/Nativeint (.-I r))))
+          (case [\i] (return (conv int32 (.-I r))))
+          (case [\t] (return (conv int (.-I r)))))
+        (.decode c (conv uint64 (.-I r)))))))
+
 (go/method callback "callback is caml_callbackN_exn: the closure applied to the n arguments at args on oi's thread; the result, or\nthe exception raised marked as caml_callback_exn marks it.\n"
   ^uint64 [^{:tag (* capi)} c ^uint64 clos ^int n ^uint64 args]
   (.fromCAll c)
@@ -559,6 +631,8 @@
                 (set! exn (.-V e))
                 (return))
               (panic x)))))
+  (when (!= Apply nil)
+    (return (Apply f vs)))
   (set! r (.ApplyCallback (.-th c) f vs))
   (return r nil))
 
@@ -591,7 +665,7 @@
                       (lit ci/Arg))]
       ["caml_named_value" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                             (let [name (.CString (.-m c) (arg a 0))
-                                  (values v ok) (oi/NamedValue name)]
+                                  (values v ok) (namedValue name)]
                               (when (not ok)
                                 (return (ai 0)))
                               (let [slot (aget (.-named c) name)]
