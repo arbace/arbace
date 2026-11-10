@@ -2814,3 +2814,11 @@ the one musl read serves both): `index` is rebuilt when its keys differ from the
 flock around the whole read, `fresh` needs a complete index; `test/c/musl-lock-test.bash`. Alternative for the index considered:
 `read-all` deleting index.edn whenever it reads anything (rejected: repairs only what this process broke). Recorded in
 doc/C23-SURVEY.md, "As built: musl's index and its lock".
+
+## 2026-11-10, c-musl-lock: the review's findings (REVIEW.md, .tmp/merge-1111/REVIEW.md, section 1)
+
+`index`'s temporary file is named by nanoTime and thread id (as aotlib.ae and runtime.ae) and deleted when the rename fails (1.1);
+`bin/ci musl read` re-checks `fresh` once it holds the lock and a waiter reads nothing (1.2); test/c/musl-lock-test.bash writes its
+output to a file under its work directory, not /dev/null, and says it is by hand; Makefile target `ci-musl-lock-test` (1.4).
+Proofs: the test (ok, three cases), `bin/ci check --only test/c/essential-check.txt` (exit 0, controls differ as they must; the musl
+forms reread first, about 14 minutes at CI_JOBS=2), bin/reap, bin/crops-score --judge --strict, make check-makefile.
