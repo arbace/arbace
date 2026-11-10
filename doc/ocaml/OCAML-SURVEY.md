@@ -3363,3 +3363,108 @@ cases at 1) and the switch (eval, AOT 1): about 99.9% (judge 0.996); with OC209 
   `[:external name]` (every `:abstract` test in the typer reviewed: a day, a risk to typer-check's 79 and the stdlib's 71); (c) port the
   Pattern uenv itself (unify_eq_set, the injectivity rule, the Expression-first retry of unify_gadt): two to three days, the hook
   retired. *Recommended: (a)* (no program of the corpora needs more; the night's native records will show one that does).
+
+## Decided (the user, 2026-11-10, about 10:30 UTC): OC209-OC222
+
+Relayed by the main session with the brief of the branch `ocaml-s1`: **OC209 (a)** to **OC212 (a)** as recommended above, and the
+plan's ten proposals of 2026-11-10 (OCaml's completeness above 90%: stages S0-S6, the main session's `.tmp/plans/OCAML-90-PLAN.md`)
+all (a), as recommended there:
+- **OC213 (a)** the read cell's error tests by their own verdict: a testsuite file the reader rejects is a read pass when its own test
+  expects what the reader does (the expected compiler output, `.compilers.reference` or the expect block); the opam set's 17 (cppo,
+  topfind) and the 2 stdlib templates stay by design.
+- **OC214 (a)** print's `:string-bytes`: the `:lines` printer keeps a quoted string's bytes.
+- **OC215 (a)** the C API at the compiled level now (`arbace/oicapi` in the compiled level's main), with OC199 (a) at AOT (native
+  names, unboxed words); the light level keeps `:c-api` until the embedding.
+- **OC216 (a)** the small runtime ports, both runtimes: OCAMLRUNPARAM `l`, `Obj.reachable_words`, `Gc.Tweak` and the compaction
+  counter, Marshal's Closures flag (OT7 reversed), weak arrays and ephemerons emptied by a collection, AF_UNIX and signals at the
+  compiled level.
+- **OC217 (a)** backtraces: debug events in the typer's Translcore, oi's backtrace stack, Printexc's raw backtraces and Slots,
+  `OCAMLRUNPARAM b`, the plain references of the two flambda-referenced tests, o2j's shadow stack for `-g` programs ((b), eval first,
+  if the AOT frames disagree).
+- **OC218 (a)** OCaml's heap accounting: words counted per allocation site, a simulated minor heap, Gc's statistics, Memprof's
+  sampling and callbacks, Obj's minor/major; the per-allocation cost measured first (dropped over 3% on the run corpus); built as (b),
+  the counters, then Memprof.
+- **OC219 (a)** Runtime_events over OC218's model.
+- **OC220 (a)** Dynlink: plugins typed into Lambda units at eval, compiled ahead into the shard behind a registry at the compiled level.
+- **OC221 (a)** the C runtime internals on ci (persistent global roots, custom finalizers, `caml_startup`, async callbacks,
+  ephemerons' C API, locale); C threads' registration, Windows, natdynlink and complete-obj stay by design.
+- **OC222 (a)** (scoring) the tests ocamltest itself skips on the reference's configuration (tsan, frame pointers, flambda, Windows,
+  macOS, POWER, other arches' debugger tests: 33 programs a level) `:na`, out of both denominators; the tool tests and compiler-output
+  stay by design.
+Order (the plan's): OC213, OC214 (S1) with OC209 and OC210 first (branch `ocaml-s1`), then OC215, OC216, OC217, OC218 then OC219,
+OC220 and OC221; OC222 with the scoring's next change.
+
+## As built: OC213, OC214, OC209, OC210 (2026-11-10, branch `ocaml-s1`, from `ocaml-indep3` `51240f00d`)
+
+Under a light lane (no gate, each process under 2 GiB, one run at a time). The plan's stage S1 and the two own-verdict items.
+
+**OC213 (a): the read cell's rejections by their own tests.** The read level reads a file as an implementation or an interface
+(Parse.implementation); OCaml 5.5.0's testsuite holds files meant to be rejected and files that are toplevel scripts, which that read
+rejects. `arbace.repr.ocaml.native`'s `own-read` judges such a file as its own test's tool reads it, from its ocamltest block (at the
+top, or after a TEST_BELOW): a test that compiles it with `ocamlc.byte` expecting status 2 by the report (OC172's port of ocamlc's
+batch printer, the file named by its basename) equal byte for byte to its `.compilers.reference`; an expect test by the expect tool's
+read, which is `Parse.use_file` over the whole file before any phrase runs (testsuite/tools/expect.ml's parse_contents); a toplevel test
+(`toplevel;`) or an `ocaml` script by its use_file read, or, when that rejects it, by its first error in the reference: for the toplevel,
+the error's chunk read alone as toploop.ml reads it (lines are read one by one; a chunk ends at a line whose `;;` only blanks and
+comments follow, then flush_input: the next chunk starts on the next line with positions from line 1, the input named //toplevel//), its
+report (the header's warning flags) a part of the reference; a file without a test of its own that a test of its directory names
+(readonly_files, `#use`) or of its parent directory as DIR/FILE (load_path/test.ml's test_file) as that test's tool reads it, against its
+reference. The verdicts: 20 by ocamlc.byte's `.compilers.reference`; 18 expect tests read as the expect tool reads them; 18 toplevel
+tests (3 read, 15 rejected with their error in the reference, the generated-parse-errors' line-directive names among them); 2 scripts;
+error_highlighting_use2/use3 (`#use`d by error_highlighting.ml's toplevel test: their reports with their file names in its reference)
+and load_path/test/driver.ml (read by test.ml's script): all 61 pass.
+Applied by `bin/repr-ocaml own-read` to test/ocaml/read-results.edn's testsuite rows as recorded (no round trip: the rejection is the
+record's; a pass is `"pass" "own verdict: HOW"`, the record's header says so; `--check`: the record already says so), and by
+`roundtrip --record-results`' testsuite corpus from now on (`results --own-root`). Negative controls (`test/ocaml/own-read-controls.txt`,
+one a tool: unclosed_struct.ml against unclosed_object.ml's reference, unclosed_simple_pattern.ml against unclosed_simple_expr.ml's,
+unclosed_struct.ml read as show.ml's expect test): each fails as it must, or nothing is recorded. The class `:oracle-rejects` keeps the
+opam set's 17 (by design), `:templates` the stdlib's 2. The read cell: 3,082 to 3,143 of 3,162. No toolchain runs: the references are
+the tarball's; the round trip of the 61 files (`roundtrip --text --only-list`) still rejects each as roundtrip-known.edn records it.
+
+**OC214 (a): the quoted strings' bytes.** The `:lines` printer writes a quoted string's value as it is, and lexer.mll's quoted_string
+normalises a newline by removing one CR before an LF (store_normalized_newline), so testsuite/tests/lexing/newlines.ml's `{|CR CR LF|}`
+(value CR LF) came back LF: each CR LF of the value is now written CR CR LF. A value that is not UTF-8 (re's lib_test/expect/test_pcre.ml,
+the byte 255 in an `[%expect]` string; the forms carry it as a byte vector) was written as the vector's text: its bytes above 127 are
+now written as marks (U+DC00 + byte, never a character of a printed text) that `print.ae`'s `text-bytes` writes as the bytes themselves
+(`bin/repr-ocaml print` and the round trip's stability check compare bytes). Both files' trees now equal their prints' (`roundtrip --text
+--only-list`, their roundtrip-known.edn entries removed). The print cell's rows change at the next `--record-results` of the testsuite
+and opam-re corpora (the tool's rule: whole corpora): newlines.ml passes; test_pcre.ml stays out at mode `:full`, whose layout is the
+tokens' strings and refuses a file that is not UTF-8 (full-known.edn's `:not-utf8`): the new class `:full-not-utf8` (deferred). Until
+then `:string-bytes` keeps both rows. The samples' and the stdlib's round trip with `--text`: 8 of 8 and 148 of 150 (the 2 templates),
+text byte for byte.
+
+**OC209 (a): the native-only tests at oi's level.** `bin/oi`'s own_verdicts no longer leaves a native-only test (`native;`, no
+`bytecode`) without a verdict at oi's level: 19 such tests (9 of the run corpus, 10 of the suite's); the four whose `.reference` is not
+what bytecode does are listed in test/ocaml/own-verdict.edn for `:oi` with their reasons (typing-modules/struct_include_optimisation,
+asmcomp/optargs, asmcomp/static_catch_unboxing: ocamlopt's allocation counts; callback/callback_effects_domains_gc: ocamlc does not
+compile it), the other 15 judged by their `.reference`, which equals ocamlc's recorded run for each (own-verdicts: 0 differ).
+Re-judged on the native path by list: the run corpus's eight (`bin/oi check --only-list`): 7 pass by their own verdict,
+ast-invariants/test `slow` as recorded; the suite's seven (`suite check --only-list`): 6 pass by their own verdict, and
+asmcomp/regression_value_kinds is a `dump` row on this typer ("This pattern has type a but an expression was expected of type float":
+`(type a)`, `Float, Right {foo = (((3.5 : a) as a) : float)} | _, Left a`, an or-pattern whose first alternative needs `Float`'s
+equation `a = float` for its own constraint): the native path's gap, not OC209's (check-suite-oi.edn's row is the oracle path's pass;
+nothing recorded), most likely TYPER.md §28's per-alternative equations, for the typer's next slice.
+
+**OC210 (a): ocamltest's own processing.** (1) filecompare.ml's compare_text_files normalises CR LF: when one text's first line ends CR
+LF and the other's does not, each terminated line of the first must end CR LF and is compared without its CR. `bin/oi`'s own verdict
+gains a fifth column, the digest of the other text that compare takes as the `.reference` (`crlf_other`: the reference with a CR before
+each LF, or a CR LF reference without them), and both judges (oi_check.ae, o2j_check.ae) pass a run equal to either. (2) Environments'
+expansion (Buffer.add_substitute: `$NAME`, `${NAME}`, `$(NAME)`, an unset variable nothing, `\$` a literal `$`, values expanded
+recursively at lookup) ported into header.awk for the header's `set` variables, the arguments then split into words (String.words) and
+the environment's values expanded as to_system_env exports them; the builtins (`${ocamlsrcdir}`, `${test_build_directory}`) as before.
+norm3, subst1 and subst2 leave own-verdict.edn: `bin/oi check --only-list` and `check --aot --only-list` pass all three by their own
+verdicts. The arguments changed, so subst1's and subst2's recorded runs were recorded again with the host's ocamlc and ocamlopt by hand
+(`bin/oi record-ref --only`, their two rows: now equal to the references, `:reference true`). New negative controls at both levels
+(test/ocaml/controls.txt): norm3's run against norm2's reference, subst2's against subst1's: each differs as it must.
+
+**Scores** (`bin/crops-score --crop ocaml`): completeness 82.5% to **83.0%** (read 3,082 to 3,143; 96.4% without by design, unchanged:
+the 61 were by design); after the night's `--record-results` print 3,080 to 3,081 (test_pcre.ml deferred). Independence 51.4% to 51.5%:
+the judge's cases (own-verdicts --check: run 415 + suite 107 of 541 own at oi's level, 418 + 110 at the AOT level; the read cell's 61),
+0.570 to 0.576.
+
+**The night's commands** (after the merge; `OI_TYPER_GOMEMLIMIT=1200MiB`, `O2J_JOBS=1`):
+1. `bin/repr-ocaml roundtrip --record-results testsuite opam-re` (the print rows of newlines.ml and test_pcre.ml; the testsuite's read
+   rows by their own tests, as `own-read` wrote them), or night 10's whole native `--record-results all`, which does the same.
+2. The native records (night 12's): the suite's `check-suite-oi-native.edn` will show asmcomp/regression_value_kinds as `dump` until the
+   typer's or-pattern fix.
+3. `bin/oi own-verdicts --check`, `bin/reap --record`, `bin/crops-score --record`.

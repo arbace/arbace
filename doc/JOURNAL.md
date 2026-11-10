@@ -2883,3 +2883,36 @@ Recorded in doc/ocaml/TYPER.md, "28. As built: Ctype's pattern mode and the or-p
   pass at each level, by their own verdicts); typer-check 79 of 79 at the three levels and their runs; stdlib-check 71 of 71; `bin/oi
   test`; repl-check --native 24 of 24; the essential list 59 of 59; own-verdicts 0 differ; the four oi-divergences commands (0 failing
   not in a class); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's stage S1 and the own verdicts' rest: OC213, OC214, OC209, OC210 (branch `ocaml-s1`, from `ocaml-indep3` `51240f00d`)
+
+The user decided OC209-OC222 (a) about 10:30 UTC (the main session's plan for OCaml's completeness above 90%, OC213-OC222, and the
+survey's OC209-OC212); recorded in doc/ocaml/OCAML-SURVEY.md, "Decided (the user, 2026-11-10, about 10:30 UTC): OC209-OC222", built
+as "As built: OC213, OC214, OC209, OC210". A light lane: no gate, each process under 2 GiB, one run at a time.
+
+- OC213 (a): the plan counted the read cell's 61 testsuite rejections as parse-error tests whose reference is the error; read file by
+  file, about half are toplevel scripts (expect tests, toplevel tests, `ocaml` scripts with directives) that the read level's
+  Parse.implementation rejects but their own tool reads. So `own-read` (arbace.repr.ocaml.native) judges each as its test's tool reads
+  it: ocamlc.byte's `.compilers.reference` byte for byte (20), the expect tool's Parse.use_file (18), the toplevel's use_file read or its
+  first error's chunk (toploop.ml's line chunks, positions from 1, //toplevel//) held in the reference (18), scripts (2), and the files
+  other tests `#use` or name (3). All 61 pass, three negative controls fail. Sources: OCaml 5.5.0's tarball (SHA-256 fcc6ae66...):
+  testsuite/tools/expect.ml (parse_contents), toplevel/toploop.ml (loop, get_phrases), toplevel/topcommon.ml (refill_lexbuf),
+  stdlib/lexing.ml (flush_input). Applied to read-results.edn's testsuite rows by `bin/repr-ocaml own-read` (the rows re-judged, no
+  round trip; the alternative, a whole `--record-results testsuite`, would have rewritten the record's header to the native reader's
+  while the other corpora's rows are still the helper's). Alternative considered: judge only the 20 ocamlc tests and keep the scripts
+  by design; rejected, the expect and toplevel tools' reads are the tests' own.
+- OC214 (a): a quoted string's CR LF written CR CR LF (lexer.mll's store_normalized_newline removes one CR) and its non-UTF-8 bytes
+  written as bytes (byte marks U+DC80-U+DCFF in the printed text, `text-bytes`). newlines.ml passes; test_pcre.ml's trees too, but its
+  mode `:full` refuses a file that is not UTF-8, so it moves to a new deferred class `:full-not-utf8` (the plan counted +2; it is +1).
+  The print records wait for the night's `--record-results` of the two corpora (the tool records whole corpora only).
+- OC209 (a): native-only tests judged at oi's level by their `.reference` (15), the 4 native-behaviour ones listed in own-verdict.edn.
+  The suite's re-judge found asmcomp/regression_value_kinds refused by the native typer (an or-pattern whose first alternative needs
+  its GADT equation for its own constraint), most likely TYPER.md §28's per-alternative equations: left for the typer's next slice,
+  nothing recorded.
+- OC210 (a): ocamltest's CRLF normalisation (ocamltest/filecompare.ml's compare_text_files: the own verdict's second digest,
+  `crlf_other`) and its variable expansion (ocamltest/environments.ml's expand, stdlib/buffer.ml's add_substitute, in header.awk);
+  norm3, subst1, subst2 by their own verdicts at both levels; subst1's and subst2's ocamlc and ocamlopt runs recorded again by hand
+  (`bin/oi record-ref --only`: their arguments changed); two new negative controls a level.
+- Scores: completeness 82.5% to 83.0% (read 3,082 to 3,143), independence 51.4% to 51.5% (judge 0.570 to 0.576). Checks: own-verdicts
+  --check 0 differ; the four oi-divergences commands 0 failing; `bin/reap --record` 0 problems; `bin/crops-score --record`, `--judge
+  --strict` 0 problems; `roundtrip --text samples stdlib`; the 61 files' round trip unchanged.

@@ -1023,11 +1023,31 @@ cmd_check() {
 }
 
 # own_verdicts LEVEL [CORPUS [TAG]]: the run programs' own verdicts (the user's decision of 2026-11-07: a test's own verdict is a judge
-# no toolchain made) into $OI_DIR/own-TAG-LEVEL.tsv, its path printed: "ID STATUS SHA256 BYTES", ocamltest's verdict read from the
+# no toolchain made) into $OI_DIR/own-TAG-LEVEL.tsv, its path printed: "ID STATUS SHA256 BYTES [OTHER]" (OTHER: the digest of the
+# text ocamltest's CRLF normalisation also takes, crlf_other, OC210 (a)), ocamltest's verdict read from the
 # tarball: the exit status the test's header expects (exit_status, default 0) and its .reference, or no output when it has none
 # (ocamltest/filecompare.ml's check_file: a missing reference is an empty one). No own verdict: a program not of the testsuite (the
-# opam set's), a native-only test (its header's `native;`) at oi's level, and test/ocaml/own-verdict.edn's entries for LEVEL (oi or
-# aot): those are judged by the recorded run. CORPUS defaults to the run corpus's corpus.tsv.
+# opam set's but test/ocaml/opam-verdicts.tsv's) and test/ocaml/own-verdict.edn's entries for LEVEL (oi or aot): those are judged
+# by the recorded run (a native-only test at oi's level since OC209 (a) by its .reference, the user 2026-11-10). CORPUS defaults to the run corpus's corpus.tsv.
+# crlf_other FILE (OC210 (a), the user 2026-11-10): ocamltest/filecompare.ml's compare_text_files normalises CRLF: when one text's
+# first line ends CR LF and the other's does not, each terminated line of the first must end CR LF and is compared without its CR
+# (a final line without LF kept as it is, its CR too). So an output equals FILE (the .reference, whose first line ends LF) when it is
+# FILE, or FILE with a CR before each LF; and FILE whose first line ends CR LF and every terminated line too is equalled by its text
+# without those CRs. This prints that other text, nothing when there is none (no LF, or a CR LF reference with a line that does not)
+crlf_other() {
+  local f=$1 endnl=0
+  [ -s "$f" ] || return 0
+  [ "$(tail -c1 "$f" | od -An -tx1 | tr -d ' ')" = 0a ] && endnl=1
+  if head -n1 "$f" | od -An -tx1 | tr -s ' \n' ' ' | grep -q '0d 0a *$'; then
+    # a CR LF reference: the text without the CRs of its terminated lines, when every one ends CR LF
+    awk -v endnl=$endnl 'BEGIN { ORS = "" } { l[NR] = $0 } END {
+      for (i = 1; i <= NR; i++) { t = (i < NR || endnl); if (t) { if (l[i] !~ /\r$/) exit; sub(/\r$/, "", l[i]) } }
+      for (i = 1; i <= NR; i++) { print l[i]; if (i < NR || endnl) print "\n" } }' "$f"
+  elif [ "$(wc -l < "$f")" -gt 0 ]; then
+    awk -v endnl=$endnl 'BEGIN { ORS = "" } { l[NR] = $0 } END { for (i = 1; i <= NR; i++) { print l[i]; if (i < NR || endnl) print "\r\n" } }' "$f"
+  fi
+}
+
 own_verdicts() {
   local lv=$1 corpus=${2:-$OI_DIR/corpus.tsv} out=$OI_DIR/own-${3:-run}-$1.tsv id kind rest st ref hdr empty
   empty=$(printf '' | sha256sum | cut -d' ' -f1)
@@ -1052,15 +1072,21 @@ own_verdicts() {
     esac
     [ "$kind" = run ] && { [ -f "$TESTS/$id.ml" ] || [ -f "$TESTS/$id.mll" ]; } || continue
     grep -qxF "$id" "$out.except" && continue
-    # the test's block, `(* TEST ... *)` (at the top, or at the end after a TEST_BELOW); native-only: `native;` and no `bytecode`
+    # the test's block, `(* TEST ... *)` (at the top, or at the end after a TEST_BELOW); since OC209 (a) (the user, 2026-11-10) a
+    # native-only test (`native;`, no `bytecode`) is judged at oi's level by its .reference too, those that test what the native
+    # back end alone does listed in test/ocaml/own-verdict.edn
     hdr=$(awk '!t && /^\(\* TEST([ \t]|$)/ { t = 1 } t { print } t && /\*\)/ { exit }' "$(test_src "$id")")
-    if [ "$lv" = oi ] && printf '%s\n' "$hdr" | grep -qE '^[[:space:]]*native[[:space:]]*;' && ! printf '%s\n' "$hdr" | grep -q bytecode; then continue; fi
     st=$(printf '%s\n' "$hdr" | awk '/exit_status *= *"[0-9]+"/ { match($0, /"[0-9]+"/); print substr($0, RSTART + 1, RLENGTH - 2); exit }')
     ref=$TESTS/$id.reference
     # a test whose check is its hook (OC203 (a)): the hook's pass, as hook_check writes it
     if [ -f "$TESTS/$id.check-program-output" ]; then
       printf '%s\t%s\t%s\t%s\n' "$id" "${st:-0}" "$(printf 'check-program-output: pass\n' | sha256sum | cut -d' ' -f1)" "$(printf 'check-program-output: pass\n' | wc -c)" >> "$out.new"
-    elif [ -f "$ref" ]; then printf '%s\t%s\t%s\t%s\n' "$id" "${st:-0}" "$(sha256sum < "$ref" | cut -d' ' -f1)" "$(wc -c < "$ref")" >> "$out.new"
+    elif [ -f "$ref" ]; then
+      # OC210 (a): the other text ocamltest's compare_text_files takes as the .reference (its CRLF normalisation), a fifth column
+      printf '%s\t%s\t%s\t%s' "$id" "${st:-0}" "$(sha256sum < "$ref" | cut -d' ' -f1)" "$(wc -c < "$ref")" >> "$out.new"
+      local alt; alt=$(crlf_other "$ref" | sha256sum | cut -d' ' -f1)
+      [ "$alt" = "$empty" ] || printf '\t%s' "$alt" >> "$out.new"
+      printf '\n' >> "$out.new"
     else printf '%s\t%s\t%s\t0\n' "$id" "${st:-0}" "$empty" >> "$out.new"; fi
   done < "$corpus"
   mv "$out.new" "$out"; rm -f "$out.except"
@@ -1099,7 +1125,7 @@ cmd_own_verdicts() {
     runs=$(awk -F'\t' '$2 == "run"' "$corpus" | wc -l); n=$(wc -l < "$own")
     : > "$OI_DIR/own-disagree.txt"
     read -r ag dis <<< "$(awk -F'\t' -v dfile="$OI_DIR/own-disagree.txt" 'NR == FNR { st[$1] = $2; sh[$1] = $3; next }
-      { if (!($1 in st)) next; if (st[$1] == $2 && (sh[$1] == $3 || $3 == "*")) a++; else { d++; print "DISAGREE " $1 ": own verdict status " $2 ", the recorded run " st[$1] > dfile } }
+      { if (!($1 in st)) next; if (st[$1] == $2 && (sh[$1] == $3 || $3 == "*" || ($5 != "" && sh[$1] == $5))) a++; else { d++; print "DISAGREE " $1 ": own verdict status " $2 ", the recorded run " st[$1] > dfile } }
       END { print a + 0, d + 0 }' "$OI_DIR/own-refs.tsv" "$own")"
     echo "oi: own-verdicts: $tag corpus at $lv's level: $n of $runs run programs by their own verdict, $((runs - n)) by $tool's recorded run; own = recorded on $ag, $dis differ"
     cat "$OI_DIR/own-disagree.txt" >&2

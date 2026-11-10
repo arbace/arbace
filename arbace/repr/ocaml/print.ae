@@ -122,13 +122,39 @@
       (.append sb "\"")
       (str sb))))
 
+;; OC214 (a) (the user, 2026-11-10): a quoted string's bytes kept by the :lines printer. A quoted string has no escapes, so its
+;; value is written as it is, but lexer.mll's quoted_string normalises a newline, removing one CR before an LF
+;; (store_normalized_newline): each CR LF of the value is written CR CR LF. A value that is not UTF-8 (the forms carry it as its
+;; bytes) is written byte for byte: a byte above 127 is the mark U+DC00+BYTE in the printed text (no character of a printed
+;; file is a lone surrogate), which text-bytes writes as the byte itself.
+(defn- byte-mark [n] (char (+ 0xDC00 (int n))))
+
+(defn- quoted-body [v]
+  (let [s (if (string? v) v (apply str (map (fn [n] (if (< n 128) (char n) (byte-mark n))) v)))]
+    (str/replace s "\r\n" "\r\r\n")))
+
+(defn text-bytes
+  "The bytes of a printed text: UTF-8, but a byte mark (U+DC80..U+DCFF, a quoted string's byte that is not UTF-8) the byte itself"
+  ^bytes [^String s]
+  (let [out (java.io.ByteArrayOutputStream.) sb (StringBuilder.)
+        flush! (fn [] (when (pos? (.length sb))
+                        (let [^bytes b (.getBytes (str sb) "UTF-8")] (.write out b 0 (alength b)))
+                        (.setLength sb 0)))]
+    (dotimes [i (count s)]
+      (let [c (int (.charAt s i))]
+        (if (and (>= c 0xDC80) (<= c 0xDCFF))
+          (do (flush!) (.write out (int (- c 0xDC00))))
+          (.append sb (.charAt s i)))))
+    (flush!)
+    (.toByteArray out)))
+
 (defn- const-text [c]
   (case (hd c)
     int (str (second c) (if (nth c 2 nil) (str (char (nth c 2))) ""))
     float (str (second c) (if (nth c 2 nil) (str (char (nth c 2))) ""))
     char (str "'" (esc-char (second c) \') "'")
     string (if-let [dl (nth c 2 nil)]
-             (d/raw (str "{" dl "|" (second c) "|" dl "}"))
+             (d/raw (str "{" dl "|" (quoted-body (second c)) "|" dl "}"))
              (string-lit (second c)))
     (bad "constant" c)))
 

@@ -5,6 +5,37 @@
 function trim(s) { gsub(/^[ \t\n]+|[ \t\n]+$/, "", s); return s }
 # a class: REASON, or in helper mode (below) past its readonly_files statement the reason the test had before that mode, that statement
 function cls(r) { if (helper && roseen) r = roclass; print "class\theader: " r; exit }
+# OC210 (a) (the user, 2026-11-10): ocamltest's expansion of a variable's value (environments.ml's expand, Buffer.add_substitute):
+# $NAME, ${NAME} or $(NAME) replaced by the variable's value, itself expanded, an unset one by nothing; \$ a literal $. The
+# variables are the header's `set NAME = "VALUE"` (setv); ${ocamlsrcdir} and the other builtins were replaced before (@OCAMLSRCDIR@,
+# $VAR, which classes the arguments)
+function expand(s, depth,   out, n, i, c, prev, j, ch, cl, k, name) {
+  if (depth > 32) cls("arguments: a recursive variable definition")
+  out = ""; prev = " "; n = length(s); i = 1
+  while (i <= n) {
+    c = substr(s, i, 1)
+    if (c == "$" && prev == "\\") { out = out "$"; prev = " "; i++; continue }
+    if (c == "$") {
+      j = i + 1; ch = substr(s, j, 1)
+      if (ch == "(" || ch == "{") {
+        cl = (ch == "(") ? ")" : "}"; k = index(substr(s, j + 1), cl)
+        if (k == 0) { out = out "$"; prev = " "; i = j; continue }
+        name = substr(s, j + 1, k - 1); i = j + k + 1
+      } else {
+        k = j; while (k <= n && substr(s, k, 1) ~ /[A-Za-z0-9_]/) k++
+        if (k == j) { out = out "$"; prev = " "; i = j; continue }
+        name = substr(s, j, k - j); i = k
+      }
+      if (name in setv) out = out expand(setv[name], depth + 1)
+      prev = " "; continue
+    }
+    if (prev == "\\") out = out "\\"
+    if (c != "\\") out = out c
+    prev = c; i++
+  }
+  if (prev == "\\") out = out "\\"
+  return out
+}
 { text = text $0 " " }
 END {
   # the header: the first "(* TEST" that is not "(* TEST_BELOW", to its balanced "*)"
@@ -151,7 +182,12 @@ END {
       if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       cls("include " lib)
     }
-    if (s ~ /^set [A-Za-z_0-9]+ *= *"/) { e = s; sub(/^set /, "", e); gsub(/ *= */, "=", e); gsub(/"/, "", e); env = env " " e; continue }
+    if (s ~ /^set [A-Za-z_0-9]+ *= *"/) {
+      sv = s; sub(/^set /, "", sv); sn = sv; sub(/ *=.*/, "", sn); sub(/^[^"]*"/, "", sv); sub(/"[^"]*$/, "", sv); setv[sn] = sv
+      # its value in the environment expanded as ocamltest exports it (to_system_env), at the end (a later set counts): a token here
+      if (sv ~ /[$\\]/ && sv !~ /\$VAR/) { nexp++; expname[nexp] = sn; env = env " @@SET" nexp "@@"; continue }
+      e = s; sub(/^set /, "", e); gsub(/ *= */, "=", e); gsub(/"/, "", e); env = env " " e; continue
+    }
     if (s ~ /^unset /) continue
     if (s == "script" && prescript) continue
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
@@ -175,6 +211,9 @@ END {
   hook = FILENAME; sub(/\.mll?$/, ".check-program-output", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
   if (args ~ /\$VAR/) { cls("arguments = " args) }
+  for (q = 1; q <= nexp; q++) { ev = expand(setv[expname[q]], 0); gsub(/[ \t]/, "", ev); sub("@@SET" q "@@", expname[q] "=" ev, env) }
+  # the arguments as ocamltest gives them (OC210 (a)): expanded, then split into words (actions_helpers.ml's String.words)
+  if (index(args, "$") || index(args, "\\")) { args = expand(args, 0); gsub(/[ \t]+/, " ", args); args = trim(args) }
   # a test of C stubs that runs only native (int64-unboxing: its externals' bytecode names are "", the unboxed native ones the C's)
   # stays its class: oi calls an external by its bytecode name
   if (csclass != "" && sawnative && !sawbyte) { cls(csclass) }
