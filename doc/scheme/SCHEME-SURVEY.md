@@ -4437,8 +4437,8 @@ the other two are below.
   no `|N`), write a positive exponent with `+` (`1e+10`), Chibi's form; R6RS mode keeps Chez's, SPEC 7 states both; the R7RS suites,
   the SRFIs and the corpora rerun and recorded. (b) Keep Chez's form everywhere and class the two `:design` (R7RS 6.2.6 leaves the
   external representation's spelling to the implementation). *Recommended: (b)*: one printer rule for both modes keeps si's printing
-  Chez's, which the rest of the judges (SCS17 (c)'s printing scans) are stated over; the strict completeness is the same either way
-  in (b)'s accounting only if by design is counted, so (a) if the score is what matters: +2 cases, eval 99.6 to 99.7.
+  Chez's, which the rest of the judges (SCS17 (c)'s printing scans) are stated over. (b) leaves the strict completeness as it is (by
+  design stays in its denominator) and raises the number without by design; (a) raises the strict one, +2 cases (eval 99.6 to 99.7).
 - **SCS28 Chibi's optional-test fallback.** `(chibi optional-test)`'s else branch for other Schemes defines a `test-error` of one
   expression and calls it with two: the test library is ill-formed outside Chibi, si's `(chibi optional)` passes the other 24 tests.
   (a) Class it `:na`, a test of no implementation but Chibi (as `:suite-ill-formed`); (b) keep it deferred. *Recommended: (a)*: no
