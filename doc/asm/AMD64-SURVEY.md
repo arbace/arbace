@@ -961,3 +961,46 @@ Not built in this slice: gas's mode, relaxation, the streamer's directives, the 
 - **AXS39 The `:directive` rule after the matchers' mnemonics.** (a) as built: a text is an instruction's line when its first word is a
   printed mnemonic, a matcher's mnemonic, a prefix or a comparison mnemonic; (b) by content alone (AXS31 (b)). *Recommended: (a)* until AX4
   prints the streamer's lines: the rule's gap was a missing source of mnemonics, now the matcher's own.
+
+## As built: AXS37, AXS38 (2026-11-10; branch `asm-tg`)
+
+Both taken as (a), recommended (correctness fixes of Arbace's own generator; the user can still reject them). Sources read from the
+pinned llvm-project 23.1.5 tarball and written again in Arbace, no code copied: `llvm/lib/TableGen/TGParser.cpp` (ParseObjectBody,
+ApplyLetStack, ParseDef, ParseDefm, AddSubClass, AddSubMultiClass, ParseTopLevelLet, SetValue) and
+`llvm/utils/TableGen/AsmMatcherEmitter.cpp` (buildInstructionOperandReference, buildInstructionResultOperands,
+buildAliasResultOperands, emitConvertFuncs).
+
+- **AXS38, the let order.** `arbace.asm.tablegen`'s `complete-def` now makes a def's record in TGParser's order: the superclasses, the
+  let stack it was written in (ParseObjectBody's ApplyLetStack, before the body), the body; then level by level outwards the defm's
+  superclasses (ParseDefm's AddSubClass) and the let stack around that defm (its ApplyLetStack). A class's record already took the stack
+  after its superclasses and before its body (the fourth slice); foreach, `if` and defset add no level of their own, as in TGParser, whose
+  stack is lexical; a multiclass's base (`multiclass M : B`) takes no let around M's definition (AddSubMultiClass resolves B's records
+  without ApplyLetStack; X86 has none). Effect: in X86.td's world four records change (a body's `let IntrProperties` under an outer `let`
+  of the same field: NVVM's `int_nvvm_fence_proxy_tensormap_generic_acquire_{cta,cluster,gpu,sys}`, Intrinsics, which the generator
+  drops); no record the table reads, so `table check` was byte for byte with this change alone.
+- **AXS37, the oracle's reach.** `bin/repr-asm table oracle` (by hand, the host's llvm-tblgen 23.1.5) now runs every part and fails on
+  any difference, its new half `test/asm/table_oracle.ae` (`asm.table-oracle`, which reads llvm-tblgen's output as text): each
+  MatchTable0/1 row's conversion (ConversionTable's steps by convertToMCInst's cases: the asm operand, its render method and machine
+  operand count, TiedAsmOperandTable's result operand, an immediate, a register) against `:match`/`:match-intel`; every `:insns` entry's
+  encoding fields (opcode, format, map, prefix, operand and address size, encoding, immediate, explicit prefix, CD8 scale, the 18 flag
+  bits), operands with MIOperandInfo's counts, defs and ties against `-print-records`' resolved fields (extracted by awk; the 110 MB
+  dump is not kept); every `:print`/`:print-intel` against `-gen-asm-writer`'s printInstruction decoded (getMnemonic's AsmStrs and
+  OpInfo words, each fragment's command by its bits). About 80 s; llvm-tblgen under 600 MB.
+- **What it found.** The fields and the printers were llvm-tblgen's (20,477 entries each, the same). The conversions were not: 763 rows of
+  each table (1,526 lines of `asm/amd64/table.edn`). A tied pair was written with the later operand rendered and the earlier copied
+  forward (`ADC8rr`: `[[:t 1] [:a 1] [:a 0]]`), where LLVM canonicalizes the asm operand `$src1` to the untied `$dst`, renders `$dst`
+  and copies it into `$src1` (`[[:a 1] [:t 0] [:a 0]]`); and a tied operand of several machine operands was copied operand by operand
+  (VGATHERDPD's `[:t 8]`), where LLVM ties only single operands. `arbace.asm.amd64.gen`'s instruction conversion is now
+  buildInstructionResultOperands' (doc/asm/AMD64.md §1); every MatchTable row's conversion is equal. The encoder resolves a tie by slot
+  either way, so no encoding changed (the same counts below).
+
+| check | before | after |
+|---|---|---|
+| table oracle: MatchTable0/1 rows | 23,014 / 22,609 equal | equal |
+| conversions (new) | 763 / 763 rows differ | 23,014 / 22,609 equal |
+| `:insns` fields, `:print`, `:print-intel` (new) | 20,477 equal each | equal |
+| print aliases | 3 / 3 equal | equal |
+| `encode-check` (`MC/X86`) | 106,074 met, 0 failing | 106,074 met (EVEX 71,212, VEX 18,717, legacy 14,353, XOP 1,792); texts 107,451; cross 86,350 of 87,103; 0 failing |
+
+arm64: AR2's generator (`arbace/repr/asm/arm64/tablegen.ae` on `asm-ar2`) reads Go's arm64asm and obj sources as text, not TableGen:
+unaffected.

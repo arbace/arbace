@@ -34,7 +34,10 @@
 #   bin/repr-asm table oracle                        the oracle tier's, by hand: the host's llvm-tblgen 23.1.5 (REPR_ASM_TBLGEN, default
 #                                                    /usr/lib/llvm23/bin/llvm-tblgen) makes X86GenAsmMatcher.inc from the same .td files;
 #                                                    its MatchTable0 and MatchTable1 (mnemonic, instruction, operand classes, in order)
-#                                                    against the table's :match and :match-intel (AX3)
+#                                                    against the table's :match and :match-intel (AX3); since AXS37 also each row's
+#                                                    conversion, each :insns entry's encoding fields, operands, defs and ties
+#                                                    (-print-records) and its :print/:print-intel (-gen-asm-writer's printInstruction
+#                                                    decoded), test/asm/table_oracle.ae; every part runs, any difference fails
 #   bin/repr-asm print-oracle [CORPUS]              the oracle tier's, by hand: the printer's lines of each AT&T file against the host's
 #                                                    llvm-mc 23.1.5 (REPR_ASM_MC), file by file; table oracle also compares the printer's
 #                                                    aliases with llvm-tblgen -gen-asm-writer's printAliasInstr
@@ -206,7 +209,7 @@ case ${1:-} in
     [ -f "$llvm/lib/Target/X86/X86.td" ] || { echo "repr-asm: $llvm/lib/Target/X86/X86.td missing: bin/repr-asm corpus extract" >&2; exit 1; }
     if [ "$2" = oracle ]; then
       tblgen=${REPR_ASM_TBLGEN:-/usr/lib/llvm23/bin/llvm-tblgen}
-      o=$root/.tmp/repr-asm/oracle; mkdir -p "$o"
+      o=$root/.tmp/repr-asm/oracle; mkdir -p "$o"; ofails=0
       "$tblgen" -gen-asm-matcher -I "$llvm/include" -I "$llvm/lib/Target/X86" "$llvm/lib/Target/X86/X86.td" -o "$o/X86GenAsmMatcher.inc"
       # MatchTable0's and MatchTable1's rows (the AT&T and Intel variants) as MNEMONIC INSTRUCTION CLASS..., the token classes by
       # their text (the enum's comments), against the table's :match and :match-intel
@@ -227,7 +230,7 @@ case ${1:-} in
       if cmp -s "$o/llvm-$v.txt" "$o/arbace-$v.txt"; then
         echo "repr-asm table oracle: llvm-tblgen's MatchTable$v and the table's :$key are the same $(wc -l < "$o/llvm-$v.txt") rows, in the same order"
       else
-        echo "FAIL: repr-asm table oracle: llvm-tblgen's MatchTable$v ($(wc -l < "$o/llvm-$v.txt") rows) and the table's :$key ($(wc -l < "$o/arbace-$v.txt")) differ: diff $o/llvm-$v.txt $o/arbace-$v.txt"; exit 1
+        echo "FAIL: repr-asm table oracle: llvm-tblgen's MatchTable$v ($(wc -l < "$o/llvm-$v.txt") rows) and the table's :$key ($(wc -l < "$o/arbace-$v.txt")) differ: diff $o/llvm-$v.txt $o/arbace-$v.txt"; ofails=$((ofails + 1))
       fi
       done
       # the printer's aliases: -gen-asm-writer's printAliasInstr patterns (INSTRUCTION MI-OPERANDS CONDITIONS STRING, an operand
@@ -249,10 +252,22 @@ case ${1:-} in
       if cmp -s "$o/llvm-aliases-$v.txt" "$o/arbace-aliases-$v.txt"; then
         echo "repr-asm table oracle: llvm-tblgen's printAliasInstr (writer $v) and the table's :$key are the same $(wc -l < "$o/llvm-aliases-$v.txt") patterns"
       else
-        echo "FAIL: repr-asm table oracle: the printer's aliases differ: diff $o/llvm-aliases-$v.txt $o/arbace-aliases-$v.txt"; exit 1
+        echo "FAIL: repr-asm table oracle: the printer's aliases differ: diff $o/llvm-aliases-$v.txt $o/arbace-aliases-$v.txt"; ofails=$((ofails + 1))
       fi
       done
-      exit 0
+      # AXS37: the conversions, the :insns entries' fields and the printers' strings (test/asm/table_oracle.ae), from
+      # -print-records' resolved fields (extracted: each def's name and the fields the table reads) and the inc files above
+      "$tblgen" -print-records -I "$llvm/include" -I "$llvm/lib/Target/X86" "$llvm/lib/Target/X86/X86.td" -o "$o/records.txt"
+      awk 'BEGIN { n = split("Opcode Form OpMap OpPrefix OpSize AdSize OpEnc ImmT explicitOpPrefix CD8_Scale hasREX_W hasVEX_4V hasVEX_L ignoresVEX_L hasEVEX_K hasEVEX_Z hasEVEX_L2 hasEVEX_B hasEVEX_RC hasEVEX_U hasEVEX_NF hasTwoConditionalOps hasLockPrefix hasREPPrefix hasNoTrackPrefix IgnoresW isCommutable isPseudo OutOperandList InOperandList Constraints MIOperandInfo", fs, " ")
+                   for (i = 1; i <= n; i++) want[fs[i]] = 1 }
+           /^def [^ ]+ \{/ { print "D " $2; next }
+           /^  [^ ].* = .*;$/ { l = $0; sub(/^  /, "", l); t = l; sub(/ = .*/, "", t); k = split(t, w, " "); f = w[k]
+             if (f in want) { v = l; sub(/^[^=]* = /, "", v); sub(/;$/, "", v); print "F " f "\t" v } }' "$o/records.txt" > "$o/records-fields.txt"
+      rm -f "$o/records.txt"
+      arbace_tool -e "(do (load-file \"$root/test/asm/table_oracle.ae\") nil)" \
+        -e "(let [n (asm.table-oracle/main \"$root/asm/amd64/table.edn\" \"$o\" \"$o/X86GenAsmMatcher.inc\" \"$o/X86GenAsmWriter0.inc\" \"$o/X86GenAsmWriter1.inc\" \"$o/records-fields.txt\")] (spit \"$o/fails\" (str n)))"
+      ofails=$((ofails + $(cat "$o/fails")))
+      [ $ofails = 0 ]; exit
     fi
     GOMEMLIMIT=${REPR_ASM_TABLE_MEM:-1200MiB} arbace_tool -m arbace.asm.amd64.gen "$2" "$llvm" "$root/asm/amd64/table.edn" ;;
   encode-check)

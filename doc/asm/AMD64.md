@@ -41,7 +41,15 @@ Generated, committed, checked by regeneration (`bin/repr-asm table gen|check`; t
   `:print-aliases`, printAliasInstr's patterns (InstAliases of `EmitPriority` 1 or more with no more operands than their
   instruction, their conditions on the MCInst's operands, the ambiguous ones dropped): X86 has three, `aad`, `aam`, `xstorerng`.
 - **Its oracle** (`bin/repr-asm table oracle`, by hand): llvm-tblgen 23.1.5's `-gen-asm-matcher` on the same files; its
-  `MatchTable0` and the table's matchables are the same 23,014 rows in the same order with the same classes.
+  `MatchTable0` and the table's matchables are the same 23,014 rows in the same order with the same classes (MatchTable1 and
+  `:match-intel` 22,609). Since AXS37 (`test/asm/table_oracle.ae`) also each row's conversion (ConversionTable's steps by
+  convertToMCInst's cases: the asm operand, its render method and machine-operand count, TiedAsmOperandTable's result operand,
+  the immediates and registers), every `:insns` entry's encoding fields, operands (MIOperandInfo's counts), defs and ties
+  against `-print-records`' resolved fields, and every `:print` and `:print-intel` against `-gen-asm-writer`'s
+  printInstruction decoded (AsmStrs, the OpInfo words, each fragment's command): 20,477 entries, equal.
+- **The conversion** (since AXS37) is buildInstructionResultOperands': an operand of one machine operand tied to an earlier one
+  copies it (`[:t EARLIER]`); else the first asm operand whose name, canonicalized to the untied operand (`$src1` tied to
+  `$dst` is `$dst`, buildInstructionOperandReference), is the operand's renders it (`[:a K]`); else one immediate 0.
 
 ## 2. The matcher (`arbace.asm.amd64.asm`)
 

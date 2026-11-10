@@ -7,8 +7,9 @@
   Evaluation is lazy: a record's field keeps its initializer and the scope it was written in (a class's template
   arguments, defvars, a multiclass's arguments and NAME, foreach's variables), and is evaluated when it is first read,
   against the finished record (TableGen's late resolution of field references), then kept. A record's fields are made
-  as TGParser makes them: the superclasses in order (a later one's field overriding), the body, then the let stack, and
-  for a defm's records the defm's superclasses and the let stack around the defm, level by level outwards.
+  as TGParser makes them: the superclasses in order (a later one's field overriding), the let stack the record was
+  written in, the body, and for a defm's records the defm's superclasses and the let stack around the defm, level by
+  level outwards.
 
   Values: a long (int and bit), a String (string and code), a vector (list), Bits (bits<n>, its bits low first),
   Dag, a record (Rec), `unset` (`?`)."
@@ -735,24 +736,31 @@
   (reduce (fn [f [n r e s]] (set-field f n r e s)) fields frames))
 
 (defn- complete-def
-  "A record named `n` (nil: anonymous) of `supers` and `body` written in `scope`, the let levels around it applied."
+  "A record named `n` (nil: anonymous) of `supers` and `body` written in `scope`, the let levels around it applied in
+  TGParser's order: the superclasses, the let stack the def was written in (ParseObjectBody's ApplyLetStack, before the
+  body), the body; then, level by level outwards, the defm's superclasses (ParseDefm's AddSubClass) and the let stack
+  around that defm (its ApplyLetStack). A level of a multiclass's base (`multiclass M : B`) takes no let of the level
+  around it: AddSubMultiClass resolves B's records into M's without ApplyLetStack."
   [n supers body scope]
   (let [acc (reduce (fn [acc [sc spos snamed]]
                       (class-fields acc sc (mapv (fn [a] {:e a :s scope}) spos) (mapv (fn [[nm a]] [nm {:e a :s scope}]) snamed)))
                     [{} #{}] supers)
+        lvls *levels*
+        acc [(apply-frames (first acc) (:frames (peek lvls))) (second acc)]
         [fields s] (reduce (fn [[fields s] item]
                              (case (first item)
                                :field (let [[_ t nm v] item] [(assoc fields nm (if v {:t t :e v :s s} {:t t :v unset})) s])
                                :let (let [[_ nm r v] item] [(set-field fields nm r {:e v :s s} s) s])
                                :defvar (let [[_ nm v] item] [fields {:vars (assoc (:vars s) nm {:e v :s s}) :up s}])))
                            [(first acc) scope] body)
-        [fields sups] (reduce (fn [[fields sups] lvl]
-                                (let [fields (apply-frames fields (:frames lvl))]
-                                  (reduce (fn [acc [sc spos snamed sscope]]
-                                            (class-fields acc sc (mapv (fn [a] {:e a :s sscope}) spos)
-                                                          (mapv (fn [[nm a]] [nm {:e a :s sscope}]) snamed)))
-                                          [fields sups] (:supers lvl))))
-                              [fields (second acc)] (rseq *levels*))
+        [fields sups] (reduce (fn [[fields sups] i]
+                                (let [lvl (nth lvls i)
+                                      [fields sups] (reduce (fn [acc [sc spos snamed sscope]]
+                                                              (class-fields acc sc (mapv (fn [a] {:e a :s sscope}) spos)
+                                                                            (mapv (fn [[nm a]] [nm {:e a :s sscope}]) snamed)))
+                                                            [fields sups] (:supers lvl))]
+                                  [(if (:base lvl) fields (apply-frames fields (:frames (nth lvls (dec i))))) sups]))
+                              [fields (second acc)] (range (dec (count lvls)) 0 -1))
         id (next-id)
         nm (or n (str "anonymous_" id))
         keep (some (fn [[c fs]] (when (sups c) fs)) (:keep *w*))
@@ -812,12 +820,12 @@
                                               :frames (vec (mapcat :frames *levels*))})
              scope)
     :def (let [[_ n su body] st] (complete-def (def-name n scope) su body scope) scope)
-    :defm (let [[_ n su] st
+    :defm (let [[_ n su base] st
                 mcs (take-while #(.get ^HashMap (:mcs *w*) (first %)) su)
                 classes (drop (count mcs) su)
                 _ (when (empty? mcs) (fail (str "unknown multiclass " (ffirst su))))
                 nm (if n (def-name n scope) (if (in-mc? scope) (lookup "NAME" scope nil) (str "anonymous_" (next-id))))
-                lvl {:frames [] :supers (mapv (fn [[c p nd]] [c p nd scope]) classes)}]
+                lvl {:frames [] :supers (mapv (fn [[c p nd]] [c p nd scope]) classes) :base (= base :base)}]
             (doseq [[mc pos named] mcs]
               (let [m (.get ^HashMap (:mcs *w*) mc)
                     nmd (into {} named)
@@ -834,7 +842,7 @@
             scope)
     :multiclass (let [[_ n ta su body] st
                       ;; `multiclass M : Base<...>`: the bases are defms of the body, as TGParser instantiates them
-                      body (into (mapv (fn [b] [:defm nil [b]]) su) body)]
+                      body (into (mapv (fn [b] [:defm nil [b] :base]) su) body)]
                   (.put ^HashMap (:mcs *w*) n {:targs ta :body body :frames (vec (mapcat :frames *levels*))})
                   scope)
     :let (let [[_ ls body] st]

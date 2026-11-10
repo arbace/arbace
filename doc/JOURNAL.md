@@ -3097,3 +3097,30 @@ same rows; `bin/reap`, `bin/crops-score --judge --strict`, `test/gate/gate-key-c
 Considered: keeping the shifts' 8-bit NDD forms out of the table and encoding them by a rule (rejected: the table is the encoder's only
 source of fields); changing TableGen's let order for defs too (left as AXS38: the table oracle does not see conversions, AXS37).
 Proposed: AXS37-AXS39 (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, fourth slice)").
+
+## 2026-11-10 amd64 assembly: AXS37 and AXS38, the TableGen let order and the table oracle's reach (branch `asm-tg`, from `mac/asm-ax2d` `b65d5d923`)
+
+Taken as recommended, (a) both (doc/asm/AMD64-SURVEY.md, "As built: AXS37, AXS38"): correctness fixes of Arbace's own generator, the
+user can still reject them. Read from llvm-project 23.1.5's release tarball (`test/asm/corpora.edn`'s `:llvmorg-23.1.5`) and written
+again in Arbace, no code copied: `llvm/lib/TableGen/TGParser.cpp` (ParseObjectBody, ApplyLetStack, ParseDef, ParseDefm, AddSubClass,
+AddSubMultiClass, ParseTopLevelLet, SetValue), `llvm/utils/TableGen/AsmMatcherEmitter.cpp` (buildInstructionOperandReference,
+buildInstructionResultOperands, buildAliasResultOperands, emitConvertFuncs).
+
+AXS38: `arbace.asm.tablegen`'s def records now take the let stack they were written in after their superclasses and before their body,
+then each defm's superclasses and the stack around that defm outwards (TGParser's order; before: the body first, then every stack); a
+multiclass's base takes no let around the derived multiclass (AddSubMultiClass). In X86.td's world four records change, NVVM intrinsics
+the generator drops; `table check` byte for byte with this change alone (measured by instrumenting `complete-def` in a scratch run).
+
+AXS37: `bin/repr-asm table oracle` (by hand; the host's llvm-tblgen 23.1.5) runs every part and fails on any difference; its new half
+`test/asm/table_oracle.ae` compares each MatchTable0/1 row's conversion (ConversionTable decoded by convertToMCInst's cases), every `:insns`
+entry's encoding fields, operands, defs and ties (`-print-records`) and every `:print`/`:print-intel` (`-gen-asm-writer`'s printInstruction
+decoded). Before: matchers' rows, aliases equal; conversions 763 rows differ in each variant; fields and prints equal (20,477 each). Cause:
+`arbace.asm.amd64.gen` wrote a tie as a forward copy from the later operand and copied multi-operand ties operand by operand; now
+buildInstructionResultOperands' rule (a single-operand later tie copies the earlier; asm operand names canonicalized to the untied
+operand; else one immediate 0). After: every part equal; `asm/amd64/table.edn` regenerated (1,526 lines), `table check` byte for byte;
+`encode-check` unchanged, 106,074 of 106,075 stated encodings met (EVEX 71,212, VEX 18,717, legacy 14,353, XOP 1,792), CHECK texts 107,451,
+cross-syntax 86,350 of 87,103, error lines 80 of 130, none failing, every control failing as it must (the record untouched).
+
+arm64: AR2's generator reads Go's sources, not TableGen: unaffected. Considered: comparing TSFlags from `-gen-instr-info` instead of
+`-print-records`' fields (rejected: TSFlags leaves out ignoresVEX_L, IgnoresW, isCommutable, isPseudo and the operands); keeping the forward
+tie form since the encoder resolves either (rejected: the table is to be llvm-tblgen's, and the oracle now holds it to that).
