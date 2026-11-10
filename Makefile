@@ -25,6 +25,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
+  a64i-light a64i-run a64i-trace a64i-check a64i-record \
   x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
   repr-rust-native-check \
   repr-rust-native-errors \
@@ -574,6 +575,16 @@ repr-asm-decode-check: ## amd64's decoder judged with no llvm-mc: MC/Disassemble
 	bin/repr-asm decode-check $(LEVELS)
 repr-asm-decode-record: ## the decode check recorded into test/asm/decode-results-amd64.edn (bin/repr-asm decode-check --record [LEVEL...]; LEVELS=...)
 	bin/repr-asm decode-check --record $(LEVELS)
+a64i-light: ## a64i, arm64's machine (AR5): its light driver built alone by TamaGo's go into .tmp/a64i/a64i (bin/a64i light)
+	bin/a64i light
+a64i-run: ## a static arm64 executable run on a64i (bin/a64i run [--forms FORMS] EXE [ARG...]; EXE=..., ARGS=...)
+	bin/a64i run $(EXE) $(ARGS)
+a64i-trace: ## the lockstep against this arm64 CPU: MODE=sys, step or bisect (bin/a64i trace --mode MODE EXE; EXE=...)
+	bin/a64i trace --mode $(or $(MODE),sys) $(EXE)
+a64i-check: ## test/asm/run-arm64/'s and test/asm/a64i/'s programs on a64i from their forms (eval) and bytes (AOT), the forms against the decoded words, on arm64 the CPU's runs and the lockstep, with the controls (bin/a64i check)
+	bin/a64i check
+a64i-record: ## a64i's check recorded into test/asm/a64i-results-arm64.edn (bin/a64i check --record)
+	bin/a64i check --record
 x86i-light: ## x86i, the x86-64 integer machine (AX5.2): its light driver built alone by TamaGo's go into .tmp/x86i/x86i (bin/repr-asm x86i light)
 	bin/repr-asm x86i light
 x86i-run: ## a static x86-64 executable run on x86i: its status, or 128 + the signal (bin/repr-asm x86i run EXE [ARG...]; EXE=..., ARGS=...)

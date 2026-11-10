@@ -47,7 +47,7 @@ arbace_crop_paths=(
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'
   go/arbace/hs.ae 'go/arbace/hs/*' go/arbace/libm.ae 'go/arbace/libm/*'
   # x86i's (the x86-64 integer machine, AX5) and the frame of the machine emulators it runs on, a light driver (AXS51 (a))
-  go/arbace/x86i.ae 'go/arbace/x86i/*' go/arbace/emu.ae 'go/arbace/emu/*'
+  go/arbace/x86i.ae 'go/arbace/x86i/*' go/arbace/emu.ae 'go/arbace/emu/*' go/arbace/a64i.ae 'go/arbace/a64i/*'
   # pyi's lazy modules (queue 208, 209, 215: the C library host, _bz2's, _lzma's, _zstd's, _ssl's and _sqlite3's glue; W-P6 (a))
   go/arbace/clib.ae 'go/arbace/clib/*' go/arbace/pybz2.ae 'go/arbace/pybz2/*' go/arbace/pylzma.ae 'go/arbace/pylzma/*'
   go/arbace/pyzstd.ae 'go/arbace/pyzstd/*' go/arbace/pyssl.ae 'go/arbace/pyssl/*' go/arbace/pysqlite3.ae 'go/arbace/pysqlite3/*'

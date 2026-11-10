@@ -1,0 +1,946 @@
+(in-ns 'go.arbace.a64i) (go/file "forms.go" :imports [
+
+
+    ^{:line 4} [errors "errors"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [strconv "strconv"]
+    ^{:line 7} [strings "strings"]])
+
+
+;; The forms' front end (eval): an instruction's assembly form as arbace.repr.asm reads it (doc/asm/SPEC.md), its symbolic
+;; operands replaced by their values at the layout (`(addr V)`, `(spec lo12 (addr V))`: arbace.asm.arm64.eval), lowered to
+;; the Inst the Arm ARM's alias rules name. Never encoded: no instruction word is made or read on this path.
+
+
+(go/type Sx "Sx is an S-expression: an atom or a list.\n" (struct
+    ^{:line 16 :tag string} Atom
+    ^{:line 17 :tag (slice (* Sx))} List
+    ^{:line 18 :tag bool} IsList))
+
+
+^{:go/end 30} (go/method String ^string [^{:tag (* Sx)} s]
+  (when (not (.-IsList s))
+    (return (.-Atom s)))
+
+  (let [p (make (slice string) (len (.-List s)))]
+    (range [i x (.-List s)]
+      (aset p i (.String x)))
+
+    (+ "(" (strings/Join p " ") ")")))
+
+
+
+^{:go/end 88} (go/func ParseSx "ParseSx reads one S-expression of text (atoms, lists, strings kept as atoms with their quotes).\n" [^string text] :results [(* Sx) error]
+  (let [i 0
+      ^{:line 35 :tag (func [] [(* Sx) error])} read (zero (func [] [(* Sx) error]))
+      ^{:line 36} skip ^{:go/end 40} (fn []
+        (while (and (< i (len text)) ^:go/paren (or (== (aget text i) \space) (== (aget text i) \tab) (== (aget text i) \newline) (== (aget text i) \,)))
+          (inc! i)))]
+
+
+    (set! read ^{:go/end 86} (fn [] :results [(* Sx) error]
+        (skip)
+        (when (>= i (len text))
+          (return nil (errors/New "end of form")))
+
+        (switch (aget text i)
+          (case [\(]
+            (inc! i)
+            (let [s (addr (lit Sx :IsList true))]
+              (while true
+                (skip)
+                (when (>= i (len text))
+                  (return nil (errors/New "unclosed list")))
+
+                (when (== (aget text i) \))
+                  (inc! i)
+                  (return s nil))
+
+                (let [(values x err) (read)]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (set! (.-List s) (append (.-List s) x))))))
+
+          (case [\)]
+            (return nil (errors/New "unexpected )")))
+          (case [\"]
+            (let [j (+ i 1)]
+              (while (and (< j (len text)) (!= (aget text j) \"))
+                (when (== (aget text j) \\)
+                  (inc! j))
+
+                (inc! j))
+
+              (let [s (addr (lit Sx :Atom (subslice text i (+ j 1))))]
+                (set! i (+ j 1))
+                (return s nil)))))
+
+        (let [j i]
+          (while (and (< j (len text)) (not (strings/ContainsRune " \t\n,()\"" (conv rune (aget text j)))))
+            (inc! j))
+
+          (let [s (addr (lit Sx :Atom (subslice text i j)))]
+            (set! i j)
+            (return s nil)))))
+
+    (read)))
+
+
+^{:go/breaks [[4 94]] :go/end 95} (go/method head ^string [^{:tag (* Sx)} s]
+  (when (and (.-IsList s) (> (len (.-List s)) 0) (not (.-IsList (aget (.-List s) 0))))
+    (return (.-Atom (aget (.-List s) 0))))
+
+  "")
+
+
+(go/type formErr string)
+
+^{:go/end 99} (go/func ferr [^string f & ^{:tag (slice any)} a] (panic (conv formErr (fmt/Sprintf f (spread a)))))
+
+;; operand readers
+
+(go/type regOp (struct
+    ^{:line 104 :tag uint8} n
+    ^{:line 105 :tag bool} x ^bool sp ^bool zr))
+
+
+^{:go/end 133} (go/func asReg [^{:tag (* Sx)} o] :results [regOp bool]
+  (when (or (!= (.head o) "reg") (!= (len (.-List o)) 2))
+    (return (lit regOp) false))
+
+  (let [n (.-Atom (aget (.-List o) 1))]
+    (switch n
+      (case ["sp"]
+        (return (lit regOp 31 true true false) true))
+      (case ["wsp"]
+        (return (lit regOp 31 false true false) true))
+      (case ["xzr"]
+        (return (lit regOp 31 true false true) true))
+      (case ["wzr"]
+        (return (lit regOp 31 false false true) true))
+      (case ["fp"]
+        (return (lit regOp 29 true false false) true))
+      (case ["lr"]
+        (return (lit regOp 30 true false false) true)))
+
+    (when (and (>= (len n) 2) ^:go/paren (or (== (aget n 0) \x) (== (aget n 0) \w)))
+      (when [(values k err) (strconv/Atoi (subslice n 1))] (and (== err nil) (>= k 0) (<= k 30))
+        (return (lit regOp (conv uint8 k) (== (aget n 0) \x) false false) true)))
+
+
+    (return (lit regOp) false)))
+
+
+
+^{:go/end 150} (go/func asVReg "asVReg is a SIMD&FP register as a load or store names it (b, h, s, d, q): its number and log2 size.\n" [^{:tag (* Sx)} o] :results [uint8 uint8 bool]
+  (when (or (!= (.head o) "reg") (!= (len (.-List o)) 2))
+    (return 0 0 false))
+
+  (let [n (.-Atom (aget (.-List o) 1))]
+    (when (< (len n) 2)
+      (return 0 0 false))
+
+    (let [sz (strings/IndexByte "bhsdq" (aget n 0))
+        (values k err) (strconv/Atoi (subslice n 1))]
+      (when (or (< sz 0) (!= err nil) (< k 0) (> k 31))
+        (return 0 0 false))
+
+      (return (conv uint8 k) (conv uint8 sz) true))))
+
+
+^{:go/end 158} (go/func mustReg ^regOp [^{:tag (* Sx)} o]
+  (let [(values r ok) (asReg o)]
+    (when (not ok)
+      (ferr "not a register: %s" o))
+
+    ^{:line 157} r))
+
+
+
+^{:go/breaks [7] :go/end 204} (go/func value "value is an expression's value: a number, `(addr V)`, `(spec S E)` with its specifier applied, `(imm E)`.\n" ^int64 [^{:tag (* Sx)} o]
+  (when (not (.-IsList o))
+    (let [(values v err) (strconv/ParseInt (strings/TrimSuffix (.-Atom o) "N") 10 64)]
+      (when (!= err nil)
+        (let [(values u err2) (strconv/ParseUint (strings/TrimSuffix (.-Atom o) "N") 10 64)]
+          (when (!= err2 nil)
+            (ferr "not a value: %s" o))
+
+          (return (conv int64 u))))
+
+      (return v)))
+
+  (switch (.head o)
+    (case ["imm" "addr"]
+      (return (value (aget (.-List o) 1))))
+    (case ["spec"]
+      (let [v (value (aget (.-List o) 2))]
+        (switch (.-Atom (aget (.-List o) 1))
+          (case ["lo12"]
+            (return (bit-and v 0xfff)))
+          (case ["abs_g0" "abs_g0_nc"]
+            (return (bit-and v 0xffff)))
+          (case ["abs_g1" "abs_g1_nc"]
+            (return (bit-and (>> v 16) 0xffff)))
+          (case ["abs_g2" "abs_g2_nc"]
+            (return (bit-and (>> v 32) 0xffff)))
+          (case ["abs_g3"]
+            (return (bit-and (>> v 48) 0xffff)))
+          (case ["tprel_hi12"]
+            (return (bit-and (>> v 12) 0xfff)))
+          (case ["tprel_lo12" "tprel_lo12_nc"]
+            (return (bit-and v 0xfff)))
+          (case ["tprel_g0" "tprel_g0_nc"]
+            (return (bit-and v 0xffff)))
+          (case ["tprel_g1" "tprel_g1_nc"]
+            (return (bit-and (>> v 16) 0xffff)))
+          (case ["tprel_g2"]
+            (return (bit-and (>> v 32) 0xffff))))
+
+        (ferr ":unsupported-specifier %s" (.-Atom (aget (.-List o) 1))))))
+
+  (ferr "not a value: %s" o)
+  0)
+
+
+
+^{:go/breaks [[6 220]] :go/end 221} (go/func movwShift "movwShift is a MOVZ/MOVK operand's implied shift by its specifier (abs_gN: 16N), -1 without one.\n" ^int [^{:tag (* Sx)} o]
+  (when (== (.head o) "imm")
+    (set! o (aget (.-List o) 1)))
+
+  (when (== (.head o) "spec")
+    (let [s (.-Atom (aget (.-List o) 1))]
+      (when (strings/HasPrefix s "abs_g")
+        (return (* 16 (conv int (- (aget s 5) \0)))))
+
+      (when (strings/HasPrefix s "tprel_g")
+        (return (* 16 (conv int (- (aget s 7) \0)))))))
+
+
+  -1)
+
+
+^{:go/end 229} (go/func isImm ^bool [^{:tag (* Sx)} o]
+  (when (not (.-IsList o))
+    (let [(values _ err) (strconv/ParseInt (.-Atom o) 10 64)]
+      (return (== err nil))))
+
+  (or (== (.head o) "imm") (== (.head o) "spec")))
+
+
+(go/var shiftKinds (lit (map string uint8) ["lsl" ShLSL] ["lsr" ShLSR] ["asr" ShASR] ["ror" ShROR]))
+(go/var extKinds (lit (map string uint8) ["uxtb" ExtUXTB] ["uxth" ExtUXTH] ["uxtw" ExtUXTW] ["uxtx" ExtUXTX] ["sxtb" ExtSXTB] ["sxth" ExtSXTH] ["sxtw" ExtSXTW] ["sxtx" ExtSXTX]))
+
+
+^{:go/end 244} (go/func shiftOp "shiftOp: (shift KIND (imm A)) or (shift KIND): its kind and amount.\n" [^{:tag (* Sx)} o] :results [string int64 bool]
+  (when (!= (.head o) "shift")
+    (return "" 0 false))
+
+  (let [k (.-Atom (aget (.-List o) 1))]
+    (when (> (len (.-List o)) 2)
+      (return k (value (aget (.-List o) 2)) true))
+
+    (return k 0 true)))
+
+
+(go/var conds (lit (map string uint8) ["eq" 0] ["ne" 1] ["cs" 2] ["hs" 2] ["cc" 3] ["lo" 3] ["mi" 4] ["pl" 5] ["vs" 6] ["vc" 7] ["hi" 8] ["ls" 9] ["ge" 10] ["lt" 11] ["gt" 12] ["le" 13] ["al" 14] ["nv" 15]))
+
+^{:go/end 254} (go/func condOf ^uint8 [^{:tag (* Sx)} o]
+  (let [(values c ok) (aget conds (strings/ToLower (.-Atom o)))]
+    (when (or (not ok) (.-IsList o))
+      (ferr "not a condition: %s" o))
+
+    ^{:line 253} c))
+
+
+^{:go/end 256} (go/func size64 ^uint [^bool sf] (aget (lit (map bool uint) [true 64] [false 32]) sf))
+
+
+(go/var ^{:tag (array 2 (map uint64 (array 3 uint32))) :doc "encodable logical immediates\n"} logicalImms)
+
+^{:go/end 283} (go/func logicalImm ^bool [^uint64 v ^bool sf]
+  (let [k 0]
+    (when sf
+      (set! k 1))
+
+    (when (== (aget logicalImms k) nil)
+      (let [m (lit (map uint64 (array 3 uint32)))]
+        (for [n (conv uint32 0)] (<= n (conv uint32 k)) (inc! n)
+          (for [r (conv uint32 0)] (< r 64) (inc! r)
+            (for [s (conv uint32 0)] (< s 64) (inc! s)
+              (when [(values x ok) (DecodeBitMasks n s r sf)] ok
+                (when [(values _ had) (aget m x)] (not had)
+                  (aset m x (lit (array 3 uint32) n r s)))))))
+
+
+
+
+
+        (aset logicalImms k m)))
+
+    (let [(values _ ok) (aget (aget logicalImms k) v)]
+      ^{:line 282} ok)))
+
+
+
+^{:go/end 301} (go/func FromForm "FromForm lowers the instruction form text at pc to its Inst: the Inst, or a reason (\":unsupported-form ...\").\n" [^string text ^uint64 pc] :results [^Inst in ^string reason]
+  (let [(values f err) (ParseSx text)]
+    (when (or (!= err nil) (not (.-IsList f)) (== (len (.-List f)) 0))
+      (return (lit Inst) ":unsupported-form unreadable"))
+
+    (defer (^{:go/end 299} (fn []
+          (when [r (recover)] (!= r nil)
+            (when [(values e ok) (assert formErr r)] ok
+              (set! (values in reason) (values (lit Inst) (+ ":unsupported-form " (conv string e))))
+              (return))
+
+            (panic r)))))
+
+
+    (return (lower (strings/ToLower (.-Atom (aget (.-List f) 0))) (subslice (.-List f) 1) pc) "")))
+
+
+^{:go/end 310} (go/func nargs [^{:tag (slice (* Sx))} ops & ^{:tag (slice int)} n]
+  (range [_ k n]
+    (when (== (len ops) k)
+      (return)))
+
+
+  (ferr "operands: %d" (len ops)))
+
+
+^{:go/end 563} (go/func lower ^Inst [^string m ^{:tag (slice (* Sx))} ops ^uint64 pc]
+  (switch m
+    (case ["add" "adds" "sub" "subs"]
+      (nargs ops 3 4)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))]
+        (return (addsub (== (subslice m _ 3) "sub") (strings/HasSuffix m "s") d n (subslice ops 2)))))
+    (case ["cmp" "cmn"]
+      (nargs ops 2 3)
+      (let [n (mustReg (aget ops 0))]
+        (return (addsub (== m "cmp") true (lit regOp 31 (.-x n) false true) n (subslice ops 1)))))
+    (case ["neg" "negs"]
+      (nargs ops 2 3)
+      (let [d (mustReg (aget ops 0))]
+        (return (addsub true (== m "negs") d (lit regOp 31 (.-x d) false true) (subslice ops 1)))))
+    (case ["adc" "adcs" "sbc" "sbcs"]
+      (nargs ops 3)
+      (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))
+          ^{:line 329} op OpADC]
+        (when (== (subslice m _ 3) "sbc")
+          (set! op OpSBC))
+
+        (return (lit Inst :Op op :Sf (.-x d) :S (== (len m) 4) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r)))))
+    (case ["ngc" "ngcs"]
+      (nargs ops 2)
+      (let [(values d r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))]
+        (return (lit Inst :Op OpSBC :Sf (.-x d) :S (== m "ngcs") :Rd (.-n d) :Rn 31 :Rm (.-n r)))))
+    (case ["and" "ands" "orr" "eor" "bic" "bics" "orn" "eon"]
+      (nargs ops 3 4)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))]
+        (return (logic m d n (subslice ops 2)))))
+    (case ["tst"]
+      (nargs ops 2 3)
+      (let [n (mustReg (aget ops 0))]
+        (return (logic "ands" (lit regOp 31 (.-x n) false true) n (subslice ops 1)))))
+    (case ["mvn"]
+      (nargs ops 2 3)
+      (let [d (mustReg (aget ops 0))]
+        (return (logic "orn" d (lit regOp 31 (.-x d) false true) (subslice ops 1)))))
+    (case ["mov"]
+      (nargs ops 2)
+      (let [d (mustReg (aget ops 0))]
+        (when [(values s ok) (asReg (aget ops 1))] ok
+          (when (or (.-sp d) (.-sp s))
+            (return (lit Inst :Op OpADDI :Sf (.-x d) :Rd (.-n d) :Rn (.-n s))))
+
+          (return (lit Inst :Op OpORR :Sf (.-x d) :Rd (.-n d) :Rn 31 :Rm (.-n s))))
+
+        (return (movImm d (value (aget ops 1))))))
+    (case ["movz" "movn" "movk"]
+      (nargs ops 2 3)
+      (let [d (mustReg (aget ops 0))
+          (values v amt) (values (value (aget ops 1)) (conv int64 0))]
+        (when [s (movwShift (aget ops 1))] (>= s 0)
+          (set! amt (conv int64 s)))
+
+        (when (== (len ops) 3)
+          (let [(values k a ok) (shiftOp (aget ops 2))]
+            (when (or (not ok) (!= k "lsl"))
+              (ferr "movw shift"))
+
+            (set! amt a)))
+
+        (when (or (< v 0) (> v 0xffff) (!= (% amt 16) 0) (>= amt (conv int64 (size64 (.-x d)))))
+          (ferr "movw immediate"))
+
+        (return (lit Inst :Op (aget (lit (map string Op) ["movz" OpMOVZ] ["movn" OpMOVN] ["movk" OpMOVK]) m) :Sf (.-x d) :Rd (.-n d) :Imm v :Amount (conv uint8 amt)))))
+    (case ["lsl" "lsr" "asr" "ror"]
+      (nargs ops 3)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))]
+        (when [(values r ok) (asReg (aget ops 2))] ok
+          (return (lit Inst :Op (aget (lit (map string Op) ["lsl" OpLSLV] ["lsr" OpLSRV] ["asr" OpASRV] ["ror" OpRORV]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r))))
+
+        (let [(values sz s) (values (conv int64 (size64 (.-x d))) (value (aget ops 2)))]
+          (when (or (< s 0) (>= s sz))
+            (ferr "shift amount"))
+
+          (switch m
+            (case ["lsl"]
+              (return (lit Inst :Op OpUBFM :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Imm (% (- sz s) sz) :Imm2 (- sz 1 s))))
+            (case ["lsr"]
+              (return (lit Inst :Op OpUBFM :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Imm s :Imm2 (- sz 1))))
+            (case ["asr"]
+              (return (lit Inst :Op OpSBFM :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Imm s :Imm2 (- sz 1)))))
+
+          (return (lit Inst :Op OpEXTR :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n n) :Imm s)))))
+    (case ["lslv" "lsrv" "asrv" "rorv" "udiv" "sdiv"]
+      (nargs ops 3)
+      (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))]
+        (return (lit Inst :Op (aget (lit (map string Op) ["lslv" OpLSLV] ["lsrv" OpLSRV] ["asrv" OpASRV] ["rorv" OpRORV] ["udiv" OpUDIV] ["sdiv" OpSDIV]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r)))))
+    (case ["ubfx" "sbfx" "bfxil" "ubfiz" "sbfiz" "bfi"]
+      (nargs ops 4)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))
+          (values sz lsb w) (values (conv int64 (size64 (.-x d))) (value (aget ops 2)) (value (aget ops 3)))]
+        (when (or (< lsb 0) (< w 1) (> (+ lsb w) sz))
+          (ferr "bitfield"))
+
+        (let [op (aget (lit (map string Op) ["ubfx" OpUBFM] ["sbfx" OpSBFM] ["bfxil" OpBFM] ["ubfiz" OpUBFM] ["sbfiz" OpSBFM] ["bfi" OpBFM]) m)]
+          (when (or (strings/HasSuffix m "x") (== m "bfxil"))
+            (return (lit Inst :Op op :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Imm lsb :Imm2 (- (+ lsb w) 1))))
+
+          (return (lit Inst :Op op :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Imm (% (- sz lsb) sz) :Imm2 (- w 1))))))
+    (case ["bfc"]
+      (nargs ops 3)
+      (let [d (mustReg (aget ops 0))
+          (values sz lsb w) (values (conv int64 (size64 (.-x d))) (value (aget ops 1)) (value (aget ops 2)))]
+        (return (lit Inst :Op OpBFM :Sf (.-x d) :Rd (.-n d) :Rn 31 :Imm (% (- sz lsb) sz) :Imm2 (- w 1)))))
+    (case ["sbfm" "bfm" "ubfm"]
+      (nargs ops 4)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))]
+        (return (lit Inst :Op (aget (lit (map string Op) ["sbfm" OpSBFM] ["bfm" OpBFM] ["ubfm" OpUBFM]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Imm (value (aget ops 2)) :Imm2 (value (aget ops 3))))))
+    (case ["extr"]
+      (nargs ops 4)
+      (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))]
+        (return (lit Inst :Op OpEXTR :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Imm (value (aget ops 3))))))
+    (case ["sxtb" "sxth" "sxtw" "uxtb" "uxth"]
+      (nargs ops 2)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))
+          ^{:line 429} top (aget (lit (map byte int64) [\b 7] [\h 15] [\w 31]) (aget m 3))
+          ^{:line 430} op OpSBFM]
+        (when (== (aget m 0) \u)
+          (set! op OpUBFM))
+
+        (return (lit Inst :Op op :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Imm 0 :Imm2 top))))
+    (case ["adr" "adrp"]
+      (nargs ops 2)
+      (let [d (mustReg (aget ops 0))]
+        (when (== m "adr")
+          (return (lit Inst :Op OpADR :Sf true :Rd (.-n d) :Target (conv uint64 (value (aget ops 1))))))
+
+        (return (lit Inst :Op OpADRP :Sf true :Rd (.-n d) :Target (bit-and-not (conv uint64 (value (aget ops 1))) 0xfff)))))
+    (case ["b" "bl"]
+      (nargs ops 1)
+      (let [op OpB]
+        (when (== m "bl")
+          (set! op OpBL))
+
+        (return (lit Inst :Op op :Target (conv uint64 (value (aget ops 0)))))))
+    (case ["cbz" "cbnz"]
+      (nargs ops 2)
+      (let [r (mustReg (aget ops 0))
+          ^{:line 452} op OpCBZ]
+        (when (== m "cbnz")
+          (set! op OpCBNZ))
+
+        (return (lit Inst :Op op :Sf (.-x r) :Rd (.-n r) :Target (conv uint64 (value (aget ops 1)))))))
+    (case ["tbz" "tbnz"]
+      (nargs ops 3)
+      (let [r (mustReg (aget ops 0))
+          ^{:line 460} b (value (aget ops 1))
+          ^{:line 461} op OpTBZ]
+        (when (== m "tbnz")
+          (set! op OpTBNZ))
+
+        (return (lit Inst :Op op :Sf (>= b 32) :Rd (.-n r) :Imm b :Target (conv uint64 (value (aget ops 2)))))))
+    (case ["br" "blr" "ret"]
+      (let [n (conv uint8 30)]
+        (cond (== (len ops) 1)
+          (set! n (.-n (mustReg (aget ops 0))))
+          (or (!= m "ret") (!= (len ops) 0))
+          (ferr "operands"))
+
+        (return (lit Inst :Op (aget (lit (map string Op) ["br" OpBR] ["blr" OpBLR] ["ret" OpRET]) m) :Rn n))))
+    (case ["csel" "csinc" "csinv" "csneg"]
+      (nargs ops 4)
+      (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))]
+        (return (lit Inst :Op (aget (lit (map string Op) ["csel" OpCSEL] ["csinc" OpCSINC] ["csinv" OpCSINV] ["csneg" OpCSNEG]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Cond (condOf (aget ops 3))))))
+    (case ["cset" "csetm"]
+      (nargs ops 2)
+      (let [d (mustReg (aget ops 0))
+          ^{:line 481} op OpCSINC]
+        (when (== m "csetm")
+          (set! op OpCSINV))
+
+        (return (lit Inst :Op op :Sf (.-x d) :Rd (.-n d) :Rn 31 :Rm 31 :Cond (bit-xor (condOf (aget ops 1)) 1)))))
+    (case ["cinc" "cinv" "cneg"]
+      (nargs ops 3)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))]
+        (return (lit Inst :Op (aget (lit (map string Op) ["cinc" OpCSINC] ["cinv" OpCSINV] ["cneg" OpCSNEG]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n n) :Cond (bit-xor (condOf (aget ops 2)) 1)))))
+    (case ["ccmp" "ccmn"]
+      (nargs ops 4)
+      (let [n (mustReg (aget ops 0))
+          ^{:line 493} in (lit Inst :Op OpCCMP :Sf (.-x n) :S true :N (== m "ccmn") :Rn (.-n n) :Imm2 (value (aget ops 2)) :Cond (condOf (aget ops 3)))]
+        (if [(values r ok) (asReg (aget ops 1))] ok
+          (set! (.-Rm in) (.-n r))
+
+          (set! (values (.-Rm in) (.-Imm in)) (values 255 (value (aget ops 1)))))
+
+        (return in)))
+    (case ["rbit" "rev16" "rev32" "rev" "rev64" "clz" "cls"]
+      (nargs ops 2)
+      (let [(values d n) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))
+          ^{:line 503} op (aget (lit (map string Op) ["rbit" OpRBIT] ["rev16" OpREV16] ["rev32" OpREV32] ["rev" OpREV] ["rev64" OpREV] ["clz" OpCLZ] ["cls" OpCLS]) m)]
+        (return (lit Inst :Op op :Sf (.-x d) :Rd (.-n d) :Rn (.-n n)))))
+    (case ["madd" "msub" "smaddl" "smsubl" "umaddl" "umsubl"]
+      (nargs ops 4)
+      (let [(values d n r a) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)) (mustReg (aget ops 3)))]
+        (return (lit Inst :Op (aget (lit (map string Op) ["madd" OpMADD] ["msub" OpMSUB] ["smaddl" OpSMADDL] ["smsubl" OpSMSUBL] ["umaddl" OpUMADDL] ["umsubl" OpUMSUBL]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Ra (.-n a)))))
+    (case ["mul" "mneg" "smull" "smnegl" "umull" "umnegl" "smulh" "umulh"]
+      (nargs ops 3)
+      (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))]
+        (return (lit Inst :Op (aget (lit (map string Op) ["mul" OpMADD] ["mneg" OpMSUB] ["smull" OpSMADDL] ["smnegl" OpSMSUBL] ["umull" OpUMADDL] ["umnegl" OpUMSUBL] ["smulh" OpSMULH] ["umulh" OpUMULH]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Ra 31))))
+    (case ["svc" "brk" "udf"]
+      (nargs ops 1)
+      (return (lit Inst :Op (aget (lit (map string Op) ["svc" OpSVC] ["brk" OpBRK] ["udf" OpUDF]) m) :Imm (value (aget ops 0)))))
+    (case ["nop" "yield" "wfe" "wfi" "sev" "sevl"]
+      (nargs ops 0)
+      (return (lit Inst :Op OpHINT :Sys (aget (lit (map string uint32) ["nop" 0] ["yield" 1] ["wfe" 2] ["wfi" 3] ["sev" 4] ["sevl" 5]) m))))
+    (case ["hint"]
+      (nargs ops 1)
+      (return (lit Inst :Op OpHINT :Sys (conv uint32 (value (aget ops 0))))))
+    (case ["dmb" "dsb" "isb"]
+      (let [opt (conv uint32 15)]
+        (when (== (len ops) 1)
+          (if (.-IsList (aget ops 0))
+            (set! opt (conv uint32 (value (aget ops 0))))
+
+            (let [(values v ok) (aget barrierOpts (strings/ToLower (.-Atom (aget ops 0))))]
+              (when (not ok)
+                (ferr "barrier option %s" (aget ops 0)))
+
+              (set! opt v))))
+
+
+        (return (lit Inst :Op OpBARRIER :Sys (bit-or (<< (aget (lit (map string uint32) ["dmb" 5] ["dsb" 4] ["isb" 6]) m) 4) opt)))))
+    (case ["clrex"]
+      (let [opt (conv uint32 15)]
+        (when (== (len ops) 1)
+          (set! opt (conv uint32 (value (aget ops 0)))))
+
+        (return (lit Inst :Op OpCLREX :Sys opt))))
+    (case ["mrs"]
+      (nargs ops 2)
+      (return (lit Inst :Op OpMRS :Rd (.-n (mustReg (aget ops 0))) :Sys (sysReg (aget ops 1)))))
+    (case ["msr"]
+      (nargs ops 2)
+      (return (lit Inst :Op OpMSR :Rd (.-n (mustReg (aget ops 1))) :Sys (sysReg (aget ops 0)))))
+    (case ["prfm"]
+      (nargs ops 2)
+      (let [in (ldst OpPRFM 3 false false (lit regOp :n (prfOp (aget ops 0))) (subslice ops 1) pc)]
+        (set! (.-Sf in) false)
+        (return in))))
+
+  (when [(values in ok) (lowerLdSt m ops pc)] ok
+    (return in))
+
+  (when (strings/HasPrefix m "b.")
+    (nargs ops 1)
+    (return (lit Inst :Op OpBCOND :Cond (condOf (addr (lit Sx :Atom (subslice m 2)))) :Target (conv uint64 (value (aget ops 0))))))
+
+  (ferr "mnemonic %s" m)
+  (lit Inst))
+
+
+(go/var barrierOpts (lit (map string uint32) ["sy" 15] ["st" 14] ["ld" 13] ["ish" 11] ["ishst" 10] ["ishld" 9] ["nsh" 7] ["nshst" 6] ["nshld" 5] ["osh" 3] ["oshst" 2] ["oshld" 1]))
+
+(go/var sysRegs (lit (map string uint32) ["nzcv" SysNZCV] ["fpcr" SysFPCR] ["fpsr" SysFPSR] ["tpidr_el0" SysTPIDR] ["tpidrro_el0" SysTPIDRRO]
+    ^{:line 568} ["cntvct_el0" SysCNTVCT] ["cntfrq_el0" SysCNTFRQ] ["dczid_el0" SysDCZID] ["ctr_el0" SysCTR] ["midr_el1" SysMIDR]))
+
+^{:go/end 576} (go/func sysReg ^uint32 [^{:tag (* Sx)} o]
+  (let [(values v ok) (aget sysRegs (strings/ToLower (.-Atom o)))]
+    (when (or (not ok) (.-IsList o))
+      (ferr "system register %s" o))
+
+    ^{:line 575} v))
+
+
+^{:go/end 590} (go/func prfOp ^uint8 [^{:tag (* Sx)} o]
+  (when (.-IsList o)
+    (return (conv uint8 (value o))))
+
+  (let [s (strings/ToLower (.-Atom o))]
+    (when (< (len s) 7)
+      (ferr "prfop %s" o))
+
+    (let [t (aget (lit (map string uint8) ["pld" 0] ["pli" 1] ["pst" 2]) (subslice s _ 3))
+        ^{:line 587} l (conv uint8 (- (aget s 4) \1))
+        ^{:line 588} p (aget (lit (map string uint8) ["keep" 0] ["strm" 1]) (subslice s 5))]
+      (bit-or (<< t 3) (<< l 1) p))))
+
+
+
+^{:go/end 625} (go/func movImm "movImm is MOV's immediate: MOVZ when one halfword holds it, else MOVN, else ORR's bitmask (the Arm ARM's alias order).\n" ^Inst [^regOp d ^int64 v]
+  (let [sz (size64 (.-x d))
+      ^{:line 595} u (conv uint64 v)]
+    (when (== sz 32)
+      (when (or (< v (- (<< 1 31))) (> v 0xffffffff))
+        (ferr "mov immediate"))
+
+      (set! u bit-and 0xffffffff))
+
+    (let [wide ^{:go/end 609} (fn [^uint64 x] :results [int64 uint8 bool]
+          (for [s (conv uint 0)] (< s sz) (set! s + 16)
+            (when (== (bit-and-not x ^uint64 (<< 0xffff s)) 0)
+              (return (conv int64 (bit-and (>> x s) 0xffff)) (conv uint8 s) true)))
+
+
+          (return 0 0 false))]
+
+      (when [(values i s ok) (wide u)] ok
+        (return (lit Inst :Op OpMOVZ :Sf (.-x d) :Rd (.-n d) :Imm i :Amount s)))
+
+      (let [inv (bit-not u)]
+        (when (== sz 32)
+          (set! inv bit-and 0xffffffff))
+
+        (when [(values i s ok) (wide inv)] ok
+          (return (lit Inst :Op OpMOVN :Sf (.-x d) :Rd (.-n d) :Imm i :Amount s)))
+
+        (when (logicalImm u (.-x d))
+          (return (lit Inst :Op OpORRI :Sf (.-x d) :Rd (.-n d) :Rn 31 :Imm (conv int64 u))))
+
+        (ferr "mov immediate %d" v)
+        (lit Inst)))))
+
+
+^{:go/end 668} (go/func addsub ^Inst [^bool sub ^bool s ^regOp d ^regOp n ^{:tag (slice (* Sx))} rest]
+  (let [(values opI opR opX) (values OpADDI OpADDR OpADDX)]
+    (when sub
+      (set! (values opI opR opX) (values OpSUBI OpSUBR OpSUBX)))
+
+    (when (isImm (aget rest 0))
+      (let [v (value (aget rest 0))]
+        (when (== (len rest) 2)
+          (let [(values k a ok) (shiftOp (aget rest 1))]
+            (when (or (not ok) (!= k "lsl") ^:go/paren (and (!= a 0) (!= a 12)))
+              (ferr "add shift"))
+
+            (set! v << a)))
+
+        (when (or (< v 0) ^:go/paren (and (> v 0xfff) ^:go/paren (or (!= (bit-and v 0xfff) 0) (> (>> v 12) 0xfff))))
+          (ferr "add immediate %d" v))
+
+        (return (lit Inst :Op opI :Sf (.-x d) :S s :Rd (.-n d) :Rn (.-n n) :Imm v))))
+
+    (let [r (mustReg (aget rest 0))
+        ^{:line 647 :tag string} k (zero string)
+        ^{:line 648 :tag int64} a (zero int64)]
+      (when (== (len rest) 2)
+        (let [^bool ok (zero bool)]
+          (when [(set! (values k a ok) (shiftOp (aget rest 1)))] (not ok)
+            (ferr "shift operand"))))
+
+
+      (when [(values _ isExt) (aget extKinds k)] (or isExt (and (.-sp d) (not s)) (.-sp n) ^:go/paren (and (.-x d) (not (.-x r))))
+        (let [ext ExtUXTX]
+          (when (not (.-x d))
+            (set! ext ExtUXTW))
+
+          (if [(values e ok) (aget extKinds k)] ok
+            (set! ext (conv int e))
+            (when (and (!= k "") (!= k "lsl"))
+              (ferr "extend %s" k)))
+
+          (return (lit Inst :Op opX :Sf (.-x d) :S s :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Ext (conv uint8 ext) :Amount (conv uint8 a)))))
+
+      (lit Inst :Op opR :Sf (.-x d) :S s :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Shift (aget shiftKinds k) :Amount (conv uint8 a)))))
+
+
+^{:go/end 697} (go/func logic ^Inst [^string m ^regOp d ^regOp n ^{:tag (slice (* Sx))} rest]
+  (let [op (aget (lit (map string Op) ["and" OpAND] ["ands" OpAND] ["bic" OpAND] ["bics" OpAND] ["orr" OpORR] ["orn" OpORR] ["eor" OpEOR] ["eon" OpEOR]) m)
+      ^{:line 672} s (or (== m "ands") (== m "bics"))
+      ^{:line 673} neg (or (== m "bic") (== m "bics") (== m "orn") (== m "eon"))]
+    (when (isImm (aget rest 0))
+      (let [u (conv uint64 (value (aget rest 0)))]
+        (when neg
+          (set! u (bit-not u)))
+
+        (when (not (.-x d))
+          (set! u bit-and 0xffffffff))
+
+        (when (not (logicalImm u (.-x d)))
+          (ferr "logical immediate %#x" u))
+
+        (return (lit Inst :Op (aget (lit (map Op Op) [OpAND OpANDI] [OpORR OpORRI] [OpEOR OpEORI]) op) :Sf (.-x d) :S s :Rd (.-n d) :Rn (.-n n) :Imm (conv int64 u)))))
+
+    (let [r (mustReg (aget rest 0))
+        ^{:line 688} in (lit Inst :Op op :Sf (.-x d) :S s :N neg :Rd (.-n d) :Rn (.-n n) :Rm (.-n r))]
+      (when (== (len rest) 2)
+        (let [(values k a ok) (shiftOp (aget rest 1))]
+          (when [(values _ sk) (aget shiftKinds k)] (or (not ok) (not sk))
+            (ferr "shift operand"))
+
+          (set! (values (.-Shift in) (.-Amount in)) (values (aget shiftKinds k) (conv uint8 a)))))
+
+      ^{:line 696} in)))
+
+
+(go/var lseOps (lit (slice string) "add" "clr" "eor" "set" "smax" "smin" "umax" "umin"))
+
+
+^{:go/end 889} (go/func lowerLdSt "lowerLdSt: the loads and stores, exclusives and LSE atomics by their mnemonics.\n" [^string m ^{:tag (slice (* Sx))} ops ^uint64 pc] :results [Inst bool]
+  (let [sizeOf ^{:go/breaks [[4 713]] :go/end 714} (fn ^uint8 [^string suffix ^regOp r]
+        (switch suffix
+          (case ["b"]
+            (return 0))
+          (case ["h"]
+            (return 1)))
+
+        (when (.-x r)
+          (return 3))
+
+        2)]
+
+    (when (>= (len ops) 2)
+      (when [(values vn vsz ok) (asVReg (aget ops 0))] ok
+        (let [op (aget (lit (map string Op) ["ldr" OpLDR] ["str" OpSTR] ["ldur" OpLDR] ["stur" OpSTR] ["ldp" OpLDP] ["stp" OpSTP] ["ldnp" OpLDP] ["stnp" OpSTP]) m)]
+          (when (== op OpInvalid)
+            (return (lit Inst) false))
+
+          (let [rest (subslice ops 1)
+              ^{:line 722 :tag uint8} vn2 (zero uint8)]
+            (when (or (== op OpLDP) (== op OpSTP))
+              (let [(values n2 sz2 ok2) (asVReg (aget ops 1))]
+                (when (or (not ok2) (!= sz2 vsz) (< vsz 2))
+                  (ferr "pair registers"))
+
+                (set! (values vn2 rest) (values n2 (subslice ops 2)))))
+
+            (let [in (ldst op vsz false false (lit regOp :n vn) rest pc)]
+              (set! (values (.-Sf in) (.-Vreg in) (.-Ra in)) (values false true vn2))
+              (when (and (== (.-Op in) OpLDRLIT) (< vsz 2))
+                (ferr "literal size"))
+
+              (return in true))))))
+
+
+    (switch m
+      (case ["ldr" "str" "ldur" "stur" "ldtr" "sttr"]
+        (nargs ops 2 3)
+        (let [t (mustReg (aget ops 0))
+            ^{:line 742} op OpLDR]
+          (when (== (aget m 0) \s)
+            (set! op OpSTR))
+
+          (return (ldst op (sizeOf "" t) false false t (subslice ops 1) pc) true)))
+      (case ["ldrb" "strb" "ldrh" "strh" "ldurb" "sturb" "ldurh" "sturh"]
+        (nargs ops 2 3)
+        (let [t (mustReg (aget ops 0))
+            ^{:line 750} op OpLDR]
+          (when (== (aget m 0) \s)
+            (set! op OpSTR))
+
+          (return (ldst op (sizeOf (subslice m (- (len m) 1)) t) false false t (subslice ops 1) pc) true)))
+      (case ["ldrsb" "ldrsh" "ldrsw" "ldursb" "ldursh" "ldursw"]
+        (nargs ops 2 3)
+        (let [t (mustReg (aget ops 0))
+            ^{:line 758} sz (aget (lit (map byte uint8) [\b 0] [\h 1] [\w 2]) (aget m (- (len m) 1)))]
+          (return (ldst OpLDR sz true (.-x t) t (subslice ops 1) pc) true)))
+      (case ["ldp" "stp" "ldnp" "stnp" "ldpsw"]
+        (nargs ops 3 4)
+        (let [(values t t2) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)))
+            ^{:line 763} op OpLDP]
+          (when (== (aget m 0) \s)
+            (set! op OpSTP))
+
+          (let [in (ldst op (sizeOf "" t) (== m "ldpsw") (== m "ldpsw") t (subslice ops 2) pc)]
+            (when (== m "ldpsw")
+              (set! (.-Size in) 2))
+
+            (set! (.-Ra in) (.-n t2))
+            (when (== (.-Mode in) ModeReg)
+              (ferr "pair register offset"))
+
+            (return in true))))
+      (case ["clrex"]
+        (return (lit Inst) false)))
+
+    ;; exclusives and ordered
+    (range [_ p (lit (slice (struct
+              ^{:line 781 :tag string} pre
+              ^{:line 782 :tag Op} op
+              ^{:line 783 :tag bool} acq ^bool rel
+              ^{:line 784 :tag bool} pair))
+          (lit _ "ldxp" OpLDXR false false true) (lit _ "ldaxp" OpLDXR true false true) (lit _ "stxp" OpSTXR false false true) (lit _ "stlxp" OpSTXR false true true)
+          (lit _ "ldxr" OpLDXR false false false) (lit _ "ldaxr" OpLDXR true false false) (lit _ "stxr" OpSTXR false false false) (lit _ "stlxr" OpSTXR false true false)
+          (lit _ "ldapr" OpLDAR true false false) (lit _ "ldar" OpLDAR true false false) (lit _ "stlr" OpSTLR false true false))]
+      (when (or (not (strings/HasPrefix m (.-pre p))) ^:go/paren (and (!= m (.-pre p)) (!= m (+ (.-pre p) "b")) (!= m (+ (.-pre p) "h"))))
+        (continue))
+
+      (let [suf (subslice m (len (.-pre p)))
+          ^{:line 792} in (lit Inst :Op (.-op p) :Acq (.-acq p) :Rel (.-rel p) :Pair (.-pair p))
+          ^{:line 793} k 0]
+        (when (== (.-op p) OpSTXR)
+          (set! (.-Rm in) (.-n (mustReg (aget ops 0))))
+          (set! k 1))
+
+        (let [t (mustReg (aget ops k))]
+          (set! (values (.-Rd in) (.-Size in)) (values (.-n t) (sizeOf suf t)))
+          (inc! k)
+          (when (.-pair p)
+            (set! (.-Ra in) (.-n (mustReg (aget ops k))))
+            (inc! k))
+
+          (when (or (!= (len ops) (+ k 1)) (!= (.head (aget ops k)) "mem") (> (len (.-List (aget ops k))) 3))
+            (ferr "exclusive operand"))
+
+          (set! (.-Rn in) (.-n (mustReg (aget (.-List (aget ops k)) 1))))
+          (when (and (== (len (.-List (aget ops k))) 3) (!= (value (aget (.-List (aget ops k)) 2)) 0))
+            (ferr "exclusive offset"))
+
+          (return in true))))
+
+    ;; LSE: ld<op>{a,l,al}{b,h}, st<op>{l}{b,h}, swp{a,l,al}{b,h}, cas{a,l,al}{b,h}, casp{a,l,al}
+    (let [^Op op (zero Op)
+        ^{:line 816 :tag uint32} sub (zero uint32)
+        ^{:line 817 :tag string} rest (zero string)
+        ^{:line 818} store false]
+      (switch
+        (case [(strings/HasPrefix m "casp")]
+          (set! (values op rest) (values OpCASP (subslice m 4))))
+        (case [(strings/HasPrefix m "cas")]
+          (set! (values op rest) (values OpCAS (subslice m 3))))
+        (case [(strings/HasPrefix m "swp")]
+          (set! (values op rest) (values OpSWP (subslice m 3))))
+        (case [(or (strings/HasPrefix m "ld") (strings/HasPrefix m "st"))]
+          (range [i o lseOps]
+            (when (strings/HasPrefix (subslice m 2) o)
+              (set! (values op sub rest store) (values OpLDOP (conv uint32 i) (subslice m (+ 2 (len o))) (== (aget m 0) \s)))))
+          ;; smax/smin before set: the longest operation name that matches
+
+
+          (when (and (== op OpLDOP) (strings/HasPrefix (subslice m 2) "s") (not (strings/HasPrefix (subslice m 2) "set")))
+            (range [i o (lit (slice string) "smax" "smin")]
+              (when (strings/HasPrefix (subslice m 2) o)
+                (set! (values sub rest) (values (conv uint32 (+ 4 i)) (subslice m (+ 2 (len o)))))))))
+
+
+
+        (default
+          (return (lit Inst) false)))
+
+      (when (== op OpInvalid)
+        (return (lit Inst) false))
+
+      (let [in (lit Inst :Op op :Sys sub)
+          ^{:line 847} ord (strings/TrimRight rest "bh")
+          ^{:line 848} suf (subslice rest (len ord))]
+        (switch ord
+          (case [""])
+          (case ["a"]
+            (set! (.-Acq in) true))
+          (case ["l"]
+            (set! (.-Rel in) true))
+          (case ["al"]
+            (set! (values (.-Acq in) (.-Rel in)) (values true true)))
+          (default
+            (return (lit Inst) false)))
+
+        (when (or (> (len suf) 1) ^:go/paren (and store (.-Acq in)) ^:go/paren (and (== op OpCASP) (!= suf "")))
+          (return (lit Inst) false))
+
+        (let [k 0
+            ^{:line 864} s (mustReg (aget ops 0))]
+          (set! (.-Rm in) (.-n s))
+          (cond (== op OpCASP) (do
+              (set! (.-Rd in) (.-n (mustReg (aget ops 2))))
+              (set! k 4)
+              (if (.-x s)
+                (set! (.-Size in) 3)
+
+                (set! (.-Size in) 2)))
+
+            ^{:line 874} store (do
+              (set! (.-Rd in) 31)
+              (set! k 1)
+              (set! (.-Size in) (sizeOf suf s))) :else
+
+            (let [t (mustReg (aget ops 1))]
+              (set! (.-Rd in) (.-n t))
+              (set! k 2)
+              (set! (.-Size in) (sizeOf suf s))))
+
+          (when (or (!= (len ops) (+ k 1)) (!= (.head (aget ops k)) "mem"))
+            (ferr "atomic operand"))
+
+          (set! (.-Rn in) (.-n (mustReg (aget (.-List (aget ops k)) 1))))
+          (return in true))))))
+
+
+
+
+^{:go/end 947} (go/func ldst "ldst is a load's or store's addressing: (mem BASE [OFFSET|REG [EXTEND]]), (wb (mem ...)) pre-indexed, (mem BASE) IMM\npost-indexed, or a label (a literal load).\n" ^Inst [^Op op ^uint8 size ^bool signed ^bool wide ^regOp t ^{:tag (slice (* Sx))} rest ^uint64 pc]
+  (let [in (lit Inst :Op op :Size size :Signed signed :Wide wide :Rd (.-n t))]
+    (set! (.-Sf in) (or (== size 3) wide))
+    (let [a (aget rest 0)]
+      (when (and (!= (.head a) "mem") (!= (.head a) "wb"))
+        (when (or (!= op OpLDR) (!= (len rest) 1) ^:go/paren (and (< size 2) (< (.-n t) 32)))
+          (ferr "address"))
+
+        (set! (values (.-Op in) (.-Target in)) (values OpLDRLIT (conv uint64 (value a))))
+        (return in))
+
+      (when (== (.head a) "wb")
+        (set! (.-Mode in) ModePre)
+        (set! a (aget (.-List a) 1)))
+
+      (when (< (len (.-List a)) 2)
+        (ferr "address"))
+
+      (set! (.-Rn in) (.-n (mustReg (aget (.-List a) 1))))
+      (when (== (len rest) 2)
+        (when (or (!= (.-Mode in) ModeOff) (!= (len (.-List a)) 2))
+          (ferr "post-index"))
+
+        (set! (values (.-Mode in) (.-Imm in)) (values ModePost (value (aget rest 1))))
+        (return in))
+
+      (when (>= (len (.-List a)) 3)
+        (when [(values r ok) (asReg (aget (.-List a) 2))] ok
+          (when (!= (.-Mode in) ModeOff)
+            (ferr "register offset with writeback"))
+
+          (set! (values (.-Mode in) (.-Rm in) (.-Ext in)) (values ModeReg (.-n r) ExtUXTX))
+          (when (not (.-x r))
+            (set! (.-Ext in) ExtUXTW))
+
+          (when (== (len (.-List a)) 4)
+            (let [(values k amt ok) (shiftOp (aget (.-List a) 3))]
+              (when (not ok)
+                (ferr "extend"))
+
+              (if (== k "lsl")
+                (set! (.-Ext in) ExtUXTX)
+                (if [(values e ok) (aget extKinds k)] ok
+                  (set! (.-Ext in) e)
+
+                  (ferr "extend %s" k)))
+
+              (set! (.-Amount in) (conv uint8 amt))))
+
+          (return in))
+
+        (set! (.-Imm in) (value (aget (.-List a) 2))))
+
+      ^{:line 946} in)))

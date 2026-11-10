@@ -226,6 +226,22 @@ x86i_light() {
      "$goroot/bin/go" build -p 2 -trimpath -o "$x86i_exe" ./x86idriver/)
 }
 
+# a64i's light driver (AR5): go/arbace/{crt,emu,a64i} and test/asm/a64i-driver printed by repr/go and built alone by TamaGo's
+# go into .tmp/a64i/a64i, as x86i's (A64I_EXE: another build of it)
+a64i_dir=$root/.tmp/a64i
+a64i_exe=${A64I_EXE:-$a64i_dir/a64i}
+a64i_light() {
+  [ -z "${A64I_EXE:-}" ] || return 0
+  local out=$a64i_dir/print src=$a64i_dir/print-root
+  rm -rf "$out" "$src"; mkdir -p "$src/go/arbace"
+  ln -s "$root/go/arbace/crt.ae" "$root/go/arbace/crt" "$root/go/arbace/emu.ae" "$root/go/arbace/emu" "$root/go/arbace/a64i.ae" \
+    "$root/go/arbace/a64i" "$root/test/asm/a64i-driver/go/arbace/a64idriver.ae" "$root/test/asm/a64i-driver/go/arbace/a64idriver" "$src/go/arbace/"
+  "$root/bin/build-go" --print-only --module arbace --work "$out" "$src" >&2
+  (cd "$out/mod" && export GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+     GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} &&
+     "$goroot/bin/go" build -p 2 -trimpath -o "$a64i_exe" ./a64idriver/)
+}
+
 edn() { arbace_tool -e "(let [c (read-string (slurp \"$corpora\"))] $1)"; }
 
 # corpus_ids: the corpora's ids of the architecture, in order
@@ -392,6 +408,8 @@ rows() {
 case ${1:-} in
   print-oracle|link-oracle|decode|decode-object|decode-check|x86i|x86i-check|x86i-decode-check)
     [ "$arch" = amd64 ] || { echo "repr-asm: $1 is amd64's" >&2; exit 2; } ;;
+  a64i|a64i-check)
+    [ "$arch" = arm64 ] || { echo "repr-asm: $1 is arm64's (--arch arm64)" >&2; exit 2; } ;;
 esac
 case ${1:-} in
   read|print) v=$1; shift; arbace_tool -m arbace.repr.asm "$v" --arch "$arch" "$@" ;;
@@ -771,6 +789,78 @@ case ${1:-} in
     arbace_tool -e "(do (load-file \"$root/test/asm/decode_judge.ae\") nil)" -e "(asm.decode-judge/main \"$root/test/asm/decode-results-amd64.edn\" \"$work\" \"$root/test/asm/divergences-decode.edn\" \"${record:-}\")" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
   link-dump) shift; arbace_tool -m arbace.asm.link dump "$@" ;;
+  a64i)
+    # AR5: a64i, arm64's machine (go/arbace/a64i over the frame go/arbace/emu)
+    case ${2:-} in
+      light) a64i_light ;;
+      run|decode-text|forms-check|trace) v=$2; shift 2; [ -x "$a64i_exe" ] || a64i_light; exec "$a64i_exe" "$v" "$@" ;;
+      eval-build) shift 2; [ $# -eq 2 ] || { echo "repr-asm a64i eval-build LIST WORK" >&2; exit 2; }
+        export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
+        arbace_tool -m arbace.asm.arm64.eval build "$1" "$2" "$src/musl-1.2.6" ;;
+      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|eval-build LIST WORK" >&2; exit 2 ;;
+    esac ;;
+  a64i-check)
+    # AR5: test/asm/run-arm64/'s and test/asm/a64i/'s programs built for AOT (arbace.asm.link build: WORK/NAME) and for eval
+    # (arbace.asm.arm64.eval: WORK/NAME.eval, WORK/NAME.forms), each run by a64i both ways (WORK/NAME.aot.*, WORK/NAME.eval.*),
+    # its forms against its decoded words (WORK/NAME.fc); on an arm64 host run by the CPU too (WORK/NAME.status, .out, .err) and
+    # the lockstep in the sys and step modes (WORK/NAME.sys, .step; a header's `# step-limit: N` bounds the step mode); the
+    # controls' runs; judged by test/asm/a64i_judge.ae. --only NAME,...: those programs alone (not recordable)
+    shift; record= only=
+    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; *) echo "repr-asm --arch arm64 a64i-check [--record] [--only NAME,...]" >&2; exit 2 ;; esac; done
+    [ -z "$only" ] || [ -z "$record" ] || { echo "repr-asm a64i-check: --only is not recordable" >&2; exit 2; }
+    export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
+    work=$root/.tmp/repr-asm/a64i; rm -rf "$work"; mkdir -p "$work" "$lists"
+    : > "$lists/a64i.list"
+    for f in "$root"/test/asm/run-arm64/*.s "$root"/test/asm/a64i/*.s; do
+      n=${f##*/}; n=${n%.s}
+      case $n in duplicate|undefined) continue ;; esac
+      [ -z "$only" ] || case ",$only," in *",$n,"*) ;; *) continue ;; esac
+      printf '%s\t%s\n' "$n" "$f" >> "$lists/a64i.list"
+    done
+    arbace_tool -m arbace.asm.link build "$lists/a64i.list" "$work" "$src/musl-1.2.6" arm64
+    arbace_tool -m arbace.asm.arm64.eval build "$lists/a64i.list" "$work" "$src/musl-1.2.6"
+    [ -x "$a64i_exe" ] || a64i_light
+    case $(uname -m) in aarch64|arm64) native=1 ;; *) native=0; echo "a64i-check: not an arm64 host: the CPU's runs and the lockstep are the arm64 VM's (their recorded rows stand)" ;; esac
+    ctl=$root/test/asm/controls-a64i.txt
+    while IFS=$'\t' read -r n c _; do
+      [ "$c" = built ] || continue
+      chmod +x "$work/$n"
+      st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$a64i_exe" run --coverage "$n.cov" "./$n" > "$n.aot.out" 2> "$n.aot.err") || st=$?
+      echo "$st" > "$work/$n.aot.status"
+      if [ -f "$work/$n.forms" ]; then
+        st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$a64i_exe" run --forms "$n.forms" "./$n.eval" > "$n.eval.out" 2> "$n.eval.err") || st=$?
+        echo "$st" > "$work/$n.eval.status"
+        "$a64i_exe" forms-check "$work/$n" "$work/$n.forms" > "$work/$n.fc" || true
+      fi
+      if [ $native = 1 ]; then
+        st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" "./$n" > "$n.out" 2> "$n.err") || st=$?
+        echo "$st" > "$work/$n.status"
+        (cd "$work" && GOMAXPROCS=1 timeout 120 "$a64i_exe" trace --mode sys "./$n" > "$n.sys" 2>&1) || true
+        lim=$(sed -n 's/^#[[:space:]]*step-limit:[[:space:]]*\([0-9]*\).*/\1/p' "$(awk -F'\t' -v n="$n" '$1==n{print $2}' "$lists/a64i.list")" | head -1)
+        (cd "$work" && A64I_STEP_LIMIT=${lim:-0} GOMAXPROCS=1 timeout "${REPR_ASM_STEP_TIMEOUT:-600}" "$a64i_exe" trace --mode step "./$n" > "$n.step" 2>&1) || true
+      fi
+      while read -r cid kind subj ref; do
+        case $cid in ''|'#'*) continue ;; esac
+        [ "$subj" = "$n" ] || continue
+        tag=${ref/:/-}
+        case $kind in
+          inject) st=0; (cd "$work" && A64I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$a64i_exe" run "./$n" > "$n.inject-$tag.out" 2> "$n.inject-$tag.err") || st=$?
+                  echo "$st" > "$work/$n.inject-$tag.status" ;;
+          forms) [ -f "$work/$ref" ] && "$a64i_exe" forms-check "$work/$ref" "$work/$n.forms" > "$work/$n.forms-$ref" || true ;;
+          sys|step|bisect) [ $native = 1 ] || continue
+            (cd "$work" && A64I_INJECT=$ref A64I_STEP_LIMIT=200000 GOMAXPROCS=1 timeout 120 "$a64i_exe" trace --mode $kind "./$n" > "$n.$kind-$tag" 2>&1) || true ;;
+        esac
+      done < "$ctl"
+    done < "$work/build.tsv"
+    fails=0
+    judge=(-e "(do (load-file \"$root/test/asm/a64i_judge.ae\") nil)")
+    if [ -z "$only" ]; then
+      arbace_tool "${judge[@]}" -e "(asm.a64i-judge/controls \"$work\" \"$ctl\" $([ $native = 1 ] && echo true || echo false))" || fails=$((fails + 1))
+      arbace_tool "${judge[@]}" -e "(asm.a64i-judge/main \"$root/test/asm/a64i-results-arm64.edn\" \"$work\" \"$root/test/asm/divergences-a64i.edn\" \"${record:-}\" \"$native\")" || fails=$((fails + 1))
+    else
+      arbace_tool "${judge[@]}" -e "(doseq [r (asm.a64i-judge/rows \"$work\" $([ $native = 1 ] && echo true || echo false))] (prn r))"
+    fi
+    [ $fails = 0 ] ;;
   x86i)
     shift
     case ${1:-} in
