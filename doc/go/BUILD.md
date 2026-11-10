@@ -306,12 +306,27 @@ DIR/
                   {}, or no file             a Go program (go/ alone)
                   :name "hello"              the executable's name (default: DIR's name)
                   :module, :go               a Go program's go.mod lines (the build's program.edn)
+                  :roots :entry              the program's own Java classes rooted from the entry, the
+                                             services and the metadata alone (default :all, every member)
   src/            Clojure namespaces (.ae, .clj, .cljc) and resources: a directory of the class path
   java/           Java forms (doc/classes/SPEC.md §9.2): each package's ns file and its classes' files
   go/             Go forms (SPEC.md §4.1): an Arbace program's namespaces of Go forms (go.P), or the
                   Go program
+  resources/      the class path's jars: each subdirectory one, in their names' order (META-INF/services,
+                  META-INF/native-image metadata, data)
   runs/           the samples' runs (NAME.args, .in, .out, .err, .code: "The test programs" below)
 ```
+
+- **Resources, services, metadata** (A4-A7 of the Ghidra case study's G1 plan, 2026-11-10; J2G-SPEC §4.1,
+  "Roots from a program's metadata", §10.3). Each subdirectory of `resources/` is given to j2g as a
+  `--resources DIR`, in their names' order, as the jars of a class path: their files embedded, a path several
+  hold once a directory (ClassLoader.getResources finds each, the first by getResource), their
+  `META-INF/services` files the service registry ServiceLoader iterates, their native-image metadata and the
+  program's constant reflective sites roots. `:roots :entry` (j2g's `--own-roots entry`) roots the program's
+  own Java classes from the entry and those roots alone, so that a class nothing names is not in the program;
+  a class j2g refuses (a type outside the world) does not fail the build: j2g's `report.edn` lists it under
+  `:refused`, `:stubbed` (reached: its uses throw, naming the refusal) or `:dropped`. The samples `services`,
+  `resources`, `reflect-meta` and `refusals` of `test/programs/` show each.
 
 - **The entry.** `:main NS` runs `NS/-main` with the command line (the program's main package puts
   `-m NS` before it: j2g's `--entry-arg`); `:main-class CLASS` calls `CLASS.main(String[])` directly,

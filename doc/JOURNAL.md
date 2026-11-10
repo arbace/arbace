@@ -3684,3 +3684,90 @@ holder fields from jrt's hand-written Thread: more coupling than a transcription
 ThreadGroup analyze clean; the Cleaner's PhantomCleanable and DGCClient's PhantomLiveRef fail on "Unknown type: PhantomReference"
 because `jdk/edge.edn` has no entry for it yet (night step 2, `bin/j2g-edge update`). A slip: predict peaked at 4.98 GB, over
 the brief's 2 GiB (the analysis of the whole world), with MemAvailable above 40 GiB throughout and nothing else running.
+
+## 2026-11-10: Ghidra G1's run half by day: A4-A7 (branch `ghidra-run`, from `mac/java-p1` 4428594d1)
+
+The user approved GH4 (ii) (2026-11-10): ServiceLoader as a closed-world registry, out of `:classloading`'s by-design list.
+Built for any large Java program, each piece with Arbace's own fixtures (Ghidra is neither read nor edited here; the demo
+repo's `plan/G1.md` §2 items A4-A7; `.tmp/plans/GHIDRA-CASE-STUDY.md` §2.3-2.4, §4.4, §4.6):
+
+- **A4, ServiceLoader** (J2G-SPEC §4.1 "Roots from a program's metadata", §12): jrt's own `java.util.ServiceLoader`
+  (`overlay/jdk/java.base/java/util/ServiceLoader.java`, jdk26u's public API written anew, EPL) iterates a table j2g
+  generates, the embedded resource `META-INF/arbace/services`: the world's module provides (`jdk/provides.txt`, made by the
+  new `bin/jrt provides [--check]` from jdk26u's `module-info.java` files, the providers the closure has: java.logging's
+  `LoggingProviderImpl`, jdk.security.auth's `KeyStoreLoginModule`), then every `META-INF/services/S` of the program's
+  resources in the class path's order. A provider is found by name in jrt's registry and made by reflection (static
+  `provider()` for a module provider, else the public no-argument constructor), the JDK's `ServiceConfigurationError`s. j2g
+  roots a service's providers (`#<init>`, `#provider`) once the service class is reached (`arbace.j2g.meta`, the conditional
+  roots in main.ae's reachability loop beside the stand-ins'). The JDK variants that name providers directly are kept;
+  javac's tool world keeps its variant (overlay/jdk/javac/variants/ServiceLoader.ae, which applies to the new class: the
+  shipped forms are declared first, javac's own copy in jdk/javac/forms is then unused, as ServiceConfigurationError's
+  already is). Alternatives: ServiceLoader reading META-INF/services at run time through getResources (no generated
+  table: but the closed world must root the providers at build time anyway, and the table is the same facts once); every
+  provider rooted unconditionally (grows every executable by the world's providers even when no service is used).
+- **A5, class resources** (J2G-SPEC §10.3): a data file several `--resources` directories hold is embedded once a directory
+  (the first at its path, directory K's at `META-INF/arbace/roots/K/PATH`, the index `META-INF/arbace/roots`), so
+  `getResources` finds one URL a jar; a translated class's `p/C.class` has a `jar:` URL (no bytes: `getResourceAsStream`
+  null, as the JDK for a URL it cannot open); translated calls of ClassLoader's `getResource`, `getResources`,
+  `getResourceAsStream` and the static `getSystemResource*` (operation-level stubs until now) are j2g support functions
+  (`m/class-loader-resource-helpers`): a loader's own override first, else `ClassPathResources`' new statics. Alternative: a
+  names-only listing of the world's classes on `java.class.path` (GH4 (iii)'s other half): not needed by these fixtures, left.
+- **A6, reflection roots** (§4.1): native-image's `reflect-config.json`, `jni-config.json`, `resource-config.json`'s bundles
+  and `reachability-metadata.json` under `META-INF/native-image/` (a JSON reader of j2g's own), conditions
+  (`typeReachable`) honoured; the constant reflective sites of the program's own classes (`Class.forName("lit")`,
+  `C.class.getMethod("m")`, constructors, fields, Lookup's finds) rooted, the others listed (`:reflective-sites :dynamic`).
+  `--own-roots entry` (program.edn `:roots :entry`) roots a program's own classes from its entry and these roots alone.
+- **A7, refusals** (§4.1): a refused class's stubs now name the cause (`class p.C was refused by j2g: ...`), and
+  `report.edn`'s `:refused` sorts the refused classes into `:stubbed` (a translated method needs it) and `:dropped`.
+- `bin/arbace-go --build-program`: `resources/` (each subdirectory a jar, `--resources` in name order) and `:roots`.
+  Samples `test/programs/{services,resources,reflect-meta,refusals}`, each judged by its own output (and its negative
+  part: the missing provider's error, a Greeter no file names absent, the class only named at run time absent, absent
+  resources, the refused class stubbed). `test/java/divergences.edn`'s `:classloading` text: ServiceLoader out (its
+  `:match` kept until the night's records show what the registry leaves). BUILD.md, J2G-SPEC, LICENSE.md
+  (`jdk/provides.txt`), the agenda.
+
+Proofs by day (main's stage 0 as the host, one light process at a time): the joint javac check
+(`.tmp/night7/all9-run.sh`): 3,324 files (+1 ServiceLoader), 0 errors, 6,964 classes (41 s, 1.0 GB); `bin/jrt-convert derive
+--check`: 79 overlays, 0 not as derived; `bin/jrt provides --check` current; `bin/j2g-unit`: all passed, with 17 new checks
+(the root copies and their index, the registry's order, provides, reflect-config's roots, malformed JSON, the refusals'
+sorting, the constant sites; each with a negative control; 9.6 s, 0.6 GB); repr/java's read of the changed overlays
+(`bin/repr-java read-jdk` on javac's tool `javac-5ad357331dbcd7cfb0fd`: ServiceLoader, ClassPathResources, HostStore, 0 javac
+errors); `bin/j2g --analyze-only` over jdk/forms with those two converted files and the four samples' Java forms and
+resources (3 min 56 s, 2.15 GB peak): ServiceLoader, ClassPathResources and every sample class analyze, but `ui/Tool`
+(java.awt.Robot) and `ui/Panel` (java.awt.datatransfer.Clipboard), the intended refusals; the report's registry (the
+world's two, svc.Greeter's English, French, Missing), the metadata's roots (rm.Plugin unconditional, rm.Conditional once
+rm.Main), the constant sites (rm.Constant#<clinit>, #hello), the dynamic sites listed, `svc.Missing` absent. The other
+analysis failures of that run (Compiler's UndeclaredThrowableException, ProviderConfig's SASL, the selector providers,
+AbstractInterruptibleChannel) are the committed conversion's staleness against `java-p1`'s overlays, which the night's
+conversion settles; none is in these files. Not run by day: no conversion, edge, build or whole-program j2g.
+
+Night commands (in the night's worktree with `ghidra-run` merged, heavy ones under `bin/heavy-lock`):
+
+```sh
+# 0. light
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check && bin/jrt provides --check && bin/j2g-unit
+# 1. the conversion: + java/util/ServiceLoader.ae, ClassPathResources.ae's new statics
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. the edges (ServiceLoader now in the forms)
+bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the build; report.edn: :metadata's :services (the world's two providers), no :analysis-failures for
+#    java/util/ServiceLoader or jdk/internal/jrt/ClassPathResources, J2g_ClassLoaderGetResource* in j2g_support
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke
+# 4. the samples, by their own output (and the old ones unchanged); refusals' report: :refused :stubbed ui/Tool, :dropped ui/Panel
+ARBACE_PROGRAM_KEEP=1 bin/heavy-lock bin/arbace-go --build-program --check services resources reflect-meta refusals hello-java mixed
+grep -A3 ':refused' target/arbace-go/programs/refusals/j2g/report.edn
+# 5. javac's tool (its ServiceLoader variant over the new class) and its checks
+bin/heavy-lock bin/javac-vendor tool && bin/heavy-lock bin/javac-vendor check --from
+# 6. Java's levels on the tests ServiceLoader and ClassLoader's resources touch: saved, not recorded
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 2 \
+  --only 'jdk/java/util/ServiceLoader/|jdk/java/security/Provider/DefaultProviderList|jdk/java/util/spi/ToolProvider|langtools/tools/javac/modules/FileManagerGetServiceLoaderTest|jdk/java/lang/ClassLoader/|jdk/java/net/URLClassLoader/' \
+  --save .tmp/ghidra-run-night/check
+bin/java-check --judge .tmp/ghidra-run-night/check/*.edn
+```
+
+Risks: the shipped executable now roots the world's two providers when their services are reached (DefaultLoggerFinder,
+LoginModule) and translates real ServiceLoader calls where it stubbed them (URLConnection's content handlers,
+KeyStoreUtil): empty iterations instead of UnsupportedOperationException. log4j's ServiceLoaderUtil calls `ServiceLoader.load`
+through a MethodHandle (`invokeExact`), which is F15's area, not this branch's.

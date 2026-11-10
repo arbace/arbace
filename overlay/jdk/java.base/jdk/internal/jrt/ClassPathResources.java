@@ -7,6 +7,15 @@
  * opened by this class's handler (the jar: connection of the JDK is outside the world); a
  * file of ARBACE_PATH has its file: URL, as the JVM's class path directories give it. The
  * natives are jrt's Go (go/arbace/jrt/resources.ae).
+ * Since A5 of the Ghidra case study's G1 plan (doc/go/J2G-SPEC.md §10.3, "Resources by URL"): a resource
+ * that several of a program's resource directories hold (the jars of its class path) is embedded once
+ * a directory, the first at its path, directory K's at META-INF/arbace/roots/K/PATH, listed in the index
+ * META-INF/arbace/roots (j2g, arbace.j2g.meta), so that getResources enumerates one URL a directory, in
+ * the class path's order; and a translated class's class file has a URL, "jar:...!/p/C.class", as the
+ * JDK's class path gives one, though no bytes (the Go build has no class files: opening it fails, so
+ * getResourceAsStream answers null, as the JDK's does for a URL it cannot open). ClassLoader's resource
+ * methods in translated code call the statics below (j2g's support functions, arbace.j2g.model's
+ * class-loader-resource-helpers).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -73,6 +82,47 @@ public final class ClassPathResources {
         return dirs;
     }
 
+    /** The embedded resource's bytes, or null (ServiceLoader's registry, META-INF/arbace/services). */
+    public static byte[] embeddedBytes(String name) {
+        return bytes0(name);
+    }
+
+    /** The resource roots' index (META-INF/arbace/roots: "K NAME" a line), read once: the K's in order. */
+    private static List<String> roots;
+
+    private static List<String> roots() {
+        synchronized (ClassPathResources.class) {
+            if (roots == null) {
+                List<String> ks = new ArrayList<>();
+                byte[] b = bytes0("META-INF/arbace/roots");
+                if (b != null) {
+                    for (String line : new String(b, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                        int i = line.indexOf(' ');
+                        if (i > 0)
+                            ks.add(line.substring(0, i));
+                    }
+                }
+                roots = ks;
+            }
+            return roots;
+        }
+    }
+
+    /** Is name the class file of a class of the program ("p/C.class", p.C in jrt's registry)? */
+    private static boolean classFile(String name) {
+        if (!name.endsWith(".class") || name.startsWith("/") || name.indexOf("..") >= 0)
+            return false;
+        String bn = name.substring(0, name.length() - ".class".length()).replace('/', '.');
+        if (bn.isEmpty() || bn.endsWith("module-info") || bn.endsWith("package-info"))
+            return false;
+        try {
+            Class.forName(bn, false, null);
+            return true;
+        } catch (ClassNotFoundException | LinkageError | IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     /** The URL of an embedded resource. */
     private static URL embeddedURL(String name) {
         try {
@@ -130,6 +180,8 @@ public final class ClassPathResources {
             if (u != null)
                 return u;
         }
+        if (classFile(name))
+            return embeddedURL(name);
         return null;
     }
 
@@ -139,6 +191,13 @@ public final class ClassPathResources {
             throw new NullPointerException();
         List<URL> urls = new ArrayList<>();
         if (embedded0(name))
+            urls.add(embeddedURL(name));
+        for (String k : roots()) {
+            String copy = "META-INF/arbace/roots/" + k + "/" + name;
+            if (embedded0(copy))
+                urls.add(embeddedURL(copy));
+        }
+        if (urls.isEmpty() && classFile(name))
             urls.add(embeddedURL(name));
         for (String d : path()) {
             URL b = directoryURL(d);
@@ -173,6 +232,34 @@ public final class ClassPathResources {
         if (name == null)
             throw new NullPointerException();
         return Collections.emptyEnumeration();
+    }
+
+    /**
+     * ClassLoader.getResourceAsStream of a loader, as the JDK's: getResource's URL opened, null when
+     * there is none or it cannot be opened (a class file's).
+     */
+    public static InputStream getResourceAsStream(ClassLoader loader, String name) {
+        URL u = loader == null ? find(name) : loader.getResource(name);
+        try {
+            return u == null ? null : u.openStream();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** ClassLoader.getSystemResource: the system loader's. */
+    public static URL systemResource(String name) {
+        return getResource(ClassLoader.getSystemClassLoader(), name);
+    }
+
+    /** ClassLoader.getSystemResources: the system loader's. */
+    public static Enumeration<URL> systemResources(String name) throws IOException {
+        return getResources(ClassLoader.getSystemClassLoader(), name);
+    }
+
+    /** ClassLoader.getSystemResourceAsStream: the system loader's. */
+    public static InputStream systemResourceAsStream(String name) {
+        return getResourceAsStream(ClassLoader.getSystemClassLoader(), name);
     }
 
     /** The handler of the embedded resources' jar: URLs: their connection reads the resource. */
