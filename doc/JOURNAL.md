@@ -2898,3 +2898,57 @@ ARS23 (a byte a character in Plan 9's UTF-8 names). Sources studied: llvm-projec
 `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`, `llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCAsmInfo.cpp`,
 `llvm/lib/MC/MCParser/AsmLexer.cpp`, `llvm/include/llvm/MC/MCAsmInfo.h`; TamaGo's go1.27.1 `src/cmd/asm/internal/{asm,lex}`; the Mac VM's
 inventory (queue 255) for the oracle tier to come. No code copied (LICENSE.md, doc/ARBACE.md).
+
+## 2026-11-10 amd64 assembly: AX2's first slice, the table from LLVM's `.td` by Arbace's TableGen, the matcher and the encoder (branch `asm-ax2`, from `mac/asm-ar1` `6b8d79358`)
+
+AX2 of doc/asm/AMD64-SURVEY.md §12 on the light lane (stage 0, one run at a time, under 2 GiB, no lock; no llvm-tblgen or llvm-mc
+in any check), the user's decisions of 2026-11-09 followed (AXS4 (a), the table from LLVM's `.td`; AXS5 (a), one encoder mode per
+reference) and AXS17-AXS22 provisionally as recommended. Built (doc/asm/AMD64.md; "As built: AX2 (first slice)"):
+
+- `arbace.asm.tablegen` (`arbace/asm/tablegen.ae`): TableGen's language read and evaluated after llvm-project 23.1.5's
+  `llvm/lib/TableGen/TGLexer.cpp`, `TGParser.cpp`, `Record.cpp` and `llvm/docs/TableGen/ProgRef.rst` (the release tarball
+  `llvm-project-23.1.5.src.tar.xz`, SHA-256 `fb50b1ea...6a6e`, the pin of `test/asm/corpora.edn`): the preprocessor's conditionals,
+  classes, defs, multiclasses and defm (several multiclasses in one, the defm's classes after them, the let levels outwards),
+  let with bit ranges, foreach, defvar, defset, if, named template arguments, the `!` operators the X86 files and the
+  target-independent ones use, anonymous records; fields evaluated lazily against the finished record. On X86.td (144,000 lines,
+  106 files) it makes the 22,373 instructions and 2,796 aliases llvm-tblgen makes, about 2 minutes. Its memory was the first
+  obstacle (2.2 GiB with every field kept): the generator keeps only the fields it reads of the instructions and aliases,
+  evaluated when each record is complete, and drops the fields of the record kinds it never reads (intrinsics, patterns,
+  scheduling), 1.2 GiB. Debugged on the way: `#` at a line's start is a paste unless a directive follows; a def's name's
+  identifiers are names; `{1-0}` lexes `-0`; `!cond`; several multiclasses in one defm; an unresolved identifier in a paste is
+  its name.
+- `arbace.asm.amd64.gen`: AsmMatcherEmitter's rules (`llvm/utils/TableGen/AsmMatcherEmitter.cpp`: tokenizeAsmString, validate,
+  buildRegisterClasses with the singleton registers' names, getOperandClass, ClassInfo's order, shouldBeMatchedBefore with the
+  aliases' result instruction's position) with `Common/CodeGenInstruction.cpp`'s FlattenAsmStringVariants (the outer `{a|b}` only:
+  my first, recursive flattening lost AVX-512's `{%k}` braces) and `Common/CodeGenRegisters.cpp`'s TopoOrderRC (a register set
+  is named by its first class in that order: VR128's set is FR16's); `asm/amd64/table.edn` (8.9 MB, one entry a line): 23,014
+  matchables, 107 classes, 207 mnemonic aliases, 7 predicates, 322 registers, 20,465 instructions' encoding fields.
+  `bin/repr-asm table gen|check` (check regenerates, byte for byte; about 2.5 minutes); `table oracle` by hand: the host's
+  llvm-tblgen 23.1.5 `-gen-asm-matcher` on the same files, its MatchTable0 equal to the table's matchables, 23,014 of 23,014 rows
+  in order (the comparison drove three fixes: aliases' `"att"` variant name, the alias's result instruction's position, the
+  register sets' names).
+- `arbace.asm.amd64.asm`: the AT&T matcher and the encoder after `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (parseInstruction's
+  rewrites, matchAndEmitATTInstruction, processInstruction with optimizeInstFromVEX3ToVEX2 and the shift by 1,
+  checkTargetMatchPredicate, CheckBaseRegAndIndexRegAndScale, VerifyAndAdjustOperands, Code16GCC), `X86Operand.h`,
+  `X86AsmParserCommon.h` and `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp` (prefixes, REX, VEX2/VEX3, XOP, ModRM, SIB,
+  displacements, immediates, fixups), `X86BaseInfo.h` (getOperandBias, getMemoryOperandNo, needSIB), `X86MCTargetDesc.cpp`
+  (needsAddressSizeOverride) and `X86EncodingOptimization.cpp`.
+- `arbace.asm.amd64.check` and `bin/repr-asm encode-check [--record]`: `MC/X86`'s stated encodings judged by their own CHECK lines
+  in each RUN line's mode, as FileCheck reads them (the instructions' encodings in order, each stated encoding matched forward
+  from the last match: the tests write a CHECK before, after or beside its instruction; a positional pairing failed on
+  `x86-64.s`); the error tests' `error:` lines in order. `test/asm/encode-results-amd64.edn`, `divergences-encode.edn`,
+  `controls-encode.txt`, `encode_judge.ae`; the Makefile's `repr-asm-table`, `-table-check`, `-encode-check`, `-encode-record`.
+  `test/asm/corpora.edn`'s `:tables` names the `.td` files `corpus extract` takes. `arbace/asm/` joins `arbace_crop_paths`,
+  embed.ae's exclusions and the audit's crop rules.
+
+Results: of `MC/X86`'s 106,075 stated encodings 32,673 met (legacy 13,753, VEX 17,128, XOP 1,792), 73,402 classed (EVEX 50,896, Intel
+20,725 for AX3, `{evex}`/`{rex2}` 1,175, APX 605, no run 1), none failing; of the 96 error tests, 79 read, 60 of their 108 `error:`
+lines met, 48 pending. Three negative controls fail as they must. AX1's and AR1's round trips unchanged; `bin/reap`, `bin/crops-score
+--judge --strict` and `test/gate/gate-key-crops-test.bash` pass. Not built: EVEX and APX, the CHECK text, gas's mode, relaxation
+(no stated encoding needs it), the gate step and the row (AXS21 (a)).
+
+Considered: llvm-tblgen's JSON committed at the oracle tier (AXS4 (a) as first written) against Arbace's own TableGen: the brief
+asked for the generator to be Arbace's; the oracle comparison makes it as trustworthy. Proposed (doc/asm/AMD64-SURVEY.md,
+"Proposed (AX2)"): AXS23 (the generator Arbace's), AXS24 (the regeneration in `--full`), AXS25 (FileCheck's order for the
+pairing), AXS26 (the machine level as a second view now, the read forms rewritten with the CHECK-text slice), AXS27 (EVEX next).
+No code copied (LICENSE.md, doc/ARBACE.md); the table is a derived work of LLVM's `.td` files under their licence.

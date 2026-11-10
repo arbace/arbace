@@ -154,6 +154,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   assembly forms and prints it back byte for byte; musl 32/32, `MC/AsmParser` 139/157 and `MC/X86` 464/621 pass, the rest classed
   (Intel for AX3, the error tests for AX2). Proposed AXS17-AXS22. Next: AX2 (LLVM's `.td` table, the machine-level forms, the
   stated encodings and CHECK texts), then arm64's AR1 on the same frame.
+- Assembly, amd64's AX2: `asm-ax2` (on `asm-ar1`; AX2's first slice, doc/asm/AMD64-SURVEY.md, "As built: AX2 (first slice)",
+  doc/asm/AMD64.md): amd64's instruction table generated from LLVM's X86 `.td` by Arbace's own TableGen (`asm/amd64/table.edn`,
+  checked by regeneration; llvm-tblgen's `MatchTable0` its oracle by hand, 23,014 of 23,014 rows), the AT&T matcher and the
+  encoder of the legacy, VEX and XOP encodings, `bin/repr-asm table gen|check|oracle` and `encode-check`: `MC/X86`'s stated
+  encodings judged by their own CHECK lines, every non-pass classed (EVEX and APX the largest, Intel for AX3). Proposed
+  AXS23-AXS27. Next: EVEX, then the CHECK text (the AT&T print from the AsmString) and the machine-level forms (AXS26), APX.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

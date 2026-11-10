@@ -642,3 +642,68 @@ New with AX1 (each with options, the recommended named):
   `.tmp/asm/src` (the clean clone's too, as `bin/llvm-corpus`), nothing of llvm/test committed; (b) the corpora committed under
   `test/asm/`. *Recommended: (a)*: 17 MB of tests, all of it behind one pin already on the host.
 
+
+## As built: AX2 (first slice, 2026-11-10; branch `asm-ax2`)
+
+On the light lane (stage 0, one run at a time, under 2 GiB, no lock, no LLVM tool in any check), the user's decisions of
+2026-11-09 followed (AXS4 (a): the table from LLVM's `.td`; AXS5 (a): one encoder mode per reference, here `:llvm`), and
+AXS17-AXS22 as recommended. doc/asm/AMD64.md describes what was built.
+
+- **The table** (`asm/amd64/table.edn`, 8.9 MB, one entry a line): generated from llvm-project 23.1.5's X86 TableGen files (144,000
+  lines in 106 files, extracted with the corpora: `test/asm/corpora.edn`'s `:tables`) by **Arbace's own TableGen**
+  (`arbace.asm.tablegen`, the language read and evaluated lazily; 22,373 instructions and 2,796 aliases, as llvm-tblgen counts
+  them) and **AsmMatcherEmitter's rules** (`arbace.asm.amd64.gen`): 23,014 matchables in the matcher's order, 107 operand
+  classes, 207 mnemonic aliases, 7 assembler predicates, 322 registers (those with an AsmName), and the encoding fields of
+  the 20,465 instructions the matchables name. `bin/repr-asm table gen|check` (about 2.5 minutes, 1.2 GiB): `check` regenerates and compares byte for
+  byte. Its oracle, by hand: `bin/repr-asm table oracle` runs the host's llvm-tblgen 23.1.5 `-gen-asm-matcher` on the same
+  files; its `MatchTable0` is the table's matchables row for row, 23,014 of 23,014 in the same order with the same classes.
+- **The matcher and the encoder** (`arbace.asm.amd64.asm`): X86AsmParser's AT&T path (parseInstruction's rewrites, the
+  generated MatchInstructionImpl, the suffix retry and its messages, processInstruction) and X86MCCodeEmitter for the legacy,
+  REX, VEX and XOP encodings with LLVM's choices.
+- **The check** (`arbace.asm.amd64.check`, `bin/repr-asm encode-check [--record]`; the Makefile's `repr-asm-encode-check`,
+  `repr-asm-encode-record`): each stated encoding of `MC/X86` judged by its test's own CHECK lines as FileCheck reads them, in the
+  runs' modes; `test/asm/encode-results-amd64.edn` (a row a file), `test/asm/divergences-encode.edn` (the classes),
+  `test/asm/controls-encode.txt` (three negative controls, failing as they must). About 6 minutes on a loaded host, 1.5 GiB, four threads.
+
+| `MC/X86` (621 files) | stated | met | classed | failing |
+|---|---:|---:|---|---:|
+| encodings (`encoding: [...]`) | 106,075 | **32,673**: legacy 13,753 (base integer, x87, MMX, SSE), VEX 17,128, XOP 1,792 | 73,402: `:evex` 50,896, `:intel` 20,725, `:forced-encoding` 1,175, `:apx` 605, `:no-run` 1 | **0** |
+| error tests (96 files, `not llvm-mc`) | 108 `error:` lines in the 79 AX1 reads | 60 (57 files every line) | 17 files AX1 refuses or reads as Intel | 48 lines in 15 files (pending: messages of the operand and directive checks not ported yet) |
+
+Every stated encoding the encoder produces is the test's: no `:mismatch`, `:rejected`, `:crash` or `:unpaired`. The judge holds
+the record (met not fewer, failures not more, every class known) and the three controls fail as they must. The four files of
+the first trial (`I86-64`, `I86-32`, `SSE2-32`, `x86-64`) and the VEX and XOP files (`AVX-64` 4,804 of 4,804, `AVX-32`, `AVX2-64`,
+`FMA-64`, `XOP-64`, `avx-64-att`) meet every encoding they state outside the classes. AX1's and AR1's round trips rerun: the
+same rows (`roundtrip: ok` on both architectures); `bin/reap` (0 problems) and `bin/crops-score --judge --strict` pass;
+`test/gate/gate-key-crops-test.bash` passes with `arbace/asm/` in `arbace_crop_paths`, embed.ae's exclusions and the audit's
+`crop-rules` (the table `asm/amd64/table.edn` lies outside every key's tree).
+
+Not built in this slice: EVEX (AVX-512, AVX10) and APX, the largest classes; the CHECK text printed equal (the AT&T print of the
+matched instruction from its AsmString: AX2's next slice); gas's mode (AXS5's `:gnu`) and relaxation (no stated encoding needs it:
+llvm-mc's `-show-encoding` prints the instruction unrelaxed; objects need it, AX4); Intel syntax (AX3); the gate step and the row
+(AX10, AXS21 (a)).
+
+## Proposed (AX2)
+
+Each with options, the recommended one named.
+
+- **AXS23 The table's generator.** (a) Arbace's own TableGen evaluator and AsmMatcherEmitter's rules, the table committed and
+  checked by regeneration, llvm-tblgen the oracle by hand (`table oracle`), as built; (b) llvm-tblgen's `--dump-json` filtered and
+  committed at the oracle tier (AXS4 (a) as first written). *Recommended: (a)*: the generator is the crop's (independence), and
+  the oracle shows the result is llvm-tblgen's row for row; the same evaluator reads AArch64's `.td` for AR2.
+- **AXS24 The regeneration check's place.** (a) a `--full` step with the row's steps (AX10; about 2.5 minutes, 1.2 GiB), the
+  essential gate reading the committed table; (b) essential. *Recommended: (a)*: the table changes only with the pin.
+- **AXS25 Pairing a stated encoding with its instruction.** (a) FileCheck's order, each stated encoding matched forward from the
+  last match in the run's output, an unmet one classed by the nearest instruction not matched, as built (the tests write a
+  CHECK before, after or beside its instruction, and in blocks); (b) by adjacency in the file. *Recommended: (a)*: it is the
+  test's own verdict; a wrong encoding can only cost more lines, never pass one.
+- **AXS26 The machine level of the forms (AXS17's first part).** The matcher now names every encoded statement's machine
+  instruction (LLVM's, e.g. `ADD32ri8`) and its operands: (a) the machine level as a second view made from the read forms by
+  the matcher, `(x86/ADD32ri8 (reg eax) (reg eax) (imm 1))`, kept beside AX1's syntax-level forms and records, the SDM mnemonic and
+  width (`(add {:w 32} ...)`) derived from it with AX2's CHECK-text slice; (b) AX1's forms rewritten to `(add {:w 32} ...)` now, the
+  written mnemonic into the layer (AXS17 (a)), every AX1 record rewritten; (c) the syntax level only. *Recommended: (a) now, then
+  (b) once the print from the AsmString makes the round trip `(add {:w 32} ...)` → text → the same forms checkable*: the match
+  falls out of the table naturally, the rewrite of the reader's forms needs the printer to keep `:full`'s byte-for-byte claim.
+- **AXS27 EVEX and APX next.** (a) EVEX (disp8*N from `CD8_Scale`, masks, broadcast, rounding: 50,000-odd of the classed lines)
+  then the CHECK text, then APX; (b) the CHECK text first. *Recommended: (a)*: the classes are the measure of "equal or classed",
+  and the table already holds EVEX's fields.

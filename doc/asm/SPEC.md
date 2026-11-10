@@ -136,7 +136,9 @@ prints canonically. `:end` is the text after the last item when it is not the ca
 
 `bin/repr-asm [--arch amd64|arm64] read [--syntax att|gnu|apple|plan9] [--full] FILE [-o OUT.ae]`, `print [--full] FILE.ae [-o OUT]`
 (the dialect the header's), `corpus extract|lists`, `roundtrip [--record] [CORPUS...]`, `divergences`; the Makefile's `repr-asm-*`
-(`ARCH=`, `repr-asm-roundtrip-arm64`, `repr-asm-record-arm64`).
+(`ARCH=`, `repr-asm-roundtrip-arm64`, `repr-asm-record-arm64`). Since AX2 (doc/asm/AMD64.md): `table gen|check|oracle` (amd64's
+instruction table) and `encode-check [--record] [CORPUS...]` (the stated encodings by their own CHECK lines); the forms stay this
+spec's, the machine level a view the matcher makes (AXS26).
 
 ## 8. The judges of AX1 and AR1 (own verdicts only)
 

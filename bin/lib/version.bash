@@ -40,6 +40,8 @@ arbace_crop_paths=(
   'arbace/cpp/*' arbace/rust.ae 'arbace/rust/*' 'arbace/llvm/*'
   # repr/asm, the assembly crops' bridge (doc/asm/SPEC.md; AX1)
   arbace/repr/asm.ae 'arbace/repr/asm/*'
+  # the assembler of the assembly crops: TableGen, amd64's table generator, matcher, encoder and check (AX2)
+  'arbace/asm/*'
   # their Go forms: oi's (with its C API, oicapi), si's (scm, scminterp), pyi's (py, expat, pyexpat), hsi's (hs) and the libm port hsi and pyi import
   go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/oicapi.ae 'go/arbace/oicapi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'

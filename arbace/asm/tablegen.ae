@@ -1,0 +1,897 @@
+(ns arbace.asm.tablegen
+  "TableGen's language read and evaluated (doc/asm/AMD64-SURVEY.md §7.2, AXS4; doc/asm/AMD64.md, \"The table\"): the
+  records of a `.td` file and its includes, as llvm-tblgen makes them (llvm-project 23.1.5, llvm/lib/TableGen/TGLexer.cpp,
+  TGParser.cpp, Record.cpp and llvm/docs/TableGen/ProgRef.rst, Apache-2.0 WITH LLVM-exception: the language, written
+  again in Arbace; no llvm-tblgen runs). The generators of arbace.asm.amd64.gen read the records.
+
+  Evaluation is lazy: a record's field keeps its initializer and the scope it was written in (a class's template
+  arguments, defvars, a multiclass's arguments and NAME, foreach's variables), and is evaluated when it is first read,
+  against the finished record (TableGen's late resolution of field references), then kept. A record's fields are made
+  as TGParser makes them: the superclasses in order (a later one's field overriding), the body, then the let stack, and
+  for a defm's records the defm's superclasses and the let stack around the defm, level by level outwards.
+
+  Values: a long (int and bit), a String (string and code), a vector (list), Bits (bits<n>, its bits low first),
+  Dag, a record (Rec), `unset` (`?`)."
+  (:require [arbace.string :as str])
+  (:import [java.util HashMap ArrayList]))
+
+(set! *warn-on-reflection* true)
+
+(deftype Bits [bs])                         ;; a vector of 0, 1 or unset, bit 0 first
+(deftype Dag [op opname args])              ;; args: a vector of [VALUE NAME-or-nil]
+(deftype Rec [^String name ^long id fields supers ^HashMap cache anon])
+(def unset ::unset)
+
+(defn rec? [x] (instance? Rec x))
+(defn bits? [x] (instance? Bits x))
+(defn dag? [x] (instance? Dag x))
+(defn rec-name ^String [^Rec r] (.-name r))
+(defn rec-id ^long [^Rec r] (.-id r))
+(defn rec-supers [^Rec r] (.-supers r))
+(defn rec-fields [^Rec r] (.-fields r))
+(defn anon? [^Rec r] (.-anon r))
+(defn bits-of [^Bits b] (.-bs b))
+(defn dag-op [^Dag d] (.-op d))
+(defn dag-args [^Dag d] (.-args d))
+(defn subclass? [^Rec r ^String c] (contains? (.-supers r) c))
+
+(defn- fail [msg & [data]] (throw (ex-info (str "tablegen: " msg) (or data {}))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the lexer (TGLexer)
+
+(defn- ch ^long [^String s ^long i] (if (< i (.length s)) (long (int (.charAt s (int i)))) -1))
+(defn- alpha? [^long c] (or (<= 97 c 122) (<= 65 c 90) (= c 95)))
+(defn- digit? [^long c] (<= 48 c 57))
+(defn- idch? [^long c] (or (alpha? c) (digit? c)))
+
+(defn- line-start? [^String s ^long i]
+  (loop [j (dec i)] (cond (neg? j) true (= (ch s j) 10) true (<= (ch s j) 32) (recur (dec j)) :else false)))
+
+(def ^:private puncts #{\< \> \{ \} \[ \] \( \) \, \; \: \= \. \# \? \- \+})
+
+(defn lex
+  "The tokens of `s`: [KIND VALUE LINE], KIND :id :int :bin (VALUE [N WIDTH]) :str :code :var ($name) :bang (!op)
+  :punct (VALUE a string; `...` one) :pp (a preprocessor line, VALUE [DIRECTIVE NAME])."
+  [^String s ^String file]
+  (let [out (ArrayList.) n (.length s)]
+    (loop [i 0 line 1]
+      (if (>= i n)
+        (vec out)
+        (let [c (ch s i)]
+          (cond
+            (= c 10) (recur (inc i) (inc line))
+            (<= c 32) (recur (inc i) line)
+            (and (= c 47) (= (ch s (inc i)) 47))
+            (let [k (.indexOf s "\n" (int i))] (recur (if (neg? k) n k) line))
+            (and (= c 47) (= (ch s (inc i)) 42))
+            (let [[j l] (loop [j (+ i 2) d 1 l line]
+                          (cond (>= j n) (fail (str file ": unterminated comment"))
+                                (and (= (ch s j) 42) (= (ch s (inc j)) 47)) (if (= d 1) [(+ j 2) l] (recur (+ j 2) (dec d) l))
+                                (and (= (ch s j) 47) (= (ch s (inc j)) 42)) (recur (+ j 2) (inc d) l)
+                                (= (ch s j) 10) (recur (inc j) d (inc l))
+                                :else (recur (inc j) d l)))]
+              (recur (long j) (long l)))
+            (and (= c 35) (line-start? s i) (re-find #"^#(ifdef|ifndef|else|endif|define)\b" (subs s i (min n (+ i 10)))))
+            ;; a preprocessor directive: #ifdef NAME, #ifndef, #define, #else, #endif
+            (let [k (let [k (.indexOf s "\n" (int i))] (if (neg? k) n k))
+                  ws (str/split (str/trim (subs s (inc i) k)) #"\s+")]
+              (.add out [:pp [(first ws) (second ws)] line])
+              (recur (long k) line))
+            (= c 34)
+            (let [sb (StringBuilder.)
+                  j (loop [j (inc i)]
+                      (let [d (ch s j)]
+                        (cond (or (= d -1) (= d 10)) (fail (str file ":" line ": unterminated string"))
+                              (= d 34) (inc j)
+                              (= d 92) (let [e (ch s (inc j))]
+                                         (.append sb (case (int e) 110 \newline 116 \tab 34 \" 39 \' 92 \\ (char e)))
+                                         (recur (+ j 2)))
+                              :else (do (.append sb (char d)) (recur (inc j))))))]
+              (.add out [:str (str sb) line])
+              (recur (long j) line))
+            (and (= c 91) (= (ch s (inc i)) 123))
+            (let [k (.indexOf s "}]" (int (+ i 2)))
+                  _ (when (neg? k) (fail (str file ":" line ": unterminated code")))
+                  t (subs s (+ i 2) k)]
+              (.add out [:code t line])
+              (recur (+ k 2) (+ line (count (filter #(= \newline %) t)))))
+            (= c 36)
+            (let [j (loop [j (inc i)] (if (idch? (ch s j)) (recur (inc j)) j))]
+              (.add out [:var (subs s (inc i) j) line])
+              (recur (long j) line))
+            (= c 33)
+            (let [j (loop [j (inc i)] (if (idch? (ch s j)) (recur (inc j)) j))]
+              (.add out [:bang (subs s (inc i) j) line])
+              (recur (long j) line))
+            (and (= c 46) (= (ch s (inc i)) 46) (= (ch s (+ i 2)) 46))
+            (do (.add out [:punct "..." line]) (recur (+ i 3) line))
+            (or (digit? c) (and (#{43 45} c) (digit? (ch s (inc i)))))
+            (let [neg (= c 45) i0 (if (#{43 45} c) (inc i) i)]
+              (cond
+                (and (= (ch s i0) 48) (= (ch s (inc i0)) 120))
+                (let [j (loop [j (+ i0 2)] (if (or (digit? (ch s j)) (<= 97 (ch s j) 102) (<= 65 (ch s j) 70)) (recur (inc j)) j))
+                      v (Long/parseUnsignedLong (subs s (+ i0 2) j) 16)]
+                  (.add out [:int (if neg (- v) v) line]) (recur (long j) line))
+                (and (= (ch s i0) 48) (= (ch s (inc i0)) 98) (#{48 49} (ch s (+ i0 2))))
+                (let [j (loop [j (+ i0 2)] (if (#{48 49} (ch s j)) (recur (inc j)) j))
+                      t (subs s (+ i0 2) j)]
+                  (.add out [:bin [(Long/parseUnsignedLong t 2) (count t)] line]) (recur (long j) line))
+                :else
+                (let [j (loop [j i0] (if (digit? (ch s j)) (recur (inc j)) j))]
+                  (if (and (not (#{43 45} c)) (alpha? (ch s j)))
+                    ;; an identifier that starts with digits
+                    (let [k (loop [k j] (if (idch? (ch s k)) (recur (inc k)) k))]
+                      (.add out [:id (subs s i k) line]) (recur (long k) line))
+                    (let [v (Long/parseLong (subs s i0 j))]
+                      (.add out (if neg [:int (- v) line :neg] [:int v line])) (recur (long j) line))))))
+            (alpha? c)
+            (let [j (loop [j i] (if (idch? (ch s j)) (recur (inc j)) j))]
+              (.add out [:id (subs s i j) line])
+              (recur (long j) line))
+            (puncts (char c)) (do (.add out [:punct (str (char c)) line]) (recur (inc i) line))
+            :else (fail (str file ":" line ": unexpected character " (pr-str (char c))))))))))
+
+(defn- preprocess
+  "The tokens with TableGen's preprocessor's conditionals applied (#define, #ifdef, #ifndef, #else, #endif)."
+  [toks ^HashMap defines]
+  (loop [ts toks out (transient []) stack ()]
+    (if (empty? ts)
+      (persistent! out)
+      (let [[k v :as t] (first ts) live (every? true? stack)]
+        (if (= k :pp)
+          (let [[d nm] v]
+            (case d
+              "define" (do (when live (.put defines nm true)) (recur (rest ts) out stack))
+              "ifdef" (recur (rest ts) out (conj stack (.containsKey defines nm)))
+              "ifndef" (recur (rest ts) out (conj stack (not (.containsKey defines nm))))
+              "else" (recur (rest ts) out (conj (rest stack) (not (first stack))))
+              "endif" (recur (rest ts) out (rest stack))
+              (fail (str "unknown preprocessor directive #" d))))
+          (recur (rest ts) (if live (conj! out t) out) stack))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the parser (TGParser): statements and values as data, executed by `exec`
+
+(deftype P [toks ^longs pos ^String file])
+
+(defn- peek-t [^P p] (let [i (aget ^longs (.-pos p) 0) ts (.-toks p)] (when (< i (count ts)) (nth ts i))))
+(defn- peek2 [^P p] (let [i (inc (aget ^longs (.-pos p) 0)) ts (.-toks p)] (when (< i (count ts)) (nth ts i))))
+(defn- adv [^P p] (let [t (peek-t p)] (aset ^longs (.-pos p) 0 (inc (aget ^longs (.-pos p) 0))) t))
+(defn- at? [p k v] (let [t (peek-t p)] (and t (= k (first t)) (or (nil? v) (= v (second t))))))
+(defn- perr [^P p msg] (fail (str (.-file p) ":" (or (nth (peek-t p) 2 nil) "end") ": " msg " at " (pr-str (take 2 (peek-t p))))))
+(defn- expect [p k v] (if (at? p k v) (adv p) (perr p (str "expected " (or v k)))))
+(defn- punct? [p v] (at? p :punct v))
+(defn- eat [p v] (when (punct? p v) (adv p) true))
+(defn- kw? [p v] (at? p :id v))
+(defn- ident [p] (second (expect p :id nil)))
+
+(declare parse-value parse-type eat-field)
+
+(def ^:private type-kws #{"bit" "bits" "int" "string" "code" "dag" "list"})
+
+(defn- parse-type [p]
+  (let [t (ident p)]
+    (case t
+      "bit" [:bit] "int" [:int] "string" [:string] "code" [:string] "dag" [:dag]
+      "bits" (do (expect p :punct "<") (let [n (second (expect p :int nil))] (expect p :punct ">") [:bits n]))
+      "list" (do (expect p :punct "<") (let [e (parse-type p)] (expect p :punct ">") [:list e]))
+      [:class t])))
+
+(defn- parse-ranges
+  "A range list: N, N-M, N...M separated by commas, as [[A B] ...] (B nil for one)."
+  [p end]
+  (loop [out []]
+    (if (punct? p end)
+      out
+      (let [a (parse-value p)
+            [b] (cond (eat p "...") [(parse-value p)]
+                      (and (at? p :int nil) (= :neg (nth (peek-t p) 3 nil))) [[:int (- (long (second (adv p))))]]
+                      (eat p "-") [(parse-value p)]
+                      :else [nil])
+            out (conj out [a b])]
+        (if (eat p ",") (recur out) out)))))
+
+(defn- parse-args
+  "A template-argument list after `<`: [POSITIONAL NAMED] (NAMED a vector of [NAME VALUE])."
+  [p]
+  (loop [pos [] named []]
+    (if (eat p ">")
+      [pos named]
+      (let [[pos named] (if (and (at? p :id nil) (let [t (peek2 p)] (and t (= [:punct "="] (vec (take 2 t))))))
+                          (let [n (ident p)] (adv p) [pos (conj named [n (parse-value p)])])
+                          [(conj pos (parse-value p)) named])]
+        (if (eat p ",") (recur pos named) (do (expect p :punct ">") [pos named]))))))
+
+(defn- parse-list [p open close]
+  (loop [out []]
+    (if (eat p close) out
+        (let [out (conj out (parse-value p))]
+          (if (eat p ",") (recur out) (do (expect p :punct close) out))))))
+
+(defn- parse-dag [p]
+  (let [op (parse-value p)
+        opname (when (eat p ":") (second (expect p :var nil)))
+        args (loop [out []]
+               (if (eat p ")") out
+                   (let [[v n] (if (at? p :var nil)
+                                 [[:unset] (second (adv p))]
+                                 (let [v (parse-value p)] [v (when (eat p ":") (second (expect p :var nil)))]))
+                         out (conj out [v n])]
+                     (if (eat p ",") (recur out) (do (expect p :punct ")") out)))))]
+    [:dag op opname args]))
+
+(defn- parse-simple [^P p]
+  (let [[k v] (peek-t p)]
+    (case k
+      :int (do (adv p) [:int v])
+      :bin (do (adv p) [:bin v])
+      :str (do (adv p)
+               ;; adjacent strings are concatenated
+               (loop [s v] (if (at? p :str nil) (recur (str s (second (adv p)))) [:str s])))
+      :code (do (adv p) [:str v])
+      :var (perr p "unexpected $variable")
+      :bang
+      (do (adv p)
+          (let [ty (when (eat p "<") (let [t (parse-type p)] (expect p :punct ">") t))]
+            (expect p :punct "(")
+            (if (= v "cond")
+              (let [cs (loop [out []]
+                         (if (eat p ")") out
+                             (let [c (parse-value p) _ (expect p :punct ":") x (parse-value p) out (conj out [c x])]
+                               (if (eat p ",") (recur out) (do (expect p :punct ")") out)))))]
+                [:cond cs])
+              [:bang v ty (parse-list p "(" ")")])))
+      :id
+      (case v
+        "true" (do (adv p) [:int 1])
+        "false" (do (adv p) [:int 0])
+        (do (adv p)
+            (if (punct? p "<")
+              (do (adv p) (let [[pos named] (parse-args p)] [:inst v pos named]))
+              [:id v])))
+      :punct
+      (case v
+        "?" (do (adv p) [:unset])
+        "{" (do (adv p) [:bits (parse-list p "{" "}")])
+        "[" (do (adv p)
+                (let [xs (parse-list p "[" "]")]
+                  (when (eat p "<") (parse-type p) (expect p :punct ">"))
+                  [:list xs]))
+        "(" (do (adv p) (parse-dag p))
+        (perr p "expected a value"))
+      (perr p "expected a value"))))
+
+(def ^:dynamic *name* false)
+
+(defn- parse-postfix [p]
+  (loop [x (parse-simple p)]
+    (cond
+      (and (punct? p "{") (not *name*)) (do (adv p) (let [r (parse-ranges p "}")] (expect p :punct "}") (recur [:bitsl x r])))
+      (punct? p "[") (do (adv p) (let [r (parse-ranges p "]")] (expect p :punct "]") (recur [:idx x r])))
+      (punct? p ".") (do (adv p) (recur [:field x (ident p)]))
+      :else x)))
+
+(defn parse-value [p]
+  (loop [x (parse-postfix p)]
+    (if (punct? p "#")
+      (do (adv p)
+          ;; `a#` at a name's end: nothing follows the paste
+          (if (or (punct? p ":") (punct? p "{") (punct? p ";") (punct? p ",") (punct? p ">") (punct? p ")") (punct? p "]") (kw? p "in"))
+            x
+            (recur [:paste x (parse-postfix p)])))
+      x)))
+
+(defn- parse-supers
+  "After `:`: [[NAME POSITIONAL NAMED] ...]."
+  [p]
+  (loop [out []]
+    (let [n (ident p)
+          [pos named] (if (eat p "<") (parse-args p) [[] []])
+          out (conj out [n pos named])]
+      (if (eat p ",") (recur out) out))))
+
+(defn- parse-body
+  "A record's body: `;` or `{ items }`: [[:field TYPE NAME VALUE] [:let NAME RANGES VALUE] [:defvar NAME VALUE]]."
+  [p]
+  (if (eat p ";")
+    []
+    (do (expect p :punct "{")
+        (loop [out []]
+          (cond
+            (eat p "}") out
+            (eat p ";") (recur out)
+            (kw? p "let") (do (adv p)
+                              (let [n (ident p)
+                                    r (when (eat p "{") (let [r (parse-ranges p "}")] (expect p :punct "}") r))
+                                    _ (expect p :punct "=")
+                                    v (parse-value p)]
+                                (expect p :punct ";")
+                                (recur (conj out [:let n r v]))))
+            (kw? p "defvar") (do (adv p) (let [n (ident p) _ (expect p :punct "=") v (parse-value p)]
+                                           (expect p :punct ";") (recur (conj out [:defvar n v]))))
+            (or (kw? p "assert") (kw? p "dump"))
+            (do (loop [] (when-not (eat p ";") (adv p) (recur))) (recur out))
+            :else
+            (let [_ (eat-field p)
+                  t (parse-type p)
+                  n (ident p)
+                  v (when (eat p "=") (parse-value p))]
+              (expect p :punct ";")
+              (recur (conj out [:field t n v]))))))))
+
+(defn- eat-field [p] (when (kw? p "field") (adv p)))
+
+(declare parse-stmt)
+
+(defn- parse-block
+  "A statement, or `{ statements }`."
+  [p]
+  (if (eat p "{")
+    (loop [out []] (if (eat p "}") out (recur (into out (parse-stmt p)))))
+    (parse-stmt p)))
+
+(defn- parse-targs [p]
+  (if (eat p "<")
+    (loop [out []]
+      (let [t (parse-type p) n (ident p) d (when (eat p "=") (parse-value p)) out (conj out [t n d])]
+        (if (eat p ",") (recur out) (do (expect p :punct ">") out))))
+    []))
+
+(defn- name-end? [p] (or (punct? p ":") (punct? p "{") (punct? p ";")))
+
+(defn parse-stmt
+  "One statement: a vector of statements (`include` is resolved by the executor: [:include FILE])."
+  [^P p]
+  (let [[k v] (peek-t p)]
+    (when-not (= k :id) (perr p "expected a statement"))
+    (adv p)
+    (case v
+      "include" [[:include (second (expect p :str nil))]]
+      "class" (let [n (ident p) ta (parse-targs p) su (if (eat p ":") (parse-supers p) [])]
+                [[:class n ta su (parse-body p)]])
+      "def" (let [n (when-not (name-end? p) (binding [*name* true] (parse-value p))) su (if (eat p ":") (parse-supers p) [])]
+              [[:def n su (parse-body p)]])
+      "defm" (let [n (when-not (punct? p ":") (binding [*name* true] (parse-value p)))
+                   _ (expect p :punct ":")
+                   su (parse-supers p)]
+               (expect p :punct ";")
+               [[:defm n su]])
+      "multiclass" (let [n (ident p) ta (parse-targs p) su (if (eat p ":") (parse-supers p) [])
+                         body (if (eat p "{") (loop [out []] (if (eat p "}") out (recur (into out (parse-stmt p))))) (do (expect p :punct ";") []))]
+                     [[:multiclass n ta su body]])
+      "let" (let [ls (loop [out []]
+                       (let [n (ident p)
+                             r (when (eat p "{") (let [r (parse-ranges p "}")] (expect p :punct "}") r))
+                             _ (expect p :punct "=")
+                             x (parse-value p)
+                             out (conj out [n r x])]
+                         (if (eat p ",") (recur out) out)))]
+              (when-not (kw? p "in") (perr p "expected in"))
+              (adv p)
+              [[:let ls (parse-block p)]])
+      "foreach" (let [n (ident p)
+                      _ (expect p :punct "=")
+                      it (if (punct? p "{")
+                           (do (adv p) (let [r (parse-ranges p "}")] (expect p :punct "}") [:ranges r]))
+                           (let [a (parse-value p)]
+                             (cond (eat p "...") [:ranges [[a (parse-value p)]]]
+                                   (and (at? p :int nil) (= :neg (nth (peek-t p) 3 nil))) [:ranges [[a [:int (- (long (second (adv p))))]]]]
+                                   (eat p "-") [:ranges [[a (parse-value p)]]]
+                                   :else a)))]
+                  (when-not (kw? p "in") (perr p "expected in"))
+                  (adv p)
+                  [[:foreach n it (parse-block p)]])
+      "defvar" (let [n (ident p) _ (expect p :punct "=") x (parse-value p)] (expect p :punct ";") [[:defvar n x]])
+      "defset" (let [_ (parse-type p) n (ident p) _ (expect p :punct "=") _ (expect p :punct "{")
+                     body (loop [out []] (if (eat p "}") out (recur (into out (parse-stmt p)))))]
+                 [[:defset n body]])
+      "deftype" (let [n (ident p) _ (expect p :punct "=") t (parse-type p)] (expect p :punct ";") [[:deftype n t]])
+      "if" (let [c (parse-value p)
+                 _ (when-not (kw? p "then") (perr p "expected then"))
+                 _ (adv p)
+                 a (parse-block p)
+                 b (when (kw? p "else") (adv p) (parse-block p))]
+             [[:if c a (or b [])]])
+      ("assert" "dump") (do (loop [] (when-not (eat p ";") (adv p) (recur))) [])
+      (perr p (str "unknown statement " v)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the world: classes, multiclasses, records, global defvars
+
+(defn new-world [include-dirs drop keep]
+  {:dirs include-dirs :drop (set drop) :keep keep
+   :classes (HashMap.) :mcs (HashMap.) :defs (HashMap.) :order (ArrayList.) :gvars (HashMap.) :types (HashMap.)
+   :defines (HashMap.) :counter (long-array 2) :defsets (ArrayList.)})
+
+(def ^:dynamic *w* nil)
+(def ^:dynamic *levels* nil)   ;; a vector of levels {:frames [[NAME RANGES ENTRY] ...] :supers [[CLASS ARGS NAMED SCOPE] ...]}
+
+(defn lookup-def ^Rec [^String n] (.get ^HashMap (:defs *w*) n))
+(defn records [] (vec (:order *w*)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; values
+
+(declare ev fv force*)
+
+(defn- ->bits
+  "`v` as a Bits of width `n`."
+  [v ^long n]
+  (cond
+    (bits? v) (let [bs (bits-of v)]
+                (if (= (count bs) n) v
+                    (if (< (count bs) n) (Bits. (into bs (repeat (- n (count bs)) 0))) (Bits. (subvec bs 0 n)))))
+    (integer? v) (let [x (long v)] (Bits. (mapv #(if (< (long %) 64) (bit-and 1 (bit-shift-right x (long %))) (if (neg? x) 1 0)) (range n))))
+    (= v unset) (Bits. (vec (repeat n unset)))
+    :else (fail (str "not convertible to bits<" n ">: " (pr-str v)))))
+
+(defn bits->int
+  "A Bits' integer, or nil when a bit is unset."
+  [v]
+  (let [bs (bits-of v)]
+    (when (every? integer? bs)
+      (reduce (fn [^long a [^long i ^long b]] (if (= b 1) (bit-or a (bit-shift-left 1 i)) a)) 0 (map-indexed vector bs)))))
+
+(defn as-int [v]
+  (cond (integer? v) (long v)
+        (bits? v) (or (bits->int v) (fail "unset bits used as an integer"))
+        :else (fail (str "not an integer: " (pr-str (if (rec? v) (rec-name v) v))))))
+
+(defn- coerce [t v]
+  (if (or (nil? t) (= v unset))
+    (if (and t (= :bits (first t)) (= v unset)) (->bits v (second t)) v)
+    (case (first t)
+      :bits (->bits v (second t))
+      :bit (if (bits? v) (first (bits-of v)) v)
+      :int (if (bits? v) (or (bits->int v) v) v)
+      v)))
+
+(defn- vstr
+  "A value as text, as `#` and !strconcat's operands and a record's name."
+  ^String [v]
+  (cond (string? v) v
+        (integer? v) (str v)
+        (rec? v) (rec-name v)
+        (bits? v) (str (bits->int v))
+        (= v unset) "?"
+        :else (fail (str "not a string: " (pr-str v)))))
+
+(defn- veq [a b]
+  (cond (and (rec? a) (rec? b)) (= (rec-name a) (rec-name b))
+        (or (bits? a) (bits? b)) (= (as-int a) (as-int b))
+        :else (= a b)))
+
+(defn- lookup
+  [^String n scope rec]
+  (loop [s scope]
+    (if s
+      (if-let [e (get (:vars s) n)]
+        (force* e rec)
+        (recur (:up s)))
+      (cond
+        (and rec (contains? (rec-fields rec) n)) (fv rec n)
+        (and rec (= n "NAME")) (rec-name rec)
+        (.containsKey ^HashMap (:gvars *w*) n) (.get ^HashMap (:gvars *w*) n)
+        :else (or (lookup-def n) (fail (str "unknown identifier " n)))))))
+
+(defn- resolvable? [^String n scope rec]
+  (or (loop [s scope] (when s (or (contains? (:vars s) n) (recur (:up s)))))
+      (and rec (or (contains? (rec-fields rec) n) (= n "NAME")))
+      (.containsKey ^HashMap (:gvars *w*) n)
+      (some? (lookup-def n))))
+
+(defn force* [e rec]
+  (if (contains? e :v)
+    (:v e)
+    (coerce (:t e) (ev (:e e) (:s e) rec))))
+
+(defn- slice-positions [ranges scope rec]
+  (vec (mapcat (fn [[a b]]
+                 (let [a (as-int (ev a scope rec))]
+                   (if b
+                     (let [b (as-int (ev b scope rec))] (if (<= a b) (range a (inc b)) (range a (dec b) -1)))
+                     [a])))
+               ranges)))
+
+(declare instantiate new-rec class-fields)
+
+(defn- dag-arg [v ^Dag d] ;; !getdagarg's key: an index or a name
+  (let [args (dag-args d)]
+    (if (string? v) (first (first (filter #(= v (second %)) args))) (first (nth args (long v) [nil])))))
+
+(defn- bang [op ty args scope rec]
+  (let [e #(ev % scope rec)
+        ints #(mapv (comp as-int e) args)]
+    (case op
+      "add" (reduce + (ints)) "mul" (reduce * (ints)) "sub" (let [[a b] (ints)] (- a b))
+      "div" (let [[a b] (ints)] (quot a b))
+      "and" (reduce bit-and (ints)) "or" (reduce bit-or (ints)) "xor" (reduce bit-xor (ints))
+      "shl" (let [[a b] (ints)] (bit-shift-left a b)) "sra" (let [[a b] (ints)] (bit-shift-right a b))
+      "srl" (let [[a b] (ints)] (unsigned-bit-shift-right a b))
+      "not" (if (zero? (long (first (ints)))) 1 0)
+      "logtwo" (let [[a] (ints)] (- 63 (Long/numberOfLeadingZeros a)))
+      ("eq" "ne" "lt" "le" "gt" "ge")
+      (let [[a b] (mapv e args)
+            c (if (and (or (string? a) (rec? a) (= a unset)) (= op "eq")) (if (veq a b) 0 1)
+                  (if (and (string? a) (string? b)) (compare a b)
+                      (if (and (or (string? a) (rec? a)) (= op "ne")) (if (veq a b) 0 1)
+                          (compare (as-int a) (as-int b)))))]
+        (if (case op "eq" (zero? c) "ne" (not (zero? c)) "lt" (neg? c) "le" (<= c 0) "gt" (pos? c) "ge" (>= c 0)) 1 0))
+      "if" (let [[c a b] args] (if (zero? (long (as-int (e c)))) (e b) (e a)))
+      "strconcat" (apply str (map (comp vstr e) args))
+      "interleave" (let [[l sep] (mapv e args)] (str/join sep (map vstr l)))
+      "listconcat" (vec (apply concat (map e args)))
+      "listsplat" (let [[x n] (mapv e args)] (vec (repeat (as-int n) x)))
+      "listremove" (let [[a b] (mapv e args)] (vec (remove (fn [x] (some #(veq x %) b)) a)))
+      "listflatten" (vec (mapcat #(if (vector? %) % [%]) (e (first args))))
+      "size" (let [x (e (first args))] (if (dag? x) (count (dag-args x)) (count x)))
+      "empty" (let [x (e (first args))] (if (cond (dag? x) (empty? (dag-args x)) (string? x) (= "" x) :else (empty? x)) 1 0))
+      "head" (first (e (first args)))
+      "tail" (vec (rest (e (first args))))
+      "subst" (let [[a b c] (mapv e args)]
+                (cond (string? c) (str/replace c (vstr a) (vstr b))
+                      (vector? c) (mapv #(if (veq % a) b %) c)
+                      (veq c a) b :else c))
+      "substr" (let [[s a n] (mapv e args) s (vstr s) a (as-int a) n (if (some? n) (as-int n) (count s))]
+                 (subs s (min a (count s)) (min (count s) (+ a n))))
+      "find" (let [[s t a] (mapv e args)] (.indexOf ^String s ^String t (int (if a (as-int a) 0))))
+      "tolower" (str/lower-case (e (first args)))
+      "toupper" (str/upper-case (e (first args)))
+      "cast" (let [v (e (first args))]
+               (case (first ty)
+                 :string (vstr v)
+                 :int (as-int v)
+                 :bit (as-int v)
+                 :bits (->bits v (second ty))
+                 :class (if (rec? v) v (or (lookup-def (vstr v)) (fail (str "!cast: no record " (vstr v)))))
+                 v))
+      "isa" (let [v (e (first args))] (if (and (rec? v) (subclass? v (second ty))) 1 0))
+      "exists" (let [v (e (first args))] (if (lookup-def (vstr v)) 1 0))
+      "initialized" (if (= unset (e (first args))) 0 1)
+      "con" (let [ds (mapv e args)]
+              (Dag. (dag-op (first ds)) nil (vec (mapcat dag-args ds))))
+      "dag" (let [[o xs ns] (mapv e args)]
+              (Dag. o nil (mapv (fn [x n] [x (when (string? n) n)]) xs (if (vector? ns) ns (repeat nil)))))
+      "getdagop" (dag-op (e (first args)))
+      "setdagop" (let [[d o] (mapv e args)] (Dag. o nil (dag-args d)))
+      "getdagarg" (let [[d k] (mapv e args)] (dag-arg k d))
+      "getdagname" (let [[d k] (mapv e args)] (second (nth (dag-args d) (as-int k))))
+      "setdagarg" (let [[d k v] (mapv e args)
+                        i (if (string? k) (first (keep-indexed #(when (= k (second %2)) %1) (dag-args d))) (as-int k))]
+                    (Dag. (dag-op d) nil (assoc (dag-args d) i [v (second (nth (dag-args d) i))])))
+      "range" (let [xs (mapv e args)]
+                (cond (and (= 1 (count xs)) (vector? (first xs))) (vec (range (count (first xs))))
+                      (= 1 (count xs)) (vec (range (as-int (first xs))))
+                      :else (vec (range (as-int (first xs)) (as-int (second xs))))))
+      "foreach" (let [[v l x] args n (second v) seq (e l)
+                      f (fn [it] (ev x {:vars {n {:v it}} :up scope} rec))]
+                  (if (dag? seq)
+                    (Dag. (dag-op seq) nil (mapv (fn [[a nm]] [(f a) nm]) (dag-args seq)))
+                    (mapv f seq)))
+      "filter" (let [[v l x] args n (second v)]
+                 (vec (filter #(not (zero? (long (as-int (ev x {:vars {n {:v %}} :up scope} rec))))) (e l))))
+      "foldl" (let [[init l a v x] args an (second a) vn (second v)]
+                (reduce (fn [acc it] (ev x {:vars {an {:v acc} vn {:v it}} :up scope} rec)) (e init) (e l)))
+      "repr" (pr-str (e (first args)))
+      (fail (str "unsupported !" op)))))
+
+(defn ev
+  "The value of the expression `x` in `scope`, field references resolved against the record `rec` (nil: none)."
+  [x scope rec]
+  (case (first x)
+    :int (second x)
+    :str (second x)
+    :bin (let [[v w] (second x)] (->bits v w))
+    :unset unset
+    :id (lookup (second x) scope rec)
+    :list (mapv #(ev % scope rec) (second x))
+    :bits (Bits. (vec (mapcat (fn [y] (let [v (ev y scope rec)]
+                                        (cond (bits? v) (bits-of v)
+                                              (integer? v) [(bit-and 1 (long v))]
+                                              (= v unset) [unset]
+                                              :else (fail "a bits element that is not a bit"))))
+                              (rseq (second x)))))
+    :dag (let [[_ op opname args] x]
+           (Dag. (ev op scope rec) opname (mapv (fn [[a n]] [(ev a scope rec) n]) args)))
+    :field (let [r (ev (second x) scope rec)]
+             (when-not (rec? r) (fail (str "a field ." (nth x 2) " of a value that is not a record")))
+             (fv r (nth x 2)))
+    :bitsl (let [v (ev (second x) scope rec)
+                 v (if (integer? v) (->bits v 64) v)
+                 ps (slice-positions (nth x 2) scope rec)
+                 bs (bits-of v)]
+             (Bits. (vec (rseq (mapv #(nth bs %) ps)))))
+    :idx (let [v (ev (second x) scope rec)
+               ps (slice-positions (nth x 2) scope rec)]
+           (if (and (= 1 (count ps)) (nil? (second (first (nth x 2)))))
+             (nth v (first ps))
+             (mapv #(nth v %) ps)))
+    :paste (let [pv (fn [y] (if (and (= :id (first y)) (not (resolvable? (second y) scope rec))) (second y) (ev y scope rec)))
+                 a (pv (second x)) b (pv (nth x 2))]
+             (if (and (vector? a) (vector? b)) (into a b) (str (vstr a) (vstr b))))
+    :bang (let [[_ op ty args] x]
+            (try (bang op ty args scope rec)
+                 (catch arbace.lang.ExceptionInfo e
+                   (if (:expr (ex-data e)) (throw e)
+                       (throw (ex-info (str (.getMessage e) " in " (subs (pr-str x) 0 (min 300 (count (pr-str x))))) (assoc (ex-data e) :expr true)))))))
+    :cond (first (or (some (fn [[c v]] (when-not (zero? (long (as-int (ev c scope rec)))) [(ev v scope rec)])) (second x))
+                     (fail "!cond: no condition holds")))
+    :inst (let [[_ c pos named] x
+                pos (mapv (fn [a] {:v (ev a scope rec)}) pos)
+                named (mapv (fn [[n a]] [n {:v (ev a scope rec)}]) named)]
+            (instantiate c pos named))
+    (fail (str "unknown expression " (pr-str (first x))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; records
+
+(defn- entry-value [e rec]
+  (if (contains? e :sl)
+    (let [base (bits-of (->bits (entry-value (:base e) rec) (second (:t e))))]
+      (Bits. (reduce (fn [bs [ps se]]
+                       (let [v (bits-of (->bits (force* se rec) (count ps)))]
+                         (reduce (fn [bs [k p]] (assoc bs p (nth v (- (count ps) 1 k)))) bs (map-indexed vector ps))))
+                     base (:sl e))))
+    (force* e rec)))
+
+(def ^:private busy ::busy)
+
+(defn fv
+  "The value of the field `n` of the record `r`, evaluated once."
+  [^Rec r ^String n]
+  (let [^HashMap c (.-cache r)]
+    (if (.containsKey c n)
+      (let [v (.get c n)] (if (identical? v busy) (fail (str "a field defined by itself: " (.-name r) "." n)) v))
+      (let [e (get (.-fields r) n)]
+        (when-not e (fail (str "no field " n " in " (.-name r))))
+        (.put c n busy)
+        (let [v (try (entry-value e r) (catch Throwable t (.remove c n) (throw t)))]
+          (.put c n v)
+          v)))))
+
+(defn field? [^Rec r ^String n] (contains? (.-fields r) n))
+
+(defn- set-field
+  "The fields with `n` set to the entry `e` (its declared type kept), or its bits `ranges` (in `scope`) set."
+  [fields n ranges e scope]
+  (let [old (get fields n)
+        t (or (:t old) (:t e))]
+    (if ranges
+      (let [ps (slice-positions ranges scope nil)
+            base (if (contains? old :sl) old {:t t :base (or old {:v unset}) :sl []})]
+        (assoc fields n (update base :sl conj [ps e])))
+      (assoc fields n (cond (= t (:t e)) e
+                            (contains? e :v) {:t t :v (coerce t (:v e))}
+                            :else (assoc e :t t))))))
+
+(defn class-fields
+  "The fields and superclass names of class `c` instantiated over `fields` with its arguments' entries `pos` and `named`."
+  [[fields supers] ^String c pos named]
+  (let [cls (or (.get ^HashMap (:classes *w*) c) (fail (str "unknown class " c)))
+        {:keys [targs body] cs :supers} cls
+        nm (into {} named)
+        scope (reduce (fn [s [i [t n d]]]
+                        (let [e (or (get pos i) (get nm n)
+                                    (when d {:e d :s s})
+                                    {:v unset})]
+                          {:vars (assoc (:vars s) n (assoc e :t t)) :up nil}))
+                      {:vars {} :up nil}
+                      (map-indexed vector targs))
+        [fields supers] (reduce (fn [acc [sc spos snamed]]
+                                  (class-fields acc sc (mapv (fn [a] {:e a :s scope}) spos)
+                                                (mapv (fn [[n a]] [n {:e a :s scope}]) snamed)))
+                                [fields supers] cs)
+        [fields _] (reduce (fn [[fields s] item]
+                             (case (first item)
+                               :field (let [[_ t n v ce] item]
+                                        [(assoc fields n (or ce (if v {:t t :e v :s s} {:t t :v unset}))) s])
+                               :let (let [[_ n r v ce] item] [(set-field fields n r (or ce {:e v :s s}) s) s])
+                               :defvar (let [[_ n v] item] [fields {:vars (assoc (:vars s) n {:e v :s s}) :up nil}])))
+                           [fields scope] body)]
+    [fields (into (conj supers c) (:all-supers cls))]))
+
+(defn- const-value
+  "The value of a constant expression (literals alone), or ::none."
+  [x]
+  (case (first x)
+    (:int :str) (second x)
+    :unset unset
+    :bin (let [[v w] (second x)] (->bits v w))
+    :list (let [vs (mapv const-value (second x))] (if (some #(= ::none %) vs) ::none vs))
+    ::none))
+
+(defn- const-item
+  "A class body's item with its entry made once when its value is a constant."
+  [item]
+  (case (first item)
+    :field (let [[_ t n v] item
+                 c (if v (const-value v) unset)]
+             (if (= c ::none) item [:field t n v {:t t :v (coerce t c)}]))
+    :let (let [[_ n r v] item c (const-value v)]
+           (if (or r (= c ::none)) item [:let n r v {:v c}]))
+    item))
+
+(defn- next-id ^long [] (let [^longs c (:counter *w*)] (aset c 0 (inc (aget c 0))) (aget c 0)))
+
+(defn- register [^Rec r]
+  (when (.containsKey ^HashMap (:defs *w*) (rec-name r)) (fail (str "def " (rec-name r) " already defined")))
+  (.put ^HashMap (:defs *w*) (rec-name r) r)
+  (.add ^ArrayList (:order *w*) r)
+  (doseq [^ArrayList l (:defsets *w*)] (.add l r))
+  r)
+
+(defn instantiate
+  "An anonymous record of class `c` (a value `C<args>`)."
+  [^String c pos named]
+  (let [[fields supers] (class-fields [{} #{}] c pos named)
+        id (next-id)]
+    (Rec. (str "anonymous_" id) id fields supers (HashMap.) true)))
+
+(defn- apply-frames [fields frames]
+  (reduce (fn [f [n r e s]] (set-field f n r e s)) fields frames))
+
+(defn- complete-def
+  "A record named `n` (nil: anonymous) of `supers` and `body` written in `scope`, the let levels around it applied."
+  [n supers body scope]
+  (let [acc (reduce (fn [acc [sc spos snamed]]
+                      (class-fields acc sc (mapv (fn [a] {:e a :s scope}) spos) (mapv (fn [[nm a]] [nm {:e a :s scope}]) snamed)))
+                    [{} #{}] supers)
+        [fields s] (reduce (fn [[fields s] item]
+                             (case (first item)
+                               :field (let [[_ t nm v] item] [(assoc fields nm (if v {:t t :e v :s s} {:t t :v unset})) s])
+                               :let (let [[_ nm r v] item] [(set-field fields nm r {:e v :s s} s) s])
+                               :defvar (let [[_ nm v] item] [fields {:vars (assoc (:vars s) nm {:e v :s s}) :up s}])))
+                           [(first acc) scope] body)
+        [fields sups] (reduce (fn [[fields sups] lvl]
+                                (let [fields (apply-frames fields (:frames lvl))]
+                                  (reduce (fn [acc [sc spos snamed sscope]]
+                                            (class-fields acc sc (mapv (fn [a] {:e a :s sscope}) spos)
+                                                          (mapv (fn [[nm a]] [nm {:e a :s sscope}]) snamed)))
+                                          [fields sups] (:supers lvl))))
+                              [fields (second acc)] (rseq *levels*))
+        id (next-id)
+        nm (or n (str "anonymous_" id))
+        keep (some (fn [[c fs]] (when (sups c) fs)) (:keep *w*))
+        fields (cond
+                 (some sups (:drop *w*)) {}
+                 keep (let [r (Rec. nm id fields sups (HashMap.) (nil? n))]
+                        (into {} (for [f keep :when (contains? fields f)]
+                                   [f (try {:v (fv r f)} (catch arbace.lang.ExceptionInfo _ (get fields f)))])))
+                 :else fields)]
+    (register (Rec. nm id fields sups (HashMap.) (nil? n)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the executor
+
+(declare exec-stmts load-file*)
+
+(defn- mentions-name? [x]
+  (cond (= x [:id "NAME"]) true
+        (vector? x) (some mentions-name? x)
+        :else false))
+
+(defn- in-mc? [scope] (loop [s scope] (when s (or (contains? (:vars s) "NAME") (recur (:up s))))))
+
+(defn- def-name
+  "The name of a def or defm: nil for an anonymous one; in a multiclass NAME# before a name that does not mention NAME."
+  [x scope]
+  (cond
+    (nil? x) nil
+    :else (let [bound? (fn [n] (loop [s scope] (when s (or (contains? (:vars s) n) (recur (:up s))))))
+                lit (fn lit [x] (case (first x)
+                                  :id (if (bound? (second x)) x [:str (second x)])
+                                  :paste [:paste (lit (second x)) (lit (nth x 2))]
+                                  x))
+                s (vstr (ev (lit x) scope nil))]
+            (if (and (in-mc? scope) (not (mentions-name? x)))
+              (str (lookup "NAME" scope nil) s)
+              s))))
+
+(defn- push-frames [frames]
+  (let [l (peek *levels*)] (conj (pop *levels*) (update l :frames into frames))))
+
+(defn- iter-values [it scope]
+  (if (= :ranges (first it))
+    (slice-positions (second it) scope nil)
+    (let [v (ev it scope nil)] (if (bits? v) (bits-of v) v))))
+
+(defn- exec-stmt
+  "Executes one statement in `scope`; the scope after it (a defvar binds)."
+  [st scope]
+  (case (first st)
+    :include (do (load-file* (second st)) scope)
+    :class (let [[_ n ta su body] st
+                 all (reduce (fn [s [c]] (into (conj s c) (:all-supers (.get ^HashMap (:classes *w*) c)))) #{} su)]
+             (when-not (every? #(.get ^HashMap (:classes *w*) (first %)) su)
+               (fail (str "class " n ": unknown superclass in " (pr-str (map first su)))))
+             (.put ^HashMap (:classes *w*) n {:targs ta :supers su :body (mapv const-item body) :all-supers all})
+             scope)
+    :def (let [[_ n su body] st] (complete-def (def-name n scope) su body scope) scope)
+    :defm (let [[_ n su] st
+                mcs (take-while #(.get ^HashMap (:mcs *w*) (first %)) su)
+                classes (drop (count mcs) su)
+                _ (when (empty? mcs) (fail (str "unknown multiclass " (ffirst su))))
+                nm (if n (def-name n scope) (if (in-mc? scope) (lookup "NAME" scope nil) (str "anonymous_" (next-id))))
+                lvl {:frames [] :supers (mapv (fn [[c p nd]] [c p nd scope]) classes)}]
+            (doseq [[mc pos named] mcs]
+              (let [m (.get ^HashMap (:mcs *w*) mc)
+                    nmd (into {} named)
+                    mscope (reduce (fn [s [i [t an d]]]
+                                     (let [x (or (get pos i) (get nmd an))
+                                           v (cond x (coerce t (ev x scope nil))
+                                                   d (coerce t (ev d s nil))
+                                                   :else unset)]
+                                       {:vars (assoc (:vars s) an {:v v}) :up nil}))
+                                   {:vars {"NAME" {:v nm}} :up nil}
+                                   (map-indexed vector (:targs m)))]
+                (binding [*levels* (conj *levels* (assoc lvl :frames (:frames m)))]
+                  (exec-stmts (:body m) mscope))))
+            scope)
+    :multiclass (let [[_ n ta su body] st
+                      ;; `multiclass M : Base<...>`: the bases are defms of the body, as TGParser instantiates them
+                      body (into (mapv (fn [b] [:defm nil [b]]) su) body)]
+                  (.put ^HashMap (:mcs *w*) n {:targs ta :body body :frames (vec (mapcat :frames *levels*))})
+                  scope)
+    :let (let [[_ ls body] st]
+           (binding [*levels* (push-frames (mapv (fn [[n r x]] [n r {:e x :s scope} scope]) ls))]
+             (exec-stmts body scope))
+           scope)
+    :foreach (let [[_ n it body] st]
+               (doseq [v (iter-values it scope)]
+                 (exec-stmts body {:vars {n {:v v}} :up scope}))
+               scope)
+    :defvar (let [[_ n x] st v (ev x scope nil)]
+              (if scope
+                {:vars {n {:v v}} :up scope}
+                (do (.put ^HashMap (:gvars *w*) n v) scope)))
+    :defset (let [[_ n body] st l (ArrayList.)]
+              (.add ^ArrayList (:defsets *w*) l)
+              (exec-stmts body scope)
+              (.remove ^ArrayList (:defsets *w*) l)
+              (.put ^HashMap (:gvars *w*) n (vec l))
+              scope)
+    :deftype scope
+    :if (let [[_ c a b] st]
+          (exec-stmts (if (zero? (long (as-int (ev c scope nil)))) b a) scope)
+          scope)))
+
+(defn exec-stmts [stmts scope]
+  (reduce (fn [s st]
+            (try (exec-stmt st s)
+                 (catch arbace.lang.ExceptionInfo e
+                   (if (:stmt (ex-data e)) (throw e)
+                       (throw (ex-info (str (.getMessage e) " [" (let [t (pr-str (vec (take 3 st)))] (subs t 0 (min 200 (count t)))) "]")
+                                       (assoc (ex-data e) :stmt true)))))))
+          scope stmts))
+
+(defn- resolve-include ^String [^String f]
+  (or (first (filter #(.isFile (java.io.File. ^String %)) (map #(str % "/" f) (:dirs *w*))))
+      (fail (str "include \"" f "\" not found in " (pr-str (:dirs *w*))))))
+
+(defn- load-file* [^String f]
+  (let [path (resolve-include f)
+        toks (preprocess (lex (slurp path) f) (:defines *w*))
+        p (P. toks (long-array 1) f)]
+    (loop []
+      (when (peek-t p)
+        (let [line (nth (peek-t p) 2)
+              st (parse-stmt p)]
+          (try (exec-stmts st nil)
+               (catch arbace.lang.ExceptionInfo e
+                 (if (:at (ex-data e)) (throw e)
+                     (throw (ex-info (str (.getMessage e) " (in the statement at " f ":" line ")") (assoc (ex-data e) :at [f line])))))))
+        (recur)))))
+
+(defn load-td
+  "The world of the records of `file` (found in `include-dirs`, the first being the file's own directory). `drop`: the
+  classes whose records keep their name and classes but not their fields (records no reader of the world reads: a
+  generator's saving of memory, nothing else changes); `keep`: [[CLASS [FIELD ...]] ...], the records of CLASS keep only
+  those fields, evaluated when the record is complete (one that cannot be yet stays lazy)."
+  [^String file include-dirs & [drop keep]]
+  (let [w (new-world include-dirs drop keep)]
+    (binding [*w* w *levels* [{:frames [] :supers []}]]
+      (load-file* file))
+    w))
+
+(defmacro with-world [w & body] `(binding [*w* ~w] ~@body))

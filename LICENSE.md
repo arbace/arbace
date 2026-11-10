@@ -1363,6 +1363,16 @@ covers what.
   for rule, under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below). Its test corpora
   (`llvm/test/MC/{X86,AsmParser}`, extracted into `.tmp/`, never committed) are under the same licence; musl 1.2.6's
   `.s` files, read as a corpus, under musl's MIT licence (section "musl: MIT License").
+- `arbace/asm/` (`arbace.asm.tablegen`, `arbace.asm.amd64.*`: the assembler of the assembly crops, AX2, doc/asm/AMD64.md):
+  the TableGen reader and evaluator follows LLVM's `llvm/lib/TableGen/TGLexer.cpp`, `TGParser.cpp`, `Record.cpp` and
+  `llvm/docs/TableGen/ProgRef.rst`, the table's generator `llvm/utils/TableGen/AsmMatcherEmitter.cpp` and
+  `utils/TableGen/Common/CodeGenInstruction.cpp` (`FlattenAsmStringVariants`) and `CodeGenRegisters.cpp` (`TopoOrderRC`), the matcher
+  `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `X86Operand.h` and `X86AsmParserCommon.h`, the encoder
+  `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`, `X86BaseInfo.h`, `X86MCTargetDesc.cpp` and
+  `X86EncodingOptimization.cpp`, from the same `llvm-project-23.1.5.src.tar.xz`, rule for rule, under the Apache License 2.0 with
+  the LLVM Exceptions (section "LLVM (clang)" below); no code is copied. `asm/amd64/table.edn`, generated from that tarball's
+  `llvm/lib/Target/X86/*.td` and `llvm/include/llvm/{Target,CodeGen,IR}/*.td` (extracted into `.tmp/`, never committed), is a work
+  derived from them, under the same licence.
 - The same namespaces' arm64 part (AR1, doc/asm/ARM64-SURVEY.md): `arm64/gnu.ae`'s operand grammar follows LLVM's
   `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` and `lex.ae`'s AArch64 dialects its
   `MCTargetDesc/AArch64MCAsmInfo.cpp` (the same tarball and licence); `plan9.ae`'s operand grammar follows Go 1.27.1's

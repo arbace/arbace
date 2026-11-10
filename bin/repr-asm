@@ -26,6 +26,19 @@
 #                                                    non-pass in a class of test/asm/divergences-read.edn, and the negative
 #                                                    controls of test/asm/controls.txt fail; WORK .tmp/repr-asm/rt/CORPUS
 #   bin/repr-asm divergences [RESULTS]               the results' non-passes judged against the classes (none unclassed)
+#   bin/repr-asm table gen|check                     amd64's instruction table (AX2, AXS4): llvm-project 23.1.5's X86 .td files (extracted
+#                                                    with the corpora, test/asm/corpora.edn's :tables) read by Arbace's TableGen
+#                                                    (arbace.asm.tablegen) and made into LLVM's matchables and encodings
+#                                                    (arbace.asm.amd64.gen); gen writes asm/amd64/table.edn, check regenerates it and
+#                                                    compares byte for byte (about 2.5 minutes, 1.3 GiB; no llvm-tblgen)
+#   bin/repr-asm table oracle                        the oracle tier's, by hand: the host's llvm-tblgen 23.1.5 (REPR_ASM_TBLGEN, default
+#                                                    /usr/lib/llvm23/bin/llvm-tblgen) makes X86GenAsmMatcher.inc from the same .td files;
+#                                                    its MatchTable0 (mnemonic, instruction, operand classes, in order) against the table's
+#   bin/repr-asm encode-check [--record] [CORPUS...] amd64's encoder (AX2): the stated encodings of each file (default mc-x86) judged
+#                                                    by the test's own CHECK lines (arbace.asm.amd64.check; no llvm-mc), against
+#                                                    test/asm/encode-results-amd64.edn (--record rewrites the corpora's rows), every
+#                                                    non-pass in a class of test/asm/divergences-encode.edn, and the negative controls of
+#                                                    test/asm/controls-encode.txt fail; WORK .tmp/repr-asm/enc/CORPUS
 set -euo pipefail
 arch=amd64 args=()
 while [ $# -gt 0 ]; do case $1 in --arch) arch=$2; shift 2 ;; *) args+=("$1"); shift ;; esac; done
@@ -60,7 +73,7 @@ extract() {
     [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host (a fetch by its pin, the user's)" >&2; return 1; }
     want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
     [ "$want" = "$sum" ] || { echo "repr-asm: $tar's SHA-256 $want is not the pin's $sum" >&2; return 1; }
-    edn "(doseq [x (:corpora c) :when (= (:pin x) :$id) m (:extract x)] (println m))" > "$TMPDIR/asm-members.txt"
+    edn "(doseq [x (concat (:corpora c) (:tables c)) :when (= (:pin x) :$id) m (:extract x)] (println m))" > "$TMPDIR/asm-members.txt"
     echo "repr-asm: extracting $(wc -l < "$TMPDIR/asm-members.txt") members of $id"
     case $tar in
       *.tar.gz) tar -xzf "$main/$tar" -C "$src" --wildcards -T "$TMPDIR/asm-members.txt" ;;
@@ -166,6 +179,60 @@ case ${1:-} in
       if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
     done < "$controls"
     judge=(-e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"$all\" \"$classes\" \"${record:-}\" \"${ids[*]}\")")
+    arbace_tool "${judge[@]}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  table)
+    case ${2:-} in gen|check|oracle) ;; *) echo "repr-asm table gen|check|oracle" >&2; exit 2 ;; esac
+    llvm=$src/llvm-project-23.1.5.src/llvm
+    [ -f "$llvm/lib/Target/X86/X86.td" ] || { echo "repr-asm: $llvm/lib/Target/X86/X86.td missing: bin/repr-asm corpus extract" >&2; exit 1; }
+    if [ "$2" = oracle ]; then
+      tblgen=${REPR_ASM_TBLGEN:-/usr/lib/llvm23/bin/llvm-tblgen}
+      o=$root/.tmp/repr-asm/oracle; mkdir -p "$o"
+      "$tblgen" -gen-asm-matcher -I "$llvm/include" -I "$llvm/lib/Target/X86" "$llvm/lib/Target/X86/X86.td" -o "$o/X86GenAsmMatcher.inc"
+      # MatchTable0's rows as MNEMONIC INSTRUCTION CLASS..., the token classes by their text (the enum's comments)
+      awk '/^  MCK_[A-Za-z0-9_]+, \/\/ / { n = $1; sub(/^MCK_/, "", n); sub(/,$/, "", n); t = $0; sub(/.*\/\/ /, "", t)
+             if (t ~ /^'"'"'/) { gsub(/'"'"'/, "", t); tok[n] = t } }
+           /static const MatchEntry MatchTable0/ { on = 1; next }
+           on && /^};/ { on = 0 }
+           on && /\/\* / { m = $0; sub(/.*\/\* /, "", m); sub(/ \*\/.*/, "", m)
+             i = $0; sub(/.*X86::/, "", i); sub(/,.*/, "", i)
+             c = $0; sub(/.*\{ /, "", c); sub(/ ?\}, \},.*/, "", c); gsub(/MCK_/, "", c); gsub(/,/, "", c)
+             k = split(c, cs, " "); out = m " " i
+             for (j = 1; j <= k; j++) out = out " " ((cs[j] in tok) ? tok[cs[j]] : cs[j])
+             print out }' "$o/X86GenAsmMatcher.inc" > "$o/llvm.txt"
+      sed -n 's/^  \["\([^"]*\)" \[\([^]]*\)\] "\([^"]*\)".*/\1 \3 \2/p' "$root/asm/amd64/table.edn" |
+        sed -e 's/"[a-z]*:\([^"]*\)"/\1/g' -e 's/ *$//' > "$o/arbace.txt"
+      if cmp -s "$o/llvm.txt" "$o/arbace.txt"; then
+        echo "repr-asm table oracle: llvm-tblgen's MatchTable0 and the table's matchables are the same $(wc -l < "$o/llvm.txt") rows, in the same order"
+      else
+        echo "FAIL: repr-asm table oracle: llvm-tblgen's MatchTable0 ($(wc -l < "$o/llvm.txt") rows) and the table's ($(wc -l < "$o/arbace.txt")) differ: diff $o/llvm.txt $o/arbace.txt"; exit 1
+      fi
+      exit 0
+    fi
+    GOMEMLIMIT=${REPR_ASM_TABLE_MEM:-1200MiB} arbace_tool -m arbace.asm.amd64.gen "$2" "$llvm" "$root/asm/amd64/table.edn" ;;
+  encode-check)
+    shift; record=; ids=()
+    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    [ ${#ids[@]} -gt 0 ] || ids=(mc-x86)
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    works=()
+    for id in "${ids[@]}"; do
+      make_list "$id"
+      work=$root/.tmp/repr-asm/enc/$id; rm -rf "$work"; mkdir -p "$work"
+      arbace_tool -m arbace.asm.amd64.check check "$lists/$id.list" "$work"
+      works+=("$work")
+    done
+    fails=0
+    # the negative controls: a subject's statements judged against a reference's CHECK lines must not meet them all
+    while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.asm.amd64.check control "$sp" "$rp" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-encode.txt"
+    judge=(-e "(do (load-file \"$root/test/asm/encode_judge.ae\") nil)" -e "(asm.encode-judge/main \"$root/test/asm/encode-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-encode.edn\" \"${record:-}\")")
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
   divergences)

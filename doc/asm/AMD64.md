@@ -1,0 +1,68 @@
+# amd64: the table, the matcher and the encoder (AX2)
+
+The machine half of the x86-64 crop (doc/asm/AMD64-SURVEY.md §7.2, §8.2; the forms are doc/asm/SPEC.md's). AX2's first slice:
+the instruction table generated from LLVM's TableGen files by Arbace's own TableGen, the AT&T matcher and the encoder of the
+legacy, VEX and XOP encodings, and the check of `MC/X86`'s stated encodings by their own CHECK lines. No LLVM tool runs in any
+of it; llvm-tblgen and llvm-mc are the oracle tier's, by hand.
+
+## 1. The table (`asm/amd64/table.edn`)
+
+Generated, committed, checked by regeneration (`bin/repr-asm table gen|check`; the Makefile's `repr-asm-table`,
+`repr-asm-table-check`), like repr/ocaml's and repr/haskell's tables.
+
+- **Source.** llvm-project 23.1.5's `llvm/lib/Target/X86/X86.td` and what it includes (`llvm/include/llvm/{Target,CodeGen,IR}`:
+  144,000 lines in 106 files), from the release tarball pinned in `test/asm/corpora.edn` (`:tables`), extracted with the corpora
+  by `bin/repr-asm corpus extract`.
+- **TableGen** (`arbace.asm.tablegen`): the language read and evaluated after `TGLexer.cpp`, `TGParser.cpp`, `Record.cpp` and
+  ProgRef: the preprocessor's `#ifdef`, classes with template arguments (positional and named), defs, multiclasses and
+  `defm` (several multiclasses in one defm, the defm's classes after them), `let` (fields and bit ranges), `foreach`,
+  `defvar`, `defset`, `if`, values (bits, lists, dags, `!` operators, `!cond`, anonymous records `C<...>`), names pasted with
+  `#`. A record's fields are made as TGParser makes them (superclasses in order, a later one's field overriding; the body;
+  the let stack; for a defm's records its classes and the let stack around it, level by level outwards) and evaluated
+  lazily against the finished record (TableGen's late resolution). The generator keeps only the fields it reads of the
+  instructions and aliases (evaluated when each record is complete) and drops the fields of the record kinds it never reads
+  (intrinsics, patterns, scheduling): about 2 minutes, 1.2 GiB.
+- **The matchables** (`arbace.asm.amd64.gen`, after `AsmMatcherEmitter.cpp`): each instruction and `InstAlias` of the AT&T
+  variant (not `isCodeGenOnly`, no `#` in its string, no operand written twice), its string flattened
+  (`FlattenAsmStringVariants`: the outer `{a|b}` only) and tokenized with the variant's characters; the operand classes
+  (register sets named as LLVM names them, by CodeGenRegBank's order: the size info, the larger set, the name; singleton
+  registers; the `AsmOperandClass` records with their predicate and render methods; tokens); the order of
+  `shouldBeMatchedBefore` (mnemonic, operand count, the classes' partial order, the record position for `HasPositionOrder`,
+  the number of required features) by a stable merge sort; the conversion of each matchable into the machine operands (an
+  asm operand rendered, a tied operand copied, an alias's fixed register or immediate). The `MnemonicAlias` records
+  (`applyMnemonicAliases`), the assembler predicates, the registers (AsmName, HWEncoding) and each instruction's encoding
+  fields (`X86Inst`: opcode, format, map, prefix, operand and address size, encoding, immediate, the VEX/EVEX bits,
+  `CD8_Scale`, the operands and ties).
+- **Its oracle** (`bin/repr-asm table oracle`, by hand): llvm-tblgen 23.1.5's `-gen-asm-matcher` on the same files; its
+  `MatchTable0` and the table's matchables are the same 23,014 rows in the same order with the same classes.
+
+## 2. The matcher (`arbace.asm.amd64.asm`)
+
+An AX1 form's operands as `X86Operand`s (registers by AsmName, `%dbN` as `%drN`, the 64-bit-only registers refused outside
+64-bit mode; immediates and displacements folded when constant, `.set`/`=` constants inlined as LLVM's parser does; memory
+with mode and size 0, AT&T's), then `parseInstruction`'s rewrites (`{disp8}`, `{disp32}`, `{vex3}`, `.d8`/`.d32`, `lock`/`rep`/
+`notrack` as flags, the prefix words cs, ds, rex64, data16, xacquire... as instructions of their own, `data32` in 16-bit mode,
+`setXXb`, the comparison predicates of `cmpXXps`/`vcmpXX*`/`vpcmpXX*`/`vpcomXX*`, the string instructions' default operands,
+`(%dx)`, `mov` of a segment register, x87's `fsub`/`fdiv` alone, `finit`'s FWAIT), `MatchInstructionImpl` (the mnemonic
+aliases, the entries of the mnemonic in order, each operand's class, the assembler predicates for the mode, X86's
+`checkTargetMatchPredicate`), `matchAndEmitATTInstruction`'s suffix retry and its messages, `processInstruction` (VEX3 to
+VEX2, `int $3`, shifts by 1). `.code16gcc` matches as 32-bit.
+
+## 3. The encoder
+
+`X86MCCodeEmitter::encodeInstruction` with LLVM's choices (AXS5 (a): the mode `:llvm`): the segment, `rep`, address-size,
+operand-size, `lock` and mandatory prefixes, REX (W, R, X, B; `%spl`-`%dil`), VEX2 or VEX3 (`determineOptimalKind`) and
+XOP, the maps, every legacy and VEX format, ModRM, SIB and the displacement's choices (none, disp8, disp32; 16-bit
+addressing; RIP-relative), the immediates, `Imm8Reg`, and fixups (a symbolic value's bytes shown as llvm-mc shows them,
+`A`, `B`, ...). Not yet: EVEX (AVX-512, AVX10), APX (REX2, maps 4-7), relaxation (llvm-mc's `-show-encoding` prints the
+unrelaxed instruction, so the stated encodings need none; objects do, AX4), gas's mode (`:gnu`, AXS5).
+
+## 4. The check (`arbace.asm.amd64.check`, `bin/repr-asm encode-check`)
+
+Each `MC/X86` file's RUN lines give its runs (mode from the triple, the FileCheck prefixes, `-show-encoding`, `not llvm-mc`);
+its statements are read by AX1's reader and assembled in each run's mode (`.code16`, `.code32`, `.code64`, `.code16gcc`
+followed); each stated encoding (`<PREFIX>: ... encoding: [...]`) is matched as FileCheck matches it in llvm-mc's output: the
+first instruction, from the last one matched on, whose `encoding: [...]` the pattern matches (`{{regex}}`, blanks collapsed).
+An unmet one is classed (`test/asm/divergences-encode.edn`). An error test's `error:` lines are matched in order against
+the assembler's own messages. Rows by file in `test/asm/encode-results-amd64.edn`; negative controls in
+`test/asm/controls-encode.txt` (a test's statements judged against another test's CHECK lines must fail).
