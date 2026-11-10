@@ -2988,20 +2988,164 @@
   [unit m occ]
   (fp-words (md5 (byte-array (mapcat seq [(fp-string unit) (fp-string m) (fp-string occ)])))))
 
+(declare prim-typeable-binds promoted-typeable-binds)
+
 (defn- typeable-binds [m]
   (let [v (fn [mm o] (list 'v (ext-name "var" mm o)))
         trname (fn [s] (list 'app (v "GHC.Internal.Types" "TrNameS") [(list 'lit (str (pr-str s) "#"))]))
         modv (ext-name "var" m "$trModule")]
     (when (seq @*tycons*)
-      (cons (list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname *unit*) (trname m)]))
-            (for [[tn info] @*tycons* :when (= m (nmod tn))]
-              (let [[hi lo] (tycon-fingerprint *unit* m (occ tn))
-                    arity (count (:tvs info []))
-                    star (v "GHC.Internal.Types" "krep$*")
-                    krep (reduce (fn [acc _] (list 'app (v "GHC.Internal.Types" "KindRepFun") [star acc])) star (range arity))]
-                (list 'bind (ext-name "var" m (str "$tc" (occ tn)))
-                      (list 'app (v "GHC.Internal.Types" "TyCon")
-                            [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname (occ tn)) (list 'lit "0#") krep]))))))))
+      (concat
+        [(list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname *unit*) (trname m)]))]
+        (when (= m "GHC.Internal.Types")
+          (concat (prim-typeable-binds *unit* trname) (promoted-typeable-binds m *unit* trname modv)))
+        (for [[tn info] @*tycons* :when (= m (nmod tn))]
+          (let [[hi lo] (tycon-fingerprint *unit* m (occ tn))
+                arity (count (:tvs info []))
+                star (v "GHC.Internal.Types" "krep$*")
+                krep (reduce (fn [acc _] (list 'app (v "GHC.Internal.Types" "KindRepFun") [star acc])) star (range arity))]
+            (list 'bind (ext-name "var" m (str "$tc" (occ tn)))
+                  (list 'app (v "GHC.Internal.Types" "TyCon")
+                        [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname (occ tn)) (list 'lit "0#") krep]))))))))
+
+;;; HF10-P20 (a): GHC.Internal.Types' Typeable bindings of the wired-in things (GHC.Tc.Instance.Typeable's mkPrimTypeableTodos,
+;;; run when the module is GHC.Types): tr$ModuleGHCPrim, the built-in kind representations (builtInKindReps: krep$*,
+;;; krep$Constraint, krep$*Arr*, krep$*->*->*), a $tc binding for each of GHC.Internal.Prim's type constructors with its
+;;; KindRep (mkKindRepRhs over the kind its interface writes, GHC.Internal.Prim's own since HF10-P18 (a)) and a $tc' binding
+;;; for each promoted data constructor of the module whose type is a KindRep (todoForTyCons' promoted constructors)
+
+(defn- trv [o] (list 'v (ext-name "var" "GHC.Internal.Types" o)))
+(defn- kr-list [xs] (reduce (fn [acc x] (list 'app (trv ":") [x acc])) (trv "[]") (reverse xs)))
+(defn- kr-tycon-app [ref args] (list 'app (trv "KindRepTyConApp") [ref (kr-list args)]))
+(defn- kr-fun [a b] (list 'app (trv "KindRepFun") [a b]))
+(defn- kr-var [i] (list 'app (trv "KindRepVar") [(list 'app (trv "I#") [(list 'lit (str i "#"))])]))
+
+(defn- form-tc [ns m o args] (list 'tycon-app (list 'ext (symbol ns) m o) (vec args)))
+(def ^:private lifted-rep-form (form-tc "data" "GHC.Internal.Types" "BoxedRep" [(form-tc "data" "GHC.Internal.Types" "Lifted" [])]))
+(defn- type-of-rep [r] (form-tc "tc" "GHC.Internal.Prim" "TYPE" [r]))
+
+(defn- expand-kind
+  "coreView over a kind form's head: the synonyms of GHC.Internal.Types the interfaces name (Type, UnliftedType, ZeroBitType,
+  Constraint and the representations LiftedRep, UnliftedRep, ZeroBitRep)"
+  [f]
+  (if (and (seq? f) (= 'tycon-app (first f)) (= "GHC.Internal.Types" (nth (second f) 2)) (= 'tc (nth (second f) 1)))
+    (case (nth (second f) 3)
+      "Type" (type-of-rep lifted-rep-form)
+      "Constraint" (form-tc "tc" "GHC.Internal.Prim" "CONSTRAINT" [lifted-rep-form])
+      "UnliftedType" (type-of-rep (form-tc "tc" "GHC.Internal.Types" "UnliftedRep" []))
+      "ZeroBitType" (type-of-rep (form-tc "tc" "GHC.Internal.Types" "ZeroBitRep" []))
+      "LiftedRep" lifted-rep-form
+      "UnliftedRep" (form-tc "data" "GHC.Internal.Types" "BoxedRep" [(form-tc "data" "GHC.Internal.Types" "Unlifted" [])])
+      "ZeroBitRep" (form-tc "data" "GHC.Internal.Types" "TupleRep"
+                            [(form-tc "data" "GHC.Internal.Types" "[]" [(form-tc "tc" "GHC.Internal.Types" "RuntimeRep" [])])])
+      f)
+    f))
+
+(defn- norm-kind [f]
+  (let [f (expand-kind f)]
+    (cond (and (seq? f) (= 'tycon-app (first f))) (list 'tycon-app (second f) (mapv norm-kind (nth f 2)))
+          (and (seq? f) (= 'fun (first f))) (list 'fun 't 'many (norm-kind (nth f 3)) (norm-kind (nth f 4)))
+          :else f)))
+
+(def ^:private built-in-kind-reps
+  (let [star (norm-kind (form-tc "tc" "GHC.Internal.Types" "Type" []))
+        arr (fn [a b] (list 'fun 't 'many a b))]
+    [[star "krep$*"] [(norm-kind (form-tc "tc" "GHC.Internal.Types" "Constraint" [])) "krep$Constraint"]
+     [(arr star star) "krep$*Arr*"] [(arr star (arr star star)) "krep$*->*->*"]]))
+
+(defn- tc-rep-ref
+  "The TyCon representation's binding of a type constructor (ext NS M O): a promoted constructor's $tc'O, GHC.Internal.Prim's
+  in GHC.Internal.Types"
+  [[_ ns m o]]
+  (if (= 'data ns)
+    (list 'v (ext-name "var" m (str "$tc'" o)))
+    (list 'v (ext-name "var" (if (= m "GHC.Internal.Prim") "GHC.Internal.Types" m) (str "$tc" o)))))
+
+(defn- form-kind-rep
+  "mkKindRepRhs over a kind form (the binders' de Bruijn indices env), the built-in KindReps found by the kind's
+  normal form except the one being defined"
+  [env f & [defining]]
+  (let [f (norm-kind f)
+        builtin (some (fn [[k n]] (when (and (= k f) (not= n defining)) n)) built-in-kind-reps)]
+    (cond
+      builtin (trv builtin)
+      (= 'tv (first f)) (kr-var (or (get env (second f)) (throw (ex-info (str "typeable: unbound kind variable " (second f)) {}))))
+      (= 'fun (first f)) (kr-fun (form-kind-rep env (nth f 3)) (form-kind-rep env (nth f 4)))
+      (= 'tycon-app (first f))
+      (let [[_ [_ _ m o] args] f
+            con0 (fn [a] (when (and (seq? a) (= 'tycon-app (first a)) (= 'data (nth (second a) 1))) a))]
+        (or (when (and (= m "GHC.Internal.Prim") (= o "TYPE"))
+              (let [r (first args)]
+                (when-let [r (con0 r)]
+                  (let [[_ [_ _ rm ro] rargs] r]
+                    (cond (empty? rargs) (list 'app (trv "KindRepTYPE") [(list 'v (ext-name "var" rm ro))])
+                          (and (= 1 (count rargs)) (con0 (first rargs)) (empty? (nth (first rargs) 2)))
+                          (let [[_ [_ _ lm lo]] (first rargs)]
+                            (list 'app (trv "KindRepTYPE") [(list 'app (list 'v (ext-name "var" rm ro)) [(list 'v (ext-name "var" lm lo))])]))
+                          :else nil)))))
+            (kr-tycon-app (tc-rep-ref (second f)) (map #(form-kind-rep env %) args))))
+      :else (throw (ex-info (str "typeable: kind not handled " (pr-str f)) {})))))
+
+(defn- split-foralls [f]
+  (loop [f f vs []]
+    (if (and (seq? f) (= 'forall (first f))) (recur (nth f 4) (conj vs (nth f 1))) [vs f])))
+
+(defn- prim-things
+  "GHC.Internal.Prim's interface's things (the closure's wired-in interface)"
+  []
+  (let [p (or (get *iface-files* "GHC.Internal.Prim")
+              (some (fn [d] (let [f (File. (str d "/GHC.Internal.Prim.iface.edn"))] (when (.isFile f) (.getPath f)))) *ifdirs*))]
+    (when p
+      (let [f (File. ^String p) k [(.getCanonicalPath f) (.lastModified f)]
+            forms (or (get @iface-forms k) (let [x (read-forms (slurp f))] (swap! iface-forms assoc k x) x))]
+        (second (some #(when (= 'hsiface/things (first %)) %) forms))))))
+
+(defn- elab-kind-rep
+  "A promoted constructor's type (the elaborator's) as a KindRep: nil when it is not one (a context, a type the forms
+  cannot name)"
+  [env t]
+  (case (first t)
+    :tv (when-let [i (get env (second t))] (kr-var i))
+    :tc (let [[_ n as] t]
+          (cond (and (= fun-tc n) (= 2 (count as)))
+                (let [a (elab-kind-rep env (first as)) b (elab-kind-rep env (second as))] (when (and a b) (kr-fun a b)))
+                (and (vector? n) (ext? n))
+                (let [rs (map #(elab-kind-rep env %) as)] (when (every? some? rs) (kr-tycon-app (tc-rep-ref n) rs)))
+                :else nil))
+    nil))
+
+(defn- prim-typeable-binds
+  "mkPrimTypeableTodos' bindings, when the module is GHC.Internal.Types"
+  [unit trname]
+  (let [modp (ext-name "var" "GHC.Internal.Types" "tr$ModuleGHCPrim")
+        tycon (fn [m modv o nk krep]
+                (let [[hi lo] (tycon-fingerprint unit m o)]
+                  (list 'app (trv "TyCon") [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname o)
+                                            (list 'lit (str nk "#")) krep])))]
+    (concat
+      [(list 'bind modp (list 'app (trv "Module") [(trname unit) (trname "GHC.Internal.Prim")]))]
+      (for [[k n] built-in-kind-reps] (list 'bind (ext-name "var" "GHC.Internal.Types" n) (form-kind-rep {} k n)))
+      (for [t (prim-things) :when (and (seq? t) (= 'tycon (first t)))]
+        (let [o (nth (second t) 3) [vs body] (split-foralls (nth t 5))]
+          (list 'bind (ext-name "var" "GHC.Internal.Types" (str "$tc" o))
+                (tycon "GHC.Internal.Prim" modp o (count vs) (form-kind-rep (zipmap vs (range)) body))))))))
+
+(defn- promoted-typeable-binds
+  "The module's promoted constructors' $tc' bindings (todoForTyCons: tyConIsTypeable of the promoted constructor, its kind
+  the constructor's type without a context); the unboxed tuples' and sums' left out (GHC writes the tuples' $tc'(#,#)...: their
+  KindRepFun nests, up to 64 deep, as one nested term each, take the -O0 pipeline past the module's time limit; GHC binds
+  each $krep apart)"
+  [m unit trname modv]
+  (for [[tn info] @*tycons* :when (and (= m (nmod tn)) (not (re-matches #"(Tuple|Sum)[0-9]+#" (occ tn)))) c (:cons info)
+        :let [t (get @*genv* c)
+              [vs ctx body] (if (= :forall (first t)) [(nth t 1) (nth t 2) (nth t 3)] [[] [] t])
+              ;; synonyms expanded (coreView: KindRepVar's KindBndr is Int)
+              krep (when (and t (empty? ctx)) (elab-kind-rep (zipmap vs (range)) (try (deep-expand body) (catch Throwable _ body))))]
+        :when krep]
+    (let [o (str "'" (occ c)) [hi lo] (tycon-fingerprint unit m o)]
+      (list 'bind (ext-name "var" m (str "$tc" o))
+            (list 'app (trv "TyCon") [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname o)
+                                      (list 'lit (str (count vs) "#")) krep])))))
 
 (def ^:private phase-times? (some? (System/getenv "REPR_HASKELL_TC_TIMES")))
 (defmacro ^:private phase

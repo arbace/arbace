@@ -2830,3 +2830,37 @@ recorded; 0 worse, missing or unclassed, 0 better", the control differs as it mu
 move nothing the record counts, so nothing is re-recorded (the ratchet has nothing to take). Base mode (`--package base --ifaces
 own`): a missing ghc-prim.cabal is an error (exit 2, with the verb that fetches the corpus), no longer an empty list of
 reexported modules that passes; only the new line changed, bash -n, base's mode not run here (its pools are the night's).
+
+## 2026-11-10: HF10-P18 (a) GHC.Internal.Prim from primops.txt.pp, HF10-P15 (a) haskell-lib-own-base, HF10-P20 (a) started (branch `hs-p18`, from `mac/hs-p11` 3d55ae343)
+
+The user decided HF10-P15 to P27 (a) (P25 yes, its ruling: the own-interface round trip is a round trip's own verdict, GHC's
+level at the oracle tier) on 2026-11-10 (the plan `.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the survey's "Decided" block). Built by
+an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no GHC, no gate,
+no network). Sources: GHC 9.14.1's pinned tarball (SHA-256 `2a83779c...`): `compiler/GHC/Builtin/primops.txt.pp`,
+`utils/genprimopcode/{Lexer.x,Parser.y,AccessOps.hs,Main.hs}`, `compiler/GHC/Builtin/{Utils,Types/Prim}.hs`,
+`compiler/GHC/Types/Id/Make.hs`, `compiler/GHC/Tc/Instance/Typeable.hs` (BSD-3, LICENSE.md "GHC").
+
+- P18 (a): `arbace/repr/haskell/primiface.ae` builds GHC.Internal.Prim's interface from `primops.txt.pp` (Arbace's own cpp,
+  genprimopcode's lexer and parser and the access ops ported, primOpInfo's types and binders, the strictness options, Make.hs's
+  ghcPrimIds, exposedPrimTyCons' kinds). Judged against the pack `haskell-lib-ifaces-ghc-9.14.1`'s member: 3,085 of 3,085 facts
+  equal and 3,155 of 3,155 lines byte for byte (all but the header, which names the own verb); the control (types rotated) differs.
+  `lib-check --ifaces own` builds and judges it first and gives it to every closure (`LIB_CHECK_PRIM=ghc`: the pack's): no GHC
+  interface on the own path any more. Alternatives considered: extending `tools/hsprimops/primops.awk` (awk is a host tool, and
+  the types need genprimopcode's parser); taking the tycons' kinds from the pack (that is the GHC dependence removed).
+- P15 (a): `haskell-lib-check-own` keeps ghc-internal's pool as its output (`ghc-internal-pool.tar`, 6.5 MB, 0.01 s), and the new
+  `--full` step `haskell-lib-own-base` (`:uses` it) runs base's lib-check and lib-stg against their records with their controls,
+  keeping base's pool (`LIB_CHECK_POOL_OUT`, `LIB_CHECK_DEP_POOL_TAR`). Not run through `bin/gate` (the light lane's rule): its
+  command was run by hand, 6 min 8 s, 1.36 GiB.
+- P20 (a), started: the whole own set (`LIB_STG_REPLACE=all`) ran 0 of 10; four classes found and fixed in turn: GHC.Types'
+  wired-in Typeable bindings (mkPrimTypeableTodos: `tr$ModuleGHCPrim`, `krep$*` and the other built-in KindReps, GHC.Prim's
+  tycons' `$tc` from the own Prim's kinds, the promoted constructors' `$tc'`; the unboxed tuples' `$tc'` left out: deep nests time
+  the module out), the foreign calls' arguments missing from the closures' free variables (`w_188`), the synonym KindBndr in a
+  KindRep, and Unarise of unboxed tuple binders and arguments (GHC.Internal.Bignum.Primitives' `plusWord12#`, found by bisection,
+  `LIB_STG_REPLACE=@FILE`), then a primop used as a value (WordArray's `mwaWrite# = writeWordArray#`: maybeSaturate's
+  eta-expansion). lib-stg on the own interfaces 5,398 to 5,412 of 7,632 equal (8 modules better, 0 worse; re-recorded); the run
+  still 0 of 10: the wrong-size class remains elsewhere and List's `product` path has an unbound floated local; the tail is
+  bisected one class at a time (the survey's "HF10-P20 (a), started").
+- Checks: primiface check (above); lib-check --ifaces own on ghc-internal and base 0 worse (265 and 241 against their records),
+  lib-stg base 531 of 1,024 as recorded, controls differ; hsi-essential's command 123 programs, 0 unclassed, controls fail;
+  bin/reap 0 problems; crops-score --judge --strict 0 problems (Haskell 76.0). Not run: bin/gate (`--full --plan` for the new step
+  is the main session's).
