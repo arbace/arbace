@@ -276,8 +276,21 @@
     (letfn [(lp [a b] (if (= a b) (mk a) {:ppat_desc [:Ppat_or (mk a) (lp (inc a) b)] :ppat_loc loc}))]
       (let [c1 (int c1) c2 (int c2)] (if (<= c1 c2) (lp c1 c2) (lp c2 c1))))))
 
+(declare build-as-type-aux)
+
 (defn build-as-type
-  "Typecore.build_as_type: the most general type of what a pattern matches, an alias's variable's type"
+  "Typecore.build_as_type: the most general type of what a pattern matches, an alias's variable's type; a constraint
+  (build_as_type_extra_inner) ground its own type, else the inner pattern's unified with it"
+  [p]
+  (if-let [[t & rest] (seq (:constraints p))]
+    (if-not (ty/free-vars? t)
+      t
+      (let [as-ty (build-as-type (assoc p :constraints rest))]
+        (unify! as-ty t "pattern")
+        t))
+    (build-as-type-aux p)))
+
+(defn- build-as-type-aux
   [p]
   (let [d (:desc p)]
     (case (d 0)
@@ -352,7 +365,7 @@
       :Ppat_alias (let [p (type-pat env (d 1) expected vars) n (:txt (d 2)) id (ty/ident-create n)
                         tv (build-as-type p)]
                     (swap! vars conj [n id tv])
-                    (mk [:Tpat_alias p id n tv] expected))
+                    (mk [:Tpat_alias p id n tv] (:type p)))
       :Ppat_constant (let [[c tf] (constant (d 1))] (unify! (tf) expected "pattern") (mk [:Tpat_constant c] expected))
       :Ppat_interval (type-pat env (char-or ((:pconst_desc (d 1)) 1) ((:pconst_desc (d 2)) 1) loc) expected vars)
       :Ppat_tuple (let [ps (d 1)
@@ -412,9 +425,13 @@
                            (unify! (ty/instance scheme) expected "pattern")
                            (swap! vars conj [n id scheme])
                            (mk [:Tpat_var id n] expected))
+                         ;; Typecore's Ppat_constraint (solve_Ppat_constraint): the constraint unified with the expected
+                         ;; type, the inner pattern typed against the constraint, the pattern's type the constraint's, the
+                         ;; constraint kept as its extra (build_as_type's): under a GADT equation the two differ
                          (let [t (annot-type env (d 2))]
                            (unify! t expected "pattern")
-                           (type-pat env (d 1) expected vars)))
+                           (let [p (type-pat env (d 1) t vars)]
+                             (assoc p :type t :constraints (cons t (:constraints p))))))
       :Ppat_variant (let [tag (d 1) sarg (d 2)
                           ;; Typecore.solve_Ppat_variant: an undecided tag, matched
                           arg-type (when sarg (ty/newvar))
