@@ -169,7 +169,9 @@ the rows' `:cross`, the classes `test/asm/divergences-cross.edn`, the controls `
   (`.comment`), `.code16/32/64`. A symbol is registered in MC's order (its first label, attribute or use).
 - **The instructions**: arbace.asm.amd64.asm's encoder, whose fixups carry X86MCCodeEmitter's kinds (FK_Data_N, reloc_signed_4byte and
   `_relax`, the RIP-relative kinds with the GOTPCRELX choices by opcode, reloc_branch_4byte_pcrel for `call`/`jmp`/`jcc` to a symbol's
-  reference) and the RIP-relative bias of a following immediate. An instruction that may need relaxation (JCC_1, JMP_1, the short
+  reference; since the asm branches' merge the prefix's kinds too: `_rex` under REX, `_rex2` under REX2, `_relax_evex` for ADD64's
+  NDD and NF memory forms, and TLSCALL's FK_NONE at the instruction's start with no displacement) and the RIP-relative bias of a
+  following immediate. An instruction that may need relaxation (JCC_1, JMP_1, the short
   immediate forms of X86EncodingOptimizationForImmediate.def with a symbolic immediate) is a chunk of its own; the rest is data.
 - **The layout** (MCAssembler::layout, relaxOnce): the sections laid out, then relaxed to a fixed point, each pass forward with the
   stretch of a later target; a branch relaxed when its target is not resolved (a global or undefined symbol, another section) or out of
@@ -177,8 +179,8 @@ the rows' `:cross`, the classes `test/asm/divergences-cross.edn`, the controls `
   after X86InstrControl.td.
 - **The fixups** (evaluateFixup, X86AsmBackend, X86ELFObjectWriter, ELFObjectWriter::recordRelocation): the PC-relative bias (-1, -2,
   -4), resolved within a section for a local symbol, else a relocation: its type by kind, size and specifier (PC32, PLT32, 32, 32S, 64,
-  PC64, 16, 8, GOTPCREL, GOTPCRELX, REX_GOTPCRELX, GOT32/64, GOTPC32/64, GOTOFF64, TPOFF32/64, DTPOFF32/64, SIZE32/64, TLSGD, TLSLD,
-  GOTTPOFF, TLSDESC, TLSDESC_CALL, PLTOFF64), against the section symbol for a defined local unless the specifier needs the symbol, a
+  PC64, 16, 8, GOTPCREL, GOTPCRELX, REX_GOTPCRELX, CODE_4_GOTPCRELX, GOT32/64, GOTPC32/64, GOTOFF64, TPOFF32/64, DTPOFF32/64, SIZE32/64, TLSGD, TLSLD,
+  GOTTPOFF, CODE_4_GOTTPOFF, CODE_6_GOTTPOFF, TLSDESC, CODE_4_GOTPC32_TLSDESC, TLSDESC_CALL, PLTOFF64), against the section symbol for a defined local unless the specifier needs the symbol, a
   mergeable section's nonzero addend or a TLS section forbid it; a difference with its subtrahend in the fixup's section PC-relative.
 - **CFI** (MCDwarf's FrameEmitterImpl, emitted after the layout): `.cfi_startproc [simple]`, `.cfi_endproc`, `def_cfa`,
   `def_cfa_offset`, `adjust_cfa_offset`, `def_cfa_register`, `offset`, `rel_offset`, `val_offset`, `restore`, `undefined`,
