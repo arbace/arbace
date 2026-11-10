@@ -629,6 +629,17 @@
                              imm12! (fn [^long v] (set-w! 0x3ffc00 (bit-shift-left (bit-and v 0xfff) 10)))
                              ldst! (fn [^long v ^long sh] (set-w! 0x3ffc00 (bit-shift-left (bit-shift-right (bit-and v 0xfff) sh) 10)))
                              movw! (fn [^long v ^long g] (set-w! 0x1fffe0 (bit-shift-left (bit-and (bit-shift-right v (* 16 g)) 0xffff) 5)))
+                             ;; writeSMovWImm: a signed group's MOVZ, or MOVN of the inverted value when negative
+                             smovw! (fn [^long v ^long g]
+                                      (let [imm (bit-shift-right v (* 16 g)) w (u32 b at)]
+                                        (when-not (<= -4294967296 (bit-shift-right v (* 16 (max 0 (dec g)))) 4294967295)
+                                          (fail (str "relocation " tname " out of range: " v)))
+                                        (if (bit-test w 30)
+                                          (movw! v g)
+                                          (let [neg (bit-test imm 16)
+                                                imm (if neg (bit-xor imm 0xffff) imm)
+                                                w (if neg (bit-and w (bit-not 0x40000000)) (bit-or w 0x40000000))]
+                                            (put! b at (bit-or (bit-and w (bit-not 0x1fffe0)) (bit-shift-left (bit-and imm 0xffff) 5)) 4)))))
                              tp (fn [] (+ (long (tp-off (sym-va ref 0))) a))]
                          (case t
                            0 nil
@@ -655,7 +666,8 @@
                            0x225 (imm12! (bit-shift-right (range! (tp) 0 0xffffff) 12))
                            0x226 (imm12! (range! (tp) 0 4095))
                            0x227 (imm12! (tp))
-                           (0x220) (movw! (tp) 2) (0x221 0x222) (movw! (tp) 1) (0x223 0x224) (movw! (tp) 0)
+                           0x220 (smovw! (tp) 2) 0x221 (smovw! (tp) 1) 0x222 (movw! (tp) 1) 0x223 (smovw! (tp) 0) 0x224 (movw! (tp) 0)
+                           0x10e (smovw! (s+a) 0) 0x10f (smovw! (s+a) 1) 0x110 (smovw! (s+a) 2)
                            (0x228 0x229) (ldst! (tp) 0) (0x22a 0x22b) (ldst! (tp) 1) (0x22c 0x22d) (ldst! (tp) 2) (0x22e 0x22f) (ldst! (tp) 3)
                            (0x23a 0x23b) (ldst! (tp) 4)
                            (unsupported :reloc (str "relocation " tname)))))
@@ -686,7 +698,9 @@
           local-entries (vec (for [f files [i s] (map-indexed vector (:symbols (:o f)))
                                    :when (and (pos? (long i)) (= elf/STB_LOCAL (:bind s)) (not= elf/STT_SECTION (:type s)))
                                    :let [sh (long (:shndx s)) fi (:idx f)]
-                                   :when (or (= sh elf/SHN_ABS) (zero? sh) (and (< sh 0xff00) (live? fi sh)))
+                                   :when (or (= sh elf/SHN_ABS) (zero? sh) (and (< sh 0xff00) (live? fi sh)
+                                                                                 ;; a local of .eh_frame (AArch64's $d) has no place: dropped
+                                                                                 (some? (.get place [fi sh]))))
                                    :when (not (and (.startsWith ^String (:name s) ".L") (< 0 sh 0xff00)
                                                    (not (zero? (bit-and (long (:flags (sec-of files fi sh))) SHF_MERGE)))))]
                                {:file fi :name (:name s) :bind elf/STB_LOCAL :type (:type s) :other (:other s)
