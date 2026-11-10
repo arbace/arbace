@@ -5436,3 +5436,36 @@ stage's `:steps` and the stub runs of read and AOT).
   (five packs' pins, four universes); crops-test, costs-test, gate-key-crops-test and plan-logic-test pass on the spliced
   table (crops-test with its expectations updated); crops-score: gate item 100% (4 essential, 8 full, 3 oracle), every
   stage "steps agree", 0 facts refuted, independence 79.4% as before.
+
+## As built: 256, Lib/test's universe as data; the check without python3, proved again (2026-11-10, the Mac VM, queue 256)
+
+The brief (from the main host's facts at main-ro, `bin/pyi:183 pyall() { python3`) asked for `bin/pyi check` with no python3 at
+check time. That held at the base already: since queue 234 the check's runner is `tools/pyi/libtest_all.py` compiled by pyi's
+AOT (`pyrun`, `runner_exe`), and since queue 240 the universe's modules are regrtest's findtests run on it. What still came from
+CPython's runs at check time was the method inventory: the own verdict read every reference file (`ref-cpython314-lib-test*.edn`,
+outcomes and all) for its ids. 256 makes that inventory a record of its own.
+
+- **`test/python/universe-cpython314.edn`**: a line a module, `{:module M :tests [T ...] :cpython-skips {T REASON ...}}`, the
+  modules (529) and test ids (47,836) CPython 3.14.10's recorded runs name and the tests they skipped on the recording platform
+  (2,449, with the reason: information for the classing, never read by the judge). `test/python/universe.ae` writes it on stage 0
+  (no python3, a second), keyed (`;; key`) by the SHA-256 of the generator and the references; `bin/pyi universe` writes it,
+  `record-ref` writes it after Lib/test's references, `bin/pyi universe --check` writes it afresh and compares byte for byte, its
+  negative control a universe from one reference less, which must differ (in `pyi-essential` and `make python-essential`).
+- **The judge**: `libtest_judge.ae --universe FILE` takes the inventory from it (read-universe, the same rule as read-inventory)
+  and, with the own verdict, reads no reference at all (only `--verdict ref` and `--agreement` need CPython's outcomes).
+  `bin/pyi check` passes it to the judge and to the controls' judge and refuses a universe whose key is not its inputs' ("the
+  universe ... is stale"); `universe_diff` compares findtests' modules with the record's.
+- **Verdicts unchanged**: over all 529 modules (a fabricated run, every module empty) the judge's rows with `--universe` equal the
+  rows from the references byte for byte (47,922 rows; t1); a real run over 11 modules of the four corpora judged by the head and by
+  the base gives the same `results.tsv` (337 rows).
+- **Proved with python3 removed**: python3, python and python3.14 first on PATH, each logging its call and exiting 99: `bin/pyi
+  check --fresh` over test_bool, test_int, test_getopt, test_filecmp, test_augassign, test_colorsys, test_textwrap, test_winreg,
+  test_shlex, test_asyncio.test_locks, test_fnmatch (the runner compiled cold): 337 methods, 313 pass, 23 classed, 1 failing, the
+  three controls failing as they must, the stubs' log empty; the stub's own control, the same runner verb by python3
+  (`PYI_RUNNER=python3 bin/pyi runner owned`), exits 99 and logs its call.
+- **The one failing method**, on the base too: test_augassign's testCustomMethods1, `__iadd__ = None` in a class falls back to
+  `__add__` under pyi where CPython raises TypeError ('NoneType' object is not callable): a runtime gap, in no class.
+- **Independence** (main's `bin/crops-score --crop python --ref mac/mac/201-python-py7-py11` in a scratch clone of main-ro with
+  the patch): main-ro's facts 80.0% (judge 0, stale); 258's patch 79.4%; 256's patch 79.4%, judge 0.971 with `:cases {:self 51638
+  :recorded 3187}`: 240's 48,546 inventory methods counted 710 ids twice (12 modules both lib-test's and lib-test-all's references
+  record), 47,836 distinct.
