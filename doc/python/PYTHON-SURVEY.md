@@ -5403,3 +5403,36 @@ records only when `bin/reap` shows 0 problems, so every non-pass must be in a cl
   each with its likely class (the class most methods with the same reason are in, a rule by cause, the module's
   class), and `--control` appends a fabricated unclassed row that must be listed; then `bin/pyi check --judge RUN
   --record` writes the record from the night's run, no run again.
+
+## As built: 258, the gate fragments `test/gate/crops/python.edn` and `python-oracle.edn` (2026-11-10, the Mac VM, queue 258)
+
+GT9's write-ahead `python.edn` (main) with queues 212, 213, 235, 240 and 247's drafts, finished as one fragment and an
+oracle-tier fragment, committed on this branch (crops-score reads them at the ref) and given to the main host as three patches
+against main (queue 258's report): the fragments, the splice into `test/gate/steps.edn` with `test/gate/crops-test.bash`'s
+expectations (Python gated, its chains beside the serial run), and `test/crops/independence.edn` (247's facts with every
+stage's `:steps` and the stub runs of read and AOT).
+
+- **Essential, chain `python-essential`** (each check at most 3 GiB, none on `:python`, no lock): `python-read-essential`
+  (spec-check, samples, both round trips of samples, lex-check and parse-check --full of samples and lex-errors, from the
+  committed records), `pyi-essential` (GT9's `python-front-essential` with 247's `pyi-golden`: gen --check, golden,
+  scope-check, compile-check --full of samples, synthetic and errors), `pyi-aot-essential` (essential-aot.txt's 21 programs
+  compiled and on the loop), `pyi-c2j`. pyi's AOT runtime is the `:build` step `pyi-aot-runtime`, run only when a check
+  that runs needs it, so `pyi-aot-essential` runs on the cached runtime.
+- **`--full`**: chain `python-read` (python-front whole; python-roundtrip and python-native rotated a seventh a night over
+  the night's results files) and chain `pyi-aot` (check --aot --no-pyi whole, judged by the golden texts and CPython's
+  recorded runs; pyi on goi rotated; the wheels), both light, so `gate.crops concurrent` runs them beside the serial run
+  (GTS216 (a)); chain `pyi-full` (runtime check 5 GiB, Lib/test by its own verdict 6 GiB, rotated by module) serial.
+- **Oracle tier** (`python-oracle.edn`, `:phase :oracle`, the only steps on `:python`): python-records-verify,
+  python-roundtrip-oracle, pyi-oracle. `:host-ids :python` and `:crop-pins :python` (`bin/repr-python pins --check`: 15 s,
+  ok on the VM) are steps.edn's already.
+- **Measures** (arm64, the VM, busybox `time -v`, python3, python and python3.14 stubs exiting 99 first on PATH, the
+  stubs' log empty): python-read-essential 16 s, 0.44 GiB; pyi-essential 10 s, 0.43 GiB; pyi-aot-essential 41 s warm
+  (60 s the first), 0.93 GiB; pyi-c2j 25 s, 2.9 GiB; the chain about 92 s warm. pyi-aot-runtime cold (an empty Go cache)
+  171 and 266 s, 4.0 GiB in one process, 4.7 GiB the tree (MemAvailable's drop): `:mem-gib 6`, not `:heavy` (queue 235's
+  13.5 GB was a Go cache past its trim).
+- **Proved** in a scratch merge of main (2a72c94aa) and this branch, stage 0 the VM's: `gate.crops check` 0 problems;
+  `bin/gate --plan`, `--full --plan`, `--nightly --plan` (the rotations' slices) and `--oracle --plan` without a table
+  error once the night's nine files exist (fabricated in the scratch); without them the planner names exactly those nine
+  (five packs' pins, four universes); crops-test, costs-test, gate-key-crops-test and plan-logic-test pass on the spliced
+  table (crops-test with its expectations updated); crops-score: gate item 100% (4 essential, 8 full, 3 oracle), every
+  stage "steps agree", 0 facts refuted, independence 79.4% as before.
