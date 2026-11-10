@@ -2790,3 +2790,17 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+
+## 2026-11-09: LLS43 (a), LLS44 (b), LLS45 (a): the fragments' sizes and a held-out set in the gate (branch `llvm-props4`, from next `6c3c87c02`)
+
+The user accepted llvm-props3's proposals as recommended (about 14:20). LLS43 (a): verifyFragmentExpression and
+DIVariable::getSizeInBits ported from llvm-project 23.1.5 (`llvm/lib/IR/Verifier.cpp` V:7425-7464, V:1749-1753, V:799, V:536;
+`llvm/lib/IR/DebugInfoMetadata.cpp:1653`, the pinned tarball) into Arbace's verifier and, written apart, into the mutants' own
+verdicts, which no longer leave a rule to opt for a fragment in the module; their order the Verifier's (a definition's
+subprogram and its unit's global expressions, the walk, the records; the globals' `!dbg` again by visitGlobalVariable's direct
+call). LLS44 (b): left. LLS45 (a): `bin/repr-llvm heldout-check`, 900 mutants of 41 base modules (test/llvm/heldout-bases.txt)
+from the fixed seed 1200000, own verdicts held to Arbace's verifier, two crossed controls; the gate step `llvm-heldout`
+(llvm-full). Its first run found a rule the verifier lacked (visitDILocalVariable's `invalid type`, V:1721), fixed. Measured: 886
+of 900 own, all met (8 min, 0.7 GB); expect-test 42 cases and 12 controls; the essential read and print families as recorded;
+crops-score unchanged (LLVM IR 96.4 / 97.9 / 100 / 96.9). Alternatives: keeping LLS43 on opt's record (b), the held-out sets
+only in worktrees (LLS45 (b)). Recorded in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS43 (a), LLS44 (b), LLS45 (a)".
