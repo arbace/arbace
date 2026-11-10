@@ -1447,3 +1447,82 @@ Numbering from AXS75.
 **Rule slips**: three wait loops used a process substitution (`<(...)`) in a `grep`, against the rule; harmless (they read the
 check's and the conversion's logs). One command ran `x86i trace` without the worktree's TMPDIR exported, so its temporary files went to /tmp (removed by the
 run itself).
+
+## As built: AX5.5 (2026-11-10; branch `asm-ax5c`)
+
+On the light lane (stage 0 and TamaGo's go, one run at a time, every conversion and check under a 2 GiB watcher; no lock, no gate), on
+`asm-ax5b` (`81a49bc21`). AXS81 (a): the VEX contexts, AX5's integer extensions (AXS59 (a)), SSE and SSE2 with MXCSR's flags computed
+(AXS62 (a)), the per-run coverage and AXS70 (b)'s decode level. doc/asm/AMD64.md §10 describes what was built.
+
+- **The VEX contexts** (AXS69's "until needed"): `arbace.asm.amd64.dgen`'s attribute mask takes VEX and VEX.L beside the five legacy bits
+  (128 masks, 32 contexts: the sixteen IC_VEX ones added), so `go/arbace/x86i/dectab.ae` holds every VEX instruction of maps 0F, 0F38
+  and 0F3A (846 KB to 1.9 MB; `x86i gen`, 56 s, 1.39 GB). The Go decoder reads C4 and C5 as decode.ae does (REX's bits from VEX's
+  inverted R, X, B and its W, VEX.pp as the mandatory prefix in the context, VEX.L, VEX.vvvv with its validity, an imm8 naming a register,
+  VSIB, YMM, mask and tile registers as operands x86i does not model); EVEX, XOP, REX2, 3DNow! and VEX's maps 5-7 stay refused.
+- **The integer extensions** behind the model's CPUID (leaf 0's highest 7; leaf 1's ECX RDRAND, POPCNT, MOVBE, CMPXCHG16B; leaf 7's EBX
+  BMI1, BMI2, RDSEED, ADX, ECX RDPID; `cpuid.s`'s stated stdout follows): a family `bmi` (andn bextr blsi blsmsk blsr bzhi, their
+  undefined flags per instruction; mulx pdep pext rorx sarx shlx shrx; adcx adox), cmpxchg8b and cmpxchg16b, rdrand, rdseed, rdpid (the
+  step mode copies the native's value, as rdtsc's).
+- **SSE and SSE2** (`sem_sse`): the families `sse` (moves, halves, sign masks, words, logic, shuffles, unpacks, maskmovdqu, ldmxcsr and
+  stmxcsr, movnti, the hints), `sseint`, `ssefp` and `ssecvt`, 342 instructions claimed; an instruction with an XMM operand is bound in
+  SSE's table, so `movsd` and `cmpsd` go to SSE's or the string family's by their operands. The floating point in software at round to
+  nearest: Go's float64 arithmetic (IEEE 754's), a single's result the double's rounded again (innocuous: 53 ≥ 2·24 + 2), MXCSR's
+  flags from the operands and the exact error terms (two-sum, a fused multiply-add; math/big near the range's bottom, where a term can
+  underflow: the step mode found divpd's lost PE there), tininess after rounding as x86 detects it. A rounding mode other than nearest,
+  DAZ, FTZ or an unmasked exception raises SIGILL as `:unimplemented` (AX8), as rcpps and rsqrtps do (each vendor's approximation).
+- **The lockstep** compares XMM and MXCSR after every SSE instruction; `X86I_INJECT=FAMILY:xmm|pe` flips an XMM destination's lowest bit or
+  MXCSR's PE.
+- **The coverage** (`x86i run --coverage`, `x86i claimed`): x86i-check sums the programs' executed instructions against the families'
+  claims, by family, into `coverage.txt`, held to `test/asm/x86i-coverage-amd64.txt`.
+- **The decode check** (`bin/repr-asm x86i-decode-check [--record]`, AXS70 (b)): MC/X86's 64-bit met encodings and MC/Disassembler/X86's
+  64-bit byte strings, each decoded alone by `x86i decode-hex` against arbace.asm.amd64.decode (`decode-check`'s `x86i-corpus`); rows
+  `test/asm/x86i-decode-results-amd64.edn`, the class `:encoding-deferred`, controls `test/asm/controls-x86i-decode.txt`.
+- **The synthetic programs**: seven new families (bmi, adx, ssemov, sseint, ssefp, ssecmp, ssecvt; `lib/hex.s`'s `put_vec`), seeded,
+  their digests beside AX5.4's five (unchanged); and `fault-movaps.s` (a misaligned movaps: SIGSEGV).
+
+What the CPU's runs and the step mode found on the way: 0 divided by infinity is exact (the fused multiply-add's term is a NaN there); an
+invalid operation and a division by zero report their flag alone, without the denormal operand's (AXS84); divpd's inexact result with a
+denormal operand needs the exact value (the remainder underflows).
+
+| check | result |
+|---|---|
+| `bin/repr-asm x86i-check` (`x86i/`) | **42 of 43** programs by their own verdicts and equal to the CPU's runs (16 of `test/asm/run/`, 15 of `test/asm/x86i/`, 12 synthetic); `cpuid` by its stated verdict (the widened model), the class `:cpuid` against the CPU |
+| `decode/` | 43 of 43 (201,218 instructions) as `arbace.asm.amd64.decode` decodes them |
+| `lockstep/` (sys) | 42 of 43 equal, `cpuid` the class `:cpuid` |
+| `step/` | **43 of 43** equal in the step mode; the twelve synthetic programs 5.3 million instructions compared one by one (the seven new ones 2.2 million, XMM and MXCSR at each SSE instruction) |
+| `loader/` | 43 of 43 |
+| coverage (`test/asm/x86i-coverage-amd64.txt`) | 702 of the 1,291 instructions the families claim executed: bmi 48 of 60, sse 116 of 134, sseint 92 of 100, ssefp 48 of 72, ssecvt 26 of 36, atomic 10 of 18 (the rest by family, mostly memory and `_REV` forms the programs do not write: AXS88) |
+| controls (`test/asm/controls-x86i.txt`) | **23** fail as they must: AX5.4's 18 and AX5.5's five (`step` synth-bmi `bmi:cf`, synth-ssefp `ssefp:xmm`, synth-sseint `sseint:xmm`; `bisect` synth-ssecvt `ssecvt:pe`; `inject` synth-adx `bmi:of`) |
+| `bin/repr-asm x86i-decode-check` | 487 files, 82,988 byte strings: **20,531 decoded as arbace.asm.amd64.decode decodes them** (13,336 of them VEX), none different; 62,457 in encodings x86i does not read yet (EVEX 60,624, XOP 1,287, REX2 426, VEX maps 5-7 36, 3DNow! and prefixed 84), 324 files `:encoding-deferred`, 163 all equal; three controls fail as they must; about 3 minutes, 1.45 GB |
+| `bin/repr-asm x86i gen-check`, run-check, `bin/reap`, `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`, `make check-makefile` | pass (run 18 of 18 ok; reap 41 of 44 cells checked, 0 problems) |
+
+The recorded check took 19 minutes beside night 11 (1.35 GB at its peak), the step mode at 8,000-14,000 instructions a second. The
+decode check found two of the Go decoder's corner cases on its first run: a byte string read in its stream's context (a lone F3 is
+XRELEASE before 90: the corpus gives each instruction the fifteen bytes from it and its length), and fifteen prefixes with no room for
+an opcode (invalid, as LLVM's decoder finds with the bytes after).
+
+### Proposed (AX5.5)
+
+Numbering from AXS82.
+
+- **AXS82 The VEX tables' reach.** (a) as built: every VEX instruction of maps 0F, 0F38 and 0F3A in the decode tables (1.9 MB), though
+  only BMI's run, the rest decoded and judged by x86i-decode-check, SIGILL at run time; (b) only the rows of the claimed families.
+  *Recommended: (a)*: the decode check judges them all, and AX8's AVX needs them.
+- **AXS83 The floating point's source.** (a) as built: Go's IEEE double arithmetic with the exact error terms and math/big near the bottom,
+  round to nearest only; (b) a software-float port (Berkeley SoftFloat 3, BSD-3, its 8086-SSE specialization) for every rounding mode
+  now. *Recommended: (a)*, (b) weighed at AX8 with the rounding modes, DAZ and FTZ.
+- **AXS84 The denormal flag beside an invalid operation or a division by zero.** (a) as built: DE dropped then (the SDM's priority of
+  the SIMD exceptions read as the highest alone for these, which this AMD CPU does; a QNaN operand, by the SDM, already suppresses DE),
+  another vendor's difference a class `:vendor`; (b) both flags. *Recommended: (a)*: the step mode compares MXCSR at every
+  instruction, and the reading is the one both the CPU and the SDM's QNaN rule support.
+- **AXS85 rcpps, rsqrtps, rcpss, rsqrtss.** (a) as built: unclaimed (SIGILL, `:unimplemented`): their results are each vendor's
+  approximation tables; (b) AMD's and Intel's tables written, the model's vendor choosing. *Recommended: (a)* until a program needs them.
+- **AXS86 The coverage's record.** (a) as built: the claimed instructions never executed listed per family in a committed file, an
+  instruction executed when recorded and not now failing the check; (b) a report only. *Recommended: (a)*.
+- **AXS87 The decode check in the gate.** (a) at AX10 with x86i-check (AXS73 (a)); (b) now. *Recommended: (a)*.
+- **AXS88 The next slice.** (a) AX5.6: musl's harnesses; (b) the claimed instructions the synthetic programs leave unexecuted first.
+  *Recommended: (a)*, the coverage list beside it.
+
+**Rule slips**: one command ran process substitutions (`<(...)`: a leftover no-op `cmp` loop and a `diff` comparing a printed file
+with its source) and one test fed `x86i decode-hex` from `/dev/stdin` (a here-string), both against the rule and both harmless; every other wait loop polled a
+log file.

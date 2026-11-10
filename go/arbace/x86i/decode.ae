@@ -7,8 +7,8 @@
 
 ;; The decoder (doc/asm/AMD64.md §10): arbace.asm.amd64.decode's logic, LLVM's X86 disassembler (X86Disassembler.cpp's
 ;; readPrefixes, readOpcode, getInstructionID, readModRM, readSIB, readDisplacement, fixupReg, readOperands and the
-;; translation into an MCInst), for 64-bit mode's legacy and REX encodings, over dgen's tables. VEX, EVEX, XOP, REX2 and
-;; 3DNow! are refused (Unsupported): x86i raises SIGILL for them, the class :unimplemented.
+;; translation into an MCInst), for 64-bit mode's legacy, REX and (since AX5.5) VEX encodings, over dgen's tables. EVEX, XOP,
+;; REX2, 3DNow! and VEX's maps 5-7 are refused (Unsupported): x86i raises SIGILL for them, the class :unimplemented.
 
 
 (go/const "Operand kinds.\n"
@@ -18,7 +18,7 @@
   ^{:line 18} [^{:val 4} ORel] ; a branch displacement (Imm), from the next instruction
   ^{:line 19} [^{:val 5} OXMM] ; an XMM register (Reg)
   ^{:line 20} [^{:val 6} OSeg] ; a segment register (Reg: ES CS SS DS FS GS)
-  ^{:line 21} [^{:val 7} OOther] ; a register x86i does not model (MMX, x87, debug, control)
+  ^{:line 21} [^{:val 7} OOther] ; a register x86i does not model (MMX, x87, debug, control, YMM, mask, tile), or a vector-indexed address
   ^{:line 22} [^{:val 8} OSI] ; a string instruction's source, [RSI] (seg Seg)
   ^{:line 23} [^{:val 9} ODI]) ; a string instruction's destination, [RDI]
 
@@ -59,7 +59,7 @@
 (go/const "Decode results.\n"
   ^{:line 60} [^{:val 0} DecOK iota]
   ^{:line 61} [^{:val 1} DecInvalid]
-  ^{:line 62} [^{:val 2} DecUnsupported]) ; VEX, EVEX, XOP, REX2, 3DNow!
+  ^{:line 62} [^{:val 2} DecUnsupported]) ; EVEX, XOP, REX2, 3DNow!, VEX's maps 5-7
 
 
 (go/var gpr8 (lit (slice string) "AL" "CL" "DL" "BL" "AH" "CH" "DH" "BH" "R8B" "R9B" "R10B" "R11B" "R12B" "R13B" "R14B" "R15B"))
@@ -100,24 +100,29 @@
     ^{:line 100 :tag (slice uint64)} imms
     ^{:line 101 :tag int} opreg
     ^{:line 102 :tag int} cc
-    ^{:line 103 :tag uint16} id))
+    ^{:line 103 :tag uint16} id
+    ^{:line 104 :tag int} vex ; 0 none, 2 the two-byte VEX prefix (C5), 3 the three-byte one (C4)
+    ^{:line 105 :tag (array 3 byte)} vx ; the VEX prefix's bytes
+    ^{:line 106 :tag int} vvvv ; VEX.vvvv, inverted (an operand's register)
+    ^{:line 107 :tag int} sibIdx ; the SIB's index field with REX.X, 4 included (VSIB's vector index)
+    ^{:line 108 :tag bool} sawRegImm)) ; an imm8 that names a register (its high nibble) was read
 
 
 (go/const
-  ^{:line 107} [^{:val 0} eaNone iota]
-  ^{:line 108} [^{:val 1} eaBase]
-  ^{:line 109} [^{:val 2} eaSIB]
-  ^{:line 110} [^{:val 3} eaReg])
+  ^{:line 112} [^{:val 0} eaNone iota]
+  ^{:line 113} [^{:val 1} eaBase]
+  ^{:line 114} [^{:val 2} eaSIB]
+  ^{:line 115} [^{:val 3} eaReg])
 
 
-^{:go/end 118} (go/method peek [^{:tag (* decoder)} d] :results [byte bool]
+^{:go/end 123} (go/method peek [^{:tag (* decoder)} d] :results [byte bool]
   (when (< (.-cur d) (len (.-b d)))
     (return (aget (.-b d) (.-cur d)) true))
 
   (return 0 false))
 
 
-^{:go/end 130} (go/method consume [^{:tag (* decoder)} d ^int n] :results [uint64 bool]
+^{:go/end 135} (go/method consume [^{:tag (* decoder)} d ^int n] :results [uint64 bool]
   (when (> (+ (.-cur d) n) (len (.-b d)))
     (return 0 false))
 
@@ -129,20 +134,23 @@
     (return v true)))
 
 
-^{:go/end 132} (go/func isRex ^bool [^byte b] (and (>= b 0x40) (<= b 0x4f)))
+^{:go/end 137} (go/func isRex ^bool [^byte b] (and (>= b 0x40) (<= b 0x4f)))
 
-^{:go/end 134} (go/method rexBit ^int [^{:tag (* decoder)} d ^uint k] (bit-and (conv int (>> (.-rex d) k)) 1))
+^{:go/end 139} (go/method rexBit ^int [^{:tag (* decoder)} d ^uint k] (bit-and (conv int (>> (.-rex d) k)) 1))
 
 
-^{:go/end 254} (go/method readPrefixes "readPrefixes: the result code.\n" ^int [^{:tag (* decoder)} d]
+^{:go/end 280} (go/method readPrefixes "readPrefixes: the result code.\n" ^int [^{:tag (* decoder)} d]
   (let [^byte last (zero byte)]
     (while true
       (let [(values bv ok) (.consume d 1)]
         (when (not ok)
+          (when (>= (len (.-b d)) 15) ; prefixes to the fifteenth byte: the opcode would be beyond an instruction's longest (as LLVM's decoder fails, given the bytes after)
+            (return DecInvalid))
+
           (break))
 
         (let [b (conv byte bv)
-            ^{:line 145} start (== (- (.-cur d) 1) 0)]
+            ^{:line 153} start (== (- (.-cur d) 1) 0)]
           (when (and start (== b 0xf0))
             (set! last b)
             (break))
@@ -216,7 +224,25 @@
               (break))))))
 
     (switch
-      (case [(== last 0x62) (== last 0xc4) (== last 0xc5) (== last 0xd5)]
+      (case [(== last 0xc4) (== last 0xc5)] ; VEX (always, in 64-bit mode): REX's bits from its inverted R, X, B and its W
+        (when [(values _ ok) (.peek d)] (not ok)
+          (return DecInvalid))
+
+        (let [(values c1 _) (.consume d 1)]
+          (set! (values (aget (.-vx d) 0) (aget (.-vx d) 1)) (values last (conv byte c1)))
+          (if (== last 0xc5) (do
+              (set! (.-vex d) 2)
+              (set! (.-rex d) (bit-or 0x40 (<< (bit-and (>> (bit-not (aget (.-vx d) 1)) 7) 1) 2)))
+              (when (== (bit-and (aget (.-vx d) 1) 3) 1)
+                (set! (.-opsize d) true)))
+
+
+            (let [(values c2 _) (.consume d 1)]
+              (aset (.-vx d) 2 (conv byte c2))
+              (set! (.-vex d) 3)
+              (set! (.-rex d) (bit-or 0x40 (<< (bit-and (>> (aget (.-vx d) 2) 7) 1) 3) (<< (bit-and (>> (bit-not (aget (.-vx d) 1)) 7) 1) 2) (<< (bit-and (>> (bit-not (aget (.-vx d) 1)) 6) 1) 1) (bit-and (>> (bit-not (aget (.-vx d) 1)) 5) 1)))))))
+
+      (case [(== last 0x62) (== last 0xd5)]
         (when [(values _ ok) (.peek d)] (not ok)
           (return DecInvalid))
 
@@ -250,10 +276,34 @@
           (set! (.-addrsize d) 4))))
 
 
-    ^{:line 253} DecOK))
+    ^{:line 279} DecOK))
 
 
-^{:go/end 286} (go/method readOpcode ^int [^{:tag (* decoder)} d]
+^{:go/end 336} (go/method readOpcode ^int [^{:tag (* decoder)} d]
+  (when (!= (.-vex d) 0)
+    (let [m 1]
+      (when (== (.-vex d) 3)
+        (set! m (conv int (bit-and (aget (.-vx d) 1) 0x1f))))
+
+      (switch m
+        (case [1]
+          (set! (.-otype d) otTwo))
+        (case [2]
+          (set! (.-otype d) ot38))
+        (case [3]
+          (set! (.-otype d) ot3A))
+        (case [5 6 7]
+          (return DecUnsupported))
+        (default
+          (return DecInvalid)))
+
+      (let [(values o ok) (.consume d 1)]
+        (when (not ok)
+          (return DecInvalid))
+
+        (set! (.-opcode d) (conv byte o))
+        (return DecOK))))
+
   (let [(values c ok) (.consume d 1)]
     (when (not ok)
       (return DecInvalid))
@@ -282,18 +332,18 @@
         (default
           (set! (values (.-otype d) (.-opcode d)) (values otTwo (conv byte c2)))))
 
-      ^{:line 285} DecOK)))
+      ^{:line 335} DecOK)))
 
 
-^{:go/end 313} (go/method readSIB ^bool [^{:tag (* decoder)} d]
+^{:go/end 363} (go/method readSIB ^bool [^{:tag (* decoder)} d]
   (let [(values sv ok) (.consume d 1)]
     (when (not ok)
       (return true))
 
-    ^{:go/breaks [[7 312]]} (let [sib (conv int sv)
-        ^{:line 294} idx (bit-or (bit-and (>> sib 3) 7) (<< (.rexBit d 1) 3))
-        ^{:line 295} base (bit-or (bit-and sib 7) (<< (.rexBit d 0) 3))]
-      (set! (.-sibIndex d) idx)
+    ^{:go/breaks [[7 362]]} (let [sib (conv int sv)
+        ^{:line 344} idx (bit-or (bit-and (>> sib 3) 7) (<< (.rexBit d 1) 3))
+        ^{:line 345} base (bit-or (bit-and sib 7) (<< (.rexBit d 0) 3))]
+      (set! (values (.-sibIndex d) (.-sibIdx d)) (values idx idx))
       (when (== idx 4)
         (set! (.-sibIndex d) -1))
 
@@ -312,7 +362,7 @@
       false)))
 
 
-^{:go/breaks [[4 330]] :go/end 331} (go/method readDisp ^bool [^{:tag (* decoder)} d]
+^{:go/breaks [[4 380]] :go/end 381} (go/method readDisp ^bool [^{:tag (* decoder)} d]
   (switch (.-eaDisp d)
     (case [8]
       (let [(values v ok) (.consume d 1)]
@@ -330,7 +380,7 @@
   false)
 
 
-^{:go/end 377} (go/method readModRM ^bool [^{:tag (* decoder)} d]
+^{:go/end 427} (go/method readModRM ^bool [^{:tag (* decoder)} d]
   (when (.-hasModrm d)
     (return false))
 
@@ -341,7 +391,7 @@
     (let [m (conv int mv)]
       (set! (values (.-modrm d) (.-hasModrm d)) (values (conv byte m) true))
       (let [md (>> m 6)
-          ^{:line 344} rm (bit-or (bit-and m 7) (<< (.rexBit d 0) 3))]
+          ^{:line 394} rm (bit-or (bit-and m 7) (<< (.rexBit d 0) 3))]
         (set! (.-regI d) (bit-or (bit-and (>> m 3) 7) (<< (.rexBit d 2) 3)))
         (set! (.-eaDisp d) 0)
         (switch md
@@ -377,10 +427,14 @@
 
 
 
-^{:go/breaks [[5 389]] :go/end 390} (go/func regValid "regValid is fixupRegValue's validity for a type at an index.\n" ^bool [^uint8 typ ^int i]
+^{:go/breaks [[5 443]] :go/end 444} (go/func regValid "regValid is fixupRegValue's validity for a type at an index.\n" ^bool [^uint8 typ ^int i]
   (switch typ
-    (case [tyRv tyR8 tyR16 tyR32 tyR64 tyXMM tyMM64]
+    (case [tyRv tyR8 tyR16 tyR32 tyR64 tyXMM tyYMM tyMM64]
       (return true))
+    (case [tyVK]
+      (return (<= (bit-and i 0xf) 7)))
+    (case [tyTMM]
+      (return (<= i 7)))
     (case [tySegReg]
       (return (<= (bit-and i 7) 5)))
     (case [tyDebugReg tyControlReg]
@@ -389,9 +443,9 @@
   false)
 
 
-^{:go/end 402} (go/method idWithMask [^{:tag (* decoder)} d ^int mask] :results [uint16 bool]
+^{:go/end 456} (go/method idWithMask [^{:tag (* decoder)} d ^int mask] :results [uint16 bool]
   (let [ctx (aget ctxOfMask mask)
-      ^{:line 394} dec (aget decisions (aget decIdx (+ (* (+ (* (.-otype d) nctx) ctx) 256) (conv int (.-opcode d)))))]
+      ^{:line 448} dec (aget decisions (aget decIdx (+ (* (+ (* (.-otype d) nctx) ctx) 256) (conv int (.-opcode d)))))]
     (when (== (len dec) 1)
       (return (aget dec 0) true))
 
@@ -403,14 +457,16 @@
 
 
 (go/const "the attribute mask's bits (dgen's packing)\n"
-  ^{:line 406} [^{:val 1} aXS 1]
-  ^{:line 407} [^{:val 2} aXD 2]
-  ^{:line 408} [^{:val 4} aREXW 4]
-  ^{:line 409} [^{:val 8} aOPSIZE 8]
-  ^{:line 410} [^{:val 16} aADSIZE 16])
+  ^{:line 460} [^{:val 1} aXS 1]
+  ^{:line 461} [^{:val 2} aXD 2]
+  ^{:line 462} [^{:val 4} aREXW 4]
+  ^{:line 463} [^{:val 8} aOPSIZE 8]
+  ^{:line 464} [^{:val 16} aADSIZE 16]
+  ^{:line 465} [^{:val 32} aVEX 32]
+  ^{:line 466} [^{:val 64} aVEXL 64])
 
 
-^{:go/breaks [[5 424]] :go/end 425} (go/func is16Equivalent ^bool [^string o ^string e]
+^{:go/breaks [[5 480]] :go/end 481} (go/func is16Equivalent ^bool [^string o ^string e]
   (when (!= (len o) (len e))
     (return false))
 
@@ -424,9 +480,34 @@
   true)
 
 
-^{:go/end 506} (go/method getID ^bool [^{:tag (* decoder)} d]
-  (let [m 0]
-    (if (== (.-mand d) 0) (do
+^{:go/end 587} (go/method getID ^bool [^{:tag (* decoder)} d]
+  (let [m 0
+      ^{:line 485} pp ^{:go/end 494} (fn [^byte v]
+        (switch (bit-and v 3)
+          (case [1]
+            (set! m bit-or aOPSIZE))
+          (case [2]
+            (set! m bit-or aXS))
+          (case [3]
+            (set! m bit-or aXD))))]
+
+
+    (cond (== (.-vex d) 3) (do
+        (set! m bit-or aVEX)
+        (pp (aget (.-vx d) 2))
+        (when (!= (bit-and (aget (.-vx d) 2) 4) 0)
+          (set! m bit-or aVEXL)))
+
+      (== (.-vex d) 2) (do
+        (set! m bit-or aVEX)
+        (pp (aget (.-vx d) 1))
+        (when (and (== (bit-and (aget (.-vx d) 1) 3) 1) (.-adsize d))
+          (set! m bit-or aADSIZE))
+
+        (when (!= (bit-and (aget (.-vx d) 1) 4) 0)
+          (set! m bit-or aVEXL)))
+
+      (== (.-mand d) 0) (do
         (when (.-opsize d)
           (set! m bit-or aOPSIZE))
 
@@ -440,7 +521,7 @@
           (== (.-rep d) 0xf2)
           (set! m bit-or aXD)
           (== (.-rep d) 0xf3)
-          (set! m bit-or aXS)))
+          (set! m bit-or aXS))) :else
 
 
       (switch (.-mand d)
@@ -505,7 +586,7 @@
       false)))
 
 
-^{:go/end 515} (go/method readImm ^bool [^{:tag (* decoder)} d ^int n]
+^{:go/end 596} (go/method readImm ^bool [^{:tag (* decoder)} d ^int n]
   ^{:go/breaks [4]} (let [(values v ok) (.consume d n)]
     (when (not ok)
       (return true))
@@ -514,68 +595,97 @@
     false))
 
 
-^{:go/end 520} (go/method readOpcodeReg [^{:tag (* decoder)} d ^int size]
+^{:go/end 601} (go/method readOpcodeReg [^{:tag (* decoder)} d ^int size]
   (set! _ size)
   (set! (.-opreg d) (bit-or (<< (.rexBit d 0) 3) (conv int (bit-and (.-opcode d) 7)))))
 
 
-^{:go/end 576} (go/method readOperands ^int [^{:tag (* decoder)} d ^{:tag (slice spec)} sp]
-  (range [_ s sp]
-    (switch (.-enc s)
-      (case [encNone encSI encDI encFP encDup])
-      (case [encSIB]
-        (when (or (.readModRM d) (!= (.-ea d) eaSIB))
-          (return DecInvalid)))
+^{:go/end 686} (go/method readOperands ^int [^{:tag (* decoder)} d ^{:tag (slice spec)} sp]
+  (let [need false] ; a VEX.vvvv other than 1111b that no operand reads: invalid
+    (switch (.-vex d)
+      (case [3]
+        (set! (.-vvvv d) (bit-and (conv int (>> (bit-not (aget (.-vx d) 2)) 3)) 0xf)))
+      (case [2]
+        (set! (.-vvvv d) (bit-and (conv int (>> (bit-not (aget (.-vx d) 1)) 3)) 0xf))))
 
-      (case [encReg]
-        (when (or (.readModRM d) (not (regValid (.-typ s) (.-regI d))))
-          (return DecInvalid)))
+    (when (!= (.-vex d) 0)
+      (set! need (!= (.-vvvv d) 0)))
 
-      (case [encRM]
-        (when (.readModRM d)
-          (return DecInvalid))
+    (range [_ s sp]
+      (switch (.-enc s)
+        (case [encNone encSI encDI encFP encDup])
+        (case [encSIB]
+          (when (or (.readModRM d) (!= (.-ea d) eaSIB))
+            (return DecInvalid)))
 
-        (when (and (== (.-ea d) eaReg) (not (regValid (.-typ s) (.-eaI d))))
-          (return DecInvalid)))
+        (case [encReg]
+          (when (or (.readModRM d) (not (regValid (.-typ s) (.-regI d))))
+            (return DecInvalid)))
 
-      (case [encIB]
-        (when (.readImm d 1)
-          (return DecInvalid)))
+        (case [encRM]
+          (when (.readModRM d)
+            (return DecInvalid))
 
-      (case [encIW]
-        (when (.readImm d 2)
-          (return DecInvalid)))
+          (when (and (== (.-ea d) eaReg) (not (regValid (.-typ s) (.-eaI d))))
+            (return DecInvalid)))
 
-      (case [encID]
-        (when (.readImm d 4)
-          (return DecInvalid)))
+        (case [encIB]
+          (when (.-sawRegImm d) ; the second imm8 of an instruction whose first names a register: its low nibble
+            (set! (.-imms d) (append (.-imms d) (bit-and (aget (.-imms d) (- (len (.-imms d)) 1)) 0xf)))
+            (continue))
 
-      (case [encIO]
-        (when (.readImm d 8)
-          (return DecInvalid)))
+          (when (.readImm d 1)
+            (return DecInvalid))
 
-      (case [encIV]
-        (when (.readImm d (.-immsz d))
-          (return DecInvalid)))
+          (when (or (== (.-typ s) tyXMM) (== (.-typ s) tyYMM))
+            (set! (.-sawRegImm d) true)))
 
-      (case [encIA]
-        (when (.readImm d (.-addrsize d))
-          (return DecInvalid)))
+        (case [encIW]
+          (when (.readImm d 2)
+            (return DecInvalid)))
 
-      (case [encRB encRW encRD encRO encRV]
-        (.readOpcodeReg d 0))
-      (case [encCC]
-        (set! (.-cc d) (conv int (bit-and (.-opcode d) 0xf))))
-      (case [encVSIB encIRC encCF encVVVV encWritemask]
-        (return DecUnsupported))
-      (default
-        (return DecInvalid))))
+        (case [encID]
+          (when (.readImm d 4)
+            (return DecInvalid)))
+
+        (case [encIO]
+          (when (.readImm d 8)
+            (return DecInvalid)))
+
+        (case [encIV]
+          (when (.readImm d (.-immsz d))
+            (return DecInvalid)))
+
+        (case [encIA]
+          (when (.readImm d (.-addrsize d))
+            (return DecInvalid)))
+
+        (case [encRB encRW encRD encRO encRV]
+          (.readOpcodeReg d 0))
+        (case [encCC]
+          (set! (.-cc d) (conv int (bit-and (.-opcode d) 0xf))))
+        (case [encVVVV]
+          (set! need false)
+          (when (or (== (.-vex d) 0) (not (regValid (.-typ s) (.-vvvv d))))
+            (return DecInvalid)))
+
+        (case [encVSIB]
+          (when (or (.readModRM d) (!= (.-ea d) eaSIB) ^:go/paren (and (!= (.-typ s) tyMVSIBX) (!= (.-typ s) tyMVSIBY)))
+            (return DecInvalid)))
+
+        (case [encIRC encCF encWritemask]
+          (return DecUnsupported))
+        (default
+          (return DecInvalid))))
 
 
-  ^{:line 575} DecOK)
+    (when need
+      (return DecInvalid))
+
+    ^{:line 685} DecOK))
 
 
-^{:go/end 588} (go/func sext ^int64 [^uint64 v ^int n]
+^{:go/end 698} (go/func sext ^int64 [^uint64 v ^int n]
   (switch n
     (case [1]
       (return (conv int64 (conv int8 v))))
@@ -588,7 +698,7 @@
 
 
 
-^{:go/end 621} (go/method regOpnd "regOpnd is the register operand of type typ at index i (fixupRegValue).\n" [^{:tag (* decoder)} d ^uint8 typ ^int i ^uint8 size] :results [Opnd string]
+^{:go/end 737} (go/method regOpnd "regOpnd is the register operand of type typ at index i (fixupRegValue).\n" [^{:tag (* decoder)} d ^uint8 typ ^int i ^uint8 size] :results [Opnd string]
   (switch typ
     (case [tyR8]
       (when (and (== (.-rex d) 0) (>= i 4) (<= i 7))
@@ -608,6 +718,12 @@
       (return (.gprOf d (.-regsize d) i)))
     (case [tyXMM]
       (return (lit Opnd :K OXMM :Size 16 :Reg (conv uint8 i)) (+ "XMM" (strconv/Itoa i))))
+    (case [tyYMM]
+      (return (lit Opnd :K OOther :Size 32 :Reg (conv uint8 i)) (+ "YMM" (strconv/Itoa i))))
+    (case [tyVK]
+      (return (lit Opnd :K OOther :Size 8 :Reg (conv uint8 (bit-and i 0xf))) (+ "K" (strconv/Itoa (bit-and i 0xf)))))
+    (case [tyTMM]
+      (return (lit Opnd :K OOther :Size 0 :Reg (conv uint8 i)) (+ "TMM" (strconv/Itoa i))))
     (case [tyMM64]
       (return (lit Opnd :K OOther :Size 8 :Reg (conv uint8 (bit-and i 7))) (+ "MM" (strconv/Itoa (bit-and i 7)))))
     (case [tySegReg]
@@ -620,7 +736,7 @@
   (return (lit Opnd) ""))
 
 
-^{:go/end 633} (go/method gprOf [^{:tag (* decoder)} d ^int size ^int i] :results [Opnd string]
+^{:go/end 749} (go/method gprOf [^{:tag (* decoder)} d ^int size ^int i] :results [Opnd string]
   (switch size
     (case [1]
       (return (.regOpnd d tyR8 i 1)))
@@ -632,7 +748,7 @@
   (.regOpnd d tyR64 i 8))
 
 
-^{:go/end 640} (go/func regName ^string [^int i ^int addr]
+^{:go/end 756} (go/func regName ^string [^int i ^int addr]
   (when (== addr 4)
     (return (aget gpr32 i)))
 
@@ -640,9 +756,9 @@
 
 
 
-^{:go/end 677} (go/method mem "mem is translateRMMemory: the operand and its five MCInst parts.\n" [^{:tag (* decoder)} d ^bool forceSIB ^uint8 size] :results [Opnd (slice string) bool]
+^{:go/end 793} (go/method mem "mem is translateRMMemory: the operand and its five MCInst parts.\n" [^{:tag (* decoder)} d ^bool forceSIB ^uint8 size] :results [Opnd (slice string) bool]
   (let [o (lit Opnd :K OMem :Size size :Base -1 :Index -1 :Scale 1 :Seg (.-seg d) :Disp (.-disp d))
-      ^{:line 645} seg (aget segNames (.-seg d))]
+      ^{:line 761} seg (aget segNames (.-seg d))]
     (switch (.-ea d)
       (case [eaSIB]
         (let [base ""]
@@ -677,10 +793,10 @@
 
 
 
-^{:go/end 771} (go/method translate "translate builds the operands and the MCInst's text parts.\n" ^bool [^{:tag (* decoder)} d ^{:tag (* Inst)} in ^{:tag (slice spec)} sp ^bool wantMI]
-  ^{:go/breaks [[4 770]]} (let [immIx 0
-      ^{:line 682 :tag (func [^int k] [(slice Opnd) (slice string) bool])} one (zero (func [^int k] [(slice Opnd) (slice string) bool]))]
-    (set! one ^{:go/end 759} (fn [^int k] :results [(slice Opnd) (slice string) bool]
+^{:go/end 903} (go/method translate "translate builds the operands and the MCInst's text parts.\n" ^bool [^{:tag (* decoder)} d ^{:tag (* Inst)} in ^{:tag (slice spec)} sp ^bool wantMI]
+  ^{:go/breaks [[4 902]]} (let [immIx 0
+      ^{:line 798 :tag (func [^int k] [(slice Opnd) (slice string) bool])} one (zero (func [^int k] [(slice Opnd) (slice string) bool]))]
+    (set! one ^{:go/end 891} (fn [^int k] :results [(slice Opnd) (slice string) bool]
         (let [s (aget sp k)]
           (switch (.-enc s)
             (case [encNone]
@@ -691,9 +807,22 @@
             (case [encReg]
               (let [(values o n) (.regOpnd d (.-typ s) (.-regI d) (.-size s))]
                 (return (lit (slice Opnd) o) (lit (slice string) n) true)))
+            (case [encVVVV]
+              (let [(values o n) (.regOpnd d (.-typ s) (.-vvvv d) (.-size s))]
+                (return (lit (slice Opnd) o) (lit (slice string) n) true)))
+            (case [encVSIB] ; a vector-indexed address (gathers): not modelled, its MCInst as decode's
+              (let [base ""]
+                (when (>= (.-sibBase d) 0)
+                  (set! base (regName (.-sibBase d) (.-addrsize d))))
+
+                (let [p "XMM"]
+                  (when (== (.-typ s) tyMVSIBY)
+                    (set! p "YMM"))
+
+                  (return (lit (slice Opnd) (lit _ :K OOther :Size (.-size s))) (lit (slice string) base (strconv/Itoa (.-sibScale d)) (+ p (strconv/Itoa (.-sibIdx d))) (strconv/FormatInt (.-disp d) 10) (aget segNames (.-seg d))) true))))
             (case [encRM encSIB]
               (switch (.-typ s)
-                (case [tyR8 tyR16 tyR32 tyR64 tyRv tyMM64 tyXMM tyDebugReg tyControlReg]
+                (case [tyR8 tyR16 tyR32 tyR64 tyRv tyMM64 tyXMM tyYMM tyVK tyTMM tyDebugReg tyControlReg]
                   (when (!= (.-ea d) eaReg)
                     (return nil nil false))
 
@@ -711,7 +840,7 @@
               (let [raw (aget (.-imms d) immIx)]
                 (inc! immIx)
                 (let [n (aget (lit (map uint8 int) [encIB 1] [encIW 2] [encID 4] [encIO 8] [encIV (.-immsz d)] [encIA (.-addrsize d)]) (.-enc s))
-                    ^{:line 714} v (conv int64 raw)]
+                    ^{:line 843} v (conv int64 raw)]
                   (switch (.-typ s)
                     (case [tyRel]
                       (cond (== (.-enc s) encIV)
@@ -729,8 +858,11 @@
                     (let [o (lit Opnd :K OMem :Size (.-size s) :Base -1 :Index -1 :Scale 1 :Seg (.-seg d) :Disp v)]
                       (return (lit (slice Opnd) o) (lit (slice string) (strconv/FormatInt v 10) (aget segNames (.-seg d))) true)))
 
-                  (when (== (.-typ s) tyXMM)
-                    (return nil nil false))
+                  (when (== (.-typ s) tyXMM) ; a register in the immediate's high nibble
+                    (return (lit (slice Opnd) (lit _ :K OXMM :Size 16 :Reg (conv uint8 (bit-and (>> raw 4) 0xf)))) (lit (slice string) (+ "XMM" (strconv/Itoa (conv int (bit-and (>> raw 4) 0xf))))) true))
+
+                  (when (== (.-typ s) tyYMM)
+                    (return (lit (slice Opnd) (lit _ :K OOther :Size 32 :Reg (conv uint8 (bit-and (>> raw 4) 0xf)))) (lit (slice string) (+ "YMM" (strconv/Itoa (conv int (bit-and (>> raw 4) 0xf))))) true))
 
                   (return (lit (slice Opnd) (lit _ :K OImm :Size (.-size s) :Imm v)) (lit (slice string) (strconv/FormatInt v 10)) true))))
             (case [encSI]
@@ -771,7 +903,7 @@
 
 
 
-^{:go/end 817} (go/func Decode "Decode decodes the instruction at the start of b (at most 15 bytes are read), with its MCInst's text when wantMI.\n" [^{:tag (slice byte)} b ^bool wantMI] :results [(* Inst) int]
+^{:go/end 949} (go/func Decode "Decode decodes the instruction at the start of b (at most 15 bytes are read), with its MCInst's text when wantMI.\n" [^{:tag (slice byte)} b ^bool wantMI] :results [(* Inst) int]
   (let [d (addr (lit decoder :b b :sibBase -1 :sibIndex -1))]
     (when [r (.readPrefixes d)] (!= r DecOK)
       (return (addr (lit Inst :Len (conv uint8 (max (.-cur d) 1)))) r))
@@ -783,7 +915,7 @@
       (return (addr (lit Inst :Len (conv uint8 (max (.-cur d) 1)))) DecInvalid))
 
     (let [id (.-id d)
-        ^{:line 786} ins (addr (aget insns id))]
+        ^{:line 918} ins (addr (aget insns id))]
       (when (.-bad ins)
         (return (addr (lit Inst :Len (conv uint8 (max (.-cur d) 1)))) DecInvalid))
 
@@ -818,7 +950,7 @@
 
 
 
-^{:go/end 846} (go/method Text "Text is the instruction as the decode judge compares it with arbace.asm.amd64.decode's: NAME, its MCInst's operands\n(a register's name, `-` for none, an immediate's value) and its flags (lock, rep, repne).\n" ^string [^{:tag (* Inst)} in]
+^{:go/end 978} (go/method Text "Text is the instruction as the decode judge compares it with arbace.asm.amd64.decode's: NAME, its MCInst's operands\n(a register's name, `-` for none, an immediate's value) and its flags (lock, rep, repne).\n" ^string [^{:tag (* Inst)} in]
   (let [^strings/Builder sb (zero strings/Builder)]
     (.WriteString sb (.-Name in))
     (range [_ m (.-MI in)]

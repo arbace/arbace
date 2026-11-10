@@ -302,7 +302,7 @@ pinned tarball and written again in Arbace; doc/asm/AMD64-SURVEY.md, "As built: 
 
 Not yet: `--mdis`'s markup printer; FileCheck's variables (`[[...]]`); a symbolizer (llvm-objdump's targets and relocations).
 
-## 10. x86i, the x86-64 integer machine (AX5.2-AX5.4)
+## 10. x86i, the x86-64 integer machine (AX5.2-AX5.5)
 
 x86i interprets a static x86-64 Linux executable's integer instructions (doc/asm/AMD64-SURVEY.md, "As built: AX5.2"; the design
 AX5-DESIGN, AXS51-AXS62, decided by the user 2026-11-10). It is Go forms built alone by TamaGo's go, a light driver as si's and
@@ -404,5 +404,44 @@ oi's are (AXS51 (a)), out of every key (`arbace_crop_paths`): no Arbace build re
   `cpuid.s` (`# cpu: cpuid`: its own stated stdout, the model's; its CPU-compared run and sys mode the class `:cpuid`), and the controls
   `step`, `bisect` (an injected fault caught at, or bisected to, an instruction of its family) and `loader` (`X86I_INJECT=loader:random`).
 
-Not yet (AX5.5-AX5.6): BMI, ADX, cmpxchg16b, rdrand/rdseed/rdpid, SSE/SSE2 and the VEX contexts; per-run coverage (the opcodes executed
-against the families' claims); musl's harnesses.
+- **AX5.5: the VEX contexts** (AXS81 (a), AXS69's "until needed"): dgen's attribute mask has seven bits (VEX and VEX.L beside the five
+  legacy ones), so `dectab.ae` holds the sixteen IC_VEX contexts and every VEX instruction of maps 0F, 0F38 and 0F3A (1.9 MB); the Go
+  decoder reads the C4 and C5 prefixes (REX's bits from the inverted R, X, B and W, VEX.pp as the mandatory prefix, VEX.L, VEX.vvvv and
+  its validity, the register in an imm8's high nibble, VSIB, YMM, mask and tile registers as unmodelled operands) after
+  X86DisassemblerDecoder as decode.ae ports it. EVEX, XOP, REX2, 3DNow! and VEX's maps 5-7 stay refused (`:encoding-deferred` in the
+  decode check, SIGILL at run time).
+- **AX5.5's families** (AXS59 (a), each behind its bit in the model's CPUID: leaf 0's highest leaf 7; leaf 1's ECX RDRAND, POPCNT,
+  MOVBE, CMPXCHG16B; leaf 7's EBX BMI1, BMI2, RDSEED, ADX and ECX RDPID): `bmi` (andn bextr blsi blsmsk blsr bzhi with their flags,
+  the undefined ones per instruction; mulx pdep pext rorx sarx shlx shrx, flags unchanged; adcx adox, CF or OF alone), cmpxchg8b and
+  cmpxchg16b (atomic; 16-byte alignment, the write made either way), rdrand, rdseed, rdpid (misc; the lockstep copies the native's
+  value, and a native failure's CF). SSE and SSE2 for XMM operands (`sem_sse`; an instruction with an XMM operand is bound by its
+  mnemonic in SSE's table, so `movsd` and `cmpsd` are SSE's or the string family's by their operands): `sse` (the moves, halves,
+  sign masks, pextrw/pinsrw, the logic, shuffles and unpacks, maskmovdqu, ldmxcsr/stmxcsr with MXCSR_MASK 0xffff, movnti, the
+  prefetches, clflush), `sseint` (the packed integer arithmetic, saturations, multiplies, psadbw, averages, minimum and maximum,
+  comparisons, packs, shifts), `ssefp` (add sub mul div sqrt min max, scalar and packed, single and double; cmpps/ss/pd/sd's eight
+  predicates; comis and ucomis) and `ssecvt` (every conversion between int32, int64, single and double, rounded or truncated). A
+  16-byte memory operand must be aligned but for movups, movupd and movdqu (#GP: SIGSEGV). The floating point is computed in
+  software at round to nearest (AXS62 (a)): Go's float64 arithmetic is IEEE 754's; a single's result is the double's rounded again
+  (innocuous: 53 ≥ 2·24 + 2); MXCSR's flags from the operation: IE for an SNaN operand, a QNaN in a signalling comparison, min/max
+  or comis, and the invalid operations (the indefinite QNaN), ZE, DE for a denormal operand of an operation that is not invalid
+  nor divides by zero (the CPU reports the higher-priority one alone), OE, PE from the exact error term (two-sum, a fused
+  multiply-add) and, near the range's bottom, from math/big's exact value, UE for a tiny (after rounding, as x86 detects it) and
+  inexact result; the integer indefinite for a NaN or an out-of-range conversion; the first operand's NaN quieted, else the
+  second's. Not claimed (SIGILL, `:unimplemented`): a rounding mode other than nearest, DAZ, FTZ or an unmasked exception (AX8),
+  rcpps/rsqrtps (each vendor's own approximation), SSE3 and later, the MMX forms (pextrw's memory form, SSE4.1's, is bound by its
+  mnemonic and raises `:unimplemented` from its routine, so the coverage counts it claimed).
+- **The lockstep** compares XMM and MXCSR after every instruction of the SSE families (ldmxcsr and stmxcsr have no XMM operand).
+  `X86I_INJECT=FAMILY:xmm` flips the lowest bit of the instruction's XMM destination, `FAMILY:pe` MXCSR's PE.
+- **The per-run coverage**: `x86i run --coverage FILE` counts each instruction executed; `x86i claimed` lists the decode tables'
+  instructions a family claims (bind's rule over their operands' kinds); x86i-check writes `coverage.txt` (by family, executed of
+  claimed, and the claimed ones never executed) and holds it to `test/asm/x86i-coverage-amd64.txt` (an instruction executed when
+  recorded and not now fails).
+- **The decode check** (`bin/repr-asm x86i-decode-check [--record]`, AXS70 (b); `test/asm/x86i_decode_judge.ae`): every encoding
+  the decode check's `rt` level meets in MC/X86 in 64-bit mode and every byte string of MC/Disassembler/X86's 64-bit runs
+  (`arbace.asm.amd64.decode-check`'s `x86i-corpus`), each decoded alone by `x86i decode-hex` and held to arbace.asm.amd64.decode's
+  decoding (instruction, MCInst operands, lock/rep/repne, or `!invalid`); rows `xrt/FILE`, `xdis/FILE` in
+  `test/asm/x86i-decode-results-amd64.edn`, controls `test/asm/controls-x86i-decode.txt`.
+- **The synthetic programs** add seven families (bmi, adx, ssemov, sseint, ssefp, ssecmp, ssecvt; `lib/hex.s`'s `put_vec` writes a
+  vector and MXCSR in one write), and `test/asm/x86i/fault-movaps.s` a misaligned movaps's SIGSEGV.
+
+Not yet (AX5.6): musl's harnesses.

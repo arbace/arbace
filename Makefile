@@ -25,7 +25,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
-  x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record \
+  x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -579,10 +579,14 @@ x86i-gen-check: ## x86i's decode tables regenerated and compared with the commit
 	bin/repr-asm x86i gen-check
 x86i-synth: ## x86i's synthetic programs, one a family, written into .tmp/x86i/synth, their digests against test/asm/x86i/synth-digests.edn (bin/repr-asm x86i synth DIR)
 	bin/repr-asm x86i synth .tmp/x86i/synth
-x86i-check: ## test/asm/run/'s programs run on x86i, judged by their verdicts and against the CPU's runs, decoded against arbace.asm.amd64.decode, with the controls (bin/repr-asm x86i-check)
+x86i-check: ## test/asm/run/'s, x86i's own and the synthetic programs run on x86i, judged by their verdicts, the CPU's runs and the lockstep, decoded against arbace.asm.amd64.decode, with the coverage and the controls (bin/repr-asm x86i-check)
 	bin/repr-asm x86i-check
 x86i-record: ## x86i's check recorded into test/asm/x86i-results-amd64.edn (bin/repr-asm x86i-check --record)
 	bin/repr-asm x86i-check --record
+x86i-decode-check: ## x86i's Go decoder against arbace.asm.amd64.decode over MC/X86's met encodings and MC/Disassembler/X86's 64-bit strings (bin/repr-asm x86i-decode-check)
+	bin/repr-asm x86i-decode-check
+x86i-decode-record: ## x86i's decode check recorded into test/asm/x86i-decode-results-amd64.edn (bin/repr-asm x86i-decode-check --record)
+	bin/repr-asm x86i-decode-check --record
 repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
 repr-asm-table-arm64: ## A64's encoding table regenerated from Go's arm64asm and cmd/internal/obj/arm64 (bin/repr-asm --arch arm64 table gen)

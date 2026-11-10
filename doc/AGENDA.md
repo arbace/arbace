@@ -226,7 +226,14 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   sys-mode difference to its instruction; rcl rcr shld shrd, the bit family, enter, xlatb, movbe, rdtscp, cpuid's model; signal
   handlers with Linux's frames, sigaltstack, rt_sigreturn; five seeded synthetic programs (`bin/repr-asm x86i synth`). x86i-check:
   35 programs, 34 equal to the CPU (cpuid `:cpuid`), 35 of 35 step-equal and loaded as Linux loads them; 18 controls. Proposed
-  AXS75-AXS81. Next: AX5.5 (VEX contexts, BMI, ADX, SSE/SSE2, coverage; AXS81 (a)), then AX5.6's musl harnesses.
+  AXS75-AXS81.
+  `asm-ax5c` (on `asm-ax5b`; AX5.5, "As built: AX5.5"): the VEX contexts in dgen and the Go decoder; BMI1/2, ADX, cmpxchg8b/16b,
+  rdrand/rdseed/rdpid behind the model's CPUID (leaf 7); SSE/SSE2 (moves, logic, shuffles, packed integers, single and double
+  arithmetic, comparisons, conversions) with MXCSR's flags in software at round to nearest; XMM and MXCSR in the step mode; seven new
+  synthetic families; the per-run coverage (702 of 1,291 claimed, `test/asm/x86i-coverage-amd64.txt`); `bin/repr-asm x86i-decode-check`
+  (AXS70 (b): 20,531 byte strings equal to arbace.asm.amd64.decode's, none different, 62,457 EVEX/XOP/REX2 deferred). x86i-check: 43
+  programs, 42 equal to the CPU (cpuid `:cpuid`), 43 of 43 step-equal; 23 controls. Proposed AXS82-AXS88. Next: AX5.6's musl
+  harnesses (AXS88 (a)).
 
 ## Decided, not built yet
 

@@ -3431,3 +3431,43 @@ Proposed AXS75-AXS81.
 
 Rule slips: three wait loops used process substitution (`<(...)`); one `x86i trace` loop ran without the worktree's TMPDIR, its
 temporary files in /tmp removed by the run itself.
+
+## 2026-11-10 amd64 assembly: AX5.5, x86i's VEX contexts, BMI1/2, ADX, cmpxchg16b, rdrand/rdseed/rdpid, SSE/SSE2 with MXCSR in software, the coverage, the Go decoder's decode check (branch `asm-ax5c`, from `mac/asm-ax5b` `81a49bc21`)
+
+AXS81 (a) as the main session directed. Light lane: stage 0 and TamaGo's go 1.27.1 alone, one run at a time, every repr/go read and
+check under a watcher killing the process tree past 2 GiB; no lock, no gate, no network, nothing installed; only Arbace-built synthetic
+and hand-written programs run, with timeouts. doc/asm/AMD64-SURVEY.md, "As built: AX5.5"; doc/asm/AMD64.md §10.
+
+What was built (Go written in `.tmp` from `.tmp/keep/wt/asm-ax5b/src`, converted by `bin/repr-go read --goos linux --goarch amd64` a
+package at a time with the decode tables stubbed, AXS68 (a); the sources kept in `.tmp/keep/wt/asm-ax5c/`):
+- `arbace.asm.amd64.dgen`: the attribute mask's VEX and VEX.L bits; `go/arbace/x86i/dectab.ae` regenerated (32 contexts, 1.9 MB).
+- `go/arbace/x86i`: the decoder's VEX path (`decode`, `tables`); `sem_bmi` (bmi, cmpxchg8b/16b, rdrand, rdseed, rdpid); `sem_sse` (the
+  SSE and SSE2 families, the floating point and MXCSR in software); `sem`'s bind (SSE's table for an XMM operand), `Claimed`,
+  `FamilyOf`, cpuid's model (leaf 7, RDRAND, CMPXCHG16B); `cpu`'s coverage counts and the injections `FAMILY:xmm`, `FAMILY:pe`; the
+  lockstep's XMM and MXCSR compare for the SSE families and the native's rdrand/rdseed/rdpid values copied.
+- The driver: `run --coverage FILE`, `decode-hex FILE`, `claimed`.
+- `bin/repr-asm x86i-decode-check [--record]` (Makefile `x86i-decode-check`, `x86i-decode-record`): `arbace.asm.amd64.decode-check`'s
+  `x86i-corpus` and `test/asm/x86i_decode_judge.ae`; x86i-check's coverage (`test/asm/x86i-coverage-amd64.txt`) and its step timeout
+  (`REPR_ASM_STEP_TIMEOUT`, 600 s).
+- `test/asm/x86i/gen.ae`: seven families (bmi, adx, ssemov, sseint, ssefp, ssecmp, ssecvt; AX5.4's five programs byte for byte as
+  before), `lib/hex.s`'s `put_vec`; `test/asm/x86i/fault-movaps.s`; `cpuid.s`'s stated stdout for the widened model; the class
+  `:encoding-deferred`; five controls in `controls-x86i.txt`, two in `controls-x86i-decode.txt`.
+
+Results: x86i-check 43 programs (16 of test/asm/run, 15 hand-written, 12 synthetic): 42 equal to the CPU's runs and by their
+verdicts (cpuid `:cpuid`), 43 decoded alike (201,218 instructions), 42 sys-equal (cpuid `:cpuid`), 43 step-equal, 43 loaded as Linux
+loads them; 23 controls fail as they must; recorded (215 rows); coverage 702 of the families' 1,291 claimed instructions executed,
+recorded. x86i-decode-check: 82,988 byte strings of 487 files, 20,531 decoded as arbace.asm.amd64.decode decodes them (13,336 VEX),
+none different, 62,457 in encodings not read yet (EVEX 60,624; `:encoding-deferred`, 324 files); three controls; recorded (487 rows).
+gen-check, run-check, `bin/reap` (0 problems), `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`, `make check-makefile`
+pass.
+
+Found: 0/inf's error term is a NaN (exact, not inexact); the CPU reports an invalid operation's or a division by zero's flag without the
+denormal operand's beside it (AXS84); divpd with a denormal operand lost PE when the remainder underflowed (math/big near the range's
+bottom now). The step mode compared XMM and MXCSR at every instruction of 2.2 million instructions of the new programs before the first
+record.
+
+Considered: a SoftFloat port now (AXS83 (b)); the VEX tables restricted to BMI's rows (AXS82 (b)); vendor tables for rcpps/rsqrtps
+(AXS85 (b)); a coverage report without a record (AXS86 (b)). Proposed AXS82-AXS88.
+
+Rule slips: one command used process substitutions (`<(...)`, a no-op `cmp` loop and a `diff` of a printed file against its source);
+one test read `/dev/stdin` through a here-string. Harmless.

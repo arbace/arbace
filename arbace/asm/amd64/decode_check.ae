@@ -473,9 +473,79 @@
       "rt" (let [r (rt-file a (Long/parseLong b))] (if (= (:met r) (:stated r)) "same" "differs"))
       "obj" (let [r (obj-file a b)] (if (= (:met r) (:stated r)) "same" "differs")))))
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; x86i's Go decoder's corpus (AX5.5, AXS70 (b)): the bytes each level meets in 64-bit mode with arbace.asm.amd64.decode's
+;; decoding of them, for `x86i decode-hex` and test/asm/x86i_decode_judge.ae
+
+(defn x86i-text
+  "A decoding (decode's map) as `x86i decode-text` writes an instruction: NAME, its MCInst's operands (a register's name, `-`
+  for none, an immediate's value), its flags; `!invalid` for a failure."
+  [r]
+  (if (:fail r)
+    "!invalid"
+    (str (:inst r)
+         (apply str (for [o (:mi r)] (str " " (if (contains? o :reg) (or (:reg o) "-") (:imm o)))))
+         (let [fl (filter (:flags r) [:lock :rep :repne])] (when (seq fl) (str " /" (str/join "," (map name fl))))))))
+
+(defn- hex-of [bs] (apply str (map #(format "%02x" (long %)) bs)))
+
+(defn x86i-dis-lines
+  "MC/Disassembler/X86's test at path: each instruction of its 64-bit runs' byte groups as [HEX TEXT SIZE], HEX the bytes from
+  it up to fifteen (the decoder peeks beyond an instruction: a lone F3 before 90 is XRELEASE's), SIZE the decoding's length (a
+  failure `!invalid`), distinct."
+  [^String path]
+  (let [src (asm/latin1 path)
+        parts (split-parts src)
+        seen (java.util.LinkedHashSet.)]
+    (doseq [r (runs src) :when (and (= 64 (:mode r)) (not (:markup? r)))
+            :let [text (if (:input r) (get parts (:input r) "") src)]
+            {bs :bytes} (:groups (read-stream text (:hex? r)))]
+      (loop [i 0]
+        (when (< i (count bs))
+          (let [e (try (d/decode bs i 64) (catch Throwable _ {:fail true :size 1}))]
+            (.add seen [(hex-of (subvec bs i (min (count bs) (+ i 15)))) (x86i-text e) (str (:size e))])
+            (recur (+ i (max 1 (long (:size e)))))))))
+    (vec seen)))
+
+(defn x86i-rt-lines
+  "MC/X86's file at path: each encoding the round trip meets in 64-bit mode (no fixup) as [HEX TEXT SIZE] (SIZE the decoding's
+  length: llvm-mc's lone LOCK first is one byte), distinct."
+  [^String path]
+  (let [src (asm/latin1 path)
+        rs (c/runs src)
+        starts (#'c/line-starts src)
+        read-of (memoize (fn [syn] (try {:items (asm/read-items src {:arch :amd64 :syntax syn})} (catch Throwable _ nil))))
+        seen (java.util.HashSet.)
+        out (java.util.LinkedHashSet.)]
+    (doseq [r rs
+            :let [cs (vec (remove (fn [[l]] (.contains seen l)) (c/checks src (:prefixes r))))
+                  _ (doseq [[l] cs] (.add seen l))]
+            :when (and (seq cs) (:encoding? r) (= 64 (:mode r)))
+            :let [rd (read-of (if (:intel? r) :intel :att))]
+            :when rd
+            :let [stmts (binding [x/*intel* (:intel? r)] (c/assemble-file (:items rd) starts (:mode r)))]
+            [_ cl sts] (#'c/judge-encodings cs stmts)
+            :when (= cl :pass)
+            :let [[bs fix?] (text-bytes (:text (first sts)))]
+            :when (and (not fix?) (<= (count bs) 15))]
+      (let [e (try (d/decode bs 0 64) (catch Throwable _ {:fail true :size 0}))]
+        (.add out [(hex-of bs) (x86i-text e) (str (:size e))])))
+    (vec out)))
+
+(defn x86i-corpus
+  "x86i-corpus DIS-LIST RT-LIST OUT: OUT's lines KIND/NAME HEX TEXT SIZE (xdis, xrt) for x86i decode-hex and its judge."
+  [dis-list rt-list out]
+  (let [rows (fn [l] (vec (for [ln (str/split-lines (slurp l)) :when (seq ln)] (str/split ln #"\t"))))
+        res (concat (when (seq dis-list) (for [[n r] (pmap-rows (rows dis-list) (fn [[n p]] {:lines (x86i-dis-lines p)}))] [(str "xdis/" n) r]))
+                    (when (seq rt-list) (for [[n r] (pmap-rows (rows rt-list) (fn [[n p]] {:lines (x86i-rt-lines p)}))] [(str "xrt/" n) r])))]
+    (spit out (apply str (for [[id r] res [h t z] (:lines r)] (str id "\t" h "\t" t "\t" z "\n"))))
+    (doseq [[id r] res :when (:crash r)] (println (str "repr-asm x86i-decode-check: " id " crashed: " (:crash r))))
+    (println (str "repr-asm x86i-decode-check: " (reduce + (map (comp count :lines second) res)) " byte strings from " (count res) " files"))))
+
 (defn -main [verb & args]
   (case verb
     "check" (apply check args)
+    "x86i-corpus" (apply x86i-corpus args)
     "control" (println (apply control args))
     ;; decode MODE HEX...: each instruction of the bytes, decoded and printed (bin/repr-asm decode)
     "decode" (let [[mode & hs] args
