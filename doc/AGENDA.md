@@ -92,7 +92,7 @@ Six crops are above 90 on all three. What the others still need:
   hs-props, hs-props2, hs-hfsi9), OCaml (ocaml-compl, ocaml-props: OC199-OC205), Scheme (scheme-props to scheme-props3:
   the pinned Unicode 16.0 database), LLVM IR (llvm-lls33, llvm-props, llvm-props2: own verdicts), Rust (rust-rf10b,
   rust-props: RF10b, RFP23-RFP41), the gate (go-tests, gate-lane2: GTS255), controls-cg (Clojure's and Go's maturity 100),
-  table-ready (W-D13: oi and crt type-check in every configuration of goi's table), night10-fixes.
+  table-ready (W-D13: oi and crt type-check in every configuration of goi's table), night10-fixes; oi-table2 (2026-11-10: ext_final.ae's seven table errors fixed, tamago amd64 and arm64 none).
 - **On `java-night` only**: java-rmi (with java-more, java-props, java-j2g, java-refl, jcv7, security, net, serial4),
   java-older, java-classfile, java-http, java-props2, the stage-0 patches (`33d04049c`), and before them F9, F10b, F14,
   JCV2, java-unix, java-serial and java-serial2. They need tonight's conversion (`bin/jrt-convert update`, `bin/j2g-edge
