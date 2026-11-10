@@ -78,6 +78,7 @@ Six crops are above 90 on all three. What the others still need:
   maturity rise with it); eval 0.5 until rsi runs the native front end's MIR (RF10b's passes: 506 of 616 bodies equal;
   RF11, `rust-rf11`), and RES54 (a) holds a ceiling of 80% until RF12 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md),
   [rust/RUST-EVAL-SURVEY.md](rust/RUST-EVAL-SURVEY.md)).
+- py-aot-classid (2026-11-10): the AOT judge records a classed row's `:class` by its id (`aot.ae` `(:id c)`; test `test/python/aot_judge_test.ae`); aot.ae's digest moves, the AOT packages and runner rerun; no record touched.
 - **Python** (all three): the branch `mac/201-python-py7-py11` is not on `next` yet; its read records (240r) are made, the
   rest (stdlib, site-packages, Lib/test, the mutants, the runtime and wheels' outcomes, the AOT runtime and `check --aot`)
   is night 11's. After it: the branch merged into `next` (`merge-py`, the morning of 11-11), the independence facts moved to
