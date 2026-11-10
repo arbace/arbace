@@ -38,14 +38,15 @@
       [(str/trim (slurp st)) (bytes-hex (str work "/" n "." suffix "out")) (slurp-or (str work "/" n "." suffix "err") "")])))
 
 (defn judge-run
-  "x86i's run of n against the verdict [EXIT STDOUT-HEX] and the CPU's run: [RESULT DETAIL]."
+  "x86i's run of n against the verdict [EXIT STDOUT-HEX] and the CPU's run: [RESULT DETAIL]. A program whose header says
+  `# judge: cpu` states its exit status alone; its stdout's judge is the CPU's run (AXS9 (a)): want-out nil."
   [x cpu [want-exit want-out]]
   (let [[st out err] x [cst cout cerr] cpu]
     (cond (nil? x) [:missing "x86i did not run"]
           (= st "124") [:timeout "x86i killed after the time limit"]
           (str/includes? err ":unimplemented") [:unimplemented (str/trim (last (str/split-lines err)))]
           (not= st want-exit) [:verdict (str "exit " st ", stated " want-exit)]
-          (not= out want-out) [:verdict (str "stdout " (subs out 0 (min 64 (count out))) ", stated " (subs want-out 0 (min 64 (count want-out))))]
+          (and want-out (not= out want-out)) [:verdict (str "stdout " (subs out 0 (min 64 (count out))) ", stated " (subs want-out 0 (min 64 (count want-out))))]
           (nil? cpu) [:missing "the CPU's run is missing"]
           (not= st cst) [:cpu (str "exit " st ", the CPU's " cst)]
           (not= out cout) [:cpu "stdout differs from the CPU's"]
@@ -76,10 +77,23 @@
                      (str addr " " h ": x86i " text ", arbace.asm.amd64.decode " want)))]
     (if bad [:decode bad (count rows)] [:pass "" (count rows)])))
 
+(defn cpu-judged
+  "The programs of the list (NAME<tab>PATH lines) whose header says `# judge: cpu`."
+  [lst]
+  (set (for [l (str/split-lines (slurp lst)) :when (seq l) :let [[n p] (str/split l #"\t")]
+             :when (some #(re-matches #"#\s*judge:\s*cpu\s*" %) (take-while #(str/starts-with? % "#") (str/split-lines (slurp p))))]
+         n)))
+
+(defn- wants
+  "Each program's verdict [EXIT STDOUT-HEX], the stdout nil for one the CPU judges."
+  [work lst]
+  (let [cj (cpu-judged lst)]
+    (into {} (for [[n [e o]] (read-tsv (str work "/want.tsv"))] [n [e (when-not (cj n) o)]]))))
+
 (defn rows
   "The run's rows: x86i/NAME and decode/NAME for each program WORK/build.tsv says was built."
-  [work]
-  (let [built (read-tsv (str work "/build.tsv")) want (read-tsv (str work "/want.tsv"))]
+  [work lst]
+  (let [built (read-tsv (str work "/build.tsv")) want (wants work lst)]
     (vec (apply concat
                 (for [[n [c]] (sort-by key built) :when (= c "built")]
                   (let [[r dt] (judge-run (run-of work n "x86i.") (run-of work n "") (want n))
@@ -92,8 +106,8 @@
   REFERENCE's CPU run), `decode` (SUBJECT's decode-text against arbace's decoding of REFERENCE's bytes, line by line) or
   `inject` (SUBJECT's run under X86I_INJECT=REFERENCE, WORK/SUBJECT.inject-FAMILY-FLAG.*, against its own CPU run): `differs` as it must, else `same`;
   `left` when the subject or the reference is missing."
-  [work kind subj ref]
-  (let [want (read-tsv (str work "/want.tsv"))
+  [work lst kind subj ref]
+  (let [want (wants work lst)
         x (run-of work subj "x86i.")
         r (case kind
             "verdict" (when (and x (want ref)) (first (judge-run x (run-of work subj "") (want ref))))
@@ -107,8 +121,8 @@
                            (first (judge-decode mixed))))))]
     (cond (nil? r) "left" (= r :pass) "same" :else "differs")))
 
-(defn main [results work classes-path record]
-  (let [run (rows work)
+(defn main [results work lst classes-path record]
+  (let [run (rows work lst)
         old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
         oldm (into {} (map (fn [[i c]] [i c]) old))
         classes (set (map :id (read-string (slurp classes-path))))
@@ -135,11 +149,11 @@
 
 (defn controls
   "Each control of FILE (ID KIND SUBJECT REFERENCE): its verdict printed; the count of controls that did not differ."
-  [work file]
+  [work lst file]
   (let [bad (atom 0)]
     (doseq [l (str/split-lines (slurp file)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
       (let [[id kind subj ref] (str/split l #"\s+")
-            v (control work kind subj ref)]
+            v (control work lst kind subj ref)]
         (if (= v "differs")
           (println (str "control " id ": fails as it must"))
           (do (swap! bad inc) (println (str "FAIL: control " id ": " v))))))
