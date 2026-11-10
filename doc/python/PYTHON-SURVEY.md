@@ -5792,3 +5792,75 @@ Checks: `lib-test test_augassign test_binop test_descr test_class test_compare t
 classed, 2 failing, the head 220 pass, 31 classed, 0 failing, method by method exactly the three above from failure to ok;
 `make python-essential`, `bin/pyi runtime vet`, `table-check --configs tamago/amd64,tamago/arm64`, and a sample of `runtime
 check` (live oracle: 9 programs and 1 session equal, controls failing as they must).
+
+## As built: 262, the C API's next slices and `_testlimitedcapi` on ci (2026-11-10, the Mac VM, queue 262; 244-3 (a), 244-4 (a))
+
+244's follow-up 3 (the VM's proposal P3): the limited C API beyond the first slice, with reference counts on the handles,
+then the first part of 244-4, CPython's own `_testlimitedcapi` built by ci into pyi's C world.
+
+- **The headers are CPython's own** (`tools/pyi/clib/ctypestest/lib.conf`): every source of the world defines `Py_LIMITED_API`
+  (`_ctypes_test.c` 3.13, `_testlimitedcapi`'s parts 3.5 to 3.14), and ci's checker and builder take CPython 3.14.10's
+  `Include/` in that mode as gcc does (a probe of `_testlimitedcapi/float.c` first). The clean-room `Python.h` of 244 is
+  removed; `tools/pyi/capi/include/pyconfig.h` is Arbace's configuration of `Include/` for ci's target (LP64, musl, the GIL;
+  `HAVE_SYS_TYPES_H`, `SIZEOF_PID_T` and the others `Include/` consults). `pycapi.c` defines the data `Include/` declares
+  without including it (under the limited API the type objects' type is incomplete): the singletons' and the type objects'
+  heads, and a `PyExc_NAME` pointer for every built-in exception, bound at the world's start to the objects' handles
+  (`bindData`). The node program grew from 1.44 to 2.54 MB.
+- **The world's modules**: `_testlimitedcapi.c` and its parts but `heaptype_relative.c` and `vectorcall_limited.c` (their Init
+  functions make types from `PyType_Spec`s: natives that add nothing, the next slice's). The module is single-phase
+  (`PyModule_Create2`): `extModuleObj` keeps the module PyInit made, its functions bound to it (`cMethod`: METH_VARARGS,
+  KEYWORDS, NOARGS, O, FASTCALL; their messages name `module.func()` as `_PyObject_FunctionStr`; a result with an error
+  set, or NULL without one, `_Py_CheckFunctionResult`'s SystemErrors).
+- **Reference counts on the handles** (`go/arbace/pyctypes/world.go`): a proxy is a `PyVarObject` head (ob_refcnt, ob_type,
+  ob_size: the limited API inlines `Py_SIZE`; a list's or bytearray's refreshed after every native, which may have run Python
+  code) whose count is the references C holds. A proxy is made at 0 (a borrowed reference); a new reference C receives raises
+  it; `Py_DecRef`, `_Py_DecRef`, and an inline `Py_DECREF` through `_Py_Dealloc`, lower it; at the end of the outermost C
+  entry from Python (a ctypes foreign call, an extension module's function, its PyInit: `capiEnter`/`capiLeave`, after the
+  result was taken) the proxies at 0 are released, their map entries dropped and their memory freed, so an object C held only
+  during a call is Go's alone again (the probe's weak reference dies). A result C returns is stolen (the cMethod's, PyInit's,
+  a `py_object` restype's: GetResult's `Py_XDECREF` after `O_get`). Types and the singletons are immortal with CPython's
+  `_Py_IMMORTAL_INITIAL_REFCNT`, which the inline `Py_INCREF`/`Py_DECREF` of the old limited versions leave alone. A
+  `py_object` stored in a ctypes object's memory pins its object (CPython keeps it in `_objects`, which the handles cannot
+  follow); one a `from_param` CArg holds is given back when the CArg is collected.
+- **The natives** (`capi_limited.go`, `capi_objects.go`, ports of `Objects/` and `Python/`): `PyModule_*`, `PyArg_Parse` and
+  `PyArg_ParseTuple` (getargs.c's `vgetargs1_impl`, `convertsimple`'s units and `seterror`'s messages), `Py_BuildValue`,
+  the errors (`PyErr_SetObject`, `ExceptionMatches`, `GetRaisedException` and the rest), capsules (`PyCapsule_New` over py's
+  `PyCapsule`, its C destructor run when the capsule is collected; `PyCapsule_Import` as capsule.c), slices (sliceobject.c's
+  `PySlice_Unpack`, `AdjustIndices`, `GetIndicesEx`, `GetIndices`), `PyEval_GetFrame*` and the recursion limit, `PyFrame_Get*`,
+  `PyGILState_*`, `PySys_GetObject`/`SetObject`/`GetXOptions`, `Py_GetConstant[Borrowed]`, the object protocol (attributes,
+  items, `HasAttr*` with the unraisable report of 3.13), sequences (abstract.c's `PySequence_GetItem` and its sq_item index
+  rule), tuples, lists, dicts, numbers', strings' and types' cores, imports. 119 of the 320 C API functions the world
+  references; the other 201 are natives that raise NotImplementedError "pyi's C API does not provide NAME (queue 262)"
+  (`bindMissing`; the C stack unwound as by a longjmp), so the module loads whole and a function reaching one fails alone
+  (`:capi-port`).
+- **pythonapi**: `PyFrame_GetLocals` and the other `PyFrame_Get*`, `PyEval_GetFrame*`, `PyGILState_Ensure`/`Release`/`Check` (a
+  thread that calls C holds the GIL already: `PyGILState_LOCKED`), `Py_PACK_VERSION`, and every native above, resolved by name.
+
+**Counts** (each test's own verdict; `bin/pyi lib-test-all --fresh MODULES`, goi; base 9de32029b, head this branch):
+
+| module | base | head |
+|---|---|---|
+| test_capi (1,195) | 4 pass; `:testcapi` 1,116, `:extension-modules` 71 (7 modules skip on `_testlimitedcapi`) | 37 pass; `:testcapi` 1,154, 0 failing |
+| test_ctypes (621) | 531 pass, `:ctypes-port` 26 | the same, 0 failing |
+| test_bytes (325) | does not import (SkipTest at `ByteArrayTest`'s class body: `:extension-modules` 325) | 253 pass, `:bytes-gaps` 54, 0 failing |
+| test_class (42) | 31 pass | 32 pass (`testHasAttrString`) |
+| test_frame (61) | 47 pass, `:ctypes-port` 1 | 48 pass (`TestFrameCApi.test_basic`); the base's 2 failing |
+| test_codecs, test_support | 266, 64 pass | the same (test_support's 3 failing the base's) |
+
+test_capi's 33 new passes are test_build's 6, test_capsule's 7, test_eval's 11 and test_slice's 9 (none lost); `:testcapi`
+grows by 38 because test_bytearray, test_bytes and test_object of test_capi now import `_testlimitedcapi` and stop at
+`_testcapi` instead (from `:extension-modules`). `:bytes-gaps` (new, deferred) holds test_bytes' 54 failures: pyi's bytes and
+bytearray, two of them Go panics (`test_mutating_index`, `test_resize`), none the C API's. `:capi-port` (new) matches the
+not-provided natives; no sampled row reaches one.
+
+**The check** `.tmp/q262/t/check262.sh ROOT` (the report's appendix): `probe262.py`, 61 lines over every reachable part
+(build, version, slices with their index rules, eval and frames, capsules and `PyCapsule_Import`'s errors, sys, the sequence
+protocol through `bytearray`, `HasAttrString`, getargs' messages, a weak reference that dies once C has let go, pythonapi's
+frames and GIL state), against python3 3.14.10's run of CPython's own `_testlimitedcapi`; its negative control judges the run
+against a mutated reference, which must fail. PASS on the head, FAIL on the base (no `_testlimitedcapi`).
+
+**What remains of 244-4**: the types a spec makes (`PyType_FromSpec`, `FromModuleAndSpec`, `FromMetaclass`: objects whose
+memory is C's, their slots C functions; `heaptype_relative.c`, `vectorcall_limited.c`, `_testcapi`'s heap types), the 201
+natives of `:capi-port`, and `_testcapi` itself: it uses the full API, whose macros read objects' layouts (`PyTuple_GET_ITEM`'s
+`ob_item`, `PyBytes_AS_STRING`, `PyFloat_AS_DOUBLE`, the compact unicode's data), which proxies of a head alone cannot give
+(the DECISION of the report); `_testinternalcapi` by design (244-4 (a)).
