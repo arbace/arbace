@@ -313,6 +313,7 @@
       :loop (resolve-block (:block e) true)
       :drop-temps (resolve-expr (:expr e) true)
       :closure nil
+      :const-block nil   ; (RF13c: an inline const's body has a region tree of its own)
       (walk-expr e))
     (set-cx! prev)))
 
@@ -439,7 +440,7 @@
         (cond
           (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
           ;; a constant (NamedConst): the crate's or std's, or an associated one by its type
-          (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args))
+          (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args :user-ty (:user-ty (r-of e)) :fspan (:fspan e)))
           (and (#{:local :ext} (first rd)) (str/starts-with? (str (nth rd 2)) "Const")) (mk e :named-const ty :def (second rd) :args [])
           ;; a static: the deref of its allocation's pointer (StaticRef: `&T`, `*mut T` for a mutable one)
           (and (= :local (first rd)) (str/starts-with? (str (nth rd 2)) "Static"))
@@ -541,10 +542,19 @@
       x
       {:k :borrow :bk (case (second (:cap cap)) :imm :shared :mut :mut :unique :unique) :arg x :ty (:ty cap) :span (:span e) :tsi (:hir-id e)})))
 
+(def ^:dynamic *body-def* nil)   ; RF13c: the def whose body is built (an inline const's parent)
+
 (defn- mirror-unadjusted [e]
   (let [ty (ty-of e)]
     (case (:kind e)
       :lit (mk e :literal ty :lit (:lit e) :neg false)
+      ;; RF13c: ExprKind::ConstBlock: the inline const unevaluated at the parent's identity arguments
+      ;; (`const any::type_name::<T>::{constant#0}`)
+      :const-block (if-let [d *body-def*]
+                     (mk e :named-const ty :text (str (binding [c/*in-value* true c/*erased-regions* true]
+                                                        (c/print-def-path d (c/identity-args (c/generics-of d))))
+                                                      "::{constant#" (:index e) "}"))
+                     (unsupported "an inline const outside a body"))
       :path (mirror-path e ty)
       :type-relative (if (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e)) (unsupported "a type-relative path" (first ty)))
       ;; RF12: a qualified path to a trait's function (`<T as Clone>::clone`): its function item, as a type-relative one's
@@ -3274,6 +3284,9 @@
                            (enter-scope! [(:hir-id x) :call-site])
                            (enter-scope! [(:hir-id x) :arguments])
                            (swap! *rt* assoc-in [:cx :var-parent] nil)
+                           ;; RF13c: the initializer's destruction scope (region.rs' visit_body for a non-fn body), so a
+                           ;; temporary not extended (a match's scrutinee) dies at the initializer's end
+                           (enter-scope! [(:hir-id x) :destruction])
                            (resolve-local nil x) @*rt*)
                   *b* (atom {:blocks [] :locals [{:ty t :mut true :scope 0}] :source-scopes [[nil nil]] :source-scope 0 :debug []
                              :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
@@ -3336,6 +3349,7 @@
               ret (:output sig)]
         (binding [*edition* ed
                   *self-var* nil *names* {}
+                  *body-def* (when-not closure? (:id d))
                   *res* res
                   *closure-info* closures
                   *closure-tys* (into {} (for [[_ ci] closures :when (= :closure (first (:ty ci)))] [(second (:ty ci)) (mapv :ty (:captures ci))]))

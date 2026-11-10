@@ -2962,3 +2962,63 @@ with the full oracle).
   core as today, a re-make of the pack), core-check's default list unchanged**; (b) add the four modules to core-modules.txt (the
   pack grows the same, but every core-check run then takes num/mod.rs's 40 minutes); (c) leave it (the run takes 32 native bodies,
   the record's for the rest). *Recommended: (a)*.
+
+## As built: RF13c, more of core's bodies equal to rustc's built MIR (2026-11-10)
+
+Branch `rust-rf13c` (from `mac/rust-rf13b` `0d44a0343`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`).
+RF13b's remaining causes taken cheapest per body first; each fix follows rustc 1.99.1's own code, none needs a choice.
+
+### Causes fixed
+
+- **A trait's associated constant through a type-relative path** (`T::IS_ZST`, `Self::SIZE`, `Dst::SIZE`: RF13b's 48 "a path"
+  refusals' largest group): the trait's item found through a trait in scope (std's `SizedTypeProperties` too, its constant's type
+  from core's interface), a parameter's bounds or a trait's `Self`, is THIR's NamedConst at the trait's item with Self the type,
+  and its user type `TypeOf(<T as mem::SizedTypeProperties>::IS_ZST)` (instantiate_value_path).
+- **A parameter's where clauses as method candidates** (assemble_inherent_candidates_from_param): `self.0.fmt(f)` under
+  `T: fmt::Debug` with only the module `fmt` imported, `range.start_bound()` under `R: ops::RangeBounds<usize>`; a projection's
+  item bounds likewise (`self.0.hash(state)` on `<T as DiscriminantKind>::Discriminant: Hash`): RF13b's "a method call without its
+  callee" in Wrapping's, Range's, Discriminant's impls and `slice::index::range`.
+- **An impl item's user type** (write_user_type_annotation_from_args): the impl's parameters fresh variables, apart from the
+  written self type, which is the impl's own self type for `Self` (`NonZero<^c_0>::new_unchecked at <impl .. for NonZero<u8>>`;
+  `MaybeUninit<^c_0>::uninit at <impl .. for MaybeUninit<^c_1>>`).
+- **One substituted token keeps its own place** (transcribe.rs' maybe_use_metavar_location returns the token unchanged unless its
+  span collides): a token passed on by `$($arg)*` or `$t:tt` was given its metavariable's place when it had more than one
+  character. This fixes the format placeholders' spans through `const_panic!` (`span: ?`), `debug_assert!`'s message
+  (`is_reading ( borrow )`) and `const_assert!`'s values' spans.
+- **A const item's initializer has a destruction scope** (region.rs' visit_body for a body that is not a function's): a match's
+  scrutinee temporary dies at the initializer's end (`SizedTypeProperties::MAX_SLICE_LEN`).
+- **Copy of the root file's own trait** (marker.rs: `Copy`, `Sized`, `PointeeSized` are the crate's): `PhantomData<T>: Copy` by the
+  local impl; **`#[derive(Copy)]` on a union** (MaybeUninit's) expanded as a struct's.
+- **Array lengths of `size_of::<T>()`** for a thin pointer, unit or primitive (TypeId's `16 / size_of::<*const ()>()` is 2).
+- **A std enum's unit variant named by its variant's path** (a derive's `$crate::cmp::Ordering::Equal`): its value; a tuple
+  variant's constructor function (`$crate::option::Option::Some`).
+- **Try blocks** without a `?` of their own (lower_expr_try_block: the tail wrapped in `Try::from_output`).
+- **Inline consts** (`const { intrinsics::type_name::<T>() }`): lowered with their `{constant#N}` in the fn's DefCollector order
+  (array lengths, repeat counts, const blocks and braced arguments under the item, closures' and nested items' apart), typed in
+  the enclosing body (an InlineConst shares its parent's typeck root), and in THIR the constant `const any::type_name::<T>::
+  {constant#0}`. The inline const's own body is not built yet.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (about 50 minutes, under 2.5 GB): **5,474 equal** to rustc's built MIR
+  (5,398 at RF13b), 155 more but for the allocations (114: most of the bodies whose format placeholders' spans were wrong now
+  differ only by allocation ids), 85 differ (148), 63 refused (117), 74 without a body of rustc's by their key. No module lost an
+  equal body; the largest gains iter::range +26 (NonZero's user types), mem +9, ptr +8, any +7, num::wrapping +6.
+- Refusals left: 36 "a path" (const parameters as values in array methods, `unicode::*` tables of an unread module, a few
+  private paths), 14 method calls without their callee (crate-private methods of other files: `IndexRange`'s, RFP52), 13 others.
+
+### Left
+
+- Crate-private items of files outside the 37 (RFP52); a const parameter used as a value (`N` in `as_array`, `spec_next_chunk`);
+  the inline const's own body (`{constant#N}`: the oracle has them, core-check does not build them yet); an unnormalized alias in
+  a signature (`ChangeOutputType` in `try_from_fn`); user types of derive's `AssertParamIsClone` spans; the allocation ids.
+
+### Proposed (RF13c)
+
+- **RFP52 core's crate-private items in the interface pass.** Bodies of the 37 modules name `pub(crate)` items of other files,
+  which std's interface (rustdoc's JSON) does not hold: `ops::IndexRange`'s `start`/`end`/`len` (6 bodies of slice/index.rs),
+  `iter::adapters::try_process` (result's and option's `from_iter`), `clone::uninit::CopySpec` (2 in the essential subset).
+  RF12-P2's interface pass collects only the checked files. Options: (a) **a list `test/rust/front/core-iface-extra.txt`
+  (`ops/index_range.rs`, `iter/adapters/mod.rs`, `clone/uninit.rs` to start) whose files the interface pass collects too, before
+  any body, in every core-check run (a few minutes more)**; (b) `CORE_IFACE_FILES=all` by default (every module file, RF12-P7's
+  night pass, far longer); (c) leave it. *Recommended: (a)*.

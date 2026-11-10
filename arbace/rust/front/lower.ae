@@ -55,6 +55,26 @@
 (def ^:dynamic *lt-types* #{})      ; the crate's own types with lifetime parameters (by name)
 (def ^:dynamic *seg-res* nil)       ; the resolution of the path's last segment (its type), while its arguments are lowered
 (def ^:dynamic *std-lts* {})        ; std's types: def path -> number of lifetime parameters (RFP10: the helper's --std-names data)
+(def ^:dynamic *anon-index* nil)    ; RF13c: a fn's anonymous constants (AST AnonConst forms) -> their `{constant#N}` disambiguator
+
+(defn- anon-consts-index
+  "RF13c: the DefCollector's AnonConst and InlineConst definitions under a fn item, in its walk order (generics, the
+  signature, the body; an array length, a repeat count, a const block, a braced const argument), each its parent's
+  `{constant#N}`: identity map from the AST form to N. A closure's, a nested item's and an anonymous constant's own
+  contents have other parents."
+  [f]
+  (let [m (java.util.IdentityHashMap.) n (atom -1)]
+    (letfn [(w [x] (cond (seq? x)
+                         (case (first x)
+                           AnonConst (.put m x (swap! n inc))
+                           Item nil
+                           (if (and (= 'Expr (first x)) (= 'Closure (head (fv x :kind))))
+                             nil
+                             (doseq [y (rest x)] (w y))))
+                         (vector? x) (doseq [y x] (w y))
+                         :else nil))]
+      (w (fv f :generics)) (w (fv f :sig)) (w (fv f :body)))
+    m))
 
 (defn- next-id [] (when *owner* [(first @*owner*) (second (swap! *owner* update 1 inc))]))
 (defn- node [m] (assoc m :hir-id (next-id)))
@@ -452,6 +472,29 @@
       Assign (ex {:kind :assign :lhs (lower-expr (second k)) :rhs (lower-expr (nth k 2))})
       AssignOp (let [[_ op a b] k] (ex {:kind :assign-op :op (assignops (fv op :node)) :lhs (lower-expr a) :rhs (lower-expr b)}))
       Block (let [[_ b l] k] (ex {:kind :block :block (lower-block b) :label (label-name l)}))
+      ;; RF13c: an inline const (`const { intrinsics::type_name::<T>() }`): its value's expression, typed with the
+      ;; enclosing body's (one typeck root), its `{constant#N}` by the fn's DefCollector order
+      ConstBlock (let [anon (second k) n (when *anon-index* (.get ^java.util.IdentityHashMap *anon-index* anon))]
+                   (if (some? n)
+                     (ex {:kind :const-block :expr (lower-expr (fv anon :value)) :index n})
+                     (ex {:kind :err :ast 'ConstBlock})))
+      ;; RF13c: a try block without a `?` of its own (lower_expr_try_block: its tail wrapped in `Try::from_output`, the
+      ;; lang item's call); with one, whose break to the catch scope is not lowered yet, still an error
+      TryBlock (let [b (second k)
+                     own-try? (letfn [(w [x] (cond (and (seq? x) (= 'Expr (first x)))
+                                                   (let [kk (fv x :kind)]
+                                                     (cond (= 'Try (head kk)) true
+                                                           (#{'Closure 'TryBlock} (head kk)) false
+                                                           :else (some w (rest x))))
+                                                   (seq? x) (some w x)
+                                                   (vector? x) (some w x)
+                                                   :else false))]
+                                (boolean (some w (fv b :stmts))))
+                     blk (when-not own-try? (lower-block b))]
+                 (if (and blk (:expr blk))
+                   (let [tail (:expr blk) tsp (:span tail)]
+                     (ex {:kind :block :block (assoc blk :expr (call-e (path-e "from_output" tsp) [tail] tsp)) :label nil}))
+                   (ex {:kind :err :ast 'TryBlock})))
       Let (let [[_ p init] k] (ex {:kind :let :pat (lower-pat p) :init (lower-expr init)}))
       If (let [[_ c t els] k]
            (ex {:kind :if :cond (lower-cond c) :then (block-e (lower-block t) (span-of t))
@@ -788,6 +831,7 @@
             :else nil))))
 
 (defn- lower-fn [f]
+  (binding [*anon-index* (anon-consts-index f)]
   (let [sig (fv f :sig) d (fv sig :decl) h (fv sig :header)
         params (binding [*sig* true] (lower-fn-decl-params d))
         ;; impl Trait in argument position (at any depth, an associated item constraint's too): a synthetic type parameter
@@ -818,7 +862,7 @@
      :self (implicit-self (fv d :inputs))
      :params params
      :output (let [o (fv d :output)] (when (= 'Ty (head o)) (binding [*sig* true] (lower-ty (second o)))))
-     :body (some-> (some-val (fv f :body)) lower-block)}))
+     :body (some-> (some-val (fv f :body)) lower-block)})))
 
 (defn- use-items [tree prefix sp attrs vis & [file]]
   ;; one item per leaf of a use tree (lower_use_tree), and a ListStem for a nested tree

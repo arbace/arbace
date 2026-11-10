@@ -743,8 +743,9 @@
   [[tr args]]
   (let [self (shallow (first args))]
     (cond
-      (= tr (c/lang "sized")) (not (unsized? self))
-      (#{(c/lang "meta_sized") (c/lang "pointee_sized")} tr) true
+      (= (or (c/ext-of-local tr) tr) (c/lang "sized")) (not (unsized? self))
+      ;; (RF13c: in marker.rs these are the root file's own traits)
+      (#{(c/lang "meta_sized") (c/lang "pointee_sized")} (or (c/ext-of-local tr) tr)) true
       (dyn-implements? self tr) true
       ;; an alias's item bounds (assemble_candidates_from_projected_tys)
       (alias-implements? self tr) true
@@ -864,6 +865,28 @@
                  (concat (local-impls false nil t)
                          (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
            (do (rollback! s) nil)))
+     ;; RF13c: a parameter's where clauses (assemble_inherent_candidates_from_param): the bound traits' methods, in scope
+     ;; or not (`self.0.fmt(f)` under `T: fmt::Debug` with only the module `fmt` imported), Self the parameter
+     (let [st (shallow t)]
+       (when (#{:param :proj} (first st))
+         (some (fn [cl]
+                 (when (and (= :trait (first cl)) (= st (shallow (first (second (second cl))))))
+                   (let [[tr targs] (second cl) s (snapshot)]
+                     (when-let [[def k] (trait-item tr nm)]
+                       (or (when (= "AssocFn" (str k)) (try-def def (vec targs))) (do (rollback! s) nil))))))
+               (concat (param-env)
+                       ;; a projection's item bounds (`self.0.hash(state)` on `<T as DiscriminantKind>::Discriminant: Hash`),
+                       ;; their supertraits too, Self the projection
+                       (when (= :proj (first st))
+                         (let [[_ sad sargs] st
+                               bounds (if (number? sad)
+                                        (try (vec (for [cl (c/item-bounds sad) :when (= :trait (first cl))] (erase (c/subst cl (vec sargs))))) (catch Throwable _ []))
+                                        (vec (for [[_ _ p bs] (:items (get (:traits c/*si*) (c/path-parent sad))) :when (= p sad)
+                                                   b bs :when (= 'trait (head b))]
+                                               [:trait [(nth b 1) (erase (c/subst (mapv c/sty->ty (nth b 2)) (vec sargs)))]])))
+                               bounds (into bounds (mapcat (fn [cl] (trait-supers (second cl))) bounds))]
+                           (for [cl bounds :when (= :trait (first cl))]
+                             (let [[tr as] (second cl)] [:trait [tr (vec (cons st (rest as)))]]))))))))
      ;; traits in scope (assemble_extension_candidates_for_trait): Self a fresh variable, the method's self type unified
      ;; with the adjusted receiver, then `Self: Trait` proven (an impl, or a parameter's bound)
      (some (fn [tr]
@@ -943,11 +966,14 @@
                     (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
       (some (fn [tr]
               (when-let [[def k] (trait-item tr nm)]
-                (if (and (str/starts-with? (str k) "AssocConst") (number? def))
-                  ;; a trait's associated constant for the type: its declared type with Self the type
+                (if (and (str/starts-with? (str k) "AssocConst") (or (number? def) (get (:consts c/*si*) def)))
+                  ;; a trait's associated constant for the type: its declared type with Self the type (RF13c: std's
+                  ;; trait's too, `T::IS_ZST` through SizedTypeProperties' blanket impl; THIR's NamedConst at the trait's item)
                   (let [targs (vec (cons t (drop 1 (fresh-args tr)))) s (snapshot) ok (impls-for t tr (vec (rest targs)))]
                     (rollback! s)
-                    (when ok (erase (c/subst (c/type-of def) targs))))
+                    (when ok
+                      (when *assoc-const* (reset! *assoc-const* [def targs :trait]))
+                      (erase (c/subst (if (number? def) (c/type-of def) (c/sty->ty (:ty (get (:consts c/*si*) def)))) targs))))
                 (when (= "AssocFn" (str k))
                   (let [targs (vec (cons t (drop 1 (fresh-args tr))))
                         s (snapshot)
@@ -1087,7 +1113,7 @@
   (let [v (c/path-parent p)]
     (if (get (:adts c/*si*) v) v (c/path-parent v))))
 
-(declare probe-assoc-fn)
+(declare probe-assoc-fn std-variant)
 
 (defn- type-relative-value
   "A value path `Type::name` (its prefix a type): the associated function an inherent impl or a trait gives the type"
@@ -1111,7 +1137,8 @@
             ;; without arguments all its parameters fresh variables, defaulted ones too)
             _ (when (and *user-self* bty)
                 (reset! *user-self* (let [st (shallow bty)]
-                                      (if (and (= :adt (first st)) (empty? (:args (:args (first segs)))))
+                                      ;; (RF13c: `Self` is the impl's self type as it is: `Self::new_unchecked` in an impl for NonZero<u8>)
+                                      (if (and (= :adt (first st)) (empty? (:args (:args (first segs)))) (not= "Self" base-name))
                                         [:adt (second st) (fresh-args (second st))]
                                         bty))))]
         (when (and bty (not (#{:err :unknown} (first bty))))
@@ -1129,7 +1156,10 @@
                                 (when (= "Trait" (:kind d))
                                   (when-let [[item k] (trait-item (:id d) (:ident (peek segs)))]
                                     ;; (Self the parameter itself: `Self::read_uint(..)` in a provided method)
-                                    (cond (str/starts-with? (str k) "AssocConst") (erase (c/subst (c/type-of item) (vec (cons (shallow bty) (rest (fresh-args (:id d)))))))
+                                    (cond (str/starts-with? (str k) "AssocConst")
+                                          (let [targs (vec (cons (shallow bty) (rest (fresh-args (:id d)))))]
+                                            (when *assoc-const* (reset! *assoc-const* [item targs :trait]))
+                                            (erase (c/subst (c/type-of item) targs)))
                                           (= "AssocFn" (str k)) [:fndef item (vec (cons (shallow bty) (rest (fresh-args item))))]
                                           :else nil)))))
                       c/*scope*))
@@ -1141,7 +1171,9 @@
                                    (let [[tr targs] (second cl)]
                                      (when-let [[item k] (trait-item tr nm)]
                                        (cond (= "AssocFn" (str k)) [:fndef item (into (vec targs) (drop (count targs) (fresh-args item)))]
-                                             (and (str/starts-with? (str k) "AssocConst") (number? item)) (erase (c/subst (c/type-of item) (vec targs)))
+                                             (and (str/starts-with? (str k) "AssocConst") (number? item))
+                                             (do (when *assoc-const* (reset! *assoc-const* [item (vec targs) :trait]))
+                                                 (erase (c/subst (c/type-of item) (vec targs))))
                                              :else nil)))))
                         (param-env)))))))))))
 
@@ -1162,6 +1194,15 @@
   (cond (number? def) (let [p (c/def-of (:parent (c/def-of def)))] (when (str/starts-with? (str (:kind p)) "Impl") (:id p)))
         (string? def) (let [pp (c/path-parent def)] (when (re-find #"\{impl#\d+\}$" (str pp)) pp))
         :else nil))
+
+(defn- user-impl-args
+  "RF13c: an impl item's arguments as instantiate_value_path writes its user type (write_user_type_annotation_from_args,
+  before the impl's self type is equated with the written one): the impl's parameters fresh variables, the item's own
+  as they are (written or fresh)"
+  [ip args]
+  (if ip
+    (let [fa (vec (fresh-args ip))] (if (<= (count fa) (count args)) (into fa (drop (count fa) args)) args))
+    args))
 
 (def ^:dynamic *canon-erased* false)   ; canonicalizing a path's written arguments: their elided regions variables
 
@@ -1313,6 +1354,9 @@
                        (get (:consts c/*si*) p) (erase (c/sty->ty (:ty (get (:consts c/*si*) p))))
                        (#{"Ctor(Variant, Fn)" "Ctor(Struct, Fn)"} k) [:fndef p (fresh-args (std-adt-of p))]
                        (#{"Ctor(Variant, Const)" "Ctor(Struct, Const)"} k) (let [a (std-adt-of p)] [:adt a (fresh-args a)])
+                       ;; RF13c: a derive's `$crate::cmp::Ordering::Equal`, `$crate::option::Option::Some` (the variant by
+                       ;; the written path): a unit variant's value, a tuple variant's constructor function
+                       (and (= "Variant" k) (std-variant p)) (std-value-ty p)
                        :else [:unknown]))
           ;; `Self` as a value in an impl of a tuple or unit struct: its constructor at the impl's self type's arguments
           :self-alias (let [st (erase c/*self-ty*)]
@@ -1642,7 +1686,9 @@
       :param (boolean (some (fn [cl] (and (= :trait (first cl)) (= (c/lang "copy") (first (second cl))) (= t (shallow (first (second (second cl))))))) (param-env)))
       ;; RF12: the impl's clauses on a parameter by the parameter environment (`impl<T: Copy> Copy for MaybeUninit<T>` is not
       ;; MaybeUninit<T>'s for a T without Copy), not assumed as an accepted program's obligations are
-      :adt (let [s (snapshot) r (binding [*strict-params* true] (impls-for t (c/lang "copy") []))] (rollback! s) (vector? r))
+      ;; (RF13c: in marker.rs Copy is the root file's own trait, its impls the crate's: `impl Copy for PhantomData<T>`)
+      :adt (boolean (some (fn [tr] (let [s (snapshot) r (binding [*strict-params* true] (impls-for t tr []))] (rollback! s) (vector? r)))
+                          (distinct (remove nil? [(c/lang "copy") (c/local-def-of-ext (c/lang "copy"))]))))
       ;; RF13b: a rigid projection by its where clauses, then its item bounds (`<T as Pointee>::Metadata: Copy`)
       :proj (boolean (or (some (fn [cl] (and (= :trait (first cl)) (= (c/lang "copy") (first (second cl))) (= t (shallow (first (second (second cl))))))) (param-env))
                          (alias-implements? t (c/lang "copy"))))
@@ -1781,6 +1827,8 @@
   (let [ty
         (case (:kind e)
           :lit (lit-ty (:lit e) expected)
+          ;; RF13c: an inline const: its value checked in the enclosing body (InlineConst shares its parent's typeck root)
+          :const-block (check-expr (:expr e) expected)
           ;; a type-relative value path whose type has generic arguments (`Pair::<u8, 4>::len`): resolve_fully_qualified_call
           ;; on the lowered self type
           :type-relative (let [_ (doseq [l (ty-consts (:qself e))] (anon-const! l true))
@@ -1788,7 +1836,7 @@
                            (let [t (or (when-not (#{:err :unknown} (first bt)) (probe-assoc-fn bt (:ident (:seg e)))) [:unknown])]
                              (when (and *extra* (= :fndef (first t)))
                                (let [ip (impl-item-of (second t))]
-                                 (when-let [u (canonical-user-ty (second t) (nth t 2) (when ip [ip bt]))] (note! e :user-ty u))))
+                                 (when-let [u (canonical-user-ty (second t) (user-impl-args ip (nth t 2)) (when ip [ip bt]))] (note! e :user-ty u))))
                              t))
           ;; a qualified path `<T as Trait>::item`: the trait's item with Self the type (its other arguments fresh)
           :qpath (let [bt (body-ty (:qself e))
@@ -1826,19 +1874,22 @@
                            (let [t (apply-turbofish {:kind :path :path {:segs segs}} t)]
                              (when (and *extra* (= :fndef (first t)))
                                (let [ip (impl-item-of (second t))]
-                                 (when-let [u (canonical-user-ty (second t) (nth t 2) (when ip [ip bt]))] (note! e :user-ty u))))
+                                 (when-let [u (canonical-user-ty (second t) (user-impl-args ip (nth t 2)) (when ip [ip bt]))] (note! e :user-ty u))))
                              t))))
                        [:unknown]))
           :path (do (doseq [seg (:segs (:path e)) a (:args (:args seg)) :when (and (map? (:const a)) (not (:node a)))] (anon-const! (:const a) true))
                     (binding [*user-self* (atom nil) *assoc-const* (atom nil)]
                       (let [t (apply-turbofish e (path-ty e))]
-                        (when (and *extra* @*assoc-const*) (note! e :named-const @*assoc-const*))
+                        (when (and *extra* @*assoc-const*) (note! e :named-const @*assoc-const*)
+                          ;; RF13c: a trait's constant through a type-relative path: TypeOf(<T as Trait>::C)
+                          (when (= :trait (nth @*assoc-const* 2 nil))
+                            (let [[d args] @*assoc-const*] (when-let [u (canonical-user-ty d args nil)] (note! e :user-ty u)))))
                         ;; RF10: the path's user type annotation (instantiate_value_path)
                         (when (and *extra* (#{:fndef} (first t)))
                           (let [[_ d args] t
                                 ip (impl-item-of d)
                                 self (when (and ip @*user-self*) [ip @*user-self*])]
-                            (when-let [u (canonical-user-ty d args self)] (note! e :user-ty u))))
+                            (when-let [u (canonical-user-ty d (if self (user-impl-args ip args) args) self)] (note! e :user-ty u))))
                         t)))
           :call (check-call e expected)
           :method (let [rt (check-expr (:receiver e) nil)

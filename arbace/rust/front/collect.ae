@@ -708,6 +708,21 @@
           (when-let [c (:ctor (def-of id))] [id (:kind (def-of c))])
           [id (:kind (def-of id))])))))
 
+(defn local-def-of-ext
+  "RF13c: the root file's own definition of an interface path (core's `marker::Copy` in marker.rs), its def id, else nil"
+  [p]
+  (first (local-of-ext p)))
+
+(def ^:private ext-of-local-cache (atom nil))
+
+(defn ext-of-local
+  "RF13c: the interface path of a definition of the root file (`*local-paths*` reversed), else nil"
+  [id]
+  (when (and *local-paths* (number? id))
+    (let [m @*local-paths* [cm r] @ext-of-local-cache
+          r (if (identical? cm m) r (let [r (into {} (for [[p i] m :when (number? i)] [i p]))] (reset! ext-of-local-cache [m r]) r))]
+      (get r id))))
+
 (defn res-def
   "A path's resolution as [:local ID KIND] [:ext PATH KIND] [:prim N] [:param P] [:self-alias] [:self-param] or nil"
   [path]
@@ -795,6 +810,22 @@
                t (str/replace (str/replace t "_" "") #"(u|i)(8|16|32|64|128|size)$" "")]
            (when (re-matches #"[0-9]+" t) (bigint t)))
     :block (when (empty? (:stmts (:block x))) (some-> (:expr (:block x)) eval-int-expr))
+    ;; RF13c: `size_of::<T>()` of a thin pointer, a unit or a primitive (TypeId's `16 / size_of::<*const ()>()`): its
+    ;; layout's size on the target (x86_64: 8-byte pointers)
+    :call (when (empty? (:args x))
+            (let [f (:func x) segs (:segs (:path f)) sg (peek segs)
+                  tys (keep :ty (:args (:args sg)))]
+              (when (and (= :path (:kind f)) (= "size_of" (:ident sg)) (= 1 (count tys)))
+                (let [t (first tys)
+                      prim {"u8" 1 "i8" 1 "bool" 1 "u16" 2 "i16" 2 "u32" 4 "i32" 4 "f32" 4 "char" 4 "u64" 8 "i64" 8 "f64" 8
+                            "usize" 8 "isize" 8 "u128" 16 "i128" 16}
+                      prim-of (fn [t] (when (and (= :path (:kind t)) (= 1 (count (:segs (:path t))))) (get prim (:ident (first (:segs (:path t)))))))
+                      thin? (fn [t] (or (and (= :tup (:kind t)) (empty? (:elts t))) (prim-of t)))]
+                  (some-> (cond (and (= :tup (:kind t)) (empty? (:elts t))) 0
+                                (prim-of t) (prim-of t)
+                                (and (#{:ptr :ref} (:kind t)) (thin? (:ty (:mt t)))) 8
+                                :else nil)
+                          bigint)))))
     :binary (let [a (eval-int-expr (:lhs x)) b (eval-int-expr (:rhs x))]
               (when (and a b)
                 (case (:op x) "+" (+ a b) "-" (when (>= a b) (- a b)) "*" (* a b)

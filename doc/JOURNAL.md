@@ -2914,3 +2914,21 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   record's body for them. Against core-oracle's full dump (by hand) the 10 of `str`, `slice` and `fmt` are equal. RF12-P6's "43 of 48"
   was measured against the full dump. Proposed RFP51 (a): a list of the export's modules added to the pack at the oracle tier.
   doc/rust/FRONTEND-SURVEY.md, "As built: RF13b".
+
+## 2026-11-10: RF13c, more of core's bodies equal to rustc's built MIR (branch `rust-rf13c`, from `mac/rust-rf13b` `0d44a0343`)
+
+- RF13b's remaining causes taken cheapest per body first, each after rustc 1.99.1's own code (the pinned rust-src; rustc's
+  rustc_hir_typeck method probe, instantiate_value_path, rustc_expand's transcribe.rs, rustc_hir_analysis' region.rs,
+  rustc_ast_lowering's try blocks and inline consts as the models): a trait's associated constant through a type-relative path
+  (`T::IS_ZST`) as NamedConst with its user type; a parameter's where clauses and a projection's item bounds as method candidates
+  whether their trait is in scope or not; an impl item's user type with the impl's parameters fresh and `Self` the impl's own self
+  type; one substituted token keeping its own place (the metavariable's place only for a span over several tokens), which fixed
+  the format placeholders' spans through `const_panic!` and `debug_assert!`'s messages; a const initializer's destruction scope;
+  Copy through marker.rs's own traits and `#[derive(Copy)]` on a union; `size_of::<T>()` in array lengths; a std variant named
+  by its written path; try blocks without their own `?`; inline consts as constants `{constant#N}` of their parent, numbered in the
+  DefCollector's order. Alternatives considered: special-casing `SizedTypeProperties` (rejected: the probe's general rule covers
+  it and Wrapping's `fmt`), and dropping the metavariable spans altogether (rejected: RF12 needs them for spans joining a
+  definition's tokens to a fragment).
+- core-check: 5,474 equal (5,398 at RF13b), 155 but for the allocations (114), 85 differ (148), 63 refused (117); no module lost an
+  equal body. Proposed RFP52 (a): the interface pass over a list of files holding crate-private items the 37 modules name.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13c".
