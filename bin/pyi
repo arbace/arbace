@@ -132,12 +132,14 @@
 #                                  their subjects run with every sample; PYI_RUNTIME_CONTROLS another file) end each family;
 #                                  tables: the two generators alone (the oracle tier's); queue 238: also the bytecode view's
 #                                  tables (tools/pyi/bytecode_table.py, 3.14.10's and --suffix 315's; opcode_table.py --suffix
-#                                  315 by the 3.15.2 oracle), each 3.15 one with its negative control (3.14.10's made into it)
-#                                  gen-tables [TABLE...] (queue 265): builtins_{opcode,errno}_table.go made by Arbace from the pinned
-#                                  CPython 3.14.10 and musl 1.2.6 tarballs (tools/pyi/runtime_tables.ae on stage 0: the modules' own
-#                                  C, errnomodule.c's add_errcode calls, _opcode's metadata, preprocessed by repr/c's preprocessor),
-#                                  gofmt'd, byte for byte the printed runtime's; a control per table (one source fact changed must
-#                                  differ); no python3 (tools/pyi/{opcode,errno}_table.py: the oracle tier's)
+#                                  315 by the 3.15.2 oracle), each 3.15 one with its negative control (3.14.10's made into it);
+#                                  queue 265: also the five tables gen-tables makes, against tools/pyi/{errno,opcode,fcntl,socket,posix}_table.py
+#                                  gen-tables [TABLE...] (queue 265): builtins_{opcode,errno,fcntl,socket,posix}_table.go made by
+#                                  Arbace from pinned sources (tools/pyi/runtime_tables.ae on stage 0: the modules' own C preprocessed
+#                                  by repr/c's preprocessor against the CPython 3.14.10 and musl 1.2.6 tarballs, Alpine's pyconfig.h,
+#                                  Linux's and BlueZ's headers, tools/pyi/header-apks.sha256, and Go's syscall), gofmt'd, byte for
+#                                  byte the printed runtime's; a control per table (one source fact changed must differ); no
+#                                  python3 (tools/pyi/*_table.py of the five: the oracle tier's)
 #   bin/pyi aot FILE.py [ARGS...]  PY8: FILE compiled by pyi's AOT (arbace.python.aot: the IR to Go forms over go/arbace/py, its
 #                                  module-level imports compiled ahead; printed by repr/go, built by TamaGo's go in
 #                                  .tmp/repr-python/pyi/aot/mod) and run; source compiled at run time by the host's compiler
@@ -1601,6 +1603,19 @@ cmd_runtime() {
       bc_tables_check "$t/src/py" || rc=1
       python3 -I -S -B "$root/tools/pyi/cjkcodecs_table.py" "$top" "$t/src/py/builtins_cjk_table.go" --check \
         && echo "runtime: builtins_cjk_table.go is cjkcodecs_table.py's from the tarball's headers" || { echo "runtime: builtins_cjk_table.go DIFFERS"; rc=1; }
+      # queue 265: the five tables Arbace makes (bin/pyi runtime gen-tables) against the python3 generators that recorded them
+      # from CPython's own modules (the oracle's: this machine's CPython 3.14.10); fcntl's, socket's and posix's with the build
+      # line the committed files carry
+      local g
+      for g in errno opcode fcntl socket posix; do
+        case $g in
+          errno|opcode) python3 -I -S -B "$root/tools/pyi/${g}_table.py" "$t/$g.go" ;;
+          *) python3 -I -S -B "$root/tools/pyi/${g}_table.py" "${ARBACE_GOROOT:-/root/tamago-go}" "$t/$g.go" ;;
+        esac && tamago_go gofmt "$t/$g.go" > "$t/$g.fmt" \
+          && { case $g in fcntl|socket|posix) { printf '//go:build linux\n\n'; cat "$t/$g.fmt"; } > "$t/$g.fmt2" && mv "$t/$g.fmt2" "$t/$g.fmt" ;; esac; } \
+          && cmp -s "$t/$g.fmt" "$t/src/py/builtins_${g}_table.go" \
+          && echo "runtime: builtins_${g}_table.go is ${g}_table.py's from the oracle's $g" || { echo "runtime: builtins_${g}_table.go DIFFERS from ${g}_table.py's"; rc=1; }
+      done
       return $rc ;;
     gen-tables) shift; runtime_gen_tables "$@" ;;
     *) die "usage: bin/pyi runtime print|read|vet|check|tables|gen-tables" ;;
@@ -1629,26 +1644,62 @@ musl_src() {
   echo "$m"
 }
 
-# the runtime tables Arbace makes (queue 265): table, the printed runtime's file, the sources the generator reads (CPython's
-# tree, musl's: the negative control's overlay copies them)
-RT_GEN_TABLES="opcode errno"
+# header_roots: tools/pyi/header-apks.sha256's apks (Alpine's python3, linux-headers and bluez-headers the oracle was built
+# with, x86_64 and aarch64) checked by their SHA-256 (from REPR_PYTHON_SRC/ARCH/, the main checkout's copy, or the mirror)
+# and their usr/include extracted into $WORK/header-apks/root-ARCH (queue 265: pyconfig.h, Linux's UAPI and BlueZ's headers)
+header_roots() {
+  local pins="$root/tools/pyi/header-apks.sha256" d="$WORK/header-apks" mirror sha rel a f key m
+  mirror=$(sed -n 's/^ *:mirror "\(.*\)"$/\1/p' "$root/test/python/corpora.edn" | head -1)
+  key=$(grep -v '^#' "$pins" | sha256sum | cut -c1-64)
+  m=${root%%/.tmp/gate-clean/*}; m=${m%%/.tmp/worktrees/*}
+  if [ "$(cat "$d/.extracted" 2>/dev/null)" != "$key" ]; then
+    rm -rf "$d/root-x86_64" "$d/root-aarch64"
+    while read -r sha rel; do
+      case $sha in '#'*|'') continue ;; esac
+      a=${rel%%/*}; f="$d/$a/$(basename "$rel")"; mkdir -p "$d/$a"
+      if [ ! -f "$f" ] || [ "$(sha256sum < "$f" | cut -c1-64)" != "$sha" ]; then
+        if [ -n "${REPR_PYTHON_SRC:-}" ] && [ -f "$REPR_PYTHON_SRC/$a/$(basename "$rel")" ]; then cp "$REPR_PYTHON_SRC/$a/$(basename "$rel")" "$f.part"
+        elif [ "$m" != "$root" ] && [ -f "$m/.tmp/repr-python/pyi/header-apks/$a/$(basename "$rel")" ]; then cp "$m/.tmp/repr-python/pyi/header-apks/$a/$(basename "$rel")" "$f.part"
+        else local repo=${rel#*/}; repo=${repo%%/*}
+             curl -fsSL -m 600 -o "$f.part" "$mirror/$repo/$a/$(basename "$rel")" || { rm -f "$f.part"; die "header apks: fetching $rel failed"; }
+        fi
+        mv "$f.part" "$f"
+      fi
+      [ "$(sha256sum < "$f" | cut -c1-64)" = "$sha" ] || die "$f: SHA-256 differs from tools/pyi/header-apks.sha256's (moving the pin is a recorded decision)"
+      mkdir -p "$d/root-$a"
+      tar --warning=no-unknown-keyword -xzf "$f" -C "$d/root-$a" usr/include 2>/dev/null || [ -d "$d/root-$a/usr/include" ] || die "$f: no usr/include"
+    done < "$pins"
+    echo "$key" > "$d/.extracted"
+  fi
+  echo "$d"
+}
+
+# the runtime tables Arbace makes (queue 265) and the sources the generator reads (CPython's tree: the negative controls'
+# copies hold these)
+RT_GEN_TABLES="opcode errno fcntl socket posix"
 RT_GEN_CPY="Include/opcode_ids.h Include/opcode.h Include/internal/pycore_opcode_metadata.h Include/internal/pycore_intrinsics.h
-  Include/internal/pycore_ceval.h Python/intrinsics.c Python/ceval.c Modules/_opcode.c Lib/_opcode_metadata.py Modules/errnomodule.c"
+  Include/internal/pycore_ceval.h Python/intrinsics.c Python/ceval.c Modules/_opcode.c Lib/_opcode_metadata.py Modules/errnomodule.c
+  Modules/fcntlmodule.c Modules/socketmodule.c Modules/socketmodule.h Modules/posixmodule.c"
 
 # runtime_gen_tables [TABLE...] (queue 265): go/arbace/py's tables tools/pyi/*_table.py recorded from CPython's own modules,
 # made by Arbace (tools/pyi/runtime_tables.ae on stage 0: the modules' C sources preprocessed by repr/c's preprocessor
 # against the pinned headers) from the pinned CPython 3.14.10 tarball and musl 1.2.6's, gofmt'd by TamaGo's gofmt and
 # compared with the printed runtime's file byte for byte; then each table's negative control (GTS81 (a)): the same
 # generator over the sources with one fact changed (opcode: BINARY_OP's metadata without HAS_ARG_FLAG; errno: musl's
-# strerror text of EPERM) must differ from the committed file. No python3: the python3 generators are the oracle tier's
+# strerror text of EPERM; fcntl: musl's F_ADD_SEALS; socket: musl's AI_NUMERICSERV; posix: musl's sysconf table's
+# _SC_CLK_TCK) must differ from the committed file. fcntl, socket and posix also read Alpine's pyconfig.h, Linux's and
+# BlueZ's headers (header_roots, tools/pyi/header-apks.sha256) and Go's syscall (zerrors_linux_{amd64,arm64}.go: the
+# names written syscall.NAME). No python3: the python3 generators are the oracle tier's
 # (bin/pyi runtime tables, where the oracle runs live)
 runtime_gen_tables() {
   local tables=("$@") t="$WORK/runtime-gen" top="$root/.tmp/repr-python/Python-3.14.10" musl rc=0 tb f
   [ ${#tables[@]} -gt 0 ] || read -ra tables <<< "$RT_GEN_TABLES"
   [ -d "$top/Lib" ] || env -u REPR_PYTHON_VERSION "$root/bin/repr-python" pins --fetch >/dev/null
   musl=$(musl_src) || return 1
+  local hr; hr=$(header_roots) || return 1
   rm -rf "$t"; mkdir -p "$t/out" "$t/ctl/out"; runtime_print "$t/src"
-  gen() { (cd "$root" && ARBACE_PATH="$root" "$(arbace_exe)" "$root/tools/pyi/runtime_tables.ae" --cpython "$1" --musl "$2" "$3" "${@:4}") \
+  gen() { (cd "$root" && ARBACE_PATH="$root" "$(arbace_exe)" "$root/tools/pyi/runtime_tables.ae" --cpython "$1" --musl "$2" \
+             --goroot "${ARBACE_GOROOT:-/root/tamago-go}" --root-amd64 "$hr/root-x86_64" --root-arm64 "$hr/root-aarch64" "$3" "${@:4}") \
             2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; }; return "${PIPESTATUS[0]}"; }
   gen "$top" "$musl" "$t/out" "${tables[@]}" || return 1
   for tb in "${tables[@]}"; do
@@ -1663,9 +1714,12 @@ runtime_gen_tables() {
   # the controls: copies of the sources read, one fact changed in each
   local c="$t/ctl/cpython" m="$t/ctl/musl"
   for f in $RT_GEN_CPY; do mkdir -p "$c/$(dirname "$f")"; cp "$top/$f" "$c/$f"; done
-  mkdir -p "$m"; cp -r "$musl/include" "$musl/arch" "$m/"; mkdir -p "$m/src/errno"; cp "$musl/src/errno/__strerror.h" "$m/src/errno/"
+  mkdir -p "$m/src"; cp -r "$musl/include" "$musl/arch" "$m/"; cp -r "$musl/src/errno" "$musl/src/conf" "$m/src/"
   sed -i 's/^\(    \[BINARY_OP\] = { true, INSTR_FMT_IBC0000, \)HAS_ARG_FLAG | /\1/' "$c/Include/internal/pycore_opcode_metadata.h"
   sed -i 's/^E(EPERM, *"Operation not permitted")/E(EPERM, "Operation not allowed")/' "$m/src/errno/__strerror.h"
+  sed -i 's/^#define F_ADD_SEALS\t1033$/#define F_ADD_SEALS\t1039/' "$m/include/fcntl.h"
+  sed -i 's/^#define AI_NUMERICSERV  0x400$/#define AI_NUMERICSERV  0x800/' "$m/include/netdb.h"
+  sed -i 's/^\t\t\[_SC_CLK_TCK\] = 100,$/\t\t[_SC_CLK_TCK] = 250,/' "$m/src/conf/sysconf.c"
   gen "$c" "$m" "$t/ctl/out" "${tables[@]}" >/dev/null || { echo "control not judged: runtime gen-tables: the generator failed on the controls' sources"; return 1; }
   for tb in "${tables[@]}"; do
     f=builtins_${tb}_table.go

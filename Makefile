@@ -569,6 +569,7 @@ python-essential: ## PY10: Python's essential chain as the gate's proposed steps
 	bin/pyi golden
 	bin/pyi universe --check
 	bin/pyi scope-check samples synthetic errors
+	bin/pyi runtime gen-tables
 	bin/pyi compile-check --full samples synthetic errors
 	bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt
 
