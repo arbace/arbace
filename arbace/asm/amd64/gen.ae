@@ -160,6 +160,133 @@
                 :else (recur (inc i) j (conj! out (nth a i)))))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
+;; the printer's fields (AsmWriterInst.cpp, AsmWriterEmitter.cpp's printInstruction and printAliasInstr)
+
+(defn- print-method
+  "An operand's PrinterMethodName: an Operand's or a RegisterOperand's PrintMethod, else printOperand."
+  ^String [v]
+  (if (and (tg/rec? v) (or (tg/subclass? v "RegisterOperand") (tg/subclass? v "Operand")))
+    (let [p (f v "PrintMethod")] (if (and (string? p) (not= "" p)) p "printOperand"))
+    "printOperand"))
+
+(defn- ident-char? [c] (let [c (char c)] (or (<= (int \a) (int c) (int \z)) (<= (int \A) (int c) (int \Z)) (<= (int \0) (int c) (int \9)) (= c \_))))
+
+(defn asm-writer
+  "AsmWriterInst's parse of a flattened AsmString: its fragments, a literal string or [MI-OPERAND PRINT-METHOD] for each
+  `$name` (`${name:modifier}` the same: X86's printers take no modifier); `\\n`, `\\t` and `\\` before one of `${|}\\` as
+  literals, `$$` a `$`. `op-of` gives an operand's {:ix :rec} by name."
+  [^String s op-of]
+  (let [out (java.util.ArrayList.) sb (StringBuilder.) n (.length s)
+        flush! (fn [] (when (pos? (.length sb)) (.add out (str sb)) (.setLength sb 0)))]
+    (loop [i 0]
+      (if (>= i n)
+        (do (flush!) (vec out))
+        (let [c (.charAt s i)]
+          (cond
+            (and (= c \\) (< (inc i) n))
+            (let [d (.charAt s (inc i))] (.append sb (case d \n "\n" \t "\t" (str d))) (recur (+ i 2)))
+            (and (= c \$) (< (inc i) n) (= \$ (.charAt s (inc i)))) (do (.append sb "$") (recur (+ i 2)))
+            (= c \$)
+            (let [curly (and (< (inc i) n) (= \{ (.charAt s (inc i))))
+                  st (if curly (+ i 2) (inc i))
+                  e (loop [e st] (if (and (< e n) (ident-char? (.charAt s e))) (recur (inc e)) e))
+                  e (if curly
+                      (let [e (if (and (< e n) (= \: (.charAt s e)))
+                                (loop [e (inc e)] (if (and (< e n) (ident-char? (.charAt s e))) (recur (inc e)) e))
+                                e)]
+                        (inc e))
+                      e)
+                  nm (subs s st (loop [k st] (if (and (< k n) (ident-char? (.charAt s k))) (recur (inc k)) k)))]
+              (flush!)
+              (when (seq nm)
+                (let [o (or (op-of nm) (throw (ex-info (str "asm writer: unknown operand $" nm " in " s) {})))]
+                  (.add out [(:ix o) (print-method (:rec o))])))
+              (recur e))
+            :else (do (.append sb c) (recur (inc i)))))))))
+
+(defn- unescape-alias
+  "UnescapeAliasString: `\\{` and `\\}` as the braces."
+  ^String [^String s]
+  (-> s (str/replace "\\{" "{") (str/replace "\\}" "}")))
+
+(defn- count-operands ^long [^String s] (count (filter #(or (= % \space) (= % \tab)) s)))
+
+(defn print-aliases
+  "AsmWriterEmitter::EmitPrintAliasInstruction for the variant 0: the InstAliases of EmitPriority 1 or more whose string
+  has no more operands than their instruction's, by result instruction: [[FRAGMENTS MI-OPERANDS CONDITIONS] ...] in
+  the order tried (the priority, then the record's order), the ambiguous ones (the same operands and conditions as
+  another) left out. A condition is [:ignore], [:imm V], [:reg R] (nil: no register), [:rc CLASS [REG ...]],
+  [:tied OPERAND] or [:custom OPERAND-RECORD]; the fragments are asm-writer's, an operand [MI-OPERAND PRINT-METHOD]
+  (nil: printOperand)."
+  [aliases operand-list ties set-of]
+  (let [iap (fn [a]
+              (let [res (f a "ResultInst")
+                    ri (tg/dag-op res)
+                    ol (operand-list ri)
+                    tie (ties (f ri "Constraints"))
+                    flat-inst (flatten-variant (f ri "AsmString") 0)
+                    flat (unescape-alias (flatten-variant (f a "AsmString") 0))]
+                (when (>= (count-operands flat-inst) (count-operands flat))
+                  (let [listed (vec (remove (fn [o] (and (= 1 (:n o))
+                                                         (when-let [t (some #(when (= (:name %) (tie (:name o))) %) ol)]
+                                                           (and (< (long (:ix t)) (long (:ix o))) (= (rn (:rec t)) (rn (:rec o)))))))
+                                            ol))
+                        args (tg/dag-args res)
+                        nmi (reduce + (map :n ol))]
+                    (loop [i 0 conds [] opmap {}]
+                      (if (or (= i (count args)) (= i (count listed)))
+                        {:conds conds :n nmi
+                         :frags (mapv (fn [x] (if (vector? x) x x))
+                                      (let [out (java.util.ArrayList.) sb (StringBuilder.) n (.length flat)]
+                                        (loop [k 0]
+                                          (if (>= k n)
+                                            (do (when (pos? (.length sb)) (.add out (str sb))) (vec out))
+                                            (let [c (.charAt flat k)]
+                                              (if (= c \$)
+                                                (let [curly (and (< (inc k) n) (= \{ (.charAt flat (inc k))))
+                                                      st (if curly (+ k 2) (inc k))
+                                                      e (if curly
+                                                          (loop [e st] (if (and (< e n) (not= \} (.charAt flat e))) (recur (inc e)) e))
+                                                          (loop [e st] (if (and (< e n) (ident-char? (.charAt flat e))) (recur (inc e)) e)))
+                                                      nm (subs flat st e)]
+                                                  (when (pos? (.length sb)) (.add out (str sb)) (.setLength sb 0))
+                                                  (.add out (or (opmap nm) (throw (ex-info (str "alias printer: unmapped $" nm) {}))))
+                                                  (recur (if (and curly (< e n)) (inc e) e)))
+                                                (do (.append sb c) (recur (inc k)))))))))}
+                        (let [[v nm] (nth args i)
+                              o (nth listed i)
+                              mi (long (:ix o))
+                              conds (into conds (repeat (- mi (count conds)) [:ignore]))
+                              pm (when (and (tg/rec? v) (or (tg/subclass? v "RegisterOperand") (tg/subclass? v "Operand")))
+                                   (let [p (f v "PrintMethod")] (when (and (string? p) (not= "" p) (not= "printOperand" p)) p)))
+                              rc (when (tg/rec? v) (cond (tg/subclass? v "RegisterClass") v
+                                                         (tg/subclass? v "RegisterOperand") (f v "RegClass")))]
+                          (cond
+                            (and nm rc (not (tg/subclass? v "Register")))
+                            (if (contains? opmap nm)
+                              (recur (inc i) (conj conds [:tied (first (opmap nm))]) opmap)
+                              (recur (inc i) (conj conds [:rc (tg/rec-name rc) (vec (sort (set-of rc)))]) (assoc opmap nm [mi pm])))
+                            (and nm (tg/rec? v) (not (tg/subclass? v "Register")))
+                            (let [p (when (tg/field? v "MCOperandPredicate") (f v "MCOperandPredicate"))]
+                              (recur (inc i) (if (and p (not= p tg/unset)) (conj conds [:custom (tg/rec-name v)]) conds) (assoc opmap nm [mi pm])))
+                            (integer? v) (recur (inc i) (conj conds [:imm v]) opmap)
+                            (tg/bits? v) (recur (inc i) (conj conds [:imm (tg/bits->int v)]) opmap)
+                            (and (tg/rec? v) (= "zero_reg" (tg/rec-name v))) (recur (inc i) (conj conds [:reg nil]) opmap)
+                            (and (tg/rec? v) (tg/subclass? v "Register")) (recur (inc i) (conj conds [:reg (tg/rec-name v)]) opmap)
+                            :else (throw (ex-info (str "alias printer: result operand " (pr-str v)) {}))))))))))
+        cands (for [a aliases :let [p (fint a "EmitPriority")] :when (and p (>= (long p) 1))] [a p])]
+    (into (sorted-map)
+          (for [[rname xs] (group-by (fn [[a]] (tg/rec-name (tg/dag-op (f a "ResultInst")))) cands)
+                :let [xs (sort-by (fn [[a p]] [(- (long p)) (tg/rec-id a)]) xs)
+                      iaps (vec (keep (fn [[a]] (iap a)) xs))
+                      uniq (keep-indexed (fn [k x] (when-not (some (fn [[j y]] (and (not= j k) (= (:n x) (:n y)) (= (:conds x) (:conds y))))
+                                                                    (map-indexed vector iaps))
+                                                     x))
+                                         iaps)]
+                :when (seq uniq)]
+            [rname (mapv (juxt :frags :n :conds) uniq)]))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
 ;; the classes (AsmMatcherInfo::buildClassInfo, buildRegisterClasses, buildOperandClasses)
 
 (defn- user-class
@@ -338,6 +465,7 @@
                       tie (ties (f r "Constraints"))]
                   (cond-> (into {} (remove (fn [[k v]] (or (nil? v) (and (= k :cd8) (zero? (long v))))) m))
                     (seq flags) (assoc :flags (vec flags))
+                    true (assoc :print (asm-writer (flatten-variant (f r "AsmString") 0) (into {} (map (juxt :name identity) ol))))
                     true (assoc :ops (mapv (fn [o] [(:name o) (rn (:rec o)) (:n o)]) ol)
                                 :defs (count (tg/dag-args (f r "OutOperandList"))))
                     (seq tie) (assoc :ties (vec (for [o ol :let [t (tie (:name o))] :when t
@@ -365,6 +493,8 @@
                   (into (sorted-map) (for [[from xs] (group-by first ms)]
                                        [from (vec (concat (for [[_ p to] xs :when (seq p)] [p to])
                                                           (for [[_ p to] xs :when (empty? p)] [p to])))])))
+       ;; the printer's aliases (printAliasInstr), by the instruction they print
+       :print-aliases (print-aliases aliases operand-list ties set-of)
        :match (mapv (fn [m] [(:mn m) (mapv (fn [o] (class-key (:class o))) (:ops m))
                              (:inst m) (:conv m) (:preds m) (when (= :alias (:kind m)) (:name m))])
                     sorted)}))))
@@ -399,6 +529,10 @@
     (line " :aliases")
     (line " {")
     (doseq [[k v] (:aliases t)] (line "  " (pr-str k) " " (pr-str v)))
+    (line " }")
+    (line " :print-aliases")
+    (line " {")
+    (doseq [[k v] (:print-aliases t)] (line "  " (pr-str k) " " (pr-str v)))
     (line " }")
     (line " :match")
     (line " [")

@@ -11,6 +11,7 @@
   :mismatch (another encoding) and :rejected (an error where llvm-mc encodes)."
   (:require [arbace.repr.asm :as asm]
             [arbace.asm.amd64.asm :as x]
+            [arbace.asm.amd64.print :as p]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable Future]))
 
@@ -56,7 +57,17 @@
            {:mode (mode-of r) :prefixes (prefixes-of fc) :error? err?
             :intel? (boolean (re-find #"x86-asm-syntax[= ]intel" r))
             :encoding? (boolean (re-find #"-?-show-encoding" r))
-            :obj? (boolean (re-find #"filetype[= ]obj" r))}))))
+            :obj? (boolean (re-find #"filetype[= ]obj" r))
+            ;; what llvm-mc prints: AT&T unless the output variant is Intel's; immediates in hex with --print-imm-hex; the
+            ;; output read by another tool (objdump, readobj) or with options that change the instructions
+            :out-intel? (boolean (or (re-find #"output-asm-variant[= ]1" r)
+                                     (and (re-find #"x86-asm-syntax[= ]intel" r) (not (re-find #"output-asm-variant[= ]0" r)))))
+            :imm-hex? (boolean (re-find #"print-imm-hex" r))
+            ;; a triple whose rewriter changes the instructions (X86MCLFIRewriter's x86_64_lfi)
+            :lfi? (boolean (re-find #"-m?triple[= ]+\S*lfi" r))
+            :other-tool? (boolean (or (re-find #"filetype[= ]obj" r) (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" fc)
+                                      (re-find #"llvm-(objdump|readobj|readelf|nm|dwarfdump)" r)))
+            :options? (boolean (re-find #"x86-sse2avx|x86-align-branch|x86-pad-|x86-branches-within|mc-relax-all|-defsym|--defsym" r))}))))
 
 (defn checks
   "The CHECK lines of `prefixes`: [LINE KIND CONTENT] (KIND \"\" -NEXT ...)."
@@ -95,6 +106,14 @@
 
 (defn- insn? [f] (and (seq? f) (symbol? (first f)) (not= "asm" (namespace (first f)))))
 
+(defn- print-of
+  "{:asm LINE} the instruction as llvm-mc prints it (arbace.asm.amd64.print), or {:punsup CLASS} what the printer cannot
+  print yet."
+  [inst mi flags mode]
+  (try (binding [p/*t* x/*t*] {:asm (p/print-inst inst mi (or flags #{}) mode)})
+       (catch arbace.lang.ExceptionInfo e
+         (if-let [c (:print/unsupported (ex-data e))] {:punsup c :pwhat (.getMessage e)} (throw e)))))
+
 (defn assemble-file
   "[[LINE ENCODINGS] ...] for each instruction statement in `mode`: ENCODINGS a vector of {:text \"encoding: [...]\"} or
   {:error MSG} or {:unsupported C}."
@@ -106,8 +125,10 @@
         (cond
           (not (seq? f)) (recur (rest items) mode syms out gcc)
           (insn? f)
-          (let [es (vec (mapcat (fn [r] (cond (:bytes r) (cond->> [{:text (x/encoding-text r) :inst (:inst r)}]
-                                                            (:wait r) (cons {:text "encoding: [0x9b]" :inst "WAIT"}))
+          (let [es (vec (mapcat (fn [r] (cond (:bytes r) (cond->> [(merge {:text (x/encoding-text r) :inst (:inst r)}
+                                                                         (print-of (:inst r) (:mi r) (:pflags r) mode))]
+                                                            (:wait r) (cons (merge {:text "encoding: [0x9b]" :inst "WAIT"}
+                                                                                   (print-of "WAIT" [] #{} mode))))
                                                :else [r]))
                                 (try (binding [x/*gcc* gcc] (x/assemble-insn f mode syms))
                                      (catch Throwable e [{:unsupported :crash :what (str (pr-str f) ": " e)}]))))]
@@ -164,6 +185,82 @@
         (let [j (first (keep-indexed (fn [k e] (when (and (>= k i) (re-find (first ps) e)) k)) errs))]
           (if j (recur (rest ps) (inc (long j)) (inc met)) (recur (rest ps) i met)))))))
 
+;; the print level (AXS29 (a)): each CHECK line's text, the part before an `encoding: [...]`, held to the printed
+;; instructions as FileCheck holds it to llvm-mc's output (forward from the last match, -SAME on the same line), its
+;; blanks collapsed; a line of what this printer does not print (directives, labels, fixups, comments) classed by its kind
+
+(defn- text-part
+  "The CHECK content's instruction text: before an `encoding:`, without a trailing `#`; nil when nothing is left."
+  [^String c]
+  (let [i (.indexOf c "encoding:")
+        t (str/trim (if (neg? i) c (subs c 0 i)))
+        t (str/trim (str/replace t #"#+$" ""))]
+    (when (seq t) t)))
+
+(defn text-kind
+  "The kind of a CHECK text this printer does not print, else nil."
+  [^String t]
+  (let [t' (str/replace t #"^\{\{[^}]*\}\}\s*" "")]
+    (cond
+      (re-find #"fixup [A-Z]+ - offset|^\s*(value|kind|offset):" t) :fixup
+      (re-find #"<MCInst|<MCOperand|^\s*#?\s*<" t) :show-inst
+      (re-find #"(^|\s)(error|warning|note):" t) :diagnostic
+      (re-find #"^#|imm = 0x|^[a-z0-9]+ = |= mem\[|= zero|\[[0-9u,]+\]$|^ymm|^xmm|^zmm|^k[0-7] =" t') :comment
+      (re-find #"^\.[A-Za-z_]" t') :directive
+      (re-find #"^[\w.$@\"{}\[\]-]+:(\s|$)" t') :directive
+      (re-find #"^\^|^~+$|\.s:\d+:" t) :diagnostic
+      :else nil)))
+
+(def ^:private mnemonics-of
+  (memoize (fn [t]
+             (into #{"lock" "rep" "repne" "notrack" "{nf}" "{vex}" "{vex2}" "{vex3}" "{evex}" "{disp8}" "{disp32}" "callq" "data32"}
+                   (concat (for [[_ i] (:insns t) :let [f (first (:print i))] :when (string? f)]
+                             (first (str/split f #"[\s]")))
+                           (for [[_ ps] (:print-aliases t) [fr] ps :when (string? (first fr))] (first (str/split (first fr) #"\s"))))))))
+
+(defn- instruction-text?
+  "Whether a CHECK text can be an instruction's line: its first word a mnemonic or prefix the printer writes (a
+  comparison's predicate in its mnemonic too), or a FileCheck pattern."
+  [^String t]
+  (let [w (str/lower-case (first (str/split (str/trim t) #"\s+")))]
+    (or (.startsWith w "{{") (.startsWith w "[[") (contains? (mnemonics-of x/*t*) w)
+        (re-matches #"v?cmp[a-z_]+(ps|pd|ss|sd|sh|ph|bf16)|vpcmp[a-z_]+u?[bwdq]|vpcom[a-z]+u?[bwdq]" w))))
+
+(defn- judge-text
+  "Each CHECK text of `cs` held to the printed instructions in order: [LINE CLASS OUTPUT]."
+  [cs stmts show?]
+  (let [outs (vec (for [[l es] stmts e es] [l e]))
+        n (count outs)]
+    (loop [cs cs k 0 off 0 res []]
+      (if (empty? cs)
+        res
+        (let [[l kind c] (first cs)
+              t (when-not (#{"-NOT" "-EMPTY"} kind) (text-part c))]
+          (cond
+            (or (nil? t) (re-find #"^-COUNT" kind)) (recur (rest cs) k off res)
+            (text-kind t) (recur (rest cs) k off (conj res [l (text-kind t) nil]))
+            :else
+            (let [pat (pattern t)
+                  try-at (fn [i from] (let [e (second (nth outs i))
+                                            a (when (:asm e) (if show? (str (:asm e) "\t# " (:text e)) (:asm e)))]
+                                        (when a (let [m (re-matcher pat a)]
+                                                  (when (.find m (int (min (count a) from))) [i (.end m)])))))
+                  hit (if (= kind "-SAME")
+                        (when (< k n) (try-at k off))
+                        (or (when (< k n) (try-at k off))
+                            (some #(try-at % 0) (range (inc k) n))))]
+              (if hit
+                (recur (rest cs) (long (first hit)) (long (second hit)) (conj res [l :pass (:asm (second (nth outs (first hit))))]))
+                (let [rest-outs (subvec outs (min k n))
+                      e (when (seq rest-outs) (second (apply min-key #(Math/abs (- (long (first %)) (long l))) rest-outs)))]
+                  (recur (rest cs) k off
+                         (conj res [l (cond (not (instruction-text? t)) :directive
+                                            ;; an APX register or pseudo prefix named in the text: APX's, as the encodings'
+                                            (re-find #"%r(1[6-9]|2[0-9]|3[01])[bwd]?\b|\{(nf|rex2|dfv=[^}]*)\}|\{evex\}\s+(cmp|test)" t) :apx
+                                            (nil? e) :unpaired (:unsupported e) (:unsupported e) (:error e) :rejected
+                                            (:punsup e) (:punsup e) :else :mismatch)
+                                    (when e (or (:asm e) (:error e) (:what e) (:pwhat e)))])))))))))))
+
 (defn check-file
   "One file's row: {:stated N :met N :by {CLASS N} :errors [MET STATED] :fails [[LINE CLASS DETAIL] ...]}."
   [^String path flags]
@@ -180,18 +277,28 @@
                            :let [cs (vec (remove (fn [[l]] (.contains seen l)) (checks src (:prefixes r))))
                                  _ (doseq [[l] cs] (.add seen l))]
                            :when (seq cs)]
+                       (let [txt-cs (when-not (:error? r)
+                                      (vec (filter (fn [[_ k c]] (and (not (#{"-NOT" "-EMPTY"} k)) (not (re-find #"^-COUNT" k)) (text-part c))) cs)))
+                             txt-as (fn [cls] (vec (for [[l] txt-cs] [l cls])))]
                        (cond
                          (or (:intel? r) (= :intel (:refused read)))
-                         {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l :intel]))}
+                         {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l :intel])) :txt (txt-as :intel)}
                          (:refused read)
-                         {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l (:refused read)]))}
+                         {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l (:refused read)])) :txt (txt-as (:refused read))}
                          (nil? (:mode r))
-                         {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l :other-target]))}
+                         {:enc (vec (for [[l _ c] cs :when (enc-content c)] [l :other-target])) :txt (txt-as :other-target)}
                          :else
-                         (let [stmts (assemble-file (:items read) starts (:mode r))]
+                         (let [stmts (binding [p/*imm-hex* (:imm-hex? r)] (assemble-file (:items read) starts (:mode r)))]
                            {:enc (if (:encoding? r) (judge-encodings cs stmts) (vec (for [[l _ c] cs :when (enc-content c)] [l :not-shown])))
-                            :errors (when (:error? r) (judge-errors cs stmts))}))))
+                            :txt (cond (:out-intel? r) (txt-as :intel)
+                                       (:other-tool? r) (txt-as :other-tool)
+                                       (:options? r) (txt-as :options)
+                                       (:lfi? r) (txt-as :lfi)
+                                       :else (judge-text txt-cs stmts (:encoding? r)))
+                            :errors (when (:error? r) (judge-errors cs stmts))})))))
         enc (vec (mapcat :enc results))
+        txt (vec (mapcat :txt results))
+        tby (frequencies (map second txt))
         by (frequencies (map second enc))
         unjudged (- all-enc (count enc))]
     {:stated all-enc
@@ -200,6 +307,8 @@
      ;; the met encodings by the instruction's encoding (legacy, VEX, XOP)
      :fam (frequencies (for [[_ c sts] enc :when (= c :pass)]
                          (case (:enc (get (:insns x/*t*) (:inst (first sts)))) "EncVEX" :vex "EncXOP" :xop "EncEVEX" :evex :legacy)))
+     :text {:stated (count txt) :met (get tby :pass 0) :by (dissoc tby :pass)}
+     :tfails (vec (for [[l c o] txt :when (or (System/getenv "REPR_ASM_TEXT_ROWS") (#{:mismatch :rejected :crash :unpaired} c))] [l c (str o)]))
      :errors (let [es (keep :errors results)] (when (seq es) [(reduce + (map first es)) (reduce + (map second es))]))
      :fails (vec (for [[l c sts] enc :when (#{:mismatch :rejected :crash} c)]
                    [l c (str/join " | " (map #(or (:text %) (:error %) (:what %)) sts))]))}))
@@ -215,6 +324,19 @@
         stmts (assemble-file items starts (:mode r))
         enc (judge-encodings (checks src (:prefixes r)) stmts)]
     (if (every? #(= :pass (second %)) enc) "same" "differs")))
+
+(defn control-print
+  "A negative control of the print level: the SUBJECT's statements printed (with immediates in hex when `hex`) and judged
+  against the REFERENCE's CHECK texts by the level's own judge, in the mode of the reference's first AT&T run:
+  `differs` when a CHECK text of an instruction goes unmet (as it must), else `same`."
+  [^String subject ^String reference & [hex]]
+  (let [src (asm/latin1 reference)
+        ssrc (asm/latin1 subject)
+        r (first (filter #(and (not (:error? %)) (not (:intel? %)) (not (:out-intel? %)) (:mode %)) (runs src)))
+        stmts (binding [p/*imm-hex* (= hex "hex")] (assemble-file (asm/read-items ssrc asm/amd64) (line-starts ssrc) (:mode r)))
+        cs (vec (filter (fn [[_ k c]] (and (not (#{"-NOT" "-EMPTY"} k)) (text-part c))) (checks src (:prefixes r))))
+        res (judge-text cs stmts (:encoding? r))]
+    (if (some #{:mismatch :unpaired :rejected} (map second res)) "differs" "same")))
 
 (defn- check-list [lst work]
   (let [rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
@@ -232,15 +354,21 @@
           (apply str (for [[n r] res]
                        (str n "\t" (:stated r) "\t" (:met r) "\t" (pr-str (into (sorted-map) (:by r))) "\t" (pr-str (:errors r))
                             "\t" (pr-str (into (sorted-map) (:fam r)))
+                            "\t" (pr-str (some-> (:text r) (update :by #(into (sorted-map) %)) (->> (into (sorted-map)))))
                             (when (:crash r) (str "\tcrash: " (str/replace (:crash r) #"[\t\n]" " "))) "\n"))))
     (spit (str work "/fails.tsv")
           (apply str (for [[n r] res [l c d] (:fails r)] (str n "\t" l "\t" (name c) "\t" d "\n"))))
+    (spit (str work "/print-fails.tsv")
+          (apply str (for [[n r] res [l c d] (:tfails r)] (str n "\t" l "\t" (name c) "\t" (str/replace (str d) #"[\t\n]" " ") "\n"))))
     (let [st (reduce + (map (comp :stated second) res)) met (reduce + (map (comp :met second) res))
           by (apply merge-with + (map (comp :by second) res))
           fam (apply merge-with + (map (comp :fam second) res))
           es (keep (comp :errors second) res)]
       (println (str "repr-asm encode-check: " met " of " st " stated encodings met " (pr-str (into (sorted-map) fam))
                     "; the rest " (pr-str (into (sorted-map) by))))
+      (let [ts (keep (comp :text second) res)]
+        (println (str "repr-asm encode-check: print level: " (reduce + (map :met ts)) " of " (reduce + (map :stated ts))
+                      " CHECK texts met; the rest " (pr-str (into (sorted-map) (apply merge-with + (map :by ts)))))))
       (println (str "repr-asm encode-check: error tests' error lines " (reduce + (map first es)) " of " (reduce + (map second es)) " met"))
       (when-let [cs (seq (filter (comp :crash second) res))]
         (println (str "repr-asm encode-check: " (count cs) " files crashed: " (str/join " " (map first cs))))))))
@@ -251,5 +379,29 @@
   [verb & args]
   (case verb
     "check" (apply check-list args)
-    "control" (println (apply control args)))
+    "control" (println (apply control args))
+    "control-print" (println (binding [x/*t* (x/table)] (apply control-print args)))
+    ;; print-list LIST OUT: for the oracle by hand (llvm-mc's output beside), each file's first AT&T run's printed
+    ;; instructions into OUT/NAME.txt (a line each, <ERROR> or <CLASS> for one not printed) and its llvm-mc options into
+    ;; OUT/NAME.run
+    "print-list" (let [[lst out] args t (x/table)]
+                   (doseq [l (str/split-lines (slurp lst)) :when (seq l)
+                           :let [[n path] (str/split l #"\t") src (asm/latin1 path)
+                                 r (first (filter #(and (not (:error? %)) (not (:intel? %)) (not (:out-intel? %)) (:mode %)
+                                                        (not (:lfi? %)) (not (:options? %)))
+                                                  (runs src)))
+                                 items (when r (try (asm/read-items src asm/amd64) (catch Throwable _ nil)))]
+                           :when items]
+                     (binding [x/*t* t p/*imm-hex* (:imm-hex? r)]
+                       (let [stmts (try (assemble-file items (line-starts src) (:mode r)) (catch Throwable _ nil))
+                             trip (second (re-find #"-m?triple[= ]+(\S+)" (first (filter #(re-find #"llvm-mc" %) (run-lines src)))))]
+                         (spit (str out "/" n ".txt")
+                               (apply str (for [[_ es] stmts e es]
+                                            (str (or (:asm e) (when (:error e) "<ERROR>") (str "<" (name (or (:unsupported e) (:punsup e) :none)) ">")) "\n"))))
+                         (spit (str out "/" n ".run") (str (or trip "x86_64") (when (:imm-hex? r) " --print-imm-hex") "\t" path "\n"))))))
+    ;; show FILE [MODE]: each statement's printed line and encoding (a debugging aid, beside llvm-mc by hand)
+    "show" (let [[path mode] args src (asm/latin1 path)]
+             (binding [x/*t* (x/table)]
+               (doseq [[l es] (assemble-file (asm/read-items src asm/amd64) (line-starts src) (Long/parseLong (or mode "64"))) e es]
+                 (println (str l ": " (or (:asm e) (:punsup e)) "  # " (or (:text e) (:error e) (:unsupported e))))))))
   (shutdown-agents))

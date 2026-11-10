@@ -34,11 +34,19 @@
 #   bin/repr-asm table oracle                        the oracle tier's, by hand: the host's llvm-tblgen 23.1.5 (REPR_ASM_TBLGEN, default
 #                                                    /usr/lib/llvm23/bin/llvm-tblgen) makes X86GenAsmMatcher.inc from the same .td files;
 #                                                    its MatchTable0 (mnemonic, instruction, operand classes, in order) against the table's
+#   bin/repr-asm print-oracle [CORPUS]              the oracle tier's, by hand: the printer's lines of each AT&T file against the host's
+#                                                    llvm-mc 23.1.5 (REPR_ASM_MC), file by file; table oracle also compares the printer's
+#                                                    aliases with llvm-tblgen -gen-asm-writer's printAliasInstr
 #   bin/repr-asm encode-check [--record] [CORPUS...] amd64's encoder (AX2): the stated encodings of each file (default mc-x86) judged
 #                                                    by the test's own CHECK lines (arbace.asm.amd64.check; no llvm-mc), against
 #                                                    test/asm/encode-results-amd64.edn (--record rewrites the corpora's rows), every
 #                                                    non-pass in a class of test/asm/divergences-encode.edn, and the negative controls of
-#                                                    test/asm/controls-encode.txt fail; WORK .tmp/repr-asm/enc/CORPUS
+#                                                    test/asm/controls-encode.txt fail; WORK .tmp/repr-asm/enc/CORPUS. Its print level (AX2's
+#                                                    third slice): each matched instruction printed in AT&T syntax as llvm-mc prints it
+#                                                    (arbace.asm.amd64.print, from the table's :print and :print-aliases) and each CHECK
+#                                                    line's text held to the printed lines as FileCheck holds it, the record's :text rows,
+#                                                    the classes test/asm/divergences-print.edn, the controls test/asm/controls-print.txt;
+#                                                    --record only from a run with no failure at either level
 set -euo pipefail
 arch=amd64 args=()
 while [ $# -gt 0 ]; do case $1 in --arch) arch=$2; shift 2 ;; *) args+=("$1"); shift ;; esac; done
@@ -207,6 +215,25 @@ case ${1:-} in
       else
         echo "FAIL: repr-asm table oracle: llvm-tblgen's MatchTable0 ($(wc -l < "$o/llvm.txt") rows) and the table's ($(wc -l < "$o/arbace.txt")) differ: diff $o/llvm.txt $o/arbace.txt"; exit 1
       fi
+      # the printer's aliases: -gen-asm-writer's printAliasInstr patterns (INSTRUCTION MI-OPERANDS CONDITIONS STRING, an operand
+      # $N) against the table's :print-aliases
+      "$tblgen" -gen-asm-writer -I "$llvm/include" -I "$llvm/lib/Target/X86" "$llvm/lib/Target/X86/X86.td" -o "$o/X86GenAsmWriter.inc"
+      awk '/static const AliasPattern Patterns/ { p = 1; next } p && /^  };/ { p = 0 }
+           p && /\/\/ X86::/ { n = $0; sub(/.*X86::/, "", n); sub(/ - .*/, "", n) }
+           p && /^    \{/ { s = $0; gsub(/[{} ]/, "", s); split(s, f, ","); pat[++np] = n " " f[1] " " f[3] " " f[4] }
+           /static const char AsmStrings/ { a = 1; next } a && /;$/ { a = 0 }
+           a && /\/\* [0-9]+ \*\// { off = $0; sub(/.*\/\* /, "", off); sub(/ \*\/.*/, "", off); t = $0; sub(/^[^"]*"/, "", t); sub(/\\0"$/, "", t)
+             while (match(t, /\\x[0-9A-F][0-9A-F]/)) { t = substr(t, 1, RSTART - 1) "$" (strtonum("0x" substr(t, RSTART + 2, 2)) - 1) substr(t, RSTART + 4) }
+             str[off] = t }
+           END { for (i = 1; i <= np; i++) { split(pat[i], g, " "); print g[1], g[3], g[4], str[g[2]] } }' "$o/X86GenAsmWriter.inc" > "$o/llvm-aliases.txt"
+      arbace_tool -e "(let [t (read-string (slurp \"$root/asm/amd64/table.edn\"))]
+                        (doseq [[i ps] (:print-aliases t) [fr n cs] ps]
+                          (println i n (count cs) (apply str (map #(if (string? %) % (str \"\$\" (first %))) fr)))))" > "$o/arbace-aliases.txt"
+      if cmp -s "$o/llvm-aliases.txt" "$o/arbace-aliases.txt"; then
+        echo "repr-asm table oracle: llvm-tblgen's printAliasInstr and the table's :print-aliases are the same $(wc -l < "$o/llvm-aliases.txt") patterns"
+      else
+        echo "FAIL: repr-asm table oracle: the printer's aliases differ: diff $o/llvm-aliases.txt $o/arbace-aliases.txt"; exit 1
+      fi
       exit 0
     fi
     GOMEMLIMIT=${REPR_ASM_TABLE_MEM:-1200MiB} arbace_tool -m arbace.asm.amd64.gen "$2" "$llvm" "$root/asm/amd64/table.edn" ;;
@@ -232,9 +259,40 @@ case ${1:-} in
       v=$(arbace_tool -m arbace.asm.amd64.check control "$sp" "$rp" | tail -1)
       if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
     done < "$root/test/asm/controls-encode.txt"
-    judge=(-e "(do (load-file \"$root/test/asm/encode_judge.ae\") nil)" -e "(asm.encode-judge/main \"$root/test/asm/encode-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-encode.edn\" \"${record:-}\")")
+    # the print level's: a subject's statements printed (in hex with `hex`) and judged against a reference's CHECK texts must not meet them all
+    while read -r cid subj ref hex; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.asm.amd64.check control-print "$sp" "$rp" ${hex:+"$hex"} | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-print.txt"
+    judge=(-e "(do (load-file \"$root/test/asm/encode_judge.ae\") nil)" -e "(asm.encode-judge/main \"$root/test/asm/encode-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-encode.edn\" \"${record:-}\" \"$root/test/asm/divergences-print.edn\")")
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
+  print-oracle)
+    # the oracle tier's, by hand: each AT&T file's printed instructions against the host's llvm-mc 23.1.5 (REPR_ASM_MC, default
+    # /usr/lib/llvm23/bin/llvm-mc) run with the file's first AT&T run's triple, its instruction lines (comments dropped) diffed
+    # with the printer's (the statements the check does not print left out)
+    shift; id=${1:-mc-x86}; mc=${REPR_ASM_MC:-/usr/lib/llvm23/bin/llvm-mc}
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    make_list "$id"
+    o=$root/.tmp/repr-asm/print-oracle/$id; rm -rf "$o"; mkdir -p "$o"
+    arbace_tool -m arbace.asm.amd64.check print-list "$lists/$id.list" "$o"
+    files=0 same=0 lines=0 extra=0
+    for r in "$o"/*.run; do
+      n=${r%.run}; IFS=$'\t' read -r opts path < "$r"
+      # shellcheck disable=SC2086
+      "$mc" -triple $opts "$path" 2>"$n.err" | grep -P '^\t[^.]' | sed -e 's/[ \t]*#.*//' -e 's/[ \t]*$//' > "$n.llvm" || true
+      grep -v '^<' "$n.txt" | sed 's/[ \t]*$//' > "$n.ours" || true
+      files=$((files + 1)); lines=$((lines + $(wc -l < "$n.ours")))
+      if cmp -s "$n.llvm" "$n.ours"; then same=$((same + 1)); else
+        k=$(diff "$n.llvm" "$n.ours" | grep -c '^>' || true); extra=$((extra + k))
+        [ "$k" -gt 0 ] && echo "repr-asm print-oracle: ${n##*/}: $k printed lines not llvm-mc's"
+      fi
+    done
+    echo "repr-asm print-oracle: $files files, $same with llvm-mc's very lines; $lines lines printed, $extra of them not llvm-mc's (diff $o/NAME.llvm $o/NAME.ours)" ;;
   divergences)
     arbace_tool -e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"${2:-$results}\" \"$classes\" \"\" \"\")" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2; exit 2 ;;

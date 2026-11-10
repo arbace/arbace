@@ -2985,3 +2985,40 @@ none failing; error lines 63 of 108 met (was 60). The first run over the 132 EVE
 Considered: one port of `emitVEXOpcodePrefix` for VEX, XOP and EVEX together in place of the first slice's VEX function, rejected
 for this slice (the VEX path's 17,128 met lines unchanged by construction); EVEX's APX fields (B4, X4, NDD, NF) left to APX.
 Proposed (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, second slice)"): AXS28 (the CHECK text before APX, as AXS27 (a) orders it).
+
+## 2026-11-10 amd64 assembly: AX2's third slice, the CHECK text printed (branch `asm-ax2c`, from `mac/asm-ax2b` `44c4eb18e`)
+
+AXS28 (b) and AXS29 (a) followed provisionally (AXS23-AXS29 unanswered): the AT&T printer and the CHECK texts' print level before
+APX. Studied, not copied: llvm-project 23.1.5 (the pinned tarball, `test/asm/corpora.edn`'s `:llvmorg-23.1.5`)
+`llvm/utils/TableGen/AsmWriterEmitter.cpp` (printInstruction's operand calls, `EmitPrintAliasInstruction`: EmitPriority, the
+operand count rule, the conditions, the ambiguity rule; `IAPrinter::formatAliasString`), `llvm/utils/TableGen/Common/AsmWriterInst.cpp`
+(the AsmString's fragments, escapes, `${name:modifier}`), `llvm/lib/Target/X86/MCTargetDesc/X86ATTInstPrinter.{cpp,h}` (printInst,
+printVecCompareInstr, the operand printers), `X86InstPrinterCommon.cpp` (printInstFlags, the condition codes, the SSE/AVX predicates,
+the comparison mnemonics, rounding control, printPCRelImm), `X86MCAsmInfo.cpp` (the at-specifiers' spellings),
+`llvm/lib/MC/MCInstPrinter.cpp` (formatImm, formatHex, matchAliasPatterns), `MCExpr.cpp` (MCExpr::print), `MCSymbol.cpp`,
+`MCAsmInfo.cpp` (isValidUnquotedName), and `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (the instruction flags, the DX
+operand, register equates).
+
+- `arbace.asm.amd64.gen`: `asm-writer` (each instruction's `:print`), `print-aliases` (the table's `:print-aliases`); the table
+  regenerated (`asm/amd64/table.edn`, 10.9 MB; the matchables and the sections before `:insns` byte for byte as before).
+- `arbace.asm.amd64.print` (new): the printer. `arbace.asm.amd64.asm`: an encoding's result carries its MCInst (`:mi`) and the
+  printer's flags (`:pflags`: `{vex}`, `{vex2}`, `{evex}` beside the encoder's); `(%dx)` alone not refused as an address; register
+  equates as operands, bases, indexes and segments.
+- `arbace.asm.amd64.check`: the print level (`text-part`, `text-kind`, `judge-text`, the runs' `:out-intel?`, `:imm-hex?`,
+  `:other-tool?`, `:options?`, `:lfi?`), the verbs `control-print`, `print-list` (the oracle's input) and `show` (a file's printed lines);
+  `test/asm/encode_judge.ae` judges the `:text` rows too and refuses `--record` from a run with a failure at either level;
+  `test/asm/divergences-print.edn`, `test/asm/controls-print.txt` (four controls); `bin/repr-asm print-oracle` and `table oracle`'s
+  alias comparison; the Makefile's `repr-asm-print-oracle`.
+
+Results: of `MC/X86`'s 108,601 CHECK texts 82,838 met, 25,763 classed (Intel 21,318, APX 2,221, directives 1,202, other tools' output
+772, comments 116, unread 63, LFI 61, other target 7, options 2, fixup 1), none failing; recorded into
+`test/asm/encode-results-amd64.edn` from that run (the encoding rows equal: 81,966 met, 0 failing). The first whole run failed 178
+texts (the DX operand, register equates, `tlsdesc`'s spelling) and the LFI files, all fixed or classed. Oracles by hand: llvm-tblgen's
+MatchTable0 23,014 of 23,014 rows and printAliasInstr 3 of 3 patterns; llvm-mc 23.1.5 over the 372 AT&T files: 83,156 of the 83,157
+printed lines llvm-mc's (the one left an `.ifdef ERR` statement llvm-mc skips), after two fixes the oracle found (a specifier after an
+expression). `table check` byte for byte; AX1's and AR1's round trips the same rows; `bin/reap` (0 problems), `bin/crops-score --judge
+--strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: AXS29 (b), FileCheck emulated over the streamer's whole output, left for AX4 (the directives' printer); classing the
+unmet texts by the nearest statement alone (the encodings' rule), kept but preceded by the text's own kind, since a text's content
+says whether it can be an instruction's line. Proposed (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, third slice)"): AXS30-AXS33.

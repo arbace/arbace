@@ -756,3 +756,63 @@ Not built in this slice: the CHECK text (AXS27's second step), APX (its third), 
   labels), recorded beside the encodings' rows; (b) a FileCheck emulation over llvm-mc's whole output (text and encoding on one
   line, CHECK-NEXT, CHECK-SAME, CHECK-NOT), replacing AXS25's pairing. *Recommended: (a) first*: it keeps the encodings' record
   and judge as they are; (b) once the text is printed equal, as a stricter judge of both.
+
+## As built: AX2 (third slice, 2026-11-10; branch `asm-ax2c`)
+
+On the light lane, AXS23-AXS29 still unanswered and followed as recommended (AXS28 (b): the CHECK text before APX; AXS29 (a): the
+table regenerated with the printer's fields, the text judged as the encodings are, its classes apart). doc/asm/AMD64.md §1, §4 and §5
+describe what was built.
+
+- **The table regenerated** with the printer's fields, after `AsmWriterInst.cpp` and `AsmWriterEmitter.cpp` (llvm-project 23.1.5,
+  read and written again): each instruction's AT&T AsmString parsed into its fragments with each operand's MI index and
+  `PrintMethod` (28 print methods), and printAliasInstr's patterns. AXS29's "few hundred" aliases counted exactly: X86 has three
+  InstAliases that print (`aad`, `aam` for the immediate 10, `xstorerng`); every other one says `EmitPriority` 0 or has more operands
+  than its instruction. The matchables are untouched: `table oracle`'s MatchTable0 is still 23,014 of 23,014 rows, and it now also
+  compares llvm-tblgen `-gen-asm-writer`'s printAliasInstr with the table's `:print-aliases` (3 of 3). `table check` byte for byte.
+- **The printer** (`arbace.asm.amd64.print`): X86ATTInstPrinter, X86InstPrinterCommon, MCInstPrinter's number formats and
+  matchAliasPatterns, MCExpr's and MCSymbol's printing (doc/asm/AMD64.md §5).
+- **The print level** of `bin/repr-asm encode-check`: each CHECK text held to the printed lines as FileCheck holds it, the rows'
+  `:text`, the classes `test/asm/divergences-print.edn`, four negative controls in `test/asm/controls-print.txt` (each fails as it
+  must), `--record` refused from a run with a failure at either level. `bin/repr-asm print-oracle` (by hand): llvm-mc beside.
+- **The matcher**, two gaps the print level found (statements whose CHECK lines state no encoding): `(%dx)` alone is
+  ParseMemOperand's DX register (in, out, ins, outs), not a 16-bit address the base check refuses; a symbol equated to a register
+  (`v_ecx = %ecx`) is that register as an operand, a base, an index or a segment (`v_gs:(,v_eax)`; the class `:segment-symbol` emptied).
+
+| `MC/X86` (621 files) | stated | met | classed | failing |
+|---|---:|---:|---|---:|
+| encodings (unchanged) | 106,075 | 81,966 | 24,109: `:intel` 20,725, `:apx` 3,383, `:no-run` 1 | 0 |
+| **CHECK texts** | 108,601 | **82,838** | 25,763: `:intel` 21,318, `:apx` 2,221, `:directive` 1,202, `:other-tool` 772, `:comment` 116, `:unread` 63, `:lfi` 61, `:other-target` 7, `:options` 2, `:fixup` 1 | **0** |
+
+The first run over the whole corpus failed 178 texts, of three causes, all fixed: the `(%dx)` operand (x86-64's in and out), the
+register equates (x86_operands), and the specifiers' spelling (`a@tlsdesc`, `tlscall` in lower case as X86MCAsmInfo spells them);
+the LFI files (triple `x86_64_lfi`, whose rewriter changes the instructions) classed. By hand against llvm-mc 23.1.5
+(`bin/repr-asm print-oracle`): of 372 AT&T files 282 print llvm-mc's very instruction lines; of the 83,157 lines the printer
+prints, 83,156 are llvm-mc's in llvm-mc's order (the other files differ by lines the check does not print: APX, macro bodies); the
+one left is `pltoff`'s statement under `.ifdef ERR`, which llvm-mc skips and the check assembles (AXS32). Two differences the oracle
+found that no run's CHECK text reached, both fixed: `(3+$foo)@ABS8` printed `3+$foo@ABS8` (the specifier on the symbol) and
+`($foo@ABS8-4)`. The encode level is unchanged (81,966 met, 0 failing, the rows equal but their new `:text`); AX1's and AR1's round
+trips give the same rows (`roundtrip: ok`, both architectures); `bin/reap` (0 problems), `bin/crops-score --judge --strict`,
+`test/gate/gate-key-crops-test.bash` and `make check-makefile` pass. The encode check with its print level takes about 3 minutes on a
+loaded host (four threads, under 1.5 GiB).
+
+Not built in this slice: the asm streamer's directives, labels and comments (classed), FileCheck's `-NEXT` held strictly (AXS30),
+`.if`/`.ifdef` and macro expansion in the check's assembly (AXS32), the machine-level forms (AXS26), APX, Intel (AX3).
+
+### Proposed (AX2, third slice)
+
+- **AXS30 The text judge's strictness.** (a) as built: FileCheck's forward search over the printed instructions alone, `-NEXT` and
+  `-DAG` searched like `CHECK`, `-SAME` on the matched line, `-NOT` not judged (the printer makes no directive lines, so `-NEXT`
+  cannot be held to adjacency), with llvm-mc as the oracle by hand that the lines themselves are llvm-mc's; (b) AXS29 (b) now: the
+  streamer's whole output (directives, labels, assignments, comments, fixups) printed and FileCheck emulated exactly. *Recommended:
+  (a) until AX4*, whose ELF streamer prints the directives; then (b), which also retires `:directive`, `:comment` and `:fixup`.
+- **AXS31 The `:directive` class's rule.** (a) as built: a CHECK text is a non-instruction line when its content says so (a leading
+  `.`, a label, `fixup`, `imm =`, a diagnostic) or its first word is no mnemonic, prefix or comparison mnemonic the printer writes;
+  (b) only by content, the rest failing until the streamer prints them. *Recommended: (a)*: a text whose first word no instruction
+  prints cannot be an instruction's line, and a wrong mnemonic the printer writes still fails.
+- **AXS32 Conditional assembly and macros in the checks.** (a) the check's assembly follows `.if`/`.ifdef`/`.else` (with RUN's
+  `--defsym`, now classed `:options`) and expands `.macro`/`.rept`/`.irp` (AXS19 (a)'s text bodies) as LLVM's AsmParser does, in AX2's
+  next slice; (b) at AX4 with the object writer. *Recommended: (a)*: the oracle shows the one line not llvm-mc's comes from an
+  `.ifdef`'d statement, and macro bodies hide instructions (`compact-unwind-cfi_def_cfa`) from both levels.
+- **AXS33 VEX map 7 under `:apx`.** USERMSR's and MSR_IMM's VEX map 7 forms (`urdmsr $123, %r9`) are classed `:apx` at both levels
+  though they are VEX: (a) encode VEX map 7 with APX's slice and keep the class until then; (b) a class of its own now. *Recommended:
+  (a)*: a handful of lines, and the APX slice touches the same map decoding.

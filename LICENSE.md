@@ -1369,7 +1369,9 @@ covers what.
   `utils/TableGen/Common/CodeGenInstruction.cpp` (`FlattenAsmStringVariants`) and `CodeGenRegisters.cpp` (`TopoOrderRC`), the matcher
   `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `X86Operand.h` and `X86AsmParserCommon.h`, the encoder
   `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`, `X86BaseInfo.h`, `X86MCTargetDesc.cpp` and
-  `X86EncodingOptimization.cpp`, from the same `llvm-project-23.1.5.src.tar.xz`, rule for rule, under the Apache License 2.0 with
+  `X86EncodingOptimization.cpp`, the printer `X86ATTInstPrinter.cpp`, `X86InstPrinterCommon.cpp`, `X86MCAsmInfo.cpp`,
+  `llvm/lib/MC/MCInstPrinter.cpp`, `MCExpr.cpp`, `MCSymbol.cpp` and `MCAsmInfo.cpp` with the table's printer fields after
+  `llvm/utils/TableGen/AsmWriterEmitter.cpp` and `Common/AsmWriterInst.cpp`, from the same `llvm-project-23.1.5.src.tar.xz`, rule for rule, under the Apache License 2.0 with
   the LLVM Exceptions (section "LLVM (clang)" below); no code is copied. `asm/amd64/table.edn`, generated from that tarball's
   `llvm/lib/Target/X86/*.td` and `llvm/include/llvm/{Target,CodeGen,IR}/*.td` (extracted into `.tmp/`, never committed), is a work
   derived from them, under the same licence.

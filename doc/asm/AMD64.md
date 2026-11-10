@@ -2,8 +2,9 @@
 
 The machine half of the x86-64 crop (doc/asm/AMD64-SURVEY.md §7.2, §8.2; the forms are doc/asm/SPEC.md's). AX2's first slice:
 the instruction table generated from LLVM's TableGen files by Arbace's own TableGen, the AT&T matcher and the encoder of the
-legacy, VEX and XOP encodings (EVEX since its second slice), and the check of `MC/X86`'s stated encodings by their own CHECK lines. No LLVM tool runs in any
-of it; llvm-tblgen and llvm-mc are the oracle tier's, by hand.
+legacy, VEX and XOP encodings (EVEX since its second slice), the check of `MC/X86`'s stated encodings by their own CHECK lines, and since
+its third slice the printer (§5) and the CHECK texts' print level. No LLVM tool runs in any of it; llvm-tblgen and llvm-mc are the
+oracle tier's, by hand.
 
 ## 1. The table (`asm/amd64/table.edn`)
 
@@ -32,7 +33,11 @@ Generated, committed, checked by regeneration (`bin/repr-asm table gen|check`; t
   asm operand rendered, a tied operand copied, an alias's fixed register or immediate). The `MnemonicAlias` records
   (`applyMnemonicAliases`), the assembler predicates, the registers (AsmName, HWEncoding) and each instruction's encoding
   fields (`X86Inst`: opcode, format, map, prefix, operand and address size, encoding, immediate, the VEX/EVEX bits,
-  `CD8_Scale`, the operands and ties).
+  `CD8_Scale`, the operands and ties). Since the third slice the printer's fields too (after `AsmWriterInst.cpp` and
+  `AsmWriterEmitter.cpp`): each instruction's `:print`, its AT&T AsmString (variant 0) parsed into literal fragments and
+  `[MI-OPERAND PRINT-METHOD]` for each `$operand` (the Operand's or RegisterOperand's `PrintMethod`, else `printOperand`), and
+  `:print-aliases`, printAliasInstr's patterns (InstAliases of `EmitPriority` 1 or more with no more operands than their
+  instruction, their conditions on the MCInst's operands, the ambiguous ones dropped): X86 has three, `aad`, `aam`, `xstorerng`.
 - **Its oracle** (`bin/repr-asm table oracle`, by hand): llvm-tblgen 23.1.5's `-gen-asm-matcher` on the same files; its
   `MatchTable0` and the table's matchables are the same 23,014 rows in the same order with the same classes.
 
@@ -74,3 +79,32 @@ first instruction, from the last one matched on, whose `encoding: [...]` the pat
 An unmet one is classed (`test/asm/divergences-encode.edn`). An error test's `error:` lines are matched in order against
 the assembler's own messages. Rows by file in `test/asm/encode-results-amd64.edn`; negative controls in
 `test/asm/controls-encode.txt` (a test's statements judged against another test's CHECK lines must fail).
+
+Its print level (AX2's third slice): each run's statements are printed (§5), and each CHECK line's text (its part before an
+`encoding:`, a trailing `#` dropped) of a run that is not an error test is held to the printed lines as FileCheck holds it to
+llvm-mc's output: forward from the last match, the rest of the matched line first (`-SAME` only there), blanks collapsed, the
+encoding's comment beside the text when the run shows encodings. A text of a line the printer does not make (a directive, a label,
+an assignment, a fixup's or a verbose comment, an MCInst dump, a diagnostic: by its content, or its first word no instruction's
+mnemonic) is classed by its kind; the runs whose output is not this printer's (Intel's output variant, another tool reading an
+object, the LFI rewriter, options that change the instructions) by the run. The rows' `:text` in `test/asm/encode-results-amd64.edn`,
+the classes `test/asm/divergences-print.edn`, the negative controls `test/asm/controls-print.txt` (other instructions, another mode,
+and a test's own statements printed with immediates in hex). `--record` only from a run with no failure at either level.
+
+## 5. The printer (`arbace.asm.amd64.print`)
+
+`X86ATTInstPrinter::printInst` over the matcher's MCInst (the table's instruction, its operands `{:reg}`, `{:imm}`, `{:expr}` after
+processInstruction, the statement's flags): `printInstFlags` (lock, notrack, rep and repne, `{nf}`, `{vex}` `{vex2}` `{vex3}`
+`{evex}` from the statement or the instruction's explicit prefix, `{disp8}` `{disp32}`), `callq` for CALLpcrel32 in 64-bit mode,
+`data32` for DATA16_PREFIX in 16-bit mode, then printAliasInstr, `printVecCompareInstr` (`cmp`/`vcmp`/`vpcmp`/`vpcom` with the
+predicate in the mnemonic, `{1toN}` and `{sae}`, the mask), else the instruction's `:print` fragments with the print methods
+(`printOperand`, `printMemReference` and the `print*mem` methods, `printSrcIdx*`, `printDstIdx*`, `printMemOffs*`, `printU8Imm`,
+`printSTiRegOperand`, `printCondCode`, `printCondFlags`, `printRoundingControl`, `printPCRelImm`, `printVKPair`). Immediates as
+`formatImm` writes them (decimal, `--print-imm-hex` hex); expressions as `MCExpr::print` (only `+`/`-` group without parentheses,
+`X-42` for an addition of a negative constant, symbols quoted when needed, a specifier after the symbol, `tlscall`/`tlsdesc` in lower
+case, a specifier after an expression put on its symbols as `applyModifierToExpr` does; a negative literal is the text's unary minus,
+and a constant subexpression that needed parentheses where it stands is folded as LLVM's parser folds a parenthesized one).
+`printExprOperand`'s parentheses around an expression starting with `$`. Not printed yet (classed): a directional local label (`1f`:
+llvm-mc's `.Ltmp` name) and the location counter.
+
+By hand (`bin/repr-asm print-oracle`, the oracle tier): every AT&T file's printed lines against the host's llvm-mc 23.1.5 run with
+the file's triple, file by file.

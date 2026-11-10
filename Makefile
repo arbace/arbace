@@ -20,7 +20,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check cppi-codegen-gen \
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
   repr-asm-extract repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
-  repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record \
+  repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -528,10 +528,12 @@ repr-asm-table: ## amd64's instruction table asm/amd64/table.edn generated from 
 	bin/repr-asm table gen
 repr-asm-table-check: ## amd64's instruction table regenerated and compared with asm/amd64/table.edn byte for byte (bin/repr-asm table check)
 	bin/repr-asm table check
-repr-asm-encode-check: ## amd64's encoder: MC/X86's stated encodings judged by their own CHECK lines against test/asm/encode-results-amd64.edn, the classes and the controls (bin/repr-asm encode-check [CORPUS...]; CORPORA=...)
+repr-asm-encode-check: ## amd64's encoder and printer: MC/X86's stated encodings and CHECK texts judged by their own CHECK lines against test/asm/encode-results-amd64.edn, the classes and the controls (bin/repr-asm encode-check [CORPUS...]; CORPORA=...)
 	bin/repr-asm encode-check $(CORPORA)
 repr-asm-encode-record: ## amd64's encoding check recorded into test/asm/encode-results-amd64.edn (bin/repr-asm encode-check --record [CORPUS...]; CORPORA=...)
 	bin/repr-asm encode-check --record $(CORPORA)
+repr-asm-print-oracle: ## the oracle tier's, by hand: amd64's printed instructions against the host's llvm-mc 23.1.5, file by file (bin/repr-asm print-oracle)
+	bin/repr-asm print-oracle
 repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
 repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)

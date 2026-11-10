@@ -118,7 +118,12 @@
   (vec (mapcat
         (fn [x]
           (let [deco (fn [m] (concat (when-let [k (:k m)] [{:k :tok :t "{"} {:k :reg :reg (reg-of (list 'reg k))} {:k :tok :t "}"}])
-                                     (when (:z m) [{:k :tok :t "{z}"}])))]
+                                     (when (:z m) [{:k :tok :t "{z}"}])))
+                eq-reg (when (and (= 'mem (first x)) (= [:disp] (keys (second x))) (symbol? (:disp (second x))))
+                         (let [v (get syms (name (:disp (second x))))]
+                           (when (and (seq? v) (#{'reg 'pct} (first v)) (= 2 (count v))) (reg-of (list 'reg (second v))))))]
+            (if eq-reg
+              (do (check-reg-mode eq-reg mode) [{:k :reg :reg eq-reg}])
             (case (first x)
               reg (let [r (reg-of x) m (first (filter map? (rest x)))]
                     (check-reg-mode r mode)
@@ -133,22 +138,30 @@
                          (.startsWith t "r") (fail "Invalid rounding mode.")
                          :else (fail "unknown token in expression")))
               mem (let [m (second x)
+                        ;; a symbol equated to a register (`v = %ecx`: its value (pct ecx)), as X86AsmParser reads it
+                        reg-val (fn [v] (when (and (seq? v) (#{'reg 'pct} (first v)) (= 2 (count v))) (reg-of (list 'reg (second v)))))
                         rg (fn [r] (cond (nil? r) nil
-                                         (and (seq? r) (= 'asm/eq (first r))) (let [v (get syms (name (second r)))]
-                                                                                 (if (and (seq? v) (= 'reg (first v))) (reg-of v) (fail "invalid register name")))
+                                         (and (seq? r) (= 'asm/eq (first r))) (or (reg-val (get syms (name (second r)))) (fail "invalid register name"))
                                          :else (reg-of (list 'reg r))))
+                        ;; `%fs:(v_ecx)`: a register equate in the parentheses, read as the displacement, is the base
+                        eq-base (when (and (nil? (:base m)) (nil? (:index m)) (symbol? (:disp m)))
+                                  (reg-val (get syms (name (:disp m)))))
+                        m (if eq-base (-> m (assoc :base (list 'asm/eq (:disp m))) (dissoc :disp)) m)
                         base (rg (:base m)) index (rg (:index m))
-                        seg (when (:seg m) (reg-of (list 'reg (:seg m))))
+                        seg (cond (:seg m) (reg-of (list 'reg (:seg m)))
+                                  (:segsym m) (or (reg-val (get syms (name (:segsym m)))) (fail "invalid register name")))
                         scale (if (contains? m :scale) (const-value (:scale m) syms) 1)
                         disp (if (contains? m :disp) (:disp m) 0)]
-                    (when (:segsym m) (unsupported :segment-symbol "a segment named by a symbol"))
                     (doseq [r [base index]] (when r (check-reg-mode r mode)))
-                    (check-base-index base index (= mode 64))
+                    ;; (%dx) alone: ParseMemOperand's DX register operand (in, out, ins, outs), not an address
+                    (when-not (and (= base "DX") (nil? index) (nil? seg) (not (contains? m :scale))
+                                   (= 0 (const-value disp syms)))
+                      (check-base-index base index (= mode 64)))
                     (when-not (#{1 2 4 8} scale) (fail "scale factor in address must be 1, 2, 4 or 8"))
                     (concat [{:k :mem :seg seg :base base :index index :scale scale :disp disp :dv (const-value disp syms)
                               :size 0 :mode mode}]
                             (when-let [b (:bcst m)] [{:k :tok :t (str "{1to" b "}")}])
-                            (deco m))))))
+                            (deco m)))))))
         (reverse ops))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
@@ -883,7 +896,14 @@
                      [n xs])
             [_ e mi] (match-att n xs mode opts)
             [inst mi] (process (nth e 2) mi flags)]
-        (cond-> (encode inst mi mode flags) wait (assoc :wait true)))
+        ;; the MCInst's flags for the printer (matchAndEmitInstruction's IP_USE_VEX, IP_USE_VEX2, IP_USE_EVEX)
+        (cond-> (assoc (encode inst mi mode flags)
+                       :mi mi
+                       :pflags (cond-> flags
+                                 (= :vex (:force opts)) (conj :use-vex)
+                                 (= :vex2 (:force opts)) (conj :use-vex2)
+                                 (= :evex (:force opts)) (conj :use-evex)))
+          wait (assoc :wait true)))
       (catch arbace.lang.ExceptionInfo ex
         (let [d (ex-data ex)]
           (cond (:asm/error d) {:error (:asm/error d)}

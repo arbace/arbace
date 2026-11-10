@@ -161,7 +161,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   encodings judged by their own CHECK lines, every non-pass classed (EVEX and APX the largest, Intel for AX3). Proposed
   AXS23-AXS27. `asm-ax2b` (on `asm-ax2`; "As built: AX2 (second slice)"): EVEX encoded (opmasks, `{z}`, broadcast, rounding and
   `{sae}`, disp8*N, maps 5-7, `{evex}`): 81,966 of 106,075 stated encodings met (EVEX 49,206), none failing, the rest Intel (AX3)
-  and APX. Proposed AXS28. Next: the CHECK text (the AT&T print from the AsmString) and the machine-level forms (AXS26), then APX.
+  and APX. Proposed AXS28. `asm-ax2c` (on `asm-ax2b`; "As built: AX2 (third slice)"): the CHECK text, each matched instruction
+  printed in AT&T syntax as llvm-mc prints it from the table's AsmStrings, print methods and printAliasInstr's patterns (the table
+  regenerated with them; llvm-tblgen's MatchTable0 and printAliasInstr its oracles by hand): the print level of `encode-check`,
+  82,838 of 108,601 CHECK texts met, none failing, the rest classed (Intel 21,318, APX 2,221, directives 1,202, other tools' output
+  772, ...); by hand against llvm-mc 23.1.5, 83,157 printed lines of 83,158 llvm-mc's own (the one left an `.ifdef`'d statement the
+  check assembles). Proposed AXS30-AXS32. Next: the machine-level forms (AXS26), then APX; the streamer's directives with AX4.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
