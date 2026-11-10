@@ -1,0 +1,631 @@
+(ns arbace.repr.haskell.primiface
+  "HF10-P18 (a) (doc/haskell/FRONTEND-SURVEY.md, \"As built: HF10-P18\"): GHC.Internal.Prim's interface built by Arbace
+  from GHC 9.14.1's compiler/GHC/Builtin/primops.txt.pp, as GHC builds it without compiling a module (GHC.Iface.Load's
+  ghcPrimIface over GHC.Builtin.Utils' ghcPrimExports and ghcPrimFixities): the file preprocessed by Arbace's own C
+  preprocessor (arbace.repr.haskell.cpp, as hadrian's `cc -E -undef -traditional`), read by a port of genprimopcode's
+  lexer and parser (utils/genprimopcode: Lexer.x, Parser.y, AccessOps.hs, Main.hs's desugarVectorSpec), each primop's
+  type built as genprimopcode's primOpInfo makes it (tvsIn, ppTyVarBinders: the inferred binders first, then the
+  specified ones, each GHC.Builtin.Types.Prim's template variable), its arity and strictness signature (the `strictness`
+  option's mkClosedDmdSig); the ghcPrimIds of GHC.Types.Id.Make (realWorld#, void#, nullAddr#, seq from their pseudoop
+  entries, whose types genprimopcode's rules give as Make.hs does; coerce, proxy#, leftSection and rightSection as
+  Make.hs builds them); the exposed primitive type constructors of GHC.Builtin.Types.Prim (exposedPrimTyCons, then the
+  vector types of the `primtype VECTOR` entry) with their kinds (pcPrimTyCon0, pcPrimTyCon, pcPrimTyCon_LevPolyLastArg,
+  Proxy#, FUN, TYPE, CONSTRAINT), roles and arities. GHC 9.14.1's sources the specification (the pinned tarball's
+  utils/genprimopcode, compiler/GHC/Builtin/{Utils,Types/Prim}.hs, compiler/GHC/Types/Id/Make.hs; BSD-3, LICENSE.md
+  \"GHC\").
+
+  The interface is written in the iface2 verb's format (the helper's, which the readers take), with the header of the
+  front end's own interfaces ({:verb \"own\"}); `check` judges it against GHC's (the pack haskell-lib-ifaces-ghc-9.14.1's
+  pool member) fact by fact (ownface/compare-ifaces: exports, fixities, every value's type in the judge's canonical
+  form) and every other line byte for byte, with a negative control (the primops' types rotated by one) that must
+  differ."
+  (:require [arbace.string :as str]
+            [arbace.repr.haskell.cpp :as cpp]
+            [arbace.repr.haskell.ownface :as ownface]
+            [arbace.repr.haskell.typecheck :as tc])
+  (:import [java.io File]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The lexer (genprimopcode's Lexer.x)
+
+(def ^:private keywords
+  #{"section" "primop" "pseudoop" "primtype" "with" "defaults" "True" "False" "Compare" "GenPrimOp" "fixity" "infix"
+    "infixl" "infixr" "Nothing" "effect" "NoEffect" "CanFail" "ThrowsException" "ReadWriteEffect" "defined_bits"
+    "can_fail_warning" "DoNotWarnCanFail" "WarnIfEffectIsCanFail" "YesWarnCanFail" "vector" "bytearray_access_ops"
+    "addr_access_ops" "thats_all_folks" "SCALAR" "VECTOR" "VECTUPLE" "INTVECTUPLE"})
+
+(defn- id-char? [c] (or (Character/isLetterOrDigit (char c)) (= c \#) (= c \_)))
+
+(defn lex-primops
+  "The tokens of primops.txt (the preprocessed file): [:kw K] [:lower S] [:upper S] [:int N] [:str S] [:nobraces S]
+  and the punctuation as keywords (:open :close :arrow :darrow :eq :comma :lparen :rparen :lhash :rhash :lbrack
+  :rbrack :langle :rangle). Alex's longest match: a keyword is a whole identifier; braces nest, their insides one
+  token a run"
+  [^String s]
+  (let [n (count s)]
+    (loop [i 0 depth 0 out (transient [])]
+      (if (>= i n)
+        (persistent! out)
+        (let [c (.charAt s i)]
+          (if (pos? depth)
+            (cond (= c \{) (recur (inc i) (inc depth) (conj! out [:open]))
+                  (= c \}) (recur (inc i) (dec depth) (conj! out [:close]))
+                  :else (let [j (loop [j i] (if (and (< j n) (not (#{\{ \}} (.charAt s j)))) (recur (inc j)) j))]
+                          (recur j depth (conj! out [:nobraces (subs s i j)]))))
+            (let [at (fn [^String p] (.startsWith s p (int i)))]
+              (cond
+                (Character/isWhitespace c) (recur (inc i) depth out)
+                (at "--") (let [e (.indexOf s "\n" (int i))] (recur (if (neg? e) n (inc e)) depth out))
+                (= c \{) (recur (inc i) 1 (conj! out [:open]))
+                (= c \}) (throw (ex-info (str "primops: unbalanced } at " i) {}))
+                (at "->") (recur (+ i 2) depth (conj! out [:arrow]))
+                (at "=>") (recur (+ i 2) depth (conj! out [:darrow]))
+                (at "(#") (recur (+ i 2) depth (conj! out [:lhash]))
+                (at "#)") (recur (+ i 2) depth (conj! out [:rhash]))
+                (= c \=) (recur (inc i) depth (conj! out [:eq]))
+                (= c \,) (recur (inc i) depth (conj! out [:comma]))
+                (= c \() (recur (inc i) depth (conj! out [:lparen]))
+                (= c \)) (recur (inc i) depth (conj! out [:rparen]))
+                (= c \[) (recur (inc i) depth (conj! out [:lbrack]))
+                (= c \]) (recur (inc i) depth (conj! out [:rbrack]))
+                (= c \<) (recur (inc i) depth (conj! out [:langle]))
+                (= c \>) (recur (inc i) depth (conj! out [:rangle]))
+                (= c \") (let [e (.indexOf s "\"" (int (inc i)))]
+                           (recur (inc e) depth (conj! out [:str (subs s (inc i) e)])))
+                (or (Character/isDigit c) (and (= c \-) (< (inc i) n) (Character/isDigit (.charAt s (inc i)))))
+                (let [j (loop [j (inc i)] (if (and (< j n) (Character/isDigit (.charAt s j))) (recur (inc j)) j))]
+                  (recur j depth (conj! out [:int (Long/parseLong (subs s i j))])))
+                (Character/isLetter c)
+                (let [j (loop [j (inc i)] (if (and (< j n) (id-char? (.charAt s j))) (recur (inc j)) j))
+                      w (subs s i j)]
+                  (recur j depth (conj! out (cond (contains? keywords w) [:kw w]
+                                                  (Character/isLowerCase c) [:lower w]
+                                                  :else [:upper w]))))
+                :else (throw (ex-info (str "primops: lexical error at " i ": " (pr-str (subs s i (min n (+ i 20))))) {}))))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The parser (genprimopcode's Parser.y; AccessOps.hs's generated entries)
+
+(defn- parser [toks] {:toks toks :i (atom 0)})
+(defn- peek-tok [p & [k]] (get (:toks p) (+ @(:i p) (or k 0))))
+(defn- next-tok! [p] (let [t (peek-tok p)] (swap! (:i p) inc) t))
+(defn- expect! [p t] (let [x (next-tok! p)] (when-not (= t x) (throw (ex-info (str "primops: expected " t ", got " x " at token " (dec @(:i p))) {}))) x))
+(defn- kw? [t k] (= t [:kw k]))
+
+(defn- braces!
+  "pStuffBetweenBraces: the text inside, nested braces kept"
+  [p]
+  (expect! p [:open])
+  (loop [acc (StringBuilder.) depth 1]
+    (let [t (next-tok! p)]
+      (case (first t)
+        :open (recur (.append acc "{") (inc depth))
+        :close (if (= 1 depth) (str acc) (recur (.append acc "}") (dec depth)))
+        :nobraces (recur (.append acc ^String (second t)) depth)))))
+
+(defn- option-start? [p]
+  (let [t (peek-tok p)]
+    (and (or (= :lower (first t)) (some #(kw? t %) ["vector" "fixity" "effect" "defined_bits" "can_fail_warning"]))
+         (= [:eq] (peek-tok p 1)))))
+
+(defn- option! [p]
+  (let [t (next-tok! p) _ (expect! p [:eq]) v (peek-tok p)]
+    (cond
+      (kw? t "vector") (do (expect! p [:lbrack])
+                           (loop [acc []]
+                             (if (= [:rbrack] (peek-tok p))
+                               (do (next-tok! p) [:vector acc])
+                               (do (when (= [:comma] (peek-tok p)) (next-tok! p))
+                                   (expect! p [:langle])
+                                   (let [a (second (next-tok! p)) _ (expect! p [:comma]) b (second (next-tok! p)) _ (expect! p [:comma])
+                                         k (second (next-tok! p))]
+                                     (expect! p [:rangle])
+                                     (recur (conj acc [a b k])))))))
+      (kw? t "fixity") (let [d (next-tok! p)]
+                         (if (kw? d "Nothing") [:fixity nil]
+                             [:fixity [(second (next-tok! p)) ({"infix" "n" "infixl" "l" "infixr" "r"} (second d))]]))
+      (kw? t "effect") [:effect (second (next-tok! p))]
+      (kw? t "defined_bits") [:defined-bits (second (next-tok! p))]
+      (kw? t "can_fail_warning") [:can-fail-warning (second (next-tok! p))]
+      (kw? v "True") (do (next-tok! p) [(second t) true])
+      (kw? v "False") (do (next-tok! p) [(second t) false])
+      (= [:open] v) [(second t) (braces! p)]
+      (= :int (first v)) (do (next-tok! p) [(second t) (second v)])
+      :else (throw (ex-info (str "primops: option value " v) {})))))
+
+(defn- options! [p] (loop [acc []] (if (option-start? p) (recur (conj acc (option! p))) acc)))
+(defn- with-options! [p] (if (kw? (peek-tok p) "with") (do (next-tok! p) (options! p)) []))
+(defn- desc! [p] (if (= [:open] (peek-tok p)) (braces! p) ""))
+
+(declare type!)
+
+(defn- tycon-start? [p]
+  (let [t (peek-tok p)]
+    (or (= :upper (first t)) (some #(kw? t %) ["SCALAR" "VECTOR" "VECTUPLE" "INTVECTUPLE"])
+        (and (= [:lparen] t) (= [:rparen] (peek-tok p 1)))
+        (and (= [:lparen] t) (= [:arrow] (peek-tok p 1)) (= [:rparen] (peek-tok p 2))))))
+
+(defn- tycon! [p]
+  (let [t (next-tok! p)]
+    (cond (= :upper (first t)) (second t)
+          (= :kw (first t)) (keyword (second t))
+          (= [:rparen] (peek-tok p)) (do (next-tok! p) "()")
+          :else (do (expect! p [:arrow]) (expect! p [:rparen]) "->"))))
+
+(defn- atype! [p]
+  (let [t (peek-tok p)]
+    (cond
+      (tycon-start? p) (let [tc (tycon! p)]
+                         (loop [args []]
+                           (cond (= :lower (first (peek-tok p))) (recur (conj args [:tv (second (next-tok! p))]))
+                                 (tycon-start? p) (recur (conj args [:app (tycon! p) []]))
+                                 :else [:app tc args])))
+      (= [:lhash] t) (do (next-tok! p)
+                         (if (= [:rhash] (peek-tok p))
+                           (do (next-tok! p) [:utup []])
+                           (loop [ts [(type! p)]]
+                             (if (= [:comma] (peek-tok p))
+                               (do (next-tok! p) (recur (conj ts (type! p))))
+                               (do (expect! p [:rhash]) [:utup ts])))))
+      (= [:lparen] t) (do (next-tok! p) (let [ty (type! p)] (expect! p [:rparen]) ty))
+      (= :lower (first t)) (do (next-tok! p) [:tv (second t)])
+      :else (throw (ex-info (str "primops: type expected, got " t " at token " @(:i p)) {})))))
+
+(defn- type! [p]
+  (let [a (atype! p)]
+    (cond (= [:arrow] (peek-tok p)) (do (next-tok! p) [:fun a (type! p)])
+          (= [:darrow] (peek-tok p)) (do (next-tok! p) [:cfun a (type! p)])
+          :else a)))
+
+;; AccessOps.hs: the ByteArray# and Addr# access primops, generated
+(def ^:private element-types
+  (into [["Char" [:app "Char#" []]] ["WideChar" [:app "Char#" []]] ["Int" [:app "Int#" []]] ["Word" [:app "Word#" []]]
+         ["Addr" [:app "Addr#" []]] ["Float" [:app "Float#" []]] ["Double" [:app "Double#" []]]
+         ["StablePtr" [:app "StablePtr#" [[:tv "a"]]]]]
+        (for [n [8 16 32 64] [k t] [["Int" "Int"] ["Word" "Word"]]] [(str k n) [:app (str t n "#") []]])))
+
+(defn- access-ops [kind]
+  (let [unaligned (remove #(contains? #{"Int8" "Word8"} (first %)) element-types)
+        mba [:app "MutableByteArray#" [[:tv "s"]]] st [:app "State#" [[:tv "s"]]] int [:app "Int#" []]
+        read-res (fn [t] [:fun st [:utup [st t]]]) write-res (fn [t] [:fun t [:fun st st]])
+        op (fn [nm ty] {:kind :primop :name nm :cat :gen :ty ty :opts []})
+        [base mut sfx sfx-as] (if (= kind :bytearray)
+                                [[:app "ByteArray#" []] mba "Array#" (fn [e] (str "indexWord8ArrayAs" e "#"))]
+                                [[:app "Addr#" []] [:app "Addr#" []] "OffAddr#" (fn [e] (str "indexWord8OffAddrAs" e "#"))])
+        as (fn [verb e] (if (= kind :bytearray) (str verb "Word8ArrayAs" e "#") (str verb "Word8OffAddrAs" e "#")))]
+    (concat (for [[e t] element-types] (op (str "index" e sfx) [:fun base [:fun int t]]))
+            (for [[e t] unaligned] (op (sfx-as e) [:fun base [:fun int t]]))
+            (for [[e t] element-types] (op (str "read" e sfx) [:fun mut [:fun int (read-res t)]]))
+            (for [[e t] unaligned] (op (as "read" e) [:fun mut [:fun int (read-res t)]]))
+            (for [[e t] element-types] (op (str "write" e sfx) [:fun mut [:fun int (write-res t)]]))
+            (for [[e t] unaligned] (op (as "write" e) [:fun mut [:fun int (write-res t)]])))))
+
+(defn parse-primops
+  "primops.txt's Info: {:defaults [OPTION...] :entries [ENTRY...]}, an entry {:kind :primop|:pseudoop|:primtype|:section
+  :cons :name :cat :ty :opts}"
+  [^String text]
+  (let [p (parser (lex-primops text))]
+    (expect! p [:kw "defaults"])
+    (let [defaults (options! p)]
+      (loop [acc []]
+        (let [t (peek-tok p)]
+          (cond
+            (kw? t "thats_all_folks") {:defaults defaults :entries acc}
+            (kw? t "primop") (do (next-tok! p)
+                                 (let [cons (second (next-tok! p)) nm (second (next-tok! p))
+                                       cat (if (kw? (next-tok! p) "Compare") :compare :gen)
+                                       ty (type! p) _ (desc! p) opts (with-options! p)]
+                                   (recur (conj acc {:kind :primop :cons cons :name nm :cat cat :ty ty :opts opts}))))
+            (kw? t "pseudoop") (do (next-tok! p)
+                                   (let [nm (second (next-tok! p)) ty (type! p) _ (desc! p) opts (with-options! p)]
+                                     (recur (conj acc {:kind :pseudoop :name nm :ty ty :opts opts}))))
+            (kw? t "primtype") (do (next-tok! p)
+                                   (let [ty (type! p) _ (desc! p) opts (with-options! p)]
+                                     (recur (conj acc {:kind :primtype :ty ty :opts opts}))))
+            (kw? t "section") (do (next-tok! p) (next-tok! p) (desc! p) (recur acc))
+            (kw? t "bytearray_access_ops") (do (next-tok! p) (recur (into acc (access-ops :bytearray))))
+            (kw? t "addr_access_ops") (do (next-tok! p) (recur (into acc (access-ops :addr))))
+            :else (throw (ex-info (str "primops: entry expected, got " t " at token " @(:i p)) {}))))))))
+
+(defn- opt [e k] (some (fn [[n v]] (when (= n k) v)) (:opts e)))
+
+(defn- desugar-vector
+  "Main.hs's desugarVectorSpec: an entry with a vector option, one entry a vector type (its name and type)"
+  [e]
+  (if-let [vos (opt e :vector)]
+    (for [[con rep n] vos]
+      (let [vx (str con "X" n) vcons (str vx "#") nm (:name e)
+            suffix (fn [s suf] (when (str/ends-with? s suf) (subs s 0 (- (count s) (count suf)))))
+            name' (when nm
+                    (cond (suffix nm "Array#") (str (suffix nm "Array#") vx "Array#")
+                          (suffix nm "OffAddr#") (str (suffix nm "OffAddr#") vx "OffAddr#")
+                          (suffix nm "ArrayAs#") (str (suffix nm "ArrayAs#") con "ArrayAs" vx "#")
+                          (suffix nm "OffAddrAs#") (str (suffix nm "OffAddrAs#") con "OffAddrAs" vx "#")
+                          :else (str (subs nm 0 (dec (count nm))) vx "#")))
+            ds (fn ds [t]
+                 (case (first t)
+                   :fun [:fun (ds (nth t 1)) (ds (nth t 2))]
+                   :cfun [:cfun (ds (nth t 1)) (ds (nth t 2))]
+                   :app (case (nth t 1)
+                          :SCALAR [:app rep []]
+                          :VECTOR [:app vcons []]
+                          :VECTUPLE [:utup (vec (repeat n [:app rep []]))]
+                          :INTVECTUPLE [:utup (vec (repeat n [:app "Int#" []]))]
+                          [:app (nth t 1) (mapv ds (nth t 2))])
+                   :tv t
+                   :utup [:utup (mapv ds (nth t 1))]))]
+        (assoc e :name name' :ty (ds (:ty e)) :vector [con rep n])))
+    [e]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC's types: the template variables, the type constructors
+
+(def ^:private unique-base 3530822107858468864) ; mkAlphaTyVarUnique 0: the tag '1' in the top byte
+
+(def ^:private kind-type [:tc "tc" "GHC.Internal.Types" "Type" []])
+(def ^:private kind-rr [:tc "tc" "GHC.Internal.Types" "RuntimeRep" []])
+(def ^:private kind-lev [:tc "tc" "GHC.Internal.Types" "Levity" []])
+(def ^:private kind-mult [:tc "tc" "GHC.Internal.Types" "Multiplicity" []])
+(defn- dc [o & args] [:tc "data" "GHC.Internal.Types" o (vec args)])
+(defn- TYPE
+  "mk_TYPE_app: TYPE rep, its synonyms Type, UnliftedType and ZeroBitType for LiftedRep, UnliftedRep and ZeroBitRep"
+  [rep]
+  (case (when (= "tc" (nth rep 1)) (nth rep 3))
+    "LiftedRep" kind-type
+    "UnliftedRep" [:tc "tc" "GHC.Internal.Types" "UnliftedType" []]
+    "ZeroBitRep" [:tc "tc" "GHC.Internal.Types" "ZeroBitType" []]
+    [:tc "tc" "GHC.Internal.Prim" "TYPE" [rep]]))
+(def ^:private lifted-rep [:tc "tc" "GHC.Internal.Types" "LiftedRep" []])
+(def ^:private unlifted-rep [:tc "tc" "GHC.Internal.Types" "UnliftedRep" []])
+(def ^:private zero-bit-rep [:tc "tc" "GHC.Internal.Types" "ZeroBitRep" []])
+
+(def ^:private template
+  "GHC.Builtin.Types.Prim's template variables: mkTemplateTyVars' n-th (from 0) is named by the letter a+n, unique
+  n+1 (mkAlphaTyVarUnique); the kind variables of mkTemplateKindVars k, unique 0. {KEY [NAME UNIQUE KIND]}"
+  (let [tv (fn [n kind] [(str (char (+ 97 n))) (inc n) kind])]
+    {:alpha (tv 0 kind-type) :beta (tv 1 kind-type) :gamma (tv 2 kind-type) :delta (tv 3 kind-type)
+     :rr1 (tv 16 kind-rr) :rr2 (tv 17 kind-rr) :rr3 (tv 18 kind-rr)
+     :open-alpha (tv 0 (TYPE [:tv :rr1])) :open-beta (tv 1 (TYPE [:tv :rr2])) :open-gamma (tv 2 (TYPE [:tv :rr3]))
+     :lev1 (tv 11 kind-lev) :lev2 (tv 10 kind-lev)
+     :levpoly-alpha (tv 0 (TYPE (dc "BoxedRep" [:tv :lev1]))) :levpoly-beta (tv 1 (TYPE (dc "BoxedRep" [:tv :lev2])))
+     :mult1 (tv 13 kind-mult) :mult2 (tv 14 kind-mult)
+     :kv-type ["k" 0 kind-type] :kv-rr ["k" 0 kind-rr]
+     ;; coerce's: mkTemplateKiTyVars [runtimeRepTy] (\\[k] -> [TYPE k, TYPE k])
+     :coerce-a ["a" 1 (TYPE [:tv :kv-rr])] :coerce-b ["b" 2 (TYPE [:tv :kv-rr])]
+     ;; proxy#'s: mkTemplateKiTyVars [liftedTypeKind] id
+     :proxy-a ["a" 1 [:tv :kv-type]]}))
+
+(def ^:private pp-tyvar
+  "genprimopcode's ppTyVar: a primops.txt variable's inferred binders and its binder"
+  {"a" [[] :alpha] "b" [[] :beta] "c" [[] :gamma] "s" [[] :delta]
+   "a_reppoly" [[:rr1] :open-alpha] "b_reppoly" [[:rr2] :open-beta]
+   "a_levpoly" [[:lev1] :levpoly-alpha] "b_levpoly" [[:lev2] :levpoly-beta]})
+
+(def ^:private rep-names
+  {"Char#" "WordRep" "Int#" "IntRep" "Int8#" "Int8Rep" "Int16#" "Int16Rep" "Int32#" "Int32Rep" "Int64#" "Int64Rep"
+   "Word#" "WordRep" "Word8#" "Word8Rep" "Word16#" "Word16Rep" "Word32#" "Word32Rep" "Word64#" "Word64Rep"
+   "Addr#" "AddrRep" "Float#" "FloatRep" "Double#" "DoubleRep"})
+
+(def prim-tycons
+  "GHC.Builtin.Types.Prim's exposedPrimTyCons in order: [NAME SHAPE ROLES RESULT-REP], SHAPE :plain (pcPrimTyCon0,
+  pcPrimTyCon: each argument of kind Type), :levpoly-last (pcPrimTyCon_LevPolyLastArg: forall {l :: Levity}, the last
+  argument TYPE ('BoxedRep l)) or the special ones' (:proxy :fun :TYPE); the vector types follow, from primops.txt"
+  (let [p0 (fn [n rep] [n :plain [] rep])]
+    [(p0 "Addr#" (dc "AddrRep")) ["Array#" :levpoly-last [:representational] unlifted-rep] (p0 "ByteArray#" unlifted-rep)
+     ["SmallArray#" :levpoly-last [:representational] unlifted-rep] (p0 "Char#" (dc "WordRep")) (p0 "Double#" (dc "DoubleRep"))
+     (p0 "Float#" (dc "FloatRep")) (p0 "Int#" (dc "IntRep")) (p0 "Int8#" (dc "Int8Rep")) (p0 "Int16#" (dc "Int16Rep"))
+     (p0 "Int32#" (dc "Int32Rep")) (p0 "Int64#" (dc "Int64Rep")) (p0 "BCO" lifted-rep)
+     ["Weak#" :levpoly-last [:representational] unlifted-rep]
+     ["MutableArray#" :levpoly-last [:nominal :representational] unlifted-rep]
+     ["MutableByteArray#" :plain [:nominal] unlifted-rep]
+     ["SmallMutableArray#" :levpoly-last [:nominal :representational] unlifted-rep]
+     ["MVar#" :levpoly-last [:nominal :representational] unlifted-rep]
+     ["TVar#" :levpoly-last [:nominal :representational] unlifted-rep]
+     ["MutVar#" :levpoly-last [:nominal :representational] unlifted-rep]
+     (p0 "RealWorld" lifted-rep)
+     ["StablePtr#" :levpoly-last [:representational] (dc "AddrRep")]
+     ["StableName#" :levpoly-last [:phantom] unlifted-rep]
+     (p0 "Compact#" unlifted-rep) ["State#" :plain [:nominal] zero-bit-rep] ["Proxy#" :proxy [:nominal :phantom] zero-bit-rep]
+     (p0 "ThreadId#" unlifted-rep) (p0 "Word#" (dc "WordRep")) (p0 "Word8#" (dc "Word8Rep")) (p0 "Word16#" (dc "Word16Rep"))
+     (p0 "Word32#" (dc "Word32Rep")) (p0 "Word64#" (dc "Word64Rep")) (p0 "StackSnapshot#" unlifted-rep)
+     ["PromptTag#" :plain [:representational] unlifted-rep]
+     ["FUN" :fun [:nominal :nominal :nominal :representational :representational] lifted-rep]
+     ["TYPE" :TYPE [:nominal] lifted-rep] ["CONSTRAINT" :TYPE [:nominal] lifted-rep]]))
+
+(defn- vec-tycon
+  "A vector type of the primtype VECTOR entry: <Int8,Int8#,16> is Int8X16# :: TYPE ('VecRep 'Vec16 'Int8ElemRep)"
+  [[con _ n]]
+  [(str con "X" n "#") :plain [] (dc "VecRep" (dc (str "Vec" n)) (dc (str con "ElemRep")))])
+
+;;; ------------------------------------------------------------------------------------------
+;;; A primops.txt type as GHC's type
+
+(declare kind-of)
+
+(defn- rep-of
+  "A type's runtime representation (its kind's TYPE argument)"
+  [vreps t]
+  (let [k (kind-of vreps t)]
+    (case (when (= "tc" (nth k 1)) (nth k 3))
+      "Type" lifted-rep "UnliftedType" unlifted-rep "ZeroBitType" zero-bit-rep
+      "TYPE" (first (nth k 4))
+      (throw (ex-info (str "primops: no representation of kind " k) {})))))
+
+(defn- levity-of [vreps t]
+  (let [r (rep-of vreps t)]
+    (cond (= r lifted-rep) (dc "Lifted")
+          (= r unlifted-rep) (dc "Unlifted")
+          (and (= "data" (nth r 1)) (= "BoxedRep" (nth r 3))) (first (nth r 4))
+          :else (throw (ex-info (str "primops: no levity of representation " r) {})))))
+
+(def ^:private tycon-table (delay (into {} (map (juxt first identity) prim-tycons))))
+
+(defn- kind-of
+  "A type's kind (vreps: the vector types' representations)"
+  [vreps t]
+  (case (first t)
+    :tv (nth (get template (second t)) 2)
+    :fun kind-type
+    :tc (let [[_ ns m o _] t]
+          (cond (and (= m "GHC.Internal.Prim") (get vreps o)) (TYPE (get vreps o))
+                (and (= m "GHC.Internal.Prim") (get @tycon-table o)) (TYPE (nth (get @tycon-table o) 3))
+                :else (throw (ex-info (str "primops: no kind of " t) {}))))))
+
+(defn ghc-type
+  "A primops.txt type as GHC's (the forms' tree): [:tv KEY], [:tc NS MODULE OCC ARGS] with the invisible arguments,
+  [:fun MULT A B] (MULT :many or a variable's key), [:cfun A B]; vreps: {VECTOR-TYCON REP} of the vector types"
+  [vreps t]
+  (case (first t)
+    :tv [:tv (second (get pp-tyvar (second t)))]
+    :fun [:fun :many (ghc-type vreps (nth t 1)) (ghc-type vreps (nth t 2))]
+    :cfun [:cfun (ghc-type vreps (nth t 1)) (ghc-type vreps (nth t 2))]
+    :utup (let [ts (mapv #(ghc-type vreps %) (nth t 1)) n (count ts)]
+            (case n
+              0 [:tc "tc" "GHC.Internal.Types" "Unit#" []]
+              1 [:tc "tc" "GHC.Internal.Types" "Solo#" [(rep-of vreps (first ts)) (first ts)]]
+              [:tc "tc" "GHC.Internal.Types" (str "Tuple" n "#") (into (mapv #(rep-of vreps %) ts) ts)]))
+    :app (let [o (nth t 1) as (mapv #(ghc-type vreps %) (nth t 2))]
+           (cond
+             (= o "Coercible") [:tc "tc" "GHC.Internal.Types" "Coercible" (into [(kind-of vreps (first as))] as)]
+             (get vreps o) [:tc "tc" "GHC.Internal.Prim" o []]
+             (get @tycon-table o)
+             (let [[_ shape] (get @tycon-table o)]
+               (case shape
+                 :levpoly-last [:tc "tc" "GHC.Internal.Prim" o (into [(levity-of vreps (peek as))] as)]
+                 :proxy [:tc "tc" "GHC.Internal.Prim" o (into [(kind-of vreps (first as))] as)]
+                 [:tc "tc" "GHC.Internal.Prim" o as]))
+             :else (throw (ex-info (str "primops: unknown type constructor " o) {}))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Printing: the forms (the iface2 verb's typeF) and GHC's text of a type
+
+(defn- tv-name [k] (let [[n u] (get template k)] (str n "#" (+ unique-base u))))
+
+(defn- ext-str [ns m o] (str "(ext " ns " " (pr-str m) " " (pr-str o) ")"))
+(def ^:private many-form "(tycon-app (ext data \"GHC.Internal.Types\" \"Many\") [])")
+
+(defn type-form [t]
+  (case (first t)
+    :tv (str "(tv " (pr-str (tv-name (second t))) ")")
+    :tc (let [[_ ns m o as] t] (str "(tycon-app " (ext-str ns m o) " [" (str/join " " (map type-form as)) "])"))
+    :fun (let [[_ mult a b] t]
+           (str "(fun t " (if (= :many mult) many-form (type-form [:tv mult])) " " (type-form a) " " (type-form b) ")"))
+    :cfun (str "(fun c " many-form " " (type-form (nth t 1)) " " (type-form (nth t 2)) ")")
+    :forall (let [[_ bs body] t]
+              (reduce (fn [acc [k _]] (str "(forall " (pr-str (tv-name k)) " specified " (type-form (nth (get template k) 2)) " " acc ")"))
+                      (type-form body) (reverse bs)))))
+
+(defn- visible-args
+  "A type constructor application's visible arguments (the invisible kind and representation arguments dropped)"
+  [[_ _ m o as]]
+  (cond (re-matches #"(Tuple[0-9]+|Solo)#" o) (subvec as (quot (count as) 2))
+        (= o "Coercible") (subvec as 1)
+        (and (= m "GHC.Internal.Prim") (contains? #{:levpoly-last :proxy} (second (get @tycon-table o)))) (subvec as 1)
+        :else as))
+
+(declare type-text)
+
+(defn- atomic? [t] (or (= :tv (first t)) (and (= :tc (first t)) (or (empty? (visible-args t)) (re-matches #"(Tuple[0-9]+|Solo|Unit)#" (nth t 3))))))
+
+(defn- arg-text [t] (if (atomic? t) (type-text t) (str "(" (type-text t) ")")))
+
+(defn type-text
+  "GHC's text of a type (its pretty printer's, as the iface2 verb writes it): a promoted constructor with its tick"
+  [t]
+  (case (first t)
+    :tv (first (get template (second t)))
+    :tc (let [o (nth t 3) vs (visible-args t)]
+          (cond (= o "Unit#") "(# #)"
+                (re-matches #"(Tuple[0-9]+|Solo)#" o) (str "(# " (str/join ", " (map type-text vs)) " #)")
+                :else (str/join " " (cons (str (when (= "data" (nth t 1)) "'") o) (map arg-text vs)))))
+    :fun (let [[_ mult a b] t]
+           (str (if (#{:fun :cfun} (first a)) (str "(" (type-text a) ")") (type-text a))
+                (if (= :many mult) " -> " (str " %" (first (get template mult)) " -> ")) (type-text b)))
+    :cfun (str (type-text (nth t 1)) " => " (type-text (nth t 2)))
+    :forall (let [[_ bs body] t]
+              (str "forall "
+                   (str/join " " (for [[k vis] bs :let [[n _ kind] (get template k)]]
+                                   (cond (= vis :inferred) (if (= kind kind-type) (str "{" n "}") (str "{" n " :: " (type-text kind) "}"))
+                                         (= kind kind-type) n
+                                         :else (str "(" n " :: " (type-text kind) ")"))))
+                   ". " (type-text body)))))
+
+(defn- quantify [infs bndrs body]
+  (let [bs (vec (concat (map (fn [k] [k :inferred]) (distinct infs)) (map (fn [k] [k :specified]) (distinct bndrs))))]
+    (if (seq bs) [:forall bs body] body)))
+
+(defn- prim-tvs [t]
+  (case (first t)
+    (:fun :cfun) (concat (prim-tvs (nth t 1)) (prim-tvs (nth t 2)))
+    :app (mapcat prim-tvs (nth t 2))
+    :utup (mapcat prim-tvs (nth t 1))
+    :tv [(second t)]))
+
+(defn primop-type
+  "genprimopcode's primOpInfo: the type quantified over its variables (tvsIn, ppTyVarBinders)"
+  [vreps ty]
+  (let [tvs (prim-tvs ty)]
+    (quantify (mapcat #(first (get pp-tyvar %)) tvs) (map #(second (get pp-tyvar %)) tvs) (ghc-type vreps ty))))
+
+(defn- arity-of [t]
+  (case (first t)
+    :forall (recur (nth t 2))
+    (:fun :cfun) (inc (arity-of (nth t (if (= :fun (first t)) 3 2))))
+    0))
+
+(def ^:private demands
+  "GHC.Types.Demand's demands as primops.txt.pp's strictness options name them, as the iface2 verb prints them"
+  {"topDmd" "<L>" "evalDmd" "<SL>" "lazyApply1Dmd" "<MC(1,L)>" "lazyApply2Dmd" "<MC(1,C(1,L))>"
+   "strictOnceApply1Dmd" "<1C(1,L)>" "strictManyApply1Dmd" "<SC(S,L)>"})
+(def ^:private divergences {"topDiv" "" "botDiv" "b" "exnDiv" "x"})
+
+(defn strictness
+  "A primop's strictness option (`\\ arity -> mkClosedDmdSig ...`) at its arity as the iface2 verb prints the signature"
+  [^String s arity]
+  (let [s (str/trim s)]
+    (if-let [[_ d dv] (re-find #"mkClosedDmdSig\s*\(replicate\s+arity\s+(\w+)\)\s*(\w+)" s)]
+      (str (apply str (repeat arity (get demands d))) (get divergences dv))
+      (let [[_ ds dv] (re-find #"mkClosedDmdSig\s*\[([^\]]*)\]\s*(\w+)" s)]
+        (str (apply str (map #(or (get demands (str/trim %)) (throw (ex-info (str "primops: demand " %) {})))
+                             (str/split (str/trim ds) #"\s*,\s*")))
+             (or (get divergences dv) (throw (ex-info (str "primops: divergence " dv) {}))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; GHC.Types.Id.Make's ghcPrimIds, the type constructors' kinds
+
+(def ^:private make-ids
+  "ghcPrimIds that Make.hs builds otherwise than genprimopcode's rules give from their pseudoop entries (coerceId over
+  mkTemplateKiTyVars; proxyHashId; leftSectionId, rightSectionId with their multiplicity variables)"
+  {"coerce" (quantify [:kv-rr] [:coerce-a :coerce-b]
+                      [:cfun [:tc "tc" "GHC.Internal.Types" "Coercible" [(TYPE [:tv :kv-rr]) [:tv :coerce-a] [:tv :coerce-b]]]
+                       [:fun :many [:tv :coerce-a] [:tv :coerce-b]]])
+   "proxy#" (quantify [:kv-type] [:proxy-a] [:tc "tc" "GHC.Internal.Prim" "Proxy#" [[:tv :kv-type] [:tv :proxy-a]]])
+   "leftSection" (quantify [:rr1 :rr2 :mult1] [:open-alpha :open-beta]
+                           [:fun :many [:fun :mult1 [:tv :open-alpha] [:tv :open-beta]] [:fun :mult1 [:tv :open-alpha] [:tv :open-beta]]])
+   "rightSection" (let [a [:tv :open-alpha] b [:tv :open-beta] c [:tv :open-gamma]]
+                    (quantify [:rr1 :rr2 :rr3 :mult1 :mult2] [:open-alpha :open-beta :open-gamma]
+                              [:fun :many [:fun :mult1 a [:fun :mult2 b c]] [:fun :mult2 b [:fun :mult1 a c]]]))})
+
+(def ^:private ghc-prim-ids ["realWorld#" "void#" "nullAddr#" "seq" "coerce" "proxy#" "leftSection" "rightSection"])
+
+(defn- tycon-kind
+  "A primitive type constructor's kind as a type (with :forall binders) and its arity"
+  [[o shape roles rep]]
+  (let [arrows (fn [args res] (reduce (fn [acc a] [:fun :many a acc]) res (reverse args)))]
+    (case shape
+      :plain [(arrows (repeat (count roles) kind-type) (TYPE rep)) (count roles)]
+      :levpoly-last [[:forall [[:lev1 :inferred]]
+                      (arrows (concat (repeat (dec (count roles)) kind-type) [(TYPE (dc "BoxedRep" [:tv :lev1]))]) (TYPE rep))]
+                     (inc (count roles))]
+      :proxy [[:forall [[:kv-type :specified]] (arrows [[:tv :kv-type]] (TYPE rep))] 2]
+      :fun [[:forall [[:mult1 :required]] [:forall [[:rr1 :inferred] [:rr2 :inferred]]
+                                            (arrows [(TYPE [:tv :rr1]) (TYPE [:tv :rr2])] kind-type)]] 5]
+      :TYPE [(arrows [kind-rr] kind-type) 1])))
+
+(defn- kind-text [t]
+  (if (and (= :forall (first t)) (= :required (second (first (second t)))))
+    (let [[k] (first (second t)) [n _ kind] (get template k)]
+      (str "forall (" n " :: " (type-text kind) ") -> " (kind-text (nth t 2))))
+    (type-text t)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The interface
+
+(defn- id-line [o t strict]
+  (str "(id " (ext-str "var" "GHC.Internal.Prim" o) " " (pr-str (type-text t)) " " (type-form t)
+       " {:arity " (arity-of t) " :strictness " (pr-str strict) "})"))
+
+(defn build
+  "The interface's parts from primops.txt's text: {:exports [LINE...] :fixities [LINE...] :things [LINE...] :ids {NAME
+  TYPE} :order [NAME...]}; rotate: the negative control's (each primop given the next one's type)"
+  [text & [rotate]]
+  (let [{:keys [defaults entries]} (parse-primops text)
+        default-strict (some (fn [[n v]] (when (= n "strictness") v)) defaults)
+        primtypes (filter #(= :primtype (:kind %)) entries)
+        vec-tycons (map (comp vec-tycon :vector) (mapcat desugar-vector (filter #(opt % :vector) primtypes)))
+        vreps (into {} (map (juxt first #(nth % 3)) vec-tycons))
+        ops (vec (mapcat desugar-vector (filter #(= :primop (:kind %)) entries)))
+        ops (if rotate (mapv (fn [o n] (assoc o :ty (:ty n))) ops (concat (rest ops) [(first ops)])) ops)
+        pseudo (into {} (for [e entries :when (= :pseudoop (:kind e))] [(:name e) e]))
+        prim-id (fn [o] (or (get make-ids o) (primop-type vreps (:ty (get pseudo o)))))
+        op-type (fn [e] (primop-type vreps (:ty e)))
+        id-lines (concat (for [o ghc-prim-ids] (id-line o (prim-id o) ""))
+                         (for [e ops :let [t (op-type e)]]
+                           (id-line (:name e) t (strictness (or (opt e "strictness") default-strict) (arity-of t)))))
+        tycons (concat prim-tycons vec-tycons)
+        tycon-lines (for [tc tycons :let [[k ar] (tycon-kind tc) roles (case (second tc)
+                                                                          :levpoly-last (cons :nominal (nth tc 2))
+                                                                          (nth tc 2))]]
+                      (str "(tycon " (ext-str "tc" "GHC.Internal.Prim" (first tc)) " " (pr-str (kind-text k)) " other [] "
+                           (type-form k)
+                           " {:roles [" (str/join " " (map name roles)) "] :arity " ar "})"))
+        fix-lines (sort (cons "(fixity var \"seq\" 0 r)"
+                              (for [e ops :let [f (opt e :fixity)] :when f]
+                                (str "(fixity var " (pr-str (:name e)) " " (first f) " " (second f) ")"))))]
+    {:exports (concat (for [o ghc-prim-ids] (str "(avail " (ext-str "var" "GHC.Internal.Prim" o) " [])"))
+                      (for [e ops] (str "(avail " (ext-str "var" "GHC.Internal.Prim" (:name e)) " [])"))
+                      (for [tc tycons] (str "(avail " (ext-str "tc" "GHC.Internal.Prim" (first tc)) " [])")))
+     :fixities fix-lines
+     :things (sort (concat id-lines tycon-lines))
+     :n-primops (count ops)}))
+
+(defn iface-text [parts]
+  (str "(hsiface/module \"GHC.Internal.Prim\" {:unit \"ghc-internal\" :verb \"own\" :own 1 :from \"primops.txt.pp\"})\n"
+       "(hsiface/exports [" (str/join "\n  " (:exports parts)) "])\n"
+       "(hsiface/fixities [" (str/join "\n  " (:fixities parts)) "])\n"
+       "(hsiface/things [" (str/join "\n  " (:things parts)) "])\n"
+       "(hsiface/instances [])\n(hsiface/unfoldings [])\n(hsiface/fam-instances [])\n"))
+
+(defn primops-text
+  "primops.txt from primops.txt.pp: Arbace's C preprocessor in GCC's traditional mode (hadrian's `cc -E -undef
+  -traditional -P -x c`), its line markers dropped"
+  [path]
+  (let [{:keys [text]} (cpp/preprocess path {:defines []})]
+    (str/join "\n" (remove #(re-find #"^# [0-9]+ \"" %) (str/split-lines text)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The judge
+
+(defn- things-of [text] (second (some #(when (and (seq? %) (= 'hsiface/things (first %))) %) (read-string (str "[" text "]")))))
+
+(defn check
+  "The own interface's text against GHC's: the facts (ownface/compare-ifaces, each read with its own kind arities)
+  and every line but the header byte for byte: {:facts :equal :missing :extra :by :lines n :lines-equal n :diff [...]}"
+  [own ghc]
+  (let [oka (tc/kind-arities (things-of own) {}) gka (tc/kind-arities (things-of ghc) {})
+        c (ownface/compare-ifaces own ghc {} oka gka)
+        ol (rest (str/split-lines own)) gl (rest (str/split-lines ghc))
+        diff (vec (take 8 (for [[a b] (map vector gl ol) :when (not= a b)] {:ghc a :ours b})))]
+    (assoc (select-keys c [:facts :equal :missing :extra :by :diff])
+           :lines (count gl) :lines-equal (count (filter true? (map = gl ol))) :lines-ours (count ol) :line-diff diff
+           :kind-arities-equal (= (into {} (filter (fn [[k _]] (= "GHC.Internal.Prim" (nth (if (vector? k) (if (vector? (first k)) (first k) k) k) 2 nil))) oka))
+                                  (into {} (filter (fn [[k _]] (= "GHC.Internal.Prim" (nth (if (vector? k) (if (vector? (first k)) (first k) k) k) 2 nil))) gka))))))
+
+(defn -main
+  "write PRIMOPS.TXT.PP DIR: GHC.Internal.Prim's interface into DIR/GHC.Internal.Prim.iface.edn; check PRIMOPS.TXT.PP
+  GHC-IFACE: built afresh and judged against GHC's, fact by fact and line by line, with the negative control (exit 1
+  when a fact differs or the control is judged equal)"
+  [& args]
+  (let [[verb pp a] args]
+    (case verb
+      "write" (let [parts (build (primops-text pp)) d (File. ^String a) f (str a "/GHC.Internal.Prim.iface.edn")]
+                (.mkdirs d)
+                (spit (str f ".part") (iface-text parts))
+                (.renameTo (File. (str f ".part")) (File. f))
+                (println (str "primiface: " f ": " (:n-primops parts) " primops, " (count (:exports parts)) " exports, "
+                              (count (:things parts)) " things")))
+      "check" (let [txt (primops-text pp) ghc (slurp a)
+                    own (iface-text (build txt))
+                    r (check own ghc)
+                    ctl (check (iface-text (build txt true)) ghc)
+                    ok (and (= (:facts r) (:equal r)) (zero? (:extra r)))
+                    ctl-ok (not= (:facts ctl) (:equal ctl))]
+                (binding [*print-length* nil *print-level* nil]
+                  (println (pr-str (dissoc r :line-diff)))
+                  (doseq [d (:line-diff r)] (println "line differs:\n  ghc:  " (:ghc d) "\n  ours: " (:ours d))))
+                (println (str "primiface: " (:equal r) " of " (:facts r) " facts equal (" (:missing r) " missing, " (:extra r) " extra), "
+                              (:lines-equal r) " of " (:lines r) " lines equal byte for byte (ours " (:lines-ours r) ")"
+                              "; the control (types rotated): " (:equal ctl) " of " (:facts ctl) " facts equal, "
+                              (if ctl-ok "differs, as it must" "JUDGED EQUAL: the judge is blind")))
+                (System/exit (if (and ok ctl-ok) 0 1)))
+      (do (println "usage: -m arbace.repr.haskell.primiface write PRIMOPS.TXT.PP DIR | check PRIMOPS.TXT.PP GHC-IFACE") (System/exit 2)))))

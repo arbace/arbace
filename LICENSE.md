@@ -1108,6 +1108,15 @@ covers what.
   `compiler/GHC/Core/Opt/Simplify/Utils.hs`) and `rename.ae`'s `integral-fl` (generalizeOverLitVal of
   `compiler/GHC/Rename/Pat.hs`) from the same tarball, under the notices those files carry; `libcheck.ae`'s `dm-unfoldings`,
   `grow-closure` and `cabal-reexports` are Arbace's own.
+- `arbace/repr/haskell/primiface.ae` (GHC.Internal.Prim's interface from `primops.txt.pp`, HF10-P18 (a), doc/haskell/FRONTEND-SURVEY.md,
+  "As built: HF10-P18"): ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): genprimopcode's lexer and parser
+  (`utils/genprimopcode/Lexer.x`, `Parser.y`), `AccessOps.hs`, `Main.hs`'s desugarVectorSpec, tvsIn and ppTyVarBinders,
+  `compiler/GHC/Builtin/Types/Prim.hs`'s template variables and exposedPrimTyCons, `compiler/GHC/Builtin/Utils.hs`'s
+  ghcPrimExports and ghcPrimFixities and `compiler/GHC/Types/Id/Make.hs`'s ghcPrimIds, by hand on 2026-11-10, under the notices
+  those files carry (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below). `typecheck.ae`'s
+  HF10-P20 Typeable bindings of the wired-in things follow `compiler/GHC/Tc/Instance/Typeable.hs` (mkPrimTypeableTodos,
+  builtInKindReps, mkKindRepRhs, todoForTyCons) of the same tarball, under its notice.
 - `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
   ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
   `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,

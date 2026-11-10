@@ -130,6 +130,10 @@ code. Three kinds of things live here:
   `Env.hs`, `Inline.hs`, `compiler/GHC/Core/Opt/OccurAnal.hs`, `Opt/Arity.hs`, `compiler/GHC/Core/Unfold.hs` with
   `Unfold/Make.hs`, `compiler/GHC/Core/Utils.hs` and `SimpleOpt.hs`'s `exprIsConApp_maybe` from the same tarball, carrying
   GHC's notice; `primops.ae` is generated from `compiler/GHC/Builtin/primops.txt.pp` by `tools/hsprimops/primops.awk`;
+  `primiface.ae` (HF10-P18 (a), 2026-11-10) builds GHC.Internal.Prim's interface from the same `primops.txt.pp` with ports of
+  `utils/genprimopcode` (Lexer.x, Parser.y, AccessOps.hs, Main.hs's desugarVectorSpec and ppTyVarBinders), `Builtin/Types/Prim.hs`'s
+  template variables and exposed type constructors, `Builtin/Utils.hs`'s ghcPrimExports and `Types/Id/Make.hs`'s ghcPrimIds, and
+  `typecheck.ae`'s Typeable bindings of the wired-in things (HF10-P20) follow `Tc/Instance/Typeable.hs`, all from the same tarball;
   `simplcmp.ae`, the simplified Core's judge, is Arbace's own),
   `deriv.ae` (HF4, 2026-11-05) ports the generators of `compiler/GHC/Tc/Deriv/Generate.hs` (Eq, Ord, Enum, Bounded, Ix, Read,
   Show) and `Deriv/Functor.hs` (Functor, Foldable, Traversable) from the same tarball, the file carrying GHC's notice;
