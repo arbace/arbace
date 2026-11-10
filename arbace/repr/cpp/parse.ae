@@ -1266,9 +1266,13 @@
   its semantic form for an aggregate); any other argument as it is."
   [^P p t x]
   (let [ti (when (= "InitListExpr" (:kind x)) (sema/tinfo t (.-year p)))]
-    (if (#{:class :record} (:k ti))
+    (cond
+      (#{:class :record} (:k ti))
       {:kind "CXXConstructExpr" :range (:range x) :_b (:_b x) :_e (:_e x) :inner [(if (= :class (:k ti)) (designate p t x) x)]}
-      x)))
+      ;; CP352: an array's `a({1})` (C++20 parenthesized aggregate initialization) is clang's InitListExpr in its semantic form,
+      ;; the one `a{1}` has (g++.dg/cpp2a/paren-init33.C: the print's `a1{1}` read again must equal)
+      (and (= "InitListExpr" (:kind x)) (= :a (:t t))) (designate p t x)
+      :else x)))
 
 (declare dependent-type? designate pack-indexed targ-nodes)
 
@@ -2112,7 +2116,7 @@
             (node p "LabelStmt" b (ne s) {:name (.-s t) :inner [s]})))
       (or (t= t "asm") (t= t "__asm__") (t= t "__asm"))
       (do (skip-until! p #{";"}) (let [e (last-ix p)] (expect! p ";") (node p "GCCAsmStmt" b e {})))
-      (or (and (t= t "[") (is-at? p 1 "[")) (t= t "__attribute__"))
+      (or (and (t= t "[") (is-at? p 1 "[")) (t= t "__attribute__") (and (t= t "__attribute") (is-at? p 1 "(")))
       (let [as (attr-nodes p)]
         (if (block-decl-start? p)
           ;; the attributes of a declaration: its declaration-specifiers' (from them again)
@@ -2654,7 +2658,10 @@
   conversion-type-id: ptr-operators alone after the specifiers)."
   [^P p ctx]
   (let [ds (parse-decl-specs p (if (= ctx :trailing) :alias :type-id))
-        base (or (ds-type ds) (perr p "a type"))]
+        base (or (ds-type ds) (perr p "a type"))
+        ;; CP352: a class or enumeration defined in a trailing return type (`auto f() -> struct C {} {}`, ill-formed) has no place in the
+        ;; function's forms (its declaration would stand beside it): a decline, the declaration's text
+        _ (when (and (= ctx :trailing) (:tag-node ds) (not (skim? p))) (perr p "a type defined in a trailing return type"))]
     (if (= ctx :conv)
       (reduce (fn [t op] (assoc op :of t)) base (ptr-ops p))
       (build-type base (parse-declarator p :abstract)))))
@@ -3485,6 +3492,9 @@
         e (long (:_e n))
         explicit (empty? ps)]
     (cond
+      ;; CP352: an enum under a template header (ill-formed: `template <typename T> enum A<T>::E : T { e };`) has no form that keeps
+      ;; the header (clang's EnumDecl does not): the converter's text form of the whole declaration, which reads again as itself
+      (= k "EnumDecl") (node p "NativeDecline" ob e {})
       (and explicit (= k "CXXRecordDecl"))
       (node p "ClassTemplateSpecializationDecl" ob e
             (-> (dissoc n :_args :_qn :kind :range)
@@ -3734,7 +3744,14 @@
     (if (.-mac t)
       (let [o (.-o t)] (loop [] (let [^T c (cur p)] (when (and (.-mac c) (= o (.-o c)) (not (identical? :eof (.-k c)))) (adv! p) (recur)))))
       (loop []
-        (if (id? p) (adv! p) (perr p "a module name"))
+        (if (id? p)
+          (let [^T c (cur p)]
+            ;; CP352: a later identifier a macro's expansion begins (`export module foo:bar.bob;` with `#define bob fred;`) is the macro's
+            ;; name too, its whole expansion consumed, its `;` with it: the written `;` is the declaration's own
+            (if (.-mac c)
+              (let [o (.-o c)] (loop [] (let [^T d (cur p)] (when (and (.-mac d) (= o (.-o d)) (not (identical? :eof (.-k d)))) (adv! p) (recur)))))
+              (adv! p)))
+          (perr p "a module name"))
         (when (and (is? p ".") (identical? :id (tk (nxt p 1)))) (adv! p) (recur))))))
 
 (defn- module-semi!
