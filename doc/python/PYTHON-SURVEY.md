@@ -5385,12 +5385,12 @@ records only when `bin/reap` shows 0 problems, so every non-pass must be in a cl
   panics, a bug each, by name, no pattern), seven cycles in `:finalization-cycle` (read: their probable cause). Queue 250's leftovers (its report's
   Lows): test_cmd_line_script's 28 in `:pyi-main-module` (bin/pyi python's prologue in place of runpy; -W ignored), 4 in
   `:runner-limits`, test_format's 6 in `:format-messages`.
-- **Never-run modules** (about 366 of lib-test-all's 425 had no run under pyi on the VM): two random samples of 12 and
-  10 such modules, `bin/pyi check` (1,480 methods): 1,251 pass, 104 classed, 125 in no class (8%), now classed by cause:
+- **Never-run modules** (about 366 of lib-test-all's 425 had no run under pyi on the VM): three random samples of 12, 10
+  and 6 such modules, `bin/pyi check` (2,553 methods): 2,134 pass, 261 classed, 158 in no class (6%), now classed by cause:
   `:pyi-command-line` (bin/pyi python's options and environment variables taken and ignored: test_cmd_line, test_warnings'
   -W and PYTHONWARNINGS tests), `:warnings-c`, `:regrtest-children` (test_regrtest's regrtest in pyi children, not
   analysed past their cut tracebacks), `:inlined-comprehensions`, `:profile-events`, `:struct-sequences`, `:annotate-rest`,
-  `:pprint-dispatch`, more `:runtime-panics`. At that rate the night's run holds some hundreds to a few thousand methods
+  `:pprint-dispatch`, `:float-core`, `:sequence-index-ops`, `:compiler-shapes`, more `:runtime-panics`. At that rate the night's run holds some hundreds to a few thousand methods
   in no class in the modules not sampled: the morning script lists them with their likely class.
 - **AOT** (divergences-aot.edn's first class, `:finalization-goi`, synth/datamodel/del.py): the night runs pyi on goi
   beside the compiled run; del.py's compiled run lacks 'del 1' and pyi on goi prints neither, so the rule `:as-pyi` does
