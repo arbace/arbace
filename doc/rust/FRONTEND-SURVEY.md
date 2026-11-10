@@ -3077,3 +3077,70 @@ bodies, cheapest per body first; each fix follows rustc 1.99.1's own code, none 
   evaluated (`{ Locality::L3.to_llvm() }`, 3); `slice_get_unchecked`'s `T` through ChangePointee's associated type equality
   (4); `offset_of!` in inline consts (4); the reborrow of `Some(slice)` against an expected `Option<&[T]>` (1); a few drop
   orders and temporaries (`try_from_fn_erased`, `encode_utf8_raw`'s never temporaries).
+
+## As built: RF13e, core's bodies equal to rustc's built MIR, further; RFP52 (a) (2026-11-10)
+
+Branch `rust-rf13e` (from `mac/rust-rf13d` `011d4cc3b`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`,
+`GOMAXPROCS=2`). RF13d's decision-free causes, cheapest per body first, each after rustc 1.99.1's own code (the pinned
+rust-src's `compiler/`); then RFP52 (a), decided by the user on 2026-11-10, measured apart.
+
+### Causes fixed
+
+- **`offset_of!`** (`const { builtin # offset_of(C, f) }`): hir::ExprKind::OffsetOf lowered, check_expr_offset_of's
+  (container, variant, field) indices (an enum's variant then its field, a struct's or tuple's field), thir cx's lowering
+  to a call of the `offset_of` lang item intrinsic per field (`offset_of::<option::Option<T>>(const 1_u32, const 0_u32)`,
+  not from HIR, the expression's span), their sum for several; the fields of an expression fragment (`$($fields:expr)+`)
+  taken from its field chain as parse_floating_field_access takes them from the nonterminal.
+- **An inline const's own inline consts**: the DefCollector's anonymous constants nested under the one they are in
+  (`ptr::read_unaligned::{constant#0}::{constant#0}`), built as bodies and named so in their parent's MIR.
+- **Generalization freshens a body's late-bound regions** (generalize.rs: every region but one bound inside the type):
+  `Some(slice)` against an expected `Option<&[T]>` now reborrows `&(*_2)` (RF13d's open cause: the expected input's region
+  stayed the parameter's, so coercion's no-op case applied).
+- **The return coercion is a CoerceMany** (ret_coercion): the first `return` (or the body) coerced, a later one by
+  try_find_coercion_lub, whose fast path leaves a type equal to the merged one alone (a body tail after `return`s: no
+  `&mut *` reborrow).
+- **`Self { .. }` patterns of another file's struct** (`let Self { start, end, exhausted } = self` on `ops::RangeInclusive`).
+- **The builtin Copy and Clone of tuples and arrays** (`Result<(), fmt::Error>: Copy` through `(): Copy`): `copy _3`.
+- **`Destruct` holds for every type** (its builtin candidate): `Guard<'_, T>`'s Drop impl applies, the guard is dropped.
+- **A crate constant in a pattern** (`UNUSED =>`): DefKind::Const as 1.99 prints it (`Const { is_type_const: false }`)
+  recognised, the pattern of the constant's type, its value from its expression of literals (const_to_pat's constant).
+- **An operator on a rigid projection by its item bound** (`<T as DiscriminantKind>::Discriminant: PartialEq`: the alias
+  bound candidate): `PartialEq::eq(&a, &b)`.
+- **convert_place_derefs_to_mutable in the builder's table** (`bytes[a..b].copy_from_slice(..)`: IndexMut).
+- **partial_ord.rs' exceptions** to the simple body (`Some(Ord::cmp(..))`): a unit struct, an enum without variants or
+  with one unit variant keep the default body (`PhantomPinned`).
+- **A let type's elided regions are fresh region variables** (re_infer): `let s: &[U] = unsafe { transmute(x) }` is no
+  reborrow.
+- **RFP52 (a)**: `test/rust/front/core-iface-extra.txt` (index_range, iter::adapters, array::drain, clone::uninit,
+  intrinsics::bounds, char::decode, char, ascii::ascii_char, unicode, unicode_data) collected by the interface pass in
+  every run before any body (`CORE_IFACE_EXTRA`: another list, empty for none; about 75 s); the native interface also
+  writes the impls the interface lacks (inherent and trait, at their `{impl#N}` paths, with their functions), indexed as
+  load-std-iface indexes its own; core's index takes a uniform path's re-export (`use unicode_data::alphabetic::lookup as
+  Alphabetic`) as the module's own.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (`CORE_IFACE=cache`, under 2.5 GB): before (RF13d's run at
+  `011d4cc3b`) 5,538 equal; the causes above without RFP52 (`CORE_IFACE_EXTRA=`, RF13d's index) **5,551** (+13: slice::index
+  +3, option +2, ptr +2, any, array, cell, marker, mem, mem::maybe_uninit +1 each), 157 but for the allocations, 42 differ,
+  44 refused; with RFP52 (a) and core's index made afresh **5,576** (+25: char::methods +15, the unicode tables and
+  `decode_utf16`; slice::index +10, `slice_get_unchecked`'s `T` through the bounds impls and `IndexRange`'s methods), 157,
+  37 differ, 24 refused, 74 without rustc's body. No module lost an equal body at either step.
+- `bin/rust-front core-essential` (with the extra list) and `bin/rust-front essential`: equal to their known files;
+  `bin/reap` 0 problems; `bin/crops-score --judge --strict` passes.
+
+### Left
+
+- tuple.rs' `Default` (12): rustc's metavariable spans (transcribe.rs' maybe_use_metavar_location, the global
+  MetavarSpansMap keyed by span and syntax context, read back by Span::to's try_metavars) decide which `$T` gets its
+  definition's span; a faithful port needs hygiene contexts, rustc's expansion order and the parser's span combinations,
+  not ported (no guess).
+- Braced const arguments evaluated (`{ Locality::L3.to_llvm() }`, 3, and their `{constant#N}` bodies): needs const
+  evaluation of a call (a CTFE of our MIR or an evaluator over HIR); the user type would print the braced snippet.
+- RFP52's rest: `ChangeOutputType` (a crate-private type alias: the interface has no aliases), `clone::uninit`'s
+  `CopySpec` qualified path (2), `drain::Drain`, `ascii::Char` (2), `try_process`'s turbofish (result's and option's
+  `from_iter`), `NeverShortCircuit`'s bodies now differ rather than refused (from_fn, map, fold, rfold), `MAX_ONE_B` (a
+  crate-private constant's value in a pattern).
+- Others: `array::clone`'s `DefId(0:5755 ..)` (a DefIndex), `encode_utf8_raw`'s never temporaries, `encode_utf8_raw_unchecked`,
+  `transmute_prefix`'s nested struct, `downcast_unchecked_*`'s cast user types, `cell::clone`, `assert_coerce_unsized`,
+  `swap_nonoverlapping_bytes`, `get_or_try_insert_with`, `flatten_ref`, cmp's `smallest`/`largest` (macro impl spans).

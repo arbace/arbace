@@ -2959,3 +2959,24 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
 - core-check: 5,538 equal (5,474 at RF13c), 157 but for the allocations (155), 49 differ (85), 52 refused (63); no module lost an
   equal body (baseline rerun at `7f153a722`: 5,474, as recorded). `bin/rust-front core-essential` and `essential` equal to their
   known files. doc/rust/FRONTEND-SURVEY.md, "As built: RF13d".
+
+## 2026-11-10: RF13e, more of core's bodies equal to rustc's built MIR; RFP52 (a) (branch `rust-rf13e`, from `mac/rust-rf13d` `011d4cc3b`)
+
+- RF13d's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src's
+  `compiler/`: rustc_hir_typeck's check_expr_offset_of, coercion.rs (try_find_coercion_lub's fast path, ret_coercion),
+  rustc_infer's generalize.rs, place_op.rs' convert_place_derefs_to_mutable, rustc_mir_build's thir cx (OffsetOf),
+  rustc_builtin_macros' partial_ord.rs, rustc_trait_selection's builtin Copy/Clone and Destruct candidates, rustc_span's
+  MetavarSpansMap): offset_of!, nested inline consts, generalization of late-bound regions (the `Some(slice)` reborrow:
+  RF13d's port of expected_inputs_for_expected_output was right, generalization kept the parameter's region), the return
+  coercion as a CoerceMany, `Self { .. }` patterns of another file's struct, tuples' and arrays' builtin Copy/Clone,
+  Destruct, crate constants in patterns, an operator's alias bound, IndexMut in the builder's table, partial_ord's unit
+  exceptions, a let type's elided regions as fresh variables.
+- RFP52 (a), the user's decision of 2026-11-10 (with RFP48-RFP61 and RF12-P8, relayed by the main session):
+  `test/rust/front/core-iface-extra.txt`, the interface pass over its ten files in every run, the native interface's impls,
+  uniform-path re-exports in core's index.
+- Left, explained: tuple.rs' `Default` (12; metavar_spans needs hygiene contexts and rustc's expansion order: not ported
+  rather than guessed), braced const arguments (const evaluation of a call), RFP52's rest (a crate-private type alias, CopySpec,
+  Drain, ascii::Char, try_process's turbofish).
+- core-check: 5,538 (RF13d) -> 5,551 by the causes (`CORE_IFACE_EXTRA=`, RF13d's index) -> 5,576 with RFP52 (a) and a fresh
+  index; no module lost an equal body at either step. `bin/rust-front core-essential` and `essential` equal to their known
+  files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes. doc/rust/FRONTEND-SURVEY.md, "As built: RF13e".
