@@ -2790,6 +2790,7 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+## 2026-11-09: RF12's first slice, core's module files through the front end (branch `rust-rf12`, from `mac/next` 3ef7b3f78)
 
 ## 2026-11-09: C++'s programs by Arbace's own route, the refusals' biggest groups closed and the switch prepared (branch `cpp-route`)
 
@@ -2823,3 +2824,77 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   an own measure); counting the generated programs without running them (no credit without the run); taking the night8 run's whole ci
   library (its reader is older): only the 13 units no day process could read were taken, their lowered C byte for byte the checkout's.
 - **Slips**: one process substitution in a throwaway comparison; one kill loop that matched its own shell. Recorded in the survey.
+
+- The brief (RF12, doc/rust/FRONTEND-SURVEY.md §7): the front end builds core from the pinned rust-src (Alpine's
+  `rust-src-1.99.1-r0`, `tools/rsdump/apks.sha256`) module by module, judged against rustc's own built MIR of core. Beside RF11
+  (`rust-rf11`): its files (build_run, mono, codegen, front-records) left to it; this slice's edits are in expand, resolve, lower,
+  collect, typeck and build (mir-name, span-text, float constants, signatures) and the new `core_check.ae`.
+- The oracle: the helper as rustc (no trimmed paths, as the programs' oracles) over a copy of `library/core` with `task/wake.rs`'s two
+  self-naming statics patched (rustc's `-Zdump-mir` cycles on them, E0391; the build itself passes): 31,334 built bodies in 35 s and
+  1.2 GB, by hand (`bin/rust-front core-oracle`); rustc's own driver was tried first and turns `trimmed_def_paths` on, so its dump
+  prints `fn assert_unchecked` where the programs' oracles print full paths: rejected for the helper's. The judge keys bodies by the
+  dump's file name (the def path with disambiguators), the printed names being ambiguous (860 duplicates).
+- Considered for the crate's other modules: (a) all of core at once (refused: the rules' 2 GiB a process, core's 173k lines);
+  (b) each module file as the crate's root with the rest of core from std's interface and names, the file's own items local
+  (`localize`, `loc`) — built; (c) core's own collection first, then bodies — the direction: the slice writes core's interface from
+  its own collection module by module (`native-iface.edn`), read by the modules after it.
+- The fixes, by the groups that blocked whole modules: the virtual file for macro output's spans (the front end's facts are keyed by
+  span; core's macros expand one definition many times), their origins mapped back for printed MIR; core's macros 2.0 with def-site
+  hygiene, metavariable expressions, the meta fragment, fragments passed on, item fragments, cfg_select!, concat! of a fragment;
+  resolution in core (crate::, $crate::, ::core::, super::, re-exports, private names from the sources); impls' disambiguators in
+  rustc's DefIndex order; #[rustc_inherit_overflow_checks]; normalized signatures; Self in a trait's generics and Self::Variant in
+  patterns; qualified paths; Copy by the parameter environment; f16 and f128 constants; closures named by their owner; the impls'
+  index (tuple.rs from about 25 minutes to 4).
+- Results (`bin/rust-front core-check`, the 35 modules, 17 min, 2.50 GB peak): bodies built 5,393 of 5,601 (588 of 652 at the slice's
+  first run), 4,578 equal to rustc's built MIR byte for byte (247 at the first run) and 41 more but for the allocations; 33 of 35 modules
+  through every stage (20); whole: ops::arith 500, ops::bit 1,989, default 20, ops::function 5. The pack `rust-core-built`
+  (`418ebb7b...`, 36 members, made by hand with the helper as rustc, `bin/rust-front core-oracle && core-records make`), its kind in
+  `test/oracle-records/kinds.edn`. No REAP cell reads the check: Rust's scores unchanged, eval and AOT at 0.5 (RES54's ceiling).
+- Not done here (RF11's files): a6's core bodies and mono-check's core-closure from the native core; proposals RF12-P1 to P5 in the
+  survey.
+- Note: the essential step's build-check lines fail outside `rust-rf10b` before and after this slice: the pin of `rust-front-built`
+  on next is the pack made in that worktree, whose MIR prints its absolute paths (`{closure@/root/.../rust-rf10b/...}`,
+  `<impl at /root/.../rust-rf10b/...>`); the store also holds a later pack with `@ROOT@` (RF11's?). Runs (7 of 7), mono-check,
+  capture-check and the five controls unchanged.
+- Rule slips (the session's first half): `bin/repr-rust helper` fetched the pinned rustc-dev apk from the network (the main
+  checkout's .tmp lacked it); a run's peak was 1.83 GB under GOMEMLIMIT=1800MiB.
+
+## 2026-11-09: RF12's first slice, second part: RF12-P1, P2, RF11 merged, more groups (branch `rust-rf12`)
+
+- The user's decisions (2026-11-09): RF12-P1 (a), P2 (b), P3 (a), P5 (a); P4 moot (RF11's pack carries `@ROOT@`). `mac/next`
+  `6c3c87c02` merged in (the records' conflicts, both sides kept); `bin/rust-front essential` then equals its known file in this
+  worktree (62 of 62), which confirms P4's diagnosis.
+- P1: the essential step `rust-core-essential` (`bin/rust-front core-essential`: six modules from the pack `rust-core-built`, its own caches,
+  the toolchains stubbed, `test/rust/front/core-essential-known.txt`, the crossed control `_control/core/crossed`): 564 of 567 bodies
+  equal, 3 min 29 s, 1.97 GB; `gate.crops check` 0 problems, `bin/gate --plan` names it, no table error. Considered: all 35 modules
+  (27 min: over the essential tier's time), the oracle tier only (rejected by the decision).
+- P2: one collection pass over the listed files before the bodies (no order between modules), traits now written too.
+- Groups: impl spans through nested macros (tokens read back with their origin, metavariable spans: tuple 168 and `iter::range` +113),
+  pattern types and include_str! (`marker`, `ptr::non_null` through every stage), *mut to *const, bound turbofish variables'
+  annotations, array lengths' integer expressions; the 35 modules now 5,030 of 5,601 bodies equal (4,578 at the first part's end),
+  35 of 35 modules through every stage.
+- P3 not built: a6's `ptr::write_volatile` and its `precondition_check` now build equal to rustc's built MIR, but the run would need a
+  core body translated from core's crate context into the program's, instantiated (`::<i32>`) and its callees collected natively;
+  proposed as RF12-P6 with the night's whole-core interface pass (RF12-P7).
+- Every run under 2.5 GB (GOMEMLIMIT 2400MiB), one core-check at a time, no network.
+
+## 2026-11-09: RF12-P6's preparation, RF12-P7's night slot (branch `rust-rf12`)
+
+- The user decided RF12-P6 (a) and RF12-P7 (a) (night 11). The slot `.tmp/night11/slots/rust-core.sh` was written: `CORE_IFACE_FILES=all`,
+  `CORE_IFACE_ONLY=1` (new in core-check), then the slice's modules with the cached interface; GOMAXPROCS=2, GOMEMLIMIT=1800MiB (lane LB's
+  2 GiB a process), stubbed toolchains, records nothing; `# EST: 150`.
+- P6's first condition, a6's core bodies equal to rustc's built MIR, met for the three with source bodies (`write_volatile`, its
+  `precondition_check`, `is_aligned_to`; `drop_glue` is a shim): `ptr::const_ptr` and `ptr::mut_ptr` added to the slice (37 modules, the
+  pack remade), `format_args!`'s place inside core's own macros read through the virtual file. Carrying the bodies into the run
+  (printing for the program's crate, instantiation, native callees) is not built: the next slice, on RF11's `build_run.ae`.
+- The 37 modules: 5,108 of 5,767 bodies equal (+71 but for the allocations); both essential checks equal their known files.
+
+## 2026-11-09 (night): RF12-P6, core's bodies built natively in a program's run
+
+- `bin/rust-front core-export` writes core's bodies (core-check through the 21 passes, externalized to core's paths, with their
+  equality to rustc's built MIR from the pack `rust-core-built`); `bin/rust-front run-built --native-core` prints them again in the
+  program's crate, instantiates them per mono item, builds their callees natively and takes a closure only when every body is equal,
+  the record's body the fallback; drop glue's simple shim built natively (shim.rs' elaborated drop of a type whose glue is its own
+  `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
+  considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
+  the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".

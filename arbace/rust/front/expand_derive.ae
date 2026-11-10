@@ -352,8 +352,9 @@
             it' (fset it :attrs (vec (remove #(= "derive" (attr-name %)) attrs)))
             spans (into {} (derive-names attrs true))
             derived (vec (mapcat (fn [trait]
-                                   (let [m (fresh-mark) frags (atom {})
-                                         tsp (get spans trait)
+                                   (let [tsp (get spans trait)
+                                         ;; RF12: the expansion's call site is the derive's path (its tokens' place)
+                                         m (binding [*site* (when (and *virtual* (vector? tsp)) (vec (take 4 tsp)))] (fresh-mark)) frags (atom {})
                                          _ (when *mark-crates* (swap! *mark-crates* assoc m :derive)
                                              (when (vector? tsp) (swap! *mark-crates* assoc [:dspan m] (vec (take 4 tsp)))))
                                          text (derive-text trait info frags)]
@@ -372,9 +373,14 @@
 ;; cfg and cfg_attr on items (rustc_expand/src/config.rs; rustc_attr_parsing's CfgEntry): the predicate evaluated for the
 ;; host's target (x86_64-unknown-linux-musl, edition's defaults, not a test build), the attribute left as its trace
 
-(def ^:private cfg-names {"unix" true "debug_assertions" true "panic" "unwind" "target_os" "linux" "target_family" "unix"
+(def cfg-names-programs {"unix" true "debug_assertions" true "panic" "unwind" "target_os" "linux" "target_family" "unix"
                           "target_arch" "x86_64" "target_pointer_width" "64" "target_endian" "little" "target_env" "musl"
                           "target_vendor" "unknown" "target_has_atomic" "64"})
+;; RF12: the cfg a crate is expanded under (arbace.rust.front.core-check binds core's build's: a name to true, or to the set of
+;; its values, true among them when the name is also set alone, as `target_has_atomic`)
+(def ^:dynamic *cfg-names* cfg-names-programs)
+(defn- cfg-value? [nm v] (let [x (get *cfg-names* nm)] (if (set? x) (contains? x v) (= v x))))
+(defn- cfg-name? [nm] (let [x (get *cfg-names* nm)] (or (true? x) (and (set? x) (contains? x true)))))
 
 (defn- item-lo-hi [it]
   (let [^Tok a (or (:t it) (:t (:open it))) ^Tok b (or (:t it) (:t (:close it)))]
@@ -403,8 +409,8 @@
       (and (#{"true" "false"} nm)) [(list 'Bool (= nm "true") (foreign-span 0)) (= nm "true") (rest items)]
       (punct-item? b :Eq)
       (let [v (tsym c)]
-        [(list 'NameValue :name nm :value (list 'Some v) :span (foreign-span 0)) (= v (get cfg-names nm)) (drop 3 items)])
-      :else [(list 'NameValue :name nm :value 'None :span (foreign-span 0)) (true? (get cfg-names nm)) (rest items)])))
+        [(list 'NameValue :name nm :value (list 'Some v) :span (foreign-span 0)) (cfg-value? nm v) (drop 3 items)])
+      :else [(list 'NameValue :name nm :value 'None :span (foreign-span 0)) (cfg-name? nm) (rest items)])))
 
 (defn- attr-items [a]
   (let [item (fget (second (fget a :kind)) :item)]
