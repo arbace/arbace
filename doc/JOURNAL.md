@@ -2790,3 +2790,9 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+
+## 2026-11-10: Scheme's deferred non-passes surveyed, SCS27 and SCS28 proposed (branch `scheme-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90% (doc/CROPS-SCORE.md) listed Scheme's 8 deferred cases (eval 6, AOT 2). The slow benchmarks
+(speed, SC109) and the AOT's syntax constants (psyntax's records as read-back constants, SC90) are designs of their own; the R7RS
+exponent sign (SCS27) and Chibi's ill-formed optional-test fallback (SCS28) need the user's choice. Nothing run, no record changed.
