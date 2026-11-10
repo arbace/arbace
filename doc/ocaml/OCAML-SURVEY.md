@@ -3535,3 +3535,83 @@ C helpers keep their header's class at the AOT levels, header.awk's helper mode)
    is read in `.tmp/o6/compiled/run/ID/o2j.out`.
 3. With night 12's OC202 records: `bin/heavy-lock bin/oi check --aot --level compiled --record` (whole: the C API programs among the
    shards), `bin/oi suite check --aot --level compiled --record`, then `bin/reap --record`, `bin/crops-score --record`.
+
+## As built: OC216 (a), the small runtime ports (2026-11-10, branch `ocaml-s3`, from `ocaml-s2` `79afd5c9b`)
+
+Under a light lane (no gate, each process under 2 GiB, one run at a time). OC216 (a) (the user, 2026-11-10) reverses, for the programs
+it moves, five by-design rulings: OC11 (a) (OCAMLRUNPARAM's stack limit; Obj's layout), OC64 (a) (the collector's counters at zero),
+OC68 (b)'s weak part (weak arrays and ephemerons holding their keys strongly), OC65 (`Obj.reachable_words`) and OT7 (a) (Marshal's
+Closures flag). A program left in its class keeps it, the class's `:why` saying what is left. Sources: OCaml 5.5.0's tarball
+(runtime/gc_ctrl.c: caml_gc_minor, gc_major_res, gc_full_major_res, caml_gc_compaction, caml_runtime_parameters, format_gc_tweaks;
+runtime/startup_aux.c: caml_parse_ocamlrunparam, scanmult, init_max_stack_wsz; runtime/extern.c: caml_obj_reachable_words and the code
+pointers; runtime/intern.c: CODE_CODEPOINTER; runtime/weak.c: ephe_clean).
+
+**The ports (oi: `go/arbace/oi`; the AOT runtime: `jdk/ocaml/ocaml/rt`, o2j).**
+- *Gc.Tweak* (gc_ctrl.c's format_gc_tweaks): `Sys.runtime_parameters` ends with `,Xname=value` for each tweak away from its initial
+  value (oi's `caml_runtime_parameters`, ExtGc's `tweaksText`). misc/gctweaks passes at both levels.
+- *The counters* (OC64's part): Gc.minor, major, full_major and compact are counted as gc_ctrl.c counts them (a minor and none, one,
+  three, three majors; a compaction; full_major's and compact's forced major collection), beside the runtime's own collections: oi's
+  are Go's `NumGC` less the cycles the asked collections ran (`gcAsked`, `gcAbsorbed`), the AOT runtime's a canary `WeakReference` seen
+  cleared (`ExtGc/gcCycles`, Java having no count). compaction/test_compact_full passes at both levels.
+- *`Obj.reachable_words`* (extern.c's caml_obj_reachable_words): the words of the blocks reachable from the value, each counted once
+  with its header, by OCaml's layout on 64 bits (an immediate none, a boxed float 2, a boxed integer 3, a string its padded words, a
+  float array a word a float, a block its fields, a closure its code pointer, closure information, a second pointer above arity one and
+  its environment; a partial application caml_curry's). The AOT runtime cannot see a translated closure's environment (its fields) and
+  counts it 3. lib-obj/reachable_words passes at both levels.
+- *OCAMLRUNPARAM's l* (startup_aux.c): header.awk passes `l=` into the program's environment as it did `d=` (OC193), and the class
+  `ocamlrunparam l=...` goes. oi: unset, the call depth is 200,000 calls as before; set, the depth counts words as the bytecode's stack
+  about does (a call one, its frame's slots more: `newFrame` under `stackWordsMode`), at most l and at most 800,000 (Go's stack), so a
+  frame of 273 lets (misc/pr7168) overflows after a few hundred calls and a frame of a few slots (runtime-errors/stackoverflow) after
+  25,000-odd: both pass, on the native path and ocamlc's. The AOT runtime counts calls (`Rt/enter`, OC92), l/4 of them at most:
+  pr7168 passes at the light level; stackoverflow overflows there at the interpreter's own 10,000 frames first (`:light-depth`,
+  aot-known.edn), the compiled level has Go's stack.
+- *Weak arrays and ephemerons* (OC68 (b)'s weak part): a key with an identity (a block with fields, a string, a float array, a
+  closure, a custom block) is a weak pointer: oi's `weakRef` over Go's `weak.Make`, the AOT runtime's `WeakReference`. A check never
+  makes the key strong: Go's `weak.Pointer.Value` shades the value while the collector marks, so a loop of `Weak.check` kept it for
+  ever; oi reads a dead flag that `runtime.AddCleanup` sets, and a get or an asked collection (after the collection, no marking
+  running) sets it too. The asked collections walk every live weak array and ephemeron (a registry of weak pointers to them) and clear an
+  ephemeron's data with a dead key (weak.c's ephe_clean), so the data is collected in turn. regression/pr5233, weak-ephe-final/weaklifetime
+  and weaktest pass at oi's level; at the light AOT level they stay over the time limit as before (pr5233 fills a list of a third of
+  the JVM-sized heap). Left in `:gc-and-memory`: ephetest (test6: a key reachable only from its own ephemeron's data stays alive while
+  the ephemeron does: Go has no ephemerons, the data is held by the ephemeron, not by its key), ephetest2 (the same, by chains),
+  ephetest3 (Int64 keys: a boxed integer has no identity in either runtime).
+  The price: a `Weak.set` of a fresh value costs about 5 microseconds more (weak.Make and its cleanup), and weak-ephe-final/weak_array_par
+  (four domains' 4,000,000 sets of fresh strings, just within OI_TIMEOUT before) goes over it: `oi-slow.edn` (`:speed`, deferred);
+  at the light AOT level it was slow already.
+- *Marshal's Closures flag* (OT7 (a) reversed): a closure marshals as a block of Closure_tag whose first field is a code pointer
+  (CODE_CODEPOINTER, the code's number in the process's table and the digest of its name, intern.c checking both: another program's
+  pointer is an unknown code module), its environment after it; a partial application is number 0 (caml_curry's) with its function
+  and arguments. Read back, the closure blocks are made closures once the whole value is read (cycles of a letrec's closures kept).
+  oi: a closure's `Code` (or a native closure) numbered when first marshalled; a closure capturing a mutable variable's cell is still
+  a functional value. The AOT runtime: o2j gives each function's class `envOf`, `blank` and `fill` (its free variables, a closure of
+  the class with none, their setting), a class numbered with a closure as its prototype. lib-marshal/intext, intext_par (oi, with
+  their C stubs on ci), fuzzy and runtime-objects/Tests pass at oi's level, fuzzy and Tests at the light AOT level (intext's are the
+  light level's `:c-api`). fuzzy now fuzzes past its first message: an altered message whose sizes the JVM refuses
+  (NegativeArraySize, an index out of bounds) is a Failure "input_value: ill-formed message" (`Marshal/fromBytes`), a bigarray more
+  elements than the data left an invalid read (BaOps), a closure block of the wrong size for its class ill-formed.
+
+**Not built: AF_UNIX and signals at the compiled level** (the plan's 2 AOT programs, OT23/OT24 at the compiled level): they need the
+compiled main's host path as OC208's exec has (a socket's descriptor of the OS behind jrt's file layer, a signal handler of the main
+relayed to the runtime), several days with a compiled run each; left for a later slice, `:unix-java` unchanged.
+
+**Results (light).** oi's level: 12 programs move: misc/gctweaks, lib-obj/reachable_words, misc/pr7168, runtime-errors/stackoverflow,
+regression/pr5233, weak-ephe-final/weaklifetime, weaktest, lib-marshal/intext, intext_par (the run corpus), compaction/test_compact_full,
+lib-marshal/fuzzy, runtime-objects/Tests (the suite); weak_array_par passes to `:speed`. The light AOT level: misc/gctweaks,
+lib-obj/reachable_words, misc/pr7168, compaction/test_compact_full, lib-marshal/fuzzy, runtime-objects/Tests; runtime-errors/stackoverflow
+from `:runtime-parameters` to `:light-depth`. Recorded with `--only-list --record` on ocamlc's path (`--ocdump`: check-oi.edn,
+check-suite-oi.edn, check-aot.edn, check-suite-aot.edn, the matrix's sources until OC185's switch) and the native path (check-oi-native.edn).
+The compiled level's records are the night's (below).
+
+**Checks (light).** typer-check 79 of 79, stdlib-check (71 units, the samples 79 of 79), repl-check --native, the essential list 59
+of 59 with its controls, `bin/oi test`, own-verdicts --check 0 differing, the four oi-divergences commands 0 failing (the pins of the
+seven programs that pass now out of pins-attested.tsv), `bin/reap --record` 0 problems, `bin/crops-score --record`, `--judge --strict`
+0 problems. Completeness 83.0% to 83.6% (eval 477 / 195 / 4 to 488 / 183 / 5, AOT 419 / 191 / 66 to 425 / 184 / 67; without by design
+96.4% to 96.3%: weak_array_par's speed and stackoverflow's light depth are deferred classes), against the plan's +14 / +16: the
+ephemerons' three, the compiled level's AF_UNIX and signals, and the compiled level's rows (the light level's timeouts: pr5233,
+weaklifetime, weaktest; intext's `:c-api`) are what is short.
+
+**The night's (compiled level, j2g above 2 GiB).** `bin/heavy-lock bin/oi check --aot --level compiled --only-list
+test/ocaml/oc216-compiled.txt` and `bin/heavy-lock bin/oi suite check --aot --level compiled --only-list
+test/ocaml/oc216-suite-compiled.txt` (the moved programs; o2j's new methods in every class); the passes then `--record`ed with the same
+lists, aot-compiled-known.edn's entries of the passing ones out (reachable_words, gctweaks, pr5233, weaklifetime, weaktest,
+test_compact_full, fuzzy, Tests), a failure's class the day after.

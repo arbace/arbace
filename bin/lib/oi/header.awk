@@ -163,8 +163,9 @@ END {
       if (key == "modules" && aot != 1 && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
       # OCAMLRUNPARAM's d (OC193 (a), the user 2026-11-09): oi and the AOT runtime read the domains' limit, so a header that sets d
       # alone (parallel/max_domains1, max_domains2) runs with it in the environment (ocamltest's ocamlrunparam variable, OCAMLRUNPARAM's
-      # value: its leading comma an ignored option); the other parameters (b=, l=, ...) keep the class
-      if (key == "ocamlrunparam" && val ~ /^,?d=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
+      # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT
+      # runtime's call depth); the other parameters (b=, ...) keep the class
+      if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
       if (key == "ocamlrunparam") { cls("ocamlrunparam " val) }
       cls(key " = " val)
     }

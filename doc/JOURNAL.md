@@ -2944,3 +2944,35 @@ parse_declaration and native_repr).
   of missing externals unchanged; oi's C API programs unchanged; typer-check, stdlib-check, the essential list, own-verdicts, the four
   oi-divergences commands. The compiled runs (j2g, above 2 GiB) are the night's: `bin/oi check --aot --level compiled --only-list
   test/ocaml/capi-compiled.txt` under the big lock, then the classes of what does not pass.
+
+## 2026-11-10: OCaml's OC216 (a), the small runtime ports (branch `ocaml-s3`, from `ocaml-s2` `79afd5c9b`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The user decided OC213-OC222 (a) on 2026-11-10; OC216 (a)
+reverses, for the programs it moves, OC11 (a) (the stack limit, Obj's layout), OC64 (a) (the counters), OC68 (b)'s weak part, OC65
+(reachable_words) and OT7 (a) (Marshal's Closures flag). Sources: OCaml 5.5.0's tarball (runtime/gc_ctrl.c, startup_aux.c, extern.c,
+intern.c, weak.c; the tests named below). OCAML-SURVEY.md, "As built: OC216 (a)".
+
+- Gc.Tweak's parameters in `Sys.runtime_parameters` (format_gc_tweaks); the asked collections counted as gc_ctrl.c counts them beside
+  the runtime's own (oi: Go's NumGC less the cycles the asked ones ran; the AOT runtime: a canary WeakReference, Java having no count);
+  `Obj.reachable_words` by OCaml's layout of the values on 64 bits.
+- OCAMLRUNPARAM's l: header.awk passes it as it passed d (OC193). oi counts words under it (a call one, its frame's slots more), at most
+  l and 800,000; first tried as l/4 calls, which passed on the native path but not on ocamlc's (misc/pr7168's 273-let frames: 25,000
+  such calls are Go's stack beyond the CPU limit), and l/4 for the call's own words with the slots beside overflowed stackoverflow
+  before its x = 20000: the frame's slots and the call's one are the bytecode's stack about. The AOT runtime counts calls, l/4.
+- Weak keys as weak pointers (Go's weak, jrt's WeakReference). Found while porting: `weak.Pointer.Value` shades its value while the
+  collector marks, so a program that checks a weak key in a loop kept it alive for ever (a probe: 726 collections, never emptied); a
+  check reads a flag `runtime.AddCleanup` sets instead, and the asked collections refresh the flags of every live weak array (a
+  registry of weak pointers to the arrays, not to each key: the first try, a registry a key, was slower still). Ephemerons' data
+  stays the ephemeron's while the key lives, cleared with a dead key at the asked collections. Alternatives considered: a pending
+  strong slot made weak at the next collection (cheaper for a slot overwritten soon, but a key kept one cycle longer and a flag across
+  goroutines); ephemerons proper (Go's runtime has none; the data on the key needs the key's object: no). The cost, about 5 us a
+  Weak.set of a fresh value, takes weak-ephe-final/weak_array_par (4,000,000 sets, just within the limit before) to `:speed`.
+- Marshal's Closures flag: CODE_CODEPOINTER with the code's number in the process's table and the digest of its name; o2j's classes
+  get envOf, blank and fill for the AOT runtime. lib-marshal/fuzzy then fuzzes past its first message and found the AOT reader's
+  Java exceptions on altered sizes: Failure "input_value: ill-formed message" (an invalid read for a bigarray longer than the data).
+- Not built: AF_UNIX and signals at the compiled level (a host path as OC208's, several days with compiled runs): later.
+- Moved, oi's level: misc/gctweaks, lib-obj/reachable_words, misc/pr7168, runtime-errors/stackoverflow, regression/pr5233,
+  weak-ephe-final/weaklifetime, weaktest, lib-marshal/intext, intext_par, compaction/test_compact_full, lib-marshal/fuzzy,
+  runtime-objects/Tests (12); weak_array_par pass to `:speed`. The light AOT level: gctweaks, reachable_words, pr7168,
+  test_compact_full, fuzzy, Tests (6); stackoverflow to `:light-depth`. Recorded `--only-list --record`, ocamlc's path (`--ocdump`,
+  the matrix's sources until OC185's switch) and the native one (check-oi-native.edn).

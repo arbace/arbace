@@ -25,7 +25,7 @@
   (field ^:static ^long forcedMajorCount 0)
   (field ^:static ^:final ^Object/1 gcControl
     (new Object/1 [(Long/valueOf 262144) (Long/valueOf 0) (Long/valueOf 120) (Long/valueOf 0) (Long/valueOf 0)
-                   (Long/valueOf 134217728) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 44)
+                   (Long/valueOf (ExtCore/stackWords)) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 44)
                    (Long/valueOf 100) (Long/valueOf 8192)]))
   (field ^:static ^:final ^String/1 tweakNames (new String/1 ["mark_stack_prune_factor" "small_heap_limit"]))
   (field ^:static ^:final ^long/1 tweakVals (new long/1 [32 128]))
@@ -34,6 +34,29 @@
   (field ^:static ^:final ephNone (Block. 251 (new Object/1 0)))
 
 
+  ;; OC216 (a): the collections a program asks for counted as gc_ctrl.c counts them (minors and majors finished, compactions), and the
+  ;; runtime's own collections seen by a canary (a WeakReference to an object of its own: cleared, a collection ran; one counted a
+  ;; time it is seen cleared, the ones the asked collections ran not counted)
+  (field ^:static ^long minorAsked 0)
+  (field ^:static ^long majorAsked 0)
+  (field ^:static ^long compactions 0)
+  (field ^:static ^long cycles 0)
+  (field ^:static ^WeakReference canary (WeakReference. (Object.)))
+  (method ^:static gcCycles ^long []
+    (when (nil? (.get canary))
+      (set! cycles (unchecked-add cycles 1))
+      (set! canary (WeakReference. (Object.))))
+    cycles)
+  (method ^:static gcAsked ^void [^long minors ^long majors ^long compacts ^long forced]
+    (ExtGc/gcCycles)
+    (set! minorAsked (unchecked-add minorAsked minors))
+    (set! majorAsked (unchecked-add majorAsked majors))
+    (set! compactions (unchecked-add compactions compacts))
+    (set! forcedMajorCount (unchecked-add forcedMajorCount forced))
+    (ExtGc/weakCollect)
+    (ExtGc/finCollect)
+    (when (nil? (.get canary)) (set! canary (WeakReference. (Object.)))))
+
   (method ^:static gcStat []
     (let [rt (Runtime/getRuntime)
           total (unchecked-divide (.totalMemory rt) 8)
@@ -41,9 +64,9 @@
           free (unchecked-divide (.freeMemory rt) 8)]
       (Block. 0 (new Object/1
                   [(Double/valueOf 0.0) (Double/valueOf 0.0) (Double/valueOf 0.0)
-                   (Long/valueOf 0) (Long/valueOf 0)
+                   (Long/valueOf (unchecked-add (ExtGc/gcCycles) minorAsked)) (Long/valueOf (unchecked-add (ExtGc/gcCycles) majorAsked))
                    (Long/valueOf total) (Long/valueOf 1) (Long/valueOf used) (Long/valueOf 0)
-                   (Long/valueOf free) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0)
+                   (Long/valueOf free) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf compactions)
                    (Long/valueOf total) (Long/valueOf 0) (Long/valueOf forcedMajorCount) (Long/valueOf 0)]))))
 
   (method ^:public ^:static caml_gc_stat [u] (ExtGc/gcStat))
@@ -58,13 +81,10 @@
       (loop [^int i 0]
         (when (< i n) (aset gcControl i (aget f i)) (recur (unchecked-inc-int i))))
       Rt/UNIT))
-  (method ^:public ^:static caml_gc_minor [u] (ExtGc/finCollect) Rt/UNIT)
-  (method ^:public ^:static caml_gc_major [u] (ExtGc/finCollect) Rt/UNIT)
-  (method ^:public ^:static caml_gc_full_major [u]
-    (set! forcedMajorCount (unchecked-add forcedMajorCount 1))
-    (ExtGc/finCollect)
-    Rt/UNIT)
-  (method ^:public ^:static caml_gc_compaction [u] (ExtGc/finCollect) Rt/UNIT)
+  (method ^:public ^:static caml_gc_minor [u] (ExtGc/gcAsked 1 0 0 0) Rt/UNIT)
+  (method ^:public ^:static caml_gc_major [u] (ExtGc/gcAsked 1 1 0 0) Rt/UNIT)
+  (method ^:public ^:static caml_gc_full_major [u] (ExtGc/gcAsked 1 3 0 1) Rt/UNIT)
+  (method ^:public ^:static caml_gc_compaction [u] (ExtGc/gcAsked 1 3 1 1) Rt/UNIT)
   (method ^:public ^:static caml_gc_major_slice [n] (Long/valueOf 0))
   (method ^:public ^:static caml_get_minor_free [u] (Long/valueOf 262144))
 
@@ -94,7 +114,16 @@
                     ",M=" (Rt/l (aget gcControl 8)) ",m=" (Rt/l (aget gcControl 9))
                     ",n=" (Rt/l (aget gcControl 10)) ",o=" (Rt/l (aget gcControl 2))
                     ",p=0,s=" (Rt/l (aget gcControl 0)) ",t=0,v=" (Rt/l (aget gcControl 3))
-                    ",V=0,W=" (if runtimeWarnings 1 0))))
+                    ",V=0,W=" (if runtimeWarnings 1 0) (ExtGc/tweaksText))))
+  ;; gc_ctrl.c's format_gc_tweaks: ",Xname=value" for each tweak away from its initial value (OC216 (a))
+  (method ^:static tweaksText ^String []
+    (let [b (StringBuilder.)]
+      (loop [^int i 0]
+        (when (< i (alength tweakNames))
+          (when (not (== (aget tweakVals i) (aget tweakInit i)))
+            (.append b ",X") (.append b (aget tweakNames i)) (.append b "=") (.append b (aget tweakVals i)))
+          (recur (unchecked-inc-int i))))
+      (.toString b)))
   (method ^:public ^:static caml_ml_enable_runtime_warnings [b]
     (set! runtimeWarnings (Rt/t b))
     Rt/UNIT)
@@ -216,7 +245,8 @@
   (method ^:static ephCopy [v]
     (if (or (instance? Block v) (instance? double/1 v) (instance? byte/1 v)) (Rt/dup v) v))
   (method ^:static ephGet [e ^int off ^boolean cp]
-    (let [v (aget (.-f (cast Block e)) off)]
+    (ExtGc/ephClean e)
+    (let [v (ExtGc/ephSlot (aget (.-f (cast Block e)) off))]
       (cond (identical? v ephNone) Rt/NONE
             cp (Rt/some (ExtGc/ephCopy v))
             :else (Rt/some v))))
@@ -239,10 +269,52 @@
       (System/arraycopy (.-f (cast Block es)) (unchecked-int os) (.-f (cast Block ed)) (unchecked-int od) (unchecked-int l))
       Rt/UNIT))
 
-  (method ^:public ^:static caml_ephe_create [n] (ExtGc/ephCreate n))
+  ;; OC216 (a), the user 2026-11-10 (oi's weakOf, ephSlot, ephClean, weakCollect): a weak key with an identity (a block with fields, a
+  ;; string, a float array, a closure, a custom block) is held by a WeakReference, emptied by the collection that finds it unreachable;
+  ;; an immediate, a boxed float or integer stays. An ephemeron's data stays strong while its keys live; the asked collections clear the
+  ;; data of an ephemeron whose key died, so that the data is collected in turn (a key reachable only from its own ephemeron's data
+  ;; stays alive while the ephemeron does: oi's divergence).
+  (field ^:static ^:final ^ArrayList ephRegistry (ArrayList.))
+  (field ^:static ^boolean weakUsed false)
+  (method ^:static weakOf [v]
+    (if (or (and (instance? Block v) (> (alength (.-f (cast Block v))) 0))
+            (instance? byte/1 v) (instance? double/1 v) (instance? Closure v) (instance? Pap v) (instance? Custom v))
+      (do (set! weakUsed true) (WeakReference. v))
+      v))
+  (method ^:static ephSlot [v]
+    (if (instance? WeakReference v)
+      (let [y (.get (cast WeakReference v))] (if (nil? y) ephNone y))
+      v))
+  (method ^:static ephClean ^void [e]
+    (let [f (.-f (cast Block e)) ^:mutable dead false]
+      (loop [^int i 2]
+        (when (< i (alength f))
+          (when (and (instance? WeakReference (aget f i)) (nil? (.get (cast WeakReference (aget f i)))))
+            (aset f i ephNone)
+            (set! dead true))
+          (recur (unchecked-inc-int i))))
+      (when dead (aset f 1 ephNone))))
+  (method ^:static weakCollect ^void []
+    (when weakUsed
+      (System/gc)
+      (let [live (ArrayList.)]
+        (loop [^int i 0]
+          (when (< i (.size ephRegistry))
+            (let [r (cast WeakReference (.get ephRegistry i)) e (.get r)]
+              (when (not (nil? e))
+                (ExtGc/ephClean e)
+                (.add live r)))
+            (recur (unchecked-inc-int i))))
+        (.clear ephRegistry)
+        (.addAll ephRegistry live))))
+
+  (method ^:public ^:static caml_ephe_create [n]
+    (let [e (ExtGc/ephCreate n)]
+      (.add ephRegistry (WeakReference. e))
+      e))
   (method ^:public ^:static caml_weak_create [n] (ExtGc/ephCreate n))
   (method ^:public ^:static caml_ephe_set_key [e n k]
-    (aset (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.set") k)
+    (aset (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.set") (ExtGc/weakOf k))
     Rt/UNIT)
   (method ^:public ^:static caml_ephe_unset_key [e n]
     (aset (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.set") ephNone)
@@ -250,7 +322,7 @@
   (method ^:public ^:static caml_weak_set [e n o]
     (let [off (ExtGc/ephKeyOffset e n "Weak.set")]
       (if (and (instance? Block o) (not (identical? o ephNone)))
-        (aset (.-f (cast Block e)) off (aget (.-f (cast Block o)) 0))
+        (aset (.-f (cast Block e)) off (ExtGc/weakOf (aget (.-f (cast Block o)) 0)))
         (aset (.-f (cast Block e)) off ephNone))
       Rt/UNIT))
   (method ^:public ^:static caml_ephe_set_data [e d]
@@ -266,10 +338,11 @@
   (method ^:public ^:static caml_ephe_get_data [e] (ExtGc/ephGet e 1 false))
   (method ^:public ^:static caml_ephe_get_data_copy [e] (ExtGc/ephGet e 1 true))
   (method ^:public ^:static caml_ephe_check_key [e n]
-    (Rt/b (not (identical? (aget (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.check")) ephNone))))
+    (Rt/b (not (identical? (ExtGc/ephSlot (aget (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.check"))) ephNone))))
   (method ^:public ^:static caml_weak_check [e n]
-    (Rt/b (not (identical? (aget (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.check")) ephNone))))
+    (Rt/b (not (identical? (ExtGc/ephSlot (aget (.-f (cast Block e)) (ExtGc/ephKeyOffset e n "Weak.check"))) ephNone))))
   (method ^:public ^:static caml_ephe_check_data [e]
+    (ExtGc/ephClean e)
     (Rt/b (not (identical? (aget (.-f (cast Block e)) 1) ephNone))))
   (method ^:public ^:static caml_ephe_blit_key [es ofs ed ofd n] (ExtGc/ephBlit es ofs ed ofd n))
   (method ^:public ^:static caml_weak_blit [es ofs ed ofd n] (ExtGc/ephBlit es ofs ed ofd n))
