@@ -3687,3 +3687,56 @@ order). Built in the light lane (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As bui
 Alternatives considered: committing the two re-recorded reference lines without their level rows (the REAP cells would lose
 cases until the night: no); renaming string literals for JCS343 (the user chose (a)); scoring the platform 1 because java.base's
 class files by javac on Arbace already equal the build's (JN3.5): the ruling says the platform must be Arbace's own, consumed.
+
+## 2026-11-10: JCS359-JCS378 and JCV10 (b) decided; JCS359 stage 1's tooling built (branch `jcs359-s1`)
+
+**Decision.** At about 10:30 the user decided:
+
+- JCS359 (a), staged;
+- JCS360 (a);
+- JCS362-JCS369 as recommended (JCS368 (b));
+- JCS370-JCS378 as recommended, with JCS371 = JCV10 (b).
+
+The proposals are in `.tmp/plans/JCS359-PLAN.md` and `.tmp/plans/JAVA-90-PLAN.md`. The texts are in
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user, 2026-11-10, about 10:30)". JCS361's recommendation (b) stands
+unchanged.
+
+**What was built.** Branch `jcs359-s1`, from `mac/java-indep` 02b281c3b; the light lane; no whole run. The details are in the
+survey's "As built: JCS359 stage 1 tooling".
+
+- **JCS362 (a).** `bin/javac-vendor platform-build [--check]` writes `jdk/javac/platform-build.edn`, derived once from
+  jdk26u's build tree at baf63fbe (`build/linux-x86_64-server-release`). It holds:
+  - each module's javac options, from `_the.M_batch.cmdline` as `module_opts` reads it;
+  - its sources as roots plus 74 excludes, checked by count and digest against `_the.M_batch.filelist`;
+  - `VERSION_*` from spec.gmk;
+  - the `gcc -E` flags from `_UnixConstants.java.cmdline` and `_SocketOptionRegistry.java.cmdline`;
+  - jmod create's arguments from `support/images/jmods/_create_M.jmod_exec.cmdline`.
+
+  Every value carries its origin, and paths use placeholders. `--check` is the oracle tier's re-check. Verified for all 68
+  modules: the options and the file lists from the data are the build's.
+- **`classes modules`.** It reads that data instead of the build tree's command lines and file lists, and takes `--jobs N`. A
+  module of more than 1,000 files runs alone. Each class is judged by its digest against JCS360 (a)'s
+  `jdk/javac/platform-own-known.edn`, as `known`, `differ` or `stale`. Two negative controls run on each run's own results.
+- **The known file.** It lists the 12 differing classes of the day's measure, in 9 modules (`:param-names`, an anonymous class's
+  LocalVariableTable names). Their digests come from `java-indep`'s kept evidence.
+
+**Proof.** Run on 8 small modules with `--jobs 2`, in 37 s:
+
+- 4 modules `known`, 4 `equal`; the peak was 1.73 GB; both controls failed as they must.
+- The end-to-end negative run used a known file without jdk.net's entry and with an entry for an equal class of java.logging.
+  It gave `differ` and `stale`, exit 1.
+
+**Night 15's command** (JCS374 (a)): all 68 modules with `--jobs 3` under `bin/heavy-lock`, `GOMEMLIMIT=6GiB`. The estimated
+peak is about 8 GiB and the run about 15-20 minutes. The command is in the survey.
+
+**Alternatives considered:**
+
+- Committing the 15,393-line file lists verbatim (1.4 MB): rejected. Roots plus excludes rebuild them exactly and stay
+  readable at 61 KB.
+- Recomputing the lists from `make/` (JCS362 (b)): rejected by the decision.
+- Judging a known class by its name alone: rejected. Both digests are required, so a change on either side is seen.
+- A JVM to check the known reason with `javap`: kept by hand, in the oracle tier. The check itself needs no JVM.
+- Plain `--jobs` without the big modules alone: rejected. Three of java.base, java.desktop and jdk.localedata at once could
+  pass 15 GiB.
+
+**Correction to the brief.** The day's evidence holds 12 classes in 9 modules (jdk.jdi's 4 among them), not 13 in 10.

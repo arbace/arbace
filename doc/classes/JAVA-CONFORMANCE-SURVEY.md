@@ -4729,3 +4729,107 @@ nothing here moves it, by the ruling; JCS359 does.
 - **JCS361** The judge's last 0.014: the 207 `:stdout` tests judged by the JDK's recorded stdout (`verdicts.edn`). (a) JCV2's way
   extended: a golden file reviewed against the specification for each whose output the API specifies, the rest kept; (b) as is.
   *Recommended: (b)* until JCS359 (0.3 of a point of independence; the review costs days).
+
+## Decided (the user, 2026-11-10, about 10:30): JCS359-JCS378, JCV10 (b)
+
+The plan for JCS359 (`.tmp/plans/JCS359-PLAN.md`, 2026-11-10: the own platform in five stages, its proposals JCS362-JCS369) and
+the Java 90 plan (`.tmp/plans/JAVA-90-PLAN.md`, its proposals JCS370-JCS378) were put to the user with JCS359-JCS361 above.
+
+- **JCS359 (a), staged:** the own platform in five stages. (1) every module's class files by javac on Arbace, the build's
+  configuration as data, a known file; (2) the 16 modules' generated sources by the build's own generators on javac's tool;
+  (3) the module descriptors as the image holds them; (4) `bin/javac-vendor platform --own`, the new pin and the switch;
+  (5) the gate's steps, the independence facts and the oracle tier. The score moves only at (4) and (5), 59.7% → 99.7%.
+- **JCS360 (a):** the own platform is javac on Arbace's output as it is; each class that differs from the build's is listed with
+  its reason in `jdk/javac/platform-own-known.edn`.
+- **JCS361:** not changed by this decision. The recommendation (b) (as is until JCS359) stands: the range's one proposal the
+  ruling did not name.
+- **JCS362-JCS369, as recommended:** JCS362 (a) the build's configuration (module options, file lists with their excludes,
+  version strings, the C preprocessor's flags, the jmod flags) derived once into `jdk/javac/platform-build.edn` with each value's
+  origin, re-checked against the build only in the oracle tier; JCS363 (a) a generator that follows the running runtime
+  (`CaseFolding`) gives the platform Arbace's output, listed; JCS364 (a) java.base's `ModuleHashes` left out, listed; JCS365 (a)
+  a content pin, `jdk/javac/platform.sha256` rewritten for the own platform, built on a miss into
+  `ARBACE_GATE_EXES/platform-PIN20`, out of `arbace_javac_key`; JCS366 (a) the build tree read afterwards only by the oracle
+  tier's `javac-platform-oracle`; JCS367 (a) both platforms selectable for one transition night; JCS368 (b) generatenimbus on
+  tool-world variants of the AWT and Swing value classes, measured first; JCS369 (a) the two C-preprocessed sources by
+  repr/c's preprocessor on C's own target.
+- **JCS370-JCS378, as recommended:** JCS370 (a) the record first, from the night's `--full` outputs; JCS371 (b) = **JCV10 (b)**,
+  the ranking by tests freed per missing jrt class, on those records; JCS372 (a) with (b)'s reporting; JCS373 (a) print's 72
+  unnamed class-file differences reviewed; JCS374 (a) the port batches as Java nights, P1 on night 15 after JCS359's measure;
+  JCS375 (a) XML only if P3 leaves Java short; JCS376 (a) the interpreter's speed last; JCS377 (a) javac's API tests at
+  compiled measured in P1's night; JCS378 (a) `--release` through a generated ct.sym after JCS359's stage 5.
+
+## As built: JCS359 stage 1 tooling (2026-11-10; branch `jcs359-s1`, from `java-indep` 02b281c3b)
+
+The tooling only. The 68-module measure is night 15's (JCS374 (a)).
+
+**JCS362 (a): `jdk/javac/platform-build.edn`.** `bin/javac-vendor platform-build` derives the JDK build's configuration from the
+build tree once, about 10 seconds; `platform-build --check` (the oracle tier's re-check) derives it afresh into WORK and
+compares it with the committed file. The file is 61 KB and 448 lines, each line readable by the Clojure reader and laid out so
+that the shell reads it (`pb_get`, `pb_scalar`: a module's name alone on its line, then each field on one line).
+
+- **Origins.** `:origins` gives each value's origin: the batch's command line, the batch's file list, spec.gmk, the two
+  `gcc -E` command lines and the jmod commands.
+- **Placeholders.** Paths use `{gensrc}`, `{src}`, `{build}` and `{jdk}`. `{gensrc}` stays the build tree's `support/gensrc`
+  until stage 2 makes it.
+- **Top-level fields.** `:jdk` (the pin), `:build`, `:roots` (gensrc, linux, unix, share: the build's order), `:version`
+  (spec.gmk's `VERSION_*`), `:cpp` (the 37 flags of `gcc -E`, equal in both command lines; stage 2) and `:modules`.
+- **Each module.** `:options` (javac's, less the diagnostics' and the javacserver's own, as `module_opts` read them); `:exclude`;
+  `:files` and `:files-sha256`; `:jmod` (jmod create's arguments less `-J*` and the output; stage 3).
+- **The sources.** A module's sources are its roots' `*.java` in the build's order, each root sorted, less `:exclude` (74
+  entries in 9 modules: javadoc's snippet-files, files shadowed by an earlier root, the make files' excludes such as
+  java.desktop's 32-bit X11 wrappers and jdk.sctp's unsupported stubs).
+- **Self-check.** The derivation refuses to write a file whose rebuilt list is not the build's list, file for file and in
+  order. Checked separately for all 68 modules: the options from the data equal `module_opts`' from the command line, and the
+  file lists equal the build's.
+
+**`bin/javac-vendor classes modules`** now reads its options and sources from that file, not from the build tree's command lines
+or file lists.
+
+- **Sources check.** A module whose rebuilt list does not match `:files` and `:files-sha256` (jdk26u's checkout moved) fails as
+  `sources`.
+- **No platform assembly.** No platform is assembled for this corpus alone: it compiles with `--system none` and reads no
+  class file.
+- **`--jobs N`.** N modules at once, except that a module of more than `JAVAC_VENDOR_ALONE` files (default 1000: java.base,
+  java.desktop, java.xml, jdk.localedata) runs alone. The peak is the larger of one big module's and N small ones'.
+- **Judgment.** Each class file is compared by SHA-256 with the build's (`build.sums`, `own.sums`, `diffs.tsv`). Each difference
+  is judged against **JCS360 (a)'s `jdk/javac/platform-own-known.edn`** (`JAVAC_VENDOR_KNOWN` names another file). An entry is
+  a module, a class, both digests and a reason. The results:
+  - `known`: a difference listed with both its digests;
+  - `differ` (fails): a difference not listed, or listed with other digests;
+  - `stale` (fails): a listed class that does not differ.
+- **Summary.** `summary.tsv` gains KNOWN, UNEXPLAINED and STALE columns.
+- **Negative controls.** Two, judged again on the run's own results (GTS81 (a)), and either one passing fails the run:
+  - (1) the first known module with one known entry taken away must be `differ`;
+  - (2) a known entry added for an equal class must be `stale`.
+- **The known file** holds the 12 classes measured by day on 2026-11-10 in 9 modules, each `:param-names`. Their digests were
+  taken from that day's kept evidence (`java-indep`'s `.tmp/jv*/classes/modules/MODULE/{build,arbace}`, javac's tool
+  `javac-5ad357331dbc`): jdk.net, jdk.jartool, java.security.sasl, jdk.management.agent, java.rmi, java.management, jdk.jdi ×4,
+  jdk.zipfs and java.prefs.
+
+**Proof (by day, light; javac's tool `javac-5ad357331dbc`, `GOMEMLIMIT=1800MiB`, `--jobs 2`).** Eight small modules, 37 s:
+jdk.net, java.prefs, jdk.zipfs and jdk.jartool `known` (1 class each); java.logging, jdk.nio.mapmode, java.instrument and java.se
+(no class but its descriptor) `equal`. The peak was java.prefs, 1.73 GB. Controls 1 and 2 failed as they must. Exit 0.
+
+An end-to-end negative run used a known file without jdk.net's entry and with an entry for java.logging's equal `Level.class`.
+jdk.net came out `differ` (`unexplained jdk/net/ExtendedSocketOptions$1.class` with both digests) and java.logging `stale`.
+Exit 1.
+
+**Keys.** `bin/javac-vendor` and `jdk/javac/` are in `arbace_javac_key`, so the merge moves it once: one javac tool rebuild at
+the night's gate. `gate_key` and `arbace_runtime_key` are unchanged. The two new files leave that key only at stage 4, with
+JCS365 (a).
+
+**The night's command (night 15, JCS374 (a): before P1's Java night).** All 68 modules with `--jobs 3`. Peak estimate:
+
+- Alone: java.base 3.25 GB (JN3.5), java.desktop 3.5-5 GB, jdk.localedata 3-5 GB, java.xml about 3 GB.
+- Three small ones at once: at most about 3 × 2.5 GB (jdk.hotspot.agent, jdk.compiler) ≈ 8 GiB.
+- So the run's peak is about 8 GiB and one process at most about 6 GiB.
+- Time: about 15-20 minutes, against 30-45 serial.
+
+It runs under `bin/heavy-lock` until its peaks are measured:
+
+    GOMEMLIMIT=6GiB JAVAC_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac \
+      bin/heavy-lock bin/javac-vendor --work .tmp/jv classes modules --jobs 3
+    cat .tmp/jv/classes/modules/summary.tsv     # each module equal or known; every new difference an entry with its reason
+
+Each new difference is read (`javap -v` of both classes, the oracle's JDK, by hand). It becomes a known entry with its reason
+(JCS360 (a)) or a javac on Arbace fix; then the run again until it exits 0.
