@@ -196,6 +196,10 @@
     (re-matches #"'\(char [0-9]+\)'#" t) [(list 'char (read-string (second (re-find #"char ([0-9]+)" t)))) :word]
     (re-matches #"(?s)'.*'#" t) [(list 'char (int (.charAt ^String t 1))) :word]
     (re-matches #"(?s)\".*\"#" t) [(list 'str (utf8-bytes (read-string (subs t 0 (dec (count t)))))) :addr]
+    ;; a primitive string literal of bytes (HsStringPrim's ByteString, the elaborator's (bytes "...")#): its bytes as
+    ;; they are, one char a byte (HF10-P20: the Unicode tables' bitmaps were the literal 0, lookupIntN read address 0)
+    (re-matches #"(?s)\(bytes (\".*\")\)#" t)
+    [(list 'str (apply str (map (fn [c] (char (bit-and (int c) 255))) (read-string (second (re-matches #"(?s)\(bytes (\".*\")\)#" t)))))) :addr]
     (re-matches #"-?Infinity##" t) [(list 'double (str "0x" (Long/toHexString (Double/doubleToRawLongBits (Double/parseDouble (subs t 0 (- (count t) 2))))))) :double]
     (re-matches #"-?Infinity#" t) [(list 'float (str "0x" (Integer/toHexString (Float/floatToRawIntBits (Float/parseFloat (subs t 0 (dec (count t)))))))) :float]
     (re-matches #"-?[0-9.eE+-]+##" t) [(list 'double (str "0x" (Long/toHexString (Double/doubleToRawLongBits (Double/parseDouble (subs t 0 (- (count t) 2))))))) :double]
@@ -489,7 +493,7 @@
     (flatten-app (list 'app (second (second e)) (into (nth (second e) 2) (nth e 2))))
     e))
 
-(defn- string-lit? [a] (and (head? a 'lit) (re-matches #"(?s)\".*\"#?" (second a))))
+(defn- string-lit? [a] (and (head? a 'lit) (or (re-matches #"(?s)\".*\"#?" (second a)) (re-matches #"(?s)\(bytes \".*\"\)#" (second a)))))
 
 (def ^:dynamic *joins* nil)   ; atom #{name}: the failure join points (their calls pass the void (##))
 
@@ -964,6 +968,8 @@
                ;; a nullary join point's jump, whatever its body's representation (HF10-P20: bignat_gcd's void $j was
                ;; returned as (##), its body never run)
                (contains? @*njoins* (local-name e)) (list 'app (local-name e) [])
+               ;; an unarised unboxed tuple's binder returned: the tuple of its components (Unarise)
+               (seq (get @*multi* e)) (let [cs (get @*multi* e)] (list 'con (unboxed-name (count cs)) (mapv first cs)))
                ;; a variable of a void type returned: Unarise's (##)
                (empty? (local-reps e)) (list 'con (unboxed-name 0) [])
                :else (list 'app (local-name e) []))
@@ -1063,8 +1069,13 @@
                (expr body))
            (let [[_ s b alts] e
                  at (let [a0 (alt-type alts)] (if (= '(poly) a0) (or (scrut-alg s b) a0) a0))
-                 srs (expr-reps s)
                  ubx (some (fn [[_ c]] (and (vector? c) (unboxed-con? c))) alts)
+                 ;; an unboxed tuple's scrutinee of an unknown type (a local function's call, runRW# of one): its
+                 ;; representations its alternative's binders' (HF10-P20: withNewWordArray2#'s runRW# io bound two
+                 ;; values in a case of one)
+                 srs (or (when (and ubx (not (expr-comps s)))
+                           (some (fn [[_ c xs]] (when (and (vector? c) (unboxed-con? c)) (vec (mapcat local-reps xs)))) alts))
+                         (expr-reps s))
                  void? (and (empty? srs) (not ubx))
                  [at brep] (cond void? ['(multi 0) :v]
                                  ubx [(list 'multi (count srs)) (reps->rep srs)]
@@ -1099,7 +1110,12 @@
                                                             cs)
                                                           :else (let [n (local-name x) r (reps->rep rs)] (swap! *reps* assoc n r) [[n r]])))
                                                       (map vector xs (concat comps (repeat [:L])))))]
-                                  (list 'alt (unboxed-name (count bs)) bs (expr body)))
+                                  (do
+                                    ;; the case binder of an unboxed tuple stands for its components (Unarise's
+                                    ;; unariseAlts: its occurrences the tuple again; HF10-P20: Integer's
+                                    ;; quotRem's wild_941 was unbound)
+                                    (when (lv? b) (swap! *multi* assoc b bs) (swap! *mcomps* assoc b comps))
+                                    (list 'alt (unboxed-name (count bs)) bs (expr body))))
                                 :else (let [reps (con-reps c)
                                             bs (mapv (fn [x r] (let [n (local-name x)] (swap! *reps* assoc n r) [n r]))
                                                      xs (concat reps (repeat :L)))]
