@@ -2898,3 +2898,26 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
   considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
   the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
+
+## 2026-11-10: P7, goi's loads and stores by their words (branch `goi-fields`)
+
+- The Mac VM's P7 (`.tmp/mac-queue/reports/proposals-2026-11-10-vm.md`; 251's "Lows": a pointer field's load 12 -> 3 ns in
+  plain Go, worked around in pyi's loop): goi's `Type.load` and `store` (go/arbace/goi/types.ae) took every non-`any` R value
+  through `reflect.NewAt(RT, p).Elem()` (`ptrTo`'s lookup, `packEface`'s copy, `Set`'s checks). Now each descriptor decides once,
+  when its RT is final, how its values move (`fastKind`, kept in `Type.fast` with the RT's type word `tw`): a pointer, map,
+  channel or unsafe.Pointer by its word, a slice by its header (a new 24-byte box on load), an `any` or compiled empty interface
+  as itself, a compiled non-empty interface loaded as gc converts it to `any` (only the itab's type word read); the store's fast
+  path only when the value's type word is the type's; structs, arrays, funcs and complex as before. Every pointer still moves by
+  a typed store (the write barriers, S25). `AddrOf`, `UnsafeToPtr` and `SliceToArrayPtr` (go/arbace/goi/expr.ae) find their
+  pointer type's word once when built instead of `NewAt` at each run.
+- Alternatives: an `ArbacePack` in reflect's overlay (overlay/go/reflect; it moves Go's patched runtime and every key, and
+  reflect's `unsafe_New` would also serve structs: kept for a later step if structs matter); the decision at build time in
+  `LoadR`/`StoreR` (a named type's kind is not final while it is built, so the descriptor decides lazily); a `reflect.Zero`
+  eface for the type word (an allocation for a slice; the stubs' reading of reflect.Type's data word is already goi's).
+- Measured in plain Go (TamaGo's go1.27.1, the printed functions verbatim against a descriptor stub; harness in
+  `.tmp/p7-goi-fields/bench`): pointer load 18.3 -> 4.3 ns, map 22.8 -> 4.1, io.Reader 21.4 -> 4.1, slice 62 -> 30, pointer store
+  23.4 -> 4.4, slice store 34.3 -> 5.0, `&s.f` 15.4 -> 1.1; each kind's load and store equal to the base's, and a GOGC=1
+  collector stress. The interpreter test `test/goi/run/go/t/fields.ae` (made from Go by repr/go's helper read, gc's run its
+  `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
+  gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
+  list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
