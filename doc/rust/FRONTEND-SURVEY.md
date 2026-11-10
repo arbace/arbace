@@ -2946,3 +2946,19 @@ with the full oracle).
   `move` for `copy`, 4), `assert!`'s message through `debug_assert!` (6), array lengths not evaluated (`16 / size_of::<*const ()>()`,
   2), `IntoIterator::into_iter` not inserted for `from_iter`'s argument (2); refusals: paths to private associated constants
   (`T::IS_ZST`, `Self::SIZE`, 48 "a path"), method calls without their callee (28), and desugarings lowering marks `:err` (25).
+- `bin/rust-front core-export` (48 bodies, about 50 minutes under the host's load, 2.3 GB): **32 of 32 equal** where the pack
+  `rust-core-built` holds rustc's body; the 16 others (`str`, `slice`, `fmt` and `num`'s, outside the pack's 37 modules) have no
+  oracle in the pack, so the export marks them not equal and `run-built --native-core` keeps the record's body for them. Against
+  the full core oracle (core-oracle's dump, by hand) `str`'s, `slice`'s (`as_ptr`, `as_mut_ptr` among them) and `fmt`'s 10 are
+  equal too; `num`'s six (`is_power_of_two`, equal at RF12) were not run again. RF12-P6's "43 equal" was measured against that full
+  oracle, not the pack.
+
+### Proposed (RF13b)
+
+- **RFP51 The pack for the export's modules.** core-export judges its bodies against `rust-core-built`, which holds only
+  core-check's 37 modules, so `str`, `slice`, `fmt` and `num`'s exported bodies are never taken by `run-built --native-core`.
+  Options: (a) **a list of its own, `test/rust/front/core-export-modules.txt` (`str/mod.rs`, `slice/mod.rs`, `fmt/mod.rs`,
+  `num/mod.rs`), whose bodies `bin/rust-front core-records make` adds to the pack (the oracle tier, rustc as the helper: one dump of
+  core as today, a re-make of the pack), core-check's default list unchanged**; (b) add the four modules to core-modules.txt (the
+  pack grows the same, but every core-check run then takes num/mod.rs's 40 minutes); (c) leave it (the run takes 32 native bodies,
+  the record's for the rest). *Recommended: (a)*.
