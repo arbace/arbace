@@ -1379,7 +1379,11 @@ covers what.
   `MCParser/ELFAsmParser.cpp`, `MCParser/AsmParser.cpp`, `X86AsmBackend.cpp`, `X86ELFObjectWriter.cpp` and
   `X86EncodingOptimizationForImmediate.def`, and `arbace/asm/elf.ae` (the ELF64 writer and reader) `llvm/lib/MC/ELFObjectWriter.cpp`
   and `StringTableBuilder.cpp`, the same tarball, licence and manner; no code is copied. The records `test/asm/records/obj-*.edn` hold
-  llvm-mc 23.1.5's output for musl's files (MIT), Arbace's own tests and `llvm/test/MC/X86`'s (Apache 2.0 WITH LLVM-exception).
+  llvm-mc 23.1.5's output for musl's files (MIT), Arbace's own tests and `llvm/test/MC/X86`'s (Apache 2.0 WITH LLVM-exception). AX4's
+  second slice: `arbace/asm/link.ae` (the static linker) follows lld's `lld/ELF/` from the same tarball (`Driver.cpp`, `InputFiles.cpp`,
+  `SymbolTable.cpp`, `Symbols.cpp`, `LinkerScript.cpp`, `Writer.cpp`, `OutputSections.cpp`, `SyntheticSections.cpp`, `InputSection.cpp`,
+  `Relocations.cpp`, `Arch/X86_64.cpp`), the same licence and manner; no code is copied. `test/asm/run/` is Arbace's own; its
+  `musl:` sources are read from musl 1.2.6's pinned tarball (MIT), never committed.
 - The same namespaces' arm64 part (AR1, doc/asm/ARM64-SURVEY.md): `arm64/gnu.ae`'s operand grammar follows LLVM's
   `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` and `lex.ae`'s AArch64 dialects its
   `MCTargetDesc/AArch64MCAsmInfo.cpp` (the same tarball and licence); `plan9.ae`'s operand grammar follows Go 1.27.1's

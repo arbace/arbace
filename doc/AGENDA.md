@@ -176,8 +176,13 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   llvm-mc -filetype=obj writes them (`arbace.asm.amd64.obj` over the encoder, `arbace.asm.elf`'s writer and reader; sections, symbols,
   relaxation, the relocations X86ELFObjectWriter chooses, CFI into `.eh_frame`), `bin/repr-asm object|object-check`: musl's 32 and 6
   synthetic objects equal to llvm-mc 23.1.5's recorded objects byte for byte, `MC/X86`'s object tests 30 of 47, the rest classed (APX,
-  macros and `.reloc`, `.loc`), none failing. Proposed AXS37-AXS41. Next: the static linker and the first runs by the CPU (AXS40 (a)),
-  then the decoder (x86asm).
+  macros and `.reloc`, `.loc`), none failing. Proposed AXS37-AXS41.
+  `asm-ax4b` (on `asm-ax4`; AX4's second slice, "As built: AX4 (second slice)", doc/asm/AMD64.md §8): Arbace's static linker
+  (`arbace.asm.link`: ELF64 objects → a static ET_EXEC as lld lays one out: COMDAT, symbol resolution, lld's sections and rank, merged
+  pieces, `.eh_frame`, `.got` with GOTPCRELX relaxed, TLS, program headers, `bin/repr-asm link`), and `bin/repr-asm run-check`:
+  `test/asm/run/`'s 18 programs (P4's, musl's crti/crtn, string and setjmp functions among them) assembled, linked and run by the CPU,
+  18 of 18 by their own verdicts; GNU ld by hand agrees on every run. Freestanding only (musl's libc.a waits for AX7). Proposed
+  AXS45-AXS50 (AX2d's and AX4's AXS37-AXS41 collide: to renumber at merge). Next: the decoder (x86asm, AXS50 (a)).
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

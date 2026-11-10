@@ -953,3 +953,84 @@ and with it "musl's objects read back to their forms" (here read back to their s
   exit criterion "run by the CPU with their own verdicts" needs only the writer built here, and the decoder is a conversion of its own.
 - **AXS41 `.debug_line`.** (a) `.loc`/`.file N` into `.debug_line` as MCDwarfLineTable writes it (DWARF 5 by default) with the next
   slice; (b) when a corpus needs it (gcc and clang `-S` output with `-g`). *Recommended: (b)*: no corpus of AX4's exit needs it.
+
+## As built: AX4 (second slice, 2026-11-10; branch `asm-ax4b`)
+
+On the light lane (stage 0, one run at a time, under 2 GiB, no lock; no assembler, linker or compiler of the host in any check), on
+`asm-ax4`'s object assembler. The slice is §7.3's linker and §12's AX4 exit "P4's program and the first synthetic programs assembled,
+linked, run by the CPU". llvm-project 23.1.5's `lld/ELF` read from the pinned tarball (extracted into `.tmp/`, never committed) and
+written again in Arbace; no code copied. doc/asm/AMD64.md §8 describes what was built.
+
+- **`arbace.asm.link`** (`arbace/asm/link.ae`): ELF64 relocatable objects → a static `ET_EXEC` for x86-64 Linux as lld lays one out with
+  no script: COMDAT, symbol resolution (global, weak, common, local; hidden made local), the output sections by lld's names and rank,
+  mergeable sections' pieces deduplicated, `.eh_frame`'s CIEs deduplicated and dead FDEs dropped, `.got`/`.got.plt`/`.relro_padding`,
+  the program headers (PT_PHDR, PT_LOADs by permission, PT_TLS, PT_GNU_RELRO, PT_GNU_STACK), addresses from 0x200000, congruent file
+  offsets, the relocations AX4 emits with GOTPCRELX relaxed as lld relaxes it and GOTTPOFF relaxed to local exec, the linker-defined
+  symbols, the symbol table, entry `_start`. `arbace.asm.elf`'s reader gives each relocation its target section's index (`:target`,
+  additive; its canonical view unchanged).
+- **The run check** (`bin/repr-asm run-check [--record]`): `test/asm/run/`'s 18 tests (Arbace's own; their helpers and second objects in
+  `test/asm/run/lib/`) with their own verdicts in their headers, assembled and linked in one Arbace process, each program run by the CPU
+  under `timeout` (10 s), judged by its verdict; rows `test/asm/run-results-amd64.edn`, classes `test/asm/divergences-run.edn` (three
+  deferred, none used), four negative controls `test/asm/controls-run.txt` (a program's run judged by another's verdict). About 12 s,
+  0.75 GiB. `bin/repr-asm link OBJ... -o OUT`, `link-dump EXE`, `link-oracle` (by hand); the Makefile's `repr-asm-link`,
+  `repr-asm-link-dump`, `repr-asm-run-check`, `repr-asm-run-record`, `repr-asm-link-oracle`.
+
+| test | what it runs | verdict |
+|---|---|---|
+| `p4-hello` | §3's P4: `write` and `exit` | 42, `hello` |
+| `exit-status`, `loop-sum`, `calls`, `data-bss` | an exit status; loops (short and near back branches); recursion and calls through a register; `.data.*`/`.bss.*` merged, a common | stated |
+| `two-objects` | PLT32, PC32, R_X86_64_64, 32S across objects; GOTPCRELX relaxed (`mov`→`lea`, `call *`, `jmp *`), an absolute through a `.got` entry, GOTPCREL with an addend | stated |
+| `weak`, `comdat`, `merge-strings` | an undefined weak (0), a weak overridden; a COMDAT group in two objects (the first kept); strings deduplicated across objects | stated |
+| `eh-frame` | CFI in two objects (one CIE, two FDEs re-pointed: `readelf --debug-dump=frames` by hand agrees) | stated |
+| `tls` | `.tdata`/`.tbss` in PT_TLS, the thread pointer by `arch_prctl`, TPOFF32, GOTTPOFF relaxed | stated |
+| `linker-symbols`, `relocs-data` | `__ehdr_start`, `__bss_start`, `_end`, `_etext`, `__start_`/`__stop_`; R_X86_64_32/16/8, PC64, PC32, SIZE32/64, GOTOFF64 and GOTPC32 with `_GLOBAL_OFFSET_TABLE_` | stated |
+| `musl-crti`, `musl-string`, `musl-setjmp` | musl 1.2.6's `crti`/`crtn` around `.init`/`.fini`; its x86-64 `memcpy`, `memmove` (to the hidden `__memcpy_fwd` across objects), `memset`; `setjmp`/`longjmp` | stated |
+| `undefined`, `duplicate` | a missing symbol, two strong definitions | the link's refusal in lld's words |
+
+**18 of 18 pass**, none classed, none failing; the four controls fail as they must. What the runs found on the way: two tests' own
+mistakes (setjmp's second return printed, a GOT entry dereferenced), and a SIZE relocation against a local symbol, which MC (and so
+llvm-mc) writes against the section symbol: its size 0, as lld would give (the test made the symbol global). Freestanding only: musl's
+`libc.a` cannot be had from the tarball without compiling its C (its x86-64 `.s` are 32 files beside 1,538 `.c` in `src/`), so linking against musl waits
+for AX7 (AXS47); its `crt1` is C too.
+
+**The oracle, by hand** (`bin/repr-asm link-oracle`): the host has no `ld.lld` (none in `/usr/lib/llvm23/bin`), so GNU ld 2.45.1's
+`ld.bfd -static` linked the same Arbace-assembled objects. Every program's exit status and stdout are the same as Arbace's (16 of 16;
+GNU ld refuses the two link-error tests too). The canonical views (entry, segments, sections, symbols as section+offset) differ only by
+cause: GNU ld's default script with `-z separate-code` (base 0x400000, the headers alone in an R PT_LOAD, `.text` on its own pages, the
+read-only data in an R PT_LOAD after it; `.init` before `.text`, `.got.plt` before `.data`), no PT_PHDR and no PT_GNU_STACK in its static
+output of objects without `.note.GNU-stack`, `.eh_frame` kept as SHT_X86_64_UNWIND (lld's synthetic one is PROGBITS), GOTPCRELX relaxed
+for absolute symbols too and GOTPCREL with an addend (no `.got` at all; lld keeps entries for both), `.tdata` in PT_GNU_RELRO with no
+`.relro_padding`, its linker-defined symbols always defined and global (lld's only when referenced, hidden), a hidden global kept global
+(`__memcpy_fwd`; lld makes it local), an undefined weak left out of `.symtab`; every other symbol at the same section and offset. A
+byte-level reference needs lld itself (AXS46).
+
+AX1's and AR1's round trips, the encode check and the object check (68 of 85 byte for byte, unchanged), `bin/reap`, `bin/crops-score
+--judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` pass.
+
+Not built in this slice: archives, shared objects, static PIE, TLS GD/LD/TLSDESC, `--gc-sections`, ICF, scripts, lld's hash-sharded order
+of merged pieces (Arbace's first seen), the decoder (AXS50).
+
+### Proposed (AX4, second slice)
+
+Numbering: AX4's first slice proposed AXS37-AXS41 while AX2d's branch proposed its own AXS37-AXS39 (a collision for the main session to
+renumber at merge); these start at AXS45 to stay clear of both.
+
+- **AXS45 The run check's judge.** (a) as built: each program's own verdict stated in its header (exit status, stdout, or the link's
+  refusal), the CPU's run judged by it; (b) also x86i's run and the lockstep (§8.3) once x86i exists. *Recommended: (a) now, (b) at AX5*:
+  the CPU is the strictest judge the AOT level has, and no tool of the host is in it.
+- **AXS46 The linker's byte-level reference.** (a) as built: lld's layout as the model, held by the runs, the canonical view checked by
+  hand against GNU ld (by cause); (b) ld.lld 23.1.5 (the pinned tarball's lld, or an Alpine package, by the user's OK) by hand, its
+  executables recorded and pinned like llvm-mc's objects (`test/asm/records/exe-run-lld-23.1.5.edn`), the check byte for byte then
+  canonical. *Recommended: (b)* when the user allows the package: a byte-for-byte reference catches what a run cannot (padding, symbol
+  order, `.comment`'s line aside, which is Arbace's by design).
+- **AXS47 Linking against musl.** (a) freestanding only until AX7 (as built); (b) a pack of clang `-S` of musl's C (§9's
+  `asm-amd64-musl-S`) assembled by Arbace and archived into Arbace's own `libc.a` (archives then read member by member as ld pulls them),
+  `crt1` included; (c) ci's musl as C forms lowered to assembly by an Arbace back end (beyond v1). *Recommended: (b) at AX7*: the pack is
+  0.5 of independence for those cases, the freestanding corpus stays 1.
+- **AXS48 The run check in the gate.** (a) at AX10 with the row: an essential step (about 12 s, 0.75 GiB), the programs run under
+  `timeout`; (b) now. *Recommended: (a)*, as AXS39 (a).
+- **AXS49 Merged pieces' order.** (a) first seen (as built); (b) lld's: xxh3 of each piece into 32 shards, laid out shard by shard.
+  *Recommended: (b) with AXS46 (b)* only: without lld's executables to compare, the order changes nothing a program can see.
+- **AXS50 The next slice.** (a) the decoder (x86asm converted by repr/go's reader, `MC/Disassembler/X86`'s 13,545 decodings, the
+  objects read back to forms), AX4's remaining exit; (b) more run tests first (a generator by instruction family, §10's synthetic
+  programs). *Recommended: (a)*, then (b) with x86i (AX5).

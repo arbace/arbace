@@ -3103,3 +3103,36 @@ are fragments since, never bytes in a SHT_NOBITS section, and a fill above 64 Mi
 Considered: packs in the store for the references (AXS37 (b): kept for corpora above a megabyte), the MC tests' CHECK lines as the judge
 (AXS37 (c): needs the decoder for llvm-objdump `-d`), recomputing fixup kinds outside the encoder (AXS38 (b)). Proposed: AXS37-AXS41.
 Next (AXS40 (a)): the static linker and the first runs by the CPU, then the decoder.
+
+## 2026-11-10 amd64 assembly: AX4's second slice, Arbace's static linker and the first programs run by the CPU (branch `asm-ax4b`, from `mac/asm-ax4` `bbe9638e5`)
+
+Done on the light lane (stage 0, one run at a time, under 2 GiB, no lock). Studied: llvm-project 23.1.5's `lld/ELF/` from the pinned
+`.tmp/llvm/llvm-project-23.1.5.src.tar.xz` (SHA-256 `fb50b1ea...`, test/asm/corpora.edn's pin; extracted into the worktree's `.tmp/lld/`,
+never committed): `Driver.cpp`, `InputFiles.cpp` (initializeSymbols, the COMDAT rule), `SymbolTable.cpp`, `Symbols.cpp` (resolve,
+getSymVA, computeBinding), `LinkerScript.cpp` (getOutputSectionName, assignAddresses, the relro padding), `Writer.cpp` (getSectionRank,
+isRelroSection, createPhdrs, fixSectionAlignments, computeFileOffset, setPhdrs, removeEmptyPTLoad, demoteAndCopyLocalSymbols),
+`OutputSections.cpp` (commitSection, finalizeInputSections), `SyntheticSections.cpp` (EhFrameSection, GotSection, GotPltSection,
+RelroPaddingSection, sortSymTabSymbols), `InputSection.cpp` (getRelocTargetVA, getTlsTpOffset), `Relocations.cpp` (RelocScan::process),
+`Arch/X86_64.cpp` (getRelExpr, scanSectionImpl, relocate, adjustGotPcExpr, relaxGot, relaxGotNoPic, relaxTlsIeToLe, relaxOnce). Written
+again by hand in Arbace; no code copied.
+
+Built: `arbace/asm/link.ae` (`arbace.asm.link`: the static linker, ELF64 objects → a static ET_EXEC as lld lays one out with no script;
+the run check's builder, verdicts and controls; the canonical view of an executable for the oracle); `arbace.asm.elf`'s reader gives each
+relocation its target section's index (`:target`, additive); `bin/repr-asm link|link-dump|run-check|link-oracle`; the Makefile's
+`repr-asm-link`, `-link-dump`, `-run-check`, `-run-record`, `-link-oracle`; `test/asm/run/` (18 tests of Arbace's own with their verdicts
+in their headers, helpers and second objects in `lib/`; four take musl 1.2.6's `crti.s`, `crtn.s`, `memcpy.s`, `memmove.s`, `memset.s`,
+`setjmp.s`, `longjmp.s` from its pinned tarball, assembled by Arbace), `test/asm/run-results-amd64.edn`, `divergences-run.edn`,
+`controls-run.txt`, `run_judge.ae`; doc/asm/AMD64.md §8, the survey's "As built: AX4 (second slice)", LICENSE.md, doc/ARBACE.md.
+
+Results: 18 of 18 programs assembled, linked and run by the CPU meet their own verdicts (16 runs: §3's P4 among them, exit 42 and
+`hello`; two link refusals in lld's words); the four negative controls fail as they must; about 12 s, 0.75 GiB. The oracle by hand: no
+ld.lld on the host, so GNU ld 2.45.1 (`ld.bfd -static`) linked the same objects: all 16 runs identical, the canonical differences all by
+cause (its script and `-z separate-code`, its wider GOT relaxation, no PT_PHDR/PT_GNU_STACK, linker symbols always global, hidden globals
+kept global). The object check (68 of 85 byte for byte), the encode check, AX1's and AR1's round trips, `bin/reap`, `bin/crops-score
+--judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` unchanged and passing.
+
+Considered: static PIE first (rejected: ET_EXEC is lld's default and needs no self-relocation code in a freestanding program), linking
+musl's `libc.a` (not possible without compiling its C at check time: AX7, AXS47), lld's hash-sharded order of merged pieces (AXS49),
+judging by GNU ld's executables (rejected: another linker's layout, kept as the by-hand oracle), lld itself as the byte reference (not
+installed; AXS46). Proposed AXS45-AXS50 (numbered past AX2d's and AX4's colliding AXS37-AXS41, for the main session to renumber).
+Next (AXS50 (a)): the decoder (x86asm), AX4's remaining exit.

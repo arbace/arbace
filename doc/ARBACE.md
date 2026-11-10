@@ -393,7 +393,13 @@ code. Three kinds of things live here:
   `StringTableBuilder.cpp`, and a reader of Arbace's own) and `asm/amd64/obj.ae` (`arbace.asm.amd64.obj`: the object assembler after
   `MCObjectStreamer.cpp`, `MCELFStreamer.cpp`, `MCAssembler.cpp`'s layout and relaxation, `MCDwarf.cpp`'s FrameEmitterImpl,
   `MCParser/ELFAsmParser.cpp`, `MCParser/AsmParser.cpp`'s data and alignment directives, `X86AsmBackend.cpp`,
-  `X86ELFObjectWriter.cpp`, `X86EncodingOptimizationForImmediate.def`), written by hand after the same tarball; no code is copied.
+  `X86ELFObjectWriter.cpp`, `X86EncodingOptimizationForImmediate.def`), written by hand after the same tarball; no code is copied. AX4's
+  second slice (2026-11-10, "As built: AX4 (second slice)"): `asm/link.ae` (`arbace.asm.link`: the static linker after llvm-project
+  23.1.5's `lld/ELF/`: `Driver.cpp`, `InputFiles.cpp`'s initializeSymbols and COMDAT rule, `SymbolTable.cpp`, `Symbols.cpp`'s resolve and
+  getSymVA, `LinkerScript.cpp`'s getOutputSectionName and assignAddresses, `Writer.cpp`'s getSectionRank, createPhdrs,
+  fixSectionAlignments, assignFileOffsets and setPhdrs, `OutputSections.cpp`, `SyntheticSections.cpp`'s .eh_frame, .got, .got.plt and
+  symbol tables, `InputSection.cpp`'s getRelocTargetVA and getTlsTpOffset, `Relocations.cpp`'s RelocScan::process,
+  `Arch/X86_64.cpp`'s relocate, adjustGotPcExpr, relaxGot and relaxTlsIeToLe), written by hand; no code is copied.
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

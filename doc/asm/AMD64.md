@@ -181,4 +181,62 @@ the rows' `:cross`, the classes `test/asm/divergences-cross.edn`, the controls `
   `test/asm/divergences-object.edn`, controls `test/asm/controls-object.txt` (a file's object against another's record).
 
 Not yet: `.debug_line` (`.loc`), `.reloc`, macros and conditional assembly (AXS32), APX (the encoder's), `.symver`, `.weakref`,
-COMDAT groups beyond the one tested, x32 and i386 objects, the linker and the decoder (AX4's next slices).
+COMDAT groups beyond the one tested, x32 and i386 objects, the decoder (AX4's next slice; the linker is §8).
+
+## 8. The static linker and the runs (AX4, second slice)
+
+`arbace.asm.link` (`arbace/asm/link.ae`) links ELF64 relocatable objects into a static executable (`ET_EXEC`) for x86-64 Linux as lld
+lays one out with no linker script (llvm-project 23.1.5's `lld/ELF`, read and written again; doc/asm/AMD64-SURVEY.md §7.3, "As built:
+AX4 (second slice)").
+
+- **Inputs**: ELF64 relocatable objects (an archive or a shared object is classed: `:archive`, `:shared`). The object's own tables, its
+  groups, `.note.GNU-stack` and SHF_EXCLUDE sections never reach the output.
+- **COMDAT** (InputFiles): the first group of a signature kept, a later one's members discarded; a symbol defined in a discarded section
+  is an undefined reference of its binding; a relocation from a live section to a local symbol of a discarded one is an error.
+- **Symbols** (Symbol::resolve): the global table in the order names are first seen; defined over common over undefined, strong over
+  weak, two strong definitions `duplicate symbol: NAME`, the larger common (the stricter alignment) kept, the most constraining
+  visibility of all references; an undefined strong symbol a relocation needs is `undefined symbol: NAME`, an undefined weak one 0.
+  Commons are allocated into `.bss` (COMMON) in the table's order. The symbols lld defines when referenced: `__ehdr_start`,
+  `__executable_start`, `_etext`/`etext`, `_edata`/`edata`, `_end`/`end`, `__bss_start`, `_GLOBAL_OFFSET_TABLE_` (`.got.plt`'s start),
+  `__start_SEC`/`__stop_SEC` of a section named as a C identifier, `__{preinit,init,fini}_array_{start,end}`; hidden.
+- **Output sections** (getOutputSectionName, finalizeInputSections, getSectionRank): `.text.*` into `.text` and GNU's other prefixes
+  likewise, created in input order, then sorted stably by lld's rank (R, RX, RW TLS, RW RELRO, RW, NOBITS after PROGBITS, non-alloc
+  last); the flags ORed, the alignment the largest; a mergeable section (SHF_MERGE) split into pieces (strings at their terminators, else
+  by entry size) and deduplicated into one synthetic section at its first input's place; `.eh_frame` parsed into CIEs and FDEs, the CIEs
+  deduplicated by contents and personality, an FDE whose function is not live dropped, each FDE's CIE pointer rewritten (one CIE for a
+  program's MC objects); `.got` (an entry for each symbol a GOT relocation keeps: its address, no dynamic relocation), `.got.plt` (three
+  header words) when GOTOFF/GOTPC or `_GLOBAL_OFFSET_TABLE_` need it, `.relro_padding` after a RELRO section, `.comment` with the
+  linker's line, then `.symtab`, `.shstrtab`, `.strtab`. An executable section's padding is `int3` (0xcc).
+- **Program headers** (createPhdrs): PT_PHDR; the PT_LOADs by permission (the first holds the ELF header and the program headers with
+  the read-only sections; a RELRO run ends a PT_LOAD; a PROGBITS section after a NOBITS one starts one); PT_TLS; PT_GNU_RELRO;
+  PT_GNU_STACK (RW). An empty PT_LOAD is removed after the layout (removeEmptyPTLoad).
+- **Addresses and offsets** (assignAddresses, fixSectionAlignments, assignFileOffsets): from 0x200000 past the headers; a PT_LOAD's first
+  section on the next 4 KiB page at the same page offset (the TLS one aligned to PT_TLS's alignment), each section aligned; `.tbss` takes
+  no address space; `.relro_padding` reaches the next common page; a PT_LOAD's first section's file offset congruent to its address, the
+  rest at their distance from it, a NOBITS section at the current offset; the section headers last, aligned to 8.
+- **Relocations** (X86_64::relocate, RelocScan::process): `R_X86_64_64`, `32` (unsigned), `32S`, `16`, `8`, `PC64`, `PC32`, `PC16`,
+  `PC8`, `PLT32` (direct: nothing is preemptible), `GOTPCREL`, `GOTPCRELX` and `REX_GOTPCRELX` relaxed as adjustGotPcExpr and relaxGot
+  relax them (an addend of -4 and not an absolute, undefined weak or TLS symbol: `mov` into `lea`, `call *` into `addr32 call`, `jmp *`
+  into `jmp; nop`, `test` and the binary operations of REX_GOTPCRELX into immediates; the rest through a `.got` entry), `GOT32`,
+  `GOT64`, `GOTOFF64`, `GOTPC32`, `GOTPC64`, `PLTOFF64`, `SIZE32`, `SIZE64`, `TPOFF32`, `TPOFF64`, `DTPOFF32`/`64` (TP-relative in an
+  executable), `GOTTPOFF` relaxed to local exec (relaxTlsIeToLe); a TLS symbol's address is its offset in PT_TLS and the thread pointer's
+  offset getTlsTpOffset's (variant II). Range checks give lld's `relocation R_X86_64_... out of range`. TLS GD/LD/TLSDESC are classed
+  (`:tls-gd-ld`), and so are relocations inside a mergeable section.
+- **The symbol table** (demoteAndCopyLocalSymbols, sortSymTabSymbols): each file's locals but section symbols and `.L` symbols of
+  mergeable sections, then the globals in the table's order with their final binding (a hidden or internal one local, grouped with its
+  file's locals); `.strtab` in the order of addition, `.shstrtab` deduplicated.
+- **Entry**: `_start` (else lld's warning and 0).
+
+**The run check** (`bin/repr-asm run-check [--record]`): each test of `test/asm/run/` (Arbace's own freestanding programs: syscalls,
+loops, calls, data and `.bss`, commons, relocations across objects, GOT relaxation, weak symbols, COMDAT, merged strings, `.eh_frame`,
+TLS with `arch_prctl`, linker-defined symbols, musl 1.2.6's `crti`/`crtn`, `memcpy`/`memmove`/`memset` and `setjmp`/`longjmp` assembled
+from its tarball) states its verdict in its header (`# exit:`, `# stdout:`, `# with:` and `# before:` the other sources, `# link-error:`
+a refusal in lld's words); the sources are assembled (`arbace.asm.amd64.obj`) and linked by Arbace in one process, each program run by
+the CPU under a time limit, and judged by its own verdict: no assembler, linker or compiler of the host at check time. Rows
+`test/asm/run-results-amd64.edn`, classes `test/asm/divergences-run.edn`, controls `test/asm/controls-run.txt` (a program's run judged
+by another test's verdict). `bin/repr-asm link OBJ... -o OUT` links by hand, `link-dump EXE` reads an executable back canonically,
+`link-oracle` is the oracle tier's (the host's ld.lld when present, else GNU ld, on the same objects: runs and canonical views compared,
+by hand only).
+
+Not yet: archives (musl's `libc.a` needs its C compiled: AX7), shared objects and dynamic linking (AXS11), static PIE, TLS GD/LD/TLSDESC
+relaxation, `--gc-sections`, ICF, linker scripts, the merge pieces' order by lld's hash shards (Arbace's: first seen).

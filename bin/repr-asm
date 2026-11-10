@@ -67,6 +67,18 @@
 #   bin/repr-asm object-record [CORPUS]              the oracle tier's, by hand: the record made by the host's llvm-mc 23.1.5
 #                                                    (REPR_ASM_MC; -triple x86_64-linux-musl -filetype=obj), each object twice
 #                                                    and compared (verify), the pin rewritten
+#   bin/repr-asm link OBJ... -o OUT                  Arbace's static linker (AX4's second slice, arbace.asm.link): ELF64 objects
+#                                                    linked into a static x86-64 executable (ET_EXEC) as lld 23.1.5 lays one out
+#                                                    with no script (no ld)
+#   bin/repr-asm link-dump EXE                       an executable read back canonically: entry, segments, sections, symbols
+#   bin/repr-asm run-check [--record]                test/asm/run/'s programs (their verdicts in their headers: exit, stdout,
+#                                                    with, before, link-error) assembled and linked by Arbace, run by the CPU
+#                                                    under timeout ($REPR_ASM_RUN_TIMEOUT, 10 s), judged by their own verdicts;
+#                                                    rows against test/asm/run-results-amd64.edn, classes
+#                                                    test/asm/divergences-run.edn, controls test/asm/controls-run.txt failing;
+#                                                    --record rewrites the rows; WORK .tmp/repr-asm/run/run
+#   bin/repr-asm link-oracle                         the oracle tier's, by hand: the host's ld.lld (else ld.bfd; REPR_ASM_LD)
+#                                                    links the same objects, the runs and canonical views compared
 set -euo pipefail
 arch=amd64 args=()
 while [ $# -gt 0 ]; do case $1 in --arch) arch=$2; shift 2 ;; *) args+=("$1"); shift ;; esac; done
@@ -362,6 +374,12 @@ case ${1:-} in
     echo "repr-asm print-oracle: $files files, $same with llvm-mc's very lines; $lines lines printed, $extra of them not llvm-mc's (diff $o/NAME.llvm $o/NAME.ours)" ;;
   object) shift; export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.obj object "$@" ;;
   object-dump) shift; arbace_tool -m arbace.asm.amd64.obj dump "$@" ;;
+  link)
+    shift; out= objs=()
+    while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift 2 ;; *) objs+=("$1"); shift ;; esac; done
+    [ -n "$out" ] && [ ${#objs[@]} -gt 0 ] || { echo "repr-asm link OBJ... -o OUT" >&2; exit 2; }
+    arbace_tool -m arbace.asm.link link "$out" "${objs[@]}"
+    chmod +x "$out" ;;
   object-record)
     shift; id=musl; [ $# -gt 0 ] && [ "${1#--}" = "$1" ] && id=$1
     mc=${REPR_ASM_MC:-/usr/lib/llvm23/bin/llvm-mc}
@@ -415,6 +433,49 @@ case ${1:-} in
     judge=(-e "(do (load-file \"$root/test/asm/object_judge.ae\") nil)" -e "(asm.object-judge/main \"$root/test/asm/object-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-object.edn\" \"${record:-}\")")
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
+  run-check)
+    # AX4's runs: each test of test/asm/run/ (its own verdict in its header) assembled and linked by Arbace into WORK/NAME, run by
+    # the CPU under a time limit (the test's own program, nothing else), judged by its verdict; rows against
+    # test/asm/run-results-amd64.edn, classes test/asm/divergences-run.edn, controls test/asm/controls-run.txt
+    shift; record=
+    for a in "$@"; do case $a in --record) record=1 ;; esac; done
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    work=$root/.tmp/repr-asm/run/run; rm -rf "$work"; mkdir -p "$work" "$lists"
+    : > "$lists/run.list"
+    for f in "$root"/test/asm/run/*.s; do n=${f##*/}; printf '%s\t%s\n' "${n%.s}" "$f" >> "$lists/run.list"; done
+    musl=$src/musl-1.2.6
+    arbace_tool -m arbace.asm.link build "$lists/run.list" "$work" "$musl"
+    fails=0
+    while IFS=$'\t' read -r n c _; do
+      [ "$c" = built ] || continue
+      chmod +x "$work/$n"
+      st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" "./$n" > "$n.out" 2> "$n.err") || st=$?
+      echo "$st" > "$work/$n.status"
+    done < "$work/build.tsv"
+    arbace_tool -m arbace.asm.link verdicts "$work"
+    while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      v=$(arbace_tool -m arbace.asm.link control "$work" "$subj" "$ref" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-run.txt"
+    arbace_tool -e "(do (load-file \"$root/test/asm/run_judge.ae\") nil)" -e "(asm.run-judge/main \"$root/test/asm/run-results-amd64.edn\" \"$work\" \"$root/test/asm/divergences-run.edn\" \"${record:-}\")" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  link-oracle)
+    # the oracle tier's, by hand: the host's GNU ld (REPR_ASM_LD, default ld.bfd; ld.lld when present) links the run check's
+    # objects (the last run-check's WORK) and the two executables are compared at the canonical level
+    shift
+    ld=${REPR_ASM_LD:-$(command -v ld.lld || command -v ld.bfd)}
+    work=$root/.tmp/repr-asm/run/run o=$root/.tmp/repr-asm/run/oracle; rm -rf "$o"; mkdir -p "$o"
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    arbace_tool -m arbace.asm.link oracle-objects "$lists/run.list" "$o" "$src/musl-1.2.6"
+    while IFS=$'\t' read -r n objs; do
+      # shellcheck disable=SC2086
+      "$ld" -static -o "$o/$n.ref" $objs 2> "$o/$n.ld.err" || { echo "$n: $ld refuses: $(head -1 "$o/$n.ld.err")"; continue; }
+      st=0; (cd "$o" && timeout 10 "./$n.ref" > "$n.ref.out" 2>&1) || st=$?
+      echo "$n: ${ld##*/}'s run exit $st, stdout $(cmp -s "$o/$n.ref.out" "$work/$n.out" && echo same || echo differs) as Arbace's"
+      arbace_tool -m arbace.asm.link compare "$work/$n" "$o/$n.ref"
+    done < "$o/objects.tsv" ;;
+  link-dump) shift; arbace_tool -m arbace.asm.link dump "$@" ;;
   divergences)
     arbace_tool -e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"${2:-$results}\" \"$classes\" \"\" \"\")" ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2; exit 2 ;;
