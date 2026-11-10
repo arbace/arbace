@@ -607,8 +607,15 @@
                     (logical? e) (mk e :logical ty :op (if (= "&&" (:op e)) :and :or) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
                     :else (mk e :binary ty :op (get bin-ops (:op e)) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e))))
       :assign (mk e :assign ty :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
-      :assign-op (if (:callee (r-of e))
-                   (unsupported "an overloaded compound assignment")
+      :assign-op (cond
+                   (:callee (r-of e)) (unsupported "an overloaded compound assignment")
+                   ;; RF15: an overloaded compound assignment (`String += &str`): thir's overloaded_operator over the left side
+                   ;; as mirrored (its mutable autoref, typeck's adjustment) and the right one, OpAssign's method at [L R]
+                   (not (builtin-binop? (str/replace (str (:op e)) "=" "") (ty-of (:lhs e)) (ty-of (:rhs e))))
+                   (let [op (str/replace (str (:op e)) "=" "") [tr m] (get op-methods op)]
+                     (overloaded-operator e ty [(str tr "Assign") (str m "_assign")] [(ty-of (:lhs e)) (adjusted-ty (:rhs e))]
+                                          [(mirror-expr (:lhs e)) (mirror-expr (:rhs e))]))
+                   :else
                    (mk e :assign-op ty :op (get bin-ops (str/replace (str (:op e)) "=" "")) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e))))
       :addr-of (if (:raw e)
                  (mk e :raw-borrow ty :mutbl (boolean (:mutbl e)) :arg (mirror-expr (:expr e)))
@@ -1777,7 +1784,8 @@
               (if (= "0" (str n))
                 (unsupported "a zero-length repeat")
                 (let [[bb o] (as-operand bb scope (:value x) :no)]
-                  [bb (list 'repeat (op-form o) (str n))])))
+                  ;; RF15: the count's constant kept for an instance's substitution (a const parameter: `[0; R]`)
+                  [bb (with-meta (list 'repeat (op-form o) (str n)) {:count (:count x)})])))
     :array (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
              [bb (list 'aggregate (list 'array (ty-form (second (:ty x)))) (mapv op-form os))])
     :tuple (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]

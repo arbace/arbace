@@ -236,7 +236,12 @@
 
 (defn- def-local? [d] (or (number? d) (and (vector? d) (= (second d) (:name *local*)))))
 
-(defn- generics [d] (when-not (vector? d) (c/generics-any d)))
+(defn- generics [d]
+  (cond (vector? d) nil
+        ;; RF15: core::ptr::drop_glue (`pub(crate) const unsafe fn drop_glue<T: PointeeSized>`, the lang item drop_glue) is not
+        ;; in std's interface (not public): its one parameter, so its shims' symbols carry T
+        (= d "core::ptr::drop_glue") {:parent-count 0 :params [{:name "T" :kind :type :index 0}]}
+        :else (c/generics-any d)))
 
 (defn- impl-of
   "An impl's self type and trait reference (tc types over its parameters): [self [trait-def args]-or-nil]"
@@ -355,6 +360,8 @@
   {"i8" "a" "i16" "s" "i32" "l" "i64" "x" "i128" "n" "isize" "i"
    "u8" "h" "u16" "t" "u32" "m" "u64" "y" "u128" "o" "usize" "j" "f16" "C3f16" "f32" "f" "f64" "d" "f128" "C4f128"})
 
+(def ^:private auto-trait-rank {"core::marker::Sync" 0 "core::marker::Send" 1})
+
 (defn- print-type! [m t]
   (let [basic (case (first t)
                 :bool "b" :char "c" :str "e" :never "z" :param "p"
@@ -381,7 +388,10 @@
                    (push! m "D")
                    (when principal (print-def-path! m (first principal) (into [[:dummy-self]] (second principal))))
                    (doseq [[ad _ term] projections] (push! m "p") (push! m (ident (item-name-of ad))) (print-type! m term))
-                   (doseq [a autos] (print-def-path! m a []))
+                   ;; RF15: the auto traits in rustc's interned order (ExistentialPredicate::stable_cmp: by DefPathHash), which
+                   ;; for core's markers is Sync before Send (rustc 1.99.1's hashes; the record's symbols show it); others after,
+                   ;; in their written order
+                   (doseq [a (sort-by #(get auto-trait-rank (str %) 9) autos)] (print-def-path! m a []))
                    (push! m "E") (push! m "L_"))
             ;; RF14: a fn pointer (`F`, `U` when unsafe, its inputs, `E`, its output); another ABI's or one with bound regions
             ;; (a binder's `G`) refused
@@ -713,7 +723,7 @@
         (ws "ReprC") (assoc :c true)
         (ws "ReprTransparent") (assoc :transparent true)
         (ws "ReprPacked") (assoc :packed true)
-        (some #(re-matches #"[iu](8|16|32|64|128|size)" %) ws) (assoc :int (some #(re-matches #"[iu](8|16|32|64|128|size)" %) ws))))
+        (some #(re-matches #"[iu](?:8|16|32|64|128|size)" %) ws) (assoc :int (some #(re-matches #"[iu](?:8|16|32|64|128|size)" %) ws))))
     (let [r (:repr (get (:adts c/*si*) adt))]
       (cond-> {} (and (string? r) (re-matches #"[iu](8|16|32|64|128|size)" r)) (assoc :int r)
                  (= "C" r) (assoc :c true)))))
@@ -836,6 +846,29 @@
 (defn layout-of [t]
   (let [t (erase-regions t)]
     (if-let [l (get @*layouts* t)] l (let [l (layout-of* t)] (swap! *layouts* assoc t l) l))))
+
+(declare solver-def)
+(declare local-adt-by-path)
+(defn variant-discriminant
+  "RF15: within build-program's bindings, the explicit discriminant of the local enum's variant at PATH (`Color::Green`, its
+  anonymous constant `Color::Green::{constant#0}`), as discriminant-values reads it; else nil"
+  [n ^String path]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn []
+        (when-let [[_ ep vn] (re-matches #"(.+)::([A-Za-z_][A-Za-z0-9_]*)" path)]
+          (when-let [adt (local-adt-by-path ep)]
+            (let [vs (vec (tc/variants-of adt)) i (first (keep-indexed (fn [i v] (when (= vn (str (second (:data v)))) i)) vs))]
+              (when i (nth (tc/discriminant-values adt) i)))))))))
+
+(declare layout-form)
+(defn type-layout-form
+  "RF15: within build-program's bindings, the layout of the type whose form is TYF (its :tc, else form->ty) as layout-form
+  writes it (the helper's mir/layouts entry)"
+  [n tyf]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def)
+      (fn [] (layout-form (layout-of (or (:tc (meta tyf)) (form->ty tyf))))))))
 
 (defn- scalar-form [s]
   (let [[k bits signed] (:prim s) r (when-not (:union s) (vec (:range s)))]
@@ -1409,6 +1442,13 @@
       fnptr [:fnptr {}]
       ;; RF14: a closure by its type's text (a local one's `{closure@FILE:L:C: L:C}`, typeck's)
       closure [:closure (second f) {}]
+      ;; RF15: a record's trait object (`(dyn)`: its text alone) whose principal is a local trait without parameters and no
+      ;; auto trait (`dyn Animal`), as a std call's argument
+      dyn (let [[_ p] (re-matches #"dyn ([A-Za-z_][A-Za-z0-9_:]*)" (str (second f)))
+                tr (when p (local-trait-by-path p))]
+            (if (and tr (empty? (filter #(not= :lifetime (:kind %)) (rest (c/all-params (c/generics-of tr))))))
+              [:dyn {:principal [tr []] :projections [] :autos []} [:re-erased]]
+              (throw (ex-info (str "mono: the type form " (pr-str f)) {:fact :layout}))))
       (throw (ex-info (str "mono: the type form " (pr-str st)) {:fact :layout})))))
 
 (defn- text-of [t]
@@ -1588,6 +1628,68 @@
   (and (number? d) (#{"Fn" "AssocFn" "Closure"} (:kind (c/def-of d))) (not (trait-method? d)) (empty? (filter type-arg? args))
        (or (not= "Closure" (:kind (c/def-of d))) (not (generic-def? (enclosing-fn d))))))
 
+(defn- concrete?
+  "RF15: a type or argument list with no parameter, inference variable or unnormalized projection in it"
+  [x]
+  (not (some #(and (vector? %) (#{:param :infer :cparam :proj :var} (first %))) (tree-seq coll? seq x))))
+
+(defn- local-generic-instance?
+  "RF15 (RFP49 (a)'s rest): an instance of a local generic function, method (a generic impl's, or a trait's default body at its
+  Self) or closure (of a generic function) at concrete type arguments, which the collector builds by instantiating our body"
+  [d args]
+  (and (number? d) (#{"Fn" "AssocFn" "Closure"} (:kind (c/def-of d))) (seq (filter type-arg? args)) (concrete? args)))
+
+(defn- instantiate*
+  "Our body's forms at ARGS (Instance::instantiate_mir_and_normalize_erasing_regions): each type form from its :tc substituted,
+  normalized and erased, a function constant's text from its type, a named constant's arguments substituted"
+  [x args norm]
+  (cond
+    (seq? x)
+    (let [m (meta x)
+          y (apply list (map #(instantiate* % args norm) x))]
+      (cond
+        (and (= 'ty (first y)) (:tc m)) (build/ty-form (norm (:tc m)))
+        (and (= 'unevaluated (first y)) (:nc m)) (with-meta y (update m :nc (fn [[d as]] [d (mapv norm as)])))
+        ;; a repeat's count of a const parameter (`[0; R]`) at the instance's argument
+        (and (= 'repeat (first y)) (vector? (:count m)))
+        (let [k (c/subst (:count m) args)] (with-meta (list 'repeat (second y) (str (c/print-const k))) (assoc m :count k)))
+        ;; a const parameter's value (`0..R`) at the instance's argument: an integer's scalar
+        (and (= 'const (first y)) (seq? (nth y 3 nil)) (= 'const-param (first (nth y 3))))
+        (let [[_ i nm] (nth y 3) a (nth args i nil) tyf (nth y 2) st (nth tyf 2 nil)
+              v (when (and (vector? a) (= :cval (first a))) (bigint (parse-long (str/replace (str (second a)) #"_?[iu](8|16|32|64|128|size)$" ""))))
+              sz (when (and (seq? st) (#{'int 'uint} (first st))) (let [k (second st)] (if (str/ends-with? k "size") 8 (quot (parse-long (subs k 1)) 8))))]
+          (if (and v sz)
+            (with-meta (list 'const (str "const " v "_" (second st)) tyf (list 'scalar (mod v (reduce * 1N (repeat (* 8 sz) 2N))) sz)) m)
+            (if m (with-meta y m) y)))
+        (= 'const (first y))
+        (let [tyf (nth y 2 nil) t (:tc (meta tyf)) v (nth y 3 nil) nc (:nc (meta v))
+              text (cond (and t (= :fndef (first t))) (build/fn-const-text t)
+                         nc (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (first nc) (second nc))))
+                         :else (second y))]
+          (with-meta (apply list 'const text (drop 2 y)) m))
+        :else (if m (with-meta y m) y)))
+    (vector? x) (let [y (mapv #(instantiate* % args norm) x)] (if (meta x) (with-meta y (meta x)) y))
+    (map? x) (into {} (for [[k v] x] [k (cond (= k :local-tys) (mapv norm v)
+                                              (= k :promoted-bodies) (into {} (for [[i pb] v] [i (instantiate* pb args norm)]))
+                                              ;; build-run's Assert spans by their (condition expected message), as the terms become
+                                              (= k :assert-spans) (into {} (for [[ak sp] v] [(instantiate* ak args norm) sp]))
+                                              :else (instantiate* v args norm))]))
+    :else x))
+
+(defn- instantiate-body [b args]
+  (instantiate* b args (fn [t] (let [t (erase-regions (c/subst t args))] (erase-regions (try (tc/normalize-deep t) (catch Throwable _ t)))))))
+
+(defn instance-name
+  "RF15: a generic instance's body name: its definition's MIR name and its type arguments"
+  [base args]
+  (str base "::<" (str/join ", " (for [a args :when (type-arg? a)] (binding [c/*in-value* false] (c/print-ty a)))) ">"))
+
+(defn instantiate-runtime
+  "RF15 (RFP49 (a)'s rest): within build-program's bindings, our runtime body B (with its :promoted-bodies) at ARGS"
+  [n b args]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def) (fn [] (instantiate-body b args)))))
+
 (defn- std-call
   "RFP49 (a): a record body's function constant (fndef PATH [ARG-FORMS]) as [DEF ARGS]: a trait method of std's (PATH printed as
   def_path_str prints it: `std::fmt::Display::fmt`) or of the crate's, its arguments' types by form->ty"
@@ -1603,7 +1705,7 @@
 (defn program-facts
   "Within build-program's bindings: the program's native facts over its built BODIES ([[name body err] ...]); STD-CALLS (RFP49
   (a)): the record's std bodies' function constants [PATH ARG-FORMS], whose local instances the collector adds"
-  [n bodies & [std-calls]]
+  [n bodies & [std-calls std-fn-syms]]
   (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil) *closure-kinds* (atom {})]
    (tc/with-solver (solver-def) (fn []
     (let [ours (into {} (for [[nm b] bodies :when b] [nm b]))
@@ -1623,28 +1725,55 @@
                                                                                                (= "main" (str (second (:data d)))) (= 0 (:parent d)))))]
                   (:id d))
           ;; RF14: closures' bodies too (a closure is an instance when it is called or reaches std's bodies)
-          by-def (into {} (for [d (concat fn-defs (filter #(and (= "Closure" (:kind %)) (:body (:node %))) (c/defs)))] [(:id d) (name-of d)]))
+          by-def* (into {} (for [d (concat fn-defs (filter #(and (= "Closure" (:kind %)) (:body (:node %))) (c/defs)))] [(:id d) (name-of d)]))
+          ;; RF15 (RFP49 (a)'s rest): an item is a definition (no type argument) or [DEF ARGS], a generic one's instance, its body
+          ;; ours instantiated at ARGS
+          by-def (fn [k] (if (vector? k) (instance-name (get by-def* (first k)) (second k)) (get by-def* k)))
+          inst-cache (atom {})
+          item-body (fn [k] (if (vector? k)
+                              (if (contains? @inst-cache k) (get @inst-cache k)
+                                  (let [b (when-let [b (get ours (get by-def* (first k)))] (try (instantiate-body b (second k)) (catch Throwable _ nil)))]
+                                    (swap! inst-cache assoc k b) b))
+                              (get ours (by-def k))))
+          ;; a call's or resolution's local target as an item key: the definition at no type argument, else its instance
+          local-key (fn [d args] (cond (local-instance? d args) d
+                                       (local-generic-instance? d (erase-regions args)) [d (erase-regions args)]))
           ;; RFP49 (a): the local instances std's bodies reach: each trait method's call or function constant of the record's
           ;; std instances' bodies (STD-CALLS: [PATH ARG-FORMS]) resolved by mono, those that are a local function's or
           ;; closure's at no type argument (a generic one's instantiation is not ported)
           std-roots (distinct (for [[path forms] std-calls
                                     :let [r (try (let [[d args] (std-call path forms)] (resolve-instance d args)) (catch Throwable _ nil))]
                                     :when r :let [[rd rargs shim] r]
-                                    :when (and (nil? shim) (local-instance? rd rargs))]
-                                rd))
+                                    :when (nil? shim) :let [k (local-key rd rargs)] :when k]
+                                k))
+          ;; RF15: the local functions std's bodies' vtables point to (the record's std bodies' function allocations, STD-FN-SYMS:
+          ;; `<Failure as Debug>::fmt` in `<Box<dyn Error> as From<Failure>>::from`'s vtable), matched by their symbols
+          std-roots (if (seq std-fn-syms)
+                      (distinct (concat std-roots
+                                        (for [[d _] by-def* :when (local-instance? d [])
+                                              :let [sy (try (instance-symbol {:def d :args []}) (catch Throwable _ nil))]
+                                              :when (contains? std-fn-syms sy)]
+                                          d)))
+                      std-roots)
           ;; the collector: from the roots through the calls of our bodies (core's bodies' own uses are the pack's)
           items (loop [todo (vec (concat roots std-roots)) seen #{} acc []]
                   (if-let [d (first todo)]
                     (if (contains? seen d)
                       (recur (subvec todo 1) seen acc)
-                      (let [b (get ours (by-def d))
+                      (let [b (item-body d)
                             calls (when b (keep #(call-fndef (:term %)) (:blocks b)))
                             next-local (concat (for [[_ cd args] calls :when (and (number? cd) (empty? (filter type-arg? args)))] cd)
+                                               ;; RF15: a local generic function's call at concrete arguments, its instance
+                                               (for [[_ cd args] calls :when (and (number? cd) (not (trait-method? cd)))
+                                                     :let [k (local-key cd args)] :when (vector? k)]
+                                                 k)
                                                ;; RF14: a trait method's call resolved to a local impl's method at no type argument
+                                               ;; (RF15: or to a local generic instance: a generic impl's method, a default body)
                                                (for [[_ cd args] calls :when (trait-method? cd)
                                                      :let [r (try (resolve-instance cd (erase-regions args)) (catch Throwable _ nil)) [rd rargs] r]
-                                                     :when (and (nil? (nth r 2 nil)) (local-instance? rd rargs))]
-                                                 rd)
+                                                     :when (and r (nil? (nth r 2 nil)))
+                                                     :let [k (local-key rd rargs)] :when k]
+                                                 k)
                                                (for [t (drop-tys b) x (drop-fns t)] x)
                                                ;; RF13: the local functions it reifies to function pointers
                                                (for [blk (:blocks b) st (:stmts blk)
@@ -1663,34 +1792,34 @@
                                                (for [[_ _ c tr targs] (when b (dyn-casts b))
                                                      [k m] (try (vtable-entries tr) (catch Throwable _ nil)) :when (= :method k)
                                                      :let [i (try (vtable-instance c tr targs m) (catch Throwable _ nil))]
-                                                     :when (and i (local-instance? (:def i) (:args i)))]
-                                                 (:def i)))]
+                                                     :when i :let [k (local-key (:def i) (:args i))] :when k]
+                                                 k))]
                         (recur (into (subvec todo 1) next-local) (conj seen d) (conj acc d))))
                     acc))
-          ext-items (distinct (for [d items :let [b (get ours (by-def d))] :when b t (map :term (:blocks b)) :let [ft (call-fndef t)] :when ft
+          ext-items (distinct (for [d items :let [b (item-body d)] :when b t (map :term (:blocks b)) :let [ft (call-fndef t)] :when ft
                                     :let [[cd args] (let [[_ cd args] ft]
                                                       ;; RF14: a trait method's instance by its impl (the record's when mono refuses it)
                                                       (if (trait-method? cd) (or (try (resolve-instance cd (erase-regions args)) (catch Throwable _ nil)) [cd args]) [cd args]))]
                                     :when (and (string? cd) (not (intrinsic? cd)) (mir-available? cd))]
                                 {:def cd :args (erase-regions args)}))
           ;; {body-name [[TARGET-TEXT vtable-or-error] ...]} in the body's order (the runtime body's casts take them in turn)
-          vtables (into {} (for [d items :let [b (get ours (by-def d))] :when b :let [cs (dyn-casts b)] :when (seq cs)]
+          vtables (into {} (for [d items :let [b (item-body d)] :when b :let [cs (dyn-casts b)] :when (seq cs)]
                              [(by-def d) (vec (for [[_ tt c tr targs] cs] [tt (try-fact #(vtable-alloc c tr targs))]))]))
-          glue (distinct (concat (for [d items :let [b (get ours (by-def d))] :when b t (drop-tys b) g (drop-glues t)] g)
+          glue (distinct (concat (for [d items :let [b (item-body d)] :when b t (drop-tys b) g (drop-glues t)] g)
                                  (for [[_ vs] vtables [_ v] vs :when (and (map? v) (not (error? v)) (:glue v)) g (drop-glues (:glue v))] g)))
           ext-items (concat ext-items (for [t glue] {:def (c/lang "drop_glue") :args [t] :shim :drop-glue}))
-          item-fact (fn [d] (let [nm (:names (attrs-of d))]
+          item-fact (fn [k] (let [[d args] (if (vector? k) k [k []]) nm (:names (attrs-of d))]
                               (try-fact #(cond-> {:def (print-path d) :def-id (def-id-text d) :instance (str "Item(" (def-id-text d) ")")
-                                                  :symbol (instance-symbol {:def d :args []}) :name (by-def d) :kind :fn}
+                                                  :symbol (instance-symbol {:def d :args args}) :name (by-def k) :kind :fn}
                                            (nm "track_caller") (assoc :track-caller true)))))
-          callees (into {} (for [d items :let [b (get ours (by-def d))] :when b blk (:blocks b) :let [t (:term blk) ft (call-fndef t)] :when ft]
+          callees (into {} (for [d items :let [b (item-body d)] :when b blk (:blocks b) :let [t (:term blk) ft (call-fndef t)] :when ft]
                              [(second (second t)) (try-fact #(callee-fact ft))]))
-          fsyms (into {} (for [d items :let [b (get ours (by-def d))] :when b blk (:blocks b) :let [t (:term blk) ft (call-fndef t)] :when ft
+          fsyms (into {} (for [d items :let [b (item-body d)] :when b blk (:blocks b) :let [t (:term blk) ft (call-fndef t)] :when ft
                                :let [[_ cd args] ft] :when (not (intrinsic? cd))]
                            [(second (second t)) (try-fact #(call-fsym cd args))]))
           ;; RF13: a function item reified to a function pointer (`dbl as fn(i32) -> i32`): its instance's symbol by the
           ;; constant's text, as a call's
-          fsyms (into fsyms (for [d items :let [b (get ours (by-def d))] :when b blk (:blocks b) st (:stmts blk)
+          fsyms (into fsyms (for [d items :let [b (item-body d)] :when b blk (:blocks b) st (:stmts blk)
                                   :when (and (seq? st) (= 'assign (first st)))
                                   :let [rv (nth st 2 nil)]
                                   :when (and (seq? rv) (= 'cast (first rv)) (str/starts-with? (str (second rv)) "PointerCoercion(ReifyFnPointer"))
@@ -1707,6 +1836,8 @@
                                   :when d]
                               [ln (try-fact #(instance-symbol {:def d :args []}))]))]
       {:crate *local* :items (into {} (for [d items] [(by-def d) (item-fact d)])) :order (mapv by-def items)
+       ;; RF15: the generic instances' bodies to instantiate: {name [base-name args]}
+       :instances (into {} (for [k items :when (and (vector? k) (item-body k))] [(by-def k) [(get by-def* (first k)) (second k)]]))
        :ext-items (vec (for [x ext-items] (assoc x :symbol (try-fact #(instance-symbol x)))))
        :callees callees :fsyms fsyms :statics statics :langsyms langsyms :vtables vtables
        :layouts-of (fn [forms] (binding [*local* *local* *layouts* (atom {})] (tc/with-solver (solver-def) #(layout-table forms))))})))))

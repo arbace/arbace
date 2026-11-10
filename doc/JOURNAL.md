@@ -3011,3 +3011,31 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
   `core-essential` equal to their known files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes (Rust
   unchanged). `rsi-build` keeps each batch's mono-check lines (`mono-all.log`). doc/rust/FRONTEND-SURVEY.md, "As built: RF14
   (RFP48)", with the night's commands (the whole plan again, rsi-native over the new own program, `bin/rsi check --front own`).
+
+## 2026-11-10: RF15, RFP49 (a)'s rest: generic local instances, promoted constants (branch `rust-rf15`, from `mac/rust-rf14` `e1bdba384`)
+
+- RFP49 (a)'s rest, after rustc 1.99.1's rustc_monomorphize collector and Instance::instantiate_mir_and_normalize_erasing_regions
+  (the pinned rust-src's `compiler/`): mono's collector takes `[DEF ARGS]` items, a local generic function's, a generic impl's
+  method's, a trait's default body's at its Self or a generic function's closure's instance at concrete arguments, reached from
+  our bodies' calls, from the record's std bodies' function constants (RFP49's first part, now with the arguments) and from
+  vtables; each instance is our body instantiated (`mono/instantiate-runtime`: the types from their `:tc` substituted and
+  normalized, function constants' texts from their types, const parameters' values, repeat counts), collected in turn. The
+  local functions std's bodies' vtables name (the record's std bodies' function allocations, by symbol) are roots too.
+  Alternatives considered: rebuilding each instance through typeck at the arguments (rustc instantiates the polymorphic MIR,
+  as done here), keeping the record's instance bodies (RFP54 (a) takes ours).
+- The promoted constants of `main` (RF10's slice 5, further), after rustc_const_eval's interpreter: binary and unary operators,
+  numeric casts, strings' and byte strings' constants with their relocations, reborrows, nested borrows, enum variants with or
+  without fields and tuples or structs of several fields laid out by mono's layout (else the record's layout of that type), a
+  variant's explicit discriminant, f32's and f64's associated constants.
+- Found on the way: LowerSliceLenCalls (lower_slice_len.rs, enabled at -O0: `<[T]>::len` as PtrMetadata); an overloaded
+  compound assignment (`String += &str`: THIR's overloaded_operator, where the builder made a builtin Add of references);
+  `None::<u8>`'s turbofish (typeck); `drop_glue`'s parameter for v0 (not in std's interface); a trait object's auto traits in
+  rustc's interned order (Sync before Send); a record's `(dyn)` of a local trait read back; adt-repr's `#[repr(u8)]` read as a
+  vector (every explicitly sized enum's layout was the record's).
+- Measured, light (one process at a time, under 2 GiB): the 8 programs' mono facts against the record callees 592 -> 660 of
+  710, core items 483 -> 630, symbols 50 -> 105 of 128, native callees 964 -> 1,070 of 1,122; `rsi-build` over the 67
+  synthetic programs: **56 own** (RF14 48; 47 minutes), native callees 4,275 of 4,739, vtables 29 of 36. `bin/rust-front
+  essential`: the mono-check total moved by a6's `drop_glue::<D>` now an equal core item (core-items 2 of 2), the known file's
+  line rewritten (every fact equal); `core-essential` equal to its known file (564 of 567); `bin/reap` 0 problems;
+  `bin/crops-score --judge --strict` exit 0, Rust unchanged. RFP58 (the vector ABI) is not small: its design note in
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF15", with the night's commands.

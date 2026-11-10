@@ -178,8 +178,12 @@ items below are the ones whose work is still ahead or tied to a night.
   RF12-P8), its rest (aliases, CopySpec, Drain, ascii::Char) left. RF14 (`rust-rf14` on rust-rf13e, "As built: RF14 (RFP48)"):
   RFP48 (a) built (trait resolution in mono: impls, specialization's leaf, default bodies, the Fn traits' builtin candidates;
   the native callees of the synthetic corpus 3,503 -> 4,079 of about 4,500, vtables 0 -> 25 of 32) and RFP49 (a)'s first part
-  (the local non-generic instances std's bodies reach): 48 of 67 synthetic programs own (47). Next: RFP49's generic local
-  instances through std, then RFP50, RFP58; the night: the whole plan's rsi-build, rsi-native, `rsi check --front own`.
+  (the local non-generic instances std's bodies reach): 48 of 67 synthetic programs own (47). RF15 (`rust-rf15` on rust-rf14,
+  "As built: RF15"): RFP49 (a)'s rest (generic local instances: our bodies instantiated; std's vtables' local functions),
+  promoted constants (operators, casts, strings, variants, layouts), LowerSliceLenCalls, overloaded `+=`: 56 of 67 own.
+  Next: RFP58 (its design note: 1.5-2 days, the 4 HashMap programs), more of CTFE in promoted bodies (fmt, structs, traits),
+  upstream monomorphizations (panic-assert-eq, with RFP57), RFP50; the night: the whole plan's rsi-build, rsi-native over the
+  8 new own programs, `rsi check --front own`.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above).
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records

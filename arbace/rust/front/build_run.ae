@@ -80,6 +80,22 @@
                         (and (re-matches #"(\*(const|mut) |&(mut )?)[A-Za-z0-9_:<>]+" t) (not (re-find #"\[|dyn |str" t))) [8 8]
                         :else nil)]
       (when sz (case nm "SIZE" (list 'scalar sz 8) "ALIGN" (list 'scalar al 8) "IS_ZST" (list 'scalar (if (zero? sz) 1 0) 1)))))
+  ;; RF15: f32's and f64's associated constants (library/core/src/num/f32.rs and f64.rs: their bits as CTFE evaluates them,
+  ;; NAN 0.0 / 0.0 rustc_apfloat's positive quiet NaN)
+  (when-let [[_ t nm] (re-matches #"const core::f(32|64)::<impl f(?:32|64)>::([A-Z_0-9]+)" text)]
+    (let [f32? (= t "32")
+          bits (get (if f32?
+                      {"MAX" 0x7f7fffff "MIN" 0xff7fffff "MIN_POSITIVE" 0x00800000 "EPSILON" 0x34000000 "NAN" 0x7fc00000
+                       "INFINITY" 0x7f800000 "NEG_INFINITY" 0xff800000}
+                      {"MAX" 0x7fefffffffffffffN "MIN" 0xffefffffffffffffN "MIN_POSITIVE" 0x0010000000000000N "EPSILON" 0x3cb0000000000000N
+                       "NAN" 0x7ff8000000000000N "INFINITY" 0x7ff0000000000000N "NEG_INFINITY" 0xfff0000000000000N})
+                    nm)
+          ints (get (if f32?
+                      {"RADIX" 2 "MANTISSA_DIGITS" 24 "DIGITS" 6 "MIN_EXP" -125 "MAX_EXP" 128 "MIN_10_EXP" -37 "MAX_10_EXP" 38}
+                      {"RADIX" 2 "MANTISSA_DIGITS" 53 "DIGITS" 15 "MIN_EXP" -1021 "MAX_EXP" 1024 "MIN_10_EXP" -307 "MAX_10_EXP" 308})
+                    nm)]
+      (cond bits (list 'scalar (bigint bits) (if f32? 4 8))
+            ints (list 'scalar (if (neg? ints) (+ ints 4294967296) ints) 4))))
   (when-let [[_ t nm] (re-matches #"const core::num::<impl ([iu](?:8|16|32|64|128|size))>::(MIN|MAX|BITS)" text)]
     (let [n (if (str/ends-with? t "size") 64 (parse-long (subs t 1)))
           signed? (str/starts-with? t "i")
@@ -93,24 +109,152 @@
 
 (defn- scalar-align [size] (cond (>= size 16) 16 (>= size 8) 8 :else size))
 
+(defn- scalar-kind
+  "A scalar type form's [kind bits] (kind :int, :uint, :float, :bool or :char), else nil"
+  [tyf]
+  (let [st (when (seq? tyf) (nth tyf 2 nil)) st (if (symbol? st) (list st) st)]
+    (when (seq? st)
+      (case (first st)
+        bool [:bool 8] char [:char 32]
+        (int uint) [(keyword (name (first st))) (let [n (second st)] (if (str/ends-with? n "size") 64 (parse-long (subs n 1))))]
+        float [:float (parse-long (subs (second st) 1))]
+        nil))))
+
+(defn- bytes->int [bs] (reduce (fn [acc b] (+ (* acc 256) b)) 0N (reverse bs)))
+
+(defn- scalar-val
+  "A scalar's value (a bigint, or a double/float for a float) from its little-endian bytes"
+  [[k bits] bs]
+  (let [u (bytes->int bs)]
+    (case k
+      :float (if (= bits 32) (Float/intBitsToFloat (unchecked-int (long u))) (Double/longBitsToDouble (.longValue (biginteger u))))
+      :int (if (>= u (reduce * 1N (repeat (dec bits) 2N))) (- u (reduce * 1N (repeat bits 2N))) u)
+      u)))
+
+(defn- val-bytes
+  "A scalar value written back as [kind bits]'s little-endian bytes (an integer wrapped)"
+  [[k bits] v]
+  (let [n (quot bits 8)]
+    (if (= k :float)
+      (le-bytes (if (= bits 32) (bit-and (long (Float/floatToRawIntBits (float v))) 0xffffffff) (bigint (biginteger (Double/doubleToRawLongBits (double v))))) n)
+      (le-bytes (mod (bigint v) (reduce * 1N (repeat bits 2N))) n))))
+
+(defn- f->int
+  "Rust's float-to-int `as`: saturating, NaN 0"
+  [[k bits] x]
+  (let [x (double x)
+        lo (if (= k :int) (- (reduce * 1N (repeat (dec bits) 2N))) 0N)
+        hi (dec (if (= k :int) (reduce * 1N (repeat (dec bits) 2N)) (reduce * 1N (repeat bits 2N))))]
+    (cond (Double/isNaN x) 0N
+          (<= x (double lo)) lo
+          (>= x (double hi)) hi
+          :else (bigint (.toBigInteger (java.math.BigDecimal. x))))))
+
+(defn variant-bytes
+  "RF15: the value of variant VIDX of an ADT whose layout is the layout form L (mono's or the record's mir/layouts entry),
+  its fields' values FIELDS ([{:bytes :relocs}] in field order), as CTFE writes it into memory: each field at its offset in
+  the variant's layout, the tag (a direct encoding's discriminant wrapped to the tag's width; a niche encoding's niche value
+  when VIDX is not the untagged variant) at the tag's offset, zero elsewhere: {:bytes :align :relocs}"
+  [l vidx fields]
+  (let [vs (:variants l) size (long (:size l))
+        buf (long-array size)
+        relocs (atom [])
+        put! (fn [off bs] (doseq [[i b] (map-indexed vector bs)] (aset buf (int (+ (long off) i)) (long b))))
+        place! (fn [offs]
+                 (when (not= (count offs) (count fields)) (throw (ex-info "a variant's fields and its layout's differ" {})))
+                 (doseq [[o f] (map vector offs fields)]
+                   (put! o (:bytes f))
+                   (doseq [[ro a] (:relocs f)] (swap! relocs conj [(+ (long o) (long ro)) a]))))]
+    (case (str (first vs))
+      "single" (do (when-not (= vidx (second vs)) (throw (ex-info "another variant" {})))
+                   (place! (if (vector? (:fields l)) (:fields l) [])))
+      "multiple"
+      (let [m (second vs) [_ bits _] (:tag m) off (long (first (:fields l)))
+            e (:encoding m)
+            tv (case (str (first e))
+                 "direct" (nth (:discrs l) vidx vidx)
+                 "niche" (let [[_ untagged nstart nend niche-start] e]
+                           (when (and (not= vidx untagged) (<= nstart vidx nend))
+                             (+ (bigint niche-start) (- vidx nstart)))))]
+        (place! (:offsets (nth (:variants m) vidx)))
+        (when tv
+          (let [v (mod (bigint tv) (reduce * 1N (repeat bits 2N)))]
+            (put! off (for [i (range (quot (long bits) 8))] (.intValue (.and (.shiftRight (biginteger v) (int (* 8 i))) (biginteger 255))))))))
+      (throw (ex-info (str "a layout's variants " (pr-str vs)) {})))
+    {:bytes (vec (map int buf)) :align (:align l) :relocs (vec (sort-by first @relocs))}))
+
 (defn eval-promoted
   "RF11 (RF10's slice 5's first part): a promoted constant's body evaluated as rustc's CTFE evaluates it into its allocation, for
   the promoted bodies of straight-line assignments of scalar constants (std's integer constants by std-const-value), copies of
-  locals and arrays of them, whose _0 borrows a local: {:bytes [B...] :align A}; else an ex-info (the CTFE's: the rest of
-  slice 5)"
-  [pb]
+  locals and arrays of them, whose _0 borrows a local: {:bytes [B...] :align A :relocs [[OFFSET ALLOC]]}; else an ex-info (the
+  CTFE's: the rest of slice 5). RF15: arithmetic, unary operators and numeric casts on scalars (rustc_const_eval's
+  binary_op, unary_op and cast: integers wrapped, floats IEEE as Rust's), and a string's or byte string's constant (a
+  pointer to its bytes' allocation, RAW-ALLOC's [ALLOC LEN]: the fat pointer's relocation)"
+  ([pb] (eval-promoted pb nil nil nil nil))
+  ([pb raw-alloc nest-alloc unit-variant anon-discr]
   (let [env (atom {}) result (atom nil)
-        no (fn [what x] (throw (ex-info (str "promoted: " what) {:x x})))
+        no (fn [what x] (throw (ex-info (str "promoted: " what (when (System/getenv "RF_PROMOTED_TRACE") (str " " (pr-str x)))) {:x x})))
         loc-of (fn [p] (if (and (seq? p) (= 'place (first p)) (= 2 (count p))) (second p) (no "a projected place" p)))
+        local-ty (fn [l] (:ty (nth (:locals pb) l nil)))
         operand (fn [o]
                   (case (first o)
-                    const (let [[_ text _ v] o
-                                v (if (and (seq? v) (= 'unevaluated (first v))) (or (std-const-value text) (no "an unevaluated constant" o)) v)]
-                            (if (and (seq? v) (= 'scalar (first v)))
-                              (let [[_ bits size] v] {:bytes (le-bytes bits size) :align (scalar-align size)})
-                              (no "a constant's value" o)))
+                    const (let [[_ text tyf v] o
+                                ;; RF15: a variant's explicit discriminant (its anonymous constant, `Color::Green::{constant#0}`)
+                                discr-v (fn [] (when-let [[_ vp] (and anon-discr (re-matches #"const (.+)::\{constant#\d+\}" text))]
+                                                    (when-let [d (anon-discr vp)]
+                                                      (when-let [[k bits] (scalar-kind tyf)]
+                                                        (list 'scalar (mod (bigint d) (reduce * 1N (repeat bits 2N))) (quot bits 8))))))
+                                v (if (and (seq? v) (= 'unevaluated (first v))) (or (std-const-value text) (discr-v) (no "an unevaluated constant" o)) v)]
+                            (cond
+                              (and (seq? v) (= 'scalar (first v)))
+                              (let [[_ bits size] v] {:bytes (le-bytes bits size) :align (scalar-align size) :ty tyf})
+                              ;; RF15: `&"two"` (a &str: its bytes' allocation and length) and `&b"ab"` (a pointer)
+                              (and (seq? v) (#{'raw-str 'raw-bytes} (first v)) raw-alloc)
+                              (let [[a n] (raw-alloc (first v) (second v))]
+                                (if (= 'raw-str (first v))
+                                  {:bytes (vec (concat (repeat 8 0) (le-bytes n 8))) :align 8 :relocs [[0 a]] :ty tyf}
+                                  {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 a]] :ty tyf}))
+                              :else (no "a constant's value" o)))
                     (copy move) (or (get @env (loc-of (second o))) (no "a local not assigned" o))
-                    (no "an operand" o)))]
+                    (no "an operand" o)))
+        sk (fn [x tyf] (or (scalar-kind tyf) (no "a non-scalar operand" x)))
+        binop (fn [rv dst-ty]
+                (let [[_ op a b] rv va (operand a) vb (operand b)
+                      ka (sk rv (:ty va)) kb (sk rv (:ty vb))
+                      x (scalar-val ka (:bytes va)) y (scalar-val kb (:bytes vb))
+                      kd (sk rv dst-ty)
+                      cmp (fn [f] (val-bytes [:bool 8] (if (f) 1 0)))
+                      fl? (= :float (first ka))
+                      arith (fn [f] (val-bytes kd (if fl? (if (= 32 (second ka)) (float (f (float x) (float y))) (f (double x) (double y))) (f x y))))]
+                  (when (and (#{"Div" "Rem"} op) (not fl?) (zero? y)) (no "a division by zero" rv))
+                  {:ty dst-ty :align (scalar-align (quot (second kd) 8))
+                   :bytes (case op
+                            "Add" (arith +) "Sub" (arith -) "Mul" (arith *)
+                            "Div" (arith (if fl? / quot)) "Rem" (arith (if fl? (fn [p q] (if (= 32 (second ka)) (float (rem (float p) (float q))) (rem (double p) (double q)))) rem))
+                            "BitAnd" (val-bytes kd (.and (biginteger x) (biginteger y)))
+                            "BitOr" (val-bytes kd (.or (biginteger x) (biginteger y)))
+                            "BitXor" (val-bytes kd (.xor (biginteger x) (biginteger y)))
+                            "Shl" (val-bytes kd (.shiftLeft (biginteger x) (int (mod y (second ka)))))
+                            "Shr" (val-bytes kd (.shiftRight (biginteger x) (int (mod y (second ka)))))
+                            "Eq" (cmp #(== x y)) "Ne" (cmp #(not (== x y))) "Lt" (cmp #(< x y)) "Le" (cmp #(<= x y))
+                            "Gt" (cmp #(> x y)) "Ge" (cmp #(>= x y))
+                            (no (str "a binop " op) rv))}))
+        unop (fn [rv dst-ty]
+               (let [[_ op a] rv va (operand a) k (sk rv (:ty va)) x (scalar-val k (:bytes va))]
+                 {:ty dst-ty :align (:align va)
+                  :bytes (case op
+                           "Neg" (val-bytes k (if (= :float (first k)) (if (= 32 (second k)) (float (- (float x))) (- (double x))) (- x)))
+                           "Not" (if (= :bool (first k)) (val-bytes k (if (zero? x) 1 0)) (val-bytes k (.not (biginteger x))))
+                           (no (str "a unop " op) rv))}))
+        cast (fn [rv]
+               (let [[_ kind a tyf] rv va (operand a) ks (sk rv (:ty va)) kd (sk rv tyf) x (scalar-val ks (:bytes va))]
+                 {:ty tyf :align (scalar-align (quot (second kd) 8))
+                  :bytes (case kind
+                           "IntToInt" (val-bytes kd x)
+                           "IntToFloat" (val-bytes kd (if (= 32 (second kd)) (float (.doubleValue (biginteger x))) (.doubleValue (biginteger x))))
+                           "FloatToFloat" (val-bytes kd (if (= 32 (second kd)) (float x) (double x)))
+                           "FloatToInt" (val-bytes kd (f->int kd x))
+                           (no (str "a cast " kind) rv))}))]
     (loop [bi 0 seen #{}]
       (when (seen bi) (no "a loop" bi))
       (let [blk (nth (:blocks pb) bi)]
@@ -120,11 +264,25 @@
             assign (let [[_ p rv] st l (loc-of p)]
                      (case (first rv)
                        use (swap! env assoc l (operand (second rv)))
+                       binop (swap! env assoc l (binop rv (local-ty l)))
+                       unop (swap! env assoc l (unop rv (local-ty l)))
+                       cast (swap! env assoc l (cast rv))
                        aggregate (let [[_ kind ops] rv]
                                    (cond
                                      (and (seq? kind) (= 'array (first kind)))
-                                     (let [vs (map operand ops)]
-                                       (swap! env assoc l {:bytes (vec (mapcat :bytes vs)) :align (if (seq vs) (apply max (map :align vs)) 1)}))
+                                     (let [vs (map operand ops)
+                                           offs (reductions + 0 (map (comp count :bytes) vs))]
+                                       (swap! env assoc l {:bytes (vec (mapcat :bytes vs)) :align (if (seq vs) (apply max (map :align vs)) 1)
+                                                           :relocs (vec (for [[v o] (map vector vs offs) [ro a] (:relocs v)] [(+ o ro) a]))}))
+                                     ;; RF15: an enum's variant (`Enum::Variant`'s path), fieldless (`&Color::Blue`) or with fields
+                                     ;; (`&Some(1.5)`): its layout's bytes, the tag as mono lays it out
+                                     (and (seq? kind) (= 'adt (first kind)) unit-variant (integer? (nth kind 5 nil))
+                                          (re-find #"(^|::)[A-Z][A-Za-z0-9_]*(::<[^>]*>)?::[A-Z][A-Za-z0-9_]*$" (str (second kind))))
+                                     (swap! env assoc l (unit-variant (local-ty l) (nth kind 5) (mapv operand ops)))
+                                     ;; RF15: a tuple or struct of several fields (`&(-3, true)`): each at its offset in the layout
+                                     (and (seq? kind) (#{'adt 'tuple} (first kind)) unit-variant (> (count ops) 1)
+                                          (or (= 'tuple (first kind)) (contains? #{nil 0} (nth kind 5 nil))))
+                                     (swap! env assoc l (unit-variant (local-ty l) 0 (mapv operand ops)))
                                      ;; RF13: a struct, tuple or variant-less ADT of no field (a unit struct: `&Dog`) or of one scalar
                                      ;; field (a newtype: `&Bird(1)`), whose layout is its field's
                                      (and (seq? kind) (#{'adt 'tuple} (first kind)) (<= (count ops) 1)
@@ -135,17 +293,47 @@
                                      (swap! env assoc l (if (seq ops) (operand (first ops)) {:bytes [] :align 1}))
                                      :else (no (str "an aggregate " (when (seq? kind) (first kind))) kind)))
                        ;; RF13: [x; N] of a scalar constant (`&[0u8; 100]`)
-                       repeat (let [[_ o n] rv v (operand o) n (Long/parseLong (str n))]
-                                (swap! env assoc l {:bytes (vec (apply concat (repeat n (:bytes v)))) :align (:align v)}))
-                       ref (if (= l 0) (reset! result (or (get @env (loc-of (nth rv 2))) (no "a borrow of a local not assigned" rv)))
-                               (no "a borrow but _0's" rv))
+                       repeat (let [[_ o n] rv v (operand o) n (Long/parseLong (str n)) w (count (:bytes v))]
+                                (swap! env assoc l {:bytes (vec (apply concat (repeat n (:bytes v)))) :align (:align v)
+                                                    :relocs (vec (for [i (range n) [ro a] (:relocs v)] [(+ (* i w) ro) a]))}))
+                       ref (let [tp (nth rv 2)
+                                 deref? (and (seq? tp) (= 3 (count tp)) (= '(deref) (nth tp 2)))]
+                             (cond
+                               (= l 0) (reset! result (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv)))
+                               ;; RF15: `&*p` of a pointer local: the same pointer (a reborrow)
+                               deref? (swap! env assoc l (assoc (or (get @env (second tp)) (no "a reborrow of a local not assigned" rv)) :ty (local-ty l)))
+                               ;; RF15: a borrow of another local: its value an allocation of its own (CTFE's intern, a nested allocation)
+                               nest-alloc (let [v (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv))]
+                                            {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (nest-alloc v)]] :ty (local-ty l)})
+                               :else (no "a borrow but _0's" rv)))
                        (no (str "an rvalue " (first rv)) rv)))
             (no "a statement" st)))
         (let [t (:term blk)]
           (case (first t)
             return (or @result (no "no borrow in _0" pb))
             goto (recur (second t) (conj seen bi))
-            (no "a terminator" t)))))))
+            (no "a terminator" t))))))))
+
+(defn- slice-len-fn? [d]
+  (or (= d "core::slice::<impl [T]>::len")
+      (= d (try (c/lang "slice_len_fn") (catch Throwable _ ::none)))))
+
+(defn lower-slice-len-calls
+  "RF15: rustc_mir_transform's LowerSliceLenCalls (lower_slice_len.rs, an optimization pass enabled at mir-opt-level 1, so at
+  -O0): a call of `<[T]>::len` (the lang item slice_len_fn) becomes `DEST = PtrMetadata(ARG)` and a goto to its target, so
+  the instance is never reached (rustc's optimized MIR, the record's, has no such call)"
+  [blocks]
+  (mapv (fn [b]
+          (let [t (:term b)]
+            (if-not (and (seq? t) (= 'call (first t)) (seq? (second t)) (= 'const (first (second t))))
+              b
+              (let [[_ f args dest target] t
+                    ft (:tc (meta (nth f 2 nil)))]
+                (if (and (vector? ft) (= :fndef (first ft)) (slice-len-fn? (second ft)) (= 1 (count args)) (some? target))
+                  (-> b (update :stmts #(conj (vec %) (list 'assign dest (list 'unop "PtrMetadata" (first args)))))
+                      (assoc :term (list 'goto target)))
+                  b)))))
+        blocks))
 
 (defn- runtime-body
   "Our built body made the runtime body codegen takes, with the record's facts; a static's pointer (static-ptr ID) the record's
@@ -176,12 +364,26 @@
                          (if (and (seq? x) (= 'const (first x)) (seq? (nth x 3 nil)) (= 'unevaluated (first (nth x 3))) (some? (nth (nth x 3) 3 nil)))
                            (let [idx (nth (nth x 3) 3)
                                  pb (or (get (:promoted-bodies ours) idx) (throw (ex-info (str "no promoted body " idx) {})))
-                                 {:keys [bytes align]} (try (eval-promoted pb)
-                                                            (catch Throwable e (when-let [f (:const! facts)] (f false)) (throw e)))
+                                 raw-alloc (fn [kind id]
+                                             (let [bs (or (alloc-bytes ours id) (throw (ex-info (str "no bytes for allocation " id) {})))
+                                                   a (str "allocB" id)]
+                                               (swap! static-data conj [a {:kind :memory :align 1 :mutable false :bytes (apply str (map #(format "%02x" %) bs))
+                                                                           :init (apply str (repeat (count bs) "1")) :relocs []}])
+                                               [a (count bs)]))
+                                 nest-n (atom 0)
+                                 nest-alloc (fn [{:keys [bytes align relocs]}]
+                                              (let [a (str "allocP" idx "n" (swap! nest-n inc))]
+                                                (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
+                                                                            :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
+                                                a))
+                                 {:keys [bytes align relocs]} (try (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts))
+                                                                   (catch Throwable e (when-let [f (:const! facts)] (f false))
+                                                                     (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
+                                                                     (throw e)))
                                  a (str "allocP" idx)]
                              (when-let [f (:const! facts)] (f true))
                              (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
-                                                         :init (apply str (repeat (count bytes) "1")) :relocs []}])
+                                                         :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
                              (apply list (concat (take 3 x) [(list 'ptr (symbol a) 0 8)] (drop 4 x))))
                            x))))
         ;; RFP44 (a): an unsizing cast to a trait object carries its vtable's allocation (codegen's pair's second half): mono's
@@ -264,7 +466,7 @@
                   :scopes (mapv (fn [[p _]] [p nil nil nil false]) (:scopes ours))
                   :debug (:debug ours)
                   :blocks (mapv (fn [b] {:cleanup (:cleanup b) :stmts (vec (filter keep-stmt? (:stmts b))) :after-dbg [] :term (term (:term b))})
-                                (:blocks ours))
+                                (lower-slice-len-calls (:blocks ours)))
                   :allocs "" :alloc-data []}))
         (assoc :alloc-data (vec (distinct @static-data))))))
 
@@ -538,7 +740,11 @@
                                           x)
                                         (dissoc b :alloc-data)))
                                 (vec acc))
-                    facts (mono/program-facts n bodies std-calls)
+                    ;; RF15: the function allocations of those bodies (their vtables' entries), by symbol
+                    std-fn-syms (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))
+                                           [_ a] (:alloc-data b) :when (= :fn (:kind a))]
+                                       (:symbol a)))
+                    facts (mono/program-facts n bodies std-calls std-fn-syms)
                     ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                 (native-core-plan (for [x (:ext-items facts) :let [rec (some #(when (= (:symbol x) (:symbol %)) %) rec-bodies)] :when rec]
@@ -589,6 +795,12 @@
                                                                   [(vec (take 3 (rest t))) (:assert-span (meta t))]))]
                                             (if (or (nil? r) (:error r)) [nil (str "the passes: " (or (:error r) "no body"))] [(assoc r :name (:name b) :promoted-bodies pbs :assert-spans aspans) err]))
                                           [b err])]))
+                    ;; RF15 (RFP49 (a)'s rest): the generic instances the collector reached, our runtime bodies instantiated
+                    ours (into ours (for [[nm [base args]] (:instances facts) :let [[b err] (get ours base)]]
+                                      [nm (if b
+                                            (try [(assoc (mono/instantiate-runtime n b args) :name nm) err]
+                                                 (catch Throwable e [nil (str "the instance: " (.getMessage e))]))
+                                            [nil err])]))
                     native-call (fn [f]
                                   (let [txt (second f) c (get (:callees facts) txt)
                                         sp (:call-span (meta f))
@@ -623,7 +835,15 @@
                                              (do (fact! :locs false) (list 'loc "?" 0 0)))))
                     nf {:fsym fsym :statics statics :native-call native-call :header header :assert-loc assert-loc
                         :vtables (:vtables facts) :vtable! (fn [native?] (fact! :vtables native?))
-                        :const! (fn [native?] (fact! :consts native?))}
+                        :const! (fn [native?] (fact! :consts native?))
+                        ;; RF15: a promoted ADT value's bytes (an enum's variant: `&Color::Blue`, `&Some(1.5)`) from mono's layout
+                        :anon-discr (fn [vp] (try (mono/variant-discriminant n vp) (catch Throwable _ nil)))
+                        :unit-variant (fn [tyf vidx fields]
+                                        (let [l (try (mono/type-layout-form n tyf)
+                                                     ;; a layout mono refuses: the record's, as the module's table takes it
+                                                     (catch Throwable e (or (get rec-layouts (second tyf))
+                                                                            (throw (ex-info (str "the variant " vidx " of " (second tyf) ": " (.getMessage e)) {})))))]
+                                          (variant-bytes l vidx fields)))}
                     local? (fn [b] (str/starts-with? (str (:def-id b)) "DefId(0:"))
                     ext-syms (set (map :symbol (:ext-items facts)))
                     rec-by-name (into {} (for [r rec-bodies] [(:name r) r]))
