@@ -104,12 +104,18 @@
 #                                                    SIGILL, named on stderr (:unimplemented); X86I_INJECT=FAMILY:FLAG flips the
 #                                                    flag after each instruction of the family (the negative controls' fault)
 #   bin/repr-asm x86i decode-text EXE                its code sections as x86i's decoder decodes them, an instruction a line
+#   bin/repr-asm x86i trace --mode sys EXE [ARG...]  the lockstep's sys mode (AX5.3): EXE run natively under ptrace (ASLR off,
+#                                                    the vdso hidden) and on x86i from the native's initial state, compared at
+#                                                    each system call (registers, flags the SDM defines, FS, the result; the
+#                                                    world's results copied); `equal` or the first difference
 #   bin/repr-asm x86i gen|gen-check                  x86i's decode tables, go/arbace/x86i/dectab.ae, made from asm/amd64/table.edn
 #                                                    by arbace.asm.amd64.dgen; gen-check: the committed file equal to a fresh one
 #   bin/repr-asm x86i-check [--record]               test/asm/run/'s programs assembled and linked by Arbace, each run by the CPU
 #                                                    and by x86i (timeouts $REPR_ASM_RUN_TIMEOUT, 10 s, and 60 s): x86i's run
 #                                                    judged by the program's own verdict and against the CPU's (status, stdout,
-#                                                    stderr), its code decoded by x86i's decoder against arbace.asm.amd64.decode;
+#                                                    stderr), its code decoded by x86i's decoder against arbace.asm.amd64.decode,
+#                                                    the lockstep's sys mode (x86i trace --mode sys: the native run under ptrace
+#                                                    compared at each system call) equal;
 #                                                    rows against test/asm/x86i-results-amd64.edn, classes
 #                                                    test/asm/divergences-x86i.edn, the negative controls of
 #                                                    test/asm/controls-x86i.txt failing; WORK .tmp/repr-asm/x86i
@@ -619,9 +625,10 @@ case ${1:-} in
       light) x86i_light ;;
       run) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" run "$@" ;;
       decode-text) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" decode-text "$@" ;;
+      trace) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" trace "$@" ;;
       gen) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen gen "$root/go/arbace/x86i/dectab.ae" ;;
       gen-check) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen check "$root/go/arbace/x86i/dectab.ae" ;;
-      *) echo "repr-asm x86i light|run EXE [ARG...]|decode-text EXE|gen|gen-check" >&2; exit 2 ;;
+      *) echo "repr-asm x86i light|run EXE [ARG...]|decode-text EXE|trace --mode sys EXE [ARG...]|gen|gen-check" >&2; exit 2 ;;
     esac ;;
   x86i-check)
     # AX5.2: each test of test/asm/run/ assembled and linked by Arbace into WORK/NAME (as run-check), run by the CPU (WORK/NAME.status,
@@ -644,12 +651,18 @@ case ${1:-} in
       st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$x86i_exe" run "./$n" > "$n.x86i.out" 2> "$n.x86i.err") || st=$?
       echo "$st" > "$work/$n.x86i.status"
       "$x86i_exe" decode-text "$work/$n" > "$work/$n.dec"
+      (cd "$work" && GOMAXPROCS=1 timeout 60 "$x86i_exe" trace --mode sys "./$n" > "$n.trace" 2>&1) || true
       while read -r cid kind subj ref; do
         case $cid in ''|'#'*) continue ;; esac
-        [ "$kind" = inject ] && [ "$subj" = "$n" ] || continue
-        sfx=inject-${ref/:/-}
-        st=0; (cd "$work" && X86I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$x86i_exe" run "./$n" > "$n.$sfx.out" 2> "$n.$sfx.err") || st=$?
-        echo "$st" > "$work/$n.$sfx.status"
+        [ "$subj" = "$n" ] || continue
+        case $kind in
+          inject)
+            sfx=inject-${ref/:/-}
+            st=0; (cd "$work" && X86I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$x86i_exe" run "./$n" > "$n.$sfx.out" 2> "$n.$sfx.err") || st=$?
+            echo "$st" > "$work/$n.$sfx.status" ;;
+          lockstep)
+            (cd "$work" && X86I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$x86i_exe" trace --mode sys "./$n" > "$n.trace-${ref/:/-}" 2>&1) || true ;;
+        esac
       done < "$ctl"
     done < "$work/build.tsv"
     fails=0

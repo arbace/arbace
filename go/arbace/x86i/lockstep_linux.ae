@@ -1,0 +1,230 @@
+(in-ns 'go.arbace.x86i) (go/file "lockstep_linux.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [binary "encoding/binary"]
+    ^{:line 6} [fmt "fmt"]
+    ^{:line 7} [os "os"]
+    ^:alias ^{:line 8} [sys "syscall"]
+
+    ^{:line 10} [crt "arbace/crt"]
+    ^{:line 11} [emu "arbace/emu"]])
+
+
+;; The lockstep's sys mode (AX5-DESIGN §3, AXS56 (a)-AXS58 (a); AX5.3's first part): the executable run natively under ptrace
+;; (ASLR off) and on x86i from the native's own initial state (its stack's bytes, the vdso's auxv entry made AT_IGNORE in both),
+;; compared at each system call's entry (the registers but RAX, RCX and R11; the number; RIP; the flags the last instruction
+;; defined; FS's base) and exit (the result), the world's calls' results and buffers copied from the native (time, random, ids,
+;; uname, affinity) and the addresses mmap and brk return taken from it; at the end the status, stdout and stderr. The first
+;; difference is the verdict: the syscall's ordinal, its number and what differs.
+
+
+
+(go/var ^{:doc "world are the calls whose results x86i copies from the native (AXS58 (a)): number -> the argument that is the output\nbuffer and its size (-1: the result's count of bytes; 0: no buffer).\n"} world (lit (map uint64 (array 2 int))
+    ^{:line 24} [228 (lit _ 1 16)] ; clock_gettime(clk, ts)
+    ^{:line 25} [96 (lit _ 0 16)] ; gettimeofday(tv, tz)
+    ^{:line 26} [201 (lit _ 0 8)] ; time(t)
+    ^{:line 27} [318 (lit _ 0 -1)] ; getrandom(buf, len, flags)
+    ^{:line 28} [39 (lit _ -1 0)] ; getpid
+    ^{:line 29} [186 (lit _ -1 0)] ; gettid
+    ^{:line 30} [110 (lit _ -1 0)] ; getppid
+    ^{:line 31} [63 (lit _ 0 390)] ; uname
+    ^{:line 32} [204 (lit _ 2 -1)])) ; sched_getaffinity(pid, len, mask)
+
+
+(go/var regNames (lit (array 16 string) "RAX" "RCX" "RDX" "RBX" "RSP" "RBP" "RSI" "RDI" "R8" "R9" "R10" "R11" "R12" "R13" "R14" "R15"))
+
+^{:go/end 39} (go/func nativeGPR ^{:tag (array 16 uint64)} [^{:tag (* sys/PtraceRegs)} r]
+  (lit (array 16 uint64) (.-Rax r) (.-Rcx r) (.-Rdx r) (.-Rbx r) (.-Rsp r) (.-Rbp r) (.-Rsi r) (.-Rdi r) (.-R8 r) (.-R9 r) (.-R10 r) (.-R11 r) (.-R12 r) (.-R13 r) (.-R14 r) (.-R15 r)))
+
+
+
+(go/type LockstepResult "LockstepResult is a sys-mode run's verdict.\n" (struct
+    ^{:line 43 :tag bool} Equal
+    ^{:line 44 :tag int} Syscalls
+    ^{:line 45 :tag uint64} Steps
+    ^{:line 46 :tag string} Diff
+    ^{:line 47 :tag int} Status)) ; the native's status
+
+
+
+^{:go/end 214} (go/func Lockstep "Lockstep runs path in sys mode.\n" [^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env] :results [(* LockstepResult) error]
+  (let [tmp (os/TempDir)
+      (values in err) (os/CreateTemp tmp "x86i-stdin")]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (os/Remove (.Name in)))
+    (let [(values nout _) (os/CreateTemp tmp "x86i-out")
+        (values nerr _) (os/CreateTemp tmp "x86i-err")]
+      (defer (os/Remove (.Name nout)))
+      (defer (os/Remove (.Name nerr)))
+      (let [(values t ^:assign err) (emu/StartTracee path argv env (lit (slice uintptr) (.Fd in) (.Fd nout) (.Fd nerr)))]
+        (when (!= err nil)
+          (return nil err))
+
+        (defer (.Kill t))
+        (let [res (addr (lit LockstepResult))
+            ^{:line 68} fail ^{:go/end 71} (fn [^string f & ^{:tag (slice any)} a] :results [(* LockstepResult) error]
+              (set! (.-Diff res) (+ (fmt/Sprintf "syscall #%d: " (.-Syscalls res)) (fmt/Sprintf f (spread a))))
+              (return res nil))
+
+
+            ;; the native's initial stack, the vdso hidden
+            (values lo hi ^:assign err) (.StackRange t)]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [(values stack ^:assign err) (.Read t lo (conv int (- hi lo)))]
+            (when (!= err nil)
+              (return nil err))
+
+            (let [sp (.-Rsp (.-Regs t))
+                ^{:line 83} at ^{:go/end 83} (fn ^uint64 [^uint64 a] (.Uint64 binary/LittleEndian (subslice stack (- a lo))))
+                ^{:line 84} p (+ sp 8 (* 8 (at sp)) 8)]
+              (while (!= (at p) 0)
+                (set! p + 8))
+
+              (for [(set! p + 8)] (!= (at p) 0) (set! p + 16)
+                (when (== (at p) 33) ; AT_SYSINFO_EHDR -> AT_IGNORE
+                  (.PutUint64 binary/LittleEndian (subslice stack (- p lo)) 1)
+                  (when [err (.Write t p (subslice stack (- p lo) (+ (- p lo) 8)))] (!= err nil)
+                    (return nil err))))
+
+
+
+
+              ;; x86i from the same state
+              (let [as (emu/NewAS)
+                  (values img ^:assign err) (emu/LoadELF as path)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (.Map as (- hi emu/StackSize) emu/StackSize (bit-or emu/PermR emu/PermW) "stack")
+                (.WriteBytes as lo stack)
+                (let [(values ^bytes/Buffer xout ^bytes/Buffer xerr) (zero bytes/Buffer)
+                    ^{:line 106} ks (crt/NewSys (.-M as) nil (addr xout) (addr xerr))]
+                  (set! (values (.-Args ks) (.-Env ks)) (values argv env))
+                  (let [k (emu/NewKernel as img ks)
+                      ^{:line 109} c (New as k (.-Rip (.-Regs t)) sp)]
+                    (set! (.-R c) (nativeGPR (addr (.-Regs t))))
+                    (set! (.-FS c) (.-Fs_base (.-Regs t)))
+
+                    (let [^{:tag (* sys/PtraceRegs)} native (addr (.-Regs t))]
+                      (while true
+                        (let [(values ns err) (.Resume t 0)]
+                          (when (!= err nil)
+                            (return nil err))
+
+                          (let [xs (.RunUntilSyscall c)]
+                            (set! (.-Steps res) (.-Steps c))
+                            (switch
+                              (case [(and (== ns emu/StopSyscall) (== xs stopAtSyscall))])
+                              (case [(and (== ns emu/StopSignal) (== xs stopSignal))]
+                                (when (!= (.-Sig t) (.-Signal c))
+                                  (return (fail "the native stopped with signal %d, x86i raised %d (%s) at %#x" (.-Sig t) (.-Signal c) (.-Reason c) (.-RIP c))))
+
+                                (when (!= (.-Rip native) (.-RIP c))
+                                  (return (fail "signal %d: the native at %#x, x86i at %#x" (.-Sig t) (.-Rip native) (.-RIP c))))
+
+                                (when [(values _ err) (.Resume t (.-Sig t))] (!= err nil)
+                                  (return nil err))
+
+                                (return (finish res t c nout nerr (addr xout) (addr xerr))))
+                              (case [(== ns emu/StopSignal)]
+                                (return (fail "the native stopped with signal %d at %#x; x86i went on to %#x" (.-Sig t) (.-Rip native) (.-RIP c))))
+                              (case [(== xs stopSignal)]
+                                (return (fail "x86i raised signal %d (%s) at %#x; the native made a system call (%d) at %#x" (.-Signal c) (.-Reason c) (.-RIP c) (.-Orig_rax native) (.-Rip native))))
+                              (default
+                                (return (fail "the native stopped (%d), x86i (%d) at %#x" ns xs (.-RIP c)))))
+
+                            (inc! (.-Syscalls res))
+                            ;; at the entry
+                            (let [n (.-Orig_rax native)]
+                              (when (!= (aget (.-R c) 0) n)
+                                (return (fail "the system call's number: native %d, x86i %d" n (aget (.-R c) 0))))
+
+                              (when (!= (.-Rip native) (+ (.-RIP c) 2))
+                                (return (fail "RIP: native %#x, x86i %#x" (- (.-Rip native) 2) (.-RIP c))))
+
+                              (let [ng (nativeGPR native)]
+                                (for [i 1] (< i 16) (inc! i)
+                                  (when (or (== i 1) (== i 11))
+                                    (continue))
+
+                                  (when (!= (aget ng i) (aget (.-R c) i))
+                                    (return (fail "system call %d at %#x: %s native %#x, x86i %#x" n (.-RIP c) (aget regNames i) (aget ng i) (aget (.-R c) i)))))
+
+
+                                (let [m (bit-and-not (conv uint64 (bit-or CF PF AF ZF SF OF DF)) (.Undef (.-F c)))]
+                                  (when (!= (bit-and (bit-xor (.-Eflags native) (.Get (.-F c))) m) 0)
+                                    (return (fail "system call %d at %#x: RFLAGS native %#x, x86i %#x (compared %#x)" n (.-RIP c) (.-Eflags native) (.Get (.-F c)) m)))
+
+                                  (when (!= (.-Fs_base native) (.-FS c))
+                                    (return (fail "system call %d at %#x: FS base native %#x, x86i %#x" n (.-RIP c) (.-Fs_base native) (.-FS c))))
+
+                                  (let [args (lit (array 6 uint64) (aget (.-R c) 7) (aget (.-R c) 6) (aget (.-R c) 2) (aget (.-R c) 10) (aget (.-R c) 8) (aget (.-R c) 9))]
+                                    ;; the native's exit
+                                    (set! (values ns err) (.Resume t 0))
+                                    (when (!= err nil)
+                                      (return nil err))
+
+                                    (when (== ns emu/StopExit)
+                                      (when [r (.Step c)] (and (!= r stopExit) (!= r stopSignal))
+                                        (return (fail "system call %d ended the native (%d); x86i went on" n (.-Status t))))
+
+                                      (return (finish res t c nout nerr (addr xout) (addr xerr))))
+
+                                    (when (!= ns emu/StopSyscall)
+                                      (return (fail "system call %d: the native stopped with signal %d" n (.-Sig t))))
+
+                                    (let [nret (.-Rax native)
+                                        (values w isWorld) (aget world n)]
+                                      (set! (.-SysHook c) ^{:go/end 204} (fn [^uint64 sn ^{:tag (array 6 uint64)} a] :results [int64 bool]
+                                          (switch
+                                            (case [isWorld]
+                                              (when (and (>= (aget w 0) 0) (>= (conv int64 nret) 0))
+                                                (let [size (aget w 1)]
+                                                  (when (< size 0)
+                                                    (set! size (conv int nret)))
+
+                                                  (when [(values b err) (.Read t (aget a (aget w 0)) size)] (== err nil)
+                                                    (.WriteBytes as (aget a (aget w 0)) b))))
+
+
+                                              (return (conv int64 nret) true))
+                                            (case [(and (== sn 9) (>= (conv int64 nret) 0))] ; mmap at the native's address
+                                              (let [(values r _) (.Syscall k 9 nret (aget a 1) (aget a 2) (bit-or (aget a 3) 0x10) (aget a 4) (aget a 5))]
+                                                (return r true)))
+                                            (case [(and (== sn 12) (== (aget a 0) 0) (== (.-Brk k) (.-BrkBase k)))] ; the program break's start, the native's
+                                              (set! (values (.-BrkBase k) (.-Brk k)) (values nret nret))
+                                              (return (conv int64 nret) true)))
+
+                                          (return 0 false)))
+
+                                      (let [r (.Step c)]
+                                        (set! (.-SysHook c) nil)
+                                        (when (!= r stepOK)
+                                          (return (fail "system call %d: x86i stopped (%d) where the native went on" n r)))
+
+                                        (when (!= (aget (.-R c) 0) nret)
+                                          (return (fail "system call %d%v: result native %#x, x86i %#x" n args nret (aget (.-R c) 0))))))))))))))))))))))))
+
+
+
+
+^{:go/end 231} (go/func finish [^{:tag (* LockstepResult)} res ^{:tag (* emu/Tracee)} t ^{:tag (* CPU)} c ^{:tag (* os/File)} nout ^{:tag (* os/File)} nerr ^{:tag (* bytes/Buffer)} xout ^{:tag (* bytes/Buffer)} xerr] :results [(* LockstepResult) error]
+  (set! (values (.-Status res) (.-Steps res)) (values (.-Status t) (.-Steps c)))
+  (let [(values no _) (os/ReadFile (.Name nout))
+      (values ne _) (os/ReadFile (.Name nerr))]
+    (switch
+      (case [(!= (.-Status t) (.Status c))]
+        (set! (.-Diff res) (fmt/Sprintf "status: native %d, x86i %d" (.-Status t) (.Status c))))
+      (case [(not (bytes/Equal no (.Bytes xout)))]
+        (set! (.-Diff res) "stdout differs"))
+      (case [(not (bytes/Equal ne (.Bytes xerr)))]
+        (set! (.-Diff res) "stderr differs"))
+      (default
+        (set! (.-Equal res) true)))
+
+    (return res nil)))

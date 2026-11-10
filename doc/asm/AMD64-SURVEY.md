@@ -1283,3 +1283,84 @@ hand only). `asm-ax4c` (`49bd71464`, AX4's third slice, the decoder) was merged 
 | `object-check` | **80 of 86** byte for byte (musl 32/32, synthetic 7/7, `mc-x86-obj` 41/47; `:unsupported-directive` 5, `:unsupported-debug-line` 1); 0 failing; 5 controls |
 | `run-check` | 18 of 18 by their own verdicts; 4 controls |
 | `bin/reap`, `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`, `make check-makefile` | pass (reap: 0 problems) |
+
+## As built: AX5.2 (2026-11-10; branch `asm-ax5`)
+
+On the light lane (stage 0 and TamaGo's go, one run at a time, under 2 GiB but for one slip below; no lock, no gate), on `asm-merged`
+(`9f880b7ab`, the decoder of AX4's third slice in it). The user decided AXS17-AXS67 as recommended on 2026-11-10 (~10:30 UTC), AX5's
+design among them (AXS51-AXS62). The slice is AX5-DESIGN §8's AX5.2, the frame and the core integer ISA, and the first part of
+AX5.3, the lockstep's `sys` mode. doc/asm/AMD64.md §10 describes what was built.
+
+- **Where** (AXS51 (a), AXS52 (a)): `go/arbace/emu` (the address space over crt's `Mem`, the ELF loader, Linux's stack, the kernel
+  layer, the tracer) and `go/arbace/x86i` (the decoder, the machine, the flags, the families, the lockstep), Go forms built alone
+  with crt and the driver `test/asm/x86i-driver` by TamaGo's go (`bin/repr-asm x86i light`, seconds), in `arbace_crop_paths`, the
+  audit's `crop-rules` and `gate-key-crops-test.bash`'s list (no key moves; the test passes). crt is untouched.
+- **The decoder from the table** (AXS53 (a), AXS63 (a)): `arbace.asm.amd64.dgen` writes the decisions `arbace.asm.amd64.decode`
+  makes as Go forms data (`go/arbace/x86i/dectab.ae`, 846 KB of hexadecimal strings: the 15 legacy contexts of 64-bit mode by the
+  attribute mask, each of the four legacy maps' 256 opcodes' decision, every instruction a decision names with its Intel mnemonic
+  and specifiers); `bin/repr-asm x86i gen|gen-check` (14 s, 1.2 GiB). The Go decoder is decode.ae's legacy and REX path written
+  again in Go; VEX, EVEX, XOP, REX2 and 3DNow! are refused as `:unimplemented` (their contexts at AX5.5 and AX8).
+- **The machine** (AXS54 (a), AXS55 (a)): the families alu, unary, mov, stack, branch, muldiv, shift (no rcl/rcr), string, conv,
+  atomic (cmpxchg, xadd) and misc, chosen by the table's Intel mnemonic, one routine a family over every size and operand kind; lazy
+  flags with the SDM's undefined bits named per kind (`Undef`). About 28 million instructions a second on `alu.s` (8.6 million
+  instructions in 0.32 s, one thread).
+- **The lockstep's sys mode** (AXS56 (a)-AXS58 (a), AX5.3's first part): pure Go over ptrace, ASLR off by `personality`, x86i started
+  from the native's stack (the vdso's auxv entry made AT_IGNORE in both), compared at each system call's entry and exit, the world
+  list copied, mmap's addresses and the break's start the native's.
+- **The corpus**: `test/asm/run/`'s 16 runnable programs (the two link refusals stay the linker's: `duplicate`, `undefined`, not run)
+  and x86i's own hand-written programs, `test/asm/x86i/`: `alu.s` (99 stubs: the alu, unary, shift and rotate families at four sizes
+  over twelve edge values, both carries in, the flags the SDM defines; 28,512 lines), `muldiv.s` (25 stubs), `string.s`, `misc.s`
+  (every condition by setcc and cmov, xchg, xadd, cmpxchg, bswap, the extensions, high bytes, lahf/sahf, pushfq/popfq, the loops,
+  leave, ret imm, lea with a 32-bit address, movabs, brk, mmap, mprotect, munmap) judged by the CPU's runs (`# judge: cpu`, AXS9
+  (a)), and eight `fault-*.s` by their stated status (SIGFPE for #DE twice, SIGILL, SIGTRAP, SIGSEGV for a null store, a read-only
+  store, hlt and a non-executable fetch). `alu.s` and `muldiv.s` were written by a shell loop over the operations and sizes; the
+  generator proper is AX5.4's (AXS60 (a)).
+
+| check | result |
+|---|---|
+| `bin/repr-asm x86i-check` (`x86i/`) | **28 of 28** programs (16 of `test/asm/run/`, 12 of `test/asm/x86i/`) by their own verdicts and equal to the CPU's runs (status, stdout, stderr) |
+| `decode/` | 28 of 28: every instruction of their code sections (about 2,600) as x86i's decoder decodes it equal to `arbace.asm.amd64.decode`'s decoding of the same bytes |
+| `lockstep/` (`x86i trace --mode sys`) | 28 of 28 equal (e.g. `misc` 105 system calls with brk and mmap, `string` 288, the faults' signals by number and RIP) |
+| controls (`test/asm/controls-x86i.txt`) | 10 fail as they must: verdict ×2, cpu ×2, decode ×2, `X86I_INJECT` against the CPU ×2 (`alu:cf`, `alu:zf`), against the lockstep ×2 (`alu:cf`, `string:df`) |
+| `bin/repr-asm x86i gen-check` | the committed decode tables equal to a fresh generation |
+| run-check, `bin/reap`, `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`, `make check-makefile` | pass (run 18 of 18; reap 0 problems) |
+
+About 50 s for the check (the programs assembled and linked, run twice and traced, the decode judge), 1.2 GiB at its peak.
+What the runs found: xadd's memory form puts the register first (`XADD64rm`'s operands), a 32-bit shift or rotate by 0 still
+zeroes the register's upper half, and `and $-16, %rsp`'s flags depend on the stack's address (a test's own mistake, its flags now set
+first). Not run in this slice: the decode check (`decode.ae` unchanged) and AX1's and AR1's round trips (no reader touched).
+
+### Proposed (AX5.2)
+
+Numbering from AXS68 (AX4c used AXS63-AXS67).
+
+- **AXS68 How x86i's Go forms are written.** (a) as built: written as Go and converted by repr/go's native reader (`bin/repr-go read
+  --goos linux --goarch amd64`, the converter's style, as SC70 (a) and oi's; one package at a time, the decode tables stubbed for the
+  read: about 80 s and 1.5 GiB a package), the decode tables written as forms by dgen; (b) hand-written forms (goi's style).
+  *Recommended: (a)*: forms are forms; the printer, `go vet` and the build accept both.
+- **AXS69 The decode tables' reach.** (a) as built: the legacy and REX maps of 64-bit mode, VEX, EVEX, XOP and REX2 refused as
+  `:unimplemented` until the families that need them (AX5.5's SSE/BMI by VEX, AX8's AVX by VEX and EVEX), dgen extended then by their
+  contexts; (b) every map now. *Recommended: (a)*: a table no family uses is untested weight (the vector contexts are about 200 of the
+  context list).
+- **AXS70 The Go decoder's judge.** (a) as built: the programs' code decoded by both decoders (about 2,600 instructions); (b) also
+  every legacy encoding the decode check's `rt` level meets and `MC/Disassembler/X86`'s 64-bit strings, decoded by x86i and held to
+  `arbace.asm.amd64.decode`'s results, a level of its own (`x86i-decode-check`). *Recommended: (b) at AX5.4*: the corpus is there and
+  the Go decoder is a second port of the same rules.
+- **AXS71 The hand-written programs' verdict.** (a) as built: the stated exit and `# judge: cpu` (the CPU's run, AXS9 (a)), the flags
+  printed masked by what the SDM defines; (b) stated stdout. *Recommended: (a)*: the outputs are tens of thousands of lines no one
+  checks by hand; the lockstep (sys now, step at AX5.3) judges them further.
+- **AXS72 The lockstep's flags.** (a) as built: at each comparison the six status flags and DF less those the last flag-setting
+  instruction leaves undefined (its kind's: a logical operation's AF, a shift's AF and, past a count of one, OF, a multiply's SF ZF AF
+  PF, a divide's six, a rotate's OF past one); (b) the design's per-family mask applied to every compare. *Recommended: (a)*: it is
+  the SDM's rule per instruction, narrower than a family's, and the step mode needs it anyway.
+- **AXS73 The check in the gate.** (a) at AX10 with the row (AXS61 (a)): an essential step, about 50 s and 1.2 GiB, ptrace on the
+  host (`ptrace_scope` 1); (b) now. *Recommended: (a)*.
+- **AXS74 The next slice.** (a) AX5.3's rest: the `step` mode, the loader's judge (x86i's own stack against the native's snapshot),
+  the bisection and the injected faults named by instruction; (b) AX5.4 first (the generator, rcl/rcr, shld/shrd, the bit family,
+  signal frames). *Recommended: (a)*: small, and every later slice's synthetic programs are judged by it.
+
+**Rule slips**: (1) the first conversion of the three packages by `bin/repr-go read` in one run, with the decode tables as a
+900 KB string concatenation of 9,000 pieces, peaked at 11.6 GB before failing (the light lane's limit is 2 GiB); every later read was
+one package at a time with the tables stubbed, under a watcher that kills the session past 2 GiB (`.tmp/memwatch.sh`), at most
+1.54 GB, and dgen now writes each table as one literal; (2) two commands named `/dev/fd/1` and `/dev/null` (a `sed` whose output
+went nowhere, a `cp` of a file to `/dev/null`), harmless but against the rule.

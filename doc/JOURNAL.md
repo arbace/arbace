@@ -3348,3 +3348,43 @@ recorded), `--arch arm64 encode-check` (7,685 of 12,298, print 12,156), `bin/rea
 Considered: keeping ax4c's `:lets` instead (the same semantics, but asm-tg's is the one the conversions oracle was proven with);
 merging the generated table textually (rejected: the generator is the source); dropping `:dis` from the oracle's comparison (rejected:
 deriving it from LLVM's records checks the generator's rule).
+
+## 2026-11-10 amd64 assembly: AX5.2, x86i's frame and core integer ISA, and AX5.3's sys mode (branch `asm-ax5`, from `mac/asm-merged` `9f880b7ab`)
+
+The user decided AXS17-AXS67 as recommended (~10:30 UTC), AX5's design (`.tmp/plans/AX5-DESIGN.md`, AXS51-AXS62) with them. Built on
+the light lane (stage 0 and TamaGo's go 1.27.1 alone; one run at a time; no lock, no gate, no network, nothing installed;
+doc/asm/AMD64-SURVEY.md, "As built: AX5.2"; doc/asm/AMD64.md §10).
+
+What was built:
+- `arbace.asm.amd64.dgen` (`arbace/asm/amd64/dgen.ae`): the decisions `arbace.asm.amd64.decode` (AX4c's port of llvm-project 23.1.5's
+  X86 disassembler, rebuilt from `asm/amd64/table.edn`) makes for 64-bit mode's legacy and REX maps, written as Go forms data,
+  `go/arbace/x86i/dectab.ae` (15 contexts, four maps, each instruction's Intel mnemonic and specifiers); `bin/repr-asm x86i gen|gen-check`.
+- `go/arbace/emu` (the address space over crt's `Mem` with page permissions and a TLB, an ELF64 reader and loader, Linux's initial
+  stack, brk/mmap/munmap/mprotect/exit, the rest crt's `Sys.Syscall`; the ptrace tracer) and `go/arbace/x86i` (the Go decoder, the
+  machine, lazy flags, the families alu, unary, mov, stack, branch, muldiv, shift without rcl/rcr, string, conv, atomic, misc; an
+  instruction no family claims raises SIGILL, `:unimplemented`; the lockstep's sys mode), written as Go from the Intel SDM vol. 2 and
+  the AMD APM vol. 3 as references (nothing copied; the stack's layout from the psABI and getauxval(3), not the kernel's source) and
+  converted by `bin/repr-go read --goos linux --goarch amd64`, a package at a time; the driver `test/asm/x86i-driver` (`run`,
+  `decode-text`, `trace --mode sys`, `X86I_INJECT`), built alone with crt by TamaGo's go (`bin/repr-asm x86i light`).
+- `bin/repr-asm x86i-check [--record]` (`test/asm/x86i_judge.ae`): `test/asm/run/`'s 16 runnable programs and 12 hand-written ones
+  (`test/asm/x86i/`: alu, muldiv, string, misc judged by the CPU's runs, `# judge: cpu`; eight faults by their status), each run by the
+  CPU and by x86i, decoded by both decoders, traced in sys mode: 28 of 28 equal to the CPU's runs and by their verdicts, 28 of 28 decoded
+  alike (2,636 instructions), 28 of 28 lockstep-equal; ten controls fail as they must (two each: another's verdict, another's CPU run,
+  another's bytes, `X86I_INJECT` against the CPU and against the lockstep). Records `test/asm/x86i-results-amd64.edn`, classes
+  `test/asm/divergences-x86i.edn`, controls `test/asm/controls-x86i.txt`. Makefile `x86i-*`.
+- Crop paths: `go/arbace/{x86i,emu}{.ae,/*}` in `bin/lib/version.bash`'s `arbace_crop_paths`, the audit's `crop-rules` and
+  `gate-key-crops-test.bash`'s list; the test passes, no key moves. crt untouched (AXS52 (a)).
+- Docs: doc/asm/AMD64.md §10, the survey's "As built: AX5.2" with AXS68-AXS74, LICENSE.md (dgen and the Go decoder after LLVM's
+  disassembler, Apache-2.0 WITH LLVM-exception; the rest Arbace's own), doc/ARBACE.md, doc/ALPINE.md (`lld23`, ld.lld 23.1.5, the
+  oracle tier's by hand, installed by the user today for AXS46).
+
+Found on the way: xadd's memory form puts the register operand first; a 32-bit shift or rotate by 0 zeroes the register's upper half;
+a test's flags after `and $-16, %rsp` depend on the stack's address. About 28 million instructions a second.
+
+Considered: hand-writing the Go forms (AXS68 (b)); generating every map's tables now (AXS69 (b)); `debug/elf` and `crypto/rand` in the
+driver (dropped: a small ELF64 reader of emu's own and math/rand/v2 keep repr/go's read of the driver light); the design's per-family flag
+masks (AXS72 (b): the SDM's per-instruction rule built instead).
+
+Rule slips: the first conversion of all three packages at once peaked at 11.6 GB (the decode tables as a 9,000-piece string
+concatenation); every later read one package at a time, the tables stubbed, under a 2 GiB watcher (peak 1.54 GB), and dgen writes each
+table as one literal. Two commands named `/dev/fd/1` and `/dev/null`.

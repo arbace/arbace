@@ -409,7 +409,10 @@ code. Three kinds of things live here:
   `X86MCTargetDesc.cpp`'s needsAddressSizeOverride) and `asm/amd64/decode_check.ae` (`arbace.asm.amd64.decode-check`: the check,
   with llvm-mc's byte stream after `llvm/tools/llvm-mc/Disassembler.cpp` and FileCheck's matching), written by hand; no code is
   copied. Go's `golang.org/x/arch/x86/x86asm` (TamaGo's GOROOT, `src/cmd/vendor/`) was weighed and not used (doc/asm/AMD64-SURVEY.md,
-  "As built: AX4 (third slice)").
+  "As built: AX4 (third slice)"). AX5.2 (2026-11-10, "As built: AX5.2"): `asm/amd64/dgen.ae` (`arbace.asm.amd64.dgen`: x86i's decode
+  tables, the decisions `decode.ae` makes for 64-bit mode's legacy and REX maps written out as the Go forms data
+  `go/arbace/x86i/dectab.ae`), written by hand; x86i's Go forms (`go/arbace/x86i`, `go/arbace/emu`, outside `arbace/`) were written
+  as Go and converted by repr/go's native reader (doc/asm/AMD64.md §10; LICENSE.md).
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

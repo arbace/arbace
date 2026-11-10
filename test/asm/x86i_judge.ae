@@ -6,7 +6,10 @@
   Go decoder decodes it (`x86i decode-text`) equal to arbace.asm.amd64.decode's decoding of the same bytes (the instruction, its
   MCInst operands, lock/rep/repne).
 
-  Rows `[ID RESULT DETAIL]`, ID x86i/NAME or decode/NAME, against test/asm/x86i-results-amd64.edn; every other result a class of
+  And the lockstep's sys mode (AX5.3, `x86i trace --mode sys`): the program run natively under ptrace and on x86i from the
+  native's initial state, compared at every system call; equal, or the first difference (lockstep/NAME).
+
+  Rows `[ID RESULT DETAIL]`, ID x86i/NAME, decode/NAME or lockstep/NAME, against test/asm/x86i-results-amd64.edn; every other result a class of
   test/asm/divergences-x86i.edn (:unimplemented: x86i raised SIGILL for an instruction no family claims, never a silent wrong
   result); with RECORD the rows are rewritten from the run (refused when it holds a failure). The negative controls
   (test/asm/controls-x86i.txt) are judged by `control`."
@@ -19,7 +22,7 @@
        ";; decoder against arbace.asm.amd64.decode (decode/NAME): :pass, else a class of test/asm/divergences-x86i.edn. Written by\n"
        ";; `bin/repr-asm x86i-check --record`. Read with the Clojure reader.\n"))
 
-(def failing #{:verdict :cpu :timeout :decode :missing})
+(def failing #{:verdict :cpu :timeout :decode :missing :lockstep})
 
 (defn- slurp-or [^String p d] (if (.exists (java.io.File. p)) (slurp p) d))
 
@@ -90,6 +93,12 @@
   (let [cj (cpu-judged lst)]
     (into {} (for [[n [e o]] (read-tsv (str work "/want.tsv"))] [n [e (when-not (cj n) o)]]))))
 
+(defn judge-trace
+  "The lockstep's sys mode's row of n from its output (`x86i trace --mode sys`'s line): :pass when equal, else :lockstep."
+  [n ^String path]
+  (let [l (str/trim (first (str/split-lines (slurp-or path "(no trace)\n"))))]
+    [(str "lockstep/" n) (if (str/includes? l "sys: equal:") :pass :lockstep) (str/replace l #"^x86i trace sys: (equal: )?" "")]))
+
 (defn rows
   "The run's rows: x86i/NAME and decode/NAME for each program WORK/build.tsv says was built."
   [work lst]
@@ -99,12 +108,14 @@
                   (let [[r dt] (judge-run (run-of work n "x86i.") (run-of work n "") (want n))
                         dec (str work "/" n ".dec")
                         [dr ddt k] (if (.exists (java.io.File. dec)) (judge-decode (str/split-lines (slurp dec))) [:missing "no decode-text" 0])]
-                    [[(str "x86i/" n) r dt] [(str "decode/" n) dr (if (= dr :pass) (str k " instructions") ddt)]]))))))
+                    [[(str "x86i/" n) r dt] [(str "decode/" n) dr (if (= dr :pass) (str k " instructions") ddt)]
+                     (judge-trace n (str work "/" n ".trace"))]))))))
 
 (defn control
   "A negative control: `verdict` (SUBJECT's x86i run judged by REFERENCE's verdict), `cpu` (SUBJECT's x86i run against
   REFERENCE's CPU run), `decode` (SUBJECT's decode-text against arbace's decoding of REFERENCE's bytes, line by line) or
-  `inject` (SUBJECT's run under X86I_INJECT=REFERENCE, WORK/SUBJECT.inject-FAMILY-FLAG.*, against its own CPU run): `differs` as it must, else `same`;
+  `lockstep` (SUBJECT's lockstep in sys mode under X86I_INJECT=REFERENCE, WORK/SUBJECT.trace-FAMILY-FLAG, which must find a
+  difference), `inject` (SUBJECT's run under X86I_INJECT=REFERENCE, WORK/SUBJECT.inject-FAMILY-FLAG.*, against its own CPU run): `differs` as it must, else `same`;
   `left` when the subject or the reference is missing."
   [work lst kind subj ref]
   (let [want (wants work lst)
@@ -112,6 +123,8 @@
         r (case kind
             "verdict" (when (and x (want ref)) (first (judge-run x (run-of work subj "") (want ref))))
             "cpu" (let [cpu (run-of work ref "")] (when (and x cpu) (first (judge-run x cpu (want subj)))))
+            "lockstep" (let [p (str work "/" subj ".trace-" (str/replace ref ":" "-"))]
+                         (when (.exists (java.io.File. p)) (second (judge-trace subj p))))
             "inject" (let [xi (run-of work subj (str "inject-" (str/replace ref ":" "-") ".")) cpu (run-of work subj "")] (when (and xi cpu) (first (judge-run xi cpu (want subj)))))
             "decode" (let [a (str work "/" subj ".dec") b (str work "/" ref ".dec")]
                        (when (and (.exists (java.io.File. a)) (.exists (java.io.File. b)))
@@ -128,10 +141,12 @@
         classes (set (map :id (read-string (slurp classes-path))))
         problems (atom [])
         xs (filter #(str/starts-with? (first %) "x86i/") run)
-        ds (filter #(str/starts-with? (first %) "decode/") run)]
+        ds (filter #(str/starts-with? (first %) "decode/") run)
+        ls (filter #(str/starts-with? (first %) "lockstep/") run)]
     (println (str "repr-asm x86i-check: " (count (filter #(= :pass (second %)) xs)) " of " (count xs)
                   " programs run by x86i meet their own verdicts and equal the CPU's runs; "
                   (count (filter #(= :pass (second %)) ds)) " of " (count ds) " decoded as arbace.asm.amd64.decode decodes them; "
+                  (count (filter #(= :pass (second %)) ls)) " of " (count ls) " lockstep-equal in sys mode; "
                   (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))))
     (doseq [[i c dt] run]
       (cond (failing c) (swap! problems conj (str "failing: " i " " (name c) " " dt))

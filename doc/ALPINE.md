@@ -122,6 +122,14 @@ The LLVM IR crop (doc/llvm/LLVM-CROP-SURVEY.md, after the tag) adds LLVM's own t
 apk add llvm23 llvm23-test-utils
 ```
 
+The assembly crop's oracle tier adds lld at the same version, `ld.lld` 23.1.5 (`lld23`, installed by the user 2026-11-10 for
+AXS46: the linker's byte-level reference, by hand only; `/usr/bin/ld.lld`). No check runs it, and x86i (doc/asm/AMD64.md §10)
+needs nothing from apk: its tracer is pure Go over ptrace.
+
+```sh
+apk add lld23
+```
+
 The lines are amd64's. On an arm64 host `qemu-aarch64` is not needed (nothing runs amd64 executables
 under emulation, and `bin/arbace-go --fixpoint` runs on amd64 only), and the host's line above loses
 `reptyr`, which edge builds for x86_64 alone (checked 2026-11-01); Arbace's line resolves on both

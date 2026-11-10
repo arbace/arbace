@@ -301,3 +301,61 @@ pinned tarball and written again in Arbace; doc/asm/AMD64-SURVEY.md, "As built: 
   controls `test/asm/controls-decode.txt`. `bin/repr-asm decode MODE [intel] HEX...` and `decode-object OBJ` by hand.
 
 Not yet: `--mdis`'s markup printer; FileCheck's variables (`[[...]]`); a symbolizer (llvm-objdump's targets and relocations).
+
+## 10. x86i, the x86-64 integer machine (AX5.2, AX5.3's sys mode)
+
+x86i interprets a static x86-64 Linux executable's integer instructions (doc/asm/AMD64-SURVEY.md, "As built: AX5.2"; the design
+AX5-DESIGN, AXS51-AXS62, decided by the user 2026-11-10). It is Go forms built alone by TamaGo's go, a light driver as si's and
+oi's are (AXS51 (a)), out of every key (`arbace_crop_paths`): no Arbace build reads it.
+
+- **`go/arbace/emu`**, the frame of the machine emulators: `AS`, a process's address space over crt's `Mem` (crt's slabs hold the
+  bytes; emu keeps each page's R/W/X permissions, Linux's layout and a 256-entry software TLB; an access returns a fault instead
+  of panicking, crt's `R`/`W` never on the hot path); `ReadELF`/`LoadELF` (an ELF64 executable's PT_LOADs page-aligned with their
+  permissions, file bytes then zeros, a page two segments share given both's permissions; PT_INTERP refused, a static PIE at
+  Linux's no-ASLR base); `Stack` (the stack as Linux gives it from 0x7ffffffff000: argc, argv, envp, auxv with AT_PHDR, AT_ENTRY,
+  AT_RANDOM, AT_EXECFN, AT_PLATFORM, AT_HWCAP, AT_MINSIGSTKSZ ..., no AT_SYSINFO_EHDR: no vdso; from the psABI and getauxval(3),
+  not the kernel's source); `Kernel`, the system calls beyond crt's (brk from the page after the highest PT_LOAD; anonymous
+  mmap top-down from 128 MiB below the stack's top, MAP_FIXED, munmap, mprotect, with their permissions; exit and exit_group;
+  clone, fork, vfork, execve -ENOSYS), every other call crt's `Sys.Syscall` on the same `Mem` unchanged (crt untouched,
+  AXS52 (a)); the tracer `Tracee` (`trace_linux`: ptrace from one locked thread, ASLR off by `personality(ADDR_NO_RANDOMIZE)`,
+  PTRACE_O_TRACESYSGOOD and EXITKILL, memory through /proc/PID/mem).
+- **`go/arbace/x86i`**: the decoder (`decode`, `tables`) is §9's, LLVM's X86 disassembler, rebuilt in Go for 64-bit mode's legacy
+  and REX encodings over the tables `arbace.asm.amd64.dgen` writes from `asm/amd64/table.edn` (`dectab.ae`, generated, checked by
+  regeneration: `bin/repr-asm x86i gen|gen-check`): the contexts the attribute mask names, each map's (one byte, 0F, 0F38, 0F3A)
+  decisions by context and opcode (one instruction, or 256 by ModRM), every instruction a decision names with its Intel mnemonic
+  and operand specifiers (encoding, type, size or tied operand). readPrefixes, readOpcode, getInstructionID's corrections,
+  readModRM/SIB/displacement, readOperands and the translation follow §9's port; VEX, EVEX, XOP, REX2 and 3DNow! are refused
+  (SIGILL, `:unimplemented`). The machine (`cpu`): sixteen registers, RIP, lazy flags (`flags`, AXS55 (a): the last
+  flag-setting instruction's kind, size, operands and result; a condition computed from them, a `cmp`'s directly; RFLAGS
+  materialized on a whole read; `Undef`, the bits the SDM leaves undefined after it), FS and GS bases; instructions decoded once
+  per address (a store into a page holding decoded code invalidates it). The families (`sem`, hand-written from the Intel SDM vol. 2
+  and the AMD APM vol. 3 as references, AXS54 (a)), chosen by the instruction's Intel mnemonic from the table: alu (add or adc sbb
+  and sub xor cmp test), unary (inc dec neg not), mov (mov movabs movzx movsx movsxd lea xchg bswap cmovcc setcc), stack (push pop
+  pushfq popfq leave), branch (jmp jcc call ret loop loope loopne jrcxz jecxz), muldiv (mul imul div idiv; #DE is SIGFPE), shift
+  (shl sal shr sar rol ror), string (movs stos lods scas cmps, rep/repe/repne, DF), conv (cbw cwde cdqe cwd cdq cqo), atomic
+  (cmpxchg xadd; one thread), misc (nop and the prefixes LLVM decodes as instructions, clc stc cmc cld std lahf sahf, syscall,
+  cpuid with x86i's own model, rdtsc, ud2/int3/hlt as SIGILL/SIGTRAP/SIGSEGV). Every other mnemonic, and an operand of a register
+  file x86i does not model (XMM, x87, MMX, segment, debug, control), raises SIGILL naming the instruction (`:unimplemented`),
+  never a silent wrong result. A fault (an unmapped or protected access, a fetch from a page without X) is SIGSEGV; with no
+  handler (AX5.4 builds the frames) the process ends with 128 + the signal, as the shell sees the CPU's.
+- **The lockstep's sys mode** (`lockstep_linux`, AX5.3's first part, AXS56 (a)-AXS58 (a)): the executable run natively under
+  ptrace and on x86i from the native's own initial state (its stack's bytes, the auxv's AT_SYSINFO_EHDR made AT_IGNORE in both),
+  compared at each system call's entry (the number, RIP, every register but RAX, RCX and R11, the flags the last instruction
+  defined, FS's base) and exit (the result), the world's results and buffers copied from the native (clock_gettime,
+  gettimeofday, time, getrandom, getpid, gettid, getppid, uname, sched_getaffinity), mmap's address and the break's start taken
+  from it; a signal compared by number and RIP; at the end the status, stdout and stderr. The verdict: `equal`, or the first
+  difference.
+- **The driver** (`test/asm/x86i-driver`, `x86idriver`): `run [--stats] EXE [ARG...]`, `decode-text EXE`, `trace --mode sys EXE`;
+  `X86I_INJECT=FAMILY:FLAG` flips the flag after each instruction of the family (the negative controls' fault). `bin/repr-asm x86i
+  light` prints the forms by repr/go and builds them by TamaGo's go into `.tmp/x86i/x86i` (seconds); `x86i run|decode-text|trace`.
+- **The check** (`bin/repr-asm x86i-check [--record]`, `test/asm/x86i_judge.ae`): `test/asm/run/`'s programs and x86i's own
+  hand-written ones (`test/asm/x86i/`: `alu.s`, `muldiv.s`, `string.s`, `misc.s`, eight `fault-*.s`; `# judge: cpu` in a header:
+  its stdout's judge is the CPU's run, AXS9 (a)), assembled and linked by Arbace, each run by the CPU and by x86i: `x86i/NAME`, x86i's
+  run by the program's own verdict and equal to the CPU's (status, stdout, stderr); `decode/NAME`, every instruction of its code
+  as x86i decodes it equal to `arbace.asm.amd64.decode`'s decoding of the same bytes; `lockstep/NAME`, the sys mode equal. Rows
+  `test/asm/x86i-results-amd64.edn`, classes `test/asm/divergences-x86i.edn`, controls `test/asm/controls-x86i.txt` (a run judged by
+  another's verdict or against another's CPU run, a decoding held to another's bytes, injected faults the CPU's run and the
+  lockstep must catch).
+
+Not yet (AX5.3-AX5.6): the `step` mode, the loader's judge and the bisection; rcl/rcr, shld/shrd, the bit family, enter, signal
+handlers and frames; BMI, ADX, SSE/SSE2; musl's harnesses.

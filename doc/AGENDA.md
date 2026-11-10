@@ -216,6 +216,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   (20,718 of 20,718; `-gen-disassembler`'s instructions the table's 20,715 `:dis` ones), the decode check re-recorded on the merged
   table: `dis` 24,441 of 24,445, `rt` 106,070 of 106,074 (APX now encoded: 6,565 more than ax4c's), `obj` 479 of 479, none failing.
   Next: the 11-11 merge of `asm-merged`; then AX5's x86i over the decoder (AXS67 (a)).
+- Assembly, amd64's AX5: `asm-ax5` (on `asm-merged`; AX5.2 and AX5.3's sys mode, doc/asm/AMD64-SURVEY.md, "As built: AX5.2",
+  doc/asm/AMD64.md §10): x86i, the x86-64 integer machine, a light driver (`go/arbace/{x86i,emu}` over crt, built by TamaGo's go; crop
+  paths, no key moves): the decoder from the table (`arbace.asm.amd64.dgen`), the core integer families, lazy flags, Linux's loader and
+  stack, the lockstep's sys mode over ptrace; `bin/repr-asm x86i-check`: 28 of 28 programs (test/asm/run's 16 and test/asm/x86i's 12)
+  equal to the CPU's runs and by their verdicts, decoded alike by both decoders, lockstep-equal; ten controls. Proposed AXS68-AXS74.
+  Next: AX5.3's rest (step mode, the loader's judge, the bisection; AXS74 (a)), then AX5.4.
 
 ## Decided, not built yet
 
