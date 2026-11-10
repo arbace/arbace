@@ -2864,3 +2864,41 @@ no network). Sources: GHC 9.14.1's pinned tarball (SHA-256 `2a83779c...`): `comp
   lib-stg base 531 of 1,024 as recorded, controls differ; hsi-essential's command 123 programs, 0 unclassed, controls fail;
   bin/reap 0 problems; crops-score --judge --strict 0 problems (Haskell 76.0). Not run: bin/gate (`--full --plan` for the new step
   is the main session's).
+
+## 2026-11-10: HF10-P20 (a) continued: the whole own set from 0 of 10 to 40 of 63 (branch `hs-p20`, from `mac/hs-p18` 876e2913c)
+
+Built by an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no
+GHC, no gate, no network), the plan's stage 2 (`.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the user's decision of HF10-P15 to P27).
+Sources: GHC 9.14.1's pinned tarball, `compiler/GHC/Stg/Unarise.hs` (unariseFunArg, unariseAlts, void arguments),
+`compiler/GHC/CoreToStg/Prep.hs` (the case on unsafeEqualityProof dropped, maybeSaturate), `compiler/GHC/HsToCore.hs`
+(patchMagicDefns: unsafeEqualityProof, unsafeCoerce#), `compiler/GHC/HsToCore/Match.hs` (matchView),
+`compiler/GHC/Tc/TyCl/PatSyn.hs` (mkPatSynRecSelBinds), `compiler/GHC/Types/Id/Make.hs` (coerceId) (BSD-3, LICENSE.md
+"GHC").
+
+- Method: each run-breaking class found by a run of the day's ten (then the 63), its first module by bisection
+  (`LIB_STG_REPLACE=@FILE`, the new `LIB_STG_SIDES=own`), fixed in the front end, judged by `lib-stg --ifaces own --judge` (no
+  module worse) before the next run. New static comparisons in `arbace.repr.haskell.stgcmp` (`--abi`, `--rets`, `--builds`,
+  `--why`) and hsi errors that name the call (`unboxed tuple of the wrong size: the alternative binds N, M returned ...; the
+  scrutinee F`) found classes without runs. Alternatives considered: running every program on every bisection probe (too slow
+  at about a minute a probe); fixing the elaborator's type variable kinds now (a larger change across the renamer, the
+  elaborator and the interfaces: left as the class `kinds`, an interim table of two Unsafe.Coerce results in tostg).
+- Fixed, one class each (the survey's table): polymorphic identities' instantiated results (inline, runRW#), void values and
+  nullary void join points, synonyms and newtypes of function types in result types, unsafeCoerce# and Unsafe.Coerce's
+  patched definitions, match variables typed (equations' binders, desugar's match variables after their pattern variables, a
+  cast's target type), nested unboxed tuple binders, unboxed tuple case binders, a tuple case's size from its binders, coerce's
+  evidence argument, existential dictionaries in record construction, update and selectors, primops out of the CAF float
+  shortcut, view patterns (matchView), pattern synonyms' record selectors, primitive byte-string literals.
+- Measures: lib-stg on the own interfaces 5,412 to 5,473 of 7,637 bindings equal to GHC's -O0 (25 modules better, 0 worse;
+  re-recorded); lib-stg of base 531 to 547 of 1,024; the `equal` set 83 modules, 50 of 63 programs pass on it (0 lost against GHC's -O0 set's 50); the `all` set
+  40 of 63 (0 of 10 before), 10 of `equal`'s passes lost. `test/haskell/lib-stg-own-results.edn` gains the runs as rows,
+  `{:runs :equal ...}` and `{:runs :all ...}` (`libcheck record-runs`, `judge-runs`; lib-stg `--run --record/--judge`).
+- Not reached: HF10-P20's proof (all ≥ equal, 0 lost). The tail, by class: a case on the void token in an argument slot (5
+  programs, the exception paths first), output that differs (4), NonTermination unhandled (1); beyond the 63, pattern
+  synonym patterns (no `$mP` matcher: HF9's slice 7) and type variables' kinds.
+- Checks: lib-stg --ifaces own 0 worse (re-recorded), its control 0 of 171; lib-check --ifaces own 265 against 265, 0 worse
+  (258 of 265, facts unchanged), base 241 against 241, 0 worse (235 of 241), both controls differ; base's lib-stg 531 to 547, 0
+  worse (re-recorded); run-check's negative control fails on every run; hsi-essential's command 123 programs, 0 unclassed, the
+  four controls fail; the GHC-interfaces steps' commands: haskell-lib-check 0 worse (260 of 265), haskell-lib-stg 5,372 to 5,444 of
+  7,610 (0 worse, re-recorded) with its runs 60 of 63 on each side, 0 lost. Not run: bin/gate (the light lane).
+- Rule slips: a wait loop used process substitution `<(...)` once, and two commands named /dev/null (`>/dev/null 2>&1` on a
+  debugging compile, a `grep` of /dev/null); none touched another worktree's files.

@@ -572,10 +572,19 @@
                             (if (:stg r) (select-keys (:stg r) [:compared :equal :data-equal])
                                 (select-keys r [:compared :equal :data-equal])))))
 
+(defn- run-rows
+  "A record's rows of the runs (HF10-P20: {:runs SET ...}, the programs that pass on a library set)"
+  [record-file]
+  (if (.isFile (File. ^String record-file))
+    (vec (for [line (str/split-lines (slurp record-file)) :when (str/starts-with? line "{")
+               :let [m (read-string line)] :when (and (map? m) (:runs m))] m))
+    []))
+
 (defn record-stg
-  "The results into lib-stg's record: a whole run replaces it, a partial one its modules' rows"
+  "The results into lib-stg's record: a whole run replaces it, a partial one its modules' rows; the runs' rows kept"
   [results-file record-file partial? source]
   (let [f (File. ^String record-file)
+        runs (run-rows record-file)
         old (if (and partial? (.isFile f)) (read-results [record-file]) [])
         new (read-results [results-file])
         by (merge (into (sorted-map) (map (juxt :name stg-row) old)) (into {} (map (juxt :name stg-row) new)))]
@@ -585,8 +594,44 @@
                ";; its exported bindings with their closures judged against GHC's -O0 STG (" source "). One map a\n"
                ";; module: :stage, :compared, :equal, :data-equal. --judge FILE fails on a module whose stage drops or whose equal count\n"
                ";; drops, on a module of a whole run the record lacks or the other way. Read with the Clojure reader.\n"
-               (apply str (for [[_ r] by] (str (binding [*print-length* nil *print-level* nil] (pr-str r)) "\n")))))
+               (apply str (for [[_ r] by] (str (binding [*print-length* nil *print-level* nil] (pr-str r)) "\n")))
+               (apply str (for [r runs] (str (binding [*print-length* nil *print-level* nil] (pr-str r)) "\n")))))
     (println (str "lib-stg: " (count new) " modules recorded into " record-file " (" (count by) " rows)"))))
+
+(defn- run-passes [results-file]
+  (vec (sort (for [l (str/split-lines (slurp results-file)) :when (str/starts-with? l "{")
+                   :let [m (read-string l)] :when (= :pass (:result m))]
+               (:id m)))))
+
+(defn record-runs
+  "HF10-P20: a run of run-check's programs on a library set (lib-stg --ifaces own --run, LIB_STG_REPLACE=SET) as the
+  record's row {:runs SET :passes N :of M :ids [...]}, replacing the set's row, the module rows kept"
+  [results-file record-file set-name]
+  (let [ids (run-passes results-file)
+        n (count (filter #(str/starts-with? % "{") (str/split-lines (slurp results-file))))
+        row {:runs (keyword set-name) :passes (count ids) :of n :ids ids}
+        text (slurp record-file)
+        lines (remove (fn [l] (and (str/starts-with? l "{") (let [m (read-string l)] (and (map? m) (= (:runs m) (:runs row))))))
+                      (str/split-lines text))]
+    (spit record-file (str (str/join "\n" lines) "\n" (binding [*print-length* nil *print-level* nil] (pr-str row)) "\n"))
+    (println (str "lib-stg --run: " (:passes row) " of " n " programs pass on the " set-name " set, recorded into " record-file))))
+
+(defn judge-runs
+  "A run on a library set against the record's row of the set: a recorded pass lost fails (exit 1); with the row of
+  the `equal` set too, a pass of `equal`'s lost on `all` fails"
+  [record-file results-file set-name]
+  (let [rows (into {} (map (juxt :runs identity) (run-rows record-file)))
+        now (set (run-passes results-file))
+        mine (get rows (keyword set-name))
+        lost (when mine (remove now (:ids mine)))
+        lost-eq (when (and (= set-name "all") (get rows :equal)) (remove now (:ids (get rows :equal))))]
+    (cond
+      (nil? mine) (do (println (str "lib-stg --run: UNRECORDED: no row of the " set-name " set in " record-file)) (System/exit 1))
+      (or (seq lost) (seq lost-eq))
+      (do (println (str "lib-stg --run: " set-name ": " (count now) " pass; lost against the record: " (str/join " " (distinct (concat lost lost-eq)))))
+          (System/exit 1))
+      :else (println (str "lib-stg --run: " set-name ": " (count now) " pass, the " (:passes mine) " recorded kept"
+                          (when lost-eq (str ", every pass of the equal set's " (:passes (get rows :equal)) " kept")))))))
 
 (defn judge-stg
   "A lib-stg run's results against the record: exit status 1 when a module is worse, or (a whole run) one of either is
@@ -718,6 +763,8 @@
       "compare-runs" (compare-runs (first more) (second more))
       "judge-stg" (let [[rec res w] more] (judge-stg rec res (= w "whole")))
       "record-stg" (let [[res rec w src] more] (record-stg res rec (not= w "whole") src))
+      "record-runs" (let [[res rec st] more] (record-runs res rec st))
+      "judge-runs" (let [[rec res st] more] (judge-runs rec res st))
       ;; merge MODE RESULTS OURS PACK OUT...: triples; one line a module, NAME OWN KEPT; MODE all (every own binding) or
       ;; equal (only the exported bindings equal to GHC's -O0, RESULTS' judge)
       "merge" (let [[mode res & trip] more

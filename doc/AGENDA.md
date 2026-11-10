@@ -75,8 +75,10 @@ Six crops are above 90 on all three. What the others still need:
   methods' unfoldings after its Simplifier (HF10-P12: lib-stg 5,398 of 7,627 bindings equal to GHC's -O0, ahead of GHC's
   interfaces), and base on that pool (HF10-P14: 235 of 241, `hs-p11`); HF10-P15 to P27 decided (a) (the user, 2026-11-10; P25 yes):
   `hs-p18` built P18 (GHC.Internal.Prim's interface from primops.txt.pp, 3,085 of 3,085 facts and every line but the header equal to
-  GHC's: no GHC interface left on the own path), P15 (`haskell-lib-own-base`, on haskell-lib-check-own's pool) and started P20 (the
-  whole own set: four run-breaking classes fixed, lib-stg 5,407 of 7,632; the run still 0 of 10, the next class bisected); next
+  GHC's: no GHC interface left on the own path), P15 (`haskell-lib-own-base`, on haskell-lib-check-own's pool) and started P20;
+  `hs-p20` carried P20 on (sixteen run-breaking classes fixed in the front end, lib-stg 5,473 of 7,637, 0 worse): the whole own set
+  runs 40 of run-check's 63 (0 of 10 before), the `equal` set 50 (83 modules), both recorded as run rows; P20's proof (all ≥
+  equal, 0 lost) not reached: 10 lost in three classes (a case on the void token, output differences, NonTermination); next
   P20's tail, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
 - **Rust** (all three): the AOT cell has no record yet (RE4's `bin/rsi check --aot --record`, tonight: completeness and

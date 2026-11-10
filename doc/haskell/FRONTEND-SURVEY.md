@@ -2909,3 +2909,104 @@ worse) before the next run.
 | hsi-essential's command (`bin/hsi own-verdicts --check`, `check --only @test/haskell/hsi/essential.txt`) | 123 programs, 0 not passing in no class, the four controls fail as they must |
 | `bin/reap`; `bin/crops-score --judge --strict` | 41 of 44 cells checked, 0 problems; 0 problems (Haskell independence 76.0: no case runs on own libraries yet) |
 | `haskell-lib-own-base`'s command (the pool through the tar) | lib-check 241 against 241, **0 worse** (235 of 241); lib-stg 531 of 1,024 bindings (recorded 531), 0 worse; both controls differ |
+
+## As built: HF10-P20 (a), continued (2026-11-10, branch `hs-p20`, from `mac/hs-p18` 876e2913c)
+
+By an agent in the light lane (one process at a time under 2 GiB; stage 0 `/root/arbace/target/seed/amd64/arbace`, the
+checkout's sources evaluated; no GHC, no gate run, no network). GHC 9.14.1's sources the specification, from the pinned
+tarball (`compiler/GHC/Stg/Unarise.hs`, `compiler/GHC/CoreToStg/Prep.hs`, `compiler/GHC/HsToCore.hs`'s patchMagicDefns,
+`compiler/GHC/HsToCore/Match.hs`'s matchView, `compiler/GHC/Tc/TyCl/PatSyn.hs`'s mkPatSynRecSelBinds,
+`compiler/GHC/Types/Id/Make.hs`'s coerceId; BSD-3, LICENSE.md "GHC").
+
+**Where it stands.** The whole own set (`LIB_STG_REPLACE=all`: every ghc-internal module Arbace's own STG, GHC's `-O0` for
+none) runs **40 of run-check's 63** programs (it ran 0 of the day's 10); the `equal` set (the modules whose every binding
+equals GHC's `-O0`) runs 50 (83 modules own whole, 0 lost against GHC's `-O0` set's 50). The proof of HF10-P20 (≥ the `equal` set's passes, 0 lost) is not
+reached: 10 of `equal`'s passes are lost on `all`, in the three classes of the tail below. lib-stg on the own interfaces
+**5,412 to 5,473 of 7,637** bindings equal to GHC's `-O0` (25 modules better, 0 worse; re-recorded), the modules
+with every binding equal 59 to 64, the `equal` set of the run 78 to 83 modules.
+
+### Method
+
+Each class was found by a run, its first broken module by bisection (`.tmp/p20/bisect.sh` in the worktree:
+`LIB_STG_REPLACE=@FILE` with the `equal` modules plus a prefix of the rest, `LIB_STG_SIDES=own` running the own side alone,
+`LO`/`HI` resuming a range; about a minute a probe), fixed, judged by `lib-stg --ifaces own --judge` (no module worse), and
+the next run made. Static comparisons of the own STG with GHC's `-O0` found classes without runs:
+`arbace.repr.haskell.stgcmp --abi GHC OURS` (every exported binding's arguments' representations), `--rets` (the
+unboxed tuples' sizes the callers of each function expect), `--builds` (the sizes each binding builds), `GHC OURS --why`
+(each differing binding's first difference). hsi's errors now name what they need: "unboxed tuple of the wrong size"
+gives the alternative's size, the values returned and the call's function, "case of an algebraic type on" the
+scrutinee (`go/arbace/hs/compile.ae`'s `tupleSizeMsg`, `scrutName`, `Atom.String`).
+
+### The classes fixed
+
+| class | where it broke | the fix (GHC's rule) |
+|---|---|---|
+| a polymorphic identity's result taken lifted | BigNat's `inline bignat_compare a b` (an Int#) thunked | `tostg/app-type`: a result type variable instantiated from the argument whose type ends in it (inline, lazy, oneShot; runRW#'s `(State# RealWorld -> o) -> o`) |
+| a void value case-bound by its rep | Native's `mwaTrimZeroes#` result passed on: unbound sat | a void argument a case on `(##)`, the argument `void#` (Unarise) |
+| a nullary void join point returned as `(##)` | Native's `bignat_gcd`: the join's body never ran | a jump to a nullary join point is its call (`*njoins*`) |
+| synonyms and newtypes of function types | Latin1's `DecodeBuffer#`, ST's `STRep`, `ST`: results unknown, tuples miscounted | `result-type`, `arg-types` expand synonyms and newtypes (instNewTyCon_maybe) |
+| unsafeCoerce# applied | Exts' `atomicModifyMutVar#`: the triple unarised into its arguments | unsafeCoerce# x is x (patchMagicDefns' unfolding, CorePrep) |
+| match variables untyped | a State# in `(# s, r #)` bound lifted, a 4-tuple returned for 3 | typecheck types the equations' `ds` binders; desugar's match variables take their pattern variables' types (`desugar/fresh-types`); a cast function's type its coercion's target |
+| nested unboxed tuples | Native's case on `quotRemWord3#` bound 2 of 3 | a component binder of several representations unarised into one binder each |
+| coerce's unfolding | Utils' `(#.) _f = coerce` returned the evidence, Eq# | `\d x -> x` (coerceId takes the Coercible evidence) |
+| Unsafe.Coerce's magic | `unsafeEqualityProof = case unsafeEqualityProof of ...` looped; unsafeCoerce returned the proof | the proof's right-hand side UnsafeRefl, a case on the proof its body (patchMagicDefns, CorePrep) |
+| existential dictionaries | Handle__ built with 13 of 17 fields; its selectors took the dictionaries for fields | record construction wants the constructor's context, record update and the selectors bind and pass it |
+| a CAF of a primop | Real's `divZeroError = raise# e` a call of raise# | the CAF float shortcut leaves primops and foreign calls to `rhs` |
+| view patterns | Encoding.Types' `(getEncode -> encode)` a wildcard, its variable unbound | matchView: `x = F v`, then P on x |
+| pattern synonyms' record selectors | BufferCodec's `encode` had no binding | mkPatSynRecSelBinds: the synonym's own pattern, the field's variable, else recSelError |
+| unboxed tuple case binders | Integer's quotRem's `wild_941` unbound | the case binder stands for its components (unariseAlts) |
+| a tuple case of an unknown scrutinee | withNewWordArray2#'s `runRW# io` bound 2 in a case of 1 | the case's size its alternative's binders' |
+| primitive byte strings | the Unicode tables' bitmaps the literal 0: segfaults in generalCategory | `(bytes "...")#` literals as their bytes |
+
+Interim, named as such in the code: `tostg/kinded-results` gives unsafeCoerceAddr's and unsafeCoerceUnlifted's results
+their representations; the elaborator keeps no type variable's kind (its interfaces write `Type` for `(a :: TYPE
+AddrRep)`), the class `kinds` below.
+
+### The tail (stage 4's fallback list until fixed)
+
+The 10 of `equal`'s passes lost on `all`, by class:
+
+1. **case of an algebraic type on void** (LibContainers, MVarOrder, StmBlock, ThrowMasked, class-enum): a function's
+   argument slot holds the void token where a data value is expected; the exception paths (TopHandler's `real_handler`,
+   the forked threads' `catch`) meet it first. Candidates from `--abi`: bindings GHC eta-expands over State# that ours
+   do not (`Arr.adjust`, `done`, `fill`, `ST.unsafeInterleaveST`, the encoders' `[:L :L :v]`), the void fields of
+   constructors (`STret`, `Refl`, `UnsafeRefl`: GHC's Unarise drops them).
+2. **output differs** (Echo, class-num, runtime-laziness, runtime-textio): runs to the end with a different stdout or
+   stderr; not yet looked at.
+3. **NonTermination unhandled** (runtime-loop): "no alternative for NonTermination" in TopHandler's handler.
+
+Beyond the 63: pattern synonym patterns are not desugared (`psyn`, HF9's slice 7: the matcher `$mP`); the kinds of
+type variables (`kinds`: TYPE-kinded binders written `Type`; Box constructors' fields, unsafePtrEquality#); the ABI
+classes `--abi` lists (117 bindings, most of them eta arities hsi's application absorbs).
+
+### Records and tools
+
+- `test/haskell/lib-stg-own-results.edn`: the module rows re-recorded (5,473 of 7,637), and the runs as rows of their
+  own, `{:runs SET :passes N :of 63 :ids [...]}` for `all` (40) and `equal` (50): `lib-stg --ifaces own --run
+  --record FILE` writes the set's row (`LIB_STG_REPLACE`'s set), `--judge FILE` fails on a recorded pass lost (on `all`,
+  on a pass of `equal`'s row lost: the proof of P20, failing today); `libcheck record-runs`, `judge-runs`; `record-stg`
+  keeps the run rows, `judge-stg` reads module rows alone.
+- `LIB_STG_SIDES=own` (lib-stg `--run`): the own side alone (bisection), the other side's last results kept.
+- `LIB_STG_CORE=1`: also the elaborator's local types (`M.ltypes.edn`) beside the Core.
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` | 5,473 of 7,637, **0 worse**, 25 better (re-recorded); the control 0 of 171; 11 min, 1.75 GiB |
+| `LIB_STG_REPLACE=all ... lib-stg --ifaces own --run` | ghc0 50 of 63 (as before: the programs compiled by the changed front end lose nothing); all **40 of 63**, 10 lost (the tail), recorded as `{:runs :all}`; `judge-runs` fails on it, as P20's unmet proof; 15 min, 1.56 GiB |
+| `LIB_STG_REPLACE=equal LIB_STG_SIDES=own ... --run --record` (judge-runs on it: kept; `all`'s results judged as `equal`'s: fails, the control) | 83 modules own, **50 of 63**, 0 lost against GHC's `-O0` set; recorded as `{:runs :equal}`; 7 min, 1.55 GiB |
+| `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` | 265 against 265, **0 worse** (258 of 265; 20,681 of 20,891 facts), 1 better (Encoding.Types' binders 13 to 18: the synonym's selectors; not re-recorded); the control differs; 8 min, 1.78 GiB |
+| `lib-check --package base --ifaces own --judge test/haskell/lib-check-own-base.edn` | 241 against 241, **0 worse** (235 of 241); the control differs; 3 min, 1.39 GiB; base's lib-stg 531 to **547 of 1,024**, 0 worse (re-recorded), its control 0 of 23 |
+| `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (the step `haskell-lib-check`) | 265 against 265, 0 worse (260 of 265), 1 better (Encoding.Types); the control differs; 6 min |
+| `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run` (the step `haskell-lib-stg`) | 5,372 to **5,444 of 7,610**, 0 worse, 31 better (re-recorded); the control 0 of 171; runs 60 of 63 on each side, 0 lost, the 59 recorded kept; 24 min, 1.82 GiB |
+| hsi-essential's command | `bin/hsi own-verdicts --check`, `check ... --only @test/haskell/hsi/essential.txt`: 123 programs, 0 not passing in no class, the four controls fail as they must |
+
+### Night commands (one at a time, under 2 GiB each)
+
+1. `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` (11 min), then
+   `LIB_STG_REUSE=1 LIB_STG_REPLACE=equal bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`
+   (15 min: both sides, `equal`'s 50 kept) and `LIB_STG_REUSE=1 LIB_STG_REPLACE=all ... --run` (15 min; fails on the 10 lost
+   until the tail is fixed: the measure, not a gate step).
+2. The `--full` steps the front end's change touches, as the gate runs them: `haskell-lib-check`, `haskell-lib-check-own`,
+   `haskell-lib-own-base`, `haskell-lib-stg` (the last with `--run`, about 28 minutes).
