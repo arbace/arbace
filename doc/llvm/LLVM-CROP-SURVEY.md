@@ -2173,3 +2173,29 @@ one left, `LTO-Resolution-X86-protected-def-dllimport` (`llvm-as --disable-verif
 `disable-verify` in `test/llvm/valid-wide-known.tsv` (`REPR_LLVM_KNOWN`) until the night's `bin/repr-llvm record-opt`, the class removed
 when it passes. The other lists' records unchanged (valid, reject, split, reject-av, reject-other); `check verify-llvmtest` re-recorded
 (792 of 806: 11 fixed by LL4's messages), roundtrip-llvmtest and text-llvmtest 304/304, verify-probes 472/478.
+
+## As built: llvm-compl2, deferred non-passes closed (2026-11-10, branch `llvm-compl2`)
+
+A light lane, decision-free: the deferred classes whose cause was a gap in Arbace's own tools, re-judged by whole runs of the
+families and recorded from passing runs.
+
+- `bin/llvmi` ran the seed's ci, not the checkout's: it never sourced `bin/lib/ci/fresh.bash`, so a seed older than the checkout's
+  `arbace/c/` (LLS21 (a)'s `__atomic_*`, `fmodf` and function-pointer result widths, all after `d5548e72`) checked and built the lowered C
+  with the old builder, and the records kept `:ci-builtins` and `:abi-punning` items that the checkout had fixed. `run`, `lower`, `check`
+  and `modules` now call `c_ci_fresh`, as `bin/ci` does (the checkout's ci evaluated until the next re-seed).
+- `bin/llvmi check --aot`'s module had no `cilib` link (RES34's prebuilt libraries, which cf2g's programs import since then): every
+  program importing a musl unit failed to build. The module links `CI_AOT_LIB` (default the main checkout's `.tmp/ci-aot-lib`), as
+  `bin/lib/ci/check-aot`'s does.
+- `arbace/repr/llvm/verify.ae` (LLVM 23's Verifier, visitIntrinsicCall and visitVPIntrinsic): gc.relocate tied to a statepoint (or
+  undef, or a landingpad) with constant base and derived indices inside its gc-live bundle; the VP casts' equal vector lengths, vp.fcmp's
+  and vp.icmp's predicates, experimental.vp.splice's index range (times the vscale_range minimum); the module flag
+  require-logical-pointer refusing plain getelementptr and alloca; AMDGPU (an amdgcn triple): allocas in addrspace(5),
+  s.prefetch.data's address spaces, av.load/av.store's metadata string, the cooperative atomics' pointer and metadata node.
+
+Results (whole families, recorded): `bin/llvmi check` 537 of 562 (was 529; with the checkout's ci the x86_fp80 aggregates are
+the data layout's size, so 7 of `:long-double`'s 10 pass), `check --aot` 537 of 562 (was 522; 22 min and 45 min evaluated, under
+1.5 GB); `bin/repr-llvm check verify-llvmtest` 800 of 806 (8 of `:llvmtest-rules` fixed), verify-probes 472/478, roundtrip-llvmtest
+and text-llvmtest 304/304 unchanged. `:ci-builtins` and `:abi-punning` removed; `:long-double`'s tests are the 3 left. The crop's
+completeness 96.4% to 97.6% (read 98.7 to 99.2, eval 94.1 to 95.6, AOT 92.9 to 95.6). Left deferred: `:personality` 13 a level
+(the C++ runtime on ci), `:dg-options` 2 (the pack remade by clang with each test's options, by hand), the read's 4 rules (the whole-wave
+call, load-to-lds, mfma-scale, DILocation placement) and 2 messages, the probes' 5.

@@ -2790,3 +2790,15 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   unchanged (Rust 75.0 / 75.0 / 95.8 / 80.0): an own case still consumes rustc's records, so the eval stage stays 0.5 (RES54 (a);
   `independence.edn` counts the own cases). Proposed: RFP42-RFP47.
 
+
+## 2026-11-10: LLVM IR's deferred non-passes closed where the gap was Arbace's own (branch `llvm-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90%, cheapest per case first (doc/CROPS-SCORE.md). LLVM IR: `bin/llvmi` checked and built the
+lowered C with the seed's embedded ci, not the checkout's (no `c_ci_fresh`), so LLS21 (a)'s fixes never reached its records; and
+its AOT module lacked RES34's `cilib` link, so no program importing musl's prebuilt units built. Both fixed in `bin/llvmi`, the
+Verifier rules of gc.relocate, the VP intrinsics, require-logical-pointer and AMDGPU's allocas, prefetch, av load/store and
+cooperative atomics ported into `arbace/repr/llvm/verify.ae` (LLVM 23.1.5's Verifier.cpp). Whole runs recorded: llvmi eval and AOT
+537 of 562 each (529, 522 before), verify-llvmtest 800 of 806 (792); the other families unchanged. Completeness 96.4 to 97.6.
+Alternatives: recording only the re-run rows (`bin/llvmi check --record` takes no `--only`), so the whole levels were run, in the
+light lane (one run at a time, under 1.5 GB). ci's namespaces were not changed (they are embedded, in `gate_key`); llvmi's are crop
+paths. Scheme (SCS27 proposed) and C (the long tail of the checker and the converter, a case each) were looked at and left.

@@ -1755,6 +1755,16 @@
       (and (zero? (long dbi)) (= 'alloca (first db))
            (let [[_ ps] (split-inst db) c (second (strip-flags ps))] (or (nil? c) (not (vector? c)) (not (local? (peek c)))))))))
 
+;; llvm-compl2: module-wide facts some instruction rules read
+(defn- require-logical-pointer? []
+  (boolean
+   (some (fn [f] (let [[_ id v] (md-ops f)]
+                   (and (= (md-str id) "require-logical-pointer") (md-int-op? v) (not (zero? (.signum ^java.math.BigInteger (md-int-val v)))))))
+         (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) *all-forms*))))
+
+(defn- amdgcn-triple? []
+  (boolean (some #(when (= (first %) 'llvm/triple) (str/starts-with? (str (second %)) "amdgcn")) *all-forms*)))
+
 (defn- check-intrinsic-call
   "Verifier::visitIntrinsicCall: the rules of particular intrinsics at their calls (each visit ends at its first failure)."
   [^String nm b defs]
@@ -1772,6 +1782,25 @@
         (when-not (#{"fpexcept.ignore" "fpexcept.maytrap" "fpexcept.strict"} ex) (verr :verifier/intrinsic-call "invalid exception behavior argument" :inst))
         (when (and rounding? (not (#{"round.dynamic" "round.tonearest" "round.downward" "round.upward" "round.towardzero" "round.tonearestaway"} rm)))
           (verr :verifier/intrinsic-call "invalid rounding mode argument" :inst))))
+;; llvm-compl2 (visitIntrinsicCall's AMDGPU cases): s.prefetch.data on flat, global or constant memory (or an address space
+    ;; past AMDGPU's), av.load/av.store's last argument a metadata string, the cooperative atomics on a generic or global pointer
+    ;; with a node of one string last
+    (cond
+      (str/starts-with? id "llvm.amdgcn.s.prefetch.data")
+      (let [as (addrspace (aty 0))]
+        (when-not (or (#{0 1 4} as) (> (long as) 9))
+          (verr :verifier/intrinsic-call "llvm.amdgcn.s.prefetch.data only supports global or constant memory" :inst)))
+      (re-find #"^llvm\.amdgcn\.av\.(load|store)\." id)
+      (when-not (md-str (arg (dec (count args))))
+        (verr :verifier/intrinsic-call "the last argument to av load/store intrinsics must be a metadata string" :inst))
+      (str/starts-with? id "llvm.amdgcn.cooperative.atomic.")
+      (do (when-not (#{0 1} (addrspace (aty 0)))
+            (verr :verifier/intrinsic-call "cooperative atomic intrinsics require a generic or global pointer" :inst (value-culprit (aty 0) (arg 0) defs)))
+          (let [ops (md-ops (arg (dec (count args))))]
+            (when-not (and (= 1 (count ops)) (md-str (first ops)))
+              (verr :verifier/intrinsic-call "cooperative atomic intrinsics require that the last argument is a metadata string" :inst
+                    (value-culprit 'metadata (arg (dec (count args))) defs)))))
+      :else nil)
     (case id
       "llvm.assume"
       (do (when (seq (:bundles o)) (when-not (#{1 true} (arg 0)) (verr :verifier/intrinsic-call "assume with operand bundles must have i1 true condition" :inst)))
@@ -1813,6 +1842,45 @@
       (let [fa (arg 0) d (when (global? fa) (.get *gdefs* (global-key fa)))]
         (when-not (and d (= :function (:kind d)) (= 'llvm/define (first (:form d))))
           (verr :verifier/intrinsic-call "llvm.localrecover first argument must be function defined in this module" :inst)))
+      ;; llvm-compl2 (LLVM 23's Verifier, visitIntrinsicCall's experimental_gc_relocate): tied to a statepoint (or undef, or a landingpad
+      ;; on an invoke's unwind path), the base and derived indices constant and within the statepoint's gc-live bundle
+      "llvm.experimental.gc.relocate"
+      (let [tok (arg 0) d (when (local? tok) (.get ^java.util.Map defs (local-key tok))) di (when d (nth d 2))
+            sp (when (and di ('#{call invoke} (first di)))
+                 (let [c (callee-of di)] (when (and (global? c) (str/starts-with? (global-key c) "llvm.experimental.gc.statepoint")) di)))
+            lp? (and di (= 'landingpad (first di)))]
+        (when-not (= 3 (count args)) (verr :verifier/intrinsic-call "wrong number of arguments" :inst))
+        (when-not (or lp? sp ('#{undef poison} tok))
+          (verr :verifier/intrinsic-call "gc relocate is incorrectly tied to the statepoint" :inst))
+        (when-not (integer? (arg 1)) (verr :verifier/intrinsic-call "gc.relocate operand #2 must be integer offset" :inst))
+        (when-not (integer? (arg 2)) (verr :verifier/intrinsic-call "gc.relocate operand #3 must be integer offset" :inst))
+        (when sp
+          (when-let [live (some (fn [[tag & ops]] (when (= tag "gc-live") ops)) (:bundles (nth (split-inst sp) 2)))]
+            ;; getZExtValue: a negative i32 index is a large unsigned one
+            (let [n (count live) zx (fn [v] (if (neg? (long v)) Long/MAX_VALUE (long v)))]
+              (when-not (< (zx (arg 1)) n) (verr :verifier/intrinsic-call "gc.relocate: statepoint base index out of bounds" :inst))
+              (when-not (< (zx (arg 2)) n) (verr :verifier/intrinsic-call "gc.relocate: statepoint derived index out of bounds" :inst))))))
+      ;; llvm-compl2 (visitVPIntrinsic): a VP cast keeps the vector length, vp.fcmp and vp.icmp take their kind's predicates,
+      ;; experimental.vp.splice's index within [-VL, VL-1], VL the known minimum elements times the function's vscale_range minimum
+      ("llvm.vp.fptoui" "llvm.vp.fptosi" "llvm.vp.uitofp" "llvm.vp.sitofp" "llvm.vp.fptrunc" "llvm.vp.fpext" "llvm.vp.trunc"
+       "llvm.vp.zext" "llvm.vp.sext" "llvm.vp.ptrtoint" "llvm.vp.inttoptr")
+      (let [rt (result-type b) at (aty 0)]
+        (when (and (vec-type? rt) (vec-type? at) (not= (shape rt) (shape at)))
+          (verr :verifier/intrinsic-call "VP cast intrinsic first argument and result vector lengths must be equal" :inst)))
+      "llvm.vp.fcmp"
+      (when-not (#{"false" "oeq" "ogt" "oge" "olt" "ole" "one" "ord" "uno" "ueq" "ugt" "uge" "ult" "ule" "une" "true"} (md-str (arg 2)))
+        (verr :verifier/intrinsic-call "invalid predicate for VP FP comparison intrinsic" :inst))
+      "llvm.vp.icmp"
+      (when-not (#{"eq" "ne" "ugt" "uge" "ult" "ule" "sgt" "sge" "slt" "sle"} (md-str (arg 2)))
+        (verr :verifier/intrinsic-call "invalid predicate for VP integer comparison intrinsic" :inst))
+      "llvm.experimental.vp.splice"
+      (let [rt (result-type b) idx (arg 2)
+            vr (attr-of (group-items (:attrs fo)) "vscale_range")
+            lo (if vr (Long/parseLong (first (re-seq #"[0-9]+" (str (second vr))))) 1)
+            vl (* (long (nth rt 1)) lo)]
+        (when (and (vec-type? rt) (integer? idx)
+                   (not (or (and (neg? (long idx)) (<= (- (long idx)) vl)) (and (>= (long idx) 0) (< (long idx) vl)))))
+          (verr :verifier/intrinsic-call "The splice index exceeds the range [-VL, VL-1] where VL is the known minimum number of elements in the vector" :inst)))
       "llvm.experimental.gc.statepoint"
       (do (when (and (= h 'call) (seq? (second ps)) (= 'asm (first (second ps))))
             (verr :verifier/intrinsic-call "gc.statepoint support for inline assembly unimplemented" :inst))
@@ -3272,6 +3340,12 @@
                             (verr :verifier/landingpad "LandingPadInst not the first non-PHI instruction in the block."))))
                       (check-funclet hd b x bi blocks items insts g defs (some? (:personality o)))
                       (when (= hd 'getelementptr) (check-gep b))
+                      ;; llvm-compl2: the module flag require-logical-pointer (nonzero) takes plain getelementptr and alloca out
+                      ;; (llvm.structured.gep and llvm.structured.alloca instead); AMDGPU's allocas are in the private address space 5
+                      (when (and ('#{getelementptr alloca} hd) (require-logical-pointer?))
+                        (verr :verifier/logical-pointer (str "Non-logical " hd " disallowed for this module.") :inst))
+                      (when (and (= hd 'alloca) (amdgcn-triple?) (not= 5 (addrspace (result-type b))))
+                        (verr :verifier/alloca "alloca on amdgpu must be in addrspace(5)" :inst))
                       (when ('#{load store} hd) (check-load-store hd b))
                       ;; visitCallBase
                       (when-let [c (callee-of b)]
