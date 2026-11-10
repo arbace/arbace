@@ -785,3 +785,41 @@ Each fix is the typer's own rule, from OCaml 5.5.0's typing/:
   typer at it ("type expression :Ptyp_open outside the slice"); the program types now (it runs on the C API on ci, doc/ocaml/
   OCAML-SURVEY.md, "As built: the C API on ci"; its run is the speed class, below). The native library rebuilt with it, all 49
   units of the other libraries as before; `bin/oi check --only-list test/ocaml/essential-check.txt` 58 of 58.
+
+## 27. As built: night 10's native-path gaps (2026-11-10, branch `ocaml-indep2`, from `ocaml-indep`'s `813c335f0`)
+
+Night 10's light lanes ran `bin/oi check`, `check --aot` and `suite check` on the native path over next (`.tmp/night10/DIAGNOSIS.md`
+§2-3); `ocaml-indep` had fixed 20 of the suite's 25. The rest, each from OCaml 5.5.0's sources (the pinned tarball):
+
+- **`:c-runtime-internals` takes the C stubs' runs** (`test/ocaml/divergences*.edn`): since ef4f24416 the stubs build on ci against
+  the clean-room `caml/*.h`, which lack the `CAML_INTERNALS` headers by design (OT6 (a)); the class's `:match` adds `fail cstubs: `,
+  `fail output differs`, `fail timeout`, its `:programs` keeping it to the listed tests (the native judge reads divergences.edn
+  after its own classes, so the native records take it too).
+- **Ctype.nondep_type_decl** in `typemod.ae`'s `nondep` (Mtype.nondep_supertype for an anonymous argument): a type declaration in
+  a covariant position whose kind names the parameter is made abstract; its manifest is tried again through private
+  abbreviations (Env.find_type_expansion_opt; the declaration made private), else dropped; the variance flipped in a functor's
+  parameter (Mtype.nondep_mty); a value's, an exception's or a contravariant declaration's still an error. The expansion
+  (Ctype.try_expand_safe) stops at a private abstract abbreviation unless asked. Btype.has_constr_row's `Private` is not
+  modelled (no `#row` constructors in the port). typing-labels/mixin, mixin2, mixin3, memory-model/forbidden.
+- **-safer-matching** (Clflags.safer_matching): Matching.toplevel_handler's partial forced, every match keeping its failure
+  handler; `--safer-matching` passed by `bin/oi`'s two native dumps and the suite's. basic-more/safer_matching (its only user).
+- **Typemod.initial_env's add_units**: the units of the visible -I directories (`*include-dirs*`: an `.mli` or a native
+  `.cmi.ae`, as Env.persistent_structures_of_dir lists the `.cmi`) added as persistent structures after the opened Stdlib, the
+  unit being compiled left out (`env/add-visible-units`). A directory's `.mli` of a unit not compiled yet counts as visible,
+  which OCaml's `.cmi` listing would not (no program of the corpora depends on it).
+  typing-shadowing-of-pervasives-submodules/redefine_largefile.
+- **Tmc's explicit requests**: Translattribute.get_tailcall_attribute on the function expression (Typecore's Pexp_apply keeps its
+  attributes, `:attrs`), the Lapply's ap_tailcall as its fourth element `{:tailcall :true|:false}` (kept by simplif's and
+  make_key's rebuilds; the dump prints no attributes), read by choice_apply (false: no TMC call) and by
+  find_nonambiguous_tmc_call (one explicit request among several arguments with calls). tmc/tupled_function.
+- **Tcoerce_structure's id_pos_list** (`[:structure pairs ids]`): Includemod.signatures' present modules of sig1 with their
+  positions, composed by compose_coercions and bound around the coerced block by wrap_id_pos_list (apply_coercion,
+  transl_structure); compose_coercions keeps a Tcoerce_alias as a Tcoerce_primitive; transl_module_path through an absent
+  alias to its target's address (Env's ModAlias). basic-modules/pr11186.
+
+Checked: `bin/oi check --only-list` (the C-stub tests classed, mixin x3 and safer_matching pass), `suite check --only-list`
+(forbidden, redefine_largefile, tupled_function, pr11186, the opam loads pass), `check --aot --only-list` (lib-digest/md5 and
+misc/hamming pass natively: their translated program is the oracle path's byte for byte up to stamps; the night's "timeout 120s
+of CPU" is the limit's edge, md5 117 s and hamming 134 s wall here, not a native-path gap), typer-check 79 of 79, stdlib-check
+71 of 71, the oi-essential step's commands. Left on the native path: lib-sys/immediate64 (Ctype's pattern-mode unification of
+an abbreviation with an abstract type: mcomp and record_equation, not ported) and opam/sexplib0/load (a GADT's inline record).

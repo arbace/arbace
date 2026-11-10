@@ -2826,3 +2826,32 @@ set's own verdicts", with the proposals OC209-OC211.
   cases left: 37 at oi's level, 16 at the AOT level (OC209-OC211).
 - Scores (`bin/crops-score --crop ocaml`): independence 51.3% to 51.4% (judge 0.563 to 0.570, its cases by `own-verdicts`); after
   night 10's read and print records and the switch, about 99.9%.
+
+## 2026-11-10: OCaml's native path, night 10's gaps (branch `ocaml-indep2`, from `ocaml-indep` `813c335f0`)
+
+The brief: fix the native-path gaps night 10's light lanes exposed (`.tmp/night10/DIAGNOSIS.md` §2-3: la-oi-check 11 failing,
+la-oi-aot 9, la-oi-suite 25, of which `ocaml-indep` fixed 20), in a light lane (one process at a time, under 2 GiB), judging
+by list, not recording: the native records are night 12's, after the merge. Recorded in doc/ocaml/TYPER.md, "27. As built:
+night 10's native-path gaps".
+
+- 2a: `:c-runtime-internals` (all six classes files carrying it) also matches the C stubs' run reasons (`fail cstubs: `, `fail
+  output differs`, `fail timeout`), its `:programs` keeping it scoped: since ef4f24416 the stubs build on ci against the
+  clean-room headers, without the `CAML_INTERNALS` ones by design (OT6 (a)). The nine C-stub tests are classed again.
+- 2b: Ctype.nondep_type_decl's rule in `typemod.ae`'s `nondep` (OCaml 5.5.0, typing/ctype.ml and mtype.ml): in a covariant
+  position a kind that cannot be erased becomes abstract, a manifest that cannot be erased is tried through private
+  abbreviations, else dropped; the variance flips in a functor's parameter. Alternative: catching the error for abstract kinds
+  alone, as the diagnosis proposed (not faithful: OCaml's rule is by variance, and keeps a private expansion first).
+  typing-labels/mixin, mixin2, mixin3 and memory-model/forbidden pass.
+- 2c: `-safer-matching` ported (Matching.toplevel_handler: every match partial) rather than accepted as a no-op;
+  basic-more/safer_matching, its only user, passes.
+- Beyond the brief, cheapest first: redefine_largefile (Typemod.initial_env's add_units: the -I directories' units shadow the
+  opened Stdlib), tmc/tupled_function (Translattribute's tail-call attribute carried to Tmc's find_nonambiguous_tmc_call),
+  basic-modules/pr11186 (compose_coercions' Tcoerce_alias case, Tcoerce_structure's id_pos_list and wrap_id_pos_list,
+  transl_module_path through an absent alias). Each from OCaml 5.5.0's lambda/ and typing/ (the pinned tarball).
+- The AOT level's "timeout 120s of CPU" on lib-digest/md5 and misc/hamming is not a native-path gap: the native Lambda of md5
+  equals ocdump's up to stamps (ocdump run by hand as the oracle), its translated program the oracle path's, and both pass
+  natively here (md5 117 s, hamming 134 s wall): the CPU limit's edge under the night's load.
+- Left: lib-sys/immediate64 (Ctype's pattern-mode unification of an abbreviation with an abstract type, mcomp and
+  record_equation, not ported) and opam/sexplib0/load (a GADT's inline record), both native-path classes until ported.
+- Checks: the lists above by `bin/oi check`, `suite check` and `check --aot` `--only-list`; typer-check 79 of 79 at the three
+  levels; stdlib-check 71 of 71; the oi-essential and oi-divergences steps' commands (essential 59 of 59, repl-check 24 of 24, own-verdicts 0 differ); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
