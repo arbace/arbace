@@ -5507,3 +5507,69 @@ record (`roundtrip --record`, live) classes them.
   (`.tmp/q257/257-independence.patch`, superseding 256's).
 - **The night's command (main host, python3):** `REPR_PYTHON_ORACLE=record bin/repr-python roundtrip samples stdlib site-packages
   lib-test`, then commit the four `python-pydump-printed-*` pins and manifests and `essential/printed-samples/` (report 257).
+
+## As built: 251, pyi on goi's speed: `:slow-on-goi` and `:clib-on-goi` (2026-11-10, the Mac VM, queue 251)
+
+The brief: profile pyi's eval loop under goi on the two classes' tests, port CPython 3.14's fast paths that apply, run the C
+library cores natively where goi's table allows, each test's time before and after.
+
+**Where the time goes (run, the VM).** Each of the eight tests was timed alone (`unittest` on the one test id, `bin/pyi run`, two
+at a time, base 836dd541 and head in separate worktrees sharing one IR cache):
+
+| test | class | base: load + run | head: load + run | what bounds it |
+|---|---|---:|---:|---|
+| test_traceback ...keyword_suggestions_from_command_string | slow | 34 + 499 s, ok | 34 + 487 s, ok | 22 children of pyi on goi, 18-22 s each to start |
+| test_traceback ...keyword_suggestions_from_file | slow | 33 + 513 s, ok | 33 + 489 s, ok | the same |
+| test_queue ...shutdown_immediate_all_methods_in_many_threads | slow | 27 + 49 s, ok | 31 + 38 s, ok | the eval loop (64K put/get under 12 threads) |
+| test_xml_etree ...test_deeply_nested_deepcopy | slow | 42 + 190 s, ok | 45 + 161 s, ok | the eval loop (500,000 SubElement calls, then deepcopy) |
+| test_subprocess ...test_communicate_timeout_large_input | slow | 75 + 13 s, error | 77 + 13 s, error | the child's start: `server.accept()` times out at the test's own 10 s |
+| test_bz2 ...testDecompressLimited | clib | 405 + 700 s, ok | (not rerun) | ci interpreted by goi (the module's `BIG_DATA` compressed at import) |
+| test_lzma ...test_decompress_limited | clib | killed at 1,200 s | (not rerun) | the same |
+| test_bz2 ...testThreading | clib | killed at 1,200 s | (not rerun) | the same (50 MB) |
+
+Three bounds, of which only one is the eval loop's:
+- **pyi's start on goi** (traceback's two, subprocess's): `bin/pyi python -c pass` is 18.3 s at base and head; a Go profile of
+  stage 0 (`ARBACE_CPUPROFILE`) puts it in reading the runtime's 23 MB of mode-`:full` forms (about 21% of the CPU), goi's checker
+  over `arbace/py` (12%), goi's builder (5%), the evaluated front end (`arbace/python`, 25%) and Go's collector (29%). None of it is
+  pyi's runtime running; all of it goes when W2 compiles `arbace/py` into the executable and embeds `arbace/python` (PYS28 (a),
+  W-D1 (a)). test_subprocess's test is a failure, not a timeout: its child must connect within 10 s.
+- **ci interpreted by goi** (the three `:clib-on-goi`): nothing in the eval loop; goi's table on this branch already lists
+  `arbace/ci` and `arbace/crt` (queue 214, 208's DECISION 1 (a)), so W2's executable runs ci's interpreter compiled (cirun's speed,
+  about 130 times, 208's table). No REQUEST is needed: the table allows it at W2, and before W2 nothing on the VM can.
+- **The eval loop on goi** (queue, deepcopy): what this task changed.
+
+**goi's cost model (probed, `bin/goi run` of a Go program on stage 0, ns per operation):** a push and a pop with `append` and
+re-slicing 421, with an index and an int 204, inline 81; `f.Fast[i]` 33, a local slice's `fast[i]` 11; `in := c.Instrs[pc]` 136
+(a struct copy), `in := &instrs[pc]` 34; a call 28, a call of a function with a `defer` 233; an interface method call 41. goi
+loads a slice, struct or pointer from a field through `reflect.NewAt(...).Elem().Interface()` and stores one through `reflect`'s
+`Set` (`go/arbace/goi/types.ae`'s `load` and `store`); only empty-interface, interpreted-interface and scalar fields are plain
+loads. A pyi instruction was about 1 us on goi, two-fifths of it the value stack's slice header.
+
+**The changes (run, `go/arbace/py`, `arbace/python/aot.ae`):**
+- **The value stack as `Stack[:SP]`** (CPython's `stack_pointer`): `Frame.Stack` holds the room, `Frame.SP` the depth; a push or a
+  pop moves an int, not the slice's header. Every `len(f.Stack)` is `f.SP`, every open slice of the stack bounded by it,
+  `growStack` copies `Stack[:SP]`, the collector's walk (`finalize.go`) visits `Stack[:SP]`; arbace.python.aot's depth checks read
+  `(.-SP f)`.
+- **step's instructions by address**, `c.Instrs` and `f.Fast` held in locals (a frame's fast locals are made with it and never
+  replaced).
+- **CPython 3.14's FOR_ITER_RANGE, FOR_ITER_LIST, FOR_ITER_TUPLE**: the exact range, list and tuple iterators' next inline in step,
+  their slots' code.
+- **LOAD_ATTR and STORE_ATTR in step's switch** (through `opImpls` each copied its instruction; CPython's are the loop's own; the
+  registered implementations stay for `AotExec`), LOAD_FAST, STORE_FAST and POP_TOP's push and pop inline, CALL's keyword names
+  read only when given. The specializations 202b and 210 had already ported (LOAD_ATTR's and LOAD_GLOBAL's inline caches, the
+  exact int and float BINARY_OPs, CALL_PY_EXACT_ARGS's binding, CALL_ALLOC_AND_ENTER_INIT, the method variant) were kept.
+
+**Measured on goi** (`bin/pyi run`, 100,000 iterations, the base and the head alternated twice): an empty `for` 0.36 -> 0.23 s, a
+function call 2.5 -> 2.1 s, a method call 3.3 -> 2.5 s, an attribute load 1.5 -> 1.0-1.2 s, a class's call 2.7 -> 2.1-2.3 s,
+`list.append` 1.7 -> 1.2 s; 20,000 SubElement calls 3.9 -> 3.1 s; the tests above. Not taken: a call that stays in step (CPython's
+`goto start_frame`; each Python call returns to runFrames and enters its callee through guardedStep's `defer`, about 0.5 us of a
+call's 21 us on goi), and the collector's knobs (`PYI_GOMEMLIMIT=8GiB GOGC=400`: 6% for twice the memory).
+
+**After W2 (probed, `bin/pyi aot`):** the runtime compiled, the tests on its loop as W2's executable runs them: deepcopy's test
+0.8 s, the queue's 0.1 s.
+
+**The classes:** `:slow-on-goi` 5 and `:clib-on-goi` 3 before and after: on the VM no member passes within the driver's 300 s that
+did not already (deepcopy's and the queue's pass alone at base, in 190 s and 49 s; their rows are the night's runs, with other
+modules beside them); the night's record decides. test_subprocess's member is a failure of its own 10 s timeout, kept in
+`:slow-on-goi` (the child's start is the cause) until W2. Checks: `make python-essential`, `bin/pyi runtime vet`, `bin/pyi
+table-check --configs tamago/amd64,tamago/arm64`, a sampled `bin/pyi runtime check`, `test-251-stack.bash` (report 251).
