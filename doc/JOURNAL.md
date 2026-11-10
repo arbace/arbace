@@ -2794,3 +2794,33 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   an own measure); counting the generated programs without running them (no credit without the run); taking the night8 run's whole ci
   library (its reader is older): only the 13 units no day process could read were taken, their lowered C byte for byte the checkout's.
 - **Slips**: one process substitution in a throwaway comparison; one kill loop that matched its own shell. Recorded in the survey.
+
+## 2026-11-10: C++'s CP325-CP337 and P23 built (branch `cpp-props5`)
+
+- **What**: the user's acceptance of 2026-11-09 (each proposal as recommended), on a branch from mac/cpp-route-merged a69c3b10a so that
+  cpp-route's code generation route is in. Checker: a Sema crash is a failing `:crash`, never an acceptance (CP325 (a); parse/enum4.C's
+  long overflow in the constant evaluation fixed: 64-bit wrap); a time cap for each file of the dg read, `REPR_CPP_DG_TIMEOUT` default
+  300 s (CP329 (a)); `C<A>::M` as a placeholder for a deduced class (CP327 (a), class-deduction-alias20); structured bindings modelled
+  in the checker (CP331 (a)); `:gxx-only-rules` by design (CP328 (a)). Code generator: inheriting constructors (CP330 (a), CP326 (a);
+  mangled CI1/CI2 <base>, Itanium §5.1.4.3), std::tuple and std::map's operator[] (CP332 (a): clang's builtin templates
+  `__type_pack_element` and `__make_integer_seq` in the native parser and the templates, a pack parameter's type as an alias's argument,
+  pack expansions as one argument, a misread fold, if constexpr over a class, a failing decltype in a bound signature a substitution
+  failure), runtime/hello.cpp now generated; the full parse cache in gen-batch (CP336 (a)); the module's order as clang's (P23 (a):
+  functions placed at first reference as llvm::Functions are when created, EmitDeferred depth first; the order read from
+  clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH LLVM-exception, no code ported). CP333 (b), CP334 (b),
+  CP335 (b): nothing to build now; CP337 (b) was cpp-route's.
+- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (hello.cpp, unique_ptr
+  and the library's tuples were the next group), and the read's own record counts the dg files Arbace's front end judges alone.
+- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: cpp-props5"): the dg every-10th sample 121 → 121 own passes, the same files (two
+  regressions found and fixed on the way); 75 files with structured bindings, inheriting constructors and alias20: 12 → 13; the run
+  corpora's 82 programs by our route: 55 → 56 generated, then hello.cpp; codegen-gen 154 of 154 recorded again for P23's order (the
+  forms otherwise the same); P23 against clang's IR of 17 samples by hand: vtables in clang's order 3 → 13, functions' common
+  subsequence 44% → 79%. No run check (the lowered runtime's read is heavy; the runs are the night's). `bin/crops-score --crop cpp`
+  unchanged (76.3 / 100 / 67.8): the facts move only with the night's records (the dg own record, the switch).
+- **Alternatives considered**: writing the deferred functions after each top-level definition (tried: clang's IR shows the bodies'
+  references placed later, the positions are creation order, so it was dropped); diagnosing a failed decltype at the call instead of
+  dropping the candidate (wrong for SFINAE, [temp.deduct.general]/8); a future with a timeout for CP329 (the goroutine would run on).
+- **Proposed**: CP338 (the run corpora's remaining refusals), CP339 (landing pads' cleanups at the scope's end), CP340 (the generation's
+  time at night).
+- **Slips**: two process substitutions (`paste <(...)`, `diff <(...)`) and one `>/dev/null` in throwaway comparisons, against the day's
+  rules; a `bin/cppi runtime-build` attempt was refused by the permission layer during night 10's heavy work and not retried.

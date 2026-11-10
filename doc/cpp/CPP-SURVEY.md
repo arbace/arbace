@@ -5700,3 +5700,96 @@ its own shell's command line (a pattern in the loop's text) and ended the shell,
 `.tmp/`: `g0/`, `g3/`, `g4/` (the generation runs), `chk-ours/`, `chk-ours25/`, `aot-ours25/` (the runs), `cg1/`-`cg4/` (codegen-gen),
 `base/` (a0c6ad347's worktree and its `cg0/`), `micro/` (the probes), `probe/` (the native tree's dump), `m/` (the lists), `stubs/`,
 `memwatch.sh`, `gen*.sh`, `mklists.sh`, `ps.sh`, and the runtime `cppi/runtime/` (its ci library, 13 units from night8's).
+
+## Decided (2026-11-09, the user: CP325-CP337, P23)
+
+Each as recommended: CP325 (a), CP326 (a), CP327 (a), CP328 (a), CP329 (a), CP330 (a), CP331 (a), CP332 (a), CP333 (b), CP334 (b),
+CP335 (b), CP336 (a), CP337 (b) (built on `cpp-route`), and doc/cpp/CODEGEN.md's P23 (a).
+
+## As built: cpp-props5 (2026-11-10; branch `cpp-props5` from mac/cpp-route-merged a69c3b10a)
+
+Light, by day's rules in night 10's light lane: main's stage 0 (`ARBACE_HOST_EXE`), one run at a time of at most about 2 GiB
+(`GOMEMLIMIT=1400MiB`, a watcher killing a process tree past 2.3 GB; the one program past 2 GiB is named below), `REPR_CPP_THREADS=2`,
+compiler stubs exiting 99 first on PATH (clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld, as, opt, llvm-as, lli,
+llc; their log empty at the end), no gate but `--plan`, no run check (the lowered runtime's read is a heavy job: the programs' runs by
+our route are the night's).
+
+### What was built
+
+- **CP325 (a), a Sema crash a status of its own.** `arbace.repr.cpp.diag/sema-errors`: a unit's refusal (`:codegen/refused`, a type's
+  `:cpp/gap`, a constant not reached) leaves the errors found before it, as before; anything else thrown is a crash, the file's read a
+  failing `:crash` with its message (`dg/read-own`), never an acceptance. On the every-10th sample 8 files read so (they had been
+  "accepted" with nothing found): coroutines' three (a NullPointerException), pr67405.C and template/instantiate1.C (a stack overflow),
+  template/array32.C (a number format), warn/overflow-warn-3.C (a division by zero in the evaluation); all failing before as after.
+  Found by it and fixed: parse/enum4.C's `9223372036854775807ULL * 2 + 1` threw Java's long overflow in `const-int` (its own pass held
+  only because the crash came after its errors): the evaluation's 64-bit arithmetic wraps, as the unsigned types' modulo 2^N does.
+- **CP329 (a), the dg read's time cap.** `REPR_CPP_DG_TIMEOUT` seconds a file (default 300, as clang's dumps had; 0 none): sema's
+  `*deadline*`, checked at each expression and statement analyzed, each constant evaluated (every 4,096 steps of the constexpr
+  evaluator) and each template instantiated (`tick!`); past it every step throws, the analysis unwinds and the read is a failing
+  `:timeout`. On the sample one file (cpp23/ext-floating12.C, rejected and failing before) reads past 300 s.
+- **CP328 (a)**, test/cpp/divergences-dg.edn's `:gxx-only-rules` (by design, by file): cpp1z/inh-ctor35.C (`-fno-new-inheriting-ctors`,
+  the rules before P0136R1) and cpp1z/class-deduction-alias1.C (GCC's alias equivalence at C++17); both were in `:clang-accepts`.
+- **CP327 (a)**, `sema/ctad-template`: a placeholder `C<A>::M` names the member class or alias template M found by class member lookup
+  in the resolved C<A>: cpp2a/class-deduction-alias20.C passes by the own front end (it crashes clang: no oracle verdict).
+- **CP331 (a)**: the checker models a structured binding as the code generator does (after cpp-props3's [dcl.struct.bind]/4 rules),
+  in declarations and range-based for, so the bindings' uses are analyzed; an array of unknown bound is diagnosed as incomplete
+  (cpp26/decomp11.C had crashed on it once modelled).
+- **CP330 (a) and CP326 (a)**: inheriting constructors in the code generator (doc/cpp/CODEGEN.md G5e): std::unique_ptr at C++17 and
+  later generates.
+- **CP332 (a)**: std::tuple's constructors, std::get, make_tuple, std::map's operator[] and a map of strings (CODEGEN.md G5e: clang's
+  builtin templates `__type_pack_element` and `__make_integer_seq`, which the native parser had declined, so `tuple_element` had no
+  `type`; a pack parameter's type as an alias's argument; pack expansions as a mem-initializer's and a functional cast's arguments;
+  `(__constructible<_Elements...>())` read as a fold; if constexpr over a class; a signature's decltype that does not analyze with every
+  argument bound a substitution failure, std::size of a pair). `__type_pack_element`'s index is checked (not a constant, negative, out
+  of range) and its errors reported at the alias (ext/type_pack_element2.C, an own pass by the parser's decline before, holds by them).
+- **CP336 (a)**: gen-batch with P15 (b)'s full parse cache on (CPP_FULL_CACHE=0 off).
+- **P23 (a)**: the module in clang's order (CODEGEN.md G5e): each function placed at its first reference, as an llvm::Function takes its
+  place in the module when created, the personality at the first landing pad, `__clang_call_terminate` before the declarations its body
+  names, the eager definitions first and then the deferred ones depth first.
+- **CP333 (b), CP334 (b), CP335 (b)**: nothing built: CP333's split is written when the night's switch holds (below), coroutines and GNU
+  vector types stay clang's pack under `auto`. **CP337 (b)** was built on `cpp-route`.
+
+### Checked (light)
+
+| check | result |
+|---|---|
+| the dg every-10th sample (`.tmp/sample.sh`: `sA` the base, `sC` the head) | 121 → 121 own passes, the same files; 2 regressions found on the way (`sB`: ext/type_pack_element2.C by the parser now reading `__type_pack_element`, parse/enum4.C by CP325's crash) and fixed |
+| the 75 files with a structured binding, an inheriting constructor or alias20 (`.tmp/flist.txt`; `fl-b` on a69c3b10a, `fl-n`) | 12 → 13 own passes (class-deduction-alias20), none lost; decomp11's crash fixed after |
+| gen-batch over the run corpora's 82 programs (`.tmp/G1`, before CP332's last fixes) | 56 generated (cpp-route: 55): embed-26 now generates; runtime/hello.cpp generated after (`.tmp/g22`) |
+| gen-batch over the 82 at the head (`.tmp/G2`) | SEE-G2 |
+| probes (`.tmp/p/`): inheriting constructors (inh1), std::unique_ptr (uptr1), std::tuple and make_tuple (tup1-tup3), std::map (map1, map2), a pack-typed alias argument (pk1, pk2), a constexpr if over a class (ce1) | generate (none was run: the runs are the night's) |
+| `bin/cppi codegen-gen` | at the base 154 of 154 as recorded; at P23's head 97 of 154 (57 forms moved by the order alone: 151 the same forms as a set, 3 differing only in the always-inliner's `.iN` numbering); `--record`: 154 of 154 generated, forms.sha256 recorded again |
+| P23 against clang 23.1.5's -O0 IR of 17 samples with vtables (cpp-codegen-fix's, kept in the main checkout's `.tmp/keep/`, by hand) | vtable and VTT definitions in clang's order 3 → 13 of 17; functions and declarations: the longest common subsequence 44.3% → 78.8% of the common names, 2 samples exact (dtors, tmpl-virtual) |
+
+What is left of P23's order: a destructor named by a landing pad's cleanup is placed where our landing pad is written (at the first
+call that may throw) and clang's where the scope's cleanups are popped (at its end); a complete-object constructor and destructor of
+the runtime's classes are declared C2/D2 where clang declares C1/D1 (constructor aliases).
+
+### Proposed (CP338-CP340)
+
+- **CP338: the remaining refusals of the run corpora** (after this branch, 26 of 82): coroutines 7 and vector types 5 stay deferred
+  (CP334 (b), CP335 (b)); the native parser's declines 4 (explicit object parameters, multidimensional subscripts, vbase8-10, library),
+  threads 3 (atomics' `__atomic_thread_fence`, threads' arithmetic on a class, thread-throw's `_Indices`), singles 5. (a) Take them in
+  that order of programs gained, the parser's first; (b) stop at auto's switch. **Recommended: (a).**
+- **CP339: the landing pad's cleanups written at the scope's end**, as clang's PopCleanupBlock (P23's remaining function-order
+  difference). (a) Build it (the EH cleanup blocks emitted when the scope pops, the landing pads branching to them), about a day, the
+  forms recorded again; (b) leave it. **Recommended: (b)** until the codegen records pack (P23's condition) exists to hold the order.
+- **CP340: generation time.** The 82 programs took 5,928 s in one process at `GOMAXPROCS=2` and `GOMEMLIMIT=1400MiB` (cpp-route
+  measured 1,272 s with more processors); runtime/hello.cpp alone 1,884 s with threads.cpp. (a) Measure at night with the
+  full cache warm (CP336) and `GOMAXPROCS` unset; (b) as is. **Recommended: (a)** (night commands below).
+
+### The night's commands (after cpp-route's slot of night 11 and this branch's merge; one process at a time, about 2 GiB)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace REPR_CPP_THREADS=2 GOMEMLIMIT=1400MiB
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the own record over the 4,597 files (CP325's crashes, CP329's cap, CP327, CP331, the parser's builtin templates)
+bin/repr-cpp dg --corpus dg-error --front native                               # the record held
+# then test/crops/independence.edn's C++ read fact (:dg-own [N 1] :dg-clang [4597-N 0.5]) and bin/crops-score --record
+bin/cppi codegen-gen                                                           # 154 of 154 as recorded (P23's order)
+CPPI_ROUTE=ours bin/cppi check --corpus samples,runtime                        # hello.cpp's run by our route (unique_ptr's inheriting constructor, map's operator[])
+bin/cppi route-compare && bin/cppi route-compare --aot                         # as cpp-route's night: no clang pass lost under auto
+bin/cppi route-compare --corpus gxx-dg-run --sample 25                         # embed-26 now ours
+bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2                        # the oracle tier: P23's order against clang's IR at the IR level
+# CP333 (b), when the switch holds: independence.edn's eval and AOT :cases {:own-route [N 1] :pack [82-N 0.5]} averaged with the
+# runtime's (0.5, 0.657 with P21 (b)) -- G5c's model; then bin/crops-score --record
+```
