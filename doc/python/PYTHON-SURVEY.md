@@ -5347,3 +5347,59 @@ against the base where both ran (test_import, test_str, test_format): no method 
 
 **Left**: test_ast's test_pickling (300 s), test_traceback's test_encoded_file (15 children) and test_import's
 test_script_shadowing_stdlib (14 children): each child's start under goi is about 30 s, past the driver's limit.
+## As built: 259, the classes ready for night 11's eval and AOT records (2026-11-09/10, the Mac VM, queue 259)
+
+Light: samples and probes on the VM at 6ee13e5ae (244's head); nothing recorded committed. Night 11 (the main host, amd64)
+records `bin/pyi check` (eval, Lib/test) and `bin/pyi check --aot` (AOT, the 151 programs); run.sh commits Python's
+records only when `bin/reap` shows 0 problems, so every non-pass must be in a class, and the cells' structure must hold.
+
+- **bin/reap and the own verdict** (a REQUEST commit for the main host, `test/reap/main.ae`): the eval cell held the record
+  to the references' non-excluded `:outcome` ids, the ref verdict's methods. The record is the own verdict's since 234:
+  the inventory (every reference id, `:excluded` ones too) with the tests pyi's run reported. So the night's record was a
+  problem by construction ("N cases of check-lib-test-linux-amd64.edn not in [refs]": on the VM's harvested runs 94 such
+  methods in 163 modules). A `:results` source with `:py-ref-modules` whose file says `(verdict own)` is now held to the
+  inventory of its modules, its other ids not extra cases (t1: a fabricated own record with `:excluded` ids and a
+  pyi-only test has 0 case problems, the control with an id dropped 1; the parent 5 extra).
+- **The import probe**: every module of the universe (529) imported on pyi as the driver imports it (regrtest's setup
+  first) and its tests loaded: 413 load, 107 do not import (skips at import: Windows, the GIL, test_gdb, absent C modules),
+  7 have a submodule the loader skipped. Two causes were in no class: `test.support.requires` at module level raises
+  `ResourceDenied` (SkipTest's subclass; the driver writes "import ResourceDenied: ...", eight modules) and `_sysconfig`
+  (test_sysconfig): `:skipped-by-test` and `:c-modules-deferred` take them.
+- **The id probe**: the loader's ids under pyi against the inventory, every module that imports (420 with an inventory):
+  737 inventory methods are never loaded (the night's "not-run"), 703 already classed (test_decimal's C variants); the
+  other 34 by cause: builtins' and itertools.batched's doctests (`:builtin-docstrings`), test_clinic's classes defined
+  only with `_testclinic` (`:c-modules-deferred`), test_code's `CoExtra` under `check_impl_detail(cpython=True)`
+  (`:cpython-only`), and 8 reference ids that name a subtest (`:subtest-ids`, new, by design).
+- **New classes** (divergences.edn): `:memoryview-formats` (test_memoryview's 47: memoryobject.c's formats, shapes and
+  cast), `:buffer-protocol-python` (test_buffer's 9: PEP 688's `__buffer__`/`__release_buffer__` from Python),
+  `:io-memory-c` (test_memoryio's 6 C-class methods), all from 249's run at its head, unclassed there; `:subtest-ids`;
+  `:runner-limits` (a test past the runner's 300 s, a module's rest past its 3600 s: the row's text is its cause, no
+  verdict; DECISION 1, (a) provisional). Narrowed into existing classes: TestLinuxAbstractNamespace's 3 (`:socket-gaps`),
+  testMakefileCloseSocketDestroy (`:finalization`, getrefcount), the ctypes users outside test_ctypes that fail
+  (`:ctypes-port`: test_memoryview's test_ctypes_cast, test_threading's test_finalize_running_thread, test_audit's
+  test_ctypes_call_function; a sample of the 53 such methods: 49 of 94 pass with the controls' subjects).
+- **The families' sample** (`bin/pyi check --fresh`, 13 language-core and stdlib-tests modules whose saved runs held
+  unclassed failures): 2,746 methods, 2,433 pass, 227 classed, 86 in no class, the same 86 as queue 234's runs of
+  2026-11-07 (the families' rotation was never recorded, so nothing had classed them): `:builtin-functions-core`,
+  `:set-core`, `:deque-core`, `:itertools-core`, `:functools-core` by module and cause, `:runtime-panics` (three Go
+  panics, a bug each, by name, no pattern), seven cycles in `:finalization-cycle` (read: their probable cause). Queue 250's leftovers (its report's
+  Lows): test_cmd_line_script's 28 in `:pyi-main-module` (bin/pyi python's prologue in place of runpy; -W ignored), 4 in
+  `:runner-limits`, test_format's 6 in `:format-messages`.
+- **Never-run modules** (about 366 of lib-test-all's 425 had no run under pyi on the VM): two random samples of 12 and
+  10 such modules, `bin/pyi check` (1,480 methods): 1,251 pass, 104 classed, 125 in no class (8%), now classed by cause:
+  `:pyi-command-line` (bin/pyi python's options and environment variables taken and ignored: test_cmd_line, test_warnings'
+  -W and PYTHONWARNINGS tests), `:warnings-c`, `:regrtest-children` (test_regrtest's regrtest in pyi children, not
+  analysed past their cut tracebacks), `:inlined-comprehensions`, `:profile-events`, `:struct-sequences`, `:annotate-rest`,
+  `:pprint-dispatch`, more `:runtime-panics`. At that rate the night's run holds some hundreds to a few thousand methods
+  in no class in the modules not sampled: the morning script lists them with their likely class.
+- **AOT** (divergences-aot.edn's first class, `:finalization-goi`, synth/datamodel/del.py): the night runs pyi on goi
+  beside the compiled run; del.py's compiled run lacks 'del 1' and pyi on goi prints neither, so the rule `:as-pyi` does
+  not take it and the judge's `:differs` is `:failed`, which the AOT cell refuses whatever its class (the essential
+  `--no-pyi` run never saw it). The night's command on the VM, `bin/pyi check --aot` with pyi's runs: 151 programs, 150 pass,
+  1 classed, 0 failing, no `:pyi-differs`; its record copied as the amd64 one, `bin/reap` gave AOT 150 / 0 / 1 and the
+  eval cell's synthetic sources 150 / 1 / 0, the three stale `:until`s the only Python problems.
+- **The morning script** (queue 259's report, for the main host's `.tmp/`): `py-unclassed.sh` lists every non-pass of
+  the night's eval run (its `results.tsv`: the record leaves an unclassed method out) and bin/reap's Python problems,
+  each with its likely class (the class most methods with the same reason are in, a rule by cause, the module's
+  class), and `--control` appends a fabricated unclassed row that must be listed; then `bin/pyi check --judge RUN
+  --record` writes the record from the night's run, no run again.
