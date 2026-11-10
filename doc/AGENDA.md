@@ -182,7 +182,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   pieces, `.eh_frame`, `.got` with GOTPCRELX relaxed, TLS, program headers, `bin/repr-asm link`), and `bin/repr-asm run-check`:
   `test/asm/run/`'s 18 programs (P4's, musl's crti/crtn, string and setjmp functions among them) assembled, linked and run by the CPU,
   18 of 18 by their own verdicts; GNU ld by hand agrees on every run. Freestanding only (musl's libc.a waits for AX7). Proposed
-  AXS45-AXS50 (AX2d's and AX4's AXS37-AXS41 collide: to renumber at merge). Next: the decoder (x86asm, AXS50 (a)).
+  AXS45-AXS50 (AX2d's and AX4's AXS37-AXS41 collide: to renumber at merge).
+  `asm-ax4c` (on `asm-ax4b`; AX4's third slice, "As built: AX4 (third slice)", doc/asm/AMD64.md §9): the decoder, LLVM's X86
+  disassembler rebuilt from the table (not x86asm: AXS63), `bin/repr-asm decode|decode-object|decode-check`: MC/Disassembler/X86's 186
+  tests 24,441 of 24,445 CHECK lines (4 `--mdis` classed), every encoding encode-check meets decoded back (99,505 of 99,509, 4 by
+  design), musl's objects read back (479 of 479); eight controls; a TableGen fix (`let` around a `class`). AX4's exit met. Proposed
+  AXS63-AXS67. Next: AX5's x86i over this decoder (AXS67 (a)).
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

@@ -1034,3 +1034,71 @@ renumber at merge); these start at AXS45 to stay clear of both.
 - **AXS50 The next slice.** (a) the decoder (x86asm converted by repr/go's reader, `MC/Disassembler/X86`'s 13,545 decodings, the
   objects read back to forms), AX4's remaining exit; (b) more run tests first (a generator by instruction family, §10's synthetic
   programs). *Recommended: (a)*, then (b) with x86i (AX5).
+
+## As built: AX4 (third slice, 2026-11-10; branch `asm-ax4c`)
+
+On the light lane (stage 0, one run at a time, under 2 GiB, no lock; no llvm-mc nor any LLVM tool in any check), on `asm-ax4b`. The slice
+is AX4's remaining exit (§12): "x86asm converted (the decoder)", `MC/Disassembler/X86`'s decodings, and the objects read back to their
+forms. doc/asm/AMD64.md §9 describes what was built.
+
+**The choice: LLVM's disassembler rebuilt from the table, not x86asm.** Two sources were weighed. Go's `golang.org/x/arch/x86/x86asm`
+(TamaGo's GOROOT, `src/cmd/vendor/`; BSD; 22,979 lines, 17,223 of them its generated `tables.go` and `avx_tables.go`) decodes into
+its own `Inst` (its `Op` names, its `Args`, GNU's, Intel's and Plan 9's printers): to give LLVM-equal results it would need a map from
+each of its ops and argument shapes to the table's instructions and MCInst operands (and LLVM's choices where both read the same bytes
+otherwise: NOOP against XCHG, the `_REV` forms, EIZ, prefixes kept as instructions), and without that map its result could be neither
+printed by AX2's printer nor re-encoded by AX2's encoder. LLVM's X86 disassembler decodes into the very instruction records the table already holds
+(the matcher's and the printer's): its tables are TableGen's `-gen-disassembler`, made from each instruction's encoding fields, which
+`asm/amd64/table.edn` has (the generator now also lists the 250 instructions only the disassembler emits, `_REV` forms and other
+ForceDisassemble ones, with `:dis` and the mode predicate). So the decoder is X86Disassembler.cpp's logic and X86RecognizableInstr.cpp's
+and X86DisassemblerTables.cpp's rules (contexts, filters, specifiers) written again, 1,100 lines of Arbace, with no generated table
+committed (each decision made at its first use, by opcode type, context and opcode); x86asm would have been its decoder plus its tables
+and the map. The judge then reuses AX2's printer and encoder unchanged. This is
+AX5-DESIGN's AXS53 (a) as the coordinator relayed it; x86asm stays an optional second view.
+
+- **`arbace.asm.amd64.decode`** (`arbace/asm/amd64/decode.ae`): the contexts and ranks, `inheritsFrom` (LLVM's default arguments in its
+  recursive calls kept, the IC case's `AdSize64` passed as noPrefix as LLVM passes it), `outranks`, the attribute mask's context,
+  `insnContext`, the operand specifiers and ModRM filters, `setTableFields` per decision; readPrefixes, readOpcode, getInstructionID with
+  its corrections, readModRM/readSIB/readDisplacement, fixupReg, readOperands, the translation, getInstruction's flags. `decode`,
+  `decode-all`.
+- **`arbace.asm.amd64.decode-check`** (`arbace/asm/amd64/decode_check.ae`) and **`bin/repr-asm decode MODE [intel] HEX...`,
+  `decode-object OBJ`, `decode-check [--record] [dis|rt|obj]`**; the Makefile's `repr-asm-decode`, `-decode-object`, `-decode-check`,
+  `-decode-record`. The corpus `test/asm/corpora.edn`'s `:decode-corpora` (`:mc-x86-dis`, extracted with the others, no round trip's).
+- **The printer** (`arbace.asm.amd64.print`, additive): `addr32`/`addr16` for the decoder's address-size flag (printInstFlags'
+  `IP_HAS_AD_SIZE`, X86_MC::needsAddressSizeOverride). **The encoder** (additive): `memory-operand`, public for the decoder.
+- **Arbace's TableGen fixed**: the `let` stack around a `class` now applies to it (after its superclasses, before its body, as
+  TGParser's ParseObjectBody does); before, AMX-FP8's four `TDP*F8PS` lost their `$src1 = $dst` tie (the decode check's one crash: the
+  printer read an operand the MCInst did not have). The table changes in those four instructions' ties and matcher conversions, and in
+  the disassembler's instructions added.
+
+| level | judged | met | classed | failing |
+|---|---:|---:|---|---:|
+| `dis`: MC/Disassembler/X86's 186 tests, their CHECK lines (13,546 byte strings, AT&T and Intel runs, 16-, 32- and 64-bit, APX, AMX, AVX10, `--hex`, the error tests' diagnostics) | 24,445 | **24,441** | 4 `:markup` (`--mdis`'s two tests) | 0 |
+| `rt`: every encoding encode-check meets in MC/X86, decoded back to the matcher's instruction and operands | 99,509 | **99,505** (of them 16 with llvm-mc's lone LOCK first, 66 another instruction of the same bytes) | 3 `:llvm-nop` (`xchg %ax,%ax` read as `nop`, LLVM's NOOP rule), 1 `:eiz-dropped` (`(,%eiz)` in 64-bit, LLVM's EIZ rule) | 0 |
+| `obj`: musl 1.2.6's 32 files assembled into objects by AX4's assembler, their code decoded in order | 479 instructions | **479** | none | 0 |
+
+The negative controls (`test/asm/controls-decode.txt`): eight, each failing as it must (a test's bytes against another's CHECK lines,
+twice across modes; met encodings decoded in another mode; a musl object against another file's instructions). About 6 minutes for the
+three levels (four threads, under 1.5 GiB). The encode check (99,509 met), the object check, the run check, AX1's and AR1's round trips
+and the table check are unchanged and pass.
+
+Not built in this slice: `--mdis`'s markup printer, FileCheck's variables (none in these tests), a symbolizer (llvm-objdump's branch targets
+and relocations beside the code).
+
+### Proposed (AX4, third slice)
+
+Numbering from AXS63 (AX5-DESIGN uses AXS51-AXS62, the coordinator's note).
+
+- **AXS63 The decoder's source.** (a) as built: LLVM's X86 disassembler rebuilt from `asm/amd64/table.edn`, its tables made at first use;
+  (b) x86asm converted (its ops mapped onto the table's instructions); (c) both, x86asm as a second view checked against (a).
+  *Recommended: (a)*, with (c) only if AX5's x86i wants Go's decoder in goi (AXS53's note).
+- **AXS64 The decode tables committed.** (a) as built: made from the table at first use, never committed; (b) generated into
+  `asm/amd64/dis.edn` by `bin/repr-asm table gen` and checked by regeneration, as LLVM ships X86GenDisassemblerTables.inc; (c) checked by
+  hand against llvm-tblgen's `-gen-disassembler` (the oracle tier's, like `table oracle`). *Recommended: (a) and (c)*: the tables are a
+  pure function of the committed table; (c) proves them equal to LLVM's (the decision per context and opcode) at no cost to the check.
+- **AXS65 The decode check in the gate.** (a) at AX10 with the row: `dis` and `obj` an essential step (about 2.5 minutes, 1.5 GiB), `rt`
+  in `--full` (about 3 minutes); (b) now. *Recommended: (a)*, as AXS39 (a) and AXS48 (a).
+- **AXS66 `--mdis`.** (a) the printer's markup (`markup(O, Markup::Register)` ...) as a dynamic flag of arbace.asm.amd64.print, the two
+  tests met; (b) leave classed. *Recommended: (a)* when the printer is next touched: small, and it closes the level.
+- **AXS67 The next slice.** (a) AX5's x86i over this decoder (its instruction records, as AX5-DESIGN's AXS53 (a)); (b) llvm-objdump's
+  `-d` text (a symbolizer and the object's relocations), which turns MC/X86's object tests' CHECK lines into their own judges (AXS37
+  (c)). *Recommended: (a)*, then (b) with AX10's row.

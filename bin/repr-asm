@@ -79,6 +79,20 @@
 #                                                    --record rewrites the rows; WORK .tmp/repr-asm/run/run
 #   bin/repr-asm link-oracle                         the oracle tier's, by hand: the host's ld.lld (else ld.bfd; REPR_ASM_LD)
 #                                                    links the same objects, the runs and canonical views compared
+#   bin/repr-asm decode MODE [intel] HEX...         amd64's decoder (AX4's third slice, arbace.asm.amd64.decode: LLVM's X86
+#                                                    disassembler rebuilt from the table): the bytes decoded as llvm-mc
+#                                                    --disassemble decodes them in MODE (16, 32, 64), each instruction printed
+#                                                    (AT&T, or Intel's) with its table instruction and operands
+#   bin/repr-asm decode-object OBJ                   an ELF64 object's code sections decoded and printed
+#   bin/repr-asm decode-check [--record] [LEVEL...]  the decoder judged with no llvm-mc, LEVEL dis, rt or obj (default all):
+#                                                    dis, MC/Disassembler/X86's tests (test/asm/corpora.edn's :decode-corpora) by
+#                                                    their own CHECK lines (each byte string decoded and printed, held as
+#                                                    FileCheck holds llvm-mc's output); rt, every encoding encode-check meets in
+#                                                    MC/X86 decoded back to the matcher's instruction; obj, musl's objects as
+#                                                    Arbace writes them decoded back to their assembled instructions; rows
+#                                                    against test/asm/decode-results-amd64.edn, every unmet check in a class of
+#                                                    test/asm/divergences-decode.edn, the negative controls of
+#                                                    test/asm/controls-decode.txt failing; WORK .tmp/repr-asm/decode
 set -euo pipefail
 arch=amd64 args=()
 while [ $# -gt 0 ]; do case $1 in --arch) arch=$2; shift 2 ;; *) args+=("$1"); shift ;; esac; done
@@ -113,7 +127,7 @@ extract() {
     [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host (a fetch by its pin, the user's)" >&2; return 1; }
     want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
     [ "$want" = "$sum" ] || { echo "repr-asm: $tar's SHA-256 $want is not the pin's $sum" >&2; return 1; }
-    edn "(doseq [x (concat (:corpora c) (:tables c)) :when (= (:pin x) :$id) m (:extract x)] (println m))" > "$TMPDIR/asm-members.txt"
+    edn "(doseq [x (concat (:corpora c) (:tables c) (:decode-corpora c)) :when (= (:pin x) :$id) m (:extract x)] (println m))" > "$TMPDIR/asm-members.txt"
     echo "repr-asm: extracting $(wc -l < "$TMPDIR/asm-members.txt") members of $id"
     case $tar in
       *.tar.gz) tar -xzf "$main/$tar" -C "$src" --wildcards -T "$TMPDIR/asm-members.txt" ;;
@@ -475,6 +489,47 @@ case ${1:-} in
       echo "$n: ${ld##*/}'s run exit $st, stdout $(cmp -s "$o/$n.ref.out" "$work/$n.out" && echo same || echo differs) as Arbace's"
       arbace_tool -m arbace.asm.link compare "$work/$n" "$o/$n.ref"
     done < "$o/objects.tsv" ;;
+  decode) shift; export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.decode-check decode "$@" ;;
+  decode-object) shift; export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.decode-check decode-object "$@" ;;
+  decode-check)
+    shift; record=; levels=()
+    for a in "$@"; do case $a in --record) record=1 ;; dis|rt|obj) levels+=("$a") ;; *) echo "repr-asm decode-check [--record] [dis|rt|obj...]" >&2; exit 2 ;; esac; done
+    [ ${#levels[@]} -gt 0 ] || levels=(dis rt obj)
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    work=$root/.tmp/repr-asm/decode; rm -rf "$work"; mkdir -p "$work" "$lists"
+    dl= rl= ol=
+    for l in "${levels[@]}"; do
+      case $l in
+        dis) d=$src/$(edn '(println (:dir (first (filter #(= (:id %) :mc-x86-dis) (:decode-corpora c)))))')
+             [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; exit 1; }
+             (cd "$d" && find . -type f \( -name '*.txt' -o -name '*.s' \) | sed 's|^\./||' | LC_ALL=C sort) |
+               awk -v d="$d" '{ n = $0; sub(/\.(txt|s)$/, "", n); gsub("/", "-", n); print n "\t" d "/" $0 }' > "$lists/mc-x86-dis.list"
+             echo "repr-asm: mc-x86-dis: $(wc -l < "$lists/mc-x86-dis.list") files"; dl=$lists/mc-x86-dis.list ;;
+        rt) make_list mc-x86; rl=$lists/mc-x86.list ;;
+        obj) make_list musl; ol=$lists/musl.list ;;
+      esac
+    done
+    arbace_tool -m arbace.asm.amd64.decode-check check "$dl" "$rl" "$ol" "$work"
+    fails=0
+    # the negative controls: KIND SUBJECT REFERENCE (dis: a test's bytes against another test's CHECK lines; rt: a file's met
+    # encodings decoded in another mode; obj: a musl object's code held to another file's instructions)
+    while read -r cid kind subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      case $kind in
+        dis) [ -n "$dl" ] || continue
+             a=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$dl"); b=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$dl") ;;
+        rt) [ -n "$rl" ] || continue
+            a=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$rl"); b=$ref ;;
+        obj) [ -n "$ol" ] || continue
+             a=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$ol"); b=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$ol") ;;
+        *) continue ;;
+      esac
+      if [ -z "$a" ] || [ -z "$b" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.asm.amd64.decode-check control "$kind" "$a" "$b" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-decode.txt"
+    arbace_tool -e "(do (load-file \"$root/test/asm/decode_judge.ae\") nil)" -e "(asm.decode-judge/main \"$root/test/asm/decode-results-amd64.edn\" \"$work\" \"$root/test/asm/divergences-decode.edn\" \"${record:-}\")" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
   link-dump) shift; arbace_tool -m arbace.asm.link dump "$@" ;;
   divergences)
     arbace_tool -e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"${2:-$results}\" \"$classes\" \"\" \"\")" ;;

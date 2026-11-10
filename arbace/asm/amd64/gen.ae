@@ -26,7 +26,7 @@
    "AsmMatchConverter" "HasPositionOrder" "isCommutable" "Opcode" "Form" "OpMap" "OpPrefix" "OpSize" "AdSize" "OpEnc"
    "hasREX_W" "hasVEX_4V" "hasVEX_L" "ignoresVEX_L" "hasEVEX_K" "hasEVEX_Z" "hasEVEX_L2" "hasEVEX_B" "hasEVEX_RC"
    "hasEVEX_U" "hasEVEX_NF" "hasTwoConditionalOps" "ImmT" "CD8_Scale" "explicitOpPrefix" "hasLockPrefix" "hasREPPrefix"
-   "hasNoTrackPrefix" "IgnoresW" "Namespace"])
+   "hasNoTrackPrefix" "IgnoresW" "Namespace" "ForceDisassemble" "isAsmParserOnly"])
 
 (def alias-fields ["AsmString" "ResultInst" "Predicates" "EmitPriority" "AsmVariantName" "UseInstAsmMatchConverter"])
 
@@ -491,6 +491,12 @@
           sorted (stable-sort before ms)
           sorted-intel (stable-sort before ms-intel)
           used-insns (distinct (map :inst (concat sorted sorted-intel)))
+          ;; the disassembler's instructions (X86RecognizableInstr's shouldBeEmitted: an X86Inst, not Pseudo's form, not
+          ;; codegen-only unless ForceDisassemble, not asm-parser-only), AX4's decoder
+          dis? (fn [r] (and (tg/subclass? r "X86Inst") (not= "Pseudo" (fname r "Form"))
+                            (or (not= 1 (bit (f r "isCodeGenOnly"))) (= 1 (bit (f r "ForceDisassemble"))))
+                            (not= 1 (bit (f r "isAsmParserOnly")))))
+          dis-insns (map tg/rec-name (filter dis? insns))
           match-row (fn [m] [(:mn m) (mapv (fn [o] (class-key (:class o))) (:ops m))
                              (:inst m) (:conv m) (:preds m) (when (= :alias (:kind m)) (:name m))])
           ;; MnemonicAlias (applyMnemonicAliases) of a variant: FROM -> [[PREDICATES TO] ...], the conditional ones first, in record order
@@ -512,9 +518,15 @@
                                   :when (= 1 (bit (f r fl)))]
                               k)
                       ol (operand-list r)
-                      tie (ties (f r "Constraints"))]
+                      tie (ties (f r "Constraints"))
+                      ;; RecognizableInstr's Is32Bit/Is64Bit: the first predicate naming Not64Bit or In32Bit, else In64Bit
+                      dmode (some (fn [p] (let [n (tg/rec-name p)]
+                                            (cond (or (.contains ^String n "Not64Bit") (.contains ^String n "In32Bit")) 32
+                                                  (.contains ^String n "In64Bit") 64)))
+                                  (f r "Predicates"))]
                   (cond-> (into {} (remove (fn [[k v]] (or (nil? v) (and (= k :cd8) (zero? (long v))))) m))
                     (seq flags) (assoc :flags (vec flags))
+                    (dis? r) (assoc :dis (or dmode 0))
                     true (assoc :print (asm-writer (flatten-variant (f r "AsmString") 0) (into {} (map (juxt :name identity) ol))))
                     true (assoc :print-intel (asm-writer (flatten-variant (f r "AsmString") 1) (into {} (map (juxt :name identity) ol))))
                     true (assoc :ops (mapv (fn [o] [(:name o) (rn (:rec o)) (:n o)]) ol)
@@ -536,7 +548,7 @@
                                                                (letfn [(dd [v] (if (tg/dag? v) (apply list (symbol (rn (tg/dag-op v))) (map (comp dd first) (tg/dag-args v))) (symbol (rn v))))]
                                                                  (dd d))))
                                                      (f r "PredicateName")]]))
-       :insns (into (sorted-map) (for [n used-insns] [n (enc (insn-by-name n))]))
+       :insns (into (sorted-map) (for [n (distinct (concat used-insns dis-insns))] [n (enc (insn-by-name n))]))
        ;; MnemonicAlias (applyMnemonicAliases): FROM -> [[PREDICATES TO] ...], the conditional ones first, in record order
        :aliases (mnemonic-aliases "att")
        ;; the printer's aliases (printAliasInstr), by the instruction they print

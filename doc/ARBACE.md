@@ -399,7 +399,17 @@ code. Three kinds of things live here:
   getSymVA, `LinkerScript.cpp`'s getOutputSectionName and assignAddresses, `Writer.cpp`'s getSectionRank, createPhdrs,
   fixSectionAlignments, assignFileOffsets and setPhdrs, `OutputSections.cpp`, `SyntheticSections.cpp`'s .eh_frame, .got, .got.plt and
   symbol tables, `InputSection.cpp`'s getRelocTargetVA and getTlsTpOffset, `Relocations.cpp`'s RelocScan::process,
-  `Arch/X86_64.cpp`'s relocate, adjustGotPcExpr, relaxGot and relaxTlsIeToLe), written by hand; no code is copied.
+  `Arch/X86_64.cpp`'s relocate, adjustGotPcExpr, relaxGot and relaxTlsIeToLe), written by hand; no code is copied. AX4's third
+  slice (2026-11-10, "As built: AX4 (third slice)"): `asm/amd64/decode.ae` (`arbace.asm.amd64.decode`: the decoder after the same
+  tarball's `llvm/lib/Target/X86/Disassembler/X86Disassembler.cpp` and `X86DisassemblerDecoder.h` (readPrefixes, readOpcode,
+  getInstructionID, readOperands, translateInstruction, getInstruction's flags), `include/llvm/Support/X86DisassemblerDecoderCommon.h`
+  (the contexts and their ranks, the encodings and types), and the tables TableGen makes after `llvm/utils/TableGen/X86RecognizableInstr.cpp`
+  (insnContext, emitInstructionSpecifier, emitDecodePath, typeFromString and the encodings), `X86DisassemblerTables.cpp` (inheritsFrom,
+  outranks, emitContextTable, setTableFields) and `X86ModRMFilters.h`, built from `asm/amd64/table.edn` at their first use;
+  `X86MCTargetDesc.cpp`'s needsAddressSizeOverride) and `asm/amd64/decode_check.ae` (`arbace.asm.amd64.decode-check`: the check,
+  with llvm-mc's byte stream after `llvm/tools/llvm-mc/Disassembler.cpp` and FileCheck's matching), written by hand; no code is
+  copied. Go's `golang.org/x/arch/x86/x86asm` (TamaGo's GOROOT, `src/cmd/vendor/`) was weighed and not used (doc/asm/AMD64-SURVEY.md,
+  "As built: AX4 (third slice)").
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

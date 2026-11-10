@@ -3136,3 +3136,41 @@ musl's `libc.a` (not possible without compiling its C at check time: AX7, AXS47)
 judging by GNU ld's executables (rejected: another linker's layout, kept as the by-hand oracle), lld itself as the byte reference (not
 installed; AXS46). Proposed AXS45-AXS50 (numbered past AX2d's and AX4's colliding AXS37-AXS41, for the main session to renumber).
 Next (AXS50 (a)): the decoder (x86asm), AX4's remaining exit.
+
+## 2026-11-10 amd64 assembly: AX4's third slice, the decoder, LLVM's X86 disassembler rebuilt from the table (branch `asm-ax4c`, from `mac/asm-ax4b` `abc8c2b97`)
+
+Done on the light lane (stage 0, one run at a time, under 2 GiB, no lock; no LLVM tool at check time). Studied: llvm-project 23.1.5 from
+the pinned `.tmp/llvm/llvm-project-23.1.5.src.tar.xz` (SHA-256 `fb50b1ea...`, test/asm/corpora.edn's pin; extracted into the worktree's
+`.tmp/llvm-read/`, never committed): `llvm/lib/Target/X86/Disassembler/X86Disassembler.cpp` and `X86DisassemblerDecoder.h`,
+`llvm/include/llvm/Support/X86DisassemblerDecoderCommon.h`, `llvm/utils/TableGen/X86RecognizableInstr.cpp`, `X86DisassemblerTables.cpp`,
+`X86ModRMFilters.h`, `llvm/lib/Target/X86/MCTargetDesc/X86MCTargetDesc.cpp` (needsAddressSizeOverride), `X86InstPrinterCommon.cpp`
+(printInstFlags, printPCRelImm), `llvm/tools/llvm-mc/Disassembler.cpp`; and Go's `golang.org/x/arch/x86/x86asm` in TamaGo's GOROOT
+(`src/cmd/vendor/`, pinned by seed/goroot.sha256), weighed and not used. Written again by hand in Arbace; no code copied.
+
+Decision (the brief's choice, the coordinator's note of AX5-DESIGN's AXS53 (a) concurring): the decoder is LLVM's disassembler rebuilt
+from `asm/amd64/table.edn`, not x86asm converted. LLVM's decodes into the table's own instruction records and MCInst operands, so AX2's
+printer prints them and AX2's encoder re-encodes them unchanged, and LLVM-equal results follow from LLVM's rules (contexts, ranks,
+inheritance, its corrections in getInstructionID); x86asm decodes into its own ops and argument shapes and would need a map onto the
+table's instructions and LLVM's choices besides its 17,000 lines of tables. The disassembler's tables are made at first use, per opcode
+type, context and opcode, from the table; nothing generated beyond the table is committed (AXS64 proposes checking them by hand against
+llvm-tblgen's `-gen-disassembler`).
+
+Built: `arbace/asm/amd64/decode.ae` (`arbace.asm.amd64.decode`), `arbace/asm/amd64/decode_check.ae` (`arbace.asm.amd64.decode-check`:
+llvm-mc's byte stream, FileCheck's matching, the three levels, controls, `decode` and `decode-object`), `test/asm/decode_judge.ae`,
+`test/asm/decode-results-amd64.edn`, `divergences-decode.edn`, `controls-decode.txt`; `bin/repr-asm decode|decode-object|decode-check`;
+the Makefile's `repr-asm-decode`, `-decode-object`, `-decode-check`, `-decode-record`; `test/asm/corpora.edn`'s `:decode-corpora`
+(`llvm/test/MC/Disassembler/X86`, extracted by `corpus extract`); the generator lists the disassembler's instructions (`:dis` with the
+mode predicate; 250 added, `_REV` and other ForceDisassemble ones) and reads `ForceDisassemble` and `isAsmParserOnly`; the printer prints
+`addr32`/`addr16` for the decoder's flag; the encoder's `memory-operand` public. A TableGen fix: the `let` stack around a `class` applies to
+it (TGParser's ParseObjectBody), which AMX-FP8's `TDP*F8PS` need for their `$src1 = $dst` tie (four instructions of the table change).
+doc/asm/AMD64.md §9, the survey's "As built: AX4 (third slice)", LICENSE.md, doc/ARBACE.md.
+
+Results: MC/Disassembler/X86's 186 tests: 24,441 of 24,445 CHECK lines met by their own judges, the 4 others `--mdis`'s markup (classed
+deferred); the round trip: 99,505 of the 99,509 encodings encode-check meets decode back to the matcher's instruction (16 with llvm-mc's
+lone LOCK first, 66 another instruction of the same bytes), 3 `xchg` of the accumulator with itself read as `nop` and 1 `(,%eiz)` read
+without EIZ, both LLVM's own readings (classed by design); musl's 32 objects: 479 of 479 instructions read back. Eight negative controls
+fail as they must. About 6 minutes, under 1.5 GiB. The encode check, object check, run check, AX1's and AR1's round trips and the table
+check unchanged and passing.
+
+Considered: x86asm converted (above); the tables generated and committed (AXS64); `--mdis` (AXS66). Proposed AXS63-AXS67 (numbered from
+AXS63: AX5-DESIGN holds AXS51-AXS62). Next (AXS67 (a)): AX5's x86i over this decoder.

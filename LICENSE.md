@@ -1383,7 +1383,12 @@ covers what.
   second slice: `arbace/asm/link.ae` (the static linker) follows lld's `lld/ELF/` from the same tarball (`Driver.cpp`, `InputFiles.cpp`,
   `SymbolTable.cpp`, `Symbols.cpp`, `LinkerScript.cpp`, `Writer.cpp`, `OutputSections.cpp`, `SyntheticSections.cpp`, `InputSection.cpp`,
   `Relocations.cpp`, `Arch/X86_64.cpp`), the same licence and manner; no code is copied. `test/asm/run/` is Arbace's own; its
-  `musl:` sources are read from musl 1.2.6's pinned tarball (MIT), never committed.
+  `musl:` sources are read from musl 1.2.6's pinned tarball (MIT), never committed. AX4's third slice: `arbace/asm/amd64/decode.ae`
+  (the decoder) follows `llvm/lib/Target/X86/Disassembler/X86Disassembler.cpp`, `X86DisassemblerDecoder.h`,
+  `llvm/include/llvm/Support/X86DisassemblerDecoderCommon.h` and the disassembler tables' generator `llvm/utils/TableGen/X86RecognizableInstr.cpp`,
+  `X86DisassemblerTables.cpp` and `X86ModRMFilters.h`, and `arbace/asm/amd64/decode_check.ae` `llvm/tools/llvm-mc/Disassembler.cpp`,
+  the same tarball, licence and manner; no code is copied. `llvm/test/MC/Disassembler/X86` is read from the tarball as test data
+  (extracted into `.tmp/`, never committed).
 - The same namespaces' arm64 part (AR1, doc/asm/ARM64-SURVEY.md): `arm64/gnu.ae`'s operand grammar follows LLVM's
   `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` and `lex.ae`'s AArch64 dialects its
   `MCTargetDesc/AArch64MCAsmInfo.cpp` (the same tarball and licence); `plan9.ae`'s operand grammar follows Go 1.27.1's
