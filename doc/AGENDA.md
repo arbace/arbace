@@ -173,6 +173,7 @@ items below are the ones whose work is still ahead or tied to a night.
   night 11.
 - **Rust** ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md)): RF11, RF12 (RES54's ceiling until it); RFP29 (a) later;
   RFP42 (a), RFP45 (a), RFP47 (a) and RFP46 (a)'s whole run at night ("As built: RF13 (first slice)", its night commands);
+  core-check 5,538 equal at RF13d ("As built: RF13d"; rust-rf13d carries rust-rf13b's fix and RF13c);
   RFP48-RFP52 (trait resolution, the collector through std's bodies, closures' shims, the export's pack, core's crate-private
   items in the interface pass) await the user.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at

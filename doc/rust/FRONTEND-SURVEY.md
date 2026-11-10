@@ -3022,3 +3022,58 @@ RF13b's remaining causes taken cheapest per body first; each fix follows rustc 1
   (`ops/index_range.rs`, `iter/adapters/mod.rs`, `clone/uninit.rs` to start) whose files the interface pass collects too, before
   any body, in every core-check run (a few minutes more)**; (b) `CORE_IFACE_FILES=all` by default (every module file, RF12-P7's
   night pass, far longer); (c) leave it. *Recommended: (a)*.
+
+## As built: RF13d, core's bodies equal to rustc's built MIR, further (2026-11-10)
+
+Branch `rust-rf13d` (from `mac/rust-rf13c` `7f153a722`, `mac/rust-rf13b`'s review fix `ab753d5d0` merged), light lane (one
+process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`). RF13c's decision-free causes and the port gaps among its differing
+bodies, cheapest per body first; each fix follows rustc 1.99.1's own code, none needs a choice. RFP52's crate-private items
+(`NeverShortCircuit`, `IndexRange`, `try_process`, `ChangeOutputType`, `unicode::*`, `drain::Drain`) stay out, as decided.
+
+### Causes fixed
+
+- **A const parameter used as a value** (`repeat_n(val, N)`, `as_array::<N>`, `spec_next_chunk`; THIR's ConstParam): the
+  constant `const N` (Const::Ty of the parameter); an array of length `N`'s bounds check compares with `const N` likewise.
+- **Inline consts' own bodies** (RF13c lowered them only in the parent): each `const { .. }` of a fn is a body
+  `f::{constant#N}` built as construct_const builds a constant's (its typeck results the parent's, its region tree a non-fn
+  body's), judged against the oracle's `{constant#N}` dump.
+- **Constants check overflow** (Builder::new: BodyOwnerKind::Const): `Duration::MAX`'s `NANOS_PER_SEC - 1` is a checked
+  subtraction; inline consts too.
+- **Derive's assertions' spans** (assert_ty_bounds: `let _: AssertParamIsClone<T>;` at the field's span): Clone's and Eq's
+  user types now name the field (`panic/location.rs:43:5: 43:27`), not the derive.
+- **An item nested in a method** of a const or static kind (`from_nanos::NANOS_PER_SEC`, `to_digit::TO_UPPERCASE_MASK`): its
+  MIR name through the method's `<impl at ..>`.
+- **A const closure's declaration span** (`const move |a| ..`): from `const` through its bars.
+- **The crate's own ManuallyDrop never needs drop** (`#[lang = "manually_drop"]`, AdtDef::is_manually_drop).
+- **A trait item through a parameter's where clause** (`R::from_residual(v)` under `R: Try`): its user type's trait
+  arguments are fresh (`TypeOf(<R as FromResidual<^c_0>>::from_residual)`).
+- **A trait's written arguments on its segment** (`AsRef::<[MaybeUninit<T>; N]>::as_ref(self)`): the trait's parameters after
+  Self.
+- **An impl Trait argument takes no turbofish argument** (`from_raw_parts::<U>`: `U` is `T`'s, the synthetic `impl Thin`
+  fresh).
+- **`Self` in an impl**: a struct pattern or expression of a braced struct (`let Self { start, end, exhausted } = self`,
+  `Self { value }`), with the struct expression's user type `TypeOf(RangeInclusive<Idx>)`; a unit struct's `Self` a
+  ZstLiteral (`const ZeroSized: PhantomData<T>`) with its user type.
+- **Unsizing coercion casts**: `self as &[T]` from `&[T; N]` (check_casts' try_coercion_cast, `PointerCoercion(Unsize,
+  AsCast)`), and `*const [T; N]` to `*const [T]` (coerce_unsized of raw pointers).
+- **`write_via_move`** (into.rs's intrinsic lowering): `*ptr = val` without a call or a drop (`ptr::write`, `mem::replace`).
+- **Char constants as char's Debug writes them** (`'\u{10ffff}'`, `'\u{7f}'`; a non-printable or grapheme-extending
+  character escaped), and an escaped char literal's value its code point, not its first UTF-16 unit.
+- The impl header's def_span to its self type when that is on a later line (`impl .. FromResidual<..>\n for Result<T, F>`).
+- Ported without a gain yet: expected_inputs_for_expected_output's generalization (a variable the probe binds takes the
+  generalized value, its free regions fresh); `Some(slice)` against an expected `Option<&[T]>` still copies where rustc
+  reborrows, so its cause is elsewhere.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (`CORE_IFACE=cache`, about 50 minutes, under 2.5 GB): **5,538
+  equal** to rustc's built MIR (5,474 at RF13c), 157 more but for the allocations (155), 49 differ (85), 52 refused (63), 74
+  without a body of rustc's by their key. No module lost an equal body; the largest gains array +14, time +12, char::methods
+  +6, any +5.
+- `bin/rust-front core-essential` and `bin/rust-front essential`: equal to their known files.
+- Left, by cause: RFP52's crate-private items (the most of the 52 refused: `unicode::*` and the case tables 18, `NeverShortCircuit` 4,
+  `IndexRange` 6, `try_process`, `ChangeOutputType`, `drain::Drain`, `ascii::Char`); `macro_rules!` metavariable spans that
+  collide across expansions (tuple.rs' `Default`, 12: transcribe.rs' global metavar_spans table); braced const arguments
+  evaluated (`{ Locality::L3.to_llvm() }`, 3); `slice_get_unchecked`'s `T` through ChangePointee's associated type equality
+  (4); `offset_of!` in inline consts (4); the reborrow of `Some(slice)` against an expected `Option<&[T]>` (1); a few drop
+  orders and temporaries (`try_from_fn_erased`, `encode_utf8_raw`'s never temporaries).

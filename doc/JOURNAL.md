@@ -2940,3 +2940,22 @@ rsi-native: a counted failure line). rsi-build counts the programs skipped for w
 record in the pack)"). Proof: `bin/rust-front essential` passes, equal to essential-known.txt (known.diff empty, 3m50s, stub
 calls 0); a fabricated UI id (tests/ui/abi/foo#bar.rs) with front.tsv "own" and no .ours.ll names the same directory as
 rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch these two files (checked), so they rebase clean.
+
+## 2026-11-10: RF13d, more of core's bodies equal to rustc's built MIR (branch `rust-rf13d`, from `mac/rust-rf13c` `7f153a722`)
+
+- `mac/rust-rf13b`'s review fix (`ab753d5d0`) merged first, so the branch carries RF13b's fix, RF13c and RF13d; the journal's
+  conflict resolved by keeping both entries.
+- RF13c's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src; rustc_mir_build's
+  thir cx (ConstParam, SelfCtor's ZstLiteral), builder/mod.rs (constants check overflow), builder/expr/into.rs (write_via_move),
+  rustc_builtin_macros' deriving/mod.rs assert_ty_bounds, rustc_hir_typeck's check_casts, coercion.rs (coerce_unsized),
+  instantiate_value_path, expected_inputs_for_expected_output with generalize.rs, char's Debug): const parameters as values,
+  inline consts' own bodies (`f::{constant#N}`), derive's assertion spans, nested consts' MIR names, const closures' spans, the
+  crate's own ManuallyDrop, fresh trait arguments in a where-clause item's user type, a trait segment's written arguments,
+  impl Trait arguments skipped by a turbofish, `Self` struct patterns, expressions and unit values with their user types,
+  unsizing coercion casts and raw pointer coercions, write_via_move lowered as an assignment, char constants' escapes and code
+  points. Alternatives considered: modelling transcribe.rs' global metavar_spans table for tuple.rs' `Default` (12 bodies;
+  left, as a heuristic over expansion order would risk the equal ones), evaluating braced const arguments (`{ L3.to_llvm() }`,
+  3 bodies: needs const evaluation of a call; left). RFP52's crate-private items untouched, as decided.
+- core-check: 5,538 equal (5,474 at RF13c), 157 but for the allocations (155), 49 differ (85), 52 refused (63); no module lost an
+  equal body (baseline rerun at `7f153a722`: 5,474, as recorded). `bin/rust-front core-essential` and `essential` equal to their
+  known files. doc/rust/FRONTEND-SURVEY.md, "As built: RF13d".

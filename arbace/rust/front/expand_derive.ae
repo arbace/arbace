@@ -46,9 +46,43 @@
           (= k '(Tup [])) true
           :else (contains? scalar-names (simple-path-name ty)))))
 
+(def ^:private ^:dynamic *assert-spans* nil)   ; RF13d: the field spans of the assertions derive-text wrote, in order
+
+(defn- field-spans-of [vd]
+  (cond (and (seq? vd) (= 'Tuple (first vd))) (mapv #(fget % :span) (second vd))
+        (and (seq? vd) (= 'Struct (first vd))) (mapv #(fget % :span) (fget vd :fields))
+        :else []))
+
+(defn- assert-spans
+  "assert_ty_bounds: `let _: AssertParamIsX<T>;` has the field's span (with the expansion's context) as its statement's, its
+  local's, its pattern's, its type's and its path's span"
+  [d spans m]
+  (let [left (atom spans)
+        sp (fn [fs] (when (and (sequential? fs) (>= (count fs) 4)) (conj (vec (take 4 fs)) m)))]
+    (letfn [(assert-local? [x]
+              (and (seq? x) (= 'Local (first x))
+                   (let [t (let [o (fget x :ty)] (when (and (seq? o) (= (quote Some) (first o))) (second o))) k (when t (fget t :kind))]
+                     (and (seq? k) (= 'Path (first k))
+                          (let [segs (fget (nth k 2) :segments)]
+                            (#{"AssertParamIsClone" "AssertParamIsEq"} (str (second (fget (peek (vec segs)) :ident)))))))))
+            (fix-local [x s]
+              (let [t (let [o (fget x :ty)] (when (and (seq? o) (= (quote Some) (first o))) (second o))) k (fget t :kind)
+                    k' (list 'Path (second k) (fset (nth k 2) :span s))]
+                (-> x (fset :span s) (fset :pat (fset (fget x :pat) :span s))
+                    (fset :ty (list 'Some (-> t (fset :span s) (fset :kind k')))))))
+            (w [x]
+              (cond (and (seq? x) (= 'Stmt (first x)) (seq? (fget x :kind)) (= 'Let (first (fget x :kind)))
+                         (assert-local? (second (fget x :kind))))
+                    (let [fs (first @left) _ (swap! left rest) s (sp fs)]
+                      (if s (-> x (fset :span s) (fset :kind (list 'Let (fix-local (second (fget x :kind)) s)))) x))
+                    (seq? x) (apply list (map w x))
+                    (vector? x) (mapv w x)
+                    :else x))]
+      (w d))))
+
 (defn- derive-text
   "One derive's impls as text, the fields' types as fragments (frags: an atom of N -> {:frag :ty :ast})"
-  [trait {:keys [kind name tparams ptoks gparams shape variants copy? ord? default-variant]} frags]
+  [trait {:keys [kind name tparams ptoks gparams shape variants copy? ord? default-variant field-spans]} frags]
   (let [fr (fn [ty] (let [n (count @frags)] (swap! frags assoc n {:frag :ty :ast ty}) (str "__rf_frag_" n)))
         ;; the type parameters' names are the item's own tokens (generic/mod.rs copies the parameters with their spans)
         tparams (map (fn [nm t] (if t (let [n (count @frags)] (swap! frags assoc n (titem t 0)) (str "__rf_frag_" n)) nm))
@@ -66,12 +100,14 @@
                            ""))
         head (fn [attrs unsafe? path bound body]
                (str "#[automatically_derived] " attrs (if unsafe? "unsafe " "") "impl" (gens bound) " " path " for " self-ty " {" body "}\n"))
+        ;; RF13d: each assertion's field span recorded (assert_ty_bounds' span is field.span), put back by assert-spans
         asserts (fn [path fields-tys]
                   (let [seen (atom #{})]
-                    (apply str (for [ty fields-tys
+                    (apply str (for [[ty fsp] (map vector fields-tys (concat field-spans (repeat nil)))
                                      :let [nm (simple-path-name ty)]
                                      :when (or (nil? nm) (let [new? (not (@seen nm))] (swap! seen conj nm) new?))]
-                                 (str "let _: " path "<" (fr ty) ">; ")))))
+                                 (do (when *assert-spans* (swap! *assert-spans* conj fsp))
+                                     (str "let _: " path "<" (fr ty) ">; "))))))
         all-tys (if (= kind :struct)
                   (let [[k fs] shape] (case k :named (map second fs) :tuple fs []))
                   (mapcat (fn [[_ [k fs]]] (case k :named (map second fs) :tuple fs [])) variants))
@@ -350,6 +386,7 @@
                   :default-variant (when (= 'Enum kw)
                                      (some (fn [v] (when (some #(= "default" (attr-name %)) (fget v :attrs)) (second (fget v :ident))))
                                            (fget data :variants)))
+                  :field-spans (if (= 'Struct kw) (field-spans-of data) (vec (mapcat #(field-spans-of (fget % :data)) (fget data :variants))))
                   :copy? (some #{"Copy"} names) :ord? (some #{"Ord"} names)}
             it' (fset it :attrs (vec (remove #(= "derive" (attr-name %)) attrs)))
             spans (into {} (derive-names attrs true))
@@ -359,14 +396,16 @@
                                          m (binding [*site* (when (and *virtual* (vector? tsp)) (vec (take 4 tsp)))] (fresh-mark)) frags (atom {})
                                          _ (when *mark-crates* (swap! *mark-crates* assoc m :derive)
                                              (when (vector? tsp) (swap! *mark-crates* assoc [:dspan m] (vec (take 4 tsp)))))
-                                         text (derive-text trait info frags)]
+                                         aspans (atom [])
+                                         text (binding [*assert-spans* aspans] (derive-text trait info frags))]
                                      (map (comp (fn [d] (impl-bounds d gens))
                                                 (fn [d] (let [cs (set (map :name (filter #(= :const (:k %)) gparams)))] (if (seq cs) (const-args cs d) d)))
                                                 ;; the impl's span is the derive's path's, at the expansion's context
                                                 (fn [d] (if (vector? tsp) (fset d :span (conj (vec (take 4 tsp)) m)) d))
                                                 (fn [d] (if (= trait "Default") (default-path-span d info it) d))
                                                 (fn [d] (impl-generics-span d gsp (let [w (fget (fget gens :where_clause) :span)] (when (vector? w) w)) m))
-                                                (if (= trait "Hash") (comp expr-stmts no-colon-spans) no-colon-spans))
+                                                (if (= trait "Hash") (comp expr-stmts no-colon-spans) no-colon-spans)
+                                                (fn [d] (if (seq @aspans) (assert-spans d @aspans m) d)))
                                           (parse-fragment (text->items text m @frags) :items))))
                                  names))]
         [it' derived]))))
