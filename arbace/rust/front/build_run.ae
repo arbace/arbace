@@ -121,12 +121,25 @@
                      (case (first rv)
                        use (swap! env assoc l (operand (second rv)))
                        aggregate (let [[_ kind ops] rv]
-                                   (when-not (and (seq? kind) (= 'array (first kind))) (no "an aggregate but an array" kind))
-                                   (let [vs (map operand ops)]
-                                     (swap! env assoc l {:bytes (vec (mapcat :bytes vs)) :align (if (seq vs) (apply max (map :align vs)) 1)})))
+                                   (cond
+                                     (and (seq? kind) (= 'array (first kind)))
+                                     (let [vs (map operand ops)]
+                                       (swap! env assoc l {:bytes (vec (mapcat :bytes vs)) :align (if (seq vs) (apply max (map :align vs)) 1)}))
+                                     ;; RF13: a struct, tuple or variant-less ADT of no field (a unit struct: `&Dog`) or of one scalar
+                                     ;; field (a newtype: `&Bird(1)`), whose layout is its field's
+                                     (and (seq? kind) (#{'adt 'tuple} (first kind)) (<= (count ops) 1)
+                                          (or (= 'tuple (first kind))
+                                              ;; a struct's constructor, not an enum's variant (`E::V`: the variant's tag is in the layout)
+                                              (and (contains? #{nil 0} (nth kind 5 nil)) (#{"struct" "fn" "const"} (str (nth kind 2 nil)))
+                                                   (not (re-find #"(^|::)[A-Z][A-Za-z0-9_]*::[A-Z][A-Za-z0-9_]*$" (str (nth kind 4 nil)))))))
+                                     (swap! env assoc l (if (seq ops) (operand (first ops)) {:bytes [] :align 1}))
+                                     :else (no (str "an aggregate " (when (seq? kind) (first kind))) kind)))
+                       ;; RF13: [x; N] of a scalar constant (`&[0u8; 100]`)
+                       repeat (let [[_ o n] rv v (operand o) n (Long/parseLong (str n))]
+                                (swap! env assoc l {:bytes (vec (apply concat (repeat n (:bytes v)))) :align (:align v)}))
                        ref (if (= l 0) (reset! result (or (get @env (loc-of (nth rv 2))) (no "a borrow of a local not assigned" rv)))
                                (no "a borrow but _0's" rv))
-                       (no "an rvalue" rv)))
+                       (no (str "an rvalue " (first rv)) rv)))
             (no "a statement" st)))
         (let [t (:term blk)]
           (case (first t)
@@ -570,8 +583,12 @@
                                   (let [txt (second f) c (get (:callees facts) txt)
                                         sp (:call-span (meta f))
                                         recs (get @rec-callees txt)
-                                        cal (if (and c (not (mono/error? c))) (do (fact! :callees true) (list 'callee c))
-                                                (do (fact! :callees false) (or (ffirst recs) (throw (ex-info (str "no callee for " txt) {})))))
+                                        cal (cond
+                                              ;; RF13: a call through a function pointer (the operand a local): no instance to resolve,
+                                              ;; codegen calls the operand's value
+                                              (not= 'const (first f)) nil
+                                              (and c (not (mono/error? c))) (do (fact! :callees true) (list 'callee c))
+                                              :else (do (fact! :callees false) (or (ffirst recs) (throw (ex-info (str "no callee for " txt) {})))))
                                         cl (:call-loc (meta f))
                                         l (cond (vector? sp) (do (fact! :locs true) (list 'loc root-file (first sp) (second sp)))
                                                 ;; RF12-P6: a native core body's call: its place in core's sources
@@ -719,7 +736,16 @@
                        (catch Throwable e [:unsupported (str "the module's printing: " (.getMessage e))]))]
     (if (not= st :ok)
       (str "codegen refused (" (name st) " " what ")")
-      (when-let [why (lower-c dir n)] (str "rsi's lowering refused (" why ")")))))
+      (or (when-let [why (lower-c dir n)] (str "rsi's lowering refused (" why ")"))
+          ;; RF13: an instance of the program's crate the module declares but does not define (a generic local function, a
+          ;; closure or a derived method reached only through std's bodies, which the collector does not walk): the link
+          ;; would fail, so the module is not the program's
+          (let [ll (slurp (str dir "/" n ".ours.ll"))
+                cn (str/replace n "-" "_")
+                tok (re-find (re-pattern (str "Cs[0-9A-Za-z]+_" (count cn) cn)) ll)
+                missing (when tok (for [[_ sym] (re-seq #"(?m)^declare [^@]*@([^ (]+)\(" ll) :when (str/includes? sym tok)] sym))]
+            (when (seq missing)
+              (str "a local instance not collected (" (count missing) ": " (first missing) ")")))))))
 
 (defn- tally-line [tally sep]
   (str/join ", " (for [[k [e t]] (sort tally)] (str (name k) " " e sep t))))

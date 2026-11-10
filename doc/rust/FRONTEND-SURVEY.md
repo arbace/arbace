@@ -2758,3 +2758,69 @@ The user's decisions (2026-11-09): RF12-P6 (a), RF12-P7 (a) in night 11.
 - Left: `mut_ptr::cast_const` (a `*mut T` local for rustc's `*const T`), `slice::as_ptr`/`as_mut_ptr` (the user type's annotation),
   `ptr::metadata::from_raw_parts` (`move` for `copy`) and `<DynMetadata>::size_of` (`VTable` unresolved); none on a6's path. The
   export is not committed (it is the run's input, made by `core-export`); the night or the gate would run `core-export` first.
+
+## As built: RF13 (first slice): RFP42-RFP47 as decided, what runs light (2026-11-10)
+
+Branch `rust-rf13` (from `mac/rust-rf12` `0c22b1f1b`). The user accepted RFP42-RFP47 as recommended (2026-11-09). This slice builds
+what of them runs light (one process at a time, at most about 2 GiB: `RF11_PROCS=2`, `RF11_BATCH=3`, `GOMEMLIMIT` 1800MiB) and
+prepares the heavy parts for the night.
+
+### RFP44 (a): virtual calls and vtables
+
+- **The slot, natively** (`arbace.rust.front.mono`'s `vtable-entries`, after rustc_trait_selection's `vtable.rs`
+  `prepare_vtable_segments`): the metadata entries (drop, size, align), then a depth-first walk of the supertraits (the local
+  trait's bounds, std's `names/trait` `:supertraits`), each trait's own vtable-safe methods after its supertraits' (no `Self:
+  Sized` clause, no own type or const parameter: std's from the interface's `:predicates` and `:generics`, a local one's from
+  `explicit-clauses`), a vptr where a later supertrait with entries follows one with entries. A call on a trait object is
+  Instance's `Virtual`: `callee-fact` gives `{:kind "virtual" ... :slot N}` (the object's principal from the `dyn`'s type),
+  natively; the record's virtual callees (the facts mono still refuses, std's bodies) get their slot from the call's method
+  path and its receiver's printed `dyn` (the principal resolved through std's modules or the crate's traits: `dyn Error`'s
+  `Display::fmt` is slot 4 after Debug's and the vptr), counted as `vslots`.
+- **The call** (`arbace.rust.back.codegen`, meth.rs' `VirtualIndex::get_fn`): the receiver's pair split, the function loaded from
+  the vtable at slot × 8, the data pointer the first argument.
+- **The vtable of an unsizing cast in our bodies**: `vtable-alloc` lays it out natively (drop glue's symbol or null, the size and
+  alignment from mono's layout, each entry a local impl's method by its v0 symbol) when every entry is a local impl's own
+  non-generic method with a reference receiver; else (a default method's instance, std's impls, a closure's `FnOnce` shim: trait
+  resolution, which mono does not port) the record's cast of the same target type in the same body, taken in order (counted
+  `vtables`). The collector roots a vtable's local methods. A cast between two trait objects of the same principal (a lifetime's
+  coercion) keeps the pair (rvalue.rs' `unsize_ptr`).
+- Thread locals (`tlsref`, `panic-hashmap-index`): not built (the static's v0 symbol needs std's def path of a `thread_local!`
+  closure's static, which std's interface does not hold).
+
+### Codegen's gaps found on the way (std's bodies from the record and ours)
+
+The repeat loop (`[x; N]`: builder.rs' `write_operand_repeatedly`, header/body/next blocks, the MIR block's later code continued
+in `repeat_loop_next`; an integer constant whose bytes are one byte a memset, as rvalue.rs), `powif32`/`powif64`, `fmaf32`/`fmaf64`,
+`exact_div`, `typed_swap_nonoverlapping` (at -O0 the place swap, not the fallback body), `catch_unwind` (codegen_gnu_try's internal
+`__rust_try`, defined once in the module), `type_id_eq` by its fallback body, TypeId constants (a relocation to a `GlobalAlloc::TypeId`
+keeps its bytes), `&str` valtree constants (`tyconst`), unsizing a struct's tail (`PolymorphicIter<[T; N]>` to `PolymorphicIter<[T]>`),
+transmutes between memory layouts and from memory to a scalar or pair, the discriminant of an SSA local's field, function-pointer
+calls in our bodies (no callee to resolve), reified local functions (their symbol and the collector's root), another crate's static
+declared external (std's `WHITESPACE_MAP`), promoted `[x; N]`, unit and newtype struct constants. A printer's failure is now the
+program's refusal, not the batch's end.
+
+A module that declares an instance of the program's own crate it does not define (a generic local function, a closure or a
+derived method reached only through std's bodies, which the collector does not walk) is no longer `own`: `rsi-build` says `a local
+instance not collected` (found by `rsi-native`: three programs that passed codegen and the lowering did not link).
+
+### `panic-vec-remove`'s fault
+
+`Vec::remove` is `#[track_caller]`, but mono's attributes (`ext-attrs`) did not find it: the file's impls in order are not rustc's
+disambiguators in alloc's `vec/mod.rs` (a `const impl` the parser counts where rustc's `{impl#1}` is the next impl), so the call
+passed no location and std's body read a garbage pointer (status 139). A function the file's impls name once is now found by its
+name; `bin/rust-front rsi-native panic-vec-remove`: status 101, its outputs as rustc's recorded run.
+
+### RFP45 (a), RFP46 (a), RFP47 (a), RFP42 (a): the night's parts
+
+- **RFP45**: `RF_RSI_UI=40` makes `rfr_rsi_list` add every 40th of `bin/rsi list --set run` (those without compile flags; the
+  others listed in `rsi-plan.ui-skipped`), named `ui-` and their id with `/` and `#` as `%` (`rfr_name`), read in the UI corpus's
+  source root (`rfr_rsi_dir`: this checkout's or the main checkout's `.tmp/repr-rust/src/rustc-1.99.1-src`), for `records make rsi`
+  and `rsi-build` (`RF_SRC_ROOT`, a batch an edition and a root). The UI corpus's sources are not on this host: the night fetches
+  them first.
+- **RFP46**: as decided, the day runs lists (this slice: 14 programs at a time, about 16 minutes at two threads, under 2 GiB a
+  process); the night runs the whole set at `RF11_BATCH=6`.
+- **RFP47**: `bin/rsi std-build` takes `RSI_STD_REMAP=/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library` (Cargo's trim-paths
+  off, the library's absolute and workspace-relative paths remapped as the distribution's build remaps them), into its own
+  `RSI_STD_DIR`; `test/rust/runtime/std.edn` takes it with the night's re-pin (the runtime's key holds std.edn: changing it by day
+  would make every runtime stale).
+- **RFP42**: not buildable by day (no lowered std on this host, RES60 (a)); its night command below.
