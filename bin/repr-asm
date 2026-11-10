@@ -96,14 +96,25 @@
 #                                                    against test/asm/decode-results-amd64.edn, every unmet check in a class of
 #                                                    test/asm/divergences-decode.edn, the negative controls of
 #                                                    test/asm/controls-decode.txt failing; WORK .tmp/repr-asm/decode
-#   bin/repr-asm --arch arm64 table gen|check        AR2: A64's encoding table, arbace/repr/asm/arm64/table.ae, generated from Go's
+#   bin/repr-asm --arch arm64 table gen|check        AR2: A64's encoding tables: arbace/repr/asm/arm64/table.ae, generated from Go's
 #                                                    arm64asm and cmd/internal/obj/arm64 in $ARBACE_GOROOT (VERSION checked) by
-#                                                    arbace.repr.asm.arm64.tablegen; check: the committed table equal to a fresh one
+#                                                    arbace.repr.asm.arm64.tablegen, and (AR2's second slice, ARS24 (a))
+#                                                    asm/arm64/table.edn, llvm-project 23.1.5's AArch64.td read by Arbace's TableGen
+#                                                    (test/asm/corpora.edn's :aarch64-td, with AsmParser/AArch64AsmParser.cpp's
+#                                                    messages) by arbace.asm.arm64.gen (about 1 minute, 1.5 GiB); check: both equal to
+#                                                    a fresh generation, byte for byte
+#   bin/repr-asm --arch arm64 table oracle           the oracle tier's, by hand: the host's llvm-tblgen 23.1.5 (REPR_ASM_TBLGEN)
+#                                                    -print-records; every matchable instruction, its AsmString and its encoding
+#                                                    against asm/arm64/table.edn (test/asm/table_oracle_arm64.ae)
 #   bin/repr-asm --arch arm64 encode-check [--record] [CORPUS...]
 #                                                    AR2: every MC/AArch64 line that states an encoding encoded from its CHECK text
 #                                                    (or the input line a text-less block pairs with) and judged by the stated bytes,
-#                                                    the CHECK text printed back (:print), each error test's `error:` lines' instructions
-#                                                    rejected (:reject); against test/asm/encode-results-arm64.edn (--record merges the
+#                                                    the CHECK text printed back by the operands' kinds (:print, ARS25), the input
+#                                                    instructions paired with the encoding lines in order and encoded (:input, ARS29),
+#                                                    each error test's `error:` lines' instructions rejected under the features of the
+#                                                    run that checks them (-mattr, -mcpu: ARS26) with a message LLVM's fragment is
+#                                                    found in (:reject, ARS27); Go's table first, LLVM's records (asm/arm64/table.edn,
+#                                                    arbace.repr.asm.arm64.lenc) for what it refuses; against test/asm/encode-results-arm64.edn (--record merges the
 #                                                    run's corpora's rows into it, only from a run with no problem), every recorded file
 #                                                    of the run's corpora run, the classes test/asm/divergences-encode-arm64.edn and the
 #                                                    negative controls test/asm/controls-encode-arm64.txt (default corpora mc-aarch64,
@@ -288,10 +299,24 @@ case ${1:-} in
     [ $fails = 0 ] ;;
   table)
     if [ "$arch" = arm64 ]; then
-      case ${2:-} in gen) chk= ;; check) chk=--check ;; *) echo "repr-asm --arch arm64 table gen|check" >&2; exit 2 ;; esac
+      case ${2:-} in gen) chk= ;; check) chk=--check ;; oracle) chk=oracle ;; *) echo "repr-asm --arch arm64 table gen|check|oracle" >&2; exit 2 ;; esac
+      llvm=$src/llvm-project-23.1.5.src/llvm
+      if [ "$chk" = oracle ]; then
+        # the oracle tier's, by hand (AR2's second slice): the host's llvm-tblgen 23.1.5 prints AArch64.td's records
+        # (-print-records); each instruction's AsmString and Inst bits (fixed, an operand field's, unset) against the table's
+        tblgen=${REPR_ASM_TBLGEN:-/usr/lib/llvm23/bin/llvm-tblgen}
+        o=$root/.tmp/repr-asm/table-oracle-arm64; mkdir -p "$o"
+        "$tblgen" -print-records -I "$llvm/lib/Target/AArch64" -I "$llvm/include" "$llvm/lib/Target/AArch64/AArch64.td" -o "$o/records.txt"
+        arbace_tool -e "(do (load-file \"$root/test/asm/table_oracle_arm64.ae\") nil)" \
+          -e "(asm.table-oracle-arm64/main \"$root/asm/arm64/table.edn\" \"$o/records.txt\")"; exit
+      fi
+      [ -f "$llvm/lib/Target/AArch64/AArch64.td" ] && [ -f "$llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp" ] ||
+        { echo "repr-asm: $llvm/lib/Target/AArch64 missing: bin/repr-asm corpus extract" >&2; exit 1; }
       [ "$(head -1 "$goroot/VERSION" 2>"$TMPDIR/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
         { echo "repr-asm: $goroot/VERSION is not the pin's (seed/goroot.sha256's toolchain)" >&2; exit 1; }
-      arbace_tool -m arbace.repr.asm.arm64.tablegen "$goroot" "$root/arbace/repr/asm/arm64/table.ae" ${chk:+"$chk"}; exit
+      arbace_tool -m arbace.repr.asm.arm64.tablegen "$goroot" "$root/arbace/repr/asm/arm64/table.ae" ${chk:+"$chk"} || exit 1
+      # ARS24 (a): LLVM's AArch64 records by Arbace's TableGen (about 1 minute, 1.5 GiB)
+      GOMEMLIMIT=${REPR_ASM_TABLE_MEM:-1500MiB} arbace_tool -m arbace.asm.arm64.gen "$llvm" "$root/asm/arm64/table.edn" ${chk:+"$chk"}; exit
     fi
     case ${2:-} in gen|check|oracle) ;; *) echo "repr-asm table gen|check|oracle" >&2; exit 2 ;; esac
     llvm=$src/llvm-project-23.1.5.src/llvm
@@ -369,6 +394,7 @@ case ${1:-} in
       [ ${#ids[@]} -gt 0 ] || ids=(mc-aarch64 mc-asmparser-aarch64)
       specs=()
       for id in "${ids[@]}"; do make_list "$id"; specs+=("$id=$lists/$id.list"); done
+      export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
       arbace_tool -m arbace.repr.asm.arm64.encheck "$root/test/asm/encode-results-arm64.edn" "$root/test/asm/divergences-encode-arm64.edn" \
         "$root/test/asm/controls-encode-arm64.txt" "${record:-}" "${specs[@]}"; exit
     fi

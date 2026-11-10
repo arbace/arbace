@@ -711,3 +711,91 @@ Each with options, the recommended named; none taken.
   counts by class and a digest of its non-passes. *Recommended: (a)*.
 - **ARS29 The inputs too.** (a) the next slice pairs each input instruction with its CHECK line (in order, per check prefix) and
   encodes the input as well (the hand-written spellings, the aliases LLVM resolves); (b) CHECK texts only. *Recommended: (a)*.
+
+## As built: AR2 (second slice) (2026-11-10; branch `asm-ar2b`, from `mac/asm-merged` `9f880b7ab`)
+
+The user's decisions of 2026-11-10 (about 10:30 UTC): ARS24 (a), amending ARS5 (a): arm64's encodings beyond ARMv8.0, the system
+registers, PSTATE fields, operations and features from LLVM's AArch64 `.td` files in the pinned llvm-project 23.1.5 tarball, through
+Arbace's own TableGen; and ARS25-ARS29 (a): the print by argument kind, feature sets from each test's RUN lines, LLVM's messages on
+refusal (the reject level judged by the fragment), the per-line record kept until AR10, the input lines encoded beside their CHECK
+lines. Built on the light lane (stage 0, at most 1.5 GiB, no lock, nothing fetched: the tarball is the one AX2 extracts X86's `.td`
+from); llvm-tblgen run by hand once, as the oracle.
+
+- **Arbace's TableGen reads AArch64.td** (`arbace/asm/tablegen.ae`, additive): `!switch`, `!match` and `!sort`, which AArch64's files
+  and Target.td's SubtargetFeature use and X86's did not. AArch64.td's 67,124 records load in about 36 s at 1.4 GiB; amd64's table is
+  unchanged (`bin/repr-asm table check`, byte for byte).
+- **The table** (`asm/arm64/table.edn`, generated, committed; `arbace.asm.arm64.gen`; `bin/repr-asm --arch arm64 table gen|check`,
+  which also regenerates Go's table as before; about 53 s, 1.5 GiB): 7,484 instructions (Namespace AArch64, not pseudo, not
+  codegen-only) with their AsmStrings, operands, ties, predicates and encodings, and 3,053 InstAliases; the operand types, their
+  AsmOperandClasses, the registers and register classes (SetTheory's operators); the predicates over the features, the 356
+  SubtargetFeatures with what they imply, the 84 processors' features; AArch64SystemOperands.td's tables (1,657 system registers with
+  their access and features, the PSTATE fields, AT, DC, IC, TLBI 166, TLBIP 120, PLBI, GIC, barriers, prefetch operations, SVCR, ...);
+  and, read as text from `AsmParser/AArch64AsmParser.cpp`, showMatchError's messages by diagnostic type and ExtensionDefs' feature
+  names. The encoding is CodeEmitterGen's reading of `Inst`: each record's unset `bits<n>` (and `bit`) fields are given bits that
+  name themselves before `Inst` is evaluated, so `let Inst{4-0} = Rd;` leaves `[Rd 0]..[Rd 4]` in Inst; a field partly set (`let
+  scale{5} = 1;`) keeps its set bits. By hand (`bin/repr-asm --arch arm64 table oracle`, `test/asm/table_oracle_arm64.ae`): the host's
+  llvm-tblgen 23.1.5 `-print-records` names the same 7,484 instructions, each with the same AsmString and encoding: 0 differences.
+- **The matcher and encoder over it** (`arbace.repr.asm.arm64.lenc`): Go's table first (AR2's first slice, unchanged but two LLVM
+  conventions: an unshifted 12-bit value shifted by 12 is written with `LSL #12`, `add w3, w4, #4194304`, as
+  tryParseImmWithOptionalShift does; the first slice's note that LLVM rejects `add w5, w6, #0x1000` read a prefix no RUN line
+  checks); what it refuses is matched as AArch64AsmParser's matcher matches it, in outline: each instruction's AsmString (variant 0)
+  and each InstAlias of the mnemonic is a template, `$NAME` matched by its operand's class (the predicate methods by name: register
+  classes by AsmName, NEON's by AltName and kind, vector lists, immediates by range and scale, labels, conditions and inverted ones,
+  system registers by access and feature, PSTATE fields, barriers, prefetch operations, logical, FP and add/sub immediates, register
+  pairs, the GPR64sp0 `[xN, #0]`), rendered and encoded by its EncoderMethod into the Inst bits its field sets; an alias's fixed
+  registers, immediates and complex sub-operands, tied operands' values; the parser's own rules ported: parseSysAlias and
+  parseSyspAlias (IC, DC, AT, TLBI, PLBI, GIC, GSB, GICR, TLBIP, CFP/DVP/COSP/CPP), sxt/uxt's twiddles, cset's AL/NV refusal, MOPS's
+  register rules.
+- **ARS26, features**: `encode-check` reads each test's RUN lines (continuations joined; a FileCheck run of its own reading the file an
+  llvm-mc run wrote counts as that run's), and the reject level binds the features of the run that checks the error line's prefix:
+  `-mcpu`'s processor (else generic) and `-mattr`'s additions with all they imply, less each removal and every feature implying it
+  (ClearImpliedBits). An instruction or an operand that needs a feature not enabled is refused with LLVM's message. The encode and
+  input levels run with every feature (their lines' features are the test's own `.arch` directives as much as its RUN lines).
+- **ARS27, messages**: a refusal carries AArch64AsmParser's message: MatchInstructionImpl's choice (the furthest operand any matchable
+  failed at, the latest specific diagnostic; `too few operands for instruction`; `instruction requires: ...` from the matchable missing
+  the fewest features) in showMatchError's words by the class's DiagnosticType; the system aliases', setRequiredFeatureString's and
+  MOPS's. The reject level passes when LLVM's fragment (FileCheck's text after `error:`, its alternatives expanded) is found in the
+  message; an error line under a prefix no RUN line checks states no verdict (`:unchecked-prefix`); the echo of an error is the next
+  line under its own prefix.
+- **ARS25, the print by kind**: `print-kinds` spells a logical immediate `#0x...` (printLogicalImm, in the row's width), MOVI's 64-bit
+  pattern `#0x` with 14 digits at least (printSIMDType10Operand), and under a run's `-print-imm-hex` every other integer immediate in
+  hexadecimal, from the row that encoded the line (Go's argument kinds or LLVM's operand classes); the forms' `(hex N WIDTH)`.
+- **ARS29, inputs**: a new level, `:input`: each input instruction of a file paired in order with the encoding lines of the first check
+  prefix that has as many, encoded and judged by the paired line's bytes.
+- **ARS28**: the record stays per line (`test/asm/encode-results-arm64.edn`, now 35,767 rows); five more controls (LSE's LDADD against
+  LDADDA, FP16's FADD against FSUB, two TLBI operations, two system registers of LLVM's table, and the reject level's message against
+  another line's fragment, `_control/msg-...`): eleven, each failing as it must.
+
+| level | lines | before (first slice) | now | classed now |
+|---|---:|---:|---:|---|
+| encode: the stated encodings | 12,298 | 7,685 | **12,290** | 7 `:check-text`, 1 `:directive` |
+| print: the CHECK texts printed | 12,227 | 12,156 | **12,222** | 5 `:check-text` |
+| input: the input lines encoded (new) | 6,212 | — | **6,212** | none |
+| reject: the `error:` lines, with LLVM's fragment | 5,030 | 0 | **4,176** | 484 `:message`, 265 `:no-instruction`, 59 `:unchecked-prefix`, 31 `:relocation`, 14 `:feature-gate`, 1 `:operand-spelling` |
+
+None failing; about 26 s and 0.9 GiB for the check. The classes the first slice deferred to ARS24 (`:sysreg-name` 2,299, `:extension`
+1,787, `:fp16` 326, `:sysop-name` 144, `:extension-operands` 49) and ARS25's `:print-radix` (66) have no row left and are gone from
+`test/asm/divergences-encode-arm64.edn`. What stays: the parser's own messages before the matcher (`expected integer shift amount`,
+`mismatched register size suffix`, the register pairs' `expected first even register ...`, the reader's syntax errors) and
+MatchInstructionImpl's choice where the order of LLVM's matchables differs from the table's (`:message`, deferred); 14 feature-gated
+lines whose `.arch`/`.arch_extension` directives the features do not follow yet. AR1's round trips (arm64 and amd64) unchanged.
+
+What differs from the plan: the matcher is a structural one over the AsmStrings (the forms' trees against the templates), not
+AsmMatcherEmitter's operand classes and their order; Go's table stays first, so the base A64 rows keep the first slice's choices and
+LLVM's records add the rest (ARS24 (a)'s cross-check of the base by LLVM's records is not run yet); the encode and input levels take
+every feature. Not built: the gate step and the row (AR10); Plan 9's encodings (AR8); the decoder (AR3); SVE and SME's directories
+(AR11; their instructions are in the table).
+
+## Proposed (AR2, second slice)
+
+Each with options, the recommended named; none taken.
+
+- **ARS30 The base by LLVM's records too.** (a) a cross level: every line Go's table encodes, encoded again by LLVM's matcher alone and
+  the two words compared (ARS24 (a)'s cross-check, both ways); (b) LLVM's matcher first and Go's table the cross-check; (c) Go's
+  table alone for the base. *Recommended: (a)*, then (b) once the cross level meets every base line.
+- **ARS31 The directives' features.** (a) `.arch`, `.arch_extension` and `.cpu` read in file order and the features they set bound
+  for the lines after them, at every level; (b) the RUN lines' features alone. *Recommended: (a)*: the 14 `:feature-gate` lines.
+- **ARS32 The parser's messages.** (a) AArch64AsmParser's operand parsers ported for their own messages (shift amounts, register
+  pairs, vector kinds and lists), the matchables in AsmMatcherEmitter's order for the near-miss choice; (b) `:message` kept.
+  *Recommended: (a)* in slices, by count.
+
