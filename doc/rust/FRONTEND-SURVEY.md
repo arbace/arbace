@@ -2851,8 +2851,8 @@ In the order they depend on each other, each one process at a time:
   `main-err`, `patterns`, `strings`, `structs`, `traits`), the vector ABI 4 (`collections`, `generics`, `iterators`, `rc-refcell`:
   hashbrown's SSE2 groups), `tlsref` 1, an unevaluated named constant 1 (`casts`), a closure's function pointer 1 (`closures`,
   RFP50), and two `main`s not ours (`panic-assert-eq`'s path, `panic-explicit`'s `&str` promoted constant). In the 14 programs
-  this slice worked on, the vtables' and virtual calls' facts: 8 of 8 virtual slots native where the callee was ours, the record's
-  virtual callees' slots computed (`vslots` 2 of 2 to 4 of 4 a program), the casts' vtables the record's (`vtables` 0 of 2 to 0 of 3:
+  this slice worked on, the vtables' and virtual calls' facts: the record's virtual callees' slots all computed (`vslots` 2 of 2 to
+  4 of 4 a program), the casts' vtables the record's (`vtables` 0 of 2 to 0 of 3:
   every one needed a default method, a closure's shim or std's impl: RFP48, RFP50).
 - The native leg (`bin/rust-front rsi-native`, by hand: rustc as the linker driver): **44 of 47 give rustc's recorded run** (43
   before: `panic-vec-remove`); the three left are RFP47's std paths (`overflow-abs-i64`, `overflow-pow-i32`, `panic-alloc`).
