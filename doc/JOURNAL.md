@@ -2825,3 +2825,24 @@ pinned by `test/ocaml/corpora.edn` (`runtime/finalise.c`, `runtime/startup_aux.c
   time at night), CP341 (the full cache's format, or none).
 - **Slips**: two process substitutions (`paste <(...)`, `diff <(...)`) and one `>/dev/null` in throwaway comparisons, against the day's
   rules; a `bin/cppi runtime-build` attempt was refused by the permission layer during night 10's heavy work and not retried.
+
+## 2026-11-10: C++'s print cell on the own round trip's records, CP243 (a)'s switch (branch `cpp-print-own`)
+
+- **What**: cpp-compl's night step 2 run by day in the light lane: `bin/repr-cpp roundtrip-corpus KEY --judge own --record-results`
+  for gxx-dg-every-10 (1,796 of 1,807 pass, 11 forms-differ), gxx-old-deja-every-10 (320 of 323, 3), c-c++-common-every-10 (326 of
+  326), libstdcxx-testsuite-every-40 (244 of 244), and `bin/repr-cpp dg --corpus modules [--sample 10] --rt-judge own --record`
+  (gxx-modules-all 1,180 of 1,181, gxx-modules-every-10 119 of 119): `test/repr/cpp/roundtrip-results/own/`. Two fixes on the way:
+  a statement's GNU attribute printed `__attribute__((x))` when it is no standard attribute (`[[used]]` was dropped on the read
+  again; `arbace/repr/cpp/print.ae`), and `sema`'s empty-init bails on a member of its own class's type (parse/struct-4.C overflowed
+  the stack; `arbace/repr/cpp/sema.ae`). Then CP243 (a): `--judge own` the round trip's default (`bin/lib/repr-cpp/roundtrip`;
+  `dg --rt-judge own` too), `test/reap/cells.edn`'s C++ print sources on `roundtrip-results/own`, cpp-roundtrip-dg's rotation
+  universe the own record, `test/crops/independence.edn`'s judge `:roundtrip [3887 1]`; `bin/reap --record`, `bin/crops-score --record`.
+- **Why**: the crops' roadmap's cheapest unscheduled gain (`.tmp/plans/CROPS-90-ROADMAP.md`, item 3); the user's CP243 (a) of
+  2026-11-07 waited only on the records, which needed no clang and fit the day's 2 GiB.
+- **Checked**: each record from a whole run with no failure; the samples (9 of 9, the control failing as it must) and
+  gxx-dg-essential (33 of 33) under the new default; old-deja and c-c++-common checked again after the fixes. `bin/crops-score --crop
+  cpp`: 76.3 / 100 / 67.8 → 89.1 / 100 / 71.3 (print 48.3 → 99.5; judge 0.735 → 0.907); `--judge --strict` 0 problems.
+- **Alternatives considered**: classing the 15 forms-differ in the known file (the own judge classes them itself; the known file is
+  the clang judge's); fixing them now (CP342, doc/cpp/CPP-SURVEY.md, "As built: CP243 (a)").
+- **Slips**: `bin/lib/repr-cpp/roundtrip` edited while a run read it (the 47-minute libstdcxx run lost, run again); one `/dev/null`
+  in a throwaway grep.

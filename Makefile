@@ -392,13 +392,13 @@ repr-cpp-pp-record: ## g++ -E and clang's raw tokens run on the corpora's files,
 	bin/repr-cpp pp-check --record --add-missing $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
 repr-cpp-cxxdump-check: ## the oracle's filter over a list of files, its numbers (bin/repr-cpp cxxdump-check LIST OUT; LIST=... OUT=...)
 	bin/repr-cpp cxxdump-check $(LIST) $(OUT) --layouts
-repr-cpp-roundtrip: ## repr/cpp's round trip in mode :lines over a list: forms, print, forms again, the print's AST, g++'s and clang's objects (bin/repr-cpp roundtrip LIST WORK; LIST=... WORK=...)
+repr-cpp-roundtrip: ## repr/cpp's round trip in mode :lines over a list by its own judge: forms, print, forms again, mode :full byte for byte (--judge clang: the print's AST, the objects) (bin/repr-cpp roundtrip LIST WORK; LIST=... WORK=...)
 	bin/repr-cpp roundtrip $(LIST) $(WORK)
 repr-cpp-roundtrip-corpus: ## repr/cpp's round trip over a recorded list made by its key: CORPUS-every-N, CORPUS-all, CORPUS-essential, samples (bin/repr-cpp roundtrip-corpus KEY; KEY=...)
 	bin/repr-cpp roundtrip-corpus $(KEY)
 repr-cpp-pp-essential: ## the essential subset of C++'s token check (test/cpp/essential-read.txt: the lexical corpus, one g++.dg file of each class, three headers) (bin/repr-cpp pp-check --essential)
 	bin/repr-cpp pp-check --essential
-repr-cpp-roundtrip-essential: ## the essential subset of C++'s round trip (test/cpp/essential-print.txt, held to roundtrip-results/gxx-dg-essential.edn) and the samples (bin/repr-cpp roundtrip-corpus gxx-dg-essential, samples)
+repr-cpp-roundtrip-essential: ## the essential subset of C++'s round trip (test/cpp/essential-print.txt, held to roundtrip-results/own/gxx-dg-essential.edn) and the samples (bin/repr-cpp roundtrip-corpus gxx-dg-essential, samples)
 	bin/repr-cpp roundtrip-corpus gxx-dg-essential && bin/repr-cpp roundtrip-corpus samples
 repr-cpp-pp-record-results: ## the token check's results, test/repr/cpp/pp-check-results.edn, at the recorded samplings (bin/repr-cpp pp-check --record-results, three runs)
 	bin/repr-cpp pp-check --corpus cpp-lexical --record-results && bin/repr-cpp pp-check --corpus gxx-dg --sample 10 --record-results && bin/repr-cpp pp-check --corpus libstdcxx-headers --sample 8 --record-results

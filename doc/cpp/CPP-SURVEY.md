@@ -5798,3 +5798,87 @@ bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2                        #
 # CP333 (b), when the switch holds: independence.edn's eval and AOT :cases {:own-route [N 1] :pack [82-N 0.5]} averaged with the
 # runtime's (0.5, 0.657 with P21 (b)) -- G5c's model; then bin/crops-score --record
 ```
+
+## As built: CP243 (a), the print cell on the own round trip's records (2026-11-10; branch `cpp-print-own` from mac/cpp-props5 57dd92021)
+
+The day's light lane (one process at a time, at most about 2 GiB: `REPR_CPP_THREADS=2 GOMEMLIMIT=1800MiB`, main's stage 0 by
+`ARBACE_HOST_EXE`, no gate, no clang or g++). cpp-compl's "The night" step 2 run by day, then CP243 (a)'s switch.
+
+### The records (`roundtrip-results/own/KEY.edn`, `--judge own --record-results`, each from a whole run with no failure)
+
+| key | files | pass | known (class) | wall, peak |
+|---|---:|---:|---|---|
+| gxx-dg-every-10 | 1,807 | 1,796 | 11 forms-differ | 12.5 min, 1.83 GB |
+| gxx-old-deja-every-10 | 323 | 320 | 3 forms-differ | 2.5 min, 1.61 GB |
+| c-c++-common-every-10 | 326 | 326 | none | 1.5 min, 1.0 GB |
+| libstdcxx-testsuite-every-40 | 244 | 244 | none | 49 min, 1.95 GB (each file reads libstdc++'s headers natively) |
+| gxx-modules-all (`bin/repr-cpp dg --corpus modules --rt-judge own --record`) | 1,181 | 1,180 | 1 forms-differ | 15 min, 1.86 GB |
+| gxx-modules-every-10 (`... --sample 10 ...`; the gate's, not counted beside -all) | 119 | 119 | none | 2 min, 1.69 GB |
+
+The samples (9 of 9) and gxx-dg-essential (33 of 33, its own record of cpp-compl) checked after the last fix, the samples'
+control `_control/bitfields-vs-io` failing as it must (the controls are the samples'; `--record-results` runs none);
+gxx-old-deja-every-10 and c-c++-common-every-10 checked again against their records after the fixes, unchanged.
+
+Two failures found and fixed on the way (each file passes after):
+
+- **c-c++-common/Wimplicit-fallthrough-20.c**: `__attribute__((used));` on a null statement printed `[[used]] ;`, which clang (and
+  the native parser after it) drops as an unknown standard attribute: the forms read again lost it. An AttributedStmt's forms do not
+  say how an attribute was written; an unqualified name that is no standard attribute can only have been written `__attribute__((...))`
+  (an unknown `[[name]]` makes no node), so `print`'s `stmt-attr-str` prints it so (`std-stmt-attrs`, parse's std-attrs).
+- **g++.dg/parse/struct-4.C** (`struct A { struct A a; };`, ill-formed): the native read overflowed the stack in `sema`'s
+  `empty-init`/`fill` (`struct A b = { 0 }` filling a member of its own class's type, without end); `empty-init` now bails (the
+  sema's decline, the converter's tree as before) on a class met again inside its own fill (`*filling*`).
+
+The 15 forms-differ by cause (the own judge's rule class: the first own level that fails, level 1; deferred): most are dg-error
+files whose error recovery the forms do not keep: a type defined in a cast or in a condition's declaration dropped
+(old-deja `g++.bugs/900405_01.C`, `g++.jason/cond.C`), stray tokens `#`, `$` read as a directive the second time
+(`g++.other/crash41.C`), missing semicolons (`parse/semicolon3.C`), `>=` split from a template-id (`parse/template30.C`),
+invalid pack expansions and defaults (`cpp0x/lambda/lambda-err3.C`, `template/crash106.C`), attributes where none may stand
+(`cpp0x/attr-no_unique_address1.C`), `coroutines/ramp-return-a.C`'s `> >`; reader gaps on valid code: `__attribute` without its
+trailing underscores read as an empty declaration (`asan/pr82792.C`), `enum A<T>::E : T { e };` out of line
+(`cpp0x/scoped_enum7.C`), `auto baz() -> C` (`cpp0x/trailing5.C`), `cpp2a/paren-init33.C`'s parenthesized array members, a stray
+`;` (`modules/cpp-11.C`); and `modules/target-aarch64-1_a.C`, an aarch64-only test (`<arm_sve.h>`), read on x86-64.
+
+### The switch (CP243 (a))
+
+- `bin/lib/repr-cpp/roundtrip`: `--judge own` the default (`REPR_CPP_JUDGE` unset); `--judge clang` the oracle tier's, by hand at
+  a tag. `bin/lib/repr-cpp/dg`: `--rt-judge own` the default, its clang route passing `--judge clang` itself; the selftest's
+  `results-record.sh` (the clang judge's records) passes `--judge clang`.
+- `test/reap/cells.edn`'s `[:cpp :print]` sources read `test/repr/cpp/roundtrip-results/own`; clang's records
+  (`roundtrip-results/KEY.edn`) stay the oracle tier's.
+- `cpp-roundtrip` and `cpp-roundtrip-dg` (`test/gate/steps.edn`, `test/gate/crops/cpp.edn`): already `--judge own` on `[:stage0]`
+  (ORS31 (a)); now held to the own records, cpp-roundtrip-dg's rotation universe the own gxx-dg-every-10.
+- `test/crops/independence.edn`'s judge: `:roundtrip [3887 1]`, 0.735 → 0.907.
+
+The known file's 6 files of no own record (HotSpot's 5, `samples/coroutine.cpp`) stay the cell's unrecorded part (3 forms-differ,
+2 print-rejected, 1 gxx-objects-location: clang's classes); `bin/reap`'s detail calls the 15 own forms-differ "recorded known the
+known file no longer lists", the clang judge's wording (no failure: the own judge classes them itself).
+
+### Numbers (bin/crops-score --crop cpp)
+
+| measure | before | after |
+|---|---|---|
+| completeness | 76.3 (96.8) | 89.1 (97.8): print 48.3 → 99.5 (3,866 pass / 1 design / 20 deferred) |
+| maturity | 100 | 100 |
+| independence | 67.8 | 71.3 (judge 0.735 → 0.907) |
+
+`bin/reap --record` (the C++ read cell's sources moved too: cpp-props5's records, not recorded in the matrix before),
+`bin/crops-score --record`, `--judge --strict`: 0 problems.
+
+### Left
+
+The 15 forms-differ (CP342 below); HotSpot's 5 under the own judge (a `hotspot-x86-linux` key needs jdk26u's sources).
+
+### Proposed (CP342; not decided)
+
+- **CP342: the own judge's forms-differ.** (a) Fix the valid-code reader gaps (pr82792's `__attribute`, scoped_enum7's out-of-line
+  enum, trailing5, paren-init33, cpp-11's `;`: five files, about a day); the dg-error files' error recovery stays deferred. (b) A class
+  of its own for an ill-formed file whose error recovery the forms do not keep (by design, as clang's print-rejected was). (c) As now.
+  **Recommended: (a)**, then (b) for the rest; print +0.1 either way.
+
+### Slips, scratch
+
+Edited `bin/lib/repr-cpp/roundtrip` while a run of it was reading it (bash reads a script as it goes): the first
+libstdcxx-testsuite-every-40 run died at its judge (`ool: command not found`) after 47 minutes and was run again; one
+`grep ... /dev/null` in a throwaway command. Scratch in the worktree's `.tmp/`: `repr-cpp-roundtrip/KEY/` (the runs), `repr-cpp-dg/`,
+`rt-*.log`, `chk-*.log`.
