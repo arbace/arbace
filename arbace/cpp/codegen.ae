@@ -55,6 +55,16 @@
     (swap! *top* update :forms assoc i f)
     (add-top! f)))
 
+(def ^:dynamic *eager-want* false) ; P23 (a): the top-level definitions wanted before any is written (no slot yet)
+
+(defn- reserve!
+  "P23 (a): the function `nm`'s place among the module's forms taken now, at its first reference, as an llvm::Function
+  takes its place in the module's list when created (GetOrCreateLLVMFunction) and is defined there later."
+  [nm]
+  (let [skey [:fn nm]]
+    (when-not (contains? (:slots @*top*) skey)
+      (swap! *top* (fn [t] (-> t (assoc-in [:slots skey] (count (:forms t))) (update :forms conj [::slot skey])))))))
+
 (defn- declare! [^String nm ret ps & {:keys [va nounwind pattrs]}]
   (when-not (contains? (:declared @*top*) nm)
     (swap! *top* update :declared conj nm)
@@ -306,7 +316,8 @@
       (swap! *top* update :wanted conj [fid v])
       (if (and (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
                (not (and (:tbody f) (not (:implicit f)) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))))
-        (swap! *top* update :queue conj [fid v])
+        (do (when-not *eager-want* (reserve! nm))
+            (swap! *top* update :queue conj [fid v]))
         (let [[r ps va plan] (fn-sig f v)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
     (gsym nm)))
 
@@ -426,9 +437,11 @@
 (defn- clang-call-terminate! []
   (when-not (contains? (:declared @*top*) "__clang_call_terminate")
     (swap! *top* update :declared conj "__clang_call_terminate")
+    ;; (P23 (a): the function created before the declarations its body names, as clang's getClangCallTerminateFn)
+    (reserve! "__clang_call_terminate")
     (declare! "__cxa_begin_catch" 'ptr '[ptr] :nounwind true)
     (declare! "_ZSt9terminatev" 'void [] :nounwind true)
-    (add-top! (list 'llvm/define (gsym "__clang_call_terminate") 'void [['ptr '%a0]] :linkage :linkonce_odr :visibility :hidden
+    (place! [:fn "__clang_call_terminate"] (list 'llvm/define (gsym "__clang_call_terminate") 'void [['ptr '%a0]] :linkage :linkonce_odr :visibility :hidden
                     :attrs [:noinline :noreturn :nounwind]
                     :body [(list 'block nil
                                  (list '= '%t1 (list 'call 'ptr (gsym "__cxa_begin_catch") [['ptr '%a0]] :attrs [:nounwind]))
@@ -496,6 +509,8 @@
                 [es ss] (eh-slots!)]
             (swap! *f* assoc-in [:pads state] l)
             (swap! *f* assoc :personality true :blocks [])
+            ;; (P23 (a): the personality function created at the first landing pad, as clang's getOpaquePersonalityFn)
+            (declare! "__gxx_personality_v0" 'i32 [] :va true)
             (start! l)
             (let [lp (val! (apply list 'landingpad '(struct ptr i32)
                                   (concat (when cleanup [:cleanup]) (map (fn [ti] (list 'catch 'ptr (or ti 'null))) clauses))))]
@@ -2085,6 +2100,7 @@
   functions, in the order first referred to (P23 (a))."
   [fid]
   (when-not (some #(= fid %) (:d0s @*top*))
+    (reserve! (abi/mangle-fn (sema/fnd fid) 0))
     (swap! *top* update :d0s conj-new fid)
     (swap! *top* update :queue conj [:d0 fid])))
 
@@ -2100,6 +2116,7 @@
   [fid v]
   (let [f (sema/fnd fid)
         nm (fn-name fid v)
+        _ (reserve! nm)
         vtt? (takes-vtt? f v)
         vbc (vb-class? (:cls f))
         [ret ps va plan] (fn-sig f v)
@@ -2224,7 +2241,7 @@
             body (vec (concat [entry] (rest blocks) (:pad-blocks s)))
             params (mapv (fn [t a p] (vec (concat [t] a [p]))) ps (:pattrs plan) pnames)]
         (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
-        (add-top! (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
+        (place! [:fn nm] (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
                          (concat (linkage-of f)
                                  (when (or (nothrow-fn? f) (:always-inline f))
                                    [:attrs (vec (concat (when (:always-inline f) [:alwaysinline]) (when (nothrow-fn? f) [:nounwind])))])
@@ -2240,6 +2257,7 @@
   "The deleting destructor: D2, then operator delete with the object's size."
   [f]
   (let [nm (abi/mangle-fn f 0)
+        _ (reserve! nm)
         t {:k :class :id (:cls f)}
         ;; the class's operator delete, else the global sized one (FindDeallocationFunctionForDestructor)
         d (sema/dtor-dealloc (:cls f))
@@ -2250,7 +2268,7 @@
       (emit! '(ret void))
       (close-block!))
     ;; (the destructor's linkage: strong for one defined out of line here, G5c; linkonce_odr for an inline one)
-    (add-top! (apply list 'llvm/define (gsym nm) 'void [['ptr '%a0]]
+    (place! [:fn nm] (apply list 'llvm/define (gsym nm) 'void [['ptr '%a0]]
                      (concat (let [l (linkage-of f)] (if (and (empty? l) (:body f) (not (:lazy f))) [] (if (:internal f) [:linkage :internal] [:linkage :linkonce_odr])))
                              [:body (vec (:blocks @state))])))))
 
@@ -2669,6 +2687,7 @@
         (binding [*out* *err*] (println "layout" nm id (pr-str (:targs c)) (pr-str (dissoc (abi/layout id) :primary)) (pr-str (map (fn [f] [(:name f) (abi/size-of (:ty f))]) (:fields c))) (pr-str (:bases c))))))
     (emit-globals! prog file)
     ;; the definitions: every non-inline function with a body, then what they use
+    (binding [*eager-want* true]
     (doseq [[k id] (:order prog) :when (= k :fn)]
       (let [f (sema/fnd id)]
         ;; internal functions are written when used, as clang defers them
@@ -2682,7 +2701,7 @@
             (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
             (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
         (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
-        (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id))))
+        (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id)))))
     ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
     (doseq [cid (sort (keys @abi/*classes*)) :when (= :here (vtable-home cid))]
@@ -2715,7 +2734,6 @@
           pending? (fn [] (or (seq (:queue @*top*)) (seq (vt-todo))))
           eager (:queue @*top*)]
       (swap! *top* assoc :queue [])
-      (doseq [x eager] (emit-item! x))
       (letfn [(deferred! []
                 (vtables!)
                 (let [cur (:queue @*top*)]
@@ -2723,6 +2741,7 @@
                   (doseq [x cur]
                     (emit-item! x)
                     (when (pending?) (deferred!)))))]
+        (doseq [x eager] (emit-item! x))
         (while (pending?) (deferred!))))
     ;; (every slot filled: a wanted group or VTT is written)
     (swap! *top* update :forms (fn [fs] (filterv #(not (and (vector? %) (= ::slot (first %)))) fs)))
