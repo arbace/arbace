@@ -36,6 +36,22 @@
 
 (defn- field-mut [pos lam] (if (neg? pos) l/lambda-unit [:Lprim (l/pfield pos :pointer true) [lam]]))
 
+(declare apply-coercion)
+
+(defn- wrap-id-pos-list
+  "Translmod.wrap_id_pos_list: each identifier of the coercion's id_pos_list the block names bound to its (coerced)
+  field, renamed afresh"
+  [id-pos-list get-field lam]
+  (let [[lam _ s] (reduce (fn [[lam fv s] [id pos c]]
+                            (if (contains? fv id)
+                              (let [id2 (ty/ident-create (:name id))
+                                    rhs (apply-coercion :alias c (get-field pos))]
+                                [[:Llet :alias "" id2 rhs lam] (into fv (s/free-variables rhs)) (assoc s id [:Lvar id2])])
+                              [lam fv s]))
+                          [lam (s/free-variables lam) {}]
+                          id-pos-list)]
+    (if (empty? s) lam (s/subst s lam))))
+
 (defn apply-coercion
   "Translmod.apply_coercion"
   [strict cc arg]
@@ -44,8 +60,10 @@
     (case (cc 0)
       :structure (name-lambda strict arg
                               (fn [id]
-                                [:Lprim (l/pmakeblock 0 false nil)
-                                 (mapv (fn [[pos c]] (apply-coercion :alias c (field-mut pos [:Lvar id]))) (cc 1))]))
+                                (let [get-field (fn [pos] (field-mut pos [:Lvar id]))]
+                                  (wrap-id-pos-list (get cc 2) get-field
+                                                    [:Lprim (l/pmakeblock 0 false nil)
+                                                     (mapv (fn [[pos c]] (apply-coercion :alias c (get-field pos))) (cc 1))]))))
       :functor (let [param (ty/ident-create "funarg")
                      carg (apply-coercion :alias (cc 1) [:Lvar param])]
                  (name-lambda strict arg
@@ -62,12 +80,17 @@
     (nil? c1) c2
     (nil? c2) c1
     (and (= :structure (c1 0)) (= :structure (c2 0)))
-    (let [v2 (vec (c2 1))]
+    (let [v2 (vec (c2 1))
+          ids1 (mapv (fn [[id pos1 cc1 :as x]]
+                       (if (neg? pos1) x (let [[pos2 cc2] (v2 pos1)] [id pos2 (compose-coercions cc1 cc2)])))
+                     (get c1 2))]
       [:structure (mapv (fn [[p1 cc1 :as pc]]
-                          (if (and cc1 (= :primitive (cc1 0)))
+                          ;; Tcoerce_primitive and Tcoerce_alias take no argument (position -1): kept as they are
+                          (if (and cc1 (#{:primitive :alias} (cc1 0)))
                             pc
                             (let [[p2 cc2] (v2 p1)] [p2 (compose-coercions cc1 cc2)])))
-                        (c1 1))])
+                        (c1 1))
+       (vec (concat ids1 (get c2 2)))])
     (= :alias (c2 0)) [:alias (c2 1) (compose-coercions c1 (c2 2))]
     (and (= :functor (c1 0)) (= :functor (c2 0)))
     [:functor (compose-coercions (c2 1) (c1 1)) (compose-coercions (c1 2) (c2 2))]
@@ -230,12 +253,16 @@
   [_ cc items sig]
   (let [ids (vec (keep (fn [item] (when (env/runtime-item? item) (item 2))) sig))
         final (if (and cc (= :structure (cc 0)))
-                [:Lprim (l/pmakeblock 0 false nil)
-                 (mapv (fn [[pos c]]
-                         (if (and c (= :primitive (c 0)))
-                           (apply-coercion :strict c nil)
-                           (apply-coercion :strict c (if (neg? pos) l/lambda-unit [:Lvar (ids pos)]))))
-                       (cc 1))]
+                (let [get-field (fn [pos] (if (neg? pos) l/lambda-unit [:Lvar (ids pos)]))
+                      own (set ids)]
+                  ;; the id_pos_list's identifiers but the structure's own fields bound around the block
+                  (wrap-id-pos-list (vec (remove (fn [[id]] (own id)) (get cc 2))) get-field
+                                    [:Lprim (l/pmakeblock 0 false nil)
+                                     (mapv (fn [[pos c]]
+                                             (if (and c (= :primitive (c 0)))
+                                               (apply-coercion :strict c nil)
+                                               (apply-coercion :strict c (get-field pos))))
+                                           (cc 1))]))
                 [:Lprim (l/pmakeblock 0 false nil) (mapv (fn [id] [:Lvar id]) ids)])]
     (letfn [(go [items] (if (empty? items) final (transl-struct-item (first items) #(go (rest items)))))]
       (go items))))
