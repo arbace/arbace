@@ -5572,4 +5572,6 @@ call's 21 us on goi), and the collector's knobs (`PYI_GOMEMLIMIT=8GiB GOGC=400`:
 did not already (deepcopy's and the queue's pass alone at base, in 190 s and 49 s; their rows are the night's runs, with other
 modules beside them); the night's record decides. test_subprocess's member is a failure of its own 10 s timeout, kept in
 `:slow-on-goi` (the child's start is the cause) until W2. Checks: `make python-essential`, `bin/pyi runtime vet`, `bin/pyi
-table-check --configs tamago/amd64,tamago/arm64`, a sampled `bin/pyi runtime check`, `test-251-stack.bash` (report 251).
+table-check --configs tamago/amd64,tamago/arm64`, a sampled `bin/pyi runtime check`, `test-251-stack.bash` (report 251), and
+`bin/pyi lib-test test_range test_iter test_with test_sys_settrace` in both worktrees: every method's outcome the same (588
+methods), the four modules' wall 309 s at base, 195 s at the head.
