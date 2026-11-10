@@ -160,7 +160,11 @@ items below are the ones whose work is still ahead or tied to a night.
   [classes/JAVA-CONFORMANCE-SURVEY.md](classes/JAVA-CONFORMANCE-SURVEY.md)): JCS169 after serialization's slices 2-4;
   F10b's asynchronous channels after the night's records; JCS190's flip after the night's comparison; JCS231 after F9;
   JCS261 waits; JCS274 (`:nio`'s rest reclassified after the record); JCV11 (b) (reopens RPS9 (a)); JCV12 (b); JCS180
-  later; F15 (JCS350-JCS356) for the next Java night.
+  later; F15 (JCS350-JCS356) for the next Java night. JCS370-JCS378 as recommended and JCV10 (b) (the user, 2026-11-10):
+  the record first (S1), then the port batches P1 (night 15), P2 (night 17), P3 (night 19). P1 built by day on `java-p1`
+  (PhantomReference and the thread "Reference Handler", System.runFinalization, thread groups, the Cleaner, jar verification
+  JCS231, DGCClient jdk26u's; "As built: P1 (by day)", its night commands there; JCS379-JCS383 proposed); P2 takes
+  serialization's slices 5 and 8 (JCS383).
 - **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243, the own judge the default after tonight's records; CP250 when
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above).
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;

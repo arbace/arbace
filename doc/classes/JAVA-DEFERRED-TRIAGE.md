@@ -6670,3 +6670,199 @@ annotations AnnotationSupport, F14's): getParameters is then not written (`param
 is the JCS280 commit. (2) The support methods are compiled only by the build: a Go compile error names `j2g_support.go`; each is
 one commit to revert (JCS304/JCS293, JCS320, JCS280). (3) JCS300 (c)'s compile fails for a test: said on stderr, the test runs as
 before.
+
+## As built: P1 (by day): PhantomReference, the Cleaner, thread groups, jar verification (branch `java-p1`, write-ahead)
+
+Branch `java-p1` from `mac/java-dyn-fix` (`379130378`: `java-night` with the frozen JVM's fix of j2g's dyn forms), 2026-11-10,
+by day under the light rules (no conversion, edge, build or level run; one light process at a time). The user's decisions of
+2026-11-10 (about 10:30): JCS370-JCS378 as recommended (`.tmp/plans/JAVA-90-PLAN.md`), JCS374 (a): P1 on night 15, P2 on
+night 17, P3 on night 19; JCV10 (b). P1's brief: the jrt and overlay gaps behind `:security`'s and `:serialization`'s remaining
+tests, PhantomReference, thread groups.
+
+### What P1's tests need, measured from the records
+
+The records are three conversions stale (the plan's §0), so the tail was taken from what was measured since: `:security`'s 361
+tests run on night 8's world (F23's `interp-now.tsv`, 261 pass), less what F23, JCS230 (b), JCS233 (a) and JCS235 (a) built
+(the Java night's slices): what F23 left is Kerberos 10 (by design but its permissions, JCS230 (b)), serialization 6 (JCS167's
+slices 1-4, built), **jar signing 5 (JCS231 (b): after F9's night, which `java-night` holds; P1's)**, LDAP 3 (JCS234 (a):
+deferred), reflection 4 and five single causes. `:serialization`'s slices 1-4, 6 (JCS170) and 7 (JCS169) are built on
+`java-night`; slices 5 (RecordComponent) and 8 (Clojure's types, JCS243 (a)) are not (below, JCS383). And java.lang.ref's
+and the thread groups' tests by their first missing piece in `test/java/check-interp.edn` (a scan of the non-passing tests'
+sources for `PhantomReference`, `Cleaner`, `ThreadGroup`, `getThreadGroup`, `runFinalization`: 23 tests):
+
+| piece | tests (interp's first reason) |
+|---|---|
+| PhantomReference (F17, JCS321 (a)) | t04816 Basic, t04818 EnqueueNullRef, t04822 PhantomReferentClearing, t04823 ReferenceClone, t04824 ReferenceEnqueue, t04826 ReferenceRefersTo, t03610 TestReferenceRefersTo (hotspot) |
+| System.runFinalization | t04682 FinInterrupt, t04683 FinThreads, t05432, t05472 IteratorMicroBenchmark x2, t05474 RemoveMicroBenchmark, t05683 GCRetention, t05842 ManyEntries, t08134 http Finalizer |
+| ThreadGroup (JCS322) | t04686 ITLConstructor, t04821 NullQueue (and the thread "Reference Handler"), t05712 ThrowingTasks, t04815 ThreadLists, t07952 DaemonRMIExporterTest |
+| java.lang.ref.Cleaner | t03385 Test7190310 (t05123 ExpandingMap's first gap is FileChannel.MapMode) |
+| jar verification (JCS231) | t05732 GetMethodsReturnClones, t05736 and t05741 ScanSignedJar, t05737 SignedJarFileGetInputStream, t05739 TurkCert, t05742 TestIndexedJarWithBadSignature, t05269 CertsMatch |
+
+### What came in, and how (jdk26u at `baf63fb`)
+
+| part | how |
+|---|---|
+| PhantomReference | `go/arbace/jrt/reference.ae`: jrt's `PhantomReference` beside Weak and Soft (a weak pointer whose `get` answers null; `refersTo` the referent itself, now for every kind, not `get()`'s answer, as jdk26u's `refersTo0`), a non-leaf (`PhantomReference_I`; `arbace.j2g.model/class-supers` lists it: jdk26u's `PhantomCleanable` and the tests' own references extend it), its generic signature in `classdata.ae`, the manifest's class list (`test/jrt/manifest.ae`). Go has nothing between a weak and a phantom referent's collection and jrt runs no finalizers, so both are enqueued alike |
+| the thread "Reference Handler" | the cleanups of collected referents no longer enqueue on Go's cleanup goroutine: they put the reference on a pending list that a daemon Java thread "Reference Handler" of the system group, at priority 10, enqueues (jdk26u's `Reference.startReferenceHandlerThread`); `RunMain` starts it before main (NullQueue looks for it), a program without `RunMain` with its first collected referent |
+| System.runFinalization | `system.ae`: a collection and a yield; jrt runs no finalizers (a JVM with `--finalization=disabled`, JEP 421), the interrupt status untouched (FinInterrupt). `finalize()` itself: JCS379 |
+| thread groups (JCS322 (a), the user's P1 overriding its (b)) | `go/arbace/jrt/threadgroup.ae`, jdk26u's `ThreadGroup.java` transcribed (JDK 19's design: a group tracks no threads; `activeCount`, `enumerate`, `interrupt` walk the live platform threads of management.ae's registry; the system and main groups' subgroups strong, later ones weak; `list()` left out: no test calls it); the groups "system", "main" in it, "VirtualThreads" in it; `Thread`: its group (the creator's, or the constructor's; an adopted goroutine's the main group), `getThreadGroup` (null once terminated), the five constructors taking a group (`inheritInheritableThreadLocals` false: no inheritable values, ITLConstructor), `Thread.activeCount`, `Thread.enumerate`, `setPriority` and construction within the group's maximum, `toString`'s group. An uncaught exception goes as before (the thread's handler, else the default handler, else the message): a group's `uncaughtException` does the same, and no test extends ThreadGroup |
+| the Cleaner (F17) | `test/jrt/jrt_sources.ae`'s new `p1-sources`: jdk26u's `java.lang.ref.Cleaner`, `jdk.internal.ref.CleanerImpl`, `PhantomCleanable`, `CleanerFactory` unchanged (the cleaner's thread jrt's own InnocuousThread). The variants that cut a Cleaner (DESKey, DESedeKey, PBEKey, PBKDF2KeyImpl, PasswordCallback, Timer, Executors, LogManager, DatagramChannelImpl; ZipFile's and Inflater's FileCleanable, NativeBuffer) stay as they are: JCS380 |
+| DGCClient | its derivation (weak references for jdk26u's phantom ones) dropped from `test/jrt/derive.ae` and its overlay removed: jdk26u's file, listed in `rmi-sources` (JCS321 (a)) |
+| jar verification (JCS231) | jdk26u's `JarVerifier`, `ManifestEntryVerifier`, `SignatureFileVerifier`, `ManifestDigester` in `p1-sources`, jrt's verifying-nothing `JarVerifier.java` and `ManifestEntryVerifier.java` overlays removed; `JarFile.java`'s overlay with jdk26u's verifier code restored (`jv`, `maybeInstantiateVerifier`, `initializeVerifier`, the verifier stream, `verifiableEntry`, the entries' certificates and signers, `ensureInitialization`), its other cuts kept (ZipAccess for SharedSecrets, the versions' feature numbers), jdk26u's `ScopedValue IN_VERIFIER_INIT` a `ThreadLocal` (no ScopedValue in the Go build); `overlay/jdk/variants/JarEntry.ae` removed (the copy constructor copies the certificates and signers again: java.security is in the world since F1-F4) |
+
+LICENSE.md: `threadgroup.ae`'s origin, the jar overlays' lines. Not changed: `RuntimeUtil`'s and JMX's three thread makers'
+derivations without groups (JCS381).
+
+### Light checks done
+
+Main's stage 0 as `ARBACE_HOST_EXE`, one process at a time, each under 2 GiB but the predicted world's (below, 4.98 GB):
+
+- **jrt's package tests**, `bin/jrt test --arch amd64 --package jrt`: the new `TestPhantomReferences` (get null, refersTo the
+  referent, a collected referent's reference enqueued by "Reference Handler", a live system-group daemon; enqueue and clear by
+  hand; a null referent's reference enqueues; runFinalization keeps the interrupt status) and `TestThreadGroups` (system > main >
+  the user's, a group's threads, activeCount and enumerate with and without recursion, the groups' enumeration, a terminated
+  thread's group null, the priority capped by the group's maximum at construction and by setPriority, Thread.toString's group,
+  inheritInheritableThreadLocals false) pass, and the whole package passes with the regenerated manifest test (9.9 s; the
+  first run caught the test's own unbuffered channel, `(make (chan any) 2)` is repr/go's spelling);
+- **the manifest and member tables**: `jrt.tables` and `jrt.manifest` on the frozen jar (`frozen_java tools -Xmx1800m`, as
+  `bin/jrt manifest` runs them; `JAVA_TOOL_OPTIONS` breaks `java26.bash`'s version check): Thread 52 of 121 JDK members (+8:
+  the five group constructors, getThreadGroup, activeCount, enumerate), System's runFinalization, ThreadGroup 21 of 32 (`list`
+  and members jrt does not define left out), PhantomReference 2 of 6 (its own: the
+  constructor and get; the rest Reference's), "edge members of these classes jrt does not define: 0";
+- **the joint javac check** (`.tmp/night7/all9-run.sh`, the JDK's javac over the closure as java.base's patch): 3,323 files
+  (java-night's 3,317, +8 `p1-sources`, +1 DGCClient jdk26u's, -1 its overlay, -2 the stub verifiers), **0 errors**, 6,958
+  classes (45 s, 1.0 GB);
+- **the derivations**, `bin/jrt-convert derive --check`: 79 overlays (80 less DGCClient's), 0 not as derived.
+- **the night's world predicted**, `bin/jrt-convert predict` (JCS283 (b); javac's tool `javac-5ad357331dbcd7cfb0fd`,
+  `REPR_JAVA_STALE_OK=1`): 1,071 files changed against the committed conversion (b6a6093af: all of `java-night`'s unconverted
+  slices with P1's), 1,769 read with their context in 41 minutes, 1,767 converted, every one natively but 2; the 2 failures and
+  46 javac errors are the predicted read's known context gaps (`LocaleProviderAdapter`, `LocaleData`: the generated
+  `LocaleDataIndex`; `PlatformLogger`: java.logging's packages, as F5's check found), none in P1's files. The vet (`jrt.vet`
+  over the world, the changed classes): 46 refused, 43 of them the night's own gaps (sun.nio.fs's generated `UnixConstants`,
+  generics the edge does not declare yet, `MethodHandleInfo`, java.time.chrono's dates); P1's three: `PhantomCleanable` and
+  DGCClient's `PhantomLiveRef` ("header: Unknown type: PhantomReference") and `Cleaner` (its `register` returning a
+  `PhantomCleanableRef`, a consequence): **`jdk/edge.edn` has no `java/lang/ref/PhantomReference`** (ThreadGroup's entry is
+  there), which the night's `bin/j2g-edge update` (step 2) records, the edge being the JVM's answers for every class the
+  builds name. Should step 3's report still name them, the fallback is risk (3) below. j2g's analysis of the whole predicted world
+  (`bin/j2g --analyze-only`, J2G_MISSING the changed classes): 45 analysis failures, P1's four the same edge gap (Cleaner,
+  PhantomCleanable, DGCClient and its PhantomLiveRef); **the jar verifier's classes (JarVerifier, ManifestEntryVerifier,
+  SignatureFileVerifier, ManifestDigester), JarFile and JarEntry analyze without a failure or a stub**, and so do the classes
+  naming ThreadGroup and Thread's new members. The 52 stubs are the other slices' (java.lang.invoke's, System.Logger, and
+  `RecordComponent` in JMX's mapping factory: serialization's slice 5, JCS383). The whole predict ran 73 minutes, **peak 4.98 GB**
+  (the analysis of the whole world, beyond the day's 2 GiB rule: a slip of this branch's day, see the journal); its outputs in the
+  worktree's `.tmp/jrt/predict/`.
+
+### Expected yield (interp / compiled; the triage's 0.7 where a second cause is unknown)
+
+- PhantomReference: EnqueueNullRef, PhantomReferentClearing, ReferenceClone, ReferenceEnqueue, ReferenceRefersTo,
+  TestReferenceRefersTo: **5-6**; Basic waits for finalization (JCS379).
+- runFinalization: FinInterrupt; GCRetention, ManyEntries and the three micro benchmarks (their next gaps unknown): **3-5**;
+  FinThreads and the http Finalizer need `finalize()` (JCS379).
+- thread groups: ITLConstructor, NullQueue, ThrowingTasks, DaemonRMIExporterTest (with F27's RMI), ThreadLists (with JMX-1's
+  ManagementFactory): **3-5**.
+- the Cleaner: Test7190310: **0-1**.
+- jar verification: the 7 above: **4-6**.
+
+About **+15-23 at interp and +12-20 at compiled** (the compiled level's are the same tests where j2g translates them; the
+DynSubs of PhantomReference are new, JCS111 (a)'s mechanism). With the plan's S4 estimate (+60-90) the rest of P1's share is
+`:security`'s single causes and serialization's slices 5 and 8, not built here (JCS383).
+
+### The night's commands (night 15, after JCS359's measure; in the night's worktree with `java-p1` merged, heavy ones under `bin/heavy-lock`)
+
+```sh
+# 0. light: the joint javac check (the closure + 8 files: Cleaner 4, the jar verifier 4; 0 errors), the derivations (DGCClient's
+#    gone: one fewer), jrt's package tests (TestPhantomReferences, TestThreadGroups and their neighbours)
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check \
+  && bin/jrt test --arch amd64 --package jrt -run 'TestPhantom|TestThreadGroups|TestWeakReferences|TestThread|TestRunMain|TestSystem' -count=1
+# 1. jrt's manifest and member tables (the frozen JVM: PhantomReference, ThreadGroup and Thread's new members appear;
+#    manifest_test.ae refers to each), then the conversion: + Cleaner, CleanerImpl, PhantomCleanable, CleanerFactory,
+#    JarVerifier, ManifestEntryVerifier, SignatureFileVerifier, ManifestDigester, DGCClient (share:java.rmi), JarFile's
+#    overlay; - jrt's JarVerifier and ManifestEntryVerifier overlays
+JAVA_TOOL_OPTIONS=-Xmx2g bin/jrt manifest
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. the package table, j2g's edge (PhantomReference and ThreadGroup are jrt's now; the Cleaner's and the verifier's classes),
+#    javac's world's edge
+bin/jrt modules && bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the build; j2g's report: no :analysis-failures for Cleaner, CleanerImpl, PhantomCleanable, JarVerifier,
+#    SignatureFileVerifier, JarFile; a DynSub_PhantomReference; no "a variant for a class not in the inputs"
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test
+# 4. the smoke (below; .tmp/p1-smoke.clj): expect "phantom null true", "enqueued true", "cleaner ran",
+#    "groups main system true", "itl 1", "jar-signed true" (TurkCert's signed test.jar, an entry read whole then its signers)
+target/arbace-go/amd64/arbace .tmp/p1-smoke.clj
+# 5. Java's levels interp and compiled on P1's areas: saved, not recorded; expect the yields above and no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 2 \
+  --only 'jdk/java/lang/(ref|Thread|ThreadGroup|System/finalization|management/ThreadMXBean)/|jdk/java/util/(jar|zip)/|jdk/java/security/CodeSource|jdk/java/util/concurrent/(ConcurrentQueues|ThreadPoolExecutor)/|jdk/java/util/(ArrayList|Collection)/|jdk/sun/net/www/protocol/http/Finalizer|jdk/javax/management/remote/mandatory/connection/DaemonRMIExporterTest|jdk/java/rmi/|hotspot/jtreg/compiler/(intrinsics/TestReferenceRefersTo|c2/Test7190310)' \
+  --save .tmp/p1-night/check
+bin/java-check --judge .tmp/p1-night/check/*.edn
+```
+
+The smoke (`.tmp/p1-smoke.clj`):
+
+```clojure
+(import '(java.lang.ref PhantomReference ReferenceQueue Cleaner) '(java.util.jar JarFile))
+(defmacro item [n & body] `(println ~n (try (eval '(do ~@body)) (catch Throwable t# (str "FAILED " t#)))))
+(item "phantom" (let [o (Object.) p (PhantomReference. o (ReferenceQueue.))] (str (.get p) " " (.refersTo p o))))
+(item "enqueued" (let [q (ReferenceQueue.) p (PhantomReference. (Object.) q)]
+  (loop [i 0] (System/gc) (if-let [r (.remove q 50)] (identical? r p) (if (< i 100) (recur (inc i)) false)))))
+(item "cleaner" (let [done (promise)] (.register (Cleaner/create) (Object.) #(deliver done "ran"))
+  (loop [i 0] (System/gc) (or (deref done 50 nil) (if (< i 100) (recur (inc i)) "not run")))))
+(item "groups" (let [g (.getThreadGroup (Thread/currentThread))] (str (.getName g) " " (.getName (.getParent g)) " "
+  (some #(= "Reference Handler" (.getName %)) (let [a (make-array Thread 64)] (take (.enumerate (.getParent g) a) a))))))
+(item "itl" (let [l (InheritableThreadLocal.) r (atom nil)] (.set l 1)
+  (doto (Thread. nil #(reset! r [(.get l)]) "t" 0 true) .start .join) (first @r)))
+(item "jar-signed" (with-open [j (JarFile. "/root/jdk26u/test/jdk/java/util/jar/JarFile/test.jar" true)]
+  (some (fn [e] (with-open [in (.getInputStream j e)] (while (pos? (.read in (byte-array 4096)))))
+              (when (and (not (.isDirectory e)) (.getCodeSigners e)) true))
+        (enumeration-seq (.entries j)))))
+```
+
+**Risks and fallbacks**: (1) the thread "Reference Handler" is a live thread: a test that counts the live threads exactly
+(ThreadMXBean's counts) sees one more, as on the JDK (which has it and more); the night's `--only` covers
+`java/lang/management/ThreadMXBean`; fallback: started lazily (with the first collected referent) instead of by `RunMain`, one
+line. (2) the jar verifier's classes refused by j2g (a member the edge lacks): the report names it; fallback the JarFile
+overlay and the two stub overlays restored (`git revert` of the jar commit), the Cleaner and the groups kept. (3) a
+DynSub of PhantomReference (`PhantomCleanable`'s) not built: JC4c's mechanism, as Weak and Soft; fallback the Cleaner's four
+files out of `p1-sources`. (4) Thread's interface gains `GetThreadGroup__ThreadGroup`: every translated subclass of Thread
+(ForkJoinWorkerThread, InnocuousThread, the tests') gets it from the embedded `Thread` (final, promoted).
+
+## Proposed (P1): JCS379-JCS383
+
+Numbered after JCS378 (`.tmp/plans/JAVA-90-PLAN.md`).
+
+### JCS379 Finalization (`Object.finalize`)
+
+Basic, FinThreads and the http Finalizer test (3) need an object's `finalize()` run after it becomes unreachable, on a thread
+"Finalizer". (a) By design: Arbace runs as a JVM with `--finalization=disabled` (JEP 421; finalization is deprecated for
+removal since JDK 18): a `:finalization` class, `:kind :design`; (b) Go's `runtime.SetFinalizer` on every object of a class
+that overrides `finalize` (j2g's allocation of such a class and the interpreter's `new` of one), the finalizer queueing it for
+a "Finalizer" thread, `runFinalization` waiting for that queue: 1.5 days, a cost on every such allocation, and resurrection
+(which Go's finalizers allow once) to match. *Recommended: (a)*: the JDK itself is moving to (a), and 3 tests.
+
+### JCS380 The Cleaner's cut variants restored
+
+With the Cleaner in the world (P1), the variants that left out a Cleaner (DESKey, DESedeKey, PBEKey, PBKDF2KeyImpl,
+PasswordCallback: keys zeroed only when destroyed; Timer, Executors' finalizable delegate, LogManager, DatagramChannelImpl,
+ZipFile's and Inflater's FileCleanable, NativeBuffer) can be jdk26u's again. (a) In P2, one variant a commit, each with its
+area's tests (`bin/jrt-convert vet --classes`); (b) only where a test needs it; (c) never. *Recommended: (a)*: fewer
+variants, the JDK's behaviour (a key's bytes zeroed when it is unreachable), no test known to need it now.
+
+### JCS381 RuntimeUtil's and JMX's thread makers with groups again
+
+RMI's `RuntimeUtil` and JMX's three thread makers are derived without thread groups (F27, JMX-1). (a) Their derivations
+dropped in P2 (jdk26u's files), DaemonRMIExporterTest's threads then in the "RMI Runtime" group as on the JDK; (b) kept.
+*Recommended: (a)*, after night 15 shows the groups.
+
+### JCS382 The thread "Reference Handler" from the start
+
+P1 starts it in `RunMain` (NullQueue looks for it before any reference is made). (a) As built; (b) lazily, with the first
+collected referent (no thread for a program that makes no reference with a queue; NullQueue fails). *Recommended: (a)*: the
+JVM has it from the start, and a daemon thread blocked on a channel costs nothing.
+
+### JCS383 Serialization's slices 5 and 8 as P2's
+
+`Class.getRecordComponents` and `RecordComponent` (slice 5, records' tests and reflection's) and Clojure's types (slice 8,
+JCS243 (a), the suite's `serialization` 9) are not built by P1, which took the security tail and the references. (a) Both in
+P2 (night 17), with JCS241 (invokeDefault) and JCS242 if a test reads lambdas from a file; (b) slice 8 alone in P2, slice 5
+with F25's reflection records. *Recommended: (a)*: about 1.5 days, and both are measured by the same areas' run.

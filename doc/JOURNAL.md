@@ -3659,3 +3659,28 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   the old and new `forms` with the world stubbed (interfaces, slot keys, method and sub forms, proxy classes, `m/translated?`) give the
   same forms printed with metadata but the reader's `:line`/`:column`, which `arbace.j2g.out/clean` drops, and `out/file-text` of
   j2g_dyn.go byte for byte equal (17,900 characters).
+
+## 2026-11-10: P1 by day (branch `java-p1`, from `mac/java-dyn-fix` 379130378)
+
+The user decided JCS370-JCS378 as recommended (`.tmp/plans/JAVA-90-PLAN.md`; recorded in
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user, 2026-11-10)") and JCV10 (b): P1 is night 15's Java night, its ports
+built by day. Built (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)"): jrt's PhantomReference (F17, JCS321 (a)) beside
+Weak and Soft, a non-leaf listed in j2g's `class-supers`, `refersTo` on the referent itself, the collected referents' references
+enqueued by a daemon thread "Reference Handler" of the system group that `RunMain` starts; `System.runFinalization` (a collection,
+no finalizers: `finalize()` is JCS379); thread groups (JCS322 (a), the user's P1 over its earlier (b)): `go/arbace/jrt/threadgroup.ae`
+transcribed from jdk26u's `java/lang/ThreadGroup.java` at `baf63fb` (system, main, VirtualThreads; groups track no threads, as
+JDK 19's), Thread's group, its five group constructors, `getThreadGroup`, `activeCount`, `enumerate`, the priority within the
+group's maximum; jdk26u's `java.lang.ref.Cleaner`, `jdk.internal.ref.CleanerImpl`, `PhantomCleanable`, `CleanerFactory` into the
+closure (`p1-sources`); jar verification (JCS231): jdk26u's `JarVerifier`, `ManifestEntryVerifier`, `SignatureFileVerifier`,
+`ManifestDigester` in place of jrt's stubs, JarFile's overlay with jdk26u's verifier code (ScopedValue as a ThreadLocal),
+JarEntry's variant removed; DGCClient's derivation dropped (jdk26u's file, `share:java.rmi`). The manifest and member tables
+regenerated (`jrt.tables`, `jrt.manifest` on the frozen jar with -Xmx1800m: PhantomReference 2 of 6 members, ThreadGroup 21 of 32,
+Thread 52 of 121). Alternatives: ThreadGroup as jdk26u's Java translated (it needs Thread's package-private `getAllThreads` and
+holder fields from jrt's hand-written Thread: more coupling than a transcription); finalization over `runtime.SetFinalizer`
+(JCS379 proposes by design). Serialization's slices 5 and 8 are not in P1 (JCS383: P2). Proofs by day: jrt's package tests
+(new TestPhantomReferences, TestThreadGroups; the whole package), the joint javac check of the closure (3,323 files, 0 errors),
+`bin/jrt-convert derive --check` (79 overlays, 0 not as derived). Night 15's commands are in the triage's section. `bin/jrt-convert predict` (the night's world by day, all of
+`java-night`'s unconverted slices with P1's: 1,071 changed files): the jar verifier's classes, JarFile and the classes naming
+ThreadGroup analyze clean; the Cleaner's PhantomCleanable and DGCClient's PhantomLiveRef fail on "Unknown type: PhantomReference"
+because `jdk/edge.edn` has no entry for it yet (night step 2, `bin/j2g-edge update`). A slip: predict peaked at 4.98 GB, over
+the brief's 2 GiB (the analysis of the whole world), with MemAvailable above 40 GiB throughout and nothing else running.
