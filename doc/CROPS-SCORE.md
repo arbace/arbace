@@ -19,6 +19,7 @@ bin/crops-score --input FILE          REAP cell records over the tree's (test/re
 bin/crops-score --judge               the checkout's matrix judged afresh by reap.main's own readers and judging; a
                                       difference from test/reap/matrix.edn is a problem (exit 1)
 bin/crops-score --strict              a fact of independence.edn the tree's gate steps refute is a problem (exit 1)
+bin/crops-score --self-test           the rulings' own tests (fabricated cases, a negative control each; also run by --judge)
 bin/crops-score --record              the checkout's scores of every crop written into test/crops/scores.edn (CSP1 (b));
                                       without it, scoring the checkout (no --ref, --newest, --input) compares each crop
                                       with its line there, and any difference is a problem (exit 1)
@@ -49,7 +50,8 @@ counts are printed beside each percentage.
   (queue task 221 reports them; `--input` takes them).
 - *Refinement (CSP4, decided).* By design counts in the strict denominator, as the brief says. The number "without by
   design", pass / (pass + deferred + pending), is printed beside it, in the table, the details, the TSV and the record. A class of kind `:na` (goi-not-applicable's: Go's
-  AOT invalid programs) is outside the matrix's counts already, and so outside both denominators.
+  AOT invalid programs; since OC222 (a), 2026-11-10, OCaml's `:config-skipped`) is outside the matrix's counts already, and so outside
+  both denominators; the details print a cell's n/a count beside its counts.
 
 ### Maturity
 
@@ -404,3 +406,45 @@ The independence audit of 2026-11-09 (`.tmp/indep-audit/` in the main checkout: 
   fixed); with OCaml's read claimed 1, (b) refutes it on `read-results.edn`'s "the oracle's parser, tools/ocdump"; a Java stage
   naming javac-classes is refuted on `:jdk`. On the corrected facts none is refuted. Facts that had no `:steps` and whose steps
   exist were given them (Clojure's read and print, Go's read and print, C's and C++'s print, Scheme's read, Rust's AOT).
+
+## Decided (the user, 2026-11-10, about 10:30 UTC): RFP53 (a) for Rust, OC222 (a) for OCaml
+
+Two scoring rulings of the user, relayed by the main session, built on branch `crops-rulings` (from `mac/next` dc6a55df2).
+
+- **RFP53 (a), Rust's own cases** (`.tmp/plans/RUST-90-PLAN.md` §3). A case of Rust's eval or AOT cell scores **1** when all
+  seven of its inputs are Arbace's own, else **0.5** (RFP43 (a) stays for a partly own case): C1 the program's bodies from our
+  front end, C2 std's instances' bodies from source, C3 no mono fact refused or taken from the record, C4 std's interface and
+  the StableCrateIds native, C5 a native allocator shim, C6 the library lowered by Arbace, C7 ci on `c/target` (not
+  `test/c/host`). Eval and AOT are the case-weighted mean over the cell's cases, the mixed-stage rule of 2026-11-07, counted from
+  the records. Built: `test/crops/crops.edn`'s `:own-inputs :rust` names C1-C7; a stage fact's `:case-inputs {:file F}` names the
+  record of the cell's cases' inputs, `[ID {:c1 VALUE ... :c7 VALUE}]` a case, `:own` an own input (`test/rust/eval-inputs-linux-amd64.edn`,
+  written by hand from the run as bin/rsi makes it until RUST-90's S6 makes `bin/rsi check --record` write it from `front.tsv`;
+  `test/rust/aot-inputs-linux-amd64.edn` once the AOT cell is recorded). `crops.score`'s `rfp53-counts` counts the cell's cases
+  (the ids of its sources' records) whose every input is `:own` (N); every other case of the cell, a row with one input not own or
+  no row at all, counts 0.5 (M = the matrix's cases less N), and the stage is (N + 0.5 M) / (N + M). With the cell not recorded
+  or F absent the stated score stands, said in the check. Today 0 of 5 eval cases are own (each runs on the IR pack, std's IR,
+  rustc's shim and `test/c/host`): eval 0.5, AOT 0.5 (no record), Rust's independence **80.0, unchanged**. It moves as cases
+  become own: with one case's seven inputs marked own on the checkout (a trial, not committed) eval was 0.6 and independence 82.0,
+  and the second case, own but for C7, stayed 0.5. The self-test's fabricated cell: 37 of 73 cases own in eval and AOT, the judge
+  (66,692 + 0.5 x 146) / 66,838, gives **90.1**, as the plan computes; its control, the same 37 with C7 `test/c/host`, counts 0
+  own and gives 80.0.
+- **OC222 (a), OCaml's configuration skips** (`.tmp/plans/OCAML-90-PLAN.md` §1, §5). The 33 tests ocamltest itself reports skipped
+  on the pinned configuration (OCaml 5.5.0, linux/amd64, `ocamlc -config`: flambda false, tsan false, with_frame_pointers false)
+  are **not applicable**, `:na`, outside completeness's denominators, as Go's AOT invalid programs; the other tools' tests
+  (the debugger 5, gdb and lldb on amd64 2, func_sections, execvpe's skip) stay by design in `:tools-and-targets`. Built: the
+  class `:config-skipped` (`:kind :na`), first in `test/ocaml/divergences.edn` and `divergences-aot.edn`, its `:skips` naming each
+  program's skipping action (tsan 10, frame_pointers 8, flambda 3, target-windows 6 (win-env and win-stat moved from
+  `:c-runtime-internals`), macos 2, arch_power 1, arch_arm64 2, arch_riscv 1), each checked in the 5.5.0 testsuite's headers;
+  `test/ocaml/ocamltest-config.edn` records the configuration (`ocamlc -config` of the host's 5.5.0, 2026-11-10) and ocamltest's
+  actions (`builtin_actions.ml`, `ocaml_actions.ml`: each passes when a configuration key holds a value). `crops.edn`'s `:na-rules
+  :ocaml` makes `crops.score` check every `:na` class of OCaml's cells' classes (`na-class-problems`): `:skips` covering `:programs`,
+  each action known and failing on the recorded configuration, `:match` taking only `class` rows (a program a run judged is never
+  `:na`); any breach is a problem (exit 1). OCaml's eval cell 477 / 162 / 4 (33 n/a), AOT 419 / 158 / 66 (33 n/a): completeness
+  **82.5 → 84.2** (+1.7, the plan's figure), without by design 96.4 unchanged; `bin/oi divergences` (both levels, the suite's too)
+  class every non-pass.
+- **Negative controls.** `bin/crops-score --self-test` (also run by every `--judge`, so by the gate's `crops-score` step) holds both
+  rulings' numbers and controls that must fail: Rust's C7 control above; OCaml's an amd64 program classed `:na` by `arch_amd64` on
+  amd64, an action not recorded, a program with no action, a `:match` that takes a run's failure, a class without `:skips`, no
+  configuration. Each was seen to fail; with the rules broken (an input counted own whatever its value, an action never passing)
+  the self-test fails. On the records: `native-debugger/linux-gdb-arm64` given `arch_amd64` makes `bin/crops-score` exit 1
+  ("passes on the pinned configuration (architecture amd64): ocamltest runs it").

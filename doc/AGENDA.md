@@ -47,7 +47,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | Go | 97.0 (100.0) | 100 | 100 | |
 | C | 96.0 (99.6) | 100 | 99.7 | |
 | C++ | 76.3 (96.8) | 100 | 67.8 | completeness, independence |
-| OCaml | 81.8 (96.6) | 100 | 87.4 | completeness, independence |
+| OCaml | 84.2 (96.4); 82.5 before OC222 (a) | 100 | 51.3 | completeness, independence |
 | Scheme | 97.4 (98.9) | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
@@ -76,8 +76,12 @@ Six crops are above 90 on all three. What the others still need:
   [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
 - **Rust** (all three): the AOT cell has no record yet (RE4's `bin/rsi check --aot --record`, tonight: completeness and
   maturity rise with it); eval 0.5 until rsi runs the native front end's MIR (RF10b's passes: 506 of 616 bodies equal;
-  RF11, `rust-rf11`), and RES54 (a) holds a ceiling of 80% until RF12 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md),
+  RF11, `rust-rf11`). Since RFP53 (a) (the user, 2026-11-10; branch `crops-rulings`) eval and AOT are case-weighted: a case
+  scores 1 when all seven inputs C1-C7 are own (`test/rust/eval-inputs-linux-amd64.edn`, 0 of 5 today), so 37 of 73 own in
+  both cells give 90.1 (`.tmp/plans/RUST-90-PLAN.md`, S6) ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md),
   [rust/RUST-EVAL-SURVEY.md](rust/RUST-EVAL-SURVEY.md)).
+- **OCaml, OC222 (a)** (the user, 2026-11-10; branch `crops-rulings`): the 33 tests ocamltest itself skips on the pinned
+  configuration are `:na` (`:config-skipped`, `test/ocaml/ocamltest-config.edn`): completeness 82.5 → 84.2.
 - **Python** (all three): the branch `mac/201-python-py7-py11` is not on `next` yet; its read records (240r) are made, the
   rest (stdlib, site-packages, Lib/test, the mutants, the runtime and wheels' outcomes, the AOT runtime and `check --aot`)
   is night 11's. After it: the branch merged into `next` (`merge-py`, the morning of 11-11), the independence facts moved to
