@@ -2940,6 +2940,23 @@ The executable's path comes from an optional host interface `HostExecutable` (§
 `OSHost` implements on Linux (`os.Executable`, links resolved); a host without it names
 `/arbace`.
 
+**The class path's entries by name** (GH4 (iii) of the Ghidra case study's G1 plan, the user's go-ahead of 2026-11-11;
+branch `ghidra-gh4iii`). A program with `--resources` has a class path of entries, the directories in order, and
+`System.getProperty("java.class.path")` lists them by name alone: each directory's last component, joined by `:` (a
+`--property java.class.path=...` of the program, `program.edn`'s `:properties`, wins). For a `:java` project the names
+are `bin/java-project`'s `resources.jars/NNN-MODULE` (`001-util:002-app`: the plan's order). The names are no files of
+the host's file system. j2g embeds two indexes beside the roots': `META-INF/arbace/classpath` (`K NAME` a line, every
+directory, `arbace.j2g.meta/classpath-index-text`) and `META-INF/arbace/owners` (`K PATH` a line: the directory that
+has each plain path of the program's resources first, `embed/user-resources`' third result; a path the others hold
+too is their root copy). `ClassPathResources.classPath()` lists the names and `findIn(entry, name)` resolves a
+resource of one entry to its `jar:` URL: directory K's root copy, else the plain path when K owns it, else null
+(the JDK's resources and another entry's are no entry's). `inDirectory`, which a `URLClassLoader` over a `file:` URL
+of a directory asks, answers for a directory that is no directory of the host's but an entry's name (the name, or
+the file it names under the working directory): so `new URLClassLoader(new URL[] {new URL(new File(e).toURI().toURL() +
+"/")}, null).getResource(p)` finds what entry `e` has. Not done: `java.io.File`, `FileInputStream` and `Files` do not see
+an entry's resources (a program that walks the class path with `File`, as Ghidra's `ApplicationUtilities` does, finds
+nothing there). Fixture: `test/programs/classpath`; unit tests in `test/j2g/unit.ae`.
+
 **Resources of several directories, class files, and ClassLoader's methods in translated code** (A5 of the
 Ghidra case study's G1 plan, GH4 (iii) in part; on branch `ghidra-run`, write-ahead). `--resources DIR` is the
 class path's jar: a data file several of them hold is embedded once each, the first directory's at its path,

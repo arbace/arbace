@@ -16,6 +16,14 @@
  * getResourceAsStream answers null, as the JDK's does for a URL it cannot open). ClassLoader's resource
  * methods in translated code call the statics below (j2g's support functions, arbace.j2g.model's
  * class-loader-resource-helpers).
+ * Since GH4 (iii) of that plan: the class path's entries by name. j2g embeds META-INF/arbace/classpath
+ * (K NAME a line, one a resource directory in the class path's order: java.class.path is these names,
+ * joined by the path separator) and META-INF/arbace/owners (K PATH a line: the entry that has a plain path
+ * first, which tells an entry's resources from the JDK's and another entry's). classPath() lists the
+ * names, findIn(entry, name) resolves a resource of one entry to its URL, and inDirectory answers for a
+ * directory that is an entry's name as the file: URL of a directory would (a URLClassLoader over
+ * new File(entry).toURI().toURL() finds the entry's embedded resources). The names are names only: no
+ * file of the host's file system has them (java.io.File does not see the embedded resources).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -108,6 +116,91 @@ public final class ClassPathResources {
         }
     }
 
+    /** The entries' names (META-INF/arbace/classpath), by index K; empty when the program has no resource directory. */
+    private static List<String> entries;
+
+    private static synchronized List<String> entries() {
+        if (entries == null) {
+            List<String> names = new ArrayList<>();
+            byte[] b = bytes0("META-INF/arbace/classpath");
+            if (b != null) {
+                for (String line : new String(b, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                    int i = line.indexOf(' ');
+                    if (i > 0)
+                        names.add(line.substring(i + 1));
+                }
+            }
+            entries = names;
+        }
+        return entries;
+    }
+
+    /** The first entry (index) of each plain path of the resource directories (META-INF/arbace/owners), read once. */
+    private static java.util.Map<String, Integer> owners;
+
+    private static synchronized java.util.Map<String, Integer> owners() {
+        if (owners == null) {
+            java.util.Map<String, Integer> m = new java.util.HashMap<>();
+            byte[] b = bytes0("META-INF/arbace/owners");
+            if (b != null) {
+                for (String line : new String(b, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                    int i = line.indexOf(' ');
+                    if (i > 0)
+                        m.put(line.substring(i + 1), Integer.parseInt(line.substring(0, i)));
+                }
+            }
+            owners = m;
+        }
+        return owners;
+    }
+
+    /** The class path's entries' names, in order (java.class.path's parts): a copy. */
+    public static List<String> classPath() {
+        return new ArrayList<>(entries());
+    }
+
+    /** The index of the entry named name, or -1. */
+    private static int entryIndex(String name) {
+        return name == null ? -1 : entries().indexOf(name);
+    }
+
+    /**
+     * The URL of resource name in the class path's entry (one of classPath()'s names), a jar: URL
+     * of the embedded resource, or null: the entry has no such resource, or is no entry.
+     */
+    public static URL findIn(String entry, String name) {
+        if (name == null)
+            throw new NullPointerException();
+        int k = entryIndex(entry);
+        if (k < 0 || name.startsWith("/"))
+            return null;
+        String copy = "META-INF/arbace/roots/" + k + "/" + name;
+        if (embedded0(copy))
+            return embeddedURL(copy);
+        if (embedded0(name)) {
+            Integer o = owners().get(name);
+            if (o != null && o.intValue() == k)
+                return embeddedURL(name);
+        }
+        return null;
+    }
+
+    /** The entry whose name a directory is (the name, or the file it names as the working directory has it), or null. */
+    private static String entryOf(File dir) {
+        List<String> es = entries();
+        if (es.isEmpty())
+            return null;
+        try {
+            File d = dir.getCanonicalFile();
+            for (String e : es) {
+                if (e.equals(dir.getPath()) || new File(e).getCanonicalFile().equals(d))
+                    return e;
+            }
+        } catch (IOException x) {
+        }
+        return null;
+    }
+
     /** Is name the class file of a class of the program ("p/C.class", p.C in jrt's registry)? */
     private static boolean classFile(String name) {
         if (!name.endsWith(".class") || name.startsWith("/") || name.indexOf("..") >= 0)
@@ -151,6 +244,10 @@ public final class ClassPathResources {
                     return null;
             } else {
                 file = new File(dir, name.replace('/', File.separatorChar));
+            }
+            if (!file.exists() && !dir.exists()) {
+                String e = entryOf(dir);
+                return e == null ? null : findIn(e, name);
             }
             return file.exists() ? url : null;
         } catch (IOException | IllegalArgumentException e) {
