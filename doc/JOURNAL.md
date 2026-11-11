@@ -5029,3 +5029,11 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
   have been taken).
 - Recorded by hand: `bin/repr-asm object-record synthetic` and `bin/repr-asm object-record mc-x86-obj` (`/usr/lib/llvm23/bin/llvm-mc
   -triple x86_64-linux-musl -filetype=obj [--defsym ERR=1] FILE -o OUT`, each twice); every earlier object's bytes unchanged.
+- Proofs (stage 0, light, one at a time, each under 2 GiB; no gate): `object-check` musl 32 of 32, synthetic 8 of 8, mc-x86-obj 49 of 49
+  (six controls fail as they must; recorded); `run-check` 19 of 19 and five controls; `x86i-check` whole 43 of 44 (`{:cpuid 2}`, 8 min 29
+  s), unchanged; the round trip (musl, mc-asmparser, mc-x86) unchanged; arm64's `object-check` (a64-musl 13, a64-synthetic 3,
+  mc-aarch64-obj 110, all byte for byte), `object-verdict` (2,819 of 2,832, unchanged), `run-check` 17 of 17 and `bin/a64i check
+  --essential` 74 of 74, unchanged. `bin/reap` (recorded) 49 of 52 cells checked, 0 problems: x86-64 AOT 105 -> 108 / 0 / 0;
+  `bin/crops-score --record`, `--judge --strict` 0. No key moves (`arbace/asm/` and `bin/repr-asm` are crop paths or no key's:
+  `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
+- Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
