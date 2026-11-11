@@ -154,7 +154,7 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
 
 ## Being built today (2026-11-09; light, sample checks; for the second merge pass or later)
 
-- C: `c-props3` (CS294, CS295). C++: `cpp-props4` (CP320-CP324), `cpp-route` (CP240 (b)), `cpp-codegen-fix` (the vtables
+- C: `c-props3` (CS294, CS295), `c-props4` (CS296 (b), CS297 (a), the Mac's ms_struct request), `c-musl-lock` (stacked on it: musl's index rebuilt when stale, `read` under a lock; night 10's false c-check fails). C++: `cpp-props4` (CP320-CP324), `cpp-route` (CP240 (b)), `cpp-codegen-fix` (the vtables
   in a deterministic order, the codegen record 149 of 149: `cpp-codegen-gen` fails on `next` without it).
 - Haskell: `hs-p3` (HF10-P3, the own interfaces). Rust: `rust-rf11` (RF11's first slice); `rust-rf13` (RFP42-RFP47's light
   parts: virtual calls and vtables, codegen's gaps, `panic-vec-remove`; the UI sampling and std's remapping for the night);

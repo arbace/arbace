@@ -3626,3 +3626,35 @@ when the build failed: `gen`, `mod`); `HSI_KEEP_BINS=1` keeps them. Nothing read
 generated packages `.tmp/hsi/aot/lib/` (shared, built once per runtime and image) stay. Test (day, `--jobs 1`, no `--record`, samples/Arrays,
 Classes, Cont, Deadlock): progs 272 MB with HSI_KEEP_BINS=1, 271 KB without; verdicts 4 of 4 pass as recorded; peak 1.1 GiB; a second run
 rebuilt and passed. Alternative considered: deleting the whole `aot/` dir (also drops the small logs and the key: kept for debugging).
+
+## 2026-11-09: CS296 (b), CS297 (a), and ms_struct for the Mac VM's ctypes (branch `c-props4`, from next `6c3c87c02`)
+
+The user accepted c-props3's proposals as recommended (about 14:20) and passed on the Mac VM's request (report 244, item 4).
+CS296 (b): nothing changes. CS297 (a): `-Wno-implicit-int` and `-Wno-error=implicit-int` read by `arbace.repr.c.host` and passed
+to the checker, which then gives no implicit-int error (gcc 15.2 by hand: none, or a warning); `judge_test.ae`'s
+`implicit-int-options`. The request: `#pragma pack(push, n)` in a function body was already gcc's since CS290 (a) (measured 9 as
+gcc; `test/c/run/pack-in-body.c`); GNU's `ms_struct` implemented in the checker's layout (`ms-layout!`) from gcc's manual's
+Microsoft layout rules, no gcc source read, every rule's case measured with the host's gcc 15.2 by hand
+(`test/c/run/ms-struct.c`, self-checking: 23 differences before, 0 after, interpreted and compiled). Records: ci-run's two
+programs' gcc runs, check and AOT rows; REAP's C eval and AOT +2. Alternative considered for CS297: computing the option in
+`arbace.c` alone to keep musl's forms key (rejected: the decision names the host's file options; the key's move costs one musl
+read). Proposed: CS298 (`-mms-bitfields`). Recorded in doc/C23-SURVEY.md, "As built: CS296 (b), CS297 (a), the ms_struct request".
+
+
+## 2026-11-10: musl's forms index repaired by `index` and locked by `read` (branch `c-musl-lock`, from `c-props4` `883115fd0`)
+
+Night 10's c-check/c-aot false fails were a stale `index.edn` in next's musl forms cache (936 of 1,331 sources, no
+`__libc_start_main`), diagnosed in .tmp/night10/DIAGNOSIS.md section 1: concurrent `bin/ci musl ensure` runs in g-gate1 without a lock, and
+`arbace.c.musl/index` never rebuilt an existing index. Fixed on `c-props4` (it already moves the forms key through repr/c, so
+the one musl read serves both): `index` is rebuilt when its keys differ from the cached sources, `bin/lib/ci/musl read` holds an
+flock around the whole read, `fresh` needs a complete index; `test/c/musl-lock-test.bash`. Alternative for the index considered:
+`read-all` deleting index.edn whenever it reads anything (rejected: repairs only what this process broke). Recorded in
+doc/C23-SURVEY.md, "As built: musl's index and its lock".
+
+## 2026-11-10, c-musl-lock: the review's findings (REVIEW.md, .tmp/merge-1111/REVIEW.md, section 1)
+
+`index`'s temporary file is named by nanoTime and thread id (as aotlib.ae and runtime.ae) and deleted when the rename fails (1.1);
+`bin/ci musl read` re-checks `fresh` once it holds the lock and a waiter reads nothing (1.2); test/c/musl-lock-test.bash writes its
+output to a file under its work directory, not /dev/null, and says it is by hand; Makefile target `ci-musl-lock-test` (1.4).
+Proofs: the test (ok, three cases), `bin/ci check --only test/c/essential-check.txt` (exit 0, controls differ as they must; the musl
+forms reread first, about 14 minutes at CI_JOBS=2), bin/reap, bin/crops-score --judge --strict, make check-makefile.
