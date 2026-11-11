@@ -114,7 +114,8 @@ Prior art:
   `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
-  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python, LLVM IR and Rust (ten rows, 40 cells since merge plan
+  read, eval, AOT and print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python, LLVM IR, Rust, Haskell, x86-64 assembly and arm64 assembly (thirteen rows, 52 cells since AX10,
+  2026-11-10; ten rows, 40 cells since merge plan
   batch 2, 2026-11-07, llvm-90's and rust-row's rows; eight rows, 32 cells since batch 1, the rows' branches merged: four rows, 16 cells since C8, doc/C23-SURVEY.md §10; C++'s since CX10,
   doc/cpp/CPP-SURVEY.md, "As built: CX10 (write-ahead)", "As built: cppi-check": C++'s read the token check's `test/repr/cpp/pp-check-known.edn` with its results
   `pp-check-results.edn` (`:c-known`'s `:id-sep "/"`) and CX9's dg record, eval and AOT CX8's `test/cpp/check{,-aot}-linux-amd64.edn` and the sampling's
@@ -146,8 +147,10 @@ Prior art:
   `ref-cpython314-lib-test*.edn`, reader `:results` with `:py-ref`) and pyi's compiled loop, AOT `bin/pyi check --aot`
   (`check-aot-linux-amd64.edn`, reader `:pyi-aot`), print the `:full` round trip; eval and AOT "no check yet" until Python's amd64
   records night writes them.
+  The assembly rows since AX10 (doc/asm/AMD64-SURVEY.md, "As built: AX10"): read and print `bin/repr-asm`'s round trips, eval and AOT x86i's and a64i's
+  runs (`test/asm/*-results-{amd64,arm64}.edn`, classes `test/asm/divergences*.edn`), judged by the tests' own verdicts.
   `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test against the Clojure classes.
-- `bin/crops-score` (and `make crops-score`; doc/CROPS-SCORE.md): each of the eleven crops' completeness (the REAP cells'
+- `bin/crops-score` (and `make crops-score`; doc/CROPS-SCORE.md): each of the thirteen crops' completeness (the REAP cells'
   pass / (pass + by design + deferred + pending) from a tree's `test/reap/matrix.edn`), maturity (a checklist measured on the
   tree: cells recorded, none unclassed, negative controls, gate steps, a REAP row, records without a host path) and
   independence (per stage, read, eval, AOT, print and judge, the reviewed facts of `test/crops/independence.edn`
@@ -361,6 +364,10 @@ Prior art:
     `bin/oi stdlib`'s Lambda); since 2026-11-07 the native path is `bin/oi check`'s, `check --aot`'s and `suite check`'s default
     (TY24 (a); `--ocdump` the oracle's), and each run program is judged by its own verdict as ocamltest gives it (the header's exit
     status, the `.reference` or no output; `bin/oi own-verdicts`, exceptions `test/ocaml/own-verdict.edn`), the rest by the recorded run).
+  - The assembly crops, repr/asm (`bin/repr-asm`, `bin/a64i`; doc/asm/AMD64-SURVEY.md, doc/asm/ARM64-SURVEY.md): `arbace/repr/asm{.ae,/}`,
+    `arbace/asm/` and `asm/`, x86-64 and arm64 assembly as forms and back, with the encoder, decoder and linker made from LLVM's tables by Arbace's TableGen
+    and x86i's and a64i's CPU runs (light drivers, `go/arbace/{x86i,a64i,emu}`); judged by the tests' own verdicts, no host assembler (llvm-mc only in the
+    oracle tier); their gate steps are `test/gate/crops/asm.edn`'s (AX10).
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'

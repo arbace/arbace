@@ -1629,3 +1629,28 @@ choice; (b), a rotation by corpus file, is not built). On the light lane, one ch
   parts have the same blind spot); counted as the night runs it, 16 min 29 s on average (242%) and 17 min 25 s the heaviest night (256%).
   The encode check is the cost: without it the night is 6 min 58 s (102%). Proposed (AXS91): encode-check rotated by corpus file in sevenths
   (about 1 min 22 s a night, the night at about 8 min 20 s, 122%), or the share raised.
+
+## As built: AXS91 (2026-11-11; branch `fixes-1111`)
+
+The user decided AXS91 (a): the nightly `asm-amd64-encode.mc-x86` rotated by corpus file in sevenths (GT8.4), a seventh a night, the whole once a week.
+
+- **`bin/repr-asm encode-check --only LIST`** (amd64): LIST a file of mc-x86's file names, bare, a line each (the names of the record's `mc-x86/NAME`
+  rows; an unknown name, an empty list, another corpus or `--record` refused). Only those files are checked; `test/asm/encode_judge.ae`'s `main`
+  takes a seventh argument (`partial`): every file of the run is still held to its record row, the recorded files the run did not hold are
+  not "recorded, not run", and the controls whose subject or reference is not in the list print "left (not in this run)" as before.
+- **The step**: `asm-amd64-encode` has a `:rotate` (test/gate/crops/asm.edn and steps.edn, the same hunk: `gate.crops splice` adds a fragment's
+  steps and does not replace one already spliced): `:universe` the encode record, `:id-re` its bare names, `:subset` test/asm/subsets.edn's
+  `:mc-x86`, `:always` the same 15 files, `:failed-as "\\3"` (sed -E: no `(?:`). The subset is the subjects and references of the encode, print
+  and cross-syntax controls but the two heavy pairs, AVX-64/AVX2-64 and avx512-intel/avx512f_vl-intel (17,000 of the 106,000 stated encodings:
+  with them the subset alone ran 4 min 47 s); those two controls run in `--full` and in the clean run's whole tier, and in a slice only when both
+  files fall in it. A night is the subset and one slice of the other 606 files (`.sub` and `.sK`, `bin/gate --nightly --plan`: 426 rows of the
+  universe, 15 in the subset); `--full` runs the whole.
+- **Measured** (by hand, one at a time on stage 0, 2026-11-11): the subset (15 files, 8,992 stated encodings, all 14 controls that have both files
+  judged: fail as they must) 2 min 11 s and 0.63 GiB, so the fixed part (the table and the judge) is about 1 min 20 s of it; the whole 9 min 31 s
+  (AXS90), so a slice about 1 min 10 s of work above the fixed part: a night about 3 min 30 s against the whole's 9 min 31 s, not the 1 min 22 s the
+  proposal estimated (it left the fixed part out). The night is then about 10 min 20 s (about 150% of half a share by AXS89's count). Not built:
+  fewer controls in the subset (each file taken out is a control that runs one night in seven or none).
+- Proofs: `gate.crops check` 0 problems, `test/gate/crops-test.bash` ok, `rotation-test.bash` 65 of 65, `bin/gate --full --plan` no table error,
+  `GATE_NIGHT=3 bin/gate --nightly --plan` names `asm-amd64-encode.mc-x86.sub` and `.s3`.
+- Not changed, to look at: x86i-check's `:failed-re` (steps.edn, AXS89) uses `(?:...)`, which `sed -E` (the runner's use of `:failed-re`) does not
+  read; its `:id-re`'s `(?:...)` is the planner's Java regex and fine.

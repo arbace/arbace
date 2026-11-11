@@ -5733,3 +5733,14 @@ on `Runnable` and `Supplier<T>`, called with a method reference to a void method
 it through the subclass, the native provider through the base). Slips: SoftwareModeling's front read peaked at 9.2 GiB in its
 chunk of ANTLR's generated parsers (`SleighParser.java`, 751 KB; MemAvailable above 40 GiB, nothing else heavy), over the brief's
 4 GiB; its nread was held out of the run (by renaming the module in the scratch copy of the plan) for the night.
+
+## 2026-11-11: fixes-1111 (branch `fixes-1111` from mac/next 5d10a92fb): AXS91 (a), the OCaml fetch log, LLVM's classes, CLAUDE.md's counts
+
+- AXS91 (a) (the user): asm-amd64-encode's mc-x86 rotated by file in sevenths: `bin/repr-asm encode-check --only LIST`, `test/asm/subsets.edn`'s
+  `:mc-x86`, `:rotate` on the step (doc/asm/AMD64-SURVEY.md, "As built: AXS91"). The proposal's 1 min 22 s a night was an underestimate (the
+  fixed part left out): measured 2 min 11 s for the subset, about 3 min 30 s a night. Alternative not taken: a smaller subset (fewer controls).
+- bin/repr-ocaml: `mkdir -p .tmp/repr-ocaml` before the two `fetch.log` writes (ocamllex-check, ocamlyacc-check; night 11's la-oi-ocamlyacc).
+- LLVM: test/llvm/divergences-read.edn: `di-drop` joins `:debug-info-rules`, and a new deferred class `:constant-type-rules` takes the "constant
+  expression type mismatch" verdicts; the night 11 rejected tree's records applied (night 11, `.tmp/night11/rejected/llvm`).
+- CLAUDE.md: bin/reap's matrix has thirteen rows and 52 cells (Haskell, x86-64 and arm64 assembly joined the ten), crops-score thirteen crops;
+  a sentence for the assembly crops.
