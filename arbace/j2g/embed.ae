@@ -242,9 +242,13 @@
   whose name begins with a dot) at its path relative to DIR, after PREFIX/ when given. [srcs
   data]: the sources (.ae, .clj, .cljc), {resource-path text}, which join the embedded sources,
   and the other files, {resource-path File}, which join the resource data. A path that taken
-  (the program's own sources and data) or another DIR holds already is an error."
+  (the program's own sources and data) holds already, or a source another DIR holds, is an
+  error. A data file another DIR before it holds already is a root copy (A5 of the Ghidra case
+  study's G1 plan; J2G-SPEC §10.3, \"Resources by URL\"): embedded at
+  META-INF/arbace/roots/K/PATH, K the DIR's index (arbace.j2g.meta/root-path), so that
+  ClassLoader.getResources finds one a directory, as the JDK finds one a jar."
   [specs taken]
-  (loop [[spec & more] specs srcs (sorted-map) data (sorted-map)]
+  (loop [[spec & more] specs k 0 srcs (sorted-map) data (sorted-map) plain #{}]
     (if (nil? spec)
       [srcs data]
       (let [i (.lastIndexOf ^String spec "=")
@@ -256,14 +260,28 @@
                         :when (and (.isFile f) (not (str/starts-with? (.getName f) ".")))
                         :let [rel (str/replace (str (.relativize (.toPath base) (.toPath f))) File/separator "/")]]
                     [(if (seq prefix) (str prefix "/" rel) rel) f])
-            [srcs data] (reduce (fn [[srcs data] [p ^File f]]
-                                  (when (or (contains? taken p) (contains? srcs p) (contains? data p))
-                                    (throw (ex-info (str "j2g: --resources " spec ": " p " is embedded already") {})))
-                                  (if (re-find #"\.(ae|clj|cljc)$" p)
-                                    [(assoc srcs p (slurp f)) data]
-                                    [srcs (assoc data p f)]))
-                                [srcs data] files)]
-        (recur more srcs data)))))
+            [srcs data plain'] (reduce (fn [[srcs data plain'] [p ^File f]]
+                                         (when (or (contains? taken p) (contains? srcs p))
+                                           (throw (ex-info (str "j2g: --resources " spec ": " p " is embedded already") {})))
+                                         (cond
+                                           (re-find #"\.(ae|clj|cljc)$" p)
+                                           (if (contains? plain p)
+                                             (throw (ex-info (str "j2g: --resources " spec ": " p " is embedded already") {}))
+                                             [(assoc srcs p (slurp f)) data (conj plain' p)])
+                                           ;; another directory's resource of this path: a root copy
+                                           (contains? plain p) [srcs (assoc data (str "META-INF/arbace/roots/" k "/" p) f) plain']
+                                           :else [srcs (assoc data p f) (conj plain' p)]))
+                                       [srcs data plain] files)]
+        (recur more (inc k) srcs data plain')))))
+
+(defn resource-dir-names
+  "The names of the --resources directories by index (the jars' names in the roots' index,
+  arbace.j2g.meta/roots-index-text): each DIR's last component."
+  [specs]
+  (vec (for [spec specs
+             :let [i (.lastIndexOf ^String spec "=")
+                   dir (if (pos? i) (subs spec 0 i) spec)]]
+         (.getName (.getAbsoluteFile (io/file dir))))))
 
 (defn package-loaders
   "j2g --java-namespaces (bin/arbace-go --build-program, REAP7b, RPS93 (c)): the namespaces of

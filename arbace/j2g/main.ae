@@ -40,6 +40,13 @@
                        to DIR (after PREFIX/ when given), as a directory of the class path: a
                        user's namespaces (.ae, .clj, .cljc) join the embedded sources, other
                        files the resource data (bin/arbace-go --build-program, REAP7)
+    --own-roots all|entry
+                       with --program, the program's own classes (nm/own-class?: a user's Java
+                       forms) rooted every member (all, the default: the REPL's world) or only
+                       from the entry, the services, the metadata and the constant reflective
+                       sites (entry; J2G-SPEC §4.1, Roots from a program's metadata)
+    --provides FILE    the world's module provides (default jdk/provides.txt beside --jdk's
+                       forms: bin/jrt provides), the service registry's first providers
     --edge FILE        the classes outside the forms, as data (default jdk/edge.edn:
                        doc/STANDALONE-NOTES.md, S2): j2g loads no class, reflects on none and
                        runs no ASM
@@ -76,6 +83,7 @@
             [arbace.j2g.embed :as embed]
             [arbace.j2g.edge :as edge]
             [arbace.j2g.zlib :as zlib]
+            [arbace.j2g.meta :as meta]
             [arbace.repr.go.print :as gp]))
 
 (defn- now [] (System/nanoTime))
@@ -120,6 +128,8 @@
       "--record-edge" (recur (rest more) (assoc opts :record-edge (first more)))
       "--jvm-reflection" (recur more (assoc opts :jvm-reflection true))
       "--analyze-only" (recur more (assoc opts :analyze-only true))
+      "--own-roots" (recur (rest more) (assoc opts :own-roots (keyword (first more))))
+      "--provides" (recur (rest more) (assoc opts :provides (first more)))
       (throw (ex-info (str "j2g: unknown option " a) {})))))
 
 (defn- internal [s] (str/replace s "." "/"))
@@ -626,6 +636,31 @@
     {:scan scan :slice slice :in-slice? in-slice? :jrt-java? jrt-java? :formatter? formatter? :streams? streams?
      :ci-order? ci-order? :regex? regex? :fjp-support? fjp-support?}))
 
+(declare meta-report)
+
+(defn- meta-roots
+  "The roots of a program's metadata (opts' :program-meta, program-meta) in the loaded world (a/*unit*
+  bound): {:roots [spec ...] (unconditional: the metadata's entries without a condition and the
+  reflective sites whose names are constants, in the program's own classes) :conditional [[class
+  [spec ...]] ...] (once class is reached: the services' providers, the conditional metadata)
+  :sites (meta/reflective-sites of the own classes) :absent [spec ...] (a class not in the world)}."
+  [opts]
+  (let [pm (:program-meta opts)
+        own (filter nm/own-class? (sort @(:order a/*unit*)))
+        sites (meta/reflective-sites own)
+        uncond (concat (mapcat second (filter (comp nil? first) (:metadata pm)))
+                       (map second (:rooted sites)))
+        [present absent] (meta/present-specs uncond)
+        conds (concat (meta/service-roots (:services pm))
+                      (for [[c specs] (:metadata pm) :when c] [(meta/internal c) specs]))
+        cond-split (for [[c specs] conds] [c (meta/present-specs specs)])]
+    {:roots present
+     :conditional (vec (for [[c [p _]] cond-split :when (seq p)] [c p]))
+     :sites sites
+     ;; a service's provider whose class is absent is reported, not an error: the registry
+     ;; lists it, and ServiceLoader throws ServiceConfigurationError there, as the JDK does
+     :absent (vec (concat absent (mapcat (fn [[_ [_ a]]] a) cond-split)))}))
+
 (defn- analysis-report
   "--analyze-only (JCS265 (b), J2G-SPEC §4.1, \"The analysis alone\"): the loaded world's
   analysis failures, printed a line each and written into OUT/report.edn as a translation's report
@@ -634,12 +669,23 @@
   failed)."
   [opts world t-load]
   (let [failed (vec (:failed world))
-        report {:analyze-only true
-                :files (count (:files world))
-                :classes (count @(:compile-set world))
-                :analysis-failures failed
-                :variants (:variants world)
-                :times {:load t-load}}]
+        ;; with --resources: the program's metadata and the roots it gives (J2G-SPEC §4.1, \"Roots from
+        ;; a program's metadata\"), each root's methods as root-keys finds them
+        report (if (:program-meta opts)
+                 (w/with-world world
+                   (let [mr (meta-roots opts)]
+                     (assoc (meta-report (:program-meta opts) (:sites mr) (:absent mr))
+                            :analyze-only true
+                            :meta-roots {:roots (:roots mr) :conditional (:conditional mr)
+                                         :root-keys (vec (sort (distinct (mapcat root-keys (:roots mr)))))})))
+                 {})
+        report (merge {:analyze-only true
+                       :files (count (:files world))
+                       :classes (count @(:compile-set world))
+                       :analysis-failures failed
+                       :variants (:variants world)
+                       :times {:load t-load}}
+                      report)]
     (doseq [[n msg] failed]
       (println (str "j2g: analysis failure " n ": " (str/replace (str msg) #"\s+" " "))))
     ;; J2G_MISSING (a regex of internal names; F27, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27
@@ -674,6 +720,50 @@
     (println (str "j2g: --analyze-only: " (count failed) " analysis failures; " (:out opts) "/report.edn"))
     report)))
 
+(defn program-meta
+  "A program's discovery metadata (arbace.j2g.meta; J2G-SPEC §4.1, \"Roots from a program's metadata\"):
+  the service registry of the world's provides (opts' :provides, default jdk/provides.txt beside the
+  JDK's forms) and of the META-INF/services files among data ({resource-path File}: the JDK's resource
+  data and the program's resources with their root copies), and the roots of the native-image
+  metadata among them. {:services {svc [[provider kind] ...]} :bad-services [[path line] ...]
+  :metadata [[condition [spec ...]] ...] :metadata-errors [[path msg] ...]}."
+  [opts jdk data]
+  (let [text-fns (into {} (for [[p f] data
+                                :when (or (meta/services-path? p) (meta/metadata-path? p))]
+                            [p #(slurp (io/file f))]))
+        provides (meta/read-provides (or (:provides opts) (str (.getParent (io/file jdk)) "/provides.txt")))
+        svcs (meta/services provides text-fns)
+        md (meta/data-metadata-roots text-fns)]
+    {:services svcs :bad-services (:bad (meta svcs))
+     :metadata md :metadata-errors (:errors (meta md))}))
+
+(defn- write-meta-resources!
+  "The generated resources of a program's metadata, written under OUT/meta and returned as
+  {resource-path File} for the embedded data: the service registry (when the world has a
+  ServiceLoader to read it) and the resource roots' index (when a resource has root copies)."
+  [opts pm data]
+  (let [dir (str (:out opts) "/meta")
+        roots (meta/roots-index-text (keys data) (embed/resource-dir-names (:resources opts)))]
+    (merge
+      (let [f (io/file dir "services")]
+        (write! (str f) (meta/services-text (:services pm)))
+        {meta/services-resource f})
+      (when (seq roots)
+        (let [f (io/file dir "roots")]
+          (write! (str f) roots)
+          {meta/roots-resource f})))))
+
+(defn- meta-report
+  "report.edn's part of a program's metadata: the registry, the metadata's roots, the reflective
+  sites, the specs whose class is not in the world."
+  [pm sites absent]
+  {:services (into (sorted-map) (for [[svc ps] (:services pm)] [svc (vec (for [[p k] ps] (str (name k) " " p)))]))
+   :services-bad-lines (:bad-services pm)
+   :metadata-roots (vec (:metadata pm))
+   :metadata-errors (:metadata-errors pm)
+   :reflective-sites sites
+   :roots-absent (vec (sort (distinct absent)))})
+
 (defn run*
   "j2g's run, in the class environment run binds."
   [opts]
@@ -689,10 +779,19 @@
                      ;; a user's program's directories (--resources, REAP7)
                      [usrcs udata] (embed/user-resources (:resources opts) (into (set (keys srcs)) (keys data)))
                      srcs (merge srcs usrcs)
-                     srcs (merge srcs (embed/package-loaders (:java-namespaces opts) (into (set (keys srcs)) (keys data))))]
+                     srcs (merge srcs (embed/package-loaders (:java-namespaces opts) (into (set (keys srcs)) (keys data))))
+                     data (merge data udata)
+                     ;; the program's discovery metadata (arbace.j2g.meta): its registry and roots
+                     ;; index embedded, its roots applied below
+                     pm (program-meta opts jdk data)]
                  (assoc opts :embedded srcs :cut-candidates (sort (embed/cut-candidates srcs))
-                        :embedded-data (merge data udata)))
-               opts)
+                        :embedded-data (merge data (write-meta-resources! opts pm data))
+                        :program-meta pm))
+               ;; --analyze-only with --resources: the metadata read and reported, nothing embedded
+               (if (and (:analyze-only opts) (seq (:resources opts)))
+                 (let [[_ udata] (embed/user-resources (:resources opts) #{})]
+                   (assoc opts :program-meta (program-meta opts jdk udata)))
+                 opts))
         ;; the second round's inputs: the compiled namespaces' trees (their packages.edn)
         late? (fn [i] (or (= i (:await opts)) (.isFile (io/file i "packages.edn"))))
         compiled-packages! #(reset! nm/compiled-packages
@@ -751,11 +850,17 @@
             _ (println (str "j2g: " (count (:handles (:vh wst))) " constant VarHandles, on "
                             (count (:fields (:vh wst))) " fields"))
             t1 (now)
+            ;; the program's metadata (arbace.j2g.meta; J2G-SPEC §4.1, "Roots from a program's metadata")
+            mr (when (:program-meta opts) (meta-roots opts))
             roots (vec (concat (mapcat root-keys (concat (:roots opts) (when-let [f (:root-fn opts)] (f))
+                                                         (:roots mr)
                                                          ;; --program: the REPL's world, every public
                                                          ;; member of every class with Java forms
                                                          ;; (J2G-SPEC §10.6, EVAL-PLAN.md Q2)
                                                          (when (:program opts) (filter #(and (a/decl %) (repl-visible? %)
+                                                                                             ;; --own-roots entry: the program's own
+                                                                                             ;; classes from its entry and metadata alone
+                                                                                             (not (and (= :entry (:own-roots opts)) (nm/own-class? %)))
                                                                                              ;; not a compiled fn's code or a
                                                                                              ;; reify's (S6): reached by their
                                                                                              ;; interfaces' calls
@@ -767,6 +872,12 @@
                                (when (a/decl c/serial-lambdas)
                                  (for [[nme desc] c/serial-lambdas-methods] [c/serial-lambdas nme desc]))
                                (when (a/decl "arbace/lang/RT") (fromfn/roots))
+                               ;; what ClassLoader's resource helpers call (out/support-forms; m/class-loader-resource-helpers)
+                               (when (and (a/decl "jdk/internal/jrt/ClassPathResources") (m/hand-written? "java/lang/ClassLoader"))
+                                 (for [[nme desc] m/class-loader-resource-helpers
+                                       :when (m/class-loader-resource-ready? nme desc)
+                                       :let [[n d] (m/class-loader-resource-target nme desc)]]
+                                   ["jdk/internal/jrt/ClassPathResources" n d]))
                                ;; what Class.getResourceAsStream (out/support-forms) makes
                                (when (a/decl "java/io/ByteArrayInputStream")
                                  [["java/io/ByteArrayInputStream" "<init>" "([B)V"]])
@@ -861,8 +972,17 @@
             ;; every stand-in j2g can translate (in the slice) is replaced (J2G-SPEC §4.3)
             standins (vec (for [[n j] jc :when (and (:standin j) (m/translatable? n) (slice? n))] n))
             ;; each round continues the previous one from the new roots (reach/run's :state)
+            ;; the conditional roots (the services' providers, the conditional metadata) once their
+            ;; class is reached, each once
+            cond-done (atom #{})
+            cond-roots (fn [T]
+                         (vec (for [[c specs] (:conditional mr)
+                                    :when (and (contains? T c) (not (contains? @cond-done [c specs])))
+                                    :let [_ (swap! cond-done conj [c specs])]
+                                    k (mapcat root-keys specs)]
+                                k)))
             res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice? :classes standins})) n 0]
-                  (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (standin-roots scan (:T res))))
+                  (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (concat (standin-roots scan (:T res)) (cond-roots (:T res)))))
                         res2 (binding [m/*w* wst] (r/run {:roots sroots :slice? slice? :state (:state res)
                                                           :fis (binding [m/*w* (assoc wst :T (:T res))] (fromfn/fis (:T res)))}))]
                     (if (or (= (:T res2) (:T res)) (> n 8)) res2 (recur res2 (inc n)))))
@@ -1022,6 +1142,12 @@
                              :unavailable (into (sorted-map) (for [[k v] (:unavailable res)] [(str/join " " k) (vec (sort v))]))
                              :missing (into (sorted-map) (for [[k v] (:missing res)] [k (count v)]))
                              :analysis-failures (:failed world)
+                             ;; the refused classes, stubbed or dropped (GH6 (iv); J2G-SPEC §4.1)
+                             :refused (meta/refusals (merge (into {} (for [[n msg] (:failed world) :when (a/decl n)] [n msg]))
+                                                            (:failed-classes res))
+                                                     (:unavailable res))
+                             ;; the program's metadata, its roots (J2G-SPEC §4.1)
+                             :metadata (when mr (meta-report (:program-meta opts) (:sites mr) (:absent mr)))
                              :variants (:variants world)
                              :errors @errors
                              ;; §8.3, Q10: non-volatile fields of interface Go type written after

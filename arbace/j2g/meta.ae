@@ -1,0 +1,386 @@
+(ns arbace.j2g.meta
+  "bin/j2g: a program's discovery metadata as closed-world tables and roots (doc/go/J2G-SPEC.md §4.1,
+  \"Roots from a program's metadata\"; §10.3; the Ghidra case study's GH4 (ii)-(iv) and GH6 (iv), items
+  A4-A7 of its G1 plan):
+
+  - the service registry (GH4 (ii), A4): every META-INF/services/S of the program's resources, in the
+    order of its resource directories (the class path's jars), and the world's module `provides`
+    (jdk/provides.txt, bin/jrt provides), as one generated table the program embeds,
+    META-INF/arbace/services, which jrt's own java.util.ServiceLoader iterates; each provider rooted
+    (its constructors and a static provider()) once its service is reached;
+  - the resource roots (A5): a resource the program's resource directories hold more than once is
+    embedded at its path from the first and at META-INF/arbace/roots/K/PATH from directory K, listed in
+    META-INF/arbace/roots, so that ClassLoader.getResources enumerates one URL a directory;
+  - reflection roots (GH4 (iv), A6): GraalVM native-image's reachability metadata under
+    META-INF/native-image/ (reflect-config.json, jni-config.json, resource-config.json's bundles,
+    reachability-metadata.json), and the reflective call sites whose names are constant strings;
+  - the refusals (GH6 (iv), A7): the classes j2g refused, each stubbed (a reached method needs it: its
+    uses throw with the cause) or dropped (nothing reached needs it).
+
+  Pure functions over the resources and the analyzed world; main.ae applies them."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.analyze :as a]
+            [arbace.j2g.access :as acc]
+            [arbace.j2g.names :as nm]))
+
+(def services-resource
+  "The generated service registry's resource path: one provider a line, KIND SERVICE PROVIDER (KIND
+  module, the world's provides, or classpath, a META-INF/services file's), services sorted, each
+  service's providers in discovery order."
+  "META-INF/arbace/services")
+
+(def roots-resource
+  "The resource roots' index: one line K NAME a resource directory some of whose resources another
+  directory before it holds too (their copies at META-INF/arbace/roots/K/PATH)."
+  "META-INF/arbace/roots")
+
+(def roots-prefix "META-INF/arbace/roots/")
+
+(defn root-path
+  "Where resource directory k's copy of path p is embedded."
+  [k p]
+  (str roots-prefix k "/" p))
+
+(defn unroot
+  "[k path]: a root copy's directory index and plain path, or [-1 p] for a plain path."
+  [^String p]
+  (if-let [[_ k q] (re-matches #"META-INF/arbace/roots/(\d+)/(.+)" p)]
+    [(Long/parseLong k) q]
+    [-1 p]))
+
+(defn by-plain-path
+  "The resource paths ps grouped by their plain path, each group in the class path's order (the plain
+  path, which the first directory holding it gives, then the copies by directory): {plain [path ...]},
+  sorted by plain path."
+  [ps]
+  (into (sorted-map)
+        (for [[q xs] (group-by #(second (unroot %)) ps)]
+          [q (vec (sort-by #(first (unroot %)) xs))])))
+
+;; ---------------------------------------------------------------------------------------
+;; services (GH4 (ii))
+
+(defn- java-name? [^String s]
+  (and (pos? (count s))
+       (every? (fn [part] (and (pos? (count part))
+                               (Character/isJavaIdentifierStart (.charAt ^String part 0))
+                               (every? #(Character/isJavaIdentifierPart (char %)) (rest part))))
+               (str/split s #"\." -1))))
+
+(defn parse-services-file
+  "A META-INF/services file's providers, as java.util.ServiceLoader reads one (its javadoc): a
+  provider's binary name a line, # beginning a comment, blanks around it ignored, empty lines skipped,
+  duplicates kept once. [providers bad-lines]."
+  [^String text]
+  (loop [[l & more] (str/split-lines text) ps [] bad []]
+    (if (nil? l)
+      [(vec (distinct ps)) bad]
+      (let [i (.indexOf ^String l "#")
+            n (str/trim (if (neg? i) l (subs l 0 i)))]
+        (cond (= "" n) (recur more ps bad)
+              (java-name? n) (recur more (conj ps n) bad)
+              :else (recur more ps (conj bad l)))))))
+
+(defn services-path? [^String p]
+  (boolean (re-matches #"META-INF/services/[^/]+" (second (unroot p)))))
+
+(defn read-provides
+  "The world's module provides (jdk/provides.txt, bin/jrt provides: MODULE SERVICE PROVIDER a line),
+  [[service provider] ...] in order; empty when f does not exist."
+  [f]
+  (let [f (io/file f)]
+    (if (.isFile f)
+      (vec (for [l (str/split-lines (slurp f))
+                 :let [l (str/trim l)]
+                 :when (and (seq l) (not (str/starts-with? l "#")))
+                 :let [[_ s p] (str/split l #"\s+")]
+                 :when (and s p)]
+             [s p]))
+      [])))
+
+(defn services
+  "The registry: {service [[provider kind] ...]} sorted by service, the world's provides first (kind
+  :module), then the META-INF/services files of data ({path text-fn}, the program's resources with
+  their root copies) in the class path's order (kind :classpath), a provider once a service. Also
+  :bad, the lines that name no class, [[path line] ...]."
+  [provides data]
+  (let [files (by-plain-path (filter services-path? (keys data)))
+        acc (reduce (fn [m [s p]] (update m s (fnil conj []) [p :module])) (sorted-map) provides)
+        [acc bad] (reduce (fn [[m bad] [q paths]]
+                            (let [s (subs q (count "META-INF/services/"))]
+                              (reduce (fn [[m bad] path]
+                                        (let [[ps b] (parse-services-file ((get data path)))]
+                                          [(update m s (fnil into []) (for [p ps] [p :classpath]))
+                                           (into bad (for [l b] [path l]))]))
+                                      [m bad] paths)))
+                          [acc []] files)]
+    (with-meta (into (sorted-map) (for [[s ps] acc]
+                                    [s (vec (vals (reduce (fn [m [p k]] (if (contains? m p) m (assoc m p [p k])))
+                                                          (array-map) ps)))]))
+               {:bad bad})))
+
+(defn- distinct-by-first [ps]
+  (loop [[x & more] ps seen #{} out []]
+    (cond (nil? x) out
+          (seen (first x)) (recur more seen out)
+          :else (recur more (conj seen (first x)) (conj out x)))))
+
+(defn services-text
+  "The registry's resource text (services-resource)."
+  [svcs]
+  (str/join (for [[s ps] svcs [p k] (distinct-by-first ps)]
+              (str (name k) " " s " " p "\n"))))
+
+(defn internal [^String s] (str/replace s "." "/"))
+
+(defn service-roots
+  "The conditional roots of the registry: [[service-internal [spec ...]] ...]: a provider's
+  constructors and its static provider() (root specs, binary names), once the service is reached."
+  [svcs]
+  (vec (for [[s ps] svcs]
+         [(internal s) (vec (mapcat (fn [[p _]] [(str p "#<init>") (str p "#provider")]) ps))])))
+
+(defn roots-index-text
+  "The resource roots' index (roots-resource) of the copies among paths: K NAME a line, K a directory
+  some copy is from, NAME its name (names: the directories' names by index)."
+  [paths names]
+  (let [ks (sort (distinct (keep #(let [[k _] (unroot %)] (when (>= k 0) k)) paths)))]
+    (str/join (for [k ks] (str k " " (nth names k) "\n")))))
+
+;; ---------------------------------------------------------------------------------------
+;; JSON (the metadata's format): a reader of RFC 8259's grammar into maps, vectors, strings, numbers
+;; (Long or Double), true, false and nil
+
+(defn- json-fail [^String s i what]
+  (throw (ex-info (str "JSON: " what " at " i) {:at i})))
+
+(defn read-json
+  "The JSON value of text s (an error on malformed text)."
+  [^String s]
+  (let [n (count s)
+        ws (fn [i] (loop [i i] (if (and (< i n) (Character/isWhitespace (.charAt s i))) (recur (inc i)) i)))
+        value (fn value [i]
+                (let [i (ws i)]
+                  (when (>= i n) (json-fail s i "unexpected end"))
+                  (let [c (.charAt s i)]
+                    (cond
+                      (= c \{) (loop [i (ws (inc i)) m {}]
+                                 (if (and (< i n) (= \} (.charAt s i)))
+                                   [m (inc i)]
+                                   (let [[k i] (value i)
+                                         _ (when-not (string? k) (json-fail s i "a key that is not a string"))
+                                         i (ws i)
+                                         _ (when-not (and (< i n) (= \: (.charAt s i))) (json-fail s i "no :"))
+                                         [v i] (value (inc i))
+                                         i (ws i)
+                                         m (assoc m k v)]
+                                     (cond (and (< i n) (= \, (.charAt s i))) (recur (ws (inc i)) m)
+                                           (and (< i n) (= \} (.charAt s i))) [m (inc i)]
+                                           :else (json-fail s i "no , or }")))))
+                      (= c \[) (loop [i (ws (inc i)) v []]
+                                 (if (and (< i n) (= \] (.charAt s i)))
+                                   [v (inc i)]
+                                   (let [[x i] (value i)
+                                         i (ws i)
+                                         v (conj v x)]
+                                     (cond (and (< i n) (= \, (.charAt s i))) (recur (ws (inc i)) v)
+                                           (and (< i n) (= \] (.charAt s i))) [v (inc i)]
+                                           :else (json-fail s i "no , or ]")))))
+                      (= c \") (let [sb (StringBuilder.)]
+                                 (loop [i (inc i)]
+                                   (when (>= i n) (json-fail s i "an unterminated string"))
+                                   (let [c (.charAt s i)]
+                                     (cond
+                                       (= c \") [(str sb) (inc i)]
+                                       (= c \\) (let [e (.charAt s (inc i))]
+                                                  (case e
+                                                    \u (do (.append sb (char (Integer/parseInt (subs s (+ i 2) (+ i 6)) 16)))
+                                                           (recur (+ i 6)))
+                                                    (do (.append sb (case e \b \backspace \f \formfeed \n \newline
+                                                                      \r \return \t \tab e))
+                                                        (recur (+ i 2)))))
+                                       :else (do (.append sb c) (recur (inc i)))))))
+                      (str/starts-with? (subs s i) "true") [true (+ i 4)]
+                      (str/starts-with? (subs s i) "false") [false (+ i 5)]
+                      (str/starts-with? (subs s i) "null") [nil (+ i 4)]
+                      :else (let [j (loop [j i] (if (and (< j n) (#{\- \+ \. \e \E \0 \1 \2 \3 \4 \5 \6 \7 \8 \9} (.charAt s j)))
+                                                  (recur (inc j)) j))
+                                  t (subs s i j)]
+                              (when (= i j) (json-fail s i (str "an unexpected " c)))
+                              [(if (re-find #"[.eE]" t) (Double/parseDouble t) (Long/parseLong t)) j])))))
+        [v i] (value 0)]
+    (when (< (ws i) n) (json-fail s i "text after the value"))
+    v))
+
+;; ---------------------------------------------------------------------------------------
+;; native-image's reachability metadata (GH4 (iv))
+
+(defn metadata-path?
+  "A native-image metadata file j2g reads (META-INF/native-image/.../NAME.json)."
+  [^String p]
+  (boolean (re-matches #"META-INF/native-image/.*/(reflect-config|jni-config|resource-config|reachability-metadata)\.json"
+                       (second (unroot p)))))
+
+(defn- condition-of [e]
+  (let [c (get e "condition")]
+    (when (map? c) (or (get c "typeReachable") (get c "typeReached")))))
+
+(defn- reflection-specs
+  "The root specs of one reflection entry: the class itself (its initializer: Class.forName finds a
+  translated class), its constructors when the entry asks for them or names <init>, its members of
+  the names it lists, every member when it asks for all methods."
+  [e]
+  (let [c (or (get e "name") (get e "type"))]
+    (when (string? c)
+      (let [all? #(true? (get e %))]
+        (vec (distinct
+               (concat [(str c "#<clinit>")]
+                       (when (some all? ["allDeclaredConstructors" "allPublicConstructors"
+                                         "queryAllDeclaredConstructors" "queryAllPublicConstructors"])
+                         [(str c "#<init>")])
+                       (when (some all? ["allDeclaredMethods" "allPublicMethods"])
+                         [c])
+                       (for [m (concat (get e "methods") (get e "queriedMethods"))
+                             :let [nme (get m "name")] :when (string? nme)]
+                         (str c "#" nme)))))))))
+
+(defn metadata-roots
+  "The roots of one metadata file's JSON value v (its file name decides the format): [[condition
+  [spec ...]] ...], condition a service-like binary name (nil: unconditional). reflect-config and
+  jni-config are arrays of reflection entries; reachability-metadata.json has :reflection, :jni and
+  :bundles; resource-config.json's bundles name ResourceBundle classes (their constructors, as
+  ResourceBundle.getBundle makes them); resource patterns need no root (every resource is embedded)."
+  [^String path v]
+  (let [entries (fn [xs] (for [e xs :when (map? e) :let [ss (reflection-specs e)] :when (seq ss)]
+                           [(condition-of e) ss]))
+        bundles (fn [xs] (for [b xs :when (map? b) :let [nme (get b "name")] :when (string? nme)]
+                           [(condition-of b) [(str nme "#<init>") (str nme "#<clinit>")]]))]
+    (vec
+      (cond
+        (re-find #"(reflect|jni)-config\.json$" path) (entries v)
+        (re-find #"resource-config\.json$" path) (when (map? v) (bundles (get v "bundles")))
+        (re-find #"reachability-metadata\.json$" path)
+        (when (map? v) (concat (entries (get v "reflection")) (entries (get v "jni")) (bundles (get v "bundles"))))
+        :else nil))))
+
+(defn data-metadata-roots
+  "The roots of every metadata file of data ({path text-fn}): [[condition [spec ...]] ...] in path
+  order, and :errors [[path message] ...] in its metadata."
+  [data]
+  (let [rs (for [p (sort (filter metadata-path? (keys data)))]
+             (try {:roots (metadata-roots p (read-json ((get data p))))}
+                  (catch Exception e {:error [p (.getMessage e)]})))]
+    (with-meta (vec (mapcat :roots rs)) {:errors (vec (keep :error rs))})))
+
+;; ---------------------------------------------------------------------------------------
+;; reflective call sites whose names are constant strings (GH4 (iv))
+
+(defn- const-string [x]
+  (let [x (acc/unaccess x)]
+    (when (and (map? x) (= :const (:op x)) (string? (:val x))) (:val x))))
+
+(defn- class-lit-binary [x]
+  (let [x (acc/unaccess x)]
+    (when (and (map? x) (= :class-lit (:op x)) (string? (:class x)) (str/starts-with? (:class x) "L"))
+      (str/replace (subs (:class x) 1 (dec (count (:class x)))) "/" "."))))
+
+(def ^:private reflective-calls
+  "[owner name] of the reflective calls whose first argument names a class (:class) or a member of
+  the receiver's class literal (:member, :ctor, :field)."
+  {["java/lang/Class" "forName"] :class
+   ["java/lang/ClassLoader" "loadClass"] :class
+   ["java/lang/Class" "getMethod"] :member
+   ["java/lang/Class" "getDeclaredMethod"] :member
+   ["java/lang/Class" "getConstructor"] :ctor
+   ["java/lang/Class" "getDeclaredConstructor"] :ctor
+   ["java/lang/Class" "getField"] :field
+   ["java/lang/Class" "getDeclaredField"] :field
+   ["java/lang/invoke/MethodHandles$Lookup" "findVirtual"] :lookup
+   ["java/lang/invoke/MethodHandles$Lookup" "findStatic"] :lookup
+   ["java/lang/invoke/MethodHandles$Lookup" "findConstructor"] :lookup-ctor})
+
+(defn site-roots
+  "The root specs of one analyzed node, when it is a reflective call whose names are constants:
+  Class.forName(\"p.C\") (and ClassLoader.loadClass) the class (its initializer); C.class.getMethod(\"m\",
+  ...) C's members named m; C.class.getConstructor(...) C's constructors; C.class.getField(\"f\") the
+  class; a Lookup's findVirtual and findStatic of (C.class, \"m\", ...) C#m, findConstructor C's
+  constructors. Returns [:rooted specs], [:dynamic what] for a site whose name is not constant, or nil."
+  [node]
+  (let [node (acc/unaccess node)]
+    (when (and (map? node) (= :invoke (:op node)))
+      (when-let [k (get reflective-calls [(:owner node) (:name node)])]
+        (let [[a0 a1] (:args node)
+              cls (class-lit-binary (:target node))]
+          (case k
+            :class (if-let [c (const-string a0)] [:rooted [(str c "#<clinit>")]] [:dynamic (str (:name node) " of a name not constant")])
+            :member (cond (and cls (const-string a0)) [:rooted [(str cls "#" (const-string a0))]]
+                          cls [:dynamic (str (:name node) " of " cls " by a name not constant")]
+                          :else [:dynamic (str (:name node) " on a class not constant")])
+            :ctor (if cls [:rooted [(str cls "#<init>")]] [:dynamic (str (:name node) " on a class not constant")])
+            :field (if cls [:rooted [(str cls "#<clinit>")]] [:dynamic (str (:name node) " on a class not constant")])
+            :lookup (let [c (class-lit-binary a0) m (const-string a1)]
+                      (if (and c m) [:rooted [(str c "#" m)]] [:dynamic (str (:name node) " not of constants")]))
+            :lookup-ctor (if-let [c (class-lit-binary a0)] [:rooted [(str c "#<init>")]] [:dynamic (str (:name node) " not of a constant class")])))))))
+
+(defn reflective-sites
+  "The reflective call sites of the analyzed classes ns (internal names; in the world a/*unit* binds):
+  {:rooted [[class spec] ...] :dynamic [[class what] ...]}, each distinct, in class order."
+  [ns]
+  (let [hits (for [n ns
+                   :let [d (a/decl n)]
+                   :when d
+                   :let [st @(:state d)]
+                   :when (and (:analyzed st) (not (:analysis-failed st)))
+                   node (tree-seq (some-fn map? vector? seq?) #(if (map? %) (vals %) (seq %))
+                                  [(:bodies st) (:clinit st) (:init st)])
+                   :let [r (try (site-roots node) (catch Exception _ nil))]
+                   :when r]
+               [n r])]
+    {:rooted (vec (distinct (for [[n [k specs]] hits :when (= k :rooted) s specs] [n s])))
+     :dynamic (vec (distinct (for [[n [k what]] hits :when (= k :dynamic)] [n what])))}))
+
+;; ---------------------------------------------------------------------------------------
+;; root specs over the world
+
+(defn spec-class
+  "The internal name of a root spec's class."
+  [^String spec]
+  (internal (first (str/split spec #"#" 2))))
+
+(defn present-specs
+  "specs split by whether their class is in the world: [present absent]."
+  [specs]
+  (let [g (group-by #(boolean (a/decl (spec-class %))) specs)]
+    [(vec (distinct (get g true))) (vec (distinct (get g false)))]))
+
+;; ---------------------------------------------------------------------------------------
+;; the refusals (GH6 (iv))
+
+(defn- top-of [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
+
+(defn- names-class? [^String why ^String n]
+  ;; reach's notes name a class by its internal name ("class p/C failed analysis", "class p/C: ...")
+  ;; or, for a class outside the world, by its binary name
+  (or (str/includes? why (str "class " n " ")) (str/includes? why (str "class " n ":"))))
+
+(defn refusals
+  "The classes j2g refused, by whether the program reaches them: failed, {class cause} (the load's
+  analysis failures and reach's unavailable classes), unavailable, reach's {[class method desc]
+  #{why}}. {:stubbed [[class cause [method-key ...]] ...] :dropped [[class cause] ...]}: stubbed, a
+  reached method of another class needs the class (its operations there throw with the cause);
+  dropped, none does (the class is not in the program)."
+  [failed unavailable]
+  (let [refused-tops (set (map (comp top-of key) failed))
+        stubbed (for [[n cause] (sort failed)
+                      :let [refs (vec (sort (for [[k whys] unavailable
+                                                  :when (and (vector? k) (string? (first k))
+                                                             ;; a refused class's methods are not translated
+                                                             (not (refused-tops (top-of (first k))))
+                                                             (some #(names-class? (str %) n) whys))]
+                                              (str/join " " k))))]
+                      :when (seq refs)]
+                  [n cause refs])
+        s (set (map first stubbed))]
+    {:stubbed (vec stubbed)
+     :dropped (vec (for [[n cause] (sort failed) :when (not (s n))] [n cause]))}))

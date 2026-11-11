@@ -896,6 +896,33 @@
    "([Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/Process;"
    "([Ljava/lang/String;[Ljava/lang/String;Ljava/io/File;)Ljava/lang/Process;"])
 
+(def class-loader-resource-helpers
+  "ClassLoader's resource methods translated code calls, [name desc support-function]: the instance
+  ones a loader's own override first, else ClassPathResources' (out/support-forms); the static ones
+  the system loader's."
+  [["getResource" "(Ljava/lang/String;)Ljava/net/URL;" "J2g_ClassLoaderGetResource"]
+   ["getResources" "(Ljava/lang/String;)Ljava/util/Enumeration;" "J2g_ClassLoaderGetResources"]
+   ["getResourceAsStream" "(Ljava/lang/String;)Ljava/io/InputStream;" "J2g_ClassLoaderGetResourceAsStream"]
+   ["getSystemResource" "(Ljava/lang/String;)Ljava/net/URL;" "J2g_ClassLoaderGetSystemResource"]
+   ["getSystemResources" "(Ljava/lang/String;)Ljava/util/Enumeration;" "J2g_ClassLoaderGetSystemResources"]
+   ["getSystemResourceAsStream" "(Ljava/lang/String;)Ljava/io/InputStream;" "J2g_ClassLoaderGetSystemResourceAsStream"]])
+
+(defn class-loader-resource-target
+  "The static method of jdk.internal.jrt.ClassPathResources a ClassLoader resource helper calls (name
+  desc): getResource(ClassLoader, String) for getResource(String), systemResource(String) for
+  getSystemResource(String), and so on."
+  [nme desc]
+  (if (str/starts-with? nme "getSystem")
+    [(str "system" (subs nme (count "getSystem"))) desc]
+    [nme (str "(Ljava/lang/ClassLoader;" (subs desc 1))]))
+
+(defn class-loader-resource-ready?
+  "Has the world's ClassPathResources the static a ClassLoader resource helper calls (jrt's own Java as
+  converted: the helpers came with A5)?"
+  [nme desc]
+  (let [[n d] (class-loader-resource-target nme desc)]
+    (boolean (some #(and (= n (:name %)) (= d (:desc %))) (:methods (a/decl "jdk/internal/jrt/ClassPathResources"))))))
+
 (def support-call-helpers
   "The instance methods of jrt's hand-written classes that jrt cannot write itself, as they name
   translated classes, by [owner name desc]: [support function, the translated class it needs].
@@ -914,8 +941,13 @@
          ;; System.inheritedChannel (JCS201 (a)): SelectorProvider.provider().inheritedChannel()
          ["java/lang/System" "inheritedChannel" "()Ljava/nio/channels/Channel;"]
          ["J2g_SystemInheritedChannel" "java/nio/channels/spi/SelectorProvider"]}
-        (for [d runtime-exec-descs]
-          [["java/lang/Runtime" "exec" d] [(str "J2g_Runtime" (nm/method-base "exec" d)) "jdk/internal/jrt/RuntimeExec"]])))
+        ;; ClassLoader's resources (A5 of the Ghidra case study's G1 plan; J2G-SPEC §10.3, "Resources by
+        ;; URL"): jdk.internal.jrt.ClassPathResources' (a loader's own override first)
+        (concat
+          (for [[nme desc f] class-loader-resource-helpers]
+            [["java/lang/ClassLoader" nme desc] [f "jdk/internal/jrt/ClassPathResources"]])
+          (for [d runtime-exec-descs]
+            [["java/lang/Runtime" "exec" d] [(str "J2g_Runtime" (nm/method-base "exec" d)) "jdk/internal/jrt/RuntimeExec"]]))))
 
 (defn throwable-print-helper
   "The support function of a call of a member of support-call-helpers declared by its owner
@@ -923,5 +955,7 @@
   roots what the function calls); nil otherwise."
   [owner name desc]
   (when-let [[f c] (get support-call-helpers [owner name desc])]
-    (when (and (hand-written? owner) (translatable? c)) f)))
+    (when (and (hand-written? owner) (translatable? c)
+               (or (not= owner "java/lang/ClassLoader") (class-loader-resource-ready? name desc)))
+      f)))
 
