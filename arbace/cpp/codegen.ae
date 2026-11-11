@@ -674,6 +674,13 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
 
+(def ^:private ^:dynamic *in-tls-init* false)
+
+(defn- tls-wrapper-name
+  "The thread-local wrapper's name of the variable whose symbol is `nm` (Itanium 5.1.4.1: TW <object name>)."
+  [^String nm]
+  (str "_ZTW" (if (str/starts-with? nm "_Z") (subs nm 2) (str (count nm) nm))))
+
 (defn- var-addr [id]
   (or (get-in @*f* [:addr id])
       (let [v (sema/var* id)]
@@ -688,7 +695,11 @@
                                        (swap! *top* update :declared conj nm)
                                        (add-top! (list 'llvm/global (gsym nm) (if (abi/scalar? (abi/unq (:ty v))) (abi/llvm-type (:ty v)) (list 'array (abi/size-of (:ty v)) 'i8))
                                                        :linkage :external :align (abi/align-of (:ty v)))))
-                                     (gsym nm))
+                                     ;; a thread-local variable with dynamic initialization: through its wrapper (outside the
+                                     ;; unit's __tls_init, which initializes it)
+                                     (if (and (:tls v) (not *in-tls-init*) (some #(= nm (second %)) (:tls-dyn @*top*)))
+                                       (val! (list 'call 'ptr (gsym (tls-wrapper-name nm)) []))
+                                       (gsym nm)))
           :static-local (gsym (abi/mangle-local-static (sema/fnd (:fn-of v)) (:name v) (long (:disc v))))
           (fail :codegen "no address for " (:name v))))))
 
@@ -1126,8 +1137,14 @@
                                   (emit! (list 'store [lt r] ['ptr res] :align a))))))
       :cmpxchg (let [ep (emit-rv (:ep e))
                      v (val-of)
-                     weak (if (some? (:wc e)) (not (zero? (long (:wc e)))) (fail :atomic "a run-time weak flag"))
-                     one (fn [s f]
+                     ;; (a run-time weak flag, cpp-s3: libstdc++'s __compare_exchange(..., bool __is_weak, ...) under
+                     ;; std::atomic<double>'s compare-exchange loop: both forms behind a branch on it, as clang's EmitAtomicOp
+                     ;; switches on IsWeak; nil until then)
+                     weak-c (when (some? (:wc e)) (not (zero? (long (:wc e)))))
+                     wv (when-not (some? (:wc e)) (emit-rv (:w e)))
+                     wk (atom weak-c)
+                     one* (fn [s f]
+                           (let [weak @wk]
                            (let [c (val! (list 'load lt ['ptr ep] :align a))
                                  pr (val! (apply list (cond-> ['cmpxchg ['ptr p] [lt c] [lt v] s f] weak (conj :weak true) true (conj :align a))))
                                  old (val! (list 'extractvalue [(list 'struct lt 'i1) pr] 0))
@@ -1137,7 +1154,16 @@
                              (begin! ls)
                              (emit! (list 'store [lt old] ['ptr ep] :align a))
                              (begin! lc)
-                             (store! abi/bool* ok res)))
+                             (store! abi/bool* ok res))))
+                     one (fn [s f]
+                           (if (and wv (nil? @wk))
+                             (let [lw (new-label "cmxchg.weak") ls (new-label "cmpxchg.strong") lc (new-label "cmpxchg.continue")]
+                               (condbr! wv lw ls)
+                               (close-block!)
+                               (doseq [[l w] [[ls false] [lw true]]]
+                                 (start! l) (reset! wk w) (one* s f) (reset! wk nil) (br! lc) (close-block!))
+                               (start! lc))
+                             (one* s f)))
                      fails (fn [s]
                              (if (:foc e)
                                (one s (cmpxchg-fail-ord (:foc e)))
@@ -1489,6 +1515,17 @@
     :temp (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e))
                 (binding [*extend-now* (or *extend-now* (identical? e *extend-root*))] (push-temp-cleanup! (:id (abi/unq (:ty e))) t)) t)
     :assign (let [v (emit-rv (:r e)) a (emit-lv (:l e))] (store! (:ty e) v a) a)
+    ;; GNU complex (cpp-s3): a part's address, a compound assignment by a real value
+    :cpart (offset! (emit-lv (:e e)) (* (long (:part e)) (abi/size-of (:ty e))))
+    :ccompound (let [a (emit-lv (:l e)) et (:of (abi/unq (:ty e))) es (abi/size-of et)
+                     v (emit-rv (:r e))
+                     re (load! et a) im (load! et (offset! a es))
+                     both (#{"*" "/"} (:o e))
+                     re2 (arith! (:o e) et re v)
+                     im2 (when both (arith! (:o e) et im v))]
+                 (store! et re2 a)
+                 (when both (store! et im2 (offset! a es)))
+                 a)
     :cassign (let [a (emit-lv (:l e)) t (abi/unq (:ty e)) old (load! t a)
                    r (emit-rv (:r e))
                    nv (if (:ptr e)
@@ -1584,6 +1621,10 @@
       :expr (if (abi/class? tu) (emit-into (:e init) addr) (store! tu (emit-rv (:e init)) addr))
       :ctor (call! (:fn init) addr (:args init) nil false)
       (:copy :copy-bytes) (memcpy! addr (emit-lv (:e init)) (abi/size-of tu))
+      ;; a complex object's parts (cpp-s3); one not written zero
+      :complex (let [et (:of tu) es (abi/size-of et) [a b] (:items init)]
+                 (store! et (if a (emit-rv a) (zero-of et)) addr)
+                 (store! et (if b (emit-rv b) (zero-of et)) (offset! addr es)))
       :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
                 (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n))
       :bind (store! (abi/ptr abi/void) (let [e (:e init)] (binding [*extend-root* (when *extend* (extend-root e))] (emit-lv e))) addr)
@@ -2651,9 +2692,15 @@
                       (add-top! (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a]))) (swap! dyn conj [:dtor id]))
                   ((if (:internal v) #(swap! *top* assoc-in [:lazy nm] %) add-top!) (apply list 'llvm/global (gsym nm) ct cv (concat link [:align a])))))
               :else
-              (do (when (:tls v) (fail :tls "a thread-local variable with dynamic initialization (" (:name v) "): clang's TLS wrapper"))
+              (do (when (and (:tls v) (:linkonce v)) (fail :tls "a template's thread-local static member with dynamic initialization (" (:name v) ")"))
                   (add-top! (apply list 'llvm/global (gsym nm) (if (abi/ref? t) 'ptr (list 'array s 'i8)) (if (abi/ref? t) 'null 'zeroinitializer) (concat link [:align a])))
-                  (swap! dyn conj [:init id])))))))
+                  ;; a thread-local one: initialized by the unit's __tls_init on its first use in a thread, through its
+                  ;; wrapper _ZTW (clang's ItaniumCXXABI::EmitThreadLocalInitFuncs), not by the global constructor
+                  (if (:tls v)
+                    (do (when (and (abi/class? (abi/unq t)) (nontrivial-dtor? (:id (abi/unq t))))
+                          (fail :tls "a thread-local variable with a destructor (" (:name v) ")"))
+                        (swap! *top* update :tls-dyn (fnil conj []) [id nm]))
+                    (swap! dyn conj [:init id]))))))))
     ;; the dynamic initializations by priority (init_priority(N): a function _GLOBAL__I_00000N of its own, clang's), then
     ;; the functions __attribute__((constructor(N))) names, all in llvm.global_ctors
     (let [groups (group-by (fn [[_ id]] (long (or (:init-priority (sema/var* id)) 65535))) @dyn)
@@ -2699,6 +2746,41 @@
                            (concat (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                    [:body (vec (concat [entry] (rest blocks) (:pad-blocks s)))])))
           (swap! entries conj [prio nm]))))
+     ;; the thread-local variables with dynamic initialization (clang's ItaniumCXXABI::EmitThreadLocalInitFuncs): the
+     ;; unit's __tls_init runs their initializations once a thread, behind __tls_guard; each variable's init function
+     ;; _ZTH is an alias of it, and its wrapper _ZTW (weak_odr, hidden) calls that and returns the variable's address
+     (when-let [tv (seq (:tls-dyn @*top*))]
+       (add-top! (list 'llvm/global (gsym "__tls_guard") 'i8 0 :linkage :internal :thread-local true :align 1))
+       (let [state (atom {:blocks [] :label '%entry :insts [] :n 0 :allocas [] :addr {} :cleanups [] :loops [] :entry-stores []
+                          :fn {:name "init" :ty {:k :fn :ret abi/void :ps []}} :ret-label '%return})]
+         (binding [*f* state *in-tls-init* true]
+           (let [l1 (new-label "init") l2 (new-label "exit")
+                 gv (val! (list 'load 'i8 ['ptr (gsym "__tls_guard")] :align 1))
+                 c (val! (list 'icmp :eq 'i8 gv 0))]
+             (condbr! c l1 l2)
+             (begin! l1)
+             (emit! (list 'store ['i8 1] ['ptr (gsym "__tls_guard")] :align 1))
+             (doseq [[id nm] tv]
+               (let [v (sema/var* id)] (with-full (emit-init (gsym nm) (:ty v) (:ginit v)))))
+             (begin! l2))
+           (emit! '(ret void))
+           (close-block!))
+         (let [s @state blocks (:blocks s) entry (first blocks)
+               entry (apply list 'block (second entry) (concat (:allocas s) (:entry-stores s) (drop 2 entry)))]
+           (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
+           (add-top! (apply list 'llvm/define (gsym "__tls_init") 'void [] :linkage :internal
+                            (concat (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
+                                    [:body (vec (concat [entry] (rest blocks) (:pad-blocks s)))])))))
+       (doseq [[_ nm] tv]
+         (add-top! (list 'llvm/alias (gsym (str "_ZTH" (subs (tls-wrapper-name nm) 4))) '(fn void []) ['ptr (gsym "__tls_init")])))
+       (declare! "llvm.threadlocal.address.p0" 'ptr '[ptr])
+       (doseq [[_ nm] tv]
+         (let [w (tls-wrapper-name nm)]
+           (add-top! (list 'llvm/define (gsym w) 'ptr [] :linkage :weak_odr :visibility :hidden
+                           :body [(list 'block nil
+                                        (list 'call 'void (gsym (str "_ZTH" (subs w 4))) [])
+                                        (list '= '%t1 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
+                                        '(ret ptr %t1))])))))
      (when (seq @entries)
        (add-top! (list 'llvm/global (gsym "llvm.global_ctors") (list 'array (count @entries) '(struct i32 ptr ptr))
                        (apply list 'array (for [[prio nm] @entries] ['(struct i32 ptr ptr) (list 'struct ['i32 prio] ['ptr (gsym nm)] ['ptr 'null])]))

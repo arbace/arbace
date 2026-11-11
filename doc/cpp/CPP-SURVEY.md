@@ -6184,3 +6184,135 @@ bin/cppi route-compare && bin/cppi route-compare --aot                  # sample
 at the head), `th1/`, `rtA/`, `p/` (probes), `cppi/codegen-gen/`, `sF/`, `sG/` (the dg samples), `repr-cpp-dg-own/` (the `--only` runs),
 `m/` (the lists), `stubs/`, `env.sh`, `job.sh`, `watch.sh`, `gen*.sh`, `g82.sh`, `gi.sh`, `geneh.sh`, `names.sh`, `sample.sh`, `dgone.sh`,
 `cg.sh`, `ess.sh`.
+
+## As built: cpp-s3 (2026-11-11; branch `cpp-s3` from mac/next adf65b4fd, which carries cpp-s2)
+
+Light, by day's rules (.tmp/night12/AGENT-RULES.md): main's stage 0 (`ARBACE_HOST_EXE`), at most two processes of at most about 1.4 GB
+(`GOMEMLIMIT=1400MiB GOGC=30 REPR_CPP_THREADS=2`; a watcher killing a process tree past 2.5 GB by PID: a first run in the fresh worktree,
+which also made the C target tree, passed 2.6 GB and was killed, every later one stayed under 1.4 GB), the compiler stubs first on PATH
+(their log empty: no clang, g++ or LLVM tool ran), no gate. The 82 run programs generated at a snapshot worktree of the commit
+(`.tmp/snap`), so that the sources were not edited under a run that loads them.
+
+### 1. The own route's refusals (CP353 (a)'s slices, as cpp-s2 left them)
+
+The run corpora's 82 programs by our route (gen-batch over cpp-props5's lists, each once; `.tmp/G2` at the head): **65 → 69 generated**,
+the four new: tls/thread_local12e.C, pr77550.C, cpp23/explicit-obj-default2.C, runtime/deferred.cpp. None lost; the 65 that generated before have their IR byte for byte cpp-s2's, 60 of them, the other 5 (hello.cpp, io.cpp, p1-first.cpp, threads.cpp, thread-throw.cpp) equal after the inliner's local numbering (`.iN`); 2,133 s, peak 1.4 GB.
+
+- **thread_local12e.C, the TLS wrapper.** A thread-local variable with dynamic initialization (namespace scope or a static member, not a
+  template's) is zero in its global and initialized by the unit's `__tls_init` behind `__tls_guard` (internal, thread_local), each
+  variable's `_ZTH` an alias of it and its wrapper `_ZTW` (weak_odr, hidden) calling that and returning `llvm.threadlocal.address` of the
+  global, as clang's ItaniumCXXABI::EmitThreadLocalInitFuncs writes them; every use of the variable outside `__tls_init` calls the wrapper
+  (`var-addr`). Not in llvm.global_ctors (clang's neither). One with a destructor (`__cxa_thread_atexit`) and a template's are still
+  refused; so is an `extern thread_local` of another unit (clang's `extern_weak` _ZTH with a null test). The lowering already takes the
+  alias (`__attribute__((alias("__tls_init")))` of a static function) and `_Thread_local`. Against clang's recorded IR (the pack
+  cpp-ir-gxx-dg-run): the same wrapper and init names for the variable the program uses; clang also emits the header's unused
+  functions and wrappers (f1-f12, `_ZTW` of s1-s4, u1-u8), our route only what is used, as for every header definition.
+- **pr77550.C** (refused at `_CharT`, then four more causes):
+  - [temp.param]/12: `template <typename _CharT, typename = char_traits<_CharT>> struct basic_string;` then
+    `template <typename, typename, typename> struct basic_string {...}`: a default argument taken from an earlier declaration keeps that
+    declaration's parameters (`:dparams`) when the names differ, and is resolved over them (`complete-args`).
+  - The injected class name of a class template with an unnamed parameter: the parser spelled it with the named parameters only
+    (`bs<T2>`, another specialization, so the instantiation recursed); now the class's bare name, which sema finds as the injected name
+    (repr/cpp's parser, `:inj-full`). Clang prints `bs<type-parameter-0-0, T2>`; neither spelling is clang's, the forms' round trip is
+    unchanged (below).
+  - [basic.lookup.argdep]/3: the associated namespaces of a class are its bases' and, for a template's specialization, its template type
+    arguments' too (`adl-class-nss`, for functions and function templates): `distance(begin, end)` of a global iterator adaptor over
+    `std::F<...>` finds `std::distance`.
+  - [basic.stc.dynamic.general]/2: the implicit `operator new(size_t)` is declared beside a unit's own placement `operator new(size_t,
+    void*)` (before, only when lookup found none).
+  - [dcl.spec.auto.general]/10: a function declared `auto` whose body has no return statement returns void (before, generic lambdas only).
+  Its defined names are clang's but the closure's copy constructor, `_ZZ4mainEN3$_0C2ERKZ4mainE3$_0` against clang's `..C2ERKS_` (the
+  local class's substitution; internal, no behaviour; CP360).
+- **explicit-obj-default2.C, explicit object parameters (P0847R7).** The parser takes `this` before a parameter (`isExplicitObjectParameter`
+  on its ParmVarDecl; the forms `(cpp/this PARAM)`, printed back as `this ...`); sema takes a member function whose explicit object
+  parameter is a reference to its class as an implicit object one with that ref-qualifier and cv (the object parameter the same,
+  [over.match.funcs]/4) and keeps the parameter's type for the mangling: `N H <prefix> <name> E` with it first among the parameters
+  (`_ZNH1SaSERS_RKS_`). By value, deduced (`this auto&&`) or named in a body: refused. Two older faults the program shows were fixed with
+  it: a defaulted move assignment copied its members (its source an xvalue only in the checker's mode), and an implicit or defaulted copy
+  assignment over a member whose operator= is user-provided was trivial (a memcpy past A's operator=; `trivial-assign?`). Its functions
+  and calls are clang's (the pack).
+- **runtime/deferred.cpp:**
+  - GNU's complex types: `__complex__ T` a type `{:k :complex :of T}` ({T, T}, the element's alignment, mangled `C T`, classified
+    by its parts), `__real__`/`__imag__` of a complex glvalue its part's glvalue, `_M_value{ __r, __i }` its parts, `op=` by a real value
+    (+ and - the real part, * and / both, as clang's ComplexExprEmitter with a real right operand). Complex arithmetic of two complex
+    values (`__mulxc3`, `__divxc3`) and complex prvalues are refused.
+  - The generic `__atomic_load`, `store`, `exchange` and `compare_exchange` of a float or double (every operand through a pointer)
+    as the integer of its size; a run-time weak flag of `__atomic_compare_exchange` (libstdc++'s `__compare_exchange(..., bool
+    __is_weak, ...)`) both forms behind a branch on it, as clang's EmitAtomicOp.
+  - [temp.deduct]/5: a template parameter that is not deduced takes its default argument also before deduced ones (`template<bool
+    _AtomicRef = false, typename _Tp> bool compare_exchange_weak(_Tp*, ...)`).
+  - GNU's `abi_tag`: `B <source-name>` after a function's name (`_ZNKSt7complexIeE4realB5cxx11Ev`).
+  Its defined names are clang's (the pack cpp-ir-samples), all of them.
+
+The refused, by cause: coroutines 7 and GNU vector types 5 (CP334 (b), CP335 (b) leave them), runtime/library.cpp (variant's
+`_FUN_type`: `_Build_FUNs`' inherited `_S_fun`s, then `std::any`, then `<format>`: several slices, CP359).
+
+### 2. CP344 (a): either judge passes a dg file
+
+`test/reap/main.ae`'s `own-for` takes `:either true` (cells.edn's C++ read source): a file outside `dg-syntax-only.txt` that clang's
+record does not pass passes when the own record (`check-dg-own-linux-amd64.edn`) passes it, counted by its judge. With the every-10th own
+sample: **13 files** (5,289 → 5,302 read passes; by design 1,182 → 1,169), C++ completeness 90.99 → **91.04**. The whole own record
+(CP342/CP343, night 13) brings the rest.
+
+### 3. CP348 (a): the runtime's own units by a list
+
+`bin/cppi`'s `rt_ours_glob` is a list (`CPPI_RUNTIME_OURS`, prefixes or unit names): libsupc++/ and P22's 13 units of c++98/ and c++11/
+whose external names our route already writes as the oracle does (CODEGEN.md, "P22 (b), the first measure"). It acts only under the route
+`auto` or `ours` (P21 (b): `cppi_runtime_route_default` is still clang); its proof is the night's runtime-build (below). eh_alloc.cc was
+re-measured by cpp-s2 (names equal). libiberty's C demangler by C's route and G5b's instantiation are next.
+
+### Not built: CP345, CP347, CP349, CP351
+
+- CP345 (a) (CP264, threads): a crt fix, which moves gate_key and needs runtime-ci (3 GB) to prove: the night's (`--full` night), not by day.
+- CP346 (b): nothing to build. CP347 (a) waits for CP340's night measure.
+- CP349 (a), the runtime's early cutoff: matters once P21 (b) flips. The design: `cpp-runtime-ir` (`runtime-build`, then the units'
+  IR digests and routes into `$GATE_OUT/ir.sha256`, `:outputs true`) and `cpp-runtime` (`runtime-ci` alone, `:uses
+  ["cpp-runtime-ir/ir.sha256"]`, its inputs the lowering's and ci's without the parser, sema and the code generator). Its open point: a
+  skipped `cpp-runtime-ir` must leave `.tmp/cppi/runtime` as built (a new worktree or the clean run has none), so either the tree is the
+  step's output (hundreds of MB) or `runtime-ci` rebuilds it from the records when missing, which the audit then sees reading sema (CP361).
+- CP351 (a): after CP348's rest.
+
+### Checked (light; the stubs' log empty)
+
+| check | result |
+|---|---|
+| gen-batch over the 82 at e09fac2e5 (`.tmp/G1`, tls and pr77550) | 67 generated, the 65 of cpp-s2's G2 byte for byte |
+| gen-batch over the 82 at the head (`.tmp/G2`) | **69 generated** (65 → 69), none lost, the 65 byte for byte cpp-s2's G2 (60) or after numbering (5); 2,133 s, peak 1,391 MB |
+| the four new against clang's recorded IR (packs cpp-ir-gxx-dg-run, cpp-ir-samples; by hand) | defined names as above |
+| probes (`.tmp/p/`): t1-t3 (TLS), c1-c3 (defaults, injected name, ADL), a1 (std::atomic<double>) | generate |
+| `bin/cppi codegen-gen` | 154 of 154 as recorded, the two negative controls failing as they must (776 s, 1.2 GB) |
+| `bin/repr-cpp target verify`, `pp-check --essential`; `roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own` | pass, 33 of 33 and 9 of 9, the control failing as it must |
+| `roundtrip-corpus gxx-dg-every-10 --judge own --only-list` the 164 recorded files with `this` parameters or unnamed template parameters | 164 of 164 pass, as recorded |
+| the dg every-10th own sample (`.tmp/sH`) | 125 own passes, cpp-s2's |
+| `bin/reap --record`, then `bin/reap` | 0 problems (49 of 52 cells checked); the matrix's C++ read cell (CP344) |
+| `bin/crops-score --record`, `--judge --strict` | 0 problems; C++ completeness 90.99 → 91.04, independence 71.30 |
+
+### The night's commands (after this branch's merge; one process at a time)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB GOGC=30 REPR_CPP_THREADS=2 CPPI_JOBS=1 CPPI_THREADS=1
+CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build .tmp/cppi/rt-ours        # cpp-s2's P21 (b) proof with CP348's list: 63 + 13 by ours (about 20 min, 1.5 GB)
+CPPI_RUNTIME_ROUTE=auto CPPI_CI_MEMLIMIT=3GiB bin/cppi runtime-ci .tmp/cppi/rt-ours   # (about 40 min, 3 GB)
+printf '%s\n' gxx-dg-run/tls/thread_local12e.C gxx-dg-run/pr77550.C gxx-dg-run/cpp23/explicit-obj-default2.C > .tmp/s3-new.txt
+CPPI_ROUTE=ours bin/cppi check --corpus gxx-dg-run --only .tmp/s3-new.txt && CPPI_ROUTE=ours bin/cppi check --aot --corpus gxx-dg-run --only .tmp/s3-new.txt
+printf '%s\n' runtime/deferred.cpp > .tmp/s3-rt.txt
+CPPI_ROUTE=ours bin/cppi check --corpus runtime --only .tmp/s3-rt.txt  # (2-3 GB: nodes-list)
+bin/cppi route-compare --corpus gxx-dg-run --sample 25 && bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25
+```
+
+### Proposed (CP359-CP361)
+
+- **CP359: library.cpp's slices.** variant's converting constructor's `_FUN_type` (an overload set of `_S_fun`s inherited by
+  using-declarations through `_Build_FUNs`' pack of bases), then `std::any`, then `<format>`'s instantiations. (a) Next in S5a, one slice a
+  day, each measured over the 82; (b) after S5b. **Recommended: (a)**.
+- **CP360: a local class's substitution in the mangler** (`Z4mainE3$_0` a candidate, `ERKS_`): names level only (internal).
+  (a) Fix with the next names-level slice; (b) leave. **Recommended: (a)**.
+- **CP361: CP349's open point.** (a) `runtime-ci` rebuilds the lowered runtime from the pack's records when its tree is missing, the
+  parser, sema and code generator declared among its inputs only through the `:uses` digest (an audit rule for a `:uses`-covered read);
+  (b) the tree as the step's output. **Recommended: (a)**, built with P21 (b)'s flip.
+
+### Scratch
+
+`.tmp/`: `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `tls*/`, `pr*/`, `xo*/`, `df*/`, `lb1/` (single programs), `p/` (probes),
+`pack/`, `pack2/`, `pack3/` (the packs unpacked), `rtsel/` (the round trip's 164), `sH/` (the dg sample), `env.sh`, `job.sh`, `watch.sh`,
+`run.sh`, `gen*.sh`, `gi.sh`, `gp.sh`, `snapgen.sh`, `cmp.sh`, `cg.sh`, `ess.sh`, `rtsel.sh`, `sample.sh`.

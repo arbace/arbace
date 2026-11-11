@@ -368,6 +368,8 @@
       ;; references to references collapse ([dcl.ref]/7: a substituted T& or T&&)
       & (let [t (resolve-type-form scope (second f))] (abi/lref (if (abi/ref? t) (:to t) t)))
       && (let [t (resolve-type-form scope (second f))] (if (abi/ref? t) t (abi/rref t)))
+      ;; GNU's __complex__ T (_Complex T): {:k :complex :of T} (cpp-s3: std::complex<long double>'s _M_value)
+      complex {:k :complex :of (abi/unq (resolve-type-form scope (second f)))}
       const (assoc (resolve-type-form scope (second f)) :c true)
       volatile (assoc (resolve-type-form scope (second f)) :v true)
       restrict (resolve-type-form scope (second f))
@@ -883,7 +885,20 @@
         nm (:name n)
         body (body-of n)
         pn (param-nodes n)
-        f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :refq (when cid (method-refq qt)) :op (when (and nm (not= k :conv)) (fn-op nm))
+        ;; cpp-s3: an explicit object parameter (C++23, P0847R7) of reference type to the class: the member function as an
+        ;; implicit object one with that ref-qualifier and cv ([over.match.funcs]/4: the same object parameter), the
+        ;; parameter's type kept for the mangling (Itanium's H <prefix> <name> E with it first among the parameters);
+        ;; explicit-obj-default2.C's defaulted assignments. By value, deduced (this auto&&) or named in a body: refused
+        xobj (when (and cid (:isExplicitObjectParameter (first pn)))
+               (let [o (first (:ps ty))]
+                 (when-not (and (abi/ref? o) (abi/class? (abi/unq (:to o))) (= cid (:id (abi/unq (:to o)))))
+                   (fail :xobj "an explicit object parameter not a reference to its class"))
+                 (when (and (:name (first pn)) body) (fail :xobj "an explicit object parameter named in a body"))
+                 o))
+        ty (if xobj (update ty :ps (comp vec rest)) ty)
+        pn (if xobj (vec (rest pn)) pn)
+        f {:name nm :kind k :cls cid :ty ty :cq (if xobj (boolean (:c (:to xobj))) (method-const? qt))
+           :refq (if xobj (if (= :rref (:k xobj)) "&&" "&") (when cid (method-refq qt))) :op (when (and nm (not= k :conv)) (fn-op nm))
            ;; (a class's allocation and deallocation functions are static members, [class.free]/1)
            :static (and cid (or (= "static" (:storageClass n)) (contains? #{"operator new" "operator new[]" "operator delete" "operator delete[]"} nm)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
@@ -914,6 +929,11 @@
            :defaulted (when (:explicitlyDefaulted n) true) :deleted (boolean (:explicitlyDeleted n))
            :pos (long (or (:_b n) 0))
            :src *src*}
+        ;; GNU's abi_tag("t", ...) (cpp-s3: <complex>'s real() and imag()): B <source-name> after the name, the tags sorted
+        tags (not-empty (vec (sort (distinct (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"abi_tag" "__abi_tag__"} (:_gnu a)))
+                                                           [_ t] (re-seq #"\"([^\"]*)\"" (str (:_arg a)))]
+                                                       t)))))
+        f (cond-> f xobj (assoc :xobj xobj) tags (assoc :abi-tags tags))
         ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
         f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
                                        :access (when cid *member-access*)))
@@ -1287,6 +1307,16 @@
          (every? #(let [f (fnd %)] (or (not (copy-ctor? f id)) (and (or (:implicit f) (:defaulted f)) (:trivial f)))) (:ctors c))
          (every? trivial-copy? (class-like-members id)))))
 
+(defn- trivial-assign?
+  "cpp-s3: the class's copy and move assignments trivial ([class.copy.assign]/9) as far as trivial-copy? does not tell:
+  no user-provided one, its bases' and members' trivial too. (An implicit or defaulted assignment over a member whose
+  operator= is user-provided is a call of it, not a copy of the bytes: explicit-obj-default2.C's S over A.)"
+  [id]
+  (and (not (abi/dynamic? id))
+       (not-any? #(let [f (fnd %)] (and (or (copy-assign? f id) (move-assign? f id)) (not (or (:implicit f) (:defaulted f)))))
+                 (:methods (abi/cls id)))
+       (every? trivial-assign? (class-like-members id))))
+
 (defn- implicit-fn! [id k nm ty & {:as more}]
   (let [fid (next-id)
         c (abi/cls id)
@@ -1366,7 +1396,7 @@
     (doseq [x (:ctors (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
     (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
-      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (trivial-copy? id))]
+      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)))]
         (when del (upd-fn! fid merge del)))))
     ;; CX12 (the checker): the implicit move constructor and move assignment ([class.copy.ctor]/8, [class.copy.assign]/4:
     ;; declared when the class declares no copy or move member and no destructor); one defined as deleted is no
@@ -1377,9 +1407,9 @@
                (let [d (:dtor (abi/cls id))] (or (nil? d) (:implicit (fnd d)))))
       (let [rref {:k :rref :to t}]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [rref] :va false} :trivial (trivial-copy? id) :cx-move true)
-        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (trivial-copy? id) :cx-move true))))
+        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)) :cx-move true))))
     (doseq [x (:methods (abi/cls id))]
-      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (and (trivial-copy? id) (trivial-assign? id))))))
     (abi/update-cls! id assoc :user-ctor (boolean (seq (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id)))))
                      :user-dtor (boolean (let [d (:dtor (abi/cls id))] (and d (not (:implicit (fnd d))))))
                      :user-copy-assign (boolean (some #(let [g (fnd %)] (and (copy-assign? g id) (not (:implicit g)))) (:methods (abi/cls id)))))
@@ -2551,6 +2581,12 @@
         (abi/arr? tu) (let [el (init-for (:of tu) nil ctx style)] (if (#{:none :zero} (:i el)) el {:i :list :items [] :fill el :n (:n tu)}))
         (= style :value) {:i :zero}
         :else {:i :none})
+      ;; a complex object from a list of its real and imaginary parts (cpp-s3: complex(long double __r, long double __i) :
+      ;; _M_value{ __r, __i }; GCC's extension, [dcl.init.list] taking it as an aggregate of two)
+      (and (= :init-list (:op src)) (= :complex (:k tu)))
+      (let [items (:items src) et (:of tu)]
+        (when (> (count items) 2) (fail :init "too many initializers for a complex"))
+        {:i :complex :items (mapv #(convert-scalar (rv %) et false) items)})
       (= :init-list (:op src))
       (cond
         (abi/arr? tu)
@@ -2774,8 +2810,13 @@
   ::operator new (t) without <new>)."
   [nm]
   (let [d (implicit-alloc-fns nm)
-        ds (if (string? (first d)) [d] d)]
-    (doseq [[qt ps] ds]
+        ds (if (string? (first d)) [d] d)
+        ;; (cpp-s3: those of the signatures no declaration has: a unit that declares only a placement form,
+        ;; `void *operator new(size_t, void *)`, still has the implicit `operator new(size_t)`, pr77550.C)
+        have (set (for [e (binding [*cutoff* Long/MAX_VALUE] (own-names *root* nm)) :when (= :fn (:e e))]
+                    (mapv abi/unq (:ps (:ty (fnd (:id e)))))))]
+    (.put ^java.util.HashMap (:names *root*) (str " implicit " nm) [])
+    (doseq [[qt ps] ds :when (not (have (mapv #(abi/unq (resolve-type *root* %)) ps)))]
       (declare-fn! *root* {:kind "FunctionDecl" :name nm :type {:qualType qt}
                            :inner (mapv (fn [t] {:kind "ParmVarDecl" :type {:qualType t}}) ps)}))))
 
@@ -2786,7 +2827,8 @@
               (lookup-qualified (:scope ctx) (conj q nm) g)
               (lookup (:scope ctx) nm))
         es (lk)
-        es (if (and (empty? es) (empty? q) (implicit-alloc-fns nm)) (do (implicit-alloc! nm) (lk)) es)
+        es (if (and (empty? q) (implicit-alloc-fns nm) (not (.containsKey ^java.util.HashMap (:names *root*) (str " implicit " nm))))
+             (do (implicit-alloc! nm) (lk)) es)
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
     ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
@@ -3095,14 +3137,38 @@
         (recur pa (conj out pa))
         out))))
 
+(defn adl-class-nss
+  "cpp-s3: the namespaces associated with the class `cid` ([basic.lookup.argdep]/3): its innermost enclosing namespace's
+  (adl-nss), its bases', and for a class template's specialization its template type arguments' (classes, and the classes
+  pointers, references and arrays name), each class once; pr77550.C's distance(begin, end), std::distance found through an
+  iterator adaptor's argument std::F<...>. Scopes by identity."
+  [cid]
+  (let [seen (java.util.HashSet.) out (java.util.ArrayList.) nss (java.util.IdentityHashMap.)]
+    (letfn [(ty! [t]
+              (cond (map? t) (let [t (abi/unq t)]
+                               (cond (abi/class? t) (cls! (:id t))
+                                     (#{:ptr :ref :rref :arr} (:k t)) (ty! (or (:to t) (:of t)))
+                                     (:pack t) (doseq [x (:pack t)] (ty! x))
+                                     :else nil))
+                    :else nil))
+            (cls! [cid]
+              (when (and cid (.add seen cid))
+                (let [c (abi/cls cid)]
+                  (when-let [o (:outer c)]
+                    (doseq [n (adl-nss (loop [s o] (if (or (nil? s) (= :ns (:kind s))) s (recur (:parent s)))))]
+                      (when (and n (not (.containsKey nss n))) (.put nss n true) (.add out n))))
+                  (doseq [b (:bases c)] (cls! (:cls b)))
+                  (doseq [a (:targs c)] (ty! a)))))]
+      (cls! cid)
+      (vec out))))
+
 (defn- adl-fns
   "The functions named `nm` in the namespaces of the class arguments' classes ([basic.lookup.argdep], for classes)."
   [args nm]
   (distinct
    (for [a args
          :let [cid (class-id (:ty a))] :when cid
-         :let [outer (loop [s (:outer (abi/cls cid))] (if (= :ns (:kind s)) s (recur (:parent s))))]
-         ns (adl-nss outer)
+         ns (adl-class-nss cid)
          e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (= :fn (:e e))]
      (:id e))))
 
@@ -3224,6 +3290,10 @@
         _ (when-not (abi/ptr? (abi/unq (:ty p))) (fail :expr nm " of a non-pointer"))
         vt (let [t (abi/unq (:to (abi/unq (:ty p))))] (dissoc t :v))
         vt (if (#{:tas :clear} which) abi/char* vt)
+        ;; (the generic forms, every operand through a pointer, of a float or a double: the integer of its size, the bits
+        ;; moved as clang's EmitAtomicExpr does through its integer-typed temporaries; cpp-s3: std::atomic<double>'s load,
+        ;; store, exchange and fetch_add's compare-exchange loop, runtime/deferred.cpp)
+        vt (if (and (abi/floating? vt) (not (some #{:v} shape)) (#{4 8} (abi/size-of vt))) (if (= 4 (abi/size-of vt)) abi/uint* abi/ulong*) vt)
         _ (when-not (or (abi/integral? vt) (abi/ptr? vt) (= :enum (:k vt)) (#{:tas :clear} which)) (fail :type nm " of " (pr-str vt)))
         _ (when (and (= :rmw which) (not (abi/integral? vt))) (fail :type nm " of " (pr-str vt)))
         _ (when-not (#{1 2 4 8} (abi/size-of vt)) (fail :type nm " of a " (abi/size-of vt) "-byte type"))
@@ -3330,7 +3400,7 @@
                       (catch arbace.lang.ExceptionInfo _ nil)))
         frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) found))) (adl-fns args nm) tspecs)
         cands (concat (map (fn [m] [:m m]) members) (map (fn [f] [:f f]) (distinct frees)))]
-    (when (and (empty? cands) (System/getenv "CPP_OP_TRACE")) (binding [*out* *err*] (println "operator" o "no candidates for" (pr-str (map :ty args)))))
+    (when (and (empty? cands) (System/getenv "CPP_OP_TRACE")) (binding [*out* *err*] (println "operator" o "no candidates for" (pr-str (map :ty args)) (pr-str (map #(some-> (class-id (:ty %)) abi/cls ((juxt :name :lambda :targs))) args)))))
     (if (empty? cands)
       (cond
         (= o "=") (fail :assign "no operator=")
@@ -4062,6 +4132,15 @@
             ("++" "--") (do (when-not (lv? e) (fail :incdec "++ of an rvalue"))
                             {:op :incdec :o o :post (boolean (:isPostfix n)) :e e :ty (abi/unq (:ty e)) :cat (if (:isPostfix n) :pr :lv)})
             "!" {:op :not :e (to-bool e) :ty abi/bool* :cat :pr}
+            ;; GNU's __real__ and __imag__ of a complex glvalue: the part's glvalue (cpp-s3); of a real operand, the
+            ;; operand and zero (GCC's manual, "Complex Numbers")
+            ("__real" "__imag")
+            (let [t (abi/unq (:ty e))]
+              (cond (= :complex (:k t)) (do (when-not (lv? e) (fail :complex "__real__ of a complex prvalue"))
+                                            {:op :cpart :part (if (= o "__real") 0 1) :e e :ty (assoc (:of t) :c (:c (:ty e))) :cat (:cat e)})
+                    (abi/arith? t) (cond (= o "__real") e (abi/floating? t) {:op :float :v 0.0 :ty t :cat :pr} :else {:op :int :v 0 :ty t :cat :pr})
+                    :else (fail :operator "unary " o)))
+            "__extension__" e
             ("-" "+" "~") (let [r (rv e) pt (promote-type (:ty r))] {:op :unop :o o :e (convert-scalar r pt false) :ty pt :cat :pr})
             (fail :operator "unary " o)))))
     "BinaryOperator"
@@ -4077,7 +4156,14 @@
             (builtin-binop o (class->scalar ctx l) (class->scalar ctx r)))))
     "CompoundAssignOperator"
     (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)]
-      (or (when (or (class-operand? l) (class-operand? r)) (operator-call ctx o [l r]))
+      (or (when (= :complex (:k (abi/unq (:ty l))))
+            ;; a complex glvalue op= a real value (cpp-s3: std::complex<long double>'s operator*=(long double)): + and - on the
+            ;; real part, * and / on both, as clang's ComplexExprEmitter does with a real right operand
+            (let [et (:of (abi/unq (:ty l))) r (rv r)]
+              (when-not (and (lv? l) (abi/arith? (abi/unq (:ty r))) (#{"+=" "-=" "*=" "/="} o))
+                (fail :complex "a complex compound assignment " o))
+              {:op :ccompound :o (subs o 0 1) :l l :r (convert-scalar r et false) :ty (:ty l) :cat :lv}))
+          (when (or (class-operand? l) (class-operand? r)) (operator-call ctx o [l r]))
           (when (or (class-operand? l) (class-operand? r)) (no-operator! ctx o [l r]))
           (compound-node (subs o 0 (dec (count o))) l (class->scalar ctx r))))
     "ConditionalOperator"
@@ -5011,7 +5097,10 @@
                    body)]
         (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))
         ;; (a generic lambda's body with no return statement: void, [expr.prim.lambda.closure]/4's deduction)
-        (when (and glam (has-auto? (:ret (:ty (fnd fid))))) (upd-fn! fid assoc-in [:ty :ret] abi/void))))))
+        ;; (cpp-s3: any function's declared `auto` with no return statement in its body, [dcl.spec.auto.general]/10:
+        ;; pr77550.C's `static auto construct(_Alloc, _Tp p2, _Args) { _S_construct(p2); }`)
+        (when (or (and glam (has-auto? (:ret (:ty (fnd fid))))) (and body (= :auto (:k (:ret (:ty (fnd fid)))))))
+          (upd-fn! fid assoc-in [:ty :ret] abi/void))))))
 
 (defn- defaulted-comparison!
   "A defaulted == or <=> ([class.compare.default], [class.eq], [class.spaceship]): the bases' and members' comparisons
@@ -5100,7 +5189,9 @@
                                                              (if (abi/arr? t) {:i :copy-bytes :e (field-node src cls (:i fl))}
                                                                  (init-for t [(field-node src cls (:i fl))] ctx :direct)))}))})))))
     (when (and (= :method (:kind f)) (= "=" (:op f)))
-      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (checking?) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
+      ;; (a defaulted move assignment's source an xvalue in the code generator's mode too, its members moved:
+      ;; explicit-obj-default2.C, cpp-s3)
+      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (or (checking?) (:defaulted f)) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
             me (deref-node (this-expr ctx))
             c (abi/cls cls)]
         (binding [*cutoff* Long/MAX_VALUE]

@@ -4664,3 +4664,32 @@ shared_ptr_base.h, ext/atomicity.h from the pinned gcc-15.2.0 tarball; P2201R1 (
 Records: the dg own sample recorded again (120 → 125 own passes of 454) and independence.edn's read fact with it; C++ completeness 90.99
 (unchanged), independence 71.28 → 71.30 (read 0.657 → 0.658; eval and AOT still 0.5 until the records say which programs our route runs,
 CP356); the route's gains count at the night's records. doc/cpp/CPP-SURVEY.md, "As built: cpp-s2", has the measures and the night's commands.
+
+## 2026-11-11: cpp-s3, C++'s own route: four more run programs, CP344 (a), CP348 (a) (branch `cpp-s3`, from `mac/next` adf65b4fd)
+
+Light, by day (.tmp/night12/AGENT-RULES.md; stage 0, the compiler stubs first on PATH, their log empty; no gate). Sources: the Itanium
+C++ ABI (5.1.2's abi-tags, 5.1.4.1's TW/TH special names, 5.1.5's C prefix for complex types, the H of an explicit object member
+function); clang 23.1.5's behaviour as the recorded IR packs show it (cpp-ir-gxx-dg-run, cpp-ir-samples: ItaniumCXXABI's TLS wrapper
+and __tls_init, EmitAtomicOp's weak branch, ComplexExprEmitter with a real operand); libstdc++ 15.2's complex, atomic_base.h from the
+pinned gcc-15.2.0 tarball; P0847R7; [temp.param]/12, [temp.deduct]/5, [basic.lookup.argdep]/3, [basic.stc.dynamic.general]/2,
+[dcl.spec.auto.general]/10, [class.copy.assign]/9. No live clang or g++.
+
+- The 82 run programs by our route: 65 → 69 generated (thread_local12e.C, pr77550.C, explicit-obj-default2.C, runtime/deferred.cpp),
+  none lost, the 65's IR byte for byte or after the inliner's numbering. The new four's defined names are clang's but for a lambda's
+  copy constructor (CP360) and the header functions clang emits unused.
+- The TLS wrapper as clang writes it (`__tls_init` behind `__tls_guard`, `_ZTH` aliases, `_ZTW` wrappers, uses through the wrapper).
+  Considered: the initializations in the global constructor (no: a thread's own copy would not be initialized).
+- Explicit object parameters of reference type taken as the implicit object form with the ref-qualifier (the IR is the same), the H
+  mangling kept; the parser's `this` and the forms' `(cpp/this P)` (the round trip of the 164 recorded files with `this` or unnamed
+  template parameters unchanged). Considered: a static-like member with the object as an ordinary argument (no: every call path of
+  members would change). Fixed on the way: defaulted move assignments copied; an assignment over a member with a user-provided
+  operator= was trivial.
+- GNU complex types as far as std::complex<long double>'s members need (parts, a list, op= by a real); generic atomics of a double on its
+  bits; a run-time weak flag; defaults before deduced template parameters; abi_tag.
+- CP344 (a): reap's own-for `:either`: 13 dg files the own sample passes and clang's record does not now pass (read 5,289 → 5,302),
+  completeness 90.99 → 91.04. CP348 (a): runtime_ours takes a list (libsupc++/ and P22's 13 names-exact units); acting once P21 (b) flips.
+- Not built: CP345 (a crt fix, a --full night's), CP347 (waits for CP340's measure), CP349 (designed in the survey; its open point
+  CP361), CP351. library.cpp stays several slices away (CP359).
+
+Records: test/reap/matrix.edn and test/crops/scores.edn recorded again (C++ completeness 91.04, independence 71.30). The survey's "As
+built: cpp-s3" has the measures and the night's commands.
