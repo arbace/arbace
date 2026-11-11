@@ -4693,3 +4693,31 @@ pinned gcc-15.2.0 tarball; P0847R7; [temp.param]/12, [temp.deduct]/5, [basic.loo
 
 Records: test/reap/matrix.edn and test/crops/scores.edn recorded again (C++ completeness 91.04, independence 71.30). The survey's "As
 built: cpp-s3" has the measures and the night's commands.
+
+## 2026-11-11: cpp-s4, C++'s own route: library.cpp's variant and any slices (branch `cpp-s4`, from `mac/cpp-s3` 7d8ef69ba)
+
+Light, by day (.tmp/night12/AGENT-RULES.md; stage 0, the compiler stubs first on PATH, their log empty; no gate). CP359 (a) taken:
+runtime/library.cpp through our route, variant, then any, then <format>. Sources: libstdc++ 15.2's <variant>, <any>, <charconv>,
+<format>, bits/parse_numbers.h, ext/numeric_traits.h, bits/utility.h (the headers the pinned gcc-15.2.0 tarball's libstdc++ installs);
+the Itanium C++ ABI (5.1.4.3's CI2 <base> of an inheriting constructor, 5.1.5.3's Dc and the unresolved names of a dependent
+expression); clang 23.1.5's names as the recorded IR pack cpp-ir-samples has them for library.cpp; [temp.variadic]/5,
+[namespace.udecl]/1, [class.qual]/2, [class.inhctor.init]/1, [class.base.init]/9, [dcl.type.auto.deduct]/5, [conv.integral]/3,
+[temp.pre]/5, [basic.lookup.argdep]/3.4, [temp.deduct.partial]/8 and /11, [temp.deduct.type]/5.1, [basic.type.qualifier]/3,
+[over.best.ics]/4, [dcl.enum]/5. No live clang or g++. CP335 (b) leaves the GNU vector programs to clang's pack: not touched.
+
+- variant's converting constructor by our route (probe v1: every defined name of ours among clang's for library.cpp, every variant name of
+  clang's among ours): pack expansions among the bases and in a using-declaration, a variable template alone in constant text, constant
+  evaluation of local arrays, decltype(auto), qualified template names and casts in constant text, a constant's value as its type holds
+  it, a pack parameter only by a `...` before its name, the parser's skim not ending a template's initializer at a template argument's
+  comma (it had declared a variable `variant` that hid the injected-class-name from the delegating constructors), inheriting
+  constructors through a typedef and transitively with clang's CI2 names, a union's other members left uninitialized.
+- any (probe a1, the same): a dependent variable template's value in a symbolic signature (mangled as written), ADL through a pointer,
+  sizeof of a member, partial ordering with a function parameter pack; a scoped enumeration's earlier enumerators in its initializers.
+- Toward <format>: non-deducible parameters out of deduction, cv on an array's elements, a constraint's satisfaction outside the asking
+  user-defined conversion. library.cpp now stops at <format>'s `_Store` (it stopped at variant); the consteval check of the format
+  string is the big one (CP362). Considered: evaluating the check (a class-object constant evaluator, days) against emitting the stored
+  view alone for the code generator; proposed, not built.
+- The 82 run programs: 69 generated, as before; 68 byte for byte cpp-s3's, opt/unroll1.C's two names now clang's (cv on an array's
+  elements). codegen-gen 154 of 154; C++'s essential read and print pass; reap and crops-score unchanged (no record changed).
+
+CP362-CP364 proposed. The survey's "As built: cpp-s4" has the measures and the night's commands.
