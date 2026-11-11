@@ -1,7 +1,9 @@
 (in-ns 'go.arbace.a64i) (go/file "simdfp.go" :imports [
 
-    ^{:line 3} [big "math/big"]
-    [strings "strings"]])
+
+    ^{:line 4} [math "math"]
+    ^{:line 5} [big "math/big"]
+    ^{:line 6} [strings "strings"]])
 
 ;; Advanced SIMD's FP lanes (doc/asm/ARM64-SURVEY.md, "As built: AR9"; ARS53 (a), then (b)): the vector classes three same
 ;; (FP) and two-register miscellaneous (FP) at single and double precision (4s, 2s, 2d), decoded, lowered from their forms
@@ -13,6 +15,9 @@
 ;; lengthening fcvtn, fcvtl, fcvtxn. Written from the Arm ARM's pseudocode (DDI 0487) by Arbace; no code copied.
 ;; Since AR10 (ARS56 (a)) also the scalar forms of these classes and the by-element multiplies (below, after execSIMDFP),
 ;; written as Go and converted by repr/go's native reader, their hooks in the functions above as converted.
+;; Since AR11 (ARS61 (b)) also fcvtn, fcvtl, fcvtxn (half precision as their narrow type, round to odd) and the fixed-point
+;; conversions scvtf, ucvtf, fcvtzs, fcvtzu with #fbits, vector, scalar and from or into a general register (decodeFPFixed; its
+;; hooks in fp.go's decodeFP, lowerFP, execFP), below after execVELInt, written and converted the same way.
 
 (go/var vf3Names (lit (array ... string) "fmaxnm" "fminnm" "fmaxnmp" "fminnmp" "fmla" "fmls" "fadd" "fsub" "faddp" "fabd" "fmulx" "fmul" "fcmeq" "fcmge" "fcmgt" "facge" "facgt" "fmax" "fmin" "fmaxp" "fminp" "fdiv"))
 
@@ -48,7 +53,10 @@
 
 
 
-^{:go/end 79} (go/func decodeSIMDFP "decodeSIMDFP is the vector FP classes a64i runs; false when the word is not one (the integer classes' decoder goes on).\n" [^uint32 w] :results [Inst string bool]
+^{:go/end 71} (go/func decodeSIMDFP "decodeSIMDFP is the vector FP classes a64i runs; false when the word is not one (the integer classes' decoder goes on).\n" [^uint32 w] :results [Inst string bool]
+  (when [(values in r ok) (decodeVFCVT w)] ok
+    (return in r true))
+
   (when (and (== (bf w 31 31) 0) (== (bf w 10 10) 0) ^:go/paren (or (== (bf w 28 24) 15) ^:go/paren (and (== (bf w 30 30) 1) (== (bf w 28 24) 31))))
     (return (decodeVEL w)))
 
@@ -92,6 +100,9 @@
   (when (or (< (len ops) 2) (> (len ops) 3))
     (return (lit Inst) false))
 
+  (when [(values in ok) (lowerVFCVT m ops)] ok
+    (return in true))
+
   (when [(values in ok) (lowerVEL m ops)] ok
     (return in true))
 
@@ -130,7 +141,10 @@
 
 
 
-^{:go/end 123} (go/func vfName "vfName is the coverage's name: v.fadd.4s, a compare with zero v.fcmeq0.4s.\n" ^string [^{:tag (* Inst)} in]
+^{:go/end 142} (go/func vfName "vfName is the coverage's name: v.fadd.4s, a compare with zero v.fcmeq0.4s.\n" ^string [^{:tag (* Inst)} in]
+  (when (or (== (.-Op in) OpVFCVT) (== (.-Op in) OpVFIX))
+    (return (vfcvtName in)))
+
   (when (== (.-Op in) OpVEL)
     (return (velName in)))
 
@@ -149,6 +163,7 @@
 
   (when (<= (.-Sys in) 4)
     (return (+ "v." (aget vf2Names (.-Sys in)) "0." (arr (.-Size in) (.-Sf in)))))
+
   (+ "v." (aget vf2Names (.-Sys in)) "." (arr (.-Size in) (.-Sf in))))
 
 
@@ -254,7 +269,7 @@
 
 
 
-^{:go/end 255} (go/method execSIMDFP "execSIMDFP executes a vector FP instruction lane by lane (the operands read before the destination is written).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+^{:go/end 293} (go/method execSIMDFP "execSIMDFP executes a vector FP instruction lane by lane (the operands read before the destination is written).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
   (when (and (== (.-Op in) OpVEL) (< (.-Sys in) velFP))
     (.execVELInt c in)
     (return))
@@ -262,9 +277,17 @@
   (when (not (.fpCheck c in))
     (return))
 
+  (when (== (.-Op in) OpVFCVT)
+    (.execVFCVT c in)
+    (return))
+
+  (when (== (.-Op in) OpVFIX)
+    (.execVFIX c in)
+    (return))
+
   (let [t (fmtOf (.-Size in))
-      ^{:line 232} e (.-bits t)
-      ^{:line 233} n (/ 64 (conv int e))]
+      ^{:line 263} e (.-bits t)
+      ^{:line 264} n (/ 64 (conv int e))]
     (when (.-Sf in)
       (set! n (/ 128 (conv int e))))
 
@@ -276,7 +299,7 @@
       (return))
 
     (let [(values a b d) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)) (aget (.-Q c) (.-Rd in)))
-        ^{:line 238 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+        ^{:line 276 :tag (array 2 uint64)} r (zero (array 2 uint64))]
       (for [i 0] (< i n) (inc! i)
         (let [^uint64 x (zero uint64)]
           (if (== (.-Op in) OpVF2)
@@ -627,6 +650,250 @@
             (setLane (addr r) i (* 2 e) (bit-and p (emask (* 2 e))))))
 
         (aset (.-Q c) (.-Rd in) r)))))
+
+(go/var ^{:doc "AR11 (ARS61 (b)): the FP conversions between the lanes' sizes (fcvtn, fcvtl, fcvtxn) and the fixed-point ones (scvtf,\nucvtf, fcvtzs, fcvtzu with #fbits: vector, scalar, and from or into a general register). OpVFCVT's Sys: 0 fcvtn, 1 fcvtl, 2\nfcvtxn; its Size the wider type's (2: half and single, 3: single and double), Sf the 2 form (the upper half). OpVFIX's Sys:\nvfixNames' index; Imm the fraction bits.\n"} vfcvtNames (lit (array ... string) "fcvtn" "fcvtl" "fcvtxn"))
+
+(go/var vfixNames (lit (array ... string) "scvtf" "ucvtf" "fcvtzs" "fcvtzu"))
+
+(go/var ^{:doc "halfFmt is IEEE half precision (FPCR.AHP clear), the narrow type of fcvtn's and fcvtl's 4s.\n"} halfFmt (lit fpt 16 5 10 -14))
+
+^{:go/end 644} (go/func halfValue "halfValue is a finite half's value (exactly).\n" ^float64 [^uint64 b]
+  (let [(values e f) (values (bit-and (>> b 10) 31) (bit-and b 1023))
+      ^{:line 636} v (math/Ldexp (conv float64 f) -24)]
+    (when (!= e 0)
+      (set! v (math/Ldexp (conv float64 (bit-or f 1024)) (- (conv int e) 25))))
+
+    (when (== (bit-and (>> b 15) 1) 1)
+      (set! v (- v)))
+
+    ^{:line 643} v))
+
+^{:go/end 657} (go/func halfBits "halfBits is the half of a value a half represents exactly (not a zero).\n" ^uint64 [^float64 f]
+  (let [s (conv uint64 0)]
+    (when (math/Signbit f)
+      (set! (values s f) (values (<< 1 15) (- f))))
+
+    (let [(values m e) (math/Frexp f)]
+      (when (<= (+ e 14) 0)
+        (return (bit-or s (conv uint64 (math/Ldexp f 24)))))
+
+      (bit-or s (<< (conv uint64 (+ e 14)) 10) (- (conv uint64 (math/Ldexp m 11)) 1024)))))
+
+^{:go/end 671} (go/func roundOdd "roundOdd is r (truncated to p bits, inexact) made odd: its last bit set, away from zero when it was clear (round to odd).\n" ^{:tag (* big/Float)} [^{:tag (* big/Float)} r ^int p]
+  (let [e (.MantExp r nil)
+      (values z _) (.Int (.SetMantExp (hp) r (- p e)) nil)]
+    (when (== (.Bit z 0) 0)
+      (if (< (.Sign z) 0)
+        (.Sub z z (big/NewInt 1))
+
+        (.Add z z (big/NewInt 1))))
+
+
+    (.SetMantExp (.SetPrec (new big/Float) (conv uint p)) (.SetInt (.SetPrec (new big/Float) (conv uint p)) z) (- e p))))
+
+^{:go/end 686} (go/func fixedBits "fixedBits is a fixed-point conversion form's fraction bits (its third operand; 0 without one), 1 to the register's width.\n" ^int64 [^string m ^{:tag (slice (* Sx))} ops ^bool x]
+  (when (< (len ops) 3)
+    (return 0))
+
+  (let [(values fb w) (values (value (aget ops 2)) (conv int64 32))]
+    (when x
+      (set! w 64))
+
+    (when (or (< fb 1) (> fb w))
+      (ferr "%s's fraction bits %d" m fb))
+
+    ^{:line 685} fb))
+
+^{:go/end 705} (go/func decodeFPFixed "decodeFPFixed is the conversions between FP and fixed-point (sf 0 S 11110 ftype 0 rmode opcode scale Rn Rd): scvtf, ucvtf\nfrom a general register and fcvtzs, fcvtzu into one, with 64 - scale fraction bits.\n" [^uint32 w] :results [Inst string]
+  (let [(values sf ft scale) (values (== (bf w 31 31) 1) (bf w 23 22) (bf w 15 10))
+      ^{:line 692} op (bf w 20 16)
+      (values rd rn) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)))]
+    (when (or (!= (bf w 29 29) 0) (== ft 2) ^:go/paren (and (not sf) (< scale 32)) ^:go/paren (and (!= op 2) (!= op 3) (!= op 24) (!= op 25)))
+      (return (lit Inst) undef))
+
+    (when (== ft 3)
+      (return (lit Inst) ":unimplemented fp-half"))
+
+    (let [fb (conv int64 (- 64 scale))]
+      (when (<= op 3)
+        (return (lit Inst :Op OpCVTF :Sf sf :Size (+ (conv uint8 ft) 2) :Rd rd :Rn rn :Signed (== op 2) :Imm fb) ""))
+
+      (return (lit Inst :Op OpFCVTI :Sf sf :Size (+ (conv uint8 ft) 2) :Rd rd :Rn rn :Signed (== op 24) :Sys 3 :Imm fb) ""))))
+
+^{:go/end 756} (go/func decodeVFCVT "decodeVFCVT is fcvtn, fcvtl, fcvtxn (two-register miscellaneous, opcodes 10110 and 10111; fcvtxn's scalar too) and the\nfixed-point scvtf, ucvtf, fcvtzs, fcvtzu (shift by immediate, opcodes 11100 and 11111, vector and scalar); false when the\nword is another class (the FP16 ones :unimplemented simd).\n" [^uint32 w] :results [Inst string bool]
+  (let [(values q u scalar) (values (== (bf w 30 30) 1) (bf w 29 29) (== (bf w 28 28) 1))]
+    (when (or (!= (bf w 31 31) 0) ^:go/paren (and scalar (not q)))
+      (return (lit Inst) "" false))
+
+    (let [(values rd rn) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)))]
+      (when (and (== (bf w 27 24) 14) (== (bf w 23 23) 0) (== (bf w 21 17) 16) (== (bf w 11 10) 2))
+        (let [(values opc sz) (values (bf w 16 12) (bf w 22 22))]
+          (switch
+            (case [(and (== opc 22) (== u 0) (not scalar))]
+              (return (lit Inst :Op OpVFCVT :Sf q :Size (+ (conv uint8 sz) 2) :Rd rd :Rn rn) "" true))
+            (case [(and (== opc 23) (== u 0) (not scalar))]
+              (return (lit Inst :Op OpVFCVT :Sf q :Size (+ (conv uint8 sz) 2) :Rd rd :Rn rn :Sys 1) "" true))
+            (case [(and (== opc 22) (== u 1))]
+              (when (== sz 0)
+                (return (lit Inst) undef true))
+
+              (return (lit Inst :Op OpVFCVT :Sf (and q (not scalar)) :S scalar :Size 3 :Rd rd :Rn rn :Sys 2) "" true)))
+
+          (return (lit Inst) "" false)))
+
+      (when (and (== (bf w 27 23) 30) (== (bf w 10 10) 1) (!= (bf w 22 19) 0))
+        (let [(values opc immh) (values (bf w 15 11) (bf w 22 19))]
+          (when (and (!= opc 28) (!= opc 31))
+            (return (lit Inst) "" false))
+
+          (let [k u]
+            (when (== opc 31)
+              (set! k + 2))
+
+            (let [sz (conv uint8 2)]
+              (switch
+                (case [(>= immh 8)]
+                  (set! sz 3))
+                (case [(== immh 1)]
+                  (return (lit Inst) undef true))
+                (case [(< immh 4)]
+                  (return (lit Inst) unimpSIMD true)))
+
+              (when (and (== sz 3) (not q) (not scalar))
+                (return (lit Inst) undef true))
+
+              (let [fb (- (<< (conv int64 16) sz) (conv int64 (bit-or (<< immh 3) (bf w 18 16))))]
+                (return (lit Inst :Op OpVFIX :Sf (and q (not scalar)) :S scalar :Size sz :Rd rd :Rn rn :Imm fb :Sys k) "" true))))))
+
+      (return (lit Inst) "" false))))
+
+^{:go/end 798} (go/func lowerVFCVT "lowerVFCVT is their forms: fcvtn v0.2s, v1.2d; fcvtl2 v0.4s, v1.8h; fcvtxn s0, d1; scvtf v0.4s, v1.4s, #3; fcvtzu d0, d1, #64.\n" [^string m ^{:tag (slice (* Sx))} ops] :results [Inst bool]
+  (let [base (strings/TrimSuffix m "2")
+      ^{:line 761} two (!= base m)
+      (values d dok) (asVec (aget ops 0))
+      (values n nok) (asVec (aget ops 1))]
+    (when (or (not dok) (not nok))
+      (return (lit Inst) false))
+
+    (when [k (nameIndex (subslice vfcvtNames) base)] (and (>= k 0) (== (len ops) 2))
+      (when (and (== (.-kind d) \s) (== (.-kind n) \s) (== k 2) (not two))
+        (when (or (!= (.-size d) 2) (!= (.-size n) 3))
+          (ferr "fcvtxn of %s from %s" (conv string (aget esz (.-size d))) (conv string (aget esz (.-size n)))))
+
+        (return (lit Inst :Op OpVFCVT :S true :Size 3 :Rd (.-n d) :Rn (.-n n) :Sys 2) true))
+
+      (when (or (!= (.-kind d) \v) (!= (.-kind n) \v))
+        (return (lit Inst) false))
+
+      (let [(values wide narrow) (values n d)]
+        (when (== k 1)
+          (set! (values wide narrow) (values d n)))
+
+        (when (or (< (.-size wide) 2) (!= (.-size wide) (+ (.-size narrow) 1)) (not (.-q wide)) (!= (.-q narrow) two) ^:go/paren (and (== k 2) (!= (.-size wide) 3)))
+          (ferr "%s of %s from %s" m (arr (.-size d) (.-q d)) (arr (.-size n) (.-q n))))
+
+        (return (lit Inst :Op OpVFCVT :Sf two :Size (.-size wide) :Rd (.-n d) :Rn (.-n n) :Sys (conv uint32 k)) true)))
+
+    (let [k (nameIndex (subslice vfixNames) m)]
+      (when (or (< k 0) (!= (len ops) 3) (isVecOrReg (aget ops 2)) (!= (.-kind d) (.-kind n)) ^:go/paren (and (!= (.-kind d) \v) (!= (.-kind d) \s)) (!= (.-size d) (.-size n)) (!= (.-q d) (.-q n)) (< (.-size d) 2))
+        (return (lit Inst) false))
+
+      (when (and (== (.-kind d) \v) (== (.-size d) 3) (not (.-q d)))
+        (ferr "%s of 1d" m))
+
+      (let [fb (value (aget ops 2))]
+        (when (or (< fb 1) (> fb (<< (conv int64 8) (.-size d))))
+          (ferr "%s's fraction bits %d" m fb))
+
+        (return (lit Inst :Op OpVFIX :Sf (and (== (.-kind d) \v) (.-q d)) :S (== (.-kind d) \s) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Imm fb :Sys (conv uint32 k)) true)))))
+
+^{:go/end 817} (go/func vfcvtName "vfcvtName is their coverage's names: v.fcvtn.4h, v.fcvtl2.2s, v.fcvtxn.s, v.scvtf.fix.4s, v.fcvtzu.fix.d.\n" ^string [^{:tag (* Inst)} in]
+  (when (== (.-Op in) OpVFIX)
+    (let [a (arr (.-Size in) (.-Sf in))]
+      (when (.-S in)
+        (set! a (conv string (aget esz (.-Size in)))))
+
+      (return (+ "v." (aget vfixNames (.-Sys in)) ".fix." a))))
+
+  (when (.-S in)
+    (return (+ "v." (aget vfcvtNames (.-Sys in)) ".s")))
+
+  (let [two ""]
+    (when (.-Sf in)
+      (set! two "2"))
+
+    (+ "v." (aget vfcvtNames (.-Sys in)) two "." (arr (- (.-Size in) 1) false))))
+
+^{:go/end 862} (go/method execVFCVT "execVFCVT executes fcvtn, fcvtl and fcvtxn: a narrowing writes the lower half (the 2 form the upper, the lower kept; the\nscalar fcvtxn one lane, the rest cleared), a lengthening reads the lower half (the 2 form the upper). The half forms refuse\nFPCR.AHP (the alternative half precision a64i does not model).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values wide narrow) (values (fmtOf (.-Size in)) (fmtOf 2))]
+    (when (== (.-Size in) 2)
+      (set! narrow halfFmt)
+      (when (== (bit-and (>> (.-FPCR c) 26) 1) 1)
+        (set! (.-PC c) - 4)
+        (.raise c SIGILL (+ ":unimplemented fpcr-ahp " (fpName in)))
+        (return)))
+
+
+    (let [(values we ne) (values (.-bits wide) (.-bits narrow))
+        (values a d) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rd in)))
+        ^{:line 834 :tag (array 2 uint64)} r (zero (array 2 uint64))
+        ^{:line 835} n (conv int (/ 64 ne))]
+      (when (== (.-Sys in) 1)
+        (let [off 0]
+          (when (.-Sf in)
+            (set! off n))
+
+          (for [i 0] (< i n) (inc! i)
+            (setLane (addr r) i we (.fpConvert c narrow wide (lane a (+ off i) ne))))
+
+          (aset (.-Q c) (.-Rd in) r)
+          (return)))
+
+      (let [mode (.rmode c)]
+        (when (== (.-Sys in) 2)
+          (set! mode 5))
+
+        (when (.-S in)
+          (set! n 1))
+
+        (let [off 0]
+          (when (.-Sf in)
+            (set! (values (aget r 0) off) (values (aget d 0) n)))
+
+          (for [i 0] (< i n) (inc! i)
+            (setLane (addr r) (+ off i) ne (.fpConvertMode c wide narrow (lane a i we) mode)))
+
+          (aset (.-Q c) (.-Rd in) r))))))
+
+^{:go/end 894} (go/method execVFIX "execVFIX executes the fixed-point conversions lane by lane: FixedToFP at FPCR's rounding mode, FPToFixed towards zero.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [t (fmtOf (.-Size in))
+      ^{:line 867} e (.-bits t)
+      ^{:line 868} n (/ 64 (conv int e))]
+    (when (.-Sf in)
+      (set! n (/ 128 (conv int e))))
+
+    (when (.-S in)
+      (set! n 1))
+
+    (let [a (aget (.-Q c) (.-Rn in))
+        ^{:line 876 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+      (for [i 0] (< i n) (inc! i)
+        (let [x (lane a i e)
+            ^{:line 879 :tag uint64} v (zero uint64)]
+          (if (< (.-Sys in) 2)
+            (let [f (hp)]
+              (if (== (.-Sys in) 0)
+                (.SetInt64 f (>> (conv int64 (<< x (- 64 e))) (- 64 e)))
+
+                (.SetUint64 f x))
+
+              (set! v (.rounded c t (.SetMantExp f f (- (conv int (.-Imm in)))))))
+
+            (set! v (.fpToFixed c t x (conv int (.-Imm in)) 3 e (== (.-Sys in) 2))))
+
+          (setLane (addr r) i e v)))
+
+      (aset (.-Q c) (.-Rd in) r))))
 
 
 (go/var _ big/NewFloat)

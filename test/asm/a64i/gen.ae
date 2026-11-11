@@ -299,7 +299,8 @@
 
 (def ^:private fpd {:bits 64 :fb 52 :eb 11 :min-normal Double/MIN_NORMAL})
 (def ^:private fps {:bits 32 :fb 23 :eb 8 :min-normal (double Float/MIN_NORMAL)})
-(defn- ft [t] (if (= t :d) fpd fps))
+(def ^:private fph {:bits 16 :fb 10 :eb 5 :min-normal (Math/pow 2.0 -14)})
+(defn- ft [t] (case t :d fpd :h fph fps))
 
 (defn- f-exp ^long [t ^long b] (bit-and (unsigned-bit-shift-right b (:fb (ft t))) (ones (:eb (ft t)))))
 (defn- f-frac ^long [t ^long b] (bit-and b (ones (:fb (ft t)))))
@@ -554,12 +555,17 @@
 (defn- rat-bits
   "The bits of the type's value NEG * M * 2^Q (M*2^Q exactly representable)."
   ^long [t neg ^BigInteger m ^long q]
+  (if (= t :h)
+    ;; AR11: a half's bits from its fields (m below 2^11 after a carry's renormalisation; a subnormal's q is -24)
+    (let [m (.longValue m) [m q] (if (>= m 2048) [(bit-shift-right m 1) (inc q)] [m q])]
+      (bit-or (if neg 0x8000 0) (if (< m 1024) m (bit-or (bit-shift-left (+ q 25) 10) (- m 1024)))))
   (let [v (java.math.BigDecimal. m) v (if (neg? q) (.divide v (.pow (java.math.BigDecimal. 2) (int (- q)))) (.multiply v (.pow (java.math.BigDecimal. 2) (int q))))
         x (if (= t :d) (.doubleValue v) (double (.floatValue v)))]
-    (f-bits t (if neg (- x) x))))
+    (f-bits t (if neg (- x) x)))))
 
 (defn round-rat
-  "FPRound of the exact non-zero value NEG * NUM/DEN to the type under MODE (:n :p :m :z): [RESULT FPSR]."
+  "FPRound of the exact non-zero value NEG * NUM/DEN to the type under MODE (:n :p :m :z, AR11's :o: round to odd, FCVTXN's):
+  [RESULT FPSR]."
   [t neg ^BigInteger num ^BigInteger den mode]
   (let [{:keys [fb eb]} (ft t) bias (dec (bit-shift-left 1 (dec (long eb)))) emin (- 1 bias) emax bias
         e0 (- (.bitLength num) (.bitLength den))
@@ -571,12 +577,13 @@
         inexact (not (zero? (.signum ^BigInteger r)))
         up (and inexact (case mode
                           :n (let [c (.compareTo (.shiftLeft ^BigInteger r 1) ^BigInteger dd)] (or (pos? c) (and (zero? c) (.testBit ^BigInteger m 0))))
-                          :z false :p (not neg) :m neg))
+                          :z false :o false :p (not neg) :m neg))
         m (if up (.add ^BigInteger m BigInteger/ONE) m)
+        m (if (and inexact (= mode :o)) (.setBit ^BigInteger m 0) m)
         ;; the largest finite: (2^(fb+1) - 1) * 2^(emax - fb)
         maxm (.subtract (.shiftLeft BigInteger/ONE (int (inc (long fb)))) BigInteger/ONE)
         over (> (+ (dec (.bitLength ^BigInteger m)) q) emax)]
-    (cond over [(if (case mode :n true :z false :p (not neg) :m neg) (f-inf t neg) (rat-bits t neg maxm (- emax (long fb)))) (bit-or OFC IXC)]
+    (cond over [(if (case mode :n true (:z :o) false :p (not neg) :m neg) (f-inf t neg) (rat-bits t neg maxm (- emax (long fb)))) (bit-or OFC IXC)]
           (zero? (.signum ^BigInteger m)) [(f-zero t neg) (if inexact (bit-or IXC UFC) 0)]
           :else [(rat-bits t neg m q) (cond (not inexact) 0 tiny (bit-or IXC UFC) :else IXC)])))
 
@@ -1741,6 +1748,147 @@
 (def vel-families
   [["neon-el" "NEON's next slice: the scalar forms of the FP classes (fabd, fmulx, fcmeq, fcmge, fcmgt, facge, facgt; the compares with zero, fcvt[npmza][su], scvtf, ucvtf; faddp, fmaxp, fminp, fmaxnmp, fminnmp) on s and d, and the by-element multiplies (mul, mla, mls; s/umull, s/umlal, s/umlsl and their 2 forms; fmla, fmls, fmul, fmulx, vector and scalar)" vel-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; AR11 (ARS61 (b)): NEON's conversions: fcvtn and fcvtn2 (2d to 2s/4s, 4s to 4h/8h), fcvtl and fcvtl2 (the reverse), fcvtxn and
+;; fcvtxn2 (2d to 2s/4s, round to odd) and fcvtxn's scalar (d to s), and the fixed-point conversions scvtf, ucvtf, fcvtzs, fcvtzu
+;; with #fbits, vector (2s, 4s, 2d), scalar (s, d) and from or into a general register (w, x), each at FPCR 0 and under FPCR's
+;; directed rounding modes and DN (the stub setting FPCR, as neon-fp-rm's); on neon's setup (v0 the mix of v1 and v2: the 2 forms
+;; of the narrowings keep its lower half). The model: FPConvert between half, single and double by round-rat (half's bits from
+;; its fields; FPCR.AHP clear), round to odd as :o, FixedToFP and FPToFixed (towards zero, saturated) on BigIntegers.
+
+(defn- h-val
+  "A finite half's value."
+  ^double [^long b]
+  (let [e (f-exp :h b) f (f-frac :h b)
+        v (if (zero? e) (Math/scalb (double f) (int -24)) (Math/scalb (double (+ 1024 f)) (int (- e 25))))]
+    (if (f-sign :h b) (- v) v)))
+
+(defn- fval ^double [t ^long b] (if (= t :h) (h-val b) (f-val t b)))
+
+(defn fp-convert-x
+  "FPConvert between :h, :s and :d at MODE (:n :p :m :z, or :o, FCVTXN's round to odd) and DN: [RESULT FPSR]."
+  [from to a mode dn?]
+  (dn to dn?
+      (cond (f-nan? from a) (let [d (- (long (:fb (ft from))) (long (:fb (ft to)))) fr (f-frac from a)
+                                  fr (if (pos? d) (unsigned-bit-shift-right fr d) (bit-shift-left fr (- d)))]
+                              [(f-quiet to (bit-or (f-inf to (f-sign from a)) fr)) (if (f-snan? from a) IOC 0)])
+            (f-inf? from a) [(f-inf to (f-sign from a)) 0]
+            (f-zero? from a) [(f-zero to (f-sign from a)) 0]
+            :else (round-bd to (bd (fval from a)) mode))))
+
+(defn fp-from-fixed
+  "FixedToFP: the E-bit integer X (signed or not) over 2^FBITS rounded to T at MODE: [RESULT FPSR]."
+  [t ^long x ^long e ^long fbits signed mode]
+  (let [n (if signed (BigInteger/valueOf (sext x e)) (.and (BigInteger/valueOf x) (.subtract (.shiftLeft BigInteger/ONE (int e)) BigInteger/ONE)))]
+    (if (zero? (.signum n))
+      [(f-zero t false) 0]
+      (round-rat t (neg? (.signum n)) (.abs n) (.shiftLeft BigInteger/ONE (int fbits)) mode))))
+
+(defn fp-to-fixed
+  "FPToFixed towards zero: T's A times 2^FBITS as a W-bit integer (signed or not), saturated (IOC; a NaN 0), IXC when inexact:
+  [RESULT FPSR]."
+  [t a ^long fbits ^long w signed]
+  (if (f-nan? t a)
+    [0 IOC]
+    (let [lo (if signed (.negate (.shiftLeft BigInteger/ONE (int (dec w)))) BigInteger/ZERO)
+          hi (.subtract (.shiftLeft BigInteger/ONE (int (if signed (dec w) w))) BigInteger/ONE)
+          [n inexact] (if (f-inf? t a)
+                        [(if (f-sign t a) (.subtract lo BigInteger/ONE) (.add hi BigInteger/ONE)) false]
+                        (let [e (.multiply (bd (f-val t a)) (java.math.BigDecimal. (.shiftLeft BigInteger/ONE (int fbits)))) r (bd-round e :z)]
+                          [(.toBigInteger r) (not (zero? (.compareTo r e)))]))
+          [n fl] (cond (neg? (.compareTo ^BigInteger n lo)) [lo IOC] (pos? (.compareTo ^BigInteger n hi)) [hi IOC] inexact [n IXC] :else [n 0])]
+      [(.longValue (.and ^BigInteger n (.subtract (.shiftLeft BigInteger/ONE (int w)) BigInteger/ONE))) fl])))
+
+(defn- fpcr-stub
+  "A case's stub: INSN, under FPCR (set before, cleared after) when not 0."
+  [^long fpcr insn]
+  (if (zero? fpcr)
+    (str insn "\n")
+    (str "mov\tx10, #0x" (Long/toHexString fpcr) "\n\tmsr\tfpcr, x10\n\t" insn "\n\tmsr\tfpcr, xzr\n")))
+
+(defn cvt-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        sp {:h [0 0x8000 0x3c00 0xbc00 0x7c00 0xfc00 0x7e00 0x7e15 0x7c01 0xfd33 1 0x8001 0x3ff 0x400 0x7bff 0xfbff 0x3555 0x4248]
+            :s (vec (fp-specials :s)) :d (vec (fp-specials :d))}
+        modes (cons [:n 0 false] rm-modes)
+        ;; a value of T to convert to NT: a special, any bits, an exponent across NT's range (its subnormals, underflow to zero,
+        ;; overflow), a tie at NT's precision, a value exact in NT, a value near 1
+        cv (fn [t nt]
+             (let [{:keys [fb eb bits]} (ft t) {nfb :fb neb :eb} (ft nt)
+                   bias (dec (bit-shift-left 1 (dec (long eb)))) nbias (dec (bit-shift-left 1 (dec (long neb))))
+                   sh (- (long fb) (long nfb)) x (nx) sg (if (odd? (unsigned-bit-shift-right x 7)) (bit-shift-left 1 (dec (long bits))) 0)
+                   ex (+ bias (- (mod (unsigned-bit-shift-right x 9) (+ (* 2 nbias) (long nfb) 5)) (+ nbias (long nfb) 2)))]
+               (case (mod x 6)
+                 0 (pick x (sp t))
+                 1 (bit-and (nx) (ones bits))
+                 2 (bit-or sg (bit-shift-left ex (long fb)) (bit-and (nx) (ones fb)))
+                 3 (bit-or sg (bit-shift-left ex (long fb)) (bit-shift-left (bit-and (nx) (ones nfb)) sh) (bit-shift-left 1 (dec sh)))
+                 4 (bit-or sg (bit-shift-left ex (long fb)) (bit-shift-left (bit-and (nx) (ones nfb)) sh))
+                 (bit-or sg (bit-shift-left (+ bias (- (mod (nx) 40) 20)) (long fb)) (bit-and (nx) (ones fb))))))
+        nv (fn [t] (let [x (nx)] (if (zero? (mod x 3)) (pick x (sp t)) (bit-and (nx) (ones (:bits (ft t)))))))
+        ;; an integer lane: any bits, or a small one (sign-extended)
+        iv (fn [^long e] (let [x (nx)] (bit-and (if (odd? x) (nx) (bit-shift-right (nx) (+ 40 (mod x 20)))) (ones e))))
+        ;; an FP lane to convert with FB fraction bits: a special, any bits, a value of magnitude 2^-(fb+2) to 2^(e-fb+1)
+        fx (fn [t ^long e ^long fb]
+             (let [x (nx)]
+               (case (mod x 4)
+                 0 (pick x (sp t))
+                 1 (bit-and (nx) (ones e))
+                 (f-bits t (* (if (odd? (unsigned-bit-shift-right x 5)) -1.0 1.0)
+                              (+ 1.0 (/ (double (bit-and (unsigned-bit-shift-right (nx) 11) 0xfffff)) 1048576.0))
+                              (Math/pow 2.0 (double (- (mod (unsigned-bit-shift-right x 9) (+ e 4)) fb 2))))))))
+        fbits (fn [^long e i] (case (mod (long i) 5) 0 e 1 1 (inc (mod (nx) e))))
+        tt (fn [t] (if (= t :d) "d" "s"))]
+    (concat
+     ;; fcvtn, fcvtxn and their 2 forms
+     (for [[base wa na] [["fcvtn" "2d" "2s"] ["fcvtn" "4s" "4h"] ["fcvtxn" "2d" "2s"]] two [false true] [mode fpcr dn?] modes _ (range 6)
+           :let [wt (if (= wa "2d") :d :s) nt (if (= wt :d) :s :h) we (ar-e wa) ne (ar-e na) n (ar-n wa)
+                 v1 (vpack (for [_ (range n)] (cv wt nt)) we) v2 [(nx) (nx)] d (v0-of v1 v2)
+                 rs (for [i (range n)] (fp-convert-x wt nt (vlane v1 i we) (if (= base "fcvtxn") :o mode) dn?))
+                 p (first (vpack (map first rs) ne))
+                 [lo hi] (if two [(first d) p] [p 0])]]
+       (ncase (fpcr-stub fpcr (str base (when two "2") "\tv0." (if two (str (* 2 n) (subs na 1)) na) ", v1." wa)) v1 v2
+              [lo (bit-xor (long hi) (long (reduce bit-or 0 (map second rs))))]))
+     ;; fcvtxn's scalar
+     (for [[mode fpcr dn?] modes _ (range 8)
+           :let [v1 (vpack [(cv :d :s) (cv :d :s)] 64) v2 [(nx) (nx)] [r fl] (fp-convert-x :d :s (vlane v1 0 64) :o dn?)]]
+       (ncase (fpcr-stub fpcr "fcvtxn\ts0, d1") v1 v2 [r fl]))
+     ;; fcvtl and its 2 form
+     (for [[na wa] [["2s" "2d"] ["4h" "4s"]] two [false true] [mode fpcr dn?] modes _ (range 6)
+           :let [wt (if (= wa "2d") :d :s) nt (if (= wt :d) :s :h) we (ar-e wa) ne (ar-e na) n (ar-n wa)
+                 v1 (vpack (for [_ (range (* 2 n))] (nv nt)) ne) v2 [(nx) (nx)]
+                 rs (for [i (range n)] (fp-convert-x nt wt (vlane v1 (+ i (if two n 0)) ne) mode dn?))
+                 [lo hi] (vpack (map first rs) we)]]
+       (ncase (fpcr-stub fpcr (str "fcvtl" (when two "2") "\tv0." wa ", v1." (if two (str (* 2 n) (subs na 1)) na))) v1 v2
+              [lo (bit-xor (long hi) (long (reduce bit-or 0 (map second rs))))]))
+     ;; the fixed-point conversions, vector
+     (for [op ["scvtf" "ucvtf" "fcvtzs" "fcvtzu"] a ["2s" "4s" "2d"] [mode fpcr dn?] modes i (range 5)
+           :let [e (ar-e a) n (ar-n a) t (if (= e 64) :d :s) fb (fbits e i) to? (str/starts-with? op "fcvt")
+                 sg (#{"scvtf" "fcvtzs"} op)
+                 v1 (vpack (for [_ (range (quot 128 e))] (if to? (fx t e fb) (iv e))) e) v2 [(nx) (nx)]
+                 rs (for [k (range n)] (let [x (vlane v1 k e)] (if to? (fp-to-fixed t x fb e sg) (fp-from-fixed t x e fb sg mode))))
+                 [lo hi] (half (vpack (map first rs) e) (second (arrs a)))]]
+       (ncase (fpcr-stub fpcr (str op "\tv0." a ", v1." a ", #" fb)) v1 v2 [lo (bit-xor (long hi) (long (reduce bit-or 0 (map second rs))))]))
+     ;; scalar
+     (for [op ["scvtf" "ucvtf" "fcvtzs" "fcvtzu"] t [:s :d] [mode fpcr dn?] modes i (range 3)
+           :let [e (if (= t :d) 64 32) fb (fbits e i) to? (str/starts-with? op "fcvt") sg (#{"scvtf" "fcvtzs"} op)
+                 v1 (vpack (for [_ (range (quot 128 e))] (if to? (fx t e fb) (iv e))) e) v2 [(nx) (nx)]
+                 x (vlane v1 0 e) [r fl] (if to? (fp-to-fixed t x fb e sg) (fp-from-fixed t x e fb sg mode))]]
+       (ncase (fpcr-stub fpcr (str op "\t" (tt t) "0, " (tt t) "1, #" fb)) v1 v2 [r fl]))
+     ;; from and into a general register (x1 v1's lower half; fcvtz[su]'s result moved from x5 into d0)
+     (for [op ["scvtf" "ucvtf" "fcvtzs" "fcvtzu"] t [:s :d] w [32 64] [mode fpcr dn?] modes i (range 3)
+           :let [e (if (= t :d) 64 32) fb (fbits w i) to? (str/starts-with? op "fcvt") sg (#{"scvtf" "fcvtzs"} op)
+                 g (if (= w 64) "x" "w")
+                 v1 (if to? (vpack (for [_ (range (quot 128 e))] (fx t e fb)) e) [(iv 64) (nx)]) v2 [(nx) (nx)]
+                 [r fl] (if to? (fp-to-fixed t (vlane v1 0 e) fb w sg) (fp-from-fixed t (first v1) w fb sg mode))]]
+       (ncase (fpcr-stub fpcr (if to?
+                                (str op "\t" g "5, " (tt t) "1, #" fb "\n\tfmov\td0, x5")
+                                (str op "\t" (tt t) "0, " g "1, #" fb)))
+              v1 v2 [r fl])))))
+
+(def cvt-families
+  [["neon-cvt" "NEON's conversions: fcvtn, fcvtn2 (2d to 2s/4s, 4s to 4h/8h), fcvtl, fcvtl2, fcvtxn, fcvtxn2 and fcvtxn's scalar (round to odd), and the fixed-point scvtf, ucvtf, fcvtzs, fcvtzu with #fbits (vector, scalar, from or into a general register), at FPCR 0 and under FPCR's directed rounding modes and DN" cvt-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -1796,6 +1944,11 @@
          ;; AR10 (ARS56 (a)): the scalar FP classes and the by-element multiplies
          (for [[i [nm what f]] (map-indexed vector vel-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 800 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR11 (ARS61 (b)): NEON's conversions
+         (for [[i [nm what f]] (map-indexed vector cvt-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 900 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)
