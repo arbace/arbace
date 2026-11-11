@@ -309,6 +309,11 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   `simd-struct.s` (structure loads and stores and FP lanes by hand) in the essential subset (+2 s), `synth-neon-fp-rm` (the FP lanes
   under FPCR, 1,152 cases), and in a64i the scalar FP classes and the by-element multiplies (`synth-neon-el`, 568 cases): a64i 93 of 93,
   coverage 2,129 of 2,129, eval 309, AOT 3,055 / 0 / 13. Proposed ARS61, ARS62. Next: ARS61, ARS62, the VM's rows (ARS55, ARS58).
+  Then `asm-ar11` (from `mac/asm-ar10` `a4f851948`; "As built: AR11"; ARS61 (b), ARS62 (a), the user's): `synth-neon-el-e` (a quarter
+  of synth-neon-el, 142 cases) in the essential subset (+5 to +9 s at night 12's load), and in a64i fcvtn, fcvtl, fcvtxn (half as the
+  narrow type, round to odd) and the fixed-point scvtf, ucvtf, fcvtzs, fcvtzu with #fbits, vector, scalar and general register
+  (`synth-neon-cvt`, 1,000 cases): a64i 95 of 95, coverage 2,176 of 2,176, eval 311, AOT 3,057 / 0 / 13. Proposed ARS63-ARS65. Next:
+  ARS63, ARS64 (the essential time on a quiet host), ARS65, the VM's rows (ARS55, ARS58).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,

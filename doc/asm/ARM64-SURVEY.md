@@ -1446,3 +1446,71 @@ Numbering from ARS61. Each with options, the recommended named; none taken.
 - **ARS62 synth-neon-el in the essential subset.** The scalar FP and by-element forms run only in `--full`'s rotation. (a) a quarter of
   synth-neon-el's cases (142) beside synth-neon-e, about 2 s; (b) the rotation alone. *Recommended: (a)*, as review 1111 (5) did for
   the integer lanes.
+
+## As built: AR11 (2026-11-11; branch `asm-ar11`, from `mac/asm-ar10` `a4f851948`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go, during night 12 (one run at a time, every process under 1.5 GiB,
+MemAvailable checked at 12 GiB or more before each run); arm64 programs run by a64i and, for the synthetic programs' `--record`, by
+qemu-aarch64 11.1.2 user mode (the model's second judge); no LLVM or GNU tool. The user's answers (2026-11-11): ARS61 (b), ARS62 (a),
+ARS62 first. The semantics read again from the Arm ARM (DDI 0487: FCVTN, FCVTL, FCVTXN, the AdvSIMD shift by immediate class's SCVTF,
+UCVTF, FCVTZS, FCVTZU (fixed-point), the conversions between floating-point and fixed-point class, FPConvert, FPRoundBase's
+FPRounding_ODD, FixedToFP, FPToFixed); no code copied.
+
+- **ARS62 (a): `synth-neon-el-e` in the essential subset** (`test/asm/subsets.edn`'s `:a64i`): every fourth case of synth-neon-el (142
+  of 568; `test/asm/a64i/gen.ae`, the same seed), as review 1111 (5)'s synth-neon-e is synth-neon's quarter. qemu-aarch64 equal to the
+  model at `--record`; controls verdict-13 and inject-26. The essential step's time, measured alone at night 12's load (load average
+  30-67, heavier than AR10's 24-25): 92 s and 80 s without it, 101 s and 85 s with it (two pairs, +5 to +9 s, 6-10%; about +4 to +7 s
+  on a quiet host by AR10's ratio, more than ARS62's estimate of 2 s).
+- **ARS61 (b): NEON's conversions in a64i** (`go/arbace/a64i/simdfp.ae`, with hooks in `fp.ae` and `simd.ae`; written as Go in a copy
+  of the light driver's printed module, compiled and run there first, then converted by repr/go's native reader, `REPR_GO_JOBS=1`, 240 s,
+  peak 1.09 GiB under a watchdog that would have stopped it at 1.45 GiB; the new functions and the changed ones without comments taken
+  from the conversion, `decodeFP`'s, `round`'s, `lowerSIMDFP`'s hooks and `simd.ae`'s (`OpVFCVT`, `OpVFIX`, their names, `simdName`'s and
+  `execSIMD`'s dispatch) by hand so the files' comments stay):
+  - fcvtn and fcvtn2 (2d to 2s/4s, 4s to 4h/8h), fcvtl and fcvtl2 (the reverse), fcvtxn and fcvtxn2 (2d to 2s/4s) and fcvtxn's scalar (d
+    to s): `OpVFCVT`, Size the wider type's, Sf the 2 form (the narrowing's lower half kept, the lengthening's source the upper half).
+    Half precision is the narrow type of the 4s forms only (`halfFmt`, its exact value and bits; FPCR.AHP refused `:unimplemented
+    fpcr-ahp`); fcvtxn's sz 0 undefined. Round to odd is FPRound's mode 5 (`rint`'s and `round`'s: truncated, the last bit set when
+    inexact, the largest finite on overflow), FPCR's mode ignored, DN honoured; `fpConvert` is `fpConvertMode` at FPCR's mode.
+  - the fixed-point conversions: `OpVFIX` (Sys scvtf, ucvtf, fcvtzs, fcvtzu; Imm the fraction bits, `2*esize - immh:immb`) on 2s, 4s, 2d
+    and the scalar s and d (immh 001x, FP16, `:unimplemented simd`; 0001 and a 2d's Q clear undefined); from and into a general register
+    (`decodeFPFixed`, the class `sf 0 S 11110 ftype 0 rmode opcode scale`: `OpCVTF` and `OpFCVTI` with Imm, `64 - scale` fraction bits,
+    sf 0 with scale<5> clear undefined, ftype 11 `:unimplemented fp-half`). FixedToFP scales the integer by 2^-fbits before FPRound at
+    FPCR's mode; FPToFixed (`fpToFixed`, `fpToInt` its zero-bits case) scales by 2^fbits, rounds towards zero and saturates (IOC).
+  - Coverage names `v.fcvtn.4h`, `v.fcvtl2.2s`, `v.fcvtxn.s`, `v.scvtf.fix.4s`, `v.fcvtzu.fix.d`, `scvtf.fix.s.w`, `fcvtzs.fix.x.d` (47
+    new: 31 simd, 16 fp). The synthetic program `synth-neon-cvt` (1,000 cases; neon's setup, each case at FPCR 0 and under RMode 1-3 and
+    DN, the stub setting FPCR; the narrowings' sources drawn across the narrow type's range: its subnormals, underflow, overflow, ties
+    at its precision; the fixed-point ones' fraction bits 1 to the width, values near saturation): gen.ae's model `fp-convert-x` (half,
+    single, double by round-rat, which gained the half's bits and `:o`), `fp-from-fixed`, `fp-to-fixed`. qemu-aarch64 agreed with the
+    model on the first `--record`, a64i (eval, AOT and the forms check) on its first run. The light driver printed from the forms
+    compiles to the written Go (gofmt'd, comments aside, one parameter list grouped differently) and claims the same 2,176 names.
+    Controls verdict-14, forms-8, inject-27 (simd:x), inject-28 (fp:x: a general-register conversion's).
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval and AOT | 93 / 93 | **95 / 95** (22 synthetic programs, 23,711 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,129 of 2,129 (fp 118, simd 1,476) | **2,176 of 2,176** (fp 134, simd 1,507) |
+| controls (`test/asm/controls-a64i.txt`) | 55 | **61** |
+| `--essential` | 76 programs, 17 controls judged | **77** (with synth-neon-el-e), 19 controls judged |
+| the eval cell `[:asm-arm64 :eval]` | 309 / 0 / 0 | **311 / 0 / 0** |
+| the AOT cell `[:asm-arm64 :aot]` | 3,055 / 0 / 13 (99.6%) | **3,057 / 0 / 13 (99.6%)** |
+
+**crops-score** (arm64 assembly): completeness 99.8 (99.8 without by design), maturity 100.0, independence 100.0, unchanged; `--judge
+--strict` 0 problems. `bin/reap --record`: 49 of 52 cells checked, 0 problems. Proofs (each once, by hand, one at a time): `bin/a64i synth
+--record` (22 programs under qemu-aarch64; twice, once for each slice), `bin/a64i check --record` whole (95 of 95, 3 min 56 s at night
+12's load, under 0.4 GiB), `--essential` (four runs, 77 and 76 programs). Not rerun: object-check, run-check, encode-check and the round
+trips (no shared code moved: only `go/arbace/a64i/` and `test/asm/`). The keys do not move (`test/gate/gate-key-crops-test.bash` passes;
+`bin/arbace-go --gate-key` `314c8e5b04ab...` at the base, in `asm-ar10`'s worktree, and at AR11).
+
+### Proposed (AR11)
+
+Numbering from ARS63. Each with options, the recommended named; none taken.
+
+- **ARS63 NEON's slice after.** (a) the saturating doubling multiplies and the saturating shifts and narrows (ARS61 (a): sqdmulh,
+  sqrdmulh, sqdmull, sqdmlal, sqdmlsl, sqshl, uqshl, sqshrn, sqrshrn, sqxtn, uqxtn, sqxtun); (b) the estimates (ARS61 (c): frecpe,
+  frsqrte, frecps, frsqrts, frecpx); (c) FP16's arithmetic (FEAT_FP16: the h forms the decoder now refuses, the conversions' half
+  type reused). *Recommended: (a)*: compiled DSP and codec code meets it next; the estimates' tables are a larger read for fewer users.
+- **ARS64 the essential subset's time.** synth-neon-el-e cost more than estimated at night 12's load. (a) keep it (ARS62 (a) as built);
+  (b) an eighth of synth-neon-el instead of a quarter (71 cases); (c) measure again on a quiet host before deciding. *Recommended:
+  (c)*, then (a) if the step stays within its budget.
+- **ARS65 synth-neon-cvt in the essential subset.** (a) a quarter of it (250 cases) as synth-neon-e and synth-neon-el-e; (b) the
+  rotation alone. *Recommended: (b)* until ARS64 is measured: the essential step already grew twice in two days.
