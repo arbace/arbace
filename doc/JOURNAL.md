@@ -3626,3 +3626,29 @@ when the build failed: `gen`, `mod`); `HSI_KEEP_BINS=1` keeps them. Nothing read
 generated packages `.tmp/hsi/aot/lib/` (shared, built once per runtime and image) stay. Test (day, `--jobs 1`, no `--record`, samples/Arrays,
 Classes, Cont, Deadlock): progs 272 MB with HSI_KEEP_BINS=1, 271 KB without; verdicts 4 of 4 pass as recorded; peak 1.1 GiB; a second run
 rebuilt and passed. Alternative considered: deleting the whole `aot/` dir (also drops the small logs and the key: kept for debugging).
+
+## 2026-11-11: goi's REPL leaves out the loaded files of other configurations (branch `py-buildtag`, from `mac/next` `a7e6c4f03`)
+
+Night 11's Python eval was rejected: every Lib/test module failed to import with `Go check errors in package arbace/py:
+builtins_posix_ext.go:154: posixWarnHook redeclared in this block` (and 9 more; .tmp/night12/DIAGNOSIS-N11.md, row python-eval).
+`go/arbace/py.ae` loads `py/builtins_os_other` (a62a002e1, queue 214: the `//go:build !linux` file goi's table checks in the
+tamago configurations), and goi's REPL kept every file a package file loads (`arbace.go.repl/file!`) and gave them all to the
+checker (`source-of`); only the package reader (`arbace.go.check.load/package-source`) applied `file-included?`. Reproduced on
+next: `bin/pyi lib-test test_class`, 0 pass, 40 failing ("does not import"), the same ten errors from `complete!`.
+The fix (the right one, not the quick one): `source-of` keeps only the files whose build constraints the package's configuration
+satisfies, `file-included?` with `tag-set` as go/build does (`//go:build` lines and _GOOS/_GOARCH names); a file of another
+configuration is still loaded (its go/file recorded) but neither checked nor defined (`define!` defines the checked result's
+declarations). The quick fix (dropping the load line from py.ae and `bin/pyi`'s `runtime_read_other` adding it) was not needed;
+it would have kept the REPL wrong for any package file listing such a file. Test: `test/goi/repl-pkgs/go/rt/lib` gets `other.go`
+(`//go:build !linux`) and `x_windows.go`, each redeclaring a name of a.go or b.go; `test/goi/repl.ae`'s expectations unchanged.
+Negative control: the seed's embedded (unfixed) goi on the new repl-pkgs fails (`suffix redeclared`, `Shout redeclared`).
+Known edge: after a load the REPL's current file is the last one loaded; a package file whose last load is an excluded file would
+send later REPL declarations to it (none does: lib.ae loads b last, py.ae a linux file).
+Also `bin/pyi` cmd_bench: `|| true` inside both `why=$(grep ... | tail -1)` (pa-bench: an empty `.aot.err` ended the script under
+pipefail before its summary and `--record`).
+arbace/go is embedded, so `gate_key` moves: the gate builds the executables again (night 12's `--full` rebuilds anyway); until a
+re-seed stage 0 evaluates arbace.go.repl from the checkout (RT.toolSource), as these proofs ran it.
+Proofs (stage 0 `/root/arbace/target/seed/amd64/arbace` as host and as `GOI_RUN_EXE`, ARBACE_PATH the worktree): `bin/goi test`
+(light: check-test 22 assertions, run 22 of 22, repl 124 of 124, std 185 of 185, the session as its transcript; peak 2.2 GiB);
+`bin/goi check --essential --jobs 4` 801 of 801 pass, the three controls fail as they must, no regression; `bin/pyi lib-test test_class` 31 pass, 11 classed, 0 failing; `test_bool test_unary
+test_keywordonlyarg` 48 of 48 pass (GOGC=50, peak 1.9 GiB); `bin/reap` 0 problems.
