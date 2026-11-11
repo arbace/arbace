@@ -20,12 +20,16 @@
 # run). An entry's key: the input's SHA-256 and the helper's (pydump.py, or tokdump.py, or syntax_cases.py with the
 # tarball's pin), first 16 characters, "INPUT:HELPER". The essential corpora's members are committed, raw, under
 # test/python/records/essential/CORPUS/ (ORS2 (a), ORS19 (a)): the essential steps need no store.
+# The round trip's print (queue 257): python-pydump-printed-CORPUS, the rows alone (tree/REL.row: CPython's status, its
+# ast.dump's digest, its normalized code's, marshal's) of each file the round trip printed from CORPUS, keyed by the
+# printed file's SHA-256 and pydump.py's: recorded by bin/repr-python roundtrip in mode record, read in records mode for
+# levels 2 and 3 (with the original's tree rows of python-pydump-CORPUS); printed-samples' members committed as essential.
 # Class A, outcomes (pyrec_outcome): a command's stdout and status keyed by its inputs, committed as
 # test/python/records/outcomes/NAME.out and NAME.meta (key, status, host): spec-check's and samples' verdicts, gen --check's
 # coverage, the smoke runs and REPL sessions of bin/pyi runtime check, the wheels' CPython runs.
 
 PYREC_DIR=$root/test/python/records
-PYREC_ESSENTIAL="samples synthetic errors lex-errors"
+PYREC_ESSENTIAL="samples synthetic errors lex-errors printed-samples"
 PYREC_LIB=${REPR_PYTHON_ORACLE_LIB:-$root/test/oracle-records/oracle.bash}
 if [ -f "$PYREC_LIB" ]; then
   . "$PYREC_LIB"
@@ -126,7 +130,8 @@ pyrec_dump() {
   pyrec_read "$@"
 }
 
-# pyrec_read KIND CORPUS BASE LIST OUT [TSV]: the records' dumps (records mode)
+# pyrec_read KIND CORPUS BASE LIST OUT [TSV]: the records' dumps (records mode); OUT empty: the rows alone into TSV (queue 257:
+# the round trip's levels 2 and 3 read CPython's digests, its ast.dump's and its normalized code's, from the rows)
 pyrec_read() {
   local kind=$1 corpus=$2 base=$3 list=$4 out=$5 tsv=${6:-} ext; ext=$(pyrec_ext "$kind")
   local pin man w=$TMPDIR/pyrec.$$.$RANDOM src
@@ -134,8 +139,8 @@ pyrec_read() {
   [ -f "$man" ] || { echo "UNRECORDED $corpus: no $man (REPR_PYTHON_ORACLE=record, on the host with python3: doc/ORACLE-RECORDS-SURVEY.md, \"As built: Python\")" >&2; return 1; }
   rm -rf "$w"; mkdir -p "$w"
   # the wanted members with their keys, against the manifest
-  pyrec_keys "$kind" "$base" "$list" | awk -F'\t' -v k="$kind" -v e="$ext" -v t="${tsv:+1}" '
-    { print k "/" $1 e "\t" $2; if (t) print k "/" $1 ".row\t" $2 }' > "$w/want"
+  pyrec_keys "$kind" "$base" "$list" | awk -F'\t' -v k="$kind" -v e="$ext" -v t="${tsv:+1}" -v d="${out:+1}" '
+    { if (d) print k "/" $1 e "\t" $2; if (t) print k "/" $1 ".row\t" $2 }' > "$w/want"
   awk -F'\t' 'NR == FNR { if (!/^#/) { key[$1] = $2; sha[$1] = $3 }; next }
               !($1 in key) { print "UNRECORDED " $1 > "/dev/stderr"; bad = 1; next }
               key[$1] != $2 { print "STALE " $1 ": its input or helper changed since the record" > "/dev/stderr"; bad = 1; next }
@@ -149,9 +154,11 @@ pyrec_read() {
   else
     src=$(oracle_unpack "$pin") || { rm -rf "$w"; return 1; }; src=$src/python-pydump-$corpus
   fi
-  mkdir -p "$out"
-  awk '{ print substr($0, 67) }' "$w/sums" | grep -v '\.row$' | tr '\n' '\0' > "$w/names"
-  (cd "$src" && tar --null -T "$w/names" -cf - --transform "s|^$kind/||") | tar -C "$out" -xf -
+  if [ -n "$out" ]; then
+    mkdir -p "$out"
+    awk '{ print substr($0, 67) }' "$w/sums" | grep -v '\.row$' | tr '\n' '\0' > "$w/names"
+    (cd "$src" && tar --null -T "$w/names" -cf - --transform "s|^$kind/||") | tar -C "$out" -xf -
+  fi
   if [ -n "$tsv" ]; then
     awk '{ print substr($0, 67) }' "$w/sums" | grep '\.row$' | tr '\n' '\0' | (cd "$src" && xargs -0 -r cat) | LC_ALL=C sort > "$tsv"
   fi
@@ -162,20 +169,26 @@ pyrec_read() {
 pyrec_verify_dump() {
   local kind=$1 corpus=$2 base=$3 list=$4 out=$5 tsv=$6 v=$PYREC_VSTATE ext rel n=0 nd=0; ext=$(pyrec_ext "$kind")
   mkdir -p "$v/rec"; local r=$v/rec/$kind-$corpus.$RANDOM
-  if ! pyrec_read "$kind" "$corpus" "$base" "$list" "$r" ${tsv:+"$r.tsv"} 2> "$v/err"; then
+  if ! pyrec_read "$kind" "$corpus" "$base" "$list" "${out:+$r}" ${tsv:+"$r.tsv"} 2> "$v/err"; then
     echo "verify: $corpus $kind: $(tail -1 "$v/err")"; echo "$corpus $kind $(wc -l < "$list") $(wc -l < "$list")" >> "$v/tally"; return 0
   fi
   [ -z "$tsv" ] || pyrec_norm_rows "$kind" < "$tsv" > "$r.live.tsv"
   while IFS= read -r rel; do
     n=$((n + 1))
-    if ! cmp -s "$out/$rel$ext" "$r/$rel$ext" || { [ -n "$tsv" ] && [ "$(grep -F -- "$rel"$'\t' "$r.live.tsv" | head -1)" != "$(grep -F -- "$rel"$'\t' "$r.tsv" | head -1)" ]; }; then
+    if { [ -n "$out" ] && ! cmp -s "$out/$rel$ext" "$r/$rel$ext"; } || { [ -n "$tsv" ] && [ "$(grep -F -- "$rel"$'\t' "$r.live.tsv" | head -1)" != "$(grep -F -- "$rel"$'\t' "$r.tsv" | head -1)" ]; }; then
       nd=$((nd + 1)); echo "verify: $corpus $kind/$rel: DIFFERS"
     fi
   done < "$list"
   echo "$corpus $kind $n $nd" >> "$v/tally"
-  # the crossed pair's candidates: this corpus's first file's live dump and its last file's record
+  # the crossed pair's candidates: this corpus's first file's live dump and its last file's record (rows alone: the rows)
   if [ "$n" -ge 2 ] && [ ! -f "$v/pair" ]; then
-    printf '%s\t%s\t%s\n' "$out/$(head -1 "$list")$ext" "$r/$(tail -1 "$list")$ext" "$corpus $kind: $(head -1 "$list") against $(tail -1 "$list")'s record" > "$v/pair"
+    if [ -n "$out" ]; then
+      printf '%s\t%s\t%s\n' "$out/$(head -1 "$list")$ext" "$r/$(tail -1 "$list")$ext" "$corpus $kind: $(head -1 "$list") against $(tail -1 "$list")'s record" > "$v/pair"
+    else
+      grep -F -- "$(head -1 "$list")"$'\t' "$r.live.tsv" | head -1 | cut -f2- > "$r.pair-live"
+      grep -F -- "$(tail -1 "$list")"$'\t' "$r.tsv" | head -1 | cut -f2- > "$r.pair-rec"
+      printf '%s\t%s\t%s\n' "$r.pair-live" "$r.pair-rec" "$corpus $kind rows: $(head -1 "$list") against $(tail -1 "$list")'s record" > "$v/pair"
+    fi
   fi
 }
 
@@ -187,8 +200,13 @@ pyrec_stage() {
   mkdir -p "$s/m/$kind"
   echo "$corpus" > "$s/corpus"
   pyrec_keys "$kind" "$base" "$list" > "$s/keys"
-  (cd "$out" && sed "s|\$|$ext|" "$list" | tr '\n' '\0' | tar --null -T - -cf -) | tar -C "$s/m/$kind" -xf -
-  awk -F'\t' -v k="$kind" -v e="$ext" '{ print k "/" $1 e "\t" $2 }' "$s/keys" > "$s/ids"
+  : > "$s/ids"
+  if [ -n "$out" ]; then  # OUT empty: the rows alone (queue 257: the round trip's print, python-pydump-printed-CORPUS)
+    (cd "$out" && sed "s|\$|$ext|" "$list" | tr '\n' '\0' | tar --null -T - -cf -) | tar -C "$s/m/$kind" -xf -
+    awk -F'\t' -v k="$kind" -v e="$ext" '{ print k "/" $1 e "\t" $2 }' "$s/keys" > "$s/ids"
+  else
+    (cd "$s/m/$kind" && sed -n 's|/[^/]*$||p' "$list" | LC_ALL=C sort -u | tr '\n' '\0' | xargs -0 -r mkdir -p)
+  fi
   if [ -n "$tsv" ]; then
     # each row beside its dump (the dump's directory exists)
     pyrec_norm_rows "$kind" < "$tsv" | awk -F'\t' -v d="$s/m/$kind" '{ f = d "/" $1 ".row"; print > f; close(f) }'

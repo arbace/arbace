@@ -5226,3 +5226,105 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
+
+## 2026-11-11: night 11's Haskell and Scheme failures fixed (branch hs-scm-n12, from mac/next)
+
+Source: .tmp/night12/DIAGNOSIS-N11.md (h-check, h-div, hs-props, hs-props2, la-scm-corpora). Haskell: the six nofib programs whose keys
+moved with HES86 (a) (imaginary/paraffins, imaginary/primes, real/compress, shootout/fasta, shootout/reverse-complement, spectral/simple)
+recorded again with the host's GHC 9.14.1 by hand (`bin/hsi check --live --dump-only --record-progs --corpus nofib --only <six>`, then
+`bin/hsi check --corpus nofib --only <six> --record`): the pack's bytes are the same (pin unchanged, no mirror push needed), only
+haskell-stg-progs.tsv's keys moved; cryptarithm1 and primetest listed in `:speed`, hs_try_putmvar001's `:test-c` results `[:hsi :fail]`;
+`bin/hsi divergences`: 908 programs, 797 pass, 111 in a class, 0 not. `bin/hsi`'s verify_libs local `pin` renamed `lpin` (it shadowed the
+GHC pin ghc_check reads); `bin/hsi check` fails on a plan of 0 programs. Scheme: `bin/si r7rs --chibi-test --record` (pass 1216 -> 1230,
+fail 9 -> 2); the rest of si-corpora's chain then failed at `corpora divergences` (157 anchored alternatives of
+test/scheme/divergences-corpora.edn matched no recorded item: the mats record no longer fails those clauses), dropped by script
+(classes left with no pattern: mats-chez-format keeps no :match). bin/reap --record, bin/crops-score --record.
+
+## 2026-11-11: cpp-n12, night 11's C++ failures: cpp-route's records, `:threads` widened, the dg tree's gcc.dg/cpp (branch `cpp-n12`, from `mac/next` `a7e6c4f03`)
+
+From `.tmp/night12/DIAGNOSIS-N11.md` (rows cpp-route, rejected/cpp-dg, lb-dg-ref):
+- cpp-route's flip (0a38cd982, the default route auto) moved `runtime/threads.cpp` at both levels from the `__clone` shape to
+  `fail differ status 139 ... segmentation fault (thread 1004: _ZL4worki ...)`: the started thread faults in its body, the same
+  unproven thread start on ci's threads that `:threads` defers (rust-re6's "not yet proven on ci"). `test/cpp/divergences.edn`'s
+  `:threads` takes a third `:match`, `#"^fail differ status 139 .*segmentation fault \(thread \d+: _ZL4worki"` (the AOT level is judged by
+  the same file: `divergences-aot.edn` is empty). Alternative considered: a class of its own; rejected, the diagnosis names it one cause.
+- The slot's records, swept into the rejected cpp-dg commit (`.tmp/night11/rejected/cpp-dg/tracked.diff`): only its eight
+  `test/cpp/check{,-aot}{,-every-25}{,-times}-linux-amd64.edn` applied (they apply on next as is). Not taken: `ref-dg-gxx15.edn`,
+  `dg-times.edn`, `dg-preprocess-results.edn` (recorded in the tree with no gcc.dg, below) and hs-props' two Haskell files. The s25 rows:
+  vbase8-10, embed-26, init/vector1 and torture/vshuf-v16hi oracle-rejected -> ours-refused (in class), defaulted19a and special/initp1
+  now pass; runtime/atomics.cpp passes; thread-throw.cpp's terminate shape stays in `:threads`. `bin/reap --record`.
+- lb-dg-ref: g++.dg/cpp/elifdef-2.C and -4.C include `../../gcc.dg/cpp/c23-elifdef-1.c`; pp-check extracted only g++.dg, g++.old-deja and
+  c-c++-common into `.tmp/cpp-gcc`, which `bin/lib/repr-cpp/dg` preferred. `bin/lib/repr-cpp/pp-check` now extracts
+  `gcc/testsuite/gcc.dg/cpp` too (about 1 MB), and adds it alone to a tree extracted before (marker `.extracted-gcc-dg-cpp`, set when tar
+  succeeds); `dg` takes first a candidate tree with its sibling `gcc.dg/cpp`, then any. Check: `bin/repr-cpp dg --corpus preprocess --only`
+  the two files (no toolchain at this part): pass 2 of 2, as recorded (the main checkout's `.tmp/repr-c` tree, this worktree having no
+  `.tmp/cpp-gcc`).
+- Not done here, left by the slot (diagnosis): independence.edn's own-route cases (the slot's `ours` counter printed 0; read the `route`
+  files first). Checks: `bin/reap` 0 problems (41 of 44 cells), `bin/crops-score --record`, `--judge --strict` exit 0.
+
+## 2026-11-11: C's night-11 failures fixed before night 12 (branch `c-n12`, from `mac/next` a7e6c4f03)
+
+From `.tmp/night12/DIAGNOSIS-N11.md`, section 4. (a) `c/include/float.h`: `DEC{32,64,128}_SUBNORMAL_MIN` only under
+`__STDC_WANT_DEC_FP__`, as gcc's float.h (gcc.dg/dfp/c23-float-dfp-1.c:94 `#error`s if C23 defines them); the other DEC macros and the
+`_TRUE_MIN`s stay. Re-judged alone: `bin/ci dg --only` (dfp-1, dfp-2: pass 2 of 2) and `bin/repr-c roundtrip --corpus gcc-c23-sub --only`
+(levels 1-2 equal, no gcc; both rows already :pass in next's records, so none rewritten). (b) The five evaluated-tool rows (torture-compile
+limits-blockid, limits-externalid, limits-fndefn; quickjs libunicode.c, quickjs.c) in `roundtrip-known.edn` as `:eval-limits` (the class
+exists, `test/c/divergences-print.edn`), their rows of `roundtrip-results.edn` written by hand as :known in the form `--record` writes (a
+partial run does not record); the night's failing rows were not committed. (c) `:cc-imaginary-int` (annot-known.edn, class in
+`test/c/divergences-annot.edn`, kind :design) for torture-execute/20041201-1.c (`2i`: gcc and the checker `_Complex int`, cc `_Complex double`);
+its annot-results row edited by hand (`bin/ci annotations` refuses `--record` after `--only`; a whole run is heavy: night command
+`bin/ci annotations --judge --record`). (d) The 3 now-passing entries dropped from `pp-check-known.edn` (gcc-c23 c23-attr-syntax-7.c, tcc-pp 11.c,
+13.S), and night 11's token and parse results (`pp-check-results.edn`, `parse-check-results.edn`, from `.tmp/night11/rejected/c/tracked.diff`)
+committed; its dg, annotation, roundtrip and check records not. (e) `test/c/check-budget.edn`: 30 s for compcert/nsievebits.c and sha3.c
+(7.9 s alone on an idle host against the 10 s default). `bin/reap --record` then `bin/reap`: 0 problems; `bin/crops-score --record`,
+`--judge --strict`: exit 0. `c/` is in no gate key (`bin/lib/version.bash`), so `gate_key` does not move; steps declaring c/include rerun.
+Not done: c-aot's nbody and spectral-norm timeouts (item for a timing by day).
+
+## 2026-11-11: goi's REPL leaves out the loaded files of other configurations (branch `py-buildtag`, from `mac/next` `a7e6c4f03`)
+
+Night 11's Python eval was rejected: every Lib/test module failed to import with `Go check errors in package arbace/py:
+builtins_posix_ext.go:154: posixWarnHook redeclared in this block` (and 9 more; .tmp/night12/DIAGNOSIS-N11.md, row python-eval).
+`go/arbace/py.ae` loads `py/builtins_os_other` (a62a002e1, queue 214: the `//go:build !linux` file goi's table checks in the
+tamago configurations), and goi's REPL kept every file a package file loads (`arbace.go.repl/file!`) and gave them all to the
+checker (`source-of`); only the package reader (`arbace.go.check.load/package-source`) applied `file-included?`. Reproduced on
+next: `bin/pyi lib-test test_class`, 0 pass, 40 failing ("does not import"), the same ten errors from `complete!`.
+The fix (the right one, not the quick one): `source-of` keeps only the files whose build constraints the package's configuration
+satisfies, `file-included?` with `tag-set` as go/build does (`//go:build` lines and _GOOS/_GOARCH names); a file of another
+configuration is still loaded (its go/file recorded) but neither checked nor defined (`define!` defines the checked result's
+declarations). The quick fix (dropping the load line from py.ae and `bin/pyi`'s `runtime_read_other` adding it) was not needed;
+it would have kept the REPL wrong for any package file listing such a file. Test: `test/goi/repl-pkgs/go/rt/lib` gets `other.go`
+(`//go:build !linux`) and `x_windows.go`, each redeclaring a name of a.go or b.go; `test/goi/repl.ae`'s expectations unchanged.
+Negative control: the seed's embedded (unfixed) goi on the new repl-pkgs fails (`suffix redeclared`, `Shout redeclared`).
+Known edge: after a load the REPL's current file is the last one loaded; a package file whose last load is an excluded file would
+send later REPL declarations to it (none does: lib.ae loads b last, py.ae a linux file).
+Also `bin/pyi` cmd_bench: `|| true` inside both `why=$(grep ... | tail -1)` (pa-bench: an empty `.aot.err` ended the script under
+pipefail before its summary and `--record`).
+arbace/go is embedded, so `gate_key` moves: the gate builds the executables again (night 12's `--full` rebuilds anyway); until a
+re-seed stage 0 evaluates arbace.go.repl from the checkout (RT.toolSource), as these proofs ran it.
+Proofs (stage 0 `/root/arbace/target/seed/amd64/arbace` as host and as `GOI_RUN_EXE`, ARBACE_PATH the worktree): `bin/goi test`
+(light: check-test 22 assertions, run 22 of 22, repl 124 of 124, std 185 of 185, the session as its transcript; peak 2.2 GiB);
+`bin/goi check --essential --jobs 4` 801 of 801 pass, the three controls fail as they must, no regression; `bin/pyi lib-test test_class` 31 pass, 11 classed, 0 failing; `test_bool test_unary
+test_keywordonlyarg` 48 of 48 pass (GOGC=50, peak 1.9 GiB); `bin/reap` 0 problems.
+
+## 2026-11-11: RF18, RFP62 (a): opaque types revealed in mono, closures' vtable entries; RFP63 (a)'s reader (branch `rust-rf18`, from `mac/rust-rf17` `50a17174b`)
+
+- RFP62 (a), decided by the user 2026-11-11, after rustc 1.99.1 (the pinned rust-src's `compiler/`): mono's program facts now read
+  each body after PostAnalysisNormalize (RFP33 (a)'s reveal, as rustc's collector reads runtime MIR), so a call through an
+  `impl Fn` return resolves to the closure behind it (`make_adder`'s, `make_counter`'s); a generic definer's own closures in its
+  hidden type carry the definer's arguments (ClosureArgs' parent_args: `compose`'s closure, instantiated at the use's); a closure's
+  layout is univariant over its upvars (layout_of's Closure arm; the upvars' types from the closure's built body, `:upvar-tys`,
+  which also give mono its closures' drop glue); a `dyn Fn` vtable's entries are the closure's body for `call` and `call_mut` and
+  `call_once`'s VTableShim (resolve_for_vtable; `vtable-shim-mangle`, the record's symbol, core's shim body the record's); a
+  record's `dyn Fn(..) -> R` argument type is read from its text so std's `Map` reaches `|f| f()`. Alternatives considered: the
+  record's items for closures behind opaque types and vtables (RFP62 (b), a record fact per closure), revealing at each use in
+  mono instead of the passes' reveal (two reveals to keep equal).
+- RFP63 (a)'s light part, the reader: `mono/*upstream*` from `RF_STD_EXPORTS` (the helper's future `--std-exports`), an instance
+  it lists taken as the upstream crate's (its symbol, external, not instantiated); without the file nothing changes. The helper's
+  dump and the packs' re-record are the night's (the helper's source is in every rust-front pack's key): written in
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF18", not run.
+- Measured, light (each process watched under 2.5 GiB): `rsi-build` over the 67 synthetic programs: **66 own** (RF17 65): closures;
+  native vtables 35 -> 42 of 46, layouts 42,792 -> 43,727 of 45,881, callees 4,516 -> 4,528; mono-check's callees against the record
+  1,992 -> 2,000 of 2,414. The watcher stopped one batch at 2.66 GB (collections), rerun alone at 2.62 GB; RF17's code peaks the
+  same there (2.71 GB). `RF_STD_EXPORTS` with a one-entry sample from panic-assert-eq's record makes it own (the reader's check, not
+  the count). `bin/rust-front essential` and `core-essential` equal their known files; `bin/reap` 0 problems; `bin/crops-score
+  --judge --strict` exit 0, Rust unchanged. The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF18".
