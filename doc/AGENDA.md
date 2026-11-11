@@ -257,6 +257,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   (`--defsym` tests into the object corpus).
   `asm-ax11b` (from `mac/next` `f6ac54829`): AX11 merged with AR7, `arbace/asm/obj.ae`'s error collection inside `run-items!` (an expansion's
   errors at its invocation); both crops' checks rerun, every record unchanged; x86-64 AOT 105 / 0 / 0, arm64 AOT 3,005 / 0 / 55.
+  `asm-ax12` (from `mac/next` `4ec952309`; doc/asm/AMD64-SURVEY.md, "As built: AX12"): AXS92 (a) the DWARF 4 line program (`.loc`'s
+  entries, emitOne's opcodes, MCDwarfLineAddr's advances, end_sequence; `synthetic/debug-line`) and AXS94 (a) MC/X86's `--defsym` cases
+  (`intel-syntax-quote-reserved`, `pltoff@ERR=1` held to llvm-mc's recorded refusal), objects recorded by hand with llvm-mc 23.1.5; x86-64
+  AOT 105 -> 108 / 0 / 0. Proposed AXS95 (the five left-out refusals), AXS96 (MC/AsmParser's DWARF tests).
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

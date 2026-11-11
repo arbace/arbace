@@ -5002,3 +5002,30 @@ No code copied.
   the three object checks) rerun unchanged. Proposed ARS53-ARS55.
 - Rule slips: two commands used `<(...)` process substitution and one wrote to /dev/null (comparisons of scratch files, nothing they
   produced was used).
+
+## 2026-11-11: AX12, the line program and the `--defsym` cases (branch `asm-ax12`, from `mac/next` `4ec952309`)
+
+The user decided (2026-11-11) AXS92 (a), the DWARF line program itself, and AXS94 (a), MC/X86's `--defsym` tests into the object corpus,
+the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's llvm-mc approved for these records only).
+
+- Sources read: llvm-project 23.1.5 (the pinned `.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, extracted into the worktree's `.tmp/`):
+  `llvm/lib/MC/MCDwarf.cpp`, `MCObjectStreamer.cpp`, `MCStreamer.cpp`, `MCAssembler.cpp`, `MCParser/AsmParser.cpp`, `MCContext.cpp`,
+  `llvm/lib/Target/X86/MCTargetDesc/X86ELFObjectWriter.cpp`; Apache-2.0 WITH LLVM-exception (already in LICENSE.md); no code copied.
+- AXS92 (a): `arbace.asm.obj` makes line entries where LLVM's MCDwarfLineEntry::make runs (instructions, emitBytes, emitValueImpl, a
+  `.loc` itself; not fills, `.org` or alignments), clears a seen `.loc` at a section change and `.popsection`, and writes `.debug_line`'s
+  program after the layout: one sequence per section in the order of its first entry, the state machine's changes, DW_LNE_set_address
+  with a pointer relocation for the first row, MCDwarfLineAddr::encode's advances from the final offsets (what the Dwarf fragments relax
+  to), DW_LNE_end_sequence at the section's end. Held by a new synthetic file `test/asm/obj/debug-line.s` (every opcode path); byte for
+  byte on the first run but one thing: an arm64 trial (by hand, not recorded) showed llvm-mc's minimum instruction length is 1 on AArch64
+  too, where AX11's header used arm64's code alignment 4; fixed for both. Alternative considered: Dwarf fragments relaxed with the code
+  (LLVM's way); not needed, `.debug_line` is written after the code's layout as `.eh_frame` is, and the bytes are the same.
+- AXS94 (a): MC/X86 has five files that use `--defsym`; two have object runs at x86-64: `intel-syntax-quote-reserved` (its object run
+  sets nothing; it was left out because another run of it uses `-defsym`) and `pltoff`'s error run (`--defsym ERR=1`, llvm-mc refuses it).
+  The list now keeps the first and adds the second as a case `pltoff@ERR=1` with its options; `object-record` records a `--defsym` case's
+  refusal (its diagnostics, the path as `<input>`, two runs equal) and the check holds Arbace's diagnostics to it line for line, with a new
+  negative control. For it the x86-64 relocation types report X86ELFObjectWriter's checkIs32/checkIs64 errors, and an instruction's fixups
+  carry their item's place; the diagnostics printer (ARS43 (a), arm64's) moved into the shared `arbace.asm.obj`. Alternatives considered:
+  recording every refusal (five more Mach-O/COFF files: AXS95, proposed); leaving error runs out (the one `--defsym` object run would not
+  have been taken).
+- Recorded by hand: `bin/repr-asm object-record synthetic` and `bin/repr-asm object-record mc-x86-obj` (`/usr/lib/llvm23/bin/llvm-mc
+  -triple x86_64-linux-musl -filetype=obj [--defsym ERR=1] FILE -o OUT`, each twice); every earlier object's bytes unchanged.

@@ -1729,3 +1729,67 @@ Numbering from AXS92.
 - **AXS94 The object check's corpus widened.** The filter of `mc-x86-obj` leaves out `--defsym` and `split-file` tests, which conditional
   assembly and macros now could take: (a) `--defsym` taken (the assembler's `:defsym` option) and the objects recorded by hand in the
   oracle tier; (b) as built. *Recommended: (a)*.
+
+## As built: AX12 (2026-11-11; branch `asm-ax12`, from `mac/next` `4ec952309`, which holds asm-ax11b and asm-ar8)
+
+The user's decisions of 2026-11-11: AXS92 (a), the line program itself, and AXS94 (a), MC/X86's `--defsym` tests into the object
+corpus; the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's llvm-mc, for these records only; no gate step runs
+it). Read from llvm-project 23.1.5's MCDwarf.cpp (MCDwarfLineEntry::make, MCDwarfLineTable::emitOne, MCDwarfLineAddr::encode),
+MCObjectStreamer.cpp (emitInstruction, emitBytes, emitValueImpl, emitDwarfLocDirective, changeSection, emitDwarfAdvanceLineAddr,
+emitDwarfLineEndEntry), MCStreamer.cpp (endSection, popSection), AsmParser.cpp (parseDirectiveLoc), MCAssembler.cpp (relaxDwarfLineAddr)
+and X86ELFObjectWriter.cpp (checkIs32, checkIs64), Apache-2.0 WITH LLVM-exception, extracted from the pinned tarball; written again in
+Arbace, no code copied.
+
+- **The line program** (`arbace.asm.obj`: `loc!`, `line-entry!`, `line-addr-bytes`, `emit-debug-line!`). A `.loc` (its file checked,
+  the line and column, `basic_block`, `prologue_end`, `epilogue_begin`, `is_stmt 0|1`, `isa N`, `discriminator N`; the flags start from
+  the last one's is_stmt; LLVM's messages for a bad one) first gives a still unused `.loc` its entry at the current place (two in a row),
+  then becomes the current one; the next instruction, `.byte`/`.short`/`.long`/`.quad` or `.ascii`/`.asciz` (emitInstruction,
+  emitValueImpl, emitBytes) makes its line entry, a temporary label at that place, in the section's list; `.zero`, `.fill`, `.org` and
+  the alignments do not (emitFill, emitValueToOffset); a section change clears it, `.popsection` too (changeSection). At the end, after
+  `.eh_frame`, `.debug_line`'s header (AX11's) is followed by one sequence per section in the order of its first entry: each entry's
+  changes from the state machine's (DW_LNS_set_file, set_column, DW_LNE_set_discriminator, set_isa, negate_stmt, set_basic_block,
+  set_prologue_end, set_epilogue_begin), then the first row by DW_LNE_set_address (an 8-byte relocation to the label: R_X86_64_64
+  against the section's symbol) with its line advance, the next by MCDwarfLineAddr's encoding of the line and address deltas from the
+  final layout (a special opcode, DW_LNS_const_add_pc and one, DW_LNS_advance_line, DW_LNS_advance_pc, DW_LNS_copy), as LLVM's Dwarf
+  fragments relax to, and DW_LNE_end_sequence at the section's end. The header's minimum instruction length is 1 for both arches
+  (AX11's header took arm64's code alignment, 4: llvm-mc writes 1; no arm64 record had a `.file N`, so nothing moved).
+- **The synthetic object** `test/asm/obj/debug-line.s` (four files, two with directories; every flag and option; two `.loc` in a row;
+  a jump relaxed between two entries; advances of 0, 17 (const_add_pc), large (advance_pc), backwards and out of the special opcodes'
+  range with no address advance (copy); entries in `.text`, `.text.g`, `.data` and a `.pushsection`; `.loc` before a section switch),
+  llvm-mc's object byte for byte. `line-table-sections` (MC/X86) still passes. An arm64 version of the same shapes, assembled by hand
+  against llvm-mc `-triple aarch64-linux-musl -mattr=+all`, is byte for byte too (not recorded: arm64's records are the arm64 line's).
+- **`--defsym` (AXS94 (a))**: `mc-x86-obj`'s filter no longer leaves out a file whose first runs use `--defsym`
+  (`intel-syntax-quote-reserved`: its x86-64 object run has none; its i386 run sets `I386`), and each object run of a kept file that
+  sets symbols with `--defsym` for x86-64 is a case of its own, `NAME@SYM=V`, its options in the list's third field (`--defsym SYM=V`),
+  assembled with the assembler's `:defsym`. MC/X86 has one: `pltoff`'s error run (`not llvm-mc ... --defsym ERR=1`), which llvm-mc
+  refuses; the record holds the refusal (`:refused`, its diagnostics with the input as `<input>`, two runs equal) and the check holds
+  Arbace's errors, printed as llvm-mc prints them (the diagnostics ARS43 (a) wrote for arm64's verdict, moved from
+  `arbace.asm.arm64.objcheck` into `arbace.asm.obj`; an AT&T `$NAME`'s caret on the name), to it line for line: `:assembled` and
+  `:error-diagnostics` fail. For it, x86-64's relocation types report X86ELFObjectWriter's errors (checkIs32: PLT, GOTPCREL, TLSGD,
+  GOTTPOFF, TLSLD; checkIs64: PLTOFF; GOTOFF's "unsupported relocation type") instead of `:unsupported-relocation`, and an
+  instruction's fixups and relaxable chunks carry their item's place. A new control `_control/pltoff-vs-err` (pltoff's object judged
+  against the refusal) fails as it must. The other MC/X86 files that use `--defsym` have no object run (`displacement-overflow`,
+  `intel-syntax-branch`, `intel-syntax-displacement-overflow`, `register-assignment`). A file llvm-mc refuses with no `--defsym` is
+  still left out, as before (five: Mach-O's and COFF's directives).
+- **Recorded by hand** (the oracle tier, the host's `/usr/lib/llvm23/bin/llvm-mc`, LLVM version 23.1.5): `bin/repr-asm object-record
+  synthetic` (each file `llvm-mc -triple x86_64-linux-musl -filetype=obj FILE -o OUT`, twice, the same bytes; the seven earlier objects
+  unchanged, `debug-line` new) and `bin/repr-asm object-record mc-x86-obj` (the same, with the case's `--defsym ERR=1` for `pltoff@ERR=1`,
+  whose refusal and diagnostics are recorded; the 47 earlier objects unchanged, `intel-syntax-quote-reserved` new); the records'
+  headers say so, their `.sha256` pins rewritten.
+- **Results**: `object-check` musl 32 of 32, synthetic 7 -> 8 of 8, mc-x86-obj 47 -> 49 of 49 (each with its controls, six now);
+  the AOT cell 105 / 0 / 0 -> 108 / 0 / 0. `:unsupported-debug-line` keeps no row (kept for DWARF 5's `.file 0` and a `.file` with an
+  MD5 or source).
+- Shared files touched (arm64's line works beside): `arbace/asm/obj.ae` (above; `data!` now `line-entry!` then `data-only!`, which
+  `fill!` and `.org` take), `arbace/asm/arm64/objcheck.ae` (its diagnostics now `arbace.asm.obj`'s, the same function), `bin/repr-asm`
+  (`mc-x86-obj`'s list, `object-record`'s options and refusals). arm64's object checks rerun unchanged.
+
+### Proposed (AX12)
+
+Numbering from AXS95.
+
+- **AXS95 The left-out refusals.** Five MC/X86 object files llvm-mc refuses at an ELF triple (Mach-O's and COFF's directives) are left
+  out of `mc-x86-obj`. (a) Record their refusals as `pltoff@ERR=1`'s and hold Arbace's diagnostics to them; (b) as built.
+  *Recommended: (a)*, a light oracle-tier recording.
+- **AXS96 MC/AsmParser's DWARF tests.** MC/AsmParser's `directive_loc*.s` and `directive_file*.s` are i386 or `-g` runs; the line program
+  could also be held by their x86-64 objects recorded by hand: (a) a corpus `mc-asmparser-obj` of those that assemble for x86-64; (b) the
+  synthetic file alone, as built. *Recommended: (b)* until the `-g` (MCGenDwarfInfo) work.
