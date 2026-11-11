@@ -5470,3 +5470,12 @@ Details in doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS359 stages 2-3 
   `gate_key` and `arbace_runtime_key` unchanged. No score moves until stage 4.
 - **Night.** `.tmp/night13/slots/jcs359.sh` (refreshed): stage 1's measure under the big lock, then stages 2 and 3 on its outputs.
 - **Proposals.** JCS379-JCS382 (the survey).
+
+## 2026-11-11: JCS359 stages 2-3's scripts moved to `test/javac-platform/` (branch `jcs359-s2`; corrects the entry above)
+
+The entry above places `gensrc.bash`, `gensrc-run.ae`, `modinfo.ae` and `cppout.ae` in `bin/lib/repr-java/`. They are in
+`test/javac-platform/` since: `bin/lib/repr-java/` is in `test/gate/steps.edn`'s `:repr-java` input group, which all of Java's
+`--full` steps declare, so that any later edit of these scripts would have rerun them (java-read heavy, java-interp 53 GiB); under
+`test/javac-platform/` they are out of every key and of those steps' inputs (only `crops-score`'s whole `test/` sees them).
+The data's header (`jdk/javac/platform-gensrc.edn`) and the survey's section name the new place; the runs gave the same results
+(java.base, java.desktop, jdk.jdi, jdk.jlink; java.logging's and java.base's descriptors).

@@ -4,7 +4,7 @@
  * VarHandleGuardMethodGenerator.java, make/modules/java.base/gensrc/GensrcVarHandles.gmk) on javac's tool executable,
  * whose world has no java.lang.invoke.MethodType factory, no VarHandle and no java.lang.classfile: bin/javac-vendor
  * gensrc reads the build's generator with its uses of those renamed to this package's classes
- * (bin/lib/repr-java/gensrc.bash's gensrc_patch_methodhandle), as make/CopyInterimTZDB.gmk renames a package.
+ * (test/javac-platform/gensrc.bash's gensrc_patch_methodhandle), as make/CopyInterimTZDB.gmk renames a package.
  * GuardMethodType: the part of java.lang.invoke.MethodType the generator calls, a return type and parameter types as
  * the API documents them, equal when both are (the generator's distinct()).
  * Written for the documented Java SE API (https://github.com/openjdk/jdk26u at baf63fb):

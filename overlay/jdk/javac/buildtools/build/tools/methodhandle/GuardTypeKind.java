@@ -4,7 +4,7 @@
  * VarHandleGuardMethodGenerator.java, make/modules/java.base/gensrc/GensrcVarHandles.gmk) on javac's tool executable,
  * whose world has no java.lang.invoke.MethodType factory, no VarHandle and no java.lang.classfile: bin/javac-vendor
  * gensrc reads the build's generator with its uses of those renamed to this package's classes
- * (bin/lib/repr-java/gensrc.bash's gensrc_patch_methodhandle), as make/CopyInterimTZDB.gmk renames a package.
+ * (test/javac-platform/gensrc.bash's gensrc_patch_methodhandle), as make/CopyInterimTZDB.gmk renames a package.
  * GuardTypeKind: java.lang.classfile.TypeKind.from(type).upperBound().descriptorString() as the API documents it: a
  * primitive type's kind is its own upper bound, its descriptor the type's ("Z", "B", "C", "S", "I", "J", "F", "D", "V");
  * a reference type's kind is REFERENCE, whose upper bound is Object, "Ljava/lang/Object;".

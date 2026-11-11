@@ -1,7 +1,8 @@
 # The own platform's generated sources (JCS359 (a)(2), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS359 stages
 # 2-3 (day)"): the 16 modules' support/gensrc made as the JDK build makes them, by the build's own tools on javac's tool
 # executable, and judged against the build tree's. Sourced by bin/javac-vendor (its root, jdk, work, out, pinned, conf,
-# pb_* and gen_exe); out of every key (bin/lib/repr-java/: the tool's checks, not its build).
+# pb_* and gen_exe); out of every key and of the Java steps' inputs (test/javac-platform/: it runs the tool, it does
+# not build it).
 #
 # Two parts, as make has two kinds of rule:
 #
@@ -21,7 +22,7 @@
 # A tool javac's tool executable holds compiled (jdk/javac/forms' module buildtools: bin/javac-vendor's tool_dirs and
 # langtools_dirs) runs compiled; any other is read by repr/java from make/jdk/src/classes/build/tools/DIR (with its
 # tool-world variants, overlay/jdk/javac/buildtools) into WORK/gensrc/tools/DIR and run by the interpreter
-# (bin/lib/repr-java/gensrc-run.ae): jdwpgen, x11wrappergen, icondata, methodhandle, module, generatenimbus.
+# (test/javac-platform/gensrc-run.ae): jdwpgen, x11wrappergen, icondata, methodhandle, module, generatenimbus.
 
 pgensrc=$out/platform-gensrc.edn
 gknown=${JAVAC_VENDOR_GENSRC_KNOWN:-$out/platform-gensrc-known.edn}
@@ -61,7 +62,7 @@ platform_gensrc_make() {
     echo ";; The JDK build's generated sources' configuration as data (JCS362 (a), JCS359 (a)(2), doc/classes/JAVA-CONFORMANCE-SURVEY.md,"
     echo ";; \"As built: JCS359 stages 2-3 (day)\"): derived by bin/javac-vendor platform-gensrc from jdk26u's build tree at"
     echo ";; $pinned, re-checked against it by platform-gensrc --check (the oracle tier's) and never read from it otherwise."
-    echo ";; Each record one line, a vector of strings (bin/lib/repr-java/gensrc.bash's pg_records): value NAME VALUE (spec.gmk's);"
+    echo ";; Each record one line, a vector of strings (test/javac-platform/gensrc.bash's pg_records): value NAME VALUE (spec.gmk's);"
     echo ";; list NAME ITEM... (a module list make computes); subst MODULE OUTPUT TEMPLATE FROM TO... (make's text"
     echo ";; substitution, its vardeps); resource-packages MODULE PACKAGE... (the module's packages that hold resources alone,"
     echo ";; stage 3's); java MODULE ID DIR TOOL ARG... (a tool run the build recorded, its @-files expanded, DIR \"-\" for none);"
@@ -122,7 +123,7 @@ platform_gensrc_make() {
     local mex
     mex=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || return 1
     for m in $(platform_modules); do
-      "$mex" "$root/bin/lib/repr-java/modinfo.ae" --packages "$b/jdk/modules/$m/module-info.class" > "$TMPDIR/javac-vendor.pg-p" || return 1
+      "$mex" "$root/test/javac-platform/modinfo.ae" --packages "$b/jdk/modules/$m/module-info.class" > "$TMPDIR/javac-vendor.pg-p" || return 1
       local rp=()
       while IFS= read -r a; do
         ls "$b/jdk/modules/$m/${a//.//}"/*.class > "$quiet" 2>&1 || rp+=("$a")
@@ -241,7 +242,7 @@ gensrc_tool() {
   mkdir -p "$cwd"
   (cd "$cwd" && env "TMPDIR=$work/tmp" \
      "ARBACE_PATH=$work/gensrc/tools/resources:$jdk/make/jdk/src/classes:$jdk/src/java.xml/share/classes:$jdk/make/langtools/tools" \
-     "$gexe" "$root/bin/lib/repr-java/gensrc-run.ae" "-Djdk.internal.jrt.javac.platform=$work/platform" \
+     "$gexe" "$root/test/javac-platform/gensrc-run.ae" "-Djdk.internal.jrt.javac.platform=$work/platform" \
      "${r[@]}" "$forms" "$cls" "$@")
 }
 # pg_concrete: stdin's placeholders, {gensrc} the own tree
@@ -356,7 +357,7 @@ gensrc_post_java_base() {
 # gensrc_preproc TEMPLATE OUT: GensrcMisc.gmk's generate-preproc-src (JCS369 (a)): the template's lines before
 # @@END_COPYRIGHT@@, then its C-preprocessed text from @@START_HERE@@ on, that line renamed, PREFIX_ dropped and a line
 # marker made empty, as make's awk and sed do; the preprocessing repr/c's on C's own target (musl's headers, c/target),
-# gcc -E's layout by bin/lib/repr-java/cppout.ae, with the build's -D, -U, -I and -std (platform-build.edn's :cpp)
+# gcc -E's layout by test/javac-platform/cppout.ae, with the build's -D, -U, -I and -std (platform-build.edn's :cpp)
 gensrc_preproc() {
   local t=$1 o=$2 opts=()
   mkdir -p "$(dirname "$o")"
@@ -364,7 +365,7 @@ gensrc_preproc() {
   mapfile -t opts < "$work/gensrc/cpp.opts"
   ( . "$root/bin/lib/repr-c/sysroot.bash" && c_sysroot &&
     mex=$(. "$root/bin/lib/host.bash" && arbace_host_exe) &&
-    "$mex" "$root/bin/lib/repr-java/cppout.ae" "$root/test/c/host" "$t" "${opts[@]}" ) > "$o.E" 2>> "$work/gensrc/log/$gm.log" ||
+    "$mex" "$root/test/javac-platform/cppout.ae" "$root/test/c/host" "$t" "${opts[@]}" ) > "$o.E" 2>> "$work/gensrc/log/$gm.log" ||
     { echo "javac-vendor gensrc: $gm: preprocessing $t failed ($work/gensrc/log/$gm.log)" >&2; return 1; }
   { awk '/@@END_COPYRIGHT@@/{exit}1' "$t"
     awk '/@@START_HERE@@/,0' "$o.E" | sed -e 's/@@START_HERE@@/\/\/ AUTOMATICALLY GENERATED FILE - DO NOT EDIT/' -e 's/PREFIX_//' -e 's/^#.*//'
@@ -556,7 +557,7 @@ gensrc() {
 }
 
 # The own platform's module descriptors (JCS359 (a)(3)): each module's javac descriptor extended as the build extends it,
-# by bin/lib/repr-java/modinfo.ae on the tools' host: (1) AddPackagesAttribute's ModulePackages (the packages of the
+# by test/javac-platform/modinfo.ae on the tools' host: (1) AddPackagesAttribute's ModulePackages (the packages of the
 # module's class files and its resource-only packages, OUT/platform-gensrc.edn's resource-packages), against the build's
 # exploded descriptor; (2) jmod create's version, main class, target platform and resolution flags (OUT/platform-build.edn's
 # :jmod), against the jmod's; java.base's ModuleHashes not written (JCS364 (a): OUT/platform-descriptors-known.edn). The
@@ -591,7 +592,7 @@ descriptors() {
     # step 1 (own only): the exploded descriptor
     r1=-
     if [ $from = own ]; then
-      "$mex" "$root/bin/lib/repr-java/modinfo.ae" "$x" "$w/exploded.class" --packages-file "$w/packages.txt" > "$w/log" 2>&1 || r1=failed
+      "$mex" "$root/test/javac-platform/modinfo.ae" "$x" "$w/exploded.class" --packages-file "$w/packages.txt" > "$w/log" 2>&1 || r1=failed
       if [ $r1 != failed ]; then cmp -s "$w/exploded.class" "$b/jdk/modules/$m/module-info.class" && r1=equal || r1=differ; x=$w/exploded.class; fi
     fi
     # step 2: jmod create's
@@ -614,7 +615,7 @@ descriptors() {
     printf '%s\n' "${ja[@]}" > "$w/modinfo.args"
     unzip -p "$b/images/jmods/$m.jmod" classes/module-info.class > "$w/build-jmod.class" 2> "$w/unzip.log"
     r2=failed
-    if [ "$r1" != failed ] && "$mex" "$root/bin/lib/repr-java/modinfo.ae" "$x" "$w/jmod.class" --packages-file "$w/packages.txt" "${ja[@]}" >> "$w/log" 2>&1; then
+    if [ "$r1" != failed ] && "$mex" "$root/test/javac-platform/modinfo.ae" "$x" "$w/jmod.class" --packages-file "$w/packages.txt" "${ja[@]}" >> "$w/log" 2>&1; then
       if cmp -s "$w/jmod.class" "$w/build-jmod.class"; then r2=equal
       else
         printf 'module-info.class\t%s\t%s\n' "$(sha256sum < "$w/build-jmod.class" | cut -c1-64)" "$(sha256sum < "$w/jmod.class" | cut -c1-64)" > "$w/diffs.tsv"
@@ -639,7 +640,7 @@ descriptors() {
     sed '$d' "$w/packages.txt" > "$w/control-packages.txt"
     x=$b/jdk/modules/$m/module-info.class; [ ! -f "$w/exploded.class" ] || x=$w/exploded.class
     local ca=(); mapfile -t ca < "$w/modinfo.args"
-    "$mex" "$root/bin/lib/repr-java/modinfo.ae" "$x" "$w/control.class" --packages-file "$w/control-packages.txt" "${ca[@]}" > "$w/control.log" 2>&1
+    "$mex" "$root/test/javac-platform/modinfo.ae" "$x" "$w/control.class" --packages-file "$w/control-packages.txt" "${ca[@]}" > "$w/control.log" 2>&1
     if cmp -s "$w/control.class" "$w/build-jmod.class"; then
       echo "javac-vendor descriptors: the control ($m less a package) equals the build's descriptor" >&2; st=1
     else

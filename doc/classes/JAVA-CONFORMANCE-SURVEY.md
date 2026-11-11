@@ -4844,7 +4844,7 @@ stages 2 and 3 after it). Nothing moves a score yet: the switch is stage 4's.
 `WORK/gensrc/out` as the JDK build does, with the build's own tools on javac's tool executable, and judges every `.java` against
 the build tree's (the reference, until stage 5 moves it to the oracle tier) and `jdk/javac/platform-gensrc-known.edn`:
 `WORK/gensrc/summary.tsv`, `generated.edn`, two negative controls (a known entry taken away must give `differ`, one added for an
-equal file `stale`). The logic is `bin/lib/repr-java/gensrc.bash` (out of every key: it runs the tool, it does not build it).
+equal file `stale`). The logic is `test/javac-platform/gensrc.bash` (out of every key and of the Java steps' declared inputs: it runs the tool, it does not build it).
 
 - **The configuration as data (JCS362 (a)).** `bin/javac-vendor platform-gensrc [--check]` derives `jdk/javac/platform-gensrc.edn`
   (157 KB, 301 records, one a line, the Clojure reader's; placeholders for paths) from the build tree once:
@@ -4862,7 +4862,7 @@ equal file `stale`). The logic is `bin/lib/repr-java/gensrc.bash` (out of every 
   Nimbus, the zh_HK copies, `sa.properties`.
 - **The tools javac's tool does not hold** (jdwpgen, x11wrappergen, icondata, methodhandle, module, generatenimbus) are read by
   repr/java from `make/jdk/src/classes/build/tools/DIR` into `WORK/gensrc/tools/DIR` (seconds each) and run by the interpreter
-  (`bin/lib/repr-java/gensrc-run.ae`: a package's classes in one top-level `do`, as javac compiles the tool; `main` called through
+  (`test/javac-platform/gensrc-run.ae`: a package's classes in one top-level `do`, as javac compiles the tool; `main` called through
   a public class of the tool's package, since jdwpgen's `Main` is package-private). No tool rebuild and no key move. What javac's
   tool world lacks is given as the plan said (JCS368 (b)), each listed with its reason:
   - variants in `overlay/jdk/javac/buildtools` (Arbace's own, EPL): `ToBin` (javax.imageio and Java2D: the PNG inflated, its filters
@@ -4882,7 +4882,7 @@ equal file `stale`). The logic is `bin/lib/repr-java/gensrc.bash` (out of every 
     JCS381); the templates are put on `ARBACE_PATH` as `make/CompileToolsJdk.gmk` copies them.
 - **The C-preprocessed sources (JCS369 (a)).** `UnixConstants` and `SocketOptionRegistry`: repr/c's preprocessor on C's own target
   (musl 1.2.6's headers, `c/target`; no gcc) with the build's `-D`, `-U`, `-I` and `-std` (platform-build.edn's `:cpp`), laid out by
-  `bin/lib/repr-java/cppout.ae` as gcc -E lays out its output (a new line's column less 2 in spaces, newlines for fewer than 8
+  `test/javac-platform/cppout.ae` as gcc -E lays out its output (a new line's column less 2 in spaces, newlines for fewer than 8
   skipped lines else a line marker, a line change where a token of a system header's macro follows one that is not or the
   reverse, at the expansion point), then make's awk and sed: both byte for byte the build's. Their class files' line numbers
   depend on that layout (`-g`), hence the emulation rather than any token-equal text.
@@ -4907,7 +4907,7 @@ The two known (`jdk/javac/platform-gensrc-known.edn`):
   Stable from run to run.
 
 **Stage 3: the descriptors.** `bin/javac-vendor descriptors [MODULE...]` extends each module's javac descriptor as the build
-does, by `bin/lib/repr-java/modinfo.ae` on the tools' host (no javac, no JVM, no java.lang.classfile): (1)
+does, by `test/javac-platform/modinfo.ae` on the tools' host (no javac, no JVM, no java.lang.classfile): (1)
 AddPackagesAttribute's `ModulePackages` (the packages of the module's class files and its resource-only packages, the data's:
 14 modules have some), against the build's exploded descriptor; (2) jmod create's version, main class, target platform and
 resolution flags (platform-build.edn's `:jmod`), against the jmod's. The writer does what jdk.internal.module.ModuleInfoExtender's
@@ -4924,7 +4924,7 @@ A negative control: the first module's step 2 with a package left out must diffe
   and java.datatransfer: 20 s, peak 1.55 GB; main classes and resource-only packages among them): 6 of 6 equal at both steps.
 
 **Keys.** `bin/javac-vendor`, `jdk/javac/` and `overlay/jdk/javac/` are in `arbace_javac_key`: the merge moves it once (one javac tool
-rebuild at the night's gate, as stage 1's merge already does). `bin/lib/repr-java/` is out of every key. `gate_key` and
+rebuild at the night's gate, as stage 1's merge already does). `test/javac-platform/` is out of every key and of the Java steps' inputs (`bin/lib/repr-java/` is in `:repr-java`'s, which all of Java's `--full` steps declare). `gate_key` and
 `arbace_runtime_key` are unchanged. The tool world's variants are read only at run time, not into `jdk/javac/forms`: no
 `bin/javac-vendor convert` and no edge.
 
