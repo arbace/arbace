@@ -608,6 +608,13 @@
                    :let [m (read-string l)] :when (not= :pass (:result m))]
                (:id m)))))
 
+(defn- run-outcomes
+  "Review 1111b, finding 6: each non-pass's outcome, {ID {:result R :differs [...]}} (what failed, not only that it failed)"
+  [results-file]
+  (into (sorted-map) (for [l (str/split-lines (slurp results-file)) :when (str/starts-with? l "{")
+                           :let [m (read-string l)] :when (not= :pass (:result m))]
+                       [(:id m) (select-keys m [:result :differs :stage])])))
+
 (def run-classes
   "HF10-P20, P28 (a): the classes of a run row's non-passes (the row's :classes, {ID CLASS}); a non-pass in none fails the judge.
   :o2-names: it calls a name of ghc-internal only its -O2 build has, from another package's -O2 STG (bytestring, directory,
@@ -626,11 +633,15 @@
   (let [ids (run-passes results-file)
         n (count (filter #(str/starts-with? % "{") (str/split-lines (slurp results-file))))
         old (some #(when (= (:runs %) (keyword set-name)) %) (run-rows record-file))
-        ;; HF10-P28 (a): each non-pass keeps its class from the set's old row, a new one :unclassed (the judge fails on it)
-        cls (into (sorted-map) (for [i (run-nonpasses results-file)] [i (get-in old [:classes i] :unclassed)]))
+        ;; HF10-P28 (a): each non-pass keeps its class from the set's old row, a new one :unclassed (the judge fails on it);
+        ;; review 1111b (finding 6): kept only when it fails as it did (the old row's :outcomes), else :unclassed
+        outs (run-outcomes results-file)
+        cls (into (sorted-map) (for [i (run-nonpasses results-file)]
+                                 [i (let [c (get-in old [:classes i] :unclassed) o (get-in old [:outcomes i])]
+                                      (if (or (nil? o) (= o (get outs i))) c :unclassed))]))
         ifaces (System/getenv "LIB_STG_PROG_IFACES")
         row (cond-> {:runs (keyword set-name) :passes (count ids) :of n :ids ids}
-              (seq cls) (assoc :classes cls)
+              (seq cls) (assoc :classes cls :outcomes outs)
               true (assoc :ifaces (keyword (or ifaces "own"))))
         text (slurp record-file)
         lines (remove (fn [l] (and (str/starts-with? l "{") (let [m (read-string l)] (and (map? m) (= (:runs m) (:runs row))))))
@@ -649,9 +660,20 @@
         ;; (all-base, HF10-P19 (a): base own too, against the all set's row)
         base-row ({"all" :equal "all-base" :all} set-name)
         lost-eq (when (and base-row (get rows base-row)) (remove now (:ids (get rows base-row))))
-        ;; HF10-P28 (a): a non-pass of the run in no class of the row's (run-classes) fails
-        uncl (when mine (remove #(contains? run-classes (get-in mine [:classes %])) (run-nonpasses results-file)))]
-    (doseq [i uncl] (println (str "lib-stg --run: " set-name ": " i " does not pass and is in no class (" (pr-str (get-in mine [:classes i])) ")")))
+        ;; HF10-P28 (a): a non-pass of the run in no class of the row's (run-classes) fails; review 1111b (finding 6): in a
+        ;; row with :outcomes, a classed non-pass whose outcome (result, differs, stage) is not the recorded one fails too
+        ;; (a row recorded before them, without :outcomes, is matched by id alone, said below)
+        outs (run-outcomes results-file)
+        moved (when (and mine (:outcomes mine))
+                (filter #(and (contains? run-classes (get-in mine [:classes %])) (not= (get-in mine [:outcomes %]) (get outs %)))
+                        (run-nonpasses results-file)))
+        uncl (when mine (concat (remove #(contains? run-classes (get-in mine [:classes %])) (run-nonpasses results-file)) moved))]
+    (doseq [i moved] (println (str "lib-stg --run: " set-name ": " i " fails otherwise than its class's recorded outcome: "
+                                   (pr-str (get outs i)) ", recorded " (pr-str (get-in mine [:outcomes i])))))
+    (doseq [i uncl :when (not (some #{i} moved))]
+      (println (str "lib-stg --run: " set-name ": " i " does not pass and is in no class (" (pr-str (get-in mine [:classes i])) ")")))
+    (when (and mine (:classes mine) (not (:outcomes mine)))
+      (println (str "lib-stg --run: " set-name ": the row has no :outcomes (recorded before review 1111b): its classes matched by id alone until it is recorded again")))
     (cond
       (nil? mine) (do (println (str "lib-stg --run: UNRECORDED: no row of the " set-name " set in " record-file)) (System/exit 1))
       (or (seq lost) (seq lost-eq))

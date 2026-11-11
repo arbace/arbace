@@ -55,7 +55,12 @@
 #                       :libs :pack with :front the reason (:ineligible: an import not own, a C file, a foreign stub, a CPP module;
 #                       :fallback: the list; else the stage that stopped the front end). Work .tmp/hsi/check-own (check-aot-own);
 #                       --record writes test/haskell/check-hsi-own.edn (-aot-own). own-fallback.txt (P23 (a)): the eligible programs
-#                       that pass on the pack and not on the own libraries, each with its class, run on the pack; it may only shrink
+#                       that did not pass on the own libraries, each with its class, run on the pack; it may only shrink: review
+#                       1111b (finding 4), HSI_OWN_FALLBACK=try runs them on the own libraries too (no --record) and fails on one
+#                       that passes; a run without --only fails on a listed id its corpora lack. Review 1111b (finding 3): a
+#                       non-pass on the own libraries is judged by divergences.edn only when it fails as check-hsi.edn's line does
+#                       (kind, status, differs); else by test/haskell/divergences-own.edn (:outcome, :message against :err, its
+#                       stderr's first line)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
@@ -84,6 +89,12 @@ while [ $# -gt 0 ]; do
 done
 case $front in native|ghc) ;; *) echo "hsi check: --front native or ghc, not $front" >&2; exit 2 ;; esac
 case $libs_set in own|pack) ;; *) echo "hsi check: --libs own or pack, not $libs_set" >&2; exit 2 ;; esac
+# review 1111b (finding 4): HSI_OWN_FALLBACK=try (--libs own): own-fallback.txt's programs tried on the own libraries too
+own_fallback=${HSI_OWN_FALLBACK:-}
+# (HSI_OWN_FALLBACK_LIST: another list, for the try mode's own test)
+own_fallback_list=${HSI_OWN_FALLBACK_LIST:-$root/test/haskell/own-fallback.txt}
+case $own_fallback in ''|try) ;; *) echo "hsi check: HSI_OWN_FALLBACK=try or unset, not $own_fallback" >&2; exit 2 ;; esac
+[ -z "$own_fallback" ] || { [ "$libs_set" = own ] && [ -z "$record" ]; } || { echo "hsi check: HSI_OWN_FALLBACK=try is --libs own's, without --record (its listed programs' lines are the pack's)" >&2; exit 2; }
 # --libs own: the eligible programs' front is the native one over the own interfaces, the others' GHC's (the pack)
 [ "$libs_set" = pack ] || { [ "$opt" = O0 ] && [ -z "$live" ] && [ -z "$record_ifaces" ]; } || { echo "hsi check: --libs own is -O0's, on the records (no --live, --record-ifaces)" >&2; exit 2; }
 [ "$libs_set" = pack ] || front=native
@@ -164,7 +175,7 @@ fi
 # the pack haskell-native-inputs-ghc-9.14.1's copy of them (its sysroot, as repr/haskell's native reads take it)
 if [ -n "$live" ]; then rtsinc=$(ls -d "$libdir"/../lib/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1)
 else rtsinc=$(ls -d "$("$root/bin/repr-haskell" native-libdir)"/*-ghc-"$pin"-*/rts-*/include 2>&1 | head -1); fi
-export libs_set own_libs own_images own_if
+export libs_set own_libs own_images own_if own_fallback
 export root work hsi libs helper helper_hash libdir ref keep images aot rtsinc opt sfx divs divs1 front
 export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 # programs that need more than ARBACE_MEM_GIB name their own cap (ID=GIB ...); none today: the deepest stacks, Loop
@@ -264,10 +275,12 @@ if [ "$front" = native ]; then
   flibs=$libs
   # --libs own: the own interfaces and the own libraries' constructors; the fallback list's programs not tried (P23 (a))
   if [ "$libs_set" = own ]; then ifaces=$own_if; flibs=$own_libs; fi
-  fb=$root/test/haskell/own-fallback.txt
+  fb=$own_fallback_list
   : > "$fw/plan.tsv"
   while IFS=$'\037' read -r id src main flags ropts name sin kind; do
-    if [ "$libs_set" = own ] && [ -f "$fb" ] && awk -v i="$id" '$1 == i {f = 1} END {exit !f}' "$fb"; then
+    # review 1111b (finding 4): HSI_OWN_FALLBACK=try runs the listed programs on the own libraries too (a pass fails the check:
+    # the list may only shrink)
+    if [ "$libs_set" = own ] && [ "$own_fallback" != try ] && [ -f "$fb" ] && awk -v i="$id" '$1 == i {f = 1} END {exit !f}' "$fb"; then
       echo "${id//\//_} fallback in test/haskell/own-fallback.txt" >> "$fw/front.fallback.log"; continue
     fi
     if front_eligible "$src" "$main" "$flags" "$kind" "$ifaces"; then
@@ -576,7 +589,13 @@ one() {
     [ "$se" = "$rse" ] || why="$why :stderr"
     # killed at the check's limits (SIGKILL at the wall cap, SIGXCPU at the CPU limit): the reason :limit
     local lim=""; case $st in 137|152) lim=" :reason :limit" ;; esac
-    echo "{:id \"$id\" :result :fail :status $st :differs [${why# }]$lim $tm}" > "$res"
+    # review 1111b (finding 3): a failure on the own libraries says what failed, stderr's first line (judged by
+    # test/haskell/divergences-own.edn's :message when it fails otherwise than on the pack)
+    local err=""
+    if [[ $tm == *":libs :own"* ]] && [ "$se" != "$rse" ]; then
+      err=$(grep -m1 . "$o.stderr" | cut -c1-120 | sed 's/\\/\\\\/g; s/"/\\"/g'); [ -z "$err" ] || err=" :err \"$err\""
+    fi
+    echo "{:id \"$id\" :result :fail :status $st :differs [${why# }]$lim$err $tm}" > "$res"
   fi
   [ -n "$keep" ] || grep -q "^$id " "$root/test/haskell/hsi-controls.txt" || rm -f "$o.stdout" "$o.stderr"
 }
@@ -679,8 +698,57 @@ echo "hsi check: $total programs ($out)"
 # records (its :results, and for :hsi its :message's text in hsi's message; review 189, F6): a classed program whose
 # result changed kind is in no class
 unclassed=0
+# review 1111b (findings 3, 4): --libs own's judge. outcome LINE: what a result says failed (kind, status, differs, reason)
+outcome() {
+  local k st d
+  k=$(sed -n 's/^{:id "[^"]*" :result \(:[a-z-]*\).*/\1/p' <<< "$1"); st=$(sed -n 's/^{:id "[^"]*" :result :[a-z-]* :status \([0-9]*\).*/\1/p' <<< "$1")
+  d=$(sed -n 's/.* :differs \(\[[^]]*\]\).*/\1/p' <<< "$1"); echo "${k:+:result $k}${st:+ :status $st}${d:+ :differs $d}"
+}
+packrec=$root/test/haskell/check-hsi$sfx.edn; [ -z "$aot" ] || packrec=$root/test/haskell/check-hsi-aot$sfx.edn
+divs_own=$root/test/haskell/divergences-own.edn
+fbad=0
+if [ "$libs_set" = own ] && [ -f "$own_fallback_list" ]; then
+  # a listed program the plan does not have, in a corpus the run took whole (no --only), is a stale line
+  if [ -z "$only" ]; then
+    while read -r fid _; do
+      case $fid in ''|\#*) continue ;; esac
+      awk -F'\037' -v i="$fid" '$1 == i {f = 1} END {exit !f}' "$plan" && continue
+      cut -d$'\037' -f1 "$plan" | cut -d/ -f1 | sort -u | grep -qx "${fid%%/*}" || continue
+      echo "hsi check: own-fallback.txt lists $fid, which the plan does not have"; fbad=$((fbad + 1))
+    done < "$own_fallback_list"
+  fi
+  # HSI_OWN_FALLBACK=try: a listed program that now passes on the own libraries leaves the list
+  if [ "$own_fallback" = try ]; then
+    while IFS= read -r line; do
+      id=$(sed 's/^{:id "\([^"]*\)".*/\1/' <<< "$line")
+      awk -v i="$id" '$1 == i {f = 1} END {exit !f}' "$own_fallback_list" || continue
+      if [[ $line == *":result :pass"* ]]; then echo "hsi check: $id passes on the own libraries and is listed in own-fallback.txt: remove it (the list may only shrink)"; fbad=$((fbad + 1))
+      else echo "hsi check: $id still listed, tried on the own libraries: $(outcome "$line")"; fi
+    done < <(grep '^{' "$out" | grep ':libs :own')
+  fi
+fi
 while IFS= read -r line; do
   id=$(sed 's/^{:id "\([^"]*\)".*/\1/' <<< "$line"); kind=$(sed -n 's/.* :result :\([a-z-]*\).*/\1/p' <<< "$line")
+  # (try mode: a listed program tried on the own libraries is judged above, by the list)
+  if [ "$own_fallback" = try ] && [[ $line == *":libs :own"* ]] && awk -v i="$id" '$1 == i {f = 1} END {exit !f}' "$own_fallback_list"; then continue; fi
+  # review 1111b (finding 3): a non-pass on the own libraries is judged by the classes of the pack's failures only when it
+  # fails there as on the pack (test/haskell/check-hsi.edn's line: kind, status, differs); else it is an own-only failure,
+  # in a class of test/haskell/divergences-own.edn whose :outcome is its own and whose :message its stderr's first line holds
+  if [ "$libs_set" = own ] && [[ $line == *":libs :own"* ]]; then
+    pl=$(grep -F "{:id \"$id\" " "$packrec" || true)
+    if [ "$(outcome "$line")" != "$(outcome "$pl")" ]; then
+      IFS=$'\t' read -r c cout cmsg < <(awk -v id="\"$id\"" '
+        /^ *\{:id :/ {cls=$2; out=""; msg=""}
+        /^ *:outcome "/ {out=$0; sub(/.*:outcome "/, "", out); sub(/".*/, "", out)}
+        /^ *:message "/ {msg=$0; sub(/.*:message "/, "", msg); sub(/".*/, "", msg)}
+        index($0, id) {printf "%s\t%s\t%s\n", cls, (out == "" ? "-" : out), (msg == "" ? "-" : msg); exit}' "$divs_own") || true
+      [ "$cmsg" = - ] && cmsg=""
+      if [ -z "$c" ]; then echo "hsi check: $id fails on the own libraries otherwise than on the pack ($(outcome "$line"); pack: $(outcome "$pl")), in no class of test/haskell/divergences-own.edn"; unclassed=$((unclassed + 1)); continue; fi
+      if [ "$cout" != "$(outcome "$line")" ]; then echo "hsi check: $id in own class $c, but its outcome $(outcome "$line") is not the class's ($cout)"; unclassed=$((unclassed + 1)); continue; fi
+      if [ -n "$cmsg" ] && [[ $line != *"$cmsg"* ]]; then echo "hsi check: $id in own class $c, but its message is not the class's (\"$cmsg\")"; unclassed=$((unclassed + 1)); continue; fi
+      echo "hsi check: $id in own class $c (pack: $(outcome "$pl"))"; continue
+    fi
+  fi
   IFS=$'\t' read -r c cres cmsg crsn < <(awk -v id="\"$id\"" '
     /^ *\{:id :/ {cls=$2; res=""; msg=""; rsn=""}
     /^ *:results \[/ {res=$0; sub(/.*:results \[/, "", res); sub(/\].*/, "", res)}
@@ -703,7 +771,9 @@ while IFS= read -r line; do
   fi
   echo "hsi check: $id in class $c"
 done < <(grep '^{' "$out" | grep -v ':result :pass')
-echo "hsi check: $unclassed not passing in no class of test/haskell/divergences$sfx.edn${sfx:+ or test/haskell/divergences.edn}"
+echo "hsi check: $unclassed not passing in no class of test/haskell/divergences$sfx.edn${sfx:+ or test/haskell/divergences.edn}$([ "$libs_set" != own ] || echo " or test/haskell/divergences-own.edn")"
+[ "$libs_set" != own ] || echo "hsi check: own-fallback.txt: $fbad problems"
+unclassed=$((unclassed + fbad))
 if [ -n "$record" ]; then
   rec=$root/test/haskell/check-hsi$sfx.edn; [ -z "$aot" ] || rec=$root/test/haskell/check-hsi-aot$sfx.edn
   # a front that is not the default records apart (HFS-I1 (a): check-hsi-native.edn beside check-hsi.edn until the switch)
