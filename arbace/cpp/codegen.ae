@@ -55,6 +55,16 @@
     (swap! *top* update :forms assoc i f)
     (add-top! f)))
 
+(def ^:dynamic *eager-want* false) ; P23 (a): the top-level definitions wanted before any is written (no slot yet)
+
+(defn- reserve!
+  "P23 (a): the function `nm`'s place among the module's forms taken now, at its first reference, as an llvm::Function
+  takes its place in the module's list when created (GetOrCreateLLVMFunction) and is defined there later."
+  [nm]
+  (let [skey [:fn nm]]
+    (when-not (contains? (:slots @*top*) skey)
+      (swap! *top* (fn [t] (-> t (assoc-in [:slots skey] (count (:forms t))) (update :forms conj [::slot skey])))))))
+
 (defn- declare! [^String nm ret ps & {:keys [va nounwind pattrs]}]
   (when-not (contains? (:declared @*top*) nm)
     (swap! *top* update :declared conj nm)
@@ -306,7 +316,8 @@
       (swap! *top* update :wanted conj [fid v])
       (if (and (or (:tbody f) (and (:implicit f) (not (:trivial f))) (and (:defaulted f) (not (:trivial f))) (:tinits f) (:tassign f))
                (not (and (:tbody f) (not (:implicit f)) (not (:defaulted f)) (extern-inst? f) (not (:always-inline f)))))
-        (swap! *top* update :queue conj [fid v])
+        (do (when-not *eager-want* (reserve! nm))
+            (swap! *top* update :queue conj [fid v]))
         (let [[r ps va plan] (fn-sig f v)] (declare! nm r ps :va va :nounwind (nothrow-fn? f) :pattrs (:pattrs plan)))))
     (gsym nm)))
 
@@ -426,9 +437,11 @@
 (defn- clang-call-terminate! []
   (when-not (contains? (:declared @*top*) "__clang_call_terminate")
     (swap! *top* update :declared conj "__clang_call_terminate")
+    ;; (P23 (a): the function created before the declarations its body names, as clang's getClangCallTerminateFn)
+    (reserve! "__clang_call_terminate")
     (declare! "__cxa_begin_catch" 'ptr '[ptr] :nounwind true)
     (declare! "_ZSt9terminatev" 'void [] :nounwind true)
-    (add-top! (list 'llvm/define (gsym "__clang_call_terminate") 'void [['ptr '%a0]] :linkage :linkonce_odr :visibility :hidden
+    (place! [:fn "__clang_call_terminate"] (list 'llvm/define (gsym "__clang_call_terminate") 'void [['ptr '%a0]] :linkage :linkonce_odr :visibility :hidden
                     :attrs [:noinline :noreturn :nounwind]
                     :body [(list 'block nil
                                  (list '= '%t1 (list 'call 'ptr (gsym "__cxa_begin_catch") [['ptr '%a0]] :attrs [:nounwind]))
@@ -496,6 +509,8 @@
                 [es ss] (eh-slots!)]
             (swap! *f* assoc-in [:pads state] l)
             (swap! *f* assoc :personality true :blocks [])
+            ;; (P23 (a): the personality function created at the first landing pad, as clang's getOpaquePersonalityFn)
+            (declare! "__gxx_personality_v0" 'i32 [] :va true)
             (start! l)
             (let [lp (val! (apply list 'landingpad '(struct ptr i32)
                                   (concat (when cleanup [:cleanup]) (map (fn [ti] (list 'catch 'ptr (or ti 'null))) clauses))))]
@@ -2080,8 +2095,14 @@
                             (or (not (abi/class? t)) (not (nontrivial-dtor? (:id t))) (trivial-dtor-body? (:id t)))))
                  (:fields (abi/cls cid))))))
 
-(defn- want-d0! "A virtual destructor's deleting variant, written once (as clang, when a vtable refers to it)." [fid]
-  (swap! *top* update :d0s conj-new fid))
+(defn- want-d0!
+  "A virtual destructor's deleting variant, written once (as clang, when a vtable refers to it): deferred among the
+  functions, in the order first referred to (P23 (a))."
+  [fid]
+  (when-not (some #(= fid %) (:d0s @*top*))
+    (reserve! (abi/mangle-fn (sema/fnd fid) 0))
+    (swap! *top* update :d0s conj-new fid)
+    (swap! *top* update :queue conj [:d0 fid])))
 
 (defn- linkage-of [f]
   (cond
@@ -2095,6 +2116,7 @@
   [fid v]
   (let [f (sema/fnd fid)
         nm (fn-name fid v)
+        _ (reserve! nm)
         vtt? (takes-vtt? f v)
         vbc (vb-class? (:cls f))
         [ret ps va plan] (fn-sig f v)
@@ -2219,7 +2241,7 @@
             body (vec (concat [entry] (rest blocks) (:pad-blocks s)))
             params (mapv (fn [t a p] (vec (concat [t] a [p]))) ps (:pattrs plan) pnames)]
         (when (:personality s) (declare! "__gxx_personality_v0" 'i32 [] :va true))
-        (add-top! (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
+        (place! [:fn nm] (apply list 'llvm/define (gsym nm) ret (cond-> params va (conj '&))
                          (concat (linkage-of f)
                                  (when (or (nothrow-fn? f) (:always-inline f))
                                    [:attrs (vec (concat (when (:always-inline f) [:alwaysinline]) (when (nothrow-fn? f) [:nounwind])))])
@@ -2235,6 +2257,7 @@
   "The deleting destructor: D2, then operator delete with the object's size."
   [f]
   (let [nm (abi/mangle-fn f 0)
+        _ (reserve! nm)
         t {:k :class :id (:cls f)}
         ;; the class's operator delete, else the global sized one (FindDeallocationFunctionForDestructor)
         d (sema/dtor-dealloc (:cls f))
@@ -2245,7 +2268,7 @@
       (emit! '(ret void))
       (close-block!))
     ;; (the destructor's linkage: strong for one defined out of line here, G5c; linkonce_odr for an inline one)
-    (add-top! (apply list 'llvm/define (gsym nm) 'void [['ptr '%a0]]
+    (place! [:fn nm] (apply list 'llvm/define (gsym nm) 'void [['ptr '%a0]]
                      (concat (let [l (linkage-of f)] (if (and (empty? l) (:body f) (not (:lazy f))) [] (if (:internal f) [:linkage :internal] [:linkage :linkonce_odr])))
                              [:body (vec (:blocks @state))])))))
 
@@ -2664,6 +2687,7 @@
         (binding [*out* *err*] (println "layout" nm id (pr-str (:targs c)) (pr-str (dissoc (abi/layout id) :primary)) (pr-str (map (fn [f] [(:name f) (abi/size-of (:ty f))]) (:fields c))) (pr-str (:bases c))))))
     (emit-globals! prog file)
     ;; the definitions: every non-inline function with a body, then what they use
+    (binding [*eager-want* true]
     (doseq [[k id] (:order prog) :when (= k :fn)]
       (let [f (sema/fnd id)]
         ;; internal functions are written when used, as clang defers them
@@ -2677,7 +2701,7 @@
             (when-not (and (= :ctor (:kind f)) (abstract-class? (:cls f))) (want-fn! id 1))
             (when (and (= :dtor (:kind f)) (:virtual f)) (want-d0! id))))
         (when (and (:tbody f) (= "main" (:name f))) (want-fn! id))
-        (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id))))
+        (when (and (:tbody f) (:used f) (not (:implicit f))) (want-fn! id)))))
     ;; G5c: the vtables (with their VTTs and type_info) of the classes whose key function this unit defines, used or not
     ;; (clang's Sema::MarkVTableUsed at the key function's definition, CodeGenModule::EmitVTable)
     (doseq [cid (sort (keys @abi/*classes*)) :when (= :here (vtable-home cid))]
@@ -2689,21 +2713,36 @@
       (let [c (abi/cls cid)]
         (when (and (= "__fundamental_type_info" (:name c)) (= [[:ns "__cxxabiv1"]] (vec (:path c))))
           (fundamental-typeinfos!))))
-    (loop []
-      (let [q (:queue @*top*)
-            d0s (for [fid (:d0s @*top*) :when (not (contains? (:declared @*top*) [:d0 fid]))] fid)
-            todo (concat (for [g (:groups @*top*) :when (not (contains? (:declared @*top*) [:group g]))] [:group g])
-                         (for [c (:vtts @*top*) :when (not (contains? (:declared @*top*) [:vtt c]))] [:vtt c]))]
-        (when (or (seq q) (seq d0s) (seq todo))
-          (swap! *top* assoc :queue [])
-          (doseq [[fid v] q] (emit-fn! fid v))
-          (doseq [fid d0s] (swap! *top* update :declared conj [:d0 fid]) (emit-d0! (sema/fnd fid)))
-          ;; the vtable groups and VTTs the code refers to (their functions queued in turn)
-          (doseq [[k x :as key] todo]
-            (when-not (contains? (:declared @*top*) key)
-              (swap! *top* update :declared conj key)
-              (if (= k :group) (group! x) (vtt! x))))
-          (recur))))
+    ;; P23 (a): the order of clang's CodeGenModule (clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH
+    ;; LLVM-exception): the definitions that must be emitted written eagerly in order (EmitGlobal's MustBeEmitted), then
+    ;; EmitDeferred: the deferred vtables first (EmitDeferredVTables), then the deferred functions taken as a list, each
+    ;; written and, when it deferred more, EmitDeferred again at once (depth first, "related ones close together")
+    (let [emit-item! (fn [[fid v]]
+                       (if (= :d0 fid)
+                         (when-not (contains? (:declared @*top*) [:d0 v])
+                           (swap! *top* update :declared conj [:d0 v]) (emit-d0! (sema/fnd v)))
+                         (emit-fn! fid v)))
+          vt-todo (fn [] (concat (for [g (:groups @*top*) :when (not (contains? (:declared @*top*) [:group g]))] [:group g])
+                                 (for [c (:vtts @*top*) :when (not (contains? (:declared @*top*) [:vtt c]))] [:vtt c])))
+          vtables! (fn [] (loop []
+                            (when-let [todo (seq (vt-todo))]
+                              (doseq [[k x :as key] todo]
+                                (when-not (contains? (:declared @*top*) key)
+                                  (swap! *top* update :declared conj key)
+                                  (if (= k :group) (group! x) (vtt! x))))
+                              (recur))))
+          pending? (fn [] (or (seq (:queue @*top*)) (seq (vt-todo))))
+          eager (:queue @*top*)]
+      (swap! *top* assoc :queue [])
+      (letfn [(deferred! []
+                (vtables!)
+                (let [cur (:queue @*top*)]
+                  (swap! *top* assoc :queue [])
+                  (doseq [x cur]
+                    (emit-item! x)
+                    (when (pending?) (deferred!)))))]
+        (doseq [x eager] (emit-item! x))
+        (while (pending?) (deferred!))))
     ;; (every slot filled: a wanted group or VTT is written)
     (swap! *top* update :forms (fn [fs] (filterv #(not (and (vector? %) (= ::slot (first %)))) fs)))
     (doseq [[nm a] (sort-by key (:aliases @*top*))] (when (contains? (:c1 @*top*) nm) (add-top! a)))
@@ -2894,12 +2933,15 @@
                  (println "generated"))
     ;; bin/cppi check's route (CPPI_ROUTE=ours|auto, bin/lib/cppi/route.bash): PATH<tab>STD<tab>OUT lines, each program's forms, IR and
     ;; lowering into OUT (gen.ll, or gen.refused), one process for the list; STD as g++ names it (gnu++17 read as c++17)
+    ;; (CP336 (a), measured: P15 (b)'s full parse cache on in gen-batch read samples/io.cpp's headers back in 557 s against
+    ;; 378 s parsing them, the forms the same; so off by default, CPP_GEN_FULL_CACHE=1 on: doc/cpp/CPP-SURVEY.md, CP341)
     "gen-batch" (let [[lst] args]
+                  (binding [ps/*full-cache* (= "1" (System/getenv "CPP_GEN_FULL_CACHE"))]
                   (doseq [l (str/split-lines (slurp lst)) :when (seq l)]
                     (let [[p std out a] (str/split l #"\t")
                           c (gen-one p (str/replace (or std "c++23") #"^gnu" "c") out (vec (remove str/blank? (str/split (or a "") #"\s+"))))]
                       (println (str out "\t" (if c (name c) "ok")))
-                      (flush)))
+                      (flush))))
                   (shutdown-agents) (System/exit 0))
     "judge" (let [[work known] args] (judge work known))
     "gen-judge" (let [[work refusals forms controls rec] args] (gen-judge work refusals forms controls (= rec "--record")))

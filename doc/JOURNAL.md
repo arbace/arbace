@@ -3318,3 +3318,71 @@ CI_AOT_LIB default takes the main checkout by `${root%%/.tmp/worktrees/*}` as bi
 the main checkout's warm cache (2.2); verify.ae's vp.splice tests the vector type before `(nth rt 1)`, and require-logical-pointer? and
 amdgcn-triple? are computed once per module (`*mod-facts*`; 2.3). Proofs: bin/llvmi check --essential 10 of 10, controls fail;
 test/repr/llvm/controls-test.bash; repr-llvm check verify-llvmtest/verify-probes --essential; bin/reap; bin/crops-score --judge --strict.
+## 2026-11-10: C++'s CP325-CP337 and P23 built (branch `cpp-props5`)
+
+- **What**: the user's acceptance of 2026-11-09 (each proposal as recommended), on a branch from mac/cpp-route-merged a69c3b10a so that
+  cpp-route's code generation route is in. Checker: a Sema crash is a failing `:crash`, never an acceptance (CP325 (a); parse/enum4.C's
+  long overflow in the constant evaluation fixed: 64-bit wrap); a time cap for each file of the dg read, `REPR_CPP_DG_TIMEOUT` default
+  300 s (CP329 (a)); `C<A>::M` as a placeholder for a deduced class (CP327 (a), class-deduction-alias20); structured bindings modelled
+  in the checker (CP331 (a)); `:gxx-only-rules` by design (CP328 (a)). Code generator: inheriting constructors (CP330 (a), CP326 (a);
+  mangled CI1/CI2 <base>, Itanium §5.1.4.3), std::tuple and std::map's operator[] (CP332 (a): clang's builtin templates
+  `__type_pack_element` and `__make_integer_seq` in the native parser and the templates, a pack parameter's type as an alias's argument,
+  pack expansions as one argument, a misread fold, if constexpr over a class, a failing decltype in a bound signature a substitution
+  failure), runtime/hello.cpp now generated; the full parse cache in gen-batch (CP336 (a), measured slower on a hit than the parse,
+  557 s against 378 s on samples/io.cpp, so off by default: CP341); the module's order as clang's (P23 (a):
+  functions placed at first reference as llvm::Functions are when created, EmitDeferred depth first; the order read from
+  clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH LLVM-exception, no code ported). CP333 (b), CP334 (b),
+  CP335 (b): nothing to build now; CP337 (b) was cpp-route's.
+- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (hello.cpp, unique_ptr
+  and the library's tuples were the next group), and the read's own record counts the dg files Arbace's front end judges alone.
+- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: cpp-props5"): the dg every-10th sample 121 → 121 own passes, the same files (two
+  regressions found and fixed on the way); 75 files with structured bindings, inheriting constructors and alias20: 12 → 13; the run
+  corpora's 82 programs by our route: 55 → 57 generated (embed-26, hello.cpp), none lost; codegen-gen 154 of 154 recorded again for P23's order (the
+  forms otherwise the same); P23 against clang's IR of 17 samples by hand: vtables in clang's order 3 → 13, functions' common
+  subsequence 44% → 79%. No run check (the lowered runtime's read is heavy; the runs are the night's). `bin/crops-score --crop cpp`
+  unchanged (76.3 / 100 / 67.8): the facts move only with the night's records (the dg own record, the switch).
+- **Alternatives considered**: writing the deferred functions after each top-level definition (tried: clang's IR shows the bodies'
+  references placed later, the positions are creation order, so it was dropped); diagnosing a failed decltype at the call instead of
+  dropping the candidate (wrong for SFINAE, [temp.deduct.general]/8); a future with a timeout for CP329 (the goroutine would run on).
+- **Proposed**: CP338 (the run corpora's remaining refusals), CP339 (landing pads' cleanups at the scope's end), CP340 (the generation's
+  time at night), CP341 (the full cache's format, or none).
+- **Slips**: two process substitutions (`paste <(...)`, `diff <(...)`) and one `>/dev/null` in throwaway comparisons, against the day's
+  rules; a `bin/cppi runtime-build` attempt was refused by the permission layer during night 10's heavy work and not retried.
+
+## 2026-11-10: C++'s print cell on the own round trip's records, CP243 (a)'s switch (branch `cpp-print-own`)
+
+- **What**: cpp-compl's night step 2 run by day in the light lane: `bin/repr-cpp roundtrip-corpus KEY --judge own --record-results`
+  for gxx-dg-every-10 (1,796 of 1,807 pass, 11 forms-differ), gxx-old-deja-every-10 (320 of 323, 3), c-c++-common-every-10 (326 of
+  326), libstdcxx-testsuite-every-40 (244 of 244), and `bin/repr-cpp dg --corpus modules [--sample 10] --rt-judge own --record`
+  (gxx-modules-all 1,180 of 1,181, gxx-modules-every-10 119 of 119): `test/repr/cpp/roundtrip-results/own/`. Two fixes on the way:
+  a statement's GNU attribute printed `__attribute__((x))` when it is no standard attribute (`[[used]]` was dropped on the read
+  again; `arbace/repr/cpp/print.ae`), and `sema`'s empty-init bails on a member of its own class's type (parse/struct-4.C overflowed
+  the stack; `arbace/repr/cpp/sema.ae`). Then CP243 (a): `--judge own` the round trip's default (`bin/lib/repr-cpp/roundtrip`;
+  `dg --rt-judge own` too), `test/reap/cells.edn`'s C++ print sources on `roundtrip-results/own`, cpp-roundtrip-dg's rotation
+  universe the own record, `test/crops/independence.edn`'s judge `:roundtrip [3887 1]`; `bin/reap --record`, `bin/crops-score --record`.
+- **Why**: the crops' roadmap's cheapest unscheduled gain (`.tmp/plans/CROPS-90-ROADMAP.md`, item 3); the user's CP243 (a) of
+  2026-11-07 waited only on the records, which needed no clang and fit the day's 2 GiB.
+- **Checked**: each record from a whole run with no failure; the samples (9 of 9, the control failing as it must) and
+  gxx-dg-essential (33 of 33) under the new default; old-deja and c-c++-common checked again after the fixes. `bin/crops-score --crop
+  cpp`: 76.3 / 100 / 67.8 → 89.1 / 100 / 71.3 (print 48.3 → 99.5; judge 0.735 → 0.907); `--judge --strict` 0 problems.
+- **Alternatives considered**: classing the 15 forms-differ in the known file (the own judge classes them itself; the known file is
+  the clang judge's); fixing them now (CP342, doc/cpp/CPP-SURVEY.md, "As built: CP243 (a)").
+- **Slips**: `bin/lib/repr-cpp/roundtrip` edited while a run read it (the 47-minute libstdcxx run lost, run again); one `/dev/null`
+  in a throwaway grep.
+
+## 2026-11-10: the five reader gaps of the own judge's forms-differ, CP352 (branch `cpp-cp352`)
+
+- **What**: five files of the 15 forms-differ of C++'s print cell (own judge), fixed in `arbace/repr/cpp/parse.ae`: a statement's
+  `__attribute (...)` (asan/pr82792.C), an enum under a template header (cpp0x/scoped_enum7.C) and a class defined in a trailing return
+  type (cpp0x/trailing5.C) as the declaration's text (NativeDecline: the forms have no place for either, and the print named what
+  the original defined), an array member's `a({...})` in the semantic list form `a{...}` has (cpp2a/paren-init33.C; clang's AST
+  for both is one InitListExpr, checked by hand with `clang++ -ast-dump`), a macro-named module partition's expansion consumed with its
+  `;` (modules/cpp-11.C). gxx-dg-every-10 recorded again from a whole run (1,801 pass, 6 forms-differ; was 1,796 and 11),
+  gxx-modules-all, gxx-modules-every-10, old-deja, c-c++-common unchanged, gxx-dg-essential 33 of 33, the samples 9 of 9 with their
+  control, codegen-gen 154 of 154. The report that found them said "CP342", which is the plan's other decided item: called CP352.
+- **Why**: the five are bugs on valid-looking code (decision-free), the rest of the 15 are dg-error files whose error recovery the forms
+  do not keep, and one aarch64-only file: left alone.
+- **Alternatives considered**: for the enum, keeping the template header in the forms (no form for it; clang's tree has none either) or
+  the printer writing one (it cannot know); for trailing5, hoisting the defined class beside the function (the tag's node would need a
+  place in the declarator's result: left for when valid code needs it, a type may not be defined in a trailing return type).
+- **Slips**: one `> /dev/null` on a background `nohup`.
