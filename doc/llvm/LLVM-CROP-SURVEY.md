@@ -2361,3 +2361,39 @@ gaps and the di-retarget verdict above.
 
 A fresh worktree needs the musl forms' cache for `bin/llvmi` (`.tmp/ci-musl/forms`, 11 MB: `bin/ci musl read`, or copy the main
 checkout's); without it llvmi's build step finds no forms and `test/repr/llvm/controls-test.bash` fails its llvmi parts (found here).
+
+## Decided (the user, 2026-11-11): LLS47 (a) and LLS50 now; LLS48 and LLS49 as they are
+
+## As built: LLS47, LLS50 (2026-11-11, branch `llvm-ind2`, from mac/next)
+
+**Built (LLS47 (a)): `mutants-oracle` in record mode compares the verdict only.** `ref-opt23.edn` keeps opt's first message and a digest
+of its stderr, so a mutant naming a later message (`builtin-prefetch-5`'s `Intrinsic called with incompatible signature`, the attr-dup
+order) read "differs" there and "same" live. The message check is the live mode's now (opt's whole stderr, `REPR_LLVM_JUDGE=live`, the
+oracle tier's authority, and `verify-check`, which holds each own message to Arbace's verifier); record mode's message column is `-`.
+No record changed. Measured (record mode, the pack's two lists): verify-rt 636 own, 636 as opt's (was 635); verify-rt-heldout 1,069 own,
+1,068 as opt's (was 1,065): the four message gaps (`builtin-prefetch-5.win.intrinsic.265`, `builtin-prefetch-5.g0.intrinsic.500128`,
+`rs.g0.attr-dup.600096`, `p1-first.lto.attr-dup.600342`) are "same" without a live opt (checked on these four: 4 own, 4 as opt's); the
+one that differs is the stale line of `pr79354.g2.di-retarget.500483` (LLS46 (b); the pack's remake corrects it).
+
+**Built (LLS50): the split-file sections' own verdicts.** `own_verdicts` (bin/repr-llvm) sends a module whose path is a section
+(`.../split/DIR/TEST.ll/SECTION.ll`) to `section_verdict`, which reads the parent test's RUN lines (`LLVM_SRC` or the checkout's
+extraction, `llvm-project-23.1.5.src/llvm/test/DIR/TEST.ll`). `valid`: some command (a pipeline's or a `;`/`&&` list's part) of opt, llc,
+llvm-as or llvm-link names `%t/SECTION` as an input (not after `-o`; after a `cd %t` the bare name counts), and no command that names
+it is under `not` or reads it with `--disable-verify`; those tools verify their input, so the test says the section is taken, as it
+does for a whole file, and Arbace's verifier must meet it (valid or debug). FileCheck, cat, cp and other tools naming it change
+nothing. Otherwise `-` (opt's record). Of the family's 60 split entries 53 are `valid` by their own verdict now (one was before): 52 more
+own verdicts (verify-llvmtest: 758 of 806 by their own verdict, was 706; 48 opt's, was 100). The 7 left on opt's record are sections
+no RUN line feeds to those tools as a file of its own (concatenated by `cat`, read by `llvm-lto2`, `llvm-diff`, `llvm-profdata`...),
+the proposal's "57" counting every `valid` row. All 800 recorded passes are unchanged (0 failing, 0 fixed); the 4 verdicts that differ
+are the same whole-file `invalid` rows as before (AMDGPU, dilocation-in-wrong-place), not sections.
+Controls: `_control/section-vs-reject` (`Verifier-gcwrite-ptrptr` against the section `Analysis-CtxProfAnalysis-full-cycle.ll-m1`'s own
+reference: the verdict differs) in `test/repr/llvm/verify-controls.txt`, met in the full family's run (4 controls fail as they must; an
+essential run leaves it, the sections' parents being in the tarball); and `controls-test.bash`'s fake tree (a parent test and four
+sections under `$w/fk`, `LLVM_SRC`): a and d valid, b under `not` and c an output only without an own verdict, and the crossed control
+failing as it must. Checks: `bin/repr-llvm check verify-llvmtest` 806 modules, 800 pass; `--essential` of roundtrip-llvmtest (43),
+verify-llvmtest (43) and verify-probes (4), 0 failing; expect-test 44 cases, 13 controls, 0 failing; controls-test all ok;
+`bin/reap` 0 problems; `bin/crops-score --judge --strict` 0.
+
+**Independence.** The judge stage 0.8455 to 0.8541 (2136 own, 880 recorded: independence 96.91 to 97.08; `test/crops/independence.edn`'s
+`:llvm :judge`, `scores.edn`). Left: the 478 probes (LLS48 (a)) and llvmi's 177 modules (LLS49 (a)), as decided, and 48 llvm/test
+modules on opt's record (41 whole files of split-file tests, 7 sections).
