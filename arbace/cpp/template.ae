@@ -59,6 +59,8 @@
 ;; a template-id with such arguments {:k :tspec :tmpl tid :name s :path p :args [...]}.
 
 (def ^:dynamic *tmpls* nil)
+;; CP365 (a): the provisional instances, {arg-class-id #{instance-class-id}}, and how to make each again {cid (fn [])}
+(def ^:dynamic *provisional* nil)
 
 (defn- same-arg? [a b] (if (and (map? a) (contains? a :val)) (= (:val a) (:val b)) (= a b)))
 (def ^:dynamic *scanned* nil)
@@ -1515,12 +1517,17 @@
 (defn- declare-instance!
   "The class of the template `t` for `args` from the pattern node `node` in a scope binding `params` to `bargs`
   (a partial specialization's or the primary's); `explicit?`: an explicit specialization (its members ordinary)."
-  [t args node params bargs explicit?]
+  ([t args node params bargs explicit?] (declare-instance! t args node params bargs explicit? nil))
+  ([t args node params bargs explicit? cid0]
   (let [tid (:id t)
-        cid (next-id)
+        cid (or cid0 (next-id))
         ps (bind-scope (:scope t) params bargs nil)
         cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]))
-        first-fn (inc (long @sema/*ids*))]
+        first-fn (inc (long @sema/*ids*))
+        ;; (CP365 (a): the argument classes not complete yet, declared only or still being defined)
+        waits (set (for [a args :when (map? a) :let [u (abi/unq a)] :when (abi/class? u) :let [c (abi/cls (:id u))]
+                         :when (or (not (:complete c)) (:defining c))]
+                     (:id u)))]
     (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
                                     :union (= "union" (:tagUsed node)) :tmpl tid :targs args :header (sema/header-node? node)})
     (enter! ps (:name t) {:e :type :ty {:k :class :id cid} :pos -1})
@@ -1534,8 +1541,20 @@
                                                                     (catch arbace.lang.ExceptionInfo _ true))
                                                            i))
                                               (:bases node))))))
-      (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid)]
-        (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
+      ;; (CP365 (a): an instance whose definition did not finish while one of its arguments was incomplete, a header's
+      ;; declaration dropped or the refusal thrown: <format>'s _Arg_value<format_context> made inside basic_format_context's
+      ;; definition, its member naming `_Context::char_type` before the context declares it. Provisional: made again in
+      ;; place, the same class, once every such argument is complete (class-completed!); clang instantiates it only where
+      ;; it must be complete, by then)
+      (try
+        (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid)]
+          (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
+        (finally
+          (when (and (seq waits) (not explicit?) *provisional* (not (:finished (abi/cls cid))))
+            (when (System/getenv "CPP_TMPL_TRACE")
+              (binding [*out* *err*] (println "provisional instance" (:name t) cid "waiting for" (mapv #(:name (abi/cls %)) waits))))
+            (swap! *provisional* (fn [m] (-> (reduce (fn [m w] (update-in m [:waits w] (fnil conj #{}) cid)) m waits)
+                                             (assoc-in [:remake cid] [t args node params bargs])))))))
       ;; the members' definitions: instantiated when used ([temp.inst]/11), linkonce_odr as clang writes them
       (when-not explicit?
         (doseq [[id f] @sema/*fns* :when (and (>= (long id) first-fn) (= cid (:cls f)) (:body f) (not (:implicit f)))]
@@ -1544,7 +1563,35 @@
       (doseq [[id f] @sema/*fns* :when (and (>= (long id) first-fn) (= cid (:cls f)) (:node f) (not (:implicit f)))]
         (name-pack-params! id (:node f)))
       (when (identical? node (:pattern t)) (abi/update-cls! cid assoc :from-primary true) (attach-ool! tid cid)))
-    {:k :class :id cid}))
+    {:k :class :id cid})))
+
+(defn- class-completed!
+  "CP365 (a): the class `id` complete; each provisional instance that waited for it and for no other incomplete class is
+  made again in place (declare-instance! with its class id: the class's record, scope and members made afresh, the old
+  members' functions left unlisted), its partial specialization's out-of-line members attached again, and the classes'
+  layouts computed again on use (a class holding the instance had laid it out broken)."
+  [id]
+  (when-let [p *provisional*]
+    (when-let [cids (seq (get-in @p [:waits id]))]
+      (swap! p update :waits dissoc id)
+      (doseq [cid cids
+              :let [still (some (fn [[w cs]] (and (contains? cs cid) (let [c (abi/cls w)] (or (not (:complete c)) (:defining c)))))
+                                (:waits @p))]
+              :when (not still)
+              :let [[t0 args node params bargs] (get-in @p [:remake cid])]
+              :when t0
+              :let [t (tmpl (:id t0))]]
+        (swap! p (fn [m] (-> m (update :remake dissoc cid)
+                             (update :waits (fn [ws] (into {} (for [[w cs] ws :let [cs (disj cs cid)] :when (seq cs)] [w cs])))))))
+        (when (System/getenv "CPP_TMPL_TRACE")
+          (binding [*out* *err*] (println "provisional instance" (:name t) cid "made again")))
+        (let [fp (abi/cls cid)]
+          (declare-instance! t args node params bargs false cid)
+          (when-let [[ptid pps pb] (:from-partial fp)]
+            (abi/update-cls! cid assoc :from-partial [ptid pps pb])
+            (when-let [pt (some #(when (= ptid (:id %)) %) (:partials t))]
+              (doseq [o (:ool pt)] (attach-one! (:id t) cid o [pps pb])))))
+        (swap! abi/*classes* (fn [m] (reduce-kv (fn [m k v] (if (:layout v) (assoc m k (dissoc v :layout)) m)) m m)))))))
 
 (declare type-constraints-satisfied?)
 
@@ -3291,4 +3338,5 @@
          :instantiate-class (fn [tid args] (instantiate-class tid args))
          ;; (a transform trait's name, not a function type returning a type named __x: __c_locale ())
          :is-trait (fn [nm] (contains? type-traits nm))
-         :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{}) *satisfaction* (atom {})] (f)))})
+         :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{}) *satisfaction* (atom {}) *provisional* (atom {:waits {} :remake {}})] (f)))
+         :class-completed (fn [id] (class-completed! id))})
