@@ -190,23 +190,63 @@
             (const-entity (:scope (abi/cls (:id t))) [nm]))))))
 
 (def ^:private binary-fns
-  {"+" + "-" - "*" * "/" quot "%" rem "<<" bit-shift-left ">>" bit-shift-right "&" bit-and "|" bit-or "^" bit-xor
+  {"+" unchecked-add "-" unchecked-subtract "*" unchecked-multiply "/" quot "%" rem "<<" bit-shift-left ">>" bit-shift-right "&" bit-and "|" bit-or "^" bit-xor
    "<" #(if (< %1 %2) 1 0) ">" #(if (> %1 %2) 1 0) "<=" #(if (<= %1 %2) 1 0) ">=" #(if (>= %1 %2) 1 0)
    "==" #(if (= %1 %2) 1 0) "!=" #(if (not= %1 %2) 1 0) "&&" #(if (and (not= %1 0) (not= %2 0)) 1 0)
    "||" #(if (or (not= %1 0) (not= %2 0)) 1 0)})
 
+(def ^:private two64 18446744073709551616N)
+
+(defn- u64?
+  "An unsigned 64-bit value above Long/MAX_VALUE, the one value of the text's evaluation held as a BigInt."
+  [x]
+  (instance? clojure.lang.BigInt x))
+
+(defn- lng
+  "A value's 64-bit pattern as a long (an unsigned 64-bit BigInt wrapped: 18446744073709551615N is -1)."
+  [x]
+  (if (u64? x) (.longValue (.toBigInteger ^clojure.lang.BigInt x)) (long x)))
+
+(defn- u64
+  "A value as unsigned long long's ([conv.integral]/3: modulo 2^64), normalized: a long when it fits, else a BigInt."
+  [x]
+  (let [v (mod (bigint x) two64)]
+    (if (<= v 9223372036854775807) (long v) v)))
+
 (defn- fold
-  "An operator applied to constants: its value, or (an operand dependent) the expression {:k :texpr :o o :args [...]}."
+  "An operator applied to constants: its value, or (an operand dependent) the expression {:k :texpr :o o :args [...]}.
+  The values are exact integers, one representation (review 1111 #3, cpp-s5b): a long, or an unsigned 64-bit value above
+  Long/MAX_VALUE as a BigInt (`size_t(-1)`, `18446744073709551615ULL`, `0x8000000000000000`). An operand of that kind
+  makes the operation unsigned long long's, as the usual arithmetic conversions do ([expr.arith.conv]/1.5): the operands
+  taken modulo 2^64 and the result too, a comparison of the converted values; else 64-bit arithmetic wraps as sema's
+  const-int. A division by zero and a shift by a count outside 0..63 are not constants: refusals, never Java's
+  exceptions (review 1111 #5)."
   [o args]
   (if (every? number? args)
-    (if (and (#{"<" ">" "<=" ">=" "==" "!="} o) (some #(not (<= -9223372036854775808 % 9223372036854775807)) args))
-      ;; (cpp-s5: an unsigned 64-bit value above Long/MAX_VALUE, compared as the integer it is)
-      (let [[a b] args] (case o "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
-                                "==" (if (== a b) 1 0) "!=" (if (== a b) 0 1)))
-    (let [[a b c] (map long args)]
-      (case o
-        "neg" (- a) "!" (if (zero? a) 1 0) "~" (bit-not a) "?" (if (zero? a) c b)
-        (long ((binary-fns o) a b)))))
+    (let [ok (fn [b] (cond (and (#{"/" "%"} o) (zero? b)) (fail :template "division by zero in a constant expression")
+                           (and (#{"<<" ">>"} o) (not (<= 0 b 63))) (fail :template "a shift by " b " in a constant expression")
+                           :else b))]
+      (if (some u64? args)
+        (let [[a b c] args
+              ua (bigint (u64 a))
+              ub (when (some? b) (bigint (u64 b)))
+              bit (fn [f] (u64 (bigint (f (.toBigInteger ^clojure.lang.BigInt ua) (.toBigInteger ^clojure.lang.BigInt ub)))))]
+          (case o
+            "neg" (u64 (- ua)) "!" (if (zero? ua) 1 0) "~" (u64 (- two64 1 ua)) "?" (if (zero? (lng a)) c b)
+            "+" (u64 (+ ua ub)) "-" (u64 (- ua ub)) "*" (u64 (* ua ub))
+            "/" (u64 (quot ua (ok ub))) "%" (u64 (rem ua (ok ub)))
+            "<<" (u64 (* ua (.pow (java.math.BigInteger/valueOf 2) (int (ok (lng b))))))
+            ">>" (u64 (quot ua (bigint (.pow (java.math.BigInteger/valueOf 2) (int (ok (lng b)))))))
+            "&" (bit #(.and ^java.math.BigInteger %1 ^java.math.BigInteger %2))
+            "|" (bit #(.or ^java.math.BigInteger %1 ^java.math.BigInteger %2))
+            "^" (bit #(.xor ^java.math.BigInteger %1 ^java.math.BigInteger %2))
+            "<" (if (< ua ub) 1 0) ">" (if (> ua ub) 1 0) "<=" (if (<= ua ub) 1 0) ">=" (if (>= ua ub) 1 0)
+            "==" (if (== ua ub) 1 0) "!=" (if (== ua ub) 0 1)
+            "&&" (if (and (not (zero? ua)) (not (zero? ub))) 1 0) "||" (if (or (not (zero? ua)) (not (zero? ub))) 1 0)))
+        (let [[a b c] (map long args)]
+          (case o
+            "neg" (unchecked-negate a) "!" (if (zero? a) 1 0) "~" (bit-not a) "?" (if (zero? a) c b)
+            (do (ok b) (long ((binary-fns o) a b)))))))
     {:k :texpr :o o :args (vec args)}))
 
 (def ^:private cast-types #{"bool" "char" "short" "int" "long" "unsigned" "signed"})
@@ -216,14 +256,18 @@
   values fitting)."
   [^String ty v]
   (cond (map? v) {:k :texpr :o "cast" :type ty :args [v]}
-        (str/starts-with? ty "bool") (if (zero? (long v)) 0 1)
-        (#{"char" "signed char"} ty) (long (unchecked-byte (long v)))
-        (= ty "unsigned char") (bit-and (long v) 0xff)
-        (#{"short" "signed short"} ty) (long (unchecked-short (long v)))
-        (= ty "unsigned short") (bit-and (long v) 0xffff)
-        (#{"int" "signed" "signed int"} ty) (long (unchecked-int (long v)))
-        (#{"unsigned" "unsigned int"} ty) (bit-and (long v) 0xffffffff)
-        :else (long v)))
+        (str/starts-with? ty "bool") (if (zero? (lng v)) 0 1)
+        (#{"char" "signed char"} ty) (long (unchecked-byte (lng v)))
+        (= ty "unsigned char") (bit-and (lng v) 0xff)
+        (#{"short" "signed short"} ty) (long (unchecked-short (lng v)))
+        (= ty "unsigned short") (bit-and (lng v) 0xffff)
+        (#{"int" "signed" "signed int"} ty) (long (unchecked-int (lng v)))
+        (#{"unsigned" "unsigned int"} ty) (bit-and (lng v) 0xffffffff)
+        ;; (cpp-s5b: a 128-bit type's constant is not evaluated in the text, a refusal, never computed modulo 2^64)
+        (str/includes? ty "__int128") (fail :template "a constant of type " ty)
+        ;; (review 1111 #3: unsigned long (long) as unsigned long long's value, fold's representation)
+        (str/includes? ty "unsigned") (u64 (lng v))
+        :else (lng v)))
 
 ;; ---------------------------------------------------------------------------------------------
 (declare expand-type-pack)
@@ -463,10 +507,16 @@
         pos (atom 0)
         peek (fn [] (nth (get ts @pos) 1 nil))
         next! (fn [] (let [t (get ts @pos)] (swap! pos inc) t))
-        num (fn [^String t] (let [t (str/replace (str/lower-case t) #"[ul]+$" "")]
-                              (cond (str/starts-with? t "0x") (Long/parseLong (subs t 2) 16)
-                                    (and (> (count t) 1) (str/starts-with? t "0")) (Long/parseLong (subs t 1) 8)
-                                    :else (Long/parseLong t))))
+        ;; an integer literal ([lex.icon]): decimal, 0x, 0b or octal, digit separators ', the suffixes u, l, ll, z in any
+        ;; case and order; its value modulo 2^64 in fold's representation, a BigInt above Long/MAX_VALUE (an unsigned
+        ;; long long: 18446744073709551615ULL; review 1111 #5: template/array32.C's 18446744073709551615 had thrown Java's
+        ;; NumberFormatException, a crash of Sema; 0b literals and separators were not read; #3: one representation)
+        num (fn [^String t] (let [t (str/replace (str/replace (str/lower-case t) "'" "") #"[ulz]+$" "")
+                                  [d r] (cond (str/starts-with? t "0x") [(subs t 2) 16]
+                                              (str/starts-with? t "0b") [(subs t 2) 2]
+                                              (and (> (count t) 1) (str/starts-with? t "0")) [(subs t 1) 8]
+                                              :else [t 10])]
+                              (u64 (bigint (java.math.BigInteger. ^String d (int r))))))
         prec {"||" 1 "&&" 2 "|" 3 "^" 4 "&" 5 "==" 6 "!=" 6 "<" 7 ">" 7 "<=" 7 ">=" 7 "<<" 8 ">>" 8 "+" 9 "-" 9 "*" 10 "/" 10 "%" 10}
         ;; the tokens of a bracketed run from the current position (its opening token consumed), joined
         run (fn [^String open ^String close]
@@ -480,10 +530,13 @@
     (letfn [(cast-named [nm v]
               (let [ty (abi/unq (sema/resolve-type scope nm))]
                 (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
-                      (= :bool (:n ty)) (if (zero? (long v)) 0 1)
+                      (= :bool (:n ty)) (if (zero? (lng v)) 0 1)
+                      ;; (cpp-s5b: a 128-bit type's constant is not evaluated in the text, a refusal)
+                      (and (abi/integral? ty) (> (* 8 (long (abi/size-of ty))) 64)) (fail :template "a 128-bit constant expression " s)
+                      ;; (an unsigned 64-bit type's value as fold's: modulo 2^64, a BigInt above Long/MAX_VALUE)
                       (abi/integral? ty) (let [b (* 8 (abi/size-of ty))]
-                                           (if (>= b 64) (long v)
-                                               (let [m (dec (bit-shift-left 1 b)) u (bit-and (long v) m)]
+                                           (if (>= b 64) (if (abi/signed? ty) (lng v) (u64 (lng v)))
+                                               (let [m (dec (bit-shift-left 1 b)) u (bit-and (lng v) m)]
                                                  (if (and (abi/signed? ty) (bit-test u (dec b))) (- u (inc m)) u))))
                       ;; (cpp-s5: a floating type's value, the operators' integers: `double(-1) < double(0)`)
                       (abi/floating? ty) v
@@ -506,12 +559,8 @@
                   ;; 64-bit value above Long/MAX_VALUE as the integer it is, so that the comparison is the type's)
                   (and (= k :id) (= "(" (peek)) (not (template-name? scope t))
                        (some #(= :type (:e %)) (sema/lookup scope t)))
-                  (let [_ (next!) v (expr 0) _ (next!)
-                        r (cast-named t v)
-                        ty (abi/unq (sema/resolve-type scope t))]
-                    (if (and (number? r) (neg? (long r)) (abi/integral? ty) (not (abi/signed? ty)) (>= (* 8 (long (abi/size-of ty))) 64))
-                      (+ (bigint r) 18446744073709551616N)
-                      r))
+                  (let [_ (next!) v (expr 0) _ (next!)]
+                    (cast-named t v))
                   (= t "(") (let [v (expr 0)] (next!) v)
                   (= t "-") (fold "neg" [(primary)])
                   (= t "+") (primary)
@@ -602,7 +651,8 @@
                     :else l))))]
       (let [v (expr 0)]
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
-        v))))
+        ;; (review 1111 #3: outside the text a value is its 64-bit pattern, a long, as sema's ce-wrap gives it)
+        (if (u64? v) (lng v) v)))))
 
 (declare resolve-args complete-args instantiate-fn var-template-inst written-qualifier)
 
@@ -951,7 +1001,7 @@
     (and (map? x) (= :tparam-v (:k x)) (= tid (:tid x))) (let [a (get b (:i x))] (cond (nil? a) x (contains? a :val) (:val a) :else a))
     (and (map? x) (= :texpr (:k x)) (:args x) (not= :sr (:o x)) (not= "cast" (:o x)))
     (let [args (mapv #(subst-value % b tid) (:args x))]
-      (if (every? number? args) (fold (:o x) args) (assoc x :args args)))
+      (if (every? number? args) (let [v (fold (:o x) args)] (if (u64? v) (lng v) v)) (assoc x :args args)))
     :else x))
 
 (defn- dependent-on? [x tid] (some #(and (map? %) (#{:tparam :tparam-v :ttp} (:k %)) (= tid (:tid %))) (tree-seq coll? seq x)))
