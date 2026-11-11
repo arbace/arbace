@@ -293,7 +293,11 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   statements inside conditionals, `--defsym`, readelf's GNU view), `.reloc` merged with PATCHINST last (sortRelocs), NEON's integer lanes
   in a64i (`simd.ae`, `synth-neon` 1,769 cases, coverage 1,358 of 1,358): mc-aarch64-obj 110 of 110, the AOT cell 98.2% → 99.6%,
   completeness 99.5 → 99.8. Proposed ARS53-ARS55. Next: the VM's CPU rows and lockstep of the thirteen synthetic programs (ARS44),
-  NEON's structure loads and stores (ARS53), the literal pool with the C packs (ARS50).
+  NEON's structure loads and stores (ARS53), the literal pool with the C packs (ARS50). Then `asm-ar9` (from `mac/next` `4ec952309`;
+  "As built: AR9"; ARS53 (a), ARS54 (a), ARS55 (b), the user's): `(asm/unread ...)` for x86-64's AT&T and Intel (amd64's round trip
+  re-recorded, unchanged), NEON's structure loads and stores (`simdmem.ae`, `synth-neon-ldst` 1,020 cases) and FP lanes' vector classes
+  (`simdfp.ae`, `synth-neon-fp` 1,176 cases) in a64i: coverage 2,015 of 2,015, eval 303, AOT 3,049 / 0 / 13. Proposed ARS56-ARS58.
+  Next: the by-element and scalar forms (ARS56), a structure load in the essential subset (ARS57), the VM's rows (ARS55, ARS58).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,

@@ -1,0 +1,337 @@
+(in-ns 'go.arbace.a64i) (go/file "simdmem.go" :imports [
+
+
+    ^{:line 4} [strconv "strconv"]
+    ^{:line 5} [strings "strings"]])
+
+
+;; Advanced SIMD's loads and stores of structures (doc/asm/ARM64-SURVEY.md, "As built: AR9"; ARS53 (a)): LD1-LD4 and ST1-ST4 of
+;; multiple structures (LD1 and ST1 of one to four registers), of a single structure (one lane), LD1R-LD4R (one structure
+;; replicated), with no offset or post-indexed (an immediate, the access's size, or a general register), decoded, lowered from
+;; their forms and executed as the Arm ARM's pseudocode defines them (DDI 0487: the shared decode of
+;; AdvSIMD load/store multiple structures and single structure, and their Operation): an element at a time, memory little endian.
+;; The Inst: Op OpVLDM, OpVLDS or OpVLDR; Sys 1 a load, 0 a store; Imm2 the structure's elements (selem, 1-4); Amount the
+;; registers repeated (rpt: LD1's and ST1's lists) or the lane's index; Sf Q (OpVLDM, OpVLDR); Size the element's log2 bytes;
+;; Rd the first register, Rn the base, Rm the post-index's register (31: the immediate Imm); Mode ModeOff or ModePost.
+;; Written from the pseudocode by Arbace; no code copied.
+
+
+
+^{:go/end 44} (go/func vmemName "vmemName is a structure load's or store's name for the coverage: v.ld3.4s.post, v.st1x2.16b.off, v.ld2.s.postr (one lane),\nv.ld4r.1d.off.\n" ^string [^{:tag (* Inst)} in]
+  (let [s "v.st"]
+    (when (== (.-Sys in) 1)
+      (set! s "v.ld"))
+
+    (set! s + (strconv/Itoa (conv int (.-Imm2 in))))
+    (switch (.-Op in)
+      (case [OpVLDM]
+        (when (== (.-Imm2 in) 1)
+          (set! s + (+ "x" (strconv/Itoa (conv int (.-Amount in))))))
+
+        (set! s + (+ "." (arr (.-Size in) (.-Sf in)))))
+      (case [OpVLDS]
+        (set! s + (+ "." (conv string (aget esz (.-Size in))))))
+      (case [OpVLDR]
+        (set! s + (+ "r." (arr (.-Size in) (.-Sf in))))))
+
+    (switch
+      (case [(== (.-Mode in) ModeOff)]
+        (return (+ s ".off")))
+      (case [(== (.-Rm in) 31)]
+        (return (+ s ".post"))))
+
+    (+ s ".postr")))
+
+
+
+^{:go/end 57} (go/func vmemBytes "vmemBytes is the bytes a structure load or store accesses: the post-index's immediate.\n" ^int64 [^{:tag (* Inst)} in]
+  (switch (.-Op in)
+    (case [OpVLDM]
+      (let [w (conv int64 8)]
+        (when (.-Sf in)
+          (set! w 16))
+
+        (return (* (conv int64 (.-Amount in)) (.-Imm2 in) w)))))
+
+  (<< (.-Imm2 in) (.-Size in)))
+
+
+
+^{:go/end 134} (go/func decodeSIMDMem "decodeSIMDMem is the AdvSIMD load/store multiple structures and single structure classes (bits 29-27 001, V 1).\n" [^uint32 w] :results [Inst string]
+  (when (!= (bf w 31 31) 0)
+    (return (lit Inst) undef))
+
+  (let [(values q l post single) (values (== (bf w 30 30) 1) (bf w 22 22) (== (bf w 23 23) 1) (== (bf w 24 24) 1))
+      (values rm size) (values (conv uint8 (bf w 20 16)) (conv uint8 (bf w 11 10)))
+      ^{:line 66} in (lit Inst :Rd (conv uint8 (bf w 4 0)) :Rn (conv uint8 (bf w 9 5)) :Rm 31 :Sys l)]
+    (cond post
+      (set! (values (.-Mode in) (.-Rm in)) (values ModePost rm))
+      (!= rm 0)
+      (return (lit Inst) undef))
+
+    (if (not single) (do
+        (when (!= (bf w 21 21) 0)
+          (return (lit Inst) undef))
+
+        (let [(values ^int rpt ^int selem) (zero int)]
+          (switch (bf w 15 12)
+            (case [0]
+              (set! (values rpt selem) (values 1 4)))
+            (case [2]
+              (set! (values rpt selem) (values 4 1)))
+            (case [4]
+              (set! (values rpt selem) (values 1 3)))
+            (case [6]
+              (set! (values rpt selem) (values 3 1)))
+            (case [7]
+              (set! (values rpt selem) (values 1 1)))
+            (case [8]
+              (set! (values rpt selem) (values 1 2)))
+            (case [10]
+              (set! (values rpt selem) (values 2 1)))
+            (default
+              (return (lit Inst) undef)))
+
+          (when (and (== size 3) (not q) (!= selem 1))
+            (return (lit Inst) undef))
+
+          (set! (values (.-Op in) (.-Sf in) (.-Size in) (.-Imm2 in) (.-Amount in)) (values OpVLDM q size (conv int64 selem) (conv uint8 rpt)))))
+
+      (let [(values opc r s) (values (bf w 15 13) (bf w 21 21) (bf w 12 12))
+          ^{:line 101} qb (bf w 30 30)]
+        (set! (.-Imm2 in) (+ (conv int64 (bit-or (<< (bit-and opc 1) 1) r)) 1))
+        (let [scale (>> opc 1)]
+          (switch scale
+            (case [3]
+              (when (or (== l 0) (== s 1))
+                (return (lit Inst) undef))
+
+              (set! (values (.-Op in) (.-Sf in) (.-Size in)) (values OpVLDR q size)))
+            (case [0]
+              (set! (values (.-Op in) (.-Size in) (.-Amount in)) (values OpVLDS 0 (conv uint8 (bit-or (<< qb 3) (<< s 2) (conv uint32 size))))))
+            (case [1]
+              (when (== (bit-and size 1) 1)
+                (return (lit Inst) undef))
+
+              (set! (values (.-Op in) (.-Size in) (.-Amount in)) (values OpVLDS 1 (conv uint8 (bit-or (<< qb 2) (<< s 1) (>> (conv uint32 size) 1))))))
+            (case [2]
+              (switch
+                (case [(!= (bit-and size 2) 0)]
+                  (return (lit Inst) undef))
+                (case [(== size 0)]
+                  (set! (values (.-Op in) (.-Size in) (.-Amount in)) (values OpVLDS 2 (conv uint8 (bit-or (<< qb 1) s)))))
+                (case [(== s 1)]
+                  (return (lit Inst) undef))
+                (default
+                  (set! (values (.-Op in) (.-Size in) (.-Amount in)) (values OpVLDS 3 (conv uint8 qb))))))))))
+
+
+
+    (when (and (== (.-Mode in) ModePost) (== (.-Rm in) 31))
+      (set! (.-Imm in) (vmemBytes (addr in))))
+
+    (return in "")))
+
+
+
+
+^{:go/end 155} (go/func vlistReg "vlistReg is one register of a structure's list: (reg vN :16b) or, for a lane, (reg vN :b); its number, element size and\ncount of elements (0 for a lane's).\n" [^{:tag (* Sx)} o] :results [uint8 uint8 int]
+  (when (or (!= (.head o) "reg") (!= (len (.-List o)) 3) (< (len (.-Atom (aget (.-List o) 1))) 2) (!= (aget (.-Atom (aget (.-List o) 1)) 0) \v))
+    (ferr "not a vector register: %s" o))
+
+  (let [(values k err) (strconv/Atoi (subslice (.-Atom (aget (.-List o) 1)) 1))
+      ^{:line 143} t (strings/TrimPrefix (.-Atom (aget (.-List o) 2)) ":")
+      ^{:line 144} sz (strings/IndexByte esz (aget t (- (len t) 1)))]
+    (when (or (!= err nil) (< k 0) (> k 31) (< sz 0))
+      (ferr "not a vector register: %s" o))
+
+    (let [cnt 0]
+      (when (> (len t) 1)
+        (when [(set! (values cnt err) (strconv/Atoi (subslice t _ (- (len t) 1))))] (!= err nil)
+          (ferr "not an arrangement: %s" o)))
+
+
+      (return (conv uint8 k) (conv uint8 sz) cnt))))
+
+
+
+
+^{:go/end 179} (go/func vlist "vlist is a structure's register list: the first register, the element size, the count of elements (0: a lane's) and the\nregisters' count; consecutive (modulo 32), one type.\n" [^{:tag (* Sx)} o] :results [uint8 uint8 int int]
+  (when (or (!= (.head o) "rlist") (< (len (.-List o)) 2))
+    (ferr "not a register list: %s" o))
+
+  (when (and (== (len (.-List o)) 2) (== (.head (aget (.-List o) 1)) "range"))
+    (let [(values a sz cnt) (vlistReg (aget (.-List (aget (.-List o) 1)) 1))
+        (values b sz2 cnt2) (vlistReg (aget (.-List (aget (.-List o) 1)) 2))]
+      (when (or (!= sz sz2) (!= cnt cnt2))
+        (ferr "a list of two types: %s" o))
+
+      (return a sz cnt (+ (conv int (bit-and (- b a) 31)) 1))))
+
+  (let [(values first sz cnt) (vlistReg (aget (.-List o) 1))]
+    (range [i x (subslice (.-List o) 2)]
+      (let [(values r sz2 cnt2) (vlistReg x)]
+        (when (or (!= sz sz2) (!= cnt cnt2) (!= r (bit-and (+ first (conv uint8 i) 1) 31)))
+          (ferr "not a list of consecutive registers of one type: %s" o))))
+
+
+    (return first sz cnt (- (len (.-List o)) 1))))
+
+
+
+^{:go/end 247} (go/func lowerSIMDMem "lowerSIMDMem is the forms of the structure loads and stores: ld1-ld4, st1-st4, ld1r-ld4r; false for another mnemonic.\n" [^string m ^{:tag (slice (* Sx))} ops] :results [Inst bool]
+  (when (or (< (len m) 3) ^:go/paren (and (!= (subslice m _ 2) "ld") (!= (subslice m _ 2) "st")) (< (aget m 2) \1) (> (aget m 2) \4) ^:go/paren (and (== (len m) 4) ^:go/paren (or (!= (aget m 3) \r) (!= (aget m 0) \l))) (> (len m) 4))
+    (return (lit Inst) false))
+
+  (nargs ops 2 3)
+  (let [selem (conv int64 (- (aget m 2) \0))
+      ^{:line 188} in (lit Inst :Rm 31)]
+    (when (== (aget m 0) \l)
+      (set! (.-Sys in) 1))
+
+    (let [list (aget ops 0)]
+      (if (and (== (.head list) "elt") (== (len (.-List list)) 3))
+        (let [(values first sz cnt n) (vlist (aget (.-List list) 1))]
+          (when (or (!= cnt 0) (!= (conv int64 n) selem) (== (len m) 4))
+            (ferr "a lane's list: %s" list))
+
+          (let [idx (value (aget (.-List list) 2))]
+            (when (or (< idx 0) (>= idx (conv int64 ^int64 (>> 16 sz))))
+              (ferr "a lane's index: %d" idx))
+
+            (set! (values (.-Op in) (.-Rd in) (.-Size in) (.-Imm2 in) (.-Amount in)) (values OpVLDS first sz selem (conv uint8 idx)))))
+
+        (let [(values first sz cnt n) (vlist list)]
+          (when (or (== cnt 0) (and (!= (* cnt ^int (<< 8 sz)) 64) (!= (* cnt ^int (<< 8 sz)) 128)))
+            (ferr "an arrangement: %s" list))
+
+          (set! (values (.-Rd in) (.-Size in) (.-Sf in) (.-Imm2 in)) (values first sz (== (* cnt ^int (<< 8 sz)) 128) selem))
+          (switch
+            (case [(== (len m) 4)]
+              (when (!= (conv int64 n) selem)
+                (ferr "%s's list: %s" m list))
+
+              (set! (.-Op in) OpVLDR))
+            (case [(== selem 1)]
+              (set! (values (.-Op in) (.-Amount in)) (values OpVLDM (conv uint8 n))))
+            (default
+              (when (or (!= (conv int64 n) selem) ^:go/paren (and (== sz 3) (not (.-Sf in))))
+                (ferr "%s's list: %s" m list))
+
+              (set! (values (.-Op in) (.-Amount in)) (values OpVLDM 1))))))
+
+
+      (when (or (!= (.head (aget ops 1)) "mem") (!= (len (.-List (aget ops 1))) 2))
+        (ferr "a structure's address: %s" (aget ops 1)))
+
+      (let [b (mustReg (aget (.-List (aget ops 1)) 1))]
+        (when (not (.-x b))
+          (ferr "a structure's base: %s" (aget ops 1)))
+
+        (set! (.-Rn in) (.-n b))
+        (when (== (len ops) 3)
+          (set! (.-Mode in) ModePost)
+          (if [(values r ok) (asReg (aget ops 2))] ok (do
+              (when (or (not (.-x r)) (.-zr r) (.-sp r))
+                (ferr "a post-index register: %s" (aget ops 2)))
+
+              (set! (.-Rm in) (.-n r)))
+            (do
+              (set! (.-Imm in) (value (aget ops 2)))
+              (when (!= (.-Imm in) (vmemBytes (addr in)))
+                (ferr "a post-index immediate other than %d: %d" (vmemBytes (addr in)) (.-Imm in))))))
+
+
+
+        (return in true)))))
+
+
+
+
+^{:go/end 339} (go/method execSIMDMem "execSIMDMem executes a structure load or store, an element at a time (the multiple structures' elements interleaved: element\ne of each register of a structure, then e+1).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [base (.reg c (.-Rn in) true)]
+    (when (and (== (.-Rn in) 31) (!= (bit-and base 15) 0))
+      (set! (.-FaultAddr c) base)
+      (.raise c SIGBUS ":sp-alignment")
+      (return))
+
+    (let [eb (<< (conv uint64 1) (.-Size in))
+        ^{:line 259} e (<< (conv uint 8) (.-Size in))
+        ^{:line 260} total (conv uint64 (vmemBytes in))
+        ^{:line 261} load (== (.-Sys in) 1)]
+      (when (and (not load) (not (.Probe (.-AS c) base (conv int total))))
+        (.segv c (.-FaultAddr (.-AS c)))
+        (return))
+
+      (let [regs (.-Q c)
+          ^{:line 267} elems (/ 8 (conv int eb))]
+        (when (.-Sf in)
+          (set! elems * 2))
+
+        (let [selem (conv int (.-Imm2 in))
+            ^{:line 272} offs (conv uint64 0)
+            ;; one element: loaded into, or stored from, register t's lane i
+            ^{:line 274} elem ^{:go/breaks [4] :go/end 286} (fn ^bool [^uint8 t ^int i]
+              (if load
+                (let [(values v ok) (.load c (+ base offs) (.-Size in))]
+                  (when (not ok)
+                    (return false))
+
+                  (setLane (addr (aget regs t)) i e v))
+
+                (.store c (+ base offs) (.-Size in) (lane (aget regs t) i e)))
+
+              (set! offs + eb)
+              true)]
+
+          (switch (.-Op in)
+            (case [OpVLDM]
+              (for [r 0] (< r (conv int (.-Amount in))) (inc! r)
+                (for [i 0] (< i elems) (inc! i)
+                  (let [t (bit-and (+ (.-Rd in) (conv uint8 r)) 31)]
+                    (for [s 0] (< s selem) (inc! s)
+                      (when (not (elem t i))
+                        (return))
+
+                      (set! t (bit-and (+ t 1) 31))))))
+
+
+
+              (when (and load (not (.-Sf in)))
+                (for [k 0] (< k (* (conv int (.-Amount in)) selem)) (inc! k)
+                  (aset (aget regs (bit-and (+ (.-Rd in) (conv uint8 k)) 31)) 1 0))))
+
+
+            (case [OpVLDS]
+              (let [t (.-Rd in)]
+                (for [s 0] (< s selem) (inc! s)
+                  (when (not (elem t (conv int (.-Amount in))))
+                    (return))
+
+                  (set! t (bit-and (+ t 1) 31)))))
+
+            (case [OpVLDR]
+              (let [t (.-Rd in)]
+                (for [s 0] (< s selem) (inc! s)
+                  (let [(values v ok) (.load c (+ base offs) (.-Size in))]
+                    (when (not ok)
+                      (return))
+
+                    (let [^{:tag (array 2 uint64)} x (zero (array 2 uint64))]
+                      (for [i 0] (< i elems) (inc! i)
+                        (setLane (addr x) i e v))
+
+                      (aset regs t x)
+                      (set! offs + eb)
+                      (set! t (bit-and (+ t 1) 31))))))))
+
+
+          (when load
+            (set! (.-Q c) regs))
+
+          (when (== (.-Mode in) ModePost)
+            (let [off (conv uint64 (.-Imm in))]
+              (when (!= (.-Rm in) 31)
+                (set! off (.reg c (.-Rm in) false)))
+
+              (aset (.-X c) (.-Rn in) (+ base off)))))))))
