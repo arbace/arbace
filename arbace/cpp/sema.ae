@@ -368,6 +368,8 @@
       ;; references to references collapse ([dcl.ref]/7: a substituted T& or T&&)
       & (let [t (resolve-type-form scope (second f))] (abi/lref (if (abi/ref? t) (:to t) t)))
       && (let [t (resolve-type-form scope (second f))] (if (abi/ref? t) t (abi/rref t)))
+      ;; GNU's __complex__ T (_Complex T): {:k :complex :of T} (cpp-s3: std::complex<long double>'s _M_value)
+      complex {:k :complex :of (abi/unq (resolve-type-form scope (second f)))}
       const (assoc (resolve-type-form scope (second f)) :c true)
       volatile (assoc (resolve-type-form scope (second f)) :v true)
       restrict (resolve-type-form scope (second f))
@@ -927,8 +929,12 @@
            :defaulted (when (:explicitlyDefaulted n) true) :deleted (boolean (:explicitlyDeleted n))
            :pos (long (or (:_b n) 0))
            :src *src*}
+        ;; GNU's abi_tag("t", ...) (cpp-s3: <complex>'s real() and imag()): B <source-name> after the name, the tags sorted
+        tags (not-empty (vec (sort (distinct (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"abi_tag" "__abi_tag__"} (:_gnu a)))
+                                                           [_ t] (re-seq #"\"([^\"]*)\"" (str (:_arg a)))]
+                                                       t)))))
+        f (cond-> f xobj (assoc :xobj xobj) tags (assoc :abi-tags tags))
         ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
-        f (cond-> f xobj (assoc :xobj xobj))
         f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
                                        :access (when cid *member-access*)))
         old (find-redecl home f)
@@ -2575,6 +2581,12 @@
         (abi/arr? tu) (let [el (init-for (:of tu) nil ctx style)] (if (#{:none :zero} (:i el)) el {:i :list :items [] :fill el :n (:n tu)}))
         (= style :value) {:i :zero}
         :else {:i :none})
+      ;; a complex object from a list of its real and imaginary parts (cpp-s3: complex(long double __r, long double __i) :
+      ;; _M_value{ __r, __i }; GCC's extension, [dcl.init.list] taking it as an aggregate of two)
+      (and (= :init-list (:op src)) (= :complex (:k tu)))
+      (let [items (:items src) et (:of tu)]
+        (when (> (count items) 2) (fail :init "too many initializers for a complex"))
+        {:i :complex :items (mapv #(convert-scalar (rv %) et false) items)})
       (= :init-list (:op src))
       (cond
         (abi/arr? tu)
@@ -3278,6 +3290,10 @@
         _ (when-not (abi/ptr? (abi/unq (:ty p))) (fail :expr nm " of a non-pointer"))
         vt (let [t (abi/unq (:to (abi/unq (:ty p))))] (dissoc t :v))
         vt (if (#{:tas :clear} which) abi/char* vt)
+        ;; (the generic forms, every operand through a pointer, of a float or a double: the integer of its size, the bits
+        ;; moved as clang's EmitAtomicExpr does through its integer-typed temporaries; cpp-s3: std::atomic<double>'s load,
+        ;; store, exchange and fetch_add's compare-exchange loop, runtime/deferred.cpp)
+        vt (if (and (abi/floating? vt) (not (some #{:v} shape)) (#{4 8} (abi/size-of vt))) (if (= 4 (abi/size-of vt)) abi/uint* abi/ulong*) vt)
         _ (when-not (or (abi/integral? vt) (abi/ptr? vt) (= :enum (:k vt)) (#{:tas :clear} which)) (fail :type nm " of " (pr-str vt)))
         _ (when (and (= :rmw which) (not (abi/integral? vt))) (fail :type nm " of " (pr-str vt)))
         _ (when-not (#{1 2 4 8} (abi/size-of vt)) (fail :type nm " of a " (abi/size-of vt) "-byte type"))
@@ -4116,6 +4132,15 @@
             ("++" "--") (do (when-not (lv? e) (fail :incdec "++ of an rvalue"))
                             {:op :incdec :o o :post (boolean (:isPostfix n)) :e e :ty (abi/unq (:ty e)) :cat (if (:isPostfix n) :pr :lv)})
             "!" {:op :not :e (to-bool e) :ty abi/bool* :cat :pr}
+            ;; GNU's __real__ and __imag__ of a complex glvalue: the part's glvalue (cpp-s3); of a real operand, the
+            ;; operand and zero (GCC's manual, "Complex Numbers")
+            ("__real" "__imag")
+            (let [t (abi/unq (:ty e))]
+              (cond (= :complex (:k t)) (do (when-not (lv? e) (fail :complex "__real__ of a complex prvalue"))
+                                            {:op :cpart :part (if (= o "__real") 0 1) :e e :ty (assoc (:of t) :c (:c (:ty e))) :cat (:cat e)})
+                    (abi/arith? t) (cond (= o "__real") e (abi/floating? t) {:op :float :v 0.0 :ty t :cat :pr} :else {:op :int :v 0 :ty t :cat :pr})
+                    :else (fail :operator "unary " o)))
+            "__extension__" e
             ("-" "+" "~") (let [r (rv e) pt (promote-type (:ty r))] {:op :unop :o o :e (convert-scalar r pt false) :ty pt :cat :pr})
             (fail :operator "unary " o)))))
     "BinaryOperator"
@@ -4131,7 +4156,14 @@
             (builtin-binop o (class->scalar ctx l) (class->scalar ctx r)))))
     "CompoundAssignOperator"
     (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)]
-      (or (when (or (class-operand? l) (class-operand? r)) (operator-call ctx o [l r]))
+      (or (when (= :complex (:k (abi/unq (:ty l))))
+            ;; a complex glvalue op= a real value (cpp-s3: std::complex<long double>'s operator*=(long double)): + and - on the
+            ;; real part, * and / on both, as clang's ComplexExprEmitter does with a real right operand
+            (let [et (:of (abi/unq (:ty l))) r (rv r)]
+              (when-not (and (lv? l) (abi/arith? (abi/unq (:ty r))) (#{"+=" "-=" "*=" "/="} o))
+                (fail :complex "a complex compound assignment " o))
+              {:op :ccompound :o (subs o 0 1) :l l :r (convert-scalar r et false) :ty (:ty l) :cat :lv}))
+          (when (or (class-operand? l) (class-operand? r)) (operator-call ctx o [l r]))
           (when (or (class-operand? l) (class-operand? r)) (no-operator! ctx o [l r]))
           (compound-node (subs o 0 (dec (count o))) l (class->scalar ctx r))))
     "ConditionalOperator"

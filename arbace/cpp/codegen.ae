@@ -1137,8 +1137,14 @@
                                   (emit! (list 'store [lt r] ['ptr res] :align a))))))
       :cmpxchg (let [ep (emit-rv (:ep e))
                      v (val-of)
-                     weak (if (some? (:wc e)) (not (zero? (long (:wc e)))) (fail :atomic "a run-time weak flag"))
-                     one (fn [s f]
+                     ;; (a run-time weak flag, cpp-s3: libstdc++'s __compare_exchange(..., bool __is_weak, ...) under
+                     ;; std::atomic<double>'s compare-exchange loop: both forms behind a branch on it, as clang's EmitAtomicOp
+                     ;; switches on IsWeak; nil until then)
+                     weak-c (when (some? (:wc e)) (not (zero? (long (:wc e)))))
+                     wv (when-not (some? (:wc e)) (emit-rv (:w e)))
+                     wk (atom weak-c)
+                     one* (fn [s f]
+                           (let [weak @wk]
                            (let [c (val! (list 'load lt ['ptr ep] :align a))
                                  pr (val! (apply list (cond-> ['cmpxchg ['ptr p] [lt c] [lt v] s f] weak (conj :weak true) true (conj :align a))))
                                  old (val! (list 'extractvalue [(list 'struct lt 'i1) pr] 0))
@@ -1148,7 +1154,16 @@
                              (begin! ls)
                              (emit! (list 'store [lt old] ['ptr ep] :align a))
                              (begin! lc)
-                             (store! abi/bool* ok res)))
+                             (store! abi/bool* ok res))))
+                     one (fn [s f]
+                           (if (and wv (nil? @wk))
+                             (let [lw (new-label "cmxchg.weak") ls (new-label "cmpxchg.strong") lc (new-label "cmpxchg.continue")]
+                               (condbr! wv lw ls)
+                               (close-block!)
+                               (doseq [[l w] [[ls false] [lw true]]]
+                                 (start! l) (reset! wk w) (one* s f) (reset! wk nil) (br! lc) (close-block!))
+                               (start! lc))
+                             (one* s f)))
                      fails (fn [s]
                              (if (:foc e)
                                (one s (cmpxchg-fail-ord (:foc e)))
@@ -1500,6 +1515,17 @@
     :temp (let [t (slot! (:ty e))] (emit-init t (:ty e) (:init e))
                 (binding [*extend-now* (or *extend-now* (identical? e *extend-root*))] (push-temp-cleanup! (:id (abi/unq (:ty e))) t)) t)
     :assign (let [v (emit-rv (:r e)) a (emit-lv (:l e))] (store! (:ty e) v a) a)
+    ;; GNU complex (cpp-s3): a part's address, a compound assignment by a real value
+    :cpart (offset! (emit-lv (:e e)) (* (long (:part e)) (abi/size-of (:ty e))))
+    :ccompound (let [a (emit-lv (:l e)) et (:of (abi/unq (:ty e))) es (abi/size-of et)
+                     v (emit-rv (:r e))
+                     re (load! et a) im (load! et (offset! a es))
+                     both (#{"*" "/"} (:o e))
+                     re2 (arith! (:o e) et re v)
+                     im2 (when both (arith! (:o e) et im v))]
+                 (store! et re2 a)
+                 (when both (store! et im2 (offset! a es)))
+                 a)
     :cassign (let [a (emit-lv (:l e)) t (abi/unq (:ty e)) old (load! t a)
                    r (emit-rv (:r e))
                    nv (if (:ptr e)
@@ -1595,6 +1621,10 @@
       :expr (if (abi/class? tu) (emit-into (:e init) addr) (store! tu (emit-rv (:e init)) addr))
       :ctor (call! (:fn init) addr (:args init) nil false)
       (:copy :copy-bytes) (memcpy! addr (emit-lv (:e init)) (abi/size-of tu))
+      ;; a complex object's parts (cpp-s3); one not written zero
+      :complex (let [et (:of tu) es (abi/size-of et) [a b] (:items init)]
+                 (store! et (if a (emit-rv a) (zero-of et)) addr)
+                 (store! et (if b (emit-rv b) (zero-of et)) (offset! addr es)))
       :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
                 (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n))
       :bind (store! (abi/ptr abi/void) (let [e (:e init)] (binding [*extend-root* (when *extend* (extend-root e))] (emit-lv e))) addr)
