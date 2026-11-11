@@ -1393,10 +1393,20 @@
   [^P p ^String kind ^long b]
   (node p kind b (last-ix p) {}))
 
+(declare soft-diag!)
+
 (defn- parse-string-literal [^P p]
   (let [b (ix p)
         ss (loop [out []] (if (#{:str :udls} (tk (cur p))) (let [s (ts (cur p))] (adv! p) (recur (conj out s))) out))
-        e (last-ix p)]
+        e (last-ix p)
+        ;; (CX12, cpp-s2: adjacent literals of two different encoding prefixes, [lex.string]/7 since P2201R1: ill-formed,
+        ;; clang's "unsupported non-standard concatenation of string literals" at the second; the literal taken)
+        _ (loop [i b enc nil]
+            (when (<= i (long e))
+              (let [pre (second (re-find #"^(u8|u|U|L)?R?[\"]" (ts (tok-at p i))))]
+                (if (and pre enc (not= pre enc))
+                  (soft-diag! p i "unsupported non-standard concatenation of string literals")
+                  (recur (inc i) (or enc pre))))))]
     (if (some #(re-find #"[\"][A-Za-z_][A-Za-z0-9_]*$" %) ss)
       ;; (G5: the literal and its ud-suffix for the code generator's literal operator call, [lex.ext]/5)
       (let [sfx (some #(second (re-find #"[\"]([A-Za-z_][A-Za-z0-9_]*)$" %)) ss)
@@ -1940,7 +1950,11 @@
   (let [qs (loop [qs #{}]
              (let [s (ts (cur p))]
                (if (#{"volatile" "__volatile__" "__volatile" "inline" "__inline__" "__inline" "goto"} s)
-                 (do (adv! p) (recur (conj qs (case s ("volatile" "__volatile__" "__volatile") :volatile ("inline" "__inline__" "__inline") :inline :goto))))
+                 (let [q (case s ("volatile" "__volatile__" "__volatile") :volatile ("inline" "__inline__" "__inline") :inline :goto)]
+                   ;; (CX12, cpp-s2: a qualifier given twice is an error, GCC's and clang's "duplicate asm qualifier";
+                   ;; the statement is taken, g++.dg's asm-qual-2.C)
+                   (when (contains? qs q) (soft-diag! p (ix p) (str "duplicate asm qualifier '" s "'")))
+                   (adv! p) (recur (conj qs q)))
                  qs)))
         _ (expect! p "(")
         lit (fn [] (if (identical? :str (tk (cur p))) (:value (parse-string-literal p)) (perr p "an asm string")))
