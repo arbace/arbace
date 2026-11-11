@@ -756,14 +756,38 @@
                                     (when either (str "; " (count either-ids) " other cases passed by it alone (CP344)"))))))))
     r))
 
+(defn hsi-own-state
+  "HF10-P31 (a): the state of a source's :own-file by its FIRST-LINE (nil: no such file): :absent, :interim (first line
+  \";; INTERIM\": not one run's outcome) or :whole."
+  [first-line]
+  (cond (nil? first-line) :absent
+        (str/starts-with? first-line ";; INTERIM") :interim
+        :else :whole))
+
+(defn hsi-pick
+  "HF10-P31 (a): a source with :own-file {:file F :name N :classes C} (bin/hsi check's own record) reads F, named N, judged by C
+  once F is whole (HSTATE :whole); while it is absent or INTERIM the source stays on its :file, the pack's record (no score
+  jump from a mixed record). The source's :own-state says which."
+  [src hstate]
+  (if-let [o (:own-file src)]
+    (if (= :whole hstate)
+      (-> src (assoc :file (:file o) :own-state :own) (cond-> (:name o) (assoc :name (:name o)) (:classes o) (assoc :classes (:classes o))))
+      (assoc src :own-state hstate))
+    src))
+
+(defn- own-first-line [src]
+  (when-let [f (get-in src [:own-file :file])]
+    (when (exists? f) (with-open [r (io/reader (path f))] (or (.readLine ^java.io.BufferedReader r) "")))))
+
 (defn- judge-source
   "A source read and judged: its entries with their classes. Every file it names must be there,
   but the :file of a source with :until (a check not recorded yet: then its cell prints \"no check
   yet\"), and an :until whose :file is there is stale, a problem (report 021's finding 3: the stale
   :until keys made a record deleted a cell with no check, or a source gone from its cell's sums);
   a source of passes with no case at all, or whose :include selects nothing, is a problem too."
-  [cell src]
-  (let [file (or (:file src) "")
+  [cell src0]
+  (let [src (hsi-pick src0 (hsi-own-state (own-first-line src0)))
+        file (or (:file src) "")
         miss (missing-files src)
         ;; a check not recorded yet: its :file missing (with it, the files the same milestone writes: :ref-runs,
         ;; :same-cases; CX10, C++'s eval and AOT cells wait for CX8's record and its references alike)
@@ -1037,10 +1061,26 @@
           (println (str "reap: wrote " out " (" (count (:corpora r)) " corpora)"))
           true))))
 
+(defn self-test
+  "HF10-P31 (a)'s guard: the own record is read only when whole."
+  []
+  (let [src {:name "pack" :file "p.edn" :own-file {:file "o.edn" :name "own" :classes ["a.edn" "b.edn"]}}
+        st (fn [fl] (hsi-own-state fl))
+        bad (concat
+             (when-not (= [:absent :interim :whole] [(st nil) (st ";; INTERIM (review 1111b)") (st ";; hsi's check")]) ["state"])
+             (when-not (= (hsi-pick src :interim) (assoc src :own-state :interim)) ["interim must keep the pack's record"])
+             (when-not (= (hsi-pick src :absent) (assoc src :own-state :absent)) ["absent must keep the pack's record"])
+             (when-not (= [:own "o.edn" "own" ["a.edn" "b.edn"]] ((juxt :own-state :file :name :classes) (hsi-pick src :whole))) ["whole must read the own record"])
+             (when-not (= {:name "x" :file "f"} (hsi-pick {:name "x" :file "f"} :whole)) ["a source without :own-file is unchanged"]))]
+    (doseq [b bad] (println "reap self-test: FAIL" b))
+    (when (empty? bad) (println "reap self-test: ok (5 cases)"))
+    (empty? bad)))
+
 (defn -main [& args]
   (binding [*root* (or (System/getenv "REAP_ROOT") ".")]
     (let [spec (read-edn "test/reap/cells.edn")
           ok (case (first args)
+               "--self-test" (self-test)
                "--suite" (suite-only spec (second args))
                "record-native-check" (record-native-check (second args) (nth args 2) (nth args 3 nil))
                (run spec (some #{"--entries"} args) (some #{"--record"} args)))]

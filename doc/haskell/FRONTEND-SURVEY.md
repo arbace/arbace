@@ -3484,3 +3484,29 @@ night's `bin/gate --full` runs the same as steps (about 2.5 hours for the five).
   tier's comparison, P27); crops-score's `:case-inputs` then the cell's own source**; half a day, a reap record; keys unmoved (crop
   paths). (b) keep two records, the cell on the pack's (the gate's step and the cell disagree on 420 programs' library set). *Recommended:
   (a)*.
+
+## Decided (the user, 2026-11-11: HF10-P31)
+
+HF10-P31 (a): the cells read the own records once they are whole; `check-hsi.edn` stays the pack's reference, recorded by hand.
+
+## As built: HF10-P31 (2026-11-11, branch `hs-p31`, from `mac/hs-p29` d90827eb0)
+
+- `test/reap/cells.edn`: the Haskell eval and AOT cells' source (`:reader :hsi-check`) gets `:own-file {:file :name :classes}`: eval
+  `check-hsi-own.edn`, classes `divergences.edn` and `divergences-own.edn` (an own-only failure is judged there, hs-p22b); AOT
+  `check-hsi-aot-own.edn`, classes `divergences-aot.edn` and `divergences-own.edn`. The source's `:file` stays the pack's record.
+- `test/reap/main.ae`: `judge-source` takes the source through `hsi-pick`: the own record is read, under its own name and classes,
+  only when `hsi-own-state` of its first line is `:whole`; absent (the AOT record today) or first line `;; INTERIM` (the eval record
+  today): the source is the pack's, unchanged (no score jump from a mixed record). Same mark crops-score's `interim?` reads (P29).
+  `bin/reap --self-test`: the guard's five cases (the states, interim and absent keep the pack's, whole reads the own, a source
+  without `:own-file` untouched); it is the reap step's first command now (`bin/reap --self-test && bin/reap`), and the step's inputs
+  gain `test/haskell/*.edn` (the Haskell records were in no input of it).
+- What switches when: the commit that re-records `check-hsi-own.edn` whole (night command 4, the INTERIM mark dropped) moves the eval
+  cell to the own record at once; likewise `check-hsi-aot-own.edn` (command 5) for the AOT cell. Each such commit also needs `bin/reap
+  --record` (the cell's source name and counts change: the matrix record differs until then, by design) and `bin/crops-score --record`.
+  A whole own record with a program in no class fails `bin/reap` (tried here on the interim record with its mark changed: 764 programs,
+  6 in no class, 11 problems), so the night's classes are written before the record is committed. The AOT own record is judged by
+  `divergences-own.edn`'s eval outcomes beside `divergences-aot.edn`: an AOT-only failure needs a class of `divergences-aot.edn`.
+- Not changed: crops-score's `:case-inputs` (it reads `check-hsi-own.edn` already, P29).
+- Checks (one run at a time, under 1.5 GiB): `bin/reap --self-test` ok; `bin/reap` 0 problems, Haskell eval 811 / 63 / 34 and AOT
+  137 / 1 / 1 as before (the pack's); `bin/crops-score --judge --strict` 0; `gate-key-crops-test` PASS; `bin/gate --plan` reads the
+  table. No key moves (test/ and bin/reap are in no key).

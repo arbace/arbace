@@ -91,6 +91,7 @@ Six crops are above 90 on all three. What the others still need:
   failures classed by what fails (`divergences-own.edn`), own-fallback.txt honest and tried (`HSI_OWN_FALLBACK=try`), lib-stg's
   run classes with outcomes; `check-hsi-own.edn` is INTERIM (a merge of light runs) until the night's whole run at 16 GiB
   (its header's commands, night 13+).
+  P31 (a) decided and built on `hs-p31`: the eval and AOT cells read `check-hsi-own.edn` / `-aot-own.edn` once whole (not INTERIM; `bin/reap --self-test`), the pack's record until then; the switch is the commit of night command 4 (5), with `bin/reap --record` and `crops-score --record`.
   P29 and P30 decided (a) (the user, 2026-11-11); `hs-p29` built P29's wiring: the step `haskell-lib-stg-own` (ghc-internal's own
   STG judged and `--run`, its output `ghc-internal-own.tar`), `haskell-lib-own-base` keeps `base-own.tar`, `hsi-check` and
   `hsi-check-aot` run `--libs own` on them (`:uses`), crops-score counts `:libs :own` from `check-hsi-own.edn` (not while it is

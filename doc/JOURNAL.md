@@ -5169,3 +5169,13 @@ built: HF10-P29"). Light work in night 12's day lane (one run at a time, under 1
   check --libs own` (507 interfaces, 506 modules; samples/Hello own, pass).
 - Night commands (not run, the survey's): the three producers' commands by hand (about 1 hour, under 2 GiB), then `bin/hsi check
   --libs own` whole at 16 GiB with `--record` (60-75 min, 10 GiB) and `--aot` (2 hours, 8 GiB), then crops-score `--record`.
+
+## 2026-11-11: HF10-P31 (a), REAP's Haskell eval and AOT cells read the own records once whole (branch `hs-p31`, from `mac/hs-p29` d90827eb0)
+
+The user decided HF10-P31 (a). `test/reap/cells.edn`'s two cells gain `:own-file` (`check-hsi-own.edn`, `check-hsi-aot-own.edn`, the
+pack's classes plus `divergences-own.edn`); `reap.main`'s `hsi-pick` reads the own record only when its first line is not `;; INTERIM`
+and it exists, else the pack's, so tonight (own eval record INTERIM, AOT record absent) the matrix is unchanged (`bin/reap` 0
+problems). Alternative considered: a flag in the cell naming the switch by hand: rejected, the record's own mark already says it.
+Tried the switch on a copy of the interim record: its 764 programs left 6 in no class, so the night's whole record needs its classes
+first. `bin/reap --self-test` in the reap step; the step's inputs gained `test/haskell/*.edn`. Details: doc/haskell/FRONTEND-SURVEY.md,
+"As built: HF10-P31".
