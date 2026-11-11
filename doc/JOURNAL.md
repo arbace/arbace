@@ -5002,3 +5002,30 @@ No code copied.
   the three object checks) rerun unchanged. Proposed ARS53-ARS55.
 - Rule slips: two commands used `<(...)` process substitution and one wrote to /dev/null (comparisons of scratch files, nothing they
   produced was used).
+
+## 2026-11-11: AR9, `(asm/unread ...)` for x86-64's dialects, NEON's structure loads and stores and FP lanes in a64i (branch `asm-ar9`, from `mac/next` `4ec952309`)
+
+The user's decisions of 2026-11-11: ARS53 (a) (the structure loads and stores first, then the FP lanes), ARS54 (a), ARS55 (b). On the
+main host, light; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources read again: the Arm ARM (DDI 0487), the
+shared decode and Operation of the AdvSIMD load/store multiple structures and single structure classes, FPCompareEQ/GE/GT, FPMulX,
+FPAbs, FPNeg and the vector FP instructions; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR9".
+
+- ARS54 (a): repr/asm's reader passes `:unread` for x86-64's AT&T and Intel too (`arbace/repr/asm.ae`), so a refused statement inside
+  a conditional block is `(asm/unread TEXT MESSAGE)` in every dialect but Plan 9's. amd64's round trip re-recorded whole: the record is
+  unchanged byte for byte (none of amd64's corpus files refuses a statement inside a conditional block); the six mc-x86 files with
+  conditional blocks' stated encodings unchanged. Alternative not taken: arm64 alone (ARS54 (b)), which left the dialects reading the
+  same text two ways. The object assembler (`arbace/asm/obj.ae`, asm-ax12's at the time) was not touched: its `unread` is AR8's.
+- ARS53 (a): `go/arbace/a64i/simdmem.go` written as Go (decode, the forms' lowering, the element loop), compiled and run from the
+  printed module first, then converted by repr/go's native reader into `simdmem.ae`; the hooks (three operations before `opSIMDEnd`,
+  their names, `simdName`, `lowerSIMD`'s first call, `execSIMD`'s dispatch, `decodeLdSt`'s class at bits 29-27 001 with V,
+  `a64i.ae`'s file list) hand-edited as forms, as AR8 did. Then the FP lanes (ARS53 (b), the user's order) the same way,
+  `simdfp.go`, reusing AR6's scalar functions lane by lane; the compares with zero named apart in the coverage (`v.fcmeq0.4s`).
+- The synthetic programs `synth-neon-ldst` (1,020 cases; a 128-byte buffer and eight registers folded after each case) and
+  `synth-neon-fp` (1,176 cases; the scalar FP model lane by lane): qemu-aarch64 agreed with both models on the first run, a64i (eval and
+  AOT) and the forms check on theirs. Coverage 1,358 → 2,015 of 2,015; a64i 85 → 87 programs; controls verdict-6/7, forms-4/5,
+  inject-18/19.
+- Results: the eval cell 301 → 303, the AOT cell 3,047 → 3,049 / 0 / 13 (99.6%), crops-score unchanged (99.8 / 100.0 / 100.0);
+  `bin/reap` 0 problems; no key moves (crop paths). Proposed ARS56-ARS58.
+- Rule slips: a background run of `bin/a64i check --essential` was still running when `test/asm/a64i/gen.ae` was edited (its synthetic
+  step had already read the file: 14 digests, the recorded ones; rerun after the change, passing); one comparison used `<(...)`
+  process substitution (scratch files, its output used for nothing).
