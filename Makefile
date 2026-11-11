@@ -551,7 +551,7 @@ repr-asm-ensure: ## repr/asm's corpora extracted once for test/asm/corpora.edn's
 asm-amd64-essential: ## the x86-64 assembly crop's essential gate steps by hand (AX10): the round trip of musl and MC/AsmParser, the run check, the object check of musl and the synthetic files (test/gate/crops/asm.edn)
 	bin/repr-asm corpus ensure && bin/repr-asm roundtrip musl mc-asmparser && bin/repr-asm run-check && bin/repr-asm object-check musl && bin/repr-asm object-check synthetic
 asm-arm64-essential: ## the arm64 assembly crop's essential gate steps by hand (AX10, AR4): the arm64 round trip, encode check, object checks, object verdict, run check and a64i's check (test/gate/crops/asm.edn)
-	bin/repr-asm corpus ensure && bin/repr-asm --arch arm64 roundtrip && bin/repr-asm --arch arm64 encode-check && bin/repr-asm --arch arm64 object-check && bin/repr-asm --arch arm64 object-check mc-aarch64-obj && bin/repr-asm --arch arm64 object-verdict && bin/repr-asm --arch arm64 run-check && bin/a64i check
+	bin/repr-asm corpus ensure && bin/repr-asm --arch arm64 roundtrip && bin/repr-asm --arch arm64 encode-check && bin/repr-asm --arch arm64 object-check && bin/repr-asm --arch arm64 object-check mc-aarch64-obj && bin/repr-asm --arch arm64 object-verdict && bin/repr-asm --arch arm64 run-check && bin/a64i check --essential
 asm-essential: asm-amd64-essential asm-arm64-essential ## both assembly crops' essential steps by hand (AX10)
 repr-asm-lists: ## repr/asm's corpus lists, split-file parts and RUN-line flags (bin/repr-asm [--arch ARCH] corpus lists; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) corpus lists

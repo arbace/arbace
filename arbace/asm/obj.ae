@@ -12,7 +12,10 @@
   arbace.asm.elf's.
 
   `assemble` gives {:bytes BYTES} or {:unsupported CLASS :what TEXT} (what is not assembled yet: :cfi, a directive, an
-  instruction's class) or {:error MESSAGE}."
+  instruction's class) or {:error MESSAGE :errors [{:pos [START END] :msg MESSAGE :expr EXPR}...]}: as LLVM's diagnostics, every
+  error of the file (ARS43 (a)): an item's (the parse's, each item after one in error assembled still) and, when there is
+  none, the layout's and the fixups' (MCAssembler's, each fixup evaluated still) and the symbol table's, each at its item's
+  place (START, END: the item's offsets in the source) with the expression it is about (the diagnostic's column)."
   (:require [arbace.repr.asm :as asm]
             [arbace.asm.amd64.asm :as x]
             [arbace.asm.elf :as elf]
@@ -21,7 +24,10 @@
 (set! *warn-on-reflection* true)
 
 (defn unsupported [cls what] (throw (ex-info (str what) {:obj/unsupported cls})))
-(defn fail [msg] (throw (ex-info (str msg) {:obj/error msg})))
+(defn fail
+  "An error; EXPR (when given) the expression it is about, the diagnostic's column (ARS43 (a))."
+  ([msg] (throw (ex-info (str msg) {:obj/error msg})))
+  ([msg expr] (throw (ex-info (str msg) {:obj/error msg :obj/expr expr}))))
 
 (def ^:dynamic *arch*
   "The architecture's part, a map: :machine (e_machine); :wrap (fn [thunk]: the assembly run inside it); :emit-insn! (fn [ctx
@@ -54,7 +60,22 @@
    :files (java.util.ArrayList.) :sec-names (java.util.HashMap.)
    :frames (java.util.ArrayList.) :frame (volatile! nil)
    :mode (volatile! 64) :intel (volatile! false)
-   :reloc-directives (java.util.ArrayList.)})   ; .reloc's [OFFSET-EXPR TYPE EXPR] (AR6, arm64's)
+   :reloc-directives (java.util.ArrayList.)   ; .reloc's [OFFSET-EXPR TYPE EXPR] (AR6, arm64's)
+   :pos (volatile! nil)                      ; the current item's [START END] (ARS43 (a): the diagnostics' place)
+   :errors (java.util.ArrayList.)})          ; the errors met ({:pos :msg :expr}), each reported, the assembly going on
+
+(defn report!
+  "An error at POS ([START END] of its item, nil when unknown) about the expression EXPR (nil: the item), collected as LLVM's
+  diagnostics are (ARS43 (a)): the assembly goes on."
+  [ctx pos msg expr]
+  (.add ^java.util.ArrayList (:errors ctx) {:pos pos :msg (str msg) :expr expr}))
+
+(defn errors? [ctx] (pos? (.size ^java.util.ArrayList (:errors ctx))))
+
+(defn with-pos
+  "A fixup [OFF SIZE EXPR KIND PCREL ADJ] marked with the current item's place (its error's)."
+  [ctx fx]
+  (vary-meta fx assoc :pos @(:pos ctx)))
 
 (defn sym-name ^String [s]
   (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s)) :else (fail (str "not a symbol: " (pr-str s)))))
@@ -220,8 +241,11 @@
       (let [v (value ctx (second e) depth) c (cv v)]
         (case (first e)
           + v
+          ;; MCExpr's unary minus: -(a - b + c) is b - a - c; a lone symbol negated is not relocatable (LLVM's "expected
+          ;; relocatable expression" at a fixup, ARS43 (a))
           - (cond c (k (- (long c)))
-                  (and (:add v) (nil? (:sub v))) {:sub (:add v) :c (- (long (:c v)))}
+                  (and (:add v) (:sub v)) {:add (:sub v) :sub (:add v) :c (- (long (:c v)))}
+                  (and (:add v) (nil? (:sub v))) (unsupported :not-relocatable (pr-str e))
                   :else (unsupported :expression (pr-str e)))
           (if c (k (case (first e) bnot (bit-not (long c)) lnot (if (zero? (long c)) 1 0))) (unsupported :expression (pr-str e)))))
       (seq? e)
@@ -263,7 +287,7 @@
     (if c
       (bytes! ctx (for [i (range size)] (bit-shift-right (long c) (* 8 i))))
       (let [ch (cur-data! ctx) ^java.util.ArrayList b (:bytes @ch)]
-        (.add ^java.util.ArrayList (:fixups @ch) [(.size b) size e nil false 0])
+        (.add ^java.util.ArrayList (:fixups @ch) (with-pos ctx [(.size b) size e nil false 0]))
         (dotimes [_ size] (.add b 0))))))
 
 (defn align! [ctx ^long a fill ^long fsize max nops?]
@@ -278,7 +302,14 @@
   (data! ctx)
   (let [n (resolve-expr ctx n)]
     (visit-syms! ctx n)
-    (add-chunk! (cur-sec ctx) (new-chunk :fill {:count n :vsize vsize :value (long v) :size 0}))))
+    (add-chunk! (cur-sec ctx) (new-chunk :fill {:count n :vsize vsize :value (long v) :size 0 :pos @(:pos ctx)}))))
+
+;; emitValueToOffset (.org, ARS47 (a)): an org fragment (MCOrgFragment), its size the target's offset less its own at the layout,
+;; its bytes the fill value's
+(defn org! [ctx target v]
+  (let [target (resolve-expr ctx target)]
+    (visit-syms! ctx target)
+    (add-chunk! (cur-sec ctx) (new-chunk :org {:target target :value (long v) :size 0 :pos @(:pos ctx)}))))
 
 (defn code-section? [sec] (pos? (bit-and (long (:flags @sec)) elf/SHF_EXECINSTR)))
 
@@ -509,6 +540,8 @@
       "ascii" (doseq [s args] (data! ctx) (bytes! ctx (string-bytes s)))
       ("asciz" "string") (doseq [s args] (data! ctx) (bytes! ctx (concat (string-bytes s) [0])))
       ("zero" "skip" "space") (let [[n v] args] (fill! ctx n 1 (if v (cv v) 0)))
+      ;; ARS47 (a): parseDirectiveOrg, an org fragment (MCOrgFragment) whatever the target
+      "org" (let [[t v] args] (data! ctx) (org! ctx t (if v (cv v) 0)))
       "fill" (let [[n sz v] args sz (if sz (long (cv sz)) 1) v (if v (cv v) 0)]
                (when-not (neg? sz) (fill! ctx n (min 8 sz) v)))
       ("align" "balign" "p2align" "balignw" "balignl" "p2alignw" "p2alignl")
@@ -538,7 +571,7 @@
         (when (:chunk @sym) (fail "redefinition of a label"))
         (visit-syms! ctx e)
         (register! ctx n)
-        (swap! sym assoc :var e)
+        (swap! sym assoc :var e :var-pos @(:pos ctx))
         (vswap! (:syms ctx) assoc n e))
       "file" (if (and (= 1 (count args)) (string? (first args)))
                (.add ^java.util.ArrayList (:files ctx) [(first args) (.size ^java.util.ArrayList (:order ctx))])
@@ -564,7 +597,7 @@
     (case (:kind m)
       :data (.size ^java.util.ArrayList (:bytes m))
       :relax (count (:bytes (:enc m)))
-      (:align :fill :nops) (long (:size m 0)))))
+      (:align :fill :nops :org) (long (:size m 0)))))
 
 (defn relax-align! [c ^long offset]
   (let [m @c a (long (:align m)) pad (mod (- a (mod offset a)) a)]
@@ -573,15 +606,35 @@
 (declare defined?)
 ;; MCSymbolELF::getBinding: the binding set, else LOCAL when defined (a label, a section, a variable whose value is), else GLOBAL
 (declare value)
+(defn- chunk-error!
+  "A layout error of the chunk c, reported once (the relaxation evaluates it again): its size 0."
+  [ctx c msg expr]
+  (when-not (:reported @c) (report! ctx (:pos @c) msg expr) (swap! c assoc :reported true))
+  (swap! c assoc :size 0))
+
 (defn relax-fill! [ctx c]
   (let [m @c v (value ctx (:count m) 0)]
-    (when (or (:add v) (:sub v)) (fail "expected assembly-time absolute expression"))
-    (when (neg? (long (:c v))) (fail "invalid number of bytes"))
-    ;; a large fill of a section with contents is not held in memory (a SHT_NOBITS one holds no bytes)
-    (when (and (> (* (long (:c v)) (long (:vsize m))) 0x4000000)
-               (not= elf/SHT_NOBITS (:type @(.get ^java.util.ArrayList (:sections ctx) (:sec m)))))
-      (unsupported :large-fill (str (:c v))))
-    (swap! c assoc :size (* (long (:c v)) (long (:vsize m))))))
+    (cond (or (:add v) (:sub v)) (chunk-error! ctx c "expected assembly-time absolute expression" (:count m))
+          (neg? (long (:c v))) (chunk-error! ctx c "invalid number of bytes" (:count m))
+          ;; (a large fill of a section with contents is refused when its bytes are written, section-bytes: an error test's
+          ;; object is never written)
+          :else (swap! c assoc :size (* (long (:c v)) (long (:vsize m)))))))
+
+(defn relax-org!
+  "computeFragmentSize's FT_Org: the target (its symbol's offset in its section plus the constant) less the fragment's offset;
+  LLVM's errors when it is not an assembly-time value, its symbol undefined, or it is behind the fragment."
+  [ctx c ^long offset]
+  (let [m @c
+        v (try (value ctx (:target m) 0) (catch arbace.lang.ExceptionInfo _ nil))]
+    (cond (or (nil? v) (:sub v)) (chunk-error! ctx c "expected assembly-time absolute expression" (:target m))
+          :else
+          (let [o (when-let [a (:add v)] (sym-offset ctx a 0))]
+            (if (and (:add v) (or (nil? o) (= :abs (first o))))
+              (chunk-error! ctx c "expected absolute expression" (:target m))
+              (let [t (+ (long (:c v)) (long (if o (second o) 0))) size (- t offset)]
+                (if (or (neg? size) (>= size 0x40000000))
+                  (chunk-error! ctx c (str "invalid .org offset '" t "' (at offset '" offset "')") (:target m))
+                  (swap! c assoc :size size))))))))
 
 (defn binding-of [ctx s] (let [m @s] (or (:bind m) (if (or (:chunk m) (:section-sym m) (and (:var m) (defined? ctx s))) elf/STB_LOCAL elf/STB_GLOBAL))))
 
@@ -616,7 +669,7 @@
   (doseq [sec (:sections ctx)]
     (let [^java.util.ArrayList cs (:chunks @sec)]
       ;; layoutSection, then relaxOnce until no offset moves
-      (loop [o 0 i 0] (when (< i (.size cs)) (let [c (.get cs i)] (swap! c assoc :offset o) (case (:kind @c) :align (relax-align! c o) :fill (relax-fill! ctx c) nil)
+      (loop [o 0 i 0] (when (< i (.size cs)) (let [c (.get cs i)] (swap! c assoc :offset o) (case (:kind @c) :align (relax-align! c o) :fill (relax-fill! ctx c) :org (relax-org! ctx c o) nil)
                                                 (recur (+ o (chunk-size c)) (inc i)))))
       (loop [iters 0]
         (let [changed (volatile! false)]
@@ -629,6 +682,7 @@
                   :align (relax-align! c o)
                   :relax (when ((:needs-relax? *arch*) ctx c stretch) ((:relax! *arch*) c))
                   :fill (relax-fill! ctx c)
+                  :org (relax-org! ctx c o)
                   nil)
                 (recur (+ o (chunk-size c)) (inc i)))))
           (when (and @changed (< iters (+ 2 (.size cs)))) (recur (inc iters))))))))
@@ -647,6 +701,7 @@
             bs (if (= :data (:kind m)) (:bytes m) (java.util.ArrayList. ^java.util.Collection (map #(if (= % :fixup) 0 %) (:bytes (:enc m)))))
             fxs (if (= :data (:kind m)) (:fixups m) (:fixups (:enc m)))]
         (doseq [fx fxs]
+          (try
           (let [[off size _ kind pcrel] fx
                 [val resolved v] (eval-fixup ctx c fx 0)
                 resolved (and resolved
@@ -658,11 +713,19 @@
             (if resolved
               (put! val false)
               (let [add (:add v)
+                    ;; a specifier over a difference (AArch64's `:lo12:a - b`) is not relocatable (MCSpecifierExpr's evaluation:
+                    ;; LLVM's error); x86's `foo@PLT - .` is a specified symbol less another
+                    _ (when (and (:spec v) (:sub v) (let [e (nth fx 2)] (and (seq? e) (= 'at (first e)) (seq? (second e)))))
+                        (fail "expected relocatable expression"))
+                    _ (when (and (nil? add) (:spec v) ((:tls-specs *arch*) (:spec v)))
+                        (fail "relocation for a thread-local variable points to an absolute symbol"))
                     _ (when (and add (:temp @add) (not (defined? ctx add)))
                         (fail (str "Undefined temporary symbol " (:name @add))))
                     [pcrel addend] (if-let [sub (:sub v)]
                                      (let [ob (sym-offset ctx sub 0)]
-                                       (when-not (and ob (= (first ob) (:sec m))) (unsupported :relocation "a difference across sections"))
+                                       ;; ELFObjectWriter::recordRelocation's errors
+                                       (when-not ob (fail (str "symbol '" (:name @sub) "' can not be undefined in a subtraction expression")))
+                                       (when-not (= (first ob) (:sec m)) (fail "Cannot represent a difference across sections"))
                                        [true (+ (long (:c v)) (- foff (long (second ob))))])
                                      [pcrel (long (:c v))])
                     type ((:reloc-type *arch*) kind size (:spec v) pcrel)
@@ -679,7 +742,14 @@
                                        :else [nil addend])]
                 (when key (swap! (symbol! ctx key) assoc :used-in-reloc true))
                 (put! 0 true)
-                (.put relocs (:sec m) (conj (vec (.get relocs (:sec m))) {:offset foff :sym key :type type :addend addend}))))))
+                (.put relocs (:sec m) (conj (vec (.get relocs (:sec m))) {:offset foff :sym key :type type :addend addend})))))
+          ;; ARS43 (a): a fixup's error reported at its item, the next fixup evaluated still (MCAssembler's reportError); an
+          ;; expression MCValue cannot hold is LLVM's "expected relocatable expression"
+          (catch arbace.lang.ExceptionInfo ex
+            (let [d (ex-data ex) pos (or (:pos (meta fx)) (:pos m)) e (nth fx 2)]
+              (cond (:obj/error d) (report! ctx pos (:obj/error d) e)
+                    (#{:expression :not-relocatable} (:obj/unsupported d)) (report! ctx pos "expected relocatable expression" e)
+                    :else (throw ex))))))
         (when (= :relax (:kind m)) (swap! c assoc :final (vec bs)))))
     ;; .reloc's relocations (MCObjectStreamer::emitRelocDirective: pending fixups added after the section's own), in their
     ;; order: the offset's section and place, the type given, the expression's symbol (a local one in a section as its
@@ -708,7 +778,12 @@
         :nops (let [mx (long ((:nops-max *arch*) (:mode m))) ctl (long (:ctl m)) ctl (if (pos? ctl) (min ctl mx) mx)]
                 (loop [n (long (:size m))] (when (pos? n) (let [k (min n ctl)] (doseq [b ((:nops *arch*) k (:mode m))] (.write o (int b))) (recur (- n k))))))
         :fill (let [n (quot (long (:size m)) (long (:vsize m)))]
+                ;; a large fill is not held in memory (a SHT_NOBITS section's bytes are not written)
+                (when (> (long (:size m)) 0x4000000) (unsupported :large-fill (str (:size m))))
                 (dotimes [_ n] (dotimes [i (:vsize m)] (.write o (int (bit-and (bit-shift-right (long (:value m)) (* 8 i)) 0xff))))))
+        :org (let [n (long (:size m))]
+               (when (> n 0x4000000) (unsupported :large-fill (str n)))
+               (dotimes [_ n] (.write o (int (bit-and (long (:value m)) 0xff)))))
         :align (let [n (long (:size m 0))]
                  (if (:nops m)
                    (doseq [b ((:nops *arch*) n (:mode m))] (.write o (int b)))
@@ -744,18 +819,24 @@
 
 (defn assemble
   "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
-  {:unsupported CLASS :what TEXT}, or {:error MESSAGE}."
+  {:unsupported CLASS :what TEXT}, or {:error MESSAGE :errors [...]} (the namespace's doc)."
   [items & [{:keys [mode] :or {mode 64}}]]
   ((or (:wrap *arch*) (fn [t] (t)))
    (fn []
+    (let [ctx-of (volatile! nil)]
     (try
       (let [ctx (new-ctx)]
+        (vreset! ctx-of ctx)
         (vreset! (:mode ctx) mode)
         ;; initSections: .text, aligned to 4 by an empty code alignment
         (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
         (vreset! (:prev ctx) nil)
         (align! ctx 4 0 1 nil true)
-        (doseq [[f] items :when (seq? f)]
+        ;; ARS43 (a): an item's error is reported and the next item assembled (AsmParser's statements); with any, the file is
+        ;; not finished (AsmParser::Run: no layout, no fixups), as LLVM's
+        (doseq [[f start end] items :when (seq? f)]
+          (vreset! (:pos ctx) (when start [start end]))
+          (try
           (let [h (first f)]
             (cond
               (= h 'asm/label)
@@ -767,13 +848,28 @@
                   (label! ctx (sym-name l))))
               (#{'asm/= 'asm/== 'asm/set 'asm/equ} h) (directive! ctx (cons 'asm/= (rest f)))
               (= "asm" (namespace h)) (directive! ctx f)
-              :else (emit-insn! ctx f))))
+              :else (emit-insn! ctx f)))
+            (catch arbace.lang.ExceptionInfo ex
+              (if (:obj/error (ex-data ex)) (report! ctx @(:pos ctx) (:obj/error (ex-data ex)) (:obj/expr (ex-data ex))) (throw ex)))))
+        (vreset! (:pos ctx) nil)
+        (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))
         (when-let [f (:finish *arch*)] (f ctx))
         (layout! ctx)
         ;; the instructions' places at the layout (arm64's eval, arbace.asm.arm64.eval: AR5)
         (when-let [f (:after-layout *arch*)] (f ctx))
         (emit-frames! ctx)
         (let [relocs (apply-fixups! ctx)
+              ;; the symbol table's evaluation of the assignments (ELFObjectWriter, MCAssembler::getSymbolOffset's errors), each
+              ;; at its .set
+              _ (doseq [n (:order ctx) :let [m @(symbol! ctx n)] :when (and (:var m) (not (:chunk m)) (not (:section-sym m)))]
+                  (let [v (try (value ctx (:var m) 0)
+                               (catch arbace.lang.ExceptionInfo ex (if (#{:expression :not-relocatable} (:obj/unsupported (ex-data ex))) ::bad (throw ex))))]
+                    (cond (= v ::bad) (report! ctx (:var-pos m) "expression could not be evaluated" (:var m))
+                          (and (:add v) (:common @(:add v)))
+                          (report! ctx (:var-pos m) (str "Common symbol '" (:name @(:add v)) "' cannot be used in assignment expr") (:var m))
+                          (and (:add v) (:sub v) (not (sym-offset ctx (:sub v) 0)))
+                          (report! ctx (:var-pos m) (str "symbol '" (:name @(:sub v)) "' could not be evaluated in a subtraction expression") (:var m)))))
+              _ (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))
               secs (vec (:sections ctx))
               sec-out (vec (for [s secs :let [m @s]]
                              (cond-> {:name (:name m) :type (:type m) :flags (:flags m) :align (:align m) :entsize (:entsize m)
@@ -805,10 +901,16 @@
                                               (vec (for [[f pos] (:files ctx)]
                                                      [f (count (filter #(< (long (reg (:key %) -1)) (long pos)) syms))])))})}))
       (catch arbace.lang.ExceptionInfo ex
-        (let [d (ex-data ex)]
-          (cond (:obj/unsupported d) {:unsupported (:obj/unsupported d) :what (.getMessage ex)}
-                (:obj/error d) {:error (:obj/error d)}
-                :else (throw ex))))))))
+        (let [d (ex-data ex)
+              ctx @ctx-of
+              errs (if ctx (vec (:errors ctx)) [])
+              errs (if (:obj/error d) (conj errs {:pos (when ctx @(:pos ctx)) :msg (str (:obj/error d))}) errs)]
+          (cond
+            ;; the errors reported (and one met after them that stopped the assembly): the first is the file's
+            (seq errs) (cond-> {:error (:msg (first errs)) :errors errs}
+                         (:obj/unsupported d) (assoc :stopped [(:obj/unsupported d) (.getMessage ex)]))
+            (:obj/unsupported d) {:unsupported (:obj/unsupported d) :what (.getMessage ex)}
+            :else (throw ex)))))))))
 
 (defn assemble-file
   "The object of the file at `path` read in the dialect `d` (arbace.repr.asm/dialect's)."

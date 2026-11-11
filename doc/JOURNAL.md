@@ -6122,3 +6122,92 @@ tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict:
   minutes per num/mod.rs and a night slot), reading the attributes from rustc's metadata (a toolchain product).
 - Independence unchanged (Rust 80.0: every case still consumes std's records, RFP43 (a)); the record facts the own front end
   reads shrink. Details and the night's commands: doc/rust/FRONTEND-SURVEY.md, "As built: RF19".
+
+## 2026-11-11: HES90: ignore_stdout judged as GHC's driver does (branch `hs-hes90`, from `mac/next` `15278e9c6`)
+
+- The user's decision (HES88's proposal (a)): `test/haskell/eval/allt.ae` marks a test with an unconditional `ignore_stdout`
+  (`:ignore-stdout true` in `testsuite-run.edn`, 19 tests), `bin/lib/hsi/check` judges it by status and stderr alone, with a negative
+  control (`conc065 conc064 status=0`: wrong stderr still fails). Only the 7 programs of the corpus's directories rerun
+  (`--only ... --record`): conc065 and conc066 pass, taken out of the class `rts`; hsi divergences 811 pass, 0 unclassed; reap and
+  crops-score strict 0 problems. Alternative (b), keep comparing stdout: rejected by the user's decision. Details: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES90".
+
+## 2026-11-11: cpp-s4, C++'s own route: library.cpp's variant and any slices (branch `cpp-s4`, from `mac/cpp-s3` 7d8ef69ba)
+
+Light, by day (.tmp/night12/AGENT-RULES.md; stage 0, the compiler stubs first on PATH, their log empty; no gate). CP359 (a) taken:
+runtime/library.cpp through our route, variant, then any, then <format>. Sources: libstdc++ 15.2's <variant>, <any>, <charconv>,
+<format>, bits/parse_numbers.h, ext/numeric_traits.h, bits/utility.h (the headers the pinned gcc-15.2.0 tarball's libstdc++ installs);
+the Itanium C++ ABI (5.1.4.3's CI2 <base> of an inheriting constructor, 5.1.5.3's Dc and the unresolved names of a dependent
+expression); clang 23.1.5's names as the recorded IR pack cpp-ir-samples has them for library.cpp; [temp.variadic]/5,
+[namespace.udecl]/1, [class.qual]/2, [class.inhctor.init]/1, [class.base.init]/9, [dcl.type.auto.deduct]/5, [conv.integral]/3,
+[temp.pre]/5, [basic.lookup.argdep]/3.4, [temp.deduct.partial]/8 and /11, [temp.deduct.type]/5.1, [basic.type.qualifier]/3,
+[over.best.ics]/4, [dcl.enum]/5. No live clang or g++. CP335 (b) leaves the GNU vector programs to clang's pack: not touched.
+
+- variant's converting constructor by our route (probe v1: every defined name of ours among clang's for library.cpp, every variant name of
+  clang's among ours): pack expansions among the bases and in a using-declaration, a variable template alone in constant text, constant
+  evaluation of local arrays, decltype(auto), qualified template names and casts in constant text, a constant's value as its type holds
+  it, a pack parameter only by a `...` before its name, the parser's skim not ending a template's initializer at a template argument's
+  comma (it had declared a variable `variant` that hid the injected-class-name from the delegating constructors), inheriting
+  constructors through a typedef and transitively with clang's CI2 names, a union's other members left uninitialized.
+- any (probe a1, the same): a dependent variable template's value in a symbolic signature (mangled as written), ADL through a pointer,
+  sizeof of a member, partial ordering with a function parameter pack; a scoped enumeration's earlier enumerators in its initializers.
+- Toward <format>: non-deducible parameters out of deduction, cv on an array's elements, a constraint's satisfaction outside the asking
+  user-defined conversion. library.cpp now stops at <format>'s `_Store` (it stopped at variant); the consteval check of the format
+  string is the big one (CP362). Considered: evaluating the check (a class-object constant evaluator, days) against emitting the stored
+  view alone for the code generator; proposed, not built.
+- The 82 run programs: 69 generated, as before; 68 byte for byte cpp-s3's, opt/unroll1.C's two names now clang's (cv on an array's
+  elements). codegen-gen 154 of 154; C++'s essential read and print pass; reap and crops-score unchanged (no record changed).
+
+CP362-CP364 proposed. The survey's "As built: cpp-s4" has the measures and the night's commands.
+
+## 2026-11-11: LLVM IR, llvm-ind2 (LLS47 (a), LLS50)
+
+By the user's decision of 2026-11-11 (LLS47 (a), LLS50; LLS48 and LLS49 left). `bin/repr-llvm mutants-oracle` in record mode compares
+the verdict only (the message is the live mode's, the oracle tier's authority): the four message gaps (builtin-prefetch-5 x2,
+rs.g0.attr-dup.600096, p1-first.lto.attr-dup.600342) read "same" without a live opt; no record changed. `own_verdicts` judges a
+split-file section by its parent test's RUN lines (`section_verdict`: `valid` when opt, llc, llvm-as or llvm-link take `%t/SECTION` as
+an input, none under `not` or with `--disable-verify`): verify-llvmtest 706 to 758 own verdicts, the recorded passes unchanged (800 of
+806), a control in verify-controls.txt and a fake-tree case in controls-test.bash. Alternative considered: the proposal's 57 valid rows
+all as own (a rule that also took sections concatenated by `cat` or read by other tools): not done, those 7 stay opt's. Judge stage
+0.8455 to 0.8541, independence 96.91 to 97.08. Details: doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS47, LLS50".
+
+## 2026-11-11: Scheme's AOT: syntax objects among a compiled program's constants, SC90 (b) (branch `scheme-aot1`, from `mac/next` `15278e9c6`)
+
+The AOT cell's one deferred class, `:syntax-constants` (2 programs refused: Racket's `syntax-case.sps`, Larceny's
+`regression.sch`), built as SC90 (b) decided: a constant holding psyntax's records (stx, rib) is written as a recipe, the unit's
+graph of objects (each object once, so the marks psyntax compares with `eq?` and the shared, mutated ribs keep their identity;
+labels are gensyms read by uid as before), built by `scm.ReadLate` in the unit's setup after psyntax's boot, a record's type named
+among the types psyntax made while booting (`BootBegin`/`BootEnd`, noted by `NewRTD`). Alternatives considered: SC90 (c)
+(expanding the unit again at start: not AOT), the record's type by the psyntax location that holds it (the compiled psyntax's
+globals are package variables of their own, not named in the program's packages), datum labels in the constants' text (no record
+syntax to read back). `bin/si check --aot --record`: 47 of 52 (was 45), 0 refused, 50 of 50 compiled runs the same as si's; the AOT
+cell 90.0% (95.7% without by design) -> 94.0% (100%). SC94 (b) not built (SCS30); SCS29 (one graph per program). Details:
+doc/scheme/SCHEME-SURVEY.md, "As built: SC90 (b), syntax objects among a compiled program's constants".
+
+## 2026-11-11: arm64 assembly, AR7: the essential step sliced, every error of a file, `-implicit-mapsyms` and `.org`, the memory families' synthetic programs (branch `asm-ar7`, from `mac/next` `15278e9c6`)
+
+The user's answers of 2026-11-11 to AR6's survey: ARS43 (a), ARS45 (b), ARS46 (b), ARS47 (a) (ARS44, the Mac's CPU rows, is the main
+session's queue task). On the main host, light; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`.
+doc/asm/ARM64-SURVEY.md, "As built: AR7", has the measures.
+
+- ARS46 (b): `bin/a64i check --only LIST|NAME,...` judged on what it ran with a slice-foreign control (x86i's AXS89 (a) ported to
+  test/asm/a64i_judge.ae), `--essential` = test/asm/subsets.edn's `:a64i` (the hand-written programs, synth-alu, synth-fp-d);
+  `a64i-essential` runs it, the new `--full` step `a64i-check` the whole set under `:rotate`; the AOT and eval builds side by side.
+  1 min 36 s → 36 s. Alternative not taken: dropping the synthetic programs from the check (their coverage is the record's).
+- ARS43 (a): the shared object assembler collects every error with its item's place and expression, as LLVM's diagnostics (an
+  item's error, then no layout, as AsmParser::Run; else the layout's, every fixup's and the symbol table's), and the object verdict
+  holds an error run's CHECK lines to llvm-mc's diagnostic text by FileCheck (`[[@LINE]]` taken). LLVM's messages taught where
+  Arbace had its own (across sections, undefined subtrahends, not relocatable, getRelocType's, out of range data, LDST alignment);
+  `beq`, `mov`'s MOVW expression (MOVN when negative), `mov` with a MOVW specifier, a memory operand's label difference. A
+  specifier over a difference is refused only in AArch64's shape (`:lo12:a - b`): x86's `foo@PLT - .` stays relocatable (found by
+  amd64's object-check synthetic/relocs). Alternative not taken: judging each `error:` line's fragment alone (AR4's judge, which
+  let the source and caret lines pass unread).
+- ARS47 (a): `.org` (an org chunk at the layout, LLVM's three errors) and `-implicit-mapsyms` (the implicit state at a section's
+  start, the ending mapping symbol after the section's last symbol, AArch64TargetELFStreamer::finish).
+- ARS45 (b): the memory families' synthetic programs (ldst 374, pair 93, excl 94, lse 240 cases: a 64-byte buffer from the row,
+  the stub, the buffer and the writeback folded into the flags' slot), qemu-aarch64 and a64i agreeing on the first run; a64i's
+  coverage 474 → 653 of 653 claimed. NEON not reached (proposed ARS48).
+- Results: object verdict 2,687 → 2,781 of 2,833 (`:message`, `:mc-option`, `:error-accepted` gone); object check mc-aarch64-obj
+  104 → 107 of 110; a64i 80 → 84 programs; the AOT cell 2,904 / 0 / 152 (95.0%) → 3,005 / 0 / 55 (98.2%); crops-score completeness 98.7 → 99.5. Proposed ARS48-ARS52 (NEON, `@AUTH`/`%pltpcrel`, the literal pool,
+  the diagnostics' columns, the memory programs in the essential subset). A fix on the way: x86i-check ran its CPU runs through
+  run-check's `$runner`, unset there under `set -u` since AR4's merge (every CPU row `exit 1`; found by the AR7 proof's `--only` run of
+  the subset, 13 of 13 after).

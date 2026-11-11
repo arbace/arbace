@@ -6,3 +6,50 @@
 (go/func TestAdd [^{:tag (* testing/T)} t]
   (when (!= (Add (conv int64 2) (conv int64 3)) (conv any (conv int64 5)))
     (.Fatal t "2+3")))
+
+(go/func TestLateConstants
+  "TestLateConstants: SC90 (b)'s late constants. Records of a type made while psyntax boots, written as the unit's
+graph and built again by ReadLate: one object for each (a mark shared by two records and two constants, a gensym
+by its uid), the strings fresh and mutable; a record of a type made outside the boot is refused.\n"
+  [^{:tag (* testing/T)} t]
+  (BootBegin)
+  (let [rtd (NewRTD (Intern "rtd:latetest") nil false false false
+                    (lit (slice Field) (lit Field :Name (Intern "a") :Mutable true) (lit Field :Name (Intern "b") :Mutable true)))]
+    (BootEnd)
+    (let [mark (NewString "m")
+          g (addr (lit Symbol :Name "l" :Gensym true :Uid "latetest-uid-1"))
+          rec (addr (lit Record :RTD rtd :F (lit (slice any) mark (List mark g))))
+          c1 (List rec (conv int64 7))
+          c2 (NewVector (lit (slice any) mark rec))
+          u (newAotUnit nil)
+          i1 (.konst u c1)
+          i2 (.konst u c2)]
+      (when (!= (.-refused u) "")
+        (.Fatal t (.-refused u)))
+      (let [K (make (slice any) 2)]
+        (ReadLate K (.lateText u))
+        (let [(values p1 ok) (assert (* Pair) (aget K i1))]
+          (when (not ok)
+            (.Fatal t "the first constant is not a pair"))
+          (let [(values r ok2) (assert (* Record) (.-Car p1))]
+            (when (or (not ok2) (!= (.-RTD r) rtd))
+              (.Fatal t "the record's type is not the booted one"))
+            (when (== (aget (.-F r) 0) (conv any mark))
+              (.Fatal t "the mark is the dumper's object, not one built again"))
+            (when (!= (aget (.-F r) 0) (nth (aget (.-F r) 1) 0))
+              (.Fatal t "the mark is not one object within the record"))
+            (when (.-RO ((inst As (* String)) (aget (.-F r) 0)))
+              (.Fatal t "the mark is read-only"))
+            (let [(values gs ok3) (assert (* Symbol) (nth (aget (.-F r) 1) 1))]
+              (when (or (not ok3) (not (.-Gensym gs)) (!= (.-Uid gs) "latetest-uid-1"))
+                (.Fatal t "the gensym is not read back by its uid")))
+            (when (!= (nth (aget K i1) 1) (conv any (conv int64 7)))
+              (.Fatal t "the fixnum is not read back"))
+            (let [(values v ok4) (assert (* Vector) (aget K i2))]
+              (when (or (not ok4) (!= (aget (.-V v) 1) (conv any r)) (!= (aget (.-V v) 0) (aget (.-F r) 0)))
+                (.Fatal t "the second constant does not share the first's record and mark")))))))
+    (let [other (NewRTD (Intern "rtd:latetest") nil false false false (lit (slice Field) (lit Field :Name (Intern "a"))))
+          u (newAotUnit nil)]
+      (.konst u (List (addr (lit Record :RTD other :F (lit (slice any) false)))))
+      (when (== (.-refused u) "")
+        (.Fatal t "a record of a type made outside psyntax's boot is not refused")))))

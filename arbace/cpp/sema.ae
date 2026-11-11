@@ -354,6 +354,9 @@
     (if-let [n (builtin-syms f)]
       (abi/b n)
       (cond (= 'auto f) {:k :auto}
+            ;; (cpp-s4: decltype(auto), [dcl.type.auto.deduct]/5: deduced as decltype of the initializer or the returned
+            ;; operand; mangled Dc; variant's __detail::__variant::__get)
+            (= 'decltype-auto f) {:k :auto :decltype true}
             ;; x86-64's va_list (the SysV ABI §3.5.7): struct __va_list_tag[1], the struct opaque here
             (= '__builtin_va_list f) (abi/arr 1 (va-list-tag))
             :else
@@ -370,8 +373,10 @@
       && (let [t (resolve-type-form scope (second f))] (if (abi/ref? t) t (abi/rref t)))
       ;; GNU's __complex__ T (_Complex T): {:k :complex :of T} (cpp-s3: std::complex<long double>'s _M_value)
       complex {:k :complex :of (abi/unq (resolve-type-form scope (second f)))}
-      const (assoc (resolve-type-form scope (second f)) :c true)
-      volatile (assoc (resolve-type-form scope (second f)) :v true)
+      ;; (cpp-s4: cv on an array type is on its elements, [basic.type.qualifier]/3: `const T&` of T = char[4], std::format's
+      ;; basic_format_string(const _Tp&) under convertible_to)
+      const (let [cv (fn cv [t] (if (abi/arr? t) (assoc t :of (cv (:of t))) (assoc t :c true)))] (cv (resolve-type-form scope (second f))))
+      volatile (let [cv (fn cv [t] (if (abi/arr? t) (assoc t :of (cv (:of t))) (assoc t :v true)))] (cv (resolve-type-form scope (second f))))
       restrict (resolve-type-form scope (second f))
       cpp/attributed (resolve-type-form scope (last f))
       array (if (= 2 (count f))
@@ -600,6 +605,14 @@
       (let [src (text-of (:file bl))]
         (when (<= (long b) (count src))
           (subs src b (max (long b) (min (count src) (+ (long e) (long (or l 0)))))))))))
+
+(defn- text-after
+  "At most `k` characters of a node's file after its range's last token, or nil."
+  ^String [n k]
+  (let [el (loc-of (get-in n [:range :end])) e (:offset el) l (:tokLen el)]
+    (when (and e (:file el))
+      (let [src (text-of (:file el)) a (min (count src) (+ (long e) (long (or l 0))))]
+        (subs src a (min (count src) (+ a (long k))))))))
 
 (defn text-before-name
   "The text a declaration's node has before its name (its location), in its own file, or nil."
@@ -1036,13 +1049,16 @@
     (when-not nm (reset! *last-anon* t))
     (swap! abi/*enums* assoc id {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped})
     (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))}))
-    (loop [[c & more] (filter #(= "EnumConstantDecl" (:kind %)) (kids n)) v 0]
+    ;; (cpp-s4: an enumerator's initializer sees the earlier enumerators, of the underlying type before the closing brace,
+    ;; [dcl.enum]/5 and [basic.scope.enum]: a scoped enumeration's too, <charconv>'s `general = fixed | scientific`)
+    (loop [[c & more] (filter #(= "EnumConstantDecl" (:kind %)) (kids n)) v 0 bs (new-scope :enum scope :path (:path scope))]
       (when c
-        (let [v (if-let [x (first (kids c))] (const-int scope x) v)
+        (let [v (if-let [x (first (kids c))] (const-int bs x) v)
               e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
+          (enter! bs (:name c) (assoc e :ty under))
           (enter! es (:name c) e)
           (when-not scoped (enter! scope (:name c) e))
-          (recur more (inc (long v))))))
+          (recur more (inc (long v)) bs))))
     t))
 
 (defn- declare-class! [scope0 n]
@@ -1069,12 +1085,18 @@
     (when (:completeDefinition n)
       (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
       (abi/update-cls! id assoc :complete true
-                       :bases (vec (for [[bi bs] (map-indexed vector (:bases n))]
-                                     (let [bt (resolve-type scope (get-in bs [:type :qualType]))]
+                       :bases (vec (for [[bi bs] (map-indexed vector (:bases n))
+                                         ;; (cpp-s4: a pack expansion among the bases, [temp.variadic]/5's base-specifier-list:
+                                         ;; one base per element of the packs it names, variant's `_Build_FUN<_Ind, _Tp, _Ti>...`)
+                                         :let [qt (get-in bs [:type :qualType])
+                                               ss (when (:isPackExpansion bs)
+                                                    (when-let [h (:pack-scopes @hooks)]
+                                                      (h scope (distinct (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (str qt))))))]
+                                         bt (if ss (map #(resolve-type % qt) ss) [(resolve-type scope qt)])]
                                        (cond-> {:cls (:id bt) :virtual (boolean (:isVirtual bs)) :access (keyword (or (#{"public" "protected" "private"} (:writtenAccess bs))
                                                                                                          (if (= "class" (:tagUsed n)) "private" "public")))}
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
-                                         (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true))))))
+                                         (contains? (:dep-bases (abi/cls id)) bi) (assoc :dependent true)))))
       ;; alignas on the class ([dcl.align]): its alignment at least the strictest one written (a type's or a constant's)
       ;; (and GNU's aligned, G5c: unwind.h's `struct _Unwind_Exception { ... } __attribute__((__aligned__))`, without an
       ;; argument the target's largest alignment, 16 on x86-64, as GCC documents it and clang's TargetInfo's
@@ -1237,8 +1259,19 @@
     ("UsingDecl" "UnresolvedUsingValueDecl" "UnresolvedUsingTypenameDecl")
                 (let [t (node-text n)
                       [_ target] (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
+                      ;; (cpp-s4: a pack expansion, `using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;` of variant's _Build_FUNs,
+                      ;; [namespace.udecl]/1, [temp.variadic]/5: the declaration once per element of the packs its qualifier
+                      ;; names, the members each one finds together)
+                      pack? (or (str/ends-with? (str/trim target) "...") (boolean (re-find #"^\s*\.\.\." (or (text-after n 16) ""))))
+                      target (if (str/ends-with? (str/trim target) "...") (subs (str/trim target) 0 (- (count (str/trim target)) 3)) target)
                       parts (vec (map str/trim (remove str/blank? (str/split (str/trim target) #"::"))))
-                      es (lookup-qualified scope parts (str/starts-with? (str/trim target) "::"))]
+                      gq? (str/starts-with? (str/trim target) "::")
+                      es (if pack?
+                           (if-let [ss (when-let [h (:pack-scopes @hooks)]
+                                         (h scope (distinct (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (str/join " " (butlast parts))))))]
+                             (vec (distinct (mapcat #(lookup-qualified % parts gq?) ss)))
+                             (lookup-qualified scope parts gq?))
+                           (lookup-qualified scope parts gq?))]
                   ;; (the rest of CP313 (a): a using-declaration names its members with their access where they were found,
                   ;; [namespace.udecl]/19, and gives them its own as members of its class, [class.access]/... ; enumerators
                   ;; and types alone, the others keep their own)
@@ -1266,7 +1299,13 @@
                   ;; class marked with the bases' names, their constructors candidates of its initializations, ctor-init)
                   (when (and (:cls scope) (>= (count parts) 2)
                              (= (last parts) (str/trim (str/replace (nth parts (- (count parts) 2)) #"<.*$" ""))))
-                    (abi/update-cls! (:cls scope) update :inherits-ctors (fnil conj #{}) (last parts)))
+                    (abi/update-cls! (:cls scope) update :inherits-ctors (fnil conj #{}) (last parts))
+                    ;; (cpp-s4: the base named through a typedef or an alias, `using _Base::_Base;` of variant's
+                    ;; _Move_assign_base and the rest, [class.qual]/2: the constructors of the class it names)
+                    (when-let [bn (try (let [t (resolve-type scope (str/join "::" (butlast parts)))]
+                                         (when (abi/class? t) (:name (abi/cls (:id t)))))
+                                       (catch arbace.lang.ExceptionInfo _ nil))]
+                      (abi/update-cls! (:cls scope) update :inherits-ctors conj bn)))
                   (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                                              (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
@@ -1621,9 +1660,18 @@
        :lor (if (or (not (zero? (long (ev (:l e))))) (not (zero? (long (ev (:r e)))))) 1 0)
        :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
        :comma (do (ev (:l e)) (ev (:r e)))
-       :load (let [x (:e e)]
-               (if (and (= :var (:op x)) (contains? env (:id x)))
+       :load (let [x (:e e)
+                   ;; (cpp-s4: an element of a local constant array, `__found[__i]` of libstdc++'s __find_uniq_type_in_pack,
+                   ;; the array a vector of its elements' values in `env`)
+                   ax (when (and (= :deref (:op x)) (= :ptradd (:op (:e x))) (= "+" (:o (:e x))) (= :decay (:op (:p (:e x))))
+                                 (= :var (:op (:e (:p (:e x))))) (contains? env (:id (:e (:p (:e x))))))
+                        @(get env (:id (:e (:p (:e x))))))]
+               (cond
+                 (vector? ax) (let [i (long (ev (:n (:e x))))]
+                                (if (< -1 i (count ax)) (nth ax i) (not-constant "an element out of its array")))
+                 (and (= :var (:op x)) (contains? env (:id x)))
                  @(get env (:id x))
+                 :else
                  (let [v (when (= :var (:op x)) (var* (:id x)))
                        init (or (:init v) (:init-node v))]
                    (if (and v (:c (:ty v)) init (or (abi/integral? (:ty v)) (:constexpr v) (and *ce-fold* (abi/floating? (:ty v)))))
@@ -1683,8 +1731,16 @@
                (if (nil? x) [:normal]
                    (if (= :decl (:s x))
                      (let [v (var* (:var x)) init (:init x)
-                           val (case (:i init) :expr (ce-eval (:e init) @env) (:zero :none) 0 (not-constant "a local's initializer"))]
-                       (swap! env assoc (:var x) (atom (ce-wrap (:ty v) val)))
+                           ;; (cpp-s4: a local array of scalars from a list, its elements' values a vector; [dcl.init.aggr]/5's
+                           ;; elements without an initializer from the list's filler)
+                           at (abi/unq (:ty v))
+                           arr? (and (abi/arr? at) (= :list (:i init)) (:n at) (not (abi/class? (abi/unq (:of at)))))
+                           el (fn [i] (case (:i i) :expr (ce-wrap (:of at) (ce-eval (:e i) @env)) (:zero :none nil) 0 (not-constant "an element's initializer")))
+                           val (if arr?
+                                 (let [xs (mapv el (:items init))]
+                                   (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill init)))))
+                                 (case (:i init) :expr (ce-eval (:e init) @env) (:zero :none) 0 (not-constant "a local's initializer")))]
+                       (swap! env assoc (:var x) (atom (if arr? val (ce-wrap (:ty v) val))))
                        (recur more))
                      (let [r (ce-exec x @env)] (if (= :normal (first r)) (recur more) r))))))
     :return (cond (:void-e s) [:ret 0] (:init s) [:ret (ce-eval (:e (:init s)) env)] :else [:ret 0])
@@ -2397,13 +2453,29 @@
             f (merge {:id fid :name (:name c) :kind :ctor :cls id :ty (:ty b) :implicit :ctor :inline true
                       :path (conj (vec (:path c)) [:cls id]) :scope (:scope c) :def-scope (:scope c) :linkage :cpp
                       :param-names (mapv (fn [_] nil) (:ps (:ty b))) :defaults (vec (:defaults b)) :pos -1
-                      :inh-from bfid :inh-base (:cls b) :access (:access b)}
+                      :inh-from bfid :inh-base (:cls b) :access (:access b)
+                      ;; (cpp-s4: mangled by the class whose constructor it inherits in the end, Itanium §5.1.4.3, as
+                      ;; clang names _Move_assign_base's `CI2 _Variant_storage`, which calls _Copy_assign_base's of the same)
+                      :inh-name (or (:inh-name b) (:cls b))}
                      (when (:tinst b) {:tinst (:tinst b)})
                      (select-keys b [:explicit :noexcept :constexpr]))]
         (swap! *fns* assoc fid f)
         (abi/update-cls! id assoc-in [:inheriting bfid] fid)
         (swap! *order* conj [:fn fid])
         fid)))
+
+(defn- inherit-through!
+  "cpp-s4: the inheriting constructor of class `id` for the base constructor `g`, `g`'s class a direct base of `id` or
+  an indirect one whose constructors the bases between inherit ([class.inhctor.init]/1, each base's inheriting
+  constructor made in turn)."
+  [id g]
+  (let [gc (:cls (fnd g))
+        below? (fn below? [c] (or (= c gc) (some #(below? (:cls %)) (:bases (abi/cls c)))))
+        bs (map :cls (:bases (abi/cls id)))]
+    (if (some #{gc} bs)
+      (inheriting-ctor! id g)
+      (let [b (or (first (filter below? bs)) (fail :overload "an inherited constructor's base"))]
+        (inheriting-ctor! id (inherit-through! b g))))))
 
 (defn- ctor-init
   "A constructor of class `id` chosen for the arguments `args` by overload resolution, its call's initializer. `nested`:
@@ -2419,16 +2491,23 @@
         ;; (CP330 (a): the code generator's too; a base constructor with the parameter types of one of the class's own
         ;; is hidden by it, [namespace.udecl]/15)
         own-ps (set (map #(mapv abi/unq (:ps (:ty (fnd %)))) cands))
-        inh (when (seq (:inherits-ctors (abi/cls id)))
-              (let [nms (:inherits-ctors (abi/cls id))]
-                (vec (for [b (:bases (abi/cls id))
-                           :let [bc (:cls b)]
-                           :when (and (contains? nms (:name (abi/cls bc))) (or (checking?) (not (:virtual b))))
-                           fid (concat (ctor-candidates bc) (when-let [h (:ctor-candidates @hooks)] (h bc args)))
-                           :let [f (fnd fid)]
-                           :when (and (seq (:ps (:ty f))) (not (copy-ctor? f bc)) (not (move-ctor? f bc))
-                                      (or (checking?) (not (contains? own-ps (mapv abi/unq (:ps (:ty f)))))))]
-                       fid))))
+        ;; (cpp-s4: inherited transitively, a base's constructors that it inherits itself, [namespace.udecl]/3 and
+        ;; [class.inhctor.init]/1: variant's _Move_assign_base, _Copy_assign_base, _Move_ctor_base and _Copy_ctor_base each
+        ;; `using _Base::_Base;` down to _Variant_storage's)
+        inh-of (fn inh-of [cid seen]
+                 (when (and (seq (:inherits-ctors (abi/cls cid))) (not (contains? seen cid)))
+                   (let [nms (:inherits-ctors (abi/cls cid))]
+                     (vec (for [b (:bases (abi/cls cid))
+                                :let [bc (:cls b)]
+                                :when (and (contains? nms (:name (abi/cls bc))) (or (checking?) (not (:virtual b))))
+                                fid (concat (concat (ctor-candidates bc) (when-let [h (:ctor-candidates @hooks)] (h bc args)))
+                                            (when-not (checking?)
+                                              (inh-of bc (conj seen cid))))
+                                :let [f (fnd fid)]
+                                :when (and (seq (:ps (:ty f))) (not (copy-ctor? f (:cls f))) (not (move-ctor? f (:cls f)))
+                                           (or (checking?) (not= cid id) (not (contains? own-ps (mapv abi/unq (:ps (:ty f)))))))]
+                            fid)))))
+        inh (inh-of id #{})
         cands (concat cands inh)
         cands (if nested (remove #(= id (class-id (abi/non-ref (or (first (:ps (:ty (fnd %)))) abi/void)))) cands) cands)
         fid (try (resolve-overload cands args nil)
@@ -2448,7 +2527,8 @@
           (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) {:i :none})
           ;; (CP330 (a), the code generator: the class's inheriting constructor for the chosen base constructor, called
           ;; with the arguments as that constructor's own would be, [class.inhctor.init]/1)
-          (some #{fid} inh) (let [d (inheriting-ctor! id fid)] {:i :ctor :fn d :args (call-args (fnd d) args ctx)})
+          ;; (a constructor inherited through a base that inherits it: that base's inheriting constructor first, cpp-s4)
+          (some #{fid} inh) (let [d (inherit-through! id fid)] {:i :ctor :fn d :args (call-args (fnd d) args ctx)})
           (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
@@ -3167,7 +3247,8 @@
   [args nm]
   (distinct
    (for [a args
-         :let [cid (class-id (:ty a))] :when cid
+         ;; (cpp-s4: a pointer's, [basic.lookup.argdep]/3.4, its pointee's)
+         :let [cid (class-id (loop [t (abi/unq (abi/non-ref (:ty a)))] (if (abi/ptr? t) (recur (abi/unq (:to t))) t)))] :when cid
          ns (adl-class-nss cid)
          e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (= :fn (:e e))]
      (:id e))))
@@ -4809,7 +4890,16 @@
                        ;; `-> auto&` among them -- [dcl.spec.auto.general]/11)
                        pre (when (and e (has-auto? rt)) (p2266-xvalue (analyze ctx e)))
                        rt (if (has-auto? rt)
-                            (let [t (if pre (deduce-auto rt pre) abi/void)] (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
+                            (let [t (cond (nil? pre) abi/void
+                                          ;; (decltype(auto): an unparenthesized name or member access its declared type, else
+                                          ;; T& of an lvalue, T&& of an xvalue, T of a prvalue, [dcl.type.decltype]/1)
+                                          (:decltype rt) (let [x (analyze ctx e)]
+                                                           (cond (and (= "DeclRefExpr" (:kind e)) (= :var (:op x))) (:ty (var* (:id x)))
+                                                                 (#{"DeclRefExpr" "MemberExpr"} (:kind e)) (:ty x)
+                                                                 (= :lv (:cat x)) (abi/lref (:ty x))
+                                                                 (= :xv (:cat x)) (abi/rref (:ty x))
+                                                                 :else (abi/unq (:ty x))))
+                                          :else (deduce-auto rt pre))] (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
                             rt)]
                    (cond
                      (nil? e) {:s :return}
@@ -5033,6 +5123,11 @@
                                  (let [ac (abi/cls-of (:ty fl))
                                        m (first (filter #(contains? given [:field (:name %)]) (:fields ac)))]
                                    {:i :list :cls (:id ac) :items [(init-of (:ty m) (get given [:field (:name m)]))] :fields-used [(:i m)]})
+                                 ;; (cpp-s4: a union's other members are not initialized, [class.base.init]/9.2 -- variant's
+                                 ;; _Variadic_union, its _M_first by the mem-initializer and its _M_rest left alone -- nor, when
+                                 ;; one member has a mem-initializer, the one a default member initializer names, /9.1)
+                                 (and (:union c) (or (not (:init fl)) (some #(and (vector? %) (= :field (first %))) (keys given))))
+                                 {:i :none}
                                  (:init fl) (init-for (:ty fl) (let [d (analyze ctx (:init fl))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind (:init fl))) :list :copy))
                                  :else (init-for (:ty fl) nil ctx :default))})))})))
 

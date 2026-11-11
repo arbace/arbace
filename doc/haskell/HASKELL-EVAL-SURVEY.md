@@ -2374,3 +2374,19 @@ The front end (`arbace/repr/haskell`) is not touched.
   testsuite driver does (`test/haskell/eval/testsuite-run.edn` has the options; 21 tests of the testsuite name it), the result
   marked `:judge :ignore-stdout`; conc065 and conc066 would pass if their status and stderr match (both 0 and empty in the record);
   (b) as now. *Recommended: (a)*: it is the test's own verdict (the user's decision of 2026-11-07), not a looser judge.
+
+## As built: HES90 (ignore_stdout)
+
+(The user's decision of 2026-11-11, HES88's proposal (a).) A test whose all.T options say `ignore_stdout` without a condition is
+judged without its stdout, as GHC's testsuite driver does: its status and stderr are still compared.
+- `test/haskell/eval/allt.ae` marks such a test `:ignore-stdout true` in `testsuite-run.edn` (`bin/hsi tests`; 19 of the run tests,
+  the other two of the 21 that name it are conditional on the platform or skipped there; the summary is unchanged).
+- `bin/lib/hsi/check`'s `ignore_stdout ID` reads the mark; the judge (own verdicts and recorded runs alike) takes the stdouts as
+  equal for such a test and no longer lists `:stdout` among its differences. A pass is a plain `:pass` (the record has no new key).
+- The negative control: `test/haskell/hsi-controls.txt`'s `conc065 conc064 status=0`, the ignore_stdout test judged against
+  conc064's reference (status forced to 0, so only the stderr differs): it must fail, and does; the control loop ignores the
+  subject's stdout too, so the pair proves stderr is still judged.
+- Rerun alone (`bin/hsi check --corpus testsuite-core --only ... --record`, GOGC=50; the 7 of the 19 in the corpus's directories):
+  conc065 and conc066 now pass (status 0, stderr empty as GHC's), the others unchanged. They left the class `rts`
+  (test/haskell/divergences.edn: 6 ids to 4). `bin/hsi divergences`: 908 programs, 811 pass (809 before), 97 in a class, 0 unclassed;
+  `bin/reap` 0 problems (matrix recorded), `bin/crops-score --judge --strict` 0.

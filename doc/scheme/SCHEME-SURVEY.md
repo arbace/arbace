@@ -4475,3 +4475,49 @@ the other two are below.
   expression and calls it with two: the test library is ill-formed outside Chibi, si's `(chibi optional)` passes the other 24 tests.
   (a) Class it `:na`, a test of no implementation but Chibi (as `:suite-ill-formed`); (b) keep it deferred. *Recommended: (a)*: no
   change to si can make the library's own macro take two expressions.
+
+## As built: SC90 (b), syntax objects among a compiled program's constants (2026-11-11, branch `scheme-aot1`)
+
+SC90 (b) (decided with SC94 (b), "Decided" above) for the AOT cell's one deferred class, `:syntax-constants` (Racket's
+`syntax-case.sps`, Larceny's `regression.sch`: psyntax's syntax objects quoted in the program's core forms, a program that uses
+syntax at run time). SC94 (b), the compiled libraries installed in psyntax, is not built: no check program needs it (SCS30).
+
+- **The recipe** (`go/arbace/scm/aot.ae`, "Late constants"): a constant whose pairs and vectors hold a record is no longer written
+  as text but as a node of the unit's graph: one node an object (`(p CAR CDR)`, `(v RO E...)`, `(s "TEXT" RO)`, `(b BYTES)`,
+  `(r "RTD-NAME" F...)`, `(k ATOM)`, the parts as node indexes), each object once by identity across all of the unit's late
+  constants, so what psyntax compares with `eq?` survives: a mark is a fresh string (`(string #\m)`), shared by the
+  identifier's mark list and the rib's; a rib is shared and mutated (its frequency vector); a label is a gensym, read by its uid
+  as before (one object a uid in the process, the compiled psyntax's own labels included). The unit's map gets `:late` (the
+  nodes, then the roots `(K-INDEX . NODE)`); the constant's text in `:consts` is `#f` until `ReadLate` builds the graph in the
+  unit's `setup` (`arbace/scheme/aot.ae`), which runs after psyntax's boot.
+- **A record's type** is named by its name among the record types made while psyntax boots (`BootBegin`/`BootEnd` around the
+  interpreted `Boot`, `DumpBoot` and the compiled package's `Boot`; `NewRTD` notes them; a name made twice is no one's). A record of
+  any other type still refuses the unit with the old reason ("a constant that does not read back"), so `:syntax-constants` stays
+  as the class of that refusal, now without a member. A unit with late constants links psyntax (`needs-psyntax`).
+- **Unit test** `TestLateConstants` (`scm_test.ae`, `bin/si unit`): a booted type's record, a mark shared by two records and
+  two constants, a gensym, built again as one object each and fresh; the same name made outside the boot refused.
+
+| command | result |
+|---|---|
+| `bin/si check --aot --only racket/syntax-case --only larceny/regression` | before: 0 of 2, both refused (`:syntax-constants`); after: 2 of 2 pass, each by the check's judge of it |
+| `bin/si check` (interpreted, the compare's reference) | 45 of 50, 10 items in classes, 0 failing, no regression (2 min) |
+| `bin/si check --aot --record` | 47 of 52 (was 45), 10 items in classes, 0 failing; 50 of 50 compiled runs the same as the interpreted ones, 0 refused (was 2) (6 min) |
+| `bin/si unit` | ok, `TestLateConstants` among them |
+
+The AOT cell: 45 / 3 / 2 deferred (90.0%, 95.7% without by design) -> 47 / 3 / 0 (94.0%, 100% without by design); what is left
+is the three by-design classes Chez decides (`:chez-exact-zero`, `:chez-console-port`, `:chez-condition-message`: si answers as
+Chez, Racket's suite expects otherwise; SCS10's rule) and the two `:na` programs. `test/scheme/essential-aot.txt` keeps
+`racket/syntax-case`, now the late constants' proof. `bin/si check --aot --only test/scheme/essential-aot.txt` (si-aot-essential's command): 12 of 13 (the
+rest the by-design `racket/base`), 13 of 13 the same as si's; si-essential's command exit 0; `bin/si srfi --aot` 11 of 11. `bin/reap
+--record`: 0 problems; `bin/crops-score --record`, `--judge --strict` exit 0: Scheme's completeness 97.4 -> 98.4 (98.9 -> 99.95
+without by design), maturity and independence 100.
+
+### Proposals (SCS29 onward)
+
+- **SCS29 One graph per program.** The late constants' identities hold within a unit; a library's syntax constant and the program's
+  share no object (their marks come from separate expansions, so no check program sees a difference). (a) Leave per unit; (b) one
+  graph for the program, its nodes built before the first unit runs. *Recommended: (a)* until a program needs it.
+- **SCS30 SC94 (b)'s half.** Compiled libraries installed in psyntax at start (decided with SC90 (b)), so `eval` and `environment`
+  see the program's own libraries as compiled. No program of the check does it. (a) Build it with a program of si's own that
+  does (`(environment '(a user library))` in a compiled program) as its proof, in a later lane; (b) leave it decided and unbuilt.
+  *Recommended: (a)*, a light day's work.

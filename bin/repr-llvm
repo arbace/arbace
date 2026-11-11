@@ -143,7 +143,7 @@ case $judge_mode in own|record|live) ;; *) echo "repr-llvm: REPR_LLVM_JUDGE is o
 # copy, which keeps them): NAME<tab>VERDICT<tab>FRAGMENT. VERDICT `invalid`: a RUN line runs `not llvm-as` or `not opt` (no pass but
 # verify) on the file with no option that changes how it is read (-data-layout, -mtriple, ...: only -o, -S, -disable-output,
 # -passes=verify, redirections): the test says the module is rejected; `valid`: RUN lines, none of them a `not` of an LLVM tool,
-# no split-file: the test says it is taken; `-`: no RUN line, a split-file test, a `not` of another tool, of opt's passes, or only
+# no split-file: the test says it is taken (a split-file section, LLS50: section_verdict, the parent's RUN lines); `-`: no RUN line, a split-file test, a `not` of another tool, of opt's passes, or only
 # with such options (no own verdict of verification; a redirection, `> /dev/null`, `2> %t`, `2>&1`, is not an option), or, for `valid`, a RUN line that reads it with `--disable-verify` (the test
 # claims no verification of it). FRAGMENT, for `invalid`, what follows `error:` on the first check line of the
 # prefixes those RUN lines give FileCheck (--check-prefix[es], default CHECK), its {{...}} and [[...]] taken out; empty when none.
@@ -151,9 +151,16 @@ case $judge_mode in own|record|live) ;; *) echo "repr-llvm: REPR_LLVM_JUDGE is o
 # feeds the file through `sed 's/A/B/g' %s |` (RISCV's iXLen, llubi's DIVREM): the test's input is sed's output, so verify-check
 # reads that (a plain s/A/B/ or s/A/B/g alone, no other sed command); empty when none
 own_verdicts() {
-  local n p
+  local n p rel par sec
   while IFS=$'\t' read -r n p; do
     [ -n "$n" ] || continue
+    # LLS50: a split-file section (.tmp/llvm/split/DIR/TEST.ll/SECTION.ll) is judged by its parent test's RUN lines
+    case $p in
+      */split/*.ll/*)
+        rel=${p#*/split/}; par=${LLVM_SRC:-${p%%/split/*}/src}/llvm-project-23.1.5.src/llvm/test/${rel%%.ll/*}.ll; sec=${rel#*.ll/}
+        if [ -f "$par" ]; then section_verdict "$n" "$par" "$sec"; else printf '%s\t-\t\t\n' "$n"; fi
+        continue ;;
+    esac
     awk -v n="$n" '
       function flush() { if (cur != "") { runs[++nr] = cur; cur = "" } }
       NR == 1 && /^; MUTANT: / { mut = $0 }
@@ -194,6 +201,26 @@ own_verdicts() {
                 if (q in pre) { f = l; sub(/^.*error: */, "", f); gsub(/\{\{[^}]*\}\}/, "", f); gsub(/\[\[[^]]*\]\]/, "", f); sub(/[[:space:]]+$/, "", f); frag = f } } }
             printf "%s\t%s\t%s\t%s\n", n, v, frag, sx }' "$p"
   done < "$1" > "$2"
+}
+
+# section_verdict NAME PARENT SECTION (LLS50): a split-file section's own verdict from the parent test's RUN lines. `valid`: some
+# command (a pipeline's or a `;`/`&&` list's part) of opt, llc, llvm-as or llvm-link names %t/SECTION as an input (not after -o),
+# and no command that names it is under `not` or reads it with --disable-verify (the tools verify their input, so the test says it is
+# taken, as for a whole file; FileCheck, cat, cp and the like change nothing; after a `cd %t` the bare name counts too); `-` otherwise
+section_verdict() {
+  awk -v n="$1" -v sec="$3" '
+    function flush() { if (cur != "") { runs[++nr] = cur; cur = "" } }
+    /^[;#\/ ]*RUN:/ { l = $0; sub(/^[;#\/ ]*RUN: ?/, "", l); c = (l ~ /\\ *$/); sub(/\\ *$/, "", l); cur = cur " " l; if (!c) flush(); next }
+    { flush() }
+    END { flush(); v = "-"; bad = 0; for (i = 1; i <= nr; i++) if (runs[i] ~ /(^|[ ;&])cd %t([ ;&]|$)/) cdt = 1
+      for (i = 1; i <= nr; i++) { r = runs[i]; gsub(/&&|;|\|/, "\001", r); k = split(r, seg, "\001")
+        for (j = 1; j <= k; j++) { m = split(seg[j], w, /[ \t]+/); used = 0; for (x = 1; x <= m; x++) if ((w[x] == "%t/" sec || (cdt && w[x] == sec)) && w[x-1] != "-o" && w[x-1] != "-o=") used = 1
+          if (!used) continue
+          f = 1; while (f <= m && w[f] == "") f++
+          if (w[f] ~ /^(opt|llc|llvm-as|llvm-link)$/) { if (seg[j] ~ /(^|[ \t])--?disable-verify([ \t]|$)/) bad = 1; else v = "valid" }
+          else if (w[f] == "not") bad = 1 } }
+      if (bad) v = "-"
+      printf "%s\t%s\t\t\n", n, v }' "$2"
 }
 
 # The pack rt (LLS31 (a); doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS31 (a)"; bin/llvmi ir-make rt): test/llvm/ir/rt.tar.xz, pinned by
@@ -512,7 +539,7 @@ case ${1:-} in
   mutants-oracle)
     # mutants-oracle LIST WORK (LLS33 (b), the oracle tier): each mutant's own verdict (its first line, `; MUTANT: KIND VERDICT
     # LAYER: MESSAGE`, arbace.repr.llvm.expect) against opt's: the verdict (valid, invalid, debug) and the message, a fragment of
-    # opt's first message (REPR_LLVM_JUDGE=record: test/llvm/ref-opt23.edn's :first) or of its whole stderr (live: opt run).
+    # opt's whole stderr (REPR_LLVM_JUDGE=live: opt run; the oracle tier's authority); record mode (test/llvm/ref-opt23.edn) holds the verdict only (LLS47 (a): the record keeps opt's first message alone).
     # WORK/oracle.tsv: NAME, KIND, the own verdict, opt's, verdict same|differs, message same|differs|-; the kinds summed. A mutant
     # whose own verdict is unknown is counted apart. Exit 1 on a difference
     list=$2 work=$3
@@ -539,7 +566,7 @@ case ${1:-} in
         sv = (ov == v[$1]) ? "same" : "differs"
         if (frag == "") sm = "-"
         else if (live) { t = ""; g = od "/" $1 ".log"; while ((getline x < g) > 0) t = t x "\n"; close(g); sm = index(t, frag) ? "same" : "differs" }
-        else sm = index(m[$1], frag) ? "same" : "differs"
+        else sm = "-"  # LLS47 (a): record mode compares the verdict only (the record keeps opt'"'"'s first message, not the later ones a mutant may name)
         print $1 "\t" k "\t" ov "\t" v[$1] "\t" sv "\t" sm }' "$work/opt.tsv" "$work/list" > "$work/oracle.tsv"
     awk -F'\t' '{ n[$2]++; if ($3 == "unknown") u[$2]++; else { o[$2]++; if ($5 == "same" && $6 != "differs") s[$2]++ } }
       END { for (k in n) printf "  %-14s %4d mutants, %4d own, %4d as opt, %4d unknown\n", k, n[k], o[k], s[k], u[k] }' "$work/oracle.tsv" | sort

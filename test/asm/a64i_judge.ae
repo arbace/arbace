@@ -131,46 +131,85 @@
                                           :else :pass)))))]
     (cond (nil? r) "left" (= r :pass) "same" :else "differs")))
 
+(defn- names-of
+  "The program names of the list (NAME<tab>PATH lines)."
+  [lst]
+  (set (for [l (str/split-lines (slurp lst)) :when (seq l)] (first (str/split l #"\t")))))
+
+(defn- row-name [id] (second (str/split id #"/" 2)))
+
 (defn controls
   "Each control of FILE (ID KIND SUBJECT REFERENCE a line) judged; the native kinds only on an arm64 host (NATIVE): 0 when every
-  one fails as it must."
-  [work file native]
-  (let [bad (atom 0)]
-    (doseq [l (str/split-lines (slurp file)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
-      (let [[id kind subj ref] (str/split l #"\s+")]
-        (if (and (not native) (#{"cpu" "sys" "step" "bisect"} kind))
-          (println (str "control " id ": " kind " needs this arm64 CPU: not run here"))
-          (let [r (control work kind subj ref)]
-            (println (str "control " id ": " (if (= r "differs") "fails as it must" r)))
-            (when-not (= r "differs") (swap! bad inc))))))
-    (when (pos? (long @bad)) (println (str "FAIL: a64i-check: " @bad " controls did not fail")) (System/exit 1))))
+  one fails as it must. PARTIAL (non-empty: --only's run, ARS46 (b)): a control whose subject, or for verdict, aot, cpu and forms
+  whose reference program, is not in the list LST is not judged (its programs were not run), the count printed."
+  ([work file native] (controls work file native nil ""))
+  ([work file native lst partial]
+   (let [bad (atom 0) skipped (atom 0) judged (atom 0)
+         names (when (seq partial) (names-of lst))]
+     (doseq [l (str/split-lines (slurp file)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
+       (let [[id kind subj ref] (str/split l #"\s+")]
+         (cond
+           (and names (not (and (names subj) (or (not (#{"verdict" "aot" "cpu" "forms"} kind)) (names ref)))))
+           (swap! skipped inc)
+           (and (not native) (#{"cpu" "sys" "step" "bisect"} kind))
+           (println (str "control " id ": " kind " needs this arm64 CPU: not run here"))
+           :else
+           (let [r (control work kind subj ref)]
+             (swap! judged inc)
+             (println (str "control " id ": " (if (= r "differs") "fails as it must" r)))
+             (when-not (= r "differs") (swap! bad inc))))))
+     (when names (println (str "controls: " @judged " judged, " @skipped " of other slices' programs not judged")))
+     (when (pos? (long @bad)) (println (str "FAIL: a64i-check: " @bad " controls did not fail")) (System/exit 1)))))
 
-(defn main [results work classes-path record native]
+(defn compare-problems
+  "The run's rows held to the recorded ones OLD ([[ID CLASS DETAIL]...]): a row not recorded, a recorded :pass that is not, and a
+  recorded row not run (the CPU's rows only where they ran, NATIVE; OLD is cut to the run's programs by the caller for a partial
+  run)."
+  [run old native]
+  (let [oldm (into {} (map (fn [[i c]] [i c]) old))
+        ran (set (map first run))]
+    (vec (concat (for [[i c] run :let [o (oldm i)] :when (nil? o)] (str "not recorded: " i))
+                 (for [[i c] run :let [o (oldm i)] :when (and (= o :pass) (not= c :pass))] (str i ": " (name c) ", recorded :pass"))
+                 (for [[i] old :when (and (not (ran i)) (or native (not (some #(str/starts-with? i %) native-prefixes))))]
+                   (str "recorded, not run: " i))))))
+
+(defn main
+  "The judgment. PARTIAL (non-empty: --only's run, ARS46 (b), as x86i's AXS89 (a)): judged on what it ran, the recorded rows cut
+  to the programs of the list LST, and the slice-foreign control: the same run held to the recorded rows of the programs it did
+  not run, which must fail (`not recorded`); recording needs the whole set."
+  ([results work classes-path record native] (main results work classes-path record native nil ""))
+  ([results work classes-path record native lst partial]
   (let [native (= native "1")
+        partial? (seq partial)
+        names (when partial? (names-of lst))
         ;; the details without the host's paths (a record holds none): the checkout's files by their paths in it
         run (mapv (fn [[i c dt]] [i c (str/replace (str dt) #"/[^ :]*/(test/asm/|musl-1\.2\.6/)" "$1")]) (rows work native))
-        old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
-        oldm (into {} (map (fn [[i c]] [i c]) old))
+        all-old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
+        old (if partial? (filterv (fn [[i]] (names (row-name i))) all-old) all-old)
         classes (set (map :id (read-string (slurp classes-path))))
         problems (atom [])
         cnt (fn [p] (let [xs (filter #(str/starts-with? (first %) p) run)] (str (count (filter #(= :pass (second %)) xs)) " of " (count xs))))]
     (println (str "a64i-check: eval (the forms) " (cnt "eval/") ", AOT (the bytes) " (cnt "aot/") " programs by their own verdicts; forms "
                   (cnt "forms/") " equal to their decoded words"
                   (when native (str "; the CPU: " (cnt "cpu/") " runs equal, lockstep sys " (cnt "sys/") ", step " (cnt "step/") ", loader " (cnt "loader/")))
-                  "; " (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))))
+                  "; " (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))
+                  (when partial? (str "; a slice of " (count names) " of the recorded programs"))))
     (doseq [[i c dt] run]
       (cond (failing c) (swap! problems conj (str "failing: " i " " (name c) " " dt))
             (and (not= c :pass) (not (classes c))) (swap! problems conj (str "unclassed: " i " " (name c) " " dt))))
-    (if (and (seq record) (empty? @problems))
+    (if (and (seq record) (not partial?) (empty? @problems))
       (let [kept (if native [] (filter (fn [[i]] (some #(str/starts-with? i %) native-prefixes)) old))]
         (spit results (str header "[\n" (apply str (map (fn [r] (str (pr-str r) "\n")) (sort-by first (concat run kept)))) "]\n"))
         (println (str "a64i-check: recorded " (+ (count run) (count kept)) " rows into " results)))
-      (do (doseq [[i c] run :let [o (oldm i)]]
-            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
-                  (and (= o :pass) (not= c :pass)) (swap! problems conj (str i ": " (name c) ", recorded :pass"))))
-          (doseq [[i] old :when (and (not (some #(= i (first %)) run))
-                                     (or native (not (some #(str/starts-with? i %) native-prefixes))))]
-            (swap! problems conj (str "recorded, not run: " i)))))
+      (swap! problems into (compare-problems run old native)))
+    (when partial?
+      ;; the negative control of a partial run: the same run judged against the other programs' recorded rows must fail
+      (let [foreign (filterv (fn [[i]] (not (names (row-name i)))) all-old)
+            fp (compare-problems run foreign native)
+            k (count (filter #(str/starts-with? % "not recorded: ") fp))]
+        (if (and (seq foreign) (pos? k))
+          (println (str "control slice-foreign: fails as it must (" k " of its rows not in the other slices' reference)"))
+          (swap! problems conj (str "control slice-foreign: the run judged against the other programs' recorded rows did not fail (" (count foreign) " rows)")))))
     (doseq [p @problems] (println (str "FAIL: " p)))
     (when (empty? @problems) (println "a64i-check: ok"))
-    (when (seq @problems) (System/exit 1))))
+    (when (seq @problems) (System/exit 1)))))

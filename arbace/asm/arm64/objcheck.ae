@@ -52,13 +52,16 @@
                    viewer (first (filter #(re-find #"^llvm-(objdump|readobj|readelf|dwarfdump|nm)\b" %) (rest pieces)))]
              :when fc]
          {:error? (boolean (re-find #"^not\s" mc))
+          ;; the input's name in the diagnostics (ARS43 (a)): `<stdin>` when llvm-mc reads it there, else its path
+          :stdin? (boolean (re-find #"<\s*%s" mc))
           :full-lines (boolean (re-find #"--match-full-lines" fc))
           :split? (boolean (re-find #"split-file|%t/" r))
           :prefixes (prefixes-of fc)
           :implicit-not (mapv second (re-seq #"--implicit-check-not[= ](\S+)" fc))
           :viewer viewer
-          :tool (cond (re-find #"-implicit-mapsyms" mc) :mc-option
-                      (nil? viewer) :no-viewer
+          ;; -implicit-mapsyms (ARS47 (a)): the object assembled so
+          :implicit-mapsyms (boolean (re-find #"-implicit-mapsyms" mc))
+          :tool (cond (nil? viewer) :no-viewer
                       (and (re-find #"^llvm-objdump" viewer) (= #{"-t" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :objdump-t
                       (and (re-find #"^llvm-readelf" viewer) (= #{"-s" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :readelf-s
                       (and (re-find #"^llvm-readelf" viewer) (= #{"--arch-specific" "-"} (set (rest (str/split (str/trim viewer) #"\s+"))))) :readelf-arch
@@ -320,6 +323,70 @@
 
 (defn- canon-lines [ls] (mapv (fn [l] {:text l}) ls))
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the diagnostics (ARS43 (a)): every error of the object assembler as llvm-mc prints it (SourceMgr's `<stdin>:LINE:COL: error:
+;; MESSAGE`, the source line, the caret), held to an error run's CHECK lines as FileCheck holds them, `[[@LINE]]` the CHECK
+;; line's own number
+
+(defn- expr-name
+  "The first symbol an expression names that the source spells (not a temporary label), or nil."
+  [e]
+  (cond (symbol? e) (let [n (name e)] (when-not (or (str/starts-with? n ".L") (str/includes? n "\u0000")) n))
+        (seq? e) (some expr-name (rest e))
+        :else nil))
+
+(defn- word-at
+  "The index of the word W in S at or after FROM (not inside a longer name), or nil."
+  [^String s ^String w ^long from]
+  (loop [i (.indexOf s w (int from))]
+    (when-not (neg? i)
+      (let [ok (fn [^long j] (or (neg? j) (>= j (count s)) (not (re-matches #"[A-Za-z0-9_.$]" (str (.charAt s j))))))]
+        (if (and (ok (dec i)) (ok (+ i (count w)))) i (recur (.indexOf s w (int (inc i)))))))))
+
+(defn- expr-index
+  "Where MCExpr's location of the expression E falls in the item's text T (LLVM's caret): a specifier's `:spec:`, a binary
+  expression's operator, a unary one's operator, a symbol's name; nil when it is not found."
+  [^String t e]
+  (let [nm (expr-name e)
+        sym-i (when nm (word-at t nm 0))]
+    (cond
+      (nil? e) nil
+      (and (seq? e) (= 'at (first e))) (let [i (.indexOf (str/lower-case t) (str ":" (str/lower-case (str (nth e 2))) ":"))]
+                                         (if (neg? i) (expr-index t (second e)) i))
+      (and (seq? e) (= 2 (count e)) sym-i) (let [i (.lastIndexOf t (str (first e)) (int sym-i))] (if (neg? i) sym-i i))
+      (and (seq? e) (= 3 (count e)) (#{'+ '- '* '/ '<< '>> '& '|} (first e)) sym-i)
+      (let [from (if (= nm (expr-name (second e))) (+ (long sym-i) (count nm)) 0)
+            i (.indexOf t (str (first e)) (int from))]
+        (if (neg? i) sym-i i))
+      :else sym-i)))
+
+(defn diagnostics
+  "The object assembler's errors (`r`'s :errors) as llvm-mc prints them for the source SRC: three lines an error, each under
+  the name llvm-mc gives the input (FILE: `<stdin>`, or the test's path)."
+  ([^String src r] (diagnostics src r "<stdin>"))
+  ([^String src r file]
+  (vec (mapcat (fn [{:keys [pos msg expr]}]
+                 (if-let [[st en] pos]
+                   (let [st (long st) en (long en)
+                         ls (.lastIndexOf src "\n" (int (dec st)))
+                         le (let [i (.indexOf src "\n" (int st))] (if (neg? i) (count src) i))
+                         ;; the item's first character not blank
+                         st (loop [i st] (if (and (< i en) (Character/isWhitespace (.charAt src (int i)))) (recur (inc i)) i))
+                         t (subs src st (max st (min en (count src))))
+                         at (+ st (long (or (expr-index t expr) 0)))
+                         line (inc (count (filter #(= \newline %) (subs src 0 st))))
+                         col (- at ls)]
+                     [(str file ":" line ":" col ": error: " msg) (subs src (inc ls) le)
+                      (str (apply str (repeat (dec col) " ")) "^")])
+                   [(str file ": error: " msg)]))
+               (:errors r)))))
+
+(defn- at-line
+  "A CHECK line's content with FileCheck's `[[@LINE]]`, `[[@LINE+N]]` and `[[@LINE-N]]` replaced by its number."
+  [^String c ^long l]
+  (str/replace c #"\[\[#?\s*@LINE(?:\s*([+-])\s*(\d+))?\s*\]\]"
+               (fn [[_ sg n]] (str (if sg ((if (= sg "+") + -) l (Long/parseLong n)) l)))))
+
 (defn judge-run
   "One run's CHECK lines against the object `r` (arbace.asm.arm64.obj/assemble's result): [[LINE RESULT]]."
   [^String src run r]
@@ -328,15 +395,15 @@
     (cond
       (empty? cs) []
       (:split? run) (mapv (fn [[l]] [l :split-file]) cs)
+      ;; an error run (ARS43 (a)): every error as llvm-mc prints it, held to the CHECK lines by FileCheck; an object that assembles
+      ;; is :error-accepted, a line not met :message (an unsupported file's lines: its class)
       (:error? run)
-      (let [msg (str (or (:error r) (:what r) ""))]
-        (mapv (fn [[l k c]]
-                (let [frag (second (re-find #"error:\s*(.*?)\s*$" c))]
-                  [l (cond (:bytes r) :error-accepted
-                           (nil? frag) :pass
-                           (str/includes? (str/lower-case msg) (str/lower-case (str/trim frag))) :pass
-                           :else :message)]))
-              cs))
+      (if (:errors r)
+        (let [outs (canon-lines (diagnostics src r (if (:stdin? run) "<stdin>" (or (:path run) "test.s"))))
+              cs2 (mapv (fn [[l k c]] [l k (at-line c l)]) cs)
+              res (into {} (map (fn [[l rr]] [l rr]) (binding [dc/*vars* true dc/*full-lines* (:full-lines run)] (dc/filecheck cs2 outs (:implicit-not run)))))]
+          (mapv (fn [[l]] [l (case (get res l :fail) :pass :pass :var :filecheck-var :message)]) cs))
+        (mapv (fn [[l]] [l (cond (:bytes r) :error-accepted (:unsupported r) (unsupported) :else :message)]) cs))
       (not (:bytes r)) (mapv (fn [[l]] [l (if (:error r) :object-error (unsupported))]) cs)
       (#{:objdump-d :objdump-r :readobj-r :readobj :objdump-t :readelf-s :readelf-arch :readelf-x} (:tool run))
       (let [o (elf/read-object (:bytes r))
@@ -372,9 +439,11 @@
   "A test's row: {:stated N :met N :by {CLASS N}} over its object runs' CHECK lines."
   [^String path]
   (let [src (asm/latin1 path)
-        rs (runs src)
-        r (try (obj/assemble-file path) (catch Throwable e {:unsupported :crash :what (str e)}))
-        res (mapcat #(try (judge-run src % r)
+        rs (mapv #(assoc % :path path) (runs src))
+        asm (fn [implicit] (try (obj/assemble-file path implicit) (catch Throwable e {:unsupported :crash :what (str e)})))
+        r (asm false)
+        ri (delay (asm true))
+        res (mapcat #(try (judge-run src % (if (:implicit-mapsyms %) @ri r))
                           (catch Throwable e (binding [*out* *err*] (println (str "repr-asm object-verdict: " path ": " e)))
                             (mapv (fn [[l]] [l :view-crash]) (check-lines src (:prefixes %)))))
                     rs)
@@ -448,7 +517,10 @@
     "judge" (when (seq (apply judge args)) (shutdown-agents) (System/exit 1))
     "control" (println (apply control args))
     "row" (prn (file-row (first args)))
+    "diagnostics" (let [src (asm/latin1 (first args)) r (obj/assemble-file (first args))]
+                    (doseq [l (diagnostics src r)] (println l)))
     "lines" (let [src (asm/latin1 (first args)) r (obj/assemble-file (first args))]
-              (doseq [run (runs src) [l res] (judge-run src run r) :when (not= res :pass)]
+              (doseq [run (runs src) [l res] (judge-run src (assoc run :path (first args)) (if (:implicit-mapsyms run) (obj/assemble-file (first args) true) r))
+                      :when (not= res :pass)]
                 (println l res (nth (str/split-lines src) (dec (long l)))))))
   (shutdown-agents))

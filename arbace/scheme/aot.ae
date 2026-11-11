@@ -427,7 +427,7 @@
 
 (defn- compile-unit
   "Unit u (the dumper's map) as the Go forms of a package's file: {:decls [...] :uses #{alias}}."
-  [{:keys [consts forms]} alias]
+  [{:keys [consts forms late]} alias]
   (binding [*u* (atom {:n 0 :decls [] :inits [] :setups [] :alias alias :uses #{}})]
     (let [tops (doall
                  (for [f forms]
@@ -445,7 +445,8 @@
                         (list 'set! 'K (list 'scm/ReadAOT (str/join "\n" consts)))
                         (list 'when (list '!= (list 'len 'K) (count consts)) (list 'panic "scm aot: the constants do not read back"))
                         inits)
-                 (list* 'go/func 'setup [m-param] setups)
+                 ;; SC90 (b): the late constants (psyntax's syntax objects) built after psyntax's boot
+                 (list* 'go/func 'setup [m-param] (concat (when late [(list 'scm/ReadLate 'K late)]) setups))
                  (list* 'go/func 'Run "Run runs the unit's forms on machine m.\n" [m-param]
                         (list 'setup 'm)
                         (for [tt tops] (list '.Exec 'm (list 'addr (list 'lit tt)) nil)))])})))
@@ -502,7 +503,8 @@
     (when-let [r (:refused u)] (println "refused:" r) (System/exit 3))
     (binding [*locs* (atom {})]
       (let [{:keys [decls]} (compile-unit u 'psyntax)
-            decls (concat decls [(list 'go/func 'Boot "Boot boots psyntax on machine m: its forms compiled.\n" [m-param] (list 'Run 'm))])]
+            decls (concat decls [(list 'go/func 'Boot "Boot boots psyntax on machine m: its forms compiled.\n" [m-param]
+                                       '(scm/BootBegin) (list 'Run 'm) '(scm/BootEnd))])]
         (write-package! src "arbace/scmaot/psyntax" "psyntax" '[[scm "arbace/scm"]] decls)))
     0))
 
@@ -528,7 +530,7 @@
                 (let [{:keys [decls uses]} (compile-unit u (symbol nm))]
                   (write-package! src (path-of nm) nm (into '[[scm "arbace/scm"]] (lib-imports uses)) decls)))
             {:keys [decls uses]} (compile-unit prog 'main)
-            needs-psyntax (some #(str/includes? (pr-str (:forms %)) "(pl ") units)
+            needs-psyntax (some #(or (:late %) (str/includes? (pr-str (:forms %)) "(pl ")) units)
             main (list 'go/func 'main []
                        (list 'set! 'scm/CommandLine (list 'append (list 'lit '(slice string) file) (list 'spread (list 'subslice 'os/Args 1))))
                        (list 'when (list '== (list 'os/Getenv "GOGC") "") (list 'debug/SetGCPercent 400))

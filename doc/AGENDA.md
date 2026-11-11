@@ -48,10 +48,10 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | C | 96.0 (99.6) | 100 | 99.7 | |
 | OCaml | 84.2 (96.4); 82.5 before OC222 (a) | 100 | 51.3 | completeness, independence |
 | C++ | 76.3 (96.8); 89.1 (97.8) / 71.3 on `cpp-print-own` | 100 | 67.8 | completeness, independence |
-| Scheme | 97.4 (98.9) | 100 | 100 | |
+| Scheme | 98.4 (99.95); 97.4 before `scheme-aot1` | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
-| LLVM IR | 97.6 (98.5) | 100 | 96.9 | llvm-ind1 (LLS46): judge 0.8455 (16 more own verdicts), independence 96.91; proposals LLS47-LLS50 (the rest of the judge is the probes, llvmi's 177, the split sections) |
+| LLVM IR | 97.6 (98.5) | 100 | 97.1 | llvm-ind2 (LLS47 (a), LLS50): judge 0.8541 (52 split-file sections by their parent's RUN lines), independence 97.08; left as decided: the probes (LLS48), llvmi's 177 (LLS49) |
 | Python | 0 | 83.3 | 20.0 | all three |
 
 Six crops are above 90 on all three. What the others still need:
@@ -94,6 +94,8 @@ Six crops are above 90 on all three. What the others still need:
   runs 40 of run-check's 63 (0 of 10 before), the `equal` set 50 (83 modules), both recorded as run rows; P20's proof (all ≥
   equal, 0 lost) not reached: 10 lost in three classes (a case on the void token, output differences, NonTermination); next
   P20's tail, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
+  Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
+  conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
   hsi's eval cell (`hsi-e1`, HES88): 797 to 809 of 908 (HE9's six recorded, the static pointer table, forkOn#'s locked threads,
   the SIMD primops); 99 left in classes (60 no reference, 12 speed, 10 Cmm); HES89 (`simd/` in the corpora) and HES90 (all.T's
@@ -286,8 +288,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   self-checking synthetic programs (`test/asm/a64i/gen.ae`: the integer families and the scalar FP at both precisions, 13,304 cases, the
   model held to qemu-aarch64 at `--record`), the scalar FP in a64i (`go/arbace/a64i/fp.ae`: FPSR's exceptions, FPCR's modes, DN), and the
   AOT cell's cheap classes (PAuth relocations, label arithmetic, `.reloc`, build attributes, the readobj/readelf/objdump views, FileCheck's
-  variables): the AOT cell 78.5% → 95.0%. Proposed ARS43-ARS47. Next: the memory families' synthetic program (ARS45 (b)), the error
-  tests' messages (ARS43), the VM's lockstep of the new programs (ARS44).
+  variables): the AOT cell 78.5% → 95.0%. Proposed ARS43-ARS47. Then `asm-ar7` (from `mac/next` `15278e9c6`; doc/asm/ARM64-SURVEY.md,
+  "As built: AR7"; ARS43 (a), ARS45 (b), ARS46 (b), ARS47 (a), the user's): `a64i-essential` sliced (`--essential`, judged on what it
+  ran, slice-foreign control; 1 min 36 s → 36 s; the whole set the `--full` step `a64i-check`, rotated), every error of a file collected
+  and judged as llvm-mc's diagnostics, `.org` and `-implicit-mapsyms`, the memory families' synthetic programs (801 cases; coverage 653
+  of 653): the AOT cell 95.0% → 98.2%, completeness 98.7 → 99.5. Proposed ARS48-ARS52. Next: the VM's CPU rows and lockstep of the twelve synthetic programs (ARS44),
+  NEON (ARS48), the reader's `@AUTH`/`%pltpcrel` (ARS49).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
@@ -371,7 +377,9 @@ items below are the ones whose work is still ahead or tied to a night.
   `__complex__` and the atomics of doubles, pr77550's five causes (the 82 run programs 65 → 69 by our route, the 65's IR unchanged),
   CP344 (a) (either judge passes a dg file: completeness 90.99 → 91.04), CP348 (a)'s list of the runtime's own units; library.cpp
   (variant, any, format: CP359), coroutines and vectors (CP351) ahead; CP345 and CP349 the night's and P21 (b)'s (CP361); CP359-CP361
-  proposed; the night's commands in the survey; CP342/CP343's dg own record on night 13 (its slot prepared).
+  proposed; the night's commands in the survey; CP342/CP343's dg own record on night 13 (its slot prepared); `cpp-s4` (2026-11-11,
+  "As built: cpp-s4"): CP359 (a)'s variant and any slices (their names clang's; library.cpp now stops at <format>, the 82 still 69,
+  unroll1.C's names now clang's), CP362 (<format>'s consteval check) to CP364 proposed.
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
   OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
   on `ocaml-s2` (its compiled runs a night's), OC216 on `ocaml-s3` and its rest (AF_UNIX and signals at the compiled level) on `ocaml-s4`, then OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.
@@ -406,7 +414,8 @@ items below are the ones whose work is still ahead or tied to a night.
   night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
   ported, completeness 97.6.
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records
-  merge; SCS22-SCS24 (above).
+  merge; SCS22-SCS24 (above); `scheme-aot1` (2026-11-11): SC90 (b) built, the AOT cell 90.0 -> 94.0 (100 without by design),
+  proposals SCS29 (one graph per program), SCS30 (SC94 (b)'s half).
 - **C** ([C23-SURVEY.md](C23-SURVEY.md)): CS281 (a) at W ((c) until); CS275 and CS280, the gmp and pcre2 packs at the next
   pack recording.
 - **The gate** ([GATE-SURVEY.md](GATE-SURVEY.md), [ORACLE-RECORDS-SURVEY.md](ORACLE-RECORDS-SURVEY.md)): GTS252 (a) later;
