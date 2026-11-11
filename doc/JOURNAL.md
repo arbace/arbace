@@ -4979,3 +4979,68 @@ The user decided CP362 (a), CP363 (a) and CP364 (a) (2026-11-11). Built, light (
   `_Store`), its drops 168 → 94; codegen-gen 154 of 154; the essential read and print checks pass; reap 0 problems, crops-score
   unchanged; no key moves. CP365 (an instance made while its argument class is incomplete) and CP366 (<format>'s rest) proposed.
 - Rule slips: one plain `&`, one `<(...)`, source edits while a run that had loaded them ran (three), one `git stash list`.
+
+## 2026-11-11: cpp-s5b, C++'s line as one branch with review 1111's fixes and the night review's C++ findings (branch `cpp-s5b`, from `mac/cpp-s5` 6c3575b77)
+
+Two reviews, read-only: `.tmp/reviews/1111/REVIEW-cpp-c-py.md` (area cpp-c-py, mac/next a7916bb2a; its fixes built on `review-fix-2`,
+journal entry "review 1111's findings fixed") and `.tmp/reviews/1111/REVIEW-pending-cpp-asm-fix23.md` (the night review of the pending
+branches mac/cpp-s5 6c3575b77, mac/review-fix-2 b6345ae2d, mac/review-fix-3). So that C++'s line merges as one, `cpp-s5b` is cpp-s5 with
+review-fix-2's C++ and Python-input commits cherry-picked (a15645cd0 TLS, e11cf87cc the threads class, a2b9a8b96 the literals, f4df29be7
+pyi-runtime-tables' inputs, 2c2d3e1b3 got.out); its goi commits aabb45df8 and 6542d2a11 (build constraints, the REPL's `:current`) move
+`gate_key` and wait for W2's end; its docs commit b6345ae2d's C++ section is carried in doc/cpp/CPP-SURVEY.md ("As built: review 1111's
+fixes"), its GOI-SPEC note goes with the goi commits. Then the night review's C++ findings:
+
+1. #3, the merge's conflict in `arbace/cpp/template.ae`'s `fold` (cpp-s5's `size_t(-1)` a BigInt, review-fix-2's
+   `18446744073709551615ULL` the long -1: merged, `==` false and any other operator a Java IllegalArgumentException). Resolved in the
+   picked a2b9a8b96 with one representation: exact integers in the text's evaluation, a BigInt only for an unsigned 64-bit value above
+   Long/MAX_VALUE; an operation with one is unsigned long long's (operands and result modulo 2^64, comparisons of the converted values);
+   outside the text the 64-bit pattern as a long (sema's `ce-wrap`). Division by zero stays a refusal, a shift count outside 0..63 is one
+   too, a 128-bit cast in the text is one. Alternative considered: the wrapped long everywhere with unsigned comparison, rejected: the
+   untyped fold cannot know an operand is unsigned, so `size_t(-1) > 0` would be false.
+2. #2, `__int128` constants: sema's 128-bit arithmetic exact (`wide-binop`), `ce-wrap` keeping a 128-bit value while it fits 64 bits,
+   else not a constant (a constexpr initializer becomes the dynamic initialization, its value right at run time; a template argument is
+   refused). Alternative: BigInt values through sema and the code generator (every `(long v)` of the constant paths), left for when a run
+   program needs a 128-bit constant above 64 bits.
+3. #1, CP362 (a)'s scope: `consteval-ctor-body-stores?` scans the body for a store to `*this`'s members (assignments, ++/--, member calls,
+   `this` passed); a storing body is analyzed and runs (its value clang's), a checking body is still skipped. Alternative: refuse a storing
+   body (CP362 (b)); analyzing gives the right value at no cost.
+4. #4, TLS kinds: the native parser records `"tls"` as clang's getTLSKind (`dynamic` for thread_local, `static` for `__thread` and
+   `_Thread_local`; it had written `static` for all three) and `constinit`; the wrapper of a variable defined elsewhere is taken only for
+   dynamic TLS without constinit, also for a static data member this unit does not define (its global declared external thread_local), never
+   when the unit defines the symbol (an extern declaration then the definition). References' wrappers (pre-existing) are CP371.
+5. #5, `tls-internal?`: a static data member is internal when an unnamed namespace is on its class's path.
+
+#6-#8 of the night review are review-fix-2's goi (#6) and review-fix-3's assembly (#7, #8), not this branch's.
+
+Proofs (night 12's rules: one process at a time, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, main's stage 0, no clang, g++ or gate):
+- Probes (`arbace.cpp.codegen gen-batch`, `.tmp/probe/`, 15 files, 373 MB): `consteval_store.C` (`v = x * 2` in the body: the
+  constructor inlined with its store, `s.v` 6; before, 0) and `consteval_check.C` (a checking body still skipped, its IR as cpp-s5's
+  rule gives); `i128_shift.C` (`(unsigned __int128)1 << 64`: not a constant, `k` dynamically initialized by `shl i128`, the value 2^64;
+  before, folded to 0), `i128_big.C` (`(__int128)9223372036854775807LL + 2`: dynamic, `add i128`; before, truncated), `i128_small.C`
+  (within 64 bits: still folded, `main` returns 0); `u64_text.C` (template arguments: `u64(-1) == 18446744073709551615ULL` 1,
+  `0x8000000000000000ULL > 0` 1, `u64(-1) / 2 > 0` 1, `!u64(-1)` 2, `u64(-1) > -1` 2, `u64(-1) * 2 == 18446744073709551614ULL` 1,
+  `U<u64(-1)>::v` the i64 -1: every value C++'s, no crash), `u64_div0.C` (`T<(1 / 0)>`: a `template` refusal, "division by zero in a
+  constant expression"); `tls_static_kind.C` (`extern __thread int x; extern thread_local constinit int y;`: both read directly, no
+  `_ZTW`/`_ZTH`), `tls_member.C` (`C::x` defined elsewhere: through `_ZTWN1C1xE`, `@_ZN1C1xE` declared external thread_local, lowered to C;
+  before, read directly), `tls_extern_def.C` (extern, use, dynamic definition: one weak_odr `_ZTW1t` and the `_ZTH1t` alias, no linkonce
+  duplicate), `tls_extern_cdef.C` (extern, use, constant definition: `@t` read directly), `tls_anon_member.C` (an unnamed namespace's
+  class's member: `_ZTHN12_GLOBAL__N_11C1xE` and `_ZTWN12_GLOBAL__N_11C1xE` internal); review-fix-2's `extern_tls.C`, `static_tls.C`,
+  `member_static.C` as review-fix-2 recorded them.
+- The 82 run programs (cpp-s5's G2 list, gen-batch, 2,563 s, peak 1.37 GB): the same 69 ok and 13 refusals by the same causes, all 69
+  `gen.ll` and every `forms.ae` byte for byte cpp-s5's G2 (which is the cpp-s5 tip's): neither the fold's representation, the 128-bit
+  rule, the consteval scan nor the TLS kinds move a run program's IR.
+- `bin/cppi codegen-gen`: 154 samples, 154 pass (the forms' digests unchanged), the two negative controls fail as they must (11.5 min,
+  peak 1.03 GB).
+- cpp-print-essential's command (the parser's TLS kind is in the native trees): `roundtrip-corpus gxx-dg-essential --judge own` 33 of 33
+  pass, `samples` 9 of 9, the control fails as it must (4.5 min, peak 1.47 GB).
+- `bin/reap`: 49 of 52 cells checked, 0 problems; `bin/crops-score --record` (scores unchanged, no diff) and `--judge --strict` exit 0.
+- Keys: `bin/arbace-go --gate-key` 314c8e5b04ab... (mac/next's, as review-fix-2 recorded it), `test/gate/gate-key-crops-test.bash` passes:
+  every file the branch changes is a crop path or a record; nothing moves a key.
+- Not run (night commands, over 1.5 GiB): `bin/cppi lower-essential` (3 GiB) and `bin/cppi check --corpus samples` (cpp-check-essential,
+  about 3 GiB), each about 10 min at one thread; the native tree check `bin/repr-cpp native-check ... --tree` over the C++ corpora (the
+  `"tls": "dynamic"` now as clang's dumps: expected improvements only, any `thread_local` VarDecl's row) and the own dg record's run
+  (`bin/repr-cpp dg --corpus dg-error --front native`, about 2.4 GiB).
+Recorded in doc/cpp/CPP-SURVEY.md, "As built: cpp-s5b", with CP371 proposed (a thread-local reference's wrapper); AGENDA's C++ line.
+- Rule slips: one probe run's peak was 2.49 GB (the first gen-batch, which failed at once compiling template.ae on `clojure.lang.BigInt`,
+  under `GOMEMLIMIT=1200MiB GOGC=30`; every later run under `GOMEMLIMIT=1000MiB GOGC=20` stayed below 1.5 GiB). The cherry-picked
+  a2b9a8b96 (c35c0b70d here) carries the conflict's resolution, its message says so.

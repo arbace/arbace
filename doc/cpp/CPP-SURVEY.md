@@ -6560,3 +6560,161 @@ used for a conclusion about the edited code); `git stash list` once (read-only).
 `.tmp/`: `G0/` (cpp-s4's G2, the base), `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `L0/`-`L2/` (library.cpp), `p/`
 (probes), `lib-clang.ll` (clang's recorded IR of library.cpp, from the pack), `env.sh`, `job.sh`, `watchall.sh`, `snapgen.sh`,
 `cmp.sh`, `cg.sh`, `ess.sh`, `probe.sh`, `gen.sh`.
+
+## As built: review 1111's fixes (2026-11-11; branch `review-fix-2` from mac/next a7916bb2a)
+
+The independent review `.tmp/reviews/1111/REVIEW-cpp-c-py.md` (area cpp-c-py, mac/next a7916bb2a), its C++ findings 1, 4 and 5. Light, by
+night 12's rules: main's stage 0 (`ARBACE_HOST_EXE`), one process at a time, `GOMEMLIMIT=1200MiB GOGC=30`, no clang, g++ or gate.
+
+### 1. cpp-s3's thread_local: internal wrappers, and an extern thread_local through its wrapper
+
+- An internal thread-local variable with a dynamic initializer (`static thread_local int x = f();`, or one of an unnamed namespace) now
+  gets an internal `_ZTH` alias and an internal `_ZTW` wrapper (no hidden visibility), as clang's ItaniumCXXABI
+  (`getThreadLocalWrapperLinkage`: a local linkage is the wrapper's; `EmitThreadLocalInitFuncs`: the alias takes the variable's linkage).
+  Before, two units with such a variable each defined the external `_ZTHL1x` (a duplicate symbol) and a weak_odr `_ZTWL1x` the linker
+  merged. A static data member is not internal (`tls-internal?`), so thread_local11.h's `T::u3` keeps clang's weak_odr hidden wrapper.
+- A thread-local variable defined in another unit (`extern thread_local int t;`, thread_local13.C's and thread_local14.C's) is read
+  through `_ZTW1t`, linkonce_odr hidden, which calls `_ZTH1t`, declared extern_weak, when it is not null, then returns
+  `llvm.threadlocal.address(@t)`: clang's discardable wrapper for a variable the unit does not define. Before, `@t` was read directly and
+  the first use in a thread read the zero-initialized object.
+- Proof (`arbace.cpp.codegen gen-batch`, before and after, `.tmp/tls/`): thread_local12e.C's IR unchanged (its wrapper and alias names
+  and linkages clang's, the recorded `cpp-ir-gxx-dg-run` x.ll); thread_local14-aux.cc and thread_local2.C, thread_local3.C,
+  thread_local-order1.C (refused `tls` both times) unchanged; a probe `static_tls.C` (`_ZTHL1x`, `_ZTHN12_GLOBAL__N_11yE` internal
+  aliases, `_ZTWL1x`, `_ZTWN12_GLOBAL__N_11yE` internal); thread_local13.C, thread_local14.C and a probe `extern_tls.C` (the reads through
+  `_ZTW1t`, `declare extern_weak void @_ZTH1t()`); each lowered to C. No IR record of clang has an internal or an extern thread_local with
+  a dynamic initializer (only thread_local12e.C's in the packs): the internal and extern shapes follow clang's source, named above.
+  `bin/cppi codegen-gen` (the 154 samples' refusals and forms' digests): 154 samples, 154 pass (the forms' digests unchanged, so neither this nor #5's sema and template changes move a sample's IR; the two negative controls fail as they must; 15 min, 1.15 GB).
+
+### 4. runtime/threads.cpp's class
+
+`test/cpp/divergences.edn`'s `:threads` had been widened by cpp-n12 with a regex on the reason alone (`_ZL4worki`), which would hide any
+program's segfault in a `static int work(int)` on a thread. threads.cpp's fault is now `:thread-exceptions` (deferred, CP367), anchored on
+threads.cpp's own frames (`_ZL4worki < g$_ZZ4mainENK3$24_N clEv`); `:threads` keeps `__clone` and `cx$thread_start`'s terminate, and no
+longer claims the threads unproven (runtime/atomics.cpp's four threads pass at both levels). `bin/cppi divergences` (and `--aot`,
+`--sample 25`): 15 programs, 13 pass, threads 1, thread-exceptions 1; `bin/reap --record`, then 0 problems.
+
+### 5. The own dg record's seven Sema crashes
+
+`bin/repr-cpp dg --corpus dg-error --front native --only` the seven files, before: `{:crash 7}`. Fixed: template.ae's `eval-text` reads an
+integer literal as [lex.icon] (0x, 0b, octal, digit separators, the suffixes u, l, ll, z), its value modulo 2^64 through BigInteger
+(template/array32.C's `18446744073709551615`: NumberFormatException), its `fold` wraps 64-bit arithmetic and refuses a division by zero;
+sema's `const-int` short-circuits `&&` and `||` and makes a division by zero not a constant, as `ce-eval` does (warn/overflow-warn-3.C's
+enumerators: ArithmeticException). After: `{:crash 5, :accepted 2}`, the two rows "missed: accepted" (as before the regression) written into
+`test/cpp/check-dg-own-linux-amd64.edn`. Left (CP368): the five below.
+
+### Proposed (CP367-CP370)
+
+- **CP367: throw and catch on ci's threads.** runtime/threads.cpp's four workers fault inside `work()`'s try/catch since the route auto
+  (cirun and ciaot, `segmentation fault (thread 1004: _ZL4worki < ...)`), while atomics.cpp's threads (a guarded static, shared_ptr counts)
+  pass. (a) Diagnose on one worker (`CPPI_ROUTE=ours`, then clang's route) to split the per-thread exception state (the pending-flag
+  layer's `cx$uncaught` per thread) from the route's try/catch codegen; (b) leave it deferred. **Recommended: (a)**, light, a day.
+- **CP368: the own dg record's five Sema crashes left.** (1-3) coroutines/co-yield-syntax-01-outside-fn.C,
+  coroutines/coro-bad-alloc-01-bad-op-del.C, coroutines/coro-missing-ret-value.C: NullPointerException in `sema.ae:1249`
+  (`NamespaceAliasDecl`: coro.h's `namespace coro = std;`, its node's text not matched, the target nil, `str/trim` of nil; the
+  native node's range across coro.h is the suspect); (4) pr67405.C and (5) template/instantiate1.C: StackOverflowError (an unbounded
+  instantiation or lookup; clang stops at its depth limit). (a) Fix the alias's text (the node's own range, or the target kept on the
+  node by the native parser) and bound the two recursions by clang's limits, each a refusal or clang's error; (b) leave them as failing
+  rows. **Recommended: (a)**, the alias first (three files).
+- **CP369: a static data member's global is internal.** sema's `declare-var!` sets `:internal` for a member a class declares `static`
+  (its storage class), so a dynamically initialized static data member's global is emitted `internal` (thread_local11.h's `T::u3`, a
+  probe's `A::y`; clang: a dso_local external global). Two units then each keep their own. (a) `:internal` only for namespace-scope
+  `static` (as `:internal-l`) or an internal home, the codegen samples' forms recorded again; (b) leave it. **Recommended: (a)** (it moves
+  the samples' digests: by itself, with its proof).
+- **CP370: an internal alias lowered to C is external.** arbace.cpp.lower writes every alias without `static` (`(dissoc lm :static)`,
+  1cf6a63ec), so the internal `_ZTHL1x` of #1 is an external C symbol and two C units' still clash at ci's link. (a) Keep `static` for an
+  internal alias when ci accepts `static T f(void) __attribute__((alias("g")))` (measure it first); (b) leave it. **Recommended: (a)**.
+
+## As built: cpp-s5b (2026-11-11; branch `cpp-s5b` from mac/cpp-s5 6c3575b77, review-fix-2's C++ commits picked)
+
+C++'s line as one branch: cpp-s5 with mac/review-fix-2's C++ and Python-input commits cherry-picked (a15645cd0 TLS, e11cf87cc the threads
+class, a2b9a8b96 the literals, f4df29be7 pyi-runtime-tables' inputs, 2c2d3e1b3 got.out; its goi commits aabb45df8 and 6542d2a11 wait for
+W2, they move `gate_key`), and the night review `.tmp/reviews/1111/REVIEW-pending-cpp-asm-fix23.md`'s C++ findings #1-#5 fixed. The section
+above ("As built: review 1111's fixes") is review-fix-2's, carried with its commits; its #5's "value modulo 2^64 as a long" is superseded by
+#3 below. Light, by night 12's rules: main's stage 0, one process at a time, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`.
+
+### #3 (merge): one representation of unsigned 64-bit values in template.ae's constant text
+
+cpp-s5's functional cast gave `size_t(-1)` as the BigInt 18446744073709551615N, review-fix-2's `num` gave `18446744073709551615ULL` as the
+long -1; merged as they were, `size_t(-1) == 18446744073709551615ULL` folded false, and any other operator on the BigInt (`(map long args)`)
+threw Java's IllegalArgumentException, a Sema crash. Now one representation, exact integers inside the text's evaluation: a long, or an
+unsigned 64-bit value above Long/MAX_VALUE as a BigInt (`num` for a literal above it, `cast-named` and `cast-to` for an unsigned 64-bit
+type). An operation with such an operand is unsigned long long's ([expr.arith.conv]/1.5): both operands and the result modulo 2^64, a
+comparison of the converted values (`size_t(-1) > -1` false, as C++), else 64-bit arithmetic wraps as before (sema's const-int). Outside
+the text (eval-text's value, subst-value's fold) a value is its 64-bit pattern, a long, as sema's typed `ce-wrap` holds it, so nothing past
+the text sees a BigInt. A division by zero stays a refusal (review-fix-2's); a shift by a count outside 0..63 is one too. The limit, by the
+untyped fold: a value that fits a long loses its unsignedness (`size_t(-1) / 2` is a plain long), and a name's value (a `static const
+size_t` member, read through sema) is its pattern.
+
+### #2: __int128 constants
+
+sema's `ce-wrap` held a 128-bit value as a long and `const-int`'s and `ce-eval`'s arithmetic wrapped at 64 bits, so `(unsigned __int128)1 <<
+64` folded to 0 (Java masks the count) and a constant above 2^63 was emitted truncated, silently. Now (`wide?`, `wide-binop`): a 128-bit
+type's arithmetic is exact (BigInt) and `ce-wrap` keeps the result while it fits 64 bits (an unsigned one not negative), else the
+expression is not a constant: a constexpr variable's initializer is then the program's dynamic initialization (i128 IR, the value right at
+run time; clang folds it), a template argument's a refusal. A shift count outside 0..127 and a division by zero are not constants. In the
+template text a cast to a 128-bit type is a refusal. Carrying 128-bit BigInts through sema and the code generator (every `(long v)` of the
+constant paths) was the alternative, left: libstdc++'s 128-bit constants above 64 bits are `<format>`/`<charconv>` internals none of the run
+programs reaches.
+
+### #1: CP362 (a) only for a consteval constructor whose body only checks
+
+`consteval-ctor-body-stores?` (sema) scans the body's node: an assignment, a compound assignment or ++/-- whose operand is a member of
+`*this` (a member named alone, `this->m`, a member or an element of one, `*this`), a call of a non-static member function named alone or
+through `this`, a call on a member, `this`/`*this` passed. Such a body is analyzed (the constructor, always-inline, runs at the immediate
+invocation: its value clang's, computed at run time); a body that stores nothing is still skipped (basic_format_string's
+`_Checking_scanner<...> __scanner(_M_str); __scanner._M_scan();` only reads `_M_str`). The scan is syntactic and conservative: a parameter
+that shadows a member counts as the member (analyzed, not wrong).
+
+### #4 and #5: thread_local as clang's TLS kinds
+
+- The native parser records the TLS kind as clang's `VarDecl::getTLSKind` (`"tls": "dynamic"` for `thread_local`, `"static"` for `__thread`
+  and `_Thread_local`; before, "static" for all three, against clang's dumps) and `constinit` (`:_constinit`, or clang's `ConstInitAttr`);
+  sema keeps `:tls-kind` and `:constinit`.
+- A variable defined in another unit is read through `_ZTW` only when clang's `usesThreadWrapperFunction` would: dynamic TLS, not
+  constinit, an `extern` variable or a static data member this unit does not define (`tls-defined-here?`: a definition after an `extern`
+  declaration is a variable of its own in sema). `extern __thread int x;` and `extern thread_local constinit int y;` are read directly
+  (before: a linkonce_odr `_ZTW` and an extern_weak `_ZTH` clang never emits); `struct C { static thread_local int x; };` used here and
+  defined elsewhere is read through `_ZTWN1C1xE`, the global declared external thread_local (before: read directly, and the lowering
+  refused the undeclared global); `extern thread_local int t;` used before its dynamic definition in the unit goes through the definition's
+  weak_odr `_ZTW1t` alone, before its constant definition reads `@t` directly.
+- `tls-internal?` (#5): a static data member is internal when an unnamed namespace is on its path ([basic.link]/4), its `_ZTH` alias and
+  `_ZTW` wrapper internal (`_ZTHN12_GLOBAL__N_11C1xE`); others stay as review-fix-2 left them (CP369: sema's `:internal` for every
+  `static` member).
+- Left: a reference's wrapper returns the reference's address where clang's loads the referent (pre-existing on both paths); CP371.
+
+### Proofs
+
+- Probes (`arbace.cpp.codegen gen-batch`, `.tmp/probe/`, 15 files, 373 MB): `consteval_store.C` (`v = x * 2` in the body: the
+  constructor inlined with its store, `s.v` 6; before, 0) and `consteval_check.C` (a checking body still skipped, its IR as cpp-s5's
+  rule gives); `i128_shift.C` (`(unsigned __int128)1 << 64`: not a constant, `k` dynamically initialized by `shl i128`, the value 2^64;
+  before, folded to 0), `i128_big.C` (`(__int128)9223372036854775807LL + 2`: dynamic, `add i128`; before, truncated), `i128_small.C`
+  (within 64 bits: still folded, `main` returns 0); `u64_text.C` (template arguments: `u64(-1) == 18446744073709551615ULL` 1,
+  `0x8000000000000000ULL > 0` 1, `u64(-1) / 2 > 0` 1, `!u64(-1)` 2, `u64(-1) > -1` 2, `u64(-1) * 2 == 18446744073709551614ULL` 1,
+  `U<u64(-1)>::v` the i64 -1: every value C++'s, no crash), `u64_div0.C` (`T<(1 / 0)>`: a `template` refusal, "division by zero in a
+  constant expression"); `tls_static_kind.C` (`extern __thread int x; extern thread_local constinit int y;`: both read directly, no
+  `_ZTW`/`_ZTH`), `tls_member.C` (`C::x` defined elsewhere: through `_ZTWN1C1xE`, `@_ZN1C1xE` declared external thread_local, lowered to C;
+  before, read directly), `tls_extern_def.C` (extern, use, dynamic definition: one weak_odr `_ZTW1t` and the `_ZTH1t` alias, no linkonce
+  duplicate), `tls_extern_cdef.C` (extern, use, constant definition: `@t` read directly), `tls_anon_member.C` (an unnamed namespace's
+  class's member: `_ZTHN12_GLOBAL__N_11C1xE` and `_ZTWN12_GLOBAL__N_11C1xE` internal); review-fix-2's `extern_tls.C`, `static_tls.C`,
+  `member_static.C` as review-fix-2 recorded them.
+- The 82 run programs (cpp-s5's G2 list, gen-batch, 2,563 s, peak 1.37 GB): the same 69 ok and 13 refusals by the same causes, all 69
+  `gen.ll` and every `forms.ae` byte for byte cpp-s5's G2 (which is the cpp-s5 tip's): neither the fold's representation, the 128-bit
+  rule, the consteval scan nor the TLS kinds move a run program's IR.
+- `bin/cppi codegen-gen`: 154 samples, 154 pass (the forms' digests unchanged), the two negative controls fail as they must (11.5 min,
+  peak 1.03 GB).
+- cpp-print-essential's command (the parser's TLS kind is in the native trees): `roundtrip-corpus gxx-dg-essential --judge own` 33 of 33
+  pass, `samples` 9 of 9, the control fails as it must (4.5 min, peak 1.47 GB).
+- `bin/reap`: 49 of 52 cells checked, 0 problems; `bin/crops-score --record` (scores unchanged, no diff) and `--judge --strict` exit 0.
+- Keys: `bin/arbace-go --gate-key` 314c8e5b04ab... (mac/next's, as review-fix-2 recorded it), `test/gate/gate-key-crops-test.bash` passes:
+  every file the branch changes is a crop path or a record; nothing moves a key.
+- Not run (night commands, over 1.5 GiB): `bin/cppi lower-essential` (3 GiB) and `bin/cppi check --corpus samples` (cpp-check-essential,
+  about 3 GiB), each about 10 min at one thread; the native tree check `bin/repr-cpp native-check ... --tree` over the C++ corpora (the
+  `"tls": "dynamic"` now as clang's dumps: expected improvements only, any `thread_local` VarDecl's row) and the own dg record's run
+  (`bin/repr-cpp dg --corpus dg-error --front native`, about 2.4 GiB).
+
+### Proposed (CP371)
+
+- **CP371: a thread-local reference's wrapper.** clang's `_ZTW` of `thread_local T& r` returns the referent (it loads the reference);
+  Arbace's returns the reference's address, on the defining and the extern paths, and the wrappers are weak or linkonce across units, so a
+  unit mixed with clang's objects reads the wrong address. (a) Load the referent in both wrappers for a reference type, with a two-unit
+  probe; (b) leave it (no run program has one). **Recommended: (a)**, small.

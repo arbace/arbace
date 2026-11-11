@@ -343,7 +343,10 @@ items below are the ones whose work is still ahead or tied to a night.
   unroll1.C's names now clang's), CP362 (<format>'s consteval check) to CP364 proposed, the user's (a) each; `cpp-s5` (2026-11-11,
   "As built: cpp-s5"): CP364 (a)'s drops.tsv and its largest causes, CP362 (a), <format>'s first slices (library.cpp now at
   <format>'s `_M_reserve` (span from std::string)), is_signed_v corrected; CP363 (a)'s two samples wait in `test/cpp/runtime/pending/` for the oracle tier (its commands in the
-  survey); CP365-CP366 proposed.
+  survey); CP365-CP366 proposed; `cpp-s5b` (2026-11-11, "As built: cpp-s5b"): C++'s line as one branch, cpp-s5 with review-fix-2's
+  C++ commits (review 1111's #1, #4-#7; its goi commits wait for W2) and the night review's #1-#5 (a consteval constructor's storing body
+  analyzed, 128-bit constants exact or not constants, one representation of unsigned 64-bit values in the template text, TLS kinds as
+  clang's), the 82 run programs' IR byte for byte cpp-s5's; CP367-CP371 proposed.
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
   OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
   on `ocaml-s2` (its compiled runs a night's), OC216 on `ocaml-s3` and its rest (AF_UNIX and signals at the compiled level) on `ocaml-s4`, then OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.
