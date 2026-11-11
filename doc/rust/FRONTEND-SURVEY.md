@@ -3733,7 +3733,10 @@ the rest the operator impls' macros, cmp's, slice and str iterators'): the recor
   the attributes' pass again, 30 minutes beside the essential runs, 4,695 functions, fmt::num's 126 among them): fmt alone then has
   callees 160 of 160 and mono-check's 76 of 76, so the corpus' native callees are **4,985 of 4,985**, function constants' symbols
   2,343 of 2,346, mono-check's equal callees 2,409 of 2,414.
-- RESULT_CHECKS
+- `bin/rust-front essential` equals its known file (49 minutes this once: ci's musl forms read afresh in the new worktree;
+  2.2 GB); `bin/rust-front core-essential` equals its own (5 min 33 s: the macro table's tie rule and `${concat}` move none of its
+  modules); `bin/reap` 49 of 52 cells checked, 0 problems; `bin/crops-score --record` leaves `test/crops/scores.edn` as it was,
+  `--judge --strict` exit 0, Rust 75.0 / 75.0 / 95.8 / 80.0, unchanged (RFP43 (a)).
 
 ### Left
 
