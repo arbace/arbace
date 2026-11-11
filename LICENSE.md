@@ -520,7 +520,9 @@ covers what.
   `ffi_prep_cif`, `ffi_call`, `ffi_prep_closure_loc`; no libffi code), under the Eclipse Public License 1.0.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
-  JN2), written for Arbace in place of jdk26u's files of the same names (from their
+  JN2; `overlay/jdk/javac/buildtools/` and `buildtools-world/`, the tool-world variants of the JDK build's tools and of
+  the API they call that `bin/javac-vendor gensrc` runs on javac's tool, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built:
+  JCS359 stages 2-3 (day)"), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The
   jdk26u files that bin/jrt-convert translates are read from the jdk26u checkout, not kept here;
   their Java forms are, in `jdk/forms/` (above).

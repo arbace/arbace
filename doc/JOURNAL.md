@@ -5430,3 +5430,43 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
+
+## 2026-11-11: JCS359 stages 2-3 by day: the generated sources and the descriptors made on Arbace (branch `jcs359-s2`)
+
+**What.** Branch `jcs359-s2` from `mac/jcs359-s1` (4094e8978), `mac/java-night` (e382ea11b) merged first (one conflict, this
+journal: both sides kept). The light by-day parts of JCS359 (a)'s stages 2 and 3, as decided on 2026-11-10 (JCS362 (a), JCS363
+(a), JCS364 (a), JCS368 (b), JCS369 (a)). Sources studied: jdk26u at baf63fbe (`make/modules/*/Gensrc.gmk`, `gensrc/*.gmk`,
+`make/common/modules/Gensrc{Common,Properties,ModuleInfo,StreamPreProcessing}.gmk`, `make/ToolsJdk.gmk`,
+`make/CompileToolsJdk.gmk`, `make/ModuleTools.gmk`, `make/CreateJmods.gmk`, `make/jdk/src/classes/build/tools/*`,
+`src/java.base/share/classes/jdk/internal/module/ModuleInfoExtender.java`) and its build tree
+(`build/linux-x86_64-server-release`: `support/gensrc/**/_*.cmdline`, `make-support/vardeps`, `jdk/modules`, `images/jmods`).
+Details in doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS359 stages 2-3 (day)".
+
+- **Stage 2.** `bin/javac-vendor platform-gensrc [--check]` derives `jdk/javac/platform-gensrc.edn`: the build's 146 recorded tool
+  runs, its substitutions, module lists, spec.gmk values and resource-only packages (JCS362 (a)). `bin/javac-vendor gensrc` replays
+  them on javac's tool and ports the rules make does not record (`bin/lib/repr-java/gensrc.bash`). Six tools the tool does not
+  hold are read by repr/java at run time and interpreted (`bin/lib/repr-java/gensrc-run.ae`), with tool-world variants
+  (`overlay/jdk/javac/buildtools{,-world}`: ToBin, GenModuleLoaderMap, the VarHandle generator's two helpers, a StAX cursor over
+  SAX, Region) and two renamings applied to the build's files at read time. The two `gcc -E` sources by repr/c's preprocessor on
+  C's own target, laid out as gcc -E lays out its output (`bin/lib/repr-java/cppout.ae`; JCS369 (a)).
+- **Result.** 2,305 of 2,307 generated `.java` files the build's byte for byte (15 of 16 modules equal), 118 s, peak 958 MB; known
+  (`jdk/javac/platform-gensrc-known.edn`): CaseFolding (JCS363 (a), Unicode 17 against the boot JDK's 16) and VarHandleGuards (the
+  same 117 methods in the interpreter's `getMethods` order, JCS380).
+- **Stage 3.** `bin/javac-vendor descriptors`: the descriptors extended as AddPackagesAttribute and jmod create extend them
+  (`bin/lib/repr-java/modinfo.ae`, ModuleInfoExtender's java.lang.classfile transform as documented, no javac or JVM). From the
+  exploded descriptors 67 of 68 the jmods' byte for byte, java.base known (JCS364 (a), ModuleHashes). From javac on Arbace's own
+  descriptors (stage 1 run by day on six small modules; `classes modules` now keeps each module's descriptor and package list)
+  6 of 6 equal at both steps.
+- **Alternatives considered.** Compiling the six tools into javac's tool (JCS379 (b): a convert, edge and rebuild night, StAX
+  and Swing stand-ins in javac's world) against interpreting them (taken: light, no key move); a variant of Nimbus' `Generator`
+  (a transcription of GPL code) against renaming its resource lookup at read time (taken); a token-equal `gcc -E` text (the
+  classes' line numbers would differ, `-g`) against emulating gcc's layout (taken: byte for byte); computing the
+  resource-only packages from the sources' resources against recording them as configuration (taken: make's copy rules exclude
+  doc-files and add generated data, which the data records exactly).
+- **Found.** `Class.getResourceAsStream` is provided by the Go build but not listed among Class's members, so Java forms
+  cannot call it, interpreted or by reflection (JCS381); the interpreter's `getMethods` order is not declaration order
+  (JCS380); interpreted classes cannot extend the Go build's classes (DefaultHandler), only implement its interfaces.
+- **Keys.** `arbace_javac_key` moves (bin/javac-vendor, jdk/javac, overlay/jdk/javac): one javac tool rebuild at the night's gate.
+  `gate_key` and `arbace_runtime_key` unchanged. No score moves until stage 4.
+- **Night.** `.tmp/night13/slots/jcs359.sh` (refreshed): stage 1's measure under the big lock, then stages 2 and 3 on its outputs.
+- **Proposals.** JCS379-JCS382 (the survey).

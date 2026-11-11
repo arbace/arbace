@@ -66,8 +66,12 @@ Six crops are above 90 on all three. What the others still need:
   11-11 merge) measures the own platform (`bin/javac-vendor classes modules`). The user decided JCS359 (a) staged, JCS360 (a),
   JCS362-JCS378 as recommended and JCV10 (b) (2026-11-10). Stage 1's tooling is on `jcs359-s1` (from `java-indep`): the build's
   configuration as data, `jdk/javac/platform-build.edn` (JCS362 (a)); `classes modules --jobs N`; the known file
-  `jdk/javac/platform-own-known.edn` (JCS360 (a), 12 classes); the controls. Next: stage 1's measure of all 68 modules on night
-  15 (JCS374 (a), the survey's command), then stages 2-3 by day. The score moves at stages 4-5: Java to 99.7.
+  `jdk/javac/platform-own-known.edn` (JCS360 (a), 12 classes); the controls. Stages 2-3's day parts are on `jcs359-s2` (2026-11-11): `bin/javac-vendor gensrc`, the 16 modules' generated
+  sources by the build's own tools on javac's tool, 2,305 of 2,307 the build's byte for byte (2 known), the two `gcc -E` ones by
+  repr/c (JCS369 (a)); `descriptors`, the 68 module descriptors as the image holds them, 67 equal and java.base known
+  (ModuleHashes, JCS364 (a)); JCS379-JCS382 proposed. Next: stage 1's measure of all 68 modules on night 15 (JCS374 (a);
+  `.tmp/night13/slots/jcs359.sh`, which then runs stages 2-3 from its outputs), stage 4's `platform --own` and switch. The
+  score moves at stages 4-5: Java to 99.7.
 - **C++** (completeness, independence): read 1,182 and print 1,665 by design are most of the gap (96.8 without them); the
   print cell is on the own round trip on `cpp-print-own` (CP243 (a): the records made by day, print 48.3 → 99.5, the judge
   0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the
