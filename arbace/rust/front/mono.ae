@@ -27,7 +27,8 @@
 
     (program-facts BODIES OPTS)     within build-check/build-program's bindings: {:items :callees :statics :langsyms :layout-of ...}
     (layout-form T)                 a type's layout as the record writes it, or nil (refused)"
-  (:require [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.build :as build] [arbace.string :as str])
+  (:require [arbace.rust.front.collect :as c] [arbace.rust.front.typeck :as tc] [arbace.rust.front.build :as build] [arbace.string :as str]
+            [arbace.rust.front.passes :as passes])
   (:import [java.io File]))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -447,6 +448,17 @@
     (print-def-path! m [:crate (:name *local*)] [])
     (str (:sb m))))
 
+(defn vtable-shim-mangle
+  "RF18 (RFP62 (a)): a VTableShim's symbol (a by-value receiver's vtable entry, Instance::resolve_for_vtable: a closure's
+  `FnOnce::call_once`): `::{shim:vtable#0}` over the method's path at its arguments, then the instantiating crate (a shim is
+  instantiated where it is used)"
+  [d args]
+  (let [m (m-new)]
+    (binding [*instance-def* d]
+      (path-append-ns! m #(print-def-path! m d (erase-regions args)) "S" 0 "vtable"))
+    (print-def-path! m [:crate (:name *local*)] [])
+    (str (:sb m))))
+
 (defn v0-mangle
   "v0::mangle: the instance's path at its arguments (a shim's kind for those that coexist with the item: none here), then the
   instantiating crate's root when the symbol must avoid cross-crate conflicts"
@@ -785,6 +797,7 @@
     t))
 
 (def ^:dynamic *layouts* nil)   ; atom: type -> layout
+(def ^:dynamic *closure-upvars* {})   ; RF18: a local closure type's text -> its upvars' types (its built body's :upvar-tys)
 
 (declare layout-of)
 
@@ -860,6 +873,12 @@
                {:size 0 :align (:align el) :abi [:memory false] :fields [:array (:size el) 0] :variants [:single 0] :niche nil :uninhabited false})
       :str {:size 0 :align 1 :abi [:memory false] :fields [:array 1 0] :variants [:single 0] :niche nil :uninhabited false}
       (:fndef :dyn) (assoc unit-l :abi [:memory (= :fndef (first t))])
+      ;; RF18 (RFP62 (a)): layout_of_uncached's Closure arm, univariant over the upvars' types (StructKind::AlwaysSized); a
+      ;; generic function's closure (`[:closure TEXT SIG ARGS]`) with its parent's arguments substituted
+      :closure (let [ups (or (get *closure-upvars* (second t))
+                             (throw (ex-info (str "mono: no layout for " (pr-str t) " (its upvars: the closure's body not built)") {:fact :layout})))
+                     ups (if-let [as (nth t 3 nil)] (mapv #(erase-regions (c/subst % as)) ups) ups)]
+                 (univariant (mapv layout-of ups) {} :always))
       :tuple (let [ts (second t)] (univariant (mapv layout-of ts) {} (if (empty? ts) :always :maybe-unsized)))
       :pat-notnull (let [l (layout-of (second t))
                          l (case (first (:abi l))
@@ -1612,6 +1631,46 @@
 (defn- local-adt-by-path [^String p]
   (some #(when (and (#{"Struct" "Enum" "Union"} (:kind %)) (= p (binding [c/*in-value* false] (c/print-def-path (:id %) [])))) (:id %)) (c/defs)))
 
+(defn- split-top
+  "TEXT's comma-separated parts at depth 0 of (), <> and []"
+  [^String text]
+  (loop [i 0 depth 0 start 0 acc []]
+    (if (= i (count text))
+      (let [last-part (str/trim (subs text start))] (if (str/blank? last-part) acc (conj acc last-part)))
+      (let [ch (.charAt text i)]
+        (cond (#{\( \< \[} ch) (recur (inc i) (inc depth) start acc)
+              (and (#{\) \> \]} ch) (not (and (= ch \>) (pos? i) (= \- (.charAt text (dec i)))))) (recur (inc i) (dec depth) start acc)
+              (and (= ch \,) (zero? depth)) (recur (inc i) depth (inc i) (conj acc (str/trim (subs text start i))))
+              :else (recur (inc i) depth start acc))))))
+
+(defn- text->ty
+  "RF18: a type's printed text, for the record's trait objects' Fn sugar (`dyn Fn(&str, i32) -> usize`): primitives, `str`,
+  `()`, tuples, references and std's String; else an exception"
+  [^String text]
+  (let [t (str/trim text)]
+    (cond
+      (#{"i8" "i16" "i32" "i64" "i128" "isize"} t) [:int t]
+      (#{"u8" "u16" "u32" "u64" "u128" "usize"} t) [:uint t]
+      (#{"f32" "f64"} t) [:float t]
+      (= "bool" t) [:bool] (= "char" t) [:char] (= "str" t) [:str] (= "!" t) [:never]
+      (= "std::string::String" t) [:adt "alloc::string::String" []]
+      (str/starts-with? t "&mut ") [:ref [:re-erased] true (text->ty (subs t 5))]
+      (str/starts-with? t "&'_ mut ") [:ref [:re-erased] true (text->ty (subs t 8))]
+      (str/starts-with? t "&'_ ") [:ref [:re-erased] false (text->ty (subs t 4))]
+      (str/starts-with? t "&") [:ref [:re-erased] false (text->ty (subs t 1))]
+      (and (str/starts-with? t "(") (str/ends-with? t ")")) [:tuple (mapv text->ty (split-top (subs t 1 (dec (count t)))))]
+      :else (throw (ex-info (str "mono: the type text " t) {:fact :layout})))))
+
+(defn- dyn-fn-sugar
+  "RF18 (RFP62 (a)): a record's `dyn Fn(A, ..) -> R` (Fn, FnMut or FnOnce, no auto trait) as the trait object typeck makes
+  of it: the trait at the arguments' tuple, FnOnce::Output's projection R (`()` when there is no arrow)"
+  [^String text]
+  (when-let [[_ tr args ret] (re-matches #"dyn (?:std|core)::ops::(Fn|FnMut|FnOnce)\((.*?)\)(?: -> (.+))?" text)]
+    (let [tup [:tuple (mapv text->ty (split-top args))]
+          r (if ret (text->ty ret) [:tuple []])]
+      [:dyn {:principal [(str "core::ops::function::" tr) [tup]] :projections [["core::ops::function::FnOnce::Output" [tup] r]] :autos []}
+       [:re-erased]])))
+
 (defn form->ty
   "A MIR type form (ty TEXT STRUCT) as a type: a local ADT by its path, another crate's by its DefId's path"
   [f]
@@ -1646,9 +1705,11 @@
       ;; auto trait (`dyn Animal`), as a std call's argument
       dyn (let [[_ p] (re-matches #"dyn ([A-Za-z_][A-Za-z0-9_:]*)" (str (second f)))
                 tr (when p (local-trait-by-path p))]
-            (if (and tr (empty? (filter #(not= :lifetime (:kind %)) (rest (c/all-params (c/generics-of tr))))))
-              [:dyn {:principal [tr []] :projections [] :autos []} [:re-erased]]
-              (throw (ex-info (str "mono: the type form " (pr-str f)) {:fact :layout}))))
+            (cond (and tr (empty? (filter #(not= :lifetime (:kind %)) (rest (c/all-params (c/generics-of tr))))))
+                  [:dyn {:principal [tr []] :projections [] :autos []} [:re-erased]]
+                  ;; RF18: std's Fn traits' sugar
+                  :else (or (try (dyn-fn-sugar (str (second f))) (catch Throwable _ nil))
+                            (throw (ex-info (str "mono: the type form " (pr-str f)) {:fact :layout})))))
       (throw (ex-info (str "mono: the type form " (pr-str st)) {:fact :layout})))))
 
 (defn- text-of [t]
@@ -1777,20 +1838,31 @@
 
 (defn- vtable-instance
   "RF14: a vtable entry's instance, {:def :args}: the method M of the object's principal TR (at TARGS, its arguments after Self)
-  for C, resolved (resolve-instance); a by-value receiver (a VTableShim) and a supertrait with parameters refused"
+  for C, resolved (resolve-instance); RF18: a closure's call_once {:def :args :shim :vtable} (its VTableShim), another
+  by-value receiver and a supertrait with parameters (but the Fn traits') refused"
   [c tr targs m]
   (let [mt (method-trait m)
         ntr (count (filter #(not= :lifetime (:kind %)) (c/all-params (c/generics-any mt))))
         args (cond (= mt tr) (into [c] targs)
                    (= 1 ntr) [c]
+                   ;; RF18 (RFP62 (a)): the Fn traits' supertraits take the object's arguments (`Fn<Args>: FnMut<Args>`,
+                   ;; `FnMut<Args>: FnOnce<Args>`)
+                   (and (get fn-trait-kind mt) (get fn-trait-kind tr)) (into [c] targs)
                    :else (throw (ex-info "mono: a supertrait's method with arguments in a vtable" {:fact :vtable})))
-        [d a] (resolve-instance m args)
-        recv (first (:inputs (if (number? d) (c/fn-sig d) (get (:fns c/*si*) d))))]
-    (when (and (number? d) (not (#{:ref :ptr} (first recv))))
-      (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable})))
-    (when (and (string? d) (seq? recv) (not (#{"ref" "ptr"} (str (first recv)))))
-      (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable})))
-    {:def d :args a}))
+        [d a shim] (resolve-instance m args)]
+    ;; RF18: a closure's FnOnce::call_once (its ClosureOnceShim, by value) is the vtable's VTableShim of call_once at the
+    ;; object's arguments (resolve_for_vtable), whose body is core's shim (the record's)
+    (cond
+      (= shim "closure-once-shim") {:def d :args (erase-regions a) :shim :vtable}
+      ;; RF18: a closure's own body (Fn::call, FnMut::call_mut of a closure of that kind) takes its environment by reference
+      (and (number? d) (= "Closure" (:kind (c/def-of d)))) {:def d :args a}
+      :else
+      (let [recv (first (:inputs (if (number? d) (c/fn-sig d) (get (:fns c/*si*) d))))]
+        (when (and (number? d) (not (#{:ref :ptr} (first recv))))
+          (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable})))
+        (when (and (string? d) (seq? recv) (not (#{"ref" "ptr"} (str (first recv)))))
+          (throw (ex-info "mono: a by-value receiver's vtable shim" {:fact :vtable})))
+        {:def d :args a}))))
 
 (defn vtable-alloc
   "RFP44 (a): the vtable of C as a TR object, as vtable_allocation_provider lays it out: drop_in_place's function (null when
@@ -1817,7 +1889,8 @@
                                  ;; RF14: the entry's instance by trait resolution (an impl's method, std's or a generic one, or the
                                  ;; trait's default body), the method's trait the object's principal or one without parameters of
                                  ;; its own (its arguments C alone)
-                                 [:fn (instance-symbol (vtable-instance c tr targs m))]))))}))
+                                 (let [i (vtable-instance c tr targs m)]
+                                   [:fn (if (= :vtable (:shim i)) (vtable-shim-mangle (:def i) (:args i)) (instance-symbol i))])))))}))
 
 (defn enclosing-fn [d] (loop [x d] (if (= "Closure" (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x)))
 
@@ -1924,7 +1997,20 @@
   "Within build-program's bindings: the program's native facts over its built BODIES ([[name body err] ...]); STD-CALLS (RFP49
   (a)): the record's std bodies' function constants [PATH ARG-FORMS], whose local instances the collector adds"
   [n bodies & [std-calls std-fn-syms]]
-  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil) *closure-kinds* (atom {})]
+  (let [;; RF18 (RFP62 (a)): every body as mono sees it after PostAnalysisNormalize (an opaque type, `impl Fn(i32) -> i32`,
+        ;; revealed: its defining body's hidden type at the use's arguments), as rustc's collector walks runtime MIR, so that
+        ;; a call through an opaque type resolves to the closure behind it
+        bodies (for [[nm b & more] bodies]
+                 (into [nm (when b (try (passes/post-analysis-normalize b) (catch Throwable _ b)))] more))
+        ;; RF18: each local closure's upvars' types by its type's text (its body's self: `&C`, `&mut C` or `C`)
+        upvars (into {} (for [[_ b] bodies :when (and b (:upvar-tys b))
+                              :let [t (some-> (nth (:locals b) 1 nil) :ty meta :tc erase-regions)
+                                    cl (when (vector? t) (cond (= :closure (first t)) t
+                                                               (and (= :ref (first t)) (vector? (nth t 3)) (= :closure (first (nth t 3)))) (nth t 3)))]
+                              :when cl]
+                          [(second cl) (:upvar-tys b)]))]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil) *closure-kinds* (atom {})
+            *closure-upvars* upvars build/*closure-tys* (merge build/*closure-tys* upvars)]
    (tc/with-solver (solver-def) (fn []
     (let [ours (into {} (for [[nm b] bodies :when b] [nm b]))
           ;; RF14: each closure's kind by its built body's self (`&C` Fn, `&mut C` FnMut, `C` FnOnce)
@@ -2060,7 +2146,8 @@
        :instances (into {} (for [k items :when (and (vector? k) (item-body k))] [(by-def k) [(get by-def* (first k)) (second k)]]))
        :ext-items (vec (for [x ext-items] (assoc x :symbol (try-fact #(instance-symbol x)))))
        :callees callees :fsyms fsyms :statics statics :langsyms langsyms :vtables vtables
-       :layouts-of (fn [forms] (binding [*local* *local* *layouts* (atom {})] (tc/with-solver (solver-def) #(layout-table forms))))})))))
+       :layouts-of (fn [forms] (binding [*local* *local* *layouts* (atom {}) *closure-upvars* upvars build/*closure-tys* (merge build/*closure-tys* upvars)]
+                                 (tc/with-solver (solver-def) #(layout-table forms))))}))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; RF12-P6: the facts of core's bodies built natively and carried into a program's run (arbace.rust.front.build-run's
