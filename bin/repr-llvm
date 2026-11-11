@@ -41,6 +41,11 @@
 #                                              the pack rt's mutants' own verdicts against opt's record (mutants-oracle, LLS35 (a))
 #   bin/repr-llvm mutants-oracle LIST WORK     (LLS33 (b), the oracle tier) each mutant's own verdict (its `; MUTANT:` line) against opt's:
 #                                              the verdict, and the message a fragment of opt's first message (record) or stderr (live)
+#   bin/repr-llvm heldout-check [WORK]        (LLS45 (a), llvm-full's part heldout) 900 mutants made afresh (test/llvm/heldout-bases.txt,
+#                                              seed REPR_LLVM_HELDOUT_SEED, default 1200000; 300 of each of intrinsics, metadata, debug), each
+#                                              own verdict met by Arbace's verifier (verify-check in own mode, no opt; the unknowns counted),
+#                                              the controls test/repr/llvm/heldout-controls.txt failing; exit 1 otherwise
+#                                              and floors: n = 900 (REPR_LLVM_HELDOUT_N) and at least 880 own verdicts (REPR_LLVM_HELDOUT_MIN_OWN; 886 recorded)
 #   bin/repr-llvm rt-lists DIR                 the pack rt's families' lists (DIR/{roundtrip-rt,verify-rt,verify-rt-heldout}.list), absolute
 #   bin/repr-llvm record-opt LIST...         opt -passes=verify's verdicts of the lists' modules recorded (test/llvm/ref-opt23.edn: digests,
 #                                              first message, stderr's digest with the paths normalized): no LLVM tool at the check
@@ -709,5 +714,45 @@ case ${1:-} in
       done < "$controls"
     fi
     [ "$n" -gt 0 ] && [ "$sv" = "$n" ] && [ "$ctl" = 0 ] ;;
+  heldout-check)
+    # LLS45 (a): a held-out set made afresh by the current mutator and judged without opt: test/llvm/heldout-bases.txt's 41 modules
+    # (the pinned pack tx, the checkout's hw, llvm/test's from the pinned tarball's extraction), 300 mutants of each of the families
+    # intrinsics, metadata and debug from the fixed seed (REPR_LLVM_HELDOUT_SEED, default 1200000), verify-check in own mode: every
+    # mutant with an own verdict met by Arbace's verifier (the verdict and the declared message); the unknowns (left to opt) only
+    # counted; the negative controls test/repr/llvm/heldout-controls.txt (two mutants of the set crossed) must fail
+    work=${2:-$root/.tmp/repr-llvm/heldout}; seed=${REPR_LLVM_HELDOUT_SEED:-1200000}
+    rm -rf "$work"; mkdir -p "$work/tx"; work=$(cd "$work" && pwd)
+    (cd "$root/test/llvm/ir" && sha256sum -c --quiet tx.tar.xz.sha256) >&2 || { echo "heldout-check: tx.tar.xz does not match its pin" >&2; exit 2; }
+    xz -dc "$root/test/llvm/ir/tx.tar.xz" | tar -xf - -C "$work/tx"
+    grep -v '^#' "$root/test/llvm/heldout-bases.txt" | grep . > "$work/bases.rel"
+    awk -F'\t' '$2 ~ /^llvm\/test\//' "$work/bases.rel" > "$work/llvmtest.rel"
+    "$root/bin/llvm-corpus" resolve "$work/llvmtest.rel" "$work/llvmtest.abs"
+    awk -F'\t' -v r="$root" -v tx="$work/tx" 'FILENAME == ARGV[1] { a[$1] = $2; next }
+      { s = $2; print $1 "\t" (sub(/^tx:/, "", s) ? tx "/" s ".ll" : (s ~ /^test\// ? r "/" s : a[$1])) }' "$work/llvmtest.abs" "$work/bases.rel" > "$work/bases.list"
+    missing=$(awk -F'\t' '{ if ((getline l < $2) < 0) print $1; close($2) }' "$work/bases.list" | head -3)
+    [ -z "$missing" ] || { echo "heldout-check: not found: $missing ... (bin/llvm-corpus extract)" >&2; exit 2; }
+    : > "$work/mutants.list"
+    for fam in intrinsics metadata debug; do
+      "$0" mutants "$work/bases.list" "$work/m-$fam" 300 "$seed" "$fam" > "$work/m-$fam.log" 2>&1 || { tail -3 "$work/m-$fam.log" >&2; exit 1; }
+      cat "$work/m-$fam/mutants.list" >> "$work/mutants.list"
+    done
+    REPR_LLVM_JUDGE=own REPR_LLVM_VERIFY_CONTROLS=$root/test/repr/llvm/heldout-controls.txt "$0" verify-check "$work/mutants.list" "$work/vc" > "$work/vc.out" 2>&1 || true
+    [ -f "$work/vc/verify.tsv" ] || { tail -5 "$work/vc.out" >&2; echo "heldout-check: verify-check wrote nothing" >&2; exit 1; }
+    n=$(wc -l < "$work/mutants.list")
+    own=$(awk -F'\t' '$8 == "own"' "$work/vc/verify.tsv" | wc -l)
+    bad=$(awk -F'\t' '$8 == "own" && ($4 != "same" || $5 == "differs")' "$work/vc/verify.tsv" | tee "$work/disagree.tsv" | wc -l)
+    st=0
+    grep '^control ' "$work/vc.out" || true
+    if grep -q '^control passed\|^control .* left' "$work/vc.out"; then echo "FAIL heldout-check: a negative control passes or is left"; st=1; fi
+    nctl=$(grep -c '^control .* fails as it must' "$work/vc.out" || true)
+    [ "$nctl" -gt 0 ] || { echo "FAIL heldout-check: no negative control failed"; st=1; }
+    # floors (REVIEW2.md, llvm-props4 1): the set is 900 mutants and at least REPR_LLVM_HELDOUT_MIN_OWN of them carry an own verdict
+    # (886 of 900 recorded at LLS45 (a); 880 leaves a margin of 6 for a mutator or rule change, a collapse to few or 0 fails)
+    want_n=${REPR_LLVM_HELDOUT_N:-900}; min_own=${REPR_LLVM_HELDOUT_MIN_OWN:-880}
+    if [ "$n" != "$want_n" ]; then echo "FAIL heldout-check: $n mutants, expected $want_n"; st=1; fi
+    if [ "$own" -lt "$min_own" ]; then echo "FAIL heldout-check: $own own verdicts, fewer than the floor $min_own"; st=1; fi
+    if [ "$bad" != 0 ]; then echo "FAIL heldout-check: $bad own verdicts not met by Arbace's verifier ($work/disagree.tsv):"; cut -f1-7 "$work/disagree.tsv" | head -10 | cut -c1-300; st=1; fi
+    echo "heldout-check: $n mutants (seed $seed, 300 each of intrinsics, metadata, debug); $own own verdicts, $((own - bad)) met by Arbace's verifier, $((n - own)) unknown (left to opt); $nctl negative controls fail as they must"
+    exit $st ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
