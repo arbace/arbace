@@ -4955,3 +4955,22 @@ expansion would then end the whole expansion, where LLVM goes on with the body's
   bisection, a Word-pattern change no probed program used; `tostg.ae` during the LibContainers bisection, which I stopped and
   did not use; `tostg.ae`'s unit check during the GHC-interface lib-stg's program runs, a no-op for programs, unit main); one
   `<(...)` in a `diff` command early on.
+
+## 2026-11-11: RF20: RFP52's rest, core's crate-private items in core-check's bodies (branch `rust-rf20`, from `mac/next` `4b8fc77e3`)
+
+- RFP52 (a)'s rest (the user's decision of 2026-11-10), each after rustc 1.99.1's own code: a qualified path's trait taken from the
+  resolved item's parent when its written prefix crosses an out-of-line module (`<T as self::uninit::CopySpec>::clone_one`); the
+  native interface writes late-bound regions as the helper does (`'^#N`, `'^'a`, not erased), type aliases with their generics
+  (`ChangeOutputType`), crate-private constants with an integer value (`MAX_ONE_B`, hexadecimal literals now evaluated) and
+  projection clauses; collect's names gain core's kinds, modules and re-exports (`ascii::Char`) and the constructors of core's
+  structs the names lack (`casemappingiter_impls!`'s `ToLowercase`, private constructors std's names omit); an out-of-line
+  module's item walks through its interface path (`drain::Drain::new`); the impl's trait is in scope for method calls (rustc's
+  traits_in_scope `current_trait`); derive(Debug) of a struct whose fields are all cfg'd out is `write_str`.
+- core-check over the 37 modules: 5,576 -> 5,594 equal (157 -> 161 but for the allocations), 24 -> 6 refused (baseline on an export of `mac/next` the same day, so no
+  source was edited under a run); no module lost an equal body. core-essential 564 -> 566 equal (known file recorded again);
+  essential unchanged; reap 0 problems; crops-score unchanged (Rust 80.0).
+- Alternatives considered: `CORE_IFACE_FILES=all` (RFP52 (b): every module file in the interface pass, far longer and still
+  without the macro-made constructors); special-casing the four names (no: each follows a rustc rule that other modules use too).
+  Left: `try_process`'s associated item bounds, `NeverShortCircuit::wrap_mut_1`'s opaque return type, RF13e's others. `gate_key`
+  unmoved (`bin/arbace-go --gate-key` equal; only `arbace/rust/front/` and a test file change); `core-attrs.edn`'s key moves, so the
+  night's rsi-build makes it again first. Details: doc/rust/FRONTEND-SURVEY.md, "As built: RF20".
