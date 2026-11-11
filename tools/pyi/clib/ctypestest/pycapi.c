@@ -10,9 +10,11 @@
 
 struct pyi_proxy { long ob_refcnt; void *ob_type; };
 struct pyi_type { long ob_refcnt; void *ob_type; char rest[400]; };
+/* True and False are PyLongObjects (lv_tag and a digit, which the full API's PyLong macros read; queue 269) */
+struct pyi_long { long ob_refcnt; void *ob_type; unsigned long lv_tag; unsigned int digit[2]; };
 struct pyi_proxy _Py_NoneStruct = { 1, 0 };
-struct pyi_proxy _Py_TrueStruct = { 1, 0 };
-struct pyi_proxy _Py_FalseStruct = { 1, 0 };
+struct pyi_long _Py_TrueStruct = { 1, 0 };
+struct pyi_long _Py_FalseStruct = { 1, 0 };
 struct pyi_proxy _Py_EllipsisObject = { 1, 0 };
 struct pyi_proxy _Py_NotImplementedStruct = { 1, 0 };
 struct pyi_type PyType_Type = { 1, 0 };
