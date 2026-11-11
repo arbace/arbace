@@ -4988,3 +4988,133 @@ expansion would then end the whole expansion, where LLVM goes on with the body's
 - Rule slips: one `<(...)` process substitution (a `comm` early on) and one `2>/dev/null` in a monitor's command; `tostg.ae`
   edited while a probe run's front end could load it (the Prim-unit change, a no-op where the libraries hold Prim's stub, as the
   run's did); two lib-check runs started at once collided in `.tmp/repr-haskell/lib-check/iface2` (both stopped, rerun serially).
+
+## 2026-11-11: Scheme's AOT: compiled libraries installed in psyntax, SCS30 (a) (branch `scheme-scs30`, from `mac/next` `4b8fc77e3`)
+
+The user decided SCS29 (a) (the late constants' identities stay per compiled unit) and SCS30 (a): SC94 (b)'s other half, with a
+program of si's own as its proof. `si/eval-library` (a library with a counter, a record type and a macro; the program `eval`s in an
+environment naming it) failed compiled (`(2 0)`, then status 255: a second instance of the library), passes now, the golden the
+interpreted run's. Built: a library's global is the store's location of its gensym read by uid (`scm.AotLoc`, replacing the
+program-owned `NewLoc`), so eval's code finds the compiled library's variables; the dump gives each library `:info` (install-library's
+arguments, one late constant, so the `$rtd` bindings' syntax objects travel as SC90 (b)'s graph) and `:visit` (its visit code);
+`Install` after the libraries' runs calls psyntax's `install-library` with no-op invoke and the visit thunk, only in a program that
+links psyntax. Alternatives considered: running the library's invoke code from the thunk (the program already runs it at start:
+a second run would double the state), a visit-less install (the macro export would find an unset transformer), `library-spec` for the
+dependency check (not in psyntax's exports: the ids read from the record). Negative control `_control/eval-library-vs-data`. si-essential's
+and si-aot-essential's commands exit 0, `bin/reap` 0 problems, `bin/crops-score --judge --strict` 0; no key moves (all paths are
+crop paths). doc/scheme/SCHEME-SURVEY.md, "As built: SCS30".
+
+
+## 2026-11-11: AR8, `@AUTH`/`%pltpcrel`, arm64's `.reloc` order, NEON's integer lanes in a64i (branch `asm-ar8`, from `mac/next` `4b8fc77e3`)
+
+The user's decisions of 2026-11-11 (ARS49 (a), AXS93 for arm64, ARS48 (a); ARS50 (a) later, ARS51 (b), ARS52 (b)), in that order. On the
+main host, light; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources read again: llvm-project 23.1.5's
+AArch64AsmParser.cpp (parseDataExpr, parseExprWithSpecifier, parseAuthExpr), AArch64MCAsmInfo.cpp (parsePercentSpecifierName),
+AArch64ELFObjectWriter.cpp (getRelocType, sortRelocs), AArch64AsmBackend.cpp (applyFixup), ELFDumper.cpp (GNU style) and
+BinaryFormat/ELFRelocs/AArch64.def (FUNCINIT64 0x13d), Apache-2.0 WITH LLVM-exception; the Arm ARM DDI 0487's Advanced SIMD pseudocode.
+No code copied.
+- ARS49 (a): the reader takes a data directive's `@AUTH(...)` after the whole operand (parseDataExpr's order and messages) and `%NAME(E)`
+  in an instruction; a statement it refuses inside a conditional block becomes `(asm/unread TEXT MESSAGE)` (the option `:unread`,
+  arm64's), assembled as its error. Alternatives considered: the AUTH suffix at the primary as before (`7 + _g4@AUTH(...)` and the error
+  cases `sym@AUTH(...) + 1` would read as different expressions than LLVM's, and blanks before `@` refuse); a permissive reading of the
+  malformed suffixes (syntax the forms cannot hold). The object assembler: PLT32, GOTPCREL32, FUNCINIT64, AUTH_ABS64 with the signed
+  pointer's bits, the specifiers on every data directive; the object verdict: `--defsym`, readelf's GNU `-S -r -x`, the `%` column.
+  mc-aarch64-obj 107 → 110 of 110 byte for byte (with arm64's `:read-text` for AX11's macros), object verdict 2,781 → 2,819 of 2,832.
+- AXS93: arm64's `.reloc` merged by offset and PATCHINST put last by the new `:sort-relocs`. The wording "after the other relocations at
+  its offset" is corrected by LLVM's source and the test: sortRelocs is a stable partition of the whole section (patchinst: JUMP26,
+  JUMP26, PATCHINST, PATCHINST), built as LLVM does it.
+- ARS48 (a): `go/arbace/a64i/simd.go` written as Go, compiled and run first from the printed module (TamaGo's go), then converted by
+  repr/go's native reader into `simd.ae`; the five hooks hand-edited as forms (`decodeFP`'s SIMD space, `isFPOp`'s range, the names, the
+  family `simd`, `execFP` and `injectX`'s dispatch, `lower`'s SIMD forms first). The synthetic program `synth-neon` (1,769 cases) and its
+  model in `gen.ae`; qemu-aarch64 agreed with the model on every case after one model fix (`Math/abs` on a boxed long resolved to the
+  int overload on this host: an explicit absolute value), a64i on its first run, the forms check after one decoder fix (the scalar
+  shifts' Q). Coverage 653 → 1,358 of 1,358 claimed executed; a64i 84 → 85 programs; controls verdict-5, forms-3, inject-17, and the
+  object verdict's patchinst-vs-ptrauth, ptrauth-vs-specifier.
+- Results: the AOT cell 98.2% → 99.6% (3,047 / 0 / 13), read 6,648 / 0 / 8, print 12,658 / 5 / 8, eval 301; crops-score completeness
+  99.5 → 99.8; `bin/reap` 0 problems; no key moves (crop paths). amd64's shared-code checks (round trip musl and mc-asmparser, run-check,
+  the three object checks) rerun unchanged. Proposed ARS53-ARS55.
+- Rule slips: two commands used `<(...)` process substitution and one wrote to /dev/null (comparisons of scratch files, nothing they
+  produced was used).
+
+## 2026-11-11: AX12, the line program and the `--defsym` cases (branch `asm-ax12`, from `mac/next` `4ec952309`)
+
+The user decided (2026-11-11) AXS92 (a), the DWARF line program itself, and AXS94 (a), MC/X86's `--defsym` tests into the object corpus,
+the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's llvm-mc approved for these records only).
+
+- Sources read: llvm-project 23.1.5 (the pinned `.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, extracted into the worktree's `.tmp/`):
+  `llvm/lib/MC/MCDwarf.cpp`, `MCObjectStreamer.cpp`, `MCStreamer.cpp`, `MCAssembler.cpp`, `MCParser/AsmParser.cpp`, `MCContext.cpp`,
+  `llvm/lib/Target/X86/MCTargetDesc/X86ELFObjectWriter.cpp`; Apache-2.0 WITH LLVM-exception (already in LICENSE.md); no code copied.
+- AXS92 (a): `arbace.asm.obj` makes line entries where LLVM's MCDwarfLineEntry::make runs (instructions, emitBytes, emitValueImpl, a
+  `.loc` itself; not fills, `.org` or alignments), clears a seen `.loc` at a section change and `.popsection`, and writes `.debug_line`'s
+  program after the layout: one sequence per section in the order of its first entry, the state machine's changes, DW_LNE_set_address
+  with a pointer relocation for the first row, MCDwarfLineAddr::encode's advances from the final offsets (what the Dwarf fragments relax
+  to), DW_LNE_end_sequence at the section's end. Held by a new synthetic file `test/asm/obj/debug-line.s` (every opcode path); byte for
+  byte on the first run but one thing: an arm64 trial (by hand, not recorded) showed llvm-mc's minimum instruction length is 1 on AArch64
+  too, where AX11's header used arm64's code alignment 4; fixed for both. Alternative considered: Dwarf fragments relaxed with the code
+  (LLVM's way); not needed, `.debug_line` is written after the code's layout as `.eh_frame` is, and the bytes are the same.
+- AXS94 (a): MC/X86 has five files that use `--defsym`; two have object runs at x86-64: `intel-syntax-quote-reserved` (its object run
+  sets nothing; it was left out because another run of it uses `-defsym`) and `pltoff`'s error run (`--defsym ERR=1`, llvm-mc refuses it).
+  The list now keeps the first and adds the second as a case `pltoff@ERR=1` with its options; `object-record` records a `--defsym` case's
+  refusal (its diagnostics, the path as `<input>`, two runs equal) and the check holds Arbace's diagnostics to it line for line, with a new
+  negative control. For it the x86-64 relocation types report X86ELFObjectWriter's checkIs32/checkIs64 errors, and an instruction's fixups
+  carry their item's place; the diagnostics printer (ARS43 (a), arm64's) moved into the shared `arbace.asm.obj`. Alternatives considered:
+  recording every refusal (five more Mach-O/COFF files: AXS95, proposed); leaving error runs out (the one `--defsym` object run would not
+  have been taken).
+- Recorded by hand: `bin/repr-asm object-record synthetic` and `bin/repr-asm object-record mc-x86-obj` (`/usr/lib/llvm23/bin/llvm-mc
+  -triple x86_64-linux-musl -filetype=obj [--defsym ERR=1] FILE -o OUT`, each twice); every earlier object's bytes unchanged.
+- Proofs (stage 0, light, one at a time, each under 2 GiB; no gate): `object-check` musl 32 of 32, synthetic 8 of 8, mc-x86-obj 49 of 49
+  (six controls fail as they must; recorded); `run-check` 19 of 19 and five controls; `x86i-check` whole 43 of 44 (`{:cpuid 2}`, 8 min 29
+  s), unchanged; the round trip (musl, mc-asmparser, mc-x86) unchanged; arm64's `object-check` (a64-musl 13, a64-synthetic 3,
+  mc-aarch64-obj 110, all byte for byte), `object-verdict` (2,819 of 2,832, unchanged), `run-check` 17 of 17 and `bin/a64i check
+  --essential` 74 of 74, unchanged. `bin/reap` (recorded) 49 of 52 cells checked, 0 problems: x86-64 AOT 105 -> 108 / 0 / 0;
+  `bin/crops-score --record`, `--judge --strict` 0. No key moves (`arbace/asm/` and `bin/repr-asm` are crop paths or no key's:
+  `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
+- Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
+
+## 2026-11-11: review 1111's findings fixed (branch `review-fix-1`, from mac/next a7916bb2a)
+
+The independent review of the merges into next since 2026-11-11 00:00 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`: Haskell,
+Rust, OCaml, Scheme, LLVM), its eight findings, one commit each, in a light lane (stage 0 `/root/arbace/target/seed/amd64/arbace`,
+no gate, no host toolchain, no network). Notes in each crop's survey ("As built: review 1111's ...").
+1. **oi's `:init-order`** (go/arbace/oi.ae; doc/ocaml/OCAML-SURVEY.md): `stackWordsMode DepthLimit` after `blake2Sigma`, `finObjs` after
+   them, goi's checker's order. `bin/oi table-check` is embed-gaps' verb (not on next); its check ran as `test/python/table_check.ae` over
+   `arbace/oi` alone through a scratch wrapper (`.tmp/tc-oi.ae`: `arbace.go.table/program-path?` taking `arbace/oi`, and a copy of the
+   list naming it), tamago/amd64 and arm64, 0.7 GB, 1 min each. It found 12 more errors from OC216 (b45b8aa4f): `ext_sys.ae`'s weak.Make
+   and runtime.AddCleanup calls without `:inst`, `marshal.ae`'s `codePap` without `:val`: fixed in a commit of their own (annotations
+   only). With the annotations fixed and next's line: 1 error, the `:init-order`; with both fixed: none in either configuration.
+   oi-essential's command passes (59 of 59 on both paths; 50 min beside other runs, 1.1 GB); oi-divergences' four judgments pass.
+2. **A pattern guard's givens** (arbace/repr/haskell/typecheck.ae; doc/haskell/FRONTEND-SURVEY.md): the review's second fix (the
+   wanteds made before the pattern under the GRHS's atom keep a snapshot of their givens). Regression case
+   `test/haskell/eval/front/GuardGivens.hs` (a GADT clause and a signature's `a ~ Int`, each with an `eqTypeRep` guard) with a
+   hand-written expected output (GHC not run): next's elaborator prints True six times, the fix the expected output (run-check on one
+   program, 1 min, 1.2 GB). lib-check --ifaces own --judge (ghc-internal): 265 against 265, 0 worse, 0 better (21 min, 1.0 GB); lib-stg
+   --ifaces own --judge: 5,533 of 7,639, as recorded, 0 worse (21 min, 1.3 GB). The same aliasing between successive patterns of one
+   clause (`infer-matches`, pre-existing) is left. Alternative not taken: a fresh atom bound around the rest of the GRHS (`set!` of a
+   dynamic var bound only in infer-grhss; infer-guards is reached from elsewhere too).
+3. **core-attrs.edn's key** (bin/lib/repr-rust/core-build.bash): `mono.ae` and `arbace/repr/rust{.ae,/}` added. On rust-rf19's work
+   directory the old key equals its stored one, the new differs: the next rsi-build makes the file again (23 min, 2.3 GB).
+4. **ext-attrs' precedence** (arbace/rust/front/mono.ae; doc/rust/FRONTEND-SURVEY.md): for a path core-attrs.edn knows, ext-attrs without
+   RF13's once-named fallback, then the map. Over rust-rf19's 4,695 paths (18 min, 0.8 GB) 13 change, all the integers'
+   `core::cmp::impls::{impl#57..81}::clamp` (ord_impl!'s, `#[track_caller]`), which the fallback answered with bool's hand-written
+   `clamp`: the review's latent case, real. `bin/rust-front essential` equals its known file (38 min, 1.0 GB), `core-essential`
+   its own (13 min, 2.0 GB, before 18:45).
+5. **llvm-ind2's section rule** (bin/repr-llvm; doc/llvm/LLVM-CROP-SURVEY.md): XFAIL, `||`, llc's -start-after/-start-before/-run-pass,
+   llvm-link's --only-needed/--internalize and `--disable-verify=VALUE` leave a section on opt's record; the whole-file rule gains XFAIL
+   and the spellings. controls-test's fake tree: next's `bin/repr-llvm` judged the five new sections valid by their own verdict, the
+   branch none. llvm-read-essential's and llvm-print-essential's commands pass (43, 43, 4, 43), llvmi check --essential 10 of 10.
+6. **Float lanes' FMA** (go/arbace/hs/simd.ae; doc/haskell/HASKELL-EVAL-SURVEY.md): `fmaf` (musl's fmaf.c, already the scalar
+   `fmaddFloat#`'s), not `float32(math.FMA(...))`. A double-rounding case: 0x1.fb64e2p+0 * 0x1.78ee6p+0 + 0x1.e80002p-37. hsi builds,
+   T22296 passes, hsi-essential's command 123 programs, 0 unclassed (24 min, 0.4 GB).
+7. **fixes-1111's renames** (bin/llvmi rt-list's default, test/crops/independence.edn's evidence): `bin/llvmi rt-list` runs again.
+8. **`--o0-layout`'s unknown module** (arbace/repr/haskell/tostg.ae): another unit's, as `ext-str` names it; lib-stg above, 0 worse.
+
+- Checks at the end: haskell-read-essential's command (51 of 51 at both levels), LLVM's controls-test all ok (14 cases), `bin/reap`
+  49 of 52 cells checked, 0 problems, `bin/crops-score --record` leaves `test/crops/scores.edn` as it was, `--judge --strict` 0.
+- Keys: every changed path is a crop path or no key's; `bin/arbace-go --gate-key` 314c8e5b04ab... on next and on the branch,
+  `test/gate/gate-key-crops-test.bash` passes. No record changed.
+- Night commands (not run): RF19's night plan, whose rsi-build now makes core-attrs.edn again (findings 3, 4: 23 min,
+  2.3 GB, one process) and then rsi's synthetic corpus as RF19 measured it (63 min, 2.24 GB peak, RF11_BATCH=3), to see the integers'
+  clamp with #[track_caller].
+- Rule slips: one foreground command ran two table checks with a plain `&` and `wait`; one shell test used `<(...)`; the first LLVM
+  controls-test ran beside rust-front essential in the same fresh worktree and its llvmi cases failed on the shared `.tmp/ci-musl`
+  (a race, "no build line"; llvmi check --essential alone passed 10 of 10 after).

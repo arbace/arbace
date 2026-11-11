@@ -77,12 +77,12 @@
         (do (doseq [op (:mi r)] (when-let [e (:expr op)] (o/visit-syms! ctx e)))
             (when (:wait r) (o/bytes! ctx [0x9b]))
             (if (may-relax? (:inst r) (:mi r))
-              (do (o/add-chunk! (o/cur-sec ctx) (o/new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r}))
+              (do (o/add-chunk! (o/cur-sec ctx) (o/new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r :pos @(:pos ctx)}))
                   nil)
               (let [ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
                 (doseq [v (:bytes r)] (.add b (if (= v :fixup) 0 v)))
                 (doseq [[off size e kind pcrel adj] (:fixups r)]
-                  (.add ^java.util.ArrayList (:fixups @ch) [(+ base (long off)) size e kind pcrel adj])))))))))
+                  (.add ^java.util.ArrayList (:fixups @ch) (o/with-pos ctx [(+ base (long off)) size e kind pcrel adj]))))))))))
 
 (defn- needs-relax? [ctx c ^long stretch]
   (let [m @c]
@@ -122,21 +122,24 @@
               :branch) :32
              :none :none
              (case size 1 :8 2 :16 4 :32 8 :64))
-        bad (fn [] (o/unsupported :relocation (str spec " " rt)))]
+        bad (fn [] (o/unsupported :relocation (str spec " " rt)))
+        ;; X86ELFObjectWriter::checkIs32, checkIs64 and GOTOFF's check: LLVM's errors (AXS94 (a): MC/X86's pltoff with ERR)
+        is32 (fn [t] (if (= rt :32) t (o/fail "32 bit reloc applied to a field with a different size")))
+        is64 (fn [t] (if (= rt :64) t (o/fail "64 bit reloc applied to a field with a different size")))]
     (case spec
       (nil "ABS8") (case rt :64 (if pcrel 24 1) :32 (if pcrel 2 10) :32s 11 :16 (if pcrel 13 12) :8 (if pcrel 15 14))
       "GOT" (case rt :64 (if pcrel 29 27) :32 (if pcrel 26 3) (bad))
-      "GOTOFF" (if (= rt :64) 25 (bad))
+      "GOTOFF" (if (= rt :64) 25 (o/fail "unsupported relocation type"))
       "TPOFF" (case rt :64 18 :32 23 (bad))
       "DTPOFF" (case rt :64 17 :32 21 (bad))
       "SIZE" (case rt :64 33 :32 32 (bad))
       "TLSCALL" 35 "TLSDESC" (if (= kind :riprel-relax-rex2) 45 34)
-      "TLSGD" (if (= rt :32) 19 (bad)) "GOTTPOFF" (if (= rt :32) (case kind (:riprel-movq-load-rex2 :riprel-relax-rex2) 44 :riprel-relax-evex 50 22) (bad)) "TLSLD" (if (= rt :32) 20 (bad))
-      "PLT" (if (= rt :32) 4 (bad))
-      "GOTPCREL" (if (= rt :32) (case kind :riprel-relax 41 (:riprel-relax-rex :riprel-movq-load) 42
-                                         (:riprel-relax-rex2 :riprel-movq-load-rex2) 43 9) (bad))
-      "GOTPCREL_NORELAX" (if (= rt :32) 9 (bad))
-      "PLTOFF" (if (= rt :64) 31 (bad))
+      "TLSGD" (is32 19) "GOTTPOFF" (is32 (case kind (:riprel-movq-load-rex2 :riprel-relax-rex2) 44 :riprel-relax-evex 50 22)) "TLSLD" (is32 20)
+      "PLT" (is32 4)
+      "GOTPCREL" (is32 (case kind :riprel-relax 41 (:riprel-relax-rex :riprel-movq-load) 42
+                                    (:riprel-relax-rex2 :riprel-movq-load-rex2) 43 9))
+      "GOTPCREL_NORELAX" (is32 9)
+      "PLTOFF" (is64 31)
       (bad))))
 
 (defn- nops ^java.util.List [^long n ^long mode]
@@ -206,8 +209,10 @@
   [items & opts]
   (binding [o/*arch* arch] (apply o/assemble items opts)))
 
-(defn assemble-file [^String path]
-  (assemble (asm/read-items (asm/latin1 path) asm/amd64)))
+(defn assemble-file
+  "The object of the file at PATH; DEFSYM ([[SYM VALUE]...]): llvm-mc's --defsym (AXS94 (a))."
+  ([^String path] (assemble (asm/read-items (asm/latin1 path) asm/amd64)))
+  ([^String path defsym] (assemble (asm/read-items (asm/latin1 path) asm/amd64) {:defsym defsym})))
 
 (defn value [ctx e depth] (binding [o/*arch* arch] (o/value ctx e depth)))
 

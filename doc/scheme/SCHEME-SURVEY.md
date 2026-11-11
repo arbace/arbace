@@ -4521,3 +4521,42 @@ without by design), maturity and independence 100.
   see the program's own libraries as compiled. No program of the check does it. (a) Build it with a program of si's own that
   does (`(environment '(a user library))` in a compiled program) as its proof, in a later lane; (b) leave it decided and unbuilt.
   *Recommended: (a)*, a light day's work.
+
+## As built: SCS30, compiled libraries installed in psyntax (2026-11-11, branch `scheme-scs30`, from `mac/next` `4b8fc77e3`)
+
+The user's decisions of 2026-11-11: SCS29 (a) (the late constants' identities stay per compiled unit) and SCS30 (a): SC94 (b)'s
+other half, built with a program of si's own as its proof (no check program needs it). Before: a compiled program did not install
+its libraries in psyntax, so `(environment '(scs30 counter))` in it expanded and invoked the library's source a second time (or,
+off the library path, failed): `eval` saw a second instance with its own state and its own record types.
+
+- **The proof program** `si/eval-library` (`test/scheme/si/programs/eval-library.sps`, golden `golden/eval-library.out`; Larceny's
+  layout, `:libraries-first`): a library `(scs30 counter)` with a mutable counter, a record type and a macro (`twice`); the program
+  bumps the counter, then `eval`s in `(environment '(rnrs) '(scs30 counter))` the reads and writes of it, a `make-box` whose record
+  the program's `box?` accepts and the reverse, and the macro. Interpreted it printed `(2 2) (3 3) 5 5 (#t 7 #t)` already; compiled,
+  before: `(2 0) (2 1) 3 2` and then a status 255 (`#[box 7] is not of type #<record type box>`).
+- **The negative control** `_control/eval-library-vs-data` (`test/scheme/si/controls.edn`): eval-library's run judged against
+  `si/data`'s golden must give a differs item. The program is in both essential subsets.
+- **A library's globals are the store's locations** (`go/arbace/scm/aot.ae`, `scm.AotLoc`; `arbace/scheme/aot.ae`, `own-loc`): a
+  gensym global of a compiled library was a fresh location of the program's own (`NewLoc`, shared across the units by package
+  variables); it is now the store's location of its gensym read by uid (the constants' one object a uid), which is where the code
+  `eval` expands finds it. Each unit holds its own variable for it, set in the unit's setup.
+- **The install** (`scm.InstallAOTLibrary`): the dump gives each library unit `:info` (the data psyntax's `install-library` takes:
+  id, name, version, the dependencies as specs, subst, env, visible?, one constant of the unit, so the syntax objects in the
+  env (`$rtd` bindings) travel as late constants, SC90 (b)) and `:visit` (the visit code, its macros' transformers, forms of the same
+  unit: `Visit`). After the libraries' `Run`s and before the program's, `Install` calls `install-library` with the info, a no-op
+  invoke thunk (the library has run: the program invoked it at start) and the visit thunk, source file name false. A library whose
+  dependencies psyntax does not hold is not installed and stays on the library path as before; a library whose visit code the
+  compiler would newly refuse is compiled and not installed. Only a program that links psyntax (`needs-psyntax`: `eval`, `environment`,
+  late constants) installs: the others compile as before, so no program pays for it.
+- **Not built:** a library the program's expansion visits but does not invoke is not in the dump's library list, so not installed (left to the library path as before); SCS29 stays (a), per unit.
+
+| command | result |
+|---|---|
+| `bin/si check --aot --only si/eval-library` | before: status 255, `(2 0)` for `(2 2)`; after: passes, the golden's 5 lines |
+| `bin/si check --record --only si/eval-library`, `--aot --record --only si/eval-library` | both pass; the compiled run the same as the interpreted one |
+| si-essential's command (`bin/si unit`, `test --si`, `check --only test/scheme/essential-check.txt`, `r7rs`, `srfi`) | all exit 0; check 46 of 51 (was 45 of 50), 0 failing, the five controls differ as they must |
+| si-aot-essential's command (`check --aot --only test/scheme/essential-aot.txt`) | 14 of 14 the same as si's, 0 refused, exit 0; 13 of 14 pass (the rest the by-design `racket/base`) |
+| `bin/reap --record`, `bin/reap` | 0 problems (eval 2,827 -> 2,828 passes, AOT 47 -> 48); `bin/crops-score --record`, `--judge --strict` exit 0 |
+
+Keys: the changes are `arbace/scheme/` and `go/arbace/scm/` (both in `arbace_crop_paths`) and `test/scheme/`: no gate_key, runtime
+key or seed key moves (`test/gate/gate-key-crops-test.bash` passes). Only a program that links psyntax installs its libraries.

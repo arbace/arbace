@@ -2397,3 +2397,20 @@ verify-llvmtest (43) and verify-probes (4), 0 failing; expect-test 44 cases, 13 
 **Independence.** The judge stage 0.8455 to 0.8541 (2136 own, 880 recorded: independence 96.91 to 97.08; `test/crops/independence.edn`'s
 `:llvm :judge`, `scores.edn`). Left: the 478 probes (LLS48 (a)) and llvmi's 177 modules (LLS49 (a)), as decided, and 48 llvm/test
 modules on opt's record (41 whole files of split-file tests, 7 sections).
+
+## As built: review 1111's fixes, finding 5 and 7 (2026-11-11, branch `review-fix-1`, from mac/next a7916bb2a)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`, findings 5 and 7). **Finding 5**: LLS50's
+section rule gave `valid` to sections the tools may never verify, latent (none in the 147 parents of the pinned corpus). `section_verdict`
+now leaves a section on opt's record (`-`) when the parent is `XFAIL`, when a RUN line naming it has `||` (its failure allowed; the `|`
+split made the `opt %t/a.ll` part a command of its own), when llc starts after the IR verifier (`-start-after`, `-start-before`,
+`-run-pass`, TargetPassConfig's addIRPasses holding the verifier) and when llvm-link may drop the unused (`--only-needed`,
+`--internalize`: only the composite is verified); `--disable-verify` is matched in its `=VALUE` spellings too. The whole-file rule gains
+`XFAIL` and the same spellings. `test/repr/llvm/controls-test.bash`'s fake tree adds a parent `D/u.ll` (sections e: `|| true`, f:
+`--disable-verify=true`, g: `llc -start-after=codegenprepare`, h: `llvm-link --only-needed`) and an XFAIL parent `D/x.ll`: next's
+`bin/repr-llvm` judged all five `valid` by their own verdict ("5 by their own verdict, 0 opt's"), the branch's none ("0 by their own
+verdict, 5 opt's", failing for want of a record, as the case expects). **Finding 7**: `bin/llvmi rt-list`'s default record is
+`check-roundtrip-rt-linux-amd64.edn` (fixes-1111's name; the verb ran again, 252 modules; the committed `rt-builds.tsv` left as made),
+and `:llvm :read`'s evidence in `test/crops/independence.edn` names `check-verify-rt-linux-amd64.edn` (not scored).
+Checks: llvm-read-essential's and llvm-print-essential's commands (43, 43, 4 and 43 modules, 0 failing), `bin/llvmi check --essential` 10 of
+10, controls-test all ok (14 cases), `bin/reap` 0 problems, `bin/crops-score --judge --strict` 0, no record changed.

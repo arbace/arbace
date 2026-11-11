@@ -1187,3 +1187,81 @@ Numbering from ARS48. Each with options, the recommended named; none taken.
 - **ARS52 The memory programs in the essential subset.** The four memory families run in the rotation (`--full`). (a) add synth-lse
   (240 cases, the atomics: about 4 s) to `:a64i`; (b) keep the subset as ARS46 (b) set it. *Recommended: (b)*: the hand-written
   ldst/lse programs already stand in the essential step.
+
+## As built: AR8 (2026-11-11; branch `asm-ar8`, from `mac/next` `4b8fc77e3`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go, light (every check under 1 GiB, the conversion of `simd.go` by repr/go's
+native reader about 2 GiB); arm64 programs run by a64i and, for the synthetic program's `--record`, by qemu-aarch64 11.1.2 user mode (an
+emulation, the model's second judge); no LLVM or GNU tool. The user's answers (2026-11-11): ARS49 (a), AXS93 (arm64 adopts the merge by
+offset with PATCHINST after the other relocations), then ARS48 (a); ARS50 (a) later with the C packs, ARS51 (b), ARS52 (b). The semantics
+read again from llvm-project 23.1.5 (AArch64AsmParser's parseDataExpr, parseExprWithSpecifier and parseAuthExpr, AArch64MCAsmInfo's
+parsePercentSpecifierName, AArch64ELFObjectWriter's getRelocType and sortRelocs, AArch64AsmBackend::applyFixup's signed pointer,
+ELFDumper.cpp's GNU section headers and relocations; Apache-2.0 WITH LLVM-exception) and the Arm ARM's Advanced SIMD pseudocode (DDI 0487);
+no code copied.
+
+- **ARS49 (a): `@AUTH(...)` and `%NAME(...)`** (`arbace.repr.asm.gnu`, `arbace.asm.arm64.obj`): in AArch64's dialects a data directive's
+  `@AUTH(KEY,DISC[,addr])` is read after the whole operand, blanks allowed, as parseDataExpr reads it (`(at E AUTH [KEY DISC addr])`,
+  `+_g1@AUTH(ib,0)` the form `(at (+ _g1) AUTH [ib 0])`, printed `(+_g1)@AUTH(ib,0)` as llvm-mc prints it), parseAuthExpr's messages in
+  the reader; `%NAME(E)` in an instruction's operand too (LLVM's error there). A statement the reader refuses inside a conditional block
+  is kept as `(asm/unread TEXT MESSAGE)` (AsmParser only lexes an ignored block; assembled, the message is the error), so the error
+  tests' `.ifdef ERR` lines no longer refuse the file. The object assembler: `%pltpcrel` and `%gotpcrel` (R_AARCH64_PLT32,
+  GOTPCREL32 on a `.word`, the symbol kept; elsewhere LLVM's "can only be used in a .word directive"), `%funcinit` (FUNCINIT64),
+  `%dtprel` as before, `@AUTH` (AUTH_ABS64, the discriminator, key and address diversity written into the 8 bytes as applyFixup does),
+  every data directive's specifiers (`.quad`, `.long`, `.hword`, `.byte` too), a string operand as the symbol it names. The object
+  verdict: `--defsym NAME=VALUE` in a run (the assembler's `:defsym`: the error runs' `.ifdef ERR` assembled), llvm-readelf's GNU style
+  for `-S -r -x NAME` (GNUELFDumper's section headers, relocations and hex dump), the diagnostic's column at `%NAME`. With AX11's macros,
+  arm64's `:read-text` (macro-hex-int).
+- **AXS93: `.reloc`'s order.** arm64 sets `:reloc-directives-merged` (AX11's merge by offset, the section's own first on a tie) and the
+  arch's new `:sort-relocs` puts R_AARCH64_PATCHINST last. A correction to AXS93's wording: llvm-mc 23.1.5's AArch64ELFObjectWriter::sortRelocs
+  is a stable partition of the section's relocations, so every PATCHINST goes after every other relocation of the section, not only
+  after those at its offset; `patchinst` states it (JUMP26, JUMP26, PATCHINST, PATCHINST) and passes byte for byte and by its CHECK lines.
+- **ARS48 (a): NEON's integer lanes in a64i** (`go/arbace/a64i/simd.ae`, written as Go and converted by repr/go's native reader; the
+  hooks in `fp.ae`, `inst.ae`, `forms.ae` and `a64i.ae` hand-edited as forms): decoded, lowered from their forms (before the integer
+  core's, whose mnemonics they share) and executed lane by lane: three same (add, sub, and, bic, orr, orn, eor, bsl, bit, bif, cmeq,
+  cmgt, cmhi, cmge, cmhs, cmtst, s/umax, s/umin, the halving, rounding-halving, saturating (FPSR.QC) and absolute-difference ones,
+  saba, uaba, mul, mla, mls, addp, s/umaxp, s/uminp, sshl, ushl; the scalar forms on D and the saturating ones at every size; the
+  register compares' aliases), two-register miscellaneous (rev16/32/64, cls, clz, cnt, not/mvn, rbit, the compares with zero, abs,
+  neg, xtn/xtn2), across lanes (addv, s/umaxv, s/uminv, s/uaddlv), copy (dup element and general, umov, smov, ins general and element,
+  mov's aliases, the scalar dup), shift by immediate (sshr, ushr, ssra, usra, srshr, urshr, srsra, ursra, sri, shl, sli, shrn/shrn2,
+  sshll/ushll and sxtl/uxtl with their `2`; the scalar D forms), modified immediate (movi, mvni, orr, bic: lsl and msl, the 64-bit
+  byte masks), uzp1/2, trn1/2, zip1/2, ext, tbl and tbx of one to four registers, three different (s/uaddl, s/usubl, s/uaddw, s/usubw,
+  addhn, subhn, s/uabal, s/uabdl, s/umlal, s/umlsl, s/umull and their `2`). The family `simd`; the injected fault `simd:x` flips a
+  vector result's lowest bit (a general one's for umov and smov). Not built (`:unimplemented simd`): the FP lanes, the polynomial and
+  doubling multiplies, the by-element forms, the saturating shifts and narrows, the loads and stores of structures (LD1-LD4, ST1-ST4).
+- **The synthetic program** `synth-neon` (`test/asm/a64i/gen.ae`'s family `neon`, 1,769 cases): v1 and v2 loaded by `ldr q` from the
+  row, v0 their mix (the accumulating forms' and INS's destination), FPSR cleared; v0's halves and FPSR (QC) checked. The model is the
+  pseudocode lane by lane on longs (unsigned compares by Long/compareUnsigned, the 64-bit saturation by BigInteger), written apart from
+  a64i's Go. `--record` ran it under qemu-aarch64 first: every case agreed once the model's `Math/abs` (which the host's reflection took
+  as `abs(int)` on a boxed long: twelve cases) became an explicit absolute value; a64i agreed (eval and AOT) on its first run, the forms
+  check once the scalar shifts' Q bit was cleared in the decoder (22 forms). Controls verdict-5, forms-3, inject-17. `synth-neon` runs in
+  `--full`'s rotation (ARS46 (b)'s subset unchanged).
+
+| check | before | after |
+|---|---|---|
+| object-check `mc-aarch64-obj` (llvm-mc's objects byte for byte) | 107 of 110 | **110 of 110** (`@AUTH`, `%pltpcrel`, `.macro`) |
+| object-verdict (MC/AArch64's object runs' CHECK lines) | 2,781 of 2,833 | **2,819 of 2,832** (`:unsupported-syntax` 38 → 0; macro-hex-int's line now the decoder's text, beside) |
+| the round trip (arm64) | mc-aarch64 400 of 409 | **402 of 409** (data-directive-specifier, elf-reloc-ptrauth) |
+| `bin/a64i check` eval and AOT | 84 / 84 | **85 / 85** (13 synthetic programs, 15,874 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 653 of 653 claimed executed | **1,358 of 1,358** (705 Advanced SIMD names) |
+| controls (`test/asm/controls-a64i.txt`, `controls-objverdict-arm64.txt`) | 33, 4 | **36, 6** |
+| the AOT cell `[:asm-arm64 :aot]` | 3,005 / 0 / 55 (98.2%) | **3,047 / 0 / 13 (99.6%)** |
+| the read and print cells | 6,646 / 0 / 10; 12,656 / 5 / 10 | **6,648 / 0 / 8; 12,658 / 5 / 8**; eval 300 → 301 |
+
+**crops-score** (arm64 assembly): completeness 99.5 → **99.8** (99.8 without by design), maturity 100.0, independence 100.0; `--judge
+--strict` 0 problems. `bin/reap --record`: 49 of 52 cells checked, 0 problems. `a64i-essential`'s programs are unchanged (the subset);
+the synthetic programs' generation grew by `synth-neon` (all thirteen written in 3.3 s, 0.2 GiB); measured 1 min 6 s under a load of
+10-11 on this host (AR7's 36 s at a quiet hour). The keys do not move: every path is in `arbace_crop_paths`
+(`test/gate/gate-key-crops-test.bash` passes). The AOT cell's classes left: `:view-llvm-dwarfdump` 9, `:filecheck-var` 2, `:no-viewer` 1,
+`:unsupported-literal-pool` 1 (ARS50).
+
+### Proposed (AR8)
+
+Numbering from ARS53. Each with options, the recommended named; none taken.
+
+- **ARS53 NEON's next slice.** (a) the loads and stores of structures (LD1-LD4, ST1-ST4, LD1R, the single-lane forms), what compiled C's
+  memcpy and memset use, with a synthetic family over the memory programs' buffer; (b) the FP lanes first (the model's Java arithmetic
+  per lane, FPCR's modes); (c) the by-element multiplies and the saturating shifts and narrows. *Recommended: (a)*, then (b).
+- **ARS54 `(asm/unread ...)` for every dialect.** The refused statement kept as text inside a conditional block is AArch64's option
+  (`:unread`). (a) x86-64's AT&T and Intel too (the amd64 round trip's error tests re-recorded); (b) arm64 alone. *Recommended: (a)*.
+- **ARS55 The VM's rows of `synth-neon`.** (a) a queue task: the CPU's runs and the lockstep (V0-V31 and FPSR in the step mode, ARS44's
+  extension) of `synth-neon` on the Mac VM; (b) left to the VM's next run of ARS44. *Recommended: (b)*.
