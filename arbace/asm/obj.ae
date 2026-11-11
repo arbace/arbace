@@ -514,6 +514,42 @@
               (set32! len-at (- (.size b) fde-start))
               (recur (rest frs) kk cie-start (inc k)))))))))
 
+;; llvm::sys::path's filename and parent_path at the POSIX style (lib/Support/Path.cpp: filename_pos, root_dir_start,
+;; parent_path_end, reverse_iterator), for tryGetFile's split of a NAME with no directory (review 1111 (7))
+(defn- path-sep? [c] (= \/ c))
+
+(defn- path-filename-pos ^long [^String s]
+  (let [n (count s)]
+    (if (and (pos? n) (path-sep? (.charAt s (dec n))))
+      (dec n)
+      (let [pos (.lastIndexOf s "/" (int (dec n)))]
+        (if (or (neg? pos) (and (= pos 1) (path-sep? (.charAt s 0)))) 0 (inc pos))))))
+
+(defn- path-root-dir-start [^String s]
+  (let [n (count s)]
+    (cond (and (> n 3) (path-sep? (.charAt s 0)) (= (.charAt s 0) (.charAt s 1)) (not (path-sep? (.charAt s 2))))
+          (let [i (.indexOf s "/" 2)] (when-not (neg? i) i))
+          (and (pos? n) (path-sep? (.charAt s 0))) 0
+          :else nil)))
+
+(defn path-filename
+  "sys::path::filename: the last component, `.` after a trailing separator (not the root's), the root itself for `/`."
+  ^String [^String p]
+  (let [n (count p) rd (path-root-dir-start p)
+        end (long (loop [e n] (if (and (pos? e) (not= (dec e) rd) (path-sep? (.charAt p (dec e)))) (recur (dec e)) e)))]
+    (if (and (pos? n) (path-sep? (.charAt p (dec n))) (or (nil? rd) (zero? end) (> (dec end) (long rd))))
+      "."
+      (subs p (path-filename-pos (subs p 0 end)) end))))
+
+(defn path-parent
+  "sys::path::parent_path: before the last component, its separators dropped but the root directory's."
+  ^String [^String p]
+  (let [end0 (path-filename-pos p)
+        was-sep (and (pos? (count p)) (path-sep? (.charAt p end0)))
+        rd (path-root-dir-start p)
+        end (long (loop [e end0] (if (and (pos? e) (or (nil? rd) (> e (long rd))) (path-sep? (.charAt p (dec e)))) (recur (dec e)) e)))]
+    (if (and rd (= end (long rd)) (not was-sep)) (subs p 0 (inc (long rd))) (subs p 0 end))))
+
 (defn dwarf-file!
   "`.file N \"NAME\"` or `.file N \"DIR\" \"NAME\"` (AsmParser::parseDirectiveFile, MCDwarfLineTableHeader::tryGetFile at
   DWARF 4, llvm-mc's default): a NAME with a directory and no DIR split into both, the directory numbered from 1 in the order
@@ -521,8 +557,10 @@
   [ctx [n & ss]]
   (let [[d nm] (if (= 2 (count ss)) ss ["" (first ss)])
         ^String nm nm ^String d d
+        ;; tryGetFile: filename and parent_path (`/x.c`: the directory `/`; review 1111 (7))
         [d nm] (if (= "" d)
-                 (let [i (.lastIndexOf nm "/")] (if (pos? i) [(subs nm 0 i) (subs nm (inc i))] ["" nm]))
+                 (let [f (path-filename nm)]
+                   (if (= "" f) ["" nm] (let [pd (path-parent nm)] (if (= "" pd) ["" nm] [pd f]))))
                  [d nm])
         ^java.util.ArrayList dirs (:dwarf-dirs ctx)
         di (if (= "" d) 0 (let [i (.indexOf dirs d)] (if (neg? i) (do (.add dirs d) (.size dirs)) (inc i))))
