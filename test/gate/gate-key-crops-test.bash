@@ -37,7 +37,7 @@ grep -q '^gate_rest_key() {' "$d/fns.bash" && grep -q '^arbace_embedded_sources(
   || { echo "FAIL: gate_key, gate_rest_key, arbace_embedded_sources or arbace_embedded_resources not found"; exit 1; }
 
 excluded="bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/crops/c2j-check bin/lib/hsi/check bin/lib/si/x bin/lib/pyi/x
-go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae
+go/arbace/hs.ae go/arbace/hs/machine.ae go/arbace/oicapi.ae go/arbace/oicapi/x.ae go/arbace/expat.ae go/arbace/pyexpat/x.ae go/arbace/clib/x.ae go/arbace/pyctypes.ae go/arbace/pyctypes/x.ae
 jdk/ocaml/ocaml/rt.ae jdk/ocaml/ocaml/rt/NInt.ae
 arbace/repr/cpp/ncheck.ae arbace/repr/cpp/tcheck.ae arbace/repr/llvm/mutate.ae arbace/rust.ae arbace/rust/x.ae arbace/llvm/run.ae
 arbace/repr/ocaml.ae arbace/repr/ocaml/print.ae arbace/repr/haskell.ae arbace/repr/rust/x.ae
