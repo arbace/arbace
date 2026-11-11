@@ -1194,6 +1194,115 @@
 (def neon-families
   [["neon" "the Advanced SIMD integer lanes: three same (add, sub, the logic and bitwise selects, the compares, max, min, the halving, saturating and absolute-difference ones, mul, mla, mls, the pairwise ones, sshl, ushl; vector and scalar), two-register miscellaneous (rev16/32/64, cls, clz, cnt, not, rbit, the compares with zero, abs, neg, xtn), across lanes (addv, s/umaxv, s/uminv, s/uaddlv), dup, umov, smov, ins and mov's aliases, the shifts by immediate (sshr, ushr, the accumulating and rounding ones, sri, shl, sli, shrn, sshll, ushll, sxtl, uxtl), movi, mvni, orr, bic by immediate, uzp, trn, zip, ext, tbl, tbx, the long, wide and narrow forms" neon-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the Advanced SIMD loads and stores of structures (AR9, ARS53 (a)): LD1-LD4 and ST1-ST4 of multiple structures (LD1's and ST1's
+;; one to four registers), of a single structure (a lane), LD1R-LD4R, each with no offset, a post-index immediate and a post-index
+;; register (x2). A 128-byte buffer of sixteen words made from the row (x3, x1, x9: w(k) = w(k-1) ^ ror(w(k-3), 13)), v0-v3 and
+;; v28-v31 loaded from it (the lists start at v0-v3 or wrap from v28-v31); the stub moves x4 from the buffer's start by its offset
+;; and runs the instruction; check stores v0-v3 and v28-v31 after the buffer and folds them into x0, the buffer and x4's distance
+;; from the start into x12. The model: the pseudocode's element loop on bytes (Mem[] and Elem[] little endian), the registers'
+;; upper halves cleared by a 64-bit load, a lane's load keeping the rest.
+
+(defn- vm-words [^long x3 ^long x1 ^long x9]
+  (loop [ws [x3 x1 x9]]
+    (if (= 16 (count ws)) ws
+        (let [k (count ws)] (recur (conj ws (bit-xor (long (ws (dec k))) (Long/rotateRight (long (ws (- k 3))) 13))))))))
+
+(defn- vm-bytes [ws] (vec (for [w ws i (range 8)] (bit-and (bit-shift-right (long w) (* 8 i)) 0xff))))
+(defn- vm-word ^long [bs ^long i] (reduce (fn [acc j] (bit-or acc (bit-shift-left (long (bs (+ (* 8 i) j))) (* 8 j)))) 0 (range 8)))
+(defn- vm-fold
+  "check's fold of sixteen words: h = w1 ^ ror(w0, 7), then h = w ^ ror(h, 7) for w2..w15."
+  ^long [bs]
+  (reduce (fn [h i] (bit-xor (vm-word bs i) (Long/rotateRight (long h) 7))) (bit-xor (vm-word bs 1) (Long/rotateRight (vm-word bs 0) 7)) (range 2 16)))
+
+(def ^:private vm-regs [0 1 2 3 28 29 30 31])
+
+(defn vm-model
+  "The model of one structure load or store: [x0 x12] after it (the registers' fold, the buffer's fold with x4's distance).
+  c: {:kind :m|:s|:r, :ld? bool, :selem n, :rpt n, :first REG, :size log2, :q bool, :idx lane, :k base offset, :wb writeback}."
+  [c ^long x3 ^long x1 ^long x9]
+  (let [{:keys [kind ld? selem rpt first size q idx k wb]} c
+        mem0 (vm-bytes (vm-words x3 x1 x9))
+        regs0 (into {} (for [[i r] (map-indexed vector vm-regs)] [r (subvec mem0 (* 16 i) (* 16 (inc i)))]))
+        eb (bit-shift-left 1 (long size)) elems (quot (if q 16 8) eb)
+        st (volatile! {:mem mem0 :regs regs0 :offs 0})
+        elem! (fn [t e]
+                (let [{:keys [mem regs offs]} @st a (+ (long k) (long offs))]
+                  (vreset! st {:offs (+ (long offs) eb)
+                               :mem (if ld? mem (reduce (fn [m j] (assoc m (+ a j) ((regs t) (+ (* (long e) eb) j)))) mem (range eb)))
+                               :regs (if ld? (assoc regs t (reduce (fn [r j] (assoc r (+ (* (long e) eb) j) (mem (+ a j)))) (regs t) (range eb))) regs)})))
+        clear-hi (fn [t] (vswap! st update-in [:regs t] (fn [r] (into (subvec r 0 8) (repeat 8 0)))))
+        reg (fn [i] (mod (+ (long first) (long i)) 32))]
+    (case kind
+      :m (do (doseq [r (range rpt) e (range elems) s (range selem)] (elem! (reg (+ r s)) e))
+             (when (and ld? (not q)) (doseq [i (range (* (long rpt) (long selem)))] (clear-hi (reg i)))))
+      :s (doseq [s (range selem)] (elem! (reg s) idx))
+      :r (doseq [s (range selem)]
+           (let [{:keys [mem offs]} @st a (+ (long k) (long offs)) bs (subvec mem a (+ a eb))]
+             (vswap! st assoc :offs (+ (long offs) eb))
+             (vswap! st assoc-in [:regs (reg s)] (vec (take 16 (concat (apply concat (repeat elems bs)) (repeat 0))))))))
+    (let [{:keys [mem regs]} @st]
+      [(vm-fold (vec (mapcat regs vm-regs)))
+       (bit-xor (+ (long k) (long wb)) (Long/rotateRight (vm-fold mem) 7))])))
+
+(defn- vm-arr [size q] (str (* (if q 2 1) (bit-shift-right 8 (long size))) (nth "bhsd" size)))
+
+(defn vm-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        arrs (for [size (range 4) q [false true]] [size q])
+        firsts (fn [n] (vec (concat [28 29 30 31] (range 0 (- 5 (long n))))))
+        lst (fn [fr n t range?]
+              (if range?
+                (str "{v" fr "." t "-v" (mod (+ (long fr) (dec (long n))) 32) "." t "}")
+                (str "{" (str/join ", " (for [i (range n)] (str "v" (mod (+ (long fr) i) 32) "." t))) "}")))
+        kinds (concat
+               (for [ld? [true false] [selem rpt] [[1 1] [1 2] [1 3] [1 4] [2 1] [3 1] [4 1]] [size q] arrs
+                     :when (not (and (= size 3) (not q) (> selem 1)))]
+                 {:kind :m :ld? ld? :selem selem :rpt rpt :size size :q q :total (* rpt selem (if q 16 8))})
+               (for [ld? [true false] selem [1 2 3 4] size (range 4)]
+                 {:kind :s :ld? ld? :selem selem :rpt 1 :size size :q false :total (* selem (bit-shift-left 1 size))})
+               (for [selem [1 2 3 4] [size q] arrs]
+                 {:kind :r :ld? true :selem selem :rpt 1 :size size :q q :total (* selem (bit-shift-left 1 size))}))]
+    (for [c kinds mode [:off :post :postr] _ (range 2)]
+      (let [{:keys [kind ld? selem rpt size q total]} c
+            n (* (long selem) (long rpt))
+            fr (let [fs (firsts n)] (fs (mod (nx) (count fs))))
+            k (mod (nx) (- 129 (long total)))
+            idx (mod (nx) (quot 16 (bit-shift-left 1 (long size))))
+            x2 (- (mod (nx) 1025) 512)
+            x1 (nx) x3 (nx) x9 (nx)
+            range? (and (= kind :m) (= selem 1) (> n 1) (<= (+ (long fr) n) 32) (odd? (nx)))
+            mn (str (if ld? "ld" "st") selem (when (= kind :r) "r"))
+            regs (case kind
+                   :s (str (lst fr n (nth ["b" "h" "s" "d"] size) false) "[" idx "]")
+                   (lst fr n (vm-arr size q) range?))
+            addr (case mode :off "[x4]" :post (str "[x4], #" total) :postr "[x4], x2")
+            wb (case mode :off 0 :post total :postr x2)
+            [res fl] (vm-model (assoc c :first fr :idx idx :k k :wb wb) x3 x1 x9)]
+        {:insn (str "add\tx4, x4, #" k "\n\t" mn "\t" regs ", " addr "\n")
+         :x1 x1 :x2 x2 :x3 x3 :nzcv x9 :res res :flags fl}))))
+
+(def vm-setup
+  (str "\tadrp\tx13, vbuf\n\tadd\tx13, x13, :lo12:vbuf\n\tmov\tx5, x3\n\tmov\tx6, x1\n\tmov\tx7, x9\n"
+       (apply str (for [i (range 16)]
+                    (str "\tstr\tx5, [x13, #" (* 8 i) "]\n\teor\tx8, x7, x5, ror #13\n\tmov\tx5, x6\n\tmov\tx6, x7\n\tmov\tx7, x8\n")))
+       "\tldp\tq0, q1, [x13]\n\tldp\tq2, q3, [x13, #32]\n\tldp\tq28, q29, [x13, #64]\n\tldp\tq30, q31, [x13, #96]\n"
+       "\tmov\tx4, x13\n\tmov\tx0, #0\n"))
+
+(defn- vm-fold-text [r off]
+  (str "\tldp\tx14, x15, [x13, #" off "]\n\teor\t" r ", x15, x14, ror #7\n"
+       (apply str (for [i (range 1 8)]
+                    (str "\tldp\tx14, x15, [x13, #" (+ (long off) (* 16 i)) "]\n\teor\t" r ", x14, " r ", ror #7\n\teor\t" r ", x15, " r ", ror #7\n")))))
+
+(def vm-flags-text
+  (str "\tadrp\tx13, vbuf\n\tadd\tx13, x13, :lo12:vbuf\n"
+       "\tstp\tq0, q1, [x13, #128]\n\tstp\tq2, q3, [x13, #160]\n\tstp\tq28, q29, [x13, #192]\n\tstp\tq30, q31, [x13, #224]\n"
+       (vm-fold-text "x0" 128) (vm-fold-text "x12" 0)
+       "\tsub\tx14, x4, x13\n\teor\tx12, x14, x12, ror #7\n"))
+
+(def vm-families
+  [["neon-ldst" "the Advanced SIMD loads and stores of structures: ld1-ld4, st1-st4 (multiple structures, ld1 and st1 of one to four registers, every arrangement; a single structure's lane, b, h, s, d), ld1r-ld4r, with no offset, a post-index immediate and a post-index register" vm-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -1223,6 +1332,12 @@
          ;; AR8: the Advanced SIMD integer lanes
          (for [[i [nm what f]] (map-indexed vector neon-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 300 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR9: the Advanced SIMD loads and stores of structures
+         (for [[i [nm what f]] (map-indexed vector vm-families)
+               :let [text (str (looped nm what vm-setup vm-flags-text (vec (f (rng (+ seed 400 i)))) :insn)
+                               "\n// the buffer and the registers' place\n\t.bss\n\t.p2align\t4\nvbuf:\t.zero\t256\n")]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)])))))
 
