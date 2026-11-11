@@ -717,13 +717,31 @@
        (or (:extern v) (= :member-static (:storage v)))
        (not (tls-defined-here? nm))))
 
+(defn- tls-via-wrapper?
+  "Whether a use of the variable `v` (symbol `nm`) outside __tls_init goes through its thread-local wrapper _ZTW: one this
+  unit initializes dynamically, or one defined in another unit (tls-wrapped-elsewhere?)."
+  [v ^String nm]
+  (boolean (and (:tls v) (#{:global :member-static} (:storage v))
+                (or (and (not *in-tls-init*) (some #(= nm (second %)) (:tls-dyn @*top*)))
+                    (tls-wrapped-elsewhere? v nm)))))
+
+(defn- tls-wrapper-ret
+  "CP371 (a): the instructions that return a thread-local wrapper's value from the variable's address `%t`: the address, or
+  for a reference the referent's, loaded (clang's ItaniumCXXABI::EmitThreadLocalInitFuncs: `if
+  (VD->getType()->isReferenceType()) Val = CreateAlignedLoad(...)`; its users take the call's value as the referent's address,
+  EmitThreadLocalVarDeclLValue)."
+  [ref? t]
+  (if ref?
+    [(list '= '%tr (list 'load 'ptr ['ptr t] :align 8)) '(ret ptr %tr)]
+    [(list 'ret 'ptr t)]))
+
 (defn- extern-tls-wrapper!
   "review 1111 #1: the wrapper of the thread-local variable `nm` defined in another unit (clang's
   ItaniumCXXABI::EmitThreadLocalInitFuncs for a variable this unit does not define): _ZTW, linkonce_odr and hidden (the
   defining unit's weak_odr one wins at link), calling the init function _ZTH, declared extern_weak (absent when the defining
   unit needs no dynamic initialization of its thread-local variables), when it is there, then returning the variable's
   address in this thread. Once per unit."
-  [^String nm]
+  [^String nm ref?]
   (when-not (contains? (:tls-ext @*top*) nm)
     (swap! *top* update :tls-ext (fnil conj #{}) nm)
     (let [w (tls-wrapper-name nm) th (str "_ZTH" (subs w 4))]
@@ -737,9 +755,9 @@
                              (list 'block '%init
                                    (list 'call 'void (gsym th) [])
                                    (list 'br '%exit))
-                             (list 'block '%exit
-                                   (list '= '%t2 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
-                                   '(ret ptr %t2))])))))
+                             (apply list 'block '%exit
+                                    (list '= '%t2 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
+                                    (tls-wrapper-ret ref? '%t2))])))))
 
 (defn- var-addr [id]
   (or (get-in @*f* [:addr id])
@@ -764,7 +782,7 @@
                                        ;; (review 1111 #1: a thread-local variable defined in another unit, whose dynamic
                                        ;; initialization is that unit's: through the discardable wrapper clang writes for it)
                                        (tls-wrapped-elsewhere? v nm)
-                                       (do (extern-tls-wrapper! nm)
+                                       (do (extern-tls-wrapper! nm (abi/ref? (:ty v)))
                                            (val! (list 'call 'ptr (gsym (tls-wrapper-name nm)) [])))
                                        :else (gsym nm)))
           :static-local (gsym (abi/mangle-local-static (sema/fnd (:fn-of v)) (:name v) (long (:disc v))))
@@ -1297,6 +1315,11 @@
                          (:e gi))))]
             (cond
               cv (emit-rv (assoc cv :ty (:ty e)))
+              ;; CP371 (a): a thread-local reference read through its wrapper, which returns the referent's address
+              (and (:raw x) (= :var (:op x))
+                   (let [v (sema/var* (:id x))]
+                     (and (abi/ref? (:ty v)) (#{:global :member-static} (:storage v)) (tls-via-wrapper? v (abi/mangle-var v)))))
+              (var-addr (:id x))
               (:raw x)
               (val! (list 'load 'ptr ['ptr (if (= :var (:op x)) (var-addr (:id x)) (emit-lv x))] :align 8))
               :else (load! (:ty e) (emit-lv x))))
@@ -2849,10 +2872,10 @@
          (let [w (tls-wrapper-name nm)]
            (add-top! (apply list 'llvm/define (gsym w) 'ptr []
                             (concat (if (tls-internal? (sema/var* id)) [:linkage :internal] [:linkage :weak_odr :visibility :hidden])
-                                    [:body [(list 'block nil
-                                                  (list 'call 'void (gsym (str "_ZTH" (subs w 4))) [])
-                                                  (list '= '%t1 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
-                                                  '(ret ptr %t1))]]))))))
+                                    [:body [(apply list 'block nil
+                                                   (list 'call 'void (gsym (str "_ZTH" (subs w 4))) [])
+                                                   (list '= '%t1 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
+                                                   (tls-wrapper-ret (abi/ref? (:ty (sema/var* id))) '%t1))]]))))))
      (when (seq @entries)
        (add-top! (list 'llvm/global (gsym "llvm.global_ctors") (list 'array (count @entries) '(struct i32 ptr ptr))
                        (apply list 'array (for [[prio nm] @entries] ['(struct i32 ptr ptr) (list 'struct ['i32 prio] ['ptr (gsym nm)] ['ptr 'null])]))
