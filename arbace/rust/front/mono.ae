@@ -1374,12 +1374,24 @@
 
 (defn- item-name-of [d] (if (number? d) (str (second (:data (c/def-of d)))) (c/path-name d)))
 
+(def ^:dynamic *upstream*
+  "RF18 (RFP63 (a)'s reader): std's exported generic instances, {[DEF ARGS] SYMBOL} (DEF std's path, ARGS erased): an instance
+  an upstream crate already exports is that crate's (Instance::upstream_monomorphization), its symbol the upstream one, never
+  instantiated in the program's crate; nil without the list (load-upstream)"
+  nil)
+
+(defn upstream-symbol
+  "RF18: the upstream crate's symbol of the instance of D at ARGS when *upstream* lists it, else nil"
+  [d args]
+  (when (and *upstream* (string? d)) (get *upstream* [d (erase-regions (vec args))])))
+
 (defn instance-symbol
   "symbol_name: the attributes' names (a weak lang item's link name, rustc_std_internal_symbol's, export_name, no_mangle),
   else v0 at the instance's arguments, with the instantiating crate when generic or globally shared with conflicts"
-  [{:keys [def args] :as inst}]
+  [{:keys [def args shim] :as inst}]
   (let [{:keys [names]} (attrs-of def)]
-    (cond (weak-link names) (mangle-internal (weak-link names))
+    (cond (and (not shim) (upstream-symbol def args)) (upstream-symbol def args)
+          (weak-link names) (mangle-internal (weak-link names))
           (names "rustc_std_internal_symbol") (mangle-internal (item-name-of def))
           (names "no_mangle") (item-name-of def)
           :else (v0-mangle def args (or (non-erasable? args) (and (#{"Fn" "AssocFn" "Closure"} (def-kind def)) (may-conflict? inst)))))))
@@ -1623,7 +1635,7 @@
         (cond-> {:kind (or shim "item") :symbol (instance-symbol (cond-> {:def d :args args} shim (assoc :shim shim))) :def (print-path d)
                  :can-unwind (and (not (names "rustc_nounwind")) (boolean (or (#{"Rust" "rust-call" "rust-cold" ""} abi) (re-find #"unwind" abi))))
                  :track-caller (boolean (names "track_caller"))}
-          (and (not shim) (not (mir-available? d))) (assoc :external true))))))))
+          (and (not shim) (or (not (mir-available? d)) (upstream-symbol d args))) (assoc :external true))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the record's type forms as types (for the layouts of the types core's bodies use), and the types' texts
@@ -1711,6 +1723,18 @@
                   :else (or (try (dyn-fn-sugar (str (second f))) (catch Throwable _ nil))
                             (throw (ex-info (str "mono: the type form " (pr-str f)) {:fact :layout})))))
       (throw (ex-info (str "mono: the type form " (pr-str st)) {:fact :layout})))))
+
+(defn load-upstream
+  "RF18 (RFP63 (a)'s reader): FILE (the helper's --std-exports dump, the night's: a vector of {:def PATH :args [TYPE-FORM ...]
+  :symbol S :crate C}, the arguments as the records write types) as *upstream*'s map; nil when FILE is nil or absent, an entry
+  whose arguments form->ty does not read left out"
+  [file]
+  (when (and file (.exists (java.io.File. ^String file)))
+    (into {} (for [e (read-string (slurp file))
+                   :let [args (try (erase-regions (mapv (fn [f] (if (and (seq? f) (= 'lt (first f))) [:re-erased] (form->ty f))) (:args e)))
+                                   (catch Throwable _ nil))]
+                   :when args]
+               [[(:def e) args] (:symbol e)]))))
 
 (defn- text-of [t]
   (if (= :pat-notnull (first t)) (str "(" (text-of (second t)) ") is !null") (build/ty-text t)))
@@ -2104,7 +2128,8 @@
                                     :let [[cd args] (let [[_ cd args] ft]
                                                       ;; RF14: a trait method's instance by its impl (the record's when mono refuses it)
                                                       (if (trait-method? cd) (or (try (resolve-instance cd (erase-regions args)) (catch Throwable _ nil)) [cd args]) [cd args]))]
-                                    :when (and (string? cd) (not (intrinsic? cd)) (mir-available? cd))]
+                                    ;; RF18 (RFP63 (a)): an upstream crate's instance is linked, not instantiated
+                                    :when (and (string? cd) (not (intrinsic? cd)) (mir-available? cd) (not (upstream-symbol cd args)))]
                                 {:def cd :args (erase-regions args)}))
           ;; {body-name [[TARGET-TEXT vtable-or-error] ...]} in the body's order (the runtime body's casts take them in turn)
           ;; (RF16: each with its source's text, so a promoted constant's cast, which PromoteTemps moved out of the body, takes
