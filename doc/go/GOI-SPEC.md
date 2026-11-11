@@ -720,7 +720,9 @@ flow, calls, defer and select.
 interpreted interface type, §5.2), and for other types, a compiled non-empty interface (`error`,
 `io.Reader`: its memory holds an itab, not a type) among them, `reflect.NewAt(RT(T), p).Elem()`'s
 typed copy (`Set`), never an untyped copy, so Go's garbage collector's write barriers apply to
-every pointer stored (S25). A field read from a struct value
+every pointer stored (S25). Since P7 (2026-11-10, "Since v1: loads and stores by their words") a value
+whose Go memory is its interface value's words skips reflect: a pointer-shaped kind, a slice, an empty
+interface, and a compiled non-empty interface's load. A field read from a struct value
 held in an `R` (a box, §5.1) reads through the box's address and copies nothing. Reflect's field
 access is not used for fields: it costs 7.8 ns against 0.6 ns for an offset (X2), and it refuses
 unexported fields (X1).
@@ -5070,6 +5072,41 @@ the check needs them: `bloop.go`'s are on a line whose `// ERROR ".*"` takes any
 58 pass (`bloop` and `escape_bloop` beside the 56), 0 fail, 3 known in `gc-m` (generic instances:
 `devirtualization`, `typeparam/issue54497`, `typeparam/pragma`), 35 unsupported as before. The record:
 1,722 of 1,837 pass; `bin/goi divergences` and `bin/reap` (re-recorded) as before.
+
+## Since v1: loads and stores by their words (2026-11-10, branch `goi-fields`, P7)
+
+The Mac VM's proposal P7 (`.tmp/mac-queue/reports/proposals-2026-11-10-vm.md`; queue 251's "Lows": pyi's
+loop worked around it by keeping its value stack as `Stack[:SP]`): `Type.load` and `store` (§4.4) took every
+`R` value that is not an `any` through `reflect.NewAt(RT, p).Elem()`, whose `NewAt` looks up the pointer
+type (`ptrTo`: `ptrToThis`, else a `sync.Map`) and whose `Interface` copies an indirect value
+(`packEface`), and `Set` checks assignability; `AddrOf` (`&x`, `&s.f`), `UnsafeToPtr`, `SliceToArrayPtr`
+made their pointer with `NewAt` too.
+
+**As built.** A descriptor decides once how its values move (`Type.fastKind`, kept in `Type.fast` with its
+RT's type word `Type.tw`, published by an atomic store), when its RT is final (a compiled or unnamed type's,
+a named interpreted type's once `complete`; before that the reflect path, the decision not kept):
+
+| kind | load | store |
+|---|---|---|
+| `fastWord`: pointer, map, channel, `unsafe.Pointer` (not a func: its frame value may be a closure, §4.6) | the interface of `tw` and the word at `p` | the value's data word, when its type word is `tw` (else reflect's) |
+| `fastSlice` | a new header box (24 bytes, as gc's `convTslice`) copied from `p` | the header copied, when its type word is `tw` |
+| `fastEface`: an RT `any` (every interpreted interface, §5.2) or a compiled empty interface | `*(*any)(p)` | `*(*any)(p) = v` |
+| `fastIface`: a compiled non-empty interface (`error`, `io.Reader`) | `any(*(*ifaceWords)(p))`: gc's conversion to `any` reads only the itab's type word, whatever the interface | reflect's (an itab is needed) |
+| `fastNone`: structs, arrays, funcs, complex | reflect's, as before | reflect's |
+
+Every pointer still moves by a typed store (`*(*unsafe.Pointer)(p) = w`, a `sliceHeader`'s copy): the
+write barriers apply (S25). The type word of a `reflect.Type` is its data word, as the stubs' `typ`
+(`stubs.ae`). `AddrOf`, `UnsafeToPtr` and `SliceToArrayPtr` find their pointer type's word once, when
+built (`reflect.PointerTo`, which `NewAt` asks at each run and which answers the same type).
+
+**Measured** (plain Go, TamaGo's go1.27.1, amd64, one CPU, the generated `types.go` functions verbatim
+against a descriptor stub, `-count 3`, ns a call, base → P7): a pointer load 18.3 → 4.3, a map load 22.8 →
+4.1, an `io.Reader` load 21.4 → 4.1, a slice load 62 → 30 (its box's allocation stays), a pointer store
+23.4 → 4.4, a slice store 34.3 → 5.0, `&s.f` 15.4 → 1.1. Each kind's load and store equal the base's
+(value, dynamic type, the memory stored, zero values, an untyped nil stored by reflect's path) and a
+collector stress of slice and pointer loads and stores keeps every value (`GOGC=1`). goi's interpreter test
+`test/goi/run/go/t/fields.ae` runs each kind (made from Go by repr/go's read, gc's run its `.out`). The harness:
+the worktree's `.tmp/p7/bench/` (kept in the main checkout's `.tmp/p7-goi-fields/`).
 
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
