@@ -4480,3 +4480,14 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
+
+## 2026-11-11: fixes-1111 (branch `fixes-1111` from mac/next 5d10a92fb): AXS91 (a), the OCaml fetch log, LLVM's classes, CLAUDE.md's counts
+
+- AXS91 (a) (the user): asm-amd64-encode's mc-x86 rotated by file in sevenths: `bin/repr-asm encode-check --only LIST`, `test/asm/subsets.edn`'s
+  `:mc-x86`, `:rotate` on the step (doc/asm/AMD64-SURVEY.md, "As built: AXS91"). The proposal's 1 min 22 s a night was an underestimate (the
+  fixed part left out): measured 2 min 11 s for the subset, about 3 min 30 s a night. Alternative not taken: a smaller subset (fewer controls).
+- bin/repr-ocaml: `mkdir -p .tmp/repr-ocaml` before the two `fetch.log` writes (ocamllex-check, ocamlyacc-check; night 11's la-oi-ocamlyacc).
+- LLVM: test/llvm/divergences-read.edn: `di-drop` joins `:debug-info-rules`, and a new deferred class `:constant-type-rules` takes the "constant
+  expression type mismatch" verdicts; the night 11 rejected tree's records applied (night 11, `.tmp/night11/rejected/llvm`).
+- CLAUDE.md: bin/reap's matrix has thirteen rows and 52 cells (Haskell, x86-64 and arm64 assembly joined the ten), crops-score thirteen crops;
+  a sentence for the assembly crops.
