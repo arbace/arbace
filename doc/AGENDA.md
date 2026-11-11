@@ -193,6 +193,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   (the gate's build, `bin/goi test`, `check`, the interpreted benchmark) on night 12 or 13, merged after it.
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).
 - Reviews: today's merged code on `next` (patches for the owners) and an audit of the independence facts.
+  `review-fix-1`: review 1111's eight findings (oi's :init-order and OC216's annotations, Haskell's guard givens and --o0-layout,
+  hsi's Float FMA, RF19's key and attribute precedence, LLVM's section rule and renames) fixed and proven; its night: RF19's
+  rsi-build makes core-attrs.edn again (23 min, 2.3 GB).
 
 - Assembly: `asm-ax1` (AX1's first slice, doc/asm/AMD64-SURVEY.md, "As built: AX1"): repr/asm reads GNU as's AT&T text into
   assembly forms and prints it back byte for byte; musl 32/32, `MC/AsmParser` 139/157 and `MC/X86` 464/621 pass, the rest classed

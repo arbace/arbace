@@ -3750,3 +3750,21 @@ the rest the operator impls' macros, cmp's, slice and str iterators'): the recor
 - RF18's (RFP63 (a)'s dump and the packs again; RFP46 (a)'s whole plan with `rsi-native` and `rsi check --front own`), now with
   RF19: the plan's rsi-build makes `core-attrs.edn` first when not current (23 minutes, 2.3 GB, one process; the main checkout's
   `.tmp/rust-front/core/` keeps it by key).
+
+## As built: review 1111's fixes to RF19, findings 3 and 4 (2026-11-11, branch `review-fix-1`, from mac/next a7916bb2a)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`). **Finding 3**: `core_attrs_key`
+(`bin/lib/repr-rust/core-build.bash`) left out `arbace/rust/front/mono.ae`, whose `local-attrs` makes every entry's names, and repr/rust's
+reader (`arbace/repr/rust{.ae,/}`); both are in the key now. Over rust-rf19's work directory the old function gives the key its
+`core-attrs.edn.key` holds (092bd9ba5613...: taken as current), the new one 520d3557f5c0...: the next rsi-build makes the file again (23
+minutes, 2.3 GB, one process). Left, as the review notes: the native-iface/index caches the pass reads from `$work/core` are not keyed by
+their sources. **Finding 4**: `ext-attrs`' last fallback (RF13: the one function of that name the file's impls hold) could answer a
+macro-made method (int_impl!'s inside `impl i32`) with a hand-written method of another impl, and the right `core-attrs.edn` entry was
+never read. `attrs-of*` now asks, for a path the map knows, `ext-attrs` without that fallback (`*once-fallback*` false, cached apart),
+then the map, then nothing; a path the map does not know is answered as before.
+A comparison of both rules over every path of rust-rf19's `core-attrs.edn` (its core copy and std interface; stage 0, 18 minutes, 0.8
+GB): 4,695 paths, 13 answered differently, all `core::cmp::impls::{impl#57}` to `{impl#81}::clamp`, ord_impl!'s methods (cmp.rs:2242-2244,
+`#[inline] #[track_caller]`), which the fallback had answered with bool's hand-written `clamp` (cmp.rs:2301, `#[inline]`): the integers'
+`clamp` had lost `#[track_caller]`.
+`bin/rust-front essential` equals its known file (38 minutes, 1.0 GB), `bin/rust-front core-essential` its own (13 minutes, 2.0 GB).
+Night command (not run): RF19's plan, whose rsi-build now makes `core-attrs.edn` again (23 minutes, 2.3 GB), then the synthetic corpus.

@@ -3096,3 +3096,24 @@ The plan's "13 are the programs' -O2 ABI" (stage 3's proof, run-check ≥ 53 on 
   exception reports a class of their own (`:o0-report`) to look at in base's -O0 TopHandler path**; 1-2 days as planned;
   (b) keep "≥ 53" by giving the own ghc-internal GHC's -O2 floated names as aliases (`ioException3`, `reverse1`): mixes the
   ABIs, a list to maintain by hand; rejected. *Recommended: (a)*.
+
+## As built: review 1111's fixes to HF10-P20/P21, findings 2 and 8 (2026-11-11, branch `review-fix-1`, from mac/next a7916bb2a)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`). **Finding 2, a pattern guard's givens.**
+HF10-P20's fix (`infer-grhss`, `*guard-w*`) rewrote only the wanteds from the guard's pattern on; but in a clause with givens (a GADT
+match, a signature's `a ~ b`) the GRHS's `*given-eqs*` atom is non-empty, the scrutinee's wanteds (eqT's `Typeable b`, `Typeable c`)
+carry that atom itself as `:geqs`, and `tc-pat` grows it by HRefl's `b ~~ c`: `under-givens` rewrote `Typeable c` to `Typeable b` and
+every comparison held. `infer-guards`' BindStmt now re-points the wanteds made before the pattern under that atom to a snapshot of the
+givens they were made under (the review's second fix). Regression case `test/haskell/eval/front/GuardGivens.hs` (both shapes), its
+expected output `GuardGivens.stdout` written by hand from the program's meaning (GHC was not run: its reference line is for the oracle
+tier's `run-check --record-ref`), run by `REPR_HASKELL_RUN_IFACES=pack HSI_LIBS=$(bin/hsi libs-pack) bin/repr-haskell run-check
+front/GuardGivens` (the program is in no corpus, so run-check reports `:no-ref` and exits 1; its stdout is the proof): next's elaborator
+prints `True` six times, the fix `False True False False True True`. Not fixed: the same aliasing between successive patterns of one
+clause (`infer-matches`, pre-existing, the review's note). **Finding 8, `--o0-layout`'s unknown module.** `con-reps` gave a constructor
+of a module `*units*` does not know the -O0 layout from its type, as the unit's own; it is now another unit's (as `ext-str` names
+it, "main"), the pack's layout. Checks in the table below.
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` (finding 2) | 265 against 265, 0 worse, 0 better; the control differs; 21 min, 1.0 GB |
+| `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` (findings 2 and 8) | 5,533 of 7,639 bindings equal, as recorded, 0 worse or missing, 0 better; the control 0 of 171; 21 min, 1.3 GB |

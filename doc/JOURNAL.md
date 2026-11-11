@@ -5037,3 +5037,51 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
   `bin/crops-score --record`, `--judge --strict` 0. No key moves (`arbace/asm/` and `bin/repr-asm` are crop paths or no key's:
   `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
 - Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
+
+## 2026-11-11: review 1111's findings fixed (branch `review-fix-1`, from mac/next a7916bb2a)
+
+The independent review of the merges into next since 2026-11-11 00:00 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`: Haskell,
+Rust, OCaml, Scheme, LLVM), its eight findings, one commit each, in a light lane (stage 0 `/root/arbace/target/seed/amd64/arbace`,
+no gate, no host toolchain, no network). Notes in each crop's survey ("As built: review 1111's ...").
+1. **oi's `:init-order`** (go/arbace/oi.ae; doc/ocaml/OCAML-SURVEY.md): `stackWordsMode DepthLimit` after `blake2Sigma`, `finObjs` after
+   them, goi's checker's order. `bin/oi table-check` is embed-gaps' verb (not on next); its check ran as `test/python/table_check.ae` over
+   `arbace/oi` alone through a scratch wrapper (`.tmp/tc-oi.ae`: `arbace.go.table/program-path?` taking `arbace/oi`, and a copy of the
+   list naming it), tamago/amd64 and arm64, 0.7 GB, 1 min each. It found 12 more errors from OC216 (b45b8aa4f): `ext_sys.ae`'s weak.Make
+   and runtime.AddCleanup calls without `:inst`, `marshal.ae`'s `codePap` without `:val`: fixed in a commit of their own (annotations
+   only). With the annotations fixed and next's line: 1 error, the `:init-order`; with both fixed: none in either configuration.
+   oi-essential's command passes (59 of 59 on both paths; 50 min beside other runs, 1.1 GB); oi-divergences' four judgments pass.
+2. **A pattern guard's givens** (arbace/repr/haskell/typecheck.ae; doc/haskell/FRONTEND-SURVEY.md): the review's second fix (the
+   wanteds made before the pattern under the GRHS's atom keep a snapshot of their givens). Regression case
+   `test/haskell/eval/front/GuardGivens.hs` (a GADT clause and a signature's `a ~ Int`, each with an `eqTypeRep` guard) with a
+   hand-written expected output (GHC not run): next's elaborator prints True six times, the fix the expected output (run-check on one
+   program, 1 min, 1.2 GB). lib-check --ifaces own --judge (ghc-internal): 265 against 265, 0 worse, 0 better (21 min, 1.0 GB); lib-stg
+   --ifaces own --judge: 5,533 of 7,639, as recorded, 0 worse (21 min, 1.3 GB). The same aliasing between successive patterns of one
+   clause (`infer-matches`, pre-existing) is left. Alternative not taken: a fresh atom bound around the rest of the GRHS (`set!` of a
+   dynamic var bound only in infer-grhss; infer-guards is reached from elsewhere too).
+3. **core-attrs.edn's key** (bin/lib/repr-rust/core-build.bash): `mono.ae` and `arbace/repr/rust{.ae,/}` added. On rust-rf19's work
+   directory the old key equals its stored one, the new differs: the next rsi-build makes the file again (23 min, 2.3 GB).
+4. **ext-attrs' precedence** (arbace/rust/front/mono.ae; doc/rust/FRONTEND-SURVEY.md): for a path core-attrs.edn knows, ext-attrs without
+   RF13's once-named fallback, then the map. Over rust-rf19's 4,695 paths (18 min, 0.8 GB) 13 change, all the integers'
+   `core::cmp::impls::{impl#57..81}::clamp` (ord_impl!'s, `#[track_caller]`), which the fallback answered with bool's hand-written
+   `clamp`: the review's latent case, real. `bin/rust-front essential` equals its known file (38 min, 1.0 GB), `core-essential`
+   its own (13 min, 2.0 GB, before 18:45).
+5. **llvm-ind2's section rule** (bin/repr-llvm; doc/llvm/LLVM-CROP-SURVEY.md): XFAIL, `||`, llc's -start-after/-start-before/-run-pass,
+   llvm-link's --only-needed/--internalize and `--disable-verify=VALUE` leave a section on opt's record; the whole-file rule gains XFAIL
+   and the spellings. controls-test's fake tree: next's `bin/repr-llvm` judged the five new sections valid by their own verdict, the
+   branch none. llvm-read-essential's and llvm-print-essential's commands pass (43, 43, 4, 43), llvmi check --essential 10 of 10.
+6. **Float lanes' FMA** (go/arbace/hs/simd.ae; doc/haskell/HASKELL-EVAL-SURVEY.md): `fmaf` (musl's fmaf.c, already the scalar
+   `fmaddFloat#`'s), not `float32(math.FMA(...))`. A double-rounding case: 0x1.fb64e2p+0 * 0x1.78ee6p+0 + 0x1.e80002p-37. hsi builds,
+   T22296 passes, hsi-essential's command 123 programs, 0 unclassed (24 min, 0.4 GB).
+7. **fixes-1111's renames** (bin/llvmi rt-list's default, test/crops/independence.edn's evidence): `bin/llvmi rt-list` runs again.
+8. **`--o0-layout`'s unknown module** (arbace/repr/haskell/tostg.ae): another unit's, as `ext-str` names it; lib-stg above, 0 worse.
+
+- Checks at the end: haskell-read-essential's command (51 of 51 at both levels), LLVM's controls-test all ok (14 cases), `bin/reap`
+  49 of 52 cells checked, 0 problems, `bin/crops-score --record` leaves `test/crops/scores.edn` as it was, `--judge --strict` 0.
+- Keys: every changed path is a crop path or no key's; `bin/arbace-go --gate-key` 314c8e5b04ab... on next and on the branch,
+  `test/gate/gate-key-crops-test.bash` passes. No record changed.
+- Night commands (not run): RF19's night plan, whose rsi-build now makes core-attrs.edn again (findings 3, 4: 23 min,
+  2.3 GB, one process) and then rsi's synthetic corpus as RF19 measured it (63 min, 2.24 GB peak, RF11_BATCH=3), to see the integers'
+  clamp with #[track_caller].
+- Rule slips: one foreground command ran two table checks with a plain `&` and `wait`; one shell test used `<(...)`; the first LLVM
+  controls-test ran beside rust-front essential in the same fresh worktree and its llvmi cases failed on the shared `.tmp/ci-musl`
+  (a race, "no build line"; llvmi check --essential alone passed 10 of 10 after).
