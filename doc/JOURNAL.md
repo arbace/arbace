@@ -4763,3 +4763,24 @@ Checks (light, 2 jobs, 3 GiB): the 26 moved and regression programs, 24 pass and
 completeness 0.9632 to 0.9665 (`bin/reap --record`, `bin/crops-score --record`, `--judge --strict`). Proposed: HES89 (the `simd/`
 tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict: conc065, conc066). Night: rts_clearMemory
 (about 2.4 GB) recorded alone, then the whole record as HES86's night.
+
+## 2026-11-11: RF19: the trait object's Fn calls, collections under 2 GiB, core's macro-made functions' attributes (branch `rust-rf19`, from `mac/next` `c572f6753`)
+
+- `<Box<dyn Fn(..)> as Fn<..>>::call` resolved natively: the missing piece was not the object candidate (typeck's
+  `dyn-implements?` had it) but the builtin `Tuple` candidate of alloc's impl's `Args: Tuple` clause (rustc 1.99.1's
+  assemble_candidate_for_tuple): closures' callees 106 -> 108 of 109. Alternative considered: an object candidate keyed on Box,
+  which rustc does not have.
+- collections' memory found and cut (measured with build-run's new `RF_MEM_TRACE`): the record was read twice (the batch's judge
+  and native-run, 477 MiB), mono cached core's parsed files whole (355 MiB; now without functions' bodies, macro definitions'
+  tokens and doc comments, which nothing reads) and the module was printed into one string before being written. 2.62 GB -> 2.09
+  GB alone; the whole corpus at RF11_BATCH=3 2.24 GB (RF18's batch was killed at 2.66). Interning the record's strings was tried
+  and dropped (larger: 1,233 MiB against 939).
+- The record's callee facts for core's macro-made items (449 refusals in RF18's run) replaced by Arbace's own: `bin/rust-front
+  core-attrs`, core-check's interface pass over ten module files writing each function's attributes after expansion, read by mono
+  only where core's sources do not show the item; core-check's macro table now prefers the shallowest of equally near files
+  (num's `uint_impl!`, not num/imp/int_bits.rs' private one) and the expander transcribes `${concat(..)}`. Synthetic corpus:
+  66 of 67 own (unchanged), native callees 4,528 -> 4,985 of 4,985 (with fmt rebuilt after `${concat}`), function constants' symbols 1,933 -> 2,343 of 2,346,
+  mono-check's equal callees 2,000 -> 2,409 of 2,414. Alternatives considered: the core export (RF12-P8's night, bodies too: 40
+  minutes per num/mod.rs and a night slot), reading the attributes from rustc's metadata (a toolchain product).
+- Independence unchanged (Rust 80.0: every case still consumes std's records, RFP43 (a)); the record facts the own front end
+  reads shrink. Details and the night's commands: doc/rust/FRONTEND-SURVEY.md, "As built: RF19".

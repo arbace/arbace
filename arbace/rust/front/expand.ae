@@ -584,7 +584,14 @@
                                 (cond (nil? a) nil
                                       (punct-item? (first a) :Dollar) {:var (tsym (second a))}
                                       :else {:depth (parse-long (str (tsym (first a))))})))]
-              (recur (drop 2 xs) (conj out {:mvx (tsym f) :a0 (arg 0) :a1 (arg 1)})))
+              (recur (drop 2 xs) (conj out (cond-> {:mvx (tsym f) :a0 (arg 0) :a1 (arg 1)}
+                                             ;; RF19: ${concat(a, $b, "c")}'s elements (metavar_expr.rs' MetaVarExprConcatElem:
+                                             ;; an identifier, a literal, a metavariable)
+                                             (= "concat" (tsym f))
+                                             (assoc :elems (vec (for [a as]
+                                                                  (cond (punct-item? (first a) :Dollar) {:var (tsym (second a))}
+                                                                        (ident-item? (first a)) {:ident (tsym (first a))}
+                                                                        :else {:lit (tsym (first a))}))))))))
             (and (ident-item? nx) (= "crate" (tsym nx)) transcriber?)
             (recur (drop 2 xs) (conj out (cond-> {:crate true}
                                            ;; (RF10: `$crate`'s place in std's macro: `$`'s start to `crate`'s end)
@@ -711,7 +718,7 @@
 
 (defn- rep-vars [pats]
   (set (mapcat (fn [p] (cond (:var p) [(:var p)] (:rep p) (rep-vars (:rep p)) (:group p) (rep-vars (:sub p))
-                             (:mvx p) (keep #(:var (get p %)) [:a0 :a1])
+                             (:mvx p) (concat (keep #(:var (get p %)) [:a0 :a1]) (keep :var (:elems p)))
                              :else nil)) pats)))
 
 (def ^:dynamic *rep-stack* [])   ; RF12: the transcription's repetitions, outermost first: [[index count] ...]
@@ -731,6 +738,15 @@
       "count" (let [b (get env (:var (:a0 p))) d (depth (:a1 p))
                     cnt (fn cnt [b k] (if (and (map? b) (:seq b)) (if (pos? k) (reduce + (map #(cnt % (dec k)) (:seq b))) (count (:seq b))) 1))]
                 [(int-lit-item (cnt b d) mark)])
+      ;; RF19: transcribe.rs' concat: the elements' texts joined into one identifier (a metavariable's one token: an ident's
+      ;; or a literal's text), marked with the expansion
+      "concat" (let [txt (fn [e] (cond (:ident e) (str (:ident e))
+                                        (:lit e) (str (:lit e))
+                                        :else (let [b (get env (:var e))]
+                                                (if (and (vector? b) (= 1 (count b)) (:t (first b)))
+                                                  (str (tsym (first b)))
+                                                  (throw (ex-info (str "expand: ${concat(..)} of $" (:var e)) {:expand true}))))))]
+                 [(titem (ftok :Ident (apply str (map txt (:elems p))) false nil 0 :Alone) mark)])
       (throw (ex-info (str "expand: metavariable expression " (:mvx p)) {:expand true})))))
 
 (defn- m-seq [pats k elems i env]
