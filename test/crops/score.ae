@@ -84,6 +84,11 @@
 
 (defn- edn [t f] (when-let [s (text t f)] (read-string s)))
 
+(defn- edn-forms
+  "Every form of F's text in tree T (a file of one form a line, bin/hsi check's), or nil."
+  [t f]
+  (when-let [s (text t f)] (read-string (str "[" s "\n]"))))
+
 (defn- read-file [f]
   (read-string (slurp (if (str/starts-with? f "/") f (str *root* "/" f)))))
 
@@ -243,6 +248,18 @@
 
 (defn- own-case? [inputs m] (and (map? m) (every? #(= :own (get m %)) inputs)))
 
+(defn- input-rows
+  "HF10-P29 (a): a record of inputs' rows as [ID {INPUT VALUE ...}]: one vector of such rows (RFP53's), or one map a case
+  with its :id beside its inputs (bin/hsi check's lines: {:id ... :libs :own ...})."
+  [forms]
+  (let [rows (if (and (= 1 (count forms)) (vector? (first forms)) (every? vector? (first forms))) (first forms) forms)]
+    (vec (for [r rows] (if (map? r) [(:id r) r] r)))))
+
+(defn interim?
+  "HF10-P29 (a): a record whose first line marks it INTERIM (\";; INTERIM\": not one run's outcome) counts no case."
+  [s]
+  (boolean (and s (str/starts-with? s ";; INTERIM"))))
+
 (defn rfp53-counts
   "RFP53 (a): of the cell's case ids IDS (TOTAL cases as test/reap/matrix.edn counts them), the cases whose every input of INPUTS
   is :own in ROWS ([ID {INPUT VALUE ...}] a case): {:self N :recorded M}, M every other case of the cell (no row, or an input not
@@ -256,8 +273,9 @@
   "The ids of the cell's cases: the first element of each row of its sources' records."
   [t crop st]
   (for [s (get-in (cells-spec t) [:cells [crop st] :sources]) :let [f (:file s)] :when (and (string? f) (has? t f))
-        r (edn t f) :when (vector? r)]
-    (first r)))
+        ;; (bin/hsi check's records: one map a program, HF10-P29 (a))
+        r (if (= :hsi-check (:reader s)) (edn-forms t f) (edn t f)) :when (or (vector? r) (and (map? r) (:id r)))]
+    (if (map? r) (:id r) (first r))))
 
 (defn- case-inputs
   "A fact's :case-inputs {:file F} (crops.edn's :own-inputs names the crop's inputs): {:self N :recorded M :note ...} counted
@@ -269,7 +287,8 @@
       (cond (empty? inputs) {:note (str "RFP53 (a): crops.edn names no :own-inputs for " (name crop) ", the stated score")}
             (not (and r (:checked r))) {:note "RFP53 (a): the cell has no record yet, the stated score"}
             (not (has? t file)) {:note (str "RFP53 (a): no " file " yet, the stated score")}
-            :else (let [c (rfp53-counts (cell-ids t crop st) (edn t file) inputs (cases r))]
+            (interim? (text t file)) {:note (str "HF10-P29 (a): " file " is marked INTERIM (not one run's outcome), the stated score")}
+            :else (let [c (rfp53-counts (cell-ids t crop st) (input-rows (edn-forms t file)) inputs (cases r))]
                     (assoc c :note (str "RFP53 (a): " (:self c) " of " (+ (:self c) (:recorded c)) " cases own in all "
                                         (count inputs) " inputs (" file "), the rest 0.5")))))))
 
@@ -577,6 +596,13 @@
                       [j] (mixed-score {:cases {:self 66692 :recorded 146}})]
                   (format "%.1f" (* 100.0 (/ (+ 1 e e 1 j) 5)))))
         c37 (rfp53-counts ids rows inputs 73)
+        ;; HF10-P29 (a): bin/hsi check --libs own's lines, one map a program, counted as :libs :own; the control the same
+        ;; programs on the pack; an INTERIM record counts none
+        hs-ids (for [i (range 1 11)] (format "samples/P%02d" i))
+        hs-own (rfp53-counts hs-ids (input-rows (concat (for [id (take 4 hs-ids)] {:id id :result :pass :libs :own})
+                                                        (for [id (drop 4 hs-ids)] {:id id :result :pass :libs :pack})))
+                             [:libs] 10)
+        hs-ctl (rfp53-counts hs-ids (input-rows (for [id hs-ids] {:id id :result :pass :libs :pack})) [:libs] 10)
         ;; the control: the same 37 cases with C7 test/c/host (ci on gcc's recorded host): none own, the stage 0.5
         ctl-rows (vec (for [[id m] rows] [id (if (= m own) (assoc m :c7 "test/c/host") m)]))
         ctl (rfp53-counts ids ctl-rows inputs 73)
@@ -601,6 +627,9 @@
      (when-not (= "90.1" (indep c37)) [(str "RFP53: 37 of 73 own gives " (indep c37) ", the plan 90.1")])
      (when-not (= "80.0" (indep {:self 0 :recorded 73})) [(str "RFP53: none own gives " (indep {:self 0 :recorded 73}) ", not 80.0")])
      (when-not (= ctl {:self 0 :recorded 73}) [(str "RFP53 control (C7 test/c/host) passed: counted " (pr-str ctl))])
+     (when-not (= hs-own {:self 4 :recorded 6}) [(str "HF10-P29: 4 of 10 :libs :own counted " (pr-str hs-own))])
+     (when-not (= hs-ctl {:self 0 :recorded 10}) [(str "HF10-P29 control (every program :libs :pack) passed: counted " (pr-str hs-ctl))])
+     (when-not (and (interim? ";; INTERIM (review)\n{:id \"a\"}") (not (interim? ";; hsi's check\n;; INTERIM"))) ["HF10-P29: the INTERIM mark misread"])
      (when (= "90.1" (indep ctl)) ["RFP53 control (C7 test/c/host) reached 90.1"])
      (when (seq good) [(str "OC222: a valid :na class refused: " (first good))])
      (for [[k v] controls :when (empty? v)] (str "OC222 control passed: " k))
@@ -627,7 +656,7 @@
     (when (some #{"--self-test"} args)
       (let [fails (self-test)]
         (doseq [x fails] (println (str "   FAIL " x)))
-        (println (str "crops-score: self-test (RFP53 (a), OC222 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
+        (println (str "crops-score: self-test (RFP53 (a), OC222 (a), HF10-P29 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
         (shutdown-agents)
         (System/exit (if (empty? fails) 0 1))))
     (let [o (parse-args args)

@@ -5141,3 +5141,31 @@ findings #1-#6, all Haskell; done by finding, light runs only (night 12 running;
   `bin/heavy-lock env ARBACE_MEM_GIB=16 HSI_JOBS=1 bin/hsi check --libs own --corpus samples,synthetic,testsuite-core --record` and the
   try run; about 10-16 GiB, 2 hours), for night 13 or later; not re-recorded by day.
 No key moves (crop paths only).
+
+## 2026-11-11: HF10-P29 (a), the own cases in the gate, and HF10-P30 (a)'s plan (branch `hs-p29`, from `mac/hs-p22b` 8516fcf10)
+
+The user's decisions of 2026-11-11 (doc/haskell/FRONTEND-SURVEY.md, "Decided (the user, 2026-11-11: HF10-P29, HF10-P30)", "As
+built: HF10-P29"). Light work in night 12's day lane (one run at a time, under 1.5 GiB):
+- `test/gate/steps.edn`: the new `--full` step `haskell-lib-stg-own` (`LIB_STG_REPLACE=all lib-stg --ifaces own --judge
+  test/haskell/lib-stg-own-results.edn --run`, `:uses` haskell-lib-check-own's and haskell-lib-own-base's pools, `:outputs`
+  `ghc-internal-own.tar`, 2 GiB); `haskell-lib-own-base` also keeps `base-own.tar`; `hsi-check` and `hsi-check-aot` run `bin/hsi check
+  --libs own` with `HSI_OWN_TARS` from those two outputs (`:uses`), their pins grown by haskell-ifaces' and the native inputs'.
+- `bin/lib/repr-haskell/lib-stg`: `LIB_STG_OWN_OUT` (PKG-own.tar: pool/, wired/, stg/UNIT/, deterministic), `LIB_STG_OWN_POOL_TAR` (the
+  closures in .tmp used only when their pool is the producer's byte for byte, else made again by lib-check --ifaces own and required
+  equal), `LIB_STG_BASE_POOL_TAR`; `bin/lib/hsi/check`: `HSI_OWN_TARS`. Alternative considered for a skipped producer: carrying lib-check's
+  whole state (plan, closures with absolute paths, boot interfaces) in the tar and rewriting its paths; rejected for the digest check
+  and a remake, which costs time only in the rare case and cannot use a stale state.
+- `test/crops/`: crops.edn's `:own-inputs :haskell` (`:libs`), independence.edn's eval and AOT `:case-inputs` (check-hsi-own.edn,
+  check-hsi-aot-own.edn); score.ae reads bin/hsi check's one-map-a-line records (`input-rows`, `cell-ids` for `:hsi-check` sources)
+  and counts nothing from a record marked `;; INTERIM` (review 1111b's mark); its self-test gains the case and its control.
+  Alternative considered: counting the interim record now (80.6 at once); rejected, the review ruled it not a result.
+- The survey gains P30 (a)'s plan: the generalisation of `--package` beyond base, the order deepseq, array, stm | pretty, ghc-boot-th,
+  template-haskell, containers | transformers, mtl, exceptions | bytestring, os-string, filepath, time | unix, file-io, directory,
+  process | binary, text (the pinned tarball's `.cabal` files), and the one GHC window's commands. HF10-P31 proposed (the REAP cells
+  read the own records).
+- Checks: `bin/gate --full --plan` clean (the new step placed after its producers, hsi-check after both), gate.crops check 0 problems,
+  crops-test 42 ok, gate-key-crops-test PASS with `--gate-key` 9accb085d767... before and after (no key moves), crops-score
+  `--self-test` and `--judge --strict` exit 0 (Haskell 76.0 unchanged), the tars made from hs-p22's own state and read by `bin/hsi
+  check --libs own` (507 interfaces, 506 modules; samples/Hello own, pass).
+- Night commands (not run, the survey's): the three producers' commands by hand (about 1 hour, under 2 GiB), then `bin/hsi check
+  --libs own` whole at 16 GiB with `--record` (60-75 min, 10 GiB) and `--aot` (2 hours, 8 GiB), then crops-score `--record`.

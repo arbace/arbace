@@ -91,7 +91,11 @@ Six crops are above 90 on all three. What the others still need:
   failures classed by what fails (`divergences-own.edn`), own-fallback.txt honest and tried (`HSI_OWN_FALLBACK=try`), lib-stg's
   run classes with outcomes; `check-hsi-own.edn` is INTERIM (a merge of light runs) until the night's whole run at 16 GiB
   (its header's commands, night 13+).
-  Next: P29 (the own cases in the gate, so crops-score counts them: independence about 85) and P30 (P17's packages)
+  P29 and P30 decided (a) (the user, 2026-11-11); `hs-p29` built P29's wiring: the step `haskell-lib-stg-own` (ghc-internal's own
+  STG judged and `--run`, its output `ghc-internal-own.tar`), `haskell-lib-own-base` keeps `base-own.tar`, `hsi-check` and
+  `hsi-check-aot` run `--libs own` on them (`:uses`), crops-score counts `:libs :own` from `check-hsi-own.edn` (not while it is
+  INTERIM: 76.0 stays; projected 80.6, about 85 with the AOT record); P30's plan (P17's packages in dependency order, one GHC
+  window) written; HF10-P31 proposed (the cells read the own records). Next: the night's runs (the survey's night commands), then P17's first slice.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).

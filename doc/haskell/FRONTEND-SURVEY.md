@@ -3307,3 +3307,178 @@ review-fix-1). Each finding, what was done:
 Not run (night, over the 1.5 GiB of night 12's day lane): lib-check and lib-stg `--ifaces own` of ghc-internal and base with this
 elaborator (the multi-guard change may move a binding) and the whole `--libs own` run; the commands are in `check-hsi-own.edn`'s
 header. No key moves (every path is a crop path).
+
+## Decided (the user, 2026-11-11: HF10-P29, HF10-P30)
+
+HF10-P29 (a): the own cases in the gate: a step `haskell-lib-stg-own` keeps ghc-internal's own interfaces and STG as its output,
+`haskell-lib-own-base` base's too, `hsi-check` and `hsi-check-aot` run `--libs own` on them (`:uses`), and crops-score counts the own
+cases from the records. HF10-P30 (a): P17 scoped as stage 5, the run corpora's packages in dependency order (first slice deepseq,
+array, stm, then containers), one GHC oracle window for their references: the plan written, no runs.
+
+## As built: HF10-P29 (2026-11-11, branch `hs-p29`, from `mac/hs-p22b` 8516fcf10)
+
+By an agent in night 12's day lane (one run at a time, each process under 1.5 GiB, MemAvailable at least 12 GiB before a run; stage 0
+`/root/arbace/target/seed/amd64/arbace`; no GHC, no gate run but `--plan`, no network). The wiring only: the heavy first runs (the own
+STG of ghc-internal with its `--run`, hsi's whole check on the own libraries) are a night's, below.
+
+**The steps** (`test/gate/steps.edn`, `--full`, in this order; each `:inputs [:lib-tools :tools :haskell :hsi]`, no GHC host):
+
+| step | `:uses` | command | `:outputs` | `:mem-gib` |
+|---|---|---|---|---:|
+| `haskell-lib-check-own` (unchanged) | | `lib-check --ifaces own --judge ...-own-ghc-internal.edn` | `ghc-internal-pool.tar` | 2 |
+| `haskell-lib-own-base` | `haskell-lib-check-own/ghc-internal-pool.tar` | lib-check and lib-stg `--package base --ifaces own`, now with `LIB_STG_OWN_OUT` | `base-pool.tar`, **`base-own.tar`** | 2 |
+| **`haskell-lib-stg-own`** (new) | the two pools | `LIB_STG_REPLACE=all lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run` | **`ghc-internal-own.tar`** | 2 |
+| `hsi-check` (`:heavy`) | `ghc-internal-own.tar`, `base-own.tar` | `HSI_OWN_TARS=... bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 4` | | 10 |
+| `hsi-check-aot` (`:heavy`) | the same | `... check --aot --libs own ... --jobs 2` | | 8 |
+
+`haskell-lib-stg-own` judges ghc-internal's 265 modules' own STG against GHC's -O0 (the module rows of `lib-stg-own-results.edn`, the
+control `lib-stg-controls.txt`), then runs run-check's programs compiled on the own interfaces of ghc-internal, its wired-in Prim
+and base (base's pool from `haskell-lib-own-base`'s output, `LIB_STG_BASE_POOL_TAR`) on GHC's -O0 libraries and on the whole own
+set (`{:runs :all}` judged: a recorded pass lost, a non-pass in no class or of another outcome, fails). Its pins are
+`haskell-lib-stg`'s with the native inputs'; `hsi-check`'s gain `haskell-ifaces-ghc-9.14.1` (the reexports `--libs own` reads) and
+the native inputs'. `bin/gate --full --plan`: no table error; the planner places `haskell-lib-own-base` and `haskell-lib-stg-own`
+"after" (decided once their producers ran, the outputs' digests in their keys: GT5's early cutoff), and `hsi-check`, `hsi-check-aot`
+"after haskell-lib-stg-own, haskell-lib-own-base".
+
+**The tools.**
+- `bin/repr-haskell lib-stg` (`bin/lib/repr-haskell/lib-stg`): `LIB_STG_OWN_OUT=DIR` (with `--ifaces own`) keeps `DIR/PKG-own.tar`,
+  one deterministic tar (sorted, mtime 0, owner 0) of `pool/` (lib-check `--ifaces own`'s interfaces), `wired/` (ghc-internal's
+  GHC.Internal.Prim, primops.txt.pp's) and `stg/UNIT/` (the run's own STG of every module); `LIB_STG_OWN_POOL_TAR=TAR` (ghc-internal):
+  the closures lib-check left in `.tmp` are used only when their pool, tarred the same way, is TAR byte for byte; else (the producer
+  skipped at its key, a `.tmp` of another state) `lib-check --ifaces own` makes them again (no judge, about 15 minutes, 1.8 GiB) and
+  must then agree, or the run fails; `LIB_STG_BASE_POOL_TAR=TAR` (`--run`): base's pool unpacked from the producer's tar in place of
+  `.tmp/repr-haskell/lib-check/own/base`.
+- `bin/hsi check --libs own` (`bin/lib/hsi/check`): `HSI_OWN_TARS=TAR:TAR...` in place of `HSI_OWN_IFACES` and `HSI_OWN_STG`, each tar
+  unpacked into `WORK/own-tars/N`, its `pool/` and `wired/` the interfaces (in that order: the wired-in Prim last), each `stg/UNIT/`
+  a library directory. The records stay apart from the pack's: `--record` writes `check-hsi-own.edn` (`-aot-own`); `check-hsi.edn`
+  stays the pack's (the own judge compares an own failure with its line, review 1111b's finding 3) and the REAP cells' source.
+
+**crops-score** (`test/crops/score.ae`, `crops.edn`, `independence.edn`): RFP53 (a)'s counting takes Haskell's records. crops.edn's
+`:own-inputs :haskell` is one input, `:libs` (the program compiled on the own interfaces and run over the own libraries' STG alone);
+Haskell's eval fact reads `:case-inputs {:file "test/haskell/check-hsi-own.edn"}`, the AOT fact `check-hsi-aot-own.edn`. The
+records of `bin/hsi check` are one map a line: `input-rows` takes a map row's `:id` with the map as its inputs, `cell-ids` reads the
+`:hsi-check` sources (`check-hsi.edn`, `-aot`) form by form; a case counts 1 when its line is `:libs :own`, the cell's other cases
+0.5. A record whose first line is `;; INTERIM` counts none (`interim?`: review 1111b's mark on `check-hsi-own.edn`, "not to be read as
+a result"): the stated `:cases` stand until the night's whole run re-records it (its `--record` drops the mark). The self-test gains
+the case (4 of 10 `:libs :own` counted 4 own, 6 at 0.5), its control (every program `:libs :pack`: 0 own) and the mark's reading.
+
+**Projection.** With the mark lifted on the interim record (a copy, not committed): eval 0.500 → **0.731** (420 of 908 cases own,
+the rest 0.5), independence **76.0 → 80.6** with AOT still 0.5; with `check-hsi-aot-own.edn` written by the night (the same share, the
+programs that build) AOT about 0.73 and independence **about 85** ((1 + 0.731 + 0.73 + 1 + 0.8) / 5 = 85.2). The recorded score is
+unchanged (76.0) until the night's records.
+
+**Keys.** Every changed path is a crop path or the gate's tables (`bin/lib/hsi/`, `bin/lib/repr-haskell/`, `test/gate/steps.edn`,
+`test/crops/`, `test/haskell/`, the survey): `bin/arbace-go --gate-key` 9accb085d767... on `mac/hs-p22b` and on the branch,
+`test/gate/gate-key-crops-test.bash` passes; the runtime and seed keys untouched (no `arbace/lang`, `go/`, `overlay/`, `jdk/`). The
+steps' own keys: `haskell-lib-check-own` unchanged (its command and inputs as before); `haskell-lib-own-base`'s command changed (it
+reruns once); `haskell-lib-stg-own` new; `hsi-check` and `hsi-check-aot` rekeyed by their commands, pins and `:uses`.
+
+### HF10-P30 (a): P17's plan (written, not run)
+
+**Why.** Of the eval corpora's 908 programs, those that stay `:libs :pack` for an import (not a C file or CPP) import the other
+installed packages; and run-check's 9 non-passes of `:o2-names` and `:o0-report` mix those packages' -O2 STG (GHC's) with the -O0 own
+ghc-internal. Each package made own (its interfaces and STG by the front end, on the own pools below it) moves programs to `:libs
+:own` and those 9 off the mix.
+
+**The generalisation (one change, the base path's).** `lib-check --package P --ifaces own` and `lib-stg --package P --ifaces own`
+already take any installation unit above ghc-internal for the unit id (`installation.edn`) and the driver-grown closures; what is
+base's alone today: (1) `--dep-pools` names ghc-internal's pool only: it becomes every own pool below P, in the order below
+(`LIB_CHECK_DEP_POOL_TAR` a list, each producer's `PKG-pool.tar`); (2) the reexported modules read from ghc-prim's `.cabal` only: every
+dependency's `.cabal` (`reexported-modules`: template-haskell's `GHC.Internal.TH.*`, ghc-boot-th's), its `build-depends` giving the
+order; (3) the judge's GHC interfaces from `haskell-ifaces-ghc-9.14.1` (the programs' closures, 113 of base's 241): the window below
+grows `haskell-lib-ifaces` by every module of P; (4) `--live`'s iface2 runs `-package ghc-internal`: `-package P` (the window's, by
+hand); (5) `hsi check --libs own`'s eligibility (`front_eligible`: an import is own when ghc-internal's, base's or a reexport) reads
+the own pools' module lists instead of the two names; (6) a step per package or one chained step `haskell-lib-own-P` after its
+dependencies' (`:uses` their pools; `LIB_STG_OWN_OUT` its `P-own.tar`, `hsi-check`'s `:uses` growing by one tar a package).
+
+**The order** (the pinned tarball's `.cabal` files, library `build-depends`; ghc-prim and ghc-bignum are reexports, done):
+
+| slice | package | depends on (beyond base) | modules (approx.) | note |
+|---|---|---|---:|---|
+| 1 | deepseq | — | 4 | NFData's Generic instances: deriving at -O0 |
+| 1 | array | — | 11 | `GHC.Arr` reexported from ghc-internal; unboxed arrays' primops |
+| 1 | stm | array | 12 | TVar primops (runtime-stm's `:o2-names`) |
+| 2 | pretty | deepseq | 4 | ghc-boot-th's dependency |
+| 2 | ghc-boot-th, template-haskell | pretty; ghc-internal | ~10 | mostly reexports of `GHC.Internal.TH.*` (`reexported-modules`) |
+| 2 | containers | array, deepseq, template-haskell | 40 | -O2's UNPACKed fields in the pack meet -O0 own code today (`:o0-report`'s `SrcLoc`) |
+| 3 | transformers, mtl | transformers | 35, 25 | |
+| 3 | exceptions | mtl, stm, template-haskell, transformers | 4 | os-string's and filepath's dependency |
+| 4 | bytestring | deepseq, template-haskell (ghc-prim) | 30 | C (`cbits/`): its foreign imports' STG only, the C on ci as hsi runs it |
+| 4 | os-string, filepath | bytestring, deepseq, exceptions, template-haskell | 25, 20 | |
+| 4 | time | deepseq | 50 | C (`cbits/HsTime.c`) |
+| 5 | unix | bytestring, filepath, os-string, time | 60 | hsc2hs modules (made on ci, HFS-I2) |
+| 5 | file-io, directory, process | unix, filepath, os-string, time (deepseq) | 5, 15, 10 | the run corpora's System.* programs (LibIO, LibSystem, LibPosix) |
+| 6 | binary, text | bytestring, containers, array (deepseq, template-haskell) | 30, 70 | text's C (simdutf: C++, out unless cppi takes it) |
+
+First slice without GHC: deepseq, array, stm (judged by lib-check's own rows and the runs: run-check's runtime-stm and the testsuite's
+stm programs; lib-stg's rows written at the window). Then containers, after the window (its -O0 reference).
+
+**The one GHC oracle window** (by hand, the main session, on a host with GHC 9.14.1, `tools/hsdump/GHC_VERSION`; one window, P16's and
+P17's references together; each a commit of its own naming `:ghc`'s identity; then `bin/oracle-records verify haskell` as the tier does):
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp
+P=deepseq,array,stm,pretty,ghc-boot-th,template-haskell,containers,transformers,mtl,exceptions,bytestring,os-string,filepath,time,unix,file-io,directory,process,binary,text
+# 1. GHC's -O0 STG of the packages, lib-stg's reference (HF10-P1's pack grown; the four boot packages' entries kept)
+HSI_DUMP_OPT=-O0 bin/hsi dumps --record --packages "$P"                       # ~1 h, GHC one module at a time, ~2 GiB
+# 2. GHC's interfaces of every module, the judge's (P16: base's 128 missing; P17: each package), the iface2 verb live
+for p in base ${P//,/ }; do bin/repr-haskell lib-check --live --record-pack --package "$p"; done   # after change (4); ~2 h in all
+# 3. the oracle tier's verify of both packs, and the round trip's GuardGivens reference (review 1111b, #5)
+bin/oracle-records verify haskell stg-libs-O0 lib-ifaces --sample 8
+bin/repr-haskell run-check --record-ref front/GuardGivens
+```
+
+then, without GHC, per package in the order above (night commands, one process at a time, about 1.5-2 GiB, minutes each but
+containers, unix and text, 10-20 minutes): `bin/repr-haskell lib-check --package P --ifaces own --record test/haskell/lib-check-own-P.edn`,
+`lib-stg --package P --ifaces own --record test/haskell/lib-stg-own-P-results.edn`, each with its control (`lib-check-controls-P.tsv`,
+`lib-stg-controls-P.txt`: a module against another's reference), then `bin/hsi check --libs own --record` (the whole corpus at 16 GiB,
+the heavy lock): the newly eligible programs measured, the fallback list grown only by programs that fail on the own libraries.
+Costs: the generalisation 1-2 days, the first slice 1 day, each later slice 1-2 days (the front end's classes it meets), one window.
+
+### Checks (light, night 12's day lane: one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| `bin/gate --full --plan` | exit 0, no table error; `haskell-lib-stg-own` between `haskell-lib-own-base` and `haskell-lib-stg`, decided "after" its two producers; `hsi-check`, `hsi-check-aot` "after haskell-lib-stg-own, haskell-lib-own-base" |
+| `gate.crops check ROOT test/gate/steps.edn` | 0 problems |
+| `bash test/gate/crops-test.bash` | 42 ok, exit 0 |
+| `bash test/gate/gate-key-crops-test.bash` | PASS; `bin/arbace-go --gate-key` 9accb085d767... before and after |
+| `bin/crops-score --self-test` | every test passes, every control fails (the new HF10-P29 case and control among them) |
+| `bin/crops-score --judge --strict` | exit 0; Haskell 76.0 unchanged (eval: "check-hsi-own.edn is marked INTERIM, the stated score"; AOT: "no check-hsi-aot-own.edn yet") |
+| the projection (`--crop haskell` on a copy without the mark, not committed) | eval 0.731, "420 of 908 cases own", independence 80.6 |
+| `LIB_STG_REUSE=1 LIB_STG_OWN_POOL_TAR=... LIB_STG_OWN_OUT=... lib-stg --ifaces own` (hs-p22's own state copied into the worktree's `.tmp`, the pool tar made from it) | "the own closures in .tmp are the producer's pool's"; control 0 of 171; `ghc-internal-own.tar`: 265 interfaces, the wired-in Prim, 265 modules' STG (25.8 MB); 29 s, 0.25 GB |
+| the same for `--package base` | `base-own.tar`: 241 interfaces, 241 modules' STG (`stg/base-4.22.0.0-3875/`); control 0 of 23; 14 s, 0.24 GB |
+| `HSI_OWN_TARS=ghc-internal-own.tar:base-own.tar bin/hsi check --libs own --corpus samples --only samples/Hello,samples/Classes,samples/Arrays` (ARBACE_MEM_GIB=1, one front-end shard at 1.2 GiB; hs-p22's hsi executable, its `simd.ae` one change behind) | 507 own interfaces, 506 modules' STG from the tars; Hello `:libs :own` pass, Arrays `:libs :pack` pass, Classes `:libs :own` "runtime: out of memory" at the 1 GiB cap (passes at 2 GiB in the light runs): exit 1 for it alone; 1m19, 0.7 GB |
+
+### Night commands (not run; one at a time, in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+The steps' commands by hand, their outputs where the gate would keep them (`O=$PWD/.tmp/p29/outs`); once the branch is in `next`, the
+night's `bin/gate --full` runs the same as steps (about 2.5 hours for the five).
+
+1. `mkdir -p $O/haskell-lib-check-own && env LIB_CHECK_POOL_OUT=$O/haskell-lib-check-own bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn`
+   (13-21 min, 1.0-1.8 GB): ghc-internal's pool with this elaborator (review 1111b's multi-guard change judged too).
+2. `mkdir -p $O/haskell-lib-own-base && env LIB_CHECK_DEP_POOL_TAR=$O/haskell-lib-check-own/ghc-internal-pool.tar LIB_CHECK_POOL_OUT=$O/haskell-lib-own-base bin/repr-haskell lib-check --package base --ifaces own --judge test/haskell/lib-check-own-base.edn && env LIB_STG_OWN_OUT=$O/haskell-lib-own-base bin/repr-haskell lib-stg --package base --ifaces own --judge test/haskell/lib-stg-own-base-results.edn`
+   (about 10 min, 1.5 GB): `base-pool.tar`, `base-own.tar`.
+3. `mkdir -p $O/haskell-lib-stg-own && env LIB_STG_OWN_POOL_TAR=$O/haskell-lib-check-own/ghc-internal-pool.tar LIB_STG_BASE_POOL_TAR=$O/haskell-lib-own-base/base-pool.tar LIB_STG_OWN_OUT=$O/haskell-lib-stg-own LIB_STG_REPLACE=all bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`
+   (about 35 min: the front end 11-21 min at 1.9 GB, run-check twice with hsi at 2 GiB): the module rows and `{:runs :all}` judged,
+   `ghc-internal-own.tar`. If a row moved with the elaborator: the same with `--record` for that file, reviewed before committing.
+4. `bin/heavy-lock env ARBACE_MEM_GIB=16 HSI_OWN_TARS=$O/haskell-lib-stg-own/ghc-internal-own.tar:$O/haskell-lib-own-base/base-own.tar bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record`
+   (about 10 GiB, 60-75 min; the front end 4 shards of 1.5 GiB first): `check-hsi-own.edn` re-recorded whole (nofib with it; the
+   INTERIM mark dropped), so crops-score counts it; `:untried-cap` settled; then the same with `HSI_OWN_FALLBACK=try` and no
+   `--record` (about 45 min): a listed program that passes leaves `own-fallback.txt`.
+5. `bin/heavy-lock env ARBACE_MEM_GIB=16 HSI_OWN_TARS=... bin/hsi check --aot --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 2 --record`
+   (8 GiB, about 2 hours: the own libraries' closures compiled once per image key, then each program's build): `check-hsi-aot-own.edn`,
+   the own AOT cases.
+6. `bin/crops-score --record && bin/crops-score --judge --strict && bin/reap`: Haskell's independence moves (projected 80.6 after 4,
+   about 85 after 5); the scores' commit names the records' commit.
+
+### Proposal
+
+- **HF10-P31 The eval and AOT cells' source.** `bin/reap`'s Haskell eval and AOT cells read `check-hsi.edn` and `check-hsi-aot.edn`,
+  the pack's records (`--libs pack`, by hand); since P29 the gate runs `--libs own`, so the cells' records are no longer what the
+  gate's step runs, and crops-score counts the own cases from a second record. (a) **after the night's whole own records, the cells
+  read `check-hsi-own.edn` and `-aot-own.edn` (every program of the corpora, `:libs own|pack` a line; the same classes with
+  `divergences-own.edn` beside), `check-hsi.edn` kept as the own judge's pack reference (recorded with the pack by hand, as the oracle
+  tier's comparison, P27); crops-score's `:case-inputs` then the cell's own source**; half a day, a reap record; keys unmoved (crop
+  paths). (b) keep two records, the cell on the pack's (the gate's step and the cell disagree on 420 programs' library set). *Recommended:
+  (a)*.

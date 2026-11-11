@@ -50,7 +50,10 @@
 # default own: ghc-internal's, its wired-in Prim and base's pools, HF10-P21 (a)), LIB_STG_REUSE=1 (the last run's STG and results kept, --run alone), LIB_STG_SIDES=own (--ifaces own --run:
 # the own side alone, the ghc0 side's last results kept; HF10-P20's bisection), LIB_STG_REF (GHC's -O0 STG, a directory of
 # PKG/M.stg.ae; default the pack haskell-stg-libs-O0-ghc-9.14.1; LIB_STG_LIVE=1: .tmp/hsi/dumps-O0/stg, made when missing by
-# HSI_DUMP_OPT=-O0 bin/hsi dumps, GHC live), HSI_LIBS (the other packages' STG; default the pack haskell-stg-libs, bin/hsi libs-pack -O2), LIB_CHECK_TIMEOUT.
+# HSI_DUMP_OPT=-O0 bin/hsi dumps, GHC live), HF10-P29 (a)'s gate step haskell-lib-stg-own: LIB_STG_OWN_POOL_TAR (ghc-internal's
+# pool as haskell-lib-check-own kept it: the closures in .tmp checked against it, made again when they differ),
+# LIB_STG_BASE_POOL_TAR (--run: base's pool as haskell-lib-own-base kept it), LIB_STG_OWN_OUT (DIR/PKG-own.tar: the own
+# interfaces and STG, hsi check --libs own's HSI_OWN_TARS), HSI_LIBS (the other packages' STG; default the pack haskell-stg-libs, bin/hsi libs-pack -O2), LIB_CHECK_TIMEOUT.
 # Work in .tmp/repr-haskell/lib-stg/ (stg/: the modules' own STG; results.edn, summary.txt; libs-ghc/, libs-own/: the
 # run's library sets; replaced.txt: each replaced module's own and kept bindings; run-ghc/, run-own/: run-check's results).
 set -euo pipefail
@@ -88,6 +91,26 @@ if [ "$pkg" != ghc-internal ]; then
 fi
 if [ "$ifaces" = own ]; then
   w=$root/.tmp/repr-haskell/lib-stg-own; [ "$pkg" = ghc-internal ] || w=$w/$pkg
+  # HF10-P29 (a): LIB_STG_OWN_POOL_TAR=TAR (the gate's haskell-lib-stg-own: haskell-lib-check-own's output, GATE_OUTS): the
+  # closures lib-check --ifaces own left in .tmp are this run's only when their pool is that tar's, byte for byte; else (the
+  # producer skipped at its key, the checkout's .tmp of another state) lib-check --ifaces own makes them again (no judge,
+  # about 15 minutes, 1.8 GiB), and they must then agree (a pool that does not is not deterministic: the run fails)
+  if [ -n "${LIB_STG_OWN_POOL_TAR:-}" ]; then
+    [ "$pkg" = ghc-internal ] || { echo "lib-stg: LIB_STG_OWN_POOL_TAR is ghc-internal's (base's closures are made by its own step's lib-check)" >&2; exit 2; }
+    [ -f "$LIB_STG_OWN_POOL_TAR" ] || { echo "lib-stg: no $LIB_STG_OWN_POOL_TAR (haskell-lib-check-own's own pool)" >&2; exit 1; }
+    mkdir -p "$w"
+    own_pool_same() {
+      [ -s "$own/plan.txt" ] && [ -d "$own/pool" ] &&
+        tar -C "$own" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf "$w/pool-now.tar" pool &&
+        cmp -s "$w/pool-now.tar" "$LIB_STG_OWN_POOL_TAR"
+    }
+    if own_pool_same; then echo "== lib-stg: the own closures in .tmp are the producer's pool's ($(basename "$LIB_STG_OWN_POOL_TAR"))" >&2
+    else
+      echo "== lib-stg: the own closures in .tmp are not the producer's pool's: lib-check --ifaces own makes them again" >&2
+      "$root/bin/lib/repr-haskell/lib-check" --ifaces own > "$w/lib-check-again.log" 2>&1 || true
+      own_pool_same || { tail -5 "$w/lib-check-again.log" >&2; echo "lib-stg: lib-check --ifaces own made a pool other than $LIB_STG_OWN_POOL_TAR" >&2; exit 1; }
+    fi
+  fi
   [ -s "$own/plan.txt" ] || { echo "lib-stg --ifaces own: no own closures ($own/plan.txt): bin/repr-haskell lib-check --ifaces own first" >&2; exit 1; }
 fi
 mkdir -p "$w"
@@ -155,6 +178,23 @@ if [ -f "$out/stg/$unit/$ctl.stg.ae" ] && [ -f "$ref/$pkg/$ctl.stg.ae" ]; then
   echo "lib-stg: the negative control ($ctl, its reference rotated): $c" | tee -a "$w/summary.txt"
   case $c in "control 0 of "*) ;; *) echo "lib-stg: the negative control found equal bindings: the judge does not tell bindings apart" >&2; exit 1 ;; esac
 elif [ -n "$judge" ]; then echo "lib-stg: the negative control ($ctl) not run: no STG or reference" >&2; exit 1
+fi
+# HF10-P29 (a): LIB_STG_OWN_OUT=DIR (--ifaces own): the package's own interfaces and STG kept as DIR/PKG-own.tar, one
+# deterministic tar of pool/ (lib-check --ifaces own's), wired/ (ghc-internal's GHC.Internal.Prim, primops.txt.pp's) and
+# stg/UNIT/ (this run's STG of every module): the gate step's output that bin/hsi check --libs own reads (HSI_OWN_TARS)
+if [ -n "${LIB_STG_OWN_OUT:-}" ]; then
+  [ "$ifaces" = own ] || { echo "lib-stg: LIB_STG_OWN_OUT is --ifaces own's" >&2; exit 2; }
+  if [ -n "$(ls "$out/stg/$unit" 2>"$w/own-out.err" | grep '\.stg\.ae$')" ] && [ -n "$(ls "$own/pool" 2>>"$w/own-out.err")" ]; then
+    so=$w/own-out; rm -rf "$so"; mkdir -p "$so/stg"
+    cp -r "$own/pool" "$so/pool"; mem=(pool stg)
+    if [ "$pkg" = ghc-internal ] && [ -d "$own/wired" ]; then cp -r "$own/wired" "$so/wired"; mem+=(wired); fi
+    cp -r "$out/stg/$unit" "$so/stg/$unit"
+    mkdir -p "$LIB_STG_OWN_OUT"
+    tar -C "$so" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf "$LIB_STG_OWN_OUT/$pkg-own.tar.part" "${mem[@]}" &&
+      mv "$LIB_STG_OWN_OUT/$pkg-own.tar.part" "$LIB_STG_OWN_OUT/$pkg-own.tar" || st=1
+    echo "lib-stg --ifaces own: $(ls "$so/pool" | wc -l) own interfaces and $(ls "$so/stg/$unit" | wc -l) modules' own STG kept in $LIB_STG_OWN_OUT/$pkg-own.tar"
+    rm -rf "$so"
+  else echo "lib-stg: LIB_STG_OWN_OUT: no own STG in $out/stg/$unit or no own pool in $own/pool" >&2; st=1; fi
 fi
 [ -n "$run" ] || exit $st
 
@@ -237,7 +277,12 @@ if [ "$ifaces" = own ]; then
   # ghc-prim and ghc-bignum reexport their modules, reexports.edn names them); LIB_STG_PROG_IFACES=ghc-internal: ghc-internal's
   # pool alone over the pack's, as before
   over=$own/pool
-  if [ "${LIB_STG_PROG_IFACES:-own}" = own ]; then
+  if [ "${LIB_STG_PROG_IFACES:-own}" = own ] && [ -n "${LIB_STG_BASE_POOL_TAR:-}" ]; then
+    # HF10-P29 (a): base's pool from the gate's producer (haskell-lib-own-base's output, GATE_OUTS), unpacked here
+    [ -f "$LIB_STG_BASE_POOL_TAR" ] || { echo "lib-stg: no $LIB_STG_BASE_POOL_TAR (haskell-lib-own-base's own pool)" >&2; exit 1; }
+    rm -rf "$w/base-pool"; mkdir -p "$w/base-pool"; tar -C "$w/base-pool" -xf "$LIB_STG_BASE_POOL_TAR"
+    over=$own/pool:$own/wired:$w/base-pool/pool
+  elif [ "${LIB_STG_PROG_IFACES:-own}" = own ]; then
     ob=$root/.tmp/repr-haskell/lib-check/own/base
     [ -s "$ob/plan.txt" ] || { echo "lib-stg --ifaces own --run: no base pool ($ob): bin/repr-haskell lib-check --package base --ifaces own first (LIB_STG_PROG_IFACES=ghc-internal: ghc-internal's alone)" >&2; exit 1; }
     over=$own/pool:$own/wired:$ob/pool
