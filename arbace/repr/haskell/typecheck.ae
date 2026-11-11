@@ -1924,7 +1924,9 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Matches, guards, bindings
 
-(def ^:dynamic *guard-w* nil) ; atom: the wanteds' index at the first pattern guard that gives equalities
+;; atom [[WI GIVENS-BEFORE]...]: at each pattern guard that gives equalities, the wanteds' index and the givens in force
+;; before it (review 1111b, finding 1: each stretch of wanteds rewritten by the givens it was made under)
+(def ^:dynamic *guard-w* nil)
 
 (defn- infer-guards
   "Guard statements, then the body: [env core-guards]"
@@ -1936,9 +1938,11 @@
                 BindStmt (let [[te ce] (infer env (arg v 3))
                                wi (count @*wanteds*) before (some-> *given-eqs* deref)
                                [env1 pc] (tc-pat env (arg v 2) te)]
-                           ;; HF10-P20: the first pattern that gives equalities: the wanteds made before it (its scrutinee's,
-                           ;; eqT's heqT @a @b) are outside its implication (infer-grhss rewrites from here)
-                           (when (and *guard-w* (nil? @*guard-w*) (not= before (some-> *given-eqs* deref))) (reset! *guard-w* wi))
+                           ;; HF10-P20: a pattern that gives equalities: the wanteds made before it (its scrutinee's,
+                           ;; eqT's heqT @a @b) are outside its implication; review 1111b (finding 1): every such pattern
+                           ;; recorded with the givens before it, so a second guard's scrutinee is not rewritten by its own
+                           ;; pattern's equalities (infer-grhss rewrites stretch by stretch)
+                           (when (and *guard-w* (not= before (some-> *given-eqs* deref))) (swap! *guard-w* conj [wi (or before {})]))
                            ;; review 1111 (2): the wanteds made before the pattern under the same scope (the clause had
                            ;; givens, so they hold *given-eqs*' atom itself) keep the givens they were made under, a
                            ;; snapshot, not the atom the pattern just added its equalities to (under-givens rewrites by :geqs)
@@ -1952,7 +1956,7 @@
                 (do (error! "guard not handled: " (con v)) [env gs]))))
           [env []] stmts))
 
-(declare rewrite-wanteds!)
+(declare rewrite-wanteds! rewrite-wanteds-by-stretch!)
 
 (defn infer-grhss
   "(GRHSs ext [GRHS...] localbinds) against result type r: core"
@@ -1963,11 +1967,14 @@
         ;; `Just HRefl <- ta `eqTypeRep` tb`, rewrote tb's Typeable b wanted, made in the where clause, to Typeable a)
         alts (with-ips env1 (mapv (fn [g]
                      (let [outer (some-> *given-eqs* deref) w0 (count @*wanteds*)]
-                       (binding [*given-eqs* (atom (or outer {})) *guard-w* (atom nil)]
+                       (binding [*given-eqs* (atom (or outer {})) *guard-w* (atom [])]
                          (let [gv (lval g)
                                [env2 gs] (infer-guards env1 (arg gv 2))
                                c (check-expr env2 (arg gv 3) r)]
-                           (when (not= (or outer {}) @*given-eqs*) (rewrite-wanteds! (or @*guard-w* w0)))
+                           (when (not= (or outer {}) @*given-eqs*)
+                             (if-let [segs (seq @*guard-w*)]
+                               (rewrite-wanteds-by-stretch! (vec segs) @*given-eqs*)
+                               (rewrite-wanteds! w0)))
                            (if (empty? gs) c (list 'guarded gs c))))))
                    (arg grhss 2)))
         body (if (and (= 1 (count alts)) (not (and (seq? (first alts)) (= 'guarded (first (first alts)))))) (first alts) (list 'guards alts))]
@@ -1987,6 +1994,22 @@
   (swap! *wanteds* (fn [ws] (into (subvec ws 0 (min w0 (count ws)))
                                   (map (fn [w] (update w :pred (fn [[c ts]] [c (mapv rewrite-by-givens ts)])))
                                        (subvec ws (min w0 (count ws))))))))
+
+(defn- rewrite-wanteds-by-stretch!
+  "Review 1111b (finding 1): segs [[WI GIVENS-BEFORE]...], one per equality-giving pattern guard of a GRHS in order. The
+  wanteds from WI_k to WI_k+1 were made after pattern k and before pattern k+1 (pattern k's own, the next scrutinee's):
+  rewritten by the givens before pattern k+1; the last stretch by the GRHS's final givens (GHC's nested implications,
+  one per pattern guard: a scrutinee's wanteds sit outside its own pattern's implication)"
+  [segs final]
+  (let [n (count @*wanteds*)]
+    (dotimes [k (count segs)]
+      (let [from (min n (first (nth segs k)))
+            to (if (< (inc k) (count segs)) (min n (first (nth segs (inc k)))) n)
+            gm (if (< (inc k) (count segs)) (second (nth segs (inc k))) final)]
+        (when (< from to)
+          (binding [*given-eqs* (atom gm)]
+            (swap! *wanteds* (fn [ws] (reduce (fn [ws i] (update-in ws [i :pred] (fn [[c ts]] [c (mapv rewrite-by-givens ts)])))
+                                              ws (range from to))))))))))
 
 (defn- settle-givens!
   "The pending givens of the scope g canonicalised again (those whose sides became known), still unknown ones left
