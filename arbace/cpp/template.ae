@@ -1714,6 +1714,19 @@
               (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e)))
               :else scope)))))
 
+(defn- ool-class-template
+  "The class template an out-of-line member's qualifier `qt` (`any::_Manager_internal<_Tp>`, as ool-qualifier gives it)
+  names by `cn`: looked up unqualified, else through the qualifier's plain names before it (a member template of a class,
+  cpp-s5: <any>'s any::_Manager_internal<_Tp>::_S_manage)."
+  [scope cn qt]
+  (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn))
+      (let [pre (when (string? qt) (second (re-find #"^((?:[A-Za-z_][A-Za-z_0-9]*::)+)[A-Za-z_][A-Za-z_0-9]*<" qt)))
+            parts (when pre (conj (vec (remove str/blank? (str/split pre #"::"))) cn))]
+        (when parts
+          (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %))
+                (try (sema/lookup-qualified scope parts) (catch arbace.lang.ExceptionInfo _ nil)))))
+      (fail :template "no class template " cn)))
+
 (defn- attach-one!
   "An out-of-line member definition `o` given to the class `cid`, made from the primary (its arguments bound to the
   header's names) or from a partial specialization (its deduced arguments, `pb` [params args])."
@@ -2188,7 +2201,7 @@
     (if (re-find #"^\s*template\s*<\s*>" text)
       (let [cls (sema/resolve-type scope qt)]
         (attach-member-template! (:id cls) {:node n :pnames []} []))
-      (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
+      (let [tid (ool-class-template scope cn qt)
             o {:node n :pnames (header-params text)}]
         (upd-tmpl! tid update :ool-tmpls (fnil conj []) o)
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-member-template! cid o (:params (tmpl tid)))))))
@@ -2252,9 +2265,9 @@
   [scope n]
   (case (:kind n)
     "ClassTemplateDecl"
-    (if-let [[cn _ nested] (when (:completeDefinition (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))) (ool-qualifier n))]
+    (if-let [[cn qt nested] (when (:completeDefinition (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))) (ool-qualifier n))]
       ;; a member class of a class template defined outside it (G5: basic_ostream<_CharT, _Traits>::sentry)
-      (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
+      (let [tid (ool-class-template scope cn qt)
             o {:k :class :node (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n))) :pnames (mapv :name (tparams n)) :nested nested}]
         (upd-tmpl! tid update :ool (fnil conj []) o)
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
@@ -2444,7 +2457,7 @@
         ;; a member of a class template defined outside it
         (and (re-find #"^\s*template\s*<\s*[^>\s]" text) (ool-class-name n))
         (let [[cn qt] (ool-qualifier n)
-              tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
+              tid (ool-class-template scope cn qt)
               t (tmpl tid)
               pnames (header-params text)
               o {:k (if (= "VarDecl" (:kind n)) :var :fn) :node n :pnames pnames :nested (nth (ool-qualifier n) 2 nil)}
