@@ -3626,3 +3626,25 @@ when the build failed: `gen`, `mod`); `HSI_KEEP_BINS=1` keeps them. Nothing read
 generated packages `.tmp/hsi/aot/lib/` (shared, built once per runtime and image) stay. Test (day, `--jobs 1`, no `--record`, samples/Arrays,
 Classes, Cont, Deadlock): progs 272 MB with HSI_KEEP_BINS=1, 271 KB without; verdicts 4 of 4 pass as recorded; peak 1.1 GiB; a second run
 rebuilt and passed. Alternative considered: deleting the whole `aot/` dir (also drops the small logs and the key: kept for debugging).
+
+## 2026-11-11: cpp-n12, night 11's C++ failures: cpp-route's records, `:threads` widened, the dg tree's gcc.dg/cpp (branch `cpp-n12`, from `mac/next` `a7e6c4f03`)
+
+From `.tmp/night12/DIAGNOSIS-N11.md` (rows cpp-route, rejected/cpp-dg, lb-dg-ref):
+- cpp-route's flip (0a38cd982, the default route auto) moved `runtime/threads.cpp` at both levels from the `__clone` shape to
+  `fail differ status 139 ... segmentation fault (thread 1004: _ZL4worki ...)`: the started thread faults in its body, the same
+  unproven thread start on ci's threads that `:threads` defers (rust-re6's "not yet proven on ci"). `test/cpp/divergences.edn`'s
+  `:threads` takes a third `:match`, `#"^fail differ status 139 .*segmentation fault \(thread \d+: _ZL4worki"` (the AOT level is judged by
+  the same file: `divergences-aot.edn` is empty). Alternative considered: a class of its own; rejected, the diagnosis names it one cause.
+- The slot's records, swept into the rejected cpp-dg commit (`.tmp/night11/rejected/cpp-dg/tracked.diff`): only its eight
+  `test/cpp/check{,-aot}{,-every-25}{,-times}-linux-amd64.edn` applied (they apply on next as is). Not taken: `ref-dg-gxx15.edn`,
+  `dg-times.edn`, `dg-preprocess-results.edn` (recorded in the tree with no gcc.dg, below) and hs-props' two Haskell files. The s25 rows:
+  vbase8-10, embed-26, init/vector1 and torture/vshuf-v16hi oracle-rejected -> ours-refused (in class), defaulted19a and special/initp1
+  now pass; runtime/atomics.cpp passes; thread-throw.cpp's terminate shape stays in `:threads`. `bin/reap --record`.
+- lb-dg-ref: g++.dg/cpp/elifdef-2.C and -4.C include `../../gcc.dg/cpp/c23-elifdef-1.c`; pp-check extracted only g++.dg, g++.old-deja and
+  c-c++-common into `.tmp/cpp-gcc`, which `bin/lib/repr-cpp/dg` preferred. `bin/lib/repr-cpp/pp-check` now extracts
+  `gcc/testsuite/gcc.dg/cpp` too (about 1 MB), and adds it alone to a tree extracted before (marker `.extracted-gcc-dg-cpp`, set when tar
+  succeeds); `dg` takes first a candidate tree with its sibling `gcc.dg/cpp`, then any. Check: `bin/repr-cpp dg --corpus preprocess --only`
+  the two files (no toolchain at this part): pass 2 of 2, as recorded (the main checkout's `.tmp/repr-c` tree, this worktree having no
+  `.tmp/cpp-gcc`).
+- Not done here, left by the slot (diagnosis): independence.edn's own-route cases (the slot's `ours` counter printed 0; read the `route`
+  files first). Checks: `bin/reap` 0 problems (41 of 44 cells), `bin/crops-score --record`, `--judge --strict` exit 0.
