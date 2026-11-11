@@ -6018,3 +6018,40 @@ methods, 37 pass, `:testcapi` 1,154; test_call 189, 7 pass, `:testcapi` 130; tes
 import or require `_testcapi` first, so they stay `:testcapi`: this task's proof is its two probes against python3
 3.14.10's own `_testlimitedcapi` (49 and 84 lines equal on the head; on the base the first stops at the missing types and
 the second differs in 133 lines).
+
+## As built: 261, the rest of `:ctypes-port` by cause, and the packed structs (2026-11-11, the Mac VM, queue 261)
+
+244's follow-ups 2 and 4 (the VM's proposal P2), on 260's buffer export and 268's C API; ported from CPython 3.14.10's
+`Modules/_ctypes` (`_ctypes.c`, `cfield.c`, `stgdict.c`, `callproc.c`) and `Python/frozen.c`.
+
+- **from_buffer shares memory** (`CDataType_from_buffer_impl`): a memoryview of the object (kept in `_objects`, so the
+  exporter refuses a resize while the ctypes object lives; "underlying buffer is not writable", "not C contiguous", the
+  memoryview's own TypeError for a non-buffer), and its bytes mapped into the C world in place (`world.ae`'s `mapGo`: a
+  slab of the mappings' region whose bytes are the buffer's own Go slice, unmapped once the ctypes object is collected).
+  C, the ctypes object and Python see each other's writes, as in CPython. `from_address` of a Python buffer's address
+  stays by design: `array.buffer_info()` gives a Go address, no address of the world.
+- **cast() shares b_objects** with its source (a dict made when it is None, the source kept in it by its id).
+- **PyCStgInfo_clone does not share the pointer type cache** (a subclass's `POINTER()` is its own); the swapped simple
+  types get a StgInfo of their own.
+- **The metatypes' `__init__`** runs `type_init`'s argument checks before `PyStgInfo_Init` ("type.__init__() takes 1 or 3
+  arguments"), and `PyCSimpleType_init` makes the swapped types when the class's metatype is `PyCSimpleType` itself
+  (not when its base is `_SimpleCData`).
+- `_length_`'s sign before its overflow; `d_set`, `f_set` and the C API's float conversions by `PyFloat_AsDouble` (a str is
+  a TypeError, "must be real number, not str"); ctypes' private errno by thread (`get_errno`/`set_errno` and
+  `use_errno`'s swap, CPython's thread state dict); `CField.bit_size` a Python int past Py_ssize_t (gh-126937).
+- **pythonapi's data symbols**: `Py_OptimizeFlag` (sys.flags.optimize) and `_PyImport_FrozenBootstrap`, `_PyImport_FrozenStdlib`,
+  `_PyImport_FrozenTest` (frozen.c's `const struct _frozen *`, made from pyi's frozen modules: name, marshalled code, size,
+  is_package, a zero entry last), made in the world's memory on their first lookup (`pyDataSymbol`).
+- Structure's, Union's, Array's and _Pointer's repr is object's, naming the instance's class (pyi's inherited slot was handed
+  the built-in value).
+
+**The packed structs.** ms_struct (c-props4) and `#pragma pack` in a function body of the main file (CS290 (a)) are
+honoured by ci: test_bitfields' msvc mode passes. test_generated_structs' Packed1-3 and four Example_gh_* structs still
+differ: `_ctypes_test_generated.c.h`'s function is in an *included* file, and ci ignores a `#pragma pack` inside a function
+body there (gcc: 9 and 12 bytes; ci: 16 and 16; probe in queue 261's report). A REQUEST for the C crop; ctypestest is
+rebuilt after it (no C of the world changed in 261).
+
+**Left in `:ctypes-port`** (test_ctypes, sampled): test_generated_data (the C crop's); by design: test_numbers' three
+`from_address` tests (Go memory), the issue18060 tests (an ABI coincidence ci's convention does not share),
+test_c_char_p (sys.getrefcount); test_audit's test_ctypes_call_function (sys.addaudithook is a no-op in pyi).
+test_pointer_types_factory moved to `:finalization-collect` (pyi collects no class, a plain one too).
