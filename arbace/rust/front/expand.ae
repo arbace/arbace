@@ -335,8 +335,11 @@
               za (max (long a) (long (or z a)))
               fa0 (at (:fspans seg) a) fz0 (at (:fspans seg) za)
               ma (at (:mvspans seg) a) mz (at (:mvspans seg) za)
+              ;; RF13c: a span of one substituted token (`$($arg)*`'s `is_reading`, a literal through `$t:tt`) keeps the
+              ;; token's own place (maybe_use_metavar_location returns the token unchanged without a collision)
+              multi? (and (not= a za) (not (and ma (identical? ma mz))))
               file5 (fn [x] (when (and (vector? x) (= 5 (count x))) x))
-              fa (or fa0 (when (not= a za) (file5 ma)))
+              fa (or fa0 (when multi? (file5 ma)))
               fz (if (and (file5 mz) fa (= (first fa) (first mz)) (or (nil? fz0) (not= (first fz0) (first fa)))) mz fz0)
               rn (.-n ^Src (:root-src @*virtual*))
               root-tok (fn [^Tok t] (when (and t (<= 0 (.-lo t)) (<= (.-hi t) rn)) t))
@@ -344,9 +347,9 @@
           (cond (and fa fz (= (first fa) (first fz))) [(fa 0) (fa 1) (fa 2) (fz 3) (fz 4)]
                 (and oa oz) (let [rs (:root-src @*virtual*) [x1 y1] (lx/span-vec rs (.-lo oa) (.-hi oa)) [_ _ x2 y2] (lx/span-vec rs (.-lo oz) (.-hi oz))
                                   ;; the end a substituted identifier with its metavariable's place in the root file
-                                  [x2 y2] (if (and (vector? mz) (= 4 (count mz)) (not= a za)) [(mz 2) (mz 3)] [x2 y2])
+                                  [x2 y2] (if (and (vector? mz) (= 4 (count mz)) multi?) [(mz 2) (mz 3)] [x2 y2])
                                   ;; and the start likewise
-                                  [x1 y1] (if (and (vector? ma) (= 4 (count ma)) (not= a za)) [(ma 0) (ma 1)] [x1 y1])]
+                                  [x1 y1] (if (and (vector? ma) (= 4 (count ma)) multi?) [(ma 0) (ma 1)] [x1 y1])]
                               [x1 y1 x2 y2])
                 ;; a builtin's tokens (a derive's, format_args!'s): the expansion's call site, as their spans are
                 (and (nil? fa) (nil? oa))
@@ -463,12 +466,34 @@
                 (when (and (seq? idf) (str/starts-with? (str (second idf)) "__rf_g")) (second idf)))))
       nil)))
 
+(defn- offset-of-fields
+  "RF13e: parse_floating_field_access over an expression fragment (offset_of!'s `$($fields:expr)+`): its field chain's
+  idents (`Some.0`: Some, 0), as the parser takes them from the nonterminal's expression; nil when it is not one"
+  [ast]
+  (loop [cur ast out ()]
+    (let [k (when (and (seq? cur) (= 'Expr (first cur))) (nth cur 2 nil))]
+      (cond (and (seq? k) (= 'Field (first k))) (recur (nth k 1) (cons (nth k 2) out))
+            (and (seq? k) (= 'Lit (first k)) (= 'Integer (:kind (apply hash-map (rest (second k))))))
+            (cons (list 'id (str (:symbol (apply hash-map (rest (second k)))))) out)
+            (and (seq? k) (= 'Path (first k)) (= 'None (second k)))
+            (let [segs (:segments (apply hash-map (rest (nth k 2 nil))))]
+              (when (= 1 (count segs)) (cons (:ident (apply hash-map (rest (first segs)))) out)))
+            :else nil))))
+
 (defn cout
   "The parser's tree out of an assembled array, as the dump writes it, the fragments put back"
   [ctx x]
   (let [^Src src (:src ctx) ed (long (:ed *root*)) frags @*frags*]
     (letfn [(o [x]
-              (cond (seq? x) (let [y (apply list (map o x))]
+              (cond (and (seq? x) (= 'OffsetOf (first x)) (vector? (nth x 2 nil)))
+                    ;; RF13e: a field that is an expression fragment: its chain's idents in its place
+                    (let [y (apply list (map o x))]
+                      (apply list (concat (butlast y)
+                                          [(vec (mapcat (fn [f] (or (when (and (seq? f) (= 'id (first f)) (str/starts-with? (str (second f)) "__rf_g"))
+                                                                      (some-> (get frags (str (second f))) :ast offset-of-fields))
+                                                                    [f]))
+                                                        (last y)))])))
+                    (seq? x) (let [y (apply list (map o x))]
                                (if-let [nm (frag-name y)]
                                  (if-let [f (get frags nm)]
                                    ;; RF12: a type fragment keeps its placeholder's place (the metavariable's, for an impl's def_span)
@@ -930,9 +955,21 @@
   root tokens in one run)"
   [items]
   (let [fl (flat items (java.util.ArrayList.))
-        toks (map :t fl)]
+        toks (map :t fl)
+        ;; RF13b: the root tokens the items came from (a fragment's own items, a transcribed token's :orig), in order
+        roots (letfn [(rts [fl] (mapcat (fn [it] (cond (and (:frag it) (:items it)) (rts (flat (:items it) (java.util.ArrayList.)))
+                                                       (:frag it) [nil]
+                                                       :else [(item-orig it)]))
+                                        fl))]
+                (vec (rts fl)))
+        root-run? (and (seq roots) (every? some? roots)
+                       (every? (fn [[^Tok a ^Tok b]] (<= (.-hi a) (.-lo b))) (partition 2 1 roots)))]
     (cond
       (and (= 1 (count fl)) (:frag (first fl))) (or (:text (first fl)) "")
+      ;; a run of the root's tokens passed on by a macro (`debug_assert!(is_reading(borrow))`): their text
+      (and root-run? (not (every? #(>= (.-lo ^Tok %) 0) toks)))
+      (let [^Tok a (first roots) ^Tok b (peek roots)]
+        (str/replace (lx/text-of (root-src) (.-lo a) (.-hi b)) #"\s+" " "))
       (some :frag fl) (str/join " " (map #(if (:frag %) (or (:text %) "") (tok-text (:t %))) fl))
       (and (seq toks) (every? #(>= (.-lo ^Tok %) 0) toks))
       (let [^Tok a (first toks) ^Tok b (last toks)

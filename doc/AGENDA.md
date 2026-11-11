@@ -155,7 +155,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
 
 - C: `c-props3` (CS294, CS295). C++: `cpp-props4` (CP320-CP324), `cpp-route` (CP240 (b)), `cpp-codegen-fix` (the vtables
   in a deterministic order, the codegen record 149 of 149: `cpp-codegen-gen` fails on `next` without it).
-- Haskell: `hs-p3` (HF10-P3, the own interfaces). Rust: `rust-rf11` (RF11's first slice).
+- Haskell: `hs-p3` (HF10-P3, the own interfaces). Rust: `rust-rf11` (RF11's first slice); `rust-rf13` (RFP42-RFP47's light
+  parts: virtual calls and vtables, codegen's gaps, `panic-vec-remove`; the UI sampling and std's remapping for the night);
+  `rust-rf13b` (core's bodies: RF12-P6's six left all equal, core-check 5,398 equal of the 37 modules' bodies, 5,108 before).
+  `rust-rf13c` (core's bodies: core-check 5,474 equal, the refusals 117 to 63; RFP52 proposed, the interface pass's extra files).
 - OCaml: `ocaml-indep2` (2026-11-10, on `ocaml-indep`: night 10's native-path gaps, TYPER.md §27: the C stubs classed, nondep,
   -safer-matching, Tmc's [@tailcall], id_pos_list, the -I units' shadowing) and `ocaml-indep3` on it (TYPER.md §28: Ctype's
   pattern mode, is_instantiable, mcomp, reify, record_equation; the or-pattern's equations scoped: immediate64 and sexplib0
@@ -199,7 +202,25 @@ items below are the ones whose work is still ahead or tied to a night.
 - **Haskell** ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md)): HES83 (b) (the own verdict where a
   `.stdout` ships, GHC's references at the oracle tier); HF9-P7 with slice 7; HF10-P20 to P27 (above, the plan's stages 2-9); HF10's lib-stg
   measures on night 11; `bin/gate --full --plan` to confirm `haskell-lib-own-base` plans after `haskell-lib-check-own`.
-- **Rust** ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md)): RF11, RF12 (RES54's ceiling until it); RFP29 (a) later.
+- **Rust** ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md)): RF11, RF12 (RES54's ceiling until it); RFP29 (a) later;
+  RFP42 (a), RFP45 (a), RFP47 (a) and RFP46 (a)'s whole run at night ("As built: RF13 (first slice)", its night commands);
+  core-check 5,576 equal at RF13e ("As built: RF13e": 5,551 by its causes, then RFP52 (a)'s interface list; rust-rf13e on
+  rust-rf13d, which carries rust-rf13b's fix and RF13c); RFP52 (a) decided by the user 2026-11-10 (with RFP48-RFP61,
+  RF12-P8), its rest (aliases, CopySpec, Drain, ascii::Char) left. RF14 (`rust-rf14` on rust-rf13e, "As built: RF14 (RFP48)"):
+  RFP48 (a) built (trait resolution in mono: impls, specialization's leaf, default bodies, the Fn traits' builtin candidates;
+  the native callees of the synthetic corpus 3,503 -> 4,079 of about 4,500, vtables 0 -> 25 of 32) and RFP49 (a)'s first part
+  (the local non-generic instances std's bodies reach): 48 of 67 synthetic programs own (47). RF15 (`rust-rf15` on rust-rf14,
+  "As built: RF15"): RFP49 (a)'s rest (generic local instances: our bodies instantiated; std's vtables' local functions),
+  promoted constants (operators, casts, strings, variants, layouts), LowerSliceLenCalls, overloaded `+=`: 56 of 67 own.
+  RF16 (`rust-rf16` on rust-rf15, "As built: RF16 (RFP58 (a))"): RFP58 (a) built (repr(simd) layouts in mono, the private SIMD
+  types read from the library's sources, vectors indirect in codegen, the generic SIMD intrinsics; ci and `gate_key` unmoved),
+  the HashMap programs' next causes (a constant function pointer's call, a spread memory field, thread-local statics), promoted
+  constants further (`ptr::null`, `size_of`, checked operators and asserts, unsizing casts with vtables): 61 of 67 own.
+  RF17 (`rust-rf17` on rust-rf16, "As built: RF17"): RF16's causes (local constants and an associated constant evaluated, a
+  static with a pointer, generic closures at their parent's arguments in mono, closure types' unification and v0, std's
+  constructors' shims, `Variants::Empty`, a reified closure's ClosureOnceShim symbol): 65 of 67 own. Next: RFP62 (opaque types in
+  mono, closures' vtable entries: closures), RFP63 (upstream monomorphizations: panic-assert-eq); the night: the whole plan's
+  rsi-build, rsi-native over the own programs RF15-RF17 added, `rsi check --front own`.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
   ported, completeness 97.6.

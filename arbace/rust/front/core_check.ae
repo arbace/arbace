@@ -220,7 +220,9 @@
                                       "self" (into (vec (str/split m #"::")) r)
                                       "super" (let [ps (str/split m #"::")] (abs (into (if (> (count ps) 1) ["crate"] ["crate"]) (concat (drop 1 (butlast ps)) r))))
                                       ("core") (vec segs)
-                                      nil)))
+                                      ;; RFP52 (a): a uniform path's first name an item of the module (`use
+                                      ;; unicode_data::alphabetic::lookup as Alphabetic`): core names no other crate
+                                      (when (and f (re-matches #"[A-Za-z_][A-Za-z0-9_]*" f)) (into (vec (str/split m #"::")) segs)))))
                                 (tree [t prefix]
                                   (let [segs (into prefix (map #(second (fget % :ident)) (fget (fget t :prefix) :segments)))
                                         kk (fget t :kind)]
@@ -320,6 +322,42 @@
        (let [p (path-of (:id d))]
          (try
            (cond
+             ;; RFP52 (a): an impl the interface lacks (an inherent impl of crate-private methods: `IndexRange`'s `start`,
+             ;; a crate-private type's trait impl: `NeverShortCircuit`'s Try), its items and its functions' signatures, at
+             ;; its `{impl#N}` path in its module
+             (and (str/starts-with? (str (:kind d)) "Impl") (some? (:disamb d)))
+             (let [mp (or (path-of (:parent d)) (when (zero? (long (:parent d))) resolve/*crate-path*))
+                   ip (str mp "::{impl#" (:disamb d) "}")]
+               (if (or (nil? mp) (get (:impls si) ip))
+                 acc
+                 (let [g (collect/generics-of (:id d))
+                       [self-ty tr] (collect/impl-header (:id d))
+                       self (ty->sty self-ty path-of)
+                       trs (when tr (let [tp (if (number? (first tr)) (path-of (first tr)) (first tr))
+                                          as (mapv #(ty->sty % path-of) (second tr))]
+                                      (when (and tp (every? some? as)) (list 'trait tp as))))
+                       kids (filter #(= (:id d) (:parent %)) (collect/defs))
+                       items (vec (for [k kids :let [n (second (:data k)) kp (str ip "::" n) kk (str (:kind k))]]
+                                    (cond (= "AssocTy" kk) [n "AssocTy" kp (ty->sty (collect/type-of (:id k)) path-of)]
+                                          (= "AssocFn" kk) [n "AssocFn" kp nil]
+                                          :else [n kk kp (ty->sty (collect/type-of (:id k)) path-of)])))
+                       fns (into {} (for [k kids :when (= "AssocFn" (:kind k))
+                                          :let [kg (collect/generics-of (:id k)) sig (collect/fn-sig (:id k))
+                                                ins (mapv #(ty->sty % path-of) (:inputs sig)) out (ty->sty (:output sig) path-of)]
+                                          :when (and (every? some? ins) out (not (get (:fns si) (str ip "::" (second (:data k))))))]
+                                      [(str ip "::" (second (:data k)))
+                                       {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
+                                        :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
+                                        :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
+                                        :abi "\"Rust\"" :const (= :const (get-in (:node k) [:header :constness])) :promotable false
+                                        :nounwind false :native true}]))]
+                   (if (and self (or (nil? tr) trs))
+                     (-> acc
+                         (assoc-in [:impls ip] {:trait trs :negative false :self self :generics (generics-sty g) :parent-count 0
+                                                :has-self false :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))
+                                                :items items :native true})
+                         (update :fns merge fns))
+                     acc))))
              (nil? p) acc
              (and (= "Fn" (:kind d)) (not (get (:fns si) p)))
              (let [g (collect/generics-of (:id d)) sig (collect/fn-sig (:id d))
@@ -381,7 +419,7 @@
                                       [(str p "::" (second (:data k))) {:kind (:kind k) :ty t :native true}])))))
              :else acc)
            (catch Throwable _ acc))))
-     {:fns {} :adts {} :traits {} :consts {}} (collect/defs))))
+     {:fns {} :adts {} :traits {} :consts {} :impls {}} (collect/defs))))
 
 (defn with-native-iface
   "std's interface with core's native additions (a path the interface has keeps the interface's)"
@@ -390,7 +428,23 @@
       (update :fns #(merge (:fns native) %))
       (update :adts #(merge (:adts native) %))
       (update :traits #(merge (:traits native) %))
-      (update :consts #(merge (:consts native) %))))
+      (update :consts #(merge (:consts native) %))
+      ;; RFP52 (a): the impls the interface lacks, indexed as load-std-iface indexes its own
+      (as-> si* (reduce (fn [acc [p m]]
+                          (if (get-in si [:impls p])
+                            acc
+                            (let [self (:self m)
+                                  k (case (first self) adt (nth self 1) prim (str "prim:" (second self)) slice "prim:slice" array "prim:array"
+                                          ref "prim:ref" ptr "prim:ptr" param "param" tuple "prim:tuple"
+                                          dyn (str "dyn:" (let [pr (nth self 1)] (when (seq? pr) (nth pr 1))))
+                                          (str "other:" (first self)))
+                                  acc (assoc-in acc [:impls p] m)]
+                              (if (:trait m)
+                                (-> acc
+                                    (update-in [:trait-impls (nth (:trait m) 1)] (fnil conj []) p)
+                                    (update-in [:trait-impls-by (nth (:trait m) 1) (if (= k "param") :blanket k)] (fnil conj []) p))
+                                (update-in acc [:inherent k] (fnil conj []) p)))))
+                        si* (:impls native)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; One module file through the pipeline
@@ -463,7 +517,18 @@
                                                 (build/build-body d {:overflow-checks false :edition 2024 :root-cache (atom {})})) nil]
                                           (catch Throwable e
                                             (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
-                                            [[nm (body-key path d)] nil (str (or (:what (ex-data e)) (.getMessage e) e)) (pr-str (:x (ex-data e)))]))))))))))))))
+                                            [[nm (body-key path d)] nil (str (or (:what (ex-data e)) (.getMessage e) e)) (pr-str (:x (ex-data e)))])))))
+                              ;; RF13d: the fn's inline consts, each a body of its own (`f::{constant#N}`)
+                              (when (#{"Fn" "AssocFn"} (:kind d))
+                                (doseq [ic (try (build/inline-consts d) (catch Throwable _ nil))
+                                        :let [sfx (build/inline-const-suffix ic) inm (str nm sfx) ik (str (body-key path d) (str/replace sfx "::" "-"))]
+                                        :when (or (nil? only) (re-find only inm))]
+                                  (swap! out conj
+                                         (on-body
+                                          (try [[inm ik] (build/build-inline-const d ic {:overflow-checks false :edition 2024 :root-cache (atom {})}) nil]
+                                               (catch Throwable e
+                                                 (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
+                                                 [[inm ik] nil (str (or (:what (ex-data e)) (.getMessage e) e)) (pr-str (:x (ex-data e)))])))))))))))))))
       (catch Throwable e (when-not (::stage (ex-data e)) (swap! stages assoc :driver (str e)))))
     {:stages @stages :bodies @out :native @native}))
 
@@ -474,7 +539,8 @@
                (let [[k n] (:data d)]
                  (case k
                    :crate acc
-                   (:type :value) (recur (collect/def-of (:parent d)) (cons n acc))
+                   ;; RF13b: a second item of the same name under one parent (const_panic!'s `do_panic`s): `do_panic#1`
+                   (:type :value) (recur (collect/def-of (:parent d)) (cons (if (pos? (long (or (:disamb d) 0))) (str n "#" (:disamb d)) n) acc))
                    :impl (recur (collect/def-of (:parent d)) (cons (str "{impl#" (:disamb d) "}") acc))
                    :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
                    (recur (collect/def-of (:parent d)) acc))))]
@@ -621,7 +687,23 @@
                     (let [{:keys [native]} (binding [*collect-only* true] (run-module m table names std-file std (with-native-iface si @native-all) lib-dir identity))]
                       (when native (swap! native-all #(merge-with merge % native)))))
                   (println (format "core-check: the interface pass over %d files: %d functions, %d ADTs, %d traits (%d s)" (count iface-files)
-                                   (count (:fns @native-all)) (count (:adts @native-all)) (count (:traits @native-all)) (quot (- (System/nanoTime) t0) 1000000000)))))]
+                                   (count (:fns @native-all)) (count (:adts @native-all)) (count (:traits @native-all)) (quot (- (System/nanoTime) t0) 1000000000)))))
+            ;; RFP52 (a): the files of test/rust/front/core-iface-extra.txt (CORE_IFACE_EXTRA: another list, empty for none)
+            ;; collected in every run, before any body: the crate-private items the 37 modules name (IndexRange's methods,
+            ;; try_process, NeverShortCircuit, the unicode tables, ...)
+            extra-list (or (System/getenv "CORE_IFACE_EXTRA") "test/rust/front/core-iface-extra.txt")
+            _ (when (and (seq extra-list) (.exists (File. ^String extra-list)))
+                (let [t0 (System/nanoTime)
+                      fs (for [x (str/split-lines (slurp extra-list)) :let [x (str/trim x)] :when (and (seq x) (not (str/starts-with? x "#")))]
+                           (str lib-dir "/core/src/" x))]
+                  (doseq [f fs :let [m (get mods (.getCanonicalPath (File. ^String f)))]]
+                    (if m
+                      (let [{:keys [native]} (binding [*collect-only* true] (run-module m table names std-file std (with-native-iface si @native-all) lib-dir identity))]
+                        (when native (swap! native-all #(merge-with merge % native))))
+                      (println "core-check: core-iface-extra: not a module file:" f)))
+                  (println (format "core-check: the extra interface files (%d): %d functions, %d ADTs, %d traits, %d impls (%d s)" (count fs)
+                                   (count (:fns @native-all)) (count (:adts @native-all)) (count (:traits @native-all)) (count (:impls @native-all))
+                                   (quot (- (System/nanoTime) t0) 1000000000)))))]
         ;; CORE_IFACE_ONLY=1: the interface pass alone (its native-iface.edn for a later CORE_IFACE=cache run)
         (doseq [f (if (System/getenv "CORE_IFACE_ONLY") [] files) :let [m (get mods (.getCanonicalPath (File. ^String f)))
                               si (with-native-iface si @native-all)]]

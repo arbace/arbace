@@ -3386,3 +3386,228 @@ test/repr/llvm/controls-test.bash; repr-llvm check verify-llvmtest/verify-probes
   the printer writing one (it cannot know); for trailing5, hoisting the defined class beside the function (the tag's node would need a
   place in the declarator's result: left for when valid code needs it, a type may not be defined in a trailing return type).
 - **Slips**: one `> /dev/null` on a background `nohup`.
+## 2026-11-10: RF13's first slice, RFP42-RFP47's light parts (branch `rust-rf13`, from `mac/rust-rf12` `0c22b1f1b`)
+
+- RFP44 (a): vtables natively in `arbace.rust.front.mono` (`vtable-entries`, a port of rustc 1.99.1's
+  `rustc_trait_selection/src/traits/vtable.rs` `prepare_vtable_segments` and `own_existential_vtable_entries`; MIT or Apache-2.0):
+  a virtual call's slot from the object's principal (`callee-fact`'s `:slot`), the record's virtual callees' slots from their method
+  path and printed `dyn`; codegen's virtual call (meth.rs' `VirtualIndex::get_fn`); our unsizing casts' vtables laid out natively when
+  every entry is a local impl's own method, else the record's cast of the same type in the same body. Alternative considered: RFP44
+  (b), the helper dumping slots (a rebuild and the packs again): not needed, the slot is the trait's items'.
+- Codegen's gaps the programs reached next, fixed: the repeat loop, powi, fma, exact_div, typed_swap_nonoverlapping, catch_unwind
+  (`__rust_try` in the module), type_id_eq, TypeId constants, `&str` valtrees, struct-tail unsizing, memory transmutes, SSA fields'
+  discriminants, function-pointer calls, reified local functions, external statics, promoted `[x; N]` and unit/newtype structs.
+- `panic-vec-remove`'s fault: `Vec::remove`'s `#[track_caller]` was not found (alloc's `vec/mod.rs` impl order is not rustc's
+  `{impl#N}`); a function the file's impls name once now found by name. The native leg 44 of 47 (43 before).
+- `rsi-build` now refuses a module that declares a local instance it does not define (the link would fail; found by `rsi-native` on
+  three programs that had passed codegen): 11 programs, RFP49.
+- Prepared for the night, not run: RFP45 (a)'s UI sampling (`RF_RSI_UI=40` in the rsi kind and `rsi-build`), RFP47 (a)'s
+  `RSI_STD_REMAP` in `bin/rsi std-build` (std.edn left alone: the runtime's key holds it). RFP42 (a) waits for the night's lowered std.
+- Synthetic corpus: 47 of 67 own (the same 47); Rust's score unchanged (RFP43 (a)). Proposed RFP48 (trait resolution in mono), RFP49
+  (the collector through std's bodies), RFP50 (closures' shims). doc/rust/FRONTEND-SURVEY.md, "As built: RF13 (first slice)".
+- Light lane: one process at a time, under 2 GiB a process (`RF11_PROCS=2`, `GOMEMLIMIT` 1800-2000MiB), no network.
+
+## 2026-11-10: RF13b, more of core's bodies equal to rustc's built MIR (branch `rust-rf13b`, from `mac/rust-rf13` `bd6a6ca6f`)
+
+- RF12-P6's six bodies left now equal: `mut_ptr::cast_const` (check_cast's try_coercion_cast of `*mut T` to `*const T`, the operand's
+  pointer coercion `AsCast` as THIR's apply_adjustment marks a cast's operand), `slice::as_ptr`/`as_mut_ptr` (the cast's user type
+  over a coercion cast's `Use`), `ptr::metadata::from_raw_parts`/`_mut` (a rigid projection Copy by its item bounds), `<DynMetadata>
+  ::size_of`/`align_of` (foreign types: `extern { type VTable; }` resolved, lowered, collected as `ForeignTy`; rustc 1.99.1's
+  rustc_resolve build_reduced_graph_for_foreign_item and rustc_ast_lowering's foreign items as the model). Their lowering was
+  contained, so no proposal was needed.
+- Widened over core-check's 37 modules, the largest classes of RF12's non-equal bodies by cause, each after rustc's code: a
+  prelude's variant of the root file's own enum mapped to the local definition (result.rs, option.rs: the largest class), a trait
+  object's inherent impl printed with its object lifetime, nested items' MIR names through their owner, `match x {}` as `!`, the
+  no-op reference coercion only for the same type, DerefMut under `&mut`, another module's struct fields from the interface,
+  `<$t>::MIN` as NamedConst, `Self(..)` as the constructor, SwitchInt's values as u128 bits, rustc's disambiguator in a body's key
+  (`do_panic#1`), `[const]` bounds printed. Alternatives considered: judging the duplicate `do_panic` keys as ambiguous (the oracle
+  has `#N` files, so the key was ours to fix) and normalizing SwitchInt's values in the printer only (the built MIR then still
+  disagreed with codegen's `const-switch-bits`, which reads constants as bits).
+- core-check: 5,398 equal (5,108 at RF12), 114 more but for the allocations (71), 148 differ (381), 117 refused (217). The known
+  files unchanged: `bin/rust-front core-essential` (564 of 567) and `bin/rust-front essential`. doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF13b, core's bodies equal to rustc's built MIR".
+
+## 2026-11-10: RF13b's core-export, RFP51 proposed
+
+- `bin/rust-front core-export` on RF13b's front end: 32 of 32 exported bodies equal where the pack `rust-core-built` holds rustc's
+  body; the 16 of `str`, `slice`, `fmt` and `num` have none in the pack (it holds core-check's 37 modules), so the run keeps the
+  record's body for them. Against core-oracle's full dump (by hand) the 10 of `str`, `slice` and `fmt` are equal. RF12-P6's "43 of 48"
+  was measured against the full dump. Proposed RFP51 (a): a list of the export's modules added to the pack at the oracle tier.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13b".
+
+## 2026-11-10: RF13c, more of core's bodies equal to rustc's built MIR (branch `rust-rf13c`, from `mac/rust-rf13b` `0d44a0343`)
+
+- RF13b's remaining causes taken cheapest per body first, each after rustc 1.99.1's own code (the pinned rust-src; rustc's
+  rustc_hir_typeck method probe, instantiate_value_path, rustc_expand's transcribe.rs, rustc_hir_analysis' region.rs,
+  rustc_ast_lowering's try blocks and inline consts as the models): a trait's associated constant through a type-relative path
+  (`T::IS_ZST`) as NamedConst with its user type; a parameter's where clauses and a projection's item bounds as method candidates
+  whether their trait is in scope or not; an impl item's user type with the impl's parameters fresh and `Self` the impl's own self
+  type; one substituted token keeping its own place (the metavariable's place only for a span over several tokens), which fixed
+  the format placeholders' spans through `const_panic!` and `debug_assert!`'s messages; a const initializer's destruction scope;
+  Copy through marker.rs's own traits and `#[derive(Copy)]` on a union; `size_of::<T>()` in array lengths; a std variant named
+  by its written path; try blocks without their own `?`; inline consts as constants `{constant#N}` of their parent, numbered in the
+  DefCollector's order. Alternatives considered: special-casing `SizedTypeProperties` (rejected: the probe's general rule covers
+  it and Wrapping's `fmt`), and dropping the metavariable spans altogether (rejected: RF12 needs them for spans joining a
+  definition's tokens to a fragment).
+- core-check: 5,474 equal (5,398 at RF13b), 155 but for the allocations (114), 85 differ (148), 63 refused (117); no module lost an
+  equal body. Proposed RFP52 (a): the interface pass over a list of files holding crate-private items the 37 modules name.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13c".
+
+2026-11-10, rust-rf13b (review fix, .tmp/merge-1111/REVIEW2.md §4 items 1 and 2): the UI programs' names (`rfr_name`: `ui-tests%ui%...`) are
+used where rsi-build's outputs are read: `bin/rust-front rsi-native` and `bin/lib/rsi/check`'s `--front own` (the same naming
+inline). A missing own IR is a failure now (check: x.refused and ir.status 1, never the pack's IR with front.tsv saying own;
+rsi-native: a counted failure line). rsi-build counts the programs skipped for want of a record in the pack ("N skipped (no
+record in the pack)"). Proof: `bin/rust-front essential` passes, equal to essential-known.txt (known.diff empty, 3m50s, stub
+calls 0); a fabricated UI id (tests/ui/abi/foo#bar.rs) with front.tsv "own" and no .ours.ll names the same directory as
+rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch these two files (checked), so they rebase clean.
+
+## 2026-11-10: RF13d, more of core's bodies equal to rustc's built MIR (branch `rust-rf13d`, from `mac/rust-rf13c` `7f153a722`)
+
+- `mac/rust-rf13b`'s review fix (`ab753d5d0`) merged first, so the branch carries RF13b's fix, RF13c and RF13d; the journal's
+  conflict resolved by keeping both entries.
+- RF13c's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src; rustc_mir_build's
+  thir cx (ConstParam, SelfCtor's ZstLiteral), builder/mod.rs (constants check overflow), builder/expr/into.rs (write_via_move),
+  rustc_builtin_macros' deriving/mod.rs assert_ty_bounds, rustc_hir_typeck's check_casts, coercion.rs (coerce_unsized),
+  instantiate_value_path, expected_inputs_for_expected_output with generalize.rs, char's Debug): const parameters as values,
+  inline consts' own bodies (`f::{constant#N}`), derive's assertion spans, nested consts' MIR names, const closures' spans, the
+  crate's own ManuallyDrop, fresh trait arguments in a where-clause item's user type, a trait segment's written arguments,
+  impl Trait arguments skipped by a turbofish, `Self` struct patterns, expressions and unit values with their user types,
+  unsizing coercion casts and raw pointer coercions, write_via_move lowered as an assignment, char constants' escapes and code
+  points. Alternatives considered: modelling transcribe.rs' global metavar_spans table for tuple.rs' `Default` (12 bodies;
+  left, as a heuristic over expansion order would risk the equal ones), evaluating braced const arguments (`{ L3.to_llvm() }`,
+  3 bodies: needs const evaluation of a call; left). RFP52's crate-private items untouched, as decided.
+- core-check: 5,538 equal (5,474 at RF13c), 157 but for the allocations (155), 49 differ (85), 52 refused (63); no module lost an
+  equal body (baseline rerun at `7f153a722`: 5,474, as recorded). `bin/rust-front core-essential` and `essential` equal to their
+  known files. doc/rust/FRONTEND-SURVEY.md, "As built: RF13d".
+
+## 2026-11-10: RF13e, more of core's bodies equal to rustc's built MIR; RFP52 (a) (branch `rust-rf13e`, from `mac/rust-rf13d` `011d4cc3b`)
+
+- RF13d's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src's
+  `compiler/`: rustc_hir_typeck's check_expr_offset_of, coercion.rs (try_find_coercion_lub's fast path, ret_coercion),
+  rustc_infer's generalize.rs, place_op.rs' convert_place_derefs_to_mutable, rustc_mir_build's thir cx (OffsetOf),
+  rustc_builtin_macros' partial_ord.rs, rustc_trait_selection's builtin Copy/Clone and Destruct candidates, rustc_span's
+  MetavarSpansMap): offset_of!, nested inline consts, generalization of late-bound regions (the `Some(slice)` reborrow:
+  RF13d's port of expected_inputs_for_expected_output was right, generalization kept the parameter's region), the return
+  coercion as a CoerceMany, `Self { .. }` patterns of another file's struct, tuples' and arrays' builtin Copy/Clone,
+  Destruct, crate constants in patterns, an operator's alias bound, IndexMut in the builder's table, partial_ord's unit
+  exceptions, a let type's elided regions as fresh variables.
+- RFP52 (a), the user's decision of 2026-11-10 (with RFP48-RFP61 and RF12-P8, relayed by the main session):
+  `test/rust/front/core-iface-extra.txt`, the interface pass over its ten files in every run, the native interface's impls,
+  uniform-path re-exports in core's index.
+- Left, explained: tuple.rs' `Default` (12; metavar_spans needs hygiene contexts and rustc's expansion order: not ported
+  rather than guessed), braced const arguments (const evaluation of a call), RFP52's rest (a crate-private type alias, CopySpec,
+  Drain, ascii::Char, try_process's turbofish).
+- core-check: 5,538 (RF13d) -> 5,551 by the causes (`CORE_IFACE_EXTRA=`, RF13d's index) -> 5,576 with RFP52 (a) and a fresh
+  index; no module lost an equal body at either step. `bin/rust-front core-essential` and `essential` equal to their known
+  files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes. doc/rust/FRONTEND-SURVEY.md, "As built: RF13e".
+
+## 2026-11-10: RF14, RFP48 (a): trait resolution in mono; RFP49 (a) begun (branch `rust-rf14`, from `mac/rust-rf13e` `db5fe592e`)
+
+- RFP48 (a), decided by the user on 2026-11-10 (RFP48-RFP61 (a), relayed by the main session): Instance::resolve's
+  resolve_associated_item for mono, after rustc 1.99.1's rustc_ty_utils/src/instance.rs and rustc_trait_selection's
+  specialize/mod.rs and specialization_graph (the pinned rust-src's `compiler/`): `arbace.rust.front.typeck/resolve-assoc-fn`
+  (the applying impls, the specialization chain leaf first by their headers, the item from the nearest impl that defines it at
+  the impl's arguments and the method's own, else the trait's default body; an overlap without a most specialized impl and an
+  impl argument nothing determines refused), `arbace.rust.front.mono/resolve-instance` (the Fn traits' builtin candidates:
+  a closure's body or ClosureOnceShim by the closure's kind from its built body's self, FnPtrShim), used by the callee facts,
+  the calls' function constants, the collector, the external items and the vtables (std's impls, generic impls and default
+  bodies; VTableShim and a supertrait with parameters still refused). Alternatives considered: rustc's full specialization
+  graph with its where-clause implication (the header test suffices where two impls both apply to a concrete goal: coherence
+  admitted them as specializations; an overlap the header test cannot order is refused), keeping the record's facts (RFP48
+  (b), not decided).
+- Found on the way, each after rustc's code: v0's `<Self as Trait>::` qualification (default_print_def_path's
+  trait_qualify_parent), trait objects, local closures and fn pointers in v0; impl disambiguators in rustc's order of
+  definitions (a derive's impls after the crate's other items); `#[track_caller]` inherited from the trait's method
+  (codegen_fn_attrs); core's attributes of a trait's provided method and of an impl found by its header's names (std's
+  interface's against the source's, where the file's order is not rustc's disambiguators'); a call's function constant whose
+  callee's attributes core's sources do not show refused as its callee is.
+- RFP49 (a), the first part: build-run hands mono the function constants of the record's std bodies; the local functions and
+  closures they reach at no type argument join the collector's items (closures' bodies items too). The rest (generic local
+  instances reached through std: `quicksort::<f64>`, `<Dog as Animal>::describe`) needs our generic bodies instantiated, next.
+- Measured, light (one process at a time, under 2 GiB): the mono facts against the record over 8 synthetic programs, before
+  (`db5fe592e` in a worktree of its own) and after: callees equal 406 -> 592 of 710, function constants' symbols 368 -> 557, the
+  native callees 731 -> 964 of about 990 (refusals 263 -> 29); `rsi-build` over the 67 synthetic programs: 48 own (47:
+  `patterns`), the native callees 4,079 of 4,524 (3,503 of 4,288), vtables 25 of 32 (0 of 7); `bin/rust-front essential` and
+  `core-essential` equal to their known files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes (Rust
+  unchanged). `rsi-build` keeps each batch's mono-check lines (`mono-all.log`). doc/rust/FRONTEND-SURVEY.md, "As built: RF14
+  (RFP48)", with the night's commands (the whole plan again, rsi-native over the new own program, `bin/rsi check --front own`).
+
+## 2026-11-10: RF15, RFP49 (a)'s rest: generic local instances, promoted constants (branch `rust-rf15`, from `mac/rust-rf14` `e1bdba384`)
+
+- RFP49 (a)'s rest, after rustc 1.99.1's rustc_monomorphize collector and Instance::instantiate_mir_and_normalize_erasing_regions
+  (the pinned rust-src's `compiler/`): mono's collector takes `[DEF ARGS]` items, a local generic function's, a generic impl's
+  method's, a trait's default body's at its Self or a generic function's closure's instance at concrete arguments, reached from
+  our bodies' calls, from the record's std bodies' function constants (RFP49's first part, now with the arguments) and from
+  vtables; each instance is our body instantiated (`mono/instantiate-runtime`: the types from their `:tc` substituted and
+  normalized, function constants' texts from their types, const parameters' values, repeat counts), collected in turn. The
+  local functions std's bodies' vtables name (the record's std bodies' function allocations, by symbol) are roots too.
+  Alternatives considered: rebuilding each instance through typeck at the arguments (rustc instantiates the polymorphic MIR,
+  as done here), keeping the record's instance bodies (RFP54 (a) takes ours).
+- The promoted constants of `main` (RF10's slice 5, further), after rustc_const_eval's interpreter: binary and unary operators,
+  numeric casts, strings' and byte strings' constants with their relocations, reborrows, nested borrows, enum variants with or
+  without fields and tuples or structs of several fields laid out by mono's layout (else the record's layout of that type), a
+  variant's explicit discriminant, f32's and f64's associated constants.
+- Found on the way: LowerSliceLenCalls (lower_slice_len.rs, enabled at -O0: `<[T]>::len` as PtrMetadata); an overloaded
+  compound assignment (`String += &str`: THIR's overloaded_operator, where the builder made a builtin Add of references);
+  `None::<u8>`'s turbofish (typeck); `drop_glue`'s parameter for v0 (not in std's interface); a trait object's auto traits in
+  rustc's interned order (Sync before Send); a record's `(dyn)` of a local trait read back; adt-repr's `#[repr(u8)]` read as a
+  vector (every explicitly sized enum's layout was the record's).
+- Measured, light (one process at a time, under 2 GiB): the 8 programs' mono facts against the record callees 592 -> 660 of
+  710, core items 483 -> 630, symbols 50 -> 105 of 128, native callees 964 -> 1,070 of 1,122; `rsi-build` over the 67
+  synthetic programs: **56 own** (RF14 48; 47 minutes), native callees 4,275 of 4,739, vtables 29 of 36. `bin/rust-front
+  essential`: the mono-check total moved by a6's `drop_glue::<D>` now an equal core item (core-items 2 of 2), the known file's
+  line rewritten (every fact equal); `core-essential` equal to its known file (564 of 567); `bin/reap` 0 problems;
+  `bin/crops-score --judge --strict` exit 0, Rust unchanged. RFP58 (the vector ABI) is not small: its design note in
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF15", with the night's commands.
+
+## 2026-11-10: RF16, RFP58 (a): the vector ABI; the HashMap programs' next causes; promoted constants further (branch `rust-rf16`, from `mac/rust-rf15` `f9cabe9be`)
+
+- RFP58 (a) as RF15's design note planned it, after rustc 1.99.1 (the pinned rust-src's `compiler/`): mono lays out
+  `#[repr(simd)]` types (rustc_ty_utils' layout_of_uncached and rustc_abi's `simd_type`: `(vector ELEMENT N)`, the newtype rule
+  for `Group`); the three types std's interface lacks (`core::core_arch::simd::Simd`, `core::core_arch::x86::__m128i`,
+  hashbrown's `Group`) are read from the library's own sources (rust-src's `library/`, `library/vendor/hashbrown-0.17.1`; stdarch's
+  `types!` read as `library/stdarch/crates/core_arch/src/macros.rs` writes it), a field's path resolved through the module's `use`
+  items and std's names. Codegen keeps a vector in memory and passes it indirectly (rustc_target's `adjust_for_rust_abi`; the
+  signatures equal the IR pack's) and emits the six intrinsics, and the rest of the generic family's simple ones, as
+  rustc_codegen_llvm's `generic_simd_intrinsic` does; rsi's lowering (LL5's scalarized vectors) takes them, so ci, the lowering
+  and `gate_key` do not move (only `arbace/rust/`, in `arbace_crop_paths`). Alternatives considered: vectors as immediates in
+  registers (the design note's guess; rustc passes them indirectly in the Rust ABI, so memory is both simpler and rustc's), the
+  helper printing the layout (the oracle tier's, not the run's), a table of the three types (the sources say it).
+- The vector ABI unblocked the HashMap programs as far as their next causes, built: a call through a constant function pointer
+  (core's quicksort), a spread argument's memory field, thread-local statics (`tlsref`: `llvm.threadlocal.address` of the static
+  declared `external thread_local`, its symbol mono's v0 of the static's def path; upper-case nested items in the value
+  namespace, rustc's non_upper_case_globals).
+- Promoted constants further (RF15's list): `ptr::null::<T>()` and `mem::size_of`/`align_of` calls, checked operators with their
+  fields and `assert`, an unsizing cast to a trait object with its vtable (mono's vtables now carry the cast's source type, since
+  PromoteTemps moves the cast out of the body mono saw); a nested borrow kept in its local (RF15 dropped it). On the tools' host a
+  `cond` whose branches `recur` did not compile as tail calls in `eval-promoted`'s loop: nested `if`s.
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **61 own** (RF15 56; 48
+  minutes): collections, rc-refcell, panic-hashmap-index, fmt, traits; native callees 4,275 of 4,739 (unchanged), vtables 35 of 46
+  (29 of 36), layouts 42,788 of 45,856 (42,388), thread-local statics 5 of 5. `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict`
+  exit 0, Rust unchanged. The 6 left and their causes in doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))", with the night's
+  commands.
+
+## 2026-11-10: RF17, RF16's causes: four programs own, closures' first part (branch `rust-rf17`, from `mac/rust-rf16` `ee2eca54d`)
+
+- RF16's "Left" taken cheapest first, after rustc 1.99.1 (the pinned rust-src's `compiler/`): local constants evaluated as codegen's
+  eval_mir_constant does (the `const` item's construct_const body interpreted by `eval-promoted` in a value mode, in runtime and
+  promoted bodies), a variant's explicit discriminant in a runtime body, a static holding a pointer (codegen_static's
+  const_alloc_to_llvm: a packed struct with its relocations) for structs; a local trait's associated constant resolved to the
+  impl's (resolve_associated_item; typeck's `resolve-assoc-fn` takes associated constants) and a generic function's closure at its
+  instance's arguments (ClosureArgs' parent_args in mono's closure types, v0 and Instance::resolve's Fn arm) for generics; two
+  closure types of one closure unify by definition (typeck compared their signatures by `=`, which failed FlatMap's
+  `F::Output == U`: RF16's "a method call without its callee" in iterators was this `flat_map(..).collect()`, not the blanket
+  impl's `unzip_check`), v0 of a closure type never a backref to its own closures' parent path, and std's tuple constructors used
+  as function values built as shim.rs' build_ctor (the record's `mir/external`) for iterators; `Variants::Empty` in codegen
+  (a zero-sized aggregate, a `poison` discriminant) for casts; a reified closure's ClosureOnceShim symbol (RFP50 (a)'s first
+  part) for closures. Alternatives considered: the record's evaluated constants (`const 4_usize`; a record fact where the
+  interpreter exists), the record's ctor shims (none: the helper does not dump them), comparing closure types by text alone in
+  unification (the signatures' variables then stay apart; equating them is typeck's own identity of the two).
+- Stopped at closures' rest (RFP62: opaque types in mono and closures' vtable entries, about two days) and panic-assert-eq (RFP63:
+  upstream monomorphizations, std's exported generic instances), both written up in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **65 own** (RF16 61; 44
+  minutes): structs, generics, iterators, casts; native callees 4,516 of 4,978 (4,275 of 4,739), constants 205 of 205 (191 of 197),
+  mono-check's callees against the record 1,992 of 2,414 (1,865). `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict` exit 0, Rust unchanged.
+  The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".

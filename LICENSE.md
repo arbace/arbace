@@ -969,6 +969,14 @@ covers what.
   `compiler/rustc_mir_build/src/builder/mod.rs` (`#[rustc_inherit_overflow_checks]`) in `build.ae`. The driver's judge, core's index and
   its native interface, `bin/lib/repr-rust/core-build.bash` and `test/rust/front/core-modules.txt` are Arbace's own, under the Eclipse
   Public License 1.0.
+- RF16 (2026-11-10, doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))"), from rustc 1.99.1, the same revision and sources and
+  under the same terms (MIT): `mono.ae`'s SIMD layouts after `compiler/rustc_ty_utils/src/layout.rs` (layout_of_uncached's repr(simd))
+  and `compiler/rustc_abi/src/layout.rs` (`LayoutCalculator::simd_type`, univariant's newtype ABI), `arbace/rust/back/codegen.ae`'s
+  generic SIMD intrinsics after `compiler/rustc_codegen_llvm/src/intrinsic.rs` (`generic_simd_intrinsic`), its vectors' indirect
+  passing after `compiler/rustc_target/src/callconv/mod.rs` (`adjust_for_rust_abi`) and its thread-local references after
+  `compiler/rustc_codegen_ssa/src/mir/rvalue.rs` (ThreadLocalRef); `mono.ae`'s reading of stdarch's `types!` follows
+  `library/stdarch/crates/core_arch/src/macros.rs`. The source reader of private ADTs and `build_run.ae`'s promoted constants'
+  additions are Arbace's own, under the Eclipse Public License 1.0.
 - The proposals RFP28-RFP41 (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: the rest of RFP28-RFP41"), from rustc 1.99.1, the same
   revision and sources and under the same terms (MIT): `build.ae`'s byte-array static constants after `compiler/rustc_middle/src/ty/
   print/pretty.rs` (`pretty_print_const_scalar_ptr`) and a closure's fake reads after `compiler/rustc_mir_build/src/builder/expr/

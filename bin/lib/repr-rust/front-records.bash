@@ -52,7 +52,18 @@ rfr_programs() {
     captures) (cd "$root" && { echo test/rust/synthetic/closures.rs; for f in test/rust/front/*.rs; do grep -q '|' "$f" && echo "$f"; done; }) ;;
   esac
 }
-rfr_name() { basename "$1" .rs; }
+# a program's member name: its file's stem; RFP45 (a): a UI program's (tests/ui/...) its id with / and # written %, prefixed ui-
+# (the UI suite's stems repeat across directories)
+rfr_name() { case $1 in tests/ui/*) printf 'ui-%s\n' "$(printf '%s' "${1%.rs}" | tr '/#' '%%')" ;; *) basename "$1" .rs ;; esac; }
+# RFP45 (a): the directory a program of rsi's plan is read in (the checkout for its samples and synthetic corpus, the UI corpus's
+# source root for a UI program: bin/rsi's srcroot, this checkout's or the main checkout's) and its file there
+rfr_rsi_srcroot() {
+  local d=$root/.tmp/repr-rust/src/rustc-1.99.1-src m
+  [ -d "$d/tests/ui" ] || { m=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/.." && pwd); d=$m/.tmp/repr-rust/src/rustc-1.99.1-src; }
+  echo "$d"
+}
+rfr_rsi_dir() { case $1 in tests/ui/*) rfr_rsi_srcroot ;; *) echo "$root" ;; esac; }
+rfr_rsi_file() { rfr_rsi_list | awk -F'\x1f' -v id="$1" '$1 == id {print $2; exit}'; }
 # RF11: rsi's plan of its samples and synthetic corpus (bin/rsi list's lines: id, file, edition, flags, ...; 0x1f-separated)
 rfr_rsi_list() {
   [ -f "$work/records/rsi-plan.tsv" ] && [ "$work/records/rsi-plan.tsv" -nt "$root/bin/rsi" ] || {
@@ -60,6 +71,16 @@ rfr_rsi_list() {
     "$root/bin/rsi" list --set samples -o "$work/records/rsi-plan.s" && "$root/bin/rsi" list --set synthetic -o "$work/records/rsi-plan.y" &&
       cat "$work/records/rsi-plan.s" "$work/records/rsi-plan.y" > "$work/records/rsi-plan.tsv"; } || return 1
   cat "$work/records/rsi-plan.tsv"
+  # RFP45 (a): RF_RSI_UI=N adds the UI suite's run programs, every Nth of bin/rsi list --set run (the night's sample: 40), those
+  # without compile flags (the rsi kind takes none yet; the rest counted in rsi-plan.ui-skipped); needs the UI corpus's sources
+  # (bin/repr-rust corpus fetch rustc-1.99.1-ui)
+  if [ -n "${RF_RSI_UI:-}" ]; then
+    local u=$work/records/rsi-plan.ui$RF_RSI_UI
+    [ -f "$u.tsv" ] && [ "$u.tsv" -nt "$root/bin/rsi" ] || {
+      "$root/bin/rsi" list --set run --sample "$RF_RSI_UI" -o "$u.all" || return 1
+      awk -F'\x1f' '$4 == ""' "$u.all" > "$u.tsv"; awk -F'\x1f' '$4 != ""' "$u.all" | cut -d$'\x1f' -f1 > "$work/records/rsi-plan.ui-skipped"; }
+    cat "$u.tsv"
+  fi
 }
 # the rsi kind's rustc command line of a program (plan_rustc's, as bin/lib/rsi/check's ir1 builds it): rfr_rsi_flags REL
 rfr_rsi_flags() {
@@ -92,7 +113,9 @@ rfr_flags() {  # KIND REL
 rfr_key() {  # KIND REL
   local k=$1 rel=$2
   { echo "rust-front $k $rel"
-    if [ "$k" = std ]; then echo "fn main() {}"; else sha256sum < "$root/$rel" | cut -c1-64; fi
+    if [ "$k" = std ]; then echo "fn main() {}"
+    elif [ "$k" = rsi ]; then sha256sum < "$(rfr_rsi_dir "$rel")/$(rfr_rsi_file "$rel")" | cut -c1-64
+    else sha256sum < "$root/$rel" | cut -c1-64; fi
     rfr_helper_hash
     rfr_flags "$k" "$rel"
     [ "$k" = built ] && { echo "$rfr_passes"; echo "$rfr_judged"; }
@@ -123,8 +146,10 @@ rfr_live() {
       cp "$s/$n.cap.edn" "$out/" ;;
     rsi)
       # as rsi's build: in the checkout, the file by its path relative to it, the checkout remapped to /src
-      local sys fl; sys=$(rf11_rsi_sysroot) || return 1; fl=$(rfr_rsi_flags "$rel") || return 1
-      (ulimit -v 4000000; cd "$root" && "$helper" rustc --mono-mir "$s/$n.record.edn" -- $fl --sysroot "$sys" --remap-path-prefix "$(pwd -P)=/src" -o "$s/$n.rustc.bin" "$rel" > "$s/$n.log" 2>&1) || { cat "$s/$n.log" >&2; return 1; }
+      # (a UI program in the UI corpus's source root, by its file there, as bin/rsi's plan builds it: RFP45 (a))
+      local sys fl rd rf; sys=$(rf11_rsi_sysroot) || return 1; fl=$(rfr_rsi_flags "$rel") || return 1
+      rd=$(rfr_rsi_dir "$rel"); rf=$(rfr_rsi_file "$rel")
+      (ulimit -v 4000000; cd "$rd" && "$helper" rustc --mono-mir "$s/$n.record.edn" -- $fl --sysroot "$sys" --remap-path-prefix "$(pwd -P)=/src" -o "$s/$n.rustc.bin" "$rf" > "$s/$n.log" 2>&1) || { cat "$s/$n.log" >&2; return 1; }
       mkdir -p "$out/$n"; cp "$s/$n.record.edn" "$out/$n/$n.record.edn" ;;
     mono)
       (ulimit -v 4000000; cd "$s" && "$helper" rustc --mono-mir "$n.record.edn" -- $(rfr_flags mono "$rel") -o "$n.rustc.bin" "$f" > "$n.log" 2>&1) || { cat "$s/$n.log" >&2; return 1; }

@@ -369,6 +369,11 @@ code. Three kinds of things live here:
   `rustc_abi/src/layout.rs`' `layout_of_union` and into `arbace/rust/back/codegen.ae` `rustc_codegen_ssa/src/mir/place.rs`'
   `project_subslice` and `rvalue.rs`' exposed-provenance casts, rustc 1.99.1, the same revision and sources; LICENSE.md names them
   (MIT OR Apache-2.0); `build_run.ae`'s promoted constants' evaluation and std's integer constants are Arbace's own.
+  RF16 (2026-11-10, doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))") ports into `mono.ae` `rustc_ty_utils/src/layout.rs`'
+  repr(simd) layouts with `rustc_abi/src/layout.rs`' `simd_type`, and into `arbace/rust/back/codegen.ae` `rustc_codegen_llvm/src/
+  intrinsic.rs`' `generic_simd_intrinsic` (splat, comparisons, bitwise and arithmetic operators, bitmask), `rustc_target/src/callconv/
+  mod.rs`' indirect vectors and `rustc_codegen_ssa/src/mir/rvalue.rs`' ThreadLocalRef, rustc 1.99.1, the same revision and sources;
+  LICENSE.md names them (MIT OR Apache-2.0); the private ADTs' source reader (with stdarch's `types!` as its macro writes) is Arbace's own.
   `arbace/rust/front/build.ae` (THIR and MIR building after `rustc_mir_build/src/{thir,builder}/`, the region scope tree after
   `rustc_hir_analysis/src/check/region.rs`) and `build_run.ae` (CleanupPostBorrowck's changes, the layouts of scalars and scalar pairs
   after `rustc_abi`) port rustc 1.99.1, the same revision and sources, by hand on 2026-11-08 (RF10's first slice,
