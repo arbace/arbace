@@ -270,8 +270,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   self-checking synthetic programs (`test/asm/a64i/gen.ae`: the integer families and the scalar FP at both precisions, 13,304 cases, the
   model held to qemu-aarch64 at `--record`), the scalar FP in a64i (`go/arbace/a64i/fp.ae`: FPSR's exceptions, FPCR's modes, DN), and the
   AOT cell's cheap classes (PAuth relocations, label arithmetic, `.reloc`, build attributes, the readobj/readelf/objdump views, FileCheck's
-  variables): the AOT cell 78.5% → 95.0%. Proposed ARS43-ARS47. Next: the memory families' synthetic program (ARS45 (b)), the error
-  tests' messages (ARS43), the VM's lockstep of the new programs (ARS44).
+  variables): the AOT cell 78.5% → 95.0%. Proposed ARS43-ARS47. Then `asm-ar7` (from `mac/next` `15278e9c6`; doc/asm/ARM64-SURVEY.md,
+  "As built: AR7"; ARS43 (a), ARS45 (b), ARS46 (b), ARS47 (a), the user's): `a64i-essential` sliced (`--essential`, judged on what it
+  ran, slice-foreign control; 1 min 36 s → 36 s; the whole set the `--full` step `a64i-check`, rotated), every error of a file collected
+  and judged as llvm-mc's diagnostics, `.org` and `-implicit-mapsyms`, the memory families' synthetic programs (801 cases; coverage 653
+  of 653): the AOT cell 95.0% → 98.2%, completeness 98.7 → 99.5. Proposed ARS48-ARS52. Next: the VM's CPU rows and lockstep of the twelve synthetic programs (ARS44),
+  NEON (ARS48), the reader's `@AUTH`/`%pltpcrel` (ARS49).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
