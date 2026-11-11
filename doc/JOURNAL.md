@@ -4515,3 +4515,21 @@ From `.tmp/night12/DIAGNOSIS-N11.md` (rows cpp-route, rejected/cpp-dg, lb-dg-ref
   `.tmp/cpp-gcc`).
 - Not done here, left by the slot (diagnosis): independence.edn's own-route cases (the slot's `ours` counter printed 0; read the `route`
   files first). Checks: `bin/reap` 0 problems (41 of 44 cells), `bin/crops-score --record`, `--judge --strict` exit 0.
+
+## 2026-11-11: C's night-11 failures fixed before night 12 (branch `c-n12`, from `mac/next` a7e6c4f03)
+
+From `.tmp/night12/DIAGNOSIS-N11.md`, section 4. (a) `c/include/float.h`: `DEC{32,64,128}_SUBNORMAL_MIN` only under
+`__STDC_WANT_DEC_FP__`, as gcc's float.h (gcc.dg/dfp/c23-float-dfp-1.c:94 `#error`s if C23 defines them); the other DEC macros and the
+`_TRUE_MIN`s stay. Re-judged alone: `bin/ci dg --only` (dfp-1, dfp-2: pass 2 of 2) and `bin/repr-c roundtrip --corpus gcc-c23-sub --only`
+(levels 1-2 equal, no gcc; both rows already :pass in next's records, so none rewritten). (b) The five evaluated-tool rows (torture-compile
+limits-blockid, limits-externalid, limits-fndefn; quickjs libunicode.c, quickjs.c) in `roundtrip-known.edn` as `:eval-limits` (the class
+exists, `test/c/divergences-print.edn`), their rows of `roundtrip-results.edn` written by hand as :known in the form `--record` writes (a
+partial run does not record); the night's failing rows were not committed. (c) `:cc-imaginary-int` (annot-known.edn, class in
+`test/c/divergences-annot.edn`, kind :design) for torture-execute/20041201-1.c (`2i`: gcc and the checker `_Complex int`, cc `_Complex double`);
+its annot-results row edited by hand (`bin/ci annotations` refuses `--record` after `--only`; a whole run is heavy: night command
+`bin/ci annotations --judge --record`). (d) The 3 now-passing entries dropped from `pp-check-known.edn` (gcc-c23 c23-attr-syntax-7.c, tcc-pp 11.c,
+13.S), and night 11's token and parse results (`pp-check-results.edn`, `parse-check-results.edn`, from `.tmp/night11/rejected/c/tracked.diff`)
+committed; its dg, annotation, roundtrip and check records not. (e) `test/c/check-budget.edn`: 30 s for compcert/nsievebits.c and sha3.c
+(7.9 s alone on an idle host against the 10 s default). `bin/reap --record` then `bin/reap`: 0 problems; `bin/crops-score --record`,
+`--judge --strict`: exit 0. `c/` is in no gate key (`bin/lib/version.bash`), so `gate_key` does not move; steps declaring c/include rerun.
+Not done: c-aot's nbody and spectral-norm timeouts (item for a timing by day).
