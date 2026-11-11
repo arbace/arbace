@@ -64,9 +64,12 @@
    :pos (volatile! nil)                      ; the current item's [START END] (ARS43 (a): the diagnostics' place)
    :errors (java.util.ArrayList.)            ; the errors met ({:pos :msg :expr}), each reported, the assembly going on
    ;; AX11: the conditionals' stack ({:parent IGNORE :met :ignore :else}), the macros (name -> {:params :body :count}) and their
-   ;; instantiations, the DWARF line table's files (number -> [DIR-INDEX NAME]) and directories, a .loc seen
+   ;; instantiations, the DWARF line table's files (number -> [DIR-INDEX NAME]) and directories, a .loc seen; AX12: the current
+   ;; .loc (MCContext's CurrentDwarfLoc) and the line entries by section, in the order of each section's first (MCLineSection)
    :conds (volatile! []) :macros (java.util.HashMap.) :macro-n (volatile! 0) :depth (volatile! 0)
-   :dwarf-files (java.util.TreeMap.) :dwarf-dirs (java.util.ArrayList.) :loc-seen (volatile! false)})
+   :dwarf-files (java.util.TreeMap.) :dwarf-dirs (java.util.ArrayList.) :loc-seen (volatile! false)
+   :dwarf-loc (volatile! {:file 0 :line 0 :col 0 :flags 1 :isa 0 :disc 0})
+   :line-secs (java.util.LinkedHashMap.)})
 
 (defn report!
   "An error at POS ([START END] of its item, nil when unknown) about the expression EXPR (nil: the item), collected as LLVM's
@@ -280,17 +283,30 @@
 (defn bytes! [ctx bs]
   (let [^java.util.ArrayList b (:bytes @(cur-data! ctx))] (doseq [v bs] (.add b (bit-and (long v) 0xff)))))
 
+(declare label! tmp!)
 (defn line-entry!
-  "MCDwarfLineEntry::make: a .loc seen makes a line entry at the next instruction or data, which the line program does not
-  write yet (AX11: the line table's header alone)."
+  "MCDwarfLineEntry::make (AX12): a .loc seen makes a line entry at the next instruction or data (emitInstruction, emitBytes,
+  emitValueImpl, and a .loc itself: two in a row), a temporary label at the current place with the current .loc, added to the
+  section's entries; the .loc is then used."
   [ctx]
-  (when @(:loc-seen ctx) (unsupported :debug-line ".loc's line entries (the line program)")))
+  (when @(:loc-seen ctx)
+    (let [n (tmp! ctx) sec (cur-sec ctx) ^java.util.LinkedHashMap ls (:line-secs ctx)]
+      (label! ctx n)
+      (vreset! (:loc-seen ctx) false)
+      (when-not (.containsKey ls (:index @sec)) (.put ls (:index @sec) (java.util.ArrayList.)))
+      (.add ^java.util.ArrayList (.get ls (:index @sec)) (assoc @(:dwarf-loc ctx) :label n)))))
+
+(defn data-only!
+  "Before data that makes no line entry is emitted (emitFill, emitValueToOffset): the arch's hook (AArch64's $d mapping symbol)."
+  [ctx]
+  (when-let [f (:on-data *arch*)] (f ctx)))
 
 (defn data!
-  "Before data is emitted (emitBytes, emitValueImpl, emitFill): the arch's hook (AArch64's $d mapping symbol)."
+  "Before data is emitted (emitBytes, emitValueImpl): a line entry for a .loc seen, then the arch's hook (AArch64's $d mapping
+  symbol)."
   [ctx]
   (line-entry! ctx)
-  (when-let [f (:on-data *arch*)] (f ctx)))
+  (data-only! ctx))
 
 (defn emit-value! [ctx e ^long size]
   (data! ctx)
@@ -312,7 +328,7 @@
 
 ;; emitFill: a fill fragment of its own (MCFillFragment), its count evaluated at the layout
 (defn fill! [ctx n ^long vsize v]
-  (data! ctx)
+  (data-only! ctx)
   (let [n (resolve-expr ctx n)]
     (visit-syms! ctx n)
     (add-chunk! (cur-sec ctx) (new-chunk :fill {:count n :vsize vsize :value (long v) :size 0 :pos @(:pos ctx)}))))
@@ -507,21 +523,120 @@
     (when-let [old (.get fs n)] (when-not (= old [di nm]) (fail "file number already allocated")))
     (.put fs n [di nm])))
 
+(declare chunk-size)
+(defn line-addr-bytes
+  "MCDwarfLineAddr::encode at DWARF 4's parameters (line base -5, line range 14, opcode base 13, minimum instruction length
+  1): a line delta and an address delta as a special opcode, DW_LNS_const_add_pc and one, or DW_LNS_advance_line,
+  DW_LNS_advance_pc, DW_LNS_copy; LINE-DELTA :end is DW_LNE_end_sequence after the address advance."
+  [line-delta ^long addr-delta]
+  (let [base -5 rng 14 opbase 13 max-special (quot (- 255 opbase) rng)
+        ;; ScaleAddrDelta
+        ;; (both arches' MCAsmInfo leave MinInstAlignment at 1: AArch64's code sections are aligned to 4 by its streamer, its
+        ;; line table's minimum instruction length is 1, as llvm-mc 23.1.5 writes it; AX12)
+        addr addr-delta]
+    (if (= line-delta :end)
+      (vec (concat (cond (= addr max-special) [0x08] (pos? addr) (concat [0x02] (uleb addr)) :else []) [0 1 1]))
+      (let [ld (long line-delta)
+            temp (- ld base)
+            [pre ld temp copy?] (if (or (neg? temp) (>= temp rng) (> (+ temp opbase) 255))
+                                  [(concat [0x03] (sleb ld)) 0 (- base) true]
+                                  [[] ld temp false])]
+        (vec (concat pre
+                     (if (and (zero? (long ld)) (zero? addr))
+                       [0x01]
+                       (let [temp (+ (long temp) opbase)
+                             op1 (+ temp (* addr rng))
+                             op2 (+ temp (* (- addr max-special) rng))]
+                         (cond (and (< addr (+ 256 max-special)) (<= op1 255)) [op1]
+                               (and (< addr (+ 256 max-special)) (>= addr max-special) (<= op2 255)) [0x08 op2]
+                               :else (concat [0x02] (uleb addr) [(if copy? 0x01 temp)]))))))))))
+
 (defn emit-debug-line!
-  "MCDwarfLineTable::emit at DWARF 4 (MCDwarfLineTableHeader::Emit): when a .file N made the table, .debug_line with its
-  header (the directories, the files) and, no line entry being written yet (line-entry!), no line program."
+  "MCDwarfLineTable::emit at DWARF 4 (MCDwarfLineTableHeader::Emit, emitOne, MCObjectStreamer's emitDwarfAdvanceLineAddr and
+  emitDwarfLineEndEntry), after the layout of the code: when a .file N made the table, .debug_line with its header (the
+  directories, the files) and the line program (AX12): for each section with line entries, in the order of their first, a
+  sequence: each entry's changes from the state machine's (DW_LNS_set_file, set_column, DW_LNE_set_discriminator, set_isa,
+  negate_stmt, set_basic_block, set_prologue_end, set_epilogue_begin), then its row: the first by DW_LNE_set_address (the
+  entry's label, a pointer-sized relocation) and its line advance, the next by the advances from the last (their final offsets,
+  as the Dwarf fragments relax to); DW_LNE_end_sequence at the section's end."
   [ctx]
   (let [^java.util.TreeMap fs (:dwarf-files ctx)]
     (when (pos? (.size fs))
       (when-not (= (vec (keys fs)) (vec (range 1 (inc (.size fs))))) (unsupported :debug-line "a file number left unassigned"))
       (section! ctx ".debug_line" elf/SHT_PROGBITS 0 0 nil false)
-      (let [body (vec (concat [(long (or (:min-inst-align *arch*) 1)) 1 1 0xfb 14 13] [0 1 1 1 1 0 0 0 1 0 0 1]
+      (data! ctx)
+      (let [body (vec (concat [1 1 1 0xfb 14 13] [0 1 1 1 1 0 0 0 1 0 0 1]
                               (mapcat #(concat (string-bytes %) [0]) (:dwarf-dirs ctx)) [0]
                               (mapcat (fn [[di nm]] (concat (string-bytes nm) [0] (uleb di) [0 0])) (vals fs)) [0]))
             u32 (fn [^long v] (for [i (range 4)] (bit-and (bit-shift-right v (* 8 i)) 0xff)))
-            hdr (concat [4 0] (u32 (count body)) body)]
-        (data! ctx)
-        (bytes! ctx (concat (u32 (count hdr)) hdr))))))
+            ch (cur-data! ctx)
+            ^java.util.ArrayList b (:bytes @ch)
+            base (.size b)
+            out! (fn [bs] (doseq [v bs] (.add b (bit-and (long v) 0xff))))
+            off-of (fn [n] (second (sym-offset ctx (symbol! ctx n) 0)))
+            ^java.util.ArrayList secs (:sections ctx)]
+        (out! (u32 0)) (out! [4 0]) (out! (u32 (count body))) (out! body)
+        (doseq [[si ^java.util.ArrayList es] (:line-secs ctx)]
+          (let [end (reduce + (map chunk-size (:chunks @(.get secs (long si)))))]
+            (loop [es (seq es) file 1 last-line 1 col 0 flags 1 isa 0 prev nil]
+              (if-let [e (first es)]
+                (do
+                  (when (not= file (long (:file e))) (out! (concat [0x04] (uleb (:file e)))))
+                  (when (not= col (long (:col e))) (out! (concat [0x05] (uleb (:col e)))))
+                  (when-not (zero? (long (:disc e)))
+                    (out! (concat [0x00] (uleb (inc (count (uleb (:disc e))))) [0x04] (uleb (:disc e)))))
+                  (when (not= isa (long (:isa e))) (out! (concat [0x0c] (uleb (:isa e)))))
+                  (when (odd? (bit-xor (long (:flags e)) flags)) (out! [0x06]))
+                  (when (pos? (bit-and (long (:flags e)) 2)) (out! [0x07]))
+                  (when (pos? (bit-and (long (:flags e)) 4)) (out! [0x0a]))
+                  (when (pos? (bit-and (long (:flags e)) 8)) (out! [0x0b]))
+                  (let [ld (- (long (:line e)) last-line)]
+                    (if prev
+                      (out! (line-addr-bytes ld (- (long (off-of (:label e))) (long (off-of prev)))))
+                      (do (out! [0x00 9 0x02])
+                          (register! ctx (:label e))
+                          (.add ^java.util.ArrayList (:fixups @ch) [(.size b) 8 (symbol (:label e)) nil false 0])
+                          (out! (repeat 8 0))
+                          (out! (line-addr-bytes ld 0)))))
+                  (recur (next es) (long (:file e)) (long (:line e)) (long (:col e))
+                         (if (odd? (bit-xor (long (:flags e)) flags)) (long (:flags e)) flags) (long (:isa e)) (:label e)))
+                (when prev (out! (line-addr-bytes :end (- (long end) (long (off-of prev))))))))))
+        (let [len (- (.size b) base 4)]
+          (dotimes [i 4] (.set b (+ base i) (bit-and (bit-shift-right len (* 8 i)) 0xff))))))))
+
+(defn loc!
+  "`.loc FILE [LINE [COLUMN]] [OPTION...]` (AsmParser::parseDirectiveLoc, MCObjectStreamer::emitDwarfLocDirective; AX12): a .loc
+  seen and not used yet gets its line entry here first, then the current .loc is set: the flags start from the last one's
+  is_stmt, `basic_block`, `prologue_end`, `epilogue_begin`, `is_stmt 0|1`, `isa N`, `discriminator N`."
+  [ctx a]
+  (let [[n & more] a
+        cv (fn [e] (let [e (resolve-expr ctx e)] (or (const-value e @(:syms ctx)) (unsupported :debug-line (str ".loc " (pr-str a))))))]
+    (when-not (integer? n) (unsupported :debug-line (str ".loc " (pr-str a))))
+    (when (< (long n) 1) (fail "file number less than one in '.loc' directive"))
+    (when-not (.containsKey ^java.util.TreeMap (:dwarf-files ctx) n) (fail "unassigned file number in '.loc' directive"))
+    (let [[line more] (if (integer? (first more)) [(first more) (rest more)] [0 more])
+          [col more] (if (integer? (first more)) [(first more) (rest more)] [0 more])
+          _ (when (neg? (long line)) (fail "line number less than zero in '.loc' directive"))
+          _ (when (neg? (long col)) (fail "column position less than zero in '.loc' directive"))
+          m (loop [os more m {:file n :line line :col col :flags (bit-and (long (:flags @(:dwarf-loc ctx))) 1) :isa 0 :disc 0}]
+              (if (empty? os)
+                m
+                (let [o (first os) on (when (symbol? o) (name o))]
+                  (case on
+                    "basic_block" (recur (rest os) (update m :flags bit-or 2))
+                    "prologue_end" (recur (rest os) (update m :flags bit-or 4))
+                    "epilogue_begin" (recur (rest os) (update m :flags bit-or 8))
+                    "is_stmt" (let [v (cv (second os))]
+                                (case (long v)
+                                  0 (recur (drop 2 os) (update m :flags bit-and (bit-not 1)))
+                                  1 (recur (drop 2 os) (update m :flags bit-or 1))
+                                  (fail "is_stmt value not 0 or 1")))
+                    "isa" (let [v (cv (second os))] (when (neg? (long v)) (fail "isa number less than zero")) (recur (drop 2 os) (assoc m :isa v)))
+                    "discriminator" (recur (drop 2 os) (assoc m :disc (cv (second os))))
+                    (if on (fail "unknown sub-directive in '.loc' directive") (fail "unexpected token in '.loc' directive"))))))]
+      (line-entry! ctx)
+      (vreset! (:dwarf-loc ctx) m)
+      (vreset! (:loc-seen ctx) true))))
 
 (defn expr-text
   "A section's name read as an expression (`.note.GNU-stack` is (- .note.GNU stack)), as its tokens spell it (parseSectionName)."
@@ -570,7 +685,11 @@
       "previous" (when-let [p @(:prev ctx)] (switch! ctx p))
       "popsection" (let [st @(:stack ctx)]
                      (when (empty? st) (fail ".popsection without corresponding .pushsection"))
-                     (let [[s p] (peek st)] (vswap! (:stack ctx) pop) (vreset! (:cur ctx) s) (vreset! (:prev ctx) p)))
+                     (let [[s p] (peek st)]
+                       (vswap! (:stack ctx) pop)
+                       ;; MCStreamer::popSection changes the section when it differs: a .loc seen is cleared (AX12)
+                       (when-not (identical? s (cur-sec ctx)) (vreset! (:loc-seen ctx) false))
+                       (vreset! (:cur ctx) s) (vreset! (:prev ctx) p)))
       ("globl" "global") (doseq [s args] (bind! ctx (sym-name s) elf/STB_GLOBAL))
       "weak" (doseq [s args] (bind! ctx (sym-name s) elf/STB_WEAK))
       "local" (doseq [s args] (bind! ctx (sym-name s) elf/STB_LOCAL))
@@ -587,7 +706,7 @@
       ("asciz" "string") (doseq [s args] (data! ctx) (bytes! ctx (concat (string-bytes s) [0])))
       ("zero" "skip" "space") (let [[n v] args] (fill! ctx n 1 (if v (cv v) 0)))
       ;; ARS47 (a): parseDirectiveOrg, an org fragment (MCOrgFragment) whatever the target
-      "org" (let [[t v] args] (data! ctx) (org! ctx t (if v (cv v) 0)))
+      "org" (let [[t v] args] (data-only! ctx) (org! ctx t (if v (cv v) 0)))
       "fill" (let [[n sz v] args sz (if sz (long (cv sz)) 1) v (if v (cv v) 0)]
                (when-not (neg? sz) (fill! ctx n (min 8 sz) v)))
       ("align" "balign" "p2align" "balignw" "balignl" "p2alignw" "p2alignl")
@@ -633,10 +752,7 @@
                 (bytes! ctx (concat (string-bytes (first args)) [0]))
                 (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev))
       "even" (if (code-section? (cur-sec ctx)) (align! ctx 2 0 1 nil true) (align! ctx 2 0 1 nil false))
-      "loc" (let [a (first args) n (if (vector? a) (first a) a)]
-              (when-not (integer? n) (unsupported :debug-line (str ".loc " (pr-str args))))
-              (when-not (.containsKey ^java.util.TreeMap (:dwarf-files ctx) n) (fail "unassigned file number in '.loc' directive"))
-              (vreset! (:loc-seen ctx) true))
+      "loc" (loc! ctx (let [a (first args)] (if (vector? a) a (vec args))))
       "cfi_sections" (when-not (= ['.eh_frame] (vec args)) (unsupported :cfi (str ".cfi_sections " (pr-str args))))
       (if (.startsWith h "cfi_")
         (cfi! ctx h args)
@@ -1197,6 +1313,67 @@
   (assemble (asm/read-items (asm/latin1 path) d)))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
+;; the diagnostics (ARS43 (a); moved from arbace.asm.arm64.objcheck by AX12): every error of the object assembler as llvm-mc
+;; prints it (SourceMgr's `FILE:LINE:COL: error: MESSAGE`, the source line, the caret)
+
+(defn- diag-expr-name
+  "The first symbol an expression names that the source spells (not a temporary label), or nil."
+  [e]
+  (cond (symbol? e) (let [n (name e)] (when-not (or (str/starts-with? n ".L") (str/includes? n "\u0000")) n))
+        (seq? e) (some diag-expr-name (rest e))
+        :else nil))
+
+(defn- diag-word-at
+  "The index of the word W in S at or after FROM (not inside a longer name), or nil."
+  [^String s ^String w ^long from]
+  (loop [i (.indexOf s w (int from))]
+    (when-not (neg? i)
+      (let [ok (fn [^long j] (or (neg? j) (>= j (count s)) (not (re-matches #"[A-Za-z0-9_.$]" (str (.charAt s j))))))]
+        (if (and (ok (dec i)) (ok (+ i (count w)))) i (recur (.indexOf s w (int (inc i)))))))))
+
+(defn- diag-expr-index
+  "Where MCExpr's location of the expression E falls in the item's text T (LLVM's caret): a specifier's `:spec:`, a binary
+  expression's operator, a unary one's operator, a symbol's name; nil when it is not found."
+  [^String t e]
+  (let [nm (diag-expr-name e)
+        ;; (x86's AT&T immediate `$NAME`: the name after its `$`, AX12)
+        sym-i (when nm (or (diag-word-at t nm 0) (when-let [i (diag-word-at t (str "$" nm) 0)] (inc (long i)))))]
+    (cond
+      (nil? e) nil
+      (and (seq? e) (= 'at (first e))) (let [lt (str/lower-case t) sp (str/lower-case (str (nth e 2)))
+                                             i (.indexOf lt (str ":" sp ":"))
+                                             ;; AArch64's `%NAME(E)`: MCSpecifierExpr's place, the name after `%` (ARS49 (a))
+                                             j (.indexOf lt (str "%" sp "("))]
+                                         (cond (not (neg? i)) i (not (neg? j)) (inc j) :else (diag-expr-index t (second e))))
+      (and (seq? e) (= 2 (count e)) sym-i) (let [i (.lastIndexOf t (str (first e)) (int sym-i))] (if (neg? i) sym-i i))
+      (and (seq? e) (= 3 (count e)) (#{'+ '- '* '/ '<< '>> '& '|} (first e)) sym-i)
+      (let [from (if (= nm (diag-expr-name (second e))) (+ (long sym-i) (count nm)) 0)
+            i (.indexOf t (str (first e)) (int from))]
+        (if (neg? i) sym-i i))
+      :else sym-i)))
+
+(defn diagnostics
+  "The object assembler's errors (`r`'s :errors) as llvm-mc prints them for the source SRC: three lines an error, each under
+  the name llvm-mc gives the input (FILE: `<stdin>`, or the test's path)."
+  ([^String src r] (diagnostics src r "<stdin>"))
+  ([^String src r file]
+  (vec (mapcat (fn [{:keys [pos msg expr]}]
+                 (if-let [[st en] pos]
+                   (let [st (long st) en (long en)
+                         ls (.lastIndexOf src "\n" (int (dec st)))
+                         le (let [i (.indexOf src "\n" (int st))] (if (neg? i) (count src) i))
+                         ;; the item's first character not blank
+                         st (loop [i st] (if (and (< i en) (Character/isWhitespace (.charAt src (int i)))) (recur (inc i)) i))
+                         t (subs src st (max st (min en (count src))))
+                         at (+ st (long (or (diag-expr-index t expr) 0)))
+                         line (inc (count (filter #(= \newline %) (subs src 0 st))))
+                         col (- at ls)]
+                     [(str file ":" line ":" col ": error: " msg) (subs src (inc ls) le)
+                      (str (apply str (repeat (dec col) " ")) "^")])
+                   [(str file ": error: " msg)]))
+               (:errors r)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
 ;; the judge: an object against llvm-mc's recorded one
 
 (defn hex->bytes ^bytes [^String h]
@@ -1222,6 +1399,29 @@
         [k d]
         [:canonical (str (alength ours) " bytes against " (alength ref))]))))
 
+(defn defsym-of
+  "The list's third field (the case's llvm-mc options, AXS94 (a): `--defsym SYM=V ...`) as assemble's :defsym ([[SYM V]...]),
+  or nil when it names none."
+  [opts]
+  (not-empty (vec (for [[_ n v] (re-seq #"--?defsym[= ]([A-Za-z_.$][\w.$]*)=(-?\w+)" (or opts ""))]
+                    [n (let [v (str/lower-case v) neg (str/starts-with? v "-") v (if neg (subs v 1) v)
+                             x (if (str/starts-with? v "0x") (Long/parseLong (subs v 2) 16) (Long/parseLong v))]
+                         (if neg (- x) x))]))))
+
+(defn judge-refusal
+  "[RESULT DETAIL] of Arbace's result `r` for the file at PATH against llvm-mc's recorded refusal (its diagnostics, the input
+  as <input>): :pass when Arbace refuses it with the same diagnostics, :error-diagnostics when its differ (the first line that
+  does), :assembled when Arbace assembles it (both failures), else the class of what was not assembled."
+  [^String path r ^String refused]
+  (let [want (str/split-lines refused)]
+    (cond (:bytes r) [:assembled (str "llvm-mc refuses it: " (first want))]
+          (:unsupported r) [(keyword (str "unsupported-" (name (:unsupported r)))) (:what r)]
+          :else (let [ours (diagnostics (asm/latin1 path) r "<input>")]
+                  (if (= ours want)
+                    [:pass ""]
+                    (let [i (or (first (filter #(not= (nth ours % nil) (nth want % nil)) (range (max (count ours) (count want))))) 0)]
+                      [:error-diagnostics (str "line " (inc i) ": ours " (pr-str (nth ours i nil)) " llvm-mc's " (pr-str (nth want i nil)))]))))))
+
 (defn read-record [^String path]
   (let [r (read-string (slurp path))] r))
 
@@ -1233,10 +1433,13 @@
         objs (:objects rec)
         rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
         _ (.mkdirs (java.io.File. ^String work))
-        res (vec (for [[n p] rows]
-                   (let [r (try (assemble-file p) (catch Throwable e {:unsupported :crash :what (str e)}))
+        res (vec (for [[n p opts] rows]
+                   (let [ds (defsym-of opts)
+                         r (try (if ds (assemble-file p ds) (assemble-file p)) (catch Throwable e {:unsupported :crash :what (str e)}))
                          want (get objs n)]
                      (cond
+                       ;; AXS94 (a): an error run's case, held to llvm-mc's refusal: its diagnostics, line for line
+                       (:refused want) (into [n] (judge-refusal p r (:refused want)))
                        (:error r) [n :error (:error r)]
                        (:unsupported r) [n (keyword (str "unsupported-" (name (:unsupported r)))) (:what r)]
                        (nil? want) [n :no-record ""]
@@ -1256,10 +1459,14 @@
   "A negative control: SUBJECT's object judged against REFERENCE's record: `differs` as it must, else `same`; `left` (a failing
   control) when the subject does not assemble or the reference is not in the record, so neither passes vacuously."
   [assemble-file subj-path ref-name record]
-  (let [rec (read-record record) r (assemble-file subj-path) hex (:hex (get (:objects rec) ref-name))]
-    (if-let [bs (and hex (:bytes r))]
+  (let [rec (read-record record) r (assemble-file subj-path) want (get (:objects rec) ref-name) hex (:hex want)]
+    (cond
+      ;; a reference that is llvm-mc's refusal (AXS94 (a)): judged by judge-refusal
+      (:refused want) (if (= :pass (first (judge-refusal subj-path r (:refused want)))) "same" "differs")
+      :else
+      (if-let [bs (and hex (:bytes r))]
       (let [[c] (compare-objects bs (hex->bytes hex))] (if (= c :pass) "same" "differs"))
-      "left")))
+      "left"))))
 
 (defn main
   "The arch's -main over its `assemble-file` (fn [PATH]): object IN.s OUT.o: the object written (exit 1 with the class when it
