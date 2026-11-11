@@ -74,17 +74,15 @@
   first unit that names one."
   nil)
 
-(defn- own-loc [name uid]
-  (if-let [{:keys [unit sym]} (get @*locs* uid)]
-    (if (= unit (:alias @*u*))
-      sym
-      (do (swap! *u* update :uses conj unit)
-          (symbol (str unit) (str sym))))
-    (let [s (fresh "G")]
-      (var! s '(* scm/Loc))
-      (init! (list 'set! s (list 'scm/NewLoc name)))
-      (swap! *locs* assoc uid {:unit (:alias @*u*) :sym s})
-      s)))
+(defn- own-loc
+  "SCS30: a library's global is the store's location of its gensym, read by uid (scm/AotLoc), as eval's code finds it: each unit
+  holds its own variable for it, set up before its code runs."
+  [name uid]
+  (memo-sym :own uid
+            #(let [s (fresh "G")]
+               (var! s '(* scm/Loc))
+               (setup! (list 'set! s (list 'scm/AotLoc 'm name uid)))
+               s)))
 
 (defn- loc-ref [[op name uid]]
   (case op
@@ -427,7 +425,7 @@
 
 (defn- compile-unit
   "Unit u (the dumper's map) as the Go forms of a package's file: {:decls [...] :uses #{alias}}."
-  [{:keys [consts forms late]} alias]
+  [{:keys [consts forms late info visit]} alias install?]
   (binding [*u* (atom {:n 0 :decls [] :inits [] :setups [] :alias alias :uses #{}})]
     (let [tops (doall
                  (for [f forms]
@@ -436,6 +434,15 @@
                      (emit! (list 'go/type tt '(struct)))
                      (emit! (list* 'go/method 'Run [(tagged 'n (list '* tt)) m-param (tagged 'e '(* scm/Env))] :results '[any bool] stmts))
                      tt)))
+          ;; SCS30: the visit code of a library to install in psyntax, forms of the same unit
+          vtops (when (and install? info)
+                  (doall
+                    (for [f visit]
+                      (let [tt (fresh "vtop")
+                            stmts (block (cx f [] :tail))]
+                        (emit! (list 'go/type tt '(struct)))
+                        (emit! (list* 'go/method 'Run [(tagged 'n (list '* tt)) m-param (tagged 'e '(* scm/Env))] :results '[any bool] stmts))
+                        tt))))
           {:keys [decls inits setups uses]} @*u*]
       {:uses uses
        :decls (concat
@@ -449,7 +456,12 @@
                  (list* 'go/func 'setup [m-param] (concat (when late [(list 'scm/ReadLate 'K late)]) setups))
                  (list* 'go/func 'Run "Run runs the unit's forms on machine m.\n" [m-param]
                         (list 'setup 'm)
-                        (for [tt tops] (list '.Exec 'm (list 'addr (list 'lit tt)) nil)))])})))
+                        (for [tt tops] (list '.Exec 'm (list 'addr (list 'lit tt)) nil)))]
+                (when (and install? info)
+                  [(list* 'go/func 'Visit "Visit runs the library's visit code (its macros' transformers) on machine m.\n" [m-param]
+                          (for [tt vtops] (list '.Exec 'm (list 'addr (list 'lit tt)) nil)))
+                   (list 'go/func 'Install "Install installs the library in psyntax (SCS30), after Run.\n" [m-param]
+                         (list 'scm/InstallAOTLibrary 'm (list 'aget 'K info) (if (seq visit) 'Visit nil)))]))})))
 
 (defn- clean
   "Form x without the reader's positions in its metadata (the compiler's quoted Go forms carry them)."
@@ -502,7 +514,7 @@
   (let [u (read-string (slurp ir))]
     (when-let [r (:refused u)] (println "refused:" r) (System/exit 3))
     (binding [*locs* (atom {})]
-      (let [{:keys [decls]} (compile-unit u 'psyntax)
+      (let [{:keys [decls]} (compile-unit u 'psyntax false)
             decls (concat decls [(list 'go/func 'Boot "Boot boots psyntax on machine m: its forms compiled.\n" [m-param]
                                        '(scm/BootBegin) (list 'Run 'm) '(scm/BootEnd))])]
         (write-package! src "arbace/scmaot/psyntax" "psyntax" '[[scm "arbace/scm"]] decls)))
@@ -524,13 +536,13 @@
                         (let [b (mangle (:name (first ls)))
                               b (if (seen b) (str b "_" (count out)) b)]
                           (recur (rest ls) (conj seen b) (conj out b)))))
+            needs-psyntax (some #(or (:late %) (str/includes? (pr-str (:forms %)) "(pl ")) units)
             path-of #(str "arbace/scmaot/" pkg "/lib/" %)
             lib-imports (fn [uses] (vec (for [a (sort (map str uses))] [(symbol a) (path-of a)])))
             _ (doseq [[u nm] (map vector libs names)]
-                (let [{:keys [decls uses]} (compile-unit u (symbol nm))]
+                (let [{:keys [decls uses]} (compile-unit u (symbol nm) (boolean needs-psyntax))]
                   (write-package! src (path-of nm) nm (into '[[scm "arbace/scm"]] (lib-imports uses)) decls)))
-            {:keys [decls uses]} (compile-unit prog 'main)
-            needs-psyntax (some #(or (:late %) (str/includes? (pr-str (:forms %)) "(pl ")) units)
+            {:keys [decls uses]} (compile-unit prog 'main false)
             main (list 'go/func 'main []
                        (list 'set! 'scm/CommandLine (list 'append (list 'lit '(slice string) file) (list 'spread (list 'subslice 'os/Args 1))))
                        (list 'when (list '== (list 'os/Getenv "GOGC") "") (list 'debug/SetGCPercent 400))
@@ -547,6 +559,10 @@
                                                               [(list 'psyntax/Boot 'm)
                                                                (list '.SetLibraryPath 'm (list* 'lit '(slice string) libpath))])
                                                             (for [nm names] (list (symbol nm "Run") 'm))
+                                                            ;; SCS30 (SC94 (b)): the compiled libraries installed in psyntax, so eval sees them
+                                                            (when needs-psyntax
+                                                              (for [[u nm] (map vector libs names) :when (:info u)]
+                                                                (list (symbol nm "Install") 'm)))
                                                             [(list 'Run 'm)]))])]
                              (list 'when (list '!= 'scm/AtExit nil) (list 'scm/AtExit))
                              (list 'os/Exit 'status)))
