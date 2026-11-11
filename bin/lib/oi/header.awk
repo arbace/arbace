@@ -180,6 +180,8 @@ END {
       # fails at its link, in a class
       # the Str library (DEFERRED-TRIAGE §3 item 10): str.ml loaded with the program, its matcher oi's ext_str_re
       if (lib == "str") { incs = incs " str"; continue }
+      # the Runtime_events library (OC219 (a)): runtime_events.ml loaded with the program, its externals oi's ext_runtime_events
+      if (lib == "runtime_events") { incs = incs " runtime_events"; continue }
       if (lib == "config" || lib == "ocamlcommon") { if (incs !~ / complib/) incs = incs " complib"; continue }
       cls("include " lib)
     }

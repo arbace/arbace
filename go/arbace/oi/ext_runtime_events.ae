@@ -1,0 +1,419 @@
+(in-ns 'go.arbace.oi) (go/file "ext_runtime_events.go" :imports [
+    [os "os"]
+    [sort "sort"]
+    [strconv "strconv"]
+    [strings "strings"]
+    [sync "sync"]
+    [time "time"]])
+
+;; Runtime_events (OC219 (a); OCaml 5.5.0's runtime/runtime_events.c, the producer, and otherlibs/runtime_events'
+;; runtime_events_consumer.c and runtime_events.ml, the consumer; LGPL-2.1 with the linking exception, read for their
+;; behaviour, written anew). The ring of events is the process's own: Runtime_events.start creates the ring's file
+;; (OCAML_RUNTIME_EVENTS_DIR or the current directory, PID.events, removed at exit unless OCAML_RUNTIME_EVENTS_PRESERVE is set;
+;; OCAML_RUNTIME_EVENTS_START starts it with the program) and writes EV_RING_START; pause and resume their lifecycle events. The
+;; events are those of the collections a program asks for, as the C runtime emits them: Gc.minor an EV_EXPLICIT_GC_MINOR span
+;; around one EV_MINOR; Gc.major EV_EXPLICIT_GC_MAJOR around a minor (caml_empty_minor_heaps_once) and one major cycle;
+;; Gc.full_major EV_EXPLICIT_GC_FULL_MAJOR around three cycles, Gc.compact EV_EXPLICIT_GC_COMPACT around three cycles and an
+;; EV_COMPACT in the last; a cycle (stw_finish_major_cycle) a minor, then EV_MAJOR_FINISH_CYCLE around the minor of
+;; stw_cycle_all_domains. The user events (Runtime_events.User: register, write with the unit, int, span and custom types, the
+;; custom ones serialized when written and deserialized when read) are the program's. A cursor on the process's own ring
+;; (create_cursor None, or Some (dir, pid) naming this process's file) reads them from the ring's start, as the C consumer's
+;; positions start at 0: read_poll calls the callbacks of each event in order, lost_events with the words overwritten when the
+;; ring (OCAMLRUNPARAM's e, 2^16 words by default) wrapped past the cursor, its count of events as the C one (max_events as the
+;; C stub reads it, Some's tagged word); a callback's exception ends the poll and is raised; a poll inside a poll of the same
+;; cursor is Failure "poll called concurrently or reentrant". Divergences (OC219): the collector's own collections (Go's) and the
+;; C runtime's other phases (marking, sweeping, the barriers), counters and allocation buckets are not emitted (OC218's heap model
+;; would give them); one ring for all domains, its events naming their domain; the file holds no ring (the events live in the
+;; process), so another process's file is not mapped ("could not map underlying runtime_events").
+
+(go/type reEvent "reEvent is one message of the ring: its position and length in words (header and timestamp included), its domain and
+timestamp; kind 0 runtime_begin, 1 runtime_end, 2 runtime_counter, 4 lifecycle, 5 a user event, -1 padding; id the phase, counter,
+lifecycle or user event index; data the counter's value or lifecycle's data; utype the user message (0 unit, 1 int, 2 span begin,
+3 span end, 4 custom) and payload a custom event's bytes.
+" (struct
+    ^int pos
+    ^int words
+    ^int dom
+    ^int64 ts
+    ^int kind
+    ^int id
+    ^int64 data
+    ^int utype
+    ^{:tag (slice byte)} payload))
+
+(go/type reCursor "reCursor is a cursor on the process's ring: open, polling (cursor_in_poll), its position in words.\n" (struct
+    ^bool open
+    ^bool inPoll
+    ^int pos))
+
+(go/var
+  [^sync/Mutex reMu]
+  [^bool reEnabled]
+  [^bool rePaused]
+  [^bool reInited]
+  [^string reLoc]
+  [^{:tag (slice reEvent)} reRing]
+  [^int reHead]
+  [^int reTail]
+  [^int reSize]
+  [^{:tag (slice Value)} reUser]
+  [^{:tag time/Time} reT0])
+
+(go/const
+  [^{:val 2} rePhaseExplicitMinor 2]
+  [^{:val 3} rePhaseExplicitMajor 3]
+  [^{:val 4} rePhaseExplicitFullMajor 4]
+  [^{:val 5} rePhaseExplicitCompact 5]
+  [^{:val 11} rePhaseMinor 11]
+  [^{:val 28} rePhaseFinishCycle 28]
+  [^{:val 44} rePhaseCompact 44])
+
+(go/func reInit "reInit reads the environment once at the program's start (caml_runtime_events_init): the ring's size, and
+OCAML_RUNTIME_EVENTS_START.
+" []
+  (when reInited
+    (return))
+  (set! reInited true)
+  (set! reT0 (time/Now))
+  (let [e (runParam 101)]
+    (when (or (< e 0) (> e 30))
+      (set! e 16))
+    (set! reSize (<< 1 e)))
+  (when [(values _ ok) (os/LookupEnv "OCAML_RUNTIME_EVENTS_START")] ok
+    (reStart)))
+
+(go/func reDestroy "reDestroy is caml_runtime_events_destroy at the program's end: the ring's file removed unless
+OCAML_RUNTIME_EVENTS_PRESERVE is set.
+" []
+  (.Lock reMu)
+  (defer (.Unlock reMu))
+  (when (not reEnabled)
+    (return))
+  (when [(values _ ok) (os/LookupEnv "OCAML_RUNTIME_EVENTS_PRESERVE")] (not ok)
+    (os/Remove reLoc))
+  (set! reEnabled false))
+
+(go/func reNow "reNow is caml_time_counter: monotonic nanoseconds.\n" ^int64 []
+  (conv int64 (time/Since reT0)))
+
+(go/func reStart "reStart is caml_runtime_events_start: the ring's file created, the ring emptied, EV_RING_START with the pid.\n" []
+  (reInit)
+  (.Lock reMu)
+  (when reEnabled
+    (.Unlock reMu)
+    (return))
+  (let [name (+ (strconv/Itoa (os/Getpid)) ".events")
+        dir (os/Getenv "OCAML_RUNTIME_EVENTS_DIR")]
+    (if (!= dir "")
+      (set! reLoc (+ dir "/" name))
+      (set! reLoc name))
+    (let [(values f err) (os/OpenFile reLoc (bit-or os/O_RDWR os/O_CREATE) 0600)]
+      (when (!= err nil)
+        (.Unlock reMu)
+        (panic (addr (lit FatalError :Msg (+ "Fatal error: Couldn't open ring buffer loc: " reLoc) :Code 2))))
+      (.Close f)))
+  (set! reRing nil)
+  (set! reHead 0)
+  (set! reTail 0)
+  (set! reEnabled true)
+  (set! rePaused false)
+  (.Unlock reMu)
+  (reWrite 0 4 0 (conv int64 (os/Getpid)) 0 nil 1))
+
+(go/func reActive "reActive is ring_is_active: started and not paused.\n" ^bool []
+  (.Lock reMu)
+  (defer (.Unlock reMu))
+  (and reEnabled (not rePaused)))
+
+(go/func reWrite "reWrite is write_to_ring: a message of n content words, a padding message first when it would straddle the ring's
+end, the oldest messages overwritten (ring_head moved past them) when the ring is full. Nothing when the ring is not active.
+" [^int dom ^int kind ^int id ^int64 data ^int utype ^{:tag (slice byte)} payload ^int n]
+  (.Lock reMu)
+  (defer (.Unlock reMu))
+  (when (or (not reEnabled) rePaused)
+    (return))
+  (let [w (+ n 2)
+        ts (reNow)
+        off (% reTail reSize)]
+    (when (< (- reSize off) w)
+      (set! reRing (append reRing (lit reEvent :pos reTail :words (- reSize off) :kind -1)))
+      (set! reTail + (- reSize off)))
+    (set! reRing (append reRing (lit reEvent :pos reTail :words w :dom dom :ts ts :kind kind :id id :data data :utype utype :payload payload)))
+    (set! reTail + w)
+    (while (> (- reTail reHead) reSize)
+      (set! reRing (subslice reRing 1))
+      (if (> (len reRing) 0)
+        (set! reHead (.-pos (aget reRing 0)))
+        (set! reHead reTail)))))
+
+(go/func reDom "reDom is the thread's domain's identifier.\n" ^int [^{:tag (* Thread)} th]
+  (when (and (!= th nil) (!= (.-Dom th) nil))
+    (return (.-ID (.-Dom th))))
+  0)
+
+(go/func rePhase "rePhase writes a phase's runtime_begin or runtime_end (CAML_EV_BEGIN, CAML_EV_END).\n" [^{:tag (* Thread)} th ^bool begin ^int phase]
+  (if begin
+    (reWrite (reDom th) 0 phase 0 0 nil 0)
+    (reWrite (reDom th) 1 phase 0 0 nil 0)))
+
+(go/func reMinor "reMinor is a minor collection's EV_MINOR span.\n" [^{:tag (* Thread)} th]
+  (rePhase th true rePhaseMinor)
+  (rePhase th false rePhaseMinor))
+
+(go/func reCycle "reCycle is stw_finish_major_cycle's events: the minor heap emptied, then EV_MAJOR_FINISH_CYCLE around the cycle,
+whose stw_cycle_all_domains empties it again; compact an EV_COMPACT in the cycle.
+" [^{:tag (* Thread)} th ^bool compact]
+  (reMinor th)
+  (rePhase th true rePhaseFinishCycle)
+  (reMinor th)
+  (when compact
+    (rePhase th true rePhaseCompact)
+    (rePhase th false rePhaseCompact))
+  (rePhase th false rePhaseFinishCycle))
+
+(go/func reExplicit "reExplicit is the events of an asked collection (gc_ctrl.c): kind 0 Gc.minor, 1 Gc.major, 2 Gc.full_major, 3 Gc.compact.\n" [^{:tag (* Thread)} th ^int kind]
+  (when (not (reActive))
+    (return))
+  (switch kind
+    (case [0]
+      (rePhase th true rePhaseExplicitMinor)
+      (reMinor th)
+      (rePhase th false rePhaseExplicitMinor))
+    (case [1]
+      (rePhase th true rePhaseExplicitMajor)
+      (reMinor th)
+      (reCycle th false)
+      (rePhase th false rePhaseExplicitMajor))
+    (case [2]
+      (rePhase th true rePhaseExplicitFullMajor)
+      (reCycle th false)
+      (reCycle th false)
+      (reCycle th false)
+      (rePhase th false rePhaseExplicitFullMajor))
+    (case [3]
+      (rePhase th true rePhaseExplicitCompact)
+      (reCycle th false)
+      (reCycle th false)
+      (reCycle th true)
+      (rePhase th false rePhaseExplicitCompact))))
+
+(go/func reLifecycle "reLifecycle is caml_ev_lifecycle.\n" [^int ev ^int64 data]
+  (reWrite 0 4 ev data 0 nil 1))
+
+(go/func reCursorOf "reCursorOf is a cursor value's state (the block's first field's custom block), nil once freed.\n" ^{:tag (* reCursor)} [^Value w]
+  (let [c (assert (* Custom) (aget (.-F (AsBlock w)) 0))]
+    (when [(values r ok) (assert (* reCursor) (.-V c))] ok
+      (return r))
+    nil))
+
+(go/func reOpenFailure "reOpenFailure is the consumer's E_OPEN_FAILURE.\n" []
+  (Failwith "Runtime_events: could not create cursor for specified path."))
+
+(go/func reCreateCursor "reCreateCursor is caml_ml_runtime_events_create_cursor.\n" ^Value [^Value opt]
+  (let [^string path ""]
+    (if (== opt None)
+      (do (.Lock reMu)
+          (let [en reEnabled loc reLoc]
+            (.Unlock reMu)
+            (when (not en)
+              (Failwith "Runtime_events: no ring for current process.          Was runtime_events started?"))
+            (set! path loc)))
+      (let [p (AsBlock (aget (.-F (AsBlock opt)) 0))]
+        (set! path (+ (GoString (aget (.-F p) 0)) "/" (strconv/Itoa (AsInt (aget (.-F p) 1))) ".events"))))
+    (let [(values f err) (os/Open path)]
+      (when (!= err nil)
+        (reOpenFailure))
+      (.Close f))
+    ;; the file must be this process's ring: another process's ring is not mapped (OC219's divergence)
+    (.Lock reMu)
+    (let [en reEnabled loc reLoc]
+      (.Unlock reMu)
+      (when (not en)
+        (Failwith "Runtime_events: could not map underlying runtime_events."))
+      (let [(values a e1) (os/Stat path)
+            (values b e2) (os/Stat loc)]
+        (when (or (!= e1 nil) (!= e2 nil) (not (os/SameFile a b)))
+          (Failwith "Runtime_events: could not map underlying runtime_events."))))
+    (Tuple (addr (lit Custom :Name "runtime_events.cursor" :V (addr (lit reCursor :open true)))) None None)))
+
+(go/func reCallback "reCallback is a field of the callbacks record when it is Some f: f, else nil.\n" ^Value [^Value cbs ^int i]
+  (let [o (aget (.-F (AsBlock cbs)) i)]
+    (when (== o None)
+      (return nil))
+    (aget (.-F (AsBlock o)) 0)))
+
+(go/func reUserEvent "reUserEvent is the registered event of an index (caml_runtime_events_user_resolve: the process's own).\n" ^Value [^int id]
+  (.Lock reMu)
+  (defer (.Unlock reMu))
+  (when (and (>= id 0) (< id (len reUser)))
+    (return (aget reUser id)))
+  nil)
+
+(go/func reDispatch "reDispatch calls the callbacks of one message (runtime_events_consumer.c's ml_* handlers).\n" [^{:tag (* Thread)} th ^Value cbs ^reEvent ev]
+  (let [ts (conv Value (.-ts ev))]
+    (switch (.-kind ev)
+      (case [0 1]
+        (when [f (reCallback cbs (.-kind ev))] (!= f nil)
+          (.ApplyCallback th f (lit (slice Value) (.-dom ev) ts (.-id ev)))))
+      (case [2]
+        (when [f (reCallback cbs 2)] (!= f nil)
+          (.ApplyCallback th f (lit (slice Value) (.-dom ev) ts (.-id ev) (conv int (.-data ev))))))
+      (case [4]
+        (when [f (reCallback cbs 4)] (!= f nil)
+          (let [^Value d None]
+            (when (!= (.-data ev) 0)
+              (set! d (Some (conv int (.-data ev)))))
+            (.ApplyCallback th f (lit (slice Value) (.-dom ev) ts (.-id ev) d)))))
+      (case [5]
+        (let [e (reUserEvent (.-id ev))]
+          (when (== e nil)
+            (return))
+          (let [typ (aget (.-F (AsBlock e)) 2)
+                ^int tid 0
+                ^Value v Unit]
+            (if [(values b ok) (assert (* Block) typ)] ok
+              (do (set! tid (AsInt (aget (.-F (AsBlock (aget (.-F b) 0))) 2)))
+                  (when (!= (.-utype ev) 4)
+                    (return))
+                  (let [buf (addr (lit Bytes :B (append (make (slice byte) 0 (len (.-payload ev))) (spread (.-payload ev)))))]
+                    (set! v (.Apply th (aget (.-F (AsBlock (aget (.-F b) 0))) 1) buf (len (.-payload ev))))))
+              (do (set! tid (AsInt typ))
+                  (switch (.-utype ev)
+                    (case [0] (set! v Unit))
+                    (case [1] (set! v (conv int (.-data ev))))
+                    (case [2] (set! v 0))
+                    (case [3] (set! v 1))
+                    (default (return)))))
+            (let [arr (AsBlock (aget (.-F (AsBlock cbs)) 6))]
+              (when (>= tid (len (.-F arr)))
+                (return))
+              (let [l (aget (.-F arr) tid)]
+                (while (!= l (conv Value 0))
+                  (let [cell (AsBlock l)
+                        cb (aget (.-F (AsBlock (aget (.-F cell) 0))) 0)]
+                    (.ApplyCallback th cb (lit (slice Value) (.-dom ev) ts e v))
+                    (set! l (aget (.-F cell) 1))))))))))))
+
+(go/func reReadPoll "reReadPoll is caml_ml_runtime_events_read_poll: the messages from the cursor's position on, their callbacks called,
+at most max (the C stub's word of Some n, 0 for None: no limit); the count of messages read.
+" ^Value [^{:tag (* Thread)} th ^Value w ^Value cbs ^Value maxv]
+  (let [c (reCursorOf w)
+        ^int mx 0
+        ^int count 0]
+    (when (== c nil)
+      (Failwith "Runtime_events: invalid or closed cursor"))
+    (when (not (.-open c))
+      (Failwith "Runtime_events: cursor is not open"))
+    (when (.-inPoll c)
+      (Failwith "Runtime_events: poll called concurrently or reentrant"))
+    (when (!= maxv None)
+      (set! mx (+ (* 2 (AsInt (aget (.-F (AsBlock maxv)) 0))) 1)))
+    (set! (.-inPoll c) true)
+    (defer ((fn [] (set! (.-inPoll c) false))))
+    (while true
+      (.Lock reMu)
+      (when (> reHead (.-pos c))
+        (let [lost (- reHead (.-pos c))]
+          (set! (.-pos c) reHead)
+          (.Unlock reMu)
+          (when [f (reCallback cbs 5)] (!= f nil)
+            (.ApplyCallback th f (lit (slice Value) 0 lost)))
+          (continue)))
+      (when (>= (.-pos c) reTail)
+        (.Unlock reMu)
+        (break))
+      (let [p (.-pos c)
+            i (sort/Search (len reRing) (fn ^bool [^int k] (>= (.-pos (aget reRing k)) p)))]
+        (when (or (>= i (len reRing)) (!= (.-pos (aget reRing i)) p))
+          (.Unlock reMu)
+          (Failwith "Runtime_events: corrupt stream"))
+        (let [ev (aget reRing i)]
+          (set! (.-pos c) (+ p (.-words ev)))
+          (.Unlock reMu)
+          (when (!= (.-kind ev) -1)
+            (reDispatch th cbs ev)
+            (inc! count)
+            (when (and (> mx 0) (>= count mx))
+              (break))))))
+    count))
+
+(go/func reUserRegister "reUserRegister is caml_runtime_events_user_register: the event {id; name; typ; tag}, its index the next.\n" ^Value [^Value name ^Value tag ^Value typ]
+  (.Lock reMu)
+  (defer (.Unlock reMu))
+  (let [idx (len reUser)
+        s (GoString name)]
+    (when (> idx 8192)
+      (InvalidArg "Runtime_events.User.register: maximum number of custom events exceeded"))
+    (when (> (len s) 127)
+      (InvalidArg "Runtime_events.User.register: maximum length for event name exceeded"))
+    (when (strings/Contains s "\u0000")
+      (InvalidArg "Runtime_events.User.register: event name has null characters"))
+    (let [e (addr (lit Block :Tag 0 :F (lit (slice Value) idx name typ tag)))]
+      (set! reUser (append reUser e))
+      e)))
+
+(go/func reUserWrite "reUserWrite is caml_runtime_events_user_write: a custom event's value serialized into the buffer and its bytes
+written, a unit, int or span event's directly; nothing when the ring is not active.
+" ^Value [^{:tag (* Thread)} th ^Value buf ^Value e ^Value v]
+  (when (not (reActive))
+    (return Unit))
+  (let [f (.-F (AsBlock e))
+        id (AsInt (aget f 0))
+        typ (aget f 2)
+        dom (reDom th)]
+    (if [(values b ok) (assert (* Block) typ)] ok
+      (let [ser (aget (.-F (AsBlock (aget (.-F b) 0))) 0)
+            n (AsInt (.Apply th ser buf v))]
+        (when (not (reActive))
+          (return Unit))
+        (let [bs (.-B (AsBytes buf))]
+          (when (or (< n 0) (> n (len bs)))
+            (InvalidArg "Runtime_events.User.write"))
+          (reWrite dom 5 id 0 4 (append (make (slice byte) 0 n) (spread (subslice bs 0 n))) (/ (+ n 8) 8))))
+      (switch (AsInt typ)
+        (case [0] (reWrite dom 5 id 0 0 nil 0))
+        (case [1] (reWrite dom 5 id (conv int64 (AsInt v)) 1 nil 1))
+        (case [2]
+          (if (== (AsInt v) 0)
+            (reWrite dom 5 id 0 2 nil 0)
+            (reWrite dom 5 id 0 3 nil 0)))))
+    Unit))
+
+(go/func init []
+  (let [r RegisterExt]
+    (r "caml_ml_runtime_events_start" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (reStart) Unit))
+    (r "caml_ml_runtime_events_pause" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (.Lock reMu)
+      (let [ok (and reEnabled (not rePaused))]
+        (.Unlock reMu)
+        (when ok
+          (reLifecycle 2 0)
+          (.Lock reMu)
+          (set! rePaused true)
+          (.Unlock reMu)))
+      Unit))
+    (r "caml_ml_runtime_events_resume" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (.Lock reMu)
+      (let [ok (and reEnabled rePaused)]
+        (when ok
+          (set! rePaused false))
+        (.Unlock reMu)
+        (when ok
+          (reLifecycle 3 0)))
+      Unit))
+    (r "caml_ml_runtime_events_are_active" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (reActive))))
+    (r "caml_ml_runtime_events_path" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (.Lock reMu)
+      (defer (.Unlock reMu))
+      (when (not reEnabled)
+        (return None))
+      (Some (Str reLoc))))
+    (r "caml_ml_runtime_current_timestamp" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (reInit) (conv Value (reNow))))
+    (r "caml_ml_runtime_events_create_cursor" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (reCreateCursor (aget a 0))))
+    (r "caml_ml_runtime_events_free_cursor" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+      (let [c (assert (* Custom) (aget (.-F (AsBlock (aget a 0))) 0))]
+        (set! (.-V c) nil))
+      Unit))
+    (r "caml_ml_runtime_events_read_poll" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (reReadPoll th (aget a 0) (aget a 1) (aget a 2))))
+    (r "caml_runtime_events_user_register" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (reUserRegister (aget a 0) (aget a 1) (aget a 2))))
+    (r "caml_runtime_events_user_write" (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (reUserWrite th (aget a 0) (aget a 1) (aget a 2))))))
