@@ -4873,3 +4873,44 @@ doc/asm/ARM64-SURVEY.md, "As built: AR7", has the measures.
   the diagnostics' columns, the memory programs in the essential subset). A fix on the way: x86i-check ran its CPU runs through
   run-check's `$runner`, unset there under `set -u` since AR4's merge (every CPU row `exit 1`; found by the AR7 proof's `--only` run of
   the subset, 13 of 13 after).
+
+## 2026-11-11: AX11, the x86-64 AOT cell's classes (branch `asm-ax11`, from `mac/next` `15278e9c6`)
+
+- The asm-amd64 AOT cell was 98 / 0 / 6 (94.2%): six files of MC/X86's object tests (llvm-project 23.1.5, `llvm/test/MC/X86/`)
+  classed `:unsupported-directive` (`pltoff`'s `.ifdef`, `reloc-directive-elf-64` and `-with-inst-relocs`' `.reloc`,
+  `reloc-directive-tlsgd`'s `.rept`, `compact-unwind-cfi_def_cfa`'s `.macro`) and `:unsupported-debug-line` (`line-table-sections`).
+  Taken cheapest first, all six now llvm-mc 23.1.5's recorded objects byte for byte: conditional assembly, macros, `.rept`, `.irp` and
+  `.irpc` expanded by the object assembler as AsmParser does (bodies as text, read again by the arch's reader), `$` with an adjacent
+  integer a name (`$0x80`, AsmParser::parseIdentifier), x86-64's `.reloc` by name with its symbol kept and the directives merged by
+  offset with the section's own relocations (llvm-mc's order in the two tests), and the DWARF 4 line table's header for `.file N`
+  (no line program yet). A run program `test/asm/run/macros.s` judged by its own verdict exercises the expansion on the CPU and on x86i.
+  The cell is 105 / 0 / 0 (100.0%). Details: doc/asm/AMD64-SURVEY.md, "As built: AX11"; proposed AXS92-AXS94.
+- The `.reloc` order was inferred from the three recorded objects (no llvm-mc run); a first try merging for every arch reordered
+  MC/AArch64's `patchinst` (llvm-mc puts PATCHINST after the JUMP26s), so the merge is x86-64's (`:reloc-directives-merged`) and arm64
+  keeps its order (AXS93 for the arm64 line). Alternatives considered: expanding macros in the reader (the round trip keeps the text, so
+  no), and the line program now (no recorded object holds one: AXS92).
+- Shared files touched beside the arm64 line: `arbace/asm/obj.ae`, `arbace/repr/asm/gnu.ae`, `bin/repr-asm` (x86i-check's `$runner`,
+  unbound on `mac/next` since AR4: every native run of `x86i-check` failed; now `${runner:-}`). Records: object, run, x86i (eval cell
+  127 -> 130 with `macros`), the round trip's two rows' reasons, `test/reap/matrix.edn`, `test/crops/scores.edn` (x86-64 assembly 99.3%).
+
+## 2026-11-11: asm-ax11b, AX11 merged with AR7 (branch `asm-ax11b`, from `mac/next` `f6ac54829`, `mac/asm-ax11` `97c993ca5` merged)
+
+AR7 (merged into `mac/next`) and AX11 changed the shared object assembler `arbace/asm/obj.ae` in parallel from `15278e9c6`: AR7 collects
+every error of a file with its item's place (ARS43 (a)) in `assemble`'s item loop, AX11 replaced that loop by `run-items!` (conditionals,
+macros, `.rept`/`.irp`/`.irpc` expanded as text). Merged so both hold: the collection moved into `run-items!` (each item, the expanded ones
+too, reports its error and the next one runs; the place is the file's item's, an expansion's items keeping their invocation's, as LLVM
+reports a diagnostic within a macro instantiation at the instantiation); a conditional with an erroneous condition pushes its state first
+as parseDirectiveIf does (its `.endif` still matches); AX11's "unmatched .ifs or .elses" a reported error beside the others (it was a
+throw). The rest (AR7's `.org`, fixup places, the symbol table's errors; AX11's `.reloc` names and merge by offset, the DWARF 4 line table's
+header, `line-entry!`) merged by git without overlap. `bin/repr-asm`: both branches fixed x86i-check's unbound `$runner`; one line kept
+(`${runner:-}`, AX11's). Alternative considered: keeping AR7's loop around `run-items!` (a try per top-level item): an error inside an
+expansion would then end the whole expansion, where LLVM goes on with the body's next statement; not done.
+
+- Proofs (stage 0, light, each under 2 GiB; no gate): amd64 `object-check mc-x86-obj` 47 of 47, `musl` 32 of 32, `synthetic` 7 of 7 (each
+  with its control), `run-check` 19 of 19 and five controls, the round trip (3 controls) and `x86i-check` whole (43 of 44, `{:cpuid 2}`,
+  as recorded; 7 min 54 s); arm64 `object-check` 16 of 16 and `mc-aarch64-obj` 107 of 110 (as recorded), `object-verdict` (2,781 of 2,833
+  CHECK lines, as recorded), the round trip, `encode-check`, `run-check` by qemu-aarch64 17 of 17, `bin/a64i check --essential` 74 of 74 and
+  whole 84 of 84, every control failing as it must. No record moved: the amd64 records equal `mac/asm-ax11`'s, the arm64 ones `mac/next`'s.
+  A by-hand probe: a macro whose body has an error, invoked twice, beside a stray `.endif`, `.purgem` of an unknown macro and an unclosed
+  `.if`, gives five errors in order, the body's at each invocation's place. `bin/reap --record` 49 of 52 cells, 0 problems, the matrix
+  unchanged (x86-64 assembly AOT 105 / 0 / 0, arm64 3,005 / 0 / 55); `bin/crops-score --record` unchanged, `--judge --strict` 0.
