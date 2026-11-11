@@ -6718,3 +6718,102 @@ that shadows a member counts as the member (analyzed, not wrong).
   Arbace's returns the reference's address, on the defining and the extern paths, and the wrappers are weak or linkonce across units, so a
   unit mixed with clang's objects reads the wrong address. (a) Load the referent in both wrappers for a reference type, with a two-unit
   probe; (b) leave it (no run program has one). **Recommended: (a)**, small.
+
+## As built: cpp-s6 (2026-11-11; branch `cpp-s6` from mac/cpp-s5b 085ed6e14)
+
+The user's decisions of 2026-11-11: CP365-CP371 all (a). Light, by night 12's rules: main's stage 0 (`ARBACE_HOST_EXE`), one process
+at a time, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, no clang, g++, gate or big lock. Probes in `.tmp/probe/` (gen-batch).
+
+### CP371 (a): a thread-local reference's wrapper
+
+`_ZTW` of a reference (`thread_local int &r = pick();`, and `extern thread_local int &r;`, a static data member's) loads the reference and
+returns the referent's address, as clang's ItaniumCXXABI::EmitThreadLocalInitFuncs (`if (VD->getType()->isReferenceType()) Val =
+CreateAlignedLoad(...)`), on the defining wrapper (weak_odr hidden, or internal) and the extern one (linkonce_odr hidden); a read of the
+reference through its wrapper takes the call's value as the referent's address (EmitThreadLocalVarDeclLValue), no second load
+(`tls-via-wrapper?`, `tls-wrapper-ret`). Probes `tls_ref.C` (`%tr = load ptr, ptr %t1` in `_ZTW1r`, main stores 9 through the call's
+value) and `tls_ref_ext.C` (`_ZTW1r`, `_ZTWN1C1mE`); `static_tls.C`, `extern_tls.C`, `tls_member.C`, `tls_extern_def.C` byte for byte
+cpp-s5b's. Left: an extern reference's declaration is still `[8 x i8]` (clang's `ptr`), the same bytes.
+
+### CP368 (a): the own dg record's five Sema crashes
+
+- (1-3) the coroutines files: the native tree names the main file `coroutines/x.C` and its quoted header `coroutines/coro.h`, both
+  relative to g++.dg, while `*main-dir*` is the main file's own directory; `text-of` found no `coroutines/coroutines/coro.h` and gave the
+  main file's text, so the alias `namespace coro = std;` read `lude "coro.h"...`, no target, an NPE. `located-file` (sema) resolves a
+  relative name also under the root the main file's own name is relative to (`text-of`, `header-node?`; the code generator names the main
+  file by its base name, so its path is unchanged). The three now read; their rows "missed: accepted" (the coroutine checks Sema lacks).
+- (4, 5) pr67405.C (`struct S { S f; };`) and template/instantiate1.C (Z<int> through Y<Z<int>> and X<Z<int>>): the class contained itself
+  and `trivial-copy?` recursed without end. A class being defined is marked `:defining` (until its body ends, a `finally`); a member of
+  such a class type (or an array of it) is an incomplete type ([class.mem.general]/7, clang's err_field_incomplete_or_sizeless): the
+  checker reports "field has incomplete type" at the member (diag's rule `:incomplete`) and leaves it out, the code generator refuses
+  (`incomplete`). Both pass by their own dg-error lines.
+- The recursions bounded: class instantiations nested at most 1024 (clang's -ftemplate-depth, `*inst-depth*`), and since the analysis'
+  stack ends first (about 900 nested on the tools' host, probe `inst_depth.C`: `template<int N> struct R { R<N+1> r; };`) the outermost
+  `instantiate-class` turns a StackOverflowError under it into the same refusal, `depth` ("recursive template instantiation exceeded
+  maximum depth", diag's rule `:depth`): a diagnostic, not a crash.
+- template/array32.C had turned into a crash (ArithmeticException in the layout: `char a[SIZE_MAX / 2]`'s size in bits passes a long,
+  since cpp-s5b's exact 64-bit constants); a layout that overflows is now a refusal (`:type`, "too large for its layout"), the row back to
+  its recorded "missed: accepted".
+
+`bin/repr-cpp dg --corpus dg-error --front native --only` the five, `--record`: 3 crash rows now "missed: accepted", 2 now pass;
+`test/cpp/check-dg-own-linux-amd64.edn` changes in those five rows alone. The 34 files of a wider run (the five, the rows whose source
+includes a quoted header, 25 of template/) gave every other row as recorded.
+
+### CP365 (a): provisional instances
+
+A class template's instance whose definition did not finish (a header's drop, or a refusal thrown) while one of its arguments was a class
+not complete (declared only, or still `:defining`) is provisional (`*provisional*`: the arguments it waits for, and how to make it): when
+the last such argument's definition ends (sema's `declare-class!` marks `:finished` and calls the hook `:class-completed`), it is made
+again in place, the same class id (`declare-instance!` with `cid`: the record, scope and members afresh; the old members' functions left
+unlisted), its partial specialization's out-of-line members attached again, and every cached layout dropped (computed again on use: a
+class holding the instance had laid it out broken). An instance that finished is never remade (`box<node>` inside node's definition, the
+common case, stays as it is). Probes: `prov3.C` (a header with <format>'s shape: `_Arg_value<basic_format_context<char*, char>>` made
+inside basic_format_context's definition before `char_type`, its member `typename _Context::char_type _M_c` dropped; now made again,
+`basic_format_arg<format_context>` 16 bytes, the member read) and `prov1.C` (`typedef V<Ctx> VC;` with `struct Ctx;` declared only, in
+the main file) generate; before, "no size for nil" and "no default constructor for V". Not covered: naming a specialization of a class
+template not defined yet in the main file (`prov2.C`, "header type", the CP338 path).
+
+### CP369 (a): a static data member's global
+
+sema's `:internal` no longer follows `static` on a static data member ([basic.link]/4: its linkage is its class's): internal only by an
+unnamed namespace on its home's path. `int A::x = 3; int A::y = f();` are now `@_ZN1A1xE = global i32 3`, `@_ZN1A1yE = global [4 x i8]
+zeroinitializer` (clang's dso_local externals), before `internal`; review 1111's member probes unchanged otherwise.
+
+### CP370 (a): an internal alias lowered to C
+
+arbace.cpp.lower keeps `static` on an internal alias (`__attribute__((alias("__tls_init"))) static void _ZTHL1x(void);`). Measured first
+(`.tmp/cal/`): `bin/ci run` accepts `static void th(void) __attribute__((alias("init")))`; two units each with a static `_ZTHL1x` aliasing
+their own `init` link and run apart (exit 0), the negative control exits 1, and the same two units with the aliases external return the
+wrong unit's value (exit 1): the clash CP370 named.
+
+### Checked, and stopped at the disk's limit
+
+Done before 20:24 UTC: the probes above (gen-batch, peaks under 0.45 GB), the dg runs named (peak 0.43 GB), `bin/ci run` over `.tmp/cal/`
+(0.32 GB). At 20:24 `df /` passed the night rules' 85% (86%, the night's own runs; this worktree's `.tmp/` is 383 MB) and stayed there past
+20:54, so by the rules no further run was started: CP369's and CP370's probes after their edit ran once (`member_static.C`: the two
+members now external, as above; `tls_member.C`, `tls_anon_member.C` byte for byte cpp-s5b's; `static_tls.C`'s C now `static` on the alias),
+and the proofs below are left as commands.
+
+### Not run (by the rules; each one process, under 1.5 GiB, in this order)
+
+```
+. .tmp/env.sh   # GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1, ARBACE_HOST_EXE main's stage 0
+# 1. the 82 run programs against cpp-s5b's G3 (about 43 min, 1.4 GB): IR unchanged but CP369's member globals' linkage
+sed 's#/cpp-s5b/.tmp/G3/#/cpp-s6/.tmp/G4/#' ../cpp-s5b/.tmp/g3.tsv > .tmp/g4.tsv && .tmp/gen.sh $PWD/.tmp/g4.tsv
+bash ../cpp-s5/.tmp/cmp.sh ../cpp-s5b/.tmp/G3 .tmp/G4    # differences: only `internal` -> external on static data members
+# 2. library.cpp alone (CP365: _Arg_value<format_context> made again; its refusal and drops.tsv against cpp-s5's 94)
+# 3. the codegen samples (CP369 moves the digests of any sample with a static data member's definition): 12 min, 1.03 GB
+bin/cppi codegen-gen; bin/cppi codegen-gen --record     # the second only when the first's differences are CP369's linkage alone
+# 4. probe member_kinds.C (constexpr, inline, const, a template's and an unnamed namespace's static members)
+# 5. bin/reap; bin/crops-score --record && bin/crops-score --judge --strict; bash test/gate/gate-key-crops-test.bash
+```
+
+Keys: every file the branch changes is under `arbace/cpp/`, `arbace/repr/cpp/`, `test/cpp/` or `doc/` (crop paths and records,
+`arbace_crop_paths`): no key should move; the test above confirms it.
+
+### Proposed (CP372-CP373)
+
+- **CP372: a specialization of a class template not defined yet, named in the main file** (`prov2.C`: `using ctx = Ctx<int, short>;`
+  before `Ctx`'s definition, "header type"): (a) an incomplete instance completed in place when the template's definition arrives (the
+  mechanism of CP365 with the template as the awaited definition); (b) leave it to CP338's retry of typedefs. **Recommended: (a)**.
+- **CP373: an extern thread-local reference's declaration** is `[8 x i8]` (clang's `ptr`), as every non-scalar extern global: (a) `ptr`
+  for a reference; (b) leave it (the same bytes). **Recommended: (a)**, with the codegen samples re-recorded once.

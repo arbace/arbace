@@ -67,7 +67,9 @@ Six crops are above 90 on all three. What the others still need:
   0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the
   read stage 0.66 and eval and AOT 0.5 (the programs run from clang's IR packs); CX12's own front end (`dg --front
   native`, tonight's record) and CP240 (b), the programs by the own route without clang's IR (`cpp-route`), lift them
-  ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md), [cpp/CODEGEN.md](cpp/CODEGEN.md)).
+  ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md), [cpp/CODEGEN.md](cpp/CODEGEN.md)). `cpp-s6` (2026-11-11): CP365, CP368-CP371 (a) built
+  (the own dg record's five crashes gone, provisional instances for <format>), its gen-batch, codegen-gen and score proofs left as
+  commands (the disk at 86%); CP372-CP373 proposed.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

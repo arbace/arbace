@@ -5044,3 +5044,29 @@ Recorded in doc/cpp/CPP-SURVEY.md, "As built: cpp-s5b", with CP371 proposed (a t
 - Rule slips: one probe run's peak was 2.49 GB (the first gen-batch, which failed at once compiling template.ae on `clojure.lang.BigInt`,
   under `GOMEMLIMIT=1200MiB GOGC=30`; every later run under `GOMEMLIMIT=1000MiB GOGC=20` stayed below 1.5 GiB). The cherry-picked
   a2b9a8b96 (c35c0b70d here) carries the conflict's resolution, its message says so.
+
+## 2026-11-11: cpp-s6, CP371, CP368, CP365, CP369 and CP370 (a) (branch `cpp-s6`, from `mac/cpp-s5b` 085ed6e14)
+
+The user decided CP365-CP371 all (a) (2026-11-11). Done in the brief's order, light, by night 12's rules (one process at a time,
+`GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, main's stage 0; no clang, g++, gate or big lock):
+- CP371 (a), d5f34d688: a thread-local reference's `_ZTW` loads the reference and returns the referent (clang's
+  ItaniumCXXABI::EmitThreadLocalInitFuncs), the defining and the extern wrapper; the read through the wrapper does not load again
+  (EmitThreadLocalVarDeclLValue). Probes tls_ref.C, tls_ref_ext.C; four earlier TLS probes byte for byte cpp-s5b's.
+- CP368 (a), 3f0a62177: the five Sema crashes of the own dg record. The coroutines' NPE was not the alias's range but the header's
+  file: the dg read names `coroutines/coro.h` relative to g++.dg and sema resolved it under the main file's directory, so the text was
+  the main file's (sema's `located-file`). The two StackOverflowErrors were a class containing itself: a member of a class being
+  defined is now "field has incomplete type" (the checker's diagnostic, the code generator's refusal); instantiations nested at most
+  1024, a StackOverflowError under the outermost one the same refusal (the stack ends near 900, measured); a layout whose bits pass a
+  long a refusal (template/array32.C, turned into a crash by cpp-s5b's exact constants, back to its recorded row). Record: 3 rows
+  crash -> "missed: accepted", pr67405.C and template/instantiate1.C pass; 34 files run, every other row as recorded.
+- CP365 (a), committed after: an instance that did not finish while an argument was incomplete or being defined is made again in place
+  when the argument's definition ends (the hook `:class-completed`), layouts dropped and computed again. Alternatives considered: a
+  fresh class id (the holders' fields would keep the broken one), retrying only the dropped member (the members' order and the cached
+  layout would be wrong), lazy instantiation throughout (CP365 (b), the model changed everywhere). Probes prov3.C (<format>'s shape in
+  a header) and prov1.C generate; prov2.C (an undefined template's specialization named in the main file) does not: CP372.
+- CP369 (a) and CP370 (a), one commit: a static data member's `:internal` only from an unnamed namespace; an internal alias lowered to
+  C keeps `static`, measured first with `bin/ci run` (static aliases accepted; two units' static `_ZTHL1x` stay apart, the external
+  ones clash, a negative control fails).
+- Stopped: at 20:24 UTC `df /` reached 86% (the night's runs) and stayed past 20:54; the rules say stop and report, so the 82
+  programs' gen-batch, library.cpp, `bin/cppi codegen-gen [--record]` (CP369 moves the samples' digests), the member probe, `bin/reap`,
+  crops-score and the keys' test are left as commands in doc/cpp/CPP-SURVEY.md, "As built: cpp-s6", with CP372-CP373 proposed.
