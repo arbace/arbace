@@ -6316,3 +6316,114 @@ bin/cppi route-compare --corpus gxx-dg-run --sample 25 && bin/cppi route-compare
 `.tmp/`: `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `tls*/`, `pr*/`, `xo*/`, `df*/`, `lb1/` (single programs), `p/` (probes),
 `pack/`, `pack2/`, `pack3/` (the packs unpacked), `rtsel/` (the round trip's 164), `sH/` (the dg sample), `env.sh`, `job.sh`, `watch.sh`,
 `run.sh`, `gen*.sh`, `gi.sh`, `gp.sh`, `snapgen.sh`, `cmp.sh`, `cg.sh`, `ess.sh`, `rtsel.sh`, `sample.sh`.
+
+## As built: cpp-s4 (2026-11-11; branch `cpp-s4` from mac/cpp-s3 7d8ef69ba)
+
+Light, by day's rules (.tmp/night12/AGENT-RULES.md): main's stage 0 (`ARBACE_HOST_EXE`), at most two processes of at most about 1.4 GB
+(`GOMEMLIMIT=1400MiB GOGC=30 REPR_CPP_THREADS=2`; a watcher killing a process tree past 2.5 GB by PID, never reached: peaks 1,342 MB for
+library.cpp alone, 1,401 MB for the 82), the compiler stubs first on PATH (their log empty: no clang, g++ or LLVM tool ran), no gate. The
+82 run programs generated at a snapshot worktree (`.tmp/snap`) so that the sources could be edited meanwhile. CP359 (a) taken as the
+next slices of runtime/library.cpp: variant, then any, then <format>. CP335 (b) defers GNU vector types to clang's pack: the five
+programs were left alone.
+
+### 1. std::variant's converting constructor (`_FUN_type`) and what it reached
+
+Probe `.tmp/p/v1.cpp` (`std::variant<int, double> v = 1; std::get<double>(v)` caught), its defined names checked against clang's
+recorded IR of library.cpp (the pack cpp-ir-samples): **all of ours among clang's, every variant name of clang's among ours**.
+
+- **A pack expansion among the bases** ([temp.variadic]/5): `struct _Build_FUNs<...> : _Build_FUN<_Ind, _Tp, _Ti>...` one base per
+  element of the packs the base names (sema's `declare-class!`, the parser's `:isPackExpansion`; the `:pack-scopes` hook binds each
+  element); it had been resolved once with the packs unbound (`not a constant: _Ind`), and the class dropped.
+- **A using-declaration's pack expansion** ([namespace.udecl]/1): `using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;` once per element,
+  the members found together (the `...` after the node's range, `text-after`).
+- **A variable template's specialization alone in a constant's text** (`__to_type<__accepted_index<_Tp>>`): const-form's, its partial
+  specializations matched; it had been read as a member of an empty qualifier.
+- **Constant evaluation of local arrays** (`constexpr bool __found[__sz] = { __is_same(_Tp, _Types)... }` of
+  `__find_uniq_type_in_pack`): a local array of scalars from a list is a vector of its elements, `a[i]` reads it.
+- **decltype(auto)** ([dcl.type.auto.deduct]/5): deduced from the returned operand as decltype is, mangled `Dc`
+  (`__detail::__variant::__get`).
+- **Constant text**: a qualified template name written in another namespace (`__gnu_cxx::__int_traits<_IntType>::__max` in
+  parse_numbers.h's `_Select_int_base`), a C-style cast to a type named by one identifier (`(_IntType)_Val`), and a constant variable's
+  value as its type holds it ([conv.integral]/3: `__int_traits<unsigned char>::__max` is 255, it had been -1, so `_Select_int_base<2,
+  unsigned char, unsigned short>` chose the wrong base and variant's `__index_type` was unknown).
+- **A template parameter is a pack by a `...` before its name only**: variant's `typename = enable_if_t<sizeof...(_Types) != 0>` had
+  been taken for a pack (its default's `sizeof...`), so the constructor's second argument mangled `JE` instead of `v`; a template
+  template parameter's own `template<typename...>` neither.
+- **The parser's skim** (repr/cpp `skip-init!`): a template's declaration has one declarator ([temp.pre]/5), so a `,` inside its
+  initializer's template argument list ends nothing: variant's `__not_self = !is_same_v<__remove_cvref_t<_Tp>, variant>;` had declared a
+  variable `variant` in the class, which hid the injected-class-name and turned the delegating constructors' `variant(...)` into member
+  initializers of an unknown member (the converting constructor default-constructed its base).
+- **Inheriting constructors** ([class.inhctor.init]): through a typedef's name (`using _Base::_Base;`, [class.qual]/2), and
+  transitively (variant's four `_Move_assign_base` ... `_Copy_ctor_base` levels down to `_Variant_storage`'s constructor), each level's
+  inheriting constructor calling the next's, all mangled `CI2` with the class whose constructor is inherited in the end
+  (`_Move_assign_base...CI2NS0_16_Variant_storage...`), as clang names them.
+- **A union's other members are not initialized** ([class.base.init]/9): `_Variadic_union`'s `_M_rest` had been default-constructed
+  after its `_M_first` (a wrong value at run time, and a constructor clang does not emit).
+
+### 2. std::any
+
+Probe `.tmp/p/a1.cpp` (`std::any a = 1; std::any_cast<float>(a)` caught): generated, its defined names all clang's.
+
+- A variable template with dependent arguments in a template's symbolic signature (any's `enable_if_t<is_copy_constructible_v<_VTp> &&
+  ..., bool> = true`): the dependent expression `{:k :texpr :o :vt}` standing for it, mangled as written (`23is_copy_constructible_vIT0_E`,
+  clang's), not a failure.
+- Argument-dependent lookup through a pointer's pointee ([basic.lookup.argdep]/3.4): `any_cast<_Up>(&__any)` finds the pointer
+  overloads declared after it; it had found only the reference ones and converted the pointer to a temporary `any`.
+- `sizeof` of a member named alone in a constant's text (`unsigned char _M_buffer[sizeof(_M_ptr)];`, which had dropped `_Storage`).
+- Partial ordering with a function parameter pack ([temp.deduct.partial]/8, /11): `_S_create(_Storage&, _Up&&)` over
+  `_S_create(_Storage&, _Args&&...)`.
+- On the way (library.cpp's next refusal): a scoped enumeration's enumerators are seen by its later initializers ([dcl.enum]/5;
+  <charconv>'s `general = fixed | scientific`).
+
+### 3. Toward <format> (not reached)
+
+library.cpp now refuses at `std::format(...)` (`.tmp/L4`; it refused at variant before). Built on the way, each a general fix: a
+parameter whose template parameters are all in non-deduced contexts takes no part in deduction ([temp.deduct.type]/5.1, clang's
+hasDeducibleTemplateParameters: `format_string<_Args...>` is `basic_format_string<char, type_identity_t<_Args>...>`); cv on an array type
+is on its elements ([basic.type.qualifier]/3: `const T&` with T = `char[4]`); a constraint's satisfaction is not under the standard-
+conversions-only rule of the user-defined conversion that asks for a converting constructor template ([over.best.ics]/4: the
+`convertible_to` in basic_format_string's constructor needs string_view's converting constructor). Next refusals (probe `.tmp/p/f2.cpp`):
+`_Arg_store`'s partial specialization ("partial specialization's arguments"), make_format_args' `_Store`, and the consteval
+basic_format_string constructor, whose body checks the format string by running `__format::_Checking_scanner` at compile time: CP362.
+
+### Checked (light; the stubs' log empty)
+
+| check | result |
+|---|---|
+| gen-batch over the 82 at da247c284 (`.tmp/G1`, variant's slice) | 69 generated, the 69 of cpp-s3's G2 byte for byte; 1,884 s, peak 1,401 MB |
+| gen-batch over the 82 at the head (`.tmp/G2`, a6b5086aa) | **69 generated, as at cpp-s3** (library.cpp now refused at <format>'s `_Store`, it was at variant), none lost; 68 byte for byte cpp-s3's G2, and opt/unroll1.C's two `DomainTraits<Interval>` members now mangled `ERA2_Ki` (a reference to an array of const int, cv on the elements) where they were `ERKA2_i`: clang's recorded IR (cpp-ir-gxx-dg-run) has `ERA2_Ki`, so the 69's IR is cpp-s3's but for a name now clang's; 1,405 s, peak 1,395 MB |
+| probes v1 (variant), a1 (any) against clang's recorded IR of library.cpp (by hand) | every defined name of ours among clang's |
+| probes (`.tmp/p/`): k1-k9 (packs, delegation), f1, s1, s2, e1, c1-c6 | generate |
+| `bin/cppi codegen-gen` | 154 of 154 as recorded, the two negative controls failing as they must (468 s, 1.2 GB) |
+| `bin/repr-cpp target verify`, `pp-check --essential`; `roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own` | pass, 33 of 33 and 9 of 9, the controls failing as they must |
+| `bin/reap` | 0 problems (49 of 52 cells checked), no record changed |
+| `bin/crops-score --record`, `--judge --strict` | 0 problems, no score changed |
+
+### Proposed (CP362-CP364)
+
+- **CP362: <format>'s consteval check.** basic_format_string's constructor is consteval and checks the string by running the format
+  parser in a constant evaluation; clang emits nothing for it but the stored string_view. (a) For the code generator, an immediate
+  invocation of a constructor whose body only checks (no member stored beyond its mem-initializers) emits the mem-initializers' value,
+  the program taken as valid (clang and g++ accepted it; the checker keeps judging); (b) a constant evaluator over class objects and
+  member calls (days). **Recommended: (a)**, then `_Arg_store`'s partial specialization and make_format_args, one slice a day as CP359.
+- **CP363: the 82 at the night.** The four library.cpp slices' runs (`CPPI_ROUTE=ours bin/cppi check --corpus runtime --only` library.cpp)
+  wait for <format>; v1 and a1 as programs of their own are no corpus. (a) Add v1.cpp and a1.cpp to test/cpp/runtime/samples/ as
+  variant.cpp and any.cpp, recorded against g++'s run by the oracle tier; (b) wait for library.cpp. **Recommended: (a)**: the slices then
+  have runs judged before <format> lands.
+- **CP364: the 763 header drops of library.cpp** (CPP_HDR_TRACE=1): most are refusals of declarations the program does not use; a
+  count per cause in gen-batch's log would show which slice unlocks most. (a) gen-batch writes `drops.tsv` beside gen.ll (cause,
+  count); (b) by hand. **Recommended: (a)**, light.
+
+### The night's commands (after this branch's merge; one process at a time)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB GOGC=30 REPR_CPP_THREADS=2 CPPI_JOBS=1 CPPI_THREADS=1
+bin/cppi route-compare --corpus gxx-dg-run --sample 25 && bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25   # no clang pass lost (2-3 GB)
+CPPI_ROUTE=ours bin/cppi check --corpus samples && CPPI_ROUTE=ours bin/cppi check --corpus runtime   # the runtime's 15 by ours under the head (about 60 min, 2-3 GB: nodes-list)
+```
+
+### Scratch
+
+`.tmp/`: `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `L1/`-`L4/` (library.cpp at each step), `p/` (probes; `*.names`, `c.v`,
+`lib-clang.names` the name lists), `env.sh`, `job.sh`, `watch.sh`, `gen*.sh`, `gi.sh`, `gp.sh`, `pw.sh`, `pl.sh`, `plw.sh`, `probe.sh`,
+`snapgen.sh`, `cmp.sh` (no process substitution), `cg.sh`, `ess.sh`.
