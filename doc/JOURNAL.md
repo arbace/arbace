@@ -3298,3 +3298,23 @@ only in worktrees (LLS45 (b)). Recorded in doc/llvm/LLVM-CROP-SURVEY.md, "As bui
 mutator or rule change; a collapse of the own verdicts, which left bad = 0 and the controls failing for the wrong reason, now
 fails). Proof: the run passes (900 mutants, 886 own, 5 min); with `REPR_LLVM_HELDOUT_MIN_OWN=887` it fails, "886 own verdicts,
 fewer than the floor 887", exit 1. Alternative: a record file of the count; an env floor beside the controls was enough.
+
+## 2026-11-10: LLVM IR's deferred non-passes closed where the gap was Arbace's own (branch `llvm-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90%, cheapest per case first (doc/CROPS-SCORE.md). LLVM IR: `bin/llvmi` checked and built the
+lowered C with the seed's embedded ci, not the checkout's (no `c_ci_fresh`), so LLS21 (a)'s fixes never reached its records; and
+its AOT module lacked RES34's `cilib` link, so no program importing musl's prebuilt units built. Both fixed in `bin/llvmi`, the
+Verifier rules of gc.relocate, the VP intrinsics, require-logical-pointer and AMDGPU's allocas, prefetch, av load/store and
+cooperative atomics ported into `arbace/repr/llvm/verify.ae` (LLVM 23.1.5's Verifier.cpp). Whole runs recorded: llvmi eval and AOT
+537 of 562 each (529, 522 before), verify-llvmtest 800 of 806 (792); the other families unchanged. Completeness 96.4 to 97.6.
+Alternatives: recording only the re-run rows (`bin/llvmi check --record` takes no `--only`), so the whole levels were run, in the
+light lane (one run at a time, under 1.5 GB). ci's namespaces were not changed (they are embedded, in `gate_key`); llvmi's are crop
+paths. Scheme (SCS27 proposed) and C (the long tail of the checker and the converter, a case each) were looked at and left.
+
+## 2026-11-10, llvm-compl2: the review's findings (REVIEW.md, .tmp/merge-1111/REVIEW.md, section 2)
+
+bin/llvmi sources bin/lib/ci/fresh.bash and calls c_ci_fresh only while the file exists (the re-seed window's R deletes it; 2.1); its
+CI_AOT_LIB default takes the main checkout by `${root%%/.tmp/worktrees/*}` as bin/lib/ci/check-aot does, so a clean run no longer reads
+the main checkout's warm cache (2.2); verify.ae's vp.splice tests the vector type before `(nth rt 1)`, and require-logical-pointer? and
+amdgcn-triple? are computed once per module (`*mod-facts*`; 2.3). Proofs: bin/llvmi check --essential 10 of 10, controls fail;
+test/repr/llvm/controls-test.bash; repr-llvm check verify-llvmtest/verify-probes --essential; bin/reap; bin/crops-score --judge --strict.
