@@ -117,7 +117,25 @@
       (when (and i (not (newtype-class? cls)))
         {:arity (+ (or (:nsupers i) (count (:supers i))) (count (:methods i))) :tycon cls :tag 1}))))
 
-(defn- con-info [c] (or (get (:all-cons *r*) c) (class-con-info c)))
+(defn- iface-con-dicts
+  "HF10-P20: an imported constructor's context dictionaries (its interface's arity is the source arity, the fields
+  alone; the worker takes the dictionaries first: Exception.Context's SomeExceptionAnnotation applied to its
+  ExceptionAnnotation dictionary alone was taken as saturated and built)"
+  [c i]
+  (if (or (contains? i :dicts) (nil? (:arity i)))
+    0
+    (let [t (or (get (:genv *r*) c) (get (:types *r*) c))]
+      (if (and (vector? t) (= :forall (first t))) (count (nth t 2)) 0))))
+
+(def ^:private con-info-cache (atom [nil {}]))
+(defn- con-info [c]
+  (if-let [i (get (:all-cons *r*) c)]
+    (let [[r0 m] @con-info-cache m (if (identical? r0 *r*) m {})]
+      (or (get m c)
+          (let [k (iface-con-dicts c i) i2 (if (pos? k) (assoc i :arity (+ k (:arity i)) :dicts k) i)]
+            (reset! con-info-cache [*r* (assoc m c i2)])
+            i2)))
+    (class-con-info c)))
 (defn- con-name? [g] (and (vector? g) (some? (con-info (assoc g 1 "data")))))
 (defn- as-data [g] (assoc g 1 "data"))
 
@@ -166,7 +184,13 @@
     (let [ar (or (:arity (con-info c)) 0)
           ts (when-let [t (global-type c)] (arg-types t))]
       (if (= ar (count ts)) (mapv (comp reps->rep type-reps) ts) (vec (repeat ar :L))))
-    (or (:reps (get (lib-cons (nth c 2)) (ext-str (nth c 2) (nth c 3))))
+    (or ;; HF10-P20: a boot library compiled at -O0 (not a program, unit main) sees its own and its dependencies'
+        ;; constructors as -O0 lays them out, from their types: the -O2 libraries' dumps hold an UNPACKed strict field
+        ;; unboxed (SrcLoc's lines and columns: $WSrcLoc unboxed I# 315# into a field the own SrcLoc keeps boxed)
+        (when (not= "main" *unit*)
+          (let [ci (con-info c) ar (:arity ci) d (or (:dicts ci) 0) ts (when-let [t (global-type c)] (arg-types t))]
+            (when (and ar (= ar (+ d (count ts)))) (into (vec (repeat d :L)) (map (comp reps->rep type-reps) ts)))))
+        (:reps (get (lib-cons (nth c 2)) (ext-str (nth c 2) (nth c 3))))
         (vec (repeat (or (:arity (con-info c)) 0) :L)))))
 
 (defn- con-strict [c]
@@ -1366,7 +1390,9 @@
           ;; the match variables' types (HF10-P20: desugar's fresh-types)
           r (update r :ltypes merge @ds/fresh-types)
           _ (set! *r* r)
-          exported (ds/program-exported r prog0)
+          ;; HF10-P20: a RULE's free variables are external too (Tidy's rule-exposed Ids: Enum's eftInt, eftIntList's
+          ;; right-hand side, which the programs' interfaces name)
+          exported (into (ds/program-exported r prog0) (:rule-names r))
           [prog new-types raw] (if simpl?
                              (simpl/simplify-module r prog0 (into exported (:rule-names r))
                                                     {:unlifted-type? (fn [t] (boolean (and t (not= [:L] (type-reps t)))))

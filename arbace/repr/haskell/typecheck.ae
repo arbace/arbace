@@ -613,6 +613,15 @@
   [env & body]
   `(binding [*ip-givens* (into *ip-givens* (::ip ~env))] ~@body))
 
+(defn- ip-synonym-name
+  "The implicit parameter a constraint synonym stands for (HasCallStack, HasExceptionContext), else nil"
+  [c]
+  (when (vector? c)
+    (case [(nth c 2 nil) (nth c 3 nil)]
+      ["GHC.Internal.Stack.Types" "HasCallStack"] "callStack"
+      ["GHC.Internal.Exception.Type" "HasExceptionContext"] "exceptionContext"
+      nil)))
+
 (defn- want! [pred]
   (cond
     (eq-pred? pred)
@@ -623,6 +632,13 @@
          (some #(= (second (prune (first (second pred)))) (first %)) *ip-givens*))
     (let [[_ t d] (last (filter #(= (second (prune (first (second pred)))) (first %)) *ip-givens*))]
       (unify (second (second pred)) t) d)
+    ;; HF10-P20: the synonyms of an implicit parameter, HasExceptionContext (?exceptionContext :: ExceptionContext) and
+    ;; HasCallStack (?callStack :: CallStack), wanted under a let ?x = e of their name: that binding (Exception.Type's
+    ;; default toException e = SomeException e where ?exceptionContext = emptyExceptionContext; its context was left
+    ;; free in every instance's inlined copy)
+    (and (seq *ip-givens*) (vector? (first pred))
+         (some #(= (ip-synonym-name (first pred)) (first %)) *ip-givens*))
+    (let [[_ _ d] (last (filter #(= (ip-synonym-name (first pred)) (first %)) *ip-givens*))] d)
     :else
   (let [i (fresh-id)]
     ;; a wanted made under given equalities keeps them (its implication's givens, GHC.Tc.Types.Constraint's
@@ -1108,8 +1124,14 @@
   [env n & [sp label]]
   (if-let [e (get env n)]
     (if (:mono e)
-      (do (when-not (:core e) (note-type! (lv n) (:mono e)))
-          [(:mono e) (or (:core e) (lv n))])
+      (let [mt (prune (:mono e))]
+        (when-not (:core e) (note-type! (lv n) (:mono e)))
+        (if (and (vector? mt) (= :forall (first mt)) (empty? (nth mt 1)) (seq (nth mt 2)))
+          ;; HF10-P20: a binder of a qualified type (withFrozenCallStack's do_this :: HasCallStack => a): its occurrence
+          ;; takes its constraints' evidence (GHC's instantiation of a lambda-bound Id; the ?callStack the let gives),
+          ;; else do_this was returned unapplied and throwIO's continuation cased on a function
+          [(nth mt 3) (app* (or (:core e) (lv n)) (mapv #(want-at! % n sp label) (nth mt 2)))]
+          [(:mono e) (or (:core e) (lv n))]))
       (let [[t preds] (instantiate (:poly e))]
         ;; a binding of the module itself (or a local one) with HasCallStack pushes its call site too (EvCsPushCall)
         [t (app* (:core e) (mapv #(want-at! % n sp label) preds))]))
@@ -1821,6 +1843,8 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Matches, guards, bindings
 
+(def ^:dynamic *guard-w* nil) ; atom: the wanteds' index at the first pattern guard that gives equalities
+
 (defn- infer-guards
   "Guard statements, then the body: [env core-guards]"
   [env stmts]
@@ -1828,20 +1852,34 @@
             (let [v (lval s)]
               (case (con v)
                 BodyStmt (let [[t c] (infer env (arg v 2))] (unify t (con-ty tc-bool)) [env (conj gs c)])
-                BindStmt (let [[te ce] (infer env (arg v 3)) [env1 pc] (tc-pat env (arg v 2) te)] [env1 (conj gs (list 'pguard pc ce))])
+                BindStmt (let [[te ce] (infer env (arg v 3))
+                               wi (count @*wanteds*) before (some-> *given-eqs* deref)
+                               [env1 pc] (tc-pat env (arg v 2) te)]
+                           ;; HF10-P20: the first pattern that gives equalities: the wanteds made before it (its scrutinee's,
+                           ;; eqT's heqT @a @b) are outside its implication (infer-grhss rewrites from here)
+                           (when (and *guard-w* (nil? @*guard-w*) (not= before (some-> *given-eqs* deref))) (reset! *guard-w* wi))
+                           [env1 (conj gs (list 'pguard pc ce))])
                 LetStmt (let [[env1 bs] (tc-local-binds env (arg v 2))] [env1 (conj gs (list 'plet bs))])
                 (do (error! "guard not handled: " (con v)) [env gs]))))
           [env []] stmts))
+
+(declare rewrite-wanteds!)
 
 (defn infer-grhss
   "(GRHSs ext [GRHS...] localbinds) against result type r: core"
   [env grhss r]
   (let [[env1 binds] (tc-local-binds env (arg grhss 3))
+        ;; HF10-P20: each guarded right-hand side its own implication (GHC.Tc.Gen.Match's tcGRHS: a pattern guard's
+        ;; givens scope over the guards after it and the body, not over the where bindings: Data.Typeable's cast,
+        ;; `Just HRefl <- ta `eqTypeRep` tb`, rewrote tb's Typeable b wanted, made in the where clause, to Typeable a)
         alts (with-ips env1 (mapv (fn [g]
-                     (let [gv (lval g)
-                           [env2 gs] (infer-guards env1 (arg gv 2))
-                           c (check-expr env2 (arg gv 3) r)]
-                       (if (empty? gs) c (list 'guarded gs c))))
+                     (let [outer (some-> *given-eqs* deref) w0 (count @*wanteds*)]
+                       (binding [*given-eqs* (atom (or outer {})) *guard-w* (atom nil)]
+                         (let [gv (lval g)
+                               [env2 gs] (infer-guards env1 (arg gv 2))
+                               c (check-expr env2 (arg gv 3) r)]
+                           (when (not= (or outer {}) @*given-eqs*) (rewrite-wanteds! (or @*guard-w* w0)))
+                           (if (empty? gs) c (list 'guarded gs c))))))
                    (arg grhss 2)))
         body (if (and (= 1 (count alts)) (not (and (seq? (first alts)) (= 'guarded (first (first alts)))))) (first alts) (list 'guards alts))]
     (wrap-lets binds body)))
@@ -2971,7 +3009,12 @@
     (let [t (expand (zonk (nth c 3)))]
       (if (and (= :tc (first t)) (contains? #{"Int" "Word" "Char" "Double" "Float"} (occ (second t)))
                (contains? #{"GHC.Internal.Types"} (nmod (second t))))
-        (list 'plit (resolve-core (nth c 2)))
+        (let [l (nth c 2)]
+          ;; HF10-P20: at Word the literal W# n## (tidyNPat's mb_int_lit at wordTy; lit-core folds no Word literal,
+          ;; GHC's expressions keep fromInteger there: Num Word's `signum 0 = 0` matched nothing)
+          (if (and (= "Word" (occ (second t))) (seq? l) (= 'olit (first l)) (= :int (second l)))
+            (list 'plit (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "W#")) [(list 'lit (str (nth l 2) "##"))]))
+            (list 'plit (resolve-core l))))
         (list 'plit (resolve-core (nth c 1)) (resolve-core (nth c 2)))))
     (seq? c) (let [c' (apply list (map resolve-core c))]
                ;; flatten (app (app f a) b)
