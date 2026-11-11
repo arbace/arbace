@@ -262,6 +262,13 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   messages, the print by kind, the input level: encode 12,290 of 12,298 (was 7,685), print 12,222 of 12,227 (was 12,156), input 6,212
   of 6,212 (new), reject 4,176 of 5,030 with LLVM's fragment (was 0), none failing, eleven controls. Proposed ARS30-ARS32. Next: the
   base cross level (ARS30), the directives' features (ARS31), the parser's messages (ARS32); AR3's decoder.
+- Assembly, arm64: `asm-ar6` (from `mac/next` `adf65b4fd`; AR6's first part, doc/asm/ARM64-SURVEY.md, "As built: AR6 (first part)";
+  ARS42 (b) and AR6, the user's): a64i's coverage record (`a64i claimed`, `test/asm/a64i-coverage-arm64.txt`: 474 of 653 claimed executed), eight seeded
+  self-checking synthetic programs (`test/asm/a64i/gen.ae`: the integer families and the scalar FP at both precisions, 13,304 cases, the
+  model held to qemu-aarch64 at `--record`), the scalar FP in a64i (`go/arbace/a64i/fp.ae`: FPSR's exceptions, FPCR's modes, DN), and the
+  AOT cell's cheap classes (PAuth relocations, label arithmetic, `.reloc`, build attributes, the readobj/readelf/objdump views, FileCheck's
+  variables): the AOT cell 78.5% → 95.0%. Proposed ARS43-ARS47. Next: the memory families' synthetic program (ARS45 (b)), the error
+  tests' messages (ARS43), the VM's lockstep of the new programs (ARS44).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,

@@ -292,26 +292,297 @@
 
 (defn- hx [^long v] (str "0x" (Long/toHexString v)))
 
-(defn program [nm what cases]
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the floating point (AR6): a model of the Arm ARM's FP pseudocode in Java's IEEE arithmetic (doubles, floats, Math/fma,
+;; Math/sqrt: correctly rounded to nearest) with the exceptions found by exact BigDecimal comparisons; FPCR 0 (round to
+;; nearest, no flush, NaNs propagated). A case's expected pair is the result's bits and FPSR | NZCV.
+
+(def ^:private fpd {:bits 64 :fb 52 :eb 11 :min-normal Double/MIN_NORMAL})
+(def ^:private fps {:bits 32 :fb 23 :eb 8 :min-normal (double Float/MIN_NORMAL)})
+(defn- ft [t] (if (= t :d) fpd fps))
+
+(defn- f-exp ^long [t ^long b] (bit-and (unsigned-bit-shift-right b (:fb (ft t))) (ones (:eb (ft t)))))
+(defn- f-frac ^long [t ^long b] (bit-and b (ones (:fb (ft t)))))
+(defn- f-sign [t ^long b] (bit-test b (dec (long (:bits (ft t))))))
+(defn- f-nan? [t b] (and (= (f-exp t b) (ones (:eb (ft t)))) (not (zero? (f-frac t b)))))
+(defn- f-snan? [t b] (and (f-nan? t b) (not (bit-test b (dec (long (:fb (ft t))))))))
+(defn- f-inf? [t b] (and (= (f-exp t b) (ones (:eb (ft t)))) (zero? (f-frac t b))))
+(defn- f-zero? [t b] (and (zero? (f-exp t b)) (zero? (f-frac t b))))
+(defn- f-quiet ^long [t ^long b] (bit-or b (bit-shift-left 1 (dec (long (:fb (ft t)))))))
+(defn- f-neg ^long [t ^long b] (bit-xor b (bit-shift-left 1 (dec (long (:bits (ft t)))))))
+(defn- f-dnan ^long [t] (bit-or (bit-shift-left (ones (:eb (ft t))) (:fb (ft t))) (bit-shift-left 1 (dec (long (:fb (ft t)))))))
+(defn- f-zero ^long [t neg] (if neg (bit-shift-left 1 (dec (long (:bits (ft t))))) 0))
+(defn- f-inf ^long [t neg] (bit-or (f-zero t neg) (bit-shift-left (ones (:eb (ft t))) (:fb (ft t)))))
+
+(defn- f-val ^double [t ^long b] (if (= t :d) (Double/longBitsToDouble b) (double (Float/intBitsToFloat (unchecked-int b)))))
+(defn- f-bits ^long [t ^double x] (if (= t :d) (Double/doubleToRawLongBits x) (bit-and (long (Float/floatToRawIntBits (unchecked-float x))) m32)))
+(defn- bd ^java.math.BigDecimal [^double x] (java.math.BigDecimal. x))
+
+(def ^:private IOC 1) (def ^:private DZC 2) (def ^:private OFC 4) (def ^:private UFC 8) (def ^:private IXC 16)
+
+(defn- nans
+  "FPProcessNaNs: [RESULT FPSR] when an operand is a NaN (a signalling one first, quieted, IOC), else nil."
+  [t & ops]
+  (or (some #(when (f-snan? t %) [(f-quiet t %) IOC]) ops)
+      (some #(when (f-nan? t %) [% 0]) ops)))
+
+(defn- rounded
+  "A rounded result `r` (a double holding the type's value, infinite on overflow) of the exact value `e` (a BigDecimal, nil
+  when the operation is not exact in decimal: `exact?` and `tiny?` given) with its exceptions."
+  [t ^double r ^java.math.BigDecimal e & [exact? tiny?]]
+  (let [inexact (if e (not (and (not (Double/isInfinite r)) (zero? (.compareTo (bd r) e)))) (not exact?))
+        tiny (if e (and (not (zero? (.signum e))) (neg? (.compareTo (.abs e) (bd (:min-normal (ft t)))))) tiny?)
+        fl (cond (Double/isInfinite r) (bit-or OFC IXC)
+                 inexact (bit-or IXC (if tiny UFC 0))
+                 :else 0)]
+    [(f-bits t r) fl]))
+
+(defn- fs ^double [t ^double x] (if (= t :s) (double (unchecked-float x)) x))
+
+(defn fp-arith
+  "FPAdd, FPSub, FPMul, FPDiv (:add :sub :mul :div) on the bits: [RESULT FPSR]."
+  [t op a b]
+  (or (nans t a b)
+      (let [x (f-val t a) y (f-val t b) y (if (= op :sub) (- y) y) b (if (= op :sub) (f-neg t b) b)
+            fin (and (not (Double/isInfinite x)) (not (Double/isInfinite y)))]
+        (case op
+          (:add :sub) (cond (and (f-inf? t a) (f-inf? t b) (not= (f-sign t a) (f-sign t b))) [(f-dnan t) IOC]
+                            (not fin) [(f-bits t (+ x y)) 0]
+                            :else (let [e (.add (bd x) (bd y)) r (fs t (+ x y))]
+                                    (if (zero? (.signum e))
+                                      [(if (and (f-zero? t a) (f-zero? t b) (= (f-sign t a) (f-sign t b))) a (f-zero t false)) 0]
+                                      (rounded t r e))))
+          :mul (cond (or (and (f-inf? t a) (f-zero? t b)) (and (f-zero? t a) (f-inf? t b))) [(f-dnan t) IOC]
+                     (not fin) [(f-inf t (not= (f-sign t a) (f-sign t b))) 0]
+                     :else (rounded t (fs t (* x y)) (.multiply (bd x) (bd y))))
+          :div (cond (or (and (f-inf? t a) (f-inf? t b)) (and (f-zero? t a) (f-zero? t b))) [(f-dnan t) IOC]
+                     (f-inf? t a) [(f-inf t (not= (f-sign t a) (f-sign t b))) 0]
+                     (f-zero? t b) [(f-inf t (not= (f-sign t a) (f-sign t b))) DZC]
+                     (or (f-zero? t a) (f-inf? t b)) [(f-zero t (not= (f-sign t a) (f-sign t b))) 0]
+                     :else (let [r (fs t (/ x y))
+                                 exact (and (not (Double/isInfinite r)) (zero? (.compareTo (.multiply (bd r) (bd y)) (bd x))))
+                                 tiny (neg? (.compareTo (.abs (bd x)) (.abs (.multiply (bd (:min-normal (ft t))) (bd y)))))]
+                             (rounded t r nil exact tiny)))))))
+
+(defn fp-minmax [t op a b]
+  (let [[a b] (if (#{:maxnm :minnm} op)
+                (let [qa (and (f-nan? t a) (not (f-snan? t a))) qb (and (f-nan? t b) (not (f-snan? t b)))]
+                  (cond (and qa (not (f-nan? t b))) [(f-inf t (= op :maxnm)) b]
+                        (and qb (not (f-nan? t a))) [a (f-inf t (= op :maxnm))]
+                        :else [a b]))
+                [a b])]
+    (or (nans t a b)
+        (let [mx (boolean (#{:max :maxnm} op)) x (f-val t a) y (f-val t b)]
+          (cond (and (f-zero? t a) (f-zero? t b) (not= (f-sign t a) (f-sign t b))) [(f-zero t (not mx)) 0]
+                (= x y) [a 0]
+                :else [(if (= mx (> x y)) a b) 0])))))
+
+(defn fp-compare
+  "FPCompare's NZCV, and FPSR."
+  [t a b e]
+  (if (or (f-nan? t a) (f-nan? t b))
+    [3 (if (or e (f-snan? t a) (f-snan? t b)) IOC 0)]
+    (let [x (f-val t a) y (f-val t b)] [(cond (== x y) 6 (< x y) 8 :else 2) 0])))
+
+(defn fp-muladd [t a n m]
+  (cond
+    (and (f-nan? t a) (not (f-snan? t a)) (not (f-nan? t n)) (not (f-nan? t m))
+         (or (and (f-inf? t n) (f-zero? t m)) (and (f-zero? t n) (f-inf? t m)))) [(f-dnan t) IOC]
+    :else
+    (or (nans t a n m)
+        (let [x (f-val t n) y (f-val t m) z (f-val t a) sp (not= (f-sign t n) (f-sign t m))
+              pinf (or (f-inf? t n) (f-inf? t m))]
+          (cond (or (and (f-inf? t n) (f-zero? t m)) (and (f-zero? t n) (f-inf? t m))) [(f-dnan t) IOC]
+                (and pinf (f-inf? t a) (not= (f-sign t a) sp)) [(f-dnan t) IOC]
+                (f-inf? t a) [a 0]
+                pinf [(f-inf t sp) 0]
+                (and (f-zero? t a) (or (f-zero? t n) (f-zero? t m))) [(f-zero t (and (f-sign t a) sp)) 0]
+                :else (let [e (.add (bd z) (.multiply (bd x) (bd y)))
+                            r (if (= t :d) (Math/fma x y z) (double (Math/fma (unchecked-float x) (unchecked-float y) (unchecked-float z))))]
+                        (if (zero? (.signum e)) [(f-zero t false) 0] (rounded t r e))))))))
+
+(defn fp-sqrt [t a]
+  (or (nans t a)
+      (cond (f-zero? t a) [a 0]
+            (f-sign t a) [(f-dnan t) IOC]
+            (f-inf? t a) [a 0]
+            :else (let [x (f-val t a) r (fs t (Math/sqrt x))]
+                    (rounded t r nil (zero? (.compareTo (.multiply (bd r) (bd r)) (bd x))) false)))))
+
+(defn- bd-round ^java.math.BigDecimal [^java.math.BigDecimal e mode]
+  (.setScale e 0 (case mode :n java.math.RoundingMode/HALF_EVEN :a java.math.RoundingMode/HALF_UP :z java.math.RoundingMode/DOWN
+                       :p java.math.RoundingMode/CEILING :m java.math.RoundingMode/FLOOR)))
+
+(defn fp-rint [t a mode x?]
+  (or (nans t a)
+      (if (or (f-inf? t a) (f-zero? t a))
+        [a 0]
+        (let [e (bd (f-val t a)) r (bd-round e mode) inexact (not (zero? (.compareTo r e)))]
+          [(if (zero? (.signum r)) (f-zero t (f-sign t a)) (f-bits t (.doubleValue r))) (if (and x? inexact) IXC 0)]))))
+
+(defn fp-toint [t a mode w signed]
+  (if (f-nan? t a)
+    [0 IOC]
+    (let [lo (if signed (.negate (.shiftLeft BigInteger/ONE (dec w))) BigInteger/ZERO)
+          hi (.subtract (.shiftLeft BigInteger/ONE (if signed (dec w) w)) BigInteger/ONE)
+          [n inexact] (if (f-inf? t a)
+                        [(if (f-sign t a) (.subtract lo BigInteger/ONE) (.add hi BigInteger/ONE)) false]
+                        (let [e (bd (f-val t a)) r (bd-round e mode)] [(.toBigInteger r) (not (zero? (.compareTo r e)))]))
+          [n fl] (cond (neg? (.compareTo n lo)) [lo IOC] (pos? (.compareTo n hi)) [hi IOC] inexact [n IXC] :else [n 0])]
+      [(.longValue (.and n (.subtract (.shiftLeft BigInteger/ONE w) BigInteger/ONE))) fl])))
+
+(defn fp-convert [from to a]
+  (cond (f-nan? from a) (let [fr (f-frac from a) fr (if (= from :d) (unsigned-bit-shift-right fr 29) (bit-shift-left fr 29))]
+                          [(f-quiet to (bit-or (f-inf to (f-sign from a)) fr)) (if (f-snan? from a) IOC 0)])
+        (f-inf? from a) [(f-inf to (f-sign from a)) 0]
+        (f-zero? from a) [(f-zero to (f-sign from a)) 0]
+        :else (let [x (f-val from a)] (rounded to (fs to x) (bd x)))))
+
+(defn fp-cvtf [t ^long v w signed]
+  (let [n (cond (and signed (= w 64)) (BigInteger/valueOf v) signed (BigInteger/valueOf (long (unchecked-int v)))
+                (= w 64) (.and (BigInteger/valueOf v) (.subtract (.shiftLeft BigInteger/ONE 64) BigInteger/ONE))
+                :else (BigInteger/valueOf (bit-and v m32)))
+        e (java.math.BigDecimal. n)
+        r (if (= t :d) (.doubleValue e) (double (.floatValue e)))]
+    (rounded t r e)))
+
+(defn- fp-specials [t]
+  (let [z (f-zero t false) one (f-bits t 1.0)]
+    (concat [z (f-zero t true) one (f-neg t one) (f-inf t false) (f-inf t true) (f-dnan t) (bit-or (f-dnan t) 0x15)
+             (f-neg t (bit-or (f-dnan t) 0x2a)) (bit-or (f-inf t false) 1) (f-neg t (bit-or (f-inf t false) 0x33))
+             1 (f-neg t 1) (ones (:fb (ft t))) (bit-shift-left 1 (:fb (ft t))) (f-neg t (bit-shift-left 1 (:fb (ft t))))
+             (dec (f-inf t false)) (f-neg t (dec (f-inf t false))) (f-bits t 1.5) (f-bits t 3.0) (f-bits t 0.1) (f-bits t -2.5)
+             (f-bits t 0.5) (f-bits t 2.5) (f-bits t -3.5) (f-bits t 1e10) (f-bits t -7e9) (f-bits t 4294967296.0)
+             (f-bits t 9.3e18) (f-bits t 1.8446744073709552E19) (f-bits t -9.223372036854775808E18)])))
+
+(defn fp-cases [t rs]
+  (let [rs (atom (seq rs))
+        nx (fn [] (let [x (first @rs)] (swap! rs rest) x))
+        sp (vec (fp-specials t))
+        rnd (fn [] (let [x (nx)]
+                     (case (mod (unsigned-bit-shift-right x 3) 4)
+                       0 (sp (mod (unsigned-bit-shift-right x 9) (count sp)))
+                       1 (bit-and x (ones (:bits (ft t))))
+                       ;; values near one, near the denormal edge and integral ones
+                       2 (f-bits t (* (if (odd? x) -1.0 1.0) (+ 1.0 (/ (double (bit-and (unsigned-bit-shift-right x 11) 0xfffff)) 1048576.0))))
+                       3 (f-bits t (double (bit-shift-right x 40))))))
+        r (if (= t :d) "d" "s") g (if (= t :d) "x" "w")
+        nz (fn [] (bit-and (nx) 15))
+        mk (fn [insn a b c nzcv [res fl] res-in]
+             {:insn insn :x1 a :x2 b :x3 c :nzcv (bit-shift-left nzcv 28) :res res :flags (bit-or fl (bit-shift-left nzcv 28)) :mov res-in})]
+    (concat
+     (for [i (range 120) op [:add :sub :mul :div]]
+       (let [a (if (< i (count sp)) (sp i) (rnd)) b (if (< i (count sp)) (sp (mod (* 7 i) (count sp))) (rnd)) n (nz)]
+         (mk (str "f" (name op) "\t" r "0, " r "1, " r "2") a b 0 n (fp-arith t op a b) :v)))
+     (for [i (range 60) op [:max :min :maxnm :minnm]]
+       (let [a (rnd) b (if (even? i) (rnd) a) n (nz)]
+         (mk (str "f" (name op) "\t" r "0, " r "1, " r "2") a b 0 n (fp-minmax t op a b) :v)))
+     (for [i (range 60) e [false true]]
+       (let [a (rnd) b (if (zero? (mod i 5)) a (rnd)) n (nz) [f fl] (fp-compare t a b e)]
+         {:insn (str (if e "fcmpe" "fcmp") "\t" r "1, " r "2") :x1 a :x2 b :x3 0 :nzcv (bit-shift-left n 28)
+          :res 0 :flags (bit-or fl (bit-shift-left f 28)) :mov :none}))
+     (for [i (range 12) e [false true]]
+       (let [a (rnd) n (nz) [f fl] (fp-compare t a (f-zero t false) e)]
+         {:insn (str (if e "fcmpe" "fcmp") "\t" r "1, #0.0") :x1 a :x2 0 :x3 0 :nzcv (bit-shift-left n 28)
+          :res 0 :flags (bit-or fl (bit-shift-left f 28)) :mov :none}))
+     (for [i (range 50) op [:fmadd :fmsub :fnmadd :fnmsub]]
+       (let [a (rnd) b (rnd) c (rnd) n (nz)
+             [na nn] (case op :fmadd [c a] :fmsub [c (f-neg t a)] :fnmadd [(f-neg t c) (f-neg t a)] :fnmsub [(f-neg t c) a])]
+         (mk (str (name op) "\t" r "0, " r "1, " r "2, " r "3") a b c n (fp-muladd t na nn b) :v)))
+     (for [i (range 50) op [:fabs :fneg :fsqrt]]
+       (let [a (rnd) n (nz)]
+         (mk (str (name op) "\t" r "0, " r "1") a 0 0 n
+             (case op :fabs [(bit-and a (bit-not (bit-shift-left 1 (dec (long (:bits (ft t))))))) 0] :fneg [(f-neg t a) 0] :fsqrt (fp-sqrt t a)) :v)))
+     (for [i (range 40) [m mode x?] [["frintn" :n false] ["frintp" :p false] ["frintm" :m false] ["frintz" :z false] ["frinta" :a false] ["frintx" :n true] ["frinti" :n false]]]
+       (let [a (rnd) n (nz)] (mk (str m "\t" r "0, " r "1") a 0 0 n (fp-rint t a mode x?) :v)))
+     (for [i (range 24) [m mode] [["fcvtzs" :z] ["fcvtzu" :z] ["fcvtns" :n] ["fcvtnu" :n] ["fcvtas" :a] ["fcvtau" :a] ["fcvtps" :p]
+                                  ["fcvtpu" :p] ["fcvtms" :m] ["fcvtmu" :m]]
+           w [32 64]]
+       (let [a (rnd) n (nz) [v fl] (fp-toint t a mode w (= \s (last m)))]
+         (mk (str m "\t" (if (= w 64) "x" "w") "0, " r "1") a 0 0 n [v fl] :x)))
+     (for [i (range 40) [m signed] [["scvtf" true] ["ucvtf" false]] w [32 64]]
+       (let [v (if (< i 8) ([0 1 -1 Long/MIN_VALUE Long/MAX_VALUE 0x80000000 0x7fffffff 0x20000001] i) (nx)) n (nz)]
+         (mk (str m "\t" r "0, " (if (= w 64) "x" "w") "1") v 0 0 n (fp-cvtf t v w signed) :v)))
+     (for [i (range 80)]
+       (let [o (if (= t :d) :s :d) a (if (< i (count (fp-specials o))) (nth (fp-specials o) i) (bit-and (nx) (ones (:bits (ft o))))) n (nz)]
+         (mk (str "fcvt\t" r "0, " (if (= o :d) "d" "s") "1") a 0 0 n (fp-convert o t a) :v)))
+     (for [i (range 30)]
+       (let [c (conds (mod i 16)) a (rnd) b (rnd) n (nz)]
+         (mk (str "fcsel\t" r "0, " r "1, " r "2, " c) a b 0 n [(if (cond-holds c n) a b) 0] :v)))
+     (for [i (range 40) e [false true]]
+       (let [c (conds (mod i 16)) a (rnd) b (rnd) n (nz) nf (mod (nx) 16)
+             [f fl] (if (cond-holds c n) (fp-compare t a b e) [nf 0])]
+         {:insn (str (if e "fccmpe" "fccmp") "\t" r "1, " r "2, #" nf ", " c) :x1 a :x2 b :x3 0 :nzcv (bit-shift-left n 28)
+          :res 0 :flags (bit-or fl (bit-shift-left f 28)) :mov :none}))
+     (for [i (range 30)]
+       (let [a (rnd) b (rnd) n (nz) [p fl] (fp-arith t :mul a b)]
+         (mk (str "fnmul\t" r "0, " r "1, " r "2") a b 0 n [(f-neg t p) fl] :v)))
+     (for [i (range 10)]
+       (let [a (rnd) n (nz)] (mk (str "fmov\t" r "0, " r "1") a 0 0 n [a 0] :v)))
+     ;; fmov's immediates: VFPExpandImm's values, +-(16..31)/16 * 2^(-3..4)
+     (for [i (range 24)]
+       (let [x (nx) v (* (if (odd? x) -1.0 1.0) (/ (+ 16.0 (mod (unsigned-bit-shift-right x 3) 16)) 16.0)
+                       (Math/pow 2.0 (- (mod (unsigned-bit-shift-right x 9) 8) 3)))
+             n (nz)]
+         (mk (str "fmov\t" r "0, #" v) 0 0 0 n [(f-bits t v) 0] :v)))
+     (for [i (range 20)]
+       (let [v (nx) n (nz) v (bit-and v (ones (:bits (ft t))))]
+         (mk (str "fmov\t" r "0, " g "1") v 0 0 n [v 0] :v)))
+     (for [i (range 20)]
+       (let [v (bit-and (nx) (ones (:bits (ft t)))) n (nz)]
+         (mk (str "fmov\t" g "0, " r "1") v 0 0 n [v 0] :x))))))
+
+(defn- looped
+  "A synthetic program as a loop over its cases (the code small, so the eval's and AOT's assembly stay quick): each case's row
+  of data (x1, x2, x3, NZCV, the expected result and flags) loaded, `setup` (the operands into place), the case's stub called
+  (its instruction under test, the result into x0, ret), `check` called, `flags-text` the check's flags into x12."
+  [nm what setup flags-text cases stub-of]
   (let [n (count cases) line (str "synth-" nm ": " n " cases\n")]
     (str "# a64i's synthetic program (AR6, ARS42 (b); test/asm/a64i/gen.ae, seeded): " what ";\n"
-         "# each case's row of data (x1, x2, x3, NZCV, the expected x0 and NZCV, the model's), the instruction run once and checked;\n"
-         "# self-checking (ARS40 (b)): a differing case prints its number, x0, the expected x0, NZCV and the expected NZCV\n"
+         "# each case's row of data (the operands, NZCV, the expected result and flags, the model's) and its stub (the instruction\n"
+         "# under test), run once in a loop and checked; self-checking (ARS40 (b)): a differing case prints its number, the result,\n"
+         "# the expected one, the flags and the expected ones\n"
          "# with: lib/out.s\n# exit: 0\n# stdout: " (pr-str line) "\n"
          "\t.text\n\t.globl\t_start\n_start:\n"
-         "\tadrp\tx20, rows\n\tadd\tx20, x20, :lo12:rows\n\tmov\tx19, #0\n\tmov\tx21, #0\n"
-         (apply str (for [c cases]
-                      (str "\tldp\tx1, x2, [x20], #16\n\tldp\tx3, x9, [x20], #16\n\tmsr\tnzcv, x9\n\tmov\tx0, x3\n\t" (:insn c) "\n\tbl\tcheck\n")))
+         "\tadrp\tx20, rows\n\tadd\tx20, x20, :lo12:rows\n\tadrp\tx24, stubs\n\tadd\tx24, x24, :lo12:stubs\n"
+         "\tmov\tx19, #0\n\tmov\tx21, #0\n\tmov\tx23, #" n "\n\tmsr\tfpcr, xzr\n"
+         "2:\tldp\tx1, x2, [x20], #16\n\tldp\tx3, x9, [x20], #16\n" setup
+         "\tldr\tx22, [x24], #8\n\tblr\tx22\n\tbl\tcheck\n\tsubs\tx23, x23, #1\n\tb.ne\t2b\n"
          "\tadrp\tx0, msg\n\tadd\tx0, x0, :lo12:msg\n\tmov\tx1, #" (count line) "\n\tbl\tput_str\n"
          "\tcmp\tx19, #0\n\tcset\tx0, ne\n\tb\texit_x0\n\n"
-         "// check: x0 and NZCV against the row's expected pair; a difference counted (x19) and printed\n"
-         "check:\n\tmrs\tx12, nzcv\n\tldp\tx10, x11, [x20], #16\n\tadd\tx21, x21, #1\n"
+         "// check: x0 and the flags against the row's expected pair; a difference counted (x19) and printed\n"
+         "check:\n" flags-text "\tldp\tx10, x11, [x20], #16\n\tadd\tx21, x21, #1\n"
          "\tcmp\tx0, x10\n\tb.ne\t1f\n\tcmp\tx12, x11\n\tb.ne\t1f\n\tret\n"
          "1:\tadd\tx19, x19, #1\n\tmov\tx13, x30\n\tmov\tx14, x0\n\tmov\tx0, x21\n\tbl\tput_hex\n\tmov\tx0, x14\n\tbl\tput_hex\n"
          "\tmov\tx0, x10\n\tbl\tput_hex\n\tmov\tx0, x12\n\tbl\tput_hex\n\tmov\tx0, x11\n\tbl\tput_hex\n\tmov\tx30, x13\n\tret\n\n"
-         "\t.data\n\t.p2align\t4\nmsg:\t.ascii\t" (pr-str line) "\n\t.p2align\t4\nrows:\n"
+         "// the stubs: a case's instruction, the result into x0\n"
+         (apply str (map-indexed (fn [i c] (str "case_" i ":\t" (stub-of c) "\tret\n")) cases))
+         "\n\t.data\n\t.p2align\t4\nmsg:\t.ascii\t" (pr-str line) "\n\t.p2align\t4\nrows:\n"
          (apply str (for [c cases]
-                      (str "\t.xword\t" (str/join ", " (map hx [(:x1 c) (:x2 c) (:x3 c) (:nzcv c) (:res c) (:flags c)])) "\n"))))))
+                      (str "\t.xword\t" (str/join ", " (map hx [(:x1 c) (:x2 c) (:x3 c) (:nzcv c) (:res c) (:flags c)])) "\n")))
+         "stubs:\n"
+         (apply str (for [i (range n)] (str "\t.xword\tcase_" i "\n"))))))
+
+(defn fp-program
+  "A synthetic FP program: each case's operands' bits in d1, d2, d3 (s1-s3 their low halves), FPSR cleared, NZCV set, the
+  instruction, the result (d0's or s0's bits, or x0) and FPSR | NZCV against the row's."
+  [nm what t cases]
+  (let [r (if (= t :d) "d" "s") g (if (= t :d) "x" "w")]
+    (looped nm what
+            "\tfmov\td1, x1\n\tfmov\td2, x2\n\tfmov\td3, x3\n\tmsr\tfpsr, xzr\n\tmsr\tnzcv, x9\n\tmov\tx0, #0\n"
+            "\tmrs\tx12, nzcv\n\tmrs\tx13, fpsr\n\torr\tx12, x12, x13\n"
+            cases
+            (fn [c] (str (:insn c) "\n"
+                         (case (:mov c) :v (str "\tfmov\t" g "0, " r "0\n") :x (if (str/includes? (:insn c) "\tw0") "\tmov\tw0, w0\n" "") :none ""))))))
+
+(defn program
+  "A synthetic integer program: x1, x2, x3 the operands, x0 = x3, NZCV set, the instruction, x0 and NZCV against the row's."
+  [nm what cases]
+  (looped nm what "\tmsr\tnzcv, x9\n\tmov\tx0, x3\n" "\tmrs\tx12, nzcv\n" cases (fn [c] (str (:insn c) "\n"))))
+
+(def fp-families
+  [["fp-d" "the scalar FP at double precision: fadd, fsub, fmul, fdiv, fmax, fmin, fmaxnm, fminnm, fcmp, fcmpe (with #0.0 too), fmadd, fmsub, fnmadd, fnmsub, fabs, fneg, fsqrt, frint*, fcvt[nzapm][su], scvtf, ucvtf, fcvt from single, fcsel, fccmp, fccmpe, fnmul, fmov (register, immediate, general)" :d]
+   ["fp-s" "the scalar FP at single precision: the same, fcvt from double" :s]])
 
 (defn- sha256 [^String s]
   (let [md (MessageDigest/getInstance "SHA-256")]
@@ -323,10 +594,15 @@
   (.mkdirs (java.io.File. (str dir "/lib")))
   (spit (str dir "/lib/out.s") (slurp out))
   (into (sorted-map)
-        (for [[i [nm what f]] (map-indexed vector families)
-              :let [text (program nm what (vec (f (rng (+ seed i)))))]]
-          (do (spit (str dir "/synth-" nm ".s") text)
-              [(str "synth-" nm) (sha256 text)]))))
+        (concat
+         (for [[i [nm what f]] (map-indexed vector families)
+               :let [text (program nm what (vec (f (rng (+ seed i)))))]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         (for [[i [nm what t]] (map-indexed vector fp-families)
+               :let [text (fp-program nm what t (vec (fp-cases t (rng (+ seed 100 i)))))]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)])))))
 
 (defn main
   "bin/repr-asm --arch arm64 a64i synth DIR [--record]: the programs written; their digests against DIGESTS (or recorded)."
