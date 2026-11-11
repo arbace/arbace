@@ -53,7 +53,8 @@
    :syms (volatile! {})                   ; assignments for the matcher (name -> expression)
    :files (java.util.ArrayList.) :sec-names (java.util.HashMap.)
    :frames (java.util.ArrayList.) :frame (volatile! nil)
-   :mode (volatile! 64) :intel (volatile! false)})
+   :mode (volatile! 64) :intel (volatile! false)
+   :reloc-directives (java.util.ArrayList.)})   ; .reloc's [OFFSET-EXPR TYPE EXPR] (AR6, arm64's)
 
 (defn sym-name ^String [s]
   (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s)) :else (fail (str "not a symbol: " (pr-str s)))))
@@ -118,9 +119,16 @@
                   (.put by k s) (.add ss s)
                   (when group (register! ctx group))
                   ;; the section's symbol (STT_SECTION, LOCAL), registered when the section first is
-                  (let [key (str "\u0000section:" (.size ss))]
+                  (let [;; a symbol of the section's name met before it, undefined, is the section's, in its place (MCContext's
+                        ;; getELFSection takes an undefined symbol of that name as the section's begin symbol; AR6's
+                        ;; `.reloc ., T, .data`)
+                        old (when-not (or group (.containsKey ^java.util.HashMap (:sec-names ctx) nm))
+                              (when-let [o (.get ^java.util.LinkedHashMap (:symbols ctx) nm)]
+                                (let [m @o] (when-not (or (:chunk m) (:var m) (:section-sym m) (:common m) (:bind m)) o))))
+                        key (if old nm (str "\u0000section:" (.size ss)))]
                     (when-not (or group (.containsKey ^java.util.HashMap (:sec-names ctx) nm)) (.put ^java.util.HashMap (:sec-names ctx) nm key))
                     (register! ctx key)
+                    (swap! s assoc :sym-key key)
                     (swap! (symbol! ctx key) assoc :section-sym (:index @s) :temp false :bind elf/STB_LOCAL :type elf/STT_SECTION
                            :chunk nil))
                   (add-chunk! s (data-chunk))
@@ -132,6 +140,11 @@
     sec))
 
 (defn sec-sym-name [^long i] (str "\u0000section:" (inc i)))
+
+(defn sec-key
+  "The key of section `i`'s symbol: its own, or the earlier symbol of its name it took (section!)."
+  [ctx ^long i]
+  (or (:sym-key @(.get ^java.util.ArrayList (:sections ctx) i)) (sec-sym-name i)))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; expressions: the item's local labels and `.` made symbols, then MCValue's evaluation
@@ -661,13 +674,29 @@
                                     (and (not (and (pos? (bit-and fl elf/SHF_MERGE)) (not (zero? addend))))
                                          (zero? (bit-and fl elf/SHF_TLS))))
                                   (not ((:keep-symbol? *arch*) (:spec v))))
-                    [key addend] (cond sec-sym? [(sec-sym-name (first oa)) (+ addend (long (second oa)))]
+                    [key addend] (cond sec-sym? [(sec-key ctx (first oa)) (+ addend (long (second oa)))]
                                        add [(:name am) addend]
                                        :else [nil addend])]
                 (when key (swap! (symbol! ctx key) assoc :used-in-reloc true))
                 (put! 0 true)
                 (.put relocs (:sec m) (conj (vec (.get relocs (:sec m))) {:offset foff :sym key :type type :addend addend}))))))
         (when (= :relax (:kind m)) (swap! c assoc :final (vec bs)))))
+    ;; .reloc's relocations (MCObjectStreamer::emitRelocDirective: pending fixups added after the section's own), in their
+    ;; order: the offset's section and place, the type given, the expression's symbol (a local one in a section as its
+    ;; section symbol) and addend
+    (doseq [[off-e type e] (:reloc-directives ctx)]
+      (let [vo (value ctx off-e 0)
+            [sec o] (or (when-let [a (:add vo)] (sym-offset ctx a 0)) (fail ".reloc offset is not relative to a section"))
+            _ (when (or (= :abs sec) (:sub vo)) (fail ".reloc offset is not relative to a section"))
+            v (value ctx e 0)
+            _ (when (:sub v) (unsupported :expression (str ".reloc " (pr-str e))))
+            add (:add v) oa (when add (sym-offset ctx add 0))
+            sec-sym? (and add (= elf/STB_LOCAL (binding-of ctx add)) oa (not= :abs (first oa)))
+            [key addend] (cond sec-sym? [(sec-key ctx (first oa)) (+ (long (:c v)) (long (second oa)))]
+                               add [(:name @add) (long (:c v))]
+                               :else [nil (long (:c v))])]
+        (when key (swap! (symbol! ctx key) assoc :used-in-reloc true))
+        (.put relocs sec (conj (vec (.get relocs sec)) {:offset (+ (long o) (long (:c vo))) :sym key :type type :addend addend}))))
     relocs))
 
 (defn section-bytes ^bytes [sec]
@@ -761,7 +790,8 @@
                                                                     (if (or (:add v) (:sub v)) (unsupported :size (pr-str e)) (:c v))))]
                             (when (and (:temp m) (not o) (not (:section-sym m))) (fail (str "Undefined temporary symbol " n)))
                             {:key n :name (or (:out-name m) (if (:section-sym m) (:name @(nth secs (:section-sym m))) n))
-                             :section-sym (some? (:section-sym m))
+                             ;; a section symbol a TLS specifier made STT_TLS keeps its name (llvm-mc's .tdata in tls-dtprel64)
+                             :section-sym (and (some? (:section-sym m)) (= elf/STT_SECTION (merged-type ctx m)))
                              :bind (binding-of ctx s) :type (merged-type ctx m)
                              :other (bit-or (long (or (:vis m) 0)) (long (or (:st-other m) 0)))
                              :shndx (cond (:common m) :common (nil? o) :undef (= :abs (first o)) :abs :else (first o))

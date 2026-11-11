@@ -1,0 +1,1009 @@
+(in-ns 'go.arbace.a64i) (go/file "fp.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [math "math"]
+    ^{:line 6} [big "math/big"]
+    ^{:line 7} [strconv "strconv"]
+    ^{:line 8} [strings "strings"]])
+
+
+;; The scalar floating point (doc/asm/ARM64-SURVEY.md, "As built: AR6"): the Arm ARM's FP data-processing classes (FP
+;; data-processing with 1, 2 and 3 sources, compare, conditional compare and select, immediate, the conversions between FP
+;; and integer and between precisions) at single and double precision, decoded, lowered from their forms and executed as the
+;; pseudocode defines them (FPAdd, FPMul, FPMulAdd, FPDiv, FPSqrt, FPMax, FPMaxNum, FPCompare, FPRoundInt, FPToFixed,
+;; FixedToFP, FPConvert; FPProcessNaNs, FPRound with FPCR's rounding mode, the exceptions accumulated in FPSR: IOC, DZC, OFC,
+;; UFC with tininess before rounding, IXC). The exact values are math/big's; FPCR.DN's default NaN taken, FPCR.FZ and half
+;; precision refused (:unimplemented). Written from DDI 0487's pseudocode by Arbace; no code copied.
+
+
+(go/const "The FP operations (after the integer core's).\n"
+  ^{:line 21} [^{:tag Op :val 82} OpFMOV (+ opCount 1 iota)] ; fmov Vd, Vn
+  ^{:line 22} [^{:val 83} OpFMOVI] ; fmov Vd, #imm (Imm: the value's bits)
+  ^{:line 23} [^{:val 84} OpFMOVG] ; fmov between a general register and Vd (Ext 0: to FP, 1: to general)
+  ^{:line 24} [^{:val 85} OpFP1] ; one source (Sys: 1 fabs, 2 fneg, 3 fsqrt, 8-15 frint*)
+  ^{:line 25} [^{:val 86} OpFP2] ; two sources (Sys: 0 fmul, 1 fdiv, 2 fadd, 3 fsub, 4 fmax, 5 fmin, 6 fmaxnm, 7 fminnm, 8 fnmul)
+  ^{:line 26} [^{:val 87} OpFP3] ; fmadd, fmsub, fnmadd, fnmsub (Sys: o1<<1 | o0)
+  ^{:line 27} [^{:val 88} OpFCMP] ; fcmp, fcmpe (S), with zero (N)
+  ^{:line 28} [^{:val 89} OpFCCMP] ; fccmp, fccmpe (S): Cond, Imm the NZCV otherwise
+  ^{:line 29} [^{:val 90} OpFCSEL] ; fcsel: Cond
+  ^{:line 30} [^{:val 91} OpFCVT] ; fcvt: Size the source's type, Amount the destination's
+  ^{:line 31} [^{:val 92} OpCVTF] ; scvtf, ucvtf (Signed): from a general register of Sf's width
+  ^{:line 32} [^{:val 93} OpFCVTI] ; fcvt[nzpma][su] (Signed; Sys the rounding: 0 N, 1 P, 2 M, 3 Z, 4 A): to a general register
+  ^{:line 33} [^{:val 94} opFPEnd])
+
+
+(go/var fpOpNames (lit (array ... string) "fmov" "fmovi" "fmovg" "fp1" "fp2" "fp3" "fcmp" "fccmp" "fcsel" "fcvt" "cvtf" "fcvti"))
+
+^{:go/end 38} (go/func isFPOp ^bool [^Op o] (and (> o opCount) (< o opFPEnd)))
+
+^{:go/end 45} (go/func fpOpName ^string [^Op o]
+  (when (isFPOp o)
+    (return (aget fpOpNames (- o opCount 1))))
+
+  (fmt/Sprintf "op%d" o))
+
+
+(go/var fp1Names (lit (map int64 string) [1 "fabs"] [2 "fneg"] [3 "fsqrt"] [8 "frintn"] [9 "frintp"] [10 "frintm"] [11 "frintz"] [12 "frinta"] [14 "frintx"] [15 "frinti"]))
+(go/var fp2Names (lit (array ... string) "fmul" "fdiv" "fadd" "fsub" "fmax" "fmin" "fmaxnm" "fminnm" "fnmul"))
+(go/var fp3Names (lit (array ... string) "fmadd" "fmsub" "fnmadd" "fnmsub"))
+(go/var rnds "npmza")
+
+^{:go/end 54} (go/func fpType ^string [^uint8 sz]
+  (aget (lit (map uint8 string) [1 "h"] [2 "s"] [3 "d"]) sz))
+
+
+
+^{:go/end 106} (go/func fpName "fpName is an FP instruction's name for the coverage: the operation as the Arm ARM names it and its types.\n" ^string [^{:tag (* Inst)} in]
+  (let [t (fpType (.-Size in))
+      ^{:line 59} w "w"]
+    (when (.-Sf in)
+      (set! w "x"))
+
+    (switch (.-Op in)
+      (case [OpFMOV]
+        (return (+ "fmov." t)))
+      (case [OpFMOVI]
+        (return (+ "fmov.imm." t)))
+      (case [OpFMOVG]
+        (when (== (.-Ext in) 0)
+          (return (+ "fmov." t "." w)))
+
+        (return (+ "fmov." w "." t)))
+      (case [OpFP1]
+        (return (+ (aget fp1Names (conv int64 (.-Sys in))) "." t)))
+      (case [OpFP2]
+        (return (+ (aget fp2Names (.-Sys in)) "." t)))
+      (case [OpFP3]
+        (return (+ (aget fp3Names (.-Sys in)) "." t)))
+      (case [OpFCMP OpFCCMP]
+        (let [s (aget (lit (map Op string) [OpFCMP "fcmp"] [OpFCCMP "fccmp"]) (.-Op in))]
+          (when (.-S in)
+            (set! s + "e"))
+
+          (when (.-N in)
+            (set! s + ".zero"))
+
+          (return (+ s "." t))))
+      (case [OpFCSEL]
+        (return (+ "fcsel." t)))
+      (case [OpFCVT]
+        (return (+ "fcvt." (fpType (.-Amount in)) "." t)))
+      (case [OpCVTF]
+        (let [s "ucvtf."]
+          (when (.-Signed in)
+            (set! s "scvtf."))
+
+          (return (+ s t "." w))))
+      (case [OpFCVTI]
+        (let [s "u"]
+          (when (.-Signed in)
+            (set! s "s"))
+
+          (return (+ "fcvt" (conv string (aget rnds (.-Sys in))) s "." w "." t)))))
+
+    (.String (.-Op in))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; decoding
+
+
+^{:go/end 220} (go/func decodeFP "decodeFP is the scalar FP data-processing classes; the rest of the SIMD&FP space is :unimplemented simd.\n" [^uint32 w] :results [Inst string]
+  (when (and (== (bit-and w 0x5f000000) 0x1f000000) (== (>> w 31) 0) (== (bf w 29 29) 0))
+    ;; FP data-processing (3 source)
+    (let [ft (bf w 23 22)]
+      (when (> ft 1)
+        (return (lit Inst) ":unimplemented fp-half"))
+
+      (return (lit Inst :Op OpFP3 :Size (+ (conv uint8 ft) 2) :Rd (conv uint8 (bf w 4 0)) :Rn (conv uint8 (bf w 9 5)) :Rm (conv uint8 (bf w 20 16)) :Ra (conv uint8 (bf w 14 10)) :Sys (bit-or (<< (bf w 21 21) 1) (bf w 15 15))) "")))
+
+  (when (or (!= (bit-and w 0x5f200000) 0x1e200000) (!= (bf w 29 29) 0))
+    (return (lit Inst) ":unimplemented simd"))
+
+  (let [ft (bf w 23 22)
+      (values rd rn rm) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)) (conv uint8 (bf w 20 16)))
+      ^{:line 126} sf (== (bf w 31 31) 1)]
+    (when (== (bf w 15 10) 0)
+      ;; conversion between FP and integer
+      (let [(values rmode opc) (values (bf w 20 19) (bf w 18 16))]
+        (switch
+          (case [(or (== opc 6) (== opc 7))]
+            ;; FMOV (general): opcode 110 to a general register, 111 to an FP one
+            (switch
+              (case [(== ft 3)]
+                (return (lit Inst) ":unimplemented fp-half"))
+              (case [(and (== ft 2) (== rmode 1) sf)]
+                (return (lit Inst) ":unimplemented fmov-top"))
+              (case [(or (!= rmode 0) (== ft 2) (== (== ft 0) sf))]
+                (return (lit Inst) undef)))
+
+            (let [ext (conv uint8 0)]
+              (when (== opc 6)
+                (set! ext 1))
+
+              (return (lit Inst :Op OpFMOVG :Sf sf :Size (+ (conv uint8 ft) 2) :Rd rd :Rn rn :Ext ext) "")))
+          (case [(> ft 1)]
+            (return (lit Inst) ":unimplemented fp-half"))
+          (case [(or (== opc 2) (== opc 3))]
+            (when (!= rmode 0)
+              (return (lit Inst) undef))
+
+            (return (lit Inst :Op OpCVTF :Sf sf :Size (+ (conv uint8 ft) 2) :Rd rd :Rn rn :Signed (== opc 2)) ""))
+          (case [(<= opc 1)]
+            (return (lit Inst :Op OpFCVTI :Sf sf :Size (+ (conv uint8 ft) 2) :Rd rd :Rn rn :Signed (== opc 0) :Sys rmode) ""))
+          (case [(or (== opc 4) (== opc 5))]
+            (when (!= rmode 0)
+              (return (lit Inst) undef))
+
+            (return (lit Inst :Op OpFCVTI :Sf sf :Size (+ (conv uint8 ft) 2) :Rd rd :Rn rn :Signed (== opc 4) :Sys 4) "")))
+
+        (return (lit Inst) undef)))
+
+    (when sf
+      (return (lit Inst) undef))
+
+    (when (> ft 1)
+      (when (== ft 3)
+        (return (lit Inst) ":unimplemented fp-half"))
+
+      (return (lit Inst) undef))
+
+    (let [size (+ (conv uint8 ft) 2)]
+      (switch
+        (case [(== (bf w 14 10) 16)]
+          ;; one source
+          (let [opc (bf w 20 15)]
+            (switch
+              (case [(== opc 0)]
+                (return (lit Inst :Op OpFMOV :Size size :Rd rd :Rn rn) ""))
+              (case [(<= opc 3)]
+                (return (lit Inst :Op OpFP1 :Size size :Rd rd :Rn rn :Sys opc) ""))
+              (case [(or (== opc 4) (== opc 5))]
+                (when (== (+ (conv uint8 (- opc 4)) 2) size)
+                  (return (lit Inst) undef))
+
+                (return (lit Inst :Op OpFCVT :Size size :Amount (+ (conv uint8 (- opc 4)) 2) :Rd rd :Rn rn) ""))
+              (case [(== opc 7)]
+                (return (lit Inst) ":unimplemented fp-half"))
+              (case [(and (>= opc 8) (<= opc 15) (!= opc 13))]
+                (return (lit Inst :Op OpFP1 :Size size :Rd rd :Rn rn :Sys opc) "")))
+
+            (return (lit Inst) ":unimplemented fp1")))
+        (case [(== (bf w 13 10) 8)]
+          (when (or (!= (bf w 15 14) 0) (!= (bf w 2 0) 0))
+            (return (lit Inst) undef))
+
+          (let [o (bf w 4 3)
+              ^{:line 198} in (lit Inst :Op OpFCMP :Size size :Rn rn :Rm rm :S (!= (bit-and o 2) 0) :N (!= (bit-and o 1) 0))]
+            (when (.-N in)
+              (set! (.-Rm in) 0))
+
+            (return in "")))
+        (case [(== (bf w 12 10) 4)]
+          (when (!= (bf w 9 5) 0)
+            (return (lit Inst) undef))
+
+          (return (lit Inst :Op OpFMOVI :Size size :Rd rd :Imm (conv int64 (vfpExpandImm (bf w 20 13) size))) ""))
+        (case [(== (bf w 11 10) 1)]
+          (return (lit Inst :Op OpFCCMP :Size size :Rn rn :Rm rm :S (== (bf w 4 4) 1) :Cond (conv uint8 (bf w 15 12)) :Imm (conv int64 (bf w 3 0))) ""))
+        (case [(== (bf w 11 10) 2)]
+          (let [opc (bf w 15 12)]
+            (when (> opc 8)
+              (return (lit Inst) ":unimplemented fp2"))
+
+            (return (lit Inst :Op OpFP2 :Size size :Rd rd :Rn rn :Rm rm :Sys opc) "")))
+        (case [(== (bf w 11 10) 3)]
+          (return (lit Inst :Op OpFCSEL :Size size :Rd rd :Rn rn :Rm rm :Cond (conv uint8 (bf w 15 12))) "")))
+
+      (return (lit Inst) ":unimplemented fp"))))
+
+
+
+^{:go/end 231} (go/func vfpExpandImm "vfpExpandImm is VFPExpandImm: the 8-bit immediate as the bits of a value of the type.\n" ^uint64 [^uint32 imm8 ^uint8 size]
+  (let [(values s b6 frac) (values (conv uint64 (>> imm8 7)) (conv uint64 (bit-and (>> imm8 6) 1)) (conv uint64 (bit-and imm8 63)))]
+    (when (== size 2)
+      (let [e (bit-or (<< (- 1 b6) 7) (<< (* b6 31) 2) (conv uint64 (bit-and (>> imm8 4) 3)))]
+        (return (bit-or (<< s 31) (<< e 23) (<< (bit-and frac 15) 19)))))
+
+    (let [e (bit-or (<< (- 1 b6) 10) (<< (* b6 255) 2) (conv uint64 (bit-and (>> imm8 4) 3)))]
+      (bit-or (<< s 63) (<< e 52) (<< (bit-and frac 15) 48)))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the forms
+
+^{:go/end 242} (go/func fpReg [^{:tag (* Sx)} o] :results [uint8 uint8 bool]
+  (let [(values r sz ok) (asVReg o)]
+    (when (or (not ok) (< sz 1) (> sz 3))
+      (return 0 0 false))
+
+    (return r sz true)))
+
+
+^{:go/end 253} (go/func mustFPReg [^{:tag (* Sx)} o] :results [uint8 uint8]
+  (let [(values r sz ok) (fpReg o)]
+    (when (not ok)
+      (ferr "not an FP register: %s" o))
+
+    (when (== sz 1)
+      (ferr "half precision: %s" o))
+
+    (return r sz)))
+
+
+
+^{:go/breaks [7] :go/end 279} (go/func fpConst "fpConst is an FP immediate's value: (imm X), (float \"TEXT\"), (- X), a number.\n" ^float64 [^{:tag (* Sx)} o]
+  (when (not (.-IsList o))
+    (when (strings/HasPrefix (.-Atom o) "\"")
+      (let [(values v err) (strconv/ParseFloat (strings/Trim (.-Atom o) "\"") 64)]
+        (when (!= err nil)
+          (ferr "not a float: %s" o))
+
+        (return v)))
+
+    (return (conv float64 (value o))))
+
+  (switch (.head o)
+    (case ["imm"]
+      (return (fpConst (aget (.-List o) 1))))
+    (case ["float"]
+      (return (fpConst (aget (.-List o) 1))))
+    (case ["-"]
+      (when (== (len (.-List o)) 2)
+        (return (- (fpConst (aget (.-List o) 1)))))))
+
+
+  (ferr "not an FP constant: %s" o)
+  0)
+
+
+^{:go/end 286} (go/func fpBits ^uint64 [^float64 v ^uint8 size]
+  (when (== size 2)
+    (return (conv uint64 (math/Float32bits (conv float32 v)))))
+
+  (math/Float64bits v))
+
+
+
+^{:go/end 381} (go/func lowerFP "lowerFP is the scalar FP instructions' forms.\n" [^string m ^{:tag (slice (* Sx))} ops] :results [Inst bool]
+  (switch m
+    (case ["fmov"]
+      (nargs ops 2)
+      (when [(values d sz ok) (fpReg (aget ops 0))] ok
+        (when [(values n nsz ok) (fpReg (aget ops 1))] ok
+          (when (!= nsz sz)
+            (ferr "fmov types"))
+
+          (return (lit Inst :Op OpFMOV :Size sz :Rd d :Rn n) true))
+
+        (when [(values g ok) (asReg (aget ops 1))] ok
+          (return (lit Inst :Op OpFMOVG :Sf (.-x g) :Size sz :Rd d :Rn (.-n g) :Ext 0) true))
+
+        (return (lit Inst :Op OpFMOVI :Size sz :Rd d :Imm (conv int64 (fpBits (fpConst (aget ops 1)) sz))) true))
+
+      (let [g (mustReg (aget ops 0))
+          (values n sz) (mustFPReg (aget ops 1))]
+        (return (lit Inst :Op OpFMOVG :Sf (.-x g) :Size sz :Rd (.-n g) :Rn n :Ext 1) true)))
+    (case ["fabs" "fneg" "fsqrt" "frintn" "frintp" "frintm" "frintz" "frinta" "frintx" "frinti"]
+      (nargs ops 2)
+      (let [(values d sz) (mustFPReg (aget ops 0))
+          (values n _) (mustFPReg (aget ops 1))]
+        (range [k v fp1Names]
+          (when (== v m)
+            (return (lit Inst :Op OpFP1 :Size sz :Rd d :Rn n :Sys (conv uint32 k)) true)))))
+
+
+    (case ["fmul" "fdiv" "fadd" "fsub" "fmax" "fmin" "fmaxnm" "fminnm" "fnmul"]
+      (nargs ops 3)
+      (let [(values d sz) (mustFPReg (aget ops 0))
+          (values n _) (mustFPReg (aget ops 1))
+          (values r _) (mustFPReg (aget ops 2))]
+        (range [k v fp2Names]
+          (when (== v m)
+            (return (lit Inst :Op OpFP2 :Size sz :Rd d :Rn n :Rm r :Sys (conv uint32 k)) true)))))
+
+
+    (case ["fmadd" "fmsub" "fnmadd" "fnmsub"]
+      (nargs ops 4)
+      (let [(values d sz) (mustFPReg (aget ops 0))
+          (values n _) (mustFPReg (aget ops 1))
+          (values r _) (mustFPReg (aget ops 2))
+          (values a _) (mustFPReg (aget ops 3))]
+        (range [k v fp3Names]
+          (when (== v m)
+            (return (lit Inst :Op OpFP3 :Size sz :Rd d :Rn n :Rm r :Ra a :Sys (conv uint32 k)) true)))))
+
+
+    (case ["fcmp" "fcmpe"]
+      (nargs ops 2)
+      (let [(values n sz) (mustFPReg (aget ops 0))
+          ^{:line 341} in (lit Inst :Op OpFCMP :Size sz :Rn n :S (== m "fcmpe"))]
+        (if [(values r _ ok) (fpReg (aget ops 1))] ok
+          (set! (.-Rm in) r)
+          (do
+            (when (!= (fpConst (aget ops 1)) 0)
+              (ferr "fcmp with a constant other than 0"))
+
+            (set! (.-N in) true)))
+
+        (return in true)))
+    (case ["fccmp" "fccmpe"]
+      (nargs ops 4)
+      (let [(values n sz) (mustFPReg (aget ops 0))
+          (values r _) (mustFPReg (aget ops 1))]
+        (return (lit Inst :Op OpFCCMP :Size sz :Rn n :Rm r :S (== m "fccmpe") :Imm (value (aget ops 2)) :Cond (condOf (aget ops 3))) true)))
+    (case ["fcsel"]
+      (nargs ops 4)
+      (let [(values d sz) (mustFPReg (aget ops 0))
+          (values n _) (mustFPReg (aget ops 1))
+          (values r _) (mustFPReg (aget ops 2))]
+        (return (lit Inst :Op OpFCSEL :Size sz :Rd d :Rn n :Rm r :Cond (condOf (aget ops 3))) true)))
+    (case ["fcvt"]
+      (nargs ops 2)
+      (let [(values d dsz) (mustFPReg (aget ops 0))
+          (values n nsz) (mustFPReg (aget ops 1))]
+        (return (lit Inst :Op OpFCVT :Size nsz :Amount dsz :Rd d :Rn n) true)))
+    (case ["scvtf" "ucvtf"]
+      (nargs ops 2)
+      (let [(values d sz) (mustFPReg (aget ops 0))
+          ^{:line 370} g (mustReg (aget ops 1))]
+        (return (lit Inst :Op OpCVTF :Sf (.-x g) :Size sz :Rd d :Rn (.-n g) :Signed (== m "scvtf")) true))))
+
+  (when (and (== (len m) 6) (strings/HasPrefix m "fcvt") (strings/ContainsRune "npmza" (conv rune (aget m 4))) ^:go/paren (or (== (aget m 5) \s) (== (aget m 5) \u)))
+    (nargs ops 2)
+    (let [g (mustReg (aget ops 0))
+        (values n sz) (mustFPReg (aget ops 1))
+        ^{:line 377} k (strings/IndexByte rnds (aget m 4))]
+      (return (lit Inst :Op OpFCVTI :Sf (.-x g) :Size sz :Rd (.-n g) :Rn n :Signed (== (aget m 5) \s) :Sys (conv uint32 k)) true)))
+
+  (return (lit Inst) false))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the values
+
+
+(go/const "FPSR's cumulative exception bits.\n"
+  ^{:line 388} [^{:val 1} fpIOC (<< 1 0)]
+  ^{:line 389} [^{:val 2} fpDZC (<< 1 1)]
+  ^{:line 390} [^{:val 4} fpOFC (<< 1 2)]
+  ^{:line 391} [^{:val 8} fpUFC (<< 1 3)]
+  ^{:line 392} [^{:val 16} fpIXC (<< 1 4)])
+
+
+(go/type fpt (struct
+    ^{:line 396 :tag uint} bits ^uint ebits ^uint fbits
+    ^{:line 397 :tag int} emin))
+
+
+^{:go/end 405} (go/func fmtOf ^fpt [^uint8 size]
+  (when (== size 2)
+    (return (lit fpt 32 8 23 -126)))
+
+  (lit fpt 64 11 52 -1022))
+
+
+^{:go/end 407} (go/method sign ^bool [^fpt t ^uint64 b] (== (bit-and (>> b (- (.-bits t) 1)) 1) 1))
+^{:go/end 408} (go/method exp ^uint64 [^fpt t ^uint64 b] (bit-and (>> b (.-fbits t)) (- ^uint64 (<< 1 (.-ebits t)) 1)))
+^{:go/end 411} (go/method frac ^uint64 [^fpt t ^uint64 b]
+  (bit-and b (- ^uint64 (<< 1 (.-fbits t)) 1)))
+
+^{:go/end 412} (go/method isNaN ^bool [^fpt t ^uint64 b] (and (== (.exp t b) (- ^uint64 (<< 1 (.-ebits t)) 1)) (!= (.frac t b) 0)))
+^{:go/end 413} (go/method isSNaN ^bool [^fpt t ^uint64 b] (and (.isNaN t b) (== (bit-and (>> b (- (.-fbits t) 1)) 1) 0)))
+^{:go/end 414} (go/method isInf ^bool [^fpt t ^uint64 b] (and (== (.exp t b) (- ^uint64 (<< 1 (.-ebits t)) 1)) (== (.frac t b) 0)))
+^{:go/end 415} (go/method isZero ^bool [^fpt t ^uint64 b] (and (== (.exp t b) 0) (== (.frac t b) 0)))
+^{:go/end 418} (go/method quiet ^uint64 [^fpt t ^uint64 b]
+  (bit-or b ^uint64 (<< 1 (- (.-fbits t) 1))))
+
+^{:go/end 421} (go/method defaultNaN ^uint64 [^fpt t]
+  (bit-or (<< (- ^uint64 (<< 1 (.-ebits t)) 1) (.-fbits t)) ^uint64 (<< 1 (- (.-fbits t) 1))))
+
+^{:go/end 428} (go/method inf ^uint64 [^fpt t ^bool neg]
+  (let [b (<< (conv uint64 (- ^uint64 (<< 1 (.-ebits t)) 1)) (.-fbits t))]
+    (when neg
+      (set! b bit-or ^uint64 (<< 1 (- (.-bits t) 1))))
+
+    ^{:line 427} b))
+
+^{:go/breaks [[4 433]] :go/end 434} (go/method zero ^uint64 [^fpt t ^bool neg]
+  (when neg
+    (return ^uint64 (<< 1 (- (.-bits t) 1))))
+
+  0)
+
+^{:go/end 437} (go/method max ^uint64 [^fpt t ^bool neg]
+  (- (.inf t neg) 1))
+
+^{:go/end 438} (go/method neg ^uint64 [^fpt t ^uint64 b] (bit-xor b ^uint64 (<< 1 (- (.-bits t) 1))))
+
+
+^{:go/end 449} (go/method exact "exact is a finite value as a big.Float (exactly).\n" ^{:tag (* big/Float)} [^fpt t ^uint64 b]
+  (let [^float64 f (zero float64)]
+    (if (== (.-bits t) 32)
+      (set! f (conv float64 (math/Float32frombits (conv uint32 b))))
+
+      (set! f (math/Float64frombits b)))
+
+    (.SetFloat64 (.SetPrec (new big/Float) 0) f)))
+
+
+(go/const ^{:val 2400} prec 2400)
+
+^{:go/end 453} (go/func hp ^{:tag (* big/Float)} [] (.SetPrec (new big/Float) prec))
+
+
+
+^{:go/end 457} (go/method rmode "rmode is FPCR.RMode: 0 nearest even, 1 towards plus infinity, 2 towards minus infinity, 3 towards zero (4: nearest away,\nFCVTA's and FRINTA's).\n" ^int [^{:tag (* CPU)} c] (conv int (bit-and (>> (.-FPCR c) 22) 3)))
+
+
+^{:go/end 485} (go/func rint "rint is v rounded to an integer by the mode, and whether it was inexact.\n" [^{:tag (* big/Float)} v ^int mode] :results [(* big/Int) bool]
+  (let [(values t _) (.Int v nil)
+      ^{:line 462} fr (.Sub (hp) v (.SetInt (hp) t))]
+    (when (== (.Sign fr) 0)
+      (return t false))
+
+    (let [neg (< (.Sign v) 0)
+        ^{:line 467} up false] ; away from zero by one
+      (switch mode
+        (case [0 4]
+          (let [h (.Cmp (.Abs (hp) fr) (big/NewFloat 0.5))]
+            (set! up (or (> h 0) ^:go/paren (and (== h 0) ^:go/paren (or (== mode 4) (== (.Bit t 0) 1)))))))
+        (case [1]
+          (set! up (not neg)))
+        (case [2]
+          (set! up neg)))
+
+      (when up
+        (if neg
+          (.Sub t t (big/NewInt 1))
+
+          (.Add t t (big/NewInt 1))))
+
+
+      (return t true))))
+
+
+
+
+^{:go/end 535} (go/method round "round is FPRound: the exact v (a finite non-zero, or a zero with its sign) rounded to the type by the mode, and the\nexceptions (OFC, UFC: tiny before rounding and inexact, IXC).\n" [^fpt t ^{:tag (* big/Float)} v ^int mode] :results [uint64 int]
+  (when (== (.Sign v) 0)
+    (return (.zero t (.Signbit v)) 0))
+
+  (let [neg (.Signbit v)
+      ^{:line 494} p (+ (conv int (.-fbits t)) 1)
+      ^{:line 495} e (- (.MantExp v nil) 1)]
+    (when (< e (.-emin t))
+      ;; below the normal range: a multiple of the least denormal
+      (let [q (- (.-emin t) (- p 1))
+          ^{:line 499} y (.SetMantExp (hp) v (- q))
+          (values n inexact) (rint y mode)
+          ^{:line 501} r (.SetMantExp (hp) (.SetInt (hp) n) q)
+          ^{:line 502} fl 0]
+        (when inexact
+          (set! fl (bit-or fpUFC fpIXC)))
+
+        (let [b (.fromExact t r neg)]
+          (return b fl))))
+
+    (let [m big/ToNearestEven]
+      (switch mode
+        (case [1]
+          (set! m big/ToPositiveInf))
+        (case [2]
+          (set! m big/ToNegativeInf))
+        (case [3]
+          (set! m big/ToZero))
+        (case [4]
+          (set! m big/ToNearestAway)))
+
+      (let [r (.Set (.SetMode (.SetPrec (new big/Float) (conv uint p)) m) v)
+          ^{:line 521} inexact (!= (.Acc r) big/Exact)]
+        (when (> (- (.MantExp r nil) 1) (+ (- (.-emin t)) 1))
+          ;; overflow: infinity, or the largest finite towards zero
+          (let [toInf (or (== mode 0) (== mode 4) ^:go/paren (and (== mode 1) (not neg)) ^:go/paren (and (== mode 2) neg))]
+            (when toInf
+              (return (.inf t neg) (bit-or fpOFC fpIXC)))
+
+            (return (.max t neg) (bit-or fpOFC fpIXC))))
+
+        (let [fl 0]
+          (when inexact
+            (set! fl fpIXC))
+
+          (return (.fromExact t r neg) fl))))))
+
+
+^{:go/end 547} (go/method fromExact ^uint64 [^fpt t ^{:tag (* big/Float)} r ^bool neg]
+  (when (== (.Sign r) 0)
+    (return (.zero t neg)))
+
+  (when (== (.-bits t) 32)
+    (let [(values f _) (.Float32 r)]
+      (return (conv uint64 (math/Float32bits f)))))
+
+  (let [(values f _) (.Float64 r)]
+    (math/Float64bits f)))
+
+
+
+^{:go/breaks [[6 561]] :go/end 562} (go/method fpCheck "fpCheck refuses what a64i does not model: FPCR.FZ (flush to zero).\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (== (bit-and (>> (.-FPCR c) 24) 1) 1)
+    (set! (.-PC c) - 4)
+    (.raise c SIGILL (+ ":unimplemented fpcr-fz " (fpName in)))
+    (return false))
+
+  (when (and (!= (.-Size in) 2) (!= (.-Size in) 3))
+    (set! (.-PC c) - 4)
+    (.raise c SIGILL (+ ":unimplemented fp-half " (fpName in)))
+    (return false))
+
+  true)
+
+
+^{:go/end 569} (go/method vget ^uint64 [^{:tag (* CPU)} c ^uint8 r ^uint8 size]
+  (when (== size 2)
+    (return (bit-and (aget (aget (.-Q c) r) 0) 0xffffffff)))
+
+  (aget (aget (.-Q c) r) 0))
+
+
+^{:go/end 571} (go/method vset [^{:tag (* CPU)} c ^uint8 r ^uint64 v] (aset (.-Q c) r (lit (array 2 uint64) v 0)))
+
+
+
+^{:go/end 588} (go/method processNaNs "processNaNs is FPProcessNaNs (2 or 3 operands, in the pseudocode's order): the NaN result and true when an operand is a\nNaN, a signalling one first (quieted, IOC).\n" [^{:tag (* CPU)} c ^fpt t & ^{:tag (slice uint64)} ops] :results [uint64 bool]
+  (range [_ b ops]
+    (when (.isSNaN t b)
+      (set! (.-FPSR c) bit-or fpIOC)
+      (return (.nanResult c t (.quiet t b)) true)))
+
+
+  (range [_ b ops]
+    (when (.isNaN t b)
+      (return (.nanResult c t b) true)))
+
+
+  (return 0 false))
+
+
+
+^{:go/end 596} (go/method nanResult "nanResult is a NaN as FPCR.DN leaves it: itself, or the default NaN.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 b]
+  (when (== (bit-and (>> (.-FPCR c) 25) 1) 1)
+    (return (.defaultNaN t)))
+
+  ^{:line 595} b)
+
+
+^{:go/end 601} (go/method invalid ^uint64 [^{:tag (* CPU)} c ^fpt t]
+  (set! (.-FPSR c) bit-or fpIOC)
+  (.defaultNaN t))
+
+
+^{:go/end 607} (go/method rounded ^uint64 [^{:tag (* CPU)} c ^fpt t ^{:tag (* big/Float)} v]
+  (let [(values b fl) (.round t v (.rmode c))]
+    (set! (.-FPSR c) bit-or (conv uint64 fl))
+    ^{:line 606} b))
+
+
+
+^{:go/end 660} (go/method fpArith "fpArith is FPAdd, FPSub, FPMul, FPDiv (op 2, 3, 0, 1).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint32 op ^uint64 a ^uint64 b]
+  (when [(values r ok) (.processNaNs c t a b)] ok
+    (return r))
+
+  ^{:go/breaks [[4 659]]} (let [(values ia ib za zb) (values (.isInf t a) (.isInf t b) (.isZero t a) (.isZero t b))
+      (values sa sb) (values (.sign t a) (.sign t b))]
+    (when (== op 3)
+      (set! (values b sb) (values (.neg t b) (not sb))))
+
+    (switch op
+      (case [2 3]
+        (switch
+          (case [(and ia ib (!= sa sb))]
+            (return (.invalid c t)))
+          (case [ia]
+            (return (.inf t sa)))
+          (case [ib]
+            (return (.inf t sb))))
+
+        (let [x (.Add (hp) (.exact t a) (.exact t b))]
+          (when (and (== (.Sign x) 0) (not (and za zb (== sa sb))))
+            ;; an exact zero sum: +0, -0 when rounding towards minus infinity (FPAdd)
+            (return (.zero t (== (.rmode c) 2))))
+
+          (return (.rounded c t x))))
+      (case [0]
+        (switch
+          (case [(or ^:go/paren (and ia zb) ^:go/paren (and za ib))]
+            (return (.invalid c t)))
+          (case [(or ia ib)]
+            (return (.inf t (!= sa sb))))
+          (case [(or za zb)]
+            (return (.zero t (!= sa sb)))))
+
+        (return (.rounded c t (.Mul (hp) (.exact t a) (.exact t b)))))
+      (case [1]
+        (switch
+          (case [(or ^:go/paren (and ia ib) ^:go/paren (and za zb))]
+            (return (.invalid c t)))
+          (case [(or ia zb)]
+            (when (and zb (not ia))
+              (set! (.-FPSR c) bit-or fpDZC))
+
+            (return (.inf t (!= sa sb))))
+          (case [(or za ib)]
+            (return (.zero t (!= sa sb)))))
+
+        (return (.rounded c t (.Quo (hp) (.exact t a) (.exact t b))))))
+
+    0))
+
+
+
+^{:go/end 691} (go/method fpMinMax "fpMinMax is FPMax, FPMin, FPMaxNum, FPMinNum (op 4, 5, 6, 7).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint32 op ^uint64 a ^uint64 b]
+  (when (>= op 6)
+    ;; FPMaxNum, FPMinNum: a quiet NaN against a number is the number
+    (let [(values qa qb) (values (and (.isNaN t a) (not (.isSNaN t a))) (and (.isNaN t b) (not (.isSNaN t b))))]
+      (cond (and qa (not (.isNaN t b)))
+        (set! a (.inf t (== op 6)))
+        (and qb (not (.isNaN t a)))
+        (set! b (.inf t (== op 6))))))
+
+
+  (when [(values r ok) (.processNaNs c t a b)] ok
+    (return r))
+
+  (let [max (or (== op 4) (== op 6))]
+    (when (and (.isZero t a) (.isZero t b) (!= (.sign t a) (.sign t b)))
+      (return (.zero t (not max))))
+
+    (let [^int cmp (zero int)]
+      (switch
+        (case [(or (.isInf t a) (.isInf t b))]
+          (set! cmp (.cmpInf t a b)))
+        (default
+          (set! cmp (.Cmp (.exact t a) (.exact t b)))))
+
+      (when (== (>= cmp 0) max)
+        (return a))
+
+      ^{:line 690} b)))
+
+
+
+^{:go/end 712} (go/method cmpInf "cmpInf compares two non-NaN values one of which is infinite.\n" ^int [^fpt t ^uint64 a ^uint64 b]
+  ^{:go/breaks [[3 711]]} (let [v ^{:go/breaks [[3 702]] :go/end 703} (fn ^int [^uint64 x]
+        (when (.isInf t x)
+          (when (.sign t x)
+            (return -1))
+
+          (return 1))
+
+        0)
+
+      (values va vb) (values (v a) (v b))]
+    (switch
+      (case [(< va vb)]
+        (return -1))
+      (case [(> va vb)]
+        (return 1)))
+
+    0))
+
+
+
+
+^{:go/end 737} (go/method fpCompare "fpCompare is FPCompare: NZCV (0011 unordered, 0110 equal, 1000 less, 0010 greater); a signalling NaN, or any NaN when\n`e` (FCMPE, FCCMPE), raises IOC.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^uint64 b ^bool e]
+  (when (or (.isNaN t a) (.isNaN t b))
+    (when (or e (.isSNaN t a) (.isSNaN t b))
+      (set! (.-FPSR c) bit-or fpIOC))
+
+    (return 3))
+
+  ^{:go/breaks [[4 736]]} (let [^int cmp (zero int)]
+    (switch
+      (case [(or (.isInf t a) (.isInf t b))]
+        (set! cmp (.cmpInf t a b)))
+      (default
+        (set! cmp (.Cmp (.exact t a) (.exact t b)))))
+
+    (switch
+      (case [(== cmp 0)]
+        (return 6))
+      (case [(< cmp 0)]
+        (return 8)))
+
+    2))
+
+
+
+^{:go/end 774} (go/method fpMulAdd "fpMulAdd is FPMulAdd: addend + op1 * op2, one rounding.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^uint64 n ^uint64 m]
+  (when (and (.isNaN t a) (not (.isSNaN t a)) (not (.isNaN t n)) (not (.isNaN t m))
+      ^:go/paren (or ^:go/paren (and (.isInf t n) (.isZero t m)) ^:go/paren (and (.isZero t n) (.isInf t m))))
+    (return (.invalid c t)))
+
+  (when [(values r ok) (.processNaNs c t a n m)] ok
+    (return r))
+
+  (let [(values in im zn zm ia) (values (.isInf t n) (.isInf t m) (.isZero t n) (.isZero t m) (.isInf t a))
+      ^{:line 749} sp (!= (.sign t n) (.sign t m))
+      ^{:line 750} sa (.sign t a)]
+    (when (or ^:go/paren (and in zm) ^:go/paren (and zn im))
+      (return (.invalid c t)))
+
+    (when (and ^:go/paren (or in im) ia (!= sa sp))
+      (return (.invalid c t)))
+
+    (when ia
+      (return (.inf t sa)))
+
+    (when (or in im)
+      (return (.inf t sp)))
+
+    (when (and (.isZero t a) ^:go/paren (or zn zm))
+      (when (== sa sp)
+        (return (.zero t sa)))
+
+      (return (.zero t (== (.rmode c) 2))))
+
+    (let [x (.Add (hp) (.exact t a) (.Mul (hp) (.exact t n) (.exact t m)))]
+      (when (== (.Sign x) 0)
+        (return (.zero t (== (.rmode c) 2))))
+
+      (.rounded c t x))))
+
+
+
+^{:go/end 803} (go/method fpSqrt "fpSqrt is FPSqrt.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a]
+  (when [(values r ok) (.processNaNs c t a)] ok
+    (return r))
+
+  (switch
+    (case [(.isZero t a)]
+      (return a))
+    (case [(.sign t a)]
+      (return (.invalid c t)))
+    (case [(.isInf t a)]
+      (return a)))
+
+  (let [x (.exact t a)
+      ^{:line 790} r (.Sqrt (hp) x)
+      ;; the exact root, or one strictly between two values of the precision: r squared against x
+      ^{:line 792} sq (.Mul (.SetPrec (new big/Float) (* 2 prec)) r r)]
+    (when (!= (.Cmp sq x) 0)
+      ;; inexact: nudge r by less than its last place towards the side the root lies on, so the rounding sees it inexact
+      (let [eps (.SetMantExp (hp) (big/NewFloat 1) (+ (- (.MantExp r nil) prec) 8))]
+        (if (< (.Cmp sq x) 0)
+          (.Add r r eps)
+
+          (.Sub r r eps))))
+
+
+    (.rounded c t r)))
+
+
+
+^{:go/end 822} (go/method fpRoundInt "fpRoundInt is FPRoundInt: an integral value of the type, by the mode; IXC only when `exact` (FRINTX).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^int mode ^bool exact]
+  (when [(values r ok) (.processNaNs c t a)] ok
+    (return r))
+
+  (when (or (.isInf t a) (.isZero t a))
+    (return a))
+
+  (let [(values n inexact) (rint (.exact t a) mode)]
+    (when (and inexact exact)
+      (set! (.-FPSR c) bit-or fpIXC))
+
+    (when (== (.Sign n) 0)
+      (return (.zero t (.sign t a))))
+
+    (let [(values b _) (.round t (.SetInt (hp) n) 0)]
+      ^{:line 821} b)))
+
+
+
+
+^{:go/end 862} (go/method fpToInt "fpToInt is FPToFixed with no fraction bits: the integer of `bits` width (signed or not), saturated (IOC) when out of\nrange or a NaN (0), IXC when inexact.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^int mode ^uint bits ^bool signed]
+  (when (.isNaN t a)
+    (set! (.-FPSR c) bit-or fpIOC)
+    (return 0))
+
+  (let [(values lo hi) (values (new big/Int) (new big/Int))]
+    (if signed (do
+        (.Neg (.Lsh lo (big/NewInt 1) (- bits 1)) lo)
+        (.Sub (.Lsh hi (big/NewInt 1) (- bits 1)) hi (big/NewInt 1)))
+
+      (.Sub (.Lsh hi (big/NewInt 1) bits) hi (big/NewInt 1)))
+
+    (let [^{:tag (* big/Int)} n (zero (* big/Int))
+        ^{:line 839} inexact false]
+      (if (.isInf t a)
+        (if (.sign t a)
+          (set! n (.Sub (new big/Int) lo (big/NewInt 1)))
+
+          (set! n (.Add (new big/Int) hi (big/NewInt 1))))
+
+
+        (set! (values n inexact) (rint (.exact t a) mode)))
+
+      (switch
+        (case [(< (.Cmp n lo) 0)]
+          (set! (.-FPSR c) bit-or fpIOC)
+          (set! n lo))
+        (case [(> (.Cmp n hi) 0)]
+          (set! (.-FPSR c) bit-or fpIOC)
+          (set! n hi))
+        (case [inexact]
+          (set! (.-FPSR c) bit-or fpIXC)))
+
+      (let [m (.Lsh (new big/Int) (big/NewInt 1) bits)]
+        (.Sub m m (big/NewInt 1))
+        (.Uint64 (.And (new big/Int) n m))))))
+
+
+
+
+^{:go/end 890} (go/method fpConvert "fpConvert is FPConvert between single and double: a NaN quieted with its payload's top bits (IOC for a signalling one),\na value rounded.\n" ^uint64 [^{:tag (* CPU)} c ^fpt from ^fpt to ^uint64 a]
+  (when (.isNaN from a)
+    (when (.isSNaN from a)
+      (set! (.-FPSR c) bit-or fpIOC))
+
+    (when (== (bit-and (>> (.-FPCR c) 25) 1) 1)
+      (return (.defaultNaN to)))
+
+    (let [frac (.frac from a)]
+      (if (> (.-fbits from) (.-fbits to))
+        (set! frac >> (- (.-fbits from) (.-fbits to)))
+
+        (set! frac << (- (.-fbits to) (.-fbits from))))
+
+      (let [r (.quiet to (bit-or (.inf to (.sign from a)) frac))]
+        (return r))))
+
+  (when (.isInf from a)
+    (return (.inf to (.sign from a))))
+
+  (when (.isZero from a)
+    (return (.zero to (.sign from a))))
+
+  (.rounded c to (.exact from a)))
+
+
+
+^{:go/end 993} (go/method execFP "execFP executes an FP instruction.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (not (.fpCheck c in))
+    (return))
+
+  (let [t (fmtOf (.-Size in))]
+    (switch (.-Op in)
+      (case [OpFMOV]
+        (.vset c (.-Rd in) (.vget c (.-Rn in) (.-Size in))))
+      (case [OpFMOVI]
+        (.vset c (.-Rd in) (conv uint64 (.-Imm in))))
+      (case [OpFMOVG]
+        (if (== (.-Ext in) 0)
+          (.vset c (.-Rd in) (.regw c (.-Rn in) (.-Sf in)))
+
+          (.set c (.-Rd in) (.vget c (.-Rn in) (.-Size in)) (.-Sf in) false)))
+
+      (case [OpFP1]
+        (let [a (.vget c (.-Rn in) (.-Size in))
+            ^{:line 911 :tag uint64} r (zero uint64)]
+          (switch (.-Sys in)
+            (case [1]
+              (set! r (bit-and-not a ^uint64 (<< 1 (- (.-bits t) 1)))))
+            (case [2]
+              (set! r (.neg t a)))
+            (case [3]
+              (set! r (.fpSqrt c t a)))
+            (case [8 9 10 11 12]
+              (set! r (.fpRoundInt c t a (aget (lit (slice int) 0 1 2 3 4) (- (.-Sys in) 8)) false)))
+            (case [14]
+              (set! r (.fpRoundInt c t a (.rmode c) true)))
+            (case [15]
+              (set! r (.fpRoundInt c t a (.rmode c) false))))
+
+          (.vset c (.-Rd in) r)))
+      (case [OpFP2]
+        (let [(values a b) (values (.vget c (.-Rn in) (.-Size in)) (.vget c (.-Rm in) (.-Size in)))
+            ^{:line 929 :tag uint64} r (zero uint64)]
+          (switch (.-Sys in)
+            (case [0 1 2 3]
+              (set! r (.fpArith c t (.-Sys in) a b)))
+            (case [4 5 6 7]
+              (set! r (.fpMinMax c t (.-Sys in) a b)))
+            (case [8]
+              (set! r (.neg t (.fpArith c t 0 a b)))))
+
+          (.vset c (.-Rd in) r)))
+      (case [OpFP3]
+        (let [(values a n m) (values (.vget c (.-Ra in) (.-Size in)) (.vget c (.-Rn in) (.-Size in)) (.vget c (.-Rm in) (.-Size in)))]
+          (when (!= (bit-and (.-Sys in) 2) 0)
+            (set! a (.neg t a)))
+
+          (when (or (== (.-Sys in) 1) (== (.-Sys in) 2))
+            (set! n (.neg t n)))
+
+          (.vset c (.-Rd in) (.fpMulAdd c t a n m))))
+      (case [OpFCMP]
+        (let [b (conv uint64 0)]
+          (when (not (.-N in))
+            (set! b (.vget c (.-Rm in) (.-Size in))))
+
+          (.SetNZCV c (<< (.fpCompare c t (.vget c (.-Rn in) (.-Size in)) b (.-S in)) 28))))
+      (case [OpFCCMP]
+        (if (.cond c (.-Cond in))
+          (.SetNZCV c (<< (.fpCompare c t (.vget c (.-Rn in) (.-Size in)) (.vget c (.-Rm in) (.-Size in)) (.-S in)) 28))
+
+          (.SetNZCV c (<< (conv uint64 (.-Imm in)) 28))))
+
+      (case [OpFCSEL]
+        (if (.cond c (.-Cond in))
+          (.vset c (.-Rd in) (.vget c (.-Rn in) (.-Size in)))
+
+          (.vset c (.-Rd in) (.vget c (.-Rm in) (.-Size in)))))
+
+      (case [OpFCVT]
+        (when (and (!= (.-Amount in) 2) (!= (.-Amount in) 3))
+          (set! (.-PC c) - 4)
+          (.raise c SIGILL (+ ":unimplemented fp-half " (fpName in)))
+          (return))
+
+        (.vset c (.-Rd in) (.fpConvert c t (fmtOf (.-Amount in)) (.vget c (.-Rn in) (.-Size in)))))
+      (case [OpCVTF]
+        (let [v (.regw c (.-Rn in) (.-Sf in))
+            ^{:line 975} x (hp)]
+          (switch
+            (case [(and (.-Signed in) (.-Sf in))]
+              (.SetInt64 x (conv int64 v)))
+            (case [(.-Signed in)]
+              (.SetInt64 x (conv int64 (conv int32 (conv uint32 v)))))
+            (default
+              (.SetUint64 x v)))
+
+          (.vset c (.-Rd in) (.rounded c t x))))
+      (case [OpFCVTI]
+        (let [mode (aget (lit (slice int) 0 1 2 3 4) (.-Sys in))
+            ^{:line 987} w (conv uint 32)]
+          (when (.-Sf in)
+            (set! w 64))
+
+          (.set c (.-Rd in) (.fpToInt c t (.vget c (.-Rn in) (.-Size in)) mode w (.-Signed in)) (.-Sf in) false))))))
+
+
+
+
+
+^{:go/end 1011} (go/method injectX "injectX is the injected fault `x` (A64I_INJECT=FAMILY:x): the destination's lowest bit flipped, a SIMD&FP register's\nfor an FP result.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (isFPOp (.-Op in))
+    (switch
+      (case [(or (== (.-Op in) OpFCMP) (== (.-Op in) OpFCCMP))]
+        (return))
+      (case [(or ^:go/paren (and (== (.-Op in) OpFMOVG) (== (.-Ext in) 1)) (== (.-Op in) OpFCVTI))])
+      (default
+        (set! (aget (aget (.-Q c) (.-Rd in)) 0) bit-xor 1)
+        (return))))
+
+
+  (when (!= (.-Rd in) 31)
+    (set! (aget (.-X c) (.-Rd in)) bit-xor 1)))

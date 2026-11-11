@@ -46,6 +46,8 @@
   :ldr19 (a literal load), :adr21, :adrp21, :add12, :ldst12 (with :scale), :movw; nil for another class."
   [^long w]
   (cond
+    ;; PAuth_LR's AUTIASPPC, AUTIBSPPC, RETAASPPC, RETABSPPC <label>: fixup_aarch64_pcrel_branch16 (AR6)
+    (or (= (bit-and w 0xffdf001f) 0xf380001f) (= (bit-and w 0xffdf001f) 0x5500001f)) [:branch16]
     (= (bit-and w 0x7c000000) 0x14000000) (if (bit-test w 31) [:call26] [:branch26])
     (= (bit-and w 0xff000000) 0x54000000) [:branch19]
     (= (bit-and w 0x7e000000) 0x34000000) [:branch19]
@@ -60,7 +62,7 @@
     (= (bit-and w 0x1f800000) 0x12800000) [:movw]
     :else nil))
 
-(def ^:private pcrel-kinds #{:call26 :branch26 :branch19 :branch14 :ldr19 :adr21 :adrp21})
+(def ^:private pcrel-kinds #{:call26 :branch26 :branch19 :branch14 :branch16 :ldr19 :adr21 :adrp21})
 
 (defn fix-expr
   "The relocated expression of a fixup operand and its specifier: [EXPR SPEC] (SPEC the lower-case name of `:SPEC:`, or nil)."
@@ -95,14 +97,46 @@
     (dotimes [i 4] (.add b (bit-and (bit-shift-right w (* 8 i)) 0xff)))
     (doseq [fx fixups] (.add ^java.util.ArrayList (:fixups @ch) (assoc fx 0 base)))))
 
+(def ^:private fold-sym
+  "The placeholder an immediate's label arithmetic is encoded as (ARS36 (a)): a bare symbol the encoder leaves to a fixup."
+  'arbace_fold)
+
+(defn- fold-imm
+  "The forms with its one immediate whose value is an expression of symbols, without a specifier (`#(end - start)`), replaced
+  by the placeholder (bare, then as :lo12:, which add and sub take): [[FORM...] EXPR], or nil when it has none."
+  [f]
+  (let [i (first (keep-indexed (fn [i op] (when (and (= 'imm (head op)) (seq? (second op)) (not (#{'spec 'at} (head (second op)))))
+                                            i))
+                               (rest f)))]
+    (when i
+      [(for [ph [fold-sym (list 'spec 'lo12 fold-sym)]] (apply list (first f) (assoc (vec (rest f)) i (list 'imm ph))))
+       (second (nth (rest f) i))])))
+
+(defn- optional-hash
+  "The form with its bare immediates written with their `#` (AArch64AsmParser takes an immediate without it: `cmp w0, 123`,
+  `fmov s0, 1.0625`, `fcmeq v0.2s, v1.2s, 0.0`): a number or a (float ...) operand after the first becomes (imm ...)."
+  [f]
+  (apply list (first f) (first (rest f))
+         (map (fn [op] (if (or (number? op) (= 'float (head op))) (list 'imm op) op)) (rest (rest f)))))
+
 (defn- emit-insn! [ctx f]
   (let [f (const-subst ctx (o/resolve-expr ctx f))
+        f (if (some #(= 'float (head %)) (rest f)) (optional-hash f) f)
         _ (when (some #(= 'lit (head %)) (rest f)) (o/unsupported :literal-pool (str "ldr =: " (pr-str f))))
+        refused (fn [^Exception e] (o/unsupported :instruction (str (or (:asm/message (ex-data e)) (.getMessage e)) ": " (pr-str f))))
         r (try (lenc/encode f)
                (catch arbace.lang.ExceptionInfo e
-                 (if (:asm/refused (ex-data e))
-                   (o/unsupported :instruction (str (or (:asm/message (ex-data e)) (.getMessage e)) ": " (pr-str f)))
-                   (throw e))))
+                 (if-not (:asm/refused (ex-data e))
+                   (throw e)
+                   ;; label arithmetic as an immediate (ARS36 (a), AR6): encoded with a placeholder left to a fixup, the
+                   ;; expression its value, folded at layout when its labels are in one section (MC's evaluateAsAbsolute
+                   ;; after layout), else the fixup's relocation is refused as LLVM refuses it
+                   (if-let [[f2s ex] (fold-imm f)]
+                     (let [r2 (first (keep #(try (lenc/encode %) (catch arbace.lang.ExceptionInfo _ nil)) f2s))]
+                       (if (and r2 (= 1 (count (:fixups r2))))
+                         (assoc r2 :fixups [(list 'imm ex)])
+                         (refused e)))
+                     (refused e)))))
         w (long (:word r))
         ;; emitA64MappingSymbol before the instruction's symbols are visited
         _ (mapping! ctx :code)
@@ -132,6 +166,8 @@
   (case kind
     (:call26 :branch26) (do (range! v -134217728 134217727) (align! v 4) (bit-and (bit-shift-right v 2) 0x3ffffff))
     (:branch19 :ldr19) (do (range! v -1048576 1048575) (align! v 4) (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5))
+    ;; an unsigned offset backwards: the negative value inverted (adjustFixupValue)
+    :branch16 (let [v (- v)] (range! v 0 262143) (align! v 4) (bit-shift-left (bit-and (bit-shift-right v 2) 0xffff) 5))
     :branch14 (do (range! v -32768 32767) (align! v 4) (bit-shift-left (bit-and (bit-shift-right v 2) 0x3fff) 5))
     :adr21 (do (range! v -1048576 1048575)
                (bit-or (bit-shift-left (bit-and v 3) 29) (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5)))
@@ -194,6 +230,10 @@
    "TLSDESC_ADD_LO12" 0x234 "TLSDESC_OFF_G1" 0x235 "TLSDESC_OFF_G0_NC" 0x236 "TLSDESC_LDR" 0x237 "TLSDESC_ADD" 0x238
    "TLSDESC_CALL" 0x239 "TLSLE_LDST128_TPREL_LO12" 0x23a "TLSLE_LDST128_TPREL_LO12_NC" 0x23b
    "TLSLD_LDST128_DTPREL_LO12" 0x23c "TLSLD_LDST128_DTPREL_LO12_NC" 0x23d
+   "AUTH_ABS64" 0x244 "AUTH_GOT_LD_PREL19" 0x24c "AUTH_ADR_GOT_PAGE" 0x24e "AUTH_LD64_GOT_LO12_NC" 0x24f
+   "AUTH_GOT_ADD_LO12_NC" 0x251 "AUTH_GOT_ADR_PREL_LO21" 0x252 "AUTH_TLSDESC_ADR_PAGE21" 0x253 "AUTH_TLSDESC_LD64_LO12" 0x254
+   "AUTH_TLSDESC_ADD_LO12" 0x255
+   "PATCHINST" 0x13c
    "COPY" 0x400 "GLOB_DAT" 0x401 "JUMP_SLOT" 0x402 "RELATIVE" 0x403 "TLS_DTPMOD64" 0x404 "TLS_DTPREL64" 0x405
    "TLS_TPREL64" 0x406 "TLSDESC" 0x407 "IRELATIVE" 0x408})
 
@@ -209,6 +249,8 @@
       "tprel_lo12" (str "TLSLE_LDST" w "_TPREL_LO12")
       "tprel_lo12_nc" (str "TLSLE_LDST" w "_TPREL_LO12_NC")
       "got_lo12" (when (= scale 8) "LD64_GOT_LO12_NC")
+      "got_auth_lo12" (when (= scale 8) "AUTH_LD64_GOT_LO12_NC")
+      "tlsdesc_auth_lo12" (when (= scale 8) "AUTH_TLSDESC_LD64_LO12")
       "gottprel_lo12" (when (= scale 8) "TLSIE_LD64_GOTTPREL_LO12_NC")
       "tlsdesc_lo12" (when (= scale 8) "TLSDESC_LD64_LO12")
       "gotpage_lo15" (when (= scale 8) "LD64_GOTPAGE_LO15")
@@ -241,28 +283,32 @@
                         nil (if pcrel ({2 "PREL16" 4 "PREL32" 8 "PREL64"} size) ({2 "ABS16" 4 "ABS32" 8 "ABS64"} size))
                         "plt" (when (and pcrel (= size 4)) "PLT32")
                         "gotpcrel" (when (and pcrel (= size 4)) "GOTPCREL32")
+                        "dtprel" (when (and (not pcrel) (= size 8)) "TLS_DTPREL64")
                         nil)
              (= k :call26) (when (contains? #{nil "plt"} spec) "CALL26")
              (= k :branch26) (when (contains? #{nil "plt"} spec) "JUMP26")
              (= k :branch19) (when (nil? spec) "CONDBR19")
              (= k :branch14) (when (nil? spec) "TSTBR14")
-             (= k :ldr19) (case spec nil "LD_PREL_LO19" "got" "GOT_LD_PREL19" "gottprel" "TLSIE_LD_GOTTPREL_PREL19"
+             (= k :branch16) (o/fail "relocation of PAC/AUT instructions is not supported")
+             (= k :ldr19) (case spec nil "LD_PREL_LO19" "got" "GOT_LD_PREL19" "got_auth" "AUTH_GOT_LD_PREL19" "gottprel" "TLSIE_LD_GOTTPREL_PREL19"
                                 "tlsdesc" "TLSDESC_LD_PREL19" nil)
-             (= k :adr21) (case spec (nil "abs") "ADR_PREL_LO21" "tlsdesc" "TLSDESC_ADR_PREL21" "tlsgd" "TLSGD_ADR_PREL21" nil)
+             (= k :adr21) (case spec (nil "abs") "ADR_PREL_LO21" "tlsdesc" "TLSDESC_ADR_PREL21" "tlsgd" "TLSGD_ADR_PREL21"
+                                "got_auth" "AUTH_GOT_ADR_PREL_LO21" nil)
              (= k :adrp21) (case spec (nil "pg_hi21") "ADR_PREL_PG_HI21" "pg_hi21_nc" "ADR_PREL_PG_HI21_NC" "got" "ADR_GOT_PAGE"
                                  "gottprel" "TLSIE_ADR_GOTTPREL_PAGE21" "tlsdesc" "TLSDESC_ADR_PAGE21" "tlsgd" "TLSGD_ADR_PAGE21"
-                                 "tlsld" "TLSLD_ADR_PAGE21" nil)
+                                 "tlsld" "TLSLD_ADR_PAGE21" "got_auth" "AUTH_ADR_GOT_PAGE" "tlsdesc_auth" "AUTH_TLSDESC_ADR_PAGE21" nil)
              (= k :add12) (case spec "lo12" "ADD_ABS_LO12_NC" "dtprel_hi12" "TLSLD_ADD_DTPREL_HI12"
                                 "dtprel_lo12" "TLSLD_ADD_DTPREL_LO12" "dtprel_lo12_nc" "TLSLD_ADD_DTPREL_LO12_NC"
                                 "tprel_hi12" "TLSLE_ADD_TPREL_HI12" "tprel_lo12" "TLSLE_ADD_TPREL_LO12"
-                                "tprel_lo12_nc" "TLSLE_ADD_TPREL_LO12_NC" "tlsdesc_lo12" "TLSDESC_ADD_LO12" nil)
+                                "tprel_lo12_nc" "TLSLE_ADD_TPREL_LO12_NC" "tlsdesc_lo12" "TLSDESC_ADD_LO12"
+                                "got_auth_lo12" "AUTH_GOT_ADD_LO12_NC" "tlsdesc_auth_lo12" "AUTH_TLSDESC_ADD_LO12" nil)
              (= k :ldst12) (ldst-reloc scale spec)
              (= k :movw) (get movw-relocs spec)
              (= k :tlsdesc-call) "TLSDESC_CALL")]
     (or (get reloc-numbers nm)
         ;; a specifier the table does not hold (the PAuth ABI's :got_auth:, ...) is not written yet; a known one on the wrong
         ;; instruction is LLVM's error
-        (if (and spec (not (re-matches #"(lo12|abs|pg_hi21(_nc)?|got(_lo12|page_lo15)?|gottprel(_lo12|_g1|_g0_nc)?|tlsdesc(_lo12)?|tlsgd|tlsld|(d)?tprel_(hi12|lo12(_nc)?|g[0-2](_nc)?)|dtprel|abs_g[0-3](_s|_nc)?|prel_g[0-3](_nc)?|gotoff_g[0-3](_nc)?|tlsdesc_off_g1|tlsdesc_off_g0_nc|plt|gotpcrel)" spec)))
+        (if (and spec (not (re-matches #"(lo12|abs|pg_hi21(_nc)?|got(_lo12|page_lo15|_auth|_auth_lo12)?|tlsdesc_auth(_lo12)?|gottprel(_lo12|_g1|_g0_nc)?|tlsdesc(_lo12)?|tlsgd|tlsld|(d)?tprel_(hi12|lo12(_nc)?|g[0-2](_nc)?)|dtprel|abs_g[0-3](_s|_nc)?|prel_g[0-3](_nc)?|gotoff_g[0-3](_nc)?|tlsdesc_off_g1|tlsdesc_off_g0_nc|plt|gotpcrel|dtprel)" spec)))
           (o/unsupported :relocation-specifier (str ":" spec ":"))
           (bad)))))
 
@@ -273,8 +319,8 @@
 
 (def ^:private tls-specs
   (into #{} (map str/upper-case)
-        ["gottprel" "gottprel_lo12" "gottprel_g1" "gottprel_g0_nc" "tlsdesc" "tlsdesc_lo12" "tlsdesc_off_g1" "tlsdesc_off_g0_nc"
-         "tprel_hi12" "tprel_lo12" "tprel_lo12_nc" "tprel_g2" "tprel_g1" "tprel_g1_nc" "tprel_g0" "tprel_g0_nc" "dtprel_hi12"
+        ["gottprel" "gottprel_lo12" "gottprel_g1" "gottprel_g0_nc" "tlsdesc" "tlsdesc_lo12" "tlsdesc_auth" "tlsdesc_auth_lo12" "tlsdesc_off_g1" "tlsdesc_off_g0_nc"
+         "tprel_hi12" "tprel_lo12" "tprel_lo12_nc" "tprel_g2" "tprel_g1" "tprel_g1_nc" "tprel_g0" "tprel_g0_nc" "dtprel" "dtprel_hi12"
          "dtprel_lo12" "dtprel_lo12_nc" "dtprel_g2" "dtprel_g1" "dtprel_g1_nc" "dtprel_g0" "dtprel_g0_nc" "tlsgd" "tlsld"]))
 
 ;; writeNopData: the padding's odd bytes zero, then NOPs
@@ -293,11 +339,84 @@
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the directives AArch64's parser and streamer add or define otherwise
 
+(defn- data-spec
+  "A data value's specifier written AArch64's way, `%dtprel(var)` (AArch64AsmParser's parseDataExpr: (pct dtprel E)), as the
+  shared assembler's (at E dtprel)."
+  [e]
+  (if (and (seq? e) (= 'pct (first e)) (= 3 (count e)) (= "dtprel" (str/lower-case (str (second e)))))
+    (list 'at (nth e 2) "dtprel")
+    e))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the build attributes (AR6): .aeabi_subsection and .aeabi_attribute (AArch64TargetStreamer's emitAttributesSubsection and
+;; emitAttribute, AArch64AsmParser's directives), written at the end as .ARM.attributes (MCELFStreamer's
+;; createAttributesWithSubsection: 'A', then each subsection: its length, vendor name, optional, parameter type, attributes)
+
+(def ^:dynamic *attrs* nil)
+
+(def ^:private known-vendors
+  {"aeabi_feature_and_bits" {:optional 1 :type 0 :tags {"tag_feature_bti" 0 "tag_feature_pac" 1 "tag_feature_gcs" 2}}
+   "aeabi_pauthabi" {:optional 0 :type 0 :tags {"tag_pauth_platform" 1 "tag_pauth_schema" 2}}})
+
+(defn- attr-word [x] (when (some? x) (if (symbol? x) (str/lower-case (name x)) (str x))))
+
+(defn- aeabi-subsection! [args]
+  (let [args (if (vector? (first args)) (first args) args)
+        [nm opt typ] args
+        nm (when (symbol? nm) (name nm))
+        _ (when-not nm (o/fail "subsection name not found"))
+        known (known-vendors nm)
+        exists (some #(= nm (:name %)) (:subs @*attrs*))
+        opt (attr-word opt) typ (attr-word typ)
+        optional (cond (nil? opt) (or (:optional known) (when exists :keep) (o/fail "optionality parameter not found, expected required|optional"))
+                       (= opt "required") 0 (= opt "optional") 1
+                       :else (o/fail "unknown AArch64 build attributes optionality, expected required|optional"))
+        ptype (cond (nil? typ) (or (:type known) (when exists :keep) (o/fail "type parameter not found, expected uleb128|ntbs"))
+                    (= typ "uleb128") 0 (= typ "ntbs") 1
+                    :else (o/fail "unknown AArch64 build attributes type, expected uleb128|ntbs"))]
+    (when (and known (not= :keep optional) (not= optional (:optional known)))
+      (o/fail (str "aeabi subsection " nm " must be marked as " (if (zero? (long (:optional known))) "required" "optional"))))
+    (swap! *attrs* (fn [a] (cond-> (assoc a :active nm)
+                             (not exists) (update :subs conj {:name nm :optional optional :type ptype :items []}))))))
+
+(defn- aeabi-attribute! [args]
+  (let [a @*attrs* nm (:active a)
+        sub (first (filter #(= nm (:name %)) (:subs a)))
+        _ (when-not sub (o/fail "no active subsection, build attribute can not be added"))
+        [tag v] args
+        tag (cond (integer? tag) (long tag)
+                  (symbol? tag) (or (get-in known-vendors [nm :tags (str/lower-case (name tag))]) (o/fail (str "unknown AArch64 build attribute '" (name tag) "' for subsection '" nm "'")))
+                  :else (o/fail "AArch64 build attributes tag not found"))
+        v (cond (integer? v) v (string? v) (str "\"" v "\"") (symbol? v) (name v) :else (o/fail "AArch64 build attributes value not found"))]
+    (swap! *attrs* update :subs
+           (fn [ss] (mapv (fn [s] (if (= nm (:name s))
+                                    (if (some #(= tag (first %)) (:items s))
+                                      (update s :items (fn [is] (mapv #(if (= tag (first %)) [tag v] %) is)))
+                                      (update s :items conj [tag v]))
+                                    s))
+                          ss)))))
+
+(defn- uleb-bytes [^long v] (loop [v v out []] (let [b (bit-and v 0x7f) v (unsigned-bit-shift-right v 7)] (if (zero? v) (conj out b) (recur v (conj out (bit-or b 0x80)))))))
+
+(defn- attributes-section! [ctx]
+  (when-let [subs (seq (:subs @*attrs*))]
+    (o/section! ctx ".ARM.attributes" 0x70000003 0 0 nil false)
+    (o/data! ctx)
+    (o/bytes! ctx (concat [0x41]
+                          (mapcat (fn [{:keys [name optional type items]}]
+                                    (let [body (concat (map int (.getBytes ^String name "ISO-8859-1")) [0 optional type]
+                                                       (mapcat (fn [[t v]] (concat (uleb-bytes t)
+                                                                                   (if (integer? v) (uleb-bytes v) (concat (map int (.getBytes ^String v "ISO-8859-1")) [0]))))
+                                                               items))
+                                          n (+ 4 (count body))]
+                                      (concat (for [i (range 4)] (bit-and (bit-shift-right n (* 8 i)) 0xff)) body)))
+                                  subs)))))
+
 (defn- directive [ctx h args]
   (let [cv (fn [e] (let [e (o/resolve-expr ctx e)] (or (o/const-value e @(:syms ctx)) (o/unsupported :expression (str "." h " " (pr-str e))))))]
     (case h
-      "word" (doseq [e args] (o/emit-value! ctx e 4))
-      ("xword" "dword") (doseq [e args] (o/emit-value! ctx e 8))
+      "word" (doseq [e args] (o/emit-value! ctx (data-spec e) 4))
+      ("xword" "dword") (doseq [e args] (o/emit-value! ctx (data-spec e) 8))
       "align" (o/directive! ctx (cons 'asm/p2align args))
       "inst" (doseq [e args] (emit-word! ctx (cv e) []))
       "tlsdesccall" (let [e (o/resolve-expr ctx (first args))
@@ -306,6 +425,29 @@
                       (.add ^java.util.ArrayList (:fixups @ch) [(.size ^java.util.ArrayList (:bytes @ch)) 0 (list 'at e "tlsdesc") [:tlsdesc-call] false 0]))
       ("arch" "arch_extension" "cpu") nil
       ("ltorg" "pool") nil
+      ;; .reloc OFFSET, TYPE, EXPR (AArch64AsmBackend::getFixupKind: R_AARCH64_* by name, BFD_RELOC_NONE/16/32/64, a number)
+      "reloc" (let [[off t e] args
+                    tn (if (integer? t) (long t) (str/upper-case (str t)))
+                    type (cond (integer? tn) tn
+                               (str/starts-with? tn "R_AARCH64_") (get reloc-numbers (subs tn 10))
+                               :else ({"BFD_RELOC_NONE" 0 "BFD_RELOC_16" 0x103 "BFD_RELOC_32" 0x102 "BFD_RELOC_64" 0x101} tn))
+                    _ (when-not type (o/fail "unknown relocation name"))
+                    off (o/resolve-expr ctx off) e (o/resolve-expr ctx (or e 0))]
+                (o/visit-syms! ctx e)
+                (.add ^java.util.ArrayList (:reloc-directives ctx) [off type e]))
+      ;; .single/.float and .double: IEEE binary32 and binary64, little-endian (AR6)
+      ("single" "float" "double")
+      (let [n (if (= h "double") 8 4)]
+        (o/data! ctx)
+        (doseq [a args]
+          (let [d (cond (number? a) (double a)
+                        (= 'float (head a)) (Double/parseDouble (str (second a)))
+                        (and (= '- (head a)) (= 2 (count a)) (= 'float (head (second a)))) (- (Double/parseDouble (str (second (second a)))))
+                        :else (o/unsupported :expression (str "." h " " (pr-str a))))
+                bits (if (= n 8) (Double/doubleToRawLongBits d) (bit-and (long (Float/floatToRawIntBits (float d))) 0xffffffff))]
+            (o/bytes! ctx (for [i (range n)] (bit-shift-right bits (* 8 i)))))))
+      "aeabi_subsection" (aeabi-subsection! args)
+      "aeabi_attribute" (aeabi-attribute! args)
       "variant_pcs" (let [n (o/sym-name (first args))] (o/register! ctx n) (swap! (o/symbol! ctx n) assoc :st-other 0x80))
       :unhandled)))
 
@@ -329,6 +471,8 @@
    :keep-symbol? keep-symbol?
    :tls-specs tls-specs
    :directive directive
+   :wrap (fn [t] (binding [*attrs* (atom {:subs [] :active nil})] (t)))
+   :finish attributes-section!
    :cfi cfi
    :on-data (fn [ctx] (mapping! ctx :data))
    :nops nops

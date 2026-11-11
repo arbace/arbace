@@ -4693,3 +4693,29 @@ pinned gcc-15.2.0 tarball; P0847R7; [temp.param]/12, [temp.deduct]/5, [basic.loo
 
 Records: test/reap/matrix.edn and test/crops/scores.edn recorded again (C++ completeness 91.04, independence 71.30). The survey's "As
 built: cpp-s3" has the measures and the night's commands.
+
+## 2026-11-11: arm64 assembly, AR6's first part: a64i's coverage record and synthetic programs, the scalar FP, the AOT cell's cheap classes (branch `asm-ar6`, from `mac/next` `adf65b4fd`)
+
+The user's answers to the AR5 survey (ARS38-ARS41 (a), ARS42 (b): the coverage's record and its generator first, then AR6), aimed at
+the arm64 REAP row's weakest cell, AOT (78.5%), cheapest classes first. On the main host (amd64), light; arm64 programs by a64i and by
+qemu-aarch64 user mode (`REPR_ASM_RUNNER`, an emulation). doc/asm/ARM64-SURVEY.md, "As built: AR6 (first part)", has the measures.
+
+- The coverage: `a64i claimed` (go/arbace/a64i/claim.ae: every decodable word's coverage name and family) and a64i-check's
+  `test/asm/a64i-coverage-arm64.txt`, held as x86i's (AXS86 (a)). Alternative not taken: a report only.
+- The synthetic programs: `test/asm/a64i/gen.ae`, eight seeded self-checking programs (ARS40 (b)): the integer families (alu, logic,
+  bitfield, dp, mul, cond) against a Clojure model of the pseudocode, the scalar FP at both precisions against a model in Java's IEEE
+  arithmetic with BigDecimal's exact comparisons; a loop over per-case stubs keeps the code small (the first form, a straight line a
+  case, took the check from 37 s to 3 min 7 s on this host). `--record` runs them under qemu-aarch64 first; every case of every
+  program agreed with the model on the first full run but two model slips (a set lookup as a boolean in FPMax, a shadowed name).
+  Alternative not taken: stated stdout from qemu's runs (an emulator as the verdict).
+- AR6's scalar FP in a64i (go/arbace/a64i/fp.ae, written as Go and converted by repr/go's native reader; the hooks hand-edited as
+  forms): decoded, lowered from the forms (forms-check equal) and executed with math/big's exact values: FPProcessNaNs, FPRound in
+  FPCR's modes, FPSR's exceptions with tininess before rounding, FPCR.DN. Refused: FZ, half precision, the vector classes.
+- The object assembler and the object verdict: the PAuth ABI's GOT relocations, PAuth_LR's 16-bit branch, label arithmetic as an
+  immediate (ARS36 (a)), `%dtprel`, `.reloc`, the build attributes, `.single`/`.float`/`.double`, the section symbol's two cases; the
+  views of llvm-readobj -S/--symbols, llvm-objdump -t, llvm-readelf -s/--hex-dump/--arch-specific, FileCheck's string variables (behind
+  a flag: amd64's judging unchanged). Fixes: AR2's bitmask encoder's overflow (AR5's `eon` crash) and `obj_list`'s random drops
+  (`grep -q` under pipefail).
+- Results: the AOT cell 2,161 / 592 deferred → 2,904 / 0 / 152 (95.0%); object verdict 1,970 of 2,538 → 2,687 of 2,833; object check 86 → 104 of
+  110; a64i eval and AOT 72 → 80 programs, coverage 474 of 653 claimed executed. Proposed ARS43-ARS47 (the error tests' messages, the VM's part,
+  AR6's next slice, the essential step's time, `-implicit-mapsyms` and `.org`).
