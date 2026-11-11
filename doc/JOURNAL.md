@@ -4831,3 +4831,16 @@ an input, none under `not` or with `--disable-verify`): verify-llvmtest 706 to 7
 806), a control in verify-controls.txt and a fake-tree case in controls-test.bash. Alternative considered: the proposal's 57 valid rows
 all as own (a rule that also took sections concatenated by `cat` or read by other tools): not done, those 7 stay opt's. Judge stage
 0.8455 to 0.8541, independence 96.91 to 97.08. Details: doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS47, LLS50".
+
+## 2026-11-11: Scheme's AOT: syntax objects among a compiled program's constants, SC90 (b) (branch `scheme-aot1`, from `mac/next` `15278e9c6`)
+
+The AOT cell's one deferred class, `:syntax-constants` (2 programs refused: Racket's `syntax-case.sps`, Larceny's
+`regression.sch`), built as SC90 (b) decided: a constant holding psyntax's records (stx, rib) is written as a recipe, the unit's
+graph of objects (each object once, so the marks psyntax compares with `eq?` and the shared, mutated ribs keep their identity;
+labels are gensyms read by uid as before), built by `scm.ReadLate` in the unit's setup after psyntax's boot, a record's type named
+among the types psyntax made while booting (`BootBegin`/`BootEnd`, noted by `NewRTD`). Alternatives considered: SC90 (c)
+(expanding the unit again at start: not AOT), the record's type by the psyntax location that holds it (the compiled psyntax's
+globals are package variables of their own, not named in the program's packages), datum labels in the constants' text (no record
+syntax to read back). `bin/si check --aot --record`: 47 of 52 (was 45), 0 refused, 50 of 50 compiled runs the same as si's; the AOT
+cell 90.0% (95.7% without by design) -> 94.0% (100%). SC94 (b) not built (SCS30); SCS29 (one graph per program). Details:
+doc/scheme/SCHEME-SURVEY.md, "As built: SC90 (b), syntax objects among a compiled program's constants".
