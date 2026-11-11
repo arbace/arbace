@@ -2925,3 +2925,115 @@ Night 11's first gate (next dc6a55df2) failed only `gate-tests`: costs-test said
   `bin/reap` 0 problems; `bin/oi divergences`, `--aot`, `suite divergences`, `--aot` every non-pass classed; a real-data control each
   (an `:na` program given `arch_amd64` fails `bin/crops-score`; one Rust case's inputs marked own moved eval to 0.6, one own but C7
   stayed 0.5; both reverted).
+
+## 2026-11-09: HF10-P11 to P14: the own interfaces a step, the default methods' unfoldings, base on the own pool (branch `hs-p11`, from next `6c3c87c02`)
+
+The user accepted HF10-P11 to P14 as recommended (P13 (b)). Recorded in doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P11 to
+P14". Ported from GHC 9.14.1 (the pinned `ghc-9.14.1-src.tar.xz`): makeCorePair's compulsory unfolding of a `$dm`
+(`compiler/GHC/HsToCore/Binds.hs`), simplStableUnfolding and updModeForStableUnfoldings (`Core/Opt/Simplify/Iteration.hs`,
+`Utils.hs`), generalizeOverLitVal (`Rename/Pat.hs`, NumDecimals).
+
+- P11 (a): the `--full` step `haskell-lib-check-own` (after `haskell-lib-check`, 2 GiB, no GHC; control the interface judge's).
+- P12 (a): `lib-check --ifaces own` runs a module that defines default methods through lib-stg's pipeline and writes each `$dm`'s
+  unfolding as its `-O0` Simplifier leaves it (154 of 156; 2 with a floated local keep the elaborator's Core), in the helper's
+  spelling; the Simplifier simplifies a stable unfolding in updModeForStableUnfoldings' mode. lib-stg on the own interfaces: 5,280
+  to 5,398 of 7,627 bindings equal to GHC's `-O0` (54 modules better, 0 worse), ahead of GHC's `-O2` interfaces (5,373 of 7,600,
+  unchanged). Alternative considered: GHC's Tidy-exposed unfoldings read from the pack (the `-O2` ones: not GHC's `-O0` view).
+- P14 (a): base on ghc-internal's own pool with no GHC closure: the driver grows each closure from the imports over the names the
+  interfaces mention (as `--make` loads on demand), maps ghc-prim's thirteen reexported modules from its `.cabal` (ghc-prim's
+  library is `Dummy.hs` and reexports), compiles in the installation's unit id. 235 of 241 modules elaborate, 0 missing
+  interfaces, 6,780 of 6,785 facts equal on the 113 modules the `haskell-ifaces` pack holds; lib-stg of base 531 of 1,024
+  bindings equal to GHC's `-O0`. Found on the way: NumDecimals (System.CPUTime.Posix's `1e12 :: Integer`), ported. Alternatives
+  considered: recording GHC's base closures with GHC (refused for this branch: GHC only at the oracle tier, HF10-P16 proposes it).
+- crops-score unchanged (Haskell independence 76.0): no case runs on own libraries yet. Proposed: HF10-P15 to P19 (base's step,
+  GHC's base interfaces for the judge, the next packages, Prim from primops.txt.pp, the first own cases).
+- Checks: hsi-essential's command (one job) 123 programs, 0 unclassed, the four controls fail; bin/gate --full --plan plans the
+  new step; the gate's costs, crops, cover and declared-env tests pass.
+
+## 2026-11-10 hs-p11: lib-stg --ifaces own --run defaults to LIB_STG_REPLACE=equal; the 50 of 63 explained
+
+- `bin/lib/repr-haskell/lib-stg`: the own branch took `${LIB_STG_REPLACE:-all}` (0 of 63 on own, exit 1); now `equal`, `all` still explicit.
+  Proof, no variable: `lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`, exit 0, 27 min 54 s, 1.7 GiB: 5,398 of 7,627
+  equal, 76 own modules and 191 GHC's, 50 of 63 on each side, 0 lost, 0 gained. The survey's night command updated.
+- 50 against run-check.edn's 53: the same ten programs fail on both sides in two runs (deterministic): compiled against the `-O2` pack's
+  interfaces, run on the `-O0` sets, which lack names such as `ioException3`. The ten alone on the `-O2` pack: 10 of 10 pass. Not load, not a
+  bug of the branch; noted in the survey.
+
+2026-11-10, hs-p11 (review fix, .tmp/merge-1111/REVIEW2.md §5 items 1 and 3): ran `bin/repr-haskell lib-check --ifaces own --judge
+test/haskell/lib-check-own-ghc-internal.edn` (the new --full step haskell-lib-check-own's command; 8m22s): "265 modules against 265
+recorded; 0 worse, missing or unclassed, 0 better", the control differs as it must (0 of 19 facts equal), exit 0. P12 and NumDecimals
+move nothing the record counts, so nothing is re-recorded (the ratchet has nothing to take). Base mode (`--package base --ifaces
+own`): a missing ghc-prim.cabal is an error (exit 2, with the verb that fetches the corpus), no longer an empty list of
+reexported modules that passes; only the new line changed, bash -n, base's mode not run here (its pools are the night's).
+
+## 2026-11-10: HF10-P18 (a) GHC.Internal.Prim from primops.txt.pp, HF10-P15 (a) haskell-lib-own-base, HF10-P20 (a) started (branch `hs-p18`, from `mac/hs-p11` 3d55ae343)
+
+The user decided HF10-P15 to P27 (a) (P25 yes, its ruling: the own-interface round trip is a round trip's own verdict, GHC's
+level at the oracle tier) on 2026-11-10 (the plan `.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the survey's "Decided" block). Built by
+an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no GHC, no gate,
+no network). Sources: GHC 9.14.1's pinned tarball (SHA-256 `2a83779c...`): `compiler/GHC/Builtin/primops.txt.pp`,
+`utils/genprimopcode/{Lexer.x,Parser.y,AccessOps.hs,Main.hs}`, `compiler/GHC/Builtin/{Utils,Types/Prim}.hs`,
+`compiler/GHC/Types/Id/Make.hs`, `compiler/GHC/Tc/Instance/Typeable.hs` (BSD-3, LICENSE.md "GHC").
+
+- P18 (a): `arbace/repr/haskell/primiface.ae` builds GHC.Internal.Prim's interface from `primops.txt.pp` (Arbace's own cpp,
+  genprimopcode's lexer and parser and the access ops ported, primOpInfo's types and binders, the strictness options, Make.hs's
+  ghcPrimIds, exposedPrimTyCons' kinds). Judged against the pack `haskell-lib-ifaces-ghc-9.14.1`'s member: 3,085 of 3,085 facts
+  equal and 3,155 of 3,155 lines byte for byte (all but the header, which names the own verb); the control (types rotated) differs.
+  `lib-check --ifaces own` builds and judges it first and gives it to every closure (`LIB_CHECK_PRIM=ghc`: the pack's): no GHC
+  interface on the own path any more. Alternatives considered: extending `tools/hsprimops/primops.awk` (awk is a host tool, and
+  the types need genprimopcode's parser); taking the tycons' kinds from the pack (that is the GHC dependence removed).
+- P15 (a): `haskell-lib-check-own` keeps ghc-internal's pool as its output (`ghc-internal-pool.tar`, 6.5 MB, 0.01 s), and the new
+  `--full` step `haskell-lib-own-base` (`:uses` it) runs base's lib-check and lib-stg against their records with their controls,
+  keeping base's pool (`LIB_CHECK_POOL_OUT`, `LIB_CHECK_DEP_POOL_TAR`). Not run through `bin/gate` (the light lane's rule): its
+  command was run by hand, 6 min 8 s, 1.36 GiB.
+- P20 (a), started: the whole own set (`LIB_STG_REPLACE=all`) ran 0 of 10; four classes found and fixed in turn: GHC.Types'
+  wired-in Typeable bindings (mkPrimTypeableTodos: `tr$ModuleGHCPrim`, `krep$*` and the other built-in KindReps, GHC.Prim's
+  tycons' `$tc` from the own Prim's kinds, the promoted constructors' `$tc'`; the unboxed tuples' `$tc'` left out: deep nests time
+  the module out), the foreign calls' arguments missing from the closures' free variables (`w_188`), the synonym KindBndr in a
+  KindRep, and Unarise of unboxed tuple binders and arguments (GHC.Internal.Bignum.Primitives' `plusWord12#`, found by bisection,
+  `LIB_STG_REPLACE=@FILE`), then a primop used as a value (WordArray's `mwaWrite# = writeWordArray#`: maybeSaturate's
+  eta-expansion). lib-stg on the own interfaces 5,398 to 5,412 of 7,632 equal (8 modules better, 0 worse; re-recorded); the run
+  still 0 of 10: the wrong-size class remains elsewhere and List's `product` path has an unbound floated local; the tail is
+  bisected one class at a time (the survey's "HF10-P20 (a), started").
+- Checks: primiface check (above); lib-check --ifaces own on ghc-internal and base 0 worse (265 and 241 against their records),
+  lib-stg base 531 of 1,024 as recorded, controls differ; hsi-essential's command 123 programs, 0 unclassed, controls fail;
+  bin/reap 0 problems; crops-score --judge --strict 0 problems (Haskell 76.0). Not run: bin/gate (`--full --plan` for the new step
+  is the main session's).
+
+## 2026-11-10: HF10-P20 (a) continued: the whole own set from 0 of 10 to 40 of 63 (branch `hs-p20`, from `mac/hs-p18` 876e2913c)
+
+Built by an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no
+GHC, no gate, no network), the plan's stage 2 (`.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the user's decision of HF10-P15 to P27).
+Sources: GHC 9.14.1's pinned tarball, `compiler/GHC/Stg/Unarise.hs` (unariseFunArg, unariseAlts, void arguments),
+`compiler/GHC/CoreToStg/Prep.hs` (the case on unsafeEqualityProof dropped, maybeSaturate), `compiler/GHC/HsToCore.hs`
+(patchMagicDefns: unsafeEqualityProof, unsafeCoerce#), `compiler/GHC/HsToCore/Match.hs` (matchView),
+`compiler/GHC/Tc/TyCl/PatSyn.hs` (mkPatSynRecSelBinds), `compiler/GHC/Types/Id/Make.hs` (coerceId) (BSD-3, LICENSE.md
+"GHC").
+
+- Method: each run-breaking class found by a run of the day's ten (then the 63), its first module by bisection
+  (`LIB_STG_REPLACE=@FILE`, the new `LIB_STG_SIDES=own`), fixed in the front end, judged by `lib-stg --ifaces own --judge` (no
+  module worse) before the next run. New static comparisons in `arbace.repr.haskell.stgcmp` (`--abi`, `--rets`, `--builds`,
+  `--why`) and hsi errors that name the call (`unboxed tuple of the wrong size: the alternative binds N, M returned ...; the
+  scrutinee F`) found classes without runs. Alternatives considered: running every program on every bisection probe (too slow
+  at about a minute a probe); fixing the elaborator's type variable kinds now (a larger change across the renamer, the
+  elaborator and the interfaces: left as the class `kinds`, an interim table of two Unsafe.Coerce results in tostg).
+- Fixed, one class each (the survey's table): polymorphic identities' instantiated results (inline, runRW#), void values and
+  nullary void join points, synonyms and newtypes of function types in result types, unsafeCoerce# and Unsafe.Coerce's
+  patched definitions, match variables typed (equations' binders, desugar's match variables after their pattern variables, a
+  cast's target type), nested unboxed tuple binders, unboxed tuple case binders, a tuple case's size from its binders, coerce's
+  evidence argument, existential dictionaries in record construction, update and selectors, primops out of the CAF float
+  shortcut, view patterns (matchView), pattern synonyms' record selectors, primitive byte-string literals.
+- Measures: lib-stg on the own interfaces 5,412 to 5,473 of 7,637 bindings equal to GHC's -O0 (25 modules better, 0 worse;
+  re-recorded); lib-stg of base 531 to 547 of 1,024; the `equal` set 83 modules, 50 of 63 programs pass on it (0 lost against GHC's -O0 set's 50); the `all` set
+  40 of 63 (0 of 10 before), 10 of `equal`'s passes lost. `test/haskell/lib-stg-own-results.edn` gains the runs as rows,
+  `{:runs :equal ...}` and `{:runs :all ...}` (`libcheck record-runs`, `judge-runs`; lib-stg `--run --record/--judge`).
+- Not reached: HF10-P20's proof (all ≥ equal, 0 lost). The tail, by class: a case on the void token in an argument slot (5
+  programs, the exception paths first), output that differs (4), NonTermination unhandled (1); beyond the 63, pattern
+  synonym patterns (no `$mP` matcher: HF9's slice 7) and type variables' kinds.
+- Checks: lib-stg --ifaces own 0 worse (re-recorded), its control 0 of 171; lib-check --ifaces own 265 against 265, 0 worse
+  (258 of 265, facts unchanged), base 241 against 241, 0 worse (235 of 241), both controls differ; base's lib-stg 531 to 547, 0
+  worse (re-recorded); run-check's negative control fails on every run; hsi-essential's command 123 programs, 0 unclassed, the
+  four controls fail; the GHC-interfaces steps' commands: haskell-lib-check 0 worse (260 of 265), haskell-lib-stg 5,372 to 5,444 of
+  7,610 (0 worse, re-recorded) with its runs 60 of 63 on each side, 0 lost. Not run: bin/gate (the light lane).
+- Rule slips: a wait loop used process substitution `<(...)` once, and two commands named /dev/null (`>/dev/null 2>&1` on a
+  debugging compile, a `grep` of /dev/null); none touched another worktree's files.

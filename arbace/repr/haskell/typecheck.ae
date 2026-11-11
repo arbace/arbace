@@ -35,7 +35,8 @@
   (:require [arbace.string :as str]
             [arbace.set :as set]
             [arbace.repr.haskell.deriv :as deriv]
-            [arbace.repr.haskell.famenv :as fam])
+            [arbace.repr.haskell.famenv :as fam]
+            [arbace.repr.haskell.rename :as rename])
   (:import [java.io File]))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -1129,8 +1130,13 @@
 (defn- overlit
   "An overloaded literal: its type a fresh meta constrained by Num (Fractional), the core resolved at the end"
   [v]
-  (let [ol (arg v 2) val (arg ol 2) a (fresh-meta)]
-    (case (con val)
+  (let [ol (arg v 2) val (arg ol 2) a (fresh-meta)
+        ;; NumDecimals: an integral fractional literal is an integral one (rnOverLit's generalizeOverLitVal)
+        ival (when (and (= 'HsFractional (con val)) (contains? *exts* "NumDecimals")) (rename/integral-fl (arg val 1)))]
+    (case (if ival 'HsIntegralFL (con val))
+      HsIntegralFL (let [fi (implicit-name ol "fromInteger" (ext-name "var" "GHC.Internal.Num" "fromInteger"))
+                         ev (want! [cls-num [a]])]
+                     [a (list 'olit :int (str ival) a ev fi)])
       HsIntegral (let [n (nth (arg val 1) 3)
                        fi (implicit-name ol "fromInteger" (ext-name "var" "GHC.Internal.Num" "fromInteger"))
                        ev (want! [cls-num [a]])]
@@ -1210,6 +1216,7 @@
                  ;; a pattern that can fail (the renamer attached MonadFail's fail to the statement): fail in the monad
                  (if-let [fl (implicit-name v "fail" nil)]
                    (let [[tf cf] (var-occ env fl (lsp (arg v 2)) "a do statement") ds (fresh-lv "ds")]
+                     (note-type! ds a)
                      (unify tf (fn-ty (list-ty (con-ty tc-char)) tr))
                      [r (app* cb [ce (list 'lam [ds] (list 'match [ds] [(list 'clause [pc] cr)
                                                                         (list 'clause [(list 'pwild)] (app* cf [(fail-msg "'do' block" (lsp (arg v 2)))]))]))])])
@@ -1376,7 +1383,10 @@
                  (unify tf (reduce (fn [acc [t _]] (fn-ty t acc)) r (reverse rs)))
                  [r (app* cf (mapv second rs))])
       RecordCon (let [cn (nm (arg v 2))
-                      [ct _] (instantiate (get @*genv* cn))
+                      ;; the constructor's context (an existential's class constraints: Handle__'s RawIO, IODevice,
+                      ;; BufferedIO, Typeable) wanted, its evidence the first arguments (HF10-P20: the record
+                      ;; construction built Handle__ without its four dictionaries)
+                      [ct cpreds] (instantiate (get @*genv* cn))
                       flds (:fields (get @*cons* cn))
                       [argts res] (loop [t ct as []] (let [t (prune t)] (if (and (= :tc (first t)) (= fun-tc (second t))) (recur (second (nth t 2)) (conj as (first (nth t 2)))) [as t])))
                       given (into {} (map (fn [fb] (let [fbv (lval fb) f (nm (arg (lval (arg fbv 2)) 2))
@@ -1397,7 +1407,8 @@
                                       given (partition 2 (nth (lval (second dd)) 2)))
                               given)]
                   [res (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
-                             (mapv (fn [f] (or (get given f) (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError")) [(list 'lit (occ f))]))) flds))])
+                             (into (mapv want! cpreds)
+                                   (mapv (fn [f] (or (get given f) (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recConError")) [(list 'lit (occ f))]))) flds)))])
       RecordUpd (let [[te ce] (infer env (arg v 2))
                       fbs (arg (arg v 3) 2)
                       upd (mapv (fn [fb] (let [fbv (lval fb) f (nm (arg (lval (arg fbv 2)) 2))
@@ -1410,9 +1421,12 @@
                   [te (list 'case ce (fresh-lv "wild")
                             (mapv (fn [[cn info]]
                                     (let [xs (mapv (fn [f] (fresh-lv (occ f))) (:fields info))
+                                          ;; the constructor's context's evidence bound by the alternative and given back
+                                          ;; to the new value (HF10-P20: an existential's dictionaries, Handle__'s)
+                                          ds (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) (second (instantiate (get @*genv* cn))))
                                           m (into {} upd)]
-                                      (list 'alt cn xs (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
-                                                             (mapv (fn [f x] (get m f x)) (:fields info) xs)))))
+                                      (list 'alt cn (into ds xs) (app* (list 'v (ext-name "var" (nmod cn) (occ cn)))
+                                                                       (into ds (mapv (fn [f x] (get m f x)) (:fields info) xs))))))
                                   cons*))])
       ;; deriving's nodes (arbace.repr.haskell.deriv): a constructor's tag as an Int, the constructor of a tag, a primop on Ints
       ;; the tag: GHC's dataToTag# (the primop dataToTagLarge#, which evaluates its argument), boxed as the Int the
@@ -1927,6 +1941,9 @@
             core (cond (zero? n) (second (first clauses))
                        simple? (list 'lam (first (first clauses)) (second (first clauses)))
                        :else (let [ds (vec (repeatedly n #(fresh-lv "ds")))]
+                               ;; the match's binders typed as the arguments (HF10-P20: a State# or Int# argument matched
+                               ;; by equations was taken for a lifted one by tostg, ascii_decode's state token)
+                               (doseq [[d t] (map vector ds args)] (note-type! d t))
                                (list 'lam ds (list 'match ds (mapv (fn [[pcs b]] (list 'clause pcs b)) clauses)))))]
         [ty core]))))
 
@@ -2083,7 +2100,9 @@
             params (mapv dict-param req')]
         (binding [*level* (inc *level*) *wanteds* ws *given-eqs* (scope-givens) *scoped-tvs* (merge *scoped-tvs* skol)]
           (assume-eqs! req')
-          (let [[env1 _] (tc-pat env (arg psb 4) (subst m res))]
+          (let [[env1 pc] (tc-pat env (arg psb 4) (subst m res))]
+            ;; the pattern's core and its variables, the record selectors' (mkPatSynRecSelBinds)
+            (swap! *patsyns* update n assoc :pat pc :vars (mapv lv argns))
             (doseq [[x at] (map vector argns args) :let [e (get env1 x)] :when (:mono e)] (unify (:mono e) (subst m at)))
             (doseq [p prov] (want! (sp p)))
             (retry-implications! false)))
@@ -2102,13 +2121,13 @@
               (solve-with-givens! @bws (super-closure (mapv vector bpreds (mapv dict-param bpreds))))))))
       ;; tcInferPatSynDecl: the pattern inferred, its type closed over its metas
       (let [t (binding [*level* (inc *level*)] (fresh-meta))
-            [env1 _] (binding [*level* (inc *level*) *wanteds* ws] (tc-pat env (arg psb 4) t))
+            [env1 pc] (binding [*level* (inc *level*) *wanteds* ws] (tc-pat env (arg psb 4) t))
             args (mapv #(or (:mono (get env1 %)) (fresh-meta)) argns)
             gen (vec (distinct (mapcat metas-of (cons t args))))
             names (mapv (fn [i] (str "p" i)) gen)]
         (doseq [[i nn] (map vector gen names)] (swap! *metas* assoc-in [i :ref] [:tv nn]))
         (doseq [w @ws] (swap! *wanteds* conj w))
-        (let [info {:univ names :req [] :ex [] :prov [] :args (mapv zonk args) :res (zonk t) :fields fields}]
+        (let [info {:univ names :req [] :ex [] :prov [] :args (mapv zonk args) :res (zonk t) :fields fields :pat pc :vars (mapv lv argns)}]
           (swap! *patsyns* assoc n info)
           (swap! *genv* assoc n (builder-type info)))))
     nil))
@@ -2982,20 +3001,164 @@
   [unit m occ]
   (fp-words (md5 (byte-array (mapcat seq [(fp-string unit) (fp-string m) (fp-string occ)])))))
 
+(declare prim-typeable-binds promoted-typeable-binds)
+
 (defn- typeable-binds [m]
   (let [v (fn [mm o] (list 'v (ext-name "var" mm o)))
         trname (fn [s] (list 'app (v "GHC.Internal.Types" "TrNameS") [(list 'lit (str (pr-str s) "#"))]))
         modv (ext-name "var" m "$trModule")]
     (when (seq @*tycons*)
-      (cons (list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname *unit*) (trname m)]))
-            (for [[tn info] @*tycons* :when (= m (nmod tn))]
-              (let [[hi lo] (tycon-fingerprint *unit* m (occ tn))
-                    arity (count (:tvs info []))
-                    star (v "GHC.Internal.Types" "krep$*")
-                    krep (reduce (fn [acc _] (list 'app (v "GHC.Internal.Types" "KindRepFun") [star acc])) star (range arity))]
-                (list 'bind (ext-name "var" m (str "$tc" (occ tn)))
-                      (list 'app (v "GHC.Internal.Types" "TyCon")
-                            [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname (occ tn)) (list 'lit "0#") krep]))))))))
+      (concat
+        [(list 'bind modv (list 'app (v "GHC.Internal.Types" "Module") [(trname *unit*) (trname m)]))]
+        (when (= m "GHC.Internal.Types")
+          (concat (prim-typeable-binds *unit* trname) (promoted-typeable-binds m *unit* trname modv)))
+        (for [[tn info] @*tycons* :when (= m (nmod tn))]
+          (let [[hi lo] (tycon-fingerprint *unit* m (occ tn))
+                arity (count (:tvs info []))
+                star (v "GHC.Internal.Types" "krep$*")
+                krep (reduce (fn [acc _] (list 'app (v "GHC.Internal.Types" "KindRepFun") [star acc])) star (range arity))]
+            (list 'bind (ext-name "var" m (str "$tc" (occ tn)))
+                  (list 'app (v "GHC.Internal.Types" "TyCon")
+                        [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname (occ tn)) (list 'lit "0#") krep]))))))))
+
+;;; HF10-P20 (a): GHC.Internal.Types' Typeable bindings of the wired-in things (GHC.Tc.Instance.Typeable's mkPrimTypeableTodos,
+;;; run when the module is GHC.Types): tr$ModuleGHCPrim, the built-in kind representations (builtInKindReps: krep$*,
+;;; krep$Constraint, krep$*Arr*, krep$*->*->*), a $tc binding for each of GHC.Internal.Prim's type constructors with its
+;;; KindRep (mkKindRepRhs over the kind its interface writes, GHC.Internal.Prim's own since HF10-P18 (a)) and a $tc' binding
+;;; for each promoted data constructor of the module whose type is a KindRep (todoForTyCons' promoted constructors)
+
+(defn- trv [o] (list 'v (ext-name "var" "GHC.Internal.Types" o)))
+(defn- kr-list [xs] (reduce (fn [acc x] (list 'app (trv ":") [x acc])) (trv "[]") (reverse xs)))
+(defn- kr-tycon-app [ref args] (list 'app (trv "KindRepTyConApp") [ref (kr-list args)]))
+(defn- kr-fun [a b] (list 'app (trv "KindRepFun") [a b]))
+(defn- kr-var [i] (list 'app (trv "KindRepVar") [(list 'app (trv "I#") [(list 'lit (str i "#"))])]))
+
+(defn- form-tc [ns m o args] (list 'tycon-app (list 'ext (symbol ns) m o) (vec args)))
+(def ^:private lifted-rep-form (form-tc "data" "GHC.Internal.Types" "BoxedRep" [(form-tc "data" "GHC.Internal.Types" "Lifted" [])]))
+(defn- type-of-rep [r] (form-tc "tc" "GHC.Internal.Prim" "TYPE" [r]))
+
+(defn- expand-kind
+  "coreView over a kind form's head: the synonyms of GHC.Internal.Types the interfaces name (Type, UnliftedType, ZeroBitType,
+  Constraint and the representations LiftedRep, UnliftedRep, ZeroBitRep)"
+  [f]
+  (if (and (seq? f) (= 'tycon-app (first f)) (= "GHC.Internal.Types" (nth (second f) 2)) (= 'tc (nth (second f) 1)))
+    (case (nth (second f) 3)
+      "Type" (type-of-rep lifted-rep-form)
+      "Constraint" (form-tc "tc" "GHC.Internal.Prim" "CONSTRAINT" [lifted-rep-form])
+      "UnliftedType" (type-of-rep (form-tc "tc" "GHC.Internal.Types" "UnliftedRep" []))
+      "ZeroBitType" (type-of-rep (form-tc "tc" "GHC.Internal.Types" "ZeroBitRep" []))
+      "LiftedRep" lifted-rep-form
+      "UnliftedRep" (form-tc "data" "GHC.Internal.Types" "BoxedRep" [(form-tc "data" "GHC.Internal.Types" "Unlifted" [])])
+      "ZeroBitRep" (form-tc "data" "GHC.Internal.Types" "TupleRep"
+                            [(form-tc "data" "GHC.Internal.Types" "[]" [(form-tc "tc" "GHC.Internal.Types" "RuntimeRep" [])])])
+      f)
+    f))
+
+(defn- norm-kind [f]
+  (let [f (expand-kind f)]
+    (cond (and (seq? f) (= 'tycon-app (first f))) (list 'tycon-app (second f) (mapv norm-kind (nth f 2)))
+          (and (seq? f) (= 'fun (first f))) (list 'fun 't 'many (norm-kind (nth f 3)) (norm-kind (nth f 4)))
+          :else f)))
+
+(def ^:private built-in-kind-reps
+  (let [star (norm-kind (form-tc "tc" "GHC.Internal.Types" "Type" []))
+        arr (fn [a b] (list 'fun 't 'many a b))]
+    [[star "krep$*"] [(norm-kind (form-tc "tc" "GHC.Internal.Types" "Constraint" [])) "krep$Constraint"]
+     [(arr star star) "krep$*Arr*"] [(arr star (arr star star)) "krep$*->*->*"]]))
+
+(defn- tc-rep-ref
+  "The TyCon representation's binding of a type constructor (ext NS M O): a promoted constructor's $tc'O, GHC.Internal.Prim's
+  in GHC.Internal.Types"
+  [[_ ns m o]]
+  (if (= 'data ns)
+    (list 'v (ext-name "var" m (str "$tc'" o)))
+    (list 'v (ext-name "var" (if (= m "GHC.Internal.Prim") "GHC.Internal.Types" m) (str "$tc" o)))))
+
+(defn- form-kind-rep
+  "mkKindRepRhs over a kind form (the binders' de Bruijn indices env), the built-in KindReps found by the kind's
+  normal form except the one being defined"
+  [env f & [defining]]
+  (let [f (norm-kind f)
+        builtin (some (fn [[k n]] (when (and (= k f) (not= n defining)) n)) built-in-kind-reps)]
+    (cond
+      builtin (trv builtin)
+      (= 'tv (first f)) (kr-var (or (get env (second f)) (throw (ex-info (str "typeable: unbound kind variable " (second f)) {}))))
+      (= 'fun (first f)) (kr-fun (form-kind-rep env (nth f 3)) (form-kind-rep env (nth f 4)))
+      (= 'tycon-app (first f))
+      (let [[_ [_ _ m o] args] f
+            con0 (fn [a] (when (and (seq? a) (= 'tycon-app (first a)) (= 'data (nth (second a) 1))) a))]
+        (or (when (and (= m "GHC.Internal.Prim") (= o "TYPE"))
+              (let [r (first args)]
+                (when-let [r (con0 r)]
+                  (let [[_ [_ _ rm ro] rargs] r]
+                    (cond (empty? rargs) (list 'app (trv "KindRepTYPE") [(list 'v (ext-name "var" rm ro))])
+                          (and (= 1 (count rargs)) (con0 (first rargs)) (empty? (nth (first rargs) 2)))
+                          (let [[_ [_ _ lm lo]] (first rargs)]
+                            (list 'app (trv "KindRepTYPE") [(list 'app (list 'v (ext-name "var" rm ro)) [(list 'v (ext-name "var" lm lo))])]))
+                          :else nil)))))
+            (kr-tycon-app (tc-rep-ref (second f)) (map #(form-kind-rep env %) args))))
+      :else (throw (ex-info (str "typeable: kind not handled " (pr-str f)) {})))))
+
+(defn- split-foralls [f]
+  (loop [f f vs []]
+    (if (and (seq? f) (= 'forall (first f))) (recur (nth f 4) (conj vs (nth f 1))) [vs f])))
+
+(defn- prim-things
+  "GHC.Internal.Prim's interface's things (the closure's wired-in interface)"
+  []
+  (let [p (or (get *iface-files* "GHC.Internal.Prim")
+              (some (fn [d] (let [f (File. (str d "/GHC.Internal.Prim.iface.edn"))] (when (.isFile f) (.getPath f)))) *ifdirs*))]
+    (when p
+      (let [f (File. ^String p) k [(.getCanonicalPath f) (.lastModified f)]
+            forms (or (get @iface-forms k) (let [x (read-forms (slurp f))] (swap! iface-forms assoc k x) x))]
+        (second (some #(when (= 'hsiface/things (first %)) %) forms))))))
+
+(defn- elab-kind-rep
+  "A promoted constructor's type (the elaborator's) as a KindRep: nil when it is not one (a context, a type the forms
+  cannot name)"
+  [env t]
+  (case (first t)
+    :tv (when-let [i (get env (second t))] (kr-var i))
+    :tc (let [[_ n as] t]
+          (cond (and (= fun-tc n) (= 2 (count as)))
+                (let [a (elab-kind-rep env (first as)) b (elab-kind-rep env (second as))] (when (and a b) (kr-fun a b)))
+                (and (vector? n) (ext? n))
+                (let [rs (map #(elab-kind-rep env %) as)] (when (every? some? rs) (kr-tycon-app (tc-rep-ref n) rs)))
+                :else nil))
+    nil))
+
+(defn- prim-typeable-binds
+  "mkPrimTypeableTodos' bindings, when the module is GHC.Internal.Types"
+  [unit trname]
+  (let [modp (ext-name "var" "GHC.Internal.Types" "tr$ModuleGHCPrim")
+        tycon (fn [m modv o nk krep]
+                (let [[hi lo] (tycon-fingerprint unit m o)]
+                  (list 'app (trv "TyCon") [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname o)
+                                            (list 'lit (str nk "#")) krep])))]
+    (concat
+      [(list 'bind modp (list 'app (trv "Module") [(trname unit) (trname "GHC.Internal.Prim")]))]
+      (for [[k n] built-in-kind-reps] (list 'bind (ext-name "var" "GHC.Internal.Types" n) (form-kind-rep {} k n)))
+      (for [t (prim-things) :when (and (seq? t) (= 'tycon (first t)))]
+        (let [o (nth (second t) 3) [vs body] (split-foralls (nth t 5))]
+          (list 'bind (ext-name "var" "GHC.Internal.Types" (str "$tc" o))
+                (tycon "GHC.Internal.Prim" modp o (count vs) (form-kind-rep (zipmap vs (range)) body))))))))
+
+(defn- promoted-typeable-binds
+  "The module's promoted constructors' $tc' bindings (todoForTyCons: tyConIsTypeable of the promoted constructor, its kind
+  the constructor's type without a context); the unboxed tuples' and sums' left out (GHC writes the tuples' $tc'(#,#)...: their
+  KindRepFun nests, up to 64 deep, as one nested term each, take the -O0 pipeline past the module's time limit; GHC binds
+  each $krep apart)"
+  [m unit trname modv]
+  (for [[tn info] @*tycons* :when (and (= m (nmod tn)) (not (re-matches #"(Tuple|Sum)[0-9]+#" (occ tn)))) c (:cons info)
+        :let [t (get @*genv* c)
+              [vs ctx body] (if (= :forall (first t)) [(nth t 1) (nth t 2) (nth t 3)] [[] [] t])
+              ;; synonyms expanded (coreView: KindRepVar's KindBndr is Int)
+              krep (when (and t (empty? ctx)) (elab-kind-rep (zipmap vs (range)) (try (deep-expand body) (catch Throwable _ body))))]
+        :when krep]
+    (let [o (str "'" (occ c)) [hi lo] (tycon-fingerprint unit m o)]
+      (list 'bind (ext-name "var" m (str "$tc" o))
+            (list 'app (trv "TyCon") [(list 'lit (str hi "#w64")) (list 'lit (str lo "#w64")) (list 'v modv) (trname o)
+                                      (list 'lit (str (count vs) "#")) krep])))))
 
 (def ^:private phase-times? (some? (System/getenv "REPR_HASKELL_TC_TIMES")))
 (defmacro ^:private phase
@@ -3092,8 +3255,12 @@
                           (list 'bind f (list 'v (tuple-con 0)))
                         (let [ds (fresh-lv "ds")
                               alts (vec (for [[cn info] (map vector cs infos) :when (some #(= f %) (:fields info))]
-                                          (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info))]
-                                            (list 'alt cn xs (nth xs (.indexOf ^java.util.List (:fields info) f))))))
+                                          (let [xs (mapv (fn [g] (fresh-lv (occ g))) (:fields info))
+                                                ;; the constructor's context's evidence first (an existential's
+                                                ;; dictionaries; HF10-P20: Handle__'s selectors took its four
+                                                ;; dictionaries for fields)
+                                                ds (mapv (fn [[c _]] (fresh-lv (str "$d" (occ c)))) (second (instantiate (get @*genv* cn))))]
+                                            (list 'alt cn (into ds xs) (nth xs (.indexOf ^java.util.List (:fields info) f))))))
                               alts (if (< (count alts) (count cs))
                                      (into [(list 'alt :default []
                                                   (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recSelError"))
@@ -3101,6 +3268,23 @@
                                            alts)
                                      alts)]
                           (list 'bind f (list 'lam [ds] (list 'case ds (fresh-lv "wild") alts)))))))
+            ;; the pattern synonyms' record selectors (GHC.Tc.TyCl.PatSyn's mkPatSynRecSelBinds: a match on the synonym,
+            ;; the field's variable, else recSelError); a synonym with a context left (HF10-P20: Encoding.Types'
+            ;; BufferCodec{encode, ...} had no selector bindings)
+            sels (into sels
+                       (for [[pn info] (sort-by (comp str key) @*patsyns*)
+                             :when (and (= m (nmod pn)) (seq (:fields info)) (empty? (:req info)) (empty? (:prov info)) (:pat info))
+                             [i f] (map-indexed vector (:fields info))]
+                         (let [ds (fresh-lv "ds")]
+                           (when-not (get @*genv* f)
+                             (swap! *genv* assoc f [:forall (vec (:univ info)) [] (fn-ty (:res info) (nth (:args info) i))]))
+                           ;; the synonym's own pattern matched (its matcher's body), the field's variable returned
+                           (list 'bind f (list 'lam [ds]
+                                               (list 'match [ds]
+                                                     [(list 'clause [(:pat info)] (nth (:vars info) i))
+                                                      (list 'clause [(list 'pwild)]
+                                                            (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "recSelError"))
+                                                                  [(list 'lit (str (pr-str (occ f)) "#"))]))]))))))
             ;; the deferred family equalities retried, as GHC's solver iterates to a fixed point; one still stuck is
             ;; left (trusted)
             _ (retry-implications! true)

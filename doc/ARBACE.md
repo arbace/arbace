@@ -116,7 +116,11 @@ code. Three kinds of things live here:
   (2026-11-09) `ownface.ae` writes the front end's own interfaces after `compiler/GHC/Iface/Make.hs`'s mkIface_ and
   `Iface/Tidy.hs`'s addExternal and trimId at -O0, `Types/Id/Make.hs`'s dataConSrcToImplBang, `Builtin/Types.hs`'s wired-in
   definitions and `Builtin/Types/Literals.hs`'s built-in families, from the same tarball, carrying GHC's notice (its judge and
-  `libcheck.ae`'s `own-order`, `own`, `rank-own` Arbace's own), and `rename.ae` and `typecheck.ae` take an hs-boot file's
+  `libcheck.ae`'s `own-order`, `own`, `rank-own` Arbace's own; since HF10-P12 (2026-11-09) `simplify.ae` simplifies a stable
+  unfolding in `Core/Opt/Simplify/Utils.hs`'s updModeForStableUnfoldings' mode and `libcheck.ae` takes each `$dm`'s compulsory
+  unfolding (`HsToCore/Binds.hs`'s makeCorePair) after it; since HF10-P14 `rename.ae`'s `integral-fl` ports `Rename/Pat.hs`'s
+  generalizeOverLitVal (NumDecimals), and `libcheck.ae`'s closure growth and `cabal-reexports` are Arbace's own), and
+  `rename.ae` and `typecheck.ae` take an hs-boot file's
   signatures as its values (`Rename/Module.hs`'s rnSrcDecls, `Tc/Module.hs`'s tcHsBootSigs); `simpleopt.ae` (2026-11-06) ports
   `compiler/GHC/Core/SimpleOpt.hs` with the occurrence information of `Core/Opt/OccurAnal.hs` and the compulsory
   unfoldings of `Types/Id/Make.hs`, `constfold.ae` (2026-11-06) the `Float#`/`Double#` rules of
@@ -126,6 +130,10 @@ code. Three kinds of things live here:
   `Env.hs`, `Inline.hs`, `compiler/GHC/Core/Opt/OccurAnal.hs`, `Opt/Arity.hs`, `compiler/GHC/Core/Unfold.hs` with
   `Unfold/Make.hs`, `compiler/GHC/Core/Utils.hs` and `SimpleOpt.hs`'s `exprIsConApp_maybe` from the same tarball, carrying
   GHC's notice; `primops.ae` is generated from `compiler/GHC/Builtin/primops.txt.pp` by `tools/hsprimops/primops.awk`;
+  `primiface.ae` (HF10-P18 (a), 2026-11-10) builds GHC.Internal.Prim's interface from the same `primops.txt.pp` with ports of
+  `utils/genprimopcode` (Lexer.x, Parser.y, AccessOps.hs, Main.hs's desugarVectorSpec and ppTyVarBinders), `Builtin/Types/Prim.hs`'s
+  template variables and exposed type constructors, `Builtin/Utils.hs`'s ghcPrimExports and `Types/Id/Make.hs`'s ghcPrimIds, and
+  `typecheck.ae`'s Typeable bindings of the wired-in things (HF10-P20) follow `Tc/Instance/Typeable.hs`, all from the same tarball;
   `simplcmp.ae`, the simplified Core's judge, is Arbace's own),
   `deriv.ae` (HF4, 2026-11-05) ports the generators of `compiler/GHC/Tc/Deriv/Generate.hs` (Eq, Ord, Enum, Bounded, Ix, Read,
   Show) and `Deriv/Functor.hs` (Functor, Foldable, Traversable) from the same tarball, the file carrying GHC's notice;
