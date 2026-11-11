@@ -645,15 +645,22 @@ covers what.
   (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/`) transcribed with
   the changes their headers name, `overlay/jdk/java.base/java/io/FileDescriptor.java` holds
   jdk26u's `attach` and `closeAll`, and the variants `overlay/jdk/variants/RandomAccessFile.ae`,
-  `Adler32.ae`, `CRC32C.ae`, `URLJarFile.ae` and `JarEntry.ae` keep the code of the jdk26u methods they replace
+  `Adler32.ae`, `CRC32C.ae` and `URLJarFile.ae` keep the code of the jdk26u methods they replace
   (`java/io/RandomAccessFile.java`, `java/util/zip/Adler32.java`, `CRC32C.java`,
-  `sun/net/www/protocol/jar/URLJarFile.java`, `java/util/jar/JarEntry.java`) where they keep it: Copyright (c) Oracle and/or its
+  `sun/net/www/protocol/jar/URLJarFile.java`) where they keep it: Copyright (c) Oracle and/or its
   affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
   below); the rest of those files, `overlay/jdk/java.base/java/io/FileCleanable.java`,
-  `java/util/jar/JarVerifier.java`, `sun/security/util/ManifestEntryVerifier.java`,
   `jdk/internal/jrt/ZipAccess.java`, `Utf8Coder.java`, the variants `ZipCoder.ae`, `ZipUtils.ae`,
   `JarFileFactory.ae` and `go/arbace/jrt/checksum.ae` are Arbace's own (zlib's adler32 algorithm
   in `checksum.ae` written from RFC 1950).
+  Since P1 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)", 2026-11-10) jrt's
+  JarVerifier and ManifestEntryVerifier are gone (jdk26u's are translated) and `JarFile.java` holds
+  jdk26u's verifier code again.
+- java.lang.ref and thread groups (P1, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)"):
+  `go/arbace/jrt/threadgroup.ae` transcribes jdk26u's `java/lang/ThreadGroup.java` (at `baf63fb`) into
+  Go: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
+  the Classpath Exception (text below); the PhantomReference and the thread "Reference Handler" in
+  `go/arbace/jrt/reference.ae` and the thread groups' members of `thread.ae` are Arbace's own.
 - java.util.logging (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F5 (write-ahead)"; recorded by the
   rule of B7): the variants `overlay/jdk/variants/LogManager.ae`, `Logger.ae`, `Level.ae`,
   `LogRecord.ae`, `SimpleFormatter.ae` and `LoggingFileHandler.ae` keep the code of the jdk26u members
@@ -911,7 +918,7 @@ covers what.
   are Arbace's own, under the Eclipse Public License 1.0.
 - Java RMI (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F27 (write-ahead)"; recorded by the rule of B7): the derived
   overlays `overlay/jdk/java.base/java/rmi/server/RMIClassLoader.java` and
-  `overlay/jdk/java.base/sun/rmi/{transport/GC,transport/DGCClient,runtime/Log,runtime/RuntimeUtil}.java` are jdk26u's files
+  `overlay/jdk/java.base/sun/rmi/{transport/GC,runtime/Log,runtime/RuntimeUtil}.java` are jdk26u's files
   of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.rmi/share/classes/`) with the exact
   replacements `test/jrt/derive.ae` makes, whose tables hold their replaced text (each file's header says so); and the
   jdk26u sources the closure adds (`test/jrt/jrt_sources.ae`'s `rmi-sources`: 89 files of `src/java.rmi/share/classes`

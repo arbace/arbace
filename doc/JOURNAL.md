@@ -5226,3 +5226,43 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
+
+## 2026-11-10: j2g's dyn forms split for the frozen JVM (branch `java-dyn-fix`, from `java-night` 49fbfee1e)
+
+- Night 11's Java retry stopped at `bin/javac-vendor convert`'s edge step (`bin/j2g --program --record-edge` on the frozen v4 jar):
+  `MethodTooLargeException` compiling `arbace.j2g.dyn/forms` (dyn.ae:416): the JVM compiler hoists a fn's quoted constants into its
+  class's `<clinit>`, at most 64 KB of bytecode, and JCS170 (a) (15293a6cc: `defineJavaProxy`, the Proxy hook) took `forms` over it
+  (its parent's dyn.ae loads on the jar). Stage 0 and the Go build compile it to Go, with no such limit; only the frozen JVM, which
+  loads the checkout's j2g as `.clj` links (bin/lib/frozen.bash), fails.
+- Fix: `forms`'s literal parts moved verbatim into three private fns, `core-forms`, `native-forms`, `proxy-forms` (each its own class),
+  `forms` concatenating them in the same order. Alternatives considered: loading the forms as data at run time (a new file to embed
+  and key) and a smaller split (two parts would leave the natives near the limit).
+- Proofs: `(require 'arbace.j2g.dyn)` on the frozen jar (`frozen_java tools`, one JVM, -Xmx1500m) fails before, loads after; on stage 0
+  the old and new `forms` with the world stubbed (interfaces, slot keys, method and sub forms, proxy classes, `m/translated?`) give the
+  same forms printed with metadata but the reader's `:line`/`:column`, which `arbace.j2g.out/clean` drops, and `out/file-text` of
+  j2g_dyn.go byte for byte equal (17,900 characters).
+
+## 2026-11-10: P1 by day (branch `java-p1`, from `mac/java-dyn-fix` 379130378)
+
+The user decided JCS370-JCS378 as recommended (`.tmp/plans/JAVA-90-PLAN.md`; recorded in
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user, 2026-11-10)") and JCV10 (b): P1 is night 15's Java night, its ports
+built by day. Built (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)"): jrt's PhantomReference (F17, JCS321 (a)) beside
+Weak and Soft, a non-leaf listed in j2g's `class-supers`, `refersTo` on the referent itself, the collected referents' references
+enqueued by a daemon thread "Reference Handler" of the system group that `RunMain` starts; `System.runFinalization` (a collection,
+no finalizers: `finalize()` is JCS379); thread groups (JCS322 (a), the user's P1 over its earlier (b)): `go/arbace/jrt/threadgroup.ae`
+transcribed from jdk26u's `java/lang/ThreadGroup.java` at `baf63fb` (system, main, VirtualThreads; groups track no threads, as
+JDK 19's), Thread's group, its five group constructors, `getThreadGroup`, `activeCount`, `enumerate`, the priority within the
+group's maximum; jdk26u's `java.lang.ref.Cleaner`, `jdk.internal.ref.CleanerImpl`, `PhantomCleanable`, `CleanerFactory` into the
+closure (`p1-sources`); jar verification (JCS231): jdk26u's `JarVerifier`, `ManifestEntryVerifier`, `SignatureFileVerifier`,
+`ManifestDigester` in place of jrt's stubs, JarFile's overlay with jdk26u's verifier code (ScopedValue as a ThreadLocal),
+JarEntry's variant removed; DGCClient's derivation dropped (jdk26u's file, `share:java.rmi`). The manifest and member tables
+regenerated (`jrt.tables`, `jrt.manifest` on the frozen jar with -Xmx1800m: PhantomReference 2 of 6 members, ThreadGroup 21 of 32,
+Thread 52 of 121). Alternatives: ThreadGroup as jdk26u's Java translated (it needs Thread's package-private `getAllThreads` and
+holder fields from jrt's hand-written Thread: more coupling than a transcription); finalization over `runtime.SetFinalizer`
+(JCS379 proposes by design). Serialization's slices 5 and 8 are not in P1 (JCS383: P2). Proofs by day: jrt's package tests
+(new TestPhantomReferences, TestThreadGroups; the whole package), the joint javac check of the closure (3,323 files, 0 errors),
+`bin/jrt-convert derive --check` (79 overlays, 0 not as derived). Night 15's commands are in the triage's section. `bin/jrt-convert predict` (the night's world by day, all of
+`java-night`'s unconverted slices with P1's: 1,071 changed files): the jar verifier's classes, JarFile and the classes naming
+ThreadGroup analyze clean; the Cleaner's PhantomCleanable and DGCClient's PhantomLiveRef fail on "Unknown type: PhantomReference"
+because `jdk/edge.edn` has no entry for it yet (night step 2, `bin/j2g-edge update`). A slip: predict peaked at 4.98 GB, over
+the brief's 2 GiB (the analysis of the whole world), with MemAvailable above 40 GiB throughout and nothing else running.

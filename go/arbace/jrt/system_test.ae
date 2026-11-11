@@ -218,3 +218,57 @@ equals with builds.\n"
                   (>= (.CompareTo_Runtime_Version__I a b) 0) (.Equals_O__Z a b) (.EqualsIgnoreOptional_O__Z a y)
                   (!= (.CompareToIgnoreOptional_Runtime_Version__I a y) -1))
           (.Error t "compareToIgnoreOptional, equalsIgnoreOptional"))))))
+
+(go/func TestPhantomReferences
+  "PhantomReference (F17): get is null, refersTo is the referent; an unreachable referent's reference is
+enqueued by the thread \"Reference Handler\" (system group); enqueue and clear by hand; a null referent's
+reference enqueues by hand; System.runFinalization keeps the interrupt status.\n"
+  [^{:tag (* testing/T)} t]
+  (let [q (ReferenceQueue_New)
+        kept (StringBuilder_New_String (Str "kept"))
+        pk (PhantomReference_New_O_ReferenceQueue kept q)
+        pd (PhantomReference_New_O_ReferenceQueue (StringBuilder_New_String (Str "dropped")) q)]
+    (when (!= (.Get__O pk) nil)
+      (.Error t "a phantom reference's get is not null"))
+    (when (or (not (.RefersTo_O__Z pk kept)) (.RefersTo_O__Z pk nil) (.RefersTo_O__Z pk (Str "other")))
+      (.Error t "refersTo of a live phantom referent"))
+    (let [^Reference_I got nil]
+      (for [i 0] (and (< i 100) (== got nil)) (inc! i)
+        (System_Gc__V)
+        (set! got (.Remove_J__Reference q 20)))
+      (when (!= got (conv Reference_I pd))
+        (.Errorf t "the collected referent's reference not enqueued: %v" got)))
+    (when (not (.RefersTo_O__Z pd nil))
+      (.Error t "an enqueued phantom reference still refers"))
+    (when (!= (.Poll__Reference q) nil)
+      (.Error t "a live phantom referent was enqueued"))
+    (runtime/KeepAlive kept)
+    ;; the handler is a live daemon thread of the system group
+    (let [found false]
+      (range [_ th (allPlatformThreads)]
+        (when (== (.String (.Load (.-name th))) "Reference Handler")
+          (set! found (and (.Load (.-daemon th)) (== (.-group th) systemThreadGroup)))))
+      (when (not found)
+        (.Error t "no thread \"Reference Handler\" in the system group")))
+    ;; by hand, and a null referent (EnqueueNullRef)
+    (let [q2 (ReferenceQueue_New)
+          p (PhantomReference_New_O_ReferenceQueue kept q2)
+          pn (PhantomReference_New_O_ReferenceQueue nil q2)]
+      (when (or (not (.Enqueue__Z p)) (.Enqueue__Z p) (not (.RefersTo_O__Z p nil)))
+        (.Error t "enqueue by hand"))
+      (when (not (.Enqueue__Z pn))
+        (.Error t "enqueue of a null referent's phantom reference"))
+      (when (or (!= (.Poll__Reference q2) (conv Reference_I p)) (!= (.Poll__Reference q2) (conv Reference_I pn)))
+        (.Error t "the queue's order"))
+      (let [pc (PhantomReference_New_O_ReferenceQueue kept nil)]
+        (.Clear__V pc)
+        (when (not (.RefersTo_O__Z pc nil))
+          (.Error t "clear")))
+      (runtime/KeepAlive kept))
+    (let [me (CurrentThread)]
+      (.Interrupt__V me)
+      (System_RunFinalization__V)
+      (when (not (Thread_Interrupted__Z))
+        (.Error t "runFinalization cleared the interrupt status")))
+    (when (not (PhantomReference_InstanceOf pk))
+      (.Error t "instanceof PhantomReference"))))

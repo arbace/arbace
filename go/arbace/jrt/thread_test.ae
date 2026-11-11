@@ -3,7 +3,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "thread_test.go"
-  :imports [[io "io"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"] [testing "testing"] [time "time"]])
+  :imports [[io "io"] [strconv "strconv"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"] [testing "testing"] [time "time"]])
 
 (go/func TestCurrentThreadPerGoroutine
   "Each goroutine has its own Thread, found again on every call; Go's goroutines get adopted
@@ -378,3 +378,66 @@ non-daemon threads, not for daemons.\n"
       (let [th (Thread_New_Runnable r)]
         (.Start__V th)
         (.Join__V th)))))
+
+(go/func TestThreadGroups
+  "Thread groups (JCS322 (a)): system > main > the user's; a thread's group from its creator or constructor,
+null once terminated; activeCount and enumerate over the live platform threads; subgroups; the priority within the
+group's maximum; toString; Thread(group, task, name, 0, false) inherits no inheritable thread locals.\n"
+  [^{:tag (* testing/T)} t]
+  (let [me (CurrentThread)
+        mg (.GetThreadGroup__ThreadGroup me)]
+    (when (or (!= mg mainThreadGroup) (!= (.GetParent__ThreadGroup mg) systemThreadGroup)
+              (!= (.GetParent__ThreadGroup systemThreadGroup) nil))
+      (.Errorf t "the groups: %v" mg))
+    (when (!= (.String (.ToString__String mg)) "java.lang.ThreadGroup[name=main,maxpri=10]")
+      (.Errorf t "toString: %s" (.String (.ToString__String mg))))
+    (let [g (ThreadGroup_New_String (Str "Flaky"))
+          sub (ThreadGroup_New_ThreadGroup_String g (Str "sub"))
+          release (make (chan (struct)))
+          started (make (chan (struct)) 2)
+          run (RunnableOf (fn [] (>! started (lit (struct))) (<! release)))
+          t1 (Thread_New_ThreadGroup_Runnable g run)
+          t2 (Thread_New_ThreadGroup_Runnable_String sub run (Str "in-sub"))]
+      (when (or (!= (.GetParent__ThreadGroup g) mg) (not (.ParentOf_ThreadGroup__Z mg sub)) (.ParentOf_ThreadGroup__Z sub g))
+        (.Error t "parents"))
+      (.Start__V t1)
+      (.Start__V t2)
+      (<! started)
+      (<! started)
+      (when (or (!= (.ActiveCount__I g) 2) (!= (.ActiveCount__I sub) 1) (!= (.ActiveGroupCount__I mg) 2))
+        (.Errorf t "counts: %d %d %d" (.ActiveCount__I g) (.ActiveCount__I sub) (.ActiveGroupCount__I mg)))
+      (let [a (NewRefArray Thread_class 4)
+            n (.Enumerate_Thread1_Z__I g a false)]
+        (when (or (!= n 1) (!= (aget (.-A a) 0) (conv any t1)))
+          (.Errorf t "enumerate without recursion: %d" n)))
+      (let [ga (NewRefArray ThreadGroup_class 4)]
+        (when (!= (.Enumerate_ThreadGroup1__I systemThreadGroup ga) (.ActiveGroupCount__I systemThreadGroup))
+          (.Error t "enumerate of the groups")))
+      (when (< (.ActiveCount__I systemThreadGroup) 3)
+        (.Error t "the system group's count"))
+      (when (!= (.String (.Impl_ToString__String t2 t2)) (+ "Thread[#" (strconv/FormatInt (.-tid t2) 10) ",in-sub,5,sub]"))
+        (.Errorf t "Thread.toString: %s" (.String (.Impl_ToString__String t2 t2))))
+      (close release)
+      (.Join__V t1)
+      (.Join__V t2)
+      (when (or (!= (.GetThreadGroup__ThreadGroup t1) nil) (!= (.ActiveCount__I g) 0))
+        (.Error t "a terminated thread's group")))
+    (let [g (ThreadGroup_New_String (Str "low"))]
+      (.SetMaxPriority_I__V g 3)
+      (let [th (Thread_New_ThreadGroup_String g (Str "low-1"))]
+        (when (!= (.Load (.-priority th)) 3)
+          (.Errorf t "a priority above the group's maximum: %d" (.Load (.-priority th))))
+        (.Impl_SetPriority_I__V th th 9)
+        (when (!= (.Load (.-priority th)) 3)
+          (.Error t "setPriority above the group's maximum"))))
+    ;; inheritInheritableThreadLocals (ITLConstructor)
+    (let [itl (InheritableThreadLocal_New)
+          seen (make (chan any) 2)]
+      (.Set_O__V itl (Str "parent"))
+      (range [_ inherit (lit (slice bool) true false)]
+        (let [th (Thread_New_ThreadGroup_Runnable_String_J_Z nil (RunnableOf (fn [] (>! seen (.Get__O itl)))) (Str "itl") 0 inherit)]
+          (.Start__V th)
+          (.Join__V th)))
+      (let [a (<! seen) b (<! seen)]
+        (when (or (== a nil) (!= b nil))
+          (.Errorf t "inheritance: %v %v" a b))))))
