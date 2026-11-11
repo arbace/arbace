@@ -4906,6 +4906,12 @@ The two known (`jdk/javac/platform-gensrc-known.edn`):
   declaration order, the interpreter of javac's tool another (`set get getAndUpdate compareAndExchange compareAndSet`).
   Stable from run to run.
 
+**The chain without the build's generated sources** (by day, light): `PB_GENSRC=WORK/gensrc/out` makes `classes modules` compile
+from the own generated sources (platform-build.edn's `{gensrc}`). Six modules that have some (java.logging, jdk.httpserver,
+jdk.jartool, jdk.jdi with jdwpgen's `JDWP.java`, jdk.management.agent, jdk.charsets: 25 s, `--jobs 2`, peak 1.55 GB): 3 equal and 3
+known (the 6 known `:param-names` classes of stage 1's file), the controls failing as they must; then `descriptors` from those
+own descriptors: 6 of 6 equal at both steps. The 16 modules whole are the night slot's step 4 (`JCS359_OWN_GENSRC=1`).
+
 **Stage 3: the descriptors.** `bin/javac-vendor descriptors [MODULE...]` extends each module's javac descriptor as the build
 does, by `test/javac-platform/modinfo.ae` on the tools' host (no javac, no JVM, no java.lang.classfile): (1)
 AddPackagesAttribute's `ModulePackages` (the packages of the module's class files and its resource-only packages, the data's:
