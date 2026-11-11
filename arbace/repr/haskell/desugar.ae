@@ -78,8 +78,22 @@
 (def cons-c (ext "data" "GHC.Internal.Types" ":"))
 
 (defn- fresh [o] (list 'lv o (str "d" (swap! *n* inc))))
+
 (defn- lv? [x] (and (seq? x) (= 'lv (first x))))
 (defn- head? [x h] (and (seq? x) (= h (first x))))
+
+(def ^:dynamic *ltypes* {})      ; the elaborator's binders' types
+(def fresh-types (atom {}))       ; HF10-P20: the match variables made for typed pattern variables, their types (tostg's
+                                  ; representations: a State# in an unboxed tuple's pattern was taken for a lifted value)
+
+(defn- fresh-like
+  "A match variable for the pattern p (named after it when a variable), its type the variable's"
+  [p]
+  (let [x (fresh (if (lv? p) (second p) "ds"))]
+    (when-let [t (let [q (loop [q p] (cond (head? q 'pbang) (recur (second q)) (head? q 'pas) (second q) :else q))]
+                   (and (lv? q) (get *ltypes* q)))]
+      (swap! fresh-types assoc x t))
+    x))
 (defn- trivial? [x] (and (seq? x) (contains? '#{lv v} (first x))))
 (defn- worker [c] (list 'v (ext "var" (nth c 2) (nth c 3))))
 
@@ -138,6 +152,7 @@
         (head? p 'plist) (mapcat pat-vars (second p))
         (head? p 'plazy) (pat-vars (second p))
         (head? p 'pbang) (pat-vars (second p))
+        (head? p 'pview) (pat-vars (nth p 2))
         :else []))
 
 (declare match)
@@ -172,7 +187,7 @@
     [p {}]))
 
 (defn- pkind [p]
-  (case (first p) pwild :any pcon :con plitp :lit plit :npat pbang :bang :any))
+  (case (first p) pwild :any pcon :con plitp :lit plit :npat pbang :bang pview :view :any))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Matching: an equation is {:pats [PAT...] :sub {lv term} :rhs (fn [fail] core)}
@@ -206,7 +221,7 @@
                (let [eqs (filter #(= c (second (first (:pats %)))) g)
                      n (count (nth (first (:pats (first eqs))) 2))
                      first-sub (nth (first (:pats (first eqs))) 2)
-                     xs (mapv (fn [i] (let [p (nth first-sub i)] (fresh (if (lv? p) (second p) "ds")))) (range n))
+                     xs (mapv (fn [i] (fresh-like (nth first-sub i))) (range n))
                      eqs2 (map (fn [e] (assoc e :pats (concat (nth (first (:pats e)) 2) (rest (:pats e))))) eqs)]
                  [(or (:tag (get *cons* c)) 0) (list 'alt c xs (match (into xs vars) eqs2 f))]))
         missing (remove (set cs) all)
@@ -243,8 +258,25 @@
   (let [body (match (into [v] vars) (map (fn [e] (assoc e :pats (cons (second (first (:pats e))) (rest (:pats e))))) g) f)]
     (list 'case v (if (lv? v) v (fresh "ds")) [(list 'alt :default [] body)])))
 
+(declare match)
+
+(defn- match-view
+  "matchView (GHC.HsToCore.Match): equations whose first pattern is a view pattern (pview F P), grouped by their
+  view expression: x = F v, then P matched against x (HF10-P20: a view pattern was taken for a wildcard, its variables
+  unbound: Encoding.Types' BufferCodec selectors)"
+  [v vars g f]
+  (let [sgs (partition-by (comp second first :pats) g)]
+    (reduce (fn [acc sg]
+              (with-fail acc
+                (fn [f2]
+                  (let [x (fresh "v")]
+                    (list 'let [(list 'bind x (list 'app (second (first (:pats (first sg)))) [v]))]
+                          (match (into [x] vars) (map (fn [e] (assoc e :pats (cons (nth (first (:pats e)) 2) (rest (:pats e))))) sg) f2))))))
+            f (reverse sgs))))
+
 (defn- match-group [v vars g f]
   (case (pkind (first (:pats (first g))))
+    :view (match-view v vars g f)
     :any (match vars (map drop-first g) f)
     :bang (match-bangs v vars g f)
     :con (match-cons v vars g f)
@@ -433,14 +465,18 @@
   (let [fields (set (mapcat :fields (vals (:all-cons r))))
         methods (set (mapcat :methods (vals (:all-classes r))))]
     (into (set (:exported r))
-          (for [[_ b] prog :when (and (vector? b) (or (str/starts-with? (nth b 3) "$") (contains? fields b) (contains? methods b)
+          ;; (Typeable's of the wired-in things in GHC.Internal.Types too: krep$*, tr$ModuleGHCPrim, mkPrimTypeableTodos' exported
+          ;; Ids, HF10-P20)
+          (for [[_ b] prog :when (and (vector? b) (or (str/starts-with? (nth b 3) "$") (str/starts-with? (nth b 3) "krep$")
+                                                      (str/starts-with? (nth b 3) "tr$") (contains? fields b) (contains? methods b)
                                                       (not= (nth b 2) (:module r))))]
             b))))
 
 (defn desugar-program
   "The elaborator's result (:core, :all-cons, :tycons): its bindings without matches"
   [r]
-  (binding [*cons* (:all-cons r) *tycons* (:tycons r) *n* (atom 0)
+  (reset! fresh-types {})
+  (binding [*cons* (:all-cons r) *tycons* (:tycons r) *n* (atom 0) *ltypes* (or (:ltypes r) {})
             so/*newtype-co* (when *casts* (fn [con] (when (contains? (:all-cons r) con) (newtype-co r con))))]
     (let [prog (mapv (fn [[_ b e]] (binding [*where* (if (vector? b) (nth b 3) (str (second b)))] (list 'bind b (simplify (simplify (ds (norm-iface e))))))) (:core r))
           exported (program-exported r prog)

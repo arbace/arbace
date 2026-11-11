@@ -30,7 +30,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden
+  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -281,6 +281,12 @@ repr-haskell-lib-check-own: ## HF10-P3: ghc-internal compiled bottom-up on the f
 repr-haskell-lib-stg-own: ## HF10-P3: lib-stg on the own interfaces, and programs on the coherent -O0 sets without the merge (bin/repr-haskell lib-stg --ifaces own --run)
 	bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run
 
+repr-haskell-lib-check-own-base: ## HF10-P14: base compiled bottom-up on ghc-internal's own pool, judged against test/haskell/lib-check-own-base.edn (bin/repr-haskell lib-check --package base --ifaces own --judge; after repr-haskell-lib-check-own)
+	bin/repr-haskell lib-check --package base --ifaces own --judge test/haskell/lib-check-own-base.edn
+
+repr-haskell-lib-stg-own-base: ## HF10-P14: base's STG on the own interfaces against GHC's -O0 STG of base, judged against test/haskell/lib-stg-own-base-results.edn (bin/repr-haskell lib-stg --package base --ifaces own --judge)
+	bin/repr-haskell lib-stg --package base --ifaces own --judge test/haskell/lib-stg-own-base-results.edn
+
 repr-haskell-lib-check: ## HF9's measure as a recorded check: ghc-internal's modules through the front end against GHC's interfaces from the pack haskell-lib-ifaces-ghc-9.14.1, judged against test/haskell/lib-check-ghc-internal.edn (bin/repr-haskell lib-check --judge)
 	bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn
 repr-haskell-lib-check-record: ## by hand at the oracle tier (GHC): the helper's iface2 verb's interfaces packed, then the measure recorded (bin/repr-haskell lib-check --live --record-pack --record)
@@ -396,13 +402,13 @@ repr-cpp-pp-record: ## g++ -E and clang's raw tokens run on the corpora's files,
 	bin/repr-cpp pp-check --record --add-missing $(if $(CORPUS),--corpus $(CORPUS)) $(if $(SAMPLE),--sample $(SAMPLE))
 repr-cpp-cxxdump-check: ## the oracle's filter over a list of files, its numbers (bin/repr-cpp cxxdump-check LIST OUT; LIST=... OUT=...)
 	bin/repr-cpp cxxdump-check $(LIST) $(OUT) --layouts
-repr-cpp-roundtrip: ## repr/cpp's round trip in mode :lines over a list: forms, print, forms again, the print's AST, g++'s and clang's objects (bin/repr-cpp roundtrip LIST WORK; LIST=... WORK=...)
+repr-cpp-roundtrip: ## repr/cpp's round trip in mode :lines over a list by its own judge: forms, print, forms again, mode :full byte for byte (--judge clang: the print's AST, the objects) (bin/repr-cpp roundtrip LIST WORK; LIST=... WORK=...)
 	bin/repr-cpp roundtrip $(LIST) $(WORK)
 repr-cpp-roundtrip-corpus: ## repr/cpp's round trip over a recorded list made by its key: CORPUS-every-N, CORPUS-all, CORPUS-essential, samples (bin/repr-cpp roundtrip-corpus KEY; KEY=...)
 	bin/repr-cpp roundtrip-corpus $(KEY)
 repr-cpp-pp-essential: ## the essential subset of C++'s token check (test/cpp/essential-read.txt: the lexical corpus, one g++.dg file of each class, three headers) (bin/repr-cpp pp-check --essential)
 	bin/repr-cpp pp-check --essential
-repr-cpp-roundtrip-essential: ## the essential subset of C++'s round trip (test/cpp/essential-print.txt, held to roundtrip-results/gxx-dg-essential.edn) and the samples (bin/repr-cpp roundtrip-corpus gxx-dg-essential, samples)
+repr-cpp-roundtrip-essential: ## the essential subset of C++'s round trip (test/cpp/essential-print.txt, held to roundtrip-results/own/gxx-dg-essential.edn) and the samples (bin/repr-cpp roundtrip-corpus gxx-dg-essential, samples)
 	bin/repr-cpp roundtrip-corpus gxx-dg-essential && bin/repr-cpp roundtrip-corpus samples
 repr-cpp-pp-record-results: ## the token check's results, test/repr/cpp/pp-check-results.edn, at the recorded samplings (bin/repr-cpp pp-check --record-results, three runs)
 	bin/repr-cpp pp-check --corpus cpp-lexical --record-results && bin/repr-cpp pp-check --corpus gxx-dg --sample 10 --record-results && bin/repr-cpp pp-check --corpus libstdcxx-headers --sample 8 --record-results

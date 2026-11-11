@@ -46,12 +46,12 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | Java | 72.9 (80.4); 77.2 on `java-night` | 100 | 99.7 | completeness |
 | Go | 97.0 (100.0) | 100 | 100 | |
 | C | 96.0 (99.6) | 100 | 99.7 | |
-| C++ | 76.3 (96.8) | 100 | 67.8 | completeness, independence |
-| OCaml | 81.8 (96.6) | 100 | 87.4 | completeness, independence |
+| OCaml | 84.2 (96.4); 82.5 before OC222 (a) | 100 | 51.3 | completeness, independence |
+| C++ | 76.3 (96.8); 89.1 (97.8) / 71.3 on `cpp-print-own` | 100 | 67.8 | completeness, independence |
 | Scheme | 97.4 (98.9) | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
-| LLVM IR | 96.4 (97.9) | 100 | 96.9 | |
+| LLVM IR | 97.6 (98.5) | 100 | 96.9 | |
 | Python | 0 | 83.3 | 20.0 | all three |
 
 Six crops are above 90 on all three. What the others still need:
@@ -63,21 +63,34 @@ Six crops are above 90 on all three. What the others still need:
   cell judged by the round trip's own checks, class files a sub-level), the rest of
   [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking.
 - **C++** (completeness, independence): read 1,182 and print 1,665 by design are most of the gap (96.8 without them); the
-  print cell moves to the own round trip (CP243 (a): its records tonight, the judge 0.735 → about 0.90). Independence: the
+  print cell is on the own round trip on `cpp-print-own` (CP243 (a): the records made by day, print 48.3 → 99.5, the judge
+  0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the
   read stage 0.66 and eval and AOT 0.5 (the programs run from clang's IR packs); CX12's own front end (`dg --front
   native`, tonight's record) and CP240 (b), the programs by the own route without clang's IR (`cpp-route`), lift them
   ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md), [cpp/CODEGEN.md](cpp/CODEGEN.md)).
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).
-- **Haskell** (independence): eval and AOT 0.5, the programs run over the STG GHC made. HF10 desugars to STG natively
-  (all 265 ghc-internal modules, 5,372 of 7,593 bindings equal to GHC's -O0); HF10-P3, the front end's own interfaces
-  (`hs-p3`), then HFS-I1's switch to the native STG ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md),
-  [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
+- **Haskell** (independence, 76.0): eval and AOT 0.5, the programs run over the STG GHC made. The front end compiles
+  ghc-internal bottom-up on its own interfaces (258 of 265; the `--full` step `haskell-lib-check-own`, HF10-P11), the default
+  methods' unfoldings after its Simplifier (HF10-P12: lib-stg 5,398 of 7,627 bindings equal to GHC's -O0, ahead of GHC's
+  interfaces), and base on that pool (HF10-P14: 235 of 241, `hs-p11`); HF10-P15 to P27 decided (a) (the user, 2026-11-10; P25 yes):
+  `hs-p18` built P18 (GHC.Internal.Prim's interface from primops.txt.pp, 3,085 of 3,085 facts and every line but the header equal to
+  GHC's: no GHC interface left on the own path), P15 (`haskell-lib-own-base`, on haskell-lib-check-own's pool) and started P20;
+  `hs-p20` carried P20 on (sixteen run-breaking classes fixed in the front end, lib-stg 5,473 of 7,637, 0 worse): the whole own set
+  runs 40 of run-check's 63 (0 of 10 before), the `equal` set 50 (83 modules), both recorded as run rows; P20's proof (all ≥
+  equal, 0 lost) not reached: 10 lost in three classes (a case on the void token, output differences, NonTermination); next
+  P20's tail, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
+  ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
 - **Rust** (all three): the AOT cell has no record yet (RE4's `bin/rsi check --aot --record`, tonight: completeness and
   maturity rise with it); eval 0.5 until rsi runs the native front end's MIR (RF10b's passes: 506 of 616 bodies equal;
-  RF11, `rust-rf11`), and RES54 (a) holds a ceiling of 80% until RF12 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md),
+  RF11, `rust-rf11`). Since RFP53 (a) (the user, 2026-11-10; branch `crops-rulings`) eval and AOT are case-weighted: a case
+  scores 1 when all seven inputs C1-C7 are own (`test/rust/eval-inputs-linux-amd64.edn`, 0 of 5 today), so 37 of 73 own in
+  both cells give 90.1 (`.tmp/plans/RUST-90-PLAN.md`, S6) ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md),
   [rust/RUST-EVAL-SURVEY.md](rust/RUST-EVAL-SURVEY.md)).
+- **OCaml, OC222 (a)** (the user, 2026-11-10; branch `crops-rulings`): the 33 tests ocamltest itself skips on the pinned
+  configuration are `:na` (`:config-skipped`, `test/ocaml/ocamltest-config.edn`): completeness 82.5 → 84.2.
+- py-aot-classid (2026-11-10): the AOT judge records a classed row's `:class` by its id (`aot.ae` `(:id c)`; test `test/python/aot_judge_test.ae`); aot.ae's digest moves, the AOT packages and runner rerun; no record touched.
 - **Python** (all three): the branch `mac/201-python-py7-py11` is not on `next` yet; its read records (240r) are made, the
   rest (stdlib, site-packages, Lib/test, the mutants, the runtime and wheels' outcomes, the AOT runtime and `check --aot`)
   is night 11's. After it: the branch merged into `next` (`merge-py`, the morning of 11-11), the independence facts moved to
@@ -92,7 +105,7 @@ Six crops are above 90 on all three. What the others still need:
   hs-props, hs-props2, hs-hfsi9), OCaml (ocaml-compl, ocaml-props: OC199-OC205), Scheme (scheme-props to scheme-props3:
   the pinned Unicode 16.0 database), LLVM IR (llvm-lls33, llvm-props, llvm-props2: own verdicts), Rust (rust-rf10b,
   rust-props: RF10b, RFP23-RFP41), the gate (go-tests, gate-lane2: GTS255), controls-cg (Clojure's and Go's maturity 100),
-  table-ready (W-D13: oi and crt type-check in every configuration of goi's table), night10-fixes.
+  table-ready (W-D13: oi and crt type-check in every configuration of goi's table), night10-fixes; oi-table2 (2026-11-10: ext_final.ae's seven table errors fixed, tamago amd64 and arm64 none).
 - **On `java-night` only**: java-rmi (with java-more, java-props, java-j2g, java-refl, jcv7, security, net, serial4),
   java-older, java-classfile, java-http, java-props2, the stage-0 patches (`33d04049c`), and before them F9, F10b, F14,
   JCV2, java-unix, java-serial and java-serial2. They need tonight's conversion (`bin/jrt-convert update`, `bin/j2g-edge
@@ -143,9 +156,30 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
 
 - C: `c-props3` (CS294, CS295). C++: `cpp-props4` (CP320-CP324), `cpp-route` (CP240 (b)), `cpp-codegen-fix` (the vtables
   in a deterministic order, the codegen record 149 of 149: `cpp-codegen-gen` fails on `next` without it).
-- Haskell: `hs-p3` (HF10-P3, the own interfaces). Rust: `rust-rf11` (RF11's first slice).
-- OCaml: `ocaml-props2` (OC191-OC197, OC206, OC207). Scheme: `scheme-props4` (SCS22-SCS24). LLVM IR: `llvm-props3`
-  (LLS40-LLS42).
+- Haskell: `hs-p3` (HF10-P3, the own interfaces). Rust: `rust-rf11` (RF11's first slice); `rust-rf13` (RFP42-RFP47's light
+  parts: virtual calls and vtables, codegen's gaps, `panic-vec-remove`; the UI sampling and std's remapping for the night);
+  `rust-rf13b` (core's bodies: RF12-P6's six left all equal, core-check 5,398 equal of the 37 modules' bodies, 5,108 before).
+  `rust-rf13c` (core's bodies: core-check 5,474 equal, the refusals 117 to 63; RFP52 proposed, the interface pass's extra files).
+- OCaml: `ocaml-indep2` (2026-11-10, on `ocaml-indep`: night 10's native-path gaps, TYPER.md §27: the C stubs classed, nondep,
+  -safer-matching, Tmc's [@tailcall], id_pos_list, the -I units' shadowing) and `ocaml-indep3` on it (TYPER.md §28: Ctype's
+  pattern mode, is_instantiable, mcomp, reify, record_equation; the or-pattern's equations scoped: immediate64 and sexplib0
+  pass, the night-10 list closed; night 12 records the native records after the merge); `ocaml-s1` on it (2026-11-10: OC213 (a),
+  the read cell's 61 testsuite rejections judged by their own tests, `bin/repr-ocaml own-read`, all pass; OC214 (a), the quoted
+  strings' bytes, the print rows at the night's `--record-results testsuite opam-re`; OC209 (a), OC210 (a), the own verdicts' rest;
+  completeness 82.5 to 83.0 on its base); `ocaml-s2` on it (2026-11-10: regression_value_kinds fixed, TYPER.md §29, Typecore's
+  Ppat_constraint and the alias's type; OC215 (a) with OC199 (a), the C API at the compiled level: CApi over a file the main serves,
+  oicapi's hooks and CallRaw, the C API's shards; built and checked light, its compiled runs the night's: `bin/oi check --aot --level
+  compiled --only-list test/ocaml/capi-compiled.txt` under the big lock, then the failures' classes); `ocaml-s3` on it (2026-11-10:
+  OC216 (a), the small runtime ports: Gc.Tweak, the counters, reachable_words, OCAMLRUNPARAM l, weak keys as weak pointers, Marshal's
+  Closures flag; 12 programs at oi's level and 6 at the light AOT level out of their by-design classes, weak_array_par to `:speed`;
+  AF_UNIX and signals at the compiled level not built; the compiled level's rows the night's: `bin/oi check --aot --level compiled
+  --only-list` of the moved programs, then aot-compiled-known.edn's stale entries out); `ocaml-s4` on it (2026-11-10: OC216 (a)'s
+  rest, AF_UNIX sockets and the OS's signals at the compiled level through the main's host file `/proc/self/ocaml-host`, HostSys;
+  the light level unchanged, the recvfrom programs `:unix-java` there; the three OC216 timeouts are CPU, not load: classed as their
+  gc class's timeouts and recorded; the night's: `bin/oi check --aot --level compiled --only-list test/ocaml/oc216-compiled.txt` and
+  `bin/oi suite check --aot --level compiled --only-list test/ocaml/oc216-suite-compiled.txt` under the big lock, then recvfrom_unix's
+  and recvfrom_linux's entries out of aot-compiled-known.edn if they pass). `ocaml-props2` (OC191-OC197, OC206, OC207). Scheme: `scheme-props4` (SCS22-SCS24), `scheme-props5` (SCS25 (a), SCS26 (b)). LLVM IR: `llvm-props3`
+  (LLS40-LLS42), `llvm-props4` (LLS43 (a), LLS44 (b), LLS45 (a): the step `llvm-heldout`).
 - Java: `java-invoke2` (JCS350-JCS356 on F15), `java-testlib2` (JCS334-JCS339).
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).
 - Reviews: today's merged code on `next` (patches for the owners) and an audit of the independence facts.
@@ -161,16 +195,36 @@ items below are the ones whose work is still ahead or tied to a night.
   F10b's asynchronous channels after the night's records; JCS190's flip after the night's comparison; JCS231 after F9;
   JCS261 waits; JCS274 (`:nio`'s rest reclassified after the record); JCV11 (b) (reopens RPS9 (a)); JCV12 (b); JCS180
   later; F15 (JCS350-JCS356) for the next Java night.
-- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243, the own judge the default after tonight's records; CP250 when
+- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243 (a) built on `cpp-print-own` (to merge), CP352 on `cpp-cp352` (the five valid-code reader gaps; to merge); CP250 when
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above).
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
-  OC191-OC207 (above).
+  OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
+  on `ocaml-s2` (its compiled runs a night's), OC216 on `ocaml-s3` and its rest (AF_UNIX and signals at the compiled level) on `ocaml-s4`, then OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.
 - **Haskell** ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md)): HES83 (b) (the own verdict where a
-  `.stdout` ships, GHC's references at the oracle tier); HF9-P7 with slice 7; HF10-P3 (above); HF10's lib-stg measures on
-  night 11.
-- **Rust** ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md)): RF11, RF12 (RES54's ceiling until it); RFP29 (a) later.
+  `.stdout` ships, GHC's references at the oracle tier); HF9-P7 with slice 7; HF10-P20 to P27 (above, the plan's stages 2-9); HF10's lib-stg
+  measures on night 11; `bin/gate --full --plan` to confirm `haskell-lib-own-base` plans after `haskell-lib-check-own`.
+- **Rust** ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md)): RF11, RF12 (RES54's ceiling until it); RFP29 (a) later;
+  RFP42 (a), RFP45 (a), RFP47 (a) and RFP46 (a)'s whole run at night ("As built: RF13 (first slice)", its night commands);
+  core-check 5,576 equal at RF13e ("As built: RF13e": 5,551 by its causes, then RFP52 (a)'s interface list; rust-rf13e on
+  rust-rf13d, which carries rust-rf13b's fix and RF13c); RFP52 (a) decided by the user 2026-11-10 (with RFP48-RFP61,
+  RF12-P8), its rest (aliases, CopySpec, Drain, ascii::Char) left. RF14 (`rust-rf14` on rust-rf13e, "As built: RF14 (RFP48)"):
+  RFP48 (a) built (trait resolution in mono: impls, specialization's leaf, default bodies, the Fn traits' builtin candidates;
+  the native callees of the synthetic corpus 3,503 -> 4,079 of about 4,500, vtables 0 -> 25 of 32) and RFP49 (a)'s first part
+  (the local non-generic instances std's bodies reach): 48 of 67 synthetic programs own (47). RF15 (`rust-rf15` on rust-rf14,
+  "As built: RF15"): RFP49 (a)'s rest (generic local instances: our bodies instantiated; std's vtables' local functions),
+  promoted constants (operators, casts, strings, variants, layouts), LowerSliceLenCalls, overloaded `+=`: 56 of 67 own.
+  RF16 (`rust-rf16` on rust-rf15, "As built: RF16 (RFP58 (a))"): RFP58 (a) built (repr(simd) layouts in mono, the private SIMD
+  types read from the library's sources, vectors indirect in codegen, the generic SIMD intrinsics; ci and `gate_key` unmoved),
+  the HashMap programs' next causes (a constant function pointer's call, a spread memory field, thread-local statics), promoted
+  constants further (`ptr::null`, `size_of`, checked operators and asserts, unsizing casts with vtables): 61 of 67 own.
+  RF17 (`rust-rf17` on rust-rf16, "As built: RF17"): RF16's causes (local constants and an associated constant evaluated, a
+  static with a pointer, generic closures at their parent's arguments in mono, closure types' unification and v0, std's
+  constructors' shims, `Variants::Empty`, a reified closure's ClosureOnceShim symbol): 65 of 67 own. Next: RFP62 (opaque types in
+  mono, closures' vtable entries: closures), RFP63 (upstream monomorphizations: panic-assert-eq); the night: the whole plan's
+  rsi-build, rsi-native over the own programs RF15-RF17 added, `rsi check --front own`.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
-  night; LLS40-LLS42 (above).
+  night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
+  ported, completeness 97.6.
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records
   merge; SCS22-SCS24 (above).
 - **C** ([C23-SURVEY.md](C23-SURVEY.md)): CS281 (a) at W ((c) until); CS275 and CS280, the gmp and pcre2 packs at the next

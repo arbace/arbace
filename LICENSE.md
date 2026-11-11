@@ -1175,6 +1175,14 @@ covers what.
   `compiler/rustc_mir_build/src/builder/mod.rs` (`#[rustc_inherit_overflow_checks]`) in `build.ae`. The driver's judge, core's index and
   its native interface, `bin/lib/repr-rust/core-build.bash` and `test/rust/front/core-modules.txt` are Arbace's own, under the Eclipse
   Public License 1.0.
+- RF16 (2026-11-10, doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))"), from rustc 1.99.1, the same revision and sources and
+  under the same terms (MIT): `mono.ae`'s SIMD layouts after `compiler/rustc_ty_utils/src/layout.rs` (layout_of_uncached's repr(simd))
+  and `compiler/rustc_abi/src/layout.rs` (`LayoutCalculator::simd_type`, univariant's newtype ABI), `arbace/rust/back/codegen.ae`'s
+  generic SIMD intrinsics after `compiler/rustc_codegen_llvm/src/intrinsic.rs` (`generic_simd_intrinsic`), its vectors' indirect
+  passing after `compiler/rustc_target/src/callconv/mod.rs` (`adjust_for_rust_abi`) and its thread-local references after
+  `compiler/rustc_codegen_ssa/src/mir/rvalue.rs` (ThreadLocalRef); `mono.ae`'s reading of stdarch's `types!` follows
+  `library/stdarch/crates/core_arch/src/macros.rs`. The source reader of private ADTs and `build_run.ae`'s promoted constants'
+  additions are Arbace's own, under the Eclipse Public License 1.0.
 - The proposals RFP28-RFP41 (2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: the rest of RFP28-RFP41"), from rustc 1.99.1, the same
   revision and sources and under the same terms (MIT): `build.ae`'s byte-array static constants after `compiler/rustc_middle/src/ty/
   print/pretty.rs` (`pretty_print_const_scalar_ptr`) and a closure's fake reads after `compiler/rustc_mir_build/src/builder/expr/
@@ -1354,7 +1362,20 @@ covers what.
   heqClass's, eqClass's and coercibleClass's superclasses, the kinds' invisible binders of unboxedSoloTyCon, coercibleTyCon,
   eqTyCon, heqTyCon, anyTyCon) and the built-in families of `compiler/GHC/Builtin/Types/Literals.hs`, by hand on 2026-11-09, the
   file carrying GHC's notice (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below); the
-  judge (`compare-ifaces`) and `libcheck.ae`'s HF10-P3 verbs (`own-order`, `own`, `rank-own`) are Arbace's own.
+  judge (`compare-ifaces`) and `libcheck.ae`'s HF10-P3 verbs (`own-order`, `own`, `rank-own`) are Arbace's own; HF10-P12's
+  `helper-core` too. HF10-P12 and P14 (2026-11-09): `simplify.ae`'s stable-unfolding mode (updModeForStableUnfoldings of
+  `compiler/GHC/Core/Opt/Simplify/Utils.hs`) and `rename.ae`'s `integral-fl` (generalizeOverLitVal of
+  `compiler/GHC/Rename/Pat.hs`) from the same tarball, under the notices those files carry; `libcheck.ae`'s `dm-unfoldings`,
+  `grow-closure` and `cabal-reexports` are Arbace's own.
+- `arbace/repr/haskell/primiface.ae` (GHC.Internal.Prim's interface from `primops.txt.pp`, HF10-P18 (a), doc/haskell/FRONTEND-SURVEY.md,
+  "As built: HF10-P18"): ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
+  `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): genprimopcode's lexer and parser
+  (`utils/genprimopcode/Lexer.x`, `Parser.y`), `AccessOps.hs`, `Main.hs`'s desugarVectorSpec, tvsIn and ppTyVarBinders,
+  `compiler/GHC/Builtin/Types/Prim.hs`'s template variables and exposedPrimTyCons, `compiler/GHC/Builtin/Utils.hs`'s
+  ghcPrimExports and ghcPrimFixities and `compiler/GHC/Types/Id/Make.hs`'s ghcPrimIds, by hand on 2026-11-10, under the notices
+  those files carry (the Glasgow Haskell Compiler License, "GHC: the Glasgow Haskell Compiler License" below). `typecheck.ae`'s
+  HF10-P20 Typeable bindings of the wired-in things follow `compiler/GHC/Tc/Instance/Typeable.hs` (mkPrimTypeableTodos,
+  builtInKindReps, mkKindRepRhs, todoForTyCons) of the same tarball, under its notice.
 - `arbace/repr/haskell/rename.ae` (repr/haskell's renamer, HF2, doc/haskell/FRONTEND-SURVEY.md, "As built: HF1-HF2"):
   ports of GHC 9.14.1, https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz (SHA-256
   `2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77`, the corpus's pin): `mkOpAppRn`,

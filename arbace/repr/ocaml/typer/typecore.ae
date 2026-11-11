@@ -170,16 +170,60 @@
 
 (def ^:dynamic *equations* "The GADT equations of the case being typed: an atom of [path previous-declaration]" nil)
 
-(defn- add-equation [t1 t2]
-  (let [local (fn [t] (let [d (ty/desc t)]
-                        (when (and (= :Tconstr (d 0)) (empty? (d 2)))
-                          (let [decl (env/find-decl (d 1))]
-                            (when (and (:local-abstract decl) (nil? (:manifest decl))) [(d 1) decl])))))]
-    (when *equations*
-      (when-let [[p decl t] (or (when-let [[p d] (local t1)] [p d t2]) (when-let [[p d] (local t2)] [p d t1]))]
-        (swap! *equations* conj [p decl])
-        (env/add-decl! p (assoc decl :manifest t))
-        true))))
+(defn- path-scope
+  "Path.scope, approximated: an identifier of the program by its stamp (a later one is scoped deeper), a predefined,
+  global or library one the lowest"
+  [p]
+  (let [id (ty/path-head p)]
+    (if (or (:global id) (:predef id) (nil? (:stamp id)) (>= (:stamp id) ty/unit-stamp-base)) 0 (:stamp id))))
+
+(defn- reify!
+  "Ctype.reify: the type variables of t made fresh abstract types ($'a, or $), which a GADT equation may name"
+  [t]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (ty/repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (let [d (ty/desc t)]
+                          (if (= :Tvar (d 0))
+                            (let [p (new-local-type (if (d 1) (str "$'" (d 1)) "$"))]
+                              (ty/link! t (ty/newty2 (ty/level t) [:Tconstr p []])))
+                            (run! go (ty/children d)))))))]
+      (go t))))
+
+(def ^:dynamic *equated-types*
+  "Ctype's record_equation: the pairs of types a GADT pattern's unification took as equal (an atom), read by -principal's
+  warning (not ported), or nil" nil)
+
+(defn- record-equation! [t1 t2] (when *equated-types* (swap! *equated-types* conj [t1 t2])))
+
+(defn- add-gadt-equation!
+  "Ctype.add_gadt_equation: the abstract type of path p (declaration decl) given the manifest t for the case"
+  [p decl t]
+  (swap! *equations* conj [p decl])
+  (env/add-decl! p (assoc decl :manifest t)))
+
+(defn- add-equation
+  "Ctype.unify3's pattern mode (OCaml 5.5.0, typing/ctype.ml), on a mismatch of t1 and t2 (their heads expanded): two
+  instantiable types, the deeper scoped one equated with the other; one instantiable type equated with the other,
+  reified; a type constructor against another type, both reified, accepted unless Ctype.mcomp finds them incompatible
+  (record_equation). True when the mismatch is no error"
+  [t1 t2]
+  (when (and *equations* t1 t2)
+    (let [t1 (ty/repr (ty/expand-head t1)) t2 (ty/repr (ty/expand-head t2))
+          i1 (ty/instantiable t1) i2 (ty/instantiable t2)]
+      (cond
+        (and i1 i2) (let [[[p decl] dest] (if (> (path-scope (first i1)) (path-scope (first i2))) [i1 t2] [i2 t1])]
+                      (record-equation! t1 t2)
+                      (add-gadt-equation! p decl dest)
+                      true)
+        i1 (do (reify! t2) (record-equation! t1 t2) (add-gadt-equation! (first i1) (second i1) t2) true)
+        i2 (do (reify! t1) (record-equation! t1 t2) (add-gadt-equation! (first i2) (second i2) t1) true)
+        (or (= :Tconstr ((ty/desc t1) 0)) (= :Tconstr ((ty/desc t2) 0)))
+        (do (reify! t1) (reify! t2)
+            (try (ty/mcomp t1 t2) (record-equation! t1 t2) true
+                 (catch arbace.lang.ExceptionInfo e (if (= :incompatible (:unify (ex-data e))) false (throw e)))))
+        :else false))))
 
 (defn- undo-equations! [eqs] (doseq [[p decl] (reverse eqs)] (env/add-decl! p decl)))
 (defn instance-constructor-pattern
@@ -232,8 +276,21 @@
     (letfn [(lp [a b] (if (= a b) (mk a) {:ppat_desc [:Ppat_or (mk a) (lp (inc a) b)] :ppat_loc loc}))]
       (let [c1 (int c1) c2 (int c2)] (if (<= c1 c2) (lp c1 c2) (lp c2 c1))))))
 
+(declare build-as-type-aux)
+
 (defn build-as-type
-  "Typecore.build_as_type: the most general type of what a pattern matches, an alias's variable's type"
+  "Typecore.build_as_type: the most general type of what a pattern matches, an alias's variable's type; a constraint
+  (build_as_type_extra_inner) ground its own type, else the inner pattern's unified with it"
+  [p]
+  (if-let [[t & rest] (seq (:constraints p))]
+    (if-not (ty/free-vars? t)
+      t
+      (let [as-ty (build-as-type (assoc p :constraints rest))]
+        (unify! as-ty t "pattern")
+        t))
+    (build-as-type-aux p)))
+
+(defn- build-as-type-aux
   [p]
   (let [d (:desc p)]
     (case (d 0)
@@ -308,7 +365,7 @@
       :Ppat_alias (let [p (type-pat env (d 1) expected vars) n (:txt (d 2)) id (ty/ident-create n)
                         tv (build-as-type p)]
                     (swap! vars conj [n id tv])
-                    (mk [:Tpat_alias p id n tv] expected))
+                    (mk [:Tpat_alias p id n tv] (:type p)))
       :Ppat_constant (let [[c tf] (constant (d 1))] (unify! (tf) expected "pattern") (mk [:Tpat_constant c] expected))
       :Ppat_interval (type-pat env (char-or ((:pconst_desc (d 1)) 1) ((:pconst_desc (d 2)) 1) loc) expected vars)
       :Ppat_tuple (let [ps (d 1)
@@ -318,7 +375,11 @@
       :Ppat_construct
       (let [c (lookup-constr env (:txt (d 1)) expected)
             [targs tres] (instance-constructor-pattern c)
-            _ (binding [ty/*gadt-equation* add-equation] (unify! tres expected "pattern"))
+            ;; Typecore.solve_Ppat_construct: a generalized constructor's result unified in pattern mode (unify_gadt), another's
+            ;; by the plain unification
+            _ (if (:res c)
+                (binding [ty/*gadt-equation* add-equation] (unify! tres expected "pattern"))
+                (unify! tres expected "pattern"))
             sarg (when-let [a (d 2)] (second a))
             sargs (cond
                     (nil? sarg) []
@@ -344,9 +405,15 @@
       :Ppat_array (let [t (ty/newvar)]
                     (unify! (ty/type-array t) expected "pattern")
                     (mk [:Tpat_array (mapv #(type-pat env % t vars) (d 1))] expected))
-      :Ppat_or (let [p1 (type-pat env (d 1) expected vars)
+      ;; Typecore's Ppat_or: each alternative typed in a copy of the pattern environment (Pattern_env.copy), its GADT
+      ;; equations dropped after it
+      :Ppat_or (let [n (when *equations* (count @*equations*))
+                     drop! (fn [] (when n
+                                    (undo-equations! (drop n @*equations*))
+                                    (swap! *equations* #(vec (take n %)))))
+                     p1 (try (type-pat env (d 1) expected vars) (finally (drop!)))
                      v2 (atom [])
-                     p2 (type-pat env (d 2) expected v2)
+                     p2 (try (type-pat env (d 2) expected v2) (finally (drop!)))
                      m (into {} (map (fn [[n id t]] [n [id t]]) @vars))
                      ren (into {} (map (fn [[n id t]] (let [[id1 t1] (get m n)] (when t1 (unify! t t1 "pattern")) [id id1])) @v2))]
                  (mk [:Tpat_or p1 (pm/alpha-pat ren p2)] expected))
@@ -358,9 +425,13 @@
                            (unify! (ty/instance scheme) expected "pattern")
                            (swap! vars conj [n id scheme])
                            (mk [:Tpat_var id n] expected))
+                         ;; Typecore's Ppat_constraint (solve_Ppat_constraint): the constraint unified with the expected
+                         ;; type, the inner pattern typed against the constraint, the pattern's type the constraint's, the
+                         ;; constraint kept as its extra (build_as_type's): under a GADT equation the two differ
                          (let [t (annot-type env (d 2))]
                            (unify! t expected "pattern")
-                           (type-pat env (d 1) expected vars)))
+                           (let [p (type-pat env (d 1) t vars)]
+                             (assoc p :type t :constraints (cons t (:constraints p))))))
       :Ppat_variant (let [tag (d 1) sarg (d 2)
                           ;; Typecore.solve_Ppat_variant: an undecided tag, matched
                           arg-type (when sarg (ty/newvar))
@@ -560,6 +631,43 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
+
+(defn- turn-let-into-match?
+  "Typecore.turn_let_into_match: the pattern holds a constructor, an open tuple or a labelled one (exists_ppat over
+  shallow_iter_ppat's children)"
+  [p]
+  (let [d (:ppat_desc p)]
+    (or (case (d 0)
+          :Ppat_construct true
+          :Ppat_tuple (or (= :Open (d 2)) (boolean (some (fn [[l _]] (some? l)) (d 1))))
+          false)
+        (boolean (some turn-let-into-match?
+                       (case (d 0)
+                         :Ppat_array (d 1)
+                         (:Ppat_or :Ppat_effect) [(d 1) (d 2)]
+                         :Ppat_variant (when (d 2) [(d 2)])
+                         :Ppat_tuple (map second (d 1))
+                         :Ppat_construct []
+                         (:Ppat_exception :Ppat_lazy) [(d 1)]
+                         :Ppat_alias [(d 1)]
+                         :Ppat_open [(d 2)]
+                         :Ppat_constraint [(d 1)]
+                         :Ppat_record (map second (d 1))
+                         []))))))
+
+(defn- vb-exp-constraint
+  "Typecore.vb_exp_constraint: the binding's expression with its constraint (a polymorphic one left to the pattern)"
+  [vb]
+  (let [c (:pvb_constraint vb) e (:pvb_expr vb)
+        eloc (:pexp_loc e)]
+    (cond
+      (nil? c) e
+      (and (= :Pvc_constraint (c 0)) (empty? (c 1)))
+      (if (= :Ptyp_poly ((:ptyp_desc (c 2)) 0)) e {:pexp_desc [:Pexp_constraint e (c 2)] :pexp_loc eloc})
+      (= :Pvc_coercion (c 0)) {:pexp_desc [:Pexp_coerce e (c 1) (c 2)] :pexp_loc eloc}
+      :else (reduce (fn [x n] {:pexp_desc [:Pexp_newtype n x] :pexp_loc eloc})
+                    {:pexp_desc [:Pexp_constraint e (c 2)] :pexp_loc eloc}
+                    (reverse (c 1))))))
 
 (declare type-expect type-function type-let type-cases split-effect-cases type-effect-cases type-binding-op type-andops type-moddep-fun)
 
@@ -829,10 +937,19 @@
                        ;; Typecore's "terrible hack for format strings": the literal typed as its format's constructors
                        (type-expect env (assoc (fmt/type-format ((:pconst_desc (d 1)) 1)) :pexp_loc loc) expected)
                        (let [[c tf] (constant (d 1))] (ret [:Texp_constant c] (tf))))
-      :Pexp_let (let [eqs (atom [])
+      :Pexp_let (if (and (= :Nonrecursive (d 1)) (= 1 (count (d 2))) (empty? (:pvb_attributes (first (d 2))))
+                         (turn-let-into-match? (:pvb_pat (first (d 2)))))
+                  ;; OCaml 5.5's Typecore: `let K x = e in body` (a constructor, an open or labelled tuple in the pattern) typed as
+                  ;; `match e with K x -> body` (turn_let_into_match): the expression first, so that the pattern's constructor is
+                  ;; disambiguated by its type (cmdliner_completion's `let (Conv conv) = ...`, Conv not in scope)
+                  (let [vb (first (d 2))]
+                    (type-expect env {:pexp_desc [:Pexp_match (vb-exp-constraint vb) [{:pc_lhs (:pvb_pat vb) :pc_guard nil :pc_rhs (d 3)}]]
+                                      :pexp_loc loc}
+                                 expected))
+                (let [eqs (atom [])
                       [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
                       body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
-                  (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
+                  (mkexp [:Texp_let (d 1) vbs body] (:type body) loc)))
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
                                      [:Pfunction_body {:pexp_desc [:Pexp_constraint ((d 3) 1) (c 1)] :pexp_loc (:pexp_loc ((d 3) 1))}]
@@ -843,7 +960,8 @@
                                    (d 3))
                            [params body t] (type-function env (d 1) sbody expected)]
                        (assoc (mkexp [:Texp_function params body] t loc) :env env))
-      :Pexp_apply (let [f (type-exp env (d 1))
+      :Pexp_apply (let [with-attrs (fn [f sf] (if-let [as (seq (:pexp_attributes sf))] (assoc f :attrs as) f))
+                        f (with-attrs (type-exp env (d 1)) (d 1))
                         sargs (vec (d 2))
                         pname (let [fd (:desc f)] (when (and (= :Texp_ident (fd 0)) (= :prim (first (:kind (fd 2)))))
                                                     (:name (second (:kind (fd 2))))))
@@ -852,9 +970,9 @@
                         [f sargs] (cond
                                     (and nolabels (= pname "%revapply") (inferred? (second (second sargs)))
                                          (apply-prim-type? :revapply (:type ((:desc f) 2))))
-                                    [(type-exp env (second (second sargs))) [(first sargs)]]
+                                    [(with-attrs (type-exp env (second (second sargs))) (second (second sargs))) [(first sargs)]]
                                     (and nolabels (= pname "%apply") (apply-prim-type? :apply (:type ((:desc f) 2))))
-                                    [(type-exp env (second (first sargs))) [(second sargs)]]
+                                    [(with-attrs (type-exp env (second (first sargs))) (second (first sargs))) [(second sargs)]]
                                     :else [f sargs])
                         [args t] (type-application env f sargs)]
                     (ret [:Texp_apply f args] t))

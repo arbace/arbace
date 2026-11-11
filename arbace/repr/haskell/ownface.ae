@@ -157,9 +157,25 @@
 
 (defn- strs [n] (mapv #(if (symbol? %) (name %) %) n))
 
+(defn helper-core
+  "HF10-P12 (a): a Core expression of the -O0 Simplifier's (arbace.repr.haskell.core) in the helper's spelling, the one
+  an interface's unfoldings are written in (desugar/norm-iface's inverse): a name vector as (ext NS M OCC), an
+  alternative's :default as default, a cast dropped (the helper writes Core with its coercions erased, as the
+  elaborator's Core is)"
+  [x]
+  (cond
+    (and (vector? x) (= 4 (count x)) (= "ext" (nth x 0))) (list 'ext (symbol (nth x 1)) (nth x 2) (nth x 3))
+    (and (seq? x) (= 'cast (first x))) (helper-core (second x))
+    (and (seq? x) (= 'alt (first x)) (= :default (second x))) (apply list 'alt 'default (map helper-core (drop 2 x)))
+    (seq? x) (apply list (map helper-core x))
+    (vector? x) (mapv helper-core x)
+    :else x))
+
 (defn own-iface-text
-  "The module's own interface: rr the renamer's result, r the elaborator's; unit the package's unit id"
-  [rr r unit]
+  "The module's own interface: rr the renamer's result, r the elaborator's; unit the package's unit id; dm-over the
+  default methods' unfoldings after the module's -O0 Simplifier ({$dm Core}, HF10-P12 (a)), written in place of the
+  elaborator's Core of each"
+  [rr r unit & [dm-over]]
   (let [r (wired r)
         m (:module r)
         ka (or (:kind-arity r) {})
@@ -235,8 +251,10 @@
                 (str "(instance " (ns-str dfun) " " (tf [:forall tvs ctx [:tc (first head) (second head)]]) ")"))
         ;; the default methods' compulsory unfoldings (GHC.HsToCore.Binds' makeCorePair with is_default_method: every
         ;; $dm, IsDefaultMethod's export, Note [INLINE and default methods]), the only unfoldings an -O0 interface carries
-        ;; (addExternal's Note [Always expose compulsory unfoldings]); the elaborator's Core of the $dm, its local binders
-        ;; made unique to the module (an importer's own binders are numbered alike)
+        ;; (addExternal's Note [Always expose compulsory unfoldings]); since HF10-P12 (a) the $dm's stable unfolding after
+        ;; the module's own -O0 Simplifier (simplStableUnfolding in updModeForStableUnfoldings' mode: what GHC's
+        ;; -O0 interface carries), else the elaborator's Core of the $dm; its local binders made unique to the module
+        ;; (an importer's own binders are numbered alike)
         dms (set (for [[_ info] classes [_ d] (:defaults info)] d))
         uniq (fn uniq [x] (cond (and (seq? x) (= 'lv (first x)) (= 3 (count x))) (list 'lv (second x) (str (nth x 2) "@" m))
                                 (seq? x) (apply list (map uniq x))
@@ -244,7 +262,7 @@
                                 :else x))
         dm-unfs (binding [*print-length* nil *print-level* nil *print-meta* false]
                   (vec (sort (for [b (:core r) :when (and (seq? b) (= 'bind (first b)) (contains? dms (second b)))]
-                               (str "(dm-unfolding " (ns-str (second b)) " " (pr-str (uniq (nth b 2))) ")")))))
+                               (str "(dm-unfolding " (ns-str (second b)) " " (pr-str (uniq (get dm-over (second b) (nth b 2)))) ")")))))
         head-occ (fn [t] (case (first t) :tc (occ (second t)) :tv (first (str/split (second t) #"_")) :app (recur (second t)) ""))
         fis (for [[fam e] (:fam-insts r)]
               (let [ax (if (:data e) (str "D:" (occ (second (:rhs e))) "0") (str "D:R:" (occ fam) (apply str (map head-occ (:lhs e)))))]

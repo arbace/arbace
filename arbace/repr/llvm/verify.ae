@@ -48,7 +48,7 @@
 (def ^:dynamic *ctx* nil)   ; where a check runs: {:fn F :bb LABEL :inst X} (the Verifier), {:form I :item K} (the parser)
 (def ^:dynamic ^java.util.List *errs* nil)   ; the Verifier's errors, in order (it goes on after a failed visit)
 
-(declare verr)
+(declare verr require-logical-pointer-scan)
 
 (defn- soft!
   "CheckFailed: the failure recorded, the check goes on."
@@ -79,6 +79,8 @@
 (def ^:dynamic ^java.util.Set *mdefs* nil)   ; !N defined
 (def ^:dynamic ^java.util.Set *mrefs* nil)   ; !N referenced
 (def ^:dynamic *all-forms* [])
+;; per module (llvm-compl2, REVIEW.md 2.3): the module-wide facts the instruction rules ask, computed at most once
+(def ^:dynamic *mod-facts* (atom {}))
 (def ^:dynamic *cur-fn* nil)   ; the name of the function LLParser is parsing   ; the module's forms (the Verifier's module-wide lookups)
 (def ^:dynamic *distinct* #{})   ; the ids of the distinct nodes
 (def ^:dynamic *partial* false)
@@ -1755,6 +1757,24 @@
       (and (zero? (long dbi)) (= 'alloca (first db))
            (let [[_ ps] (split-inst db) c (second (strip-flags ps))] (or (nil? c) (not (vector? c)) (not (local? (peek c)))))))))
 
+;; llvm-compl2: module-wide facts some instruction rules read
+(defn- once [k f]
+  (let [m @*mod-facts*]
+    (if (contains? m k) (get m k) (let [v (f)] (swap! *mod-facts* assoc k v) v))))
+
+(defn- require-logical-pointer? []
+  (once :require-logical-pointer #(require-logical-pointer-scan)))
+
+(defn- require-logical-pointer-scan []
+  (boolean
+   (some (fn [f] (let [[_ id v] (md-ops f)]
+                   (and (= (md-str id) "require-logical-pointer") (md-int-op? v) (not (zero? (.signum ^java.math.BigInteger (md-int-val v)))))))
+         (mapcat #(when (and (= (first %) 'llvm/named-meta) (= (second %) '!llvm.module.flags)) (nth % 2)) *all-forms*))))
+
+(defn- amdgcn-triple? []
+  (once :amdgcn-triple
+        (fn [] (boolean (some (fn [x] (when (= (first x) 'llvm/triple) (str/starts-with? (str (second x)) "amdgcn"))) *all-forms*)))))
+
 (defn- check-intrinsic-call
   "Verifier::visitIntrinsicCall: the rules of particular intrinsics at their calls (each visit ends at its first failure)."
   [^String nm b defs]
@@ -1772,6 +1792,25 @@
         (when-not (#{"fpexcept.ignore" "fpexcept.maytrap" "fpexcept.strict"} ex) (verr :verifier/intrinsic-call "invalid exception behavior argument" :inst))
         (when (and rounding? (not (#{"round.dynamic" "round.tonearest" "round.downward" "round.upward" "round.towardzero" "round.tonearestaway"} rm)))
           (verr :verifier/intrinsic-call "invalid rounding mode argument" :inst))))
+;; llvm-compl2 (visitIntrinsicCall's AMDGPU cases): s.prefetch.data on flat, global or constant memory (or an address space
+    ;; past AMDGPU's), av.load/av.store's last argument a metadata string, the cooperative atomics on a generic or global pointer
+    ;; with a node of one string last
+    (cond
+      (str/starts-with? id "llvm.amdgcn.s.prefetch.data")
+      (let [as (addrspace (aty 0))]
+        (when-not (or (#{0 1 4} as) (> (long as) 9))
+          (verr :verifier/intrinsic-call "llvm.amdgcn.s.prefetch.data only supports global or constant memory" :inst)))
+      (re-find #"^llvm\.amdgcn\.av\.(load|store)\." id)
+      (when-not (md-str (arg (dec (count args))))
+        (verr :verifier/intrinsic-call "the last argument to av load/store intrinsics must be a metadata string" :inst))
+      (str/starts-with? id "llvm.amdgcn.cooperative.atomic.")
+      (do (when-not (#{0 1} (addrspace (aty 0)))
+            (verr :verifier/intrinsic-call "cooperative atomic intrinsics require a generic or global pointer" :inst (value-culprit (aty 0) (arg 0) defs)))
+          (let [ops (md-ops (arg (dec (count args))))]
+            (when-not (and (= 1 (count ops)) (md-str (first ops)))
+              (verr :verifier/intrinsic-call "cooperative atomic intrinsics require that the last argument is a metadata string" :inst
+                    (value-culprit 'metadata (arg (dec (count args))) defs)))))
+      :else nil)
     (case id
       "llvm.assume"
       (do (when (seq (:bundles o)) (when-not (#{1 true} (arg 0)) (verr :verifier/intrinsic-call "assume with operand bundles must have i1 true condition" :inst)))
@@ -1813,6 +1852,45 @@
       (let [fa (arg 0) d (when (global? fa) (.get *gdefs* (global-key fa)))]
         (when-not (and d (= :function (:kind d)) (= 'llvm/define (first (:form d))))
           (verr :verifier/intrinsic-call "llvm.localrecover first argument must be function defined in this module" :inst)))
+      ;; llvm-compl2 (LLVM 23's Verifier, visitIntrinsicCall's experimental_gc_relocate): tied to a statepoint (or undef, or a landingpad
+      ;; on an invoke's unwind path), the base and derived indices constant and within the statepoint's gc-live bundle
+      "llvm.experimental.gc.relocate"
+      (let [tok (arg 0) d (when (local? tok) (.get ^java.util.Map defs (local-key tok))) di (when d (nth d 2))
+            sp (when (and di ('#{call invoke} (first di)))
+                 (let [c (callee-of di)] (when (and (global? c) (str/starts-with? (global-key c) "llvm.experimental.gc.statepoint")) di)))
+            lp? (and di (= 'landingpad (first di)))]
+        (when-not (= 3 (count args)) (verr :verifier/intrinsic-call "wrong number of arguments" :inst))
+        (when-not (or lp? sp ('#{undef poison} tok))
+          (verr :verifier/intrinsic-call "gc relocate is incorrectly tied to the statepoint" :inst))
+        (when-not (integer? (arg 1)) (verr :verifier/intrinsic-call "gc.relocate operand #2 must be integer offset" :inst))
+        (when-not (integer? (arg 2)) (verr :verifier/intrinsic-call "gc.relocate operand #3 must be integer offset" :inst))
+        (when sp
+          (when-let [live (some (fn [[tag & ops]] (when (= tag "gc-live") ops)) (:bundles (nth (split-inst sp) 2)))]
+            ;; getZExtValue: a negative i32 index is a large unsigned one
+            (let [n (count live) zx (fn [v] (if (neg? (long v)) Long/MAX_VALUE (long v)))]
+              (when-not (< (zx (arg 1)) n) (verr :verifier/intrinsic-call "gc.relocate: statepoint base index out of bounds" :inst))
+              (when-not (< (zx (arg 2)) n) (verr :verifier/intrinsic-call "gc.relocate: statepoint derived index out of bounds" :inst))))))
+      ;; llvm-compl2 (visitVPIntrinsic): a VP cast keeps the vector length, vp.fcmp and vp.icmp take their kind's predicates,
+      ;; experimental.vp.splice's index within [-VL, VL-1], VL the known minimum elements times the function's vscale_range minimum
+      ("llvm.vp.fptoui" "llvm.vp.fptosi" "llvm.vp.uitofp" "llvm.vp.sitofp" "llvm.vp.fptrunc" "llvm.vp.fpext" "llvm.vp.trunc"
+       "llvm.vp.zext" "llvm.vp.sext" "llvm.vp.ptrtoint" "llvm.vp.inttoptr")
+      (let [rt (result-type b) at (aty 0)]
+        (when (and (vec-type? rt) (vec-type? at) (not= (shape rt) (shape at)))
+          (verr :verifier/intrinsic-call "VP cast intrinsic first argument and result vector lengths must be equal" :inst)))
+      "llvm.vp.fcmp"
+      (when-not (#{"false" "oeq" "ogt" "oge" "olt" "ole" "one" "ord" "uno" "ueq" "ugt" "uge" "ult" "ule" "une" "true"} (md-str (arg 2)))
+        (verr :verifier/intrinsic-call "invalid predicate for VP FP comparison intrinsic" :inst))
+      "llvm.vp.icmp"
+      (when-not (#{"eq" "ne" "ugt" "uge" "ult" "ule" "sgt" "sge" "slt" "sle"} (md-str (arg 2)))
+        (verr :verifier/intrinsic-call "invalid predicate for VP integer comparison intrinsic" :inst))
+      "llvm.experimental.vp.splice"
+      (let [rt (result-type b) idx (arg 2)
+            vr (attr-of (group-items (:attrs fo)) "vscale_range")
+            lo (if vr (Long/parseLong (first (re-seq #"[0-9]+" (str (second vr))))) 1)
+            vl (when (vec-type? rt) (* (long (nth rt 1)) lo))]
+        (when (and vl (integer? idx)
+                   (not (or (and (neg? (long idx)) (<= (- (long idx)) vl)) (and (>= (long idx) 0) (< (long idx) vl)))))
+          (verr :verifier/intrinsic-call "The splice index exceeds the range [-VL, VL-1] where VL is the known minimum number of elements in the vector" :inst)))
       "llvm.experimental.gc.statepoint"
       (do (when (and (= h 'call) (seq? (second ps)) (= 'asm (first (second ps))))
             (verr :verifier/intrinsic-call "gc.statepoint support for inline assembly unimplemented" :inst))
@@ -2657,6 +2735,52 @@
               (contains? ok-ops op) (recur (+ i sz))
               :else false))))))
 
+;; LLS43 (a) (the user 2026-11-09): verifyFragmentExpression (Verifier.cpp of 23.1.5, V:7425-7464) and DIVariable::getSizeInBits
+;; (DebugInfoMetadata.cpp:1653): a record's or a global's DW_OP_LLVM_fragment against its variable's size.
+
+(defn- frag-info
+  "DIExpression::getFragmentInfo of a valid expression node: [offset size] of its DW_OP_LLVM_fragment, nil without one (or when the
+  expression is not valid: the record's check returns then, V:7431)."
+  [en]
+  (when (= "DIExpression" (di-kind en))
+    (let [els (expr-elements en)]
+      (when (expr-valid? els)
+        (let [i (.indexOf ^java.util.List els 4096)]
+          (when (>= i 0) [(nth els (inc i)) (nth els (+ i 2))]))))))
+
+(defn- var-size-bits
+  "DIVariable::getSizeInBits: up the variable's type chain, the first type with a size (a constant, not 0), through derived types to
+  their base; nil when the chain ends without one (a missing type, a composite, basic or other type of size 0, a size not constant)."
+  [vfs]
+  (loop [t (:type vfs) k 0]
+    (let [n (node-of t) k (long k)]
+      (when (and n (< k 1000) (not= t 'null))
+        (let [kd (di-kind n) fs (di-fields n) sz (:size fs)]
+          (cond (and (di-type-kinds kd) (integer? sz) (not (zero? (long sz)))) (long sz)
+                (= kd "DIDerivedType") (recur (:baseType fs) (inc k))
+                :else nil))))))
+
+(defn- check-fragment
+  "verifyFragmentExpression(V, Fragment, Desc) (V:7451): the fragment within the variable and not all of it; its unsigned (32-bit)
+  sum as the Verifier computes it. `desc` is the culprit the message names first (the record, or the global's expression)."
+  [var [off size] desc]
+  (when-let [vsize (var-size-bits (di-fields (node-of var)))]
+    (let [m32 (fn [x] (bit-and (long x) 0xffffffff))
+          fsize (m32 size) foff (m32 off)]
+      (when-not (<= (m32 (+ fsize foff)) vsize)
+        (verr :di/fragment "fragment is larger than or outside of variable" desc [:mdv var]))
+      (when (= fsize vsize)
+        (verr :di/fragment "fragment covers entire variable" desc [:mdv var])))))
+
+(defn- check-record-fragment
+  "verifyFragmentExpression(DVR) (V:7425): a DILocalVariable that is not artificial and a valid expression with a fragment."
+  [var expr]
+  (let [vn (node-of var) en (node-of expr)]
+    (when (= "DILocalVariable" (di-kind vn))
+      (when-let [fi (frag-info en)]
+        (when-not (flag? (:flags (di-fields vn)) "DIFlagArtificial")
+          (check-fragment var fi :inst))))))
+
 (defn- check-di-type-node
   "visitDIDerivedType, visitDICompositeType, visitDISubrange, visitDIGenericSubrange, visitDISubroutineType and
   visitDIBasicType (with visitDIType and visitDIScope) over the node `id`; true when the node is one of these kinds."
@@ -2819,11 +2943,15 @@
                                         (not (and sp (= true (:keyInstructions (di-fields (node-of sp))))))))
                              (apply verr :di/node "DbgLoc uses atomGroup but DISubprogram doesn't have Key Instructions enabled" (N :scope))))
           ;; a variable a subprogram retains: the subprogram, reached first from its function (the Verifier's walk), says so first
-          "DILocalVariable" (when-not (or (local-scope-kinds (kind-of (:scope fs)))
+          "DILocalVariable" (do (when-not (or (local-scope-kinds (kind-of (:scope fs)))
                                           (some (fn [[_ n]] (and (= "DISubprogram" (di-kind n))
                                                                  (some #{id} (md-ops (:retainedNodes (di-fields n))))))
                                                 *meta*))
                               (apply verr :di/node "local variable requires a valid scope" (N :scope)))
+                            ;; visitDILocalVariable's last check (V:1721-1722), reached with a local scope: a subroutine type is no
+                            ;; variable's (found by LLS45 (a)'s held-out set, 1200000)
+                            (when (and (local-scope-kinds (kind-of (:scope fs))) (= "DISubroutineType" (kind-of (:type fs))))
+                              (apply verr :di/node "invalid type" (N :type))))
           "DILexicalBlock" (when (and (some? (:column fs)) (not (zero? (long (:column fs)))) (zero? (long (or (:line fs) 0))))
                              (verr :di/node "cannot have column info without line info"))
           "DISubprogram"
@@ -2969,6 +3097,8 @@
   (let [reach (reachable-md forms)
         nodes (for [f forms :when (= (first f) 'llvm/meta) :let [n (nth f 2)] :when (and (di-kind n) (.contains ^java.util.Set reach (second f)))] [(second f) n])
         defs (filter #(= (first %) 'llvm/define) forms)
+        ;; LLS43 (a): the global variable expressions the compile units list (visitMDNode reaches them through the units)
+        cu-gves (set (for [[_ n] nodes :when (= "DICompileUnit" (di-kind n)) :let [g (:globals (di-fields n))] :when g x (md-ops g)] x))
         dbg? (fn [md] (some #(= % '!dbg) (take-nth 2 md)))
         has-di? (or (seq nodes)
                     (some (fn [f] (case (first f)
@@ -3010,7 +3140,12 @@
                 (when (= "DIGlobalVariableExpression" (di-kind n))
                   (let [v (:var (di-fields n))]
                     (when (and v (some? (get *meta* v)) (= "DIGlobalVariable" (di-kind (get *meta* v))))
-                      (visiting (binding [*ctx* {:md v}] (check-di-node v (get *meta* v)))))))
+                      (visiting (binding [*ctx* {:md v}] (check-di-node v (get *meta* v)))))
+                    ;; LLS43 (a): its expression's fragment against the variable (V:1749-1753), here when visitMDNode reaches it (a
+                    ;; compile unit's globals); a global's !dbg is checked again by visitGlobalVariable's direct call (V:799, below)
+                    (when (and v (some? (node-of v)) (contains? cu-gves id))
+                      (when-let [fi (frag-info (node-of (:expr (di-fields n))))]
+                        (visiting (binding [*ctx* {:md id}] (check-fragment v fi [:mdv id])))))))
                 (visiting (binding [*ctx* {:md id}] (check-di-node id n)))))
             (doseq [:let [attached (java.util.HashMap.)]
                     f forms :when (#{'llvm/define 'llvm/declare} (first f))]
@@ -3035,7 +3170,8 @@
                      (when (and (= (first f) 'llvm/declare) (or (contains? *distinct* sp) (flag? (:spFlags (di-fields spn)) "DISPFlagDefinition")))
                        (verr :di/function "function declaration may only have a unique !dbg attachment" :fn [:mdv sp])))))
                 ;; a failed attachment check ends visitFunction before its walk of the locations (V:3313)
-                (when (and sp (= "DISubprogram" (di-kind spn)) (= (first f) 'llvm/define) (= nerr (.size ^java.util.List *errs*)))
+                (if (and sp (= "DISubprogram" (di-kind spn)) (= (first f) 'llvm/define) (= nerr (.size ^java.util.List *errs*)))
+                 (do
                   (visiting (doseq [[_ l & items] (numbered-blocks f) x items]
                     (let [b (body x)]
                       (if (dbg-record? b)
@@ -3066,13 +3202,28 @@
                                 :inst :bb :fn [:mdv var] [:mdv (di-sp (:scope (di-fields vn)))] [:mdv loc] [:mdv (di-sp (:scope (di-fields ln)))] :bb :fn))
                         (when (and (= "DILocation" (di-kind ln)) (some? (di-loc-sp loc)) (not= (di-loc-sp loc) sp))
                           (verr :di/function "!dbg attachment points at wrong subprogram for function"
-                                [:mdv sp] :fn :inst [:mdv loc] [:mdv (:scope (di-fields ln))] [:mdv (di-loc-sp loc)])))))
-                      nil))))))
+                                [:mdv sp] :fn :inst [:mdv loc] [:mdv (:scope (di-fields ln))] [:mdv (di-loc-sp loc)]))))
+                       ;; LLS43 (a): after the record's visit (V:536), whatever it found
+                       (visiting (binding [*ctx* {:fn f :bb l :inst x}] (check-record-fragment var expr))))
+                      dbg_assign (visiting (binding [*ctx* {:fn f :bb l :inst x}] (check-record-fragment (nth b 2 nil) (nth b 3 nil))))
+                      nil)))
+                ;; LLS43 (a): the records of a definition the walk above leaves (no subprogram, a failed attachment check) are
+                ;; visited all the same (InstVisitor visits every instruction, V:536): their fragments
+                  (when (= (first f) 'llvm/define)
+                    (doseq [[_ l & items] (numbered-blocks f) x items :let [b (body x)]
+                            :when (and (dbg-record? b) ('#{dbg_declare dbg_value dbg_declare_value dbg_assign} (first b)))]
+                      (visiting (binding [*ctx* {:fn f :bb l :inst x}] (check-record-fragment (nth b 2 nil) (nth b 3 nil))))))))))
           (doseq [f forms :when (= (first f) 'llvm/global)]
             (let [o (apply hash-map (let [[_ _ _ & more] f] (if (and (seq more) (not (keyword? (first more)))) (rest more) more)))
                   d (get (apply hash-map (:md o)) '!dbg)]
               (when (and d (not= "DIGlobalVariableExpression" (di-kind (node-of d))))
-                (visiting (binding [*ctx* {:global f}] (verr :di/global "!dbg attachment of global variable must be a DIGlobalVariableExpression")))))))))))
+                (visiting (binding [*ctx* {:global f}] (verr :di/global "!dbg attachment of global variable must be a DIGlobalVariableExpression"))))
+              ;; LLS43 (a): visitGlobalVariable calls visitDIGlobalVariableExpression itself (V:799): the fragment again
+              (when (and d (= "DIGlobalVariableExpression" (di-kind (node-of d))))
+                (let [v (:var (di-fields (node-of d)))]
+                  (when (and v (= "DIGlobalVariable" (di-kind (node-of v))))
+                    (when-let [fi (frag-info (node-of (:expr (di-fields (node-of d)))))]
+                      (visiting (binding [*ctx* {:md d}] (check-fragment v fi [:mdv d]))))))))))))))
 
 (defn- check-sibling-unwinds
   "Verifier::verifySiblingFuncletUnwinds: pads that unwind to a sibling pad (a catchswitch to its unwind destination, a
@@ -3272,6 +3423,12 @@
                             (verr :verifier/landingpad "LandingPadInst not the first non-PHI instruction in the block."))))
                       (check-funclet hd b x bi blocks items insts g defs (some? (:personality o)))
                       (when (= hd 'getelementptr) (check-gep b))
+                      ;; llvm-compl2: the module flag require-logical-pointer (nonzero) takes plain getelementptr and alloca out
+                      ;; (llvm.structured.gep and llvm.structured.alloca instead); AMDGPU's allocas are in the private address space 5
+                      (when (and ('#{getelementptr alloca} hd) (require-logical-pointer?))
+                        (verr :verifier/logical-pointer (str "Non-logical " hd " disallowed for this module.") :inst))
+                      (when (and (= hd 'alloca) (amdgcn-triple?) (not= 5 (addrspace (result-type b))))
+                        (verr :verifier/alloca "alloca on amdgpu must be in addrspace(5)" :inst))
                       (when ('#{load store} hd) (check-load-store hd b))
                       ;; visitCallBase
                       (when-let [c (callee-of b)]
@@ -3606,6 +3763,7 @@
   [forms]
   (binding [*types* (into {} (keep #(when (= (first %) 'llvm/type) [(second %) (norm-type (nth % 2))]) forms))
             *all-forms* forms
+            *mod-facts* (atom {})
             *alloca-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "A")
             *distinct* (set (keep #(when (and (= (first %) 'llvm/meta) (:distinct (apply hash-map (drop 3 %)))) (second %)) forms))
             *prog-as* (dl-as (some #(when (= (first %) 'llvm/datalayout) (second %)) forms) "P")

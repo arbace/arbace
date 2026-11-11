@@ -3644,3 +3644,731 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
   considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
   the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
+
+## 2026-11-10: gate-crops-fix: rust-core-essential in the rust crop
+
+Night 11's first gate (next dc6a55df2) failed only `gate-tests`: costs-test said ":crops: rust-core-essential is in no crop" (rust-rf12's merge, 0c22b1f1b, added the essential step without listing it in test/gate/steps.edn's :crops :rust). gate-reads-test and gate-tests-test run bin/gate-tests nested and failed only with it. Fix: rust-core-essential added to the :rust vector (after rust-front-essential; the step lives in steps.edn, no fragment under test/gate/crops/ names it). Proof: costs-test, crops-test, gate-reads-test and gate-tests-test pass; `bin/gate --plan` plans; `bin/reap` 41 of 44 cells checked, 0 problems.
+
+## 2026-11-10: the user's scoring rulings RFP53 (a) and OC222 (a) in crops-score (branch `crops-rulings`)
+
+- The user decided (about 10:30 UTC) RFP53 (a) for Rust (`.tmp/plans/RUST-90-PLAN.md`: a case scores 1 when its seven inputs C1-C7
+  are own, else 0.5; eval and AOT the case-weighted mean, counted from the records) and OC222 (a) for OCaml
+  (`.tmp/plans/OCAML-90-PLAN.md`: the 33 tests ocamltest skips on the pinned configuration `:na`, the tools' tests by design).
+  Built on `crops-rulings` from `mac/next` dc6a55df2, as the mixed-stage rule of 2026-11-07 is (doc/CROPS-SCORE.md, "Decided (the
+  user, 2026-11-10)").
+- Rust: `test/crops/crops.edn` `:own-inputs :rust` (C1-C7), the facts' `:case-inputs {:file F}` (eval
+  `test/rust/eval-inputs-linux-amd64.edn`, written by hand from the run as bin/rsi makes it: 0 of 5 own; AOT's file once its cell is
+  recorded), `crops.score`'s `rfp53-counts` and `case-inputs`: the cell's cases not own in all seven, or with no row, count 0.5.
+  Rust stays 80.0. Considered: reading `front.tsv` from the work tree (not a record: absent in a clone and in `--ref`), and counting
+  only the rows of F (a stale F would then overstate; a case with no row is 0.5 instead).
+- OCaml: the class `:config-skipped` (`:kind :na`, `:skips` the action per program, verified in ocaml-5.5.0's testsuite headers) first
+  in `test/ocaml/divergences.edn` and `divergences-aot.edn`; `test/ocaml/ocamltest-config.edn` (`ocamlc -config`, ocamltest's actions
+  from `ocamltest/builtin_actions.ml`, `ocaml_actions.ml`); `:na-rules :ocaml` and `na-class-problems` check each class. `bin/reap
+  --record`: eval 477 / 162 / 4 and AOT 419 / 158 / 66, 33 n/a each; OCaml's completeness 82.5 to 84.2. Considered: an `:except`
+  on `:tools-and-targets` (reap's classify has none; a class of its own, first, is how `:packs` and `:fortran` are written).
+- Proofs: `bin/crops-score --self-test` (37 of 73 own gives 90.1; OCaml 82.5 to 84.2; six OC222 controls and the RFP53 C7 control
+  fail as they must, and the test fails with either rule broken); `bin/crops-score --record`, then `--judge --strict` 0 problems;
+  `bin/reap` 0 problems; `bin/oi divergences`, `--aot`, `suite divergences`, `--aot` every non-pass classed; a real-data control each
+  (an `:na` program given `arch_amd64` fails `bin/crops-score`; one Rust case's inputs marked own moved eval to 0.6, one own but C7
+  stayed 0.5; both reverted).
+
+## 2026-11-09: HF10-P11 to P14: the own interfaces a step, the default methods' unfoldings, base on the own pool (branch `hs-p11`, from next `6c3c87c02`)
+
+The user accepted HF10-P11 to P14 as recommended (P13 (b)). Recorded in doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P11 to
+P14". Ported from GHC 9.14.1 (the pinned `ghc-9.14.1-src.tar.xz`): makeCorePair's compulsory unfolding of a `$dm`
+(`compiler/GHC/HsToCore/Binds.hs`), simplStableUnfolding and updModeForStableUnfoldings (`Core/Opt/Simplify/Iteration.hs`,
+`Utils.hs`), generalizeOverLitVal (`Rename/Pat.hs`, NumDecimals).
+
+- P11 (a): the `--full` step `haskell-lib-check-own` (after `haskell-lib-check`, 2 GiB, no GHC; control the interface judge's).
+- P12 (a): `lib-check --ifaces own` runs a module that defines default methods through lib-stg's pipeline and writes each `$dm`'s
+  unfolding as its `-O0` Simplifier leaves it (154 of 156; 2 with a floated local keep the elaborator's Core), in the helper's
+  spelling; the Simplifier simplifies a stable unfolding in updModeForStableUnfoldings' mode. lib-stg on the own interfaces: 5,280
+  to 5,398 of 7,627 bindings equal to GHC's `-O0` (54 modules better, 0 worse), ahead of GHC's `-O2` interfaces (5,373 of 7,600,
+  unchanged). Alternative considered: GHC's Tidy-exposed unfoldings read from the pack (the `-O2` ones: not GHC's `-O0` view).
+- P14 (a): base on ghc-internal's own pool with no GHC closure: the driver grows each closure from the imports over the names the
+  interfaces mention (as `--make` loads on demand), maps ghc-prim's thirteen reexported modules from its `.cabal` (ghc-prim's
+  library is `Dummy.hs` and reexports), compiles in the installation's unit id. 235 of 241 modules elaborate, 0 missing
+  interfaces, 6,780 of 6,785 facts equal on the 113 modules the `haskell-ifaces` pack holds; lib-stg of base 531 of 1,024
+  bindings equal to GHC's `-O0`. Found on the way: NumDecimals (System.CPUTime.Posix's `1e12 :: Integer`), ported. Alternatives
+  considered: recording GHC's base closures with GHC (refused for this branch: GHC only at the oracle tier, HF10-P16 proposes it).
+- crops-score unchanged (Haskell independence 76.0): no case runs on own libraries yet. Proposed: HF10-P15 to P19 (base's step,
+  GHC's base interfaces for the judge, the next packages, Prim from primops.txt.pp, the first own cases).
+- Checks: hsi-essential's command (one job) 123 programs, 0 unclassed, the four controls fail; bin/gate --full --plan plans the
+  new step; the gate's costs, crops, cover and declared-env tests pass.
+
+## 2026-11-10 hs-p11: lib-stg --ifaces own --run defaults to LIB_STG_REPLACE=equal; the 50 of 63 explained
+
+- `bin/lib/repr-haskell/lib-stg`: the own branch took `${LIB_STG_REPLACE:-all}` (0 of 63 on own, exit 1); now `equal`, `all` still explicit.
+  Proof, no variable: `lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`, exit 0, 27 min 54 s, 1.7 GiB: 5,398 of 7,627
+  equal, 76 own modules and 191 GHC's, 50 of 63 on each side, 0 lost, 0 gained. The survey's night command updated.
+- 50 against run-check.edn's 53: the same ten programs fail on both sides in two runs (deterministic): compiled against the `-O2` pack's
+  interfaces, run on the `-O0` sets, which lack names such as `ioException3`. The ten alone on the `-O2` pack: 10 of 10 pass. Not load, not a
+  bug of the branch; noted in the survey.
+
+2026-11-10, hs-p11 (review fix, .tmp/merge-1111/REVIEW2.md §5 items 1 and 3): ran `bin/repr-haskell lib-check --ifaces own --judge
+test/haskell/lib-check-own-ghc-internal.edn` (the new --full step haskell-lib-check-own's command; 8m22s): "265 modules against 265
+recorded; 0 worse, missing or unclassed, 0 better", the control differs as it must (0 of 19 facts equal), exit 0. P12 and NumDecimals
+move nothing the record counts, so nothing is re-recorded (the ratchet has nothing to take). Base mode (`--package base --ifaces
+own`): a missing ghc-prim.cabal is an error (exit 2, with the verb that fetches the corpus), no longer an empty list of
+reexported modules that passes; only the new line changed, bash -n, base's mode not run here (its pools are the night's).
+
+## 2026-11-10: HF10-P18 (a) GHC.Internal.Prim from primops.txt.pp, HF10-P15 (a) haskell-lib-own-base, HF10-P20 (a) started (branch `hs-p18`, from `mac/hs-p11` 3d55ae343)
+
+The user decided HF10-P15 to P27 (a) (P25 yes, its ruling: the own-interface round trip is a round trip's own verdict, GHC's
+level at the oracle tier) on 2026-11-10 (the plan `.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the survey's "Decided" block). Built by
+an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no GHC, no gate,
+no network). Sources: GHC 9.14.1's pinned tarball (SHA-256 `2a83779c...`): `compiler/GHC/Builtin/primops.txt.pp`,
+`utils/genprimopcode/{Lexer.x,Parser.y,AccessOps.hs,Main.hs}`, `compiler/GHC/Builtin/{Utils,Types/Prim}.hs`,
+`compiler/GHC/Types/Id/Make.hs`, `compiler/GHC/Tc/Instance/Typeable.hs` (BSD-3, LICENSE.md "GHC").
+
+- P18 (a): `arbace/repr/haskell/primiface.ae` builds GHC.Internal.Prim's interface from `primops.txt.pp` (Arbace's own cpp,
+  genprimopcode's lexer and parser and the access ops ported, primOpInfo's types and binders, the strictness options, Make.hs's
+  ghcPrimIds, exposedPrimTyCons' kinds). Judged against the pack `haskell-lib-ifaces-ghc-9.14.1`'s member: 3,085 of 3,085 facts
+  equal and 3,155 of 3,155 lines byte for byte (all but the header, which names the own verb); the control (types rotated) differs.
+  `lib-check --ifaces own` builds and judges it first and gives it to every closure (`LIB_CHECK_PRIM=ghc`: the pack's): no GHC
+  interface on the own path any more. Alternatives considered: extending `tools/hsprimops/primops.awk` (awk is a host tool, and
+  the types need genprimopcode's parser); taking the tycons' kinds from the pack (that is the GHC dependence removed).
+- P15 (a): `haskell-lib-check-own` keeps ghc-internal's pool as its output (`ghc-internal-pool.tar`, 6.5 MB, 0.01 s), and the new
+  `--full` step `haskell-lib-own-base` (`:uses` it) runs base's lib-check and lib-stg against their records with their controls,
+  keeping base's pool (`LIB_CHECK_POOL_OUT`, `LIB_CHECK_DEP_POOL_TAR`). Not run through `bin/gate` (the light lane's rule): its
+  command was run by hand, 6 min 8 s, 1.36 GiB.
+- P20 (a), started: the whole own set (`LIB_STG_REPLACE=all`) ran 0 of 10; four classes found and fixed in turn: GHC.Types'
+  wired-in Typeable bindings (mkPrimTypeableTodos: `tr$ModuleGHCPrim`, `krep$*` and the other built-in KindReps, GHC.Prim's
+  tycons' `$tc` from the own Prim's kinds, the promoted constructors' `$tc'`; the unboxed tuples' `$tc'` left out: deep nests time
+  the module out), the foreign calls' arguments missing from the closures' free variables (`w_188`), the synonym KindBndr in a
+  KindRep, and Unarise of unboxed tuple binders and arguments (GHC.Internal.Bignum.Primitives' `plusWord12#`, found by bisection,
+  `LIB_STG_REPLACE=@FILE`), then a primop used as a value (WordArray's `mwaWrite# = writeWordArray#`: maybeSaturate's
+  eta-expansion). lib-stg on the own interfaces 5,398 to 5,412 of 7,632 equal (8 modules better, 0 worse; re-recorded); the run
+  still 0 of 10: the wrong-size class remains elsewhere and List's `product` path has an unbound floated local; the tail is
+  bisected one class at a time (the survey's "HF10-P20 (a), started").
+- Checks: primiface check (above); lib-check --ifaces own on ghc-internal and base 0 worse (265 and 241 against their records),
+  lib-stg base 531 of 1,024 as recorded, controls differ; hsi-essential's command 123 programs, 0 unclassed, controls fail;
+  bin/reap 0 problems; crops-score --judge --strict 0 problems (Haskell 76.0). Not run: bin/gate (`--full --plan` for the new step
+  is the main session's).
+
+## 2026-11-10: HF10-P20 (a) continued: the whole own set from 0 of 10 to 40 of 63 (branch `hs-p20`, from `mac/hs-p18` 876e2913c)
+
+Built by an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no
+GHC, no gate, no network), the plan's stage 2 (`.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the user's decision of HF10-P15 to P27).
+Sources: GHC 9.14.1's pinned tarball, `compiler/GHC/Stg/Unarise.hs` (unariseFunArg, unariseAlts, void arguments),
+`compiler/GHC/CoreToStg/Prep.hs` (the case on unsafeEqualityProof dropped, maybeSaturate), `compiler/GHC/HsToCore.hs`
+(patchMagicDefns: unsafeEqualityProof, unsafeCoerce#), `compiler/GHC/HsToCore/Match.hs` (matchView),
+`compiler/GHC/Tc/TyCl/PatSyn.hs` (mkPatSynRecSelBinds), `compiler/GHC/Types/Id/Make.hs` (coerceId) (BSD-3, LICENSE.md
+"GHC").
+
+- Method: each run-breaking class found by a run of the day's ten (then the 63), its first module by bisection
+  (`LIB_STG_REPLACE=@FILE`, the new `LIB_STG_SIDES=own`), fixed in the front end, judged by `lib-stg --ifaces own --judge` (no
+  module worse) before the next run. New static comparisons in `arbace.repr.haskell.stgcmp` (`--abi`, `--rets`, `--builds`,
+  `--why`) and hsi errors that name the call (`unboxed tuple of the wrong size: the alternative binds N, M returned ...; the
+  scrutinee F`) found classes without runs. Alternatives considered: running every program on every bisection probe (too slow
+  at about a minute a probe); fixing the elaborator's type variable kinds now (a larger change across the renamer, the
+  elaborator and the interfaces: left as the class `kinds`, an interim table of two Unsafe.Coerce results in tostg).
+- Fixed, one class each (the survey's table): polymorphic identities' instantiated results (inline, runRW#), void values and
+  nullary void join points, synonyms and newtypes of function types in result types, unsafeCoerce# and Unsafe.Coerce's
+  patched definitions, match variables typed (equations' binders, desugar's match variables after their pattern variables, a
+  cast's target type), nested unboxed tuple binders, unboxed tuple case binders, a tuple case's size from its binders, coerce's
+  evidence argument, existential dictionaries in record construction, update and selectors, primops out of the CAF float
+  shortcut, view patterns (matchView), pattern synonyms' record selectors, primitive byte-string literals.
+- Measures: lib-stg on the own interfaces 5,412 to 5,473 of 7,637 bindings equal to GHC's -O0 (25 modules better, 0 worse;
+  re-recorded); lib-stg of base 531 to 547 of 1,024; the `equal` set 83 modules, 50 of 63 programs pass on it (0 lost against GHC's -O0 set's 50); the `all` set
+  40 of 63 (0 of 10 before), 10 of `equal`'s passes lost. `test/haskell/lib-stg-own-results.edn` gains the runs as rows,
+  `{:runs :equal ...}` and `{:runs :all ...}` (`libcheck record-runs`, `judge-runs`; lib-stg `--run --record/--judge`).
+- Not reached: HF10-P20's proof (all ≥ equal, 0 lost). The tail, by class: a case on the void token in an argument slot (5
+  programs, the exception paths first), output that differs (4), NonTermination unhandled (1); beyond the 63, pattern
+  synonym patterns (no `$mP` matcher: HF9's slice 7) and type variables' kinds.
+- Checks: lib-stg --ifaces own 0 worse (re-recorded), its control 0 of 171; lib-check --ifaces own 265 against 265, 0 worse
+  (258 of 265, facts unchanged), base 241 against 241, 0 worse (235 of 241), both controls differ; base's lib-stg 531 to 547, 0
+  worse (re-recorded); run-check's negative control fails on every run; hsi-essential's command 123 programs, 0 unclassed, the
+  four controls fail; the GHC-interfaces steps' commands: haskell-lib-check 0 worse (260 of 265), haskell-lib-stg 5,372 to 5,444 of
+  7,610 (0 worse, re-recorded) with its runs 60 of 63 on each side, 0 lost. Not run: bin/gate (the light lane).
+- Rule slips: a wait loop used process substitution `<(...)` once, and two commands named /dev/null (`>/dev/null 2>&1` on a
+  debugging compile, a `grep` of /dev/null); none touched another worktree's files.
+
+## 2026-11-09: OCaml's independence: OC208 (b) built, the opam set's own verdicts (branch `ocaml-indep`, from next `6c3c87c02`)
+
+The brief: raise OCaml's independence (51.3 on next, after the 11-09 audit put every cell's record at 0.5); build OC208 as accepted
+(the user, 2026-11-09: (b), the recommendation); find what keeps eval, AOT and judge below 1 and remove a toolchain from check time;
+night 10 records the native read and print, not redone here. Recorded in doc/ocaml/OCAML-SURVEY.md, "As built: OC208 (b), the opam
+set's own verdicts", with the proposals OC209-OC211.
+
+- OC208 (b): `Unix.execv`, `execve`, `execvp`, `execvpe` in the AOT runtime (`jdk/ocaml/ocaml/rt/ExtProc.ae`), the C stubs' checks of
+  otherlibs/unix's `execv.c`, `execve.c`, `execvp.c` (OCaml 5.5.0, the pinned tarball) and oi's `ext_signal.go` behaviour (the standard
+  channels flushed, execvp's search as its lookPath). Java cannot exec, so the request is written to a path the compiled level's main
+  serves (`test/ocaml/o2j/main`: jrt's ProgramHost wrapped, `/proc/self/ocaml-exec`; Close chdirs to `ExtSys/cwd`, makes the standard
+  descriptors those of `Fd`'s table, `syscall.Exec`; a failure restores both and answers the errno). Alternatives: a native method of
+  the runtime implemented in Go (j2g resolves natives in jrt or the class's own package, so it needed a j2g or jrt change, both in every
+  key); exiting with a status and having main exec after RunMain (the runtime's `System/exit` ends the process inside jrt); OC208 (a)'s
+  spawn-wait-exit at both levels (the user chose (b)). At the light level nothing serves the path: the row stays `:unix-unported`.
+  Checked on a stub of jrt (exec with directory, environment and redirections; PATH search; errno 2 with the descriptors restored) and
+  at the light level by list; the compiled level's run is the night's (above the lane's 2 GiB).
+- The opam set's own verdicts (`test/ocaml/opam-verdicts.tsv`, `bin/oi`'s `own_verdicts`, the judges' `*` digest: the exit status
+  alone): the eight load programs by `test/ocaml/opam/load.reference`, astring's test and examples and uutf's test_uutf by exit status
+  (their packages' `Pkg.test` and `B0_ocaml.test`), astring's total by no output; pprint's and cmdliner's demonstrations stay on the
+  recorded run (OC211). A negative control at both suite levels. `bin/oi own-verdicts --check`: suite 100 of 121 at oi's level, 110 at
+  the AOT level, 0 differ. Alternatives: a report-line verdict for astring's and uutf's logs (the runner would rewrite their output, as
+  the hooks do; the packages' runners judge by status alone); expected outputs for the demonstrations (ocamlc's output copied: rejected).
+- The native path over the opam set (TY24 (a)'s default) refused astring's and cmdliner's units, hidden by the oracle path's record:
+  eight gaps of the typer ported from OCaml 5.5.0's typing/ (the pinned tarball: env.ml's .cmi reading, typemod.ml's
+  `Signature_names.simplify` and `Psig_typesubst`, load_path.ml's order and `find_normalized`, class types in a unit's interface, typecore.ml's `turn_let_into_match`, includemod.ml's
+  `Env.add_signature`) and printtyp.ml's cyclic types as `as 'a` aliases; each from a reproduction of a few lines (doc/ocaml/OCAML-SURVEY.md,
+  "The native path over the opam set"). Without them OC185's switch would have taken a suite record with fewer passes. Checked by
+  typer-check (79 of 79), repl-check (24 of 24), the native library rebuilt (no unit refused; seven units' Lambda differ only by stamps
+  and static exits' numbers) and the essential list.
+- Found: no OCaml gate step runs ocamlc or ocamlopt; eval and AOT are 0.5 by their cells' records (ocdump's path) until night 10's
+  native records and `bin/oi reap-switch --apply`; OC202's switch must take the compiled level's native record. The judge's recorded
+  cases left: 37 at oi's level, 16 at the AOT level (OC209-OC211).
+- Scores (`bin/crops-score --crop ocaml`): independence 51.3% to 51.4% (judge 0.563 to 0.570, its cases by `own-verdicts`); after
+  night 10's read and print records and the switch, about 99.9%.
+
+## 2026-11-10: OCaml's native path, night 10's gaps (branch `ocaml-indep2`, from `ocaml-indep` `813c335f0`)
+
+The brief: fix the native-path gaps night 10's light lanes exposed (`.tmp/night10/DIAGNOSIS.md` §2-3: la-oi-check 11 failing,
+la-oi-aot 9, la-oi-suite 25, of which `ocaml-indep` fixed 20), in a light lane (one process at a time, under 2 GiB), judging
+by list, not recording: the native records are night 12's, after the merge. Recorded in doc/ocaml/TYPER.md, "27. As built:
+night 10's native-path gaps".
+
+- 2a: `:c-runtime-internals` (all six classes files carrying it) also matches the C stubs' run reasons (`fail cstubs: `, `fail
+  output differs`, `fail timeout`), its `:programs` keeping it scoped: since ef4f24416 the stubs build on ci against the
+  clean-room headers, without the `CAML_INTERNALS` ones by design (OT6 (a)). The nine C-stub tests are classed again.
+- 2b: Ctype.nondep_type_decl's rule in `typemod.ae`'s `nondep` (OCaml 5.5.0, typing/ctype.ml and mtype.ml): in a covariant
+  position a kind that cannot be erased becomes abstract, a manifest that cannot be erased is tried through private
+  abbreviations, else dropped; the variance flips in a functor's parameter. Alternative: catching the error for abstract kinds
+  alone, as the diagnosis proposed (not faithful: OCaml's rule is by variance, and keeps a private expansion first).
+  typing-labels/mixin, mixin2, mixin3 and memory-model/forbidden pass.
+- 2c: `-safer-matching` ported (Matching.toplevel_handler: every match partial) rather than accepted as a no-op;
+  basic-more/safer_matching, its only user, passes.
+- Beyond the brief, cheapest first: redefine_largefile (Typemod.initial_env's add_units: the -I directories' units shadow the
+  opened Stdlib), tmc/tupled_function (Translattribute's tail-call attribute carried to Tmc's find_nonambiguous_tmc_call),
+  basic-modules/pr11186 (compose_coercions' Tcoerce_alias case, Tcoerce_structure's id_pos_list and wrap_id_pos_list,
+  transl_module_path through an absent alias). Each from OCaml 5.5.0's lambda/ and typing/ (the pinned tarball).
+- The AOT level's "timeout 120s of CPU" on lib-digest/md5 and misc/hamming is not a native-path gap: the native Lambda of md5
+  equals ocdump's up to stamps (ocdump run by hand as the oracle), its translated program the oracle path's, and both pass
+  natively here (md5 117 s, hamming 134 s wall): the CPU limit's edge under the night's load.
+- Left: lib-sys/immediate64 (Ctype's pattern-mode unification of an abbreviation with an abstract type, mcomp and
+  record_equation, not ported) and opam/sexplib0/load (a GADT's inline record), both native-path classes until ported.
+- Checks: the lists above by `bin/oi check`, `suite check` and `check --aot` `--only-list`; typer-check 79 of 79 at the three
+  levels; stdlib-check 71 of 71; the oi-essential and oi-divergences steps' commands (essential 59 of 59, repl-check 24 of 24, own-verdicts 0 differ); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's native path, the last two of night 10's gaps (branch `ocaml-indep3`, from `ocaml-indep2` `660185ddd`)
+
+The brief: close lib-sys/immediate64 and opam/sexplib0/load on the native path, in a light lane, judged by list, no `--record`.
+Recorded in doc/ocaml/TYPER.md, "28. As built: Ctype's pattern mode and the or-pattern's equations"; the new choice OC212.
+
+- immediate64: `include Sys.Immediate64.Make(Int)(Int64)` then `match repr with Immediate -> ...`, where `repr : t repr` and
+  `Immediate : Int.t repr`: OCaml 5.5.0's Ctype.unify3 in pattern mode equates the abstract `t` with `int`, because
+  is_instantiable (typing/ctype.ml) admits every nullary abstract public type without a manifest, not only the locally abstract
+  ones the port admitted. Ported from typing/ctype.ml into the port's mismatch hook (`typecore.ae`'s `add-equation`): unify3's
+  pattern-mode cases (two instantiable types, one, a constructor against another type), reify, record_equation (its pairs kept,
+  read by nothing: -principal's warning is not ported) and mcomp with its helpers (`types.ae`, the brief's ~200 lines). The
+  predefined abstract types are Type_external in 5.5 (typing/predef.ml): recognised by path, so `int` is no instantiable type and
+  `int` against a tuple is incompatible (typer-check's t72_gadt_exhaustive caught the first draft, which took them for abstract:
+  a Match_failure handler came back). As Typecore.solve_Ppat_construct, the pattern mode only for a generalized constructor; Parmatch's
+  possible-constructor test takes the same rule without equations. Alternative: the old local-abstract rule plus a special case
+  for abstract types of the current structure (not OCaml's rule, which has no such distinction since 5.x).
+- sexplib0: the diagnosis's "GADT inline record" was not the cause. Reduced by hand to a 40-line program (`let (Field {kind; conv;
+  _}) = fields in match kind, s with ... | (Required | Default _ | Omit_nil | Sexp_option | Sexp_list), _ -> ...`), which the
+  ocaml-indep2 typer refuses with the night's message and the host's ocaml accepts: an or-pattern's alternatives shared one set of
+  GADT equations, so `Sexp_option`'s `a = 'x option` met `Sexp_list`'s `'y list`. Typecore's Ppat_or types each alternative in a
+  copy of the pattern environment (Pattern_env.copy); ported: each alternative's equations dropped after it.
+- Approximations left, OC212 (recommended (a), keep them): Path.scope by stamps, the predefined types by path, has_injective_univars
+  and the row backtracking not modelled, a foreign abstract type's non-injective parameters unified.
+- Checks (none `--record`): `bin/oi suite check --only-list` and `suite check --aot --only-list` (immediate64, sexplib0/load: 2 of 2
+  pass at each level, by their own verdicts); typer-check 79 of 79 at the three levels and their runs; stdlib-check 71 of 71; `bin/oi
+  test`; repl-check --native 24 of 24; the essential list 59 of 59; own-verdicts 0 differ; the four oi-divergences commands (0 failing
+  not in a class); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's stage S1 and the own verdicts' rest: OC213, OC214, OC209, OC210 (branch `ocaml-s1`, from `ocaml-indep3` `51240f00d`)
+
+The user decided OC209-OC222 (a) about 10:30 UTC (the main session's plan for OCaml's completeness above 90%, OC213-OC222, and the
+survey's OC209-OC212); recorded in doc/ocaml/OCAML-SURVEY.md, "Decided (the user, 2026-11-10, about 10:30 UTC): OC209-OC222", built
+as "As built: OC213, OC214, OC209, OC210". A light lane: no gate, each process under 2 GiB, one run at a time.
+
+- OC213 (a): the plan counted the read cell's 61 testsuite rejections as parse-error tests whose reference is the error; read file by
+  file, about half are toplevel scripts (expect tests, toplevel tests, `ocaml` scripts with directives) that the read level's
+  Parse.implementation rejects but their own tool reads. So `own-read` (arbace.repr.ocaml.native) judges each as its test's tool reads
+  it: ocamlc.byte's `.compilers.reference` byte for byte (20), the expect tool's Parse.use_file (18), the toplevel's use_file read or its
+  first error's chunk (toploop.ml's line chunks, positions from 1, //toplevel//) held in the reference (18), scripts (2), and the files
+  other tests `#use` or name (3). All 61 pass, three negative controls fail. Sources: OCaml 5.5.0's tarball (SHA-256 fcc6ae66...):
+  testsuite/tools/expect.ml (parse_contents), toplevel/toploop.ml (loop, get_phrases), toplevel/topcommon.ml (refill_lexbuf),
+  stdlib/lexing.ml (flush_input). Applied to read-results.edn's testsuite rows by `bin/repr-ocaml own-read` (the rows re-judged, no
+  round trip; the alternative, a whole `--record-results testsuite`, would have rewritten the record's header to the native reader's
+  while the other corpora's rows are still the helper's). Alternative considered: judge only the 20 ocamlc tests and keep the scripts
+  by design; rejected, the expect and toplevel tools' reads are the tests' own.
+- OC214 (a): a quoted string's CR LF written CR CR LF (lexer.mll's store_normalized_newline removes one CR) and its non-UTF-8 bytes
+  written as bytes (byte marks U+DC80-U+DCFF in the printed text, `text-bytes`). newlines.ml passes; test_pcre.ml's trees too, but its
+  mode `:full` refuses a file that is not UTF-8, so it moves to a new deferred class `:full-not-utf8` (the plan counted +2; it is +1).
+  The print records wait for the night's `--record-results` of the two corpora (the tool records whole corpora only).
+- OC209 (a): native-only tests judged at oi's level by their `.reference` (15), the 4 native-behaviour ones listed in own-verdict.edn.
+  The suite's re-judge found asmcomp/regression_value_kinds refused by the native typer (an or-pattern whose first alternative needs
+  its GADT equation for its own constraint), most likely TYPER.md §28's per-alternative equations: left for the typer's next slice,
+  nothing recorded.
+- OC210 (a): ocamltest's CRLF normalisation (ocamltest/filecompare.ml's compare_text_files: the own verdict's second digest,
+  `crlf_other`) and its variable expansion (ocamltest/environments.ml's expand, stdlib/buffer.ml's add_substitute, in header.awk);
+  norm3, subst1, subst2 by their own verdicts at both levels; subst1's and subst2's ocamlc and ocamlopt runs recorded again by hand
+  (`bin/oi record-ref --only`: their arguments changed); two new negative controls a level.
+- Scores: completeness 82.5% to 83.0% (read 3,082 to 3,143), independence 51.4% to 51.5% (judge 0.570 to 0.576). Checks: own-verdicts
+  --check 0 differ; the four oi-divergences commands 0 failing; `bin/reap --record` 0 problems; `bin/crops-score --record`, `--judge
+  --strict` 0 problems; `roundtrip --text samples stdlib`; the 61 files' round trip unchanged.
+
+## 2026-11-10: OCaml's or-pattern regression and OC215 (a) with OC199 (a), the C API at the compiled level (branch `ocaml-s2`, from `ocaml-s1` `d87ed4a2c`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). Sources: OCaml 5.5.0's tarball (typing/typecore.ml's type_pat
+Ppat_or, Ppat_constraint, Ppat_alias, solve_Ppat_constraint, build_as_type and build_as_type_extra; typing/primitive.ml's
+parse_declaration and native_repr).
+
+- asmcomp/regression_value_kinds (found by `ocaml-s1`'s OC209 re-judge): §28's per-alternative equations were not the cause; they are
+  OCaml's (each alternative typed in a `Pattern_env.copy` of the outer environment, the variables unified in the outer one). The port's
+  Ppat_constraint typed the inner pattern against the expected type and dropped the constraint, so `((3.5 : a) as a)` under `Float`'s
+  equation gave the alias `float` where OCaml gives it `a` (the constraint's type, build_as_type_extra's ground case), and the
+  or-pattern's variables then disagreed outside the equation. Ported: the inner pattern typed against the constraint, the pattern's type
+  the constraint's, the constraint kept as an extra for build_as_type; an alias's pattern has its inner pattern's type (TYPER.md §29).
+  Alternative considered: keeping the equations of an alternative for the or-pattern's variable unification; rejected, OCaml does not.
+- OC215 (a) (the user, 2026-11-10, amending OC198): the compiled level's main links `arbace/oicapi` and oi's values serve as mirrors of
+  the Java runtime's (OCAML-SURVEY.md, "As built: OC215"). The bridge is a file the main's host serves, as OC208's exec: the runtime
+  writes and drives, the C runs on a goroutine so that its callbacks and named values are replies the runtime answers. Alternatives
+  considered: (1) the value conversion in Go over j2g's translated classes (names like `J_ocaml_rt_Block_J`): the main would depend on
+  j2g's naming and on jrt's array and boxing types, unprovable without a j2g run; (2) a Java static method the Go side calls for each
+  callback (`lang.J_ocaml_rt_CApi_J_...`): the same dependence, and j2g may prune a method only Go calls; (3) natives in jrt: a jrt change
+  moves the runtime key and the gate (not a crop path). The file and the goroutine need neither.
+- OC199 (a): an external with no bytecode name is `native:NAME:ARGS:RESULT` in the native typer's dump (Primitive's native_repr letters),
+  o2j calls it through `CApi/nativeCall`, oicapi's `CallRaw` passes unboxed words and floats.
+- Checked light: the main's Go builds and vets (printed with oi, oicapi, ci, crt and stand-ins for jrt and lang); a fake runtime in Go
+  drives the main's file over callback/test1's stubs (callbacks, identity, updates, exceptions, a missing stub); the light level's rows
+  of missing externals unchanged; oi's C API programs unchanged; typer-check, stdlib-check, the essential list, own-verdicts, the four
+  oi-divergences commands. The compiled runs (j2g, above 2 GiB) are the night's: `bin/oi check --aot --level compiled --only-list
+  test/ocaml/capi-compiled.txt` under the big lock, then the classes of what does not pass.
+
+## 2026-11-10: OCaml's OC216 (a), the small runtime ports (branch `ocaml-s3`, from `ocaml-s2` `79afd5c9b`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The user decided OC213-OC222 (a) on 2026-11-10; OC216 (a)
+reverses, for the programs it moves, OC11 (a) (the stack limit, Obj's layout), OC64 (a) (the counters), OC68 (b)'s weak part, OC65
+(reachable_words) and OT7 (a) (Marshal's Closures flag). Sources: OCaml 5.5.0's tarball (runtime/gc_ctrl.c, startup_aux.c, extern.c,
+intern.c, weak.c; the tests named below). OCAML-SURVEY.md, "As built: OC216 (a)".
+
+- Gc.Tweak's parameters in `Sys.runtime_parameters` (format_gc_tweaks); the asked collections counted as gc_ctrl.c counts them beside
+  the runtime's own (oi: Go's NumGC less the cycles the asked ones ran; the AOT runtime: a canary WeakReference, Java having no count);
+  `Obj.reachable_words` by OCaml's layout of the values on 64 bits.
+- OCAMLRUNPARAM's l: header.awk passes it as it passed d (OC193). oi counts words under it (a call one, its frame's slots more), at most
+  l and 800,000; first tried as l/4 calls, which passed on the native path but not on ocamlc's (misc/pr7168's 273-let frames: 25,000
+  such calls are Go's stack beyond the CPU limit), and l/4 for the call's own words with the slots beside overflowed stackoverflow
+  before its x = 20000: the frame's slots and the call's one are the bytecode's stack about. The AOT runtime counts calls, l/4.
+- Weak keys as weak pointers (Go's weak, jrt's WeakReference). Found while porting: `weak.Pointer.Value` shades its value while the
+  collector marks, so a program that checks a weak key in a loop kept it alive for ever (a probe: 726 collections, never emptied); a
+  check reads a flag `runtime.AddCleanup` sets instead, and the asked collections refresh the flags of every live weak array (a
+  registry of weak pointers to the arrays, not to each key: the first try, a registry a key, was slower still). Ephemerons' data
+  stays the ephemeron's while the key lives, cleared with a dead key at the asked collections. Alternatives considered: a pending
+  strong slot made weak at the next collection (cheaper for a slot overwritten soon, but a key kept one cycle longer and a flag across
+  goroutines); ephemerons proper (Go's runtime has none; the data on the key needs the key's object: no). The cost, about 5 us a
+  Weak.set of a fresh value, takes weak-ephe-final/weak_array_par (4,000,000 sets, just within the limit before) to `:speed`.
+- Marshal's Closures flag: CODE_CODEPOINTER with the code's number in the process's table and the digest of its name; o2j's classes
+  get envOf, blank and fill for the AOT runtime. lib-marshal/fuzzy then fuzzes past its first message and found the AOT reader's
+  Java exceptions on altered sizes: Failure "input_value: ill-formed message" (an invalid read for a bigarray longer than the data).
+- Not built: AF_UNIX and signals at the compiled level (a host path as OC208's, several days with compiled runs): later.
+- Moved, oi's level: misc/gctweaks, lib-obj/reachable_words, misc/pr7168, runtime-errors/stackoverflow, regression/pr5233,
+  weak-ephe-final/weaklifetime, weaktest, lib-marshal/intext, intext_par, compaction/test_compact_full, lib-marshal/fuzzy,
+  runtime-objects/Tests (12); weak_array_par pass to `:speed`. The light AOT level: gctweaks, reachable_words, pr7168,
+  test_compact_full, fuzzy, Tests (6); stackoverflow to `:light-depth`. Recorded `--only-list --record`, ocamlc's path (`--ocdump`,
+  the matrix's sources until OC185's switch) and the native one (check-oi-native.edn).
+
+## 2026-11-10: OCaml's OC216 (a), the rest: AF_UNIX sockets and the OS's signals at the compiled level (branch `ocaml-s4`, from `ocaml-s3` `b45b8aa4f`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The part of OC216 (a) (the user, 2026-11-10) `ocaml-s3` left:
+OT23 (a) and OT24 (a) reversed at the compiled level. Sources: OCaml 5.5.0's tarball, otherlibs/unix's socket.c, socketpair.c,
+socketaddr.c, accept.c, bind.c, connect.c, listen.c, shutdown.c, getsockname.c, getpeername.c, sendrecv.c, sockopt.c, select.c,
+kill.c, runtime/signals.c, as oi's ext_unix_sock.go and ext_signal.go port them. OCAML-SURVEY.md, "As built: OC216 (a), the rest".
+
+- The route: the compiled main serves `/proc/self/ocaml-host` beside OC208's exec file, a request/reply of length-prefixed fields; the
+  AOT runtime's new `HostSys` asks it, its `Sock` keeps a PF_UNIX socket or a socketpair as the OS's descriptor there (streams
+  `HSockIn`/`HSockOut` in Fd's table), and `ExtSignal` sends kill(2) to another process and has the OS's signals for a handler waited
+  for by a thread (`sigwait`) and posted as pending. No change to jrt or j2g (crop paths only). Alternatives considered: jrt's
+  `HostChannels` natives (IP only, a key move and a re-seed for AF_UNIX: no); Java's UnixDomainSocketAddress (jrt has no FileSystems,
+  F9, and Java's has neither datagrams nor abstract names: no); a poll of pending signals at every tick (a host round trip a tick: no,
+  a waiting thread and the Gil's yield instead).
+- The light level is unchanged in behaviour (no host in stage 0): the recvfrom programs stay `:unix-java` there; the class's text says so,
+  and at the compiled level it keeps them until the night's compiled run proves them.
+- Checked: the main's Go printed, vetted and tested in a scratch module (recvfrom's scenarios, a socketpair, a stream socket's calls,
+  sigaction/kill/sigwait); the runtime's new forms at the light level over the signal and socket programs (two type errors of the new
+  forms found and fixed first).
+- The three timeouts OC216 left unrecorded, rerun at load 13-19 (`cat /proc/loadavg` under 20): regression/pr7798 and
+  weak-ephe-final/ephetest3 at the light AOT level are over the CPU limit twice in a row (the limit is CPU time, not wall: OC216's
+  counters and weak keys, not the load); their aot-known.edn entries' kind is now "timeout " in their `:gc-and-memory` class and
+  they are recorded so (check-aot.edn). misc/darkening_work at oi's level timed out at load 15 and finished at load 13 with its
+  recorded class's output: at the CPU limit's edge; its record is unchanged (a first try recorded the finished run under a "timeout "
+  entry, an unclassed failure: reverted).
+
+## 2026-11-10: oi type-checks in goi's table again, after OC192 (branch `oi-table2`, from next `6c3c87c02`)
+
+W's prep (branch window-w2c, 736057475) found seven new errors of goi's checker in `go/arbace/oi` for tamago/amd64 and tamago/arm64, all
+from OC192 (a)'s `ext_final.ae` (56b343448), which landed after table-ready (5acc697c9, W-D13 (a)) had fixed oi's earlier 111. Fixed
+by the owners, W-D13 (a): `finAddr`'s six `(conv uintptr (unsafe/Pointer x))` are `(conv uintptr (conv unsafe/Pointer x))` (a conversion,
+not a call, as go/types has it and as `ext_unix_linux.ae` writes it), and oi.ae's `:init-order` puts `finObjs` after `blake2Sigma` (the
+checker's order, as Go's spec orders initialisation). Proof: test/ocaml/table_check.ae (what `bin/oi table-check` runs, here with the two
+tamago configurations alone, GOMEMLIMIT 3000MiB, window-w2c's tree with the fix picked) gives 7 errors before and none after in
+tamago/amd64 and tamago/arm64 (42 files each, the table of oi alone generated in both); linux's std read was not finished in the light
+lane's time (and its annotations are the same forms). Behaviour: `bin/oi test` ok; the five finaliser programs of OC192 pass by `bin/oi
+check --only-list`. Alternative (b), leaving oi out of the table at W2, not needed. The fix should be picked onto window-w2c.
+
+## 2026-11-09: SCS25 (a), SCS26 (b): TestWordBreakUAX29's control in the gate (branch `scheme-props5`, from next `6c3c87c02`)
+
+The user accepted scheme-props4's proposals as recommended (about 14:20). SCS25 (a): U+1E9E's exception in si's final sigma stays
+stated; Chez 10.3.0's `unicode-char-cases.ss` was not fetched (alternative (b), an hour and a download, for one character measured over
+every scalar value). SCS26 (b): `bin/si unit --control`, as `unicode-scan --control` does: the runtime's forms copied to
+`.tmp/si-control`, WB3c's rule dropped from `prim_char.ae`, `TestWordBreakUAX29` run on the copy and required to report exactly 9
+differing positions of UAX #29's WordBreakTest.txt (UCD 16.0.0), else the command fails; a part of `si-check.unicode` in
+`test/gate/crops/scheme.edn` and `steps.edn`. Alternative kept by hand (a) was rejected: GTS81 (a) wants a control per check family in
+the gate. Measured: the control differs in 9 positions (16 s); si-essential's command, the scans and their controls, crops-test, reap and
+crops-score as before (Scheme 97.4 / 98.9 / 100 / 100). Recorded in doc/scheme/SCHEME-SURVEY.md, "As built: SCS25 (a), SCS26 (b)".
+
+## 2026-11-10: Scheme's deferred non-passes surveyed, SCS27 and SCS28 proposed (branch `scheme-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90% (doc/CROPS-SCORE.md) listed Scheme's 8 deferred cases (eval 6, AOT 2). The slow benchmarks
+(speed, SC109) and the AOT's syntax constants (psyntax's records as read-back constants, SC90) are designs of their own; the R7RS
+exponent sign (SCS27) and Chibi's ill-formed optional-test fallback (SCS28) need the user's choice. Nothing run, no record changed.
+
+## 2026-11-09: LLS43 (a), LLS44 (b), LLS45 (a): the fragments' sizes and a held-out set in the gate (branch `llvm-props4`, from next `6c3c87c02`)
+
+The user accepted llvm-props3's proposals as recommended (about 14:20). LLS43 (a): verifyFragmentExpression and
+DIVariable::getSizeInBits ported from llvm-project 23.1.5 (`llvm/lib/IR/Verifier.cpp` V:7425-7464, V:1749-1753, V:799, V:536;
+`llvm/lib/IR/DebugInfoMetadata.cpp:1653`, the pinned tarball) into Arbace's verifier and, written apart, into the mutants' own
+verdicts, which no longer leave a rule to opt for a fragment in the module; their order the Verifier's (a definition's
+subprogram and its unit's global expressions, the walk, the records; the globals' `!dbg` again by visitGlobalVariable's direct
+call). LLS44 (b): left. LLS45 (a): `bin/repr-llvm heldout-check`, 900 mutants of 41 base modules (test/llvm/heldout-bases.txt)
+from the fixed seed 1200000, own verdicts held to Arbace's verifier, two crossed controls; the gate step `llvm-heldout`
+(llvm-full). Its first run found a rule the verifier lacked (visitDILocalVariable's `invalid type`, V:1721), fixed. Measured: 886
+of 900 own, all met (8 min, 0.7 GB); expect-test 42 cases and 12 controls; the essential read and print families as recorded;
+crops-score unchanged (LLVM IR 96.4 / 97.9 / 100 / 96.9). Alternatives: keeping LLS43 on opt's record (b), the held-out sets
+only in worktrees (LLS45 (b)). Recorded in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS43 (a), LLS44 (b), LLS45 (a)".
+
+2026-11-10, llvm-props4 (review fix, .tmp/merge-1111/REVIEW2.md §7 item 1): `bin/repr-llvm heldout-check` gets floors: n = 900
+(`REPR_LLVM_HELDOUT_N`) and at least 880 own verdicts (`REPR_LLVM_HELDOUT_MIN_OWN`; 886 of 900 recorded, a margin of 6 for a
+mutator or rule change; a collapse of the own verdicts, which left bad = 0 and the controls failing for the wrong reason, now
+fails). Proof: the run passes (900 mutants, 886 own, 5 min); with `REPR_LLVM_HELDOUT_MIN_OWN=887` it fails, "886 own verdicts,
+fewer than the floor 887", exit 1. Alternative: a record file of the count; an env floor beside the controls was enough.
+
+## 2026-11-10: LLVM IR's deferred non-passes closed where the gap was Arbace's own (branch `llvm-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90%, cheapest per case first (doc/CROPS-SCORE.md). LLVM IR: `bin/llvmi` checked and built the
+lowered C with the seed's embedded ci, not the checkout's (no `c_ci_fresh`), so LLS21 (a)'s fixes never reached its records; and
+its AOT module lacked RES34's `cilib` link, so no program importing musl's prebuilt units built. Both fixed in `bin/llvmi`, the
+Verifier rules of gc.relocate, the VP intrinsics, require-logical-pointer and AMDGPU's allocas, prefetch, av load/store and
+cooperative atomics ported into `arbace/repr/llvm/verify.ae` (LLVM 23.1.5's Verifier.cpp). Whole runs recorded: llvmi eval and AOT
+537 of 562 each (529, 522 before), verify-llvmtest 800 of 806 (792); the other families unchanged. Completeness 96.4 to 97.6.
+Alternatives: recording only the re-run rows (`bin/llvmi check --record` takes no `--only`), so the whole levels were run, in the
+light lane (one run at a time, under 1.5 GB). ci's namespaces were not changed (they are embedded, in `gate_key`); llvmi's are crop
+paths. Scheme (SCS27 proposed) and C (the long tail of the checker and the converter, a case each) were looked at and left.
+
+## 2026-11-10, llvm-compl2: the review's findings (REVIEW.md, .tmp/merge-1111/REVIEW.md, section 2)
+
+bin/llvmi sources bin/lib/ci/fresh.bash and calls c_ci_fresh only while the file exists (the re-seed window's R deletes it; 2.1); its
+CI_AOT_LIB default takes the main checkout by `${root%%/.tmp/worktrees/*}` as bin/lib/ci/check-aot does, so a clean run no longer reads
+the main checkout's warm cache (2.2); verify.ae's vp.splice tests the vector type before `(nth rt 1)`, and require-logical-pointer? and
+amdgcn-triple? are computed once per module (`*mod-facts*`; 2.3). Proofs: bin/llvmi check --essential 10 of 10, controls fail;
+test/repr/llvm/controls-test.bash; repr-llvm check verify-llvmtest/verify-probes --essential; bin/reap; bin/crops-score --judge --strict.
+## 2026-11-10: C++'s CP325-CP337 and P23 built (branch `cpp-props5`)
+
+- **What**: the user's acceptance of 2026-11-09 (each proposal as recommended), on a branch from mac/cpp-route-merged a69c3b10a so that
+  cpp-route's code generation route is in. Checker: a Sema crash is a failing `:crash`, never an acceptance (CP325 (a); parse/enum4.C's
+  long overflow in the constant evaluation fixed: 64-bit wrap); a time cap for each file of the dg read, `REPR_CPP_DG_TIMEOUT` default
+  300 s (CP329 (a)); `C<A>::M` as a placeholder for a deduced class (CP327 (a), class-deduction-alias20); structured bindings modelled
+  in the checker (CP331 (a)); `:gxx-only-rules` by design (CP328 (a)). Code generator: inheriting constructors (CP330 (a), CP326 (a);
+  mangled CI1/CI2 <base>, Itanium §5.1.4.3), std::tuple and std::map's operator[] (CP332 (a): clang's builtin templates
+  `__type_pack_element` and `__make_integer_seq` in the native parser and the templates, a pack parameter's type as an alias's argument,
+  pack expansions as one argument, a misread fold, if constexpr over a class, a failing decltype in a bound signature a substitution
+  failure), runtime/hello.cpp now generated; the full parse cache in gen-batch (CP336 (a), measured slower on a hit than the parse,
+  557 s against 378 s on samples/io.cpp, so off by default: CP341); the module's order as clang's (P23 (a):
+  functions placed at first reference as llvm::Functions are when created, EmitDeferred depth first; the order read from
+  clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH LLVM-exception, no code ported). CP333 (b), CP334 (b),
+  CP335 (b): nothing to build now; CP337 (b) was cpp-route's.
+- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (hello.cpp, unique_ptr
+  and the library's tuples were the next group), and the read's own record counts the dg files Arbace's front end judges alone.
+- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: cpp-props5"): the dg every-10th sample 121 → 121 own passes, the same files (two
+  regressions found and fixed on the way); 75 files with structured bindings, inheriting constructors and alias20: 12 → 13; the run
+  corpora's 82 programs by our route: 55 → 57 generated (embed-26, hello.cpp), none lost; codegen-gen 154 of 154 recorded again for P23's order (the
+  forms otherwise the same); P23 against clang's IR of 17 samples by hand: vtables in clang's order 3 → 13, functions' common
+  subsequence 44% → 79%. No run check (the lowered runtime's read is heavy; the runs are the night's). `bin/crops-score --crop cpp`
+  unchanged (76.3 / 100 / 67.8): the facts move only with the night's records (the dg own record, the switch).
+- **Alternatives considered**: writing the deferred functions after each top-level definition (tried: clang's IR shows the bodies'
+  references placed later, the positions are creation order, so it was dropped); diagnosing a failed decltype at the call instead of
+  dropping the candidate (wrong for SFINAE, [temp.deduct.general]/8); a future with a timeout for CP329 (the goroutine would run on).
+- **Proposed**: CP338 (the run corpora's remaining refusals), CP339 (landing pads' cleanups at the scope's end), CP340 (the generation's
+  time at night), CP341 (the full cache's format, or none).
+- **Slips**: two process substitutions (`paste <(...)`, `diff <(...)`) and one `>/dev/null` in throwaway comparisons, against the day's
+  rules; a `bin/cppi runtime-build` attempt was refused by the permission layer during night 10's heavy work and not retried.
+
+## 2026-11-10: C++'s print cell on the own round trip's records, CP243 (a)'s switch (branch `cpp-print-own`)
+
+- **What**: cpp-compl's night step 2 run by day in the light lane: `bin/repr-cpp roundtrip-corpus KEY --judge own --record-results`
+  for gxx-dg-every-10 (1,796 of 1,807 pass, 11 forms-differ), gxx-old-deja-every-10 (320 of 323, 3), c-c++-common-every-10 (326 of
+  326), libstdcxx-testsuite-every-40 (244 of 244), and `bin/repr-cpp dg --corpus modules [--sample 10] --rt-judge own --record`
+  (gxx-modules-all 1,180 of 1,181, gxx-modules-every-10 119 of 119): `test/repr/cpp/roundtrip-results/own/`. Two fixes on the way:
+  a statement's GNU attribute printed `__attribute__((x))` when it is no standard attribute (`[[used]]` was dropped on the read
+  again; `arbace/repr/cpp/print.ae`), and `sema`'s empty-init bails on a member of its own class's type (parse/struct-4.C overflowed
+  the stack; `arbace/repr/cpp/sema.ae`). Then CP243 (a): `--judge own` the round trip's default (`bin/lib/repr-cpp/roundtrip`;
+  `dg --rt-judge own` too), `test/reap/cells.edn`'s C++ print sources on `roundtrip-results/own`, cpp-roundtrip-dg's rotation
+  universe the own record, `test/crops/independence.edn`'s judge `:roundtrip [3887 1]`; `bin/reap --record`, `bin/crops-score --record`.
+- **Why**: the crops' roadmap's cheapest unscheduled gain (`.tmp/plans/CROPS-90-ROADMAP.md`, item 3); the user's CP243 (a) of
+  2026-11-07 waited only on the records, which needed no clang and fit the day's 2 GiB.
+- **Checked**: each record from a whole run with no failure; the samples (9 of 9, the control failing as it must) and
+  gxx-dg-essential (33 of 33) under the new default; old-deja and c-c++-common checked again after the fixes. `bin/crops-score --crop
+  cpp`: 76.3 / 100 / 67.8 → 89.1 / 100 / 71.3 (print 48.3 → 99.5; judge 0.735 → 0.907); `--judge --strict` 0 problems.
+- **Alternatives considered**: classing the 15 forms-differ in the known file (the own judge classes them itself; the known file is
+  the clang judge's); fixing them now (CP342, doc/cpp/CPP-SURVEY.md, "As built: CP243 (a)").
+- **Slips**: `bin/lib/repr-cpp/roundtrip` edited while a run read it (the 47-minute libstdcxx run lost, run again); one `/dev/null`
+  in a throwaway grep.
+
+## 2026-11-10: the five reader gaps of the own judge's forms-differ, CP352 (branch `cpp-cp352`)
+
+- **What**: five files of the 15 forms-differ of C++'s print cell (own judge), fixed in `arbace/repr/cpp/parse.ae`: a statement's
+  `__attribute (...)` (asan/pr82792.C), an enum under a template header (cpp0x/scoped_enum7.C) and a class defined in a trailing return
+  type (cpp0x/trailing5.C) as the declaration's text (NativeDecline: the forms have no place for either, and the print named what
+  the original defined), an array member's `a({...})` in the semantic list form `a{...}` has (cpp2a/paren-init33.C; clang's AST
+  for both is one InitListExpr, checked by hand with `clang++ -ast-dump`), a macro-named module partition's expansion consumed with its
+  `;` (modules/cpp-11.C). gxx-dg-every-10 recorded again from a whole run (1,801 pass, 6 forms-differ; was 1,796 and 11),
+  gxx-modules-all, gxx-modules-every-10, old-deja, c-c++-common unchanged, gxx-dg-essential 33 of 33, the samples 9 of 9 with their
+  control, codegen-gen 154 of 154. The report that found them said "CP342", which is the plan's other decided item: called CP352.
+- **Why**: the five are bugs on valid-looking code (decision-free), the rest of the 15 are dg-error files whose error recovery the forms
+  do not keep, and one aarch64-only file: left alone.
+- **Alternatives considered**: for the enum, keeping the template header in the forms (no form for it; clang's tree has none either) or
+  the printer writing one (it cannot know); for trailing5, hoisting the defined class beside the function (the tag's node would need a
+  place in the declarator's result: left for when valid code needs it, a type may not be defined in a trailing return type).
+- **Slips**: one `> /dev/null` on a background `nohup`.
+## 2026-11-10: RF13's first slice, RFP42-RFP47's light parts (branch `rust-rf13`, from `mac/rust-rf12` `0c22b1f1b`)
+
+- RFP44 (a): vtables natively in `arbace.rust.front.mono` (`vtable-entries`, a port of rustc 1.99.1's
+  `rustc_trait_selection/src/traits/vtable.rs` `prepare_vtable_segments` and `own_existential_vtable_entries`; MIT or Apache-2.0):
+  a virtual call's slot from the object's principal (`callee-fact`'s `:slot`), the record's virtual callees' slots from their method
+  path and printed `dyn`; codegen's virtual call (meth.rs' `VirtualIndex::get_fn`); our unsizing casts' vtables laid out natively when
+  every entry is a local impl's own method, else the record's cast of the same type in the same body. Alternative considered: RFP44
+  (b), the helper dumping slots (a rebuild and the packs again): not needed, the slot is the trait's items'.
+- Codegen's gaps the programs reached next, fixed: the repeat loop, powi, fma, exact_div, typed_swap_nonoverlapping, catch_unwind
+  (`__rust_try` in the module), type_id_eq, TypeId constants, `&str` valtrees, struct-tail unsizing, memory transmutes, SSA fields'
+  discriminants, function-pointer calls, reified local functions, external statics, promoted `[x; N]` and unit/newtype structs.
+- `panic-vec-remove`'s fault: `Vec::remove`'s `#[track_caller]` was not found (alloc's `vec/mod.rs` impl order is not rustc's
+  `{impl#N}`); a function the file's impls name once now found by name. The native leg 44 of 47 (43 before).
+- `rsi-build` now refuses a module that declares a local instance it does not define (the link would fail; found by `rsi-native` on
+  three programs that had passed codegen): 11 programs, RFP49.
+- Prepared for the night, not run: RFP45 (a)'s UI sampling (`RF_RSI_UI=40` in the rsi kind and `rsi-build`), RFP47 (a)'s
+  `RSI_STD_REMAP` in `bin/rsi std-build` (std.edn left alone: the runtime's key holds it). RFP42 (a) waits for the night's lowered std.
+- Synthetic corpus: 47 of 67 own (the same 47); Rust's score unchanged (RFP43 (a)). Proposed RFP48 (trait resolution in mono), RFP49
+  (the collector through std's bodies), RFP50 (closures' shims). doc/rust/FRONTEND-SURVEY.md, "As built: RF13 (first slice)".
+- Light lane: one process at a time, under 2 GiB a process (`RF11_PROCS=2`, `GOMEMLIMIT` 1800-2000MiB), no network.
+
+## 2026-11-10: RF13b, more of core's bodies equal to rustc's built MIR (branch `rust-rf13b`, from `mac/rust-rf13` `bd6a6ca6f`)
+
+- RF12-P6's six bodies left now equal: `mut_ptr::cast_const` (check_cast's try_coercion_cast of `*mut T` to `*const T`, the operand's
+  pointer coercion `AsCast` as THIR's apply_adjustment marks a cast's operand), `slice::as_ptr`/`as_mut_ptr` (the cast's user type
+  over a coercion cast's `Use`), `ptr::metadata::from_raw_parts`/`_mut` (a rigid projection Copy by its item bounds), `<DynMetadata>
+  ::size_of`/`align_of` (foreign types: `extern { type VTable; }` resolved, lowered, collected as `ForeignTy`; rustc 1.99.1's
+  rustc_resolve build_reduced_graph_for_foreign_item and rustc_ast_lowering's foreign items as the model). Their lowering was
+  contained, so no proposal was needed.
+- Widened over core-check's 37 modules, the largest classes of RF12's non-equal bodies by cause, each after rustc's code: a
+  prelude's variant of the root file's own enum mapped to the local definition (result.rs, option.rs: the largest class), a trait
+  object's inherent impl printed with its object lifetime, nested items' MIR names through their owner, `match x {}` as `!`, the
+  no-op reference coercion only for the same type, DerefMut under `&mut`, another module's struct fields from the interface,
+  `<$t>::MIN` as NamedConst, `Self(..)` as the constructor, SwitchInt's values as u128 bits, rustc's disambiguator in a body's key
+  (`do_panic#1`), `[const]` bounds printed. Alternatives considered: judging the duplicate `do_panic` keys as ambiguous (the oracle
+  has `#N` files, so the key was ours to fix) and normalizing SwitchInt's values in the printer only (the built MIR then still
+  disagreed with codegen's `const-switch-bits`, which reads constants as bits).
+- core-check: 5,398 equal (5,108 at RF12), 114 more but for the allocations (71), 148 differ (381), 117 refused (217). The known
+  files unchanged: `bin/rust-front core-essential` (564 of 567) and `bin/rust-front essential`. doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF13b, core's bodies equal to rustc's built MIR".
+
+## 2026-11-10: RF13b's core-export, RFP51 proposed
+
+- `bin/rust-front core-export` on RF13b's front end: 32 of 32 exported bodies equal where the pack `rust-core-built` holds rustc's
+  body; the 16 of `str`, `slice`, `fmt` and `num` have none in the pack (it holds core-check's 37 modules), so the run keeps the
+  record's body for them. Against core-oracle's full dump (by hand) the 10 of `str`, `slice` and `fmt` are equal. RF12-P6's "43 of 48"
+  was measured against the full dump. Proposed RFP51 (a): a list of the export's modules added to the pack at the oracle tier.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13b".
+
+## 2026-11-10: RF13c, more of core's bodies equal to rustc's built MIR (branch `rust-rf13c`, from `mac/rust-rf13b` `0d44a0343`)
+
+- RF13b's remaining causes taken cheapest per body first, each after rustc 1.99.1's own code (the pinned rust-src; rustc's
+  rustc_hir_typeck method probe, instantiate_value_path, rustc_expand's transcribe.rs, rustc_hir_analysis' region.rs,
+  rustc_ast_lowering's try blocks and inline consts as the models): a trait's associated constant through a type-relative path
+  (`T::IS_ZST`) as NamedConst with its user type; a parameter's where clauses and a projection's item bounds as method candidates
+  whether their trait is in scope or not; an impl item's user type with the impl's parameters fresh and `Self` the impl's own self
+  type; one substituted token keeping its own place (the metavariable's place only for a span over several tokens), which fixed
+  the format placeholders' spans through `const_panic!` and `debug_assert!`'s messages; a const initializer's destruction scope;
+  Copy through marker.rs's own traits and `#[derive(Copy)]` on a union; `size_of::<T>()` in array lengths; a std variant named
+  by its written path; try blocks without their own `?`; inline consts as constants `{constant#N}` of their parent, numbered in the
+  DefCollector's order. Alternatives considered: special-casing `SizedTypeProperties` (rejected: the probe's general rule covers
+  it and Wrapping's `fmt`), and dropping the metavariable spans altogether (rejected: RF12 needs them for spans joining a
+  definition's tokens to a fragment).
+- core-check: 5,474 equal (5,398 at RF13b), 155 but for the allocations (114), 85 differ (148), 63 refused (117); no module lost an
+  equal body. Proposed RFP52 (a): the interface pass over a list of files holding crate-private items the 37 modules name.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13c".
+
+2026-11-10, rust-rf13b (review fix, .tmp/merge-1111/REVIEW2.md §4 items 1 and 2): the UI programs' names (`rfr_name`: `ui-tests%ui%...`) are
+used where rsi-build's outputs are read: `bin/rust-front rsi-native` and `bin/lib/rsi/check`'s `--front own` (the same naming
+inline). A missing own IR is a failure now (check: x.refused and ir.status 1, never the pack's IR with front.tsv saying own;
+rsi-native: a counted failure line). rsi-build counts the programs skipped for want of a record in the pack ("N skipped (no
+record in the pack)"). Proof: `bin/rust-front essential` passes, equal to essential-known.txt (known.diff empty, 3m50s, stub
+calls 0); a fabricated UI id (tests/ui/abi/foo#bar.rs) with front.tsv "own" and no .ours.ll names the same directory as
+rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch these two files (checked), so they rebase clean.
+
+## 2026-11-10: RF13d, more of core's bodies equal to rustc's built MIR (branch `rust-rf13d`, from `mac/rust-rf13c` `7f153a722`)
+
+- `mac/rust-rf13b`'s review fix (`ab753d5d0`) merged first, so the branch carries RF13b's fix, RF13c and RF13d; the journal's
+  conflict resolved by keeping both entries.
+- RF13c's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src; rustc_mir_build's
+  thir cx (ConstParam, SelfCtor's ZstLiteral), builder/mod.rs (constants check overflow), builder/expr/into.rs (write_via_move),
+  rustc_builtin_macros' deriving/mod.rs assert_ty_bounds, rustc_hir_typeck's check_casts, coercion.rs (coerce_unsized),
+  instantiate_value_path, expected_inputs_for_expected_output with generalize.rs, char's Debug): const parameters as values,
+  inline consts' own bodies (`f::{constant#N}`), derive's assertion spans, nested consts' MIR names, const closures' spans, the
+  crate's own ManuallyDrop, fresh trait arguments in a where-clause item's user type, a trait segment's written arguments,
+  impl Trait arguments skipped by a turbofish, `Self` struct patterns, expressions and unit values with their user types,
+  unsizing coercion casts and raw pointer coercions, write_via_move lowered as an assignment, char constants' escapes and code
+  points. Alternatives considered: modelling transcribe.rs' global metavar_spans table for tuple.rs' `Default` (12 bodies;
+  left, as a heuristic over expansion order would risk the equal ones), evaluating braced const arguments (`{ L3.to_llvm() }`,
+  3 bodies: needs const evaluation of a call; left). RFP52's crate-private items untouched, as decided.
+- core-check: 5,538 equal (5,474 at RF13c), 157 but for the allocations (155), 49 differ (85), 52 refused (63); no module lost an
+  equal body (baseline rerun at `7f153a722`: 5,474, as recorded). `bin/rust-front core-essential` and `essential` equal to their
+  known files. doc/rust/FRONTEND-SURVEY.md, "As built: RF13d".
+
+## 2026-11-10: RF13e, more of core's bodies equal to rustc's built MIR; RFP52 (a) (branch `rust-rf13e`, from `mac/rust-rf13d` `011d4cc3b`)
+
+- RF13d's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src's
+  `compiler/`: rustc_hir_typeck's check_expr_offset_of, coercion.rs (try_find_coercion_lub's fast path, ret_coercion),
+  rustc_infer's generalize.rs, place_op.rs' convert_place_derefs_to_mutable, rustc_mir_build's thir cx (OffsetOf),
+  rustc_builtin_macros' partial_ord.rs, rustc_trait_selection's builtin Copy/Clone and Destruct candidates, rustc_span's
+  MetavarSpansMap): offset_of!, nested inline consts, generalization of late-bound regions (the `Some(slice)` reborrow:
+  RF13d's port of expected_inputs_for_expected_output was right, generalization kept the parameter's region), the return
+  coercion as a CoerceMany, `Self { .. }` patterns of another file's struct, tuples' and arrays' builtin Copy/Clone,
+  Destruct, crate constants in patterns, an operator's alias bound, IndexMut in the builder's table, partial_ord's unit
+  exceptions, a let type's elided regions as fresh variables.
+- RFP52 (a), the user's decision of 2026-11-10 (with RFP48-RFP61 and RF12-P8, relayed by the main session):
+  `test/rust/front/core-iface-extra.txt`, the interface pass over its ten files in every run, the native interface's impls,
+  uniform-path re-exports in core's index.
+- Left, explained: tuple.rs' `Default` (12; metavar_spans needs hygiene contexts and rustc's expansion order: not ported
+  rather than guessed), braced const arguments (const evaluation of a call), RFP52's rest (a crate-private type alias, CopySpec,
+  Drain, ascii::Char, try_process's turbofish).
+- core-check: 5,538 (RF13d) -> 5,551 by the causes (`CORE_IFACE_EXTRA=`, RF13d's index) -> 5,576 with RFP52 (a) and a fresh
+  index; no module lost an equal body at either step. `bin/rust-front core-essential` and `essential` equal to their known
+  files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes. doc/rust/FRONTEND-SURVEY.md, "As built: RF13e".
+
+## 2026-11-10: RF14, RFP48 (a): trait resolution in mono; RFP49 (a) begun (branch `rust-rf14`, from `mac/rust-rf13e` `db5fe592e`)
+
+- RFP48 (a), decided by the user on 2026-11-10 (RFP48-RFP61 (a), relayed by the main session): Instance::resolve's
+  resolve_associated_item for mono, after rustc 1.99.1's rustc_ty_utils/src/instance.rs and rustc_trait_selection's
+  specialize/mod.rs and specialization_graph (the pinned rust-src's `compiler/`): `arbace.rust.front.typeck/resolve-assoc-fn`
+  (the applying impls, the specialization chain leaf first by their headers, the item from the nearest impl that defines it at
+  the impl's arguments and the method's own, else the trait's default body; an overlap without a most specialized impl and an
+  impl argument nothing determines refused), `arbace.rust.front.mono/resolve-instance` (the Fn traits' builtin candidates:
+  a closure's body or ClosureOnceShim by the closure's kind from its built body's self, FnPtrShim), used by the callee facts,
+  the calls' function constants, the collector, the external items and the vtables (std's impls, generic impls and default
+  bodies; VTableShim and a supertrait with parameters still refused). Alternatives considered: rustc's full specialization
+  graph with its where-clause implication (the header test suffices where two impls both apply to a concrete goal: coherence
+  admitted them as specializations; an overlap the header test cannot order is refused), keeping the record's facts (RFP48
+  (b), not decided).
+- Found on the way, each after rustc's code: v0's `<Self as Trait>::` qualification (default_print_def_path's
+  trait_qualify_parent), trait objects, local closures and fn pointers in v0; impl disambiguators in rustc's order of
+  definitions (a derive's impls after the crate's other items); `#[track_caller]` inherited from the trait's method
+  (codegen_fn_attrs); core's attributes of a trait's provided method and of an impl found by its header's names (std's
+  interface's against the source's, where the file's order is not rustc's disambiguators'); a call's function constant whose
+  callee's attributes core's sources do not show refused as its callee is.
+- RFP49 (a), the first part: build-run hands mono the function constants of the record's std bodies; the local functions and
+  closures they reach at no type argument join the collector's items (closures' bodies items too). The rest (generic local
+  instances reached through std: `quicksort::<f64>`, `<Dog as Animal>::describe`) needs our generic bodies instantiated, next.
+- Measured, light (one process at a time, under 2 GiB): the mono facts against the record over 8 synthetic programs, before
+  (`db5fe592e` in a worktree of its own) and after: callees equal 406 -> 592 of 710, function constants' symbols 368 -> 557, the
+  native callees 731 -> 964 of about 990 (refusals 263 -> 29); `rsi-build` over the 67 synthetic programs: 48 own (47:
+  `patterns`), the native callees 4,079 of 4,524 (3,503 of 4,288), vtables 25 of 32 (0 of 7); `bin/rust-front essential` and
+  `core-essential` equal to their known files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes (Rust
+  unchanged). `rsi-build` keeps each batch's mono-check lines (`mono-all.log`). doc/rust/FRONTEND-SURVEY.md, "As built: RF14
+  (RFP48)", with the night's commands (the whole plan again, rsi-native over the new own program, `bin/rsi check --front own`).
+
+## 2026-11-10: RF15, RFP49 (a)'s rest: generic local instances, promoted constants (branch `rust-rf15`, from `mac/rust-rf14` `e1bdba384`)
+
+- RFP49 (a)'s rest, after rustc 1.99.1's rustc_monomorphize collector and Instance::instantiate_mir_and_normalize_erasing_regions
+  (the pinned rust-src's `compiler/`): mono's collector takes `[DEF ARGS]` items, a local generic function's, a generic impl's
+  method's, a trait's default body's at its Self or a generic function's closure's instance at concrete arguments, reached from
+  our bodies' calls, from the record's std bodies' function constants (RFP49's first part, now with the arguments) and from
+  vtables; each instance is our body instantiated (`mono/instantiate-runtime`: the types from their `:tc` substituted and
+  normalized, function constants' texts from their types, const parameters' values, repeat counts), collected in turn. The
+  local functions std's bodies' vtables name (the record's std bodies' function allocations, by symbol) are roots too.
+  Alternatives considered: rebuilding each instance through typeck at the arguments (rustc instantiates the polymorphic MIR,
+  as done here), keeping the record's instance bodies (RFP54 (a) takes ours).
+- The promoted constants of `main` (RF10's slice 5, further), after rustc_const_eval's interpreter: binary and unary operators,
+  numeric casts, strings' and byte strings' constants with their relocations, reborrows, nested borrows, enum variants with or
+  without fields and tuples or structs of several fields laid out by mono's layout (else the record's layout of that type), a
+  variant's explicit discriminant, f32's and f64's associated constants.
+- Found on the way: LowerSliceLenCalls (lower_slice_len.rs, enabled at -O0: `<[T]>::len` as PtrMetadata); an overloaded
+  compound assignment (`String += &str`: THIR's overloaded_operator, where the builder made a builtin Add of references);
+  `None::<u8>`'s turbofish (typeck); `drop_glue`'s parameter for v0 (not in std's interface); a trait object's auto traits in
+  rustc's interned order (Sync before Send); a record's `(dyn)` of a local trait read back; adt-repr's `#[repr(u8)]` read as a
+  vector (every explicitly sized enum's layout was the record's).
+- Measured, light (one process at a time, under 2 GiB): the 8 programs' mono facts against the record callees 592 -> 660 of
+  710, core items 483 -> 630, symbols 50 -> 105 of 128, native callees 964 -> 1,070 of 1,122; `rsi-build` over the 67
+  synthetic programs: **56 own** (RF14 48; 47 minutes), native callees 4,275 of 4,739, vtables 29 of 36. `bin/rust-front
+  essential`: the mono-check total moved by a6's `drop_glue::<D>` now an equal core item (core-items 2 of 2), the known file's
+  line rewritten (every fact equal); `core-essential` equal to its known file (564 of 567); `bin/reap` 0 problems;
+  `bin/crops-score --judge --strict` exit 0, Rust unchanged. RFP58 (the vector ABI) is not small: its design note in
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF15", with the night's commands.
+
+## 2026-11-10: RF16, RFP58 (a): the vector ABI; the HashMap programs' next causes; promoted constants further (branch `rust-rf16`, from `mac/rust-rf15` `f9cabe9be`)
+
+- RFP58 (a) as RF15's design note planned it, after rustc 1.99.1 (the pinned rust-src's `compiler/`): mono lays out
+  `#[repr(simd)]` types (rustc_ty_utils' layout_of_uncached and rustc_abi's `simd_type`: `(vector ELEMENT N)`, the newtype rule
+  for `Group`); the three types std's interface lacks (`core::core_arch::simd::Simd`, `core::core_arch::x86::__m128i`,
+  hashbrown's `Group`) are read from the library's own sources (rust-src's `library/`, `library/vendor/hashbrown-0.17.1`; stdarch's
+  `types!` read as `library/stdarch/crates/core_arch/src/macros.rs` writes it), a field's path resolved through the module's `use`
+  items and std's names. Codegen keeps a vector in memory and passes it indirectly (rustc_target's `adjust_for_rust_abi`; the
+  signatures equal the IR pack's) and emits the six intrinsics, and the rest of the generic family's simple ones, as
+  rustc_codegen_llvm's `generic_simd_intrinsic` does; rsi's lowering (LL5's scalarized vectors) takes them, so ci, the lowering
+  and `gate_key` do not move (only `arbace/rust/`, in `arbace_crop_paths`). Alternatives considered: vectors as immediates in
+  registers (the design note's guess; rustc passes them indirectly in the Rust ABI, so memory is both simpler and rustc's), the
+  helper printing the layout (the oracle tier's, not the run's), a table of the three types (the sources say it).
+- The vector ABI unblocked the HashMap programs as far as their next causes, built: a call through a constant function pointer
+  (core's quicksort), a spread argument's memory field, thread-local statics (`tlsref`: `llvm.threadlocal.address` of the static
+  declared `external thread_local`, its symbol mono's v0 of the static's def path; upper-case nested items in the value
+  namespace, rustc's non_upper_case_globals).
+- Promoted constants further (RF15's list): `ptr::null::<T>()` and `mem::size_of`/`align_of` calls, checked operators with their
+  fields and `assert`, an unsizing cast to a trait object with its vtable (mono's vtables now carry the cast's source type, since
+  PromoteTemps moves the cast out of the body mono saw); a nested borrow kept in its local (RF15 dropped it). On the tools' host a
+  `cond` whose branches `recur` did not compile as tail calls in `eval-promoted`'s loop: nested `if`s.
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **61 own** (RF15 56; 48
+  minutes): collections, rc-refcell, panic-hashmap-index, fmt, traits; native callees 4,275 of 4,739 (unchanged), vtables 35 of 46
+  (29 of 36), layouts 42,788 of 45,856 (42,388), thread-local statics 5 of 5. `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict`
+  exit 0, Rust unchanged. The 6 left and their causes in doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))", with the night's
+  commands.
+
+## 2026-11-10: RF17, RF16's causes: four programs own, closures' first part (branch `rust-rf17`, from `mac/rust-rf16` `ee2eca54d`)
+
+- RF16's "Left" taken cheapest first, after rustc 1.99.1 (the pinned rust-src's `compiler/`): local constants evaluated as codegen's
+  eval_mir_constant does (the `const` item's construct_const body interpreted by `eval-promoted` in a value mode, in runtime and
+  promoted bodies), a variant's explicit discriminant in a runtime body, a static holding a pointer (codegen_static's
+  const_alloc_to_llvm: a packed struct with its relocations) for structs; a local trait's associated constant resolved to the
+  impl's (resolve_associated_item; typeck's `resolve-assoc-fn` takes associated constants) and a generic function's closure at its
+  instance's arguments (ClosureArgs' parent_args in mono's closure types, v0 and Instance::resolve's Fn arm) for generics; two
+  closure types of one closure unify by definition (typeck compared their signatures by `=`, which failed FlatMap's
+  `F::Output == U`: RF16's "a method call without its callee" in iterators was this `flat_map(..).collect()`, not the blanket
+  impl's `unzip_check`), v0 of a closure type never a backref to its own closures' parent path, and std's tuple constructors used
+  as function values built as shim.rs' build_ctor (the record's `mir/external`) for iterators; `Variants::Empty` in codegen
+  (a zero-sized aggregate, a `poison` discriminant) for casts; a reified closure's ClosureOnceShim symbol (RFP50 (a)'s first
+  part) for closures. Alternatives considered: the record's evaluated constants (`const 4_usize`; a record fact where the
+  interpreter exists), the record's ctor shims (none: the helper does not dump them), comparing closure types by text alone in
+  unification (the signatures' variables then stay apart; equating them is typeck's own identity of the two).
+- Stopped at closures' rest (RFP62: opaque types in mono and closures' vtable entries, about two days) and panic-assert-eq (RFP63:
+  upstream monomorphizations, std's exported generic instances), both written up in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **65 own** (RF16 61; 44
+  minutes): structs, generics, iterators, casts; native callees 4,516 of 4,978 (4,275 of 4,739), constants 205 of 205 (191 of 197),
+  mono-check's callees against the record 1,992 of 2,414 (1,865). `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict` exit 0, Rust unchanged.
+  The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+
+## 2026-11-10 py-aot-classid: the AOT judge records a classed row's class by its id
+`arbace/python/aot.ae`'s `judge` read `(:class c)` of a class map (`divergences-aot.edn`'s key is `:id`), so a classed row's `:class` was `:differs` or `:refused` (queue 259's Low, P6; the main host's patch `.tmp/night-python/259-aot-classid.patch`, applied as is): now `(:id c)`. No other `(:class ...)` read of a class map in arbace/python/ (the rest read `(ex-data e)`). Test `test/python/aot_judge_test.ae` (fabricated refused and differing runs, with and without a class, as the negative control; fails on the unfixed aot.ae). aot.ae's digest (`aot_gen`) keys the AOT's printed packages and the runner: the next pyi AOT run reprints the runtime. bin/reap 0 problems, crops-score --strict 0 problems; no record written.
+
+## 2026-11-11: bin/hsi check --aot removes each program's executable after its run (branch `hs-aot-disk`)
+
+Night 11's `bin/hsi check --aot --corpus nofib,samples,synthetic,testsuite-core --jobs 2 --record` filled the disk: every compiled program's
+`hsi-aot` (20-50 MB) and its generated Go and build module stayed under `.tmp/hsi/progs/<corpus>/<program>/<key>/aot/` (34 GB+ for ~800
+programs) and the run was stopped. The user decided (2026-11-11): delete each program's binary after its run, keep logs, outputs and verdicts.
+`bin/lib/hsi/check`'s `one`, in `--aot` mode, now removes `aot/hsi-aot`, `hsi-aot.new`, `gen` and `mod` right after the compiled run (also
+when the build failed: `gen`, `mod`); `HSI_KEEP_BINS=1` keeps them. Nothing reads the binary afterwards (the verdict, `--record`, `divergences` and
+`record_progs_run` read results, outputs and the STG); a rerun rebuilds, as `bin/lib/hsi/aot`'s key hit needs `DIR/hsi-aot` to exist. The libraries'
+generated packages `.tmp/hsi/aot/lib/` (shared, built once per runtime and image) stay. Test (day, `--jobs 1`, no `--record`, samples/Arrays,
+Classes, Cont, Deadlock): progs 272 MB with HSI_KEEP_BINS=1, 271 KB without; verdicts 4 of 4 pass as recorded; peak 1.1 GiB; a second run
+rebuilt and passed. Alternative considered: deleting the whole `aot/` dir (also drops the small logs and the key: kept for debugging).

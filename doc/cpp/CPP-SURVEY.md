@@ -5700,3 +5700,242 @@ its own shell's command line (a pattern in the loop's text) and ended the shell,
 `.tmp/`: `g0/`, `g3/`, `g4/` (the generation runs), `chk-ours/`, `chk-ours25/`, `aot-ours25/` (the runs), `cg1/`-`cg4/` (codegen-gen),
 `base/` (a0c6ad347's worktree and its `cg0/`), `micro/` (the probes), `probe/` (the native tree's dump), `m/` (the lists), `stubs/`,
 `memwatch.sh`, `gen*.sh`, `mklists.sh`, `ps.sh`, and the runtime `cppi/runtime/` (its ci library, 13 units from night8's).
+
+## Decided (2026-11-09, the user: CP325-CP337, P23)
+
+Each as recommended: CP325 (a), CP326 (a), CP327 (a), CP328 (a), CP329 (a), CP330 (a), CP331 (a), CP332 (a), CP333 (b), CP334 (b),
+CP335 (b), CP336 (a), CP337 (b) (built on `cpp-route`), and doc/cpp/CODEGEN.md's P23 (a).
+
+## As built: cpp-props5 (2026-11-10; branch `cpp-props5` from mac/cpp-route-merged a69c3b10a)
+
+Light, by day's rules in night 10's light lane: main's stage 0 (`ARBACE_HOST_EXE`), one run at a time of at most about 2 GiB
+(`GOMEMLIMIT=1400MiB`, a watcher killing a process tree past 2.3 GB; the one program past 2 GiB is named below), `REPR_CPP_THREADS=2`,
+compiler stubs exiting 99 first on PATH (clang, clang++, clang-23, g++, gcc, cc, cpp, c++, cc1, cc1plus, ld, as, opt, llvm-as, lli,
+llc; their log's 5 lines all from two early attempts, `bin/ci run` on a lowered probe and `bin/cppi runtime-key`'s identity probes (`--version`, `-print-prog-name`), none from a measure below), no gate but `--plan`, no run check (the lowered runtime's read is a heavy job: the programs' runs by
+our route are the night's).
+
+### What was built
+
+- **CP325 (a), a Sema crash a status of its own.** `arbace.repr.cpp.diag/sema-errors`: a unit's refusal (`:codegen/refused`, a type's
+  `:cpp/gap`, a constant not reached) leaves the errors found before it, as before; anything else thrown is a crash, the file's read a
+  failing `:crash` with its message (`dg/read-own`), never an acceptance. On the every-10th sample 8 files read so (they had been
+  "accepted" with nothing found): coroutines' three (a NullPointerException), pr67405.C and template/instantiate1.C (a stack overflow),
+  template/array32.C (a number format), warn/overflow-warn-3.C (a division by zero in the evaluation); all failing before as after.
+  Found by it and fixed: parse/enum4.C's `9223372036854775807ULL * 2 + 1` threw Java's long overflow in `const-int` (its own pass held
+  only because the crash came after its errors): the evaluation's 64-bit arithmetic wraps, as the unsigned types' modulo 2^N does.
+- **CP329 (a), the dg read's time cap.** `REPR_CPP_DG_TIMEOUT` seconds a file (default 300, as clang's dumps had; 0 none): sema's
+  `*deadline*`, checked at each expression and statement analyzed, each constant evaluated (every 4,096 steps of the constexpr
+  evaluator) and each template instantiated (`tick!`); past it every step throws, the analysis unwinds and the read is a failing
+  `:timeout`. On the sample one file (cpp23/ext-floating12.C, rejected and failing before) reads past 300 s.
+- **CP328 (a)**, test/cpp/divergences-dg.edn's `:gxx-only-rules` (by design, by file): cpp1z/inh-ctor35.C (`-fno-new-inheriting-ctors`,
+  the rules before P0136R1) and cpp1z/class-deduction-alias1.C (GCC's alias equivalence at C++17); both were in `:clang-accepts`.
+- **CP327 (a)**, `sema/ctad-template`: a placeholder `C<A>::M` names the member class or alias template M found by class member lookup
+  in the resolved C<A>: cpp2a/class-deduction-alias20.C passes by the own front end (it crashes clang: no oracle verdict).
+- **CP331 (a)**: the checker models a structured binding as the code generator does (after cpp-props3's [dcl.struct.bind]/4 rules),
+  in declarations and range-based for, so the bindings' uses are analyzed; an array of unknown bound is diagnosed as incomplete
+  (cpp26/decomp11.C had crashed on it once modelled).
+- **CP330 (a) and CP326 (a)**: inheriting constructors in the code generator (doc/cpp/CODEGEN.md G5e): std::unique_ptr at C++17 and
+  later generates.
+- **CP332 (a)**: std::tuple's constructors, std::get, make_tuple, std::map's operator[] and a map of strings (CODEGEN.md G5e: clang's
+  builtin templates `__type_pack_element` and `__make_integer_seq`, which the native parser had declined, so `tuple_element` had no
+  `type`; a pack parameter's type as an alias's argument; pack expansions as a mem-initializer's and a functional cast's arguments;
+  `(__constructible<_Elements...>())` read as a fold; if constexpr over a class; a signature's decltype that does not analyze with every
+  argument bound a substitution failure, std::size of a pair). `__type_pack_element`'s index is checked (not a constant, negative, out
+  of range) and its errors reported at the alias (ext/type_pack_element2.C, an own pass by the parser's decline before, holds by them).
+- **CP336 (a)**, built and measured: gen-batch can read P15 (b)'s full parse cache (`ps/*full-cache*`), but a hit costs more than the
+  parse it saves on the tools' host (samples/io.cpp: 378 s parsing, 557 s reading the 6 MB table back, the forms byte for byte the
+  same), so it is off by default (`CPP_GEN_FULL_CACHE=1` on): CP341.
+- **P23 (a)**: the module in clang's order (CODEGEN.md G5e): each function placed at its first reference, as an llvm::Function takes its
+  place in the module when created, the personality at the first landing pad, `__clang_call_terminate` before the declarations its body
+  names, the eager definitions first and then the deferred ones depth first.
+- **CP333 (b), CP334 (b), CP335 (b)**: nothing built: CP333's split is written when the night's switch holds (below), coroutines and GNU
+  vector types stay clang's pack under `auto`. **CP337 (b)** was built on `cpp-route`.
+
+### Checked (light)
+
+| check | result |
+|---|---|
+| the dg every-10th sample (`.tmp/sample.sh`: `sA` the base, `sC` the head) | 121 → 121 own passes, the same files; 2 regressions found on the way (`sB`: ext/type_pack_element2.C by the parser now reading `__type_pack_element`, parse/enum4.C by CP325's crash) and fixed |
+| the 75 files with a structured binding, an inheriting constructor or alias20 (`.tmp/flist.txt`; `fl-b` on a69c3b10a, `fl-n`) | 12 → 13 own passes (class-deduction-alias20), none lost; decomp11's crash fixed after |
+| gen-batch over the run corpora's 82 programs (`.tmp/G1`, before CP332's last fixes) | 56 generated (cpp-route: 55): embed-26 now generates; runtime/hello.cpp generated after (`.tmp/g22`) |
+| gen-batch over the 82 at the head (`.tmp/G2`) | **57 generated** (cpp-route's 55, all of them still generated: embed-26 and runtime/hello.cpp added), 25 refused: coroutines 7, GNU vector types 5, the native parser's declines 4, threads 3 (atomics, threads, thread-throw), deferred's `__complex__`, and singles (spaceship-synth4, attribute-test-1's vector compound literal, pr77550, thread_local12e, builtin-clear-padding-4, null-8); 4,073 s at `GOMAXPROCS=4`, the full cache warm from `G1`, peak 2,086 MB (hello.cpp, the one program past 2 GiB) |
+| probes (`.tmp/p/`): inheriting constructors (inh1), std::unique_ptr (uptr1), std::tuple and make_tuple (tup1-tup3), std::map (map1, map2), a pack-typed alias argument (pk1, pk2), a constexpr if over a class (ce1) | generate (none was run: the runs are the night's) |
+| `bin/cppi codegen-gen` | at the base 154 of 154 as recorded; at P23's head 97 of 154 (57 forms moved by the order alone: 151 the same forms as a set, 3 differing only in the always-inliner's `.iN` numbering); `--record`: 154 of 154 generated, forms.sha256 recorded again |
+| P23 against clang 23.1.5's -O0 IR of 17 samples with vtables (cpp-codegen-fix's, kept in the main checkout's `.tmp/keep/`, by hand) | vtable and VTT definitions in clang's order 3 → 13 of 17; functions and declarations: the longest common subsequence 44.3% → 78.8% of the common names, 2 samples exact (dtors, tmpl-virtual) |
+
+What is left of P23's order: a destructor named by a landing pad's cleanup is placed where our landing pad is written (at the first
+call that may throw) and clang's where the scope's cleanups are popped (at its end); a complete-object constructor and destructor of
+the runtime's classes are declared C2/D2 where clang declares C1/D1 (constructor aliases).
+
+### Proposed (CP338-CP341)
+
+- **CP338: the remaining refusals of the run corpora** (after this branch, 25 of 82): coroutines 7 and vector types 5 stay deferred
+  (CP334 (b), CP335 (b)); the native parser's declines 4 (explicit object parameters, multidimensional subscripts, vbase8-10, library),
+  threads 3 (atomics' `__atomic_thread_fence`, threads' arithmetic on a class, thread-throw's `_Indices`), singles 5. (a) Take them in
+  that order of programs gained, the parser's first; (b) stop at auto's switch. **Recommended: (a).**
+- **CP339: the landing pad's cleanups written at the scope's end**, as clang's PopCleanupBlock (P23's remaining function-order
+  difference). (a) Build it (the EH cleanup blocks emitted when the scope pops, the landing pads branching to them), about a day, the
+  forms recorded again; (b) leave it. **Recommended: (b)** until the codegen records pack (P23's condition) exists to hold the order.
+- **CP340: generation time.** The 82 programs took 5,928 s in one process at `GOMAXPROCS=2` and `GOMEMLIMIT=1400MiB` (cpp-route
+  measured 1,272 s with more processors); runtime/hello.cpp alone 1,884 s with threads.cpp. (a) Measure at night with the
+  full cache cold and `GOMAXPROCS` unset; (b) as is. **Recommended: (a)** (night commands below).
+- **CP341: CP336's cache does not pay.** Reading the full parse's table back (skim's object table, gzip) is slower than the parse on the
+  tools' host. (a) Leave it off (as now) and take generation time from the parse itself (CP340); (b) a cheaper table format (no gzip,
+  the nodes as the reader's own forms), about a day, measured on io.cpp and hello.cpp; (c) drop the full cache. **Recommended: (a)**.
+
+### The night's commands (after cpp-route's slot of night 11 and this branch's merge; one process at a time, about 2 GiB)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace REPR_CPP_THREADS=2 GOMEMLIMIT=1400MiB
+PATH=<stubs>:$PATH bin/repr-cpp dg --corpus dg-error --front native --record   # the own record over the 4,597 files (CP325's crashes, CP329's cap, CP327, CP331, the parser's builtin templates)
+bin/repr-cpp dg --corpus dg-error --front native                               # the record held
+# then test/crops/independence.edn's C++ read fact (:dg-own [N 1] :dg-clang [4597-N 0.5]) and bin/crops-score --record
+bin/cppi codegen-gen                                                           # 154 of 154 as recorded (P23's order)
+CPPI_ROUTE=ours bin/cppi check --corpus samples,runtime                        # hello.cpp's run by our route (unique_ptr's inheriting constructor, map's operator[])
+bin/cppi route-compare && bin/cppi route-compare --aot                         # as cpp-route's night: no clang pass lost under auto
+bin/cppi route-compare --corpus gxx-dg-run --sample 25                         # embed-26 now ours
+bin/cppi codegen-check .tmp/cppi/codegen-check --jobs 2                        # the oracle tier: P23's order against clang's IR at the IR level
+# CP333 (b), when the switch holds: independence.edn's eval and AOT :cases {:own-route [N 1] :pack [82-N 0.5]} averaged with the
+# runtime's (0.5, 0.657 with P21 (b)) -- G5c's model; then bin/crops-score --record
+```
+
+## As built: CP243 (a), the print cell on the own round trip's records (2026-11-10; branch `cpp-print-own` from mac/cpp-props5 57dd92021)
+
+The day's light lane (one process at a time, at most about 2 GiB: `REPR_CPP_THREADS=2 GOMEMLIMIT=1800MiB`, main's stage 0 by
+`ARBACE_HOST_EXE`, no gate, no clang or g++). cpp-compl's "The night" step 2 run by day, then CP243 (a)'s switch.
+
+### The records (`roundtrip-results/own/KEY.edn`, `--judge own --record-results`, each from a whole run with no failure)
+
+| key | files | pass | known (class) | wall, peak |
+|---|---:|---:|---|---|
+| gxx-dg-every-10 | 1,807 | 1,796 | 11 forms-differ | 12.5 min, 1.83 GB |
+| gxx-old-deja-every-10 | 323 | 320 | 3 forms-differ | 2.5 min, 1.61 GB |
+| c-c++-common-every-10 | 326 | 326 | none | 1.5 min, 1.0 GB |
+| libstdcxx-testsuite-every-40 | 244 | 244 | none | 49 min, 1.95 GB (each file reads libstdc++'s headers natively) |
+| gxx-modules-all (`bin/repr-cpp dg --corpus modules --rt-judge own --record`) | 1,181 | 1,180 | 1 forms-differ | 15 min, 1.86 GB |
+| gxx-modules-every-10 (`... --sample 10 ...`; the gate's, not counted beside -all) | 119 | 119 | none | 2 min, 1.69 GB |
+
+The samples (9 of 9) and gxx-dg-essential (33 of 33, its own record of cpp-compl) checked after the last fix, the samples'
+control `_control/bitfields-vs-io` failing as it must (the controls are the samples'; `--record-results` runs none);
+gxx-old-deja-every-10 and c-c++-common-every-10 checked again against their records after the fixes, unchanged.
+
+Two failures found and fixed on the way (each file passes after):
+
+- **c-c++-common/Wimplicit-fallthrough-20.c**: `__attribute__((used));` on a null statement printed `[[used]] ;`, which clang (and
+  the native parser after it) drops as an unknown standard attribute: the forms read again lost it. An AttributedStmt's forms do not
+  say how an attribute was written; an unqualified name that is no standard attribute can only have been written `__attribute__((...))`
+  (an unknown `[[name]]` makes no node), so `print`'s `stmt-attr-str` prints it so (`std-stmt-attrs`, parse's std-attrs).
+- **g++.dg/parse/struct-4.C** (`struct A { struct A a; };`, ill-formed): the native read overflowed the stack in `sema`'s
+  `empty-init`/`fill` (`struct A b = { 0 }` filling a member of its own class's type, without end); `empty-init` now bails (the
+  sema's decline, the converter's tree as before) on a class met again inside its own fill (`*filling*`).
+
+The 15 forms-differ by cause (the own judge's rule class: the first own level that fails, level 1; deferred): most are dg-error
+files whose error recovery the forms do not keep: a type defined in a cast or in a condition's declaration dropped
+(old-deja `g++.bugs/900405_01.C`, `g++.jason/cond.C`), stray tokens `#`, `$` read as a directive the second time
+(`g++.other/crash41.C`), missing semicolons (`parse/semicolon3.C`), `>=` split from a template-id (`parse/template30.C`),
+invalid pack expansions and defaults (`cpp0x/lambda/lambda-err3.C`, `template/crash106.C`), attributes where none may stand
+(`cpp0x/attr-no_unique_address1.C`), `coroutines/ramp-return-a.C`'s `> >`; reader gaps on valid code: `__attribute` without its
+trailing underscores read as an empty declaration (`asan/pr82792.C`), `enum A<T>::E : T { e };` out of line
+(`cpp0x/scoped_enum7.C`), `auto baz() -> C` (`cpp0x/trailing5.C`), `cpp2a/paren-init33.C`'s parenthesized array members, a stray
+`;` (`modules/cpp-11.C`); and `modules/target-aarch64-1_a.C`, an aarch64-only test (`<arm_sve.h>`), read on x86-64.
+
+### The switch (CP243 (a))
+
+- `bin/lib/repr-cpp/roundtrip`: `--judge own` the default (`REPR_CPP_JUDGE` unset); `--judge clang` the oracle tier's, by hand at
+  a tag. `bin/lib/repr-cpp/dg`: `--rt-judge own` the default, its clang route passing `--judge clang` itself; the selftest's
+  `results-record.sh` (the clang judge's records) passes `--judge clang`.
+- `test/reap/cells.edn`'s `[:cpp :print]` sources read `test/repr/cpp/roundtrip-results/own`; clang's records
+  (`roundtrip-results/KEY.edn`) stay the oracle tier's.
+- `cpp-roundtrip` and `cpp-roundtrip-dg` (`test/gate/steps.edn`, `test/gate/crops/cpp.edn`): already `--judge own` on `[:stage0]`
+  (ORS31 (a)); now held to the own records, cpp-roundtrip-dg's rotation universe the own gxx-dg-every-10.
+- `test/crops/independence.edn`'s judge: `:roundtrip [3887 1]`, 0.735 → 0.907.
+
+The known file's 6 files of no own record (HotSpot's 5, `samples/coroutine.cpp`) stay the cell's unrecorded part (3 forms-differ,
+2 print-rejected, 1 gxx-objects-location: clang's classes); `bin/reap`'s detail calls the 15 own forms-differ "recorded known the
+known file no longer lists", the clang judge's wording (no failure: the own judge classes them itself).
+
+### Numbers (bin/crops-score --crop cpp)
+
+| measure | before | after |
+|---|---|---|
+| completeness | 76.3 (96.8) | 89.1 (97.8): print 48.3 → 99.5 (3,866 pass / 1 design / 20 deferred) |
+| maturity | 100 | 100 |
+| independence | 67.8 | 71.3 (judge 0.735 → 0.907) |
+
+`bin/reap --record` (the C++ read cell's sources moved too: cpp-props5's records, not recorded in the matrix before),
+`bin/crops-score --record`, `--judge --strict`: 0 problems.
+
+### Left
+
+The 15 forms-differ (CP342 below); HotSpot's 5 under the own judge (a `hotspot-x86-linux` key needs jdk26u's sources).
+
+### Proposed (CP342; not decided)
+
+- **CP342: the own judge's forms-differ.** (a) Fix the valid-code reader gaps (pr82792's `__attribute`, scoped_enum7's out-of-line
+  enum, trailing5, paren-init33, cpp-11's `;`: five files, about a day); the dg-error files' error recovery stays deferred. (b) A class
+  of its own for an ill-formed file whose error recovery the forms do not keep (by design, as clang's print-rejected was). (c) As now.
+  **Recommended: (a)**, then (b) for the rest; print +0.1 either way.
+
+### Slips, scratch
+
+Edited `bin/lib/repr-cpp/roundtrip` while a run of it was reading it (bash reads a script as it goes): the first
+libstdcxx-testsuite-every-40 run died at its judge (`ool: command not found`) after 47 minutes and was run again; one
+`grep ... /dev/null` in a throwaway command. Scratch in the worktree's `.tmp/`: `repr-cpp-roundtrip/KEY/` (the runs), `repr-cpp-dg/`,
+`rt-*.log`, `chk-*.log`.
+
+## As built: CP352 (2026-11-10; branch `cpp-cp352` from mac/cpp-print-own 806ab6625)
+
+(The report that found these called them "CP342"; the plan's decided CP342 is another item, so this is CP352.) CP243 (a)'s "Proposed
+(CP342)" (a): the reader's gaps on valid code, five files of the own judge's 15 forms-differ, fixed in `arbace/repr/cpp/parse.ae`
+alone (the printer needed no change). The light lane as the day before (`REPR_CPP_THREADS=2 GOMEMLIMIT=1800MiB`, one run at a time,
+no clang, no g++, no gate; clang by hand once, below).
+
+### The five fixes
+
+- **asan/pr82792.C** (`__attribute ((fallthrough));`, the spelling without the trailing underscores): a statement began an attribute
+  list only at `__attribute__` (`parse-statement`), so `__attribute` was read as a declaration (an empty `(let [] ...)` wrapper around the
+  next label, and the attribute lost). A statement's attribute now opens at `__attribute` followed by `(` too. The statement is
+  clang's AttributedStmt, printed `[[fallthrough]];`.
+- **cpp0x/scoped_enum7.C** (`template <typename T> enum A<T>::E : T { e };`, ill-formed: an enumeration is no template): clang's tree
+  has the EnumDecl alone, the forms had no place for the header, and the print `enum A<T>::E : T { e };` made `T` unknown, so the
+  second read declined. `wrap-template`'s enum case is a NativeDecline over the whole declaration (header included): the text form
+  reads again as itself.
+- **cpp0x/trailing5.C** (`auto baz() -> struct C {} {}`, ill-formed): the class defined in the trailing return type had no place in the
+  function's forms, the print `auto baz() -> C {}` named an undeclared `C`. `parse-type-id` in the `:trailing` context declines
+  (NativeDecline, the declaration's text) when the type specifiers define a class or an enumeration.
+- **cpp2a/paren-init33.C** (`a1({1})`, a member initializer of an array type: C++20's parenthesized aggregate initialization): the
+  native read kept the braced list as written (`(a1 1)`), the print's `a1{1}` (the same semantic list: clang's AST for both is the
+  one InitListExpr with the element's nested implicit list, checked by hand with `clang++ -ast-dump`) read with the nested list
+  (`(a1 (cpp/init-list 1))`). `paren-init` designates (the semantic form of `sema/semantic-list`) a braced list for an array
+  as the brace form does.
+- **modules/cpp-11.C** (`#define bob fred;`, then `export module foo:bar.bob;`, ill-formed): the module name's later identifiers
+  were consumed one token at a time, so the macro's expansion `fred;` ended the declaration at its own `;` and the written `;` stood
+  a null declaration, which the print then expanded again (two nulls). `module-name!` takes a later identifier a macro's expansion
+  begins as the macro's name, its whole expansion consumed (as it did for the first identifier, P3034R1).
+
+The four ill-formed ones are still no clang oracle's concern (the own judge has no oracle); each fix keeps its file's own round trip
+exact, which is what the print cell asks.
+
+### The records
+
+| record | before | after |
+|---|---|---|
+| gxx-dg-every-10 (`roundtrip-corpus ... --judge own --record-results`, whole run, 14 min) | 1,796 pass, 11 forms-differ | 1,801 pass, 6 forms-differ |
+| gxx-old-deja-every-10, c-c++-common-every-10 | 320 + 3, 326 | unchanged against their records |
+| gxx-modules-all (`dg --corpus modules --rt-judge own --record`) | 1,180 + 1 | unchanged (the module-name change moves none of its 1,181) |
+| gxx-modules-every-10 | 119 | unchanged |
+| libstdcxx-testsuite-every-40 (49 min) | 244 | unchanged (244 of 244) |
+
+Also gxx-dg-essential 33 of 33, the samples 9 of 9 with the control `_control/bitfields-vs-io` failing as it must, `bin/cppi
+codegen-gen` 154 of 154 (the two controls failing as they must). The 6 left: `coroutines/ramp-return-a.C`, `cpp0x/attr-no_unique_address1.C`,
+`cpp0x/lambda/lambda-err3.C`, `parse/semicolon3.C`, `parse/template30.C`, `template/crash106.C` (dg-error files whose error recovery the
+forms do not keep), old-deja's 3, and `modules/target-aarch64-1_a.C` (aarch64-only): CP342 (b) of the plan's reading, not this
+item's.
+
+### Slips
+
+`nohup ... > /dev/null` for the first background sequence (a `/dev/null` against the day's rules). Scratch: `.tmp/rt-five/` (the five files'
+run, `.tmp/five.list`), `.tmp/cp352/` (the sequences' logs).
+
+`bin/reap --record` (print cell: 15 deferred to 10 forms-differ, 3,871 pass), `bin/crops-score --record` (cpp completeness 89.1 to 89.2, print
+3,866 to 3,871 pass / 15 deferred; with the meant 97.8 to 97.8, independence 71.3 unchanged), `--judge --strict`: 0 problems.

@@ -599,27 +599,33 @@ case ${1:-} in
     fd=$(records_front) || exit 1
     libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}
     rf_libsrc_take || { echo "rsi-build: no $libsrc (bin/repr-rust src-take)"; exit 1; }
-    specs=() ids=() eds=()
+    specs=() ids=() eds=() skipped=0
+    # RFP45 (a): with RF_RSI_UI=N the UI suite's sampled run programs too (rfr_rsi_list; their records in the pack, made at night),
+    # named by rfr_name, read in the UI corpus's source root (RF_SRC_ROOT: a batch an edition and a root)
     while IFS=$'\x1f' read -r id file ed _; do
-      n=$(basename "$id" .rs)
+      n=$(rfr_name "$id")
       if [ $# -gt 0 ]; then printf ' %s ' "$*" | grep -q " $n " || continue; fi
+      [ -f "$rs/$n/$n.record.edn" ] || { echo "rsi-build: $id: no record in the pack rust-front-rsi (bin/rust-front records make rsi with RF_RSI_UI)" >&2; skipped=$((skipped+1)); continue; }
       rm -rf "${rw:?}/$n"; mkdir -p "$rw/$n"; ln -s "$rs/$n/$n.record.edn" "$rw/$n/$n.record.edn"
-      specs+=("$n=$file"); ids+=("$id"); eds+=("$ed")
+      specs+=("$n=$file"); ids+=("$id"); eds+=("$ed $(rfr_rsi_dir "$id")")
     done <<< "$plan"
     [ ${#specs[@]} -gt 0 ] || { echo "rsi-build: no program of rsi's plan named"; exit 1; }
     ed=$(printf '%s\n' "${eds[@]}" | sort -u)
-    [ "$(printf '%s\n' "$ed" | wc -l)" = 1 ] || { echo "rsi-build: the programs' editions differ ($ed): one batch an edition"; exit 1; }
+    [ "$(printf '%s\n' "$ed" | wc -l)" = 1 ] || { echo "rsi-build: the programs' editions or source roots differ ($ed): one batch an edition and a root (name the programs)"; exit 1; }
+    srcdir=${ed#* }; ed=${ed%% *}
     # RF11_BATCH programs a process (default 6): the pipeline's caches grow with the programs it builds, and a process near its
     # GOMEMLIMIT spends its cores collecting (the first whole run: 2.0 GB and every core at the end in one process)
-    : > "$rw/batch.log"; bsz=${RF11_BATCH:-6}
+    : > "$rw/batch.log"; : > "$rw/mono-all.log"; bsz=${RF11_BATCH:-6}
     for ((i = 0; i < ${#specs[@]}; i += bsz)); do
-      (cd "$root" && PATH=$stubs:$PATH BUILD_PASS=SimplifyCfg-pre-optimizations RF_EDITION=$ed RF_OVERFLOW_CHECKS=1 RF_MONO_LIB=$libsrc GOMEMLIMIT=${RF11_GOMEMLIMIT:-1800MiB} GOMAXPROCS=${RF11_PROCS:-4} \
+      (cd "$root" && PATH=$stubs:$PATH BUILD_PASS=SimplifyCfg-pre-optimizations RF_EDITION=$ed RF_OVERFLOW_CHECKS=1 RF_MONO_LIB=$libsrc RF_SRC_ROOT=$srcdir GOMEMLIMIT=${RF11_GOMEMLIMIT:-1800MiB} GOMAXPROCS=${RF11_PROCS:-4} \
          arbace_tool -m arbace.rust.front.build-run batch "$root/test/rust/front/std-crates-rsi.edn" "$fd" "$rw" --std "${specs[@]:$i:$bsz}" 2>&1 |
          grep -v -E '^Reflection warning|recur arg|^Auto-boxing' >> "$rw/batch.log")
+      # RF14: each batch's mono-check of its programs' native facts against their records (the batch rewrites mono.log)
+      grep -v '^mono-check: [0-9]* programs: ' "$rw/mono.log" >> "$rw/mono-all.log" 2>&1
     done
     own=0
     for i in "${!ids[@]}"; do
-      id=${ids[$i]} n=$(basename "$id" .rs)
+      id=${ids[$i]} n=$(rfr_name "$id")
       why=$(grep -m1 "^run-built: $n: " "$rw/batch.log" | sed "s/^run-built: $n: //")
       [ -n "$why" ] || why="the pipeline did not report ($rw/batch.log)"
       if [ "$why" = ready ]; then
@@ -631,7 +637,7 @@ case ${1:-} in
       [ "${RF11_KEEP:-0}" = 1 ] || rm -f "$rw/$n/$n.mono.edn" "$rw/$n/$n.ours.c"
     done > "$rw/front.tsv"
     cut -f2,3 "$rw/front.tsv" | sed -E 's/ \(.*//; s/^own\t.*/own/' | sort | uniq -c | sort -rn
-    echo "rsi-build: $own of ${#ids[@]} programs from Arbace's MIR (the rest from rustc's IR packs); stub calls: $(wc -l < "$stubs/stubs.log")" ;;
+    echo "rsi-build: $own of ${#ids[@]} programs from Arbace's MIR (the rest from rustc's IR packs); stub calls: $(wc -l < "$stubs/stubs.log"); $skipped skipped (no record in the pack)" ;;
   rsi-native)
     # RF11, by hand (the oracle tier's way: rustc as the linker driver, clang for the shim, gcc): the day's run of rsi-build's
     # modules where std's lowered library (bin/rsi runtime-ci, the ci leg's: about four hours to make) is not at hand: each own
@@ -652,8 +658,9 @@ case ${1:-} in
     : > "$rw/empty"; ran=0 ok=0
     while IFS=$'\t' read -r id mode _; do
       [ "$mode" = own ] || continue
-      n=$(basename "$id" .rs)
+      n=$(rfr_name "$id")
       if [ $# -gt 0 ]; then printf ' %s ' "$*" | grep -q " $n " || continue; fi
+      [ -f "$rw/$n/$n.ours.ll" ] || { echo "rsi-native: $n: front.tsv says own but $rw/$n/$n.ours.ll is missing"; ran=$((ran+1)); continue; }
       d=$rw/$n/native; rm -rf "$d"; mkdir -p "$d/low" "$d/run"
       ed=$(rfr_rsi_list | awk -F'\x1f' -v id="$id" '$1 == id {print $3; exit}')
       (cd "$root" && RSI_LOW="$d/low" RSI_RT="$rt" RSI_FRONT_IR="$rw/$n/$n.ours.ll" RSI_KEEP=1 rustc --sysroot "$sys" --edition "$ed" -A unused -A internal_features -Cdebuginfo=0 \

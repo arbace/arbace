@@ -1253,22 +1253,82 @@
 
 (defn- defines-with-sp [m] (filter #(and (= 'llvm/define (first %)) (fn-dbg %)) m))
 
+(defn- record-sp-1
+  "visit(DbgVariableRecord)'s scope check and verifyFnArgs for the record `b` (V:7212-7222, V:7467), `args` the function's
+  arguments seen so far: its message or nil."
+  [m ^java.util.HashMap args b]
+  (let [var (nth b 2 nil) loc (peek b)
+        vsp (scope-sp m (get (md-fields m var) "scope")) lsp (scope-sp m (get (md-fields m loc) "scope"))]
+    (when (and vsp lsp)
+      (if (not= vsp lsp)
+        "mismatched subprogram between #dbg record variable and DILocation"
+        (let [argn (get (md-fields m var) "arg")]
+          (when (and (integer? argn) (pos? (long argn)) (nil? (get (md-fields m loc) "inlinedAt")))
+            (let [prev (.get args argn)]
+              (.put args argn var)
+              (when (and prev (not= prev var)) "conflicting debug info for argument"))))))))
+
+;; ---- LLS43 (a) (the user 2026-11-09): verifyFragmentExpression (V:7425-7464) with DIVariable::getSizeInBits
+;; (DebugInfoMetadata.cpp:1653): a record's (after its visit, V:536) and a global variable expression's (V:1749-1753) fragment
+;; within its variable and not all of it.
+
+(def ^:private sized-types (conj di-types "DIFixedPointType"))
+
+(defn- node-at [m x] (if (seq? x) x (md-node m x)))
+
+(defn- frag-of
+  "A DIExpression node's DW_OP_LLVM_fragment as [offset size], nil without one."
+  [n]
+  (when (= "DIExpression" (di-kind n))
+    (let [v (vec (rest n)) i (.indexOf ^java.util.List v 'DW_OP_LLVM_fragment)]
+      (when (and (>= i 0) (integer? (get v (+ i 1))) (integer? (get v (+ i 2)))) [(get v (+ i 1)) (get v (+ i 2))]))))
+
+(defn- var-bits
+  "DIVariable::getSizeInBits: the first constant non-zero size up the variable's type chain (derived types to their base), else nil."
+  [m var]
+  (loop [t (get (md-fields m var) "type") k 0]
+    (let [n (when (and t (not= t 'null)) (node-at m t))]
+      (when (and (seq? n) (< k 64))
+        (let [kd (di-kind n) fs (di-fields n) sz (get fs "size")]
+          (cond (and (contains? sized-types kd) (integer? sz) (pos? (long sz))) (long sz)
+                (= kd "DIDerivedType") (recur (get fs "baseType") (inc k))
+                :else nil))))))
+
+(defn- frag-msg
+  "verifyFragmentExpression(V, Fragment) (V:7451): the Verifier's unsigned (32-bit) sum and comparisons."
+  [m var [off size]]
+  (when-let [vs (var-bits m var)]
+    (let [m32 (fn [x] (bit-and (long x) 0xffffffff)) fs (m32 size)]
+      (cond (> (m32 (+ fs (m32 off))) (long vs)) "fragment is larger than or outside of variable"
+            (= fs (long vs)) "fragment covers entire variable"))))
+
+(defn- artificial? [v] (or (= v 'DIFlagArtificial) (and (seq? v) (some #{'DIFlagArtificial} v))))
+
+(defn- record-frag
+  "verifyFragmentExpression(DVR) (V:7425): a DILocalVariable, not artificial, and an expression with a fragment."
+  [m b]
+  (let [var (nth b 2 nil)]
+    (when (= "DILocalVariable" (md-kind m var))
+      (when-let [fi (frag-of (node-at m (nth b 3 nil)))]
+        (when-not (artificial? (get (md-fields m var) "flags"))
+          (frag-msg m var fi))))))
+
+(defn- gve-frag
+  "visitDIGlobalVariableExpression's fragment check (V:1749-1753) of the node `id`."
+  [m id]
+  (let [o (md-fields m id) v (get o "var")]
+    (when (and (= "DIGlobalVariableExpression" (md-kind m id)) (= "DIGlobalVariable" (md-kind m v)))
+      (when-let [fi (frag-of (node-at m (get o "expr")))] (frag-msg m v fi)))))
+
+(defn- cu-gves [m cu] (when (= "DICompileUnit" (md-kind m cu)) (tuple-ops m (get (md-fields m cu) "globals"))))
+
 (defn- record-sp-check
-  "visit(DbgVariableRecord)'s scope check and verifyFnArgs for the records of `f` (V:7212-7222, V:7467): the first message or nil."
-  [m f]
-  (let [args (java.util.HashMap.)]
-    (some (fn [b]
-            (let [var (nth b 2 nil) loc (peek b)
-                  vsp (scope-sp m (get (md-fields m var) "scope")) lsp (scope-sp m (get (md-fields m loc) "scope"))]
-              (when (and vsp lsp)
-                (if (not= vsp lsp)
-                  "mismatched subprogram between #dbg record variable and DILocation"
-                  (let [argn (get (md-fields m var) "arg")]
-                    (when (and (integer? argn) (pos? (long argn)) (nil? (get (md-fields m loc) "inlinedAt")))
-                      (let [prev (.get args argn)]
-                        (.put args argn var)
-                        (when (and prev (not= prev var)) "conflicting debug info for argument"))))))))
-          (records-in f))))
+  "The records of `f` in order (V:536): with a subprogram (`sp?`) visit(DbgVariableRecord)'s scope check and verifyFnArgs
+  (record-sp-1), then each record's fragment (LLS43 (a)): the first message or nil."
+  ([m f] (record-sp-check m f true))
+  ([m f sp?]
+   (let [args (java.util.HashMap.)]
+     (some (fn [b] (or (when sp? (record-sp-1 m args b)) (record-frag m b))) (records-in f)))))
 
 (defn- locs-check
   "visitFunction's VisitDebugLoc (V:3313-3352) over the instructions' !dbg and llvm.loop locations of `f`, its subprogram `sp`: the
@@ -1291,18 +1351,37 @@
 
 (defn- fn-scope-checks
   "The functions' record and location checks, in the module's order: the first message or nil (the checks the retargets below can
-  move; a debug intrinsic's old call anywhere leaves it to opt: nil with :old)."
+  move; a debug intrinsic's old call anywhere leaves it to opt: nil with :old). LLS43 (a): with the fragments, in the Verifier's
+  order: each definition's subprogram visited first (visitFunction's visitMDNode, V:3255), its compile unit's global variable
+  expressions with it (their fragments, the first time each is reached), then its walk of the locations (V:3313), then its records
+  (a definition without a subprogram: their fragments alone); then the globals' !dbg (visitGlobalVariable, after every function)
+  and the compile units of !llvm.dbg.cu (the named metadata, last)."
   [m]
-  (some (fn [f] (or (locs-check m f (fn-dbg f)) (record-sp-check m f))) (defines-with-sp m)))
+  (let [seen (java.util.HashSet.)
+        gv (fn [ids] (some (fn [g] (when (.add seen g) (gve-frag m g))) ids))]
+    (or (some (fn [f]
+                (let [sp (fn-dbg f)]
+                  (or (when (= "DISubprogram" (md-kind m sp)) (gv (cu-gves m (get (md-fields m sp) "unit"))))
+                      (when sp (locs-check m f sp))
+                      (record-sp-check m f (some? sp)))))
+              (filter #(= 'llvm/define (first %)) m))
+        (gv (keep (fn [g] (when (= 'llvm/global (first g)) (second (drop-while #(not= % '!dbg) (:md (opts-of (drop 3 g))))))) m))
+        (gv (mapcat (fn [f] (when (and (= 'llvm/named-meta (first f)) (= '!llvm.dbg.cu (second f))) (mapcat #(cu-gves m %) (nth f 2)))) m)))))
 
 (defn- old-calls? [m] (some (fn [f] (some #(old-dbg? (nth (body %) 2 nil)) (for [b (blocks-of f) x (items-of b)] x)))
                             (filter #(= 'llvm/define (first %)) m)))
 
 (defn- scope-verdict
-  "A verdict from fn-scope-checks: its message as the debug info's, else valid; an old debug call or a fragment left to opt."
+  "A verdict from fn-scope-checks: its message as the debug info's, else valid; an old debug call left to opt (LLS44 (b))."
   [m why]
   (cond (old-calls? m) (unknown (str why ": an old debug intrinsic's call"))
         :else (if-let [e (fn-scope-checks m)] (debugv e) valid)))
+
+(defn- frag-verdict
+  "LLS43 (a): a change that moves only a variable's size (a type, a variable's type): valid without a fragment in the module, else
+  the fragments' first message (fn-scope-checks, the rest of it unchanged by the change)."
+  [m why]
+  (if (module-fragments? m) (scope-verdict m why) valid))
 
 (def ^:private set-base-encodings #{"DW_ATE_unsigned" "DW_ATE_signed" "DW_ATE_unsigned_char" "DW_ATE_signed_char" "DW_ATE_boolean"})
 
@@ -1348,24 +1427,26 @@
       (and (#{"DILocalVariable" "DIGlobalVariable"} kind) (= f "type"))
       (cond (not type?) (debugv "invalid type ref")
             (and (= kind "DILocalVariable") (= tk "DISubroutineType")) (debugv "invalid type")
-            ;; LLS40 (a): any other type (visitDIVariable V:1693; the record's own check V:7203); a fragment reads its size
-            (module-fragments? m) (unknown "a variable's type sent to another type, a fragment's size")
-            :else valid)
+            ;; LLS40 (a): any other type (visitDIVariable V:1693; the record's own check V:7203); LLS43 (a): a fragment reads its size
+            :else (frag-verdict m "a variable's type sent to another type"))
       ;; visitDISubroutineType (V:1407), visitDICompositeType (V:1343-1348), visitDIDerivedType (V:1295)
       (and (= kind "DISubroutineType") (= f "types")) (debugv "invalid composite elements")
       (and (= kind "DICompositeType") (= f "elements")) (debugv "invalid composite elements")
       (and (#{"DICompositeType" "DIDerivedType"} kind) (= f "baseType") (not type?)) (debugv "invalid base type")
       ;; LLS40 (a): visitDIDerivedType's set type's base (V:1278), else any type (V:1295, V:1343); a fragment reads the size
       (and (#{"DICompositeType" "DIDerivedType"} kind) (= f "baseType"))
-      (cond (module-fragments? m) (unknown "a type's base sent to another type, a fragment's size")
-            (and (= kind "DIDerivedType") (str/includes? (str (get o "tag")) "DW_TAG_set_type"))
+      (cond (and (= kind "DIDerivedType") (str/includes? (str (get o "tag")) "DW_TAG_set_type"))
             (let [tf (md-fields m to)]
-              (if (or (and (= tk "DICompositeType") (str/includes? (str (get tf "tag")) "DW_TAG_enumeration_type"))
-                      (= tk "DISubrangeType")
-                      (and (= tk "DIBasicType") (contains? set-base-encodings (str (get tf "encoding")))))
-                valid
-                (debugv "invalid set base type")))
-            :else valid)
+              (cond (or (and (= tk "DICompositeType") (str/includes? (str (get tf "tag")) "DW_TAG_enumeration_type"))
+                        (= tk "DISubrangeType")
+                        (and (= tk "DIBasicType") (contains? set-base-encodings (str (get tf "encoding")))))
+                    (frag-verdict m "a set type's base sent to another type")
+                    ;; LLS43 (a): the type's visit and a fragment's message in another order than the walk's: left to opt
+                    (and (module-fragments? m) (not= valid (frag-verdict m "a set type's base")))
+                    (unknown "a set type's invalid base and a fragment's size")
+                    :else (debugv "invalid set base type")))
+            ;; LLS43 (a): a fragment reads the size
+            :else (frag-verdict m "a type's base sent to another type"))
       (and (= kind "DICompositeType") (= f "vtableHolder") (not type?)) (debugv "invalid vtable holder")
       :else (unknown (str "the field " f " of " kind)))))
 
@@ -1405,8 +1486,8 @@
   (let [tk (di-kind (md-node m to))]
     (case (long k)
       2 (cond (not= tk "DILocalVariable") (debugv "invalid #dbg record variable")
-              ;; LLS40 (a): the scopes must agree and the arguments not conflict (V:7212-7222, V:7467); a fragment reads the size
-              (module-fragments? m) (unknown "a variable sent to another variable, a fragment's size")
+              ;; LLS40 (a): the scopes must agree and the arguments not conflict (V:7212-7222, V:7467); LLS43 (a): then the
+              ;; record's fragment against the new variable's size
               :else (scope-verdict m "a variable sent to another variable"))
       3 (if (= tk "DIExpression") (unknown "an expression") (debugv "invalid #dbg record expression"))
       4 (cond (= head 'dbg_assign) (unknown "dbg_assign's assign id")
@@ -1445,8 +1526,8 @@
                   :else (scope-verdict m "an instruction's !dbg sent to another location"))
       ;; LLS40 (a): visitGlobalVariable (V:794)
       (= case :global) (cond (not= tk-global "DIGlobalVariableExpression") (debugv "!dbg attachment of global variable must be a DIGlobalVariableExpression")
-                    (module-fragments? m) (unknown "a global's !dbg sent to another expression, a fragment's size")
-                    :else valid)))))
+                    ;; LLS43 (a): the expressions' fragments, each where the Verifier first reaches it
+                    :else (frag-verdict m "a global's !dbg sent to another expression"))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Intrinsic declarations (LLS36 (a)): LLParser's validateEndOfModule upgrades every function first (UpgradeCallsToIntrinsic,

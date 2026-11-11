@@ -28,13 +28,25 @@
 #                   bottom-up on the front end's own interfaces: the plan's modules and the package's hs-boot files in
 #                   dependency order (libcheck own-order), each renamed and elaborated against the own interfaces of the
 #                   modules its closure names (the same module names as GHC's closure; a module not compiled yet its boot
-#                   file's, GHC.Internal.Prim the wired-in interface, GHC's), then its own interface written into
+#                   file's, GHC.Internal.Prim the wired-in interface, built from primops.txt.pp by arbace.repr.haskell.primiface since
+#                   HF10-P18 (a), judged against the pack's first; LIB_CHECK_PRIM=ghc the pack's), then its own interface written into
 #                   .tmp/repr-haskell/lib-check/own/PKG/pool (arbace.repr.haskell.ownface) and judged: its binders' types
 #                   against GHC's interface of the module as without it, and the interface against GHC's fact by fact
 #                   (libcheck rank-own). --record and --judge take the own run's record (test/haskell/lib-check-own-PKG.edn).
 #                   GHC's interfaces are only the judge's: the pack's closures name the modules, its interfaces are compared
 #                   with. One process (the order is sequential); a module over the limit is :timeout, the rest goes on.
-#                   The whole package (no --only, --every); LIB_CHECK_OWN_ONLY=N stops after the first N units (a sample)
+#                   The whole package (no --only, --every); LIB_CHECK_OWN_ONLY=N stops after the first N units (a sample).
+#                   HF10-P12 (a): a module that defines default methods goes through the -O0 Simplifier (lib-stg's pipeline;
+#                   the libraries' constructors from HSI_LIBS or the pack haskell-stg-libs) and each $dm's unfolding is written
+#                   as the Simplifier left it, as GHC's -O0 interface carries it.
+#                   HF10-P14 (a): --package base on ghc-internal's own pool (LIB_CHECK_DEP_POOLS, or LIB_CHECK_DEP_POOL_TAR a tar of
+#                   it, a gate producer's output, HF10-P15 (a); LIB_CHECK_POOL_OUT=DIR keeps the run's pool as DIR/PKG-pool.tar;
+#                   made first by --ifaces own):
+#                   no GHC closure, each module's closure grown by the driver from its imports over the names the interfaces
+#                   mention, ghc-prim's reexported modules (GHC.Prim, GHC.Types ...) from its .cabal file, the unit id the
+#                   installation's (test/haskell/target/installation.edn); GHC's interface of a module the judge's when the
+#                   pack haskell-ifaces-ghc-9.14.1 holds it (113 of base's 241), else none; the control
+#                   test/haskell/lib-check-controls-base.tsv
 #   --package PKG   ghc-internal (default) or base (each base module with Prelude among its imports)
 #   --every N       every Nth module of the package (a sample), in file order
 #   --only FILE     the modules FILE names (GHC/Internal/X paths, one a line)
@@ -180,6 +192,9 @@ if [ -n "$live" ]; then
     echo "== lib-check: $(grep -c '^closure/' "$(oracle_manifest "$pin")") closures and $(grep -c '^pool/' "$(oracle_manifest "$pin")") interfaces packed into $name" >&2
   fi
 else
+  # HF10-P14 (a): base (a package above ghc-internal) on ghc-internal's own pool: its closures are grown by the driver from the
+  # imports over the own interfaces (no GHC closure); GHC.Internal.Prim the own wired-in interface (HF10-P18 (a))
+  above=""; [ "$ifaces" = own ] && [ "$pkg" != ghc-internal ] && above=1
   man=$(oracle_manifest "$pin")
   [ -f "$pin" ] && [ -f "$man" ] || { echo "lib-check: UNRECORDED: no $pin (bin/repr-haskell lib-check --live --record-pack, by hand on a host with GHC)" >&2; exit 1; }
   h=$(hsr_iface2_hash)
@@ -188,7 +203,7 @@ else
   u=$(oracle_unpack "$pin") || exit 1
   pool=$u/$(oracle_pin_name "$pin")/pool cl=$u/$(oracle_pin_name "$pin")/closure
   miss=0
-  while read -r f; do m=$(echo "$f" | tr / .); [ -f "$cl/$m.txt" ] || { echo "lib-check: UNRECORDED $m: no closure in the pack" >&2; miss=1; }; done < "$w/files.txt"
+  [ -n "$above" ] || while read -r f; do m=$(echo "$f" | tr / .); [ -f "$cl/$m.txt" ] || { echo "lib-check: UNRECORDED $m: no closure in the pack" >&2; miss=1; }; done < "$w/files.txt"
   [ "$miss" = 0 ] || exit 1
 fi
 # the modules an interface names (its things' types, instances, families): GHC loads their interfaces on demand
@@ -218,9 +233,20 @@ closure_dir() { # M L: the links of M's closure, grown to the fixed point, in L
   done
   for x in "${!have[@]}"; do ln -s "$pool/$x" "$l/$x"; done
 }
+# a package above ghc-internal on the own pools: every module, its closure the driver's (an empty directory here), GHC's
+# interface of it the judge's when the pack haskell-ifaces-ghc-9.14.1 (the programs' closures' interfaces) holds one, else "-"
+gif=""
+if [ -n "${above:-}" ]; then
+  gpin=$root/test/haskell/records/haskell-ifaces-ghc-9.14.1.sha256
+  if gu=$(oracle_unpack "$gpin" 2> "$w/gifaces.err"); then gif=$gu/$(oracle_pin_name "$gpin"); else echo "lib-check: no GHC interfaces of $pkg to judge with ($(head -1 "$w/gifaces.err"))" >&2; fi
+fi
 while read -r f; do
   m=$(echo "$f" | tr / .)
   d=$nd/src/$f.hs.edn; [ -f "$d" ] || d=$nd/src/$f.hsc.edn
+  if [ -n "${above:-}" ]; then
+    mkdir -p "$w/ln/$m"; g=-; [ -n "$gif" ] && [ -f "$gif/$m.iface.edn" ] && g=$gif/$m.iface.edn
+    printf '%s\t%s\t%s\t%s\n' "$m" "$d" "$w/ln/$m" "$g" >> "$plan"; continue
+  fi
   [ -f "$pool/$m.iface.edn" ] || { hidden=$((hidden + 1)); continue; }
   closure_dir "$m" "$w/ln/$m"
   printf '%s\t%s\t%s\t%s\n' "$m" "$d" "$w/ln/$m" "$pool/$m.iface.edn" >> "$plan"
@@ -231,10 +257,47 @@ if [ "$ifaces" = own ]; then
   # HF10-P3: bottom-up on the own interfaces (the whole plan's order, cut to the run's modules for --only/--every)
   ow=${LIB_CHECK_OWN_OUT:-$root/.tmp/repr-haskell/lib-check/own/$pkg}
   mkdir -p "$ow"
+  # HF10-P14 (a): the own pools of the packages below (base: ghc-internal's, which lib-check --ifaces own makes first)
+  deps="" unit=$pkg
+  if [ -n "${above:-}" ]; then
+    # the installation's unit id (test/haskell/target/installation.edn; ghc-internal's is wired in): Typeable's module records
+    unit=$(sed -n "s/^ *\"$pkg\" {:id \"\([^\"]*\)\".*/\1/p" "$root/test/haskell/target/installation.edn" | head -1)
+    [ -n "$unit" ] || { echo "lib-check: no unit id of $pkg in test/haskell/target/installation.edn" >&2; exit 1; }
+    deps=${LIB_CHECK_DEP_POOLS:-$root/.tmp/repr-haskell/lib-check/own/ghc-internal/pool}
+    # HF10-P15 (a): ghc-internal's pool from the gate's producer (haskell-lib-check-own's output, GATE_OUTS): unpacked here
+    if [ -n "${LIB_CHECK_DEP_POOL_TAR:-}" ]; then
+      [ -f "$LIB_CHECK_DEP_POOL_TAR" ] || { echo "lib-check: no $LIB_CHECK_DEP_POOL_TAR (the producer's own pool)" >&2; exit 1; }
+      dd=$root/.tmp/repr-haskell/lib-check/own/$pkg-deps; rm -rf "$dd"; mkdir -p "$dd"
+      tar -C "$dd" -xf "$LIB_CHECK_DEP_POOL_TAR"; deps=$dd/pool
+    fi
+    for x in ${deps//,/ }; do [ -f "$x/GHC.Internal.Base.iface.edn" ] || { echo "lib-check --package $pkg --ifaces own: no own pool $x (bin/repr-haskell lib-check --ifaces own first)" >&2; exit 1; }; done
+    # the reexported modules of the packages it depends on (ghc-prim's GHC.Prim, GHC.Types ...: their .cabal files, the
+    # pinned tarball's, as the installation's database lists them)
+    src=$root/.tmp/repr-haskell/corpus/ghc-9.14.1/libraries
+    # (base depends on ghc-internal and ghc-prim alone)
+    cabals=""; for q in ghc-prim; do [ "$q" = "$pkg" ] && continue; [ -f "$src/$q/$q.cabal" ] || { echo "lib-check: $src/$q/$q.cabal is missing (base's reexported modules come from it; bin/repr-haskell corpus fetch)" >&2; exit 2; }; cabals="$cabals${cabals:+,}$src/$q/$q.cabal"; done
+  fi
   [ -z "$partial" ] || { echo "lib-check: --ifaces own compiles the whole package in dependency order (no --only, --every)" >&2; exit 2; }
+  # HF10-P18 (a): GHC.Internal.Prim, the wired-in interface every closure reads, built by Arbace from the pinned tarball's
+  # primops.txt.pp (arbace.repr.haskell.primiface) and judged against the pack's fact by fact and byte for byte, with its
+  # negative control; LIB_CHECK_PRIM=ghc: the pack's (GHC's) as before
+  wired=$pool
+  if [ "${LIB_CHECK_PRIM:-own}" != ghc ]; then
+    pp=$root/.tmp/repr-haskell/corpus/ghc-9.14.1/compiler/GHC/Builtin/primops.txt.pp
+    [ -f "$pp" ] || { echo "lib-check: $pp is missing (bin/repr-haskell corpus fetch)" >&2; exit 2; }
+    wired=$ow/wired; rm -rf "$wired"
+    arbace_tool -m arbace.repr.haskell.primiface write "$pp" "$wired" >&2
+    arbace_tool -m arbace.repr.haskell.primiface check "$pp" "$pool/GHC.Internal.Prim.iface.edn" > "$ow/prim-check.txt" ||
+      { cat "$ow/prim-check.txt" >&2; echo "lib-check: the own GHC.Internal.Prim differs from GHC's (or its control is blind)" >&2; exit 1; }
+    tail -1 "$ow/prim-check.txt" >&2
+  fi
   arbace_tool -m arbace.repr.haskell.libcheck own-order "$plan" > "$ow/order.txt"
   [ -z "${LIB_CHECK_OWN_ONLY:-}" ] || { head -n "$LIB_CHECK_OWN_ONLY" "$ow/order.txt" > "$ow/order.cut"; mv "$ow/order.cut" "$ow/order.txt"; }
   rm -rf "$ow/pool" "$ow/boot" "$ow/ln" "$ow/work"
+  # HF10-P12 (a): a module that defines default methods goes through the -O0 Simplifier, which reads the other modules'
+  # constructors from the libraries' STG as lib-stg does (HSI_LIBS, else the pack haskell-stg-libs: bin/hsi libs-pack -O2)
+  if [ -n "${HSI_LIBS:-}" ]; then olibs=$HSI_LIBS
+  else olibs=$("$root/bin/hsi" libs-pack -O2 2> "$ow/libs.err") || { cat "$ow/libs.err" >&2; exit 1; }; fi
   echo "== lib-check --ifaces own: $(wc -l < "$ow/order.txt") units in dependency order ($(grep -c '^boot' "$ow/order.txt") boot files)" >&2
   : > "$ow/results.edn"
   while :; do
@@ -242,7 +305,7 @@ if [ "$ifaces" = own ]; then
     tail -n +$((done + 1)) "$ow/order.txt" > "$ow/order.rest"
     [ -s "$ow/order.rest" ] || break
     GOMEMLIMIT=${GOMEMLIMIT:-1500MiB} arbace_tool -m arbace.repr.haskell.libcheck own --order "$ow/order.rest" --units "$ow/order.txt" -o "$ow" \
-      --wired "$pool" --ghc-pool "$pool" --timeout "${LIB_CHECK_TIMEOUT:-900}" >> "$ow/results.edn" 2>> "$ow/err" && break
+      --wired "$wired" --ghc-pool "$pool" --libs "${olibs//:/,}" --unit "$unit" --dep-pools "$deps" --cabals "${cabals:-}" --timeout "${LIB_CHECK_TIMEOUT:-900}" >> "$ow/results.edn" 2>> "$ow/err" && break
     [ "$(wc -l < "$ow/results.edn")" -gt "$done" ] || break
   done
   # the modules' rows (the boot files' apart) in lib-check's format, and the plan for lib-stg --ifaces own (the closures
@@ -253,17 +316,28 @@ if [ "$ifaces" = own ]; then
   arbace_tool -m arbace.repr.haskell.libcheck rank-own "$ow/results.edn" | tee -a "$ow/rank.txt"
   if [ -n "$record" ]; then
     arbace_tool -m arbace.repr.haskell.libcheck record "$ow/modules.edn" "$record" "$([ -n "$partial" ] && echo partial || echo whole)" \
-      "the front end's own, bottom-up (--ifaces own; the judge's: the pack $(oracle_pin_name "$pin") at $(oracle_pin_sha "$pin"))"
+      "$(if [ -n "${above:-}" ]; then echo "the front end's own, bottom-up on ghc-internal's own pool (--package $pkg --ifaces own; the judge's: the pack $(oracle_pin_name "$gpin") at $(oracle_pin_sha "$gpin"), the modules it holds)"
+         else echo "the front end's own, bottom-up (--ifaces own; the judge's: the pack $(oracle_pin_name "$pin") at $(oracle_pin_sha "$pin"))"; fi)"
   fi
   st=0
   if [ -n "$judge" ]; then
     arbace_tool -m arbace.repr.haskell.libcheck judge "$judge" "$ow/modules.edn" "$([ -n "$partial" ] && echo partial || echo whole)" || st=1
   fi
   # the interface judge's negative control (GTS81 (a)): an own interface against another module's GHC interface, renamed
+  # a package above ghc-internal: its own control pair (test/haskell/lib-check-controls-PKG.tsv), GHC's interfaces from haskell-ifaces
+  cpool=$pool; [ -z "${above:-}" ] || { controls=$root/test/haskell/lib-check-controls-$pkg.tsv; cpool=$gif; }
   while IFS=$'\t' read -r subj other; do
     case $subj in ''|'#'*) continue ;; esac
-    arbace_tool -m arbace.repr.haskell.libcheck own-control "$ow/pool" "$pool" "$subj" "$other" || st=1
+    arbace_tool -m arbace.repr.haskell.libcheck own-control "$ow/pool" "$cpool" "$subj" "$other" || st=1
   done < "$controls"
+  # HF10-P15 (a): the package's own pool kept as a gate step's output (LIB_CHECK_POOL_OUT=DIR: DIR/PKG-pool.tar, one
+  # deterministic tar of pool/, the step's GATE_OUT), the next package's dependency (LIB_CHECK_DEP_POOL_TAR)
+  if [ -n "${LIB_CHECK_POOL_OUT:-}" ]; then
+    mkdir -p "$LIB_CHECK_POOL_OUT"
+    tar -C "$ow" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf "$LIB_CHECK_POOL_OUT/$pkg-pool.tar.part" pool &&
+      mv "$LIB_CHECK_POOL_OUT/$pkg-pool.tar.part" "$LIB_CHECK_POOL_OUT/$pkg-pool.tar" || st=1
+    echo "lib-check --ifaces own: $(ls "$ow/pool" | wc -l) own interfaces kept in $LIB_CHECK_POOL_OUT/$pkg-pool.tar" >&2
+  fi
   exit $st
 fi
 rm -f "$out"/shard.*

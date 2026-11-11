@@ -313,6 +313,7 @@
                                   :kind (str "Static { safety: Safe, mutability: " (if (:mutbl it) "Mut" "Not") ", nested: false }")})]
                 (walk-body! (:expr it) id))
       :ty-alias (add-def! {:parent parent :data [:type nm] :kind "TyAlias" :node it :ident-span isp})
+      :foreign-ty (add-def! {:parent parent :data [:type nm] :kind "ForeignTy" :node it :ident-span isp})
       :mod (let [id (add-def! {:parent parent :data [:type nm] :kind "Mod" :node it :ident-span isp :module true})]
              (doseq [x (:items it)] (collect-item! id x)))
       ;; a module's imports, for the names an expansion's paths use (their resolutions are not in the oracle's data)
@@ -694,6 +695,34 @@
                   (some #(when (= nm (:name %)) %) (:children (get (:mods *std*) m))))]
         (when c (recur (:path c) (rest rest-names)))))))
 
+(defn- local-of-ext
+  "RF13b: an interface path the root file defines itself (a constructor's by its variant or struct), its local def id"
+  [p]
+  (when (and *local-paths* (string? p))
+    (let [ctor? (re-find #"::\{constructor#\d+\}$" p)
+          base (if ctor? (subs p 0 (str/last-index-of p "::")) p)
+          id (get @*local-paths* base)]
+      ;; as the resolver's local resolutions: a constructor by its variant or struct, with the constructor's kind
+      (when (number? id)
+        (if ctor?
+          (when-let [c (:ctor (def-of id))] [id (:kind (def-of c))])
+          [id (:kind (def-of id))])))))
+
+(defn local-def-of-ext
+  "RF13c: the root file's own definition of an interface path (core's `marker::Copy` in marker.rs), its def id, else nil"
+  [p]
+  (first (local-of-ext p)))
+
+(def ^:private ext-of-local-cache (atom nil))
+
+(defn ext-of-local
+  "RF13c: the interface path of a definition of the root file (`*local-paths*` reversed), else nil"
+  [id]
+  (when (and *local-paths* (number? id))
+    (let [m @*local-paths* [cm r] @ext-of-local-cache
+          r (if (identical? cm m) r (let [r (into {} (for [[p i] m :when (number? i)] [i p]))] (reset! ext-of-local-cache [m r]) r))]
+      (get r id))))
+
 (defn res-def
   "A path's resolution as [:local ID KIND] [:ext PATH KIND] [:prim N] [:param P] [:self-alias] [:self-param] or nil"
   [path]
@@ -706,7 +735,11 @@
     (case (head r)
       def (let [k (second r) p (nth r 2)
                 p (if k p (or (std-path-def (path-segs p)) p))]
-            [:ext p (or k (ext-kind p))])
+            (if-let [[lid lk] (local-of-ext p)]
+              ;; RF13b: core's own definition named through its interface path (a prelude's `Ok`, `None` in result.rs and
+              ;; option.rs): the local definition, as rustc's one DefId
+              [:local lid lk]
+              [:ext p (or k (ext-kind p))]))
       local-def (let [k (second r) sp (nth r 2)]
                   (case k
                     ("TyParam" "ConstParam") [:param (scope-param (:ident (peek (:segs path))))]
@@ -777,11 +810,32 @@
                t (str/replace (str/replace t "_" "") #"(u|i)(8|16|32|64|128|size)$" "")]
            (when (re-matches #"[0-9]+" t) (bigint t)))
     :block (when (empty? (:stmts (:block x))) (some-> (:expr (:block x)) eval-int-expr))
+    ;; RF13c: `size_of::<T>()` of a thin pointer, a unit or a primitive (TypeId's `16 / size_of::<*const ()>()`): its
+    ;; layout's size on the target (x86_64: 8-byte pointers)
+    :call (when (empty? (:args x))
+            (let [f (:func x) segs (:segs (:path f)) sg (peek segs)
+                  tys (keep :ty (:args (:args sg)))]
+              (when (and (= :path (:kind f)) (= "size_of" (:ident sg)) (= 1 (count tys)))
+                (let [t (first tys)
+                      prim {"u8" 1 "i8" 1 "bool" 1 "u16" 2 "i16" 2 "u32" 4 "i32" 4 "f32" 4 "char" 4 "u64" 8 "i64" 8 "f64" 8
+                            "usize" 8 "isize" 8 "u128" 16 "i128" 16}
+                      prim-of (fn [t] (when (and (= :path (:kind t)) (= 1 (count (:segs (:path t))))) (get prim (:ident (first (:segs (:path t)))))))
+                      thin? (fn [t] (or (and (= :tup (:kind t)) (empty? (:elts t))) (prim-of t)))]
+                  (some-> (cond (and (= :tup (:kind t)) (empty? (:elts t))) 0
+                                (prim-of t) (prim-of t)
+                                (and (#{:ptr :ref} (:kind t)) (thin? (:ty (:mt t)))) 8
+                                :else nil)
+                          bigint)))))
     :binary (let [a (eval-int-expr (:lhs x)) b (eval-int-expr (:rhs x))]
               (when (and a b)
                 (case (:op x) "+" (+ a b) "-" (when (>= a b) (- a b)) "*" (* a b)
                       "/" (when (pos? b) (quot a b)) "%" (when (pos? b) (rem a b)) nil)))
     nil))
+
+(defn const-int-value
+  "RF13e: a constant's integer value from its expression of literals (eval-int-expr), or nil"
+  [x]
+  (eval-int-expr x))
 
 (defn lower-const-arg [x]
   ;; a const argument: a literal's value, a const parameter, else an unevaluated anonymous constant, printed by its
@@ -902,6 +956,7 @@
                (case k
                  ("Struct" "Enum" "Union") [:adt id (adt-args id (:args last-seg))]
                  "TyAlias" (local-alias-ty id (adt-args id (:args last-seg)))
+                 "ForeignTy" [:adt id []]
                  [:err (str "local " k)]))
       (or (type-relative path) [:err (str "unresolved " (pr-str (mapv :ident (:segs path))) " " (pr-str (:res path)))]))))
 
@@ -1063,7 +1118,7 @@
 
 (def ^:dynamic *in-value* false)
 
-(declare print-ty print-def-path print-arg name-binder fn-sig ctor-sig fndef-sig)
+(declare print-ty print-def-path print-arg name-binder fn-sig ctor-sig fndef-sig print-dyn)
 
 (def ^:dynamic *erased-regions* false)   ; RF10: MIR's constants print every free region erased ('_)
 
@@ -1168,7 +1223,11 @@
         in-self (when-let [c (characteristic-def self-ty)] (= (def-parent c) parent))
         in-trait (when tr (= (def-parent (first tr)) parent))]
     (if (or in-self in-trait)
-      (print-path-with-qualified self-ty tr)
+      ;; RF13b: an inherent impl of a trait object (`impl dyn Any`): its type_of's object lifetime is not erased (MIR's
+      ;; `<(dyn any::Any + 'static)>::is::<T>`)
+      (if (and (nil? tr) (= :dyn (first self-ty)) (= [:re-static] (nth self-ty 2)))
+        (generic-delimiters (fn [] (binding [*erased-regions* false] (print-dyn (second self-ty) (nth self-ty 2)))))
+        (print-path-with-qualified self-ty tr))
       (let [pre (print-def-path parent [])]
         (str pre (when (seq pre) "::")
              (generic-delimiters (fn [] (str "impl " (when tr (str (print-def-path (first tr) (second tr)) " for ")) (print-ty self-ty)))))))))

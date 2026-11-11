@@ -2,13 +2,14 @@
   "The own verdicts' unit tests for LLS38 (the module flags, llvm.ident), LLS39 (visitCallBase's immarg check and
   visitIntrinsicCall's cases; AutoUpgrade's ctlz over a non-integer), LLS40 (the debug info's scopes and fields) and LLS42
   (AutoUpgrade's memory intrinsics with an alignment, the declaration visited before its calls): each case a small module, the kind's context as
-  arbace.repr.llvm.mutate attaches it, the verdict and the message fragment arbace.repr.llvm.expect must give (the texts of
+  arbace.repr.llvm.mutate attaches it, the verdict and the message fragment arbace.repr.llvm.expect must give (LLS43 (a): the fragments' sizes; the texts of
   llvm-project 23.1.5's Verifier.cpp, Module.cpp and AutoUpgrade.cpp). The negative controls cross one case's verdict with
   another's expectation by the same judge (verdict equal, the fragment in the message): each must fail.
   Run: test/repr/llvm/expect-test.bash (doc/llvm/LLVM-CROP-SURVEY.md, \"As built: LLS38, LLS39\")."
   (:require [arbace.repr.llvm.read :as rd]
             [arbace.repr.llvm.expect :as ex]
             [arbace.repr.llvm.verify :as vf]
+            [arbace.repr.llvm.print :as pr]
             [arbace.string :as str]))
 
 (defn- flags-module [& nodes]
@@ -44,6 +45,27 @@
        "!12 = distinct !DISubprogram(name: \"g\", scope: !1, file: !1, type: !4, unit: !0, spFlags: DISPFlagDefinition)\n"
        "!13 = !DILocation(line: 2, scope: !12)\n!14 = !{!10}\n"))
 
+(def ^:private frag-module
+  "LLS43 (a): f's variable !10 (through the typedef !7 to int) and its fragment (0, 16), the artificial !11's fragment (48, 32)
+  past its int (no check: V:7443), the global @g's expression !22 (the CU's globals) a fragment (0, 8) of !23 through !7 too,
+  the sizes !30 (8), !31 (16), !32 (64), and !12, another variable of f of 16 bits."
+  (str "@g = global i32 0, !dbg !22\n"
+       "define void @f(i32 %a) !dbg !3 {\n    #dbg_value(i32 %a, !10, !DIExpression(DW_OP_LLVM_fragment, 0, 16), !5)\n"
+       "    #dbg_value(i32 %a, !11, !DIExpression(DW_OP_LLVM_fragment, 48, 32), !5)\n  ret void, !dbg !5\n}\n"
+       "!llvm.dbg.cu = !{!0}\n!llvm.module.flags = !{!2}\n"
+       "!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, emissionKind: FullDebug, globals: !21)\n"
+       "!1 = !DIFile(filename: \"a.c\", directory: \"/\")\n!2 = !{i32 2, !\"Debug Info Version\", i32 3}\n"
+       "!3 = distinct !DISubprogram(name: \"f\", scope: !1, file: !1, type: !4, unit: !0, spFlags: DISPFlagDefinition)\n"
+       "!4 = !DISubroutineType(types: !{null})\n!5 = !DILocation(line: 1, scope: !3)\n"
+       "!6 = !DIBasicType(name: \"int\", size: 32, encoding: DW_ATE_signed)\n!7 = !DIDerivedType(tag: DW_TAG_typedef, name: \"T\", file: !1, baseType: !6)\n"
+       "!10 = !DILocalVariable(name: \"x\", scope: !3, file: !1, type: !7)\n"
+       "!11 = !DILocalVariable(name: \"y\", scope: !3, file: !1, type: !6, flags: DIFlagArtificial)\n"
+       "!12 = !DILocalVariable(name: \"z\", scope: !3, file: !1, type: !31)\n"
+       "!21 = !{!22}\n!22 = !DIGlobalVariableExpression(var: !23, expr: !DIExpression(DW_OP_LLVM_fragment, 0, 8))\n"
+       "!23 = !DIGlobalVariable(name: \"g\", scope: !0, file: !1, line: 1, type: !7, isLocal: false, isDefinition: true)\n"
+       "!30 = !DIBasicType(name: \"c\", size: 8, encoding: DW_ATE_signed)\n!31 = !DIBasicType(name: \"s\", size: 16, encoding: DW_ATE_signed)\n"
+       "!32 = !DIBasicType(name: \"l\", size: 64, encoding: DW_ATE_signed)\n"))
+
 (defn- md-index [forms id] (first (keep-indexed (fn [i f] (when (and (= 'llvm/meta (first f)) (= (symbol id) (second f))) i)) forms)))
 
 (defn- with-field
@@ -52,6 +74,16 @@
   (let [i (md-index forms id) f (vec (nth forms i)) n (nth f 2)
         n2 (apply list (first n) (mapcat (fn [[fk v]] [fk (if (= (name fk) k) (symbol to) v)]) (partition 2 (rest n))))]
     [(assoc forms i (apply list (assoc f 2 n2))) {:i i :field (keyword k) :to (symbol to)}]))
+
+(defn- with-record-var
+  "LLS43 (a): the forms with the first record of the first definition's first block sent to the variable `to`, and the di-record
+  context."
+  [forms to]
+  (let [fi (first (keep-indexed (fn [i f] (when (= 'llvm/define (first f)) i)) forms))
+        f (vec (nth forms fi)) bi (inc (.indexOf ^java.util.List f :body)) blocks (nth f bi) b0 (vec (first blocks))
+        r (vec (nth b0 2))]
+    [(assoc forms fi (apply list (assoc f bi (assoc blocks 0 (apply list (assoc b0 2 (apply list (assoc r 2 (symbol to)))))))))
+     {:k 2 :to (symbol to) :head (first r)}]))
 
 (defn- call-module [call-text]
   (str intr-decls "define void @f(ptr %p, float %x) {\n  %a = alloca i32\n  " call-text "\n  ret void\n}\n"))
@@ -98,6 +130,13 @@
      ["retarget-var-scope-other" :di-retarget di-module (fn [forms] (with-field forms "!10" "scope" "!12")) :debug "invalid retained nodes, retained node does not belong to subprogram"]
      ["retarget-sp-scope" :di-retarget di-module (fn [forms] (with-field forms "!12" "scope" "!9")) :valid nil]
      ["retarget-loc-scope" :di-retarget di-module (fn [forms] (with-field forms "!5" "scope" "!12")) :debug "!dbg attachment points at wrong subprogram for function"]
+     ;; LLS43 (a): verifyFragmentExpression with the variable's size through its type chain
+     ["frag-var-type-small" :di-retarget frag-module (fn [forms] (with-field forms "!10" "type" "!30")) :debug "fragment is larger than or outside of variable"]
+     ["frag-var-type-equal" :di-retarget frag-module (fn [forms] (with-field forms "!10" "type" "!31")) :debug "fragment covers entire variable"]
+     ["frag-var-type-big" :di-retarget frag-module (fn [forms] (with-field forms "!10" "type" "!32")) :valid nil]
+     ["frag-artificial" :di-retarget frag-module (fn [forms] (with-field forms "!11" "type" "!30")) :valid nil]
+     ["frag-global-first" :di-retarget frag-module (fn [forms] (with-field forms "!7" "baseType" "!30")) :debug "fragment covers entire variable"]
+     ["frag-record-var" :di-record frag-module (fn [forms] (with-record-var forms "!12")) :debug "fragment covers entire variable"]
      ;; LLS42 (a): AutoUpgrade's memory intrinsics with an alignment and the declaration visited before its calls
      ["decl-mem5" :intr-decl
       "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg, i32)\ndefine void @f(ptr %p, ptr %q) {\n  call void @llvm.memcpy.p0.p0.i64(ptr %p, ptr %q, i64 4, i1 false)\n  ret void\n}\n"
@@ -117,7 +156,8 @@
   [["flag-min-i1-true" "flag-max-string"] ["flag-pic-max-upgraded" "flag-min-i1-true"] ["flag-div-stripped" "flag-div-no-debug"]
    ["arg-memset-size" "arg-memset-immarg"] ["arg-lifetime" "arg-va-start"] ["rename-ctlz-ptr" "rename-fpclass-i1-mask"]
    ["retarget-derived-base" "retarget-set-base"] ["retarget-var-scope-file" "retarget-var-scope-other"]
-   ["decl-mem5" "decl-mem5-call-type"] ["decl-before-calls-sig" "decl-before-calls-attr"]])
+   ["decl-mem5" "decl-mem5-call-type"] ["decl-before-calls-sig" "decl-before-calls-attr"]
+   ["frag-var-type-small" "frag-var-type-equal"] ["frag-var-type-big" "frag-global-first"]])
 
 (defn- judge [e verdict frag]
   (and (= (:verdict e) verdict) (or (nil? frag) (str/includes? (str (:msg e)) frag))))
@@ -126,7 +166,10 @@
   "[--dump DIR]: also each case's module as DIR/NAME.ll (for Arbace's verifier and, by hand, opt)."
   [& [flag dir]]
   (when (= flag "--dump")
-    (doseq [[nm _ text] cases] (spit (str dir "/" nm ".ll") text)))
+    ;; the mutant's text: a case whose ctx-fn changes the forms (LLS40 (a), LLS43 (a)) printed from them
+    (doseq [[nm _ text ctx-fn] cases]
+      (let [forms (vec (rd/read-module text)) c (ctx-fn forms)]
+        (spit (str dir "/" nm ".ll") (if (vector? c) (pr/print-module (first c)) text)))))
   (let [got (into {} (for [[nm kind text ctx-fn verdict frag] cases]
                        (let [forms (vec (rd/read-module text))
                              c (ctx-fn forms)
