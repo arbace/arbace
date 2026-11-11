@@ -330,7 +330,10 @@ items below are the ones whose work is still ahead or tied to a night.
   rust-rf17, "As built: RF18"): RFP62 (a) built (opaque types revealed in mono, closures' layouts and `dyn Fn` vtable entries with
   call_once's VTableShim, the record's `dyn Fn(..)` read): 66 of 67 own; RFP63 (a)'s reader (`RF_STD_EXPORTS`). Next: RFP63 (a)'s
   night (the helper's `--std-exports`, every rust-front pack recorded again: panic-assert-eq); the night: the whole plan's
-  rsi-build, rsi-native over the own programs RF15-RF18 added, `rsi check --front own`.
+  rsi-build, rsi-native over the own programs RF15-RF18 added, `rsi check --front own`. RF19 (`rust-rf19` on next, "As built:
+  RF19"): `Box<dyn Fn>` calls native (the builtin Tuple candidate), collections 2.62 -> 2.09 GB (the whole corpus 2.24 GB at
+  RF11_BATCH=3), core's macro-made functions' attributes by `bin/rust-front core-attrs` (native callees 4,528 -> 4,985 of 4,985):
+  66 of 67 own, independence unchanged.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
   ported, completeness 97.6.

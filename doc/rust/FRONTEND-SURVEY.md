@@ -3658,3 +3658,92 @@ absolute paths rewritten (`rust-rf17/` to `rust-rf18/`) before any run. Only `ar
 - RFP46 (a)'s whole plan again with RF18: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build` (samples and synthetic), then
   `bin/rust-front rsi-native` by hand over the own programs (rustc as the linker driver) to confirm closures runs as rustc's
   recorded run (the closures' vtables and the opaque calls), then `bin/rsi check --front own --corpus samples,synthetic` (RFP42 (a)).
+
+## As built: RF19: the trait object's Fn candidate, collections under 2 GiB, core's macro-made functions' attributes (2026-11-11)
+
+Branch `rust-rf19` (from `mac/next` `c572f6753`, which carries rust-rf18), light lane (`GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH=3`, the toolchains stubbed, every process watched and killed by PID above 2.5 GiB). RF18's caches were copied into
+the worktree and their absolute paths rewritten (`rust-rf18/` to `rust-rf19/`) before any run. Only `arbace/rust/`,
+`bin/rust-front`, `bin/lib/repr-rust/` and `test/rust/front/` change (crop paths): ci, `arbace/cpp/lower.ae` and `gate_key` do not
+move. Every rule follows rustc 1.99.1's own code (the pinned rust-src's `compiler/`).
+
+### `<Box<dyn Fn(..)> as Fn<..>>::call`: the builtin Tuple candidate
+
+RF18 named the object candidate as missing; it was not: `dyn-implements?` already answers `dyn Fn(i32) -> i32: Fn<(i32,)>`. What
+failed was alloc's impl's other clause, `impl<Args: Tuple, F: Fn<Args> + ?Sized, A: Allocator> Fn<Args> for Box<F, A>`: `Args:
+Tuple` had no candidate (typeck's `holds?` looked for an impl of the lang item `tuple_trait`, which has none: it is builtin).
+Now a tuple type implements `Tuple` (select's assemble_candidate_for_tuple; a variable or a parameter as before, any other type
+none), so the call resolves to alloc's `{impl#33}::call` (closures: callees 106 -> 108 of 109, function constants' symbols 65 -> 67
+of 68; mono-check's callees 68 -> 70 of 71 and core items 57 -> 59, all equal to the record's).
+
+### collections' memory: 2.62 GB -> 2.09 GB alone, the whole corpus 2.24 GB
+
+Measured with `RF_MEM_TRACE=1` (new: build-run's live heap after a collection at each phase, `debug mem PHASE N MiB at SECONDS` on
+the standard error), collections alone (RF18: 2.62 GB, killed in its batch at 2.66 GB):
+
+| phase | RF18's code | RF19 |
+|---|---|---|
+| the batch read the record (for mono-check's judge) | 894 MiB | 939 |
+| native-run read it again | 1,371 | 939 (the same forms) |
+| bodies built (std's interface and names, the program) | 1,649 | 1,457 |
+| mono's facts | 2,096 | 1,724 |
+| judged, the module's forms | 2,210 | 1,786 |
+| native-run done | 2,207 | 1,877 |
+| peak RSS | 2.59 GB | **2.09 GB** (1.99 GiB) |
+
+Three costs, each fixable: (1) **the record read twice** (35 MB of text, 4,546 bodies: 477 MiB a copy): `native-run` now takes
+the forms the batch read for the judge (RECORD the file or its forms); (2) **mono's cache of core's parsed files** (51 files, 355
+MiB): `parse-rs` keeps a file's items without what ext-attrs and src-adt never read, the functions' bodies, the macro
+definitions' token trees and the doc comments (8 large files: 322 -> 91 MiB); (3) **the module printed into one string** before
+it was written (`with-out-str`, the run's last peak): `write-forms` prints it form by form into the file. Not taken: interning the
+record's strings (585,415 strings, 24,828 distinct) made the read larger (1,233 MiB: the reader's strings were already cheap and the
+copy was not). The whole synthetic corpus in batches of 3 now peaks at 2.24 GB (closures, collections and drops in one process),
+none killed; collections alone stays under 2 GiB by a small margin (RF11_BATCH=3 batches stay under 2.5 GiB).
+
+### core's macro-made functions' attributes: `bin/rust-front core-attrs`
+
+The callee facts mono refused most were core's items whose attributes core's sources do not show (`mono: X's attributes are not
+in core's sources (a macro-made item)`: 449 of the refusals in RF18's run, 392 of them `core::num`'s `int_impl!`/`uint_impl!` methods,
+the rest the operator impls' macros, cmp's, slice and str iterators'): the record's callee was taken for each. Now:
+
+- **`bin/rust-front core-attrs`** (`bin/lib/repr-rust/core-build.bash`'s `core_attrs`; core-check's new `--attrs` mode): core-check's
+  interface pass (expansion, resolution, lowering, collection; no body) over `test/rust/front/core-attrs.txt`'s module files (num,
+  ops::arith, cmp, slice::iter, str::iter, slice::index, default, convert::num, any, fmt::num), every function's codegen attributes
+  after expansion (`mono/local-attrs` of its HIR, as core-export's `:attrs`) by its def path with rustc's disambiguators
+  (`def-path-string`) into `.tmp/rust-front/core/core-attrs.edn`, kept by a key (the list, the files, the front end's expansion,
+  resolution, lowering, collection and core-check, std's interface) in `core-attrs.edn.key`; 4,569 functions, about 23 minutes
+  (num/mod.rs 18), 2.3 GB, one process.
+- **mono** (`*macro-attrs*`, `RF_CORE_ATTRS`): an item `ext-attrs` does not find in core's sources takes the file's attributes
+  (a found item keeps its sources', so the pass cannot change any fact that was native); `rsi-build` makes the file when it is not
+  current (`RF_CORE_ATTRS=none`: not) and exports it.
+- **core-check's macro table** (`macros-for`): of the definitions in files equally near the module's, the shallowest
+  (`num/mod.rs`'s `#[macro_use] mod uint_macros;` exports its `uint_impl!`; `num/imp/int_bits.rs`'s private `uint_impl!`, one
+  directory deeper, was taken by the tie and no arm matched: core::num did not expand).
+- **`${concat(..)}`** (mbe's metavariable expression, transcribe.rs: the elements' identifiers, literals and metavariables'
+  tokens joined into one identifier, marked with the expansion): fmt/num.rs' `${concat($fmt_fn, _small)}`.
+
+### Results
+
+- **The whole synthetic corpus** (`rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, the toolchains stubbed, 0 stub
+  calls; 63 minutes with the attributes' pass current): **66 of 67 own** (unchanged; panic-assert-eq waits for RFP63's night). The
+  native facts (build-run's, summed; RF18 -> RF19): **callees 4,528 -> 4,984 of 4,985**, **function constants' symbols 1,933 ->
+  2,342 of 2,346**, layouts 43,727 of 45,881, vtables 42 of 46, constants 205 of 205, symbols 272 (all native); mono-check's against
+  the record (summed): **callees 2,000 -> 2,408 of 2,414**, function constants' symbols 1,924 -> 2,333 of 2,338, core items 2,027 ->
+  2,414 (all equal), items 478 of 1,125, symbols 235 of 272. The one callee left was fmt::num's `{impl#32}::fmt` (`${concat}`, built after the run;
+  the attributes' pass again, 30 minutes beside the essential runs, 4,695 functions, fmt::num's 126 among them): fmt alone then has
+  callees 160 of 160 and mono-check's 76 of 76, so the corpus' native callees are **4,985 of 4,985**, function constants' symbols
+  2,343 of 2,346, mono-check's equal callees 2,409 of 2,414.
+- RESULT_CHECKS
+
+### Left
+
+- RFP63 (a)'s night (RF18's commands), then panic-assert-eq: 67 of 67.
+- The six callees mono-check finds unequal to the record's (errors, fmt, iterators 2, panic-assert-eq, patterns) and the four
+  vtables mono leaves to the record (errors 1, traits 2, fmt 1).
+- RFP52's rest (core-check: `ChangeOutputType`, `CopySpec`, `drain::Drain`, `ascii::Char`, ...): not taken here.
+
+### The night's commands (none run here)
+
+- RF18's (RFP63 (a)'s dump and the packs again; RFP46 (a)'s whole plan with `rsi-native` and `rsi check --front own`), now with
+  RF19: the plan's rsi-build makes `core-attrs.edn` first when not current (23 minutes, 2.3 GB, one process; the main checkout's
+  `.tmp/rust-front/core/` keeps it by key).
