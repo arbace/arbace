@@ -306,6 +306,11 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   reflective sites as roots), A7 (refusals stubbed or dropped, `report.edn`'s `:refused`); proved light by day, built and run
   at night (the commands in J2G-SPEC's sections and the journal's entry): the conversion, the build, the four samples
   `services`, `resources`, `reflect-meta`, `refusals`. A1-A3, A11 on `ghidra-read`.
+- Ghidra (G1, the demo repository `arbace-ghidra`): `ghidra-read` (A1, A2, A3, A11: `bin/java-project`, `program.edn`'s
+  `:java`, doc/go/BUILD.md "Java sources by module"; the gate's `java-project` step), `ghidra-run` (A4-A7). Night: the
+  demo's `bin/read-g1 --check nread --modules SoftwareModeling` (about 9 GiB); `test/programs/java-project`'s first build
+  (`--build-program --check java-project`, a whole-program j2g). Open: the two native-provider findings of the read half
+  (the journal, 2026-11-10).
 
 ## Decided, not built yet
 
