@@ -532,6 +532,185 @@
        (let [v (bit-and (nx) (ones (:bits (ft t)))) n (nz)]
          (mk (str "fmov\t" g "0, " r "1") v 0 0 n [v 0] :x))))))
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; FPCR's rounding modes and DN (review 1111 (4)): the families fp-d-rm and fp-s-rm, each case under its own FPCR (RMode 1-3,
+;; round towards plus infinity, minus infinity and zero; and DN with round to nearest), its bits in the row's NZCV word (bits 22
+;; to 25, set by msr fpcr before the instruction). The model rounds the exact value (a rational of BigIntegers) as FPRound does
+;; at the mode: the significand at the type's precision, or the subnormal quantum when tiny; an overflow OFC and IXC, to
+;; infinity when the mode rounds away from zero in its direction (nearest, plus for a positive, minus for a negative), else to
+;; the largest finite; UFC when tiny before rounding and inexact. An exact zero sum is -0 under round to minus infinity
+;; (FPAdd's and FPMulAdd's result_sign); a NaN result the default NaN under DN.
+
+(declare looped)
+
+(defn- bd-rat
+  "A BigDecimal as [NEG NUM DEN], its magnitude NUM/DEN."
+  [^java.math.BigDecimal e]
+  (let [u (.unscaledValue e) sc (.scale e) n (.abs u)]
+    (if (neg? sc)
+      [(neg? (.signum u)) (.multiply n (.pow BigInteger/TEN (- sc))) BigInteger/ONE]
+      [(neg? (.signum u)) n (.pow BigInteger/TEN sc)])))
+
+(defn- rat-bits
+  "The bits of the type's value NEG * M * 2^Q (M*2^Q exactly representable)."
+  ^long [t neg ^BigInteger m ^long q]
+  (let [v (java.math.BigDecimal. m) v (if (neg? q) (.divide v (.pow (java.math.BigDecimal. 2) (int (- q)))) (.multiply v (.pow (java.math.BigDecimal. 2) (int q))))
+        x (if (= t :d) (.doubleValue v) (double (.floatValue v)))]
+    (f-bits t (if neg (- x) x))))
+
+(defn round-rat
+  "FPRound of the exact non-zero value NEG * NUM/DEN to the type under MODE (:n :p :m :z): [RESULT FPSR]."
+  [t neg ^BigInteger num ^BigInteger den mode]
+  (let [{:keys [fb eb]} (ft t) bias (dec (bit-shift-left 1 (dec (long eb)))) emin (- 1 bias) emax bias
+        e0 (- (.bitLength num) (.bitLength den))
+        e (if (neg? (if (neg? e0) (.compareTo (.shiftLeft num (int (- e0))) den) (.compareTo num (.shiftLeft den (int e0))))) (dec e0) e0)
+        tiny (< e emin)
+        q (- (max e emin) (long fb))
+        [nn dd] (if (neg? q) [(.shiftLeft num (int (- q))) den] [num (.shiftLeft den (int q))])
+        qr (.divideAndRemainder ^BigInteger nn ^BigInteger dd) m (aget qr 0) r (aget qr 1)
+        inexact (not (zero? (.signum ^BigInteger r)))
+        up (and inexact (case mode
+                          :n (let [c (.compareTo (.shiftLeft ^BigInteger r 1) ^BigInteger dd)] (or (pos? c) (and (zero? c) (.testBit ^BigInteger m 0))))
+                          :z false :p (not neg) :m neg))
+        m (if up (.add ^BigInteger m BigInteger/ONE) m)
+        ;; the largest finite: (2^(fb+1) - 1) * 2^(emax - fb)
+        maxm (.subtract (.shiftLeft BigInteger/ONE (int (inc (long fb)))) BigInteger/ONE)
+        over (> (+ (dec (.bitLength ^BigInteger m)) q) emax)]
+    (cond over [(if (case mode :n true :z false :p (not neg) :m neg) (f-inf t neg) (rat-bits t neg maxm (- emax (long fb)))) (bit-or OFC IXC)]
+          (zero? (.signum ^BigInteger m)) [(f-zero t neg) (if inexact (bit-or IXC UFC) 0)]
+          :else [(rat-bits t neg m q) (cond (not inexact) 0 tiny (bit-or IXC UFC) :else IXC)])))
+
+(defn- round-bd [t ^java.math.BigDecimal e mode] (let [[neg n d] (bd-rat e)] (round-rat t neg n d mode)))
+
+(defn- dn [t dn? [r fl :as res]] (if (and dn? (f-nan? t r)) [(f-dnan t) fl] res))
+
+(defn fp-arith-rm
+  "fp-arith at FPCR's MODE and DN."
+  [t op a b mode dn?]
+  (dn t dn?
+      (or (nans t a b)
+          (let [x (f-val t a) y (f-val t b) b2 (if (= op :sub) (f-neg t b) b)
+                fin (and (not (f-inf? t a)) (not (f-inf? t b2)))]
+            (case op
+              (:add :sub) (cond (and (f-inf? t a) (f-inf? t b2) (not= (f-sign t a) (f-sign t b2))) [(f-dnan t) IOC]
+                                (not fin) [(if (f-inf? t a) a b2) 0]
+                                (and (f-zero? t a) (f-zero? t b2) (= (f-sign t a) (f-sign t b2))) [a 0]
+                                :else (let [e (.add (bd x) (bd (f-val t b2)))]
+                                        (if (zero? (.signum e)) [(f-zero t (= mode :m)) 0] (round-bd t e mode))))
+              :mul (cond (or (and (f-inf? t a) (f-zero? t b)) (and (f-zero? t a) (f-inf? t b))) [(f-dnan t) IOC]
+                         (or (f-inf? t a) (f-inf? t b)) [(f-inf t (not= (f-sign t a) (f-sign t b))) 0]
+                         (or (f-zero? t a) (f-zero? t b)) [(f-zero t (not= (f-sign t a) (f-sign t b))) 0]
+                         :else (round-bd t (.multiply (bd x) (bd y)) mode))
+              :div (cond (or (and (f-inf? t a) (f-inf? t b)) (and (f-zero? t a) (f-zero? t b))) [(f-dnan t) IOC]
+                         (f-inf? t a) [(f-inf t (not= (f-sign t a) (f-sign t b))) 0]
+                         (f-zero? t b) [(f-inf t (not= (f-sign t a) (f-sign t b))) DZC]
+                         (or (f-zero? t a) (f-inf? t b)) [(f-zero t (not= (f-sign t a) (f-sign t b))) 0]
+                         :else (let [[na nn nd] (bd-rat (bd x)) [nb dn' dd] (bd-rat (bd y))]
+                                 (round-rat t (not= na nb) (.multiply ^BigInteger nn ^BigInteger dd) (.multiply ^BigInteger nd ^BigInteger dn') mode))))))))
+
+(defn fp-muladd-rm
+  "fp-muladd (a + n*m) at FPCR's MODE and DN."
+  [t a n m mode dn?]
+  (dn t dn?
+      (cond
+        (and (f-nan? t a) (not (f-snan? t a)) (not (f-nan? t n)) (not (f-nan? t m))
+             (or (and (f-inf? t n) (f-zero? t m)) (and (f-zero? t n) (f-inf? t m)))) [(f-dnan t) IOC]
+        :else
+        (or (nans t a n m)
+            (let [sp (not= (f-sign t n) (f-sign t m)) pinf (or (f-inf? t n) (f-inf? t m))]
+              (cond (or (and (f-inf? t n) (f-zero? t m)) (and (f-zero? t n) (f-inf? t m))) [(f-dnan t) IOC]
+                    (and pinf (f-inf? t a) (not= (f-sign t a) sp)) [(f-dnan t) IOC]
+                    (f-inf? t a) [a 0]
+                    pinf [(f-inf t sp) 0]
+                    (and (f-zero? t a) (or (f-zero? t n) (f-zero? t m)) (= (f-sign t a) sp)) [a 0]
+                    :else (let [e (.add (bd (f-val t a)) (.multiply (bd (f-val t n)) (bd (f-val t m))))]
+                            (if (zero? (.signum e)) [(f-zero t (= mode :m)) 0] (round-bd t e mode)))))))))
+
+(defn fp-convert-rm [from to a mode dn?]
+  (dn to dn?
+      (cond (or (f-nan? from a) (f-inf? from a) (f-zero? from a)) (fp-convert from to a)
+            :else (round-bd to (bd (f-val from a)) mode))))
+
+(defn fp-cvtf-rm [t ^long v w signed mode]
+  (let [n (cond (and signed (= w 64)) (BigInteger/valueOf v) signed (BigInteger/valueOf (long (unchecked-int v)))
+                (= w 64) (.and (BigInteger/valueOf v) (.subtract (.shiftLeft BigInteger/ONE 64) BigInteger/ONE))
+                :else (BigInteger/valueOf (bit-and v m32)))]
+    (if (zero? (.signum n)) [(f-zero t false) 0] (round-rat t (neg? (.signum n)) (.abs n) BigInteger/ONE mode))))
+
+(def ^:private rm-modes
+  "[MODE FPCR-bits]: RMode 1-3 (bits 23:22), and round to nearest with DN (bit 25)."
+  [[:p 0x400000 false] [:m 0x800000 false] [:z 0xc00000 false] [:n 0x2000000 true]])
+
+(defn fp-rm-cases [t rs]
+  (let [rs (atom (seq rs))
+        nx (fn [] (let [x (first @rs)] (swap! rs rest) x))
+        sp (vec (fp-specials t))
+        {:keys [fb bits]} (ft t)
+        maxf (dec (f-inf t false)) minn (bit-shift-left 1 (long fb))
+        rnd (fn [] (let [x (nx)]
+                     (case (mod (unsigned-bit-shift-right x 3) 6)
+                       0 (sp (mod (unsigned-bit-shift-right x 9) (count sp)))
+                       1 (bit-and x (ones bits))
+                       2 (f-bits t (* (if (odd? x) -1.0 1.0) (+ 1.0 (/ (double (bit-and (unsigned-bit-shift-right x 11) 0xfffff)) 1048576.0))))
+                       ;; near the largest finite (overflows) and near the smallest normal (the subnormal range)
+                       3 (bit-or (if (odd? x) (f-zero t true) 0) (- maxf (bit-and (unsigned-bit-shift-right x 12) 0xffff)))
+                       4 (bit-or (if (odd? x) (f-zero t true) 0) (+ (- minn 0x8000) (bit-and (unsigned-bit-shift-right x 12) 0xffff)))
+                       5 (f-bits t (double (bit-shift-right x 40))))))
+        r (if (= t :d) "d" "s")
+        nz (fn [] (bit-and (nx) 15))
+        mk (fn [insn a b c nzcv fpcr [res fl] mov]
+             {:insn insn :x1 a :x2 b :x3 c :nzcv (bit-or (bit-shift-left nzcv 28) fpcr) :res res :flags (bit-or fl (bit-shift-left nzcv 28)) :mov mov})]
+    (concat
+     (for [[mode fpcr dn?] rm-modes i (range 30) op [:add :sub :mul :div]]
+       (let [a (rnd) b (case (mod i 5) 0 (if (= op :sub) a (f-neg t a)) 1 (rnd) (rnd)) n (nz)]
+         (mk (str "f" (name op) "	" r "0, " r "1, " r "2") a b 0 n fpcr (fp-arith-rm t op a b mode dn?) :v)))
+     (for [[mode fpcr dn?] rm-modes i (range 20) op [:fmadd :fnmsub]]
+       (let [a (rnd) b (rnd) c (case (mod i 4) 0 (f-neg t (first (fp-arith t :mul a b))) (rnd)) n (nz)
+             [na nn] (case op :fmadd [c a] :fnmsub [(f-neg t c) a])]
+         (mk (str (name op) "	" r "0, " r "1, " r "2, " r "3") a b c n fpcr (fp-muladd-rm t na nn b mode dn?) :v)))
+     (for [[mode fpcr dn?] rm-modes i (range 20) [m x?] [["frintx" true] ["frinti" false]]]
+       (let [a (rnd) n (nz)] (mk (str m "	" r "0, " r "1") a 0 0 n fpcr (dn t dn? (fp-rint t a mode x?)) :v)))
+     (for [[mode fpcr dn?] rm-modes i (range 20)]
+       (let [o (if (= t :d) :s :d) a (if (< i 6) (nth [(f-dnan o) (bit-or (f-inf o false) 1) (dec (f-inf o false)) 1 (f-neg o 1) (bit-shift-left 1 (long (:fb (ft o))))] i)
+                                       (bit-and (nx) (ones (:bits (ft o))))) n (nz)]
+         (mk (str "fcvt	" r "0, " (if (= o :d) "d" "s") "1") a 0 0 n fpcr (fp-convert-rm o t a mode dn?) :v)))
+     (for [[mode fpcr _] rm-modes i (range 12) [m signed] [["scvtf" true] ["ucvtf" false]] w [32 64]]
+       (let [v (if (< i 4) ([-1 Long/MAX_VALUE 0x7fffffff 0x20000001] i) (nx)) n (nz)]
+         (mk (str m "	" r "0, " (if (= w 64) "x" "w") "1") v 0 0 n fpcr (fp-cvtf-rm t v w signed mode) :v)))
+     (for [[mode fpcr dn?] rm-modes i (range 12) op [:maxnm :min]]
+       (let [a (if (even? i) (sp (+ 6 (mod i 5))) (rnd)) b (rnd) n (nz)]
+         (mk (str "f" (name op) "	" r "0, " r "1, " r "2") a b 0 n fpcr (dn t dn? (fp-minmax t op a b)) :v))))))
+
+(defn fp-rm-program
+  "A synthetic FP program under per-case FPCR: as fp-program, FPCR set from the row's NZCV word's bits 22-25 (msr fpcr) and NZCV
+  from its bits 28-31, each case."
+  [nm what t cases]
+  (let [r (if (= t :d) "d" "s") g (if (= t :d) "x" "w")]
+    (looped nm what
+            (str "	fmov	d1, x1
+	fmov	d2, x2
+	fmov	d3, x3
+	msr	fpsr, xzr
+	and	x10, x9, #0x3c00000
+	msr	fpcr, x10
+"
+                 "	and	x10, x9, #0xf0000000
+	msr	nzcv, x10
+	mov	x0, #0
+")
+            "	mrs	x12, nzcv
+	mrs	x13, fpsr
+	orr	x12, x12, x13
+"
+            cases
+            (fn [c] (str (:insn c) "
+" (case (:mov c) :v (str "	fmov	" g "0, " r "0
+") "")))))) 
+
+(def fp-rm-families
+  [["fp-d-rm" "the scalar FP at double precision under FPCR's directed rounding modes (RMode 1-3) and DN: fadd, fsub, fmul, fdiv, fmadd, fnmsub, frintx, frinti, fcvt from single, scvtf, ucvtf, fmaxnm, fmin" :d]
+   ["fp-s-rm" "the scalar FP at single precision under FPCR's directed rounding modes and DN: the same, fcvt from double" :s]])
+
 (defn- looped
   "A synthetic program as a loop over its cases (the code small, so the eval's and AOT's assembly stay quick): each case's row
   of data (x1, x2, x3, NZCV, the expected result and flags) loaded, `setup` (the operands into place), the case's stub called
@@ -1419,7 +1598,12 @@
          (for [[i [nm what f]] (map-indexed vector vf-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 500 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
-               [(str "synth-" nm) (sha256 text)])))))
+               [(str "synth-" nm) (sha256 text)]))
+         ;; review 1111 (4): the scalar FP under FPCR's directed rounding modes and DN
+         (for [[i [nm what t]] (map-indexed vector fp-rm-families)
+               :let [text (fp-rm-program nm what t (vec (fp-rm-cases t (rng (+ seed 600 i)))))]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))))
 
 (defn main
   "bin/repr-asm --arch arm64 a64i synth DIR [--record]: the programs written; their digests against DIGESTS (or recorded)."
