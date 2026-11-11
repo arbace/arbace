@@ -4333,6 +4333,10 @@ only if P3 leaves Java short; **JCS376 (a)** interpreter speed outside this plan
 in P1's night; **JCS378 (a)** `--release` through a generated ct.sym after JCS359 stage 5.
 
 P1's day work: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)" (branch `java-p1`), with JCS379-JCS383.
+P2's day work (2026-11-11): doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)" (branch `java-p2`): serialization's slices
+5 (RecordComponent) and 8 (the classes made at run time allocatable for deserialization) as JCS383 proposed, JCS281 (b) (the
+platform logging bean), night 17's commands; JCS384-JCS388 proposed (JCS388: JCS379-JCS382 used by both `java-p1` and
+`jcs359-s2`).
 
 ## Decided (the user, 2026-11-09, about 09:30): JCS330 (a), JCS331 (a), JCS332 (a), JCS333 (a)
 

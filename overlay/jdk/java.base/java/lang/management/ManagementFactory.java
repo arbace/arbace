@@ -158,6 +158,10 @@ public class ManagementFactory {
         if (n.equals("java.lang.management.ThreadMXBean") || n.equals("com.sun.management.ThreadMXBean")) {
             return threadBean();
         }
+        if (n.equals("java.lang.management.PlatformLoggingMXBean")) {
+            // JCS281 (b): the platform logging bean (jdk26u's ManagementFactoryHelper.PlatformLoggingImpl)
+            return sun.management.ManagementFactoryHelper.getPlatformLoggingMXBean();
+        }
         if (n.equals("java.lang.management.RuntimeMXBean")) {
             return sun.management.ManagementFactoryHelper.getRuntimeMXBean();
         }
@@ -199,7 +203,8 @@ public class ManagementFactory {
         if (platformMBeanServer == null) {
             platformMBeanServer = MBeanServerFactory.createMBeanServer();
             PlatformManagedObject[] beans = {
-                threadBean(), sun.management.ManagementFactoryHelper.getRuntimeMXBean(), osBean()
+                threadBean(), sun.management.ManagementFactoryHelper.getRuntimeMXBean(), osBean(),
+                sun.management.ManagementFactoryHelper.getPlatformLoggingMXBean()
             };
             for (PlatformManagedObject pmo : beans) {
                 addMXBean(platformMBeanServer, pmo.getObjectName().getCanonicalName(), pmo);
@@ -317,6 +322,43 @@ public class ManagementFactory {
         return l;
     }
 
+    // JCS281 (b): jdk26u's getPlatformMXBean(s) over a connection, the platform component of an interface the
+    // singleton bean the Go build makes (its object name the component's: jdk26u's PlatformComponent's
+    // getObjectNamePattern for a singleton)
+    public static <T extends PlatformManagedObject>
+            T getPlatformMXBean(MBeanServerConnection connection,
+                                Class<T> mxbeanInterface)
+        throws java.io.IOException
+    {
+        if (!isPlatformInterface(mxbeanInterface)) {
+            throw new IllegalArgumentException(mxbeanInterface.getName() +
+                    " is not a platform management interface");
+        }
+        PlatformManagedObject o = singleton(mxbeanInterface);
+        if (o == null) {
+            throw notYet(mxbeanInterface);
+        }
+        return newPlatformMXBeanProxy(connection, o.getObjectName().getCanonicalName(), mxbeanInterface);
+    }
+
+    public static <T extends PlatformManagedObject>
+            List<T> getPlatformMXBeans(MBeanServerConnection connection,
+                                       Class<T> mxbeanInterface)
+        throws java.io.IOException
+    {
+        if (!isPlatformInterface(mxbeanInterface)) {
+            throw new IllegalArgumentException(mxbeanInterface.getName()
+                    + " is not a platform management interface");
+        }
+        PlatformManagedObject o = singleton(mxbeanInterface);
+        if (o == null) {
+            throw notYet(mxbeanInterface);
+        }
+        List<T> l = new ArrayList<>();
+        l.add(newPlatformMXBeanProxy(connection, o.getObjectName().getCanonicalName(), mxbeanInterface));
+        return l;
+    }
+
     public static Set<Class<? extends PlatformManagedObject>>
            getPlatformManagementInterfaces()
     {
@@ -327,6 +369,7 @@ public class ManagementFactory {
         s.add(OperatingSystemMXBean.class);
         s.add(com.sun.management.OperatingSystemMXBean.class);
         s.add(com.sun.management.UnixOperatingSystemMXBean.class);
+        s.add(PlatformLoggingMXBean.class);
         return Collections.unmodifiableSet(s);
     }
 }

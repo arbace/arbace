@@ -72,6 +72,9 @@ Six crops are above 90 on all three. What the others still need:
   (ModuleHashes, JCS364 (a)); JCS389-JCS392 proposed. Next: stage 1's measure of all 68 modules on night 15 (JCS374 (a);
   `.tmp/night13/slots/jcs359.sh`, which then runs stages 2-3 from its outputs), stage 4's `platform --own` and switch. The
   score moves at stages 4-5: Java to 99.7.
+  P2 by day on `java-p2` (2026-11-11; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)"): RecordComponent
+  (slice 5), the classes made at run time deserializable (slice 8: Clojure's `serialization`), the platform logging bean
+  (JCS281 (b)); its night is night 17 (commands in the section), its proposals JCS384-JCS388.
 - **C++** (completeness, independence): read 1,182 and print 1,665 by design are most of the gap (96.8 without them); the
   print cell is on the own round trip on `cpp-print-own` (CP243 (a): the records made by day, print 48.3 → 99.5, the judge
   0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the
