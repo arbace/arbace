@@ -3249,3 +3249,15 @@ kill.c, runtime/signals.c, as oi's ext_unix_sock.go and ext_signal.go port them.
   they are recorded so (check-aot.edn). misc/darkening_work at oi's level timed out at load 15 and finished at load 13 with its
   recorded class's output: at the CPU limit's edge; its record is unchanged (a first try recorded the finished run under a "timeout "
   entry, an unclassed failure: reverted).
+
+## 2026-11-10: oi type-checks in goi's table again, after OC192 (branch `oi-table2`, from next `6c3c87c02`)
+
+W's prep (branch window-w2c, 736057475) found seven new errors of goi's checker in `go/arbace/oi` for tamago/amd64 and tamago/arm64, all
+from OC192 (a)'s `ext_final.ae` (56b343448), which landed after table-ready (5acc697c9, W-D13 (a)) had fixed oi's earlier 111. Fixed
+by the owners, W-D13 (a): `finAddr`'s six `(conv uintptr (unsafe/Pointer x))` are `(conv uintptr (conv unsafe/Pointer x))` (a conversion,
+not a call, as go/types has it and as `ext_unix_linux.ae` writes it), and oi.ae's `:init-order` puts `finObjs` after `blake2Sigma` (the
+checker's order, as Go's spec orders initialisation). Proof: test/ocaml/table_check.ae (what `bin/oi table-check` runs, here with the two
+tamago configurations alone, GOMEMLIMIT 3000MiB, window-w2c's tree with the fix picked) gives 7 errors before and none after in
+tamago/amd64 and tamago/arm64 (42 files each, the table of oi alone generated in both); linux's std read was not finished in the light
+lane's time (and its annotations are the same forms). Behaviour: `bin/oi test` ok; the five finaliser programs of OC192 pass by `bin/oi
+check --only-list`. Alternative (b), leaving oi out of the table at W2, not needed. The fix should be picked onto window-w2c.

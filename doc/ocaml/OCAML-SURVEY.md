@@ -3125,6 +3125,13 @@ in order, never re-entered (`running_finalisation_function`, cleared by `Gc.fina
   the next compiled run should print them STALE). `oi-known.edn` and `aot-known.edn` lose the five's entries, `pins-attested.tsv` the
   four pinned rows. The other programs that register finalisers (`weak-ephe-final/ephetest`, `weaktest`; the statmemprof ones are
   Gc.Memprof's) keep their classes. `gc-and-memory`'s why says so.
+- Table check (W-D13 (a), `oi-table2`, 2026-11-10): `ext_final.ae` landed after table-ready (5acc697c9) had made oi type-check in goi's
+  table, and goi's checker found seven errors in it for tamago/amd64 and tamago/arm64: `unsafe.Pointer(x)` in `finAddr` written as a
+  call `(unsafe/Pointer x)`, where go/types (and goi's checker) see a conversion, so `(conv unsafe/Pointer x)` as in `ext_unix_linux.ae`
+  (six annotations); and `finObjs`, a variable initialised by `make`, placed last in `:init-order` where Go's spec orders it by its
+  position in the file's declaration order among the dependency-free variables (after `blake2Sigma`, before `dummyBuff`, the
+  checker's). Same machine code on Linux: the conversion is the same, the order of two independent initialisers is not observable.
+  `bin/oi table-check`'s tamago configurations: 7 errors before, none after, both architectures.
 
 **OC193 (a): `OCAMLRUNPARAM`'s `d`.** startup_aux.c's `caml_parse_ocamlrunparam` and `scanmult` (`=N`, `=0xN`, the `k`, `M`, `G`
 multipliers; `CAMLRUNPARAM` when `OCAMLRUNPARAM` is unset), `Max_domains_def` 128 (64 bits), at least 1 and at most
