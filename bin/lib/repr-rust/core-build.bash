@@ -157,12 +157,13 @@ core_export() {
 # do not show as items: int_impl!'s and uint_impl!'s methods, the operator impls' macros, cmp's), from the interface pass (no body
 # built) over test/rust/front/core-attrs.txt's module files, into .tmp/rust-front/core/core-attrs.edn ({def-path [names]}), which
 # rsi-build gives mono (RF_CORE_ATTRS); kept by a key (the list, the copy of core's sources, the front end's expansion, resolution,
-# lowering and collection) in core-attrs.key; light: one process, a few minutes, under 2 GB
+# lowering and collection; not mono.ae, whose local-attrs names them) in core-attrs.edn.key; light: one process, about 23
+# minutes (num/mod.rs 18), 2.3 GB
 core_attrs_key() {
   local lib=$1
   { cat "$root/test/rust/front/core-attrs.txt"
     (cd "$lib/core/src" && grep -v '^#' "$root/test/rust/front/core-attrs.txt" | xargs sha256sum)
-    (cd "$root" && sha256sum arbace/rust/front/{expand,expand_derive,expand_format,resolve,lower,collect,core_check}.ae arbace/rust/front/mono.ae)
+    (cd "$root" && sha256sum arbace/rust/front/{expand,expand_derive,expand_format,resolve,lower,collect,core_check}.ae)
     cat "$(records_front)/std-iface.edn" | sha256sum; } | sha256sum | cut -c1-64
 }
 
