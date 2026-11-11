@@ -8,6 +8,7 @@
             [arbace.classes.env :as env]
             [arbace.classes.analyze :as a]
             [arbace.classes.annot :as annot]
+            [arbace.j2g.code :as code]
             [arbace.j2g.edge :as edge]
             [arbace.j2g.main :as jm]
             [arbace.j2g.model :as m]
@@ -170,6 +171,137 @@
       (check "type annotations: control: a changed value differs"
              (and (not= changed (first ours)) (not (some #{changed} javac)))))))
 
+(defn- nodes-of
+  "Every node (a map with :op) under x."
+  [x]
+  (filter #(and (map? %) (:op %)) (tree-seq coll? seq x)))
+
+(defn test-invokers
+  "F15: in a world with jdk.internal.jrt.Invokers (the fixture test/j2g/unit/invoke, beside the edge's
+  java.lang.invoke), the analyzer writes (int) mh.invokeExact(1, \"a\") as Invokers.invokeExactI(mh, int.class,
+  {int.class, String.class}, {1, \"a\"}), (String) mh.invoke(x) as invokeL cast to String, a statement's call
+  as invokeExactV, MethodHandles.lookup() as Invokers.lookup(U.class); the control: MethodHandle.type() stays a
+  virtual call of MethodHandle."
+  []
+  (if-not (resolve 'arbace.classes.analyze/invokers-call)
+    ;; a host whose analysis predates F15 (stage 0 until a re-seed): the gate's build at the checkout's key has it, or
+    ;; J2G_UNIT_SOURCES=arbace.classes.analyze
+    (println "skip  invokers: the host's arbace.classes.analyze predates F15 (J2G_UNIT_SOURCES=arbace.classes.analyze)")
+  (let [e (edge/read-edge "jdk/edge.edn")
+        ;; load-fixture's binding without its advance-ids! (as test-throws)
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/invoke" :tree true}] :variant-files []))
+        bodies (w/with-world world (:bodies @(:state (a/decl "p/U"))))
+        body (fn [nm] (some (fn [[[n _] b]] (when (= n nm) b)) bodies))
+        calls (fn [nm] (filter #(= :invoke (:op %)) (nodes-of (body nm))))
+        inv (fn [nm] (first (filter #(= "jdk/internal/jrt/Invokers" (:owner %)) (calls nm))))]
+    (check "invokers: the fixture analyzes" (and (seq bodies) (not (contains? (into {} (:failed world)) "p/U")))
+           (pr-str (:failed world)))
+    (let [n (inv "poly")
+          [_ r cs os] (:args n)]
+      (check "invokers: (int) mh.invokeExact(1, \"a\") is Invokers.invokeExactI, the site's classes and the boxed arguments"
+             (and (= "invokeExactI" (:name n)) (= :static (:kind n))
+                  (= "(Ljava/lang/invoke/MethodHandle;Ljava/lang/Class;[Ljava/lang/Class;[Ljava/lang/Object;)I" (:desc n))
+                  (= "I" (:class r)) (= ["I" "Ljava/lang/String;"] (mapv :class (:elems cs)))
+                  (= 2 (count (:elems os))))
+             (pr-str (select-keys n [:name :desc]))))
+    (check "invokers: (String) mh.invoke(x) is invokeL, cast to String"
+           (and (= "invokeL" (:name (inv "gen")))
+                (some #(and (= :cast (:op %)) (= "Ljava/lang/String;" (:class %))) (nodes-of (body "gen")))))
+    (check "invokers: a statement's mh.invokeExact() is invokeExactV" (= "invokeExactV" (:name (inv "stmt"))))
+    (let [n (inv "lk")]
+      (check "invokers: MethodHandles.lookup() is Invokers.lookup(U.class)"
+             (and (= "lookup" (:name n)) (= "Lp/U;" (:class (first (:args n)))))
+             (pr-str (select-keys n [:name :args]))))
+    (check "invokers: control: MethodHandle.type() is MethodHandle's own call"
+           (and (nil? (inv "plain")) (some #(and (= "java/lang/invoke/MethodHandle" (:owner %)) (= "type" (:name %))) (calls "plain")))))))
+
+(defn test-lookup-call
+  "F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F15 (java.lang.invoke)\"): the analyzer writes
+  MethodHandles.lookup() as jdk.internal.jrt.Invokers.lookup(C.class); in a JDK class (C of the JDK's packages,
+  pkg-of :jrt) j2g keeps it the nil of J2G-SPEC section 8.5 (the VarHandle idiom's static initializers unchanged), in
+  a program's own class or Arbace's a real call; and MethodHandles.lookup() itself (a world without Invokers) is the
+  nil as before. The control: a call of another Invokers method is not the lookup."
+  []
+  (let [lit (fn [c] {:op :class-lit :class (str "L" c ";") :type "Ljava/lang/Class;"})
+        call (fn [owner name args] {:op :invoke :kind :static :owner owner :name name :args args})]
+    (check "lookup-call: MethodHandles.lookup() is the nil"
+           (code/lookup-call? (call "java/lang/invoke/MethodHandles" "lookup" [])))
+    (check "lookup-call: Invokers.lookup(C.class) of a JDK class is the nil"
+           (code/lookup-call? (call "jdk/internal/jrt/Invokers" "lookup" [(lit "java/util/concurrent/ConcurrentHashMap")])))
+    (check "lookup-call: Invokers.lookup(C.class) of a test's class is a real call"
+           (not (code/lookup-call? (call "jdk/internal/jrt/Invokers" "lookup" [(lit "t04746/Test7157574")]))))
+    (check "lookup-call: Invokers.lookup(C.class) of Arbace's class is a real call"
+           (not (code/lookup-call? (call "jdk/internal/jrt/Invokers" "lookup" [(lit "arbace/lang/KeywordInvokeSite")]))))
+    (check "lookup-call: control: Invokers.invokeExactI is not the lookup"
+           (not (code/lookup-call? (call "jdk/internal/jrt/Invokers" "invokeExactI" [(lit "java/lang/String")]))))))
+
+;; JCS350 (a): a private method of an interpreted class in reflection (arbace.j2g.dyncf's setMethod native, the Go
+;; the executable's interpreter runs): JVMS 5.4.6, a private method is selected as itself, so it takes no Dyn slot
+;; and no method by key (where a subclass's private method of the same key would replace it), and its member table
+;; entry calls its own implementation, not the receiver's class's of that key. The natives are Go forms in j2g's
+;; source, checked as data (their run needs the executable, the night's: t07686)
+
+(defn- source-forms [path]
+  (with-open [r (java.io.PushbackReader. (io/reader path))]
+    (binding [*read-eval* false]
+      (doall (take-while #(not= % ::eof) (repeatedly #(read r false ::eof)))))))
+
+(defn- native-form
+  "The (list 'go/func (native-name NAME ...) ...) form of NAME in the forms of PATH (the name also as
+  (symbol (native-name NAME ...)), dyn.ae's)."
+  [path name]
+  (let [named? (fn [n] (and (seq? n) (= 'native-name (first n)) (= name (second n))))]
+    (some (fn [f] (when (and (seq? f) (= 'list (first f)) (= ''go/func (second f))
+                             (let [n (nth f 2 nil)]
+                               (or (named? n) (and (seq? n) (= 'symbol (first n)) (named? (second n))))))
+                    f))
+          (tree-seq coll? seq (source-forms path)))))
+
+(defn- private-rule?
+  "Whether a setMethod native's form selects a private method as itself: the slot and by-key stores guarded by
+  the private flag, and the member entry's (set! f impl) under it."
+  [form]
+  (let [subs (tree-seq coll? seq form)
+        priv? (fn [x] (some #(= 'jrt/AccPrivate %) (tree-seq coll? seq x)))]
+    (boolean
+      (and (some #(and (seq? %) (= 'when (first %)) (priv? (second %))
+                       (some (fn [y] (= y '(aset (.-ByKey dc) key impl))) (tree-seq coll? seq %)))
+                 subs)
+           (some #(= % '(when (!= (bit-and flags jrt/AccPrivate) 0) (set! f impl))) subs)))))
+
+(defn test-private-reflection []
+  (let [cf (native-form "arbace/j2g/dyncf.ae" "setMethod")
+        px (native-form "arbace/j2g/dyn.ae" "setMethod")]
+    (check "private reflection: dyncf's setMethod native found" (some? cf))
+    (check "private reflection: a private method is selected as itself (no slot, no by-key method, its own impl)"
+           (private-rule? cf))
+    (check "private reflection: control: a proxy's setMethod (dyn.ae, every method public) has no such rule"
+           (and (some? px) (not (private-rule? px))))))
+
+(defn test-inner-ctor-annotations
+  "JCS351 (a): a constructor's annotation records (arbace.classes.annot's C and P lines) name javac's descriptor, the one
+  jrt's Constructor has (an inner class's outer instance first), and its parameters' indices follow the leading implicit
+  parameters as the JDK's getParameterAnnotations gives them (handleParameterNumberMismatch: a member class's one); the
+  control, a static nested class's, is unshifted. The fixture test/j2g/unit/innerctor/r/Outer.java (its committed forms)."
+  []
+  (let [e (edge/read-edge "jdk/edge.edn")
+        world (binding [m/*run* true env/*declared* (:classes e) edge/*edge* e a/*source-lookup* false]
+                (w/load-world [{:root "test/j2g/unit/innerctor" :tree true}] :variant-files []))
+        data (fn [n] (w/with-world world (some-> (annot/class-data n :members true) str/split-lines vec)))
+        has (fn [ls re] (some #(re-find re %) ls))
+        in (data "r/Outer$In")
+        nested (data "r/Outer$Nested")]
+    (check "inner ctor: an inner class's constructor annotations by javac's descriptor (the outer instance first)"
+           (and (has in #"^C \(Lr[.]Outer;Ljava[.]lang[.]String;\)V ") (not (has in #"^C \(Ljava[.]lang[.]String;\)V ")))
+           (pr-str in))
+    (check "inner ctor: its parameter's annotation at index 1, after the outer instance"
+           (and (has in #"^P <init> \(Lr[.]Outer;Ljava[.]lang[.]String;\)V 1 ") (not (has in #"^P <init> \S+ 0 ")))
+           (pr-str in))
+    (check "inner ctor: control: a static nested class's, its own descriptor, index 0"
+           (and (has nested #"^C \(Ljava[.]lang[.]String;\)V ") (has nested #"^P <init> \(Ljava[.]lang[.]String;\)V 0 "))
+           (pr-str nested))))
+
 (defn -main [& _]
   (test-support-tables)
   (test-unresolved-cause)
@@ -177,6 +309,10 @@
   (test-analyze-only)
   (test-throws)
   (test-type-annotations)
+  (test-lookup-call)
+  (test-invokers)
+  (test-private-reflection)
+  (test-inner-ctor-annotations)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))

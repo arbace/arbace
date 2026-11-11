@@ -96,11 +96,24 @@
 #                             WORK/jdk-originals; JRT_WORK_RT names others), with the round
 #                             trip's javac options (bin/lib/repr-java/roundtrip, -g:none); and
 #                             java.base (JFS2 (a)): jdk26u's java.base as the JDK build compiles it,
-#                             also compared with the build's own class files. In WORK/classes/
+#                             also compared with the build's own class files; modules (JCS359's
+#                             first step): every module of the platform (JAVAC_VENDOR_MODULES: some) as
+#                             the JDK build compiles it, by javac on Arbace alone, against the build's
+#                             class files (no JVM; WORK/classes/modules/summary.tsv). Since JCS359's stage 1
+#                             (JCS362 (a), JCS360 (a)) its options and sources are OUT/platform-build.edn's, not
+#                             the build tree's command lines, and every difference is judged against
+#                             OUT/platform-own-known.edn (known, or the module fails; a stale entry fails too;
+#                             then two negative controls on the run's own results); --jobs N: N modules at once
+#                             (a module of more than JAVAC_VENDOR_ALONE files, default 1000, alone). In WORK/classes/
 #   bin/javac-vendor platform [DIR]
 #                             the platform made into DIR (default WORK/platform) and checked
 #                             against OUT/platform.sha256; prints DIR (repr/java on Arbace,
 #                             bin/repr-java, JN4)
+#   bin/javac-vendor platform-build [--check]
+#                             the JDK build's configuration as data (JCS362 (a)): each module's javac options,
+#                             sources (roots and excludes), the version strings, the C preprocessor's flags and
+#                             the jmod flags, each with its origin, derived from the build tree into
+#                             OUT/platform-build.edn; --check (the oracle tier's): derived afresh and compared
 #   bin/javac-vendor platform-pin
 #                             the platform made and pinned alone: OUT/platform.sha256 (JFS15 (b),
 #                             JFS23 (b): the build tree's exploded modules with their jmods' module
@@ -560,16 +573,330 @@ base_corpus() {
   [ $st = 0 ] && [ $d1 = 0 ] && [ $d2 = 0 ]
 }
 
+# module_opts B MODULE: the javac options the build compiled MODULE with (opts), from its batch's command line
+# (jdk/modules/MODULE/_the.MODULE_batch.cmdline, the build tree's own file, split as the shell that ran it
+# split it), the javacserver's arguments less the diagnostics' (-Xlint, -Xdoclint, -Werror), the dependency
+# plugin's and the server's -XD options, -cp, -d, -h and the file list: 63 modules take java.base's but
+# -XDstringConcat=inline, four with it, jdk.internal.vm.ci -source 25 and -parameters. Since JCS362 (a) read
+# only by platform-build (the derivation of OUT/platform-build.edn and its re-check, the oracle tier's)
+module_opts() {
+  local f=$1/jdk/modules/$2/_the.$2_batch.cmdline
+  opts=()
+  [ -f "$f" ] || return 1
+  eval "set -- $(cat "$f")"
+  while [ $# -gt 0 ] && [ "$1" != javacserver.Main ]; do shift; done
+  shift 2
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -Xlint*|-Xdoclint*|-Werror|-XDinternalAPIPath=*|-XDLOG_LEVEL=*|-XDmodifiedInputs=*|'-Xplugin:depend '*|@*) shift ;;
+      -cp|-d|-h) shift 2 ;;
+      *) opts+=("$1"); shift ;;
+    esac
+  done
+}
+
+# The build's configuration as data (JCS362 (a), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS359 stage 1
+# tooling"): OUT/platform-build.edn, derived once from the JDK build tree (platform-build) with each value's origin, and
+# re-checked against the build only by the oracle tier (platform-build --check); classes modules reads it in place of the
+# build tree's command lines and file lists. Its layout is line-oriented so that the shell reads it (pb_get), and every
+# line is the Clojure reader's: a module's name alone on its line, then its fields, each vector on one line. Paths are
+# written with placeholders: {gensrc} the build tree's support/gensrc (stage 2 makes it), {src} jdk26u's src, {build}
+# the build tree, {jdk} jdk26u's checkout. A module's sources: its roots in the build's order (gensrc, linux, unix,
+# share: {gensrc}/MODULE, {src}/MODULE/OS/classes), each root's *.java sorted (C), less :exclude (ROOT/PATH: javadoc's
+# snippet-files, a root's file shadowed by an earlier root's, the make files' excludes), checked by :files and
+# :files-sha256 (the list with placeholders, a line a file)
+pbuild=$out/platform-build.edn
+pb_roots="gensrc linux unix share"
+pb_str() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
+pb_vec() { local a sep=; printf '['; for a in "$@"; do printf '%s' "$sep"; pb_str "$a"; sep=' '; done; printf ']'; }
+# pb_abs B PATH...: each path with its placeholders, a line each
+pb_abs() {
+  local b=$1 s; shift
+  for s in "$@"; do
+    s=${s//"$b/support/gensrc"/"{gensrc}"}; s=${s//"$b"/"{build}"}; s=${s//"$jdk/src"/"{src}"}; s=${s//"$jdk"/"{jdk}"}
+    printf '%s\n' "$s"
+  done
+}
+# pb_concrete B: stdin's placeholders replaced (the gensrc root GENSRC, default B/support/gensrc)
+pb_concrete() { local g=${PB_GENSRC:-$1/support/gensrc}; sed -e "s|{gensrc}|$g|g" -e "s|{src}|$jdk/src|g" -e "s|{build}|$1|g" -e "s|{jdk}|$jdk|g"; }
+# pb_root_dir ROOT MODULE: the root's directory, with placeholders
+pb_root_dir() { case $1 in gensrc) echo "{gensrc}/$2" ;; *) echo "{src}/$2/$1/classes" ;; esac; }
+# pb_get MODULE FIELD [FILE]: the strings of MODULE's vector FIELD, a line each
+pb_get() {
+  awk -v mod="$1" -v field=":$2 [" '
+    /^  "[^"]*"$/ { cur = substr($0, 4, length($0) - 4); next }
+    cur == mod && (i = index($0, field)) {
+      s = substr($0, i + length(field)); ins = 0; buf = ""
+      for (j = 1; j <= length(s); j++) {
+        c = substr(s, j, 1)
+        if (ins) {
+          if (c == "\\") { j++; buf = buf substr(s, j, 1) }
+          else if (c == "\"") { print buf; ins = 0; buf = "" }
+          else buf = buf c
+        } else if (c == "\"") ins = 1
+        else if (c == "]") exit
+      }
+      exit
+    }' "${3:-$pbuild}"
+}
+# pb_scalar MODULE FIELD [FILE]: MODULE's scalar FIELD (a number or a string, unquoted)
+pb_scalar() {
+  awk -v mod="$1" -v field=":$2 " '
+    /^  "[^"]*"$/ { cur = substr($0, 4, length($0) - 4); next }
+    cur == mod && (i = index($0, field)) { s = substr($0, i + length(field)); sub(/[ }].*/, "", s); gsub(/"/, "", s); print s; exit }' "${3:-$pbuild}"
+}
+pb_modules() { sed -n 's/^  "\([^"]*\)"$/\1/p' "${1:-$pbuild}"; }
+# pb_files_rel MODULE [FILE]: the module's sources with placeholders, in the build's order
+pb_files_rel() {
+  local m=$1 f=${2:-$pbuild} r d dd ex
+  ex=$TMPDIR/javac-vendor.pb-exclude.$$.$BASHPID
+  pb_get "$m" exclude "$f" > "$ex"
+  for r in $pb_roots; do
+    d=$(pb_root_dir "$r" "$m"); dd=$(echo "$d" | pb_concrete "$PB_B")
+    [ -d "$dd" ] || continue
+    (cd "$dd" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) |
+      awk -v r="$r" -v d="$d" 'FILENAME == ARGV[1] { x[$0] = 1; next } !((r "/" $0) in x) { print d "/" $0 }' "$ex" -
+  done
+  rm -f "$ex"
+}
+# platform_build_make FILE: the derivation (the build tree's command lines, file lists and spec.gmk)
+platform_build_make() {
+  local o=$1 c b m r d dd f rel cpp jm st=0 a
+  c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build"
+  b=$(dirname "$c"); local bb=build/$(basename "$b")
+  PB_B=$b
+  {
+    echo ";; The JDK build's configuration as data (JCS362 (a), doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JCS359"
+    echo ";; stage 1 tooling\"): derived by bin/javac-vendor platform-build from jdk26u's build tree at $pinned,"
+    echo ";; re-checked against it by platform-build --check (the oracle tier's) and never read from it otherwise: each module's"
+    echo ";; javac options and sources (classes modules), the version strings, the C preprocessor's flags and the jmod flags"
+    echo ";; (stages 2 and 3). Generated; do not edit by hand. Its layout is the shell's too (bin/javac-vendor's pb_get)."
+    echo "{:jdk $(pb_str "$pinned")"
+    echo " :build $(pb_str "$bb")"
+    echo " :placeholders {\"{gensrc}\" \"$bb/support/gensrc\" \"{src}\" \"src\" \"{build}\" \"$bb\" \"{jdk}\" \"jdk26u's checkout\"}"
+    echo " :origins"
+    echo " {:options \"$bb/jdk/modules/MODULE/_the.MODULE_batch.cmdline, javacserver.Main's arguments less -Xlint*, -Xdoclint*, -Werror, -XDinternalAPIPath, -XDLOG_LEVEL, -XDmodifiedInputs, -Xplugin:depend, -cp, -d, -h and the @file list\""
+    echo "  :files \"$bb/jdk/modules/MODULE/_the.MODULE_batch.filelist: the roots' sources less :exclude\""
+    echo "  :version \"$bb/spec.gmk's VERSION_* := VALUE\""
+    echo "  :cpp \"$bb/support/gensrc/java.base/_UnixConstants.java.cmdline and _SocketOptionRegistry.java.cmdline: gcc -E's flags (spec.gmk's CFLAGS_JDKLIB)\""
+    echo "  :jmod \"$bb/support/images/jmods/_create_MODULE.jmod_exec.cmdline: jmod create's arguments less -J* and the jmod file (make/CreateJmods.gmk)\"}"
+    echo " :roots $(pb_vec $pb_roots)"
+    echo " :version"
+    printf ' {'
+    sed -n 's/^\(VERSION_[A-Z0-9_]*\) := \(.*\)$/\1\t\2/p' "$c" | { a=; while IFS=$'\t' read -r k v; do printf '%s%s %s\n' "$a" "$(pb_str "$k")" "$(pb_str "$v")"; a='  '; done; }
+    echo '  }'
+    cpp=
+    for f in UnixConstants SocketOptionRegistry; do
+      a=$(sed -n 's|.* -E -x c \(.*\) /[^ ]*\.java\.template 2> .*|\1|p' "$b/support/gensrc/java.base/_$f.java.cmdline")
+      [ -n "$a" ] || { echo "javac-vendor: no gcc -E flags in $b/support/gensrc/java.base/_$f.java.cmdline" >&2; return 1; }
+      [ -z "$cpp" ] || [ "$cpp" = "$a" ] || { echo "javac-vendor: the two gcc -E command lines differ in their flags" >&2; return 1; }
+      cpp=$a
+    done
+    set -f; eval "set -- $cpp"; set +f
+    pb_abs "$b" "$@" > "$TMPDIR/javac-vendor.pb-c"; mapfile -t pc < "$TMPDIR/javac-vendor.pb-c"
+    echo " :cpp $(pb_vec "${pc[@]}")"
+    echo " :modules {"
+    for m in $(platform_modules); do
+      module_opts "$b" "$m" || { echo "javac-vendor: no $b/jdk/modules/$m/_the.${m}_batch.cmdline" >&2; return 1; }
+      f=$b/jdk/modules/$m/_the.${m}_batch.filelist
+      [ -f "$f" ] || { echo "javac-vendor: no $f" >&2; return 1; }
+      # the excluded: under the roots, not in the list
+      grep -v '^$' "$f" | LC_ALL=C sort > "$TMPDIR/javac-vendor.pb-list"
+      : > "$TMPDIR/javac-vendor.pb-ex"
+      for r in $pb_roots; do
+        d=$(pb_root_dir "$r" "$m"); dd=$(echo "$d" | pb_concrete "$b")
+        [ -d "$dd" ] || continue
+        (cd "$dd" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) | while IFS= read -r rel; do printf '%s\t%s\n' "$dd/$rel" "$r/$rel"; done
+      done | LC_ALL=C sort -t $'\t' -k1,1 | awk -F'\t' 'FILENAME == ARGV[1] { x[$0] = 1; next } !($1 in x) { print $2 }' "$TMPDIR/javac-vendor.pb-list" - |
+        LC_ALL=C sort > "$TMPDIR/javac-vendor.pb-ex"
+      mapfile -t ex < "$TMPDIR/javac-vendor.pb-ex"
+      mapfile -t fl < "$f"
+      local n=0; for rel in "${fl[@]}"; do [ -n "$rel" ] && n=$((n + 1)); done
+      jm=$b/support/images/jmods/_create_$m.jmod_exec.cmdline
+      [ -f "$jm" ] || { echo "javac-vendor: no $jm" >&2; return 1; }
+      set -f; eval "set -- $(sed 's|^.*/jdk/bin/jmod ||' "$jm")"; set +f
+      local jargs=()
+      while [ $# -gt 1 ]; do case $1 in -J*|create) ;; *) jargs+=("$1") ;; esac; shift; done
+      echo "  \"$m\""
+      pb_abs "$b" "${opts[@]}" > "$TMPDIR/javac-vendor.pb-o"; mapfile -t po < "$TMPDIR/javac-vendor.pb-o"
+      pb_abs "$b" "${jargs[@]}" > "$TMPDIR/javac-vendor.pb-j"; mapfile -t pj < "$TMPDIR/javac-vendor.pb-j"
+      echo "  {:options $(pb_vec "${po[@]}")"
+      echo "   :exclude $(pb_vec "${ex[@]}")"
+      echo "   :files $n"
+      echo "   :files-sha256 \"$(grep -v '^$' "$f" | while IFS= read -r rel; do pb_abs "$b" "$rel"; done | sha256sum | cut -c1-64)\""
+      echo "   :jmod $(pb_vec "${pj[@]}")}"
+    done
+    echo ' }}'
+  } > "$o.tmp" || { rm -f "$o.tmp"; return 1; }
+  # the sources as the data gives them must be the build's list, file for file and in its order
+  for m in $(pb_modules "$o.tmp"); do
+    pb_files_rel "$m" "$o.tmp" > "$TMPDIR/javac-vendor.pb-a"
+    grep -v '^$' "$b/jdk/modules/$m/_the.${m}_batch.filelist" | while IFS= read -r rel; do pb_abs "$b" "$rel"; done > "$TMPDIR/javac-vendor.pb-b"
+    cmp -s "$TMPDIR/javac-vendor.pb-a" "$TMPDIR/javac-vendor.pb-b" || { echo "javac-vendor: $m's sources from the data are not the build's list" >&2; st=1; }
+  done
+  [ $st = 0 ] || { mv "$o.tmp" "$TMPDIR/platform-build.failed.edn"; return 1; }
+  mv "$o.tmp" "$o"
+}
+
+# The known differences (JCS360 (a)): OUT/platform-own-known.edn, each class whose own class file (javac on Arbace's, from
+# source) differs from the build's, with both digests and its reason; a line an entry, the Clojure reader's. A module
+# whose every differing class is listed with both its digests is `known`; a differing class not listed (or listed with
+# other digests) makes it `differ`; a listed class that does not differ makes it `stale`. Both fail. JAVAC_VENDOR_KNOWN
+# names another file
+pknown=${JAVAC_VENDOR_KNOWN:-$out/platform-own-known.edn}
+# known_tsv FILE: MODULE CLASS BUILD OWN WHY, a line an entry
+known_tsv() {
+  [ -f "$1" ] || return 0
+  sed -n 's/^.*{:module "\([^"]*\)" :class "\([^"]*\)" :build "\([^"]*\)" :own "\([^"]*\)" :why :\([^ }]*\)}.*$/\1\t\2\t\3\t\4\t\5/p' "$1"
+}
+# module_sums DIR: CLASS<TAB>SHA-256 of every class file under DIR but module-info.class, sorted
+module_sums() {
+  (cd "$1" && find -L . -name '*.class' ! -path ./module-info.class | sed 's|^\./||' | LC_ALL=C sort |
+     xargs -d '\n' -r sha256sum | awk '{h = $1; sub(/^[0-9a-f]+  /, ""); print $0 "\t" h}')
+}
+# module_diffs BUILD-SUMS OWN-SUMS: CLASS<TAB>BUILD<TAB>OWN for each class that differs ("-" for none), sorted
+module_diffs() {
+  awk -F'\t' 'FILENAME == ARGV[1] { b[$1] = $2; next } { o[$1] = $2 }
+    END { for (k in b) if (!(k in o)) print k "\t" b[k] "\t-"; else if (b[k] != o[k]) print k "\t" b[k] "\t" o[k]
+          for (k in o) if (!(k in b)) print k "\t-\t" o[k] }' "$1" "$2" | LC_ALL=C sort
+}
+# module_judge MODULE DIFFS KNOWN-TSV: prints KNOWN UNEXPLAINED STALE, then the lines that explain them (unexplained CLASS
+# BUILD OWN, stale CLASS)
+module_judge() {
+  awk -F'\t' -v m="$1" '
+    FILENAME == ARGV[1] { if ($1 == m) { kb[$2] = $3; ko[$2] = $4 } ; next }
+    { if (($1 in kb) && kb[$1] == $2 && ko[$1] == $3) { k++; used[$1] = 1 } else { u++; out = out "unexplained\t" $1 "\t" $2 "\t" $3 "\n" } }
+    END { for (c in kb) if (!(c in used)) { s++; out = out "stale\t" c "\n" }
+          printf "%d %d %d\n%s", k, u, s, out }' "$3" "$2"
+}
+# module_result K U S: equal, known, differ or stale
+module_result() { if [ "$2" -gt 0 ]; then echo differ; elif [ "$3" -gt 0 ]; then echo stale; elif [ "$1" -gt 0 ]; then echo known; else echo equal; fi; }
+
+# module_run MODULE: one module by javac on Arbace as the build compiles it (the data's options and sources), judged
+# against the build's class files and the known file; WORK/classes/modules/MODULE/{out.txt,summary.line}
+module_run() {
+  local m=$1 w=$work/classes/modules/$1 r n1 n2 t0 t1 ms kb j k u s o=() fl
+  rm -rf "$w"; mkdir -p "$w/arbace"
+  pb_get "$m" options > "$w/options.raw"
+  pb_concrete "$PB_B" < "$w/options.raw" > "$w/options.txt"
+  mapfile -t o < "$w/options.txt"
+  pb_files_rel "$m" | pb_concrete "$PB_B" > "$w/files.list"
+  fl=$(wc -l < "$w/files.list")
+  if [ "$fl" != "$(pb_scalar "$m" files)" ] ||
+     [ "$(pb_files_rel "$m" | sha256sum | cut -c1-64)" != "$(pb_scalar "$m" files-sha256)" ]; then
+    echo "   $m: the sources are not the data's ($fl files, :files $(pb_scalar "$m" files); jdk26u's checkout moved?)" > "$w/out.txt"
+    printf '%s\t%s\t-\t-\tsources\t-\t-\t-\t-\t-\n' "$m" "$fl" > "$w/summary.line"
+    return 1
+  fi
+  t0=$(date +%s%N)
+  r=ok
+  (cd "$w" && TMPDIR=$work/tmp busybox time -v "$javac_exe" "$work/javac.ae" "${o[@]}" -d "$w/arbace" "@$w/files.list") > "$w/arbace.log" 2> "$w/arbace.err" || r=failed
+  t1=$(date +%s%N); ms=$(( (t1 - t0) / 1000000 ))
+  kb=$(sed -n 's/.*Maximum resident set size (kbytes): *//p' "$w/arbace.err" | tail -1)
+  module_sums "$PB_B/jdk/modules/$m" > "$w/build.sums"
+  : > "$w/own.sums"; [ ! -d "$w/arbace/$m" ] || module_sums "$w/arbace/$m" > "$w/own.sums"
+  n1=$(wc -l < "$w/build.sums"); n2=$(wc -l < "$w/own.sums")
+  k=0 u=0 s=0
+  if [ $r = ok ]; then
+    module_diffs "$w/build.sums" "$w/own.sums" > "$w/diffs.tsv"
+    module_judge "$m" "$w/diffs.tsv" "$work/classes/modules/known.tsv" > "$w/judgment.txt"
+    read -r k u s < "$w/judgment.txt"
+    r=$(module_result "$k" "$u" "$s")
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$m" "$fl" "$n1" "$n2" "$r" "$ms" "${kb:--}" "$k" "$u" "$s" > "$w/summary.line"
+  {
+    echo "   $m: $fl files, $n1 classes in the build (but module-info), $n2 by javac on Arbace: $r ($ms ms, peak ${kb:-?} kB$([ "$k" = 0 ] || echo ", $k known"))"
+    [ $r != failed ] || echo "      javac on Arbace failed ($w/arbace.log: $(grep -c 'error:' "$w/arbace.log") errors)"
+    [ ! -f "$w/judgment.txt" ] || tail -n +2 "$w/judgment.txt" | sed 's/^/      /; s/\t/ /g'
+  } > "$w/out.txt"
+  # the own class files are kept only for the evidence (a module neither equal nor known)
+  case $r in equal|known) rm -rf "$w/arbace" ;; esac
+  case $r in equal|known) return 0 ;; *) return 1 ;; esac
+}
+
+# modules_controls: the judgment's negative controls (GTS81 (a)), judged again on this run's own results with the known
+# file changed: (1) a known entry taken away, its module must differ; (2) an entry added for an equal class of a module
+# that ran, its module must be stale. A control that passes fails the run
+modules_controls() {
+  local d=$work/classes/modules m c st=0 k u s line
+  line=$(awk -F'\t' '$5 == "known" {print $1; exit}' "$d/summary.tsv")
+  if [ -n "$line" ]; then
+    m=$line
+    c=$(awk -F'\t' -v m="$m" '$1 == m {print $2; exit}' "$d/known.tsv")
+    awk -F'\t' -v m="$m" -v c="$c" '!($1 == m && $2 == c)' "$d/known.tsv" > "$d/control-1.tsv"
+    module_judge "$m" "$d/$m/diffs.tsv" "$d/control-1.tsv" > "$d/control-1.txt"; read -r k u s < "$d/control-1.txt"
+    if [ "$(module_result "$k" "$u" "$s")" = differ ]; then echo "   control 1 ($m without its known $c): differ, as it must"
+    else echo "   control 1 ($m without its known $c): $(module_result "$k" "$u" "$s"): PASSES, it must fail"; st=1; fi
+  else echo "   control 1: no known module in this run (none taken)"; fi
+  m=$(awk -F'\t' '$5 == "equal" || $5 == "known" {print $1; exit}' "$d/summary.tsv")
+  c=
+  [ -z "$m" ] || c=$(awk -F'\t' 'FILENAME == ARGV[1] { d[$1] = 1; next } !($1 in d) {print $1; exit}' "$d/$m/diffs.tsv" "$d/$m/build.sums")
+  if [ -n "$c" ]; then
+    { cat "$d/known.tsv"; printf '%s\t%s\t%s\t%s\tcontrol\n' "$m" "$c" "$(awk -F'\t' -v c="$c" '$1 == c {print $2}' "$d/$m/build.sums")" "$(awk -F'\t' -v c="$c" '$1 == c {print $2}' "$d/$m/build.sums")"; } > "$d/control-2.tsv"
+    module_judge "$m" "$d/$m/diffs.tsv" "$d/control-2.tsv" > "$d/control-2.txt"; read -r k u s < "$d/control-2.txt"
+    if [ "$(module_result "$k" "$u" "$s")" = stale ]; then echo "   control 2 ($m with a known entry for its equal $c): stale, as it must"
+    else echo "   control 2 ($m with a known entry for its equal $c): $(module_result "$k" "$u" "$s"): PASSES, it must fail"; st=1; fi
+  else echo "   control 2: no equal class in this run (none taken)"; fi
+  return $st
+}
+
+# modules_corpus: every module of the platform (JAVAC_VENDOR_MODULES: some, by name) compiled by javac on Arbace as the JDK
+# build compiles it, its options and sources from OUT/platform-build.edn (JCS362 (a); the build tree's generated sources
+# still, {gensrc}, until stage 2), from jdk26u's sources alone (--module-source-path, --system none: no class file read),
+# each against the build's class files byte for byte but its module-info.class (rewritten after javac, base_corpus),
+# every difference judged against OUT/platform-own-known.edn (JCS360 (a)); no JVM: the build's classes are the JDK's
+# javac's. JCS359's stage 1 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS359 stage 1 tooling"). --jobs N (jobs)
+# modules at once, but a module of more than JAVAC_VENDOR_ALONE files (default 1000: java.base, java.desktop, java.xml,
+# jdk.localedata) alone, so that the peak is the larger of one big module's and N small ones'. WORK/classes/modules/MODULE,
+# a line a module in WORK/classes/modules/summary.tsv (MODULE FILES BUILD-CLASSES ARBACE-CLASSES RESULT MS PEAK-KB KNOWN
+# UNEXPLAINED STALE), then the controls (modules_controls)
+modules_corpus() {
+  local c m st=0 mods n big=${JAVAC_VENDOR_ALONE:-1000} d=$work/classes/modules
+  c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (its class files are the reference)"
+  PB_B=$(dirname "$c")
+  [ -f "$pbuild" ] || fail "no $pbuild (bin/javac-vendor platform-build)"
+  [ "$(sed -n 's/^{:jdk "\([0-9a-f]*\)"$/\1/p' "$pbuild")" = "$pinned" ] || fail "$pbuild is not of jdk26u at $pinned"
+  mkdir -p "$d"
+  known_tsv "$pknown" > "$d/known.tsv"
+  mods=${JAVAC_VENDOR_MODULES:-$(pb_modules)}
+  for m in $mods; do pb_modules | grep -qx "$m" || fail "no module $m in $pbuild"; done
+  echo "   ${njobs:-1} at once (a module of more than $big files alone); the build's configuration ${pbuild#$root/}, the known differences ${pknown#$root/} ($(wc -l < "$d/known.tsv") classes)"
+  for m in $mods; do
+    n=$(pb_scalar "$m" files)
+    if [ "$n" -gt "$big" ] || [ "${njobs:-1}" -le 1 ]; then
+      wait
+      module_run "$m"; cat "$d/$m/out.txt"
+    else
+      while [ "$(jobs -rp | wc -l)" -ge "$njobs" ]; do wait -n; done
+      (module_run "$m"; cat "$d/$m/out.txt") &
+    fi
+  done
+  wait
+  : > "$d/summary.tsv"
+  for m in $mods; do
+    if [ -f "$d/$m/summary.line" ]; then cat "$d/$m/summary.line" >> "$d/summary.tsv"
+    else printf '%s\t-\t-\t-\tnot-run\t-\t-\t-\t-\t-\n' "$m" >> "$d/summary.tsv"; fi
+  done
+  awk -F'\t' '$5 != "equal" && $5 != "known" {bad++} END {exit bad > 0}' "$d/summary.tsv" || st=1
+  awk -F'\t' '{n[$5]++; k += $8} END {printf "   modules: %d; ", NR; for (r in n) printf "%s %d ", r, n[r]; printf "(%d known classes)\n", k}' "$d/summary.tsv"
+  awk -F'\t' '$7 != "-" && $7 > p {p = $7; m = $1} END {if (p) printf "   peak: %s, %d MB\n", m, p / 1024}' "$d/summary.tsv"
+  modules_controls || st=1
+  return $st
+}
+
 # classes CORPUS...: javac on Arbace against the JVM's javac (JN3)
 classes() {
   local c st=0 frozen orig
-  . "$root/bin/lib/java26.bash"; arbace_use_java26 || return 1   # the reference javac: Java 26
+  # the reference javac: Java 26 (but for the modules corpus alone, which compares with the build's classes)
+  if [ "$*" != modules ]; then . "$root/bin/lib/java26.bash"; arbace_use_java26 || return 1; fi
   javac_exe=${JAVAC_EXE:-$root/target/arbace-go/amd64/arbace-javac}
   [ -x "$javac_exe" ] || fail "no $javac_exe (bin/arbace-go --build-java, or JAVAC_EXE)"
   mkdir -p "$work/classes" "$work/tmp"
   printf '(System/exit (jdk.internal.jrt.javac.Main/run (into-array String *command-line-args*)))\n' > "$work/javac.ae"
-  platform "$work/platform" || return 1
-  echo "== javac on Arbace ($javac_exe) against the JVM's ($(javac -version 2>&1)); the platform ${out#$root/}/platform.sha256"
+  # the modules corpus attributes against no platform (--system none): none assembled for it alone
+  [ "$*" = modules ] || platform "$work/platform" || return 1
+  if [ "$*" = modules ]; then echo "== javac on Arbace ($javac_exe) against the JDK build's class files (JCS359 stage 1)"
+  else echo "== javac on Arbace ($javac_exe) against the JVM's ($(javac -version 2>&1)); the platform ${out#$root/}/platform.sha256"; fi
   for c in "$@"; do
     case $c in
       baseline)
@@ -593,7 +920,8 @@ classes() {
         # of the build's options: -h (the native headers), -Xplugin:depend and the -XD options of
         # its javacserver, -Xlint:all, -Xdoclint and -Werror (diagnostics only)
         base_corpus || st=1 ;;
-      *) fail "no corpus $c (baseline, samples, jdk, java.base)" ;;
+      modules) modules_corpus || st=1 ;;
+      *) fail "no corpus $c (baseline, samples, jdk, java.base, modules)" ;;
     esac
   done
   return $st
@@ -695,8 +1023,17 @@ case $cmd in
     [ -z "${J2G_GO_EXE:-}" ] && [ -x "$root/target/arbace-go/amd64/arbace" ] && export J2G_GO_EXE=$root/target/arbace-go/amd64/arbace
     exec bin/arbace-go --build-java "$@" ;;
   classes)
+    # --jobs N: the modules corpus's modules at once (JCS359 stage 1)
+    a=()
+    while [ $# -gt 0 ]; do case $1 in --jobs) njobs=$2; shift 2 ;; *) a+=("$1"); shift ;; esac; done
+    set -- "${a[@]}"
+    case ${njobs:-1} in ''|*[!0-9]*|0) fail "classes: --jobs takes a number" ;; esac
     [ $# -gt 0 ] || set -- baseline samples jdk
     t0=$(date +%s)
+    if [ "$*" = modules ]; then
+      classes modules || { echo "javac-vendor classes: javac on Arbace differs from the build beyond the known differences, or a control passed ($(since "$t0"))"; exit 1; }
+      echo "javac-vendor classes: javac on Arbace compiles the modules as the build, byte for byte or known ($(since "$t0"))"; exit 0
+    fi
     classes "$@" || { echo "javac-vendor classes: javac on Arbace differs from the JVM's ($(since "$t0"))"; exit 1; }
     echo "javac-vendor classes: javac on Arbace compiles $* as the JVM's javac, byte for byte ($(since "$t0"))" ;;
   platform)
@@ -705,5 +1042,21 @@ case $cmd in
     platform "$d" || exit 1
     echo "$d" ;;
   platform-pin) platform_pin "$out" && cat "$out/platform.sha256" ;;
+  platform-build)
+    # JCS362 (a): OUT/platform-build.edn derived from the build tree; --check (the oracle tier's): derived afresh and
+    # compared, the committed file untouched
+    if [ "${1:-}" = --check ]; then
+      mkdir -p "$work"
+      platform_build_make "$work/platform-build.edn" || exit 1
+      if cmp -s "$pbuild" "$work/platform-build.edn"; then
+        echo "javac-vendor platform-build --check: ${pbuild#$root/} is the build tree's configuration ($(pb_modules | wc -l) modules)"
+      else
+        diff "$pbuild" "$work/platform-build.edn" > "$work/platform-build.diff"
+        echo "javac-vendor platform-build --check: ${pbuild#$root/} differs from the build tree's ($work/platform-build.diff: $(wc -l < "$work/platform-build.diff") lines)"; exit 1
+      fi
+    else
+      platform_build_make "$pbuild" || exit 1
+      echo "javac-vendor platform-build: ${pbuild#$root/}, $(pb_modules | wc -l) modules, $(stat -c %s "$pbuild") bytes"
+    fi ;;
   *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

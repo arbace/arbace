@@ -3309,7 +3309,16 @@ D6's other cuts were reversed one by one (the status at the top, B1-PLAN.md D6).
 - **`invokedynamic` as such**: `java-str` and lambdas are compiled directly (§7.5, §7.11);
   `KeywordInvokeSite`, `ReflectorCallSite`, `MethodHandle`, `VarHandle`, `MethodType` and
   signature polymorphic calls are reworked or cut (JAVA-SURFACE.md). A signature polymorphic
-  call in translated code is a translation error.
+  call in translated code is a translation error. Amended by F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15
+  (java.lang.invoke)", write-ahead): java.lang.invoke's run-time classes (MethodHandle, MethodHandles and
+  its Lookup, MethodType, MethodHandleInfo, the call sites, LambdaMetafactory) are in the world as jrt's
+  own Java over java.lang.reflect (direct handles over the member tables, adapters as handles of their
+  own), and the Java forms' analyzer writes a polymorphic call of `MethodHandle.invokeExact` or `invoke`
+  as a call of `jdk.internal.jrt.Invokers.invokeExactR`/`invokeR` (R the call's return kind; the
+  arguments boxed into an `Object[]`, the call site's type made of class literals), and
+  `MethodHandles.lookup()` as `Invokers.lookup(C.class)`, C the caller: j2g translates both as ordinary
+  calls, but the lookup in a JDK class (`pkg-of :jrt`), which stays §8.5's nil. VarHandle stays outside
+  the world (§8.5 compiles its constant handles); `invokedynamic` itself stays as said.
 - **Serialization** (`writeReplace`, `readObject`, serializable lambdas' `$deserializeLambda$`):
   cut with `ObjectInputStream`/`ObjectOutputStream`; their members are cut by variants. For good.
   Amended by JCS167 (a) (the user, 2026-11-07; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS167

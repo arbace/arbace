@@ -1,6 +1,6 @@
 # Agenda
 
-The current state of the work (as of 2026-11-09). This file is rewritten as things change. For the history, see
+The current state of the work (as of 2026-11-10). This file is rewritten as things change. For the history, see
 [JOURNAL.md](JOURNAL.md) (since 2026-11-07), the journals at the tags
 [`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
 (2026-11-01 to 2026-11-07),
@@ -61,7 +61,13 @@ Six crops are above 90 on all three. What the others still need:
   serialization JCS167, the test library JCS330-JCS339) land with tonight's conversion; their gains count only once night
   11 records the whole corpus. Next: F15 (java.lang.invoke, `java-invoke`, for the next Java night), JCV11 (b) (the print
   cell judged by the round trip's own checks, class files a sub-level), the rest of
-  [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking.
+  [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking. Independence 59.7: read, eval, AOT and print
+  0.5 while the platform is the JDK build's (the user's ruling, 2026-11-09); `java-indep` (JCS341-JCS343 built, for the
+  11-11 merge) measures the own platform (`bin/javac-vendor classes modules`). The user decided JCS359 (a) staged, JCS360 (a),
+  JCS362-JCS378 as recommended and JCV10 (b) (2026-11-10). Stage 1's tooling is on `jcs359-s1` (from `java-indep`): the build's
+  configuration as data, `jdk/javac/platform-build.edn` (JCS362 (a)); `classes modules --jobs N`; the known file
+  `jdk/javac/platform-own-known.edn` (JCS360 (a), 12 classes); the controls. Next: stage 1's measure of all 68 modules on night
+  15 (JCS374 (a), the survey's command), then stages 2-3 by day. The score moves at stages 4-5: Java to 99.7.
 - **C++** (completeness, independence): read 1,182 and print 1,665 by design are most of the gap (96.8 without them); the
   print cell is on the own round trip on `cpp-print-own` (CP243 (a): the records made by day, print 48.3 → 99.5, the judge
   0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the

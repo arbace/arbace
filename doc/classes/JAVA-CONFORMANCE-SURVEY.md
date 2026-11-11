@@ -4333,3 +4333,516 @@ only if P3 leaves Java short; **JCS376 (a)** interpreter speed outside this plan
 in P1's night; **JCS378 (a)** `--release` through a generated ct.sym after JCS359 stage 5.
 
 P1's day work: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)" (branch `java-p1`), with JCS379-JCS383.
+
+## Decided (the user, 2026-11-09, about 09:30): JCS330 (a), JCS331 (a), JCS332 (a), JCS333 (a)
+
+As the survey recommends: the libraries in the check (step 1), Arbace's own runner and assertion classes (step 2), new corpora
+by area, `othervm` ignored.
+
+## As built: JCS330-JCS333 (2026-11-09; branch `java-testlib`, from `java-night` 9e6160bbb)
+
+**JCS330 (a), the libraries.** `java.check/categorize` gives every description a `:base` beside its category: the category it
+would have without its `@library` tags and with its `@run testng`/`@run junit` actions taken as main actions. A corpus may name
+`:base` categories (`test/java/corpora.edn`): it then takes the `:run-lib` or `:framework` tests whose rest is what the plain
+corpora take (`:run-plain`, `:run-compile`, `:run-jitopts`); the corpora without `:base` (every existing one) are unchanged, and
+`bin/java-check scan` assigns the existing tests the same ids and categories (5,191 tests in the corpora, the 4,936 before and
+255 new). `@library L` is resolved as jtreg resolves it (`java.check/library-dirs`): relative to the test's directory, or with a
+leading `/` against the suite root (the nearest `TEST.ROOT`), then against `TEST.ROOT`'s `external.lib.roots` (jdk's and
+langtools' `../../`, hotspot's `../../../`: `/test/lib` is jdk26u's `test/lib`); a library that is no directory, or a
+module-qualified `@build` (a patch of a module), is a `:skip` with that reason. For these tests the directory's
+`TEST.properties` count too (`java.check/with-dir-defaults`, `java.util.Properties`' reading, the nearest file that has the
+key): `modules` is the default `@modules` of a test that has none, `lib.dirs` adds libraries. The plan gets a `srcroot` line
+per library; `record_sources` gives javac `-sourcepath .:ROOTS`, looks an `@build` class up in the test's directory then each
+root, and names every parsed file by `src_rel`: a library's file relative to the test's directory (`../../../../lib/jdk/test/lib/
+RandomFactory.java`), so the reference names no host path and `bin/java-check`'s readers (`src_of`; `java.check/src-file`) find
+it as `DIR/REL`. The library files keep their packages in the renamed tree (`jdk/test/lib/RandomFactory.java`, `rename`'s rule
+for a file with a package); a library file of the unnamed package goes into the test's package as the test's own. The JDK's runs
+(`record_runs`) compile and run the same tree. One difference from the survey's step 1, decided here: the libraries' files are
+part of each test's source set and read with it (the read level's cache is per source set, as javac's `-verbose` lists them),
+not a forms tree per library on `ARBACE_PATH`; the forms are the same, the cost is a library file read once per distinct source
+set (JCS339 proposes the shared tree if the night's times call for it).
+
+**JCS331 (a), the runner.** `test/java/runner/`, Java written clean-room from the frameworks' documentation (TestNG's, JUnit 5's
+user guide and API documentation, JUnit 4's API documentation), not their code: `org.arbace.jtreg.Runner` (about 840 lines) and
+source-compatible subsets of the APIs the corpora import, `org.testng` (Assert with its overloads, the annotations, SkipException,
+TestException, ITestContext, ITestResult, IRetryAnalyzer), `org.junit.jupiter.api` (Assertions with JUnit 5's primitive and boxed
+overloads, Assumptions, Test, BeforeAll/AfterAll/BeforeEach/AfterEach, Disabled, DisplayName, Tag, TestInstance, TestMethodOrder,
+MethodOrderer, Order, RepeatedTest, Timeout, TestInfo, function.Executable and ThrowingSupplier), `org.junit.jupiter.params`
+(ParameterizedTest; MethodSource, FieldSource, ValueSource, CsvSource, EnumSource, NullSource, EmptySource, NullAndEmptySource,
+Arguments), `org.opentest4j` (AssertionFailedError, TestAbortedException, TestSkippedException) and JUnit 4's `org.junit` (Test,
+Before, After, BeforeClass, AfterClass, Ignore, Assert, function.ThrowingRunnable), 66 files. Of the java.util corpora's 204
+framework tests, every framework import but one (JUnit 5.11's FieldSource, added) was in the subset, and the JDK's javac compiles
+247 of the 249 planned library and framework tests against it (the 2, FieldSource's and JUnit 4's, added since: their runs pass on the JDK, 222 and 6 test methods; 6 are
+skips: a module-qualified `@build`). `@run testng C` and `@run junit C` become the main action `org.arbace.jtreg.Runner testng C`
+(`junit C`; C the test's class when the action names none, renamed as a main class is), and the plan builds the runner's class
+(`build org.arbace.jtreg.Runner`) with the runner's directory as a source root; the reference names its files `ROOT:test/java/
+runner/...` (`src_of`, `java.check/src-file`: the checkout's). The runner names no framework class: it finds the annotations by
+their types' names and reads their elements by reflection, so a test's source set holds only the API files the test imports
+(and the runner). TestNG: one instance, `@BeforeSuite`/`@BeforeTest`/`@BeforeClass` (superclass first), the test methods by
+`priority` then name, `dependsOnMethods`/`dependsOnGroups` (a dependent of a failed or skipped test skipped unless `alwaysRun`),
+`@DataProvider` rows (Object[][], Object[], Iterator, Iterable; `dataProviderClass`), the injected Method, ITestContext and
+ITestResult parameters, `expectedExceptions` with `expectedExceptionsMessageRegExp`, `invocationCount`, `enabled`, a class-level
+`@Test`, SkipException a skip, `@Factory` a failure (not supported). JUnit 5: PER_METHOD (an instance a test) or PER_CLASS,
+`@BeforeAll`/`@BeforeEach` superclass first and the `After` ones subclass first, the default order by the name's hash code then
+the signature (JUnit's "deterministic but intentionally nonobvious"; MethodName, OrderAnnotation and DisplayName by
+`@TestMethodOrder`), `@RepeatedTest`, `@ParameterizedTest`'s sources with JUnit's implicit String conversions, TestInfo,
+`@Disabled`, a TestAbortedException a skip; `@TestFactory`, `@TestTemplate` and extensions a failure. JUnit 4 when the class has
+`org.junit.Test` methods (jtreg runs them under `@run junit` too). The verdict is jtreg's: the run fails (an AssertionError out
+of main, status 1) when a test or a configuration method failed or no test ran; the summary is printed, not compared
+(`verdicts.edn`: `:status`, "the framework runner's"). Both sides run the same runner (survey step 3), so a test's two runs are
+of one harness; a change to the runner changes every framework test's source set and class files, and their reference lines
+are recorded again (`bin/java-check --record-ref --only $'category\tframework'`). The runner's own negative controls:
+`test/java/runner-test.bash` runs ten fixtures (`test/java/runner-test/`: TestNG, JUnit 5 and JUnit 4 classes that pass, and that
+fail by a test, an expected exception not thrown, a configuration or container failure, no test) and holds each status to
+`expected.txt`; `--jdk` on the JDK (by hand), else on Arbace as the interp level runs a test.
+
+**JCS332 (a), the corpora.** `:java-util-lib` and `:java-util-framework` (areas `jdk/java/util/`; categories `:run-lib`,
+`:framework`; `:base` the plain corpora's three): 51 and 204 tests. java.net.http's (the survey's first area) take none: its
+`TEST.properties` gives every test java.net.http's internal packages as `@modules` (`jdk.internal.net.http.common` and 17 more),
+jtreg compiles the library with them (the JDK's javac refuses `HttpServerAdapters.java` without them: "package
+jdk.internal.net.http.common is not visible"), so all 373 of httpclient's library and framework tests are `:run-modules` at their
+base (JCS334). No reference line is committed by day: `bin/reap` holds every level's record to the reference's tests, and the
+compiled level is the night's; the night records the two corpora whole (the commands in the journal's entry).
+
+**JCS333 (a)**: `othervm` is a run mode the check takes (`run-mode-ok?`, as before): ignored.
+
+**Measured by day** (a sample of 30 of the 255: every tenth framework test and every sixth library test; the JDK's reference by
+`--record-ref --only`, 145 s with 2 jobs; the levels on the newest executable there was, the gate's of 2026-11-08 05:40, and
+javac's tool of 02:23, both older than java-night's F9 and F14):
+
+| level | sample | result |
+|---|---|---|
+| the JDK | 30 | 29 pass, 1 skip (GathererTest: a module-qualified `@build`) |
+| read | 29 | 29 pass |
+| classes | 29 | 29 pass, and 29 of 29 the JDK javac's class files (the oracle tier's row) |
+| interp | 29 | 1 pass (UUIDTest, jdk.test.lib.RandomFactory), 28 load-failed: the 20 framework tests on `Method.getDeclaredAnnotations` (F14, java-night 2026-11-08 16:36, not in that executable), 8 library tests on `Files.mismatch` (jdk.test.lib.Asserts; F9's java.nio.file, java-night 15:43) |
+| runner-test | 10 | 10 of 10 on the JDK; on Arbace the same F14 load failure |
+
+So by day the libraries and the runner are proved on the JDK and at read and classes; interp waits for the night's build of
+java-night (F9, F14). Nothing of the existing tests' rows changed: `--record-ref --only` kept the reference's 4,853 other lines
+byte for byte, `test/java/corpora-test.bash` 10 of 10, `test/java/timeouts-test.bash` 36 of 36.
+
+### Proposed (JCS334-JCS339)
+
+- **JCS334** java.net.http's tests (373 library and framework tests, all `:run-modules` by their `TEST.properties`): (a) admit
+  `@modules` entries `java.net.http/PKG` as JCS136 (a) admits `java.base/PKG` (javac's and java's `--add-exports`, the REPL world
+  making those packages visible, `jdk/repl-exports.txt` per module), in a corpus `:java-net-http-lib`/`-framework` with `:base`
+  `:run-modules` admitted, after JCS254 (b)'s client is in the night's build; (b) leave them out. *Recommended: (a)*, once the
+  night records JCS254's 8.
+- **JCS335** System properties in the actions (`@run testng/othervm -Dk=v C`; `:run-vmopts` whose options are only `-D` and the
+  dropped JIT ones): 164 more library and framework tests in java/util (17), java/lang (39), java/net (79), java/nio (16), java/io
+  (10), java/text (3). (a) admit them in the library and framework corpora (run.ae sets `-D` properties already; record_runs
+  passes them to java); (b) not now. *Recommended: (a)*.
+- **JCS336** Plain module names in `@modules` (`java.logging`, `java.prefs`: a module the test needs, no export): 172 more (java/util
+  49, java/lang 62, java/text 25, java/net 19, java/nio 12, java/io 5). (a) satisfied when the world has the module (no option); (b)
+  not now. *Recommended: (a)*, in the new corpora only (the plain corpora's `:run-modules` stay as recorded).
+- **JCS337** The next areas, one a night each, the same rules: java/lang (271), java/nio (135), java/net (102), java/text (82), java/io
+  (74). (a) yes, after java.util's night is classified; (b) all at once. *Recommended: (a)*.
+- **JCS338** The gate: the new corpora as parts of the Java level steps (`test/gate/steps.edn`'s `:parts`, `{:part java-util-lib}`
+  `{:part java-util-framework}`) and `test/java/runner-test.bash` as an essential step (the runner's negative controls, about 20 s
+  on stage 0 and the executable): (a) both, at the night that records the corpora; (b) the parts only. *Recommended: (a)*.
+- **JCS339** The libraries' forms read once per library (the survey's step 1: a forms tree per library and source digest on
+  `ARBACE_PATH`) instead of with each test's source set: (a) when the night's read level shows the libraries' share above a fifth
+  of the new corpora's read time; (b) keep the source sets as built. *Recommended: (b)*, (a) on that measurement. Beside it,
+  `TEST.properties`' `TestNG.dirs` (java/util/stream's test and boottest trees, whose tests have no `@run`: TestNG classes run by
+  the directory's rule) is not read: their tests are `:run-plain` with a main that does not exist, the JDK's record a failure.
+
+## Decided (the user, 2026-11-09, about 11:10): JCS334 (a), JCS335 (a), JCS336 (a), JCS337 (a), JCS338 (a), JCS339 (b)
+
+As the proposals recommend: java.net.http's library and framework tests with their `@modules` exports; `-D` system properties in
+the library and framework corpora; plain module names satisfied when the world has the module, in the new corpora only; the next
+areas as new corpora, one a night (all defined now, ordered by `:night`); the new corpora as parts of the Java level steps and
+`test/java/runner-test.bash` as an essential step, switched on the night that records them; the libraries' forms read with each
+test's source set, as built.
+
+## As built: JCS334-JCS339 (2026-11-09; branch `java-testlib2`, from `java-testlib` e3362e4ed)
+
+**The new corpora's own rules ("wide").** `java.check/categorize`'s `:base` (what the library and framework corpora judge a test
+by, JCS330 (a)) is computed in a wide mode; the category itself, and so every plain corpus, is computed as before. `bin/java-check
+scan` at the file's `:night 1` assigns every test of the plain corpora the same category and corpus as java-testlib's (the only
+differences are java.util's own library and framework tests, and the ids of tests not yet recorded, which are given in key order
+at the recording).
+
+**JCS334 (a).** `jdk/repl-exports.txt` takes lines `MOD/PKG`: java.net.http's fifteen internal packages that httpclient's
+`TEST.properties` names (`jdk.internal.net.http` and `.common`, `.frame`, `.hpack`, `.websocket`, and the HTTP/3, QUIC and QPACK
+ones, which JCS254 (b) left out of the world: a test using them fails at its load) and java.base's five that the same file names
+(`jdk.internal.util`, `sun.net.www.http`, `sun.net.www`, `sun.net`, `jdk.internal.net.quic`). The plain corpora read the unprefixed
+lines only (JCS136's, JCS142's); the wide mode admits a prefixed line's entry, and the plan gives it as
+`--add-exports=MOD/PKG=ALL-UNNAMED` to javac (the JDK's and Arbace's) and to java (`record_runs`). j2g's `repl-visible?` takes the
+package of a prefixed line, so the REPL's world makes those packages' public members visible (the executable's member tables grow
+by them: the night's build). The corpora `:java-net-http-lib` and `:java-net-http-framework` (test/jdk/java/net/httpclient) are
+night 2's. jtreg's `:open` and `:+open` entries (`java.net.http/jdk.internal.net.http.qpack:+open`, 9 tests) stay `:run-modules`.
+
+**JCS337 (a), the nights.** `test/java/corpora.edn` has a top-level `:night` (1: java.util's two, java-testlib's) and each new
+corpus a `:night N`; `java.check/active-corpora` gives the scan the corpora whose night has come (`JAVA_CHECK_NIGHT` overrides the
+file by hand, for a sample whose reference lines are not committed). Until its night a corpus's tests take no id. The order:
+
+| night | corpora | tests (day's world) | with the night's conversion |
+|---:|---|---:|---:|
+| 1 | java-util-lib, java-util-framework | 67 + 226 | 67 + 226 |
+| 2 | java-net-http-lib, java-net-http-framework | 5 + 50 | 41 + 295 |
+| 3 | java-lang-lib, java-lang-framework | 64 + 252 | 64 + 252 |
+| 4 | java-nio-lib, java-nio-framework | 77 + 75 | 77 + 75 |
+| 5 | java-net-lib, java-net-framework (httpclient excluded) | 104 + 79 | 111 + 80 |
+| 6 | java-text-lib, java-text-framework | 5 + 80 | 5 + 80 |
+| 7 | java-io-lib, java-io-framework | 20 + 64 | 20 + 64 |
+
+("with the night's conversion": java.net.http, jdk.httpserver and java.security.jgss in jdk/forms, which the night's `bin/jrt-convert
+update` of JCS254 (b), F24 and JCS230 writes; java.util's 255 of java-testlib became 293 with JCS334-JCS336: +5 by java.base's
+`jdk.internal.util`, +17 by `-D`, +16 by plain module names.)
+
+**JCS335 (a).** In the wide mode a main action's `-D` options (`-Dk=v`, `-Dk`) count with the dropped JIT ones (the test is
+`:run-jitopts` at its base). They travel as data: the plan's `props I -Dk=v...` lines (`run-props`: `-Dk` written `-Dk=`, the same
+empty value java gives it; a property naming jtreg's `${...}` is a skip, as an argument is), `rename`'s `props.tsv`, `record_runs`
+(java's options before the class), the reference's run `:props` (only when there are some: every existing line byte for byte),
+the check's plan and `run_actions` (to `test/java/run.ae` as `-D` before `--`, at interp and compiled). Runs differing only by
+their properties stay two (the dedup key has them).
+
+**JCS336 (a).** `java.check/module-in-world?`: a module is in the world when some of its API is, one of the packages its
+`module-info.java` (jdk26u's `src/`, beside the tests at the platform's pin) exports unqualified, or, for a module exporting none,
+one of the service classes it provides (jdk.zipfs, jdk.charsets, jdk.localedata), having forms in `jdk/forms`; java.base always. A
+plain entry of such a module is satisfied with no option in the wide mode. "Some of" and not "all of" (JCS340 proposes the
+alternative): java.management, java.naming and java.xml are in the world in part, and a test that touches a missing part fails at
+its load in that part's class. Today in: java.logging, java.sql, java.naming, java.management, java.scripting, java.xml,
+jdk.security.auth; out: java.prefs, jdk.localedata (21 java.util tests), jdk.zipfs, jdk.charsets, jdk.unsupported, jdk.compiler,
+jdk.jartool.
+
+**JCS338 (a), written as the night's step.** `test/java/night-corpora.bash N [--dry]`: raises corpora.edn's `:night` to N and
+appends night N's corpora as `{:part ID}` to java-read, java-interp, java-classes, java-compiled-full and java-print (a part
+without a `:subset-interp` is not rotated: run whole); the first time, the essential step `java-runner-test` (`env
+JAVA_CHECK_EXE=$GATE_EXE test/java/runner-test.bash`, chain java-essential, `:hosts [:prog]`, 1 GiB) after java-check-judge, and
+`test/java/runner-test.bash --forms verify` in java-forms-verify. Idempotent; `bin/gate --full --plan` after the switch of night 1:
+exit 0, `java-runner-test` and the ten parts planned. The essential step needs no javac's tool: `runner-test.bash` runs from
+committed forms (`test/java/runner-test/forms/`, the ten fixtures and the runner, 86 files, read by repr/java on javac's tool
+`5ad357331dbc`; `--forms update|verify`, verify byte for byte with the provenance's host apart, a changed file failing it; `--read`
+the fresh read as before; `--jdk` the JDK's). On the day's gate executable (`ad3066cf41ea`, before F14) the ten load-fail on
+`Method.getDeclaredAnnotations`, as java-testlib measured: the step passes on the night's build.
+
+**JCS339 (b)**: the libraries' files stay part of each test's source set (as built); JCS339 (a) on the night's measurement.
+
+**Measured by day** (the JDK of jdk26u's build as the oracle, `JAVA_CHECK_NIGHT=7 bin/java-check --record-ref --only` on 31 new
+tests, one job: 740 s, then 86 s for the four the fixes touched):
+
+| corpus | sample | the JDK |
+|---|---:|---|
+| java-util-lib, -framework | 6 | 4 pass; DateFormatSymbolsProviderTests a skip (a module-qualified `@build`); CalendarDataProviderTest fails (a locale provider SPI on the class path: `firstDayOfWeek: got='1', expected='4'`) |
+| java-net-http-lib, -framework | 6 | 4 pass (CertificateTest, WebSocketEndiannessTest, the two qpack tests, among them the `-D` ones); AltSvcFrameTest and AltSvcRegistryTest skips (module-qualified `@build`, a patch of java.net.http) |
+| java-lang-lib, -framework | 5 | 3 pass (GetModuleTest, VarHandleTestAccessByte, VirtualThreadDeadlocks#default); TestEmojiProperties fails (an ExceptionInInitializerError reading its data); AllowSecurityManager fails (`test.jdk` not set: JCS341) |
+| java-nio-lib, -framework | 4 | 4 pass (EqualsCompareTest, AdaptorMulticasting, Disconnect, SendPortZero) |
+| java-net-lib, -framework | 3 | 2 pass (ConnectPortZero, SetGetSendBufferSize); B4921848 times out on both runs (two runs differing only by their `-D` properties, kept two: `http.auth.preference=basic`, then with `java.net.preferIPv6Addresses=true`) |
+| java-text-lib, -framework | 3 | 2 pass; StrictParseTest a skip (JUnit's `org.junit.jupiter.api.condition`, not in the runner's subset) |
+| java-io-lib, -framework | 4 | 1 pass (Write); RedirectTest fails (`test.jdk`: JCS341); SetAccess fails (`jtreg.SkippedException`: run as root, JCS342); SerialFactoryExample fails (its string literals name its classes unrenamed, `"SerialFactoryExample$Point"`: the renaming's, JCS343) |
+| all | 31 | **20 pass, 7 fail, 4 skips**; 14 of the 31 have `-D` properties, 4 were chosen for their plain module names (java.logging, java.sql) |
+
+The sample found two faults of the day's code, fixed in their own commit: a `-D` value naming a class of the test's unnamed-package
+files is renamed with them (t08466's `jdk.serialFilterFactory=SerialFactoryExample$FilterInThread` becomes `ID.SerialFactoryExample$FilterInThread`,
+as a main class is); and the runner took a factory's `Object[]` row as one argument when the method has one parameter, where JUnit 5
+spreads every one-dimensional reference array (and passes a multidimensional one whole): IntegerReaderMaxValuesTest went from 14
+failures to a pass (JuPass gains both cases; the old runner fails it). The levels are not measured by day: the day's gate executable
+predates F14, on which every framework test and the runner's self-test load-fail (java-testlib's measurement).
+
+No reference line is committed (as java-testlib: `bin/reap` holds every level's record to the reference's tests, and the levels
+are the night's); the sample's lines are kept in the worktree as `.tmp/sample-ref-lines.edn`, and the committed
+`test/java/ref-jdk26.edn` is java-testlib's byte for byte.
+
+**The night's commands** (after java-testlib's night 1 and the night's build of java-night: JCS254's client, F9, F14, F24's
+httpserver, JCS230's Kerberos permissions converted; JAVA_CHECK_EXE its executable, REPR_JAVA_EXE its javac tool; heavy ones under
+`bin/heavy-lock`). For night N (2 to 7, one a night):
+
+    test/java/night-corpora.bash N                                                 # :night N, the parts (and at the first, java-runner-test)
+    test/java/runner-test.bash --forms verify || test/java/runner-test.bash --forms update   # the night's tool may read them anew
+    test/java/runner-test.bash                                                     # 10 of 10 expected
+    bin/java-check --record-ref --jobs 8 --only $'corpus\tCORPUS-(lib|framework)$'  # CORPUS java-net-http, java-lang, ...
+    bin/java-check verdicts
+    bin/java-check --levels read,interp,classes,print --corpus CORPUS-lib,CORPUS-framework --record
+    bin/heavy-lock bin/java-check --levels compiled --corpus CORPUS-lib,CORPUS-framework --record
+    bin/reap; bin/crops-score --judge --strict                                     # then class the new failures
+    bin/gate --full --plan                                                         # the parts planned; commit corpora.edn, steps.edn, the records
+
+If night 1 (java.util) runs from this branch rather than java-testlib, its first line is `test/java/night-corpora.bash 1` (the
+corpora's `:night` is already 1: it adds the parts and java-runner-test).
+
+**Risks and reverts.** (1) j2g's member tables with java.base's five and java.net.http's packages visible: a larger executable,
+or a j2g refusal naming one of them: revert `jdk/repl-exports.txt`'s prefixed lines and main.ae's hunk (JCS334's commit);
+java.net.http's corpora then take only what needs none of them. (2) A plain corpus's test changing category or corpus in the
+night's scan: none by day; if one does, the wide mode leaked: revert JCS334-JCS336's check.ae. (3) A `-D` test that differs
+between the JDK and Arbace only by its property: the property is set on both sides; look at run.ae's `-D` handling first. (4)
+`java-runner-test` failing on the night's build: the runner's own (F14); take the step out (`steps.edn`), keep the corpora.
+
+### Proposed (JCS340-JCS342)
+
+- **JCS340** The world's modules (JCS336 (a) as built: a module is in when *some* of its API has forms). (a) as built; (b) only
+  when *every* unqualified exported package has forms: java.management, java.naming and java.xml (in part in the world) out, and
+  java.security.jgss out (2 of its classes), which takes all 336 java.net.http tests out with it (their TEST.properties names it).
+  *Recommended: (a)*: a test touching a missing part fails at its load, in that part's class.
+- **JCS341** jtreg's standard system properties: jtreg gives every run `test.jdk`, `test.root`, `test.name`, `test.file`,
+  `test.vm.opts`, `test.java.opts`, `test.class.path` beside `test.src`/`test.classes`; jdk.test.lib reads them (the sample's two
+  `test.jdk` failures: ProcessTools and JDKToolFinder). (a) set them on both sides (`test.jdk` the JDK's home on the reference, on
+  Arbace a path that is no JDK: a test that launches a JVM fails into the by-design class it would anyway), an hour; (b) leave the
+  JDK's failures as recorded. *Recommended: (a)*.
+- **JCS342** `jtreg.SkippedException` (jdk.test.lib's, thrown by a test that cannot run here: SetAccess as root): jtreg reports such a
+  test as skipped, the check's JDK record as failed. (a) `record_runs`/`gather`: a run whose stderr's first line is an uncaught
+  `jtreg.SkippedException` records the test `:skip` with its message (on Arbace the same exception judged alike, the verdict's
+  `:status`); (b) as is. *Recommended: (a)*, with JCS341.
+- **JCS343** String literals naming a test's own classes (`"SerialFactoryExample$Point"` for a serialization filter): the renaming
+  into `package ID` breaks them on both sides. (a) a by-design class of the renaming (`:renamed-names`), the JDK's failures
+  recorded as they are; (b) rename such literals in the source set (a lexical pass over string literals equal to a class's
+  binary name), risky for literals that only look like names. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-09, about 14:20): JCS340-JCS343, JCS357, JCS358
+
+As recommended: JCS340 (a) (as built: a module is in the world when some of its API has forms), JCS341 (a), JCS342 (a),
+JCS343 (a); and doc/classes/JAVA-DEFERRED-TRIAGE.md's JCS357 (b) and JCS358 (b) (as built). With them the user's ruling of the same
+day on the crop's independence: the platform's class files are a toolchain's product, 0.5 (doc/CROPS-SCORE.md, "Decided (the user,
+2026-11-09)"; `test/crops/independence.edn`'s Java entry). Built on the branch `java-indep` (from `java-night` f4be0ea61, with
+`java-testlib2` 3185e9d98 and `java-invoke2` 3abb92b82 merged).
+
+## As built: JCS340-JCS343, JCS357, JCS358 (2026-11-09; branch `java-indep`)
+
+**JCS340 (a), JCS357 (b), JCS358 (b)**: as built, nothing to change (java-testlib2's `module-in-world?`; java-invoke2's
+constructors and their annotation records).
+
+**JCS341 (a).** `bin/java-check`'s `jtreg_props JDKHOME BASE PATH CLS` gives every main action jtreg's other standard properties
+beside `test.src` and `test.classes`, on both sides: `test.jdk` (the reference's: the JDK's home, `JAVA_CHECK_JDK`, which the
+reference's messages already mask as `${JDK}`, CSP5; Arbace's: `WORK/no-jdk`, a path that is no JDK, so a test that launches a JVM
+or a JDK tool fails into the class it would anyway, `:jvm-tools`), `test.root` (the directory of the `TEST.ROOT` above the test's
+file: `test/jdk`, `test/hotspot/jtreg`, `test/langtools`; for Arbace's own `test/java/jls` programs, which have none, the file's
+directory), `test.name` (the file's path from `test.root`, without a `#id`: jtreg's name of a test in a file with several `@test`
+blocks carries it; none of the corpora's tests reads it), `test.file`, `test.vm.opts` and `test.java.opts` (empty: the check
+gives a run no VM options), `test.class.path` (test.classes). The reference's side in `record_runs`, Arbace's in `run_actions`
+(interp and compiled); the plans are unchanged (the reference's from its `root` and `path` lines, the check's from `test` and
+`root`).
+
+Measured by day: of the committed reference's 4,853 tests, 9 name one of these properties in their main file (a
+`getProperty("test.…")`); recorded again by the JDK (`--record-ref --jobs 2 --only` the nine, 77 s), two change:
+t07740 (`jdk/build/releaseFile/CheckReleaseFile.java`) and t08311 (`jdk/tools/jlink/ReleaseImplementorTest.java`), both a
+`NullPointerException` on `test.jdk` before, now pass on the JDK (they read the JDK's `release` file); the other seven are
+`java.util.logging` tests whose "test.name" is a key of their own `Properties`, unchanged byte for byte. The two lines are **not
+committed**: a test the JDK passes needs a row at every level (read, interp, classes, print and compiled, the last a j2g run), so
+they are the night's (below); `test/java/ref-jdk26.edn` is `java-night`'s byte for byte. On Arbace both will fail for the JDK's
+`release` file under `test.jdk` (the class `:jvm-tools`). The library corpora of java-testlib's nights (`jdk.test.lib`'s
+`Utils.TEST_JDK`, `ProcessTools`, `JDKToolFinder`) take the properties from their first record on.
+
+**JCS342 (a).** The reference: `java.check/gather` records a test whose first failing run's stderr begins with an uncaught
+`jtreg.SkippedException` as `:skip`, its why the exception's line (`jtreg.SkippedException: MESSAGE`), so it is not run on
+Arbace (only the JDK's passes are). Arbace: `judge_own` (every `:status` and golden verdict) judges a run whose stderr's first line
+is an uncaught `jtreg.SkippedException` as `skip` with that line, and `test/java/divergences.edn`'s first class, `:jtreg-skip`
+(`:harness-design`, `:results [:skip]`), takes it: the test's own verdict is that it did not run here. No committed reference
+line is a `SkippedException` today (the sample's SetAccess is java-testlib2's, uncommitted).
+
+**JCS343 (a).** `test/java/divergences.edn`'s class `:renamed-names` (`:harness-design`, `:tests []`): a string literal naming the
+test's own class by its unrenamed binary name breaks on both sides; the JDK's failure is recorded as it is (no Arbace row), and a
+test the JDK passes in spite of it and Arbace does not is named there by id.
+
+**The platform, JCS359's first step (decision-free tooling).** `bin/javac-vendor classes modules` (`JAVAC_VENDOR_MODULES` some):
+each of the platform's 68 modules compiled by javac on Arbace as the JDK build compiles it, its batch's file list and options
+(`module_opts`: the build's `_the.MODULE_batch.cmdline` split as its shell split it, less the diagnostics' and the javacserver's
+options; 63 modules take java.base's options but `-XDstringConcat=inline`, four with it, jdk.internal.vm.ci `-source 25
+-parameters`), from jdk26u's sources and the build's generated ones (`--module-source-path`, `--system none`: no class file
+read), against the build's class files byte for byte but `module-info.class`; no JVM. `WORK/classes/modules/summary.tsv`. By day
+(javac's tool `javac-5ad357331dbc`, `GOMEMLIMIT=1800MiB`): java.logging 54 classes **equal** (11.5 s, 1.53 GB peak); jdk.zipfs 36
+and java.prefs 25, **one class each differs**: `ZipFileSystem$2` and `FileSystemPreferences$2`, an anonymous class's method whose
+LocalVariableTable names the parameters `arg0, arg1, ...` in the build and by their source names on Arbace (the build's javacserver
+compiles with a shared compiler, the interface's method entered from a class file without names; javac on Arbace, from source
+alone, has them): JCS360. 56 s for the three.
+
+**Light checks** (`ARBACE_HOST_EXE` main's stage 0; the gate's executable of `next` 6c3c87c02,
+`.tmp/gate-exe/b3aec1226e1382a8f40b`): `bin/java-check --essential --jobs 3` before and after the classes, 428 of 428 as recorded,
+0 regressions, the three controls failing as they must (105 s); `bin/reap`: 41 of 44 cells checked, 0 problems; `bin/crops-score
+--judge --strict`: 0 problems. `bin/crops-score --crop java`: 59.7% before and after (read, eval, AOT, print 0.5; judge 0.986):
+nothing here moves it, by the ruling; JCS359 does.
+
+**The night's commands** (heavy ones under `bin/heavy-lock`; after the Java night's build, `JAVA_CHECK_EXE` its executable,
+`REPR_JAVA_EXE` its javac tool):
+
+    # JCS341's two tests: the JDK's runs, the verdicts, then the five levels (compiled a j2g shard: heavy); about 10 minutes, 2 GiB
+    bin/java-check --record-ref --jobs 2 --only 't0(7740|8311) '
+    bin/java-check verdicts
+    bin/java-check --levels read,interp,classes,print --only 't0(7740|8311) ' --record
+    bin/heavy-lock bin/java-check --levels compiled --only 't0(7740|8311) ' --record
+    bin/reap; bin/crops-score --judge --strict     # t07740 and t08311 expected in :jvm-tools
+    # JCS359's measure: every module by javac on Arbace against the build's classes; serial, about 40-90 minutes, peak
+    # estimated 4-8 GiB (java.base, java.desktop, jdk.localedata); nothing committed
+    GOMEMLIMIT=6GiB JAVAC_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac \
+      bin/heavy-lock bin/javac-vendor --work .tmp/jv classes modules
+    cat .tmp/jv/classes/modules/summary.tsv
+
+### Proposed (JCS359-JCS361)
+
+- **JCS359** An own platform, which the ruling's 0.5 waits for: today javac on Arbace attributes against the JDK build tree's
+  exploded modules (`jdk/javac/platform.sha256`), and every stage's forms are made against them. (a) The platform made by Arbace and
+  consumed in its place: (1) every module's class files by javac on Arbace (`classes modules`, built; the night's measure first);
+  (2) the generated sources of the 16 modules that have some (`support/gensrc`: java.base 236 files, java.desktop 299, jdk.localedata
+  1,532, jdk.charsets 107, jdk.compiler 21 and 11 small ones) generated on javac's tool by the build's own tools, as `bin/jrt-convert`'s
+  generate step already does for java.base's closure (JN7) and `bin/javac-vendor convert` for jdk.compiler's (JFS48 (b), JFS52 (b)),
+  each compared with the build tree's; (3) the module descriptors as the image holds them (the build's `AddPackagesAttribute`, the
+  jmod's version, `ModuleTarget` and `ModuleHashes`) written by the build's tools on the tool, or by `jrt.classfile` with a writer;
+  (4) `bin/javac-vendor platform --own`: the platform assembled from (1)-(3), pinned by its class files (`platform-own.sha256`,
+  resources apart: javac reads only class files), made once per key and kept beside javac's tool (`ARBACE_GATE_EXES`), the steps of
+  read, interp, compiled and print on it. Then read, eval, AOT and print score 1: Java 59.7% → 99.7%. Days of work: (1) is built, (2)
+  the larger part (the CLDR converter and the charsets' generators run for java.base already), (3) a few hours, (4) a day with the gate's
+  wiring; the forms against the own platform must equal today's (`bin/jrt-convert verify`, `bin/repr-java check --jdk`'s hashes, the
+  read level's cache) or the differences be JCS360's. (b) (1) and (4) with the build tree's generated sources and descriptors copied,
+  their provenance recorded: still a consumed toolchain product, 0.5 by the header's rule: a waypoint, no gain. (c) As is.
+  *Recommended: (a)*, staged, (1)'s night measure first.
+
+**Measured 2026-11-10 (day)** (JCS359 (a)(1), javac's tool `javac-5ad357331dbc`, `GOMEMLIMIT=1800MiB`, one module a run, `bin/javac-vendor classes modules`, `JAVAC_VENDOR_MODULES` one module; serial, about 12 minutes of runs; java.logging, jdk.zipfs and java.prefs above are not repeated). Every module's peak stayed under 1.8 GB (java.net.http 1.78 GB, java.sql.rowset 1.77 GB, java.xml.crypto 1.74 GB).
+
+| module | files | classes | by javac on Arbace | result | ms | peak MB | differing classes |
+|---|---|---|---|---|---|---|---|
+| jdk.nio.mapmode | 3 | 1 | 1 | equal | 9392 | 1061 |  |
+| java.transaction.xa | 5 | 3 | 3 | equal | 10226 | 1050 |  |
+| jdk.editpad | 3 | 3 | 3 | equal | 16464 | 1517 |  |
+| jdk.internal.ed | 3 | 3 | 3 | equal | 10357 | 1077 |  |
+| java.instrument | 10 | 10 | 10 | equal | 9637 | 1087 |  |
+| jdk.unsupported.desktop | 8 | 11 | 11 | equal | 16542 | 1497 |  |
+| java.scripting | 14 | 12 | 12 | equal | 9395 | 1105 |  |
+| jdk.unsupported | 9 | 12 | 12 | equal | 10018 | 1109 |  |
+| jdk.naming.rmi | 8 | 12 | 12 | equal | 11761 | 1190 |  |
+| jdk.jstatd | 11 | 13 | 13 | equal | 10904 | 1135 |  |
+| jdk.net | 9 | 14 | 14 | differ | 10793 | 1098 | `ExtendedSocketOptions$1` |
+| jdk.security.jgss | 16 | 15 | 15 | equal | 12889 | 1241 |  |
+| jdk.attach | 15 | 18 | 18 | equal | 10327 | 1122 |  |
+| jdk.management.jfr | 15 | 20 | 20 | equal | 11902 | 1322 |  |
+| java.management.rmi | 16 | 22 | 22 | equal | 12607 | 1382 |  |
+| jdk.accessibility | 18 | 22 | 22 | equal | 19307 | 1530 |  |
+| java.datatransfer | 18 | 24 | 24 | equal | 11017 | 1122 |  |
+| jdk.naming.dns | 16 | 25 | 25 | equal | 10752 | 1238 |  |
+| jdk.security.auth | 30 | 25 | 25 | equal | 14972 | 1495 |  |
+| java.smartcardio | 22 | 31 | 31 | equal | 10316 | 1187 |  |
+| java.security.sasl | 30 | 34 | 34 | differ | 11008 | 1220 | `NTLMServer$1` |
+| jdk.management.agent | 30 | 41 | 41 | differ | 13536 | 1486 | `LocalRMIServerSocketFactory$1` |
+| jdk.management | 29 | 45 | 45 | equal | 10577 | 1272 |  |
+| jdk.sctp | 33 | 45 | 45 | equal | 10560 | 1169 |  |
+| jdk.jcmd | 41 | 51 | 51 | equal | 11592 | 1175 |  |
+| java.sql.rowset | 56 | 53 | 53 | equal | 39680 | 1724 |  |
+| jdk.internal.opt | 52 | 62 | 62 | equal | 11749 | 1166 |  |
+| jdk.internal.jvmstat | 61 | 66 | 66 | equal | 10947 | 1132 |  |
+| jdk.jartool | 28 | 73 | 73 | differ | 14266 | 1487 | `Main$Hasher$1` |
+| java.sql | 78 | 77 | 77 | equal | 11200 | 1212 |  |
+| jdk.httpserver | 58 | 88 | 88 | equal | 13296 | 1317 |  |
+| jdk.xml.dom | 94 | 89 | 89 | equal | 11269 | 1106 |  |
+| jdk.dynalink | 67 | 90 | 90 | equal | 11937 | 1318 |  |
+| java.rmi | 105 | 136 | 136 | differ | 13102 | 1417 | `SslRMIServerSocketFactory$1` |
+| jdk.crypto.cryptoki | 82 | 151 | 151 | equal | 14427 | 1538 |  |
+| java.naming | 204 | 244 | 244 | equal | 14919 | 1502 |  |
+| jdk.charsets | 125 | 281 | 281 | equal | 12692 | 1425 |  |
+| java.xml.crypto | 272 | 400 | 400 | equal | 19139 | 1699 |  |
+| java.management | 328 | 427 | 427 | differ | 18126 | 1486 | `JMXConnectorFactory$1` |
+| jdk.jdi | 254 | 548 | 548 | differ | 15683 | 1506 | `Commands$AsyncExecution$1`, `VMConnection$1`, `AbstractLauncher$Helper$1`, `AbstractLauncher$Helper$2` |
+| java.net.http | 313 | 712 | 712 | equal | 22413 | 1736 |  |
+
+41 modules, 4009 classes: 34 modules equal, 7 differ, in 10 anonymous classes in all (jdk.jdi 4, listed: `Commands$AsyncExecution$1`, `VMConnection$1`, `AbstractLauncher$Helper$1`, `$2`; one more each in the other six). Cause of every one, checked with `javap -v` on the build's and Arbace's class: the anonymous class's method parameter names in the LocalVariableTable (and their Utf8 constants) are `arg0, arg1, ...` in the build and the source's names (`options`, `descriptor`, `location`, ...) on Arbace, nothing else differs: JCS360's case, as for jdk.zipfs and java.prefs. Not measured (over the day's light budget or larger): java.base, java.desktop, jdk.localedata, jdk.compiler and the other big modules, java.xml, jdk.jfr, jdk.jlink, jdk.jshell, jdk.javadoc, jdk.internal.vm.ci, jdk.graal.compiler, jdk.hotspot.agent and the jdk.crypto.ec, java.se and jdk.graal.compiler.management shells (no or one class). Evidence for JCS360 (a): in 41 measured modules 10 classes of 4,009 differ, all by parameter names of an anonymous class's inherited method.
+
+- **JCS360** Where javac on Arbace's from-source output differs from the build's class files (by day: an anonymous class's
+  LocalVariableTable names, `arg0` in the build, the source's names on Arbace; the night lists all): (a) the own platform is javac on
+  Arbace's output as it is, each differing class listed with its reason in a known file (`jdk/javac/platform-own-known.edn`) and the
+  forms read against it compared with today's; (b) imitate the build's javacserver (names from class files) to be byte for byte.
+  *Recommended: (a)*: the difference is debug information the forms do not read; (b) would copy an accident of the build's server.
+- **JCS361** The judge's last 0.014: the 207 `:stdout` tests judged by the JDK's recorded stdout (`verdicts.edn`). (a) JCV2's way
+  extended: a golden file reviewed against the specification for each whose output the API specifies, the rest kept; (b) as is.
+  *Recommended: (b)* until JCS359 (0.3 of a point of independence; the review costs days).
+
+## Decided (the user, 2026-11-10, about 10:30): JCS359-JCS378, JCV10 (b)
+
+The plan for JCS359 (`.tmp/plans/JCS359-PLAN.md`, 2026-11-10: the own platform in five stages, its proposals JCS362-JCS369) and
+the Java 90 plan (`.tmp/plans/JAVA-90-PLAN.md`, its proposals JCS370-JCS378) were put to the user with JCS359-JCS361 above.
+
+- **JCS359 (a), staged:** the own platform in five stages. (1) every module's class files by javac on Arbace, the build's
+  configuration as data, a known file; (2) the 16 modules' generated sources by the build's own generators on javac's tool;
+  (3) the module descriptors as the image holds them; (4) `bin/javac-vendor platform --own`, the new pin and the switch;
+  (5) the gate's steps, the independence facts and the oracle tier. The score moves only at (4) and (5), 59.7% → 99.7%.
+- **JCS360 (a):** the own platform is javac on Arbace's output as it is; each class that differs from the build's is listed with
+  its reason in `jdk/javac/platform-own-known.edn`.
+- **JCS361:** not changed by this decision. The recommendation (b) (as is until JCS359) stands: the range's one proposal the
+  ruling did not name.
+- **JCS362-JCS369, as recommended:** JCS362 (a) the build's configuration (module options, file lists with their excludes,
+  version strings, the C preprocessor's flags, the jmod flags) derived once into `jdk/javac/platform-build.edn` with each value's
+  origin, re-checked against the build only in the oracle tier; JCS363 (a) a generator that follows the running runtime
+  (`CaseFolding`) gives the platform Arbace's output, listed; JCS364 (a) java.base's `ModuleHashes` left out, listed; JCS365 (a)
+  a content pin, `jdk/javac/platform.sha256` rewritten for the own platform, built on a miss into
+  `ARBACE_GATE_EXES/platform-PIN20`, out of `arbace_javac_key`; JCS366 (a) the build tree read afterwards only by the oracle
+  tier's `javac-platform-oracle`; JCS367 (a) both platforms selectable for one transition night; JCS368 (b) generatenimbus on
+  tool-world variants of the AWT and Swing value classes, measured first; JCS369 (a) the two C-preprocessed sources by
+  repr/c's preprocessor on C's own target.
+- **JCS370-JCS378, as recommended:** JCS370 (a) the record first, from the night's `--full` outputs; JCS371 (b) = **JCV10 (b)**,
+  the ranking by tests freed per missing jrt class, on those records; JCS372 (a) with (b)'s reporting; JCS373 (a) print's 72
+  unnamed class-file differences reviewed; JCS374 (a) the port batches as Java nights, P1 on night 15 after JCS359's measure;
+  JCS375 (a) XML only if P3 leaves Java short; JCS376 (a) the interpreter's speed last; JCS377 (a) javac's API tests at
+  compiled measured in P1's night; JCS378 (a) `--release` through a generated ct.sym after JCS359's stage 5.
+
+## As built: JCS359 stage 1 tooling (2026-11-10; branch `jcs359-s1`, from `java-indep` 02b281c3b)
+
+The tooling only. The 68-module measure is night 15's (JCS374 (a)).
+
+**JCS362 (a): `jdk/javac/platform-build.edn`.** `bin/javac-vendor platform-build` derives the JDK build's configuration from the
+build tree once, about 10 seconds; `platform-build --check` (the oracle tier's re-check) derives it afresh into WORK and
+compares it with the committed file. The file is 61 KB and 448 lines, each line readable by the Clojure reader and laid out so
+that the shell reads it (`pb_get`, `pb_scalar`: a module's name alone on its line, then each field on one line).
+
+- **Origins.** `:origins` gives each value's origin: the batch's command line, the batch's file list, spec.gmk, the two
+  `gcc -E` command lines and the jmod commands.
+- **Placeholders.** Paths use `{gensrc}`, `{src}`, `{build}` and `{jdk}`. `{gensrc}` stays the build tree's `support/gensrc`
+  until stage 2 makes it.
+- **Top-level fields.** `:jdk` (the pin), `:build`, `:roots` (gensrc, linux, unix, share: the build's order), `:version`
+  (spec.gmk's `VERSION_*`), `:cpp` (the 37 flags of `gcc -E`, equal in both command lines; stage 2) and `:modules`.
+- **Each module.** `:options` (javac's, less the diagnostics' and the javacserver's own, as `module_opts` read them); `:exclude`;
+  `:files` and `:files-sha256`; `:jmod` (jmod create's arguments less `-J*` and the output; stage 3).
+- **The sources.** A module's sources are its roots' `*.java` in the build's order, each root sorted, less `:exclude` (74
+  entries in 9 modules: javadoc's snippet-files, files shadowed by an earlier root, the make files' excludes such as
+  java.desktop's 32-bit X11 wrappers and jdk.sctp's unsupported stubs).
+- **Self-check.** The derivation refuses to write a file whose rebuilt list is not the build's list, file for file and in
+  order. Checked separately for all 68 modules: the options from the data equal `module_opts`' from the command line, and the
+  file lists equal the build's.
+
+**`bin/javac-vendor classes modules`** now reads its options and sources from that file, not from the build tree's command lines
+or file lists.
+
+- **Sources check.** A module whose rebuilt list does not match `:files` and `:files-sha256` (jdk26u's checkout moved) fails as
+  `sources`.
+- **No platform assembly.** No platform is assembled for this corpus alone: it compiles with `--system none` and reads no
+  class file.
+- **`--jobs N`.** N modules at once, except that a module of more than `JAVAC_VENDOR_ALONE` files (default 1000: java.base,
+  java.desktop, java.xml, jdk.localedata) runs alone. The peak is the larger of one big module's and N small ones'.
+- **Judgment.** Each class file is compared by SHA-256 with the build's (`build.sums`, `own.sums`, `diffs.tsv`). Each difference
+  is judged against **JCS360 (a)'s `jdk/javac/platform-own-known.edn`** (`JAVAC_VENDOR_KNOWN` names another file). An entry is
+  a module, a class, both digests and a reason. The results:
+  - `known`: a difference listed with both its digests;
+  - `differ` (fails): a difference not listed, or listed with other digests;
+  - `stale` (fails): a listed class that does not differ.
+- **Summary.** `summary.tsv` gains KNOWN, UNEXPLAINED and STALE columns.
+- **Negative controls.** Two, judged again on the run's own results (GTS81 (a)), and either one passing fails the run:
+  - (1) the first known module with one known entry taken away must be `differ`;
+  - (2) a known entry added for an equal class must be `stale`.
+- **The known file** holds the 12 classes measured by day on 2026-11-10 in 9 modules, each `:param-names`. Their digests were
+  taken from that day's kept evidence (`java-indep`'s `.tmp/jv*/classes/modules/MODULE/{build,arbace}`, javac's tool
+  `javac-5ad357331dbc`): jdk.net, jdk.jartool, java.security.sasl, jdk.management.agent, java.rmi, java.management, jdk.jdi ×4,
+  jdk.zipfs and java.prefs.
+
+**Proof (by day, light; javac's tool `javac-5ad357331dbc`, `GOMEMLIMIT=1800MiB`, `--jobs 2`).** Eight small modules, 37 s:
+jdk.net, java.prefs, jdk.zipfs and jdk.jartool `known` (1 class each); java.logging, jdk.nio.mapmode, java.instrument and java.se
+(no class but its descriptor) `equal`. The peak was java.prefs, 1.73 GB. Controls 1 and 2 failed as they must. Exit 0.
+
+An end-to-end negative run used a known file without jdk.net's entry and with an entry for java.logging's equal `Level.class`.
+jdk.net came out `differ` (`unexplained jdk/net/ExtendedSocketOptions$1.class` with both digests) and java.logging `stale`.
+Exit 1.
+
+**Keys.** `bin/javac-vendor` and `jdk/javac/` are in `arbace_javac_key`, so the merge moves it once: one javac tool rebuild at
+the night's gate. `gate_key` and `arbace_runtime_key` are unchanged. The two new files leave that key only at stage 4, with
+JCS365 (a).
+
+**The night's command (night 15, JCS374 (a): before P1's Java night).** All 68 modules with `--jobs 3`. Peak estimate:
+
+- Alone: java.base 3.25 GB (JN3.5), java.desktop 3.5-5 GB, jdk.localedata 3-5 GB, java.xml about 3 GB.
+- Three small ones at once: at most about 3 × 2.5 GB (jdk.hotspot.agent, jdk.compiler) ≈ 8 GiB.
+- So the run's peak is about 8 GiB and one process at most about 6 GiB.
+- Time: about 15-20 minutes, against 30-45 serial.
+
+It runs under `bin/heavy-lock` until its peaks are measured:
+
+    GOMEMLIMIT=6GiB JAVAC_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac \
+      bin/heavy-lock bin/javac-vendor --work .tmp/jv classes modules --jobs 3
+    cat .tmp/jv/classes/modules/summary.tsv     # each module equal or known; every new difference an entry with its reason
+
+Each new difference is read (`javap -v` of both classes, the oracle's JDK, by hand). It becomes a known entry with its reason
+(JCS360 (a)) or a javac on Arbace fix; then the run again until it exits 0.

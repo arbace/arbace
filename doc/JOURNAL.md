@@ -3538,6 +3538,8 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
 
 ## 2026-11-09: RF12's first slice, core's module files through the front end (branch `rust-rf12`, from `mac/next` 3ef7b3f78)
 
+## 2026-11-09 JCS330-JCS333 built: jtreg's libraries and the TestNG/JUnit runs in Java's check (branch `java-testlib`, from `java-night` 9e6160bbb)
+
 ## 2026-11-09 x86-64 assembly as a crop: the survey (branch `asm-amd64-survey`, from `mac/next` `7da5badcf`)
 
 ## 2026-11-09: C++'s programs by Arbace's own route, the refusals' biggest groups closed and the switch prepared (branch `cpp-route`)
@@ -5367,3 +5369,206 @@ holder fields from jrt's hand-written Thread: more coupling than a transcription
 ThreadGroup analyze clean; the Cleaner's PhantomCleanable and DGCClient's PhantomLiveRef fail on "Unknown type: PhantomReference"
 because `jdk/edge.edn` has no entry for it yet (night step 2, `bin/j2g-edge update`). A slip: predict peaked at 4.98 GB, over
 the brief's 2 GiB (the analysis of the whole world), with MemAvailable above 40 GiB throughout and nothing else running.
+
+The user accepted JCS330 (a), JCS331 (a), JCS332 (a), JCS333 (a) as java-props2's survey recommends (~09:30). Built by an agent
+in the light tier; the JDK of jdk26u's build (at the platform's pin) ran by hand as the oracle (`--record-ref --only`). Sources:
+jtreg's tag specification as the survey reads it (`@library`, `external.lib.roots`, `TEST.properties`' `modules` and `lib.dirs`),
+TestNG's documentation, the JUnit 5 user guide and API documentation, JUnit 4's API documentation; jdk26u's `test/lib`
+(jdk.test.lib) and the tests read in place at `baf63fbe42b8`. No framework source was fetched or vendored (none is in the main
+checkout, nor needed): the runner and the API subsets are Arbace's own, clean-room (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As
+built: JCS330-JCS333").
+
+- `java.check`: `categorize`'s `:base` (the category without the libraries and the framework), `corpus-of`'s `:base` filter,
+  `library-dirs` (jtreg's resolution), `with-dir-defaults` (TEST.properties), `run-plan`'s `srcroot` lines and the runner's main
+  action, `rename`'s runner argument, `src-file` (the `ROOT:` names), the framework tests' `:status` verdict.
+- `bin/java-check`: `src_of`/`src_rel`, `record_sources` with the source roots (the old path byte for byte when a test has none).
+- `test/java/runner/` (66 files) and its self-test `test/java/runner-test.bash` (10 fixtures; 10 of 10 on the JDK).
+- `test/java/corpora.edn`: `:java-util-lib` (51) and `:java-util-framework` (204), its own commit. java.net.http's corpora, the
+  survey's first, were tried and dropped: its TEST.properties makes all 373 of its tests `:run-modules` (JCS334 proposed).
+  Alternatives: a corpus for all of `:run-lib` (JCS332 (b), declined by the decision); vendoring TestNG and JUnit (JCS331 (b),
+  declined; and nothing to vendor from without the network).
+- Measured on a sample of 30 (the survey's table): JDK 29 pass; read 29, classes 29 (29 the JDK's class files), interp 1 (the other
+  28 load-failed on F14's and F9's members, which the day's executable predates). No reference line committed: `bin/reap` requires
+  every level's record for each reference test and the compiled level is the night's. The sample's lines and verdicts are in the
+  worktree's `.tmp/sample-ref-verdicts.patch`.
+
+The night's commands (on java-night's build, which has F9 and F14; JAVA_CHECK_EXE its executable, REPR_JAVA_EXE its javac tool):
+
+    test/java/runner-test.bash                                                     # 10 of 10 expected
+    bin/java-check --record-ref --jobs 8 --only $'corpus\tjava-util-(lib|framework)$'
+    bin/java-check verdicts
+    bin/java-check --levels read,interp,classes,print --corpus java-util-lib,java-util-framework --record
+    bin/heavy-lock bin/java-check --levels compiled --corpus java-util-lib,java-util-framework --record
+    bin/reap; bin/crops-score --judge --strict                                     # then class the new failures
+
+Proposed JCS334-JCS339 (the survey).
+
+## 2026-11-09 JCS334-JCS339 built: java.net.http's tests, -D properties, plain modules, the next areas by night (branch `java-testlib2`, from `java-testlib` e3362e4ed)
+
+The user accepted JCS334 (a), JCS335 (a), JCS336 (a), JCS337 (a), JCS338 (a), JCS339 (b) (~11:10). Built by an agent in the light
+tier; the JDK of jdk26u's build (at the platform's pin, `baf63fbe42b8`) ran by hand as the oracle. Sources: jtreg's tag
+specification (`@modules` MOD/PKG and plain module names, `TEST.properties`), jdk26u's `src/*/share/classes/module-info.java`
+(the exports and provides `java.check/module-in-world?` reads), the JUnit 5 user guide's factory-method arguments (the runner's
+fix). Nothing vendored. doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS334-JCS339".
+
+- The library and framework corpora's `:base` in a wide mode (the plain corpora's categories unchanged: the scan at `:night 1`
+  gives every plain test the same category and corpus): `jdk/repl-exports.txt`'s `MOD/PKG` lines (java.net.http's 15, java.base's
+  5; j2g's `repl-visible?` takes them), `-D` options as data through plan, rename, the reference's `:props` and run.ae, plain
+  module names when the world has some of the module's API.
+- `test/java/corpora.edn`'s `:night` (1) and twelve corpora by night: java-net-http 2, java-lang 3, java-nio 4, java-net 5,
+  java-text 6, java-io 7 (java-util 1, java-testlib's). Alternative considered: all at once (JCS337 (b), declined).
+- `test/java/night-corpora.bash N`: the night's switch (`:night`, the Java level steps' parts, the essential step java-runner-test
+  the first time); `test/java/runner-test.bash` from committed forms (`test/java/runner-test/forms/`, `--forms update|verify`),
+  so that the essential step needs no javac's tool. Alternative considered: the step reading the fixtures afresh (needs the tool:
+  not an essential host).
+- The JDK on 31 new tests (`JAVA_CHECK_NIGHT=7 bin/java-check --record-ref --only`): 20 pass, 7 fail, 4 skips; two faults found
+  and fixed (a `-D` value naming a test class renamed with it; JUnit's `Object[]` factory rows spread). No reference line
+  committed (bin/reap's rule, as java-testlib); the lines in the worktree's `.tmp/sample-ref-lines.edn`.
+- Checks: corpora-test 10 of 10, timeouts-test pass, runner-test --jdk 10 of 10, all9-run 3,317 files 0 errors, derive --check
+  80 overlays 0 not as derived, j2g-unit all passed, bin/reap 0 problems, crops-score --judge --strict 0 problems, bin/gate --plan
+  and (after night-corpora.bash 1, reverted) --full --plan exit 0.
+
+The night's commands are the survey's. Proposed JCS340-JCS343 (the survey).
+## 2026-11-09: F15, java.lang.invoke in the Go build (branch `java-invoke`, write-ahead)
+
+The plan's F15 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15 (java.lang.invoke)"), by day under the light rules, from
+`mac/java-night` (9e6160bbb), for the next Java night.
+
+- Measured: 43 tests the JDK passes use java.lang.invoke (`.tmp/inv/scripts/scan.py` over `test/java/ref-jdk26.edn`'s source
+  sets); all 43 load-failed at interp, 41 not passing compiled. By missing piece: 28 direct handles and their calls, 12
+  LambdaMetafactory, 1 StringConcatFactory, 2 other areas.
+- Studied: jdk26u at `baf63fb`, `src/java.base/share/classes/java/lang/invoke/` (MethodHandle, MethodHandles, MethodType,
+  MethodTypeForm, MethodHandleNatives, MethodHandleStatics, DirectMethodHandle, CallSite and its three subclasses,
+  LambdaMetafactory, AbstractValidatingLambdaMetafactory, InnerClassLambdaMetafactory, MethodHandleInfo), `sun/invoke/util/`
+  (VerifyAccess, VerifyType, BytecodeDescriptor, ValueConversions, Wrapper).
+- Decided (the slice's design; jdk26u's LambdaForms cannot run in the closed world): jrt's own MethodHandle, MethodHandles and
+  Lookup, DirectMethodHandle, MethodHandleImpl, the call sites, ProxyLambdaMetafactory over java.lang.reflect and JCS170's
+  Proxy; jdk26u's Java where it runs: MethodType, MethodTypeForm, LambdaMetafactory and VerifyAccess derived
+  (`test/jrt/derive.ae`'s `invoke-derivations`), MethodHandleInfo, AbstractValidatingLambdaMetafactory, the exceptions,
+  BytecodeDescriptor and VerifyType unpatched (`invoke-sources`); the polymorphic calls and `MethodHandles.lookup()` rewritten by
+  the Java forms' analyzer into calls of `jdk.internal.jrt.Invokers` (one place for the interpreter and j2g, the caller's class
+  known at the site); j2g keeps a JDK class's lookup the nil of J2G-SPEC §8.5, so the JDK's static initializers do not move.
+  Alternatives considered: (1) a new node kind for polymorphic calls in both back ends (two implementations of one rule, rejected);
+  (2) the rewrite in repr/java's converter (the forms would no longer say what the Java says, rejected); (3) the caller's class
+  by a stack walk (jrt has no caller frames); (4) VarHandle at run time with them (no test needs it; §8.5 stays).
+- Commits: 30dcc3ee8 (group 1: handles, lookup, call sites, Invokers, the analyzer, j2g, natives, J2G-SPEC §12, SPEC §5.6),
+  118f3956e (group 2: LambdaMetafactory), 83a98a659 (the void call site's kind, j2g-unit's tests, LICENSE.md).
+- Checked by day: the joint javac check 3,340 files, 0 errors; derive --check 84 overlays; `bin/jrt-convert predict` of the slice
+  with `--list` of the 43: no j2g analysis failure in the slice, 39 of the 43 analyze at compiled (4 refused for other areas);
+  interpreted on the gate executable over the forms (the day loader `.tmp/inv/day`, renaming the package around today's world
+  stubs): 23 of the 43 pass, the twelve metafactory tests stop at today's Proxy (JCS170 tonight); `bin/jrt test --package jrt`
+  ok; `bin/j2g-unit` all passed; `bin/gate --plan` exit 0.
+- Found: the interpreter's Dyn dispatches a private method's reflection by name (JCS350); an interpreted inner class's
+  constructor lacks its outer parameter in reflection (JCS351). Proposed JCS350-JCS356.
+
+## 2026-11-09: JCS350 (a), JCS351 (a), JCS353 (a) built; JCS352, JCS354-JCS356 recorded (branch `java-invoke2`, write-ahead)
+
+The user accepted F15's proposals about 11:10 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "Decided (the user, 2026-11-09, about 11:10):
+JCS350-JCS356"); built by day under the light rules on `java-invoke2` from `mac/java-invoke` (d0bf31ea8), for the next Java
+night (not tonight's).
+
+- JCS350 (a), `1a1be6b58`: `arbace.j2g.dyncf`'s `setMethod` native (the Go of `Compiler$CFGo`): a private instance method takes
+  no Dyn slot and no method by key, and its member table entry calls its own implementation (JVMS 5.4.6), where it called the
+  receiver's class's method of its key (t07686). Alternative considered: dispatching by the declaring class at the call (the
+  entry still virtual): rejected, the rule is the method's, not the call's.
+- JCS351 (a), `83cf8b52f`: an interpreted inner or local class's constructors published with javac's descriptor (jdk26u's
+  `Lower`, studied at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Lower.java`: the outer instance
+  prepended, the free variables appended) and `Compiler$CF$Meth.implicit`, set by `Rt/construct` before the constructor
+  (t07677); with F14's slice, the annotation records of a constructor keyed by javac's descriptor and the parameters shifted as
+  jdk26u's `Constructor.handleParameterNumberMismatch` does (`src/java.base/share/classes/java/lang/reflect/Constructor.java`).
+  Alternative considered: a second, synthetic Meth whose body sets the fields (no change to `Compiler.ae`): rejected, the
+  interpreter's nodes would be built by hand for one call.
+- JCS353 (a), `cc7ba8f28`: jrt's own `java.lang.invoke.StringConcatFactory` (overlay), jdk26u's checks, messages, recipe
+  parsing and simple shapes (`src/java.base/share/classes/java/lang/invoke/StringConcatFactory.java` and
+  `java/lang/StringConcatHelper.java`'s `stringOf`, `simpleConcat`, `newStringOf`, at `baf63fb`), the hidden class's result as
+  an adapter; `test/jrt/scf-diff/run.bash` against the JDK's: 28 cases, 0 differ, the control 5 (LICENSE.md). Alternative
+  considered: jdk26u's file derived (`derive.ae`) with the hidden class strategy cut: rejected, two thirds of the file is the
+  strategy and its class-file API, and the trivial shapes reach JavaLangAccess.
+- Recorded, nothing built: JCS352 (b), JCS354 (a) after the night proves F15, JCS355 (a) after the night's rerun, JCS356 (a) when
+  a test needs it. Proposed: JCS357 (local and anonymous classes' parameter annotations), JCS358 (an anonymous class's
+  superclass's outer instance in reflection).
+- Checked by day: the joint javac check 3,341 files, 0 errors; derive --check 84 overlays; `bin/j2g-unit` all passed (the new
+  `test-private-reflection`, `test-inner-ctor-annotations` with their controls); `bin/jrt test --package jrt` ok; `bin/reap` 0
+  problems; `bin/crops-score --judge --strict` 0 problems; `bin/gate --plan` exit 0. The runs of t07686, t07677 and t04758 need
+  the night's executable: the night's commands are in the triage's "As built: JCS350, JCS351, JCS353".
+
+## 2026-11-09: JCS340-JCS343, JCS357, JCS358 built; Java's independence and the own platform (branch `java-indep`)
+
+The user accepted JCS340 (a), JCS341 (a), JCS342 (a), JCS343 (a), JCS357 (b), JCS358 (b) (about 14:20) and ruled that the
+platform's class files are a toolchain's product, 0.5 in independence. Branch `java-indep` from `java-night` f4be0ea61, with
+`java-testlib2` (3185e9d98) and `java-invoke2` (3abb92b82) merged (each a journal conflict only: both sides' entries kept, in
+order). Built in the light lane (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS340-JCS343, JCS357, JCS358"):
+
+- JCS341 (a): `bin/java-check`'s `jtreg_props`: jtreg's `test.jdk` (the JDK's home on the reference, `WORK/no-jdk` on Arbace),
+  `test.root`, `test.name`, `test.file`, `test.vm.opts`, `test.java.opts`, `test.class.path` on both sides. Of the committed
+  reference, 9 tests name one; the JDK recorded again (by hand, the oracle, 77 s): t07740 and t08311 go from fail to pass on the
+  JDK; not committed (they need rows at every level, the compiled one a j2g run): the night's commands.
+- JCS342 (a): `java.check/gather` records an uncaught `jtreg.SkippedException` as `:skip`; `judge_own` judges it `skip` on
+  Arbace, the class `:jtreg-skip`.
+- JCS343 (a): the class `:renamed-names`. JCS340 (a), JCS357 (b), JCS358 (b): as built.
+- Independence: `bin/crops-score --crop java` 59.7% before and after (read, eval, AOT, print 0.5 by the ruling, judge 0.986). The
+  only honest lever is the platform itself; as its first step, decision-free, `bin/javac-vendor classes modules`: every module
+  compiled by javac on Arbace as the build compiles it (its batch's options parsed from the build's command line) against the
+  build's class files. By day java.logging equal, jdk.zipfs and java.prefs one anonymous class each differing by
+  LocalVariableTable names (`arg0` in the build's javacserver). Proposed JCS359 (an own platform: the modules, the 16 modules'
+  generated sources on the tool, the descriptors, the platform assembled and consumed; Java to 99.7%), JCS360 (javac on
+  Arbace's output as it is, the differences known), JCS361 (the 207 `:stdout` tests' judge; as is).
+- Checks: `bin/java-check --essential` on `next`'s gate executable 428 of 428, 0 regressions; `bin/reap` 0 problems;
+  `bin/crops-score --judge --strict` 0 problems.
+
+Alternatives considered: committing the two re-recorded reference lines without their level rows (the REAP cells would lose
+cases until the night: no); renaming string literals for JCS343 (the user chose (a)); scoring the platform 1 because java.base's
+class files by javac on Arbace already equal the build's (JN3.5): the ruling says the platform must be Arbace's own, consumed.
+
+## 2026-11-10: JCS359-JCS378 and JCV10 (b) decided; JCS359 stage 1's tooling built (branch `jcs359-s1`)
+
+**Decision.** At about 10:30 the user decided:
+
+- JCS359 (a), staged;
+- JCS360 (a);
+- JCS362-JCS369 as recommended (JCS368 (b));
+- JCS370-JCS378 as recommended, with JCS371 = JCV10 (b).
+
+The proposals are in `.tmp/plans/JCS359-PLAN.md` and `.tmp/plans/JAVA-90-PLAN.md`. The texts are in
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (the user, 2026-11-10, about 10:30)". JCS361's recommendation (b) stands
+unchanged.
+
+**What was built.** Branch `jcs359-s1`, from `mac/java-indep` 02b281c3b; the light lane; no whole run. The details are in the
+survey's "As built: JCS359 stage 1 tooling".
+
+- **JCS362 (a).** `bin/javac-vendor platform-build [--check]` writes `jdk/javac/platform-build.edn`, derived once from
+  jdk26u's build tree at baf63fbe (`build/linux-x86_64-server-release`). It holds:
+  - each module's javac options, from `_the.M_batch.cmdline` as `module_opts` reads it;
+  - its sources as roots plus 74 excludes, checked by count and digest against `_the.M_batch.filelist`;
+  - `VERSION_*` from spec.gmk;
+  - the `gcc -E` flags from `_UnixConstants.java.cmdline` and `_SocketOptionRegistry.java.cmdline`;
+  - jmod create's arguments from `support/images/jmods/_create_M.jmod_exec.cmdline`.
+
+  Every value carries its origin, and paths use placeholders. `--check` is the oracle tier's re-check. Verified for all 68
+  modules: the options and the file lists from the data are the build's.
+- **`classes modules`.** It reads that data instead of the build tree's command lines and file lists, and takes `--jobs N`. A
+  module of more than 1,000 files runs alone. Each class is judged by its digest against JCS360 (a)'s
+  `jdk/javac/platform-own-known.edn`, as `known`, `differ` or `stale`. Two negative controls run on each run's own results.
+- **The known file.** It lists the 12 differing classes of the day's measure, in 9 modules (`:param-names`, an anonymous class's
+  LocalVariableTable names). Their digests come from `java-indep`'s kept evidence.
+
+**Proof.** Run on 8 small modules with `--jobs 2`, in 37 s:
+
+- 4 modules `known`, 4 `equal`; the peak was 1.73 GB; both controls failed as they must.
+- The end-to-end negative run used a known file without jdk.net's entry and with an entry for an equal class of java.logging.
+  It gave `differ` and `stale`, exit 1.
+
+**Night 15's command** (JCS374 (a)): all 68 modules with `--jobs 3` under `bin/heavy-lock`, `GOMEMLIMIT=6GiB`. The estimated
+peak is about 8 GiB and the run about 15-20 minutes. The command is in the survey.
+
+**Alternatives considered:**
+
+- Committing the 15,393-line file lists verbatim (1.4 MB): rejected. Roots plus excludes rebuild them exactly and stay
+  readable at 61 KB.
+- Recomputing the lists from `make/` (JCS362 (b)): rejected by the decision.
+- Judging a known class by its name alone: rejected. Both digests are required, so a change on either side is seen.
+- A JVM to check the known reason with `javap`: kept by hand, in the oracle tier. The check itself needs no JVM.
+- Plain `--jobs` without the big modules alone: rejected. Three of java.base, java.desktop and jdk.localedata at once could
+  pass 15 GiB.
+
+**Correction to the brief.** The day's evidence holds 12 classes in 9 modules (jdk.jdi's 4 among them), not 13 in 10.
