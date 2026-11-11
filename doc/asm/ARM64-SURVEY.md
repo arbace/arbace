@@ -1339,3 +1339,40 @@ Numbering from ARS56. Each with options, the recommended named; none taken.
 - **ARS58 The VM's rows of the new programs.** With ARS55 (b), the Mac's next ARS44 run takes `synth-neon-ldst` and `synth-neon-fp`
   too (their CPU runs; the lockstep's V0-V31 and FPSR in the step mode). (a) named in that task's brief; (b) a task of their own.
   *Recommended: (a)*.
+
+## As built: review 1111's fixes (2026-11-11; branch `review-fix-3`, from `mac/next` `a7916bb2a` with `mac/asm-ar9` `198c25291` merged)
+
+The independent review of the assembly crops (`.tmp/reviews/1111/REVIEW-asm.md`) found nine things; the shared object assembler's
+(1-3, 6-8) are in doc/asm/AMD64-SURVEY.md, "As built: review 1111's fixes" (both arches' checks run them; arm64's error files
+`test/asm/obj-err-arm64/`). Here a64i's and arm64's:
+
+- **(4) FPCR's paths.** The synthetic programs `synth-fp-d-rm` and `synth-fp-s-rm` (`test/asm/a64i/gen.ae`, 1,168 cases each) set FPCR
+  per case from the row (RMode 1-3; DN with round to nearest) before fadd, fsub, fmul, fdiv, fmadd, fnmsub, frintx, frinti, fcvt between
+  precisions, scvtf, ucvtf, fmaxnm and fmin, the operands drawn near the largest finite and the smallest normal too. gen.ae's model
+  gains FPRound at a mode: the exact value as a rational of BigIntegers rounded at the type's precision or the subnormal quantum,
+  overflow to infinity or to the largest finite by the mode (OFC, IXC), UFC on tininess before rounding when inexact, an exact zero sum
+  -0 under RM=2 (FPAdd's and FPMulAdd's result_sign), the default NaN under DN. Held to qemu-aarch64 11.1.2 (its default CPU, max) at
+  `--record`: every case equal on the first run (in the double program 74 overflows, 46 to the largest finite, 49 -0, 34 default NaNs,
+  35 underflows). a64i failed 5 of the double program's cases, all FNMSUB: its exact values' precision (2,400 bits) lost an FMA's low
+  part when the addend is near 2^1024 and the product near 2^-2148 (no IXC, a directed rounding not taken); 3,328 bits now, and every
+  case passes. FEAT_AFP's FPCR bits FIZ, AH and NEP (0-2) are kept by `msr fpcr`, as qemu's max CPU keeps them (they were masked off,
+  silently), and refused by fpCheck as FZ is (`:unimplemented fpcr-ah` etc.).
+- **(5) SIMD in the essential gate.** `synth-neon-e`, every fourth of synth-neon's cases (443), is in test/asm/subsets.edn's `:a64i`, with
+  the controls verdict-8, forms-6 and inject-20 (and verdict-9, inject-21, inject-22 for (4)'s programs). `a64i-essential`: 1 min 22 s at
+  this host's load 24 against 1 min 13 s without it at the same load (+12%: about 41 s on a quiet host, where ARS46 measured 36 s).
+- **(9) arm64's `:insn-text`.** A macro defined by another macro's expansion and invoked from the file expands (it was an unknown
+  mnemonic): two `add x0, x0, #1` from an `inner` defined by `outer`.
+
+a64i's check, whole and `--record`: 90 of 90 programs eval and AOT, forms 90 of 90, coverage 2,015 of 2,015; the record's new rows those of
+the three new programs; `test/asm/a64i/synth-digests.edn` 15 -> 18 programs.
+
+### Proposed (review 1111)
+
+Numbering from ARS59.
+
+- **ARS59 FZ and FEAT_AFP in a64i.** FPCR.FZ, FIZ, AH and NEP are refused. (a) model them (flush to zero on inputs and outputs, AH's NaN
+  and min/max rules, NEP's upper lanes) with an rm-like synthetic family under each, qemu the second judge; (b) keep refusing until a
+  program needs them. *Recommended: (b)*: compiled C and Go do not set them.
+- **ARS60 The vector FP under FPCR.** The FP lanes (`synth-neon-fp`) run under FPCR 0 alone; the scalar's rm families do not reach
+  simdfp.ae's rounding. (a) a `neon-fp-rm` family, the same rows' FPCR; (b) as built. *Recommended: (a)*, small.
+

@@ -5064,3 +5064,52 @@ FPAbs, FPNeg and the vector FP instructions; no code copied. doc/asm/ARM64-SURVE
 - Rule slips: a background run of `bin/a64i check --essential` was still running when `test/asm/a64i/gen.ae` was edited (its synthetic
   step had already read the file: 14 digests, the recorded ones; rerun after the change, passing); one comparison used `<(...)`
   process substitution (scratch files, its output used for nothing).
+
+## 2026-11-11: review 1111's assembly findings fixed (branch `review-fix-3`, from `mac/next` `a7916bb2a` with `mac/asm-ar9` `198c25291` merged)
+
+The independent review of the assembly crops' merges into `mac/next` (`.tmp/reviews/1111/REVIEW-asm.md`, read whole; review 1111) found
+nine things, ranked medium to low; each is fixed in a commit of its own with its proof, in the order 2, 8, 1, 3, 6, 7, 9, 4, 5 (2 and 8
+first: (1)'s and (3)'s new verb and controls take the options by keyword and read them with the one parser). `mac/asm-ar9` was merged
+first (its journal entry beside AX12's; no other conflict) so the fixes apply to AR9's reader and a64i's SIMD too. Sources read, from
+the pinned llvm-project 23.1.5 tarball extracted into the worktree's `.tmp/llvm`: `llvm/lib/MC/MCParser/AsmParser.cpp`
+(parseDirectiveRept, instantiateMacroLikeBody, handleMacroEntry, printMacroInstantiations, printError, DiagHandler, parseDirectiveLoc,
+parseDirectiveReloc), `llvm/lib/MC/MCContext.cpp` (reportCommon), `MCAssembler.cpp` (layout's `.reloc` offsets), `MCObjectStreamer.cpp`
+(emitRelocDirective), `MCDwarf.cpp` (tryGetFile), `llvm/lib/Support/Path.cpp` (filename, parent_path), `StringRef.cpp`
+(getAutoSenseRadix, consumeUnsignedInteger, consumeSignedInteger), `llvm/tools/llvm-mc/llvm-mc.cpp` (fillCommandLineSymbols); the test
+`llvm/test/MC/AsmParser/macro-unknown-directive.s` for the instantiation notes' format. Apache-2.0 WITH LLVM-exception (in LICENSE.md);
+no code copied. doc/asm/AMD64-SURVEY.md and doc/asm/ARM64-SURVEY.md, "As built: review 1111's fixes".
+
+- (1) `arbace/asm/obj.ae`: an expansion (macro, `.rept`, `.irp`) runs as one instantiation, AsmParser's `<instantiation>` buffer (the
+  copies concatenated, the body from the line after its head, its items' places in that text), its errors printed as llvm-mc prints them:
+  `<instantiation>:L:C: error:`, the line, the caret, then `note: while in macro instantiation` a level, innermost first; none for an error
+  at the layout (ActiveMacros empty then). A `.rept` with no backslash, which ran at depth 0 and put body-relative offsets on the file,
+  counts toward the nesting limit now. The expected diagnostics of the new tests (`test/asm/obj-err/rept-place`, `rept-notes`,
+  `test/asm/obj-err-arm64/rept-notes`) were derived by hand from those sources, not recorded: the user's approval of hand-recorded llvm-mc
+  objects (AXS92, AXS94) covers those objects only, and diagnostics are not objects. Alternative considered: keeping the invoking
+  item's place (the review's minimal fix, depth+1); it would still not print llvm-mc's place, which is the instantiation's.
+- (2) both arches' `assemble-file` take `[PATH OPTIONS]` by keyword; (8) one `--defsym` value parser, llvm-mc's (checked by hand: `010`
+  8, `0b101` 5, `-0x10` -16, `08` and `12a` refused, 2^63 refused, -2^63 taken), read inside the check's try.
+- (3) a control runs with its reference's corpus and its subject's options; four new controls hold the diagnostics comparison; `control`
+  answers `left` for an unsupported subject against a refusal. Demonstrated by hand: judge-refusal rebound to call any two refusals equal
+  leaves the old `pltoff-vs-err` passing and fails `rept-notes-vs-err`.
+- (6) `.reloc`'s places and per-directive errors (`test/asm/obj-err/reloc-place`); an absolute `.reloc` offset is now the directive's
+  section's, as emitRelocDirective makes it (it was refused); (7) `.file`'s name split by sys::path's rules (eleven names checked by hand
+  against Path.cpp's algorithm: `/name.c` -> `/` and `name.c`, `a//b.c` -> `a`, `a/b/` -> `a/b` and `.`, `//net/x.c` -> `//net/`,
+  `//x.c` and `/` kept whole); (9) arm64's `:insn-text` (a macro defined by an expansion invoked from the file: two `add x0, x0, #1`).
+- (4) a64i's FPCR: `test/asm/a64i/gen.ae` gains FPRound at a mode (an exact rational rounded at the precision or the subnormal quantum,
+  overflow by the mode, tininess before rounding, an exact zero sum's sign under RM=2, DN) and two programs, `synth-fp-d-rm` and
+  `synth-fp-s-rm` (1,168 cases each, FPCR per case from the row). qemu-aarch64 agreed with the model on every case at the first
+  `--record`. a64i failed five FNMSUB cases in double: its big.Float precision (2,400 bits) dropped the product's low part when the
+  addend is near 2^1024 and the product near 2^-2148; raised to 3,328 bits (the span is about 3,172), all pass. `msr fpcr` keeps FIZ, AH
+  and NEP (it masked them off silently) and fpCheck refuses them as it refuses FZ. Alternative considered: modelling AH (FEAT_AFP);
+  proposed instead (ARS59 (b): no compiled program sets it).
+- (5) `synth-neon-e` (every fourth of synth-neon's cases, 443) in the essential subset with three controls; `a64i-essential` +12% (1 min
+  22 s against 1 min 13 s at load 24 on this host; about 41 s quiet). Alternative considered: synth-neon whole (1,769 cases, about four
+  times the increment).
+- Proofs (stage 0, light; one run at a time from 18:45): x86-64 object-check musl 32/32, synthetic 8/8 with obj-err 3/3, mc-x86-obj 49/49,
+  nine controls; arm64 object-check a64-musl 13/13, a64-synthetic 3/3 with obj-err-arm64 2/2, mc-aarch64-obj 110/110, five controls;
+  arm64 object-verdict 2,819 of 2,832 (unchanged), run-check 17/17 with four controls, roundtrip and encode-check ok (unchanged);
+  `bin/a64i synth --record` 18 programs under qemu; `bin/a64i check --record` whole 90 of 90 (eval, AOT, forms), coverage 2,015 of 2,015;
+  `--essential` 75 of 75, 15 controls. `bin/reap --record` (arm64 eval 303 -> 306, AOT 3,049 -> 3,052 / 0 / 13), `bin/reap` 0 problems;
+  `bin/crops-score --record`, `--judge --strict` 0. No key moves: `bin/arbace-go --gate-key` `9accb085d767...`, the value AX12 recorded
+  for `mac/next` (`arbace/asm/`, `go/arbace/a64i/`, `bin/repr-asm` are crop paths), `test/gate/gate-key-crops-test.bash` passes.

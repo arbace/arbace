@@ -261,6 +261,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   entries, emitOne's opcodes, MCDwarfLineAddr's advances, end_sequence; `synthetic/debug-line`) and AXS94 (a) MC/X86's `--defsym` cases
   (`intel-syntax-quote-reserved`, `pltoff@ERR=1` held to llvm-mc's recorded refusal), objects recorded by hand with llvm-mc 23.1.5; x86-64
   AOT 105 -> 108 / 0 / 0. Proposed AXS95 (the five left-out refusals), AXS96 (MC/AsmParser's DWARF tests).
+  `review-fix-3` (from `mac/next` `a7916bb2a` with `mac/asm-ar9`; doc/asm/AMD64-SURVEY.md, "As built: review 1111's fixes"): review 1111's
+  findings, one commit each: an expansion's errors at LLVM's `<instantiation>` places with their notes (a `.rept` with no backslash
+  counted and placed), `--defsym` by keyword and one radix-sensing parser, the refusal's diagnostics controlled, `.reloc`'s places,
+  `.file`'s path split; hand-derived diagnostics in `test/asm/obj-err*/`; every object unchanged. Proposed AXS97, AXS98.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
@@ -298,6 +302,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   re-recorded, unchanged), NEON's structure loads and stores (`simdmem.ae`, `synth-neon-ldst` 1,020 cases) and FP lanes' vector classes
   (`simdfp.ae`, `synth-neon-fp` 1,176 cases) in a64i: coverage 2,015 of 2,015, eval 303, AOT 3,049 / 0 / 13. Proposed ARS56-ARS58.
   Next: the by-element and scalar forms (ARS56), a structure load in the essential subset (ARS57), the VM's rows (ARS55, ARS58).
+  Then `review-fix-3` ("As built: review 1111's fixes"): a64i's FPCR paths held (`synth-fp-[ds]-rm`, RMode 1-3 and DN, the model's
+  FPRound at a mode, qemu at `--record`; an FMA precision bug fixed in a64i; FIZ, AH, NEP refused), `synth-neon-e` in the essential
+  subset, arm64's `:insn-text`: a64i 90 of 90. Proposed ARS59, ARS60.
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
