@@ -103,7 +103,14 @@
                "NonTypeTemplateParmDecl" {:name (:name k) :kind :value :qt (str/replace (get-in k [:type :qualType]) #"\s*\.\.\.$" "")
                                           :default (some-> (first (kids k)) kids first)}
                "TemplateTemplateParmDecl" {:name (:name k) :kind :template})
-             (or (:isParameterPack k) (re-find #"\.\.\." (or (node-text k) ""))) (assoc :pack true))))))
+             ;; (cpp-s4: a pack's `...` is written before its name, not in its default argument -- variant's
+             ;; `typename = enable_if_t<sizeof...(_Types) != 0>` is no pack -- nor in a template template parameter's own
+             ;; parameter list, `template<typename...> class _Tp`)
+             (or (:isParameterPack k)
+                 (let [t (first (str/split (or (node-text k) "") #"=" 2))
+                       t (if (= "TemplateTemplateParmDecl" (:kind k)) (subs t (inc (long (or (str/last-index-of t ">") -1)))) t)]
+                   (re-find #"\.\.\." t)))
+             (assoc :pack true))))))
 
 (defn- strip-tparam-kids [n]
   (assoc n :inner (vec (remove #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl" "TemplateArgument"} (:kind %)) (:inner n)))))
@@ -151,6 +158,12 @@
 
 (declare resolve-arg)
 
+(defn- var-value
+  "cpp-s4: a constant variable's value as its type holds it, its initializer converted ([conv.integral]/3:
+  `static const _Value __max = ... : ~(_Value)0;` of __numeric_traits_integer<unsigned char> is 255, not -1)."
+  [v x]
+  (if (and (number? x) (abi/integral? (abi/unq (:ty v)))) (sema/ce-wrap (:ty v) x) x))
+
 (defn- const-entity [scope parts]
   (let [es (if (= 1 (count parts)) (sema/lookup scope (first parts)) (sema/lookup-qualified scope parts))
         e (first es)]
@@ -159,7 +172,7 @@
       :nttp (cond-> {:k :tparam-v :i (:i e) :tid (:tid e)} (:pack e) (assoc :pack true))
       :texpr (:x e)
       :var (let [v (sema/var* (:id e))]
-             (if (and (:c (:ty v)) (:init v)) (sema/const-int (or (:def-scope v) scope) (:init v)) (fail :template "not a constant: " (str/join "::" parts))))
+             (if (and (:c (:ty v)) (:init v)) (var-value v (sema/const-int (or (:def-scope v) scope) (:init v))) (fail :template "not a constant: " (str/join "::" parts))))
       (fail :template "not a constant: " (str/join "::" parts)))))
 
 (defn- member-constant
@@ -173,7 +186,7 @@
         (let [e (first (map second (sema/class-lookup (:id t) nm false)))]
           (if (= :var (:e e))
             (let [v (sema/var* (:id e))]
-              (if (and (:c (:ty v)) (:init v)) (sema/const-int (or (:def-scope v) (:scope (abi/cls (:id t)))) (:init v)) (fail :template "not a constant: " nm)))
+              (if (and (:c (:ty v)) (:init v)) (var-value v (sema/const-int (or (:def-scope v) (:scope (abi/cls (:id t)))) (:init v))) (fail :template "not a constant: " nm)))
             (const-entity (:scope (abi/cls (:id t))) [nm]))))))
 
 (def ^:private binary-fns
@@ -426,7 +439,16 @@
   (let [es (sema/lookup scope nm)]
     (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es)))
 
-(declare static-call-value packs-named)
+(defn- qualified-template-name?
+  "cpp-s4: whether the qualified name `ps` (its parts) names a template: `__gnu_cxx::__int_traits<_IntType>::__max` in
+  parse_numbers.h's _Select_int_base, written in another namespace than the template's."
+  [scope ps]
+  (if (= 1 (count ps))
+    (template-name? scope (first ps))
+    (let [es (try (sema/lookup-qualified scope ps) (catch arbace.lang.ExceptionInfo _ nil))]
+      (some #(or (= :tmpl (:e %)) (and (= :type (:e %)) (abi/class? (:ty %)) (:tmpl (abi/cls (:id (:ty %)))))) es))))
+
+(declare static-call-value packs-named const-form)
 
 (defn eval-text
   "The value of a constant expression's text in `scope` (integers, the operators, parentheses, the conditional
@@ -458,6 +480,20 @@
                   (and (= t "(") (contains? cast-types (peek)))
                   (let [ws (loop [ws []] (let [[_ x] (next!)] (if (= x ")") ws (recur (conj ws x)))))]
                     (cast-to (str/join " " ws) (primary)))
+                  ;; (cpp-s4: a C-style cast to a type named by one identifier, a template's type parameter or a typedef:
+                  ;; parse_numbers.h's `(_IntType)_Val` in _Select_int_base's base; an integral type's value range)
+                  (and (= t "(") (= :id (first (get ts @pos))) (= ")" (nth (get ts (inc @pos)) 1 nil))
+                       (some #(= :type (:e %)) (sema/lookup scope (peek))))
+                  (let [[_ nm] (next!) _ (next!)
+                        ty (abi/unq (sema/resolve-type scope nm))
+                        v (primary)]
+                    (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
+                          (= :bool (:n ty)) (if (zero? (long v)) 0 1)
+                          (abi/integral? ty) (let [b (* 8 (abi/size-of ty))]
+                                               (if (>= b 64) (long v)
+                                                   (let [m (dec (bit-shift-left 1 b)) u (bit-and (long v) m)]
+                                                     (if (and (abi/signed? ty) (bit-test u (dec b))) (- u (inc m)) u))))
+                          :else (fail :template "constant expression " s)))
                   (= t "(") (let [v (expr 0)] (next!) v)
                   (= t "-") (fold "neg" [(primary)])
                   (= t "+") (primary)
@@ -503,7 +539,8 @@
                   (let [tkw (atom false)
                         parts (loop [ps [t]]
                                 (cond
-                                  (and (= "<" (peek)) (or (template-name? scope (last ps)) (and @tkw (> (count ps) 1))))
+                                  (and (= "<" (peek)) (or (template-name? scope (last ps)) (and @tkw (> (count ps) 1))
+                                                           (and (> (count ps) 1) (qualified-template-name? scope ps))))
                                   (do (next!) (recur (conj (pop ps) (str (last ps) "<" (run "<" ">") ">"))))
                                   ;; (`X::template f<...>`: a member template named after a dependent qualifier)
                                   (= "::" (peek)) (do (next!) (when (= "template" (peek)) (next!) (reset! tkw true)) (recur (conj ps (second (next!)))))
@@ -513,6 +550,10 @@
                       ;; `_PCCP::template _ConstructiblePair<_U1, _U2>() && ...` (libstdc++'s C++17 std::pair)
                       (and (> (count parts) 1) (= "(" (peek)) (= ")" (nth (get ts (inc @pos)) 1 nil)))
                       (do (next!) (next!) (static-call-value scope (ct/parse-name (str/join "::" parts))))
+                      ;; (cpp-s4: a variable template's specialization alone, `__accepted_index<_Tp>` as a template argument in
+                      ;; variant's `__to_type<__accepted_index<_Tp>>`: const-form's, its partial specializations matched)
+                      (and (= 1 (count parts)) (str/includes? (first parts) "<"))
+                      (const-form scope (ct/parse-name (first parts)))
                       (some #(str/includes? % "<") parts)
                       (let [r (member-constant (sema/resolve-type scope (str/join "::" (butlast parts))) (last parts))
                             tp (last (butlast parts))
@@ -3013,6 +3054,9 @@
                                    fid)))
          :pack-expand expand-type-pack
          :expand-pack expand-expr-pack
+         ;; (cpp-s4: a using-declaration's pack expansion, [namespace.udecl]/1's `using B<Ts>::f...;`: the scopes binding the
+         ;; packs its names name to each element, nil when it names none)
+         :pack-scopes (fn [scope nms] (let [packs (packs-named scope nms)] (when (seq packs) (elementwise scope packs))))
          :var-template var-template
          :dependent-name (fn [scope parts]
                            (let [es (sema/lookup scope (first parts)) e (first (filter #(= :type (:e %)) es))]
