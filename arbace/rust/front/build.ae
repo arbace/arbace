@@ -121,7 +121,9 @@
                 :array (needs-drop? (second t))
                 :slice (needs-drop? (second t))
                 :adt (let [d (second t)]
-                       (cond (number? d)
+                       (cond ;; RF13d: the crate's own ManuallyDrop (`#[lang = "manually_drop"]`, AdtDef::is_manually_drop) never
+                             (and (number? d) (some #(= "Lang(ManuallyDrop)" (:parsed %)) (:attrs (:node (c/def-of d))))) false
+                             (number? d)
                              (or (tc/implements-drop? t)
                                  (boolean (some (fn [[_ ft]] (needs-drop? ft)) (tc/all-fields d (nth t 2)))))
                              ;; std's ADTs by their interface: a Drop impl, else a field that needs drop (ManuallyDrop never)
@@ -313,6 +315,7 @@
       :loop (resolve-block (:block e) true)
       :drop-temps (resolve-expr (:expr e) true)
       :closure nil
+      :const-block nil   ; (RF13c: an inline const's body has a region tree of its own)
       (walk-expr e))
     (set-cx! prev)))
 
@@ -354,6 +357,8 @@
 (defn- ty-of [e] (or (:ty (r-of e)) (unsupported "an expression without a type" (:kind e))))
 
 (declare mirror-expr mirror-block mirror-block* lower-pattern)
+(def ^:dynamic *as-cast-src* nil)   ; RF13b: [hir-id span] of a cast's operand (apply_adjustment's is_from_as_cast)
+
 
 (defn- local-res [path] (let [r (first (:res path))] (when (= 'local (first r)) (second r))))
 
@@ -389,6 +394,15 @@
         (cond (tc/std-variant p) [(c/path-parent p) (tc/variant-index p) p (kind p)]
               (get (:adts c/*si*) p) [p 0 p (kind p)]
               :else nil))
+      ;; RF13b: `Self(..)` in an impl of a tuple or unit struct (Res::SelfCtor): the self type's constructor
+      :self-alias
+      (let [st c/*self-ty*]
+        (if-let [ctor (and (vector? st) (= :adt (first st)) (number? (second st)) (:ctor (c/def-of (second st))))]
+          [(second st) 0 (second st) (if (str/includes? (str (:kind (c/def-of ctor))) "Fn") :fn :const)]
+          ;; RF13d: `Self { .. }` (a struct pattern) in an impl of a braced struct: the struct itself
+          (when (and (vector? st) (= :adt (first st))
+                     (if (number? (second st)) (= "Struct" (:kind (c/def-of (second st)))) (= "Struct" (:kind (get (:adts c/*si*) (second st))))))
+            [(second st) 0 (second st) :struct])))
       nil)))
 
 (def ^:dynamic *loops* nil)   ; the enclosing loops and labeled blocks, innermost first
@@ -432,15 +446,21 @@
         (cond
           (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
           ;; a constant (NamedConst): the crate's or std's, or an associated one by its type
-          (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args))
+          (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args :user-ty (:user-ty (r-of e)) :fspan (:fspan e)))
           (and (#{:local :ext} (first rd)) (str/starts-with? (str (nth rd 2)) "Const")) (mk e :named-const ty :def (second rd) :args [])
           ;; a static: the deref of its allocation's pointer (StaticRef: `&T`, `*mut T` for a mutable one)
           (and (= :local (first rd)) (str/starts-with? (str (nth rd 2)) "Static"))
           (let [mut? (str/includes? (str (nth rd 2)) "mutability: Mut")
                 pt (if mut? [:ptr true ty] [:ref [:re-erased] false ty])]
             (mk e :deref ty :arg (mk e :static-ref pt :def (second rd))))
+          ;; RF13d: `Self` as a unit struct's value (Res::SelfCtor): a ZstLiteral with its user type (`const ZeroSized: T`)
+          (and (= :self-alias (first rd)) (= :adt (first ty)))
+          (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
           (and (= :adt (first ty)) (ctor-info path))
           (let [[adt vi vid _] (ctor-info path)] (mk e :adt ty :adt adt :variant vi :vid vid :fields []))
+          ;; RF13d: a const parameter used as a value (ExprKind::ConstParam): the constant `const N` (Const::Ty of the param)
+          (and (= :param (first rd)) (= :const (:kind (second rd))))
+          (mk e :const-param ty :name (:name (second rd)) :index (:index (second rd)))
           :else (unsupported "a path" (pr-str [rd (mapv :ident (:segs path)) (boolean (:lang path)) (first ty)])))))))
 
 (def ^:private op-methods
@@ -534,12 +554,37 @@
       x
       {:k :borrow :bk (case (second (:cap cap)) :imm :shared :mut :mut :unique :unique) :arg x :ty (:ty cap) :span (:span e) :tsi (:hir-id e)})))
 
+(def ^:dynamic *body-def* nil)   ; RF13c: the def whose body is built (an inline const's parent)
+
 (defn- mirror-unadjusted [e]
   (let [ty (ty-of e)]
     (case (:kind e)
       :lit (mk e :literal ty :lit (:lit e) :neg false)
+      ;; RF13c: ExprKind::ConstBlock: the inline const unevaluated at the parent's identity arguments
+      ;; (`const any::type_name::<T>::{constant#0}`)
+      :const-block (if-let [d *body-def*]
+                     (mk e :named-const ty :text (str (binding [c/*in-value* true c/*erased-regions* true]
+                                                        (c/print-def-path d (c/identity-args (c/generics-of d))))
+                                                      ;; (RF13e: an inline const's own, `f::<T>::{constant#0}::{constant#0}`)
+                                                      (apply str (map #(str "::{constant#" % "}") (or (:index-path e) [(:index e)])))))
+                     (unsupported "an inline const outside a body"))
       :path (mirror-path e ty)
-      :type-relative (if (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e))) (unsupported "a type-relative path" (first ty)))
+      ;; RF13e: thir cx's OffsetOf: a call of the offset_of intrinsic (`offset_of::<C>(variant, field)`, not from HIR, its
+      ;; fn_span the expression's) a field, their sum for several, `0_usize` for none
+      :offset-of (let [idx (or (:offset-of (r-of e)) (unsupported "an offset_of without its indices"))
+                       u32-lit (fn [n] (mk e :literal [:uint "u32"] :lit {:lit-kind "Integer" :symbol (str n)} :neg false))
+                       call (fn [[ct v f]]
+                              (mk e :call usize-ty :fun {:k :zst-literal :ty [:fndef (c/lang "offset_of") [ct]] :span (:span e) :tsi (:hir-id e)}
+                                  :args [(u32-lit v) (u32-lit f)] :from-hir false :fn-span (:span e)))]
+                   (if (empty? idx)
+                     (mk e :literal usize-ty :lit {:lit-kind "Integer" :symbol "0"} :neg false)
+                     (reduce (fn [l x] (mk e :binary usize-ty :op (get bin-ops "+") :lhs l :rhs (call x))) (call (first idx)) (rest idx))))
+      :type-relative (if (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e)) (unsupported "a type-relative path" (first ty)))
+      ;; RF12: a qualified path to a trait's function (`<T as Clone>::clone`): its function item, as a type-relative one's
+      :qpath (cond (= :fndef (first ty)) (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
+                   ;; RF12: a trait's associated constant (`<T as SizedTypeProperties>::ALIGN`): NamedConst
+                   (:named-const (r-of e)) (let [[d args] (:named-const (r-of e))] (mk e :named-const ty :def d :args args :user-ty (:user-ty (r-of e)) :fspan (:fspan e)))
+                   :else (unsupported "a qualified path" (first ty)))
       :unary (case (:op e)
                "-" (cond (not (#{:int :uint :float} (first (ty-of (:expr e)))))
                          (overloaded-operator e ty ["core::ops::arith::Neg" "neg"] [(ty-of (:expr e))] [(mirror-expr (:expr e))])
@@ -562,17 +607,28 @@
                     (logical? e) (mk e :logical ty :op (if (= "&&" (:op e)) :and :or) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
                     :else (mk e :binary ty :op (get bin-ops (:op e)) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e))))
       :assign (mk e :assign ty :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e)))
-      :assign-op (if (:callee (r-of e))
-                   (unsupported "an overloaded compound assignment")
+      :assign-op (cond
+                   (:callee (r-of e)) (unsupported "an overloaded compound assignment")
+                   ;; RF15: an overloaded compound assignment (`String += &str`): thir's overloaded_operator over the left side
+                   ;; as mirrored (its mutable autoref, typeck's adjustment) and the right one, OpAssign's method at [L R]
+                   (not (builtin-binop? (str/replace (str (:op e)) "=" "") (ty-of (:lhs e)) (ty-of (:rhs e))))
+                   (let [op (str/replace (str (:op e)) "=" "") [tr m] (get op-methods op)]
+                     (overloaded-operator e ty [(str tr "Assign") (str m "_assign")] [(ty-of (:lhs e)) (adjusted-ty (:rhs e))]
+                                          [(mirror-expr (:lhs e)) (mirror-expr (:rhs e))]))
+                   :else
                    (mk e :assign-op ty :op (get bin-ops (str/replace (str (:op e)) "=" "")) :lhs (mirror-expr (:lhs e)) :rhs (mirror-expr (:rhs e))))
       :addr-of (if (:raw e)
                  (mk e :raw-borrow ty :mutbl (boolean (:mutbl e)) :arg (mirror-expr (:expr e)))
                  (mk e :borrow ty :bk (if (:mutbl e) :mut :shared) :arg (mirror-expr (:expr e))))
-      :cast (let [src (:expr e)]
-              (cond (or (:coercion-cast (r-of src))
+      :cast (let [src (:expr e)
+                  mirror-expr (fn [x] (binding [*as-cast-src* [(:hir-id src) (:span e)]] (mirror-expr x)))
+                  c (cond (or (:coercion-cast (r-of src))
                         ;; check_cast's try_coercion_cast of a cast to the type the expression already has (CoercionCast:
                         ;; `7.5 as F`, the literal typed F by ExpectCastableToType), raw pointers apart (PointerCast)
-                        (let [st (adjusted-ty src)] (and (= (tc/erase-ty st) (tc/erase-ty ty)) (not= :ptr (first st)))))
+                        (let [st (adjusted-ty src)] (and (= (tc/erase-ty st) (tc/erase-ty ty))
+                                                         ;; RF12: a reference made a raw pointer by the coercion (`self as *const str`) is
+                                                         ;; one too (set_coercion_cast); a raw pointer's own cast is a PtrToPtr cast
+                                                         (or (not= :ptr (first st)) (= :ref (first (ty-of src)))))))
                     (mk e :use ty :source (mirror-expr src))
                     ;; a unit variant cast to an integer: its discriminant as the last explicit one's constant plus the
                     ;; offset from it (discriminant_def_for_variant), in the enum's repr type
@@ -591,11 +647,18 @@
                                     :rhs lit}
                                    lit)]
                       (mk e :cast ty :source source))
-                    :else (mk e :cast ty :source (mirror-expr src))))
+                    :else (mk e :cast ty :source (mirror-expr src)))]
+              ;; RF12: a cast's user-provided type (ValueTypeAscription over the cast; RF13b: over a coercion cast's Use too)
+              (if-let [u (:cast-user-ty (r-of e))]
+                (mk e :value-type-ascription ty :source c :user-ty u :uspan (:span (:ty e)))
+                c))
       :drop-temps (mk e :use ty :source (mirror-expr (:expr e)))
       :field (let [bt (let [x (r-of (:expr e)) t (:ty x)] (reduce (fn [_ [_ tt]] tt) t (:adj x)))
                    [vid vi] (if (= :adt (first bt))
-                              (let [d (second bt)] (if (number? d) [(tc/single-variant d) 0] (unsupported "a std field")))
+                              ;; RF13b: another module's struct (core's `Range` in slice/index.rs): its interface's fields
+                              (let [d (second bt)] (cond (number? d) [(tc/single-variant d) 0]
+                                                         (and (string? d) (not (tc/enum? d)) (get (:adts c/*si*) d)) [d 0]
+                                                         :else (unsupported "a std field")))
                               [nil 0])
                    idx (if vid (field-index vid (:ident e)) (parse-long (str (:ident e))))]
                (mk e :field ty :lhs (mirror-expr (:expr e)) :variant vi :name idx))
@@ -642,7 +705,7 @@
                     :fn-span (let [is (method-ident-span e) sp (:span e)]
                                (if (and (vector? is) (vector? sp)) [(is 0) (is 1) (sp 2) (sp 3)] sp))))
       :struct (let [[adt vi vid] (or (ctor-info (:path e)) (unsupported "a struct expression" (:path e)))]
-                (mk e :adt ty :adt adt :variant vi :vid vid :base (some-> (:base e) mirror-expr)
+                (mk e :adt ty :adt adt :variant vi :vid vid :base (some-> (:base e) mirror-expr) :user-ty (:user-ty (r-of e))
                     :fields (mapv (fn [f] [(field-index vid (:ident f)) (mirror-expr (:expr f))]) (:fields e))))
       :block (if (:label e)
                (binding [*loops* (cons {:label (:label e) :id (:hir-id e) :block? true} *loops*)]
@@ -692,6 +755,7 @@
                        (assoc base :k :borrow :bk (if (nth target 2) :mut :shared) :arg x))
       (str/starts-with? (str k) "Pointer")
       (assoc base :k :pointer-coercion :source x
+             :from-cast (and (some? (:hir-id e)) (= (:hir-id e) (first *as-cast-src*)))
              :cast (cond (and (= :closure (first (:ty x))) (= :fnptr (first target))) "ClosureFnPointer(Safe)"
                          (and (= :fndef (first (:ty x))) (= :fnptr (first target))) "ReifyFnPointer(Safe)"
                          (and (#{:ref :ptr} (first (:ty x))) (= :ptr (first target)) (= (last (:ty x)) (last target))) "MutToConstPointer"
@@ -819,6 +883,10 @@
                      {:k :range :ty ty :range {:lo lo :hi hi :end end :ty ty}}))
           :tuple {:k :leaf :ty ty :subpatterns (tuple-subpats (:pats p) (count (second ty)))}
           (:tuple-struct :struct :path)
+          (if-let [v (:const-value r)]
+            ;; RF13e: a path to the crate's integer constant (`UNUSED =>`): const_to_pat's constant, its value as const
+            ;; evaluation gives its expression of literals
+            {:k :constant :ty ty :value (int-const v ty)}
           (let [[adt vi vid] (or (ctor-info (:path p)) (unsupported "a pattern path" (:path p)))
                 subs (case (:kind p)
                        :tuple-struct (tuple-subpats (:pats p) (count (tc/all-fields-of-variant vid)))
@@ -826,7 +894,7 @@
                        [])]
             (if (tc/enum? adt)
               {:k :variant :ty ty :adt adt :variant vi :vid vid :subpatterns subs}
-              {:k :leaf :ty ty :subpatterns subs}))
+              {:k :leaf :ty ty :subpatterns subs})))
           (:ref :box) {:k :deref :ty ty :sub (lower-pattern (:pat p))}
           :or {:k :or :ty ty :pats (or-canonical (mapv lower-pattern (:pats p)))}
           :slice (let [ps (:pats p)
@@ -978,7 +1046,7 @@
         (zero? d) (if (neg? (Math/copySign 1.0 d)) "-0" "0")
         :else
         (let [neg (neg? d)
-              precision (if (= bits 32) 9 17)
+              precision (case (long bits) 16 5 32 9 128 36 17)
               raw (Double/doubleToRawLongBits (Math/abs d))
               be (bit-and (bit-shift-right raw 52) 0x7ff)
               frac (bit-and raw 0xfffffffffffff)
@@ -1029,17 +1097,52 @@
 (defn float-const [^String txt neg t]
   (let [n (second t)
         txt (str/replace txt "_" "")
-        txt (str/replace txt #"f(32|64)$" "")]
-    (if (= n "f32")
+        txt (str/replace txt #"f(16|32|64|128)$" "")]
+    (cond
+      ;; RF12: f16 and f128 (core's `0.0f16`): the value as a double (exact for the literals core writes) in the format's
+      ;; IEEE encoding, rounded to nearest even
+      (#{"f16" "f128"} n)
+      (let [d (Double/parseDouble txt) d (if neg (- d) d)
+            [eb mb] (if (= n "f16") [5 10] [15 112])
+            bias (dec (bit-shift-left 1 (dec eb)))
+            sign (if (neg? (Math/copySign 1.0 d)) 1 0)
+            ad (Math/abs d)
+            bits (cond
+                   (zero? ad) 0
+                   (Double/isInfinite ad) (* (bigint (dec (bit-shift-left 1 eb))) (.pow (biginteger 2) (int mb)))
+                   :else
+                   (let [raw (Double/doubleToRawLongBits ad)
+                         e (- (bit-and (bit-shift-right raw 52) 0x7ff) 1023)
+                         m (bit-or (bit-and raw 0xfffffffffffff) (bit-shift-left 1 52))   ; 53 significant bits
+                         ;; the significand to MB fraction bits: shift by 52 - MB (rounded half to even when narrowing)
+                         sh (- 52 mb)
+                         frac (if (neg? sh)
+                                (.shiftLeft (biginteger m) (int (- sh)))
+                                (let [q (bit-shift-right m sh) r (bit-and m (dec (bit-shift-left 1 sh))) half (bit-shift-left 1 (dec sh))]
+                                  (biginteger (if (or (> r half) (and (= r half) (odd? q))) (inc q) q))))
+                         be (+ e bias)]
+                     (+ (* (bigint be) (.pow (biginteger 2) (int mb))) (- (bigint frac) (.pow (biginteger 2) (int mb))))))
+            bits (+ (bigint bits) (if (= 1 sign) (.pow (biginteger 2) (int (+ eb mb))) 0))]
+        [:const (str "const " (float-text d (if (= n "f16") 16 128)) n) t (list 'scalar bits (if (= n "f16") 2 16))])
+      (= n "f32")
       (let [f (float (Double/parseDouble txt)) f (if neg (- f) f)]
         [:const (str "const " (float-text (double f) 32) "f32") t (list 'scalar (bit-and (long (Float/floatToRawIntBits f)) 0xffffffff) 4)])
+      :else
       (let [d (Double/parseDouble txt) d (if neg (- d) d)]
         [:const (str "const " (float-text d 64) "f64") t (list 'scalar (let [b (Double/doubleToRawLongBits d)] (if (neg? b) (+ (bigint b) (pow2 64)) b)) 8)]))))
 
 (defn- char-text [^long c]
   (case c
     10 "'\\n'" 13 "'\\r'" 9 "'\\t'" 0 "'\\0'" 39 "'\\''" 92 "'\\\\'"
-    (str "'" (String. (Character/toChars (int c))) "'")))
+    ;; RF13d: char's Debug (escape_debug_ext): a grapheme extender or a character that is not printable (Cc, Cf, Cs, Co,
+    ;; Cn, Zl, Zp, Zs but the space) as `\u{hex}`
+    (let [t (Character/getType (int c))]
+      ;; (Character's types: CONTROL 15, FORMAT 16, SURROGATE 19, PRIVATE_USE 18, UNASSIGNED 0, LINE_SEPARATOR 13,
+      ;; PARAGRAPH_SEPARATOR 14, SPACE_SEPARATOR 12; NON_SPACING_MARK 6, ENCLOSING_MARK 7)
+      (if (or (and (not= c 32) (contains? #{15 16 19 18 0 13 14 12} (long t)))
+              (contains? #{6 7} (long t)))
+        (str "'\\u{" (Long/toHexString c) "}'")
+        (str "'" (String. (Character/toChars (int c))) "'")))))
 
 (defn- escape-ascii
   "u8::escape_ascii: a byte as a byte string's Debug writes it"
@@ -1178,11 +1281,11 @@
                       :else (unsupported "a literal of" t)))
     "Float" (if (= :float (first t)) (float-const (str (:symbol lit)) neg t) (unsupported "a float literal of" t))
     "Char" (let [sym (str (:symbol lit))
-                 c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
+                 c (long (if (str/starts-with? sym "\\") (.codePointAt ^String (unesc-char sym) 0) (.codePointAt sym 0)))]
              [:const (str "const " (char-text c)) t (list 'scalar c 4)])
     "Bool" (bool-const (= "true" (str (:symbol lit))))
     "Byte" (let [sym (str (:symbol lit))
-                 c (long (if (str/starts-with? sym "\\") (int (first (unesc-char sym))) (.codePointAt sym 0)))]
+                 c (long (if (str/starts-with? sym "\\") (.codePointAt ^String (unesc-char sym) 0) (.codePointAt sym 0)))]
              (int-const c t))
     ("Str" "StrRaw") (let [v (or (:value lit) (if (= "Str" (str (:lit-kind lit))) (str-unescape (str (:symbol lit))) (str (:symbol lit))))]
                        [:const (str "const " (str-debug v)) t (list 'raw-str (intern-alloc! (map #(bit-and (long %) 0xff) (.getBytes ^String v "UTF-8"))))])
@@ -1205,7 +1308,9 @@
   (when-let [u (:user-ty x)] (push-user-type! u (or (:fspan x) (:span x)) (:ty x)))
   (case (:k x)
     :literal (lit-const (:lit x) (:neg x) (:ty x))
-    :zst-literal (if (= :fndef (first (:ty x))) (fn-const (:ty x)) unit-const)
+    :zst-literal (cond (= :fndef (first (:ty x))) (fn-const (:ty x))
+                       (= :adt (first (:ty x))) [:const (str "const ZeroSized: " (ty-text (:ty x))) (:ty x) '(zst)]
+                       :else unit-const)
     :static-ref (let [id (intern-static-alloc! (:def x))
                       pointee (when (= :ref (first (:ty x))) (nth (:ty x) 3))]
                   ;; pretty_print_const_scalar_ptr: a reference to a byte array whose pointer is a static's prints the static's
@@ -1215,8 +1320,10 @@
                             (str "const {alloc" id ": " (ty-text (:ty x)) "}"))
                    (:ty x) (list 'static-ptr id)])
     :named-const [:const (str "const " (or (:text x) (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (:def x) (:args x))))) (:ty x)
-                  (list 'unevaluated (str (or (:def x) (:text x))) [] nil)]
+                  ;; RF12-P6: the constant's definition and arguments kept (a native core body instantiated in a program's run)
+                  (with-meta (list 'unevaluated (str (or (:def x) (:text x))) [] nil) {:nc [(:def x) (vec (:args x))]})]
     :const-op (:c x)
+    :const-param [:const (str "const " (:name x)) (:ty x) (list 'const-param (:index x) (:name x))]
     (unsupported "a constant" (:k x))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1488,10 +1595,10 @@
 (defn- category [x]
   (case (:k x)
     :scope nil
-    (:field :deref :index :var-ref :upvar-ref) :place
+    (:field :deref :index :var-ref :upvar-ref :value-type-ascription) :place
     (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
     (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
-    (:literal :zst-literal :named-const :static-ref :const-op) :constant))
+    (:literal :zst-literal :named-const :static-ref :const-op :const-param) :constant))
 
 (declare lower-let-expr in-if-then-scope ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
          storage-live-binding! schedule-drop-for-binding!)
@@ -1516,6 +1623,8 @@
 (defn- var-local [id] (or (get (:var-indices (st)) id) (unsupported "a variable" id)))
 (defn- guard-local [id] (or (get (:guard-indices (st)) id) (unsupported "a guard's variable" id)))
 
+(declare span-text)
+
 (defn- expr-as-place [bb x mutability]
   (case (:k x)
     :scope (in-scope-x x (expr-as-place bb (:value x) mutability))
@@ -1533,7 +1642,11 @@
                      ;; len_of_slice_or_array
                      len (case (first bt)
                            :array (do (push! bb (list 'fake-read "ForIndex" (place-form base)))
-                                      (let [n (c/print-const (nth bt 2))] [:const (str "const " n "_usize") usize-ty (list 'scalar (parse-long n) 8)]))
+                                      ;; (RF13d: a const parameter's length, `[T; N]`: the parameter itself, `const N`)
+                                      (let [n (c/print-const (nth bt 2)) v (parse-long n)]
+                                        (if v
+                                          [:const (str "const " n "_usize") usize-ty (list 'scalar v 8)]
+                                          [:const (str "const " n) usize-ty (if (= :cparam (first (nth bt 2))) (list 'const-param (second (nth bt 2)) n) (list 'unevaluated n [] nil))])))
                            :slice (let [ptr (if (and (= [[:deref]] (:proj base)) (copy? (local-ty (:local base))))
                                               [:copy (place (:local base))]
                                               (let [t (temp! [:ptr false bt])]
@@ -1551,6 +1664,13 @@
                      (add-fake-borrows-of-base! bb base))
                    [bb (project base [:index idx])]))))
     :var-ref [bb (if (contains? *guard-vars* (:id x)) (place (guard-local (:id x)) [:deref]) (place (var-local (:id x))))]
+    ;; RF12: as_place's ValueTypeAscription: the source in a temporary, ascribed its user type (AscribeUserType, invariant)
+    :value-type-ascription
+    (let [[bb t] (as-temp bb (temporary-scope (:tsi x)) (:source x) mutability)
+          i (count (:user-types (st)))]
+      (upd! update :user-types (fnil conj []) {:text (str "user_ty: " (:user-ty x) ", span: " (span-text (:uspan x)) ", inferred_ty: " (binding [c/*in-value* false] (c/print-ty (:ty x))))})
+      (push! bb (list 'raw (str "AscribeUserType(" (mir/place (place-form (place t))) ", o, UserTypeProjection { base: UserType(" i "), projs: [] })")))
+      [bb (place t)])
     (let [[bb t] (as-temp bb (temporary-scope (:tsi x)) x mutability)] [bb (place t)])))
 
 (defn as-place [bb x] (binding [*fake-borrow-temps* nil] (expr-as-place bb x :mut)))
@@ -1659,12 +1779,13 @@
               (let [[bb s] (as-operand bb scope src :no)]
                 [bb (list 'cast (cast-kind st* (:ty x)) (op-form s) (ty-form (:ty x)))])))
     :pointer-coercion (let [[bb s] (as-operand bb scope (:source x) :no)]
-                        [bb (list 'cast (str "PointerCoercion(" (:cast x) ", Implicit)") (op-form s) (ty-form (:ty x)))])
+                        [bb (list 'cast (str "PointerCoercion(" (:cast x) (if (:from-cast x) ", AsCast)" ", Implicit)")) (op-form s) (ty-form (:ty x)))])
     :repeat (let [n (c/print-const (:count x))]
               (if (= "0" (str n))
                 (unsupported "a zero-length repeat")
                 (let [[bb o] (as-operand bb scope (:value x) :no)]
-                  [bb (list 'repeat (op-form o) (str n))])))
+                  ;; RF15: the count's constant kept for an instance's substitution (a const parameter: `[0; R]`)
+                  [bb (with-meta (list 'repeat (op-form o) (str n)) {:count (:count x)})])))
     :array (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
              [bb (list 'aggregate (list 'array (ty-form (second (:ty x)))) (mapv op-form os))])
     :tuple (let [[bb os] (reduce (fn [[bb os] f] (let [[bb o] (as-operand bb scope f :maybe)] [bb (conj os o)])) [bb []] (:fields x))]
@@ -1683,7 +1804,7 @@
                    names (if (seq (:upvar-names info)) (mapv str (:upvar-names info)) (mapv str (range (count os))))]
                [bb (list 'aggregate (list 'closure text [] (vec (take (count os) names)) span) (mapv op-form os))])
     (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] [bb (use-rv unit-const)])
-    (:literal :zst-literal :named-const :static-ref :const-op) [bb (use-rv (as-constant x))]
+    (:literal :zst-literal :named-const :static-ref :const-op :const-param) [bb (use-rv (as-constant x))]
     ;; the rest: an operand (into a temporary)
     (let [[bb o] (as-operand bb scope x :no)] [bb (use-rv o)])))
 
@@ -1779,13 +1900,21 @@
                           bb (blk (expr-into-dest pl bb v))]
                       (assign! bb dest (use-rv [:move bp]))
                       bb)
+                  (if (let [ft (:ty (:fun x))] (and (= :fndef (first ft)) (str/ends-with? (str (second ft)) "intrinsics::write_via_move")))
+                    ;; RF13d: write_via_move(ptr, val): `*ptr = val` without any drop (into.rs's intrinsic lowering: the
+                    ;; pointer a local operand's place, the value built into its deref; the destination left unassigned)
+                    (let [[bb _] (as-local-operand bb (:fun x))
+                          [p v] (:args x)
+                          [bb po] (as-local-operand bb p)
+                          pp (or (when (#{:move :copy} (first po)) (second po)) (unsupported "a write_via_move pointer" (first po)))]
+                      (blk (expr-into-dest (project pp [:deref]) bb v)))
                   (let [[bb f] (as-local-operand bb (:fun x))
                         [bb args] (reduce (fn [[bb as] a] (let [[bb o] (as-local-call-operand bb a)] [bb (conj as o)])) [bb []] (:args x))
                         ok (start-new-block!)]
                     (record-operands-moved! args)
                     (terminate! bb (list 'call (vary-meta (op-form f) assoc :call-span (caller-span x)) (mapv op-form args) (place-form dest) ok '(continue)))
                     (diverge-from! bb)
-                    ok))
+                    ok)))
             :use (expr-into-dest dest bb (:source x))
             :borrow (let [[bb p] (if (= :shared (:bk x)) (as-read-only-place bb (:arg x)) (as-place bb (:arg x)))]
                       (assign! bb dest (list 'ref (:bk x) (place-form p))) bb)
@@ -1802,11 +1931,13 @@
                                                 [i (consume (project pb [:field i ft]))]))])
                                 [bb m])
                        os (keep #(get m %) (range n))
-                       x (assoc x :active (vec (sort (keys m))))]
+                       x (assoc x :active (vec (sort (keys m))))
+                       ;; RF13d: the struct's user type (`Self { .. }`) pushed once its operands are built (as_rvalue's Adt)
+                       _ (when-let [u (:user-ty x)] (push-user-type! u (:span x) (:ty x)))]
                    (assign! bb dest (list 'aggregate (adt-agg x os) (mapv op-form os))) bb)
             (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] (assign! bb dest (use-rv unit-const)) bb)
             (:continue :break :return) (blk (stmt-expr bb x nil))
-            (:var-ref :upvar-ref :field :deref :index)
+            (:var-ref :upvar-ref :field :deref :index :value-type-ascription)
             (let [[bb p] (as-place bb x)] (assign! bb dest (use-rv (consume p))) bb)
             ;; rvalues and constants
             (let [[bb rv] (as-local-rvalue bb x)] (assign! bb dest rv) bb))]
@@ -2227,18 +2358,27 @@
 
 (defn- str-eq-fn [] [:fndef "core::cmp::PartialEq::eq" [[:str] [:str]]])
 
+(defn- switch-bits
+  "RF13b: a SwitchInt value as SwitchTargets holds it (u128 bits: an i8 discriminant's -1 is 255)"
+  [v t]
+  (if (and (integer? v) (neg? v) (signed? t))
+    (+ v (pow2 (int-bits (second t))))
+    v))
+
 (defn- perform-test!
   "perform_test: TEST of PLACE at BB, each branch to its target block (else OTHERWISE)"
   [bb otherwise place test targets]
   (let [target (fn [br] (or (some (fn [[b blk]] (when (= b br) blk)) targets) otherwise))]
     (case (first test)
       :switch (let [adt (second test)
-                    vals (keep (fn [[vi d]] (when-let [b (some (fn [[br blk]] (when (= br [:variant vi]) blk)) targets)] [d b]))
+                    dty (tc/discr-ty adt)
+                    vals (keep (fn [[vi d]] (when-let [b (some (fn [[br blk]] (when (= br [:variant vi]) blk)) targets)] [(switch-bits d dty) b]))
                                (map-indexed vector (tc/discriminant-values adt)))
                     d (temp! (tc/discr-ty adt))]
                 (assign! bb d (list 'discriminant (place-form place)))
                 (terminate! bb (list 'switch (op-form [:move d]) (vec vals) (target [:failure]))))
-      :switch-int (let [vals (keep (fn [[br blk]] (when (= :const (first br)) [(second (nth (second br) 3)) blk])) targets)]
+      :switch-int (let [pt (place-ty place)
+                        vals (keep (fn [[br blk]] (when (= :const (first br)) [(switch-bits (second (nth (second br) 3)) pt) blk])) targets)]
                     (terminate! bb (list 'switch (op-form [:copy place]) (vec vals) (target [:failure]))))
       :if (terminate! bb (list 'switch (op-form [:copy place]) [[0 (target [:failure])]] (target [:success])))
       :string-eq (let [succ (target [:success]) fail (target [:failure])
@@ -2615,7 +2755,9 @@
   (let [bt (p-ty pl)]
     (case (first bt)
       :tuple [(parse-long (str (:ident e))) 0]
-      :adt (let [d (second bt)] (if (number? d) [(field-index (tc/single-variant d) (:ident e)) 0] (unsupported "a std field")))
+      :adt (let [d (second bt)] (cond (number? d) [(field-index (tc/single-variant d) (:ident e)) 0]
+                                      (and (string? d) (not (tc/enum? d)) (get (:adts c/*si*) d)) [(field-index d (:ident e)) 0]
+                                      :else (unsupported "a std field")))
       (unsupported "a field of" bt))))
 
 (defn- cat-overloaded-place [e base]
@@ -3022,10 +3164,16 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Bodies (mod.rs: construct_fn, args_and_body)
 
+(def ^:dynamic *span-origin* nil)   ; RF12: a span of a macro's output -> its place (arbace.rust.front.expand/virtual-origin)
+
 (defn- span-text [sp]
-  (cond (and (vector? sp) (= 5 (count sp))) (let [[f l1 c1 l2 c2] sp] (str f ":" l1 ":" c1 ": " l2 ":" c2))
+  (cond (and *span-origin* (vector? sp) (= 4 (count sp)) (*span-origin* sp)) (span-text (*span-origin* sp))
+        (and (vector? sp) (= 5 (count sp))) (let [[f l1 c1 l2 c2] sp] (str f ":" l1 ":" c1 ": " l2 ":" c2))
+        ;; RF12: a place in a macro's definition as the expansion writes it ((span FILE l1 c1 l2 c2 MARK))
+        (and (seq? sp) (= 'span (first sp)) (string? (second sp)) (not (str/starts-with? (second sp) "<")))
+        (let [[_ f l1 c1 l2 c2] sp] (str f ":" l1 ":" c1 ": " l2 ":" c2))
         (vector? sp) (let [[l1 c1 l2 c2] sp] (str *root-file* ":" l1 ":" c1 ": " l2 ":" c2))
-        :else "?"))
+        :else (if (System/getenv "SPAN_DEBUG") (str "?" (pr-str sp)) "?")))
 
 (defn- push-user-type!
   "as_constant's push_cuta: a constant's user type annotation (its canonical user type, its span, the inferred type)"
@@ -3073,8 +3221,8 @@
                "")
      :user-types (vec (for [{:keys [span ty text]} (:user-types s)]
                         (if text text
-                        (let [[l1 c1 l2 c2] span t (ty-text ty)]
-                          (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ", inferred_ty: " t)))))}))
+                        (let [t (ty-text ty)]
+                          (str "user_ty: Canonical { value: Ty(" t "), max_universe: U0, var_kinds: [] }, span: " (span-text span) ", inferred_ty: " t)))))}))
 
 (defn uninhabited-adt?
   "An ADT with no variant (the crate's enums, std's Infallible), the slice's uninhabited ADTs"
@@ -3096,17 +3244,32 @@
   "A body's name as write_mir_pretty prints it: its def path, an impl as `<impl at FILE:L:C: L:C>`"
   [d]
   (let [p (c/def-of (:parent d))]
-    (if (and p (str/starts-with? (str (:kind p)) "Impl") (sequential? (:span (:node p))))
+    (cond
+      ;; RF12: a closure: its body's owner's name (an impl's method `<impl at ..>::cmp`), then `{closure#N}`
+      (and p (= "Closure" (:kind d)) (#{"Fn" "AssocFn" "Closure"} (:kind p)))
+      (str (mir-name p) "::{closure#" (:disamb d) "}")
+      ;; RF13b: an item nested in a function (assert_unsafe_precondition!'s `precondition_check`): its owner's name, then its
+      ;; own (the forced impl filename reaches through the whole path)
+      ;; (RF13d: a const or static item nested in a function too: `<impl at ..>::from_nanos::NANOS_PER_SEC`)
+      (and p (or (#{"Fn" "AssocFn"} (:kind d)) (str/starts-with? (str (:kind d)) "Const") (str/starts-with? (str (:kind d)) "Static"))
+           (#{"Fn" "AssocFn"} (:kind p)))
+      (str (mir-name p) "::" (second (:data d)))
+      (and p (str/starts-with? (str (:kind p)) "Impl") (sequential? (:span (:node p))))
       (let [[l1 c1 l2 c2] (:span (:node p))
             ;; def_span: an impl's header, to its self type (its where clause) when the item's text is the root file's
-            [l2 c2] (let [st (:span (:self-ty (:node p)))
-                          wh (keep :span (:where (:generics (:node p))))]
-                      (if (and (sequential? st) (= l1 (first st)) (not (some #{:derive} [(:derive (:node p))])))
+            [l2 c2] (let [st (or (:mv-span (:self-ty (:node p))) (:span (:self-ty (:node p))))
+                          wh (if-let [ws (:where-span (:generics (:node p)))] [ws] (keep :span (:where (:generics (:node p)))))]
+                      ;; (RF13d: the self type on a later line of the header too: `impl .. FromResidual<..>\n    for Result<T, F>`)
+                      (if (and (sequential? st) (<= l1 (first st) l2) (not (some #{:derive} [(:derive (:node p))])))
                         (let [e (or (last (sort (map (fn [x] [(nth x 2) (nth x 3)]) wh))) [(nth st 2) (nth st 3)])]
                           (if (pos? (compare [l2 c2] e)) e [l2 c2]))
                         [l2 c2]))]
-        (str "<impl at " *root-file* ":" l1 ":" c1 ": " l2 ":" c2 ">::" (second (:data d))))
-      (binding [c/*in-value* true] (c/print-def-path (:id d) [])))))
+        ;; the impl's parent's path first (an impl in a module or a body: `hint::<impl at ..>::f`; the crate root's prints nothing)
+        (let [pp (c/def-of (:parent p))
+              ;; RF13b: an impl inside a function (`write_default`'s Guard): the function's own MIR name first
+              pre (if (and pp (#{"Fn" "AssocFn"} (:kind pp))) (mir-name pp) (binding [c/*in-value* true] (c/print-def-path (:parent p) [])))]
+          (str pre (when (seq pre) "::") "<impl at " (span-text [l1 c1 l2 c2]) ">::" (second (:data d)))))
+      :else (binding [c/*in-value* true] (c/print-def-path (:id d) [])))))
 
 (defn build-discriminant
   "construct_const for an explicit discriminant (`A = 1`): the anonymous constant `Variant::{constant#0}`"
@@ -3134,7 +3297,7 @@
 
 (defn- scalar-size [t]
   (case (first t)
-    (:int :uint) (quot (int-bits (second t)) 8) :bool 1 :char 4 :float (if (= "f32" (second t)) 4 8)
+    (:int :uint) (quot (int-bits (second t)) 8) :bool 1 :char 4 :float (case (second t) "f16" 2 "f32" 4 "f128" 16 8)
     nil))
 
 (defn- const-eval-bytes
@@ -3184,10 +3347,16 @@
                            (enter-scope! [(:hir-id x) :call-site])
                            (enter-scope! [(:hir-id x) :arguments])
                            (swap! *rt* assoc-in [:cx :var-parent] nil)
+                           ;; RF13c: the initializer's destruction scope (region.rs' visit_body for a non-fn body), so a
+                           ;; temporary not extended (a match's scrutinee) dies at the initializer's end
+                           (enter-scope! [(:hir-id x) :destruction])
                            (resolve-local nil x) @*rt*)
                   *b* (atom {:blocks [] :locals [{:ty t :mut true :scope 0}] :source-scopes [[nil nil]] :source-scope 0 :debug []
                              :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
-                             :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
+                             :block-context [] :check-overflow (boolean (or (:overflow-checks opts)
+                                                                               ;; RF13d: Builder::new: constants always check
+                                                                               ;; overflow (BodyOwnerKind::Const)
+                                                                               (= kind :const)))})]
           (let [tx (mirror-expr x)]
             (start-new-block!)
             (let [bb (blk (expr-into-dest (place 0) 0 tx))]
@@ -3195,6 +3364,56 @@
               (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
                 (when-let [r (nth blocks 0)] (terminate! r '(resume))))
               (finish d (mir-name d) kind 0 t))))))))
+
+(defn inline-const-suffix
+  "RF13e: an inline const's disambiguators after its fn's path (`::{constant#0}`, `::{constant#0}::{constant#0}` for one
+  inside another)"
+  [e]
+  (apply str (map #(str "::{constant#" % "}") (or (:index-path e) [(:index e)]))))
+
+(defn inline-consts
+  "RF13d: a fn's inline consts (ExprKind::ConstBlock in its own body, not a closure's): their HIR expressions, in the order
+  of their `{constant#N}`; RF13e: an inline const's own inline consts too (offset_of!'s in a `const { assert!(..) }`)"
+  [d]
+  (let [acc (atom [])]
+    (letfn [(w [x] (cond (map? x) (cond (= :const-block (:kind x)) (do (swap! acc conj x) (w (:expr x)))
+                                         (= :closure (:kind x)) nil
+                                         :else (doseq [v (vals x)] (w v)))
+                         (sequential? x) (doseq [v x] (w v))
+                         :else nil))]
+      (w (:body (:node d))))
+    (sort-by #(or (:index-path %) [(:index %)]) (fn [a b] (compare (vec a) (vec b))) @acc)))
+
+(defn build-inline-const
+  "RF13d: construct_const for an inline const (`const { MaybeUninit::uninit() }`) of the fn D: its block into the return
+  place, typed by the fn's typeck root (an InlineConst shares its parent's typeck results), its region tree the parent's
+  (region_scope_tree of the typeck root: visit_body of a non-fn body, var_parent none, a destruction scope)"
+  [d e opts]
+  (let [{:keys [res closures]} (root-analysis d (or (:edition opts) 2024) (:root-cache opts))
+        x (:expr e)
+        t (tc/erase-ty (or (:ty (get res (:hir-id e))) (unsupported "an inline const without a type")))
+        name (str (mir-name d) (inline-const-suffix e))]
+    (tc/with-solver d
+      (fn []
+        (binding [*edition* (or (:edition opts) 2024) *res* res *self-var* nil *names* {}
+                  *body-def* (:id d)   ; (RF13e: its own inline consts named under the fn's path)
+                  *closure-info* closures *upvars* #{} *captures* []
+                  *tree* (binding [*rt* (atom {:parent {} :var {} :cx {:parent nil :var-parent nil}})]
+                           (enter-scope! [(:hir-id x) :call-site])
+                           (enter-scope! [(:hir-id x) :arguments])
+                           (swap! *rt* assoc-in [:cx :var-parent] nil)
+                           (enter-scope! [(:hir-id x) :destruction])
+                           (resolve-local nil x) @*rt*)
+                  *b* (atom {:blocks [] :locals [{:ty t :mut true :scope 0}] :source-scopes [[nil nil]] :source-scope 0 :debug []
+                             :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
+                             :block-context [] :check-overflow true})]   ; (an inline const is BodyOwnerKind::Const: overflow checked)
+          (let [tx (mirror-expr x)]
+            (start-new-block!)
+            (let [bb (blk (expr-into-dest (place 0) 0 tx))]
+              (terminate! bb '(return))
+              (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
+                (when-let [r (nth blocks 0)] (terminate! r '(resume))))
+              (finish d name :anon-const 0 t))))))))
 
 (defn anon-const-body
   "An anonymous constant of an array type's length or a repeat's count (`[T; 3]`, `[x; 3]`): its literal as usize"
@@ -3237,8 +3456,16 @@
                                      (:captures info))))]
     (tc/with-solver root
       (fn []
+        (let [;; RF12: typeck's liberated signature is normalized (`-> <usize as Add>::Output` is `-> usize`)
+              norm (fn [t] (if (and (not closure?) (vector? t))
+                             (try (let [n (tc/normalize-deep t)] (when (and (System/getenv "BUILD_NORM") (= :proj (first n))) (prn :norm t)) n)
+                                  (catch Throwable e (when (System/getenv "BUILD_TRACE") (.printStackTrace e)) t))
+                             t))
+              sig (if closure? sig (-> sig (update :inputs #(mapv norm %)) (update :output norm)))
+              ret (:output sig)]
         (binding [*edition* ed
                   *self-var* nil *names* {}
+                  *body-def* (when-not closure? (:id d))
                   *res* res
                   *closure-info* closures
                   *closure-tys* (into {} (for [[_ ci] closures :when (= :closure (first (:ty ci)))] [(second (:ty ci)) (mapv :ty (:captures ci))]))
@@ -3248,7 +3475,9 @@
                   *tree* (binding [*edition* ed] (scope-tree pats body-expr))
                   *b* (atom {:blocks [] :locals [{:ty ret :mut true :scope 0}] :source-scopes [] :source-scope 0 :debug []
                              :scopes [] :breakables [] :if-then nil :unwind (drop-tree) :var-indices {} :unit-temp nil
-                             :block-context [] :check-overflow (boolean (:overflow-checks opts))})]
+                             :block-context [] :check-overflow (boolean (or (:overflow-checks opts)
+                                                                               ;; Builder::new: `#[rustc_inherit_overflow_checks]` checks too
+                                                                               (some #(= "rustc_inherit_overflow_checks" (:unparsed %)) (:attrs (:node d)))))})]
           (let [params (mapv (fn [p t] {:pat (lower-pattern (:pat p)) :ty t}) (:params n) (:inputs sig))
                 params (if closure? (into [{:pat nil :ty env-ty}] params) params)
                 _ (when-let [sp (first (filter #(= "self" (:name (:pat %))) params))] (set! *self-var* (:var (:pat sp))))
@@ -3289,7 +3518,7 @@
                   (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
                     (when-let [r (nth blocks 0)] (terminate! r '(resume))))
                   ret-block)))
-            (finish d name :fn (count params) ret)))))))
+            (finish d name :fn (count params) ret))))))))
 
 (defn- upvar-symbol-fields
   "CapturedPlace::to_symbol's field names (`x__field`), derefs ignored"

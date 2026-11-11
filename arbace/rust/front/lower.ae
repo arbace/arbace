@@ -55,6 +55,31 @@
 (def ^:dynamic *lt-types* #{})      ; the crate's own types with lifetime parameters (by name)
 (def ^:dynamic *seg-res* nil)       ; the resolution of the path's last segment (its type), while its arguments are lowered
 (def ^:dynamic *std-lts* {})        ; std's types: def path -> number of lifetime parameters (RFP10: the helper's --std-names data)
+(def ^:dynamic *anon-index* nil)    ; RF13c: a fn's anonymous constants (AST AnonConst forms) -> their `{constant#N}` disambiguator
+
+(defn- anon-consts-index
+  "RF13c: the DefCollector's AnonConst and InlineConst definitions under a fn item, in its walk order (generics, the
+  signature, the body; an array length, a repeat count, a const block, a braced const argument), each its parent's
+  `{constant#N}`: identity map from the AST form to N. A closure's, a nested item's and an anonymous constant's own
+  contents have other parents."
+  [f]
+  ;; RF13e: an anonymous constant's own anonymous constants are its children (`f::{constant#0}::{constant#0}`: offset_of!'s
+  ;; inline const in an inline const), each mapped to its path of disambiguators from the fn
+  (let [m (java.util.IdentityHashMap.)]
+    (letfn [(w [x pre n]
+              (cond (seq? x)
+                    (case (first x)
+                      AnonConst (let [path (conj pre (swap! n inc))]
+                                  (.put m x path)
+                                  (let [n2 (atom -1)] (doseq [y (rest x)] (w y path n2))))
+                      Item nil
+                      (if (and (= 'Expr (first x)) (= 'Closure (head (fv x :kind))))
+                        nil
+                        (doseq [y (rest x)] (w y pre n))))
+                    (vector? x) (doseq [y x] (w y pre n))
+                    :else nil))]
+      (let [n (atom -1)] (w (fv f :generics) [] n) (w (fv f :sig) [] n) (w (fv f :body) [] n)))
+    m))
 
 (defn- next-id [] (when *owner* [(first @*owner*) (second (swap! *owner* update 1 inc))]))
 (defn- node [m] (assoc m :hir-id (next-id)))
@@ -268,6 +293,8 @@
                   ga (:args (peek (:segs path)))]
               {:trait path
                :polarity (fv (fv p :modifiers) :polarity)
+               ;; RF13b: `[const] Trait`, `const Trait` (BoundConstness), as HIR's pretty printer writes them
+               :constness (let [c (fv (fv p :modifiers) :constness)] (case (if (seq? c) (first c) c) Maybe :maybe Always :always nil))
                :bound-params (vec (fv p :bound_generic_params))
                :bound-names (vec (keep #(id-name (fv % :ident)) (fv p :bound_generic_params)))
                ;; Fn sugar's elided input lifetimes are the poly trait ref's fresh late-bound parameters
@@ -280,7 +307,7 @@
   (let [k (fv t :kind) sp (span-of t)]
     (node
      (merge
-      {:node :ty :span sp}
+      (cond-> {:node :ty :span sp} (fv t :mv-span) (assoc :mv-span (fv t :mv-span)))
       (cond
         (= 'Infer k) {:kind :infer}
         (= 'Never k) {:kind :never}
@@ -298,6 +325,8 @@
                 {:kind :ref :lifetime (cond lname lname *sig* "'_" :else nil) :unwritten (nil? lname) :mt (lower-mt mt)})
           PinnedRef {:kind :err}
           Ptr {:kind :ptr :mt (lower-mt (second k))}
+          ;; RF12: a pattern type (`pattern_type!(*const T is !null)`)
+          Pat {:kind :pat :ty (lower-ty (second k)) :pat (str/trim (str (nth k 2)))}
           Slice {:kind :slice :ty (lower-ty (second k))}
           ;; :len-span: the length's own span, of any file (RF7 prints an unevaluated length by its source text)
           Array {:kind :array :ty (lower-ty (second k)) :len (lower-expr (fv (nth k 2) :value)) :len-span (fv (fv (nth k 2) :value) :span)}
@@ -322,7 +351,9 @@
 
 (defn- const-like? [rs]
   (some (fn [r] (and (#{'def 'local-def} (first r))
-                     (let [k (str (second r))] (or (str/starts-with? k "Ctor(") (= k "Const") (= k "AssocConst") (= k "Static")))))
+                     (let [k (str (second r))] (or (str/starts-with? k "Ctor(") (= k "Const") (= k "AssocConst") (= k "Static")
+                                                ;; RF13e: DefKind::Const as rustc 1.99 prints it (`Const { is_type_const: false }`)
+                                                (str/starts-with? k "Const {") (str/starts-with? k "AssocConst {")))))
         rs))
 
 (defn lower-pat [p]
@@ -448,6 +479,31 @@
       Assign (ex {:kind :assign :lhs (lower-expr (second k)) :rhs (lower-expr (nth k 2))})
       AssignOp (let [[_ op a b] k] (ex {:kind :assign-op :op (assignops (fv op :node)) :lhs (lower-expr a) :rhs (lower-expr b)}))
       Block (let [[_ b l] k] (ex {:kind :block :block (lower-block b) :label (label-name l)}))
+      ;; RF13c: an inline const (`const { intrinsics::type_name::<T>() }`): its value's expression, typed with the
+      ;; enclosing body's (one typeck root), its `{constant#N}` by the fn's DefCollector order
+      ConstBlock (let [anon (second k) path (when *anon-index* (.get ^java.util.IdentityHashMap *anon-index* anon))]
+                   (if (some? path)
+                     (ex {:kind :const-block :expr (lower-expr (fv anon :value)) :index (peek path) :index-path path})
+                     (ex {:kind :err :ast 'ConstBlock})))
+      ;; RF13e: `builtin # offset_of(Container, fields)` (offset_of!'s expansion): hir::ExprKind::OffsetOf
+      OffsetOf (ex {:kind :offset-of :container (lower-ty (second k)) :fields (mapv id-name (nth k 2))})
+      ;; RF13c: a try block without a `?` of its own (lower_expr_try_block: its tail wrapped in `Try::from_output`, the
+      ;; lang item's call); with one, whose break to the catch scope is not lowered yet, still an error
+      TryBlock (let [b (second k)
+                     own-try? (letfn [(w [x] (cond (and (seq? x) (= 'Expr (first x)))
+                                                   (let [kk (fv x :kind)]
+                                                     (cond (= 'Try (head kk)) true
+                                                           (#{'Closure 'TryBlock} (head kk)) false
+                                                           :else (some w (rest x))))
+                                                   (seq? x) (some w x)
+                                                   (vector? x) (some w x)
+                                                   :else false))]
+                                (boolean (some w (fv b :stmts))))
+                     blk (when-not own-try? (lower-block b))]
+                 (if (and blk (:expr blk))
+                   (let [tail (:expr blk) tsp (:span tail)]
+                     (ex {:kind :block :block (assoc blk :expr (call-e (path-e "from_output" tsp) [tail] tsp)) :label nil}))
+                   (ex {:kind :err :ast 'TryBlock})))
       Let (let [[_ p init] k] (ex {:kind :let :pat (lower-pat p) :init (lower-expr init)}))
       If (let [[_ c t els] k]
            (ex {:kind :if :cond (lower-cond c) :then (block-e (lower-block t) (span-of t))
@@ -528,6 +584,14 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; format_args! (format.rs: flatten_format_args, inline_literals, expand_format_args' bytecode)
 
+(defn- placeholder-span
+  "RF13b: a placeholder's span: the root's [l1 c1 l2 c2], also of a format string a user's macro_rules! passed on
+  (`(span \"<expansion>\" l1 c1 l2 c2 M)` at the literal's root positions)"
+  [s]
+  (cond (vector? s) s
+        (and (seq? s) (= 'span (first s)) (= "<expansion>" (second s)) (pos? (long (nth s 2 0)))) (vec (take 4 (drop 2 s)))
+        :else s))
+
 (defn- fa-template [fa]
   (vec (for [pc (fv fa :template)]
          (case (head pc)
@@ -536,9 +600,9 @@
                              cnt (fn [c] (when-let [c (some-val c)]
                                            (if (= 'Literal (head c)) {:n (second c)}
                                                {:arg (let [i (fv (second c) :index)] (if (= 'Ok (head i)) (second i) -1))
-                                                :span (some-val (fv (second c) :span))})))]
+                                                :span (placeholder-span (some-val (fv (second c) :span)))})))]
                          {:arg (let [i (fv a :index)] (if (= 'Ok (head i)) (second i) -1))
-                          :span (some-val (fv p :span))
+                          :span (placeholder-span (some-val (fv p :span)))
                           :trait (fv p :format_trait)
                           :width (cnt (fv o :width)) :precision (cnt (fv o :precision))
                           :align (some-val (fv o :alignment)) :fill (some-> (some-val (fv o :fill)) second)
@@ -748,7 +812,8 @@
 ;; Items (item.rs)
 
 (defn- lower-generics [g]
-  {:params (vec (for [p (fv g :params)]
+  {:where-span (let [sp (span-of (fv g :where_clause))] (when (and (vector? sp) (seq (fv (fv g :where_clause) :predicates))) sp))
+   :params (vec (for [p (fv g :params)]
                   (let [k (fv p :kind)]
                     {:name (id-name (fv p :ident))
                      :kind (cond (= 'Lifetime k) :lifetime (= 'Type (head k)) :type (= 'Const (head k)) :const :else :type)
@@ -758,11 +823,13 @@
                      :bounds (mapv lower-bound (fv p :bounds))})))
    :where (vec (for [pr (fv (fv g :where_clause) :predicates)]
                  (let [k (fv pr :kind)]
-                   (case (head k)
-                     BoundPredicate (let [b (second k)] {:ty (lower-ty (fv b :bounded_ty)) :bounds (mapv lower-bound (fv b :bounds))
-                                                         :bound-params (vec (fv b :bound_generic_params))})
-                     RegionPredicate (let [b (second k)] {:lifetime (second (fv b :lifetime)) :bounds (mapv lower-bound (fv b :bounds))})
-                     {:other true}))))})
+                   ;; RF12: each predicate's span (an impl's def_span runs to its where clause's last predicate)
+                   (cond-> (case (head k)
+                             BoundPredicate (let [b (second k)] {:ty (lower-ty (fv b :bounded_ty)) :bounds (mapv lower-bound (fv b :bounds))
+                                                                 :bound-params (vec (fv b :bound_generic_params))})
+                             RegionPredicate (let [b (second k)] {:lifetime (second (fv b :lifetime)) :bounds (mapv lower-bound (fv b :bounds))})
+                             {:other true})
+                     (vector? (span-of pr)) (assoc :span (span-of pr))))))})
 
 (defn- implicit-self [params]
   ;; the first parameter `self`, `mut self`, `&self`, `&mut self` with an ImplicitSelf type
@@ -773,6 +840,7 @@
             :else nil))))
 
 (defn- lower-fn [f]
+  (binding [*anon-index* (anon-consts-index f)]
   (let [sig (fv f :sig) d (fv sig :decl) h (fv sig :header)
         params (binding [*sig* true] (lower-fn-decl-params d))
         ;; impl Trait in argument position (at any depth, an associated item constraint's too): a synthetic type parameter
@@ -803,7 +871,7 @@
      :self (implicit-self (fv d :inputs))
      :params params
      :output (let [o (fv d :output)] (when (= 'Ty (head o)) (binding [*sig* true] (lower-ty (second o)))))
-     :body (some-> (some-val (fv f :body)) lower-block)}))
+     :body (some-> (some-val (fv f :body)) lower-block)})))
 
 (defn- use-items [tree prefix sp attrs vis & [file]]
   ;; one item per leaf of a use tree (lower_use_tree), and a ListStem for a nested tree
@@ -842,12 +910,13 @@
                                              :bounds (mapv lower-bound (fv t :bounds)) :ty (some-> (some-val (fv t :ty)) lower-ty)}))
         (merge base {:kind :err})))))
 
-(defn lower-item [it]
+(defn- lower-item-1 [it]
   (let [k (fv it :kind) sp (span-of it) attrs (lower-attrs (fv it :attrs)) vis (vis-of it)]
     (if (= 'Use (head k))
       (mapv (fn [u] (with-owner (node (assoc u :node :item)))) (use-items (second k) [] sp attrs vis))
       (with-owner
-        (let [base {:node :item :span sp :attrs attrs :vis vis :hir-id (next-id)}]
+        (let [base (cond-> {:node :item :span sp :attrs attrs :vis vis :hir-id (next-id)}
+                     (fv it :rf-order) (assoc :order (fv it :rf-order)))]
           [(case (head k)
              ExternCrate (merge base {:kind :extern-crate :orig (some-val (second k)) :ident (id-name (nth k 2))})
              Fn (merge base {:kind :fn} (lower-fn (second k)))
@@ -884,6 +953,18 @@
              MacroDef (merge base {:kind :macro :ident (id-name (second k)) :def (nth k 2)})
              ForeignMod (merge base {:kind :foreign-mod :unsupported true})
              (merge base {:kind :err :ast (head k)}))])))))
+
+(defn lower-item
+  "RF13b: an item, and a foreign block's types after it as items of their own (each its own owner, as rustc's
+  foreign items are), `{:kind :foreign-ty}`"
+  [it]
+  (let [k (fv it :kind)]
+    (if (= 'ForeignMod (head k))
+      (into (lower-item-1 it)
+            (for [fi (fv (second k) :items) :let [fk (fv fi :kind)] :when (= 'TyAlias (head fk))]
+              (with-owner {:node :item :span (span-of fi) :attrs (lower-attrs (fv fi :attrs)) :vis (vis-of fi) :hir-id (next-id)
+                           :kind :foreign-ty :ident (id-name (fv (second fk) :ident))})))
+      (lower-item-1 it))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The crate

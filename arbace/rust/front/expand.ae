@@ -39,6 +39,26 @@
 (def ^:dynamic *frags* nil)    ; atom: placeholder name -> the fragment's tree (names unique in a crate's expansion)
 (def ^:dynamic *site* nil)     ; the root call site [l1 c1 l2 c2] of the expansion being made (line!, column!)
 (def ^:dynamic *sites* nil)    ; atom: mark -> its expansion's root call site
+;; RF12 (arbace.rust.front.core-check): when bound, an atom {:sb StringBuilder :lines N :origin java.util.ArrayList}: every
+;; expansion's appended text is laid after the root's text as a virtual file (each expansion's on lines of its own), and a
+;; foreign span is that place's [l1 c1 l2 c2], so every node of a macro's output has a span of its own (core's macros expand
+;; the same definition's tokens many times: the resolution and the definitions, keyed by span, need them distinct)
+(def ^:dynamic *virtual* nil)
+(def ^:dynamic *prelude-crate* nil)
+;; RF12: when bound, an atom counting definitions in rustc's order: a fragment's own items get their DefIds when the fragment
+;; is collected (visit_ast_fragment_with_placeholders), its macro calls and derives later, one invocation at a time from the
+;; stack (fully_expand_fragment); each Item form gets :rf-order, which collection's impl disambiguators follow
+(def ^:dynamic *def-order* nil)
+
+(defn- number-items [items]
+  (if-not *def-order*
+    items
+    (mapv (fn [it]
+            (if (and (seq? it) (= 'Item (first it)) (not (some #{:rf-order} it))
+                     (not (let [k (second (drop-while #(not= :kind %) it))] (and (seq? k) (= 'MacCall (first k))))))
+              (apply list (concat it [:rf-order (swap! *def-order* inc)]))
+              it))
+          items)))   ; RF12: the crate the injected prelude names (core's own modules: "core")
 (defn- fresh-mark [] (let [m (swap! mark-counter inc)] (when (and *sites* *site*) (swap! *sites* assoc m *site*)) m))
 (def ^:dynamic *mark-crates*
   "When bound to an atom: mark -> the crate of the macro_rules! macro its expansion transcribed (std's macros: the crate
@@ -47,6 +67,7 @@
 
 (defn- root-src ^Src [] (:src *root*))
 
+(declare split-commas fget)
 (declare fset strip-cfg cfg-pred cfg-item include-expr unesc remark-1 rep-vars format-args expand-derives items->stream items-text concat-text attr-name)
 
 ;; ---------------------------------------------------------------------------------------------
@@ -121,6 +142,19 @@
     (assoc it :fspan (vec (take 5 (rest s))))
     it))
 
+(declare virtual-origin)
+
+(defn- with-vorigin
+  "RF12: an item read back from an expansion's output (a macro call's tokens inside it: a virtual span) with the place its
+  token came from, as its first transcription had it (:fspan a definition's place, :orig a root token)"
+  [it s]
+  (if (and *virtual* (vector? s) (>= (count s) 4) (not (:fspan it)) (not (:orig it)))
+    (let [o (virtual-origin (subvec s 0 4))]
+      (cond (= 5 (count o)) (assoc it :fspan o)
+            (= 4 (count o)) (if-let [rt (root-at o)] (assoc it :orig rt) it)
+            :else it))
+    it))
+
 (defn dump-tts->items
   "A dump TokenStream's trees as items: the root's tokens at their spans (context 0) kept; others foreign, marked by
   their span's context (or MARK when given)"
@@ -140,7 +174,8 @@
                          ;; RF10: a std macro definition's token keeps its place in std's sources (a user type
                          ;; annotation's span: `macros.rs:148:28: 148:61`)
                          (and (seq? s) (string? (second s)) (not (str/starts-with? (second s) "<")) (pos? (long (nth s 2))))
-                         (assoc :fspan (vec (take 5 (rest s)))))])))
+                         (assoc :fspan (vec (take 5 (rest s))))
+                         true (with-vorigin s))])))
             Delimited (let [[_ ds dsp delim ts] tr
                             dm (apply hash-map (rest ds)) spm (apply hash-map (rest dsp))
                             kids (dump-tts->items (second ts) mark)]
@@ -151,10 +186,10 @@
                         (if-let [ok (delim-open delim)]
                           (let [oi (or (and (nil? mark) (vector? (:open dm)) (= 4 (count (:open dm))) (root-at (:open dm))
                                             (titem (root-at (:open dm)) 0))
-                                       (with-fspan (titem (ftok ok nil nil nil 0 (keyword (name (:open spm)))) (or mark (span-mark (:open dm)))) (:open dm)))
+                                       (with-vorigin (with-fspan (titem (ftok ok nil nil nil 0 (keyword (name (:open spm)))) (or mark (span-mark (:open dm)))) (:open dm)) (:open dm)))
                                 ci (or (and (nil? mark) (vector? (:close dm)) (= 4 (count (:close dm))) (root-at (:close dm))
                                             (titem (root-at (:close dm)) 0))
-                                       (with-fspan (titem (ftok (open-close ok) nil nil nil 0 (keyword (name (:close spm)))) (or mark (span-mark (:close dm)))) (:close dm)))]
+                                       (with-vorigin (with-fspan (titem (ftok (open-close ok) nil nil nil 0 (keyword (name (:close spm)))) (or mark (span-mark (:close dm)))) (:close dm)) (:close dm)))]
                             [{:g ok :open oi :close ci :kids kids}])
                           kids)))))
         trees)))
@@ -225,10 +260,11 @@
         starts (java.util.ArrayList.)
         origs (java.util.ArrayList.)
         fspans (java.util.ArrayList.)
-        place (fn [^String text kind sym x y z sp mark ^Tok orig & [fspan]]
+        mvspans (java.util.ArrayList.)
+        place (fn [^String text kind sym x y z sp mark ^Tok orig & [fspan mv]]
                 (let [lo (aget pos 0) n (.codePointCount text 0 (.length text))]
                   (.append sb text) (.append sb " ")
-                  (dotimes [_ (inc n)] (.add marks (Long/valueOf (long mark))) (.add origs orig) (.add fspans fspan))
+                  (dotimes [_ (inc n)] (.add marks (Long/valueOf (long mark))) (.add origs orig) (.add fspans fspan) (.add mvspans mv))
                   (aset pos 0 (+ lo n 1))
                   (lx/tok kind lo (+ lo n) sym x y z sp)))
         add-item (fn [it]
@@ -237,10 +273,12 @@
                                   (swap! *frags* assoc nm it)
                                   (.add out (place nm :Ident nm false nil 0 :Alone (long (or (:mv-mark it) 0)) (:mv-orig it) (:mv-fspan it))))
                      :else (let [^Tok t (:t it)]
-                             (if (and (>= (.-lo t) 0) (zero? (long (:mark it))))
+                             ;; RF12: in the virtual file a root token too has a place of its own in each expansion (rustc's
+                             ;; NodeIds: `$arg` used twice is two nodes), its origin kept
+                             (if (and (>= (.-lo t) 0) (zero? (long (:mark it))) (not *virtual*))
                                (.add out t)
                                (.add out (place (tok-text t) (.-kind t) (.-sym t) (.-x t) (.-y t) (.-z t) (.-sp t) (:mark it)
-                                                 (if (>= (.-lo t) 0) t (:orig it)) (:fspan it)))))))]
+                                                 (if (>= (.-lo t) 0) t (:orig it)) (:fspan it) (:mv-span it)))))))]
     (doseq [it items]
       (.add starts (Long/valueOf (.size out)))
       (let [fl (flat [it] (java.util.ArrayList.))]
@@ -257,8 +295,75 @@
           (cond (contains? open-close k) (.add stk (Long/valueOf i))
                 (contains? #{:CloseParen :CloseBrace :CloseBracket} k)
                 (let [o (long (.remove stk (dec (.size stk))))] (aset mt (int o) (int i)) (aset mt i (int o))))))
-      {:src (lx/source (str sb)) :toks toks :mt mt :n0 n0 :marks (long-array (map long marks)) :origs (.toArray origs) :fspans (.toArray fspans)
+      {:src (lx/source (str sb)) :toks toks :mt mt :n0 n0 :marks (long-array (map long marks)) :origs (.toArray origs) :fspans (.toArray fspans) :mvspans (.toArray mvspans)
        :starts (vec starts) :eof (dec cnt)})))
+
+(defn virtual-text "The root's text and the expansions' laid after it (RF12)" [] (str (:sb @*virtual*)))
+
+(defn- virtualize
+  "RF12: the assembled array's appended text laid in the virtual file, its segment's source and first line kept"
+  [ctx]
+  (if-not *virtual*
+    ctx
+    (let [^String text (.-text ^Src (:src ctx))
+          n0 (long (:n0 ctx))
+          from (.offsetByCodePoints text 0 (int (min (inc n0) (.codePointCount text 0 (.length text)))))
+          seg (subs text from)
+          v @*virtual*
+          base (inc (long (:lines v)))
+          ^StringBuilder sb (:sb v)]
+      (.append sb "\n") (.append sb seg)
+      (let [vsrc (lx/source seg) nl (count (filter #(= % \newline) seg))]
+        (swap! *virtual* #(-> % (assoc :lines (+ (long (:lines v)) 1 nl))
+                              (update :segs (fnil conj []) {:base base :n (inc nl) :vsrc vsrc :n0 n0 :origs (:origs ctx) :fspans (:fspans ctx) :marks (:marks ctx) :mvspans (:mvspans ctx)})))
+        (assoc ctx :vsrc vsrc :vbase base)))))
+
+(defn virtual-origin
+  "RF12: a span of the virtual file as the place its first and last tokens came from: [FILE l1 c1 l2 c2] (a macro's
+  definition in another file, its fragment's metavariable), [l1 c1 l2 c2] (the root file's own tokens), or nil"
+  [sp]
+  (when (and *virtual* (vector? sp) (= 4 (count sp)))
+    (let [[l1 c1 l2 c2] sp
+          seg (some #(when (and (<= (long (:base %)) (long l1)) (< (long l1) (+ (long (:base %)) (long (:n %))))) %) (:segs @*virtual*))]
+      (when seg
+        (let [^Src vs (:vsrc seg) b (long (:base seg)) n0 (long (:n0 seg))
+              pos (fn [l c] (let [li (- (long l) b)] (when (< -1 li (.-nlines vs)) (+ (aget ^ints (.-lines vs) (int li)) (dec (long c))))))
+              a (or (pos l1 c1) 0) z (some-> (pos l2 c2) dec)
+              at (fn [^objects arr p] (let [i (- (+ (long p) n0 1) n0 1)] (when (and arr p (< -1 i (alength arr))) (aget arr i))))
+              ;; a substituted identifier's metavariable span (transcribe.rs' maybe_use_metavar_location) at either end: a
+              ;; span from the definition's tokens to it is the definition's (Span::to of different contexts)
+              za (max (long a) (long (or z a)))
+              fa0 (at (:fspans seg) a) fz0 (at (:fspans seg) za)
+              ma (at (:mvspans seg) a) mz (at (:mvspans seg) za)
+              ;; RF13c: a span of one substituted token (`$($arg)*`'s `is_reading`, a literal through `$t:tt`) keeps the
+              ;; token's own place (maybe_use_metavar_location returns the token unchanged without a collision)
+              multi? (and (not= a za) (not (and ma (identical? ma mz))))
+              file5 (fn [x] (when (and (vector? x) (= 5 (count x))) x))
+              fa (or fa0 (when multi? (file5 ma)))
+              fz (if (and (file5 mz) fa (= (first fa) (first mz)) (or (nil? fz0) (not= (first fz0) (first fa)))) mz fz0)
+              rn (.-n ^Src (:root-src @*virtual*))
+              root-tok (fn [^Tok t] (when (and t (<= 0 (.-lo t)) (<= (.-hi t) rn)) t))
+              ^Tok oa (root-tok (at (:origs seg) a)) ^Tok oz (root-tok (at (:origs seg) (max (long a) (long (or z a)))))]
+          (cond (and fa fz (= (first fa) (first fz))) [(fa 0) (fa 1) (fa 2) (fz 3) (fz 4)]
+                (and oa oz) (let [rs (:root-src @*virtual*) [x1 y1] (lx/span-vec rs (.-lo oa) (.-hi oa)) [_ _ x2 y2] (lx/span-vec rs (.-lo oz) (.-hi oz))
+                                  ;; the end a substituted identifier with its metavariable's place in the root file
+                                  [x2 y2] (if (and (vector? mz) (= 4 (count mz)) multi?) [(mz 2) (mz 3)] [x2 y2])
+                                  ;; and the start likewise
+                                  [x1 y1] (if (and (vector? ma) (= 4 (count ma)) multi?) [(ma 0) (ma 1)] [x1 y1])]
+                              [x1 y1 x2 y2])
+                ;; a builtin's tokens (a derive's, format_args!'s): the expansion's call site, as their spans are
+                (and (nil? fa) (nil? oa))
+                (let [^longs ms (:marks seg) m (when (and ms (< -1 (long a) (alength ms))) (aget ms (int a)))]
+                  (when-let [st (:sites @*virtual*)] (get @st m)))
+                :else nil))))))
+
+(defn- vspan
+  "RF12: a foreign span's place in the virtual file (the appended positions LO..HI of the assembled array)"
+  [ctx ^long lo ^long hi]
+  (let [n0 (long (:n0 ctx)) b (dec (long (:vbase ctx)))
+        ;; (an empty span at the segment's start is rustc's dummy to span-vec: its first column)
+        [l1 c1 l2 c2] (or (lx/span-vec (:vsrc ctx) (- lo n0 1) (- hi n0 1)) [1 1 1 1])]
+    [(+ l1 b) c1 (+ l2 b) c2]))
 
 (defn- mark-at ^long [ctx ^long pos]
   (let [n0 (long (:n0 ctx)) ^longs ms (:marks ctx) i (- pos n0 1)]
@@ -281,6 +386,9 @@
   (let [n0 (long (:n0 ctx))]
     (cond (and (zero? lo) (zero? hi)) nil
           (and (< lo n0) (<= hi n0)) (lx/span-vec (:src ctx) lo hi)
+          ;; a span mixing appended and root positions (a macro's `$crate::m::` and a root `$name`): its appended end's
+          (and (:vsrc ctx) (or (> lo n0) (> hi n0)))
+          (let [lo' (if (> lo n0) lo (dec hi)) hi' (if (> hi n0) hi (inc lo'))] (vspan ctx lo' hi'))
           :else (let [m (mark-at ctx (max lo (inc n0)))
                       ^Tok a (orig-at ctx lo) ^Tok b (orig-at ctx (max lo (dec hi)))]
                   (if (and a b)
@@ -337,7 +445,9 @@
                                                    (open-delim-name (.-kind t))
                                                    (cstream ctx (inc i) c)))))
                   (recur (inc i) (conj out (or (invisible-group ctx t)
-                                               (list 'Token (list 'Token :kind (tok-kind-out t) :span (cspan ctx (.-lo t) (.-hi t)))
+                                               (list 'Token (list 'Token :kind (tok-kind-out t) :span (let [sp (cspan ctx (.-lo t) (.-hi t))]
+                                                                                                                   (if (and (:vsrc ctx) (vector? sp) (> (.-lo t) (long (:n0 ctx))))
+                                                                                                                     (conj sp (mark-at ctx (.-lo t))) sp)))
                                                      (symbol (name (.-sp t))))))))))))))
 
 (defn- frag-name [x]
@@ -356,13 +466,42 @@
                 (when (and (seq? idf) (str/starts-with? (str (second idf)) "__rf_g")) (second idf)))))
       nil)))
 
+(defn- offset-of-fields
+  "RF13e: parse_floating_field_access over an expression fragment (offset_of!'s `$($fields:expr)+`): its field chain's
+  idents (`Some.0`: Some, 0), as the parser takes them from the nonterminal's expression; nil when it is not one"
+  [ast]
+  (loop [cur ast out ()]
+    (let [k (when (and (seq? cur) (= 'Expr (first cur))) (nth cur 2 nil))]
+      (cond (and (seq? k) (= 'Field (first k))) (recur (nth k 1) (cons (nth k 2) out))
+            (and (seq? k) (= 'Lit (first k)) (= 'Integer (:kind (apply hash-map (rest (second k))))))
+            (cons (list 'id (str (:symbol (apply hash-map (rest (second k)))))) out)
+            (and (seq? k) (= 'Path (first k)) (= 'None (second k)))
+            (let [segs (:segments (apply hash-map (rest (nth k 2 nil))))]
+              (when (= 1 (count segs)) (cons (:ident (apply hash-map (rest (first segs)))) out)))
+            :else nil))))
+
 (defn cout
   "The parser's tree out of an assembled array, as the dump writes it, the fragments put back"
   [ctx x]
   (let [^Src src (:src ctx) ed (long (:ed *root*)) frags @*frags*]
     (letfn [(o [x]
-              (cond (seq? x) (let [y (apply list (map o x))]
-                               (if-let [nm (frag-name y)] (if-let [f (get frags nm)] (:ast f) y) y))
+              (cond (and (seq? x) (= 'OffsetOf (first x)) (vector? (nth x 2 nil)))
+                    ;; RF13e: a field that is an expression fragment: its chain's idents in its place
+                    (let [y (apply list (map o x))]
+                      (apply list (concat (butlast y)
+                                          [(vec (mapcat (fn [f] (or (when (and (seq? f) (= 'id (first f)) (str/starts-with? (str (second f)) "__rf_g"))
+                                                                      (some-> (get frags (str (second f))) :ast offset-of-fields))
+                                                                    [f]))
+                                                        (last y)))])))
+                    (seq? x) (let [y (apply list (map o x))]
+                               (if-let [nm (frag-name y)]
+                                 (if-let [f (get frags nm)]
+                                   ;; RF12: a type fragment keeps its placeholder's place (the metavariable's, for an impl's def_span)
+                                   (if (and (:vsrc ctx) (= 'Ty (first (:ast f))) (vector? (fget y :span)))
+                                     (apply list (concat (:ast f) [:mv-span (fget y :span)]))
+                                     (:ast f))
+                                   y)
+                                 y))
                     (vector? x) (mapv o x)
                     (instance? Sp x) (cspan ctx (.-lo ^Sp x) (.-hi ^Sp x))
                     (instance? Id x) (let [^Id i x ^Sp s (.-span i) m (mark-at ctx (.-lo s)) sv (cspan ctx (.-lo s) (.-hi s))]
@@ -387,7 +526,9 @@
       (try (f (parser ctx))
            (catch Throwable e
              (if (identical? e ps/perr)
-               (throw (ex-info (str "expand: the parser: " (first (first errs))) {:expand true}))
+               (do (when (System/getenv "EXPAND_DEBUG")
+                     (let [^String t (.-text ^Src (:src ctx))] (println "EXPAND_DEBUG parse failed:" (pr-str (vec errs)) (subs t (.offsetByCodePoints t 0 (int (min (inc (long (:n0 ctx))) (.codePointCount t 0 (.length t)))))))))
+                   (throw (ex-info (str "expand: the parser: " (first (first errs))) {:expand true})))
                (throw e)))))))
 
 (def ^:private parse-pat* (fn [^P p] (ps/parse-pat-allow-top-guard p nil :recover-comma nil nil)))
@@ -395,7 +536,7 @@
 (defn parse-fragment
   "The items parsed as an AST fragment of KIND (:expr :stmts :items :pat :ty), out as the dump writes it"
   [items kind]
-  (let [ctx (assemble items)]
+  (let [ctx (virtualize (assemble items))]
     (parse-with ctx
                 (fn [^P p]
                   (let [r (case kind
@@ -435,6 +576,15 @@
                                (if (and (punct-item? (first r) :Question) false) [nil nil r] [nil (tkind (first r)) (rest r)])
                                [(first r) (tkind (second r)) (drop 2 r)])]
               (recur r (conj out {:rep sub :sep sep :op op})))
+            ;; RF12: a metavariable expression (mbe/metavar_expr.rs): ${ignore($x)}, ${index(D)}, ${len(D)}, ${count($x, D)}
+            (and transcriber? (:g nx) (= :OpenBrace (:g nx)))
+            (let [[f args] (:kids nx)
+                  as (when (:g args) (split-commas (:kids args)))
+                  arg (fn [k] (let [a (nth as k nil)]
+                                (cond (nil? a) nil
+                                      (punct-item? (first a) :Dollar) {:var (tsym (second a))}
+                                      :else {:depth (parse-long (str (tsym (first a))))})))]
+              (recur (drop 2 xs) (conj out {:mvx (tsym f) :a0 (arg 0) :a1 (arg 1)})))
             (and (ident-item? nx) (= "crate" (tsym nx)) transcriber?)
             (recur (drop 2 xs) (conj out (cond-> {:crate true}
                                            ;; (RF10: `$crate`'s place in std's macro: `$`'s start to `crate`'s end)
@@ -455,6 +605,9 @@
   (loop [xs items arms []]
     (cond
       (empty? xs) arms
+      ;; RF12: a `macro NAME(MATCHER) { BODY }` (macros 2.0, one arm): the matcher's group and the body's
+      (and (= 2 (count xs)) (= :OpenParen (:g (first xs))) (= :OpenBrace (:g (second xs))))
+      [[(parse-matcher (:kids (first xs)) false) (parse-matcher (:kids (second xs)) true)]]
       (or (punct-item? (first xs) :Semi) (punct-item? (first xs) :Comma)) (recur (rest xs) arms)
       :else (let [[m arrow t & r] xs]
               (when-not (and (:g m) (punct-item? arrow :FatArrow) (:g t))
@@ -470,7 +623,7 @@
   "A fragment of KIND parsed from elems at i: [ast next-i] or nil"
   [elems i kind]
   (let [rest-items (subvec elems i)
-        ctx (assemble rest-items)
+        ctx (virtualize (assemble rest-items))
         starts (:starts ctx)]
     (try
       (parse-with ctx
@@ -503,6 +656,11 @@
       (:tok pat) (when (and e (same-tok? (:tok pat) e)) [[(inc i) env]])
       (:group pat) (when (and e (:g e) (= (:g e) (:g (:group pat))))
                      (for [[j env'] (m-seq (:sub pat) 0 (:kids e) 0 env) :when (= j (count (:kids e)))] [(inc i) env']))
+      ;; RF12: a fragment an outer macro passes on (`$compiletime` as `$compiletime:block` again): matched whole, as rustc's
+      ;; nonterminal in its invisible group is by a matcher of its kind
+      (and (:var pat) (:frag e) (not= :tt (:kind pat))
+           (let [fk (:frag e) pk (:kind pat)] (or (= fk pk) (and (#{:expr :expr_2021} fk) (#{:expr :expr_2021} pk)))))
+      [[(inc i) (assoc env (:var pat) e)]]
       (:var pat)
       (case (:kind pat)
         :tt (when e [[(inc i) (assoc env (:var pat) [e])]])
@@ -512,6 +670,21 @@
                        (and e (ident-item? e) (#{"true" "false"} (tsym e))) [[(inc i) (assoc env (:var pat) [e])]]
                        (and e (punct-item? e :Minus) (= :Literal (tkind (nth elems (inc i) nil))))
                        [[(+ i 2) (assoc env (:var pat) [e (nth elems (inc i))])]])
+        ;; RF12: an attribute's item (parse_attr_item: a path, then a delimited group or `= EXPR`, or `unsafe(..)`), bound as
+        ;; its tokens (an attribute's place takes them as written)
+        :meta (when (and e (or (ident-item? e) (punct-item? e :PathSep)))
+                (let [n (count elems)
+                      j (loop [j i]
+                          (cond (and (< j n) (punct-item? (nth elems j) :PathSep)) (recur (inc j))
+                                (and (< j n) (ident-item? (nth elems j)))
+                                (if (and (< (inc j) n) (punct-item? (nth elems (inc j)) :PathSep)) (recur (+ j 2)) (inc j))
+                                :else j))
+                      g (nth elems j nil)]
+                  (cond (:g g) [[(inc j) (assoc env (:var pat) (subvec elems i (inc j)))]]
+                        (and g (punct-item? g :Eq))
+                        (when-let [[f k] (parse-frag-at elems (inc j) :expr)]
+                          [[k (assoc env (:var pat) (into (subvec elems i (inc j)) (:items f)))]])
+                        :else [[j (assoc env (:var pat) (subvec elems i j))]])))
         :vis (cond (and e (ident-item? e) (= "pub" (tsym e)))
                    (if (and (:g (nth elems (inc i) nil)) (= :OpenParen (:g (nth elems (inc i)))))
                      [[(+ i 2) (assoc env (:var pat) [e (nth elems (inc i))])] [(inc i) (assoc env (:var pat) [e])]]
@@ -537,7 +710,28 @@
       :else (throw (ex-info "expand: matcher element" {:pat pat})))))
 
 (defn- rep-vars [pats]
-  (set (mapcat (fn [p] (cond (:var p) [(:var p)] (:rep p) (rep-vars (:rep p)) (:group p) (rep-vars (:sub p)) :else nil)) pats)))
+  (set (mapcat (fn [p] (cond (:var p) [(:var p)] (:rep p) (rep-vars (:rep p)) (:group p) (rep-vars (:sub p))
+                             (:mvx p) (keep #(:var (get p %)) [:a0 :a1])
+                             :else nil)) pats)))
+
+(def ^:dynamic *rep-stack* [])   ; RF12: the transcription's repetitions, outermost first: [[index count] ...]
+
+(defn- int-lit-item [n mark] (titem (ftok :Literal (str n) :Integer nil 0 :Alone) mark))
+
+(defn- metavar-expr
+  "mbe/transcribe.rs' transcribe_metavar_expr: ignore (nothing), index and len of the repetition DEPTH levels out (0 the
+  innermost), count of a variable's repetitions"
+  [p env mark]
+  (let [depth (fn [a] (long (or (:depth a) 0)))
+        at (fn [d] (nth *rep-stack* (- (count *rep-stack*) 1 d) nil))]
+    (case (:mvx p)
+      "ignore" []
+      "index" (if-let [[i _] (at (depth (:a0 p)))] [(int-lit-item i mark)] (throw (ex-info "expand: ${index()} outside a repetition" {:expand true})))
+      "len" (if-let [[_ n] (at (depth (:a0 p)))] [(int-lit-item n mark)] (throw (ex-info "expand: ${len()} outside a repetition" {:expand true})))
+      "count" (let [b (get env (:var (:a0 p))) d (depth (:a1 p))
+                    cnt (fn cnt [b k] (if (and (map? b) (:seq b)) (if (pos? k) (reduce + (map #(cnt % (dec k)) (:seq b))) (count (:seq b))) 1))]
+                [(int-lit-item (cnt b d) mark)])
+      (throw (ex-info (str "expand: metavariable expression " (:mvx p)) {:expand true})))))
 
 (defn- m-seq [pats k elems i env]
   (if (>= k (count pats))
@@ -565,11 +759,26 @@
             ;; transcribe.rs: a token of the definition is Alone; a delimiter keeps its spacing but `]` closes Alone
             (:tok p) [(if (:t (:tok p)) (remark-1 (:tok p) mark :Alone) (:tok p))]
             (:crate p) [(cond-> (titem (ftok :Ident "$crate" false nil 0 :Alone) mark) (:fspan p) (assoc :fspan (:fspan p)))]
+            (:mvx p) (metavar-expr p env mark)
             (:group p) (let [g (:group p)]
                          [{:g (:g g) :open (remark-1 (:open g) mark) :close (remark-1 (:close g) mark (when (= :OpenBracket (:g g)) :Alone))
                            :kids (transcribe (:sub p) env mark)}])
             (:var p) (let [b (get env (:var p) ::none)]
                        (cond (= b ::none) [(titem (ftok :Dollar nil nil nil 0 :Alone) mark) (titem (ftok :Ident (:var p) false nil 0 :Alone) mark)]
+                             ;; RF12: an item fragment after the transcriber's attributes (`#[$meta] $item`): its tokens, which the
+                             ;; parser takes with the attributes as one item (rustc's NtItem in an invisible group)
+                             (and (map? b) (= :item (:frag b)) (:items b)) (:items b)
+                             ;; RF12: one token for `$var` (an ident, a tt): its metavariable span, the definition's `$var`
+                             (and *virtual* (vector? b) (= 1 (count b)) (:t (first b))
+                                  (let [fa (:fspan (:dollar p)) fz (:fspan (:ident p))] (and fa fz (= (first fa) (first fz)))))
+                             [(assoc (first b) :mv-span (let [fa (:fspan (:dollar p)) fz (:fspan (:ident p))] [(fa 0) (fa 1) (fa 2) (fz 3) (fz 4)]))]
+                             ;; (the root file's own macro: the `$var`'s place there)
+                             (and *virtual* (vector? b) (= 1 (count b)) (:t (first b))
+                                  (let [^Tok a (some-> (:dollar p) item-orig) ^Tok z (some-> (:ident p) item-orig) n (.-n ^Src (root-src))]
+                                    (and a z (< (.-hi a) n) (< (.-hi z) n))))
+                             [(assoc (first b) :mv-span (let [^Tok a (item-orig (:dollar p)) ^Tok z (item-orig (:ident p))
+                                                              [l1 c1] (lx/span-vec (root-src) (.-lo a) (.-hi a)) [_ _ l2 c2] (lx/span-vec (root-src) (.-lo z) (.-hi z))]
+                                                          [l1 c1 l2 c2]))]
                              (map? b) (if (:frag b) [(metavar-frag b p mark)] (throw (ex-info (str "expand: $" (:var p) " still repeating") {:expand true})))
                              :else b))
             (:rep p) (let [vs (filter #(map? (get env %)) (rep-vars (:rep p)))
@@ -578,21 +787,43 @@
                               (for [k (range n)]
                                 (let [env' (reduce (fn [e v] (let [b (get env v)] (if (:seq b) (assoc e v (nth (:seq b) k)) e))) env vs)]
                                   (concat (when (and (pos? k) (:sep p)) [(remark-1 (:sep p) mark :Alone)])
-                                          (transcribe (:rep p) env' mark))))))
+                                          (binding [*rep-stack* (conj *rep-stack* [k n])] (vec (transcribe (:rep p) env' mark))))))))
             :else (throw (ex-info "expand: transcriber element" {:p p}))))
         pats)))
+
+(defn- desugar-doc-comments
+  "RF12: a macro's input's doc comments as the attributes they stand for (`#[doc = r\"..\"]`, `#![doc = ..]` inner), as
+  rustc's matcher sees them (mbe::macro_parser's desugar_doc_comments)"
+  [items]
+  (vec (mapcat (fn [it]
+                 (cond
+                   (:g it) [(assoc it :kids (desugar-doc-comments (:kids it)))]
+                   (= :DocComment (tkind it))
+                   (let [^Tok t (:t it) m (:mark it) text (str (.-sym t))
+                         hashes (if (str/includes? text "\"") (inc (reduce max 0 (map count (re-seq #"#+" text)))) 0)
+                         tk (fn [k] (cond-> (titem (ftok k nil nil nil 0 :Alone) m) (:fspan it) (assoc :fspan (:fspan it))))
+                         lit (cond-> (titem (ftok :Literal text :StrRaw nil hashes :Alone) m) (:fspan it) (assoc :fspan (:fspan it)))
+                         ident (cond-> (titem (ftok :Ident "doc" false nil 0 :Alone) m) (:fspan it) (assoc :fspan (:fspan it)))]
+                     (concat [(tk :Pound)] (when (= :Inner (.-y t)) [(tk :Bang)])
+                             [{:g :OpenBracket :open (tk :OpenBracket) :close (tk :CloseBracket) :kids [ident (tk :Eq) lit]}]))
+                   :else [it]))
+               items)))
 
 (defn expand-rules
   "A macro_rules! call: the first arm whose matcher matches all of the input, transcribed with a fresh mark"
   [mac input]
-  (let [mark (fresh-mark)]
+  (let [mark (fresh-mark)
+        input (if (some #(or (= :DocComment (tkind %)) (:g %)) input) (desugar-doc-comments input) input)]
     (when *mark-crates*
-      (swap! *mark-crates* assoc mark (let [n (str (:name mac))] (if (str/includes? n "::") (first (str/split n #"::")) "crate"))))
+      (swap! *mark-crates* assoc mark (let [n (str (:name mac))] (if (str/includes? n "::") (first (str/split n #"::")) "crate")))
+      ;; RF12: a macro 2.0's tokens resolve at its definition (def-site hygiene)
+      (when-let [m (:def-site mac)] (swap! *mark-crates* assoc [:def-site mark] m)))
     (or (some (fn [[m t]]
                 (when-let [[_ env] (first (filter #(= (count input) (first %)) (m-seq m 0 input 0 {})))]
                   (transcribe t env mark)))
               (:arms mac))
-        (throw (ex-info (str "expand: no arm of " (:name mac) " matches") {:expand true})))))
+        (do (when (System/getenv "EXPAND_DEBUG") (println "EXPAND_DEBUG no arm of" (:name mac) "for" (items-text input)))
+            (throw (ex-info (str "expand: no arm of " (:name mac) " matches") {:expand true}))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Builtin macros
@@ -669,9 +900,36 @@
       "column" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Integer :symbol (str (second (:span call))) :suffix (list 'Some "u32"))) :span (foreign-span m) :attrs [])}
       "file" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (.getCanonicalPath (File. ^String (:file *root*))) :suffix 'None)) :span (foreign-span m) :attrs [])}
       "include" {:ast (include-expr input)}
+      ;; RF12: source_util.rs' include_str! (core's `#[doc = include_str!("..")]`): the file's text, relative to the root file
+      "include_str" (let [[lit] (str-lit-of (first input))
+                          f (File. (.getParentFile (.getAbsoluteFile (File. ^String (:file *root*)))) ^String lit)]
+                      {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (slurp f)) :suffix 'None)) :span (foreign-span m) :attrs [])})
       "cfg" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Bool :symbol (str (boolean (second (cfg-pred input)))) :suffix 'None))
                         :span (foreign-span m) :attrs [])}
       "concat" {:ast (list 'Expr :kind (list 'Lit (list 'Lit :kind 'Str :symbol (esc (concat-text input)) :suffix 'None)) :span (foreign-span m) :attrs [])}
+;; RF12: rustc_builtin_macros/src/pattern_type.rs: `pattern_type!(TY is PAT)`, TyKind::Pat (the pattern kept as its
+      ;; text: core writes `!null` and ranges)
+      "pattern_type"
+      (let [i (first (keep-indexed (fn [i it] (when (and (ident-item? it) (= "is" (tsym it))) i)) input))
+            _ (when-not i (throw (ex-info "expand: pattern_type! without `is`" {:expand true})))
+            ty (parse-fragment (subvec (vec input) 0 i) :ty)]
+        {:ast (list 'Ty :kind (list 'Pat ty (items-text (subvec (vec input) (inc i)))) :span (fget ty :span) :tokens 'None)})
+      ;; RF12: rustc_builtin_macros/src/cfg_select.rs (rustc_parse's parse_cfg_select): arms `PREDICATE => { TOKENS }` or
+      ;; `_ => { TOKENS }` (a non-brace arm's tokens to its comma); the first arm whose predicate holds gives its tokens
+      "cfg_select"
+      (loop [xs (vec input)]
+        (if (empty? xs)
+          (throw (ex-info "expand: cfg_select! has no arm that holds" {:expand true}))
+          (let [arrow (first (keep-indexed (fn [i it] (when (and (punct-item? it :FatArrow)) i)) xs))
+                pred (subvec xs 0 arrow)
+                rest* (subvec xs (inc arrow))
+                body (first rest*)
+                [toks more] (if (= :OpenBrace (:g body))
+                              [(:kids body) (let [r (subvec rest* 1)] (if (and (seq r) (punct-item? (first r) :Comma)) (subvec r 1) r))]
+                              (let [j (or (first (keep-indexed (fn [i it] (when (punct-item? it :Comma) i)) rest*)) (count rest*))]
+                                [(subvec rest* 0 j) (subvec rest* (min (count rest*) (inc j)))]))
+                hold? (or (and (= 1 (count pred)) (= "_" (tsym (first pred)))) (second (cfg-pred pred)))]
+            (if hold? toks (recur more)))))
       (throw (ex-info (str "expand: the builtin " nm " is not taken") {:expand true})))))
 
 (defn include-expr
@@ -697,9 +955,21 @@
   root tokens in one run)"
   [items]
   (let [fl (flat items (java.util.ArrayList.))
-        toks (map :t fl)]
+        toks (map :t fl)
+        ;; RF13b: the root tokens the items came from (a fragment's own items, a transcribed token's :orig), in order
+        roots (letfn [(rts [fl] (mapcat (fn [it] (cond (and (:frag it) (:items it)) (rts (flat (:items it) (java.util.ArrayList.)))
+                                                       (:frag it) [nil]
+                                                       :else [(item-orig it)]))
+                                        fl))]
+                (vec (rts fl)))
+        root-run? (and (seq roots) (every? some? roots)
+                       (every? (fn [[^Tok a ^Tok b]] (<= (.-hi a) (.-lo b))) (partition 2 1 roots)))]
     (cond
       (and (= 1 (count fl)) (:frag (first fl))) (or (:text (first fl)) "")
+      ;; a run of the root's tokens passed on by a macro (`debug_assert!(is_reading(borrow))`): their text
+      (and root-run? (not (every? #(>= (.-lo ^Tok %) 0) toks)))
+      (let [^Tok a (first roots) ^Tok b (peek roots)]
+        (str/replace (lx/text-of (root-src) (.-lo a) (.-hi b)) #"\s+" " "))
       (some :frag fl) (str/join " " (map #(if (:frag %) (or (:text %) "") (tok-text (:t %))) fl))
       (and (seq toks) (every? #(>= (.-lo ^Tok %) 0) toks))
       (let [^Tok a (first toks) ^Tok b (last toks)
@@ -708,7 +978,9 @@
       :else (str/join " " (map tok-text toks)))))
 
 (defn- concat-text [items]
-  (apply str (for [part (split-commas items) :let [it (first part) ^Tok t (:t it)]]
+  (apply str (for [part (split-commas items)
+                   ;; RF12: an expression fragment of one literal (`$message:expr`) is its literal
+                   :let [it (first part) it (if (and (:frag it) (= 1 (count (:items it)))) (first (:items it)) it) ^Tok t (:t it)]]
                (cond (and t (= :Literal (.-kind t)) (= :Str (.-x t))) (unesc (.-sym t))
                      t (.-sym t)
                      :else ""))))
@@ -729,7 +1001,7 @@
   (let [args (fget mac :args)]
     (dump-tts->items (second (fget args :tokens)) nil)))
 
-(def ^:private std-builtins #{"format_args" "format_args_nl" "const_format_args" "panic" "unreachable" "assert" "stringify"
+(def ^:private std-builtins #{"cfg_select" "pattern_type" "include_str" "format_args" "format_args_nl" "const_format_args" "panic" "unreachable" "assert" "stringify"
                               "line" "column" "file" "concat" "include" "cfg"})
 
 (declare expand-form)
@@ -751,9 +1023,16 @@
                   (builtin nm input {:span (or site [0 0 0 0])
                                      ;; RF10: a call written in a std macro's definition: its place there (`$crate::format_args_nl!(..)`)
                                      :fspan (let [cl (some-> (fget mac :args) (fget :dspan) (fget :close))]
-                                              (when (and (seq? sp) (string? (second sp)) (not (str/starts-with? (second sp) "<"))
-                                                         (seq? cl) (= (second sp) (second cl)))
-                                                (list 'span (second sp) (nth sp 2) (nth sp 3) (nth cl 4) (nth cl 5))))})
+                                              (cond
+                                                (and (seq? sp) (string? (second sp)) (not (str/starts-with? (second sp) "<"))
+                                                     (seq? cl) (= (second sp) (second cl)))
+                                                (list 'span (second sp) (nth sp 2) (nth sp 3) (nth cl 4) (nth cl 5))
+                                                ;; RF12: in the virtual file, the call's place in its macro's definition (core's panic!)
+                                                (and *virtual* (vector? sp) (vector? cl))
+                                                (let [a (virtual-origin (subvec sp 0 4)) b (virtual-origin (subvec cl 0 4))]
+                                                  (when (and (= 5 (count a)) (= 5 (count b)) (= (first a) (first b)))
+                                                    (list 'span (a 0) (a 1) (a 2) (b 3) (b 4))))
+                                                :else nil))})
                   (get *std* nm) (expand-rules (get *std* nm) input)
                   :else (throw (ex-info (str "expand: no macro " nm) {:expand true}))))]
     (if (map? r)
@@ -785,7 +1064,15 @@
                     (vec r))
             stmts (if (= style 'Semicolon) (semi-last stmts) stmts)]
         (vec (mapcat expand-stmt stmts)))
-      [(apply list (map expand-form st))])))
+      (do
+        ;; RF12: a macro_rules! a statement defines (inside a block of a macro's output: num's `run_unchecked_loop!`) is in
+        ;; scope from there on, as an item's is
+        (when (and (seq? k) (= 'Item (first k)))
+          (let [ik (fget (second k) :kind)]
+            (when (and (seq? ik) (= 'MacroDef (first ik)))
+              (let [[_ idf md] ik]
+                (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))))
+        [(apply list (map expand-form st))]))))
 
 (defn- item-kind-mac? [it] (let [k (fget it :kind)] (and (seq? k) (= 'MacCall (first k)))))
 
@@ -794,20 +1081,20 @@
     (nil? (cfg-item it)) []
     (not (identical? it (cfg-item it))) (expand-item (cfg-item it))
     (not= it (strip-cfg it)) (expand-item (strip-cfg it))
-    (item-kind-mac? it) (vec (mapcat expand-item (expand-mac (second (fget it :kind)) :items)))
+    (item-kind-mac? it) (vec (mapcat expand-item (number-items (expand-mac (second (fget it :kind)) :items))))
     :else (let [k (fget it :kind)
                 _ (when (and (seq? k) (= 'MacroDef (first k)))
                     ;; a macro_rules! a macro's expansion defines is in scope from there on (textual scoping)
                     (let [[_ idf md] k]
                       (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))
                 [it' derived] (expand-derives it)]
-            (into [(expand-form it')] (mapcat expand-item derived)))))
+            (into [(expand-form it')] (mapcat expand-item (number-items derived))))))
 
 (defn expand-form [x]
   (cond
     (vector? x)
     (cond (and (seq x) (seq? (first x)) (= 'Stmt (first (first x))) (= :kind (second (first x)))) (vec (mapcat expand-stmt x))
-          (and (seq x) (seq? (first x)) (= 'Item (first (first x))) (= :attrs (second (first x)))) (vec (mapcat expand-item x))
+          (and (seq x) (seq? (first x)) (= 'Item (first (first x))) (= :attrs (second (first x)))) (vec (mapcat expand-item (number-items x)))
           :else (mapv expand-form x))
     (and (seq? x) (not= :kind (second x)))
     (apply list (map expand-form x))
@@ -886,10 +1173,12 @@
               ;; RFP38 (a): a caller's atom when bound (the builder's caller locations: each mark's root call site)
               *sites* (or *sites* (atom {}))]
       (reset! mark-counter 1)
+      (when *virtual*
+        (let [t (.-text src)] (reset! *virtual* {:sb (StringBuilder. ^String t) :lines (inc (count (filter #(= % \newline) t))) :root-src src :sites *sites*})))
       (reset! *macros* (collect-user-macros crate))
       (let [items (fget crate :items)
             no-std (some #(= "no_std" (attr-name %)) (fget crate :attrs))
-            items (into (prelude-items ed (if no-std "core" "std")) items)]
+            items (into (prelude-items ed (or *prelude-crate* (if no-std "core" "std"))) items)]
         (fset crate :items (expand-form items))))))
 
 (defn- attr-name [a]

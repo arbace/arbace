@@ -3740,3 +3740,1693 @@ peak is about 8 GiB and the run about 15-20 minutes. The command is in the surve
   pass 15 GiB.
 
 **Correction to the brief.** The day's evidence holds 12 classes in 9 modules (jdk.jdi's 4 among them), not 13 in 10.
+## 2026-11-09: RF12's first slice, core's module files through the front end (branch `rust-rf12`, from `mac/next` 3ef7b3f78)
+
+## 2026-11-09 x86-64 assembly as a crop: the survey (branch `asm-amd64-survey`, from `mac/next` `7da5badcf`)
+
+## 2026-11-09: C++'s programs by Arbace's own route, the refusals' biggest groups closed and the switch prepared (branch `cpp-route`)
+
+- **Measured** (the run corpora's 82 programs, bin/cppi check's lists: samples, runtime, gxx-dg-run's every-25th; `arbace.cpp.codegen
+  gen-batch` as `cppi_ir_route` runs it, no clang): 45 generated at the day's start (e6214cd13), **55** on the branch; the refusals by
+  cause in doc/cpp/CPP-SURVEY.md, "As built: cpp-route". The sampling by our route alone (`CPPI_ROUTE=ours bin/cppi check --corpus
+  gxx-dg-run --sample 25`, no clang): 45 generated and run on ci, **44 pass by their own verdict**, 1 the oracle-text class as under
+  clang, none runs wrong (two more built after, range-for14 and ucnid-1, pass alone); two of the passes (special/initp1.C, cpp0x/defaulted19a.C) are programs clang rejects. Under auto the
+  sampling projects to 62 passes (clang's record 60), none lost. The samples' and runtime's runs are the night's (ci's builder and the
+  runtime's read pass 2.3 GB with their iostream units).
+- **Built** (doc/cpp/CODEGEN.md, G5d; arbace/cpp/sema.ae, codegen.ae, template.ae, arbace/repr/cpp/parse.ae): structured bindings;
+  GNU's `x ?: y`; [expr.cond]'s class-to-scalar operands and same-type rule; aggregates' default member initializers in place with
+  their `this`; value-initialized list fills; lists bound to references; deduction from a reference-typed expression's type; function
+  template redeclarations by their non-type parameters' types; clang's type-parameter test (std::pair's C++17 constructors were declined
+  by the parser); default construction and implicit conversions by constructor templates; explicit template arguments kept for
+  argument-dependent lookup; classes through an ellipsis and va_arg of them (the psABI's §3.5.7); the implicit global allocation
+  functions; `__decltype` at a declaration's start (std::sort); GNU's statement expressions and a range-for's init-statement; universal character names in identifiers (CP337 (b)); the
+  unexpanded-pack diagnosis for a non-type parameter's type. Five samples of test/cpp/codegen (struct-bind, gnu-cond, va-class,
+  agg-dmi, stmt-expr). Tooling: runtime-ci's incremental read no longer drops read.tsv
+  when nothing changed, and `CPPI_CI_CHUNK` reads the runtime in chunks.
+- **Why**: the user's CP240 (b), CP263 (a) and P21 (b) (2026-11-07, 2026-11-08): C++'s eval and AOT count 0.5 while the programs run from
+  clang's recorded IR.
+- **Checked**: codegen-gen: 148 of 149 forms a0c6ad347's byte for byte, the 149th (recursion's bool conditional, now clang's `phi i1`)
+  intended; the record, stale on next since G5c's merges (120 of 149), recorded again: 154 of 154. The dg check's own front end on the
+  every-10th sample: 117 own passes as recorded after cpp0x/variadic170.C's diagnosis (it had passed by a parser decline), 118 at
+  the head (cpp2a/desig29.C). The sampling's AOT level by our route alone (`--aot`, cf2g and TamaGo's go): 44 of the 45 generated
+  pass, as the interpreted level.
+- **Not done** (proposed CP330-CP337 in the survey): inheriting constructors (std::unique_ptr), std::tuple's constructors, coroutines,
+  GNU vector types, the checker's structured bindings, the eval and AOT facts' weighting after the switch, the generation's time.
+- **Alternatives considered**: running the day's samples and runtime by gcc on the lowered C (the oracle tier's judge, not allowed for
+  an own measure); counting the generated programs without running them (no credit without the run); taking the night8 run's whole ci
+  library (its reader is older): only the 13 units no day process could read were taken, their lowered C byte for byte the checkout's.
+- **Slips**: one process substitution in a throwaway comparison; one kill loop that matched its own shell. Recorded in the survey.
+
+- The brief (RF12, doc/rust/FRONTEND-SURVEY.md §7): the front end builds core from the pinned rust-src (Alpine's
+  `rust-src-1.99.1-r0`, `tools/rsdump/apks.sha256`) module by module, judged against rustc's own built MIR of core. Beside RF11
+  (`rust-rf11`): its files (build_run, mono, codegen, front-records) left to it; this slice's edits are in expand, resolve, lower,
+  collect, typeck and build (mir-name, span-text, float constants, signatures) and the new `core_check.ae`.
+- The oracle: the helper as rustc (no trimmed paths, as the programs' oracles) over a copy of `library/core` with `task/wake.rs`'s two
+  self-naming statics patched (rustc's `-Zdump-mir` cycles on them, E0391; the build itself passes): 31,334 built bodies in 35 s and
+  1.2 GB, by hand (`bin/rust-front core-oracle`); rustc's own driver was tried first and turns `trimmed_def_paths` on, so its dump
+  prints `fn assert_unchecked` where the programs' oracles print full paths: rejected for the helper's. The judge keys bodies by the
+  dump's file name (the def path with disambiguators), the printed names being ambiguous (860 duplicates).
+- Considered for the crate's other modules: (a) all of core at once (refused: the rules' 2 GiB a process, core's 173k lines);
+  (b) each module file as the crate's root with the rest of core from std's interface and names, the file's own items local
+  (`localize`, `loc`) — built; (c) core's own collection first, then bodies — the direction: the slice writes core's interface from
+  its own collection module by module (`native-iface.edn`), read by the modules after it.
+- The fixes, by the groups that blocked whole modules: the virtual file for macro output's spans (the front end's facts are keyed by
+  span; core's macros expand one definition many times), their origins mapped back for printed MIR; core's macros 2.0 with def-site
+  hygiene, metavariable expressions, the meta fragment, fragments passed on, item fragments, cfg_select!, concat! of a fragment;
+  resolution in core (crate::, $crate::, ::core::, super::, re-exports, private names from the sources); impls' disambiguators in
+  rustc's DefIndex order; #[rustc_inherit_overflow_checks]; normalized signatures; Self in a trait's generics and Self::Variant in
+  patterns; qualified paths; Copy by the parameter environment; f16 and f128 constants; closures named by their owner; the impls'
+  index (tuple.rs from about 25 minutes to 4).
+- Results (`bin/rust-front core-check`, the 35 modules, 17 min, 2.50 GB peak): bodies built 5,393 of 5,601 (588 of 652 at the slice's
+  first run), 4,578 equal to rustc's built MIR byte for byte (247 at the first run) and 41 more but for the allocations; 33 of 35 modules
+  through every stage (20); whole: ops::arith 500, ops::bit 1,989, default 20, ops::function 5. The pack `rust-core-built`
+  (`418ebb7b...`, 36 members, made by hand with the helper as rustc, `bin/rust-front core-oracle && core-records make`), its kind in
+  `test/oracle-records/kinds.edn`. No REAP cell reads the check: Rust's scores unchanged, eval and AOT at 0.5 (RES54's ceiling).
+- Not done here (RF11's files): a6's core bodies and mono-check's core-closure from the native core; proposals RF12-P1 to P5 in the
+  survey.
+- Note: the essential step's build-check lines fail outside `rust-rf10b` before and after this slice: the pin of `rust-front-built`
+  on next is the pack made in that worktree, whose MIR prints its absolute paths (`{closure@/root/.../rust-rf10b/...}`,
+  `<impl at /root/.../rust-rf10b/...>`); the store also holds a later pack with `@ROOT@` (RF11's?). Runs (7 of 7), mono-check,
+  capture-check and the five controls unchanged.
+- Rule slips (the session's first half): `bin/repr-rust helper` fetched the pinned rustc-dev apk from the network (the main
+  checkout's .tmp lacked it); a run's peak was 1.83 GB under GOMEMLIMIT=1800MiB.
+
+## 2026-11-09: RF12's first slice, second part: RF12-P1, P2, RF11 merged, more groups (branch `rust-rf12`)
+
+- The user's decisions (2026-11-09): RF12-P1 (a), P2 (b), P3 (a), P5 (a); P4 moot (RF11's pack carries `@ROOT@`). `mac/next`
+  `6c3c87c02` merged in (the records' conflicts, both sides kept); `bin/rust-front essential` then equals its known file in this
+  worktree (62 of 62), which confirms P4's diagnosis.
+- P1: the essential step `rust-core-essential` (`bin/rust-front core-essential`: six modules from the pack `rust-core-built`, its own caches,
+  the toolchains stubbed, `test/rust/front/core-essential-known.txt`, the crossed control `_control/core/crossed`): 564 of 567 bodies
+  equal, 3 min 29 s, 1.97 GB; `gate.crops check` 0 problems, `bin/gate --plan` names it, no table error. Considered: all 35 modules
+  (27 min: over the essential tier's time), the oracle tier only (rejected by the decision).
+- P2: one collection pass over the listed files before the bodies (no order between modules), traits now written too.
+- Groups: impl spans through nested macros (tokens read back with their origin, metavariable spans: tuple 168 and `iter::range` +113),
+  pattern types and include_str! (`marker`, `ptr::non_null` through every stage), *mut to *const, bound turbofish variables'
+  annotations, array lengths' integer expressions; the 35 modules now 5,030 of 5,601 bodies equal (4,578 at the first part's end),
+  35 of 35 modules through every stage.
+- P3 not built: a6's `ptr::write_volatile` and its `precondition_check` now build equal to rustc's built MIR, but the run would need a
+  core body translated from core's crate context into the program's, instantiated (`::<i32>`) and its callees collected natively;
+  proposed as RF12-P6 with the night's whole-core interface pass (RF12-P7).
+- Every run under 2.5 GB (GOMEMLIMIT 2400MiB), one core-check at a time, no network.
+
+## 2026-11-09: RF12-P6's preparation, RF12-P7's night slot (branch `rust-rf12`)
+
+- The user decided RF12-P6 (a) and RF12-P7 (a) (night 11). The slot `.tmp/night11/slots/rust-core.sh` was written: `CORE_IFACE_FILES=all`,
+  `CORE_IFACE_ONLY=1` (new in core-check), then the slice's modules with the cached interface; GOMAXPROCS=2, GOMEMLIMIT=1800MiB (lane LB's
+  2 GiB a process), stubbed toolchains, records nothing; `# EST: 150`.
+- P6's first condition, a6's core bodies equal to rustc's built MIR, met for the three with source bodies (`write_volatile`, its
+  `precondition_check`, `is_aligned_to`; `drop_glue` is a shim): `ptr::const_ptr` and `ptr::mut_ptr` added to the slice (37 modules, the
+  pack remade), `format_args!`'s place inside core's own macros read through the virtual file. Carrying the bodies into the run
+  (printing for the program's crate, instantiation, native callees) is not built: the next slice, on RF11's `build_run.ae`.
+- The 37 modules: 5,108 of 5,767 bodies equal (+71 but for the allocations); both essential checks equal their known files.
+
+## 2026-11-09 (night): RF12-P6, core's bodies built natively in a program's run
+
+- `bin/rust-front core-export` writes core's bodies (core-check through the 21 passes, externalized to core's paths, with their
+  equality to rustc's built MIR from the pack `rust-core-built`); `bin/rust-front run-built --native-core` prints them again in the
+  program's crate, instantiates them per mono item, builds their callees natively and takes a closure only when every body is equal,
+  the record's body the fallback; drop glue's simple shim built natively (shim.rs' elaborated drop of a type whose glue is its own
+  `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
+  considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
+  the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
+
+## 2026-11-10: gate-crops-fix: rust-core-essential in the rust crop
+
+Night 11's first gate (next dc6a55df2) failed only `gate-tests`: costs-test said ":crops: rust-core-essential is in no crop" (rust-rf12's merge, 0c22b1f1b, added the essential step without listing it in test/gate/steps.edn's :crops :rust). gate-reads-test and gate-tests-test run bin/gate-tests nested and failed only with it. Fix: rust-core-essential added to the :rust vector (after rust-front-essential; the step lives in steps.edn, no fragment under test/gate/crops/ names it). Proof: costs-test, crops-test, gate-reads-test and gate-tests-test pass; `bin/gate --plan` plans; `bin/reap` 41 of 44 cells checked, 0 problems.
+
+## 2026-11-10: the user's scoring rulings RFP53 (a) and OC222 (a) in crops-score (branch `crops-rulings`)
+
+- The user decided (about 10:30 UTC) RFP53 (a) for Rust (`.tmp/plans/RUST-90-PLAN.md`: a case scores 1 when its seven inputs C1-C7
+  are own, else 0.5; eval and AOT the case-weighted mean, counted from the records) and OC222 (a) for OCaml
+  (`.tmp/plans/OCAML-90-PLAN.md`: the 33 tests ocamltest skips on the pinned configuration `:na`, the tools' tests by design).
+  Built on `crops-rulings` from `mac/next` dc6a55df2, as the mixed-stage rule of 2026-11-07 is (doc/CROPS-SCORE.md, "Decided (the
+  user, 2026-11-10)").
+- Rust: `test/crops/crops.edn` `:own-inputs :rust` (C1-C7), the facts' `:case-inputs {:file F}` (eval
+  `test/rust/eval-inputs-linux-amd64.edn`, written by hand from the run as bin/rsi makes it: 0 of 5 own; AOT's file once its cell is
+  recorded), `crops.score`'s `rfp53-counts` and `case-inputs`: the cell's cases not own in all seven, or with no row, count 0.5.
+  Rust stays 80.0. Considered: reading `front.tsv` from the work tree (not a record: absent in a clone and in `--ref`), and counting
+  only the rows of F (a stale F would then overstate; a case with no row is 0.5 instead).
+- OCaml: the class `:config-skipped` (`:kind :na`, `:skips` the action per program, verified in ocaml-5.5.0's testsuite headers) first
+  in `test/ocaml/divergences.edn` and `divergences-aot.edn`; `test/ocaml/ocamltest-config.edn` (`ocamlc -config`, ocamltest's actions
+  from `ocamltest/builtin_actions.ml`, `ocaml_actions.ml`); `:na-rules :ocaml` and `na-class-problems` check each class. `bin/reap
+  --record`: eval 477 / 162 / 4 and AOT 419 / 158 / 66, 33 n/a each; OCaml's completeness 82.5 to 84.2. Considered: an `:except`
+  on `:tools-and-targets` (reap's classify has none; a class of its own, first, is how `:packs` and `:fortran` are written).
+- Proofs: `bin/crops-score --self-test` (37 of 73 own gives 90.1; OCaml 82.5 to 84.2; six OC222 controls and the RFP53 C7 control
+  fail as they must, and the test fails with either rule broken); `bin/crops-score --record`, then `--judge --strict` 0 problems;
+  `bin/reap` 0 problems; `bin/oi divergences`, `--aot`, `suite divergences`, `--aot` every non-pass classed; a real-data control each
+  (an `:na` program given `arch_amd64` fails `bin/crops-score`; one Rust case's inputs marked own moved eval to 0.6, one own but C7
+  stayed 0.5; both reverted).
+
+## 2026-11-09: HF10-P11 to P14: the own interfaces a step, the default methods' unfoldings, base on the own pool (branch `hs-p11`, from next `6c3c87c02`)
+
+The user accepted HF10-P11 to P14 as recommended (P13 (b)). Recorded in doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P11 to
+P14". Ported from GHC 9.14.1 (the pinned `ghc-9.14.1-src.tar.xz`): makeCorePair's compulsory unfolding of a `$dm`
+(`compiler/GHC/HsToCore/Binds.hs`), simplStableUnfolding and updModeForStableUnfoldings (`Core/Opt/Simplify/Iteration.hs`,
+`Utils.hs`), generalizeOverLitVal (`Rename/Pat.hs`, NumDecimals).
+
+- P11 (a): the `--full` step `haskell-lib-check-own` (after `haskell-lib-check`, 2 GiB, no GHC; control the interface judge's).
+- P12 (a): `lib-check --ifaces own` runs a module that defines default methods through lib-stg's pipeline and writes each `$dm`'s
+  unfolding as its `-O0` Simplifier leaves it (154 of 156; 2 with a floated local keep the elaborator's Core), in the helper's
+  spelling; the Simplifier simplifies a stable unfolding in updModeForStableUnfoldings' mode. lib-stg on the own interfaces: 5,280
+  to 5,398 of 7,627 bindings equal to GHC's `-O0` (54 modules better, 0 worse), ahead of GHC's `-O2` interfaces (5,373 of 7,600,
+  unchanged). Alternative considered: GHC's Tidy-exposed unfoldings read from the pack (the `-O2` ones: not GHC's `-O0` view).
+- P14 (a): base on ghc-internal's own pool with no GHC closure: the driver grows each closure from the imports over the names the
+  interfaces mention (as `--make` loads on demand), maps ghc-prim's thirteen reexported modules from its `.cabal` (ghc-prim's
+  library is `Dummy.hs` and reexports), compiles in the installation's unit id. 235 of 241 modules elaborate, 0 missing
+  interfaces, 6,780 of 6,785 facts equal on the 113 modules the `haskell-ifaces` pack holds; lib-stg of base 531 of 1,024
+  bindings equal to GHC's `-O0`. Found on the way: NumDecimals (System.CPUTime.Posix's `1e12 :: Integer`), ported. Alternatives
+  considered: recording GHC's base closures with GHC (refused for this branch: GHC only at the oracle tier, HF10-P16 proposes it).
+- crops-score unchanged (Haskell independence 76.0): no case runs on own libraries yet. Proposed: HF10-P15 to P19 (base's step,
+  GHC's base interfaces for the judge, the next packages, Prim from primops.txt.pp, the first own cases).
+- Checks: hsi-essential's command (one job) 123 programs, 0 unclassed, the four controls fail; bin/gate --full --plan plans the
+  new step; the gate's costs, crops, cover and declared-env tests pass.
+
+## 2026-11-10 hs-p11: lib-stg --ifaces own --run defaults to LIB_STG_REPLACE=equal; the 50 of 63 explained
+
+- `bin/lib/repr-haskell/lib-stg`: the own branch took `${LIB_STG_REPLACE:-all}` (0 of 63 on own, exit 1); now `equal`, `all` still explicit.
+  Proof, no variable: `lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`, exit 0, 27 min 54 s, 1.7 GiB: 5,398 of 7,627
+  equal, 76 own modules and 191 GHC's, 50 of 63 on each side, 0 lost, 0 gained. The survey's night command updated.
+- 50 against run-check.edn's 53: the same ten programs fail on both sides in two runs (deterministic): compiled against the `-O2` pack's
+  interfaces, run on the `-O0` sets, which lack names such as `ioException3`. The ten alone on the `-O2` pack: 10 of 10 pass. Not load, not a
+  bug of the branch; noted in the survey.
+
+2026-11-10, hs-p11 (review fix, .tmp/merge-1111/REVIEW2.md §5 items 1 and 3): ran `bin/repr-haskell lib-check --ifaces own --judge
+test/haskell/lib-check-own-ghc-internal.edn` (the new --full step haskell-lib-check-own's command; 8m22s): "265 modules against 265
+recorded; 0 worse, missing or unclassed, 0 better", the control differs as it must (0 of 19 facts equal), exit 0. P12 and NumDecimals
+move nothing the record counts, so nothing is re-recorded (the ratchet has nothing to take). Base mode (`--package base --ifaces
+own`): a missing ghc-prim.cabal is an error (exit 2, with the verb that fetches the corpus), no longer an empty list of
+reexported modules that passes; only the new line changed, bash -n, base's mode not run here (its pools are the night's).
+
+## 2026-11-10: HF10-P18 (a) GHC.Internal.Prim from primops.txt.pp, HF10-P15 (a) haskell-lib-own-base, HF10-P20 (a) started (branch `hs-p18`, from `mac/hs-p11` 3d55ae343)
+
+The user decided HF10-P15 to P27 (a) (P25 yes, its ruling: the own-interface round trip is a round trip's own verdict, GHC's
+level at the oracle tier) on 2026-11-10 (the plan `.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the survey's "Decided" block). Built by
+an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no GHC, no gate,
+no network). Sources: GHC 9.14.1's pinned tarball (SHA-256 `2a83779c...`): `compiler/GHC/Builtin/primops.txt.pp`,
+`utils/genprimopcode/{Lexer.x,Parser.y,AccessOps.hs,Main.hs}`, `compiler/GHC/Builtin/{Utils,Types/Prim}.hs`,
+`compiler/GHC/Types/Id/Make.hs`, `compiler/GHC/Tc/Instance/Typeable.hs` (BSD-3, LICENSE.md "GHC").
+
+- P18 (a): `arbace/repr/haskell/primiface.ae` builds GHC.Internal.Prim's interface from `primops.txt.pp` (Arbace's own cpp,
+  genprimopcode's lexer and parser and the access ops ported, primOpInfo's types and binders, the strictness options, Make.hs's
+  ghcPrimIds, exposedPrimTyCons' kinds). Judged against the pack `haskell-lib-ifaces-ghc-9.14.1`'s member: 3,085 of 3,085 facts
+  equal and 3,155 of 3,155 lines byte for byte (all but the header, which names the own verb); the control (types rotated) differs.
+  `lib-check --ifaces own` builds and judges it first and gives it to every closure (`LIB_CHECK_PRIM=ghc`: the pack's): no GHC
+  interface on the own path any more. Alternatives considered: extending `tools/hsprimops/primops.awk` (awk is a host tool, and
+  the types need genprimopcode's parser); taking the tycons' kinds from the pack (that is the GHC dependence removed).
+- P15 (a): `haskell-lib-check-own` keeps ghc-internal's pool as its output (`ghc-internal-pool.tar`, 6.5 MB, 0.01 s), and the new
+  `--full` step `haskell-lib-own-base` (`:uses` it) runs base's lib-check and lib-stg against their records with their controls,
+  keeping base's pool (`LIB_CHECK_POOL_OUT`, `LIB_CHECK_DEP_POOL_TAR`). Not run through `bin/gate` (the light lane's rule): its
+  command was run by hand, 6 min 8 s, 1.36 GiB.
+- P20 (a), started: the whole own set (`LIB_STG_REPLACE=all`) ran 0 of 10; four classes found and fixed in turn: GHC.Types'
+  wired-in Typeable bindings (mkPrimTypeableTodos: `tr$ModuleGHCPrim`, `krep$*` and the other built-in KindReps, GHC.Prim's
+  tycons' `$tc` from the own Prim's kinds, the promoted constructors' `$tc'`; the unboxed tuples' `$tc'` left out: deep nests time
+  the module out), the foreign calls' arguments missing from the closures' free variables (`w_188`), the synonym KindBndr in a
+  KindRep, and Unarise of unboxed tuple binders and arguments (GHC.Internal.Bignum.Primitives' `plusWord12#`, found by bisection,
+  `LIB_STG_REPLACE=@FILE`), then a primop used as a value (WordArray's `mwaWrite# = writeWordArray#`: maybeSaturate's
+  eta-expansion). lib-stg on the own interfaces 5,398 to 5,412 of 7,632 equal (8 modules better, 0 worse; re-recorded); the run
+  still 0 of 10: the wrong-size class remains elsewhere and List's `product` path has an unbound floated local; the tail is
+  bisected one class at a time (the survey's "HF10-P20 (a), started").
+- Checks: primiface check (above); lib-check --ifaces own on ghc-internal and base 0 worse (265 and 241 against their records),
+  lib-stg base 531 of 1,024 as recorded, controls differ; hsi-essential's command 123 programs, 0 unclassed, controls fail;
+  bin/reap 0 problems; crops-score --judge --strict 0 problems (Haskell 76.0). Not run: bin/gate (`--full --plan` for the new step
+  is the main session's).
+
+## 2026-11-10: HF10-P20 (a) continued: the whole own set from 0 of 10 to 40 of 63 (branch `hs-p20`, from `mac/hs-p18` 876e2913c)
+
+Built by an agent in the light lane (one process at a time under 2 GiB, stage 0 `/root/arbace/target/seed/amd64/arbace`, no
+GHC, no gate, no network), the plan's stage 2 (`.tmp/plans/HASKELL-OWN-LIBS-PLAN.md`; the user's decision of HF10-P15 to P27).
+Sources: GHC 9.14.1's pinned tarball, `compiler/GHC/Stg/Unarise.hs` (unariseFunArg, unariseAlts, void arguments),
+`compiler/GHC/CoreToStg/Prep.hs` (the case on unsafeEqualityProof dropped, maybeSaturate), `compiler/GHC/HsToCore.hs`
+(patchMagicDefns: unsafeEqualityProof, unsafeCoerce#), `compiler/GHC/HsToCore/Match.hs` (matchView),
+`compiler/GHC/Tc/TyCl/PatSyn.hs` (mkPatSynRecSelBinds), `compiler/GHC/Types/Id/Make.hs` (coerceId) (BSD-3, LICENSE.md
+"GHC").
+
+- Method: each run-breaking class found by a run of the day's ten (then the 63), its first module by bisection
+  (`LIB_STG_REPLACE=@FILE`, the new `LIB_STG_SIDES=own`), fixed in the front end, judged by `lib-stg --ifaces own --judge` (no
+  module worse) before the next run. New static comparisons in `arbace.repr.haskell.stgcmp` (`--abi`, `--rets`, `--builds`,
+  `--why`) and hsi errors that name the call (`unboxed tuple of the wrong size: the alternative binds N, M returned ...; the
+  scrutinee F`) found classes without runs. Alternatives considered: running every program on every bisection probe (too slow
+  at about a minute a probe); fixing the elaborator's type variable kinds now (a larger change across the renamer, the
+  elaborator and the interfaces: left as the class `kinds`, an interim table of two Unsafe.Coerce results in tostg).
+- Fixed, one class each (the survey's table): polymorphic identities' instantiated results (inline, runRW#), void values and
+  nullary void join points, synonyms and newtypes of function types in result types, unsafeCoerce# and Unsafe.Coerce's
+  patched definitions, match variables typed (equations' binders, desugar's match variables after their pattern variables, a
+  cast's target type), nested unboxed tuple binders, unboxed tuple case binders, a tuple case's size from its binders, coerce's
+  evidence argument, existential dictionaries in record construction, update and selectors, primops out of the CAF float
+  shortcut, view patterns (matchView), pattern synonyms' record selectors, primitive byte-string literals.
+- Measures: lib-stg on the own interfaces 5,412 to 5,473 of 7,637 bindings equal to GHC's -O0 (25 modules better, 0 worse;
+  re-recorded); lib-stg of base 531 to 547 of 1,024; the `equal` set 83 modules, 50 of 63 programs pass on it (0 lost against GHC's -O0 set's 50); the `all` set
+  40 of 63 (0 of 10 before), 10 of `equal`'s passes lost. `test/haskell/lib-stg-own-results.edn` gains the runs as rows,
+  `{:runs :equal ...}` and `{:runs :all ...}` (`libcheck record-runs`, `judge-runs`; lib-stg `--run --record/--judge`).
+- Not reached: HF10-P20's proof (all ≥ equal, 0 lost). The tail, by class: a case on the void token in an argument slot (5
+  programs, the exception paths first), output that differs (4), NonTermination unhandled (1); beyond the 63, pattern
+  synonym patterns (no `$mP` matcher: HF9's slice 7) and type variables' kinds.
+- Checks: lib-stg --ifaces own 0 worse (re-recorded), its control 0 of 171; lib-check --ifaces own 265 against 265, 0 worse
+  (258 of 265, facts unchanged), base 241 against 241, 0 worse (235 of 241), both controls differ; base's lib-stg 531 to 547, 0
+  worse (re-recorded); run-check's negative control fails on every run; hsi-essential's command 123 programs, 0 unclassed, the
+  four controls fail; the GHC-interfaces steps' commands: haskell-lib-check 0 worse (260 of 265), haskell-lib-stg 5,372 to 5,444 of
+  7,610 (0 worse, re-recorded) with its runs 60 of 63 on each side, 0 lost. Not run: bin/gate (the light lane).
+- Rule slips: a wait loop used process substitution `<(...)` once, and two commands named /dev/null (`>/dev/null 2>&1` on a
+  debugging compile, a `grep` of /dev/null); none touched another worktree's files.
+
+## 2026-11-09: OCaml's independence: OC208 (b) built, the opam set's own verdicts (branch `ocaml-indep`, from next `6c3c87c02`)
+
+The brief: raise OCaml's independence (51.3 on next, after the 11-09 audit put every cell's record at 0.5); build OC208 as accepted
+(the user, 2026-11-09: (b), the recommendation); find what keeps eval, AOT and judge below 1 and remove a toolchain from check time;
+night 10 records the native read and print, not redone here. Recorded in doc/ocaml/OCAML-SURVEY.md, "As built: OC208 (b), the opam
+set's own verdicts", with the proposals OC209-OC211.
+
+- OC208 (b): `Unix.execv`, `execve`, `execvp`, `execvpe` in the AOT runtime (`jdk/ocaml/ocaml/rt/ExtProc.ae`), the C stubs' checks of
+  otherlibs/unix's `execv.c`, `execve.c`, `execvp.c` (OCaml 5.5.0, the pinned tarball) and oi's `ext_signal.go` behaviour (the standard
+  channels flushed, execvp's search as its lookPath). Java cannot exec, so the request is written to a path the compiled level's main
+  serves (`test/ocaml/o2j/main`: jrt's ProgramHost wrapped, `/proc/self/ocaml-exec`; Close chdirs to `ExtSys/cwd`, makes the standard
+  descriptors those of `Fd`'s table, `syscall.Exec`; a failure restores both and answers the errno). Alternatives: a native method of
+  the runtime implemented in Go (j2g resolves natives in jrt or the class's own package, so it needed a j2g or jrt change, both in every
+  key); exiting with a status and having main exec after RunMain (the runtime's `System/exit` ends the process inside jrt); OC208 (a)'s
+  spawn-wait-exit at both levels (the user chose (b)). At the light level nothing serves the path: the row stays `:unix-unported`.
+  Checked on a stub of jrt (exec with directory, environment and redirections; PATH search; errno 2 with the descriptors restored) and
+  at the light level by list; the compiled level's run is the night's (above the lane's 2 GiB).
+- The opam set's own verdicts (`test/ocaml/opam-verdicts.tsv`, `bin/oi`'s `own_verdicts`, the judges' `*` digest: the exit status
+  alone): the eight load programs by `test/ocaml/opam/load.reference`, astring's test and examples and uutf's test_uutf by exit status
+  (their packages' `Pkg.test` and `B0_ocaml.test`), astring's total by no output; pprint's and cmdliner's demonstrations stay on the
+  recorded run (OC211). A negative control at both suite levels. `bin/oi own-verdicts --check`: suite 100 of 121 at oi's level, 110 at
+  the AOT level, 0 differ. Alternatives: a report-line verdict for astring's and uutf's logs (the runner would rewrite their output, as
+  the hooks do; the packages' runners judge by status alone); expected outputs for the demonstrations (ocamlc's output copied: rejected).
+- The native path over the opam set (TY24 (a)'s default) refused astring's and cmdliner's units, hidden by the oracle path's record:
+  eight gaps of the typer ported from OCaml 5.5.0's typing/ (the pinned tarball: env.ml's .cmi reading, typemod.ml's
+  `Signature_names.simplify` and `Psig_typesubst`, load_path.ml's order and `find_normalized`, class types in a unit's interface, typecore.ml's `turn_let_into_match`, includemod.ml's
+  `Env.add_signature`) and printtyp.ml's cyclic types as `as 'a` aliases; each from a reproduction of a few lines (doc/ocaml/OCAML-SURVEY.md,
+  "The native path over the opam set"). Without them OC185's switch would have taken a suite record with fewer passes. Checked by
+  typer-check (79 of 79), repl-check (24 of 24), the native library rebuilt (no unit refused; seven units' Lambda differ only by stamps
+  and static exits' numbers) and the essential list.
+- Found: no OCaml gate step runs ocamlc or ocamlopt; eval and AOT are 0.5 by their cells' records (ocdump's path) until night 10's
+  native records and `bin/oi reap-switch --apply`; OC202's switch must take the compiled level's native record. The judge's recorded
+  cases left: 37 at oi's level, 16 at the AOT level (OC209-OC211).
+- Scores (`bin/crops-score --crop ocaml`): independence 51.3% to 51.4% (judge 0.563 to 0.570, its cases by `own-verdicts`); after
+  night 10's read and print records and the switch, about 99.9%.
+
+## 2026-11-10: OCaml's native path, night 10's gaps (branch `ocaml-indep2`, from `ocaml-indep` `813c335f0`)
+
+The brief: fix the native-path gaps night 10's light lanes exposed (`.tmp/night10/DIAGNOSIS.md` §2-3: la-oi-check 11 failing,
+la-oi-aot 9, la-oi-suite 25, of which `ocaml-indep` fixed 20), in a light lane (one process at a time, under 2 GiB), judging
+by list, not recording: the native records are night 12's, after the merge. Recorded in doc/ocaml/TYPER.md, "27. As built:
+night 10's native-path gaps".
+
+- 2a: `:c-runtime-internals` (all six classes files carrying it) also matches the C stubs' run reasons (`fail cstubs: `, `fail
+  output differs`, `fail timeout`), its `:programs` keeping it scoped: since ef4f24416 the stubs build on ci against the
+  clean-room headers, without the `CAML_INTERNALS` ones by design (OT6 (a)). The nine C-stub tests are classed again.
+- 2b: Ctype.nondep_type_decl's rule in `typemod.ae`'s `nondep` (OCaml 5.5.0, typing/ctype.ml and mtype.ml): in a covariant
+  position a kind that cannot be erased becomes abstract, a manifest that cannot be erased is tried through private
+  abbreviations, else dropped; the variance flips in a functor's parameter. Alternative: catching the error for abstract kinds
+  alone, as the diagnosis proposed (not faithful: OCaml's rule is by variance, and keeps a private expansion first).
+  typing-labels/mixin, mixin2, mixin3 and memory-model/forbidden pass.
+- 2c: `-safer-matching` ported (Matching.toplevel_handler: every match partial) rather than accepted as a no-op;
+  basic-more/safer_matching, its only user, passes.
+- Beyond the brief, cheapest first: redefine_largefile (Typemod.initial_env's add_units: the -I directories' units shadow the
+  opened Stdlib), tmc/tupled_function (Translattribute's tail-call attribute carried to Tmc's find_nonambiguous_tmc_call),
+  basic-modules/pr11186 (compose_coercions' Tcoerce_alias case, Tcoerce_structure's id_pos_list and wrap_id_pos_list,
+  transl_module_path through an absent alias). Each from OCaml 5.5.0's lambda/ and typing/ (the pinned tarball).
+- The AOT level's "timeout 120s of CPU" on lib-digest/md5 and misc/hamming is not a native-path gap: the native Lambda of md5
+  equals ocdump's up to stamps (ocdump run by hand as the oracle), its translated program the oracle path's, and both pass
+  natively here (md5 117 s, hamming 134 s wall): the CPU limit's edge under the night's load.
+- Left: lib-sys/immediate64 (Ctype's pattern-mode unification of an abbreviation with an abstract type, mcomp and
+  record_equation, not ported) and opam/sexplib0/load (a GADT's inline record), both native-path classes until ported.
+- Checks: the lists above by `bin/oi check`, `suite check` and `check --aot` `--only-list`; typer-check 79 of 79 at the three
+  levels; stdlib-check 71 of 71; the oi-essential and oi-divergences steps' commands (essential 59 of 59, repl-check 24 of 24, own-verdicts 0 differ); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's native path, the last two of night 10's gaps (branch `ocaml-indep3`, from `ocaml-indep2` `660185ddd`)
+
+The brief: close lib-sys/immediate64 and opam/sexplib0/load on the native path, in a light lane, judged by list, no `--record`.
+Recorded in doc/ocaml/TYPER.md, "28. As built: Ctype's pattern mode and the or-pattern's equations"; the new choice OC212.
+
+- immediate64: `include Sys.Immediate64.Make(Int)(Int64)` then `match repr with Immediate -> ...`, where `repr : t repr` and
+  `Immediate : Int.t repr`: OCaml 5.5.0's Ctype.unify3 in pattern mode equates the abstract `t` with `int`, because
+  is_instantiable (typing/ctype.ml) admits every nullary abstract public type without a manifest, not only the locally abstract
+  ones the port admitted. Ported from typing/ctype.ml into the port's mismatch hook (`typecore.ae`'s `add-equation`): unify3's
+  pattern-mode cases (two instantiable types, one, a constructor against another type), reify, record_equation (its pairs kept,
+  read by nothing: -principal's warning is not ported) and mcomp with its helpers (`types.ae`, the brief's ~200 lines). The
+  predefined abstract types are Type_external in 5.5 (typing/predef.ml): recognised by path, so `int` is no instantiable type and
+  `int` against a tuple is incompatible (typer-check's t72_gadt_exhaustive caught the first draft, which took them for abstract:
+  a Match_failure handler came back). As Typecore.solve_Ppat_construct, the pattern mode only for a generalized constructor; Parmatch's
+  possible-constructor test takes the same rule without equations. Alternative: the old local-abstract rule plus a special case
+  for abstract types of the current structure (not OCaml's rule, which has no such distinction since 5.x).
+- sexplib0: the diagnosis's "GADT inline record" was not the cause. Reduced by hand to a 40-line program (`let (Field {kind; conv;
+  _}) = fields in match kind, s with ... | (Required | Default _ | Omit_nil | Sexp_option | Sexp_list), _ -> ...`), which the
+  ocaml-indep2 typer refuses with the night's message and the host's ocaml accepts: an or-pattern's alternatives shared one set of
+  GADT equations, so `Sexp_option`'s `a = 'x option` met `Sexp_list`'s `'y list`. Typecore's Ppat_or types each alternative in a
+  copy of the pattern environment (Pattern_env.copy); ported: each alternative's equations dropped after it.
+- Approximations left, OC212 (recommended (a), keep them): Path.scope by stamps, the predefined types by path, has_injective_univars
+  and the row backtracking not modelled, a foreign abstract type's non-injective parameters unified.
+- Checks (none `--record`): `bin/oi suite check --only-list` and `suite check --aot --only-list` (immediate64, sexplib0/load: 2 of 2
+  pass at each level, by their own verdicts); typer-check 79 of 79 at the three levels and their runs; stdlib-check 71 of 71; `bin/oi
+  test`; repl-check --native 24 of 24; the essential list 59 of 59; own-verdicts 0 differ; the four oi-divergences commands (0 failing
+  not in a class); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's stage S1 and the own verdicts' rest: OC213, OC214, OC209, OC210 (branch `ocaml-s1`, from `ocaml-indep3` `51240f00d`)
+
+The user decided OC209-OC222 (a) about 10:30 UTC (the main session's plan for OCaml's completeness above 90%, OC213-OC222, and the
+survey's OC209-OC212); recorded in doc/ocaml/OCAML-SURVEY.md, "Decided (the user, 2026-11-10, about 10:30 UTC): OC209-OC222", built
+as "As built: OC213, OC214, OC209, OC210". A light lane: no gate, each process under 2 GiB, one run at a time.
+
+- OC213 (a): the plan counted the read cell's 61 testsuite rejections as parse-error tests whose reference is the error; read file by
+  file, about half are toplevel scripts (expect tests, toplevel tests, `ocaml` scripts with directives) that the read level's
+  Parse.implementation rejects but their own tool reads. So `own-read` (arbace.repr.ocaml.native) judges each as its test's tool reads
+  it: ocamlc.byte's `.compilers.reference` byte for byte (20), the expect tool's Parse.use_file (18), the toplevel's use_file read or its
+  first error's chunk (toploop.ml's line chunks, positions from 1, //toplevel//) held in the reference (18), scripts (2), and the files
+  other tests `#use` or name (3). All 61 pass, three negative controls fail. Sources: OCaml 5.5.0's tarball (SHA-256 fcc6ae66...):
+  testsuite/tools/expect.ml (parse_contents), toplevel/toploop.ml (loop, get_phrases), toplevel/topcommon.ml (refill_lexbuf),
+  stdlib/lexing.ml (flush_input). Applied to read-results.edn's testsuite rows by `bin/repr-ocaml own-read` (the rows re-judged, no
+  round trip; the alternative, a whole `--record-results testsuite`, would have rewritten the record's header to the native reader's
+  while the other corpora's rows are still the helper's). Alternative considered: judge only the 20 ocamlc tests and keep the scripts
+  by design; rejected, the expect and toplevel tools' reads are the tests' own.
+- OC214 (a): a quoted string's CR LF written CR CR LF (lexer.mll's store_normalized_newline removes one CR) and its non-UTF-8 bytes
+  written as bytes (byte marks U+DC80-U+DCFF in the printed text, `text-bytes`). newlines.ml passes; test_pcre.ml's trees too, but its
+  mode `:full` refuses a file that is not UTF-8, so it moves to a new deferred class `:full-not-utf8` (the plan counted +2; it is +1).
+  The print records wait for the night's `--record-results` of the two corpora (the tool records whole corpora only).
+- OC209 (a): native-only tests judged at oi's level by their `.reference` (15), the 4 native-behaviour ones listed in own-verdict.edn.
+  The suite's re-judge found asmcomp/regression_value_kinds refused by the native typer (an or-pattern whose first alternative needs
+  its GADT equation for its own constraint), most likely TYPER.md §28's per-alternative equations: left for the typer's next slice,
+  nothing recorded.
+- OC210 (a): ocamltest's CRLF normalisation (ocamltest/filecompare.ml's compare_text_files: the own verdict's second digest,
+  `crlf_other`) and its variable expansion (ocamltest/environments.ml's expand, stdlib/buffer.ml's add_substitute, in header.awk);
+  norm3, subst1, subst2 by their own verdicts at both levels; subst1's and subst2's ocamlc and ocamlopt runs recorded again by hand
+  (`bin/oi record-ref --only`: their arguments changed); two new negative controls a level.
+- Scores: completeness 82.5% to 83.0% (read 3,082 to 3,143), independence 51.4% to 51.5% (judge 0.570 to 0.576). Checks: own-verdicts
+  --check 0 differ; the four oi-divergences commands 0 failing; `bin/reap --record` 0 problems; `bin/crops-score --record`, `--judge
+  --strict` 0 problems; `roundtrip --text samples stdlib`; the 61 files' round trip unchanged.
+
+## 2026-11-10: OCaml's or-pattern regression and OC215 (a) with OC199 (a), the C API at the compiled level (branch `ocaml-s2`, from `ocaml-s1` `d87ed4a2c`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). Sources: OCaml 5.5.0's tarball (typing/typecore.ml's type_pat
+Ppat_or, Ppat_constraint, Ppat_alias, solve_Ppat_constraint, build_as_type and build_as_type_extra; typing/primitive.ml's
+parse_declaration and native_repr).
+
+- asmcomp/regression_value_kinds (found by `ocaml-s1`'s OC209 re-judge): §28's per-alternative equations were not the cause; they are
+  OCaml's (each alternative typed in a `Pattern_env.copy` of the outer environment, the variables unified in the outer one). The port's
+  Ppat_constraint typed the inner pattern against the expected type and dropped the constraint, so `((3.5 : a) as a)` under `Float`'s
+  equation gave the alias `float` where OCaml gives it `a` (the constraint's type, build_as_type_extra's ground case), and the
+  or-pattern's variables then disagreed outside the equation. Ported: the inner pattern typed against the constraint, the pattern's type
+  the constraint's, the constraint kept as an extra for build_as_type; an alias's pattern has its inner pattern's type (TYPER.md §29).
+  Alternative considered: keeping the equations of an alternative for the or-pattern's variable unification; rejected, OCaml does not.
+- OC215 (a) (the user, 2026-11-10, amending OC198): the compiled level's main links `arbace/oicapi` and oi's values serve as mirrors of
+  the Java runtime's (OCAML-SURVEY.md, "As built: OC215"). The bridge is a file the main's host serves, as OC208's exec: the runtime
+  writes and drives, the C runs on a goroutine so that its callbacks and named values are replies the runtime answers. Alternatives
+  considered: (1) the value conversion in Go over j2g's translated classes (names like `J_ocaml_rt_Block_J`): the main would depend on
+  j2g's naming and on jrt's array and boxing types, unprovable without a j2g run; (2) a Java static method the Go side calls for each
+  callback (`lang.J_ocaml_rt_CApi_J_...`): the same dependence, and j2g may prune a method only Go calls; (3) natives in jrt: a jrt change
+  moves the runtime key and the gate (not a crop path). The file and the goroutine need neither.
+- OC199 (a): an external with no bytecode name is `native:NAME:ARGS:RESULT` in the native typer's dump (Primitive's native_repr letters),
+  o2j calls it through `CApi/nativeCall`, oicapi's `CallRaw` passes unboxed words and floats.
+- Checked light: the main's Go builds and vets (printed with oi, oicapi, ci, crt and stand-ins for jrt and lang); a fake runtime in Go
+  drives the main's file over callback/test1's stubs (callbacks, identity, updates, exceptions, a missing stub); the light level's rows
+  of missing externals unchanged; oi's C API programs unchanged; typer-check, stdlib-check, the essential list, own-verdicts, the four
+  oi-divergences commands. The compiled runs (j2g, above 2 GiB) are the night's: `bin/oi check --aot --level compiled --only-list
+  test/ocaml/capi-compiled.txt` under the big lock, then the classes of what does not pass.
+
+## 2026-11-10: OCaml's OC216 (a), the small runtime ports (branch `ocaml-s3`, from `ocaml-s2` `79afd5c9b`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The user decided OC213-OC222 (a) on 2026-11-10; OC216 (a)
+reverses, for the programs it moves, OC11 (a) (the stack limit, Obj's layout), OC64 (a) (the counters), OC68 (b)'s weak part, OC65
+(reachable_words) and OT7 (a) (Marshal's Closures flag). Sources: OCaml 5.5.0's tarball (runtime/gc_ctrl.c, startup_aux.c, extern.c,
+intern.c, weak.c; the tests named below). OCAML-SURVEY.md, "As built: OC216 (a)".
+
+- Gc.Tweak's parameters in `Sys.runtime_parameters` (format_gc_tweaks); the asked collections counted as gc_ctrl.c counts them beside
+  the runtime's own (oi: Go's NumGC less the cycles the asked ones ran; the AOT runtime: a canary WeakReference, Java having no count);
+  `Obj.reachable_words` by OCaml's layout of the values on 64 bits.
+- OCAMLRUNPARAM's l: header.awk passes it as it passed d (OC193). oi counts words under it (a call one, its frame's slots more), at most
+  l and 800,000; first tried as l/4 calls, which passed on the native path but not on ocamlc's (misc/pr7168's 273-let frames: 25,000
+  such calls are Go's stack beyond the CPU limit), and l/4 for the call's own words with the slots beside overflowed stackoverflow
+  before its x = 20000: the frame's slots and the call's one are the bytecode's stack about. The AOT runtime counts calls, l/4.
+- Weak keys as weak pointers (Go's weak, jrt's WeakReference). Found while porting: `weak.Pointer.Value` shades its value while the
+  collector marks, so a program that checks a weak key in a loop kept it alive for ever (a probe: 726 collections, never emptied); a
+  check reads a flag `runtime.AddCleanup` sets instead, and the asked collections refresh the flags of every live weak array (a
+  registry of weak pointers to the arrays, not to each key: the first try, a registry a key, was slower still). Ephemerons' data
+  stays the ephemeron's while the key lives, cleared with a dead key at the asked collections. Alternatives considered: a pending
+  strong slot made weak at the next collection (cheaper for a slot overwritten soon, but a key kept one cycle longer and a flag across
+  goroutines); ephemerons proper (Go's runtime has none; the data on the key needs the key's object: no). The cost, about 5 us a
+  Weak.set of a fresh value, takes weak-ephe-final/weak_array_par (4,000,000 sets, just within the limit before) to `:speed`.
+- Marshal's Closures flag: CODE_CODEPOINTER with the code's number in the process's table and the digest of its name; o2j's classes
+  get envOf, blank and fill for the AOT runtime. lib-marshal/fuzzy then fuzzes past its first message and found the AOT reader's
+  Java exceptions on altered sizes: Failure "input_value: ill-formed message" (an invalid read for a bigarray longer than the data).
+- Not built: AF_UNIX and signals at the compiled level (a host path as OC208's, several days with compiled runs): later.
+- Moved, oi's level: misc/gctweaks, lib-obj/reachable_words, misc/pr7168, runtime-errors/stackoverflow, regression/pr5233,
+  weak-ephe-final/weaklifetime, weaktest, lib-marshal/intext, intext_par, compaction/test_compact_full, lib-marshal/fuzzy,
+  runtime-objects/Tests (12); weak_array_par pass to `:speed`. The light AOT level: gctweaks, reachable_words, pr7168,
+  test_compact_full, fuzzy, Tests (6); stackoverflow to `:light-depth`. Recorded `--only-list --record`, ocamlc's path (`--ocdump`,
+  the matrix's sources until OC185's switch) and the native one (check-oi-native.edn).
+
+## 2026-11-10: OCaml's OC216 (a), the rest: AF_UNIX sockets and the OS's signals at the compiled level (branch `ocaml-s4`, from `ocaml-s3` `b45b8aa4f`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The part of OC216 (a) (the user, 2026-11-10) `ocaml-s3` left:
+OT23 (a) and OT24 (a) reversed at the compiled level. Sources: OCaml 5.5.0's tarball, otherlibs/unix's socket.c, socketpair.c,
+socketaddr.c, accept.c, bind.c, connect.c, listen.c, shutdown.c, getsockname.c, getpeername.c, sendrecv.c, sockopt.c, select.c,
+kill.c, runtime/signals.c, as oi's ext_unix_sock.go and ext_signal.go port them. OCAML-SURVEY.md, "As built: OC216 (a), the rest".
+
+- The route: the compiled main serves `/proc/self/ocaml-host` beside OC208's exec file, a request/reply of length-prefixed fields; the
+  AOT runtime's new `HostSys` asks it, its `Sock` keeps a PF_UNIX socket or a socketpair as the OS's descriptor there (streams
+  `HSockIn`/`HSockOut` in Fd's table), and `ExtSignal` sends kill(2) to another process and has the OS's signals for a handler waited
+  for by a thread (`sigwait`) and posted as pending. No change to jrt or j2g (crop paths only). Alternatives considered: jrt's
+  `HostChannels` natives (IP only, a key move and a re-seed for AF_UNIX: no); Java's UnixDomainSocketAddress (jrt has no FileSystems,
+  F9, and Java's has neither datagrams nor abstract names: no); a poll of pending signals at every tick (a host round trip a tick: no,
+  a waiting thread and the Gil's yield instead).
+- The light level is unchanged in behaviour (no host in stage 0): the recvfrom programs stay `:unix-java` there; the class's text says so,
+  and at the compiled level it keeps them until the night's compiled run proves them.
+- Checked: the main's Go printed, vetted and tested in a scratch module (recvfrom's scenarios, a socketpair, a stream socket's calls,
+  sigaction/kill/sigwait); the runtime's new forms at the light level over the signal and socket programs (two type errors of the new
+  forms found and fixed first).
+- The three timeouts OC216 left unrecorded, rerun at load 13-19 (`cat /proc/loadavg` under 20): regression/pr7798 and
+  weak-ephe-final/ephetest3 at the light AOT level are over the CPU limit twice in a row (the limit is CPU time, not wall: OC216's
+  counters and weak keys, not the load); their aot-known.edn entries' kind is now "timeout " in their `:gc-and-memory` class and
+  they are recorded so (check-aot.edn). misc/darkening_work at oi's level timed out at load 15 and finished at load 13 with its
+  recorded class's output: at the CPU limit's edge; its record is unchanged (a first try recorded the finished run under a "timeout "
+  entry, an unclassed failure: reverted).
+
+## 2026-11-10: oi type-checks in goi's table again, after OC192 (branch `oi-table2`, from next `6c3c87c02`)
+
+W's prep (branch window-w2c, 736057475) found seven new errors of goi's checker in `go/arbace/oi` for tamago/amd64 and tamago/arm64, all
+from OC192 (a)'s `ext_final.ae` (56b343448), which landed after table-ready (5acc697c9, W-D13 (a)) had fixed oi's earlier 111. Fixed
+by the owners, W-D13 (a): `finAddr`'s six `(conv uintptr (unsafe/Pointer x))` are `(conv uintptr (conv unsafe/Pointer x))` (a conversion,
+not a call, as go/types has it and as `ext_unix_linux.ae` writes it), and oi.ae's `:init-order` puts `finObjs` after `blake2Sigma` (the
+checker's order, as Go's spec orders initialisation). Proof: test/ocaml/table_check.ae (what `bin/oi table-check` runs, here with the two
+tamago configurations alone, GOMEMLIMIT 3000MiB, window-w2c's tree with the fix picked) gives 7 errors before and none after in
+tamago/amd64 and tamago/arm64 (42 files each, the table of oi alone generated in both); linux's std read was not finished in the light
+lane's time (and its annotations are the same forms). Behaviour: `bin/oi test` ok; the five finaliser programs of OC192 pass by `bin/oi
+check --only-list`. Alternative (b), leaving oi out of the table at W2, not needed. The fix should be picked onto window-w2c.
+
+## 2026-11-09: SCS25 (a), SCS26 (b): TestWordBreakUAX29's control in the gate (branch `scheme-props5`, from next `6c3c87c02`)
+
+The user accepted scheme-props4's proposals as recommended (about 14:20). SCS25 (a): U+1E9E's exception in si's final sigma stays
+stated; Chez 10.3.0's `unicode-char-cases.ss` was not fetched (alternative (b), an hour and a download, for one character measured over
+every scalar value). SCS26 (b): `bin/si unit --control`, as `unicode-scan --control` does: the runtime's forms copied to
+`.tmp/si-control`, WB3c's rule dropped from `prim_char.ae`, `TestWordBreakUAX29` run on the copy and required to report exactly 9
+differing positions of UAX #29's WordBreakTest.txt (UCD 16.0.0), else the command fails; a part of `si-check.unicode` in
+`test/gate/crops/scheme.edn` and `steps.edn`. Alternative kept by hand (a) was rejected: GTS81 (a) wants a control per check family in
+the gate. Measured: the control differs in 9 positions (16 s); si-essential's command, the scans and their controls, crops-test, reap and
+crops-score as before (Scheme 97.4 / 98.9 / 100 / 100). Recorded in doc/scheme/SCHEME-SURVEY.md, "As built: SCS25 (a), SCS26 (b)".
+
+## 2026-11-10: Scheme's deferred non-passes surveyed, SCS27 and SCS28 proposed (branch `scheme-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90% (doc/CROPS-SCORE.md) listed Scheme's 8 deferred cases (eval 6, AOT 2). The slow benchmarks
+(speed, SC109) and the AOT's syntax constants (psyntax's records as read-back constants, SC90) are designs of their own; the R7RS
+exponent sign (SCS27) and Chibi's ill-formed optional-test fallback (SCS28) need the user's choice. Nothing run, no record changed.
+
+## 2026-11-09: LLS43 (a), LLS44 (b), LLS45 (a): the fragments' sizes and a held-out set in the gate (branch `llvm-props4`, from next `6c3c87c02`)
+
+The user accepted llvm-props3's proposals as recommended (about 14:20). LLS43 (a): verifyFragmentExpression and
+DIVariable::getSizeInBits ported from llvm-project 23.1.5 (`llvm/lib/IR/Verifier.cpp` V:7425-7464, V:1749-1753, V:799, V:536;
+`llvm/lib/IR/DebugInfoMetadata.cpp:1653`, the pinned tarball) into Arbace's verifier and, written apart, into the mutants' own
+verdicts, which no longer leave a rule to opt for a fragment in the module; their order the Verifier's (a definition's
+subprogram and its unit's global expressions, the walk, the records; the globals' `!dbg` again by visitGlobalVariable's direct
+call). LLS44 (b): left. LLS45 (a): `bin/repr-llvm heldout-check`, 900 mutants of 41 base modules (test/llvm/heldout-bases.txt)
+from the fixed seed 1200000, own verdicts held to Arbace's verifier, two crossed controls; the gate step `llvm-heldout`
+(llvm-full). Its first run found a rule the verifier lacked (visitDILocalVariable's `invalid type`, V:1721), fixed. Measured: 886
+of 900 own, all met (8 min, 0.7 GB); expect-test 42 cases and 12 controls; the essential read and print families as recorded;
+crops-score unchanged (LLVM IR 96.4 / 97.9 / 100 / 96.9). Alternatives: keeping LLS43 on opt's record (b), the held-out sets
+only in worktrees (LLS45 (b)). Recorded in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS43 (a), LLS44 (b), LLS45 (a)".
+
+2026-11-10, llvm-props4 (review fix, .tmp/merge-1111/REVIEW2.md §7 item 1): `bin/repr-llvm heldout-check` gets floors: n = 900
+(`REPR_LLVM_HELDOUT_N`) and at least 880 own verdicts (`REPR_LLVM_HELDOUT_MIN_OWN`; 886 of 900 recorded, a margin of 6 for a
+mutator or rule change; a collapse of the own verdicts, which left bad = 0 and the controls failing for the wrong reason, now
+fails). Proof: the run passes (900 mutants, 886 own, 5 min); with `REPR_LLVM_HELDOUT_MIN_OWN=887` it fails, "886 own verdicts,
+fewer than the floor 887", exit 1. Alternative: a record file of the count; an env floor beside the controls was enough.
+
+## 2026-11-10: LLVM IR's deferred non-passes closed where the gap was Arbace's own (branch `llvm-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90%, cheapest per case first (doc/CROPS-SCORE.md). LLVM IR: `bin/llvmi` checked and built the
+lowered C with the seed's embedded ci, not the checkout's (no `c_ci_fresh`), so LLS21 (a)'s fixes never reached its records; and
+its AOT module lacked RES34's `cilib` link, so no program importing musl's prebuilt units built. Both fixed in `bin/llvmi`, the
+Verifier rules of gc.relocate, the VP intrinsics, require-logical-pointer and AMDGPU's allocas, prefetch, av load/store and
+cooperative atomics ported into `arbace/repr/llvm/verify.ae` (LLVM 23.1.5's Verifier.cpp). Whole runs recorded: llvmi eval and AOT
+537 of 562 each (529, 522 before), verify-llvmtest 800 of 806 (792); the other families unchanged. Completeness 96.4 to 97.6.
+Alternatives: recording only the re-run rows (`bin/llvmi check --record` takes no `--only`), so the whole levels were run, in the
+light lane (one run at a time, under 1.5 GB). ci's namespaces were not changed (they are embedded, in `gate_key`); llvmi's are crop
+paths. Scheme (SCS27 proposed) and C (the long tail of the checker and the converter, a case each) were looked at and left.
+
+## 2026-11-10, llvm-compl2: the review's findings (REVIEW.md, .tmp/merge-1111/REVIEW.md, section 2)
+
+bin/llvmi sources bin/lib/ci/fresh.bash and calls c_ci_fresh only while the file exists (the re-seed window's R deletes it; 2.1); its
+CI_AOT_LIB default takes the main checkout by `${root%%/.tmp/worktrees/*}` as bin/lib/ci/check-aot does, so a clean run no longer reads
+the main checkout's warm cache (2.2); verify.ae's vp.splice tests the vector type before `(nth rt 1)`, and require-logical-pointer? and
+amdgcn-triple? are computed once per module (`*mod-facts*`; 2.3). Proofs: bin/llvmi check --essential 10 of 10, controls fail;
+test/repr/llvm/controls-test.bash; repr-llvm check verify-llvmtest/verify-probes --essential; bin/reap; bin/crops-score --judge --strict.
+## 2026-11-10: C++'s CP325-CP337 and P23 built (branch `cpp-props5`)
+
+- **What**: the user's acceptance of 2026-11-09 (each proposal as recommended), on a branch from mac/cpp-route-merged a69c3b10a so that
+  cpp-route's code generation route is in. Checker: a Sema crash is a failing `:crash`, never an acceptance (CP325 (a); parse/enum4.C's
+  long overflow in the constant evaluation fixed: 64-bit wrap); a time cap for each file of the dg read, `REPR_CPP_DG_TIMEOUT` default
+  300 s (CP329 (a)); `C<A>::M` as a placeholder for a deduced class (CP327 (a), class-deduction-alias20); structured bindings modelled
+  in the checker (CP331 (a)); `:gxx-only-rules` by design (CP328 (a)). Code generator: inheriting constructors (CP330 (a), CP326 (a);
+  mangled CI1/CI2 <base>, Itanium §5.1.4.3), std::tuple and std::map's operator[] (CP332 (a): clang's builtin templates
+  `__type_pack_element` and `__make_integer_seq` in the native parser and the templates, a pack parameter's type as an alias's argument,
+  pack expansions as one argument, a misread fold, if constexpr over a class, a failing decltype in a bound signature a substitution
+  failure), runtime/hello.cpp now generated; the full parse cache in gen-batch (CP336 (a), measured slower on a hit than the parse,
+  557 s against 378 s on samples/io.cpp, so off by default: CP341); the module's order as clang's (P23 (a):
+  functions placed at first reference as llvm::Functions are when created, EmitDeferred depth first; the order read from
+  clang/lib/CodeGen/CodeGenModule.cpp at llvmorg-23.1.5, Apache-2.0 WITH LLVM-exception, no code ported). CP333 (b), CP334 (b),
+  CP335 (b): nothing to build now; CP337 (b) was cpp-route's.
+- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (hello.cpp, unique_ptr
+  and the library's tuples were the next group), and the read's own record counts the dg files Arbace's front end judges alone.
+- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: cpp-props5"): the dg every-10th sample 121 → 121 own passes, the same files (two
+  regressions found and fixed on the way); 75 files with structured bindings, inheriting constructors and alias20: 12 → 13; the run
+  corpora's 82 programs by our route: 55 → 57 generated (embed-26, hello.cpp), none lost; codegen-gen 154 of 154 recorded again for P23's order (the
+  forms otherwise the same); P23 against clang's IR of 17 samples by hand: vtables in clang's order 3 → 13, functions' common
+  subsequence 44% → 79%. No run check (the lowered runtime's read is heavy; the runs are the night's). `bin/crops-score --crop cpp`
+  unchanged (76.3 / 100 / 67.8): the facts move only with the night's records (the dg own record, the switch).
+- **Alternatives considered**: writing the deferred functions after each top-level definition (tried: clang's IR shows the bodies'
+  references placed later, the positions are creation order, so it was dropped); diagnosing a failed decltype at the call instead of
+  dropping the candidate (wrong for SFINAE, [temp.deduct.general]/8); a future with a timeout for CP329 (the goroutine would run on).
+- **Proposed**: CP338 (the run corpora's remaining refusals), CP339 (landing pads' cleanups at the scope's end), CP340 (the generation's
+  time at night), CP341 (the full cache's format, or none).
+- **Slips**: two process substitutions (`paste <(...)`, `diff <(...)`) and one `>/dev/null` in throwaway comparisons, against the day's
+  rules; a `bin/cppi runtime-build` attempt was refused by the permission layer during night 10's heavy work and not retried.
+
+## 2026-11-10: C++'s print cell on the own round trip's records, CP243 (a)'s switch (branch `cpp-print-own`)
+
+- **What**: cpp-compl's night step 2 run by day in the light lane: `bin/repr-cpp roundtrip-corpus KEY --judge own --record-results`
+  for gxx-dg-every-10 (1,796 of 1,807 pass, 11 forms-differ), gxx-old-deja-every-10 (320 of 323, 3), c-c++-common-every-10 (326 of
+  326), libstdcxx-testsuite-every-40 (244 of 244), and `bin/repr-cpp dg --corpus modules [--sample 10] --rt-judge own --record`
+  (gxx-modules-all 1,180 of 1,181, gxx-modules-every-10 119 of 119): `test/repr/cpp/roundtrip-results/own/`. Two fixes on the way:
+  a statement's GNU attribute printed `__attribute__((x))` when it is no standard attribute (`[[used]]` was dropped on the read
+  again; `arbace/repr/cpp/print.ae`), and `sema`'s empty-init bails on a member of its own class's type (parse/struct-4.C overflowed
+  the stack; `arbace/repr/cpp/sema.ae`). Then CP243 (a): `--judge own` the round trip's default (`bin/lib/repr-cpp/roundtrip`;
+  `dg --rt-judge own` too), `test/reap/cells.edn`'s C++ print sources on `roundtrip-results/own`, cpp-roundtrip-dg's rotation
+  universe the own record, `test/crops/independence.edn`'s judge `:roundtrip [3887 1]`; `bin/reap --record`, `bin/crops-score --record`.
+- **Why**: the crops' roadmap's cheapest unscheduled gain (`.tmp/plans/CROPS-90-ROADMAP.md`, item 3); the user's CP243 (a) of
+  2026-11-07 waited only on the records, which needed no clang and fit the day's 2 GiB.
+- **Checked**: each record from a whole run with no failure; the samples (9 of 9, the control failing as it must) and
+  gxx-dg-essential (33 of 33) under the new default; old-deja and c-c++-common checked again after the fixes. `bin/crops-score --crop
+  cpp`: 76.3 / 100 / 67.8 → 89.1 / 100 / 71.3 (print 48.3 → 99.5; judge 0.735 → 0.907); `--judge --strict` 0 problems.
+- **Alternatives considered**: classing the 15 forms-differ in the known file (the own judge classes them itself; the known file is
+  the clang judge's); fixing them now (CP342, doc/cpp/CPP-SURVEY.md, "As built: CP243 (a)").
+- **Slips**: `bin/lib/repr-cpp/roundtrip` edited while a run read it (the 47-minute libstdcxx run lost, run again); one `/dev/null`
+  in a throwaway grep.
+
+## 2026-11-10: the five reader gaps of the own judge's forms-differ, CP352 (branch `cpp-cp352`)
+
+- **What**: five files of the 15 forms-differ of C++'s print cell (own judge), fixed in `arbace/repr/cpp/parse.ae`: a statement's
+  `__attribute (...)` (asan/pr82792.C), an enum under a template header (cpp0x/scoped_enum7.C) and a class defined in a trailing return
+  type (cpp0x/trailing5.C) as the declaration's text (NativeDecline: the forms have no place for either, and the print named what
+  the original defined), an array member's `a({...})` in the semantic list form `a{...}` has (cpp2a/paren-init33.C; clang's AST
+  for both is one InitListExpr, checked by hand with `clang++ -ast-dump`), a macro-named module partition's expansion consumed with its
+  `;` (modules/cpp-11.C). gxx-dg-every-10 recorded again from a whole run (1,801 pass, 6 forms-differ; was 1,796 and 11),
+  gxx-modules-all, gxx-modules-every-10, old-deja, c-c++-common unchanged, gxx-dg-essential 33 of 33, the samples 9 of 9 with their
+  control, codegen-gen 154 of 154. The report that found them said "CP342", which is the plan's other decided item: called CP352.
+- **Why**: the five are bugs on valid-looking code (decision-free), the rest of the 15 are dg-error files whose error recovery the forms
+  do not keep, and one aarch64-only file: left alone.
+- **Alternatives considered**: for the enum, keeping the template header in the forms (no form for it; clang's tree has none either) or
+  the printer writing one (it cannot know); for trailing5, hoisting the defined class beside the function (the tag's node would need a
+  place in the declarator's result: left for when valid code needs it, a type may not be defined in a trailing return type).
+- **Slips**: one `> /dev/null` on a background `nohup`.
+## 2026-11-10: RF13's first slice, RFP42-RFP47's light parts (branch `rust-rf13`, from `mac/rust-rf12` `0c22b1f1b`)
+
+- RFP44 (a): vtables natively in `arbace.rust.front.mono` (`vtable-entries`, a port of rustc 1.99.1's
+  `rustc_trait_selection/src/traits/vtable.rs` `prepare_vtable_segments` and `own_existential_vtable_entries`; MIT or Apache-2.0):
+  a virtual call's slot from the object's principal (`callee-fact`'s `:slot`), the record's virtual callees' slots from their method
+  path and printed `dyn`; codegen's virtual call (meth.rs' `VirtualIndex::get_fn`); our unsizing casts' vtables laid out natively when
+  every entry is a local impl's own method, else the record's cast of the same type in the same body. Alternative considered: RFP44
+  (b), the helper dumping slots (a rebuild and the packs again): not needed, the slot is the trait's items'.
+- Codegen's gaps the programs reached next, fixed: the repeat loop, powi, fma, exact_div, typed_swap_nonoverlapping, catch_unwind
+  (`__rust_try` in the module), type_id_eq, TypeId constants, `&str` valtrees, struct-tail unsizing, memory transmutes, SSA fields'
+  discriminants, function-pointer calls, reified local functions, external statics, promoted `[x; N]` and unit/newtype structs.
+- `panic-vec-remove`'s fault: `Vec::remove`'s `#[track_caller]` was not found (alloc's `vec/mod.rs` impl order is not rustc's
+  `{impl#N}`); a function the file's impls name once now found by name. The native leg 44 of 47 (43 before).
+- `rsi-build` now refuses a module that declares a local instance it does not define (the link would fail; found by `rsi-native` on
+  three programs that had passed codegen): 11 programs, RFP49.
+- Prepared for the night, not run: RFP45 (a)'s UI sampling (`RF_RSI_UI=40` in the rsi kind and `rsi-build`), RFP47 (a)'s
+  `RSI_STD_REMAP` in `bin/rsi std-build` (std.edn left alone: the runtime's key holds it). RFP42 (a) waits for the night's lowered std.
+- Synthetic corpus: 47 of 67 own (the same 47); Rust's score unchanged (RFP43 (a)). Proposed RFP48 (trait resolution in mono), RFP49
+  (the collector through std's bodies), RFP50 (closures' shims). doc/rust/FRONTEND-SURVEY.md, "As built: RF13 (first slice)".
+- Light lane: one process at a time, under 2 GiB a process (`RF11_PROCS=2`, `GOMEMLIMIT` 1800-2000MiB), no network.
+
+## 2026-11-10: RF13b, more of core's bodies equal to rustc's built MIR (branch `rust-rf13b`, from `mac/rust-rf13` `bd6a6ca6f`)
+
+- RF12-P6's six bodies left now equal: `mut_ptr::cast_const` (check_cast's try_coercion_cast of `*mut T` to `*const T`, the operand's
+  pointer coercion `AsCast` as THIR's apply_adjustment marks a cast's operand), `slice::as_ptr`/`as_mut_ptr` (the cast's user type
+  over a coercion cast's `Use`), `ptr::metadata::from_raw_parts`/`_mut` (a rigid projection Copy by its item bounds), `<DynMetadata>
+  ::size_of`/`align_of` (foreign types: `extern { type VTable; }` resolved, lowered, collected as `ForeignTy`; rustc 1.99.1's
+  rustc_resolve build_reduced_graph_for_foreign_item and rustc_ast_lowering's foreign items as the model). Their lowering was
+  contained, so no proposal was needed.
+- Widened over core-check's 37 modules, the largest classes of RF12's non-equal bodies by cause, each after rustc's code: a
+  prelude's variant of the root file's own enum mapped to the local definition (result.rs, option.rs: the largest class), a trait
+  object's inherent impl printed with its object lifetime, nested items' MIR names through their owner, `match x {}` as `!`, the
+  no-op reference coercion only for the same type, DerefMut under `&mut`, another module's struct fields from the interface,
+  `<$t>::MIN` as NamedConst, `Self(..)` as the constructor, SwitchInt's values as u128 bits, rustc's disambiguator in a body's key
+  (`do_panic#1`), `[const]` bounds printed. Alternatives considered: judging the duplicate `do_panic` keys as ambiguous (the oracle
+  has `#N` files, so the key was ours to fix) and normalizing SwitchInt's values in the printer only (the built MIR then still
+  disagreed with codegen's `const-switch-bits`, which reads constants as bits).
+- core-check: 5,398 equal (5,108 at RF12), 114 more but for the allocations (71), 148 differ (381), 117 refused (217). The known
+  files unchanged: `bin/rust-front core-essential` (564 of 567) and `bin/rust-front essential`. doc/rust/FRONTEND-SURVEY.md, "As built:
+  RF13b, core's bodies equal to rustc's built MIR".
+
+## 2026-11-10: RF13b's core-export, RFP51 proposed
+
+- `bin/rust-front core-export` on RF13b's front end: 32 of 32 exported bodies equal where the pack `rust-core-built` holds rustc's
+  body; the 16 of `str`, `slice`, `fmt` and `num` have none in the pack (it holds core-check's 37 modules), so the run keeps the
+  record's body for them. Against core-oracle's full dump (by hand) the 10 of `str`, `slice` and `fmt` are equal. RF12-P6's "43 of 48"
+  was measured against the full dump. Proposed RFP51 (a): a list of the export's modules added to the pack at the oracle tier.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13b".
+
+## 2026-11-10: RF13c, more of core's bodies equal to rustc's built MIR (branch `rust-rf13c`, from `mac/rust-rf13b` `0d44a0343`)
+
+- RF13b's remaining causes taken cheapest per body first, each after rustc 1.99.1's own code (the pinned rust-src; rustc's
+  rustc_hir_typeck method probe, instantiate_value_path, rustc_expand's transcribe.rs, rustc_hir_analysis' region.rs,
+  rustc_ast_lowering's try blocks and inline consts as the models): a trait's associated constant through a type-relative path
+  (`T::IS_ZST`) as NamedConst with its user type; a parameter's where clauses and a projection's item bounds as method candidates
+  whether their trait is in scope or not; an impl item's user type with the impl's parameters fresh and `Self` the impl's own self
+  type; one substituted token keeping its own place (the metavariable's place only for a span over several tokens), which fixed
+  the format placeholders' spans through `const_panic!` and `debug_assert!`'s messages; a const initializer's destruction scope;
+  Copy through marker.rs's own traits and `#[derive(Copy)]` on a union; `size_of::<T>()` in array lengths; a std variant named
+  by its written path; try blocks without their own `?`; inline consts as constants `{constant#N}` of their parent, numbered in the
+  DefCollector's order. Alternatives considered: special-casing `SizedTypeProperties` (rejected: the probe's general rule covers
+  it and Wrapping's `fmt`), and dropping the metavariable spans altogether (rejected: RF12 needs them for spans joining a
+  definition's tokens to a fragment).
+- core-check: 5,474 equal (5,398 at RF13b), 155 but for the allocations (114), 85 differ (148), 63 refused (117); no module lost an
+  equal body. Proposed RFP52 (a): the interface pass over a list of files holding crate-private items the 37 modules name.
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF13c".
+
+2026-11-10, rust-rf13b (review fix, .tmp/merge-1111/REVIEW2.md §4 items 1 and 2): the UI programs' names (`rfr_name`: `ui-tests%ui%...`) are
+used where rsi-build's outputs are read: `bin/rust-front rsi-native` and `bin/lib/rsi/check`'s `--front own` (the same naming
+inline). A missing own IR is a failure now (check: x.refused and ir.status 1, never the pack's IR with front.tsv saying own;
+rsi-native: a counted failure line). rsi-build counts the programs skipped for want of a record in the pack ("N skipped (no
+record in the pack)"). Proof: `bin/rust-front essential` passes, equal to essential-known.txt (known.diff empty, 3m50s, stub
+calls 0); a fabricated UI id (tests/ui/abi/foo#bar.rs) with front.tsv "own" and no .ours.ll names the same directory as
+rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch these two files (checked), so they rebase clean.
+
+## 2026-11-10: RF13d, more of core's bodies equal to rustc's built MIR (branch `rust-rf13d`, from `mac/rust-rf13c` `7f153a722`)
+
+- `mac/rust-rf13b`'s review fix (`ab753d5d0`) merged first, so the branch carries RF13b's fix, RF13c and RF13d; the journal's
+  conflict resolved by keeping both entries.
+- RF13c's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src; rustc_mir_build's
+  thir cx (ConstParam, SelfCtor's ZstLiteral), builder/mod.rs (constants check overflow), builder/expr/into.rs (write_via_move),
+  rustc_builtin_macros' deriving/mod.rs assert_ty_bounds, rustc_hir_typeck's check_casts, coercion.rs (coerce_unsized),
+  instantiate_value_path, expected_inputs_for_expected_output with generalize.rs, char's Debug): const parameters as values,
+  inline consts' own bodies (`f::{constant#N}`), derive's assertion spans, nested consts' MIR names, const closures' spans, the
+  crate's own ManuallyDrop, fresh trait arguments in a where-clause item's user type, a trait segment's written arguments,
+  impl Trait arguments skipped by a turbofish, `Self` struct patterns, expressions and unit values with their user types,
+  unsizing coercion casts and raw pointer coercions, write_via_move lowered as an assignment, char constants' escapes and code
+  points. Alternatives considered: modelling transcribe.rs' global metavar_spans table for tuple.rs' `Default` (12 bodies;
+  left, as a heuristic over expansion order would risk the equal ones), evaluating braced const arguments (`{ L3.to_llvm() }`,
+  3 bodies: needs const evaluation of a call; left). RFP52's crate-private items untouched, as decided.
+- core-check: 5,538 equal (5,474 at RF13c), 157 but for the allocations (155), 49 differ (85), 52 refused (63); no module lost an
+  equal body (baseline rerun at `7f153a722`: 5,474, as recorded). `bin/rust-front core-essential` and `essential` equal to their
+  known files. doc/rust/FRONTEND-SURVEY.md, "As built: RF13d".
+
+## 2026-11-10: RF13e, more of core's bodies equal to rustc's built MIR; RFP52 (a) (branch `rust-rf13e`, from `mac/rust-rf13d` `011d4cc3b`)
+
+- RF13d's decision-free causes taken cheapest per body, each after rustc 1.99.1's own code (the pinned rust-src's
+  `compiler/`: rustc_hir_typeck's check_expr_offset_of, coercion.rs (try_find_coercion_lub's fast path, ret_coercion),
+  rustc_infer's generalize.rs, place_op.rs' convert_place_derefs_to_mutable, rustc_mir_build's thir cx (OffsetOf),
+  rustc_builtin_macros' partial_ord.rs, rustc_trait_selection's builtin Copy/Clone and Destruct candidates, rustc_span's
+  MetavarSpansMap): offset_of!, nested inline consts, generalization of late-bound regions (the `Some(slice)` reborrow:
+  RF13d's port of expected_inputs_for_expected_output was right, generalization kept the parameter's region), the return
+  coercion as a CoerceMany, `Self { .. }` patterns of another file's struct, tuples' and arrays' builtin Copy/Clone,
+  Destruct, crate constants in patterns, an operator's alias bound, IndexMut in the builder's table, partial_ord's unit
+  exceptions, a let type's elided regions as fresh variables.
+- RFP52 (a), the user's decision of 2026-11-10 (with RFP48-RFP61 and RF12-P8, relayed by the main session):
+  `test/rust/front/core-iface-extra.txt`, the interface pass over its ten files in every run, the native interface's impls,
+  uniform-path re-exports in core's index.
+- Left, explained: tuple.rs' `Default` (12; metavar_spans needs hygiene contexts and rustc's expansion order: not ported
+  rather than guessed), braced const arguments (const evaluation of a call), RFP52's rest (a crate-private type alias, CopySpec,
+  Drain, ascii::Char, try_process's turbofish).
+- core-check: 5,538 (RF13d) -> 5,551 by the causes (`CORE_IFACE_EXTRA=`, RF13d's index) -> 5,576 with RFP52 (a) and a fresh
+  index; no module lost an equal body at either step. `bin/rust-front core-essential` and `essential` equal to their known
+  files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes. doc/rust/FRONTEND-SURVEY.md, "As built: RF13e".
+
+## 2026-11-10: RF14, RFP48 (a): trait resolution in mono; RFP49 (a) begun (branch `rust-rf14`, from `mac/rust-rf13e` `db5fe592e`)
+
+- RFP48 (a), decided by the user on 2026-11-10 (RFP48-RFP61 (a), relayed by the main session): Instance::resolve's
+  resolve_associated_item for mono, after rustc 1.99.1's rustc_ty_utils/src/instance.rs and rustc_trait_selection's
+  specialize/mod.rs and specialization_graph (the pinned rust-src's `compiler/`): `arbace.rust.front.typeck/resolve-assoc-fn`
+  (the applying impls, the specialization chain leaf first by their headers, the item from the nearest impl that defines it at
+  the impl's arguments and the method's own, else the trait's default body; an overlap without a most specialized impl and an
+  impl argument nothing determines refused), `arbace.rust.front.mono/resolve-instance` (the Fn traits' builtin candidates:
+  a closure's body or ClosureOnceShim by the closure's kind from its built body's self, FnPtrShim), used by the callee facts,
+  the calls' function constants, the collector, the external items and the vtables (std's impls, generic impls and default
+  bodies; VTableShim and a supertrait with parameters still refused). Alternatives considered: rustc's full specialization
+  graph with its where-clause implication (the header test suffices where two impls both apply to a concrete goal: coherence
+  admitted them as specializations; an overlap the header test cannot order is refused), keeping the record's facts (RFP48
+  (b), not decided).
+- Found on the way, each after rustc's code: v0's `<Self as Trait>::` qualification (default_print_def_path's
+  trait_qualify_parent), trait objects, local closures and fn pointers in v0; impl disambiguators in rustc's order of
+  definitions (a derive's impls after the crate's other items); `#[track_caller]` inherited from the trait's method
+  (codegen_fn_attrs); core's attributes of a trait's provided method and of an impl found by its header's names (std's
+  interface's against the source's, where the file's order is not rustc's disambiguators'); a call's function constant whose
+  callee's attributes core's sources do not show refused as its callee is.
+- RFP49 (a), the first part: build-run hands mono the function constants of the record's std bodies; the local functions and
+  closures they reach at no type argument join the collector's items (closures' bodies items too). The rest (generic local
+  instances reached through std: `quicksort::<f64>`, `<Dog as Animal>::describe`) needs our generic bodies instantiated, next.
+- Measured, light (one process at a time, under 2 GiB): the mono facts against the record over 8 synthetic programs, before
+  (`db5fe592e` in a worktree of its own) and after: callees equal 406 -> 592 of 710, function constants' symbols 368 -> 557, the
+  native callees 731 -> 964 of about 990 (refusals 263 -> 29); `rsi-build` over the 67 synthetic programs: 48 own (47:
+  `patterns`), the native callees 4,079 of 4,524 (3,503 of 4,288), vtables 25 of 32 (0 of 7); `bin/rust-front essential` and
+  `core-essential` equal to their known files, `bin/reap` 0 problems, `bin/crops-score --judge --strict` passes (Rust
+  unchanged). `rsi-build` keeps each batch's mono-check lines (`mono-all.log`). doc/rust/FRONTEND-SURVEY.md, "As built: RF14
+  (RFP48)", with the night's commands (the whole plan again, rsi-native over the new own program, `bin/rsi check --front own`).
+
+## 2026-11-10: RF15, RFP49 (a)'s rest: generic local instances, promoted constants (branch `rust-rf15`, from `mac/rust-rf14` `e1bdba384`)
+
+- RFP49 (a)'s rest, after rustc 1.99.1's rustc_monomorphize collector and Instance::instantiate_mir_and_normalize_erasing_regions
+  (the pinned rust-src's `compiler/`): mono's collector takes `[DEF ARGS]` items, a local generic function's, a generic impl's
+  method's, a trait's default body's at its Self or a generic function's closure's instance at concrete arguments, reached from
+  our bodies' calls, from the record's std bodies' function constants (RFP49's first part, now with the arguments) and from
+  vtables; each instance is our body instantiated (`mono/instantiate-runtime`: the types from their `:tc` substituted and
+  normalized, function constants' texts from their types, const parameters' values, repeat counts), collected in turn. The
+  local functions std's bodies' vtables name (the record's std bodies' function allocations, by symbol) are roots too.
+  Alternatives considered: rebuilding each instance through typeck at the arguments (rustc instantiates the polymorphic MIR,
+  as done here), keeping the record's instance bodies (RFP54 (a) takes ours).
+- The promoted constants of `main` (RF10's slice 5, further), after rustc_const_eval's interpreter: binary and unary operators,
+  numeric casts, strings' and byte strings' constants with their relocations, reborrows, nested borrows, enum variants with or
+  without fields and tuples or structs of several fields laid out by mono's layout (else the record's layout of that type), a
+  variant's explicit discriminant, f32's and f64's associated constants.
+- Found on the way: LowerSliceLenCalls (lower_slice_len.rs, enabled at -O0: `<[T]>::len` as PtrMetadata); an overloaded
+  compound assignment (`String += &str`: THIR's overloaded_operator, where the builder made a builtin Add of references);
+  `None::<u8>`'s turbofish (typeck); `drop_glue`'s parameter for v0 (not in std's interface); a trait object's auto traits in
+  rustc's interned order (Sync before Send); a record's `(dyn)` of a local trait read back; adt-repr's `#[repr(u8)]` read as a
+  vector (every explicitly sized enum's layout was the record's).
+- Measured, light (one process at a time, under 2 GiB): the 8 programs' mono facts against the record callees 592 -> 660 of
+  710, core items 483 -> 630, symbols 50 -> 105 of 128, native callees 964 -> 1,070 of 1,122; `rsi-build` over the 67
+  synthetic programs: **56 own** (RF14 48; 47 minutes), native callees 4,275 of 4,739, vtables 29 of 36. `bin/rust-front
+  essential`: the mono-check total moved by a6's `drop_glue::<D>` now an equal core item (core-items 2 of 2), the known file's
+  line rewritten (every fact equal); `core-essential` equal to its known file (564 of 567); `bin/reap` 0 problems;
+  `bin/crops-score --judge --strict` exit 0, Rust unchanged. RFP58 (the vector ABI) is not small: its design note in
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF15", with the night's commands.
+
+## 2026-11-10: RF16, RFP58 (a): the vector ABI; the HashMap programs' next causes; promoted constants further (branch `rust-rf16`, from `mac/rust-rf15` `f9cabe9be`)
+
+- RFP58 (a) as RF15's design note planned it, after rustc 1.99.1 (the pinned rust-src's `compiler/`): mono lays out
+  `#[repr(simd)]` types (rustc_ty_utils' layout_of_uncached and rustc_abi's `simd_type`: `(vector ELEMENT N)`, the newtype rule
+  for `Group`); the three types std's interface lacks (`core::core_arch::simd::Simd`, `core::core_arch::x86::__m128i`,
+  hashbrown's `Group`) are read from the library's own sources (rust-src's `library/`, `library/vendor/hashbrown-0.17.1`; stdarch's
+  `types!` read as `library/stdarch/crates/core_arch/src/macros.rs` writes it), a field's path resolved through the module's `use`
+  items and std's names. Codegen keeps a vector in memory and passes it indirectly (rustc_target's `adjust_for_rust_abi`; the
+  signatures equal the IR pack's) and emits the six intrinsics, and the rest of the generic family's simple ones, as
+  rustc_codegen_llvm's `generic_simd_intrinsic` does; rsi's lowering (LL5's scalarized vectors) takes them, so ci, the lowering
+  and `gate_key` do not move (only `arbace/rust/`, in `arbace_crop_paths`). Alternatives considered: vectors as immediates in
+  registers (the design note's guess; rustc passes them indirectly in the Rust ABI, so memory is both simpler and rustc's), the
+  helper printing the layout (the oracle tier's, not the run's), a table of the three types (the sources say it).
+- The vector ABI unblocked the HashMap programs as far as their next causes, built: a call through a constant function pointer
+  (core's quicksort), a spread argument's memory field, thread-local statics (`tlsref`: `llvm.threadlocal.address` of the static
+  declared `external thread_local`, its symbol mono's v0 of the static's def path; upper-case nested items in the value
+  namespace, rustc's non_upper_case_globals).
+- Promoted constants further (RF15's list): `ptr::null::<T>()` and `mem::size_of`/`align_of` calls, checked operators with their
+  fields and `assert`, an unsizing cast to a trait object with its vtable (mono's vtables now carry the cast's source type, since
+  PromoteTemps moves the cast out of the body mono saw); a nested borrow kept in its local (RF15 dropped it). On the tools' host a
+  `cond` whose branches `recur` did not compile as tail calls in `eval-promoted`'s loop: nested `if`s.
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **61 own** (RF15 56; 48
+  minutes): collections, rc-refcell, panic-hashmap-index, fmt, traits; native callees 4,275 of 4,739 (unchanged), vtables 35 of 46
+  (29 of 36), layouts 42,788 of 45,856 (42,388), thread-local statics 5 of 5. `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict`
+  exit 0, Rust unchanged. The 6 left and their causes in doc/rust/FRONTEND-SURVEY.md, "As built: RF16 (RFP58 (a))", with the night's
+  commands.
+
+## 2026-11-10: RF17, RF16's causes: four programs own, closures' first part (branch `rust-rf17`, from `mac/rust-rf16` `ee2eca54d`)
+
+- RF16's "Left" taken cheapest first, after rustc 1.99.1 (the pinned rust-src's `compiler/`): local constants evaluated as codegen's
+  eval_mir_constant does (the `const` item's construct_const body interpreted by `eval-promoted` in a value mode, in runtime and
+  promoted bodies), a variant's explicit discriminant in a runtime body, a static holding a pointer (codegen_static's
+  const_alloc_to_llvm: a packed struct with its relocations) for structs; a local trait's associated constant resolved to the
+  impl's (resolve_associated_item; typeck's `resolve-assoc-fn` takes associated constants) and a generic function's closure at its
+  instance's arguments (ClosureArgs' parent_args in mono's closure types, v0 and Instance::resolve's Fn arm) for generics; two
+  closure types of one closure unify by definition (typeck compared their signatures by `=`, which failed FlatMap's
+  `F::Output == U`: RF16's "a method call without its callee" in iterators was this `flat_map(..).collect()`, not the blanket
+  impl's `unzip_check`), v0 of a closure type never a backref to its own closures' parent path, and std's tuple constructors used
+  as function values built as shim.rs' build_ctor (the record's `mir/external`) for iterators; `Variants::Empty` in codegen
+  (a zero-sized aggregate, a `poison` discriminant) for casts; a reified closure's ClosureOnceShim symbol (RFP50 (a)'s first
+  part) for closures. Alternatives considered: the record's evaluated constants (`const 4_usize`; a record fact where the
+  interpreter exists), the record's ctor shims (none: the helper does not dump them), comparing closure types by text alone in
+  unification (the signatures' variables then stay apart; equating them is typeck's own identity of the two).
+- Stopped at closures' rest (RFP62: opaque types in mono and closures' vtable entries, about two days) and panic-assert-eq (RFP63:
+  upstream monomorphizations, std's exported generic instances), both written up in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+- Measured, light (one process at a time, under 2 GiB): `rsi-build` over the 67 synthetic programs: **65 own** (RF16 61; 44
+  minutes): structs, generics, iterators, casts; native callees 4,516 of 4,978 (4,275 of 4,739), constants 205 of 205 (191 of 197),
+  mono-check's callees against the record 1,992 of 2,414 (1,865). `bin/rust-front essential` equal to its known file;
+  `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict` exit 0, Rust unchanged.
+  The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+
+## 2026-11-10 py-aot-classid: the AOT judge records a classed row's class by its id
+`arbace/python/aot.ae`'s `judge` read `(:class c)` of a class map (`divergences-aot.edn`'s key is `:id`), so a classed row's `:class` was `:differs` or `:refused` (queue 259's Low, P6; the main host's patch `.tmp/night-python/259-aot-classid.patch`, applied as is): now `(:id c)`. No other `(:class ...)` read of a class map in arbace/python/ (the rest read `(ex-data e)`). Test `test/python/aot_judge_test.ae` (fabricated refused and differing runs, with and without a class, as the negative control; fails on the unfixed aot.ae). aot.ae's digest (`aot_gen`) keys the AOT's printed packages and the runner: the next pyi AOT run reprints the runtime. bin/reap 0 problems, crops-score --strict 0 problems; no record written.
+
+## 2026-11-11: bin/hsi check --aot removes each program's executable after its run (branch `hs-aot-disk`)
+
+Night 11's `bin/hsi check --aot --corpus nofib,samples,synthetic,testsuite-core --jobs 2 --record` filled the disk: every compiled program's
+`hsi-aot` (20-50 MB) and its generated Go and build module stayed under `.tmp/hsi/progs/<corpus>/<program>/<key>/aot/` (34 GB+ for ~800
+programs) and the run was stopped. The user decided (2026-11-11): delete each program's binary after its run, keep logs, outputs and verdicts.
+`bin/lib/hsi/check`'s `one`, in `--aot` mode, now removes `aot/hsi-aot`, `hsi-aot.new`, `gen` and `mod` right after the compiled run (also
+when the build failed: `gen`, `mod`); `HSI_KEEP_BINS=1` keeps them. Nothing reads the binary afterwards (the verdict, `--record`, `divergences` and
+`record_progs_run` read results, outputs and the STG); a rerun rebuilds, as `bin/lib/hsi/aot`'s key hit needs `DIR/hsi-aot` to exist. The libraries'
+generated packages `.tmp/hsi/aot/lib/` (shared, built once per runtime and image) stay. Test (day, `--jobs 1`, no `--record`, samples/Arrays,
+Classes, Cont, Deadlock): progs 272 MB with HSI_KEEP_BINS=1, 271 KB without; verdicts 4 of 4 pass as recorded; peak 1.1 GiB; a second run
+rebuilt and passed. Alternative considered: deleting the whole `aot/` dir (also drops the small logs and the key: kept for debugging).
+
+## 2026-11-09: CS296 (b), CS297 (a), and ms_struct for the Mac VM's ctypes (branch `c-props4`, from next `6c3c87c02`)
+
+The user accepted c-props3's proposals as recommended (about 14:20) and passed on the Mac VM's request (report 244, item 4).
+CS296 (b): nothing changes. CS297 (a): `-Wno-implicit-int` and `-Wno-error=implicit-int` read by `arbace.repr.c.host` and passed
+to the checker, which then gives no implicit-int error (gcc 15.2 by hand: none, or a warning); `judge_test.ae`'s
+`implicit-int-options`. The request: `#pragma pack(push, n)` in a function body was already gcc's since CS290 (a) (measured 9 as
+gcc; `test/c/run/pack-in-body.c`); GNU's `ms_struct` implemented in the checker's layout (`ms-layout!`) from gcc's manual's
+Microsoft layout rules, no gcc source read, every rule's case measured with the host's gcc 15.2 by hand
+(`test/c/run/ms-struct.c`, self-checking: 23 differences before, 0 after, interpreted and compiled). Records: ci-run's two
+programs' gcc runs, check and AOT rows; REAP's C eval and AOT +2. Alternative considered for CS297: computing the option in
+`arbace.c` alone to keep musl's forms key (rejected: the decision names the host's file options; the key's move costs one musl
+read). Proposed: CS298 (`-mms-bitfields`). Recorded in doc/C23-SURVEY.md, "As built: CS296 (b), CS297 (a), the ms_struct request".
+
+
+## 2026-11-10: musl's forms index repaired by `index` and locked by `read` (branch `c-musl-lock`, from `c-props4` `883115fd0`)
+
+Night 10's c-check/c-aot false fails were a stale `index.edn` in next's musl forms cache (936 of 1,331 sources, no
+`__libc_start_main`), diagnosed in .tmp/night10/DIAGNOSIS.md section 1: concurrent `bin/ci musl ensure` runs in g-gate1 without a lock, and
+`arbace.c.musl/index` never rebuilt an existing index. Fixed on `c-props4` (it already moves the forms key through repr/c, so
+the one musl read serves both): `index` is rebuilt when its keys differ from the cached sources, `bin/lib/ci/musl read` holds an
+flock around the whole read, `fresh` needs a complete index; `test/c/musl-lock-test.bash`. Alternative for the index considered:
+`read-all` deleting index.edn whenever it reads anything (rejected: repairs only what this process broke). Recorded in
+doc/C23-SURVEY.md, "As built: musl's index and its lock".
+
+## 2026-11-10, c-musl-lock: the review's findings (REVIEW.md, .tmp/merge-1111/REVIEW.md, section 1)
+
+`index`'s temporary file is named by nanoTime and thread id (as aotlib.ae and runtime.ae) and deleted when the rename fails (1.1);
+`bin/ci musl read` re-checks `fresh` once it holds the lock and a waiter reads nothing (1.2); test/c/musl-lock-test.bash writes its
+output to a file under its work directory, not /dev/null, and says it is by hand; Makefile target `ci-musl-lock-test` (1.4).
+Proofs: the test (ok, three cases), `bin/ci check --only test/c/essential-check.txt` (exit 0, controls differ as they must; the musl
+forms reread first, about 14 minutes at CI_JOBS=2), bin/reap, bin/crops-score --judge --strict, make check-makefile.
+
+At the user's request, a survey and plan for x86-64 (amd64) assembly as an intermediate crop, the way LLVM IR became one
+(doc/llvm/LLVM-CROP-SURVEY.md the model), written beside the arm64 survey (doc/asm/ARM64-SURVEY.md, branch `asm-arm64-survey`):
+doc/asm/AMD64-SURVEY.md. Doc only: nothing built, no lock, nothing fetched or installed. Read: doc/llvm/LLVM-CROP-SURVEY.md,
+doc/CROPS-SCORE.md, test/crops/crops.edn, test/reap/cells.edn, doc/ORACLE-RECORDS-SURVEY.md §3, `go/arbace/crt/{mem,syscall}.ae`,
+`tamago/cmd/go/cmd/{asm,internal/obj/x86}`, TamaGo go1.27.1's `src/cmd/asm/internal/asm/testdata` and
+`src/cmd/vendor/golang.org/x/arch/x86/x86asm` (BSD-3, a decoder with GNU, Intel and Plan 9 printers, AVX-512 from XED's data).
+Counted offline: llvm-project 23.1.4's `llvm/test/MC/X86` (632 files, 106,075 stated encodings, 96 error tests), `MC/AsmParser` (162),
+`MC/ELF` (265), `MC/Disassembler/X86` (13,545 stated decodings); gcc 15.2.0's `gcc.target/i386` (9,288 files, 3,504 run tests) and
+`gcc.target/x86_64` (153), extracted into the worktree's scratch from the pinned tarball; musl 1.2.6's 32 x86-64 `.s`/`.S`; Go's 67
+amd64 `.s` in `tamago/goroot` and its encoding tests (amd64 12,252 lines, AVX-512 14,302). Probes (seconds): GNU as 2.45.1 and
+llvm-mc 23.1.5 give the same `.text` on 31 of musl's 32 files (the other: a jump to a global symbol, short in gas, rel32 with a
+relocation in llvm-mc); Intel syntax's `mov edx, len` is a memory operand where AT&T's `mov $len, %edx` is an immediate; a static
+program assembled, linked and run by the CPU. Proposed: two intermediate rows `:asm-amd64` and `:asm-arm64`; forms at the machine
+level in the SDM's operand order; judges all own verdicts (the tests' stated encodings and text, exit status), the CPU's run and a
+ptrace lockstep tracer of Arbace's own; gas and llvm-mc only at the oracle tier; binutils never read for porting (GPL), its
+testsuite as data only; QEMU, unicorn and Bochs not used. Plan AX1-AX10, 53 to 92 days, AX1 the measurable first step (musl's
+32 files and MC/AsmParser read, printed `:full` byte for byte, read again equal). Proposals AXS1-AXS16 and the shared AS1-AS8, none
+decided. Alternatives considered: one `:asm` crop for both architectures (AXS1 (b)); per-syntax forms (AXS2 (b)); Go's optab or
+XED as the encoder's table (AXS4 (b), (c)); binary translation to Go as AOT (AXS7 (b), kept as optional AX11).
+
+## 2026-11-09 AArch64 assembly as a crop: the survey (branch `asm-arm64-survey`, from `mac/next` 7da5badcf)
+
+At the user's request, a survey only (doc/asm/ARM64-SURVEY.md; nothing built, nothing fetched, no lock), modelled on
+doc/llvm/LLVM-CROP-SURVEY.md, written beside the amd64 survey (doc/asm/AMD64-SURVEY.md, branch `asm-amd64-survey`) with a
+section "Shared with amd64" (SH1-SH10) for the merged plan. Sources read: llvm-project 23.1.5's tarball (the main checkout's
+`.tmp/llvm/llvm-project-23.1.5.src.tar.xz`: `llvm/test/MC/AArch64` 2,360 files, 417 base with 12,298 stated encodings,
+`MC/Disassembler/AArch64` 96 files, `lib/Target/AArch64`'s sizes), gcc 15.2.0's (`gcc/testsuite/gcc.target/aarch64` 8,545 files,
+854 run tests, 4,488 check-function-bodies; `libgcc/config/aarch64`), musl 1.2.6's aarch64 sources (15 `.s`), TamaGo's go tree
+go1.27.1 (`src/cmd/asm/internal/asm/testdata/arm64*.s`, `src/cmd/internal/obj/arm64/` with Go 1.27's instgen-generated
+`inst_gen.go`, `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm` at x/arch v0.27.1-0.20260521044007-9c1a596a2c97), `tamago/cmd/`'s
+forms of cmd/asm and obj/arm64, the box's arm64 `.s`, `bin/box-arm64-vm`, `go/arbace/crt`. Probes (seconds, light): LLVM 23.1.5's
+llvm-mc, llvm-objdump and FileCheck are installed (no arm64 linker on the host); TamaGo's go cross-builds a linux/arm64 static
+program in 4.3 s (353 MB) and qemu-aarch64 11.1.2 runs it (681 system calls of 21 kinds, threads and signals at once);
+`go tool objdump -gnu` pairs Plan 9 and GNU spellings. Recommended: GNU syntax first, Go's own assembler reused for Plan 9,
+Apple's spelling and Mach-O objects last; read and `:full` print in Arbace; the encoder/decoder from Go's and arm64asm's tables
+offline (Arm's machine-readable specification only after its licence is read, a fetch); AOT the assembler and a static linker
+to ELF; eval a64i, an A64 user-level interpreter in Go forms over a frame shared with amd64 and Linux's calls by name on
+crt; the tests' own verdicts (stated encodings, rejection messages, Go's `.out`) as the judge; native arm64 runs only from the
+Mac VM, QEMU's as labelled emulations at the oracle tier. Plan AR0-AR10, 40 to 66 days, AR1 (read and `:full` print over the
+417 base MC files, musl's and the box's) 3 to 5; decisions ARS1-ARS16. Alternatives considered: one shared `:asm` row (SH1 (b)),
+an A64-to-Go translator as AOT (kept as optional AR13), LLVM's `.td` via llvm-tblgen as the tables (a host record), qemu-aarch64
+as the main oracle (an emulation, not hardware).
+
+## 2026-11-10 x86-64 assembly: AX1's first slice, repr/asm's reader and :full print (branch `asm-ax1`, from `mac/next` `6c3c87c02`)
+
+The user's decisions of 2026-11-09 (~14:2x) on the two assembly surveys (two crops `:asm-amd64` and `:asm-arm64` in one directory, the
+forms at the machine level, GNU syntax first, byte for byte and canonical, readers first) start the amd64 crop with AX1
+(doc/asm/AMD64-SURVEY.md §12). The branch merges `mac/asm-amd64-survey` and `mac/asm-arm64-survey` (their JOURNAL entries kept in
+order). Built, on the light lane (stage 0, under 1.5 GiB, no lock, no assembler run, nothing fetched): doc/asm/SPEC.md, the forms'
+draft for both crops; `arbace.repr.asm` with `lex` (LLVM 23.1.5's AsmLexer token rules for x86 ELF: `#`, `//`, `/* */`, `;`, the
+integer and float spellings, `1f`/`2b`), `gnu` (GNU's directive language: labels, assignments, directives with comma and space
+separated arguments, `.macro`/`.rept`/`.irp`/`.irpc` bodies and macro invocations as text, `.intel_syntax` refused for AX3, LLVM's
+GNU operator precedence, the canonical print), `amd64/att` (AT&T operands after X86AsmParser: registers, `%st(N)`, `$imm`, memory
+with segment, symbolic segments and equated registers, `*` indirection, `{vex3}` pseudo prefixes, prefixes, AVX-512's `{%k}`,
+`{z}`, `{1toN}`, `{rn-sae}`), `full` (mode :full's layer: per item the gap and the text when not canonical, with the canonical
+text's hash, after repr/llvm's LLS18 (a)); `bin/repr-asm read|print|corpus extract|lists|roundtrip [--record]|divergences` and the
+Makefile's `repr-asm-*`; `test/asm/corpora.edn` (musl 1.2.6's and llvm-project 23.1.5's tarballs, the pins of test/c and test/cpp
+restated), `roundtrip-results-amd64.edn`, `divergences-read.edn`, `controls.txt`, `judge.ae`. The namespaces are a crop's: added to
+`bin/lib/version.bash`'s `arbace_crop_paths`, `arbace/j2g/embed.ae`'s exclusions and `test/gate/audit.ae`'s `crop-rules`
+(`test/gate/gate-key-crops-test.bash` passes); this commit moves the gate's key once (embed.ae and version.bash are hashed, as every
+crop's first commit did), later commits under `arbace/repr/asm` none.
+
+Results (bin/repr-asm roundtrip, about 50 s): musl's 32 files all pass (read; the `.ae` text read back to the same forms and layer;
+printed back byte for byte; the canonical print read again to the same forms with an empty layer); `MC/AsmParser` 139 of 157 (its
+split-file tests as their parts; 15 error tests rejected as their RUN lines say, one input of an error test, one Intel, one
+`-motorola-integers`); `MC/X86` 464 of 621 (every AT&T file; 152 Intel for AX3, 4 error tests, one file that is not an input).
+Negative controls: three, each a file's `.ae` printed back against another's original, fail as they must.
+
+Decisions taken within the slice, as proposals for the user (doc/asm/AMD64-SURVEY.md, "Proposed"): AXS17 (the mnemonic as written,
+operands reversed, until AX2's table makes the machine level; the alternative, a hand table of suffixes now, cannot tell `cmovl`'s
+condition from a suffix), AXS18 (the header `asm/unit`, since `asm/file` is the `.file` directive's item), AXS19 (macro bodies as
+text, gas's model; parsing them was considered, but altmacro and `\()` make bodies that are not statements before expansion),
+AXS20 (split-file tests as parts), AXS21 (the gate step and the row at AX10), AXS22 (the corpora extracted, not committed).
+Sources studied: llvm-project-23.1.5.src.tar.xz's `llvm/lib/MC/MCParser/{AsmLexer,AsmParser,ELFAsmParser}.cpp`,
+`llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `llvm/lib/Target/X86/MCTargetDesc/X86MCAsmInfo.cpp` (Apache-2.0 WITH
+LLVM-exception; rules followed by hand, no code copied; LICENSE.md and doc/ARBACE.md name them).
+
+## 2026-11-10 arm64 assembly: AR1, repr/asm's arm64 reader and :full print (branch `asm-ar1`, from `mac/asm-ax1` `ab91839f8`)
+
+AR1 of doc/asm/ARM64-SURVEY.md §12 on AX1's shell, on the light lane (stage 0, under 1.5 GiB, no lock, no assembler run, nothing
+fetched or installed). The lexer takes a dialect (LLVM 23.1.5's `AArch64MCAsmInfo.cpp`: ELF's and COFF's `//`, `#` a comment only at
+a statement's start as `AsmLexer::LexToken` has it, else an immediate's `#`; Darwin's `;` and `%%`; Plan 9's bytes above 127 in names,
+`->`, `@>`); the shell reads a `.S`'s cpp lines and macro invocations as items, `NAME .req REG`, `$d:`, `%pltpcrel(f)`,
+`f@AUTH(ia,42)` and `.arch`'s text; the header's map names the dialect. `arbace.repr.asm.arm64.gnu` reads A64's operands after
+`AArch64AsmParser.cpp` (registers with kinds and predicate qualifiers, `#` immediates, `:spec:` specifiers, `=` literals, memory with
+`!`, lists and ranges, indexes, shifts and extends) in the text's order; `arbace.repr.asm.plan9` reads Plan 9's text lexically after
+Go 1.27.1's `cmd/asm/internal/asm/parse.go` (`(p9/MNEMONIC ...)`, groups `(addr E [..] [..])`, lists, indexes, DATA's `/N`).
+`bin/repr-asm --arch arm64`, six arm64 corpora in `test/asm/corpora.edn` (musl's aarch64 `.s`, libgcc's aarch64 `.S` from the pinned
+gcc 15.2.0 tarball, `MC/AArch64`'s top level and `MC/AsmParser/AArch64` from the llvm-project 23.1.5 tarball, the box's arm64 `.s`, Go's
+`cmd/asm` testdata in TamaGo's GOROOT at `seed/goroot.sha256`'s go1.27.1), `test/asm/roundtrip-results-arm64.edn`,
+`divergences-read-arm64.edn`, `controls-arm64.txt`, the Makefile's arm64 targets.
+
+Results (`bin/repr-asm --arch arm64 roundtrip`, about 18 s): musl 15/15, libgcc 7/7, `MC/AArch64` 400/409 (39 files in Apple's
+spelling by their triples), `MC/AsmParser/AArch64` 0/1, the box 7/7, Go's testdata 5/5; the ten not passing are error tests whose
+RUN lines say llvm-mc rejects them, class `:error-test`; six negative controls fail as they must. AX1's amd64 round trip rerun: the same
+810 rows and every `.ae` text byte for byte AX1's. Fixed on the way: `bin/repr-asm divergences` (AX1's) named no corpus and so judged
+every row "not recorded"; it now takes every corpus of the results.
+
+Considered and proposed (doc/asm/ARM64-SURVEY.md, "Proposed (AR1)"): ARS17 (the syntax level in the text's order until AR2; a `#`
+normalised now needs the operand classes), ARS18 (Plan 9 lexically in `p9/`; reversing its operands is not right for every
+instruction), ARS19 (a `.S` read as the preprocessor's text; preprocessing first loses the source), ARS20 (flat record names with
+`-arm64`), ARS21 (Apple's spelling by the RUN lines' triples), ARS22 (the extensions' 1,942 files read now, encodings at AR11: measured by hand, 1,938 pass, 4 error tests),
+ARS23 (a byte a character in Plan 9's UTF-8 names). Sources studied: llvm-project-23.1.5.src.tar.xz's
+`llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`, `llvm/lib/Target/AArch64/MCTargetDesc/AArch64MCAsmInfo.cpp`,
+`llvm/lib/MC/MCParser/AsmLexer.cpp`, `llvm/include/llvm/MC/MCAsmInfo.h`; TamaGo's go1.27.1 `src/cmd/asm/internal/{asm,lex}`; the Mac VM's
+inventory (queue 255) for the oracle tier to come. No code copied (LICENSE.md, doc/ARBACE.md).
+
+## 2026-11-10 amd64 assembly: AX2's first slice, the table from LLVM's `.td` by Arbace's TableGen, the matcher and the encoder (branch `asm-ax2`, from `mac/asm-ar1` `6b8d79358`)
+
+AX2 of doc/asm/AMD64-SURVEY.md §12 on the light lane (stage 0, one run at a time, under 2 GiB, no lock; no llvm-tblgen or llvm-mc
+in any check), the user's decisions of 2026-11-09 followed (AXS4 (a), the table from LLVM's `.td`; AXS5 (a), one encoder mode per
+reference) and AXS17-AXS22 provisionally as recommended. Built (doc/asm/AMD64.md; "As built: AX2 (first slice)"):
+
+- `arbace.asm.tablegen` (`arbace/asm/tablegen.ae`): TableGen's language read and evaluated after llvm-project 23.1.5's
+  `llvm/lib/TableGen/TGLexer.cpp`, `TGParser.cpp`, `Record.cpp` and `llvm/docs/TableGen/ProgRef.rst` (the release tarball
+  `llvm-project-23.1.5.src.tar.xz`, SHA-256 `fb50b1ea...6a6e`, the pin of `test/asm/corpora.edn`): the preprocessor's conditionals,
+  classes, defs, multiclasses and defm (several multiclasses in one, the defm's classes after them, the let levels outwards),
+  let with bit ranges, foreach, defvar, defset, if, named template arguments, the `!` operators the X86 files and the
+  target-independent ones use, anonymous records; fields evaluated lazily against the finished record. On X86.td (144,000 lines,
+  106 files) it makes the 22,373 instructions and 2,796 aliases llvm-tblgen makes, about 2 minutes. Its memory was the first
+  obstacle (2.2 GiB with every field kept): the generator keeps only the fields it reads of the instructions and aliases,
+  evaluated when each record is complete, and drops the fields of the record kinds it never reads (intrinsics, patterns,
+  scheduling), 1.2 GiB. Debugged on the way: `#` at a line's start is a paste unless a directive follows; a def's name's
+  identifiers are names; `{1-0}` lexes `-0`; `!cond`; several multiclasses in one defm; an unresolved identifier in a paste is
+  its name.
+- `arbace.asm.amd64.gen`: AsmMatcherEmitter's rules (`llvm/utils/TableGen/AsmMatcherEmitter.cpp`: tokenizeAsmString, validate,
+  buildRegisterClasses with the singleton registers' names, getOperandClass, ClassInfo's order, shouldBeMatchedBefore with the
+  aliases' result instruction's position) with `Common/CodeGenInstruction.cpp`'s FlattenAsmStringVariants (the outer `{a|b}` only:
+  my first, recursive flattening lost AVX-512's `{%k}` braces) and `Common/CodeGenRegisters.cpp`'s TopoOrderRC (a register set
+  is named by its first class in that order: VR128's set is FR16's); `asm/amd64/table.edn` (8.9 MB, one entry a line): 23,014
+  matchables, 107 classes, 207 mnemonic aliases, 7 predicates, 322 registers, 20,465 instructions' encoding fields.
+  `bin/repr-asm table gen|check` (check regenerates, byte for byte; about 2.5 minutes); `table oracle` by hand: the host's
+  llvm-tblgen 23.1.5 `-gen-asm-matcher` on the same files, its MatchTable0 equal to the table's matchables, 23,014 of 23,014 rows
+  in order (the comparison drove three fixes: aliases' `"att"` variant name, the alias's result instruction's position, the
+  register sets' names).
+- `arbace.asm.amd64.asm`: the AT&T matcher and the encoder after `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (parseInstruction's
+  rewrites, matchAndEmitATTInstruction, processInstruction with optimizeInstFromVEX3ToVEX2 and the shift by 1,
+  checkTargetMatchPredicate, CheckBaseRegAndIndexRegAndScale, VerifyAndAdjustOperands, Code16GCC), `X86Operand.h`,
+  `X86AsmParserCommon.h` and `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp` (prefixes, REX, VEX2/VEX3, XOP, ModRM, SIB,
+  displacements, immediates, fixups), `X86BaseInfo.h` (getOperandBias, getMemoryOperandNo, needSIB), `X86MCTargetDesc.cpp`
+  (needsAddressSizeOverride) and `X86EncodingOptimization.cpp`.
+- `arbace.asm.amd64.check` and `bin/repr-asm encode-check [--record]`: `MC/X86`'s stated encodings judged by their own CHECK lines
+  in each RUN line's mode, as FileCheck reads them (the instructions' encodings in order, each stated encoding matched forward
+  from the last match: the tests write a CHECK before, after or beside its instruction; a positional pairing failed on
+  `x86-64.s`); the error tests' `error:` lines in order. `test/asm/encode-results-amd64.edn`, `divergences-encode.edn`,
+  `controls-encode.txt`, `encode_judge.ae`; the Makefile's `repr-asm-table`, `-table-check`, `-encode-check`, `-encode-record`.
+  `test/asm/corpora.edn`'s `:tables` names the `.td` files `corpus extract` takes. `arbace/asm/` joins `arbace_crop_paths`,
+  embed.ae's exclusions and the audit's crop rules.
+
+Results: of `MC/X86`'s 106,075 stated encodings 32,673 met (legacy 13,753, VEX 17,128, XOP 1,792), 73,402 classed (EVEX 50,896, Intel
+20,725 for AX3, `{evex}`/`{rex2}` 1,175, APX 605, no run 1), none failing; of the 96 error tests, 79 read, 60 of their 108 `error:`
+lines met, 48 pending. Three negative controls fail as they must. AX1's and AR1's round trips unchanged; `bin/reap`, `bin/crops-score
+--judge --strict` and `test/gate/gate-key-crops-test.bash` pass. Not built: EVEX and APX, the CHECK text, gas's mode, relaxation
+(no stated encoding needs it), the gate step and the row (AXS21 (a)).
+
+Considered: llvm-tblgen's JSON committed at the oracle tier (AXS4 (a) as first written) against Arbace's own TableGen: the brief
+asked for the generator to be Arbace's; the oracle comparison makes it as trustworthy. Proposed (doc/asm/AMD64-SURVEY.md,
+"Proposed (AX2)"): AXS23 (the generator Arbace's), AXS24 (the regeneration in `--full`), AXS25 (FileCheck's order for the
+pairing), AXS26 (the machine level as a second view now, the read forms rewritten with the CHECK-text slice), AXS27 (EVEX next).
+No code copied (LICENSE.md, doc/ARBACE.md); the table is a derived work of LLVM's `.td` files under their licence.
+
+## 2026-11-10 amd64 assembly: AX2's second slice, EVEX in the matcher and the encoder (branch `asm-ax2b`, from `mac/asm-ax2` `7e909ad83`)
+
+AXS27 (a) followed provisionally (EVEX next; AXS23-AXS27 unanswered). Studied, not copied: llvm-project 23.1.5 (the pinned
+tarball, `test/asm/corpora.edn`'s `:llvmorg-23.1.5`) `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`
+(X86OpcodePrefixHelper's EVEX fields and `emit`, `emitVEXOpcodePrefix`'s EVEX cases form by form, `isDispOrCDisp8`,
+`emitMemModRMByte`, `encodeInstruction`'s writemask and rounding-operand skips), `X86BaseInfo.h` (`isX86_64ExtendedReg`,
+`isApxExtendedReg`), `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (`MatchRegisterByName`'s 64-bit-only registers,
+`ParseRoundingModeOp`, the pseudo prefixes, `checkTargetMatchPredicate`'s `{evex}`, `replaceWithCCMPCTEST`) and `X86Operand.h`
+(`isVK*Pair`, `addMaskPairOperands`).
+
+- `arbace.asm.amd64.asm`: `evex-prefix!` (62 and P0-P2: R, X, B, R' with inverted bits, mmm from the map (TB, T8, TA, maps 5-7), W,
+  vvvv and V', U, pp, z, L'L, b, aaa; L'L from the rounding control on a register form with EVEX.b, zero for `{sae}`); the
+  encoder's operand skips count the writemask; the EVEX_RC operand left out of the immediates; disp8*N from the table's
+  `CD8_Scale` in both ModRM paths (no compression in 16-bit addressing, as LLVM). The matcher: `%xmm16`-`%xmm31`, `%ymm16`-`%ymm31`,
+  `%zmm`, `%k` taken (outside 64-bit mode the 64-bit-only ones refused with llvm-mc's message), `{rn-sae}`-`{rz-sae}` as the
+  immediates 0-3, `{sae}` a token, `vp2intersect`'s mask pairs (every `VK*Pair` set is K0-K7; the pair's encoding its even
+  register's), `{evex}`. What stays APX's is classed `:apx` by its cause: map 4, NF, the two conditional operands, `{dfv=...}`
+  (any case), `{rex2}`, `{evex} cmp`/`test` in 64-bit mode, `%r16`-`%r31`.
+- `test/asm/encode-results-amd64.edn` recorded from a run with 0 failing; `divergences-encode.edn`: `:evex` and
+  `:forced-encoding` empty and kept, `:apx` widened; `controls-encode.txt`: a fourth control, `avx512bw-64-att` against
+  `avx512dq-att`, fails as it must.
+
+Results: of `MC/X86`'s 106,075 stated encodings 81,966 met (was 32,673): legacy 13,753, VEX 17,215 (+87, the opmask instructions
+the first slice refused for their `%k` registers), XOP 1,792, EVEX 49,206; 24,109 classed (Intel 20,725 for AX3, APX 3,383, no run 1);
+none failing; error lines 63 of 108 met (was 60). The first run over the 132 EVEX files met 49,969 and rejected 169, two causes
+(`isVK2Pair` looked for a register class the table does not name; `{dFV=...}` in upper case), both fixed. Table check byte for byte
+(not regenerated: its fields held EVEX's bits); AX1's and AR1's round trips the same rows; `bin/reap` (0 problems), `bin/crops-score
+--judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass. llvm-mc not run: the tests' own CHECK lines judge.
+
+Considered: one port of `emitVEXOpcodePrefix` for VEX, XOP and EVEX together in place of the first slice's VEX function, rejected
+for this slice (the VEX path's 17,128 met lines unchanged by construction); EVEX's APX fields (B4, X4, NDD, NF) left to APX.
+Proposed (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, second slice)"): AXS28 (the CHECK text before APX, as AXS27 (a) orders it).
+
+## 2026-11-10 amd64 assembly: AX2's third slice, the CHECK text printed (branch `asm-ax2c`, from `mac/asm-ax2b` `44c4eb18e`)
+
+AXS28 (b) and AXS29 (a) followed provisionally (AXS23-AXS29 unanswered): the AT&T printer and the CHECK texts' print level before
+APX. Studied, not copied: llvm-project 23.1.5 (the pinned tarball, `test/asm/corpora.edn`'s `:llvmorg-23.1.5`)
+`llvm/utils/TableGen/AsmWriterEmitter.cpp` (printInstruction's operand calls, `EmitPrintAliasInstruction`: EmitPriority, the
+operand count rule, the conditions, the ambiguity rule; `IAPrinter::formatAliasString`), `llvm/utils/TableGen/Common/AsmWriterInst.cpp`
+(the AsmString's fragments, escapes, `${name:modifier}`), `llvm/lib/Target/X86/MCTargetDesc/X86ATTInstPrinter.{cpp,h}` (printInst,
+printVecCompareInstr, the operand printers), `X86InstPrinterCommon.cpp` (printInstFlags, the condition codes, the SSE/AVX predicates,
+the comparison mnemonics, rounding control, printPCRelImm), `X86MCAsmInfo.cpp` (the at-specifiers' spellings),
+`llvm/lib/MC/MCInstPrinter.cpp` (formatImm, formatHex, matchAliasPatterns), `MCExpr.cpp` (MCExpr::print), `MCSymbol.cpp`,
+`MCAsmInfo.cpp` (isValidUnquotedName), and `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (the instruction flags, the DX
+operand, register equates).
+
+- `arbace.asm.amd64.gen`: `asm-writer` (each instruction's `:print`), `print-aliases` (the table's `:print-aliases`); the table
+  regenerated (`asm/amd64/table.edn`, 10.9 MB; the matchables and the sections before `:insns` byte for byte as before).
+- `arbace.asm.amd64.print` (new): the printer. `arbace.asm.amd64.asm`: an encoding's result carries its MCInst (`:mi`) and the
+  printer's flags (`:pflags`: `{vex}`, `{vex2}`, `{evex}` beside the encoder's); `(%dx)` alone not refused as an address; register
+  equates as operands, bases, indexes and segments.
+- `arbace.asm.amd64.check`: the print level (`text-part`, `text-kind`, `judge-text`, the runs' `:out-intel?`, `:imm-hex?`,
+  `:other-tool?`, `:options?`, `:lfi?`), the verbs `control-print`, `print-list` (the oracle's input) and `show` (a file's printed lines);
+  `test/asm/encode_judge.ae` judges the `:text` rows too and refuses `--record` from a run with a failure at either level;
+  `test/asm/divergences-print.edn`, `test/asm/controls-print.txt` (four controls); `bin/repr-asm print-oracle` and `table oracle`'s
+  alias comparison; the Makefile's `repr-asm-print-oracle`.
+
+Results: of `MC/X86`'s 108,601 CHECK texts 82,838 met, 25,763 classed (Intel 21,318, APX 2,221, directives 1,202, other tools' output
+772, comments 116, unread 63, LFI 61, other target 7, options 2, fixup 1), none failing; recorded into
+`test/asm/encode-results-amd64.edn` from that run (the encoding rows equal: 81,966 met, 0 failing). The first whole run failed 178
+texts (the DX operand, register equates, `tlsdesc`'s spelling) and the LFI files, all fixed or classed. Oracles by hand: llvm-tblgen's
+MatchTable0 23,014 of 23,014 rows and printAliasInstr 3 of 3 patterns; llvm-mc 23.1.5 over the 372 AT&T files: 83,156 of the 83,157
+printed lines llvm-mc's (the one left an `.ifdef ERR` statement llvm-mc skips), after two fixes the oracle found (a specifier after an
+expression). `table check` byte for byte; AX1's and AR1's round trips the same rows; `bin/reap` (0 problems), `bin/crops-score --judge
+--strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: AXS29 (b), FileCheck emulated over the streamer's whole output, left for AX4 (the directives' printer); classing the
+unmet texts by the nearest statement alone (the encodings' rule), kept but preceded by the text's own kind, since a text's content
+says whether it can be an instruction's line. Proposed (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, third slice)"): AXS30-AXS33.
+
+## 2026-11-10 amd64 assembly: AX3, Intel syntax read, matched and printed, and the cross-syntax judge (branch `asm-ax3`, from `mac/asm-ax2c` `030627ff5`)
+
+AX3 of doc/asm/AMD64-SURVEY.md §12 on the light lane (stage 0, one run at a time, under 1.5 GiB, no lock; llvm-mc and llvm-tblgen only
+by hand as oracles). Sources read and written again in Arbace (no code copied), all from llvm-project 23.1.5's release tarball
+(`test/asm/corpora.edn`'s `:llvmorg-23.1.5`, sha256 fb50b1ea...): `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (parseIntelOperand,
+ParseIntelMemoryOperandSize, ParseIntelExpression, IntelExprStateMachine, InfixCalculator and OpPrecedence, ParseIntelNamedOperator,
+ParseIntelOffsetOperator, ParseIntelDotOperator, ParseRoundingModeOp, HandleAVX512Operand, MatchRegisterByName, ParseRegister,
+AddDefaultSrcDestOperands, parseInstruction's Intel branches and xlat, matchAndEmitIntelInstruction, ParseDirective's `.intel_syntax`),
+`X86Operand.h` (isAbsMem's MaybeDirectBranchDest, isMemUnsized), `llvm/lib/Target/X86/MCTargetDesc/X86IntelInstPrinter.{cpp,h}`,
+`X86InstPrinterCommon.cpp` (printExprOperand, printVKPair), `X86MCTargetDesc.cpp` (populateReservedIdentifiers), `X86MCAsmInfo.cpp`
+(isValidX86UnquotedName), `llvm/utils/TableGen/AsmMatcherEmitter.cpp` (the parser variants, tokenizeAsmString's isolated tokens,
+extractSingletonRegisterForAsmOperand, validate's comment delimiter) and `AsmWriterEmitter.cpp` (printAliasInstr per writer),
+`llvm/lib/MC/MCParser/AsmParser.cpp` (parseExpression's folding, parsePrimaryExpr's inlining of a constant variable: MASM's symbol rule
+as llvm-mc applies it).
+
+Built: `arbace.asm.amd64.gen` makes the table's Intel variant (`:match-intel`, `:aliases-intel`, `:print-aliases-intel`, `:print-intel`;
+`asm/amd64/table.edn` regenerated, its AT&T parts unchanged); `bin/repr-asm table oracle` compares MatchTable1 and X86GenAsmWriter1's
+aliases too. `arbace.repr.asm.amd64.intel` (new): the Intel reader and canonical printer; `arbace.repr.asm.gnu` keeps the assignments read
+so far (`*equ*`) and the syntax in force while printing (`*syntax*`), and reads Intel statements with the Intel reader; `arbace.repr.asm`
+takes the dialect `:syntax :intel`. `arbace.asm.amd64.asm`: Intel's operands, Sym + Imm, matchAndEmitIntelInstruction, `xlat`.
+`arbace.asm.amd64.print`: the Intel printer. `arbace.asm.amd64.check`: each run read in its own syntax and printed in its output's,
+the cross-syntax judge and `control-cross`; `test/asm/encode_judge.ae` judges and records `:cross`; `test/asm/judge.ae` names a file's
+class by its id first. `bin/repr-asm`: a file is Intel when its first llvm-mc run reads it so (the run's own command), the cross controls.
+New: `test/asm/divergences-cross.edn`, `test/asm/controls-cross.txt`; two Intel controls each in `controls-encode.txt` and
+`controls-print.txt`. doc/asm/SPEC.md §5a, doc/asm/AMD64.md §6.
+
+Results (`MC/X86`): round trip 609 of 621 files (464 before; the rest 9 error tests, 2 `-masm-integers` tests under `:lexer-option`,
+1 not input), `MC/AsmParser` 140 of 157 (139); stated encodings 99,509 of 106,075 met (81,966; the rest APX 6,565 and one no run),
+CHECK texts 100,884 of 108,601 (82,838), the cross-syntax judge 82,765 of 83,505 AT&T instructions (the rest by design: 566 ambiguous,
+118 branches to a constant, 32 standalone masks, 21 read as another instruction, 2 `$` names, 1 local label), error lines 74 of 130
+(63 of 108); none failing at any level, recorded from that run (`encode-results-amd64.edn`, `roundtrip-results-amd64.edn`). The first
+runs failed one text (Sym plus a negative Imm printed `+-`, now LLVM's subtraction) and 41 cross cases: the judge used the run's mode
+after `.code32` (fixed) and the rest were llvm-mc's own, checked by hand with llvm-mc 23.1.5 and classed. Oracles by hand: llvm-tblgen
+MatchTable0 23,014 and MatchTable1 22,609 rows, the two writers' aliases 3 and 3. `table check` byte for byte; AR1's round trip the same
+rows; `bin/reap` (0 problems), `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: reading Intel memory operands as a tree with the registers inside (kept the state machine's reading: registers out of the
+sum, the value the calculator's, which `_g0[rbp + 1 + (2*5) - 3 + 1<<1]` needs); the cross judge on encodings (AXS34 (b)); a lexer option
+for MASM's integers (AXS35). Proposed: AXS34-AXS36 (doc/asm/AMD64-SURVEY.md, "Proposed (AX3)").
+
+## 2026-11-10 amd64 assembly: AX2's fourth slice, APX matched, encoded and printed, and VEX's map 7 (branch `asm-ax2d`, from `mac/asm-ax3` `55d62a05d`)
+
+AX2's last encoding family (doc/asm/AMD64-SURVEY.md, "As built: AX2 (fourth slice, APX)") on the light lane (stage 0, one run at a time,
+under 1.5 GiB, no lock; llvm-mc only by hand as the oracle), AXS17-AXS36 unanswered and followed as recommended (AXS27 (a): APX after EVEX
+and the CHECK text; AXS33 (a): VEX's map 7 with APX). Sources read and written again in Arbace (no code copied), from llvm-project 23.1.5's
+release tarball (`test/asm/corpora.edn`'s `:llvmorg-23.1.5`): `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`
+(X86OpcodePrefixHelper: REX2, EVEX's R4/B4/X4/V4, setBB2, setXX2, setV2, setNF, setSC, determineOptimalKind; emitVEXOpcodePrefix,
+emitREXPrefix, emitOpcodePrefix, encodeInstruction's IsND), `X86BaseInfo.h` (hasNewDataDest, getMemoryOperandNo, needSIB,
+isApxExtendedReg, isX86_64ExtendedReg, canUseApxExtendedReg), `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (MatchRegisterByName,
+parseCFlagsOp, parseInstruction's pseudo prefixes, checkTargetMatchPredicate, processInstruction's replaceWithCCMPCTEST,
+validateInstruction), `X86EncodingOptimization.cpp` (optimizeShiftRotateWithImmediateOne), `X86InstPrinterCommon.cpp` (printInstFlags),
+`llvm/lib/TableGen/TGParser.cpp` (ParseObjectBody, ApplyLetStack).
+
+Built: `arbace.asm.amd64.asm`: the extended GPRs, canUseApxExtendedReg, `{dfv=}`, `{nf}` with CFCMOV's exception, `{rex2}`, `{evex}
+cmp`/`test` as CCMP/CTEST, the high byte check, REX2, EVEX's prefix rewritten with APX's bits, the new data destination in the forms and
+the memory operand's number, SIB for `%r20`/`%r28`, VEX's maps 4-7. `arbace.asm.tablegen`: the let stack around a class's definition
+applied to it (AMX-FP8's tie was lost); `arbace.asm.amd64.gen`: `:insns` with processInstruction's shift-by-1 targets (ROL8r1_ND ...,
+DisassembleOnly); `asm/amd64/table.edn` regenerated (24 lines: those 4 + 12 instructions). `arbace.asm.amd64.check`: an instruction text
+known by the matchers' mnemonics too (the `:directive` rule had hidden 2,322 APX texts: `ccmpbw`'s print begins with `ccmp` and a print
+method), the text level's `:apx` rule removed, the nearest-statement tie broken to the earlier, the cross class `:disassemble-only`,
+`REPR_ASM_ENC_ROWS`. `bin/repr-asm encode-check --record` requires the controls to fail as they must (it had recorded from a run whose new
+control passed). Five APX controls (`controls-encode.txt` 2, `controls-print.txt` 2, `controls-cross.txt` 1); class texts updated
+(`divergences-encode.edn`, `divergences-print.edn`, `divergences-cross.edn`); doc/asm/AMD64.md §1, §3.
+
+Results (`MC/X86`, 621 files): stated encodings 106,074 of 106,075 met (99,509; the one left no run judges), EVEX 71,212, VEX 18,717
+(USERMSR's and MSR_IMM's map 7, AMX-FP8's map 5), legacy 14,353, XOP 1,792; CHECK texts 107,451 of 108,601 (100,884), `:apx` empty,
+`:directive` 102 (2,425); cross-syntax 86,350 of 87,103 AT&T instructions (82,765 of 83,505), the new by-design `:disassemble-only` 12
+(`rol bl, al`, which llvm-mc 23.1.5 itself rejects, checked by hand); error lines 80 of 130 (74); none failing at any level, recorded.
+The first subset run (146 files) left 28 encodings, both causes the table's; `table check` byte for byte; AX1's and AR1's round trips the
+same rows; `bin/reap`, `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: keeping the shifts' 8-bit NDD forms out of the table and encoding them by a rule (rejected: the table is the encoder's only
+source of fields); changing TableGen's let order for defs too (left as AXS38: the table oracle does not see conversions, AXS37).
+Proposed: AXS37-AXS39 (doc/asm/AMD64-SURVEY.md, "Proposed (AX2, fourth slice)").
+
+## 2026-11-10 amd64 assembly: AXS37 and AXS38, the TableGen let order and the table oracle's reach (branch `asm-tg`, from `mac/asm-ax2d` `b65d5d923`)
+
+Taken as recommended, (a) both (doc/asm/AMD64-SURVEY.md, "As built: AXS37, AXS38"): correctness fixes of Arbace's own generator, the
+user can still reject them. Read from llvm-project 23.1.5's release tarball (`test/asm/corpora.edn`'s `:llvmorg-23.1.5`) and written
+again in Arbace, no code copied: `llvm/lib/TableGen/TGParser.cpp` (ParseObjectBody, ApplyLetStack, ParseDef, ParseDefm, AddSubClass,
+AddSubMultiClass, ParseTopLevelLet, SetValue), `llvm/utils/TableGen/AsmMatcherEmitter.cpp` (buildInstructionOperandReference,
+buildInstructionResultOperands, buildAliasResultOperands, emitConvertFuncs).
+
+AXS38: `arbace.asm.tablegen`'s def records now take the let stack they were written in after their superclasses and before their body,
+then each defm's superclasses and the stack around that defm outwards (TGParser's order; before: the body first, then every stack); a
+multiclass's base takes no let around the derived multiclass (AddSubMultiClass). In X86.td's world four records change, NVVM intrinsics
+the generator drops; `table check` byte for byte with this change alone (measured by instrumenting `complete-def` in a scratch run).
+
+AXS37: `bin/repr-asm table oracle` (by hand; the host's llvm-tblgen 23.1.5) runs every part and fails on any difference; its new half
+`test/asm/table_oracle.ae` compares each MatchTable0/1 row's conversion (ConversionTable decoded by convertToMCInst's cases), every `:insns`
+entry's encoding fields, operands, defs and ties (`-print-records`) and every `:print`/`:print-intel` (`-gen-asm-writer`'s printInstruction
+decoded). Before: matchers' rows, aliases equal; conversions 763 rows differ in each variant; fields and prints equal (20,477 each). Cause:
+`arbace.asm.amd64.gen` wrote a tie as a forward copy from the later operand and copied multi-operand ties operand by operand; now
+buildInstructionResultOperands' rule (a single-operand later tie copies the earlier; asm operand names canonicalized to the untied
+operand; else one immediate 0). After: every part equal; `asm/amd64/table.edn` regenerated (1,526 lines), `table check` byte for byte;
+`encode-check` unchanged, 106,074 of 106,075 stated encodings met (EVEX 71,212, VEX 18,717, legacy 14,353, XOP 1,792), CHECK texts 107,451,
+cross-syntax 86,350 of 87,103, error lines 80 of 130, none failing, every control failing as it must (the record untouched).
+
+arm64: AR2's generator reads Go's sources, not TableGen: unaffected. Considered: comparing TSFlags from `-gen-instr-info` instead of
+`-print-records`' fields (rejected: TSFlags leaves out ignoresVEX_L, IgnoresW, isCommutable, isPseudo and the operands); keeping the forward
+tie form since the encoder resolves either (rejected: the table is to be llvm-tblgen's, and the oracle now holds it to that).
+
+## 2026-11-10 amd64 assembly: AX4's first slice, ELF64 objects written as llvm-mc writes them and read back (branch `asm-ax4`, from `mac/asm-ax3` `55d62a05d`)
+
+AX4 of doc/asm/AMD64-SURVEY.md §12, its first slice (§7.3's writer and reader), on the light lane (stage 0, one run at a time, no lock;
+llvm-mc 23.1.5 only by hand, to record the references). Sources read and written again in Arbace (no code copied), all from
+llvm-project 23.1.5's release tarball (`test/asm/corpora.edn`'s `:llvmorg-23.1.5`, sha256 fb50b1ea..., the MC and X86 MCTargetDesc
+sources extracted into the worktree's `.tmp/` for reading): `llvm/lib/MC/ELFObjectWriter.cpp` (ELFWriter::writeObject,
+computeSymbolTable, isInSymtab, writeSymbol, mergeTypeForSet, recordRelocation, useSectionSymbol, writeRelocations,
+writeSectionHeaders), `StringTableBuilder.cpp` (multikeySort's tail order, the tail merge), `MCObjectStreamer.cpp` (fragments,
+emitInstruction, emitValueImpl, emitFill, emitNops, emitValueToAlignment, emitCodeAlignment, changeSection, emitLabel),
+`MCELFStreamer.cpp` (initSections, emitSymbolAttribute, CombineSymbolTypes, emitCommonSymbol, emitLocalCommonSymbol, emitIdent),
+`MCAssembler.cpp` (layout, layoutSection, relaxOnce with Stretch, relaxAlign, relaxInstruction, evaluateFixup), `MCDwarf.cpp`
+(FrameEmitterImpl: EmitCIE, EmitFDE, emitCFIInstruction, encodeAdvanceLoc, CIEKey), `MCSymbolELF.cpp` (getBinding),
+`MCStreamer.cpp` (emitCFIStartProc), `MCParser/ELFAsmParser.cpp` (parseSectionArguments, the defaults by name),
+`MCParser/AsmParser.cpp` (parseDirectiveFill, parseDirectiveSpace), `llvm/lib/Target/X86/MCTargetDesc/X86AsmBackend.cpp`
+(mayNeedRelaxation, fixupNeedsRelaxationAdvanced, relaxInstruction, evaluateFixup's PC-relative bias, applyFixup, writeNopData,
+getMaximumNopSize), `X86ELFObjectWriter.cpp` (getType64, getRelocType64, needsRelocateWithSymbol), `X86MCCodeEmitter.cpp`
+(emitImmediate, emitMemModRMByte's fixup kinds, isPCRel32Branch), `X86EncodingOptimizationForImmediate.def`, and
+`lib/Target/X86/X86InstrControl.td` (JMP_2/4, JCC_2/4).
+
+Built: `arbace/asm/elf.ae` (`arbace.asm.elf`: the ELF64 writer, a reader, the canonical view) and `arbace/asm/amd64/obj.ae`
+(`arbace.asm.amd64.obj`: the object assembler); `arbace.asm.amd64.asm`'s fixups carry their expression, kind, PC-relativity and offset
+(additive; AddCCFrm's JCC_4 to a symbol takes reloc_branch_4byte_pcrel); `bin/repr-asm object|object-dump|object-check|object-record`,
+the Makefile's `repr-asm-object*`; `test/asm/obj/*.s` (six synthetic tests of Arbace's own), `test/asm/records/obj-{musl,synthetic,
+mc-x86-obj}-llvm-mc-23.1.5.edn` with their `.sha256` (llvm-mc's objects, each made twice and compared, recorded by hand with the host's
+llvm-mc 23.1.5, `-triple x86_64-linux-musl -filetype=obj`), `test/asm/object-results-amd64.edn`, `divergences-object.edn`,
+`controls-object.txt`, `object_judge.ae`; doc/asm/AMD64.md §7, the survey's "As built: AX4 (first slice)", SPEC.md §7, LICENSE.md and
+doc/ARBACE.md.
+
+Results: musl 1.2.6's 32 objects and the 6 synthetic ones equal to llvm-mc's byte for byte; `MC/X86`'s object tests for x86-64 ELF,
+47 recorded: 30 byte for byte, 17 classed (APX 11, `.macro`/`.ifdef`/`.rept`/`.reloc` 5, `.loc` 1), none failing; five negative
+controls fail as they must. The encode check (99,509 met, 0 failing), AX1's and AR1's round trips, `bin/reap` (0 problems),
+`bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` unchanged and passing. Found and
+fixed on the way: the relaxed branches' encodings missing from the table, JCC_4's kind, absolute variables' binding, aliases' type and
+size, section names read as expressions, SHF_LINK_ORDER, section names as symbols, variables followed through, fills as fragments. A first
+survey run held `large-bss`'s 2^52-byte `.bss` as bytes and grew to 5 GiB before it was stopped by hand (above the lane's 2 GiB): fills
+are fragments since, never bytes in a SHT_NOBITS section, and a fill above 64 MiB elsewhere is classed.
+
+Considered: packs in the store for the references (AXS40 (b): kept for corpora above a megabyte), the MC tests' CHECK lines as the judge
+(AXS40 (c): needs the decoder for llvm-objdump `-d`), recomputing fixup kinds outside the encoder (AXS41 (b)). Proposed: AXS40-AXS44.
+Next (AXS43 (a)): the static linker and the first runs by the CPU, then the decoder.
+
+## 2026-11-10 amd64 assembly: AX4's second slice, Arbace's static linker and the first programs run by the CPU (branch `asm-ax4b`, from `mac/asm-ax4` `bbe9638e5`)
+
+Done on the light lane (stage 0, one run at a time, under 2 GiB, no lock). Studied: llvm-project 23.1.5's `lld/ELF/` from the pinned
+`.tmp/llvm/llvm-project-23.1.5.src.tar.xz` (SHA-256 `fb50b1ea...`, test/asm/corpora.edn's pin; extracted into the worktree's `.tmp/lld/`,
+never committed): `Driver.cpp`, `InputFiles.cpp` (initializeSymbols, the COMDAT rule), `SymbolTable.cpp`, `Symbols.cpp` (resolve,
+getSymVA, computeBinding), `LinkerScript.cpp` (getOutputSectionName, assignAddresses, the relro padding), `Writer.cpp` (getSectionRank,
+isRelroSection, createPhdrs, fixSectionAlignments, computeFileOffset, setPhdrs, removeEmptyPTLoad, demoteAndCopyLocalSymbols),
+`OutputSections.cpp` (commitSection, finalizeInputSections), `SyntheticSections.cpp` (EhFrameSection, GotSection, GotPltSection,
+RelroPaddingSection, sortSymTabSymbols), `InputSection.cpp` (getRelocTargetVA, getTlsTpOffset), `Relocations.cpp` (RelocScan::process),
+`Arch/X86_64.cpp` (getRelExpr, scanSectionImpl, relocate, adjustGotPcExpr, relaxGot, relaxGotNoPic, relaxTlsIeToLe, relaxOnce). Written
+again by hand in Arbace; no code copied.
+
+Built: `arbace/asm/link.ae` (`arbace.asm.link`: the static linker, ELF64 objects → a static ET_EXEC as lld lays one out with no script;
+the run check's builder, verdicts and controls; the canonical view of an executable for the oracle); `arbace.asm.elf`'s reader gives each
+relocation its target section's index (`:target`, additive); `bin/repr-asm link|link-dump|run-check|link-oracle`; the Makefile's
+`repr-asm-link`, `-link-dump`, `-run-check`, `-run-record`, `-link-oracle`; `test/asm/run/` (18 tests of Arbace's own with their verdicts
+in their headers, helpers and second objects in `lib/`; four take musl 1.2.6's `crti.s`, `crtn.s`, `memcpy.s`, `memmove.s`, `memset.s`,
+`setjmp.s`, `longjmp.s` from its pinned tarball, assembled by Arbace), `test/asm/run-results-amd64.edn`, `divergences-run.edn`,
+`controls-run.txt`, `run_judge.ae`; doc/asm/AMD64.md §8, the survey's "As built: AX4 (second slice)", LICENSE.md, doc/ARBACE.md.
+
+Results: 18 of 18 programs assembled, linked and run by the CPU meet their own verdicts (16 runs: §3's P4 among them, exit 42 and
+`hello`; two link refusals in lld's words); the four negative controls fail as they must; about 12 s, 0.75 GiB. The oracle by hand: no
+ld.lld on the host, so GNU ld 2.45.1 (`ld.bfd -static`) linked the same objects: all 16 runs identical, the canonical differences all by
+cause (its script and `-z separate-code`, its wider GOT relaxation, no PT_PHDR/PT_GNU_STACK, linker symbols always global, hidden globals
+kept global). The object check (68 of 85 byte for byte), the encode check, AX1's and AR1's round trips, `bin/reap`, `bin/crops-score
+--judge --strict`, `test/gate/gate-key-crops-test.bash` and `make check-makefile` unchanged and passing.
+
+Considered: static PIE first (rejected: ET_EXEC is lld's default and needs no self-relocation code in a freestanding program), linking
+musl's `libc.a` (not possible without compiling its C at check time: AX7, AXS47), lld's hash-sharded order of merged pieces (AXS49),
+judging by GNU ld's executables (rejected: another linker's layout, kept as the by-hand oracle), lld itself as the byte reference (not
+installed; AXS46). Proposed AXS45-AXS50 (AX4's first slice's are AXS40-AXS44 since the merge, `asm-merged`).
+Next (AXS50 (a)): the decoder (x86asm), AX4's remaining exit.
+
+## 2026-11-10 arm64 assembly: AR2's first slice, A64's table and encoder (branch `asm-ar2`, from `mac/asm-ar1` `6b8d79358`)
+
+AR2 of doc/asm/ARM64-SURVEY.md §12, its first slice, on the light lane (stage 0, 0.53 GiB peak, no lock, no assembler run, nothing
+fetched or installed), beside AX2 on `asm-ax2` (shared files touched additively: SPEC.md's new §12, bin/repr-asm's new verbs `table`
+and `encode-check`, new Makefile targets, new records with the `-arm64` suffix). The user's ARS5 (a): Go's tables and arm64asm.
+arm64asm needed no fetch: TamaGo's GOROOT vendors golang.org/x/arch at `v0.27.1-0.20260521044007-9c1a596a2c97`
+(`src/cmd/vendor/golang.org/x/arch/arm64/arm64asm`, `modules.txt`), pinned with the toolchain by `seed/goroot.sha256`; the host's
+module cache and /usr/lib/go hold other copies, not used.
+
+Built: `arbace.repr.asm.arm64.tablegen` reads arm64asm's `tables.go` (1,208 rows), `condition.go` (93 alias conditions, Go
+expressions parsed by Go's precedence into Arbace functions over the word), `inst.go`'s `sysInstsAttrs` (106 DC and TLBI operations),
+`inst.json`'s should-be-one bits (30 rows; tables.go's masks leave them out, so SMULH's Ra and LDAR's Rs were zero until they were
+read) and `cmd/internal/obj/arm64/sysRegEnc.go` (431 system registers) into the committed `arbace/repr/asm/arm64/table.ae`
+(`bin/repr-asm --arch arm64 table check`, `table --check` before the merge: byte for byte). `bits.ae` ports `condition_util.go`. `arbace.repr.asm.arm64.enc` inverts
+`decode.go`'s `decodeArg` for every one of the 312 argument kinds, the rows of a mnemonic tried in arm64asm's order. LLVM's own
+choices, found by the check and followed: MOV's immediate MOVZ, then MOVN, then ORR (arm64asm's decode order prefers ORR's alias);
+MOVZ with a TLS relocation encoded as MOVN (`AArch64MCCodeEmitter`'s fixMOVZ: `tprel_gN`, `dtprel_gN`, `gottprel_g1`); a
+relocation's specifier sets MOVZ's half-word; a bare symbolic immediate is not a relocation; no immediate shifted unasked
+(`add w5, w6, #0x1000` rejected); the constrained-unpredictable forms refused (`validateInstruction`); an alias's tied register
+(CNEG, ROR, MOV's ORR) filled; a second pass for the aliases LLVM prints where arm64asm's decoder prefers another (`lsl w3, w2,
+#0`, BFI before BFC); Apple's older NEON spelling (`shrn.8b v0, v0, #1`: the suffix the first operand's, the others widened,
+narrowed or 16b); TBZ's bit 31 from the bit number, an X register with a bit below 32 allowed.
+
+The check (`arbace.repr.asm.arm64.encheck`, `bin/repr-asm --arch arm64 encode-check`): each line stating an encoding, its CHECK text
+(each alternative of FileCheck's `{{a|b}}`, `{{[wx]}}`, optional groups), the text one line up for a `CHECK-ENCODING:` line, the
+input line for a block of text-less `CHECK: encoding:` lines after a block of inputs of the same size, encoded to the stated bytes
+(a fixup's `A` bits unstated; `0x90'A'` the byte with the fixup's bits zero); the CHECK text printed back (white space as FileCheck
+matches it); each error test's `error:` lines, the instruction echoed after or written before, refused. Results: encode 7,685 of
+12,298 met, classed 2,299 `:sysreg-name`, 1,787 `:extension`, 326 `:fp16`, 144 `:sysop-name`, 49 `:extension-operands`, 7
+`:check-text`, 1 `:directive`, failing 0; print 12,156 of 12,227, classed 66 `:print-radix`, 5 `:check-text`; reject 5,030 lines of
+188 error tests, classed 4,527 `:message` (refused, LLVM's message not given), 211 `:feature-gate`, 26 `:relocation`, 1
+`:operand-spelling`, 265 `:no-instruction`. Six negative controls fail as they must. AR1's round trips rerun unchanged (arm64, amd64).
+
+Considered: `go/arbace` goi running arm64asm's Decode as the oracle (a decoder, not an encoder; AR3's); encoding by search over the
+decoder (the 19- and 26-bit fields rule it out); joining inst.json to tables.go by syntax (their spellings differ: by op and fixed
+bits instead). Proposed (doc/asm/ARM64-SURVEY.md, "Proposed (AR2)"): ARS24 (LLVM's AArch64 `.td` for the extensions, registers and
+features, amending ARS5 (a); Go's optab is code, Arm's specification waits for its licence), ARS25 (the print by argument kind), ARS26
+(feature sets from the RUN lines), ARS27 (LLVM's messages), ARS28 (the record's size), ARS29 (the input lines too). Sources: TamaGo's
+go1.27.1 GOROOT `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm/{tables,condition,condition_util,decode,inst}.go`, `inst.json`,
+`src/cmd/internal/obj/arm64/{sysRegEnc,asm7}.go`; llvm-project-23.1.5's `llvm/test/MC/AArch64` (the corpus). LICENSE.md and
+doc/ARBACE.md record the generated table's and the ports' origins (Go's BSD 3-Clause License).
+
+## 2026-11-10 assembly: the asm branches integrated, `asm-merged` (from `mac/asm-tg` `69ca9140d`, with `mac/asm-ax4b` `abc8c2b97` and `mac/asm-ar2` `da6bfe8f8`)
+
+One branch for the 11-11 merge in place of the three, on the light lane (stage 0, one run at a time, under 2 GiB, no lock; llvm-mc and
+llvm-tblgen 23.1.5 by hand only), every finding of `.tmp/merge-1111/REVIEW2.md` §0-§3 fixed (doc/asm/AMD64-SURVEY.md, "As built: the
+asm branches integrated"). Merges: asm-ax4b into asm-tg (conflicts `arbace/asm/amd64/asm.ae`, the survey, AGENDA, JOURNAL), then
+asm-ar2 (conflicts `bin/repr-asm`, the Makefile's `.PHONY`, JOURNAL); both sides kept in the documents, in date order.
+
+The REX conflict: asm-tg's `rex-kind` kept, asm-ax4b's `rex?` dropped, and the fixup kind read from the prefix's kind as llvm-mc 23.1.5
+chooses it (`llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`'s emitMemModRMByte, `X86ELFObjectWriter.cpp`'s getRelocType64,
+`X86AsmBackend.cpp`, `X86FixupKinds.h`, from `.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, extracted into the worktree's `.tmp/`;
+written again, no code copied): `_rex2` kinds give CODE_4_GOTPCRELX, CODE_4_GOTTPOFF and CODE_4_GOTPC32_TLSDESC, ADD64's NDD/NF memory
+forms `_relax_evex` (CODE_6_GOTTPOFF; GOTPCREL stays plain). Ported rather than classed `:apx` (REVIEW2's fallback): the source was
+at hand and the cases few. With APX encoded the object check reached the 11 tests ax4b had classed `:unsupported-apx`; 10 were
+llvm-mc's objects at once, `tlsdesc-64` showed `call *a@tlscall(base)`'s zero displacement (S_TLSCALL, FK_NONE at the
+instruction's start), ported too. New synthetic object `test/asm/obj/apx-relocs.s` holds all of these kinds, recorded by llvm-mc
+by hand (`object-record synthetic`: the six existing objects byte for byte unchanged).
+
+The rest: `bin/repr-asm`'s `table` and `encode-check` by `--arch` (arm64's `table [--check]` now `table gen|check`, the Makefile and
+SPEC with it; the generated `arbace/repr/asm/arm64/table.ae`'s header line names the new spelling, `table check` byte for byte); AX4's
+AXS37-AXS41 renumbered AXS40-AXS44 in the survey, AGENDA and this branch's own journal entries above (not yet on `next`; asm-ax4's
+commit messages keep the old numbers; AX5's design, `.tmp/plans/AX5-DESIGN.md`, names only the collision, and starts at AXS51,
+consistent); the link and object controls `left` when vacuous; AR2's `--record` merged per corpus, refused with problems, and a
+"recorded, not run" check; busybox awk in the table oracle; LICENSE.md and doc/ARBACE.md on `arbace/asm/`'s two meanings.
+
+Results on the merged tree: AX1's and AR1's round trips unchanged; encode-check 106,074 of 106,075 met (texts 107,451, cross 86,350 of
+87,103), 0 failing; arm64 encode 7,685 of 12,298, print 12,156, 0 failing (recorded: counts unchanged, three reasons newer than
+ar2's record, which asm-ar2's own tree reproduces today); `table check` byte for byte on both arches, `table oracle` by hand all
+equal; object-check 80 of 86 byte for byte (was 68 of 85), 0 failing, recorded; run-check 18 of 18, record unchanged; `bin/reap`
+(0 problems), `bin/crops-score --judge --strict`, `test/gate/gate-key-crops-test.bash`, `make check-makefile` pass.
+
+Considered: keeping `rex?` set from `(= kind :rex)` as REVIEW2 suggested (the same, but `rex-kind` is already bound before the memory
+operand is encoded, so the volatile adds nothing); classing APX GOTPCREL `:apx` (rejected: llvm-mc's kinds were small to port and
+`gotpcrelx.s`, `tlsdesc-64` and `elf-reloc-tls` check them). `asm-ax4c` was not pushed when this was finished: it merges on top.
+## 2026-11-10 amd64 assembly: AX4's third slice, the decoder, LLVM's X86 disassembler rebuilt from the table (branch `asm-ax4c`, from `mac/asm-ax4b` `abc8c2b97`)
+
+
+Done on the light lane (stage 0, one run at a time, under 2 GiB, no lock; no LLVM tool at check time). Studied: llvm-project 23.1.5 from
+the pinned `.tmp/llvm/llvm-project-23.1.5.src.tar.xz` (SHA-256 `fb50b1ea...`, test/asm/corpora.edn's pin; extracted into the worktree's
+`.tmp/llvm-read/`, never committed): `llvm/lib/Target/X86/Disassembler/X86Disassembler.cpp` and `X86DisassemblerDecoder.h`,
+`llvm/include/llvm/Support/X86DisassemblerDecoderCommon.h`, `llvm/utils/TableGen/X86RecognizableInstr.cpp`, `X86DisassemblerTables.cpp`,
+`X86ModRMFilters.h`, `llvm/lib/Target/X86/MCTargetDesc/X86MCTargetDesc.cpp` (needsAddressSizeOverride), `X86InstPrinterCommon.cpp`
+(printInstFlags, printPCRelImm), `llvm/tools/llvm-mc/Disassembler.cpp`; and Go's `golang.org/x/arch/x86/x86asm` in TamaGo's GOROOT
+(`src/cmd/vendor/`, pinned by seed/goroot.sha256), weighed and not used. Written again by hand in Arbace; no code copied.
+
+Decision (the brief's choice, the coordinator's note of AX5-DESIGN's AXS53 (a) concurring): the decoder is LLVM's disassembler rebuilt
+from `asm/amd64/table.edn`, not x86asm converted. LLVM's decodes into the table's own instruction records and MCInst operands, so AX2's
+printer prints them and AX2's encoder re-encodes them unchanged, and LLVM-equal results follow from LLVM's rules (contexts, ranks,
+inheritance, its corrections in getInstructionID); x86asm decodes into its own ops and argument shapes and would need a map onto the
+table's instructions and LLVM's choices besides its 17,000 lines of tables. The disassembler's tables are made at first use, per opcode
+type, context and opcode, from the table; nothing generated beyond the table is committed (AXS64 proposes checking them by hand against
+llvm-tblgen's `-gen-disassembler`).
+
+Built: `arbace/asm/amd64/decode.ae` (`arbace.asm.amd64.decode`), `arbace/asm/amd64/decode_check.ae` (`arbace.asm.amd64.decode-check`:
+llvm-mc's byte stream, FileCheck's matching, the three levels, controls, `decode` and `decode-object`), `test/asm/decode_judge.ae`,
+`test/asm/decode-results-amd64.edn`, `divergences-decode.edn`, `controls-decode.txt`; `bin/repr-asm decode|decode-object|decode-check`;
+the Makefile's `repr-asm-decode`, `-decode-object`, `-decode-check`, `-decode-record`; `test/asm/corpora.edn`'s `:decode-corpora`
+(`llvm/test/MC/Disassembler/X86`, extracted by `corpus extract`); the generator lists the disassembler's instructions (`:dis` with the
+mode predicate; 250 added, `_REV` and other ForceDisassemble ones) and reads `ForceDisassemble` and `isAsmParserOnly`; the printer prints
+`addr32`/`addr16` for the decoder's flag; the encoder's `memory-operand` public. A TableGen fix: the `let` stack around a `class` applies to
+it (TGParser's ParseObjectBody), which AMX-FP8's `TDP*F8PS` need for their `$src1 = $dst` tie (four instructions of the table change).
+doc/asm/AMD64.md §9, the survey's "As built: AX4 (third slice)", LICENSE.md, doc/ARBACE.md.
+
+Results: MC/Disassembler/X86's 186 tests: 24,441 of 24,445 CHECK lines met by their own judges, the 4 others `--mdis`'s markup (classed
+deferred); the round trip: 99,505 of the 99,509 encodings encode-check meets decode back to the matcher's instruction (16 with llvm-mc's
+lone LOCK first, 66 another instruction of the same bytes), 3 `xchg` of the accumulator with itself read as `nop` and 1 `(,%eiz)` read
+without EIZ, both LLVM's own readings (classed by design); musl's 32 objects: 479 of 479 instructions read back. Eight negative controls
+fail as they must. About 6 minutes, under 1.5 GiB. The encode check, object check, run check, AX1's and AR1's round trips and the table
+check unchanged and passing.
+
+Considered: x86asm converted (above); the tables generated and committed (AXS64); `--mdis` (AXS66). Proposed AXS63-AXS67 (numbered from
+AXS63: AX5-DESIGN holds AXS51-AXS62). Next (AXS67 (a)): AX5's x86i over this decoder.
+
+## 2026-11-10 assembly: the decoder merged into `asm-merged` (`mac/asm-ax4c` `49bd71464` into `asm-merged` `ae0373fab`)
+
+Done on the light lane (stage 0, one run at a time, under 1.5 GiB a process, no lock; llvm-tblgen 23.1.5 by hand only), so that the
+11-11 merge takes one assembly branch. `git merge mac/asm-ax4c`; its merge base is `asm-ax4b`'s `abc8c2b97`, so ax4c's table and checks
+predate asm-tg's 763 conversion fixes and AX2d's APX. Conflicts and resolutions:
+
+- `arbace/asm/tablegen.ae`: both branches had fixed `let` around a `class` the same way (TGParser's ParseObjectBody: the let stack
+  applied after the superclasses, before the body; asm-tg's AXS38 work as `:frames`, ax4c's as `:lets` with `apply-frames` declared).
+  One implementation kept, asm-tg's (LLVM's order, the one asm-tg's `table oracle` already proves); ax4c's dropped.
+- `arbace/asm/amd64/gen.ae`: asm-tg's `used-insns` (processInstruction's shifts by 1 of NDD forms) kept, ax4c's `dis?` and
+  `dis-insns` (X86RecognizableInstr's shouldBeEmitted, the mode predicate) added beside it.
+- `asm/amd64/table.edn`: not merged by hand; regenerated by `bin/repr-asm table gen` from the resolved generator, `table check` byte
+  for byte (20,718 instructions, 20,715 with `:dis`).
+- `bin/repr-asm`: ax4c's `decode`, `decode-object` and `decode-check` are amd64's (asm-merged's `--arch` dispatch refuses them with
+  `--arch arm64`); their help lines before arm64's. Makefile `.PHONY`: both lines. AGENDA, the survey and the journal: both texts
+  (journal entries in date order, this one last); `asm.ae`, `print.ae`, `corpora.edn`, AMD64.md, LICENSE.md, ARBACE.md merged cleanly.
+
+The table oracle (asm-tg's AXS37 `insns` part) failed on the merged table: 20,715 rows differed by ax4c's `:dis` key, which it did not
+derive. Now it does, from llvm-tblgen's `-print-records` (the extract adds each def's superclasses, `isCodeGenOnly`, `ForceDisassemble`,
+`isAsmParserOnly` and `Predicates`; `test/asm/table_oracle.ae` applies RecognizableInstr's rule): every part equal, 20,718 of 20,718
+`:insns` rows. By hand, AXS64 (c) in part: `llvm-tblgen -gen-disassembler`'s `modRMTable` names exactly the table's 20,715 `:dis`
+instructions (the decisions per context and opcode not compared yet).
+
+The decode check rerun on the merged tree, 0 failing, then `--record`ed: `dis` 24,441 of 24,445 (4 `:markup`) and `obj` 479 of 479,
+unchanged; `rt` 106,070 of 106,074 (ax4c: 99,505 of 99,509): encode-check now meets AX2d's APX and the AMX-FP8, MOVRS, MSR-immediate and
+USERMSR encodings, and the decoder reads all 6,565 more back; 145 `rt/` rows rise, none falls, the same four by design (3 `:llvm-nop`,
+1 `:eiz-dropped`); the eight controls fail as they must (about 5.5 minutes, 1.5 GiB). The rest on the merged tree, all as before:
+encode-check 106,074 of 106,075 met (texts 107,451, cross 86,350, errors 80 of 130; 20 controls), object-check 80 of 86 (5 controls),
+run-check 18 of 18 (4 controls), AX1's round trip (musl 32/32, `MC/X86` 609/621, `MC/AsmParser` 140/157), AR1's (all corpora as
+recorded), `--arch arm64 encode-check` (7,685 of 12,298, print 12,156), `bin/reap` (0 problems), `bin/crops-score --judge --strict`,
+`test/gate/gate-key-crops-test.bash`, `make check-makefile`.
+
+Considered: keeping ax4c's `:lets` instead (the same semantics, but asm-tg's is the one the conversions oracle was proven with);
+merging the generated table textually (rejected: the generator is the source); dropping `:dis` from the oracle's comparison (rejected:
+deriving it from LLVM's records checks the generator's rule).
+
+## 2026-11-10 amd64 assembly: AX5.2, x86i's frame and core integer ISA, and AX5.3's sys mode (branch `asm-ax5`, from `mac/asm-merged` `9f880b7ab`)
+
+The user decided AXS17-AXS67 as recommended (~10:30 UTC), AX5's design (`.tmp/plans/AX5-DESIGN.md`, AXS51-AXS62) with them. Built on
+the light lane (stage 0 and TamaGo's go 1.27.1 alone; one run at a time; no lock, no gate, no network, nothing installed;
+doc/asm/AMD64-SURVEY.md, "As built: AX5.2"; doc/asm/AMD64.md §10).
+
+What was built:
+- `arbace.asm.amd64.dgen` (`arbace/asm/amd64/dgen.ae`): the decisions `arbace.asm.amd64.decode` (AX4c's port of llvm-project 23.1.5's
+  X86 disassembler, rebuilt from `asm/amd64/table.edn`) makes for 64-bit mode's legacy and REX maps, written as Go forms data,
+  `go/arbace/x86i/dectab.ae` (15 contexts, four maps, each instruction's Intel mnemonic and specifiers); `bin/repr-asm x86i gen|gen-check`.
+- `go/arbace/emu` (the address space over crt's `Mem` with page permissions and a TLB, an ELF64 reader and loader, Linux's initial
+  stack, brk/mmap/munmap/mprotect/exit, the rest crt's `Sys.Syscall`; the ptrace tracer) and `go/arbace/x86i` (the Go decoder, the
+  machine, lazy flags, the families alu, unary, mov, stack, branch, muldiv, shift without rcl/rcr, string, conv, atomic, misc; an
+  instruction no family claims raises SIGILL, `:unimplemented`; the lockstep's sys mode), written as Go from the Intel SDM vol. 2 and
+  the AMD APM vol. 3 as references (nothing copied; the stack's layout from the psABI and getauxval(3), not the kernel's source) and
+  converted by `bin/repr-go read --goos linux --goarch amd64`, a package at a time; the driver `test/asm/x86i-driver` (`run`,
+  `decode-text`, `trace --mode sys`, `X86I_INJECT`), built alone with crt by TamaGo's go (`bin/repr-asm x86i light`).
+- `bin/repr-asm x86i-check [--record]` (`test/asm/x86i_judge.ae`): `test/asm/run/`'s 16 runnable programs and 12 hand-written ones
+  (`test/asm/x86i/`: alu, muldiv, string, misc judged by the CPU's runs, `# judge: cpu`; eight faults by their status), each run by the
+  CPU and by x86i, decoded by both decoders, traced in sys mode: 28 of 28 equal to the CPU's runs and by their verdicts, 28 of 28 decoded
+  alike (2,636 instructions), 28 of 28 lockstep-equal; ten controls fail as they must (two each: another's verdict, another's CPU run,
+  another's bytes, `X86I_INJECT` against the CPU and against the lockstep). Records `test/asm/x86i-results-amd64.edn`, classes
+  `test/asm/divergences-x86i.edn`, controls `test/asm/controls-x86i.txt`. Makefile `x86i-*`.
+- Crop paths: `go/arbace/{x86i,emu}{.ae,/*}` in `bin/lib/version.bash`'s `arbace_crop_paths`, the audit's `crop-rules` and
+  `gate-key-crops-test.bash`'s list; the test passes, no key moves. crt untouched (AXS52 (a)).
+- Docs: doc/asm/AMD64.md §10, the survey's "As built: AX5.2" with AXS68-AXS74, LICENSE.md (dgen and the Go decoder after LLVM's
+  disassembler, Apache-2.0 WITH LLVM-exception; the rest Arbace's own), doc/ARBACE.md, doc/ALPINE.md (`lld23`, ld.lld 23.1.5, the
+  oracle tier's by hand, installed by the user today for AXS46).
+
+Found on the way: xadd's memory form puts the register operand first; a 32-bit shift or rotate by 0 zeroes the register's upper half;
+a test's flags after `and $-16, %rsp` depend on the stack's address. About 28 million instructions a second.
+
+Considered: hand-writing the Go forms (AXS68 (b)); generating every map's tables now (AXS69 (b)); `debug/elf` and `crypto/rand` in the
+driver (dropped: a small ELF64 reader of emu's own and math/rand/v2 keep repr/go's read of the driver light); the design's per-family flag
+masks (AXS72 (b): the SDM's per-instruction rule built instead).
+
+Rule slips: the first conversion of all three packages at once peaked at 11.6 GB (the decode tables as a 9,000-piece string
+concatenation); every later read one package at a time, the tables stubbed, under a 2 GiB watcher (peak 1.54 GB), and dgen writes each
+table as one literal. Two commands named `/dev/fd/1` and `/dev/null`.
+
+## 2026-11-10 amd64 assembly: AX5.3's rest and AX5.4, x86i's step mode, loader's judge, bisection, the integer ISA's rest and signal handlers (branch `asm-ax5b`, from `mac/asm-ax5` `5c7142cdf`)
+
+AXS74 (a) as the main session directed: AX5.3's rest, then AX5.4 as far as the slice allowed. Light lane: stage 0 and TamaGo's go 1.27.1
+alone, one run at a time, every repr/go read and check under a watcher killing the process tree past 2 GiB (peaks 1.54 GB for the
+reads, 1.3 GB for the check); no lock, no gate, no network, nothing installed; only Arbace-built synthetic and hand-written programs
+run, with timeouts. doc/asm/AMD64-SURVEY.md, "As built: AX5.3 and AX5.4"; doc/asm/AMD64.md §10.
+
+What was built (Go written in `.tmp`, converted to forms by `bin/repr-go read --goos linux --goarch amd64` a package at a time with the
+decode tables stubbed, AXS68 (a)):
+- `go/arbace/emu`: the tracer's single step (PTRACE_SINGLESTEP with a signal, PTRACE_GETSIGINFO, PTRACE_GETFPREGS by raw ptrace calls),
+  the mappings with permissions, a store log in the address space, the fault's kind (read, write, fetch); `LoadELF` maps a segment's
+  whole file pages as Linux does; mmap's first address below the vdso's eight pages (`VdsoSize`).
+- `go/arbace/x86i`: the step mode, the loader's judge and the bisection in `lockstep_linux`; `sem_bit` (rcl rcr shld shrd, the bit
+  family bt bts btr btc bsf bsr tzcnt lzcnt popcnt, enter, xlatb, movbe, rdtscp); cpuid's model widened (POPCNT, MOVBE, LZCNT, SYSCALL,
+  NX, LM); `signal` (rt_sigaction, rt_sigprocmask, sigaltstack, rt_sigreturn, the x86-64 frame, fault and kill delivery, the
+  alternate stack); the faults' siginfo and trap state.
+- The driver: `trace --mode sys|step|bisect`, `X86I_STEP_LIMIT`, `X86I_INJECT=loader:random`.
+- `test/asm/x86i/gen.ae` and `bin/repr-asm x86i synth DIR [--record]` (Makefile `x86i-synth`; `x86i-trace` takes `MODE`): five synthetic
+  programs (bit, rotc, shiftd, cond, misc), their digests in `test/asm/x86i/synth-digests.edn`; `test/asm/x86i/signals.s`, `cpuid.s`
+  (`# cpu: cpuid`, judged by its stated stdout, the class `:cpuid` against the CPU and in sys mode); `alu.s` and `muldiv.s` bounded in
+  step mode (`# step-limit: 500000`).
+- `bin/repr-asm x86i-check`: the rows `step/NAME` and `loader/NAME`, the synthetic programs, the controls `step`, `bisect`, `loader`;
+  `bin/repr-asm corpus extract` into the worktree's `.tmp/asm/src` (`REPR_ASM_SRC`), the main checkout's copy being gone.
+
+Results: x86i-check 34 of 35 programs equal to the CPU's runs and by their verdicts (cpuid `:cpuid`), 35 of 35 decoded alike
+(85,633 instructions), 34 of 35 sys-equal (cpuid `:cpuid`), 35 of 35 step-equal, 35 of 35 loaded as Linux loads them; 18 controls
+fail as they must; recorded (175 rows). gen-check, run-check, `bin/reap`, `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`,
+`make check-makefile` as the survey's section records. The step mode: 20,000-37,000 instructions a second idle, 5,000-11,000 beside the
+night's runs.
+
+Found: Linux's segment pages carry the file's bytes before and after a segment (x86i zeroed them); the vdso's pages at mmap's top; a
+fault's saved RFLAGS has RF; the frame's uc_stack.ss_flags are the stored flags; TRAPNO, ERR and CR2 are the thread's last trap's;
+under single-step each step's forced SIGTRAP unblocks SIGTRAP and becomes the last trap; a pending signal is reported before the next
+instruction, a step after the syscall that unblocked it.
+
+Considered: comparing the writable mappings at every system call (dropped for write(2), which only reads memory: synth-cond's 57,232
+writes); learning the host's XSAVE size from CPUID (not available without assembly or cgo; the native's first frame gives it);
+judging SIGTRAP handlers in sys mode only (AXS78 (b)); stated stdout for the synthetic programs (AXS71 (a) kept: the CPU's run).
+Proposed AXS75-AXS81.
+
+Rule slips: three wait loops used process substitution (`<(...)`); one `x86i trace` loop ran without the worktree's TMPDIR, its
+temporary files in /tmp removed by the run itself.
+
+## 2026-11-10 amd64 assembly: AX5.5, x86i's VEX contexts, BMI1/2, ADX, cmpxchg16b, rdrand/rdseed/rdpid, SSE/SSE2 with MXCSR in software, the coverage, the Go decoder's decode check (branch `asm-ax5c`, from `mac/asm-ax5b` `81a49bc21`)
+
+AXS81 (a) as the main session directed. Light lane: stage 0 and TamaGo's go 1.27.1 alone, one run at a time, every repr/go read and
+check under a watcher killing the process tree past 2 GiB; no lock, no gate, no network, nothing installed; only Arbace-built synthetic
+and hand-written programs run, with timeouts. doc/asm/AMD64-SURVEY.md, "As built: AX5.5"; doc/asm/AMD64.md §10.
+
+What was built (Go written in `.tmp` from `.tmp/keep/wt/asm-ax5b/src`, converted by `bin/repr-go read --goos linux --goarch amd64` a
+package at a time with the decode tables stubbed, AXS68 (a); the sources kept in `.tmp/keep/wt/asm-ax5c/`):
+- `arbace.asm.amd64.dgen`: the attribute mask's VEX and VEX.L bits; `go/arbace/x86i/dectab.ae` regenerated (32 contexts, 1.9 MB).
+- `go/arbace/x86i`: the decoder's VEX path (`decode`, `tables`); `sem_bmi` (bmi, cmpxchg8b/16b, rdrand, rdseed, rdpid); `sem_sse` (the
+  SSE and SSE2 families, the floating point and MXCSR in software); `sem`'s bind (SSE's table for an XMM operand), `Claimed`,
+  `FamilyOf`, cpuid's model (leaf 7, RDRAND, CMPXCHG16B); `cpu`'s coverage counts and the injections `FAMILY:xmm`, `FAMILY:pe`; the
+  lockstep's XMM and MXCSR compare for the SSE families and the native's rdrand/rdseed/rdpid values copied.
+- The driver: `run --coverage FILE`, `decode-hex FILE`, `claimed`.
+- `bin/repr-asm x86i-decode-check [--record]` (Makefile `x86i-decode-check`, `x86i-decode-record`): `arbace.asm.amd64.decode-check`'s
+  `x86i-corpus` and `test/asm/x86i_decode_judge.ae`; x86i-check's coverage (`test/asm/x86i-coverage-amd64.txt`) and its step timeout
+  (`REPR_ASM_STEP_TIMEOUT`, 600 s).
+- `test/asm/x86i/gen.ae`: seven families (bmi, adx, ssemov, sseint, ssefp, ssecmp, ssecvt; AX5.4's five programs byte for byte as
+  before), `lib/hex.s`'s `put_vec`; `test/asm/x86i/fault-movaps.s`; `cpuid.s`'s stated stdout for the widened model; the class
+  `:encoding-deferred`; five controls in `controls-x86i.txt`, two in `controls-x86i-decode.txt`.
+
+Results: x86i-check 43 programs (16 of test/asm/run, 15 hand-written, 12 synthetic): 42 equal to the CPU's runs and by their
+verdicts (cpuid `:cpuid`), 43 decoded alike (201,218 instructions), 42 sys-equal (cpuid `:cpuid`), 43 step-equal, 43 loaded as Linux
+loads them; 23 controls fail as they must; recorded (215 rows); coverage 702 of the families' 1,291 claimed instructions executed,
+recorded. x86i-decode-check: 82,988 byte strings of 487 files, 20,531 decoded as arbace.asm.amd64.decode decodes them (13,336 VEX),
+none different, 62,457 in encodings not read yet (EVEX 60,624; `:encoding-deferred`, 324 files); three controls; recorded (487 rows).
+gen-check, run-check, `bin/reap` (0 problems), `bin/crops-score --judge --strict`, `gate-key-crops-test.bash`, `make check-makefile`
+pass.
+
+Found: 0/inf's error term is a NaN (exact, not inexact); the CPU reports an invalid operation's or a division by zero's flag without the
+denormal operand's beside it (AXS84); divpd with a denormal operand lost PE when the remainder underflowed (math/big near the range's
+bottom now). The step mode compared XMM and MXCSR at every instruction of 2.2 million instructions of the new programs before the first
+record.
+
+Considered: a SoftFloat port now (AXS83 (b)); the VEX tables restricted to BMI's rows (AXS82 (b)); vendor tables for rcpps/rsqrtps
+(AXS85 (b)); a coverage report without a record (AXS86 (b)). Proposed AXS82-AXS88.
+
+Rule slips: one command used process substitutions (`<(...)`, a no-op `cmp` loop and a `diff` of a printed file against its source);
+one test read `/dev/stdin` through a here-string. Harmless.
+
+## 2026-11-10 arm64 assembly: AR2's second slice, LLVM's AArch64 records by Arbace's TableGen (branch `asm-ar2b`, from `mac/asm-merged` `9f880b7ab`)
+
+The user decided ARS24 (a) at about 10:30 UTC, amending ARS5 (a): arm64's encodings beyond ARMv8.0, the system registers, PSTATE
+fields, operations and features from LLVM's AArch64 `.td` files in the pinned llvm-project 23.1.5 tarball
+(`.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, test/asm/corpora.edn's `:llvmorg-23.1.5`), read by Arbace's own TableGen; and ARS25-ARS29
+(a): print operands by argument kind, feature sets from each test's RUN line, LLVM's messages on refusal (the reject level judged by
+the fragment), the per-line record kept until AR10, the input lines encoded with their CHECK lines. Built on the light lane (stage 0,
+under 1.5 GiB, one run at a time, no lock, nothing fetched).
+
+What was done, in order:
+- Extracted from the tarball (test/asm/corpora.edn's new `:tables` entry `:aarch64-td`): `llvm/lib/Target/AArch64/*.td`,
+  `llvm/include/llvm/TableGen/*.td` and `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`, beside X86's. Arbace's TableGen
+  (`arbace/asm/tablegen.ae`) needed three operators X86's files never used: `!switch` (AArch64InstrFormats.td's
+  ChangeElementTypeToInteger), `!match` (AArch64SystemOperands.td's TLBIPEntry) and `!sort` (Target.td's SubtargetFeature `Implies`),
+  added after llvm/docs/TableGen/ProgRef.rst; AArch64.td then loads, 67,124 records in 36 s at 1.4 GiB. amd64's `table check` still
+  byte for byte.
+- `arbace/asm/arm64/gen.ae` writes `asm/arm64/table.edn`. The encoding is read as CodeEmitterGen reads `Inst`: before evaluating it,
+  each unset `bits<n>`/`bit` field of the record is given bits naming itself (`[Rd 0]`...), so the slices `let Inst{4-0} = Rd;` copy
+  them; a field partly set (`let scale{5} = 1;`, FP16's scaled conversions, found by a mismatch) keeps its set bits. The drop list
+  keeps PatFrags and ComplexPattern (imm0_7 and addsub_shifted_imm64 are Operands too). The system operands' features read Requires,
+  ExtraRequires and RequiresStr together. showMatchError's literal messages and ExtensionDefs' names are read from
+  AArch64AsmParser.cpp as text. By hand, llvm-tblgen 23.1.5 `-print-records` (2 s): the same 7,484 instructions, AsmStrings and
+  encodings, 0 differences (`bin/repr-asm --arch arm64 table oracle`, `test/asm/table_oracle_arm64.ae`).
+- `arbace/repr/asm/arm64/lenc.ae`: Go's table first, then LLVM's matchables of the mnemonic as templates of the operands' text. Each
+  failure found by the encode check led to a rule from AArch64AsmParser.cpp: AltNames (`v0`) only for NEON's vector classes (`str v0`
+  is refused), an alias's own operand types and its argument used twice (cinc's `src`), the inverted condition `inv_ccode`, register
+  pairs with `x30, xzr` and `x31`, GPR64sp0's `[xN, #0]` for every matchable of a mnemonic that has one (tryParseGPR64sp0Operand
+  parses before the matcher; `ldr x4, [x9, #0], #4` stays refused), `$A$B` as a vector index or two operands, parseSysAlias with its
+  REG_OPTIONAL rule (FEAT_TLBID) and parseSyspAlias with TLBIP's D128/TLBID rule (AArch64BaseInfo), sxt/uxt's twiddles, MOPS's rules.
+  Go's add/sub immediate learnt tryParseImmWithOptionalShift (`add w3, w4, #4194304` is `#1024, lsl #12`): the first slice's contrary
+  note came from `CHECK-ERROR-AARCH64:`, a prefix no RUN line of basic-a64-diagnostics checks; the reject level now judges only lines a
+  run checks (59 `:unchecked-prefix`).
+- `encheck.ae`: RUN lines parsed (`-mcpu`, `-mattr`, the prefixes, a separate FileCheck run reading `%t.N`), the reject level under the
+  features of the run that checks the line, judged by LLVM's fragment (`message-meets?`); the echo of an error is the next line under
+  the error's own prefix (`CHECK-UNKNOWN: ... <unknown>` was read as an instruction); the print by kind (ARS25; the forms' `(hex N W)`
+  printed by `arm64/gnu.ae`); the input level (ARS29).
+
+Counts (`bin/repr-asm --arch arm64 encode-check`, 0 failing, about 26 s and 0.9 GiB; recorded from that run): encode 12,290 of 12,298
+(was 7,685; 7 `:check-text`, 1 `:directive`), print 12,222 of 12,227 (was 12,156), input 6,212 of 6,212 (new), reject 4,176 of 5,030
+with LLVM's fragment (was 0; 484 `:message`, 265 `:no-instruction`, 59 `:unchecked-prefix`, 31 `:relocation`, 14 `:feature-gate`, 1
+`:operand-spelling`); eleven controls (five new: LDADD/LDADDA, FADD/FSUB in FP16, two TLBI operations, two system registers, a
+message against another line's fragment), each failing as it must. Also run: `bin/repr-asm --arch arm64 table check` (both tables, 53 s,
+1.5 GiB), `bin/repr-asm table check` (amd64, byte for byte, 147 s, 1.3 GiB), AR1's round trips on both arches (as recorded), `make
+check-makefile`.
+
+Considered: generating the matcher as AsmMatcherEmitter does (operand classes ordered, the matchables sorted; too large for one slice,
+the structural matcher meets every stated encoding); LLVM's matcher first with Go's table as the cross-check (kept for ARS30: the base
+lines keep the first slice's rows); the features at the encode and input levels too (their lines' features are also the tests'
+`.arch` directives, ARS31). Proposed ARS30-ARS32 (doc/asm/ARM64-SURVEY.md).
+
+## 2026-11-10 Assembly: AX10, the two assembly crops join REAP and crops-score (branch `asm-ax10`, from `mac/asm-ax5c` `f05515abf`)
+
+The user decided on 2026-11-10 to bring AX10 forward, reversing CSP7 (the CROPS-90 roadmap had kept assembly out of
+`test/crops/crops.edn` until AX10, so that no crop under 90 joined with read and print alone): the x86-64 crop `:asm-amd64` joins the
+REAP matrix and crops-score with its four cells, the arm64 crop `:asm-arm64` with read and print checked and eval and AOT "no check
+yet", as Python's waited; the gate steps AXS21 (a), AXS42 (a), AXS65 (a), AXS73 (a) and AXS87 (a) had left to AX10 move forward with it.
+
+The base: `mac/asm-ax5c` (`f05515abf`, carrying `asm-merged`, AX5's slices) with `mac/asm-ar2b` (`8744bfdba`, arm64's LLVM-table encoder)
+merged; both sit on `asm-merged`; the conflicts (bin/repr-asm's help, this journal) kept both sides. Every asm check was rerun after the
+merge on stage 0, one at a time, none failing: the round trips (amd64 1 min 24 s, 1.0 GiB; arm64 33 s), arm64's table check and
+encode check, amd64's encode check (9 min 31 s, 1.4 GiB), decode check (dis 5 min 39 s, rt 2 min 1 s, obj 37 s), object check (musl,
+synthetic, mc-x86-obj), run check (23 s), x86i-check (14 min 44 s, 1.25 GiB), x86i-decode-check (1 min 42 s), the table and x86i's
+decode tables (3 min 10 s and 31 s).
+
+Built (doc/asm/AMD64-SURVEY.md, "As built: AX10"; doc/CROPS-SCORE.md, "Decided (the user, 2026-11-10)"):
+- `test/reap/cells.edn`: the rows `:asm-amd64` ("x86-64 asm") and `:asm-arm64` ("arm64 asm"); `test/reap/main.ae`: the readers
+  `:asm-rows`, `:asm-counts` and `:asm-arm64` over bin/repr-asm's records, each non-pass taken by the class its own judge found
+  (`:class-id`); `:by-design` maps to `:design`, `:pending` to nothing (a case in one fails). x86-64: read 25,222 / 1 / 32, eval 127 / 2 / 0,
+  AOT 98 / 0 / 6, print 194,582 / 1,532 / 400; arm64: read 6,646 / 0 / 10, print 12,656 / 5 / 10, eval and AOT no check yet (AR5, AR4).
+  `bin/reap --record`: 47 of 52 cells checked, 0 problems.
+- arm64's print level had no control of its own (the encode controls judge the encoding): `arbace.repr.asm.arm64.encheck/control-print`
+  and four `_control/print-` pairs in `test/asm/controls-encode-arm64.txt`, each failing as it must; a self-pair, tried once, was
+  reported "same" and failed the check.
+- `test/crops/crops.edn`: the two crops with a control rule per check family (10 of 10 and 4 of 4) and `:llvm-mc` among the toolchain
+  hosts; `test/crops/independence.edn`: x86-64's five stages 1 (judge 0.9998: the object check's 86 files against llvm-mc's recorded
+  objects at 0.5, 221,916 cases by their own verdicts), arm64's read, print and judge 1, eval and AOT 0 (no stage yet). `crops.score`'s
+  record reader took a crop id of letters alone (a hyphenated id read "not recorded" after `--record`): `[a-z][a-z0-9-]*` now.
+  `bin/crops-score --record`; `--judge --strict` 0 problems. x86-64 assembly: completeness 97.9% (98.5% without by design), maturity
+  100.0%, independence 100.0%; arm64 assembly: 49.9% (49.9%), 91.7%, 60.0%.
+- The gate: `test/gate/crops/asm.edn` and `asm-oracle.edn`, spliced into `test/gate/steps.edn` (`gate.crops splice`): essential
+  `asm-amd64-read-essential`, `asm-amd64-run-essential`, `asm-amd64-object-essential` (1 min 20 s, 0.8 GiB at most) and
+  `asm-arm64-read-essential`, `asm-arm64-print-essential` (1 min 18 s, 0.9 GiB); `--full` `asm-amd64-roundtrip`, `-decode` (obj nightly;
+  dis and rt `:clean-only`), `-object`, `x86i-decode`, `asm-arm64-table` nightly, and `asm-amd64-encode`, `asm-amd64-table` and `x86i-check`
+  as `:clean-only` parts (nightly 4 min 48 s, 71% of half a share; with them it was 40 min 24 s, 594%); the oracle tier's print-oracle,
+  table oracles and link-oracle on a new host `:llvm-mc` (llvm-mc, llvm-tblgen, ld.lld). `:budgets`: `:new-crops` with the two, `:shares`
+  0.5 each (AXS16 (a), ARS15), `:crops` 11; `:crop-pins` `bin/repr-asm corpus check` (new, with `corpus ensure`: the corpora extracted once
+  per `test/asm/corpora.edn`, under a lock). `gate.crops check` 0 problems; `bin/gate --plan`, `--full --plan`, `--oracle --plan` with no
+  table error; costs-test, crops-test (its expected pins and chains extended with the two crops), gate-key-crops-test pass. The costs
+  were measured by hand (`/usr/bin/time -v`), written as the worktree's `.tmp/gate/NAME.mem` for `bin/gate --costs`; no pass recorded.
+- Makefile: `repr-asm-pins`, `repr-asm-ensure`, `asm-amd64-essential`, `asm-arm64-essential`, `asm-essential`.
+
+Considered: x86i-check as the essential step AXS73 (a) planned (about 50 s then; 14 min 44 s now, the step mode over 43 programs: over
+the 2-minute chain limit, so `--full`, then `:clean-only` for the share); the decode check's dis level essential (AXS65 (a), 5 min 39 s:
+nightly obj only); keeping every `--full` part nightly (594% of the share; the share binds only after two passes, GTS222, but the night
+is full); counting arm64's encode level in a cell (beside AOT until arm64's AOT exists). Proposed AXS89-AXS90 (doc/asm/AMD64-SURVEY.md, "Proposed (AX10)": x86i-check and encode-check at night).
+
+Rule slips: none known (no lock, no gate run but `--plan` and `--costs`, one check at a time, the memory checked before each).
+
+## 2026-11-10 asm-axs89: x86i-check rotated, encode-check nightly (AXS89 (a), AXS90 (a); branch `asm-axs89` from `mac/asm-ax10` 00ded8184)
+
+Decided by the user the same day. Done: `bin/repr-asm x86i-check --only LIST` (a file of program names; the slice's programs run, each with its
+lockstep's sys and step modes, judged on what it ran: the recorded rows cut to the list, the coverage not held, the controls whose programs are
+outside not judged, `--record` refused), with the negative control `slice-foreign` in `test/asm/x86i_judge.ae` (the run held to the other
+programs' recorded rows must fail); `test/asm/subsets.edn` (the map `:all`, 13 quick programs); `x86i-check`'s part `all` out of `:clean-only`
+with `:rotate` (GT8.4: the subset nightly, a seventh of the rest a night by the planner's hash, whole in `--full`), in `test/gate/crops/asm.edn`
+and `test/gate/steps.edn`; `asm-amd64-encode.mc-x86` out of `:clean-only`. Measured by hand (`/usr/bin/time -v`): whole 8 min 39 s, 1.3 GiB; the
+subset 38 s; slice 6 (the heaviest by run time, 5 programs) 2 min 28 s, 1.2 GiB. `bin/gate --full --costs`: asm-amd64 full 22 min 58 s, 338% of its
+half share (it counts x86i-check whole); as the night runs it 17 min 25 s the heaviest night, 256%: over, because of encode-check (9 min 31 s);
+proposed AXS91 (encode in sevenths, about 122%). Considered: slices cut by hand to 2-3 minutes (the planner's slices are hash slices, the period
+fixed at 7; the planner not changed); `:always` for the controls' subjects (the slices would hold 20 programs each: a partial run judges the
+controls whose programs it ran instead). Checks: `gate.crops check` 0 problems; `bin/gate --plan`, `--nightly --plan` (nights 3 and 6),
+`--full --plan`, `--oracle --plan` without a table error; costs-test, crops-test, rotation-test (65), rotation-controls-test, lanes-test (50),
+gate-key-crops-test pass.
+
+Rule slips: the background launch of the two slice measures redirected to `/dev/null` (`> /dev/null 2>&1` on the `nohup`); no other.
+
+
+## 2026-11-10: P7, goi's loads and stores by their words (branch `goi-fields`)
+
+- The Mac VM's P7 (`.tmp/mac-queue/reports/proposals-2026-11-10-vm.md`; 251's "Lows": a pointer field's load 12 -> 3 ns in
+  plain Go, worked around in pyi's loop): goi's `Type.load` and `store` (go/arbace/goi/types.ae) took every non-`any` R value
+  through `reflect.NewAt(RT, p).Elem()` (`ptrTo`'s lookup, `packEface`'s copy, `Set`'s checks). Now each descriptor decides once,
+  when its RT is final, how its values move (`fastKind`, kept in `Type.fast` with the RT's type word `tw`): a pointer, map,
+  channel or unsafe.Pointer by its word, a slice by its header (a new 24-byte box on load), an `any` or compiled empty interface
+  as itself, a compiled non-empty interface loaded as gc converts it to `any` (only the itab's type word read); the store's fast
+  path only when the value's type word is the type's; structs, arrays, funcs and complex as before. Every pointer still moves by
+  a typed store (the write barriers, S25). `AddrOf`, `UnsafeToPtr` and `SliceToArrayPtr` (go/arbace/goi/expr.ae) find their
+  pointer type's word once when built instead of `NewAt` at each run.
+- Alternatives: an `ArbacePack` in reflect's overlay (overlay/go/reflect; it moves Go's patched runtime and every key, and
+  reflect's `unsafe_New` would also serve structs: kept for a later step if structs matter); the decision at build time in
+  `LoadR`/`StoreR` (a named type's kind is not final while it is built, so the descriptor decides lazily); a `reflect.Zero`
+  eface for the type word (an allocation for a slice; the stubs' reading of reflect.Type's data word is already goi's).
+- Measured in plain Go (TamaGo's go1.27.1, the printed functions verbatim against a descriptor stub; harness in
+  `.tmp/p7-goi-fields/bench`): pointer load 18.3 -> 4.3 ns, map 22.8 -> 4.1, io.Reader 21.4 -> 4.1, slice 62 -> 30, pointer store
+  23.4 -> 4.4, slice store 34.3 -> 5.0, `&s.f` 15.4 -> 1.1; each kind's load and store equal to the base's, and a GOGC=1
+  collector stress. The interpreter test `test/goi/run/go/t/fields.ae` (made from Go by repr/go's helper read, gc's run its
+  `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
+  gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
+  list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).

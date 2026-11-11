@@ -239,6 +239,76 @@
         (let [o (get-in f [:mixed :own]) j (get-in f [:mixed :jdk-record]) n (+ o j)]
           (when (pos? n) [(double (/ (+ o (* 0.5 j)) n)) n]))))
 
+;; ---- RFP53 (a) (the user, 2026-11-10; doc/CROPS-SCORE.md, "Decided (the user, 2026-11-10)"): a case's own inputs
+
+(defn- own-case? [inputs m] (and (map? m) (every? #(= :own (get m %)) inputs)))
+
+(defn rfp53-counts
+  "RFP53 (a): of the cell's case ids IDS (TOTAL cases as test/reap/matrix.edn counts them), the cases whose every input of INPUTS
+  is :own in ROWS ([ID {INPUT VALUE ...}] a case): {:self N :recorded M}, M every other case of the cell (no row, or an input not
+  :own: 0.5, RFP43 (a)); a row whose id is not the cell's counts nothing."
+  [ids rows inputs total]
+  (let [own (set (for [r rows :when (and (vector? r) (own-case? inputs (second r)))] (first r)))
+        n (count (filter own (distinct ids)))]
+    {:self n :recorded (max 0 (- total n))}))
+
+(defn- cell-ids
+  "The ids of the cell's cases: the first element of each row of its sources' records."
+  [t crop st]
+  (for [s (get-in (cells-spec t) [:cells [crop st] :sources]) :let [f (:file s)] :when (and (string? f) (has? t f))
+        r (edn t f) :when (vector? r)]
+    (first r)))
+
+(defn- case-inputs
+  "A fact's :case-inputs {:file F} (crops.edn's :own-inputs names the crop's inputs): {:self N :recorded M :note ...} counted
+  from F and the cell's record, or {:note ...} alone (the stated score stands) when the cell or F is not recorded yet."
+  [t config m crop st f]
+  (when-let [file (get-in f [:case-inputs :file])]
+    (let [inputs (map first (get-in config [:own-inputs crop :inputs]))
+          r (m [crop st])]
+      (cond (empty? inputs) {:note (str "RFP53 (a): crops.edn names no :own-inputs for " (name crop) ", the stated score")}
+            (not (and r (:checked r))) {:note "RFP53 (a): the cell has no record yet, the stated score"}
+            (not (has? t file)) {:note (str "RFP53 (a): no " file " yet, the stated score")}
+            :else (let [c (rfp53-counts (cell-ids t crop st) (edn t file) inputs (cases r))]
+                    (assoc c :note (str "RFP53 (a): " (:self c) " of " (+ (:self c) (:recorded c)) " cases own in all "
+                                        (count inputs) " inputs (" file "), the rest 0.5")))))))
+
+;; ---- OC222 (a) (the user, 2026-11-10): a class of :kind :na is ocamltest's own skip on the pinned configuration
+
+(defn na-class-problems
+  "The problems of class C of FILE (:kind :na) under OC222 (a)'s rule, CONF its :config file read (nil when absent): :skips
+  {PROGRAM ACTION} covering :programs exactly, each ACTION one of CONF's :actions and failing on CONF's :config, and :match
+  taking only the rows outside the run corpus (\"^class \": a program that runs and fails is never :na)."
+  [file c conf]
+  (let [skips (:skips c) progs (:programs c) where (str file ": class " (:id c) " (:na)")]
+    (cond (not (map? skips)) [(str where " has no :skips (OC222 (a): ocamltest's own skip on the pinned configuration)")]
+          (nil? conf) [(str where ": its :config " (pr-str (:config c)) " is not there")]
+          :else (concat
+                 (when (empty? progs) [(str where " lists no :programs")])
+                 (when (seq (:tests c)) [(str where " takes :tests (only :programs with :skips)")])
+                 (for [re (:match c) :when (not (str/starts-with? (str re) "^class "))]
+                   (str where ": :match " (pr-str (str re)) " takes rows a run judged (only \"^class \" rows)"))
+                 (for [p progs :when (not (contains? skips p))] (str where ": " p " names no skipping action"))
+                 (for [p (keys skips) :when (not (some #{p} progs))] (str where ": " p " is in :skips, not in :programs"))
+                 (for [[p a] skips :let [req (get-in conf [:actions a])]
+                       :when (or (nil? req) (= (get-in conf [:config (:key req)]) (:passes req)))]
+                   (if req
+                     (str where ": " p "'s action " a " passes on the pinned configuration (" (:key req) " " (:passes req) "): ocamltest runs it")
+                     (str where ": " p "'s action " a " is not among " (:config c) "'s :actions")))))))
+
+(defn- na-problems
+  "OC222 (a): the problems of every :na class in the crop's cells' classes, for a crop with crops.edn's :na-rules."
+  [t config crop]
+  (when (get-in config [:na-rules crop])
+    (let [spec (cells-spec t)
+          files (distinct (for [l levels :let [c (get-in spec [:cells [crop l]])]
+                                x (cons (:classes c) (map :classes (:sources c)))
+                                f (if (sequential? x) x [x]) :when (string? f)]
+                            f))]
+      (doall (for [f files :when (has? t f) c (edn t f) :when (and (map? c) (= :na (:kind c)))
+                   p (na-class-problems f c (when-let [cf (:config c)] (when (has? t cf) (edn t cf))))]
+               p)))))
+
 ;; ---- the cross-checks beyond the steps' hosts (the independence audit, 2026-11-09; the user's ruling (5))
 
 ;; (a) the files a step runs: the scripts its command names, and every file of bin/ or test/ those name by the root
@@ -299,7 +369,7 @@
           :when (and (re-find names sentence) (not (re-find ok sentence)))]
       [f (str/trim sentence)])))
 
-(defn- independence [t cfg config ind steps]
+(defn- independence [t cfg config ind steps m]
   (let [crop (:id cfg)
         facts (get ind crop)
         at (get-in facts [:at (or (:ref t) "checkout")])
@@ -313,6 +383,8 @@
         by-name (group-by #(str (:name %)) steps)
         rows (for [st stages
                    :let [f (merge (get-in facts [:stages st]) (get at st))
+                         ci (case-inputs t config m crop st f)
+                         f (if (:self ci) (assoc f :cases (select-keys ci [:self :recorded]) :rfp53 true) f)
                          named (mapcat #(by-name (str %)) (:steps f))
                          live (remove #(= :oracle (:phase %)) named)
                          hosted (for [s live h (:hosts s) :when (and (tool-hosts h) (not (exempt? s h)))] [(:name s) h])
@@ -343,6 +415,7 @@
                                      (seq (:steps f)) (str "UNVERIFIED: its :steps (" (str/join ", " (:steps f)) ") are not the tree's steps outside the oracle tier")
                                      (pos? claim) "UNVERIFIED: no :steps (no step of the tree runs it)"
                                      :else "claimed (no step of the tree runs it)")
+                         check (if (:note ci) (str check "; " (:note ci)) check)
                          check (if mixed
                                  (str check "; the case-weighted mean of " nmixed " cases"
                                       (when (and (number? stated) (> (Math/abs (- (double stated) mixed)) 0.005))
@@ -374,12 +447,14 @@
     {:crop cfg :ref (or ref "checkout")
      :completeness (completeness (:id cfg) m)
      :maturity (maturity t cfg config m steps)
-     :independence (independence t cfg config ind steps)}))
+     :independence (independence t cfg config ind steps m)
+     :na-problems (na-problems t config (:id cfg))}))
 
 (defn- cell-text [c]
   (let [r (:record c)]
     (str (level-names (:level c)) " " (pct (:score c)) " (" (pct (:meant c)) " without by design)"
-         (if r (str " (" (:pass r) " pass / " (:design r) " design / " (:deferred r) " deferred / " (:pending r) " pending)") "")
+         (if r (str " (" (:pass r) " pass / " (:design r) " design / " (:deferred r) " deferred / " (:pending r) " pending"
+                   (when (pos? (:na r 0)) (str "; " (:na r) " n/a, outside both denominators")) ")") "")
          (when (:flag c) (str " [" (:flag c) "]")))))
 
 (defn- print-details [s]
@@ -397,7 +472,7 @@
                     (when (seq (:host f)) (str "; host " (str/join " " (map name (:host f)))))
                     (when (:why f) (str "; " (:why f)))
                     (let [{:keys [self recorded]} (:cases f)]
-                      (when (and (number? self) (number? recorded))
+                      (when (and (number? self) (number? recorded) (not (:rfp53 f)))
                         (str "; " self " cases by their own verdict, " recorded " by a toolchain's record: (" self " + 0.5 x " recorded ") / " (+ self recorded))))
                     " [" (:check r) "]")))
     (println)))
@@ -473,7 +548,7 @@
   []
   (let [f (File. ^String (str *root* "/" scores-file))]
     (when (.isFile f)
-      (into {} (for [[_ id body] (re-seq #"(?ms)^ \{:crop :([a-z]+) (.*?)\}$" (slurp f))]
+      (into {} (for [[_ id body] (re-seq #"(?ms)^ \{:crop :([a-z][a-z0-9-]*) (.*?)\}$" (slurp f))]
                  [(keyword id) (str " {:crop :" id " " body "}")])))))
 
 (defn- record-diffs [scores]
@@ -484,6 +559,53 @@
             :when (not= now was)]
         (str scores-file ": " (name id) (if was (str " differs:\n      now " (str/replace now "\n" " ") "\n      was " (str/replace was "\n" " "))
                                             " not recorded"))))))
+
+;; ---- the rulings' own tests (fabricated cases; run by --self-test and by every --judge): each ruling's number as its plan
+;; computes it, and a negative control each that must not pass
+
+(defn self-test
+  "The failures of the rulings' tests (empty when every test passes and every control fails as it must)."
+  []
+  (let [inputs [:c1 :c2 :c3 :c4 :c5 :c6 :c7]
+        own (zipmap inputs (repeat :own))
+        ids (for [i (range 1 74)] (format "test/rust/x/c%02d.rs" i))
+        rows (vec (concat (for [id (take 37 ids)] [id own])
+                          (for [id (drop 37 ids)] [id (assoc own :c6 "pack: std's IR (Cargo, rustc, clang)")])
+                          [["test/rust/x/outside.rs" own]]))
+        indep (fn [counts]
+                (let [[e] (mixed-score {:cases counts})
+                      [j] (mixed-score {:cases {:self 66692 :recorded 146}})]
+                  (format "%.1f" (* 100.0 (/ (+ 1 e e 1 j) 5)))))
+        c37 (rfp53-counts ids rows inputs 73)
+        ;; the control: the same 37 cases with C7 test/c/host (ci on gcc's recorded host): none own, the stage 0.5
+        ctl-rows (vec (for [[id m] rows] [id (if (= m own) (assoc m :c7 "test/c/host") m)]))
+        ctl (rfp53-counts ids ctl-rows inputs 73)
+        conf {:config {"architecture" "amd64" "system" "linux" "os_type" "Unix" "tsan" "false" "flambda" "false" "with_frame_pointers" "false"}
+              :actions {"tsan" {:key "tsan" :passes "true"} "arch_amd64" {:key "architecture" :passes "amd64"}
+                        "target-windows" {:key "os_type" :passes "Win32"}}}
+        cls (fn [skips & kv] (merge {:id :config-skipped :kind :na :config "c.edn" :skips skips :programs (vec (keys skips))
+                                           :match [#"^class header: "]} (apply hash-map kv)))
+        good (na-class-problems "d.edn" (cls {"tsan/a" "tsan" "lib-filename/windows" "target-windows"}) conf)
+        controls {"an amd64 program on amd64" (na-class-problems "d.edn" (cls {"native-debugger/linux-gdb-amd64" "arch_amd64"}) conf)
+                  "an action not recorded" (na-class-problems "d.edn" (cls {"x/y" "arch_s390x"}) conf)
+                  "a program with no action" (na-class-problems "d.edn" (cls {"tsan/a" "tsan"} :programs ["tsan/a" "tsan/b"]) conf)
+                  "a run's failure taken" (na-class-problems "d.edn" (cls {"tsan/a" "tsan"} :match [#"^fail "]) conf)
+                  "no :skips" (na-class-problems "d.edn" (dissoc (cls {"tsan/a" "tsan"}) :skips) conf)
+                  "no configuration" (na-class-problems "d.edn" (cls {"tsan/a" "tsan"}) nil)}
+        cell (fn [p d f na] {:checked true :pass p :design d :deferred f :pending 0 :na na})
+        compl (fn [m] (format "%.1f" (* 100.0 (:score (completeness :ocaml m)))))
+        before {[:ocaml :read] (cell 3082 80 0 0) [:ocaml :eval] (cell 477 195 4 0) [:ocaml :aot] (cell 419 191 66 0) [:ocaml :print] (cell 3080 0 2 0)}
+        after (assoc before [:ocaml :eval] (cell 477 162 4 33) [:ocaml :aot] (cell 419 158 66 33))]
+    (concat
+     (when-not (= c37 {:self 37 :recorded 36}) [(str "RFP53: 37 of 73 own counted " (pr-str c37))])
+     (when-not (= "90.1" (indep c37)) [(str "RFP53: 37 of 73 own gives " (indep c37) ", the plan 90.1")])
+     (when-not (= "80.0" (indep {:self 0 :recorded 73})) [(str "RFP53: none own gives " (indep {:self 0 :recorded 73}) ", not 80.0")])
+     (when-not (= ctl {:self 0 :recorded 73}) [(str "RFP53 control (C7 test/c/host) passed: counted " (pr-str ctl))])
+     (when (= "90.1" (indep ctl)) ["RFP53 control (C7 test/c/host) reached 90.1"])
+     (when (seq good) [(str "OC222: a valid :na class refused: " (first good))])
+     (for [[k v] controls :when (empty? v)] (str "OC222 control passed: " k))
+     (when-not (and (= "82.5" (compl before)) (= "84.2" (compl after)))
+       [(str "OC222: completeness " (compl before) " to " (compl after) ", expected 82.5 to 84.2 (+1.7)")]))))
 
 (defn- parse-args [args]
   (loop [o {:inputs []} [a & r] args]
@@ -497,10 +619,17 @@
       "--judge" (recur (assoc o :judge true) r)
       "--strict" (recur (assoc o :strict true) r)
       "--record" (recur (assoc o :record true) r)
+      "--self-test" (recur (assoc o :self-test true) r)
       (throw (ex-info (str "crops-score: unknown argument " a) {})))))
 
 (defn -main [& args]
   (binding [*root* (or (System/getenv "CROPS_ROOT") ".")]
+    (when (some #{"--self-test"} args)
+      (let [fails (self-test)]
+        (doseq [x fails] (println (str "   FAIL " x)))
+        (println (str "crops-score: self-test (RFP53 (a), OC222 (a)): " (if (empty? fails) "every test passes, every control fails as it must" (str (count fails) " failures"))))
+        (shutdown-agents)
+        (System/exit (if (empty? fails) 0 1))))
     (let [o (parse-args args)
           config (read-file "test/crops/crops.edn")
           ind (read-file "test/crops/independence.edn")
@@ -516,10 +645,12 @@
           own? (and (nil? (:ref o)) (not (:newest o)) (empty? (:inputs o)))
           _ (when (and (:record o) (not (and own? (nil? (:crop o)))))
               (throw (ex-info "crops-score: --record records the checkout's scores of every crop (no --ref, --newest, --input, --crop)" {})))
-          judged (when (:judge o) (map #(str "test/reap/matrix.edn: " %) (judge-check)))
+          judged (when (:judge o) (concat (map #(str "test/reap/matrix.edn: " %) (judge-check))
+                                          (map #(str "self-test: " %) (self-test))))
+          na (for [s scores p (:na-problems s)] (str "OC222 (a): " p))
           diffs (when (and own? (not (:record o))) (record-diffs scores))
-          problems (concat judged (when (:strict o) refuted) diffs)]
-      (when (and (:record o) (empty? judged) (or (not (:strict o)) (empty? refuted)))
+          problems (concat judged na (when (:strict o) refuted) diffs)]
+      (when (and (:record o) (empty? judged) (empty? na) (or (not (:strict o)) (empty? refuted)))
         (spit (str *root* "/" scores-file) (scores-text scores))
         (println (str "crops-score: wrote " scores-file)))
       (if (:tsv o)

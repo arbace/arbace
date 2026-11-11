@@ -323,7 +323,18 @@
             [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
                            (list 'super. arity))
                      (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
-             (method-for arity params b)]
+             (method-for arity params b)
+             ;; Marshal's Closures flag (OC216 (a); ocaml.rt.Marshal's closureFields, fixClosures): the free variables, a closure
+             ;; of the class with none set, and their setting
+             (list 'method (with-meta 'envOf {:public true}) (with-meta ['this] {:tag 'Object/1})
+                   (if (seq fields)
+                     (list 'new 'Object/1 (mapv (fn [fl] (list (symbol (str ".-" fl)) 'this)) fields))
+                     (list 'new 'Object/1 0)))
+             (list 'method (with-meta 'blank {:public true}) (with-meta ['this] {:tag 'ocaml.rt.Closure})
+                   (apply list (symbol (str cls ".")) (repeat (count fields) nil)))
+             (concat (list 'method (with-meta 'fill {:public true}) (with-meta ['this (with-meta 'e$ {:tag 'Object/1})] {:tag 'ocaml.rt.Closure}))
+                     (map-indexed (fn [i fl] (list 'set! (list (symbol (str ".-" fl)) 'this) (list 'aget 'e$ i))) fields)
+                     ['this])]
             (when tb [tb])))
     [cls free]))
 
@@ -407,7 +418,9 @@
     (if (= arity (count args))
       (apply list (symbol (str cls) name) args)
       (do (note-missing! (str name "/" (count args))) (list 'throw (rt 'missing (str name "/" (count args))))))
-    (do (note-missing! name) (list 'throw (rt 'missing name)))))
+    ;; OC215 (a): an external the runtime does not implement is the program's C stub of that name at the compiled level
+    ;; (ocaml.rt.CApi: the main's boundary, test/ocaml/o2j/capi), missing as before where no stubs are loaded
+    (do (note-missing! name) (list 'ocaml.rt.CApi/call name (list 'new 'Object/1 (vec args))))))
 
 (def ^:private effect-prims
   {"perform" 'perform "runstack" 'runstack "resume" 'resume "reperform" 'reperform})
@@ -478,7 +491,13 @@
       (or (str/starts-with? n "Bigarray.") (str/starts-with? n "bigarray.")) (external (bigarray-ext n (count as)) as)
       ;; an external of the C runtime (caml_*) or one the runtime defines under a library's own C name (Str's re_*)
       (or (str/starts-with? n "caml_") (contains? *externals* n)) (external n as)
-      :else (do (note-missing! (str "%" n)) (list 'throw (rt 'unsupported n))))))
+      ;; an external with no bytecode name (OC199 (a), the typer's native:NAME:ARGS:RESULT): its native function, unboxed words
+      (str/starts-with? n "native:")
+      (let [[_ nm ar rs] (str/split n #":" -1)]
+        (note-missing! nm)
+        (list 'ocaml.rt.CApi/nativeCall nm (str ar rs) (list 'new 'Object/1 (vec as))))
+      ;; another name: a C stub's (OC215 (a), CApi/prim), else unsupported as before
+      :else (do (note-missing! (str "%" n)) (list 'ocaml.rt.CApi/prim n (list 'new 'Object/1 (vec as)))))))
 
 (defn- prim-node [ctx [^String n args] tail?]
   (cond

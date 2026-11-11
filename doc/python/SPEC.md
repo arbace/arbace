@@ -28,6 +28,12 @@ Words used throughout:
 - **a form**: a list `(head field... option...)`, optionally ending in one metadata map (§1.3).
 - **the checklist**: §13, every constructor and field of `Parser/Python.asdl` with its form, checked against the
   pinned tarball's file and against the oracle's `ast` module by `bin/repr-python spec-check`.
+- **3.15** (queue 236, doc/python/PY315-SURVEY.md P2): the same forms read from Python 3.15 (`REPR_PYTHON_VERSION=3.15`:
+  the 3.15.2 tarball, its grammar's parser `arbace.repr.python.parser315`, the 3.15.2 oracle built from it, the helper
+  `tools/pydump/pydump315.py`). 3.15's `Python.asdl` adds two fields and one optional value, each written so that a
+  3.14 tree's form is unchanged: `is_lazy` of `Import` and `ImportFrom` (`:lazy true`, §5.2) and `DictComp`'s `value`
+  (`nil` for `{**d for d in ...}`, §8). They are the checklist's fields marked `(3.15)`, and the worked examples
+  of 3.15's syntax are in `forms-3.15` blocks, parsed by a 3.15 oracle only (§15).
 
 Contents: 1 Principles · 2 Names · 3 Literals · 4 Modules · 5 Statements · 6 Expressions · 7 Functions, calls and
 parameters · 8 Comprehensions · 9 Patterns · 10 Type parameters · 11 Positions and mode `:full` · 12 Errors ·
@@ -288,7 +294,8 @@ forms write `:simple false` only for a parenthesized name (the one case the targ
 
 `Import(names)` is `(import [ALIAS...])`, `ImportFrom(module, names, level)` is `(import-from MODULE [ALIAS...]
 :level N)` with `nil` for no module (`from . import x`) and `:level` left out at 0; `alias(name, asname)` is
-`(alias NAME :as ASNAME)`, short the name alone.
+`(alias NAME :as ASNAME)`, short the name alone. 3.15's `lazy import` and `lazy from` (PEP 810) set `is_lazy` 1:
+`:lazy true`, left out at 0 (3.15's parser writes 0 for a plain import, 3.14's has no such field: both read without it).
 
 ```forms
 ;; py: import os.path as p, sys
@@ -297,6 +304,13 @@ forms write `:simple false` only for a parenthesized name (the one case the targ
 (import-from nil [(alias a :as b) c] :level 2)
 ;; py: from x.y import *
 (import-from x.y [*])
+```
+
+```forms-3.15
+;; py: lazy import json, os.path as p
+(import [json (alias os.path :as p)] :lazy true)
+;; py: lazy from .util import helper
+(import-from util [helper] :level 1 :lazy true)
 ```
 
 ### 5.3 Loops
@@ -498,7 +512,8 @@ arguments apart, so `f(k=1, *a)` and `f(*a, k=1)` are one node (S10).
 
 `(list-comp ELT [GEN...])`, `(set-comp ELT [GEN...])`, `(dict-comp KEY VALUE [GEN...])`, `(generator-exp ELT
 [GEN...])`; `comprehension(target, iter, ifs, is_async)` is `(comprehension TARGET ITER :ifs [EXPR...] :async
-true)`.
+true)`. 3.15's unpacking in comprehensions (PEP 798): an element `*x` is `(starred x)` as `ELT`, and `{**d for d in
+ds}` is a `DictComp` without a value (`expr? value` in 3.15's `Python.asdl`): `(dict-comp d nil [GEN...])`.
 
 ```forms
 ;; py: async def h(d, g):
@@ -510,11 +525,18 @@ true)`.
 (assign [s] (call sum [(generator-exp (bin-op * x x) [(comprehension x xs)])]))
 ```
 
+```forms-3.15
+;; py: flat = [*row for row in grid]
+;; | merged = {**d for d in ds}
+(assign [flat] (list-comp (starred row) [(comprehension row grid)]))
+(assign [merged] (dict-comp d nil [(comprehension d ds)]))
+```
+
 ## 9. Patterns
 
 | `ast` | source | form |
 |---|---|---|
-| `MatchValue(value)` | `1`, `-1`, `a.b`, `"s"` | `(match-value 1)`, `(match-value (unary-op - 1))`, `(match-value (attribute a b))` |
+| `MatchValue(value)` | `1`, `-1`, `a.b`, `"s"`; 3.15: `+1` | `(match-value 1)`, `(match-value (unary-op - 1))`, `(match-value (attribute a b))`; `(match-value (unary-op + 1))` |
 | `MatchSingleton(value)` | `None`, `True`, `False` | `(match-singleton None)` |
 | `MatchSequence(patterns)` | `[a, *r]`, `(a, b)` | `(match-sequence [(match-as nil a) (match-star r)])` |
 | `MatchMapping(keys, patterns, rest)` | `{"k": v, **r}` | `(match-mapping ["k"] [(match-as nil v)] :rest r)` |
@@ -638,8 +660,8 @@ a head used twice within a category; and it checks the oracle's `ast` module aga
 | `stmt` | `Try` | `try` | `body→1`, `handlers→2`, `orelse→:else`, `finalbody→:finally` |
 | `stmt` | `TryStar` | `try-star` | `body→1`, `handlers→2`, `orelse→:else`, `finalbody→:finally` |
 | `stmt` | `Assert` | `assert` | `test→1`, `msg→2` |
-| `stmt` | `Import` | `import` | `names→1` |
-| `stmt` | `ImportFrom` | `import-from` | `module→1`, `names→2`, `level→:level` |
+| `stmt` | `Import` | `import` | `names→1`, `is_lazy→:lazy` (3.15) |
+| `stmt` | `ImportFrom` | `import-from` | `module→1`, `names→2`, `level→:level`, `is_lazy→:lazy` (3.15) |
 | `stmt` | `Global` | `global` | `names→1` |
 | `stmt` | `Nonlocal` | `nonlocal` | `names→1` |
 | `stmt` | `Expr` | `expr` | `value→1` |
@@ -781,7 +803,8 @@ The heads beyond the `ast`: `str-concat` (§3.3) and `python/error` (§12); the 
 PY1's, all light (no Arbace build, no stage 0 build; stage 0 only reads data):
 
 - `bin/repr-python spec-check`: the checklist against `Parser/Python.asdl` of the pinned tarball and against the
-  oracle's `ast` module (§13); every `forms` block of this file read by Arbace's reader; every worked example's
+  oracle's `ast` module (§13; a field marked `(3.15)` is required of 3.15's `Python.asdl` and left out of 3.14's, queue
+  236; `REPR_PYTHON_VERSION=3.15` checks 3.15.2's file on its oracle, the `forms-3.15` blocks' examples with them); every `forms` block of this file read by Arbace's reader; every worked example's
   Python (`;; py:` lines) parsed and compiled by the oracle (a valid program, not only a parse), and every `ast`
   class in its tree (but `Name`, `Constant`, `alias`, `arg`, the contexts and the operators, which have short
   spellings or are symbols, and the format specs, which are vectors) present as its head in the example's forms.
@@ -821,6 +844,8 @@ PY3: the tokens and `:full`.
 
 ## 16. Sources
 
+- CPython 3.15.2, the release tarball `Python-3.15.2.tar.xz` (pinned as `:cpython-3.15.2`, queue 236): its
+  `Parser/Python.asdl` and `Grammar/python.gram`, `Doc/whatsnew/3.15.rst`; PEPs 798 and 810.
 - CPython 3.14.10, the release tarball `Python-3.14.10.tar.xz` from `https://www.python.org/ftp/python/3.14.10/`
   (pinned in `test/python/corpora.edn`): `Parser/Python.asdl` (the nodes), `Grammar/python.gram`, `Grammar/Tokens`,
   `Lib/ast.py`, `Lib/tokenize.py`, `Doc/library/ast.rst`, `Doc/reference/lexical_analysis.rst`; read in place, not

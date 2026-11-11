@@ -4422,3 +4422,56 @@ differ), WB3c, and `dcWordBreak` proved on UAX #29's 1,826 conformance strings.
   `unicode-scan --control` does: the runtime copied to `.tmp/si-control`, WB3c's line dropped, the test run and required to report exactly 9
   differing positions (another count fails), a part of `si-check.unicode` (about a minute: one more build of the copy). *Recommended: (b)*:
   the conformance test then has a control in the gate, as every check family does (GTS81 (a)).
+
+## Decided (the user, 2026-11-09, about 14:20): SCS25 (a), SCS26 (b)
+
+- **SCS25 (a):** U+1E9E's exception in the final sigma stays stated, as built by scheme-props4.
+- **SCS26 (b):** `bin/si unit --control`, TestWordBreakUAX29's negative control, a part of `si-check.unicode`.
+
+## As built: SCS25 (a), SCS26 (b) (2026-11-09, branch `scheme-props5`)
+
+On `scheme-props5` from `mac/next` 6c3c87c02, main's stage 0.
+
+- **SCS25 (a):** nothing changes: the exception (`go/arbace/scm/prim_char.ae`, U+1E9E not counted as cased beside a sigma) stays as
+  measured over every scalar value (the scan's frames 7 and 8, `test/scheme/wordbreak-scan.edn`, 0 lines differ).
+- **SCS26 (b):** `bin/si unit --control` copies the runtime's forms (`go/arbace/scm/*.ae`) into `.tmp/si-control/scm`, drops WB3c's rule
+  (`(when (and (== a wbZWJ) (IsExtPict (aget rs i))) (return false))`, two lines of `prim_char.ae`; the copy must differ, else it fails),
+  prints and runs `go test -run '^TestWordBreakUAX29$'` on the copy (`SI_SCM_DIR`, as `unicode-scan --control` builds its copy) and reads
+  the test's own count (`WordBreakTest.txt: N strings, M inner positions, K differ`): exactly 9 positions must differ; another count, or no
+  count, fails. It is the third command of `si-check`'s part `unicode` (`test/gate/crops/scheme.edn` and `test/gate/steps.edn`, the same
+  text), its summary line `^unit --control`, and `si-check`'s waiver names it. About 16 s warm (one print and test build of the copy).
+
+| command | result |
+|---|---|
+| `bin/si unit --control` | `TestWordBreakUAX29 without WB3c differs in 9 positions, as a control must (GTS81 (a))` |
+| `bin/si unicode-scan`, `--control` | both scans equal Chez's records (292,557 and 292,531 lines); the controls differ in 8 and 1 lines |
+| si-essential's command (`bin/si unit`, `test --si`, `check --only test/scheme/essential-check.txt`, `r7rs`, `srfi`, `corpora controls-test`) | exit 0: unit ok, 61 of 64 (3 known), 0 failing; r7rs and srfi as before, their controls failing |
+| `test/gate/crops-test.bash` | ok (steps.edn passes GT9's rules) |
+| `bin/gate --full --plan` | exit 0 |
+| `bin/reap`, `bin/crops-score --judge --strict` | 0 problems; 11 crops, 0 problems |
+
+`bin/crops-score --crop scheme` before (mac/next) and after: 97.4% (98.9% without by design), maturity 100.0, independence 100.0, the
+same: a control adds no cell (the maturity checklist's 8 of 8 check families already had theirs).
+
+Night: the gate's `si-check` (its part `unicode` now runs the third command); nothing else moves.
+
+## Proposed (2026-11-10, branch `scheme-compl2`): the deferred eval and AOT classes
+
+A light lane (raising the crops above 90%, doc/CROPS-SCORE.md) listed Scheme's deferred non-passes: eval 6 (`:ecraven-too-slow` 3,
+`:r7rs-float-printing` 2, `:chibi-optional-fallback` 1), AOT 2 (`:syntax-constants`). None is a gap fixable without a choice:
+the slow benchmarks are the interpreter's speed (SM8 SC109: compiled in the heavy list); the syntax constants need a way to write
+psyntax's records (stx, rib, their eq?-compared marks) as constants that read back with their identity, a design of its own (SC90);
+the other two are below.
+
+- **SCS27 The R7RS mode's exponent sign.** Chibi's suite accepts only `"1.7976931348623157e+308"` (and its negative) for the extreme
+  flonums; si prints Chez's `1.7976931348623157e308` (SPEC 7: "exponent form without a sign"), which R7RS reads the same. 2 cases of
+  `bin/si r7rs` and 9 of `r7rs --chibi-test` (beside, not in the cell). (a) In R7RS mode only (the mode that already prints `d.0e-N` and
+  no `|N`), write a positive exponent with `+` (`1e+10`), Chibi's form; R6RS mode keeps Chez's, SPEC 7 states both; the R7RS suites,
+  the SRFIs and the corpora rerun and recorded. (b) Keep Chez's form everywhere and class the two `:design` (R7RS 6.2.6 leaves the
+  external representation's spelling to the implementation). *Recommended: (b)*: one printer rule for both modes keeps si's printing
+  Chez's, which the rest of the judges (SCS17 (c)'s printing scans) are stated over. (b) leaves the strict completeness as it is (by
+  design stays in its denominator) and raises the number without by design; (a) raises the strict one, +2 cases (eval 99.6 to 99.7).
+- **SCS28 Chibi's optional-test fallback.** `(chibi optional-test)`'s else branch for other Schemes defines a `test-error` of one
+  expression and calls it with two: the test library is ill-formed outside Chibi, si's `(chibi optional)` passes the other 24 tests.
+  (a) Class it `:na`, a test of no implementation but Chibi (as `:suite-ill-formed`); (b) keep it deferred. *Recommended: (a)*: no
+  change to si can make the library's own macro take two expressions.

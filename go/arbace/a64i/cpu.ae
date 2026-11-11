@@ -1,0 +1,356 @@
+(in-ns 'go.arbace.a64i) (go/file "cpu.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [os "os"]
+    ^{:line 6} [strings "strings"]
+
+    ^{:line 8} [emu "arbace/emu"]])
+
+
+
+(go/const "Signals a64i raises (Linux's numbers).\n"
+  ^{:line 13} [^{:val 4} SIGILL 4]
+  ^{:line 14} [^{:val 5} SIGTRAP 5]
+  ^{:line 15} [^{:val 7} SIGBUS 7]
+  ^{:line 16} [^{:val 11} SIGSEGV 11])
+
+
+
+(go/type CPU "CPU is one arm64 thread at EL0 over the frame's address space and kernel.\n" (struct
+    ^{:line 21 :tag (array 32 uint64)} X ; X[31] is SP
+    ^{:line 22 :tag (array 32 (array 2 uint64))} Q ; the SIMD&FP registers, low and high halves (their loads and stores alone, AR5)
+    ^{:line 23 :tag uint64} PC
+    ^{:line 24 :tag bool} N ^bool Z ^bool C ^bool V
+    ^{:line 25 :tag uint64} TPIDR
+    ^{:line 26 :tag uint64} FPCR ^uint64 FPSR
+    ^{:line 27 :tag (* emu/AS)} AS
+    ^{:line 28 :tag (* emu/Kernel)} K
+
+    ^{:line 30 :tag bool :doc "the exclusive monitor: an address and size marked by a load-exclusive\n"} exclValid
+    ^{:line 31 :tag uint64} exclAddr
+    ^{:line 32 :tag uint64} exclSize
+
+    ^{:line 34 :tag (map uint64 (* Inst)) :doc "Forms, when set, are the instructions by address (eval: the forms laid out); the bytes are not decoded then\n"} Forms
+    ^{:line 35 :tag (map uint64 string)} FormErr
+    ^{:line 36 :tag (map uint64 cached)} cache
+    ^{:line 37 :tag uint64} Steps
+
+    ^{:line 39 :tag bool :doc "the end\n"} Done
+    ^{:line 40 :tag int} Code ^int Signal
+    ^{:line 41 :tag string} Reason
+    ^{:line 42 :tag uint64} FaultAddr
+    ^{:line 43 :tag (map string uint64)} Cover
+    ^{:line 44 :tag int} Pid
+
+    ^{:line 46 :tag (func [^uint64 n ^{:tag (array 6 uint64)} args] [int64 bool]) :doc "SysHook, when set, answers a system call first (the lockstep's): its result and true, or false to perform it\n"} SysHook
+
+    ^{:line 48 :tag uint64 :doc "LastSys is the last system call's number (the lockstep's)\n"} LastSys
+
+    ^{:line 50 :tag (* Inst) :doc "Last is the last instruction executed\n"} Last
+
+    ^{:line 52 :tag bool :doc "stop after a system call (the lockstep's sys mode)\n"} StopAtSys
+    ^{:line 53 :tag bool} SysDone))
+
+
+(go/type cached (struct
+    ^{:line 57 :tag uint32} w
+    ^{:line 58 :tag Inst} in
+    ^{:line 59 :tag string} r))
+
+
+
+^{:go/end 67} (go/func New "New is a CPU at entry with the stack pointer sp.\n" ^{:tag (* CPU)} [^{:tag (* emu/AS)} as ^{:tag (* emu/Kernel)} k ^uint64 entry ^uint64 sp]
+  (let [c (addr (lit CPU :AS as :K k :PC entry :cache (lit (map uint64 cached))))]
+    (aset (.-X c) 31 sp)
+    ^{:line 66} c))
+
+
+
+^{:go/end 75} (go/method Status "Status is the process's exit status: its code, or 128 and the signal that ended it.\n" ^int [^{:tag (* CPU)} c]
+  (when (!= (.-Signal c) 0)
+    (return (+ 128 (.-Signal c))))
+
+  (.-Code c))
+
+
+^{:go/end 79} (go/method raise [^{:tag (* CPU)} c ^int sig ^string reason]
+  (set! (values (.-Done c) (.-Signal c) (.-Reason c)) (values true sig reason)))
+
+
+
+
+(go/var (values ^{:tag string :doc "the injected faults (A64I_INJECT=FAMILY:FLAG, the negative controls): after each instruction of the family, the flag\n(n, z, c, v) flipped, or (x) the destination register's lowest bit\n"} injFamily ^string injFlag))
+
+
+^{:go/end 93} (go/func Inject "Inject sets the injected fault from \"FAMILY:FLAG\".\n" ^error [^string s]
+  ^{:go/breaks [4]} (let [(values f g ok) (strings/Cut s ":")]
+    (when (or (not ok) (not (strings/Contains "nzcvx" g)) (!= (len g) 1))
+      (return (fmt/Errorf "A64I_INJECT: FAMILY:n|z|c|v|x, not %q" s)))
+
+    (set! (values injFamily injFlag) (values f g))
+    nil))
+
+
+^{:go/end 101} (go/func init []
+  (when [s (os/Getenv "A64I_INJECT")] (!= s "")
+    (when [err (Inject s)] (!= err nil)
+      (fmt/Fprintln os/Stderr "a64i:" err))))
+
+
+
+
+^{:go/end 121} (go/method inject [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (!= (.Family in) injFamily)
+    (return))
+
+  (switch injFlag
+    (case ["n"]
+      (set! (.-N c) (not (.-N c))))
+    (case ["z"]
+      (set! (.-Z c) (not (.-Z c))))
+    (case ["c"]
+      (set! (.-C c) (not (.-C c))))
+    (case ["v"]
+      (set! (.-V c) (not (.-V c))))
+    (case ["x"]
+      (when (!= (.-Rd in) 31)
+        (set! (aget (.-X c) (.-Rd in)) bit-xor 1)))))
+
+
+
+
+
+^{:go/end 159} (go/method Fetch "Fetch is the instruction at pc: from the forms (eval) or decoded from the bytes (AOT), with the reason when there is none.\n" [^{:tag (* CPU)} c ^uint64 pc] :results [(* Inst) int string]
+  (when (!= (bit-and pc 3) 0)
+    (return nil SIGBUS ":pc-alignment"))
+
+  (when (!= (.-Forms c) nil)
+    (when (== (bit-and (.Perm (.-AS c) pc) emu/PermX) 0)
+      (return nil SIGSEGV ":fetch"))
+
+    (let [(values in ok) (aget (.-Forms c) pc)]
+      (when (not ok)
+        (return nil SIGILL ":code-as-data no form at this address"))
+
+      (when (== (.-Op in) OpInvalid)
+        (return nil SIGILL (aget (.-FormErr c) pc)))
+
+      (return in 0 "")))
+
+  (let [^{:tag (array 4 byte)} b (zero (array 4 byte))]
+    (when (< (.Fetch (.-AS c) pc (subslice b)) 4)
+      (return nil SIGSEGV ":fetch"))
+
+    (let [w (bit-or (conv uint32 (aget b 0)) (<< (conv uint32 (aget b 1)) 8) (<< (conv uint32 (aget b 2)) 16) (<< (conv uint32 (aget b 3)) 24))]
+      (when [(values e ok) (aget (.-cache c) pc)] (and ok (== (.-w e) w))
+        (when (!= (.-r e) "")
+          (return nil SIGILL (.-r e)))
+
+        (return (addr (.-in e)) 0 ""))
+
+      (let [(values in r) (Decode w pc)]
+        (aset (.-cache c) pc (lit cached w in r))
+        (when (!= r "")
+          (return nil SIGILL r))
+
+        (let [e (aget (.-cache c) pc)]
+          (return (addr (.-in e)) 0 ""))))))
+
+
+
+^{:go/end 182} (go/method Step "Step executes one instruction; false when the process has ended.\n" ^bool [^{:tag (* CPU)} c]
+  (when (.-Done c)
+    (return false))
+
+  (let [(values in sig r) (.Fetch c (.-PC c))]
+    (when (== in nil)
+      (set! (.-FaultAddr c) (.-PC c))
+      (.raise c sig r)
+      (return false))
+
+    (set! (.-Last c) in)
+    (inc! (.-Steps c))
+    (when (!= (.-Cover c) nil)
+      (inc! (aget (.-Cover c) (+ (.Name in) " " (.Family in)))))
+
+    (.exec c in)
+    (when (and (!= injFamily "") (not (.-Done c)))
+      (.inject c in))
+
+    (not (.-Done c))))
+
+
+
+^{:go/end 188} (go/method Run "Run executes until the process ends.\n" [^{:tag (* CPU)} c]
+  (while (.Step c)))
+
+
+
+
+^{:go/breaks [[6 198]] :go/end 199} (go/method RunToSys "RunToSys executes until a system call has been made (true) or the process ended (false).\n" ^bool [^{:tag (* CPU)} c]
+  (set! (.-SysDone c) false)
+  (while (not (.-SysDone c))
+    (when (not (.Step c))
+      (return false)))
+
+
+  true)
+
+
+;; the registers
+
+^{:go/end 208} (go/method reg ^uint64 [^{:tag (* CPU)} c ^uint8 r ^bool sp]
+  (when (and (== r 31) (not sp))
+    (return 0))
+
+  (aget (.-X c) r))
+
+
+^{:go/end 218} (go/method regw ^uint64 [^{:tag (* CPU)} c ^uint8 r ^bool sf]
+  (when (== r 31)
+    (return 0))
+
+  (when sf
+    (return (aget (.-X c) r)))
+
+  (bit-and (aget (.-X c) r) 0xffffffff))
+
+
+^{:go/end 228} (go/method set [^{:tag (* CPU)} c ^uint8 r ^uint64 v ^bool sf ^bool sp]
+  (when (and (== r 31) (not sp))
+    (return))
+
+  (when (not sf)
+    (set! v bit-and 0xffffffff))
+
+  (aset (.-X c) r v))
+
+
+;; memory
+
+^{:go/end 235} (go/method segv [^{:tag (* CPU)} c ^uint64 addr]
+  (set! (.-FaultAddr c) addr)
+  (.raise c SIGSEGV (fmt/Sprintf ":segv %#x" addr)))
+
+
+^{:go/end 243} (go/method load [^{:tag (* CPU)} c ^uint64 addr ^uint8 size] :results [uint64 bool]
+  (let [(values v ok) (.Read (.-AS c) addr ^int (<< 1 size))]
+    (when (not ok)
+      (.segv c (.-FaultAddr (.-AS c))))
+
+    (return v ok)))
+
+
+^{:go/breaks [[5 254]] :go/end 255} (go/method store ^bool [^{:tag (* CPU)} c ^uint64 addr ^uint8 size ^uint64 v]
+  (when (not (.Write (.-AS c) addr ^int (<< 1 size) v))
+    (.segv c (.-FaultAddr (.-AS c)))
+    (return false))
+
+  ;; a store to a marked address clears the monitor (the global monitor's effect, one thread)
+  (when (and (.-exclValid c) (< addr (+ (.-exclAddr c) (.-exclSize c))) (< (.-exclAddr c) (+ addr ^uint64 (<< 1 size))))
+    (set! (.-exclValid c) false))
+
+  true)
+
+
+^{:go/breaks [[4 263]] :go/end 264} (go/method aligned ^bool [^{:tag (* CPU)} c ^uint64 addr ^uint64 n]
+  (when (!= (bit-and addr (- n 1)) 0)
+    (set! (.-FaultAddr c) addr)
+    (.raise c SIGBUS (fmt/Sprintf ":alignment %#x" addr))
+    (return false))
+
+  true)
+
+
+
+^{:go/end 291} (go/method cond "the conditions (ConditionHolds)\n" ^bool [^{:tag (* CPU)} c ^uint8 k]
+  (let [^bool r (zero bool)]
+    (switch (>> k 1)
+      (case [0]
+        (set! r (.-Z c)))
+      (case [1]
+        (set! r (.-C c)))
+      (case [2]
+        (set! r (.-N c)))
+      (case [3]
+        (set! r (.-V c)))
+      (case [4]
+        (set! r (and (.-C c) (not (.-Z c)))))
+      (case [5]
+        (set! r (== (.-N c) (.-V c))))
+      (case [6]
+        (set! r (and (== (.-N c) (.-V c)) (not (.-Z c)))))
+      (case [7]
+        (set! r true)))
+
+    (when (and (== (bit-and k 1) 1) (!= k 15))
+      (set! r (not r)))
+
+    ^{:line 290} r))
+
+
+
+^{:go/end 302} (go/method NZCV "NZCV is the flags as the NZCV register holds them (bits 31-28).\n" ^uint64 [^{:tag (* CPU)} c]
+  (let [^uint64 v (zero uint64)]
+    (range [i f (lit (slice bool) (.-N c) (.-Z c) (.-C c) (.-V c))]
+      (when f
+        (set! v bit-or ^uint64 (<< 1 (- 31 i)))))
+
+
+    ^{:line 301} v))
+
+
+
+^{:go/end 307} (go/method SetNZCV "SetNZCV sets the flags from NZCV's bits.\n" [^{:tag (* CPU)} c ^uint64 v]
+  (set! (values (.-N c) (.-Z c) (.-C c) (.-V c)) (values (== (bit-and (>> v 31) 1) 1) (== (bit-and (>> v 30) 1) 1) (== (bit-and (>> v 29) 1) 1) (== (bit-and (>> v 28) 1) 1))))
+
+
+
+^{:go/end 353} (go/method svc "the system call (SVC #0): x8 the number, x0-x5 the arguments, x0 the result\n" [^{:tag (* CPU)} c]
+  (let [n (aget (.-X c) 8)
+      ^{:line 312} args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))]
+    (set! (.-LastSys c) n)
+    (set! (.-SysDone c) true)
+    (when (!= (.-SysHook c) nil)
+      (when [(values r ok) ((.-SysHook c) n args)] ok
+        (aset (.-X c) 0 (conv uint64 r))
+        (return)))
+
+
+    (let [(values s ok) (emu/SyscallA64 (conv int n))]
+      (when (not ok)
+        (aset (.-X c) 0 enosys)
+        (return))
+
+      (switch (.-Name s)
+        (case ["rt_sigaction" "rt_sigprocmask" "sigaltstack" "rt_sigreturn" "clone" "clone3" "execve" "futex" "rseq" "set_robust_list"]
+          ;; signal handlers, threads and exec are AR6's (one thread, the default dispositions)
+          (aset (.-X c) 0 enosys)
+          (return))
+        (case ["kill" "tkill" "tgkill"]
+          (when (or ^:go/paren (and (== (.-Name s) "kill") (== (conv int (aget args 0)) (.-Pid c))) ^:go/paren (and (!= (.-Name s) "kill") (== (conv int (aget args 0)) (.-Pid c))))
+            (let [sig (conv int (aget args 1))]
+              (when (== (.-Name s) "tgkill")
+                (set! sig (conv int (aget args 2))))
+
+              (when (!= sig 0)
+                (.raise c sig (fmt/Sprintf ":signal %d" sig)))
+
+              (aset (.-X c) 0 0)
+              (return))))
+
+        (case ["getpid" "gettid"]
+          (aset (.-X c) 0 (conv uint64 (.-Pid c)))
+          (return)))
+
+      (let [(values r exit) (.SyscallByName (.-K c) s (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5))]
+        (when (!= exit nil)
+          (set! (values (.-Done c) (.-Code c)) (values true (.-Code exit)))
+          (return))
+
+        (aset (.-X c) 0 (conv uint64 r))))))
+
+
+
+(go/const ^{:val 18446744073709551578N :doc "enosys is -ENOSYS as x0 holds it.\n"} enosys (bit-not (conv uint64 37)))

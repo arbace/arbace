@@ -306,7 +306,11 @@
 ;; analysis was at (its line), the function's later errors not looked for (the analysis stops at its first). Each rule:
 ;; [class message-regex clang's diagnostic].
 (def sema-rules
-  [[:overload #"^codegen: no viable function among [1-9]" "no matching function for call"]
+  [;; (CP332 (a): clang's builtin template __type_pack_element, its index checked as clang's checkBuiltinTemplateIdType does)
+   [:pack-element #"^codegen: __type_pack_element's index is not an integral constant" "template argument for non-type template parameter must be an expression / not an integral constant"]
+   [:pack-element #"^codegen: __type_pack_element's index -?\d+ is negative" "index of __type_pack_element is negative"]
+   [:pack-element #"^codegen: __type_pack_element's index \d+ is out of range" "index of __type_pack_element is out of range"]
+   [:overload #"^codegen: no viable function among [1-9]" "no matching function for call"]
    [:overload #"^codegen: call to a deleted function" "call to deleted function"]
    [:access #"^codegen: '.*' is a (private|protected) member of" "is a private member of"]
    ;; (the rest of CP313 (a): a member named through an inaccessible base, [class.access.base]/5; structured bindings,
@@ -351,6 +355,15 @@
    [:ctad #"^codegen: cannot form .* deduced class template specialization type" "cannot form a compound type of a deduced class template specialization type"]])
 
 (def ^:dynamic *sema-log* nil)
+;; CP329 (a): the System/nanoTime past which a file's read stops (arbace.repr.cpp.dg/read-own binds it; 0: no cap)
+(def ^:dynamic *deadline* 0)
+
+(defn timed-out!
+  "Throws the read's time cap ({:cpp/timeout true}) when the deadline passed."
+  []
+  (let [d (long *deadline*)]
+    (when (and (pos? d) (> (System/nanoTime) d))
+      (throw (ex-info "the read's time cap passed" {:cpp/timeout true})))))
 
 (def ^:private sema-load (delay (locking arbace.lang.RT/REQUIRE_LOCK (require 'arbace.cpp.sema 'arbace.cpp.template)) true))
 
@@ -380,6 +393,7 @@
         md (resolve 'arbace.cpp.sema/*main-dir*)
         yr (resolve 'arbace.cpp.sema/*cxx-year*)
         pe (resolve 'arbace.cpp.sema/*pedantic-errors*)
+        dl (resolve 'arbace.cpp.sema/*deadline*)
         h (fn [e n]
             (let [cls (:codegen/refused (ex-data e)) m (str (ex-message e))
                   ;; (a refusal over a type the slice leaves undeduced or dependent is the slice's, not the program's)
@@ -391,14 +405,26 @@
               (when (and rule off (= main (get-in n [:range :begin :file])))
                 (let [[l c] (line-col starts (long off))]
                   (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")})))))]
+    ;; CP325 (a): a unit's refusal (the slice's, :codegen/refused or a type's :cpp/gap, or a constant the evaluation does not reach) leaves the
+    ;; unit with the errors found before it, as before; anything else thrown is a crash of the analysis, the file's read
+    ;; then a failing :crash with its message (arbace.repr.cpp.dg/read-own), never an acceptance. CP329 (a): past the
+    ;; deadline the analysis unwinds and the read is a :timeout.
     (try
-      (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u)))}
+      (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u)))
+                      dl (long *deadline*)}
         (sema (:nodes u) (:root u) src))
       (catch arbace.lang.ExceptionInfo e
-        (when *sema-log* (swap! *sema-log* conj [(or (:codegen/refused (ex-data e)) :other) (str "unit: " (subs (str (ex-message e)) 0 (min 100 (count (str (ex-message e))))))  false])))
+        (timed-out!)
+        (let [d (ex-data e)]
+          (if (or (:codegen/refused d) (:codegen/not-constant d) (:cpp/gap d))
+            (when *sema-log* (swap! *sema-log* conj [(or (:codegen/refused d) :other) (str "unit: " (subs (str (ex-message e)) 0 (min 100 (count (str (ex-message e))))))  false]))
+            (do (when (System/getenv "CX12_TRACE") (.printStackTrace e))
+                (throw (ex-info (str "Sema crashed: " (ex-message e)) {:cpp/crash true}))))))
       (catch Throwable e
+        (timed-out!)
         (when (System/getenv "CX12_TRACE") (.printStackTrace e))
-        (when *sema-log* (swap! *sema-log* conj [:crash (str "unit: " e) false]))))
+        (throw (ex-info (str "Sema crashed: " e) {:cpp/crash true}))))
+    (timed-out!)
     (vec out)))
 
 ;; GNU's attributes clang does not know (CP294 (a)): the native parser keeps them as data on the declaration they appertain

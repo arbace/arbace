@@ -1,0 +1,352 @@
+(ns arbace.asm.arm64.gen
+  "The arm64 instruction table generated from LLVM's AArch64 `.td` files (doc/asm/ARM64-SURVEY.md, \"As built: AR2 (second
+  slice)\", ARS24 (a)): the records of llvm/lib/Target/AArch64/AArch64.td (llvm-project 23.1.5, Apache-2.0 WITH
+  LLVM-exception) read by Arbace's TableGen (arbace.asm.tablegen), then what the encoder needs of them as data:
+  - each instruction the assembler can match (Namespace AArch64, not a pseudo, not codegen-only, an AsmString): its AsmString
+    (every variant), its operands (OutOperandList, InOperandList), its ties (Constraints), its required predicates and its
+    encoding, the `Inst` field's fixed bits (mask, value) and the runs of bits each operand's field sets (CodeEmitterGen's
+    reading of `let Inst{4-0} = Rd;`: a field of the record that is an unset bits<n> is the operand of that name);
+  - each InstAlias: its AsmString, the instruction and operands it stands for, its predicates and emit priority;
+  - the operand types the instructions name (register classes, RegisterOperands, Operands: their parser match class, encoder,
+    print method and sub-operands), the AsmOperandClasses (predicate, render, super classes, diagnostic type, parser method), the
+    registers (AsmName, HWEncoding, AltNames) and the register classes' members (CodeGenRegisters' SetTheory: add, sub, and,
+    sequence, trunc, rotl, rotr, decimate);
+  - the predicates (AssemblerPredicate's condition over the subtarget features), the features (SubtargetFeature: the -mattr
+    name, what each implies), the processors (-mcpu: their features);
+  - the system operands of AArch64SystemOperands.td (each GenericEnum's FilterClass records: system registers with their
+    access and required features, the PSTATE fields, AT, DC, IC, TLBI, TLBIP, barriers, prefetch operations, ...).
+
+  - the matcher's messages: AsmParser/AArch64AsmParser.cpp's showMatchError, read as text (each diagnostic type's literal message).
+
+  `generate` returns the table's text (asm/arm64/table.edn); `-main` writes it or checks the committed one (`bin/repr-asm --arch
+  arm64 table gen|check`). No llvm-tblgen runs."
+  (:require [arbace.asm.tablegen :as tg]
+            [arbace.string :as str])
+  (:import [java.util HashMap]
+           [arbace.asm.tablegen Rec Bits]))
+
+(set! *warn-on-reflection* true)
+
+;; the records the generator never reads: kept by name and class only (tablegen's `drop`); not PatFrags or ComplexPattern,
+;; which AArch64's Operands also are (imm0_7, addsub_shifted_imm64)
+(def drop-classes ["Intrinsic" "Pattern" "InstRW" "ProcResourceKind" "ItinRW" "SchedAlias" "SchedVar" "WriteRes"
+                   "ReadAdvance" "SchedPredicateBase" "MCInstPredicate" "SDNode" "GINodeEquiv" "GICombineRule"
+                   "SchedMachineModel" "SchedReadWrite" "ProcResource" "GIComplexOperandMatcher" "GICustomOperandRenderer"])
+
+(defn load-aarch64
+  "The records of AArch64.td under the llvm tree `llvm` (its lib/Target/AArch64 and include)."
+  [^String llvm]
+  (tg/load-td "AArch64.td" [(str llvm "/lib/Target/AArch64") (str llvm "/include")] drop-classes []))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; values
+
+(defn- rn [v] (when (tg/rec? v) (tg/rec-name v)))
+(defn- f [r n] (when (tg/field? r n) (tg/fv r n)))
+(defn- fint [r n] (let [v (f r n)] (when (and (some? v) (not= v tg/unset)) (tg/as-int v))))
+(defn- fstr [r n] (let [v (f r n)] (when (string? v) v)))
+
+(defn- show
+  "A value as data: a record its name, bits an integer (nil when one is unset), a dag (OP [VALUE NAME] ...)."
+  [v]
+  (cond (tg/rec? v) (tg/rec-name v)
+        (tg/bits? v) (tg/bits->int v)
+        (tg/dag? v) (vec (cons (show (tg/dag-op v)) (map (fn [[a n]] [(show a) n]) (tg/dag-args v))))
+        (vector? v) (mapv show v)
+        (= v tg/unset) nil
+        :else v))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the encoding: Inst's bits, each fixed or an operand field's
+
+(defn- operand-field?
+  "A field declared bits<n> and left unset (`bits<5> Rd;`): an operand's, which CodeEmitterGen fills from the operand of its name."
+  [e]
+  (and (#{:bits :bit} (first (:t e))) (contains? e :v) (not (contains? e :sl))
+       (let [v (:v e)] (or (= v tg/unset) (and (tg/bits? v) (every? #(= tg/unset %) (tg/bits-of v)))))))
+
+(defn inst-bits
+  "The record's Inst as 32 entries, bit 0 first: 0, 1, nil (unset: no field) or [FIELD BIT]. The operand fields are read as
+  themselves: each is given, before Inst is evaluated, bits that name it ([FIELD I]), which Inst's slices then copy."
+  [^Rec r]
+  (let [^HashMap c (.-cache r)]
+    (doseq [[n e] (tg/rec-fields r) :when (and (not= n "Inst") (operand-field? e))]
+      (.put c n (Bits. (mapv (fn [i] [n i]) (range (or (second (:t e)) 1))))))
+    ;; an operand field with some of its bits set (`bits<6> scale; let scale{5} = 1;`): its other bits are the operand's
+    (doseq [[n e] (tg/rec-fields r)
+            :when (and (not= n "Inst") (= :bits (first (:t e))) (contains? e :sl)
+                       (let [b (:base e)] (and (contains? b :v) (let [v (:v b)] (or (= v tg/unset) (and (tg/bits? v) (every? #(= tg/unset %) (tg/bits-of v))))))))]
+      (let [v (tg/bits-of (tg/fv r n))]
+        (.put c n (Bits. (vec (map-indexed (fn [i b] (if (= b tg/unset) [n i] b)) v))))))
+    (mapv #(if (= % tg/unset) nil %) (tg/bits-of (tg/fv r "Inst")))))
+
+(defn encoding
+  "[MASK VALUE RUNS] of 32 Inst entries: the fixed bits, and RUNS [FIELD FIELD-LO INST-LO WIDTH] (the field's bits FIELD-LO
+  up set Inst's bits INST-LO up), in Inst's order."
+  [bits]
+  (let [mask (reduce (fn [m i] (if (integer? (nth bits i)) (bit-or m (bit-shift-left 1 i)) m)) 0 (range 32))
+        value (reduce (fn [m i] (if (= 1 (nth bits i)) (bit-or m (bit-shift-left 1 i)) m)) 0 (range 32))
+        runs (reduce (fn [acc i]
+                       (let [b (nth bits i)]
+                         (if (vector? b)
+                           (let [[fl fb] b
+                                 [pf plo pilo pw :as prev] (peek acc)]
+                             (if (and prev (= pf fl) (= (+ plo pw) fb) (= (+ pilo pw) i))
+                               (conj (pop acc) [pf plo pilo (inc pw)])
+                               (conj acc [fl fb i 1])))
+                           acc)))
+                     [] (range 32))]
+    [mask value runs]))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; registers and register classes
+
+(declare set-of)
+
+(def ^:dynamic *sets* nil)
+
+(defn- set-elems [v]
+  (cond (tg/rec? v) (cond (tg/subclass? v "RegisterClass") (set-of v)
+                          (tg/subclass? v "RegisterTuples") (throw (ex-info "tuples" {}))
+                          :else [(tg/rec-name v)])
+        (vector? v) (vec (mapcat set-elems v))
+        (tg/dag? v) (let [op (rn (tg/dag-op v))
+                          args (mapv first (tg/dag-args v))]
+                      (case op
+                        "add" (vec (distinct (mapcat set-elems args)))
+                        "sub" (let [[a & bs] args rm (set (mapcat set-elems bs))] (vec (remove rm (set-elems a))))
+                        "and" (let [[a b] args keep (set (set-elems b))] (vec (filter keep (set-elems a))))
+                        "sequence" (let [[fmt lo hi st] args lo (tg/as-int lo) hi (tg/as-int hi) st (if st (tg/as-int st) 1)]
+                                     (mapv #(str/replace fmt "%u" (str %)) (if (<= lo hi) (range lo (inc hi) st) (range lo (dec hi) (- st)))))
+                        "trunc" (let [[a n] args] (vec (take (tg/as-int n) (set-elems a))))
+                        "rotl" (let [[a n] args xs (set-elems a) k (mod (tg/as-int n) (max 1 (count xs)))] (vec (concat (drop k xs) (take k xs))))
+                        "rotr" (let [[a n] args xs (set-elems a) k (mod (- (count xs) (tg/as-int n)) (max 1 (count xs)))] (vec (concat (drop k xs) (take k xs))))
+                        "decimate" (let [[a n] args] (vec (take-nth (tg/as-int n) (set-elems a))))
+                        (throw (ex-info (str "set operator " op) {}))))
+        :else (throw (ex-info (str "set element " (pr-str v)) {}))))
+
+(defn set-of
+  "The registers of the register class `rc`, in its order; nil when they are tuples or an operator not read here."
+  [rc]
+  (let [^HashMap m *sets* n (tg/rec-name rc)]
+    (if (.containsKey m n)
+      (.get m n)
+      (let [s (try (set-elems (f rc "MemberList")) (catch arbace.lang.ExceptionInfo _ nil))] (.put m n s) s))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the table
+
+(defn- requires-features
+  "A system operand's Requires (C++ code naming its FeatureBitset) as the feature records' names."
+  [r]
+  (let [v (str/join " " (for [n ["Requires" "ExtraRequires" "RequiresStr"] :let [x (f r n)] :when (some? x)]
+                          (if (vector? x) (str/join " " (map str x)) (str x))))]
+    (vec (distinct (map second (re-seq #"(?:AArch64::)?(Feature\w+)" v))))))
+
+(def sysop-classes
+  "AArch64SystemOperands.td's FilterClasses read, each as [KEY CLASS FIELDS]."
+  [[:sysreg "SysReg" ["Readable" "Writeable"]] [:pstate15 "PStateImm0_15" []] [:pstate1 "PStateImm0_1" []]
+   [:at "AT" []] [:dc "DC" []] [:ic "IC" ["NeedsReg"]] [:tlbi "TLBIEntry" ["RegUse"]] [:tlbip "TLBIPEntry" ["RegUse" "AllowWithTLBID"]]
+   [:db "DB" []] [:dbnxs "DBnXS" ["ImmValue"]] [:isb "ISB" []] [:prfm "PRFM" []] [:rprfm "RPRFM" []] [:svcr "SVCR" []]
+   [:gic "GIC" ["NeedsReg"]] [:gsb "GSB" []] [:gicr "GICR" []] [:plbi "PLBIEntry" ["RegUse"]]
+   [:sveprfm "SVEPRFM" []] [:svepredpat "SVEPREDPAT" []] [:sveveclen "SVEVECLENSPECIFIER" []] [:exactfpimm "ExactFPImm" ["Repr"]]])
+
+(defn- line [& xs] (str (apply str xs) "\n"))
+
+(defn diags-of
+  "AArch64AsmParser.cpp's showMatchError read as text: {DIAGNOSTIC-TYPE MESSAGE} for each `case Match_TYPE:` whose case returns
+  `Error(Loc, \"...\")` with the message's literal alone (consecutive labels share the next one's message); the cases that
+  compute their message (a tied operand's, the mnemonic's suggestion) are left out."
+  [^String cpp]
+  (let [start (.indexOf cpp "bool AArch64AsmParser::showMatchError")
+        body (subs cpp start (.indexOf cpp "\n}\n" (int start)))
+        chunks (rest (str/split body #"case Match_"))]
+    (loop [cs chunks pending [] out (sorted-map)]
+      (if-let [c (first cs)]
+        (let [[_ nm] (re-find #"^(\w+):" c)
+              ret (re-find #"(?s)return Error\(\s*\w+,\s*((?:\"(?:[^\"\\]|\\.)*\"\s*)+)\);" c)
+              literal-only (and ret (not (re-find #"(?s)\{" (subs c 0 (.indexOf ^String c "return")))))]
+          (if (and ret literal-only)
+            (let [msg (apply str (map second (re-seq #"\"((?:[^\"\\]|\\.)*)\"" (second ret))))]
+              (recur (rest cs) [] (reduce #(assoc %1 %2 msg) out (conj pending nm))))
+            (if (re-find #"return|\{" c)
+              (recur (rest cs) [] out)
+              (recur (rest cs) (conj pending nm) out))))
+        out))))
+
+(defn extensions-of
+  "AArch64AsmParser.cpp's ExtensionDefs read as text: [[NAME [FEATURE ...]] ...] in order (`.arch_extension`'s names and the
+  names its messages give a feature set)."
+  [^String cpp]
+  (let [start (.indexOf cpp "ExtensionDefs[] = {")
+        body (subs cpp start (.indexOf cpp "\n};" (int start)))]
+    (vec (for [[_ n fs] (re-seq #"\{\{\"([^\"]+)\"\},\s*\{([^}]*)\}\}" body)]
+           [n (vec (map second (re-seq #"AArch64::(\w+)" fs)))]))))
+
+(defn generate
+  "The text of asm/arm64/table.edn from the llvm tree `llvm`."
+  ^String [^String llvm]
+  (let [cpp (slurp (str llvm "/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp"))
+        diags (diags-of cpp)
+        exts (extensions-of cpp)
+        w (load-aarch64 llvm)]
+    (tg/with-world w
+      (binding [*sets* (HashMap.)]
+        (let [recs (tg/records)
+              insn? (fn [r] (and (tg/subclass? r "Instruction") (= "AArch64" (fstr r "Namespace"))
+                                 (not= 1 (fint r "isPseudo")) (not= 1 (fint r "isCodeGenOnly"))
+                                 (seq (fstr r "AsmString")) (tg/field? r "Inst")))
+              insns (vec (for [r recs :when (insn? r)]
+                           (let [bits (try (inst-bits r) (catch arbace.lang.ExceptionInfo e e))
+                                 dag-ops (fn [n] (vec (for [[v nm] (tg/dag-args (f r n))] [nm (rn v)])))]
+                             [(tg/rec-name r)
+                              (cond-> {:asm (fstr r "AsmString")
+                                       :outs (dag-ops "OutOperandList")
+                                       :ins (dag-ops "InOperandList")
+                                       :preds (mapv rn (f r "Predicates"))}
+                                (seq (fstr r "Constraints")) (assoc :constraints (fstr r "Constraints"))
+                                (seq (fstr r "DecoderNamespace")) (assoc :decoder-ns (fstr r "DecoderNamespace"))
+                                (= 1 (fint r "isAsmParserOnly")) (assoc :parser-only true)
+                                (vector? bits) (assoc :enc (encoding bits))
+                                (not (vector? bits)) (assoc :enc-error (.getMessage ^Exception bits)))])))
+              aliases (vec (for [r recs :when (and (tg/subclass? r "InstAlias") (seq (fstr r "AsmString")))]
+                             (let [d (f r "ResultInst")]
+                               {:asm (fstr r "AsmString")
+                                :result (rn (tg/dag-op d))
+                                :args (vec (for [[v nm] (tg/dag-args d)]
+                                             (cond (tg/rec? v) [(if (tg/subclass? v "Register") :reg :op) (tg/rec-name v) nm]
+                                                   (integer? v) [:imm v nm]
+                                                   (tg/bits? v) [:imm (tg/bits->int v) nm]
+                                                   (tg/dag? v) [:dag (show v) nm]
+                                                   :else [:other (show v) nm])))
+                                :preds (mapv rn (f r "Predicates"))
+                                :priority (fint r "EmitPriority")
+                                :variant (fstr r "AsmVariantName")})))
+              ;; the operand types the instructions and aliases name, and what they name in turn
+              optypes (atom (sorted-map))
+              classes (atom (sorted-map))
+              rcs (atom (sorted-map))
+              add-class! (fn add-class! [c]
+                           (when (and c (not (contains? @classes (tg/rec-name c))))
+                             (swap! classes assoc (tg/rec-name c)
+                                    (cond-> {:name (fstr c "Name") :super (mapv rn (f c "SuperClasses"))}
+                                      (fstr c "PredicateMethod") (assoc :pred (fstr c "PredicateMethod"))
+                                      (fstr c "RenderMethod") (assoc :render (fstr c "RenderMethod"))
+                                      (seq (fstr c "DiagnosticType")) (assoc :diag (fstr c "DiagnosticType"))
+                                      (seq (fstr c "DiagnosticString")) (assoc :diag-string (fstr c "DiagnosticString"))
+                                      (fstr c "ParserMethod") (assoc :parser (fstr c "ParserMethod"))
+                                      (= 1 (fint c "IsOptional")) (assoc :optional true)
+                                      (fstr c "DefaultMethod") (assoc :default (fstr c "DefaultMethod"))))
+                             (doseq [s (f c "SuperClasses")] (add-class! s))))
+              add-rc! (fn [rc] (when (and rc (tg/subclass? rc "RegisterClass") (not (contains? @rcs (tg/rec-name rc))))
+                                 (swap! rcs assoc (tg/rec-name rc) (set-of rc))))
+              add-op! (fn add-op! [^String n]
+                        (when-let [o (and n (not (contains? @optypes n)) (tg/lookup-def n))]
+                          (swap! optypes assoc n nil)
+                          (let [pmc (f o "ParserMatchClass")]
+                            (when (tg/rec? pmc) (add-class! pmc))
+                            (swap! optypes assoc n
+                                   (cond
+                                     (tg/subclass? o "RegisterClass") (do (add-rc! o) {:kind :rc :rc n})
+                                     (tg/subclass? o "RegisterOperand")
+                                     (do (add-rc! (f o "RegClass"))
+                                         (cond-> {:kind :regop :rc (rn (f o "RegClass")) :print (fstr o "PrintMethod")}
+                                           (tg/rec? pmc) (assoc :class (tg/rec-name pmc))
+                                           (seq (fstr o "EncoderMethod")) (assoc :encoder (fstr o "EncoderMethod"))))
+                                     (tg/subclass? o "Operand")
+                                     (let [mi (vec (for [[v nm] (tg/dag-args (f o "MIOperandInfo"))] [nm (rn v)]))]
+                                       (doseq [[_ t] mi] (add-op! t))
+                                       (cond-> {:kind :op :print (fstr o "PrintMethod") :type (fstr o "OperandType")}
+                                         (tg/rec? pmc) (assoc :class (tg/rec-name pmc))
+                                         (seq (fstr o "EncoderMethod")) (assoc :encoder (fstr o "EncoderMethod"))
+                                         (seq mi) (assoc :mi mi)))
+                                     :else {:kind :other :supers (vec (sort (tg/rec-supers o)))})))))]
+          (doseq [[_ m] insns [_ t] (concat (:outs m) (:ins m))] (add-op! t))
+          (doseq [a aliases [k v] (:args a) :when (= k :op)] (add-op! v))
+          (let [regs (into (sorted-map)
+                           (for [r recs :when (and (tg/subclass? r "Register") (= "AArch64" (fstr r "Namespace")))]
+                             [(tg/rec-name r) [(fstr r "AsmName") (fint r "HWEncoding") (vec (remove empty? (f r "AltNames")))]]))
+                pred-names (into (sorted-set) (concat (mapcat (comp :preds second) insns) (mapcat :preds aliases)))
+                preds (into (sorted-map) (for [p pred-names :let [r (tg/lookup-def p)] :when r]
+                                           [p (cond-> {}
+                                                (tg/field? r "AssemblerCondDag") (assoc :cond (show (f r "AssemblerCondDag")))
+                                                (= 1 (fint r "AssemblerMatcherPredicate")) (assoc :asm true)
+                                                (fstr r "PredicateName") (assoc :name (fstr r "PredicateName")))]))
+                features (into (sorted-map) (for [r recs :when (tg/subclass? r "SubtargetFeature")]
+                                              [(tg/rec-name r) {:name (fstr r "Name") :implies (vec (sort (map rn (f r "Implies"))))}]))
+                procs (into (sorted-map) (for [r recs :when (and (tg/subclass? r "Processor") (fstr r "Name"))]
+                                           [(fstr r "Name") (vec (sort (map rn (f r "Features"))))]))
+                sysops (into (sorted-map)
+                             (for [[k c extra] sysop-classes]
+                               [k (vec (sort-by first
+                                                (for [r recs :when (tg/subclass? r c)]
+                                                  (into [(fstr r "Name") (fint r "Encoding") (requires-features r)]
+                                                        (map #(show (f r %)) extra)))))]))]
+            (str
+             (line ";; asm/arm64/table.edn: the arm64 instruction table, generated by arbace.asm.arm64.gen from llvm-project 23.1.5's")
+             (line ";; llvm/lib/Target/AArch64/AArch64.td and the messages of AsmParser/AArch64AsmParser.cpp's showMatchError (test/asm/corpora.edn's")
+             (line ";; :llvmorg-23.1.5; Apache-2.0 WITH LLVM-exception); do not edit: `bin/repr-asm --arch arm64 table gen` writes it, `table check`")
+             (line ";; regenerates and compares. Read with the Clojure reader.")
+             (line "{:insns")
+             (line " {")
+             (apply str (for [[n m] (sort-by first insns)] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :aliases")
+             (line " [")
+             (apply str (for [a aliases] (line "  " (pr-str a))))
+             (line " ]")
+             (line " :operands")
+             (line " {")
+             (apply str (for [[n m] @optypes] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :classes")
+             (line " {")
+             (apply str (for [[n m] @classes] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :regclasses")
+             (line " {")
+             (apply str (for [[n m] @rcs] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :regs")
+             (line " {")
+             (apply str (for [[n m] regs] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :preds")
+             (line " {")
+             (apply str (for [[n m] preds] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :features")
+             (line " {")
+             (apply str (for [[n m] features] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :processors")
+             (line " {")
+             (apply str (for [[n m] procs] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :diags")
+             (line " {")
+             (apply str (for [[n m] diags] (line "  " (pr-str n) " " (pr-str m))))
+             (line " }")
+             (line " :extensions")
+             (line " [")
+             (apply str (for [x exts] (line "  " (pr-str x))))
+             (line " ]")
+             (line " :sysops")
+             (line " {")
+             (apply str (for [[k xs] sysops]
+                          (str (line "  " k)
+                               (line "  [")
+                               (apply str (for [x xs] (line "   " (pr-str x))))
+                               (line "  ]"))))
+             (line " }}"))))))))
+
+(defn -main [& args]
+  (let [[llvm out check] args
+        text (generate llvm)]
+    (if (= check "--check")
+      (if (= text (slurp out))
+        (println (str "repr-asm table: " out " equal to a fresh generation"))
+        (do (println (str "FAIL: repr-asm table: " out " differs from a fresh generation (bin/repr-asm --arch arm64 table gen)"))
+            (System/exit 1)))
+      (do (spit out text) (println (str "repr-asm table: wrote " out " (" (count text) " characters)"))))
+    (shutdown-agents)))

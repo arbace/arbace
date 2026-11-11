@@ -2474,3 +2474,1088 @@ is the shim and std's lowered library.
   Alpine's remapping (`--remap-path-prefix` of the library to `/rustc/<commit>/library`, as the distribution's build passes it), std
   rebuilt and lowered again once (the night's: about four hours with runtime-ci) and the packs made again**; (b) a class `std-paths` in
   `test/rust/divergences.edn` for those programs; (c) normalize std's paths in the judge. *Recommended: (a)*, (b) until it is done.
+## As built: RF12 (first slice), core's modules through the front end (2026-11-09)
+
+Branch `rust-rf12` (from `mac/next` `3ef7b3f78`), beside RF11 (`rust-rf11`, rsi's cases from the front end's MIR), whose files it
+leaves to it but for small edits in `build.ae` (named below). The brief: run the front end over core's own sources module by
+module, judge the bodies against rustc's own built MIR of core, group the failures, fix the groups that block whole modules.
+
+### The oracle (`bin/rust-front core-oracle`, the pack `rust-core-built`)
+
+rustc's built MIR of core, made by hand with the helper as rustc (its driver leaves `trimmed_def_paths` off, so the dumps print
+full crate-relative paths as the programs' oracles do; rustc's own driver turns trimming on): `--crate-type lib --crate-name core
+--edition 2024 -C opt-level=0 -C debuginfo=0 -C overflow-checks=off --emit=metadata -Zdump-mir=built`, the paths remapped to
+`library/`, over a copy of rust-src's `library/core` (stdarch and portable-simd linked) in `.tmp/rust-front/core/lib`. The copy patches
+`task/wake.rs`' two `from_fn_ptr` statics, whose closures name the static itself: rustc's MIR dump evaluates the static while
+printing the closure's body and stops on a cycle (E0391; the build without `-Zdump-mir` passes); `|this| RawWaker::new(this,
+&VTABLE)` becomes `loop {}` in the closure, those four bodies out of the judged set. 31,334 bodies (68 MB, 35 s, 1.2 GB), indexed by
+their dump file's name (`hint-{impl#0}-to_llvm`: the def path with its disambiguators, unique where 860 printed names are not).
+`bin/rust-front core-records make` packs the first slice's modules' bodies (every file whose key starts with a listed module's
+path, one member a module: the dumps one after another, 7,547 bodies, 304 KB xz, `418ebb7b...`) and the index as `rust-core-built`
+(test/rust/records/, the oracle-records format, kind `rust core-built` in `test/oracle-records/kinds.edn`; an entry's key: the copy's
+sources, the helper's digest and the flags); `core-check --records` reads it, no helper and no rustc.
+
+### The driver (`arbace.rust.front.core-check`, `bin/rust-front core-check`)
+
+- core's module tree after `rustc_expand/src/module.rs` (`#[path]`, mod.rs directories, inline modules), cfg evaluated for core's
+  build (rustc 1.99.1's `--print cfg` at these flags: target_has_atomic's values, target_feature sse2, ub_checks, debug_assertions,
+  target_vendor alpine...; the expansion's cfg now takes a name's set of values, `*cfg-names*`): 378 module files, 105 of stdarch and
+  portable-simd.
+- core's index from its sources, cached (`.tmp/rust-front/core/index.edn`): every file read by the native reader once; its
+  `macro_rules!` and macros 2.0 (231), the nearest file's definition taken for a name (textual scope approximated crate-wide);
+  each module's definitions (628 modules: functions, ADTs, variants and constructors, traits and their items, constants, statics,
+  modules), added to std's names where they lack them (core's private items: `ub_checks::check_language_ub`).
+- One process over the listed files, one module file at a time as the crate's root (GOMEMLIMIT=1800MiB): expansion, resolution,
+  lowering, collection, type checking and MIR building, each body judged and dropped as it is built; the rest of core from std's
+  interface and names (the pack `rust-front-std`), plus core's own interface so far (below).
+
+### What was built (the groups that blocked whole modules, biggest first)
+
+- **Spans of macro output (the virtual file).** The front end keys resolution, definitions and locals by span; core's macros expand
+  one definition's tokens hundreds of times (`uint_impl!`, `forward_ref_binop!`), so their nodes shared spans and resolved to one
+  another. In core mode (`expand/*virtual*`) every expansion's tokens are laid after the root file's text as a virtual file, each
+  expansion on lines of its own (root tokens inside an expansion too: rustc's NodeIds make `$arg` used twice two nodes), and every
+  span is a place there; `expand/virtual-origin` maps a place back to where its tokens came from (a macro's definition in another
+  file, a fragment's metavariable, the root file's own tokens, or a builtin's call site), which MIR's printed spans use
+  (`build/*span-origin*`: impls' `<impl at FILE:L:C>`, user type annotations).
+- **core's macros.** Macros 2.0 (`pub(crate) macro const_eval_select { .. }`, one-arm `macro m($x) { .. }`) with def-site hygiene for
+  their identifiers (`resolve/*def-sites*`: the definition's module); metavariable expressions (`${ignore($x)}`, `${index()}`,
+  `${len()}`, `${count($x)}`: mbe/metavar_expr.rs, transcribe.rs); the `meta` fragment; a fragment passed on whole to a matcher of its
+  kind (`$compiletime:block` again); an `item` fragment after the transcriber's attributes; `cfg_select!`; `concat!` of a literal
+  fragment.
+- **Resolution in core.** `crate::`, `$crate::`, `::core::` and a root `super::` name core (std's names), a def under the root file's
+  module is the file's own definition (`localize`), an out-of-line `mod` is std's module, a name the file does not define is std's
+  (a macro's item not expanded); `Self` in a trait's generics (`Add<Rhs = Self>`, late.rs' self rib); `Self::Variant` in an enum's
+  impl's patterns.
+- **Identity.** The interface's paths of the file's own definitions are the local definitions (`collect/loc`, `*local-paths*`); impls'
+  disambiguators in rustc's DefIndex order (a fragment's own items first, its macro calls' and derives' items after, one invocation
+  at a time: `expand/*def-order*`, `:rf-order`); bodies' names relative to the crate (`hint::<impl at ..>::fmt`).
+- **Bodies.** `#[rustc_inherit_overflow_checks]` builds with overflow checks (Builder::new); the signature normalized
+  (`-> <usize as Add>::Output` is `usize`, typeck's liberated signature); a qualified path to a trait's function as a function item
+  with its user type annotation; an impl's clauses on a parameter proven by the parameter environment for Copy
+  (`impl<T: Copy> Copy for MaybeUninit<T>` is not `MaybeUninit<T>`'s for a T without Copy: `move`, not `copy`).
+- **core's interface from its sources** (`core-check/native-iface`): after each module's collection, its functions and ADTs that
+  std's interface lacks are written in the helper's `--std-iface` forms from our own generics, signatures, clauses and fields, read
+  by the modules after it and by the next run (`.tmp/rust-front/core/native-iface.edn`): the first of std's interface replaced by
+  core's own.
+- **Speed.** The crate's impl headers indexed once and prefiltered by trait and self type's head (selection instantiated every impl
+  of the crate for every goal): arith's 500 bodies in about a minute.
+
+### Results
+
+`bin/rust-front core-check` over the 35 module files of `test/rust/front/core-modules.txt` (main's stage 0, one process, GOMAXPROCS=4,
+GOMEMLIMIT=2500MiB: 17 min, peak 2.50 GB RSS; the second pass of a run, reading the first's native interface: 33 functions and 7 ADTs):
+
+| | first run (the slice's start) | as built |
+|---|---|---|
+| modules through every stage | 20 of 35 (15 stopped at expansion) | 33 of 35 (`marker`, `ptr::non_null`: `pattern_type!`) |
+| bodies built (not refused) | 588 of 652 | 5,393 of 5,601 |
+| equal to rustc's built MIR | 247 | 4,578 |
+| more but for the allocations' ids / text | 16 / 0 | 37 / 4 |
+| differ | 207 | 716 |
+| no oracle body by its key | 118 | 58 |
+
+Whole modules equal: `ops::arith` 500 of 500, `ops::bit` 1,989 of 1,989, `default` 20 of 20, `bool`, `ops::drop`, `ub_checks` (11 of 11
+with one but for the ids); `num::wrapping` 1,158 of 1,201, `clone` 27 of 29, `cmp` 276 of 374, `cell` 75 of 109, `time` 71 of 96;
+after the run, the where clauses' span and qualified paths' fixes: `ops::function` 5 of 5, `convert` 14 of 21 (`--records`, from
+the pack). The biggest remaining groups (`.tmp/rf12`'s grouping by the first differing line): impl spans through nested macro calls
+(tuple 168, `iter::range` 88: the metavariable span of an `ident` substitution, `maybe_use_metavar_location`, not ported), the
+interface's missing private fields (55 refusals, "a std field") and paths (42, "a path"), qualified paths to associated constants
+(41), user type annotations' texts of std paths (about 100 over five forms), method calls without a callee (28), `!` locals of empty
+matches (9), patterns' types left inferred (`let _N: _`, 23).
+
+`bin/rust-front essential` after the slice: run-built 7 of 7, mono-check unchanged (`core-closure 0 of 3`), capture-check 34 of 34,
+the five controls differing; build-check's lines differ from `essential-known.txt` in this checkout (51 of 62) as they do before the
+slice: RF12-P4. Rust's scores: no REAP cell reads the core check, so `bin/crops-score` is unchanged; the eval and AOT stages stay at 0.5
+(every run still reads the mono record's core bodies and std's interface), RES54's ceiling holds.
+
+### What remains
+
+- **core's interface natively, whole.** The rest of core still comes from std's interface (the helper's `--std-iface`, rustc's data):
+  its private items' fields, signatures and impls are what most refusals and differences of the measured modules lack
+  (`slice::index`'s `IndexRange` fields, `ptr`'s `ub_checks::maybe_is_aligned`). The native interface covers the processed modules'
+  functions and ADTs; impls, traits, constants and the vendored modules are not written yet, and a module reads only those processed
+  before it (two passes a run, or the whole crate's collection first: RF12-P2).
+- **Groups seen, not built:** pattern types (`pattern_type!`, which `marker` and `ptr::non_null` need: TyKind::Pat through lowering,
+  collection, typeck and the printer); const generic arguments evaluated (`{ Locality::L3.to_llvm() }`: CTFE, slice 5); the reborrow
+  of a coercion to a reference in a tail (`fn deref(&self) -> &T { *self }`: `&(*(*_1))`, ours `copy _1`); an empty match's `!`
+  local; a trait object's default lifetime in printed paths (`<(dyn any::Any + 'static)>::is`); impl spans across nested macro calls
+  (tuple's 168: `maybe_tuple_doc!`'s `$item` inside `tuple_impls!`, whose tokens lose their origin when the inner call's token
+  stream is re-read; the bodies themselves match by key); `#[derive]` on core's own items in the 860 ambiguous names (keyed now).
+- **The modules not yet run** (243 files of 273 non-vendored, and stdarch's 105): a night command below; the expansion of the
+  largest (`num/uint_macros.rs` through `num/mod.rs`) is the memory risk, measured by `CORE_TIME`.
+- **a6's core bodies and mono-check's core-closure** from the native core: not built here (RF11 is changing `build_run.ae`, `mono.ae`
+  and the packs on its branch): `ptr::write_volatile` and its `precondition_check` build natively; their differences from rustc's
+  built MIR are the user type annotation of `align_of::<T>()` and `maybe_is_aligned`'s signature (the native interface), and the run
+  needs them through the 21 passes and the optimized MIR the pack holds (RF12-P3).
+- alloc and std (RF12's next slices), after core's whole interface.
+
+### Proposed (RF12's first slice)
+
+- **RF12-P1 The core check in the gate.** Options: (a) **an essential step `rust-core-essential`: `bin/rust-front core-check --records`
+  over a short list (`ub_checks`, `bool`, `default`, `ops/drop`, `clone`, `ops/arith`: about 6 minutes, 2.5 GB), its summary held to a
+  known file with a crossed control (a body's text against another's)**; (b) only the oracle tier and by hand until the slice's
+  equal share is higher. *Recommended: (a)*: it holds what is built (arith's 500, bit's 1,989) against regressions in the shared files.
+- **RF12-P2 core's interface.** Options: (a) **as built, module by module with two passes (each module reads the native interface of
+  those before it and of the last run)**; (b) a collection pass over all of core first (every module expanded, resolved, lowered and
+  collected, no bodies; the interface written whole), then the bodies: one more pass of about the check's cost without the bodies,
+  the order-dependence gone; (c) keep std's interface for core and build only bodies natively. *Recommended: (b)* for the next slice,
+  (a) meanwhile: (c) keeps rustc's data in every run, which RF12 is to remove.
+- **RF12-P3 a6's core bodies from the native core.** Options: (a) **after RF11 merges: `build-run` takes a core body from
+  `core-check`'s native build when its built MIR equals rustc's (the four of a6), through the 21 passes, the pack's optimized body the
+  fallback; mono-check's core-closure from the native callees**; (b) wait for core's whole interface (RF12-P2 (b)). *Recommended:
+  (a)*, one slice after RF11's merge, on its files.
+- **RF12-P4 The rust-front-built pack's paths.** The pin on next is the pack made in `rust-rf10b`, whose texts name that worktree's
+  absolute paths, so `bin/rust-front essential`'s build-check lines fail in any other checkout (62 → 51 here, before and after this
+  slice); the store also holds a pack with `@ROOT@` in their place. Options: (a) **re-pin the `@ROOT@` pack (or remake it with
+  `@ROOT@`, as the mono pack does) and have build-check put the checkout's root back**; (b) leave it to RF11's packs.
+  *Recommended: (a)*, by whoever merges RF11 (its pack tooling).
+- **RF12-P5 The scope of the first slice's record.** Options: (a) **the 35 modules of `test/rust/front/core-modules.txt` recorded in the
+  pack `rust-core-built`, the whole of core's 31,334 bodies judged by a night run against the unpacked oracle by hand**; (b) pack all
+  31,334 (68 MB raw, a few MB xz). *Recommended: (a)* until more of core builds.
+
+## Decided (2026-11-09, the user: RF12-P1 to P5)
+
+RF12-P1 (a), RF12-P2 (b) for this slice, RF12-P3 (a) (RF11 merged into next), RF12-P5 (a); RF12-P4 moot: RF11's pack `rust-front-built`
+names no checkout's path (`@ROOT@`).
+
+## As built: RF12 (first slice, second part): RF12-P1, P2, the merge of RF11, more groups (2026-11-09)
+
+Branch `rust-rf12`, `mac/next` `6c3c87c02` (RF11) merged in (conflicts only in the records: both sides kept).
+
+### The merge and the essential step
+
+`bin/rust-front essential` after the merge, with this slice's changes: the summary equals `test/rust/front/essential-known.txt`
+(build-check 62 of 62, the passes, capture-check 34 of 34, run-built 7 of 7, mono-check, the five controls differing): RF12-P4's
+diagnosis holds (RF11's pack made the 11 differences of the first part, every one a closure or impl named by `rust-rf10b`'s path).
+After every change below, `bin/rust-front essential` again: the summary equals the known file (3 min 50 s), and
+`bin/rust-front core-essential` equals its own.
+
+### RF12-P1 (a): the essential step `rust-core-essential`
+
+`bin/rust-front core-essential` (`--record` rewrites the known file, by hand): `core-check --records` over
+`test/rust/front/core-essential.txt` (`ub_checks`, `bool`, `default`, `ops/drop`, `clone`, `ops/arith`) with caches of its own made
+afresh (core's index from the sources, the interface pass), rustc, rustdoc, cargo, gcc, cc and clang stubbed first on PATH (their log
+empty); its lines held to `test/rust/front/core-essential-known.txt` (564 of 567 bodies equal, one but for the allocations' ids, two
+refused), the crossed control (the first equal body's text against another body's rustc text, `_control/core/crossed` in
+`test/rust/front/controls.edn`) differing. 3 min 29 s, 1.97 GB peak. The step in `test/gate/steps.edn` beside `rust-front-essential`
+(chain `rust-essential`, `:mem-gib 3`, its pins the packs `rust-front-std` and `rust-core-built` and `tools/rsdump/apks.sha256`; its
+control in `:controls`): `gate.crops check` 0 problems, `bin/gate --plan` `run rust-core-essential ... never passed`, no table error.
+
+### RF12-P2 (b): core's interface in one pass before the bodies
+
+`core-check` first runs every listed module through expansion, resolution, lowering and collection without building a body and
+writes their functions, ADTs and now traits (with their associated functions' signatures: `clone::uninit::CopySpec`) that std's
+interface lacks; then the bodies, every module reading the whole pass's interface (no order between modules). `CORE_IFACE_FILES=LIST`
+takes the pass over other files (all of core at night), `CORE_IFACE=cache` the last run's `native-iface.edn` instead. The pass over
+the 35 modules: 11 min, 33 functions and 7 ADTs (before the traits); the run 27 min, 2.40 GB peak.
+
+### More groups
+
+- **Integer constant expressions in array lengths** evaluated (`[T; $n - 1]` is `[T; 31]`: collect's lower-const-arg).
+- **Impl spans through nested macro calls**: a macro call inside a macro's output reads its tokens back from the output's token stream;
+  each token now keeps the place it came from (`with-vorigin`: the definition's place or the root token), and a substituted
+  identifier carries its metavariable's span (transcribe.rs' `maybe_use_metavar_location`, its place in the definition), which an
+  impl's def_span ends at (`Span::to` of different contexts): tuple 0 → 168 of 180, `iter::range` 89 → 202 of 257 (the metavariable span at a span's start too).
+- **Pattern types**: `pattern_type!(T is PAT)` (rustc_builtin_macros/src/pattern_type.rs) as TyKind::Pat through lowering and
+  collection, printed `(T) is PAT`; `include_str!`: `marker` and `ptr::non_null` through every stage (10 and 58 bodies equal).
+- **`*mut T` to `*const T`** (coerce_raw_ptr's MutToConstPointer), **a turbofish's bound variables in user type annotations**
+  (`TypeOf(mem::align_of<T>)`), **the where clause in an impl's span**, **qualified paths' written trait arguments and `<T>::f`**,
+  **f16 and f128 constants**, **closures named by their owner**.
+
+### Results
+
+`bin/rust-front core-check` over the 35 module files (one process, GOMAXPROCS=4, GOMEMLIMIT=2400MiB: 33 min with the interface pass,
+2.41 GB peak; the interface pass over the 35 files 13 min: 45 functions, 7 ADTs, 10 traits):
+
+| | first part's end | the interface pass (RF12-P2) | as built |
+|---|---|---|---|
+| modules through every stage | 33 of 35 | 33 of 35 | **35 of 35** |
+| bodies built (not refused) | 5,393 of 5,601 | 5,393 of 5,601 | 5,388 of 5,601 |
+| equal to rustc's built MIR | 4,578 | 4,624 | **5,030** |
+| more but for the allocations' ids / text | 37 / 4 | 37 / 4 | 44 / 4 |
+| differ | 716 | 670 | 337 |
+
+Whole modules: `ops::arith` 500, `ops::bit` 1,989, `default` 20, `ops::function` 5, `bool`, `ops::drop`, `ub_checks`; `num::wrapping`
+1,158 of 1,201, `cmp` 302 of 374, `iter::range` 204 of 257 (with the two but for the ids), `tuple` 168 of 180, `ptr::non_null` 58 of 70,
+`ptr` 38 of 57. The remaining groups (the run's first differing lines and refusals): the interface's missing private fields (55, "a std
+field": `ops::IndexRange`'s, its module outside the 35: RF12-P7), paths through a parameter or `Self` to an associated constant (45,
+"a path": `T::IS_ZST`, `Self::SIZE`; std's trait constants have no type in std's interface), qualified paths to private traits (41),
+user type annotations of `format_args!`'s calls (`fmt::rt::Argument`, `fmt::Arguments`: 59), method calls without a callee (29),
+`num::nonzero` paths' annotations (24), `!` locals of empty matches (9). No REAP cell reads the check: Rust's scores are unchanged,
+eval and AOT at 0.5.
+
+### RF12-P3 (a): a6's core bodies
+
+Not built in this part. Of a6's four core bodies, `ptr::write_volatile` and its `precondition_check` now build equal to rustc's built
+MIR (the latter but for the allocations' ids); `const_ptr::<impl *const T>::is_aligned_to` is in a module outside the slice's list
+and `drop_glue` is a shim (no source body: rustc builds it from the type). Taking them into the run needs what the run does not have
+yet: a core body built in its own crate's context (core's module as the root, its definitions local) carried into the program's (each
+local definition by its interface path), monomorphized (`write_volatile::<i32>`: the run takes rustc's optimized instances, our bodies
+are generic built MIR through the 21 passes), and the callees it reaches collected natively (`check_language_ub`, `align_of`: the
+record's optimized bodies have them inlined). Proposed as RF12-P6.
+
+### Proposed (RF12's first slice, second part)
+
+- **RF12-P6 A core body in the program's run.** Options: (a) **the run builds the reached core function's module through core-check's
+  pipeline once per session (its body, its callees' bodies), each body translated into the program's crate (every local definition its
+  interface path, `externalize`), instantiated by the mono item's arguments (`subst` over the body's types), through the 21 passes and
+  codegen as ours; taken only when its built MIR equals rustc's (the pack `rust-core-built` extended to the reached modules), the record's
+  body the fallback; mono-check's core-closure from the native callees**; (b) wait for RF12's alloc and std slices and do it for every
+  library body at once. *Recommended: (a)*, a slice of its own (two to three days): the translation and the instantiation are the
+  parts std will need too.
+- **RF12-P7 The interface pass at night over all of core.** Options: (a) **the night's core-check over the 35 modules with
+  `CORE_IFACE_FILES` naming every non-vendored module (about an hour more), the essential step keeping its six**; (b) only the listed
+  modules. *Recommended: (a)*: the bodies then see every private item of core, not the slice's.
+
+## As built: RF12-P6's preparation and RF12-P7's slot (2026-11-09, evening)
+
+The user's decisions (2026-11-09): RF12-P6 (a), RF12-P7 (a) in night 11.
+
+- **RF12-P7**: `core-check` takes `CORE_IFACE_FILES=all` (every non-vendored module file of core) and `CORE_IFACE_ONLY=1` (the interface
+  pass alone, its `native-iface.edn` for a later `CORE_IFACE=cache`). Night 11's slot `.tmp/night11/slots/rust-core.sh` (lane LB, after
+  rust-rf10b; outside the repository): rust-src extracted in the lane's worktree from the main checkout's pinned apk, the pass over all of
+  core, then the slice's modules from the pack with that interface, GOMAXPROCS=2, GOMEMLIMIT=1800MiB, the toolchains stubbed; records
+  nothing. Estimated 150 minutes; the whole-core pass's peak is the night's measure.
+- **RF12-P6's first condition met for a6**: of a6's four core bodies, the three with source bodies now build equal to rustc's built
+  MIR: `ptr::write_volatile`, its `precondition_check` and `<impl *const T>::is_aligned_to` (the latter two but for the allocations'
+  ids). `ptr::const_ptr` and `ptr::mut_ptr` join the slice's list (37 modules; the pack `rust-core-built` made again, `b2ac8230...`).
+  The fourth, `drop_glue`, is a shim without a source body. What made them equal: the native interface reading `ub_checks`' private
+  functions (the pass before the bodies), `format_args!`'s place in a core macro's definition read through the virtual file (`panic!`'s
+  `Arguments::from_str` annotation, `library/core/src/panic.rs:62:38: 62:72`), and type-relative and qualified paths keeping their place.
+- **RF12-P6 itself, not built yet**: putting those bodies into a6's run (RF11's `build_run.ae`). Three parts remain:
+  - the body's forms printed for the program's crate: today they are printed in core's crate context, with crate-relative names, local
+    definitions and core's caller locations;
+  - instantiation by the mono item: our bodies are generic built MIR, and the run takes rustc's optimized instances (`::<i32>`);
+  - the callees those bodies reach, collected and built natively: `check_language_ub`, `align_of`, `const_eval_select`'s
+    `runtime`/`compiletime` — rustc's optimized record inlines them.
+  mono-check's `core-closure 0 of 3` moves with the third. Next slice.
+- Results: the 37 modules (`bin/rust-front core-check --records`, 28 min with the interface pass, 2.40 GB peak): **5,108 of 5,767 bodies
+  equal** to rustc's built MIR, 71 more but for the allocations, 381 differ, 217 refused, 74 without a body of rustc's by their key;
+  `ptr::const_ptr` 39 of 78, `ptr::mut_ptr` 46 of 87. `bin/rust-front core-essential` and `bin/rust-front essential` still equal their
+  known files.
+
+## As built: RF12-P6, core's bodies in the program's run (2026-11-09, night)
+
+- **`bin/rust-front core-export`**: core-check over `test/rust/front/core-native.txt` (a regex of core's names, then the module files:
+  the closure the run-built samples reach, a6's), each body run through the 21 passes and written with its equality to rustc's built
+  MIR into `.tmp/rust-front/core/native-core.edn`: its forms externalized (local ids as core's def paths, each type form's typeck type
+  as `:tc`, named constants as `:nc`, caller locations as `:call-loc`), its promoted bodies, generics and codegen attributes. 48
+  bodies, 43 equal; about 40 minutes (`num/mod.rs`), 2.27 GB at GOMEMLIMIT=2000MiB.
+- **`bin/rust-front run-built --native-core`** (`RF_CORE_NATIVE`; without it the run is as before): for each core item the program's
+  mono items reach, the export's body is printed again in the program's crate at the instance's arguments (types from `:tc`
+  substituted, `<T as Pointee>::Metadata` normalized at the instance), LowerIntrinsics run again (since the export: `transmute`,
+  `ptr_metadata`, `ub_checks` and its siblings as `RuntimeChecks`), `const_eval_select` remapped to its runtime function, its callees
+  collected through mono's `core-facts` and built likewise. A root is taken only when every body of its closure is in the export and
+  equal to rustc's; else the record's body stays (`record-kept ... (REASON)` in the log). Drop glue's shim is built natively when the
+  glue is the type's own `Drop::drop` alone (shim.rs' elaborated shim; `mono/drop-shim-plan`), else the record's.
+- **Results**: a6's core closure, 18 bodies (`write_volatile::<i32>`, `precondition_check`, `is_aligned_to`, `check_language_ub`,
+  `maybe_is_aligned`, `align_of`, `str::as_ptr`, `slice::len`, `ptr::metadata` and the rest) and its drop glue's shim, all native;
+  **mono-check's core-closure 3 of 3**; the 7 samples' status as rustc's executables (`7 of 7`), no core body from the pack
+  (`core's bodies from the pack 0, built natively 18`). Fixes on the way: coercion casts of references to raw pointers
+  (`self as *const str`), casts' user types (`ValueTypeAscription`), qualified paths to trait constants, `SizedTypeProperties`'
+  constants at the instance, doc comments in macro input, `macro_rules!` in statement position, nested core functions' attributes.
+- Left: `mut_ptr::cast_const` (a `*mut T` local for rustc's `*const T`), `slice::as_ptr`/`as_mut_ptr` (the user type's annotation),
+  `ptr::metadata::from_raw_parts` (`move` for `copy`) and `<DynMetadata>::size_of` (`VTable` unresolved); none on a6's path. The
+  export is not committed (it is the run's input, made by `core-export`); the night or the gate would run `core-export` first.
+
+## As built: RF13 (first slice): RFP42-RFP47 as decided, what runs light (2026-11-10)
+
+Branch `rust-rf13` (from `mac/rust-rf12` `0c22b1f1b`). The user accepted RFP42-RFP47 as recommended (2026-11-09). This slice builds
+what of them runs light (one process at a time, at most about 2 GiB: `RF11_PROCS=2`, `RF11_BATCH=3`, `GOMEMLIMIT` 1800MiB) and
+prepares the heavy parts for the night.
+
+### RFP44 (a): virtual calls and vtables
+
+- **The slot, natively** (`arbace.rust.front.mono`'s `vtable-entries`, after rustc_trait_selection's `vtable.rs`
+  `prepare_vtable_segments`): the metadata entries (drop, size, align), then a depth-first walk of the supertraits (the local
+  trait's bounds, std's `names/trait` `:supertraits`), each trait's own vtable-safe methods after its supertraits' (no `Self:
+  Sized` clause, no own type or const parameter: std's from the interface's `:predicates` and `:generics`, a local one's from
+  `explicit-clauses`), a vptr where a later supertrait with entries follows one with entries. A call on a trait object is
+  Instance's `Virtual`: `callee-fact` gives `{:kind "virtual" ... :slot N}` (the object's principal from the `dyn`'s type),
+  natively; the record's virtual callees (the facts mono still refuses, std's bodies) get their slot from the call's method
+  path and its receiver's printed `dyn` (the principal resolved through std's modules or the crate's traits: `dyn Error`'s
+  `Display::fmt` is slot 4 after Debug's and the vptr), counted as `vslots`.
+- **The call** (`arbace.rust.back.codegen`, meth.rs' `VirtualIndex::get_fn`): the receiver's pair split, the function loaded from
+  the vtable at slot × 8, the data pointer the first argument.
+- **The vtable of an unsizing cast in our bodies**: `vtable-alloc` lays it out natively (drop glue's symbol or null, the size and
+  alignment from mono's layout, each entry a local impl's method by its v0 symbol) when every entry is a local impl's own
+  non-generic method with a reference receiver; else (a default method's instance, std's impls, a closure's `FnOnce` shim: trait
+  resolution, which mono does not port) the record's cast of the same target type in the same body, taken in order (counted
+  `vtables`). The collector roots a vtable's local methods. A cast between two trait objects of the same principal (a lifetime's
+  coercion) keeps the pair (rvalue.rs' `unsize_ptr`).
+- Thread locals (`tlsref`, `panic-hashmap-index`): not built (the static's v0 symbol needs std's def path of a `thread_local!`
+  closure's static, which std's interface does not hold).
+
+### Codegen's gaps found on the way (std's bodies from the record and ours)
+
+The repeat loop (`[x; N]`: builder.rs' `write_operand_repeatedly`, header/body/next blocks, the MIR block's later code continued
+in `repeat_loop_next`; an integer constant whose bytes are one byte a memset, as rvalue.rs), `powif32`/`powif64`, `fmaf32`/`fmaf64`,
+`exact_div`, `typed_swap_nonoverlapping` (at -O0 the place swap, not the fallback body), `catch_unwind` (codegen_gnu_try's internal
+`__rust_try`, defined once in the module), `type_id_eq` by its fallback body, TypeId constants (a relocation to a `GlobalAlloc::TypeId`
+keeps its bytes), `&str` valtree constants (`tyconst`), unsizing a struct's tail (`PolymorphicIter<[T; N]>` to `PolymorphicIter<[T]>`),
+transmutes between memory layouts and from memory to a scalar or pair, the discriminant of an SSA local's field, function-pointer
+calls in our bodies (no callee to resolve), reified local functions (their symbol and the collector's root), another crate's static
+declared external (std's `WHITESPACE_MAP`), promoted `[x; N]`, unit and newtype struct constants. A printer's failure is now the
+program's refusal, not the batch's end.
+
+A module that declares an instance of the program's own crate it does not define (a generic local function, a closure or a
+derived method reached only through std's bodies, which the collector does not walk) is no longer `own`: `rsi-build` says `a local
+instance not collected` (found by `rsi-native`: three programs that passed codegen and the lowering did not link).
+
+### `panic-vec-remove`'s fault
+
+`Vec::remove` is `#[track_caller]`, but mono's attributes (`ext-attrs`) did not find it: the file's impls in order are not rustc's
+disambiguators in alloc's `vec/mod.rs` (a `const impl` the parser counts where rustc's `{impl#1}` is the next impl), so the call
+passed no location and std's body read a garbage pointer (status 139). A function the file's impls name once is now found by its
+name; `bin/rust-front rsi-native panic-vec-remove`: status 101, its outputs as rustc's recorded run.
+
+### RFP45 (a), RFP46 (a), RFP47 (a), RFP42 (a): the night's parts
+
+- **RFP45**: `RF_RSI_UI=40` makes `rfr_rsi_list` add every 40th of `bin/rsi list --set run` (those without compile flags; the
+  others listed in `rsi-plan.ui-skipped`), named `ui-` and their id with `/` and `#` as `%` (`rfr_name`), read in the UI corpus's
+  source root (`rfr_rsi_dir`: this checkout's or the main checkout's `.tmp/repr-rust/src/rustc-1.99.1-src`), for `records make rsi`
+  and `rsi-build` (`RF_SRC_ROOT`, a batch an edition and a root). The UI corpus's sources are not on this host: the night fetches
+  them first.
+- **RFP46**: as decided, the day runs lists (this slice: 14 programs at a time, about 16 minutes at two threads, under 2 GiB a
+  process); the night runs the whole set at `RF11_BATCH=6`.
+- **RFP47**: `bin/rsi std-build` takes `RSI_STD_REMAP=/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library` (Cargo's trim-paths
+  off, the library's absolute and workspace-relative paths remapped as the distribution's build remaps them), into its own
+  `RSI_STD_DIR`; `test/rust/runtime/std.edn` takes it with the night's re-pin (the runtime's key holds std.edn: changing it by day
+  would make every runtime stale).
+- **RFP42**: not buildable by day (no lowered std on this host, RES60 (a)); its night command below.
+
+### The night's commands (lane LB or the oracle tier; none run here)
+
+In the order they depend on each other, each one process at a time:
+
+1. RFP47 (a), the oracle tier (rustc, Cargo, clang): `RSI_STD_DIR=.tmp/rsi/std-remap
+   RSI_STD_REMAP=/rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library bin/rsi std-build --update` (the last build here: cargo 38 s,
+   IR 2 s, 103 units), then `grep -c '/rustc/58cf8f9c' .tmp/rsi/std-remap/ir/core/*.ll` (the panics' paths named
+   as the recorded runs name them), then std.edn's `:rustflags` takes the remap (a commit: the runtime's key moves) and
+   `bin/rsi runtime-ci` makes std's lowered library (about four hours, 6 GiB: RES60 (a)), `bin/rust-front std-crates --rsi` and
+   `bin/rust-front records make rsi` (the pack again, 3 minutes).
+2. RFP42 (a): `bin/rust-front rsi-build` (RFP46 (a): the whole plan at `RF11_BATCH=6`, `RF11_PROCS=4`, about 30 minutes, 2.4 GB a
+   process; the samples' processes above that), then `bin/rsi check --front own --corpus samples,synthetic`; when every own case
+   passes or is classed, `--front own` the default of `rsi-check` and `rsi-essential` for those corpora and the record re-recorded.
+3. RFP45 (a): `bin/repr-rust corpus fetch rustc-1.99.1-ui` (the UI sources; network), `RF_RSI_UI=40 bin/rust-front records make
+   rsi` (about 93 programs, the helper as rustc: about 5 minutes, 3 MB xz more in the pack), `RF_RSI_UI=40 bin/rust-front rsi-build
+   ui-...` by edition (the names of `rsi-plan.ui40.tsv`), then `bin/rsi check --front own --corpus run` over them.
+
+### Results
+
+- `bin/rust-front rsi-build` over the synthetic corpus (67 programs, main's stage 0, `RF11_PROCS=2`, `RF11_BATCH=4`, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; 40 minutes): **47 of 67 own**, the same 47 as RF11's run; the 20 others now stop
+  later. Their first refusals before → after: virtual calls 5, unsizing to `dyn` 3, the repeat loop 2, `powi` 2, `typed_swap` 1
+  (13, all past) → a local instance not collected 11 (RFP49: `algorithms`, `drops`, `errors`, `float-f32`, `float-f64`, `fmt`,
+  `main-err`, `patterns`, `strings`, `structs`, `traits`), the vector ABI 4 (`collections`, `generics`, `iterators`, `rc-refcell`:
+  hashbrown's SSE2 groups), `tlsref` 1, an unevaluated named constant 1 (`casts`), a closure's function pointer 1 (`closures`,
+  RFP50), and two `main`s not ours (`panic-assert-eq`'s path, `panic-explicit`'s `&str` promoted constant). In the 14 programs
+  this slice worked on, the vtables' and virtual calls' facts: the record's virtual callees' slots all computed (`vslots` 2 of 2 to
+  4 of 4 a program), the casts' vtables the record's (`vtables` 0 of 2 to 0 of 3:
+  every one needed a default method, a closure's shim or std's impl: RFP48, RFP50).
+- The native leg (`bin/rust-front rsi-native`, by hand: rustc as the linker driver): **44 of 47 give rustc's recorded run** (43
+  before: `panic-vec-remove`); the three left are RFP47's std paths (`overflow-abs-i64`, `overflow-pow-i32`, `panic-alloc`).
+- `bin/rust-front essential` equals its known file (5 min 50 s), `bin/rust-front core-essential` equals its own (564 of 567, 10
+  min), `bin/reap` 41 of 44 cells checked, 0 problems, `bin/crops-score --judge --strict` exit 0; Rust 75.0 / 75.0 / 95.8 / 80.0,
+  unchanged (RFP43 (a): an own case still scores 0.5). `bin/rsi check --essential` (a 4 GiB `--full` step) was not run: it needs
+  std's lowered library, which this host does not have, and this slice does not touch its path (`bin/rsi std-build` only under
+  `RSI_STD_REMAP`).
+- Not reached (item 2 of the brief): the core bodies still not equal to rustc's built MIR (`mut_ptr::cast_const`,
+  `slice::as_ptr`/`as_mut_ptr`, `ptr::metadata::from_raw_parts`/`_mut`, `<DynMetadata>::size_of`/`align_of`; the last needs
+  foreign types, `extern { type VTable; }`, which lowering marks unsupported).
+
+### Proposed (RF13's first slice)
+
+- **RFP48 Trait resolution in mono.** Every call of a trait method and every vtable entry that is not a local impl's own method is
+  still the record's fact (`callee-fact` refuses "a trait method's resolution"; `vtable-alloc` refuses default methods, std's impls
+  and shims). Options: (a) **port Instance::resolve's `resolve_associated_item` for impl candidates (the local impls, std's
+  `si/impl`s of the interface, the trait's default body instantiated with the impl's arguments) and the builtin candidates mono
+  meets (closures' Fn traits, `Clone` of Copy types, drop glue), the facts refused only for what it leaves**, 2-3 days; (b) keep the
+  record's facts until RF12's std slices. *Recommended: (a)*: it is the largest share of the refused callee facts (synthetic:
+  about a third of each program's callees), and RF12's std bodies need it too.
+- **RFP49 The collector through std's bodies.** Three programs pass codegen and the lowering but miss a local instance the module
+  declares (generic local functions instantiated inside std's bodies, closures passed to std's adapters, derived methods reached
+  through a vtable in std's bodies), now refused as `a local instance not collected`. Options: (a) **mono's collector walks the
+  record's std instances' bodies for the local definitions they name (by their DefId and arguments) and builds those instances
+  from our bodies (generic ones instantiated as RF12-P6 instantiates core's)**; (b) roots from the record's mono items (the
+  record's instance list: a fact of rustc's). *Recommended: (a)*.
+- **RFP50 Closures' function-pointer and vtable shims.** `ClosureFnPointer` (`closures`) and a closure's `FnOnce::call_once` in a
+  `dyn Fn` vtable need shim.rs' ClosureOnceShim and VTableShim bodies, which only the record has (local, so not taken). Options:
+  (a) **build the two shims natively (shim.rs: a call of the closure's body with its environment by reference or by value)**, after
+  RFP48; (b) take the record's shim bodies for local closures (a record body in our module). *Recommended: (a)*.
+
+## As built: RF13b, core's bodies equal to rustc's built MIR (2026-11-10)
+
+Branch `rust-rf13b` (from `mac/rust-rf13` `bd6a6ca6f`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`).
+Every fix below follows rustc 1.99.1's own code (the pinned rust-src and rustc's sources as RF12 read them); none needs a choice.
+
+### RF12-P6's six bodies left
+
+- **`mut_ptr::cast_const`** (`self as _`): check_cast's `try_coercion_cast` now takes `*mut T` to `*const T` (coerce_raw_ptr, the
+  operand's `Pointer(MutToConstPointer)`), the cast's `_` unified with the return type; a raw pointer's coercion stays a PtrToPtr
+  cast (not a CoercionCast, as check_cast keeps it), and the operand's pointer coercion prints `AsCast` (THIR's
+  `apply_adjustment`: `is_from_as_cast` when the expression's parent is a cast).
+- **`slice::as_ptr` / `as_mut_ptr`** (`self as *const [T] as *const T`): the cast's user type (`ValueTypeAscription`) is put over a
+  coercion cast's `Use` too, as `make_mirror_unadjusted` does for every branch.
+- **`ptr::metadata::from_raw_parts` / `_mut`**: a rigid projection is Copy by its where clauses and its item bounds
+  (`<T as Pointee>::Metadata: Copy`), so the operand is `copy`.
+- **`<DynMetadata<Dyn>>::size_of` / `align_of`** (and `vtable_ptr`): foreign types (`unsafe extern "C" { type VTable; }`): the
+  resolver defines a foreign block's types (`ForeignTy`, build_reduced_graph_for_foreign_item), lowering gives each its own item
+  and owner (`:foreign-ty`), the collector a def (`ForeignTy`, its path `ptr::metadata::VTable`), the type an ADT without
+  arguments. The block's functions and statics are still not defined (none of the 37 modules calls one).
+
+All six now equal to rustc's built MIR (`bin/rust-front core-check` over `ptr/mut_ptr.rs`, `slice/mod.rs`, `ptr/metadata.rs`
+with the full oracle).
+
+### The largest classes of RF12's non-equal bodies, by cause
+
+- **A prelude's variant of the root file's own enum** (`Ok`, `Err`, `Some`, `None` in result.rs and option.rs): resolved through
+  core's prelude to the interface path, it was std's ADT, so the pattern's bindings and the constructor's arguments stayed
+  inference variables (`let _3: _`, `Option::<_>::None`). `res-def` now maps an interface path the root file defines (`*local-paths*`)
+  to the local definition, a constructor by its variant or struct with the constructor's kind (rustc's one DefId). The largest
+  class: result 36 → 57, option 53 → 92 equal, and method probes through those bindings (`<A as Iterator>::next` on `&mut A`).
+- **A trait object's inherent impl** (`impl dyn Any`): its self type's object lifetime is type_of's, not erased
+  (`<(dyn any::Any + 'static)>::is::<T>`).
+- **Items nested in a function** (`assert_unsafe_precondition!`'s `precondition_check`, an impl inside a method): their MIR name is
+  the owner's with the forced impl filename through the whole path (`slice::index::<impl at ..>::get_unchecked::precondition_check`).
+- **A match without arms** (`match *self {}`) is `!` (check_expr_match), coerced where used: NeverToAny's temporary.
+- **The no-op reference coercion only for the same type**: `self` (`&&T`) returned as `&T` with the elided region its own is
+  deref-coerced (`&(*(*_1))`), no longer unified.
+- **An overloaded deref under `&mut`** (`&mut *self.borrow_mut()`) is DerefMut (convert_place_derefs_to_mutable; also `&mut v[i]`'s
+  IndexMut).
+- **Another module's struct fields** (core's `Range` in slice/index.rs): read from the interface's fields (RF12's 55 refusals "a
+  std field").
+- **An inherent associated constant through a qualified self type** (`<$t>::MIN` in Wrapping's impls): NamedConst; `Self(..)` in an
+  impl of a tuple struct the constructor's aggregate (Res::SelfCtor).
+- **SwitchInt's values as SwitchTargets holds them** (u128 bits: an i8 discriminant's -1 is 255; codegen sign-extends as before).
+- **Two items of one name under one parent** (const_panic!'s `do_panic`s): their key carries rustc's disambiguator (`do_panic#1`),
+  as -Zdump-mir names their files; each is now judged against its own dump.
+- `[const]` and `const` bounds kept in lowering and printed in an impl Trait parameter's name (`impl [const] FnOnce(T) -> bool`);
+  a format placeholder's span from a user macro's literal kept at the root's place; `assert!`'s message from a run of root tokens a
+  macro passed on is their text.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (about 50 minutes under the host's load, the interface pass 20 of them,
+  under 2.5 GB): **5,398 equal** to rustc's built MIR (5,108 at RF12), 114 more but for the allocations (71), 148 differ (381), 117
+  refused (217), 74 without a body of rustc's by their key. No module lost an equal body.
+- What is left, by cause (`[:differ ...]` rows): the format placeholder span through core's `panic!` macros (`span: ?` in
+  `Argument::new_display`/`new_debug`'s user types, 26), user types' canonical variables for an impl's parameters
+  (`NonZero<^c_0>` for `NonZero<u8>`, 13), Copy of local ADTs whose Copy impl is in the root file (`PhantomData`, `MaybeUninit`:
+  `move` for `copy`, 4), `assert!`'s message through `debug_assert!` (6), array lengths not evaluated (`16 / size_of::<*const ()>()`,
+  2), `IntoIterator::into_iter` not inserted for `from_iter`'s argument (2); refusals: paths to private associated constants
+  (`T::IS_ZST`, `Self::SIZE`, 48 "a path"), method calls without their callee (28), and desugarings lowering marks `:err` (25).
+- `bin/rust-front core-export` (48 bodies, about 50 minutes under the host's load, 2.3 GB): **32 of 32 equal** where the pack
+  `rust-core-built` holds rustc's body; the 16 others (`str`, `slice`, `fmt` and `num`'s, outside the pack's 37 modules) have no
+  oracle in the pack, so the export marks them not equal and `run-built --native-core` keeps the record's body for them. Against
+  the full core oracle (core-oracle's dump, by hand) `str`'s, `slice`'s (`as_ptr`, `as_mut_ptr` among them) and `fmt`'s 10 are
+  equal too; `num`'s six (`is_power_of_two`, equal at RF12) were not run again. RF12-P6's "43 equal" was measured against that full
+  oracle, not the pack.
+
+### Proposed (RF13b)
+
+- **RFP51 The pack for the export's modules.** core-export judges its bodies against `rust-core-built`, which holds only
+  core-check's 37 modules, so `str`, `slice`, `fmt` and `num`'s exported bodies are never taken by `run-built --native-core`.
+  Options: (a) **a list of its own, `test/rust/front/core-export-modules.txt` (`str/mod.rs`, `slice/mod.rs`, `fmt/mod.rs`,
+  `num/mod.rs`), whose bodies `bin/rust-front core-records make` adds to the pack (the oracle tier, rustc as the helper: one dump of
+  core as today, a re-make of the pack), core-check's default list unchanged**; (b) add the four modules to core-modules.txt (the
+  pack grows the same, but every core-check run then takes num/mod.rs's 40 minutes); (c) leave it (the run takes 32 native bodies,
+  the record's for the rest). *Recommended: (a)*.
+
+## As built: RF13c, more of core's bodies equal to rustc's built MIR (2026-11-10)
+
+Branch `rust-rf13c` (from `mac/rust-rf13b` `0d44a0343`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`).
+RF13b's remaining causes taken cheapest per body first; each fix follows rustc 1.99.1's own code, none needs a choice.
+
+### Causes fixed
+
+- **A trait's associated constant through a type-relative path** (`T::IS_ZST`, `Self::SIZE`, `Dst::SIZE`: RF13b's 48 "a path"
+  refusals' largest group): the trait's item found through a trait in scope (std's `SizedTypeProperties` too, its constant's type
+  from core's interface), a parameter's bounds or a trait's `Self`, is THIR's NamedConst at the trait's item with Self the type,
+  and its user type `TypeOf(<T as mem::SizedTypeProperties>::IS_ZST)` (instantiate_value_path).
+- **A parameter's where clauses as method candidates** (assemble_inherent_candidates_from_param): `self.0.fmt(f)` under
+  `T: fmt::Debug` with only the module `fmt` imported, `range.start_bound()` under `R: ops::RangeBounds<usize>`; a projection's
+  item bounds likewise (`self.0.hash(state)` on `<T as DiscriminantKind>::Discriminant: Hash`): RF13b's "a method call without its
+  callee" in Wrapping's, Range's, Discriminant's impls and `slice::index::range`.
+- **An impl item's user type** (write_user_type_annotation_from_args): the impl's parameters fresh variables, apart from the
+  written self type, which is the impl's own self type for `Self` (`NonZero<^c_0>::new_unchecked at <impl .. for NonZero<u8>>`;
+  `MaybeUninit<^c_0>::uninit at <impl .. for MaybeUninit<^c_1>>`).
+- **One substituted token keeps its own place** (transcribe.rs' maybe_use_metavar_location returns the token unchanged unless its
+  span collides): a token passed on by `$($arg)*` or `$t:tt` was given its metavariable's place when it had more than one
+  character. This fixes the format placeholders' spans through `const_panic!` (`span: ?`), `debug_assert!`'s message
+  (`is_reading ( borrow )`) and `const_assert!`'s values' spans.
+- **A const item's initializer has a destruction scope** (region.rs' visit_body for a body that is not a function's): a match's
+  scrutinee temporary dies at the initializer's end (`SizedTypeProperties::MAX_SLICE_LEN`).
+- **Copy of the root file's own trait** (marker.rs: `Copy`, `Sized`, `PointeeSized` are the crate's): `PhantomData<T>: Copy` by the
+  local impl; **`#[derive(Copy)]` on a union** (MaybeUninit's) expanded as a struct's.
+- **Array lengths of `size_of::<T>()`** for a thin pointer, unit or primitive (TypeId's `16 / size_of::<*const ()>()` is 2).
+- **A std enum's unit variant named by its variant's path** (a derive's `$crate::cmp::Ordering::Equal`): its value; a tuple
+  variant's constructor function (`$crate::option::Option::Some`).
+- **Try blocks** without a `?` of their own (lower_expr_try_block: the tail wrapped in `Try::from_output`).
+- **Inline consts** (`const { intrinsics::type_name::<T>() }`): lowered with their `{constant#N}` in the fn's DefCollector order
+  (array lengths, repeat counts, const blocks and braced arguments under the item, closures' and nested items' apart), typed in
+  the enclosing body (an InlineConst shares its parent's typeck root), and in THIR the constant `const any::type_name::<T>::
+  {constant#0}`. The inline const's own body is not built yet.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (about 50 minutes, under 2.5 GB): **5,474 equal** to rustc's built MIR
+  (5,398 at RF13b), 155 more but for the allocations (114: most of the bodies whose format placeholders' spans were wrong now
+  differ only by allocation ids), 85 differ (148), 63 refused (117), 74 without a body of rustc's by their key. No module lost an
+  equal body; the largest gains iter::range +26 (NonZero's user types), mem +9, ptr +8, any +7, num::wrapping +6.
+- Refusals left: 36 "a path" (const parameters as values in array methods, `unicode::*` tables of an unread module, a few
+  private paths), 14 method calls without their callee (crate-private methods of other files: `IndexRange`'s, RFP52), 13 others.
+
+### Left
+
+- Crate-private items of files outside the 37 (RFP52); a const parameter used as a value (`N` in `as_array`, `spec_next_chunk`);
+  the inline const's own body (`{constant#N}`: the oracle has them, core-check does not build them yet); an unnormalized alias in
+  a signature (`ChangeOutputType` in `try_from_fn`); user types of derive's `AssertParamIsClone` spans; the allocation ids.
+
+### Proposed (RF13c)
+
+- **RFP52 core's crate-private items in the interface pass.** Bodies of the 37 modules name `pub(crate)` items of other files,
+  which std's interface (rustdoc's JSON) does not hold: `ops::IndexRange`'s `start`/`end`/`len` (6 bodies of slice/index.rs),
+  `iter::adapters::try_process` (result's and option's `from_iter`), `clone::uninit::CopySpec` (2 in the essential subset).
+  RF12-P2's interface pass collects only the checked files. Options: (a) **a list `test/rust/front/core-iface-extra.txt`
+  (`ops/index_range.rs`, `iter/adapters/mod.rs`, `clone/uninit.rs` to start) whose files the interface pass collects too, before
+  any body, in every core-check run (a few minutes more)**; (b) `CORE_IFACE_FILES=all` by default (every module file, RF12-P7's
+  night pass, far longer); (c) leave it. *Recommended: (a)*.
+
+## As built: RF13d, core's bodies equal to rustc's built MIR, further (2026-11-10)
+
+Branch `rust-rf13d` (from `mac/rust-rf13c` `7f153a722`, `mac/rust-rf13b`'s review fix `ab753d5d0` merged), light lane (one
+process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`). RF13c's decision-free causes and the port gaps among its differing
+bodies, cheapest per body first; each fix follows rustc 1.99.1's own code, none needs a choice. RFP52's crate-private items
+(`NeverShortCircuit`, `IndexRange`, `try_process`, `ChangeOutputType`, `unicode::*`, `drain::Drain`) stay out, as decided.
+
+### Causes fixed
+
+- **A const parameter used as a value** (`repeat_n(val, N)`, `as_array::<N>`, `spec_next_chunk`; THIR's ConstParam): the
+  constant `const N` (Const::Ty of the parameter); an array of length `N`'s bounds check compares with `const N` likewise.
+- **Inline consts' own bodies** (RF13c lowered them only in the parent): each `const { .. }` of a fn is a body
+  `f::{constant#N}` built as construct_const builds a constant's (its typeck results the parent's, its region tree a non-fn
+  body's), judged against the oracle's `{constant#N}` dump.
+- **Constants check overflow** (Builder::new: BodyOwnerKind::Const): `Duration::MAX`'s `NANOS_PER_SEC - 1` is a checked
+  subtraction; inline consts too.
+- **Derive's assertions' spans** (assert_ty_bounds: `let _: AssertParamIsClone<T>;` at the field's span): Clone's and Eq's
+  user types now name the field (`panic/location.rs:43:5: 43:27`), not the derive.
+- **An item nested in a method** of a const or static kind (`from_nanos::NANOS_PER_SEC`, `to_digit::TO_UPPERCASE_MASK`): its
+  MIR name through the method's `<impl at ..>`.
+- **A const closure's declaration span** (`const move |a| ..`): from `const` through its bars.
+- **The crate's own ManuallyDrop never needs drop** (`#[lang = "manually_drop"]`, AdtDef::is_manually_drop).
+- **A trait item through a parameter's where clause** (`R::from_residual(v)` under `R: Try`): its user type's trait
+  arguments are fresh (`TypeOf(<R as FromResidual<^c_0>>::from_residual)`).
+- **A trait's written arguments on its segment** (`AsRef::<[MaybeUninit<T>; N]>::as_ref(self)`): the trait's parameters after
+  Self.
+- **An impl Trait argument takes no turbofish argument** (`from_raw_parts::<U>`: `U` is `T`'s, the synthetic `impl Thin`
+  fresh).
+- **`Self` in an impl**: a struct pattern or expression of a braced struct (`let Self { start, end, exhausted } = self`,
+  `Self { value }`), with the struct expression's user type `TypeOf(RangeInclusive<Idx>)`; a unit struct's `Self` a
+  ZstLiteral (`const ZeroSized: PhantomData<T>`) with its user type.
+- **Unsizing coercion casts**: `self as &[T]` from `&[T; N]` (check_casts' try_coercion_cast, `PointerCoercion(Unsize,
+  AsCast)`), and `*const [T; N]` to `*const [T]` (coerce_unsized of raw pointers).
+- **`write_via_move`** (into.rs's intrinsic lowering): `*ptr = val` without a call or a drop (`ptr::write`, `mem::replace`).
+- **Char constants as char's Debug writes them** (`'\u{10ffff}'`, `'\u{7f}'`; a non-printable or grapheme-extending
+  character escaped), and an escaped char literal's value its code point, not its first UTF-16 unit.
+- The impl header's def_span to its self type when that is on a later line (`impl .. FromResidual<..>\n for Result<T, F>`).
+- Ported without a gain yet: expected_inputs_for_expected_output's generalization (a variable the probe binds takes the
+  generalized value, its free regions fresh); `Some(slice)` against an expected `Option<&[T]>` still copies where rustc
+  reborrows, so its cause is elsewhere.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (`CORE_IFACE=cache`, about 50 minutes, under 2.5 GB): **5,538
+  equal** to rustc's built MIR (5,474 at RF13c), 157 more but for the allocations (155), 49 differ (85), 52 refused (63), 74
+  without a body of rustc's by their key. No module lost an equal body; the largest gains array +14, time +12, char::methods
+  +6, any +5.
+- `bin/rust-front core-essential` and `bin/rust-front essential`: equal to their known files.
+- Left, by cause: RFP52's crate-private items (the most of the 52 refused: `unicode::*` and the case tables 18, `NeverShortCircuit` 4,
+  `IndexRange` 6, `try_process`, `ChangeOutputType`, `drain::Drain`, `ascii::Char`); `macro_rules!` metavariable spans that
+  collide across expansions (tuple.rs' `Default`, 12: transcribe.rs' global metavar_spans table); braced const arguments
+  evaluated (`{ Locality::L3.to_llvm() }`, 3); `slice_get_unchecked`'s `T` through ChangePointee's associated type equality
+  (4); `offset_of!` in inline consts (4); the reborrow of `Some(slice)` against an expected `Option<&[T]>` (1); a few drop
+  orders and temporaries (`try_from_fn_erased`, `encode_utf8_raw`'s never temporaries).
+
+## As built: RF13e, core's bodies equal to rustc's built MIR, further; RFP52 (a) (2026-11-10)
+
+Branch `rust-rf13e` (from `mac/rust-rf13d` `011d4cc3b`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`,
+`GOMAXPROCS=2`). RF13d's decision-free causes, cheapest per body first, each after rustc 1.99.1's own code (the pinned
+rust-src's `compiler/`); then RFP52 (a), decided by the user on 2026-11-10, measured apart.
+
+### Causes fixed
+
+- **`offset_of!`** (`const { builtin # offset_of(C, f) }`): hir::ExprKind::OffsetOf lowered, check_expr_offset_of's
+  (container, variant, field) indices (an enum's variant then its field, a struct's or tuple's field), thir cx's lowering
+  to a call of the `offset_of` lang item intrinsic per field (`offset_of::<option::Option<T>>(const 1_u32, const 0_u32)`,
+  not from HIR, the expression's span), their sum for several; the fields of an expression fragment (`$($fields:expr)+`)
+  taken from its field chain as parse_floating_field_access takes them from the nonterminal.
+- **An inline const's own inline consts**: the DefCollector's anonymous constants nested under the one they are in
+  (`ptr::read_unaligned::{constant#0}::{constant#0}`), built as bodies and named so in their parent's MIR.
+- **Generalization freshens a body's late-bound regions** (generalize.rs: every region but one bound inside the type):
+  `Some(slice)` against an expected `Option<&[T]>` now reborrows `&(*_2)` (RF13d's open cause: the expected input's region
+  stayed the parameter's, so coercion's no-op case applied).
+- **The return coercion is a CoerceMany** (ret_coercion): the first `return` (or the body) coerced, a later one by
+  try_find_coercion_lub, whose fast path leaves a type equal to the merged one alone (a body tail after `return`s: no
+  `&mut *` reborrow).
+- **`Self { .. }` patterns of another file's struct** (`let Self { start, end, exhausted } = self` on `ops::RangeInclusive`).
+- **The builtin Copy and Clone of tuples and arrays** (`Result<(), fmt::Error>: Copy` through `(): Copy`): `copy _3`.
+- **`Destruct` holds for every type** (its builtin candidate): `Guard<'_, T>`'s Drop impl applies, the guard is dropped.
+- **A crate constant in a pattern** (`UNUSED =>`): DefKind::Const as 1.99 prints it (`Const { is_type_const: false }`)
+  recognised, the pattern of the constant's type, its value from its expression of literals (const_to_pat's constant).
+- **An operator on a rigid projection by its item bound** (`<T as DiscriminantKind>::Discriminant: PartialEq`: the alias
+  bound candidate): `PartialEq::eq(&a, &b)`.
+- **convert_place_derefs_to_mutable in the builder's table** (`bytes[a..b].copy_from_slice(..)`: IndexMut).
+- **partial_ord.rs' exceptions** to the simple body (`Some(Ord::cmp(..))`): a unit struct, an enum without variants or
+  with one unit variant keep the default body (`PhantomPinned`).
+- **A let type's elided regions are fresh region variables** (re_infer): `let s: &[U] = unsafe { transmute(x) }` is no
+  reborrow.
+- **RFP52 (a)**: `test/rust/front/core-iface-extra.txt` (index_range, iter::adapters, array::drain, clone::uninit,
+  intrinsics::bounds, char::decode, char, ascii::ascii_char, unicode, unicode_data) collected by the interface pass in
+  every run before any body (`CORE_IFACE_EXTRA`: another list, empty for none; about 75 s); the native interface also
+  writes the impls the interface lacks (inherent and trait, at their `{impl#N}` paths, with their functions), indexed as
+  load-std-iface indexes its own; core's index takes a uniform path's re-export (`use unicode_data::alphabetic::lookup as
+  Alphabetic`) as the module's own.
+
+### Results
+
+- `bin/rust-front core-check --records` over the 37 modules (`CORE_IFACE=cache`, under 2.5 GB): before (RF13d's run at
+  `011d4cc3b`) 5,538 equal; the causes above without RFP52 (`CORE_IFACE_EXTRA=`, RF13d's index) **5,551** (+13: slice::index
+  +3, option +2, ptr +2, any, array, cell, marker, mem, mem::maybe_uninit +1 each), 157 but for the allocations, 42 differ,
+  44 refused; with RFP52 (a) and core's index made afresh **5,576** (+25: char::methods +15, the unicode tables and
+  `decode_utf16`; slice::index +10, `slice_get_unchecked`'s `T` through the bounds impls and `IndexRange`'s methods), 157,
+  37 differ, 24 refused, 74 without rustc's body. No module lost an equal body at either step.
+- `bin/rust-front core-essential` (with the extra list) and `bin/rust-front essential`: equal to their known files;
+  `bin/reap` 0 problems; `bin/crops-score --judge --strict` passes.
+
+### Left
+
+- tuple.rs' `Default` (12): rustc's metavariable spans (transcribe.rs' maybe_use_metavar_location, the global
+  MetavarSpansMap keyed by span and syntax context, read back by Span::to's try_metavars) decide which `$T` gets its
+  definition's span; a faithful port needs hygiene contexts, rustc's expansion order and the parser's span combinations,
+  not ported (no guess).
+- Braced const arguments evaluated (`{ Locality::L3.to_llvm() }`, 3, and their `{constant#N}` bodies): needs const
+  evaluation of a call (a CTFE of our MIR or an evaluator over HIR); the user type would print the braced snippet.
+- RFP52's rest: `ChangeOutputType` (a crate-private type alias: the interface has no aliases), `clone::uninit`'s
+  `CopySpec` qualified path (2), `drain::Drain`, `ascii::Char` (2), `try_process`'s turbofish (result's and option's
+  `from_iter`), `NeverShortCircuit`'s bodies now differ rather than refused (from_fn, map, fold, rfold), `MAX_ONE_B` (a
+  crate-private constant's value in a pattern).
+- Others: `array::clone`'s `DefId(0:5755 ..)` (a DefIndex), `encode_utf8_raw`'s never temporaries, `encode_utf8_raw_unchecked`,
+  `transmute_prefix`'s nested struct, `downcast_unchecked_*`'s cast user types, `cell::clone`, `assert_coerce_unsized`,
+  `swap_nonoverlapping_bytes`, `get_or_try_insert_with`, `flatten_ref`, cmp's `smallest`/`largest` (macro impl spans).
+
+## As built: RF14 (RFP48): trait resolution in mono; RFP49 (a) begun (2026-11-10)
+
+Branch `rust-rf14` (from `mac/rust-rf13e` `db5fe592e`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH` 2 or 3). The user decided RFP48-RFP61 (a) on 2026-11-10; this slice builds RFP48 (a) and the first part of RFP49 (a).
+
+### RFP48 (a): Instance::resolve for trait methods
+
+- **Impl candidates** (`arbace.rust.front.typeck/resolve-assoc-fn`, after rustc 1.99.1's rustc_ty_utils/src/instance.rs
+  resolve_associated_item and rustc_trait_selection's specialize/mod.rs and specialization_graph): the impls of the trait (the
+  crate's and std's interface's, by the self type's key) whose header unifies with the concrete trait reference and whose
+  clauses hold; with several (specialization), the chain ordered leaf first by `specializes` (an impl's header at its own
+  parameters an instance of the other's), the leaf required to specialize every other (else refused: "overlapping impls"); the
+  item from the first impl of the chain that defines it, at the impl's arguments and the method's own (rebase_onto), else the
+  trait's default body at the call's arguments; an impl argument its header does not determine refused.
+- **Builtin candidates** (`arbace.rust.front.mono/resolve-instance`): the Fn traits on a closure (its body when the closure's
+  kind is the trait's or Fn called as FnMut, else `ClosureOnceShim`, the `closure-once-shim` callee) and on a function item or
+  pointer (`FnPtrShim`, `fnptr-shim`); the closure's kind read from its built body's self (`&C`, `&mut C`, `C`). Clone's shims
+  and the other builtin impls stay refused ("a builtin candidate").
+- **The facts that use it**: each call's callee and function constant's symbol (`callee-fact`, `call-fsym`), the collector's
+  local items (a trait call resolved to a local function at no type argument), the external items (`:ext-items`: the resolved
+  instance, so RF12-P6's native core plan matches more of the record's std bodies), and the vtables (`vtable-alloc`: an entry
+  that is not a local impl's own method resolved, its instance's symbol: std's impls, generic impls, default bodies; a by-value
+  receiver's VTableShim and a supertrait with parameters still refused).
+- **Found on the way**: v0's trait-qualified paths (default_print_def_path's `trait_qualify_parent`: `<Self as Trait>::item`,
+  `Y`), trait objects (`D`, the principal at a dummy Self, `p` projections, auto traits, `L_`), local closures (by their
+  `{closure@..}` text, typeck's fn_decl_span) and fn pointers (`F`); an impl's disambiguator in rustc's order of definitions (a
+  derive's impls after the crate's other items, as rustc-def-index orders them; the source's order gave `<V2 as Add>::add`
+  `s9_` for rustc's `s2_`); `#[track_caller]` inherited by a trait impl's method from its trait's method (codegen_fn_attrs:
+  `<Grid as Index>::index`); core's attributes of a trait's provided method (`Iterator::map`) and of an impl whose file order is
+  not rustc's disambiguator (the impl found by its header's names, std's interface's against the source's: `impl From<&str> for
+  String` among string.rs' 82 impls); a call's function constant whose callee's attributes core's sources do not show refused
+  as its callee is (`checked_add`'s macro-made impl).
+
+### RFP49 (a), the first part: the collector through std's bodies
+
+`build-run`'s native run hands mono the function constants of the record's std instances' bodies (`(fndef PATH [ARGS])`, rustc's
+std bodies: RF12's part); mono resolves each trait method's (PATH as def_path_str prints it, std's trait through its modules, the
+arguments by `form->ty`, a local closure by its text) and adds the local functions and closures it reaches at no type argument
+to the collector's items (closures' bodies now items too). A generic local function or a closure of a generic one reached only
+through std (an instantiation of our bodies, as RF12-P6 instantiates core's) is not ported yet: RFP49's rest.
+
+### Results
+
+- **The mono facts against the record** (`rsi-build`'s mono-check of the same run, each batch's lines now kept in
+  `mono-all.log`), the 8 programs RF13 left with the most refused callees (traits, closures, drops, errors, structs, strings,
+  algorithms, patterns; `RF11_BATCH=2`), before (`db5fe592e` in a worktree of its own, the same logging) and after RFP48 (a):
+  callees equal **406 -> 592** of 710, function constants' symbols 368 -> 557 of 564/567, core's items reached 314 -> 483 (all
+  equal), mono items' symbols 40 -> 50 of 128; the native callee facts 731 -> 964 of 987/993 (the refusals 263 -> 29: 21 core
+  items whose attributes core's sources do not show, macro-made, 6 calls with no fact, 2 `Box<dyn Fn>`'s `Fn` impl); no
+  callee fact mono gives differs from the record's (MONO_VERBOSE over traits, errors, structs, patterns: the differences left are
+  facts mono does not give).
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; about 75 minutes): **48 of 67 own** (47 at RF13: `patterns` now, through RFP49's
+  first part: `<Shape as Debug>::fmt`, reached through std's formatting bodies). The native callees 4,079 of 4,524 (RF13: 3,503 of
+  4,288), the vtables 25 of 32 (0 of 7); the function constants' symbols 1,739 of 2,135 (1,911 of 1,982: those whose callee's
+  attributes core's sources do not show are now refused, as their callee is: the record's, where the default rules gave
+  `checked_add`'s and `<&i32 as Rem>::rem`'s wrong symbol). The programs RF13 stopped at "a local instance not collected" now stop
+  later: errors, float-f32, float-f64, strings and panic-explicit at a promoted constant in `main` (`promoted: a constant's
+  value`, `an rvalue binop`), fmt at a callee of `Argument::new_debug::<Option<_>>` (an uninferred type in our body), and the
+  rest at a generic local instance reached through std (algorithms' `quicksort::<f64>`, traits' `<Dog as Animal>::describe`,
+  structs' `<[Token]>::len`, main-err's `<Failure as Debug>::fmt` through a generic, panic-assert-eq's `assert_failed::<i32, i32>`,
+  drops' drop glue): RFP49's rest; the vector ABI 4 (RFP58), `casts`' unevaluated constant, `closures`' reified closure
+  (RFP50), `panic-hashmap-index`'s `tlsref`.
+- `bin/rust-front essential` equals its known file (6 min 27 s; the staged records copied from another worktree name its paths:
+  re-staged); `bin/rust-front core-essential` equals its own (564 of 567, 8 min 43 s; core's caches copied from another worktree name its
+  paths: rewritten); `bin/reap` 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict` exit 0, Rust 75.0 / 75.0 /
+  95.8 / 80.0, unchanged (RFP43 (a): an own case still scores 0.5).
+
+### Left (RFP49's rest and the rest of RFP48)
+
+- Generic local instances reached only through std's bodies (`quicksort::<f64>`, a trait's default body at a local Self,
+  `<[Token]>::len`): mono's collector would instantiate our generic bodies at the arguments std's bodies give (RF12-P6's way for
+  core's); the next part of RFP49 (a).
+- RFP48: Clone's shims and the other builtin impls (a `CloneShim`, `Box<dyn Fn>`'s `Fn` impl through the object's own
+  candidate), a vtable's by-value receiver (VTableShim) and a supertrait with parameters; core items whose attributes a macro
+  makes (the integers' and slices' iterator impls, `default_impl!`, `forward_ref_binop!`) are the record's, as before.
+
+### The night's commands (none run here)
+
+- RFP46 (a)'s whole plan again, now with RFP48 and RFP49's first part: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build`
+  (samples and synthetic, about 30-60 minutes, 2.4 GB a process; the samples' processes above that), then `bin/rust-front
+  rsi-native` by hand over the own programs (rustc as the linker driver) to confirm the new own program (`patterns`) runs as
+  rustc's recorded run, then `bin/rsi check --front own --corpus samples,synthetic` (RFP42 (a)).
+
+## As built: RF15 (RFP49 (a)'s rest): generic local instances, promoted constants, the own programs' next causes (2026-11-10)
+
+Branch `rust-rf15` (from `mac/rust-rf14` `e1bdba384`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH` 3). RF14's caches were copied into the worktree and their absolute paths rewritten (`rust-rf14/` to `rust-rf15/`)
+before any run.
+
+### RFP49 (a)'s rest: generic local instances
+
+- **The collector's items** (`arbace.rust.front.mono/program-facts`): an item is a local definition at no type argument, as
+  before, or `[DEF ARGS]`, a local generic function's, a generic impl's method's, a trait's default body's (at its Self) or a
+  generic function's closure's instance at concrete arguments (`local-generic-instance?`: no parameter, inference variable or
+  projection left). They are reached from our bodies' calls (a local generic function at concrete arguments, a trait call
+  resolved by RFP48 to a local generic instance), from std's bodies' function constants (RFP49's first part, now with the
+  arguments) and from the vtables' entries; each instance's body is ours instantiated
+  (Instance::instantiate_mir_and_normalize_erasing_regions: every type form from its `:tc` substituted, normalized and erased,
+  a function constant's text from its type, a named constant's arguments, a const parameter's value as an integer scalar, a
+  repeat's count from the builder's kept constant), so the instance's own calls are collected in turn
+  (`quicksort::<f64>` calling itself). Its name is the definition's MIR name with its type arguments (`quicksort::<f64>`), its
+  header's symbol v0 at the arguments; build-run instantiates our runtime body (`mono/instantiate-runtime`, the promoted
+  bodies and the Assert spans with it).
+- **std's vtables** (`std-fn-syms`): the function allocations of the record's std bodies (a vtable's entries:
+  `<Box<dyn Error> as From<Failure>>::from`'s holds `<Failure as Debug>::fmt`), matched against the local functions' symbols,
+  join the roots.
+- **v0**: `core::ptr::drop_glue` is not in std's interface (`pub(crate)`): its one parameter, so the glue's symbols carry their
+  type (`drop_glue::<Noisy>`, the vtable's drop entry); a trait object's auto traits in rustc's interned order
+  (ExistentialPredicate::stable_cmp, by DefPathHash: `Sync` before `Send`, as rustc 1.99.1's symbols show; others after, in
+  their written order): errors' `<Box<dyn Error + Send + Sync> as ToString>::to_string` was declared under the other order. A record's trait object of a local trait without parameters (`(dyn)`, its text `dyn Animal`) is read
+  as that trait's object (form->ty), so a std call's arguments resolve.
+
+### Promoted constants (RF10's slice 5, further)
+
+`build-run/eval-promoted`, as rustc_const_eval interprets a promoted body: binary and unary operators on scalars (integers
+wrapped; floats as IEEE, `%` as fmod; comparisons), numeric casts (IntToInt, IntToFloat, FloatToFloat, FloatToInt saturating),
+a string's or byte string's constant (a pointer with its relocation to the bytes' allocation), a reborrow `&*p` (the same
+pointer), a borrow of another local (a nested allocation), an enum's variant with or without fields and a tuple or struct of
+several fields (each field at its offset in the type's layout, the tag by its encoding: `mono/type-layout-form`, else the
+record's layout of that type), a variant's explicit discriminant (`Color::Green::{constant#0}`), f32's and f64's associated
+constants (`std-const-value`: MAX, MIN, MIN_POSITIVE, EPSILON, NAN, INFINITY, NEG_INFINITY and the integer ones).
+
+### Others found on the way
+
+- LowerSliceLenCalls (`build-run/lower-slice-len-calls`, rustc_mir_transform's lower_slice_len.rs, on at mir-opt-level 1, so
+  at -O0): `<[T]>::len` becomes `PtrMetadata`, as rustc's optimized MIR has it (`structs`' `<[Token]>::len` was declared and
+  never defined).
+- An overloaded compound assignment (`String += &str`): THIR's overloaded_operator over OpAssign's method (build.ae), where the
+  builder made a builtin Add of two references.
+- A unit variant's turbofish (`None::<u8>`, typeck's apply-turbofish: the variant's segment's arguments are its enum's).
+- `repr(u8)` enums' layout: adt-repr read `#[repr(u8)]` as a regex match's vector (`re-matches` with a group), so every
+  explicitly sized enum's layout failed (mono's layout fact the record's).
+
+### Results
+
+- **The mono facts against the record** (`rsi-build`'s mono-check, the lines of the 8 programs RF14 measured: traits,
+  closures, drops, errors, structs, strings, algorithms, patterns; this time from the 67 programs' run, `RF11_BATCH=3`):
+  callees equal **592 -> 660** of 710, function constants' symbols 557 -> 605 (of 567 -> 649: the instances' own constants
+  join), core's items reached 483 -> 630 (all equal), mono items' symbols 50 -> 105 of 128, items 100 -> 210 (of 512 -> 529),
+  layouts 10,225 -> 10,974 of 12,588; the native callee facts 964 -> 1,070 of 1,122 (52 refused).
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; 47 minutes): **56 of 67 own** (48 at RF14): algorithms, drops (generic
+  local instances, the glue's symbol), errors, panic-explicit, float-f32, float-f64, strings (promoted constants; strings also
+  the overloaded `+=`), main-err (std's vtables). The native callees 4,275 of 4,739 (RF14: 4,079 of 4,524), the vtables 29 of
+  36 (25 of 32), the function constants' symbols 1,798 of 2,215. The 11 left: the vector ABI 4 (collections, generics,
+  iterators, rc-refcell: RFP58, below), promoted constants that need more of CTFE 3 (fmt: a call, `std::ptr::null::<u8>()`, in
+  a promoted body; structs: a checked `AddWithOverflow` and its Assert, an implicit discriminant after an explicit one;
+  traits: `&[&Dog, &Bird(1)]`, an unsizing cast to `&dyn Animal` with its vtable inside the promoted), panic-assert-eq
+  (`assert_failed::<i32, i32>` is std's: the record's callee names std's upstream copy, rustc's share-generics, which mono
+  does not know: the instantiating crate is ours), casts (a layout's variants codegen does not take), closures (RFP50's
+  reified closure), panic-hashmap-index (`tlsref`).
+- `bin/rust-front essential`: one line of its summary moved, the mono-check's total: a6's `drop_glue::<D>` is now a core item
+  whose symbol mono gives equal to the record's (core-items 1 of 1 -> 2 of 2, core-closure 0 of 3 -> 0 of 2), every other
+  line equal; `test/rust/front/essential-known.txt` takes the line (every fact still equal). `bin/rust-front core-essential`
+  equals its own (564 of 567, 5 min 28 s), `bin/rust-front essential` 4 min 17 s. `bin/reap` 41 of 44 cells checked, 0
+  problems; `bin/crops-score --judge --strict` exit 0, Rust 75.0 / 75.0 / 95.8 / 80.0, unchanged (RFP43 (a): an own case still
+  scores 0.5 until S6's switch).
+
+### RFP58 (a), the vector ABI: the design note (not built: not small)
+
+The four synthetic programs codegen refuses with `unsupported abi other` (collections, generics, iterators, rc-refcell) all
+reach hashbrown's SSE2 group through std's HashMap: the record's bodies of `hashbrown::control::group::sse2::Group`'s
+`load`, `load_aligned`, `store_aligned`, `match_tag`, `match_empty`, `match_empty_or_deleted`, `match_full` and
+`convert_special_to_empty_and_full_to_deleted`, over three 16-byte, 16-aligned types whose layout the helper prints `(other)`
+(rustc's BackendRepr::SimdVector): `__m128i`, `core::core_arch::simd::Simd<i8, 16>` and `Group`, and six SIMD intrinsics,
+`simd_splat`, `simd_eq`, `simd_lt`, `simd_gt`, `simd_or` and `simd_bitmask` (`_mm_set1_epi8`, `_mm_cmpeq_epi8`,
+`_mm_movemask_epi8`: stdarch's sse2.rs writes them over the generic intrinsics, no `llvm.x86.*` call).
+
+- **Layout** (mono): `#[repr(simd)]` (stdarch's `Simd<T, N>([T; N])`) laid out as rustc_abi's vector: size N times the
+  element's, rounded to its alignment (16 for 16 bytes), the ABI `(vector ELEMENT N)` in the layout form; a newtype over it
+  (`__m128i`, `Group`) takes its field's ABI (univariant's single non-ZST field). The helper's `(other)` gives neither the
+  element nor the count, so this must be mono's (the record's layout cannot be the fallback; the helper could print it, the
+  oracle tier's).
+- **Codegen** (arbace.rust.back.codegen): a layout kind `:vector` as LLVM's `<N x iK>` immediate (loads, stores, phis and
+  calls by value as rustc_codegen_llvm passes it: `<16 x i8>` in a register at -O0); the six intrinsics as
+  rustc_codegen_llvm's generic_simd_intrinsic emits them: `simd_splat` an insertelement and a zero shufflevector, the
+  comparisons `icmp` to `<16 x i1>` then `sext` to the element type, `simd_or` an `or`, `simd_bitmask` an `icmp slt` against
+  zero to `<16 x i1>` bitcast to `i16`; transmutes between the three types a vector-to-vector `bitcast`.
+- **rsi's lowering** (arbace.cpp.lower) already lowers vector types to a C struct of one array and the operations
+  (`icmp`/`fcmp` over vectors, `extractelement`, `insertelement`, constant-mask `shufflevector`, bit-packed `<N x i1>`) to
+  loops, from the C++ and LLVM crops; ci is not touched, so `gate_key` does not move (RFP58 (a)'s premise holds).
+- **Cost**: about 1.5 to 2 days (the layout and the codegen kind about one, the six intrinsics and the transmutes half a day,
+  a check over the four programs' records' `Group` bodies against rustc's IR half a day). It unblocks the four programs only
+  as far as their next cause (generics then has its const generic `Matrix<R, C>` instances, now instantiated).
+
+### Left
+
+- Promoted constants that need more of CTFE: a call inside a promoted body (`std::ptr::null::<u8>()`), a checked operator
+  with its Assert (an implicit discriminant after an explicit one), an unsizing cast with its vtable inside a promoted
+  (`&[&Dog, &Bird(1)]`).
+- Upstream monomorphizations (rustc's share-generics at -O0: an instance std already exports is std's symbol, not
+  instantiated in the program's crate): `assert_failed::<i32, i32>` (panic-assert-eq). Natively this needs std's exported generic instances (its crates' metadata, `exported_symbols`), which
+  RFP57's native interfaces would carry.
+- RFP58 (above), RFP50 (`closures`' reified closure), `casts`' layout variants, `tlsref`.
+
+### The night's commands (none run here)
+
+- RFP46 (a)'s whole plan again, now with RF15: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build` (samples and synthetic,
+  about 30-60 minutes, 2.4 GB a process; the samples' processes above that), then `bin/rust-front rsi-native` by hand over the
+  own programs (rustc as the linker driver) to confirm the 8 new own programs (algorithms, drops, errors, float-f32, float-f64,
+  main-err, panic-explicit, strings) run as rustc's recorded runs, then `bin/rsi check --front own --corpus samples,synthetic`
+  (RFP42 (a)).
+
+## As built: RF16 (RFP58 (a)): the vector ABI; the HashMap programs' next causes; promoted constants further (2026-11-10)
+
+Branch `rust-rf16` (from `mac/rust-rf15` `f9cabe9be`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH=3`). RF15's caches were copied into the worktree and their absolute paths rewritten (`rust-rf15/` to `rust-rf16/`)
+before any run. Only `arbace/rust/` changes (in `arbace_crop_paths`): ci, `arbace/cpp/lower.ae` and `gate_key` do not move.
+
+### RFP58 (a): the vector ABI
+
+- **The definitions std's interface lacks** (`arbace.rust.front.mono/src-adt`): a private std ADT a public one reaches
+  (`core::core_arch::simd::Simd`, `core::core_arch::x86::__m128i`, hashbrown's `Group`) read from the library's own sources
+  (`RF_MONO_LIB`, rust-src 1.99.1's `library/`) as `ext-attrs` finds an item: the module tree from the crate's root (core,
+  alloc, std, or a dependency in `library/vendor`), a module a macro declares (hashbrown's `cfg_if!`) by rustc's default file;
+  a struct item with its `#[repr(simd)]`, its generic parameters and its fields' types (a parameter, a primitive, an array
+  `[T; N]`, a path through the module's `use` items, their cfg evaluated against core's build, resolved by std's names), else
+  stdarch's `types!` (core_arch/src/macros.rs: `pub struct NAME(LEN x ELEM);` expands to `#[repr(simd)] pub struct
+  NAME([ELEM; LEN])`). Such an ADT's layout is now mono's where it was the record's: the 4 programs' layouts equal to the
+  record's 16,055 -> 16,336 (collections 6,916 -> 7,043 of 7,539).
+- **Layout** (`mono/simd-layout`, after rustc_ty_utils' layout_of_uncached `def.repr().simd()` and rustc_abi's
+  `LayoutCalculator::simd_type`, 1.99.1): the element and count from the one array field, the element a scalar, the size N times
+  the element's aligned as LLVM aligns a vector of that size (x86_64's data layout: 8 and 16 bytes; else the next power of two),
+  `BackendRepr::SimdVector`, one field at 0, the element's niche; univariant's newtype rule takes a vector field's ABI as a
+  scalar's (`Group`). The layout form writes it `(vector ELEMENT N)` (the helper prints `(other)`): `__m128i` and `Group`
+  `(vector (int 64 true ..) 2)`, `Simd<i8, 16>` `(vector (int 8 true ..) 16)`. A record's const argument (`(cst "16")`) is read
+  as `[:cval "16"]` (form->ty), so `Simd<i8, 16>`'s layout and its instances resolve.
+- **Codegen** (`arbace.rust.back.codegen`): a vector layout is `:memory` with its `:vector` (element, count): rustc_target's
+  `adjust_for_rust_abi` makes a SimdVector argument and return indirect (`make_indirect`), which is codegen's rule for a memory
+  aggregate larger than a pointer: the same signatures as rustc's (`ptr align 16 %a`, `ptr sret([16 x i8]) align 16`, checked
+  against the IR pack's `_mm_cmpeq_epi8`, `_mm_movemask_epi8`, `Group::match_full`). The generic SIMD intrinsics as
+  rustc_codegen_llvm's `generic_simd_intrinsic` emits them, each vector operand loaded from its memory and the result stored:
+  `simd_splat` (insertelement into poison, a zero-mask shufflevector), `simd_eq/ne/lt/le/gt/ge` (icmp, signed or not by the
+  element, or fcmp's ordered predicates, then sext of `<N x i1>`), `simd_or/and/xor/add/sub`, `simd_bitmask` (lshr by the
+  element's width less one, trunc to `<N x i1>`, bitcast to `iN`, then zext or trunc to the result). A transmute between two
+  memory layouts of one size (`__m128i` to `Simd<i8, 16>`) is the same bytes. rsi's lowering (`arbace.cpp.lower`, LL5's
+  scalarized vectors) takes them unchanged.
+
+### The HashMap programs' next causes (found by the vector ABI, built)
+
+- **A call through a constant function pointer** (core's quicksort passes `partition_lomuto_branchless_cyclic` as
+  `(ptr allocN 0 8)` of a fn allocation, no callee fact): called through the operand's value.
+- **A spread argument's memory field** (a `"rust-call"` closure shim's tuple of one non-zero-sized memory field): by pointer or
+  as the integer of its size, as the caller passes the tuple (a tuple of several memory fields stays refused).
+- **Thread-local statics** (`(tlsref MUT PATH)`: std's `RandomState::new`'s `thread_local!` KEYS, in every HashMap program):
+  codegen_rvalue_operand's ThreadLocalRef, `llvm.threadlocal.address.p0` of the static declared `external thread_local` as
+  rustc's codegen unit declares another crate's; its symbol mono's v0 of the static's def path (the body's DefId, then the
+  name; `std-static-symbol`), equal in shape to rustc's (`_RNvNCNKNvNvMNtNtCs.._3std4hash6randomNtBa_11RandomState3new4KEYS0s_0
+  23___RUST_STD_INTERNAL_VAL`); an item nested in a function body that std's names do not list, named in upper case, is in the
+  value namespace (rustc's non_upper_case_globals: thread_local!'s `const KEYS`). build-run counts it as the fact `tlsrefs`.
+
+### Promoted constants further (RF15's list)
+
+- fmt: a call in a promoted body, `std::ptr::null::<u8>()` (`without_provenance(0)`: 8 zero bytes); `mem::size_of::<T>()` and
+  `align_of` by T's layout (mono's).
+- Checked operators (`AddWithOverflow`, `SubWithOverflow`, `MulWithOverflow`: `(T, bool)` with its fields kept for `_2.0` and
+  `_2.1`) and their `assert` terminator (structs' `Color::Blue as i32 + 1`, an implicit discriminant after an explicit one).
+- traits' `&[&Dog, &Bird(1)]` as `&[&dyn Animal]`: an unsizing cast in a promoted body, the pointer then its vtable's allocation;
+  PromoteTemps moves the cast out of the body mono saw, so mono's vtables now carry each cast's source type and the promoted
+  cast takes the body's vtable of its target and source (the body's own casts too, by source first). A nested borrow
+  (`&_5` in a promoted body) is now kept in its local (RF15 built the value and dropped it: "a reborrow of a local not assigned").
+
+### Results
+
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; 48 minutes): **61 of 67 own** (RF15 56): collections and rc-refcell (the
+  vector ABI, the constant function pointer, the spread argument, the thread-local static), panic-hashmap-index (the
+  thread-local static: RF15's `tlsref`), fmt (the promoted `ptr::null` call) and traits (the promoted unsizing cast and its
+  vtable). The native facts (build-run's, summed): callees 4,275 of 4,739 (unchanged), vtables 29 of 36 -> 35 of 46 (the
+  promoted casts' and traits' now-built `main`'s), layouts 42,388 -> 42,788 of 45,856, constants 179 -> 191 of 197, thread-local
+  statics 5 of 5; mono-check's against the record (`mono-all.log`, summed): layouts 41,946 -> 42,334 of 45,483, every other fact
+  unchanged (callees 1,865 of 2,414, fn-symbols 1,789 of 2,204, core items 1,870 of 1,870). The SIMD types' layouts count as
+  differing from the record's `(other)`.
+- The 6 left: generics (`pair_up::<&str, i32>::{closure#0}`, a generic function's closure reached through std's `Map`, its v0
+  type refused: "v0 of the type [:closure ...]" with parameters, and `<i32 as Zero>::ZERO`, a local trait's associated constant
+  in a promoted body), iterators (`main` is the record's: "a method call without its callee", `v.iter().unzip_check()` through a
+  blanket impl of a local trait for std's `Iter`), structs (local constants: `const LIMIT`, unevaluated in our MIR, in a promoted
+  body and in `main`), panic-assert-eq (upstream monomorphizations, RF15's), casts (a layout's variants codegen does not take),
+  closures (RFP50's reified closure).
+- `bin/rust-front essential` equals its known file (4 min 22 s; no line moved: the essential programs reach no SIMD type, no
+  thread-local static and none of the new promoted forms); `bin/rust-front core-essential` equals its own (564 of 567, 4 min 55 s);
+  `bin/reap` 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict` exit 0, Rust 75.0 / 75.0 / 95.8 / 80.0,
+  unchanged (RFP43 (a): an own case still scores 0.5 until S6's switch).
+
+### Left (the next causes, cheapest first)
+
+- structs: local constants evaluated (a `const` item's body built and evaluated as a promoted body is, `eval-promoted`'s
+  interpreter; its uses in `main` then constants), the cheapest: the interpreter exists.
+- generics: a generic closure's type in v0 at its instance's arguments (the closure's parent's arguments substituted), and a
+  local trait's associated constant (`<i32 as Zero>::ZERO`, the impl's constant's body evaluated, with structs' part).
+- iterators: a method call through a blanket impl of a local trait (`impl<I: Iterator<Item = &i32>> UnzipCheck for I`) in the
+  builder (typeck's method callee), then its instance at `Iter<i32>`.
+- casts: codegen of a layout's variants; closures: RFP50; panic-assert-eq: upstream monomorphizations (RFP57's interfaces).
+
+### The night's commands (none run here)
+
+- RFP46 (a)'s whole plan again, now with RF16: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build` (samples and synthetic,
+  about 30-60 minutes, 2.4 GB a process; the samples' processes above that), then `bin/rust-front rsi-native` by hand over the
+  own programs (rustc as the linker driver) to confirm the new own programs (collections, fmt, panic-hashmap-index, rc-refcell, traits) run as rustc's recorded runs:
+  the vector code through rsi's lowering and the thread-local static against std's lowered library, then `bin/rsi check
+  --front own --corpus samples,synthetic` (RFP42 (a)).
+
+## As built: RF17: RF16's causes, four programs own and closures' first part (2026-11-10)
+
+Branch `rust-rf17` (from `mac/rust-rf16` `ee2eca54d`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH=3`, the toolchains stubbed). RF16's caches were copied into the worktree and their absolute paths rewritten
+(`rust-rf16/` to `rust-rf17/`) before any run. Only `arbace/rust/` changes (in `arbace_crop_paths`): ci, `arbace/cpp/lower.ae` and
+`gate_key` do not move. RF16's causes were taken cheapest first, as its "Left" lists them; every rule follows rustc 1.99.1's
+own code (the pinned rust-src's `compiler/`).
+
+### structs: local constants
+
+- **A local constant evaluated** (`build-run`'s `local-const`, codegen's eval_mir_constant of an unevaluated `const` item): the
+  item's body as construct_const builds it (build-check's bodies already hold it) interpreted by `eval-promoted` in a value mode
+  (`_0` holds the value, not a borrow; its fake reads and user type ascriptions skipped, its `false-edge`s followed), a scalar's
+  bytes the operand's `(scalar BITS SIZE)`; in a runtime body and inside a promoted body (`LIMIT` in both); each constant once.
+- **A variant's explicit discriminant in a runtime body** (`Color::Green as u8`: THIR's cast of a unit variant, its anonymous
+  constant `Color::Green::{constant#0}`), mono's `variant-discriminant`, as RF15 evaluated it in promoted bodies.
+- **A static holding a pointer** (`static GREETING: &str = "hi"`): its initializer's relocations read back from our allocation's
+  text (`╾allocN<imm>╼`, `alloc-bytes+relocs`), each pointee its own allocation; codegen defines such a static as
+  codegen_static's const_alloc_to_llvm does (a packed struct, the bytes between the relocations and each pointer the allocation
+  it points at).
+
+### generics: an associated constant, a generic function's closure
+
+- **`<i32 as Zero>::ZERO`** (a local trait's associated constant, in a promoted body): the builder keeps the constant's
+  definition and arguments (`:nc`); `mono/resolve-const` resolves it as resolve_associated_item does (typeck's
+  `resolve-assoc-fn`, which now takes a trait's associated constant to the impl's constant of its name), and the impl's
+  constant's body is evaluated as above.
+- **A generic function's closure at its instance's arguments**: mono's instances substitute a closure type's parent arguments
+  (`closed-closures`: `[:closure TEXT SIG ARGS]`, ClosureArgs' parent_args; the signature substituted too), and a record's
+  closure form keeps them (its closure arguments less the three synthetic ones); v0 prints such a closure's path at them
+  (`pair_up::<&str, i32>::{closure#0}`), and Instance::resolve's Fn-trait arm resolves to the closure's body at them, so the
+  collector reaches `pair_up::<&str, i32>::{closure#0}` through std's `Map`.
+
+### iterators: a closure's type in unification and in v0, constructors' shims
+
+- **Two closure types of one closure unify** (typeck): a closure type is its definition at its parent's arguments; its
+  signature's variables are equated, not compared by `=` (which saw two ids of one variable and failed FlatMap's
+  `F::Output == U`, so `.flat_map(..).collect()` had no method: RF16's "a method call without its callee", which was this call,
+  not the blanket impl's `unzip_check`).
+- **v0 of a closure type is not a backref to its own closures' parent path**: a closure type's key is its definition at its whole
+  closure arguments, the parent path of its own closures is printed at their parent arguments (generics_of takes a closure's
+  parent from the typeck root), so `FlatMap<.., Map<.., {closure#0}>, {closure}>` prints the outer closure in full, as rustc's
+  symbol does.
+- **Constructors' shims** (`mono/ctor-shim-body`): a std ADT's tuple constructor used as a function value and instantiated in the
+  program's crate (`ControlFlow::<i32>::Break`, `Result::<(), NonZero<usize>>::Err`: the record's `mir/external`, rustc's
+  build_ctor shim whose MIR the helper does not dump) is built as shim.rs' build_ctor builds it (`_0 = ADT::V(move _1, ..);
+  return`), its path the item's def_path_str less its generic arguments, its arguments the function constant's; the fact
+  `ctor-shims`.
+
+### casts: an uninhabited type's variants
+
+- Codegen's `Variants::Empty` (`ControlFlow<NeverShortCircuitResidual, Infallible>`, array `map`'s `try_map`): an aggregate of it
+  is a zero-sized operand, nothing stored; its discriminant codegen_get_discr's `poison`.
+
+### closures: RFP50 (a)'s first part, then RFP62
+
+- A closure reified as a function pointer (`fnptr(|x| x - 1, 4)`, `[("add", |a, b| a + b), ..]`: ClosureFnPointer) carries its
+  ClosureOnceShim's symbol (`mono/closure-once-symbol`: Instance::resolve_closure at FnOnce, `<{closure} as FnOnce<(ARGS,)>>::
+  call_once` at the program's crate), the shim's body the record's (core's `FnOnce::call_once`); the fact `closure-shims`.
+  codegen then takes `closures`; its next causes are four closures the collector does not reach: three returned as
+  `impl Fn` (`make_adder`'s, `make_counter`'s, `compose`'s: mono has no opaque types) and one in a `Box<dyn Fn>` vtable
+  (`main::{closure#12}`: the vtable is the record's). RFP62 below.
+
+### Results
+
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, under 2 GiB a
+  process, the toolchains stubbed, 0 stub calls; 44 minutes): **65 of 67 own** (RF16 61): structs, generics, iterators, casts.
+  The native facts (build-run's, summed): callees 4,275 of 4,739 -> 4,516 of 4,978, constants 191 of 197 -> 205 of 205,
+  function constants' symbols 1,798 of 2,215 -> 1,925 of 2,340, layouts 42,788 -> 42,792 of 45,860, symbols 258 -> 266 (all
+  native), constructors' shims 2 of 2, closure shims 3 of 3, vtables 35 of 46 (unchanged); mono-check's against the record
+  (`mono-all.log`, summed): callees 1,865 -> 1,992 of 2,414, function constants' symbols 1,789 of 2,204 -> 1,916 of 2,329, core
+  items 1,870 -> 2,022 (all equal), items 464 of 1,119 -> 468 of 1,124, symbols 228 -> 230 of 272, layouts unchanged
+  (42,334 of 45,483).
+- The 2 left: closures (four closures the collector does not reach: RFP62) and panic-assert-eq (`assert_failed::<i32, i32>`,
+  std's upstream instance: RFP63).
+- `bin/rust-front essential` equals its known file (3 min 51 s; no line moved); `bin/rust-front core-essential` equals its own
+  (564 of 567, 4 min 51 s); `bin/reap` 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict` exit 0, Rust 75.0 /
+  75.0 / 95.8 / 80.0, unchanged (RFP43 (a): an own case still scores 0.5 until S6's switch).
+
+### RFP62 Closures behind opaque types and in vtables (`closures`)
+
+`closures`' last four closures are reached only through an `impl Fn` return (`make_adder`, `make_counter`, `compose`: the call
+`add5(1)` is `<opaque as Fn<(i32,)>>::call`) and through a `Box<dyn Fn() -> usize>`'s vtable (a closure's `call`, `call_mut` and
+`call_once` entries: the last a VTableShim of its ClosureOnceShim). Mono has no opaque types: their identity (RFP33 (a)) is
+typeck's, but neither their hidden types (the defining body's typeck results) nor `RevealAll`'s normalization in mono's
+instances, layouts and symbols; and `vtable-alloc` refuses shims. Options: (a) **reveal opaque types in mono (type_of of an
+opaque: its defining body's hidden type, substituted at the opaque's arguments; every type mono instantiates normalized under
+RevealAll before layouts, resolution and v0) and build closures' vtable entries natively (the body's own `call`/`call_mut`,
+`call_once` as `VTableShim(ClosureOnceShim)`'s symbol with the record's shim body, as RF17 took the reified pointer's)**, about two
+days (opaque types reach layouts, symbols and resolution at once; a check over the samples' `impl Trait` programs too); (b) take
+the record's items for closures reached only through opaque types and vtables (a record fact per such closure). *Recommended:
+(a)*: `impl Trait` returns are common in the samples, and the vtable part is small once the shim symbols are mono's.
+
+### RFP63 Upstream monomorphizations (`panic-assert-eq`)
+
+rustc's share-generics (on at -O0): an instance an upstream crate already exports is that crate's symbol, not instantiated in the
+program (`core::panicking::assert_failed::<i32, i32>`, which std exports: the record's callee names std's copy). Mono instantiates
+it in the program's crate, so the module declares a local instance it never defines. Natively this needs
+`upstream_monomorphizations`: each upstream crate's exported generic instances (its metadata's `exported_symbols`). Options: (a)
+**the helper's std interface dump also lists std's exported generic instances (def path and arguments, from
+`tcx.exported_generic_symbols`/`upstream_monomorphizations`), recorded with the interface (the oracle tier's, as
+`std-iface.edn` is), and mono resolves an instance to the upstream crate's symbol when listed**, about a day plus a re-record of
+the interface pack at night; (b) read the exported symbols from the rlibs' metadata natively (RFP57's native interfaces), larger;
+(c) keep the record's callee for such instances (a counted record fact). *Recommended: (a)*, (b) once RFP57 is built.
+
+### The night's commands (none run here)
+
+- RFP46 (a)'s whole plan again, now with RF17: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build` (samples and synthetic), then
+  `bin/rust-front rsi-native` by hand over the own programs (rustc as the linker driver) to confirm the new own programs (structs,
+  generics, iterators, casts; with RF15's and RF16's) run as rustc's recorded runs (the native constructors' shims, the static
+  with a pointer, the uninhabited `poison` discriminant), then `bin/rsi check --front own --corpus samples,synthetic` (RFP42 (a)).

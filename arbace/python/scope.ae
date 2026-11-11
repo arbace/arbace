@@ -1,6 +1,7 @@
-;; Ported from CPython 3.14.10, Python/symtable.c and Python/future.c (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz):
+;; Ported from CPython 3.14.10, Python/symtable.c and Python/future.c (https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz),
+;; and 3.15.2's symtable.c deltas (https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tar.xz; queue 239):
 ;; Copyright (c) 2001 Python Software Foundation; All Rights Reserved. Licensed under the PSF License Agreement for
-;; Python 3.14 (LICENSE.md).
+;; Python 3.14 and 3.15 (LICENSE.md).
 (ns arbace.python.scope
   "pyi's scope analysis (doc/python/PYI-SPEC.md §2; doc/python/PYTHON-SURVEY.md §6.2 (1); PY5a): the symbol table of a
   module of Python forms, as CPython 3.14.10's Python/symtable.c builds it, so that it can be checked against
@@ -15,8 +16,14 @@
 
   table: the module's forms -> (block TYPE \"NAME\" {\"SYMBOL\" FLAGS ...} [CHILD ...]), the form of
   tools/pydump/pydump.py scopes."
-  (:require [arbace.repr.python.print :as pp]
+  (:require [arbace.repr.python.lex :as lex]
+            [arbace.repr.python.print :as pp]
             [arbace.string :as str]))
+
+(defn- py315?
+  "The reader's Python is 3.15 (arbace.repr.python.lex/*minor*, REPR_PYTHON_VERSION=3.15; queue 239): 3.15.2's symtable.c"
+  []
+  (>= (long lex/*minor*) 15))
 
 ;; ---- the flags (Include/internal/pycore_symtable.h) ----
 
@@ -42,6 +49,15 @@
 
 (defn- pos-of [x] (when (and (seq? x) (map? (last x))) (:pos (last x))))
 
+(def ^:dynamic *top-level-await*
+  "compile()'s PyCF_ALLOW_TOP_LEVEL_AWAIT (queue 228)"
+  false)
+
+(defmacro ^:private at
+  "BODY with *pos* the location of the form X when it has one (symtable.c's LOCATION(x) at each symtable_add_def)"
+  [x & body]
+  `(binding [*pos* (or (pos-of ~x) *pos*)] ~@body))
+
 ;; ---- blocks: atoms ----
 
 (def ^:private function-like #{:function :annotation :type-variable :type-alias :type-parameters})
@@ -53,7 +69,7 @@
            :nested (boolean (and c (or (:nested c) (function-like (:type c)))))
            :comprehension nil :generator false :coroutine false :comp-inlined false :comp-iter-target false
            :comp-iter-expr 0 :can-see-class false :needs-class-closure false :needs-classdict false
-           :has-conditional-annotations false :in-conditional false :in-unevaluated false :annotation-block nil
+           :has-conditional-annotations false :in-conditional false :in-try false :in-unevaluated false :annotation-block nil
            :mangled-names nil :scope-info nil})))
 
 (defn- function-like? [b] (boolean (function-like (:type @b))))
@@ -117,7 +133,7 @@
         old (get (:symbols @b) mangled)
         val (if old
               (do (when (and (has? flag DEF_PARAM) (has? old DEF_PARAM))
-                    (syntax-error (str "duplicate argument '" name "' in function definition")))
+                    (syntax-error (str (if (py315?) "duplicate parameter '" "duplicate argument '") name "' in function definition")))
                   (when (and (has? flag DEF_TYPE_PARAM) (has? old DEF_TYPE_PARAM))
                     (syntax-error (str "duplicate type parameter '" name "'")))
                   (bit-or old flag))
@@ -183,15 +199,15 @@
 (defn- arg-name [a] (if (seq? a) (ident (second a)) (ident a)))
 (defn- arg-ann [a] (when (seq? a) (nth (second (pp/node a)) 1 nil)))
 
-(defn- visit-params! [st as] (doseq [a as] (add-def! st (arg-name a) DEF_PARAM)))
+(defn- visit-params! [st as] (doseq [a as] (at a (add-def! st (arg-name a) DEF_PARAM))))
 
 (defn- visit-arguments! [st a]
   (let [o (args-of a)]
     (visit-params! st (:posonly o))
     (visit-params! st (:args o))
     (visit-params! st (:kwonly o))
-    (when-let [v (:vararg o)] (add-def! st (arg-name v) DEF_PARAM))
-    (when-let [k (:kwarg o)] (add-def! st (arg-name k) DEF_PARAM))))
+    (when-let [v (:vararg o)] (at v (add-def! st (arg-name v) DEF_PARAM)))
+    (when-let [k (:kwarg o)] (at k (add-def! st (arg-name k) DEF_PARAM)))))
 
 (defn- visit-annotation! [st annotation]
   (let [cur (:cur @st)
@@ -214,11 +230,13 @@
     (when unevaluated (swap! (:cur @st) assoc :in-unevaluated false))
     (exit! st)))
 
-(defn- visit-annotations! [st a returns]
+(defn- visit-annotations! [st a returns fb]
   (let [cur (:cur @st)
         is-in-class (:can-see-class @cur)
         current-type (:type @cur)]
     (keyed! st a (enter! st "__annotate__" :annotation))
+    ;; 3.15: ste_function_name, the function's name in its __annotate__'s qualname (compiler_set_qualname)
+    (when (py315?) (swap! (:cur @st) assoc :function-name (:name @fb)))
     (when (or is-in-class (= :class current-type))
       (swap! (:cur @st) assoc :can-see-class true)
       (add-def! st "__classdict__" USE))
@@ -244,13 +262,14 @@
 (defn- visit-type-param! [st tp]
   (let [[h [nm] o _] (pp/node tp)
         nm (ident nm)]
-    (add-def! st nm (bit-or DEF_TYPE_PARAM DEF_LOCAL))
-    (case h
-      type-var (do (visit-type-param-bound-or-default!
-                    st (:bound o) nm (when-let [b (:bound o)] (if (and (seq? b) (= 'tuple (first b))) "a TypeVar constraint" "a TypeVar bound")) tp)
-                   (visit-type-param-bound-or-default! st (:default o) nm "a TypeVar default" tp))
-      type-var-tuple (visit-type-param-bound-or-default! st (:default o) nm "a TypeVarTuple default" tp)
-      param-spec (visit-type-param-bound-or-default! st (:default o) nm "a ParamSpec default" tp))))
+    (at tp
+      (add-def! st nm (bit-or DEF_TYPE_PARAM DEF_LOCAL))
+      (case h
+        type-var (do (visit-type-param-bound-or-default!
+                      st (:bound o) nm (when-let [b (:bound o)] (if (and (seq? b) (= 'tuple (first b))) "a TypeVar constraint" "a TypeVar bound")) tp)
+                     (visit-type-param-bound-or-default! st (:default o) nm "a TypeVar default" tp))
+        type-var-tuple (visit-type-param-bound-or-default! st (:default o) nm "a TypeVarTuple default" tp)
+        param-spec (visit-type-param-bound-or-default! st (:default o) nm "a ParamSpec default" tp)))))
 
 (defn- enter-type-param-block! [st name has-defaults has-kwdefaults class? tps]
   (let [current-type (:type @(:cur @st))]
@@ -263,6 +282,11 @@
       (add-def! st ".generic_base" DEF_LOCAL) (add-def! st ".generic_base" USE))
     (when has-defaults (add-def! st ".defaults" DEF_PARAM))
     (when has-kwdefaults (add-def! st ".kwdefaults" DEF_PARAM))))
+
+(defn- allows-top-level-await? [st] (and *top-level-await* (= :module (:type @(:cur @st)))))
+
+(defn- maybe-coroutine-for-module! [st]
+  (when (allows-top-level-await? st) (swap! (:cur @st) assoc :coroutine true)))
 
 (defn- async-def? [st] (let [c @(:cur @st)] (and (= :function (:type c)) (:coroutine c))))
 
@@ -279,7 +303,7 @@
       (enter-type-param-block! st nm true (boolean (some some? (:kw-defaults ao))) false tps)
       (doseq [tp tps] (visit-type-param! st tp)))
     (let [fb (keyed! st x (new-block st nm :function))]
-      (visit-annotations! st args (:returns o))
+      (visit-annotations! st args (:returns o) fb)
       (enter-existing! st fb true)
       (when async? (swap! fb assoc :coroutine true))
       (visit-arguments! st args)
@@ -300,7 +324,7 @@
       (swap! (:cur @st) assoc :mangled-names #{})
       (doseq [tp tps] (visit-type-param! st tp)))
     (visit-exprs! st (:bases o))
-    (doseq [k (:keywords o)] (let [[_ [kn v] _ _] (pp/node k)] (when (some? kn) (check-name (ident kn) :store))))
+    (doseq [k (:keywords o)] (let [[_ [kn v] _ _] (pp/node k)] (when (some? kn) (at k (check-name (ident kn) :store)))))
     (doseq [k (:keywords o)] (visit-expr! st (nth (second (pp/node k)) 1) :load))
     (keyed! st x (enter! st nm :class))
     (swap! st assoc :private nm)
@@ -313,13 +337,22 @@
     (swap! st assoc :private tmp)))
 
 (defn- visit-alias! [st a]
+  (at a
   (let [[nm as] (if (seq? a) (let [[_ [n] o _] (pp/node a)] [(ident n) (some-> (:as o) ident)]) [(ident a) nil])
         name (or as nm)
         store (first (str/split name #"\."))]
     (if (not= name "*")
       (add-def! st store DEF_IMPORT)
       (when (not= :module (:type @(:cur @st)))
-        (syntax-error "import * only allowed at module level")))))
+        (syntax-error "import * only allowed at module level"))))))
+
+(defn- check-lazy-import-context!
+  "3.15's check_lazy_import_context: a lazy import only outside a try statement, a function and a class"
+  [st import-type]
+  (let [c @(:cur @st)]
+    (cond (:in-try c) (syntax-error (str "lazy " import-type " not allowed inside try/except blocks"))
+          (= :function (:type c)) (syntax-error (str "lazy " import-type " not allowed inside functions"))
+          (= :class (:type c)) (syntax-error (str "lazy " import-type " not allowed inside classes")))))
 
 (defn- directive-check! [st nm global?]
   (let [cur (lookup st (:cur @st) nm)]
@@ -338,10 +371,9 @@
         (syntax-error (str "annotated name '" nm "' can't be " (if global? "global" "nonlocal")))
         (directive-check! st nm global?)))
     ;; the directive's location for the second pass's errors (symtable.c's ste_directives, error_at_directive)
-    (swap! (:cur @st) update :directives #(if (contains? % nm) % (assoc % nm *pos*)))
+    (let [mangled (maybe-mangle st (:cur @st) nm)]
+      (swap! (:cur @st) update :directives #(if (contains? % mangled) % (assoc % mangled *pos*))))
     (add-def! st nm (if global? DEF_GLOBAL DEF_NONLOCAL))))
-
-(defn- maybe-coroutine-for-module! [st] nil)
 
 (defn- visit-stmt*! [st x]
   (let [[h p o _] (pp/node x)
@@ -376,15 +408,17 @@
           (let [cur (lookup st (:cur @st) nm)]
             (when (and (has? cur (bit-or DEF_GLOBAL DEF_NONLOCAL)) (not= (:cur @st) (:global @st)) simple)
               (syntax-error (str "annotated name '" nm "' can't be " (if (has? cur DEF_GLOBAL) "global" "nonlocal"))))
-            (if simple
-              (add-def! st nm (bit-or DEF_ANNOT DEF_LOCAL))
-              (when (some? v) (add-def! st nm DEF_LOCAL))))
+            (at t
+              (if simple
+                (add-def! st nm (bit-or DEF_ANNOT DEF_LOCAL))
+                (when (some? v) (add-def! st nm DEF_LOCAL)))))
           (visit-expr! st t :store))
         (visit-annotation! st an)
         (e! v))
       aug-assign (do (visit-expr! st (first p) :store) (e! (nth p 2)))
       (for async-for)
       (do (when (= h 'async-for)
+            (maybe-coroutine-for-module! st)
             (when-not (:coroutine @(:cur @st)) (syntax-error "'async for' outside async function")))
           (visit-expr! st (first p) :store) (e! (second p))
           (conditional! st #(do (body! (nth p 2)) (body! (:else o)))))
@@ -398,16 +432,25 @@
                                       (body! b)))))
       raise (when (some? (first p)) (e! (first p)) (e! (:from o)))
       (try try-star)
-      (conditional! st #(do (body! (first p))
-                            (doseq [hd (second p)]
-                              (let [[_ [b] ho _] (pp/node hd)]
-                                (e! (:type ho))
-                                (when-let [n (:name ho)] (add-def! st (ident n) DEF_LOCAL))
-                                (body! b)))
-                            (body! (:else o)) (body! (:finally o))))
+      (conditional! st #(let [blk (:cur @st) was (:in-try @blk)]
+                          ;; 3.15's ENTER_TRY_BLOCK: the try statement's every part (a lazy import there is refused)
+                          (swap! blk assoc :in-try true)
+                          (body! (first p))
+                          (doseq [hd (second p)]
+                            (let [[_ [b] ho _] (pp/node hd)]
+                              (e! (:type ho))
+                              (when-let [n (:name ho)] (at hd (add-def! st (ident n) DEF_LOCAL)))
+                              (body! b)))
+                          (body! (:else o)) (body! (:finally o))
+                          (swap! blk assoc :in-try was)))
       assert (do (e! (first p)) (e! (second p)))
-      import (doseq [a (first p)] (visit-alias! st a))
-      import-from (do (doseq [a (second p)] (visit-alias! st a))
+      import (do (when (:lazy o) (check-lazy-import-context! st "import"))
+                 (doseq [a (first p)] (visit-alias! st a)))
+      import-from (do (when (:lazy o)
+                        (check-lazy-import-context! st "from ... import")
+                        (when (some #(= "*" (if (seq? %) (ident (second %)) (ident %))) (second p))
+                          (syntax-error "lazy from ... import * is not allowed")))
+                      (doseq [a (second p)] (visit-alias! st a))
                       (when (and (= "__future__" (some-> (first p) ident)) (not (:level o))
                                  (not (contains? (:future-stmts @st) x)))
                         (syntax-error "from __future__ imports must occur at the beginning of the file")))
@@ -417,6 +460,7 @@
       (pass break continue) nil
       (with async-with)
       (do (when (= h 'async-with)
+            (maybe-coroutine-for-module! st)
             (when-not (:coroutine @(:cur @st)) (syntax-error "'async with' outside async function")))
           (conditional! st #(do (doseq [i (first p)]
                                   (let [[_ [c v] _ _] (pp/node i)]
@@ -497,9 +541,14 @@
       (swap! b assoc :generator generator?)
       (let [async? (and (:coroutine @b) (not generator?))]
         (exit! st)
-        (when (and async? (not (async-def? st)) (nil? (:comprehension @(:cur @st))))
+        (when (and async? (not (async-def? st)) (nil? (:comprehension @(:cur @st))) (not (allows-top-level-await? st)))
           (syntax-error "asynchronous comprehension outside of an asynchronous function"))
         (when async? (swap! (:cur @st) assoc :coroutine true))))))
+
+(defn- anon-name
+  "A lambda's or comprehension's block name: 3.14's _Py_ID(lambda), 3.15's _Py_STR(anon_lambda) (<lambda>)"
+  [nm]
+  (if (py315?) (str "<" nm ">") nm))
 
 (defn- visit-expr*! [st x ctx]
   (cond
@@ -519,7 +568,7 @@
         named-expr (do (raise-if-annotation-block! st "named expression")
                        (when (pos? (:comp-iter-expr @cur))
                          (syntax-error "assignment expression cannot be used in a comprehension iterable expression"))
-                       (when (:comprehension @cur) (extend-namedexpr-scope! st (first p)))
+                       (when (:comprehension @cur) (at (first p) (extend-namedexpr-scope! st (first p))))
                        (e! (second p))
                        (visit-expr! st (first p) :store))
         bool-op (es! (second p))
@@ -527,17 +576,17 @@
         unary-op (e! (second p))
         lambda (let [ao (args-of (first p))]
                  (es! (:defaults ao)) (es! (:kw-defaults ao))
-                 (keyed! st x (enter! st "lambda" :function))
+                 (keyed! st x (enter! st (anon-name "lambda") :function))
                  (visit-arguments! st (first p))
                  (e! (second p))
                  (exit! st))
         if-exp (es! p)
         dict (do (es! (first p)) (es! (second p)))
         (set list tuple) (doseq [v (first p)] (visit-expr! st v ctx))
-        list-comp (handle-comprehension! st x :list "listcomp" (second p) (first p) nil)
-        set-comp (handle-comprehension! st x :set "setcomp" (second p) (first p) nil)
-        dict-comp (handle-comprehension! st x :dict "dictcomp" (nth p 2) (second p) (first p))
-        generator-exp (handle-comprehension! st x :generator "genexpr" (second p) (first p) nil)
+        list-comp (handle-comprehension! st x :list (anon-name "listcomp") (second p) (first p) nil)
+        set-comp (handle-comprehension! st x :set (anon-name "setcomp") (second p) (first p) nil)
+        dict-comp (handle-comprehension! st x :dict (anon-name "dictcomp") (nth p 2) (first p) (second p))
+        generator-exp (handle-comprehension! st x :generator (anon-name "genexpr") (second p) (first p) nil)
         (yield yield-from)
         (do (raise-if-annotation-block! st "yield expression")
             (e! (first p))
@@ -546,14 +595,15 @@
               (syntax-error (case k :list "'yield' inside list comprehension" :set "'yield' inside set comprehension"
                                   :dict "'yield' inside dict comprehension" "'yield' inside generator expression"))))
         await (do (raise-if-annotation-block! st "await expression")
-                  (when-not (function-like? cur) (syntax-error "'await' outside function"))
-                  (when (and (not (async-def? st)) (nil? (:comprehension @cur)))
-                    (syntax-error "'await' outside async function"))
+                  (when-not (allows-top-level-await? st)
+                    (when-not (function-like? cur) (syntax-error "'await' outside function"))
+                    (when (and (not (async-def? st)) (nil? (:comprehension @cur)))
+                      (syntax-error "'await' outside async function")))
                   (e! (first p))
                   (swap! cur assoc :coroutine true))
         compare (do (e! (first p)) (es! (nth p 2)))
         call (do (e! (first p)) (es! (second p))
-                 (doseq [k (:keywords o)] (let [[_ [kn _] _ _] (pp/node k)] (when (some? kn) (check-name (ident kn) :store))))
+                 (doseq [k (:keywords o)] (let [[_ [kn _] _ _] (pp/node k)] (when (some? kn) (at k (check-name (ident kn) :store)))))
                  (doseq [k (:keywords o)] (e! (second (second (pp/node k))))))
         formatted-value (do (e! (first p)) (doseq [part (:format-spec o)] (when-not (string? part) (e! part))))
         interpolation (do (e! (first p)) (doseq [part (:format-spec o)] (when-not (string? part) (e! part))))
@@ -571,6 +621,7 @@
   (if-let [p (pos-of x)] (binding [*pos* p] (visit-expr*! st x ctx)) (visit-expr*! st x ctx)))
 
 (defn- visit-pattern! [st x]
+  (at x
   (let [[h p o _] (pp/node x)]
     (case h
       match-value (visit-expr! st (first p) :load)
@@ -582,11 +633,11 @@
                         (when-let [r (:rest o)] (add-def! st (ident r) DEF_LOCAL)))
       match-class (do (visit-expr! st (first p) :load)
                       (doseq [q (second p)] (visit-pattern! st q))
-                      (doseq [a (:kwd-attrs o)] (check-name (ident a) :store))
+                      (doseq [[a q] (map vector (:kwd-attrs o) (:kwd-patterns o))] (at q (check-name (ident a) :store)))
                       (doseq [q (:kwd-patterns o)] (visit-pattern! st q)))
       match-as (do (when (some? (first p)) (visit-pattern! st (first p)))
                    (when (some? (second p)) (add-def! st (ident (second p)) DEF_LOCAL)))
-      match-or (doseq [q (first p)] (visit-pattern! st q)))))
+      match-or (doseq [q (first p)] (visit-pattern! st q))))))
 
 ;; ---- the second pass (symtable.c's analyze_block) ----
 

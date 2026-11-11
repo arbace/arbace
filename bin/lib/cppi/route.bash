@@ -8,7 +8,7 @@
 # The default route (CP240 (b), decided 2026-11-07): clang until the night's comparison (bin/cppi route-compare over the samples, the
 # runtime and gxx-dg-run's sampling, eval and AOT) holds every pass; then this one word becomes auto, the records are written again
 # (--record) and bin/lib/cppi/check's header names it (doc/cpp/CPP-SURVEY.md, "As built: cpp-target")
-cppi_route_default=clang
+cppi_route_default=auto
 cppi_ir_route() {
   local todo=$1 jobs=$2 route=${CPPI_ROUTE:-$cppi_route_default} rest
   case $route in clang|ours|auto) ;; *) echo "cppi: CPPI_ROUTE is clang, ours or auto" >&2; return 2 ;; esac

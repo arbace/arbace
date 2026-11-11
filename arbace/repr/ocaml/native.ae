@@ -20,6 +20,8 @@
                                                     ocamlc's -w, -warn-error, -no-app-funct, -keywords (OC172 (b))
     errors-check --dir DIR                          the hand cases of DIR (test/ocaml/errors/: FILE.ml/.mli, FILE.flags,
                                                     FILE.err recorded from ocamlc) reported natively, equal to FILE.err
+    own-read --root DIR --list LIST                 OC213 (a): each file of LIST (relative to DIR), one the reader rejects,
+                                                    judged by its own test (own-read): ID, pass or fail, how
     mutants --root DIR --list LIST --out OUT [--n N] [--seed S]
                                                     N mutants of each file of LIST (default 40, seed 1): one token
                                                     deleted, inserted or swapped with the next, OUT/mNNNNN.ml(i) and
@@ -361,6 +363,150 @@
     (println (str "errors-check: " (count files) " cases, " (- (count files) @bad) " equal to ocamlc's stderr, " @bad " differ"))
     (System/exit (if (zero? @bad) 0 1))))
 
+;; ---------------------------------------------------------------------------------------------
+;; OC213 (a) (the user, 2026-11-10): a testsuite file the reader rejects, judged by its own test. OCaml 5.5.0's testsuite holds
+;; files meant to be rejected (parse-errors/, lexing/, the toplevel's error tests) and files that are not implementations but
+;; toplevel scripts (expect tests, toplevel tests, `ocaml FILE` scripts, with their directives): the read level's file reading
+;; (Parse.implementation) rejects both. Each is judged here as its test's own tool reads it, the expected outcome its reference's:
+;;   ocamlc.byte (the header's ocamlc_byte_exit_status "2"): the report equal byte for byte to the .compilers.reference (the
+;;     file named by its basename, as ocamltest runs ocamlc in the test's directory);
+;;   expect: the expect tool reads the whole file with Parse.use_file (testsuite/tools/expect.ml's parse_contents) before it runs
+;;     a phrase: the reader's share of the test's verdict is that read;
+;;   toplevel (stdin) and ocaml (a script): read as use_file; a file that reads is the tool's input as it reads it, one rejected
+;;     is judged by its first error, which the reference must hold: for the toplevel, the error's chunk (toploop.ml's loop:
+;;     the lines from the one after the last `;;` that ends a line, blanks and comments apart, the positions from 1 there, the
+;;     input named //toplevel//) read alone, its report (warnings of the chunk and the error, the header's flags) a part of the
+;;     reference; for a script, the report with the file's basename;
+;;   no test of its own: a file another test of its directory names (readonly_files, `#use`), or of its parent directory as
+;;     DIR/FILE (test_file), is judged as that test's tool reads it, against that test's reference.
+;; The rest (no test names the file, a header of another kind, a report the reference does not hold) keeps its rejection.
+
+(defn- test-block
+  "The file's ocamltest block, `(* TEST ... *)` (at the top, or at the end after a TEST_BELOW), as its text, or nil"
+  [^String text]
+  (when-let [m (re-find #"(?s)\(\* TEST(?:[ \t\r\n])(.*?)\*\)" (str/replace text #"\(\* TEST_BELOW" "(* XTEST_BELOW"))]
+    (second m)))
+
+(defn- tool-of
+  "The tool that reads the file in its test: :expect, :ocamlc (a compilation expected to fail with status 2), :toplevel, :script
+  (the `ocaml` action), or nil"
+  [^String block]
+  (cond
+    (re-find #"(?m)^\s*expect\s*;" block) :expect
+    (re-find #"(?m)^\s*toplevel\s*;" block) :toplevel
+    (and (re-find #"(?m)^\s*ocamlc\.byte\s*;" block) (re-find #"ocamlc_byte_exit_status\s*=\s*\"2\"" block)) :ocamlc
+    (re-find #"(?m)^\s*ocaml\s*;" block) :script))
+
+(defn- header-flags [^String block]
+  (or (second (re-find #"(?m)^\s*flags\s*=\s*\"([^\"]*)\"" block)) ""))
+
+(defn- reference-text
+  "The test's reference for its tool, as bytes read as ISO-8859-1 (the reports' byte strings), or nil"
+  [^String stem tool]
+  (some (fn [suffix]
+          (let [f (File. (str stem suffix))]
+            (when (.exists f) (String. (read-bytes (.getPath f)) "ISO-8859-1"))))
+        (if (= tool :ocamlc) [".compilers.reference"] [".compilers.reference" ".ocaml.reference" ".reference"])))
+
+(defn- toplevel-chunk-start
+  "The byte offset where the toplevel's chunk holding offset E starts: after the end of the line of the last `;;` before E
+  that only blanks and comments follow on its line (toploop.ml's get_phrases and is_blank_with_linefeed, then flush_input)"
+  [^bytes b fname e]
+  (let [lb (lex/new-lexbuf b fname)]
+    (binding [ds/*state* (ds/new-state)]
+      (loop [start 0 pending false]
+        (let [t (try (lex/token-rule lb) (catch arbace.lang.ExceptionInfo _ [:EOF]))
+              s (lex/pos-cnum (lex/start-p lb))]
+          (if (or (= :EOF (first t)) (>= s e))
+            start
+            (case (first t)
+              :SEMISEMI (recur start true)
+              (:COMMENT :DOCSTRING) (recur start pending)
+              :EOL (if pending (recur (lex/pos-cnum (lex/curr-p lb)) false) (recur start false))
+              (recur start false))))))))
+
+(defn- error-offset [r] (let [[_ _ _ loc] r] (lex/pos-cnum (first loc))))
+
+(defn- judge-as
+  "The verdict of the file's bytes B (named BASE) read by TOOL against the reference REF (flags FLAGS): [:pass how] or [:fail why]"
+  [^bytes b base rel tool ref flags]
+  (case tool
+    :ocamlc (let [rep (report-of b base (kind-of rel {}) flags)]
+              (cond (nil? ref) [:fail "ocamlc.byte's test without a .compilers.reference"]
+                    (= ref rep) [:pass "ocamlc.byte's expected rejection: the report is the .compilers.reference"]
+                    :else [:fail "the report is not the .compilers.reference"]))
+    :expect (let [r (p/parse b base :toplevel)]
+              (if (= :ok (first r))
+                [:pass "read as the expect tool reads it (Parse.use_file)"]
+                [:fail "the expect tool's read (Parse.use_file) rejects it"]))
+    (:toplevel :script)
+    (let [r (p/parse b base :toplevel)]
+      (cond
+        (= :ok (first r)) [:pass (str "read as the " (name tool) " reads it (use_file)")]
+        (nil? ref) [:fail "rejected as use_file, no reference"]
+        :else
+        (let [rep (if (= tool :toplevel)
+                    (let [s (toplevel-chunk-start b base (error-offset r))
+                          chunk (java.util.Arrays/copyOfRange b (int s) (alength b))]
+                      (report-of chunk "//toplevel//" :toplevel flags))
+                    (report-of b base :toplevel flags))]
+          (if (and (seq rep) (str/includes? ref rep))
+            [:pass (str "the " (name tool) "'s expected rejection: its report is in the reference")]
+            [:fail (str "the " (name tool) "'s report is not in the reference")]))))
+    [:fail "no tool"]))
+
+(defn own-read
+  "OC213 (a): the verdict of a testsuite file the reader rejects, by its own test (above): [:pass how] or [:fail why]. PATH the
+  file, REL its name in the corpus; with TEST-PATH (a negative control), the file judged as TEST-PATH's test reads its own file,
+  against TEST-PATH's reference"
+  ([^String path ^String rel] (own-read path rel path))
+  ([^String path ^String rel ^String test-path]
+  (let [f (File. path)
+        b (read-bytes path)
+        base (.getName f)
+        stem (str/replace test-path #"\.mli?$" "")
+        block (test-block (String. (read-bytes test-path) "ISO-8859-1"))]
+    (if block
+      (let [tool (tool-of block)]
+        (if tool
+          (judge-as b base rel tool (reference-text stem tool) (header-flags block))
+          [:fail "its test reads it with no tool judged here"]))
+      ;; a file another test of its directory names
+      (let [tf (File. test-path)
+            tbase (.getName tf)
+            pdir (.getParentFile tf)
+            ;; its directory's tests naming it, then its parent's naming DIR/FILE (load_path/test.ml's test_file = "test/driver.ml")
+            users (for [[^File d nm] [[pdir tbase] [(.getParentFile pdir) (str (.getName pdir) "/" tbase)]]
+                        ^File g (sort-by #(.getName ^File %) (or (seq (.listFiles d)) []))
+                        :let [n (.getName g)]
+                        :when (and (re-find #"\.mli?$" n) (not= n tbase))
+                        :let [blk (test-block (slurp g))]
+                        :when (and blk (str/includes? blk nm) (tool-of blk))]
+                    [g blk])]
+        (if-let [[^File g blk] (first users)]
+          (let [tool (if (= (tool-of blk) :ocamlc) :ocamlc :script)
+                [v how] (judge-as b base rel tool (reference-text (str/replace (.getPath g) #"\.mli?$" "") (tool-of blk)) (header-flags blk))]
+            [v (str how " (" (.getName g) "'s test reads it)")])
+          [:fail "no test of its own, none of its directory names it"]))))))
+
+(defn own-read-controls
+  "OC213 (a)'s negative controls: each line `SUBJECT REFERENCE` of CONTROLS-FILE (paths under ROOT; # comments) judges the subject
+  as the reference's test reads its own file, against its reference: it must fail. [[subject reference verdict how] ...]"
+  [^String root ^String controls-file]
+  (vec (for [l (str/split-lines (slurp controls-file))
+             :let [[s r] (str/split (str/trim l) #"\s+")]
+             :when (and s r (not (str/starts-with? s "#")))]
+         (let [[v how] (try (own-read (str root "/" s) s (str root "/" r)) (catch Throwable t [:fail (str "failure: " (.getMessage t))]))]
+           [s r v how]))))
+
+(defn- do-own-read [{:keys [opts]}]
+  (let [root (get opts "--root") files (list-files (get opts "--list"))
+        res (for [rel files] (let [[v how] (try (own-read (str root "/" rel) rel)
+                                                (catch Throwable t [:fail (str "failure: " (.getMessage t))]))]
+                               (println (str rel "\t" (name v) "\t" how))
+                               v))]
+    (println (str "own-read: " (count files) " files, " (count (filter #(= :pass %) (doall res))) " pass by their own test"))))
+
 (defn- do-dump [{:keys [opts args]}]
   (let [f (first args)
         name (or (get opts "--file") f)]
@@ -377,4 +523,5 @@
       "report" (do-report (pa #{"--file" "--flags"}))
       "errors-check" (do-errors-check (pa #{"--dir"}))
       "mutants" (do-mutants (pa #{"--root" "--list" "--out" "--n" "--seed"}))
-      (do (println "usage: -m arbace.repr.ocaml.native dump|read|check|report|errors-check|mutants ...") (System/exit 2)))))
+      "own-read" (do-own-read (pa #{"--root" "--list"}))
+      (do (println "usage: -m arbace.repr.ocaml.native dump|read|check|report|errors-check|mutants|own-read ...") (System/exit 2)))))

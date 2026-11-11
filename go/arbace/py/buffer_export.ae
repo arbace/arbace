@@ -1,0 +1,197 @@
+(in-ns 'go.arbace.py) ^{:go/comments [[9 1 "// Buffer exports (queue 249; Objects/memoryobject.c's managed buffer, Modules/arraymodule.c's ob_exports and"] [10 1 "// Objects/bytearrayobject.c's): an exporter counts the buffers it exports and refuses a resize while one is held"] [11 1 "// (BufferError). A memoryview of a counting exporter holds one export through its managed buffer, shared by the"] [12 1 "// views made from it (a slice, a cast, memoryview(view), toreadonly), from its creation until the last of those views"] [13 1 "// is released: by release() or the context manager's exit, or at its death (memory_dealloc's release; pyi's"] [14 1 "// finalizer, TrackFinalizer, queue 241)."] [15 1 "//"] [16 1 "// pyi has no reference counts, so a view dropped without release() still counts until Go's collector finds it dead:"] [17 1 "// a resize that finds the count above zero first asks the collector (exportsVerify) and refuses only when a view"] [18 1 "// still holds the export. Those collections have the moment at del's kind of budget (exportsSpent; finSpent, queue"] [19 1 "// 222: a tenth of the elapsed wall time, and 200 ms); past it the resize is allowed, as before 249 (a view of the old size reads what the"] [20 1 "// exporter now holds, never past it: memoryview.go reads the exporter's bytes at each access)."] [21 1 "//"] [22 1 "// The mechanism is any exporter's (array; bytearray under PYI_BYTEARRAY_EXPORTS=1, bytearray.go says why not by"] [23 1 "// default; queue 244's ctypes objects, another package's): embed a BufferExports, answer Exports() (nil: no count),"] [24 1 "// call Refuse before a resize; memoryview() of the object then counts."] [25 1 "//"] [26 1 "// Under goi (the runtime interpreted) a view a returned call left in goi's registers is not found dead (queue 218's"] [27 1 "// REQUEST, 222's finding): a resize after such a temporary view can then be refused where CPython allows it."] [29 1 "// BufferExports is an exporter's ob_exports: the managed buffers of its views not released. confirmed is the count a"] [30 1 "// collection last found held (-1, or any other value than n, once the count moved since): a refusal at that count"] [31 1 "// asks the collector nothing more, so a view held over many refused resizes costs one collection, not one each."] [34 1 "// BufferExporter is an exporter that counts its exports (builtinValue of a subclass's instance answers too)."] [37 1 "// Count is the exports held (a view not released, or not yet found dead)."] [40 1 "// Refuse is the exporter's check before it changes its buffer's size: nil while nothing holds an export (after the"] [41 1 "// collector found the views dropped unreleased dead), else BufferError msg (arraymodule.c's \"cannot resize an array"] [42 1 "// that is exporting buffers\", bytearray's \"Existing exports of data: object cannot be re-sized\")."] [53 1 "// Acquire and Release are a native's own export over a call (PyObject_GetBuffer ... PyBuffer_Release), for an"] [54 1 "// exporter whose buffer must not move while the call holds it."] [69 1 "// exportsOf is o's count, nil when o (or the built-in value of a subclass's instance) counts none."] [80 1 "// managedBuffer is _PyManagedBufferObject: one export of an exporter, shared by the views made from the first."] [82 23 "// the exporter's count (nil: the exporter counts none)"] [83 23 "// the views registered and not released (mbuf->exports)"] [84 2 "// a class's __buffer__ (PEP 688): the exporter whose __release_buffer__ gets the view __buffer__ returned"] [89 1 "// newManagedBuffer is the export memoryview(o) takes: o's count raised when it counts."] [93 3 "// PYI_NO_FINALIZERS: no view is ever found dead, so none counts (pyi's behaviour before 249)"] [100 1 "// register makes v a view of mb (mbuf_add_view): it holds the export until released or dead."] [111 1 "// drop is mbuf_release: the export given back once the last view went."] [125 1 "// memoryviewFinalize is memory_dealloc's release of a view never released: its export given back."] [137 1 "// exportsVerify is the collection at a refused resize: Go's collection and the finalizers' drain (finRound) while it"] [138 1 "// gives exports back, within the collections' budget; whether e still exports (false also past the budget, or while"] [139 1 "// finalizers are draining: the resize then allowed). A count found held is confirmed until it moves."] [166 1 "// exportsRound is finRound's collection with a shorter wait: Go's collection, then a wait until a dead object is"] [167 1 "// queued or Go's finalizers have been still for 3 ms (polled every 100 us), then the drain. A view dropped unreleased"] [168 1 "// is queued as soon as Go's finalizer goroutine runs, so the common case (a temporary view) costs the collection"] [169 1 "// alone; a view still held costs the 3 ms once (BufferExports.confirmed)."] [193 2 "// exportsSpent is the time the refused resizes' collections took: held to a tenth of the elapsed wall time and"] [194 2 "// 200 ms, the moment at del's rule (finSpent, queue 222) with a budget of its own"] [196 2 "// PYI_EXPORTS_DEBUG=1: each verification's rounds on stderr"]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[71 32] [74 46] [132 23] [149 16] [149 38] [174 28] [174 57] [182 28]]} (go/file "buffer_export.go" :imports [
+
+
+    ^{:go/apos {1 [4 2]} :go/pos {:lparen [3 8] :rparen [7 1] :tok-pos [3 1]}} [os "os"]
+    ^{:go/apos {1 [5 2]}} [runtime "runtime"]
+    ^{:go/apos {1 [6 2]}} [time "time"]])
+
+
+;; Buffer exports (queue 249; Objects/memoryobject.c's managed buffer, Modules/arraymodule.c's ob_exports and
+;; Objects/bytearrayobject.c's): an exporter counts the buffers it exports and refuses a resize while one is held
+;; (BufferError). A memoryview of a counting exporter holds one export through its managed buffer, shared by the
+;; views made from it (a slice, a cast, memoryview(view), toreadonly), from its creation until the last of those views
+;; is released: by release() or the context manager's exit, or at its death (memory_dealloc's release; pyi's
+;; finalizer, TrackFinalizer, queue 241).
+;;
+;; pyi has no reference counts, so a view dropped without release() still counts until Go's collector finds it dead:
+;; a resize that finds the count above zero first asks the collector (exportsVerify) and refuses only when a view
+;; still holds the export. Those collections have the moment at del's kind of budget (exportsSpent; finSpent, queue
+;; 222: a tenth of the elapsed wall time, and 200 ms); past it the resize is allowed, as before 249 (a view of the old size reads what the
+;; exporter now holds, never past it: memoryview.go reads the exporter's bytes at each access).
+;;
+;; The mechanism is any exporter's (array; bytearray under PYI_BYTEARRAY_EXPORTS=1, bytearray.go says why not by
+;; default; queue 244's ctypes objects, another package's): embed a BufferExports, answer Exports() (nil: no count),
+;; call Refuse before a resize; memoryview() of the object then counts.
+;;
+;; Under goi (the runtime interpreted) a view a returned call left in goi's registers is not found dead (queue 218's
+;; REQUEST, 222's finding): a resize after such a temporary view can then be refused where CPython allows it.
+
+
+
+
+^{:go/pos {:doc [29 1] :tok-pos [32 1]}} (go/type ^{:go/pos {:name-pos [32 6]}} BufferExports "BufferExports is an exporter's ob_exports: the managed buffers of its views not released. confirmed is the count a\ncollection last found held (-1, or any other value than n, once the count moved since): a refusal at that count\nasks the collector nothing more, so a view held over many refused resizes costs one collection, not one each.\n" ^{:go/pos {:lbrace [32 26] :rbrace [32 45] :struct [32 20]}} (struct ^{:tag ^{:go/pos {:name-pos [32 41]}} int :go/pos {:name-pos [32 28]}} n ^{:tag ^{:go/pos {:name-pos [32 41]}} int :go/pos {:name-pos [32 31]}} confirmed))
+
+
+^{:go/pos {:doc [34 1] :tok-pos [35 1]}} (go/type ^{:go/pos {:name-pos [35 6]}} BufferExporter "BufferExporter is an exporter that counts its exports (builtinValue of a subclass's instance answers too).\n" ^{:go/pos {:interface [35 21] :lbrace [35 30] :rbrace [35 57]}} (interface (^{:go/pos {:name-pos [35 32]}} Exports ^{:tag ^{:go/pos {:star [35 42]}} (* ^{:go/pos {:name-pos [35 43]}} BufferExports) :go/pos {:closing [35 40] :opening [35 39]}} [])))
+
+
+^{:go/pos {:doc [37 1] :func [38 1] :lbrace [38 37] :rbrace [38 50] :return [38 39]}} (go/method ^{:go/pos {:name-pos [38 25]}} Count "Count is the exports held (a view not released, or not yet found dead).\n" ^{:tag ^{:go/pos {:name-pos [38 33]}} int :go/pos {:closing [38 31] :opening [38 30] :recv-closing [38 23] :recv-opening [38 6]}} [^{:tag ^{:go/pos {:star [38 9]}} (* ^{:go/pos {:name-pos [38 10]}} BufferExports) :go/pos {:name-pos [38 7]}} e] ^{:go/pos {:dot [38 47] :name-pos [38 48]}} (.-n ^{:go/pos {:name-pos [38 46]}} e))
+
+
+
+
+^{:go/pos {:doc [40 1] :func [43 1] :lbrace [43 50] :rbrace [51 1] :return [50 2]}} (go/method ^{:go/pos {:name-pos [43 25]}} Refuse "Refuse is the exporter's check before it changes its buffer's size: nil while nothing holds an export (after the\ncollector found the views dropped unreleased dead), else BufferError msg (arraymodule.c's \"cannot resize an array\nthat is exporting buffers\", bytearray's \"Existing exports of data: object cannot be re-sized\").\n" ^{:tag ^{:go/pos {:name-pos [43 44]}} error :go/pos {:closing [43 42] :opening [43 31] :recv-closing [43 23] :recv-opening [43 6]}} [^{:tag ^{:go/pos {:star [43 9]}} (* ^{:go/pos {:name-pos [43 10]}} BufferExports) :go/pos {:name-pos [43 7]}} e ^{:tag ^{:go/pos {:name-pos [43 36]}} string :go/pos {:name-pos [43 32]}} msg]
+  ^{:go/pos {:if [44 2] :lbrace [44 26] :rbrace [46 2]}} (when ^{:go/pos {:op-pos [44 14]}} (or ^{:go/apos {2 [44 10]} :go/pos {:op-pos [44 7]}} (== ^{:go/pos {:name-pos [44 5]}} e nil) ^{:go/apos {2 [44 24]} :go/pos {:op-pos [44 21]}} (<= ^{:go/pos {:dot [44 18] :name-pos [44 19]}} (.-n ^{:go/pos {:name-pos [44 17]}} e) 0))
+    ^{:go/apos {1 [45 10]} :go/pos {:return [45 3]}} (return nil))
+
+  ^{:go/pos {:if [47 2] :lbrace [47 45] :rbrace [49 2]}} (when ^{:go/pos {:op-pos [47 24]}} (and ^{:go/pos {:op-pos [47 9]}} (!= ^{:go/pos {:dot [47 6] :name-pos [47 7]}} (.-n ^{:go/pos {:name-pos [47 5]}} e) ^{:go/pos {:dot [47 13] :name-pos [47 14]}} (.-confirmed ^{:go/pos {:name-pos [47 12]}} e)) ^{:go/pos {:op-pos [47 27]}} (not ^{:go/pos {:lparen [47 41] :rparen [47 43]}} (^{:go/pos {:name-pos [47 28]}} exportsVerify ^{:go/pos {:name-pos [47 42]}} e)))
+    ^{:go/apos {1 [48 10]} :go/pos {:return [48 3]}} (return nil))
+
+  ^{:go/pos {:lparen [50 14] :rparen [50 35]}} (^{:go/pos {:name-pos [50 9]}} Raise ^{:go/pos {:name-pos [50 15]}} BufferErrorType ^{:go/pos {:name-pos [50 32]}} msg))
+
+
+
+
+^{:go/pos {:doc [53 1] :func [55 1] :lbrace [55 35] :rbrace [60 1]}} (go/method ^{:go/pos {:name-pos [55 25]}} Acquire "Acquire and Release are a native's own export over a call (PyObject_GetBuffer ... PyBuffer_Release), for an\nexporter whose buffer must not move while the call holds it.\n" ^{:go/pos {:closing [55 33] :opening [55 32] :recv-closing [55 23] :recv-opening [55 6]}} [^{:tag ^{:go/pos {:star [55 9]}} (* ^{:go/pos {:name-pos [55 10]}} BufferExports) :go/pos {:name-pos [55 7]}} e]
+  ^{:go/pos {:if [56 2] :lbrace [56 14] :rbrace [59 2]}} (when ^{:go/apos {2 [56 10]} :go/pos {:op-pos [56 7]}} (!= ^{:go/pos {:name-pos [56 5]}} e nil)
+    ^{:go/pos {:tok-pos [57 6]}} (inc! ^{:go/pos {:dot [57 4] :name-pos [57 5]}} (.-n ^{:go/pos {:name-pos [57 3]}} e))
+    ^{:go/apos {2 [58 17]} :go/pos {:tok-pos [58 15]}} (set! ^{:go/pos {:dot [58 4] :name-pos [58 5]}} (.-confirmed ^{:go/pos {:name-pos [58 3]}} e) -1)))
+
+
+
+^{:go/pos {:func [62 1] :lbrace [62 35] :rbrace [67 1]}} (go/method ^{:go/pos {:name-pos [62 25]}} Release ^{:go/pos {:closing [62 33] :opening [62 32] :recv-closing [62 23] :recv-opening [62 6]}} [^{:tag ^{:go/pos {:star [62 9]}} (* ^{:go/pos {:name-pos [62 10]}} BufferExports) :go/pos {:name-pos [62 7]}} e]
+  ^{:go/pos {:if [63 2] :lbrace [63 25] :rbrace [66 2]}} (when ^{:go/pos {:op-pos [63 14]}} (and ^{:go/apos {2 [63 10]} :go/pos {:op-pos [63 7]}} (!= ^{:go/pos {:name-pos [63 5]}} e nil) ^{:go/apos {2 [63 23]} :go/pos {:op-pos [63 21]}} (> ^{:go/pos {:dot [63 18] :name-pos [63 19]}} (.-n ^{:go/pos {:name-pos [63 17]}} e) 0))
+    ^{:go/pos {:tok-pos [64 6]}} (dec! ^{:go/pos {:dot [64 4] :name-pos [64 5]}} (.-n ^{:go/pos {:name-pos [64 3]}} e))
+    ^{:go/apos {2 [65 17]} :go/pos {:tok-pos [65 15]}} (set! ^{:go/pos {:dot [65 4] :name-pos [65 5]}} (.-confirmed ^{:go/pos {:name-pos [65 3]}} e) -1)))
+
+
+
+
+^{:go/apos {6 [77 9]} :go/pos {:doc [69 1] :func [70 1] :lbrace [70 41] :rbrace [78 1] :return [77 2]}} (go/func ^{:go/pos {:name-pos [70 6]}} exportsOf "exportsOf is o's count, nil when o (or the built-in value of a subclass's instance) counts none.\n" ^{:tag ^{:go/pos {:star [70 26]}} (* ^{:go/pos {:name-pos [70 27]}} BufferExports) :go/pos {:closing [70 24] :opening [70 15]}} [^{:tag ^{:go/pos {:name-pos [70 18]}} Object :go/pos {:name-pos [70 16]}} o]
+  ^{:go/pos {:if [71 2] :lbrace [71 37] :rbrace [73 2]}} (when [^{:go/pos {:tok-pos [71 11]}} (values ^{:go/pos {:name-pos [71 5]}} x ^{:go/pos {:name-pos [71 8]}} ok) ^{:go/pos {:dot [71 15] :lparen [71 16] :rparen [71 31]}} (assert ^{:go/pos {:name-pos [71 17]}} BufferExporter ^{:go/pos {:name-pos [71 14]}} o)] ^{:go/pos {:name-pos [71 34]}} ok
+    ^{:go/pos {:return [72 3]}} (return ^{:go/pos {:dot [72 11] :lparen [72 19] :name-pos [72 12] :rparen [72 20]}} (.Exports ^{:go/pos {:name-pos [72 10]}} x)))
+
+  ^{:go/pos {:if [74 2] :lbrace [74 51] :rbrace [76 2]}} (when [^{:go/pos {:tok-pos [74 11]}} (values ^{:go/pos {:name-pos [74 5]}} x ^{:go/pos {:name-pos [74 8]}} ok) ^{:go/pos {:dot [74 29] :lparen [74 30] :rparen [74 45]}} (assert ^{:go/pos {:name-pos [74 31]}} BufferExporter ^{:go/pos {:lparen [74 26] :rparen [74 28]}} (^{:go/pos {:name-pos [74 14]}} builtinValue ^{:go/pos {:name-pos [74 27]}} o))] ^{:go/pos {:name-pos [74 48]}} ok
+    ^{:go/pos {:return [75 3]}} (return ^{:go/pos {:dot [75 11] :lparen [75 19] :name-pos [75 12] :rparen [75 20]}} (.Exports ^{:go/pos {:name-pos [75 10]}} x)))
+
+  nil)
+
+
+
+^{:go/pos {:doc [80 1] :tok-pos [81 1]}} (go/type ^{:go/pos {:name-pos [81 6]}} managedBuffer "managedBuffer is _PyManagedBufferObject: one export of an exporter, shared by the views made from the first.\n" ^{:go/pos {:lbrace [81 27] :rbrace [87 1] :struct [81 20]}} (struct
+    ^{:tag ^{:go/pos {:star [82 8]}} (* ^{:go/pos {:name-pos [82 9]}} BufferExports) :go/pos {:name-pos [82 2]}} exp ; the exporter's count (nil: the exporter counts none)
+    ^{:tag ^{:go/pos {:name-pos [83 8]}} int :go/pos {:name-pos [83 2]}} views ; the views registered and not released (mbuf->exports)
+
+    ^{:tag ^{:go/pos {:name-pos [85 13]}} Object :doc "a class's __buffer__ (PEP 688): the exporter whose __release_buffer__ gets the view __buffer__ returned\n" :go/pos {:name-pos [85 2]}} pyExporter
+    ^{:tag ^{:go/pos {:star [86 13]}} (* ^{:go/pos {:name-pos [86 14]}} MemoryView) :go/pos {:name-pos [86 2]}} pyView))
+
+
+
+^{:go/pos {:doc [89 1] :func [90 1] :lbrace [90 48] :rbrace [98 1] :return [97 2]}} (go/func ^{:go/pos {:name-pos [90 6]}} newManagedBuffer "newManagedBuffer is the export memoryview(o) takes: o's count raised when it counts.\n" ^{:tag ^{:go/pos {:star [90 33]}} (* ^{:go/pos {:name-pos [90 34]}} managedBuffer) :go/pos {:closing [90 31] :opening [90 22]}} [^{:tag ^{:go/pos {:name-pos [90 25]}} Object :go/pos {:name-pos [90 23]}} o]
+  (let [^{:go/pos {:name-pos [91 2] :tok-pos [91 4]}} e ^{:go/pos {:lparen [91 16] :rparen [91 18]}} (^{:go/pos {:name-pos [91 7]}} exportsOf ^{:go/pos {:name-pos [91 17]}} o)]
+    ^{:go/pos {:if [92 2] :lbrace [92 28] :rbrace [95 2]}} (when ^{:go/pos {:op-pos [92 14]}} (or ^{:go/apos {2 [92 10]} :go/pos {:op-pos [92 7]}} (== ^{:go/pos {:name-pos [92 5]}} e nil) ^{:go/pos {:name-pos [92 17]}} finDisable)
+      ;; PYI_NO_FINALIZERS: no view is ever found dead, so none counts (pyi's behaviour before 249)
+      ^{:go/apos {1 [94 10]} :go/pos {:return [94 3]}} (return nil))
+
+    ^{:go/pos {:dot [96 3] :lparen [96 11] :name-pos [96 4] :rparen [96 12]}} (.Acquire ^{:go/pos {:name-pos [96 2]}} e)
+    ^{:go/pos {:op-pos [97 9]}} (addr ^{:go/acolon {2 [97 27]} :go/apos {2 [97 24]} :go/pos {:lbrace [97 23] :rbrace [97 30]}} (lit ^{:go/pos {:name-pos [97 10]}} managedBuffer :exp ^{:go/pos {:name-pos [97 29]}} e))))
+
+
+
+^{:go/pos {:doc [100 1] :func [101 1] :lbrace [101 62] :rbrace [109 1] :return [108 2]}} (go/method ^{:go/pos {:name-pos [101 26]}} register "register makes v a view of mb (mbuf_add_view): it holds the export until released or dead.\n" ^{:tag ^{:go/pos {:star [101 50]}} (* ^{:go/pos {:name-pos [101 51]}} MemoryView) :go/pos {:closing [101 48] :opening [101 34] :recv-closing [101 24] :recv-opening [101 6]}} [^{:tag ^{:go/pos {:star [101 10]}} (* ^{:go/pos {:name-pos [101 11]}} managedBuffer) :go/pos {:name-pos [101 7]}} mb ^{:tag ^{:go/pos {:star [101 37]}} (* ^{:go/pos {:name-pos [101 38]}} MemoryView) :go/pos {:name-pos [101 35]}} v]
+  ^{:go/pos {:if [102 2] :lbrace [102 15] :rbrace [104 2]}} (when ^{:go/apos {2 [102 11]} :go/pos {:op-pos [102 8]}} (== ^{:go/pos {:name-pos [102 5]}} mb nil)
+    ^{:go/pos {:return [103 3]}} (return ^{:go/pos {:name-pos [103 10]}} v))
+
+  ^{:go/pos {:tok-pos [105 9]}} (set! ^{:go/pos {:dot [105 3] :name-pos [105 4]}} (.-mbuf ^{:go/pos {:name-pos [105 2]}} v) ^{:go/pos {:name-pos [105 11]}} mb)
+  ^{:go/pos {:tok-pos [106 10]}} (inc! ^{:go/pos {:dot [106 4] :name-pos [106 5]}} (.-views ^{:go/pos {:name-pos [106 2]}} mb))
+  ^{:go/pos {:lparen [107 16] :rparen [107 38]}} (^{:go/pos {:name-pos [107 2]}} TrackFinalizer ^{:go/pos {:name-pos [107 17]}} v ^{:go/pos {:name-pos [107 20]}} memoryviewFinalize)
+  ^{:go/pos {:name-pos [108 9]}} v)
+
+
+
+^{:go/apos {6 [122 9]} :go/pos {:doc [111 1] :func [112 1] :lbrace [112 39] :rbrace [123 1] :return [122 2]}} (go/method ^{:go/pos {:name-pos [112 26]}} drop "drop is mbuf_release: the export given back once the last view went.\n" ^{:tag ^{:go/pos {:name-pos [112 33]}} error :go/pos {:closing [112 31] :opening [112 30] :recv-closing [112 24] :recv-opening [112 6]}} [^{:tag ^{:go/pos {:star [112 10]}} (* ^{:go/pos {:name-pos [112 11]}} managedBuffer) :go/pos {:name-pos [112 7]}} mb]
+  ^{:go/pos {:if [113 2] :lbrace [113 19] :rbrace [116 2]}} (when ^{:go/apos {2 [113 15]} :go/pos {:op-pos [113 12]}} (!= ^{:go/pos {:dot [113 7] :name-pos [113 8]}} (.-exp ^{:go/pos {:name-pos [113 5]}} mb) nil)
+    ^{:go/pos {:dot [114 9] :lparen [114 17] :name-pos [114 10] :rparen [114 18]}} (.Release ^{:go/pos {:dot [114 5] :name-pos [114 6]}} (.-exp ^{:go/pos {:name-pos [114 3]}} mb))
+    ^{:go/apos {2 [115 12]} :go/pos {:tok-pos [115 10]}} (set! ^{:go/pos {:dot [115 5] :name-pos [115 6]}} (.-exp ^{:go/pos {:name-pos [115 3]}} mb) nil))
+
+  ^{:go/pos {:if [117 2] :lbrace [117 26] :rbrace [121 2]}} (when ^{:go/apos {2 [117 22]} :go/pos {:op-pos [117 19]}} (!= ^{:go/pos {:dot [117 7] :name-pos [117 8]}} (.-pyExporter ^{:go/pos {:name-pos [117 5]}} mb) nil)
+    (let [^{:go/pos {:tok-pos [118 8]}} (values ^{:go/pos {:name-pos [118 3]}} o ^{:go/pos {:name-pos [118 6]}} v) (values ^{:go/pos {:dot [118 13] :name-pos [118 14]}} (.-pyExporter ^{:go/pos {:name-pos [118 11]}} mb) ^{:go/pos {:dot [118 28] :name-pos [118 29]}} (.-pyView ^{:go/pos {:name-pos [118 26]}} mb))]
+      ^{:go/pos {:tok-pos [119 28]}} (set! (values ^{:go/pos {:dot [119 5] :name-pos [119 6]}} (.-pyExporter ^{:go/pos {:name-pos [119 3]}} mb) ^{:go/pos {:dot [119 20] :name-pos [119 21]}} (.-pyView ^{:go/pos {:name-pos [119 18]}} mb)) ^{:go/apos {1 [119 30] 2 [119 35]}} (values nil nil))
+      ^{:go/pos {:return [120 3]}} (return ^{:go/pos {:lparen [120 23] :rparen [120 28]}} (^{:go/pos {:name-pos [120 10]}} releaseBuffer ^{:go/pos {:name-pos [120 24]}} o ^{:go/pos {:name-pos [120 27]}} v))))
+
+  nil)
+
+
+
+^{:go/pos {:doc [125 1] :func [126 1] :lbrace [126 35] :rbrace [135 1]}} (go/func ^{:go/pos {:name-pos [126 6]}} memoryviewFinalize "memoryviewFinalize is memory_dealloc's release of a view never released: its export given back.\n" ^{:go/pos {:closing [126 33] :opening [126 24]}} [^{:tag ^{:go/pos {:name-pos [126 27]}} Object :go/pos {:name-pos [126 25]}} o]
+  (let [^{:go/pos {:name-pos [127 2] :tok-pos [127 4]}} m ^{:go/pos {:dot [127 8] :lparen [127 9] :rparen [127 21]}} (assert ^{:go/pos {:star [127 10]}} (* ^{:go/pos {:name-pos [127 11]}} MemoryView) ^{:go/pos {:name-pos [127 7]}} o)
+      ^{:tag ^{:go/pos {:name-pos [128 13]}} string :go/pos {:name-pos [128 6] :tok-pos [128 2]}} pyType (zero ^{:go/pos {:name-pos [128 13]}} string)]
+    ^{:go/pos {:if [129 2] :lbrace [129 47] :rbrace [131 2]}} (when ^{:go/pos {:op-pos [129 19]}} (and ^{:go/apos {2 [129 15]} :go/pos {:op-pos [129 12]}} (!= ^{:go/pos {:dot [129 6] :name-pos [129 7]}} (.-mbuf ^{:go/pos {:name-pos [129 5]}} m) nil) ^{:go/apos {2 [129 43]} :go/pos {:op-pos [129 40]}} (!= ^{:go/pos {:dot [129 28] :name-pos [129 29]}} (.-pyExporter ^{:go/pos {:dot [129 23] :name-pos [129 24]}} (.-mbuf ^{:go/pos {:name-pos [129 22]}} m)) nil))
+      ^{:go/pos {:tok-pos [130 10]}} (set! ^{:go/pos {:name-pos [130 3]}} pyType ^{:go/pos {:dot [130 36] :name-pos [130 37]}} (.-Name ^{:go/pos {:dot [130 29] :lparen [130 34] :name-pos [130 30] :rparen [130 35]}} (.Type ^{:go/pos {:dot [130 18] :name-pos [130 19]}} (.-pyExporter ^{:go/pos {:dot [130 13] :name-pos [130 14]}} (.-mbuf ^{:go/pos {:name-pos [130 12]}} m))))))
+
+    ^{:go/pos {:if [132 2] :lbrace [132 36] :rbrace [134 2]}} (when [^{:go/pos {:name-pos [132 5] :tok-pos [132 9]}} err ^{:go/pos {:dot [132 13] :lparen [132 21] :name-pos [132 14] :rparen [132 22]}} (.release ^{:go/pos {:name-pos [132 12]}} m)] ^{:go/apos {2 [132 32]} :go/pos {:op-pos [132 29]}} (!= ^{:go/pos {:name-pos [132 25]}} err nil)
+      ^{:go/pos {:lparen [133 16] :rparen [133 74]}} (^{:go/pos {:name-pos [133 3]}} finUnraisable ^{:go/pos {:name-pos [133 17]}} err ^{:go/apos {1 [133 22]} :go/pos {:op-pos [133 67]}} (+ "Exception ignored in __release_buffer__ of " ^{:go/pos {:name-pos [133 68]}} pyType)))))
+
+
+
+
+
+
+^{:go/pos {:doc [137 1] :func [140 1] :lbrace [140 43] :rbrace [164 1] :return [163 2]}} (go/func ^{:go/pos {:name-pos [140 6]}} exportsVerify "exportsVerify is the collection at a refused resize: Go's collection and the finalizers' drain (finRound) while it\ngives exports back, within the collections' budget; whether e still exports (false also past the budget, or while\nfinalizers are draining: the resize then allowed). A count found held is confirmed until it moves.\n" ^{:tag ^{:go/pos {:name-pos [140 38]}} bool :go/pos {:closing [140 36] :opening [140 19]}} [^{:tag ^{:go/pos {:star [140 22]}} (* ^{:go/pos {:name-pos [140 23]}} BufferExports) :go/pos {:name-pos [140 20]}} e]
+  ^{:go/pos {:if [141 2] :lbrace [141 18] :rbrace [143 2]}} (when ^{:go/pos {:name-pos [141 5]}} exportsDebug
+    ^{:go/apos {1 [142 11]} :go/pos {:lparen [142 10] :rparen [142 86]}} (^{:go/pos {:name-pos [142 3]}} println "exports verify" ^{:go/pos {:dot [142 30] :name-pos [142 31]}} (.-n ^{:go/pos {:name-pos [142 29]}} e) ^{:go/pos {:dot [142 46] :lparen [142 53] :name-pos [142 47] :rparen [142 54]}} (.String ^{:go/pos {:name-pos [142 34]}} exportsSpent) ^{:go/pos {:dot [142 77] :lparen [142 84] :name-pos [142 78] :rparen [142 85]}} (.String ^{:go/pos {:lparen [142 67] :rparen [142 76]}} (^{:go/pos {:dot [142 61] :name-pos [142 62] :x-pos [142 57]}} time/Since ^{:go/pos {:name-pos [142 68]}} finStart))))
+
+  ^{:go/pos {:if [144 2] :lbrace [144 92] :rbrace [146 2]}} (when ^{:go/ops [[144 16] [144 29]] :go/pos {:op-pos [144 29]}} (or ^{:go/pos {:name-pos [144 5]}} finDisable ^{:go/pos {:name-pos [144 19]}} finDrains ^{:go/pos {:op-pos [144 45]}} (> ^{:go/pos {:name-pos [144 32]}} exportsSpent ^{:go/pos {:op-pos [144 67]}} (+ ^{:go/apos {1 [144 47]} :go/pos {:op-pos [144 50]}} (* 200 ^{:go/pos {:dot [144 55] :name-pos [144 56] :x-pos [144 51]}} time/Millisecond) ^{:go/apos {2 [144 89]} :go/pos {:op-pos [144 88]}} (/ ^{:go/pos {:lparen [144 78] :rparen [144 87]}} (^{:go/pos {:dot [144 72] :name-pos [144 73] :x-pos [144 68]}} time/Since ^{:go/pos {:name-pos [144 79]}} finStart) 10))))
+    ^{:go/apos {1 [145 10]} :go/pos {:return [145 3]}} (return false))
+
+  (let [^{:go/pos {:name-pos [147 2] :tok-pos [147 5]}} t0 ^{:go/pos {:lparen [147 16] :rparen [147 17]}} (^{:go/pos {:dot [147 12] :name-pos [147 13] :x-pos [147 8]}} time/Now)]
+    ^{:go/pos {:defer [148 2]}} (defer ^{:go/pos {:lparen [148 49] :rparen [148 50]}} (^{:go/pos {:func [148 8] :lbrace [148 15] :rbrace [148 48]}} (fn ^{:go/pos {:closing [148 13] :opening [148 12]}} [] ^{:go/pos {:tok-pos [148 30]}} (set! ^{:go/pos {:name-pos [148 17]}} exportsSpent + ^{:go/pos {:lparen [148 43] :rparen [148 46]}} (^{:go/pos {:dot [148 37] :name-pos [148 38] :x-pos [148 33]}} time/Since ^{:go/pos {:name-pos [148 44]}} t0)))))
+    ^{:go/pos {:for [149 2] :lbrace [149 48] :rbrace [159 2]}} (for ^{:go/apos {1 [149 15]}} [^{:go/pos {:name-pos [149 6] :tok-pos [149 12]}} round 0] ^{:go/pos {:op-pos [149 28]}} (and ^{:go/apos {2 [149 26]} :go/pos {:op-pos [149 24]}} (< ^{:go/pos {:name-pos [149 18]}} round 3) ^{:go/apos {2 [149 37]} :go/pos {:op-pos [149 35]}} (> ^{:go/pos {:dot [149 32] :name-pos [149 33]}} (.-n ^{:go/pos {:name-pos [149 31]}} e) 0)) ^{:go/pos {:tok-pos [149 45]}} (inc! ^{:go/pos {:name-pos [149 40]}} round)
+      (let [^{:go/pos {:name-pos [150 3] :tok-pos [150 10]}} before ^{:go/pos {:dot [150 14] :name-pos [150 15]}} (.-n ^{:go/pos {:name-pos [150 13]}} e)
+          ^{:go/pos {:name-pos [151 3] :tok-pos [151 6]}} t1 ^{:go/pos {:lparen [151 17] :rparen [151 18]}} (^{:go/pos {:dot [151 13] :name-pos [151 14] :x-pos [151 9]}} time/Now)]
+        ^{:go/pos {:lparen [152 15] :rparen [152 16]}} (^{:go/pos {:name-pos [152 3]}} exportsRound)
+        ^{:go/pos {:if [153 3] :lbrace [153 19] :rbrace [155 3]}} (when ^{:go/pos {:name-pos [153 6]}} exportsDebug
+          ^{:go/apos {1 [154 12] 4 [154 44]} :go/pos {:lparen [154 11] :rparen [154 78]}} (^{:go/pos {:name-pos [154 4]}} println "exports round" ^{:go/pos {:name-pos [154 29]}} round ^{:go/pos {:name-pos [154 36]}} before "->" ^{:go/pos {:dot [154 51] :name-pos [154 52]}} (.-n ^{:go/pos {:name-pos [154 50]}} e) ^{:go/pos {:dot [154 69] :lparen [154 76] :name-pos [154 70] :rparen [154 77]}} (.String ^{:go/pos {:lparen [154 65] :rparen [154 68]}} (^{:go/pos {:dot [154 59] :name-pos [154 60] :x-pos [154 55]}} time/Since ^{:go/pos {:name-pos [154 66]}} t1))))
+
+        ^{:go/pos {:if [156 3] :lbrace [156 20] :rbrace [158 3]}} (when ^{:go/pos {:op-pos [156 10]}} (== ^{:go/pos {:dot [156 7] :name-pos [156 8]}} (.-n ^{:go/pos {:name-pos [156 6]}} e) ^{:go/pos {:name-pos [156 13]}} before)
+          ^{:go/pos {:tok-pos [157 4]}} (break))))
+
+
+    ^{:go/pos {:if [160 2] :lbrace [160 13] :rbrace [162 2]}} (when ^{:go/apos {2 [160 11]} :go/pos {:op-pos [160 9]}} (> ^{:go/pos {:dot [160 6] :name-pos [160 7]}} (.-n ^{:go/pos {:name-pos [160 5]}} e) 0)
+      ^{:go/pos {:tok-pos [161 15]}} (set! ^{:go/pos {:dot [161 4] :name-pos [161 5]}} (.-confirmed ^{:go/pos {:name-pos [161 3]}} e) ^{:go/pos {:dot [161 18] :name-pos [161 19]}} (.-n ^{:go/pos {:name-pos [161 17]}} e)))
+
+    ^{:go/apos {2 [163 15]} :go/pos {:op-pos [163 13]}} (> ^{:go/pos {:dot [163 10] :name-pos [163 11]}} (.-n ^{:go/pos {:name-pos [163 9]}} e) 0)))
+
+
+
+
+
+
+^{:go/pos {:doc [166 1] :func [170 1] :lbrace [170 21] :rbrace [190 1]}} (go/func ^{:go/pos {:name-pos [170 6]}} exportsRound "exportsRound is finRound's collection with a shorter wait: Go's collection, then a wait until a dead object is\nqueued or Go's finalizers have been still for 3 ms (polled every 100 us), then the drain. A view dropped unreleased\nis queued as soon as Go's finalizer goroutine runs, so the common case (a temporary view) costs the collection\nalone; a view still held costs the 3 ms once (BufferExports.confirmed).\n" ^{:go/pos {:closing [170 19] :opening [170 18]}} []
+  ^{:go/pos {:lparen [171 14] :rparen [188 3]}} (^{:go/pos {:name-pos [171 2]}} allowThreads ^{:go/pos {:func [171 15] :lbrace [171 22] :rbrace [188 2]}} (fn ^{:go/pos {:closing [171 20] :opening [171 19]}} []
+      ^{:go/pos {:lparen [172 13] :rparen [172 14]}} (^{:go/pos {:dot [172 10] :name-pos [172 11] :x-pos [172 3]}} runtime/GC)
+      (let [^{:go/pos {:name-pos [173 3] :tok-pos [173 8]}} last ^{:go/pos {:dot [173 18] :lparen [173 23] :name-pos [173 19] :rparen [173 24]}} (.Load ^{:go/pos {:name-pos [173 11]}} finRuns)]
+        ^{:go/pos {:for [174 3] :lbrace [174 68] :rbrace [187 3]}} (for [^{:go/pos {:tok-pos [174 21]}} (values ^{:go/pos {:name-pos [174 7]}} quiet ^{:go/pos {:name-pos [174 14]}} waited) ^{:go/apos {1 [174 24] 2 [174 27]}} (values 0 0)] ^{:go/pos {:op-pos [174 41]}} (and ^{:go/apos {2 [174 38]} :go/pos {:op-pos [174 36]}} (< ^{:go/pos {:name-pos [174 30]}} quiet 30) ^{:go/apos {2 [174 53]} :go/pos {:op-pos [174 51]}} (< ^{:go/pos {:name-pos [174 44]}} waited 2000)) ^{:go/pos {:tok-pos [174 65]}} (inc! ^{:go/pos {:name-pos [174 59]}} waited)
+          ^{:go/pos {:dot [175 9] :lparen [175 14] :name-pos [175 10] :rparen [175 15]}} (.Lock ^{:go/pos {:name-pos [175 4]}} finMu)
+          (let [^{:go/pos {:name-pos [176 4] :tok-pos [176 11]}} queued ^{:go/apos {2 [176 30]} :go/pos {:op-pos [176 28]}} (> ^{:go/pos {:lparen [176 17] :rparen [176 26]}} (^{:go/pos {:name-pos [176 14]}} len ^{:go/pos {:name-pos [176 18]}} finQueue) 0)]
+            ^{:go/pos {:dot [177 9] :lparen [177 16] :name-pos [177 10] :rparen [177 17]}} (.Unlock ^{:go/pos {:name-pos [177 4]}} finMu)
+            ^{:go/pos {:if [178 4] :lbrace [178 14] :rbrace [180 4]}} (when ^{:go/pos {:name-pos [178 7]}} queued
+              ^{:go/pos {:return [179 5]}} (return))
+
+            ^{:go/pos {:lparen [181 14] :rparen [181 37]}} (^{:go/pos {:dot [181 8] :name-pos [181 9] :x-pos [181 4]}} time/Sleep ^{:go/apos {1 [181 15]} :go/pos {:op-pos [181 19]}} (* 100 ^{:go/pos {:dot [181 25] :name-pos [181 26] :x-pos [181 21]}} time/Microsecond))
+            ^{:go/pos {:else-lbrace [184 11] :else-rbrace [186 4] :if [182 4] :lbrace [182 42] :rbrace [184 4]}} (if [^{:go/pos {:name-pos [182 7] :tok-pos [182 11]}} now ^{:go/pos {:dot [182 21] :lparen [182 26] :name-pos [182 22] :rparen [182 27]}} (.Load ^{:go/pos {:name-pos [182 14]}} finRuns)] ^{:go/pos {:op-pos [182 34]}} (!= ^{:go/pos {:name-pos [182 30]}} now ^{:go/pos {:name-pos [182 37]}} last)
+              ^{:go/pos {:tok-pos [183 17]}} (set! (values ^{:go/pos {:name-pos [183 5]}} last ^{:go/pos {:name-pos [183 11]}} quiet) ^{:go/apos {2 [183 24]}} (values ^{:go/pos {:name-pos [183 19]}} now 0))
+
+              ^{:go/pos {:tok-pos [185 10]}} (inc! ^{:go/pos {:name-pos [185 5]}} quiet)))))))
+
+
+
+  ^{:go/pos {:lparen [189 17] :rparen [189 18]}} (^{:go/pos {:name-pos [189 2]}} drainFinalizers))
+
+
+^{:go/pos {:lparen [192 5] :rparen [198 1] :tok-pos [192 1]}} (go/var
+
+
+  [^{:tag ^{:go/pos {:dot [195 19] :name-pos [195 20] :x-pos [195 15]}} time/Duration :doc "exportsSpent is the time the refused resizes' collections took: held to a tenth of the elapsed wall time and\n200 ms, the moment at del's rule (finSpent, queue 222) with a budget of its own\n" :go/pos {:name-pos [195 2]}} exportsSpent]
+
+  [^{:doc "PYI_EXPORTS_DEBUG=1: each verification's rounds on stderr\n" :go/pos {:name-pos [197 2]}} exportsDebug ^{:go/apos {2 [197 51]} :go/pos {:op-pos [197 48]}} (!= ^{:go/apos {1 [197 27]} :go/pos {:lparen [197 26] :rparen [197 46]}} (^{:go/pos {:dot [197 19] :name-pos [197 20] :x-pos [197 17]}} os/Getenv "PYI_EXPORTS_DEBUG") "")])

@@ -103,8 +103,79 @@
       (println "== ghc") (doseq [x (get gb n)] (prn x))
       (println "== ours") (doseq [x (get ob n)] (prn x)))))
 
+(defn- signatures
+  "A module's exported top-level bindings' calling conventions: NAME -> its closure's arguments' representations (a
+  constructor application or a thunk: [])"
+  [forms]
+  (into {} (for [[n r] (tops-of forms) :when (ext? n)]
+             [n (if (and (seq? r) (= 'closure (first r))) (mapv second (nth r 3)) [])])))
+
+(defn abi
+  "HF10-P20: the calling conventions of every module of OURS (a directory of M.stg.ae) against GHC's (GHC's directory):
+  an exported binding whose arguments' representations differ (a caller compiled against one side breaks on the other),
+  one line each: NAME GHC's OURS"
+  [ghc-dir ours-dir]
+  (doseq [f (sort (map #(.getName %) (seq (.listFiles (java.io.File. ours-dir)))))
+          :when (str/ends-with? f ".stg.ae")
+          :let [gf (java.io.File. ghc-dir f)]
+          :when (.exists gf)]
+    (let [g (signatures (read-file (str gf))) o (signatures (read-file (str ours-dir "/" f)))]
+      (doseq [[n sg] (sort g) :let [so (get o n)] :when (and so (not= sg so))]
+        (println n (pr-str sg) (pr-str so))))))
+
+(defn- returns
+  "Every case on a call of an external function with an unboxed tuple's alternative: FUNCTION -> the set of value counts"
+  [forms]
+  (let [m (atom {})]
+    ((fn w [y] (when (or (seq? y) (vector? y))
+                 (when (and (seq? y) (= 'case (first y)) (seq? (second y)) (= 'app (first (second y)))
+                            (ext? (second (second y))) (seq? (nth y 3 nil)) (= 'multi (first (nth y 3))))
+                   (swap! m update (second (second y)) (fnil conj #{}) (second (nth y 3))))
+                 (doseq [z y] (w z))))
+     forms)
+    @m))
+
+(defn- tuple-cons
+  "Each top-level binding's unboxed tuples built: NAME -> the set of their sizes (the values returned)"
+  [forms]
+  (into {} (for [[n r] (tops-of forms) :when (ext? n)
+                 :let [m (atom #{})]]
+             (do ((fn w [y] (when (or (seq? y) (vector? y))
+                              (when (and (seq? y) (= 'con (first y)) (string? (second y)) (re-find #"/(\(#,*#\)|MkSolo#)$" (second y)))
+                                (swap! m conj (count (nth y 2))))
+                              (doseq [z y] (w z))))
+                  r)
+                 [n @m]))))
+
+(defn builds
+  "HF10-P20: the unboxed tuples' sizes each binding builds, OURS against GHC's, one line a binding that differs"
+  [ghc-dir ours-dir]
+  (doseq [f (sort (map #(.getName %) (seq (.listFiles (java.io.File. ours-dir)))))
+          :when (str/ends-with? f ".stg.ae")
+          :let [gf (java.io.File. ghc-dir f)]
+          :when (.exists gf)]
+    (let [g (tuple-cons (read-file (str gf))) o (tuple-cons (read-file (str ours-dir "/" f)))]
+      (doseq [[n so] (sort o) :let [sg (get g n)] :when (and sg (not= sg so) (seq (remove sg so)))]
+        (println n (pr-str (sort sg)) (pr-str (sort so)))))))
+
+(defn rets
+  "HF10-P20: the unboxed tuples' sizes the callers of each external function expect, OURS (a directory) against GHC's:
+  a function whose callers expect another size on our side returns another size (the run's \"unboxed tuple of the wrong
+  size\"), one line each: FUNCTION GHC's OURS"
+  [ghc-dir ours-dir]
+  (let [rd (fn [d] (apply merge-with into (for [f (sort (map #(.getName %) (seq (.listFiles (java.io.File. d)))))
+                                                :when (str/ends-with? f ".stg.ae")]
+                                            (returns (read-file (str d "/" f))))))
+        g (rd ghc-dir) o (rd ours-dir)]
+    (doseq [[f so] (sort o) :let [sg (get g f)] :when (and sg (not= sg so))]
+      (println f (pr-str (sort sg)) (pr-str (sort so))))))
+
 (defn -main [ghc ours & [n]]
   (cond
+    (= ghc "--abi") (abi ours n)
+    (= ghc "--rets") (rets ours n)
+    (= ghc "--builds") (builds ours n)
+    (= n "--why") (doseq [[k [x y]] (sort (:why (compare-files ghc ours)))] (println "==" k) (println "  ghc:" x) (println "  own:" y))
     (= n "--control") (let [[e c] (control ghc ours)] (println (str "control " e " of " c " bindings equal")))
     n (show ghc ours n)
     :else

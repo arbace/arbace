@@ -689,22 +689,87 @@
     ;; maximum_field_alignment whether the user set it or not; 95_bitfields' packed ALIGN tests)
     (if max-align (min a (long max-align)) a)))
 
+(defn- ms-layout!
+  "The 244 request (Mac VM's report 244, item 4): a structure with GNU's `ms_struct` attribute laid out as gcc documents the
+  Microsoft layout (gcc's manual, x86 type attributes `ms_struct`, and -mms-bitfields): adjacent bit-fields share a unit of
+  their type's size only while their types have the same size and the next one fits in what is left of it; a new unit starts at
+  the type's alignment (1 when packed, capped by #pragma pack); a bit-field's type aligns the record even unnamed (not when
+  packed); a zero-width bit-field ends the run it follows and then aligns the record and the next member to its type (capped by
+  #pragma pack), and after no bit-field it is ignored. Each rule's case measured against the host's gcc 15.2 by hand
+  (test/c/run/ms-struct.c). The members into `out`; [size-in-bits align]."
+  [members packed max-align ^ArrayList out]
+  (let [off (atom 0) al (atom 1) run (atom nil) zw (atom nil) vseen (atom false)
+        close! (fn [] (when-let [{:keys [start size]} @run] (reset! off (+' start size)) (reset! run nil)))
+        next-align (fn [a] (let [z @zw] (reset! zw nil) (if z (max (long a) (long z)) a)))]
+    (doseq [m members]
+      (let [t (:t m)
+            ta (long (align-of t))
+            a (member-align m packed max-align)
+            mpacked (or packed (:mpacked m))
+            w (:bits m)
+            tsz (*' 8 (long (or (size-of t) 4)))]
+        (cond
+          (and w (zero? w))
+          (if @run
+            (let [za (if max-align (min ta (long max-align)) ta)]
+              (close!)
+              (swap! al max za)
+              (reset! zw za)
+              (.add out (assoc m :off (quot @off 8) :bitoff 0)))
+            (.add out (assoc m :off (quot @off 8) :bitoff 0)))
+          w
+          (let [r0 @run]
+            (if (and r0 (= (:size r0) tsz) (<= w (:rem r0)))
+              (let [o (- (+' (:start r0) (:size r0)) (:rem r0))]
+                (swap! run update :rem - w)
+                (.add out (assoc m :off (quot (:start r0) 8) :bitoff (- o (:start r0)))))
+              (let [_ (close!)
+                    ba (long (next-align a))
+                    start (align-up @off (*' 8 ba))]
+                (when-not mpacked (swap! al max a))
+                (reset! run {:start start :size tsz :rem (- tsz w)})
+                (reset! off start)
+                (.add out (assoc m :off (quot start 8) :bitoff 0)))))
+          :else
+          (let [_ (close!)
+                o (align-up (quot (+' @off 7) 8) (long (next-align a)))
+                sz (size-of t)]
+            (swap! al max a)
+            (.add out (cond-> (assoc m :off o) @vseen (assoc :voff true)))
+            (when (var-size? t) (reset! vseen true))
+            (reset! off (*' 8 (+' o (or sz 0))))))))
+    (close!)
+    [@off @al]))
+
 (defn- layout!
   "Lays out the record `r`'s members [{:name :t :bits :align :packed}] as gcc 15.2 does on x86-64."
   [^HashMap r members kind packed max-align]
-  (let [out (ArrayList.)]
-    (if (= kind :union)
+  (let [out (ArrayList.)
+        ms (.get r :ms)]
+    (cond
+      ;; the 244 request: GNU's ms_struct (ms-layout!)
+      (and ms (not= kind :union))
+      (let [[bits al] (ms-layout! members packed max-align out)
+            al (long al)
+            al (if-let [ra (.get r :min-align)] (max al (long ra)) al)]
+        (.put r :size (align-up (quot (+' bits 7) 8) al))
+        (.put r :align al))
+      (= kind :union)
       (let [sz (atom 0) al (atom 1)]
         (doseq [m members]
           (let [t (:t m)
                 a (member-align m packed max-align)
                 s (long (or (size-of t) 0))
                 s (if (:bits m) (quot (+' (:bits m) 7) 8) s)]
-            (when-not (and (:bits m) (nil? (:name m))) (swap! al max a))
+            ;; the 244 request: under ms_struct an unnamed bit-field's type aligns the union too (not when packed or zero-width)
+            (when (or (not (and (:bits m) (nil? (:name m))))
+                      (and ms (pos? (long (:bits m))) (not (or packed (:mpacked m)))))
+              (swap! al max a))
             (swap! sz max s)
             (.add out (assoc m :off 0 :bitoff (when (:bits m) 0)))))
         (.put r :size (align-up @sz (long @al)))
         (.put r :align @al))
+      :else
       (let [off (atom 0) al (atom 1) vseen (atom false)] ; off in bits
         (doseq [m members]
           (let [t (:t m)
@@ -1088,6 +1153,9 @@
             packed (some #(= "packed" (first %)) as)
             al (some #(when (= "aligned" (first %)) (aligned-value (second %))) as)]
         (when al (.put r :min-align al))
+        ;; the 244 request: GNU's ms_struct (gcc_struct the default here; of the two the first written wins, gcc ignoring the
+        ;; other as incompatible)
+        (.put r :ms (= "ms_struct" (some #(#{"ms_struct" "gcc_struct"} (first %)) as)))
         ;; CS290 (a): the pack state as it is now (a statement-level #pragma pack changes it inside a body)
         (let [pk (:pack @(cx :pack-state))]
           (when pk (feat! :cc-attr-layout))
@@ -2569,8 +2637,9 @@
         (record! nm (declare-object! n ft m :fn nil false))
         (push-scope!)
         ;; CS294 (a): an identifier list's parameter no declaration names defaults to int, an error of gcc's since C99 (a
-        ;; permerror of -Wimplicit-int: a warning under -fpermissive, which -w silences; C90 warns only), at the declarator's line
-        (when (and kr (c99?) (not (cx :permissive)))
+        ;; permerror of -Wimplicit-int: a warning under -fpermissive, which -w silences; C90 warns only), at the declarator's line;
+        ;; CS297 (a): none under -Wno-implicit-int, a warning (not the checker's) under -Wno-error=implicit-int
+        (when (and kr (c99?) (not (cx :permissive)) (not (cx :no-implicit-int)))
           (doseq [[pn _ pm] named :when (and pn (:c/implicit-int pm))]
             (binding [*line* (or (:line (meta ps)) *line*)]
               (err! (str "type of '" pn "' defaults to 'int'")))))
@@ -2854,15 +2923,15 @@
   {:std std :scopes (ArrayList.) :errors (ArrayList.) :annot nil :annotating (atom false)
    :done-units (HashSet.) :defs (IdentityHashMap.) :units {} :pack-state (atom {}) :ldouble-size (:ldouble-size opts 16)
    :unsigned-char (:unsigned-char opts) :pedantic (:pedantic opts) :ext-lines (:ext-lines opts) :sys-dirs (:sys-dirs opts) :base (:base opts)
-   :permissive (:permissive opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
+   :permissive (:permissive opts) :no-implicit-int (:no-implicit-int opts) :no-c2y-compat (:no-c2y-compat opts) :no-c23-compat (:no-c23-compat opts) :exec-charset (:exec-charset opts)})
 
 (defn check-unit
   "Checks a read (arbace.repr.c/read-c's {:forms :units}) at the standard `std` (a keyword), the
   builtins' forms `builtins` declared first: {:errors [...] :items [[line [annotation...]] ...]} (the
   items when `annotate`)."
-  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive]}]
+  [rd std builtins & {:keys [annotate ldouble-size unsigned-char results pedantic ext-lines sys-dirs base notes no-c2y-compat no-c23-compat exec-charset permissive no-implicit-int]}]
   (let [c (assoc (new-cx std {:ldouble-size (or ldouble-size 16) :unsigned-char unsigned-char :pedantic pedantic :ext-lines ext-lines :sys-dirs sys-dirs :base base
-                                      :permissive permissive :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
+                                      :permissive permissive :no-implicit-int no-implicit-int :no-c2y-compat no-c2y-compat :no-c23-compat no-c23-compat :exec-charset exec-charset})
                  :units (into {} (for [[k u] (:units rd)] [(str k) u]))
                  :results (when results (IdentityHashMap.)))
         items (ArrayList.)]

@@ -1,0 +1,79 @@
+;; The compiled level's system calls beyond Java's API (OC216 (a), the rest: doc/ocaml/OCAML-SURVEY.md, "As built: OC216 (a), the
+;; rest"): AF_UNIX sockets (Sock, HSockIn, HSockOut) and the signals of the OS (ExtSignal). Java has neither Unix-domain datagram
+;; sockets nor abstract names nor the descriptors of the OS, and receives no signal; the compiled level's main (test/ocaml/o2j/main,
+;; the crop's Go, as OC208's exec and OC215's C API) does, through one file its host serves, hostPath: a request written there is
+;; handled at once (the system call made by the main's goroutine), its reply read next. A request and a reply are fields, each a u32
+;; (big-endian) length and its bytes; a request's first field is its operation, a reply's first "ok" (the results after it) or "e"
+;; (the errno after it). Nothing serves hostPath at the light level (a Java forms interpreter in stage 0): the open fails, avail is
+;; false, and the callers keep their light-level behaviour (Sock: EPROTONOSUPPORT for PF_UNIX; ExtSignal: the program's own signals).
+;; Ported from otherlibs/unix's socket.c, socketaddr.c, sendrecv.c, accept.c, bind.c, connect.c, listen.c, shutdown.c,
+;; getsockname.c, getpeername.c, signals.c and kill.c (OCaml 5.5.0) as oi's ext_unix_sock.go and ext_signal.go have them.
+
+(in-ns 'ocaml.rt)
+
+(import '(java.io ByteArrayOutputStream RandomAccessFile IOException) '(java.util ArrayList))
+
+(defclass ^:public ^:final HostSys
+  (field ^:static ^:final ^String hostPath "/proc/self/ocaml-host")
+  ;; 0 not yet asked, 1 served, 2 not served
+  (field ^:static ^int state 0)
+
+  ;; whether a host serves hostPath (asked once: an open and a close)
+  (method ^:public ^:static avail ^boolean []
+    (when (== state 0)
+      (set! state (try (let [f (RandomAccessFile. hostPath "rw")] (.close f) (int 1))
+                       (catch IOException e (int 2)))))
+    (== state 1))
+
+  (method ^:static u32 ^void [^ByteArrayOutputStream o ^int n]
+    (.write o (unchecked-int (bit-and (bit-shift-right n 24) 255)))
+    (.write o (unchecked-int (bit-and (bit-shift-right n 16) 255)))
+    (.write o (unchecked-int (bit-and (bit-shift-right n 8) 255)))
+    (.write o (unchecked-int (bit-and n 255))))
+
+  ;; a field: a byte array as it is, a String in UTF-8, a number in decimal
+  (method ^:static put ^void [^ByteArrayOutputStream o x]
+    (let [^byte/1 b (cond (instance? byte/1 x) (cast byte/1 x)
+                  (instance? String x) (Rt/ofUtf8 (cast String x))
+                  :else (Rt/ofUtf8 (String/valueOf x)))]
+      (HostSys/u32 o (alength b))
+      (.write o b 0 (alength b))))
+
+  ;; the request fs made and its reply's fields (after "ok"); a reply "e" raised as Unix_error (errno, fn, ""). Called without the
+  ;; Gil for the calls that may block (the caller releases it).
+  (method ^:public ^:static call ^ArrayList [^String fn ^Object/1 fs]
+    (let [o (ByteArrayOutputStream.)]
+      (loop [^int i 0] (when (< i (alength fs)) (HostSys/put o (aget fs i)) (recur (unchecked-inc-int i))))
+      (let [^byte/1 r (try
+                (let [f (RandomAccessFile. hostPath "rw")]
+                  (try
+                    (let [b (.toByteArray o)]
+                      (.write f b 0 (alength b))
+                      (let [n (.readInt f) buf (new byte/1 n)]
+                        (.readFully f buf)
+                        buf))
+                    (finally (.close f))))
+                (catch IOException e nil))]
+        (when (nil? r) (throw (ExtUnix/error 5 fn "")))
+        (let [out (ArrayList.)]
+          (loop [^int p 0]
+            (when (< p (alength r))
+              (let [n (unchecked-int (bit-or (bit-shift-left (bit-and (aget r p) 255) 24)
+                              (bit-shift-left (bit-and (aget r (unchecked-add-int p 1)) 255) 16)
+                              (bit-shift-left (bit-and (aget r (unchecked-add-int p 2)) 255) 8)
+                              (bit-and (aget r (unchecked-add-int p 3)) 255)))
+                    s (unchecked-add-int p 4)]
+                (.add out (java.util.Arrays/copyOfRange r s (unchecked-add-int s n)))
+                (recur (unchecked-add-int s n)))))
+          (let [st (Rt/utf8 (.get out 0))]
+            (if (.equals st "ok")
+              (do (.remove out 0) out)
+              (throw (ExtUnix/error (Integer/parseInt (Rt/utf8 (.get out 1))) fn ""))))))))
+
+  ;; the same, the Gil released while the host works (a call that may block)
+  (method ^:public ^:static callFree ^ArrayList [^String fn ^Object/1 fs]
+    (Gil/unlock)
+    (try (HostSys/call fn fs) (finally (Gil/lock))))
+
+  ;; a result field as a number
+  (method ^:public ^:static num ^long [^ArrayList r ^int i] (Long/parseLong (Rt/utf8 (.get r i)))))

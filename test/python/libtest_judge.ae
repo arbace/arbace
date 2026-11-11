@@ -1,12 +1,25 @@
 ;; The judge of Lib/test under pyi (bin/pyi check, divergences, lib-test and lib-test-all; queue 194 PY6a, queue 201 PY7):
-;; each test method's outcome under pyi against CPython 3.14.10's (the references, test/python/ref-cpython314-lib-test*.edn),
-;; a method that is not equal in a class of test/python/divergences.edn (GR10's format, as test/goi/divergences.edn and
-;; test/java/divergences.edn), and against the check's record (test/python/check-lib-test-linux-amd64.edn), as goi's check
-;; judges a run against its reference: a method the record passes that does not pass now fails (a regression).
+;; each test method judged by its own verdict (queue 234, the user's rule of 2026-11-07: unittest's outcome under pyi,
+;; --verdict own, the default) or by CPython 3.14.10's recorded run (--verdict ref, the oracle tier's: pyi's outcome
+;; against the references, test/python/ref-cpython314-lib-test*.edn), a method that does not pass in a class of
+;; test/python/divergences.edn (GR10's format, as test/goi/divergences.edn and test/java/divergences.edn), and against the
+;; check's record (test/python/check-lib-test-linux-amd64.edn), as goi's check judges a run against its reference: a method
+;; the record passes that does not pass now fails (a regression).
 ;;
-;; A method's row: ID ("MODULE/TEST-ID", the references' ids), RESULT, REASON, CORPUS. RESULT is pass when pyi's outcome
-;; is CPython's, else the first word of the method's line and REASON the rest; the classes' :match regexes see
-;; "RESULT REASON", the line:
+;; The two verdicts (queue 234):
+;;   own  a method passes when unittest's outcome under pyi is ok (an expected failure is ok, an unexpected success a
+;;        failure: the drivers'); skipped, failure, error, timeout and crash do not. The methods: the inventory (every
+;;        reference line's id, :excluded too but the runner's, which name no test: which tests exist, no outcome read)
+;;        with every test pyi's run reported
+;;        (unittest.loader's own ids aside); a module of neither with a run gives one row MODULE/* (its import line). No
+;;        CPython outcome is read.
+;;   ref  a method passes when pyi's outcome is CPython's recorded one; the methods are the references' :outcome lines.
+;; The record's header names its verdict ("(verdict own)"); a record of the other verdict is not judged against (its
+;; regressions would be the change of rule: "re-record"). --agreement (no judging): both verdicts of every method, the
+;; methods they disagree on by kind, per corpus.
+;;
+;; A method's row: ID ("MODULE/TEST-ID"), RESULT, REASON, CORPUS. RESULT is pass when the verdict passes it, else the
+;; first word of the method's line and REASON the rest; the classes' :match regexes see "RESULT REASON", the line:
 ;;   "import MESSAGE"      the module does not import (its first error), also a method of a package's submodule the loader
 ;;                         could not import (its _FailedTest's error) or skipped at its import ("import SkipTest: REASON")
 ;;   "stopped-in MESSAGE"  the driver stopped in the method (the last line of its standard error, or a timeout)
@@ -20,7 +33,13 @@
 ;;   --dir DIR           a run: DIR/MODULE.out (the driver's output), .err, .status; the modules: --modules FILE (lines
 ;;                       MODULE<TAB>CORPUS) and the arguments (of --corpus C, default lib-test)
 ;;   --results FILE      (repeatable) no run: saved rows (--save's, ID<TAB>RESULT<TAB>REASON<TAB>CORPUS) judged again
-;;   --ref FILE          (repeatable) the references; a method is a reference's :outcome line (not :module, not :excluded)
+;;   --ref FILE          (repeatable) the references; a method is a reference's :outcome line (not :module, not :excluded);
+;;                       with --verdict own only their ids are read (the inventory)
+;;   --verdict own|ref   the method's verdict (default own; ref: CPython's recorded run, the oracle tier's)
+;;   --skips pass        with own: a skipped method passes (default: a non-pass, the test's "not run here")
+;;   --agreement         no judging: each method's own and recorded-run verdicts (--dir, or --results of a ref judge's
+;;                       --save: pyi's outcome is CPython's where the row passes), the disagreements by kind per corpus
+;;                       (--methods: each one's id)
 ;;   --classes FILE      the classes (test/python/divergences.edn); none, or --no-classes: no method classed (the
 ;;                       oracle's control, the negative controls: every method equal but the references' :excluded)
 ;;   --record FILE       the record judged against (absent: "no record yet", regressions not judged)
@@ -38,6 +57,15 @@
 (require '[arbace.string :as str])
 (import '[java.io File])
 
+(defn host-free
+  "TEXT without the machine's paths, for the record (queue 235; as arbace.repr.python.results/host-free): the checkout's
+  directory (the working directory: bin/pyi runs in it) as <checkout>, then any other absolute path under /root, /home,
+  /tmp or /Users (crops-score's :abs-path) as <root>/, <home>/, <tmp>/, <Users>/. No class reads a path (the classes judge
+  the run's own reasons, before the record is written)"
+  [s]
+  (let [root (str (.getCanonicalPath (File. ".")) "/")]
+    (-> (str s) (str/replace root "<checkout>/") (str/replace #"(?<![A-Za-z0-9_.@<>-])/(root|home|tmp|Users)/" "<$1>/"))))
+
 (defn parse-args [args]
   (loop [a args o {:mods [] :refs [] :results [] :corpus "lib-test" :name "lib-test"}]
     (if-let [x (first a)]
@@ -52,6 +80,9 @@
         "--only" (recur (nnext a) (assoc o :only (second a)))
         "--save" (recur (nnext a) (assoc o :save (second a)))
         "--name" (recur (nnext a) (assoc o :name (second a)))
+        "--verdict" (recur (nnext a) (assoc o :verdict (second a)))
+        "--agreement" (recur (next a) (assoc o :agreement true))
+        "--skips" (recur (nnext a) (assoc o :skips (second a)))
         "--write-record" (recur (next a) (assoc o :write-record true))
         "--no-classes" (recur (next a) (assoc o :no-classes true))
         "--divergences" (recur (next a) (assoc o :divergences true))
@@ -62,6 +93,13 @@
 
 (def opts (parse-args *command-line-args*))
 (def pfx (:name opts))
+(def verdict (or (:verdict opts) "own"))
+(when-not (#{"own" "ref"} verdict) (throw (ex-info (str "--verdict " verdict ": own or ref") {})))
+(def own? (= "own" verdict))
+;; --skips pass: a skip passes by its own verdict (unittest's wasSuccessful; queue 234's DECISION's option (b)); the
+;; default, non-pass: a skip is the test's "not run here", a non-pass its class names
+(def skip-passes? (= "pass" (:skips opts)))
+(defn own-pass? [o] (or (= o "ok") (and skip-passes? (= o "skipped"))))
 
 (defn exists? [p] (and p (.exists (File. ^String p))))
 
@@ -78,11 +116,27 @@
               :when (and (:outcome m) (not (:module m)) (not (:excluded m)))]
           [(:id m) (name (:outcome m))])))
 
+(defn read-inventory
+  "The inventory: MODULE -> the ids of its reference lines (:excluded too, not :module), no outcome read"
+  [paths]
+  (reduce (fn [m id] (update m (first (str/split id #"/" 2)) (fnil conj #{}) id)) {}
+          (for [p paths :when (exists? p)
+                l (str/split-lines (slurp p))
+                :when (str/starts-with? l "{:id ")
+                :let [m (read-string l)]
+                ;; not a test: regrtest's JUnit named none ("runner: regrtest's JUnit names no test id", "... the test None")
+                :when (and (not (:module m)) (str/includes? (str (:id m)) "/")
+                           (not (str/starts-with? (str (:excluded m)) "runner: regrtest's JUnit names")))]
+            (:id m))))
+
 (defn read-classes
   "The classes, their :tests as sets"
   [path]
   (if (and path (not (:no-classes opts)))
-    (mapv #(assoc % :tests-set (set (:tests %))) (read-string (slurp path)))
+    (mapv #(assoc % :tests-set (set (:tests %)))
+          ;; a class of one verdict's (:verdict :own: the skips and CPython's own failures the own verdict classes) is
+          ;; not the other verdict's: the recorded-run judge still fails a skip of pyi's alone that no class names
+          (filter #(or (nil? (:verdict %)) (= (name (:verdict %)) verdict)) (read-string (slurp path))))
     []))
 
 (defn classify
@@ -95,8 +149,8 @@
   "The record: id -> [result reason corpus], in its order (:order)"
   [path]
   (if (exists? path)
-    (let [rows (read-string (slurp path))]
-      {:present true
+    (let [text (slurp path) rows (read-string text)]
+      {:present true :verdict (if (str/includes? text "(verdict own)") "own" "ref")
        :rows (into {} (for [[id r why c] rows] [id [(name r) (str why) (if c (name c) "")]]))
        :order (mapv first rows)})
     {:present false :rows {} :order []}))
@@ -172,6 +226,7 @@
 ;; the rows
 
 (def refs (read-refs (:refs opts)))
+(def inventory (when (or own? (:agreement opts)) (read-inventory (:refs opts))))
 (def classes (read-classes (:classes opts)))
 (def record (read-record (:record opts)))
 (def only (read-only (:only opts)))
@@ -197,6 +252,27 @@
            (if (= got want)
              [id "pass" "" c want]
              (let [[r why] (split-line (method-line run t))] [id r why c want]))))))
+
+(defn- reported-ids
+  "The tests a module's run reported (CASE lines), unittest.loader's own ids aside"
+  [run]
+  (remove #(str/starts-with? % "unittest.loader.") (keys (:cases run))))
+
+(defn own-rows
+  "A run's rows by the tests' own verdict: for each module, the inventory's and the run's tests (selected) as
+  [id result reason corpus nil]; ok passes"
+  []
+  (vec (for [[m c] mod-corpus
+             :let [run (read-run (:dir opts) m) prefix (str m "/")
+                   ids (into (set (get inventory m)) (map #(str prefix %) (reported-ids run)))
+                   ids (if (seq ids) (sort ids) [(str prefix "*")])]
+             id ids
+             :when (selected? only id)
+             :let [t (subs id (count prefix))
+                   got (when-not (:import run) (first (get (:cases run) t)))]]
+         (if (own-pass? got)
+           [id "pass" "" c nil]
+           (let [[r why] (split-line (if (= t "*") (method-line run "*") (method-line run t)))] [id r why c nil])))))
 
 (defn saved-rows
   "Saved rows (--save's files): [id result reason corpus want]"
@@ -250,8 +326,10 @@
 ;; the judgment
 
 (defn judge []
-  (let [rows (cond (:dir opts) (run-rows) (seq (:results opts)) (saved-rows) :else (throw (ex-info "no --dir and no --results" {})))
+  (let [rows (cond (:dir opts) (if own? (own-rows) (run-rows)) (seq (:results opts)) (saved-rows) :else (throw (ex-info "no --dir and no --results" {})))
         partial? (some? only)
+        other-verdict? (and (:present record) (not= verdict (:verdict record)))
+        record (if other-verdict? {:present false :rows {} :order []} record)
         rec? (:present record)
         judged (for [[id r why c want] rows]
                  (let [rec (get-in record [:rows id])
@@ -284,7 +362,7 @@
                             (:write-record opts) " -- no class: left out of the record"
                             :else " -- in no class of the divergences")))
         (println (str "   failing: " (:id r))))
-      (println (str pfx " " m ": " (count rs) " methods: " eq " equal, " (count classed) " classed"
+      (println (str pfx " " m ": " (count rs) " methods: " eq (if own? " pass, " " equal, ") (count classed) " classed"
                     (when (seq by-class) (str " (" (str/join ", " (for [[c k] (sort by-class)] (str c " " k))) ")"))
                     ", " (count failing) " failing"
                     (when (:import run) (str " (does not import: " (:import run) ")"))
@@ -300,11 +378,13 @@
       (println (str "   failing: " id)))
     (let [n (count judged) eq (count (filter #(= "pass" (:result %)) judged))
           nf (count (filter :fails judged)) nreg (count (filter :regression judged)) nfix (count (filter :fixed judged))]
-      (println (str pfx ": " (count mod-order) " modules, " n " methods: " eq " equal, " (- n eq nf) " classed, " nf " failing"
+      (println (str pfx ": " (count mod-order) " modules, " n " methods: " eq (if own? " pass, " " equal, ") (- n eq nf) " classed, " nf " failing"
                     (when (pos? nreg) (str " (" nreg " regressions)"))
                     (when (seq missing) (str ", " (count missing) " with no result"))))
       (cond
         (:no-classes opts) nil
+        other-verdict? (println (str pfx ": the record (" (:record opts) ") is the " (if own? "recorded-run (ref)" "own")
+                                     " verdict's, this judge the " verdict " verdict's: regressions not judged (re-record it)"))
         (not rec?) (println (str pfx ": no record yet (" (:record opts) "): regressions not judged"))
         :else (println (str pfx ": against the record: " nreg " regressions, " nfix " now pass"
                             (when partial? " (a selection)"))))
@@ -320,16 +400,65 @@
               header (let [t (when (exists? path) (slurp path)) i (when t (.indexOf ^String t "\n["))]
                        (if (and i (pos? i))
                          (subs t 0 (inc i))
-                         (str ";; bin/pyi check's record (doc/python/PYTHON-SURVEY.md, \"As built: PY7 (the check)\"): every test method of\n"
-                              ";; Lib/test the check judges, [ID RESULT REASON CORPUS], ID MODULE/TEST-ID (the references'), RESULT pass (pyi's\n"
-                              ";; outcome CPython's) or the first word of its line (import, stopped-in, crash, not-run, ok, skipped, failure,\n"
-                              ";; error, timeout) and REASON the rest; every non-pass in a class of test/python/divergences.edn. Written by\n"
+                         (str ";; bin/pyi check's record (doc/python/PYTHON-SURVEY.md, \"As built: PY7 (the check)\"; \"As built: 234\"): every test method of\n"
+                              ";; Lib/test the check judges, [ID RESULT REASON CORPUS], ID MODULE/TEST-ID, RESULT pass (the verdict's: own, unittest's\n"
+                              ";; ok under pyi; ref, pyi's outcome CPython's) or the first word of its line (import, stopped-in, crash, not-run, ok,\n"
+                              ";; skipped, failure, error, timeout) and REASON the rest; every non-pass in a class of test/python/divergences.edn. Written by\n"
                               ";; bin/pyi check --record on the main host (linux/amd64); the check fails on a method it passes that does not\n"
-                              ";; pass. The gate's universe of the check's parts (a part a CORPUS). Read with the Clojure reader.\n")))]
+                              ";; pass. The gate's universe of the check's parts (a part a CORPUS). Read with the Clojure reader.\n")))
+              header (let [h (str/replace header #"\n;; \(verdict (own|ref)\)\n" "\n")]
+                       (str h ";; (verdict " verdict ")\n"))]
           (spit path (str header "[\n"
-                          (str/join "\n" (for [[id r why c] all] (str "[" (pr-str id) " :" r " " (pr-str (str why)) " :" c "]")))
+                          (str/join "\n" (for [[id r why c] all] (str "[" (pr-str id) " :" r " " (pr-str (host-free why)) " :" c "]")))
                           "\n]\n"))
           (println (str pfx ": " path " written, " (count all) " methods"))))
       (System/exit (cond (and (:write-record opts) (pos? nf)) 3 (or (pos? nf) (seq missing)) 1 :else 0)))))
 
-(if (:divergences opts) (divergences) (judge))
+;; --agreement: the two verdicts side by side (queue 234)
+
+(defn- outcome-kind [o]
+  (cond (nil? o) "none" (#{"failure" "error"} o) "failure/error" :else o))
+
+(defn agreement-kind
+  "A method's agreement: [agree? kind], kind naming pyi's outcome and CPython's recorded one (nil: no outcome)"
+  [own-pass ref-pass got want]
+  (let [k (str "pyi " (outcome-kind got) ", CPython " (if want (outcome-kind want) "none (no reference outcome)"))]
+    (cond
+      (nil? want) [nil (str (if own-pass "own pass" "own non-pass") ", judged by its own verdict alone: " k)]
+      (= own-pass ref-pass) [true (if own-pass "both pass" "both non-pass")]
+      own-pass [false (str "own pass, ref non-pass: " k)]
+      :else [false (str "ref pass, own non-pass: " k)])))
+
+(defn agreement-rows
+  "[id corpus got want]: pyi's outcome (got; import, crash ... for a method with no outcome) and CPython's (want)"
+  []
+  (if (:dir opts)
+    (vec (for [[m c] mod-corpus
+               :let [run (read-run (:dir opts) m) prefix (str m "/")
+                     ids (sort (into (set (get inventory m)) (map #(str prefix %) (reported-ids run))))]
+               id ids :when (selected? only id)
+               :let [t (subs id (count prefix))
+                     got (if (:import run) "import" (or (first (get (:cases run) t)) (first (split-line (method-line run t)))))]]
+           [id c got (get refs id)]))
+    ;; a ref judge's saved rows: pass means pyi's outcome was CPython's
+    (vec (for [[id r _ c want] (saved-rows)] [id c (if (= r "pass") want r) want]))))
+
+(defn agreement []
+  (let [rows (for [[id c got want] (agreement-rows)
+                   :let [own-pass (own-pass? got) ref-pass (and (some? want) (= got want))
+                         [agree k] (agreement-kind own-pass ref-pass got want)]]
+               {:id id :corpus c :agree agree :kind k})
+        report (fn [label rs]
+                 (let [both (filter #(some? (:agree %)) rs) a (count (filter :agree both)) n (count both)]
+                   (println (str pfx " agreement " label ": " (count rs) " methods, " n " with both verdicts: " a " agree"
+                                 (when (pos? n) (format " (%.2f%%)" (* 100.0 (/ a n)))) ", " (- n a) " disagree; "
+                                 (- (count rs) n) " by their own verdict alone"))
+                   (doseq [[k v] (sort-by (comp - val) (frequencies (map :kind (remove :agree rs))))]
+                     (println (format "   %6d %s" v k)))))]
+    (doseq [[c rs] (sort-by key (group-by :corpus rows))] (report (str "(" c ")") rs))
+    (report "(all)" rows)
+    (when (:methods opts)
+      (doseq [r (sort-by :id rows) :when (false? (:agree r))] (println (str "   " (:id r) ": " (:kind r)))))
+    (System/exit 0)))
+
+(if (:divergences opts) (divergences) (if (:agreement opts) (agreement) (judge)))

@@ -57,7 +57,14 @@
 (defn transl-value-path [vd]
   (if-let [a (:addr vd)] (transl-addr a) (transl-address (:path vd) (:pos vd))))
 
-(defn transl-module-path [p] (transl-addr (or (:addr (env/find-module p)) (env/type-error (str "no address for " p)))))
+(defn transl-module-path
+  "Lambda.transl_module_path: the module's address (Env.find_module_address); a module alias's (an absent module, Env's
+  store_module of Mp_absent) is its target's"
+  [p]
+  (let [e (env/find-module p)]
+    (if (and e (= :Mty_alias (first (:mty e))))
+      (transl-module-path ((:mty e) 1))
+      (transl-addr (or (:addr e) (env/type-error (str "no address for " p)))))))
 
 (defn transl-extension-path [path]
   (if-let [a (get @env/ext-addrs path)]
@@ -378,7 +385,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
 
-(declare transl-exp transl-function transl-let transl-apply transl-match transl-handler)
+(declare transl-exp transl-function transl-let transl-apply transl-match transl-handler tailcall-attribute)
 
 (defn- split-pattern
   "Typedtree.split_pattern: [value-part exception-part] of a computation pattern"
@@ -541,7 +548,7 @@
                 prim (specialize (:type f) hcc p)
                 lam (binding [*prim-loc* (:loc e)] (lambda-of-prim prim largs))]
             (if (empty? extra) lam (transl-apply lam extra)))
-          (transl-apply (transl-exp f) args)))
+          (transl-apply (transl-exp f) args (tailcall-attribute f))))
       ;; Translcore.transl_letop: each and-operator applied to the bindings so far and its expression, the
       ;; let-operator to their result and the body's function (no arity fusion)
       :Texp_letop (let [[_ lop lexp ands param case partial] d
@@ -659,14 +666,31 @@
        [:Lprim (l/pfield 0 :pointer true) [varg]]
        [:Lifthenelse [:Lprim (l/prim "||") [(test-tag 246) (test-tag 244)]] force varg]]]]))
 
+(defn tailcall-attribute
+  "Translattribute.get_tailcall_attribute: an expression's [@tailcall] (or [@ocaml.tailcall]): :true with no payload or
+  `true`, :false with `false`, nil (Default_tailcall) without one or with another payload"
+  [e]
+  (when-let [a (first (filter #(#{"tailcall" "ocaml.tailcall"} (:txt (:attr_name %))) (:attrs e)))]
+    (let [p (:attr_payload a)
+          items (when (= :PStr (first p)) (second p))]
+      (cond
+        (empty? items) :true
+        (= 1 (count items))
+        (let [item (:pstr_desc (first items))
+              d (when (= :Pstr_eval (first item)) (:pexp_desc (second item)))
+              lid (when (and (= :Pexp_construct (first d)) (nil? (get d 2))) (:txt (d 1)))]
+          (case (when lid (env/lid-parts lid)) ["true"] :true ["false"] :false nil))
+        :else nil))))
+
 (defn transl-apply
-  "Translcore.transl_apply: right-to-left evaluation, out-of-order partial applications as closures"
-  [lam sargs]
+  "Translcore.transl_apply: right-to-left evaluation, out-of-order partial applications as closures; an application
+  made here carries the tail-call expectation (ap_tailcall) as its attributes {:tailcall :true|:false}, Tmc's to read"
+  [lam sargs & [tailcall]]
   (let [lapply (fn [f args]
                  (case (f 0)
-                   :Lapply [:Lapply (f 1) (vec (concat (f 2) args))]
+                   :Lapply (assoc f 2 (vec (concat (f 2) args)))
                    :Lsend [:Lsend (f 1) (f 2) (f 3) (vec (concat (f 4) args))]
-                   [:Lapply f (vec args)]))]
+                   (cond-> [:Lapply f (vec args)] tailcall (conj {:tailcall tailcall}))))]
     (letfn [(build [lam args l]
               (if (empty? l)
                 (lapply lam (reverse (map first args)))

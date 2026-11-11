@@ -25,6 +25,22 @@ def enc(x):
         return d
     if isinstance(x, list):
         return [enc(i) for i in x]
+    if isinstance(x, str) and any(0xD800 <= ord(c) < 0xE000 for c in x):
+        # a lone surrogate among its UTF-16 units (queue 232; arbace.repr.python.astjson's rule): JSON's \udcXX alone
+        # is no character to Go's decoder, so the units
+        u = x.encode("utf-16-le", "surrogatepass")
+        u = [u[i] | u[i + 1] << 8 for i in range(0, len(u), 2)]
+        i, lone = 0, False
+        while i < len(u):
+            if 0xD800 <= u[i] < 0xDC00 and i + 1 < len(u) and 0xDC00 <= u[i + 1] < 0xE000:
+                i += 2
+            elif 0xD800 <= u[i] < 0xE000:
+                lone = True
+                break
+            else:
+                i += 1
+        if lone:
+            return {"$": "str", "u": u}
     if x is None or isinstance(x, (bool, str)):
         return x
     if isinstance(x, int):

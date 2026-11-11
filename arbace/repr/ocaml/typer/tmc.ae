@@ -17,8 +17,9 @@
 
 (ns arbace.repr.ocaml.typer.tmc
   "Tmc.rewrite (doc/ocaml/TYPER.md, T8): the functions marked [@tail_mod_cons] (their Lfunction's attribute :tmc)
-  rewritten with a destination-passing-style variant NAME_dps. Tail-call expectations are not kept (the dump does
-  not print them); an ambiguous constructor's arguments are refused."
+  rewritten with a destination-passing-style variant NAME_dps. The tail-call expectations Tmc makes are not kept (the dump
+  does not print them); a call's own ([@tailcall], the application's {:tailcall ..}) disambiguates a constructor's
+  arguments as find_nonambiguous_tmc_call does, an ambiguous constructor's arguments refused in TMC position."
   (:require [arbace.repr.ocaml.typer.types :as ty]
             [arbace.repr.ocaml.typer.lambda :as l]
             [arbace.repr.ocaml.typer.simplif :as s]
@@ -116,13 +117,15 @@
      :use (:use d)}))
 
 ;; ---------------------------------------------------------------------------------------------
-;; Choice: {:dps :direct (fn []) :calls n :benefits bool}
+;; Choice: {:dps :direct (fn []) :calls n :benefits bool :explicit bool} (:explicit: explicit_tailcall_request)
 
-(defn- ch-lambda [v] {:dps (dps-lambda v) :direct (fn [] v) :calls 0 :benefits false})
-(defn- ch-map [f c] {:dps (dps-map f (:dps c)) :direct (fn [] (f ((:direct c)))) :calls (:calls c) :benefits (:benefits c)})
+(defn- ch-lambda [v] {:dps (dps-lambda v) :direct (fn [] v) :calls 0 :benefits false :explicit false})
+(defn- ch-map [f c] {:dps (dps-map f (:dps c)) :direct (fn [] (f ((:direct c)))) :calls (:calls c) :benefits (:benefits c)
+                     :explicit (boolean (:explicit c))})
 (defn- ch-pair [a b] {:dps (dps-pair (:dps a) (:dps b)) :direct (fn [] [((:direct a)) ((:direct b))])
-                      :calls (+ (:calls a) (:calls b)) :benefits (or (:benefits a) (:benefits b))})
-(def ^:private ch-unit {:dps dps-unit :direct (fn [] nil) :calls 0 :benefits false})
+                      :calls (+ (:calls a) (:calls b)) :benefits (or (:benefits a) (:benefits b))
+                      :explicit (boolean (or (:explicit a) (:explicit b)))})
+(def ^:private ch-unit {:dps dps-unit :direct (fn [] nil) :calls 0 :benefits false :explicit false})
 (defn- ch-list [cs]
   (if (empty? cs) (ch-map (fn [_] []) ch-unit)
       (ch-map (fn [[v vs]] (vec (cons v vs))) (ch-pair (first cs) (ch-list (rest cs))))))
@@ -174,20 +177,26 @@
               :Ltrywith (ch-map (fn [[a b]] [:Ltrywith a (t 2) b]) (ch-pair (ch false (t 1)) (ch tail (t 3))))
               :Lstaticcatch (ch-map (fn [[a b]] [:Lstaticcatch a (t 2) b]) (ch-pair (ch tail (t 1)) (ch tail (t 3))))))
           (choice-apply [tail t]
-            (let [f (t 1) sp (when (= :Lvar (f 0)) (get ctx (f 1)))
+            ;; ap_tailcall: Tailcall_expectation false no TMC call, true an explicit request
+            (let [tc (:tailcall (get t 3))
+                  f (t 1) sp (when (and (= :Lvar (f 0)) (not= :false tc)) (get ctx (f 1)))
                   args (when sp (s/find-exact-application (:kind sp) (:arity sp) (t 2)))]
               (if args
                 {:dps (dps-make (fn [_ dst] [:Lapply [:Lvar (:dps-id sp)] (vec (concat [[:Lvar (:var dst)] (:offset dst)] args))]))
-                 :direct (fn [] t) :calls 1 :benefits true}
+                 :direct (fn [] t) :calls 1 :benefits true :explicit (= :true tc)}
                 (ch-lambda t))))
           (choice-makeblock [prim args]
+            ;; Choice.find_nonambiguous_tmc_call: one argument with TMC calls, or among several the one explicitly requested
             (let [cs (mapv #(ch false %) args)
-                  with (filter #(pos? (:calls %)) cs)]
+                  with (filter #(pos? (:calls %)) cs)
+                  only-explicit (> (count with) 1)
+                  pick? (fn [c] (and (pos? (:calls c)) (or (not only-explicit) (:explicit c))))]
               (cond
                 (empty? with) (ch-lambda [:Lprim prim (mapv ch-direct cs)])
-                (> (count with) 1) (let [tc (ch-map (fn [as] [:Lprim prim as]) (ch-list cs))]
-                                     (assoc tc :dps (dps-make (fn [_ _] (throw (ex-info "Tmc: ambiguous constructor arguments" {}))))))
-                :else (let [i (first (keep-indexed (fn [i c] (when (pos? (:calls c)) i)) cs))
+                (and only-explicit (not= 1 (count (filter :explicit with))))
+                (let [tc (ch-map (fn [as] [:Lprim prim as]) (ch-list cs))]
+                  (assoc tc :dps (dps-make (fn [_ _] (throw (ex-info "Tmc: ambiguous constructor arguments" {}))))))
+                :else (let [i (first (keep-indexed (fn [i c] (when (pick? c) i)) cs))
                             c (cs i)
                             constr {:tag-name (:name prim) :mutable (str/starts-with? (:name prim) "makemutable")
                                     :before (mapv ch-direct (subvec cs 0 i)) :after (mapv ch-direct (subvec cs (inc i)))}]
@@ -197,7 +206,8 @@
                                      (with-placeholder constr (fn [nd] [:Lsequence (ch-dps c false nd) [:Lvar (:var nd)]]))))
                          :benefits false
                          :dps (delay-constructor constr (:dps c))
-                         :calls (:calls c)}))))
+                         :calls (:calls c)
+                         :explicit (boolean (:explicit c))}))))
           (choice-prim [tail prim args]
             (cond
               (= :makeblock (:kind prim)) (choice-makeblock prim args)

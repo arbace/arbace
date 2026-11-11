@@ -59,7 +59,7 @@ pyrec_python_id() {  # the :host-ids :python recipe: the version line, python3's
 
 pyrec_sha16() { sha256sum < "$1" | cut -c1-16; }
 pyrec_helper() {  # KIND: the helper's script
-  case $1 in tok) echo "$root/tools/pydump/tokdump.py" ;; src) echo "$root/tools/pydump/syntax_cases.py" ;; *) echo "$root/tools/pydump/pydump.py" ;; esac
+  case $1 in tok) echo "$root/tools/pydump/tokdump.py" ;; src) echo "$root/tools/pydump/syntax_cases.py" ;; *) echo "$root/tools/pydump/${PYDUMP:-pydump.py}" ;; esac
 }
 pyrec_pin() { echo "$PYREC_DIR/python-pydump-$1.sha256"; }
 pyrec_essential() { case " $PYREC_ESSENTIAL " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -89,8 +89,8 @@ pyrec_run_helper() {
   for i in "$d"/part.*; do
     [ -s "$i" ] || continue
     case $kind in
-      tree) command python3 -I -S -B "$root/tools/pydump/pydump.py" tree --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" & ;;
-      full) command python3 -I -S -B "$root/tools/pydump/pydump.py" tree --full --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" & ;;
+      tree) command python3 -I -S -B "$root/tools/pydump/${PYDUMP:-pydump.py}" tree --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" & ;;
+      full) command python3 -I -S -B "$root/tools/pydump/${PYDUMP:-pydump.py}" tree --full --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" & ;;
       scopes) command python3 -I -S -B "$root/tools/pydump/pydump.py" scopes --base "$base" --list "$i" --out "$out" & ;;
       tok) command python3 -I -S -B "$root/tools/pydump/tokdump.py" --base "$base" --list "$i" --out "$out" --tsv "$i.tsv" & ;;
     esac

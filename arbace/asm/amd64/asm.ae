@@ -1,0 +1,1126 @@
+(ns arbace.asm.amd64.asm
+  "amd64's matcher and encoder (doc/asm/AMD64-SURVEY.md §7.2, AX2; AXS5's mode :llvm): an instruction's form (AX1's
+  AT&T reading) matched against the table of asm/amd64/table.edn (arbace.asm.amd64.gen's, LLVM's matchables in their
+  order) and encoded as LLVM's MC does, after llvm-project 23.1.5's X86AsmParser.cpp (parseInstruction,
+  matchAndEmitATTInstruction, processInstruction), X86Operand.h (the operand classes' predicates and render methods),
+  the generated MatchInstructionImpl's rules and X86MCCodeEmitter.cpp (prefixes, REX, ModRM, SIB, displacements,
+  immediates, fixups), Apache-2.0 WITH LLVM-exception, written again in Arbace.
+
+  `assemble-insn` takes a form, the mode (16, 32 or 64) and the constant symbols, and gives {:inst NAME :bytes [B ...]
+  :fixups [[OFFSET SIZE] ...]} or {:error MESSAGE} (the assembler's own message, as llvm-mc writes it) or {:unsupported
+  CLASS} (what this slice does not encode yet: :vex, :evex, :xop, :apx, ...)."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the table
+
+(defn- load-table [^String path]
+  (let [t (read-string (slurp path))
+        classes (into {} (for [[k v] (:classes t)]
+                           [k (cond (vector? v) (if (.startsWith ^String k "reg:") (set v) v) :else v)]))
+        regs (:regs t)
+        by-asm (into {} (for [[n [a _]] regs] [(str/lower-case a) n]))]
+    (assoc t
+           :classes classes
+           :by-mn (reduce (fn [m e] (update m (first e) (fnil conj []) e)) {} (:match t))
+           :by-mn-intel (reduce (fn [m e] (update m (first e) (fnil conj []) e)) {} (:match-intel t))
+           :by-asm by-asm)))
+
+(def ^:private tables (atom {}))
+
+(defn table
+  "The table at `path` (REPR_ASM_TABLE, else asm/amd64/table.edn), read once."
+  ([] (table (or (System/getenv "REPR_ASM_TABLE") "asm/amd64/table.edn")))
+  ([^String path] (or (get @tables path) (let [t (load-table path)] (swap! tables assoc path t) t))))
+
+(def ^:dynamic *t* nil)
+;; .code16gcc: 16-bit mode, matched as 32-bit (X86AsmParser's Code16GCC)
+(def ^:dynamic *gcc* false)
+;; the statement's syntax: Intel's forms (arbace.repr.asm.amd64.intel, the operands in the text's order) when true (AX3)
+(def ^:dynamic *intel* false)
+;; the matcher's variant: MatchTable0 (AT&T) or MatchTable1 (Intel), with its mnemonic aliases
+(def ^:dynamic *variant* 0)
+
+(defn- reg-enc ^long [r] (if r (long (second (get (:regs *t*) r))) 0))
+(defn- in-class? [r ^String cls] (contains? (get (:classes *t*) (str "reg:" cls)) r))
+
+(defn fail [msg] (throw (ex-info msg {:asm/error msg})))
+(defn unsupported [cls msg] (throw (ex-info msg {:asm/unsupported cls})))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; expressions: constants folded, else symbolic
+
+(defn const-value
+  "The integer value of the expression `e` with the constant symbols `syms`, or nil when it is symbolic."
+  [e syms]
+  (cond
+    (instance? Long e) e
+    (integer? e) (.longValue (biginteger e))
+    (symbol? e) (when-let [v (get syms (name e))] (const-value v syms))
+    (seq? e)
+    (let [[op a b] e]
+      (if (= 2 (count e))
+        (when-let [x (const-value a syms)]
+          (case op - (- x) + x bnot (bit-not x) lnot (if (zero? x) 1 0) nil))
+        (let [x (const-value a syms) y (const-value b syms)]
+          (when (and x y (#{'+ '- '* '/ '% '<< '>> '| '& 'xor 'ornot '== '!= '< '<= '> '>= '&& '||} op))
+            (case op
+              + (+ x y) - (- x y) * (* x y) / (when-not (zero? y) (quot x y)) % (when-not (zero? y) (rem x y))
+              << (bit-shift-left x y) >> (bit-shift-right x y) | (bit-or x y) & (bit-and x y) xor (bit-xor x y)
+              ornot (bit-or x (bit-not y))
+              == (if (= x y) -1 0) != (if (= x y) 0 -1) < (if (< x y) -1 0) <= (if (<= x y) -1 0)
+              > (if (> x y) -1 0) >= (if (>= x y) -1 0) && (if (and (not (zero? x)) (not (zero? y))) 1 0)
+              || (if (or (not (zero? x)) (not (zero? y))) 1 0))))))
+    :else nil))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; operands (X86Operand): {:k :reg :reg R} {:k :imm :e E :v V} {:k :mem :seg :base :index :scale :disp :dv :size :mode}
+;; {:k :tok :t TEXT}
+
+(defn- reg-of
+  "The register named by the form (reg NAME) or (reg st N)."
+  [x]
+  (let [[_ r n] x
+        nm (if (and (= 'st r) (integer? n)) (str "st(" n ")") (name r))
+        nm (if (= nm "st") "st(0)" nm)
+        nm (str/replace (str/lower-case nm) #"^db(\d+)$" "dr$1")]
+    (or (get (:by-asm *t*) nm)
+        (when (= nm "st(0)") (get (:by-asm *t*) "st"))
+        (fail (str "invalid register name")))))
+
+(defn- check-reg-mode [r ^long mode]
+  ;; X86AsmParser::MatchRegisterByName: GR64, the REX byte registers and isX86_64ExtendedReg's (r8-r31, xmm8-31, ymm8-31,
+  ;; zmm8-31, cr8-15, dr8-15) outside 64-bit mode
+  (when (and (not= mode 64)
+             (or (in-class? r "GR64") (#{"SIL" "DIL" "BPL" "SPL" "RIP" "RIZ"} r)
+                 (re-matches #"R([89]|[12][0-9]|3[01])[DWB]?(H)?|[XYZ]MM([89]|[12][0-9]|3[01])|CR(8|9|1[0-5])|DR(8|9|1[0-5])" r)))
+    (fail (str "register %" (str/lower-case (first (get (:regs *t*) r))) " is only available in 64-bit mode"))))
+
+(defn- egpr?
+  "X86II::isApxExtendedReg: APX's extended GPRs, %r16-%r31 at each width."
+  [r]
+  (boolean (and (string? r) (re-matches #"R(1[6-9]|2[0-9]|3[01])[DWB]?" r))))
+
+(defn- check-base-index
+  "CheckBaseRegAndIndexRegAndScale's rules on a memory operand's registers."
+  [b x m64]
+  (let [g16 #(in-class? % "GR16") g32 #(in-class? % "GR32") g64 #(in-class? % "GR64")
+        vec? #(re-matches #"[XYZ]MM\d+" %)]
+    (cond
+      (and b (not (or (#{"RIP" "EIP"} b) (g16 b) (g32 b) (g64 b)))) (fail "invalid base+index expression")
+      (and x (not (or (#{"EIZ" "RIZ"} x) (g16 x) (g32 x) (g64 x) (vec? x)))) (fail "invalid base+index expression")
+      (or (and (#{"RIP" "EIP"} b) x) (#{"EIP" "RIP" "ESP" "RSP"} x)) (fail "invalid base+index expression")
+      (and b (g16 b) (or m64 (not (#{"BX" "BP" "SI" "DI"} b)))) (fail "invalid 16-bit base register")
+      (and (nil? b) x (g16 x)) (fail "16-bit memory operand may not include only index register")
+      (and b x (g64 b) (or (g16 x) (g32 x) (= x "EIZ"))) (fail "base register is 64-bit, but index register is not")
+      (and b x (g32 b) (or (g16 x) (g64 x) (= x "RIZ"))) (fail "base register is 32-bit, but index register is not")
+      (and b x (g16 b) (or (g32 x) (g64 x))) (fail "base register is 16-bit, but index register is not")
+      (and b x (g16 b) (or (not (#{"BX" "BP"} b)) (not (#{"SI" "DI"} x)))) (fail "invalid 16-bit base/index register combination")
+      (and (not m64) (#{"RIP" "EIP"} b)) (fail "IP-relative addressing requires 64-bit mode")
+      :else nil)))
+
+;; parseIntelOperand's value: the expression state machine keeps one symbol (Sym) and computes the rest as an integer (Imm),
+;; the symbol counted 0, constant symbols inlined; the operand's expression is Sym + Imm
+(defn- symbol-leaves [e syms]
+  (cond (or (symbol? e) (and (seq? e) (#{'sym 'at 'local} (first e))))
+        (if (and (not (and (seq? e) (#{'at 'local} (first e)))) (const-value e syms)) [] [e])
+        (seq? e) (vec (mapcat #(symbol-leaves % syms) (rest e)))
+        :else []))
+
+(defn- intel-value
+  "Sym + Imm of an Intel operand's expression `e` (IntelExprStateMachine): an integer when it has no symbol."
+  [e syms]
+  (let [ls (distinct (symbol-leaves e syms))]
+    (cond
+      (empty? ls) (or (const-value e syms) e)
+      (> (count ls) 1) (fail "cannot use more than one symbol in memory operand")
+      :else (let [sym (first ls)
+                  zero (fn z [x] (cond (= x sym) 0 (seq? x) (if (#{'sym 'at 'local} (first x)) x (apply list (first x) (map z (rest x)))) :else x))
+                  v (const-value (zero e) syms)]
+              (cond (nil? v) e (zero? (long v)) sym (neg? (long v)) (list '- sym (- (long v))) :else (list '+ sym v))))))
+
+(defn- intel-mem
+  "parseIntelOperand's address: an index with the base RIP drops the base; with no scale written, ESP or RSP as the index and a
+  vector register as the base swap with the other; SI or DI as the base with BX or BP the index swap (CheckBaseRegAndIndexReg
+  shares AT&T's order)."
+  [base index scale-written?]
+  (let [vec? (fn [r] (and r (re-matches #"[XYZ]MM\d+" r)))
+        base (if (and index (= base "RIP")) nil base)
+        [base index] (if (and (not scale-written?) (not (#{"ESP" "RSP"} base)) (#{"ESP" "RSP"} index)) [index base] [base index])
+        [base index] (if (and (not scale-written?) (not (vec? index)) (vec? base)) [index base] [base index])
+        _ (when (and scale-written? index (in-class? index "GR16")) (fail "16-bit addresses cannot have a scale"))
+        [base index] (if (and (#{"SI" "DI"} base) (#{"BX" "BP"} index)) [index base] [base index])]
+    [base index]))
+
+(defn- operands
+  "The X86Operands of the form's operands (the SDM's order in the form, the text's here: AT&T's reversed, Intel's as they
+  are); `mn` the mnemonic (Intel's jmp and call: a bracketed or sized memory operand is no direct branch target)."
+  [ops mode syms & [mn]]
+  (vec (mapcat
+        (fn [x]
+          (let [deco (fn [m] (concat (when-let [k (:k m)] [{:k :tok :t "{"} {:k :reg :reg (reg-of (list 'reg k))} {:k :tok :t "}"}])
+                                     (when (:z m) [{:k :tok :t "{z}"}])))
+                eq-reg (when (and (= 'mem (first x)) (= [:disp] (keys (second x))) (symbol? (:disp (second x))))
+                         (let [v (get syms (name (:disp (second x))))]
+                           (when (and (seq? v) (#{'reg 'pct} (first v)) (= 2 (count v))) (reg-of (list 'reg (second v))))))]
+            (if eq-reg
+              (do (check-reg-mode eq-reg mode) [{:k :reg :reg eq-reg}])
+            (case (first x)
+              reg (let [r (reg-of x) m (first (filter map? (rest x)))]
+                    (check-reg-mode r mode)
+                    (when (and *intel* (= r "RIP")) (fail "rip can only be used as a base register"))
+                    (cons {:k :reg :reg r} (deco m)))
+              imm (let [e (if *intel* (intel-value (second x) syms) (second x))] [{:k :imm :e e :v (const-value e syms)}])
+              ind (cons {:k :tok :t "*"} (operands [(second x)] mode syms mn))
+              ;; ParseRoundingModeOp: {rn-sae} ... {rz-sae} an immediate (X86::STATIC_ROUNDING), {sae} a token
+              rc (let [t (str (second x))]
+                   (cond (= t "sae") [{:k :tok :t "{sae}"}]
+                         (re-matches #"r[nduz]-sae" t) (let [v ({"rn" 0 "rd" 1 "ru" 2 "rz" 3} (subs t 0 2))] [{:k :imm :e v :v v}])
+                         ;; parseCFlagsOp: CCMP's and CTEST's default flags, an immediate (of 8, sf 4, zf 2, cf 1)
+                         (.startsWith (str/lower-case t) "dfv=")
+                         (let [fs (remove empty? (map str/trim (str/split (subs (str/lower-case t) 4) #",")))
+                               v (reduce (fn [^long acc f]
+                                           (let [b ({"of" 8 "sf" 4 "zf" 2 "cf" 1} f)]
+                                             (cond (nil? b) (fail "Invalid conditional flags")
+                                                   (pos? (bit-and acc (long b))) (fail "Duplicated conditional flag")
+                                                   :else (bit-or acc (long b)))))
+                                         0 fs)]
+                           [{:k :imm :e v :v v}])
+                         (.startsWith t "r") (fail "Invalid rounding mode.")
+                         :else (fail "unknown token in expression")))
+              mem (let [m (second x)
+                        ;; a symbol equated to a register (`v = %ecx`: its value (pct ecx)), as X86AsmParser reads it
+                        reg-val (fn [v] (when (and (seq? v) (#{'reg 'pct} (first v)) (= 2 (count v))) (reg-of (list 'reg (second v)))))
+                        rg (fn [r] (cond (nil? r) nil
+                                         (and (seq? r) (= 'asm/eq (first r))) (or (reg-val (get syms (name (second r)))) (fail "invalid register name"))
+                                         :else (reg-of (list 'reg r))))
+                        ;; `%fs:(v_ecx)`: a register equate in the parentheses, read as the displacement, is the base
+                        eq-base (when (and (nil? (:base m)) (nil? (:index m)) (symbol? (:disp m)))
+                                  (reg-val (get syms (name (:disp m)))))
+                        m (if eq-base (-> m (assoc :base (list 'asm/eq (:disp m))) (dissoc :disp)) m)
+                        base (rg (:base m)) index (rg (:index m))
+                        [base index] (if *intel* (intel-mem base index (contains? m :scale)) [base index])
+                        seg (cond (:seg m) (reg-of (list 'reg (:seg m)))
+                                  (:segsym m) (or (reg-val (get syms (name (:segsym m)))) (fail "invalid register name")))
+                        scale (if (contains? m :scale) (const-value (:scale m) syms) 1)
+                        disp (if (contains? m :disp) (:disp m) 0)
+                        disp (if *intel* (intel-value disp syms) disp)]
+                    (doseq [r [base index]] (when r (check-reg-mode r mode)))
+                    ;; (%dx) alone: ParseMemOperand's DX register operand (in, out, ins, outs), not an address
+                    (when-not (and (= base "DX") (nil? index) (nil? seg) (not (contains? m :scale))
+                                   (= 0 (const-value disp syms)))
+                      (check-base-index base index (= mode 64)))
+                    (when-not (#{1 2 4 8} scale) (fail "scale factor in address must be 1, 2, 4 or 8"))
+                    (concat [(cond-> {:k :mem :seg seg :base base :index index :scale scale :disp disp :dv (const-value disp syms)
+                                      :size (or (:size m) 0) :mode mode}
+                               ;; Intel's jmp and call: MaybeDirectBranchDest false with ptr or brackets
+                               (and *intel* (#{"jmp" "call"} mn) (or (:size m) (not (:bare m)))) (assoc :nodirect true))]
+                            (when-let [b (:bcst m)] [{:k :tok :t (str "{1to" b "}")}])
+                            (deco m)))))))
+        (if *intel* ops (reverse ops)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the classes' predicates (X86Operand.h)
+
+(defn- int8? [^long v] (<= -128 v 127))
+(defn- uint? [^long v ^long bits] (and (<= 0 v) (< v (bit-shift-left 1 bits))))
+(defn- s16i8? [^long v] (or (int8? v) (and (uint? v 16) (int8? (long (unchecked-short v))))))
+(defn- s32i8? [^long v] (or (int8? v) (and (uint? v 32) (int8? (long (unchecked-int v))))))
+(defn- int32? [^long v] (<= -2147483648 v 2147483647))
+
+(defn- mem? [o ^long size] (and (= :mem (:k o)) (or (zero? (long (:size o))) (= size (long (:size o))))))
+(defn- abs-mem? [o] (and (= :mem (:k o)) (nil? (:seg o)) (nil? (:base o)) (nil? (:index o)) (= 1 (:scale o)) (not (:nodirect o))))
+(defn- mem-offs? [o] (and (= :mem (:k o)) (nil? (:base o)) (nil? (:index o)) (= 1 (:scale o))))
+(defn- disp0? [o] (= 0 (:dv o)))
+(defn- src-idx? [o] (and (= :mem (:k o)) (nil? (:index o)) (= 1 (:scale o)) (#{"RSI" "ESI" "SI"} (:base o)) (disp0? o)))
+(defn- dst-idx? [o] (and (= :mem (:k o)) (nil? (:index o)) (= 1 (:scale o)) (or (nil? (:seg o)) (= "ES" (:seg o)))
+                         (#{"RDI" "EDI" "DI"} (:base o)) (disp0? o)))
+(defn- index-in? [o lo hi] (when-let [i (:index o)] (let [[_ p n] (re-matches #"([XYZ]MM)(\d+)" i)] (and p (= p lo) (<= (Long/parseLong n) (long hi))))))
+
+(defn- pred [^String m o]
+  (let [imm? (= :imm (:k o)) v (:v o)
+        mm (fn [s] (mem? o s))]
+    (case m
+      "isImm" imm?
+      "isImmSExti16i8" (and imm? (or (nil? v) (s16i8? v)))
+      "isImmSExti32i8" (and imm? (or (nil? v) (s32i8? v)))
+      "isImmSExti64i8" (and imm? (or (nil? v) (int8? v)))
+      "isImmSExti64i32" (and imm? (or (nil? v) (int32? v)))
+      "isImmUnsignedi8" (and imm? (or (nil? v) (uint? v 8) (int8? v)))
+      "isImmUnsignedi4" (and imm? (some? v) (uint? v 4))
+      "isAVX512RC" imm?
+      "isMem" (= :mem (:k o))
+      "isMem8" (mm 8) "isMem16" (mm 16) "isMem32" (mm 32) "isMem64" (mm 64) "isMem80" (mm 80) "isMem128" (mm 128)
+      "isMem256" (mm 256) "isMem512" (mm 512)
+      "isMem32_RC128" (and (mm 32) (index-in? o "XMM" 15)) "isMem64_RC128" (and (mm 64) (index-in? o "XMM" 15))
+      "isMem32_RC256" (and (mm 32) (index-in? o "YMM" 15)) "isMem64_RC256" (and (mm 64) (index-in? o "YMM" 15))
+      "isMem32_RC128X" (and (mm 32) (index-in? o "XMM" 31)) "isMem64_RC128X" (and (mm 64) (index-in? o "XMM" 31))
+      "isMem32_RC256X" (and (mm 32) (index-in? o "YMM" 31)) "isMem64_RC256X" (and (mm 64) (index-in? o "YMM" 31))
+      "isMem32_RC512" (and (mm 32) (index-in? o "ZMM" 31)) "isMem64_RC512" (and (mm 64) (index-in? o "ZMM" 31))
+      "isMem512_GR16" (and (mm 512) (or (nil? (:base o)) (in-class? (:base o) "GR16")))
+      "isMem512_GR32" (and (mm 512) (or (nil? (:base o)) (in-class? (:base o) "GR32") (= "EIP" (:base o)))
+                           (or (nil? (:index o)) (in-class? (:index o) "GR32") (= "EIZ" (:index o))))
+      "isMem512_GR64" (and (mm 512) (or (nil? (:base o)) (in-class? (:base o) "GR64") (= "RIP" (:base o)))
+                           (or (nil? (:index o)) (in-class? (:index o) "GR64") (= "RIZ" (:index o))))
+      "isSibMem" (and (= :mem (:k o)) (not (#{"RIP" "EIP"} (:base o))))
+      "isAbsMem" (abs-mem? o)
+      "isAbsMem8" (and (abs-mem? o) (mm 8) (or (nil? (:dv o)) (int8? (:dv o))))
+      "isAbsMemMode16" (and (abs-mem? o) (= 16 (:mode o)))
+      "isSrcIdx8" (and (mm 8) (src-idx? o)) "isSrcIdx16" (and (mm 16) (src-idx? o))
+      "isSrcIdx32" (and (mm 32) (src-idx? o)) "isSrcIdx64" (and (mm 64) (src-idx? o))
+      "isDstIdx8" (and (mm 8) (dst-idx? o)) "isDstIdx16" (and (mm 16) (dst-idx? o))
+      "isDstIdx32" (and (mm 32) (dst-idx? o)) "isDstIdx64" (and (mm 64) (dst-idx? o))
+      "isMemConstOffs64" (and (mem-offs? o) (= 64 (:mode o)) (some? (:dv o)) (not (int32? (:dv o))))
+      "isGR32orGR64" (and (= :reg (:k o)) (or (in-class? (:reg o) "GR32") (in-class? (:reg o) "GR64")))
+      "isGR16orGR32orGR64" (and (= :reg (:k o)) (or (in-class? (:reg o) "GR16") (in-class? (:reg o) "GR32") (in-class? (:reg o) "GR64")))
+      ;; VK2, VK4, VK8 and VK16 are each K0-K7
+      ("isVK2Pair" "isVK4Pair" "isVK8Pair" "isVK16Pair") (and (= :reg (:k o)) (in-class? (:reg o) "VK1"))
+      (if-let [[_ ms sz] (re-matches #"isMemOffs(16|32|64)_(8|16|32|64)" m)]
+        (and (mem-offs? o) (= (Long/parseLong ms) (long (:mode o))) (mm (Long/parseLong sz)))
+        (unsupported :operand-class m)))))
+
+(defn- valid? [o ^String cls]
+  (let [c (get (:classes *t*) cls)]
+    (cond
+      (.startsWith cls "tok:") (and (= :tok (:k o)) (= (:t o) c))
+      (.startsWith cls "reg:") (and (= :reg (:k o)) (contains? c (:reg o)))
+      :else (pred (first c) o))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the operands rendered into the machine instruction (the render methods)
+
+(defn- sub-reg [r ^long bits]
+  ;; getX86SubSuperRegister for the general registers: the register of the same number at `bits`
+  (let [n (reg-enc r)
+        names {16 ["AX" "CX" "DX" "BX" "SP" "BP" "SI" "DI" "R8W" "R9W" "R10W" "R11W" "R12W" "R13W" "R14W" "R15W"]
+               32 ["EAX" "ECX" "EDX" "EBX" "ESP" "EBP" "ESI" "EDI" "R8D" "R9D" "R10D" "R11D" "R12D" "R13D" "R14D" "R15D"]}]
+    (nth (names bits) n)))
+
+(defn- render [o ^String cls]
+  (let [c (get (:classes *t*) cls)
+        m (if (vector? c) (if (string? (first c)) (second c) "addRegOperands") "addRegOperands")
+        ex (fn [e v] (if (some? v) {:imm v} {:expr e}))]
+    (case m
+      "addRegOperands" [{:reg (:reg o)}]
+      ("addImmOperands" "addAVX512RCOperands") [(ex (:e o) (:v o))]
+      "addMemOperands" [{:reg (:base o)} {:imm (:scale o)} {:reg (:index o)} (ex (:disp o) (:dv o)) {:reg (:seg o)}]
+      "addAbsMemOperands" [(ex (:disp o) (:dv o))]
+      "addSrcIdxOperands" [{:reg (:base o)} {:reg (:seg o)}]
+      "addDstIdxOperands" [{:reg (:base o)}]
+      "addMemOffsOperands" [(ex (:disp o) (:dv o)) {:reg (:seg o)}]
+      "addGR32orGR64Operands" [{:reg (if (in-class? (:reg o) "GR64") (sub-reg (:reg o) 32) (:reg o))}]
+      "addGR16orGR32orGR64Operands" [{:reg (if (or (in-class? (:reg o) "GR32") (in-class? (:reg o) "GR64")) (sub-reg (:reg o) 16) (:reg o))}]
+      ;; K0_K1, K2_K3, ...: the pair's encoding is its even register's
+      "addMaskPairOperands" [{:reg (str "K" (bit-and (reg-enc (:reg o)) 6))}]
+      (unsupported :render m))))
+
+(defn- convert
+  "The machine operands of the match `e` (its conversion) over the X86Operands `ops`."
+  [e ops]
+  (let [[_ classes _ conv] e
+        slots (vec (mapcat (fn [c]
+                             (case (first c)
+                               :a (render (nth ops (second c)) (nth classes (second c)))
+                               :t [[:tie (second c)]]
+                               :r [{:reg (second c)}]
+                               :i [{:imm (second c)}]
+                               :z [{:reg nil}]))
+                           conv))]
+    (mapv (fn [s] (if (vector? s) (nth slots (second s)) s)) slots)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; matching (MatchInstructionImpl, checkTargetMatchPredicate)
+
+(defn- features [^long mode] (case (if (and *gcc* (= mode 16)) 32 mode) 64 #{"Is64Bit"} 32 #{"Is32Bit"} 16 #{"Is16Bit"}))
+
+(defn- pred-holds? [p feats]
+  (let [[cd _] (get (:preds *t*) p)
+        d (read-string cd)
+        ev (fn ev [x] (cond (symbol? x) (contains? feats (name x))
+                            (= 'not (first x)) (not (ev (second x)))
+                            (= 'all_of (first x)) (every? ev (rest x))
+                            (= 'any_of (first x)) (some ev (rest x))
+                            :else false))]
+    (boolean (ev d))))
+
+(def ^:private no-egpr #{"XSAVE" "XSAVE64" "XSAVEOPT" "XSAVEOPT64" "XSAVEC" "XSAVEC64" "XSAVES" "XSAVES64" "XRSTOR" "XRSTOR64"
+                          "XRSTORS" "XRSTORS64"})
+
+(defn- can-use-egpr?
+  "X86II::canUseApxExtendedReg: EVEX always; the legacy maps OB and TB but XSAVE*/XRSTOR*; a pseudo never (the matchable
+  pseudos LLVM excepts are no AT&T or Intel matchables)."
+  [^String inst info]
+  (cond (= "EncEVEX" (:enc info)) true
+        (contains? (set (:flags info)) :pseudo) false
+        (no-egpr inst) false
+        :else (and (= "EncNormal" (:enc info)) (contains? #{"OB" "TB"} (:map info)))))
+
+;; X86::isCMP, X86::isTEST: the instructions of the mnemonics cmp and test
+(defn- cmp-or-test? [^String inst] (boolean (re-matches #"(CMP|TEST)(8|16|32|64)[a-z].*" inst)))
+
+(defn- target-ok? [inst info opts]
+  (let [fl (set (:flags info))]
+    (cond
+      (and (:egpr opts) (not (can-use-egpr? inst info))) false
+      (and (not= (boolean (:nf opts)) (contains? fl :nf)) (not (re-matches #"CFCMOV.*" inst))) false
+      (#{:rex :rex2} (:force opts)) (= "EncNormal" (:enc info))
+      (#{:vex :vex2 :vex3} (:force opts)) (= "EncVEX" (:enc info))
+      (= :evex (:force opts)) (or (= "EncEVEX" (:enc info)) (and (= 64 (:mode opts)) (cmp-or-test? inst)))
+      (= "ExplicitVEX" (:explicit info)) false
+      :else true)))
+
+(defn- match-impl
+  "[:ok ENTRY MI] or [:fail KIND DATA] for the mnemonic `mn` and the operands."
+  [^String mn ops mode opts]
+  (let [opts (assoc opts :mode mode
+                    :egpr (boolean (some (fn [o] (or (egpr? (:reg o)) (egpr? (:base o)) (egpr? (:index o)))) ops)))
+        mn (let [as (get (if (= 1 *variant*) (:aliases-intel *t*) (:aliases *t*)) mn)
+                 feats (features mode)]
+             (or (some (fn [[ps to]] (when (every? #(pred-holds? % feats) ps) to)) as) mn))
+        es (get (if (= 1 *variant*) (:by-mn-intel *t*) (:by-mn *t*)) mn)]
+    (if (empty? es)
+      [:fail :mnemonic nil]
+      (let [feats (features mode)]
+        (loop [es es ret [:fail :operand nil]]
+          (if (empty? es)
+            ret
+            (let [e (first es)
+                  classes (second e)]
+              (if (or (not= (count classes) (count ops)) (not (every? true? (map valid? ops classes))))
+                (recur (rest es) ret)
+                (let [missing (remove #(pred-holds? % feats) (nth e 4))]
+                  (if (seq missing)
+                    (recur (rest es) [:fail :feature missing])
+                    (let [info (get (:insns *t*) (nth e 2))]
+                      (if (target-ok? (nth e 2) info opts)
+                        [:ok e (convert e ops)]
+                        (recur (rest es) [:fail :unsupported nil])))))))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; processInstruction's rewrites
+
+(defn- ext? [r] (and r (pos? (bit-and (reg-enc r) 8))))
+
+(defn- vex3->vex2
+  "X86::optimizeInstFromVEX3ToVEX2: the commutable VEX instructions' sources swapped, the moves as their _REV forms,
+  when that leaves VEX.B clear: [INST MI] or nil."
+  [inst mi]
+  (let [info (get (:insns *t*) inst) fl (set (:flags info))
+        rev1 #{"VMOVAPDrr" "VMOVAPDYrr" "VMOVAPSrr" "VMOVAPSYrr" "VMOVDQArr" "VMOVDQAYrr" "VMOVDQUrr" "VMOVDQUYrr"
+               "VMOVUPDrr" "VMOVUPDYrr" "VMOVUPSrr" "VMOVUPSYrr"}
+        [new i1 i2] (cond
+                      (rev1 inst) [(str inst "_REV") 0 1]
+                      (#{"VMOVSDrr" "VMOVSSrr"} inst) [(str inst "_REV") 0 2]
+                      (= inst "VMOVZPQILo2PQIrr") ["VMOVPQI2QIrr" 0 1]
+                      (#{"VCMPPDrri" "VCMPPDYrri" "VCMPPSrri" "VCMPPSYrri" "VCMPSDrri" "VCMPSSrri"} inst)
+                      (when (#{0 3 4 7} (bit-and 7 (long (:imm (nth mi 3))))) [nil 1 2])
+                      (and (fl :commutable) (= "EncVEX" (:enc info)) (= "TB" (:map info)) (= "MRMSrcReg" (:form info))
+                           (not (fl :w)) (fl :4v) (= 3 (count mi)) (not (#{"VMOVHLPSrr" "VUNPCKHPDrr"} inst)))
+                      [nil 1 2])]
+    (when (and i1 (not (ext? (:reg (nth mi i1)))) (ext? (:reg (nth mi i2))))
+      (if new
+        [new mi]
+        [inst (assoc mi i1 (nth mi i2) i2 (nth mi i1))]))))
+
+(defn- process
+  "X86AsmParser::processInstruction: VEX3 to VEX2 (unless {vex3}); an `int $3` as INT3; a shift or rotate by 1 as its
+  D1 form."
+  [inst mi flags]
+  (cond
+    (and (not (flags :vex3)) (vex3->vex2 inst mi)) (vex3->vex2 inst mi)
+    ;; `{evex} cmp` is `ccmpt {dfv=}`, `{evex} test` `ctest {dfv=}`: the condition 10 (true) and no flags, IP_USE_EVEX cleared
+    (and (flags :use-evex) (re-matches #"(CMP|TEST)(8|16|32|64)(rr|rm|mr|ri|mi|ri8|mi8|ri32|mi32)" inst)
+         (get (:insns *t*) (str "C" inst)))
+    [(str "C" inst) (conj mi {:imm 0} {:imm 10}) :ccmp]
+    (and (= inst "INT") (= 3 (:imm (first mi)))) ["INT3" []]
+    (and (re-matches #"(RCR|RCL|ROL|ROR|SAR|SHL|SHR)(8|16|32|64)[rm]i(_EVEX|_ND|_NF|_NF_ND)?" inst)
+         (= 1 (:imm (peek mi))))
+    (let [n (str/replace inst #"([rm])i(_|$)" "$11$2")]
+      (if (get (:insns *t*) n) [n (pop mi)] [inst mi]))
+    :else [inst mi]))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the encoder (X86MCCodeEmitter)
+
+(def ^:private seg-prefix {"CS" 0x2E "SS" 0x36 "DS" 0x3E "ES" 0x26 "FS" 0x64 "GS" 0x65})
+
+(defn- operand-bias ^long [info ^long nops]
+  (let [tie (into {} (:ties info))]
+    (case (long (:defs info))
+      0 0
+      1 (cond (and (> nops 1) (= 0 (get tie 1))) 1
+              (and (= nops 8) (= 0 (get tie 6))) 1
+              :else 0)
+      2 (cond (and (>= nops 4) (= 0 (get tie 2)) (= 1 (get tie 3))) 2
+              (and (= nops 9) (= 0 (get tie 2)) (or (= 1 (get tie 3)) (= 1 (get tie 8)))) 2
+              :else 0)
+      0)))
+
+(defn- nd?
+  "X86II::hasNewDataDest: APX's new data destination, EVEX map 4 with EVEX.b and VEX_4V (the destination in vvvv)."
+  [info]
+  (let [fl (set (:flags info))] (boolean (and (= "T_MAP4" (:map info)) (fl :b) (fl :4v)))))
+
+(defn- mem-operand-no ^long [info]
+  (let [fl (set (:flags info)) v4 (if (fl :4v) 1 0) k (if (fl :k) 1 0) nd (if (nd? info) 1 0)]
+    (case (:form info)
+      ("MRMDestMem" "MRMDestMemFSIB" "MRMDestMemCC") nd
+      ("MRMSrcMem" "MRMSrcMemFSIB") (+ 1 v4 k)
+      "MRMSrcMem4VOp3" (+ 1 k)
+      "MRMSrcMemOp4" 3
+      "MRMSrcMemCC" (+ 1 nd)
+      "MRMDestMem4VOp3CC" 1
+      ("MRMXmCC" "MRMXm" "MRM0m" "MRM1m" "MRM2m" "MRM3m" "MRM4m" "MRM5m" "MRM6m" "MRM7m") (+ v4 k)
+      -1)))
+
+(defn memory-operand
+  "The memory operand's first MCInst operand of the instruction `info` with `nops` operands (X86II::getMemoryOperandNo plus
+  getOperandBias), -1 when none: the decoder's (AX4's third slice)."
+  ^long [info ^long nops]
+  (let [m (mem-operand-no info)] (if (neg? m) -1 (+ m (operand-bias info nops)))))
+
+(defn- imm-size ^long [info]
+  (case (:imm info)
+    ("Imm8" "Imm8PCRel" "Imm8Reg") 1 ("Imm16" "Imm16PCRel") 2 ("Imm32" "Imm32PCRel" "Imm32S") 4 "Imm64" 8 0))
+(defn- imm-kind [info] (when (= "Imm32S" (:imm info)) :signed))
+;; an expression that is a symbol's reference with no specifier (isPCRel32Branch's MCSymbolRefExpr)
+(defn- symbol-ref? [e] (or (symbol? e) (and (seq? e) (#{'sym 'local} (first e)))))
+;; emitMemModRMByte's RIP-relative fixup kind (AX4): the relaxable GOT loads by opcode, for a symbol's reference alone
+(def ^:private riprel-relax
+  #{"ADC32rm" "ADD32rm" "AND32rm" "CMP32rm" "MOV32rm" "OR32rm" "SBB32rm" "SUB32rm" "TEST32mr" "XOR32rm" "CALL64m" "JMP64m"
+    "TAILJMPm64" "TEST64mr" "ADC64rm" "ADD64rm" "AND64rm" "CMP64rm" "OR64rm" "SBB64rm" "SUB64rm" "XOR64rm" "LEA64r"})
+(def ^:private riprel-relax-evex #{"ADD64rm_NF" "ADD64rm_ND" "ADD64mr_ND" "ADD64mr_NF_ND" "ADD64rm_NF_ND"})
+;; PKIND the prefix emitREXPrefix chose (:rex, :rex2 or nil): llvm-mc 23's _rex2 kinds become the CODE_4 relocations
+(defn- riprel-kind [inst disp pkind]
+  (let [e (:expr disp)]
+    (cond (not (or (symbol-ref? e) (and (seq? e) (= 'at (first e)) (symbol-ref? (second e)) (= 3 (count e))))) :riprel
+          (= inst "MOV64rm") (if (= pkind :rex2) :riprel-movq-load-rex2 :riprel-movq-load)
+          (riprel-relax inst) (case pkind :rex2 :riprel-relax-rex2 :rex :riprel-relax-rex :riprel-relax)
+          (riprel-relax-evex inst) :riprel-relax-evex
+          :else :riprel)))
+;; a@tlscall: a symbol's reference whose specifier is TLSCALL (emitMemModRMByte's S_TLSCALL case)
+(defn- tlscall? [e]
+  (boolean (and (seq? e) (= 'at (first e)) (= 3 (count e)) (symbol-ref? (second e)) (= "tlscall" (str/lower-case (str (nth e 2)))))))
+(defn- imm-pcrel? [info] (contains? #{"Imm8PCRel" "Imm16PCRel" "Imm32PCRel"} (:imm info)))
+
+(defn- low-byte-ext? [r] (#{"SPL" "BPL" "SIL" "DIL"} r))
+;; X86II::isX86_64ExtendedReg: r8-r31, xmm8-31, ymm8-31, zmm8-31, cr8-15, dr8-15
+(defn- x86-64-ext? [r]
+  (boolean (and (string? r) (re-matches #"R([89]|[12][0-9]|3[01])[DWB]?|[XYZ]MM([89]|[12][0-9]|3[01])|CR([89]|1[0-5])|DR([89]|1[0-5])" r))))
+(defn- high-byte? [r] (#{"AH" "BH" "CH" "DH"} r))
+
+;; emitVEXOpcodePrefix for VEX and XOP (X86OpcodePrefixHelper's VEX2, VEX3, XOP)
+(defn- vex-prefix! [info mi ^long mode ^long bias ^long mem-op flags byte!]
+  (let [fl (set (:flags info))
+        enc (fn [^long i] (reg-enc (:reg (nth mi i))))
+        b3 (fn [^long i] (bit-and 1 (bit-shift-right (enc i) 3)))
+        b4 (fn [^long i] (bit-and 1 (bit-shift-right (enc i) 4)))
+        v4 (fl :4v)
+        st (volatile! {:r 0 :x 0 :b 0 :vvvv 0})
+        r! (fn [i] (vswap! st assoc :r (b3 i)))
+        b! (fn [i] (vswap! st assoc :b (b3 i)))
+        x! (fn [i] (vswap! st assoc :x (b3 i)))
+        xs! (fn [i] (vswap! st assoc :x (b4 i)))
+        v! (fn [i] (vswap! st assoc :vvvv (bit-and 15 (enc i))))
+        c (long bias)
+        _ (case (:form info)
+            ("RawFrm" "MRM_C0") nil
+            "MRMDestMem4VOp3CC" (do (r! c) (b! mem-op) (x! (+ mem-op 2)) (v! (+ c 6)))
+            ("MRMDestMem" "MRMDestMemCC" "MRMDestMemFSIB") (let [k (+ c 5)] (b! mem-op) (x! (+ mem-op 2)) (if v4 (do (v! k) (r! (inc k))) (r! k)))
+            ("MRMSrcMem" "MRMSrcMemCC" "MRMSrcMemFSIB") (do (r! c) (when v4 (v! (inc c))) (b! mem-op) (x! (+ mem-op 2)))
+            "MRMSrcMem4VOp3" (do (r! c) (b! mem-op) (x! (+ mem-op 2)) (v! (+ c 6)))
+            "MRMSrcMemOp4" (do (r! c) (v! (inc c)) (b! mem-op) (x! (+ mem-op 2)))
+            ("MRMXmCC" "MRM0m" "MRM1m" "MRM2m" "MRM3m" "MRM4m" "MRM5m" "MRM6m" "MRM7m")
+            (do (when v4 (v! c)) (b! mem-op) (x! (+ mem-op 2)))
+            ("MRMSrcRegCC" "MRMSrcReg") (do (r! c) (let [k (if v4 (do (v! (inc c)) (+ c 2)) (inc c))] (b! k) (xs! k)))
+            "MRMSrcReg4VOp3" (do (r! c) (b! (inc c)) (v! (+ c 2)))
+            "MRMSrcRegOp4" (do (r! c) (v! (inc c)) (b! (+ c 3)) (xs! (+ c 3)))
+            ("MRMDestRegCC" "MRMDestReg") (do (b! c) (xs! c) (let [k (inc c)] (if v4 (do (v! k) (r! (inc k))) (r! k))))
+            "MRMr0" (r! c)
+            ("MRMXrCC" "MRM0r" "MRM1r" "MRM2r" "MRM3r" "MRM4r" "MRM5r" "MRM6r" "MRM7r")
+            (let [k (if v4 (do (v! c) (inc c)) c)] (b! k) (xs! k))
+            (unsupported :form (str "VEX " (:form info))))
+        {:keys [r x b vvvv]} @st
+        w (if (fl :w) 1 0)
+        mm (case (:map info) "TB" 1 "T8" 2 "TA" 3 "T_MAP4" 4 "T_MAP5" 5 "T_MAP6" 6 "T_MAP7" 7 "XOP8" 8 "XOP9" 9 "XOPA" 10
+             (unsupported :vex-map (:map info)))
+        l (if (fl :l) 1 0)
+        pp (case (:prefix info) "PD" 1 "XS" 2 "XD" 3 0)
+        last (bit-or (bit-shift-left (bit-and 15 (bit-not (long vvvv))) 3) (bit-shift-left l 2) pp)
+        xop? (= "EncXOP" (:enc info))
+        vex2? (and (not xop?) (not (flags :vex3)) (zero? (+ w (long x) (long b))) (= mm 1))]
+    (when (and (not= mode 64) (pos? (+ (long r) (long x) (long b)))) nil)
+    (if vex2?
+      (do (byte! 0xC5) (byte! (bit-or (bit-shift-left (bit-and 1 (bit-not (long r))) 7) last)))
+      (do (byte! (if xop? 0x8F 0xC4))
+          (byte! (bit-or (bit-shift-left (bit-and 1 (bit-not (long r))) 7) (bit-shift-left (bit-and 1 (bit-not (long x))) 6)
+                         (bit-shift-left (bit-and 1 (bit-not (long b))) 5) mm))
+          (byte! (bit-or (bit-shift-left w 7) last))))))
+
+(defn- evex-prefix!
+  "emitVEXOpcodePrefix for EVEX (X86OpcodePrefixHelper's EVEX: 62, P0-P2), form by form: R and R' of ModRM.reg, B and X (a
+  vector register's bit 4) of ModRM.rm, B and B4 (an extended GPR's bit 4, not inverted) of a GPR rm or base, X and X4 (EVEX.U)
+  of an index, V' of a VSIB index, vvvv and V' (APX's new data destination there), aaa from the opmask, the NF bit (aaa's
+  bit 2), CCMP's and CTEST's flags in vvvv and their condition in V' and aaa (setSC); z, L'L, b, U and W from the
+  instruction, L'L the rounding control's with EVEX.b on a register form."
+  [info mi ^long bias ^long mem-op byte!]
+  (let [fl (set (:flags info))
+        v4 (fl :4v)
+        k? (fl :k)
+        nd (nd? info)
+        two-cc (fl :2cc)
+        reg-at (fn [^long i] (:reg (nth mi i)))
+        enc (fn [^long i] (reg-enc (reg-at i)))
+        bit (fn ^long [^long v ^long sh] (bit-and 1 (bit-shift-right v sh)))
+        st (volatile! {:r 0 :r2 0 :x 0 :x2 (if (fl :u) 1 0) :b 0 :b2 0 :vvvv 0 :v2 0 :aaa (if (fl :nf) 4 0)
+                       :l (if (fl :l) 1 0) :l2 (if (fl :l2) 1 0)})
+        put! (fn [k v] (vswap! st assoc k v))
+        rr2! (fn [i] (let [e (enc i)] (put! :r (bit e 3)) (put! :r2 (bit e 4))))
+        bb2! (fn [i] (let [e (enc i)] (put! :b (bit e 3)) (when (egpr? (reg-at i)) (put! :b2 (bit e 4)))))
+        xx2! (fn [i] (let [e (enc i)] (put! :x (bit e 3)) (when (egpr? (reg-at i)) (put! :x2 (bit e 4)))))
+        x4! (fn [i] (when-not (egpr? (reg-at i)) (put! :x (bit (enc i) 4))))
+        v2! (fn [i] (when-not (or v4 (egpr? (reg-at i))) (put! :v2 (bit (enc i) 4))))
+        vv2! (fn [i] (let [e (enc i)] (put! :vvvv (bit-and 15 e)) (put! :v2 (bit e 4))))
+        aaa! (fn [i] (put! :aaa (bit-and 7 (enc i))))
+        ;; set4V of the flags immediate (stored inverted, so written as it is) and setSC of the condition
+        cc! (fn [i j] (put! :vvvv (bit-and 15 (bit-not (long (:imm (nth mi i))))))
+              (let [c (long (:imm (nth mi j)))] (put! :v2 (bit-and 1 (bit-not (bit-shift-right c 3)))) (put! :aaa (bit-and 7 c))))
+        cur (volatile! bias)
+        nxt! (fn [] (let [c (long @cur)] (vreset! cur (inc c)) c))
+        two! (fn [] (when two-cc (let [a (nxt!) b (nxt!)] (cc! a b))))
+        rc (volatile! nil)
+        mem! (fn [] (bb2! mem-op) (xx2! (+ mem-op 2)) (v2! (+ mem-op 2)))]
+    (case (:form info)
+      "MRMDestMem4VOp3CC" (do (rr2! (nxt!)) (bb2! mem-op) (xx2! (+ mem-op 2)) (vswap! cur + 5) (vv2! (nxt!)))
+      ("RawFrm" "MRM_C0") nil
+      ("MRMDestMem" "MRMDestMemCC" "MRMDestMemFSIB")
+      (do (mem!) (when nd (vv2! (nxt!))) (vswap! cur + 5) (when k? (aaa! (nxt!))) (when (and v4 (not nd)) (vv2! (nxt!)))
+          (rr2! (nxt!)) (two!))
+      ("MRMSrcMem" "MRMSrcMemCC" "MRMSrcMemFSIB")
+      (do (when nd (vv2! (nxt!))) (rr2! (nxt!)) (when k? (aaa! (nxt!))) (when (and v4 (not nd)) (vv2! (nxt!))) (mem!)
+          (vswap! cur + 5) (two!))
+      "MRMSrcMem4VOp3" (do (rr2! (nxt!)) (bb2! mem-op) (xx2! (+ mem-op 2)) (vv2! (+ (long @cur) 5)))
+      ("MRMXmCC" "MRM0m" "MRM1m" "MRM2m" "MRM3m" "MRM4m" "MRM5m" "MRM6m" "MRM7m")
+      (do (when v4 (vv2! (nxt!))) (when k? (aaa! (nxt!))) (mem!) (vswap! cur + 6)
+          (when two-cc (cc! (long @cur) (inc (long @cur)))))
+      ("MRMSrcReg" "MRMSrcRegCC")
+      (do (when nd (vv2! (nxt!))) (rr2! (nxt!)) (when k? (aaa! (nxt!))) (when (and v4 (not nd)) (vv2! (nxt!)))
+          (let [c (nxt!)] (bb2! c) (x4! c)) (two!)
+          (when (fl :b) (vreset! rc (if (fl :rc) (long (:imm (peek mi))) 0))))
+      "MRMSrcReg4VOp3" (do (rr2! (nxt!)) (bb2! (nxt!)) (vv2! (nxt!)))
+      ("MRMDestReg" "MRMDestRegCC")
+      (do (when nd (vv2! (nxt!))) (let [c (nxt!)] (bb2! c) (x4! c)) (when k? (aaa! (nxt!))) (when (and v4 (not nd)) (vv2! (nxt!)))
+          (rr2! (nxt!)) (two!) (when (fl :b) (vreset! rc 0)))
+      "MRMr0" (rr2! (nxt!))
+      ("MRMXrCC" "MRM0r" "MRM1r" "MRM2r" "MRM3r" "MRM4r" "MRM5r" "MRM6r" "MRM7r")
+      (do (when v4 (vv2! (nxt!))) (when k? (aaa! (nxt!))) (let [c (nxt!)] (bb2! c) (x4! c))
+          ;; set4V(++CurOp), setSC(++CurOp): past the immediate
+          (when two-cc (let [c (long @cur)] (cc! (inc c) (+ c 2)))))
+      (unsupported :form (str "EVEX " (:form info))))
+    (when-let [r @rc] (put! :l (bit-and 1 (long r))) (put! :l2 (bit (long r) 1)))
+    (let [{:keys [r r2 x x2 b b2 vvvv v2 aaa l l2]} @st
+          inv (fn ^long [v] (bit-and 1 (bit-not (long v))))
+          mmm (case (:map info) "TB" 1 "T8" 2 "TA" 3 "T_MAP4" 4 "T_MAP5" 5 "T_MAP6" 6 "T_MAP7" 7 (unsupported :form (str "EVEX map " (:map info))))
+          pp (case (:prefix info) "PD" 1 "XS" 2 "XD" 3 0)
+          w (if (fl :w) 1 0)
+          z (if (and k? (fl :z)) 1 0)
+          eb (if (fl :b) 1 0)]
+      (byte! 0x62)
+      (byte! (bit-or (bit-shift-left (inv r) 7) (bit-shift-left (inv x) 6) (bit-shift-left (inv b) 5) (bit-shift-left (inv r2) 4)
+                     (bit-shift-left (long b2) 3) (long mmm)))
+      (byte! (bit-or (bit-shift-left w 7) (bit-shift-left (bit-and 15 (bit-not (long vvvv))) 3) (bit-shift-left (inv x2) 2) (long pp)))
+      (byte! (bit-or (bit-shift-left z 7) (bit-shift-left (long l2) 6) (bit-shift-left (long l) 5) (bit-shift-left eb 4)
+                     (bit-shift-left (inv v2) 3) (long aaa))))))
+
+(defn encode
+  "The bytes of the machine instruction `inst` with operands `mi` in `mode` and `flags` (#{:lock :rep :repne :notrack
+  :disp8 :disp32 :rex ...}): {:bytes [B or :fixup-letter ...]}."
+  [^String inst mi ^long mode flags]
+  (let [info (get (:insns *t*) inst)
+        fl (set (:flags info))
+        _ (when (contains? fl :pseudo) (unsupported :pseudo inst))
+        evex? (= "EncEVEX" (:enc info))
+        vex? (#{"EncVEX" "EncXOP" "EncEVEX"} (:enc info))
+        v4 (+ (if (fl :4v) 1 0) (if (and evex? (fl :k)) 1 0))
+        i8reg? (= "Imm8Reg" (:imm info))
+        nd (if (nd? info) 1 0)
+        out (java.util.ArrayList.)
+        fixups (java.util.ArrayList.)
+        byte! (fn [^long b] (.add out (bit-and b 0xff)))
+        nops (count mi)
+        op (fn [^long i] (nth mi i))
+        reg (fn [^long i] (:reg (op i)))
+        rnum (fn [r] (bit-and (reg-enc r) 7))
+        mem-no (let [m (mem-operand-no info)] (if (neg? m) -1 m))
+        bias (operand-bias info nops)
+        cur (long-array 1 bias)
+        mem-op (if (neg? mem-no) -1 (+ mem-no bias))
+        constant! (fn [^long v ^long size] (dotimes [i size] (byte! (bit-shift-right v (* 8 i)))))
+        ;; emitImmediate: a constant, or a fixup (its bytes zero, shown as its letter)
+        ;; a fixup is [OFFSET SIZE EXPR KIND PCREL ADJ] (AX4: the object writer's; KIND X86MCCodeEmitter's fixup kind, nil for
+        ;; FK_Data_SIZE, ADJ the ImmOffset added to EXPR)
+        imm! (fn [o ^long size pcrel? & [kind adj]]
+               (if (and (some? (:imm o)) (not pcrel?))
+                 (constant! (:imm o) size)
+                 (do (.add fixups [(.size out) size (if (some? (:imm o)) (:imm o) (:expr o)) kind (boolean pcrel?) (or adj 0)])
+                     (dotimes [_ size] (.add out :fixup)))))
+        m64 (= mode 64)
+        ;; prefixes (emitPrefixImpl)
+        _ (when (>= mem-op 0) (when-let [s (reg (+ mem-op 4))] (byte! (seg-prefix s))))
+        _ (when (or (fl :rep) (flags :rep)) (byte! 0xF3))
+        _ (when (flags :repne) (byte! 0xF2))
+        mem16? (fn [^long m] (let [b (reg m) x (reg (+ m 2))]
+                               (or (and (= mode 16) (nil? b) (nil? x)) (in-class? b "GR16") (in-class? x "GR16"))))
+        mem32? (fn [^long m] (let [b (reg m) x (reg (+ m 2))]
+                               (or (= "EIP" b) (= "EIZ" x) (in-class? b "GR32") (in-class? x "GR32"))))
+        adsize (:adsize info)
+        ad-over (or (and (= mode 16) (= adsize "AdSize32")) (and (= mode 32) (= adsize "AdSize16")) (and m64 (= adsize "AdSize32"))
+                    (case (:form info)
+                      "RawFrmDstSrc" (let [si (reg 1)] (or (and (not= mode 32) (= si "ESI")) (and (= mode 32) (= si "SI"))))
+                      "RawFrmSrc" (let [si (reg 0)] (or (and (not= mode 32) (= si "ESI")) (and (= mode 32) (= si "SI"))))
+                      "RawFrmDst" (let [di (reg 0)] (or (and (not= mode 32) (= di "EDI")) (and (= mode 32) (= di "DI"))))
+                      (cond (neg? mem-op) false
+                            m64 (mem32? mem-op)
+                            (= mode 32) (mem16? mem-op)
+                            :else (not (mem16? mem-op)))))
+        _ (when (or ad-over (flags :adsize)) (byte! 0x67))
+        _ (case (:form info)
+            "RawFrmDstSrc" (do (when (and (reg 2) (not= "DS" (reg 2))) (byte! (seg-prefix (reg 2)))) (aset cur 0 (+ (aget cur 0) 3)))
+            "RawFrmSrc" (do (when (and (reg 1) (not= "DS" (reg 1))) (byte! (seg-prefix (reg 1)))) (aset cur 0 (+ (aget cur 0) 2)))
+            "RawFrmDst" (aset cur 0 (inc (aget cur 0)))
+            "RawFrmMemOffs" (when-let [s (reg 1)] (byte! (seg-prefix s)))
+            nil)
+        ;; emitOpcodePrefix (or emitVEXOpcodePrefix)
+        _ (when vex? (if evex? (evex-prefix! info mi bias mem-op byte!) (vex-prefix! info mi mode bias mem-op flags byte!)))
+        _ (when (and (not vex?) (= (:opsize info) (if (= mode 16) "OpSize32" "OpSize16"))) (byte! 0x66))
+        _ (when (and (not vex?) (or (fl :lock) (flags :lock))) (byte! 0xF0))
+        _ (when (and (not vex?) (or (fl :notrack) (flags :notrack))) (byte! 0x3E))
+        _ (when-not vex? (case (:prefix info) "PD" (byte! 0x66) "XS" (byte! 0xF3) "XD" (byte! 0xF2) nil))
+        ;; emitREXPrefix: REX, or REX2 (D5, M R4 X4 B4 W R X B) when an extended GPR's bit 4 is set, the instruction is
+        ;; ExplicitREX2 (JMPABS, PUSHP, POPP) or {rex2} asks for it; REX2's M bit is the 0F map's escape
+        rex-kind
+        (when (and m64 (not vex?))
+          (let [regs (keep :reg (subvec mi (min bias nops)))
+                hi (some high-byte? regs)
+                rex2-lb (or (= "ExplicitREX2" (:explicit info)) (flags :use-rex2))
+                lower (or (some low-byte-ext? regs) (flags :rex))
+                b3 (fn [r] (if (and r (pos? (bit-and (reg-enc r) 8))) 1 0))
+                b4 (fn [r] (if (and r (pos? (bit-and (reg-enc r) 16))) 1 0))
+                c (aget cur 0)
+                [rr xr br] (case (:form info)
+                             "AddRegFrm" [nil nil (reg c)]
+                             ("MRMSrcReg" "MRMSrcRegCC") [(reg c) nil (reg (inc c))]
+                             ("MRMSrcMem" "MRMSrcMemCC") [(reg c) (reg (+ mem-op 2)) (reg mem-op)]
+                             "MRMDestReg" [(reg (inc c)) nil (reg c)]
+                             "MRMDestMem" [(reg (+ c 5)) (reg (+ mem-op 2)) (reg mem-op)]
+                             ("MRMXmCC" "MRMXm" "MRM0m" "MRM1m" "MRM2m" "MRM3m" "MRM4m" "MRM5m" "MRM6m" "MRM7m")
+                             [nil (reg (+ mem-op 2)) (reg mem-op)]
+                             ("MRMXrCC" "MRMXr" "MRM0r" "MRM1r" "MRM2r" "MRM3r" "MRM4r" "MRM5r" "MRM6r" "MRM7r") [nil nil (reg c)]
+                             [nil nil nil])
+                [r x b r2 x2 b2] [(b3 rr) (b3 xr) (b3 br) (b4 rr) (b4 xr) (b4 br)]
+                w (if (fl :w) 1 0)
+                kind (cond (pos? (+ (long r2) (long x2) (long b2))) :rex2
+                           rex2-lb :rex2
+                           (or lower (pos? (+ (long r) (long x) (long b) w))) :rex)]
+            (when (and kind hi) (fail "can't encode high byte register in REX-prefixed instruction"))
+            (case kind
+              :rex (byte! (bit-or 0x40 (bit-shift-left w 3) (bit-shift-left (long r) 2) (bit-shift-left (long x) 1) (long b)))
+              :rex2 (do (byte! 0xD5)
+                        (byte! (bit-or (if (= "TB" (:map info)) 0x80 0) (bit-shift-left (long r2) 6) (bit-shift-left (long x2) 5)
+                                       (bit-shift-left (long b2) 4) (bit-shift-left w 3) (bit-shift-left (long r) 2)
+                                       (bit-shift-left (long x) 1) (long b))))
+              nil)
+            kind))
+        _ (when (and (fl :w) (not m64) (not vex?)) (fail "REX.W requires 64-bit mode"))
+        _ (when-not vex? (case (:map info) "TB" (when-not (= rex-kind :rex2) (byte! 0x0F)) ("T8" "TA" "ThreeDNow") (byte! 0x0F) nil))
+        _ (when-not vex? (case (:map info) "T8" (byte! 0x38) "TA" (byte! 0x3A) nil))
+        i8 (volatile! nil)
+        base-op (if (= (:map info) "ThreeDNow") 0x0F (long (:opcode info)))
+        modrm (fn [^long md ^long rf ^long rm] (byte! (bit-or rm (bit-shift-left rf 3) (bit-shift-left md 6))))
+        ;; isDispOrCDisp8: a displacement as a disp8, compressed by EVEX's CD8_Scale (disp8*N): the byte's value or nil
+        cd8 (long (if evex? (or (:cd8 info) 0) 0))
+        d8 (fn [dv] (when (some? dv)
+                      (let [dv (long dv)]
+                        (cond (zero? cd8) (when (int8? dv) dv)
+                              (not (zero? (bit-and dv (dec cd8)))) nil
+                              :else (let [q (quot dv cd8)] (when (int8? q) q))))))
+        ;; emitMemModRMByte
+        mem! (fn [^long m ^long rf & [force-sib]]
+               (let [disp (op (+ m 3)) base (reg m) index (reg (+ m 2)) scale (long (:imm (op (inc m))))
+                     dv (:imm disp)
+                     c8 (d8 dv)]
+                 (cond
+                   (#{"RIP" "EIP"} base)
+                   (do (modrm 0 rf 5) (imm! disp 4 (some? (:expr disp)) (riprel-kind inst disp rex-kind)
+                                            (if (and (:expr disp) (pos? (imm-size info))) (- (imm-size info)) 0)))
+                   (or (and (= mode 32) (= adsize "AdSize16")) (mem16? m))
+                   (if base
+                     (let [t16 {3 7 5 6 6 4 7 5}
+                           rmf (long (or (t16 (rnum base)) (fail "invalid 16-bit base register")))
+                           rmf (if index
+                                 (let [i16 (long (or (t16 (rnum index)) (fail "invalid 16-bit index register")))]
+                                   (if (pos? (bit-and i16 2))
+                                     (bit-or (bit-and rmf 1) (bit-shift-left (- 7 i16) 1))
+                                     (bit-or (bit-and i16 1) (bit-shift-left (- 7 rmf) 1))))
+                                 rmf)]
+                       (cond
+                         (and (some? dv) (int8? dv) (zero? (long dv)) (not= rmf 6)) (modrm 0 rf rmf)
+                         (and (some? dv) (int8? dv)) (do (modrm 1 rf rmf) (imm! disp 1 false))
+                         :else (do (modrm 2 rf rmf) (imm! disp 2 false))))
+                     (do (modrm 0 rf 6) (imm! disp 2 false)))
+                   :else
+                   (let [no-disp (not (or (flags :disp8) (flags :disp32)))
+                         disp8-ok (not (flags :disp32))
+                         need-sib (or force-sib index (#{"ESP" "RSP" "R12" "R12D" "R20" "R20D" "R28" "R28D"} base) (and m64 (nil? base)))
+                         bn (when base (rnum base))]
+                     (if-not need-sib
+                       (cond
+                         (nil? base) (do (modrm 0 rf 5) (imm! disp 4 false))
+                         (and (not= bn 5) (= 0 dv) no-disp) (modrm 0 rf bn)
+                         ;; `call *a@tlscall(base)`: the displacement treated as a zero, the fixup (FK_NONE, R_X86_64_TLSDESC_CALL)
+                         ;; at the instruction's start
+                         (and (not= bn 5) (tlscall? (:expr disp)))
+                         (do (.add fixups [0 0 (:expr disp) :none false 0]) (modrm 0 rf bn))
+                         (and (some? c8) disp8-ok) (do (modrm 1 rf bn) (imm! {:imm c8} 1 false))
+                         :else (do (modrm 2 rf bn) (imm! disp 4 false (if (= inst "MOV32rm") :signed-relax :signed))))
+                       (let [[dsz bno] (cond
+                                         (nil? base) (do (modrm 0 rf 4) [4 5])
+                                         (and (= 0 dv) no-disp (not= bn 5)) (do (modrm 0 rf 4) [0 bn])
+                                         (and (some? c8) disp8-ok) (do (modrm 1 rf 4) [1 bn])
+                                         :else (do (modrm 2 rf 4) [4 bn]))
+                             ss ({1 0 2 1 4 2 8 3} scale)
+                             xn (if index (rnum index) 4)]
+                         (byte! (bit-or (long bno) (bit-shift-left (long xn) 3) (bit-shift-left (long ss) 6)))
+                         (when (pos? (long dsz)) (imm! (if (= 1 (long dsz)) {:imm c8} disp) dsz false (when (= 4 (long dsz)) :signed)))))))))
+        cc (fn [^long i] (long (:imm (op i))))
+        c0 (aget cur 0)
+        form (:form info)
+        nops-used (volatile! nops)
+        next-cur
+        (case form
+          ("RawFrmDstSrc" "RawFrmSrc" "RawFrmDst" "PrefixByte") (do (byte! base-op) c0)
+          "AddCCFrm" (do (vreset! nops-used (dec nops)) (byte! (+ base-op (cc (dec nops))))
+                         ;; RawFrm's case after the fallthrough: JCC_4 to a symbol's reference, reloc_branch_4byte_pcrel
+                         (if (and m64 (= "JCC_4" inst) (symbol-ref? (:expr (op c0))))
+                           (do (imm! (op c0) 4 true :branch) (inc c0))
+                           c0))
+          "RawFrm" (do (byte! base-op)
+                       (if (and m64 (#{"CALL64pcrel32" "JMP_4" "JCC_4"} inst) (:expr (op c0)))
+                         (do (imm! (op c0) 4 true (when (symbol-ref? (:expr (op c0))) :branch)) (inc c0))
+                         c0))
+          "RawFrmMemOffs" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info) (imm-kind info)) (+ c0 2))
+          "RawFrmImm8" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info) (imm-kind info)) (imm! (op (inc c0)) 1 false) (+ c0 2))
+          "RawFrmImm16" (do (byte! base-op) (imm! (op c0) (imm-size info) (imm-pcrel? info) (imm-kind info)) (imm! (op (inc c0)) 2 false) (+ c0 2))
+          "AddRegFrm" (do (byte! (+ base-op (rnum (reg c0)))) (inc c0))
+          "MRMDestReg" (let [s (+ c0 1 v4)] (byte! base-op) (modrm 3 (rnum (reg s)) (rnum (reg (+ c0 nd)))) (inc s))
+          ("MRMDestMem" "MRMDestMemFSIB") (let [s (+ c0 5 v4)] (byte! base-op) (mem! (+ c0 nd) (rnum (reg s)) (= form "MRMDestMemFSIB")) (inc s))
+          "MRMDestMem4VOp3CC" (do (byte! (+ base-op (cc 8))) (mem! (inc c0) (rnum (reg 0))) (+ c0 5 3))
+          "MRMSrcReg" (let [s (+ c0 1 v4)]
+                        (when (and evex? (fl :rc)) (vswap! nops-used dec))
+                        (byte! base-op) (modrm 3 (rnum (reg (+ c0 nd))) (rnum (reg s)))
+                        (if i8reg? (do (vreset! i8 (reg-enc (reg (inc s)))) (+ s 2)) (inc s)))
+          "MRMSrcReg4VOp3" (do (byte! base-op) (modrm 3 (rnum (reg c0)) (rnum (reg (inc c0)))) (+ c0 3))
+          "MRMSrcRegOp4" (do (byte! base-op) (vreset! i8 (reg-enc (reg (+ c0 2)))) (modrm 3 (rnum (reg c0)) (rnum (reg (+ c0 3)))) (+ c0 4))
+          "MRMSrcMem4VOp3" (do (byte! base-op) (mem! (inc c0) (rnum (reg c0))) (+ c0 7))
+          "MRMSrcMemOp4" (do (byte! base-op) (vreset! i8 (reg-enc (reg (+ c0 2)))) (mem! (+ c0 3) (rnum (reg c0))) (+ c0 8))
+          "MRMSrcRegCC" (let [c0 (+ c0 nd)] (byte! (+ base-op (cc (+ c0 2)))) (modrm 3 (rnum (reg c0)) (rnum (reg (inc c0)))) (+ c0 3))
+          ("MRMSrcMem" "MRMSrcMemFSIB") (let [m (+ c0 1 v4)]
+                        (byte! base-op) (mem! m (rnum (reg (+ c0 nd))) (= form "MRMSrcMemFSIB"))
+                        (if i8reg? (do (vreset! i8 (reg-enc (reg (+ m 5)))) (+ m 6)) (+ m 5)))
+          "MRMSrcMemCC" (let [c0 (+ c0 nd)] (byte! (+ base-op (cc (+ c0 6)))) (mem! (inc c0) (rnum (reg c0))) (+ c0 7))
+          "MRMDestRegCC" (do (byte! (+ base-op (cc (+ c0 2)))) (modrm 3 (rnum (reg (inc c0))) (rnum (reg c0))) (+ c0 3))
+          "MRMDestMemCC" (do (byte! (+ base-op (cc (+ c0 6)))) (mem! c0 (rnum (reg (+ c0 5)))) (+ c0 7))
+          "MRMXrCC" (do (byte! (+ base-op (cc (inc c0)))) (modrm 3 0 (rnum (reg c0))) (+ c0 2))
+          "MRMXmCC" (do (byte! (+ base-op (cc (+ c0 5)))) (mem! c0 0) (+ c0 6))
+          ("MRMXr" "MRM0r" "MRM1r" "MRM2r" "MRM3r" "MRM4r" "MRM5r" "MRM6r" "MRM7r")
+          (let [c (+ c0 v4)] (byte! base-op) (modrm 3 (if (= form "MRMXr") 0 (Long/parseLong (subs form 3 4))) (rnum (reg c))) (inc c))
+          "MRMr0" (do (byte! base-op) (modrm 3 (rnum (reg c0)) 0) (inc c0))
+          ("MRMXm" "MRM0m" "MRM1m" "MRM2m" "MRM3m" "MRM4m" "MRM5m" "MRM6m" "MRM7m")
+          (let [c (+ c0 v4)] (byte! base-op) (mem! c (if (= form "MRMXm") 0 (Long/parseLong (subs form 3 4)))) (+ c 5))
+          (if-let [[_ n] (re-matches #"MRM([0-7])X" form)]
+            (do (byte! base-op) (byte! (+ 0xC0 (bit-shift-left (Long/parseLong n) 3))) c0)
+            (if-let [[_ h] (re-matches #"MRM_([0-9A-F]{2})" form)]
+              (do (byte! base-op) (byte! (Long/parseLong h 16)) c0)
+              (unsupported :form form))))
+        _ (if i8reg?
+            (let [v (bit-shift-left (long (or @i8 0)) 4)
+                  v (if (< (long next-cur) (long @nops-used)) (bit-or v (bit-and 15 (long (:imm (op next-cur))))) v)]
+              (byte! v))
+            (loop [c (long next-cur)]
+              (when (< c (- (long @nops-used) (if (fl :2cc) 2 0)))
+                (imm! (op c) (imm-size info) (imm-pcrel? info) (imm-kind info))
+                (recur (inc c)))))
+        _ (when (= (:map info) "ThreeDNow") (byte! (:opcode info)))]
+    (when (> (.size out) 15) (fail "instruction length exceeds the limit of 15"))
+    {:inst inst :bytes (vec out) :fixups (vec fixups)}))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; an instruction's statement (parseInstruction, matchAndEmitATTInstruction)
+
+(def ^:private cmp-preds
+  {"eq" 0 "eq_oq" 0 "lt" 1 "lt_os" 1 "le" 2 "le_os" 2 "unord" 3 "unord_q" 3 "neq" 4 "neq_uq" 4 "nlt" 5 "nlt_us" 5
+   "nle" 6 "nle_us" 6 "ord" 7 "ord_q" 7 "eq_uq" 8 "nge" 9 "nge_us" 9 "ngt" 10 "ngt_us" 10 "false" 11 "false_oq" 11
+   "neq_oq" 12 "ge" 13 "ge_os" 13 "gt" 14 "gt_os" 14 "true" 15 "true_uq" 15 "eq_os" 16 "lt_oq" 17 "le_oq" 18
+   "unord_s" 19 "neq_us" 20 "nlt_uq" 21 "nle_uq" 22 "ord_s" 23 "eq_us" 24 "nge_uq" 25 "ngt_uq" 26 "false_os" 27
+   "neq_os" 28 "ge_oq" 29 "gt_oq" 30 "true_us" 31})
+
+(defn- patch-name
+  "[NAME PREDICATE] the mnemonic patched as parseInstruction does (setXXb, the comparisons' predicates)."
+  [^String n]
+  (let [n (if (and (.startsWith n "set") (.endsWith n "b") (not (#{"setzub" "setzunb" "setb" "setnb"} n))) (subs n 0 (dec (count n))) n)]
+    (or (when-let [[_ v cc suf] (re-matches #"(v?)cmp(\w+?)(ss|sd|ps|pd|sh|ph|bf16)" n)]
+          (when-let [p (cmp-preds cc)]
+            (when (and (or (= v "v") (< (long p) 8)) (or (= v "v") (not (.endsWith n "h"))))
+              [(case suf "sh" "vcmpsh" "ph" "vcmpph" "bf16" "vcmpbf16" (str v "cmp" suf)) p])))
+        (when (and (.startsWith n "vpcmp") (#{\b \w \d \q} (last n)) (> (count n) 6))
+          (let [k (if (= \u (nth n (- (count n) 2))) 2 1)
+                p ({"eq" 0 "lt" 1 "le" 2 "neq" 4 "nlt" 5 "nle" 6} (subs n 5 (- (count n) k)))]
+            (when (and p (or (not= 0 p) (= k 2))) [(str "vpcmp" (when (= k 2) "u") (last n)) p])))
+        (when (and (.startsWith n "vpcom") (#{\b \w \d \q} (last n)) (> (count n) 6))
+          (let [k (if (= \u (nth n (- (count n) 2))) 2 1)
+                p ({"lt" 0 "le" 1 "gt" 2 "ge" 3 "eq" 4 "neq" 5 "false" 6 "true" 7} (subs n 5 (- (count n) k)))]
+            (when p [(str "vpcom" (when (= k 2) "u") (last n)) p])))
+        [n nil])))
+
+(defn- default-si [^long mode] {:k :mem :seg nil :base (case (if *gcc* 32 mode) 64 "RSI" 32 "ESI" "SI") :index nil :scale 1 :disp 0 :dv 0 :size 0 :mode mode})
+(defn- default-di [^long mode] {:k :mem :seg nil :base (case (if *gcc* 32 mode) 64 "RDI" 32 "EDI" "DI") :index nil :scale 1 :disp 0 :dv 0 :size 0 :mode mode})
+
+(defn- dx-reg [o] (if (and (= :mem (:k o)) (= "DX" (:base o)) (nil? (:index o)) (= 0 (:dv o)) (nil? (:seg o))) {:k :reg :reg "DX"} o))
+
+(defn- verify-adjust
+  "VerifyAndAdjustOperands: the defaults `final`, when operands are written each memory one's register size and segment
+  given to its default (a mismatch keeps the written operands for the matcher to judge)."
+  [ops final]
+  (if (empty? ops)
+    final
+    (loop [i 0 rc nil out []]
+      (if (= i (count final))
+        out
+        (let [o (nth ops i) f (nth final i)]
+          (cond
+            (= :reg (:k f)) (if (and (= :reg (:k o)) (= (:reg o) (:reg f))) (recur (inc i) rc (conj out f)) ops)
+            (not= :mem (:k o)) ops
+            :else
+            (let [b (:base o)]
+              (when (and rc b (not (in-class? b rc))) (fail "mismatching source and destination index registers"))
+              (if-let [c (cond (nil? b) nil (in-class? b "GR64") "GR64" (in-class? b "GR32") "GR32" (in-class? b "GR16") "GR16")]
+                (let [si? (#{"RSI" "ESI" "SI"} (:base f))
+                      nb ({"GR64" ["RSI" "RDI"] "GR32" ["ESI" "EDI"] "GR16" ["SI" "DI"]} c)]
+                  (recur (inc i) c (conj out (assoc f :size (:size o) :seg (:seg o) :base (if si? (first nb) (second nb))))))
+                ops))))))))
+
+(defn- defaults
+  "The string instructions' default operands (AddDefaultSrcDestOperands, VerifyAndAdjustOperands: Intel's in the text's
+  order, destination first), the in/out (%dx) as DX."
+  [^String n ops ^long mode]
+  (let [c (count ops)
+        verify-adjust (fn [ops final] (verify-adjust ops (if (and *intel* (= 2 (count final))) (vec (reverse final)) final)))
+        ops (cond
+              (and (#{"outb" "outsb" "outw" "outsw" "outl" "outsl" "out" "outs"} n) (= c 2)) (assoc ops 1 (dx-reg (ops 1)))
+              (and (#{"inb" "insb" "inw" "insw" "inl" "insl" "in" "ins"} n) (= c 2)) (assoc ops 0 (dx-reg (ops 0)))
+              :else ops)
+        dx {:k :reg :reg "DX"}]
+    (cond
+      (and (#{"insb" "insw" "insl" "insd" "ins"} n) (#{0 2} c)) (verify-adjust ops [dx (default-di mode)])
+      (and (#{"outsb" "outsw" "outsl" "outsd" "outs"} n) (#{0 2} c)) (verify-adjust ops [(default-si mode) dx])
+      (and (#{"lods" "lodsb" "lodsw" "lodsl" "lodsd" "lodsq"} n) (#{0 1} c)) (verify-adjust ops [(default-si mode)])
+      (and (#{"stos" "stosb" "stosw" "stosl" "stosd" "stosq" "scas" "scasb" "scasw" "scasl" "scasd" "scasq"} n) (#{0 1} c))
+      (verify-adjust ops [(default-di mode)])
+      (and (#{"cmps" "cmpsb" "cmpsw" "cmpsl" "cmpsd" "cmpsq"} n) (#{0 2} c)) (verify-adjust ops [(default-di mode) (default-si mode)])
+      (and (#{"movs" "movsb" "movsw" "movsl" "movsd" "movsq" "smov" "smovb" "smovw" "smovl" "smovd" "smovq"} n) (#{0 2} c))
+      (verify-adjust ops [(default-si mode) (default-di mode)])
+      :else ops)))
+
+(defn- match-att
+  "matchAndEmitATTInstruction: the mnemonic as written, then with the suffixes b, w, l, q (s, l, t for x87)."
+  [^String n ops mode opts]
+  (let [r (match-impl n ops mode opts)]
+    (if (= :ok (first r))
+      r
+      (let [fp? (.startsWith n "f")
+            sufs (if fp? ["s" "l" "t" nil] ["b" "w" "l" "q"])
+            sizes (if fp? [32 64 80 nil] [8 16 32 64])
+            vec? (some #(and (= :reg (:k %)) (re-matches #"[XYZ]MM\d+" (:reg %))) ops)
+            mi (first (keep-indexed (fn [i o] (when (= :mem (:k o)) i)) ops))
+            rs (mapv (fn [s sz]
+                       (if (and s (or mi (not vec?)))
+                         (match-impl (str n s) (if (and mi vec? sz) (assoc-in ops [mi :size] sz) ops) mode opts)
+                         [:fail :mnemonic nil]))
+                     sufs sizes)
+            oks (filter #(= :ok (first (second %))) (map vector sufs rs))]
+        (cond
+          (= 1 (count oks)) (second (first oks))
+          (> (count oks) 1)
+          (fail (str "ambiguous instructions require an explicit suffix (could be "
+                     (str/join ", " (map-indexed (fn [i [s]] (str (when (= i (dec (count oks))) "or ") "'" n s "'")) oks)) ")"))
+          (every? #(= :mnemonic (second %)) rs)
+          (case (second r)
+            :mnemonic (fail (str "invalid instruction mnemonic '" n "'"))
+            :unsupported (fail "unsupported instruction")
+            :feature (fail (str "instruction requires: " (str/join " " (map #(second (get (:preds *t*) %)) (nth r 2)))))
+            (fail "invalid operand for instruction"))
+          (= 1 (count (filter #(= :unsupported (second %)) rs))) (fail "unsupported instruction")
+          (= 1 (count (filter #(= :feature (second %)) rs)))
+          (fail (str "instruction requires: " (str/join " " (map #(second (get (:preds *t*) %)) (nth (first (filter #(= :feature (second %)) rs)) 2)))))
+          (= 1 (count (filter #(= :operand (second %)) rs))) (fail "invalid operand for instruction")
+          :else (fail "unknown use of instruction mnemonic without a size suffix"))))))
+
+(defn- missing-text [feats] (str "instruction requires: " (str/join " " (map #(second (get (:preds *t*) %)) feats))))
+
+(defn- match-intel
+  "matchAndEmitIntelInstruction: call, jmp, push and pop take an unsized memory operand at the pointer's width; push of a
+  constant that fits it is matched first in AT&T's table with the mode's suffix; an unsized memory operand is tried at each
+  size (8 ... 512), each new instruction a match; exactly one match wins, more is an ambiguous size."
+  [^String n ops ^long mode opts]
+  (let [ptr (if (and *gcc* (= mode 16)) 16 mode)
+        ptr (case (long ptr) 16 16 32 32 64)
+        ui (first (keep-indexed (fn [i o] (when (and (= :mem (:k o)) (zero? (long (:size o)))) i)) ops))
+        ops (if (and ui (#{"call" "jmp" "push" "pop"} n)) (assoc-in ops [ui :size] ptr) ops)
+        unsized (when (and ui (zero? (long (:size (ops ui))))) ui)
+        ms (transient [])
+        last-inst (volatile! nil)
+        add! (fn [r] (let [i (if (= :ok (first r)) (nth (second r) 2) @last-inst)]
+                       (when (or (zero? (count ms)) (not= i @last-inst)) (conj! ms r))
+                       (vreset! last-inst i)))]
+    (when (and (= n "push") (= 1 (count ops)) (= :imm (:k (ops 0))) (some? (:v (ops 0))))
+      (let [v (long (:v (ops 0)))
+            fits (or (= ptr 64)
+                     (and (>= v (- (bit-shift-left 1 (dec ptr)))) (< v (bit-shift-left 1 (dec ptr))))
+                     (and (>= v 0) (< v (bit-shift-left 1 ptr))))]
+        (when fits
+          (let [r (binding [*variant* 0] (match-impl (str n ({64 "q" 32 "l" 16 "w"} ptr)) ops mode opts))]
+            (conj! ms r)
+            (when (= :ok (first r)) (vreset! last-inst (nth (second r) 2)))))))
+    (when unsized
+      (doseq [sz [8 16 32 64 80 128 256 512]]
+        (let [r (binding [*variant* 1] (match-impl n (assoc-in ops [unsized :size] sz) mode opts))
+              i (if (= :ok (first r)) (nth (second r) 2) @last-inst)]
+          (when (or (zero? (count ms)) (not= i @last-inst)) (conj! ms r))
+          (vreset! last-inst i))))
+    (when (zero? (count ms)) (conj! ms (binding [*variant* 1] (match-impl n ops mode opts))))
+    (let [ms (persistent! ms)
+          oks (filter #(= :ok (first %)) ms)
+          cnt (fn [k] (count (filter #(= k (second %)) ms)))]
+      (cond
+        (= :mnemonic (second (peek ms))) (fail (str "invalid instruction mnemonic '" n "'"))
+        (= 1 (count oks)) (first oks)
+        (> (count oks) 1) (fail (str "ambiguous operand size for instruction '" n "'"))
+        (= 1 (cnt :unsupported)) (fail "unsupported instruction")
+        (= 1 (cnt :feature)) (fail (missing-text (nth (last (filter #(= :feature (second %)) ms)) 2)))
+        (= 1 (cnt :operand)) (fail "invalid operand for instruction")
+        :else (fail "unknown instruction mnemonic")))))
+
+(def ^:private fpu-wait {"finit" "fninit" "fsave" "fnsave" "fstcw" "fnstcw" "fstcww" "fnstcw" "fstenv" "fnstenv"
+                         "fstsw" "fnstsw" "fstsww" "fnstsw" "fclex" "fnclex"})
+
+(def ^:private prefix-insns #{"cs" "ds" "es" "fs" "gs" "ss" "rex64" "data32" "data16" "addr32" "addr16" "xacquire" "xrelease"
+                                "acquire" "release"})
+
+(declare assemble-one)
+
+(defn assemble-insn
+  "The encodings of the statement `f` in `mode` with the constant symbols `syms`: a prefix word (cs, rex64, data16,
+  xrelease, ...) is an instruction of its own before the rest, as parseInstruction leaves the rest to the next statement."
+  [f ^long mode syms]
+  (let [[mn & r] f
+        attrs (when (map? (first r)) (first r))
+        words (filter #(prefix-insns (name %)) (:prefix attrs))
+        d32 (some #{'data32} words)
+        rest-form (fn [] (apply list ({'callw 'calll 'ljmpw 'ljmpl} mn mn)
+                                (assoc attrs :prefix (vec (remove #(prefix-insns (name %)) (:prefix attrs)))) (if attrs (rest r) r)))]
+    (cond
+      (and (= mode 16) (some #{'data16} (cons mn words))) [{:error "redundant data16 prefix"}]
+      (and (= mode 32) (some #{'data32} (cons mn words))) [{:error "redundant data32 prefix"}]
+      (and (= mode 64) (some #{'data32} (cons mn words))) [{:error "'data32' is not supported in 64-bit mode"}]
+      (= mn 'data32) [(assemble-one '(data16) mode syms)]
+      ;; data32 INSN in 16-bit mode: INSN matched as 32-bit (ForcedDataPrefix)
+      d32 (binding [*gcc* true] [(assemble-one (rest-form) mode syms)])
+      (seq words)
+      (conj (mapv #(assemble-one (list %) mode syms) words)
+            (assemble-one (rest-form) mode syms))
+      :else [(assemble-one f mode syms)])))
+
+(defn assemble-one
+  "The encoding of the instruction form `f` in `mode` with the constant symbols `syms`: {:inst :bytes :fixups} (with
+  :wait true when an FWAIT comes first), {:error MSG} or {:unsupported CLASS :what TEXT}."
+  [f ^long mode syms]
+  (binding [*t* (or *t* (table))]
+    (try
+      (let [[mn & r] f
+            attrs (when (map? (first r)) (first r))
+            ops (if attrs (rest r) r)
+            n (name mn)
+            pseudo (map str/lower-case (:pseudo attrs))
+            opts (reduce (fn [o p] (case p
+                                     "rex" (assoc o :force :rex) "rex2" (assoc o :force :rex2) "vex" (assoc o :force :vex)
+                                     "vex2" (assoc o :force :vex2) "vex3" (assoc o :force :vex3) "evex" (assoc o :force :evex)
+                                     "disp8" (assoc o :disp :disp8) "disp32" (assoc o :disp :disp32) "nf" (assoc o :nf true)
+                                     (fail "unknown prefix")))
+                         {} pseudo)
+            [n opts] (cond (.endsWith n ".d32") [(subs n 0 (- (count n) 4)) (assoc opts :disp :disp32)]
+                           (.endsWith n ".d8") [(subs n 0 (- (count n) 3)) (assoc opts :disp :disp8)]
+                           :else [n opts])
+            pfx (set (remove prefix-insns (map name (:prefix attrs))))
+            flags (cond-> #{}
+                    (pfx "lock") (conj :lock)
+                    (or (pfx "rep") (pfx "repe") (pfx "repz")) (conj :rep)
+                    (or (pfx "repne") (pfx "repnz")) (conj :repne)
+                    (pfx "notrack") (conj :notrack)
+                    (:disp opts) (conj (:disp opts))
+                    (= :rex (:force opts)) (conj :rex))
+            _ (when (some #(not (#{"lock" "rep" "repe" "repz" "repne" "repnz" "notrack"} %)) pfx)
+                (unsupported :prefix-word (str/join " " pfx)))
+            ;; the MCInst's flags (matchAndEmitInstruction's IP_USE_REX, IP_USE_REX2, IP_USE_VEX, IP_USE_VEX2, IP_USE_VEX3,
+            ;; IP_USE_EVEX): the encoder's and the printer's
+            flags (cond-> flags
+                    (= :vex3 (:force opts)) (conj :vex3)
+                    (= :rex2 (:force opts)) (conj :use-rex2)
+                    (= :vex (:force opts)) (conj :use-vex)
+                    (= :vex2 (:force opts)) (conj :use-vex2)
+                    (= :evex (:force opts)) (conj :use-evex))
+            wait (fpu-wait n)
+            n (or wait n)
+            [n cmpp] (patch-name n)
+            xs (operands ops mode syms (str/replace n #"\.d(8|32)$" ""))
+            ;; the predicate taken from the mnemonic: AT&T's first operand, Intel's last
+            xs (if cmpp (if *intel* (conj xs {:k :imm :e cmpp :v cmpp}) (vec (cons {:k :imm :e cmpp :v cmpp} xs))) xs)
+            n (if (and (#{"fsub" "fdiv" "fsubr" "fdivr"} n) (empty? xs)) (str n "p") n)
+            xs (defaults n xs mode)
+            n (if (and (= n "movsd") (empty? ops) (not *intel*)) "movsl" n)
+            ;; xlat mem8: xlatb (the operand only gives the size)
+            [n xs] (if (and (#{"xlat" "xlatb"} n) (= 1 (count xs)) (= :mem (:k (xs 0))) (#{0 8} (long (:size (xs 0)))))
+                     ["xlatb" []] [n xs])
+            ;; mov %seg, %r16/%r32: the 32-bit register (16 in 16-bit mode)
+            [n xs] (if (and (#{"mov" "movw" "movl"} n) (= 2 (count xs)) (= :reg (:k (xs 0))) (= :reg (:k (xs 1)))
+                            (in-class? (:reg (xs 1)) "SEGMENT_REG")
+                            (or (in-class? (:reg (xs 0)) "GR16") (in-class? (:reg (xs 0)) "GR32")))
+                     [(if (and (not= n "mov") (= (nth n 3) (if (= mode 16) \l \w))) (if (= mode 16) "movw" "movl") n)
+                      (assoc xs 0 {:k :reg :reg (sub-reg (:reg (xs 0)) (if (= mode 16) 16 32))})]
+                     [n xs])
+            [_ e mi] (if *intel* (match-intel n xs mode opts) (binding [*variant* 0] (match-att n xs mode opts)))
+            ;; validateInstruction: a high byte register where the encoding needs EVEX, REX2 or REX
+            _ (let [info (get (:insns *t*) (nth e 2))
+                    regs (keep :reg mi)
+                    h (first (filter high-byte? regs))]
+                (when (and h (not (#{"EncVEX" "EncXOP"} (:enc info)))
+                           (or (= "EncEVEX" (:enc info)) (#{:rex :rex2} (:force opts)) (contains? (set (:flags info)) :w)
+                               (some #(or (low-byte-ext? %) (x86-64-ext? %)) regs)))
+                  (fail (str "can't encode '" (str/lower-case h) "' in an instruction requiring EVEX/REX2/REX prefix"))))
+            [inst mi ccmp] (process (nth e 2) mi flags)
+            flags (if ccmp (disj flags :use-evex) flags)]
+        (cond-> (assoc (encode inst mi mode flags) :mi mi :pflags flags)
+          wait (assoc :wait true)))
+      (catch arbace.lang.ExceptionInfo ex
+        (let [d (ex-data ex)]
+          (cond (:asm/error d) {:error (:asm/error d)}
+                (:asm/unsupported d) {:unsupported (:asm/unsupported d) :what (.getMessage ex)}
+                :else (throw ex)))))))
+
+(defn encoding-text
+  "llvm-mc's `encoding: [...]` of an encoding (a fixup's bytes its letter, A for the first)."
+  ^String [{:keys [bytes fixups wait]}]
+  (let [letters (into {} (for [[i [off size]] (map-indexed vector fixups) k (range size)] [(+ (long off) (long k)) (char (+ 65 (long i)))]))
+        bs (map-indexed (fn [i b] (if (= b :fixup) (str (letters i)) (format "0x%02x" b))) bytes)]
+    (str "encoding: [" (str/join "," bs) "]")))

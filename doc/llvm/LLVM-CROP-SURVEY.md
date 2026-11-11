@@ -2036,6 +2036,78 @@ add checks valid modules never meet). A difference is a rule to fix by day.
     Arbace's verifier, no opt), about 7 minutes, with the existing controls. Cost: an hour (a step's part, the fragment, its waiver).
   - (b) Leave it to the rt pack. *Recommended: (a)*: a rule change that breaks an own verdict would then fail by night without opt.
 
+## Decided (the user, 2026-11-09, about 14:20): LLS43 (a), LLS44 (b), LLS45 (a)
+
+- **LLS43 (a):** port getSizeInBits and verifyFragmentExpression's two checks, and drop the fragment condition from the own verdicts.
+- **LLS44 (b):** the DILocation used only as an inlinedAt and the old debug intrinsics' calls stay left to opt.
+- **LLS45 (a):** a held-out set made afresh from a fixed seed, its own verdicts held to Arbace's verifier by night, without opt.
+
+## As built: LLS43 (a), LLS44 (b), LLS45 (a) (2026-11-09, branch `llvm-props4`)
+
+On `llvm-props4` from `mac/next` 6c3c87c02, main's stage 0, `REPR_LLVM_THREADS=2`. Sources read: llvm-project 23.1.5's
+`llvm/lib/IR/Verifier.cpp` (V:7425-7464 verifyFragmentExpression, V:1749-1753 visitDIGlobalVariableExpression, V:799
+visitGlobalVariable's direct call, V:536 visitDbgRecords, V:1713-1722 visitDILocalVariable) and `DebugInfoMetadata.cpp:1653`
+(DIVariable::getSizeInBits), from the pinned tarball, extracted into the worktree's `.tmp` alone.
+
+**LLS43 (a), Arbace's verifier** (`arbace/repr/llvm/verify.ae`): `frag-info` (getFragmentInfo of a valid expression),
+`var-size-bits` (getSizeInBits: up the type chain, a type's constant non-zero size, through derived types to their base, else
+none) and `check-fragment` (`fragment is larger than or outside of variable` when the Verifier's unsigned 32-bit sum of size and
+offset exceeds the variable's size, `fragment covers entire variable` when the size is the variable's; culprits the record or the
+expression, then the variable). A record's check runs after the record's visit, whatever that found, also in a definition the
+location walk leaves (no subprogram, a failed attachment check: InstVisitor visits every instruction); `dbg_assign` too; an
+artificial variable is skipped (V:7443). A global variable expression's check runs where visitMDNode reaches it (a compile unit's
+`globals`) and again for each global's `!dbg` (visitGlobalVariable calls visitDIGlobalVariableExpression itself, so opt prints the
+message twice). Each new message byte for byte opt 23.1.5's whole stderr on eight modules (the six cases below and two by hand,
+a global's and two records', run by hand with opt).
+
+**LLS43 (a), the own verdicts** (`arbace/repr/llvm/expect.ae`): `module-fragments?` no longer leaves a rule to opt. The
+fragment checks are written apart from the verifier's (`frag-of`, `var-bits`, `frag-msg`, `record-frag`, `gve-frag`) and
+`fn-scope-checks` walks them in the Verifier's order: each definition's subprogram first (its compile unit's global variable
+expressions, each the first time it is reached), the location walk, the records (each: scope and argument checks, then its
+fragment; a definition without a subprogram: the fragments alone), then the globals' `!dbg` and `!llvm.dbg.cu`'s units. A
+variable's type, a type's base (the set type's base rule kept first; both a set base error and a fragment message: left to opt,
+their order is the node visit's) and a global's `!dbg` sent elsewhere now give the fragments' first message or valid; a record's
+variable sent to another variable its scope checks then its fragment.
+
+**Found by the held-out set (LLS45 (a)):** Arbace's verifier lacked visitDILocalVariable's last check (V:1721-1722), `invalid
+type` for a local variable whose type is a subroutine type (the own verdict had it): added, reached only with a local scope.
+
+**LLS44 (b):** nothing changes; the two cases stay `unknown`, judged by opt's record.
+
+**LLS45 (a):** `bin/repr-llvm heldout-check [WORK]`: `test/llvm/heldout-bases.txt`'s 41 modules (LLS33 (b)'s day inputs: 21 of
+the pinned pack tx, the four `hw-*`, 16 llvm/test files from the pinned tarball's extraction), 300 mutants of each of the
+intrinsics, metadata and debug families from the fixed seed 1200000 (`REPR_LLVM_HELDOUT_SEED`), `verify-check` in own mode: every
+own verdict must be met by Arbace's verifier (verdict and declared message), the unknowns only counted, and the negative controls
+`test/repr/llvm/heldout-controls.txt` (two mutants of the set crossed: a rejection against a valid mutant, two rejections with other
+messages) must fail. The gate step `llvm-heldout` (`llvm-full`, after `llvm-print`; `:mem-gib 1`), its controls file in `:controls`,
+the crop's step list and `test/crops/independence.edn`'s read and judge stages (it adds no case: its unknowns are not judged).
+
+| command | result |
+|---|---|
+| `bin/repr-llvm heldout-check` (before the `invalid type` fix) | 886 own of 900, 885 met: `hw-dbg.di-retarget.1200276` (`invalid type`, opt agrees by hand) |
+| `bin/repr-llvm heldout-check` | 900 mutants, 886 own verdicts (98.4%), 886 met by Arbace's verifier, 14 unknown; 2 controls fail as they must; 480 s, 0.71 GB |
+| `test/repr/llvm/expect-test.bash` | 42 cases (6 new: LLS43's), 12 controls (2 new), 0 failing; the six mutants (`--dump`, now the mutated forms printed) by opt 23.1.5 by hand: the same first message, and Arbace's verifier opt's whole stderr byte for byte |
+| llvm-read-essential's and llvm-print-essential's commands | roundtrip, verify, probes 43, 43, 4 and text 43 pass, 0 failing, the controls fail |
+| `bin/repr-llvm check verify-probes` (whole) | 478 modules, 472 pass, 0 failing against the record |
+| `test/repr/llvm/controls-test.bash` | every line ok but llvmi's (no 23.1.5 `llvm/test` extraction in the main checkout, as on llvm-props3) |
+| `bin/llvmi check --essential` | not run here: the same absence (`bin/llvm-corpus extract`, the night's); llvmi is untouched |
+| `test/gate/crops-test.bash`, `bin/gate --full --plan` | ok; exit 0, `llvm-heldout` planned |
+| `bin/reap`, `bin/crops-score --judge --strict` | 0 problems; 11 crops, 0 problems |
+
+`bin/crops-score --crop llvm` before (mac/next) and after: 96.4% / 97.9% / 100.0% / 96.9%, the same (the held-out set's
+verdicts are no cell's case; the rt families are still the night's).
+
+### The night's commands (LLS43, LLS45)
+
+    bin/llvm-corpus extract                                       # if the main checkout's .tmp/llvm/src lacks 23.1.5's llvm/test
+    env REPR_LLVM_THREADS=2 bin/repr-llvm heldout-check           # the gate's llvm-heldout: about 8 min, 0.7 GB
+    bin/repr-llvm check verify-llvmtest; bin/repr-llvm check roundtrip-llvmtest; bin/repr-llvm check text-llvmtest   # whole
+    bin/llvmi check --essential; test/repr/llvm/controls-test.bash
+    REPR_LLVM_JUDGE=live bin/repr-llvm mutants-oracle .tmp/repr-llvm/heldout/mutants.list .tmp/llvm/mo-heldout   # oracle tier, by hand
+
+Expected: 0 own verdicts unmet, the whole llvmtest families as recorded (Verifier/fragment.ll's own verdict is valid with the
+warning, which the new message now matches), live opt agreeing with the 886 own verdicts.
+
 ## As built: LLS21 (a), ci's gaps (2026-11-05, branch `ci-lls21`)
 
 What the user decided (LLS21 (a)) is in ci, C's crop (`arbace/c/build.ae`, `arbace/c/check.ae`), no new native and no Go
@@ -2173,3 +2245,29 @@ one left, `LTO-Resolution-X86-protected-def-dllimport` (`llvm-as --disable-verif
 `disable-verify` in `test/llvm/valid-wide-known.tsv` (`REPR_LLVM_KNOWN`) until the night's `bin/repr-llvm record-opt`, the class removed
 when it passes. The other lists' records unchanged (valid, reject, split, reject-av, reject-other); `check verify-llvmtest` re-recorded
 (792 of 806: 11 fixed by LL4's messages), roundtrip-llvmtest and text-llvmtest 304/304, verify-probes 472/478.
+
+## As built: llvm-compl2, deferred non-passes closed (2026-11-10, branch `llvm-compl2`)
+
+A light lane, decision-free: the deferred classes whose cause was a gap in Arbace's own tools, re-judged by whole runs of the
+families and recorded from passing runs.
+
+- `bin/llvmi` ran the seed's ci, not the checkout's: it never sourced `bin/lib/ci/fresh.bash`, so a seed older than the checkout's
+  `arbace/c/` (LLS21 (a)'s `__atomic_*`, `fmodf` and function-pointer result widths, all after `d5548e72`) checked and built the lowered C
+  with the old builder, and the records kept `:ci-builtins` and `:abi-punning` items that the checkout had fixed. `run`, `lower`, `check`
+  and `modules` now call `c_ci_fresh`, as `bin/ci` does (the checkout's ci evaluated until the next re-seed).
+- `bin/llvmi check --aot`'s module had no `cilib` link (RES34's prebuilt libraries, which cf2g's programs import since then): every
+  program importing a musl unit failed to build. The module links `CI_AOT_LIB` (default the main checkout's `.tmp/ci-aot-lib`), as
+  `bin/lib/ci/check-aot`'s does.
+- `arbace/repr/llvm/verify.ae` (LLVM 23's Verifier, visitIntrinsicCall and visitVPIntrinsic): gc.relocate tied to a statepoint (or
+  undef, or a landingpad) with constant base and derived indices inside its gc-live bundle; the VP casts' equal vector lengths, vp.fcmp's
+  and vp.icmp's predicates, experimental.vp.splice's index range (times the vscale_range minimum); the module flag
+  require-logical-pointer refusing plain getelementptr and alloca; AMDGPU (an amdgcn triple): allocas in addrspace(5),
+  s.prefetch.data's address spaces, av.load/av.store's metadata string, the cooperative atomics' pointer and metadata node.
+
+Results (whole families, recorded): `bin/llvmi check` 537 of 562 (was 529; with the checkout's ci the x86_fp80 aggregates are
+the data layout's size, so 7 of `:long-double`'s 10 pass), `check --aot` 537 of 562 (was 522; 22 min and 45 min evaluated, under
+1.5 GB); `bin/repr-llvm check verify-llvmtest` 800 of 806 (8 of `:llvmtest-rules` fixed), verify-probes 472/478, roundtrip-llvmtest
+and text-llvmtest 304/304 unchanged. `:ci-builtins` and `:abi-punning` removed; `:long-double`'s tests are the 3 left. The crop's
+completeness 96.4% to 97.6% (read 98.7 to 99.2, eval 94.1 to 95.6, AOT 92.9 to 95.6). Left deferred: `:personality` 13 a level
+(the C++ runtime on ci), `:dg-options` 2 (the pack remade by clang with each test's options, by hand), the read's 4 rules (the whole-wave
+call, load-to-lds, mfma-scale, DILocation placement) and 2 messages, the probes' 5.

@@ -1,0 +1,580 @@
+(in-ns 'go.arbace.a64i) (go/file "lockstep_linux_arm64.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [errors "errors"]
+    ^{:line 6} [fmt "fmt"]
+    ^{:line 7} [os "os"]
+    ^{:line 8} [sort "sort"]
+    ^{:line 9} [syscall "syscall"]
+    ^{:line 10} [unsafe "unsafe"]
+
+    ^{:line 12} [crt "arbace/crt"]
+    ^{:line 13} [emu "arbace/emu"]])
+
+
+;; The lockstep (doc/asm/ARM64-SURVEY.md §8, AR5): the program run natively by this arm64 CPU under ptrace (the frame's
+;; tracer, emu.Tracee: registers by PTRACE_GETREGSET NT_PRSTATUS, ASLR off) and by a64i from the native's own initial state
+;; (its stack's bytes, the auxv's AT_SYSINFO_EHDR made AT_IGNORE in both: no vdso), compared in the sys mode at each system
+;; call (the registers, the call's arguments, the bytes write(2) writes, the writable memory) or in the step mode after
+;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, the bytes stored, TPIDR_EL0 after an MSR). The world's
+;; answers (read's bytes, clock_gettime's, getrandom's, the ids) are the native's, copied into a64i. Rules for
+;; single-stepping's artifacts: an exclusive load ends the step mode until the next system call (a single-stepped
+;; store-exclusive always fails: the step's exception clears the monitor), the region compared there as in the sys mode;
+;; x7 at a system call stop is ptrace's (entry 0, exit 1), never compared.
+
+(go/type lockstep (struct
+    ^{:line 27 :tag (* emu/Tracee)} t
+    ^{:line 28 :tag (* CPU)} c
+    ^{:line 29 :tag LockstepOpts} opts
+    ^{:line 30 :tag (* LockstepResult)} res
+    ^{:line 31 :tag bool} stepping
+    ^{:line 32 :tag bool} resume ; the step mode resumed after the next system call (an exclusive region)
+    ^{:line 33 :tag bool} afterSys ; the last step was a system call's
+    ^{:line 34 :tag uint64} stackLo
+    ^{:line 35 :tag uint64} stackHi))
+
+
+
+
+
+(go/var ^{:doc "world: the calls whose results (and output bytes) a64i takes from the native: the argument index of the buffer and\nits size's (-1: the result's count)\n"} world (lit (map string (array 2 int))
+    ^{:line 42} ["read" (lit _ 1 -1)] ["pread64" (lit _ 1 -1)] ["readv" (lit _ -1 0)] ["clock_gettime" (lit _ 1 16)] ["clock_getres" (lit _ 1 16)]
+    ^{:line 43} ["gettimeofday" (lit _ 0 16)] ["getrandom" (lit _ 0 -1)] ["getpid" (lit _ -1 0)] ["getppid" (lit _ -1 0)] ["gettid" (lit _ -1 0)]
+    ^{:line 44} ["getuid" (lit _ -1 0)] ["geteuid" (lit _ -1 0)] ["getgid" (lit _ -1 0)] ["getegid" (lit _ -1 0)] ["uname" (lit _ 0 390)]
+    ^{:line 45} ["set_tid_address" (lit _ -1 0)] ["nanosleep" (lit _ -1 0)] ["clock_nanosleep" (lit _ -1 0)] ["sched_yield" (lit _ -1 0)]
+    ^{:line 46} ["openat" (lit _ -1 0)] ["close" (lit _ -1 0)] ["lseek" (lit _ -1 0)] ["write" (lit _ -1 0)] ["writev" (lit _ -1 0)] ["ioctl" (lit _ -1 0)]
+    ^{:line 47} ["prlimit64" (lit _ 3 16)] ["getrlimit" (lit _ 1 16)] ["fcntl" (lit _ -1 0)] ["getcwd" (lit _ 0 -1)] ["readlinkat" (lit _ 2 -1)]))
+
+
+^{:go/end 55} (go/func nativeX ^{:tag (array 32 uint64)} [^{:tag (* syscall/PtraceRegs)} r]
+  (let [^{:tag (array 32 uint64)} x (zero (array 32 uint64))]
+    (copy (subslice x _ 31) (subslice (.-Regs r)))
+    (aset x 31 (.-Sp r))
+    ^{:line 54} x))
+
+
+^{:go/end 62} (go/func xname ^string [^int i]
+  (when (== i 31)
+    (return "sp"))
+
+  (fmt/Sprintf "x%d" i))
+
+
+
+^{:go/end 84} (go/func Lockstep "Lockstep runs path in the sys mode, the step mode, or the sys mode then the step mode.\n" [^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env ^LockstepOpts opts] :results [(* LockstepResult) error]
+  (let [(values devnull err) (os/OpenFile "/dev/null" os/O_RDWR 0)]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close devnull))
+    (let [(values t ^:assign err) (emu/StartTracee path argv env (lit (slice uintptr) (.Fd devnull) (.Fd devnull) (.Fd devnull)))]
+      (when (!= err nil)
+        (return nil err))
+
+      (defer (.Kill t))
+      (let [l (addr (lit lockstep :t t :opts opts :res (addr (lit LockstepResult))))]
+        (when [err (.start l path argv env)] (!= err nil)
+          (return nil err))
+
+        (when (or (.-Step opts) (== (.-StepFrom opts) 0))
+          (set! (.-stepping l) true))
+
+        (.loop l)))))
+
+
+
+
+^{:go/end 139} (go/method start "start makes a64i's process from the native's at its exec: the executable loaded by a64i's loader, the native's stack\nmapping's bytes (its AT_SYSINFO_EHDR made AT_IGNORE in both) and its registers.\n" ^error [^{:tag (* lockstep)} l ^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env]
+  (let [t (.-t l)
+      (values lo hi err) (.StackRange t)]
+    (when (!= err nil)
+      (return err))
+
+    (set! (values (.-stackLo l) (.-stackHi l)) (values lo hi))
+    (let [sp (.-Sp (.-Regs t))
+        ;; the auxv after argc, argv, envp
+        ^{:line 97} p sp
+        ^{:line 98} rd ^{:go/end 105} (fn ^uint64 [^uint64 a]
+          (let [(values b _) (.Read t a 8)
+              ^{:line 100 :tag uint64} v (zero uint64)]
+            (for [k 7] (>= k 0) (dec! k)
+              (set! v (bit-or (<< v 8) (conv uint64 (aget b k)))))
+
+            ^{:line 104} v))
+
+        ^{:line 106} argc (rd p)]
+      (set! p + (* 8 (+ argc 2)))
+      (while (!= (rd p) 0)
+        (set! p + 8))
+
+      (set! p + 8)
+      (for [] (!= (rd p) 0) (set! p + 16)
+        (when (== (rd p) 33)
+          (.Write t p (lit (slice byte) 1 0 0 0 0 0 0 0))))
+
+
+      (let [(values stack ^:assign err) (.Read t lo (conv int (- hi lo)))]
+        (when (!= err nil)
+          (return err))
+
+        (let [as (emu/NewAS)
+            (values img ^:assign err) (emu/LoadELF as path)]
+          (when (!= err nil)
+            (return err))
+
+          (set! (.-Loader (.-res l)) (.loaderJudge l path argv env img sp lo stack))
+          (.Map as (- emu/A64StackTop emu/A64StackSize) emu/A64StackSize (bit-or emu/PermR emu/PermW) "stack")
+          (.WriteBytes as lo stack)
+          (let [sys (crt/NewSys (.-M as) os/Stdin os/Stdout os/Stderr)]
+            (set! (values (.-Args sys) (.-Env sys)) (values argv env))
+            ^{:go/breaks [6]} (let [k (emu/NewKernelA64 as img sys)
+                ^{:line 132} c (New as k (.-Pc (.-Regs t)) sp)
+                ^{:line 133} x (nativeX (addr (.-Regs t)))]
+              (set! (.-X c) x)
+              (.SetNZCV c (.-Pstate (.-Regs t)))
+              (set! (.-Pid c) (.-Pid t))
+              (set! (.-c l) c)
+              nil)))))))
+
+
+
+
+
+^{:go/end 226} (go/method loaderJudge "loaderJudge: a64i's own initial stack (emu.StackA64) against the native's, the masked entries aside: AT_HWCAP, AT_HWCAP2,\nAT_HWCAP3 (the CPU's), AT_MINSIGSTKSZ (its SVE/SME state's size), AT_RSEQ_*; AT_SYSINFO_EHDR (no vdso in a64i), AT_RANDOM's\nbytes (random); the strings and the layout compared. \"\" when equal.\n" ^string [^{:tag (* lockstep)} l ^string path ^{:tag (slice string)} argv ^{:tag (slice string)} env ^{:tag (* emu/Image)} img ^uint64 nsp ^uint64 lo ^{:tag (slice byte)} nstack]
+  (let [as (emu/NewAS)]
+    (when [(values _ err) (emu/LoadELF as path)] (!= err nil)
+      (return (.Error err)))
+
+    (let [^{:tag (array 16 byte)} rnd (zero (array 16 byte))
+        ^{:line 150} sp (emu/StackA64 as img argv env rnd)
+        (values mine ok) (.ReadBytes as sp (conv int (- emu/A64StackTop sp)))]
+      (when (or (not ok) (< nsp lo))
+        (return "a64i's stack unreadable"))
+
+      (let [theirs (subslice nstack (- nsp lo))
+          ^{:line 156} u ^{:go/end 165} (fn ^uint64 [^{:tag (slice byte)} b ^int o]
+            (when (> (+ o 8) (len b))
+              (return 0))
+
+            (let [^uint64 v (zero uint64)]
+              (for [k 7] (>= k 0) (dec! k)
+                (set! v (bit-or (<< v 8) (conv uint64 (aget b (+ o k))))))
+
+              ^{:line 164} v))
+
+          ;; argc, argv, envp, the auxv (AT_SYSINFO_EHDR dropped from the native's: no vdso)
+          ^{:line 167} parse ^{:go/end 193} (fn [^{:tag (slice byte)} b] :results [(slice uint64) (slice (array 2 uint64))]
+            (let [^{:tag (slice uint64)} words (zero (slice uint64))
+                ^{:line 169} o 0
+                ^{:line 170} argc (conv int (u b 0))]
+              (for [k 0] (<= k (+ argc 1)) (inc! k)
+                (set! words (append words (u b o)))
+                (set! o + 8))
+
+              (while (!= (u b o) 0)
+                (set! words (append words (u b o)))
+                (set! o + 8))
+
+              (set! o + 8)
+              (let [^{:tag (slice (array 2 uint64))} aux (zero (slice (array 2 uint64)))]
+                (while (<= (+ o 16) (len b))
+                  (let [(values k v) (values (u b o) (u b (+ o 8)))]
+                    (set! o + 16)
+                    (when (or (== k 33) (== k 1))
+                      (continue))
+
+                    (set! aux (append aux (lit (array 2 uint64) k v)))
+                    (when (== k 0)
+                      (break))))
+
+
+                (return words aux))))
+
+          (values mw ma) (parse mine)
+          (values tw ta) (parse theirs)]
+        (when (!= (fmt/Sprint mw) (fmt/Sprint tw))
+          (return (fmt/Sprintf "argc, argv or envp: %x, native %x" mw tw)))
+
+        (when (!= (len ma) (len ta))
+          (return (fmt/Sprintf "auxv of %d entries, native %d" (len ma) (len ta))))
+
+        ^{:go/breaks [[4 225]]} (let [^uint64 rndAt (zero uint64)]
+          (range [i ma]
+            (when (!= (aget (aget ma i) 0) (aget (aget ta i) 0))
+              (return (fmt/Sprintf "auxv entry %d: type %d, native %d" i (aget (aget ma i) 0) (aget (aget ta i) 0))))
+
+            (switch (aget (aget ma i) 0)
+              (case [16 26 29 51 27 28]
+                (continue))
+              (case [25]
+                (set! rndAt (aget (aget ma i) 1))))
+
+            (when (!= (aget (aget ma i) 1) (aget (aget ta i) 1))
+              (return (fmt/Sprintf "auxv type %d: %#x, native %#x" (aget (aget ma i) 0) (aget (aget ma i) 1) (aget (aget ta i) 1)))))
+
+
+          ;; the strings, the platform and the random bytes' place: from AT_RANDOM up, byte for byte (the random bytes aside)
+          (when (and (!= rndAt 0) (> rndAt sp) (> rndAt nsp))
+            (let [(values a ok) (.ReadBytes as (+ rndAt 16) (conv int (- emu/A64StackTop rndAt 16)))
+                ^{:line 220} b (subslice nstack (- (+ rndAt 16) lo))]
+              (when (or (not ok) (not (bytes/Equal a b)))
+                (return "the strings above AT_RANDOM differ"))))
+
+
+          "")))))
+
+
+^{:go/end 235} (go/method fail [^{:tag (* lockstep)} l ^string f & ^{:tag (slice any)} a] :results [(* LockstepResult) error]
+  (set! (.-Diff (.-res l)) (fmt/Sprintf f (spread a)))
+  (set! (.-Steps (.-res l)) (.-Steps (.-c l)))
+  (when (!= (.-Last (.-c l)) nil)
+    (set! (.-Family (.-res l)) (.Family (.-Last (.-c l)))))
+
+  (return (.-res l) nil))
+
+
+
+^{:go/end 253} (go/method compareRegs "compareRegs holds a64i's registers to the native's (x7 aside at a system call stop).\n" ^string [^{:tag (* lockstep)} l ^bool atSys]
+  ^{:go/breaks [[4 252]]} (let [r (addr (.-Regs (.-t l)))
+      ^{:line 240} nx (nativeX r)]
+    (for [i 0] (< i 32) (inc! i)
+      (when (and atSys (== i 7))
+        (continue))
+
+      (when (!= (aget nx i) (aget (.-X (.-c l)) i))
+        (return (fmt/Sprintf "%s %#x, native %#x" (xname i) (aget (.-X (.-c l)) i) (aget nx i)))))
+
+
+    (when (!= (bit-and (.-Pstate r) 0xf0000000) (.NZCV (.-c l)))
+      (return (fmt/Sprintf "nzcv %#x, native %#x" (.NZCV (.-c l)) (bit-and (.-Pstate r) 0xf0000000))))
+
+    ""))
+
+
+^{:go/end 269} (go/method tpidr [^{:tag (* lockstep)} l] :results [uint64 error]
+  (let [^{:tag (array 8 byte)} b (zero (array 8 byte))
+      ^{:line 257} iov (lit (struct
+          ^{:line 258 :tag (* byte)} base
+          ^{:line 259 :tag uint64} n)
+        (addr (aget b 0)) 8)]
+    (when [(values _ _ e) (syscall/Syscall6 syscall/SYS_PTRACE 0x4204 (conv uintptr (.-Pid (.-t l))) 0x401 (conv uintptr (conv unsafe/Pointer (addr iov))) 0 0)] (!= e 0)
+      (return 0 e))
+
+    (let [^uint64 v (zero uint64)]
+      (for [k 7] (>= k 0) (dec! k)
+        (set! v (bit-or (<< v 8) (conv uint64 (aget b k)))))
+
+      (return v nil))))
+
+
+
+^{:go/end 296} (go/method compareMemory "compareMemory holds a64i's writable pages to the native's (the stack: the native's [stack] mapping's pages only).\n" ^string [^{:tag (* lockstep)} l]
+  ^{:go/breaks [[4 295]]} (let [ps (.Writable (.-AS (.-c l)))]
+    (sort/Slice ps ^{:go/end 274} (fn ^bool [^int i ^int j] (< (aget ps i) (aget ps j))))
+    (range [_ p ps]
+      (when (and (>= p (- emu/A64StackTop emu/A64StackSize)) ^:go/paren (or (< p (.-stackLo l)) (>= p (.-stackHi l))))
+        (continue))
+
+      (let [(values mine ok) (.ReadBytes (.-AS (.-c l)) p 4096)]
+        (when (not ok)
+          (continue))
+
+        (let [(values theirs err) (.Read (.-t l) p 4096)]
+          (when (!= err nil)
+            (return (fmt/Sprintf "page %#x: not in the native's memory" p)))
+
+          (when (not (bytes/Equal mine theirs))
+            (range [i mine]
+              (when (!= (aget mine i) (aget theirs i))
+                (return (fmt/Sprintf "memory at %#x: %#02x, native %#02x" (+ p (conv uint64 i)) (aget mine i) (aget theirs i)))))))))
+
+
+
+
+    ""))
+
+
+
+^{:go/end 326} (go/method sysHook "sysHook: a64i's system call n answered as the world list says, the native's result nret (and its memory) in hand.\n" ^{:tag (func [uint64 (array 6 uint64)] [int64 bool])} [^{:tag (* lockstep)} l ^uint64 nret ^{:tag (array 6 uint64)} nargs]
+  ^{:go/end 325} (fn [^uint64 n ^{:tag (array 6 uint64)} args] :results [int64 bool]
+    (let [(values s ok) (emu/SyscallA64 (conv int n))]
+      (when (not ok)
+        (return (conv int64 nret) true))
+
+      (let [(values w inWorld) (aget world (.-Name s))]
+        (when (not inWorld)
+          (return 0 false))
+
+        (when (>= (aget w 0) 0)
+          (let [size (conv uint64 (aget w 1))]
+            (when (< (aget w 1) 0)
+              (set! size nret)
+              (when (< (conv int64 nret) 0)
+                (set! size 0)))
+
+
+            (when (> size 0)
+              (let [(values b err) (.Read (.-t l) (aget args (aget w 0)) (conv int size))]
+                (when (== err nil)
+                  (.WriteBytes (.-AS (.-c l)) (aget args (aget w 0)) b))))))
+
+
+
+        (return (conv int64 nret) true)))))
+
+
+
+
+^{:go/end 343} (go/method compareWrite "the bytes write(2) would write: a64i's against the native's\n" ^string [^{:tag (* lockstep)} l ^uint64 n ^{:tag (array 6 uint64)} args]
+  (let [(values s _) (emu/SyscallA64 (conv int n))]
+    (when (!= (.-Name s) "write")
+      (return ""))
+
+    ^{:go/breaks [[4 342]]} (let [(values mine ok1) (.ReadBytes (.-AS (.-c l)) (aget args 1) (conv int (aget args 2)))
+        (values theirs err) (.Read (.-t l) (aget args 1) (conv int (aget args 2)))]
+      (when (or (not ok1) (!= err nil))
+        (return ""))
+
+      (when (not (bytes/Equal mine theirs))
+        (return (fmt/Sprintf "write(%d) writes %q, native %q" (aget args 0) mine theirs)))
+
+      "")))
+
+
+^{:go/end 473} (go/method loop [^{:tag (* lockstep)} l] :results [(* LockstepResult) error]
+  (let [(values c t) (values (.-c l) (.-t l))]
+    (while true
+      (when (.-stepping l)
+        (when (and (!= (.-StepLimit (.-opts l)) 0) (>= (.-Stepped (.-res l)) (.-StepLimit (.-opts l))))
+          (set! (.-stepping l) false)))
+
+
+      (when (not (.-stepping l))
+        ;; the sys mode: a64i to its next SVC (stopped before it), the native to its next system call entry
+        (while true
+          (let [(values in _ _) (.Fetch c (.-PC c))]
+            (when (and (!= in nil) (== (.-Op in) OpSVC))
+              (break))
+
+            (when (not (.Step c))
+              (break))))
+
+
+        (let [(values st err) (.Resume t 0)]
+          (when (!= err nil)
+            (return nil err))
+
+          (when [(values r done err) (.atStop l st)] (or done (!= err nil))
+            (return r err))
+
+          (continue)))
+
+      ;; the step mode
+      (let [(values in _ _) (.Fetch c (.-PC c))]
+        (when (and (!= in nil) ^:go/paren (== (.-Op in) OpLDXR))
+          ;; an exclusive region: to the next system call in the sys mode's way (stepping would fail its store)
+          (inc! (.-Exclusive (.-res l)))
+          (set! (values (.-stepping l) (.-resume l)) (values false true))
+          (continue))
+
+        (when (and (!= in nil) (== (.-Op in) OpSVC))
+          ;; the system call stepped over in the native, its result fed to a64i
+          (let [args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))]
+            (when [d (.compareWrite l (aget (.-X c) 8) args)] (!= d "")
+              (return (.fail l "at %#x: %s" (.-PC c) d)))
+
+            (let [(values st err) (.StepOnce t 0 true)]
+              (when (!= err nil)
+                (return nil err))
+
+              (when (== st emu/StopExit)
+                (set! (.-SysHook c) nil)
+                (.Step c)
+                (return (.finish l)))
+
+              (set! (.-SysHook c) (.sysHook l (aget (.-Regs (.-Regs t)) 0) args))
+              (.Step c)
+              (set! (.-SysHook c) nil)
+              (inc! (.-Syscalls (.-res l)))
+              (set! (.-afterSys l) true)
+              (when (.-Done c)
+                (return (.finish l)))
+
+              (when [d (.compareRegs l false)] (!= d "")
+                (return (.fail l "after the system call at %#x: %s" (- (.-PC c) 4) d)))
+
+              (when [d (.compareMemory l)] (!= d "")
+                (return (.fail l "after the system call at %#x: %s" (- (.-PC c) 4) d)))
+
+              (when (and (> (.-StepFrom (.-opts l)) 0) (>= (.-Syscalls (.-res l)) (+ (.-StepFrom (.-opts l)) 1)) (not (.-Step (.-opts l))))
+                ;; bisecting: the difference was before this call
+                (return (.fail l "bisect: no difference before the system call that differed")))
+
+              (continue))))
+
+        (let [pc (.-PC c)]
+          (set! (values (.-Log (.-AS c)) (.-Stores (.-AS c))) (values true (subslice (.-Stores (.-AS c)) _ 0)))
+          (.Step c)
+          (set! (.-Log (.-AS c)) false)
+          (let [(values st err) (.StepOnce t 0 (and (!= in nil) (== (.-Op in) OpBRK)))]
+            (when (!= err nil)
+              (return nil err))
+
+            ;; single-stepping's artifact: the first step after a stepped system call's return stops before its instruction
+            ;; (the step's pending state), once; the native stepped again
+            (when (and (== st emu/StopStep) (.-afterSys l) (== (.-Pc (.-Regs t)) pc))
+              (set! (values st err) (.StepOnce t 0 (and (!= in nil) (== (.-Op in) OpBRK))))
+              (when (!= err nil)
+                (return nil err)))
+
+
+            ;; a brk's SIGTRAP (si_code TRAP_BRKPT) is reported as the step's own trap with the pc unmoved: the native's signal
+            (when (and (!= in nil) (== (.-Op in) OpBRK) (== st emu/StopStep) (== (.-Pc (.-Regs t)) pc))
+              (set! (values st (.-Sig t)) (values emu/StopSignal SIGTRAP)))
+
+            (set! (.-afterSys l) false)
+            (inc! (.-Stepped (.-res l)))
+            (when (or (== st emu/StopExit) (== st emu/StopSignal))
+              (when (not (.-Done c))
+                (return (.stepFail l pc "the native stopped (signal %d), a64i did not" (.-Sig t))))
+
+              (when (== st emu/StopSignal)
+                (when (!= (.-Sig t) (.-Signal c))
+                  (return (.stepFail l pc "signal %d, native %d" (.-Signal c) (.-Sig t))))
+
+                (.Resume t (.-Sig t)))
+
+              (return (.finish l)))
+
+            (when (.-Done c)
+              (return (.stepFail l pc "a64i stopped (%s), the native did not" (.-Reason c))))
+
+            (when (!= (.-Pc (.-Regs t)) (.-PC c))
+              (return (.stepFail l pc "pc %#x, native %#x" (.-PC c) (.-Pc (.-Regs t)))))
+
+            (when [d (.compareRegs l false)] (!= d "")
+              (return (.stepFail l pc "%s" d)))
+
+            (for [i 0] (< (+ i 1) (len (.-Stores (.-AS c)))) (set! i + 2)
+              (let [(values a n) (values (aget (.-Stores (.-AS c)) i) (conv int (aget (.-Stores (.-AS c)) (+ i 1))))
+                  (values mine _) (.ReadBytes (.-AS c) a n)
+                  (values theirs err) (.Read t a n)]
+                (when (or (!= err nil) (not (bytes/Equal mine theirs)))
+                  (return (.stepFail l pc "stored at %#x: %x, native %x" a mine theirs)))))
+
+
+            (when [last (.-Last c)] (and (!= last nil) ^:go/paren (or (== (.-Op last) OpMSR) (== (.-Op last) OpMRS)))
+              (when [(values v err) (.tpidr l)] (and (== err nil) (!= v (.-TPIDR c)))
+                (return (.stepFail l pc "tpidr_el0 %#x, native %#x" (.-TPIDR c) v))))))))))
+
+
+
+
+
+^{:go/end 481} (go/method stepFail [^{:tag (* lockstep)} l ^uint64 pc ^string f & ^{:tag (slice any)} a] :results [(* LockstepResult) error]
+  (set! (.-DiffPC (.-res l)) pc)
+  (when [(values in _ _) (.Fetch (.-c l) pc)] (!= in nil)
+    (set! (.-DiffInst (.-res l)) (.Key in)))
+
+  (.fail l "at %#x: %s" pc (fmt/Sprintf f (spread a))))
+
+
+
+
+^{:go/end 567} (go/method atStop "atStop: the native at a stop of the sys mode (a system call's entry, a signal, its end), a64i stopped before its SVC\n(or ended): compared, the call made by both. done when the run is over.\n" [^{:tag (* lockstep)} l ^int st] :results [(* LockstepResult) bool error]
+  (let [(values c t) (values (.-c l) (.-t l))]
+    (switch st
+      (case [emu/StopExit]
+        (when (not (.-Done c))
+          (let [(values r err) (.fail l "the native ended (status %d), a64i did not (pc %#x)" (.-Status t) (.-PC c))]
+            (return r true err)))
+
+        (let [(values r err) (.finish l)]
+          (return r true err)))
+      (case [emu/StopSignal]
+        (when (or (not (.-Done c)) (!= (.-Signal c) (.-Sig t)))
+          (let [(values r err) (.fail l "the native's signal %d at %#x, a64i's %d (%s) at %#x" (.-Sig t) (.-Pc (.-Regs t)) (.-Signal c) (.-Reason c) (.-PC c))]
+            (return r true err)))
+
+        (when (!= (.-Pc (.-Regs t)) (.-PC c))
+          (let [(values r err) (.fail l "signal %d at %#x, native at %#x" (.-Sig t) (.-PC c) (.-Pc (.-Regs t)))]
+            (return r true err)))
+
+        (.Resume t (.-Sig t))
+        (let [(values r err) (.finish l)]
+          (return r true err))))
+
+    ;; a system call's entry
+    (when (.-Done c)
+      (let [(values r err) (.fail l "a64i ended (%s, status %d), the native makes system call %d at %#x" (.-Reason c) (.Status c) (aget (.-Regs (.-Regs t)) 8) (- (.-Pc (.-Regs t)) 4))]
+        (return r true err)))
+
+    (when (!= (- (.-Pc (.-Regs t)) 4) (.-PC c))
+      (let [(values r err) (.fail l "system call at %#x, a64i at %#x" (- (.-Pc (.-Regs t)) 4) (.-PC c))]
+        (return r true err)))
+
+    (when [d (.compareRegs l true)] (!= d "")
+      (let [(values r err) (.fail l "at system call %d (%#x): %s" (.-Syscalls (.-res l)) (.-PC c) d)]
+        (return r true err)))
+
+    (let [args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))]
+      (when [d (.compareWrite l (aget (.-X c) 8) args)] (!= d "")
+        (let [(values r err) (.fail l "at system call %d (%#x): %s" (.-Syscalls (.-res l)) (.-PC c) d)]
+          (return r true err)))
+
+      (when [d (.compareMemory l)] (!= d "")
+        (let [(values r err) (.fail l "at system call %d (%#x): %s" (.-Syscalls (.-res l)) (.-PC c) d)]
+          (return r true err)))
+
+      (let [(values ^:assign st err) (.Resume t 0)]
+        (when (!= err nil)
+          (return nil true err))
+
+        (when (== st emu/StopExit)
+          (.Step c)
+          (let [(values r err) (.finish l)]
+            (return r true err)))
+
+        (when (!= st emu/StopSyscall)
+          (return nil true (errors/New "lockstep: the native did not stop at the system call's exit")))
+
+        (set! (.-SysHook c) (.sysHook l (aget (.-Regs (.-Regs t)) 0) args))
+        (.Step c)
+        (set! (.-SysHook c) nil)
+        (inc! (.-Syscalls (.-res l)))
+        (when (.-Done c)
+          ;; a64i ended with this call (exit): the native ends on resuming
+          (let [(values st err) (.Resume t 0)]
+            (when (!= err nil)
+              (return nil true err))
+
+            (when (!= st emu/StopExit)
+              (let [(values r err) (.fail l "a64i ended at system call %d, the native did not" (.-Syscalls (.-res l)))]
+                (return r true err)))
+
+            (let [(values r ^:assign err) (.finish l)]
+              (return r true err))))
+
+        (when (!= (aget (.-X c) 0) (aget (.-Regs (.-Regs t)) 0))
+          (let [(values r err) (.fail l "system call %d (%#x) returns %#x, native %#x" (.-Syscalls (.-res l)) (- (.-PC c) 4) (aget (.-X c) 0) (aget (.-Regs (.-Regs t)) 0))]
+            (return r true err)))
+
+        (when (or ^:go/paren (and (> (.-StepFrom (.-opts l)) 0) (== (.-Syscalls (.-res l)) (.-StepFrom (.-opts l)))) (.-resume l))
+          (set! (values (.-stepping l) (.-resume l)) (values true false)))
+
+        (return nil false nil)))))
+
+
+^{:go/end 581} (go/method finish [^{:tag (* lockstep)} l] :results [(* LockstepResult) error]
+  (let [(values c t) (values (.-c l) (.-t l))]
+    (set! (.-Steps (.-res l)) (.-Steps c))
+    (set! (.-Status (.-res l)) (.-Status t))
+    (when (and (not (.-Exited t)) (not (.-Signaled t)))
+      (return (.fail l "the native has not ended")))
+
+    (when (!= (.Status c) (.-Status t))
+      (return (.fail l "status %d, native %d" (.Status c) (.-Status t))))
+
+    (set! (.-Equal (.-res l)) true)
+    (return (.-res l) nil)))

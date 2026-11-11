@@ -67,6 +67,11 @@
     (.mkdirs (.getParentFile f))
     (spit f text)))
 
+(defn- spit-bytes [^String path ^bytes b]
+  (let [f (File. path)]
+    (.mkdirs (.getParentFile f))
+    (java.nio.file.Files/write (.toPath f) b (make-array java.nio.file.OpenOption 0))))
+
 (defn- strip-ae [^String s] (if (str/ends-with? s ".ae") (subs s 0 (- (count s) 3)) s))
 
 ;; ---- read ----
@@ -102,7 +107,9 @@
           (let [x (read-string (slurp f))]
             (if (cv/error-form? x)
               (swap! skipped inc)
-              (spit-mk (str out "/" r) (if (get opts "--full") (cv/full-text x) (pr/print-file x)))))
+              (if (get opts "--full")
+                (spit-mk (str out "/" r) (cv/full-text x))
+                (spit-bytes (str out "/" r) (pr/text-bytes (pr/print-file x))))))
           (catch Throwable t
             (swap! bad inc)
             (println "FAIL" r (.getMessage t))))))
@@ -161,8 +168,8 @@
                       (do (swap! ok inc)
                           (when printed
                             (let [pf (str printed "/" r)
-                                  again (pr/print-file b)]
-                              (when-not (= again (slurp pf)) (swap! unstable inc) (swap! unstable-files conj r)
+                                  again (pr/text-bytes (pr/print-file b))]
+                              (when-not (java.util.Arrays/equals ^bytes again (java.nio.file.Files/readAllBytes (.toPath (File. ^String pf)))) (swap! unstable inc) (swap! unstable-files conj r)
                                 (println "UNSTABLE" r))))))))))))))
     (let [unexpected-rej (remove (fn [[r v]] (= (select-keys (get known r) [:class :kind :message]) (select-keys v [:class :kind :message]))) @rejects)
           unexpected-diff (remove (fn [[r v]] (= (select-keys (get known r) [:class :at :orig :printed :message]) v)) @diffs)
@@ -318,12 +325,68 @@
                ";; print cell. Made by " (if (= reader "helper") "the helper's reader (--reader helper)" "the native reader, the print read again by it")
                ". Read with the Clojure reader.\n")} k))
 
+(declare own-header)
 (defn- write-results [^String f k reader id rows]
   (let [pre (str id "/")
         old (if (.exists (File. f)) (read-string (slurp f)) [])
         kept (remove #(str/starts-with? (str (first %)) pre) old)
         all (sort-by first (concat kept rows))]
-    (spit-mk f (str (results-header k reader) "[\n" (apply str (for [r all] (str " " (pr-str (vec r)) "\n"))) "]\n"))))
+    (spit-mk f (str (results-header k reader) (when (= k :read) own-header) "[\n" (apply str (for [r all] (str " " (pr-str (vec r)) "\n"))) "]\n"))))
+
+;; OC213 (a) (the user, 2026-11-10; doc/ocaml/OCAML-SURVEY.md, "As built: OC213, OC214, OC209, OC210"): a file of the testsuite the
+;; reader rejects is judged by its own test (arbace.repr.ocaml.native's own-read: ocamlc's .compilers.reference, the expect tool's
+;; and the toplevel's reads); a pass is a read row "pass" whose reason says so, "own verdict: HOW". Its negative controls
+;; (test/ocaml/own-read-controls.txt) must fail, else nothing is recorded.
+(def ^:private own-prefix "own verdict: ")
+(def ^:private own-header
+  (str ";; OC213 (a) (the user, 2026-11-10): a file of the testsuite the reader rejects passes by its own test, REASON \"own verdict: HOW\"\n"
+       ";; (ocamlc's .compilers.reference, the expect tool's or the toplevel's read: bin/repr-ocaml own-read), else stays a rejection.\n"))
+
+(defn- own-row [root id r]
+  (let [own-read (requiring-resolve 'arbace.repr.ocaml.native/own-read)
+        [v how] (try (own-read (str root "/" r) r) (catch Throwable t [:fail (str "failure: " (.getMessage t))]))]
+    (when (= :pass v) [(str id "/" r) "pass" (str own-prefix how)])))
+
+(defn- own-controls-bad
+  "The controls that do not fail (each printed), or nil; a missing controls file is no control: one fails"
+  [root controls-file]
+  (if-not (and controls-file (.exists (File. ^String controls-file)))
+    (do (println "OWN CONTROLS: no controls file" (pr-str controls-file)) [:none])
+    (let [rows ((requiring-resolve 'arbace.repr.ocaml.native/own-read-controls) root controls-file)]
+      (doseq [[s r v how] rows]
+        (println (if (= :fail v) (str "control " s " judged by " r "'s test: fails as it must (" how ")")
+                     (str "CONTROL PASSES " s " judged by " r "'s test (" how ")"))))
+      (seq (remove #(= :fail (nth % 2)) rows)))))
+
+(defn- do-own-results
+  "own-results --read FILE --corpus ID --root BASE --controls FILE [--check]: OC213 (a) applied to the read level's record as it
+  is: each row of corpus ID that is a rejection, or a pass by its own verdict, judged again by its own test (no round trip: the
+  rejection is the record's; the rows of the other corpora and the passes of the reader untouched); --check: the record must
+  already say so (exit 1 on a row that would change), else the rows rewritten, the header kept"
+  [{:keys [opts]}]
+  (let [f (get opts "--read") id (get opts "--corpus") root (get opts "--root") pre (str id "/")
+        text (slurp f)
+        header (apply str (map #(str % "\n") (take-while #(str/starts-with? % ";;") (str/split-lines text))))
+        header (if (str/includes? header "OC213 (a)") header (str header own-header))
+        rows (read-string text)
+        ctl-bad (own-controls-bad root (get opts "--controls"))
+        judged (vec (for [[rid res why :as row] rows]
+                      (if (and (str/starts-with? rid pre)
+                               (or (= res "reject") (and (= res "pass") (str/starts-with? (str why) own-prefix))))
+                        (let [r (subs rid (count pre))]
+                          (or (own-row root id r)
+                              (if (= res "reject") row [rid "reject" (str "own verdict lost: " why)])))
+                        row)))
+        changed (remove nil? (map (fn [a b] (when (not= a b) [a b])) rows judged))
+        n-own (count (filter #(and (= "pass" (second %)) (str/starts-with? (str (nth % 2)) own-prefix)) judged))]
+    (doseq [[a b] changed] (println (if (get opts "--check") "WOULD CHANGE" "CHANGED") (first a) (pr-str (second a)) "->" (pr-str (second b)) (pr-str (nth b 2))))
+    (println (str "own-results " id ": " n-own " passes by their own test, "
+                  (count (filter #(and (str/starts-with? (first %) pre) (= "reject" (second %))) judged)) " rejections left, "
+                  (count changed) " rows changed"))
+    (cond
+      (seq ctl-bad) (do (println "own-results: a control does not fail: nothing recorded") (System/exit 1))
+      (get opts "--check") (System/exit (if (empty? changed) 0 1))
+      :else (spit-mk f (str header "[\n" (apply str (for [r judged] (str " " (pr-str (vec r)) "\n"))) "]\n")))))
 
 (defn- do-results
   "results --corpus ID --list FILE --compare REPORT --full REPORT --read OUT --print OUT: one corpus's rows of the read and
@@ -336,10 +399,13 @@
         fu (read-string (slurp (get opts "--full")))
         unstable (set (:unstable-files c))
         one-line (fn [x] (str/replace (str x) #"\s+" " "))
+        own-root (get opts "--own-root")
         read-rows (for [r names]
                     (if-let [v (get (:rejected c) r)]
-                      [(str id "/" r) "reject" (one-line (str (name (:class v)) " " (name (:kind v)) ": " (:message v)))]
+                      (or (when own-root (own-row own-root id r))
+                          [(str id "/" r) "reject" (one-line (str (name (:class v)) " " (name (:kind v)) ": " (:message v)))])
                       [(str id "/" r) "pass" ""]))
+        ctl-bad (when own-root (own-controls-bad own-root (get opts "--own-controls")))
         print-rows (for [r names :when (not (get (:rejected c) r))]
                      (let [d (get (:differ c) r) fr (get (:rejected fu) r) ff (get (:failures fu) r)]
                        (cond
@@ -353,7 +419,7 @@
                          :else [(str id "/" r) "pass" ""])))
         bad (filter #(= "fail" (second %)) print-rows)]
     (doseq [r bad] (println "NOT RECORDED (the printer's failure)" (pr-str r)))
-    (if (seq bad)
+    (if (or (seq bad) (seq ctl-bad))
       (System/exit 1)
       (do (write-results (get opts "--read") :read (get opts "--reader" "native") id read-rows)
           (write-results (get opts "--print") :print (get opts "--reader" "native") id print-rows)
@@ -369,5 +435,6 @@
       "full" (do-full (pa #{"--src" "--parse" "--layout" "--out" "--forms" "--known" "--rt-known" "--report"}))
       "dumps" (do-dumps (pa #{"--mode" "--root" "--again" "--known" "--times"}))
       "compare" (do-compare (pa #{"--orig" "--cand" "--printed" "--known" "--report"}))
-      "results" (do-results (pa #{"--corpus" "--list" "--compare" "--full" "--read" "--print" "--reader"}))
+      "results" (do-results (pa #{"--corpus" "--list" "--compare" "--full" "--read" "--print" "--reader" "--own-root" "--own-controls"}))
+      "own-results" (do-own-results (pa #{"--read" "--corpus" "--root" "--controls"}))
       (do (println "usage: -m arbace.repr.ocaml read|print|compare ...") (System/exit 2)))))

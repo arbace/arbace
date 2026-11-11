@@ -144,8 +144,32 @@
       (contains? #{"Struct" "Union" "TyAlias" "TyParam" "Enum" "AssocTy" "ForeignTy"} (:kind r))))
 
 ;; A local module: {:items (atom {[ns name] res}) :globs (atom [res]) :parent mod :root mod}
-(defn- new-module [parent kind]
-  {:items (atom {}) :globs (atom []) :imports (atom []) :parent parent :kind kind :uid (Object.)})
+(def ^:dynamic *def-sites* {})   ; RF12: a macro 2.0 expansion's mark -> its definition's module (core's path): def-site hygiene
+(def ^:dynamic *crate-path* nil)   ; RF12: the root file's module in core ("core::num"), the rest of core std's names
+
+(defn- new-module [parent kind & [std-path]]
+  {:items (atom {}) :globs (atom []) :imports (atom []) :parent parent :kind kind :uid (Object.) :std-path std-path})
+
+(def ^:private value-kinds #{"Fn" "Const" "Static" "AssocFn" "AssocConst" "Ctor"})
+(declare ^:dynamic *root*)
+
+(defn- localize
+  "RF12: std's def of a path under the root file's module is the root file's own definition when it defines it"
+  [r]
+  (if-let [cp (and *crate-path* (map? r) (= :def (:t r)) (string? (:path r)) *crate-path*)]
+    (let [^String p (:path r)]
+      (cond (= p cp) {:t :local-def :kind "Mod" :mod *root*}
+            (str/starts-with? p (str cp "::"))
+            (let [ss (str/split (subs p (+ 2 (count cp))) #"::")
+                  ns (if (some #(str/starts-with? (str (:kind r)) %) value-kinds) :value :type)]
+              (or (loop [m *root* ss ss]
+                    (when m
+                      (if (next ss)
+                        (recur (:mod (get @(:items m) [:type (first ss)])) (rest ss))
+                        (get @(:items m) [ns (first ss)]))))
+                  r))
+            :else r))
+    r))
 
 (def ^:dynamic *std* {})
 (def ^:dynamic *root* nil)
@@ -169,7 +193,10 @@
      (let [m (:mod mres)]
        (when-not (contains? seen (:uid m))
          (or (get @(:items m) [ns nm])
-             (glob-get mres ns nm (conj seen (:uid m))))))
+             (glob-get mres ns nm (conj seen (:uid m)))
+             ;; RF12: a name of core's module this file does not define (a macro's item not expanded): std's
+             (when-let [sp (:std-path m)]
+               (some-> (std-module-res sp) (module-get ns nm seen) localize)))))
      (= :def (:t mres))
      (when-let [m (get *std* (:path mres))]
        (when-let [c (first (filter #(and (= ns (:ns %)) (= nm (:name %))) (:children m)))]
@@ -246,13 +273,21 @@
       Static (let [st (second k) nm (id-name (fv st :ident))
                    mut (if (= 'Mut (fv st :mutability)) "Mut" "Not")]
                (define! m :value nm {:t :local-def :kind (str "Static { safety: Safe, mutability: " mut ", nested: false }") :span (ident-span-at sp (fv st :ident))}))
-      Mod (let [[_ _safety ident mk] k nm (id-name ident) mm (new-module m "Mod")]
-            (when (= 'Loaded (head mk)) (collect-items mm (second mk)))
-            (define! m :type nm {:t :local-def :kind "Mod" :span (ident-span-at sp ident) :mod mm}))
+      Mod (let [[_ _safety ident mk] k nm (id-name ident) mm (new-module m "Mod" (when (:std-path m) (str (:std-path m) "::" nm)))]
+            (if (and (not= 'Loaded (head mk)) (:std-path m) (std-module-res (:std-path mm)))
+              ;; RF12: core's module of another file: std's names
+              (define! m :type nm (std-module-res (:std-path mm)))
+              (do (when (= 'Loaded (head mk)) (collect-items mm (second mk)))
+                  (define! m :type nm {:t :local-def :kind "Mod" :span (ident-span-at sp ident) :mod mm}))))
       ExternCrate (let [[_ orig ident] k nm (id-name ident) crate (or (some-val orig) nm)]
                     (when-let [r (std-module-res (if (string? crate) crate (id-name crate)))]
                       (swap! *extern* assoc nm r)
                       (define! m :type nm r)))
+      ;; RF13b: a foreign block's types (`extern { type VTable; }`), ForeignTy in the type namespace (rustc's
+      ;; build_reduced_graph_for_foreign_item); its functions and statics are not defined yet
+      ForeignMod (doseq [fi (fv (second k) :items) :let [fk (fv fi :kind)] :when (= 'TyAlias (head fk))]
+                   (let [nm (id-name (fv (second fk) :ident))]
+                     (define! m :type nm {:t :local-def :kind "ForeignTy" :span (ident-span-at (fv fi :span) (fv (second fk) :ident))})))
       Use (let [tree (second k)]
             (if (some #(= "prelude_import" (some-> % (fv :kind) second (fv :item) (fv :path) segs first seg-name)) (fv item :attrs))
               (reset! *prelude* (std-module-res (str/join "::" (map seg-name (segs (fv tree :prefix))))))
@@ -281,6 +316,8 @@
                     (:module rib) (module-get {:mod (:module rib)} ns nm)
                     :else nil))
             (rseq *ribs*))
+      ;; a macro 2.0's own identifier: its definition's module (hygiene.rs' def-site context, the items there)
+      (when-let [dm (get *def-sites* ctxt)] (some-> (localize (std-module-res dm)) (module-get ns nm) localize))
       (module-get {:mod *root*} ns nm)
       (when (= ns :type) (get @*extern* nm))
       (when-let [p @*prelude*] (module-get p ns nm))
@@ -295,9 +332,13 @@
 (defn- first-seg [s ns n-segs]
   (let [nm (seg-name s) ctxt (id-ctxt (fv s :ident))]
     (case nm
-      "crate" {:t :local-def :kind "Mod" :mod *root*}
+      "crate" (if *crate-path* (localize (std-module-res "core")) {:t :local-def :kind "Mod" :mod *root*})
+      "$crate" (if *crate-path* (localize (std-module-res "core")) (lexical ns nm ctxt))
       "self" (if (and (= 1 n-segs) (= ns :value)) (lexical :value "self" ctxt) {:t :local-def :kind "Mod" :mod (normal-module (module-scope))})
-      "super" {:t :local-def :kind "Mod" :mod (parent-module (module-scope))}
+      "super" (let [n (normal-module (module-scope))]
+                (if (and *crate-path* (nil? (:parent n)))
+                  (localize (std-module-res (subs *crate-path* 0 (max 0 (.lastIndexOf ^String *crate-path* "::")))))
+                  {:t :local-def :kind "Mod" :mod (parent-module (module-scope))}))
       "{{root}}" :root
       (lexical ns nm ctxt))))
 
@@ -311,8 +352,8 @@
         (let [s (nth ss i) last? (== i (dec n)) sns (if last? ns :type)
               r (if (zero? i)
                   (first-seg s sns n)
-                  (cond (= :root cur) (get @*extern* (seg-name s))
-                        (module-like? cur) (or (module-get cur sns (seg-name s))
+                  (cond (= :root cur) (localize (get @*extern* (seg-name s)))
+                        (module-like? cur) (or (localize (module-get cur sns (seg-name s)))
                                                (when (and last? (= ns :value) (#{"Enum"} (:kind cur))) nil))
                         :else nil))]
           (cond
@@ -371,12 +412,18 @@
 (defn- report-path [path ns]
   (let [ss (segs path)
         {:keys [res resolved]} (resolve-path path ns)
+
         res (if (and (nil? res) (= ns :value) (== 1 (count ss)))
               nil res)]
     (walk-seg-args path)
     (cond
       (nil? res) (emit! (fv path :span) {:t :err})
       (== resolved (count ss)) (emit! (fv path :span) res)
+      ;; `Self::Variant` in an enum's impl: the variant (resolve_ty_and_res_fully_qualified_call's enum variant)
+      (and (= :self-ty-alias (:t res)) (== 1 resolved) (== 2 (count ss))
+           (when-let [of (:of res)] (#{"Enum"} (:kind of)))
+           (module-get (:of res) ns (seg-name (nth ss 1))))
+      (emit! (fv path :span) (module-get (:of res) ns (seg-name (nth ss 1))))
       :else (emit! (prefix-span path resolved) res))))
 
 (defn walk-generic-args [a]
@@ -628,7 +675,10 @@
         Enum (let [[_ _ g edef] k]
                (with-rib (generics-rib g) (walk-generics g) (walk edef)))
         Impl (let [im (second k) g (fv im :generics)
-                   self {:self-type {:t :self-ty-alias :span (lo-of sp)} :self-ctor {:t :self-ctor :span (lo-of sp)}}]
+                   st (fv im :self_ty)
+                   ;; RF12: the self type's own resolution, for `Self::Variant` (typeck's type-relative variant of an enum)
+                   of (when (= 'Path (head (fv st :kind))) (:res (resolve-path (nth (fv st :kind) 2) :type)))
+                   self {:self-type {:t :self-ty-alias :span (lo-of sp) :of of} :self-ctor {:t :self-ctor :span (lo-of sp)}}]
                (with-rib (with-const-params (generics-rib g))
                  (walk-generics g)
                  (when-let [h (some-val (fv im :of_trait))] (report-path (fv (fv h :trait_ref) :path) :type))
@@ -637,7 +687,8 @@
                    (doseq [it (fv im :items)] (walk-assoc it)))))
         Trait (let [t (second k) g (fv t :generics)]
                 (with-rib (generics-rib g)
-                  (walk-generics g)
+                  ;; with_self_rib around the generics too (a default `Rhs = Self`, late.rs' resolve_item)
+                  (with-rib {:self-type {:t :self-ty-param :span (lo-of sp)}} (walk-generics g))
                   (with-rib {:self-type {:t :self-ty-param :span (lo-of sp)}}
                     (doseq [b (fv t :bounds)] (or (bound-trait b) (walk b)))
                     (doseq [it (fv t :items)] (walk-assoc it)))))
@@ -677,15 +728,17 @@
           (let [s (nth path i) nm (seg-name s)
                 r (if (zero? i)
                     (case nm
-                      "crate" {:t :local-def :kind "Mod" :mod *root*}
+                      ("crate" "$crate") (if *crate-path* (localize (std-module-res "core")) {:t :local-def :kind "Mod" :mod *root*})
                       "self" {:t :local-def :kind "Mod" :mod (normal-module m)}
-                      "super" {:t :local-def :kind "Mod" :mod (parent-module m)}
+                      "super" (if (and *crate-path* (nil? (:parent (normal-module m))))
+                                (localize (std-module-res (subs *crate-path* 0 (max 0 (.lastIndexOf ^String *crate-path* "::")))))
+                                {:t :local-def :kind "Mod" :mod (parent-module m)})
                       "{{root}}" :root
                       (or (some #(module-get {:mod %} :type nm) (take-while some? (iterate (fn [mm] (when (= "Block" (:kind mm)) (:parent mm))) m)))
                           (get @*extern* nm)
                           (when-let [p @*prelude*] (module-get p :type nm))))
                     (cond (= :root cur) (get @*extern* nm)
-                          (module-like? cur) (module-get cur :type nm)
+                          (module-like? cur) (localize (module-get cur :type nm))
                           :else nil))]
             (when r (recur (inc i) r))))))))
 
@@ -701,7 +754,7 @@
                          :when r] [ns r]))
           (when base
             (into {} (for [ns [:type :value :macro]
-                           :let [r (if (= :root base) (when (= ns :type) (get @*extern* last-nm)) (module-get base ns last-nm))]
+                           :let [r (if (= :root base) (when (= ns :type) (get @*extern* last-nm)) (localize (module-get base ns last-nm)))]
                            :when r] [ns r]))))))))
 
 (defn resolve-imports-of [m]
@@ -754,7 +807,7 @@
              *prelude* (atom nil)
              *acc* (atom {})]
     (binding [*extern* (atom {"core" (std-module-res "core")})]
-     (let [root (new-module nil "Mod")]
+     (let [root (new-module nil "Mod" *crate-path*)]
        (binding [*root* root]
          (collect-items root (fv crate :items))
          ;; the imports of every module, to a fixpoint across modules

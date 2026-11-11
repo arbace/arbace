@@ -1,0 +1,246 @@
+(in-ns 'go.arbace.x86i) (go/file "flags.go" :imports [
+
+    ^{:line 3} [bits "math/bits"]])
+
+;; The flags, lazily (AXS55 (a)): the last flag-setting instruction's kind, size, operands and result; a flag computed when
+;; read, RFLAGS materialized when read whole. Flags an instruction leaves undefined (SDM) get one fixed value, the formula
+;; below gives (the lockstep's per-family masks, AX5.3, hide them).
+
+
+(go/const "The kinds.\n"
+  ^{:line 11} [^{:val 0} fRaw iota] ; the flags are raw's bits
+  ^{:line 12} [^{:val 1} fAdd] ; a + b
+  ^{:line 13} [^{:val 2} fAdc] ; a + b + cin
+  ^{:line 14} [^{:val 3} fSub] ; a - b (cmp, neg as 0 - b)
+  ^{:line 15} [^{:val 4} fSbb] ; a - b - cin
+  ^{:line 16} [^{:val 5} fLogic] ; and, or, xor, test: CF = OF = 0, AF 0 (undefined)
+  ^{:line 17} [^{:val 6} fInc] ; a + 1, CF kept (cin)
+  ^{:line 18} [^{:val 7} fDec] ; a - 1, CF kept (cin)
+  ^{:line 19} [^{:val 8} fShl] ; a << b (b in 1..), CF the last bit out, OF (b = 1) MSB(res) ^ CF
+  ^{:line 20} [^{:val 9} fShr] ; a >> b, CF the last bit out, OF (b = 1) MSB(a)
+  ^{:line 21} [^{:val 10} fSar] ; a >>s b, CF the last bit out, OF 0
+  ^{:line 22} [^{:val 11} fMul] ; CF = OF = cin, SF ZF PF from res (undefined), AF 0 (undefined)
+  ^{:line 23} [^{:val 12} fShrd]) ; shrd: as fShr, OF (b = 1) whether the sign changed
+
+
+
+(go/const "RFLAGS bits.\n"
+  ^{:line 28} [^{:val 1} CF (<< 1 0)]
+  ^{:line 29} [^{:val 4} PF (<< 1 2)]
+  ^{:line 30} [^{:val 16} AF (<< 1 4)]
+  ^{:line 31} [^{:val 64} ZF (<< 1 6)]
+  ^{:line 32} [^{:val 128} SF (<< 1 7)]
+  ^{:line 33} [^{:val 256} TF (<< 1 8)]
+  ^{:line 34} [^{:val 512} IF (<< 1 9)]
+  ^{:line 35} [^{:val 1024} DF (<< 1 10)]
+  ^{:line 36} [^{:val 2048} OF (<< 1 11)]
+  ^{:line 37} [^{:val 262144} AC (<< 1 18)]
+  ^{:line 38} [^{:val 2097152} ID (<< 1 21)])
+
+
+
+(go/const ^{:val 2261 :doc "arith are the status flags (CF PF AF ZF SF OF).\n"} arith (bit-or CF PF AF ZF SF OF))
+
+
+(go/type Flags "Flags is RFLAGS: the status flags lazily, the rest in raw.\n" (struct
+    ^{:line 46 :tag uint8} op
+    ^{:line 47 :tag uint8} size
+    ^{:line 48 :tag uint64} a ^uint64 b
+    ^{:line 49 :tag uint64} res
+    ^{:line 50 :tag uint64} cin
+    ^{:line 51 :tag uint64} raw ; the system and control bits always; the status bits when op is fRaw
+    ^{:line 52 :tag uint64} und)) ; status bits the last instruction left undefined beyond its kind's (a rotate's OF, a divide's six)
+
+
+^{:go/end 57} (go/method set [^{:tag (* Flags)} f ^uint8 op ^uint8 size ^uint64 a ^uint64 b ^uint64 res]
+  (set! (values (.-op f) (.-size f) (.-a f) (.-b f) (.-res f) (.-und f)) (values op size a b (bit-and res (mask size)) 0)))
+
+
+
+^{:go/end 74} (go/method Undef "Undef are the status bits the last flag-setting instruction left undefined (the SDM's): the lockstep masks them (AXS55 (a)).\n" ^uint64 [^{:tag (* Flags)} f]
+  (let [u (.-und f)]
+    (switch (.-op f)
+      (case [fLogic]
+        (set! u bit-or AF))
+      (case [fShl fShr fSar fShrd]
+        (set! u bit-or AF)
+        (when (!= (.-b f) 1)
+          (set! u bit-or OF)))
+
+      (case [fMul]
+        (set! u bit-or (bit-or SF ZF AF PF))))
+
+    ^{:line 73} u))
+
+
+^{:go/end 112} (go/method cf ^bool [^{:tag (* Flags)} f]
+  ^{:go/breaks [[3 111]]} (let [m (mask (.-size f))]
+    (switch (.-op f)
+      (case [fRaw]
+        (return (!= (bit-and (.-raw f) CF) 0)))
+      (case [fAdd]
+        (return (< (.-res f) (bit-and (.-a f) m))))
+      (case [fAdc]
+        (return (or (< (.-res f) (bit-and (.-a f) m)) ^:go/paren (and (!= (.-cin f) 0) (== (.-res f) (bit-and (.-a f) m))))))
+      (case [fSub]
+        (return (< (bit-and (.-a f) m) (bit-and (.-b f) m))))
+      (case [fSbb]
+        (return (or (< (bit-and (.-a f) m) (bit-and (.-b f) m)) ^:go/paren (and (!= (.-cin f) 0) (== (bit-and (.-a f) m) (bit-and (.-b f) m))))))
+      (case [fLogic]
+        (return false))
+      (case [fInc fDec fMul]
+        (return (!= (.-cin f) 0)))
+      (case [fShl]
+        (let [n (* (conv uint (.-size f)) 8)]
+          (when (> (conv uint (.-b f)) n)
+            (return false))
+
+          (return (!= (bit-and (>> (.-a f) (- n (conv uint (.-b f)))) 1) 0))))
+      (case [fShr fShrd]
+        (when (> (.-b f) 64)
+          (return false))
+
+        (return (!= (bit-and (>> (bit-and (.-a f) m) (- (.-b f) 1)) 1) 0)))
+      (case [fSar]
+        (let [sh (- (.-b f) 1)]
+          (when (> sh 63)
+            (set! sh 63))
+
+          (return (!= (bit-and (conv uint64 (>> (conv int64 (sx (.-a f) (.-size f))) sh)) 1) 0)))))
+
+    false))
+
+
+^{:go/end 119} (go/method zf ^bool [^{:tag (* Flags)} f]
+  (when (== (.-op f) fRaw)
+    (return (!= (bit-and (.-raw f) ZF) 0)))
+
+  (== (.-res f) 0))
+
+
+^{:go/end 126} (go/method sf ^bool [^{:tag (* Flags)} f]
+  (when (== (.-op f) fRaw)
+    (return (!= (bit-and (.-raw f) SF) 0)))
+
+  (!= (bit-and (.-res f) (signBit (.-size f))) 0))
+
+
+^{:go/end 133} (go/method pf ^bool [^{:tag (* Flags)} f]
+  (when (== (.-op f) fRaw)
+    (return (!= (bit-and (.-raw f) PF) 0)))
+
+  (== (bit-and (bits/OnesCount8 (conv uint8 (.-res f))) 1) 0))
+
+
+^{:go/breaks [[4 146]] :go/end 147} (go/method af ^bool [^{:tag (* Flags)} f]
+  (switch (.-op f)
+    (case [fRaw]
+      (return (!= (bit-and (.-raw f) AF) 0)))
+    (case [fAdd fAdc fSub fSbb]
+      (return (!= (bit-and (bit-xor (.-a f) (.-b f) (.-res f)) 0x10) 0)))
+    (case [fInc]
+      (return (!= (bit-and (bit-xor (.-a f) 1 (.-res f)) 0x10) 0)))
+    (case [fDec]
+      (return (!= (bit-and (bit-xor (.-a f) 1 (.-res f)) 0x10) 0))))
+
+  false)
+
+
+^{:go/end 172} (go/method of ^bool [^{:tag (* Flags)} f]
+  ^{:go/breaks [[3 171]]} (let [sb (signBit (.-size f))]
+    (switch (.-op f)
+      (case [fRaw]
+        (return (!= (bit-and (.-raw f) OF) 0)))
+      (case [fAdd fAdc]
+        (return (!= (bit-and (bit-xor (.-a f) (.-res f)) (bit-xor (.-b f) (.-res f)) sb) 0)))
+      (case [fSub fSbb]
+        (return (!= (bit-and (bit-xor (.-a f) (.-b f)) (bit-xor (.-a f) (.-res f)) sb) 0)))
+      (case [fInc]
+        (return (== (.-res f) sb)))
+      (case [fDec]
+        (return (== (.-res f) (- sb 1))))
+      (case [fShl]
+        (return (!= (!= (bit-and (.-res f) sb) 0) (.cf f))))
+      (case [fShr]
+        (return (!= (bit-and (.-a f) sb) 0)))
+      (case [fShrd]
+        (return (!= (bit-and (bit-xor (.-a f) (.-res f)) sb) 0)))
+      (case [fMul]
+        (return (!= (.-cin f) 0))))
+
+    false))
+
+
+
+^{:go/end 196} (go/method Get "Get is RFLAGS.\n" ^uint64 [^{:tag (* Flags)} f]
+  (let [v (bit-and-not (.-raw f) arith)]
+    (when (.cf f)
+      (set! v bit-or CF))
+
+    (when (.pf f)
+      (set! v bit-or PF))
+
+    (when (.af f)
+      (set! v bit-or AF))
+
+    (when (.zf f)
+      (set! v bit-or ZF))
+
+    (when (.sf f)
+      (set! v bit-or SF))
+
+    (when (.of f)
+      (set! v bit-or OF))
+
+    (bit-or v 2)))
+
+
+
+^{:go/end 203} (go/method Put "Put sets RFLAGS (the bits user mode may change).\n" [^{:tag (* Flags)} f ^uint64 v ^uint64 writable]
+  (let [cur (.Get f)]
+    (set! (.-raw f) (bit-or (bit-and-not cur writable) (bit-and v writable) 2))
+    (set! (values (.-op f) (.-und f)) (values fRaw 0))))
+
+
+
+
+^{:go/end 247} (go/method cond "cond is the condition code's truth (0 O, 1 NO, 2 B, 3 AE, 4 E, 5 NE, 6 BE, 7 A, 8 S, 9 NS, 10 P, 11 NP, 12 L, 13 GE, 14 LE,\n15 G).\n" ^bool [^{:tag (* Flags)} f ^uint8 cc]
+  (let [^bool r (zero bool)]
+    (switch (>> cc 1)
+      (case [0]
+        (set! r (.of f)))
+      (case [1]
+        (if (== (.-op f) fSub)
+          (set! r (< (bit-and (.-a f) (mask (.-size f))) (bit-and (.-b f) (mask (.-size f)))))
+
+          (set! r (.cf f))))
+
+      (case [2]
+        (set! r (.zf f)))
+      (case [3]
+        (if (== (.-op f) fSub)
+          (set! r (<= (bit-and (.-a f) (mask (.-size f))) (bit-and (.-b f) (mask (.-size f)))))
+
+          (set! r (or (.cf f) (.zf f)))))
+
+      (case [4]
+        (set! r (.sf f)))
+      (case [5]
+        (set! r (.pf f)))
+      (case [6]
+        (if (== (.-op f) fSub)
+          (set! r (< (conv int64 (sx (.-a f) (.-size f))) (conv int64 (sx (.-b f) (.-size f)))))
+
+          (set! r (!= (.sf f) (.of f)))))
+
+      (case [7]
+        (if (== (.-op f) fSub)
+          (set! r (<= (conv int64 (sx (.-a f) (.-size f))) (conv int64 (sx (.-b f) (.-size f)))))
+
+          (set! r (or (.zf f) (!= (.sf f) (.of f)))))))
+
+
+    (when (!= (bit-and cc 1) 0)
+      (return (not r)))
+
+    ^{:line 246} r))

@@ -5576,3 +5576,101 @@ file of the dg corpora above), `bin/ci check --record` and `check --aot --record
   standard; gcc also drops or downgrades it for these two options. No file of the C23 corpora uses them today.
   - (a) Read both options in `arbace.repr.c.host`'s file options and pass them to the checker (`:no-implicit-int`). Cost: half an hour.
   - (b) Leave it. *Recommended: (a)* with the next checker change, so the rule is gcc's whole.
+
+## Decided (the user, 2026-11-09, about 14:20): CS296 (b), CS297 (a)
+
+- **CS296 (b):** the extra `conflicting types for 'f'` on gnu23-attr-syntax-2's and -3's line 12 stays.
+- **CS297 (a):** `-Wno-implicit-int` and `-Wno-error=implicit-int` read from the dg options and passed to the checker.
+
+With them, the Mac VM's request (report 244, item 4): ci's builder and `#pragma pack(push, n)` inside a function body, and GNU's
+`ms_struct` attribute, laid out as gcc does.
+
+## As built: CS296 (b), CS297 (a), the ms_struct request (2026-11-09, branch `c-props4`)
+
+On `c-props4` from `mac/next` 6c3c87c02, main's stage 0 (`ARBACE_HOST_EXE`), musl's forms and the runtime cache copied from
+`c-props3`'s worktree (the same key) for the runs made before the repr/c change below.
+
+- **CS296 (b):** nothing changes.
+- **CS297 (a):** `arbace.repr.c.host`'s file options give `:no-implicit-int` for `-Wno-implicit-int` (gcc: no diagnostic) and
+  `-Wno-error=implicit-int` (a warning, not the checker's); `annot`'s dump passes it to `check-unit`, and CS294's diagnostic
+  (`type of 'Y' defaults to 'int'`) is off under it as under `-fpermissive`. gcc 15.2 by hand on `int f(x) { return x; }` at
+  `-std=c17`: an error, a warning with `-fpermissive` and `-Wno-error=implicit-int`, nothing with `-Wno-implicit-int`.
+  `test/c/judge_test.ae`'s `implicit-int-options` (file `test/c/judge/implicit-int-param.c`) holds the four cases. No dg file
+  of the corpora uses the options, so no record moves.
+- **`#pragma pack` in a body:** already gcc's since CS290 (a) (5728fe111, this morning): the report's probe gives 9 here as
+  gcc, at file scope and in a body, nested in a block with pop restoring (the report was made on the VM's earlier tree).
+  `test/c/run/pack-in-body.c` holds it.
+- **`ms_struct`:** `arbace.c.check`'s `ms-layout!`, for a structure whose attributes name `ms_struct` first (`gcc_struct`, the
+  default here, undoes it; of the two the first written wins, as gcc ignores the other), from gcc's manual (x86 type attributes,
+  `-mms-bitfields`'s rules; no gcc source read): adjacent bit-fields share a unit of their type's size while the types' sizes agree
+  and the next fits in what is left; else the unit ends and a new one starts at the type's alignment (1 when packed, capped by
+  `#pragma pack`, raised by `aligned`); a bit-field's type aligns the record even unnamed (not when packed); a zero-width
+  bit-field after a bit-field ends its unit and aligns the record and the next member to its type (capped by the pack), after
+  anything else it is ignored. A union under `ms_struct`: its unnamed bit-fields align it too. Each member's `:off` is its
+  unit's byte, `:bitoff` within the unit, as the builder and cf2g read them: no builder change. `-mms-bitfields` itself is not
+  read (CS298 below). doc/c/SPEC.md §12 says so.
+  `test/c/run/ms-struct.c`: 20 structures and a union (the manual's five examples on x86-64's sizes, runs of mixed sizes, packed,
+  `#pragma pack(1)` and `(2)`, `_Bool`, an aligned member, gcc_struct), sizes, alignments, offsets and each bit-field's first bit,
+  checking itself (abort on a difference) against gcc 15.2's layout measured by hand; before the change 23 differences, after 0.
+  Both programs added to ci-run (`test/c/run/README`), gcc's runs recorded (`bin/ci record-ref --corpus ci-run --only`: the two
+  entries added, the others' equal), their rows in `test/c/check-linux-amd64.edn` (`bin/ci check --corpus ci-run --record`:
+  19 of 19 pass) and `check-aot-linux-amd64.edn` (`bin/ci check --aot --only` the two: pass, the rows added by hand in place).
+
+| command | result |
+|---|---|
+| `bin/ci run test/c/run/ms-struct.c` (before / after) | 23 differences, abort / its output gcc's byte for byte |
+| `bin/ci check --corpus ci-run --record` | 19 programs, pass 19 (99 s, 1.5 GB) |
+| `bin/ci check --aot --only` the two | pass 2 (137 s, 0.9 GB) |
+| `env CI_JOBS=2 CI_LINK_CHECK=1 bin/ci check --only test/c/essential-check.txt` | 0 failing, the controls differ (753 s, 1.4 GB) |
+| `env CI_JOBS=2 bin/ci check --aot --only test/c/essential-aot.txt` | 0 failing, the controls differ (535 s, 1.8 GB) |
+| `bin/ci dg --essential` (with the repr/c change) | 92 of 92, the control differs |
+| `bin/repr-c check --c23` | exit 0, the controls refused |
+| judge_test's `implicit-int-options` and `extension-lines-by-unit` (by `arbace.test/test-vars`; the whole judge-test needs musl read again) | pass |
+| `bin/reap --record` | C eval 2151 to 2153 passes, AOT 2159 to 2161 (`test/reap/matrix.edn`) |
+| `bin/crops-score --record`, `--judge --strict` | C's cells move (`test/crops/scores.edn`); 11 crops, 0 problems |
+
+`bin/crops-score --crop c` before (mac/next) and after: 96.0% (99.6% without by design), maturity 100.0, independence 99.7: the
+same to the shown digit (eval 2151 to 2153 and AOT 2159 to 2161 passes; the two new programs, like all of ci-run, have no verdict of
+their own and are judged by gcc's record).
+
+### Rekeys
+
+Embedded (gate_key, the whole `--full` reruns): `arbace/c/check.ae`, `arbace/repr/c/host.ae`, `arbace/repr/c/annot.ae`. The
+repr/c change moves the musl forms' key (CS295 (b)): `bin/ci musl read` once (about 56 minutes at `CI_THREADS=2`, the night's or
+judge-test's ensure). Outside: `test/c/run/`, `test/c/judge/implicit-int-param.c`, `test/c/judge_test.ae`, the records.
+
+### The night's commands
+
+`bin/ci musl read` (or `bin/ci judge-test`, whose ensure reads it: expected 107 tests, 0 failures), then the gate's C steps;
+`bin/ci check --aot --corpus ci-run` (whole, expected 19 of 19 as recorded); no dg record moves.
+
+### Proposed (c-props4)
+
+- **CS298 `-mms-bitfields`.** gcc's option makes every structure `ms_struct` (and `gcc_struct` undoes it per type). ci reads only
+  the attribute. (a) Read the option in `arbace.repr.c.host`'s file options and default `:ms` from it; half an hour, the musl key
+  moves again. (b) Leave it until a test or a program uses it (none of the corpora does; Python's ctypes asks the attribute).
+  *Recommended: (b).*
+
+## As built: musl's index and its lock (2026-11-10, branch `c-musl-lock`, from `c-props4`)
+
+Night 10's c-check recorded about 2,000 false fails (`undefined function __libc_start_main`, status 139): next's
+`.tmp/ci-musl/forms/index.edn` listed 936 of the cache's 1,331 sources (.tmp/night10/DIAGNOSIS.md, section 1). Cause: g-gate1's
+concurrent steps each ran `bin/ci musl ensure` with no lock, `arbace.c.musl/index` was "made once and kept" (it never looked at
+the cache again once index.edn existed), and the next `musl read` found the key fresh and kept the stale index.
+- `arbace/c/musl.ae`, `index`: the kept index is used only when its keys equal the sources the cache holds (the `.c.ae` files of
+  `sources`); else it is made again from the cache, written through a temporary name and renamed. Chosen over deleting index.edn in
+  `read-all`: it repairs an index damaged by anything (a crash, a hand copy), not only by a read in this process, and costs one
+  directory listing per use.
+- `bin/lib/ci/musl`: `read` holds an flock on `FORMS.lock` (beside the cache) around prepare, the key check, the `rm -rf`, the
+  read, the index and the key write, so a second reader waits and finds the cache fresh; `fresh()` also needs index.edn and as many
+  units in it as the cache holds (cheap: a count of ` {:defs ` against the `.c.ae` files). A stale index alone does not reread the cache
+  (`keyok` is the key's check): `read-all` reads what is missing and `index` is made again. `ensure` takes no lock itself (it calls
+  `read`; flock is not reentrant).
+- `test/c/musl-lock-test.bash`: on a copy of a complete cache, a partial index (one unit), a missing index, and two readers (the
+  first holds the lock by `CI_MUSL_HOLD`; the second must wait and end after it).
+- Rekey: `arbace/c/musl.ae` is in the forms key, so one musl read, as c-props4's change to repr/c already asks (no second one on
+  top of it).  `arbace/c/musl.ae` is also in `gate_key` (arbace/c, embedded), as c-props4's changes already are.
+- Proved on the branch (a copy of main's complete cache, its key written as the checkout's, index corrupted to one unit): `bin/ci musl
+  fresh` fails, `ensure` repairs it without rereading (74 s), `bin/ci run` of torture-execute/20000314-1.c exits 0; `bin/ci check --only`
+  four torture files pass; c-check-essential's command exits 0; `bin/reap` 41 of 44, 0 problems; `bin/crops-score --judge --strict` 0 problems;
+  `test/c/musl-lock-test.bash` ok (the second reader waited 153 s behind the first's lock, held 6 s: the index build ran after it).

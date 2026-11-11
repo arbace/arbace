@@ -1,0 +1,83 @@
+(ns asm.x86i-decode-judge
+  "bin/repr-asm x86i-decode-check's judgment (AX5.5, AXS70 (b); doc/asm/AMD64.md §10): x86i's Go decoder held to
+  arbace.asm.amd64.decode, the port it was written again from, over the decode check's corpora: every encoding the `rt` level
+  meets in MC/X86 (64-bit runs) and every byte string of MC/Disassembler/X86's 64-bit runs, each decoded alone by `x86i
+  decode-hex` against the instruction, MCInst operands and lock/rep/repne arbace.asm.amd64.decode gives the same bytes (or its
+  refusal, `!invalid`).
+
+  Rows `[ID RESULT DETAIL]`, ID xrt/FILE or xdis/FILE (one a corpus file), against test/asm/x86i-decode-results-amd64.edn: :pass
+  (every instruction equal), :encoding-deferred (the rest refused by x86i's decoder as an encoding it does not read yet: EVEX,
+  XOP, REX2, 3DNow!, VEX's maps 5-7; a class of test/asm/divergences-x86i.edn), :decode (a difference: failing). With RECORD
+  the rows are rewritten (refused from a run with a failure). The controls: a file's texts held to another file's expected
+  decodings, line by line, must differ."
+  (:require [arbace.string :as str]))
+
+(def header
+  (str ";; x86i's decode check (bin/repr-asm x86i-decode-check; doc/asm/AMD64.md §10, AX5.5, AXS70 (b)): x86i's Go decoder against\n"
+       ";; arbace.asm.amd64.decode over the decode check's MC/X86 met encodings (xrt/FILE) and MC/Disassembler/X86's 64-bit byte\n"
+       ";; strings (xdis/FILE), each decoded alone: :pass, else a class of test/asm/divergences-x86i.edn. Written by\n"
+       ";; `bin/repr-asm x86i-decode-check --record`. Read with the Clojure reader.\n"))
+
+(defn- lines-of [path] (vec (for [l (str/split-lines (slurp path)) :when (seq l)] (str/split l #"\t" -1))))
+
+(defn judge-lines
+  "Expected lines [ID HEX TEXT] beside x86i's [ID HEX TEXT] (the same order): [RESULT DETAIL] for one file's lines."
+  [exp got]
+  (let [pairs (map vector exp got)
+        bad (first (for [[[_ h want] [_ gh text]] pairs
+                         :when (not (or (= text want) (= text "!unsupported")))]
+                     (str h ": x86i " text (when (not= h gh) (str " (of " gh ")")) ", arbace.asm.amd64.decode " want)))
+        n (count exp)
+        deferred (count (filter (fn [[[_ _ want] [_ _ text]]] (and (= text "!unsupported") (not= want text))) pairs))]
+    (cond (not= (count exp) (count got)) [:decode (str (count got) " decodings of " n " lines")]
+          bad [:decode bad]
+          (pos? deferred) [:encoding-deferred (str (- n deferred) " of " n " equal; " deferred " in encodings x86i does not read yet")]
+          :else [:pass (str n " instructions")])))
+
+(defn rows [expected got]
+  (let [g (group-by first (lines-of got))]
+    (vec (for [[id ls] (sort-by key (group-by first (lines-of expected)))]
+           (into [id] (judge-lines ls (get g id [])))))))
+
+(defn main [results expected got classes-path record]
+  (let [run (rows expected got)
+        old (if (.exists (java.io.File. ^String results)) (read-string (slurp results)) [])
+        oldm (into {} (map (fn [[i c]] [i c]) old))
+        classes (set (map :id (read-string (slurp classes-path))))
+        problems (atom [])
+        tot (fn [k] (reduce + (for [[_ _ dt] run :let [m (re-find #"(\d+) (?:of (\d+) equal|instructions)" dt)] :when m]
+                                (Long/parseLong (if (= k :all) (or (nth m 2) (nth m 1)) (nth m 1))))))]
+    (println (str "repr-asm x86i-decode-check: " (count (filter #(= :pass (second %)) run)) " of " (count run) " files pass, "
+                  (tot :eq) " of " (tot :all) " instructions equal; " (pr-str (into (sorted-map) (dissoc (frequencies (map second run)) :pass)))))
+    (doseq [[i c dt] run]
+      (cond (= c :decode) (swap! problems conj (str "failing: " i " " dt))
+            (and (not= c :pass) (not (classes c))) (swap! problems conj (str "unclassed: " i " " (name c) " " dt))))
+    (if (and (seq record) (empty? @problems))
+      (do (spit results (str header "[\n" (apply str (map (fn [r] (str (pr-str r) "\n")) run)) "]\n"))
+          (println (str "repr-asm: recorded " (count run) " rows into " results)))
+      (do (doseq [[i c] run :let [o (oldm i)]]
+            (cond (nil? o) (swap! problems conj (str "not recorded: " i))
+                  (and (= o :pass) (not= c :pass)) (swap! problems conj (str i ": " (name c) ", recorded :pass"))))
+          (doseq [[i] old :when (not (some #(= i (first %)) run))] (swap! problems conj (str "recorded, not run: " i)))))
+    (doseq [p @problems] (println (str "FAIL: " p)))
+    (when (empty? @problems) (println "repr-asm x86i-decode-check: ok"))
+    (when (seq @problems) (System/exit 1))))
+
+(defn control
+  "SUBJECT's x86i texts held to REFERENCE's expected lines (by position): `differs` as it must, `same`, or `left`."
+  [expected got subj ref]
+  (let [e (get (group-by first (lines-of expected)) ref) g (get (group-by first (lines-of got)) subj)]
+    (if (or (empty? e) (empty? g))
+      "left"
+      (let [n (min (count e) (count g))]
+        (if (= :pass (first (judge-lines (take n e) (take n g)))) "same" "differs")))))
+
+(defn controls [expected got file]
+  (let [bad (atom 0)]
+    (doseq [l (str/split-lines (slurp file)) :let [l (str/trim l)] :when (and (seq l) (not (str/starts-with? l "#")))]
+      (let [[id subj ref] (str/split l #"\s+")
+            v (control expected got subj ref)]
+        (if (= v "differs")
+          (println (str "control " id ": fails as it must"))
+          (do (swap! bad inc) (println (str "FAIL: control " id ": " v))))))
+    (when (pos? @bad) (System/exit 1))))

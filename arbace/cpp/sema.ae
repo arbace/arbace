@@ -39,6 +39,14 @@
 ;; CX12 (second slice): the checker's rules that the code generator does not apply (on with *on-refusal*: a program the
 ;; checker reads may be ill-formed; the code generator's programs are not, and its analysis stays as it was)
 (defn checking? [] (some? *on-refusal*))
+;; CP329 (a): the dg read's time cap for one file (arbace.repr.cpp.diag binds it: System/nanoTime's deadline, 0 none); past it
+;; every analysis step throws {:cpp/timeout true}, which the refusals' handlers may catch, so the analysis unwinds with nothing
+;; more done and the reader, seeing the deadline passed, reports the file's read as :timeout
+(def ^:dynamic *deadline* 0)
+(defn tick! []
+  (let [d (long *deadline*)]
+    (when (and (pos? d) (> (System/nanoTime) d))
+      (throw (ex-info "codegen: the read's time cap passed" {:cpp/timeout true})))))
 ;; the function templates of the call being resolved whose deduction gave no candidate: {:sure-drops n :unsure-drops m}
 (def ^:dynamic *drops* nil)
 ;; the access of the class member being declared (the access-specifier before it)
@@ -71,9 +79,19 @@
           :path (:path parent [])}
          more))
 
+(defn ucn-name
+  "A name with its universal character names as their characters ([lex.charset]/2, [lex.name]: `\\u00C1`, `\\u00c1` and
+  `\\U000000C1` one identifier, as clang's IdentifierInfo holds it); a name without a backslash itself (cpp-route: g++.dg's
+  other/ucnid-1.C)."
+  ^String [^String nm]
+  (if (and nm (>= (.indexOf nm "\\") 0))
+    (str/replace nm #"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})"
+                 (fn [[_ a b]] (String. (Character/toChars (Integer/parseInt ^String (or a b) 16)))))
+    nm))
+
 (defn- enter! [scope ^String nm e]
   (when nm
-    (let [^java.util.HashMap m (:names scope)]
+    (let [^java.util.HashMap m (:names scope) nm (ucn-name nm)]
       (.put m nm (conj (or (.get m nm) []) e))))
   e)
 
@@ -90,7 +108,7 @@
   ([scope ^String nm ^java.util.IdentityHashMap seen]
    (when-not (.containsKey seen (:names scope))
      (.put seen (:names scope) true)
-     (let [es (.get ^java.util.HashMap (:names scope) nm)
+     (let [es (.get ^java.util.HashMap (:names scope) (ucn-name nm))
            es (if (= :ns (:kind scope)) (filterv #(< (long (or (:pos %) -1)) (long *cutoff*)) es) es)]
        (concat es (doall (mapcat #(own-names % nm seen) (:usings scope))))))))
 
@@ -129,7 +147,7 @@
   ([id ^String nm] (class-lookup id nm false))
   ([id ^String nm unqualified?]
    (let [c (abi/cls id)
-         own (seq (.get ^java.util.HashMap (:names (:scope c)) nm))]
+         own (seq (.get ^java.util.HashMap (:names (:scope c)) (ucn-name nm)))]
      (if own
        (mapv (fn [e] [id e]) own)
        (let [found (keep #(seq (class-lookup (:cls %) nm unqualified?)) (if unqualified? (remove :dependent (:bases c)) (:bases c)))
@@ -449,13 +467,25 @@
   (when (and (string? s) (:ctad @hooks))
     (let [f (try (ct/parse-type (strip-type-attrs s)) (catch Exception _ nil))
           [f cv] (loop [f f cv #{}] (if (and (seq? f) (#{'const 'volatile} (first f))) (recur (second f) (conj cv (first f))) [f cv]))]
+      ;; (CP327 (a): a member template named through a class, `T<double>::AFoo`, [temp.res.general]/1 and
+      ;; [dcl.type.simple]/3: the nested-name-specifier's class resolved, then its member found by class member lookup)
+      (if (and (seq? f) (= 'cpp/scope (first f)) (symbol? (last f)) (> (count f) 2))
+        (let [pre (if (= 3 (count f)) (second f) (apply list (butlast f)))
+              t (try (abi/unq (resolve-type-form scope pre)) (catch arbace.lang.ExceptionInfo _ nil))]
+          (when (abi/class? t)
+            (let [nm (name (last f))
+                  es (or (seq (map second (class-lookup (:id t) nm false)))
+                         (try (lookup-qualified (:scope (abi/cls-of t)) [nm] false) (catch arbace.lang.ExceptionInfo _ nil)))]
+              (when (and (seq es) (nil? (type-entity es)))
+                (when-let [e (first (filter #(and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) es))]
+                  [(:id e) cv])))))
       (when (and (symbol? f) (not (builtin-syms f)) (not= 'auto f))
         (let [parts (name-parts f)
               es (try (if (= 1 (count parts)) (lookup scope (first parts)) (lookup-qualified scope parts))
                       (catch arbace.lang.ExceptionInfo _ nil))]
           (when (and (seq es) (nil? (type-entity es)))
             (when-let [e (first (filter #(and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) es))]
-              [(:id e) cv])))))))
+              [(:id e) cv]))))))))
 
 (defn ctad-compound!
   "CP311 (a), the checker: a variable's type `s` that does not resolve and holds a placeholder for a deduced class type
@@ -1130,7 +1160,15 @@
                                            (let [t la]
                                              (cond (= :enum (:k t)) (when-not (:name (get @abi/*enums* (:id t))) (swap! abi/*enums* assoc-in [(:id t) :name] nm) t)
                                                    (abi/class? t) (when-not (:name (abi/cls (:id t))) (abi/update-cls! (:id t) assoc :name nm) t)))))]
-                               (mode-type n (or t0 own (resolve-type scope qt)))))
+                               (mode-type n (or t0 own
+                                                (try (resolve-type scope qt)
+                                                     ;; (CP332 (a), the checker: __type_pack_element's index refused, the error
+                                                     ;; reported in the analysis' order at the alias, the declaration going on)
+                                                     (catch arbace.lang.ExceptionInfo x
+                                                       (if (and (checking?) (= :pack-element (:codegen/refused (ex-data x))))
+                                                         (do (swap! *order* conj [:cx-error (ex-info (.getMessage x) (update (ex-data x) :cx/node #(or % n)))])
+                                                             abi/int*)
+                                                         (throw x))))))))
                        :pos (long (or (:_b n) 0))}
                 ;; (CX12, the checker: a member typedef's access)
                 (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
@@ -1173,7 +1211,7 @@
                                                              nil
                                                              (catch arbace.lang.ExceptionInfo x x))))))
                                                 es))]
-                        (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))]))))
+                        (swap! *order* conj [:cx-error (ex-info (.getMessage ^Throwable x) (assoc (ex-data x) :cx/node n))]))))
                   ;; (CP323 (a): `using B::B;` inherits B's constructors, [namespace.udecl]/3 and [class.inhctor.init]: the
                   ;; class marked with the bases' names, their constructors candidates of its initializations, ctor-init)
                   (when (and (:cls scope) (>= (count parts) 2)
@@ -1382,6 +1420,7 @@
         c))))
 
 (defn const-int [scope n]
+  (tick!)
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
     (letfn [(ev [e]
               (case (:op e)
@@ -1389,10 +1428,13 @@
                 ;; G5c: the value converted to the cast's type ([conv.integral]/3: modulo 2^N for an unsigned one), so that
                 ;; libstdc++'s __numeric_traits_integer<unsigned>::__is_signed, (_Value)(-1) < 0, is false
                 :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) (ce-wrap (:ty e) v) (fail :const "constant cast")))
-                :unop (let [v (ev (:e e))] (case (:o e) "-" (- (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
+                ;; (CP325 (a): 64-bit arithmetic wraps, as the unsigned types' modulo 2^N does; a signed overflow is the
+                ;; program's error, which this evaluation does not judge -- parse/enum4.C's 9223372036854775807ULL * 2 + 1 had
+                ;; thrown Java's ArithmeticException, a crash of the analysis)
+                :unop (let [v (ev (:e e))] (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
                 :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))
                              u (and (abi/integral? (:ty e)) (not (abi/signed? (:ty e))))
-                             r (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b)
+                             r (case (:o e) "+" (unchecked-add a b) "-" (unchecked-subtract a b) "*" (unchecked-multiply a b)
                                      "/" (if u (Long/divideUnsigned a b) (quot a b)) "%" (if u (Long/remainderUnsigned a b) (rem a b))
                                      "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
                                      "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
@@ -1464,6 +1506,7 @@
   ([e] (binding [*ce-steps* (atom 0)] (ce-eval e {})))
   ([e env]
    (when (> (long (swap! *ce-steps* inc)) 1000000) (not-constant "too many steps"))
+   (when (zero? (rem (long @*ce-steps*) 4096)) (tick!))
    (let [ev #(ce-eval % env)
          t (:ty e)]
      (case (:op e)
@@ -1552,7 +1595,12 @@
                (when (and (not (:constexpr f)) (not (:cls f)) (not (:implicit f)) (not (:inline f)) (not (:tinst f))
                           (:node f) (not (header-node? (:node f))) (not (str/starts-with? (str (:name f)) "__")))
                  (ce-top-sure! "call to non-constexpr function '" (:name f) "'"))
-               (when (or (not (:constexpr f)) (:obj e) (and (:cls f) (not (:static f)))) (not-constant "a call of " (:name f)))
+               ;; (a constexpr member function of an empty class, its object nothing it can read: evaluated without it,
+               ;; integral_constant's operator value_type() of `__is_invocable<...>{}`; CP332 (a))
+               (when (or (not (:constexpr f))
+                         (and (or (:obj e) (and (:cls f) (not (:static f))))
+                              (not (and (:cls f) (not (:static f)) (abi/empty-class? (:cls f))))))
+                 (not-constant "a call of " (:name f)))
                (when-not (:tbody f) (when (:body f) (analyze-fn! (:id f))))
                (let [f (fnd (:fn e))
                      ;; (an argument of an empty class, a tag such as true_type: a value nothing reads; G4)
@@ -1856,6 +1904,7 @@
     (second (first (sort-by first cands)))))
 
 (def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
+(def ^:dynamic *conv-tmpl-cache* nil) ; atom {[class arg-type cat value op] bool}: a converting constructor template converts
 
 (defn ics
   "The implicit conversion sequence of the argument `e` (a typed expression or {:op :init-list}) to the parameter type `p`."
@@ -1870,6 +1919,8 @@
                                   ;; [over.ics.list]/5: the worst conversion of an element
                                   (when (every? some? rs) {:rank (reduce max 0 (map #(long (:rank %)) rs))}))
             (and (abi/class? pt) (or (aggregate? pt) (seq (ctor-candidates (:id pt))))) {:rank 3}
+            ;; (a non-const lvalue reference binds no list's temporary, [over.ics.list]/9 with [dcl.init.ref]/5)
+            (and (= :ref (:k p)) (not (:c pt)) (not (and (= 1 (count (:items e))) (lv? (first (:items e)))))) nil
             (and (abi/scalar? pt) (<= (count (:items e)) 1)) {:rank (if (seq (:items e)) (or (std-rank (rv (first (:items e))) (:ty (rv (first (:items e)))) pt) 9) 0)}
             :else nil)
       (abi/ref? p)
@@ -1903,13 +1954,28 @@
         *no-user* nil
         ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
         (and (class-id at) (conv-for (class-id at) (abi/unq pt) false (:c at))) {:rank 3}
-        :else (when (some (fn [cid] (let [f (fnd cid)]
-                                      (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
-                                           (not (let [p0 (first (:ps (:ty f)))] (and (abi/ref? p0) (= (class-id (:to p0)) (:id pt)))))
-                                           (<= (- (count (:ps (:ty f))) (count (filter some? (:defaults f)))) 1)
-                                           (let [r (binding [*no-user* true] (ics e (first (:ps (:ty f)))))] (and r (< (long (:rank r)) 3))))))
-                          (ctor-candidates (:id pt)))
-                {:rank 3}))
+        :else (let [converts? (fn [cid] (let [f (fnd cid)]
+                                          (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
+                                               (not (let [p0 (first (:ps (:ty f)))] (and (abi/ref? p0) (= (class-id (:to p0)) (:id pt)))))
+                                               (<= (- (count (:ps (:ty f))) (count (filter some? (:defaults f)))) 1)
+                                               (let [r (binding [*no-user* true] (ics e (first (:ps (:ty f)))))] (and r (< (long (:rank r)) 3))))))]
+                (when (or (some converts? (ctor-candidates (:id pt)))
+                          ;; (a converting constructor template's specialization for the argument, [over.match.copy]/1.1 with
+                          ;; [temp.deduct.call]: std::basic_string's C++17 `template<typename = _RequireAllocator<_Alloc>>
+                          ;; basic_string(const _CharT*, const _Alloc& = _Alloc())`, a literal given to a const string&; tried
+                          ;; only when no constructor that is no template converts; cpp-route)
+                          (when-let [h (:ctor-candidates @hooks)]
+                            (when-not (= :init-list (:op e))
+                              ;; (by the class and the argument's type, category and, for a null pointer constant, value: a
+                              ;; program asks the same conversion many times, and each asks deduction and instantiation)
+                              (let [k [(:id pt) (:ty e) (:cat e) (when (= :int (:op e)) (:v e)) (:op e)]
+                                    c *conv-tmpl-cache*]
+                                (if-some [v (when c (get @c k))]
+                                  v
+                                  (let [v (boolean (some converts? (binding [*no-user* true] (h (:id pt) [e]))))]
+                                    (when c (swap! c assoc k v))
+                                    v))))))
+                  {:rank 3})))
       (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false (:c at))) {:rank 3})
       (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
       :else (let [r (std-rank e (:ty (rv e)) pt)
@@ -2042,11 +2108,20 @@
   (let [ps (:ps (:ty f))]
     (vec (concat
           (map-indexed (fn [i a] (if (< i (count ps)) (init-for (nth ps i) a ctx :copy) (let [a (rv a)]
-                                                                                           (when (abi/class? (:ty a)) (fail :varargs "a class through ..."))
+                                                                                           ;; [expr.call]/12: a class argument through the ellipsis is
+                                                                                           ;; conditionally-supported; clang passes a trivially copyable and
+                                                                                           ;; destructible one by value as a parameter of its type (the psABI's
+                                                                                           ;; classes, the registers counted on), refuses the others
+                                                                                           ;; (err_cannot_pass_non_trivial_c_object_to_vararg)
+                                                                                           (when (abi/class? (abi/unq (:ty a)))
+                                                                                             (let [id (:id (abi/unq (:ty a)))]
+                                                                                               (when-not (and (trivial-copy? id) (trivial-dtor? id)) (fail :varargs "a non-trivial class through ..."))))
+                                                                                           (if (abi/class? (abi/unq (:ty a)))
+                                                                                             (assoc (init-for (abi/unq (:ty a)) a ctx :copy) :va-ty (abi/unq (:ty a)))
                                                                                            (let [t (abi/unq (:ty a))]
                                                                                              {:i :expr :e (cond (= :float (abi/bn t)) (convert-scalar a abi/double* false)
                                                                                                                 (and (abi/integral? t) (not= t (promote-type t))) (convert-scalar a (promote-type t) false)
-                                                                                                                :else a)}))))
+                                                                                                                :else a)})))))
                        args)
           (for [i (range (count args) (count ps))]
             (let [d (nth (:defaults f) i nil)]
@@ -2247,6 +2322,29 @@
                (throw x))))
       :else (ctor-init id args ctx)))))
 
+(defn- inheriting-ctor!
+  "CP330 (a): the constructor of class `id` that inherits the base constructor `bfid` ([namespace.udecl]/3,
+  [class.inhctor.init]), made once: the base constructor's parameters (and default arguments), its definition the base
+  subobject initialized by `bfid` with the parameters forwarded and the other subobjects default-initialized (as an
+  implicit default constructor's, their default member initializers), analyze-implicit!'s :inh-from. Mangled as Itanium
+  §5.1.4.3's inheriting constructor (CI1/CI2 and the base's name, abi/unqualified-name), as clang emits it at -O0. It is no
+  member of the class's :ctors: the base constructor stays the candidate overload resolution sees."
+  [id bfid]
+  (or (get-in (abi/cls id) [:inheriting bfid])
+      (let [b (fnd bfid)
+            c (abi/cls id)
+            fid (next-id)
+            f (merge {:id fid :name (:name c) :kind :ctor :cls id :ty (:ty b) :implicit :ctor :inline true
+                      :path (conj (vec (:path c)) [:cls id]) :scope (:scope c) :def-scope (:scope c) :linkage :cpp
+                      :param-names (mapv (fn [_] nil) (:ps (:ty b))) :defaults (vec (:defaults b)) :pos -1
+                      :inh-from bfid :inh-base (:cls b) :access (:access b)}
+                     (when (:tinst b) {:tinst (:tinst b)})
+                     (select-keys b [:explicit :noexcept :constexpr]))]
+        (swap! *fns* assoc fid f)
+        (abi/update-cls! id assoc-in [:inheriting bfid] fid)
+        (swap! *order* conj [:fn fid])
+        fid)))
+
 (defn- ctor-init
   "A constructor of class `id` chosen for the arguments `args` by overload resolution, its call's initializer. `nested`:
   the second phase of [over.match.list] with one element itself a list, where a conversion to X by a user-defined
@@ -2258,14 +2356,18 @@
         ;; [over.match.funcs]/8-9: B's constructors but its copy and move constructors and a default constructor), its
         ;; own declared beside them; one chosen is checked for its access as B's member ([namespace.udecl]/19) and the
         ;; initialization left unanalyzed, the object declared all the same)
-        inh (when (and (checking?) (seq (:inherits-ctors (abi/cls id))))
+        ;; (CP330 (a): the code generator's too; a base constructor with the parameter types of one of the class's own
+        ;; is hidden by it, [namespace.udecl]/15)
+        own-ps (set (map #(mapv abi/unq (:ps (:ty (fnd %)))) cands))
+        inh (when (seq (:inherits-ctors (abi/cls id)))
               (let [nms (:inherits-ctors (abi/cls id))]
                 (vec (for [b (:bases (abi/cls id))
                            :let [bc (:cls b)]
-                           :when (contains? nms (:name (abi/cls bc)))
+                           :when (and (contains? nms (:name (abi/cls bc))) (or (checking?) (not (:virtual b))))
                            fid (concat (ctor-candidates bc) (when-let [h (:ctor-candidates @hooks)] (h bc args)))
                            :let [f (fnd fid)]
-                           :when (and (seq (:ps (:ty f))) (not (copy-ctor? f bc)) (not (move-ctor? f bc)))]
+                           :when (and (seq (:ps (:ty f))) (not (copy-ctor? f bc)) (not (move-ctor? f bc))
+                                      (or (checking?) (not (contains? own-ps (mapv abi/unq (:ps (:ty f)))))))]
                        fid))))
         cands (concat cands inh)
         cands (if nested (remove #(= id (class-id (abi/non-ref (or (first (:ps (:ty (fnd %)))) abi/void)))) cands) cands)
@@ -2283,7 +2385,10 @@
             f (when-not (= ::inherited fid) (fnd fid))]
         (cond
           (= ::inherited fid) {:i :none}
-          (some #{fid} inh) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) {:i :none})
+          (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) {:i :none})
+          ;; (CP330 (a), the code generator: the class's inheriting constructor for the chosen base constructor, called
+          ;; with the arguments as that constructor's own would be, [class.inhctor.init]/1)
+          (some #{fid} inh) (let [d (inheriting-ctor! id fid)] {:i :ctor :fn d :args (call-args (fnd d) args ctx)})
           (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
@@ -2293,7 +2398,15 @@
 (defn default-ctor-init
   "Default- (or with `value?` value-) initialization of a class object."
   [id value?]
-  (let [cands (filter #(let [f (fnd %)] (<= (count (:ps (:ty f))) (count (filter some? (:defaults f))))) (ctor-candidates id))
+  (let [zero? #(let [f (fnd %)] (<= (count (:ps (:ty f))) (count (filter some? (:defaults f)))))
+        cands (filter zero? (ctor-candidates id))
+        ;; no constructor that is no template takes no argument: the constructor templates' specializations for no
+        ;; argument, by overload resolution ([class.default.ctor]/1, [over.match.ctor]; std::pair's C++17 default
+        ;; constructors are templates whose conditions, enable_if<...>::type = true, choose the implicit or the explicit one)
+        cands (or (seq cands)
+                  (when-let [h (:ctor-candidates @hooks)]
+                    (let [ts (filter zero? (h id []))]
+                      (if (> (count ts) 1) [(resolve-overload ts [] nil)] ts))))
         fid (first cands)]
     (when-not fid (fail :init "no default constructor for " (:name (abi/cls id))))
     (when (and (checking?) (:deleted-sure (fnd fid))) (fail :overload "call to a deleted function " (:name (fnd fid))))
@@ -2328,7 +2441,7 @@
   [st items]
   (let [it (first items) u (abi/unq st)]
     (cond
-      (= :init-list (:op it)) [it (rest items)]
+      (#{:init-list :default-init :value-init} (:op it)) [it (rest items)]
       (and (or (abi/arr? u) (and (abi/class? u) (aggregate? u)))
            (not (and (abi/class? u) (let [k (class-id (:ty it))] (or (= k (:id u)) (and k (abi/derived-from? k (:id u)))))))
            (not (and (abi/arr? u) (= :str (:op it)))))
@@ -2364,9 +2477,22 @@
   [t src ctx style]
   (let [tu (abi/unq t)]
     (cond
+      ;; a semantic list's value-initialized element (the native parser's ImplicitValueInitExpr fill, [dcl.init.aggr]/5.2)
+      (= :value-init (:op src)) (init-for t nil ctx :value)
       (and (= :init-list (:op src)) (init-list-elem t))
       (let [a (or (std-init-list t src ctx) (fail :init "a list's element does not convert to the initializer_list's"))]
         (if (abi/ref? t) {:i :bind-temp :init {:i :expr :e a} :ty (:ty a)} {:i :expr :e a}))
+      ;; [dcl.init.list]/3.10: a list for a reference that is not a single element of a reference-related type: a prvalue of
+      ;; the referenced type copy-list-initialized from it, the reference bound to the temporary (a const lvalue or an
+      ;; rvalue reference; libstdc++'s __do_is_implicitly_default_constructible_impl, __helper<const _Tp&>({}), which
+      ;; std::pair's C++17 default constructor's condition asks)
+      (and (abi/ref? t) (= :init-list (:op src))
+           (not (and (= 1 (count (:items src))) (not= :init-list (:op (first (:items src))))
+                     (let [at (:ty (first (:items src))) pt (:to t)]
+                       (or (= (arr-unq at) (arr-unq pt))
+                           (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt))))))))
+      (do (when-not (or (:c (:to t)) (= :rref (:k t))) (fail :init "a non-const reference to a list's temporary"))
+          {:i :bind-temp :init (init-for (abi/unq (:to t)) src ctx :list) :ty (abi/unq (:to t))})
       (abi/ref? t)
       (let [e (if (= :init-list (:op src)) (if (= 1 (count (:items src))) (first (:items src)) (fail :init "a list for a reference")) src)
             e (if (vector? e) (if (= 1 (count e)) (first e) (fail :init "a reference from arguments")) e)
@@ -2420,10 +2546,15 @@
             (do (when (> (count items) (count subs)) (fail :init "too many initializers"))
                 {:i :list :cls (:id tu)
                  :items (vec (map-indexed (fn [i s]
-                                            (if (< i (count items))
+                                            ;; (the native parser's semantic list holds a default member initializer's
+                                            ;; place as CXXDefaultInitExpr, :default-init: the member's own initializer)
+                                            (if (and (< i (count items)) (not= :default-init (:op (nth items i))))
                                               (init-for (:ty s) (nth items i) ctx :copy)
                                               (if-let [d (:init (:field s))]
-                                                (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
+                                                ;; (its `this` the aggregate being initialized, [class.mem.general]/11; clang's
+                                                ;; CXXDefaultInitExprScope: :agg-this, the code generator binds it to the object)
+                                                (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
+                                                        (assoc :agg-this true))
                                                 (init-for (:ty s) {:op :init-list :items []} ctx :value))))
                                           subs))
                  :fields-used (mapv (comp :i :field) (remove :base subs))})))
@@ -2559,6 +2690,10 @@
              (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)) (not *unevaluated*))
                (capture-field ctx (:id e))
                (var-node (:id e))))
+      ;; a structured binding of an array's element or a data member: the subobject's expression (decomposition!)
+      :binding (if (and (:lambda ctx) (not= (:fn e) (:fn-id ctx)))
+                 (fail :decl "a structured binding captured by a lambda")
+                 (:expr e))
       :capfield (field-node (deref-node {:op :this :ty (:this-type ctx) :cat :pr}) (:cls (:lambda ctx)) (:i e))
       :field (let [tc (some-> (:fn-id ctx) fnd :cls)]
                ;; (the rest of CP313 (a): a member named in a member function, its access through the naming class)
@@ -2595,18 +2730,41 @@
                              :cx-using (cx-using-map es)))))
       (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
 
+(def ^:private implicit-alloc-fns
+  ;; [basic.stc.dynamic.general]/2: the global allocation and deallocation functions implicitly declared in each translation
+  ;; unit (those that name no std type; their mangled names _Znwm, _Znam, _ZdlPv, _ZdaPv, _ZdlPvm, _ZdaPvm)
+  {"operator new" ["void *(unsigned long)" ["unsigned long"]]
+   "operator new[]" ["void *(unsigned long)" ["unsigned long"]]
+   "operator delete" [["void (void *) noexcept" ["void *"]] ["void (void *, unsigned long) noexcept" ["void *" "unsigned long"]]]
+   "operator delete[]" [["void (void *) noexcept" ["void *"]] ["void (void *, unsigned long) noexcept" ["void *" "unsigned long"]]]})
+
+(defn- implicit-alloc!
+  "The implicit global declarations of the allocation or deallocation function `nm` entered in the root scope, the first
+  time a name expression names one that no declaration (<new>'s) has declared (cpp-route: g++.dg's cpp0x/defaulted19a.C,
+  ::operator new (t) without <new>)."
+  [nm]
+  (let [d (implicit-alloc-fns nm)
+        ds (if (string? (first d)) [d] d)]
+    (doseq [[qt ps] ds]
+      (declare-fn! *root* {:kind "FunctionDecl" :name nm :type {:qualType qt}
+                           :inner (mapv (fn [t] {:kind "ParmVarDecl" :type {:qualType t}}) ps)}))))
+
 (defn- name-expr [ctx n]
   (let [nm (get-in n [:referencedDecl :name])
         [g q] (ref-qualifier n)
-        es (if (or g (seq q))
-             (lookup-qualified (:scope ctx) (conj q nm) g)
-             (lookup (:scope ctx) nm))
+        lk #(if (or g (seq q))
+              (lookup-qualified (:scope ctx) (conj q nm) g)
+              (lookup (:scope ctx) nm))
+        es (lk)
+        es (if (and (empty? es) (empty? q) (implicit-alloc-fns nm)) (do (implicit-alloc! nm) (lk)) es)
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
     ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
     (when (and (empty? es) (or g (seq q))) (fail :name "unknown name " nm))
     (let [e (entity-expr ctx es n)]
-      (if-let [tt (when (seq (:tmpls e)) (written-targs n nm))]
+      ;; (an unqualified name that finds nothing, with explicit template arguments: argument-dependent lookup's templates
+      ;; take them, [temp.names]/3's P0846; get<i>(e) of a structured binding, [dcl.struct.bind]/4)
+      (if-let [tt (when (or (seq (:tmpls e)) (and (= :fnset (:op e)) (empty? (:fns e)) (empty? es))) (written-targs n nm))]
         (assoc e :targs-text tt :targs-scope (:scope ctx))
         e))))
 
@@ -3645,6 +3803,38 @@
         inits (sort-by first @(:inits lam))]
     {:op :temp-obj :init {:i :list :cls id :items (mapv second inits) :fields-used (mapv first inits)} :ty t :cat :pr}))
 
+(def ^:private opaque-ids (atom 0))
+
+(defn- cond-node
+  "The conditional operator's node of the analyzed condition `c` (contextually bool) and operands `a`, `b` ([expr.cond])."
+  [ctx c a b]
+  (cond
+    (and (lv? a) (lv? b) (= (:ty a) (:ty b))) {:op :cond :c c :then a :else b :ty (:ty a) :cat :lv}
+    (and (abi/class? (abi/unq (:ty a))) (= (abi/unq (:ty a)) (abi/unq (:ty b))))
+    {:op :cond :c c :then (if (= :pr (:cat a)) a {:op :temp-obj :init (init-for (abi/unq (:ty a)) a ctx :copy) :ty (abi/unq (:ty a)) :cat :pr})
+     :else (if (= :pr (:cat b)) b {:op :temp-obj :init (init-for (abi/unq (:ty b)) b ctx :copy) :ty (abi/unq (:ty b)) :cat :pr}) :ty (abi/unq (:ty a)) :cat :pr}
+    ;; [expr.cond]/4: one operand of class type, the other not (and not void): the class operand converted to the other's
+    ;; type after lvalue-to-rvalue conversion, by its conversion function (g++.dg's ext/cond3.C: X() ? X() : false)
+    (and (not= (boolean (abi/class? (abi/unq (:ty a)))) (boolean (abi/class? (abi/unq (:ty b)))))
+         (not (abi/void? (abi/unq (:ty a)))) (not (abi/void? (abi/unq (:ty b)))))
+    (let [swap? (not (abi/class? (abi/unq (:ty a))))
+          [k o] (if swap? [b a] [a b])
+          ot (abi/unq (:ty (rv o)))
+          kt (abi/unq (:ty k))
+          [k o] (if (conv-for (class-id kt) ot false (:c (:ty k)))
+                  [(user-conv ctx k ot false) o]
+                  ;; (else the other operand converted to the class, a temporary by its converting constructor)
+                  [k {:op :temp-obj :init (init-for kt o ctx :copy) :ty kt :cat :pr}])]
+      (if swap? (cond-node ctx c o k) (cond-node ctx c k o)))
+    :else (let [a (rv a) b (rv b)
+                ;; ([expr.cond]/7.1: operands of the same type, that type; bool ? bool stays bool)
+                t (cond (= (abi/unq (:ty a)) (abi/unq (:ty b))) (abi/unq (:ty a))
+                        (and (abi/arith? (:ty a)) (abi/arith? (:ty b))) (arith-common (:ty a) (:ty b))
+                        (abi/ptr? (:ty a)) (:ty a) (abi/ptr? (:ty b)) (:ty b)
+                        (abi/void? (:ty a)) abi/void
+                        :else (abi/unq (:ty a)))]
+            {:op :cond :c c :then (convert-scalar a t false) :else (convert-scalar b t false) :ty t :cat :pr})))
+
 (declare analyze-node)
 
 (defn- ctad-expr
@@ -3667,6 +3857,7 @@
 
 (defn- analyze-node
   [ctx n]
+  (tick!)
   (when-let [a *at*] (when (:range n) (reset! a n)))
   (case (:kind n)
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
@@ -3837,18 +4028,18 @@
           (when (or (class-operand? l) (class-operand? r)) (no-operator! ctx o [l r]))
           (compound-node (subs o 0 (dec (count o))) l (class->scalar ctx r))))
     "ConditionalOperator"
-    (let [[c a b] (kids n) c (fold-mark (to-bool (analyze ctx c))) a (analyze ctx a) b (analyze ctx b)]
-      (cond
-        (and (lv? a) (lv? b) (= (:ty a) (:ty b))) {:op :cond :c c :then a :else b :ty (:ty a) :cat :lv}
-        (and (abi/class? (abi/unq (:ty a))) (= (abi/unq (:ty a)) (abi/unq (:ty b))))
-        {:op :cond :c c :then (if (= :pr (:cat a)) a {:op :temp-obj :init (init-for (abi/unq (:ty a)) a ctx :copy) :ty (abi/unq (:ty a)) :cat :pr})
-         :else (if (= :pr (:cat b)) b {:op :temp-obj :init (init-for (abi/unq (:ty b)) b ctx :copy) :ty (abi/unq (:ty b)) :cat :pr}) :ty (abi/unq (:ty a)) :cat :pr}
-        :else (let [a (rv a) b (rv b)
-                    t (cond (and (abi/arith? (:ty a)) (abi/arith? (:ty b))) (arith-common (:ty a) (:ty b))
-                            (abi/ptr? (:ty a)) (:ty a) (abi/ptr? (:ty b)) (:ty b)
-                            (abi/void? (:ty a)) abi/void
-                            :else (abi/unq (:ty a)))]
-                {:op :cond :c c :then (convert-scalar a t false) :else (convert-scalar b t false) :ty t :cat :pr})))
+    (let [[c a b] (kids n)] (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (analyze ctx a) (analyze ctx b)))
+    ;; GNU's `x ?: y` ([GCC manual, Conditionals with Omitted Operands]; clang's BinaryConditionalOperator): x evaluated once,
+    ;; bound as an opaque value (a glvalue's address, a class prvalue materialized, else its value), the condition and the
+    ;; true operand both that value (clang's OpaqueValueExpr, CodeGenFunction::OpaqueValueMapping)
+    "BinaryConditionalOperator"
+    (let [[x y] (kids n)
+          x (analyze ctx x)
+          x (if (and (= :pr (:cat x)) (abi/class? (abi/unq (:ty x)))) (materialize x) x)
+          k (swap! opaque-ids inc)
+          ov {:op :opaque :id k :ty (:ty x) :cat (:cat x)}
+          r (cond-node ctx (to-bool ov) ov (analyze ctx y))]
+      {:op :bind-opaque :id k :e x :body r :ty (:ty r) :cat (:cat r)})
     "CallExpr"
     (if-let [op (when (= "DeclRefExpr" (:kind (first (kids n))))
                   ({"__builtin_operator_new" "operator new" "__builtin_operator_delete" "operator delete"}
@@ -3927,9 +4118,18 @@
           [k] (kids n)
           t (if (and (#{:xvalue "xvalue"} (:valueCategory n)) (not (abi/ref? t))) (abi/rref t) t)
           t (if (and (= "lvalue" (:valueCategory n)) (not (abi/ref? t))) (abi/lref t) t)]
-      (if (and (= "CXXFunctionalCastExpr" (:kind n)) (abi/class? (abi/unq t)))
+      (cond
+        ;; (T(pack...): a functional notation whose one argument is a pack expansion is T(e1, ..., en),
+        ;; [expr.type.conv]/2, as many as the pack has; CP332 (a), make_tuple's __result_type(std::forward<_Elements>(__args)...))
+        (and (= "CXXFunctionalCastExpr" (:kind n)) (= "PackExpansionExpr" (:kind k)))
+        (let [args (analyze-args ctx [k])]
+          (cond (abi/class? (abi/unq t)) {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
+                (empty? args) {:op :zero-val :ty t :cat :pr}
+                (= 1 (count args)) (cast-expr ctx t (first args) true)
+                :else (fail :expr "a functional cast of a scalar type with " (count args) " arguments")))
+        (and (= "CXXFunctionalCastExpr" (:kind n)) (abi/class? (abi/unq t)))
         {:op :temp-obj :init (init-for t (if (= "InitListExpr" (:kind k)) (analyze ctx k) [(analyze ctx k)]) ctx :direct) :ty (abi/unq t) :cat :pr}
-        (cast-expr ctx t (analyze ctx k) true))))
+        :else (cast-expr ctx t (analyze ctx k) true))))
     ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
     (if-let [ct (when-not (= "CXXConstructExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
       (ctad-expr ctx n ct)
@@ -3950,6 +4150,22 @@
                                    (when (and f (not (:cls f)) (not (:this-type ctx))) (check-type-access! (:scope ctx) qt n))))
                                {:op :zero-val :ty t :cat :pr})
     "InitListExpr" {:op :init-list :items (analyze-args ctx (kids n)) :ty {:k :init-list}}
+    ;; a default member initializer's place in a semantic list (the native parser's fill, [dcl.init.aggr]/5.1): the
+    ;; aggregate's initialization takes the member's initializer there
+    ;; GNU's statement expression ({ s...; e; }) (GCC's manual, "Statements and Declarations in Expressions"): the statements in
+    ;; a block of their own, the last expression statement's value the value (a scalar's or void; a class's refused); cpp-route
+    "StmtExpr"
+    (let [c (block-ctx ctx)
+          xs (vec (kids (first (kids n))))
+          lst (peek xs)
+          val? (and lst (not (str/ends-with? (str (:kind lst)) "Stmt")))
+          items (mapv #(stmt c %) (if val? (pop xs) xs))
+          e (when val? (analyze c lst))
+          _ (when (and e (abi/class? (abi/unq (:ty e)))) (fail :expr "a statement expression of class type"))
+          e (when e (rv e))]
+      {:op :stmt-expr :items items :e e :ty (if e (:ty e) abi/void) :cat :pr})
+    "CXXDefaultInitExpr" {:op :default-init :ty {:k :default-init} :cat :pr}
+    "ImplicitValueInitExpr" {:op :value-init :ty {:k :value-init} :cat :pr}
     ;; sizeof...(pack): the number of a pack's elements (CODEGEN.md G3)
     ;; (an operand already analyzed, given to an operator's analysis: a fold expression's elements, CP291 (a))
     "__Typed" (:e n)
@@ -3983,7 +4199,7 @@
                            (reduce (fn [acc e] (combine e acc)) (peek xs) (rseq (pop xs))))
           :else (let [xs (if init (into [init] es) es)]
                   (reduce combine (first xs) (rest xs)))))
-      (fail :expr "a fold expression the parser kept as its text"))
+      (fail :expr "a fold expression the parser kept as its text: " (subs (str (node-text n)) 0 (min 120 (count (str (node-text n)))))))
     "SizeOfPackExpr" (let [e (first (lookup (:scope ctx) (:name n)))]
                        (when-not (#{:pack :varpack} (:e e)) (fail :pack "sizeof... of a non-pack " (:name n)))
                        {:op :int :v (count (or (:elems e) (:ids e))) :ty abi/ulong* :cat :pr})
@@ -4177,6 +4393,87 @@
       (= "list" (:init n)) (init-for t (analyze ctx init) ctx :list)
       :else (let [a (analyze ctx init)] (init-for t a ctx (if (= :init-list (:op a)) :list :copy))))))
 
+
+(defn- decomposition!
+  "A structured binding declaration ([dcl.struct.bind]): the DecompositionDecl `d`, its initializer the typed `src`
+  (a range-for's *__begin) or its own. The unnamed variable e of the declared (auto) type, deduced from the
+  initializer (an array's copy element by element when the declaration has no ref-qualifier, /1); then its bindings:
+  of an array e's elements (/2); of a tuple-like type (std::tuple_size<E>::value a constant, /4) variables of type
+  Ti& or Ti&& (as the initializer is an lvalue) initialized by get<i>(e) (argument-dependent lookup; e an lvalue when
+  its type is an lvalue reference, else an xvalue; a member get<i>() when E has a member template get), Ti the call's
+  result type; else of e's non-static data members in declaration order, all of one class (/5). The bindings of /2
+  and /5 are names of e's subobjects (no variable: clang's BindingDecl's holding expression), entered as :binding.
+  The statements: e's declaration and the tuple-like bindings' variables'."
+  [ctx d src]
+  (let [bs (filter #(= "BindingDecl" (:kind %)) (kids d))
+        d0 (assoc d :inner (vec (remove #(= "BindingDecl" (:kind %)) (kids d))))
+        _ (when (or (= "static" (:storageClass d)) (:tls d)) (fail :decl "a static or thread-local structured binding"))
+        eid (local-var! ctx d0 :local)
+        t (:ty (var* eid))
+        initn (init-kid d0)
+        pre (or src (when initn
+                      (let [a (if (= "ParenListExpr" (:kind initn)) (let [as (analyze-args ctx (kids initn))] (if (= 1 (count as)) (first as) (fail :decl "a structured binding from several values"))) (analyze ctx initn))]
+                        (if (and (= :init-list (:op a)) (= 1 (count (:items a)))) (first (:items a)) a)))
+                (fail :decl "a structured binding without an initializer"))
+        pu (abi/unq (:ty pre))
+        ;; ([dcl.struct.bind]/1: E an array of unknown bound is an incomplete type, clang's err_decomp_decl... incomplete;
+        ;; cpp26/decomp11.C, a crash before CP331 (a) modelled the declaration in the checker)
+        _ (when (and (abi/arr? pu) (nil? (:n pu)))
+            (throw (ex-info "codegen: cannot decompose an array of unknown bound: its type is incomplete"
+                            {:codegen/refused :decomp :cx/node d})))
+        [t init] (if (and (= :auto (:k t)) (abi/arr? pu))
+                   (let [at (cond-> pu (:c t) (assoc :c true) (:v t) (assoc :v true))
+                         el (:of pu) pt (abi/ptr el)]
+                     [at {:i :list :n (:n pu)
+                          :items (vec (for [i (range (:n pu))]
+                                        (init-for (:of at) {:op :deref :e {:op :ptradd :o "+" :p (rv pre) :n {:op :int :v i :ty abi/long* :cat :pr} :ty pt :cat :pr} :ty el :cat :lv} ctx :copy)))}])
+                   (let [t (deduce-auto t pre)] [t (init-for t pre ctx :copy)]))
+        _ (upd-var! eid assoc :ty t)
+        hn (str "__binding" eid)
+        _ (enter! (:scope ctx) hn {:e :var :id eid})
+        ref {:kind "DeclRefExpr" :referencedDecl {:name hn}}
+        ecv (abi/non-ref t)
+        E (abi/unq ecv)
+        n (count bs)
+        bind! (fn [b x] (enter! (:scope ctx) (:name b) {:e :binding :expr x :fn (:fn-id ctx)}))
+        tuple-n (when (abi/class? E)
+                  (let [tn (str "__bindingE" eid)]
+                    (enter! (:scope ctx) tn {:e :type :ty ecv})
+                    (try (const-int (:scope ctx) {:kind "DeclRefExpr" :_wn true :qualifier ["std" (str "tuple_size<" tn ">")] :referencedDecl {:name "value"}})
+                         (catch arbace.lang.ExceptionInfo _ nil))))
+        more (cond
+               (abi/arr? E)
+               (do (when-not (= n (:n E)) (fail :decl "a structured binding of " n " names for " (:n E) " elements"))
+                   (doseq [[i b] (map-indexed vector bs)]
+                     (bind! b (analyze ctx {:kind "ArraySubscriptExpr" :inner [ref {:kind "IntegerLiteral" :value (str i) :type {:qualType "unsigned long"}}]})))
+                   [])
+               tuple-n
+               (do (when-not (= n tuple-n) (fail :decl "a structured binding of " n " names for a tuple-like size " tuple-n))
+                   (let [member? (some (fn [[_ e]] (= :tmpl (:e e))) (class-lookup (:id E) "get"))
+                         ev (let [x (var-node eid)] (if (= :ref (:k t)) x (assoc x :cat :xv)))]
+                     (vec (for [[i b] (map-indexed vector bs)]
+                            (let [r (if member?
+                                      (analyze ctx {:kind "CallExpr" :inner [{:kind "MemberExpr" :name "get" :isArrow false :_wn true :explicitTemplateArgs [(str i)] :inner [ref]}]})
+                                      (analyze-call ctx (analyze ctx {:kind "DeclRefExpr" :referencedDecl {:name "get"} :_wn true :explicitTemplateArgs [(str i)]}) [ev]))
+                                  bt (if (= :lv (:cat r)) (abi/lref (abi/non-ref (:ty r))) (abi/rref (abi/unq (abi/non-ref (:ty r)))))
+                                  bid (next-id)]
+                              (swap! *vars* assoc bid {:id bid :name (:name b) :ty bt :storage :local :fn (:fn-id ctx)})
+                              (enter! (:scope ctx) (:name b) {:e :var :id bid})
+                              {:s :decl :var bid :init (init-for bt r ctx :copy)})))))
+               (abi/class? E)
+               (let [cid (loop [c (:id E)]
+                           (let [own (remove #(and (:bits %) (nil? (:name %))) (:fields (abi/cls c)))
+                                 bs* (filter #(seq (remove (fn [f] (and (:bits f) (nil? (:name f)))) (:fields (abi/cls (:cls %))))) (:bases (abi/cls c)))]
+                             (cond (seq own) c (= 1 (count bs*)) (recur (:cls (first bs*))) :else c)))
+                     fs (remove #(and (:bits %) (nil? (:name %))) (:fields (abi/cls cid)))]
+                 (when-not (= n (count fs)) (fail :decl "a structured binding of " n " names for " (count fs) " members"))
+                 (when (some #(or (:anon %) (nil? (:name %))) fs) (fail :decl "a structured binding of an anonymous member"))
+                 (doseq [[f b] (map vector fs bs)]
+                   (bind! b (analyze ctx {:kind "MemberExpr" :name (:name f) :isArrow false :inner [ref]})))
+                 [])
+               :else (fail :decl "a structured binding of " (pr-str E)))]
+    (vec (cons {:s :decl :var eid :init init} more))))
+
 (declare check-static-assert!)
 
 (defn- cx-decomposition!
@@ -4226,8 +4523,13 @@
         :else nil))))
 
 (defn- decl-stmt [ctx n]
-  (vec (for [d (kids n)]
+  (vec (mapcat #(if (vector? %) % [%]) (for [d (kids n)]
          (case (:kind d)
+           ;; a structured binding declaration: e's declaration and the tuple-like bindings' variables
+           ;; (CP331 (a): the checker checks the rules of [dcl.struct.bind]/4 (cpp-props3's), then models the declaration as
+           ;; the code generator does, so the bindings' uses are analyzed too; cpp-route had refused it after the rules)
+           "DecompositionDecl" (do (when (checking?) (cx-decomposition! ctx d))
+                                   (decomposition! ctx d nil))
            "VarDecl" (let [_ (when (checking?)
                                (let [f (when-let [i (:fn-id ctx)] (fnd i))]
                                  ;; (a function template's specialization that is no member, fifth slice: its names are
@@ -4261,9 +4563,7 @@
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
            "StaticAssertDecl" (do (when-not (some-> (:fn-id ctx) fnd :tinst) (check-static-assert! ctx d)) {:s :null})
-           ;; (the rest of CP313 (a): a structured binding declaration's rules checked, the declaration not modelled)
-           "DecompositionDecl" (do (cx-decomposition! ctx d) (fail :decl "local declaration " (:kind d)))
-           (fail :decl "local declaration " (:kind d))))))
+           (fail :decl "local declaration " (:kind d)))))))
 
 (defn- block-ctx [ctx] (assoc ctx :scope (new-scope :block (:scope ctx))))
 
@@ -4297,18 +4597,34 @@
         inc (analyze c {:kind "UnaryOperator" :opcode "++" :inner [(ref "__begin1")]})
         ic (block-ctx c)
         de (analyze ic {:kind "UnaryOperator" :opcode "*" :inner [(ref "__begin1")]})
-        lid (local-var! ic loopd :local)
-        lt (:ty (var* lid))
-        lt (if (has-auto? lt) (deduce-auto lt de) lt)
-        _ (upd-var! lid assoc :ty lt)
-        linit (init-for lt de ic :copy)
-        _ (enter! (:scope ic) (:name loopd) {:e :var :id lid})]
+        decls (if (= "DecompositionDecl" (:kind loopd))
+                (decomposition! ic loopd de)
+                (let [lid (local-var! ic loopd :local)
+                      lt (:ty (var* lid))
+                      lt (if (has-auto? lt) (deduce-auto lt de) lt)
+                      _ (upd-var! lid assoc :ty lt)
+                      linit (init-for lt de ic :copy)]
+                  (enter! (:scope ic) (:name loopd) {:e :var :id lid})
+                  [{:s :decl :var lid :init linit}]))]
     {:s :block :items [{:s :decl :var rid :init rinit} {:s :decl :var bid :init binit} {:s :decl :var eid :init einit}
-                       {:s :for :cond cnd :inc inc :body {:s :block :items [{:s :decl :var lid :init linit} (stmt ic body)]}}]}))
+                       {:s :for :cond cnd :inc inc :body {:s :block :items (conj (vec decls) (stmt ic body))}}]}))
+
+(defn- constexpr-if-value
+  "An if constexpr's condition's value ([stmt.if]/2: a contextually converted constant expression of type bool): an
+  integral constant (const-int), or an object of class type converted to bool as a condition is (to-bool: its conversion
+  function, explicit ones too, [conv]/4) and evaluated (`if constexpr (__is_invocable<...>{})`, std::map's
+  _Rb_tree::_S_key; CP332 (a))."
+  [scope cn]
+  (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} cn)))]
+    (if (abi/class? (abi/unq (:ty e)))
+      (let [v (binding [*cutoff* Long/MAX_VALUE] (ce-eval (to-bool e)))]
+        (if (number? v) v (if v 1 0)))
+      (const-int scope cn))))
 
 (defn stmt
   "The typed statement of a tree node."
   [ctx n]
+  (tick!)
   (when-let [a *at*] (when (:range n) (reset! a n)))
   (case (:kind n)
     nil {:s :null}
@@ -4378,7 +4694,7 @@
                                                 ;; if constexpr ([stmt.if]/2): the condition a constant, the discarded branch not analyzed
                                                 ;; (CX12, the checker: a condition [expr.const]/5 makes surely not constant, clang's
                                                 ;; err_constexpr_if_condition_expression_is_not_constant, at the condition)
-                                                [(if (not= 0 (long (try (const-int (:scope c) cn)
+                                                [(if (not= 0 (long (try (constexpr-if-value (:scope c) cn)
                                                                         (catch arbace.lang.ExceptionInfo x
                                                                           (if (and (checking?) (:cx/sure (ex-data x)))
                                                                             (throw (ex-info (str "codegen: constexpr if condition is not a constant expression ("
@@ -4404,7 +4720,11 @@
     "CXXForRangeStmt"
     (let [c (block-ctx ctx)
           ks (vec (:inner n))
-          rangen (some #(when (= "DeclStmt" (:kind %)) %) ks)
+          ;; (the native parser's node is clang's: init-statement (or none), the range's DeclStmt, begin, end, cond, inc, the
+          ;; loop variable's DeclStmt, the body; C++20's init-statement, [stmt.ranged]/1, analyzed first in the loop's scope:
+          ;; it was taken for the range; g++.dg's cpp2a/range-for14.C; cpp-route)
+          init-s (when (and (= 8 (count ks)) (:kind (first ks))) (stmt c (first ks)))
+          rangen (if (= 8 (count ks)) (nth ks 1) (some #(when (= "DeclStmt" (:kind %)) %) ks))
           range-e (analyze c (first (kids (first (kids rangen)))))
           loopd (first (kids (last (filter #(= "DeclStmt" (:kind %)) ks))))
           body (last ks)
@@ -4418,6 +4738,7 @@
                       (materialize (or (std-init-list t range-e c) (fail :range-for "a braced range"))))
                     range-e)
           at (:ty range-e)]
+      ((fn [r] (if init-s {:s :block :items [init-s r]} r))
       (if (and (not (abi/arr? (abi/unq at))) (class-id at))
         (range-for-class c range-e loopd body)
       (do
@@ -4430,17 +4751,21 @@
             bvar {:op :var :id bid :ty pt :cat :lv}
             evar {:op :var :id eid :ty pt :cat :lv}
             ic (block-ctx c)
-            lid (local-var! ic loopd :local)
-            lt (:ty (var* lid))
-            lt (if (has-auto? lt) (deduce-auto lt {:op :deref :e (rv bvar) :ty et :cat :lv}) lt)
-            _ (upd-var! lid assoc :ty lt)
-            linit (init-for lt {:op :deref :e (rv bvar) :ty et :cat :lv} ic :copy)
-            _ (enter! (:scope ic) (:name loopd) {:e :var :id lid})]
+            de {:op :deref :e (rv bvar) :ty et :cat :lv}
+            decls (if (= "DecompositionDecl" (:kind loopd))
+                    (decomposition! ic loopd de)
+                    (let [lid (local-var! ic loopd :local)
+                          lt (:ty (var* lid))
+                          lt (if (has-auto? lt) (deduce-auto lt de) lt)
+                          _ (upd-var! lid assoc :ty lt)
+                          linit (init-for lt de ic :copy)]
+                      (enter! (:scope ic) (:name loopd) {:e :var :id lid})
+                      [{:s :decl :var lid :init linit}]))]
         {:s :block :items [{:s :decl :var bid :init {:i :expr :e (rv range-e)}}
                            {:s :decl :var eid :init {:i :expr :e {:op :ptradd :o "+" :p (rv range-e) :n {:op :int :v (:n at) :ty abi/long* :cat :pr} :ty pt :cat :pr}}}
                            {:s :for :cond {:op :cmp :o "!=" :l (rv bvar) :r (rv evar) :ct pt :ty abi/bool* :cat :pr}
                             :inc {:op :incdec :o "++" :post false :e bvar :ty pt :cat :lv}
-                            :body {:s :block :items [{:s :decl :var lid :init linit} (stmt ic body)]}}]}))))
+                            :body {:s :block :items (conj (vec decls) (stmt ic body))}}]})))))
     "BreakStmt" {:s :break}
     "ContinueStmt" {:s :continue}
     "SwitchStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
@@ -4502,6 +4827,10 @@
                     (= "ImplicitValueInitExpr" (:kind x)) (init-for t nil ctx :value)
                     (= "InitListExpr" (:kind x)) (init-for t (analyze ctx x) ctx :list)
                     (= "CXXParenListInitExpr" (:kind x)) (init-for t (mapv #(analyze ctx %) (kids x)) ctx :direct)
+                    ;; (a mem-initializer whose one argument is a pack expansion, `_Inherited(std::forward<_UTypes>(__u)...)`,
+                    ;; [temp.variadic]/5: as many arguments as the pack has; CP332 (a), tuple's constructors)
+                    (= "PackExpansionExpr" (:kind x)) (let [as (analyze-args ctx [x])]
+                                                        (init-for t as ctx (if (empty? as) :value :direct)))
                     :else (init-for t [(analyze ctx x)] ctx :direct)))
         deleg (get given [:base cid])]
     (if deleg
@@ -4509,7 +4838,9 @@
       {:bases (vec (for [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
                      (let [t {:k :class :id (:cls b)}
                            x (get given [:base (:cls b)])]
-                       {:base (:cls b) :idx i :init (if (contains? given [:base (:cls b)]) (init-of t x) (init-for t nil ctx :default))})))
+                       {:base (:cls b) :idx i :init (cond (contains? (:pre-inits f) (:cls b)) (get (:pre-inits f) (:cls b))
+                                                         (contains? given [:base (:cls b)]) (init-of t x)
+                                                         :else (init-for t nil ctx :default))})))
        ;; the virtual bases, which the complete object's constructor initializes ([class.base.init]/7)
        :vbases (vec (for [v (abi/vbases-init cid)]
                       (let [t {:k :class :id v}]
@@ -4640,6 +4971,16 @@
         ctx {:scope fs :fn-id fid :this-type (abi/ptr {:k :class :id cls}) :statics (atom [])}
         f (assoc f :params pids)]
     (swap! *fns* assoc fid f)
+    ;; (CP330 (a): an inheriting constructor, [class.inhctor.init]/1: the base subobject by the inherited constructor, the
+    ;; parameters forwarded (static_cast<T&&>(p): an lvalue reference's an lvalue, else an xvalue); the rest as an implicit
+    ;; default constructor initializes them)
+    (if-let [bfid (:inh-from f)]
+      (let [b (fnd bfid)
+            args (mapv (fn [pid] (let [n (var-node pid)] (if (= :ref (:k (:ty (var* pid)))) n (assoc n :cat :xv)))) pids)
+            bi {:i :ctor :fn bfid :args (call-args b args ctx)}]
+        (binding [*cutoff* Long/MAX_VALUE]
+          (upd-fn! fid assoc :tinits (ctor-inits ctx (assoc f :inits [] :pre-inits {(:inh-base f) bi})))))
+    (do
     (when (and (= :ctor (:kind f)) (empty? (:ps (:ty f))))
       (binding [*cutoff* Long/MAX_VALUE] (upd-fn! fid assoc :tinits (ctor-inits ctx (assoc f :inits [])))))
     (when (= :ctor (:kind f))
@@ -4667,7 +5008,7 @@
                                 (for [fl (:fields c)]
                                   (if (abi/arr? (:ty fl))
                                     {:s :copy-bytes :dst (field-node me cls (:i fl)) :src (field-node src cls (:i fl))}
-                                    (full (assign-node ctx (field-node me cls (:i fl)) (field-node src cls (:i fl)))))))))))))
+                                    (full (assign-node ctx (field-node me cls (:i fl)) (field-node src cls (:i fl)))))))))))))))
   fid)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -4806,7 +5147,8 @@ protected:
   [nodes proot ^String src]
   (let [root (new-scope :ns nil :path [])]
   (binding [*src* src *fns* (atom {}) *vars* (atom {}) *ids* (atom 0) *order* (atom [])
-            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})]
+            abi/*classes* (atom {}) abi/*enums* (atom {}) *proot* proot *root* root *header-cache* (atom {}) *last-anon* (atom nil) *lambda-counts* (atom {})
+            *conv-tmpl-cache* (atom {})]
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
        (fn []
