@@ -4,6 +4,10 @@
 ;; ServerSocket (bind already, for a stream socket), connect the Socket, accept the accepted one. The calls that may block (accept, connect, read, write) run outside
 ;; the Gil; select tests a socket's readiness by the bytes available (a listening socket's by a pending connection it accepts
 ;; ahead), a pipe's by its count, a file's always.
+;; OC216 (a), the rest (doc/ocaml/OCAML-SURVEY.md, "As built: OC216 (a), the rest"): at the compiled level a socket of PF_UNIX (and
+;; socketpair) is the OS's, made and used through the main's host (HostSys): `host` set, `os` its descriptor of the OS, its streams
+;; HSockIn and HSockOut; every call below on such a socket is the host's system call (oi's ext_unix_sock.go, otherlibs/unix's
+;; socket.c, socketpair.c, sendrecv.c and the rest). Where no host serves (the light level) PF_UNIX stays EPROTONOSUPPORT.
 
 (in-ns 'ocaml.rt)
 
@@ -23,6 +27,9 @@
   (field ^:public ^Socket ahead)
   ;; its entry of Fd's table (its streams and what closes it are the entry's)
   (field ^:public ^Fd fd)
+  ;; a socket of the OS through HostSys, and its descriptor there
+  (field ^:public ^boolean host)
+  (field ^:public ^long os)
 
   (method ^:public ^:static ofFd ^Sock [^long fd ^String fn]
     (let [d (Fd/get fd)]
@@ -55,8 +62,74 @@
   (method ^:static valueOf [^InetSocketAddress a]
     (Block. 1 (new Object/1 [(.getAddress (.getAddress a)) (Long/valueOf (long (.getPort a)))])))
 
+  ;; ---- the host's sockets (OC216 (a), the rest)
+
+  ;; a Unix.sockaddr as the host's field: "u" and the path (an abstract name's leading NUL kept), or "i", the port's two bytes
+  ;; (big-endian) and the address's 4 or 16
+  (method ^:static hostAddr ^byte/1 [sa]
+    (let [b (cast Block sa)]
+      (if (== (.-tag b) 0)
+        (let [p (cast byte/1 (aget (.-f b) 0))
+              o (new byte/1 (unchecked-inc-int (alength p)))]
+          (aset o 0 (unchecked-byte 117))
+          (System/arraycopy p 0 o 1 (alength p))
+          o)
+        (let [ip (cast byte/1 (aget (.-f b) 0))
+              port (Rt/ii (aget (.-f b) 1))
+              o (new byte/1 (unchecked-add-int 3 (alength ip)))]
+          (aset o 0 (unchecked-byte 105))
+          (aset o 1 (unchecked-byte (bit-shift-right port 8)))
+          (aset o 2 (unchecked-byte port))
+          (System/arraycopy ip 0 o 3 (alength ip))
+          o))))
+
+  ;; the host's field as a Unix.sockaddr (alloc_sockaddr)
+  (method ^:static hostValue [^byte/1 a]
+    (if (and (> (alength a) 0) (== (aget a 0) 105))
+      (Block. 1 (new Object/1 [(java.util.Arrays/copyOfRange a 3 (alength a))
+                               (Long/valueOf (long (bit-or (bit-shift-left (bit-and (aget a 1) 255) 8) (bit-and (aget a 2) 255))))]))
+      (Block. 0 (new Object/1 [(java.util.Arrays/copyOfRange a (if (> (alength a) 0) 1 0) (alength a))]))))
+
+  ;; a socket of the OS (descriptor os of the host) entered into Fd's table
+  (method ^:static hostInstall ^long [^long dom ^long typ ^long os]
+    (let [s (Sock.)
+          d (Fd.)
+          in (HSockIn. os)]
+      (set! (.-domain s) dom)
+      (set! (.-typ s) typ)
+      (set! (.-host s) true)
+      (set! (.-os s) os)
+      (set! (.-sock d) s)
+      (set! (.-fd s) d)
+      (set! (.-sdgram d) (== typ 1))
+      (set! (.-readable d) true)
+      (set! (.-writable d) true)
+      (set! (.-sin d) in)
+      (set! (.-sout d) (HSockOut. os))
+      (set! (.-sclose d) in)
+      (Fd/install d)))
+
+  (method ^:static flags ^long [l]
+    (let [xs (ExtUnixFd/ints l)]
+      (loop [^int i 0 ^long f 0]
+        (if (>= i (.size xs)) f (recur (unchecked-inc-int i) (bit-or f (bit-shift-left 1 (Rt/l (.get xs i)))))))))
+
+  (method ^:static os [^Sock s] (Long/valueOf (.-os s)))
+  ;; ?cloexec: None 0, Some b b's 0 or 1
+  (method ^:static cloexecOf [c] (if (instance? Block c) (Long/valueOf (Rt/l (aget (.-f (cast Block c)) 0))) (Long/valueOf 0)))
+
+  (method ^:public ^:static caml_unix_socketpair [cloexec dom typ proto]
+    (when (not (HostSys/avail)) (throw (Rt/missing "caml_unix_socketpair")))
+    (let [r (HostSys/call "socketpair" (new Object/1 ["socketpair" dom typ proto (Sock/cloexecOf cloexec)]))
+          a (Sock/hostInstall (Rt/l dom) (Rt/l typ) (HostSys/num r 0))
+          b (Sock/hostInstall (Rt/l dom) (Rt/l typ) (HostSys/num r 1))]
+      (Rt/tuple (new Object/1 [(Long/valueOf a) (Long/valueOf b)]))))
+
   (method ^:public ^:static caml_unix_socket [cloexec dom typ proto]
     (let [dm (Rt/l dom)]
+      (when (and (== dm 0) (HostSys/avail))
+        (let [r (HostSys/call "socket" (new Object/1 ["socket" dom typ proto (Sock/cloexecOf cloexec)]))]
+          (return (Long/valueOf (Sock/hostInstall dm (Rt/l typ) (HostSys/num r 0))))))
       (when (or (== dm 0) (> (Rt/l typ) 1)) (throw (ExtUnix/error 93 "socket" "")))
       (let [s (Sock.)]
         (set! (.-domain s) dm)
@@ -65,6 +138,9 @@
 
   (method ^:public ^:static caml_unix_bind [fd sa]
     (let [s (Sock/ofFd (Rt/l fd) "bind")]
+      (when (.-host s)
+        (HostSys/call "bind" (new Object/1 ["bind" (Sock/os s) (Sock/hostAddr sa)]))
+        (return Rt/UNIT))
       (set! (.-bound s) (Sock/addrOf sa "bind"))
       ;; a bound stream socket is a server's: its ServerSocket made now, so that getsockname before listen knows the port
       (when (== (.-typ s) 0)
@@ -79,6 +155,9 @@
 
   (method ^:public ^:static caml_unix_listen [fd n]
     (let [s (Sock/ofFd (Rt/l fd) "listen")]
+      (when (.-host s)
+        (HostSys/call "listen" (new Object/1 ["listen" (Sock/os s) n]))
+        (return Rt/UNIT))
       (when (nil? (.-server s))
        (try
         (let [ss (ServerSocket.)]
@@ -100,6 +179,10 @@
 
   (method ^:public ^:static caml_unix_accept [cloexec fd]
     (let [s (Sock/ofFd (Rt/l fd) "accept")]
+      (when (.-host s)
+        (let [r (HostSys/callFree "accept" (new Object/1 ["accept" (Sock/os s) (Sock/cloexecOf cloexec)]))
+              i (Sock/hostInstall (.-domain s) (.-typ s) (HostSys/num r 0))]
+          (return (Rt/tuple (new Object/1 [(Long/valueOf i) (Sock/hostValue (cast byte/1 (.get r 1)))])))))
       (when (nil? (.-server s)) (throw (ExtUnix/error 22 "accept" "")))
       (let [c (if (some? (.-ahead s))
                 (let [a (.-ahead s)] (set! (.-ahead s) nil) a)
@@ -114,6 +197,10 @@
           (Rt/tuple (new Object/1 [(Long/valueOf i) (Sock/valueOf (cast InetSocketAddress (.getRemoteSocketAddress c)))]))))))
 
   (method ^:public ^:static caml_unix_connect [fd sa]
+    (let [s0 (Sock/ofFd (Rt/l fd) "connect")]
+      (when (.-host s0)
+        (HostSys/callFree "connect" (new Object/1 ["connect" (Sock/os s0) (Sock/hostAddr sa)]))
+        (return Rt/UNIT)))
     (let [s (Sock/ofFd (Rt/l fd) "connect")
           a (Sock/addrOf sa "connect")
           c (Socket.)]
@@ -127,6 +214,9 @@
   (method ^:public ^:static caml_unix_shutdown [fd cmd]
     (let [s (Sock/ofFd (Rt/l fd) "shutdown")
           c (Rt/l cmd)]
+      (when (.-host s)
+        (HostSys/call "shutdown" (new Object/1 ["shutdown" (Sock/os s) cmd]))
+        (return Rt/UNIT))
       (when (nil? (.-conn s)) (throw (ExtUnix/error 107 "shutdown" "")))
       (try
         (when (not (== c 1)) (.shutdownInput (.-conn s)))
@@ -136,6 +226,8 @@
 
   (method ^:public ^:static caml_unix_getsockname [fd]
     (let [s (Sock/ofFd (Rt/l fd) "getsockname")]
+      (when (.-host s)
+        (return (Sock/hostValue (cast byte/1 (.get (HostSys/call "getsockname" (new Object/1 ["getsockname" (Sock/os s)])) 0)))))
       (cond (some? (.-server s)) (Sock/valueOf (cast InetSocketAddress (.getLocalSocketAddress (.-server s))))
             (some? (.-conn s)) (Sock/valueOf (cast InetSocketAddress (.getLocalSocketAddress (.-conn s))))
             (some? (.-bound s)) (Sock/valueOf (.-bound s))
@@ -143,6 +235,8 @@
 
   (method ^:public ^:static caml_unix_getpeername [fd]
     (let [s (Sock/ofFd (Rt/l fd) "getpeername")]
+      (when (.-host s)
+        (return (Sock/hostValue (cast byte/1 (.get (HostSys/call "getpeername" (new Object/1 ["getpeername" (Sock/os s)])) 0)))))
       (when (nil? (.-conn s)) (throw (ExtUnix/error 107 "getpeername" "")))
       (Sock/valueOf (cast InetSocketAddress (.getRemoteSocketAddress (.-conn s))))))
 
@@ -169,22 +263,63 @@
       (when (some? (.-server s)) (.close (.-server s)))
       (catch IOException e nil)))
 
+  ;; recv and recvfrom on a socket of the host: the bytes read put at ofs, and the sender's address (unix's sendrecv.c)
+  (method ^:static hostRecv ^java.util.ArrayList [^Sock s ^String fn buf ofs len flags]
+    (let [n (Math/min (Rt/ii len) (int 65536))
+          r (HostSys/callFree fn (new Object/1 [fn (Sock/os s) (Long/valueOf (long n)) (Long/valueOf (Sock/flags flags))]))
+          d (cast byte/1 (.get r 0))]
+      (System/arraycopy d 0 (cast byte/1 buf) (Rt/ii ofs) (alength d))
+      r))
+
+  (method ^:public ^:static caml_unix_recvfrom [fd buf ofs len flags]
+    (let [s (Sock/ofFd (Rt/l fd) "recvfrom")]
+      (when (not (.-host s)) (throw (Rt/missing "caml_unix_recvfrom")))
+      (let [r (Sock/hostRecv s "recvfrom" buf ofs len flags)]
+        (Rt/tuple (new Object/1 [(Long/valueOf (long (alength (cast byte/1 (.get r 0))))) (Sock/hostValue (cast byte/1 (.get r 1)))])))))
+
+  (method ^:public ^:static caml_unix_sendto_native [fd buf ofs len flags sa]
+    (let [s (Sock/ofFd (Rt/l fd) "sendto")]
+      (when (not (.-host s)) (throw (Rt/missing "caml_unix_sendto")))
+      (let [n (Math/min (Rt/ii len) (int 65536))
+            o (Rt/ii ofs)
+            r (HostSys/callFree "sendto" (new Object/1 ["sendto" (Sock/os s) (java.util.Arrays/copyOfRange (cast byte/1 buf) o (unchecked-add-int o n))
+                                                       (Long/valueOf (Sock/flags flags)) (Sock/hostAddr sa)]))]
+        (Long/valueOf (HostSys/num r 0)))))
+
+  (method ^:public ^:static caml_unix_sendto [fd buf ofs len flags sa] (Sock/caml_unix_sendto_native fd buf ofs len flags sa))
+
   (method ^:public ^:static caml_unix_recv [fd buf ofs len flags]
+    (let [s0 (Sock/ofFd (Rt/l fd) "recv")]
+      (when (.-host s0)
+        (return (Long/valueOf (long (alength (cast byte/1 (.get (Sock/hostRecv s0 "recv" buf ofs len flags) 0))))))))
     (let [s (Sock/ofFd (Rt/l fd) "recv")
           n (Sock/read s (cast byte/1 buf) (Rt/ii ofs) (Math/min (Rt/ii len) (int 65536)))]
       (when (< n 0) (throw (ExtUnix/error (unchecked-int (unchecked-negate n)) "recv" "")))
       (Long/valueOf n)))
 
   (method ^:public ^:static caml_unix_send [fd buf ofs len flags]
+    (let [s0 (Sock/ofFd (Rt/l fd) "send")]
+      (when (.-host s0)
+        (let [n (Math/min (Rt/ii len) (int 65536))
+              o (Rt/ii ofs)]
+          (return (Long/valueOf (HostSys/num (HostSys/callFree "send" (new Object/1 ["send" (Sock/os s0) (java.util.Arrays/copyOfRange (cast byte/1 buf) o (unchecked-add-int o n))
+                                                                                     (Long/valueOf (Sock/flags flags))])) 0))))))
     (let [s (Sock/ofFd (Rt/l fd) "send")
           n (Sock/write s (cast byte/1 buf) (Rt/ii ofs) (Math/min (Rt/ii len) (int 65536)))]
       (when (< n 0) (throw (ExtUnix/error (unchecked-int (unchecked-negate n)) "send" "")))
       (Long/valueOf n)))
 
   ;; socket options are accepted and kept by no one (SO_REUSEADDR is the server's anyway); get answers false or 0
-  (method ^:public ^:static caml_unix_setsockopt [kind fd opt v] (Sock/ofFd (Rt/l fd) "setsockopt") Rt/UNIT)
+  ;; a host's socket: the boolean and integer options (kinds 0 and 1) are the OS's, the others kept by no one as above
+  (method ^:public ^:static caml_unix_setsockopt [kind fd opt v]
+    (let [s (Sock/ofFd (Rt/l fd) "setsockopt")]
+      (when (and (.-host s) (<= (Rt/l kind) 1))
+        (HostSys/call "setsockopt" (new Object/1 ["setsockopt" (Sock/os s) kind opt (Long/valueOf (Rt/l v))]))))
+    Rt/UNIT)
   (method ^:public ^:static caml_unix_getsockopt [kind fd opt]
-    (Sock/ofFd (Rt/l fd) "getsockopt")
+    (let [s (Sock/ofFd (Rt/l fd) "getsockopt")]
+      (when (and (.-host s) (<= (Rt/l kind) 1))
+        (return (Long/valueOf (HostSys/num (HostSys/call "getsockopt" (new Object/1 ["getsockopt" (Sock/os s) kind opt])) 0)))))
     (let [k (Rt/l kind)] (if (or (== k 2) (== k 4)) Rt/NONE (if (== k 3) (Double/valueOf 0.0) (Long/valueOf 0)))))
 
   ;; select's readiness of a descriptor for reading
@@ -193,7 +328,8 @@
       (cond (nil? d) false
             (some? (.-sock d))
             (let [s (cast Sock (.-sock d))]
-              (cond (some? (.-ahead s)) true
+              (cond (.-host s) (== 1 (HostSys/num (HostSys/call "poll" (new Object/1 ["poll" (Sock/os s)])) 0))
+                    (some? (.-ahead s)) true
                     (some? (.-server s))
                     (try (.setSoTimeout (.-server s) 1)
                          (let [c (.accept (.-server s))] (set! (.-ahead s) c) true)

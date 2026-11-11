@@ -3037,3 +3037,215 @@ Sources: GHC 9.14.1's pinned tarball, `compiler/GHC/Stg/Unarise.hs` (unariseFunA
   7,610 (0 worse, re-recorded) with its runs 60 of 63 on each side, 0 lost. Not run: bin/gate (the light lane).
 - Rule slips: a wait loop used process substitution `<(...)` once, and two commands named /dev/null (`>/dev/null 2>&1` on a
   debugging compile, a `grep` of /dev/null); none touched another worktree's files.
+
+## 2026-11-09: OCaml's independence: OC208 (b) built, the opam set's own verdicts (branch `ocaml-indep`, from next `6c3c87c02`)
+
+The brief: raise OCaml's independence (51.3 on next, after the 11-09 audit put every cell's record at 0.5); build OC208 as accepted
+(the user, 2026-11-09: (b), the recommendation); find what keeps eval, AOT and judge below 1 and remove a toolchain from check time;
+night 10 records the native read and print, not redone here. Recorded in doc/ocaml/OCAML-SURVEY.md, "As built: OC208 (b), the opam
+set's own verdicts", with the proposals OC209-OC211.
+
+- OC208 (b): `Unix.execv`, `execve`, `execvp`, `execvpe` in the AOT runtime (`jdk/ocaml/ocaml/rt/ExtProc.ae`), the C stubs' checks of
+  otherlibs/unix's `execv.c`, `execve.c`, `execvp.c` (OCaml 5.5.0, the pinned tarball) and oi's `ext_signal.go` behaviour (the standard
+  channels flushed, execvp's search as its lookPath). Java cannot exec, so the request is written to a path the compiled level's main
+  serves (`test/ocaml/o2j/main`: jrt's ProgramHost wrapped, `/proc/self/ocaml-exec`; Close chdirs to `ExtSys/cwd`, makes the standard
+  descriptors those of `Fd`'s table, `syscall.Exec`; a failure restores both and answers the errno). Alternatives: a native method of
+  the runtime implemented in Go (j2g resolves natives in jrt or the class's own package, so it needed a j2g or jrt change, both in every
+  key); exiting with a status and having main exec after RunMain (the runtime's `System/exit` ends the process inside jrt); OC208 (a)'s
+  spawn-wait-exit at both levels (the user chose (b)). At the light level nothing serves the path: the row stays `:unix-unported`.
+  Checked on a stub of jrt (exec with directory, environment and redirections; PATH search; errno 2 with the descriptors restored) and
+  at the light level by list; the compiled level's run is the night's (above the lane's 2 GiB).
+- The opam set's own verdicts (`test/ocaml/opam-verdicts.tsv`, `bin/oi`'s `own_verdicts`, the judges' `*` digest: the exit status
+  alone): the eight load programs by `test/ocaml/opam/load.reference`, astring's test and examples and uutf's test_uutf by exit status
+  (their packages' `Pkg.test` and `B0_ocaml.test`), astring's total by no output; pprint's and cmdliner's demonstrations stay on the
+  recorded run (OC211). A negative control at both suite levels. `bin/oi own-verdicts --check`: suite 100 of 121 at oi's level, 110 at
+  the AOT level, 0 differ. Alternatives: a report-line verdict for astring's and uutf's logs (the runner would rewrite their output, as
+  the hooks do; the packages' runners judge by status alone); expected outputs for the demonstrations (ocamlc's output copied: rejected).
+- The native path over the opam set (TY24 (a)'s default) refused astring's and cmdliner's units, hidden by the oracle path's record:
+  eight gaps of the typer ported from OCaml 5.5.0's typing/ (the pinned tarball: env.ml's .cmi reading, typemod.ml's
+  `Signature_names.simplify` and `Psig_typesubst`, load_path.ml's order and `find_normalized`, class types in a unit's interface, typecore.ml's `turn_let_into_match`, includemod.ml's
+  `Env.add_signature`) and printtyp.ml's cyclic types as `as 'a` aliases; each from a reproduction of a few lines (doc/ocaml/OCAML-SURVEY.md,
+  "The native path over the opam set"). Without them OC185's switch would have taken a suite record with fewer passes. Checked by
+  typer-check (79 of 79), repl-check (24 of 24), the native library rebuilt (no unit refused; seven units' Lambda differ only by stamps
+  and static exits' numbers) and the essential list.
+- Found: no OCaml gate step runs ocamlc or ocamlopt; eval and AOT are 0.5 by their cells' records (ocdump's path) until night 10's
+  native records and `bin/oi reap-switch --apply`; OC202's switch must take the compiled level's native record. The judge's recorded
+  cases left: 37 at oi's level, 16 at the AOT level (OC209-OC211).
+- Scores (`bin/crops-score --crop ocaml`): independence 51.3% to 51.4% (judge 0.563 to 0.570, its cases by `own-verdicts`); after
+  night 10's read and print records and the switch, about 99.9%.
+
+## 2026-11-10: OCaml's native path, night 10's gaps (branch `ocaml-indep2`, from `ocaml-indep` `813c335f0`)
+
+The brief: fix the native-path gaps night 10's light lanes exposed (`.tmp/night10/DIAGNOSIS.md` §2-3: la-oi-check 11 failing,
+la-oi-aot 9, la-oi-suite 25, of which `ocaml-indep` fixed 20), in a light lane (one process at a time, under 2 GiB), judging
+by list, not recording: the native records are night 12's, after the merge. Recorded in doc/ocaml/TYPER.md, "27. As built:
+night 10's native-path gaps".
+
+- 2a: `:c-runtime-internals` (all six classes files carrying it) also matches the C stubs' run reasons (`fail cstubs: `, `fail
+  output differs`, `fail timeout`), its `:programs` keeping it scoped: since ef4f24416 the stubs build on ci against the
+  clean-room headers, without the `CAML_INTERNALS` ones by design (OT6 (a)). The nine C-stub tests are classed again.
+- 2b: Ctype.nondep_type_decl's rule in `typemod.ae`'s `nondep` (OCaml 5.5.0, typing/ctype.ml and mtype.ml): in a covariant
+  position a kind that cannot be erased becomes abstract, a manifest that cannot be erased is tried through private
+  abbreviations, else dropped; the variance flips in a functor's parameter. Alternative: catching the error for abstract kinds
+  alone, as the diagnosis proposed (not faithful: OCaml's rule is by variance, and keeps a private expansion first).
+  typing-labels/mixin, mixin2, mixin3 and memory-model/forbidden pass.
+- 2c: `-safer-matching` ported (Matching.toplevel_handler: every match partial) rather than accepted as a no-op;
+  basic-more/safer_matching, its only user, passes.
+- Beyond the brief, cheapest first: redefine_largefile (Typemod.initial_env's add_units: the -I directories' units shadow the
+  opened Stdlib), tmc/tupled_function (Translattribute's tail-call attribute carried to Tmc's find_nonambiguous_tmc_call),
+  basic-modules/pr11186 (compose_coercions' Tcoerce_alias case, Tcoerce_structure's id_pos_list and wrap_id_pos_list,
+  transl_module_path through an absent alias). Each from OCaml 5.5.0's lambda/ and typing/ (the pinned tarball).
+- The AOT level's "timeout 120s of CPU" on lib-digest/md5 and misc/hamming is not a native-path gap: the native Lambda of md5
+  equals ocdump's up to stamps (ocdump run by hand as the oracle), its translated program the oracle path's, and both pass
+  natively here (md5 117 s, hamming 134 s wall): the CPU limit's edge under the night's load.
+- Left: lib-sys/immediate64 (Ctype's pattern-mode unification of an abbreviation with an abstract type, mcomp and
+  record_equation, not ported) and opam/sexplib0/load (a GADT's inline record), both native-path classes until ported.
+- Checks: the lists above by `bin/oi check`, `suite check` and `check --aot` `--only-list`; typer-check 79 of 79 at the three
+  levels; stdlib-check 71 of 71; the oi-essential and oi-divergences steps' commands (essential 59 of 59, repl-check 24 of 24, own-verdicts 0 differ); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's native path, the last two of night 10's gaps (branch `ocaml-indep3`, from `ocaml-indep2` `660185ddd`)
+
+The brief: close lib-sys/immediate64 and opam/sexplib0/load on the native path, in a light lane, judged by list, no `--record`.
+Recorded in doc/ocaml/TYPER.md, "28. As built: Ctype's pattern mode and the or-pattern's equations"; the new choice OC212.
+
+- immediate64: `include Sys.Immediate64.Make(Int)(Int64)` then `match repr with Immediate -> ...`, where `repr : t repr` and
+  `Immediate : Int.t repr`: OCaml 5.5.0's Ctype.unify3 in pattern mode equates the abstract `t` with `int`, because
+  is_instantiable (typing/ctype.ml) admits every nullary abstract public type without a manifest, not only the locally abstract
+  ones the port admitted. Ported from typing/ctype.ml into the port's mismatch hook (`typecore.ae`'s `add-equation`): unify3's
+  pattern-mode cases (two instantiable types, one, a constructor against another type), reify, record_equation (its pairs kept,
+  read by nothing: -principal's warning is not ported) and mcomp with its helpers (`types.ae`, the brief's ~200 lines). The
+  predefined abstract types are Type_external in 5.5 (typing/predef.ml): recognised by path, so `int` is no instantiable type and
+  `int` against a tuple is incompatible (typer-check's t72_gadt_exhaustive caught the first draft, which took them for abstract:
+  a Match_failure handler came back). As Typecore.solve_Ppat_construct, the pattern mode only for a generalized constructor; Parmatch's
+  possible-constructor test takes the same rule without equations. Alternative: the old local-abstract rule plus a special case
+  for abstract types of the current structure (not OCaml's rule, which has no such distinction since 5.x).
+- sexplib0: the diagnosis's "GADT inline record" was not the cause. Reduced by hand to a 40-line program (`let (Field {kind; conv;
+  _}) = fields in match kind, s with ... | (Required | Default _ | Omit_nil | Sexp_option | Sexp_list), _ -> ...`), which the
+  ocaml-indep2 typer refuses with the night's message and the host's ocaml accepts: an or-pattern's alternatives shared one set of
+  GADT equations, so `Sexp_option`'s `a = 'x option` met `Sexp_list`'s `'y list`. Typecore's Ppat_or types each alternative in a
+  copy of the pattern environment (Pattern_env.copy); ported: each alternative's equations dropped after it.
+- Approximations left, OC212 (recommended (a), keep them): Path.scope by stamps, the predefined types by path, has_injective_univars
+  and the row backtracking not modelled, a foreign abstract type's non-injective parameters unified.
+- Checks (none `--record`): `bin/oi suite check --only-list` and `suite check --aot --only-list` (immediate64, sexplib0/load: 2 of 2
+  pass at each level, by their own verdicts); typer-check 79 of 79 at the three levels and their runs; stdlib-check 71 of 71; `bin/oi
+  test`; repl-check --native 24 of 24; the essential list 59 of 59; own-verdicts 0 differ; the four oi-divergences commands (0 failing
+  not in a class); `bin/reap` (41 of 44 cells checked, 0 problems); `bin/crops-score --judge --strict` (passes).
+
+## 2026-11-10: OCaml's stage S1 and the own verdicts' rest: OC213, OC214, OC209, OC210 (branch `ocaml-s1`, from `ocaml-indep3` `51240f00d`)
+
+The user decided OC209-OC222 (a) about 10:30 UTC (the main session's plan for OCaml's completeness above 90%, OC213-OC222, and the
+survey's OC209-OC212); recorded in doc/ocaml/OCAML-SURVEY.md, "Decided (the user, 2026-11-10, about 10:30 UTC): OC209-OC222", built
+as "As built: OC213, OC214, OC209, OC210". A light lane: no gate, each process under 2 GiB, one run at a time.
+
+- OC213 (a): the plan counted the read cell's 61 testsuite rejections as parse-error tests whose reference is the error; read file by
+  file, about half are toplevel scripts (expect tests, toplevel tests, `ocaml` scripts with directives) that the read level's
+  Parse.implementation rejects but their own tool reads. So `own-read` (arbace.repr.ocaml.native) judges each as its test's tool reads
+  it: ocamlc.byte's `.compilers.reference` byte for byte (20), the expect tool's Parse.use_file (18), the toplevel's use_file read or its
+  first error's chunk (toploop.ml's line chunks, positions from 1, //toplevel//) held in the reference (18), scripts (2), and the files
+  other tests `#use` or name (3). All 61 pass, three negative controls fail. Sources: OCaml 5.5.0's tarball (SHA-256 fcc6ae66...):
+  testsuite/tools/expect.ml (parse_contents), toplevel/toploop.ml (loop, get_phrases), toplevel/topcommon.ml (refill_lexbuf),
+  stdlib/lexing.ml (flush_input). Applied to read-results.edn's testsuite rows by `bin/repr-ocaml own-read` (the rows re-judged, no
+  round trip; the alternative, a whole `--record-results testsuite`, would have rewritten the record's header to the native reader's
+  while the other corpora's rows are still the helper's). Alternative considered: judge only the 20 ocamlc tests and keep the scripts
+  by design; rejected, the expect and toplevel tools' reads are the tests' own.
+- OC214 (a): a quoted string's CR LF written CR CR LF (lexer.mll's store_normalized_newline removes one CR) and its non-UTF-8 bytes
+  written as bytes (byte marks U+DC80-U+DCFF in the printed text, `text-bytes`). newlines.ml passes; test_pcre.ml's trees too, but its
+  mode `:full` refuses a file that is not UTF-8, so it moves to a new deferred class `:full-not-utf8` (the plan counted +2; it is +1).
+  The print records wait for the night's `--record-results` of the two corpora (the tool records whole corpora only).
+- OC209 (a): native-only tests judged at oi's level by their `.reference` (15), the 4 native-behaviour ones listed in own-verdict.edn.
+  The suite's re-judge found asmcomp/regression_value_kinds refused by the native typer (an or-pattern whose first alternative needs
+  its GADT equation for its own constraint), most likely TYPER.md §28's per-alternative equations: left for the typer's next slice,
+  nothing recorded.
+- OC210 (a): ocamltest's CRLF normalisation (ocamltest/filecompare.ml's compare_text_files: the own verdict's second digest,
+  `crlf_other`) and its variable expansion (ocamltest/environments.ml's expand, stdlib/buffer.ml's add_substitute, in header.awk);
+  norm3, subst1, subst2 by their own verdicts at both levels; subst1's and subst2's ocamlc and ocamlopt runs recorded again by hand
+  (`bin/oi record-ref --only`: their arguments changed); two new negative controls a level.
+- Scores: completeness 82.5% to 83.0% (read 3,082 to 3,143), independence 51.4% to 51.5% (judge 0.570 to 0.576). Checks: own-verdicts
+  --check 0 differ; the four oi-divergences commands 0 failing; `bin/reap --record` 0 problems; `bin/crops-score --record`, `--judge
+  --strict` 0 problems; `roundtrip --text samples stdlib`; the 61 files' round trip unchanged.
+
+## 2026-11-10: OCaml's or-pattern regression and OC215 (a) with OC199 (a), the C API at the compiled level (branch `ocaml-s2`, from `ocaml-s1` `d87ed4a2c`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). Sources: OCaml 5.5.0's tarball (typing/typecore.ml's type_pat
+Ppat_or, Ppat_constraint, Ppat_alias, solve_Ppat_constraint, build_as_type and build_as_type_extra; typing/primitive.ml's
+parse_declaration and native_repr).
+
+- asmcomp/regression_value_kinds (found by `ocaml-s1`'s OC209 re-judge): §28's per-alternative equations were not the cause; they are
+  OCaml's (each alternative typed in a `Pattern_env.copy` of the outer environment, the variables unified in the outer one). The port's
+  Ppat_constraint typed the inner pattern against the expected type and dropped the constraint, so `((3.5 : a) as a)` under `Float`'s
+  equation gave the alias `float` where OCaml gives it `a` (the constraint's type, build_as_type_extra's ground case), and the
+  or-pattern's variables then disagreed outside the equation. Ported: the inner pattern typed against the constraint, the pattern's type
+  the constraint's, the constraint kept as an extra for build_as_type; an alias's pattern has its inner pattern's type (TYPER.md §29).
+  Alternative considered: keeping the equations of an alternative for the or-pattern's variable unification; rejected, OCaml does not.
+- OC215 (a) (the user, 2026-11-10, amending OC198): the compiled level's main links `arbace/oicapi` and oi's values serve as mirrors of
+  the Java runtime's (OCAML-SURVEY.md, "As built: OC215"). The bridge is a file the main's host serves, as OC208's exec: the runtime
+  writes and drives, the C runs on a goroutine so that its callbacks and named values are replies the runtime answers. Alternatives
+  considered: (1) the value conversion in Go over j2g's translated classes (names like `J_ocaml_rt_Block_J`): the main would depend on
+  j2g's naming and on jrt's array and boxing types, unprovable without a j2g run; (2) a Java static method the Go side calls for each
+  callback (`lang.J_ocaml_rt_CApi_J_...`): the same dependence, and j2g may prune a method only Go calls; (3) natives in jrt: a jrt change
+  moves the runtime key and the gate (not a crop path). The file and the goroutine need neither.
+- OC199 (a): an external with no bytecode name is `native:NAME:ARGS:RESULT` in the native typer's dump (Primitive's native_repr letters),
+  o2j calls it through `CApi/nativeCall`, oicapi's `CallRaw` passes unboxed words and floats.
+- Checked light: the main's Go builds and vets (printed with oi, oicapi, ci, crt and stand-ins for jrt and lang); a fake runtime in Go
+  drives the main's file over callback/test1's stubs (callbacks, identity, updates, exceptions, a missing stub); the light level's rows
+  of missing externals unchanged; oi's C API programs unchanged; typer-check, stdlib-check, the essential list, own-verdicts, the four
+  oi-divergences commands. The compiled runs (j2g, above 2 GiB) are the night's: `bin/oi check --aot --level compiled --only-list
+  test/ocaml/capi-compiled.txt` under the big lock, then the classes of what does not pass.
+
+## 2026-11-10: OCaml's OC216 (a), the small runtime ports (branch `ocaml-s3`, from `ocaml-s2` `79afd5c9b`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The user decided OC213-OC222 (a) on 2026-11-10; OC216 (a)
+reverses, for the programs it moves, OC11 (a) (the stack limit, Obj's layout), OC64 (a) (the counters), OC68 (b)'s weak part, OC65
+(reachable_words) and OT7 (a) (Marshal's Closures flag). Sources: OCaml 5.5.0's tarball (runtime/gc_ctrl.c, startup_aux.c, extern.c,
+intern.c, weak.c; the tests named below). OCAML-SURVEY.md, "As built: OC216 (a)".
+
+- Gc.Tweak's parameters in `Sys.runtime_parameters` (format_gc_tweaks); the asked collections counted as gc_ctrl.c counts them beside
+  the runtime's own (oi: Go's NumGC less the cycles the asked ones ran; the AOT runtime: a canary WeakReference, Java having no count);
+  `Obj.reachable_words` by OCaml's layout of the values on 64 bits.
+- OCAMLRUNPARAM's l: header.awk passes it as it passed d (OC193). oi counts words under it (a call one, its frame's slots more), at most
+  l and 800,000; first tried as l/4 calls, which passed on the native path but not on ocamlc's (misc/pr7168's 273-let frames: 25,000
+  such calls are Go's stack beyond the CPU limit), and l/4 for the call's own words with the slots beside overflowed stackoverflow
+  before its x = 20000: the frame's slots and the call's one are the bytecode's stack about. The AOT runtime counts calls, l/4.
+- Weak keys as weak pointers (Go's weak, jrt's WeakReference). Found while porting: `weak.Pointer.Value` shades its value while the
+  collector marks, so a program that checks a weak key in a loop kept it alive for ever (a probe: 726 collections, never emptied); a
+  check reads a flag `runtime.AddCleanup` sets instead, and the asked collections refresh the flags of every live weak array (a
+  registry of weak pointers to the arrays, not to each key: the first try, a registry a key, was slower still). Ephemerons' data
+  stays the ephemeron's while the key lives, cleared with a dead key at the asked collections. Alternatives considered: a pending
+  strong slot made weak at the next collection (cheaper for a slot overwritten soon, but a key kept one cycle longer and a flag across
+  goroutines); ephemerons proper (Go's runtime has none; the data on the key needs the key's object: no). The cost, about 5 us a
+  Weak.set of a fresh value, takes weak-ephe-final/weak_array_par (4,000,000 sets, just within the limit before) to `:speed`.
+- Marshal's Closures flag: CODE_CODEPOINTER with the code's number in the process's table and the digest of its name; o2j's classes
+  get envOf, blank and fill for the AOT runtime. lib-marshal/fuzzy then fuzzes past its first message and found the AOT reader's
+  Java exceptions on altered sizes: Failure "input_value: ill-formed message" (an invalid read for a bigarray longer than the data).
+- Not built: AF_UNIX and signals at the compiled level (a host path as OC208's, several days with compiled runs): later.
+- Moved, oi's level: misc/gctweaks, lib-obj/reachable_words, misc/pr7168, runtime-errors/stackoverflow, regression/pr5233,
+  weak-ephe-final/weaklifetime, weaktest, lib-marshal/intext, intext_par, compaction/test_compact_full, lib-marshal/fuzzy,
+  runtime-objects/Tests (12); weak_array_par pass to `:speed`. The light AOT level: gctweaks, reachable_words, pr7168,
+  test_compact_full, fuzzy, Tests (6); stackoverflow to `:light-depth`. Recorded `--only-list --record`, ocamlc's path (`--ocdump`,
+  the matrix's sources until OC185's switch) and the native one (check-oi-native.edn).
+
+## 2026-11-10: OCaml's OC216 (a), the rest: AF_UNIX sockets and the OS's signals at the compiled level (branch `ocaml-s4`, from `ocaml-s3` `b45b8aa4f`)
+
+A light lane (no gate, each process under 2 GiB, one run at a time). The part of OC216 (a) (the user, 2026-11-10) `ocaml-s3` left:
+OT23 (a) and OT24 (a) reversed at the compiled level. Sources: OCaml 5.5.0's tarball, otherlibs/unix's socket.c, socketpair.c,
+socketaddr.c, accept.c, bind.c, connect.c, listen.c, shutdown.c, getsockname.c, getpeername.c, sendrecv.c, sockopt.c, select.c,
+kill.c, runtime/signals.c, as oi's ext_unix_sock.go and ext_signal.go port them. OCAML-SURVEY.md, "As built: OC216 (a), the rest".
+
+- The route: the compiled main serves `/proc/self/ocaml-host` beside OC208's exec file, a request/reply of length-prefixed fields; the
+  AOT runtime's new `HostSys` asks it, its `Sock` keeps a PF_UNIX socket or a socketpair as the OS's descriptor there (streams
+  `HSockIn`/`HSockOut` in Fd's table), and `ExtSignal` sends kill(2) to another process and has the OS's signals for a handler waited
+  for by a thread (`sigwait`) and posted as pending. No change to jrt or j2g (crop paths only). Alternatives considered: jrt's
+  `HostChannels` natives (IP only, a key move and a re-seed for AF_UNIX: no); Java's UnixDomainSocketAddress (jrt has no FileSystems,
+  F9, and Java's has neither datagrams nor abstract names: no); a poll of pending signals at every tick (a host round trip a tick: no,
+  a waiting thread and the Gil's yield instead).
+- The light level is unchanged in behaviour (no host in stage 0): the recvfrom programs stay `:unix-java` there; the class's text says so,
+  and at the compiled level it keeps them until the night's compiled run proves them.
+- Checked: the main's Go printed, vetted and tested in a scratch module (recvfrom's scenarios, a socketpair, a stream socket's calls,
+  sigaction/kill/sigwait); the runtime's new forms at the light level over the signal and socket programs (two type errors of the new
+  forms found and fixed first).
+- The three timeouts OC216 left unrecorded, rerun at load 13-19 (`cat /proc/loadavg` under 20): regression/pr7798 and
+  weak-ephe-final/ephetest3 at the light AOT level are over the CPU limit twice in a row (the limit is CPU time, not wall: OC216's
+  counters and weak keys, not the load); their aot-known.edn entries' kind is now "timeout " in their `:gc-and-memory` class and
+  they are recorded so (check-aot.edn). misc/darkening_work at oi's level timed out at load 15 and finished at load 13 with its
+  recorded class's output: at the CPU limit's edge; its record is unchanged (a first try recorded the finished run under a "timeout "
+  entry, an unclassed failure: reverted).

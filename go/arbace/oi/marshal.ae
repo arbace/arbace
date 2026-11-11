@@ -1,9 +1,11 @@
 (in-ns 'go.arbace.oi) (go/file "marshal.go" :imports [
 
 
+    [md5 "crypto/md5"]
     ^{:line 4} [binary "encoding/binary"]
     ^{:line 5} [fmt "fmt"]
-    ^{:line 6} [math "math"]])
+    ^{:line 6} [math "math"]
+    [sync "sync"]])
 
 
 ;; runtime/extern.c and intern.c: Marshal's format (the small and big headers, no compression),
@@ -280,7 +282,27 @@
                 (set! (.-size64 s) + (+ 2 (>> (+ sz64 7) 3)))))
             (.record s x))
           (case [(* Closure)]
-            (.invalid s "output_value: functional value"))
+            ;; the Closures flag (OC216 (a), the user 2026-11-10; OT7 reversed): a closure is a block of Closure_tag whose first field
+            ;; is its code pointer (codeRef), then its environment (a partial application: the function and the arguments so far)
+            (when (== (bit-and (.-flags s) flagClosures) 0)
+              (.invalid s "output_value: functional value"))
+            (when (.shareLookup s x)
+              (break))
+            (let [fs (closureFields x)]
+              (when (== fs nil)
+                (.invalid s "output_value: functional value"))
+              (.header s (len fs) TagClosure)
+              (set! (.-size32 s) + (conv uint64 (+ 1 (len fs))))
+              (set! (.-size64 s) + (conv uint64 (+ 1 (len fs))))
+              (.record s x)
+              (when (> (len fs) 1)
+                (set! stack (append stack (lit externFrame :f fs :i 1))))
+              (set! v (aget fs 0))
+              (goto :again)))
+          (case [(* codeRef)]
+            (set! (.-buf s) (append (.-buf s) codeCodePointer))
+            (set! (.-buf s) (.AppendUint32 binary/BigEndian (.-buf s) (conv uint32 (.-idx x))))
+            (set! (.-buf s) (append (.-buf s) (spread (codeDigest (.-idx x))))))
           (case [(* Fiber)]
             (.invalid s "output_value: continuation value"))
           (case [(* Block)]
@@ -395,7 +417,8 @@
     ^{:line 363 :tag string} fun
     ^{:line 364 :tag (slice Value)} objs
     ^{:line 365 :tag int} nobjs
-    ^{:line 366 :tag int} counter))
+    ^{:line 366 :tag int} counter
+    ^bool closures))
 
 
 ^{:go/end 373} (go/method check [^{:tag (* internState)} s ^int n]
@@ -676,9 +699,12 @@
                   (case [codeDoubleArray64Little codeDoubleArray64Big]
                     (doubleArray (conv int (.u64 s)) (== code codeDoubleArray64Little)))
                   (case [codeCodePointer]
-                    (.u32 s)
-                    (let [d (.block s 16)]
-                      (Failwith (fmt/Sprintf "input_value: unknown code module %X" d))))
+                    (let [idx (conv int (.u32 s))
+                        d (.block s 16)]
+                      (when (or (>= idx (codeCount)) (!= (conv string d) (conv string (codeDigest idx))))
+                        (Failwith (fmt/Sprintf "input_value: unknown code module %X" d)))
+                      (set! (.-closures s) true)
+                      (set! v (addr (lit codeRef :idx idx)))))
                   (case [codeInfixPointer]
                     (.failf s "bad infix offset"))
                   (case [oldCodeCustom]
@@ -743,7 +769,130 @@
 
             (set! @dest v)))))
 
+    (when (.-closures s)
+      (return (fixClosures (aget root 0))))
     (aget root 0)))
+
+;; ---- closures (OC216 (a)): the code pointers of oi's closures. A function's code (or a native closure) gets the next number of
+;; the process's table when a closure of it is first marshalled; the pointer is written as extern.c writes one, CODE_CODEPOINTER, the
+;; number for the offset and the digest of the code's name for the code fragment's digest (intern.c's caml_find_code_fragment_by_digest:
+;; a number this process's table does not have, or whose code is another, is an unknown code module). A partial application's number
+;; is codePap, and the closure block holds its function and arguments.
+
+(go/type codeRef "codeRef is a code pointer in a closure block being marshalled or read back.\n" (struct ^int idx))
+
+(go/type codeEntry (struct ^{:tag (* Code)} code ^{:tag (* Closure)} native ^string name))
+
+(go/var
+  [^{:tag (slice codeEntry)} codeTable (lit (slice codeEntry) (lit codeEntry :name "caml_curry"))]
+  [codeIndex (lit (map any int))]
+  [^sync/Mutex codeMu])
+
+(go/const [codePap 0])
+
+(go/func codeCount ^int []
+  (.Lock codeMu)
+  (defer (.Unlock codeMu))
+  (len codeTable))
+
+(go/func codeDigest ^{:tag (slice byte)} [^int idx]
+  (.Lock codeMu)
+  (let [name (.-name (aget codeTable idx))]
+    (.Unlock codeMu)
+    (let [d (md5/Sum (conv (slice byte) name))]
+      (subslice d _))))
+
+(go/func codeNumber "codeNumber is the table's number of a code (or a native closure), given one when it has none.\n" ^int [^any key ^codeEntry e]
+  (.Lock codeMu)
+  (defer (.Unlock codeMu))
+  (when [(values i ok) (aget codeIndex key)] ok
+    (return i))
+  (aset codeIndex key (len codeTable))
+  (set! codeTable (append codeTable e))
+  (- (len codeTable) 1))
+
+(go/func closureFields "closureFields is a closure's block as the Closures flag writes it: its code pointer then its environment; nil for a\nclosure whose environment holds a mutable variable's cell (not an OCaml value).\n" ^{:tag (slice Value)} [^{:tag (* Closure)} c]
+  (switch
+    (case [(!= (.-Base c) nil)]
+      (return (append (lit (slice Value) (addr (lit codeRef :idx codePap)) (.-Base c)) (spread (.-Args c)))))
+    (case [(!= (.-Code c) nil)]
+      (range [_ x (.-Env c)]
+        (when [(values _ cell) (assert (* Cell) x)] cell
+          (return nil)))
+      (return (append (lit (slice Value) (addr (lit codeRef :idx (codeNumber (.-Code c) (lit codeEntry :code (.-Code c) :name (.-Name (.-Code c))))))) (spread (.-Env c)))))
+    (default
+      (return (lit (slice Value) (addr (lit codeRef :idx (codeNumber c (lit codeEntry :native c :name "native")))))))))
+
+(go/func fixClosures "fixClosures turns the closure blocks of a value read back into closures: every block reached is visited once, a block\nof Closure_tag whose first field is a code pointer becomes the closure of that code (its environment the other fields), and a\ncode pointer anywhere else is an ill-formed message.\n" ^Value [^Value root]
+  (let [seen (lit (map (* Block) bool))
+        memo (lit (map (* Block) (* Closure)))
+        ^{:tag (slice (* Block))} blocks nil
+        ^{:tag (slice (* Block))} cls nil
+        stack (lit (slice Value) root)]
+    (while (> (len stack) 0)
+      (let [v (aget stack (- (len stack) 1))]
+        (set! stack (subslice stack _ (- (len stack) 1)))
+        (when [(values b ok) (assert (* Block) v)] (and ok (not (aget seen b)))
+          (aset seen b true)
+          (if (== (.-Tag b) TagClosure)
+            (do
+              (when (== (len (.-F b)) 0) (Failwith "input_value: ill-formed message"))
+              (let [(values cr isc) (assert (* codeRef) (aget (.-F b) 0))]
+                (when (not isc) (Failwith "input_value: ill-formed message"))
+                (.Lock codeMu)
+                (let [e (aget codeTable (.-idx cr))]
+                  (.Unlock codeMu)
+                  (switch
+                    (case [(== (.-idx cr) codePap)]
+                      (when (< (len (.-F b)) 2) (Failwith "input_value: ill-formed message"))
+                      (aset memo b (addr (lit Closure))))
+                    (case [(!= (.-native e) nil)]
+                      (aset memo b (.-native e)))
+                    (default
+                      (aset memo b (addr (lit Closure :Arity (.-Arity (.-code e)) :Code (.-code e))))))))
+              (set! cls (append cls b))
+              (set! stack (append stack (spread (subslice (.-F b) 1)))))
+            (do
+              (set! blocks (append blocks b))
+              (set! stack (append stack (spread (.-F b)))))))))
+    (let [r (fn ^Value [^Value v]
+              (when [(values b ok) (assert (* Block) v)] ok
+                (when [(values c isc) (aget memo b)] isc
+                  (return c)))
+              (when [(values _ ok) (assert (* codeRef) v)] ok
+                (Failwith "input_value: ill-formed message"))
+              v)]
+      (range [_ b blocks]
+        (range [i x (.-F b)]
+          (aset (.-F b) i (r x))))
+      (let [paps 0]
+        (range [_ b cls]
+          (let [c (aget memo b)
+                idx (.-idx (assert (* codeRef) (aget (.-F b) 0)))]
+            (switch
+              (case [(== idx codePap)]
+                (let [(values base ok) (assert (* Closure) (r (aget (.-F b) 1)))]
+                  (when (not ok) (Failwith "input_value: ill-formed message"))
+                  (set! (.-Base c) base)
+                  (set! (.-Args c) (make (slice Value) (- (len (.-F b)) 2)))
+                  (range [i x (subslice (.-F b) 2)]
+                    (aset (.-Args c) i (r x)))
+                  (inc! paps)))
+              (case [(and (!= (.-Code c) nil) (> (len (.-F b)) 1))]
+                (set! (.-Env c) (make (slice Value) (- (len (.-F b)) 1)))
+                (range [i x (subslice (.-F b) 1)]
+                  (aset (.-Env c) i (r x)))))))
+        ;; a partial application's arity: its function's less its arguments (a function that is itself one, after it)
+        (for [k 0] (< k (+ paps 1)) (inc! k)
+          (range [_ b cls]
+            (let [c (aget memo b)]
+              (when (!= (.-Base c) nil)
+                (set! (.-Arity c) (- (.-Arity (.-Base c)) (len (.-Args c))))))))
+        (range [_ b cls]
+          (let [c (aget memo b)]
+            (when (and (!= (.-Base c) nil) (<= (.-Arity c) 0))
+              (Failwith "input_value: ill-formed message")))))
+      (r root))))
 
 
 ^{:go/end 749} (go/func init []

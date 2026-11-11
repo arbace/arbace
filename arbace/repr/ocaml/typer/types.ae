@@ -1267,7 +1267,24 @@
               :else (let [n (loop [] (let [n (letter-of-int @counter)] (swap! counter inc) (if (or (named n) (used n)) (recur) n)))]
                       (recur (rest vs) (assoc m v (str "'" n)) (conj used n))))))))))
 
+(def ^:dynamic *printing*
+  "The nodes type-text is printing (an IdentityHashMap: node -> its alias or nil): a node met again inside itself is a cycle
+  (a recursive polymorphic variant or object), printed as Printtyp's `as 'a` alias"
+  nil)
+
+(declare type-text*)
 (defn type-text [names t prec]
+  (if (nil? *printing*)
+    (binding [*printing* (java.util.IdentityHashMap.)] (type-text names t prec))
+    (let [t (repr t) ^java.util.IdentityHashMap m *printing*]
+      (if (.containsKey m t)
+        (or (.get m t) (let [a (str "'r" (inc (count (remove nil? (.values m)))))] (.put m t a) a))
+        (do (.put m t nil)
+            (let [s (type-text* names t prec) a (.get m t)]
+              (.remove m t)
+              (if a (str "(" s " as " a ")") s)))))))
+
+(defn- type-text* [names t prec]
   ;; prec: 0 top, 1 arrow argument / tuple component, 2 constructor argument
   (let [t (repr t) d (desc t)
         paren (fn [p s] (if (> prec p) (str "(" s ")") s))]
@@ -1316,3 +1333,188 @@
   "The texts of ts at precedence prec, one naming of their variables"
   [ts prec]
   (let [names (name-vars ts)] (mapv #(type-text names % prec) ts)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Ctype.mcomp (OCaml 5.5.0, typing/ctype.ml): could two types be equal? Used by the pattern mode's unification, where a
+;; mismatch under a type constructor is no error unless the types are surely incompatible. It throws {:unify
+;; :incompatible} when no equality witness can exist; otherwise it returns (an over-approximation, as OCaml's).
+
+(defn- mcomp-incompatible [] (throw (ex-info "Incompatible" {:unify :incompatible})))
+
+
+(defn- path-equiv [p1 p2] (or (= p1 p2) (= (*normalize-type-path* p1) (*normalize-type-path* p2))))
+
+(declare mcomp* mcomp)
+
+(defn- mcomp-list [pairs env tl1 tl2]
+  (when-not (= (count tl1) (count tl2)) (mcomp-incompatible))
+  (dorun (map #(mcomp* pairs %1 %2) tl1 tl2)))
+
+(defn- mcomp-kind [k1 k2]
+  (let [a (field-kind-repr k1) b (field-kind-repr k2)]
+    (when (or (and (= :public a) (= :absent b)) (and (= :absent a) (= :public b))) (mcomp-incompatible))))
+
+(defn- mcomp-fields [pairs ty1 ty2]
+  (let [[fields2 rest2] (flatten-fields ty2)
+        [fields1 rest1] (flatten-fields ty1)
+        [ps miss1 miss2] (associate-fields fields1 fields2)
+        has-present (fn [l] (some (fn [[_ k _]] (= :public (field-kind-repr k))) l))]
+    (mcomp* pairs rest1 rest2)
+    (when (or (and (has-present miss1) (= :Tnil ((desc (object-row ty2)) 0)))
+              (and (has-present miss2) (= :Tnil ((desc (object-row ty1)) 0))))
+      (mcomp-incompatible))
+    (doseq [[_ k1 t1 k2 t2] ps] (mcomp-kind k1 k2) (mcomp* pairs t1 t2))))
+
+(defn- mcomp-row [pairs row1 row2]
+  (let [[r1 r2 ps] (merge-row-fields (row-fields row1) (row-fields row2))
+        cannot-erase (fn [[_ f]] (= :Rpresent ((field-view f) 0)))]
+    (when (or (and (row-closed row1) (some cannot-erase r2)) (and (row-closed row2) (some cannot-erase r1)))
+      (mcomp-incompatible))
+    (doseq [[_ f1 f2] ps]
+      (let [v1 (field-view f1) v2 (field-view f2)
+            k1 (v1 0) k2 (v2 0)
+            pnone (fn [v] (and (= :Rpresent (v 0)) (nil? (v 1))))
+            psome (fn [v] (and (= :Rpresent (v 0)) (some? (v 1))))
+            either-args (fn [v] (and (= :Reither (v 0)) (seq (v 2))))
+            either-noarg (fn [v] (and (= :Reither (v 0)) (v 1)))]
+        (cond
+          (or (and (pnone v1) (or (psome v2) (either-args v2) (= :Rabsent k2)))
+              (and (psome v1) (or (pnone v2) (either-noarg v2) (= :Rabsent k2)))
+              (and (or (either-args v1) (= :Rabsent k1)) (pnone v2))
+              (and (or (either-noarg v1) (= :Rabsent k1)) (psome v2)))
+          (mcomp-incompatible)
+          (and (psome v1) (psome v2)) (mcomp* pairs (v1 1) (v2 1))
+          (and (psome v1) (= :Reither k2) (not (v2 1))) (run! #(mcomp* pairs (v1 1) %) (v2 2))
+          (and (= :Reither k1) (not (v1 1)) (psome v2)) (run! #(mcomp* pairs (v2 1) %) (v1 2))
+          :else nil)))))
+
+(defn- mcomp-record-description [pairs ls1 ls2]
+  (when-not (= (count ls1) (count ls2)) (mcomp-incompatible))
+  (doseq [[l1 l2] (map vector ls1 ls2)]
+    (mcomp* pairs (:type l1) (:type l2))
+    (when-not (and (= (:name l1) (:name l2)) (= (boolean (:mut l1)) (boolean (:mut l2)))
+                   (= (boolean (:atomic l1)) (boolean (:atomic l2))))
+      (mcomp-incompatible))))
+
+(defn- mcomp-type-option [pairs t t']
+  (cond (and (nil? t) (nil? t')) nil
+        (and t t') (mcomp* pairs t t')
+        :else (mcomp-incompatible)))
+
+(defn- mcomp-variant-description [pairs cs1 cs2]
+  (when-not (= (count cs1) (count cs2)) (mcomp-incompatible))
+  (doseq [[c1 c2] (map vector cs1 cs2)]
+    (mcomp-type-option pairs (:res c1) (:res c2))
+    ;; Cstr_tuple against Cstr_tuple, Cstr_record against Cstr_record (an inlined record's labels its :inlined)
+    (cond (and (:inlined c1) (:inlined c2))
+          (mcomp-record-description pairs (:inlined c1) (:inlined c2))
+          (or (:inlined c1) (:inlined c2)) (mcomp-incompatible)
+          :else (mcomp-list pairs nil (:args c1) (:args c2)))
+    (when-not (= (:name c1) (:name c2)) (mcomp-incompatible))))
+
+(defn decl-kind
+  "A declaration's kind's tag; the predefined abstract types are Type_external in OCaml 5.5 (predef.ml), kept
+  [:abstract] in the port's declarations"
+  [p decl]
+  (let [k ((:kind decl) 0)]
+    (if (and (= :abstract k) (= :Pident (p 0)) (:predef (p 1))) :external k)))
+
+(defn datatype-decl?
+  "Ctype.is_datatype: a variant, a record, an extensible type or an external (a predefined abstract type)"
+  [p decl]
+  (boolean (and decl (#{:variant :record :open :external} (decl-kind p decl)))))
+
+(defn- injective-params
+  "The injectivity of a declaration's parameters (Variance.Inj): a datatype's are; an abstract type's when annotated
+  `!`; an abbreviation's are not assumed; the predefined types' are (Variance.full)"
+  [p decl n]
+  (cond (nil? decl) (repeat n false)
+        (datatype-decl? p decl) (repeat n true)
+        (:param-annots decl) (map (fn [[_ i]] (= :Injective i)) (:param-annots decl))
+        :else (repeat n false)))
+
+(defn instantiable
+  "Ctype.is_instantiable: a nullary abstract public type without a manifest ([path declaration]), which a GADT pattern
+  may equate"
+  [t]
+  (let [d (desc t)]
+    (when (and (= :Tconstr (d 0)) (empty? (d 2)))
+      (let [decl (*find-type* (d 1))]
+        (when (and decl (= :abstract (decl-kind (d 1) decl)) (not (:private decl)) (nil? (:manifest decl))
+                   (zero? (or (:arity decl) (count (:params decl)))))
+          [(d 1) decl])))))
+
+(defn mcomp?
+  "Ctype.mcomp as a predicate"
+  [t1 t2]
+  (try (mcomp t1 t2) true
+       (catch arbace.lang.ExceptionInfo e (if (= :incompatible (:unify (ex-data e))) false (throw e)))))
+
+(defn- mcomp-type-decl [pairs p1 p2 tl1 tl2]
+  (let [decl (*find-type* p1) decl' (*find-type* p2)]
+    (when (and decl decl')
+      (if (path-equiv p1 p2)
+        (doseq [[i t1 t2] (map vector (injective-params p1 decl (count tl1)) tl1 tl2)]
+          (when i (mcomp* pairs t1 t2)))
+        (let [k (decl-kind p1 decl) k' (decl-kind p2 decl')]
+          (cond
+            (and (= :record k k') (= ((:kind decl) 2) ((:kind decl') 2)))
+            (do (mcomp-list pairs nil tl1 tl2)
+                (mcomp-record-description pairs ((:kind decl) 1) ((:kind decl') 1)))
+            (= :variant k k')
+            (do (mcomp-list pairs nil tl1 tl2)
+                (mcomp-variant-description pairs ((:kind decl) 1) ((:kind decl') 1)))
+            (= :open k k') (mcomp-list pairs nil tl1 tl2)
+            (and (= :external k k') (= (path-head p1) (path-head p2))) (mcomp-list pairs nil tl1 tl2)
+            (or (= :abstract k) (= :abstract k')) nil
+            :else (mcomp-incompatible)))))))
+
+(defn- mcomp* [pairs t1 t2]
+  (let [t1 (repr t1) t2 (repr t2)]
+    (when-not (identical? t1 t2)
+      (let [d1 (desc t1) d2 (desc t2)]
+        (cond
+          (or (= :Tvar (d1 0)) (= :Tvar (d2 0))) nil
+          (and (= :Tconstr (d1 0) (d2 0)) (empty? (d1 2)) (empty? (d2 2)) (path-equiv (d1 1) (d2 1))) nil
+          :else
+          (let [t1' (repr (expand-head-opt t1)) t2' (repr (expand-head-opt t2))]
+            (when-not (or (identical? t1' t2') (contains? @pairs [t1' t2']))
+              (swap! pairs conj [t1' t2'])
+              (let [d1 (desc t1') d2 (desc t2') k1 (d1 0) k2 (d2 0)]
+                (cond
+                  (or (= :Tvar k1) (= :Tvar k2)) nil
+                  (and (= :Tarrow k1 k2) (or (= (d1 1) (d2 1)) (and (not (is-optional (d1 1))) (not (is-optional (d2 1))))))
+                  (do (mcomp* pairs (d1 2) (d2 2)) (mcomp* pairs (d1 3) (d2 3)))
+                  (= :Ttuple k1 k2)
+                  (do (when-not (= (count (d1 1)) (count (d2 1))) (mcomp-incompatible))
+                      (doseq [[[l1 a] [l2 b]] (map vector (d1 1) (d2 1))]
+                        (when-not (= l1 l2) (mcomp-incompatible))
+                        (mcomp* pairs a b)))
+                  (= :Tconstr k1 k2) (mcomp-type-decl pairs (d1 1) (d2 1) (d1 2) (d2 2))
+                  ;; has_injective_univars is not modelled: a universal variable is taken as compatible
+                  (or (= :Tconstr k1) (= :Tconstr k2))
+                  (let [p (if (= :Tconstr k1) (d1 1) (d2 1))] (when (datatype-decl? p (*find-type* p)) (mcomp-incompatible)))
+                  (and (= :Tfunctor k1 k2) (= (d1 1) (d2 1))) (mcomp* pairs (d1 5) (d2 5))
+                  (and (= :Tfunctor k1) (= :Tarrow k2) (= (d1 1) (d2 1)))
+                  (do (mcomp* pairs (newty [:Tpackage (d1 3) (d1 4)]) (d2 2)) (mcomp* pairs (d1 5) (d2 3)))
+                  (and (= :Tarrow k1) (= :Tfunctor k2) (= (d1 1) (d2 1)))
+                  (do (mcomp* pairs (d1 2) (newty [:Tpackage (d2 3) (d2 4)])) (mcomp* pairs (d1 3) (d2 5)))
+                  (= :Tpackage k1 k2) nil
+                  (= :Tvariant k1 k2) (mcomp-row pairs (d1 1) (d2 1))
+                  (= :Tobject k1 k2) (mcomp-fields pairs (d1 1) (d2 1))
+                  (= :Tfield k1 k2) (mcomp-fields pairs t1' t2')
+                  (= :Tnil k1 k2) nil
+                  (and (= :Tpoly k1 k2) (empty? (d1 2)) (empty? (d2 2))) (mcomp* pairs (d1 1) (d2 1))
+                  ;; enter_poly: the universal variables paired as fresh variables of both bodies
+                  (= :Tpoly k1 k2)
+                  (if (= (count (d1 2)) (count (d2 2)))
+                    (let [vs (vec (repeatedly (count (d1 2)) newvar))]
+                      (mcomp* pairs (subst (d1 2) vs (d1 1)) (subst (d2 2) vs (d2 1))))
+                    (mcomp-incompatible))
+                  (= :Tunivar k1 k2) nil
+                  :else (mcomp-incompatible))))))))))
+
+(defn mcomp
+  "Ctype.mcomp: throws {:unify :incompatible} when t1 and t2 can surely not be equal"
+  [t1 t2]
+  (mcomp* (atom #{}) t1 t2))
