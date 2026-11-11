@@ -3096,3 +3096,143 @@ The plan's "13 are the programs' -O2 ABI" (stage 3's proof, run-check ≥ 53 on 
   exception reports a class of their own (`:o0-report`) to look at in base's -O0 TopHandler path**; 1-2 days as planned;
   (b) keep "≥ 53" by giving the own ghc-internal GHC's -O2 floated names as aliases (`ioException3`, `reverse1`): mixes the
   ABIs, a list to maintain by hand; rejected. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-11: HF10-P28)
+
+HF10-P28 (a): stage 3's proof restated as "run-check's 63 on the own interfaces ≥ the `all` set's 50, 0 lost"; the 7 programs that
+call ghc-internal's -O2-only names wait for P17 (own -O0 STG of bytestring, directory, file-io, stm); the 3 exception-report
+differences a class of their own, `:o0-report`.
+
+## As built: HF10-P21, P19, P22, P23 (2026-11-11, branch `hs-p22`, from `mac/next` 4b8fc77e3)
+
+By an agent in the light lane (one process at a time under 2 GiB, at most three by day; stage 0 `/root/arbace/target/seed/amd64/arbace`,
+the checkout's sources evaluated; no GHC, no gate run, no network). GHC 9.14.1's sources the specification, from the pinned tarball
+(`compiler/GHC/Tc/Gen/App.hs`'s tcInstFun, `compiler/GHC/Tc/Gen/Expr.hs`'s tcRecordBinds, `compiler/GHC/Tc/Solver/Dict.hs`'s IP givens,
+`libraries/ghc-internal/src/GHC/Internal/Exception/{Type,Backtrace}.hs`; BSD-3, LICENSE.md "GHC").
+
+**Where it stands.** P21's proof (P28 (a)) is met: run-check's 63 compiled on **every package's own interfaces** run 51 on GHC's own
+-O0 libraries (`ghc0`, 50 on ghc-internal's pool alone) and **51 on the whole own set** (`LIB_STG_REPLACE=all`; 50 before), every
+pass of the `all` set's 50 kept, 0 lost. P19 (a) with P22 (a) and P23 (a) built: `bin/hsi check --libs own` runs a program the front end
+can take on the own interfaces alone over the own libraries' STG alone, **the first own cases**: of samples', synthetic's and testsuite-core's 764 programs, **420 run on Arbace's own libraries (412 pass)**, 342 on the pack (74 of them by the fallback list).
+
+### P21 (a): the programs on every package's own interfaces
+
+`bin/repr-haskell run-check`'s `REPR_HASKELL_RUN_IFACES_OVER` takes a list (`DIR:DIR...`; `run-check/over.txt` names each copied
+interface's directory); `lib-stg --ifaces own --run` gives it ghc-internal's pool, its wired-in `GHC.Internal.Prim` (primops.txt.pp's,
+HF10-P18) and base's pool (`lib-check --package base --ifaces own`), 507 interfaces (`LIB_STG_PROG_IFACES=ghc-internal`: the pool
+alone, as before). ghc-prim and ghc-bignum compile nothing of their own (`Dummy`): their modules are reexports, named by the
+pack's `reexports.edn` (GHC.Types → GHC.Internal.Types, GHC.Num.Integer is base's). No pack interface of a boot package is read by
+run-check's programs any more: the pack `haskell-ifaces-ghc-9.14.1` gives only the other packages' (containers, bytestring, ...).
+
+### The classes fixed (each by a run, judged by lib-check and lib-stg `--ifaces own --judge` before the next run)
+
+| class | where it broke | the fix (GHC's rule) |
+|---|---|---|
+| a pattern's implicit parameter | `someExceptionContext (SomeException _) = ?exceptionContext` read the empty context: HasExceptionContext, a synonym of `?exceptionContext :: ExceptionContext`, was not matched by name as HasCallStack is, so the wanted was defaulted (`defaultExceptionContext`); no uncaught exception printed its backtrace on the own libraries (runtime-exceptions) | a constructor pattern's IP givens (`HasCallStack`, `HasExceptionContext`, `?x :: t`) are its alternative's (`ip-pat-env` into `::ip`, `with-ips`); the solver matches either synonym by its name; the module's unscoped existential givens only for `?callStack`, as before (an unscoped `?exceptionContext` took another function's dictionary) |
+| a field of a qualified type | `ceaCollectExceptionAnnotationMechanism cea` (`:: HasCallStack => IO SomeExceptionAnnotation`) applied without its call stack: the action was a function | an application's result of a qualified type is instantiated after its arguments (tcInstFun's final instantiation), HasCallStack's call site the field's, GHC's `OccurrenceOfRecSel` label "a use of `f'" |
+| a record construction's field | `CollectExceptionAnnotationMechanism { ceaCollect... = SomeExceptionAnnotation `fmap` collectBacktraces }` built no abstraction over the call stack | each field checked against its type (tcRecordBinds' checking), a qualified one abstracting its evidence, as the positional constructor already did |
+| the innermost implicit parameter | `errorCallWithCallStackException s stk = ... withFrozenCallStack $ toExceptionWithBacktrace (ErrorCall s) where ?callStack = stk`: the argument's HasCallStack took the `where`'s `?callStack` (stk) instead of the frozen stack withFrozenCallStack gives it: `error`'s backtrace showed collectExceptionAnnotation's and toExceptionWithBacktrace's frames (cgrun016, T11572, 15 testsuite programs) | a qualified argument's IP givens (check-poly's) are in scope ahead of an enclosing `let ?x` (`ip-pat-env`, `with-ips`), GHC's innermost given |
+| GHC.Internal.Prim's unit | on the own libraries alone (no GHC stub of Prim) `void#` was named `main:GHC.Internal.Prim/void#` (samples/Cont: no STG for main:GHC.Internal.Prim) | GHC.Internal.Prim is ghc-internal's whether or not the libraries hold its stub (`tostg/ext-str`) |
+
+lib-stg on the own interfaces 5,533 → **5,536 of 7,639** (Exception.Type 20 → 23 of 42), 0 worse; lib-check own 265 against 265, 0 worse;
+base's 241 and 547 of 1,024, 0 worse; on GHC's interfaces lib-check 265, 0 worse, lib-stg 5,457 → 5,460 of 7,612 (0 worse; its runs 60 of 63, the 59 recorded kept).
+
+### run-check on the own interfaces (P28 (a)'s classes)
+
+| set (`LIB_STG_REPLACE`, the programs on the own interfaces of ghc-internal, Prim and base) | pass of 63 |
+|---|---:|
+| ghc0: GHC's own -O0 STG of the boot libraries | **51** (50 on ghc-internal's pool alone) |
+| all: every ghc-internal module Arbace's own STG | **51**, 0 lost against ghc0 and the recorded `all` 50 (the row re-recorded 50 → 51) |
+| all-base (`LIB_STG_BASE=own`): base's 241 modules own too, no GHC-made STG of the four boot packages | **51**, 0 lost (a new row `{:runs :all-base}`) |
+
+The rows of `lib-stg-own-results.edn` carry `:ifaces` (`:own`: every package's pools) and `:classes` (each non-pass's class);
+`libcheck judge-runs` fails on a non-pass in no class (`run-classes`): `:o2-names` (the other packages' -O2 STG calls ghc-internal's
+-O2-only names: LibBytes, LibIO, LibMisc, LibPosix, LibSystem, LibText, runtime-stm; P17), `:o0-report` (P28 (a)'s class: Exc and
+Trace; with the context restored the report is GHC's text up to the backtrace's line, where `prettySrcLoc` of the own (-O0, boxed)
+ghc-internal meets containers' -O2 `SrcLoc` with UNPACKed `Int#` fields: `case of an algebraic type on int64(629)`; it moves with P17
+too: containers' own -O0 STG), `:hsi-memory` (Loop, runtime-deep at the light runs' 2 GiB), `:hsi` (AsyncRerun). runtime-exceptions,
+the third of P28's report programs, passes.
+
+### P19 (a), P22 (a), P23 (a): `bin/hsi check --libs own`
+
+`bin/hsi check --libs own` (`HSI_LIBS_SET=own`): a program is an own case when the native front end can take it on the own interfaces
+alone (`front_eligible` over a directory of the own interfaces only: every import ghc-internal's or base's, or a reexport of one; no C,
+no foreign stub, no CPP), it is not in `test/haskell/own-fallback.txt` (P23 (a): the list, empty, that may only shrink) and the front
+end compiles it; it runs over the own libraries' STG alone (`HSI_OWN_STG`: ghc-internal's 265 and base's 241 modules, no other
+package, no GHC-made module: a run that needed one would stop) and its own image: `:libs :own`. Every other program runs as `--front
+ghc` runs it (haskell-stg-progs over haskell-stg-libs): `:libs :pack`, `:front` the reason (`:ineligible`, `:fallback`, the stage that
+stopped the front end). `--aot` the same (the own libraries' closures compiled by HE8's per-image cache). Work `.tmp/hsi/check-own`
+(`check-aot-own`); `--record` writes `test/haskell/check-hsi-own.edn` (`-aot-own`) beside the pack's records until the switch (P29).
+
+| corpus (`--libs own`, ARBACE_MEM_GIB=2: the light cap) | programs | own (`:libs :own`) | own pass | pack | pack pass |
+|---|---:|---:|---:|---:|---:|
+| samples, synthetic | 63 | 47 | 43 | 16 | 16 |
+| samples, synthetic, testsuite-core (`test/haskell/check-hsi-own.edn`) | 764 | **420** | **412** | 342 (74 fallback) | 312 |
+
+The 8 own non-passes fail on the pack as well (AsyncRerun, CallConv's Cmm, T24809, AtomicPrimops, T3279, conc037, T22671 at the light
+cap, numsparks001 `:threaded-way`), in their classes of `test/haskell/divergences.edn`. The fallback list's 74, each with its class:
+`:front-run` 49 (the program's own STG: Word's negative literal patterns, T9533; patError's text, dsrun005; C:IP left applied, T246,
+IPRun; `$tcMany` named, TypeableEq; ...: the front end's), `:o0-report` 16 (the uncaught report on the own libraries: `fail` in IO's
+`throwIO` frame, PatternMatchFail's frames), `:light-cap` 7 (2 GiB, 60 s: -O0 libraries are slower and larger; the gate's 16 GiB to
+measure), `:own-lib` 2 (class IP's selector `ip` absent from the own GHC.Internal.Classes: tcrun019, tcrun024). 4 programs the pack
+passes at 16 GiB fail at the light cap on either side (Loop, runtime-deep, readMVar1, fptr02). `--aot --libs own`: samples/Hello and
+synthetic/class-num built and run from the own libraries' STG compiled to Go (`:vs-hsi :same`), the first own AOT cases.
+
+### Independence
+
+Unchanged in the recorded score (76.0): `test/crops/independence.edn`'s eval and AOT facts name the gate's steps `hsi-check` and
+`hsi-check-aot`, which run on the packs; an own case counts when a step runs it (P29). With the night's records the projection is
+eval 0.5 + 0.5 x 420/908 = 0.731 (nofib's 58 eligible not yet run), AOT as eval's share if the same programs build (~0.73), judge unchanged: **independence about 85** ((2 + 0.731 + 0.73 + 0.8) / 5 = 85.2), against 76.0.
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` | 265 against 265, **0 worse**; control differs; 13 min, 1.75 GiB |
+| `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` | 5,533 → **5,536 of 7,639**, 0 worse (re-recorded); control 0 of 171; 11 min |
+| `lib-check --package base --ifaces own --judge ...-own-base.edn`, `lib-stg --package base --ifaces own --judge ...` | 241 against 241, 0 worse; 547 of 1,024, 0 worse; controls differ; 4 min each |
+| `LIB_STG_REUSE=1 LIB_STG_REPLACE=all lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run` | ghc0 51, own **51 of 63**, 0 lost; judge-runs: the 51 recorded kept, equal's 50 kept, every non-pass in a class; 20 min, 1.6 GiB |
+| the same with `LIB_STG_BASE=own LIB_STG_SIDES=own` | **51 of 63**, 0 lost (`{:runs :all-base}`); 10 min |
+| `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` | 265 against 265, 0 worse (before the last elaborator change: a night command) |
+| `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run` | 5,457 → 5,460 of 7,612, 0 worse (re-recorded); runs 60 of 63, the 59 recorded kept; 29 min, 1.9 GiB (before the last elaborator change: a night command) |
+| `bin/hsi check --libs own --corpus samples,synthetic,testsuite-core --record` (ARBACE_MEM_GIB=2) | 764 programs: 420 own (412 pass), 342 pack; `check-hsi-own.edn`; 44 min, 2.0 GiB (then the 83 own failures again with the last fix, 9 passing, the 74 left to the fallback list and rerun) |
+| hsi-essential's command | own-verdicts current; 123 programs, 122 pass, 0 unclassed; the four controls that ran fail as they must |
+| haskell-read-essential's command | `bin/repr-haskell test` as expected, controls differ; array, deepseq, containers 51 of 51 at the tree and text levels |
+| `bin/reap`; `bin/crops-score --record`, `--judge --strict` | 0 problems; scores unchanged (Haskell 76.0), exit 0 |
+| `bash test/gate/gate-key-crops-test.bash` | PASS; every changed path is a crop path (`arbace/repr/haskell/`, `bin/lib/hsi/`, `bin/lib/repr-haskell/`) or `bin/repr-haskell` and `test/haskell/`, none in `gate_key`, the runtime key or the seed's |
+
+### Night commands (one at a time; `. .tmp/env.sh`)
+
+1. `ARBACE_MEM_GIB=16 bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record` (the whole
+   eval corpus at the gate's cap; the front end 4 shards of 1.5 GiB, then the runs: about 10 GiB, 60-75 minutes, the heavy
+   lock as hsi-check): the light-cap fallbacks (`:light-cap` 7) and nofib's 58 eligible measured; the list shrunk by hand.
+2. `bin/hsi check --aot --libs own --corpus samples,synthetic,testsuite-core --jobs 2 --record` (8 GiB, about 2 hours: the
+   own libraries' closures compiled once per image key, then each program's build): A, the own AOT cases.
+3. `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (10 min, 1.5 GiB) and `bin/repr-haskell lib-stg
+   --judge test/haskell/lib-stg-results.edn --run` (29 min, 1.9 GiB): the GHC-interface judges after the last elaborator change
+   (the innermost IP given), which they ran before.
+
+### Proposals
+
+- **HF10-P29 The own cases in the gate.** `bin/hsi check --libs own` needs ghc-internal's and base's own interfaces and STG, which
+  today live in a worktree's `.tmp`. (a) **`haskell-lib-check-own` keeps its pool (as now, `ghc-internal-pool.tar`); a new `--full`
+  step `haskell-lib-stg-own` (`lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`, LIB_STG_REPLACE=all: the
+  module rows and the classed `{:runs :all}` row, 2 GiB, about 35 minutes) keeps ghc-internal's own STG as its output
+  (`ghc-internal-stg.tar`, :uses the pool); `haskell-lib-own-base` keeps base's pool and STG too; `hsi-check` and `hsi-check-aot`
+  run `--libs own` with the three tars as `:uses` (`HSI_OWN_IFACES`, `HSI_OWN_STG` taking a tar), recording `:libs` per case in
+  `check-hsi{,-aot}.edn` (the switch: `check-hsi-own.edn` retired); crops-score's eval and AOT facts count the `:libs :own` cases
+  from the records (`:cases {:own [E 1] :pack [M 0.5] :c [87 0.5]}`, E and A read by `crops.score` from the records, not by hand)**;
+  1 day; the night's hsi-check grows by the front end of about 600 programs (4 shards of 1.5 GiB, about 40 minutes); keys: steps
+  and crop paths only (bin/lib/hsi, arbace/repr/haskell: `arbace_crop_paths`), gate_key unmoved. (b) keep `--libs own` a check by
+  hand, its record `check-hsi-own.edn`, the facts' counts written by hand at each merge (drift; the steps cannot agree with them).
+  *Recommended: (a)*.
+- **HF10-P30 P17 scoped: the run corpora's packages own.** The programs that stay `:libs :pack` for an import are the other
+  packages' (containers, array, bytestring, text, stm, mtl, deepseq, directory, filepath, process, time, unix); and the 9 run-check
+  programs of `:o2-names` and `:o0-report` mix those packages' -O2 STG with the -O0 own ghc-internal. (a) **the plan's stage 5 as
+  decided (P17 (a)): `--package P` generalised from base to any installation unit, its own pool and STG, dependency order deepseq,
+  array, stm, containers, template-haskell's reexports, transformers, mtl, os-string, filepath, bytestring, text, time, unix,
+  file-io, directory, process; each with lib-check and lib-stg records and controls; the -O0 references grown at one GHC window
+  (P16, P17's pack, the oracle tier); `--libs own` then takes every own package**; 4-8 days, one oracle window; first slice
+  without GHC: deepseq, array, stm (no -O0 reference: judged by runs only, lib-stg's rows written at the window). (b) only the
+  packages run-check's 9 need (bytestring, directory, file-io, stm, containers and their dependencies): about half the work, the
+  testsuite's other imports stay pack. *Recommended: (a), first slice deepseq, array, stm, then containers*.

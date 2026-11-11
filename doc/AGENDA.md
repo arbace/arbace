@@ -82,7 +82,12 @@ Six crops are above 90 on all three. What the others still need:
   qualified binders, guard implications, -O0 constructor layouts, ...; lib-stg 5,533 of 7,639, 0 worse), and the elaborator
   keeps representation kinds (the `kinded-results` hard-code gone); P21 not built: the 13 programs neither set runs are the
   other packages' -O2 ABI and -O0 exception reports, not the programs' (HF10-P28 proposed: P21's proof restated, those to
-  P17); next P28's decision, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
+  P17); P28 decided (a) (the user, 2026-11-11); `hs-p22` built P21 (run-check compiled on every package's own interfaces: the
+  whole own set, ghc-internal and base both own, 51 of 63, 0 lost; classed rows `{:runs :all}`, `{:runs :all-base}`: o2-names 7,
+  o0-report 2, hsi-memory 2, hsi 1) and P19 with P22-P23: `bin/hsi check --libs own`, the first own cases (programs on the own
+  interfaces run over the own STG alone; samples, synthetic and testsuite-core: 420 of 764 run own, 412 pass; `check-hsi-own.edn`, `own-fallback.txt`);
+  four elaborator classes (a pattern's IP givens, a field's qualified result, record fields checked, the innermost IP given).
+  Next: P29 (the own cases in the gate, so crops-score counts them: independence about 85) and P30 (P17's packages)
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).

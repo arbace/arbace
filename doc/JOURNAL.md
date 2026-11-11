@@ -4955,3 +4955,36 @@ expansion would then end the whole expansion, where LLVM goes on with the body's
   bisection, a Word-pattern change no probed program used; `tostg.ae` during the LibContainers bisection, which I stopped and
   did not use; `tostg.ae`'s unit check during the GHC-interface lib-stg's program runs, a no-op for programs, unit main); one
   `<(...)` in a `diff` command early on.
+
+## 2026-11-11: HF10-P21, P19, P22, P23: programs on every package's own interfaces, the first own cases (branch `hs-p22`, from `mac/next` 4b8fc77e3)
+
+- The user's decision of 2026-11-11 (HF10-P28 (a)): stage 3's proof restated as run-check on own interfaces ≥ the `all` set's 50,
+  0 lost; the 7 programs calling ghc-internal's -O2-only names wait for P17; the exception-report differences a class `:o0-report`.
+- P21 (a): run-check's `REPR_HASKELL_RUN_IFACES_OVER` takes a list; `lib-stg --ifaces own --run` gives the programs ghc-internal's
+  pool, its wired-in Prim (HF10-P18) and base's pool (`LIB_STG_PROG_IFACES=ghc-internal` the old). ghc-prim and ghc-bignum are
+  reexports (their `.cabal`: `Dummy` only), named by `reexports.edn`. Result: ghc0 51 of 63 (50 before), the whole own set 51
+  (50), 0 lost; with base's 241 modules own too (`LIB_STG_BASE=own`, a new row `{:runs :all-base}`) 51, 0 lost. The rows carry
+  `:ifaces` and `:classes`; `libcheck judge-runs` fails on a non-pass in no class (o2-names 7, o0-report 2, hsi-memory 2, hsi 1).
+- Classes fixed (each found by a run; bisection was masked by mixed sets' `$tcIP`, so the modules were probed by replacing one
+  own module with GHC's -O0 at a time, `.tmp/p22/probe2.sh`, and read with `stgcmp`): a constructor pattern's implicit-parameter
+  givens are its alternative's (`someExceptionContext` read the default empty context: no backtrace on the own libraries); a
+  field of a qualified type is instantiated after its arguments (`ceaCollectExceptionAnnotationMechanism cea` without its call
+  stack); record construction checks each field (the field's qualified type abstracted); a qualified argument's IP givens are
+  the innermost, ahead of an enclosing `let ?x` (errorCallWithCallStackException's frozen stack: `error`'s backtrace showed
+  internal frames); GHC.Internal.Prim's unit is ghc-internal without its stub. Each judged by lib-check and lib-stg `--ifaces own
+  --judge` before the next run: lib-stg own 5,533 → 5,536 of 7,639, 0 worse; lib-check own 265 and base 241, 0 worse; base's
+  lib-stg 547, 0 worse; on GHC's interfaces lib-check 0 worse, lib-stg 5,457 → 5,460 (runs 60 of 63, 0 lost).
+- Alternatives for the IP scoping considered: keep the module-wide existential givens for every IP (an unscoped
+  `?exceptionContext` took another function's dictionary: rejected); default `?exceptionContext` only at top level (does not
+  give a pattern's context: rejected). GHC's rule (the implication's givens, innermost first) taken.
+- P19 (a), P22 (a), P23 (a): `bin/hsi check --libs own`: eligible programs (front_eligible over the own interfaces alone) are
+  compiled by the front end on the own interfaces and run over the own STG alone (ghc-internal's 265 and base's 241 modules, no
+  GHC-made module), `:libs :own`; the rest as `--front ghc`, `:libs :pack` with the reason; `test/haskell/own-fallback.txt`
+  (74 programs, each with its class: front-run 49, o0-report 16, light-cap 7, own-lib 2) runs on the pack. Over samples,
+  synthetic and testsuite-core (764 programs, the light cap of 2 GiB): 420 own (412 pass), 342 pack (312 pass); recorded in
+  `test/haskell/check-hsi-own.edn`. `--aot --libs own`: samples/Hello and synthetic/class-num compiled from the own STG.
+- Independence stays 76.0 in the record: the facts name hsi-check and hsi-check-aot, which run the packs; HF10-P29 proposes
+  the gate steps and crops-score's count from the records (projection about 85). HF10-P30 scopes P17.
+- Rule slips: one `<(...)` process substitution (a `comm` early on) and one `2>/dev/null` in a monitor's command; `tostg.ae`
+  edited while a probe run's front end could load it (the Prim-unit change, a no-op where the libraries hold Prim's stub, as the
+  run's did); two lib-check runs started at once collided in `.tmp/repr-haskell/lib-check/iface2` (both stopped, rerun serially).
