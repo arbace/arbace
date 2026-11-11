@@ -40,6 +40,14 @@
       (aset v i Unbound))
     (addr (lit Env :V v :Up up))))
 
+(go/func AotLoc "AotLoc is the store's location of the compiled program's own global named name with uid (SCS30: a library's global is the location eval's code finds, the gensym read by its uid as the constants' are).\n"
+  ^{:tag (* Loc)} [^{:tag (* M)} m ^string name ^string uid]
+  (let [s (aget aotGensyms uid)]
+    (when (== s nil)
+      (set! s (addr (lit Symbol :Name name :Gensym true :Uid uid)))
+      (aset aotGensyms uid s))
+    (.LocOf m s)))
+
 (go/func NewLoc "NewLoc is a location of the compiled program's own (a library's global), not in the store.\n"
   ^{:tag (* Loc)} [^string name]
   (addr (lit Loc :Name (Gensym name) :V Unbound)))
@@ -82,6 +90,36 @@
             (break)))
         (set! out (append out (.datum r "datum")))))
     out))
+
+(go/func noopThunk ^{:tag (* Prim)} [^string name]
+  (addr (lit Prim :Name name :Min 0 :Max 0 :Fn (fn [^{:tag (slice any)} _] :results [any] (return Unspec)))))
+
+(go/func InstallAOTLibrary
+  "InstallAOTLibrary installs a compiled library in psyntax (SCS30, SC94 (b)): info the unit's constant libInfo made, its invoke state
+already run by the program's start, visit (nil when none) run when psyntax first visits it; a library whose dependencies
+psyntax does not hold is left to the library path as before.\n"
+  [^{:tag (* M)} m ^any info ^{:tag (func [(* M)])} visit]
+  (let [(values x ok) (ListSlice info)
+        held (make (map any bool))
+        (values libs _) (ListSlice (.Call m (.Psyntax m "installed-libraries") true))
+        all true]
+    (when (or (not ok) (!= (len x) 9))
+      (panic "scm aot: a library's info does not read back"))
+    (range [_ l libs]
+      (aset held (aget (.-F ((inst As (* Record)) l)) 0) true))
+    (range [_ i (lit (slice int) 3 4 5)]
+      (let [(values ds _) (ListSlice (aget x i))]
+        (range [_ d ds]
+          (let [(values sp _) (ListSlice d)]
+            (when (not (aget held (aget sp 0)))
+              (set! all false))))))
+    (when (not all)
+      (return))
+    (let [vp (noopThunk "visit")]
+      (when (!= visit nil)
+        (set! vp (addr (lit Prim :Name "visit" :Min 0 :Max 0 :Fn (fn [^{:tag (slice any)} _] :results [any] (visit m) (return Unspec))))))
+      (.Call m (.Psyntax m "install-library") (aget x 0) (aget x 1) (aget x 2) (aget x 3) (aget x 4) (aget x 5) (aget x 6) (aget x 7)
+             vp (noopThunk "invoke") (conv any false) (conv any false) (List (Intern "quote") (conv any false)) Null (aget x 8) (conv any false)))))
 
 (go/method readGensym "readGensym reads #{NAME UID} after its #.\n" ^any [^{:tag (* reader)} r]
   (.next r)
@@ -272,7 +310,8 @@
 
 (go/type aotUnit "aotUnit is a unit being dumped: its text, its constants (by identity for objects), why it is refused.\n"
   (struct ^{:tag (* M)} m ^{:tag strings/Builder} b ^{:tag (slice string)} consts ^{:tag (map any int)} ix ^string refused
-          ^{:tag (map any int)} gix ^{:tag (slice string)} gnodes ^{:tag (slice string)} groots))
+          ^{:tag (map any int)} gix ^{:tag (slice string)} gnodes ^{:tag (slice string)} groots
+          ^string info ^{:tag (slice string)} visit))
 
 (go/func cljQuote "cljQuote is s as a Clojure string literal.\n" ^string [^string s]
   (let [^strings/Builder b (zero strings/Builder)]
@@ -672,6 +711,12 @@ a gensym by its name and uid; budget bounds the walk (a cyclic constant is refus
     (range [_ c (.-consts u)]
       (.WriteString (addr b) (+ (cljQuote c) "\n")))
     (.WriteString (addr b) "]\n")
+    (when (!= (.-info u) "")
+      (.WriteString (addr b) (+ " :info " (.-info u) "\n"))
+      (.WriteString (addr b) " :visit [")
+      (range [_ f (.-visit u)]
+        (.WriteString (addr b) (+ f "\n")))
+      (.WriteString (addr b) "]\n"))
     (when (> (len (.-gnodes u)) 0)
       (.WriteString (addr b) (+ " :late " (cljQuote (.lateText u)) "\n")))
     (.WriteString (addr b) " :forms [")
@@ -701,6 +746,24 @@ primitives resolved as the evaluator resolves them then): the unit :psyntax.\n"
     (BootEnd)
     (.unitText u "psyntax" "psyntax" out)))
 
+;; SCS30: the data psyntax's install-library takes of a library, as one list: id name version imp* vis* inv* subst env visible?
+;; (the dependencies as specs: id name version)
+(go/func libSpec ^any [^any l]
+  (let [rec ((inst As (* Record)) l)]
+    (List (aget (.-F rec) 0) (aget (.-F rec) 1) (aget (.-F rec) 2))))
+
+(go/func libSpecs ^any [^any ls]
+  (let [(values xs _) (ListSlice ls)
+        ^{:tag (slice any)} out nil]
+    (range [_ x xs]
+      (set! out (append out (libSpec x))))
+    (ListTail out Null)))
+
+(go/func libInfo ^any [^{:tag (* Record)} rec]
+  (let [f (.-F rec)]
+    (List (aget f 0) (aget f 1) (aget f 2) (libSpecs (aget f 3)) (libSpecs (aget f 4)) (libSpecs (aget f 5))
+          (aget f 6) (aget f 7) (aget f 14))))
+
 (go/method DumpProgram
   "DumpProgram expands the top-level program forms by psyntax as RunProgram does and dumps, instead of
 running them, the invoke code of each library it needs from a source file (in invoke order: each
@@ -723,6 +786,15 @@ library after those it invokes) and the program's core form: one unit each.\n"
                    (when (!= (aget (.-F rec) 15) (conv any false))
                      (let [u (newAotUnit m)
                            f (.dumpForm u (aget (.-F rec) 11))]
+                       ;; SCS30 (SC94 (b)): the library as psyntax installs it, and its visit code (its macros' transformers)
+                       (let [r0 (.-refused u)]
+                         (set! (.-visit u) (lit (slice string) (.dumpForm u (aget (.-F rec) 10))))
+                         (set! (.-info u) (strconv/Itoa (.konst u (libInfo rec))))
+                         ;; a library the install would newly refuse is compiled as before, not installed
+                         (when (and (== r0 "") (!= (.-refused u) ""))
+                           (set! (.-refused u) "")
+                           (set! (.-info u) "")
+                           (set! (.-visit u) nil)))
                        (.WriteString (addr b) (.unitText u "library" (WriteValue (aget (.-F rec) 1) false) (lit (slice string) f))))))))
     (range [_ l libs]
       (walk l))

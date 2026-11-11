@@ -376,7 +376,8 @@ items below are the ones whose work is still ahead or tied to a night.
   ported, completeness 97.6.
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records
   merge; SCS22-SCS24 (above); `scheme-aot1` (2026-11-11): SC90 (b) built, the AOT cell 90.0 -> 94.0 (100 without by design),
-  proposals SCS29 (one graph per program), SCS30 (SC94 (b)'s half).
+  proposals SCS29 (one graph per program), SCS30 (SC94 (b)'s half); `scheme-scs30` (2026-11-11): SCS29 (a) kept, SCS30 (a) built: compiled
+  libraries installed in psyntax, proved by `si/eval-library` (AOT cell 48 / 3 / 0).
 - **C** ([C23-SURVEY.md](C23-SURVEY.md)): CS281 (a) at W ((c) until); CS275 and CS280, the gmp and pcre2 packs at the next
   pack recording.
 - **The gate** ([GATE-SURVEY.md](GATE-SURVEY.md), [ORACLE-RECORDS-SURVEY.md](ORACLE-RECORDS-SURVEY.md)): GTS252 (a) later;
