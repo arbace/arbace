@@ -311,6 +311,11 @@
 
 (declare analyze)
 
+;; (cpp-s2) an atom a caller binds to learn that a decltype's operand did not analyze and was kept as a dependent stand-in:
+;; with every argument bound that is a substitution failure ([temp.deduct.general]/8), which a partial specialization's match
+;; reads as no match (libstdc++'s __shared_ptr::__has_esft_base<_Yp, __void_t<__esft_base_t<_Yp>>>, whose __void_t drops it)
+(def ^:dynamic *decltype-failed* nil)
+
 (defn- decltype-of
   "decltype(e) ([dcl.type.decltype]/1): the operand the native parser kept for the text `t`, analyzed in `scope`
   (unevaluated: its result is not kept); an unparenthesized id-expression or member access its entity's declared type,
@@ -320,12 +325,19 @@
     (when-not n
       (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "decltype(" t ") not kept by the parser")))
       (fail :decltype "decltype(" t ")"))
-    (let [x (try (analyze {:scope scope :statics (atom [])} n)
+    (let [outer *decltype-failed*
+          ;; (the failures of the decltypes the operand's analysis meets on the way, overload candidates' signatures, are
+          ;; theirs: only this decltype's own is its caller's, cpp-s2)
+          x (try (binding [*decltype-failed* nil] (analyze {:scope scope :statics (atom [])} n))
                  ;; (an operand that does not analyze, a template's parameters in it: a dependent type, the decltype
                  ;; analyzed again where the arguments are bound; G4: __void_t<decltype(declval<_Alloc&>().allocate(...))>)
                  (catch arbace.lang.ExceptionInfo e
                    (if (:codegen/refused (ex-data e))
                      (do (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "decltype(" t ") dependent:" (.getMessage e))))
+                         ;; (only an unknown name, a lookup that found nothing after argument-dependent lookup, is
+                         ;; taken for a real substitution failure: the analysis' own gaps, `size_t{}` as an argument,
+                         ;; refuse with other classes, which keep the dependent stand-in as before)
+                         (when (and outer (= :name (:codegen/refused (ex-data e)))) (reset! outer true))
                          {:dependent-decltype t})
                      (throw e))))]
       (cond
@@ -1097,6 +1109,7 @@
 (declare declare-node*! cx-access! cx-using-map)
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
+(def ^:dynamic *main-retry* nil) ; atom [[scope node exception] ...]: the main file's typedefs to declare again (CP338 (a))
 (def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
 
 (defn declare-node!
@@ -1119,7 +1132,17 @@
                    (binding [*out* *err*] (println "header drop:" (:kind n) (:name n) (get-in n [:range :begin :offset]) (.getMessage e) (:file (loc-of (get-in n [:range :begin]))))))
                  nil)
              (throw e))))
-    (declare-node*! scope n)))
+    (if (and *main-retry* (#{"TypedefDecl" "TypeAliasDecl"} (:kind n)))
+      ;; (CP338 (a): a main file's typedef or alias naming a class template's specialization before the template, or its
+      ;; specialization, is defined (pr77550's `typedef basic_string<char> string;` before char_traits<char>): declared again
+      ;; after each later top-level declaration, as the headers' are after them; clang instantiates only when the type must
+      ;; be complete)
+      (try (declare-node*! scope n)
+           (catch arbace.lang.ExceptionInfo e
+             (if (and (:codegen/refused (ex-data e)) (re-find #"an incomplete class template" (str (.getMessage e))))
+               (do (swap! *main-retry* conj [scope n e]) nil)
+               (throw e))))
+      (declare-node*! scope n))))
 
 (defn- declare-node*!
   [scope n]
@@ -1130,6 +1153,8 @@
                       ;; an inline namespace's members are members of the enclosing one too ([namespace.def]/7; G4:
                       ;; std::__cxx11)
                       (when (and (:isInline n) (:name n))
+                        ;; (CP338 (a): marked inline for argument-dependent lookup, adl-nss)
+                        (.put ^java.util.HashMap (:names s) " inline" [])
                         (let [^java.util.ArrayList us (:usings scope)] (when-not (some #(identical? % s) us) (.add us s))))
                       (doseq [k (kids n)] (declare-node! s k)))
     "LinkageSpecDecl" (let [s (assoc scope :extern-c (= "C" (:language n)))] (doseq [k (kids n)] (declare-node! s k)))
@@ -1142,6 +1167,11 @@
           la (some-> *last-anon* deref)]
       (enter! scope (:name n)
               (cond-> {:e :type
+                       ;; (a typedef or alias declaration's name: a dependent expression's qualifier written with it is
+                       ;; mangled as written, an unresolved-qualifier-level <simple-id>, not as the type it names; clang's
+                       ;; mangleUnresolvedTypeOrSimpleId, Itanium 5.1.5.3's <unresolved-name>; the template's arguments
+                       ;; there as in libstdc++'s std::pair `_PCCP::template _MoveConstructiblePair<_U1, _U2>()`)
+                       :typedef true
                        :ty (if (and la (abi/class? la) (= qt (str (or (second (re-find #"^(struct|class|union) " (str qt))) "") " " (:name n)))
                                     (nil? (:name (abi/cls (:id la))))
                                     ;; (typedef struct { ... } T: the unnamed class named T for linkage, [dcl.typedef]/9;
@@ -3054,6 +3084,17 @@
     {:op :call :fn fid :args (call-args f args ctx)
      :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
 
+(defn adl-nss
+  "CP338 (a): the namespace `ns` with, when it is an inline namespace, the namespaces enclosing it as far as the first that is
+  not ([basic.lookup.argdep]/3: an inline namespace's enclosing namespace is associated too; std::__cxx11's std, where
+  operator+(const _CharT*, const basic_string&) is)."
+  [ns]
+  (loop [s ns out [ns]]
+    (let [pa (:parent s)]
+      (if (and pa (= :ns (:kind s)) (.containsKey ^java.util.HashMap (:names s) " inline"))
+        (recur pa (conj out pa))
+        out))))
+
 (defn- adl-fns
   "The functions named `nm` in the namespaces of the class arguments' classes ([basic.lookup.argdep], for classes)."
   [args nm]
@@ -3061,7 +3102,8 @@
    (for [a args
          :let [cid (class-id (:ty a))] :when cid
          :let [outer (loop [s (:outer (abi/cls cid))] (if (= :ns (:kind s)) s (recur (:parent s))))]
-         e (binding [*cutoff* Long/MAX_VALUE] (own-names outer nm)) :when (= :fn (:e e))]
+         ns (adl-nss outer)
+         e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (= :fn (:e e))]
      (:id e))))
 
 (defn- sure-assoc-nss
@@ -3160,7 +3202,9 @@
     "__atomic_store_n" [:store [:v :o]] "__atomic_store" [:store [:vp :o]]
     "__atomic_exchange_n" [:xchg [:v :o]] "__atomic_exchange" [:xchg [:vp :rp :o]]
     "__atomic_compare_exchange_n" [:cmpxchg [:ep :v :w :o :fo]] "__atomic_compare_exchange" [:cmpxchg [:ep :vp :w :o :fo]]
-    "__atomic_test_and_set" [:tas [:o]] "__atomic_clear" [:clear [:o]]}
+    "__atomic_test_and_set" [:tas [:o]] "__atomic_clear" [:clear [:o]]
+    ;; (CP338 (a): the fences, no pointer: clang's EmitBuiltinExpr for __atomic_thread_fence and __atomic_signal_fence)
+    "__atomic_thread_fence" [:fence [:o]] "__atomic_signal_fence" [:sfence [:o]]}
    (into {} (for [op ["add" "sub" "and" "or" "xor" "nand" "min" "max"]
                   [nm post] [[(str "__atomic_fetch_" op) false] [(str "__atomic_" op "_fetch") true]]]
               [nm [:rmw [:v :o] (keyword op) post]]))))
@@ -3170,6 +3214,10 @@
 (defn- atomic-expr
   "The node of a GNU __atomic builtin `nm` applied to the argument nodes `args`."
   [ctx ^String nm args]
+  (if (#{:fence :sfence} (first (atomic-forms nm)))
+    (let [_ (when-not (= 1 (count args)) (fail :expr nm " with " (count args) " arguments"))
+          o (convert-scalar (rv (analyze ctx (first args))) abi/int* false)]
+      {:op :atomic :which (first (atomic-forms nm)) :o o :oc (:v (ce-try o)) :ty abi/void :cat :pr})
   (let [[which shape rmw post] (or (atomic-forms nm) (fail :expr "the atomic builtin " nm))
         _ (when-not (= (count args) (inc (count shape))) (fail :expr nm " with " (count args) " arguments"))
         p (rv (analyze ctx (first args)))
@@ -3190,13 +3238,15 @@
         const (fn [k] (when-let [e (ops k)] (:v (ce-try e))))]
     (merge {:op :atomic :which which :rmw rmw :post post :p p :vt vt :oc (const :o) :foc (const :fo) :wc (const :w) :cat :pr
             :ty (case which (:load :xchg) (if (or (:rp ops) (:vp ops)) abi/void vt) :rmw vt (:cmpxchg :tas) abi/bool* abi/void)}
-           ops)))
+           ops))))
 
 (def ^:private value-builtins
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
    "__builtin_addressof" :addressof
    "__builtin_alloca" :alloca
+   "__builtin_clear_padding" :clear-padding
+   "__atomic_always_lock_free" :lock-free "__atomic_is_lock_free" :lock-free
    "__builtin_va_start" :va-start "__builtin_c23_va_start" :va-start "__builtin_va_end" :va-end "__builtin_va_copy" :va-copy
    "__builtin_add_overflow" :add-overflow "__builtin_sub_overflow" :sub-overflow "__builtin_mul_overflow" :mul-overflow
    ;; the bit counts and byte swaps (G5c: <bit>'s std::__popcount, __countl_zero, __countr_zero over __builtin_popcountg,
@@ -3299,7 +3349,10 @@
                                                                (when (re-find #"ambiguous|deleted function" (.getMessage x)) (throw x)))
                                                            (throw x))))]
         (cond
-          (nil? best) (when (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args))
+          (nil? best) (cond (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
+                            ;; (CP338 (a): none viable, a != b's rewritten candidate !(a == b), [over.match.oper]/3.4: a
+                            ;; class's defaulted operator!= visible in a defaulted <=>'s body, (x <=> y) != 0 of std::strong_ordering)
+                            (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr}))
           (contains? ms best) (method-call ctx best l more true)
           :else (fn-call ctx best args))))))
 
@@ -4071,6 +4124,21 @@
         (:va-start :va-end :va-copy)
         (let [as (mapv #(rv (analyze ctx %)) (rest (kids n)))]
           {:op :va :which b :args (if (= b :va-copy) (subvec as 0 2) (subvec as 0 1)) :ty abi/void :cat :pr})
+        ;; (CP338 (a): __builtin_clear_padding(p): the padding bits of *p zeroed, clang's EmitBuiltinClearPadding; a
+        ;; pointer to a complete object type)
+        :clear-padding (let [p (rv (analyze ctx (second (kids n))))
+                             t (abi/unq (:ty p))]
+                         (when-not (and (abi/ptr? t) (not (abi/void? (:to t))) (not (abi/fn? (:to t))))
+                           (fail :expr "__builtin_clear_padding of " (pr-str (:ty p))))
+                         {:op :clear-padding :p p :to (abi/unq (:to t)) :ty abi/void :cat :pr})
+        ;; (CP338 (a): __atomic_always_lock_free(n, p) and __atomic_is_lock_free(n, p) with a constant size and a null pointer
+        ;; (an object of n bytes aligned to n), folded as clang's x86-64 target does: lock-free for 1, 2, 4 and 8 bytes;
+        ;; <bits/shared_ptr_base.h>'s _Sp_counted_base<_S_atomic>::_M_release)
+        :lock-free (let [[sz pp] (map #(rv (analyze ctx %)) (rest (kids n)))
+                         nv (:v (ce-try sz)) pv (when pp (ce-try pp))]
+                     (when-not (and (number? nv) pp (some? pv) (zero? (long (or (:v pv) 0))))
+                       (fail :expr "a lock-free query not folded"))
+                     {:op :int :v (if (#{1 2 4 8} (long nv)) 1 0) :ty abi/bool* :cat :pr})
         :alloca {:op :alloca :e (convert-scalar (rv (analyze ctx (second (kids n)))) abi/ulong* false) :ty (abi/ptr abi/void) :cat :pr}
         ;; __builtin_{add,sub,mul}_overflow(a, b, &r): r = a op b in r's type; the overflow flag false (a divergence
         ;; when it overflows: no wider arithmetic yet; G4: <bits/stl_vector.h>'s size computations)
@@ -4106,11 +4174,16 @@
                              (member-expr ctx (assoc n :name (or (get-in n [:referencedDecl :name]) (:name n))))
                              (name-expr ctx n))
     "ArraySubscriptExpr"
+    (if (not= 2 (count (kids n)))
+      ;; (CP338 (a): C++23's a[] and a[i, j, ...]: the class's operator[] of that many arguments, [over.sub]/1)
+      (let [[an & ins] (kids n) a (analyze ctx an) is (analyze-args ctx ins)]
+        (or (when (class-operand? a) (operator-call ctx "[]" (into [a] is)))
+            (fail :expr "a subscript of " (count is) " expressions")))
     (let [[an in] (kids n) a (analyze ctx an) i (analyze ctx in)]
       (or (when (class-operand? a) (operator-call ctx "[]" [a i]))
           (let [i (class->scalar ctx i)]
           (let [[p ix] (if (abi/ptr? (:ty (rv a))) [(rv a) (rv i)] [(rv i) (rv a)])]
-            {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv}))))
+            {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv})))))
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
     (if-let [ct (when (= "CXXFunctionalCastExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
       (ctad-expr ctx n ct)
@@ -4768,6 +4841,25 @@
                             :body {:s :block :items (conj (vec decls) (stmt ic body))}}]})))))
     "BreakStmt" {:s :break}
     "ContinueStmt" {:s :continue}
+    ;; (CP338 (a): GNU's asm statement as clang's CodeGenFunction::EmitAsmStmt takes the one at -O0 that the lowering keeps,
+    ;; a compiler barrier: an empty template, no outputs, no goto labels, its inputs scalar values in registers (`r`); any
+    ;; other a refusal)
+    "GCCAsmStmt" (let [a (or (:_asm n) (fail :stmt "statement GCCAsmStmt"))
+                       _ (when (or (seq (:outputs a)) (seq (:labels a)) (:goto a)) (fail :stmt "an asm statement with outputs or labels"))
+                       _ (when-not (= "\"\"" (:template a)) (fail :stmt "an asm statement's template " (:template a)))
+                       ins (mapv (fn [[nm c] x]
+                                   (let [c (subs c 1 (dec (count c)))
+                                         _ (when (or nm (not (re-matches #"r+" c))) (fail :stmt "an asm operand's constraint " c))
+                                         e (rv (analyze ctx x))]
+                                     (when-not (or (abi/integral? (abi/unq (:ty e))) (abi/ptr? (abi/unq (:ty e))))
+                                       (fail :stmt "an asm operand of " (pr-str (:ty e))))
+                                     e))
+                                 (:inputs a) (:inner n))
+                       cl (mapv (fn [c] (let [c (subs c 1 (dec (count c)))]
+                                          (when-not (#{"memory" "cc"} c) (fail :stmt "an asm clobber " c))
+                                          c))
+                                (:clobbers a))]
+                   {:s :asm :ins ins :clobbers cl})
     "SwitchStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                        [init ks] (if (:hasInit n) [(first ks) (subvec ks 1)] [nil ks])
                        _ (when (:hasVar n) (fail :stmt "a switch condition's declaration"))
@@ -4940,6 +5032,15 @@
         bin (fn [o x y] (or (when (or (class-operand? x) (class-operand? y)) (operator-call ctx o [x y])) (builtin-binop o (class->scalar ctx x) (class->scalar ctx y))))]
     (binding [*cutoff* Long/MAX_VALUE]
       (case (:op f)
+        ;; (CP338 (a): a defaulted secondary comparison, [class.compare.secondary]/2: x @ y by its rewritten candidate alone,
+        ;; != as !(x == y), a relational as (x <=> y) @ 0, the result converted to bool; it had been emitted unreachable)
+        ("!=" "<" ">" "<=" ">=")
+        (let [o (:op f)
+              r (if (= "!=" o)
+                  (when-let [c (operator-call ctx "==" [a b])] {:op :not :e (to-bool c) :ty abi/bool* :cat :pr})
+                  (rewritten-relational ctx o [a b]))
+              _ (when-not r (fail :overload "a defaulted operator" o " with no usable rewritten candidate"))]
+          (upd-fn! fid assoc :params pids :tbody {:s :return :init {:i :expr :e (to-bool r)}}))
         "==" (let [e (reduce (fn [acc [x y]] (let [t (to-bool (bin "==" x y))] (if acc {:op :land :l acc :r t :ty abi/bool* :cat :pr} t))) nil subs)
                    e (or e {:op :int :v 1 :ty abi/bool* :cat :pr})]
                (upd-fn! fid assoc :params pids :tbody {:s :return :init {:i :expr :e e}}))
@@ -4962,7 +5063,7 @@
   "An implicit (or defaulted) special member's definition: params and, for a default constructor, the members'
   initializers."
   [fid]
-  (if (#{"==" "<=>"} (:op (fnd fid)))
+  (if (or (#{"==" "<=>"} (:op (fnd fid))) (and (:defaulted (fnd fid)) (#{"!=" "<" ">" "<=" ">="} (:op (fnd fid)))))
     (defaulted-comparison! fid)
   (do (let [f (fnd fid)
         cls (:cls f)
@@ -5165,7 +5266,11 @@ protected:
                (let [before (count @*retry*)]
                  (retry!)
                  (when (and (< k 6) (pos? before) (< (count @*retry*) before)) (recur (inc k)))))
-             (doseq [n ms] (declare-node! root n))))
+             (binding [*main-retry* (atom [])]
+               (let [again! (fn [] (let [r @*main-retry*] (reset! *main-retry* []) (doseq [[sc n] r] (declare-node! sc n))))]
+                 (doseq [n ms] (declare-node! root n) (when (seq @*main-retry*) (again!)))
+                 ;; (one still refused: its refusal, as before)
+                 (when-let [[_ _ e] (first @*main-retry*)] (throw e))))))
          ;; the declarations in order, then (templates) the lazy definitions each round made used, until none
          (let [entry! (fn [[k id]]
                         (case k
