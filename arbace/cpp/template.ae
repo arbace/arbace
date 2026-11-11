@@ -1177,6 +1177,18 @@
 (defn- tparams-in [P tid]
   (distinct (keep #(when (and (map? %) (#{:tparam :tparam-v :ttp} (:k %)) (= tid (:tid %))) (:i %)) (tree-seq coll? seq P))))
 
+(defn- deducible-tparams
+  "cpp-s4: the template parameters of `tid` that `P` names outside non-deduced contexts (a dependent member type's
+  qualifier, X<T>::type)."
+  [P tid]
+  (distinct ((fn walk [x]
+               (cond (and (map? x) (= :tdep (:k x))) []
+                     (and (map? x) (#{:tparam :tparam-v :ttp} (:k x)) (= tid (:tid x))) (cons (:i x) (mapcat walk (vals x)))
+                     (map? x) (mapcat walk (vals x))
+                     (coll? x) (mapcat walk x)
+                     :else []))
+             P)))
+
 (defn deduce-call
   "DeduceTemplateArguments for a call ([temp.deduct.call]): the template arguments of the function template `t` for
   the call's typed arguments after the explicit ones, each parameter's P and A adjusted (adjust-for-deduction) and
@@ -1202,6 +1214,10 @@
                           ;; a parameter whose template parameters were all given explicitly has them substituted
                           ;; ([temp.deduct]/2-/3): nothing left to deduce, overload resolution checks the argument
                           :when (and (dependent? P) (not (every? (set (keys explicit-b)) (tparams-in P tid))))
+                          ;; (cpp-s4: a parameter whose template parameters are all in non-deduced contexts, a nested-name-
+                          ;; specifier's, takes no part, [temp.deduct.type]/5.1, clang's hasDeducibleTemplateParameters:
+                          ;; std::format's `format_string<_Args...>`, basic_format_string<char, type_identity_t<_Args>...>)
+                          :when (seq (deducible-tparams P tid))
                           ;; an overload set holding a function template: a non-deduced context ([temp.deduct.call]/6;
                           ;; G5: std::endl given to a stream's operator<< templates)
                           :when (not (and (= :fnset (:op e)) (seq (:tmpls e))))]
@@ -1826,6 +1842,7 @@
             ;; (CX12, CP281 (a), the checker: a constraint that evaluated to false with no doubt is a sure failure)
             d (atom false)
             unsat (fn [what]
+                    (when (System/getenv "CPP_CONSTRAINT_TRACE") (binding [*out* *err*] (println "unsatisfied" what (:name t) (pr-str args) (pr-str (some-> (:constraint t) (#'sema/node-text))))))
                     (throw (ex-info (str "codegen: " what " not satisfied for " (:name t))
                                     {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))})))
             ;; (the type-constraints first: [temp.constr.decl]/3.1 puts them before the requires-clause in the conjunction,
@@ -1833,9 +1850,14 @@
             ;; `template<__eligible_tuple_like<tuple> _UTuple> requires (__constructible_from_tuple_like<_UTuple>())`, whose
             ;; requires-clause for a non-tuple _UTuple instantiates a generic lambda over an index sequence: std::thread's
             ;; constructor, cpp-s2)
-            _ (when-not (binding [sema/*constraint-doubt* d] (type-constraints-satisfied? t args ps)) (unsat "type-constraints"))
+            ;; (cpp-s4: a constraint's satisfaction is its own context, not the user-defined conversion that asks for the
+            ;; converting constructor template: [over.best.ics]/4's standard-conversions-only does not reach into it --
+            ;; std::format's basic_format_string(const _Tp&) requires convertible_to<const _Tp&, basic_string_view<_CharT>>,
+            ;; whose static_cast needs string_view's converting constructor)
+            _ (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false] (type-constraints-satisfied? t args ps)) (unsat "type-constraints"))
             _ (when-let [rc (:constraint t)]
-                (when-not (binding [sema/*constraint-doubt* d] (sema/constraint-satisfied? ps rc)) (unsat "constraints")))
+                (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false] (sema/constraint-satisfied? ps rc))
+                  (unsat "constraints")))
             fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (#'sema/declare-fn! ps (:pattern t)))
             _ (when-not fid (unsat "constraints"))
             ;; (CP332 (a): a decltype in the signature that does not analyze with every argument bound is a substitution
