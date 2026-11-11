@@ -362,11 +362,13 @@ obj_list() {
     local d=$src/llvm-project-23.1.5.src/llvm/test/MC/AArch64 f
     [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; return 1; }
     mkdir -p "$lists"; : > "$lists/mc-aarch64-obj.list"
+    # (the triples collected whole, not by `grep -q`: its early exit broke the pipe under pipefail and dropped a file with several
+    # object runs at random, AR6)
     for f in $(grep -l -e 'filetype=obj' -e 'filetype obj' "$d"/*.s | LC_ALL=C sort); do
-      awk '/RUN:/ { l = $0; sub(/.*RUN:[ \t]*/, "", l); cur = cont ? cur " " l : l
+      [ -n "$(awk '/RUN:/ { l = $0; sub(/.*RUN:[ \t]*/, "", l); cur = cont ? cur " " l : l
                     if (cur ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", cur); cont = 1 } else { print cur; cont = 0 } }' "$f" |
         grep -e 'filetype[= ]obj' | grep -o -e '-triple[= ]*[^ ]*' -e '-mtriple[= ]*[^ ]*' |
-        grep -v -i -e darwin -e apple -e ios -e macos -e win -e coff -e ilp32 -e arm64_32 -e _be -e arm64ec | grep -q . || continue
+        grep -v -i -e darwin -e apple -e ios -e macos -e win -e coff -e ilp32 -e arm64_32 -e _be -e arm64ec || true)" ] || continue
       n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/mc-aarch64-obj.list"
     done
     echo "repr-asm: mc-aarch64-obj: $(wc -l < "$lists/mc-aarch64-obj.list") files"
@@ -813,11 +815,35 @@ case ${1:-} in
     # AR5: a64i, arm64's machine (go/arbace/a64i over the frame go/arbace/emu)
     case ${2:-} in
       light) a64i_light ;;
-      run|decode-text|forms-check|trace) v=$2; shift 2; [ -x "$a64i_exe" ] || a64i_light; exec "$a64i_exe" "$v" "$@" ;;
+      run|decode-text|forms-check|trace|claimed) v=$2; shift 2; [ -x "$a64i_exe" ] || a64i_light; exec "$a64i_exe" "$v" "$@" ;;
+      synth) shift 2; [ $# -ge 1 ] || { echo "repr-asm --arch arm64 a64i synth DIR [--record]" >&2; exit 2; }
+        # AR6, ARS42 (b): a64i's synthetic programs (test/asm/a64i/gen.ae, seeded, self-checking against its model), written into
+        # DIR, their digests held to test/asm/a64i/synth-digests.edn; --record first assembles and links them (arbace.asm.link) and
+        # runs each under qemu-aarch64 (REPR_ASM_RUNNER; an emulation, the model's second judge): every one must print its line
+        # and exit 0 before the digests are written
+        mkdir -p "$1"; dir=$(cd "$1" && pwd); rec=; [ "${2:-}" = --record ] && rec=1
+        if [ -n "$rec" ]; then
+          arbace_tool -e "(do (load-file \"$root/test/asm/a64i/gen.ae\") nil)" -e "(asm.a64i-gen/gen \"$dir\" \"$root/test/asm/a64i/lib/out.s\")" > "$dir/gen.out"
+          export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
+          : > "$dir/synth.list"; for f in "$dir"/synth-*.s; do n=${f##*/}; printf '%s\t%s\n' "${n%.s}" "$f" >> "$dir/synth.list"; done
+          arbace_tool -m arbace.asm.link build "$dir/synth.list" "$dir" "$src/musl-1.2.6" arm64
+          qrun=${REPR_ASM_RUNNER:-$(command -v qemu-aarch64 || true)}
+          [ -n "$qrun" ] || { echo "repr-asm a64i synth --record: no arm64 runner (REPR_ASM_RUNNER, qemu-aarch64)" >&2; exit 1; }
+          bad=0
+          while IFS=$'\t' read -r n c _; do
+            [ "$c" = built ] || { echo "FAIL: a64i synth: $n not built: $c"; bad=1; continue; }
+            chmod +x "$dir/$n"; st=0; (cd "$dir" && timeout 60 "$qrun" "./$n" > "$n.qemu.out") || st=$?
+            want=$(sed -n 's/^# stdout: "\(.*\)\\n"$/\1/p' "$dir/$n.s")
+            if [ $st = 0 ] && [ "$(cat "$dir/$n.qemu.out")" = "$want" ]; then echo "a64i synth: $n: $want (qemu-aarch64)"
+            else echo "FAIL: a64i synth: $n under $qrun: exit $st: $(head -c 300 "$dir/$n.qemu.out")"; bad=1; fi
+          done < "$dir/build.tsv"
+          [ $bad = 0 ] || exit 1
+        fi
+        arbace_tool -e "(do (load-file \"$root/test/asm/a64i/gen.ae\") nil)" -e "(asm.a64i-gen/main \"$dir\" \"$root/test/asm/a64i/lib/out.s\" \"$root/test/asm/a64i/synth-digests.edn\" \"$rec\")" ;;
       eval-build) shift 2; [ $# -eq 2 ] || { echo "repr-asm a64i eval-build LIST WORK" >&2; exit 2; }
         export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
         arbace_tool -m arbace.asm.arm64.eval build "$1" "$2" "$src/musl-1.2.6" ;;
-      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|eval-build LIST WORK" >&2; exit 2 ;;
+      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|claimed|synth DIR [--record]|eval-build LIST WORK" >&2; exit 2 ;;
     esac ;;
   a64i-check)
     # AR5: test/asm/run-arm64/'s and test/asm/a64i/'s programs built for AOT (arbace.asm.link build: WORK/NAME) and for eval
@@ -831,7 +857,9 @@ case ${1:-} in
     export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
     work=$root/.tmp/repr-asm/a64i; rm -rf "$work"; mkdir -p "$work" "$lists"
     : > "$lists/a64i.list"
-    for f in "$root"/test/asm/run-arm64/*.s "$root"/test/asm/a64i/*.s; do
+    # the synthetic programs (AR6, ARS42 (b)): written by test/asm/a64i/gen.ae into WORK/synth, their digests the recorded ones
+    "$0" --arch arm64 a64i synth "$work/synth"
+    for f in "$root"/test/asm/run-arm64/*.s "$root"/test/asm/a64i/*.s "$work"/synth/*.s; do
       n=${f##*/}; n=${n%.s}
       case $n in duplicate|undefined) continue ;; esac
       [ -z "$only" ] || case ",$only," in *",$n,"*) ;; *) continue ;; esac
@@ -873,6 +901,31 @@ case ${1:-} in
       done < "$ctl"
     done < "$work/build.tsv"
     fails=0
+    # the per-run coverage (AR6, ARS42 (b), as x86i's AXS86 (a)): the instructions a64i claims (a64i claimed: every decodable
+    # word's name and family) against those the AOT runs executed (their .cov), the claimed ones never executed listed by family
+    # in WORK/coverage.txt; held to (or recorded into) test/asm/a64i-coverage-arm64.txt: an instruction executed when recorded and
+    # not now fails, as does one executed and not claimed
+    "$a64i_exe" claimed > "$work/claimed.txt"
+    cat "$work"/*.cov > "$work/executed.txt"
+    awk 'FNR == NR { ex[$1] = 1; next } { n[$2]++; if ($1 in ex) e[$2]++; else un[$2] = un[$2] " " $1 }
+         END { for (f in n) { printf "%s %d of %d executed;%s\n", f, e[f], n[f], un[f]; t += n[f]; te += e[f] }
+               printf "all %d of %d executed\n", te, t > tot }' tot="$work/coverage-total.txt" "$work/executed.txt" "$work/claimed.txt" |
+      LC_ALL=C sort > "$work/coverage.txt"
+    echo "a64i-check: coverage: $(cat "$work/coverage-total.txt") (the claimed instructions; WORK/coverage.txt)"
+    unclaimed=$(awk 'FNR == NR { c[$1] = 1; next } !($1 in c) { print $1 }' "$work/claimed.txt" "$work/executed.txt" | LC_ALL=C sort -u)
+    if [ -n "$unclaimed" ]; then echo "FAIL: a64i-check: coverage: executed, not claimed:" $unclaimed; fails=$((fails + 1)); fi
+    cov=$root/test/asm/a64i-coverage-arm64.txt
+    if [ -n "$record" ]; then
+      { echo "# a64i's per-run coverage (bin/repr-asm --arch arm64 a64i-check --record; AR6, ARS42 (b)): by family, the claimed instructions"
+        echo "# (a64i claimed) executed by the check's AOT runs, then those never executed. Written by the check; an instruction executed"
+        echo "# here and not in a later run fails it."
+        cat "$work/coverage.txt"; } > "$cov"
+    elif [ -n "$only" ]; then
+      echo "a64i-check: coverage of this slice only, not held to the record"
+    elif [ -f "$cov" ]; then
+      lost=$(awk 'FNR == NR { if ($0 !~ /^#/) for (i = 6; i <= NF; i++) was[$i] = 1; next } $1 != "all" { for (i = 6; i <= NF; i++) if (!($i in was)) print $i }' "$cov" "$work/coverage.txt")
+      if [ -n "$lost" ]; then echo "FAIL: a64i-check: coverage: executed when recorded, not now:" $lost; fails=$((fails + 1)); fi
+    fi
     judge=(-e "(do (load-file \"$root/test/asm/a64i_judge.ae\") nil)")
     if [ -z "$only" ]; then
       arbace_tool "${judge[@]}" -e "(asm.a64i-judge/controls \"$work\" \"$ctl\" $([ $native = 1 ] && echo true || echo false))" || fails=$((fails + 1))

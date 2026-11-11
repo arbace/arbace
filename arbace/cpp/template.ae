@@ -715,6 +715,17 @@
     (seq (kids n)) (value-arg (sema/const-int scope (first (kids n))) (:name p) (param-type scope p))
     :else (fail :template "template argument " (pr-str (dissoc n :inner)))))
 
+(defn- inherit-default
+  "The parameter `p` (the `i`th of the declaration `to`) with the default argument of the `i`th of the declaration `from`;
+  written in terms of `from`'s parameters, which it keeps as :dparams when their names differ from `to`'s
+  ([temp.param]/12: `template <typename _CharT, typename = char_traits<_CharT>> struct basic_string;` then
+  `template <typename, typename, typename> struct basic_string {...}`, pr77550.C)."
+  [p from to ^long i]
+  (let [q (get from i)
+        dps (or (:dparams q) (subvec (vec from) 0 i))]
+    (cond-> (assoc p :default (:default q))
+      (not= (map :name dps) (map :name (subvec (vec to) 0 i))) (assoc :dparams dps))))
+
 (defn- complete-args
   "The arguments `given` (a vector, maybe shorter) completed by the template's default arguments, each resolved in a
   scope binding the parameters before it ([temp.arg]/9); nil when one is missing."
@@ -727,7 +738,7 @@
         (if (:pack p)
           (recur (inc i) (conj args {:pack []}))
         (when d
-          (let [s (bind-scope (:scope t) (subvec (:params t) 0 i) args nil)
+          (let [s (bind-scope (:scope t) (or (:dparams p) (subvec (:params t) 0 i)) args nil)
                 a (if (= :type (:kind p))
                     (sema/resolve-type s d)
                     (value-arg (binding [sema/*cutoff* Long/MAX_VALUE] (sema/const-int s d)) (:name p) (param-type s p)))]
@@ -1052,14 +1063,23 @@
         n (count ps)
         ;; a trailing pack nothing deduced is empty ([temp.arg.explicit]/4)
         b (reduce (fn [b i] (if (and (:pack (nth ps i)) (not (contains? b i))) (assoc b i {:pack []}) b)) b (range n))
+        ;; (cpp-s3: a parameter that is not deduced takes its default argument also before deduced ones, [temp.deduct]/5:
+        ;; `template<bool _AtomicRef = false, typename _Tp> bool compare_exchange_weak(_Tp* ...)`, std::atomic<double>)
+        later? (fn [i] (some #(contains? b %) (range (inc i) n)))
         given (loop [i 0 out []]
-                (if (or (= i n) (not (contains? b i)))
-                  out
+                (cond
+                  (= i n) out
+                  (contains? b i)
                   (let [a (get b i)
                         a (if (:bound a) (value-arg (:val a) (:name (nth ps i)) (param-type (sym-scope t) (nth ps i))) a)]
-                    (recur (inc i) (conj out a)))))]
-    (when (every? #(contains? b %) (range (count given)))
-      (when (= (count given) (count (filter #(contains? b %) (range n))))
+                    (recur (inc i) (conj out a)))
+                  (and (:default (nth ps i)) (not (:pack (nth ps i))) (later? i))
+                  (if-let [as (complete-args (assoc t :params (subvec (vec ps) 0 (inc i))) out)]
+                    (recur (inc i) as)
+                    out)
+                  :else out))]
+    (when (every? #(or (contains? b %) (:default (nth ps %))) (range (count given)))
+      (when (= (count (filter #(contains? b %) (range (count given)))) (count (filter #(contains? b %) (range n))))
         (complete-args t given)))))
 
 (defn- explicit-args
@@ -1788,8 +1808,7 @@
   (distinct
    (for [a args
          :let [t (abi/unq (abi/non-ref (:ty a)))] :when (abi/class? t)
-         :let [outer (loop [s (:outer (abi/cls (:id t)))] (if (#{:ns} (:kind s)) s (recur (:parent s))))]
-         ns (sema/adl-nss outer)
+         ns (sema/adl-class-nss (:id t))
          e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names ns nm)) :when (and (= :tmpl (:e e)) (= :fn (:tk e)))]
      (:id e))))
 
@@ -2122,14 +2141,14 @@
         ;; the definition's parameters, the earlier declarations' default arguments kept ([temp.param]/12; G4:
         ;; basic_string's defaults are on its declaration in <stringfwd.h>)
         (if (:completeDefinition pattern)
-          (let [olds (:params (tmpl tid))]
+          (let [olds (:params (tmpl tid)) news (tparams n)]
             (upd-tmpl! tid assoc :pattern pattern
-                       :params (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get olds i))) (assoc p :default (:default (get olds i))) p))
-                                                 (tparams n)))))
+                       :params (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get olds i))) (inherit-default p olds news i) p))
+                                                 news))))
           ;; a later declaration's defaults merged (G5: <iosfwd>'s istreambuf_iterator declared again after its
           ;; definition, by the headers' retry)
           (let [news (tparams n)]
-            (upd-tmpl! tid update :params (fn [ps] (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get news i))) (assoc p :default (:default (get news i))) p)) ps))))))
+            (upd-tmpl! tid update :params (fn [ps] (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get news i))) (inherit-default p news ps i) p)) ps))))))
         (do (swap! *tmpls* assoc tid {:id tid :tk :class :name (:name n) :scope scope :path (:path scope) :params (tparams n)
                                       :class-constraint (:requiresClause n)
                                       :pattern (when (:completeDefinition pattern) pattern) :pos (:_b n) :insts {} :specs {} :partials [] :ool []})

@@ -6002,3 +6002,58 @@ ghidra-g1b's `resources.jars` (one class-path directory per module); Ghidra 12.2
 - Fixture `test/programs/classpath` (two modules, `001-core:002-plugin`), unit tests in `test/j2g/unit.ae`; docs: J2G-SPEC §10.3, BUILD.md.
 - Finding: `ApplicationUtilities.findPrimaryApplicationRootDir` resolves entries as `java.io.File`, so SolverTest's Application still needs
   either File over an entry or a real directory by `:properties` (demo plan/G1.md, branch g1c).
+
+## 2026-11-11: cpp-s3, C++'s own route: four more run programs, CP344 (a), CP348 (a) (branch `cpp-s3`, from `mac/next` adf65b4fd)
+
+Light, by day (.tmp/night12/AGENT-RULES.md; stage 0, the compiler stubs first on PATH, their log empty; no gate). Sources: the Itanium
+C++ ABI (5.1.2's abi-tags, 5.1.4.1's TW/TH special names, 5.1.5's C prefix for complex types, the H of an explicit object member
+function); clang 23.1.5's behaviour as the recorded IR packs show it (cpp-ir-gxx-dg-run, cpp-ir-samples: ItaniumCXXABI's TLS wrapper
+and __tls_init, EmitAtomicOp's weak branch, ComplexExprEmitter with a real operand); libstdc++ 15.2's complex, atomic_base.h from the
+pinned gcc-15.2.0 tarball; P0847R7; [temp.param]/12, [temp.deduct]/5, [basic.lookup.argdep]/3, [basic.stc.dynamic.general]/2,
+[dcl.spec.auto.general]/10, [class.copy.assign]/9. No live clang or g++.
+
+- The 82 run programs by our route: 65 → 69 generated (thread_local12e.C, pr77550.C, explicit-obj-default2.C, runtime/deferred.cpp),
+  none lost, the 65's IR byte for byte or after the inliner's numbering. The new four's defined names are clang's but for a lambda's
+  copy constructor (CP360) and the header functions clang emits unused.
+- The TLS wrapper as clang writes it (`__tls_init` behind `__tls_guard`, `_ZTH` aliases, `_ZTW` wrappers, uses through the wrapper).
+  Considered: the initializations in the global constructor (no: a thread's own copy would not be initialized).
+- Explicit object parameters of reference type taken as the implicit object form with the ref-qualifier (the IR is the same), the H
+  mangling kept; the parser's `this` and the forms' `(cpp/this P)` (the round trip of the 164 recorded files with `this` or unnamed
+  template parameters unchanged). Considered: a static-like member with the object as an ordinary argument (no: every call path of
+  members would change). Fixed on the way: defaulted move assignments copied; an assignment over a member with a user-provided
+  operator= was trivial.
+- GNU complex types as far as std::complex<long double>'s members need (parts, a list, op= by a real); generic atomics of a double on its
+  bits; a run-time weak flag; defaults before deduced template parameters; abi_tag.
+- CP344 (a): reap's own-for `:either`: 13 dg files the own sample passes and clang's record does not now pass (read 5,289 → 5,302),
+  completeness 90.99 → 91.04. CP348 (a): runtime_ours takes a list (libsupc++/ and P22's 13 names-exact units); acting once P21 (b) flips.
+- Not built: CP345 (a crt fix, a --full night's), CP347 (waits for CP340's measure), CP349 (designed in the survey; its open point
+  CP361), CP351. library.cpp stays several slices away (CP359).
+
+Records: test/reap/matrix.edn and test/crops/scores.edn recorded again (C++ completeness 91.04, independence 71.30). The survey's "As
+built: cpp-s3" has the measures and the night's commands.
+
+## 2026-11-11: arm64 assembly, AR6's first part: a64i's coverage record and synthetic programs, the scalar FP, the AOT cell's cheap classes (branch `asm-ar6`, from `mac/next` `adf65b4fd`)
+
+The user's answers to the AR5 survey (ARS38-ARS41 (a), ARS42 (b): the coverage's record and its generator first, then AR6), aimed at
+the arm64 REAP row's weakest cell, AOT (78.5%), cheapest classes first. On the main host (amd64), light; arm64 programs by a64i and by
+qemu-aarch64 user mode (`REPR_ASM_RUNNER`, an emulation). doc/asm/ARM64-SURVEY.md, "As built: AR6 (first part)", has the measures.
+
+- The coverage: `a64i claimed` (go/arbace/a64i/claim.ae: every decodable word's coverage name and family) and a64i-check's
+  `test/asm/a64i-coverage-arm64.txt`, held as x86i's (AXS86 (a)). Alternative not taken: a report only.
+- The synthetic programs: `test/asm/a64i/gen.ae`, eight seeded self-checking programs (ARS40 (b)): the integer families (alu, logic,
+  bitfield, dp, mul, cond) against a Clojure model of the pseudocode, the scalar FP at both precisions against a model in Java's IEEE
+  arithmetic with BigDecimal's exact comparisons; a loop over per-case stubs keeps the code small (the first form, a straight line a
+  case, took the check from 37 s to 3 min 7 s on this host). `--record` runs them under qemu-aarch64 first; every case of every
+  program agreed with the model on the first full run but two model slips (a set lookup as a boolean in FPMax, a shadowed name).
+  Alternative not taken: stated stdout from qemu's runs (an emulator as the verdict).
+- AR6's scalar FP in a64i (go/arbace/a64i/fp.ae, written as Go and converted by repr/go's native reader; the hooks hand-edited as
+  forms): decoded, lowered from the forms (forms-check equal) and executed with math/big's exact values: FPProcessNaNs, FPRound in
+  FPCR's modes, FPSR's exceptions with tininess before rounding, FPCR.DN. Refused: FZ, half precision, the vector classes.
+- The object assembler and the object verdict: the PAuth ABI's GOT relocations, PAuth_LR's 16-bit branch, label arithmetic as an
+  immediate (ARS36 (a)), `%dtprel`, `.reloc`, the build attributes, `.single`/`.float`/`.double`, the section symbol's two cases; the
+  views of llvm-readobj -S/--symbols, llvm-objdump -t, llvm-readelf -s/--hex-dump/--arch-specific, FileCheck's string variables (behind
+  a flag: amd64's judging unchanged). Fixes: AR2's bitmask encoder's overflow (AR5's `eon` crash) and `obj_list`'s random drops
+  (`grep -q` under pipefail).
+- Results: the AOT cell 2,161 / 592 deferred → 2,904 / 0 / 152 (95.0%); object verdict 1,970 of 2,538 → 2,687 of 2,833; object check 86 → 104 of
+  110; a64i eval and AOT 72 → 80 programs, coverage 474 of 653 claimed executed. Proposed ARS43-ARS47 (the error tests' messages, the VM's part,
+  AR6's next slice, the essential step's time, `-implicit-mapsyms` and `.org`).

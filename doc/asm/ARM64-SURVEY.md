@@ -1001,3 +1001,97 @@ Each with options, the recommended named; none taken.
 - **ARS42 The next slice.** (a) AR6: FP and SIMD arithmetic with FPCR/FPSR, the signal frame, musl's harnesses; (b) the coverage's
   record and a synthetic generator (AXS60's) for the integer families first. *Recommended: (b)* (small, it hardens what AR5 built),
   then (a).
+
+## As built: AR6 (first part) (2026-11-11; branch `asm-ar6`, from `mac/next` `adf65b4fd`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go, light (every check under 1 GiB, the conversions by repr/go's native
+reader 2.0 GiB); arm64 programs run by a64i and, for the run check and the synthetic programs' `--record`, by qemu-aarch64 11.1.2 user
+mode (`REPR_ASM_RUNNER`, an emulation, said so in every line it judges); no LLVM or GNU tool. ARS38-ARS41 (a) and ARS42 (b) as the
+user answered them: the coverage's record and a synthetic generator first, then AR6's scalar FP; aimed at the AOT cell's non-passes,
+cheapest classes first. The semantics are the Arm ARM's pseudocode (DDI 0487: FPAdd, FPMul, FPMulAdd, FPDiv, FPSqrt, FPMax,
+FPMaxNum, FPCompare, FPRoundInt, FPToFixed, FixedToFP, FPConvert, FPProcessNaNs, FPRound), llvm-project 23.1.5's AArch64 back end
+and llvm-readobj/llvm-objdump read again for the views (AArch64ELFObjectWriter, AArch64AsmBackend, AArch64TargetStreamer,
+MCELFStreamer's attributes, ELFDumper.cpp's LLVM and GNU styles; Apache-2.0 WITH LLVM-exception), written again in Arbace; no code
+copied.
+
+- **The coverage's record** (ARS42 (b), as x86i's AXS86 (a)): `a64i claimed` (go/arbace/a64i/claim.ae, written as Go and converted
+  by repr/go's native reader) names every instruction the decoder takes (every word's bits 10-31 at three settings of the two low
+  register fields, the system class and the FP compares with every low field: a name depends on no register); `a64i-check` sums
+  the AOT runs' `--coverage` against it by family into `WORK/coverage.txt`, held to `test/asm/a64i-coverage-arm64.txt`: an
+  instruction executed when recorded and not now fails, as does one executed and not claimed (it found the claim's first miss,
+  FCMPE, whose opcode2 is the low field).
+- **The synthetic programs** (ARS42 (b), ARS40 (b): self-checking): `test/asm/a64i/gen.ae` (seeded) writes eight programs into the
+  check's work directory, their digests committed (`test/asm/a64i/synth-digests.edn`; `bin/a64i synth DIR [--record]`). Each case is
+  a row of data (the operands, NZCV, the expected result and flags) and five to eleven instructions (the operands loaded, the flags
+  and FPSR set, the instruction, a call of `check`), the expectation the generator's model of the pseudocode, written apart from
+  a64i's Go (Clojure longs for the integer families; Java's IEEE doubles, floats, Math/fma and Math/sqrt with BigDecimal's exact
+  comparisons for the exceptions); a run passes when it prints its one line and exits 0. `--record` runs each program under
+  qemu-aarch64 first (the model's second judge): every case agreed. alu (2,400 cases), logic (1,456), bitfield (800), dp (1,096),
+  mul (1,000), cond (1,696), fp-d and fp-s (2,428 each); each a loop over per-case stubs (the case's instruction and a `ret`),
+  so the programs' code stays small for the eval's and AOT's assembly.
+- **AR6's scalar floating point** (go/arbace/a64i/fp.ae; the hooks in decode, forms, exec, inst and cpu hand-edited as forms): the
+  FP data-processing classes at single and double precision decoded (1, 2 and 3 sources, compare, conditional compare and select,
+  immediate, the FP-integer conversions with every rounding, FMOV general, FCVT between the precisions), lowered from their forms
+  (eval) to the same Inst (forms-check holds them equal) and executed: FPProcessNaNs' order (a signalling NaN first, quieted, IOC),
+  FPCR.DN's default NaN, FPRound in FPCR's four modes and FPCVTA's ties-away by math/big's exact values, the exceptions in FPSR (IOC,
+  DZC, OFC, UFC with tininess before rounding as the Arm ARM detects it, IXC), FMAXNM's quiet NaN, FPMulAdd's inf times zero with a
+  quiet NaN addend, FCVT's NaN payloads. FPCR.FZ and half precision are refused (`:unimplemented`, SIGILL), as are SIMD's vector
+  classes (`:unimplemented simd`). The family `fp`, its injected faults (`fp:x` flips the result register's lowest bit, the flags
+  as before).
+- **The AOT cell's cheap classes** (the object assembler, `arbace.asm.arm64.obj` and the shared `arbace.asm.obj`): the PAuth ABI's
+  GOT relocations (`:got_auth:`, `:got_auth_lo12:`, `:tlsdesc_auth:` → R_AARCH64_AUTH_*), PAuth_LR's backward 16-bit branch
+  fixup (its relocation LLVM's error), label arithmetic as an immediate folded at layout (ARS36 (a)), the optional `#` before an FP
+  immediate, `%dtprel(sym)` data, `.reloc` (after the section's own relocations, as MC's pending fixups), the build attributes
+  (`.aeabi_subsection`, `.aeabi_attribute` → `.ARM.attributes`), `.single`/`.float`/`.double`; an undefined symbol named as a
+  section met before it becomes that section's symbol in its place, a section symbol a TLS specifier makes STT_TLS keeps its name
+  (llvm-mc's bytes). The object verdict's views: llvm-readobj `-S` and `--symbols`, llvm-objdump `-t`, llvm-readelf `-s`,
+  `--hex-dump`, `--arch-specific`; FileCheck's string variables, `[[#]]` and `--match-full-lines` (the shared FileCheck subset,
+  behind `*vars*`: amd64's judging unchanged); a run assembled with `-implicit-mapsyms` is the class `:mc-option`. Two fixes on the
+  way: AR2's bitmask encoder overflowed on a 63-ones element (AR5's `eon x0, x1, #1` crash), and `obj_list mc-aarch64-obj` dropped
+  files at random on this host (`grep -q`'s early exit under pipefail: 115 of 124 listed; the VM's run had missed
+  `armv8.9a-debug-pmu`, now recorded).
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval and AOT (by their own verdicts) | 72 / 72 | **80 / 80** (8 synthetic programs, 13,304 cases) |
+| forms (each form equal to its decoded word) | 72 of 72 (24,340 instructions) | **80 of 80** |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | none recorded (AR5: 356 of 535 claimed executed with the synthetic integer programs) | **474 of 653 claimed executed**; alu 48/48, logic 72/72, bitfield, branch, cond, dp1, dp2, move, mul, sys whole; fp 118 of 118; left: the memory families (ldst, pair, excl, lse) |
+| controls (`test/asm/controls-a64i.txt`) | 18 (10 run here) | **28** (20 run here: verdict-3, aot-3, inject-5..12 added; the CPU's 8 on the VM) |
+| object-check `mc-aarch64-obj` (llvm-mc's objects byte for byte) | 86 of 110 | **104 of 110** (`.org` 1, `.macro` 1, `mov x0, #(label diff)` 2, `@AUTH`/`%pltpcrel` syntax 2) |
+| object-verdict (MC/AArch64's object runs' own CHECK lines) | 1,970 of 2,538 | **2,687 of 2,833** (124 files) |
+| the AOT cell `[:asm-arm64 :aot]` | 2,161 / 0 / 592 (78.5%) | **2,904 / 0 / 152 (95.0%)** |
+
+**crops-score** (arm64 assembly): completeness 94.6 → **98.7** (98.7 without by design), maturity 100.0, independence 100.0;
+`--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells checked, 0 problems (arm64's eval 288 → 296 passes, AOT 2,161 →
+2,904).
+
+The AOT cell's classes left (146 lines of the object verdict): `:message` 86 (the error tests: LLVM reports every error of a file,
+the object assembler stops at its first), `:unsupported-syntax` 32 (`sym@AUTH(ia,42)`, `%pltpcrel(f)`: repr/asm's reader),
+`:mc-option` 12 (`-implicit-mapsyms`), `:view-llvm-dwarfdump` 9, `:error-accepted` 3, `:filecheck-var` 2 (a variable defined on a
+disassembly's text line), `:no-viewer` 1, `:unsupported-directive` 1 (`.macro`); the object check's 6 above.
+
+Not built: the vector (NEON) classes, FPCR.FZ, half precision, the signal frame, the memory families' synthetic programs, musl's C
+as a pack (ARS11) and the torture programs; the lockstep compares the general registers and NZCV, not yet V and FPSR (the VM's).
+The CPU's rows of the new programs wait for the VM (ARS41 (a)): eval and AOT are judged here by the programs' own verdicts.
+
+### Proposed (AR6, first part)
+
+Numbering from ARS43. Each with options, the recommended named; none taken.
+
+- **ARS43 The error tests' messages** (86 lines, the AOT cell's largest class). (a) the object assembler keeps going after an
+  instruction's or a fixup's error, collecting every error with its line as LLVM's diagnostics do, the run judged on all of them;
+  (b) as now, the first error alone. *Recommended: (a)*: the tests state every error.
+- **ARS44 The VM's part of AR6.** (a) a queue task: the check on the VM (the CPU's rows of the eight synthetic programs, their
+  lockstep), the lockstep taught V0-V31 and FPSR in the step mode; (b) the CPU's rows left absent for the synthetic programs.
+  *Recommended: (a)*.
+- **ARS45 AR6's next slice.** (a) NEON's integer and FP lanes with a synthetic family each (the model's Java arithmetic per lane),
+  then FPCR's modes in the synthetic programs (the rounding modes, DN), FZ; (b) the memory families' synthetic program first (ldst,
+  pair, excl, lse: 186 claimed names unexecuted); (c) musl's C and torture's `-O0` as packs (ARS11; clang `-S` on the VM, by hand).
+  *Recommended: (b)*, small and it closes the coverage's integer side, then (a), then (c).
+- **ARS46 The essential step's time.** `a64i-essential` grows from about 37 s to 2 min 12 s on this host (the synthetic programs'
+  assembly, AOT's and the eval's, is most of it: 61 s and 49 s). (a) keep them whole in the essential gate; (b) `a64i-check --only`
+  judged on what it ran (as x86i's AXS89 (a): the recorded rows of the rest left, a slice-foreign control), the essential step the
+  hand-written programs and two synthetic ones (synth-alu, synth-fp-d), the rest nightly in `--full` (GT8.4's `:rotate`).
+  *Recommended: (b)*.
+- **ARS47 `-implicit-mapsyms` and `.org`.** (a) the option taken (the mapping symbols only where the state leaves the section's
+  implicit one) and `.org` in the shared assembler (14 lines, 2 objects); (b) left classed. *Recommended: (a)* in the next AOT slice.

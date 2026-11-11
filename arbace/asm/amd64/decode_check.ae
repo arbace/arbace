@@ -187,19 +187,69 @@
                           (recur (+ k 2) (conj out [:lit (subs t i j)] [:re (subs t (+ j 2) k)])))))))]
     (re-pattern (apply str (map (fn [[k s]] (if (= k :re) (str "(?:" s ")") (java.util.regex.Pattern/quote s))) parts)))))
 
+(def ^:dynamic *vars*
+  "When true, `filecheck` takes FileCheck's string variables (AR6: the arm64 object verdict's): `[[NAME:REGEX]]` defines NAME
+  as what REGEX matched, `[[NAME]]` matches its value; a numeric or pseudo variable (`[[#...]]`, `[[@LINE]]`) or a use before
+  its definition stays :var. False (amd64's checks): every line with `[[` is :var."
+  false)
+
+(def ^:dynamic *full-lines*
+  "With *vars*: FileCheck's --match-full-lines, a pattern matching a whole line (leading and trailing blanks aside)."
+  false)
+
+(defn- pattern-vars
+  "FileCheck's pattern with its string variables against the bindings `env`: [PATTERN [[NAME GROUP]...]], or nil when the line
+  holds a variable this subset does not take."
+  [^String t env]
+  (let [t (canon (str/trim t))
+        defs (java.util.ArrayList.)
+        out (StringBuilder.)]
+    (loop [i 0]
+      (let [j1 (.indexOf t "{{" (int i)) j2 (.indexOf t "[[" (int i))
+            j (cond (neg? j1) j2 (neg? j2) j1 :else (min j1 j2))]
+        (if (neg? j)
+          (do (.append out (java.util.regex.Pattern/quote (subs t i)))
+              [(re-pattern (if *full-lines* (str "^ ?" out " ?$") (str out))) (vec defs)])
+          (let [re? (= j j1) close (if re? "}}" "]]") k (.indexOf t close (int (+ j 2)))]
+            (if (neg? k)
+              (do (.append out (java.util.regex.Pattern/quote (subs t i))) [(re-pattern (str out)) (vec defs)])
+              (let [body (subs t (+ j 2) k)]
+                (.append out (java.util.regex.Pattern/quote (subs t i j)))
+                (if re?
+                  (do (.append out (str "(?:" body ")")) (recur (+ k 2)))
+                  (let [[_ nm rx] (re-matches #"([A-Za-z_][A-Za-z0-9_]*)(?::(.*))?" body)]
+                    (cond
+                      ;; the anonymous numeric match `[[#]]`: an unsigned decimal number
+                      (= body "#") (do (.append out "(?:[0-9]+)") (recur (+ k 2)))
+                      (nil? nm) nil
+                      (some? rx) (let [g (str "fcv" (.size defs))]
+                                   (.add defs [nm g]) (.append out (str "(?<" g ">" rx ")")) (recur (+ k 2)))
+                      (some #(= nm (first %)) defs) (do (.append out (str "\\k<" (second (first (filter #(= nm (first %)) defs))) ">"))
+                                                        (recur (+ k 2)))
+                      (contains? env nm) (do (.append out (java.util.regex.Pattern/quote (get env nm))) (recur (+ k 2)))
+                      :else nil)))))))))))
+
 (defn filecheck
   "The CHECK lines `cs` ([LINE KIND CONTENT]) held to the output lines as FileCheck holds them: [[LINE RESULT OUT-INDEX]],
-  RESULT :pass, :fail, :not-found (a -NOT that matched) or :var (a FileCheck variable, not taken)."
+  RESULT :pass, :fail, :not-found (a -NOT that matched) or :var (a FileCheck variable, not taken; with *vars* only those the
+  subset does not take)."
   [cs outs implicit-not]
   (let [;; the output's last newline ends an empty last line (FileCheck's buffer)
         lines (conj (mapv #(canon (:text %)) outs) "")
         n (count lines)
         res (java.util.ArrayList.)
         matched (java.util.HashSet.)
-        find-in (fn [p ^long li ^long col] (let [s ^String (nth lines li) m (re-matcher p s)] (when (.find m (int (min col (count s)))) [(.start m) (.end m)])))]
+        env (atom {})
+        cur-defs (atom [])
+        last-m (atom nil)
+        find-in (fn [p ^long li ^long col] (let [s ^String (nth lines li) m (re-matcher p s)]
+                                             (when (.find m (int (min col (count s))))
+                                               (reset! last-m (into {} (for [[nm g] @cur-defs] [nm (.group m ^String g)])))
+                                               [(.start m) (.end m)])))]
     (loop [cs cs li 0 col 0 nots [] started false]
       (if (empty? cs)
-        (do (doseq [[l p] nots]
+        (do (reset! cur-defs [])
+            (doseq [[l p] nots]
               (.add res [l (if (some (fn [k] (find-in p k (if (= k li) col 0))) (range li n)) :not-found :pass) nil]))
             (doseq [w implicit-not :let [hit (some (fn [k] (when (and (not (.contains matched k)) (.contains ^String (nth lines k) w)) k)) (range n))]]
               (.add res [0 (if hit :not-found :pass) hit]))
@@ -207,15 +257,17 @@
         (let [[l kind content] (first cs)
               t (str/trim content)]
           (cond
-            (re-find #"\[\[" t) (do (.add res [l :var nil]) (recur (rest cs) li col nots started))
-            (= kind "-NOT") (recur (rest cs) li col (conj nots [l (pattern t)]) started)
+            (and (re-find #"\[\[" t) (or (not *vars*) (nil? (pattern-vars t @env))))
+            (do (.add res [l :var nil]) (recur (rest cs) li col nots started))
+            (= kind "-NOT") (recur (rest cs) li col (conj nots [l (if *vars* (first (pattern-vars t @env)) (pattern t))]) started)
             (= kind "-EMPTY")
             (let [k (if started (inc li) li)]
               (if (and (< k n) (= "" (str/trim (nth lines k))))
                 (do (.add res [l :pass k]) (recur (rest cs) k (count (nth lines k)) [] true))
                 (do (.add res [l :fail (when (< k n) k)]) (recur (rest cs) li col nots started))))
             :else
-            (let [p (pattern t)
+            (let [[p defs] (if *vars* (pattern-vars t @env) [(pattern t) []])
+                  _ (reset! cur-defs defs)
                   hit (case kind
                         "-NEXT" (let [k (if started (inc li) li)] (when (< k n) (when-let [m (find-in p k 0)] [k m])))
                         "-SAME" (when (< li n) (when-let [m (find-in p li col)] [li m]))
@@ -231,6 +283,7 @@
                                             (range li (inc (long k))))
                                     :not-found :pass) nil]))
                   (.add matched k)
+                  (when (seq defs) (swap! env merge @last-m))
                   (.add res [l :pass k])
                   (recur (rest cs) (long k) (long en) [] true))
                 (do (.add res [l :fail nil]) (recur (rest cs) li col nots started))))))))))
