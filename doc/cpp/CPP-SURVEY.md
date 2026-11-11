@@ -6427,3 +6427,136 @@ CPPI_ROUTE=ours bin/cppi check --corpus samples && CPPI_ROUTE=ours bin/cppi chec
 `.tmp/`: `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `L1/`-`L4/` (library.cpp at each step), `p/` (probes; `*.names`, `c.v`,
 `lib-clang.names` the name lists), `env.sh`, `job.sh`, `watch.sh`, `gen*.sh`, `gi.sh`, `gp.sh`, `pw.sh`, `pl.sh`, `plw.sh`, `probe.sh`,
 `snapgen.sh`, `cmp.sh` (no process substitution), `cg.sh`, `ess.sh`.
+
+## As built: cpp-s5 (2026-11-11; branch `cpp-s5` from mac/next 4b8fc77e3, which carries cpp-s4)
+
+Light, by day's rules (.tmp/night12/AGENT-RULES.md): main's stage 0 (`ARBACE_HOST_EXE`), at most two processes (`GOMEMLIMIT=1400MiB
+GOGC=30 REPR_CPP_THREADS=2`; a watcher, `.tmp/watchall.sh`, killing by PID any process of this worktree's TMPDIR past 2.5 GB, never
+reached: peaks 1.4 GB for the generator, 2.4 GB once for `xz -d` unpacking the snapshot's sysroot), the compiler stubs first on PATH
+(their log empty: no clang, g++ or LLVM tool ran), no gate. The 82 run programs generated at a snapshot worktree (`.tmp/snap`). The
+user's decisions of 2026-11-11: CP362 (a), CP363 (a), CP364 (a).
+
+### 1. CP364 (a): gen-batch's drops.tsv
+
+`gen-one` (so gen-batch, gen-list and `bin/cppi codegen`) writes `OUT/drops.tsv` beside gen.ll or gen.refused: the header
+declarations the analysis dropped (G4), grouped by cause (the refusal's class and message), the largest first, `count class message
+examples` (three `KIND:NAME`). sema's `*header-drops*` is now a map keyed by the node (its identity, place, kind and name): a
+declaration a later round of the headers' retry declares is taken out, so a drop is counted once and only when it stays dropped
+(`CPP_HDR_TRACE=1` prints every attempt: library.cpp's 764 trace lines were 168 drops). No file when nothing was dropped.
+
+library.cpp's drops, at cpp-s4's code (`.tmp/L0`): **168**, the largest causes 49 "partial specialization's arguments" (48 of them
+<refwrap.h>'s `_Mem_fn_traits`, written by the macro `_GLIBCXX_MEM_FN_TRAITS`, and <format>'s `_Arg_store<_Context>`), 26 "unknown
+type _Tp/element_type" (`indirectly_readable_traits`), 10 "an explicit specialization's qualifier", 6 `_GLIBCXX_STD_C`, 6
+`move_only_function`'s macro-written types. After this branch (`.tmp/G2/files/runtime/library.cpp/drops.tsv`): ****94****; the
+first two causes are gone (§2), the rest are listed there.
+
+### 2. The drops' largest causes, and <format> (CP362 (a))
+
+Each a general fix, found on library.cpp's way into <format> (probes `.tmp/p/f3.cpp`-`f9.cpp`, `x1`-`x13`):
+
+- **A partial specialization a macro writes**: its arguments' text is the macro's invocation; the parser now keeps the arguments'
+  tokens as the preprocessor gave them (`:_targtext`, the code generator's, under `*full-headers*`), read when the source text has
+  no `Name<` (`_Mem_fn_traits<_Res (_Class::*)(_ArgTypes...) const &>`: the 48).
+- **A partial specialization's type-constraints** ([temp.param]/4, [temp.constr.decl]/3.1): matched with its requires-clause; only
+  the latter was checked, so `formatter<__formattable_float _Tp, __char _CharT>` matched `formatter<int, char>` beside the integers'
+  one ("ambiguous partial specializations"); `indirectly_readable_traits`' constrained specializations (the 26) likewise.
+- **A class template defined with a qualified name** (`template<...> class __format::_Arg_store {...}`, [class.pre]/3): declared
+  in the namespace (or class) its nested-name-specifier names, its partial and explicit specializations' primary found there too
+  (`class-key-scope`); a partial specialization's arguments found after `class __format::` ([class.pre]/3); the specialization's own
+  class not re-scoped by the pattern's qualifier.
+- **A decltype-specifier as a nested-name-specifier** ([expr.prim.id.qual]/1; <format>'s `_Normalize = typename
+  decltype(_S_to_arg_type<_Tp>())::type`): the type reader makes `(cpp/scope (decltype ...) type)`, and the parser keeps the
+  operand for the code generator, as it did for a decl-specifier's decltype.
+- **`__extension__ template<...>`** (clang's ParseExternalDeclaration consumes the keyword first): <type_traits>' `__is_signed_integer`
+  and <iterator_concepts.h>'s `__is_signed_int128` had been declined.
+- **GNU's `__int128` and `unsigned __int128`** (`:i128`, `:u128`): size and alignment 16, LLVM's i128, mangled `n` and `o`, rank 6,
+  GCC's mode TI; <format>'s `_Arg_value` union and `_S_to_arg_type` name them under `__SIZEOF_INT128__`.
+- **CP362 (a)**: a consteval constructor, for the code generator, is always_inline (inlined and erased, as clang emits no immediate
+  function) and its body, which only checks (basic_format_string's runs the format string's scanner), is not analyzed: the
+  immediate invocation stores the mem-initializers' value at run time. clang stores the constant `{ i64 13, ptr @.str }` (the
+  checker of the mem-initializers' string_view(const char*) constructor, a constant evaluation of class objects, is CP362 (b));
+  the value is the same, the instructions not.
+- **An anonymous member's type is this class body's last unnamed class**: a class instantiated by a member's declaration declares
+  its own unnamed classes in between (`*last-anon*` bound per body); `_Arg_value`'s union had been given basic_format_args' union's
+  type, silently.
+- **An out-of-line member's names are looked up in its class's enclosing classes too** (the parser's lookup scope;
+  [basic.lookup.unqual]): <istream.tcc>'s `basic_istream<_CharT, _Traits>::sentry::sentry` names basic_istream's `__streambuf_type`
+  (`__streambuf_type* __sb = ...` had been read as a multiplication); a member class template named through its qualifier
+  (`any::_Manager_internal<_Tp>::_S_manage`).
+- **A `<` after a `)` or a number opens no template argument list** ([temp.names]/3, the parser's `angle-close` and the type
+  reader's argument split), and **a functional cast to a named type in constant text** (an unsigned 64-bit value above
+  Long/MAX_VALUE kept as the integer it is for the comparison): <type_traits>' `__is_signed_helper<_Tp, true> :
+  __bool_constant<_Tp(-1) < _Tp(0)>` had been declined, so **`is_signed_v<T>` was false for every T** (and `is_unsigned_v<int>`
+  true, `signed_integral<long>` and `weakly_incrementable<int*>` false); now as the standard says (probe x12: long, char, double,
+  __int128 signed; unsigned long, unsigned, bool not).
+
+**library.cpp** (the 82's 70th, CP359's last slice): it refused at make_format_args' `_Store` (cpp-s4); it now passes <format>'s
+make_format_args, basic_format_arg's constructor (formatter<int>), vformat_to's `output_iterator<_Sink_iter<char>, const char&>`
+constraint, and refuses at **<format>'s `_Seq_sink<string>::_M_reserve`, whose `this->_M_reset(_M_seq, __sz)` needs span<char>'s converting constructor from std::string ("no viable function among 1")**. Ahead of it: span's converting constructor from a contiguous range (std::string through
+ranges::begin's, end's and size's constraints, probe f8's trace), then the formatting
+machinery itself (clang's IR of library.cpp defines 663 functions, most of them <format>'s: `__do_vformat_to`, the scanner,
+formatter<int>, <double>, <const char*>, the Unicode tables' views). `_Arg_value<format_context>` is instantiated before
+`basic_format_context` is defined (its members dropped, "no size for nil"): CP365.
+
+### Checked (light; the stubs' log empty)
+
+| check | result |
+|---|---|
+| gen-batch over the 82 at 694c5e339 (`.tmp/G1`) | 69 generated, **the 69 of cpp-s4's G2 byte for byte**; 1,931 s |
+| gen-batch over the 82 at f1fd13481 (`.tmp/G2`, the head's code) | **69 generated, the 69 of cpp-s4's G2 byte for byte** (the is_signed fix changed none of their IR); library.cpp refused at `_M_reserve`, 94 drops; 1,784 s |
+| library.cpp alone (`.tmp/L0`-`L2`) | refused at `_Store` (L0, 168 drops), at sentry's `__streambuf_type` (L1, 94), at vformat (L2, 96) |
+| probes (`.tmp/p/`): a1 (any), x1-x9, x12, x13 | generate; x12's is_signed/is_unsigned answers the standard's |
+| `bin/cppi codegen-gen` | 154 of 154 as recorded, the two negative controls failing as they must (591 s) |
+| `bin/repr-cpp target verify`, `pp-check --essential`; `roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own` | pass, 33 of 33 and 9 of 9, the controls failing as they must |
+| `bin/reap` | 0 problems (49 of 52 cells checked), no record changed |
+| `bin/crops-score --record`, `--judge --strict` | 0 problems, no score changed |
+| keys | `test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go --gate-key` 314c8e5b... at mac/next and at the head: **no key moves** (arbace/cpp, arbace/repr/cpp are `arbace_crop_paths`) |
+
+### CP363 (a): variant.cpp and any.cpp
+
+`test/cpp/runtime/pending/variant.cpp` and `any.cpp` (cpp-s4's probes v1 and a1, by our route their defined names clang's) wait
+outside the runtime's list (`bin/cppi list runtime` reads `test/cpp/runtime/samples/*.cpp`), so that no record goes stale before the
+oracle tier records them. The oracle tier's commands (by hand, the host `:cxx`; then one process at a time):
+
+```
+git mv test/cpp/runtime/pending/variant.cpp test/cpp/runtime/pending/any.cpp test/cpp/runtime/samples/
+bin/cppi record-ref --corpus runtime --only          # g++ 15.2's runs of the runtime's 10, test/cpp/ref-gxx15.edn
+bin/cppi record-ir --corpus samples,runtime          # the pack cpp-ir-samples again (clang's IR of the two), its pin
+bin/cppi check --corpus runtime --record && bin/cppi check --aot --corpus runtime --record
+bin/cppi lower-corpus samples                        # the lowering's recorded list (samples+runtime) names the two: re-record it as its header says
+bin/reap --record && bin/crops-score --record && bin/crops-score --judge --strict
+printf 'runtime/variant.cpp\nruntime/any.cpp\n' > .tmp/cp363.txt && CPPI_ROUTE=ours bin/cppi check --corpus runtime --only .tmp/cp363.txt   # their runs by our route
+```
+
+### Proposed (CP365-CP366)
+
+- **CP365: a class template's specialization named before its argument's class is defined.** `_Arg_value<format_context>` (and
+  basic_format_arg's, _Arg_store's) is instantiated while `basic_format_context` is only declared, so its members that name
+  `_Context::char_type` are dropped and the instance stays broken (clang instantiates only where the type must be complete). (a)
+  An instance made while one of its arguments is an incomplete class is provisional: named again after the argument is complete,
+  it is made again (the headers' typedefs that hold it retried as G4's are); (b) instantiate the class lazily (on completeness),
+  sema's model changed throughout. **Recommended: (a).**
+- **CP366: <format>'s rest.** span's converting constructor from a contiguous range (ranges::begin, end and size's constraints on
+  std::string), then `__do_vformat_to`'s formatting machinery: (a) one slice a day as CP359, library.cpp's refusal and drops.tsv
+  the measure; (b) wait for CP362 (b)'s constant evaluator first. **Recommended: (a).**
+
+### The night's commands (after this branch's merge; one process at a time)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1200MiB GOGC=30 REPR_CPP_THREADS=2 CPPI_JOBS=1 CPPI_THREADS=1
+bin/repr-cpp dg --corpus dg-error --own        # the checker over sema's changes (is_signed, partial specializations' type-constraints): the own dg record held (2-3 GB, about 60 min)
+bin/cppi route-compare --corpus gxx-dg-run --sample 25 && bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25   # no clang pass lost (2-3 GB)
+CPPI_ROUTE=ours bin/cppi check --corpus samples && CPPI_ROUTE=ours bin/cppi check --corpus runtime   # about 60 min, 2-3 GB
+```
+
+### Rule slips
+
+A plain `&` once (the first watcher, `(bash watch.sh ... &)`); one `<(...)` (a `diff` of two drops files); source edits while a run
+that loads them was running (sema.ae and parse.ae/template.ae each once, after the run had loaded them: the runs' outputs were not
+used for a conclusion about the edited code); `git stash list` once (read-only).
+
+### Scratch
+
+`.tmp/`: `G0/` (cpp-s4's G2, the base), `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `L0/`-`L2/` (library.cpp), `p/`
+(probes), `lib-clang.ll` (clang's recorded IR of library.cpp, from the pack), `env.sh`, `job.sh`, `watchall.sh`, `snapgen.sh`,
+`cmp.sh`, `cg.sh`, `ess.sh`, `probe.sh`, `gen.sh`.

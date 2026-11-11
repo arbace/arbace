@@ -4955,3 +4955,27 @@ expansion would then end the whole expansion, where LLVM goes on with the body's
   bisection, a Word-pattern change no probed program used; `tostg.ae` during the LibContainers bisection, which I stopped and
   did not use; `tostg.ae`'s unit check during the GHC-interface lib-stg's program runs, a no-op for programs, unit main); one
   `<(...)` in a `diff` command early on.
+
+## 2026-11-11: cpp-s5, CP364 (a) and CP362 (a): library.cpp's drops by cause and <format>'s first slices (branch `cpp-s5`, from `mac/next` 4b8fc77e3)
+
+The user decided CP362 (a), CP363 (a) and CP364 (a) (2026-11-11). Built, light (doc/cpp/CPP-SURVEY.md, "As built: cpp-s5"):
+- CP364 (a): `arbace.cpp.codegen/gen-one` writes `OUT/drops.tsv`, the header declarations sema dropped (G4) by cause, largest
+  first; `sema/*header-drops*` keyed by the node so that a declaration the retry rounds declare later is not counted (library.cpp:
+  764 trace lines, 168 drops at cpp-s4's code). Alternative considered: counting in the log by hand (CP364 (b)); a log line per drop
+  is what CPP_HDR_TRACE already gives, and it counts every attempt.
+- The two largest causes closed: a macro-written partial specialization's arguments from the parser's tokens (48), a partial
+  specialization's type-constraints matched (26 and <format>'s formatter ambiguity). Then, on library.cpp's way through <format>:
+  class templates and their specializations defined with a qualified name, decltype as a nested-name-specifier, `__extension__
+  template`, GNU's `__int128` types, an anonymous member's type taken from its own class body, out-of-line members' lookup in the
+  enclosing classes (the parser), a `<` after `)` or a number as an operator and functional casts in constant text. The last fixes a
+  pre-existing wrong answer: `is_signed_v<T>` was false for every T (the trait's partial specialization was declined), so
+  `signed_integral<long>` and `weakly_incrementable<int*>` were false.
+- CP362 (a): a consteval constructor is always_inline for the code generator and its checking body is not analyzed; the stored
+  string_view is computed at run time where clang stores a constant (CP362 (b) the constant evaluator).
+- CP363 (a): `test/cpp/runtime/pending/{variant,any}.cpp` wait for the oracle tier (its commands in the survey); placed outside the
+  runtime's list so that no record goes stale before then. Alternative considered: adding them to `samples/` now, which would leave
+  the runtime corpus's records (ref, IR pack, check, lowering list) stale until the oracle tier.
+- Measures: the 82 run programs still 69 by our route, their IR byte for byte cpp-s4's; library.cpp now refuses at <format>'s `_Seq_sink<string>::_M_reserve`, whose `this->_M_reset(_M_seq, __sz)` needs span<char>'s converting constructor from std::string ("no viable function among 1") (it was make_format_args'
+  `_Store`), its drops 168 → 94; codegen-gen 154 of 154; the essential read and print checks pass; reap 0 problems, crops-score
+  unchanged; no key moves. CP365 (an instance made while its argument class is incomplete) and CP366 (<format>'s rest) proposed.
+- Rule slips: one plain `&`, one `<(...)`, source edits while a run that had loaded them ran (three), one `git stash list`.
