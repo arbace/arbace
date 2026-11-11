@@ -1116,7 +1116,11 @@
   [m]
   (let [seen (java.util.HashSet.) work (java.util.ArrayDeque.) push! (fn [r] (when (.add seen r) (.add work r)))
         nodes (into {} (keep #(when (= (first %) 'llvm/meta) [(second %) (nth % 2)]) m))
-        no-dbg (fn [md] (mapcat identity (remove #(= '!dbg (first %)) (partition 2 md))))]
+        no-dbg (fn [md] (mapcat identity (remove #(= '!dbg (first %)) (partition 2 md))))
+        ;; LLS46 (b): stripDebugLocFromLoopID (DebugInfo.cpp): the DILocation operands of an instruction's llvm.loop id go with the
+        ;; debug info, so a node reached only through a loop's start or end location is not left
+        loops (java.util.HashSet.)
+        loop-id (fn [md] (second (drop-while #(not= % '!llvm.loop) md)))]
     (doseq [f m]
       (case (first f)
         llvm/named-meta (when-not (or (str/starts-with? (name (second f)) "!llvm.dbg.") (= (second f) '!llvm.gcov))
@@ -1128,12 +1132,17 @@
             (doseq [bl (blocks-of f) x (items-of bl) :let [b (body x)]
                     :when (not (dbg-record? x))
                     :when (not (and (= 'call (first b)) (old-dbg? (nth b 2 nil))))]
+              (when-let [l (loop-id (:md (opts-of (drop 2 b))))] (.add loops l))
               (doseq [r (md-ids-in (no-dbg (:md (opts-of (drop 2 b)))))] (push! r))
               (when (and ('#{call invoke callbr} (first b)) (vector? (nth b 3 nil)))
                 (doseq [r (md-ids-in (filter #(and (vector? %) (= 'metadata (first %))) (nth b 3)))] (push! r))))))
         llvm/global (doseq [r (md-ids-in (no-dbg (:md (opts-of (drop 3 f)))))] (push! r))
         nil))
-    (loop [] (when-let [r (.poll work)] (doseq [s (md-ids-in (get nodes r))] (push! s)) (recur)))
+    (loop [] (when-let [r (.poll work)]
+               (doseq [s (md-ids-in (get nodes r))
+                       :when (not (and (.contains loops r) (= "DILocation" (di-kind (get nodes s)))))]
+                 (push! s))
+               (recur)))
     seen))
 
 (defn- hard-if-kept

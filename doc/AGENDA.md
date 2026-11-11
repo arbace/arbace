@@ -51,7 +51,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | Scheme | 97.4 (98.9) | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
-| LLVM IR | 97.6 (98.5) | 100 | 96.9 | |
+| LLVM IR | 97.6 (98.5) | 100 | 96.9 | llvm-ind1 (LLS46): judge 0.8455 (16 more own verdicts), independence 96.91; proposals LLS47-LLS50 (the rest of the judge is the probes, llvmi's 177, the split sections) |
 | Python | 0 | 83.3 | 20.0 | all three |
 
 Six crops are above 90 on all three. What the others still need:
