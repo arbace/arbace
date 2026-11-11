@@ -846,10 +846,18 @@
 (defn- traits-in-scope
   "The traits a method call may name: the crate's own, then std's in scope (*scope-traits*)"
   [nm]
-  (concat (for [d (c/defs) :when (= "Trait" (:kind d)) :when (trait-item (:id d) nm)] (:id d))
-          (for [p (or *scope-traits* (keys (:traits c/*si*)))
-                :let [m (get (:traits c/*si*) p)]
-                :when (some #(= nm (first %)) (:items m))] p)))
+  (distinct
+   (concat (for [d (c/defs) :when (= "Trait" (:kind d)) :when (trait-item (:id d) nm)] (:id d))
+           (for [p (or *scope-traits* (keys (:traits c/*si*)))
+                 :let [m (get (:traits c/*si*) p)]
+                 :when (some #(= nm (first %)) (:items m))] p)
+           ;; RF20: the trait the enclosing impl implements (rustc_resolve's traits_in_scope: current_trait first, when it may
+           ;; have the item): `"..".fmt(f)` in `impl fmt::Display for X` names Display, not imported
+           (for [g c/*scope* :let [d (:def g)]
+                 :when (and (number? d) (str/starts-with? (str (:kind (c/def-of d))) "Impl"))
+                 :let [tp (first (second (try (c/impl-header d) (catch Throwable _ nil))))]
+                 :when (and (string? tp) (some #(= nm (first %)) (:items (get (:traits c/*si*) tp))))]
+             tp))))
 
 (defn- alias-trait-bound-args
   "RF13e: a projection's item bound of TR (std's from its interface): the bound's trait arguments at the projection's
@@ -1957,7 +1965,14 @@
                        path (:path e) segs (:segs path)
                        nm (:ident (peek segs))
                        r (when (> (count segs) 1) (try (c/res-def (assoc path :segs (vec (butlast segs)) :res nil :span nil)) (catch Throwable _ nil)))
-                       tr (when (#{:local :ext} (first r)) (second r))]
+                       tr (or (when (#{:local :ext} (first r)) (second r))
+                              ;; RF20: a trait the written prefix does not walk to (`<T as self::uninit::CopySpec>::clone_one`: an
+                              ;; out-of-line module's crate-private trait): the item's own resolution, its parent the trait (as
+                              ;; instantiate_value_path takes the trait from the resolved item, tcx.parent)
+                              (let [d (first (filter #(and (seq? %) (= 'def (first %)) (#{"AssocFn" "AssocConst"} (second %))) (:res path)))
+                                    p (when d (str (nth d 2)))
+                                    tp (when (and p (str/includes? p "::")) (subs p 0 (str/last-index-of p "::")))]
+                                (when (and tp (get (:traits c/*si*) tp)) tp)))]
                    (or (when-let [[def k] (and tr (trait-item tr nm))]
                          (let [fresh (vec (drop 1 (fresh-args tr)))
                                ;; RF12: the trait's written arguments (`<T as AsRef<U>>`), else fresh variables
