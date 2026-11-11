@@ -768,13 +768,21 @@
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
         ;; an implicit parameter (GHC.Tc.Solver.Dict's IP: its name determines its type, as a functional
         ;; dependency): a given of the same name, HasCallStack being ?callStack :: CallStack
-        (when (or (= c cls-ip) (= c cls-callstack))
-          (let [[pn pt] (if (= c cls-ip) [(second (first ts)) (second ts)] ["callStack" (con-ty tc-callstack)])]
+        ;; HF10-P21: HasExceptionContext too, ?exceptionContext :: ExceptionContext (SomeException's constructor gives it:
+        ;; someExceptionContext (SomeException _) = ?exceptionContext read the default, the empty context)
+        (when (or (= c cls-ip) (ip-synonym-name c))
+          (let [syn (fn [x] (case (ip-synonym-name x)
+                              "callStack" ["callStack" (con-ty tc-callstack)]
+                              "exceptionContext" ["exceptionContext" (con-ty (ext-name "tc" "GHC.Internal.Exception.Context" "ExceptionContext"))]
+                              nil))
+                [pn pt] (if (= c cls-ip) [(second (first ts)) (second ts)] (syn c))]
             (some (fn [[[gc gts] term]]
                     (let [[gn gt] (cond (= gc cls-ip) [(second (zonk (first gts))) (second gts)]
-                                        (= gc cls-callstack) ["callStack" (con-ty tc-callstack)])]
+                                        :else (syn gc))]
                       (when (and gn (= gn pn)) (unify pt gt) term)))
-                  (concat givens (some-> *skolem-givens* deref)))))
+                  ;; (the module's existential patterns' givens, unscoped, for ?callStack alone, as before: a pattern's
+                  ;; ?exceptionContext is given to its alternative by ip-pat-env)
+                  (concat givens (when (= pn "callStack") (some-> *skolem-givens* deref))))))
         (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) (some-> *skolem-givens* deref))
         (when (and (= c cls-typeable) (seq ts))
           (or (typeable-term (last ts))
@@ -1327,9 +1335,19 @@
   [env head args expected]
   (let [[tf cf] (infer env head)
         [ats r] (reduce (fn [[ats t] _] (let [[a r] (split-fun t)] [(conj ats a) r])) [[] tf] args)
+        ;; HF10-P21: a result of a qualified type, a field's (CollectExceptionAnnotationMechanism's ceaCollect... :: HasCallStack =>
+        ;; IO SomeExceptionAnnotation): instantiated after the arguments, its constraints' evidence applied (tcInstFun's final
+        ;; instantiation); HasCallStack's call site the occurrence's, GHC's OccurrenceOfRecSel origin "a use of `f'" for a field
+        rq (let [x (prune r)] (when (and (vector? x) (= :forall (first x)) (empty? (nth x 1)) (seq (nth x 2))) x))
+        r (if rq (nth rq 3) r)
         _ (when expected (unify r expected))
         cs (mapv (fn [a at] (check-expr env a at)) args ats)]
-    [r (app* cf cs)]))
+    (if rq
+      (let [n (when (= 'HsVar (con head)) (nm (arg head 2)))
+            sp (when n (lsp (arg head 2)))
+            label (when (and n (= "fld" (nth n 1))) (str "a use of `" (occ n) "'"))]
+        [r (app* (app* cf cs) (mapv #(if n (want-at! % n sp label) (want! %)) (nth rq 2)))])
+      [r (app* cf cs)])))
 
 (defn- app-spine [v]
   (loop [x v args ()] (if (= 'HsApp (con x)) (recur (lval (arg x 2)) (cons (arg x 3) args)) [x (vec args)])))
@@ -1450,10 +1468,14 @@
                       [ct cpreds] (instantiate (get @*genv* cn))
                       flds (:fields (get @*cons* cn))
                       [argts res] (loop [t ct as []] (let [t (prune t)] (if (and (= :tc (first t)) (= fun-tc (second t))) (recur (second (nth t 2)) (conj as (first (nth t 2)))) [as t])))
+                      ;; HF10-P21: each field checked against its type (tcRecordBinds' tcCheckPolyExprNC): a field of a
+                      ;; qualified type (ceaCollectExceptionAnnotationMechanism :: HasCallStack => IO ...) abstracts its
+                      ;; evidence, as the constructor applied positionally does
                       given (into {} (map (fn [fb] (let [fbv (lval fb) f (nm (arg (lval (arg fbv 2)) 2))
-                                                         [t c] (infer env (arg fbv 3))
-                                                         i (.indexOf ^java.util.List flds f)]
-                                                     (when (>= i 0) (unify t (nth argts i)))
+                                                         i (.indexOf ^java.util.List flds f)
+                                                         c (if (>= i 0)
+                                                             (check-expr env (arg fbv 3) (nth argts i))
+                                                             (second (infer env (arg fbv 3))))]
                                                      [f c]))
                                       (arg (arg v 3) 2)))
                       ;; RecordWildCards (C {..}): each field the renamer filled from the variable of its name in scope
@@ -1678,6 +1700,20 @@
         (when (and f1 f2) (add-given! f1 f2) (add-given! x1 x2)))
       :else nil)))
 
+(defn- ip-pat-env
+  "HF10-P21: the implicit parameters a constructor pattern's context gives (SomeException's HasExceptionContext, a
+  HasCallStack, a ?x :: t) in env's ::ip, so its alternative's wanteds of them are its dictionaries (with-ips;
+  GHC's given IP constraints of the pattern's implication)"
+  [env dpreds dvars]
+  (reduce (fn [env [[c ts] d]]
+            (let [[n t] (cond (= c cls-ip) [(second (prune (first ts))) (second ts)]
+                              (= (ip-synonym-name c) "callStack") ["callStack" (con-ty tc-callstack)]
+                              (= (ip-synonym-name c) "exceptionContext")
+                              ["exceptionContext" (con-ty (ext-name "tc" "GHC.Internal.Exception.Context" "ExceptionContext"))]
+                              :else nil)]
+              (if (string? n) (update env ::ip (fnil conj []) [n t d]) env)))
+          env (map vector dpreds dvars)))
+
 (defn- tc-gadt-pat
   "A pattern on a GADT constructor (GHC.Tc.Gen.Pat's tcDataConPat): the scrutinee T us, the universals the us, the
   existentials skolems, each equality spec a given (a skolem u) or a unification (else), the context's dictionaries
@@ -1697,7 +1733,7 @@
         _ (assume-eqs! dpreds)
         ps (pat-args (arg v 3))
         [env' pcs] (reduce (fn [[env pcs] [p at]] (let [[e c] (tc-pat env p (subst m at))] [e (conj pcs c)]))
-                           [env []] (map vector ps args))]
+                           [(ip-pat-env env dpreds dvars) []] (map vector ps args))]
     [env' (list 'pcon cn (into dvars pcs))]))
 
 (defn- gadt-split
@@ -1759,7 +1795,7 @@
                    _ (when-not ct (error! "no constructor type for " (pr-str cn)))
                    _ (unify res t)
                    [env' pcs] (reduce (fn [[env pcs] [a at]] (let [[env1 pc] (tc-pat env a at)] [env1 (conj pcs pc)]))
-                                      [env []] (map vector args ats))]
+                                      [(ip-pat-env env dpreds dvars) []] (map vector args ats))]
                [env' (list 'pcon cn (into dvars pcs))]))
 
 ;; HF9 (second slice): pattern synonyms (GHC.Tc.TyCl.PatSyn, GHC.Tc.Gen.Pat's tcPatSynPat). A synonym's type is
@@ -1815,7 +1851,7 @@
                                     [(occ f) (if (true? (arg fbv 4)) (list 'L nil (list 'VarPat nil (list 'L nil (list 'rn/name x)))) (arg fbv 3))]))]
                (mapv (fn [f] (get given (occ f) (list 'L nil (list 'WildPat nil)))) fields))
              (pat-args details))
-        [env' pcs] (reduce (fn [[env pcs] [p at]] (let [[e c] (tc-pat env p at)] [e (conj pcs c)])) [env []] (map vector ps ats))]
+        [env' pcs] (reduce (fn [[env pcs] [p at]] (let [[e c] (tc-pat env p at)] [e (conj pcs c)])) [(ip-pat-env env dpreds dvars) []] (map vector ps ats))]
     [env' (list 'psyn cn evs dvars pcs)]))
 
 (defn tc-pat [env p t]

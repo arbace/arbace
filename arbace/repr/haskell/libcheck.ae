@@ -603,13 +603,35 @@
                    :let [m (read-string l)] :when (= :pass (:result m))]
                (:id m)))))
 
+(defn- run-nonpasses [results-file]
+  (vec (sort (for [l (str/split-lines (slurp results-file)) :when (str/starts-with? l "{")
+                   :let [m (read-string l)] :when (not= :pass (:result m))]
+               (:id m)))))
+
+(def run-classes
+  "HF10-P20, P28 (a): the classes of a run row's non-passes (the row's :classes, {ID CLASS}); a non-pass in none fails the judge.
+  :o2-names: it calls a name of ghc-internal only its -O2 build has, from another package's -O2 STG (bytestring, directory,
+  file-io, stm: their own -O0 STG is HF10-P17's); :o0-report: the uncaught exception's report differs on base's -O0 libraries (GHC's
+  own -O0 set, ghc0, prints the same: base's -O0 TopHandler path); :hsi-memory: more than the light runs' 2 GiB; :hsi: hsi's own
+  class (run-check.edn's)"
+  {:o2-names "a name of ghc-internal only its -O2 build has, from another package's -O2 STG (HF10-P17)"
+   :o0-report "the uncaught exception's report on base's -O0 libraries (ghc0 the same)"
+   :hsi-memory "more than the light runs' 2 GiB (run-check.edn's)"
+   :hsi "hsi's own class (run-check.edn's)"})
+
 (defn record-runs
   "HF10-P20: a run of run-check's programs on a library set (lib-stg --ifaces own --run, LIB_STG_REPLACE=SET) as the
   record's row {:runs SET :passes N :of M :ids [...]}, replacing the set's row, the module rows kept"
   [results-file record-file set-name]
   (let [ids (run-passes results-file)
         n (count (filter #(str/starts-with? % "{") (str/split-lines (slurp results-file))))
-        row {:runs (keyword set-name) :passes (count ids) :of n :ids ids}
+        old (some #(when (= (:runs %) (keyword set-name)) %) (run-rows record-file))
+        ;; HF10-P28 (a): each non-pass keeps its class from the set's old row, a new one :unclassed (the judge fails on it)
+        cls (into (sorted-map) (for [i (run-nonpasses results-file)] [i (get-in old [:classes i] :unclassed)]))
+        ifaces (System/getenv "LIB_STG_PROG_IFACES")
+        row (cond-> {:runs (keyword set-name) :passes (count ids) :of n :ids ids}
+              (seq cls) (assoc :classes cls)
+              true (assoc :ifaces (keyword (or ifaces "own"))))
         text (slurp record-file)
         lines (remove (fn [l] (and (str/starts-with? l "{") (let [m (read-string l)] (and (map? m) (= (:runs m) (:runs row))))))
                       (str/split-lines text))]
@@ -624,14 +646,24 @@
         now (set (run-passes results-file))
         mine (get rows (keyword set-name))
         lost (when mine (remove now (:ids mine)))
-        lost-eq (when (and (= set-name "all") (get rows :equal)) (remove now (:ids (get rows :equal))))]
+        ;; (all-base, HF10-P19 (a): base own too, against the all set's row)
+        base-row ({"all" :equal "all-base" :all} set-name)
+        lost-eq (when (and base-row (get rows base-row)) (remove now (:ids (get rows base-row))))
+        ;; HF10-P28 (a): a non-pass of the run in no class of the row's (run-classes) fails
+        uncl (when mine (remove #(contains? run-classes (get-in mine [:classes %])) (run-nonpasses results-file)))]
+    (doseq [i uncl] (println (str "lib-stg --run: " set-name ": " i " does not pass and is in no class (" (pr-str (get-in mine [:classes i])) ")")))
     (cond
       (nil? mine) (do (println (str "lib-stg --run: UNRECORDED: no row of the " set-name " set in " record-file)) (System/exit 1))
       (or (seq lost) (seq lost-eq))
       (do (println (str "lib-stg --run: " set-name ": " (count now) " pass; lost against the record: " (str/join " " (distinct (concat lost lost-eq)))))
           (System/exit 1))
+      (seq uncl) (do (println (str "lib-stg --run: " set-name ": " (count uncl) " non-passes in no class")) (System/exit 1))
       :else (println (str "lib-stg --run: " set-name ": " (count now) " pass, the " (:passes mine) " recorded kept"
-                          (when lost-eq (str ", every pass of the equal set's " (:passes (get rows :equal)) " kept")))))))
+                          (when lost-eq (str ", every pass of the " (name base-row) " set's " (:passes (get rows base-row)) " kept"))
+                          (when (:classes mine)
+                            (str "; the non-passes by class: "
+                                 (str/join ", " (for [[c n] (sort (frequencies (vals (select-keys (:classes mine) (run-nonpasses results-file)))))]
+                                                  (str (name c) " " n))))))))))
 
 (defn judge-stg
   "A lib-stg run's results against the record: exit status 1 when a module is worse, or (a whole run) one of either is
