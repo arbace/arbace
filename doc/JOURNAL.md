@@ -5109,7 +5109,12 @@ no code copied. doc/asm/AMD64-SURVEY.md and doc/asm/ARM64-SURVEY.md, "As built: 
 - Proofs (stage 0, light; one run at a time from 18:45): x86-64 object-check musl 32/32, synthetic 8/8 with obj-err 3/3, mc-x86-obj 49/49,
   nine controls; arm64 object-check a64-musl 13/13, a64-synthetic 3/3 with obj-err-arm64 2/2, mc-aarch64-obj 110/110, five controls;
   arm64 object-verdict 2,819 of 2,832 (unchanged), run-check 17/17 with four controls, roundtrip and encode-check ok (unchanged);
+  x86-64 run-check 19/19 with five controls, roundtrip musl mc-asmparser ok, x86i-check whole 43 of 44 (`{:cpuid 2}`, unchanged; 13 min 25 s
+  at load 15-25, 1.3 GiB, before 18:45);
   `bin/a64i synth --record` 18 programs under qemu; `bin/a64i check --record` whole 90 of 90 (eval, AOT, forms), coverage 2,015 of 2,015;
   `--essential` 75 of 75, 15 controls. `bin/reap --record` (arm64 eval 303 -> 306, AOT 3,049 -> 3,052 / 0 / 13), `bin/reap` 0 problems;
   `bin/crops-score --record`, `--judge --strict` 0. No key moves: `bin/arbace-go --gate-key` `9accb085d767...`, the value AX12 recorded
   for `mac/next` (`arbace/asm/`, `go/arbace/a64i/`, `bin/repr-asm` are crop paths), `test/gate/gate-key-crops-test.bash` passes.
+- Rule slips: one command wrote to `2>/dev/null` (a sourcing of bin/lib/tools.bash, nothing kept); the x86-64 and arm64 object checks
+  ran concurrently with one TMPDIR, so x86-64's musl list lost a file (rerun alone: 32 of 32); one `sleep 1` and one foreground
+  `until ... sleep` wait (stopped); one `git stash list` (read-only, no stash made).
