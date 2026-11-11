@@ -31,9 +31,19 @@
 #define SIZEOF__BOOL 1
 #define ALIGNOF_MAX_ALIGN_T 16
 #define WITH_DOC_STRINGS 1
-/* queue 269: ci's checker takes gcc's generic __atomic_load and __atomic_store (pyatomic_gcc.h's float and double
-   accessors) for functions of fewer parameters ("too many arguments to function"); ci's world is one thread, so the
-   plain access is the atomic one. A REQUEST for the C crop (arbace/c/check.ae's builtins). */
+/* queue 269: gcc's __atomic builtins (Include/cpython/pyatomic_gcc.h, which the full API's inline functions call):
+   ci's builder implements none of them (a call faults as an undefined function) and its checker takes the generic
+   __atomic_load and __atomic_store for prototyped functions; ci's world is one thread, so each is its plain access
+   (statement expressions and __typeof__, which ci reads). A REQUEST for the C crop (arbace/c's builtins). */
 #define __atomic_load(p, r, o) ((void)(o), *(r) = *(p))
 #define __atomic_store(p, v, o) ((void)(o), *(p) = *(v))
+#define __atomic_load_n(p, o) ((void)(o), *(p))
+#define __atomic_store_n(p, v, o) ((void)(o), (void)(*(p) = (v)))
+#define __atomic_thread_fence(o) ((void)(o))
+#define __atomic_fetch_add(p, v, o) ({ __typeof__(*(p)) _pyi_o = *(p); *(p) += (v); (void)(o); _pyi_o; })
+#define __atomic_fetch_and(p, v, o) ({ __typeof__(*(p)) _pyi_o = *(p); *(p) &= (v); (void)(o); _pyi_o; })
+#define __atomic_fetch_or(p, v, o) ({ __typeof__(*(p)) _pyi_o = *(p); *(p) |= (v); (void)(o); _pyi_o; })
+#define __atomic_exchange_n(p, v, o) ({ __typeof__(*(p)) _pyi_o = *(p); *(p) = (v); (void)(o); _pyi_o; })
+#define __atomic_compare_exchange_n(p, e, d, w, s, f) \
+    ({ int _pyi_r = *(p) == *(e); if (_pyi_r) *(p) = (d); else *(e) = *(p); _pyi_r; })
 #endif
