@@ -199,10 +199,14 @@
   "An operator applied to constants: its value, or (an operand dependent) the expression {:k :texpr :o o :args [...]}."
   [o args]
   (if (every? number? args)
+    (if (and (#{"<" ">" "<=" ">=" "==" "!="} o) (some #(not (<= -9223372036854775808 % 9223372036854775807)) args))
+      ;; (cpp-s5: an unsigned 64-bit value above Long/MAX_VALUE, compared as the integer it is)
+      (let [[a b] args] (case o "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
+                                "==" (if (== a b) 1 0) "!=" (if (== a b) 0 1)))
     (let [[a b c] (map long args)]
       (case o
         "neg" (- a) "!" (if (zero? a) 1 0) "~" (bit-not a) "?" (if (zero? a) c b)
-        (long ((binary-fns o) a b))))
+        (long ((binary-fns o) a b)))))
     {:k :texpr :o o :args (vec args)}))
 
 (def ^:private cast-types #{"bool" "char" "short" "int" "long" "unsigned" "signed"})
@@ -473,7 +477,18 @@
                           (= x open) (recur (inc d))
                           (= x close) (if (= 1 d) (str/join " " (map second (subvec ts start (dec @pos)))) (recur (dec d)))
                           :else (recur d))))))]
-    (letfn [(primary []
+    (letfn [(cast-named [nm v]
+              (let [ty (abi/unq (sema/resolve-type scope nm))]
+                (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
+                      (= :bool (:n ty)) (if (zero? (long v)) 0 1)
+                      (abi/integral? ty) (let [b (* 8 (abi/size-of ty))]
+                                           (if (>= b 64) (long v)
+                                               (let [m (dec (bit-shift-left 1 b)) u (bit-and (long v) m)]
+                                                 (if (and (abi/signed? ty) (bit-test u (dec b))) (- u (inc m)) u))))
+                      ;; (cpp-s5: a floating type's value, the operators' integers: `double(-1) < double(0)`)
+                      (abi/floating? ty) v
+                      :else (fail :template "constant expression " s))))
+            (primary []
               (let [[k t] (next!)]
                 (cond
                   ;; a C-style cast to a builtin type: (bool)(x)
@@ -484,16 +499,19 @@
                   ;; parse_numbers.h's `(_IntType)_Val` in _Select_int_base's base; an integral type's value range)
                   (and (= t "(") (= :id (first (get ts @pos))) (= ")" (nth (get ts (inc @pos)) 1 nil))
                        (some #(= :type (:e %)) (sema/lookup scope (peek))))
-                  (let [[_ nm] (next!) _ (next!)
-                        ty (abi/unq (sema/resolve-type scope nm))
-                        v (primary)]
-                    (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
-                          (= :bool (:n ty)) (if (zero? (long v)) 0 1)
-                          (abi/integral? ty) (let [b (* 8 (abi/size-of ty))]
-                                               (if (>= b 64) (long v)
-                                                   (let [m (dec (bit-shift-left 1 b)) u (bit-and (long v) m)]
-                                                     (if (and (abi/signed? ty) (bit-test u (dec b))) (- u (inc m)) u))))
-                          :else (fail :template "constant expression " s)))
+                  (let [[_ nm] (next!) _ (next!)]
+                    (cast-named nm (primary)))
+                  ;; (cpp-s5: a functional cast to a type named by one identifier, [expr.type.conv]/2: <type_traits>'
+                  ;; __is_signed_helper's `__bool_constant<_Tp(-1) < _Tp(0)>`, so that is_signed_v<long> holds; an unsigned
+                  ;; 64-bit value above Long/MAX_VALUE as the integer it is, so that the comparison is the type's)
+                  (and (= k :id) (= "(" (peek)) (not (template-name? scope t))
+                       (some #(= :type (:e %)) (sema/lookup scope t)))
+                  (let [_ (next!) v (expr 0) _ (next!)
+                        r (cast-named t v)
+                        ty (abi/unq (sema/resolve-type scope t))]
+                    (if (and (number? r) (neg? (long r)) (abi/integral? ty) (not (abi/signed? ty)) (>= (* 8 (long (abi/size-of ty))) 64))
+                      (+ (bigint r) 18446744073709551616N)
+                      r))
                   (= t "(") (let [v (expr 0)] (next!) v)
                   (= t "-") (fold "neg" [(primary)])
                   (= t "+") (primary)
