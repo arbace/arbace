@@ -4593,3 +4593,74 @@ test_keywordonlyarg` 48 of 48 pass (GOGC=50, peak 1.9 GiB); `bin/reap` 0 problem
   expression type mismatch" verdicts; the night 11 rejected tree's records applied (night 11, `.tmp/night11/rejected/llvm`).
 - CLAUDE.md: bin/reap's matrix has thirteen rows and 52 cells (Haskell, x86-64 and arm64 assembly joined the ten), crops-score thirteen crops;
   a sentence for the assembly crops.
+
+## 2026-11-10: C++'s CP338 (a) and CP350 (a), the run corpora's refusals by our route (branch `cpp-cp338`)
+
+- **What**: the user's decisions of 2026-11-10 (about 10:30 UTC: CP338 (a) and CP344-CP351 as recommended), on a branch from
+  mac/cpp-props5 57dd92021. In CP338 (a)'s order (the parser's declines, the threads, the singles, `__complex__`): `main()` with no
+  type as GCC's grokdeclarator takes it (a pedantic diagnostic, dropped without -pedantic-errors); a forward-declared class's scope
+  looking in its definition's (iosfwd's streambuf typedef); C++23's multidimensional subscript; the fences and the lock-free queries;
+  GNU's asm statement parsed into its parts, the empty barrier generated as clang does; `__builtin_clear_padding` as clang 23 writes
+  it; the defaulted secondary comparisons (they had been emitted `unreachable`) and `!=`'s rewritten candidate when none is viable;
+  variable templates' partial specializations and their constants in a type's text; `sizeof...` in a type's text; an alias template
+  as `__make_integer_seq`'s sequence; a non-type pack's parameter type in its own template's scope; ADL through inline namespaces;
+  a main file's typedef of a not-yet-defined template's specialization declared again later; packs through a template template
+  parameter. CP350 (a): under `auto` a program goes to our route when every option is one it models (-D, -U, -I, -fexceptions,
+  -fno-exceptions), and every program by ours is given its options. Clang's behaviour was read from clang 23.1.5's recorded IR (the
+  pack cpp-ir-gxx-dg-run) and clang/lib/CodeGen's CGBuiltin.cpp and CGStmt.cpp at llvmorg-23.1.5 (Apache-2.0 WITH LLVM-exception),
+  GCC's from gcc/cp/decl.cc at gcc-15.2.0 (the pinned tarball); no code ported.
+- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (S5a of the plan).
+- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: CP338 (a) and CP350 (a)"): the 82 programs by our route 57 → 62 generated (none
+  lost); codegen-gen 154 of 154 unchanged; the dg every-10th sample 121 → 122 own passes (variadic-ttp3), none lost; `bin/reap` 0
+  problems after recording the matrix again (cpp-props5's CP328 class move, the same at the base); `bin/crops-score --judge --strict`
+  0 problems. The lowered runtime built by day (198 of 198, peak 2,945 MB in the ci read's chunks) and the five new programs with
+  opt/unroll1.C (its -fno-exceptions) run by our route: 6 of 6 pass by their own verdicts (vbase8-10 a gain: clang rejects it).
+- **Not built**: explicit object parameters, the TLS wrapper, `__complex__`, std::thread's tuple constraints, shared_ptr's
+  `__has_esft_base` SFINAE, pr77550's `_CharT`, library.cpp's variant and any (each refused further on now).
+- **Alternatives considered**: implicit int for any function (GCC 15 makes it a permerror, no-type-2.C); emitting no code for
+  `__builtin_clear_padding` (behaviour the same here, but not clang's IR); deferring every main-file declaration that names an
+  incomplete template (only typedefs and aliases are, as no instantiation is needed for them).
+- **Proposed**: CP355 (-fstrict-enums, -fno-threadsafe-statics modelled), CP353 (CP338's next slices' order), CP354 (the measuring
+  lists' duplicates).
+- **Slips**: two process substitutions (`diff <(sort ...)`) in a throwaway comparison early on, against the day's rules; the first
+  runtime build attempt stopped at the disk rule (83%), retried when the disk was at 78%.
+
+## 2026-11-11: cpp-cp338b, cpp-cp338 rebased onto cpp-n12 (branch `cpp-cp338b`, from `mac/cpp-cp338` f13582d5a)
+
+The three commits of `cpp-cp338` rebased onto `cpp-n12` (340566cd2, on mac/next a7e6c4f03, which carries cpp-cp352, cpp-print-own and
+cpp-props5). Conflicts: `arbace/repr/cpp/parse.ae`'s asm statement (cp338's parse into parts kept, with cp352's `__attribute (` start of
+an attributed statement); the journal and the survey (both lines' sections kept, cp338's after cp352's); the agenda's C++ line (CP243 (a)
+and CP352 merged into next, then cp338's text); `test/reap/matrix.edn` taken from the base and recorded again. cp338's proposal "CP352"
+(-fstrict-enums, -fno-threadsafe-statics modelled) renumbered CP355 (cp352's CP352 stays): the survey's "Proposed (CP353-CP355)" and
+cp338's journal entry. Checks (light): `bin/cppi codegen-gen` 154 of 154, the two negative controls failing; `bin/repr-cpp
+roundtrip-corpus gxx-dg-essential --judge own` 33 of 33 and `samples --judge own` 9 of 9 (the control failing), 0 regressions; `bin/reap`
+0 problems after `--record`; `bin/crops-score --record`, `--judge --strict`. Running when committed, not yet read: gen-batch over the 82 run
+programs (`.tmp/G4`) and the dg every-10th sample (`.tmp/sE`). Not run (over the 2 GiB rule): the lowered runtime and the six programs by
+our route.
+
+## 2026-11-11: cpp-s2, C++'s own route: the mangler's written qualifiers (P21 (b)'s blocker), three more programs, two CX12 diagnostics (branch `cpp-s2`, from `mac/cpp-cp338b` 63a1df5d7)
+
+Light, by day (.tmp/night12/AGENT-RULES.md; stage 0, the compiler stubs first on PATH, their log empty; no gate). Sources: the Itanium C++
+ABI's <unresolved-name> grammar (5.1.5.3) and clang 23.1.5's ItaniumMangle.cpp behaviour as its recorded IR shows it (the pack
+cpp-runtime-ir, test/cpp/records/cpp-runtime-ir.sha256's 378dbaff...: 124 uses of `sr5_PCCPE`); libstdc++ 15.2's stl_pair.h, tuple,
+shared_ptr_base.h, ext/atomicity.h from the pinned gcc-15.2.0 tarball; P2201R1 ([lex.string]/7). No live clang or g++.
+
+- The mangler: a static member call's qualifier written as a typedef's name (std::pair's `_PCCP`) or an alias template's specialization
+  is mangled as written (`clsr5_PCCPE...`), not as the class it names with its arguments substituted. Night 11's lb-g5-ours failure
+  (eh_alloc.cc, 2 missing and 2 more names) is closed by the route's generation: eh_alloc.cc's names equal the pack's, and all 63 C++
+  units of libsupc++ by our route name exactly what clang's IR names. Alternatives: substituting back to the alias at mangling time (no:
+  the alias is gone from the resolved type), or a name table from the pack (no: the IR is the oracle's).
+- The run corpora's 82 programs by our route: 62 → 65 generated (threads.cpp, thread-throw.cpp, atomics.cpp), none lost. Causes:
+  type-constraints with arguments (`__eligible_tuple_like<tuple> _UTuple`) were never checked, and were checked after the
+  requires-clause; a partial specialization's decltype failure under `__void_t` was taken for a match (now no match for its own operand's
+  unknown name only: taking any failure lost std::string's construction from a literal, since our analysis' gaps fail too); a declared
+  `__atomic_add_single` read as an atomic builtin. Considered: a wider SFINAE (every refusal class of the decltype's operand), rejected
+  for that reason; recorded as a later step once the analysis' gaps that refuse are classed apart.
+- CX12: the parser's soft diagnostics "duplicate asm qualifier" and "unsupported non-standard concatenation of string literals": 5 own
+  passes of the dg-error part's files that name them (asm-qual-2.C and four concatenation tests).
+- The night-13 slot for CP342/CP343's dg own record prepared (`.tmp/night13/slots/cpp-dg-own.sh`, not run; the user's decision of
+  2026-11-11 moved it to night 13).
+
+Records: the dg own sample recorded again (120 → 125 own passes of 454) and independence.edn's read fact with it; C++ completeness 90.99
+(unchanged), independence 71.28 → 71.30 (read 0.657 → 0.658; eval and AOT still 0.5 until the records say which programs our route runs,
+CP356); the route's gains count at the night's records. doc/cpp/CPP-SURVEY.md, "As built: cpp-s2", has the measures and the night's commands.

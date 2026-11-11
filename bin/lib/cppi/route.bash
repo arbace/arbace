@@ -3,8 +3,19 @@
 #   cppi_ir_route TODO JOBS   each program of TODO (ID STD ARGS PATH) its IR in $work/files/ID/x.ll and ir.status, by
 #                             CPPI_ROUTE: clang (the default: clang++ -O0 -S -emit-llvm, ir1), ours (Arbace's front end and code
 #                             generator, arbace.cpp.codegen gen-batch, no clang: a program it refuses is ir.status 98, its class in
-#                             ir.log), auto (ours for a program with no options of its dg-options, clang++ for the rest and for
-#                             those ours refuses). $work/files/ID/route says which made the IR.
+#                             ir.log), auto (ours for a program whose options are all ones our route models, clang++ for the rest
+#                             and for those ours refuses). $work/files/ID/route says which made the IR.
+# The options our route models (CP350 (a), decided 2026-11-10): the preprocessor's -D, -U and -I, and -fexceptions and -fno-exceptions
+# (the target's predefined macros follow them, cpp/target/dialect.edn's option deltas; the code generator's landing pads are
+# behaviour-neutral where g++ accepts the program); -std= is the list's STD, and -O*, -w and -pedantic never reach ARGS (cppi_opts:
+# the -O0 shape is kept, a program's behaviour is its verdict). Every program by ours is given its ARGS.
+cppi_route_modelled() { # cppi_route_modelled ARGS: 0 when every option of ARGS is one our route models
+  local o
+  for o in $1; do
+    case $o in -D*|-U*|-I*|-fexceptions|-fno-exceptions) ;; *) return 1 ;; esac
+  done
+  return 0
+}
 # The default route (CP240 (b), decided 2026-11-07): clang until the night's comparison (bin/cppi route-compare over the samples, the
 # runtime and gxx-dg-run's sampling, eval and AOT) holds every pass; then this one word becomes auto, the records are written again
 # (--record) and bin/lib/cppi/check's header names it (doc/cpp/CPP-SURVEY.md, "As built: cpp-target")
@@ -15,7 +26,10 @@ cppi_ir_route() {
   rest=$todo
   if [ "$route" != clang ]; then
     rest=$todo.clang; : > "$rest"
-    awk -F'\t' -v w="$work" -v r="$route" '{ if (r == "auto" && $3 != "") next; print $4 "\t" $2 "\t" w "/files/" $1 }' "$todo" > "$todo.ours"
+    tr '\t' '\037' < "$todo" | while IFS=$'\037' read -r i s a p; do
+      if [ "$route" = auto ] && ! cppi_route_modelled "$a"; then continue; fi
+      printf '%s\t%s\t%s\t%s\n' "$p" "$s" "$work/files/$i" "$a"
+    done > "$todo.ours"
     awk -F'\t' '{ print $3 }' "$todo.ours" | while IFS= read -r d; do rm -rf "$d"; mkdir -p "$d"; done
     if [ -s "$todo.ours" ]; then
       # libstdc++'s headers from the tree made without g++ (CP241 (b); REPR_CPP_HEADERS=host: the host's installed tree)
