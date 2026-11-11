@@ -67,15 +67,23 @@
    ;; instantiations, the DWARF line table's files (number -> [DIR-INDEX NAME]) and directories, a .loc seen; AX12: the current
    ;; .loc (MCContext's CurrentDwarfLoc) and the line entries by section, in the order of each section's first (MCLineSection)
    :conds (volatile! []) :macros (java.util.HashMap.) :macro-n (volatile! 0) :depth (volatile! 0)
+   ;; review 1111 (1): the instantiations being run, outermost first ({:buf TEXT :at PLACE}: AsmParser's ActiveMacros, each
+   ;; expansion's text its `<instantiation>` buffer and the invoking item's place), and the parse over (AsmParser::Run's end: an
+   ;; error after it, at the layout, has no instantiation notes)
+   :inst (volatile! []) :parsed (volatile! false)
    :dwarf-files (java.util.TreeMap.) :dwarf-dirs (java.util.ArrayList.) :loc-seen (volatile! false)
    :dwarf-loc (volatile! {:file 0 :line 0 :col 0 :flags 1 :isa 0 :disc 0})
    :line-secs (java.util.LinkedHashMap.)})
 
 (defn report!
-  "An error at POS ([START END] of its item, nil when unknown) about the expression EXPR (nil: the item), collected as LLVM's
-  diagnostics are (ARS43 (a)): the assembly goes on."
+  "An error at POS ([START END] of its item in the file, or [START END TEXT NOTES] of an item of an expansion: offsets in its
+  text, AsmParser's `<instantiation>` buffer, and the instantiations' places innermost first, each [START END] or
+  [START END TEXT]; nil when unknown) about the expression EXPR (nil: the item), collected as LLVM's diagnostics are (ARS43
+  (a)): the assembly goes on. After the parse (the layout's errors) an expansion's place keeps no notes, as LLVM's
+  ActiveMacros is empty then (review 1111 (1))."
   [ctx pos msg expr]
-  (.add ^java.util.ArrayList (:errors ctx) {:pos pos :msg (str msg) :expr expr}))
+  (let [pos (if (and @(:parsed ctx) (> (count pos) 3)) (subvec pos 0 3) pos)]
+    (.add ^java.util.ArrayList (:errors ctx) {:pos pos :msg (str msg) :expr expr})))
 
 (defn errors? [ctx] (pos? (.size ^java.util.ArrayList (:errors ctx))))
 
@@ -612,8 +620,9 @@
   (let [[n & more] a
         cv (fn [e] (let [e (resolve-expr ctx e)] (or (const-value e @(:syms ctx)) (unsupported :debug-line (str ".loc " (pr-str a))))))]
     (when-not (integer? n) (unsupported :debug-line (str ".loc " (pr-str a))))
-    (when (< (long n) 1) (fail "file number less than one in '.loc' directive"))
-    (when-not (.containsKey ^java.util.TreeMap (:dwarf-files ctx) n) (fail "unassigned file number in '.loc' directive"))
+    ;; at the file number's token (parseDirectiveLoc's Loc; review 1111 (1))
+    (when (< (long n) 1) (fail "file number less than one in '.loc' directive" :first-operand))
+    (when-not (.containsKey ^java.util.TreeMap (:dwarf-files ctx) n) (fail "unassigned file number in '.loc' directive" :first-operand))
     (let [[line more] (if (integer? (first more)) [(first more) (rest more)] [0 more])
           [col more] (if (integer? (first more)) [(first more) (rest more)] [0 more])
           _ (when (neg? (long line)) (fail "line number less than zero in '.loc' directive"))
@@ -1077,7 +1086,11 @@
   (let [rd (or (:read-text *arch*) (unsupported :directive "a macro's or a repetition's body"))
         ms (vec (keys (:macros ctx)))]
     (try (if (seq ms)
-           (vec (drop (count ms) (rd ctx (str (apply str (for [m ms] (str ".macro " m "\n.endm\n"))) text))))
+           ;; the items' offsets the text's own, the declarations' length taken off (review 1111 (1): the places)
+           (let [pre (apply str (for [m ms] (str ".macro " m "\n.endm\n"))) k (count pre)
+                 sh (fn [x] (if (number? x) (- (long x) k) x))]
+             (mapv (fn [it] (if (and (vector? it) (>= (count it) 3)) (-> it (update 1 sh) (update 2 sh)) it))
+                   (drop (count ms) (rd ctx (str pre text)))))
            (rd ctx text))
          (catch arbace.lang.ExceptionInfo ex
            (if (or (:obj/unsupported (ex-data ex)) (:obj/error (ex-data ex))) (throw ex) (fail (.getMessage ex)))))))
@@ -1151,13 +1164,24 @@
 
 (declare run-items!)
 
+(defn- body-of
+  "A block's body as parseMacroLikeBody and parseDirectiveMacro take it: from the line after the head's end (the reader's text
+  starts with the head line's newline), its expansion's `<instantiation>` lines counted from there (review 1111 (1))."
+  ^String [b]
+  (let [b (str b)] (cond (str/starts-with? b "\r\n") (subs b 2) (str/starts-with? b "\n") (subs b 1) :else b)))
+
 (defn- instantiate!
-  "The expanded text read and run, nested at most 20 deep (AsmMacroMaxNestingDepth)."
-  [ctx ^String text]
-  (when (>= (long @(:depth ctx)) 20) (fail "macros cannot be nested more than 20 levels deep"))
-  (vswap! (:depth ctx) inc)
-  (try (run-items! ctx (read-body ctx text))
-       (finally (vswap! (:depth ctx) dec))))
+  "The expanded text read and run as one instantiation (AsmParser's `<instantiation>` buffer, its items' places in it, the
+  invoking item's place its note's), nested at most 20 deep (AsmMacroMaxNestingDepth: checked at a macro's entry, a
+  repetition's instantiation counted but not checked, as handleMacroEntry and instantiateMacroLikeBody)."
+  ([ctx text] (instantiate! ctx text true))
+  ([ctx ^String text check-depth]
+   (when (and check-depth (>= (long @(:depth ctx)) 20)) (fail "macros cannot be nested more than 20 levels deep"))
+   (let [at @(:pos ctx)]
+     (vswap! (:depth ctx) inc)
+     (vswap! (:inst ctx) conj {:buf text :at (when at (subvec at 0 (min 3 (count at))))})
+     (try (run-items! ctx (read-body ctx text))
+          (finally (vswap! (:inst ctx) pop) (vswap! (:depth ctx) dec) (vreset! (:pos ctx) at))))))
 
 (defn- invoke-macro! [ctx ^String nm ^String argt]
   (let [m (or (.get ^java.util.HashMap (:macros ctx) nm) (fail (str "unknown macro " nm)))
@@ -1186,9 +1210,13 @@
   "The items run in order, the conditionals' ignored parts skipped and the blocks expanded."
   [ctx items]
   (doseq [[f start end] items :when (seq? f)]
-    ;; the file's own items give the place (ARS43 (a)); an expansion's items (read from its text, their offsets the text's) keep
-    ;; the invoking item's, as LLVM's diagnostic within a macro instantiation is reported at the instantiation
-    (when (zero? (long @(:depth ctx))) (vreset! (:pos ctx) (when start [start end])))
+    ;; the file's own items give the place (ARS43 (a)); an expansion's items (read from its text, their offsets the text's) give
+    ;; theirs in it, with the instantiations' places as notes, innermost first: LLVM's `<instantiation>:L:C: error:` and its
+    ;; `note: while in macro instantiation` lines (printMacroInstantiations; review 1111 (1))
+    (vreset! (:pos ctx) (when start (let [inst @(:inst ctx)]
+                                      (if (seq inst)
+                                        [start end (:buf (peek inst)) (mapv :at (rseq inst))]
+                                        [start end]))))
     (try
     (let [h (first f) hn (when (and (symbol? h) (= "asm" (namespace h))) (name h))]
       (cond
@@ -1198,7 +1226,7 @@
         (= hn "unread") (fail (str (nth f 2)))
         (= hn "macro") (let [[nm ps] (macro-params (second f))]
                          (when (.containsKey ^java.util.HashMap (:macros ctx) nm) (fail (str "macro '" nm "' is already defined")))
-                         (.put ^java.util.HashMap (:macros ctx) nm (atom {:params ps :body (nth f 2) :count 0})))
+                         (.put ^java.util.HashMap (:macros ctx) nm (atom {:params ps :body (body-of (nth f 2)) :count 0})))
         (= hn "purgem") (let [nm (str/trim (str (second f)))]
                           (when-not (.remove ^java.util.HashMap (:macros ctx) nm) (fail (str "macro '" nm "' is not defined"))))
         (= hn "invoke") (invoke-macro! ctx (sym-name (second f)) (when (> (count f) 2) (str (nth f 2))))
@@ -1209,15 +1237,15 @@
           (invoke-macro! ctx (name h) (str/trim (subs t (min (count t) (count (name h)))))))
         (#{"rept" "rep"} hn)
         (let [c (or (const-value (resolve-expr ctx (head-expr ctx (second f))) @(:syms ctx)) (fail "unexpected token in '.rept' directive"))
-              body (nth f 2)]
+              body (body-of (nth f 2))]
           (when (neg? (long c)) (fail "Count is negative"))
-          (if (str/includes? body "\\")
-            (dotimes [k c] (instantiate! ctx (expand-body body [] {} nil k)))
-            (let [items (read-body ctx body)] (dotimes [_ c] (run-items! ctx items)))))
+          ;; the copies one instantiation, as parseDirectiveRept's buffer, a body with no backslash too (review 1111 (1): its
+          ;; items' places and its count toward the nesting limit)
+          (instantiate! ctx (apply str (for [k (range c)] (if (str/includes? body "\\") (expand-body body [] {} nil k) body))) false))
         (#{"irp" "irpc"} hn)
         (let [[p & vs] (split-args (second f))
               vs (if (= hn "irpc") (map str (apply str vs)) (if (seq vs) vs [""]))]
-          (doseq [v vs] (instantiate! ctx (expand-body (nth f 2) [p] (doto (java.util.HashMap.) (.put p v)) nil 0))))
+          (instantiate! ctx (apply str (for [v vs] (expand-body (body-of (nth f 2)) [p] (doto (java.util.HashMap.) (.put p v)) nil 0))) false))
         :else (item! ctx f)))
       (catch arbace.lang.ExceptionInfo ex
         (if (:obj/error (ex-data ex)) (report! ctx @(:pos ctx) (:obj/error (ex-data ex)) (:obj/expr (ex-data ex))) (throw ex))))))
@@ -1245,6 +1273,7 @@
         ;; as LLVM's
         (run-items! ctx items)
         (vreset! (:pos ctx) nil)
+        (vreset! (:parsed ctx) true)
         (when (seq @(:conds ctx)) (report! ctx nil "unmatched .ifs or .elses" nil))
         (when (errors? ctx) (throw (ex-info "errors" {:obj/errors true})))
         (when-let [f (:finish *arch*)] (f ctx))
@@ -1340,6 +1369,8 @@
         sym-i (when nm (or (diag-word-at t nm 0) (when-let [i (diag-word-at t (str "$" nm) 0)] (inc (long i)))))]
     (cond
       (nil? e) nil
+      ;; a directive's first operand's token (parseDirectiveLoc's file number)
+      (= e :first-operand) (when-let [m (re-find #"^\S+\s+" t)] (count m))
       (and (seq? e) (= 'at (first e))) (let [lt (str/lower-case t) sp (str/lower-case (str (nth e 2)))
                                              i (.indexOf lt (str ":" sp ":"))
                                              ;; AArch64's `%NAME(E)`: MCSpecifierExpr's place, the name after `%` (ARS49 (a))
@@ -1352,26 +1383,38 @@
         (if (neg? i) sym-i i))
       :else sym-i)))
 
+(defn- diag-lines
+  "One message as SourceMgr prints it: `NAME:LINE:COL: KIND: MSG`, the source line of TEXT, the caret; the column the item's
+  first character not blank, or its expression's (diag-expr-index)."
+  [^String src st en name kind msg expr]
+  (let [st (long st) en (long en)
+        ls (.lastIndexOf src "\n" (int (dec st)))
+        le (let [i (.indexOf src "\n" (int st))] (if (neg? i) (count src) i))
+        st (loop [i st] (if (and (< i en) (< i (count src)) (Character/isWhitespace (.charAt src (int i)))) (recur (inc i)) i))
+        t (subs src (min st (count src)) (max (min st (count src)) (min en (count src))))
+        at (+ st (long (or (diag-expr-index t expr) 0)))
+        line (inc (count (filter #(= \newline %) (subs src 0 (min st (count src))))))
+        col (- at ls)]
+    [(str name ":" line ":" col ": " kind ": " msg) (subs src (inc ls) le)
+     (str (apply str (repeat (dec col) " ")) "^")]))
+
 (defn diagnostics
   "The object assembler's errors (`r`'s :errors) as llvm-mc prints them for the source SRC: three lines an error, each under
-  the name llvm-mc gives the input (FILE: `<stdin>`, or the test's path)."
+  the name llvm-mc gives the input (FILE: `<stdin>`, or the test's path); an error within an expansion at its place in the
+  expansion's text, `<instantiation>`, followed by a `note: while in macro instantiation` for each instantiation, innermost
+  first (AsmParser::printMacroInstantiations; review 1111 (1))."
   ([^String src r] (diagnostics src r "<stdin>"))
   ([^String src r file]
-  (vec (mapcat (fn [{:keys [pos msg expr]}]
-                 (if-let [[st en] pos]
-                   (let [st (long st) en (long en)
-                         ls (.lastIndexOf src "\n" (int (dec st)))
-                         le (let [i (.indexOf src "\n" (int st))] (if (neg? i) (count src) i))
-                         ;; the item's first character not blank
-                         st (loop [i st] (if (and (< i en) (Character/isWhitespace (.charAt src (int i)))) (recur (inc i)) i))
-                         t (subs src st (max st (min en (count src))))
-                         at (+ st (long (or (diag-expr-index t expr) 0)))
-                         line (inc (count (filter #(= \newline %) (subs src 0 st))))
-                         col (- at ls)]
-                     [(str file ":" line ":" col ": error: " msg) (subs src (inc ls) le)
-                      (str (apply str (repeat (dec col) " ")) "^")])
-                   [(str file ": error: " msg)]))
-               (:errors r)))))
+  (let [named (fn [buf] (if buf ["<instantiation>" buf] [file src]))]
+    (vec (mapcat (fn [{:keys [pos msg expr]}]
+                   (if-let [[st en buf notes] pos]
+                     (let [[nm text] (named buf)]
+                       (concat (diag-lines text st en nm "error" msg expr)
+                               (mapcat (fn [[nst nen nbuf]] (let [[nm text] (named nbuf)]
+                                                              (diag-lines text nst nen nm "note" "while in macro instantiation" nil)))
+                                       notes)))
+                     [(str file ": error: " msg)]))
+                 (:errors r))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the judge: an object against llvm-mc's recorded one
@@ -1510,5 +1553,13 @@
     "dump" (let [o (elf/canonical (elf/read-file (first args)))]
              (doseq [k [:sections :symbols :relocs] r (k o)] (println (name k) (pr-str r))))
     "check" (let [res (apply check-list assemble-file args)] (shutdown-agents) (System/exit (if (some #(#{:error :no-record} (second %)) res) 1 0)))
-    "control" (println (apply control assemble-file args)))
+    "control" (println (apply control assemble-file args))
+    ;; diag-check IN EXPECTED [OPTS]: the file's diagnostics (the input as <input>) against a hand-derived expectation of
+    ;; llvm-mc's (test/asm/obj-err/, review 1111 (1)): `pass`, or the first line that differs (exit 1)
+    "diag-check" (let [[in expected opts] args
+                       r (try (assemble-file in {:defsym (defsyms (defsym-of opts))}) (catch Throwable e {:unsupported :crash :what (str e)}))
+                       [c d] (judge-refusal in r (slurp expected))]
+                   (println (if (= c :pass) "pass" (str "FAIL: " (name c) ": " d)))
+                   (shutdown-agents)
+                   (System/exit (if (= c :pass) 0 1))))
   (shutdown-agents))
