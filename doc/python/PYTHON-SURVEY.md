@@ -5951,3 +5951,15 @@ Result (`bin/pyi lib-test test_bytes`, interpreted): 325 methods, 308 pass, 17 c
 skipped-by-test 8, testcapi 3), 0 failing; `:bytes-gaps` is removed from `divergences.edn` and `divergences-315.edn`. Proof: the probe
 `t/probe.py` (1,950 lines of bytes and bytearray answers against python3 3.14.10): 438 lines differ on the base, 0 on the head, run
 and aot.
+
+## As built: 267, test_base64's test_b64encode (2026-11-11, the Mac VM, queue 267)
+
+No code changed: 266 had already fixed it. `base64.b64encode(s, altchars=...)` calls `bytes.maketrans(b'+/', altchars)`
+(Lib/base64.py:58, 3.14.10); before 266 pyi's `bytes.maketrans` compared lengths without reading both arguments through
+the buffer protocol first, so a `str`, `int` or `list` `altchars` (test_b64encode's `altchars="*$"` TypeError case) gave
+"maketrans arguments must have same length" (ValueError) where CPython 3.14.10's `bytes_maketrans`
+(Objects/bytesobject.c, `_Py_bytes_maketrans` in Objects/bytes_methods.c) takes `Py_buffer` arguments and raises
+"a bytes-like object is required, not 'str'" (TypeError) first. 266's rework (`bufArg` before the length check) matches
+it. 263's Low 1 was recorded on the pre-266 base. Checked: test_base64 41 methods, 40 pass, 1 classed (cpython-only), 0
+failing at the head; the probe `.tmp/q267/t/probe.py` (str, int, None, list, bytearray, memoryview and array altchars, and
+`bytes.maketrans` with the same) equals python3 3.14.10's, and fails on 379efb8fe (the control).
