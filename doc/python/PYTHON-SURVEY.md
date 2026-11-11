@@ -5963,3 +5963,56 @@ the buffer protocol first, so a `str`, `int` or `list` `altchars` (test_b64encod
 it. 263's Low 1 was recorded on the pre-266 base. Checked: test_base64 41 methods, 40 pass, 1 classed (cpython-only), 0
 failing at the head; the probe `.tmp/q267/t/probe.py` (str, int, None, list, bytearray, memoryview and array altchars, and
 `bytes.maketrans` with the same) equals python3 3.14.10's, and fails on 379efb8fe (the control).
+
+## As built: 268, PyType_FromSpec and C-born objects; `_testlimitedcapi` whole (2026-11-11, the Mac VM, queue 268; 262's DECISION (a))
+
+The first entry of 262's DECISION (a) (the user, 2026-11-10): types made from specs and objects whose memory is C's, then
+`_testlimitedcapi`'s two parts 262 left out and the rest of the limited API's natives. Ported from CPython 3.14.10's
+`Objects/typeobject.c` (`PyType_FromMetaclass` and its entries `PyType_FromSpec`, `FromSpecWithBases`,
+`FromModuleAndSpec`; `get_bases_tuple`, `special_offset_from_member`, `check_basicsize_includes_size_and_offsets`,
+`PyType_GetSlot`, `PyObject_GetTypeData`, `PyType_GetTypeDataSize`, `PyObject_GetItemData`, `PyType_GenericAlloc`,
+`PyType_GenericNew`, `subtype_dealloc`'s part), `Python/structmember.c` (`PyMember_GetOne`, `PyMember_SetOne`),
+`Objects/call.c` (`PyObject_Vectorcall`, `PyObject_VectorcallMethod`), `Python/getargs.c` (`vgetargskeywords`:
+`PyArg_ParseTupleAndKeywords`, which clinic's limited-API parsers call) and the files of 262's remainder below.
+
+- **A type made from a spec** (`go/arbace/pyctypes/capi_types.ae`) is a pyi type made by `py.NewExtType`: static to pyi (a
+  class deriving from it keeps a C-born value, as a class deriving from a built-in type keeps its value: `WrapInstance`),
+  its MRO C3's, its `cType` recording what `PyHeapTypeObject` holds (tp_name, basicsize and itemsize after PEP 697's
+  relative arithmetic, `_align_up` by `ALIGNOF_MAX_ALIGN_T` = 16, the flags with `Py_TPFLAGS_HEAPTYPE`, the slots by number,
+  inherited from a C base first, the members' copy with absolute offsets, the module, the token, the dict, weaklist and
+  vectorcall offsets). Its pyi slots call the spec's C functions: tp_new, tp_init, tp_call and the vectorcall at
+  `tp_vectorcall_offset` (Py_TPFLAGS_HAVE_VECTORCALL), repr, str, hash, richcompare, iter, iternext, the mapping and
+  sequence slots, nb_bool, the number protocol's binary, in-place and unary slots, index, int, float, getattro, setattro,
+  descr_get, descr_set. `tp_methods` become method descriptors (pyi `Builtin`s with the type as owner: self is the call's
+  first argument, METH_METHOD's defining class the type, METH_CLASS and METH_STATIC as classmethod and staticmethod),
+  `tp_members` member descriptors over the instance's memory, `tp_getset` getset descriptors that call C. Every check and
+  message of `PyType_FromMetaclass` is kept (relative offsets with a positive basicsize, offsets out of range, the special
+  members' type and flags, extending a variable-size class without `Py_TPFLAGS_ITEMS_AT_END`, immutable over mutable bases,
+  the basicsize too small). Not provided (NotImplementedError "pyi's C API does not provide ..."): a metaclass other than
+  `type`, and a base whose instances are not C's (a built-in type other than `object`, a Python class).
+- **C-born objects**: their memory is the world's (`basicsize + (nitems+1) * itemsize`, zeroed, the head initialized: a new
+  reference), their handle is that memory's address (no proxy), their ob_refcnt C's references as a proxy's. The Go value
+  (`cObj`; for a class deriving from the type, its instance as `outer`, the object C's pointer names) is in the handles'
+  maps while C holds a reference or a C entry is in progress, as 262's proxies are; once Python holds it alone and Go
+  collects it (a finalizer on a small object of its own, outside the cycle the object and its instance make), its
+  `tp_dealloc` runs on the world's next entry (`reapDead` in `capiEnter`): the type's, a C base's, else `subtype_dealloc`'s
+  (the dict at tp_dictoffset released, the memory freed). A C-born object's `__dict__` (tp_dictoffset,
+  `PyObject_GenericGetDict`) is a pyi dict held in its memory; pyi's generic attribute access finds it through
+  `py.InstanceDictHook`.
+- **The world** (`tools/pyi/clib/ctypestest/lib.conf`): `heaptype_relative.c` and `vectorcall_limited.c` are built, so
+  `_testlimitedcapi` is CPython's whole; `go/arbace/clib/ctypestest` rebuilt by `bin/pyi-clib build ctypestest` on the VM
+  (the main host rebuilds it on next, whose ci differs).
+- **The remainder natives** (`capi_more.ae`): of the 201 natives 262 left raising, 171 are given (dicts, sets, lists,
+  tuples, ints with longobject.c's messages, floats, complex numbers, bytes and bytearrays, the number, mapping and
+  sequence protocols, str's core and its codecs' decoders, `PyUnicode_Translate` as `_PyUnicode_TranslateCharmap`, weak
+  references, the module table, files, PyMem) and the parts' two Init functions are C's; 28 remain (codecs' incremental
+  objects, charmap and locale codecs, wide strings, `PyUnicode_FromFormat`, `Resize`, `WriteChar`, exec'd code modules,
+  frozen modules, `PyType_Freeze`, `Py_CompileString`, `PyByteArray_AsString`, `PyBytes_DecodeEscape`, `PyFile_FromFd`).
+
+Counts (`bin/pyi lib-test-all --fresh`, each test's own verdict, the VM), base 2fc54227a and head the same: test_capi 1,195
+methods, 37 pass, `:testcapi` 1,154; test_call 189, 7 pass, `:testcapi` 130; test_ctypes 531 pass, `:ctypes-port` 26; test_bytes
+308 pass; test_frame 48 pass and its 2 failing of the base; `:capi-port` 0 rows on both sides. test_capi's and test_call's limited-API tests
+(TestHeapTypeRelative, TestPEP590's vectorcall_limited tests, test_capi's dict, set, list, long, unicode modules) all
+import or require `_testcapi` first, so they stay `:testcapi`: this task's proof is its two probes against python3
+3.14.10's own `_testlimitedcapi` (49 and 84 lines equal on the head; on the base the first stops at the missing types and
+the second differs in 133 lines).
