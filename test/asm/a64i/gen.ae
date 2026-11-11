@@ -1650,6 +1650,97 @@
 (def vfr-families
   [["neon-fp-rm" "the Advanced SIMD FP lanes (4s, 2s, 2d) under FPCR's directed rounding modes (RMode 1-3) and DN, FPCR set by each case's stub: fadd, fsub, fmul, fdiv, faddp, fabd, fmulx, fmla, fmls, fmaxnm, fmin; fsqrt, frintx, frinti, scvtf, ucvtf" vfr-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; NEON's next slice (AR10, ARS56 (a)): the scalar forms of the FP classes (three same: fabd, fmulx, the compares, facge, facgt;
+;; two-register miscellaneous: the compares with zero, fcvt[npmza][su], scvtf, ucvtf; pairwise: faddp, fmaxp, fminp, fmaxnmp,
+;; fminnmp) on s and d, and the by-element multiplies (mul, mla, mls on 4h, 8h, 2s, 4s; smull, umull, smlal, umlal, smlsl, umlsl
+;; and their 2 forms; fmla, fmls, fmul, fmulx on 2s, 4s, 2d and their scalar s and d), on neon's setup (v1 and v2 from the row,
+;; v0 their mix, FPCR 0); the model the scalar FP's lane by lane, the integer lanes' wrapping arithmetic.
+
+(defn- vel-int
+  "An integer by-element instruction's result vector: OP's lanes of v1 with v2's element IDX, v0 the accumulator."
+  [op a v1 v2 idx]
+  (let [long? (#{"smull" "umull" "smlal" "umlal" "smlsl" "umlsl"} (str/replace op #"2$" ""))
+        base (str/replace op #"2$" "") two (not= base op)
+        e (if long? (ar-e (if (#{"4h" "8h"} a) "4h" "2s")) (ar-e a)) d (v0-of v1 v2)
+        y (vlane v2 idx e)]
+    (if long?
+      (let [n (quot 64 e) sg (= \s (first base)) w (* 2 e)]
+        (vpack (for [i (range n)]
+                 (let [x (vlane v1 (+ i (if two n 0)) e)
+                       p (if sg (unchecked-multiply (sext x e) (sext y e)) (unchecked-multiply x y))
+                       acc (vlane d i w)]
+                   (bit-and (case (subs base 1) "mull" p "mlal" (unchecked-add acc p) "mlsl" (unchecked-subtract acc p)) (ones w))))
+               w))
+      (let [n (ar-n a)]
+        (half (vpack (for [i (range n)]
+                       (let [p (unchecked-multiply (vlane v1 i e) y) acc (vlane d i e)]
+                         (bit-and (case op "mul" p "mla" (unchecked-add acc p) "mls" (unchecked-subtract acc p)) (ones e))))
+                     e)
+              (second (arrs a)))))))
+
+(defn- vel-fp
+  "An FP by-element instruction's [result-vector FPSR]: lanes N of v1 with v2's element IDX (fmla's and fmls's addend v0's lane)."
+  [op t n v1 v2 idx]
+  (let [e (if (= t :d) 64 32) d (v0-of v1 v2) y (vlane v2 idx e)
+        rs (for [i (range n)]
+             (let [x (vlane v1 i e)]
+               (case op
+                 "fmla" (fp-muladd t (vlane d i e) x y)
+                 "fmls" (fp-muladd t (vlane d i e) (f-neg t x) y)
+                 "fmul" (fp-arith t :mul x y)
+                 "fmulx" ((vf3-ops "fmulx") t x y))))]
+    [(vpack (map first rs) e) (reduce bit-or 0 (map second rs))]))
+
+(defn vel-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        sp {:s (vec (fp-specials :s)) :d (vec (fp-specials :d))}
+        fv (fn [t] (case (mod (nx) 5)
+                     (0 1) (pick (nx) (sp t))
+                     2 (bit-and (nx) (ones (:bits (ft t))))
+                     3 (f-bits t (* (double (- (mod (nx) 2001) 1000)) (Math/pow 2.0 (double (- (mod (nx) 40) 20)))))
+                     (f-bits t (/ (double (nx)) 3.0e15))))
+        fvec (fn [t] (let [e (if (= t :d) 64 32)] (vpack (for [_ (range (quot 128 e))] (fv t)) e)))
+        ivec (fn [] [(nx) (nx)])
+        res (fn [[lo hi] fl] [lo (bit-xor (long hi) (long fl))])
+        tn (fn [t] (if (= t :d) "d" "s"))]
+    (concat
+     ;; the scalar three same (FP)
+     (for [op ["fabd" "fmulx" "fcmeq" "fcmge" "fcmgt" "facge" "facgt"] t [:s :d] _ (range 6)
+           :let [v1 (fvec t) v2 (fvec t) e (if (= t :d) 64 32) [r fl] ((vf3-ops op) t (vlane v1 0 e) (vlane v2 0 e)) r (bit-and (long r) (ones e))]]
+       (ncase (str op "\t" (tn t) "0, " (tn t) "1, " (tn t) "2\n") v1 v2 (res [r 0] fl)))
+     ;; the scalar two-register miscellaneous (FP)
+     (for [op ["fcmeq0" "fcmge0" "fcmgt0" "fcmle0" "fcmlt0" "fcvtns" "fcvtnu" "fcvtps" "fcvtpu" "fcvtms" "fcvtmu" "fcvtzs" "fcvtzu"
+               "fcvtas" "fcvtau" "scvtf" "ucvtf"] t [:s :d] _ (range 4)
+           :let [v1 (if (#{"scvtf" "ucvtf"} op) (ivec) (fvec t)) v2 (fvec t) e (if (= t :d) 64 32)
+                 [r fl] ((vf2-ops op) t (vlane v1 0 e)) r (bit-and (long r) (ones e))
+                 z? (str/ends-with? op "0") mn (if z? (subs op 0 (dec (count op))) op)]]
+       (ncase (str mn "\t" (tn t) "0, " (tn t) "1" (when z? ", #0.0") "\n") v1 v2 (res [r 0] fl)))
+     ;; the scalar pairwise (FP)
+     (for [op ["faddp" "fmaxp" "fminp" "fmaxnmp" "fminnmp"] t [:s :d] _ (range 6)
+           :let [v1 (fvec t) v2 (fvec t) e (if (= t :d) 64 32) [r fl] ((vf3-ops op) t (vlane v1 0 e) (vlane v1 1 e)) r (bit-and (long r) (ones e))]]
+       (ncase (str op "\t" (tn t) "0, v1." (if (= t :d) "2d" "2s") "\n") v1 v2 (res [r 0] fl)))
+     ;; the FP by element, vector and scalar
+     (for [op ["fmla" "fmls" "fmul" "fmulx"] a ["2s" "4s" "2d" "s" "d"] _ (range 6)
+           :let [t (if (#{"2d" "d"} a) :d :s) e (if (= t :d) 64 32) n (case a "2s" 2 "4s" 4 "2d" 2 1)
+                 v1 (fvec t) v2 (fvec t) idx (mod (nx) (quot 128 e)) [v fl] (vel-fp op t n v1 v2 idx)
+                 el (str "v2." (tn t) "[" idx "]")]]
+       (ncase (if (#{"s" "d"} a)
+                (str op "\t" a "0, " a "1, " el "\n")
+                (str op "\tv0." a ", v1." a ", " el "\n"))
+              v1 v2 (res v fl)))
+     ;; the integer by element
+     (for [op ["mul" "mla" "mls"] a ["4h" "8h" "2s" "4s"] _ (range 6)
+           :let [v1 (ivec) v2 (ivec) e (ar-e a) idx (mod (nx) (quot 128 e))]]
+       (ncase (str op "\tv0." a ", v1." a ", v2." (if (= e 16) "h" "s") "[" idx "]\n") v1 v2 (res (vel-int op a v1 v2 idx) 0)))
+     (for [base ["smull" "umull" "smlal" "umlal" "smlsl" "umlsl"] [na wa] [["4h" "4s"] ["2s" "2d"]] two [false true] _ (range 4)
+           :let [v1 (ivec) v2 (ivec) e (ar-e na) idx (mod (nx) (quot 128 e)) op (str base (when two "2"))
+                 src (if two (str (* 2 (ar-n na)) (subs na 1)) na)]]
+       (ncase (str op "\tv0." wa ", v1." src ", v2." (if (= e 16) "h" "s") "[" idx "]\n") v1 v2 (res (vel-int op na v1 v2 idx) 0))))))
+
+(def vel-families
+  [["neon-el" "NEON's next slice: the scalar forms of the FP classes (fabd, fmulx, fcmeq, fcmge, fcmgt, facge, facgt; the compares with zero, fcvt[npmza][su], scvtf, ucvtf; faddp, fmaxp, fminp, fmaxnmp, fminnmp) on s and d, and the by-element multiplies (mul, mla, mls; s/umull, s/umlal, s/umlsl and their 2 forms; fmla, fmls, fmul, fmulx, vector and scalar)" vel-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -1700,6 +1791,11 @@
          ;; AR10 (ARS60 (a)): the Advanced SIMD FP lanes under FPCR's directed rounding modes and DN
          (for [[i [nm what f]] (map-indexed vector vfr-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 700 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR10 (ARS56 (a)): the scalar FP classes and the by-element multiplies
+         (for [[i [nm what f]] (map-indexed vector vel-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 800 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)
