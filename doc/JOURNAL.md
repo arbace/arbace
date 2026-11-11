@@ -2902,3 +2902,26 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
 ## 2026-11-10: gate-crops-fix: rust-core-essential in the rust crop
 
 Night 11's first gate (next dc6a55df2) failed only `gate-tests`: costs-test said ":crops: rust-core-essential is in no crop" (rust-rf12's merge, 0c22b1f1b, added the essential step without listing it in test/gate/steps.edn's :crops :rust). gate-reads-test and gate-tests-test run bin/gate-tests nested and failed only with it. Fix: rust-core-essential added to the :rust vector (after rust-front-essential; the step lives in steps.edn, no fragment under test/gate/crops/ names it). Proof: costs-test, crops-test, gate-reads-test and gate-tests-test pass; `bin/gate --plan` plans; `bin/reap` 41 of 44 cells checked, 0 problems.
+
+## 2026-11-10: the user's scoring rulings RFP53 (a) and OC222 (a) in crops-score (branch `crops-rulings`)
+
+- The user decided (about 10:30 UTC) RFP53 (a) for Rust (`.tmp/plans/RUST-90-PLAN.md`: a case scores 1 when its seven inputs C1-C7
+  are own, else 0.5; eval and AOT the case-weighted mean, counted from the records) and OC222 (a) for OCaml
+  (`.tmp/plans/OCAML-90-PLAN.md`: the 33 tests ocamltest skips on the pinned configuration `:na`, the tools' tests by design).
+  Built on `crops-rulings` from `mac/next` dc6a55df2, as the mixed-stage rule of 2026-11-07 is (doc/CROPS-SCORE.md, "Decided (the
+  user, 2026-11-10)").
+- Rust: `test/crops/crops.edn` `:own-inputs :rust` (C1-C7), the facts' `:case-inputs {:file F}` (eval
+  `test/rust/eval-inputs-linux-amd64.edn`, written by hand from the run as bin/rsi makes it: 0 of 5 own; AOT's file once its cell is
+  recorded), `crops.score`'s `rfp53-counts` and `case-inputs`: the cell's cases not own in all seven, or with no row, count 0.5.
+  Rust stays 80.0. Considered: reading `front.tsv` from the work tree (not a record: absent in a clone and in `--ref`), and counting
+  only the rows of F (a stale F would then overstate; a case with no row is 0.5 instead).
+- OCaml: the class `:config-skipped` (`:kind :na`, `:skips` the action per program, verified in ocaml-5.5.0's testsuite headers) first
+  in `test/ocaml/divergences.edn` and `divergences-aot.edn`; `test/ocaml/ocamltest-config.edn` (`ocamlc -config`, ocamltest's actions
+  from `ocamltest/builtin_actions.ml`, `ocaml_actions.ml`); `:na-rules :ocaml` and `na-class-problems` check each class. `bin/reap
+  --record`: eval 477 / 162 / 4 and AOT 419 / 158 / 66, 33 n/a each; OCaml's completeness 82.5 to 84.2. Considered: an `:except`
+  on `:tools-and-targets` (reap's classify has none; a class of its own, first, is how `:packs` and `:fortran` are written).
+- Proofs: `bin/crops-score --self-test` (37 of 73 own gives 90.1; OCaml 82.5 to 84.2; six OC222 controls and the RFP53 C7 control
+  fail as they must, and the test fails with either rule broken); `bin/crops-score --record`, then `--judge --strict` 0 problems;
+  `bin/reap` 0 problems; `bin/oi divergences`, `--aot`, `suite divergences`, `--aot` every non-pass classed; a real-data control each
+  (an `:na` program given `arch_amd64` fails `bin/crops-score`; one Rust case's inputs marked own moved eval to 0.6, one own but C7
+  stayed 0.5; both reverted).
