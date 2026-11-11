@@ -53,6 +53,8 @@
 
 (declare parse-expr parse-primary)
 
+(defn- auth-tok? [t] (and t (= :ident (lex/kind t)) (= "auth" (str/lower-case (lex/value t)))))
+
 (defn- tok [ts ^long i] (when (< i (count ts)) (nth ts i)))
 
 ;; the text being read (an integer's spelling, AX11's `$0x80`), bound by read-items
@@ -105,7 +107,9 @@
                 :else (fail "unexpected $" {:at i})))
         "%" (let [n (tok ts (inc i)) o (tok ts (+ i 2))]
               (cond
-                (and dir? n (= :ident (lex/kind n)) (not (lex/ws? n)) (a64?) (lex/punct? o "(") (not (lex/ws? o)))
+                ;; AArch64's `%NAME(E)` (parseExprWithSpecifier); in an instruction's operand too, where LLVM refuses it (the
+                ;; object assembler's error, data-directive-specifier's ERR0 lines; ARS49 (a))
+                (and n (= :ident (lex/kind n)) (not (lex/ws? n)) (a64?) (lex/punct? o "(") (not (lex/ws? o)))
                 (let [[e j] (parse-expr ts (+ i 3) dir?)]
                   (if (lex/punct? (tok ts j) ")") [(list 'pct (sym-form (lex/value n)) e) (inc (long j))] (fail "expected )" {:at j})))
                 (and dir? n (= :ident (lex/kind n)) (not (lex/ws? n)))
@@ -123,7 +127,10 @@
         m (tok ts (inc (long j)))]
     (if (and (lex/punct? n "@") (not (lex/ws? n)) m (#{:ident :int} (lex/kind m)) (not (lex/ws? m))
              (not (and (seq? x) (= 2 (count x)) (#{'- '+ 'bnot 'lnot 'at 'pct} (first x))))
-             (not (and (seq? x) (= 'at (first x)))))
+             (not (and (seq? x) (= 'at (first x))))
+             ;; ARS49 (a): a data directive's `@AUTH(...)` applies to the whole operand (AArch64AsmParser::parseDataExpr), read by
+             ;; parse-data after the expression, not by its last primary
+             (not (and dir? (a64?) (auth-tok? m))))
       (let [mod (if (= :int (lex/kind m)) (lex/value m) (sym-form (lex/value m)))
             o (tok ts (+ (long j) 2))]
         (if (and (a64?) (lex/punct? o "(") (not (lex/ws? o)))
@@ -225,6 +232,40 @@
              "irpc" [#{"rept" "rep" "irp" "irpc" "irpw"} #{"endr"}]
              "irpw" [#{"rept" "rep" "irp" "irpc" "irpw"} #{"endr"}]})
 
+(defn- parse-auth
+  "[(at E AUTH [KEY DISC addr?]) I] the signed pointer's suffix whose AUTH is at `i` (AArch64AsmParser::parseAuthExpr, its
+  messages)."
+  [ts ^long i e]
+  (let [at (fn [^long k] {:at k})
+        _ (when-not (lex/punct? (tok ts (inc i)) "(") (fail "expected '('" (at (inc i))))
+        k (tok ts (+ i 2))
+        _ (when-not (and k (= :ident (lex/kind k))) (fail "expected key name" (at (+ i 2))))
+        _ (when-not (#{"ia" "ib" "da" "db"} (lex/value k)) (fail (str "invalid key '" (lex/value k) "'") (at (+ i 2))))
+        _ (when-not (lex/punct? (tok ts (+ i 3)) ",") (fail "expected ','" (at (+ i 3))))
+        d (tok ts (+ i 4))
+        _ (when-not (and d (= :int (lex/kind d))) (fail "expected integer discriminator" (at (+ i 4))))
+        dv (lex/value d)
+        _ (when-not (and (integer? dv) (<= 0 dv 65535)) (fail (str "integer discriminator " dv " out of range [0, 0xFFFF]") (at (+ i 4))))
+        [addr j] (if (lex/punct? (tok ts (+ i 5)) ",")
+                   (let [a (tok ts (+ i 6))]
+                     (if (and a (= :ident (lex/kind a)) (= "addr" (lex/value a))) [true (+ i 7)] (fail "expected 'addr'" (at (+ i 6)))))
+                   [false (+ i 5)])
+        _ (when-not (lex/punct? (tok ts j) ")") (fail "expected ')'" (at j)))
+        key (sym-form (lex/value k))]
+    [(list 'at e (sym-form (lex/value (tok ts i))) (if addr [key dv 'addr] [key dv])) (inc (long j))]))
+
+(defn- parse-data
+  "[E I] a directive's argument at `i`: an expression, and in AArch64's dialects its `@AUTH(KEY,DISC[,addr])` after it, blanks
+  allowed, which ends the operand (parseDataExpr: the specifier over the whole expression, `(+_g1)@AUTH(ib,0)` as LLVM prints it)."
+  [ts ^long i]
+  (let [[e j] (parse-expr ts i true)
+        t (tok ts j)]
+    (if (and (a64?) (lex/punct? t "@") (auth-tok? (tok ts (inc (long j)))))
+      (let [[e k] (parse-auth ts (inc (long j)) e) n (tok ts k)]
+        (when (and n (not (lex/punct? n ","))) (fail "unexpected token" {:at k}))
+        [e k])
+      [e j])))
+
 (defn- parse-dir-args
   "The comma-separated arguments of a directive from `i` to the statement's end: each an expression, nil when empty, or
   a vector of space-separated expressions."
@@ -235,7 +276,7 @@
       (let [t (tok ts i)]
         (if (lex/punct? t ",")
           (let [j (inc i)] (if (>= j (count ts)) (conj out nil nil) (recur j (conj out nil))))
-          (let [[es j] (loop [[e j] (parse-expr ts i true) es []]
+          (let [[es j] (loop [[e j] (parse-data ts i) es []]
                          (let [es (conj es e) n (tok ts j)]
                            (if (and n (not (lex/punct? n ",")) (lex/ws? n))
                              (recur (parse-expr ts j true) es)
@@ -337,7 +378,10 @@
             (when m (swap! state update :defines conj (second m)))
             (recur (long e) (conj! out [(list 'asm/cpp-line text) h e])))
         (let [{:keys [toks next]} (lex/lex-statement src pos)
-              ts toks
+              n0 (count out)
+              [p out]
+              (try
+                (let [ts toks
               n (count ts)
               ;; labels
               [out i] (loop [out out i 0]
@@ -364,27 +408,27 @@
                             :else [out i])))
               t (tok ts i)]
           (cond
-            (nil? t) (recur (long next) out)
+            (nil? t) (vector (long next) out)
 
             ;; a cpp macro's invocation (a name the text #defines, or NAME( with no blank)
             (and cpp? (= :ident (lex/kind t))
                  (or (contains? (:defines @state) (lex/value t))
                      (and (lex/punct? (tok ts (inc i)) "(") (not (lex/ws? (tok ts (inc i)))))))
             (let [args (str/trim (raw-of src ts (inc i)))]
-              (recur (long next) (conj! out [(if (= "" args)
+              (vector (long next) (conj! out [(if (= "" args)
                                                 (list 'asm/cpp-invoke (sym-form (lex/value t)))
                                                 (list 'asm/cpp-invoke (sym-form (lex/value t)) args))
                                               (lex/start t) (lex/end (peek ts))])))
 
             ;; AArch64's register alias: NAME .req REGISTER
             (and (:req opts) (= :ident (lex/kind t)) (some-> (tok ts (inc i)) lex/value str/lower-case (= ".req")))
-            (recur (long next) (conj! out [(apply list 'asm/reg-alias (sym-form (lex/value t)) (parse-dir-args ts (+ i 2)))
+            (vector (long next) (conj! out [(apply list 'asm/reg-alias (sym-form (lex/value t)) (parse-dir-args ts (+ i 2)))
                                            (lex/start t) (lex/end (peek ts))]))
 
             ;; a macro's invocation
             (and (#{:ident} (lex/kind t)) (contains? (:macros @state) (lex/value t)))
             (let [args (str/trim (raw-of src ts (inc i)))]
-              (recur (long next) (conj! out [(if (= "" args)
+              (vector (long next) (conj! out [(if (= "" args)
                                                 (list 'asm/invoke (sym-form (lex/value t)))
                                                 (list 'asm/invoke (sym-form (lex/value t)) args))
                                               (lex/start t) (lex/end (peek ts))])))
@@ -399,7 +443,7 @@
                   x (case (lex/kind t) :string (list 'sym (lex/value t)) :dot (list 'asm/dot) (sym-form (lex/value t)))]
               (when (< (long j) n) (fail "junk after an assignment" {:at j}))
               (when (= :ident (lex/kind t)) (swap! state assoc-in [:equ (lex/value t)] e))
-              (recur (long next) (conj! out [(list (if (lex/punct? (tok ts (inc i)) "=") 'asm/= 'asm/==) x e)
+              (vector (long next) (conj! out [(list (if (lex/punct? (tok ts (inc i)) "=") 'asm/= 'asm/==) x e)
                                              (lex/start t) (lex/end (peek ts))])))
 
             ;; directives
@@ -412,7 +456,7 @@
                       body (subs src (int body-start) (int (lex/start et)))]
                   (when (= d "macro")
                     (let [m (first (str/split head #"[\s,]+"))] (swap! state update :macros conj m)))
-                  (recur (long (lex/end et)) (conj! out [(list (symbol "asm" d) head body (dir-name et)) (lex/start t) (lex/end et)])))
+                  (vector (long (lex/end et)) (conj! out [(list (symbol "asm" d) head body (dir-name et)) (lex/start t) (lex/end et)])))
                 (let [form (if (raw d)
                              (if (= "" head) (list (symbol "asm" d)) (list (symbol "asm" d) head))
                              (if (re-matches #"[A-Za-z_][A-Za-z0-9_.$]*" d)
@@ -420,19 +464,32 @@
                                (apply list 'asm/directive d (parse-dir-args ts (inc i)))))]
                   (when (and (#{"set" "equ"} d) (seq? form) (= 3 (count form)) (symbol? (second form)))
                     (swap! state assoc-in [:equ (name (second form))] (nth form 2)))
+                  (cond (#{"if" "ifne" "ifeq" "ifge" "ifgt" "ifle" "iflt" "ifdef" "ifndef" "ifnotdef" "ifb" "ifnb" "ifc" "ifnc" "ifeqs" "ifnes"} d)
+                        (swap! state update :cond (fnil inc 0))
+                        (= d "endif") (swap! state update :cond #(max 0 (dec (long (or % 0))))))
                   (case d
                     "intel_syntax" (swap! state assoc :syntax :intel)
                     "att_syntax" (swap! state assoc :syntax :att)
                     "purgem" (swap! state update :macros disj head)
                     nil)
-                  (recur (long next) (conj! out [form (lex/start t) (lex/end (peek ts))])))))
+                  (vector (long next) (conj! out [form (lex/start t) (lex/end (peek ts))])))))
 
             :else
             (do (when (and (= :intel (:syntax @state)) (not (:intel opts)))
                   (fail "Intel syntax (AX3)" {:class :intel}))
-                (recur (long next) (conj! out [(binding [*equ* (:equ @state)]
+                (vector (long next) (conj! out [(binding [*equ* (:equ @state)]
                                                   (if (= :intel (:syntax @state)) ((:intel opts) ts i) (insn ts i)))
-                                               (lex/start t) (lex/end (peek ts))]))))))))
+                                               (lex/start t) (lex/end (peek ts))])))))
+                ;; ARS49 (a): inside a conditional block, a statement the reader refuses is kept as its text, (asm/unread TEXT
+                ;; MESSAGE) (AsmParser only lexes an ignored block's statements; an assembled one is the error MESSAGE)
+                (catch arbace.lang.ExceptionInfo e
+                  (if (and (:unread opts) (:asm/refused (ex-data e)) (pos? (long (:cond @state 0))) (seq toks))
+                    (let [out (loop [o out] (if (> (count o) n0) (recur (pop! o)) o))]
+                      [(long next) (conj! out [(list 'asm/unread (subs src (int (lex/start (first toks))) (int (lex/end (peek toks))))
+                                                     (.getMessage e))
+                                               (lex/start (first toks)) (lex/end (peek toks))])])
+                    (throw e))))]
+          (recur (long p) out)))))
     (catch arbace.lang.ExceptionInfo e
       (let [line (inc (count (filter #(= \newline %) (subs src 0 (int @cur)))))]
         (throw (ex-info (str (.getMessage e) " (line " line ")") (ex-data e))))))))))
@@ -453,6 +510,7 @@
       (= h 'asm/cpp-line) (str "#" (second f))
       (= h 'asm/cpp-invoke) (let [a (when (> (count f) 2) (nth f 2))]
                               (str (name-text (second f)) (when a (if (.startsWith ^String a "(") a (str " " a)))))
+      (= h 'asm/unread) (second f)
       (= h 'asm/reg-alias) (str (name-text (second f)) " .req " (subs (args-text (nnext f)) (min 1 (count (args-text (nnext f))))))
       (and (symbol? h) (= "asm" (namespace h)))
       (let [d (name h)]
