@@ -63,8 +63,9 @@ platform_gensrc_make() {
     echo ";; $pinned, re-checked against it by platform-gensrc --check (the oracle tier's) and never read from it otherwise."
     echo ";; Each record one line, a vector of strings (bin/lib/repr-java/gensrc.bash's pg_records): value NAME VALUE (spec.gmk's);"
     echo ";; list NAME ITEM... (a module list make computes); subst MODULE OUTPUT TEMPLATE FROM TO... (make's text"
-    echo ";; substitution, its vardeps); java MODULE ID DIR TOOL ARG... (a tool run the build recorded, its @-files expanded, DIR"
-    echo ";; \"-\" for none); mv MODULE ID FROM TO (the run's move after it). Paths with bin/javac-vendor's placeholders."
+    echo ";; substitution, its vardeps); resource-packages MODULE PACKAGE... (the module's packages that hold resources alone,"
+    echo ";; stage 3's); java MODULE ID DIR TOOL ARG... (a tool run the build recorded, its @-files expanded, DIR \"-\" for none);"
+    echo ";; mv MODULE ID FROM TO (the run's move after it). Paths with bin/javac-vendor's placeholders."
     echo ";; Generated; do not edit by hand."
     echo "{:jdk $(pb_str "$pinned")"
     echo " :build $(pb_str "$bb")"
@@ -73,7 +74,8 @@ platform_gensrc_make() {
     echo "  :list \"$bb/make-support/vardeps/make/ModuleWrapper.gmk/java.base/VARDEPS_VALUE.vardeps (GensrcModuleLoaderMap.gmk's BOOT_MODULES, PLATFORM_MODULES, NATIVE_ACCESS_MODULES), .../common/modules/GensrcModuleInfo.gmk/MODULE/ALL_MODULES.vardeps\""
     echo "  :subst \"$bb/make-support/vardeps/make/ModuleWrapper.gmk/java.base/BUILD_*_VARDEPS.vardeps (SetupTextFileProcessing's sed)\""
     echo "  :java \"$bb/support/gensrc/MODULE/**/_*.cmdline: the recorded java runs (cd DIR && java ... -cp CP TOOL ARGS)\""
-    echo "  :mv \"$bb/support/gensrc/MODULE/**/_*_post.cmdline\"}"
+    echo "  :mv \"$bb/support/gensrc/MODULE/**/_*_post.cmdline\""
+    echo "  :resource-packages \"$bb/jdk/modules/MODULE/module-info.class's ModulePackages less the packages of MODULE's class files\"}"
     echo " :records ["
     for v in COPYRIGHT_YEAR OPENJDK_TARGET_OS OPENJDK_TARGET_OS_TYPE OPENJDK_TARGET_CPU OPENJDK_TARGET_CPU_BITS \
              OPENJDK_TARGET_CPU_ENDIAN VERSION_NUMBER VERSION_STRING VERSION_SHORT; do
@@ -113,6 +115,19 @@ platform_gensrc_make() {
         else shift; fi
       done
       echo "  $(pb_vec subst java.base "$out2" "$tpl" "${pairs[@]}")"
+    done
+    # the resource-only packages of every module (stage 3's ModulePackages: the image's packages, a module's class
+    # files' and its resources'; the platform holds class files alone): the exploded descriptor's packages that hold
+    # no class file
+    local mex
+    mex=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || return 1
+    for m in $(platform_modules); do
+      "$mex" "$root/bin/lib/repr-java/modinfo.ae" --packages "$b/jdk/modules/$m/module-info.class" > "$TMPDIR/javac-vendor.pg-p" || return 1
+      local rp=()
+      while IFS= read -r a; do
+        ls "$b/jdk/modules/$m/${a//.//}"/*.class > "$quiet" 2>&1 || rp+=("$a")
+      done < "$TMPDIR/javac-vendor.pg-p"
+      [ ${#rp[@]} = 0 ] || echo "  $(pb_vec resource-packages "$m" $(printf '%s\n' "${rp[@]}" | LC_ALL=C sort))"
     done
     # the recorded java runs, by module and path; each run's _post move after it
     for m in $gensrc_modules; do
@@ -505,6 +520,103 @@ gensrc() {
   gensrc_judge || st=1
   cat "$work/gensrc/summary.tsv" >&2
   [ ! -s "$work/gensrc/explain.txt" ] || { echo "   differences not explained by ${gknown#$root/}:" >&2; head -30 "$work/gensrc/explain.txt" >&2; }
+  echo "   ($(since "$t0"))" >&2
+  return $st
+}
+
+# The own platform's module descriptors (JCS359 (a)(3)): each module's javac descriptor extended as the build extends it,
+# by bin/lib/repr-java/modinfo.ae on the tools' host: (1) AddPackagesAttribute's ModulePackages (the packages of the
+# module's class files and its resource-only packages, OUT/platform-gensrc.edn's resource-packages), against the build's
+# exploded descriptor; (2) jmod create's version, main class, target platform and resolution flags (OUT/platform-build.edn's
+# :jmod), against the jmod's; java.base's ModuleHashes not written (JCS364 (a): OUT/platform-descriptors-known.edn). The
+# input is stage 1's own descriptor and class packages (WORK/classes/modules/MODULE/module-info.class, packages.txt) when
+# classes modules has run for the module (from own), else the build's exploded descriptor and classes (from exploded:
+# step 2 alone proves the writer). Into WORK/descriptors/MODULE/{exploded,jmod}.class and WORK/descriptors/summary.tsv
+dknown=${JAVAC_VENDOR_DESCRIPTORS_KNOWN:-$out/platform-descriptors-known.edn}
+descriptors() {
+  local c b m w from st=0 t0 mex x r1 r2 jm k u s kt
+  t0=$(date +%s)
+  c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (the reference)"
+  b=$(dirname "$c")
+  mex=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || fail "no tools' host"
+  kt=$work/descriptors/known.tsv
+  mkdir -p "$work/descriptors"
+  gknown_tsv "$dknown" > "$kt"
+  printf 'MODULE\tFROM\tEXPLODED\tJMOD\n' > "$work/descriptors/summary.tsv"
+  : > "$work/descriptors/explain.txt"
+  for m in ${*:-$(platform_modules)}; do
+    w=$work/descriptors/$m; rm -rf "$w"; mkdir -p "$w"
+    if [ -f "$work/classes/modules/$m/module-info.class" ] && [ -f "$work/classes/modules/$m/packages.txt" ]; then
+      from=own
+      cp "$work/classes/modules/$m/packages.txt" "$w/classes.txt"
+      x=$work/classes/modules/$m/module-info.class
+    else
+      from=exploded
+      (cd "$b/jdk/modules/$m" && find . -name '*.class' ! -path ./module-info.class | sed 's|^\./||; s|/[^/]*$||' | LC_ALL=C sort -u | tr / .) > "$w/classes.txt"
+      x=$b/jdk/modules/$m/module-info.class
+    fi
+    { cat "$w/classes.txt"; pg_records | awk -F'\037' -v m="$m" '$1 == "resource-packages" && $2 == m { for (i = 3; i <= NF; i++) print $i }'; } |
+      LC_ALL=C sort -u > "$w/packages.txt"
+    # step 1 (own only): the exploded descriptor
+    r1=-
+    if [ $from = own ]; then
+      "$mex" "$root/bin/lib/repr-java/modinfo.ae" "$x" "$w/exploded.class" --packages-file "$w/packages.txt" > "$w/log" 2>&1 || r1=failed
+      if [ $r1 != failed ]; then cmp -s "$w/exploded.class" "$b/jdk/modules/$m/module-info.class" && r1=equal || r1=differ; x=$w/exploded.class; fi
+    fi
+    # step 2: jmod create's
+    pb_get "$m" jmod > "$w/jmod.args"
+    local ja=() resn=0
+    mapfile -t jm < "$w/jmod.args"
+    while [ ${#jm[@]} -gt 0 ]; do
+      case ${jm[0]} in
+        --module-version) ja+=(--version "${jm[1]}"); jm=("${jm[@]:2}") ;;
+        --target-platform) ja+=(--target "${jm[1]}"); jm=("${jm[@]:2}") ;;
+        --main-class) ja+=(--main-class "${jm[1]}"); jm=("${jm[@]:2}") ;;
+        --do-not-resolve-by-default) resn=$((resn | 1)); jm=("${jm[@]:1}") ;;
+        --warn-if-resolved=deprecated) resn=$((resn | 2)); jm=("${jm[@]:1}") ;;
+        --warn-if-resolved=deprecated-for-removal) resn=$((resn | 4)); jm=("${jm[@]:1}") ;;
+        --warn-if-resolved=incubating) resn=$((resn | 8)); jm=("${jm[@]:1}") ;;
+        *) jm=("${jm[@]:1}") ;;
+      esac
+    done
+    [ $resn = 0 ] || ja+=(--resolution "$resn")
+    printf '%s\n' "${ja[@]}" > "$w/modinfo.args"
+    unzip -p "$b/images/jmods/$m.jmod" classes/module-info.class > "$w/build-jmod.class" 2> "$w/unzip.log"
+    r2=failed
+    if [ "$r1" != failed ] && "$mex" "$root/bin/lib/repr-java/modinfo.ae" "$x" "$w/jmod.class" --packages-file "$w/packages.txt" "${ja[@]}" >> "$w/log" 2>&1; then
+      if cmp -s "$w/jmod.class" "$w/build-jmod.class"; then r2=equal
+      else
+        printf 'module-info.class\t%s\t%s\n' "$(sha256sum < "$w/build-jmod.class" | cut -c1-64)" "$(sha256sum < "$w/jmod.class" | cut -c1-64)" > "$w/diffs.tsv"
+        read -r k u s < <(module_judge "$m" "$w/diffs.tsv" "$kt")
+        r2=$(module_result "$k" "$u" "$s")
+        [ "$r2" = known ] || printf '%s\tunexplained\tmodule-info.class\t%s\n' "$m" "$(cut -f2- "$w/diffs.tsv")" >> "$work/descriptors/explain.txt"
+      fi
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$m" "$from" "$r1" "$r2" >> "$work/descriptors/summary.tsv"
+    case "$r1 $r2" in *failed*|*differ*|*stale*) st=1 ;; esac
+  done
+  # a known entry of a module not run, or whose descriptor is equal, is stale
+  awk -F'\t' '{print $1}' "$kt" | while read -r m; do
+    r2=$(awk -F'\t' -v m="$m" '$1 == m {print $4}' "$work/descriptors/summary.tsv")
+    [ "$r2" != equal ] || { echo "$m	stale	module-info.class" >> "$work/descriptors/explain.txt"; }
+  done
+  grep -q 'stale' "$work/descriptors/explain.txt" && st=1
+  # the negative control (GTS81 (a)): the first module's step 2 again with its last package left out must differ
+  m=$(awk -F'\t' 'NR == 2 {print $1}' "$work/descriptors/summary.tsv")
+  if [ -n "$m" ] && [ -f "$work/descriptors/$m/jmod.class" ]; then
+    w=$work/descriptors/$m
+    sed '$d' "$w/packages.txt" > "$w/control-packages.txt"
+    x=$b/jdk/modules/$m/module-info.class; [ ! -f "$w/exploded.class" ] || x=$w/exploded.class
+    local ca=(); mapfile -t ca < "$w/modinfo.args"
+    "$mex" "$root/bin/lib/repr-java/modinfo.ae" "$x" "$w/control.class" --packages-file "$w/control-packages.txt" "${ca[@]}" > "$w/control.log" 2>&1
+    if cmp -s "$w/control.class" "$w/build-jmod.class"; then
+      echo "javac-vendor descriptors: the control ($m less a package) equals the build's descriptor" >&2; st=1
+    else
+      echo "   control ($m less its last package): differs, as it must" >&2
+    fi
+  fi
+  cat "$work/descriptors/summary.tsv" | awk -F'\t' 'NR > 1 { n[$2 " " $3 " " $4]++ } END { for (k in n) print "   " n[k] " modules from " k }' >&2
+  [ ! -s "$work/descriptors/explain.txt" ] || cat "$work/descriptors/explain.txt" >&2
   echo "   ($(since "$t0"))" >&2
   return $st
 }
