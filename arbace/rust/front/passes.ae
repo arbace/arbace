@@ -1035,6 +1035,32 @@
         (seq? t) (apply list (map #(subst-map % m) t))
         :else t))
 
+(defn- definer-closure?
+  "RF18: TEXT (typeck's `{closure@FILE:L:C: L:C}`) is a closure defined inside the function DEF (its definitions' parents)"
+  [^String text def]
+  (when-let [[_ a b c d] (re-find #":(\d+):(\d+): (\d+):(\d+)\}$" text)]
+    (let [want (mapv parse-long [a b c d])
+          cl (some (fn [x] (when (and (= "Closure" (:kind x))
+                                      (= want (some->> (try (#'tc/closure-decl-span (:node x)) (catch Throwable _ nil)) (take 4) (mapv long))))
+                             x))
+                   (c/defs))]
+      (loop [x cl] (cond (nil? x) false (= def (:id x)) true :else (recur (c/def-of (:parent x))))))))
+
+(defn- close-definer-closures
+  "RF18 (RFP62 (a)): a generic definer's own closures in its hidden type at the definer's identity arguments (a closure's
+  ClosureArgs carry its parent's: `[:closure TEXT SIG ARGS]`, mono's closed form), substituted with the type at the use"
+  [t def]
+  (let [g (c/generics-of def)]
+    (if-not (some #(#{:type :const} (:kind %)) (c/all-params g))
+      t
+      (let [ids (mapv tc/erase-ty (c/identity-args g))]
+        (letfn [(walk [x] (cond (and (vector? x) (= :closure (first x)) (= 3 (count x)) (string? (second x)) (definer-closure? (second x) def))
+                                (conj x ids)
+                                (vector? x) (mapv walk x)
+                                (map? x) (into {} (for [[a b] x] [a (walk b)]))
+                                :else x))]
+          (walk t))))))
+
 (defn- hidden-type [op]
   (let [cache (or *opaque-cache* (atom {}))]
     (if (contains? @cache op)
@@ -1048,7 +1074,8 @@
                     (:output (try (tc/erased-sig (:id d)) (catch Throwable _ nil))))
               h (when (and (vector? out) (= :opaque (first out)) (= (nth out 2 nil) (nth op 2 nil)))
                   (let [res (tc/body-results d)]
-                    (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty (subst-map (param-args (nth out 3 nil) (nth op 3 nil))))))]
+                    (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty (close-definer-closures (:id d))
+                            (subst-map (param-args (nth out 3 nil) (nth op 3 nil))))))]
           (swap! cache assoc op h)
           h)
       (let [ds (filter (fn [d] (and (#{"Fn" "AssocFn"} (str (:kind d))) (map? (:node d)) (:body (:node d))

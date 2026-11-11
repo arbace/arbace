@@ -3559,3 +3559,102 @@ the interface pack at night; (b) read the exported symbols from the rlibs' metad
   `bin/rust-front rsi-native` by hand over the own programs (rustc as the linker driver) to confirm the new own programs (structs,
   generics, iterators, casts; with RF15's and RF16's) run as rustc's recorded runs (the native constructors' shims, the static
   with a pointer, the uninhabited `poison` discriminant), then `bin/rsi check --front own --corpus samples,synthetic` (RFP42 (a)).
+
+## As built: RF18 (RFP62 (a)): opaque types revealed in mono, closures' layouts and vtable entries; RFP63 (a)'s reader (2026-11-11)
+
+Branch `rust-rf18` (from `mac/rust-rf17` `50a17174b`), light lane (one process at a time, `GOMEMLIMIT=2000MiB`, `GOMAXPROCS=2`,
+`RF11_BATCH=3`, the toolchains stubbed, each process watched under 2.5 GiB). RF17's caches were copied into the worktree and their
+absolute paths rewritten (`rust-rf17/` to `rust-rf18/`) before any run. Only `arbace/rust/` changes (in `arbace_crop_paths`): ci,
+`arbace/cpp/lower.ae` and `gate_key` do not move. Every rule follows rustc 1.99.1's own code (the pinned rust-src's `compiler/`).
+
+### RFP62 (a): opaque types in mono
+
+- **Mono walks runtime MIR's types** (`program-facts`): each body passes PostAnalysisNormalize first (`passes/post-analysis-normalize`,
+  RFP33 (a)'s reveal: an opaque type's hidden type, the defining body's typeck type at the use's arguments), as rustc's collector
+  reads the bodies after the analysis passes. Mono read the built bodies, so `add5(1)` was `<impl Fn(i32) -> i32 as
+  Fn<(i32,)>>::call`: no callee fact (its text was not the runtime body's), and the closure behind it never reached. Now the call
+  is `<{closure@..} as Fn<(i32,)>>::call`, resolved by RF14's Fn arm to `make_adder::{closure#0}`, collected (likewise
+  `make_counter`'s FnMut closure).
+- **A generic definer's closure in its hidden type** (`passes/close-definer-closures`): `compose`'s hidden type is its own closure,
+  whose ClosureArgs carry the definer's arguments; the hidden type's closures defined inside the definer get its identity
+  arguments (`[:closure TEXT SIG ARGS]`, RF17's closed form) before the use's substitution, so `f(bb(41))` resolves to
+  `compose::<i32, i32, String, {closure}, {closure}>::{closure#0}` and the collector instantiates it (RF15's generic instances).
+
+### RFP62 (a): closures' layouts and vtable entries
+
+- **A closure's layout** (`mono/layout-of*`'s `:closure`, layout_of_uncached's Closure arm): univariant over its upvars' types,
+  `StructKind::AlwaysSized`; the upvars from the closure's built body (`build-body` now leaves `:upvar-tys`, closure_analyze's
+  captures, the closure type's fields), a generic function's closure's substituted at its parent's arguments. The same map binds
+  `build/*closure-tys*` in mono, so a closure's drop glue is its upvars' (it was none in mono).
+- **The Fn traits' vtable entries** (`vtable-instance`, `vtable-alloc`): `dyn Fn(..)`'s supertraits `FnMut` and `FnOnce` take the
+  object's arguments (`Fn<Args>: FnMut<Args>: FnOnce<Args>`); `call` and `call_mut` resolve to the closure's own body (its receiver
+  the environment by reference, so no shim), `call_once` to the ClosureOnceShim, whose vtable entry is its VTableShim
+  (Instance::resolve_for_vtable): `vtable-shim-mangle`, `::{shim:vtable#0}` over `<{closure} as FnOnce<(ARGS,)>>::call_once` then
+  the instantiating crate, equal to the record's symbol; its body core's shim (the record's, as RF17's reified pointer's).
+  `boxed`'s three vtables and `main::{closure#4}::{closure#0}`'s are now mono's (vtables 0 -> 4 of 4 in `closures`).
+- **The record's `dyn Fn(..) -> R`** (`form->ty`'s `dyn`, `dyn-fn-sugar`): a std body's argument type `(ty "dyn std::ops::Fn() ->
+  usize" (dyn))` is read from its text (the trait at the arguments' tuple, `FnOnce::Output`'s projection), so the std call
+  `<{closure} as FnMut<(&Box<dyn Fn() -> usize>,)>>::call_mut` resolves and `main::{closure#12}` (`|f| f()`, reached only through
+  std's `Map`) is collected.
+
+### RFP63 (a): the reader side (std's exported generic instances)
+
+- `mono/*upstream*` (`load-upstream`, read from `RF_STD_EXPORTS` by build-run's `native-run`): `{[DEF ARGS] SYMBOL}` of the
+  helper's future `--std-exports` dump; an instance it lists is the upstream crate's (Instance::upstream_monomorphization): its
+  symbol the listed one (`instance-symbol`), its callee fact `:external`, and it is no `ext-item` (never instantiated in the
+  program's crate, linked from std's lowered library). Without the file nothing changes (the default until the night records it).
+- A reader check with a hand-made one-entry list taken from `panic-assert-eq`'s record (`test/rust/front/std-exports-sample.edn`:
+  `core::panicking::assert_failed::<i32, i32>`, std's symbol as the record's callee names it): the program's module then declares
+  std's instance (`assert_failed::<i32, i32>`'s std symbol, external) and the program is own (`RF_STD_EXPORTS=test/rust/front/std-exports-sample.edn .tmp/rb.sh t-pae panic-assert-eq`, 1.7 GB). It proves the reader, not the fact: the fact is the night's dump, and `panic-assert-eq` counts own
+  only once the recorded list carries it.
+
+### Results
+
+- **The whole synthetic corpus** (`bin/rust-front rsi-build` over its 67 programs, `RF11_BATCH=3`, two threads, the toolchains
+  stubbed, 0 stub calls; 41 minutes): **66 of 67 own** (RF17 65): closures. The batch of closures, collections and drops was
+  stopped by the day's process watcher (2.66 GB, over 2.5 GiB) after closures; collections and drops were then built alone,
+  both own (collections 2.62 GB alone, drops 1.8 GB). RF17's code peaks the same way on collections alone (killed at 2.71 GB):
+  not RF18's; RF17's "under 2 GiB a process" did not hold for collections, the light lane's line needs collections in a batch of
+  its own or `RF11_GOMEMLIMIT` lower. The native facts (build-run's, summed): callees 4,516 of 4,978 -> 4,528 of 4,985, function
+  constants' symbols 1,925 of 2,340 -> 1,933 of 2,346, layouts 42,792 of 45,860 -> 43,727 of 45,881 (closures' layouts now
+  mono's), vtables 35 of 46 -> 42 of 46, symbols 266 -> 272 (all native), constants 205 of 205, closure shims 3 of 3;
+  mono-check's against the record (summed): callees 1,992 -> 2,000 of 2,414, function constants' symbols 1,916 of 2,329 -> 1,924
+  of 2,338, items 468 of 1,124 -> 478 of 1,125, symbols 230 -> 235 of 272, layouts 42,334 -> 43,265 of 45,483, core items
+  2,022 -> 2,027 (all equal).
+- The 1 left: panic-assert-eq (RFP63: std's upstream instance `assert_failed::<i32, i32>`; its reader built, the list the night's).
+  closures' other refusals, counted record facts: `<Box<dyn Fn(i32) -> i32> as Fn<(i32,)>>::call` (Box's Fn impl needs the trait
+  object's own Fn candidate in the impl's where clause: typeck's, refused as "a builtin candidate") and `<i32 as Ord>::cmp`
+  (a macro-made item's attributes).
+- `bin/rust-front essential` equals its known file (3 min 49 s; no line moved); `bin/rust-front core-essential` equals its own
+  (564 of 567, 4 min 27 s; 2.0 GB); `bin/reap` 41 of 44 cells checked, 0 problems; `bin/crops-score --judge --strict` exit 0, Rust
+  75.0 / 75.0 / 95.8 / 80.0, unchanged (RFP43 (a): an own case still scores 0.5 until S6's switch).
+- build-run's `RF_CALLEE_TRACE=1` writes each callee mono refused, with its text, into the program's build-run.log (`debug
+  no-callee`), as found useful here.
+
+### Left
+
+- RFP63 (a)'s night (below), then panic-assert-eq: 67 of 67.
+- The object candidate in typeck's selection (`dyn Fn: Fn` in `Box<F>: Fn`'s where clause), so `Box<dyn Fn>` calls resolve to
+  alloc's impl.
+- The collections program's memory (2.6 GB in a process of its own): what the batch keeps of its layouts and core bodies (RES53's
+  kind of question for the front end's builder).
+
+### The night's commands (none run here)
+
+- **RFP63 (a)'s dump and the packs again** (the oracle tier, the host with rustc; about an hour and a half, a helper run under its
+  4 GB `ulimit -v`, a re-record night: the helper's sources are in every rust-front pack's key, `rfr_helper_hash`, so changing it
+  makes each pack STALE until recorded again; outside `arbace/rust/`, so not on this branch):
+  1. tools/rsdump: `--std-exports FILE`, after rustc_middle's `upstream_monomorphizations` (the instances the crate being
+     compiled would link from an upstream crate: `tcx.upstream_monomorphizations(())`, each DefId's args map to the exporting
+     crate), filtered to std, core and alloc's definitions, each written `{:def DEF-PATH :args [TYPE-FORM ...] :symbol
+     tcx.symbol_name(instance) :crate CRATE-NAME}` sorted, the arguments as the records write types (`sty`'s `(ty TEXT STRUCT)`).
+  2. bin/lib/repr-rust/front-records.bash: the kind rsi gains the member `std-exports.edn`, made on an empty program with rsi's
+     plan's flags and sysroot, `"$helper" rustc --std-exports std-exports.edn -- $(rfr_rsi_flags test/rust/synthetic/panic-assert-eq.rs)
+     --sysroot "$(rf11_rsi_sysroot)" -o empty.bin empty.rs` (rsi's std build: `bin/rsi std-build` at test/rust/runtime/ir.sha256 first,
+     in the checkout that records; the main checkout's `.tmp/rsi/std` is an older 103-unit build); bin/rust-front's rsi-build exports
+     `RF_STD_EXPORTS=$rs/std-exports.edn`.
+  3. `bin/repr-rust helper`, then `bin/rust-front records make std built captures mono rsi` and `bin/rust-front core-records make`,
+     each pack's verify (`bin/oracle-records`), then `bin/rust-front rsi-build` over the 67 (expected 67 of 67 own).
+- RFP46 (a)'s whole plan again with RF18: `RF11_BATCH=6 RF11_PROCS=4 bin/rust-front rsi-build` (samples and synthetic), then
+  `bin/rust-front rsi-native` by hand over the own programs (rustc as the linker driver) to confirm closures runs as rustc's
+  recorded run (the closures' vtables and the opaque calls), then `bin/rsi check --front own --corpus samples,synthetic` (RFP42 (a)).

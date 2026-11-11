@@ -4559,3 +4559,26 @@ Proofs (stage 0 `/root/arbace/target/seed/amd64/arbace` as host and as `GOI_RUN_
 (light: check-test 22 assertions, run 22 of 22, repl 124 of 124, std 185 of 185, the session as its transcript; peak 2.2 GiB);
 `bin/goi check --essential --jobs 4` 801 of 801 pass, the three controls fail as they must, no regression; `bin/pyi lib-test test_class` 31 pass, 11 classed, 0 failing; `test_bool test_unary
 test_keywordonlyarg` 48 of 48 pass (GOGC=50, peak 1.9 GiB); `bin/reap` 0 problems.
+
+## 2026-11-11: RF18, RFP62 (a): opaque types revealed in mono, closures' vtable entries; RFP63 (a)'s reader (branch `rust-rf18`, from `mac/rust-rf17` `50a17174b`)
+
+- RFP62 (a), decided by the user 2026-11-11, after rustc 1.99.1 (the pinned rust-src's `compiler/`): mono's program facts now read
+  each body after PostAnalysisNormalize (RFP33 (a)'s reveal, as rustc's collector reads runtime MIR), so a call through an
+  `impl Fn` return resolves to the closure behind it (`make_adder`'s, `make_counter`'s); a generic definer's own closures in its
+  hidden type carry the definer's arguments (ClosureArgs' parent_args: `compose`'s closure, instantiated at the use's); a closure's
+  layout is univariant over its upvars (layout_of's Closure arm; the upvars' types from the closure's built body, `:upvar-tys`,
+  which also give mono its closures' drop glue); a `dyn Fn` vtable's entries are the closure's body for `call` and `call_mut` and
+  `call_once`'s VTableShim (resolve_for_vtable; `vtable-shim-mangle`, the record's symbol, core's shim body the record's); a
+  record's `dyn Fn(..) -> R` argument type is read from its text so std's `Map` reaches `|f| f()`. Alternatives considered: the
+  record's items for closures behind opaque types and vtables (RFP62 (b), a record fact per closure), revealing at each use in
+  mono instead of the passes' reveal (two reveals to keep equal).
+- RFP63 (a)'s light part, the reader: `mono/*upstream*` from `RF_STD_EXPORTS` (the helper's future `--std-exports`), an instance
+  it lists taken as the upstream crate's (its symbol, external, not instantiated); without the file nothing changes. The helper's
+  dump and the packs' re-record are the night's (the helper's source is in every rust-front pack's key): written in
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF18", not run.
+- Measured, light (each process watched under 2.5 GiB): `rsi-build` over the 67 synthetic programs: **66 own** (RF17 65): closures;
+  native vtables 35 -> 42 of 46, layouts 42,792 -> 43,727 of 45,881, callees 4,516 -> 4,528; mono-check's callees against the record
+  1,992 -> 2,000 of 2,414. The watcher stopped one batch at 2.66 GB (collections), rerun alone at 2.62 GB; RF17's code peaks the
+  same there (2.71 GB). `RF_STD_EXPORTS` with a one-entry sample from panic-assert-eq's record makes it own (the reader's check, not
+  the count). `bin/rust-front essential` and `core-essential` equal their known files; `bin/reap` 0 problems; `bin/crops-score
+  --judge --strict` exit 0, Rust unchanged. The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF18".
