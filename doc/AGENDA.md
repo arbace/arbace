@@ -247,6 +247,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   `asm-amd64-encode` out of `:clean-only` into the nightly (9 min 31 s). asm-amd64's full tier is 17 min 25 s the heaviest night (256% of
   half a share, 6 min 48 s; `--costs` says 338%, it does not know the rotation): over, by the encode check. Proposed AXS91: encode-check
   rotated in sevenths (the night at about 8 min 20 s, 122%), or a larger share.
+  `asm-ax11` (from `mac/next`; doc/asm/AMD64-SURVEY.md, "As built: AX11"): the AOT cell's six object classes fixed (conditionals,
+  macros, `.rept`/`.irp`/`.irpc`, x86-64's `.reloc`, the DWARF 4 line table's header, `$0x80` as a name): 94.2% -> 100.0% (105 / 0 / 0, the
+  run check 19 of 19 with `run/macros`). Proposed AXS92 (the line program), AXS93 (arm64's `.reloc` order, for the arm64 line), AXS94
+  (`--defsym` tests into the object corpus).
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

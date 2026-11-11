@@ -1654,3 +1654,69 @@ The user decided AXS91 (a): the nightly `asm-amd64-encode.mc-x86` rotated by cor
   `GATE_NIGHT=3 bin/gate --nightly --plan` names `asm-amd64-encode.mc-x86.sub` and `.s3`.
 - Not changed, to look at: x86i-check's `:failed-re` (steps.edn, AXS89) uses `(?:...)`, which `sed -E` (the runner's use of `:failed-re`) does not
   read; its `:id-re`'s `(?:...)` is the planner's Java regex and fine.
+
+## As built: AX11 (2026-11-11; branch `asm-ax11`, from `mac/next` `15278e9c6`)
+
+The x86-64 AOT cell's non-pass classes, cheapest first: the object check's six `MC/X86` files llvm-mc 23.1.5 assembles and Arbace did
+not (five `:unsupported-directive`: `.ifdef`, `.reloc` twice, `.rept` with `.reloc`, `.macro`; one `:unsupported-debug-line`). All six are
+now llvm-mc's objects byte for byte; the cell went from 98 / 0 / 6 (94.2%) to 105 / 0 / 0 (100.0%), with a new run program. No llvm-mc ran:
+the objects are held to the records made by hand (`test/asm/records/obj-mc-x86-obj-llvm-mc-23.1.5.edn`, unchanged).
+
+- **Conditional assembly** (`arbace.asm.obj/run-items!`, after AsmParser's parseDirectiveIf*, Else*, EndIf: TheCondStack): `.if`,
+  `.ifne`, `.ifeq`, `.ifge`, `.ifgt`, `.ifle`, `.iflt`, `.ifdef`, `.ifndef`/`.ifnotdef`, `.ifb`, `.ifnb`, `.ifc`, `.ifnc`, `.ifeqs`, `.ifnes`,
+  `.elseif`, `.else`, `.endif`, nested, an ignored part's conditionals still counted, an unmatched one an error. The reader already
+  read both branches as forms; the assembler skips the ignored ones. `pltoff` (`.ifdef ERR` around an error line) passes.
+- **Macros and repetitions** (parseDirectiveMacro, handleMacroEntry, expandMacro at a GNU target, parseMacroArguments,
+  parseDirectiveRept/Irp/Irpc): the reader keeps a block's body as text; the assembler expands it as text (`\NAME`, `\@` the
+  instantiations so far, `\+` the macro's count, `\()`; positional, default, keyword `NAME=V`, `:req` and `:vararg` arguments; commas,
+  or blanks between operands) and reads it with the arch's new `:read-text` in the syntax current at the expansion, 20 levels deep
+  at most; `.purgem`; a macro defined by an expansion is invoked from the file through `:insn-text` (the reader took the line for an
+  instruction: printed back, the name looked up among the macros first, as AsmParser does). `.rept`'s body without a backslash is
+  read once. `compact-unwind-cfi_def_cfa` (two macros with CFI) passes.
+- **`$` and an integer as a name**: `sub $$0x80+8, %rsp` (the macro's text at an ELF target: no Darwin `$$` substitution) is an
+  immediate of the undefined symbol `$0x80` plus 8 in llvm-mc (AsmParser::parseIdentifier joins `$` with an adjacent identifier or
+  integer); `arbace.repr.asm.gnu`'s primary does too, the integer as spelled (`*src*`, bound by `read-items`). A shared file: it moves
+  the round trip's rows that refused `$` followed by an integer (see below).
+- **x86-64's `.reloc`** (`arbace.asm.amd64.obj`'s directive: X86AsmBackend::getFixupKind at ELF, `R_X86_64_*` by name and
+  `BFD_RELOC_NONE/8/16/32/64`); the shared relocation of a directive now names its symbol, a local one too (`.Lbase` stays `.Lbase`, as
+  llvm-mc writes it; a section's own symbol is the section's), and with the arch's `:reloc-directives-merged` (x86-64's) a section's
+  directives are merged with its own relocations by offset, the directives in their order, a tie the own first: llvm-mc 23.1.5's
+  order in `reloc-directive-with-inst-relocs` ("emitted in groups") and `reloc-directive-tlsgd`. arm64 keeps them after its own: the
+  merge reorders MC/AArch64's `patchinst` (its PATCHINST after both JUMP26s, as llvm-mc's AArch64 writer puts them; AXS93).
+  `reloc-directive-elf-64`, `-with-inst-relocs` and `-tlsgd` pass.
+- **The DWARF 4 line table's header** (MCDwarfLineTableHeader::Emit at llvm-mc's default version 4): `.file N "NAME"` and `.file N
+  "DIR" "NAME"` (tryGetFile: a NAME's directory split off, the directories numbered from 1) make `.debug_line` at the end (after
+  `.eh_frame`, as finishImpl orders them) with its header and no line program; `.loc` checks its file and marks a location seen, which a
+  section switch clears (MCStreamer::switchSection); an instruction or data while one is seen is a line entry, still
+  `:unsupported-debug-line` (the program is not written yet: AXS92). `line-table-sections` (a `.loc` at a section's end) passes.
+- **The run check's new program** `test/asm/run/macros.s` (by its own verdict: exit 42, five lines): the macros' arguments, `\@`, `\()`,
+  a macro's macro, `.purgem`, `.rept`, `.irp`, `.irpc` and the conditionals nested and ignored, run by the CPU; 19 of 19; its control
+  `_control/macros-vs-loop` fails as it must. x86i runs it too: `x86i-check` 44 programs, 43 by their verdicts and equal to the CPU's
+  (`cpuid` by design, as before), every mode, recorded; the eval cell 127 / 2 / 0 -> 130 / 2 / 0.
+- **`x86i-check`'s native runs** used `$runner`, which only `run-check` sets (arm64's emulator, AR4): under `set -u` every CPU run
+  failed (`runner: unbound variable`) on `mac/next`; now `${runner:-}`.
+- **The round trip's rows** of the two files that refused `$` and an integer now refuse later in them, the same class
+  (`mc-asmparser/motorola_integers`: `unexpected %` at line 8, `-motorola-integers`' `%01010`; `mc-x86/x86_errors`: an error test, at
+  line 129); recorded. arm64's round trip unchanged.
+- **Proofs** (stage 0, one at a time, each under 1.5 GiB): `object-check mc-x86-obj` 47 of 47 (with its control), `musl` 32 of 32,
+  `synthetic` 6 of 6; `run-check` 19 of 19 and five controls; `x86i-check` whole (7 min 20 s) with its controls; the round trip 810
+  files; arm64's `object-check` (both corpora), `object-verdict`, `run-check`, `bin/a64i check` and round trip unchanged; `bin/reap` 49 of 52
+  cells checked, 0 problems (recorded); `bin/crops-score --judge --strict` 0 (x86-64 assembly 99.3%, 99.9% without by design).
+- Shared files touched (arm64's agent works beside): `bin/repr-asm` (one line, above), `arbace/asm/obj.ae` (the items' loop now `run-items!`, conditionals, macros, the
+  line table, `.reloc`'s symbol and order hook, `line-entry!` in `data!` and `emit-insn!`, `switch!`'s clearing) and
+  `arbace/repr/asm/gnu.ae` (`$` and an integer); arm64's object, object-verdict, run and a64i checks rerun, unchanged.
+
+### Proposed (AX11)
+
+Numbering from AXS92.
+
+- **AXS92 The line program.** (a) MCDwarfLineAddr's program (DW_LNE_set_address with its R_X86_64_64, the special opcodes, the
+  sequences per section, end_sequence) written, held by the MC/X86 tests with `.loc` the object list's filter leaves out and by new
+  synthetic objects recorded in the oracle tier by hand (llvm-mc 23.1.5); (b) as built: the header only, a line entry unsupported.
+  *Recommended: (a)*, after the oracle tier records them.
+- **AXS93 arm64's `.reloc` order.** (a) arm64 sets `:reloc-directives-merged` and moves `R_AARCH64_PATCHINST` after its offset's other
+  relocations (the order llvm-mc's AArch64 writer gives `patchinst`), held by `mc-aarch64-obj`; (b) as built: after its own. For the arm64
+  line (asm-ar7). *Recommended: (a)*, by the arm64 line.
+- **AXS94 The object check's corpus widened.** The filter of `mc-x86-obj` leaves out `--defsym` and `split-file` tests, which conditional
+  assembly and macros now could take: (a) `--defsym` taken (the assembler's `:defsym` option) and the objects recorded by hand in the
+  oracle tier; (b) as built. *Recommended: (a)*.

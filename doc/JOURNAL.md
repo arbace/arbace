@@ -4784,3 +4784,22 @@ tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict:
   minutes per num/mod.rs and a night slot), reading the attributes from rustc's metadata (a toolchain product).
 - Independence unchanged (Rust 80.0: every case still consumes std's records, RFP43 (a)); the record facts the own front end
   reads shrink. Details and the night's commands: doc/rust/FRONTEND-SURVEY.md, "As built: RF19".
+
+## 2026-11-11: AX11, the x86-64 AOT cell's classes (branch `asm-ax11`, from `mac/next` `15278e9c6`)
+
+- The asm-amd64 AOT cell was 98 / 0 / 6 (94.2%): six files of MC/X86's object tests (llvm-project 23.1.5, `llvm/test/MC/X86/`)
+  classed `:unsupported-directive` (`pltoff`'s `.ifdef`, `reloc-directive-elf-64` and `-with-inst-relocs`' `.reloc`,
+  `reloc-directive-tlsgd`'s `.rept`, `compact-unwind-cfi_def_cfa`'s `.macro`) and `:unsupported-debug-line` (`line-table-sections`).
+  Taken cheapest first, all six now llvm-mc 23.1.5's recorded objects byte for byte: conditional assembly, macros, `.rept`, `.irp` and
+  `.irpc` expanded by the object assembler as AsmParser does (bodies as text, read again by the arch's reader), `$` with an adjacent
+  integer a name (`$0x80`, AsmParser::parseIdentifier), x86-64's `.reloc` by name with its symbol kept and the directives merged by
+  offset with the section's own relocations (llvm-mc's order in the two tests), and the DWARF 4 line table's header for `.file N`
+  (no line program yet). A run program `test/asm/run/macros.s` judged by its own verdict exercises the expansion on the CPU and on x86i.
+  The cell is 105 / 0 / 0 (100.0%). Details: doc/asm/AMD64-SURVEY.md, "As built: AX11"; proposed AXS92-AXS94.
+- The `.reloc` order was inferred from the three recorded objects (no llvm-mc run); a first try merging for every arch reordered
+  MC/AArch64's `patchinst` (llvm-mc puts PATCHINST after the JUMP26s), so the merge is x86-64's (`:reloc-directives-merged`) and arm64
+  keeps its order (AXS93 for the arm64 line). Alternatives considered: expanding macros in the reader (the round trip keeps the text, so
+  no), and the line program now (no recorded object holds one: AXS92).
+- Shared files touched beside the arm64 line: `arbace/asm/obj.ae`, `arbace/repr/asm/gnu.ae`, `bin/repr-asm` (x86i-check's `$runner`,
+  unbound on `mac/next` since AR4: every native run of `x86i-check` failed; now `${runner:-}`). Records: object, run, x86i (eval cell
+  127 -> 130 with `macros`), the round trip's two rows' reasons, `test/reap/matrix.edn`, `test/crops/scores.edn` (x86-64 assembly 99.3%).
