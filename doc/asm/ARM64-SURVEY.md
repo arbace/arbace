@@ -1376,3 +1376,73 @@ Numbering from ARS59.
 - **ARS60 The vector FP under FPCR.** The FP lanes (`synth-neon-fp`) run under FPCR 0 alone; the scalar's rm families do not reach
   simdfp.ae's rounding. (a) a `neon-fp-rm` family, the same rows' FPCR; (b) as built. *Recommended: (a)*, small.
 
+
+## As built: AR10 (2026-11-11; branch `asm-ar10`, from `mac/review-fix-3` `6bf064ab4`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go, during night 12 (one run at a time, every process under 1.5 GiB); arm64
+programs run by a64i and, for the synthetic programs' `--record`, by qemu-aarch64 11.1.2 user mode (the model's second judge); no LLVM
+or GNU tool. The user's answers (2026-11-11): ARS56 (a), ARS57 (a), ARS59 (b) (FZ and FEAT_AFP's bits stay refused), ARS60 (a), in
+the order ARS57, ARS60, ARS56. The semantics read again from the Arm ARM (DDI 0487: the AdvSIMD scalar three same (FP), scalar
+two-register miscellaneous (FP), scalar pairwise and vector x indexed element classes' decode and Operation, FPMulX, FPMulAdd); no
+code copied.
+
+- **ARS57 (a): `test/asm/a64i/simd-struct.s` in the essential subset** (`test/asm/subsets.edn`'s `:a64i`): ld1 of one register, ld2
+  of halfwords, ld3 of words with a post-index immediate, ld4 of bytes on 8b (a range, the upper halves cleared), ld1r and a halfword
+  lane's ld1, ld4r of doublewords, st2 of bytes, st3 of a lane, st1 of four registers with a post-index register; fadd, fcmge and fcmeq
+  on 4s, fmul on 2d, fdiv on 4s with FPSR.IXC: 21 lines of stdout, each derived by hand before the run and the same under qemu-aarch64
+  and a64i (eval and AOT). Controls verdict-10 (its eval by simd-ldst's verdict) and inject-23 (a SIMD result's bit). The essential step's
+  time, measured alone at the same load (24-25 on this host, night 12 running): 53 s for the old subset, 55 s with simd-struct (+2 s,
+  +4%; about 43 s on a quiet host by the earlier ratio).
+- **ARS60 (a): `synth-neon-fp-rm`** (`test/asm/a64i/gen.ae`, 1,152 cases): the FP lanes under FPCR's directed rounding modes (RMode
+  1-3) and DN (round to nearest), FPCR set by each case's stub (`mov x10, #...; msr fpcr, x10`, the instruction, `msr fpcr, xzr`):
+  fadd, fsub, fmul, fdiv, faddp, fabd, fmulx, fmla, fmls, fmaxnm, fmin, fsqrt, frintx, frinti, scvtf, ucvtf on 2s, 4s and 2d, the
+  operands drawn as the scalar rm families draw them (near the largest finite and the smallest normal, every sixth case's v2 v1 negated
+  or equal: exact zero sums, -0 under RMode 2). The model is the scalar rm model lane by lane; fsqrt's directed rounding by an exact
+  root (the value scaled by 2^1400, its integer square root by Newton's iteration, a sticky half when inexact, then FPRound at the
+  mode). qemu-aarch64 agreed with the model on every case at the first `--record`, a64i (eval and AOT) on its first run: simdfp.ae's
+  lanes already round through the scalar FP's FPRound at FPCR's mode. Controls verdict-11, inject-24.
+- **ARS56 (a): NEON's next slice in a64i** (`go/arbace/a64i/simdfp.ae`; written as Go in the printed module, compiled and run there
+  first, then converted by repr/go's native reader, 1.15 GiB peak; the new functions taken from the conversion, the hooks spliced into
+  the existing functions as converted, so the file's AR9 layout and comments stay; `simd.ae`'s hooks hand-edited as forms: `OpVEL`
+  before `opSIMDEnd`, its name, `simdName`'s and `execSIMD`'s dispatch):
+  - the scalar forms of three same (FP): fabd, fmulx, fcmeq, fcmge, fcmgt, facge, facgt on s and d (the other opcodes of the scalar
+    class undefined, frecps and frsqrts `:unimplemented simd`); of two-register miscellaneous (FP): the compares with zero,
+    fcvt[npmza][su], scvtf, ucvtf (frecpe, frsqrte, frecpx, fcvtxn `:unimplemented`); the scalar pairwise faddp, fmaxp, fminp, fmaxnmp,
+    fminnmp from a 2s or 2d (the FP16 forms `:unimplemented`). `OpVF3`/`OpVF2` with `S`: one lane, the rest of the register cleared.
+  - the vector x indexed element class (`OpVEL`, `velNames`, the element's index in `Imm`): mul, mla, mls on 4h, 8h, 2s, 4s; smull,
+    umull, smlal, umlal, smlsl, umlsl and their 2 forms (from 4h/8h into 4s, from 2s/4s into 2d); fmla, fmls, fmul, fmulx by element on
+    2s, 4s, 2d and their scalar forms on s and d. An h element's register is v0-v15 (the lowering refuses v16-v31); a d element's L
+    bit set, a 2d's Q clear and size 01 are undefined; FP16, the saturating doubling forms, the dot products and fcmla `:unimplemented`.
+  - Coverage names `v.fabd.s`, `v.fcmeq0.d`, `v.faddp.s`, `v.fmla.e.4s`, `v.fmla.e.d`, `v.smull2.e.8h` (114 new). The synthetic program
+    `synth-neon-el` (568 cases; neon's setup, FPCR 0): qemu-aarch64 agreed with the model on the first `--record`, a64i (eval and AOT)
+    and the forms check on the first run (and the printed module's build gave the same claimed list as the converted forms'). Controls
+    verdict-12, forms-7, inject-25.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval and AOT | 90 / 90 | **93 / 93** (20 synthetic programs, 22,569 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,015 of 2,015 (simd 1,362) | **2,129 of 2,129** (simd 1,476) |
+| controls (`test/asm/controls-a64i.txt`) | 48 | **55** |
+| `--essential` | 75 programs | **76** (with simd-struct), 17 controls judged |
+| the eval cell `[:asm-arm64 :eval]` | 306 / 0 / 0 | **309 / 0 / 0** |
+| the AOT cell `[:asm-arm64 :aot]` | 3,052 / 0 / 13 (99.6%) | **3,055 / 0 / 13 (99.6%)** |
+
+**crops-score** (arm64 assembly): completeness 99.8 (99.8 without by design), maturity 100.0, independence 100.0, unchanged; `--judge
+--strict` 0 problems. `bin/reap --record`: 49 of 52 cells checked, 0 problems. Proofs (each once, by hand, one at a time): `bin/a64i synth
+--record` (20 programs under qemu-aarch64), `bin/a64i check --record` whole (93 of 93, 2 min 11 s, under 0.5 GiB), `--essential` (three
+runs, 76 of 76), the old subset alone twice (for the time). Not rerun: object-check, run-check, encode-check and the round trips (no
+shared code moved: only `go/arbace/a64i/` and `test/asm/`). The keys do not move (`test/gate/gate-key-crops-test.bash` passes;
+`bin/arbace-go --gate-key` `314c8e5b04ab...` with the base's files and with AR10's).
+
+### Proposed (AR10)
+
+Numbering from ARS61. Each with options, the recommended named; none taken.
+
+- **ARS61 NEON's slice after.** (a) the saturating doubling multiplies (sqdmulh, sqrdmulh, sqdmull, sqdmlal, sqdmlsl, vector, scalar and
+  by element) with the saturating shifts and narrows (sqshl, uqshl, sqshrn, sqrshrn, sqxtn, uqxtn, sqxtun), the fixed-point side of
+  what compiled DSP code uses; (b) fcvtn, fcvtl, fcvtxn and the fixed-point conversions (scvtf/fcvtzs with #fbits), what C's mixed
+  float/double loops use; (c) the estimates (frecpe, frsqrte, frecps, frsqrts, frecpx). *Recommended: (b)*: smaller, and C's
+  vectorized loops meet it first.
+- **ARS62 synth-neon-el in the essential subset.** The scalar FP and by-element forms run only in `--full`'s rotation. (a) a quarter of
+  synth-neon-el's cases (142) beside synth-neon-e, about 2 s; (b) the rotation alone. *Recommended: (a)*, as review 1111 (5) did for
+  the integer lanes.

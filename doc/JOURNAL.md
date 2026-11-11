@@ -5118,3 +5118,38 @@ no code copied. doc/asm/AMD64-SURVEY.md and doc/asm/ARM64-SURVEY.md, "As built: 
 - Rule slips: one command wrote to `2>/dev/null` (a sourcing of bin/lib/tools.bash, nothing kept); the x86-64 and arm64 object checks
   ran concurrently with one TMPDIR, so x86-64's musl list lost a file (rerun alone: 32 of 32); one `sleep 1` and one foreground
   `until ... sleep` wait (stopped); one `git stash list` (read-only, no stash made).
+
+## 2026-11-11: AR10, a structure load in the essential gate, the vector FP under FPCR, NEON's scalar FP and by-element forms in a64i (branch `asm-ar10`, from `mac/review-fix-3` `6bf064ab4`)
+
+The user's decisions of 2026-11-11: ARS56 (a), ARS57 (a), ARS59 (b) (FZ and FEAT_AFP stay refused), ARS60 (a), in the order ARS57,
+ARS60, ARS56. On the main host during night 12 (one run at a time, each process under 1.5 GiB, MemAvailable checked before each run);
+arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources read again: the Arm ARM (DDI 0487), the AdvSIMD scalar
+three same (FP), scalar two-register miscellaneous (FP), scalar pairwise and vector x indexed element classes (decode and Operation),
+FPMulX, FPMulAdd; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR10".
+
+- ARS57 (a): `test/asm/a64i/simd-struct.s`, a hand-written program (ld1-ld4, ld1r, ld4r, a lane's ld1 and st3, st1 and st2 with post-index
+  immediate and register; fadd, fcmge, fcmeq, fmul on 2d, fdiv with FPSR.IXC), its 21 expected lines derived by hand, then held to
+  qemu-aarch64's run and a64i's (both equal on the first run); in `test/asm/subsets.edn`'s `:a64i` with controls verdict-10 and inject-23.
+  `a64i-essential` measured alone at the same load (24-25): 53 s without, 55 s with. Alternative not taken: the rotation alone (ARS57 (b)).
+- ARS60 (a): `synth-neon-fp-rm` (1,152 cases), the FP lanes under RMode 1-3 and DN, FPCR set by each case's stub; gen.ae's model is the
+  scalar rm model lane by lane, fsqrt's directed rounding by an exact integer root (Newton's iteration on the value scaled by 2^1400, a
+  sticky half when inexact). qemu-aarch64 and a64i agreed with the model on their first runs. Controls verdict-11, inject-24.
+- ARS56 (a): a64i's scalar FP classes (three same: fabd, fmulx, the compares, facge, facgt; two-register miscellaneous: the compares with
+  zero, fcvt[npmza][su], scvtf, ucvtf; pairwise: faddp, fmaxp, fminp, fmaxnmp, fminnmp; on s and d) and the vector x indexed element class
+  (mul, mla, mls; s/umull, s/umlal, s/umlsl and their 2 forms; fmla, fmls, fmul, fmulx vector and scalar), written as Go in the printed
+  module (`.tmp/gomod`, a copy of the light driver's print), built and run there, then converted by repr/go's native reader (`bin/repr-go
+  read --goos linux --goarch arm64 --out DIR arbace/a64i` in that module, `REPR_GO_JOBS=1`, 113 s, peak 1.15 GiB under a watchdog that
+  would have stopped it at 1.45 GiB). The whole package's conversion differs from the committed forms by line metadata and the comments
+  the print drops, so the new functions were taken from it and the hooks spliced into simdfp.ae's existing functions as converted; the
+  light driver printed from the result compiles to the same Go (but the detached section comment) and claims the same 2,129 names.
+  `simd.ae`'s hooks (`OpVEL`, its name, `simdName`, `execSIMD`) by hand. `synth-neon-el` (568 cases): qemu-aarch64 and a64i (eval, AOT,
+  forms) equal to the model on their first runs. Controls verdict-12, forms-7, inject-25. Alternative considered: hand-writing the forms
+  (no conversion), which the print-and-build loop made slower to get right.
+- Results: a64i 90 -> 93 programs eval and AOT, coverage 2,015 -> 2,129 of 2,129, controls 48 -> 55; `bin/reap --record` (arm64 eval
+  306 -> 309, AOT 3,052 -> 3,055 / 0 / 13), `bin/reap` 0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0),
+  `--judge --strict` 0. No key moves (`go/arbace/a64i/` and `test/asm/` are crop paths): `bin/arbace-go --gate-key` `314c8e5b04ab...` with
+  the base's files and with AR10's; `test/gate/gate-key-crops-test.bash` passes. Proposed ARS61, ARS62.
+- Rule slips: one comparison used `<(...)` process substitution (two claimed lists, output read only); `bin/arbace-go --gate-key` ran
+  twice with `2>/dev/null`, and the watchdog script writes `2>/dev/null` for /proc reads of exiting processes; one `git stash list`
+  (read-only, no stash made); the gate key's "before" was taken by checking the base's versions of the changed files out in the worktree
+  for one command and back (no run was loading them).

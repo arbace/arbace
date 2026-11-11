@@ -305,6 +305,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   Then `review-fix-3` ("As built: review 1111's fixes"): a64i's FPCR paths held (`synth-fp-[ds]-rm`, RMode 1-3 and DN, the model's
   FPRound at a mode, qemu at `--record`; an FMA precision bug fixed in a64i; FIZ, AH, NEP refused), `synth-neon-e` in the essential
   subset, arm64's `:insn-text`: a64i 90 of 90. Proposed ARS59, ARS60.
+  Then `asm-ar10` (from `mac/review-fix-3` `6bf064ab4`; "As built: AR10"; ARS56 (a), ARS57 (a), ARS59 (b), ARS60 (a), the user's):
+  `simd-struct.s` (structure loads and stores and FP lanes by hand) in the essential subset (+2 s), `synth-neon-fp-rm` (the FP lanes
+  under FPCR, 1,152 cases), and in a64i the scalar FP classes and the by-element multiplies (`synth-neon-el`, 568 cases): a64i 93 of 93,
+  coverage 2,129 of 2,129, eval 309, AOT 3,055 / 0 / 13. Proposed ARS61, ARS62. Next: ARS61, ARS62, the VM's rows (ARS55, ARS58).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
