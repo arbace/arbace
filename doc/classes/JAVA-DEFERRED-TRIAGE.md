@@ -6984,7 +6984,7 @@ JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-
   --save .tmp/p2-night/check
 bin/java-check --judge .tmp/p2-night/check/*.edn
 # 6. Clojure's serialization namespace on the test build (1 GB, ~1 min): its skip removed from the reference first
-sed -i '/clojure.test-clojure.serialization "Java serialization/d' test/arbace-go-results.edn
+sed -i 's/^  clojure.test-clojure.serialization "Java serialization (ObjectOutputStream, cut by D6)"}$/  }/' test/arbace-go-results.edn
 CLOJURE_TESTS_GO=$PWD/target/arbace-go/amd64/arbace-tests bin/clojure-tests -j 2 clojure.test-clojure.serialization
 # 7. the morning after: its counts into test/arbace-go-results.edn's :namespaces (and a test the eval level fails, such as
 #    function-serialization, in :skipped-tests or a narrower Clojure class than :serialization, JCS387), the AOT level in the
