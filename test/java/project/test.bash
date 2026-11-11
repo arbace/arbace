@@ -12,7 +12,7 @@
 #     (the cascade), Unused not reached, PlainFormat kept; the multi-release list names the binary jar's
 #     release 11 Helper; Platform read at release 25's layer ("release 11"); the split package demo.common
 #     merged with both loads; the resources (the services file, toylib.properties, util's words.txt; not
-#     Maven's pom.properties);
+#     Maven's pom.properties), and the same a directory a module (resources.jars, A5's class path);
 #   - the controls, each of which must fail (test/java/project/controls/): a model with an unknown key, a
 #     cycle, :closure on a module of sources; a root naming an absent type; a module naming the
 #     annotations jar's type without the jar (and with it, compiled); release 10 reads Platform's base
@@ -57,6 +57,8 @@ expect "split package: demo.common's namespace loads both modules' classes" \
   bash -c 'grep -q "(load \"common/Other\")" "$1" && grep -q "(load \"common/Shared\")" "$1"' _ "$w/fx/forms.all/demo/common.ae"
 expect "resources: the services file, toylib.properties and words.txt, not Maven's metadata" \
   bash -c 'cd "$1" && [ -f META-INF/services/org.example.toylib.ext.Format ] && [ -f toylib.properties ] && [ -f demo/util/words.txt ] && [ ! -e META-INF/maven ] && [ ! -e META-INF/MANIFEST.MF ]' _ "$w/fx/resources.all"
+expect "resources by module: util's words.txt in 001-util, toylib's services file in 002-toylib, app none" \
+  bash -c 'cd "$1" && [ "$(ls | tr "\n" " ")" = "001-util 002-toylib " ] && [ -f 001-util/demo/util/words.txt ] && [ -f 002-toylib/META-INF/services/org.example.toylib.ext.Format ] && [ ! -e 001-util/META-INF ]' _ "$w/fx/resources.jars"
 expect "the forms name their files by module (no work path)" bash -c '! grep -rq "$1" "$2"' _ "$w" "$w/fx/forms.all"
 
 echo "controls:"

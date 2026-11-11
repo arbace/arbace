@@ -35,6 +35,10 @@
                        program (bin/arbace-go --build-program, REAP7); no rlwrap
     --entry-arg ARG    with --program, ARG put before the command line's arguments
                        (repeated, in order): -m NS for a namespace's -main; no rlwrap
+    --property K=V     with --program, the system property K set to V at the start, before
+                       any class of the program is initialized (repeated, in order; a later
+                       K wins): a program's properties as data (program.edn :properties,
+                       A13 of the Ghidra case study's G1 plan, J2G-SPEC §10.6)
     --resources DIR[=PREFIX]
                        with --program, every file under DIR embedded too, at its path relative
                        to DIR (after PREFIX/ when given), as a directory of the class path: a
@@ -122,6 +126,10 @@
       ;; arguments before the command line's, its source and resource directories
       "--entry" (recur (rest more) (-> opts (assoc :entry (first more)) (update :roots conj (str (first more) "#main"))))
       "--entry-arg" (recur (rest more) (update opts :entry-args (fnil conj []) (first more)))
+      "--property" (let [a (first more) i (when a (.indexOf ^String a "="))]
+                     (when-not (and i (pos? i))
+                       (throw (ex-info (str "j2g: --property K=V, not " (pr-str a)) {})))
+                     (recur (rest more) (update opts :properties (fnil conj []) [(subs a 0 i) (subs a (inc i))])))
       "--resources" (recur (rest more) (update opts :resources (fnil conj []) (first more)))
       ;; --program: a Java forms tree's package namespaces embedded as no-op loaders (REAP7b, RPS93)
       "--java-namespaces" (recur (rest more) (update opts :java-namespaces (fnil conj []) (first more)))
@@ -355,19 +363,31 @@
    '(load "arbace/rlwrap_linux")
    '(load "arbace/rlwrap_other")])
 
+(defn- property-forms
+  "The system properties set at the start (j2g --property, program.edn :properties): one
+  System.setProperty a pair, in order, after arbace.version and before the image, the host and
+  any class of the program."
+  [properties]
+  (for [[k v] properties]
+    (list 'jrt/System_SetProperty_String_String__String (list 'jrt/Str k) (list 'jrt/Str v))))
+
 (defn- program-entry-main
   "A user's program's main (program-main-forms with an entry): Main's start but rlwrap, the
   command line after entry-args, entry's main (default arbace.lang.Main's)."
-  [entry entry-args]
+  [entry entry-args properties]
   (let [internal (str/replace (or entry "arbace.lang.Main") "." "/")
         pkg (nm/pkg-of internal)
         _ (when-not (= :lang pkg)
             (throw (ex-info (str "j2g: --entry " entry ": not a class of the program's Java forms") {})))
         call (symbol "lang" (nm/static-method-name (nm/go-class-name internal) "main" "([Ljava/lang/String;)V"))
         n (count entry-args)]
-    (list 'go/func 'main []
+    (apply list
+     (concat
+     (list 'go/func 'main []
           '(when (!= arbaceVersion "")
-             (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
+             (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion))))
+     (property-forms properties)
+     (list
           '(let [(values sub err) (fs/Sub resources "res")]
              (when (== err nil)
                (jrt/SetHost (jrt/ProgramHost sub))))
@@ -380,7 +400,7 @@
                    (list 'aset '(.-A args) (list '+ 'i n) '(jrt/Str a)))
              (list 'let ['status (list 'jrt/RunMain (list 'fn [] (list call 'args)))]
                    '(finishImage)
-                   '(os/Exit status))]))))
+                   '(os/Exit status))]))))))
 
 (defn- program-main-forms
   "main: first rlwrap for an interactive REPL (execRlwrap, which replaces the process when it
@@ -392,8 +412,9 @@
   the process's. With gotable?, the main package imports goi's table (its registration).
   With entry (a class's binary name) its static main(String[]) is called in place of Main's,
   with entry-args (strings) those arguments put before the command line's: a user's program
-  (bin/arbace-go --build-program, REAP7), whose command line is its own (no rlwrap)."
-  [gotable? & [entry entry-args]]
+  (bin/arbace-go --build-program, REAP7), whose command line is its own (no rlwrap). properties
+  ([K V] pairs, j2g --property) are set after arbace.version."
+  [gotable? & [entry entry-args properties]]
   [(list 'go/file "main.go" :imports (vec (concat '[[embed "embed"] [fs "io/fs"] [os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]]
                                                  (when gotable? '[[_ "arbace/gotable"]])
                                                  ;; the compiled namespaces' packages, for their classes' registration (S6)
@@ -409,21 +430,23 @@
               :doc "arbaceVersion is Arbace's version, the map *arbace-version* reads from the system property arbace.version: empty in j2g's output, set by bin/arbace-go's link (go build -ldflags -X main.arbaceVersion=...).\n"}
       arbaceVersion)
    (if (or entry (seq entry-args))
-     (program-entry-main entry entry-args)
-     '(go/func main []
-        (execRlwrap)
-        (when (!= arbaceVersion "")
-          (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
-        (let [(values sub err) (fs/Sub resources "res")]
-          (when (== err nil)
-            (jrt/SetHost (jrt/ProgramHost sub))))
-        (setupImage imageData)
-        (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
-          (range [i a (subslice os/Args 1)]
-            (aset (.-A args) i (jrt/Str a)))
-          (let [status (jrt/RunMain (fn [] (lang/Main_Main_String1__V args)))]
-            (finishImage)
-            (os/Exit status)))))])
+     (program-entry-main entry entry-args properties)
+     (let [[f nm params rlwrap version & body]
+           '(go/func main []
+              (execRlwrap)
+              (when (!= arbaceVersion "")
+                (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
+              (let [(values sub err) (fs/Sub resources "res")]
+                (when (== err nil)
+                  (jrt/SetHost (jrt/ProgramHost sub))))
+              (setupImage imageData)
+              (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
+                (range [i a (subslice os/Args 1)]
+                  (aset (.-A args) i (jrt/Str a)))
+                (let [status (jrt/RunMain (fn [] (lang/Main_Main_String1__V args)))]
+                  (finishImage)
+                  (os/Exit status))))]
+       (apply list (concat [f nm params rlwrap version] (property-forms properties) body))))])
 
 (defn- source-top
   "The name a Go file is named after (§4.3): in arbace/lang the Java forms file of top-level
@@ -1288,7 +1311,7 @@
                       "The main package's embedded sources (j2g --program): data, not Go forms.\n")
               (write! (str prog-dir "/go/arbace/cmd/arbace/main.ae")
                       (str ";; Generated by j2g --program (J2G-SPEC §10.6).\n(in-ns 'go.arbace.cmd.arbace)\n\n"
-                           (str/join "\n\n" (map out/form-text (program-main-forms (some? (:gotable opts)) (:entry opts) (:entry-args opts)))) "\n"))
+                           (str/join "\n\n" (map out/form-text (program-main-forms (some? (:gotable opts)) (:entry opts) (:entry-args opts) (:properties opts)))) "\n"))
               ;; the image of prepared namespaces (EXEC-NOTES.md): its encoding (hand-written
               ;; forms of the main package), the program's types, and an empty image, which
               ;; bin/arbace-go --build replaces
