@@ -4664,3 +4664,20 @@ shared_ptr_base.h, ext/atomicity.h from the pinned gcc-15.2.0 tarball; P2201R1 (
 Records: the dg own sample recorded again (120 → 125 own passes of 454) and independence.edn's read fact with it; C++ completeness 90.99
 (unchanged), independence 71.28 → 71.30 (read 0.657 → 0.658; eval and AOT still 0.5 until the records say which programs our route runs,
 CP356); the route's gains count at the night's records. doc/cpp/CPP-SURVEY.md, "As built: cpp-s2", has the measures and the night's commands.
+
+## 2026-11-11: llvm-ind1, LLVM IR's independence (the judge) and the two reported mutants-oracle gaps (branch `llvm-ind1`, from `mac/next` 235b9cdd2)
+
+What: `bin/crops-score`'s per-stage facts for LLVM: read, eval, AOT and print 1.0, the judge 0.843 alone below (948 of 3,016 cases by a
+toolchain's record: 478 probes and 116 llvm/test modules by opt's, 177 llvmi modules at each level by lli's). Built the part that is light
+and in Arbace's own tools: `own_verdicts` no longer takes a redirection (`> /dev/null`, `2> %t`, `2>&1`) for an option, so 16 more llvm/test
+modules are judged by their own `not llvm-as` (706 own verdicts of 806, was 690, all met by Arbace's verifier; control
+`_control/redirect-vs-valid`); judge 0.8428 to 0.8455, independence 96.86 to 96.91. The second gap (`pr79354.g2.di-retarget.500483`, expect
+says invalid, opt debug) was `expect/stripped-reachable` following a loop id's DILocation operands, which StripDebugInfo drops
+(`stripDebugLocFromLoopID`): fixed in expect.ae and in verify.ae (the verifier's own walk had the same gap, which also made three recorded verify-rt-heldout rows fail: coroutine.g0.di-retarget.500278, io.g0.di-retarget.600072, io.g0.di-drop.600358, now passing; the pack's pr79354 mutant line is stale until its remake and its row is a classed :verdict), two unit cases and a control (the first fails on the old rule), `heldout-check` 886 of 886, the whole families as recorded. The first gap
+(record mode's `; MUTANT:` message against opt's first message only) is a limit of the record (`:first`): written up as LLS47 with three
+options (verdict-only in record mode, the rules emit opt's first message, record all messages), recommended (a). Not built, proposals
+LLS48 (probes), LLS49 (llvmi's 177: agreement with ci is no judge, llvmi lowers the IR to C and runs it on ci), LLS50 (split-file sections'
+`valid`), in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS46". Considered and left: stating the probes' expectations from opt's record
+(the record under another name). Found: a fresh worktree has no `.tmp/ci-musl/forms`, llvmi's build step then writes no `build.tsv`.
+Sources: bin/repr-llvm (own_verdicts), arbace/repr/llvm/expect.ae, llvm-project 23.1.5's DebugInfo.cpp (read from the recorded survey's
+line references, no network), test/crops/independence.edn.

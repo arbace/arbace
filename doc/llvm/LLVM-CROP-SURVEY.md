@@ -2271,3 +2271,93 @@ and text-llvmtest 304/304 unchanged. `:ci-builtins` and `:abi-punning` removed; 
 completeness 96.4% to 97.6% (read 98.7 to 99.2, eval 94.1 to 95.6, AOT 92.9 to 95.6). Left deferred: `:personality` 13 a level
 (the C++ runtime on ci), `:dg-options` 2 (the pack remade by clang with each test's options, by hand), the read's 4 rules (the whole-wave
 call, load-to-lds, mfma-scale, DILocation placement) and 2 messages, the probes' 5.
+
+## As built: LLS46, which stages stay below 100 and what removes it (2026-11-11, branch `llvm-ind1`, from mac/next)
+
+**Where the independence is lost.** Four of the five stages are 1.0 (read, eval, AOT, print: no toolchain at check time, the pinned
+packs counting as input in the crop's language, LLS27 (a)). Only the judge is below: 0.843 (2068 cases by their own verdict, 948 by a
+toolchain's record at 0.5), independence (4 + 0.843) / 5 = 96.9. The 948 recorded cases are three populations:
+
+| cases | judged by | why there is no own verdict |
+|---|---|---|
+| 478 probes (`test/llvm/probes`) | opt's record (`ref-opt23.edn`: verdict, first message, stderr's digest) | bare modules written to provoke one Verifier rule; no RUN or CHECK line, no stated expectation |
+| 116 `llvm/test` modules (verify-llvmtest) | opt's record | the test's own verdict is not a verify verdict Arbace can read: 57 `valid` split-file sections (their RUN lines are in the parent file), 41 whole files of split-file tests, and 18 whose RUN line reads the file with an option or by a redirection |
+| 177 llvmi modules, at each level (354) | lli's record (`ref-lli23.edn`) | clang 23's IR of the checkout's C and C++ programs that print values (162 `c-`, 14 `cpp.`, 1 `ee.`); no expected output beside them |
+
+**Built (LLS46 (a)): a redirection is not an option.** `own_verdicts` (bin/repr-llvm) refused a RUN line such as
+`not llvm-as < %s > /dev/null 2>&1` or `not llvm-as < %s >/dev/null 2> %t | FileCheck %s < %t` because `plain` took the redirection's
+file (`/dev/null`, `%t`) for an option that changes how the module is read. A redirection, `>`, `>>`, `1>`, `2>`, `&>` with its file as the
+next word, `2>&1`, is no option now. Sixteen llvm/test modules (the Verifier/GC/Assembler tests of the old `not llvm-as` form) are
+judged by their own `invalid` (and the CHECK fragment where one is declared) and no longer by opt's record; every one is still met by
+Arbace's verifier (verify-llvmtest: 800 of 806 as recorded, 706 by their own verdict, was 690; 446 of 448 rejections with the
+reference's message). A negative control for the new form: `_control/redirect-vs-valid` (`Analysis-BasicAA-128-bit-ptr` against
+`Verifier-gcwrite-ptrptr`'s own reference), fails as it must. The judge stage 0.8428 to 0.8455 (2084 own, 932 recorded: independence
+96.86 to 96.91; `test/crops/independence.edn`'s `:llvm :judge`).
+
+**Built (LLS46 (b)): StripDebugInfo and the loop ids' locations (the second reported gap).** `arbace.repr.llvm.expect/stripped-reachable`
+and the verifier's own `verify/stripped-reachable-md` walked an instruction's `!llvm.loop` node whole, so a node reached only through the
+loop id's `DILocation` operands (start and end location: scope, then the subprogram, the unit, its `globals:` list, the variable) counted
+as left behind by StripDebugInfo, and a debug verdict was made `invalid` (opt's second verifyModule). DebugInfo.cpp's
+`stripDebugLocFromLoopID` drops those operands: opt says `debug`. Both walks skip a loop id's DILocation operands now. That is
+`pr79354.g2.di-retarget.500483` (a DIGlobalVariable's `file:` sent to a DILocation, `!llvm.loop !56` in `foo`): the mutant's line said
+`invalid`, opt's record `debug` with the message the same (`invalid file`); and it was the cause of three of the pack's recorded
+`:verdict` rows in verify-rt-heldout too (`coroutine.g0.di-retarget.500278`, `io.g0.di-retarget.600072`, `io.g0.di-drop.600358`, verify
+said invalid where opt says debug): those three pass now. Unit cases `retarget-gv-file-loop` (`debug`) and `retarget-gv-file-kept` (a plain
+`!keep` attachment names the variable: `invalid`), crossed as a control; the first fails on the old rule (checked by reverting the file).
+expect-test: 44 cases, 13 controls, 0 failing. The pack's mutants carry the line as it was made, so the pack's `pr79354.g2.di-retarget.500483`
+still says `invalid` and now verify says `debug`: its row in `check-verify-rt-heldout-linux-amd64.edn` is a `:verdict` ("the test says
+invalid, verify says debug"), in `:debug-info-rules`; the pack's remake (a night's, `ir-make rt --mutants`) writes the corrected line and the
+row passes. Whole families on the checkout: verify-llvmtest 800 of 806, verify-probes 472 of 478, verify-rt 904 of 905 (all as recorded),
+verify-rt-heldout 1,096 of 1,101 (was 1,095: three fixed, one new, the stale line's); `bin/repr-llvm heldout-check` (900 mutants made afresh
+with both rules): 886 own verdicts, 886 met by Arbace's verifier, the controls fail. `bin/reap --record`, `bin/crops-score --record`: the
+LLVM row's completeness 97.65 to 97.7 (read 99.5, three deferred cases fewer), independence 0.9686 to 0.9691.
+
+**Why `mutants-oracle` reads "differs" in record mode and "same" live (the first gap)** is a limit of the record, not of the rules:
+`ref-opt23.edn` keeps opt's first message (`:first`) and a digest of the whole stderr. `builtin-prefetch-5`'s intrinsic mutants
+(`builtin-prefetch-5.win.intrinsic.265`, `.g0.intrinsic.500128`) get from opt `Invalid user of intrinsic instruction!` and then
+`Intrinsic called with incompatible signature`; the mutant names the second, which is in live opt's stderr and not in `:first`. The two
+attr-dup mutants (`rs.g0.attr-dup.600096`, `p1-first.lto.attr-dup.600342`) are the same shape. Measured over the pack's two lists in
+record mode: 636 own verdicts, 635 as opt's (verify-rt) and 1069, 1065 (verify-rt-heldout); the 5 differences are these four message
+gaps and the di-retarget verdict above.
+
+### Proposed (llvm-ind1)
+
+- **LLS47 The mutants' message in record mode.**
+  - (a) Record mode compares the verdict only; the message is the live mode's (opt's whole stderr, `REPR_LLVM_JUDGE=live`, the oracle
+    tier's authority). Cost: one awk condition in `mutants-oracle`; no record changes; the 4 false differences go. Loses the message
+    check on the 1,700 mutants by record (it stays live and in `verify-check`, which holds each own message to Arbace's verifier).
+  - (b) The rules emit opt's first message for a kind whose message is a later one (prefetch's `Invalid user of intrinsic instruction!`,
+    the attr-dup order). Cost: the Verifier's order for those kinds, then the pack's remake (the mutants' hashes change: `ir-make rt
+    --mutants` and the night's `record-opt`). Changes what a mutant's message means (the first, not the rule's own).
+  - (c) `ref-opt23.edn` keeps all of opt's messages (`:messages`), record mode finds the fragment among them. Cost: `record-opt` over
+    about 2,000 modules (the oracle tier, opt 23.1.5, minutes) and an awk change; record mode then equals live.
+  - *Recommended: (a)*: the record is a day-time approximation by design (above), live is the check that counts, and (a) costs nothing;
+    (c) if record mode is to be authoritative on its own.
+- **LLS48 The 478 probes' own verdicts** (the largest part: +1.6 points of independence).
+  - (a) Leave them at 0.5: opt's record is what they are for (a differential of Arbace's verifier against opt's on hand-picked rules).
+  - (b) Each probe states its expectation (`; EXPECT: invalid|valid|debug FRAGMENT`) derived by hand from Verifier.cpp's and
+    LLParser.cpp's 23.1.5 source, as the mutator's rules are, never copied from opt's record (a copy would be the record under another
+    name, and the check could not tell). Cost: 478 files read against the source, days; the header read by `own_verdicts` is a few lines.
+  - *Recommended: (a)* until the probes are rewritten as rule tests; (b) is the way if the user wants the stage at 1.0.
+- **LLS49 llvmi's 177 modules (162 C, 14 C++, 1 ee).**
+  - (a) Leave them at 0.5, as the C crop's synth and ci-run corpora and C++'s samples are (gcc's and g++'s records).
+  - (b) Judge each by agreement with ci's run of the C source. *Not valid*: llvmi lowers the IR to C and runs it on ci, so both
+    runs are ci's; an error in ci agrees with itself.
+  - (c) Expected output beside each program (`.expect`), written from the language's rules by hand: 176 programs, days, and the C crop
+    would want the same files.
+  - *Recommended: (a)*; (c) only together with C's and C++'s decision on the same programs.
+- **LLS50 The split-file sections (57 `valid`, +0.9 points of the judge).** A section `NAME.ll-part` whose parent test passes
+  `%t/part.ll` to opt, llc, llvm-link or llvm-as with no `not` and no `--disable-verify` states that the tools take it, and they verify
+  their input: `valid`, met by Arbace's valid or debug as the other `valid` verdicts are.
+  - (a) `own_verdicts` reads the parent file's RUN lines for a section (the section's parent path is in the split manifest). Cost:
+    half a day, an awk change and a control; the 41 whole-file entries (the RUN lines run on sections, not on the file) stay opt's.
+  - (b) Leave them. *Recommended: (a)*.
+
+### The night's commands (LLS46)
+
+    bin/repr-llvm check verify-llvmtest                    # 800 of 806, 706 own: about 30 s, under 1 GB (run by day)
+    bin/repr-llvm heldout-check                            # 886 of 886 own, met by Arbace's verifier: 7 min, 0.7 GB (run by day)
+    REPR_LLVM_JUDGE=live bin/repr-llvm mutants-oracle .tmp/repr-llvm/heldout/mutants.list .tmp/llvm/mo-heldout   # oracle tier: the new rule against live opt, by hand
+
+A fresh worktree needs the musl forms' cache for `bin/llvmi` (`.tmp/ci-musl/forms`, 11 MB: `bin/ci musl read`, or copy the main
+checkout's); without it llvmi's build step finds no forms and `test/repr/llvm/controls-test.bash` fails its llvmi parts (found here).
