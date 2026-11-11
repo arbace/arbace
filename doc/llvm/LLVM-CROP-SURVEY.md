@@ -2310,7 +2310,7 @@ invalid, verify says debug"), in `:debug-info-rules`; the pack's remake (a night
 row passes. Whole families on the checkout: verify-llvmtest 800 of 806, verify-probes 472 of 478, verify-rt 904 of 905 (all as recorded),
 verify-rt-heldout 1,096 of 1,101 (was 1,095: three fixed, one new, the stale line's); `bin/repr-llvm heldout-check` (900 mutants made afresh
 with both rules): 886 own verdicts, 886 met by Arbace's verifier, the controls fail. `bin/reap --record`, `bin/crops-score --record`: the
-LLVM row's completeness 97.65 to 97.7 (read 99.5, three deferred cases fewer), independence 0.9686 to 0.9691.
+LLVM row's completeness 97.65 to 97.66 (read 3,826 to 3,828 passes, deferred 19 to 17: three fixed, the stale line one more), independence 0.9686 to 0.9690 (scores.edn).
 
 **Why `mutants-oracle` reads "differs" in record mode and "same" live (the first gap)** is a limit of the record, not of the rules:
 `ref-opt23.edn` keeps opt's first message (`:first`) and a digest of the whole stderr. `builtin-prefetch-5`'s intrinsic mutants
