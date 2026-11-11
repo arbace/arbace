@@ -1,0 +1,358 @@
+(ns arbace.asm.arm64.obj
+  "arm64's object assembler (doc/asm/ARM64-SURVEY.md §4.3, AR4): AArch64's part of the shared object assembler arbace.asm.obj
+  (`arch`), after llvm-project 23.1.5's AArch64 back end: AArch64MCCodeEmitter.cpp (which operand gives which fixup kind),
+  AArch64AsmBackend.cpp (adjustFixupValue: a resolved fixup's value into its field, with its range and alignment checks;
+  shouldForceRelocation: ADRP always relocated; writeNopData), AArch64ELFObjectWriter.cpp (getRelocType: the R_AARCH64_*
+  type by fixup kind and specifier; needsRelocateWithSymbol), AArch64ELFStreamer.cpp (the mapping symbols $x and $d,
+  .inst, .tlsdesccall) and AArch64AsmParser.cpp's directives (.word 4 bytes, .xword, .align a power of 2, .arch, .cpu,
+  .variant_pcs), and MCDwarf's CIE for AArch64 (data alignment -4, return address x30, DW_CFA_def_cfa sp, 0), Apache-2.0
+  WITH LLVM-exception, written again in Arbace; no code copied. The instructions are AR2's encoder's
+  (arbace.repr.asm.arm64.lenc: Go's table, then LLVM's records), each a word and the operands it leaves to a fixup; the
+  fixup's kind is read off the encoded word's class (the field the operand fills).
+
+  `assemble` gives {:bytes BYTES} or {:unsupported CLASS :what TEXT} or {:error MESSAGE}."
+  (:require [arbace.repr.asm :as asm]
+            [arbace.repr.asm.arm64.lenc :as lenc]
+            [arbace.repr.asm.arm64.enc :as enc]
+            [arbace.asm.obj :as o]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def EM_AARCH64 183)
+
+(defn- head [x] (when (seq? x) (first x)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the mapping symbols (AArch64ELFStreamer: emitA64MappingSymbol, emitDataMappingSymbol; the state kept per section)
+
+(defn- mapping! [ctx kind]
+  (let [sec (o/cur-sec ctx)]
+    (when-not (= kind (:ems @sec))
+      (let [nm (if (= kind :code) "$x" "$d")
+            k (str nm "\u0000" (vswap! (:tmp ctx) inc))
+            s (o/label! ctx k)]
+        ;; NOTYPE before the label, which makes a symbol of a TLS section STT_TLS ($d in .tbss is)
+        (swap! s assoc :out-name nm :bind elf/STB_LOCAL)
+        (swap! sec assoc :ems kind)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the fixups: the kind by the encoded word's class (AArch64MCCodeEmitter's operand encoders), the expression and its
+;; specifier from the operand
+
+(defn fixup-kind
+  "The fixup kind of an instruction word whose operand is left to a fixup: :call26, :branch26, :branch19, :branch14,
+  :ldr19 (a literal load), :adr21, :adrp21, :add12, :ldst12 (with :scale), :movw; nil for another class."
+  [^long w]
+  (cond
+    (= (bit-and w 0x7c000000) 0x14000000) (if (bit-test w 31) [:call26] [:branch26])
+    (= (bit-and w 0xff000000) 0x54000000) [:branch19]
+    (= (bit-and w 0x7e000000) 0x34000000) [:branch19]
+    (= (bit-and w 0x7e000000) 0x36000000) [:branch14]
+    (= (bit-and w 0x3b000000) 0x18000000) [:ldr19]
+    (= (bit-and w 0x9f000000) 0x10000000) [:adr21]
+    (= (bit-and w 0x9f000000) 0x90000000) [:adrp21]
+    (= (bit-and w 0x1f800000) 0x11000000) [:add12]
+    (= (bit-and w 0x3b000000) 0x39000000)
+    (let [size (bit-and (bit-shift-right w 30) 3) v (bit-test w 26) opc (bit-and (bit-shift-right w 22) 3)]
+      [:ldst12 (if (and v (zero? size) (>= opc 2)) 16 (bit-shift-left 1 size))])
+    (= (bit-and w 0x1f800000) 0x12800000) [:movw]
+    :else nil))
+
+(def ^:private pcrel-kinds #{:call26 :branch26 :branch19 :branch14 :ldr19 :adr21 :adrp21})
+
+(defn fix-expr
+  "The relocated expression of a fixup operand and its specifier: [EXPR SPEC] (SPEC the lower-case name of `:SPEC:`, or nil)."
+  [op]
+  (cond
+    (= 'spec (head op)) [(nth op 2) (str/lower-case (str (second op)))]
+    (= 'at (head op)) [(second op) (str/lower-case (str (nth op 2)))]
+    (#{'imm 'lit} (head op)) (fix-expr (second op))
+    (#{'mem 'wb} (head op)) (first (keep #(when-not (#{'reg 'shift} (head %)) (fix-expr %)) (rest op)))
+    (#{'reg 'shift 'rlist 'elt} (head op)) nil
+    :else [op nil]))
+
+(defn- const-subst
+  "The form with the symbols the file assigned a constant replaced by their values (outside registers)."
+  [ctx f]
+  (let [syms @(:syms ctx)]
+    (letfn [(walk [x]
+              (cond (symbol? x) (if-let [c (and (contains? syms (name x)) (o/const-value x syms))] c x)
+                    ;; a literal beyond a long is its 64 bits (MCExpr's int64_t arithmetic)
+                    (and (integer? x) (not (instance? Long x))) (.longValue (biginteger x))
+                    (#{'reg 'shift 'elt 'rlist} (head x)) x
+                    (seq? x) (apply list (first x) (map walk (rest x)))
+                    :else x))]
+      (cons (first f) (map walk (rest f))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the instructions
+
+(defn- emit-word! [ctx ^long w fixups]
+  (mapping! ctx :code)
+  (let [ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
+    (dotimes [i 4] (.add b (bit-and (bit-shift-right w (* 8 i)) 0xff)))
+    (doseq [fx fixups] (.add ^java.util.ArrayList (:fixups @ch) (assoc fx 0 base)))))
+
+(defn- emit-insn! [ctx f]
+  (let [f (const-subst ctx (o/resolve-expr ctx f))
+        _ (when (some #(= 'lit (head %)) (rest f)) (o/unsupported :literal-pool (str "ldr =: " (pr-str f))))
+        r (try (lenc/encode f)
+               (catch arbace.lang.ExceptionInfo e
+                 (if (:asm/refused (ex-data e))
+                   (o/unsupported :instruction (str (or (:asm/message (ex-data e)) (.getMessage e)) ": " (pr-str f)))
+                   (throw e))))
+        w (long (:word r))
+        ;; emitA64MappingSymbol before the instruction's symbols are visited
+        _ (mapping! ctx :code)
+        ;; getAddSubImmOpValue: a HI12 specifier shifts the immediate by 12
+        w (if (some #(let [[_ sp] (fix-expr %)] (and sp (str/ends-with? sp "hi12"))) (:fixups r)) (bit-or w 0x400000) w)
+        fxs (vec (for [op (distinct (:fixups r))
+                       :let [[e spec] (fix-expr op)]
+                       :when (some? e)]
+                   (let [[kind scale] (or (fixup-kind w) (o/unsupported :fixup-kind (str "a fixup in " (pr-str f))))
+                         e (if spec (list 'at e spec) e)]
+                     (o/visit-syms! ctx e)
+                     [0 4 e (if scale [kind scale] [kind]) (contains? pcrel-kinds kind) 0])))]
+    (emit-word! ctx w fxs)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; a resolved fixup into its field (adjustFixupValue, applyFixup), the relocation types (getRelocType)
+
+(defn- range! [^long v ^long lo ^long hi]
+  (when-not (<= lo v hi) (o/fail "fixup value out of range")))
+
+(defn- align! [^long v ^long a]
+  (when-not (zero? (mod v a)) (o/fail "fixup not sufficiently aligned")))
+
+(defn field-of
+  "The bits a resolved fixup of `kind` with value `v` sets in its instruction word."
+  ^long [[kind scale] ^long v]
+  (case kind
+    (:call26 :branch26) (do (range! v -134217728 134217727) (align! v 4) (bit-and (bit-shift-right v 2) 0x3ffffff))
+    (:branch19 :ldr19) (do (range! v -1048576 1048575) (align! v 4) (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5))
+    :branch14 (do (range! v -32768 32767) (align! v 4) (bit-shift-left (bit-and (bit-shift-right v 2) 0x3fff) 5))
+    :adr21 (do (range! v -1048576 1048575)
+               (bit-or (bit-shift-left (bit-and v 3) 29) (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5)))
+    :add12 (do (range! v 0 4095) (bit-shift-left v 10))
+    :ldst12 (do (range! v 0 (* 4095 (long scale))) (align! v scale) (bit-shift-left (quot v (long scale)) 10))
+    :movw (do (range! v 0 65535) (bit-shift-left v 5))
+    (o/unsupported :fixup-kind (str "a resolved " kind))))
+
+(defn- movw-value
+  "adjustFixupValue's MOVW with an absolute specifier (:abs_gN[_s|_nc]:): [FIELD MOVN?] of the value `v`."
+  [^String spec ^long v]
+  (let [[_ g s] (re-matches #"abs_g([0-3])(_s|_nc)?" spec)
+        x (bit-shift-right v (* 16 (Long/parseLong g)))]
+    (cond (= s "_nc") [(bit-and x 0xffff) nil]
+          (= s "_s") (do (range! x -65535 65535) [(if (neg? x) (bit-not x) x) (neg? x)])
+          :else (do (when-not (zero? (unsigned-bit-shift-right x 16)) (o/fail "fixup value out of range")) [x nil]))))
+
+(defn- put-fixup! [^java.util.ArrayList bs off size kind ^long x reloc? spec]
+  (let [off (long off) spec (when spec (str/lower-case (str spec)))]
+    (cond
+      reloc? nil
+      (nil? kind) (dotimes [i size] (.set bs (+ off i) (bit-and (bit-shift-right x (* 8 i)) 0xff)))
+      (and (= :movw (first kind)) spec)
+      (let [[f movn?] (movw-value spec x) f (bit-shift-left (long f) 5)]
+        (dotimes [i 4] (.set bs (+ off i) (bit-or (long (.get bs (+ off i))) (bit-and (bit-shift-right f (* 8 i)) 0xff))))
+        ;; applyFixup: a signed group's negative value makes the MOVZ a MOVN (bit 30 clear), else MOVZ
+        (when (some? movn?)
+          (let [b3 (long (.get bs (+ off 3)))] (.set bs (+ off 3) (if movn? (bit-and b3 (bit-not 0x40)) (bit-or b3 0x40))))))
+      :else (let [f (field-of kind x)]
+              (dotimes [i 4] (.set bs (+ off i) (bit-or (long (.get bs (+ off i))) (bit-and (bit-shift-right f (* 8 i)) 0xff))))))))
+
+(def reloc-numbers
+  "R_AARCH64_* by name (llvm/include/llvm/BinaryFormat/ELFRelocs/AArch64.def)."
+  {"NONE" 0 "ABS64" 0x101 "ABS32" 0x102 "ABS16" 0x103 "PREL64" 0x104 "PREL32" 0x105 "PREL16" 0x106
+   "MOVW_UABS_G0" 0x107 "MOVW_UABS_G0_NC" 0x108 "MOVW_UABS_G1" 0x109 "MOVW_UABS_G1_NC" 0x10a "MOVW_UABS_G2" 0x10b
+   "MOVW_UABS_G2_NC" 0x10c "MOVW_UABS_G3" 0x10d "MOVW_SABS_G0" 0x10e "MOVW_SABS_G1" 0x10f "MOVW_SABS_G2" 0x110
+   "LD_PREL_LO19" 0x111 "ADR_PREL_LO21" 0x112 "ADR_PREL_PG_HI21" 0x113 "ADR_PREL_PG_HI21_NC" 0x114 "ADD_ABS_LO12_NC" 0x115
+   "LDST8_ABS_LO12_NC" 0x116 "TSTBR14" 0x117 "CONDBR19" 0x118 "JUMP26" 0x11a "CALL26" 0x11b "LDST16_ABS_LO12_NC" 0x11c
+   "LDST32_ABS_LO12_NC" 0x11d "LDST64_ABS_LO12_NC" 0x11e "MOVW_PREL_G0" 0x11f "MOVW_PREL_G0_NC" 0x120 "MOVW_PREL_G1" 0x121
+   "MOVW_PREL_G1_NC" 0x122 "MOVW_PREL_G2" 0x123 "MOVW_PREL_G2_NC" 0x124 "MOVW_PREL_G3" 0x125 "LDST128_ABS_LO12_NC" 0x12b
+   "MOVW_GOTOFF_G0" 0x12c "MOVW_GOTOFF_G0_NC" 0x12d "MOVW_GOTOFF_G1" 0x12e "MOVW_GOTOFF_G1_NC" 0x12f "MOVW_GOTOFF_G2" 0x130
+   "MOVW_GOTOFF_G2_NC" 0x131 "MOVW_GOTOFF_G3" 0x132 "GOTREL64" 0x133 "GOTREL32" 0x134 "GOT_LD_PREL19" 0x135
+   "LD64_GOTOFF_LO15" 0x136 "ADR_GOT_PAGE" 0x137 "LD64_GOT_LO12_NC" 0x138 "LD64_GOTPAGE_LO15" 0x139 "PLT32" 0x13a
+   "GOTPCREL32" 0x13b
+   "TLSGD_ADR_PREL21" 0x200 "TLSGD_ADR_PAGE21" 0x201 "TLSGD_ADD_LO12_NC" 0x202 "TLSGD_MOVW_G1" 0x203 "TLSGD_MOVW_G0_NC" 0x204
+   "TLSLD_ADR_PREL21" 0x205 "TLSLD_ADR_PAGE21" 0x206 "TLSLD_ADD_LO12_NC" 0x207 "TLSLD_MOVW_G1" 0x208 "TLSLD_MOVW_G0_NC" 0x209
+   "TLSLD_LD_PREL19" 0x20a "TLSLD_MOVW_DTPREL_G2" 0x20b "TLSLD_MOVW_DTPREL_G1" 0x20c "TLSLD_MOVW_DTPREL_G1_NC" 0x20d
+   "TLSLD_MOVW_DTPREL_G0" 0x20e "TLSLD_MOVW_DTPREL_G0_NC" 0x20f "TLSLD_ADD_DTPREL_HI12" 0x210 "TLSLD_ADD_DTPREL_LO12" 0x211
+   "TLSLD_ADD_DTPREL_LO12_NC" 0x212 "TLSLD_LDST8_DTPREL_LO12" 0x213 "TLSLD_LDST8_DTPREL_LO12_NC" 0x214
+   "TLSLD_LDST16_DTPREL_LO12" 0x215 "TLSLD_LDST16_DTPREL_LO12_NC" 0x216 "TLSLD_LDST32_DTPREL_LO12" 0x217
+   "TLSLD_LDST32_DTPREL_LO12_NC" 0x218 "TLSLD_LDST64_DTPREL_LO12" 0x219 "TLSLD_LDST64_DTPREL_LO12_NC" 0x21a
+   "TLSIE_MOVW_GOTTPREL_G1" 0x21b "TLSIE_MOVW_GOTTPREL_G0_NC" 0x21c "TLSIE_ADR_GOTTPREL_PAGE21" 0x21d
+   "TLSIE_LD64_GOTTPREL_LO12_NC" 0x21e "TLSIE_LD_GOTTPREL_PREL19" 0x21f
+   "TLSLE_MOVW_TPREL_G2" 0x220 "TLSLE_MOVW_TPREL_G1" 0x221 "TLSLE_MOVW_TPREL_G1_NC" 0x222 "TLSLE_MOVW_TPREL_G0" 0x223
+   "TLSLE_MOVW_TPREL_G0_NC" 0x224 "TLSLE_ADD_TPREL_HI12" 0x225 "TLSLE_ADD_TPREL_LO12" 0x226 "TLSLE_ADD_TPREL_LO12_NC" 0x227
+   "TLSLE_LDST8_TPREL_LO12" 0x228 "TLSLE_LDST8_TPREL_LO12_NC" 0x229 "TLSLE_LDST16_TPREL_LO12" 0x22a
+   "TLSLE_LDST16_TPREL_LO12_NC" 0x22b "TLSLE_LDST32_TPREL_LO12" 0x22c "TLSLE_LDST32_TPREL_LO12_NC" 0x22d
+   "TLSLE_LDST64_TPREL_LO12" 0x22e "TLSLE_LDST64_TPREL_LO12_NC" 0x22f
+   "TLSDESC_LD_PREL19" 0x230 "TLSDESC_ADR_PREL21" 0x231 "TLSDESC_ADR_PAGE21" 0x232 "TLSDESC_LD64_LO12" 0x233
+   "TLSDESC_ADD_LO12" 0x234 "TLSDESC_OFF_G1" 0x235 "TLSDESC_OFF_G0_NC" 0x236 "TLSDESC_LDR" 0x237 "TLSDESC_ADD" 0x238
+   "TLSDESC_CALL" 0x239 "TLSLE_LDST128_TPREL_LO12" 0x23a "TLSLE_LDST128_TPREL_LO12_NC" 0x23b
+   "TLSLD_LDST128_DTPREL_LO12" 0x23c "TLSLD_LDST128_DTPREL_LO12_NC" 0x23d
+   "COPY" 0x400 "GLOB_DAT" 0x401 "JUMP_SLOT" 0x402 "RELATIVE" 0x403 "TLS_DTPMOD64" 0x404 "TLS_DTPREL64" 0x405
+   "TLS_TPREL64" 0x406 "TLSDESC" 0x407 "IRELATIVE" 0x408})
+
+(def reloc-names (into {} (map (fn [[k v]] [v (str "R_AARCH64_" k)]) reloc-numbers)))
+
+;; the specifiers of an LDST fixup by scale: LLVM's names after the access width
+(defn- ldst-reloc [^long scale spec]
+  (let [w (* 8 scale)]
+    (case spec
+      ("lo12" nil) (str "LDST" w "_ABS_LO12_NC")
+      "dtprel_lo12" (str "TLSLD_LDST" w "_DTPREL_LO12")
+      "dtprel_lo12_nc" (str "TLSLD_LDST" w "_DTPREL_LO12_NC")
+      "tprel_lo12" (str "TLSLE_LDST" w "_TPREL_LO12")
+      "tprel_lo12_nc" (str "TLSLE_LDST" w "_TPREL_LO12_NC")
+      "got_lo12" (when (= scale 8) "LD64_GOT_LO12_NC")
+      "gottprel_lo12" (when (= scale 8) "TLSIE_LD64_GOTTPREL_LO12_NC")
+      "tlsdesc_lo12" (when (= scale 8) "TLSDESC_LD64_LO12")
+      "gotpage_lo15" (when (= scale 8) "LD64_GOTPAGE_LO15")
+      nil)))
+
+(def ^:private movw-relocs
+  {"abs_g3" "MOVW_UABS_G3" "abs_g2" "MOVW_UABS_G2" "abs_g2_s" "MOVW_SABS_G2" "abs_g2_nc" "MOVW_UABS_G2_NC"
+   "abs_g1" "MOVW_UABS_G1" "abs_g1_s" "MOVW_SABS_G1" "abs_g1_nc" "MOVW_UABS_G1_NC" "abs_g0" "MOVW_UABS_G0"
+   "abs_g0_s" "MOVW_SABS_G0" "abs_g0_nc" "MOVW_UABS_G0_NC"
+   "prel_g3" "MOVW_PREL_G3" "prel_g2" "MOVW_PREL_G2" "prel_g2_nc" "MOVW_PREL_G2_NC" "prel_g1" "MOVW_PREL_G1"
+   "prel_g1_nc" "MOVW_PREL_G1_NC" "prel_g0" "MOVW_PREL_G0" "prel_g0_nc" "MOVW_PREL_G0_NC"
+   "gotoff_g3" "MOVW_GOTOFF_G3" "gotoff_g2" "MOVW_GOTOFF_G2" "gotoff_g2_nc" "MOVW_GOTOFF_G2_NC" "gotoff_g1" "MOVW_GOTOFF_G1"
+   "gotoff_g1_nc" "MOVW_GOTOFF_G1_NC" "gotoff_g0" "MOVW_GOTOFF_G0" "gotoff_g0_nc" "MOVW_GOTOFF_G0_NC"
+   "dtprel_g2" "TLSLD_MOVW_DTPREL_G2" "dtprel_g1" "TLSLD_MOVW_DTPREL_G1" "dtprel_g1_nc" "TLSLD_MOVW_DTPREL_G1_NC"
+   "dtprel_g0" "TLSLD_MOVW_DTPREL_G0" "dtprel_g0_nc" "TLSLD_MOVW_DTPREL_G0_NC"
+   "tprel_g2" "TLSLE_MOVW_TPREL_G2" "tprel_g1" "TLSLE_MOVW_TPREL_G1" "tprel_g1_nc" "TLSLE_MOVW_TPREL_G1_NC"
+   "tprel_g0" "TLSLE_MOVW_TPREL_G0" "tprel_g0_nc" "TLSLE_MOVW_TPREL_G0_NC"
+   "gottprel_g1" "TLSIE_MOVW_GOTTPREL_G1" "gottprel_g0_nc" "TLSIE_MOVW_GOTTPREL_G0_NC"
+   "tlsdesc_off_g1" "TLSDESC_OFF_G1" "tlsdesc_off_g0_nc" "TLSDESC_OFF_G0_NC"})
+
+(defn reloc-type
+  "getRelocType: the R_AARCH64_* number of a fixup of `kind` (nil: data of `size` bytes) with the specifier `spec` (upper or
+  lower case, nil when none); LLVM's error when the pair has none."
+  [kind ^long size spec pcrel]
+  (let [spec (when spec (str/lower-case (str spec)))
+        [k scale] kind
+        bad (fn [] (o/fail (str "invalid fixup for " (if k (name k) (str size "-byte data")) (when spec (str " relocation :" spec ":")))))
+        nm (cond
+             (nil? k) (case spec
+                        nil (if pcrel ({2 "PREL16" 4 "PREL32" 8 "PREL64"} size) ({2 "ABS16" 4 "ABS32" 8 "ABS64"} size))
+                        "plt" (when (and pcrel (= size 4)) "PLT32")
+                        "gotpcrel" (when (and pcrel (= size 4)) "GOTPCREL32")
+                        nil)
+             (= k :call26) (when (contains? #{nil "plt"} spec) "CALL26")
+             (= k :branch26) (when (contains? #{nil "plt"} spec) "JUMP26")
+             (= k :branch19) (when (nil? spec) "CONDBR19")
+             (= k :branch14) (when (nil? spec) "TSTBR14")
+             (= k :ldr19) (case spec nil "LD_PREL_LO19" "got" "GOT_LD_PREL19" "gottprel" "TLSIE_LD_GOTTPREL_PREL19"
+                                "tlsdesc" "TLSDESC_LD_PREL19" nil)
+             (= k :adr21) (case spec (nil "abs") "ADR_PREL_LO21" "tlsdesc" "TLSDESC_ADR_PREL21" "tlsgd" "TLSGD_ADR_PREL21" nil)
+             (= k :adrp21) (case spec (nil "pg_hi21") "ADR_PREL_PG_HI21" "pg_hi21_nc" "ADR_PREL_PG_HI21_NC" "got" "ADR_GOT_PAGE"
+                                 "gottprel" "TLSIE_ADR_GOTTPREL_PAGE21" "tlsdesc" "TLSDESC_ADR_PAGE21" "tlsgd" "TLSGD_ADR_PAGE21"
+                                 "tlsld" "TLSLD_ADR_PAGE21" nil)
+             (= k :add12) (case spec "lo12" "ADD_ABS_LO12_NC" "dtprel_hi12" "TLSLD_ADD_DTPREL_HI12"
+                                "dtprel_lo12" "TLSLD_ADD_DTPREL_LO12" "dtprel_lo12_nc" "TLSLD_ADD_DTPREL_LO12_NC"
+                                "tprel_hi12" "TLSLE_ADD_TPREL_HI12" "tprel_lo12" "TLSLE_ADD_TPREL_LO12"
+                                "tprel_lo12_nc" "TLSLE_ADD_TPREL_LO12_NC" "tlsdesc_lo12" "TLSDESC_ADD_LO12" nil)
+             (= k :ldst12) (ldst-reloc scale spec)
+             (= k :movw) (get movw-relocs spec)
+             (= k :tlsdesc-call) "TLSDESC_CALL")]
+    (or (get reloc-numbers nm)
+        ;; a specifier the table does not hold (the PAuth ABI's :got_auth:, ...) is not written yet; a known one on the wrong
+        ;; instruction is LLVM's error
+        (if (and spec (not (re-matches #"(lo12|abs|pg_hi21(_nc)?|got(_lo12|page_lo15)?|gottprel(_lo12|_g1|_g0_nc)?|tlsdesc(_lo12)?|tlsgd|tlsld|(d)?tprel_(hi12|lo12(_nc)?|g[0-2](_nc)?)|dtprel|abs_g[0-3](_s|_nc)?|prel_g[0-3](_nc)?|gotoff_g[0-3](_nc)?|tlsdesc_off_g1|tlsdesc_off_g0_nc|plt|gotpcrel)" spec)))
+          (o/unsupported :relocation-specifier (str ":" spec ":"))
+          (bad)))))
+
+;; needsRelocateWithSymbol: a specifier with S_GOT's bit (GOT, GOTTPREL, DTPREL, TPREL and their parts) or PLT, GOTPCREL
+(defn- keep-symbol? [spec]
+  (boolean (when spec (let [s (str/lower-case (str spec))]
+                        (or (str/includes? s "got") (str/includes? s "tprel") (#{"plt" "gotpcrel"} s))))))
+
+(def ^:private tls-specs
+  (into #{} (map str/upper-case)
+        ["gottprel" "gottprel_lo12" "gottprel_g1" "gottprel_g0_nc" "tlsdesc" "tlsdesc_lo12" "tlsdesc_off_g1" "tlsdesc_off_g0_nc"
+         "tprel_hi12" "tprel_lo12" "tprel_lo12_nc" "tprel_g2" "tprel_g1" "tprel_g1_nc" "tprel_g0" "tprel_g0_nc" "dtprel_hi12"
+         "dtprel_lo12" "dtprel_lo12_nc" "dtprel_g2" "dtprel_g1" "dtprel_g1_nc" "dtprel_g0" "dtprel_g0_nc" "tlsgd" "tlsld"]))
+
+;; writeNopData: the padding's odd bytes zero, then NOPs
+(defn- nops ^java.util.List [^long n _mode]
+  (let [out (java.util.ArrayList.)]
+    (dotimes [_ (mod n 4)] (.add out 0))
+    (dotimes [_ (quot n 4)] (doseq [b [0x1f 0x20 0x03 0xd5]] (.add out b)))
+    out))
+
+;; AArch64's DWARF registers (AArch64RegisterInfo.td: x0-x30 0-30, sp 31, v0-v31 64-95)
+(def ^:private dwarf-regs
+  (merge (into {} (for [i (range 31) p ["x" "w"]] [(str p i) i]))
+         {"sp" 31 "wsp" 31 "fp" 29 "lr" 30}
+         (into {} (for [i (range 32) p ["v" "q" "d" "s" "h" "b"]] [(str p i) (+ 64 i)]))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the directives AArch64's parser and streamer add or define otherwise
+
+(defn- directive [ctx h args]
+  (let [cv (fn [e] (let [e (o/resolve-expr ctx e)] (or (o/const-value e @(:syms ctx)) (o/unsupported :expression (str "." h " " (pr-str e))))))]
+    (case h
+      "word" (doseq [e args] (o/emit-value! ctx e 4))
+      ("xword" "dword") (doseq [e args] (o/emit-value! ctx e 8))
+      "align" (o/directive! ctx (cons 'asm/p2align args))
+      "inst" (doseq [e args] (emit-word! ctx (cv e) []))
+      "tlsdesccall" (let [e (o/resolve-expr ctx (first args))
+                          ch (o/cur-data! ctx)]
+                      (o/visit-syms! ctx e)
+                      (.add ^java.util.ArrayList (:fixups @ch) [(.size ^java.util.ArrayList (:bytes @ch)) 0 (list 'at e "tlsdesc") [:tlsdesc-call] false 0]))
+      ("arch" "arch_extension" "cpu") nil
+      ("ltorg" "pool") nil
+      "variant_pcs" (let [n (o/sym-name (first args))] (o/register! ctx n) (swap! (o/symbol! ctx n) assoc :st-other 0x80))
+      :unhandled)))
+
+(defn- cfi [h _args]
+  (case h
+    "cfi_negate_ra_state" {:op :escape :bytes [0x2d]}
+    nil))
+
+(def arch
+  "AArch64's part of arbace.asm.obj (its *arch*)."
+  {:machine EM_AARCH64
+   :emit-insn! emit-insn!
+   :needs-relax? (fn [_ _ _] false)
+   :relax! identity
+   :pcrel-bias (fn [_] 0)
+   :put-fixup! put-fixup!
+   :force-reloc? (fn [kind] (= :adrp21 (first kind)))
+   :resolve-spec? (fn [spec] (boolean (re-matches #"abs_g[0-3](_s|_nc)?" (str/lower-case (str spec)))))
+   :min-inst-align 4
+   :reloc-type reloc-type
+   :keep-symbol? keep-symbol?
+   :tls-specs tls-specs
+   :directive directive
+   :cfi cfi
+   :on-data (fn [ctx] (mapping! ctx :data))
+   :nops nops
+   :nops-max (fn [_] Long/MAX_VALUE)
+   :dwarf-regs dwarf-regs
+   :eh-frame-type elf/SHT_PROGBITS
+   :cie {:ra 30 :data-align -4 :init [0x0c 31 0] :cfa 0}})
+
+(defn assemble
+  "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
+  {:unsupported CLASS :what TEXT}, or {:error MESSAGE}."
+  [items]
+  (binding [o/*arch* arch] (o/assemble items)))
+
+(defn assemble-file [^String path]
+  (let [items (try (asm/read-items (asm/latin1 path) (asm/dialect "arm64" nil path))
+                   (catch arbace.lang.ExceptionInfo e
+                     (if (= :syntax (:asm/refused (ex-data e))) {:unsupported :syntax :what (.getMessage e)} (throw e))))]
+    (if (map? items) items (assemble items))))
+
+(defn check-list [lst work record] (binding [o/*arch* arch] (o/check-list assemble-file lst work record)))
+(defn control [subj-path ref-name record] (binding [o/*arch* arch] (o/control assemble-file subj-path ref-name record)))
+
+(defn -main
+  "object IN.s OUT.o; dump OBJ; check LIST WORK RECORD; control SUBJECT REFNAME RECORD (arbace.asm.obj/main)."
+  [verb & args]
+  (binding [o/*arch* arch] (apply o/main assemble-file verb args)))

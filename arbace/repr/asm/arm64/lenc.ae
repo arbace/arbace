@@ -353,6 +353,11 @@
       :else
       (or
        (when-let [[_ a b] (re-matches #"isImmInRange<(-?\d+),\s*(-?\d+)>" pm)] (range-imm (Long/parseLong a) (Long/parseLong b)))
+       ;; isSImm9OffsetFB<W>: a signed 9-bit offset that is not a scaled unsigned 12-bit one (LDUR's aliases of LDR, AR4)
+       (when-let [[_ w] (re-matches #"isSImm9OffsetFB<(\d+)>" pm)]
+         (let [sc (quot (Long/parseLong w) 8)]
+           (fn [[op & r] _] (let [v (bare-int op)]
+                              (when (and v (<= -256 v 255) (not (and (zero? (mod v sc)) (<= 0 (quot v sc) 4095)))) [v r])))))
        (when-let [[_ n] (re-matches #"isSImm<(\d+)>" pm)] (let [h (bit-shift-left 1 (dec (Long/parseLong n)))] (range-imm (- h) (dec h))))
        (when-let [[_ n] (re-matches #"isUImm<(\d+)>" pm)] (range-imm 0 (dec (bit-shift-left 1 (Long/parseLong n)))))
        (when-let [[_ n s] (re-matches #"isSImmScaled<(\d+),\s*(\d+)>" pm)]
@@ -377,8 +382,12 @@
          (let [a (Long/parseLong a) b (Long/parseLong b)]
            (fn [[op & r] _] (let [v (bare-int op)] (when (and v (>= v b) (zero? (mod (- v b) a)) (< (quot (- v b) a) (if (= a 90) 4 2))) [(quot (- v b) a) r])))))
        (when-let [[_ t] (re-matches #"isLogicalImm<int(32|64)_t>" pm)]
-         (let [size (Long/parseLong t)]
-           (fn [[op & r] _] (let [v (int-imm op)]
+         (let [size (Long/parseLong t)
+               ;; addLogicalImmNotOperands (BIC's, ORN's aliases of AND, ORR): the value checked, its complement encoded (AR4)
+               not? (str/includes? (str (:render cls)) "Not")
+               mask (if (= size 64) -1 0xffffffff)]
+           (fn [[op & r] _] (let [v (int-imm op)
+                                  v (when (and v (enc/bitmask v size)) (if not? (bit-and (bit-not v) mask) v))]
                               (when-let [[n immr imms] (and v (enc/bitmask v size))]
                                 [(bit-or (bit-shift-left n 12) (bit-shift-left immr 6) imms) r])))))
        (case cname
@@ -412,7 +421,10 @@
          "LSLImm3Shift" (fn [[op & r] _] (let [[k a] (enc/shift-op op)] (when (and (= k "lsl") (integer? a) (<= 0 a 7)) [a r])))
          "HinteUImm16" (fn [[op & r] _] (let [v (bare-int op)]
                                           (when (and v (<= 0 v 65535) (not (and (<= 12319 v 16383) (zero? (mod (- v 12319) 32))))) [v r])))
-         "TIndexHint" (fn [[op & r] _] (when-let [[_ x] (and (symbol? op) (re-matches #"(?i)(r|c|j|jc)" (str op)))] [({"r" 0 "c" 1 "j" 2 "jc" 3} (str/lower-case x)) r]))
+         ;; AR4: tryParseTIndexHint's `nb` (POE2's TCHANGEF, TEV's TENTER), any case, is 1
+         "TIndexHint" (fn [[op & r] _] (if (and (symbol? op) (= "nb" (str/lower-case (str op))))
+                                          [1 r]
+                                          (when-let [[_ x] (and (symbol? op) (re-matches #"(?i)(r|c|j|jc)" (str op)))] [({"r" 0 "c" 1 "j" 2 "jc" 3} (str/lower-case x)) r])))
          nil)))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
@@ -624,6 +636,8 @@
     (let [[d s] ops]
       (cond (xreg? s) (refuse :operands (if (= mn "uxtw") "invalid instruction" "invalid operand for instruction"))
             (and (xreg? d) (wreg? s) (str/starts-with? mn "s")) [d (as-reg s "x")]
+            ;; uxtw Xd, Wn: the alias's GPR32as64 source, a W register encoded as its X (AR4: musl's clone.s)
+            (and (xreg? d) (wreg? s) (= mn "uxtw")) [d (as-reg s "x")]
             (and (xreg? d) (wreg? s) (#{"uxtb" "uxth"} mn)) [(as-reg d "w") s]
             :else ops))
     (and (#{"cset" "csetm" "cinc" "cinv" "cneg"} mn) (symbol? (last ops)) (#{"al" "nv"} (str/lower-case (str (last ops)))))

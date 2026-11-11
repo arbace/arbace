@@ -1,0 +1,240 @@
+;; The command a64i, a64i's light driver (doc/asm/ARM64-SURVEY.md, AR5): `run` a static arm64 executable on a64i (its
+;; bytes decoded, AOT; with --forms its instructions from their forms, eval), `decode-text`, `forms-check` (each form's Inst
+;; against the decoded word's at its address), `trace --mode sys|step|bisect` (the lockstep against this CPU, ptrace).
+(in-ns 'go.arbace.a64idriver) (go/file "main.go" :doc "The command a64i, a64i's light driver (doc/asm/ARM64-SURVEY.md, AR5): `run` a static arm64 executable on a64i (its\nbytes decoded, AOT; with --forms its instructions from their forms, eval), `decode-text`, `forms-check` (each form's Inst\nagainst the decoded word's at its address), `trace --mode sys|step|bisect` (the lockstep against this CPU, ptrace).\n" :imports [
+
+
+    ^{:line 7} [bufio "bufio"]
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [rand "math/rand/v2"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [sort "sort"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [time "time"]
+
+    ^{:line 16} [a64i "arbace/a64i"]
+    ^{:line 17} [crt "arbace/crt"]
+    ^{:line 18} [emu "arbace/emu"]])
+
+
+^{:go/end 24} (go/func usage []
+  (fmt/Fprintln os/Stderr "usage: a64i run [--stats] [--coverage FILE] [--forms FORMS] EXE [ARG...] | a64i decode-text EXE | a64i forms-check EXE FORMS | a64i trace --mode sys|step|bisect EXE [ARG...]")
+  (os/Exit 2))
+
+
+^{:go/end 66} (go/func main []
+  (when (< (len os/Args) 3)
+    (usage))
+
+  (switch (aget os/Args 1)
+    (case ["run"]
+      (let [args (subslice os/Args 2)
+          (values stats cover forms) (values false "" "")]
+        (while (and (> (len args) 0) (strings/HasPrefix (aget args 0) "--"))
+          (switch
+            (case [(== (aget args 0) "--stats")]
+              (set! (values stats args) (values true (subslice args 1))))
+            (case [(and (== (aget args 0) "--coverage") (> (len args) 1))]
+              (set! (values cover args) (values (aget args 1) (subslice args 2))))
+            (case [(and (== (aget args 0) "--forms") (> (len args) 1))]
+              (set! (values forms args) (values (aget args 1) (subslice args 2))))
+            (default
+              (usage))))
+
+
+        (when (== (len args) 0)
+          (usage))
+
+        (os/Exit (run args stats cover forms))))
+    (case ["decode-text"]
+      (decodeText (aget os/Args 2)))
+    (case ["forms-check"]
+      (when (!= (len os/Args) 4)
+        (usage))
+
+      (os/Exit (formsCheck (aget os/Args 2) (aget os/Args 3))))
+    (case ["trace"]
+      (let [args (subslice os/Args 2)]
+        (when (or (< (len args) 3) (!= (aget args 0) "--mode") ^:go/paren (and (!= (aget args 1) "sys") (!= (aget args 1) "step") (!= (aget args 1) "bisect")))
+          (usage))
+
+        (os/Exit (trace (aget args 1) (subslice args 2)))))
+    (default
+      (usage))))
+
+
+
+
+^{:go/end 94} (go/func readForms "readForms reads FORMS: ADDR<tab>FORM lines (arbace.asm.arm64.eval's), each lowered at its address.\n" [^string path] :results [(map uint64 (* a64i/Inst)) (map uint64 string) (map uint64 string) error]
+  (let [(values f err) (os/Open path)]
+    (when (!= err nil)
+      (return nil nil nil err))
+
+    (defer (.Close f))
+    (let [(values forms errs texts) (values (lit (map uint64 (* a64i/Inst))) (lit (map uint64 string)) (lit (map uint64 string)))
+        ^{:line 76} sc (bufio/NewScanner f)]
+      (.Buffer sc (make (slice byte) (<< 1 20)) (<< 1 20))
+      (while (.Scan sc)
+        (let [(values a t ok) (strings/Cut (.Text sc) "\t")]
+          (when (not ok)
+            (continue))
+
+          (let [(values pc err) (strconv/ParseUint a 16 64)]
+            (when (!= err nil)
+              (return nil nil nil (fmt/Errorf "forms: %q" a)))
+
+            (let [(values in r) (a64i/FromForm t pc)]
+              (when (!= r "")
+                (aset errs pc (+ r ": " t)))
+
+              (set! (values (aget forms pc) (aget texts pc)) (values (addr in) t))))))
+
+      (return forms errs texts (.Err sc)))))
+
+
+^{:go/end 153} (go/func run ^int [^{:tag (slice string)} argv ^bool stats ^string cover ^string forms]
+  (let [as (emu/NewAS)]
+    (when [(values f err) (emu/ReadELF (aget argv 0))] (and (== err nil) (!= (.-Machine f) emu/EM_AARCH64))
+      (fmt/Fprintf os/Stderr "a64i: %s: not an AArch64 executable\n" (aget argv 0))
+      (return 127))
+
+    (let [(values img err) (emu/LoadELF as (aget argv 0))]
+      (when (!= err nil)
+        (fmt/Fprintf os/Stderr "a64i: %s: %v\n" (aget argv 0) err)
+        (return 127))
+
+      (let [^{:tag (array 16 byte)} rnd (zero (array 16 byte))]
+        (range [i rnd]
+          (aset rnd i (conv byte (rand/Uint32))))
+
+        (let [sp (emu/StackA64 as img argv (os/Environ) rnd)
+            ^{:line 112} sys (crt/NewSys (.-M as) os/Stdin os/Stdout os/Stderr)]
+          (set! (.-Args sys) argv)
+          (set! (.-Env sys) (os/Environ))
+          (let [k (emu/NewKernelA64 as img sys)
+              ^{:line 116} c (a64i/New as k (.-Entry img) sp)]
+            (set! (.-Pid c) 1000)
+            (when (!= forms "")
+              (let [(values fm errs _ err) (readForms forms)]
+                (when (!= err nil)
+                  (fmt/Fprintln os/Stderr "a64i:" err)
+                  (return 2))
+
+                (set! (values (.-Forms c) (.-FormErr c)) (values fm errs))))
+
+            (when (!= cover "")
+              (set! (.-Cover c) (lit (map string uint64))))
+
+            (let [t0 (time/Now)]
+              (.Run c)
+              (when (!= cover "")
+                (let [out (addr (lit strings/Builder))
+                    ^{:line 133} keys (make (slice string) 0 (len (.-Cover c)))]
+                  (range [k (.-Cover c)]
+                    (set! keys (append keys k)))
+
+                  (sort/Strings keys)
+                  (range [_ k keys]
+                    (fmt/Fprintf out "%s %d\n" k (aget (.-Cover c) k)))
+
+                  (when [err (os/WriteFile cover (conv (slice byte) (.String out)) 0644)] (!= err nil)
+                    (fmt/Fprintln os/Stderr "a64i:" err))))
+
+
+              (when stats
+                (let [el (time/Since t0)]
+                  (fmt/Fprintf os/Stderr "a64i: %d instructions in %v (%.1f M/s)\n" (.-Steps c) el (/ (conv float64 (.-Steps c)) (.Seconds el) 1000000.0))))
+
+              (when (and (!= (.-Signal c) 0) ^:go/paren (or (strings/HasPrefix (.-Reason c) ":unimplemented") (strings/HasPrefix (.-Reason c) ":unsupported") (strings/HasPrefix (.-Reason c) ":code-as-data") (!= (os/Getenv "A64I_VERBOSE") "")))
+                (fmt/Fprintf os/Stderr "a64i: signal %d at %#x: %s\n" (.-Signal c) (.-PC c) (.-Reason c)))
+
+              (.Status c))))))))
+
+
+
+^{:go/end 175} (go/func codeWords "codeWords are the words of the executable's code sections: address -> word.\n" [^string path] :results [(map uint64 uint32) (slice uint64) error]
+  (let [(values f err) (emu/ReadELF path)]
+    (when (!= err nil)
+      (return nil nil err))
+
+    (let [ws (lit (map uint64 uint32))
+        ^{:line 162 :tag (slice uint64)} order (zero (slice uint64))]
+      (range [_ s (.-Sections f)]
+        (when (or (== (bit-and (.-Flags s) emu/SHF_EXECINSTR) 0) (!= (.-Type s) emu/SHT_PROGBITS))
+          (continue))
+
+        (let [b (.Bytes f (.-Off s) (.-Size s))]
+          (for [off 0] (<= (+ off 4) (len b)) (set! off + 4)
+            (let [a (+ (.-Addr s) (conv uint64 off))]
+              (aset ws a (bit-or (conv uint32 (aget b off)) (<< (conv uint32 (aget b (+ off 1))) 8) (<< (conv uint32 (aget b (+ off 2))) 16) (<< (conv uint32 (aget b (+ off 3))) 24)))
+              (set! order (append order a))))))
+
+
+      (return ws order nil))))
+
+
+^{:go/end 193} (go/func decodeText [^string path]
+  (let [(values ws order err) (codeWords path)]
+    (when (!= err nil)
+      (fmt/Fprintln os/Stderr "a64i:" err)
+      (os/Exit 1))
+
+    (let [out (addr (lit strings/Builder))]
+      (range [_ a order]
+        (let [(values in r) (a64i/Decode (aget ws a) a)
+            ^{:line 186} t (.Key in)]
+          (when (!= r "")
+            (set! t (+ "!" r)))
+
+          (fmt/Fprintf out "%x\t%08x\t%s\n" a (aget ws a) t)))
+
+      (.WriteString os/Stdout (.String out)))))
+
+
+
+
+^{:go/end 241} (go/func formsCheck "formsCheck: each form of FORMS lowered at its address against the word EXE (the AOT link of the same sources) holds\nthere, decoded: the two Insts equal. Prints each difference and a summary; 0 when every form is met.\n" ^int [^string exe ^string forms]
+  (let [(values ws _ err) (codeWords exe)]
+    (when (!= err nil)
+      (fmt/Fprintln os/Stderr "a64i:" err)
+      (return 2))
+
+    (let [(values fm errs texts ^:assign err) (readForms forms)]
+      (when (!= err nil)
+        (fmt/Fprintln os/Stderr "a64i:" err)
+        (return 2))
+
+      (let [addrs (make (slice uint64) 0 (len fm))]
+        (range [a fm]
+          (set! addrs (append addrs a)))
+
+        (sort/Slice addrs ^{:go/end 212} (fn ^bool [^int i ^int j] (< (aget addrs i) (aget addrs j))))
+        ^{:go/breaks [[5 240]]} (let [(values same diff unl undec) (values 0 0 0 0)]
+          (range [_ a addrs]
+            (let [(values w ok) (aget ws a)]
+              (when (not ok)
+                (fmt/Printf "NOWORD %x %s\n" a (aget texts a))
+                (inc! diff)
+                (continue))
+
+              (let [(values d r) (a64i/Decode w a)]
+                (switch
+                  (case [(!= (aget errs a) "")]
+                    (fmt/Printf "UNLOWERED %x %s\n" a (aget errs a))
+                    (inc! unl))
+                  (case [(!= r "")]
+                    (fmt/Printf "UNDECODED %x %08x %s %s\n" a w r (aget texts a))
+                    (inc! undec))
+                  (case [(!= (.Key d) (.Key (aget fm a)))]
+                    (fmt/Printf "DIFF %x %08x %s\n  form:   %s\n  decoded: %s\n" a w (aget texts a) (.Key (aget fm a)) (.Key d))
+                    (inc! diff))
+                  (default
+                    (inc! same))))))
+
+
+          (fmt/Printf "forms-check: %d of %d equal, %d differ, %d not lowered, %d not decoded\n" same (len addrs) diff unl undec)
+          (when (> (+ diff unl undec) 0)
+            (return 1))
+
+          0)))))

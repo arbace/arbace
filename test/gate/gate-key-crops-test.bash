@@ -34,7 +34,7 @@ go/arbace/oi.ae go/arbace/oi/apply.ae go/arbace/scm.ae go/arbace/scm/eval.ae go/
 arbace/repr/cpp.ae arbace/repr/cpp/convert.ae arbace/repr/llvm.ae arbace/cpp/lower.ae
 arbace/repr/ocaml.ae arbace/repr/scheme.ae arbace/scheme/aot.ae arbace/repr/python.ae arbace/repr/python/print.ae
 arbace/python.ae arbace/python/scope.ae go/arbace/py.ae go/arbace/py/frame.ae
-go/arbace/x86i.ae go/arbace/x86i/cpu.ae go/arbace/emu.ae go/arbace/emu/as.ae"
+go/arbace/x86i.ae go/arbace/x86i/cpu.ae go/arbace/emu.ae go/arbace/emu/as.ae go/arbace/a64i.ae go/arbace/a64i/exec.ae"
 kept="go/arbace/ci.ae go/arbace/ci/expr.ae go/arbace/cinterp.ae go/arbace/cinterp/natives.ae go/arbace/crt.ae go/arbace/crt/mem.ae
 arbace/c.ae arbace/c/build.ae arbace/c/cinterp.ae arbace/repr/c.ae arbace/repr/c/lex.ae arbace/lang/CInterp.ae
 arbace/core.ae arbace/o2j.ae arbace/http.ae arbace/tls/x.ae arbace/go/check.ae arbace/repr/go.ae
