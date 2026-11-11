@@ -301,6 +301,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   reflective sites as roots), A7 (refusals stubbed or dropped, `report.edn`'s `:refused`); proved light by day, built and run
   at night (the commands in J2G-SPEC's sections and the journal's entry): the conversion, the build, the four samples
   `services`, `resources`, `reflect-meta`, `refusals`. A1-A3, A11 on `ghidra-read`.
+- repr/java: `java-nread-g1` (the native provider's two fixes from Ghidra's G1 read proof: a void method's reference against
+  Supplier, an inherited static field through two static on-demand imports; samples `MrefVoid`, `Star*`). Its night: the four
+  provenance writers (the reader hash moved), nojavac-check and attr-check over jdk, javac and jdk26u, `bin/repr-java check --jdk`.
 
 ## Decided, not built yet
 

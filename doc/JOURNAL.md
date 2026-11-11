@@ -5403,3 +5403,28 @@ on `Runnable` and `Supplier<T>`, called with a method reference to a void method
 it through the subclass, the native provider through the base). Slips: SoftwareModeling's front read peaked at 9.2 GiB in its
 chunk of ANTLR's generated parsers (`SleighParser.java`, 751 KB; MemAvailable above 40 GiB, nothing else heavy), over the brief's
 4 GiB; its nread was held out of the run (by renaming the module in the scratch copy of the plan) for the night.
+
+## 2026-11-10: the native provider's two G1 fixes (branch `java-nread-g1`, from `mac/java-p1` 4428594d1)
+
+Ghidra's G1 read proof found two files whose `read --no-javac` forms differ from javac's (its repros, Arbace-only Java, in
+the ghidra-read worktree's `.tmp/nread-repro`). Both fixed in the native provider by porting javac's rule (jdk26u at
+`baf63fb`), each case a sample of `test/repr/java/java/sample/` with a control (doc/classes/JAVA-FRONTEND-SURVEY.md, "As
+built: JN9 fixes from G1"):
+
+- `expr.ae`'s `mref-check`: a void referent against a value-returning descriptor is an incompatible return type
+  (`Attr.checkReferenceCompatible`, Attr.java:3830-3849), so `run(Supplier<T>)` is inapplicable to `this::work` with `work`
+  void and `run(Runnable)` is chosen, as javac does (sample `MrefVoid`, its control a value method's reference: Supplier).
+- `decls.ae`'s `find-var`: a field reached through static on-demand imports is cloned with the star import scope's origin,
+  the last such import in the source that includes it (`StarImportScope.importAll` prepends, Scope.java:897;
+  `CompoundScope.getOrigin`, Scope.java:1102-1108; `Resolve.findVar`, Resolve.java:1551-1569), so
+  `import static Base.*; import static Sub.*;` names `Sub/MASK` (samples `StarBase`, `StarSub`, `StarImports`, and the
+  control `StarImportsBase`, the imports the other way round: `StarBase/MASK`). Static methods were already javac's.
+
+Alternatives: keeping both imports' origins and choosing at the use (no: javac's origin is the scope's, not the
+lookup's); fixing the method references' check only in the overload phase (no: javac's check is one, in every mode). Checks
+(light, stage 0, javac's tool `javac-5ad35733`): the samples' attr-check, nojavac-check (and, the fix reverted, the negative
+control: FAILED on the three files), parse-check, front-check over samples and baseline, nojavac-check over the baseline,
+`bin/repr-java check` (expected forms written for the five samples) and the samples' round trip recorded (the classes level of
+`StarImports` and `StarImportsBase` known: the constant pool's order alone). Left to a night: nojavac-check and attr-check over
+jdk, javac and jdk26u (over 2 GiB), `bin/repr-java check --jdk` (GTS137 (a)), and the four provenance writers for the new
+reader hash (the essential `provenance` step fails on the branch until they run).
