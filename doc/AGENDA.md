@@ -81,6 +81,8 @@ Six crops are above 90 on all three. What the others still need:
   runs 40 of run-check's 63 (0 of 10 before), the `equal` set 50 (83 modules), both recorded as run rows; P20's proof (all ≥
   equal, 0 lost) not reached: 10 lost in three classes (a case on the void token, output differences, NonTermination); next
   P20's tail, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
+  Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
+  conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
   hsi's eval cell (`hsi-e1`, HES88): 797 to 809 of 908 (HE9's six recorded, the static pointer table, forkOn#'s locked threads,
   the SIMD primops); 99 left in classes (60 no reference, 12 speed, 10 Cmm); HES89 (`simd/` in the corpora) and HES90 (all.T's

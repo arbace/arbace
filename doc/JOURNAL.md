@@ -4784,3 +4784,11 @@ tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict:
   minutes per num/mod.rs and a night slot), reading the attributes from rustc's metadata (a toolchain product).
 - Independence unchanged (Rust 80.0: every case still consumes std's records, RFP43 (a)); the record facts the own front end
   reads shrink. Details and the night's commands: doc/rust/FRONTEND-SURVEY.md, "As built: RF19".
+
+## 2026-11-11: HES90: ignore_stdout judged as GHC's driver does (branch `hs-hes90`, from `mac/next` `15278e9c6`)
+
+- The user's decision (HES88's proposal (a)): `test/haskell/eval/allt.ae` marks a test with an unconditional `ignore_stdout`
+  (`:ignore-stdout true` in `testsuite-run.edn`, 19 tests), `bin/lib/hsi/check` judges it by status and stderr alone, with a negative
+  control (`conc065 conc064 status=0`: wrong stderr still fails). Only the 7 programs of the corpus's directories rerun
+  (`--only ... --record`): conc065 and conc066 pass, taken out of the class `rts`; hsi divergences 811 pass, 0 unclassed; reap and
+  crops-score strict 0 problems. Alternative (b), keep comparing stdout: rejected by the user's decision. Details: doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES90".
