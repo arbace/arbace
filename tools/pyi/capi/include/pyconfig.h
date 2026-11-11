@@ -2,10 +2,13 @@
    configuration CPython 3.14.10's Include/ reads when ci builds an extension module of pyi's C world against it in
    the limited API's mode (configure's output for this target, written by hand: the macros Include/ consults). The C
    target is ci's (x86-64, LP64, musl): a build with the GIL (Py_GIL_DISABLED undefined), wchar_t 4 bytes, pid_t an
-   int. */
+   int. Since queue 269 also the full API's (_testcapi's parts define no Py_LIMITED_API): its headers ask for POSIX
+   threads (cpython/pythread.h's Py_tss_t) and fork. */
 #ifndef Py_PYCONFIG_H
 #define Py_PYCONFIG_H
 #define HAVE_WCHAR_H 1
+#define HAVE_PTHREAD_H 1
+#define HAVE_FORK 1
 #define HAVE_SYS_TYPES_H 1
 #define HAVE_SYS_STAT_H 1
 #define HAVE_UNISTD_H 1
@@ -28,4 +31,9 @@
 #define SIZEOF__BOOL 1
 #define ALIGNOF_MAX_ALIGN_T 16
 #define WITH_DOC_STRINGS 1
+/* queue 269: ci's checker takes gcc's generic __atomic_load and __atomic_store (pyatomic_gcc.h's float and double
+   accessors) for functions of fewer parameters ("too many arguments to function"); ci's world is one thread, so the
+   plain access is the atomic one. A REQUEST for the C crop (arbace/c/check.ae's builtins). */
+#define __atomic_load(p, r, o) ((void)(o), *(r) = *(p))
+#define __atomic_store(p, v, o) ((void)(o), *(p) = *(v))
 #endif

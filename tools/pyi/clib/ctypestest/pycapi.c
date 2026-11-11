@@ -4,35 +4,43 @@
    struct becomes its object's handle (a proxy's head, ob_refcnt and ob_type; the limited API reads no further), each
    PyExc_NAME pointer is set to the handle of builtins.NAME. The functions are pyctypes's natives. A static link keeps
    only what is reached, so the unused ones cost nothing. This file includes no Python.h: under the limited API the
-   type objects' type is incomplete, and only their head is a proxy's. Arbace's own. */
+   type objects' type is incomplete, and only their head is a proxy's. Since queue 269 the full API's macros read a
+   type object's fields (Py_TYPE(o)->tp_flags, PyList_Type.tp_new): each type object has PyTypeObject's size (416
+   bytes on LP64), which pyctypes fills as CPython's own. Arbace's own. */
 
 struct pyi_proxy { long ob_refcnt; void *ob_type; };
+struct pyi_type { long ob_refcnt; void *ob_type; char rest[400]; };
 struct pyi_proxy _Py_NoneStruct = { 1, 0 };
 struct pyi_proxy _Py_TrueStruct = { 1, 0 };
 struct pyi_proxy _Py_FalseStruct = { 1, 0 };
 struct pyi_proxy _Py_EllipsisObject = { 1, 0 };
 struct pyi_proxy _Py_NotImplementedStruct = { 1, 0 };
-struct pyi_proxy PyType_Type = { 1, 0 };
-struct pyi_proxy PyBaseObject_Type = { 1, 0 };
-struct pyi_proxy PyLong_Type = { 1, 0 };
-struct pyi_proxy PyBool_Type = { 1, 0 };
-struct pyi_proxy PyFloat_Type = { 1, 0 };
-struct pyi_proxy PyComplex_Type = { 1, 0 };
-struct pyi_proxy PyUnicode_Type = { 1, 0 };
-struct pyi_proxy PyBytes_Type = { 1, 0 };
-struct pyi_proxy PyByteArray_Type = { 1, 0 };
-struct pyi_proxy PyTuple_Type = { 1, 0 };
-struct pyi_proxy PyList_Type = { 1, 0 };
-struct pyi_proxy PyDict_Type = { 1, 0 };
-struct pyi_proxy PySet_Type = { 1, 0 };
-struct pyi_proxy PyFrozenSet_Type = { 1, 0 };
-struct pyi_proxy PySlice_Type = { 1, 0 };
-struct pyi_proxy PyModule_Type = { 1, 0 };
-struct pyi_proxy PyDictProxy_Type = { 1, 0 };
-struct pyi_proxy PyRange_Type = { 1, 0 };
-struct pyi_proxy PyMemoryView_Type = { 1, 0 };
-struct pyi_proxy PyProperty_Type = { 1, 0 };
-struct pyi_proxy PyCapsule_Type = { 1, 0 };
+struct pyi_type PyType_Type = { 1, 0 };
+struct pyi_type PyBaseObject_Type = { 1, 0 };
+struct pyi_type PyLong_Type = { 1, 0 };
+struct pyi_type PyBool_Type = { 1, 0 };
+struct pyi_type PyFloat_Type = { 1, 0 };
+struct pyi_type PyComplex_Type = { 1, 0 };
+struct pyi_type PyUnicode_Type = { 1, 0 };
+struct pyi_type PyBytes_Type = { 1, 0 };
+struct pyi_type PyByteArray_Type = { 1, 0 };
+struct pyi_type PyTuple_Type = { 1, 0 };
+struct pyi_type PyList_Type = { 1, 0 };
+struct pyi_type PyDict_Type = { 1, 0 };
+struct pyi_type PySet_Type = { 1, 0 };
+struct pyi_type PyFrozenSet_Type = { 1, 0 };
+struct pyi_type PySlice_Type = { 1, 0 };
+struct pyi_type PyModule_Type = { 1, 0 };
+struct pyi_type PyDictProxy_Type = { 1, 0 };
+struct pyi_type PyRange_Type = { 1, 0 };
+struct pyi_type PyMemoryView_Type = { 1, 0 };
+struct pyi_type PyProperty_Type = { 1, 0 };
+struct pyi_type PyCapsule_Type = { 1, 0 };
+struct pyi_type PyInstanceMethod_Type = { 1, 0 };
+struct pyi_type PyGen_Type = { 1, 0 };
+
+/* Py_Version (Include/pylifecycle.h; queue 269: _testcapi reads it): Py_PACK_FULL_VERSION of 3.14.10 final */
+const unsigned long Py_Version = 0x030E0AF0;
 
 void *PyExc_ArithmeticError;
 void *PyExc_AssertionError;
