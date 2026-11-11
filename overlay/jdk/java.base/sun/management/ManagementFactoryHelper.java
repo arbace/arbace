@@ -34,9 +34,15 @@
  * jmm's thread status as jdk26u's jdk.internal.misc.VM.toThreadState does (jrt's VM is a shim of its own). Copyright (c) Oracle and/or
  * its affiliates, under the GNU General Public License version 2 with the Classpath Exception, as the notice
  * above says (LICENSE.md).
+ *
+ * JCS281 (b) (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)"): jdk26u's PlatformLoggingImpl, the
+ * platform logging bean, over java.util.logging's LoggingMXBean called directly (java.logging is in the world,
+ * translated as java.base's: jdk26u's LoggingMXBeanAccess finds it by reflection only because java.management
+ * may not read java.logging's module).
  */
 package sun.management;
 
+import java.lang.management.PlatformLoggingMXBean;
 import java.lang.management.RuntimeMXBean;
 import java.lang.management.ThreadMXBean;
 
@@ -67,6 +73,65 @@ public class ManagementFactoryHelper {
         }
         return runtimeMBean;
     }
+
+    // JCS281 (b): jdk26u's getPlatformLoggingMXBean, java.util.logging always present
+    public static PlatformLoggingMXBean getPlatformLoggingMXBean() {
+        return PlatformLoggingImpl.MBEAN;
+    }
+
+    public static boolean isPlatformLoggingMXBeanAvailable() {
+        return true;
+    }
+
+    // jdk26u's, its LoggingMXBeanAccess's reflective calls made directly on LogManager's bean
+    static final class PlatformLoggingImpl implements PlatformLoggingMXBean {
+
+        @SuppressWarnings("deprecation")
+        private final java.util.logging.LoggingMXBean impl = java.util.logging.LogManager.getLoggingMXBean();
+
+        private PlatformLoggingImpl() {
+        }
+
+        private volatile javax.management.ObjectName objname;  // created lazily
+        @Override
+        public javax.management.ObjectName getObjectName() {
+            javax.management.ObjectName result = objname;
+            if (result == null) {
+                synchronized (this) {
+                    result = objname;
+                    if (result == null) {
+                        result = Util.newObjectName(LOGGING_MXBEAN_NAME);
+                        objname = result;
+                    }
+                }
+            }
+            return result;
+        }
+
+        @Override
+        public java.util.List<String> getLoggerNames() {
+            return impl.getLoggerNames();
+        }
+
+        @Override
+        public String getLoggerLevel(String loggerName) {
+            return impl.getLoggerLevel(loggerName);
+        }
+
+        @Override
+        public void setLoggerLevel(String loggerName, String levelName) {
+            impl.setLoggerLevel(loggerName, levelName);
+        }
+
+        @Override
+        public String getParentLoggerName(String loggerName) {
+            return impl.getParentLoggerName(loggerName);
+        }
+
+        static final PlatformLoggingMXBean MBEAN = new PlatformLoggingImpl();
+    }
+
+    private static final String LOGGING_MXBEAN_NAME = "java.util.logging:type=Logging";
 
     public static boolean isThreadSuspended(int state) {
         return ((state & JMM_THREAD_STATE_FLAG_SUSPENDED) != 0);
