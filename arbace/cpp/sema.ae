@@ -1029,6 +1029,11 @@
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
                ;; thread_local, _Thread_local, __thread ([basic.stc.thread]; G5c: libsupc++'s eh_globals.cc)
                :tls (boolean (:tls n))
+               ;; (cpp-s5b, pending review 1111 #4: the TLS kind, clang's VarDecl::getTLSKind: "dynamic" for C++'s
+               ;; thread_local, "static" for __thread and _Thread_local; with constinit, [dcl.constinit], a thread-local
+               ;; variable clang reads directly, never through its wrapper)
+               :tls-kind (:tls n)
+               :constinit (boolean (or (:_constinit n) (some #(= "ConstInitAttr" (:kind %)) (:inner n))))
                :pos (long (or (:_b n) 0))}
             ;; (CX12, the checker: a constexpr variable, its initializer checked as a constant expression)
             v (cond-> v (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
@@ -1525,6 +1530,26 @@
 
 (declare ce-eval ce-wrap ub! not-constant)
 
+(defn- wide?
+  "cpp-s5b (pending review 1111 #2): whether the integral type `t` is wider than 64 bits (__int128, unsigned __int128)."
+  [t]
+  (let [t (abi/underlying (abi/unq t))]
+    (and (abi/integral? t) (> (* 8 (long (abi/size-of t))) 64))))
+
+(defn- wide-binop
+  "cpp-s5b (pending review 1111 #2): a 128-bit type's arithmetic on the operands' values (longs: ce-wrap keeps a 128-bit
+  value only while it fits 64 bits) computed exactly, for ce-wrap to refuse a result outside 64 bits, never computed modulo
+  2^64 (`(unsigned __int128)1 << 64` was 0); a shift by a count outside 0..127 and a division by zero are not constants."
+  [^String o a b]
+  (let [a (long a) b (long b) A (bigint a) B (bigint b)]
+    (case o
+      "+" (+ A B) "-" (- A B) "*" (* A B)
+      ("/" "%") (if (zero? b) (not-constant "division by zero") (if (= o "/") (quot A B) (rem A B)))
+      "<<" (if (<= 0 b 127) (* A (bigint (.pow (java.math.BigInteger/valueOf 2) (int b)))) (not-constant "a shift by " b))
+      ">>" (if (<= 0 b 127) (bit-shift-right a (min b 63)) (not-constant "a shift by " b))
+      "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
+      nil)))
+
 (declare const-int)
 
 (defn- var-const-int
@@ -1552,7 +1577,10 @@
                 ;; (CP325 (a): 64-bit arithmetic wraps, as the unsigned types' modulo 2^N does; a signed overflow is the
                 ;; program's error, which this evaluation does not judge -- parse/enum4.C's 9223372036854775807ULL * 2 + 1 had
                 ;; thrown Java's ArithmeticException, a crash of the analysis)
-                :unop (let [v (ev (:e e))] (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
+                :unop (let [v (ev (:e e))]
+                        (if (and (#{"-" "~"} (:o e)) (wide? (:ty e)))
+                          (ce-wrap (:ty e) (if (= "-" (:o e)) (- (bigint v)) (bit-not (long v))))
+                          (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0))))
                 ;; (review 1111 #5: && and || short-circuit, [expr.log.and]/1, so that 2 || 1 / 0 is 1; a division by zero is not a
                 ;; constant, as ce-eval's, never Java's ArithmeticException: warn/overflow-warn-3.C's enumerators had crashed Sema)
                 :binop (let [a (long (ev (:l e)))
@@ -1561,13 +1589,14 @@
                              u (and (abi/integral? (:ty e)) (not (abi/signed? (:ty e))))
                              _ (when (and (not sc) (#{"/" "%"} (:o e)) (zero? b))
                                  (if (checking?) (ub! e "division by zero") (not-constant "division by zero")))
-                             r (case (:o e) "+" (unchecked-add a b) "-" (unchecked-subtract a b) "*" (unchecked-multiply a b)
+                             r (if-some [w (when (and (not sc) (wide? (:ty e))) (wide-binop (:o e) a b))] w
+                               (case (:o e) "+" (unchecked-add a b) "-" (unchecked-subtract a b) "*" (unchecked-multiply a b)
                                      "/" (if u (Long/divideUnsigned a b) (quot a b)) "%" (if u (Long/remainderUnsigned a b) (rem a b))
                                      "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
                                      "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
                                      "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
                                      "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
-                                     "||" (if (or (not= a 0) (not= b 0)) 1 0))]
+                                     "||" (if (or (not= a 0) (not= b 0)) 1 0)))]
                          (if (abi/integral? (:ty e)) (ce-wrap (:ty e) r) r))
                 :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
                 ;; (compared in the operands' common type: unsigned ones as unsigned, [expr.rel]/5, [conv.arith])
@@ -1605,6 +1634,12 @@
     (cond
       (= :bool (abi/bn t)) (if (if (number? v) (not (zero? (double v))) v) 1 0)
       (abi/floating? t) (if (= :float (abi/bn t)) (double (float (double v))) (double v))
+      ;; (cpp-s5b, pending review 1111 #2: a 128-bit value is held as a long while it fits 64 bits, as the type's value
+      ;; (an unsigned one not negative); outside, not a constant, never truncated)
+      (wide? t) (let [x (if (float? v) (long (double v)) v)]
+                  (if (and (<= Long/MIN_VALUE x Long/MAX_VALUE) (or (abi/signed? t) (not (neg? x))))
+                    (long x)
+                    (not-constant "a " (* 8 (long (abi/size-of t))) "-bit value outside 64 bits")))
       (abi/integral? t) (let [bits (* 8 (abi/size-of t)) x (long (if (float? v) (long (double v)) v))]
                           (if (>= bits 64) x
                               (let [m (dec (bit-shift-left 1 bits)) y (bit-and x m)]
@@ -1647,7 +1682,7 @@
                  ;; ([expr.const]/5.15: a reinterpret_cast, as a conversion between a pointer and an integer is)
                  (not-constant "cast " (:ck e))))
        :unop (let [v (ev (:e e))]
-               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (- (long v))) "+" v "~" (bit-not (long v)))))
+               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (if (wide? t) (- (bigint v)) (- (long v)))) "+" v "~" (bit-not (long v)))))
        :not (if (zero? (long (ev (:e e)))) 1 0)
        :binop (let [a (ev (:l e)) b (ev (:r e))]
                 (if (abi/floating? t)
@@ -1674,12 +1709,12 @@
                                         (ub! e "signed left shift discards bits")
                                         :else nil)
                           nil)))
-                    (ce-wrap t (case (:o e)
+                    (ce-wrap t (if-some [w (when (wide? t) (wide-binop (:o e) a b))] w (case (:o e)
                                  "+" (+ a b) "-" (- a b) "*" (* a b)
                                  "/" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/divideUnsigned a b) (quot a b)))
                                  "%" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/remainderUnsigned a b) (rem a b)))
                                  "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
-                                 "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b))))))
+                                 "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)))))))
        :cmp (let [a (ev (:l e)) b (ev (:r e))
                   c (if (or (float? a) (float? b)) (compare (double a) (double b))
                         (if (abi/signed? (:ct e)) (compare (long a) (long b)) (Long/compareUnsigned (long a) (long b))))]
@@ -5172,6 +5207,41 @@
     (let [vs (distinct @rets)]
       (when (and (= 1 (count vs)) (first vs) (= :local (:storage (var* (first vs))))) (first vs)))))
 
+(defn- consteval-ctor-body-stores?
+  "cpp-s5b (pending review 1111 #1, CP362 (a)'s scope): whether the body (its node) of class `cls`'s consteval constructor
+  may store to the object it constructs beyond its mem-initializers: an assignment, a compound assignment or ++/-- whose
+  operand is a member of *this (a member named alone, this->m, a member of one, an element of one, *this), a call of a
+  member function of the class named alone or through this, a call on a member, or `this`/`*this` passed. The scan is
+  syntactic and conservative (a member passed by reference is not counted: basic_format_string's
+  `_Checking_scanner<...> __scanner(_M_str)` only reads it)."
+  [cls body]
+  (let [member? (fn [nm] (and (string? nm) (seq nm)
+                              (some (fn [[_ e]] (or (= :field (:e e)) (and (= :fn (:e e)) (not (:static (fnd (:id e)))))))
+                                    (try (class-lookup cls nm) (catch arbace.lang.ExceptionInfo _ nil)))))
+        strip (fn [x] (loop [x x] (if (#{"ParenExpr" "ImplicitCastExpr"} (:kind x)) (recur (first (:inner x))) x)))
+        this? (fn [x] (let [x (strip x)] (or (= "CXXThisExpr" (:kind x))
+                                             (and (= "UnaryOperator" (:kind x)) (= "*" (:opcode x)) (= "CXXThisExpr" (:kind (strip (first (:inner x)))))))))
+        of-this? (fn of-this? [x]
+                   (let [x (strip x)]
+                     (case (:kind x)
+                       "CXXThisExpr" true
+                       "DeclRefExpr" (boolean (member? (get-in x [:referencedDecl :name])))
+                       ("MemberExpr" "CXXDependentScopeMemberExpr" "UnresolvedMemberExpr")
+                       (let [b (first (:inner x))] (or (nil? b) (of-this? b)))
+                       "ArraySubscriptExpr" (of-this? (first (:inner x)))
+                       "UnaryOperator" (and (= "*" (:opcode x)) (of-this? (first (:inner x))))
+                       false)))
+        store? (fn [x]
+                 (case (:kind x)
+                   "BinaryOperator" (and (= "=" (:opcode x)) (of-this? (first (:inner x))))
+                   "CompoundAssignOperator" (of-this? (first (:inner x)))
+                   "UnaryOperator" (and (#{"++" "--"} (:opcode x)) (of-this? (first (:inner x))))
+                   ("CallExpr" "CXXMemberCallExpr")
+                   (or (of-this? (first (:inner x))) (some this? (rest (:inner x))))
+                   ("CXXConstructExpr" "ParenListExpr" "InitListExpr" "CXXTemporaryObjectExpr") (some this? (:inner x))
+                   false))]
+    (boolean (some #(and (map? %) (store? %)) (tree-seq #(and (map? %) (seq (:inner %))) :inner body)))))
+
 (defn analyze-fn!
   "Analyzes a function's body (and a constructor's mem-initializers) into :tbody."
   [fid]
@@ -5213,7 +5283,10 @@
             ;; (CP362 (a), the user 2026-11-11: a consteval constructor's body, which only checks (basic_format_string's runs
             ;; the format string's scanner at compile time), is not evaluated by the code generator: the immediate invocation
             ;; stores the mem-initializers' value, the program taken as valid, as clang and g++ accepted it)
-            body (when (:body f) (if (and (:consteval f) (= :ctor (:kind f)) (not (checking?))) {:s :block :items []} (trace #(stmt ctx (:body f)))))
+            ;; (pending review 1111 #1, cpp-s5b: only a body that stores to no member; one that does is analyzed, the
+            ;; constructor run when its immediate invocation is reached, its value the one clang folds)
+            body (when (:body f) (if (and (:consteval f) (= :ctor (:kind f)) (not (checking?)) (not (consteval-ctor-body-stores? cls (:body f))))
+                                   {:s :block :items []} (trace #(stmt ctx (:body f)))))
             ;; a constructor's or destructor's function-try-block: control reaching a handler's end rethrows the exception
             ;; ([except.handle]/15; clang's ExitCXXTryStmt, doImplicitRethrow); another function's handler falls through to its end
             ;; ([except.handle]/16). The mem-initializers stay before the try (cpp-90: an exception of theirs is not caught by the

@@ -683,10 +683,39 @@
 
 (defn- tls-internal?
   "review 1111 #1: whether the thread-local variable `v` has internal linkage ([basic.link]/4: `static` at namespace scope or
-  a member of an unnamed namespace), its _ZTH and _ZTW internal too. A static data member is not: sema's :internal also
-  holds for the members a class declares `static` (thread_local11.h's T::u3, whose global is emitted internal: CP369)."
+  a member of an unnamed namespace), its _ZTH and _ZTW internal too. A static data member by its class's linkage alone
+  (pending review 1111 #5, cpp-s5b): internal when an unnamed namespace encloses its class, [basic.link]/4; sema's
+  :internal also holds for every member a class declares `static` (thread_local11.h's T::u3, whose global is emitted
+  internal: CP369), so it is not read for them."
   [v]
-  (boolean (and (:internal v) (not= :member-static (:storage v)))))
+  (boolean (if (= :member-static (:storage v))
+             (some #(= [:anon] %) (:path v))
+             (:internal v))))
+
+(defn- tls-defined-here?
+  "cpp-s5b (pending review 1111 #4): whether this unit defines the thread-local variable whose symbol is `nm`: a
+  definition after an `extern` declaration of it is a variable of its own in sema (`extern thread_local int t;` then
+  `thread_local int t = f();`), a static data member's out-of-line definition the member itself."
+  [^String nm]
+  (let [m (or (:tls-defs @*top*)
+              (let [m (set (for [[_ w] @sema/*vars*
+                                 :when (and (:tls w) (#{:global :member-static} (:storage w)) (not (:extern w))
+                                            (or (:defined w) (:pending-def w) (:linkonce w)))]
+                             (abi/mangle-var w)))]
+                (swap! *top* assoc :tls-defs m)
+                m))]
+    (contains? m nm)))
+
+(defn- tls-wrapped-elsewhere?
+  "cpp-s5b (pending review 1111 #4): whether a use of the thread-local variable `v` (symbol `nm`) defined in another unit
+  goes through its wrapper, as clang's ItaniumCXXABI::usesThreadWrapperFunction decides: only C++'s dynamic TLS
+  (thread_local; __thread and _Thread_local are static TLS, read directly), not constinit (constant-initialized by
+  declaration, isEmittedWithConstantInitializer), for an extern variable or a static data member this unit does not
+  define."
+  [v ^String nm]
+  (and (:tls v) (= "dynamic" (:tls-kind v)) (not (:constinit v))
+       (or (:extern v) (= :member-static (:storage v)))
+       (not (tls-defined-here? nm))))
 
 (defn- extern-tls-wrapper!
   "review 1111 #1: the wrapper of the thread-local variable `nm` defined in another unit (clang's
@@ -722,7 +751,8 @@
                                        (swap! *top* update :lazy dissoc nm)
                                        (add-top! f))
                                      ;; a variable defined elsewhere (extern, a header's): declared
-                                     (when (and (:extern v) (not (contains? (:declared @*top*) nm)))
+                                     ;; (cpp-s5b: a thread-local static data member defined in another unit too)
+                                     (when (and (or (:extern v) (tls-wrapped-elsewhere? v nm)) (not (contains? (:declared @*top*) nm)))
                                        (swap! *top* update :declared conj nm)
                                        (add-top! (list 'llvm/global (gsym nm) (if (abi/scalar? (abi/unq (:ty v))) (abi/llvm-type (:ty v)) (list 'array (abi/size-of (:ty v)) 'i8))
                                                        :linkage :external :align (abi/align-of (:ty v)))))
@@ -733,7 +763,7 @@
                                        (val! (list 'call 'ptr (gsym (tls-wrapper-name nm)) []))
                                        ;; (review 1111 #1: a thread-local variable defined in another unit, whose dynamic
                                        ;; initialization is that unit's: through the discardable wrapper clang writes for it)
-                                       (and (:tls v) (:extern v))
+                                       (tls-wrapped-elsewhere? v nm)
                                        (do (extern-tls-wrapper! nm)
                                            (val! (list 'call 'ptr (gsym (tls-wrapper-name nm)) [])))
                                        :else (gsym nm)))
