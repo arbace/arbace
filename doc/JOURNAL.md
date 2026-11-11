@@ -4844,3 +4844,32 @@ globals are package variables of their own, not named in the program's packages)
 syntax to read back). `bin/si check --aot --record`: 47 of 52 (was 45), 0 refused, 50 of 50 compiled runs the same as si's; the AOT
 cell 90.0% (95.7% without by design) -> 94.0% (100%). SC94 (b) not built (SCS30); SCS29 (one graph per program). Details:
 doc/scheme/SCHEME-SURVEY.md, "As built: SC90 (b), syntax objects among a compiled program's constants".
+
+## 2026-11-11: arm64 assembly, AR7: the essential step sliced, every error of a file, `-implicit-mapsyms` and `.org`, the memory families' synthetic programs (branch `asm-ar7`, from `mac/next` `15278e9c6`)
+
+The user's answers of 2026-11-11 to AR6's survey: ARS43 (a), ARS45 (b), ARS46 (b), ARS47 (a) (ARS44, the Mac's CPU rows, is the main
+session's queue task). On the main host, light; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`.
+doc/asm/ARM64-SURVEY.md, "As built: AR7", has the measures.
+
+- ARS46 (b): `bin/a64i check --only LIST|NAME,...` judged on what it ran with a slice-foreign control (x86i's AXS89 (a) ported to
+  test/asm/a64i_judge.ae), `--essential` = test/asm/subsets.edn's `:a64i` (the hand-written programs, synth-alu, synth-fp-d);
+  `a64i-essential` runs it, the new `--full` step `a64i-check` the whole set under `:rotate`; the AOT and eval builds side by side.
+  1 min 36 s → 36 s. Alternative not taken: dropping the synthetic programs from the check (their coverage is the record's).
+- ARS43 (a): the shared object assembler collects every error with its item's place and expression, as LLVM's diagnostics (an
+  item's error, then no layout, as AsmParser::Run; else the layout's, every fixup's and the symbol table's), and the object verdict
+  holds an error run's CHECK lines to llvm-mc's diagnostic text by FileCheck (`[[@LINE]]` taken). LLVM's messages taught where
+  Arbace had its own (across sections, undefined subtrahends, not relocatable, getRelocType's, out of range data, LDST alignment);
+  `beq`, `mov`'s MOVW expression (MOVN when negative), `mov` with a MOVW specifier, a memory operand's label difference. A
+  specifier over a difference is refused only in AArch64's shape (`:lo12:a - b`): x86's `foo@PLT - .` stays relocatable (found by
+  amd64's object-check synthetic/relocs). Alternative not taken: judging each `error:` line's fragment alone (AR4's judge, which
+  let the source and caret lines pass unread).
+- ARS47 (a): `.org` (an org chunk at the layout, LLVM's three errors) and `-implicit-mapsyms` (the implicit state at a section's
+  start, the ending mapping symbol after the section's last symbol, AArch64TargetELFStreamer::finish).
+- ARS45 (b): the memory families' synthetic programs (ldst 374, pair 93, excl 94, lse 240 cases: a 64-byte buffer from the row,
+  the stub, the buffer and the writeback folded into the flags' slot), qemu-aarch64 and a64i agreeing on the first run; a64i's
+  coverage 474 → 653 of 653 claimed. NEON not reached (proposed ARS48).
+- Results: object verdict 2,687 → 2,781 of 2,833 (`:message`, `:mc-option`, `:error-accepted` gone); object check mc-aarch64-obj
+  104 → 107 of 110; a64i 80 → 84 programs; the AOT cell 2,904 / 0 / 152 (95.0%) → 3,005 / 0 / 55 (98.2%); crops-score completeness 98.7 → 99.5. Proposed ARS48-ARS52 (NEON, `@AUTH`/`%pltpcrel`, the literal pool,
+  the diagnostics' columns, the memory programs in the essential subset). A fix on the way: x86i-check ran its CPU runs through
+  run-check's `$runner`, unset there under `set -u` since AR4's merge (every CPU row `exit 1`; found by the AR7 proof's `--only` run of
+  the subset, 13 of 13 after).

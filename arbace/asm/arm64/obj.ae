@@ -27,9 +27,16 @@
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the mapping symbols (AArch64ELFStreamer: emitA64MappingSymbol, emitDataMappingSymbol; the state kept per section)
 
+(def ^:dynamic *implicit-mapsyms*
+  "llvm-mc's -implicit-mapsyms (ARS47 (a)): a section starts in its implicit state (code in an executable section, data in the
+  others), no mapping symbol at its start; one at its end restores it (`implicit-end!`)."
+  false)
+
+(defn- ems-of [sec] (or (:ems @sec) (when *implicit-mapsyms* (if (o/code-section? sec) :code :data))))
+
 (defn- mapping! [ctx kind]
   (let [sec (o/cur-sec ctx)]
-    (when-not (= kind (:ems @sec))
+    (when-not (= kind (ems-of sec))
       (let [nm (if (= kind :code) "$x" "$d")
             k (str nm "\u0000" (vswap! (:tmp ctx) inc))
             s (o/label! ctx k)]
@@ -95,7 +102,7 @@
   (mapping! ctx :code)
   (let [ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
     (dotimes [i 4] (.add b (bit-and (bit-shift-right w (* 8 i)) 0xff)))
-    (doseq [fx fixups] (.add ^java.util.ArrayList (:fixups @ch) (assoc fx 0 base)))))
+    (doseq [fx fixups] (.add ^java.util.ArrayList (:fixups @ch) (o/with-pos ctx (assoc fx 0 base))))))
 
 (def ^:private fold-sym
   "The placeholder an immediate's label arithmetic is encoded as (ARS36 (a)): a bare symbol the encoder leaves to a fixup."
@@ -103,14 +110,29 @@
 
 (defn- fold-imm
   "The forms with its one immediate whose value is an expression of symbols, without a specifier (`#(end - start)`), replaced
-  by the placeholder (bare, then as :lo12:, which add and sub take): [[FORM...] EXPR], or nil when it has none."
+  by the placeholder (bare, then as :lo12:, which add and sub take, then as :abs_g0:, which movz takes): [[FORM...] EXPR], or nil
+  when it has none. ARS43 (a): also a bare expression operand (`mov x0, 1b - 0b`, `mov x0, label`: a MOVW fixup) and a memory
+  operand's offset (`ldr x0, [x1, label - .]`: an LDST fixup), as AArch64AsmParser takes them."
   [f]
-  (let [i (first (keep-indexed (fn [i op] (when (and (= 'imm (head op)) (seq? (second op)) (not (#{'spec 'at} (head (second op)))))
+  (let [expr? (fn [x] (or (symbol? x) (and (seq? x) (not (#{'reg 'shift 'rlist 'elt 'imm 'mem 'wb 'spec 'at 'lit 'float 'sym} (head x))))))
+        ops (vec (rest f))
+        i (first (keep-indexed (fn [i op] (when (or (and (= 'imm (head op)) (seq? (second op)) (not (#{'spec 'at} (head (second op)))))
+                                                    (and (pos? i) (expr? op)))
                                             i))
-                               (rest f)))]
-    (when i
-      [(for [ph [fold-sym (list 'spec 'lo12 fold-sym)]] (apply list (first f) (assoc (vec (rest f)) i (list 'imm ph))))
-       (second (nth (rest f) i))])))
+                               ops))
+        j (when-not i
+            (first (keep-indexed (fn [i op] (when (and (= 'mem (head op)) (= 3 (count op)) (= 'reg (head (second op))) (expr? (nth op 2))) i))
+                                 ops)))
+        phs [fold-sym (list 'spec 'lo12 fold-sym) (list 'spec 'abs_g0 fold-sym)]]
+    (cond
+      i (let [op (ops i) ex (if (= 'imm (head op)) (second op) op)]
+          ;; (mov's expression is movz's, MOVW's fixup)
+          [(concat (for [ph phs] (apply list (first f) (assoc ops i (list 'imm ph))))
+                   (when (= 'mov (first f)) [(apply list 'movz (assoc ops i (list 'imm (last phs))))]))
+           ex])
+      j (let [op (ops j)]
+          [(for [ph phs] (apply list (first f) (assoc ops j (list 'mem (second op) ph)))) (nth op 2)])
+      :else nil)))
 
 (defn- optional-hash
   "The form with its bare immediates written with their `#` (AArch64AsmParser takes an immediate without it: `cmp w0, 123`,
@@ -119,8 +141,14 @@
   (apply list (first f) (first (rest f))
          (map (fn [op] (if (or (number? op) (= 'float (head op))) (list 'imm op) op)) (rest (rest f)))))
 
+(def ^:private cond-branch
+  "AArch64AsmParser's conditional branches without the dot (`beq` as `b.eq`; ARS43 (a): fixup-out-of-range-edge's)."
+  (into {} (for [c ["eq" "ne" "cs" "hs" "cc" "lo" "mi" "pl" "vs" "vc" "hi" "ls" "ge" "lt" "gt" "le" "al" "nv"]]
+             [(symbol (str "b" c)) (symbol (str "b." c))])))
+
 (defn- emit-insn! [ctx f]
-  (let [f (const-subst ctx (o/resolve-expr ctx f))
+  (let [f (if-let [b (cond-branch (first f))] (cons b (rest f)) f)
+        f (const-subst ctx (o/resolve-expr ctx f))
         f (if (some #(= 'float (head %)) (rest f)) (optional-hash f) f)
         _ (when (some #(= 'lit (head %)) (rest f)) (o/unsupported :literal-pool (str "ldr =: " (pr-str f))))
         refused (fn [^Exception e] (o/unsupported :instruction (str (or (:asm/message (ex-data e)) (.getMessage e)) ": " (pr-str f))))
@@ -136,7 +164,10 @@
                        (if (and r2 (= 1 (count (:fixups r2))))
                          (assoc r2 :fixups [(list 'imm ex)])
                          (refused e)))
-                     (refused e)))))
+                     ;; mov with a MOVW specifier (`mov x0, #:abs_g0_s:1b`) is movz's (AArch64AsmParser's alias)
+                     (or (when (and (= 'mov (first f)) (some #(and (= 'imm (head %)) (#{'spec 'at} (head (second %)))) (rest f)))
+                           (try (lenc/encode (cons 'movz (rest f))) (catch arbace.lang.ExceptionInfo _ nil)))
+                         (refused e))))))
         w (long (:word r))
         ;; emitA64MappingSymbol before the instruction's symbols are visited
         _ (mapping! ctx :code)
@@ -160,6 +191,10 @@
 (defn- align! [^long v ^long a]
   (when-not (zero? (mod v a)) (o/fail "fixup not sufficiently aligned")))
 
+;; the LDST fixups' own message (adjustFixupValue's fixup_aarch64_ldst_imm12_scaleN)
+(defn- ldst-align! [^long v ^long a]
+  (when-not (zero? (mod v a)) (o/fail (str "fixup must be " a "-byte aligned"))))
+
 (defn field-of
   "The bits a resolved fixup of `kind` with value `v` sets in its instruction word."
   ^long [[kind scale] ^long v]
@@ -172,7 +207,7 @@
     :adr21 (do (range! v -1048576 1048575)
                (bit-or (bit-shift-left (bit-and v 3) 29) (bit-shift-left (bit-and (bit-shift-right v 2) 0x7ffff) 5)))
     :add12 (do (range! v 0 4095) (bit-shift-left v 10))
-    :ldst12 (do (range! v 0 (* 4095 (long scale))) (align! v scale) (bit-shift-left (quot v (long scale)) 10))
+    :ldst12 (do (range! v 0 (+ (* 4095 (long scale)) (dec (long scale)))) (ldst-align! v scale) (bit-shift-left (quot v (long scale)) 10))
     :movw (do (range! v 0 65535) (bit-shift-left v 5))
     (o/unsupported :fixup-kind (str "a resolved " kind))))
 
@@ -189,7 +224,19 @@
   (let [off (long off) spec (when spec (str/lower-case (str spec)))]
     (cond
       reloc? nil
-      (nil? kind) (dotimes [i size] (.set bs (+ off i) (bit-and (bit-shift-right x (* 8 i)) 0xff)))
+      (nil? kind) (do
+                    ;; a data fixup's value fits its size, signed or not (ARS43 (a): LLVM's message)
+                    (when (and (< (long size) 8)
+                               (not (<= (- (bit-shift-left 1 (dec (* 8 (long size))))) x (dec (bit-shift-left 1 (* 8 (long size)))))))
+                      (o/fail (str "value evaluated as " x " is out of range.")))
+                    (dotimes [i size] (.set bs (+ off i) (bit-and (bit-shift-right x (* 8 i)) 0xff))))
+      ;; a MOVW fixup without a specifier, an expression (`mov x0, 1b - 0b`): signed, a negative value inverted into a MOVN
+      ;; (adjustFixupValue, applyFixup)
+      (and (= :movw (first kind)) (nil? spec))
+      (do (range! x -65535 65535)
+          (let [f (bit-shift-left (bit-and (if (neg? x) (bit-not x) x) 0xffff) 5)]
+            (dotimes [i 4] (.set bs (+ off i) (bit-or (long (.get bs (+ off i))) (bit-and (bit-shift-right f (* 8 i)) 0xff))))
+            (let [b3 (long (.get bs (+ off 3)))] (.set bs (+ off 3) (if (neg? x) (bit-and b3 (bit-not 0x40)) (bit-or b3 0x40))))))
       (and (= :movw (first kind)) spec)
       (let [[f movn?] (movw-value spec x) f (bit-shift-left (long f) 5)]
         (dotimes [i 4] (.set bs (+ off i) (bit-or (long (.get bs (+ off i))) (bit-and (bit-shift-right f (* 8 i)) 0xff))))
@@ -277,7 +324,14 @@
   [kind ^long size spec pcrel]
   (let [spec (when spec (str/lower-case (str spec)))
         [k scale] kind
-        bad (fn [] (o/fail (str "invalid fixup for " (if k (name k) (str size "-byte data")) (when spec (str " relocation :" spec ":")))))
+        ;; AArch64ELFObjectWriter::getRelocType's messages (ARS43 (a))
+        bad (fn [] (o/fail (cond (and (nil? k) (= size 1)) "1-byte data relocations not supported"
+                                 (and (= k :ldst12) (= scale 4) (#{"got_lo12" "gottprel_lo12" "tlsdesc_lo12"} spec))
+                                 "32-bit load/store relocation is not supported in LP64"
+                                 (= k :ldst12) (str "invalid fixup for " (* 8 (long scale)) "-bit load/store instruction")
+                                 (= k :movw) "invalid fixup for movz/movk instruction"
+                                 (= k :add12) "invalid fixup for add (uimm12) instruction"
+                                 :else (str "invalid fixup for " (if k (name k) (str size "-byte data")) (when spec (str " relocation :" spec ":"))))))
         nm (cond
              (nil? k) (case spec
                         nil (if pcrel ({2 "PREL16" 4 "PREL32" 8 "PREL64"} size) ({2 "ABS16" 4 "ABS32" 8 "ABS64"} size))
@@ -398,6 +452,37 @@
 
 (defn- uleb-bytes [^long v] (loop [v v out []] (let [b (bit-and v 0x7f) v (unsigned-bit-shift-right v 7)] (if (zero? v) (conj out b) (recur v (conj out (bit-or b 0x80)))))))
 
+(defn- implicit-end!
+  "AArch64TargetELFStreamer::finish under -implicit-mapsyms (ARS47 (a)): an executable section that ends in data gets a $x at its
+  end, another that ends in code a $d, each put in the symbol order right after the section's last symbol (its own symbol, a
+  label, a mapping symbol), the FILE symbols' places moved by the symbols put before them."
+  [ctx]
+  (let [^java.util.ArrayList order (:order ctx)
+        n0 (.size order)
+        cur (o/cur-sec ctx) prev @(:prev ctx)
+        added (vec (for [sec (vec (:sections ctx))
+                         :let [e (ems-of sec) code? (o/code-section? sec)]
+                         :when (if code? (= e :data) (= e :code))]
+                     (do (vreset! (:cur ctx) sec)
+                         (mapping! ctx (if code? :code :data))
+                         [(:index @sec) (.get order (dec (.size order)))])))]
+    (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev)
+    (when (seq added)
+      (let [old (vec (take n0 order))
+            sec-of (fn [n] (let [m @(o/symbol! ctx n)]
+                             (cond (:section-sym m) (:section-sym m) (:chunk m) (:sec @(:chunk m)) :else nil)))
+            last-i (into {} (for [[i n] (map-indexed vector old) :let [sc (sec-of n)] :when sc] [sc i]))
+            ins (into {} (for [[sc k] added :let [i (last-i sc)] :when i] [i k]))
+            new (vec (concat (mapcat (fn [i n] (if-let [k (ins i)] [n k] [n])) (range) old)
+                             ;; a section with no symbol before: its end symbol where it was put
+                             (for [[sc k] added :when (nil? (last-i sc))] k)))
+            idx (sort (keys ins))]
+        (.clear order) (.addAll order new)
+        (let [^java.util.ArrayList fs (:files ctx)]
+          (dotimes [j (.size fs)]
+            (let [[f pos] (.get fs j)]
+              (.set fs j [f (+ (long pos) (count (filter #(< (long %) (long pos)) idx)))]))))))))
+
 (defn- attributes-section! [ctx]
   (when-let [subs (seq (:subs @*attrs*))]
     (o/section! ctx ".ARM.attributes" 0x70000003 0 0 nil false)
@@ -431,7 +516,7 @@
                     type (cond (integer? tn) tn
                                (str/starts-with? tn "R_AARCH64_") (get reloc-numbers (subs tn 10))
                                :else ({"BFD_RELOC_NONE" 0 "BFD_RELOC_16" 0x103 "BFD_RELOC_32" 0x102 "BFD_RELOC_64" 0x101} tn))
-                    _ (when-not type (o/fail "unknown relocation name"))
+                    _ (when-not type (o/fail "unknown relocation name" t))
                     off (o/resolve-expr ctx off) e (o/resolve-expr ctx (or e 0))]
                 (o/visit-syms! ctx e)
                 (.add ^java.util.ArrayList (:reloc-directives ctx) [off type e]))
@@ -472,7 +557,7 @@
    :tls-specs tls-specs
    :directive directive
    :wrap (fn [t] (binding [*attrs* (atom {:subs [] :active nil})] (t)))
-   :finish attributes-section!
+   :finish (fn [ctx] (when *implicit-mapsyms* (implicit-end! ctx)) (attributes-section! ctx))
    :cfi cfi
    :on-data (fn [ctx] (mapping! ctx :data))
    :nops nops
@@ -487,11 +572,17 @@
   [items]
   (binding [o/*arch* arch] (o/assemble items)))
 
-(defn assemble-file [^String path]
+(defn- assemble-file* [^String path]
   (let [items (try (asm/read-items (asm/latin1 path) (asm/dialect "arm64" nil path))
                    (catch arbace.lang.ExceptionInfo e
                      (if (= :syntax (:asm/refused (ex-data e))) {:unsupported :syntax :what (.getMessage e)} (throw e))))]
     (if (map? items) items (assemble items))))
+
+(defn assemble-file
+  "The object of the file at PATH; with IMPLICIT, as -implicit-mapsyms assembles it (ARS47 (a))."
+  ([^String path] (assemble-file path false))
+  ([^String path implicit]
+   (binding [*implicit-mapsyms* (boolean implicit)] (assemble-file* path))))
 
 (defn check-list [lst work record] (binding [o/*arch* arch] (o/check-list assemble-file lst work record)))
 (defn control [subj-path ref-name record] (binding [o/*arch* arch] (o/control assemble-file subj-path ref-name record)))

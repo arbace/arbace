@@ -850,24 +850,51 @@ case ${1:-} in
     # (arbace.asm.arm64.eval: WORK/NAME.eval, WORK/NAME.forms), each run by a64i both ways (WORK/NAME.aot.*, WORK/NAME.eval.*),
     # its forms against its decoded words (WORK/NAME.fc); on an arm64 host run by the CPU too (WORK/NAME.status, .out, .err) and
     # the lockstep in the sys and step modes (WORK/NAME.sys, .step; a header's `# step-limit: N` bounds the step mode); the
-    # controls' runs; judged by test/asm/a64i_judge.ae. --only NAME,...: those programs alone (not recordable)
+    # controls' runs; judged by test/asm/a64i_judge.ae.
+    # ARS46 (b), as x86i's AXS89 (a): --only LIST (a file of program names, one a line, as the gate's rotation writes its list; or
+    # NAME,... by hand) runs those programs alone, judged on what it ran: the recorded rows of the others are left, the coverage is
+    # not held, the controls whose programs are not in the list are not judged, and one more control, slice-foreign, judges the run
+    # against the recorded rows of the programs it did not run, which must fail; --essential: --only the subset of
+    # test/asm/subsets.edn's :a64i (the hand-written programs and two synthetic ones, the essential gate's); --record needs the whole set
     shift; record= only=
-    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; *) echo "repr-asm --arch arm64 a64i-check [--record] [--only NAME,...]" >&2; exit 2 ;; esac; done
-    [ -z "$only" ] || [ -z "$record" ] || { echo "repr-asm a64i-check: --only is not recordable" >&2; exit 2; }
+    while [ $# -gt 0 ]; do case $1 in
+      --record) record=1; shift ;;
+      --only) [ $# -ge 2 ] || { echo "repr-asm a64i-check --only LIST|NAME,..." >&2; exit 2; }; only=$2; shift 2 ;;
+      --essential) only=essential; shift ;;
+      *) echo "repr-asm --arch arm64 a64i-check [--record] [--only LIST|NAME,...] [--essential]" >&2; exit 2 ;; esac; done
+    [ -z "$only" ] || [ -z "$record" ] || { echo "repr-asm a64i-check: --record records the whole set: no --only" >&2; exit 2; }
     export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
     work=$root/.tmp/repr-asm/a64i; rm -rf "$work"; mkdir -p "$work" "$lists"
     : > "$lists/a64i.list"
+    t_start=$SECONDS
     # the synthetic programs (AR6, ARS42 (b)): written by test/asm/a64i/gen.ae into WORK/synth, their digests the recorded ones
     "$0" --arch arm64 a64i synth "$work/synth"
     for f in "$root"/test/asm/run-arm64/*.s "$root"/test/asm/a64i/*.s "$work"/synth/*.s; do
       n=${f##*/}; n=${n%.s}
       case $n in duplicate|undefined) continue ;; esac
-      [ -z "$only" ] || case ",$only," in *",$n,"*) ;; *) continue ;; esac
       printf '%s\t%s\n' "$n" "$f" >> "$lists/a64i.list"
     done
-    arbace_tool -m arbace.asm.link build "$lists/a64i.list" "$work" "$src/musl-1.2.6" arm64
-    arbace_tool -m arbace.asm.arm64.eval build "$lists/a64i.list" "$work" "$src/musl-1.2.6"
+    if [ -n "$only" ]; then
+      if [ "$only" = essential ]; then
+        arbace_tool -e "(doseq [n (:subset (first (filter #(= :a64i (:id %)) (read-string (slurp \"$root/test/asm/subsets.edn\")))))] (println n))" > "$work/only.txt"
+      elif [ -f "$only" ]; then grep -v '^[[:space:]]*$' "$only" > "$work/only.txt" || true
+      else printf '%s\n' "$only" | tr ',' '\n' | grep -v '^$' > "$work/only.txt" || true; fi
+      unknown=$(awk -F'\t' 'FNR == NR { want[$0] = 1; next } { have[$1] = 1 } END { for (n in want) if (!(n in have)) print n }' "$work/only.txt" "$lists/a64i.list")
+      [ -z "$unknown" ] || { echo "repr-asm a64i-check: --only names programs that do not exist:" $unknown >&2; exit 2; }
+      awk -F'\t' 'FNR == NR { want[$0] = 1; next } $1 in want' "$work/only.txt" "$lists/a64i.list" > "$lists/a64i.list.slice"
+      mv "$lists/a64i.list.slice" "$lists/a64i.list"
+      [ -s "$lists/a64i.list" ] || { echo "repr-asm a64i-check: --only LIST is empty" >&2; exit 2; }
+    fi
+    # the AOT build and the eval build side by side (ARS46 (b): the essential step's time; each under 0.5 GiB), their logs after
+    t_b0=$SECONDS
+    arbace_tool -m arbace.asm.link build "$lists/a64i.list" "$work" "$src/musl-1.2.6" arm64 > "$work/build-aot.log" 2>&1 & p_aot=$!
+    arbace_tool -m arbace.asm.arm64.eval build "$lists/a64i.list" "$work" "$src/musl-1.2.6" > "$work/build-eval.log" 2>&1 & p_eval=$!
+    st_aot=0; wait $p_aot || st_aot=$?; st_eval=0; wait $p_eval || st_eval=$?
+    cat "$work/build-aot.log" "$work/build-eval.log"
+    [ $st_aot = 0 ] && [ $st_eval = 0 ] || { echo "FAIL: a64i-check: the builds failed (AOT exit $st_aot, eval exit $st_eval)"; exit 1; }
+    echo "a64i-check: the AOT and eval builds side by side in $((SECONDS - t_b0))s"
     [ -x "$a64i_exe" ] || a64i_light
+    t_progs0=$SECONDS
     case $(uname -m) in aarch64|arm64) native=1 ;; *) native=0; echo "a64i-check: not an arm64 host: the CPU's runs and the lockstep are the arm64 VM's (their recorded rows stand)" ;; esac
     ctl=$root/test/asm/controls-a64i.txt
     while IFS=$'\t' read -r n c _; do
@@ -900,6 +927,7 @@ case ${1:-} in
         esac
       done < "$ctl"
     done < "$work/build.tsv"
+    echo "a64i-check: $(wc -l < "$lists/a64i.list" | tr -d ' ') programs${only:+ (--only $only)}: built in $((t_progs0 - t_start))s, run in $((SECONDS - t_progs0))s"
     fails=0
     # the per-run coverage (AR6, ARS42 (b), as x86i's AXS86 (a)): the instructions a64i claims (a64i claimed: every decodable
     # word's name and family) against those the AOT runs executed (their .cov), the claimed ones never executed listed by family
@@ -927,12 +955,8 @@ case ${1:-} in
       if [ -n "$lost" ]; then echo "FAIL: a64i-check: coverage: executed when recorded, not now:" $lost; fails=$((fails + 1)); fi
     fi
     judge=(-e "(do (load-file \"$root/test/asm/a64i_judge.ae\") nil)")
-    if [ -z "$only" ]; then
-      arbace_tool "${judge[@]}" -e "(asm.a64i-judge/controls \"$work\" \"$ctl\" $([ $native = 1 ] && echo true || echo false))" || fails=$((fails + 1))
-      arbace_tool "${judge[@]}" -e "(asm.a64i-judge/main \"$root/test/asm/a64i-results-arm64.edn\" \"$work\" \"$root/test/asm/divergences-a64i.edn\" \"${record:-}\" \"$native\")" || fails=$((fails + 1))
-    else
-      arbace_tool "${judge[@]}" -e "(doseq [r (asm.a64i-judge/rows \"$work\" $([ $native = 1 ] && echo true || echo false))] (prn r))"
-    fi
+    arbace_tool "${judge[@]}" -e "(asm.a64i-judge/controls \"$work\" \"$ctl\" $([ $native = 1 ] && echo true || echo false) \"$lists/a64i.list\" \"${only:+partial}\")" || fails=$((fails + 1))
+    arbace_tool "${judge[@]}" -e "(asm.a64i-judge/main \"$root/test/asm/a64i-results-arm64.edn\" \"$work\" \"$root/test/asm/divergences-a64i.edn\" \"${record:-}\" \"$native\" \"$lists/a64i.list\" \"${only:+partial}\")" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
   x86i)
     shift
@@ -986,7 +1010,8 @@ case ${1:-} in
       [ "$c" = built ] || continue
       t_prog=$SECONDS
       chmod +x "$work/$n"
-      st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" $runner "./$n" > "$n.out" 2> "$n.err") || st=$?
+      # (x86-64's programs run by this CPU: no runner; `$runner` is run-check's, unset here under set -u since AR4's merge, AR7)
+      st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" "./$n" > "$n.out" 2> "$n.err") || st=$?
       echo "$st" > "$work/$n.status"
       st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$x86i_exe" run --coverage "$n.cov" "./$n" > "$n.x86i.out" 2> "$n.x86i.err") || st=$?
       echo "$st" > "$work/$n.x86i.status"

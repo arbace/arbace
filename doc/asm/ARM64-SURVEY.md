@@ -1095,3 +1095,95 @@ Numbering from ARS43. Each with options, the recommended named; none taken.
   *Recommended: (b)*.
 - **ARS47 `-implicit-mapsyms` and `.org`.** (a) the option taken (the mapping symbols only where the state leaves the section's
   implicit one) and `.org` in the shared assembler (14 lines, 2 objects); (b) left classed. *Recommended: (a)* in the next AOT slice.
+
+## As built: AR7 (2026-11-11; branch `asm-ar7`, from `mac/next` `15278e9c6`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go, light (every check under 0.6 GiB); arm64 programs run by a64i and,
+for the synthetic programs' `--record`, by qemu-aarch64 11.1.2 user mode (an emulation, the model's second judge); no LLVM or GNU
+tool. The user's answers (2026-11-11): ARS43 (a), ARS45 (b), ARS46 (b), ARS47 (a); ARS44 is the main session's queue task. Built in
+that order of value: the essential step's time, the error tests' diagnostics, `-implicit-mapsyms` and `.org`, the memory families'
+synthetic programs. The semantics read again from llvm-project 23.1.5's AArch64 and MC sources as AR6 did (AsmParser::Run's
+finalization, MCAssembler's layout and fixup errors, MCOrgFragment's size, ELFObjectWriter's relocation and symbol errors,
+AArch64ELFObjectWriter::getRelocType's messages, AArch64AsmBackend's adjustFixupValue and applyFixup for MOVW without a specifier,
+AArch64TargetELFStreamer::finish's ending mapping symbols, AArch64AsmParser's `beq` aliases; Apache-2.0 WITH LLVM-exception), the
+error tests' CHECK lines the judge; no code copied.
+
+- **The essential step's time** (ARS46 (b), as x86i's AXS89 (a)): `bin/a64i check --only LIST|NAME,...` runs those programs alone,
+  judged on what it ran (the recorded rows of the others left, the coverage not held, the controls of other programs not judged)
+  with one more control, slice-foreign (the run held to the other programs' recorded rows, which must fail); `--essential` is
+  `--only` test/asm/subsets.edn's `:a64i` (the 72 hand-written programs, synth-alu, synth-fp-d). `a64i-essential` runs it; the new
+  `--full` step `a64i-check` runs the whole set, rotated by GT8.4's `:rotate` (the subset nightly, the other synthetic programs a
+  seventh a night). The AOT build and the eval build now run side by side.
+- **Every error of a file** (ARS43 (a)): the shared object assembler (`arbace.asm.obj`) reports an item's error and goes on to the
+  next item (AsmParser's statements); with any, the file is not finished (AsmParser::Run: no layout); else the layout's errors (a
+  fill's or an org's, once each), every fixup's (each evaluated still: MCAssembler's reportError) and the symbol table's
+  assignments' (`expression could not be evaluated`, a common symbol in an assignment, an undefined subtrahend) are collected, each
+  with its item's place and the expression it is about. `assemble` gives `{:error FIRST :errors [{:pos :msg :expr}...]}`. The
+  object verdict prints them as llvm-mc does (`<stdin>:LINE:COL: error: MESSAGE` or the test's path when llvm-mc reads a file, the
+  source line, the caret; the column where MCExpr's location falls: a specifier's `:spec:`, a binary or unary expression's
+  operator, a symbol) and holds an error run's CHECK lines to them by the FileCheck subset, `[[@LINE]]`, `[[@LINE+N]]` and `[[# @LINE+N]]`
+  taken. LLVM's messages where Arbace had its own or none: `Cannot represent a difference across sections`, `symbol 'S' can not be
+  undefined in a subtraction expression`, `expected relocatable expression` (a negated symbol, a product, a sum of symbols, a
+  specifier over a difference), `1-byte data relocations not supported`, `invalid fixup for N-bit load/store instruction`, `32-bit
+  load/store relocation is not supported in LP64`, `invalid fixup for movz/movk instruction`, `value evaluated as V is out of
+  range.`, `fixup must be N-byte aligned`, `relocation for a thread-local variable points to an absolute symbol`, the org's three.
+  A large fill is refused only when its bytes are written (an error test's 128 MiB `.space` is laid out, not held).
+- **What the error tests needed beside** (the object assembler, `arbace.asm.arm64.obj`): `beq` and the other dotless conditional
+  branches; an expression operand of `mov` (a MOVW fixup without a specifier: signed, a negative value a MOVN, as llvm-mc writes
+  `mov x0, 0b - 1b`), `mov` with a MOVW specifier as `movz`; a memory operand's label difference (`ldr x0, [x1, label - .]`: an LDST
+  fixup, its range and alignment checked at the layout).
+- **`-implicit-mapsyms` and `.org`** (ARS47 (a)): `.org` in the shared assembler (an org chunk sized at the layout, its fill byte);
+  under `-implicit-mapsyms` a section starts in its implicit state and, at the end, an executable section left in data gets a `$x`
+  and another left in code a `$d`, each put right after the section's last symbol in the symbol order, the FILE symbols moved by
+  those put before them (AArch64TargetELFStreamer::finish). The object verdict assembles such a run with the option.
+- **The memory families' synthetic programs** (ARS45 (b)): `test/asm/a64i/gen.ae`'s four new families, each case a stub over a
+  64-byte buffer whose eight words the setup makes from the row (x3, x1, x9), x4 its middle; `check` folds the buffer and x4's
+  distance from the middle (the writeback) into the flags' slot. The model: the buffer as 64 bytes little endian, the extends, the
+  writeback, the exclusive monitor single-threaded, the atomics at their size. ldst (374 cases: every load width and sign, the stores,
+  b/h/s/d/q, unsigned offset, ldur/stur, pre- and post-index, register offset with lsl and sxtw, the literal loads), pair (93: ldp,
+  stp, ldpsw, ldnp, stnp, s/d/q pairs), excl (94: ldxr/stxr and their acquire and release forms at every size, clrex's failing
+  store, the exclusive pairs, ldar, ldapr, stlr), lse (240: ld<op> and st<op> for the eight operations at every size and order, swp,
+  cas, casp hit and missed). `--record` ran them under qemu-aarch64 first: every case agreed; a64i agreed on the first run. Controls
+  verdict-4 and inject-13..16.
+
+| check | before | after |
+|---|---|---|
+| `a64i-essential` (wall, this host) | 1 min 36 s (all 80 programs) | **36 s** (74: the subset, judged on what it ran, slice-foreign control) |
+| `bin/a64i check` whole (wall) | 1 min 36 s (80 programs) | **1 min 7 s** (84 programs) |
+| `bin/a64i check` eval and AOT | 80 / 80 | **84 / 84** (12 synthetic programs, 14,105 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 474 of 653 claimed executed | **653 of 653** (ldst, pair, excl, lse whole) |
+| controls (`test/asm/controls-a64i.txt`) | 28 | **33** (+ slice-foreign on a slice) |
+| object-verdict (MC/AArch64's object runs' CHECK lines) | 2,687 of 2,833 | **2,781 of 2,833** (`:message` 86, `:mc-option` 12, `:error-accepted` 3 → 0) |
+| object-check `mc-aarch64-obj` | 104 of 110 | **107 of 110** (`.org`, `mov x0, #(label diff)` 2) |
+| the AOT cell `[:asm-arm64 :aot]` | 2,904 / 0 / 152 (95.0%) | **3,005 / 0 / 55 (98.2%)**; eval 296 → 300 (the four new programs, forms and CPU rows aside) |
+
+**crops-score** (arm64 assembly): completeness 98.7 → **99.5** (99.5 without by design), maturity 100.0, independence 100.0;
+`--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells checked, 0 problems.
+
+The AOT cell's classes left: `:unsupported-syntax` 38 (`sym@AUTH(ia,42)`, `%pltpcrel(f)`: repr/asm's reader; data-directive-specifier's
+error run's 6 among them), `:view-llvm-dwarfdump` 9, `:filecheck-var` 2, `:no-viewer` 1, `:unsupported-directive` 1 (`.macro`),
+`:unsupported-literal-pool` 1 (`ldr x0, =(-undef)`); the object check's 3 (two syntax, `.macro`). Not built: NEON (ARS45 (b)'s next),
+musl's C and torture as packs, FPCR.FZ, half precision. The CPU's rows of the four new programs wait for the VM (ARS44). A fix
+on the way (amd64): x86i-check's CPU runs used run-check's `$runner`, unset under `set -u` there since AR4's merge (every CPU row
+`exit 1`); the subset 13 of 13 after.
+
+### Proposed (AR7)
+
+Numbering from ARS48. Each with options, the recommended named; none taken.
+
+- **ARS48 NEON in a64i.** (a) the vector classes' integer lanes first (add/sub/logic/shifts/compare/permute, UMOV/INS/DUP), one
+  synthetic family each with the model per lane, then the FP lanes (the model's Java arithmetic per lane); (b) the FP lanes first;
+  (c) only what musl's and torture's code executes, after ARS11's packs. *Recommended: (a)*: the integer lanes are the bulk of what
+  compiled C uses, and their model is plain.
+- **ARS49 `@AUTH(...)` and `%pltpcrel(...)` in repr/asm's reader** (38 lines, now the AOT cell's largest class). (a) read them as
+  forms (`(at sym AUTH ia 42)`, `(pct pltpcrel f)`) with their relocations (R_AARCH64_AUTH_ABS64, PLT32); (b) leave them classed.
+  *Recommended: (a)*.
+- **ARS50 The literal pool** (`ldr x0, =expr`, `.ltorg`; 1 line, and compiled C's constants). (a) AArch64's constant pools as
+  llvm-mc lays them out (per section, at `.ltorg` and the section's end, deduplicated); (b) left classed. *Recommended: (a)* with the
+  C packs (ARS11).
+- **ARS51 The diagnostics' columns.** The column is found in the item's text where MCExpr's location falls (a heuristic: only 4 of
+  the tests' columns are stated, all met). (a) the reader records each operand's offset in the item, the column exact; (b) keep the
+  heuristic until a stated column misses. *Recommended: (b)*.
+- **ARS52 The memory programs in the essential subset.** The four memory families run in the rotation (`--full`). (a) add synth-lse
+  (240 cases, the atomics: about 4 s) to `:a64i`; (b) keep the subset as ARS46 (b) set it. *Recommended: (b)*: the hand-written
+  ldst/lse programs already stand in the essential step.

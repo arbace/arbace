@@ -584,6 +584,270 @@
   [["fp-d" "the scalar FP at double precision: fadd, fsub, fmul, fdiv, fmax, fmin, fmaxnm, fminnm, fcmp, fcmpe (with #0.0 too), fmadd, fmsub, fnmadd, fnmsub, fabs, fneg, fsqrt, frint*, fcvt[nzapm][su], scvtf, ucvtf, fcvt from single, fcsel, fccmp, fccmpe, fnmul, fmov (register, immediate, general)" :d]
    ["fp-s" "the scalar FP at single precision: the same, fcvt from double" :s]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the memory families (AR7, ARS45 (b)): ldst, pair, excl, lse. A 64-byte buffer, its eight words made from the row (x3 the
+;; seed, x1 and x9 data) by the setup, x4 its middle (buf + 32); the case's stub (its instructions under test, the result into x0,
+;; free to move x4: the writeback) is called, then `check` folds the buffer and x4's distance from the middle into x12. The model
+;; holds the buffer as 64 bytes (little endian) and the instructions' pseudocode (Mem[], the extends, the writeback, the exclusive
+;; monitor single-threaded, the atomics' operations at their size).
+
+(def ^:private mem-words
+  "The setup's eight words of the buffer from x3, x1, x9 (the setup's instructions, in their order)."
+  (fn [^long x3 ^long x1 ^long x9]
+    [x3 (bit-not x3) (bit-xor x3 x9) (unchecked-add x3 x1) (Long/rotateRight x3 32) (unchecked-subtract x9 x3)
+     (bit-xor x1 (bit-shift-left x3 1)) (bit-xor x9 (unsigned-bit-shift-right x3 3))]))
+
+(defn- mem-of [ws] (vec (for [w ws i (range 8)] (bit-and (bit-shift-right (long w) (* 8 i)) 0xff))))
+(defn- rd ^long [m ^long a ^long n] (reduce (fn [acc i] (bit-or acc (bit-shift-left (long (m (+ a 32 i))) (* 8 i)))) 0 (range n)))
+(defn- wr [m ^long a ^long n ^long v] (reduce (fn [m i] (assoc m (+ a 32 i) (bit-and (bit-shift-right v (* 8 i)) 0xff))) m (range n)))
+(defn- sext ^long [^long v ^long bits] (if (>= bits 64) v (let [s (- 64 bits)] (bit-shift-right (bit-shift-left v s) s))))
+(defn- zext ^long [^long v ^long bits] (if (>= bits 64) v (bit-and v (ones bits))))
+
+(defn- mem-hash
+  "check's fold: h = w1 ^ ror(w0, 7), then h = w ^ ror(h, 7) for w2..w7, then the base's distance from the middle."
+  ^long [m ^long delta]
+  (let [w (fn [i] (rd m (- (* 8 i) 32) 8))
+        h (reduce (fn [h i] (bit-xor (long (w i)) (Long/rotateRight h 7))) (bit-xor (long (w 1)) (Long/rotateRight (long (w 0)) 7)) (range 2 8))]
+    (bit-xor delta (Long/rotateRight h 7))))
+
+(def mem-setup
+  (str "\tadrp\tx4, buf\n\tadd\tx4, x4, :lo12:buf\n"
+       "\tmvn\tx5, x3\n\tstp\tx3, x5, [x4]\n"
+       "\teor\tx5, x3, x9\n\tadd\tx6, x3, x1\n\tstp\tx5, x6, [x4, #16]\n"
+       "\tror\tx5, x3, #32\n\tsub\tx6, x9, x3\n\tstp\tx5, x6, [x4, #32]\n"
+       "\teor\tx5, x1, x3, lsl #1\n\teor\tx6, x9, x3, lsr #3\n\tstp\tx5, x6, [x4, #48]\n"
+       "\tadd\tx4, x4, #32\n\tmov\tx0, #0\n"))
+
+(def mem-hash-text
+  (str "\tadrp\tx13, buf\n\tadd\tx13, x13, :lo12:buf\n"
+       "\tldp\tx14, x15, [x13]\n\teor\tx12, x15, x14, ror #7\n"
+       "\tldp\tx14, x15, [x13, #16]\n\teor\tx12, x14, x12, ror #7\n\teor\tx12, x15, x12, ror #7\n"
+       "\tldp\tx14, x15, [x13, #32]\n\teor\tx12, x14, x12, ror #7\n\teor\tx12, x15, x12, ror #7\n"
+       "\tldp\tx14, x15, [x13, #48]\n\teor\tx12, x14, x12, ror #7\n\teor\tx12, x15, x12, ror #7\n"
+       "\tadd\tx13, x13, #32\n\tsub\tx14, x4, x13\n\teor\tx12, x14, x12, ror #7\n"))
+
+(defn- mcase
+  "A memory case: the stub's text, the row's x1, x2, x3, x9, and the model's [x0 memory delta]."
+  [stub x1 x2 x3 x9 [res m delta]]
+  {:insn stub :x1 x1 :x2 x2 :x3 x3 :nzcv x9 :res res :flags (mem-hash m delta)})
+
+(def ^:private ld-kinds
+  ;; [mnemonic register-width bytes signed?]
+  [["ldrb" 32 1 false] ["ldrh" 32 2 false] ["ldr" 32 4 false] ["ldr" 64 8 false]
+   ["ldrsb" 32 1 true] ["ldrsb" 64 1 true] ["ldrsh" 32 2 true] ["ldrsh" 64 2 true] ["ldrsw" 64 4 true]])
+(def ^:private st-kinds [["strb" 32 1] ["strh" 32 2] ["str" 32 4] ["str" 64 8]])
+
+(defn- unscaled [^String mn] (str/replace mn #"^(ld|st)r" "$1ur"))
+
+(defn- address
+  "An addressing mode's operand text and [ADDRESS NEW-BASE-DELTA] for an access of n bytes (x4 the middle, delta 0): the scaled
+  unsigned offset, the unscaled signed one (ldur), pre- and post-index, the register offset (lsl, sxtw) with x2."
+  [mode ^long n x ^long x2]
+  (let [sh (Long/numberOfTrailingZeros n)]
+    (case mode
+      :uoff (let [k (* n (mod x (quot 32 n)))] [(str "[x4, #" k "]") [k 0] 0])
+      ;; ldur's offset: -32 .. 32 - n, any alignment
+      :unscaled (let [k (- (mod x (- 65 n)) 32)] [(str "[x4, #" k "]") [k 0] 0])
+      :pre (let [k (* n (- (mod x (quot 64 n)) (quot 32 n)))] [(str "[x4, #" k "]!") [k k] 0])
+      :post (let [k (- (mod x 64) 32)] [(str "[x4], #" k) [0 k] 0])
+      :reg-lsl (let [i (- (mod x (quot 64 n)) (quot 32 n)) s? (odd? (unsigned-bit-shift-right x 9))]
+                 [(str "[x4, x2" (if s? (str ", lsl #" sh) "") "]") [(if s? (* i n) i) 0] (if s? i (* i 1))])
+      :reg-sxtw (let [i (- (mod x (quot 64 n)) (quot 32 n))]
+                  [(str "[x4, w2, sxtw #" sh "]") [(* i n) 0] (bit-and i m32)]))))
+
+(defn- reg-fix
+  "The register-offset index x2: for :reg-lsl without a shift the byte offset itself."
+  [mode ^long n x [_ [a _] x2]]
+  (if (and (= mode :reg-lsl) (not (odd? (unsigned-bit-shift-right (long x) 9)))) a x2))
+
+(defn ldst-cases [rs]
+  (let [rs (atom (seq rs)) nx (fn [] (let [x (first @rs)] (swap! rs rest) x))
+        modes [:uoff :unscaled :pre :post :reg-lsl :reg-sxtw]]
+    (concat
+     ;; the integer loads, every width and sign, every mode
+     (for [[mn w n sg] ld-kinds mode modes _ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) x (nx)
+             [op [a d] x2] (address mode n x 0) x2 (reg-fix mode n x [op [a d] x2])
+             mn (if (= mode :unscaled) (unscaled mn) mn)
+             m (mem-of (mem-words x3 x1 x9)) v (rd m a n) v (if sg (zext (sext v (* 8 n)) w) v)]
+         (mcase (str mn "\t" (r (= w 64) 0) ", " op "\n") x1 x2 x3 x9 [v m d])))
+     ;; the integer stores
+     (for [[mn w n] st-kinds mode modes _ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) x (nx)
+             [op [a d] x2] (address mode n x 0) x2 (reg-fix mode n x [op [a d] x2])
+             mn (if (= mode :unscaled) (unscaled mn) mn)
+             m (wr (mem-of (mem-words x3 x1 x9)) a n x1)]
+         (mcase (str mn "\t" (r (= w 64) 1) ", " op "\n") x1 x2 x3 x9 [0 m d])))
+     ;; the FP and SIMD registers' loads (b, h, s, d into x0 by fmov; q stored back at the middle) and stores (x1 by fmov)
+     (for [[rg n] [["b" 1] ["h" 2] ["s" 4] ["d" 8] ["q" 16]] mode modes ld? [true false] _ (range 2)]
+       (let [x1 (nx) x3 (nx) x9 (nx) x (nx)
+             [op [a d] x2] (address mode n x 0) x2 (reg-fix mode n x [op [a d] x2])
+             mn (if ld? "ldr" "str") mn (if (= mode :unscaled) (unscaled mn) mn)
+             m0 (mem-of (mem-words x3 x1 x9))]
+         (if ld?
+           (if (= rg "q")
+             ;; q0 loaded, then stored at the base after the writeback (the model's address d, kept in the buffer: a post-index
+             ;; beyond 16 moved down by 48)
+             (let [[op d] (if (and (= mode :post) (> (long d) 16)) [(str "[x4], #" (- (long d) 48)) (- (long d) 48)] [op d])
+                   lo (rd m0 a 8) hi (rd m0 (+ a 8) 8) m (wr (wr m0 d 8 lo) (+ d 8) 8 hi)]
+               (mcase (str mn "\tq0, " op "\n\tstr\tq0, [x4]\n") x1 x2 x3 x9 [0 m d]))
+             (mcase (str mn "\t" rg "0, " op "\n\tfmov\t" (if (= n 8) "x0, d0" "w0, s0") "\n") x1 x2 x3 x9 [(rd m0 a n) m0 d]))
+           (let [m (if (= rg "q") (wr (wr m0 a 8 x1) (+ a 8) 8 0) (wr m0 a n x1))]
+             (mcase (str "\tfmov\td0, x1\n" mn "\t" rg "0, " op "\n") x1 x2 x3 x9 [0 m d])))))
+     ;; the literal loads: w, x, sw, s, d (the literal after the stub's ret)
+     (for [[mn rg n sg] [["ldr" "w" 4 false] ["ldr" "x" 8 false] ["ldrsw" "x" 4 true] ["ldr" "s" 4 false] ["ldr" "d" 8 false]] _ (range 4)]
+       (let [x1 (nx) x3 (nx) x9 (nx) v (zext (nx) (* 8 n))
+             res (if sg (sext v 32) v)
+             mv (case rg "s" "\tfmov\tw0, s0\n" "d" "\tfmov\tx0, d0\n" "")
+             dst (case rg ("s" "d") (str rg "0") (str rg "0"))]
+         {:insn (str mn "\t" dst ", 1f\n" mv "\tret\n\t.p2align\t3\n1:\t" (if (= n 8) ".xword\t" ".word\t") (hx v) "\n")
+          :x1 x1 :x2 0 :x3 x3 :nzcv x9 :res res :flags (mem-hash (mem-of (mem-words x3 x1 x9)) 0) :no-ret true})))))
+
+(defn- pick-k
+  "A multiple of n in [lo, hi] chosen by x."
+  ^long [x ^long lo ^long hi ^long n]
+  (* n (+ (quot lo n) (mod (unsigned-bit-shift-right (long x) 5) (inc (quot (- hi lo) n))))))
+
+(defn- pair-addr
+  "A pair's operand text and [ADDRESS DELTA] for T bytes at element size n: the offset and pre-index within the buffer, the
+  post-index's access at the middle (HI-POST bounds its writeback)."
+  [mode x ^long n ^long t ^long hi-post]
+  (case mode
+    :off (let [k (pick-k x -32 (- 32 t) n)] [(str "[x4, #" k "]") k 0])
+    :pre (let [k (pick-k x -32 (min hi-post (- 32 t)) n)] [(str "[x4, #" k "]!") k k])
+    :post (let [k (pick-k x -32 hi-post n)] [(str "[x4], #" k) 0 k])))
+
+(defn pair-cases [rs]
+  (let [rs (atom (seq rs)) nx (fn [] (let [x (first @rs)] (swap! rs rest) x))]
+    (concat
+     ;; ldp, stp (w, x), ldpsw, ldnp, stnp: offset, pre- and post-index
+     (for [[kind n] [[:w 4] [:x 8] [:sw 4] [:nw 4] [:nx 8]] ld? [true false] mode [:off :pre :post] _ (range 3)
+           :when (not (and (= kind :sw) (not ld?)))
+           :when (not (and (#{:nw :nx} kind) (not= mode :off)))]
+       (let [x1 (nx) x3 (nx) x9 (nx)
+             [op a d] (pair-addr mode (nx) n (* 2 n) 32)
+             reg (if (= n 8) "x" "w")
+             m0 (mem-of (mem-words x3 x1 x9))
+             mn (case kind :sw "ldpsw" (:nw :nx) (if ld? "ldnp" "stnp") (if ld? "ldp" "stp"))
+             rr (if (= kind :sw) "x" reg)]
+         (if ld?
+           (let [v1 (rd m0 a n) v2 (rd m0 (+ a n) n)
+                 [v1 v2] (if (= kind :sw) [(sext v1 32) (sext v2 32)] [v1 v2])]
+             (mcase (str mn "\t" rr "0, " rr "5, " op "\n\teor\tx0, x0, x5, ror #13\n") x1 0 x3 x9
+                    [(bit-xor v1 (Long/rotateRight v2 13)) m0 d]))
+           (let [m (wr (wr m0 a n x1) (+ a n) n x9)]
+             (mcase (str "\tmov\tx5, x9\n" mn "\t" reg "1, " reg "5, " op "\n") x1 0 x3 x9 [0 m d])))))
+     ;; the FP and SIMD pairs: s, d (into x0 by fmov), q (stored back at the base after the writeback, swapped)
+     (for [[rg n] [["s" 4] ["d" 8] ["q" 16]] mode [:off :pre :post] ld? [true false] _ (range 2)]
+       (let [x1 (nx) x3 (nx) x9 (nx)
+             [op a d] (pair-addr mode (nx) n (* 2 n) (if (and ld? (= rg "q")) 0 32))
+             m0 (mem-of (mem-words x3 x1 x9))]
+         (if ld?
+           (if (= rg "q")
+             (let [m (-> m0 (wr d 8 (rd m0 (+ a 16) 8)) (wr (+ d 8) 8 (rd m0 (+ a 24) 8)) (wr (+ d 16) 8 (rd m0 a 8)) (wr (+ d 24) 8 (rd m0 (+ a 8) 8)))]
+               (mcase (str "ldp\tq0, q1, " op "\n\tstp\tq1, q0, [x4]\n") x1 0 x3 x9 [0 m d]))
+             (let [v1 (rd m0 a n) v2 (rd m0 (+ a n) n) f (if (= n 8) "x" "w") g (if (= n 8) "d" "s")]
+               (mcase (str "ldp\t" rg "0, " rg "1, " op "\n\tfmov\t" f "0, " g "0\n\tfmov\t" f "5, " g "1\n\teor\tx0, x0, x5, ror #13\n")
+                      x1 0 x3 x9 [(bit-xor v1 (Long/rotateRight v2 13)) m0 d])))
+           (let [m (if (= rg "q") (-> m0 (wr a 8 x1) (wr (+ a 8) 8 0) (wr (+ a 16) 8 x9) (wr (+ a 24) 8 0))
+                       (-> m0 (wr a n x1) (wr (+ a n) n x9)))]
+             (mcase (str "\tfmov\td0, x1\n\tfmov\td1, x9\n" "stp\t" rg "0, " rg "1, " op "\n") x1 0 x3 x9 [0 m d]))))))))
+
+(defn excl-cases [rs]
+  (let [rs (atom (seq rs)) nx (fn [] (let [x (first @rs)] (swap! rs rest) x))
+        sfx {1 "b" 2 "h" 4 "" 8 ""}]
+    (concat
+     ;; load exclusive, add x1, store exclusive (status 0 into x0, the sum stored); every size, acquire and release
+     (for [n [1 2 4 8] [l s] [["ldxr" "stxr"] ["ldaxr" "stlxr"] ["ldxr" "stlxr"] ["ldaxr" "stxr"]] _ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (* n (- (mod (nx) (quot 64 n)) (quot 32 n)))
+             rg (if (= n 8) "x" "w") m0 (mem-of (mem-words x3 x1 x9))
+             v (zext (unchecked-add (rd m0 k n) x1) (* 8 n))]
+         (mcase (str "\tadd\tx8, x4, #" (+ 32 k) "\n\tsub\tx8, x8, #32\n" l (sfx n) "\t" rg "5, [x8]\n\tadd\t" rg "5, " rg "5, " rg "1\n"
+                     s (sfx n) "\tw0, " rg "5, [x8]\n")
+                x1 0 x3 x9 [0 (wr m0 k n v) 0])))
+     ;; the store exclusive after clrex fails (status 1), memory unchanged
+     (for [n [4 8] s ["stxr" "stlxr"]]
+       (let [x1 (nx) x3 (nx) x9 (nx) rg (if (= n 8) "x" "w")]
+         (mcase (str "\tclrex\n" s "\tw0, " rg "1, [x4]\n") x1 0 x3 x9 [1 (mem-of (mem-words x3 x1 x9)) 0])))
+     ;; the pairs: ldxp/stxp, ldaxp/stlxp (w, x): the two swapped
+     (for [n [4 8] [l s] [["ldxp" "stxp"] ["ldaxp" "stlxp"] ["ldxp" "stlxp"]] _ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (* 2 n (- (mod (nx) (quot 32 n)) (quot 16 n)))
+             rg (if (= n 8) "x" "w") m0 (mem-of (mem-words x3 x1 x9))
+             v1 (rd m0 k n) v2 (rd m0 (+ k n) n)]
+         (mcase (str "\tadd\tx8, x4, #" (+ 32 k) "\n\tsub\tx8, x8, #32\n" l "\t" rg "5, " rg "6, [x8]\n" s "\tw0, " rg "6, " rg "5, [x8]\n")
+                x1 0 x3 x9 [0 (-> m0 (wr k n v2) (wr (+ k n) n v1)) 0])))
+     ;; load-acquire, store-release (ldar, stlr; ldapr): every size
+     (for [n [1 2 4 8] [mn ld?] [["ldar" true] ["ldapr" true] ["stlr" false]] _ (range 2)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (* n (- (mod (nx) (quot 64 n)) (quot 32 n)))
+             rg (if (= n 8) "x" "w") m0 (mem-of (mem-words x3 x1 x9))
+             at (str "\tadd\tx8, x4, #" (+ 32 k) "\n\tsub\tx8, x8, #32\n")]
+         (if ld?
+           (mcase (str at mn (sfx n) "\t" rg "0, [x8]\n") x1 0 x3 x9 [(rd m0 k n) m0 0])
+           (mcase (str at mn (sfx n) "\t" rg "1, [x8]\n") x1 0 x3 x9 [0 (wr m0 k n x1) 0])))))))
+
+(def ^:private lse-ops
+  ;; [name (fn [old operand bits] new)]
+  [["add" (fn [o v b] (unchecked-add (long o) (long v)))] ["clr" (fn [o v b] (bit-and (long o) (bit-not (long v))))]
+   ["eor" (fn [o v b] (bit-xor (long o) (long v)))] ["set" (fn [o v b] (bit-or (long o) (long v)))]
+   ["smax" (fn [o v b] (if (>= (sext o b) (sext v b)) o v))] ["smin" (fn [o v b] (if (<= (sext o b) (sext v b)) o v))]
+   ["umax" (fn [o v b] (if (>= (Long/compareUnsigned (zext o b) (zext v b)) 0) o v))]
+   ["umin" (fn [o v b] (if (<= (Long/compareUnsigned (zext o b) (zext v b)) 0) o v))]])
+
+(defn lse-cases [rs]
+  (let [rs (atom (seq rs)) nx (fn [] (let [x (first @rs)] (swap! rs rest) x))
+        sfx {1 "b" 2 "h" 4 "" 8 ""}
+        at (fn [k] (str "\tadd\tx8, x4, #" (+ 32 k) "\n\tsub\tx8, x8, #32\n"))
+        pick-v (fn [m0 k n x] (case (mod (long x) 4) 0 (rd m0 k n) 1 (bit-xor (rd m0 k n) 1) 2 0 (nx)))]
+    (concat
+     ;; ld<op>{a,l,al}{b,h,}: the old value into x0 (zero-extended at the size), the operation stored
+     (for [[op f] lse-ops n [1 2 4 8] ord ["" "a" "l" "al"]]
+       (let [x3 (nx) x9 (nx) x0s (nx) k (* n (- (mod (nx) (quot 64 n)) (quot 32 n)))
+             x1 (nx) m0 (mem-of (mem-words x3 x1 x9)) b (* 8 n) rg (if (= n 8) "x" "w")
+             old (rd m0 k n) v (zext (f old x1 b) b)]
+         (mcase (str (at k) "ld" op ord (sfx n) "\t" rg "1, " rg "0, [x8]\n") x1 0 x3 x9 [old (wr m0 k n v) 0])))
+     ;; st<op>{l}: no result
+     (for [[op f] lse-ops n [4 8] ord ["" "l"]]
+       (let [x3 (nx) x9 (nx) k (* n (- (mod (nx) (quot 64 n)) (quot 32 n)))
+             x1 (nx) m0 (mem-of (mem-words x3 x1 x9)) b (* 8 n) rg (if (= n 8) "x" "w")
+             v (zext (f (rd m0 k n) x1 b) b)]
+         (mcase (str (at k) "st" op ord (sfx n) "\t" rg "1, [x8]\n") x1 0 x3 x9 [0 (wr m0 k n v) 0])))
+     ;; swp{a,l,al}{b,h,}
+     (for [n [1 2 4 8] ord ["" "a" "l" "al"] _ (range 2)]
+       (let [x3 (nx) x9 (nx) k (* n (- (mod (nx) (quot 64 n)) (quot 32 n)))
+             x1 (nx) m0 (mem-of (mem-words x3 x1 x9)) rg (if (= n 8) "x" "w")]
+         (mcase (str (at k) "swp" ord (sfx n) "\t" rg "1, " rg "0, [x8]\n") x1 0 x3 x9 [(rd m0 k n) (wr m0 k n (zext x1 (* 8 n))) 0])))
+     ;; cas{a,l,al}{b,h,}: the compare value the memory's (it swaps) or not (it does not); the old value into x0
+     (for [n [1 2 4 8] ord ["" "a" "l" "al"] hit? [true false]]
+       (let [x3 (nx) x9 (nx) k (* n (- (mod (nx) (quot 64 n)) (quot 32 n)))
+             x1 (nx) m0 (mem-of (mem-words x3 x1 x9)) rg (if (= n 8) "x" "w") old (rd m0 k n)]
+         (mcase (str (at k) (if hit? (str "ldr" (sfx n) "\t" rg "5, [x8]\n") "\tmov\tx5, x9\n")
+                     "cas" ord (sfx n) "\t" rg "5, " rg "1, [x8]\n\tmov\tx0, x5\n")
+                x1 0 x3 x9 [old (if (or hit? (= (zext x9 (* 8 n)) old)) (wr m0 k n (zext x1 (* 8 n))) m0) 0])))
+     ;; casp{a,l,al} (w, x): x6, x7 compared, x14, x15 stored; the old pair into x0 folded
+     (for [n [4 8] ord ["" "a" "l" "al"] hit? [true false]]
+       (let [x3 (nx) x9 (nx) k (* 2 n (- (mod (nx) (quot 32 n)) (quot 16 n)))
+             x1 (nx) m0 (mem-of (mem-words x3 x1 x9)) rg (if (= n 8) "x" "w")
+             o1 (rd m0 k n) o2 (rd m0 (+ k n) n)
+             same (and (not hit?) (= (zext x9 (* 8 n)) o1) (= (zext x1 (* 8 n)) o2))]
+         (mcase (str (at k) (if hit? (str "ldp\t" rg "6, " rg "7, [x8]\n") "\tmov\tx6, x9\n\tmov\tx7, x1\n")
+                     "\tmov\tx14, x1\n\tmov\tx15, x9\n"
+                     "casp" ord "\t" rg "6, " rg "7, " rg "14, " rg "15, [x8]\n\teor\tx0, x6, x7, ror #13\n")
+                x1 0 x3 x9 [(bit-xor o1 (Long/rotateRight o2 13))
+                            (if (or hit? same) (-> m0 (wr k n (zext x1 (* 8 n))) (wr (+ k n) n (zext x9 (* 8 n)))) m0) 0]))))))
+
+(def mem-families
+  [["ldst" "loads and stores: ldr, ldrb, ldrh, ldrsb, ldrsh, ldrsw, str, strb, strh (unsigned offset, ldur/stur, pre- and post-index, register offset with lsl and sxtw), b/h/s/d/q's, the literal loads" ldst-cases]
+   ["pair" "pairs: ldp, stp, ldpsw, ldnp, stnp (w, x; offset, pre- and post-index), s/d/q's" pair-cases]
+   ["excl" "exclusives: ldxr, ldaxr, stxr, stlxr (b, h, w, x), clrex, ldxp, ldaxp, stxp, stlxp, ldar, ldapr, stlr" excl-cases]
+   ["lse" "atomics: ld<op> and st<op> (add, clr, eor, set, smax, smin, umax, umin), swp, cas, casp with their orders" lse-cases]])
+
+(defn mem-program
+  "A memory family's program: the buffer set from the row, the stub, x0 and the buffer's fold against the row's (a literal
+  load's stub ends in its own ret and its literal, the loop's ret after them unreached)."
+  [nm what cases]
+  (str (looped nm what mem-setup mem-hash-text (vec (remove nil? cases)) :insn)
+       "\n// the buffer\n\t.bss\n\t.p2align\t4\nbuf:\t.zero\t64\n"))
+
 (defn- sha256 [^String s]
   (let [md (MessageDigest/getInstance "SHA-256")]
     (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md (.getBytes s "UTF-8"))))))
@@ -601,6 +865,11 @@
                [(str "synth-" nm) (sha256 text)]))
          (for [[i [nm what t]] (map-indexed vector fp-families)
                :let [text (fp-program nm what t (vec (fp-cases t (rng (+ seed 100 i)))))]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR7: the memory families
+         (for [[i [nm what f]] (map-indexed vector mem-families)
+               :let [text (mem-program nm what (vec (f (rng (+ seed 200 i)))))]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)])))))
 
