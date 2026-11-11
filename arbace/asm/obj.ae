@@ -1399,14 +1399,37 @@
         [k d]
         [:canonical (str (alength ours) " bytes against " (alength ref))]))))
 
+(defn defsym-value
+  "llvm-mc's --defsym VALUE as it reads it (fillCommandLineSymbols: StringRef::getAsInteger(0, int64_t)): the radix sensed
+  (`0x`/`0X` 16, `0b`/`0B` 2, `0o` 8, a `0` before a digit 8, else 10), a leading `-` negating, the whole text consumed and
+  the value an int64's (a negative's magnitude at most 2^63); nil when llvm-mc refuses it (`value is not an integer`). One
+  parser for both arches' object checks (review 1111 (8))."
+  [^String v]
+  (let [neg (str/starts-with? v "-") s (if neg (subs v 1) v) ls (str/lower-case s)
+        [radix ^String ds] (cond (str/starts-with? ls "0x") [16 (subs s 2)]
+                                 (str/starts-with? ls "0b") [2 (subs s 2)]
+                                 (str/starts-with? s "0o") [8 (subs s 2)]
+                                 (and (> (count s) 1) (= \0 (.charAt s 0)) (Character/isDigit (.charAt s 1))) [8 (subs s 1)]
+                                 :else [10 s])
+        u (when (re-matches #"[0-9A-Za-z]+" ds) (try (BigInteger. ds (int radix)) (catch NumberFormatException _ nil)))
+        lim (.shiftLeft BigInteger/ONE 63)]
+    (when u
+      (cond (and (not neg) (< (.compareTo ^BigInteger u lim) 0)) (.longValue ^BigInteger u)
+            (and neg (<= (.compareTo ^BigInteger u lim) 0)) (.longValue (.negate ^BigInteger u))
+            :else nil))))
+
 (defn defsym-of
-  "The list's third field (the case's llvm-mc options, AXS94 (a): `--defsym SYM=V ...`) as assemble's :defsym ([[SYM V]...]),
-  or nil when it names none."
+  "The list's third field (the case's llvm-mc options, AXS94 (a): `--defsym SYM=V ...`) as [[SYM V-TEXT]...], or nil when it
+  names none; `defsyms` reads the values."
   [opts]
-  (not-empty (vec (for [[_ n v] (re-seq #"--?defsym[= ]([A-Za-z_.$][\w.$]*)=(-?\w+)" (or opts ""))]
-                    [n (let [v (str/lower-case v) neg (str/starts-with? v "-") v (if neg (subs v 1) v)
-                             x (if (str/starts-with? v "0x") (Long/parseLong (subs v 2) 16) (Long/parseLong v))]
-                         (if neg (- x) x))]))))
+  (not-empty (vec (for [[_ n v] (re-seq #"--?defsym[= ]([A-Za-z_.$][\w.$]*)=(\S+)" (or opts ""))] [n v]))))
+
+(defn defsyms
+  "[[SYM V-TEXT]...] as assemble's :defsym ([[SYM V]...]): each value read by defsym-value, a value llvm-mc refuses unsupported
+  (:defsym) as its refusal is not recorded."
+  [pairs]
+  (not-empty (vec (for [[n v] pairs]
+                    [n (or (defsym-value (str v)) (unsupported :defsym (str "value is not an integer: " v)))]))))
 
 (defn judge-refusal
   "[RESULT DETAIL] of Arbace's result `r` for the file at PATH against llvm-mc's recorded refusal (its diagnostics, the input
@@ -1434,10 +1457,12 @@
         rows (vec (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t")))
         _ (.mkdirs (java.io.File. ^String work))
         res (vec (for [[n p opts] rows]
-                   ;; the options passed by keyword, the arches' assemble-file ([PATH OPTIONS]) taking {:defsym} alike (review
-                   ;; 1111 (2): arm64's second argument was -implicit-mapsyms)
-                   (let [ds (defsym-of opts)
-                         r (try (assemble-file p {:defsym ds}) (catch Throwable e {:unsupported :crash :what (str e)}))
+                   ;; the options read inside the try (review 1111 (8)) and passed by keyword, the arches' assemble-file
+                   ;; ([PATH OPTIONS]) taking {:defsym} alike (review 1111 (2): arm64's second argument was -implicit-mapsyms)
+                   (let [r (try (assemble-file p {:defsym (defsyms (defsym-of opts))})
+                                (catch arbace.lang.ExceptionInfo e
+                                  (if-let [c (:obj/unsupported (ex-data e))] {:unsupported c :what (.getMessage e)} {:unsupported :crash :what (str e)}))
+                                (catch Throwable e {:unsupported :crash :what (str e)}))
                          want (get objs n)]
                      (cond
                        ;; AXS94 (a): an error run's case, held to llvm-mc's refusal: its diagnostics, line for line
