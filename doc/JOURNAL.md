@@ -4480,3 +4480,16 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
+
+## 2026-11-11: night 11's Haskell and Scheme failures fixed (branch hs-scm-n12, from mac/next)
+
+Source: .tmp/night12/DIAGNOSIS-N11.md (h-check, h-div, hs-props, hs-props2, la-scm-corpora). Haskell: the six nofib programs whose keys
+moved with HES86 (a) (imaginary/paraffins, imaginary/primes, real/compress, shootout/fasta, shootout/reverse-complement, spectral/simple)
+recorded again with the host's GHC 9.14.1 by hand (`bin/hsi check --live --dump-only --record-progs --corpus nofib --only <six>`, then
+`bin/hsi check --corpus nofib --only <six> --record`): the pack's bytes are the same (pin unchanged, no mirror push needed), only
+haskell-stg-progs.tsv's keys moved; cryptarithm1 and primetest listed in `:speed`, hs_try_putmvar001's `:test-c` results `[:hsi :fail]`;
+`bin/hsi divergences`: 908 programs, 797 pass, 111 in a class, 0 not. `bin/hsi`'s verify_libs local `pin` renamed `lpin` (it shadowed the
+GHC pin ghc_check reads); `bin/hsi check` fails on a plan of 0 programs. Scheme: `bin/si r7rs --chibi-test --record` (pass 1216 -> 1230,
+fail 9 -> 2); the rest of si-corpora's chain then failed at `corpora divergences` (157 anchored alternatives of
+test/scheme/divergences-corpora.edn matched no recorded item: the mats record no longer fails those clauses), dropped by script
+(classes left with no pattern: mats-chez-format keeps no :match). bin/reap --record, bin/crops-score --record.
