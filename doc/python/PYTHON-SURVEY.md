@@ -5436,3 +5436,6 @@ stage's `:steps` and the stub runs of read and AOT).
   (five packs' pins, four universes); crops-test, costs-test, gate-key-crops-test and plan-logic-test pass on the spliced
   table (crops-test with its expectations updated); crops-score: gate item 100% (4 essential, 8 full, 3 oracle), every
   stage "steps agree", 0 facts refuted, independence 79.4% as before.
+
+## As built: py-aot-classid (2026-11-10)
+queue 259's Low: `aot.ae`'s `judge` took `(:class c)` of a class (key `:id`) at its two classed rows, recording `:differs`/`:refused`; now `(:id c)`. `test/python/aot_judge_test.ae` (`ARBACE_PATH=.:test $ARBACE_HOST_EXE -m python.aot-judge-test`) judges fabricated runs, with the unclassed control. `aot_gen` (aot.ae's digest) changes: the AOT's printed packages and the runner rerun (`pyi-aot-runtime`, then pyi-aot-essential, pyi-check-aot). The records are not touched: night 11's AOT record writes the ids.

@@ -3611,3 +3611,6 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
   mono-check's callees against the record 1,992 of 2,414 (1,865). `bin/rust-front essential` equal to its known file;
   `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict` exit 0, Rust unchanged.
   The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+
+## 2026-11-10 py-aot-classid: the AOT judge records a classed row's class by its id
+`arbace/python/aot.ae`'s `judge` read `(:class c)` of a class map (`divergences-aot.edn`'s key is `:id`), so a classed row's `:class` was `:differs` or `:refused` (queue 259's Low, P6; the main host's patch `.tmp/night-python/259-aot-classid.patch`, applied as is): now `(:id c)`. No other `(:class ...)` read of a class map in arbace/python/ (the rest read `(ex-data e)`). Test `test/python/aot_judge_test.ae` (fabricated refused and differing runs, with and without a class, as the negative control; fails on the unfixed aot.ae). aot.ae's digest (`aot_gen`) keys the AOT's printed packages and the runner: the next pyi AOT run reprints the runtime. bin/reap 0 problems, crops-score --strict 0 problems; no record written.

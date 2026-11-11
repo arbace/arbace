@@ -90,6 +90,7 @@ Six crops are above 90 on all three. What the others still need:
   [rust/RUST-EVAL-SURVEY.md](rust/RUST-EVAL-SURVEY.md)).
 - **OCaml, OC222 (a)** (the user, 2026-11-10; branch `crops-rulings`): the 33 tests ocamltest itself skips on the pinned
   configuration are `:na` (`:config-skipped`, `test/ocaml/ocamltest-config.edn`): completeness 82.5 → 84.2.
+- py-aot-classid (2026-11-10): the AOT judge records a classed row's `:class` by its id (`aot.ae` `(:id c)`; test `test/python/aot_judge_test.ae`); aot.ae's digest moves, the AOT packages and runner rerun; no record touched.
 - **Python** (all three): the branch `mac/201-python-py7-py11` is not on `next` yet; its read records (240r) are made, the
   rest (stdlib, site-packages, Lib/test, the mutants, the runtime and wheels' outcomes, the AOT runtime and `check --aot`)
   is night 11's. After it: the branch merged into `next` (`merge-py`, the morning of 11-11), the independence facts moved to
