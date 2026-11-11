@@ -431,6 +431,32 @@
 (def iface-cache (atom {}))
 (def ^:dynamic *iface-files* nil) ; {MODULE path}: interfaces named one by one beside the directories' (HF10-P3's closures)
 (def ^:dynamic *unfoldings* nil) ; atom {NAME core}: the INLINE default methods' unfoldings (hsiface/unfoldings)
+;; HF10-P20: the kinds the elaborator keeps of a value's type variables, where they are a representation's (TYPE AddrRep,
+;; UnliftedType, TYPE ('BoxedRep 'Unlifted)): the rest of the elaborator trusts kinds (FRONTEND-SURVEY §3.4), but STG's
+;; PrimReps follow from them (Unsafe.Coerce's unsafeCoerceAddr's a and b are Addr# values)
+(def ^:dynamic *tv-kinds* nil)  ; atom {NAME {TV kind-type}}
+
+(defn rep-kind?
+  "A kind that fixes a representation other than a lifted value's: TYPE of a closed RuntimeRep but LiftedRep, or the
+  synonym UnliftedType (a closed kind: no type variable in it)"
+  [k]
+  (and (vector? k) (= :tc (first k)) (vector? (second k))
+       (not (some #(and (vector? %) (#{:tv :mv} (first %))) (tree-seq coll? seq k)))
+       (case (nth (second k) 3)
+         "UnliftedType" true
+         "TYPE" (let [r (first (nth k 2))]
+                  (and (vector? r) (= :tc (first r)) (not (#{"LiftedRep"} (nth (second r) 3)))
+                       (not (and (= "BoxedRep" (nth (second r) 3)) (= "Lifted" (some-> (first (nth r 2)) second (nth 3)))))))
+         false)))
+
+(defn- iface-tv-kinds
+  "A typeF form's leading forall binders whose kind fixes a representation: {TV kind-type}"
+  [f conv]
+  (loop [f f out {}]
+    (if (and (seq? f) (= 'forall (first f)))
+      (let [k (try (conv (nth f 3)) (catch Throwable _ nil))]
+        (recur (nth f 4) (if (rep-kind? k) (assoc out (nth f 1) k) out)))
+      out)))
 
 (defn- strs [n] (vec (map #(if (symbol? %) (name %) %) n)))
 
@@ -441,7 +467,9 @@
   (doseq [t things :when (and (seq? t) (case (first t) id (some? (nth t 3 nil)) datacon (some? (nth t 5 nil))
                                          class (some? (nth t 4 nil)) true))]
     (case (first t)
-      id (swap! *genv* assoc (strs (nth t 1)) (conv-type (nth t 3)))
+      id (do (swap! *genv* assoc (strs (nth t 1)) (conv-type (nth t 3)))
+             (when *tv-kinds*
+               (let [ks (iface-tv-kinds (nth t 3) conv-type)] (when (seq ks) (swap! *tv-kinds* assoc (strs (nth t 1)) ks)))))
       datacon (let [n (strs (nth t 1)) ty (conv-type (nth t 5))]
                 (swap! *genv* assoc n ty)
                 (swap! *cons* update n merge {:arity (nth t 3) :fields (mapv #(ext-name "fld" (nmod n) %) (nth t 4))
@@ -871,6 +899,17 @@
                          :else nil))]
       (w t))
     @out))
+
+(defn- sig-tv-kinds
+  "HF10-P20: a signature's kinded binders whose kind fixes a representation, (a :: TYPE 'AddrRep): {TV-KEY kind-type}"
+  [sig]
+  (into {} (for [x (tree-seq coll? seq sig)
+                 :when (and (seq? x) (= 'HsTvb (first x)))
+                 :let [bb (arg x 3) kb (arg x 4)]
+                 :when (and (seq? bb) (= 'HsBndrVar (con bb)) (seq? kb) (= 'HsBndrKind (con kb)))
+                 :let [k (try (hs-type {} (arg kb 2)) (catch Throwable _ nil))]
+                 :when (rep-kind? k)]
+             [(tv-key (nm (arg bb 2))) k])))
 
 (defn sig-type
   "A signature (HsSig ext outer body) as a closed type: [:forall [tv...] [pred...] body]"
@@ -2287,7 +2326,9 @@
   [sigs]
   (into {} (for [s sigs :let [v (lval s)] :when (= 'TypeSig (con v))
                  nl (arg v 2)]
-             [(nm nl) (sig-type (arg (arg v 3) 2))])))
+             (do (when *tv-kinds*
+                   (let [ks (sig-tv-kinds (arg (arg v 3) 2))] (when (seq ks) (swap! *tv-kinds* assoc (nm nl) ks))))
+                 [(nm nl) (sig-type (arg (arg v 3) 2))]))))
 
 (defn tc-local-binds
   "(HsValBinds ext (ValBindsRn [groups] sigs)) or empty: [env' [(bind ...)...]]"
@@ -3221,6 +3262,7 @@
         m module]
     (binding [*metas* (atom {}) *counter* (atom 0) *errors* (atom []) *level* 0 *module* module
               *genv* (atom {}) *fcalls* (atom {}) *classes* (atom {}) *insts* (atom []) *cons* (atom {}) *syns* (atom {})
+              *tv-kinds* (atom {})
               *wanteds* (atom []) *evidence* (atom {}) *unfoldings* (atom {}) *tycons* (atom {})
               *derivs* (atom []) *fixities* (atom {}) *ddescs* (atom {}) *exts* (set (:exts (second tree)))
               *ltypes* (atom {}) *skolem-givens* (atom []) *kind-arity* (atom {}) *families* (atom {}) *deferred-eqs* (atom [])
@@ -3359,6 +3401,7 @@
          :all-cons @*cons* :tycons @*tycons*
          :all-classes (into {} (for [[n info] @*classes*] [n (dissoc info :binds)]))
          :ltypes (into {} (for [[x t] @*ltypes*] [x (deep-expand (zonk t))]))
+         :tv-kinds @*tv-kinds*
          ;; the module's own values its RULES mention: the occurrence analyser keeps them alive (a rule's free
          ;; variables are occurrences: never inlined unconditionally, never dropped)
          :rule-names (let [acc (atom #{})
@@ -3367,6 +3410,15 @@
                                                  (coll? x) (let [in2 (or in? (and (seq? x) (= 'HsRule (first x))))] (doseq [y x] (w y in2)))
                                                  :else nil))]
                        (w decls false) @acc)
+         ;; HF10-P20: the module's own values its RULES' right-hand sides mention: Tidy makes them external
+         ;; (GHC.Iface.Tidy's ruleRhsFreeIds: a rule that fires elsewhere needs them; Enum's eftInt, eftIntList's)
+         :rule-rhs-names (let [acc (atom #{})
+                               w (fn w [x in?] (cond (and in? (vector? x) (= 4 (count x)) (= "ext" (nth x 0)) (= "var" (nth x 1)) (= m (nth x 2)))
+                                                     (swap! acc conj x)
+                                                     (and (seq? x) (= 'HsRule (first x))) (w (nth x 6 nil) true)
+                                                     (coll? x) (doseq [y x] (w y in?))
+                                                     :else nil))]
+                           (w decls false) @acc)
          ;; the module's NOINLINE (and OPAQUE) pragmas' binders: never inlined, never inlined unconditionally (their
          ;; inline activation never active)
          :noinline (let [acc (atom #{})

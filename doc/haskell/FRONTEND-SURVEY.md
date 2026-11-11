@@ -3010,3 +3010,89 @@ classes `--abi` lists (117 bindings, most of them eta arities hsi's application 
    until the tail is fixed: the measure, not a gate step).
 2. The `--full` steps the front end's change touches, as the gate runs them: `haskell-lib-check`, `haskell-lib-check-own`,
    `haskell-lib-own-base`, `haskell-lib-stg` (the last with `--run`, about 28 minutes).
+
+## As built: HF10-P20 (a), closed (2026-11-11, branch `hs-p21`, from `mac/next` 5d10a92fb)
+
+By an agent in the light lane (one process at a time under 2 GiB; stage 0 `/root/arbace/target/seed/amd64/arbace`, the
+checkout's sources evaluated; no GHC, no gate run, no network). GHC 9.14.1's sources the specification, from the pinned
+tarball (`compiler/GHC/Tc/Gen/Match.hs`'s tcGRHS, `compiler/GHC/HsToCore/Match/Literal.hs`'s tidyNPat,
+`compiler/GHC/Iface/Tidy.hs`'s rule-exposed Ids, `compiler/GHC/Tc/Solver/Dict.hs`'s implicit parameters, `GHC/Types/Id/Make.hs`'s
+data constructor workers; BSD-3, LICENSE.md "GHC").
+
+**Where it stands.** HF10-P20's proof is met: the whole own set (`LIB_STG_REPLACE=all`, every ghc-internal module Arbace's own
+STG) runs **50 of run-check's 63** (40 before), every one of the `equal` set's 50 passes kept, 0 lost (`lib-stg --ifaces own
+--judge test/haskell/lib-stg-own-results.edn --run`: "every pass of the equal set's 50 kept"; the `{:runs :all}` row re-recorded
+40 to 50). lib-stg on the own interfaces 5,473 to **5,533 of 7,639** bindings equal to GHC's `-O0` (0 worse); on GHC's
+interfaces 5,444 to 5,457 of 7,612 (0 worse, its runs 60 of 63, the 59 recorded kept). The 13 programs neither set runs are not the own libraries' (GHC's own `-O0` set, `ghc0`, runs the same 50): below.
+
+### The classes fixed
+
+Each found by a run, its first broken module by bisection (`.tmp/p20/bisect.sh`, now with `PAT`: only a failure whose stderr
+matches counts, another failure of a mixed set a pass, so a masking failure does not mislead it) or by reading the module's
+STG against GHC's (`stgcmp GHC OURS --why`, `stgcmp GHC OURS NAME`), fixed, judged by lib-check and lib-stg `--ifaces own
+--judge` (0 worse) before the next run.
+
+| class | where it broke | the fix (GHC's rule) |
+|---|---|---|
+| an implicit parameter's synonym under a `let ?x` | Exception.Type's default `toException e = SomeException e where ?exceptionContext = emptyExceptionContext`: every instance's inlined copy left the context free (the case on void in the forked threads' handlers) | a wanted HasExceptionContext or HasCallStack is the `let`'s binding of its name (`want!`, `ip-synonym-name`) |
+| a binder of a qualified type | withFrozenCallStack's `do_this :: HasCallStack => a` returned unapplied: throwIO's continuation cased on a function | its occurrence takes its constraints' evidence, the call site pushed (`var-occ`) |
+| a pattern guard's givens | Data.Typeable's `cast`: `Just HRefl <- ta `eqTypeRep` tb` rewrote the where clause's `Typeable b` to `Typeable a`, every cast succeeded (NonTermination taken for an AsyncException) | each GRHS its own implication, the wanteds rewritten from the first pattern that gives equalities on (`infer-grhss`, `*guard-w*`; eqT's `heqT @a @b` too) |
+| an overloaded literal pattern at Word | Num Word's `signum 0 = 0` matched nothing (class-num's signum 0) | tidyNPat at wordTy: `W# n##` |
+| -O0 constructor layouts | `$WSrcLoc` unboxed `I# 315#` into SrcLoc's fields, boxed in the own STG: the -O2 dumps' UNPACKed layout | a boot library compiled own (`--o0-layout 1`: lib-check `--ifaces own`, lib-stg `--ifaces own`) lays out its own unit's constructors from their types; lib-stg on GHC's interfaces keeps the -O2 pack's layout it merges over, base's judge too (GHC's `-O0` reference compiles each package against the installed -O2 interfaces: base's SrcLoc unpacked) |
+| rule-exposed Ids | Enum's `eftInt` (eftIntList's right-hand side) internal, the programs' interfaces name it | a NOINLINE binding a RULE's right-hand side mentions is external, as GHC's `-O0` output has it (`:rule-rhs-names` ∩ `:noinline`: eftInt, efdtInt external; List's lenAcc, lengthList's, without a pragma, internal: all of a rule's names made List's `length` unequal on the GHC-interface lib-stg) |
+| an imported constructor's context | Backtrace's `fmap SomeExceptionAnnotation` built the constructor of its dictionary alone (the interface's arity is the source arity) | its arity counts its context's dictionaries (`iface-con-dicts`) |
+| an over-applied polymorphic result | listArray's `foldr go (\_ s# -> s#) es 0# s2#`, a State#, bound by a thunk: the writes never ran, `Array.!` read arrEleBottom | a lambda argument of as many binders as the arguments beyond the declared ones gives the result its body's representations; a case's first known alternative |
+
+### The kinds kept (the interim hard-code replaced)
+
+`tostg/kinded-results` is gone. The elaborator keeps the kinds of a value's type variables where they fix a representation
+(`*tv-kinds*`, `:tv-kinds` of its result, `{NAME {TV kind}}`): a signature's kinded binders (`(a :: TYPE 'AddrRep)`,
+`UnliftedType`, `TYPE ('BoxedRep 'Unlifted)`; `sig-tv-kinds`) and an interface's forall binders (`iface-tv-kinds`, GHC's and
+the own ones); the own interfaces write them (`ownface/*kinds*`: `(forall "a_331_29_331_30" specified (tycon-app (ext tc
+"GHC.Internal.Prim" "TYPE") [(tycon-app (ext data "GHC.Internal.Types" "AddrRep") [])]) ...)`, GHC's spelling; the judge
+reads kinds as before: lib-check 0 worse). tostg gives a type variable of such a kind its representation, a call's result
+(`app-type`) and the binding's own binders (`*bkinds*`). Only closed representation kinds are kept (a kind with a variable,
+`TYPE r`, stays the elaborator's Type: the classes' kind arities read kinds' variables).
+
+### The 13 run-check programs neither set runs (for HF10-P21 and P19)
+
+GHC's own `-O0` set (`ghc0`) runs the same 50; the 13 others are not the own STG's:
+
+- 7 call names of ghc-internal that only its -O2 build has, from the other packages' -O2 STG (the pack `haskell-stg-libs`):
+  `GHC.Internal.IO.Exception/ioException3` from bytestring, directory, file-io (LibBytes, LibIO, LibMisc, LibPosix,
+  LibSystem, LibText), `GHC.Internal.List/reverse1` from stm (runtime-stm). The programs' own STG names none of them, so P21
+  (the programs on own interfaces) does not move them: the packages' own STG (P17) does.
+- 3 differ in the uncaught exception's report on the `-O0` libraries (Exc, Trace, runtime-exceptions: "Uncaught exception
+  ...ErrorCall:" where the -O2 pack's base prints GHC's text); 2 run out of hsi's 2 GiB (Loop, runtime-deep, `:hsi-memory` in
+  `test/haskell/run-check.edn` already); AsyncRerun (`:hsi`, recorded).
+
+The plan's "13 are the programs' -O2 ABI" (stage 3's proof, run-check ≥ 53 on own interfaces) does not hold: HF10-P28 below.
+
+### Tools
+
+- `bin/repr-haskell lib-stg`: `--o0-layout 1` passed to `libcheck stg` with `--ifaces own` (`tostg/*o0-layout*`; lib-check's
+  `own` verb always).
+- `.tmp/p20/bisect.sh` (worktree scratch): `PAT=TEXT` (only that failure counts), `LO`/`HI`.
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` | 265 against 265, **0 worse** (re-recorded: Encoding.Types 13 to 18 binders, Data.Dynamic errors to ok); the control differs; 12 min, 1.75 GiB |
+| `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` | 5,473 to **5,533 of 7,639**, 0 worse (re-recorded); the control 0 of 171; 16 min, 1.80 GiB |
+| `LIB_STG_REUSE=1 LIB_STG_SIDES=own LIB_STG_REPLACE=all ... --judge ... --run` | **50 of 63**, every pass of `equal`'s 50 kept (judge-runs exit 0); `{:runs :all}` 40 to 50; 8 min, 1.55 GiB |
+| hsi-essential's command | `bin/hsi own-verdicts --check`, `check --corpus samples,synthetic,testsuite-core --only @test/haskell/hsi/essential.txt`: 123 programs, 0 not passing in no class, the four controls fail as they must; 18 min, 1.75 GiB |
+| haskell-read-essential's command | `bin/repr-haskell test`, the round trip of array, deepseq, containers: 51 of 51 byte-identical, the control differs |
+| `lib-check --package base --ifaces own --judge test/haskell/lib-check-own-base.edn`, `lib-stg --package base --ifaces own --judge test/haskell/lib-stg-own-base-results.edn` (haskell-lib-own-base's commands) | 241 against 241, 0 worse; 547 of 1,024, 0 worse (the first try, with the -O0 layout for every package's constructors, lost two of Data.List.NonEmpty's: the unit check); both controls differ; 5 min each, 1.45 GiB |
+| `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (haskell-lib-check) | 265 against 265, 0 worse, 2 better (re-recorded); the control differs; 10 min |
+| `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run` (haskell-lib-stg) | 5,444 to 5,457 of 7,612, 0 worse (re-recorded); runs 60 of 63 on each side, 0 lost, the 59 recorded kept; 28 min, 1.84 GiB (the first try, with the -O0 layout here too, ran 0 of 63 on the merged set: the `--o0-layout` flag) |
+
+### Proposal
+
+- **HF10-P28 Stage 3's proof restated.** The plan's stage 3 (P21) took run-check's 13 non-passes for the programs' -O2 ABI;
+  they are not (above). (a) **P21 as planned (the programs' front end over the own pools of every package, ghc-prim and
+  ghc-bignum as reexports), its proof "run-check's 63 on own interfaces ≥ the `all` set's 50, 0 lost"; the 7 that call
+  ghc-internal's -O2-only names move with their packages to P17 (bytestring, directory, file-io, stm: own -O0 STG), the 3
+  exception reports a class of their own (`:o0-report`) to look at in base's -O0 TopHandler path**; 1-2 days as planned;
+  (b) keep "≥ 53" by giving the own ghc-internal GHC's -O2 floated names as aliases (`ioException3`, `reverse1`): mixes the
+  ABIs, a list to maintain by hand; rejected. *Recommended: (a)*.

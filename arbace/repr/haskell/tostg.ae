@@ -72,6 +72,8 @@
 (def ^:dynamic *tops* nil)    ; #{top-level names}
 (def lib-data (atom {}))      ; {MODULE {CON {:reps [...] :marks [...] :tycon T}}}
 (def ^:dynamic *unit* "main") ; the unit the module is compiled in (HF10: a boot library's, ghc-internal)
+(def ^:dynamic *o0-layout* nil) ; HF10-P20: the unit's constructors laid out at -O0, from their types (lib-check --ifaces own and
+                                ; lib-stg --ifaces own: the own set; lib-stg on GHC's interfaces merges over the -O2 pack's layout)
 
 (defn- head? [x h] (and (seq? x) (= h (first x))))
 (defn- lv? [x] (head? x 'lv))
@@ -187,7 +189,11 @@
     (or ;; HF10-P20: a boot library compiled at -O0 (not a program, unit main) sees its own and its dependencies'
         ;; constructors as -O0 lays them out, from their types: the -O2 libraries' dumps hold an UNPACKed strict field
         ;; unboxed (SrcLoc's lines and columns: $WSrcLoc unboxed I# 315# into a field the own SrcLoc keeps boxed)
-        (when (not= "main" *unit*)
+        ;; (the unit's own constructors only: GHC's -O0 reference compiles each package against the installed packages'
+        ;; -O2 interfaces, so base's -O0 STG holds ghc-internal's SrcLoc unpacked; a coherent own base, P19's, wants the
+        ;; -O0 layout of every package)
+        (when (and *o0-layout* (not= "main" *unit*)
+                   (let [u (:unit (get *units* (nth c 2)))] (or (nil? u) (= u *unit*))))
           (let [ci (con-info c) ar (:arity ci) d (or (:dicts ci) 0) ts (when-let [t (global-type c)] (arg-types t))]
             (when (and ar (= ar (+ d (count ts)))) (into (vec (repeat d :L)) (map (comp reps->rep type-reps) ts)))))
         (:reps (get (lib-cons (nth c 2)) (ext-str (nth c 2) (nth c 3))))
@@ -308,6 +314,9 @@
       (when (and (re-find #"\|" o) (= 1 (count (filter #{\_} o))))
         [(inc (.indexOf ^String o "_")) (count o)]))))
 
+(def ^:dynamic *bkinds* nil) ; HF10-P20: the top-level binding's type variables' kept kinds ({TV kind-type}), its binders' reps
+(declare kind-type)
+
 (defn type-reps
   "A type's PrimReps after unarisation: a vector, empty for a void type"
   [t]
@@ -321,7 +330,10 @@
           (and (= "GHC.Internal.Prim" (nth n 2)) (contains? prim-tycon-reps (nth n 3))) (get prim-tycon-reps (nth n 3))
           (and (= "GHC.Internal.Prim" (nth n 2)) (str/ends-with? (nth n 3) "#")) [:U]
           :else [:L]))
-      [:L])))
+      ;; HF10-P20: a type variable of the binding whose kind is kept (unsafeCoerceAddr's x :: a, a :: TYPE 'AddrRep)
+      (if-let [kt (and (= :tv (first t)) (some-> (get *bkinds* (second t)) kind-type))]
+        (type-reps kt)
+        [:L]))))
 
 (defn- newtype-unwrap
   "A newtype's application as its representation type (instNewTyCon_maybe; STG sees through newtypes), else nil"
@@ -359,12 +371,27 @@
           (not= t (expand-syn t)) (recur (strip-forall (expand-syn t)) out)
           :else out)))
 
-(def ^:private kinded-results
-  "HF10-P20, interim: the results of Unsafe.Coerce's representation-polymorphic coercions, whose type variables the
-  signatures kind (a :: TYPE AddrRep), (a :: UnliftedType): the elaborator keeps no type variable's kind (its interfaces
-  write Type), so their representations are named here until kinds are kept (the class `kinds` of P20's tail)"
-  {["GHC.Internal.Unsafe.Coerce" "unsafeCoerceAddr"] [:tc ["ext" "tc" "GHC.Internal.Prim" "Addr#"] []]
-   ["GHC.Internal.Unsafe.Coerce" "unsafeCoerceUnlifted"] [:tc ["ext" "tc" "GHC.Internal.Prim" "ByteArray#"] []]})
+(def ^:private rep-prim
+  "A RuntimeRep's constructor -> a primitive type of that representation (kind-type's)"
+  {"AddrRep" "Addr#" "IntRep" "Int#" "WordRep" "Word#" "Int8Rep" "Int8#" "Int16Rep" "Int16#" "Int32Rep" "Int32#"
+   "Int64Rep" "Int64#" "Word8Rep" "Word8#" "Word16Rep" "Word16#" "Word32Rep" "Word32#" "Word64Rep" "Word64#"
+   "FloatRep" "Float#" "DoubleRep" "Double#" "UnliftedRep" "ByteArray#"})
+
+(defn- kind-type
+  "HF10-P20: a type variable's kept kind (the elaborator's :tv-kinds) as a type of that representation: TYPE 'AddrRep an
+  Addr#, UnliftedType or TYPE ('BoxedRep 'Unlifted) an unlifted pointer (ByteArray#'s); nil for another kind"
+  [k]
+  (let [p (fn [o] [:tc ["ext" "tc" "GHC.Internal.Prim" o] []])]
+    (when (and (vector? k) (= :tc (first k)) (vector? (second k)))
+      (case (nth (second k) 3)
+        "UnliftedType" (p "ByteArray#")
+        "TYPE" (let [r (first (nth k 2))]
+                 (when (and (vector? r) (= :tc (first r)) (vector? (second r)))
+                   (let [o (nth (second r) 3)]
+                     (cond (contains? rep-prim o) (p (get rep-prim o))
+                           (and (= "BoxedRep" o) (= "Unlifted" (some-> (first (nth r 2)) second (nth 3)))) (p "ByteArray#")))))
+        nil))))
+
 
 (defn- app-type
   "The type of f applied to args (dictionary arguments first), or nil: the declared result after the arguments; when the
@@ -379,7 +406,10 @@
                 (and (seq? f) (= 'cast (first f)) (map? (nth f 2 nil))) (:r (nth f 2)))]
     (when t
       (or (when (and (seq? f) (= 'v (first f)) (vector? (second f)) (seq args))
-            (get kinded-results [(nth (second f) 2) (nth (second f) 3)]))
+            ;; HF10-P20: a result whose type variable's kind is a representation's (unsafeCoerceAddr's b :: TYPE 'AddrRep)
+            (when-let [ks (get (:tv-kinds *r*) (second f))]
+              (let [r0 (some-> (result-type t (count args)) strip-forall)]
+                (when (= :tv (first r0)) (some-> (get ks (second r0)) kind-type)))))
           (let [r0 (result-type t (count args))] (when (and r0 (not= :tv (first (strip-forall r0)))) r0))
           (let [t0 (if (= :forall (first t)) t [:forall [] [] t])
                 p (count (nth t0 2))
@@ -1405,9 +1435,10 @@
           ;; the match variables' types (HF10-P20: desugar's fresh-types)
           r (update r :ltypes merge @ds/fresh-types)
           _ (set! *r* r)
-          ;; HF10-P20: a RULE's free variables are external too (Tidy's rule-exposed Ids: Enum's eftInt, eftIntList's
-          ;; right-hand side, which the programs' interfaces name)
-          exported (into (ds/program-exported r prog0) (:rule-names r))
+          ;; HF10-P20: a NOINLINE binding a RULE's right-hand side mentions is external too, as GHC's -O0 output has it
+          ;; (Enum's eftInt, efdtInt: eftIntList's right-hand side, which the programs' interfaces name; List's lenAcc,
+          ;; lengthList's, has no pragma and stays internal)
+          exported (into (ds/program-exported r prog0) (filter (set (:noinline r)) (:rule-rhs-names r)))
           [prog new-types raw] (if simpl?
                              (simpl/simplify-module r prog0 (into exported (:rule-names r))
                                                     {:unlifted-type? (fn [t] (boolean (and t (not= [:L] (type-reps t)))))
@@ -1431,7 +1462,7 @@
         (let [binds (vec (mapcat (fn [[_ b e]]
                                    (binding [*floats* (atom [])]
                                      (let [n (if (lv? b) (local-name b) (gname b))]
-                                      (binding [*rec-ids* #{n}]
+                                      (binding [*rec-ids* #{n} *bkinds* (when (vector? b) (get (:tv-kinds *r*) b))]
                                       (cond
                                        (and (lv? b) (string-lit? e) (str/ends-with? (second e) "#"))
                                        ;; a top-level string literal (the Simplifier's floats: StgTopStringLit)

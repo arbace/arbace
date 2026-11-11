@@ -4480,3 +4480,45 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
+
+## 2026-11-11: HF10-P20 (a) closed: the whole own set runs 50 of 63, every pass of the `equal` set kept; the kinds kept (branch `hs-p21`, from `mac/next` 5d10a92fb)
+
+- Goal (the plan "Haskell on its own libraries", stage 2): `LIB_STG_REPLACE=all` (every ghc-internal module Arbace's own STG)
+  at least as good as `equal` on run-check's 63, none lost. Before: `all` 40 of 63, `equal` 50, 10 lost in three classes.
+  After: `all` **50 of 63**, every one of `equal`'s 50 passes kept (`libcheck judge-runs` on the `{:runs :all}` row, exit 0);
+  the row re-recorded 40 -> 50. lib-stg on the own interfaces 5,473 -> 5,533 of 7,639 (0 worse); lib-check own 265 against
+  265, 0 worse (re-recorded: Encoding.Types 13 -> 18 binders, Data.Dynamic errors -> ok); base's lib-check 241, lib-stg 547 of
+  1,024, both 0 worse.
+- Method as hs-p20's: a run, the first broken module bisected (`LIB_STG_SIDES=own`, `LIB_STG_REPLACE=@FILE`; the script
+  `.tmp/p20/bisect.sh` gained `PAT`, only a failure matching it counts, after a masking failure of a mixed set,
+  GHC.Internal.Maybe's `$tc'Nothing` asked by the -O2 packages, misled one bisection), or the module's STG read against GHC's
+  `-O0` (`stgcmp ... --why`); each fix judged by lib-check and lib-stg `--ifaces own --judge` before the next run. Sources:
+  GHC 9.14.1's pinned tarball (GHC.Tc.Gen.Match's tcGRHS, GHC.HsToCore.Match.Literal's tidyNPat, GHC.Iface.Tidy,
+  GHC.Tc.Solver.Dict, GHC.Types.Id.Make; BSD-3).
+- The classes, in the order the runs met them (doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P20 (a), closed"): an
+  implicit parameter's synonym (HasExceptionContext, HasCallStack) solved from a `let ?x` of its name (Exception.Type's
+  default `toException`'s context was free in every instance: the case on the void token in the forked threads' handlers);
+  a binder of a qualified type instantiated at its occurrence (withFrozenCallStack's `do_this`); a pattern guard's givens
+  scoped to its GRHS (Data.Typeable's `cast` rewrote `Typeable b` to `Typeable a`: every cast succeeded, NonTermination
+  taken for an AsyncException); Word literal patterns (`signum 0`); the own unit's constructors laid out at -O0 from their
+  types (`$WSrcLoc` unboxed fields the own SrcLoc keeps boxed), only in the own runs (`--o0-layout 1`): lib-stg on GHC's
+  interfaces merges over the -O2 pack's layout, and base's reference holds ghc-internal's constructors unpacked (GHC's -O0
+  dump compiles each package against the installed -O2 interfaces); NOINLINE bindings a rule's right-hand side mentions
+  external (Enum's eftInt; all of a rule's names first, which made List's `length` unequal on the GHC-interface lib-stg: the
+  narrower rule matches GHC's -O0 output); an imported constructor's context dictionaries in its arity (Backtrace's
+  `fmap SomeExceptionAnnotation`); an over-applied polymorphic result's representations from a lambda argument (listArray's
+  `foldr go (\_ s# -> s#) es 0# s2#`, a State# bound by a thunk: the writes never ran).
+- The kinds (the task's other item): `tostg/kinded-results` replaced. The elaborator keeps the kinds of a value's type
+  variables that fix a representation (`:tv-kinds`, from signatures' kinded binders and interfaces' foralls), the own
+  interfaces write them in GHC's spelling (`TYPE 'AddrRep`), tostg reads them for results and binders. Alternatives
+  considered: a fifth element of the elaborator's `:forall` (dropped by zonk and subst everywhere: rejected); keyed by type
+  variable name alone (GHC's interfaces name them `a`: collisions: rejected); every kind with variables (`TYPE r`: the
+  classes' kind arities read kinds' variables, a risk to lib-check's facts: only closed kinds kept).
+- HF10-P21 (stage 3) not built: its premise does not hold. GHC's own -O0 set (`ghc0`) runs the same 50, and 7 of the 13
+  others call ghc-internal's -O2-only names (`IO.Exception/ioException3`, `List/reverse1`) from the other packages' -O2 STG
+  (bytestring, directory, file-io, stm), not from the programs; 3 differ in the uncaught exception's report on -O0
+  libraries, 3 are recorded hsi classes. Proposal HF10-P28 (the survey).
+- Rule slips: three source edits while a run that could load them was running (`typecheck.ae` during the first MVarOrder
+  bisection, a Word-pattern change no probed program used; `tostg.ae` during the LibContainers bisection, which I stopped and
+  did not use; `tostg.ae`'s unit check during the GHC-interface lib-stg's program runs, a no-op for programs, unit main); one
+  `<(...)` in a `diff` command early on.
