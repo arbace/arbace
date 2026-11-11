@@ -6016,3 +6016,78 @@ methods, 37 pass, `:testcapi` 1,154; test_call 189, 7 pass, `:testcapi` 130; tes
 import or require `_testcapi` first, so they stay `:testcapi`: this task's proof is its two probes against python3
 3.14.10's own `_testlimitedcapi` (49 and 84 lines equal on the head; on the base the first stops at the missing types and
 the second differs in 133 lines).
+
+## As built: 269, the full API's layouts and `_testcapi` on ci (2026-11-11, the Mac VM, queue 269; 262's DECISION (a), 268's DECISION (a))
+
+262's DECISION (a) past `_testlimitedcapi`: the full C API's macros read objects in place, so the handles of the types
+and of tuple, list, bytes and float carry CPython 3.14.10's layouts (`go/arbace/pyctypes/capi_mirror.ae`), and
+CPython's `_testcapi` is built by ci into pyi's C world part by part.
+
+- **Type objects**: a type's handle is a `PyTypeObject` (a `PyHeapTypeObject`'s 936 bytes, or the world's static struct of
+  a type `Include/` names: `pycapi.c`'s are PyTypeObject-sized since this task, bound before any other handle is made)
+  filled as CPython's: `tp_name`, `tp_basicsize`/`tp_itemsize`, `tp_flags` (CPython's own for the types `Include/`
+  names, from python3 3.14.10's `__flags__`; a C type's own with the base's fast-subclass bits), `tp_base`,
+  `tp_bases`, `tp_mro`, `tp_dict` (pinned), and the slots: a C type's C functions, a pyi type's the generic
+  protocol's natives (`tp_repr` = `PyObject_Repr`, `tp_alloc` = `PyType_GenericAlloc`, `tp_new`/`tp_init`/`tp_dealloc`
+  natives of their own), so `PyTuple_Check` (`Py_TYPE(o)->tp_flags`) and `PyList_Type.tp_new(type, ...)` work.
+- **Mirrors** (tuple, list, bytes, float, a subclass's instance too): the object's CPython layout in the world's memory,
+  made when C first sees it, synchronized at the C boundary both ways (as PyPy's cpyext): Go to C before the world is
+  called and when a native or a closure returns (the mirrors it used), C to Go when the world returns and when a
+  native receives a mirrored object (once a synchronization epoch, through the items' mirrors). A container's slots
+  hold references as CPython's: a slot C writes steals C's reference, a slot Go changes holds a new one (the
+  mirrors' own counted apart, so "C holds the only reference" stays a count of 1: `PySet_Add`'s brand-new frozenset).
+  `PyTuple_New`/`PyList_New` give NULL items (a tuple's repr prints `<NULL>`, as 3.14's), `PyBytes_AsString` the
+  mirror's `ob_sval` (C fills a new bytes in place).
+- **PyType_Ready of C's type objects** (a static `PyTypeObject`, or one C filled after `PyType_Type.tp_alloc`): a pyi type
+  made from its fields and slots (sub-structs by `Objects/typeslots.inc`'s offsets), its handle the C struct, the
+  inherited slots, `tp_base`, `tp_bases`, `tp_mro`, `tp_dict` and `Py_TPFLAGS_READY` written back; a static type over
+  object without `tp_new` disallows instantiation (`type_ready_set_new`).
+- **C types over a built-in base** (268's DECISION (a), first part): a static type or a spec over list, tuple, bytes or
+  float makes C-born instances: the memory `tp_basicsize` bytes, the built-in part a mirror of a pyi value (the Go value
+  an instance of the type keeping it, `py.SetInstanceExt` the record), the tail C's; freed by its `tp_dealloc` once Go
+  collects it (`PyList_Type.tp_dealloc` gives the items back). `_testcapi.MyList` works.
+- **PyLong's layout** (reached: `_testcapi.call_long_compact_api`, `PyUnstable_Long_IsCompact` and `CompactValue` read it):
+  an int's handle writes `lv_tag` (the 30-bit digits' count shifted by 3, the sign in the low bits) and the digits, once
+  (ints are immutable); True's and False's structs are PyLongObject-sized; the small ints (-5 to 256, interned by pyi as
+  by CPython) are immortal. The other type data the full API's macros name are bound to pyi's types of the same role
+  (`PyFunction_Type`, `PyMethod_Type`, `PyCode_Type`, `PyFrame_Type`, `PyCell_Type`, `PyCFunction_Type`, the weak
+  references'): an undefined data symbol is a zeroed static of ci's link, so a macro over an unbound one is silently false.
+- **The world** (since this task): `Modules/_testcapimodule.c` and 16 parts: abstract, bytes, complex, dict, float, hash,
+  immortal, list, long, numbers, object, pyatomic, set, structmember, tuple, weakref, in the full API's mode; the other 22
+  parts' Init functions are stubs (`tools/pyi/clib/ctypestest/testcapi_parts.c`). `_testcapimodule.c`'s
+  `_testcapi_feature_macros.inc`, included inside a function body, is inlined by `bin/pyi-clib`'s new `inline=` (ci's
+  reader refuses a declaration split over files). `pyconfig.h` gained `HAVE_PTHREAD_H`, `HAVE_FORK` and gcc's `__atomic`
+  builtins as plain accesses (ci's builder implements none and its checker takes the generic `__atomic_load`/`store` for
+  prototyped functions; one thread: a REQUEST for the C crop). `pycapi.c` defines `Py_Version`, `PyInstanceMethod_Type`
+  (a pyi `instancemethod`) and `PyGen_Type`. ci's `char` is signed (x86-64), so `_testcapi.CHAR_MAX` is 127 as on the main
+  host's amd64 CPython (the VM's aarch64 python3 gives 255).
+- **Natives** for the parts: `PyErr_NewException`, `PyModule_GetState` (`m_size`'s state), `PyState_AddModule`,
+  `PyCallable_Check`, `PyObject_CallFunction`/`CallMethod`, `PyList_Clear`/`Extend`, `PyBytes_Join`, `_PyObject_New`,
+  `_PyArg_CheckPositional`, `_PyArg_ParseStack`, `PyArg_UnpackTuple`, `PyWeakref_GetRef`/`IsDead`, `Py_HashPointer`,
+  `PyOS_string_to_double`, `PyFloat_Pack2/4/8` and `Unpack2/4/8` (half precision rounded half to even, its OverflowError),
+  `_PyTuple_Resize`, `_PyBytes_Resize`, `PyCFunction_Call`, `PyObject_GenericGetAttr`/`SetAttr`, `PyObject_GC_Del`, getargs'
+  `c` and `C`; `PYI_CAPI_TRACE=1` names each native on stderr as C calls it.
+
+Counts (`bin/pyi lib-test-all --fresh`, each test's own verdict, the VM; base 1ead003e3 as queue 268's integration measured it):
+
+| module | base | head |
+|---|---|---|
+| test_capi (1,195) | 37 pass; `:testcapi` 1,154, cpython-only 3, skipped-by-test 1 | 258 pass; `:testcapi-parts` 548, `:testcapi` 262, `:capi-port` 112, `:capi-refcounts` 3, cpython-only 3, skipped-by-test 3, finalization 2, gc-collector 2, int-core 2; 0 failing |
+| test_call (189) | 7 pass; `:testcapi` 130, cpython-only 52 | 125 pass; cpython-only 52, `:testcapi-parts` 11, `:capi-port` 1; 0 failing |
+
+`:testcapi-parts` (new, deferred) takes a test reaching a part not built (`module '_testcapi' has no attribute`, `cannot import
+name ... from '_testcapi'`: test_misc's 309 and getargs' importers' 106 among them); `:capi-refcounts` (new, design) the
+checks of `Py_REFCNT` > 1 and of immortality, since a handle counts C's references alone; `:capi-port`'s `:tests` the
+limited-API natives' gaps that test_capi's modules show now that they import (they stopped at `_testcapi` before).
+
+**The check** `.tmp/q269/t/check269.sh ROOT` (the report's appendix): `probe269.py`, 34 lines (tuple, list, bytes and float
+through their macros, NULL items, `_PyTuple_Resize`, `_PyBytes_Resize`, the pack/unpack natives, the module's constants,
+`MyList`, the static types' `PyType_Ready`, the compact ints, weak references) against python3 3.14.10's own `_testcapi`;
+its negative control judges the run against a mutated reference, which must fail. PASS on the head; on the base the module
+does not exist.
+
+**What remains**: heaptype.c (268's DECISION (a)'s second half: specs over `type` for C metaclasses, whose instances are pyi
+types with a C tail, over int and over exceptions), the other 21 parts (vectorcall, unicode with Q3's compact layout, getargs,
+...), the `:capi-port` gaps above; a mirror is synchronized when a native receives it or the world returns, so Python code a
+native runs that changes a mirrored object the native was not given is not seen by C until the next synchronization (none of
+the sampled tests does it), and each synchronization costs the mirror's size.
