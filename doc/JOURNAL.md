@@ -6293,3 +6293,19 @@ expansion would then end the whole expansion, where LLVM goes on with the body's
   bisection, a Word-pattern change no probed program used; `tostg.ae` during the LibContainers bisection, which I stopped and
   did not use; `tostg.ae`'s unit check during the GHC-interface lib-stg's program runs, a no-op for programs, unit main); one
   `<(...)` in a `diff` command early on.
+
+## 2026-11-11: Scheme's AOT: compiled libraries installed in psyntax, SCS30 (a) (branch `scheme-scs30`, from `mac/next` `4b8fc77e3`)
+
+The user decided SCS29 (a) (the late constants' identities stay per compiled unit) and SCS30 (a): SC94 (b)'s other half, with a
+program of si's own as its proof. `si/eval-library` (a library with a counter, a record type and a macro; the program `eval`s in an
+environment naming it) failed compiled (`(2 0)`, then status 255: a second instance of the library), passes now, the golden the
+interpreted run's. Built: a library's global is the store's location of its gensym read by uid (`scm.AotLoc`, replacing the
+program-owned `NewLoc`), so eval's code finds the compiled library's variables; the dump gives each library `:info` (install-library's
+arguments, one late constant, so the `$rtd` bindings' syntax objects travel as SC90 (b)'s graph) and `:visit` (its visit code);
+`Install` after the libraries' runs calls psyntax's `install-library` with no-op invoke and the visit thunk, only in a program that
+links psyntax. Alternatives considered: running the library's invoke code from the thunk (the program already runs it at start:
+a second run would double the state), a visit-less install (the macro export would find an unset transformer), `library-spec` for the
+dependency check (not in psyntax's exports: the ids read from the record). Negative control `_control/eval-library-vs-data`. si-essential's
+and si-aot-essential's commands exit 0, `bin/reap` 0 problems, `bin/crops-score --judge --strict` 0; no key moves (all paths are
+crop paths). doc/scheme/SCHEME-SURVEY.md, "As built: SCS30".
+
