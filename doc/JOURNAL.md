@@ -4664,3 +4664,30 @@ shared_ptr_base.h, ext/atomicity.h from the pinned gcc-15.2.0 tarball; P2201R1 (
 Records: the dg own sample recorded again (120 → 125 own passes of 454) and independence.edn's read fact with it; C++ completeness 90.99
 (unchanged), independence 71.28 → 71.30 (read 0.657 → 0.658; eval and AOT still 0.5 until the records say which programs our route runs,
 CP356); the route's gains count at the night's records. doc/cpp/CPP-SURVEY.md, "As built: cpp-s2", has the measures and the night's commands.
+
+## 2026-11-11: hsi's eval cell, the cheap groups (HES88; branch hsi-e1)
+
+The Haskell crop's REAP eval cell (797 of 908, 111 in a class) taken class by class, the cheapest first, in hsi's runtime only
+(`go/arbace/hs`, edited as printed Go and read back, `bin/hsi runtime read`; the front end left to hs-p21). doc/haskell/HASKELL-EVAL-SURVEY.md,
+"As built: HES88, the eval cell's cheap groups (write-ahead)".
+
+- Recorded HE9's six (cgrun057, T16916, allocLimit1-4): they passed since the port (129b38e43), the record had not been taken.
+- The static pointer table: the loader enters each top-level StaticPtr of literal key words (a constructor, or a thunk whose body
+  under its lets is one: T12622_A's CAF) as GHC's module initializers' `hs_spt_insert` would (GHC 9.14.1,
+  compiler/GHC/Iface/Tidy/StaticPtrTable.hs, rts/StaticPtrTable.c, read in the pinned source tarball); `hs_spt_lookup` answers a
+  HaskellObj word, `addrToAny#` (new) takes it back. CgStaticPointers, CgStaticPointersNoFullLazyness, T12622 pass.
+- forkOn#'s threads locked (threadStatus#'s third field): conc071, conc072 pass.
+- The SIMD primops (primops.txt.pp's VECTOR family, `simd.ae`): T22296 passes; HES12 (a)'s design class `:simd` goes. Only T22296 of
+  the run corpora uses them: HES89 proposes the testsuite's `simd/` tests.
+- The images' magic bumped (`hsimg\x08`): an image keeps a closure's unknown primop as an error node, so an older hsi's images hid
+  `addrToAny#` from the new one (the first CgStaticPointers run showed it).
+- Tried and reverted: a safe `sleep` blocking only its thread (the threaded RTS's way). conc037 passed, but GHC's recorded normal-way
+  runs of conc038 and foreignInterruptible are neither that nor hsi's whole-machine sleep, and foreignInterruptible (a pass) failed;
+  no model tried matches the three references, so none is kept; HES84 (a) judges them.
+
+Checks (light, 2 jobs, 3 GiB): the 26 moved and regression programs, 24 pass and conc037, conc038 in `:rts` (recorded with
+`--only ... --record`); hsi-essential 122 pass and 1 `:threaded-way` of 123, the controls failing; `bin/hsi runtime check`.
+`bin/hsi divergences`: 908, 809 pass, 99 in a class: the eval cell 87.8% to 89.1% (94.4% to 95.7% without by design); Haskell's
+completeness 0.9632 to 0.9665 (`bin/reap --record`, `bin/crops-score --record`, `--judge --strict`). Proposed: HES89 (the `simd/`
+tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict: conc065, conc066). Night: rts_clearMemory
+(about 2.4 GB) recorded alone, then the whole record as HES86's night.
