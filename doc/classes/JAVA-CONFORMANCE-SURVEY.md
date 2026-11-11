@@ -4846,3 +4846,128 @@ It runs under `bin/heavy-lock` until its peaks are measured:
 
 Each new difference is read (`javap -v` of both classes, the oracle's JDK, by hand). It becomes a known entry with its reason
 (JCS360 (a)) or a javac on Arbace fix; then the run again until it exits 0.
+
+## As built: JCS359 stages 2-3 (day) (2026-11-11; branch `jcs359-s2`, from `jcs359-s1` 4094e8978 with `java-night` e382ea11b merged)
+
+The light by-day parts of stages 2 and 3 (JCS359 (a)(2), (3)), with JCS362 (a), JCS363 (a), JCS364 (a), JCS368 (b) and JCS369 (a)
+as decided. Stage 1's 68-module measure stays night 15's (its slot script, refreshed: `.tmp/night13/slots/jcs359.sh`, which runs
+stages 2 and 3 after it). Nothing moves a score yet: the switch is stage 4's.
+
+**Stage 2: the generated sources.** `bin/javac-vendor gensrc [MODULE...]` makes the 16 modules' `support/gensrc` into
+`WORK/gensrc/out` as the JDK build does, with the build's own tools on javac's tool executable, and judges every `.java` against
+the build tree's (the reference, until stage 5 moves it to the oracle tier) and `jdk/javac/platform-gensrc-known.edn`:
+`WORK/gensrc/summary.tsv`, `generated.edn`, two negative controls (a known entry taken away must give `differ`, one added for an
+equal file `stale`). The logic is `test/javac-platform/gensrc.bash` (out of every key and of the Java steps' declared inputs: it runs the tool, it does not build it).
+
+- **The configuration as data (JCS362 (a)).** `bin/javac-vendor platform-gensrc [--check]` derives `jdk/javac/platform-gensrc.edn`
+  (157 KB, 301 records, one a line, the Clojure reader's; placeholders for paths) from the build tree once:
+  - the 146 tool runs the build recorded (`support/gensrc/MODULE/**/_*.cmdline`: Spp's 122, CompileProperties' 17, the CLDR
+    converter's two, FieldGen, the X11 wrappers, the three langtools tools), their `@`-files expanded and each run's `_post`
+    move after it;
+  - the values make substitutes into text (its vardeps: `VersionProps`, `PlatformProps`, `JceSecurity`, `release.txt`), the
+    module lists of `GenModuleLoaderMap` and `GenModuleInfoSource`, and the spec.gmk values the other rules use;
+  - each module's resource-only packages (stage 3's).
+  `--check` derives it afresh and compares (the oracle tier's); it is deterministic (checked twice).
+- **The rules make does not record**, ported from `make/modules/*/Gensrc.gmk` and `gensrc/*.gmk`, a function each: CharacterData,
+  CaseFolding, IndicConjunctBreak, the charset mappings (java.base's stdcs; jdk.charsets' extcs, hkscs, euctw, sjis0213),
+  LocaleEquivalentMaps, ModuleLoaderMap, VarHandleGuards, `module-info.java` (java.base, jdk.jlink, jdk.jpackage), the buffers' and
+  ScopedMemoryAccess's snippets put together, the substitutions, `version.properties`, jdwpgen's `JDWP.java`, the AWT icons,
+  Nimbus, the zh_HK copies, `sa.properties`.
+- **The tools javac's tool does not hold** (jdwpgen, x11wrappergen, icondata, methodhandle, module, generatenimbus) are read by
+  repr/java from `make/jdk/src/classes/build/tools/DIR` into `WORK/gensrc/tools/DIR` (seconds each) and run by the interpreter
+  (`test/javac-platform/gensrc-run.ae`: a package's classes in one top-level `do`, as javac compiles the tool; `main` called through
+  a public class of the tool's package, since jdwpgen's `Main` is package-private). No tool rebuild and no key move. What javac's
+  tool world lacks is given as the plan said (JCS368 (b)), each listed with its reason:
+  - variants in `overlay/jdk/javac/buildtools` (Arbace's own, EPL): `ToBin` (javax.imageio and Java2D: the PNG inflated, its filters
+    undone, each pixel drawn as Java2D's SrcOver loop draws it, through its mul8/div8 tables; the four icons' 8 files byte for
+    byte), `GenModuleLoaderMap` (the build's holds a `Class.getResourceAsStream` that no caller reaches), and for
+    VarHandleGuardMethodGenerator `GuardMethodType` and `GuardTypeKind` (no `MethodType.methodType`, `VarHandle` or
+    `java.lang.classfile` in the tool's world);
+  - variants in `overlay/jdk/javac/buildtools-world/generatenimbus` for the API Nimbus' generator calls: `javax.xml.stream`'s
+    `XMLInputFactory` (a cursor over java.xml's SAX parser's events, through a `ContentHandler`: the interpreter's classes
+    implement the Go build's interfaces but cannot extend its classes) and `XMLStreamException`, and `javax.swing.plaf.synth.Region`
+    (its 57 constants and `getName`), each read as a patch of its module against the platform;
+  - two tools read with their uses renamed, as `make/CopyInterimTZDB.gmk` renames a package (the build's file read, never kept
+    changed; each substitution must apply): VarHandleGuardMethodGenerator (`MethodType` → `GuardMethodType`, `VarHandle.class`'s
+    name, `TypeKind`, its loop over `Method.getParameters()` over the parameter types) and Nimbus' `Generator` (its templates,
+    class resources, by `ClassLoader.getSystemClassLoader().getResourceAsStream` with the class's package's path: the Go
+    build provides `Class.getResourceAsStream` but does not list it among Class's members, so the interpreter cannot call it:
+    JCS391); the templates are put on `ARBACE_PATH` as `make/CompileToolsJdk.gmk` copies them.
+- **The C-preprocessed sources (JCS369 (a)).** `UnixConstants` and `SocketOptionRegistry`: repr/c's preprocessor on C's own target
+  (musl 1.2.6's headers, `c/target`; no gcc) with the build's `-D`, `-U`, `-I` and `-std` (platform-build.edn's `:cpp`), laid out by
+  `test/javac-platform/cppout.ae` as gcc -E lays out its output (a new line's column less 2 in spaces, newlines for fewer than 8
+  skipped lines else a line marker, a line change where a token of a system header's macro follows one that is not or the
+  reverse, at the expansion point), then make's awk and sed: both byte for byte the build's. Their class files' line numbers
+  depend on that layout (`-g`), hence the emulation rather than any token-equal text.
+
+**Measured** (javac's tool `javac-5ad357331dbc`, `GOMEMLIMIT=2GiB`, the whole run 118 s, peak 958 MB): of 2,307 generated
+`.java` files, **2,305 are the build's byte for byte** and 2 known; 15 of 16 modules `equal`, java.base `known`:
+
+| module | files | equal | known | ms |
+|---|---:|---:|---:|---:|
+| java.base | 236 | 234 | 2 | 60,736 |
+| java.desktop | 299 | 299 | 0 | 12,208 |
+| jdk.localedata | 1,532 | 1,532 | 0 | 18,401 |
+| jdk.charsets | 107 | 107 | 0 | 2,565 |
+| the other 12 | 133 | 133 | 0 | 0.6-3.8 s each |
+
+The two known (`jdk/javac/platform-gensrc-known.edn`):
+- `jdk/internal/lang/CaseFolding.java`, `:runtime-unicode` (JCS363 (a)): the tool's runtime is Unicode 17, the build's boot JDK
+  Unicode 16, which keeps 28 case foldings more.
+- `java/lang/invoke/VarHandleGuards.java`, `:reflection-order` (JCS390): the same 117 methods, text for text, in another order: the
+  generator writes in `Class.getMethods()`'s order, which Java SE leaves unspecified; HotSpot gives the template interface's
+  declaration order, the interpreter of javac's tool another (`set get getAndUpdate compareAndExchange compareAndSet`).
+  Stable from run to run.
+
+**The chain without the build's generated sources** (by day, light): `PB_GENSRC=WORK/gensrc/out` makes `classes modules` compile
+from the own generated sources (platform-build.edn's `{gensrc}`). Six modules that have some (java.logging, jdk.httpserver,
+jdk.jartool, jdk.jdi with jdwpgen's `JDWP.java`, jdk.management.agent, jdk.charsets: 25 s, `--jobs 2`, peak 1.55 GB): 3 equal and 3
+known (the 6 known `:param-names` classes of stage 1's file), the controls failing as they must; then `descriptors` from those
+own descriptors: 6 of 6 equal at both steps. The 16 modules whole are the night slot's step 4 (`JCS359_OWN_GENSRC=1`).
+
+**Stage 3: the descriptors.** `bin/javac-vendor descriptors [MODULE...]` extends each module's javac descriptor as the build
+does, by `test/javac-platform/modinfo.ae` on the tools' host (no javac, no JVM, no java.lang.classfile): (1)
+AddPackagesAttribute's `ModulePackages` (the packages of the module's class files and its resource-only packages, the data's:
+14 modules have some), against the build's exploded descriptor; (2) jmod create's version, main class, target platform and
+resolution flags (platform-build.edn's `:jmod`), against the jmod's. The writer does what jdk.internal.module.ModuleInfoExtender's
+java.lang.classfile transform writes: the input's constant pool shared, an entry reused when equal or appended in writing order
+(an attribute's name, then its entries, a class or package or module after its UTF-8), the Module attribute rebuilt in place with
+the version, the added attributes replacing their kind and following the others. The input is stage 1's own descriptor and class
+packages when `classes modules` has run for the module (it now keeps both), else the build's exploded descriptor (step 2 alone).
+A negative control: the first module's step 2 with a package left out must differ.
+
+- From the build's exploded descriptors: 67 of 68 the jmods' byte for byte; java.base `known` (`:module-hashes`, JCS364 (a):
+  its ModuleHashes not written; the own descriptor is the jmod's less that attribute and the 48 pool entries it appends last,
+  `jdk/javac/platform-descriptors-known.edn`). 53 s for 68 modules, 0.27 GB.
+- From javac on Arbace's own descriptors (stage 1 run by day on java.logging, jdk.net, java.instrument, jdk.jstatd, jdk.httpserver
+  and java.datatransfer: 20 s, peak 1.55 GB; main classes and resource-only packages among them): 6 of 6 equal at both steps.
+
+**Keys.** `bin/javac-vendor`, `jdk/javac/` and `overlay/jdk/javac/` are in `arbace_javac_key`: the merge moves it once (one javac tool
+rebuild at the night's gate, as stage 1's merge already does). `test/javac-platform/` is out of every key and of the Java steps' inputs (`bin/lib/repr-java/` is in `:repr-java`'s, which all of Java's `--full` steps declare). `gate_key` and
+`arbace_runtime_key` are unchanged. The tool world's variants are read only at run time, not into `jdk/javac/forms`: no
+`bin/javac-vendor convert` and no edge.
+
+**The night's command** (`.tmp/night13/slots/jcs359.sh WORKTREE NIGHTDIR`, about 110 minutes at most, under the big lock for
+step 1): `classes modules --jobs 3` (heavy, the measure), then `gensrc` (2 min, 1 GB) and `descriptors` (1 min, 0.3 GB) from its
+outputs; with `JCS359_OWN_GENSRC=1` also the 16 modules compiled again from the own generated sources (`PB_GENSRC`), the plan's
+stage 2 proof (heavy, 15-30 min).
+
+### Proposed (JCS389-JCS392)
+
+- **JCS389** Where the six tools javac's tool does not hold run. (a) Interpreted from a fresh read at each `gensrc` (as built: no
+  key move, 10-20 s of the run's 2 minutes); (b) read into `jdk/javac/forms`' module buildtools with their variants and compiled
+  into the tool (the plan's first idea: a `bin/javac-vendor convert` and edge night, a tool rebuild, and the world variants become
+  javac's world's). *Recommended: (a)*: the run is light either way, and (b) puts StAX and Swing stand-ins into javac's world.
+- **JCS390** VarHandleGuards' order. (a) Known, as is (`:reflection-order`); (b) the interpreter's `Class.getMethods`/
+  `getDeclaredMethods` in declaration order, as HotSpot gives them in practice (a change to `arbace/classes`, so `gate_key`: a
+  Java night), after which the file is the build's and jtreg tests that print members in that order may pass too.
+  *Recommended: (a) now, (b) with the next Java night's batch.*
+- **JCS391** `Class.getResourceAsStream` (and `getResource`) in the Go build's class environment and reflection: j2g's `go/method`s
+  exist, but `Class.getDeclaredMethods` does not list them, so neither the interpreter nor the reflector finds them (measured on
+  javac's tool and on the gate's program). (a) List them in jrt's Class reflection (a jrt change, `gate_key`: a Java night); then
+  Nimbus' generator runs unrenamed; (b) as is. *Recommended: (a)*, in a Java night's batch; the jtreg tests that load resources
+  by class may gain.
+- **JCS392** Stage 5's reference for stages 2-3. (a) Pin the own outputs by digest (`jdk/javac/platform-gensrc.sha256`, per module,
+  and the descriptors' in the platform's pin, JCS365 (a)), so that `gensrc` and `descriptors` judge without the build tree; the
+  comparison with the build tree moves to the oracle tier's `javac-platform-oracle` (JCS366 (a)); (b) keep comparing with the
+  build tree in `--full`. *Recommended: (a)*, at stage 4.

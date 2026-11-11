@@ -1,0 +1,98 @@
+;; The C-preprocessed sources of the own platform (JCS369 (a); doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built:
+;; JCS359 stages 2-3 (day)"): make's generate-preproc-src (make/modules/java.base/gensrc/GensrcMisc.gmk) runs `gcc -E`
+;; over a Java template (sun.nio.fs.UnixConstants, sun.nio.ch.SocketOptionRegistry) and keeps its output's text from
+;; @@START_HERE@@ on, a line marker made an empty line: the generated file's lines, and so the class's line numbers,
+;; are gcc -E's layout. Here the template is preprocessed by repr/c's preprocessor (arbace.repr.c.pp) on C's own target
+;; (musl 1.2.6's headers, c/target; no gcc), and its tokens are laid out as GCC's c-ppoutput.cc documents its output
+;; (gcc's documentation, "Preprocessor Output", and the -E text's own rules, written here from their observed effect):
+;;
+;; - a new source line: the previous line ended, then as many newlines as the source skipped (less than 8, in the same
+;;   file), else a line marker; the line's first token's column less 2 in spaces;
+;; - a space where the source had white space before the token on its line (repr/c's space tokens) or where two tokens
+;;   would join;
+;; - a token from a macro defined in a system header after a token that is not (or the reverse; a builtin or
+;;   command-line macro's token does not count): a line change to the token's location, which for a token of an
+;;   expansion is the expansion point: the line ended, a line marker (the source line went back), the column less 2 in
+;;   spaces.
+;;
+;; Run on the tools' host as
+;;
+;;   EXE test/javac-platform/cppout.ae HOST-DIR TEMPLATE [OPTION...]
+;;
+;; with repr/c's environment (bin/lib/repr-c/sysroot.bash's c_sysroot: ARBACE_C_HOST, ARBACE_C_SYSROOT); OPTIONs are
+;; gcc's -D, -U, -I and -std (platform-build.edn's :cpp). Prints gcc -E's text: line markers as "# LINE \"FILE\"".
+(ns javac.cppout
+  (:require [arbace.repr.c.host :as host]
+            [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.pp :as pp]
+            [arbace.string :as str])
+  (:import (arbace.repr.c.lex Tok)))
+
+(def ^:private joins
+  "The pairs repr/c's text puts a space between, [token previous] (cc's Preprocess; gcc's cpp_avoid_paste)."
+  #{[\# \#] [\& \&] [\+ \+] [\+ :PPNUMBER] [\- \-] [\- :PPNUMBER] [\. \.] [\. :PPNUMBER]
+    [\< \<] [\= \!] [\= \%] [\= \&] [\= \*] [\= \+] [\= \/] [\= \<] [\= \=] [\= \^] [\= \|]
+    [\> \-] [\> \>] [\| \|] [:DEC \-] [:IDENTIFIER :IDENTIFIER] [:INC \+]})
+
+(defn- macro-file
+  "The file a token's macro is defined in, :builtin for a predefined or command-line one, nil for no macro."
+  [^Tok t]
+  (when-let [m (.-m t)]
+    (let [^Tok nm (:name m)]
+      (if-let [p (and (instance? Tok nm) (lex/tok-position nm))]
+        (let [f (nth p 0)] (if (or (nil? f) (= f "") (str/starts-with? f "<")) :builtin f))
+        :builtin))))
+
+(defn layout
+  "gcc -E's text of the preprocessed stream r of `main`, `system?` telling a header file from the main one."
+  ^String [r ^String main system?]
+  (let [b (StringBuilder.)
+        st (atom {:line 1 :file main :printed false :prev nil :sys false :nl false :space false})
+        newline! (fn [] (.append b "\n") (swap! st #(-> % (update :line inc) (assoc :printed false))))
+        marker! (fn [file line]
+                  (when (:printed @st) (.append b "\n"))
+                  (.append b (str "# " line " \"" file "\"\n"))
+                  (swap! st assoc :line line :file file :printed false))
+        maybe-print-line (fn [file line]
+                           (when (:printed @st) (newline!))
+                           (let [{l :line f :file} @st]
+                             (if (and (= f file) (>= line l) (< line (+ l 8)))
+                               (dotimes [_ (- line l)] (newline!))
+                               (marker! file line))))
+        indent! (fn [col] (dotimes [_ (- (long col) 2)] (.append b " ")) (swap! st assoc :printed true))]
+    (doseq [^Tok t (:tokens r)]
+      (let [k (.-ch t)]
+        (cond
+          (= k \newline) (swap! st assoc :nl true :space false)
+          (= k \space) (swap! st assoc :space true)
+          (= k :eof) nil
+          :else
+          (let [[file line col] (lex/tok-position t)
+                mf (macro-file t)
+                sys (and (string? mf) (system? mf))]
+            (when (:nl @st)
+              (maybe-print-line file line)
+              (indent! col)
+              (swap! st assoc :prev nil :nl false))
+            (when (or (:space @st) (and (:prev @st) (joins [k (:prev @st)])))
+              (.append b " "))
+            (when (and (not= sys (:sys @st)) (not= mf :builtin))
+              (maybe-print-line file line)
+              (indent! col)
+              (swap! st assoc :sys sys))
+            (.append b (.-src t))
+            (swap! st assoc :printed true :prev k :space false)))))
+    (when (:printed @st) (.append b "\n"))
+    (.toString b)))
+
+(defn -main [host-dir main & opts]
+  (let [h (host/load-host host-dir)
+        fc (host/file-config (vec opts) "gnu23")
+        r (pp/preprocess (host/config h fc ".") main)]
+    (when (seq (:errors r))
+      (binding [*out* *err*] (doseq [e (:errors r)] (println "cppout:" e)))
+      (System/exit 1))
+    (print (layout r main #(not= % main)))
+    (flush)))
+
+(apply -main *command-line-args*)
