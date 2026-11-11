@@ -1,0 +1,860 @@
+(ns arbace.repr.asm.arm64.lenc
+  "AR2's second slice (doc/asm/ARM64-SURVEY.md, \"As built: AR2 (second slice)\"; doc/asm/SPEC.md §12; ARS24 (a)): A64 beyond
+  arm64asm's ARMv8.0 table, encoded from LLVM's AArch64 records as arbace.asm.arm64.gen writes them (asm/arm64/table.edn: the
+  instructions' AsmStrings, operands and Inst encodings, the InstAliases, the operand classes, the registers, the system operands
+  and the features). `encode` tries arbace.repr.asm.arm64.enc (Go's table) first; an instruction it refuses for its mnemonic, its
+  operands or a kind not built is matched here as LLVM's matcher matches it, in outline: each matchable of the mnemonic (an
+  instruction's AsmString, variant 0, or an InstAlias's) is a template of the operands' text; each `$NAME` is matched by its
+  operand's class (AArch64AsmParser's predicate methods by name: registers by class and kind, immediates by range and scale,
+  labels, conditions, system registers and operations, barriers, prefetch operations, ...), rendered (the class's render method)
+  and encoded (the operand's EncoderMethod, else its value) into the Inst bits its field sets. An alias stands for its result
+  instruction with its fixed registers and immediates; a tied operand takes the value of the one it is tied to. The features an
+  instruction or a system register requires are checked when the caller binds `*features*` (a test's -mattr/-mcpu, ARS26)."
+  (:require [arbace.repr.asm.arm64.enc :as enc]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def table-path (or (System/getenv "REPR_ASM_ARM64_TABLE") "asm/arm64/table.edn"))
+
+(def table (delay (read-string (slurp table-path))))
+
+(def ^:dynamic *features*
+  "The enabled subtarget features (a set of feature record names, implied ones included), or nil: every feature enabled."
+  nil)
+
+(defn- refuse
+  ([cause ^String msg] (throw (ex-info msg {:asm/refused cause :asm/message msg})))
+  ([cause ^String msg ^String llvm] (throw (ex-info msg {:asm/refused cause :asm/message llvm}))))
+(defn- head [x] (when (seq? x) (first x)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; features
+
+(defn feature-closure
+  "The features `names` (records' names) with every one they imply."
+  [names]
+  (let [fs (:features @table)]
+    (loop [todo (vec names) seen #{}]
+      (if-let [x (peek todo)]
+        (if (seen x) (recur (pop todo) seen) (recur (into (pop todo) (:implies (fs x))) (conj seen x)))
+        seen))))
+
+(def feature-by-name (delay (into {} (for [[r {:keys [name]}] (:features @table) :when (seq name)] [(str/lower-case name) r]))))
+
+(defn- cond-holds? [c fs]
+  (cond (string? c) (contains? fs c)
+        (vector? c) (let [[op & args] c xs (map first args)]
+                      (case op
+                        "all_of" (every? #(cond-holds? % fs) xs)
+                        "any_of" (boolean (some #(cond-holds? % fs) xs))
+                        "not" (not (cond-holds? (first xs) fs))
+                        false))
+        :else false))
+
+(defn preds-hold?
+  "Every assembler predicate of `preds` holds under *features* (always, when it is nil)."
+  [preds]
+  (or (nil? *features*)
+      (every? (fn [p] (let [{c :cond a :asm} ((:preds @table) p)] (or (not a) (nil? c) (cond-holds? c *features*)))) preds)))
+
+(defn missing-preds
+  "The predicates of `preds` that do not hold, by their names (`HasLSE`)."
+  [preds]
+  (when *features*
+    (vec (remove (fn [p] (let [{c :cond a :asm} ((:preds @table) p)] (or (not a) (nil? c) (cond-holds? c *features*)))) preds))))
+
+(defn- features-hold? [req] (or (nil? *features*) (contains? *features* "FeatureAll") (every? #(contains? *features* %) req)))
+
+(defn features-of
+  "The enabled features of llvm-mc's `-mcpu` (nil: generic) and `-mattr` list (each `+name` or `-name`, or a bare name): the
+  processor's features and the added ones with all they imply, less each removed one and every feature that implies it."
+  [cpu mattrs]
+  (let [fs (:features @table)
+        base (get (:processors @table) (or cpu "generic") (get (:processors @table) "generic"))
+        parsed (for [^String a mattrs :let [a (str/trim a)] :when (seq a)]
+                 (let [[sign nm] (if (#{\+ \-} (first a)) [(first a) (subs a 1)] [\+ a])]
+                   [sign (@feature-by-name (str/lower-case nm))]))
+        enabled (feature-closure (concat base (for [[sg f] parsed :when (and f (= sg \+))] f)))
+        removed (set (for [[sg f] parsed :when (and f (= sg \-))] f))
+        implies? (fn [f] (some removed (feature-closure [f])))]
+    (set (remove implies? enabled))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; registers
+
+(def reg-index
+  "lower-case asm name -> [[REG HWENC] ...] by AsmName; under :alt by AltNames (the vector registers' `v0`, which only the
+  NEON vector classes take)."
+  (delay (let [rs (sort-by key (:regs @table))]
+           {:asm (reduce (fn [m [r [asm enc]]] (update m (str/lower-case asm) (fnil conj []) [r enc])) {} rs)
+            :alt (reduce (fn [m [r [_ enc alts]]] (reduce (fn [m n] (update m (str/lower-case n) (fnil conj []) [r enc])) m alts)) {} rs)})))
+
+(def rc-sets (delay (into {} (for [[k v] (:regclasses @table)] [k (set v)]))))
+
+(def ^:private reg-aliases {"fp" "x29" "lr" "x30" "ip0" "x16" "ip1" "x17"})
+
+(defn reg-in
+  "The HWEncoding of the register operand `op` when it is a member of the register class `rc` (by its AsmName, or with `alt?`
+  its AltName: `v0` for Q0 and D0), else nil."
+  ([op rc] (reg-in op rc false))
+  ([op rc alt?]
+   (when (= 'reg (head op))
+     (let [nm (str/lower-case (str (second op)))
+           nm (get reg-aliases nm nm)
+           members (@rc-sets rc)]
+       (some (fn [[r e]] (when (contains? members r) e)) ((if alt? (:alt @reg-index) (:asm @reg-index)) nm))))))
+
+(defn- reg-kind [op] (let [k (nth op 2 nil)] (when (keyword? k) (str/lower-case (name k)))))
+(defn- reg-extra [op] (some #(when (map? %) %) (drop 2 op)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; templates: an AsmString's operand text as a tree the forms are matched against
+
+(defn variant
+  "The AsmString's variant `v` (each `{a|b}` its v-th alternative)."
+  ^String [^String s ^long v]
+  (let [sb (StringBuilder.) n (.length s)]
+    (loop [i 0]
+      (if (>= i n)
+        (str sb)
+        (let [c (.charAt s i)]
+          (if (and (= c \{) (or (zero? i) (not (#{\$ \\} (.charAt s (dec i))))))
+            (let [e (loop [e (inc i) d 1]
+                      (cond (>= e n) n
+                            (= \{ (.charAt s e)) (recur (inc e) (inc d))
+                            (= \} (.charAt s e)) (if (= d 1) e (recur (inc e) (dec d)))
+                            :else (recur (inc e) d)))
+                  alts (loop [j (inc i) d 0 start (inc i) out []]
+                         (cond (>= j e) (conj out (subs s start e))
+                               (= \{ (.charAt s j)) (recur (inc j) (inc d) start out)
+                               (= \} (.charAt s j)) (recur (inc j) (dec d) start out)
+                               (and (= \| (.charAt s j)) (zero? d)) (recur (inc j) d (inc j) (conj out (subs s start j)))
+                               :else (recur (inc j) d start out)))]
+              (.append sb (nth alts v ""))
+              (recur (inc e)))
+            (do (.append sb c) (recur (inc i)))))))))
+
+(defn- split-top
+  "`s` split at the commas outside brackets and braces."
+  [^String s]
+  (loop [i 0 d 0 start 0 out []]
+    (if (>= i (count s))
+      (conj out (str/trim (subs s start)))
+      (let [c (.charAt s i)]
+        (cond (#{\[ \{} c) (recur (inc i) (inc d) start out)
+              (#{\] \}} c) (recur (inc i) (dec d) start out)
+              (and (= c \,) (zero? d)) (recur (inc i) d (inc i) (conj out (str/trim (subs s start i))))
+              :else (recur (inc i) d start out))))))
+
+(declare tpl-item)
+
+(defn- tpl-ref
+  "`$Name`, `${Name}`, `$Name.KIND`, `$Name.KIND$Idx`, `$Name[$Idx]`: an operand reference."
+  [^String s]
+  (when-let [[_ a b k idx] (re-matches #"\$(?:\{(\w+)\}|(\w+))(?:\.(\w+))?(?:\$(\w+)|\[\$(\w+)\])?" s)]
+    (let [n (or a b) idx (or idx (last (re-matches #".*\[\$(\w+)\]" s)))]
+      ;; `$A$B`: B a vector index (`v0.s[1]`, `{ v3.d }[1]`) or an operand of its own that follows A (`$Rm$shift_imm`)
+      (if idx [:pair [:op n k] [:op idx]] [:op n k]))))
+
+(defn- tpl-item [^String s]
+  (let [s (str/trim s)]
+    (cond
+      (str/ends-with? s "!") [:wb (tpl-item (subs s 0 (dec (count s))))]
+      (and (str/starts-with? s "[") (str/ends-with? s "]")) (into [:mem] (map tpl-item (split-top (subs s 1 (dec (count s))))))
+      (and (str/starts-with? s "{") (str/includes? s "}")) [:raw s]
+      (re-find #"\s" s) (let [[w & r] (str/split s #"\s+")] [:shift (str/lower-case w) (when (seq r) (tpl-item (str/join " " r)))])
+      (str/starts-with? s "#$") (or (tpl-ref (subs s 1)) [:raw s])
+      (str/starts-with? s "#") [:lit (subs s 1)]
+      (str/starts-with? s "$") (or (tpl-ref s) [:raw s])
+      (re-matches #"[A-Za-z_][\w.]*" s) [:sym (str/lower-case s)]
+      (re-matches #"-?[0-9]+" s) [:lit s]
+      :else [:raw s])))
+
+(defn template
+  "An AsmString's variant 0 as [MNEMONIC [ITEM ...]], MNEMONIC lower case (a `$cond` in it kept)."
+  [^String asm]
+  (let [s (str/trim (variant asm 0))
+        i (let [m (re-find #"[\t ]" s)] (if m (.indexOf s ^String m) -1))
+        mn (str/lower-case (if (neg? i) s (subs s 0 i)))
+        rest* (if (neg? i) "" (str/trim (subs s i)))]
+    [mn (if (empty? rest*) [] (mapv tpl-item (split-top rest*)))]))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the matchables: instructions and aliases by mnemonic
+
+(defn- op-types
+  "An instruction's operands [NAME TYPE] in MCInst order (outs, ins)."
+  [m]
+  (vec (concat (:outs m) (:ins m))))
+
+(defn ties
+  "The constraints' ties of an instruction as {LATER EARLIER} by operand name (the later operand takes the earlier's value)."
+  [m]
+  (let [order (into {} (map-indexed (fn [i [n]] [n i]) (op-types m)))]
+    (into {} (for [[_ a b] (re-seq #"\$(\w+)\s*=\s*\$(\w+)" (or (:constraints m) ""))
+                   :let [[x y] (sort-by #(order % 99) [a b])]]
+               [y x]))))
+
+(def matchables
+  "mnemonic -> [{:insn NAME :tpl ITEMS :fixed {OPERAND [KIND VALUE]} :preds [...] :alias? bool}], instructions first, each
+  group in the table's order; a mnemonic with `$` (b.$cond) under :patterns."
+  (delay
+    (let [{:keys [insns aliases]} @table
+          ins (for [[n m] (sort-by key insns) :when (:enc m)
+                    :let [[mn items] (template (:asm m))]]
+                {:insn n :mn mn :tpl items :preds (:preds m)})
+          als (for [a aliases :when (and (:enc (insns (:result a))) (contains? #{nil ""} (:variant a)))
+                    :let [[mn items] (template (:asm a))
+                          m (insns (:result a))
+                          tied (ties m)
+                          names (remove tied (map first (op-types m)))
+                          fixed (into {} (keep (fn [[nm [k v an]]]
+                                                 (case k
+                                                   :reg [nm [:reg v]]
+                                                   :imm [nm [:imm v]]
+                                                   ;; a complex operand's fixed sub-operands (ro_Xextend64's (0, 0))
+                                                   :dag [nm [:dag (mapv first (rest v))]]
+                                                   nil))
+                                               (map vector names (:args a))))]]
+                {:insn (:result a) :mn mn :tpl items :fixed fixed :preds (vec (distinct (concat (:preds a) (:preds m))))
+                 :alias? true :priority (:priority a)
+                 ;; the alias's operand names in its text, each the result instruction's operands it stands for, and its types
+                 :rename (reduce (fn [m [nm [k v an]]] (if (and (= k :op) an) (update m an (fnil conj []) nm) m))
+                                 {} (map vector names (:args a)))
+                 :types (into {} (keep (fn [[k v an]] (when (and (= k :op) an) [an v])) (:args a)))})
+          all (concat ins als)]
+      (reduce (fn [m x] (if (str/includes? (:mn x) "$")
+                          (update m :patterns (fnil conj []) x)
+                          (update m (:mn x) (fnil conj []) x)))
+              {} all))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; operand classes: each (fn [ops ctx]) -> [VALUE REST] or nil; VALUE a long (the MC operand, rendered), or {:fix OP :v 0}
+
+(defn- imm-of
+  "The immediate operand's value: a long, a double, :sym (a symbolic expression), or nil when the operand is not an immediate."
+  [op]
+  (let [e (enc/imm-expr op)]
+    (when-not (= e :none)
+      (let [v (enc/ev e)] (if (nil? v) :sym v)))))
+
+(defn- int-imm [op] (let [v (imm-of op)] (when (integer? v) (long v))))
+
+(defn- bare-int
+  "A bare number or `#n` (LLVM takes either for most immediates)."
+  [op]
+  (cond (number? op) (when (integer? op) (long op)) :else (int-imm op)))
+
+(defn- parse-args [^String s] (mapv #(Long/parseLong (str/trim %)) (str/split s #",")))
+
+(defn- range-imm [lo hi]
+  (fn [[op & r] _] (let [v (bare-int op)] (when (and v (<= lo v hi)) [v r]))))
+
+(def conds enc/conds)
+
+(defn- sysreg-enc
+  "A system register's encoding (16 bits, op0:op1:CRn:CRm:op2) by name for reading (`:read`) or writing (`:write`), its
+  required features held, or a generic S<op0>_<op1>_C<n>_C<m>_<op2>."
+  [op dir]
+  (when (symbol? op)
+    (let [s (str/lower-case (str op))]
+      (or (some (fn [[n e req rd wr]]
+                  (when (and (= (str/lower-case n) s) (= 1 (if (= dir :read) rd wr)) (features-hold? req)) e))
+                (:sysreg (:sysops @table)))
+          (when-let [[_ a b c d e] (re-matches #"s([0-3])_([0-7])_c([0-9]|1[0-5])_c([0-9]|1[0-5])_([0-7])" s)]
+            (let [[a b c d e] (map #(Long/parseLong %) [a b c d e])]
+              (bit-or (bit-shift-left a 14) (bit-shift-left b 11) (bit-shift-left c 7) (bit-shift-left d 3) e)))))))
+
+(defn- named
+  "A name of the system operands' table `k` (its required features held): its encoding."
+  [k op]
+  (when (symbol? op)
+    (let [s (str/lower-case (str op))]
+      (some (fn [[n e req]] (when (and (= (str/lower-case n) s) (features-hold? req)) e)) (k (:sysops @table))))))
+
+(defn- label
+  "A PC-relative label: a symbol (a fixup) or a number (the offset, a multiple of `align`, in `bits` signed after shifting by
+  `shift`)."
+  [bits shift align]
+  (fn [[op & r] _]
+    (let [op (if (and (= 'shift (head op)) (= 2 (count op))) (second op) op)
+          e (let [x (enc/imm-expr op)] (if (= x :none) op x))
+          v (enc/ev e)]
+      (when-not (or (nil? op) (#{'reg 'mem 'wb 'rlist 'elt 'shift 'range} (head op)))
+        (if (nil? v)
+          [{:fix op :v 0} r]
+          (when (and (integer? v) (zero? (mod v align)))
+            (let [x (bit-shift-right (long v) shift) h (bit-shift-left 1 (dec bits))]
+              (when (and (>= x (- h)) (< x h)) [x r]))))))))
+
+(defn- reg-class
+  ([rc kind] (reg-class rc kind false))
+  ([rc kind alt?]
+   (fn [[op & r] _]
+     (when-let [e (reg-in op rc alt?)]
+       (when (and (if kind (= kind (reg-kind op)) (nil? (reg-kind op))) (nil? (reg-extra op)))
+         [e r])))))
+
+(defn- vec-list
+  "isTypedVectorList<RegKind::NeonVector, N, LANES, BITS>: {vA.K, ...} or {vA.K - vB.K}, N consecutive registers of the kind
+  (LANES 0: the element alone, `d`), mod 32; the first's number."
+  [n lanes bits]
+  (let [k (str (when (pos? lanes) lanes) ({8 "b" 16 "h" 32 "s" 64 "d" 128 "q"} bits))]
+    (fn [[op & r] _]
+      (let [gs (enc/rlist-regs op)]
+        (when (and gs (= n (count gs)) (every? #(= :v (:cls %)) gs) (every? #(= k (:arr %)) gs)
+                   (every? (fn [[a b]] (= (:n b) (mod (inc (:n a)) 32))) (partition 2 1 gs)))
+          [(:n (first gs)) r])))))
+
+(defn- x31
+  "`x31`, which the register pairs' and the system aliases' parsers take as XZR (a symbol to the reader: no register is x31)."
+  [op]
+  (if (or (and (= 'reg (head op)) (= "x31" (str/lower-case (str (second op))))) (and (symbol? op) (= "x31" (str/lower-case (str op)))))
+    (list 'reg 'xzr)
+    op))
+
+(defn- seq-pair [rc]
+  ;; XSeqPairs, WSeqPairs: two consecutive registers, the first even (CASP's)
+  (let [base (if (str/starts-with? rc "X") "GPR64" "GPR32")]
+    (fn [[a b & r] _]
+      (let [x (reg-in (x31 a) base) y (reg-in (x31 b) base)]
+        (when (and x y (even? x) (= y (inc x))) [x r])))))
+
+(defn class-matcher
+  "The matcher of an operand of type `ty` (its record's name) written as the template item `kind` (a register's kind suffix)."
+  [ty kind]
+  (let [{:keys [operands classes]} @table
+        o (operands ty)
+        ty-name ty
+        cls (classes (:class o))
+        pm (or (:pred cls) "")
+        cname (or (:name cls) "")]
+    (cond
+      (nil? o) nil
+      (= ty-name "inv_ccode") (fn [[op & r] _] (when-let [c (and (symbol? op) (conds (str/lower-case (str op))))] (when (< c 14) [(bit-xor c 1) r])))
+      (= (:kind o) :rc) (reg-class ty kind)
+      (= cname "XSeqPair") (seq-pair "XSeqPairsClass")
+      (= cname "WSeqPair") (seq-pair "WSeqPairsClass")
+      (= cname "GPR64x8") (fn [[op & r] _] (when-let [e (reg-in op "GPR64")] (when (and (even? e) (<= e 22) (nil? (reg-kind op))) [e r])))
+      (= cname "SyspXzrPair")
+      (fn [[a b & r] _] (let [x (reg-in (x31 a) "GPR64") y (reg-in (x31 b) "GPR64")]
+                          (cond (and (= x 31) (= y 31)) [31 r]
+                                (and x y (even? x) (= y (inc x)) (< x 30)) [x r])))
+      ;; tryParseGPR64sp0Operand: `xN` or `xN, #0` (`[x0, #0]`)
+      (= cname "GPR64sp0") (fn [[op & r] _]
+                             (when-let [e (and (nil? kind) (nil? (reg-kind op)) (reg-in op "GPR64sp"))]
+                               (if (and (seq r) (= 0 (bare-int (first r)))) [e (rest r)] [e r])))
+      (re-find #"^isNeonVectorReg" pm) (reg-class (:rc o) kind true)
+      (re-matches #"isTypedVectorList<RegKind::NeonVector, *\d+, *\d+, *\d+>" pm)
+      (let [[n l b] (map #(Long/parseLong %) (rest (re-matches #"isTypedVectorList<RegKind::NeonVector, *(\d+), *(\d+), *(\d+)>" pm)))]
+        (vec-list n l b))
+      (= (:kind o) :regop) (when (:rc o) (reg-class (:rc o) kind))
+      :else
+      (or
+       (when-let [[_ a b] (re-matches #"isImmInRange<(-?\d+),\s*(-?\d+)>" pm)] (range-imm (Long/parseLong a) (Long/parseLong b)))
+       (when-let [[_ n] (re-matches #"isSImm<(\d+)>" pm)] (let [h (bit-shift-left 1 (dec (Long/parseLong n)))] (range-imm (- h) (dec h))))
+       (when-let [[_ n] (re-matches #"isUImm<(\d+)>" pm)] (range-imm 0 (dec (bit-shift-left 1 (Long/parseLong n)))))
+       (when-let [[_ n s] (re-matches #"isSImmScaled<(\d+),\s*(\d+)>" pm)]
+         (let [h (bit-shift-left 1 (dec (Long/parseLong n))) s (Long/parseLong s)]
+           (fn [[op & r] _] (let [v (bare-int op)] (when (and v (zero? (mod v s)) (<= (- h) (quot v s) (dec h))) [(quot v s) r])))))
+       (when-let [[_ n s] (re-matches #"isUImmScaled<(\d+),\s*(\d+)>" pm)]
+         (let [h (bit-shift-left 1 (Long/parseLong n)) s (Long/parseLong s)]
+           (fn [[op & r] _] (let [v (bare-int op)] (when (and v (zero? (mod v s)) (<= 0 (quot v s) (dec h))) [(quot v s) r])))))
+       (when-let [[_ s] (re-matches #"isUImm12Offset<(\d+)>" pm)]
+         (let [s (Long/parseLong s)]
+           (fn [[op & r] _] (let [v (imm-of op)]
+                              (cond (= v :sym) (when (enc/reloc? (enc/imm-expr op)) [{:fix op :v 0} r])
+                                    (and (integer? v) (zero? (mod v s)) (<= 0 (quot v s) 4095)) [(quot v s) r])))))
+       (when-let [[_ a b] (re-matches #"isVectorIndex<(\d+),\s*(\d+)>" pm)]
+         (range-imm (Long/parseLong a) (Long/parseLong b)))
+       (when-let [[_ n] (re-matches #"isBranchTarget<(\d+)>" pm)] (label (Long/parseLong n) 2 4))
+       (when (= pm "isPAuthPCRelLabel16Operand")
+         (fn [[op & r] _] (let [v (enc/ev (let [x (enc/imm-expr op)] (if (= x :none) op x)))]
+                            (cond (nil? v) (when (symbol? op) [{:fix op :v 0} r])
+                                  (and (integer? v) (<= v 0) (zero? (mod v 4)) (< (- v) (* 4 65536))) [(quot (- v) 4) r]))))
+       (when-let [[_ a b] (re-matches #"isComplexRotation<(\d+),\s*(\d+)>" pm)]
+         (let [a (Long/parseLong a) b (Long/parseLong b)]
+           (fn [[op & r] _] (let [v (bare-int op)] (when (and v (>= v b) (zero? (mod (- v b) a)) (< (quot (- v b) a) (if (= a 90) 4 2))) [(quot (- v b) a) r])))))
+       (when-let [[_ t] (re-matches #"isLogicalImm<int(32|64)_t>" pm)]
+         (let [size (Long/parseLong t)]
+           (fn [[op & r] _] (let [v (int-imm op)]
+                              (when-let [[n immr imms] (and v (enc/bitmask v size))]
+                                [(bit-or (bit-shift-left n 12) (bit-shift-left immr 6) imms) r])))))
+       (case cname
+         "CondCode" (fn [[op & r] _] (when-let [c (and (symbol? op) (conds (str/lower-case (str op))))] [c r]))
+         "SysCR" (fn [[op & r] _] (when-let [[_ c] (and (symbol? op) (re-matches #"[cC]([0-9]|1[0-5])" (str op)))] [(Long/parseLong c) r]))
+         "MRSSystemRegister" (fn [[op & r] _] (when-let [e (sysreg-enc op :read)] [e r]))
+         "MSRSystemRegister" (fn [[op & r] _] (when-let [e (sysreg-enc op :write)] [e r]))
+         "SystemPStateFieldWithImm0_15" (fn [[op & r] _] (when-let [e (named :pstate15 op)] [e r]))
+         "SystemPStateFieldWithImm0_1" (fn [[op & r] _] (when-let [e (named :pstate1 op)] [e r]))
+         "SVCR" (fn [[op & r] _] (when-let [e (named :svcr op)] [e r]))
+         "Barrier" (fn [[op & r] _] (if-let [e (named :db op)] [e r] (let [v (bare-int op)] (when (and v (<= 0 v 15)) [v r]))))
+         "BarriernXS" (fn [[op & r] _] (if-let [e (and (symbol? op)
+                                                       (some (fn [[n e req] ] (when (and (= (str/lower-case n) (str/lower-case (str op))) (features-hold? req)) e))
+                                                             (:dbnxs (:sysops @table))))]
+                                         [e r]
+                                         (let [v (bare-int op)] (when-let [e ({16 2 20 6 24 10 28 14} v)] [e r]))))
+         "Prefetch" (fn [[op & r] _] (if-let [e (named :prfm op)] [e r] (let [v (bare-int op)] (when (and v (<= 0 v 31)) [v r]))))
+         "RangePrefetch" (fn [[op & r] _] (if-let [e (named :rprfm op)] [e r] (let [v (bare-int op)] (when (and v (<= 0 v 63)) [v r]))))
+         "AddSubImm" (fn [[op & r] _]
+                       (let [v (imm-of op) [k a] (enc/shift-op (first r))]
+                         (when (or (nil? k) (and (= k "lsl") (#{0 12} a)))
+                           (cond (integer? v) (cond (<= 0 v 4095) [(bit-or v (if (= a 12) 4096 0)) (if k (rest r) r)]
+                                                    ;; an unshifted 12-bit value shifted by 12, written with LSL #12
+                                                    (and (nil? k) (pos? v) (zero? (bit-and v 0xfff)) (<= (bit-shift-right v 12) 0xfff))
+                                                    [(bit-or (bit-shift-right v 12) 4096) r])
+                                 (= v :sym) (when (enc/reloc? (enc/imm-expr op)) [{:fix op :v (if (= a 12) 4096 0)} (if k (rest r) r)])))))
+         "FPImm" (fn [[op & r] _] (let [v (imm-of op)] (when (number? v) (when-let [i (enc/fp-imm8 (double v))] [i r]))))
+         "Imm" (fn [[op & r] _] (let [v (imm-of op)]
+                                  (cond (integer? v) [v r] (= v :sym) [{:fix op :v 0} r])))
+         "UImm6" (range-imm 0 63)
+         "LSLImm3Shift" (fn [[op & r] _] (let [[k a] (enc/shift-op op)] (when (and (= k "lsl") (integer? a) (<= 0 a 7)) [a r])))
+         "HinteUImm16" (fn [[op & r] _] (let [v (bare-int op)]
+                                          (when (and v (<= 0 v 65535) (not (and (<= 12319 v 16383) (zero? (mod (- v 12319) 32))))) [v r])))
+         "TIndexHint" (fn [[op & r] _] (when-let [[_ x] (and (symbol? op) (re-matches #"(?i)(r|c|j|jc)" (str op)))] [({"r" 0 "c" 1 "j" 2 "jc" 3} (str/lower-case x)) r]))
+         nil)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; matching a form's operands against a template
+
+(def ^:dynamic *fail*
+  "The matcher's failure as MatchInstructionImpl keeps it, an atom {:at N :code MESSAGE :too-few? B}: the furthest operand any
+  matchable failed at (a later matchable failing at the same operand or beyond moves it) and the latest specific diagnostic."
+  nil)
+
+(defn- note-fail!
+  "Records a failure at operand position `d` (`msg` nil: the generic `invalid operand for instruction`)."
+  [d msg too-few?]
+  (when *fail*
+    (swap! *fail* (fn [{:keys [at] :as f}]
+                    (if (or (nil? at) (>= d at))
+                      (cond-> (assoc f :at d :too-few? too-few?) msg (assoc :code msg))
+                      f)))))
+
+(defn- reg-family
+  "A register operand's family by its name: :gpr, :fpr, :vec (NEON), :zpr (SVE), :ppr, :pnr, :za, :other."
+  [op]
+  (let [n (str/lower-case (str (second op)))]
+    (cond (re-matches #"[xw]([0-9]+|zr)|w?sp|fp|lr" n) :gpr
+          (re-matches #"[bhsdq][0-9]+" n) :fpr
+          (re-matches #"v[0-9]+" n) :vec
+          (re-matches #"z[0-9]+" n) :zpr
+          (re-matches #"pn[0-9]+" n) :pnr
+          (re-matches #"p[0-9]+" n) :ppr
+          (str/starts-with? n "za") :za
+          :else :other)))
+
+(defn- rc-family
+  "A register class's family: its first member's name's (and a NEON vector class's, by its predicate, :vec)."
+  [rc ^String pred]
+  (if (and pred (re-find #"NeonVector|isNeonVectorReg|TypedVectorList<RegKind::NeonVector" pred))
+    :vec
+    (let [m (first ((:regclasses @table) rc))]
+      (if m (reg-family (list 'reg (symbol (str/lower-case m)))) :other))))
+
+(defn- operand-diag
+  "The diagnostic of an operand that its class does not take: the class's message (DiagnosticString, else showMatchError's for
+  its DiagnosticType) when the operand is of the class's kind (an immediate for an immediate's class, a name for a named
+  operand's, a register for a register's), else nil."
+  [ty op]
+  (let [{:keys [operands classes diags]} @table
+        o (operands ty)
+        cls (classes (:class o))
+        msg (or (:diag-string cls) (diags (:diag cls)))]
+    (when msg
+      (let [reg? (= 'reg (head op))
+            regclass? (#{:rc :regop} (:kind o))]
+        (when (if regclass? (and reg? (= (reg-family op) (rc-family (:rc o) (:pred cls)))) (not reg?)) msg)))))
+
+(defn- leaves
+  "How many of LLVM's parsed operands the form operand is: `[`, `]` and `!` each one, a NEON register's kind a token of its own,
+  a vector index another."
+  ^long [op]
+  (case (str (head op))
+    "mem" (+ 2 (reduce + 0 (map leaves (rest op))))
+    "wb" (inc (leaves (second op)))
+    "elt" (+ (leaves (second op)) (dec (count op)))
+    "reg" (if (and (keyword? (nth op 2 nil)) (re-matches #"[vV][0-9]+" (str (second op)))) 2 1)
+    1))
+
+(def ^:dynamic *sp0* "The mnemonic has a matchable taking GPR64sp0." false)
+
+(defn- match-items
+  "[BINDINGS DEPTH] of the operands `ops` matched by the template `items` (the operand types by name), or nil; DEPTH counts the
+  operands consumed (`leaves`) from `d`, the position failures are recorded at."
+  [items ops types bind ^long d]
+  (if (empty? items)
+    (if (empty? ops) [bind d] (do (note-fail! d nil false) nil))
+    (let [[it & more] items
+          fail (fn [msg] (note-fail! d msg (empty? ops)) nil)
+          step (fn [res k] (when-let [[b d2] res] (match-items more (drop k ops) types b d2)))]
+      (case (first it)
+        :op (let [[_ n k] it
+                  ty (types n)]
+              (if-let [f (and ty (class-matcher ty k))]
+                (if-let [[v r] (f ops nil)]
+                  (let [used (- (count ops) (count r))]
+                    (match-items more r types (assoc bind n v) (+ d (reduce + 0 (map leaves (take used ops))))))
+                  (fail (when (seq ops) (operand-diag ty (first ops)))))
+                (fail nil)))
+        :pair (let [[_ a [_ i]] it
+                    idx? (str/starts-with? (or (:pred ((:classes @table) (:class ((:operands @table) (types i))))) "") "isVectorIndex")]
+                (if idx?
+                  (match-items (cons (assoc it 0 :elt) more) ops types bind d)
+                  (match-items (list* a [:op i nil] more) ops types bind d)))
+        :elt (let [[_ [_ n k] [_ i]] it [op] ops]
+               (if (and (= 'elt (head op)) (= 3 (count op)))
+                 (let [x (second op) idx (nth op 2 nil)]
+                   (when-let [[b d2] (match-items [[:op n k]] [x] types bind d)]
+                     (step (match-items [[:op i nil]] [(if (number? idx) idx (list 'imm idx))] types b d2) 1)))
+                 (fail nil)))
+        :mem (let [[op] ops
+                   ;; `[xN, #0]` where the AsmString has `[$Rn]`, in a mnemonic one of whose matchables takes GPR64sp0 there:
+                   ;; tryParseGPR64sp0Operand parses `xN, #0` as the register, which the others' GPR64sp takes too
+                   op (if (and *sp0* (= 'mem (head op)) (= 1 (count (rest it))) (= 3 (count op)) (= 0 (bare-int (nth op 2))))
+                        (list 'mem (second op))
+                        op)]
+               (if (= 'mem (head op))
+                 (when-let [[b d2] (match-items (rest it) (rest op) types bind (inc d))]
+                   (match-items more (rest ops) types b (inc d2)))
+                 (fail nil)))
+        :wb (let [[op] ops]
+              (if (= 'wb (head op))
+                (when-let [[b d2] (match-items [(second it)] [(second op)] types bind d)]
+                  (match-items more (rest ops) types b (inc d2)))
+                (fail nil)))
+        :lit (let [[op] ops v (imm-of op)]
+               (if (and (some? v) (not= v :sym)
+                        (= (Double/doubleToRawLongBits (double v)) (Double/doubleToRawLongBits (Double/parseDouble (second it)))))
+                 (match-items more (rest ops) types bind (inc d))
+                 (fail nil)))
+        :sym (let [[op] ops]
+               (if (or (and (symbol? op) (= (str/lower-case (str op)) (second it)))
+                       ;; a register the AsmString spells (`chkfeat x16`)
+                       (and (= 'reg (head op)) (= 2 (count op)) (= (str/lower-case (str (second op))) (second it))))
+                 (match-items more (rest ops) types bind (inc d))
+                 (fail nil)))
+        :shift (let [[op] ops [_ w sub] it]
+                 (if (and (= 'shift (head op)) (= (str/lower-case (str (second op))) w))
+                   (let [arg (nth op 2 nil)]
+                     (if sub
+                       (when (some? arg)
+                         (when-let [[b] (match-items [sub] [arg] types bind d)] (match-items more (rest ops) types b (inc d))))
+                       (if (nil? arg) (match-items more (rest ops) types bind (inc d)) (fail nil))))
+                   (fail nil)))
+        (fail nil)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; encoding the matched operands
+
+(defn- shift-r [bits] (fn [v] (- bits v)))
+(defn- shift-l [bits] (fn [v] (- v bits)))
+
+(defn- encoder
+  "The operand value as its field takes it: the EncoderMethod's transformation (AArch64MCCodeEmitter), else the value."
+  [^String em]
+  (if (nil? em)
+    identity
+    (or (when-let [[_ n] (re-matches #"getVecShiftR(\d+)OpValue" em)] (shift-r (Long/parseLong n)))
+        (when-let [[_ n] (re-matches #"getVecShiftL(\d+)OpValue" em)] (shift-l (Long/parseLong n)))
+        (case em
+          "getFixedPointScaleOpValue" (fn [v] (- 64 v))
+          identity))))
+
+(defn- operand-values
+  "{FIELD VALUE} of a matched matchable: its bindings (renamed by an alias), fixed registers and immediates, tied operands."
+  [mt m bind]
+  (let [{:keys [operands]} @table
+        types (into {} (op-types m))
+        bind (if (:rename mt) (into {} (mapcat (fn [[k v]] (for [n (get (:rename mt) k [k])] [n v])) bind)) bind)
+        fixed (into {} (keep (fn [[n [k v]]]
+                               (case k
+                                 :reg [n (or (second ((:regs @table) v)) 0)]
+                                 :imm [n v]
+                                 ;; getMemExtendOpValue: (sign extend << 1) | do shift; else the one value
+                                 :dag [n (if (= 2 (count v)) (bit-or (bit-shift-left (long (first v)) 1) (long (second v))) (long (first v)))]
+                                 nil))
+                             (:fixed mt)))
+        vals (merge fixed bind)
+        tied (ties m)
+        vals (reduce (fn [vs [later earlier]]
+                       (cond (and (contains? vs earlier) (not (contains? vs later))) (assoc vs later (vs earlier))
+                             (and (contains? vs later) (not (contains? vs earlier))) (assoc vs earlier (vs later))
+                             :else vs))
+                     vals tied)]
+    (into {} (for [[n v] vals]
+               [n (if (map? v) v (let [o (operands (types n))] ((encoder (:encoder o)) v)))]))))
+
+(defn- assemble
+  "The word of instruction `m` with the operand values `vals`, and its fixups; nil when a field has no value."
+  [m vals]
+  (let [[mask value runs] (:enc m)]
+    (reduce (fn [acc [fld flo ilo w]]
+              (if-not (contains? vals fld)
+                (reduced nil)
+                (let [v (vals fld)
+                      x (if (map? v) (long (:v v)) (long v))
+                      bits (bit-and (bit-shift-right x flo) (dec (bit-shift-left 1 w)))]
+                  (cond-> (update acc :word bit-or (bit-shift-left bits ilo))
+                    (and (map? v) (:fix v) (not (some #{(:fix v)} (:fixups acc)))) (update :fixups conj (:fix v))))))
+            {:word (bit-and value mask) :fixups []} runs)))
+
+(defn- candidates [^String mn]
+  (let [ms @matchables]
+    (concat (get ms mn)
+            (for [x (:patterns ms)
+                  :let [[_ pre pv post] (re-matches #"([^$]*)\$(\w+)(.*)" (:mn x))]
+                  :when (and (str/starts-with? mn pre) (str/ends-with? mn post) (> (count mn) (+ (count pre) (count post))))]
+              (assoc x :mn-arg [pv (symbol (subs mn (count pre) (- (count mn) (count post))))])))))
+
+;; AArch64AsmParser's own rules around the matcher (MatchAndEmitInstruction's operand twiddles, parseCondCode's refusal,
+;; validateInstruction's MOPS checks)
+
+(defn- xreg? [op] (and (= 'reg (head op)) (re-matches #"x([0-9]|[12][0-9]|30)|xzr|fp|lr" (str/lower-case (str (second op))))))
+(defn- wreg? [op] (and (= 'reg (head op)) (re-matches #"w([0-9]|[12][0-9]|30)|wzr" (str/lower-case (str (second op))))))
+(defn- as-reg [op ^String c] (let [n (str/lower-case (str (second op)))]
+                                (list 'reg (symbol (cond (#{"xzr" "wzr"} n) (str c "zr") :else (str c (subs n 1)))))))
+
+(defn- twiddle
+  "The operands as the parser hands them to the matcher, or a refusal."
+  [^String mn ops]
+  (cond
+    (and (#{"sxtb" "sxth" "sxtw" "uxtb" "uxth" "uxtw"} mn) (= 2 (count ops)))
+    (let [[d s] ops]
+      (cond (xreg? s) (refuse :operands (if (= mn "uxtw") "invalid instruction" "invalid operand for instruction"))
+            (and (xreg? d) (wreg? s) (str/starts-with? mn "s")) [d (as-reg s "x")]
+            (and (xreg? d) (wreg? s) (#{"uxtb" "uxth"} mn)) [(as-reg d "w") s]
+            :else ops))
+    (and (#{"cset" "csetm" "cinc" "cinv" "cneg"} mn) (symbol? (last ops)) (#{"al" "nv"} (str/lower-case (str (last ops)))))
+    (refuse :operands "condition codes AL and NV are invalid for this instruction")
+    :else ops))
+
+(defn- validate
+  "validateInstruction's rules for the matched instruction `row` and its word: MOPS's three registers distinct."
+  [^String row ^long w]
+  (let [f (fn [lo] (bit-and (bit-shift-right w lo) 31))]
+    (cond
+      (re-matches #"CPY[A-Z]*" row)
+      (let [d (f 0) s* (f 16) n (f 5)]
+        (cond (= d s*) (refuse :unpredictable "invalid CPY instruction, destination and source registers are the same")
+              (= d n) (refuse :unpredictable "invalid CPY instruction, destination and size registers are the same")
+              (= s* n) (refuse :unpredictable "invalid CPY instruction, source and size registers are the same")))
+      (re-matches #"SET(G?[PME])[A-Z]*" row)
+      (let [d (f 0) n (f 5) m (f 16)]
+        (cond (= d n) (refuse :unpredictable "invalid SET instruction, destination and size registers are the same")
+              (= d m) (refuse :unpredictable "invalid SET instruction, destination and source registers are the same")
+              (= n m) (refuse :unpredictable "invalid SET instruction, source and size registers are the same"))))))
+
+(defn required-feature-string
+  "setRequiredFeatureString: an architecture version's name when the set names one (the first of v8.1a, v8.2a ...), else the
+  ExtensionDefs names whose features meet the set, joined by `, `."
+  [req]
+  (let [fs (set req)
+        vers [["HasV8_1aOps" "ARMv8.1a"] ["HasV8_2aOps" "ARMv8.2a"] ["HasV8_3aOps" "ARMv8.3a"] ["HasV8_4aOps" "ARMv8.4a"]
+              ["HasV8_5aOps" "ARMv8.5a"] ["HasV8_6aOps" "ARMv8.6a"] ["HasV8_7aOps" "ARMv8.7a"] ["HasV8_8aOps" "ARMv8.8a"]
+              ["HasV8_9aOps" "ARMv8.9a"] ["HasV9_0aOps" "ARMv9-a"] ["HasV9_1aOps" "ARMv9.1a"] ["HasV9_2aOps" "ARMv9.2a"]
+              ["HasV9_3aOps" "ARMv9.3a"] ["HasV9_4aOps" "ARMv9.4a"] ["HasV9_5aOps" "ARMv9.5a"] ["HasV9_6aOps" "ARMv9.6a"]
+              ["HasV9_7aOps" "ARMv9.7a"] ["HasV8_0rOps" "ARMv8r"]]]
+    (str (when (fs "HasV8_0aOps") "ARMv8a")
+         (or (some (fn [[f n]] (when (fs f) n)) vers)
+             (let [ms (for [[n efs] (:extensions @table) :when (some fs efs)] n)]
+               (if (seq ms) (str/join ", " ms) "(unknown)"))))))
+
+(def ^:private sys-kinds
+  ;; AArch64AsmParser's parseSysAlias: the mnemonic, its operation table, its name in the messages, whether a register is
+  ;; expected (from the entry), and the instruction it makes (SYS, SYSL, SYSP)
+  {"ic" [:ic "IC"] "dc" [:dc "DC"] "at" [:at "AT"] "tlbi" [:tlbi "TLBI"] "plbi" [:plbi "PLBI"] "gic" [:gic "GIC"]
+   "gsb" [:gsb "GSB"] "gicr" [:gicr "GICR"] "tlbip" [:tlbip "TLBIP"]})
+
+(defn- sys-word
+  "SYS (0xd5080000), SYSL (0xd5280000) or SYSP (0xd5480000) of a 14-bit op1:CRn:CRm:op2 encoding and Rt."
+  [^long base ^long e ^long rt]
+  (bit-or base (bit-shift-left (bit-and (bit-shift-right e 11) 7) 16) (bit-shift-left (bit-and (bit-shift-right e 7) 15) 12)
+          (bit-shift-left (bit-and (bit-shift-right e 3) 15) 8) (bit-shift-left (bit-and e 7) 5) rt))
+
+(defn- sys-alias
+  "parseSysAlias and parseSyspAlias: IC, DC, AT, TLBI, PLBI, GIC, GSB as SYS, GICR as SYSL, TLBIP as SYSP; CFP, DVP, COSP and CPP
+  (`rctx`) as SYS. {:word ...} or nil when the mnemonic is not one; refuses with LLVM's messages."
+  [^String mn ops]
+  (let [msg-op (fn [k] (refuse :operands (str "invalid operand for " k " instruction")))]
+    (if-let [[_ rctx-op2] (re-matches #"(cfp|dvp|cosp|cpp)" mn)]
+      (let [[o & r] ops]
+        (when-not (and (symbol? o) (= "rctx" (str/lower-case (str o)))) (msg-op "prediction restriction"))
+        (when (and (= mn "cosp") (not (features-hold? ["FeatureSPECRES2"]))) (refuse :feature "COSP requires: predres2"))
+        (when-not (features-hold? ["FeaturePredRes"]) (refuse :feature (str (str/upper-case mn) "RCTX requires: predres")))
+        (let [rt (if (seq r) (reg-in (first r) "GPR64") 31)]
+          (when (or (nil? rt) (next r)) (refuse :operands "invalid operand for prediction restriction instruction"))
+          {:word (sys-word 0xd5080000 (bit-or (bit-shift-left 3 11) (bit-shift-left 7 7) (bit-shift-left 3 3) ({"cfp" 4 "dvp" 5 "cosp" 6 "cpp" 7} mn)) rt)
+           :fixups [] :row (str/upper-case mn)}))
+      (when-let [[k label] (sys-kinds mn)]
+        (let [gicr? (= mn "gicr")
+              [o & r] (if gicr? (reverse ops) ops)
+              _ (when-not (symbol? o) (msg-op label))
+              s (str/lower-case (str o))
+              entry (some #(when (= s (str/lower-case (first %))) %) (k (:sysops @table)))
+              _ (when-not entry (msg-op label))
+              [nm e req x & x*] entry
+              ;; TLBIP's haveFeatures (AArch64BaseInfo): FEAT_D128, or FEAT_TLBID for the E1/E2 IS and OS operations
+              _ (when-not (and (features-hold? req)
+                               (or (not= k :tlbip) (features-hold? ["FeatureD128"])
+                                   (and (= 1 (first x*)) (features-hold? ["FeatureTLBID"]))))
+                  (refuse :feature (if (= k :tlbip)
+                                     (str "instruction requires: " (if (= 1 (first x*)) "tlbid or d128" "d128"))
+                                     (str label " " (str/upper-case nm) " requires: " (required-feature-string req)))))
+              ;; a REG_OPTIONAL operation takes a register only with FEAT_TLBID (or +all)
+              expect (case k
+                       (:tlbi :plbi) (case x "REG_REQUIRED" :yes "REG_OPTIONAL" (if (features-hold? ["FeatureTLBID"]) :opt :no) :no)
+                       :tlbip :yes
+                       (:ic :gic) (if (= 1 x) :yes :no)
+                       :gsb :no
+                       :yes)
+              regs (mapv x31 r)]
+          (if (= k :tlbip)
+            (let [pair (case (count regs)
+                         2 (let [[a b] regs x (reg-in a "GPR64") y (reg-in b "GPR64")]
+                             ;; tryParseSyspXzrPair (xzr, xzr), else tryParseGPRSeqPair
+                             (when (and x y (or (= x y 31) (and (even? x) (= y (inc x))))) x))
+                         nil)]
+              (when (empty? regs) (refuse :operands "expected register identifier"))
+              (when-not pair (refuse :operands "specified tlbip op requires a pair of registers"))
+              {:word (sys-word 0xd5480000 e pair) :fixups [] :row "SYSPxt"})
+            (let [rt (case (count regs)
+                       0 nil
+                       1 (or (reg-in (first regs) "GPR64") (refuse :operands "expected register operand"))
+                       (refuse :operands "invalid operand for instruction"))]
+              (when (and (= expect :yes) (nil? rt))
+                (refuse :operands (str "specified " (str/lower-case label) " op requires a register")))
+              (when (and (= expect :no) rt)
+                (refuse :operands (str "specified " (str/lower-case label) " op does not use a register")))
+              {:word (sys-word (if gicr? 0xd5280000 0xd5080000) e (or rt 31)) :fixups [] :row (if gicr? "SYSLxt" "SYSxt")})))))))
+
+(defn- requires-message
+  "Match_MissingFeature's message: `instruction requires:` and each missing predicate's name, in the predicates' order."
+  [miss]
+  (str "instruction requires:" (apply str (for [p (sort miss)] (str " " (or (:name ((:preds @table) p)) p))))))
+
+(defn llvm-encode-ops
+  "The word of (MNEMONIC OPS) by LLVM's records: {:word W :fixups [...] :row INSN}, or throws {:asm/refused CAUSE
+  :asm/message MESSAGE}, MESSAGE AArch64AsmParser's (the matcher's diagnostic as MatchInstructionImpl chooses it, in
+  showMatchError's words)."
+  [^String mn ops]
+  (or (sys-alias mn ops)
+      (let [ops (twiddle mn ops)
+            cs (candidates mn)
+            insns (:insns @table)]
+        (when (empty? cs) (refuse :no-mnemonic (str "no-mnemonic: " mn) "unrecognized instruction mnemonic"))
+        (binding [*fail* (atom {})
+                  *sp0* (boolean (some (fn [mt] (some #(= "GPR64sp0" (second %)) (op-types (insns (:insn mt))))) cs))]
+          (let [feat-miss (atom nil)
+                r (some (fn [mt]
+                          (let [m (insns (:insn mt))
+                                types (or (:types mt) (into {} (op-types m)))
+                                [items ops] (if-let [[pv s] (:mn-arg mt)] [(cons [:op pv nil] (:tpl mt)) (cons s ops)] [(:tpl mt) ops])]
+                            (when-let [[b] (match-items items ops types {} 0)]
+                              (when-let [res (assemble m (operand-values mt m b))]
+                                (if (preds-hold? (:preds mt))
+                                  (assoc res :row (:insn mt))
+                                  (let [miss (missing-preds (:preds mt))]
+                                    ;; the matchable missing the fewest features, a later one on a tie
+                                    (when (or (nil? @feat-miss) (<= (count miss) (count (second @feat-miss))))
+                                      (reset! feat-miss [mt miss]))
+                                    nil))))))
+                        cs)]
+            (when r (validate (:row r) (:word r)))
+            (or r
+                (if-let [[_ miss] @feat-miss]
+                  (refuse :feature (str "feature: " mn " requires " (str/join ", " miss)) (requires-message miss))
+                  (let [{:keys [code too-few?]} @*fail*]
+                    (refuse :operands (str "operands: " mn)
+                            (cond too-few? "too few operands for instruction"
+                                  code code
+                                  :else "invalid operand for instruction"))))))))))
+
+(defn- llvm-candidates
+  "The LLVM matcher over the form's spellings (Apple's older NEON spelling's candidates too): its result, or its first refusal."
+  [form]
+  (reduce (fn [err [m ops]]
+            (try (reduced (llvm-encode-ops m ops))
+                 (catch arbace.lang.ExceptionInfo x
+                   (if (:asm/refused (ex-data x)) (or err x) (throw x)))))
+          nil (enc/apple-neon (str/lower-case (str (first form))) (rest form))))
+
+(defn encode
+  "The word of an instruction form: Go's table first (arbace.repr.asm.arm64.enc), then LLVM's records. A refusal carries
+  :asm/message, LLVM's words, when LLVM's matcher gives them. Under *features*, an instruction Go's table encodes is refused
+  when LLVM's matcher refuses it for a feature."
+  [form]
+  (try (let [r (enc/encode form)]
+         (when *features*
+           (let [x (llvm-candidates form)]
+             ;; a feature LLVM's matcher misses, or (MRS, MSR) a system register the features or the access do not give
+             (when (and (instance? arbace.lang.ExceptionInfo x)
+                        (or (= :feature (:asm/refused (ex-data x)))
+                            (#{"mrs" "msr"} (str/lower-case (str (first form))))))
+               (throw x))))
+         r)
+       (catch arbace.lang.ExceptionInfo e
+         (let [c (:asm/refused (ex-data e))]
+           (cond
+             (:asm/message (ex-data e)) (throw e)
+             (#{:no-mnemonic :operands :arg-kind} c)
+             (let [res (llvm-candidates form)]
+               (if (map? res)
+                 res
+                 (let [c2 (:asm/refused (ex-data res))]
+                   ;; LLVM's refusal names the feature; else the first refusal's cause stays, with LLVM's message
+                   (throw (if (or (= c2 :feature) (= c :no-mnemonic))
+                            res
+                            (ex-info (.getMessage e) (assoc (ex-data e) :asm/message (:asm/message (ex-data res)))))))))
+             :else (throw e))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the canonical print by the operands' kinds (ARS25)
+
+(defn- logical-row?
+  "The row that encoded the instruction takes a logical (bitmask) immediate: Go's `immediate_bitmask` kind, LLVM's LogicalImm
+  class; 32 or 64 (its width), else nil."
+  [row]
+  (or (some (fn [r] (when (= (:syntax r) row)
+                      (some #(when-let [[_ w] (re-find #"bitmask_(32|64)" %)] (Long/parseLong w)) (:args r))))
+            (mapcat val enc/rows-by-op))
+      (when-let [m ((:insns @table) row)]
+        (some (fn [[_ ty]] (when-let [[_ w] (re-matches #"LogicalImm(32|64)" (str (:name ((:classes @table) (:class ((:operands @table) ty))))))]
+                             (Long/parseLong w)))
+              (op-types m)))))
+
+(defn- type10-row?
+  "The row takes MOVI's 64-bit pattern (Go's `immediate_8x8`, LLVM's SIMDImmType10)."
+  [row]
+  (boolean (or (some (fn [r] (and (= (:syntax r) row) (some #(str/includes? % "8x8") (:args r)))) (get enc/rows-by-op "MOVI"))
+               (when-let [m ((:insns @table) row)]
+                 (some (fn [[_ ty]] (= "SIMDImmType10" (:name ((:classes @table) (:class ((:operands @table) ty)))))) (op-types m))))))
+
+(defn- unsigned64 [v] (let [v (bigint v)] (if (neg? v) (+ v 18446744073709551616N) v)))
+
+(defn print-kinds
+  "The form with its immediates spelled as LLVM's InstPrinter spells them for the row that encoded it: a logical immediate
+  `#0x...` (printLogicalImm, the value in the row's width), MOVI's 64-bit pattern `#0x` and at least 14 digits
+  (printSIMDType10Operand), and under `-print-imm-hex` (`imm-hex?`) every other integer immediate in hexadecimal; shift amounts
+  and vector indices stay decimal."
+  [form row imm-hex?]
+  (let [mn (str/lower-case (str (first form)))
+        logical (when (#{"and" "ands" "orr" "eor" "tst"} mn) (logical-row? row))
+        type10 (and (str/starts-with? mn "movi") (type10-row? row))
+        last-imm (last (keep-indexed (fn [i x] (when (and (seq? x) (= 'imm (first x)) (integer? (second x))) i)) (rest form)))
+        hexify (fn hexify [x]
+                 (cond (and (seq? x) (= 'imm (first x)) (integer? (second x))) (list 'imm (list 'hex (second x) 1))
+                       (and (seq? x) (#{'mem 'wb} (first x))) (apply list (first x) (map hexify (rest x)))
+                       :else x))]
+    (cons (first form)
+          (map-indexed (fn [i x]
+                         (cond
+                           (and (= i last-imm) logical)
+                           (let [v (second x)
+                                 v (if (= logical 32) (bit-and (long v) 0xffffffff) (unsigned64 v))]
+                             (list 'imm (list 'hex v 1)))
+                           (and (= i last-imm) type10) (list 'imm (list 'hex (unsigned64 (second x)) 14))
+                           imm-hex? (hexify x)
+                           :else x))
+                       (rest form)))))

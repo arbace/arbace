@@ -435,6 +435,68 @@
      :detail (str (count m) " programs in " (:file src) "; " (count (filter #{:nondet} vs)) " nondeterministic and "
                   (count (filter #{:skip} vs)) " skipped, not counted")}))
 
+;; ---- assembly's readers (AX10, the user 2026-11-10; doc/asm/AMD64-SURVEY.md §11.2, "As built: AX10"): bin/repr-asm's records,
+;; each non-pass taken by the class its own judge finds (:class-id), so that the matrix holds the check's classing, not a second one
+
+(declare classes-of)
+
+(defn- asm-class
+  "The class bin/repr-asm's judges find for a non-pass, or ::unclassed (in no class: a problem). :rows (test/asm/judge.ae's classify):
+  the class whose :ids names ID, else the first whose :match finds REASON. :arm64 (arbace.repr.asm.arm64.encheck's classify): the
+  first whose :level (none, a level or a set) admits LEVEL and whose :match finds REASON or whose :ids names ID."
+  [how classes id level reason]
+  (or (case how
+        :rows (or (some (fn [c] (when (some #{id} (:ids c)) (:id c))) classes)
+                  (some (fn [c] (when (some #(re-find % (str reason)) (:match c)) (:id c))) classes))
+        :arm64 (some (fn [c] (when (and (or (nil? (:level c)) (= (:level c) level) (and (set? (:level c)) ((:level c) level)))
+                                        (or (some #(re-find % (str reason)) (:match c)) (some #{id} (:ids c))))
+                               (:id c)))
+                     classes))
+      ::unclassed))
+
+(defmethod read-source :asm-rows [src]
+  ;; rows [ID RESULT REASON] (bin/repr-asm roundtrip's, object-check's, run-check's, x86i-check's and x86i-decode-check's records;
+  ;; :include selects a prefix of the ids): :class-of :result, a non-pass's RESULT is its class (the object, run and x86i judges record
+  ;; it: test/asm/object_judge.ae, x86i_judge.ae); :class-of :reason, the class the round trip's judge finds from REASON in :classes
+  (let [rows (vec (filter #(selected? src (str (first %))) (read-edn (:file src))))
+        classes (classes-of (:classes src))]
+    {:pass (count (filter #(= :pass (second %)) rows)) :ids (mapv first rows) :selected (count rows)
+     :entries (vec (for [[id r why] rows :when (not= :pass r)]
+                     (assoc (entry id r why) :class-id (if (= :result (:class-of src)) r (asm-class :rows classes (str id) nil why)))))
+     :detail (str (count rows) " rows of " (:file src))}))
+
+(defmethod read-source :asm-counts [src]
+  ;; per file [ID {:stated N :met N :by {CLASS N} ...}] (bin/repr-asm encode-check's and decode-check's records): a case a stated
+  ;; encoding or CHECK line; :level nil the file's own counts, :text the print level's, :cross the cross-syntax judge's; :met its
+  ;; passes, :by its non-passes by the class the judge recorded. :stated must be :met plus the classes' sum
+  (let [lvl (:level src)
+        rows (vec (keep (fn [[id m]] (when (selected? src (str id)) (when-let [x (if lvl (get m lvl) m)] [(str id) x])))
+                        (read-edn (:file src))))
+        sum-by (fn [m] (reduce + 0 (vals (:by m))))]
+    {:pass (reduce + 0 (map (comp :met second) rows)) :selected (count rows)
+     :entries (vec (for [[id m] rows [c k] (sort-by (comp str key) (:by m)) :when (pos? k)]
+                     (assoc (entry id c (str k " " (name c)) k) :class-id c)))
+     :results-problems (vec (for [[id m] rows :when (not= (:stated m) (+ (:met m) (sum-by m)))]
+                              (str (:name src) ": " id " states " (:stated m) ", met " (:met m) " and classed " (sum-by m))))
+     :detail (str (count rows) " files, " (format "%,d" (long (reduce + 0 (map (comp :stated second) rows)))) " stated in " (:file src))}))
+
+(defmethod read-source :asm-arm64 [src]
+  ;; bin/repr-asm --arch arm64 encode-check's record ({:files {FILE {LEVEL [LINES PASSES]}} :non-pass [[FILE:LINE LEVEL REASON]]}):
+  ;; :level's lines, each non-pass taken by the class encheck's classify finds in :classes; the non-passes must be LINES less PASSES
+  (let [r (read-edn (:file src))
+        lvl (:level src)
+        classes (classes-of (:classes src))
+        files (filter #(selected? src (str (key %))) (:files r))
+        file-of (fn [^String id] (subs id 0 (.lastIndexOf id ":")))
+        lines (reduce + 0 (map #(first (get (val %) lvl [0 0])) files))
+        pass (reduce + 0 (map #(second (get (val %) lvl [0 0])) files))
+        np (for [[id l why] (:non-pass r) :when (and (= lvl l) (selected? src (file-of (str id))))] [(str id) why])]
+    {:pass pass :selected (count files)
+     :entries (vec (for [[id why] np] (assoc (entry id :fail why) :class-id (asm-class :arm64 classes id lvl why))))
+     :results-problems (when (not= (- lines pass) (count np))
+                         [(str (:name src) ": " (- lines pass) " lines of " (:file src) " do not pass at " lvl ", " (count np) " non-passes listed")])
+     :detail (str (count files) " files, " (format "%,d" (long lines)) " lines at the level " (name lvl))}))
+
 ;; the cases a source must have (report 021's finding 1: a shrunk record is a valid record)
 
 (def ^:private ref-ids

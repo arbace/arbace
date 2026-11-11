@@ -1,0 +1,102 @@
+(ns arbace.repr.asm.plan9
+  "repr/asm's Plan 9 syntax, lexically (doc/asm/SPEC.md §11; doc/asm/ARM64-SURVEY.md §2.3, AR1; AMD64-SURVEY.md's AX9): Go's
+  assembler's text (cmd/asm/internal/asm's parse.go, Go 1.27.1, BSD-3-Clause, for the operands' grammar) as forms in the
+  text's order and spelling, an instruction (p9/MNEMONIC OPERAND ...), the mnemonic as written (Plan 9's are upper case);
+  the machine level is AR8's, through Go's own assembler (ARS3 (a)). The C preprocessor's lines and macros are the shared
+  shell's (arbace.repr.asm.gnu, {:cpp true}).
+
+  An operand: an expression (a register is a name: R1, V0.S4, ZR; `R1<<3`, `R1->3` (-> R1 3), `R1@>3` (at> R1 3); `·f`,
+  `f<>`, `f<ABIInternal>` (id TEXT) when no symbol holds them); (imm X) `$X`; (ind X) `*X`; (addr E? [A ...] [B ...])
+  an expression followed by parenthesized groups, `8(R1)`, `(R1)(R2<<3)`, `f(SB)`, `(R6, R7)`; (rlist X ...) `[X, ...]`;
+  (elt X E) `X[E]`; (size X N) `X/N` (DATA's width)."
+  (:require [arbace.repr.asm.lex :as lex]
+            [arbace.repr.asm.gnu :as gnu]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- tok [ts ^long i] (when (< i (count ts)) (nth ts i)))
+
+(declare parse-operand)
+
+(defn- group
+  "[[X ...] I] the comma-separated operands of the group whose opening `open` is at `i`, up to `close`."
+  [ts ^long i close]
+  (if (lex/punct? (tok ts (inc i)) close)
+    [[] (+ i 2)]
+    (loop [i (inc i) out []]
+      (let [[x j] (parse-operand ts i)
+            n (tok ts j)]
+        (cond
+          (lex/punct? n ",") (recur (inc (long j)) (conj out x))
+          (lex/punct? n close) [(conj out x) (inc (long j))]
+          :else (gnu/fail (str "expected , or " close) {:at j}))))))
+
+(defn parse-operand
+  "[FORM I] the operand at `i`."
+  [ts ^long i]
+  (let [t (tok ts i)]
+    (when-not t (gnu/fail "an operand expected" {:at i}))
+    (cond
+      (lex/punct? t "$") (let [[x j] (parse-operand ts (inc i))] [(list 'imm x) j])
+      (lex/punct? t "*") (let [[x j] (parse-operand ts (inc i))] [(list 'ind x) j])
+      :else
+      (let [[x j] (cond
+                    (lex/punct? t "[") (let [[xs j] (group ts i "]")] [(apply list 'rlist xs) j])
+                    (lex/punct? t "(") [nil i]
+                    :else (gnu/parse-expr ts i true))
+            ;; the groups after it
+            [gs j] (loop [gs [] j (long j)]
+                     (if (lex/punct? (tok ts j) "(")
+                       (let [[g k] (group ts j ")")] (recur (conj gs g) (long k)))
+                       [gs j]))
+            x (cond (seq gs) (apply list 'addr (concat (when-not (nil? x) [x]) gs))
+                    :else x)
+            ;; an index and a width
+            [x j] (loop [x x j (long j)]
+                    (let [n (tok ts j) m (tok ts (inc j))]
+                      (cond
+                        (and (lex/punct? n "[") (not (lex/ws? n)))
+                        (let [[es k] (group ts j "]")] (recur (apply list 'elt x es) (long k)))
+                        (and (lex/punct? n "/") m (= :int (lex/kind m)))
+                        (recur (list 'size x (lex/value m)) (+ j 2))
+                        :else [x j])))]
+        [x j]))))
+
+(defn read-insn
+  "An instruction's form from the statement's tokens `ts` at `i`."
+  [ts ^long i]
+  (let [t (tok ts i)
+        _ (when-not (and t (= :ident (lex/kind t))) (gnu/fail "expected a mnemonic" {:at i}))
+        mn (symbol "p9" (lex/value t))
+        ops (loop [i (inc i) ops []]
+              (if (>= i (count ts))
+                ops
+                (let [[x j] (parse-operand ts i)
+                      n (tok ts j)]
+                  (cond
+                    (nil? n) (conj ops x)
+                    (lex/punct? n ",") (if (>= (inc (long j)) (count ts)) (gnu/fail "an operand expected after ," {:at j}) (recur (inc (long j)) (conj ops x)))
+                    :else (gnu/fail (str "unexpected " (pr-str (lex/value n)) " after an operand") {:at j})))))]
+    (apply list mn ops)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; canonical text
+
+(defn operand-text ^String [x]
+  (if-not (and (seq? x) (#{'imm 'ind 'addr 'rlist 'elt 'size} (first x)))
+    (gnu/expr-text x)
+    (case (first x)
+      imm (str "$" (operand-text (second x)))
+      ind (str "*" (operand-text (second x)))
+      addr (let [[_ & r] x
+                 e (when-not (vector? (first r)) (first r))
+                 gs (if e (rest r) r)]
+             (str (when e (operand-text e)) (apply str (map #(str "(" (str/join ", " (map operand-text %)) ")") gs))))
+      rlist (str "[" (str/join ", " (map operand-text (rest x))) "]")
+      elt (let [[_ y & es] x] (str (operand-text y) "[" (str/join ", " (map operand-text es)) "]"))
+      size (str (operand-text (second x)) "/" (nth x 2)))))
+
+(defn insn-text ^String [f]
+  (let [[mn & ops] f]
+    (str (name mn) (when (seq ops) (str "\t" (str/join ", " (map operand-text ops)))))))

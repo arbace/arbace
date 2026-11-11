@@ -1,0 +1,70 @@
+(ns arbace.repr.asm.full
+  "repr/asm's mode :full (doc/asm/SPEC.md §6; doc/asm/AMD64-SURVEY.md §5, after repr/llvm's, LLS18 (a)): the forms of a
+  text and the layer that prints it back byte for byte. The canonical print writes each item on a line of its own, a
+  label at the line's start, every other item after a tab, the text ending with a newline. The layer keeps, item by item,
+  what the canonical print does not write: the gap before the item (white space, comments, `;`, a line marker, a blank
+  line) and the item's own text when its spelling is not the canonical one (case, spacing, an integer in hex, a
+  comment inside it, ...), with the hash of the canonical text it stands for: an item whose form changed prints
+  canonically.
+
+  A layer is {:n COUNT :at {K E ...} :end S}: an entry per item K that differs, a string (its gap) or [GAP TEXT HASH]
+  (GAP nil when canonical); :end the text after the last item, nil when canonical. In the `.ae` text it is the last line,
+  `#_(asm/layer {...})`, which a reader skips."
+  (:require [arbace.repr.asm.gnu :as gnu]
+            [arbace.repr.c.layout :as layout]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn read-full
+  "{:forms F :layer L} of `items` ([FORM START END] ...) read from `src`."
+  [^String src items insn-text]
+  (loop [k 0 prev-end 0 at (transient {})]
+    (if (= k (count items))
+      (let [forms (mapv first items)
+            end (subs src (int prev-end))]
+        {:forms forms
+         :layer {:n (count items) :at (persistent! at) :end (when-not (= end (gnu/canon-end forms)) end)}})
+      (let [[f s e] (nth items k)
+            g (subs src (int prev-end) (int s))
+            t (subs src (int s) (int e))
+            gc (gnu/canon-gap k f)
+            tc (gnu/item-text f insn-text)
+            entry (cond
+                    (and (= g gc) (= t tc)) nil
+                    (= t tc) g
+                    :else [(when-not (= g gc) g) t (.hashCode ^String tc)])]
+        (recur (inc k) (long e) (if entry (assoc! at k entry) at))))))
+
+(defn print-full
+  "The text of `forms` with their `layer`: the original byte for byte when the forms are those it was read with."
+  ^String [forms layer insn-text]
+  (let [b (StringBuilder.)
+        at (if (= (:n layer) (count forms)) (:at layer) {})]
+    (doseq [[k f] (map-indexed vector forms)]
+      (let [e (get at k)
+            gc (gnu/canon-gap k f)
+            tc (gnu/item-text f insn-text)]
+        (cond
+          (nil? e) (do (.append b gc) (.append b tc))
+          (string? e) (do (.append b ^String e) (.append b tc))
+          :else (let [[eg et h] e]
+                  (.append b ^String (or eg gc))
+                  (.append b ^String (if (= h (.hashCode ^String tc)) et tc))))))
+    (.append b ^String (or (:end layer) (gnu/canon-end forms)))
+    (str b)))
+
+(defn layer-stats [layer]
+  (let [es (vals (:at layer))]
+    {:gaps (count (filter #(or (string? %) (and (vector? %) (first %))) es))
+     :texts (count (filter vector? es))}))
+
+(defn layer-text ^String [layer] (str "#_(asm/layer " (layout/form-str layer) ")\n"))
+
+(defn layer-of-ae
+  "The layer of an `.ae` text written in :full (nil when it has none)."
+  [^String text]
+  (let [k (.lastIndexOf text "\n#_(asm/layer ")
+        k (cond (pos? k) (inc k) (.startsWith text "#_(asm/layer ") 0 :else -1)]
+    (when-not (neg? k)
+      (second (read-string (subs text (+ k 2)))))))

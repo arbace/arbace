@@ -32,16 +32,22 @@
 # A crop that is embedded (its re-seed window) leaves the list. Not here, as they are C's (embedded since C9) or the four's:
 # bin/lib/ci, bin/lib/repr-c (gate_key's own), repr/java (javac's tool embeds it), go/arbace/{ci,cinterp,crt}.
 arbace_crop_paths=(
-  # the crops' Arbace namespaces (embed.ae's excluded): repr/haskell, rust, ocaml, scheme, python, cpp, llvm; si's, pyi's, the
+  # the crops' Arbace namespaces (embed.ae's excluded): repr/haskell, rust, ocaml, scheme, python, cpp, llvm, asm; si's, pyi's, the
   # lowering's, rsi's and llvmi's tools
   arbace/repr/haskell.ae 'arbace/repr/haskell/*' arbace/repr/rust.ae 'arbace/repr/rust/*' arbace/repr/ocaml.ae 'arbace/repr/ocaml/*'
   arbace/repr/scheme.ae 'arbace/repr/scheme/*' 'arbace/scheme/*' arbace/repr/python.ae 'arbace/repr/python/*'
   arbace/python.ae 'arbace/python/*' arbace/repr/cpp.ae 'arbace/repr/cpp/*' arbace/repr/llvm.ae 'arbace/repr/llvm/*'
   'arbace/cpp/*' arbace/rust.ae 'arbace/rust/*' 'arbace/llvm/*'
+  # repr/asm, the assembly crops' bridge (doc/asm/SPEC.md; AX1)
+  arbace/repr/asm.ae 'arbace/repr/asm/*'
+  # the assembler of the assembly crops: TableGen, amd64's table generator, matcher, encoder and check (AX2)
+  'arbace/asm/*'
   # their Go forms: oi's (with its C API, oicapi), si's (scm, scminterp), pyi's (py, expat, pyexpat), hsi's (hs) and the libm port hsi and pyi import
   go/arbace/oi.ae 'go/arbace/oi/*' go/arbace/oicapi.ae 'go/arbace/oicapi/*' go/arbace/scm.ae 'go/arbace/scm/*' go/arbace/scminterp.ae 'go/arbace/scminterp/*'
   go/arbace/py.ae 'go/arbace/py/*' go/arbace/expat.ae 'go/arbace/expat/*' go/arbace/pyexpat.ae 'go/arbace/pyexpat/*'
   go/arbace/hs.ae 'go/arbace/hs/*' go/arbace/libm.ae 'go/arbace/libm/*'
+  # x86i's (the x86-64 integer machine, AX5) and the frame of the machine emulators it runs on, a light driver (AXS51 (a))
+  go/arbace/x86i.ae 'go/arbace/x86i/*' go/arbace/emu.ae 'go/arbace/emu/*'
   # pyi's lazy modules (queue 208, 209, 215: the C library host, _bz2's, _lzma's, _zstd's, _ssl's and _sqlite3's glue; W-P6 (a))
   go/arbace/clib.ae 'go/arbace/clib/*' go/arbace/pybz2.ae 'go/arbace/pybz2/*' go/arbace/pylzma.ae 'go/arbace/pylzma/*'
   go/arbace/pyzstd.ae 'go/arbace/pyzstd/*' go/arbace/pyssl.ae 'go/arbace/pyssl/*' go/arbace/pysqlite3.ae 'go/arbace/pysqlite3/*'

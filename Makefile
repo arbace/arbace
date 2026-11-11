@@ -19,6 +19,13 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   rsi-samples rsi-lower-check rsi-lower-check-all rsi-lower-check-native-all rsi-std-build rsi-runtime-build rsi-runtime-ci rsi-aot-lib ci-aot-lib rsi-record-ref rsi-check rsi-check-aot rsi-check-all rsi-divergences rsi-synthetic rsi-synthetic-check rsi-judge-test rsi-check-essential \
   repr-llvm-record-opt repr-llvm-record-rt llvmi-ir-make llvmi-ir-make-rt repr-llvm-records-verify llvmi-run llvmi-check llvmi-check-aot llvmi-record-ref llvmi-divergences cppi-codegen-check cppi-codegen-gen \
   repr-llvm-check repr-llvm-check-essential llvm-controls-test llvmi-check-essential \
+  repr-asm-extract repr-asm-pins repr-asm-ensure asm-essential asm-amd64-essential asm-arm64-essential repr-asm-lists repr-asm-read repr-asm-print repr-asm-roundtrip repr-asm-record repr-asm-roundtrip-arm64 repr-asm-record-arm64 repr-asm-divergences \
+  repr-asm-table repr-asm-table-check repr-asm-encode-check repr-asm-encode-record repr-asm-print-oracle \
+  repr-asm-object repr-asm-object-check repr-asm-object-record repr-asm-object-oracle \
+  repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
+  repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
+  repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
+  x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
   repr-rust-native-check \
   repr-rust-native-errors \
   rust-front-corpus rust-front-mir-check rust-front-codegen-check rust-front-coverage rust-front-collect rust-front-run-native rust-front-oracles rust-front-expand-check rust-front-resolve-check rust-front-hir-check rust-front-collect-check rust-front-typeck-check rust-front-build-check rust-front-pass-check rust-front-run-built rust-front-capture-check rust-front-essential rust-front-rsi-build rust-front-rsi-native rsi-check-front-own rust-front-records-make rust-front-records-verify \
@@ -512,6 +519,101 @@ cppi-divergences: ## the recorded C++ run check judged against its classes (bin/
 	bin/cppi divergences
 cppi-divergences-aot: ## the recorded C++ AOT check judged against its classes (bin/cppi divergences --aot)
 	bin/cppi divergences --aot
+repr-asm-extract: ## repr/asm's corpora (musl 1.2.6's x86-64 and aarch64 .s, llvm/test's MC/AsmParser, MC/X86 and MC/AArch64, libgcc's aarch64 .S) out of their pinned tarballs (bin/repr-asm corpus extract)
+	bin/repr-asm corpus extract
+repr-asm-pins: ## the assembly crops' pins: each tarball of test/asm/corpora.edn against its SHA-256, nothing extracted (bin/repr-asm corpus check; bin/gate --pins)
+	bin/repr-asm corpus check
+repr-asm-ensure: ## repr/asm's corpora extracted once for test/asm/corpora.edn's content, under a lock (bin/repr-asm corpus ensure; the gate's steps)
+	bin/repr-asm corpus ensure
+asm-amd64-essential: ## the x86-64 assembly crop's essential gate steps by hand (AX10): the round trip of musl and MC/AsmParser, the run check, the object check of musl and the synthetic files (test/gate/crops/asm.edn)
+	bin/repr-asm corpus ensure && bin/repr-asm roundtrip musl mc-asmparser && bin/repr-asm run-check && bin/repr-asm object-check musl && bin/repr-asm object-check synthetic
+asm-arm64-essential: ## the arm64 assembly crop's essential gate steps by hand (AX10): the arm64 round trip and encode check (test/gate/crops/asm.edn)
+	bin/repr-asm corpus ensure && bin/repr-asm --arch arm64 roundtrip && bin/repr-asm --arch arm64 encode-check
+asm-essential: asm-amd64-essential asm-arm64-essential ## both assembly crops' essential steps by hand (AX10)
+repr-asm-lists: ## repr/asm's corpus lists, split-file parts and RUN-line flags (bin/repr-asm [--arch ARCH] corpus lists; ARCH=amd64|arm64)
+	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) corpus lists
+repr-asm-read: ## an assembly file's forms as .ae text, mode :full (bin/repr-asm read --full FILE; FILE=..., ARCH=amd64|arm64, SYNTAX=att|gnu|apple|plan9)
+	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) read $(if $(SYNTAX),--syntax $(SYNTAX)) --full $(FILE)
+repr-asm-print: ## an .ae text of assembly forms printed back, its layer kept (bin/repr-asm print --full FILE; FILE=...)
+	bin/repr-asm print --full $(FILE)
+repr-asm-roundtrip: ## repr/asm's amd64 round trip over its corpora against test/asm/roundtrip-results-amd64.edn, the classes and the negative controls (bin/repr-asm roundtrip [CORPUS...]; CORPORA=...)
+	bin/repr-asm roundtrip $(CORPORA)
+repr-asm-record: ## repr/asm's amd64 round trip recorded into test/asm/roundtrip-results-amd64.edn (bin/repr-asm roundtrip --record [CORPUS...]; CORPORA=...)
+	bin/repr-asm roundtrip --record $(CORPORA)
+repr-asm-roundtrip-arm64: ## repr/asm's arm64 round trip (GNU, Apple's spelling, Plan 9 lexically) against test/asm/roundtrip-results-arm64.edn, its classes and controls (bin/repr-asm --arch arm64 roundtrip [CORPUS...]; CORPORA=...)
+	bin/repr-asm --arch arm64 roundtrip $(CORPORA)
+repr-asm-record-arm64: ## repr/asm's arm64 round trip recorded into test/asm/roundtrip-results-arm64.edn (bin/repr-asm --arch arm64 roundtrip --record [CORPUS...]; CORPORA=...)
+	bin/repr-asm --arch arm64 roundtrip --record $(CORPORA)
+repr-asm-table: ## amd64's instruction table asm/amd64/table.edn generated from llvm-project 23.1.5's X86 .td files by Arbace's TableGen (bin/repr-asm table gen)
+	bin/repr-asm table gen
+repr-asm-table-check: ## amd64's instruction table regenerated and compared with asm/amd64/table.edn byte for byte (bin/repr-asm table check)
+	bin/repr-asm table check
+repr-asm-encode-check: ## amd64's encoder and printer: MC/X86's stated encodings and CHECK texts judged by their own CHECK lines against test/asm/encode-results-amd64.edn, the classes and the controls (bin/repr-asm encode-check [CORPUS...]; CORPORA=...)
+	bin/repr-asm encode-check $(CORPORA)
+repr-asm-encode-record: ## amd64's encoding check recorded into test/asm/encode-results-amd64.edn (bin/repr-asm encode-check --record [CORPUS...]; CORPORA=...)
+	bin/repr-asm encode-check --record $(CORPORA)
+repr-asm-print-oracle: ## the oracle tier's, by hand: amd64's printed instructions against the host's llvm-mc 23.1.5, file by file (bin/repr-asm print-oracle)
+	bin/repr-asm print-oracle
+repr-asm-object: ## amd64's object assembler: FILE assembled into an ELF64 object as llvm-mc -filetype=obj writes it (bin/repr-asm object FILE OUT; FILE=..., OUT=...)
+	bin/repr-asm object $(FILE) $(OUT)
+repr-asm-object-check: ## amd64's objects judged against llvm-mc 23.1.5's recorded ones (musl, synthetic, mc-x86-obj) against test/asm/object-results-amd64.edn, the classes and the controls (bin/repr-asm object-check [CORPUS...]; CORPORA=...)
+	bin/repr-asm object-check $(CORPORA)
+repr-asm-object-record: ## amd64's object check recorded into test/asm/object-results-amd64.edn (bin/repr-asm object-check --record [CORPUS...]; CORPORA=...)
+	bin/repr-asm object-check --record $(CORPORA)
+repr-asm-object-oracle: ## the oracle tier's, by hand: a corpus's objects recorded by the host's llvm-mc 23.1.5 into test/asm/records/ and pinned (bin/repr-asm object-record CORPUS; CORPUS=musl|synthetic|mc-x86-obj)
+	bin/repr-asm object-record $(CORPUS)
+repr-asm-link: ## Arbace's static linker: ELF64 objects linked into a static x86-64 executable as lld lays one out (bin/repr-asm link OBJS... -o OUT; OBJS=..., OUT=...)
+	bin/repr-asm link $(OBJS) -o $(OUT)
+repr-asm-link-dump: ## an executable read back canonically: entry, segments, sections, symbols (bin/repr-asm link-dump EXE; EXE=...)
+	bin/repr-asm link-dump $(EXE)
+repr-asm-run-check: ## test/asm/run/'s programs assembled and linked by Arbace, run by the CPU and judged by their own verdicts, against test/asm/run-results-amd64.edn, the classes and the controls (bin/repr-asm run-check)
+	bin/repr-asm run-check
+repr-asm-run-record: ## the run check recorded into test/asm/run-results-amd64.edn (bin/repr-asm run-check --record)
+	bin/repr-asm run-check --record
+repr-asm-link-oracle: ## the oracle tier's, by hand: the host's ld (ld.lld when present, else ld.bfd) links the run check's objects, runs and canonical views compared (bin/repr-asm link-oracle)
+	bin/repr-asm link-oracle
+repr-asm-decode: ## amd64's decoder (LLVM's X86 disassembler rebuilt from the table): bytes decoded and printed as llvm-mc --disassemble prints them (bin/repr-asm decode MODE HEX...; MODE=16|32|64, HEX=...)
+	bin/repr-asm decode $(or $(MODE),64) $(HEX)
+repr-asm-decode-object: ## an ELF64 object's code sections decoded and printed (bin/repr-asm decode-object OBJ; OBJ=...)
+	bin/repr-asm decode-object $(OBJ)
+repr-asm-decode-check: ## amd64's decoder judged with no llvm-mc: MC/Disassembler/X86's tests by their own CHECK lines, MC/X86's met encodings decoded back, musl's objects read back to their instructions, against test/asm/decode-results-amd64.edn, the classes and the controls (bin/repr-asm decode-check [LEVEL...]; LEVELS=dis|rt|obj)
+	bin/repr-asm decode-check $(LEVELS)
+repr-asm-decode-record: ## the decode check recorded into test/asm/decode-results-amd64.edn (bin/repr-asm decode-check --record [LEVEL...]; LEVELS=...)
+	bin/repr-asm decode-check --record $(LEVELS)
+x86i-light: ## x86i, the x86-64 integer machine (AX5.2): its light driver built alone by TamaGo's go into .tmp/x86i/x86i (bin/repr-asm x86i light)
+	bin/repr-asm x86i light
+x86i-run: ## a static x86-64 executable run on x86i: its status, or 128 + the signal (bin/repr-asm x86i run EXE [ARG...]; EXE=..., ARGS=...)
+	bin/repr-asm x86i run $(EXE) $(ARGS)
+x86i-decode-text: ## an executable's code sections as x86i's decoder decodes them (bin/repr-asm x86i decode-text EXE; EXE=...)
+	bin/repr-asm x86i decode-text $(EXE)
+x86i-trace: ## the lockstep: EXE run natively under ptrace and on x86i, compared at each system call (MODE=sys), each instruction (MODE=step), or bisected to the first differing instruction (MODE=bisect) (bin/repr-asm x86i trace --mode MODE EXE; EXE=...)
+	bin/repr-asm x86i trace --mode $(or $(MODE),sys) $(EXE)
+x86i-gen: ## x86i's decode tables go/arbace/x86i/dectab.ae made from asm/amd64/table.edn (bin/repr-asm x86i gen)
+	bin/repr-asm x86i gen
+x86i-gen-check: ## x86i's decode tables regenerated and compared with the committed file (bin/repr-asm x86i gen-check)
+	bin/repr-asm x86i gen-check
+x86i-synth: ## x86i's synthetic programs, one a family, written into .tmp/x86i/synth, their digests against test/asm/x86i/synth-digests.edn (bin/repr-asm x86i synth DIR)
+	bin/repr-asm x86i synth .tmp/x86i/synth
+x86i-check: ## test/asm/run/'s, x86i's own and the synthetic programs run on x86i, judged by their verdicts, the CPU's runs and the lockstep, decoded against arbace.asm.amd64.decode, with the coverage and the controls (bin/repr-asm x86i-check)
+	bin/repr-asm x86i-check
+x86i-record: ## x86i's check recorded into test/asm/x86i-results-amd64.edn (bin/repr-asm x86i-check --record)
+	bin/repr-asm x86i-check --record
+x86i-decode-check: ## x86i's Go decoder against arbace.asm.amd64.decode over MC/X86's met encodings and MC/Disassembler/X86's 64-bit strings (bin/repr-asm x86i-decode-check)
+	bin/repr-asm x86i-decode-check
+x86i-decode-record: ## x86i's decode check recorded into test/asm/x86i-decode-results-amd64.edn (bin/repr-asm x86i-decode-check --record)
+	bin/repr-asm x86i-decode-check --record
+repr-asm-divergences: ## repr/asm's recorded round trip judged against its classes (bin/repr-asm [--arch ARCH] divergences; ARCH=amd64|arm64)
+	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) divergences
+repr-asm-table-arm64: ## A64's encoding tables regenerated: Go's arm64asm and cmd/internal/obj/arm64's, and LLVM's AArch64 records by Arbace's TableGen (bin/repr-asm --arch arm64 table gen)
+	bin/repr-asm --arch arm64 table gen
+repr-asm-table-check-arm64: ## the committed A64 tables equal to a fresh generation from TamaGo's GOROOT and llvm-project 23.1.5's AArch64 .td (bin/repr-asm --arch arm64 table check)
+	bin/repr-asm --arch arm64 table check
+repr-asm-table-oracle-arm64: ## the oracle tier's, by hand: the LLVM table's instructions, AsmStrings and encodings against the host's llvm-tblgen 23.1.5 (bin/repr-asm --arch arm64 table oracle)
+	bin/repr-asm --arch arm64 table oracle
+repr-asm-encode-check-arm64: ## AR2's encode check: MC/AArch64's stated encodings, CHECK texts and error lines against test/asm/encode-results-arm64.edn, its classes and controls (bin/repr-asm --arch arm64 encode-check [CORPUS...]; CORPORA=...)
+	bin/repr-asm --arch arm64 encode-check $(CORPORA)
+repr-asm-encode-record-arm64: ## AR2's encode check recorded into test/asm/encode-results-arm64.edn (bin/repr-asm --arch arm64 encode-check --record)
+	bin/repr-asm --arch arm64 encode-check --record $(CORPORA)
 repr-llvm-check: ## repr/llvm's check families against their records, the tests' own verdicts where they have one, no LLVM tool (bin/repr-llvm check FAMILY; FAMILY=roundtrip-llvmtest|text-llvmtest|verify-llvmtest|verify-probes|roundtrip-rt|text-rt|verify-rt|verify-rt-heldout)
 	bin/repr-llvm check $(FAMILY)
 repr-llvm-check-essential: ## repr/llvm's essential subsets of the four families (the gate's llvm-read-essential, llvm-print-essential)
