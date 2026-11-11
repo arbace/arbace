@@ -6074,6 +6074,8 @@ Counts (`bin/pyi lib-test-all --fresh`, each test's own verdict, the VM; base 1e
 |---|---|---|
 | test_capi (1,195) | 37 pass; `:testcapi` 1,154, cpython-only 3, skipped-by-test 1 | 258 pass; `:testcapi-parts` 548, `:testcapi` 262, `:capi-port` 112, `:capi-refcounts` 3, cpython-only 3, skipped-by-test 3, finalization 2, gc-collector 2, int-core 2; 0 failing |
 | test_call (189) | 7 pass; `:testcapi` 130, cpython-only 52 | 125 pass; cpython-only 52, `:testcapi-parts` 11, `:capi-port` 1; 0 failing |
+| test_bytes (325) | 308 pass; `:testcapi` 3 | 310 pass (its two gh-140939 tests run: `%`'s padding past the allocation limit is MemoryError now, `percent.ae`); 0 failing |
+| test_ctypes (621), test_frame (61) | 531 pass; 48 pass, 2 failing | the same |
 
 `:testcapi-parts` (new, deferred) takes a test reaching a part not built (`module '_testcapi' has no attribute`, `cannot import
 name ... from '_testcapi'`: test_misc's 309 and getargs' importers' 106 among them); `:capi-refcounts` (new, design) the
