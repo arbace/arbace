@@ -1,0 +1,343 @@
+(in-ns 'go.arbace.x86i) (go/file "sem_bit.go" :imports [
+
+
+    ^{:line 4} [bits "math/bits"]
+    ^{:line 5} [strings "strings"]])
+
+
+;; AX5.4's families (AXS54 (a), from the Intel SDM vol. 2 and the AMD APM vol. 3 as references): the rotates through the
+;; carry (rcl, rcr) and the double shifts (shld, shrd) of the shift family, the bit family (bt bts btr btc, bsf bsr, tzcnt
+;; lzcnt popcnt), enter, xlat, movbe and rdtscp.
+
+^{:go/end 22} (go/func init []
+  (def famShift rotc "rcl" "rcr")
+  (def famShift shiftd "shld" "shrd")
+  (def famBit bt "bt" "bts" "btr" "btc")
+  (def famBit bscan "bsf" "bsr")
+  (def famBit bcount "tzcnt" "lzcnt" "popcnt")
+  (def famStack enter "enter")
+  (def famMov xlat "xlatb")
+  (def famMov movbe "movbe")
+  (def famMisc rdtscp "rdtscp"))
+
+
+
+^{:go/end 39} (go/func count "count is a shift's count operand: the immediate, CL, or 1 (the r1/m1 forms), masked to 5 bits (6 for 64-bit operands).\n" ^uint64 [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^int immAt ^uint8 w]
+  (let [^uint64 n (zero uint64)]
+    (switch
+      (case [(and (> (len (.-Ops in)) immAt) (== (.-K (aget (.-Ops in) immAt)) OImm))]
+        (set! n (conv uint64 (.-Imm (aget (.-Ops in) immAt)))))
+      (case [(strings/HasSuffix (.-Name in) "CL")]
+        (set! n (bit-and (aget (.-R c) 1) 0xff)))
+      (default
+        (set! n 1)))
+
+    (when (== w 8)
+      (return (bit-and n 63)))
+
+    (bit-and n 31)))
+
+
+
+
+
+^{:go/end 96} (go/func rotc "rcl, rcr: a rotate of the operand and CF together (w*8+1 bits); the count taken modulo 9 for bytes and 17 for words.\nCF the last bit rotated into it; OF (a count of 1) the result's MSB xor CF for rcl, its two top bits' xor for rcr, else\nundefined; the other flags unchanged. A masked count of 0 changes nothing (a 32-bit register still written).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [d (aget (.-Ops in) 0)
+      ^{:line 46} w (.-Size d)
+      ^{:line 47} n (count c in 1 w)
+      (values a ok) (.load c in (addr d) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (== n 0)
+      (when (and (== (.-K d) OReg) (== w 4))
+        (.setReg c (.-Reg d) 4 a))
+
+      (return (.done c)))
+
+    (let [nb (* (conv uint w) 8)
+        ^{:line 59} k (conv uint n)]
+      (switch w
+        (case [1]
+          (set! k % 9))
+        (case [2]
+          (set! k % 17)))
+
+      (let [fl (.Get (.-F c))
+          ^{:line 67} cf (bit-and fl CF)
+          ;; the w*8+1 bits: the operand below, CF on top, as two words for the 64-bit case
+          ^{:line 69} r (bit-and a (mask w))]
+        (for [i (conv uint 0)] (< i k) (inc! i) ; at most 64 one-bit rotations: plain and exact
+          (if (== (.-Mnem in) "rcl")
+            (let [out (bit-and (>> r (- nb 1)) 1)]
+              (set! r (bit-and (bit-or (<< r 1) cf) (mask w)))
+              (set! cf out))
+
+            (let [out (bit-and r 1)]
+              (set! r (bit-or (>> r 1) (<< cf (- nb 1))))
+              (set! cf out))))
+
+
+        (when (not (.store c in (addr d) w r))
+          (return stopSignal))
+
+        (let [msb (bit-and (>> r (- nb 1)) 1)
+            ^{:line 85} of (conv uint64 0)]
+          (if (== (.-Mnem in) "rcl")
+            (set! of (bit-xor msb cf))
+
+            (set! of (bit-xor msb (bit-and (>> r (- nb 2)) 1))))
+
+          (.Put (.-F c) (bit-or (bit-and-not fl (bit-or CF OF)) (* cf CF) (* of OF)) (bit-or CF OF))
+          (when (!= n 1)
+            (set! (.-und (.-F c)) OF))
+
+          (.done c))))))
+
+
+
+
+
+
+^{:go/end 155} (go/func shiftd "shld, shrd: the destination shifted with the source's bits shifted in. CF the last bit shifted out of the destination,\nSF ZF PF from the result, OF (a count of 1) whether the sign changed, else undefined, AF undefined. A count beyond the\noperand's size (16-bit operands only) leaves the result and the flags undefined (the SDM; the APM gives another\nresult): x86i computes it over the 32-bit concatenation and marks the flags undefined, the class :vendor.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 104} w (.-Size d)
+      ^{:line 105} n (count c in 2 w)
+      (values a ok) (.load c in (addr d) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [b (.reg c (.-Reg s) w)]
+      (when (== n 0)
+        (when (and (== (.-K d) OReg) (== w 4))
+          (.setReg c (.-Reg d) 4 a))
+
+        (return (.done c)))
+
+      (let [nb (* (conv uint64 w) 8)
+          ^{:line 118 :tag uint64} r (zero uint64)
+          ^{:line 119} over (> n nb)]
+        (cond over ; 16-bit: the 32-bit concatenation dest:src, shifted modulo 32
+          (let [v (bit-or (<< a 16) b)]
+            (when (== (.-Mnem in) "shrd")
+              (set! v (bit-or (<< b 16) a)))
+
+            (let [m (% n 32)]
+              (if (== (.-Mnem in) "shld")
+                (set! r (bit-and (>> (bit-or (<< v m) (>> v (- 32 m))) 16) 0xffff))
+
+                (set! r (bit-and (bit-or (>> v m) (<< v (- 32 m))) 0xffff)))))
+
+          (== (.-Mnem in) "shld") (do
+            (set! r (bit-or (<< a n) (>> b (- nb n))))
+            (when (== n nb)
+              (set! r b))) :else
+
+          (do
+            (set! r (bit-or (>> (bit-and a (mask w)) n) (<< b (- nb n))))
+            (when (== n nb)
+              (set! r b))))
+
+
+        (set! r bit-and (mask w))
+        (when (not (.store c in (addr d) w r))
+          (return stopSignal))
+
+        (if (== (.-Mnem in) "shld")
+          (.set (.-F c) fShl w a n r)
+
+          (.set (.-F c) fShrd w a n r))
+
+        (when over
+          (set! (.-und (.-F c)) arith))
+
+        (.done c)))))
+
+
+
+
+
+^{:go/end 200} (go/func bt "bt, bts, btr, btc: CF the selected bit (then set, reset or complemented); ZF unchanged; OF SF AF PF undefined. A register\noffset into memory addresses the bit string beyond the operand (signed, in operand-sized steps); an immediate offset is\ntaken modulo the operand's size.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 162} w (.-Size d)
+      ^{:line 163} nb (* (conv uint64 w) 8)
+      ^{:line 164 :tag uint64} off (zero uint64)]
+    (if (== (.-K s) OImm)
+      (set! off (bit-and (conv uint64 (.-Imm s)) (- nb 1)))
+      (do
+        (set! off (.reg c (.-Reg s) w))
+        (if (== (.-K d) OMem)
+          (let [so (conv int64 (sx off w))
+              ^{:line 171} step (>> so (bits/TrailingZeros64 nb))] ; floor division by the bits of the operand
+            (set! (.-Disp d) + (* step (conv int64 w)))
+            (set! off (bit-and (conv uint64 so) (- nb 1))))
+
+          (set! off bit-and (- nb 1)))))
+
+
+    (let [(values v ok) (.load c in (addr d) w)]
+      (when (not ok)
+        (return stopSignal))
+
+      (let [bit (bit-and (>> v off) 1)]
+        (when (!= (.-Mnem in) "bt")
+          (let [^uint64 r (zero uint64)]
+            (switch (.-Mnem in)
+              (case ["bts"]
+                (set! r (bit-or v ^uint64 (<< 1 off))))
+              (case ["btr"]
+                (set! r (bit-and-not v ^uint64 (<< 1 off))))
+              (default
+                (set! r (bit-xor v ^uint64 (<< 1 off)))))
+
+            (when (not (.store c in (addr d) w r))
+              (return stopSignal))))
+
+
+        (.Put (.-F c) (* bit CF) CF)
+        (set! (.-und (.-F c)) (bit-or OF SF AF PF))
+        (.done c)))))
+
+
+
+
+^{:go/end 225} (go/func bscan "bsf, bsr: the index of the lowest (highest) set bit, ZF 0; a zero source sets ZF and leaves the destination unchanged (the\nAPM's definition of what the SDM leaves undefined; :vendor on another host); CF OF SF AF PF undefined.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 206} w (.-Size d)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (if (== v 0)
+      (.Put (.-F c) ZF ZF)
+
+      (let [^uint64 r (zero uint64)]
+        (if (== (.-Mnem in) "bsf")
+          (set! r (conv uint64 (bits/TrailingZeros64 v)))
+
+          (set! r (conv uint64 (- 63 (bits/LeadingZeros64 v)))))
+
+        (.setReg c (.-Reg d) w r)
+        (.Put (.-F c) 0 ZF)))
+
+    (set! (.-und (.-F c)) (bit-or CF OF SF AF PF))
+    (.done c)))
+
+
+
+
+
+^{:go/end 265} (go/func bcount "tzcnt, lzcnt (BMI1's and LZCNT's): the count of trailing (leading) zero bits, the operand's size for a zero source; CF set\nfor a zero source, ZF for a zero result; OF SF AF PF undefined. popcnt: the count of set bits; ZF for a zero source, CF\nOF SF AF PF cleared.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 232} w (.-Size d)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (let [nb (* (conv int w) 8)
+        ^{:line 238 :tag uint64} r (zero uint64)]
+      (switch (.-Mnem in)
+        (case ["popcnt"]
+          (set! r (conv uint64 (bits/OnesCount64 v)))
+          (let [^uint64 z (zero uint64)]
+            (when (== v 0)
+              (set! z ZF))
+
+            (.setReg c (.-Reg d) w r)
+            (.Put (.-F c) z arith)
+            (return (.done c))))
+        (case ["tzcnt"]
+          (set! r (conv uint64 (min (bits/TrailingZeros64 v) nb))))
+        (default
+          (set! r (conv uint64 (- (bits/LeadingZeros64 v) (- 64 nb))))))
+
+      (let [^uint64 fl (zero uint64)]
+        (when (== v 0)
+          (set! fl bit-or CF))
+
+        (when (== r 0)
+          (set! fl bit-or ZF))
+
+        (.setReg c (.-Reg d) w r)
+        (.Put (.-F c) fl (bit-or CF ZF))
+        (set! (.-und (.-F c)) (bit-or OF SF AF PF))
+        (.done c)))))
+
+
+
+
+^{:go/end 299} (go/func enter "enter imm16, imm8: RBP pushed, the nesting level's frame pointers copied (level mod 32), RBP the new frame, RSP lowered by\nthe size.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [size (bit-and (conv uint64 (.-Imm (aget (.-Ops in) 0))) 0xffff)
+      ^{:line 271} level (bit-and (conv uint64 (.-Imm (aget (.-Ops in) 1))) 31)
+      ^{:line 272} sp0 (aget (.-R c) 4)]
+    (when (not (.push c (aget (.-R c) 5) 8))
+      (return stopSignal))
+
+    (let [ft (aget (.-R c) 4)]
+      (when (> level 0)
+        (let [bp (aget (.-R c) 5)]
+          (for [i (conv uint64 1)] (< i level) (inc! i)
+            (set! bp - 8)
+            (let [(values v ok) (.Read (.-AS c) bp 8)]
+              (when (not ok)
+                (aset (.-R c) 4 sp0)
+                (return (.fault c (.-FaultAddr (.-AS c)))))
+
+              (when (not (.push c v 8))
+                (aset (.-R c) 4 sp0)
+                (return stopSignal))))
+
+
+          (when (not (.push c ft 8))
+            (aset (.-R c) 4 sp0)
+            (return stopSignal))))
+
+
+      (aset (.-R c) 5 ft)
+      (set! (aget (.-R c) 4) - size)
+      (.done c))))
+
+
+
+^{:go/end 313} (go/func xlat "xlatb: AL from [RBX + AL].\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [a (+ (aget (.-R c) 3) (bit-and (aget (.-R c) 0) 0xff))]
+    (when (.-AdSize32 in)
+      (set! a bit-and 0xffffffff))
+
+    (let [(values v ok) (.Read (.-AS c) a 1)]
+      (when (not ok)
+        (return (.fault c (.-FaultAddr (.-AS c)))))
+
+      (.setReg c 0 1 v)
+      (.done c))))
+
+
+^{:go/end 323} (go/func byteSwap ^uint64 [^uint64 v ^uint8 w]
+  (switch w
+    (case [2]
+      (return (conv uint64 (bits/ReverseBytes16 (conv uint16 v)))))
+    (case [4]
+      (return (conv uint64 (bits/ReverseBytes32 (conv uint32 v))))))
+
+  (bits/ReverseBytes64 v))
+
+
+
+^{:go/end 337} (go/func movbe "movbe: a load or a store with its bytes reversed.\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [(values d s) (values (aget (.-Ops in) 0) (aget (.-Ops in) 1))
+      ^{:line 328} w (.-Size d)
+      (values v ok) (.load c in (addr s) w)]
+    (when (not ok)
+      (return stopSignal))
+
+    (when (not (.store c in (addr d) w (byteSwap v w)))
+      (return stopSignal))
+
+    (.done c)))
+
+
+
+^{:go/end 344} (go/func rdtscp "rdtscp: rdtsc's EDX:EAX and ECX the TSC_AUX value (Linux: the CPU's number; x86i's one CPU is 0).\n" ^int [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (rdtsc c in)
+  (.setReg c 1 4 0)
+  ^{:line 343} stepOK)

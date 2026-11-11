@@ -1,0 +1,207 @@
+(ns arbace.asm.amd64.obj
+  "amd64's object assembler (doc/asm/AMD64-SURVEY.md §7.3, AX4): x86-64's part of the shared object assembler
+  arbace.asm.obj (`arch`): the instructions are arbace.asm.amd64.asm's (AX2's matcher and encoder, its fixups with their
+  kinds), relaxed after llvm-project 23.1.5's X86AsmBackend.cpp (the relaxable instructions, the PC-relative adjustment, the
+  NOP padding) and X86EncodingOptimizationForImmediate.def (the long immediate forms), their relocations
+  X86ELFObjectWriter.cpp's (the relocation types), Apache-2.0 WITH LLVM-exception, written again in Arbace; x86-64's DWARF
+  registers and CIE. Since AR4 the rest (sections, symbols, data, CFI, layout, fixups, the file) is arbace.asm.obj's,
+  shared with arm64 (arbace.asm.arm64.obj).
+
+  `assemble` gives {:bytes BYTES} or {:unsupported CLASS :what TEXT} (what this slice does not assemble yet: :cfi, a
+  directive, an instruction's class) or {:error MESSAGE}."
+  (:require [arbace.repr.asm :as asm]
+            [arbace.asm.amd64.asm :as x]
+            [arbace.asm.obj :as o]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the relaxable instructions (X86AsmBackend::mayNeedRelaxation, getRelaxedOpcode; X86EncodingOptimizationForImmediate.def)
+
+(def ^:private long-imm
+  (let [pairs (fn [sfx & ps] (for [[l s] (partition 2 ps) x sfx] [(str s x) (str l x)]))
+        five ["" "_EVEX" "_NF" "_ND" "_NF_ND"]]
+    (into {}
+          (concat
+           (pairs [""] "CMP16mi" "CMP16mi8" "CMP16ri" "CMP16ri8" "CMP32mi" "CMP32mi8" "CMP32ri" "CMP32ri8" "CMP64mi32" "CMP64mi8"
+                  "CMP64ri32" "CMP64ri8" "CCMP16mi" "CCMP16mi8" "CCMP16ri" "CCMP16ri8" "CCMP32mi" "CCMP32mi8" "CCMP32ri" "CCMP32ri8"
+                  "CCMP64mi32" "CCMP64mi8" "CCMP64ri32" "CCMP64ri8" "PUSH16i" "PUSH16i8" "PUSH32i" "PUSH32i8" "PUSH64i32" "PUSH64i8")
+           (apply pairs five (mapcat (fn [op] [(str op "16mi") (str op "16mi8") (str op "16ri") (str op "16ri8") (str op "32mi") (str op "32mi8")
+                                               (str op "32ri") (str op "32ri8") (str op "64mi32") (str op "64mi8") (str op "64ri32") (str op "64ri8")])
+                                     ["ADD" "AND" "OR" "SUB" "XOR"]))
+           (pairs ["" "_EVEX" "_NF"] "IMUL16rmi" "IMUL16rmi8" "IMUL16rri" "IMUL16rri8" "IMUL32rmi" "IMUL32rmi8" "IMUL32rri" "IMUL32rri8"
+                  "IMUL64rmi32" "IMUL64rmi8" "IMUL64rri32" "IMUL64rri8")
+           (apply pairs ["" "_EVEX" "_ND"] (mapcat (fn [op] [(str op "16mi") (str op "16mi8") (str op "16ri") (str op "16ri8") (str op "32mi") (str op "32mi8")
+                                                             (str op "32ri") (str op "32ri8") (str op "64mi32") (str op "64mi8") (str op "64ri32") (str op "64ri8")])
+                                                   ["ADC" "SBB"]))))))
+
+(defn- relaxed-opcode [^String inst ^long mode]
+  (case inst
+    "JCC_1" (if (= mode 16) "JCC_2" "JCC_4")
+    "JMP_1" (if (= mode 16) "JMP_2" "JMP_4")
+    (get long-imm inst)))
+
+;; the relaxed branches' encodings: JMP_2, JMP_4, JCC_2, JCC_4 are isCodeGenOnly or not matchable, so the table (the matchables'
+;; instructions) lacks them; their fields after X86InstrControl.td
+(def ^:private relaxed-insns
+  (let [b {:adsize "AdSizeX" :defs 0 :enc "EncNormal" :explicit "NoExplicitOpPrefix" :prefix "NoPrfx"}]
+    {"JMP_2" (assoc b :form "RawFrm" :imm "Imm16PCRel" :map "OB" :opcode 0xE9 :ops [["dst" "brtarget16" 1]] :opsize "OpSize16")
+     "JMP_4" (assoc b :form "RawFrm" :imm "Imm32PCRel" :map "OB" :opcode 0xE9 :ops [["dst" "brtarget32" 1]] :opsize "OpSize32")
+     "JCC_2" (assoc b :form "AddCCFrm" :imm "Imm16PCRel" :map "TB" :opcode 0x80 :ops [["dst" "brtarget16" 1] ["cond" "ccode" 1]] :opsize "OpSize16")
+     "JCC_4" (assoc b :form "AddCCFrm" :imm "Imm32PCRel" :map "TB" :opcode 0x80 :ops [["dst" "brtarget32" 1] ["cond" "ccode" 1]] :opsize "OpSize32")}))
+
+(def ^:private obj-tables (atom {}))
+(defn- obj-table []
+  (let [t (x/table)]
+    (or (get @obj-tables t) (let [u (update t :insns merge relaxed-insns)] (reset! obj-tables {t u}) u))))
+
+(defn- may-relax? [^String inst mi]
+  (or (#{"JCC_1" "JMP_1"} inst)
+      (and (long-imm inst)
+           (let [skip (if (.startsWith inst "CCMP") 2 0)] (some? (:expr (nth mi (- (count mi) 1 skip))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the instructions, relaxed (MCObjectStreamer::emitInstruction, MCAssembler::relaxFragment)
+
+(defn- emit-insn! [ctx f]
+  (let [f (o/resolve-expr ctx f)
+        mode @(:mode ctx)
+        rs (binding [x/*intel* @(:intel ctx)] (x/assemble-insn f mode @(:syms ctx)))]
+    (doseq [r rs]
+      (cond
+        (:error r) (o/fail (:error r))
+        (:unsupported r) (o/unsupported (:unsupported r) (str (:what r)))
+        :else
+        (do (doseq [op (:mi r)] (when-let [e (:expr op)] (o/visit-syms! ctx e)))
+            (when (:wait r) (o/bytes! ctx [0x9b]))
+            (if (may-relax? (:inst r) (:mi r))
+              (do (o/add-chunk! (o/cur-sec ctx) (o/new-chunk :relax {:inst (:inst r) :mi (:mi r) :mode mode :flags (:pflags r) :enc r}))
+                  nil)
+              (let [ch (o/cur-data! ctx) ^java.util.ArrayList b (:bytes @ch) base (.size b)]
+                (doseq [v (:bytes r)] (.add b (if (= v :fixup) 0 v)))
+                (doseq [[off size e kind pcrel adj] (:fixups r)]
+                  (.add ^java.util.ArrayList (:fixups @ch) [(+ base (long off)) size e kind pcrel adj])))))))))
+
+(defn- needs-relax? [ctx c ^long stretch]
+  (let [m @c]
+    (and (may-relax? (:inst m) (:mi m))
+         (some (fn [fx]
+                 (let [[val resolved v] (o/eval-fixup ctx c fx stretch)]
+                   (if resolved
+                     (or (not (<= -128 (long val) 127)) (some? (:spec v)))
+                     (not (and (= 1 (long (second fx))) (:add v) (= "ABS8" (:spec v)))))))
+               (:fixups (:enc m))))))
+
+(defn- relax! [c]
+  (let [m @c inst (relaxed-opcode (:inst m) (:mode m))
+        enc (binding [x/*t* (obj-table)] (x/encode inst (:mi m) (:mode m) (disj (set (:flags m)) :use-vex :use-vex2 :use-evex)))]
+    (swap! c assoc :inst inst :enc enc)))
+
+;; x86-64's DWARF register numbers for EH (X86RegisterInfo.td's DwarfRegNum, flavour 0)
+(def ^:private dwarf-regs
+  (merge (zipmap ["rax" "rdx" "rcx" "rbx" "rsi" "rdi" "rbp" "rsp"] (range 8))
+         (zipmap ["eax" "edx" "ecx" "ebx" "esi" "edi" "ebp" "esp"] (range 8))
+         (into {} (for [i (range 8 16) sfx ["" "d" "w" "b"]] [(str "r" i sfx) i]))
+         {"rip" 16}
+         (into {} (for [i (range 16)] [(str "xmm" i) (+ 17 i)]))
+         (into {} (for [i (range 8)] [(str "st" i) (+ 33 i)]))
+         (into {} (for [i (range 8)] [(str "mm" i) (+ 41 i)]))
+         {"rflags" 49 "es" 50 "cs" 51 "ss" 52 "ds" 53 "fs" 54 "gs" 55 "fs.base" 58 "gs.base" 59}
+         (into {} (for [i (range 16 32)] [(str "xmm" i) (+ 67 (- i 16))]))
+         (into {} (for [i (range 8)] [(str "k" i) (+ 118 i)]))))
+
+(def ^:private tls-specs #{"GOTTPOFF" "INDNTPOFF" "NTPOFF" "GOTNTPOFF" "TLSCALL" "TLSDESC" "TLSGD" "TLSLD" "TLSLDM" "TPOFF" "DTPOFF"})
+
+(defn- reloc-type [kind ^long size spec pcrel]
+  (let [spec (if (= kind :branch) "PLT" spec)
+        rt (case kind
+             (:signed :signed-relax) (if (and (nil? spec) (not pcrel)) :32s :32)
+             (:riprel :riprel-relax :riprel-relax-rex :riprel-relax-rex2 :riprel-movq-load :riprel-movq-load-rex2 :riprel-relax-evex
+              :branch) :32
+             :none :none
+             (case size 1 :8 2 :16 4 :32 8 :64))
+        bad (fn [] (o/unsupported :relocation (str spec " " rt)))]
+    (case spec
+      (nil "ABS8") (case rt :64 (if pcrel 24 1) :32 (if pcrel 2 10) :32s 11 :16 (if pcrel 13 12) :8 (if pcrel 15 14))
+      "GOT" (case rt :64 (if pcrel 29 27) :32 (if pcrel 26 3) (bad))
+      "GOTOFF" (if (= rt :64) 25 (bad))
+      "TPOFF" (case rt :64 18 :32 23 (bad))
+      "DTPOFF" (case rt :64 17 :32 21 (bad))
+      "SIZE" (case rt :64 33 :32 32 (bad))
+      "TLSCALL" 35 "TLSDESC" (if (= kind :riprel-relax-rex2) 45 34)
+      "TLSGD" (if (= rt :32) 19 (bad)) "GOTTPOFF" (if (= rt :32) (case kind (:riprel-movq-load-rex2 :riprel-relax-rex2) 44 :riprel-relax-evex 50 22) (bad)) "TLSLD" (if (= rt :32) 20 (bad))
+      "PLT" (if (= rt :32) 4 (bad))
+      "GOTPCREL" (if (= rt :32) (case kind :riprel-relax 41 (:riprel-relax-rex :riprel-movq-load) 42
+                                         (:riprel-relax-rex2 :riprel-movq-load-rex2) 43 9) (bad))
+      "GOTPCREL_NORELAX" (if (= rt :32) 9 (bad))
+      "PLTOFF" (if (= rt :64) 31 (bad))
+      (bad))))
+
+(defn- nops ^java.util.List [^long n ^long mode]
+  (let [n32 [[0x90] [0x66 0x90] [0x0f 0x1f 0x00] [0x0f 0x1f 0x40 0x00] [0x0f 0x1f 0x44 0x00 0x00] [0x66 0x0f 0x1f 0x44 0x00 0x00]
+             [0x0f 0x1f 0x80 0 0 0 0] [0x0f 0x1f 0x84 0 0 0 0 0] [0x66 0x0f 0x1f 0x84 0 0 0 0 0] [0x66 0x2e 0x0f 0x1f 0x84 0 0 0 0 0]]
+        n16 [[0x90] [0x66 0x90] [0x8d 0x74 0x00] [0x8d 0xb4 0x00 0x00]]
+        mx (if (= mode 16) 4 15)
+        out (java.util.ArrayList.)]
+    (loop [n n]
+      (when (pos? n)
+        (let [l (min n mx) pre (if (> l 10) (- l 10) 0)]
+          (dotimes [_ pre] (.add out 0x66))
+          (doseq [b ((if (= mode 16) n16 n32) (dec (- l pre)))] (.add out b))
+          (recur (- n l)))))
+    out))
+
+(defn- directive
+  "x86-64's own directives (AsmParser's and X86AsmParser's): .nops, the code modes, the syntaxes."
+  [ctx h args]
+  (let [cv (fn [e] (let [e (o/resolve-expr ctx e)] (or (x/const-value e @(:syms ctx)) (o/unsupported :expression (str "." h " " (pr-str e))))))]
+    (case h
+      "nops" (let [[n ctl] args]
+               (o/add-chunk! (o/cur-sec ctx) (o/new-chunk :nops {:size (long (cv n)) :ctl (long (if ctl (cv ctl) 0)) :mode @(:mode ctx)})))
+      "code16" (vreset! (:mode ctx) 16) "code32" (vreset! (:mode ctx) 32) "code64" (vreset! (:mode ctx) 64)
+      "intel_syntax" (vreset! (:intel ctx) true) "att_syntax" (vreset! (:intel ctx) false)
+      :unhandled)))
+
+(def arch
+  "x86-64's part of arbace.asm.obj (its *arch*)."
+  {:machine elf/EM_X86_64
+   :wrap (fn [t] (binding [x/*t* (obj-table)] (t)))
+   :emit-insn! emit-insn!
+   :needs-relax? needs-relax?
+   :relax! relax!
+   ;; X86's fixups are relative to the field's end (the immediate's size, 4 for a 64-bit field)
+   :pcrel-bias (fn [size] (case (long size) 1 1 2 2 4))
+   :put-fixup! (fn [^java.util.ArrayList bs off size _kind ^long x _reloc? _spec]
+                 (dotimes [i size] (.set bs (+ (long off) i) (bit-and (bit-shift-right x (* 8 i)) 0xff))))
+   :reloc-type reloc-type
+   :keep-symbol? #{"GOT" "PLT" "GOTPCREL" "GOTPCREL_NORELAX"}
+   :tls-specs tls-specs
+   :directive directive
+   :nops nops
+   :nops-max (fn [mode] (if (= 16 (long mode)) 4 15))
+   :dwarf-regs dwarf-regs
+   ;; the CIE: data alignment -8, return address rip (16), DW_CFA_def_cfa rsp+8 and DW_CFA_offset rip at cfa-8
+   :cie {:ra 16 :data-align -8 :init [0x0c 7 8 0x90 1] :cfa 8}})
+
+(defn assemble
+  "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
+  {:unsupported CLASS :what TEXT}, or {:error MESSAGE}."
+  [items & opts]
+  (binding [o/*arch* arch] (apply o/assemble items opts)))
+
+(defn assemble-file [^String path]
+  (assemble (asm/read-items (asm/latin1 path) asm/amd64)))
+
+(defn value [ctx e depth] (binding [o/*arch* arch] (o/value ctx e depth)))
+
+(def compare-objects o/compare-objects)
+(defn check-list [lst work record] (binding [o/*arch* arch] (o/check-list assemble-file lst work record)))
+(defn control [subj-path ref-name record] (binding [o/*arch* arch] (o/control assemble-file subj-path ref-name record)))
+
+(defn -main
+  "object IN.s OUT.o: the object written (exit 1 with the class when it cannot be); dump OBJ: an object read back, canonically;
+  check LIST WORK RECORD; control SUBJECT REFNAME RECORD."
+  [verb & args]
+  (binding [o/*arch* arch] (apply o/main assemble-file verb args)))

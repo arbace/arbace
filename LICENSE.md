@@ -24,7 +24,8 @@ covers what.
   - ASM, under the BSD 3-Clause License (the package renamed from `org.objectweb.asm`, by way
     of `clojure.asm`, to `arbace.asm`), was `arbace/asm/` and `arbace/asm.ae` until 2026-10-12,
     when it left main with the JVM's bytecode back end (doc/STANDALONE-NOTES.md, S4; it remains
-    on the branch `arbace-for-java-26`). No file of main is derived from it now; its license
+    on the branch `arbace-for-java-26`). Since 2026-11-10 `arbace/asm/` holds the assembly crop's
+    assembler instead (Apache-2.0 WITH LLVM-exception, below), nothing of ASM. No file of main is derived from it now; its license
     stays below for the JVM jars main uses or used, which embed it (`seed/arbace-seed.jar`
     while it was committed, until S4, 2026-10-12, now on the branch `arbace-for-java-26`, and the
     frozen jar of `arbace-for-java-26-v4`, the oracle's reference, built from its tag), and for
@@ -1627,6 +1628,75 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `arbace/repr/asm.ae` and `arbace/repr/asm/` (`arbace.repr.asm.*`, repr/asm, the assembly crops' bridge, doc/asm/SPEC.md, AX1):
+  the lexer's token rules (`lex.ae`), the GNU expression precedence and statement shapes (`gnu.ae`) and the AT&T operand
+  grammar (`amd64/att.ae`) follow LLVM's `llvm/lib/MC/MCParser/AsmLexer.cpp`, `AsmParser.cpp` (`getGNUBinOpPrecedence`,
+  `parseStatement`, `parseMacroLikeBody`) and `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp` (`ParseMemOperand`,
+  `ParseOperand`) from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn` and `test/asm/corpora.edn`), rule
+  for rule, under the Apache License 2.0 with the LLVM Exceptions (section "LLVM (clang)" below). Its test corpora
+  (`llvm/test/MC/{X86,AsmParser}`, extracted into `.tmp/`, never committed) are under the same licence; musl 1.2.6's
+  `.s` files, read as a corpus, under musl's MIT licence (section "musl: MIT License").
+- `arbace/asm/` (`arbace.asm.tablegen`, `arbace.asm.amd64.*`: the assembler of the assembly crops, AX2, doc/asm/AMD64.md):
+  the TableGen reader and evaluator follows LLVM's `llvm/lib/TableGen/TGLexer.cpp`, `TGParser.cpp`, `Record.cpp` and
+  `llvm/docs/TableGen/ProgRef.rst`, the table's generator `llvm/utils/TableGen/AsmMatcherEmitter.cpp` and
+  `utils/TableGen/Common/CodeGenInstruction.cpp` (`FlattenAsmStringVariants`) and `CodeGenRegisters.cpp` (`TopoOrderRC`), the matcher
+  `llvm/lib/Target/X86/AsmParser/X86AsmParser.cpp`, `X86Operand.h` and `X86AsmParserCommon.h`, the encoder
+  `llvm/lib/Target/X86/MCTargetDesc/X86MCCodeEmitter.cpp`, `X86BaseInfo.h`, `X86MCTargetDesc.cpp` and
+  `X86EncodingOptimization.cpp`, the printer `X86ATTInstPrinter.cpp`, `X86InstPrinterCommon.cpp`, `X86MCAsmInfo.cpp`,
+  `llvm/lib/MC/MCInstPrinter.cpp`, `MCExpr.cpp`, `MCSymbol.cpp` and `MCAsmInfo.cpp` with the table's printer fields after
+  `llvm/utils/TableGen/AsmWriterEmitter.cpp` and `Common/AsmWriterInst.cpp`, from the same `llvm-project-23.1.5.src.tar.xz`, rule for rule, under the Apache License 2.0 with
+  the LLVM Exceptions (section "LLVM (clang)" below); no code is copied. `asm/amd64/table.edn`, generated from that tarball's
+  `llvm/lib/Target/X86/*.td` and `llvm/include/llvm/{Target,CodeGen,IR}/*.td` (extracted into `.tmp/`, never committed), is a work
+  derived from them, under the same licence. AX4's first slice: `arbace/asm/amd64/obj.ae` (the object assembler) follows
+  `llvm/lib/MC/MCObjectStreamer.cpp`, `MCELFStreamer.cpp`, `MCAssembler.cpp`, `MCDwarf.cpp` (FrameEmitterImpl),
+  `MCParser/ELFAsmParser.cpp`, `MCParser/AsmParser.cpp`, `X86AsmBackend.cpp`, `X86ELFObjectWriter.cpp` and
+  `X86EncodingOptimizationForImmediate.def`, and `arbace/asm/elf.ae` (the ELF64 writer and reader) `llvm/lib/MC/ELFObjectWriter.cpp`
+  and `StringTableBuilder.cpp`, the same tarball, licence and manner; no code is copied. The records `test/asm/records/obj-*.edn` hold
+  llvm-mc 23.1.5's output for musl's files (MIT), Arbace's own tests and `llvm/test/MC/X86`'s (Apache 2.0 WITH LLVM-exception). AX4's
+  second slice: `arbace/asm/link.ae` (the static linker) follows lld's `lld/ELF/` from the same tarball (`Driver.cpp`, `InputFiles.cpp`,
+  `SymbolTable.cpp`, `Symbols.cpp`, `LinkerScript.cpp`, `Writer.cpp`, `OutputSections.cpp`, `SyntheticSections.cpp`, `InputSection.cpp`,
+  `Relocations.cpp`, `Arch/X86_64.cpp`), the same licence and manner; no code is copied. `test/asm/run/` is Arbace's own; its
+  `musl:` sources are read from musl 1.2.6's pinned tarball (MIT), never committed. AX4's third slice: `arbace/asm/amd64/decode.ae`
+  (the decoder) follows `llvm/lib/Target/X86/Disassembler/X86Disassembler.cpp`, `X86DisassemblerDecoder.h`,
+  `llvm/include/llvm/Support/X86DisassemblerDecoderCommon.h` and the disassembler tables' generator `llvm/utils/TableGen/X86RecognizableInstr.cpp`,
+  `X86DisassemblerTables.cpp` and `X86ModRMFilters.h`, and `arbace/asm/amd64/decode_check.ae` `llvm/tools/llvm-mc/Disassembler.cpp`,
+  the same tarball, licence and manner; no code is copied. `llvm/test/MC/Disassembler/X86` is read from the tarball as test data
+  (extracted into `.tmp/`, never committed). AX5.2 (x86i): `arbace/asm/amd64/dgen.ae` writes the disassembler's decisions (the same
+  X86DisassemblerTables.cpp rules, through `decode.ae`) as `go/arbace/x86i/dectab.ae`, a work derived from the table, and
+  `go/arbace/x86i/decode.ae` and `tables.ae` follow `X86Disassembler.cpp`'s decoding for 64-bit mode's legacy and REX encodings, the
+  same tarball, licence and manner; no code is copied. The rest of `go/arbace/x86i` (the families, the flags, the lockstep) and
+  `go/arbace/emu` are Arbace's own, written from the Intel 64 and IA-32 Architectures Software Developer's Manual (vol. 2) and the AMD64
+  Architecture Programmer's Manual (vol. 3) as references, nothing copied from them, and from the System V AMD64 psABI and the Linux
+  man pages (getauxval(3), ptrace(2), personality(2)), not from the kernel's source. AX5.3 and AX5.4 (the step mode, the signal
+  frames, the families rcl to movbe) likewise; the signal frame's layout from the psABI and musl 1.2.6's `arch/x86_64/bits/signal.h`
+  (MIT, section "musl: MIT License"), nothing copied; `test/asm/x86i/gen.ae` and the programs it writes are Arbace's own.
+- The same namespaces' arm64 part (AR1, doc/asm/ARM64-SURVEY.md): `arm64/gnu.ae`'s operand grammar follows LLVM's
+  `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` and `lex.ae`'s AArch64 dialects its
+  `MCTargetDesc/AArch64MCAsmInfo.cpp` (the same tarball and licence); `plan9.ae`'s operand grammar follows Go 1.27.1's
+  `src/cmd/asm/internal/asm/parse.go` (TamaGo's GOROOT, pinned by `seed/goroot.sha256`; section "Go: BSD 3-Clause License").
+  No code is copied. Read as corpora, never committed: `llvm/test/MC/AArch64` (LLVM's licence), musl 1.2.6's aarch64 `.s`
+  (MIT), Go's `cmd/asm` testdata (BSD-3-Clause), the box's arm64 `.s` (its own files' licences, box/README.md), and gcc
+  15.2.0's `libgcc/config/aarch64/*.S` from the pinned tarball (GPL-3.0-or-later with the GCC Runtime Library Exception 3.1:
+  read and printed back as test data, never ported).
+- The same namespaces' A64 encoder (AR2, doc/asm/ARM64-SURVEY.md, "As built: AR2 (first slice)"): `arm64/table.ae` is generated
+  data from Go 1.27.1's GOROOT (TamaGo's, pinned by `seed/goroot.sha256`): `src/cmd/vendor/golang.org/x/arch/arm64/arm64asm/`'s
+  `tables.go` (the rows), `condition.go` (the alias conditions, translated into Arbace), `inst.go` (`sysInstsAttrs`) and `inst.json`
+  (the should-be-one bits), golang.org/x/arch at `v0.27.1-0.20260521044007-9c1a596a2c97` as GOROOT's `cmd/vendor/modules.txt`
+  names it, and `src/cmd/internal/obj/arm64/sysRegEnc.go` (the system registers); `arm64/bits.ae` ports arm64asm's
+  `condition_util.go`; `arm64/enc.ae` inverts `decode.go`'s `decodeArg` kind by kind (written by hand, no code copied).
+  golang.org/x/arch's `LICENSE` is Go's BSD 3-Clause License word for word but its first line, `Copyright 2015 The Go Authors.`
+  (section "Go: BSD 3-Clause License"). Its check reads `llvm/test/MC/AArch64` as a corpus, never committed (LLVM's licence).
+- AR2's second slice (doc/asm/ARM64-SURVEY.md, "As built: AR2 (second slice)"; ARS24 (a)): `asm/arm64/table.edn`, generated by
+  `arbace/asm/arm64/gen.ae` from `llvm-project-23.1.5.src.tar.xz`'s `llvm/lib/Target/AArch64/*.td` with
+  `llvm/include/llvm/{Target,CodeGen,IR,TableGen}/*.td` (read by Arbace's TableGen) and the literal messages of
+  `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp`'s `showMatchError` and its `ExtensionDefs` table (read as text; all
+  extracted into `.tmp/`, never committed), is a work derived from them, under the Apache License 2.0 with the LLVM Exceptions
+  (section "LLVM (clang)" below). `arbace/repr/asm/arm64/lenc.ae` (the matcher and encoder over that table) follows
+  `AArch64AsmParser.cpp` (`parseSysAlias`, `parseSyspAlias`, `setRequiredFeatureString`, `validateInstruction`'s MOPS rules,
+  `MatchAndEmitInstruction`'s operand twiddles and messages), `MCTargetDesc/AArch64MCCodeEmitter.cpp` (the encoder methods),
+  `MCTargetDesc/AArch64InstPrinter.cpp` (`printLogicalImm`, `printSIMDType10Operand`, ARS25's spelling) and
+  `llvm/utils/TableGen/AsmMatcherEmitter.cpp` (MatchInstructionImpl's choice of diagnostic) from the same tarball, rule for rule; no
+  code is copied. `test/asm/table_oracle_arm64.ae` reads llvm-tblgen's own output by hand (the oracle tier), never committed.
 - `test/cpp/clang.ae` (`cpp.clang`, the clang half of Arbace's C++ target, doc/cpp/CPP-SURVEY.md, "As built: CP248 (a)"):
   a port of parts of clang, the LLVM Project, from `llvm-project-23.1.5.src.tar.xz` (the pin of `test/cpp/corpora.edn`,
   SHA-256 `fb50b1eac93ddeb3aa8dab4cfe324dff74f4a9c2bdee6160c9e36188f8d06a6e`): `clang/lib/Frontend/InitPreprocessor.cpp`'s

@@ -1,0 +1,1100 @@
+(ns arbace.asm.amd64.decode
+  "amd64's decoder (doc/asm/AMD64.md §9, AX4's third slice): machine code back to the machine instructions the encoder
+  encodes (the table's instruction and its MCInst operands {:reg R} {:imm V}), as LLVM's X86 disassembler decodes them,
+  after llvm-project 23.1.5's lib/Target/X86/Disassembler/X86Disassembler.cpp (readPrefixes, readOpcode,
+  getInstructionID, readOperands, the translation into an MCInst, getInstruction's flags), X86DisassemblerDecoder.h and
+  include/llvm/Support/X86DisassemblerDecoderCommon.h (the contexts, encodings and types), and the tables TableGen's
+  -gen-disassembler makes, made here from asm/amd64/table.edn at their first use as
+  utils/TableGen/X86RecognizableInstr.cpp (each instruction's context, ModRM filter and operand specifiers) and
+  X86DisassemblerTables.cpp (inheritsFrom, outranks, setTableFields, the context of an attribute mask) make them,
+  Apache-2.0 WITH LLVM-exception, written again in Arbace.
+
+  `decode` takes the bytes, an offset and the mode (16, 32 or 64) and gives {:inst NAME :mi [OPERAND ...] :flags #{...}
+  :size N} or {:fail true :size N} (llvm-mc's `invalid instruction encoding`, the bytes it skips)."
+  (:require [arbace.asm.amd64.asm :as x]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the instruction contexts (X86DisassemblerDecoderCommon.h's INSTRUCTION_CONTEXTS: name and rank)
+
+(def ^:private ranks
+  {"IC" 0 "IC_64BIT" 1 "IC_OPSIZE" 3 "IC_ADSIZE" 3 "IC_OPSIZE_ADSIZE" 4 "IC_XD" 2 "IC_XS" 2 "IC_XD_OPSIZE" 3 "IC_XS_OPSIZE" 3
+   "IC_XD_ADSIZE" 3 "IC_XS_ADSIZE" 3 "IC_64BIT_REXW" 5 "IC_64BIT_REXW_ADSIZE" 6 "IC_64BIT_OPSIZE" 3 "IC_64BIT_ADSIZE" 3
+   "IC_64BIT_OPSIZE_ADSIZE" 4 "IC_64BIT_XD" 6 "IC_64BIT_XS" 6 "IC_64BIT_XD_OPSIZE" 3 "IC_64BIT_XS_OPSIZE" 3 "IC_64BIT_XD_ADSIZE" 3
+   "IC_64BIT_XS_ADSIZE" 3 "IC_64BIT_REXW_XS" 7 "IC_64BIT_REXW_XD" 7 "IC_64BIT_REXW_OPSIZE" 8 "IC_64BIT_REX2" 2 "IC_64BIT_REX2_REXW" 3
+   "IC_VEX" 1 "IC_VEX_XS" 2 "IC_VEX_XD" 2 "IC_VEX_OPSIZE" 2 "IC_VEX_W" 3 "IC_VEX_W_XS" 4 "IC_VEX_W_XD" 4 "IC_VEX_W_OPSIZE" 4
+   "IC_VEX_L" 3 "IC_VEX_L_XS" 4 "IC_VEX_L_XD" 4 "IC_VEX_L_OPSIZE" 4 "IC_VEX_L_W" 4 "IC_VEX_L_W_XS" 5 "IC_VEX_L_W_XD" 5
+   "IC_VEX_L_W_OPSIZE" 5 "IC_EVEX" 1 "IC_EVEX_NF" 2 "IC_EVEX_XS" 2 "IC_EVEX_XS_ADSIZE" 3 "IC_EVEX_XD" 2 "IC_EVEX_XD_ADSIZE" 3
+   "IC_EVEX_OPSIZE" 2 "IC_EVEX_OPSIZE_NF" 3 "IC_EVEX_OPSIZE_ADSIZE" 3 "IC_EVEX_W" 3 "IC_EVEX_W_NF" 4 "IC_EVEX_W_XS" 4
+   "IC_EVEX_W_XD" 4 "IC_EVEX_W_OPSIZE" 4 "IC_EVEX_L" 3 "IC_EVEX_L_XS" 4 "IC_EVEX_L_XD" 4 "IC_EVEX_L_OPSIZE" 4 "IC_EVEX_L_W" 3
+   "IC_EVEX_L_W_XS" 4 "IC_EVEX_L_W_XD" 4 "IC_EVEX_L_W_OPSIZE" 4 "IC_EVEX_L2" 3 "IC_EVEX_L2_XS" 4 "IC_EVEX_L2_XD" 4
+   "IC_EVEX_L2_OPSIZE" 4 "IC_EVEX_L2_W" 3 "IC_EVEX_L2_W_XS" 4 "IC_EVEX_L2_W_XD" 4 "IC_EVEX_L2_W_OPSIZE" 4 "IC_EVEX_K" 1
+   "IC_EVEX_XS_K" 2 "IC_EVEX_XD_K" 2 "IC_EVEX_OPSIZE_K" 2 "IC_EVEX_W_K" 3 "IC_EVEX_W_XS_K" 4 "IC_EVEX_W_XD_K" 4
+   "IC_EVEX_W_OPSIZE_K" 4 "IC_EVEX_L_K" 3 "IC_EVEX_L_XS_K" 4 "IC_EVEX_L_XD_K" 4 "IC_EVEX_L_OPSIZE_K" 4 "IC_EVEX_L_W_K" 3
+   "IC_EVEX_L_W_XS_K" 4 "IC_EVEX_L_W_XD_K" 4 "IC_EVEX_L_W_OPSIZE_K" 4 "IC_EVEX_L2_K" 3 "IC_EVEX_L2_XS_K" 4 "IC_EVEX_L2_XD_K" 4
+   "IC_EVEX_L2_OPSIZE_K" 4 "IC_EVEX_L2_W_K" 3 "IC_EVEX_L2_W_XS_K" 4 "IC_EVEX_L2_W_XD_K" 4 "IC_EVEX_L2_W_OPSIZE_K" 4 "IC_EVEX_B" 1
+   "IC_EVEX_B_NF" 2 "IC_EVEX_XS_B" 2 "IC_EVEX_XD_B" 2 "IC_EVEX_OPSIZE_B" 2 "IC_EVEX_OPSIZE_B_NF" 3 "IC_EVEX_W_B" 3
+   "IC_EVEX_W_B_NF" 4 "IC_EVEX_W_XS_B" 4 "IC_EVEX_W_XD_B" 4 "IC_EVEX_W_OPSIZE_B" 4 "IC_EVEX_L_B" 3 "IC_EVEX_L_XS_B" 4
+   "IC_EVEX_L_XD_B" 4 "IC_EVEX_L_OPSIZE_B" 4 "IC_EVEX_L_W_B" 3 "IC_EVEX_L_W_XS_B" 4 "IC_EVEX_L_W_XD_B" 4 "IC_EVEX_L_W_OPSIZE_B" 4
+   "IC_EVEX_L2_B" 3 "IC_EVEX_L2_XS_B" 4 "IC_EVEX_L2_XD_B" 4 "IC_EVEX_L2_OPSIZE_B" 4 "IC_EVEX_L2_W_B" 3 "IC_EVEX_L2_W_XS_B" 4
+   "IC_EVEX_L2_W_XD_B" 4 "IC_EVEX_L2_W_OPSIZE_B" 4 "IC_EVEX_K_B" 1 "IC_EVEX_XS_K_B" 2 "IC_EVEX_XD_K_B" 2 "IC_EVEX_OPSIZE_K_B" 2
+   "IC_EVEX_W_K_B" 3 "IC_EVEX_W_XS_K_B" 4 "IC_EVEX_W_XD_K_B" 4 "IC_EVEX_W_OPSIZE_K_B" 4 "IC_EVEX_L_K_B" 3 "IC_EVEX_L_XS_K_B" 4
+   "IC_EVEX_L_XD_K_B" 4 "IC_EVEX_L_OPSIZE_K_B" 4 "IC_EVEX_L_W_K_B" 3 "IC_EVEX_L_W_XS_K_B" 4 "IC_EVEX_L_W_XD_K_B" 4
+   "IC_EVEX_L_W_OPSIZE_K_B" 4 "IC_EVEX_L2_K_B" 3 "IC_EVEX_L2_XS_K_B" 4 "IC_EVEX_L2_XD_K_B" 4 "IC_EVEX_L2_OPSIZE_K_B" 4
+   "IC_EVEX_L2_W_K_B" 3 "IC_EVEX_L2_W_XS_K_B" 4 "IC_EVEX_L2_W_XD_K_B" 4 "IC_EVEX_L2_W_OPSIZE_K_B" 4 "IC_EVEX_KZ_B" 1
+   "IC_EVEX_XS_KZ_B" 2 "IC_EVEX_XD_KZ_B" 2 "IC_EVEX_OPSIZE_KZ_B" 2 "IC_EVEX_W_KZ_B" 3 "IC_EVEX_W_XS_KZ_B" 4 "IC_EVEX_W_XD_KZ_B" 4
+   "IC_EVEX_W_OPSIZE_KZ_B" 4 "IC_EVEX_L_KZ_B" 3 "IC_EVEX_L_XS_KZ_B" 4 "IC_EVEX_L_XD_KZ_B" 4 "IC_EVEX_L_OPSIZE_KZ_B" 4
+   "IC_EVEX_L_W_KZ_B" 3 "IC_EVEX_L_W_XS_KZ_B" 4 "IC_EVEX_L_W_XD_KZ_B" 4 "IC_EVEX_L_W_OPSIZE_KZ_B" 4 "IC_EVEX_L2_KZ_B" 3
+   "IC_EVEX_L2_XS_KZ_B" 4 "IC_EVEX_L2_XD_KZ_B" 4 "IC_EVEX_L2_OPSIZE_KZ_B" 4 "IC_EVEX_L2_W_KZ_B" 3 "IC_EVEX_L2_W_XS_KZ_B" 4
+   "IC_EVEX_L2_W_XD_KZ_B" 4 "IC_EVEX_L2_W_OPSIZE_KZ_B" 4 "IC_EVEX_KZ" 1 "IC_EVEX_XS_KZ" 2 "IC_EVEX_XD_KZ" 2 "IC_EVEX_OPSIZE_KZ" 2
+   "IC_EVEX_W_KZ" 3 "IC_EVEX_W_XS_KZ" 4 "IC_EVEX_W_XD_KZ" 4 "IC_EVEX_W_OPSIZE_KZ" 4 "IC_EVEX_L_KZ" 3 "IC_EVEX_L_XS_KZ" 4
+   "IC_EVEX_L_XD_KZ" 4 "IC_EVEX_L_OPSIZE_KZ" 4 "IC_EVEX_L_W_KZ" 3 "IC_EVEX_L_W_XS_KZ" 4 "IC_EVEX_L_W_XD_KZ" 4
+   "IC_EVEX_L_W_OPSIZE_KZ" 4 "IC_EVEX_L2_KZ" 3 "IC_EVEX_L2_XS_KZ" 4 "IC_EVEX_L2_XD_KZ" 4 "IC_EVEX_L2_OPSIZE_KZ" 4
+   "IC_EVEX_L2_W_KZ" 3 "IC_EVEX_L2_W_XS_KZ" 4 "IC_EVEX_L2_W_XD_KZ" 4 "IC_EVEX_L2_W_OPSIZE_KZ" 4 "IC_EVEX_B_U" 2
+   "IC_EVEX_XS_B_U" 3 "IC_EVEX_XD_B_U" 3 "IC_EVEX_OPSIZE_B_U" 3 "IC_EVEX_W_B_U" 4 "IC_EVEX_W_XS_B_U" 5 "IC_EVEX_W_XD_B_U" 5
+   "IC_EVEX_W_OPSIZE_B_U" 5 "IC_EVEX_K_B_U" 2 "IC_EVEX_XS_K_B_U" 3 "IC_EVEX_XD_K_B_U" 3 "IC_EVEX_OPSIZE_K_B_U" 3 "IC_EVEX_W_K_B_U" 4
+   "IC_EVEX_W_XS_K_B_U" 5 "IC_EVEX_W_XD_K_B_U" 5 "IC_EVEX_W_OPSIZE_K_B_U" 5 "IC_EVEX_KZ_B_U" 2 "IC_EVEX_XS_KZ_B_U" 3
+   "IC_EVEX_XD_KZ_B_U" 3 "IC_EVEX_OPSIZE_KZ_B_U" 3 "IC_EVEX_W_KZ_B_U" 4 "IC_EVEX_W_XS_KZ_B_U" 5 "IC_EVEX_W_XD_KZ_B_U" 5
+   "IC_EVEX_W_OPSIZE_KZ_B_U" 5})
+
+(defn- outranks? [upper lower] (> (long (ranks upper)) (long (ranks lower))))
+
+;; a vector context's parts: [VEX|EVEX L W PREFIX ADSIZE K B U NF]
+(def ^:private vec-ctx #"^IC_(VEX|EVEX)(_L2|_L)?(_W)?(_XS|_XD|_OPSIZE)?(_ADSIZE)?(_KZ|_K)?(_B)?(_U)?(_NF)?$")
+
+(declare inherits?)
+
+(defn- inh
+  "inheritsFrom with its default arguments (noPrefix true, the rest false) unless given."
+  ([c p] (inherits? c p true false false false))
+  ([c p np] (inherits? c p np false false false)))
+
+(defn- vec-inherits?
+  "inheritsFrom's VEX and EVEX cases (the generated switch's rules, by the context's parts)."
+  [child parent lig wig]
+  (let [[_ e l w p ad k b u nf] (re-matches vec-ctx parent)
+        evex? (= e "EVEX")
+        mk (fn [l w] (str "IC_" e l w p k b))]
+    (cond
+      (or u ad) false
+      nf (case parent
+           "IC_EVEX_NF" (and wig (inh child "IC_EVEX_W_NF"))
+           "IC_EVEX_B_NF" (and wig (inh child "IC_EVEX_W_B_NF"))
+           false)
+      (and (nil? l) (nil? w))
+      (or (and lig wig (inh child (mk "_L" "_W"))) (and evex? lig wig (inh child (mk "_L2" "_W")))
+          (and wig (inh child (mk nil "_W")))
+          (and lig (inh child (mk "_L" nil))) (and evex? lig (inh child (mk "_L2" nil))))
+      (nil? l)
+      (or (and lig (inh child (mk "_L" "_W"))) (and evex? lig (inh child (mk "_L2" "_W")))
+          ;; IC_EVEX_W and IC_EVEX_W_B: also their OPSIZE
+          (and evex? (nil? p) (nil? k) (inh child (str "IC_EVEX_W_OPSIZE" b))))
+      (nil? w) (and wig (inh child (mk l "_W")))
+      :else false)))
+
+(defn- inherits?
+  "X86DisassemblerTables.cpp's inheritsFrom: whether every instruction of the context `child` also belongs to `parent`."
+  [child parent np lig wig ad64]
+  (or (= child parent)
+      (case parent
+        "IC" (or (inh child "IC_64BIT" ad64) (and np (inh child "IC_OPSIZE" np)) (inh child "IC_ADSIZE")
+                 (and np (inh child "IC_XD" np)) (and np (inh child "IC_XS" np)))
+        "IC_64BIT" (or (inh child "IC_64BIT_REXW") (inh child "IC_64BIT_REX2") (and np (inh child "IC_64BIT_OPSIZE" np))
+                       (and (not ad64) (inh child "IC_64BIT_ADSIZE")) (and np (inh child "IC_64BIT_XD" np))
+                       (and np (inh child "IC_64BIT_XS" np)))
+        "IC_OPSIZE" (or (inh child "IC_64BIT_OPSIZE") (inh child "IC_OPSIZE_ADSIZE"))
+        "IC_ADSIZE" (and np (inh child "IC_OPSIZE_ADSIZE" np))
+        "IC_OPSIZE_ADSIZE" false
+        "IC_64BIT_ADSIZE" (and np (inh child "IC_64BIT_OPSIZE_ADSIZE" np))
+        "IC_64BIT_OPSIZE_ADSIZE" false
+        "IC_XD" (inh child "IC_64BIT_XD")
+        "IC_XS" (inh child "IC_64BIT_XS")
+        "IC_XD_OPSIZE" (inh child "IC_64BIT_XD_OPSIZE")
+        "IC_XS_OPSIZE" (inh child "IC_64BIT_XS_OPSIZE")
+        "IC_XD_ADSIZE" (inh child "IC_64BIT_XD_ADSIZE")
+        "IC_XS_ADSIZE" (inh child "IC_64BIT_XS_ADSIZE")
+        "IC_64BIT_REXW" (or (and np (inh child "IC_64BIT_REXW_XS" np)) (and np (inh child "IC_64BIT_REXW_XD" np))
+                            (and np (inh child "IC_64BIT_REXW_OPSIZE" np)) (and (not ad64) (inh child "IC_64BIT_REXW_ADSIZE")))
+        "IC_64BIT_OPSIZE" (or (inh child "IC_64BIT_REXW_OPSIZE") (and (not ad64) (inh child "IC_64BIT_OPSIZE_ADSIZE"))
+                              (and (not ad64) (inh child "IC_64BIT_REXW_ADSIZE")))
+        "IC_64BIT_XD" (or (inh child "IC_64BIT_REXW_XD") (and (not ad64) (inh child "IC_64BIT_XD_ADSIZE")))
+        "IC_64BIT_XS" (or (inh child "IC_64BIT_REXW_XS") (and (not ad64) (inh child "IC_64BIT_XS_ADSIZE")))
+        ("IC_64BIT_XD_OPSIZE" "IC_64BIT_XS_OPSIZE" "IC_64BIT_XD_ADSIZE" "IC_64BIT_XS_ADSIZE" "IC_64BIT_REXW_XD"
+         "IC_64BIT_REXW_XS" "IC_64BIT_REXW_OPSIZE" "IC_64BIT_REXW_ADSIZE" "IC_64BIT_REX2_REXW") false
+        "IC_64BIT_REX2" (inh child "IC_64BIT_REX2_REXW")
+        (vec-inherits? child parent lig wig))))
+
+(def ^:private attr {:64bit 1 :xs 2 :xd 4 :rexw 8 :opsize 16 :adsize 32 :vex 64 :vexl 128 :evex 256 :evexl2 512 :evexk 1024
+                     :evexkz 2048 :evexb 4096 :rex2 8192 :evexnf 16384 :evexu 32768})
+
+(defn- context-of
+  "emitContextTable: the instruction context of an attribute mask."
+  ^String [^long m]
+  (let [has (fn [k] (pos? (bit-and m (long (attr k)))))]
+    (cond
+      (and (has :evex) (has :adsize) (has :opsize)) "IC_EVEX_OPSIZE_ADSIZE"
+      (and (has :evex) (has :adsize) (has :xd)) "IC_EVEX_XD_ADSIZE"
+      (and (has :evex) (has :adsize) (has :xs)) "IC_EVEX_XS_ADSIZE"
+      (has :evexnf) (str "IC_EVEX" (cond (has :rexw) "_W" (has :opsize) "_OPSIZE") (when (has :evexb) "_B") "_NF")
+      (or (has :evex) (has :vex) (has :vexl))
+      (str (if (has :evex) "IC_EVEX" "IC_VEX")
+           (cond (and (has :evexb) (has :evexu)) nil
+                 (and (has :evex) (has :evexl2)) "_L2"
+                 (has :vexl) "_L")
+           (when (has :rexw) "_W")
+           (cond (has :opsize) "_OPSIZE" (has :xd) "_XD" (has :xs) "_XS")
+           (when (has :evex)
+             (str (cond (has :evexkz) "_KZ" (has :evexk) "_K")
+                  (when (has :evexb) "_B")
+                  (when (and (has :evexb) (has :evexu)) "_U"))))
+      (and (has :64bit) (has :rex2)) (str "IC_64BIT_REX2" (when (has :rexw) "_REXW"))
+      (and (has :64bit) (has :rexw) (has :xs)) "IC_64BIT_REXW_XS"
+      (and (has :64bit) (has :rexw) (has :xd)) "IC_64BIT_REXW_XD"
+      (and (has :64bit) (has :rexw) (has :opsize)) "IC_64BIT_REXW_OPSIZE"
+      (and (has :64bit) (has :rexw) (has :adsize)) "IC_64BIT_REXW_ADSIZE"
+      (and (has :64bit) (has :xd) (has :opsize)) "IC_64BIT_XD_OPSIZE"
+      (and (has :64bit) (has :xd) (has :adsize)) "IC_64BIT_XD_ADSIZE"
+      (and (has :64bit) (has :xs) (has :opsize)) "IC_64BIT_XS_OPSIZE"
+      (and (has :64bit) (has :xs) (has :adsize)) "IC_64BIT_XS_ADSIZE"
+      (and (has :64bit) (has :xs)) "IC_64BIT_XS"
+      (and (has :64bit) (has :xd)) "IC_64BIT_XD"
+      (and (has :64bit) (has :opsize) (has :adsize)) "IC_64BIT_OPSIZE_ADSIZE"
+      (and (has :64bit) (has :opsize)) "IC_64BIT_OPSIZE"
+      (and (has :64bit) (has :adsize)) "IC_64BIT_ADSIZE"
+      (and (has :64bit) (has :rexw)) "IC_64BIT_REXW"
+      (has :64bit) "IC_64BIT"
+      (and (has :xs) (has :opsize)) "IC_XS_OPSIZE"
+      (and (has :xd) (has :opsize)) "IC_XD_OPSIZE"
+      (and (has :xs) (has :adsize)) "IC_XS_ADSIZE"
+      (and (has :xd) (has :adsize)) "IC_XD_ADSIZE"
+      (has :xs) "IC_XS"
+      (has :xd) "IC_XD"
+      (and (has :opsize) (has :adsize)) "IC_OPSIZE_ADSIZE"
+      (has :opsize) "IC_OPSIZE"
+      (has :adsize) "IC_ADSIZE"
+      :else "IC")))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; an instruction's specifier (X86RecognizableInstr.cpp)
+
+(defn- encode-rc? [i] (and (contains? (set (:flags i)) :b) (#{"MRMDestReg" "MRMSrcReg"} (:form i))))
+
+(defn insn-context
+  "RecognizableInstr::insnContext."
+  ^String [i]
+  (let [fl (set (:flags i))
+        w (fl :w) l (fl :l) l2 (fl :l2) k (fl :k) kz (fl :z) b (fl :b) u (fl :u) nf (fl :nf)
+        p (:prefix i) opsize (:opsize i) adsize (:adsize i)
+        rc (encode-rc? i)
+        kb (fn [n] (str n (cond (and kz b) "_KZ_B" (and k b) "_K_B" kz "_KZ" k "_K" b "_B")))
+        kb-ad (fn [n] (if (= adsize "AdSize32") (str n "_ADSIZE") (kb n)))
+        kbu (fn [n] (str n (cond kz "_KZ_B_U" k "_K_B_U" :else "_B_U")))
+        pfx (fn [base] (case p "PD" (str base "_OPSIZE") "XS" (str base "_XS") "XD" (str base "_XD") "PS" base
+                         (throw (ex-info (str "Instruction does not use a prefix: " (:name i)) {}))))
+        is64 (= 64 (:dis i))]
+    (case (:enc i)
+      "EncEVEX"
+      (cond
+        (and rc u) (kbu (pfx (if w "IC_EVEX_W" "IC_EVEX")))
+        nf (str (cond (= p "PD") "IC_EVEX_OPSIZE" w "IC_EVEX_W" :else "IC_EVEX") (when b "_B") "_NF")
+        (and (not rc) l w) (kb (pfx "IC_EVEX_L_W"))
+        (and (not rc) l) (kb (pfx "IC_EVEX_L"))
+        (and (not rc) l2 w) (kb (pfx "IC_EVEX_L2_W"))
+        (and (not rc) l2) (kb (pfx "IC_EVEX_L2"))
+        w (kb (pfx "IC_EVEX_W"))
+        (= p "PD") (kb-ad "IC_EVEX_OPSIZE")
+        (= p "XD") (kb-ad "IC_EVEX_XD")
+        (= p "XS") (kb-ad "IC_EVEX_XS")
+        (= p "PS") (kb "IC_EVEX")
+        :else (pfx "IC_EVEX"))
+      ("EncVEX" "EncXOP")
+      (cond
+        (and l w) (pfx "IC_VEX_L_W")
+        (and (= p "PD") l) "IC_VEX_L_OPSIZE"
+        (and (= p "PD") w) "IC_VEX_W_OPSIZE"
+        (= p "PD") "IC_VEX_OPSIZE"
+        (and l (= p "XS")) "IC_VEX_L_XS"
+        (and l (= p "XD")) "IC_VEX_L_XD"
+        (and w (= p "XS")) "IC_VEX_W_XS"
+        (and w (= p "XD")) "IC_VEX_W_XD"
+        (and w (= p "PS")) "IC_VEX_W"
+        (and l (= p "PS")) "IC_VEX_L"
+        (= p "XD") "IC_VEX_XD"
+        (= p "XS") "IC_VEX_XS"
+        (= p "PS") "IC_VEX"
+        :else (pfx "IC_VEX"))
+      (let [o16 (= opsize "OpSize16") a32 (= adsize "AdSize32") a16 (= adsize "AdSize16")
+            rex2 (= "ExplicitREX2" (:explicit i))]
+        (if (or is64 w (= adsize "AdSize64"))
+          (cond
+            (and w (or o16 (= p "PD"))) "IC_64BIT_REXW_OPSIZE"
+            (and w a32) "IC_64BIT_REXW_ADSIZE"
+            (and o16 (= p "XD")) "IC_64BIT_XD_OPSIZE"
+            (and o16 (= p "XS")) "IC_64BIT_XS_OPSIZE"
+            (and a32 (= p "PD")) "IC_64BIT_OPSIZE_ADSIZE"
+            (and o16 a32) "IC_64BIT_OPSIZE_ADSIZE"
+            (or o16 (= p "PD")) "IC_64BIT_OPSIZE"
+            a32 "IC_64BIT_ADSIZE"
+            (and w (= p "XS")) "IC_64BIT_REXW_XS"
+            (and w (= p "XD")) "IC_64BIT_REXW_XD"
+            (= p "XD") "IC_64BIT_XD"
+            (= p "XS") "IC_64BIT_XS"
+            (and w rex2) "IC_64BIT_REX2_REXW"
+            rex2 "IC_64BIT_REX2"
+            w "IC_64BIT_REXW"
+            :else "IC_64BIT")
+          (cond
+            (and o16 (= p "XD")) "IC_XD_OPSIZE"
+            (and o16 (= p "XS")) "IC_XS_OPSIZE"
+            (and a16 (= p "XD")) "IC_XD_ADSIZE"
+            (and a16 (= p "XS")) "IC_XS_ADSIZE"
+            (and a16 (= p "PD")) "IC_OPSIZE_ADSIZE"
+            (and o16 a16) "IC_OPSIZE_ADSIZE"
+            (or o16 (= p "PD")) "IC_OPSIZE"
+            a16 "IC_ADSIZE"
+            (= p "XD") "IC_XD"
+            (= p "XS") "IC_XS"
+            :else "IC"))))))
+
+;; the operand types and encodings of an operand's record name (typeFromString, the *EncodingFromString functions)
+(defn- type-of [^String s w opsize]
+  (or (when (and w (= s "GR32")) :r32)
+      (when (and (= opsize "OpSize16") (= s "GR16")) :rv)
+      (when (and (= opsize "OpSize32") (= s "GR32")) :rv)
+      (case s
+        ("i16mem" "i32mem" "i64mem" "i8mem" "f128mem" "f256mem" "f512mem" "f64mem" "sdmem" "f32mem" "f16mem" "ssmem" "shmem"
+         "i128mem" "i256mem" "i512mem" "i512mem_GR16" "i512mem_GR32" "i512mem_GR64" "f80mem" "lea64_8mem" "lea64_16mem"
+         "lea64_32mem" "lea64mem" "anymem" "opaquemem") :m
+        ("i16imm" "i16i8imm" "i32imm" "i32i8imm" "i64i32imm" "i64i8imm" "i8imm" "ccode" "cflags" "AVX512RC" "i64imm") :imm
+        ("u4imm" "u8imm" "i16u8imm" "i32u8imm" "i64u8imm") :uimm8
+        ("GR16" "GR16orGR32orGR64") :r16
+        ("GR32" "GR32orGR64") :r32
+        "GR64" :r64
+        "GR8" :r8
+        ("VR128" "VR128X" "FR128" "FR64" "FR64X" "FR16X" "FR32" "FR32X") :xmm
+        ("VR256" "VR256X") :ymm
+        "VR512" :zmm
+        ("RST" "RSTi") :st
+        ("i64i32imm_brtarget" "i8imm_brtarget" "i16imm_brtarget" "i32imm_brtarget" "brtarget32" "brtarget16" "brtarget8") :rel
+        "VR64" :mm64
+        "sibmem" :msib
+        "SEGMENT_REG" :segmentreg "DEBUG_REG" :debugreg "CONTROL_REG" :controlreg
+        ("srcidx8" "srcidx16" "srcidx32" "srcidx64") :srcidx
+        ("dstidx8" "dstidx16" "dstidx32" "dstidx64") :dstidx
+        ("offset16_8" "offset16_16" "offset16_32" "offset32_8" "offset32_16" "offset32_32" "offset32_64" "offset64_8"
+         "offset64_16" "offset64_32" "offset64_64") :moffs
+        ("VK1" "VK1WM" "VK2" "VK2WM" "VK4" "VK4WM" "VK8" "VK8WM" "VK16" "VK16WM" "VK32" "VK32WM" "VK64" "VK64WM") :vk
+        ("VK1Pair" "VK2Pair" "VK4Pair" "VK8Pair" "VK16Pair") :vk-pair
+        ("vx32mem" "vx64mem" "vx32xmem" "vx64xmem") :mvsibx
+        ("vy32mem" "vy64mem" "vy32xmem" "vy64xmem") :mvsiby
+        ("vz32mem" "vz64mem") :mvsibz
+        "BNDR" :bndr
+        "TILE" :tmm
+        (throw (ex-info (str "Unhandled type string " s) {:decode/table s})))))
+
+(def ^:private vec-regs #{"VR128" "VR128X" "FR128" "FR64" "FR64X" "FR16X" "FR32" "FR32X" "VR256" "VR256X" "VR512"})
+(def ^:private vk-regs #{"VK1" "VK2" "VK4" "VK8" "VK16" "VK32" "VK64"})
+(def ^:private vkwm #{"VK1WM" "VK2WM" "VK4WM" "VK8WM" "VK16WM" "VK32WM" "VK64WM"})
+(def ^:private gprs #{"GR16" "GR16orGR32orGR64" "GR32" "GR32orGR64" "GR64" "GR8"})
+
+(defn- encoding-of
+  "The operand's encoding by its kind (immediate, rmRegister, roRegister, vvvvRegister, writemaskRegister, memory,
+  relocation, opcodeModifier) and record name."
+  [kind ^String s opsize]
+  (let [e (case kind
+            :immediate (cond (and (not= opsize "OpSize16") (= s "i16imm")) :iw
+                             :else (case s ("i32i8imm" "i16i8imm" "i64i8imm" "i8imm" "u4imm" "u8imm" "i16u8imm" "i32u8imm" "i64u8imm") :ib
+                                     "AVX512RC" :irc ("i16imm" "i32imm") :iv "i64i32imm" :id "ccode" :cc "cflags" :cf
+                                     ("FR32" "FR64" "FR128" "VR128" "VR256" "FR16X" "FR32X" "FR64X" "VR128X" "VR256X" "VR512" "TILE") :ib
+                                     nil))
+            :rm (cond (#{"RST" "RSTi"} s) :fp (or (gprs s) (vec-regs s) (vk-regs s) (#{"VR64" "BNDR" "TILE" "TILEPair"} s)) :rm)
+            :ro (when (or (gprs s) (vec-regs s) (vk-regs s) (vkwm s) (#{"VR64" "SEGMENT_REG" "DEBUG_REG" "CONTROL_REG" "BNDR" "TILE" "TILEPair"} s)
+                          (#{"VK1Pair" "VK2Pair" "VK4Pair" "VK8Pair" "VK16Pair"} s))
+                  :reg)
+            :vvvv (when (or (#{"GR8" "GR16" "GR32" "GR64" "TILE" "TILEPair"} s) (vec-regs s) (vk-regs s)) :vvvv)
+            :writemask (when (vkwm s) :writemask)
+            :memory (case s "sibmem" :sib
+                      ("vx32mem" "vx64mem" "vy32mem" "vy64mem" "vx32xmem" "vx64xmem" "vy32xmem" "vy64xmem" "vz32mem" "vz64mem") :vsib
+                      ("i16mem" "i32mem" "i64mem" "i8mem" "shmem" "ssmem" "sdmem" "f128mem" "f256mem" "f512mem" "f64mem" "f32mem"
+                       "f16mem" "i128mem" "i256mem" "i512mem" "i512mem_GR16" "i512mem_GR32" "i512mem_GR64" "f80mem" "lea64_8mem"
+                       "lea64_16mem" "lea64_32mem" "lea64mem" "anymem" "opaquemem") :rm
+                      nil)
+            :relocation (cond (and (not= opsize "OpSize16") (= s "i16imm")) :iw
+                              :else (case s ("i16imm" "i32imm") :iv ("i16i8imm" "i32i8imm" "i64i8imm" "i8imm" "u8imm" "i16u8imm" "i32u8imm" "i64u8imm") :ib
+                                      ("i64i32imm" "i64i32imm_brtarget" "i32imm_brtarget" "brtarget32") :id
+                                      ("i16imm_brtarget" "brtarget16") :iw ("i8imm_brtarget" "brtarget8") :ib "i64imm" :io
+                                      ("offset16_8" "offset16_16" "offset16_32" "offset32_8" "offset32_16" "offset32_32" "offset32_64"
+                                       "offset64_8" "offset64_16" "offset64_32" "offset64_64") :ia
+                                      ("srcidx8" "srcidx16" "srcidx32" "srcidx64") :si ("dstidx8" "dstidx16" "dstidx32" "dstidx64") :di
+                                      nil))
+            :opmod (case s ("GR32" "GR16") :rv "GR64" :ro "GR8" :rb "ccode" :cc nil))]
+    (or e (throw (ex-info (str "Unhandled " (name kind) " encoding " s) {:decode/table s})))))
+
+(defn- log2 ^long [^long n] (loop [n n k 0] (if (<= n 1) k (recur (bit-shift-right n 1) (inc k)))))
+
+(defn- operand-specs
+  "emitInstructionSpecifier: the operand specifiers [{:enc E :type T :cd LOG2} | {:enc :dup :of I} | nil] by operand."
+  [i]
+  (let [fl (set (:flags i))
+        ops (:ops i)
+        n (count ops)
+        ;; MI index -> operand index
+        mi->op (into {} (loop [k 0 ix 0 out []] (if (= k n) out (recur (inc k) (+ ix (long (nth (nth ops k) 2))) (conj out [ix k])))))
+        mapping (reduce (fn [m [a b]] (let [a (mi->op a) b (mi->op b)] (assoc m a a b a))) (vec (range n)) (:ties i))
+        nphys (- n (count (:ties i)))
+        specs (object-array n)
+        oi (long-array 1) pi (long-array 1)
+        cd (long (or (:cd8 i) 0))
+        handle (fn [optional kind]
+                 (when-not (and optional (>= (aget pi 0) nphys))
+                   (when (>= (aget oi 0) n) (throw (ex-info (str "too few operands " (:name i)) {:decode/table (:name i)})))
+                   (loop [] (let [k (aget oi 0)] (when (not= (nth mapping k) k) (aset specs k {:enc :dup :of (nth mapping k)}) (aset oi 0 (inc k)) (recur))))
+                   (let [k (aget oi 0) [_ tn] (nth ops k)
+                         e (encoding-of kind tn (:opsize i))]
+                     (aset specs k {:enc e :type (type-of tn (fl :w) (:opsize i))
+                                    :cd (if (and (#{:rm :vsib} e) (pos? cd)) (log2 cd) 0)})
+                     (aset oi 0 (inc k)) (aset pi 0 (inc (aget pi 0))))))
+        H (fn [kind] (handle false kind))
+        O (fn [kind] (handle true kind))
+        nd (and (= (:map i) "T_MAP4") (fl :b) (fl :4v))
+        form (:form i)]
+    (case form
+      "PrefixByte" nil
+      ("RawFrmSrc" "RawFrmDst") (H :relocation)
+      "RawFrmDstSrc" (do (H :relocation) (H :relocation))
+      "RawFrm" (O :relocation)
+      "RawFrmMemOffs" (H :relocation)
+      "AddRegFrm" (do (H :opmod) (O :relocation))
+      "AddCCFrm" (do (H :relocation) (H :opmod))
+      "MRMDestRegCC" (do (H :rm) (H :ro) (H :opmod))
+      "MRMDestReg" (do (when nd (H :vvvv)) (H :rm) (when (fl :k) (H :writemask)) (when (and (not nd) (fl :4v)) (H :vvvv))
+                       (H :ro) (O :immediate) (O :immediate))
+      "MRMDestMemCC" (do (H :memory) (H :ro) (H :opmod))
+      "MRMDestMem4VOp3CC" (do (H :ro) (H :memory) (H :vvvv) (H :opmod))
+      ("MRMDestMem" "MRMDestMemFSIB") (do (when nd (H :vvvv)) (H :memory) (when (fl :k) (H :writemask))
+                                          (when (and (not nd) (fl :4v)) (H :vvvv)) (H :ro) (O :immediate) (O :immediate))
+      "MRMSrcReg" (do (when nd (H :vvvv)) (H :ro) (when (fl :k) (H :writemask)) (when (and (not nd) (fl :4v)) (H :vvvv))
+                      (H :rm) (O :immediate) (O :immediate))
+      "MRMSrcReg4VOp3" (do (H :ro) (H :rm) (H :vvvv))
+      "MRMSrcRegOp4" (do (H :ro) (H :vvvv) (H :immediate) (H :rm) (O :immediate))
+      "MRMSrcRegCC" (do (when nd (H :vvvv)) (H :ro) (H :rm) (H :opmod))
+      ("MRMSrcMem" "MRMSrcMemFSIB") (do (when nd (H :vvvv)) (H :ro) (when (fl :k) (H :writemask))
+                                        (when (and (not nd) (fl :4v)) (H :vvvv)) (H :memory) (O :immediate) (O :immediate))
+      "MRMSrcMem4VOp3" (do (H :ro) (H :memory) (H :vvvv))
+      "MRMSrcMemOp4" (do (H :ro) (H :vvvv) (H :immediate) (H :memory) (O :immediate))
+      "MRMSrcMemCC" (do (when nd (H :vvvv)) (H :ro) (H :memory) (H :opmod))
+      "MRMXrCC" (do (H :rm) (H :opmod))
+      "MRMr0" (H :ro)
+      ("MRMXr" "MRM0r" "MRM1r" "MRM2r" "MRM3r" "MRM4r" "MRM5r" "MRM6r" "MRM7r")
+      (do (when (fl :4v) (H :vvvv)) (when (fl :k) (H :writemask)) (O :rm) (O :relocation) (O :immediate) (O :immediate))
+      "MRMXmCC" (do (H :memory) (H :opmod))
+      ("MRMXm" "MRM0m" "MRM1m" "MRM2m" "MRM3m" "MRM4m" "MRM5m" "MRM6m" "MRM7m")
+      (do (when (fl :4v) (H :vvvv)) (when (fl :k) (H :writemask)) (H :memory) (O :relocation) (O :immediate) (O :immediate))
+      ("RawFrmImm8" "RawFrmImm16") (do (H :immediate) (H :immediate))
+      (if (or (re-matches #"MRM[0-7]X" form) (re-matches #"MRM_[0-9A-F]{2}" form))
+        (O :relocation)
+        (throw (ex-info (str "Unhandled form " form) {:decode/table form}))))
+    (vec specs)))
+
+(defn- modrm-filter
+  "The instruction's ModRM filter (emitDecodePath): :dumb, or a predicate on the ModRM byte."
+  [^String form]
+  (let [reg? (fn [^long m] (= 0xc0 (bit-and m 0xc0)))]
+    (case form
+      ("RawFrm" "AddRegFrm" "RawFrmMemOffs" "RawFrmSrc" "RawFrmDst" "RawFrmDstSrc" "RawFrmImm8" "RawFrmImm16" "AddCCFrm" "PrefixByte") :dumb
+      ("MRMDestReg" "MRMDestRegCC" "MRMSrcReg" "MRMSrcReg4VOp3" "MRMSrcRegOp4" "MRMSrcRegCC" "MRMXrCC" "MRMXr") reg?
+      ("MRMDestMem" "MRMDestMemCC" "MRMDestMem4VOp3CC" "MRMDestMemFSIB" "MRMSrcMem" "MRMSrcMemFSIB" "MRMSrcMem4VOp3" "MRMSrcMemOp4"
+       "MRMSrcMemCC" "MRMXmCC" "MRMXm") (fn [^long m] (not (reg? m)))
+      "MRMr0" (fn [^long m] (and (reg? m) (= 0 (bit-and m 7))))
+      (if-let [[_ n r] (re-matches #"MRM([0-7])([rmX])" form)]
+        (let [nnn (Long/parseLong n) r? (not= r "m")]
+          (fn [^long m] (and (= r? (reg? m)) (= nnn (bit-and (bit-shift-right m 3) 7)))))
+        (if-let [[_ h] (re-matches #"MRM_([0-9A-F]{2})" form)]
+          (let [v (Long/parseLong h 16)] (fn [^long m] (= m v)))
+          (throw (ex-info (str "Invalid form " form) {:decode/table form})))))))
+
+(def ^:private map-type {"OB" :onebyte "TB" :twobyte "T8" :t38 "TA" :t3a "XOP8" :xop8 "XOP9" :xop9 "XOPA" :xopa
+                         "ThreeDNow" :3dnow "T_MAP4" :map4 "T_MAP5" :map5 "T_MAP6" :map6 "T_MAP7" :map7})
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the decode tables (DisassemblerTables::setTableFields over every instruction, by opcode type and opcode, made for a
+;; context at its first use)
+
+(defn- specs-of
+  "Each disassembled instruction's specifier, in the instruction enum's order (pseudos first, then by name), indexed by
+  [OPCODE-TYPE OPCODE]."
+  [t]
+  (let [is (for [[n i] (:insns t) :when (some? (:dis i))] (assoc i :name n))
+        is (sort-by (fn [i] [(if (contains? (set (:flags i)) :pseudo) 0 1) (:name i)]) is)
+        specs (map-indexed (fn [uid i]
+                             (let [fl (set (:flags i))
+                                   form (:form i)
+                                   n (if (= form "AddRegFrm") 8 (if (#{"MRMSrcRegCC" "MRMSrcMemCC" "MRMXrCC" "MRMXmCC" "AddCCFrm" "MRMDestRegCC"
+                                                                       "MRMDestMemCC" "MRMDestMem4VOp3CC"} form) 16 1))]
+                               {:uid uid :name (:name i) :ctx (insn-context i) :type (map-type (:map i))
+                                :opcodes (range (long (:opcode i)) (+ (long (:opcode i)) n))
+                                :filter (modrm-filter form) :is32 (= 32 (:dis i)) :np (= "NoPrfx" (:prefix i))
+                                :lig (boolean (or (fl :ignl) (encode-rc? i))) :wig (boolean (fl :ignw))
+                                :ad ({"AdSize16" 16 "AdSize32" 32 "AdSize64" 64} (:adsize i) 0)}))
+                           is)]
+    (reduce (fn [m s] (reduce (fn [m o] (update m [(:type s) o] (fnil conj []) s)) m (:opcodes s))) {} specs)))
+
+(defn- decision
+  "The ModRM decision of `ctx` and the opcode: a vector of 256 instruction names (nil: none)."
+  [cands ^String ctx]
+  (let [ids (object-array 256)
+        ok (fn [s] (and (not (and (or (:is32 s) (= 16 (:ad s))) (inherits? ctx "IC_64BIT" true false false false)))
+                        (inherits? ctx (:ctx s) (:np s) (:lig s) (:wig s) (= 64 (:ad s)))))]
+    (doseq [s cands :when (ok s)]
+      (let [f (:filter s)]
+        (dotimes [m 256]
+          (when (or (= f :dumb) (f m))
+            (let [prev (aget ids m)]
+              (when-not (and prev
+                             (or (= prev s)
+                                 (and (= "NOOP" (:name prev)) (#{"XCHG16ar" "XCHG32ar" "XCHG64ar"} (:name s)))
+                                 (outranks? (:ctx prev) (:ctx s))))
+                (aset ids m s)))))))
+    (let [v (mapv :name ids)] {:ids v :one (apply = v)})))
+
+(def ^:private cache (atom {}))
+
+(defn- tables-of [t]
+  (or (get @cache t)
+      (let [v {:by (specs-of t) :decisions (java.util.HashMap.)
+               :specs (into {} (for [[n i] (:insns t) :when (some? (:dis i))] [n (delay (operand-specs (assoc i :name n)))]))}]
+        (swap! cache assoc t v) v)))
+
+(defn- get-decision [tb type ctx ^long opcode]
+  (let [^java.util.HashMap h (:decisions tb) k [type ctx opcode]]
+    (or (.get h k)
+        (let [d (decision (get (:by tb) [type opcode]) ctx)] (.put h k d) d))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; registers
+
+(defn- names [p from to & [s]] (mapv #(str p % s) (range from (inc (long to)))))
+(def ^:private gpr8 (into ["AL" "CL" "DL" "BL" "AH" "CH" "DH" "BH"] (names "R" 8 31 "B")))
+(def ^:private gpr16 (into ["AX" "CX" "DX" "BX" "SP" "BP" "SI" "DI"] (names "R" 8 31 "W")))
+(def ^:private gpr32 (into ["EAX" "ECX" "EDX" "EBX" "ESP" "EBP" "ESI" "EDI"] (names "R" 8 31 "D")))
+(def ^:private gpr64 (into ["RAX" "RCX" "RDX" "RBX" "RSP" "RBP" "RSI" "RDI"] (names "R" 8 31)))
+(def ^:private ea16 (into ["BX_SI" "BX_DI" "BP_SI" "BP_DI" "SI" "DI" "BP" "BX"] (names "R" 8 31 "W")))
+(def ^:private ea32 (into ["EAX" "ECX" "EDX" "EBX" :sib "EBP" "ESI" "EDI"] (names "R" 8 31 "D")))
+(def ^:private ea64 (into ["RAX" "RCX" "RDX" "RBX" :sib64 "RBP" "RSI" "RDI"] (names "R" 8 31)))
+(def ^:private segs [nil "CS" "SS" "DS" "ES" "FS" "GS"])
+(def ^:private seg-regs ["ES" "CS" "SS" "DS" "FS" "GS"])
+
+(defn- gpr-of [^long size ^long i] (nth (case size 1 gpr8 2 gpr16 4 gpr32 gpr64) i))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the decoder's state (InternalInstruction) and its readers
+
+(defmacro ^:private g [k] `(.get ~'st ~k))
+(defmacro ^:private s! [k v] `(.put ~'st ~k ~v))
+
+(defn- gl ^long [^java.util.HashMap st k] (long (or (.get st k) 0)))
+
+(defn- peek-byte [^java.util.HashMap st]
+  (let [^java.util.List bs (g :bytes) c (gl st :cur)]
+    (when (< c (.size bs)) (long (.get bs c)))))
+
+(defn- consume
+  "consume: `n` little-endian bytes, or nil (the cursor unmoved) past the end."
+  [^java.util.HashMap st ^long n]
+  (let [^java.util.List bs (g :bytes) c (gl st :cur)]
+    (when (<= (+ c n) (.size bs))
+      (s! :cur (+ c n))
+      (loop [k (dec n) v 0] (if (neg? k) v (recur (dec k) (bit-or (bit-shift-left v 8) (long (.get bs (+ c k))))))))))
+
+(defn- back! [^java.util.HashMap st] (s! :cur (dec (gl st :cur))))
+
+(defn- bit-at ^long [^long v ^long k] (bit-and (bit-shift-right v k) 1))
+(defn- inv-at ^long [^long v ^long k] (bit-and (bit-shift-right (bit-not v) k) 1))
+(defn- vx ^long [^java.util.HashMap st ^long i] (long (nth (g :vx) i)))
+(defn- rex ^long [^java.util.HashMap st] (gl st :rex))
+(defn- rex2-1 ^long [^java.util.HashMap st] (long (nth (g :rex2) 1)))
+
+(defn- rex? [st ^long b] (and (= 64 (gl st :mode)) (<= 0x40 b 0x4f)))
+(defn- rex2? [st ^long b] (and (= 64 (gl st :mode)) (= b 0xd5)))
+
+(defn- read-prefixes
+  "readPrefixes: true on failure."
+  [^java.util.HashMap st]
+  (let [failed
+        (loop [byte 0]
+          (let [b (consume st 1)]
+            (if (nil? b)
+              [:end byte]
+              (let [b (long b)
+                    start? (= (dec (gl st :cur)) 0)]
+                (if (and start? (= b 0xf0))
+                  [:end b]
+                  (let [nb (peek-byte st)
+                        brk (when (and (#{0xf2 0xf3} b) nb)
+                              (let [nb (long nb)]
+                                (cond
+                                  (and (or (= nb 0xf0) (= 0x86 (bit-and nb 0xfe)) (= 0x90 (bit-and nb 0xf8)))
+                                       (do (s! :xacq true) (not (and (= b 0xf3) (= nb 0x90))))) :break
+                                  (and (= b 0xf3) (#{0x88 0x89 0xc6 0xc7} nb)) (do (s! :xacq true) :break)
+                                  (rex? st nb) (if (nil? (consume st 1)) :fail (if (nil? (peek-byte st)) :fail (do (back! st) nil)))
+                                  :else nil)))]
+                    (case brk
+                      :break [:end b]
+                      :fail [:fail]
+                      (let [prefix? (case b
+                                      0xf0 (do (s! :lock true) true)
+                                      (0xf2 0xf3) (do (when-let [nb (peek-byte st)]
+                                                        (let [nb (long nb)]
+                                                          (when (or (rex? st nb) (rex2? st nb) (= nb 0x0f) (= nb 0x66)) (s! :mand b))
+                                                          (s! :rep b)))
+                                                      true)
+                                      0x2e (do (s! :seg 1) true) 0x36 (do (s! :seg 2) true) 0x3e (do (s! :seg 3) true)
+                                      0x26 (do (s! :seg 4) true) 0x64 (do (s! :seg 5) true) 0x65 (do (s! :seg 6) true)
+                                      0x66 (do (s! :opsize true)
+                                               (when-let [nb (peek-byte st)]
+                                                 (when (and (not (g :mand)) (or (= (long nb) 0x0f) (rex? st nb))) (s! :mand 0x66)))
+                                               true)
+                                      0x67 (do (s! :adsize true) true)
+                                      false)]
+                        (cond (rex? st b) (do (s! :rex b) (recur b))
+                              prefix? (do (s! :rex 0) (recur b))
+                              :else [:end b])))))))))]
+    (if (= :fail (first failed))
+      true
+      (let [byte (long (second failed))
+            m64 (= 64 (gl st :mode))
+            vx (long-array 4)]
+        (s! :vtype :none)
+        (or
+         (cond
+           (= byte 0x62)
+           (let [b1 (consume st 1)]
+             (cond
+               (nil? b1) true
+               (nil? (peek-byte st)) true
+               :else
+               (let [b1 (long b1)]
+                 (if (or m64 (= 0xc0 (bit-and b1 0xc0)))
+                   (let [b2 (consume st 1) b3 (when b2 (consume st 1))]
+                     (if (or (nil? b2) (nil? b3))
+                       true
+                       (do (s! :vtype :evex)
+                           (aset vx 0 0x62) (aset vx 1 b1) (aset vx 2 (long b2)) (aset vx 3 (long b3))
+                           (s! :vx (vec vx))
+                           (when m64
+                             (s! :rex (bit-or 0x40 (bit-shift-left (bit-at b2 7) 3) (bit-shift-left (inv-at b1 7) 2)
+                                              (bit-shift-left (inv-at b1 6) 1) (inv-at b1 5)))
+                             (s! :rex2 [0 (bit-or (bit-shift-left (inv-at b1 4) 6) (bit-shift-left (inv-at b2 2) 5)
+                                                  (bit-shift-left (bit-at b1 3) 4))]))
+                           nil)))
+                   (do (back! st) (back! st) nil)))))
+           (#{0xc4 0xc5 0x8f} byte)
+           (let [b1 (peek-byte st)]
+             (if (nil? b1)
+               true
+               (let [b1 (long b1)
+                     type (case byte 0xc4 :vex3 0xc5 :vex2 :xop)
+                     yes (if (= type :xop) (not= 0 (bit-and b1 0x38)) (or m64 (= 0xc0 (bit-and b1 0xc0))))]
+                 (if-not yes
+                   (do (back! st) nil)
+                   (let [c1 (long (or (consume st 1) 0))
+                         c2 (if (= type :vex2) 0 (long (or (consume st 1) 0)))]
+                     (s! :vtype type)
+                     (s! :vx [byte c1 c2 0])
+                     (case type
+                       :vex2 (do (when m64 (s! :rex (bit-or 0x40 (bit-shift-left (inv-at c1 7) 2))))
+                                 (when (= 1 (bit-and c1 3)) (s! :opsize true)))
+                       (do (when m64 (s! :rex (bit-or 0x40 (bit-shift-left (bit-at c2 7) 3) (bit-shift-left (inv-at c1 7) 2)
+                                                      (bit-shift-left (inv-at c1 6) 1) (inv-at c1 5))))
+                           (when (and (= type :xop) (= 1 (bit-and c2 3))) (s! :opsize true))))
+                     nil)))))
+           (rex2? st byte)
+           (if (nil? (peek-byte st))
+             true
+             (let [r1 (long (consume st 1))]
+               (s! :rex2 [byte r1])
+               (s! :rex (bit-or 0x40 (bit-shift-left (bit-at r1 3) 3) (bit-shift-left (bit-at r1 2) 2) (bit-shift-left (bit-at r1 1) 1) (bit-at r1 0)))
+               nil))
+           :else (do (back! st) nil))
+         (let [mode (gl st :mode) os (boolean (g :opsize)) as (boolean (g :adsize))]
+           (case mode
+             16 (do (s! :regsize (if os 4 2)) (s! :addrsize (if as 4 2)) (s! :dispsize (if as 4 2)) (s! :immsize (if os 4 2)))
+             32 (do (s! :regsize (if os 2 4)) (s! :addrsize (if as 2 4)) (s! :dispsize (if as 2 4)) (s! :immsize (if os 2 4)))
+             (do (s! :dispsize 4)
+                 (if (and (pos? (rex st)) (= 1 (bit-at (rex st) 3)))
+                   (do (s! :regsize 8) (s! :addrsize (if as 4 8)) (s! :immsize 4) (s! :opsize false))
+                   (do (s! :regsize (if os 2 4)) (s! :addrsize (if as 4 8)) (s! :immsize (if os 2 4))))))
+           false))))))
+
+(defn- read-sib [^java.util.HashMap st]
+  (let [sib (consume st 1)]
+    (if (nil? sib)
+      true
+      (let [sib (long sib) a8 (= 8 (gl st :addrsize))
+            idx (bit-or (bit-and (bit-shift-right sib 3) 7) (bit-shift-left (bit-at (rex st) 1) 3) (bit-shift-left (bit-at (rex2-1 st) 5) 4))
+            base (bit-or (bit-and sib 7) (bit-shift-left (bit-at (rex st) 0) 3) (bit-shift-left (bit-at (rex2-1 st) 4) 4))
+            regs (if a8 gpr64 gpr32)]
+        (s! :sib-index-base (if a8 :r64 :r32))
+        (s! :sib-index (if (= idx 4) :none idx))
+        (s! :sib-scale (bit-shift-left 1 (bit-and (bit-shift-right sib 6) 3)))
+        (if (#{5 13} base)
+          (case (long (bit-shift-right (gl st :modrm) 6))
+            0 (do (s! :ea-disp 32) (s! :sib-base nil))
+            1 (do (s! :ea-disp 8) (s! :sib-base (nth regs base)))
+            (do (s! :ea-disp 32) (s! :sib-base (nth regs base))))
+          (s! :sib-base (nth regs base)))
+        false))))
+
+(defn- read-disp [^java.util.HashMap st]
+  (s! :disp-off (gl st :cur))
+  (case (g :ea-disp)
+    8 (let [d (consume st 1)] (if d (do (s! :disp (long (unchecked-byte d))) false) true))
+    16 (let [d (consume st 2)] (if d (do (s! :disp (long (unchecked-short d))) false) true))
+    32 (let [d (consume st 4)] (if d (do (s! :disp (long (unchecked-int d))) false) true))
+    false))
+
+(defn- read-modrm
+  "readModRM: true on failure. The reg field's index (:reg-i), the R/M's effective base (:ea: [:reg I] a register, a base
+  register's name, :sib, :sib64, nil none, or a 16-bit pair's name)."
+  [^java.util.HashMap st]
+  (cond
+    (g :modrm?) false
+    :else
+    (let [m (consume st 1)]
+      (if (nil? m)
+        true
+        (let [m (long m)
+              _ (s! :modrm m) _ (s! :modrm? true)
+              md (bit-shift-right m 6)
+              rm (bit-or (bit-and m 7) (bit-shift-left (bit-at (rex st) 0) 3) (bit-shift-left (bit-at (rex2-1 st) 4) 4))
+              reg (bit-or (bit-and (bit-shift-right m 3) 7) (bit-shift-left (bit-at (rex st) 2) 3) (bit-shift-left (bit-at (rex2-1 st) 6) 4))
+              reg (if (and (= :evex (g :vtype)) (= 64 (gl st :mode))) (bit-or reg (bit-shift-left (inv-at (vx st 1) 4) 4)) reg)]
+          (s! :reg-i reg)
+          (s! :ea-disp nil)
+          (case (gl st :addrsize)
+            2 (case md
+                0 (if (= (bit-and rm 7) 6)
+                    (do (s! :ea nil) (s! :ea-disp 16) (read-disp st))
+                    (do (s! :ea (nth ea16 rm)) false))
+                1 (do (s! :ea (nth ea16 rm)) (s! :ea-disp 8) (s! :dispsize 1) (read-disp st))
+                2 (do (s! :ea (nth ea16 rm)) (s! :ea-disp 16) (read-disp st))
+                (do (s! :ea [:reg rm]) (read-disp st)))
+            (let [bases (if (= 4 (gl st :addrsize)) ea32 ea64)]
+              (case md
+                0 (case (bit-and rm 7)
+                    4 (do (s! :ea (if (= 4 (gl st :addrsize)) :sib :sib64)) (or (read-sib st) (read-disp st)))
+                    5 (do (s! :ea nil) (s! :ea-disp 32) (read-disp st))
+                    (do (s! :ea (nth bases rm)) false))
+                (1 2) (do (when (= md 1) (s! :dispsize 1))
+                          (s! :ea-disp (if (= md 1) 8 32))
+                          (if (= 4 (bit-and rm 7))
+                            (do (s! :ea :sib) (or (read-sib st) (read-disp st)))
+                            (do (s! :ea (nth bases rm)) (read-disp st))))
+                (do (s! :ea [:reg rm]) false)))))))))
+
+(defn- fixup-value
+  "fixupRegValue/fixupRMValue: the register of `type` at `index` (`base-size` the operand size for TYPE_Rv), or nil
+  when invalid."
+  [^java.util.HashMap st type ^long index ^long base-size]
+  (case type
+    :rv (gpr-of base-size index)
+    :r8 (if (and (pos? (rex st)) (<= 4 index 7)) (nth ["SPL" "BPL" "SIL" "DIL"] (- index 4)) (nth gpr8 index))
+    :r16 (nth gpr16 index) :r32 (nth gpr32 index) :r64 (nth gpr64 index)
+    (:zmm :mvsibz) (str "ZMM" index) (:ymm :mvsiby) (str "YMM" index) (:xmm :mvsibx) (str "XMM" index)
+    :tmm (when (<= index 7) (str "TMM" index))
+    :vk (let [i (bit-and index 0xf)] (when (<= i 7) (str "K" i)))
+    ;; a pair by its even register (the matcher's rendering of K0_K1 ... and the printer's)
+    :vk-pair (when (<= index 7) (str "K" (* 2 (quot index 2))))
+    :mm64 (str "MM" (bit-and index 7))
+    :segmentreg (when (<= (bit-and index 7) 5) (nth seg-regs (bit-and index 7)))
+    :debugreg (when (<= index 15) (str "DR" index))
+    :controlreg (when (<= index 15) (str "CR" index))
+    nil))
+
+(defn- fixup-reg
+  "fixupReg: true on failure."
+  [^java.util.HashMap st op]
+  (let [type (:type op)]
+    (case (:enc op)
+      :vvvv (let [r (fixup-value st type (gl st :vvvv) (gl st :regsize))] (if r (do (s! :vvvv-reg r) false) true))
+      :reg (let [r (fixup-value st type (gl st :reg-i) (gl st :regsize))] (if r (do (s! :reg r) false) true))
+      (:rm :sib)
+      (do (when (and (= :rm (:enc op)) (= :evex (g :vtype)) (= 64 (gl st :mode)) (= 3 (bit-shift-right (gl st :modrm) 6))
+                     (not (#{:rv :r8 :r16 :r32 :r64} type)) (vector? (g :ea)))
+            (s! :ea [:reg (+ (long (second (g :ea))) (bit-shift-left (inv-at (vx st 1) 6) 4))]))
+          (if (vector? (g :ea))
+            (let [r (fixup-value st type (long (second (g :ea))) (gl st :regsize))] (if r (do (s! :ea-reg r) false) true))
+            false))
+      true)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the opcode and the instruction's ID
+
+(defn- read-opcode
+  "readOpcode: true on failure."
+  [^java.util.HashMap st]
+  (s! :otype :onebyte)
+  (let [one (fn [t] (s! :otype t) (let [o (consume st 1)] (if o (do (s! :opcode (long o)) false) true)))]
+    (case (g :vtype)
+      :evex (case (long (bit-and (vx st 1) 7)) 1 (one :twobyte) 2 (one :t38) 3 (one :t3a) 4 (one :map4) 5 (one :map5) 6 (one :map6)
+              7 (one :map7) true)
+      :vex3 (case (long (bit-and (vx st 1) 0x1f)) 1 (one :twobyte) 2 (one :t38) 3 (one :t3a) 5 (one :map5) 6 (one :map6) 7 (one :map7) true)
+      :vex2 (one :twobyte)
+      :xop (case (long (bit-and (vx st 1) 0x1f)) 8 (one :xop8) 9 (one :xop9) 10 (one :xopa) true)
+      (if (= 1 (bit-at (rex2-1 st) 7))
+        (one :twobyte)
+        (let [c (consume st 1)]
+          (if (nil? c)
+            true
+            (let [c (long c)]
+              (if (= c 0x0f)
+                (let [c2 (consume st 1)]
+                  (if (nil? c2)
+                    true
+                    (let [c2 (long c2)]
+                      (case c2
+                        0x38 (one :t38)
+                        0x3a (one :t3a)
+                        0x0f (if (read-modrm st) true (one :3dnow))
+                        (do (s! :otype :twobyte) (s! :opcode c2) false)))))
+                (do (when (g :mand) (s! :mand nil)) (s! :opcode c) false)))))))))
+
+(defn- ccmp-ctest? [^java.util.HashMap st]
+  (and (= :map4 (g :otype))
+       (let [o (gl st :opcode) r (bit-and (bit-shift-right (gl st :modrm) 3) 7)]
+         (or (and (= o 0x83) (= r 7))
+             (case (long (bit-and o 0xfe)) (0x38 0x3a 0x84) true 0x80 (= r 7) 0xf6 (= r 0) false)))))
+
+(defn- nf? [^java.util.HashMap st]
+  (and (= 1 (bit-at (vx st 3) 2))
+       (or (= :map4 (g :otype))
+           (and (= :t38 (g :otype)) (= 0 (bit-and (vx st 2) 3)) (#{0xf2 0xf3 0xf5 0xf7} (gl st :opcode))))))
+
+(defn- id-with-mask
+  "getInstructionIDWithAttrMask: [:ok NAME] or :fail."
+  [^java.util.HashMap st tb ^long mask]
+  (let [d (get-decision tb (g :otype) (context-of mask) (gl st :opcode))]
+    (if (:one d)
+      [:ok (first (:ids d))]
+      (if (read-modrm st) :fail [:ok (nth (:ids d) (gl st :modrm))]))))
+
+(defn- is16-equivalent? [^String o ^String e]
+  (and (= (count o) (count e))
+       (every? (fn [[a b]] (or (= a b) (and (#{\Q \L} a) (= b \W)) (and (#{\6 \3} a) (= b \1)) (and (#{\4 \2} a) (= b \6))))
+               (map vector o e))))
+
+(defn- get-id
+  "getInstructionID: the instruction's name in :id, true on failure."
+  [^java.util.HashMap st tb]
+  (let [mode (gl st :mode) vt (g :vtype) ot (g :otype) op (gl st :opcode)
+        A (fn [k] (long (attr k)))
+        m (volatile! (if (= mode 64) (A :64bit) 0))
+        or! (fn [k] (vswap! m bit-or (A k)))
+        pp (fn [^long v] (case (long (bit-and v 3)) 1 (or! :opsize) 2 (or! :xs) 3 (or! :xd) nil))]
+    (if-let [bad
+             (cond
+               (not= vt :none)
+               (do (or! (if (= vt :evex) :evex :vex))
+                   (case vt
+                     :evex (do (pp (vx st 2))
+                               (when (= 1 (bit-at (vx st 3) 7)) (or! :evexkz))
+                               (if (and (nf? st) (not (read-modrm st)) (not (ccmp-ctest? st)))
+                                 (or! :evexnf)
+                                 (when (and (pos? (bit-and (vx st 3) 7)) (not= ot :map4)) (or! :evexk)))
+                               (when (= 1 (bit-at (vx st 3) 4))
+                                 (or! :evexb)
+                                 (when (and (= 1 (inv-at (vx st 2) 2)) (not (read-modrm st)) (= 3 (bit-shift-right (gl st :modrm) 6)))
+                                   (or! :evexu)))
+                               (when (= 1 (bit-at (vx st 3) 5)) (or! :vexl))
+                               (when (= 1 (bit-at (vx st 3) 6)) (or! :evexl2)))
+                     :vex3 (do (pp (vx st 2)) (when (= 1 (bit-at (vx st 2) 2)) (or! :vexl)))
+                     :vex2 (do (case (long (bit-and (vx st 1) 3))
+                                 1 (do (or! :opsize) (when (g :adsize) (or! :adsize)))
+                                 2 (or! :xs) 3 (or! :xd) nil)
+                               (when (= 1 (bit-at (vx st 1) 2)) (or! :vexl)))
+                     :xop (do (pp (vx st 2)) (when (= 1 (bit-at (vx st 2) 2)) (or! :vexl))))
+                   nil)
+               (nil? (g :mand))
+               (do (when (and (g :opsize) (not= mode 16)) (or! :opsize))
+                   (when (g :adsize) (or! :adsize))
+                   (if (= ot :onebyte)
+                     (when (and (= 0xf3 (gl st :rep)) (= op 0x90)) (or! :xs))
+                     (case (gl st :rep) 0xf2 (or! :xd) 0xf3 (or! :xs) nil))
+                   nil)
+               :else
+               (do (case (long (g :mand))
+                     0xf2 (or! :xd) 0xf3 (or! :xs)
+                     0x66 (do (when (not= mode 16) (or! :opsize)) (when (g :adsize) (or! :adsize)))
+                     0x67 (or! :adsize)
+                     nil)
+                   nil))]
+      true
+      (do
+        (when (= 1 (bit-at (rex st) 3)) (or! :rexw) (vswap! m bit-and (bit-not (A :adsize))))
+        (when (and (= 0xd5 (long (nth (g :rex2) 0))) (= ot :onebyte) (or (= op 0xa1) (= 0x50 (bit-and op 0xf0)))) (or! :rex2))
+        (when (= mode 16)
+          (when (and (= ot :onebyte) (= op 0xe3)) (vswap! m bit-xor (A :adsize)))
+          (when (and (not (g :opsize)) (= ot :onebyte) (#{0xe8 0xe9} op)) (or! :opsize))
+          (when (and (not (g :opsize)) (= ot :twobyte) (<= 0x80 op 0x8f)) (or! :opsize)))
+        (let [r (id-with-mask st tb @m)]
+          (if (= r :fail)
+            true
+            (let [id (second r)
+                  done (fn [i] (s! :id i) :ok)]
+              (= :fail
+               (or
+               ;; the W bit outside 64-bit mode
+               (when (and (not= mode 64) (not= vt :none)
+                          (or (and (= vt :evex) (= 1 (bit-at (vx st 2) 7))) (and (= vt :vex3) (= 1 (bit-at (vx st 2) 7)))
+                              (and (= vt :xop) (= 1 (bit-at (vx st 2) 7)))))
+                 (let [rw (id-with-mask st tb (bit-or @m (A :rexw)))]
+                   (if (= rw :fail)
+                     (done id)
+                     (when-not (and (second rw) (.contains ^String (second rw) "64"))
+                       (done (second rw))))))
+               ;; absolute moves, umonitor, movdir64b
+               (when (or (and (= ot :onebyte) (= 0xa0 (bit-and op 0xfc))) (and (= ot :twobyte) (= op 0xae))
+                         (and (= ot :t38) (= op 0xf8)) (and (= ot :map4) (= op 0xf8)))
+                 (when (g :adsize) (or! :adsize))
+                 (when (g :opsize) (or! :opsize))
+                 (when (= mode 16)
+                   (vswap! m bit-xor (A :adsize))
+                   (when (and (= ot :onebyte) (= 0xa0 (bit-and op 0xfc))) (vswap! m bit-xor (A :opsize))))
+                 (let [r (id-with-mask st tb @m)] (if (= r :fail) :fail (done (second r)))))
+               (when (and (or (= mode 16) (g :opsize)) (zero? (bit-and @m (A :opsize))))
+                 (let [r (id-with-mask st tb (bit-or @m (A :opsize)))]
+                   (if (= r :fail)
+                     (done id)
+                     (let [w (second r)]
+                       (if (and id w (is16-equivalent? id w) (not= (= mode 16) (boolean (g :opsize))))
+                         (done w)
+                         (done id))))))
+               (when (and (= ot :onebyte) (= op 0x90) (= 1 (bit-and (rex st) 1)))
+                 (s! :opcode 0x91)
+                 (let [r (id-with-mask st tb @m)]
+                   (s! :opcode 0x90)
+                   (if (= r :fail) (done id) (done (second r)))))
+               (done id))))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the operands
+
+(defn- read-imm [^java.util.HashMap st ^long size]
+  (s! :immsize size)
+  (s! :imm-off (gl st :cur))
+  (let [v (consume st size)]
+    (if (nil? v) true (let [^java.util.ArrayList is (g :imms)] (.add is v) false))))
+
+(defn- read-opcode-reg [^java.util.HashMap st ^long size]
+  (let [size (if (zero? size) (gl st :regsize) size)
+        i (bit-or (bit-shift-left (bit-at (rex st) 0) 3) (bit-shift-left (bit-at (rex2-1 st) 4) 4) (bit-and (gl st :opcode) 7))]
+    (s! :opreg (if (and (= size 1) (pos? (rex st)) (<= 4 i 7)) (nth ["SPL" "BPL" "SIL" "DIL"] (- i 4)) (gpr-of size i)))
+    false))
+
+(defn- read-operands
+  "readOperands: true on failure."
+  [^java.util.HashMap st specs]
+  (let [vt (g :vtype) m64 (= 64 (gl st :mode))
+        vvvv (case vt
+               :evex (bit-or (bit-shift-left (inv-at (vx st 3) 3) 4) (bit-and (bit-shift-right (bit-not (vx st 2)) 3) 0xf))
+               (:vex3 :xop) (bit-and (bit-shift-right (bit-not (vx st 2)) 3) 0xf)
+               :vex2 (bit-and (bit-shift-right (bit-not (vx st 1)) 3) 0xf)
+               nil)
+        has (some? vvvv)
+        _ (when has (s! :vvvv (if m64 vvvv (bit-and (long vvvv) 0xf))))
+        need (volatile! (and has (not= 0 (gl st :vvvv))))
+        saw-reg-imm (volatile! false)]
+    (or
+     (some
+      (fn [op]
+        (when op
+          (case (:enc op)
+            (nil :si :di :fp :dup) nil
+            :vsib (do (when @need (vreset! need (and has (not= 0 (bit-and (gl st :vvvv) 0xf)))))
+                      (cond
+                        (read-modrm st) true
+                        (not (#{:sib :sib64} (g :ea))) true
+                        :else
+                        (let [i (if (= :none (g :sib-index)) 4 (long (g :sib-index)))
+                              i (if (and (= vt :evex) m64 (= 1 (inv-at (vx st 3) 3))) (+ i 16) i)
+                              p (case (:type op) :mvsibx "XMM" :mvsiby "YMM" :mvsibz "ZMM" nil)]
+                          (if (nil? p)
+                            true
+                            (do (s! :sib-index-reg (str p i))
+                                (when (= 8 (g :ea-disp)) (s! :disp (* (gl st :disp) (bit-shift-left 1 (long (:cd op))))))
+                                nil)))))
+            :sib (cond (not (#{:sib :sib64} (g :ea))) true
+                       (read-modrm st) true
+                       (fixup-reg st op) true
+                       :else nil)
+            (:reg :rm) (cond (read-modrm st) true
+                             (fixup-reg st op) true
+                             :else (do (when (and (= :rm (:enc op)) (= 8 (g :ea-disp)))
+                                         (s! :disp (* (gl st :disp) (bit-shift-left 1 (long (:cd op))))))
+                                       nil))
+            :ib (if @saw-reg-imm
+                  (let [^java.util.ArrayList is (g :imms)] (.add is (bit-and (long (.get is (dec (.size is)))) 0xf)) nil)
+                  (or (when (read-imm st 1) true)
+                      (do (when (#{:xmm :ymm} (:type op)) (vreset! saw-reg-imm true)) nil)))
+            :iw (when (read-imm st 2) true)
+            :id (when (read-imm st 4) true)
+            :io (when (read-imm st 8) true)
+            :iv (when (read-imm st (gl st :immsize)) true)
+            :ia (when (read-imm st (gl st :addrsize)) true)
+            :irc (do (s! :rc (bit-or (bit-shift-left (bit-at (vx st 3) 6) 1) (bit-at (vx st 3) 5))) nil)
+            :rb (do (read-opcode-reg st 1) nil) :rw (do (read-opcode-reg st 2) nil) :rd (do (read-opcode-reg st 4) nil)
+            :ro (do (read-opcode-reg st 8) nil) :rv (do (read-opcode-reg st 0) nil)
+            :cf (do (s! :cf (bit-and (bit-shift-right (vx st 2) 3) 0xf)) (vreset! need false) nil)
+            :cc (do (s! :cc (if (ccmp-ctest? st) (bit-and (vx st 3) 0xf) (bit-and (gl st :opcode) 0xf))) nil)
+            :vvvv (do (vreset! need false)
+                      (cond (not has) true
+                            :else (do (when-not m64 (s! :vvvv (bit-and (gl st :vvvv) 7)))
+                                      (when (fixup-reg st op) true))))
+            :writemask (if (= vt :evex) (do (s! :mask (bit-and (vx st 3) 7)) nil) true)
+            true)))
+      specs)
+     (boolean @need))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the MCInst (translateInstruction)
+
+(defn- sext ^long [^long v ^long bytes]
+  (case bytes 1 (long (unchecked-byte v)) 2 (long (unchecked-short v)) 4 (long (unchecked-int v)) v))
+
+(defn- translate-imm [^java.util.HashMap st imm op]
+  (let [imm (long imm) type (:type op) enc (:enc op)
+        imm (cond
+              (= type :rel) (case enc :iv (case (gl st :dispsize) 1 (sext imm 1) 2 (sext imm 2) 4 (sext imm 4) imm)
+                              :ib (sext imm 1) :iw (sext imm 2) :id (sext imm 4) imm)
+              (= type :imm) (case enc :ib (sext imm 1) :iw (sext imm 2) :id (sext imm 4) imm)
+              :else imm)]
+    (case type
+      :xmm [{:reg (str "XMM" (bit-shift-right imm 4))}]
+      :ymm [{:reg (str "YMM" (bit-shift-right imm 4))}]
+      :zmm [{:reg (str "ZMM" (bit-shift-right imm 4))}]
+      (if (= type :moffs) [{:imm imm} {:reg (nth segs (gl st :seg))}] [{:imm imm}]))))
+
+(defn- translate-mem
+  "translateRMMemory: [base scale index disp segment], or nil."
+  [^java.util.HashMap st force-sib]
+  (let [ea (g :ea) mode (gl st :mode) seg {:reg (nth segs (gl st :seg))}]
+    (cond
+      (#{:sib :sib64} ea)
+      (let [base (g :sib-base)
+            idx (or (g :sib-index-reg)
+                    (when (not= :none (g :sib-index)) (nth (if (= :r64 (g :sib-index-base)) gpr64 gpr32) (long (g :sib-index)))))
+            idx (or idx
+                    (when (and (not force-sib)
+                               (or (not= 1 (gl st :sib-scale)) (and (nil? base) (not= mode 64))
+                                   (and base (not (#{"ESP" "RSP" "R12D" "R12"} base)))))
+                      (if (= 4 (gl st :addrsize)) "EIZ" "RIZ")))]
+        [{:reg base} {:imm (gl st :sib-scale)} {:reg idx} {:imm (gl st :disp)} seg])
+      (nil? ea)
+      (if (nil? (g :ea-disp))
+        nil
+        [{:reg (when (= mode 64) (if (= 4 (gl st :addrsize)) "EIP" "RIP"))} {:imm 1} {:reg nil} {:imm (gl st :disp)} seg])
+      (vector? ea) nil
+      (#{"BX_SI" "BX_DI" "BP_SI" "BP_DI"} ea)
+      (let [[b i] (str/split ea #"_")] [{:reg b} {:imm 1} {:reg i} {:imm (gl st :disp)} seg])
+      :else [{:reg ea} {:imm 1} {:reg nil} {:imm (gl st :disp)} seg])))
+
+(defn- translate-op
+  [^java.util.HashMap st op specs imm-ix]
+  (case (:enc op)
+    :reg [{:reg (g :reg)}]
+    :writemask [{:reg (str "K" (gl st :mask))}]
+    (:sib :rm :vsib)
+    (case (:type op)
+      (:r8 :r16 :r32 :r64 :rv :mm64 :xmm :ymm :zmm :tmm :vk-pair :vk :debugreg :controlreg :bndr)
+      (if (vector? (g :ea)) [{:reg (g :ea-reg)}] nil)
+      (:m :mvsibx :mvsiby :mvsibz) (translate-mem st false)
+      :msib (translate-mem st true)
+      nil)
+    (:ib :iw :id :io :iv :ia) (let [^java.util.ArrayList is (g :imms) k (vswap! imm-ix inc)]
+                                (translate-imm st (.get is (dec (long k))) op))
+    :irc [{:imm (gl st :rc)}]
+    :si [{:reg (case (gl st :mode) 64 (if (g :adsize) "ESI" "RSI") 32 (if (g :adsize) "SI" "ESI") (if (g :adsize) "ESI" "SI"))}
+         {:reg (nth segs (gl st :seg))}]
+    :di [{:reg (case (gl st :mode) 64 (if (g :adsize) "EDI" "RDI") 32 (if (g :adsize) "DI" "EDI") (if (g :adsize) "EDI" "DI"))}]
+    (:rb :rw :rd :ro :rv) [{:reg (g :opreg)}]
+    :cf [{:imm (gl st :cf)}]
+    :cc [{:imm (gl st :cc)}]
+    :fp [{:reg (str "ST" (bit-and (gl st :modrm) 7))}]
+    :vvvv [{:reg (g :vvvv-reg)}]
+    :dup (translate-op st (nth specs (:of op)) specs imm-ix)
+    nil))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the instruction
+
+(defn- needs-adsize?
+  "X86_MC::needsAddressSizeOverride: whether the instruction's operands need the address-size prefix by themselves."
+  [i mi ^long mode]
+  (let [r (fn [k] (:reg (nth mi k nil)))
+        ad (:adsize i)
+        gr16? (fn [x] (and x (contains? (set gpr16) x)))
+        gr32? (fn [x] (and x (or (contains? (set gpr32) x) (= x "EIP") (= x "EIZ"))))]
+    (or (and (= mode 16) (= ad "AdSize32")) (and (= mode 32) (= ad "AdSize16")) (and (= mode 64) (= ad "AdSize32"))
+        (case (:form i)
+          "RawFrmDstSrc" (let [si (r 1)] (or (and (not= mode 32) (= si "ESI")) (and (= mode 32) (= si "SI"))))
+          "RawFrmSrc" (let [si (r 0)] (or (and (not= mode 32) (= si "ESI")) (and (= mode 32) (= si "SI"))))
+          "RawFrmDst" (let [di (r 0)] (or (and (not= mode 32) (= di "EDI")) (and (= mode 32) (= di "DI"))))
+          (let [m (x/memory-operand i (count mi))]
+            (if (neg? m)
+              false
+              (let [b (r m) idx (r (+ m 2))
+                    m16 (or (and (= mode 16) (nil? b) (nil? idx)) (gr16? b) (gr16? idx))]
+                (case mode
+                  64 (boolean (or (gr32? b) (gr32? idx)))
+                  32 m16
+                  (not m16)))))))))
+
+(defn decode
+  "The instruction at `off` of the bytes `bs` (a vector of 0..255) in `mode`: {:inst NAME :mi [OPERAND ...] :flags #{...}
+  :size N} (X86GenericDisassembler::getInstruction), or {:fail true :size N}."
+  [bs ^long off ^long mode]
+  (let [t (or x/*t* (x/table))
+        tb (tables-of t)
+        st (java.util.HashMap.)
+        bs (subvec (vec bs) off)]
+    (.put st :bytes bs) (.put st :cur 0) (.put st :mode mode) (.put st :rex 0) (.put st :rex2 [0 0]) (.put st :vx [0 0 0 0])
+    (.put st :seg 0) (.put st :imms (java.util.ArrayList.))
+    (let [fail (fn [] {:fail true :size (gl st :cur)})]
+      (if (or (empty? bs) (read-prefixes st) (read-opcode st) (get-id st tb) (nil? (g :id)))
+        (fail)
+        (let [id (g :id)
+              specs (try @(get (:specs tb) id) (catch arbace.lang.ExceptionInfo e (if (:decode/table (ex-data e)) :bad (throw e))))]
+          (if (or (= specs :bad) (read-operands st specs))
+            (fail)
+            (let [size (gl st :cur)]
+              (if (> size 15)
+                (fail)
+                (let [imm-ix (volatile! 0)
+                      parts (map #(when % (case (:enc %) nil [] (translate-op st % specs imm-ix))) specs)]
+                  (if (some (fn [[op p]] (and op (:enc op) (nil? p))) (map vector specs parts))
+                    (fail)
+                    (let [mi (vec (apply concat (remove nil? parts)))
+                          inst (if (g :xacq) ({"REP_PREFIX" "XRELEASE_PREFIX" "REPNE_PREFIX" "XACQUIRE_PREFIX"} id id) id)
+                          i (get (:insns t) inst)
+                          mand (g :mand)
+                          flags (cond-> #{}
+                                  (and (g :adsize) (not (needs-adsize? i mi mode)))
+                                  (conj (if (#{16 64} mode) :addr32 :addr16))
+                                  (and (not mand) (= 0xf2 (gl st :rep))) (conj :repne)
+                                  (and (not mand) (= 0xf3 (gl st :rep)) (not= 0x90 (gl st :opcode))) (conj :rep)
+                                  (and (not mand) (g :lock)) (conj :lock))]
+                      {:inst inst :mi mi :flags flags :size size})))))))))))
+
+(defn decode-all
+  "The instructions of `bs` in `mode` one after another as llvm-mc --disassemble reads a byte stream: each {:off N ...}
+  of decode, a failure skipping its bytes (at least one)."
+  [bs ^long mode]
+  (let [bs (vec bs) n (count bs)]
+    (loop [off 0 out []]
+      (if (>= off n)
+        out
+        (let [d (assoc (decode bs off mode) :off off)
+              size (max 1 (long (:size d)))]
+          (recur (+ off (if (:fail d) size (long (:size d)))) (conj out d)))))))

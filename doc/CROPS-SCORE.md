@@ -448,3 +448,20 @@ Two scoring rulings of the user, relayed by the main session, built on branch `c
   configuration. Each was seen to fail; with the rules broken (an input counted own whatever its value, an action never passing)
   the self-test fails. On the records: `native-debugger/linux-gdb-arm64` given `arch_amd64` makes `bin/crops-score` exit 1
   ("passes on the pinned configuration (architecture amd64): ocamltest runs it").
+## Decided (the user, 2026-11-10): AX10 forward, CSP7 reversed
+
+The roadmap's CSP7 (`.tmp/plans/CROPS-90-ROADMAP.md` in the main checkout) had kept the assembly crops out of `crops.edn` until
+AX10, so that no crop under 90 would join with read and print alone. The user reversed it on 2026-11-10: AX10 now, with the gate
+steps AXS21 (a), AXS42 (a), AXS65 (a), AXS73 (a) and AXS87 (a) had left to it. Two crops join (doc/asm/AMD64-SURVEY.md, "As built:
+AX10"): `:asm-amd64` (x86-64 assembly) with all four cells, and `:asm-arm64` (arm64 assembly) with read and print checked and eval
+and AOT "no check yet" until a64i (AR5) and arm64's ELF and runs (AR4), as Python's cells waited for their records. Their REAP rows
+read bin/repr-asm's records through three readers of `test/reap/main.ae` (`:asm-rows`, `:asm-counts`, `:asm-arm64`), each non-pass in
+the class its own judge found. Independence: no stage runs a host assembler, linker or TableGen at check time; the judge is the
+tests' own CHECK lines, the programs' verdicts and the CPU's runs, but for the object check's 86 files against llvm-mc 23.1.5's
+recorded objects (0.5; x86-64's judge 0.9998); llvm-mc, llvm-tblgen and ld.lld run only in the oracle tier (host `:llvm-mc`, a
+toolchain host). arm64's eval and AOT stages do not exist yet and score 0.
+
+- `crops.score`'s record reader took a crop id of letters alone (`:([a-z]+)`), so a hyphenated id (`:asm-amd64`) read as "not
+  recorded" after `--record`; it takes `[a-z][a-z0-9-]*` now.
+- The scores at the branch `asm-ax10` (2026-11-10): x86-64 assembly completeness 97.9% (98.5% without by design), maturity 100.0%,
+  independence 100.0%; arm64 assembly 49.9% (49.9%), 91.7%, 60.0%.

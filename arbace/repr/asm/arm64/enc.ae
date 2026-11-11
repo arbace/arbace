@@ -1,0 +1,805 @@
+(ns arbace.repr.asm.arm64.enc
+  "AR2's encoder for base A64 (doc/asm/ARM64-SURVEY.md, \"As built: AR2 (first slice)\"; doc/asm/SPEC.md §12): an instruction
+  form of arbace.repr.asm.arm64.gnu (the syntax level, AR1) to its 32-bit word, by the generated table
+  arbace.repr.asm.arm64.table (Go's arm64asm, ARS5 (a)). Its rows are tried in table order (arm64asm's decode order) among those
+  of the mnemonic; each row's argument kinds consume the operands and set the word's fields (the inverse of arm64asm's
+  decodeArg, kind by kind); a row whose fields conflict with each other or with its fixed bits, whose operands are left over
+  or short, or whose alias condition (condition.go's, over the word) fails is skipped. An operand that is a symbol (a label,
+  `:lo12:sym`) leaves its field zero and is a fixup. `encode` gives {:word W :fixups [OPERAND ...] :row SYNTAX} or throws
+  ex-info {:asm/refused CAUSE}: :no-mnemonic (no row of the mnemonic: beyond arm64asm's ARMv8.0 base), :arg-kind (a row
+  needs a kind not built), :operands (no row takes the operands)."
+  (:require [arbace.repr.asm.arm64.table :as t]
+            [arbace.repr.asm.arm64.bits :as b]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn refuse [cause ^String msg] (throw (ex-info msg {:asm/refused cause})))
+
+;; --- the table, indexed
+
+(defn- sbo-of [op ^long value]
+  (reduce bit-or 0 (for [[o fm fv sm] t/sbo :when (and (= o op) (= (bit-and value (long fm)) fv))] sm)))
+
+(defn- mov-rank
+  "MOV #imm's rows as LLVM's assembler prefers them: MOVZ's alias, MOVN's, then ORR's (arm64asm's decode order differs)."
+  [row]
+  (let [a (str (:args row))]
+    (cond (re-find #"implicit_imm16" a) 0 (re-find #"implicit_inverse" a) 1 :else 2)))
+
+(def rows-by-op
+  (let [m (reduce (fn [m [mask value op args c syn]]
+                    (update m op (fnil conj []) {:mask mask :value value :op op :args args :cond c :syntax syn :sbo (sbo-of op value)}))
+                  {} t/rows)]
+    (update m "MOV" #(vec (sort-by mov-rank %)))))
+
+(def sysop-index (into {} (map (fn [[_ k op1 cn cm op2]] [[op1 cn cm op2] k]) t/sysops)))
+(def sysops-by-name (into {} (map (fn [[n k op1 cn cm op2 has]] [[k (str/lower-case n)] [op1 cn cm op2 has]]) t/sysops)))
+(def sysregs-by-name (into {} (map (fn [[n e]] [(str/lower-case n) e]) t/sysregs)))
+(def sysreg-access (into {} (map (fn [[n _ a]] [(str/lower-case n) (str a)]) t/sysregs)))
+
+(def ^:dynamic *op* "The table op whose rows are tried (MRS reads a register, MSR writes it)." nil)
+
+;; --- operands
+
+(def conds {"eq" 0 "ne" 1 "cs" 2 "hs" 2 "cc" 3 "lo" 3 "mi" 4 "pl" 5 "vs" 6 "vc" 7 "hi" 8 "ls" 9 "ge" 10 "lt" 11
+            "gt" 12 "le" 13 "al" 14 "nv" 15})
+
+(defn- head [x] (when (seq? x) (first x)))
+
+(defn reg-of
+  "A register operand (reg NAME KIND?) as {:cls :x|:w|:b|:h|:s|:d|:q|:v :n N :sp? :zr? :arr KIND}, else nil."
+  [op]
+  (when (= 'reg (head op))
+    (let [nm (str/lower-case (str (second op)))
+          arr (let [k (nth op 2 nil)] (when (keyword? k) (str/lower-case (name k))))
+          num (fn [^String s] (when (re-matches #"[0-9]|[12][0-9]|3[01]" s) (Long/parseLong s)))]
+      (cond
+        (= nm "sp") {:cls :x :n 31 :sp? true}
+        (= nm "wsp") {:cls :w :n 31 :sp? true}
+        (= nm "xzr") {:cls :x :n 31 :zr? true}
+        (= nm "wzr") {:cls :w :n 31 :zr? true}
+        (= nm "fp") {:cls :x :n 29}
+        (= nm "lr") {:cls :x :n 30}
+        :else (when-let [[_ c n] (re-matches #"([xwbhsdqv])([0-9]+)" nm)]
+                (when-let [n (num n)]
+                  (when (or (not (#{"x" "w"} c)) (< n 31))
+                    (cond-> {:cls (keyword c) :n n} arr (assoc :arr arr)))))))))
+
+(defn ev
+  "An expression's value: a long (a double for a float), or nil for a symbolic one (a fixup)."
+  [e]
+  (cond
+    (instance? Long e) e
+    (integer? e) (.longValue ^Number e)
+    (symbol? e) nil
+    (seq? e)
+    (let [[f & xs] e
+          vs (map ev xs)]
+      (case (str f)
+        "float" (Double/parseDouble (str (first xs)))
+        "spec" nil
+        (when (every? some? vs)
+          (case (str f)
+            "-" (if (= 1 (count vs)) (- (first vs)) (reduce - vs))
+            "+" (reduce + vs)
+            "*" (reduce * vs)
+            "/" (reduce quot vs)
+            "<<" (bit-shift-left (long (first vs)) (long (second vs)))
+            ">>" (bit-shift-right (long (first vs)) (long (second vs)))
+            "|" (reduce bit-or vs)
+            "&" (reduce bit-and vs)
+            "^" (reduce bit-xor vs)
+            "~" (bit-not (long (first vs)))
+            nil))))
+    :else nil))
+
+(defn reloc?
+  "An expression a relocation resolves: a specifier's (`:lo12:sym`, `(spec lo12 sym)`) or Apple's (`sym@PAGEOFF`, `(at sym
+  PAGEOFF)`). A bare symbolic immediate is not one: LLVM wants the specifier."
+  [e]
+  (boolean (#{'spec 'at} (head e))))
+
+(defn imm-expr
+  "The expression of an immediate operand, `(imm E)` or a bare number; :none when the operand is not one."
+  [op]
+  (cond (= 'imm (head op)) (second op)
+        (number? op) op
+        (#{'spec 'at} (head op)) op
+        :else :none))
+
+;; --- the state: assigned bits, soft defaults, predicates, fixups
+
+(defn put
+  "st with `v` in the `width` bits at `lo`, or nil when it does not fit or contradicts bits already set."
+  [st ^long lo ^long width v]
+  (when (and st (integer? v))
+    (let [v (long v)
+          m (bit-shift-left (dec (bit-shift-left 1 width)) lo)]
+      (when (and (<= 0 v) (< v (bit-shift-left 1 width)))
+        (let [bits (bit-shift-left v lo)
+              cur (long (:m st))]
+          (when (= (bit-and cur m bits) (bit-and cur m (long (:w st))))
+            (assoc st :w (bit-or (bit-and (long (:w st)) (bit-not m)) bits) :m (bit-or cur m))))))))
+
+(defn- put-s
+  "A signed value in two's complement in `width` bits."
+  [st lo width ^long v]
+  (let [h (bit-shift-left 1 (dec width))]
+    (when (and (>= v (- h)) (< v h)) (put st lo width (bit-and v (dec (bit-shift-left 1 width)))))))
+
+(defn- soft [st lo width v] (when st (update st :soft conj [lo width v])))
+(defn- pred [st f] (when st (update st :preds conj f)))
+(defn- fixup [st op] (when st (update st :fix conj op)))
+(defn- field ^long [^long x ^long lo ^long width] (bit-and (bit-shift-right x lo) (dec (bit-shift-left 1 width))))
+
+(def reg-field {"d" 0 "n" 5 "m" 16 "t" 0 "t2" 10 "a" 10 "s" 16})
+
+;; an argument kind: (fn [st ops]) -> [st ops] or nil
+
+(defn- gpr [cls letter sp?]
+  (let [lo (reg-field letter)]
+    (fn [st [op & r]]
+      (when-let [g (reg-of op)]
+        (when (and (= (:cls g) cls) (if (= 31 (:n g)) (if sp? (:sp? g) (:zr? g)) true))
+          [(cond-> (put st lo 5 (:n g)) (:sp? g) (assoc :sp true)) r])))))
+
+(defn- fpr [cls letter]
+  (let [lo (reg-field letter)]
+    (fn [st [op & r]]
+      (when-let [g (reg-of op)]
+        (when (and (= (:cls g) cls) (nil? (:arr g))) [(put st lo 5 (:n g)) r])))))
+
+(defn shift-op [op] (when (= 'shift (head op)) (let [[_ k a] op] [(str/lower-case (str k)) (if (= 'imm (head a)) (ev (second a)) (ev a))])))
+
+(defn- log2 ^long [^long k] (Long/numberOfTrailingZeros k))
+
+;; immediates
+
+(defn- imm-field
+  "A plain immediate in the field [lo width], within [lo-v hi-v]; :opt DEFAULT when it may be absent."
+  [lo width lo-v hi-v & {:keys [opt]}]
+  (fn [st ops]
+    (let [e (imm-expr (first ops))]
+      (if (= e :none)
+        (when opt [(put st lo width opt) ops])
+        (let [v (ev e)]
+          (cond (nil? v) [(fixup st (first ops)) (rest ops)]
+                (and (integer? v) (<= lo-v v hi-v)) [(put st lo width v) (rest ops)]))))))
+
+(defn- pcrel [kind]
+  ;; a PC-relative label: a symbol (a fixup) or a number, the offset from the instruction
+  (fn [st [op & r]]
+    (let [;; a label named like a shift or an extend (`bl lsl`, `adr x0, uxtb`) reads as one
+          op (if (and (= 'shift (head op)) (= 2 (count op))) (second op) op)
+          e (let [x (imm-expr op)] (if (= x :none) op x))
+          v (ev e)]
+      (when-not (or (nil? op) (#{'reg 'mem 'wb 'rlist 'elt 'shift 'range} (head op)) (and (symbol? e) (conds (str e))))
+        (if (nil? v)
+          [(fixup st op) r]
+          (when (integer? v)
+            (let [v (long v)]
+              [(case kind
+                 :imm26 (when (zero? (mod v 4)) (put-s st 0 26 (quot v 4)))
+                 :imm19 (when (zero? (mod v 4)) (put-s st 5 19 (quot v 4)))
+                 :imm14 (when (zero? (mod v 4)) (put-s st 5 14 (quot v 4)))
+                 :adr (when-let [s (put-s st 5 19 (bit-shift-right v 2))] (put s 29 2 (bit-and v 3)))
+                 :adrp (when (zero? (mod v 4096))
+                         (let [p (bit-shift-right v 12)] (when-let [s (put-s st 5 19 (bit-shift-right p 2))] (put s 29 2 (bit-and p 3))))))
+               r])))))))
+
+(defn bitmask
+  "The logical immediate's N:immr:imms of `v` in `size` bits (ARM ARM's DecodeBitMasks inverted), or nil."
+  [^long v ^long size]
+  (let [mask (if (= size 64) -1 (dec (bit-shift-left 1 size)))
+        v (bit-and v mask)]
+    (when-not (or (zero? v) (= v mask))
+      (first
+       (for [e [2 4 8 16 32 64] :when (<= e size)
+             :let [em (if (= e 64) -1 (dec (bit-shift-left 1 e)))
+                   el (bit-and v em)
+                   rep (loop [i e acc el] (if (>= i size) acc (recur (+ i e) (bit-or acc (bit-shift-left el i)))))]
+             :when (= (bit-and rep mask) v)
+             r (range e)
+             :let [rot (if (zero? r) el (bit-and em (bit-or (bit-shift-left el r) (unsigned-bit-shift-right el (- e r)))))
+                   ;; rot is el rotated left by r: a run of ones from bit 0?
+                   ones (Long/bitCount rot)]
+             :when (and (< ones e) (= rot (dec (bit-shift-left 1 ones))))]
+         (let [n (if (= e 64) 1 0)
+               imms (bit-or (bit-and (bit-not (dec (* 2 e))) 0x3f) (dec ones))]
+           [n r (bit-and imms 0x3f)]))))))
+
+(defn fp-imm8
+  "VFPExpandImm inverted: the imm8 of a double, or nil."
+  [^double d]
+  (let [s (if (or (neg? d) (= d -0.0)) 1 0) a (Math/abs d)]
+    (first (for [e (range -3 5) pre (range 16)
+                 :when (= a (* (Math/pow 2.0 e) (/ (+ 16.0 pre) 16.0)))]
+             (let [x (+ e 3) bb (- 1 (bit-shift-right x 2))]
+               (bit-or (bit-shift-left s 7) (bit-shift-left bb 6) (bit-shift-left (bit-and x 3) 4) pre))))))
+
+(defn- spec-hw
+  "A relocation specifier's half-word (`:abs_g1:`, `:prel_g2_nc:`, `:tprel_g0:` ...): 0 when it names none."
+  [e]
+  (or (when (= 'spec (head e)) (when-let [[_ g] (re-find #"_g([0-3])" (str (second e)))] (Long/parseLong g))) 0))
+
+(defn- imm-val [op] (let [e (imm-expr op)] (when-not (= e :none) (ev e))))
+
+;; vector registers: the arrangements' fields
+
+(def vfield {"size" [22 2] "Q" [30 1] "sz" [22 1] "imm5" [16 5] "immh" [19 4]})
+
+(defn- code-field
+  "The soft default and predicate of a field whose value is a code (imm5's lowest set bit, immh's highest), else a hard put."
+  [st fname ^long v]
+  (let [[lo w] (vfield fname)]
+    (case fname
+      "imm5" (-> st (soft lo w v) (pred #(= v (bit-and (field % lo w) (dec (* 2 v))))) (assoc :code v))
+      "immh" (-> st (soft lo w v) (pred #(= v (Long/highestOneBit (field % lo w)))) (assoc :code v))
+      (put st lo w v))))
+
+(defn- arrangement-kind
+  "V(d|n|m)_arrangement_FIELDS___ARR_DIGITS...: the operand a (reg vN :arr) whose arrangement's digits set the fields."
+  [letter fields table]
+  (let [lo (reg-field letter)]
+    (fn [st [op & r]]
+      (when-let [g (reg-of op)]
+        (when (and (= :v (:cls g)) (:arr g))
+          (when-let [digits (table (str/upper-case (:arr g)))]
+            (let [st (reduce (fn [st [f d]] (when st (code-field st f d))) (put st lo 5 (:n g)) (map vector fields digits))]
+              (when st [st r]))))))))
+
+(defn- parse-arr-table
+  "\"8B_00__16B_01__2D_31\" with fields [size Q] -> {\"8B\" [0 0] ...}: a digit a field, the code fields' (imm5, immh) one digit."
+  [^String s fields]
+  (into {} (for [ent (str/split s #"__")
+                 :let [[a d] (str/split ent #"_")]
+                 :when (and d (re-matches #"[0-9]+" d) (not (str/starts-with? a "SEE")))]
+             [a (mapv #(Long/parseLong (str %)) d)])))
+
+(defn elt-of [op] (when (= 'elt (head op)) [(second op) (ev (nth op 2 nil))]))
+
+(defn- index-kind
+  "An element (elt (reg vN :K) I) whose index goes in imm5 (with the kind's code) or imm4."
+  [letter kinds where]
+  (let [lo (reg-field letter)]
+    (fn [st [op & r]]
+      (when-let [[x i] (elt-of op)]
+        (when-let [g (reg-of x)]
+          (when-let [k (and (= :v (:cls g)) (integer? i) (kinds (str/upper-case (str (:arr g)))))]
+            (let [s (put st lo 5 (:n g))
+                  l (log2 k)]
+              (when (and (<= 0 i) (< i (quot 16 k)))
+                [(case where
+                   :imm5 (put s 16 5 (bit-or (bit-shift-left i (inc l)) k))
+                   :imm4 (-> s (put 11 4 (bit-shift-left i l)) (pred #(= k (bit-and (field % 16 5) (dec (* 2 k)))))))
+                 r]))))))))
+
+(defn rlist-regs
+  "The registers of an (rlist ...) operand, its ranges expanded (numbers mod 32), or nil."
+  [op]
+  (when (= 'rlist (head op))
+    (let [xs (rest op)]
+      (reduce (fn [acc x]
+                (when acc
+                  (if (= 'range (head x))
+                    (let [a (reg-of (second x)) z (reg-of (nth x 2))]
+                      (when (and a z (= (:arr a) (:arr z)) (not= (:n a) (:n z)))
+                        (into acc (for [i (range (inc (mod (- (:n z) (:n a)) 32)))] (assoc a :n (mod (+ (:n a) i) 32))))))
+                    (when-let [g (reg-of x)] (conj acc g)))))
+              [] xs))))
+
+(defn- consecutive? [gs n]
+  (and (= n (count gs)) (every? #(= :v (:cls %)) gs) (apply = (map :arr gs))
+       (every? (fn [[a z]] (= (:n z) (mod (inc (:n a)) 32))) (partition 2 1 gs))))
+
+;; memory
+
+(defn- mem-of
+  "(mem BASE OFF...) as [base-reg rest-of-mem] when BASE is an X register or SP."
+  [op]
+  (when (= 'mem (head op))
+    (when-let [g (reg-of (second op))] (when (= :x (:cls g)) (when-not (:zr? g) [g (drop 2 op)])))))
+
+(defn- mem-imm
+  "A memory operand [Xn|SP{, #off}] (`wb?` its pre-indexed form (wb (mem ...))) with the offset `f` sets."
+  [wb? f]
+  (fn [st [op & r]]
+    (let [m (if wb? (when (= 'wb (head op)) (second op)) op)]
+      (when-let [[g more] (mem-of m)]
+        (let [st (put st 5 5 (:n g))]
+          (cond
+            ;; `[x4]!` has no offset to write back
+            (empty? more) (when-not wb? [(f st 0 nil) r])
+            (= 1 (count more)) (let [x (first more)
+                                     e (imm-expr x)
+                                     ;; an offset written without `#` (`[x3, _foo@PAGEOFF]`)
+                                     e (if (= e :none) (if (or (reg-of x) (#{'shift 'reg} (head x))) :none x) e)]
+                                 (when-not (= e :none)
+                                   (let [v (ev e)] [(f st v (first more)) r])))))))))
+
+(defn- off-unsigned [scale]
+  (fn [st v op] (if (nil? v)
+                  (when (reloc? (let [e (imm-expr op)] (if (= e :none) op e))) (fixup st op))
+                  (when (and (integer? v) (zero? (mod v scale))) (put st 10 12 (quot v scale))))))
+(defn- off-signed [lo width scale]
+  (fn [st v op] (when (and (integer? v) (zero? (mod v scale))) (put-s st lo width (quot v scale)))))
+
+(defn- post-index
+  "[Xn|SP], OFF: the memory operand alone, then the operand `f` takes."
+  [f]
+  (fn [st [op & r]]
+    (when-let [[g more] (mem-of op)]
+      (when (and (empty? more) (seq r))
+        (when-let [s (f (put st 5 5 (:n g)) (first r))] [s (rest r)])))))
+
+(def ext-codes {"uxtb" 0 "uxth" 1 "uxtw" 2 "uxtx" 3 "sxtb" 4 "sxth" 5 "sxtw" 6 "sxtx" 7})
+
+(defn- mem-ext
+  "[Xn|SP, Rm{, extend {#amount}}]: option at 13, S at 12; `amt` the scaled amount (nil: the byte form, absent or #0)."
+  [amt]
+  (fn [st [op & r]]
+    (when-let [[g more] (mem-of op)]
+      (let [[rm sh & extra] more
+            m (reg-of rm)
+            [k a] (when sh (shift-op sh))]
+        (when (and m (empty? extra) (or (nil? sh) k) (#{:x :w} (:cls m)) (not (:sp? m)))
+          (let [opt (if k ({"uxtw" 2 "lsl" 3 "sxtw" 6 "sxtx" 7} k) 3)
+                s (cond (nil? sh) 0
+                        (nil? amt) (cond (nil? a) 0 (= a 0) 1)
+                        :else (cond (or (nil? a) (= a 0)) (when-not (and (nil? a) (= k "lsl")) 0) (= a amt) 1))]
+            (when (and opt s (= (:cls m) (if (odd? opt) :x :w)))
+              [(-> st (put 5 5 (:n g)) (put 16 5 (:n m)) (put 13 3 opt) (put 12 1 s)) r])))))))
+
+;; the kinds by name
+
+(declare kind-fn*)
+(def kind-fn (memoize (fn [^String n] (kind-fn* n))))
+
+(defn- bitfield [op size part]
+  ;; ASR/LSR/LSL/BFI/BFXIL/SBFIZ/SBFX/UBFIZ/UBFX's lsb, width and shift operands into immr and imms
+  (fn [st ops]
+    (let [v (imm-val (first ops))]
+      (when (integer? v)
+        (let [v (long v) r (rest ops)]
+          (case [op part]
+            (["ASR" :shift] ["LSR" :shift]) (when (< -1 v size) [(put st 16 6 v) r])
+            ["LSL" :shift] (when (< -1 v size) [(-> st (put 16 6 (mod (- size v) size)) (put 10 6 (- size 1 v))) r])
+            (["BFI" :lsb] ["SBFIZ" :lsb] ["UBFIZ" :lsb]) (when (< -1 v size) [(-> st (put 16 6 (mod (- size v) size)) (assoc :lsb v)) r])
+            (["BFI" :width] ["SBFIZ" :width] ["UBFIZ" :width]) (when (and (<= 1 v) (<= (+ v (:lsb st 0)) size)) [(put st 10 6 (dec v)) r])
+            (["BFXIL" :lsb] ["SBFX" :lsb] ["UBFX" :lsb]) (when (< -1 v size) [(-> st (put 16 6 v) (assoc :lsb v)) r])
+            (["BFXIL" :width] ["SBFX" :width] ["UBFX" :width]) (when (and (<= 1 v) (<= (+ v (:lsb st 0)) size)) [(put st 10 6 (+ (:lsb st 0) v -1)) r])
+            nil))))))
+
+(defn- simd-shift [kind]
+  ;; immh:immb (bits 16-22) from the shift and the element size the register arguments named (:code, 8 bits a unit)
+  (fn [st ops]
+    (let [v (imm-val (first ops))]
+      (when (and (integer? v) (:code st))
+        (let [es (* 8 (long (:code st))) v (long v)
+              x (case kind
+                  :left (when (< -1 v es) (+ es v))
+                  :right (when (<= 1 v es) (- (* 2 es) v))
+                  :right64 (when (<= 1 v 64) (- 128 v))
+                  :left64 (when (< -1 v 64) (+ 64 v)))]
+          (when x [(put st 16 7 x) (rest ops)]))))))
+
+(defn- simd-imm8 [cmode-lo cmode-w shifts]
+  ;; MOVI/MVNI/ORR/BIC's #imm8{, LSL #n} (or MSL): a:b:c at 16, d:e:f:g:h at 5, the shift's code in cmode
+  (fn [st [op & r]]
+    (let [v (imm-val op)]
+      (when (and (integer? v) (<= 0 v 255))
+        (let [st (-> st (put 16 3 (bit-shift-right v 5)) (put 5 5 (bit-and v 31)))
+              [k a] (shift-op (first r))]
+          (cond
+            (nil? k) [(if cmode-lo (put st cmode-lo cmode-w 0) st) r]
+            (and (= k (:kind shifts "lsl")) (integer? a) (contains? (:codes shifts) a))
+            [(if cmode-lo (put st cmode-lo cmode-w ((:codes shifts) a)) st) (rest r)]))))))
+
+(defn- kind-fn* [^String n]
+  (let [nm (subs n 4)]
+    (or
+     (when-let [[_ c l s] (re-matches #"([WX])(d|n|m|t|t2|a|s)(s?)" nm)] (gpr (keyword (str/lower-case c)) l (= s "s")))
+     (when-let [[_ c l] (re-matches #"([BHSDQ])(d|n|m|t|t2|a)" nm)] (fpr (keyword (str/lower-case c)) l))
+     (when (= nm "Rt_31_1__W_0__X_1")
+       (fn [st [op & r]] (when-let [g (reg-of op)] (when (and (#{:x :w} (:cls g)) (not (:sp? g))) [(-> st (put 0 5 (:n g)) (cond-> (= :x (:cls g)) (soft 31 1 1) (= :w (:cls g)) (put 31 1 0))) r]))))
+     (when (= nm "Rn_16_5__W_1__W_2__W_4__X_8")
+       (fn [st [op & r]] (when-let [g (reg-of op)]
+                           (when (and (#{:x :w} (:cls g)) (not (:sp? g)))
+                             [(-> st (put 5 5 (:n g)) (pred #(let [k (Long/lowestOneBit (field % 16 5))] (if (= :x (:cls g)) (= k 8) (#{1 2 4} k))))) r]))))
+     (when-let [[_ c ror] (re-matches #"([WX])m_shift__LSL_0__LSR_1__ASR_2__(ROR_3__)?0_(?:31|63)" nm)]
+       (let [cls (keyword (str/lower-case c)) mx ror]
+         (fn [st [op & r]]
+           (when-let [g (reg-of op)]
+             (when (and (= cls (:cls g)) (not (:sp? g)))
+               (let [st (put st 16 5 (:n g)) [k a] (shift-op (first r))]
+                 (if (nil? k)
+                   [st r]
+                   (let [code ({"lsl" 0 "lsr" 1 "asr" 2 "ror" (when mx 3)} k)]
+                     (when (and code (integer? a) (<= 0 a (if (= cls :w) 31 63)))
+                       [(-> st (put 22 2 code) (put 10 6 a)) (rest r)])))))))))
+     (when-let [[_ w] (re-matches #"(Rm|Wm)_extend__.*" nm)]
+       (let [x64 (= w "Rm")]
+         (fn [st [op & r]]
+           (when-let [g (reg-of op)]
+             (when (and (#{:x :w} (:cls g)) (not (:sp? g)))
+               (let [[k a] (shift-op (first r))
+                     opt (cond (nil? k) (if x64 3 2) (and (= k "lsl") (nil? a)) nil (= k "lsl") (if x64 3 2) :else (ext-codes k))
+                     a (or a 0)]
+                 (when (and opt (integer? a) (<= 0 a 4) (or (and k (not= k "lsl")) (:sp st))
+                            (or (= (:cls g) (if (and x64 (= 3 (bit-and opt 3))) :x :w))
+                                ;; LLVM takes a W register with UXTX and SXTX too (`adds x1, x2, w3, uxtx`)
+                                (and x64 k (#{"uxtx" "sxtx"} k))))
+                   [(-> st (put 16 5 (:n g)) (put 13 3 opt) (put 10 3 a)) (if k (rest r) r)])))))))
+     ;; memory
+     (when (#{"Xns_mem" "Xns_mem_offset"} nm) (mem-imm false (fn [st v _] (when (= v 0) st))))
+     (when-let [[_ s] (re-matches #"Xns_mem_optional_imm12_(\d+)_unsigned" nm)] (mem-imm false (off-unsigned (Long/parseLong s))))
+     (when-let [[_ wb w s] (re-matches #"Xns_mem_(optional|wb)_imm(9|7)_(\d+)_signed" nm)]
+       (mem-imm (= wb "wb") (if (= w "9") (off-signed 12 9 1) (off-signed 15 7 (Long/parseLong s)))))
+     (when-let [[_ w s] (re-matches #"Xns_mem_post_imm(9|7)_(\d+)_signed" nm)]
+       (let [f (if (= w "9") (off-signed 12 9 1) (off-signed 15 7 (Long/parseLong s)))]
+         (post-index (fn [st op] (let [v (imm-val op)] (f st v op))))))
+     (when (= nm "Xns_mem_post_Xm")
+       (post-index (fn [st op] (when-let [g (reg-of op)] (when (and (= :x (:cls g)) (not (:sp? g)) (not (:zr? g))) (put st 16 5 (:n g)))))))
+     (when-let [[_ k] (re-matches #"Xns_mem_post_fixedimm_(\d+)" nm)]
+       (post-index (fn [st op] (when (= (imm-val op) (Long/parseLong k)) (put st 16 5 31)))))
+     (when-let [[_ a b] (re-matches #"Xns_mem_post_Q__(\d+)_0__(\d+)_1" nm)]
+       (post-index (fn [st op] (let [v (imm-val op)] (-> st (put 16 5 31) (put 30 1 (cond (= v (Long/parseLong a)) 0 (= v (Long/parseLong b)) 1)))))))
+     (when-let [[_ s] (re-matches #"Xns_mem_post_size__(.*)" nm)]
+       (let [t (into {} (for [e (str/split s #"__") :let [[v c] (str/split e #"_")]] [(Long/parseLong v) (Long/parseLong c)]))]
+         (post-index (fn [st op] (-> st (put 16 5 31) (put 10 2 (t (imm-val op))))))))
+     (when-let [[_ a] (re-matches #"Xns_mem_extend_m__UXTW_2__LSL_3__SXTW_6__SXTX_7__(?:0_0__(\d)_1|absent_0__0_1)" nm)]
+       (mem-ext (when a (Long/parseLong a))))
+     ;; labels
+     ({"slabel_imm26_2" (pcrel :imm26) "slabel_imm19_2" (pcrel :imm19) "slabel_imm14_2" (pcrel :imm14)
+       "slabel_immhi_immlo_0" (pcrel :adr) "slabel_immhi_immlo_12" (pcrel :adrp)} nm)
+     ;; conditions
+     (when (#{"cond_AllowALNV_Normal" "cond_NotAllowALNV_Invert" "conditional"} nm)
+       (fn [st [op & r]]
+         (when-let [c (and (symbol? op) (conds (str/lower-case (str op))))]
+           (case nm
+             "cond_AllowALNV_Normal" [(put st 12 4 c) r]
+             "conditional" [(put st 0 4 c) r]
+             (when (< c 14) [(put st 12 4 (bit-xor c 1)) r])))))
+     ;; immediates
+     (when (= nm "IAddSub")
+       (fn [st [op & r]]
+         (let [e (imm-expr op)]
+           (when-not (= e :none)
+             (let [v (ev e) [k a] (shift-op (first r))]
+               (cond
+                 (and k (not= k "lsl")) nil
+                 ;; a relocation's low 12 bits add (`sub x1, x0, :lo12:loc` is rejected)
+                 (nil? v) (when (and (reloc? e) (not (#{"SUB" "SUBS" "CMP"} *op*))) [(fixup (if k (put st 22 2 ({0 0 12 1} a)) st) op) (if k (rest r) r)])
+                 (not (integer? v)) nil
+                 k (when (#{0 12} a) [(-> st (put 10 12 v) (put 22 2 (if (= a 12) 1 0))) (rest r)])
+                 (<= 0 v 4095) [(-> st (put 10 12 v) (put 22 2 0)) r]
+                 ;; tryParseImmWithOptionalShift: a value of 12 bits shifted by 12 is written with LSL #12 (`add w3, w4, #4194304`)
+                 (and (pos? v) (zero? (bit-and v 0xfff)) (<= (bit-shift-right v 12) 0xfff))
+                 [(-> st (put 10 12 (bit-shift-right v 12)) (put 22 2 1)) r]))))))
+     (when-let [[_ s] (re-matches #"immediate_bitmask_(32|64)(?:_N)?_imms_immr" nm)]
+       (let [size (Long/parseLong s)]
+         (fn [st [op & r]]
+           (let [v (imm-val op)]
+             (when (integer? v)
+               (when-let [[n immr imms] (bitmask v size)]
+                 [(cond-> (-> st (put 16 6 immr) (put 10 6 imms)) (= size 64) (put 22 1 n)) r]))))))
+     ({"immediate_0_15_nzcv" (imm-field 0 4 0 15) "immediate_0_15_CRm" (imm-field 8 4 0 15)
+       "immediate_0_127_CRm_op2" (imm-field 5 7 0 127) "immediate_0_31_imm5" (imm-field 16 5 0 31)
+       "immediate_0_31_immr" (imm-field 16 6 0 31) "immediate_0_63_immr" (imm-field 16 6 0 63)
+       "immediate_0_31_imms" (imm-field 10 6 0 31) "immediate_0_63_imms" (imm-field 10 6 0 63)
+       "immediate_0_65535_imm16" (imm-field 5 16 0 65535) "immediate_0_7_op1" (imm-field 16 3 0 7)
+       "immediate_0_7_op2" (imm-field 5 3 0 7) "immediate_optional_0_15_CRm" (imm-field 8 4 0 15 :opt 15)
+       "immediate_optional_0_65535_imm16" (imm-field 5 16 0 65535 :opt 0)
+       "immediate_index_Q_imm4__imm4lt20gt_00__imm4_10" (imm-field 11 4 0 15)} nm)
+     (when (= nm "immediate_0_63_b5_b40")
+       (fn [st [op & r]] (let [v (imm-val op)] (when (and (integer? v) (<= 0 v 63)) [(-> st (put 31 1 (bit-shift-right v 5)) (put 19 5 (bit-and v 31))) r]))))
+     (when-let [[_ op s part] (re-matches #"immediate_([A-Z]+)_[A-Z]+_(32|64)M_bitfield_(lsb|width|0)_\d+_imm[rs]" nm)]
+       (bitfield op (Long/parseLong s) (case part "lsb" :lsb "width" :width :shift)))
+     (when-let [[_ mx] (re-matches #"immediate_OptLSL_amount_16_0_(16|48)" nm)]
+       (fn [st [op & r]]
+         (let [e (imm-expr op)]
+           (when-not (= e :none)
+             (let [v (ev e) [k a] (shift-op (first r))
+                   hw (cond (nil? k) 0 (and (= k "lsl") (integer? a) (<= 0 a (Long/parseLong mx)) (zero? (mod a 16))) (quot a 16))]
+               (when hw
+                 (cond (nil? v) (let [hw (if k hw (spec-hw e))]
+                                  ;; a relocation's half-word is its specifier's: no explicit `lsl` beside it
+                                  (when (and (reloc? e) (not k) (<= (* 16 hw) (Long/parseLong mx))) [(fixup (put st 21 2 hw) op) r]))
+                       (integer? v) [(-> st (put 5 16 v) (put 21 2 hw)) (if k (rest r) r)])))))))
+     (when-let [[_ s inv] (re-matches #"immediate_shift_(32|64)_implicit_(inverse_)?imm16_hw" nm)]
+       (let [size (Long/parseLong s) mask (if (= size 64) -1 0xffffffff)]
+         (fn [st [op & r]]
+           (let [v (imm-val op)]
+             (when (integer? v)
+               (let [v (bit-and (if inv (bit-not (long v)) (long v)) mask)]
+                 (when-let [hw (first (for [hw (range (quot size 16))
+                                            :when (zero? (bit-and v (bit-not (bit-shift-left 0xffff (* 16 hw)))))] hw))]
+                   [(-> st (put 5 16 (bit-and 0xffff (unsigned-bit-shift-right v (* 16 hw)))) (put 21 2 hw)) r])))))))
+     (when (#{"Cm" "Cn"} nm)
+       (fn [st [op & r]]
+         (when-let [[_ c] (and (symbol? op) (re-matches #"[cC]([0-9]|1[0-5])" (str op)))]
+           [(put st (if (= nm "Cm") 8 12) 4 (Long/parseLong c)) r])))
+     (when (#{"option_DMB_BO_system_CRm" "option_DSB_BO_system_CRm" "option_ISB_BI_system_CRm"} nm)
+       (let [names (if (= nm "option_ISB_BI_system_CRm") {"sy" 15}
+                       {"sy" 15 "st" 14 "ld" 13 "ish" 11 "ishst" 10 "ishld" 9 "nsh" 7 "nshst" 6 "nshld" 5 "osh" 3 "oshst" 2 "oshld" 1})]
+         (fn [st ops]
+           (let [op (first ops)]
+             (cond
+               (and (nil? op) (= nm "option_ISB_BI_system_CRm")) [(put st 8 4 15) ops]
+               (symbol? op) (when-let [v (names (str/lower-case (str op)))] [(put st 8 4 v) (rest ops)])
+               :else (let [v (imm-val op)] (when (and (integer? v) (<= 0 v 15)) [(put st 8 4 v) (rest ops)])))))))
+     (when (= nm "prfop_Rt")
+       (fn [st [op & r]]
+         (if (symbol? op)
+           (when-let [[_ t l p] (re-matches #"(pld|pli|pst)l([123])(keep|strm)" (str/lower-case (str op)))]
+             [(put st 0 5 (+ (* 8 ({"pld" 0 "pli" 1 "pst" 2} t)) (* 2 (dec (Long/parseLong l))) (if (= p "strm") 1 0))) r])
+           (let [v (imm-val op)] (when (and (integer? v) (<= 0 v 31)) [(put st 0 5 v) r])))))
+     (when (= nm "pstatefield_op1_op2__SPSel_05__DAIFSet_36__DAIFClr_37")
+       (fn [st [op & r]]
+         (when-let [[o1 o2] (and (symbol? op) ({"spsel" [0 5] "daifset" [3 6] "daifclr" [3 7]} (str/lower-case (str op))))]
+           [(-> st (put 16 3 o1) (put 5 3 o2)) r])))
+     (when (= nm "sysreg_o0_op1_CRn_CRm_op2")
+       (fn [st [op & r]]
+         (when (symbol? op)
+           (let [s (str/lower-case (str op))
+                 enc (or (sysregs-by-name s)
+                         (when-let [[_ a b c d e] (re-matches #"s([0-3])_([0-7])_c([0-9]|1[0-5])_c([0-9]|1[0-5])_([0-7])" s)]
+                           (let [[a b c d e] (map #(Long/parseLong %) [a b c d e])]
+                             (bit-or (bit-shift-left a 19) (bit-shift-left b 16) (bit-shift-left c 12) (bit-shift-left d 8) (bit-shift-left e 5)))))]
+             (when (and enc (= 1 (field enc 20 1))
+                        ;; Go's access flags: MRS reads, MSR writes (the generic name either)
+                        (if-let [a (sysreg-access s)] (str/includes? a (if (= *op* "MRS") "read" "write")) true))
+               [(put st 5 15 (field enc 5 15)) r])))))
+     (when-let [[_ k] (re-matches #"sysop_(AT|DC|IC|TLBI)_SYS_CR_system" nm)]
+       (fn [st [op & r]]
+         (when-let [[op1 cn cm op2 has] (and (symbol? op) (sysops-by-name [(keyword (str/lower-case k)) (str/lower-case (str op))]))]
+           (let [st (-> st (put 16 3 op1) (put 12 4 cn) (put 8 4 cm) (put 5 3 op2))]
+             (if has
+               (when-let [g (reg-of (first r))] (when (and (= :x (:cls g)) (not (:sp? g))) [(put st 0 5 (:n g)) (rest r)]))
+               (when (empty? r) [(put st 0 5 31) r]))))))
+     (when (= nm "sysop_SYS_CR_system")
+       (fn [st [op & r]]
+         (let [v (imm-val op)]
+           (when (and (integer? v) (<= 0 v 7))
+             (let [st (put st 5 3 v)]
+               (if-let [g (reg-of (first r))]
+                 (when (and (= :x (:cls g)) (not (:sp? g))) [(put st 0 5 (:n g)) (rest r)])
+                 [(put st 0 5 31) r]))))))
+     (when (#{"immediate_floatzero" "immediate_zero"} nm)
+       ;; +0.0 only (`fcmp s9, #-0.0` is rejected)
+       (fn [st [op & r]] (let [v (imm-val op)] (when (and (number? v) (zero? (Double/doubleToRawLongBits (double v)))) [st r]))))
+     (when (#{"immediate_exp_3_pre_4_imm8" "immediate_exp_3_pre_4_a_b_c_d_e_f_g_h"} nm)
+       (fn [st [op & r]]
+         (let [v (imm-val op)]
+           (when (number? v)
+             (when-let [i (fp-imm8 (double v))]
+               [(if (= nm "immediate_exp_3_pre_4_imm8") (put st 13 8 i) (-> st (put 16 3 (bit-shift-right i 5)) (put 5 5 (bit-and i 31)))) r])))))
+     (when (= nm "immediate_8x8_a_b_c_d_e_f_g_h")
+       (fn [st [op & r]]
+         (let [v (imm-val op)]
+           (when (integer? v)
+             (let [bytes (for [i (range 8)] (bit-and (unsigned-bit-shift-right (long v) (* 8 i)) 0xff))]
+               (when (every? #{0 0xff} bytes)
+                 (let [bit (fn [i] (if (= 0xff (nth bytes i)) 1 0))]
+                   [(-> st (put 5 5 (reduce + (for [i (range 5)] (bit-shift-left (bit i) i))))
+                        (put 16 3 (reduce + (for [i (range 3)] (bit-shift-left (bit (+ 5 i)) i)))))
+                    r])))))))
+     (when (= nm "immediate_OptLSL__a_b_c_d_e_f_g_h_cmode__0_0__8_1") (simd-imm8 13 1 {:codes {0 0 8 1}}))
+     (when (= nm "immediate_OptLSL__a_b_c_d_e_f_g_h_cmode__0_0__8_1__16_2__24_3") (simd-imm8 13 2 {:codes {0 0 8 1 16 2 24 3}}))
+     (when (= nm "immediate_OptLSLZero__a_b_c_d_e_f_g_h") (simd-imm8 nil nil {:codes {0 0}}))
+     (when (= nm "immediate_MSL__a_b_c_d_e_f_g_h_cmode__8_0__16_1")
+       (let [f (simd-imm8 12 1 {:kind "msl" :codes {8 0 16 1}})]
+         (fn [st ops] (when (shift-op (second ops)) (f st ops)))))
+     (when-let [[_ mx] (re-matches #"immediate_fbits_min_1_max_(32|64)_sub_64_scale" nm)]
+       (fn [st [op & r]] (let [v (imm-val op)] (when (and (integer? v) (<= 1 v (Long/parseLong mx))) [(put st 10 6 (- 64 v)) r]))))
+     (when (str/starts-with? nm "immediate_fbits_min_1_max_0_sub_0_immh_immb") (simd-shift :right))
+     (when (str/starts-with? nm "immediate_0_width_immh_immb") (simd-shift :left))
+     (when (str/starts-with? nm "immediate_0_width_m1_immh_immb") (simd-shift :left))
+     (when (str/starts-with? nm "immediate_1_width_immh_immb") (simd-shift :right))
+     (when (= nm "immediate_1_64_immh_immb__128UIntimmhimmb_8") (simd-shift :right64))
+     (when (= nm "immediate_0_63_immh_immb__UIntimmhimmb64_8") (simd-shift :left64))
+     (when (= nm "immediate_0_width_size__8_0__16_1__32_2")
+       (fn [st [op & r]] (let [v (imm-val op)] (when-let [s ({8 0 16 1 32 2} v)] [(put st 22 2 s) r]))))
+     ;; vector registers
+     (when-let [[_ l at w tbl] (re-matches #"V(d|n|m)_(22|19|16)_(\d)__(.*)" nm)]
+       (let [lo (reg-field l)
+             fname ({"22" (if (= w "1") "sz" "size") "19" "immh" "16" "imm5"} at)
+             t (into {} (for [e (str/split tbl #"__") :let [[k v] (str/split e #"_")]] [(str/lower-case k) (Long/parseLong v)]))]
+         (fn [st [op & r]]
+           (when-let [g (reg-of op)]
+             (when-let [v (and (nil? (:arr g)) (t (name (:cls g))))]
+               (when-let [s (code-field (put st lo 5 (:n g)) fname v)]
+                 [s r]))))))
+     (when-let [[_ l fs tbl] (re-matches #"V(d|n|m)_arrangement_((?:size|Q|sz|imm5|immh)(?:_(?:size|Q|sz|imm5|immh))*)___(.*)" nm)]
+       (when-not (str/includes? tbl "_index_")
+         (let [fields (str/split fs #"_")
+               t (parse-arr-table tbl fields)
+               f (arrangement-kind l fields t)]
+           (if (some #{"size" "sz"} fields)
+             ;; the element size (8 bits a unit) for the shift immediates: from the arrangement's letter
+             (fn [st ops] (when-let [[s r] (f st ops)]
+                            [(if (:code s) s (assoc s :code ({"b" 1 "h" 2 "s" 4 "d" 8 "q" 16} (str (last (:arr (reg-of (first ops)))))))) r]))
+             f))))
+     (when-let [[_ l a] (re-matches #"V(d|n|m)_arrangement_(16B|2D|4S|8H)" nm)]
+       (let [lo (reg-field l)]
+         (fn [st [op & r]] (when-let [g (reg-of op)] (when (and (= :v (:cls g)) (= (:arr g) (str/lower-case a))) [(put st lo 5 (:n g)) r])))))
+     (when-let [[_ l a] (re-matches #"V(d|n)_arrangement_D_index__1" nm)]
+       (let [lo (reg-field l)]
+         (fn [st [op & r]] (when-let [[x i] (elt-of op)] (when-let [g (reg-of x)] (when (and (= :v (:cls g)) (= "d" (:arr g)) (= i 1)) [(put st lo 5 (:n g)) r]))))))
+     (when-let [[_ l ks rest*] (re-matches #"V(d|n)_arrangement_imm5___((?:[BHSD]_\d+_?_?)+)_index__imm5(_imm4)?__.*" nm)]
+       (index-kind l (into {} (for [e (str/split (str/replace ks #"_+$" "") #"__") :let [[k v] (str/split e #"_")]] [k (Long/parseLong v)]))
+                   (if rest* :imm4 :imm5)))
+     (when (= nm "Vn_arrangement_S_index__imm5__imm5lt41gt_1__imm5lt42gt_2__imm5lt43gt_4_1") (index-kind "n" {"S" 4} :imm5))
+     (when (#{"Vn_arrangement_D_index__imm5_1" "Vn_arrangement_imm5___D_8_index__imm5_1"} nm) (index-kind "n" {"D" 8} :imm5))
+     (when (= nm "Vm_arrangement_size___H_1__S_2_index__size_L_H_M__HLM_1__HL_2_1")
+       (fn [st [op & r]]
+         (when-let [[x i] (elt-of op)]
+           (when-let [g (reg-of x)]
+             (when (and (= :v (:cls g)) (integer? i))
+               (case (:arr g)
+                 "h" (when (and (< (:n g) 16) (<= 0 i 7))
+                       [(-> st (put 22 2 1) (put 16 4 (:n g)) (put 11 1 (bit-shift-right i 2)) (put 21 1 (bit-and (bit-shift-right i 1) 1)) (put 20 1 (bit-and i 1))) r])
+                 "s" (when (<= 0 i 3) [(-> st (put 22 2 2) (put 16 5 (:n g)) (put 11 1 (bit-shift-right i 1)) (put 21 1 (bit-and i 1))) r])
+                 nil))))))
+     (when (= nm "Vm_arrangement_sz___S_0__D_1_index__sz_L_H__HL_00__H_10_1")
+       (fn [st [op & r]]
+         (when-let [[x i] (elt-of op)]
+           (when-let [g (reg-of x)]
+             (when (and (= :v (:cls g)) (integer? i))
+               (case (:arr g)
+                 "s" (when (<= 0 i 3) [(-> st (put 22 1 0) (put 16 5 (:n g)) (put 11 1 (bit-shift-right i 1)) (put 21 1 (bit-and i 1))) r])
+                 "d" (when (<= 0 i 1) [(-> st (put 22 1 1) (put 16 5 (:n g)) (put 11 1 i) (put 21 1 0)) r])
+                 nil))))))
+     (when-let [[_ k] (re-matches #"Vn_([1-4])_arrangement_16B" nm)]
+       (fn [st [op & r]]
+         (let [gs (rlist-regs op)]
+           (when (and gs (consecutive? gs (Long/parseLong k)) (= "16b" (:arr (first gs)))) [(put st 5 5 (:n (first gs))) r]))))
+     (when-let [[_ k tbl] (re-matches #"Vt_([1-4])_arrangement_size_Q___(.*)" nm)]
+       (let [t (parse-arr-table tbl ["size" "Q"]) k (Long/parseLong k)]
+         (fn [st [op & r]]
+           (let [gs (rlist-regs op)]
+             (when (and gs (consecutive? gs k))
+               (when-let [[sz q] (t (str/upper-case (str (:arr (first gs)))))]
+                 [(-> st (put 0 5 (:n (first gs))) (put 10 2 sz) (put 30 1 q)) r]))))))
+     (when-let [[_ k e] (re-matches #"Vt_([1-4])_arrangement_([BHSD])_index__.*" nm)]
+       (let [k (Long/parseLong k)]
+         (fn [st [op & r]]
+           (when-let [[x i] (elt-of op)]
+             (let [gs (rlist-regs x)]
+               (when (and gs (consecutive? gs k) (= (str/lower-case e) (:arr (first gs))) (integer? i))
+                 (let [st (put st 0 5 (:n (first gs)))
+                       [q s sz] (case e "B" (when (<= 0 i 15) [(bit-shift-right i 3) (bit-and (bit-shift-right i 2) 1) (bit-and i 3)])
+                                  "H" (when (<= 0 i 7) [(bit-shift-right i 2) (bit-and (bit-shift-right i 1) 1) (bit-shift-left (bit-and i 1) 1)])
+                                  "S" (when (<= 0 i 3) [(bit-shift-right i 1) (bit-and i 1) 0])
+                                  "D" (when (<= 0 i 1) [i 0 1]))]
+                   (when q [(-> st (put 30 1 q) (put 12 1 s) (put 10 2 sz)) r]))))))))
+     nil)))
+
+;; --- a row, then the instruction
+
+(defn- signed-movw
+  "LLVM's convention for MOVZ and MOVN with a TLS relocation (`:tprel_gN:`, `:dtprel_gN:`, `:gottprel_g1:`, no
+  `_nc`): opc is MOVN's, and the linker flips it by the value's sign (AArch64MCCodeEmitter's fixMOVZ)."
+  [row ^long word fix]
+  (if (and (#{"MOVZ" "MOVN"} (:op row))
+           (some (fn [op] (let [e (if (= 'imm (head op)) (second op) op)]
+                            (and (= 'spec (head e)) (re-matches #"(?:tprel|dtprel)_g[0-2]|gottprel_g1" (str/lower-case (str (second e))))))) fix))
+    (bit-and word (bit-not (bit-shift-left 1 30)))
+    word))
+
+(def ^:dynamic *relaxed*
+  "True on the second pass: an alias's condition (arm64asm's decoding preference) not required, for the aliases LLVM prints
+  where arm64asm's decoder prefers another (`lsl w3, w2, #0`, `bfi x0, xzr, #5, #9` before BFC, `sbfiz w9, w10, #0, #1`)."
+  false)
+
+(defn- try-row
+  "The word of `ops` by `row`, or nil; throws :arg-kind for a kind not built."
+  [row ops]
+  (let [fs (map (fn [a] (or (kind-fn a) (refuse :arg-kind (str "arg-kind: " a)))) (:args row))
+        st0 {:w 0 :m 0 :soft [] :preds [] :fix []}
+        res (reduce (fn [[st ops] [a f]]
+                      (if (and (= "RET" (:op row)) (empty? ops)) [(put st 5 5 30) ops]
+                          (let [[s o :as x] (when st (f st ops))]
+                            (if (and s (:w s)) x (reduced [nil ops])))))
+                    [st0 ops] (map vector (:args row) fs))
+        [st left] res]
+    (when (and st (empty? left))
+      (let [mask (long (:mask row)) value (long (:value row))
+            m (long (:m st))]
+        (when (= (bit-and m mask (long (:w st))) (bit-and m mask value))
+          (let [st (cond
+                     ;; an alias whose condition ties Rm and Rn (CNEG, CINC, CINV, ROR, MOV's ORR): the one left is the other
+                     (not (:cond row)) st
+                     (zero? (bit-and (bit-or m mask) 0x1f0000)) (update st :soft conj [16 5 (field (long (:w st)) 5 5)])
+                     (zero? (bit-and (bit-or m mask) 0x3e0)) (update st :soft conj [5 5 (field (long (:w st)) 16 5)])
+                     :else st)
+                st (reduce (fn [st [lo w v]]
+                             (let [fm (bit-shift-left (dec (bit-shift-left 1 w)) lo)]
+                               (if (zero? (bit-and fm (bit-or m mask))) (put st lo w v) st)))
+                           st (:soft st))
+                word (bit-or (bit-and value mask) (bit-and (long (:w st)) (bit-not mask))
+                             (bit-and (long (:sbo row)) (bit-not (bit-or mask (long (:m st))))))]
+            (when (and (every? #(% word) (:preds st))
+                       (or (nil? (:cond row)) *relaxed*
+                           (binding [b/*sysops* sysop-index] ((get t/conds (:cond row)) word))))
+              {:word (signed-movw row word (:fix st)) :fixups (:fix st) :row (:syntax row)})))))))
+
+(defn- bare-v? [x] (and (= 'reg (head x)) (= 2 (count x)) (re-matches #"[vV][0-9]+" (str (second x)))))
+
+(defn- with-arr
+  "`x` with every vector register that names no arrangement given `arr`."
+  [x arr]
+  (cond (bare-v? x) (list 'reg (second x) (keyword arr))
+        (seq? x) (apply list (map #(with-arr % arr) x))
+        :else x))
+
+(def ^:private widen {"8b" ["8h"] "16b" ["8h"] "4h" ["4s"] "8h" ["4s"] "2s" ["2d"] "4s" ["2d"] "1d" ["1q"] "2d" ["1q"]})
+(def ^:private narrow {"8h" ["8b" "16b"] "4s" ["4h" "8h"] "2d" ["2s" "4s"] "4h" ["8b"] "2s" ["4h"] "1d" ["2s"] "1q" ["1d" "2d"]})
+(defn- elem [^String a] (str (last a)))
+
+(defn apple-neon
+  "Apple's older NEON spelling (`ld1.8b {v0}, [x1]`, `shrn.8b v0, v0, #1`, `mov.s v0[1], w3`, `mov b3, v4[1]`): the candidate
+  operand lists, most likely first, as [MNEMONIC OPS]. The suffix is the first operand's arrangement; every other vector
+  register that names none takes the suffix's, its widened or narrowed one (the long and narrow instructions) or 16b (tbl's
+  table), an element without one the suffix's element size or its neighbours'; a mnemonic with no suffix whose elements name
+  no size take a scalar operand's."
+  [^String m ops]
+  (if-let [[_ base a] (re-matches #"([a-z0-9]+)\.(8b|16b|4h|8h|2s|4s|1d|2d|1q|b|h|s|d)" m)]
+    (let [arrs (distinct (concat [a] (widen a) (narrow a) ["16b" "8b"]))
+          elts (distinct (map elem (concat [a] (narrow a) (widen a))))
+          slots (vec (map-indexed (fn [i x] (cond (zero? i) [a]
+                                                  (= 'elt (head x)) elts
+                                                  (or (bare-v? x) (and (= 'rlist (head x)) (some bare-v? (rest x)))) arrs
+                                                  :else [nil]))
+                                  ops))
+          combos (reduce (fn [acc c] (for [xs acc y c] (conj xs y))) [[]] slots)]
+      (for [cs combos] [base (map (fn [x c] (if c (with-arr x c) x)) ops cs)]))
+    (let [sc (some #(when-let [g (reg-of %)] (when (#{:b :h :s :d} (:cls g)) (name (:cls g)))) ops)]
+      [[m (if (and sc (some #(and (= 'elt (head %)) (bare-v? (second %))) ops))
+            (map #(if (= 'elt (head %)) (with-arr % sc) %) ops)
+            ops)]])))
+
+(defn- unpredictable
+  "LLVM's rejections of the constrained-unpredictable forms A64 leaves to the implementation (AArch64AsmParser's
+  validateInstruction): a load pair into one register, a write-back base that is also the transfer's register, an exclusive
+  store whose status register is also a source; the reason or nil."
+  [{:keys [op args]} ^long w]
+  (let [rt (field w 0 5) rt2 (field w 10 5) rn (field w 5 5) rs (field w 16 5)
+        a (str args)
+        gpr? (re-find #"arg_[WX]t" a)
+        pair? (re-find #"t2\"" a)
+        wb? (re-find #"_(wb|post)_" a)
+        load? (str/starts-with? op "LD")]
+    (cond
+      (and load? pair? (= rt rt2) (#{"LDP" "LDPSW" "LDNP" "LDXP" "LDAXP"} op)) (str "unpredictable " op " instruction, Rt2==Rt")
+      (and gpr? wb? (not= rn 31) (or (= rn rt) (and pair? (= rn rt2))))
+      (str "unpredictable " op " instruction, writeback base is also a " (if load? "destination" "source"))
+      (and (#{"STXR" "STLXR" "STXRB" "STLXRB" "STXRH" "STLXRH" "STXP" "STLXP"} op)
+           (or (= rs rt) (and (not= rn 31) (= rs rn)) (and (#{"STXP" "STLXP"} op) (= rs rt2))))
+      (str "unpredictable " op " instruction, status is also a source"))))
+
+(defn- encode-ops [^String m ops]
+  (let [[op ops] (if-let [[_ c] (re-matches #"b\.([a-z]+)" m)] ["B" (cons (symbol c) ops)] [(str/upper-case m) ops])
+        rows (rows-by-op op)]
+    (when (empty? rows) (refuse :no-mnemonic (str "no-mnemonic: " m)))
+    (let [missing (atom nil)
+          pass (fn [] (some (fn [row] (try (try-row row ops)
+                                           (catch arbace.lang.ExceptionInfo e
+                                             (if (= :arg-kind (:asm/refused (ex-data e))) (do (reset! missing (.getMessage e)) nil) (throw e)))))
+                            rows))
+          r (binding [*op* op] (or (pass) (binding [*relaxed* true] (pass))))]
+      (when-let [u (and r (unpredictable (first (filter #(= (:syntax %) (:row r)) rows)) (:word r)))]
+        (refuse :unpredictable u))
+      (or r
+          (if @missing (refuse :arg-kind @missing) (refuse :operands (str "operands: " m)))))))
+
+(defn encode
+  "The word of an instruction form (MNEMONIC OPERAND ...) of arm64's GNU syntax (Apple's older NEON spelling too)."
+  [form]
+  (let [cands (apple-neon (str/lower-case (str (first form))) (rest form))]
+    (if (= 1 (count cands))
+      (apply encode-ops (first cands))
+      (or (some (fn [[m ops]] (try (encode-ops m ops) (catch arbace.lang.ExceptionInfo e (when-not (:asm/refused (ex-data e)) (throw e)))))
+                cands)
+          (apply encode-ops (first cands))))))

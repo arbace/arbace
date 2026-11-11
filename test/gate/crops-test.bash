@@ -99,7 +99,7 @@ gate_crop_pins_list "$w/pins.edn" > "$w/pins-awk.tsv"; crops pins "$w/pins.edn" 
 cmp -s "$w/pins-awk.tsv" "$w/pins-ae.tsv" && [ "$(cut -f1 "$w/pins-awk.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "$( { cut -f1 "$w/pins0.tsv"; echo python; } | LC_ALL=C sort | tr '\n' ' ')" ] \
   && ok "the gated crops' pins (steps.edn's, python added; not :zz-test's empty entry), awk and gate.crops alike" \
   || { bad "the pins differ or are wrong"; diff "$w/pins-awk.tsv" "$w/pins-ae.tsv"; cat "$w/pins-awk.tsv"; }
-cmp -s "$w/pins0.tsv" "$w/pins0-ae.tsv" && [ "$(cut -f1 "$w/pins0.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "cpp haskell llvm ocaml rust scheme " ] && ok "steps.edn gates C++, Haskell, LLVM IR, OCaml, Rust and Scheme (merge plan batches 1-2): --pins checks their pins" || bad "steps.edn's crop pins: $(cat "$w/pins0.tsv")"
+cmp -s "$w/pins0.tsv" "$w/pins0-ae.tsv" && [ "$(cut -f1 "$w/pins0.tsv" | LC_ALL=C sort | tr '\n' ' ')" = "asm-amd64 asm-arm64 cpp haskell llvm ocaml rust scheme " ] && ok "steps.edn gates C++, Haskell, LLVM IR, OCaml, Rust and Scheme (merge plan batches 1-2) and the two assembly crops (AX10): --pins checks their pins" || bad "steps.edn's crop pins: $(cat "$w/pins0.tsv")"
 
 # ---- GTS216 (a)'s chains
 cat > "$w/cc.edn" <<'F'
@@ -122,7 +122,7 @@ crops concurrent "$w/cc.edn" > "$w/cc.out" 2>&1
 [ "$(tr '\n' ' ' < "$w/cc.out")" = "a b " ] && ok "concurrent chains: a (its needs in the chain or outside :full) and b; not the four's, :heavy, a part above 4 GiB, a need on another chain, one another chain needs, no :mem-gib, nor c past :max-gib" \
   || bad "concurrent chains: $(cat "$w/cc.out")"
 crops concurrent "$src/test/gate/steps.edn" > "$w/cc0.out" 2>&1
-[ "$(tr '\n' ' ' < "$w/cc0.out")" = "haskell-roundtrip haskell-target-probe scheme-full ocaml-full llvm-full rust-full " ] && ok "steps.edn: the gated crops' chains beside the serial run (haskell-roundtrip, haskell-target-probe (HFS-I9 (b)), scheme-full, ocaml-full, llvm-full, rust-full: merge plan batches 1-2; cpp-full's cpp-check is 8 GiB, past :max-step-gib)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
+[ "$(tr '\n' ' ' < "$w/cc0.out")" = "haskell-roundtrip haskell-target-probe scheme-full ocaml-full llvm-full rust-full asm-amd64-full asm-arm64-full " ] && ok "steps.edn: the gated crops' chains beside the serial run (haskell-roundtrip, haskell-target-probe (HFS-I9 (b)), scheme-full, ocaml-full, llvm-full, rust-full: merge plan batches 1-2; asm-amd64-full, asm-arm64-full: AX10; cpp-full's cpp-check is 8 GiB, past :max-step-gib)" || bad "steps.edn's chains: $(cat "$w/cc0.out")"
 
 # ---- the rules
 mkdir -p "$w/r/test/ocaml"; echo '{}' > "$w/r/test/ocaml/controls.edn"; echo x > "$w/r/test/ocaml/other.edn"

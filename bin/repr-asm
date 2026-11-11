@@ -1,0 +1,997 @@
+#!/bin/bash
+# repr/asm, assembly's bridge (doc/asm/SPEC.md; doc/asm/AMD64-SURVEY.md §4, §5, §10, AX1; doc/asm/ARM64-SURVEY.md §4.1, AR1): GNU
+# as's text in AT&T syntax for amd64, and for arm64 in GNU syntax (ELF, Apple's spelling) and Plan 9's (lexically), as assembly
+# forms and back, arbace.repr.asm on the tools' host (evaluated from the checkout: a crop's namespace,
+# bin/lib/version.bash's arbace_crop_paths). No assembler runs: every judge is the text's own (the forms read again equal,
+# mode :full printed back byte for byte); gas and llvm-mc are the oracle tier's (AX2 on).
+#
+#   --arch amd64|arm64 (anywhere; default amd64)    the architecture: its corpora, record, classes and controls (amd64's
+#                                                    test/asm/{roundtrip-results-amd64,divergences-read,controls}, arm64's
+#                                                    test/asm/{roundtrip-results-arm64,divergences-read-arm64,controls-arm64})
+#   bin/repr-asm read [--syntax S] [--full] FILE.s [-o OUT.ae]  FILE's assembly forms as .ae text (a header, an item a line);
+#                                                    --full: mode :full, the text's layer kept in the .ae's last line; S att
+#                                                    (amd64), gnu, apple or plan9 (arm64); a .S is read as the C preprocessor's
+#   bin/repr-asm print [--full] FILE.ae [-o OUT.s]   the forms printed canonically; --full: with the layer, the original text
+#                                                    byte for byte
+#   bin/repr-asm corpus extract                      the corpora of test/asm/corpora.edn out of their pinned tarballs (musl
+#                                                    1.2.6's, llvm-project 23.1.5's, gcc 15.2.0's) into $REPR_ASM_SRC (default
+#                                                    MAIN/.tmp/asm/src), each tarball's SHA-256 checked against its pin first (Go's
+#                                                    testdata are read in place in $ARBACE_GOROOT, the box's in the checkout)
+#   bin/repr-asm corpus check                        each pinned tarball's SHA-256 against its pin, nothing extracted (bin/gate --pins)
+#   bin/repr-asm corpus ensure                       corpus extract once for test/asm/corpora.edn's content (a stamp beside the
+#                                                    corpora), under a lock: the gate's steps (AX10)
+#   bin/repr-asm corpus lists [CORPUS...]            each corpus's list (NAME<tab>PATH) into .tmp/repr-asm/lists/CORPUS.list
+#   bin/repr-asm roundtrip [--record] [CORPUS...]    each file of each corpus (default: every corpus of test/asm/corpora.edn): read
+#                                                    in :full, the .ae text read back (forms and layer equal), printed back byte for
+#                                                    byte, the canonical print read again to the same forms with no layer; rows
+#                                                    against test/asm/roundtrip-results-amd64.edn (every recorded :pass passes,
+#                                                    every file recorded; --record rewrites the corpora's rows from the run), every
+#                                                    non-pass in a class of test/asm/divergences-read.edn, and the negative
+#                                                    controls of test/asm/controls.txt fail; WORK .tmp/repr-asm/rt/CORPUS
+#   bin/repr-asm divergences [RESULTS]               the results' non-passes judged against the classes (none unclassed)
+#   bin/repr-asm table gen|check                     amd64's instruction table (AX2, AXS4): llvm-project 23.1.5's X86 .td files (extracted
+#                                                    with the corpora, test/asm/corpora.edn's :tables) read by Arbace's TableGen
+#                                                    (arbace.asm.tablegen) and made into LLVM's matchables and encodings
+#                                                    (arbace.asm.amd64.gen); gen writes asm/amd64/table.edn, check regenerates it and
+#                                                    compares byte for byte (about 2.5 minutes, 1.3 GiB; no llvm-tblgen)
+#   bin/repr-asm table oracle                        the oracle tier's, by hand: the host's llvm-tblgen 23.1.5 (REPR_ASM_TBLGEN, default
+#                                                    /usr/lib/llvm23/bin/llvm-tblgen) makes X86GenAsmMatcher.inc from the same .td files;
+#                                                    its MatchTable0 and MatchTable1 (mnemonic, instruction, operand classes, in order)
+#                                                    against the table's :match and :match-intel (AX3); since AXS37 also each row's
+#                                                    conversion, each :insns entry's encoding fields, operands, defs and ties
+#                                                    (-print-records) and its :print/:print-intel (-gen-asm-writer's printInstruction
+#                                                    decoded), test/asm/table_oracle.ae; every part runs, any difference fails
+#   bin/repr-asm print-oracle [CORPUS]              the oracle tier's, by hand: the printer's lines of each AT&T file against the host's
+#                                                    llvm-mc 23.1.5 (REPR_ASM_MC), file by file; table oracle also compares the printer's
+#                                                    aliases with llvm-tblgen -gen-asm-writer's printAliasInstr
+#   bin/repr-asm encode-check [--record] [CORPUS...] amd64's encoder (AX2): the stated encodings of each file (default mc-x86) judged
+#                                                    by the test's own CHECK lines (arbace.asm.amd64.check; no llvm-mc), against
+#                                                    test/asm/encode-results-amd64.edn (--record rewrites the corpora's rows), every
+#                                                    non-pass in a class of test/asm/divergences-encode.edn, and the negative controls of
+#                                                    test/asm/controls-encode.txt fail; WORK .tmp/repr-asm/enc/CORPUS. Its print level (AX2's
+#                                                    third slice): each matched instruction printed in AT&T syntax as llvm-mc prints it
+#                                                    (arbace.asm.amd64.print, from the table's :print and :print-aliases) and each CHECK
+#                                                    line's text held to the printed lines as FileCheck holds it, the record's :text rows,
+#                                                    the classes test/asm/divergences-print.edn, the controls test/asm/controls-print.txt;
+#                                                    --record only from a run with no failure at any level. Since AX3 the files and
+#                                                    runs read in Intel syntax (-x86-asm-syntax=intel, .intel_syntax) are read, matched
+#                                                    (MatchTable1) and printed (X86IntelInstPrinter) too, and a third level, the
+#                                                    cross-syntax judge: each AT&T instruction printed in Intel and read back to the same
+#                                                    machine instruction (the rows' :cross, classes test/asm/divergences-cross.edn,
+#                                                    controls test/asm/controls-cross.txt)
+#   bin/repr-asm object FILE.s OUT.o                 amd64's object assembler (AX4): FILE assembled into an ELF64 relocatable object
+#                                                    as llvm-mc -filetype=obj writes it (arbace.asm.amd64.obj over the encoder,
+#                                                    arbace.asm.elf's writer; no llvm-mc)
+#   bin/repr-asm object-dump OBJ                     an ELF64 object read back by Arbace's reader (arbace.asm.elf): its sections'
+#                                                    bytes, symbols and relocations, a line each
+#   bin/repr-asm object-check [CORPUS]               each file of the corpus (default musl) assembled and judged against llvm-mc
+#                                                    23.1.5's object recorded in test/asm/records/obj-CORPUS-llvm-mc-23.1.5.edn
+#                                                    (pinned by its .sha256; never runs llvm-mc): byte for byte, else its sections,
+#                                                    symbols and relocations, against test/asm/object-results-amd64.edn, every
+#                                                    non-pass in a class of test/asm/divergences-object.edn, the negative controls
+#                                                    of test/asm/controls-object.txt failing; --record rewrites the results
+#   bin/repr-asm object-record [CORPUS]              the oracle tier's, by hand: the record made by the host's llvm-mc 23.1.5
+#                                                    (REPR_ASM_MC; -triple x86_64-linux-musl -filetype=obj), each object twice
+#                                                    and compared (verify), the pin rewritten
+#   bin/repr-asm --arch arm64 object|object-dump|object-check|object-record ...
+#                                                    arm64's (AR4): arbace.asm.arm64.obj; the corpora a64-musl, a64-synthetic
+#                                                    (test/asm/obj-arm64/) by default, mc-aarch64-obj (MC/AArch64's ELF object
+#                                                    tests); llvm-mc's triple aarch64-linux-musl -mattr=+all; rows
+#                                                    test/asm/object-results-arm64.edn, classes divergences-object-arm64.edn,
+#                                                    controls controls-object-arm64.txt
+#   bin/repr-asm --arch arm64 object-verdict [--record]
+#                                                    AR4: mc-aarch64-obj's object runs judged by their own CHECK lines, no LLVM
+#                                                    tool (arbace.asm.arm64.objcheck: Arbace's view of the object in llvm-objdump
+#                                                    -d's bytes and relocations, -r, llvm-readobj -r; the disassembly's text
+#                                                    AR3's, beside); rows test/asm/objverdict-results-arm64.edn, controls
+#                                                    test/asm/controls-objverdict-arm64.txt
+#   bin/repr-asm --arch arm64 run-check [--record]  AR4: test/asm/run-arm64/'s programs, linked for AArch64, run by this host's
+#                                                    arm64 CPU, else REPR_ASM_RUNNER (qemu-aarch64 by default: an emulation);
+#                                                    rows test/asm/run-results-arm64.edn, classes divergences-run-arm64.edn,
+#                                                    controls controls-run-arm64.txt; `link OBJ... -o OUT` links for AArch64
+#   bin/repr-asm link OBJ... -o OUT                  Arbace's static linker (AX4's second slice, arbace.asm.link): ELF64 objects
+#                                                    linked into a static x86-64 executable (ET_EXEC) as lld 23.1.5 lays one out
+#                                                    with no script (no ld)
+#   bin/repr-asm link-dump EXE                       an executable read back canonically: entry, segments, sections, symbols
+#   bin/repr-asm run-check [--record]                test/asm/run/'s programs (their verdicts in their headers: exit, stdout,
+#                                                    with, before, link-error) assembled and linked by Arbace, run by the CPU
+#                                                    under timeout ($REPR_ASM_RUN_TIMEOUT, 10 s), judged by their own verdicts;
+#                                                    rows against test/asm/run-results-amd64.edn, classes
+#                                                    test/asm/divergences-run.edn, controls test/asm/controls-run.txt failing;
+#                                                    --record rewrites the rows; WORK .tmp/repr-asm/run/run
+#   bin/repr-asm link-oracle                         the oracle tier's, by hand: the host's ld.lld (else ld.bfd; REPR_ASM_LD)
+#                                                    links the same objects, the runs and canonical views compared
+#   bin/repr-asm decode MODE [intel] HEX...         amd64's decoder (AX4's third slice, arbace.asm.amd64.decode: LLVM's X86
+#                                                    disassembler rebuilt from the table): the bytes decoded as llvm-mc
+#                                                    --disassemble decodes them in MODE (16, 32, 64), each instruction printed
+#                                                    (AT&T, or Intel's) with its table instruction and operands
+#   bin/repr-asm decode-object OBJ                   an ELF64 object's code sections decoded and printed
+#   bin/repr-asm decode-check [--record] [LEVEL...]  the decoder judged with no llvm-mc, LEVEL dis, rt or obj (default all):
+#                                                    dis, MC/Disassembler/X86's tests (test/asm/corpora.edn's :decode-corpora) by
+#                                                    their own CHECK lines (each byte string decoded and printed, held as
+#                                                    FileCheck holds llvm-mc's output); rt, every encoding encode-check meets in
+#                                                    MC/X86 decoded back to the matcher's instruction; obj, musl's objects as
+#                                                    Arbace writes them decoded back to their assembled instructions; rows
+#                                                    against test/asm/decode-results-amd64.edn, every unmet check in a class of
+#                                                    test/asm/divergences-decode.edn, the negative controls of
+#                                                    test/asm/controls-decode.txt failing; WORK .tmp/repr-asm/decode
+#   bin/repr-asm x86i light                          x86i, the x86-64 integer machine (AX5.2; doc/asm/AMD64.md §10): its light driver,
+#                                                    go/arbace/{x86i,emu,crt} and test/asm/x86i-driver printed by repr/go and
+#                                                    built alone by TamaGo's go into .tmp/x86i/x86i (no Arbace build, no key)
+#   bin/repr-asm x86i run EXE [ARG...]               the static executable run on x86i (the light driver, built when missing):
+#                                                    its status, or 128 + the signal; an instruction no family claims raises
+#                                                    SIGILL, named on stderr (:unimplemented); X86I_INJECT=FAMILY:FLAG flips the
+#                                                    flag after each instruction of the family (the negative controls' fault)
+#   bin/repr-asm x86i decode-text EXE                its code sections as x86i's decoder decodes them, an instruction a line
+#   bin/repr-asm x86i decode-hex FILE                each line's bytes (ID<tab>HEX) decoded alone (x86i-decode-check's)
+#   bin/repr-asm x86i claimed                        the decode tables' instructions a family claims (the coverage's)
+#   bin/repr-asm x86i trace --mode sys|step|bisect EXE [ARG...]
+#                                                    the lockstep (AX5.3): EXE run natively under ptrace (ASLR off, the vdso
+#                                                    hidden) and on x86i from the native's initial state; sys: compared at each
+#                                                    system call (registers, flags the SDM defines, FS, the bytes written, the
+#                                                    result; the world's results copied); step: single-stepped, compared after
+#                                                    every instruction (registers, RIP, the flags the instruction left defined,
+#                                                    FS, GS, the bytes it stored, XMM and MXCSR when it names them, the writable
+#                                                    mappings every 4,096 and at each system call, mmap's and brk's layout;
+#                                                    X86I_STEP_LIMIT=N: the rest in sys mode); bisect: sys, and a difference
+#                                                    stepped from the last system call both agreed on to its instruction; then
+#                                                    the loader's judge (x86i's own initial stack against the native's)
+#   bin/repr-asm x86i synth DIR [--record]           x86i's synthetic programs (AX5.4, AXS60 (a)): one a family (bit, rotc, shiftd,
+#                                                    cond, misc; AX5.5: bmi, adx, ssemov, sseint, ssefp, ssecmp, ssecvt), written into DIR by test/asm/x86i/gen.ae (seeded), their digests
+#                                                    held to (or recorded into) test/asm/x86i/synth-digests.edn
+#   bin/repr-asm x86i gen|gen-check                  x86i's decode tables, go/arbace/x86i/dectab.ae, made from asm/amd64/table.edn
+#                                                    by arbace.asm.amd64.dgen; gen-check: the committed file equal to a fresh one
+#   bin/repr-asm x86i-check [--record|--only LIST]   test/asm/run/'s programs assembled and linked by Arbace, each run by the CPU
+#                                                    and by x86i (timeouts $REPR_ASM_RUN_TIMEOUT, 10 s, and 60 s): x86i's run
+#                                                    judged by the program's own verdict and against the CPU's (status, stdout,
+#                                                    stderr), its code decoded by x86i's decoder against arbace.asm.amd64.decode,
+#                                                    the lockstep's sys mode (x86i trace --mode sys: the native run under ptrace
+#                                                    compared at each system call) and step mode (every instruction; a header's
+#                                                    `# step-limit: N` bounds it; $REPR_ASM_STEP_TIMEOUT, 600 s) equal, the loader's
+#                                                    judge equal; the per-run coverage (AX5.5: the families' claimed instructions
+#                                                    executed, WORK/coverage.txt, against test/asm/x86i-coverage-amd64.txt);
+#                                                    rows against test/asm/x86i-results-amd64.edn, classes
+#                                                    test/asm/divergences-x86i.edn, the negative controls of
+#                                                    test/asm/controls-x86i.txt failing; WORK .tmp/repr-asm/x86i; --only LIST (AXS89 (a):
+#                                                    program names, a line each) runs those alone, judged on what it ran (the others'
+#                                                    rows left, the coverage not held, the controls of programs outside not judged, and
+#                                                    slice-foreign: the run against the others' recorded rows, which must fail)
+#   bin/repr-asm x86i-decode-check [--record]        AX5.5, AXS70 (b): x86i's Go decoder against arbace.asm.amd64.decode over the
+#                                                    decode check's 64-bit corpora (MC/X86's met encodings, MC/Disassembler/X86's
+#                                                    byte strings), each decoded alone (x86i decode-hex); rows against
+#                                                    test/asm/x86i-decode-results-amd64.edn, classes test/asm/divergences-x86i.edn,
+#                                                    the controls of test/asm/controls-x86i-decode.txt; WORK .tmp/repr-asm/x86i-decode
+#   bin/repr-asm --arch arm64 table gen|check        AR2: A64's encoding tables: arbace/repr/asm/arm64/table.ae, generated from Go's
+#                                                    arm64asm and cmd/internal/obj/arm64 in $ARBACE_GOROOT (VERSION checked) by
+#                                                    arbace.repr.asm.arm64.tablegen, and (AR2's second slice, ARS24 (a))
+#                                                    asm/arm64/table.edn, llvm-project 23.1.5's AArch64.td read by Arbace's TableGen
+#                                                    (test/asm/corpora.edn's :aarch64-td, with AsmParser/AArch64AsmParser.cpp's
+#                                                    messages) by arbace.asm.arm64.gen (about 1 minute, 1.5 GiB); check: both equal to
+#                                                    a fresh generation, byte for byte
+#   bin/repr-asm --arch arm64 table oracle           the oracle tier's, by hand: the host's llvm-tblgen 23.1.5 (REPR_ASM_TBLGEN)
+#                                                    -print-records; every matchable instruction, its AsmString and its encoding
+#                                                    against asm/arm64/table.edn (test/asm/table_oracle_arm64.ae)
+#   bin/repr-asm --arch arm64 encode-check [--record] [CORPUS...]
+#                                                    AR2: every MC/AArch64 line that states an encoding encoded from its CHECK text
+#                                                    (or the input line a text-less block pairs with) and judged by the stated bytes,
+#                                                    the CHECK text printed back by the operands' kinds (:print, ARS25), the input
+#                                                    instructions paired with the encoding lines in order and encoded (:input, ARS29),
+#                                                    each error test's `error:` lines' instructions rejected under the features of the
+#                                                    run that checks them (-mattr, -mcpu: ARS26) with a message LLVM's fragment is
+#                                                    found in (:reject, ARS27); Go's table first, LLVM's records (asm/arm64/table.edn,
+#                                                    arbace.repr.asm.arm64.lenc) for what it refuses; against test/asm/encode-results-arm64.edn (--record merges the
+#                                                    run's corpora's rows into it, only from a run with no problem), every recorded file
+#                                                    of the run's corpora run, the classes test/asm/divergences-encode-arm64.edn and the
+#                                                    negative controls test/asm/controls-encode-arm64.txt (default corpora mc-aarch64,
+#                                                    mc-asmparser-aarch64)
+#   The other verbs from table oracle on (print-oracle, object*, link*, run-check, decode*, x86i*) are amd64's.
+set -euo pipefail
+arch=amd64 args=()
+while [ $# -gt 0 ]; do case $1 in --arch) arch=$2; shift 2 ;; *) args+=("$1"); shift ;; esac; done
+set -- "${args[@]+"${args[@]}"}"
+case $arch in amd64|arm64) ;; *) echo "repr-asm: --arch amd64|arm64" >&2; exit 2 ;; esac
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
+main=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)
+case $root in */.tmp/gate-clean/*) main=${root%%/.tmp/gate-clean/*} ;; esac
+src=${REPR_ASM_SRC:-$main/.tmp/asm/src}
+corpora=$root/test/asm/corpora.edn
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+results=$root/test/asm/roundtrip-results-$arch.edn
+case $arch in
+  amd64) classes=$root/test/asm/divergences-read.edn controls=$root/test/asm/controls.txt ;;
+  *) classes=$root/test/asm/divergences-read-$arch.edn controls=$root/test/asm/controls-$arch.txt ;;
+esac
+lists=$root/.tmp/repr-asm/lists
+# the object assembler, its llvm-mc triple, records and classes by arch (AX4; AR4)
+case $arch in
+  amd64) objns=arbace.asm.amd64.obj triple=x86_64-linux-musl obj_results=$root/test/asm/object-results-amd64.edn
+         obj_classes=$root/test/asm/divergences-object.edn obj_controls=$root/test/asm/controls-object.txt obj_default=(musl synthetic mc-x86-obj) ;;
+  arm64) objns=arbace.asm.arm64.obj triple="aarch64-linux-musl -mattr=+all" obj_results=$root/test/asm/object-results-arm64.edn
+         obj_classes=$root/test/asm/divergences-object-arm64.edn obj_controls=$root/test/asm/controls-object-arm64.txt obj_default=(a64-musl a64-synthetic)
+         export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn ;;
+esac
+
+# x86i's light driver (AX5.2, AXS51 (a)): go/arbace/{crt,emu,x86i} and the driver printed by repr/go (bin/build-go --print-only),
+# then built by TamaGo's go alone into .tmp/x86i/x86i (si's and oi's way: no Arbace build, out of every key)
+x86i_dir=$root/.tmp/x86i
+x86i_exe=$x86i_dir/x86i
+x86i_light() {
+  local out=$x86i_dir/print src=$x86i_dir/print-root
+  rm -rf "$out" "$src"; mkdir -p "$src/go/arbace"
+  ln -s "$root/go/arbace/crt.ae" "$root/go/arbace/crt" "$root/go/arbace/emu.ae" "$root/go/arbace/emu" "$root/go/arbace/x86i.ae" \
+    "$root/go/arbace/x86i" "$root/test/asm/x86i-driver/go/arbace/x86idriver.ae" "$root/test/asm/x86i-driver/go/arbace/x86idriver" "$src/go/arbace/"
+  "$root/bin/build-go" --print-only --module arbace --work "$out" "$src" >&2
+  (cd "$out/mod" && export GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+     GOCACHE="${X86I_GOCACHE:-$x86i_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} &&
+     "$goroot/bin/go" build -p 2 -trimpath -o "$x86i_exe" ./x86idriver/)
+}
+
+# a64i's light driver (AR5): go/arbace/{crt,emu,a64i} and test/asm/a64i-driver printed by repr/go and built alone by TamaGo's
+# go into .tmp/a64i/a64i, as x86i's (A64I_EXE: another build of it)
+a64i_dir=$root/.tmp/a64i
+a64i_exe=${A64I_EXE:-$a64i_dir/a64i}
+a64i_light() {
+  [ -z "${A64I_EXE:-}" ] || return 0
+  local out=$a64i_dir/print src=$a64i_dir/print-root
+  rm -rf "$out" "$src"; mkdir -p "$src/go/arbace"
+  ln -s "$root/go/arbace/crt.ae" "$root/go/arbace/crt" "$root/go/arbace/emu.ae" "$root/go/arbace/emu" "$root/go/arbace/a64i.ae" \
+    "$root/go/arbace/a64i" "$root/test/asm/a64i-driver/go/arbace/a64idriver.ae" "$root/test/asm/a64i-driver/go/arbace/a64idriver" "$src/go/arbace/"
+  "$root/bin/build-go" --print-only --module arbace --work "$out" "$src" >&2
+  (cd "$out/mod" && export GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+     GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} &&
+     "$goroot/bin/go" build -p 2 -trimpath -o "$a64i_exe" ./a64idriver/)
+}
+
+edn() { arbace_tool -e "(let [c (read-string (slurp \"$corpora\"))] $1)"; }
+
+# corpus_ids: the corpora's ids of the architecture, in order
+corpus_ids() { edn "(doseq [x (:corpora c) :when (= (or (:arch x) :amd64) :$arch)] (println (name (:id x))))"; }
+
+extract() {
+  local id tar sum top want
+  mkdir -p "$src"
+  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$TMPDIR/asm-pins.txt"
+  while read -r id tar sum top; do
+    [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host (a fetch by its pin, the user's)" >&2; return 1; }
+    want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
+    [ "$want" = "$sum" ] || { echo "repr-asm: $tar's SHA-256 $want is not the pin's $sum" >&2; return 1; }
+    edn "(doseq [x (concat (:corpora c) (:tables c) (:decode-corpora c)) :when (= (:pin x) :$id) m (:extract x)] (println m))" > "$TMPDIR/asm-members.txt"
+    echo "repr-asm: extracting $(wc -l < "$TMPDIR/asm-members.txt") members of $id"
+    case $tar in
+      *.tar.gz) tar -xzf "$main/$tar" -C "$src" --wildcards -T "$TMPDIR/asm-members.txt" ;;
+      *.tar.xz) tar -xJf "$main/$tar" -C "$src" --wildcards -T "$TMPDIR/asm-members.txt" ;;
+    esac
+  done < "$TMPDIR/asm-pins.txt"
+}
+
+# check_pins: every pinned tarball on this host with its pin's SHA-256 (AX10: the crops' pins, bin/gate --pins); no extraction
+check_pins() {
+  local id tar sum top want n=0
+  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$TMPDIR/asm-pins.txt"
+  while read -r id tar sum top; do
+    [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host" >&2; return 1; }
+    want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
+    [ "$want" = "$sum" ] || { echo "repr-asm: $tar's SHA-256 $want is not the pin's $sum" >&2; return 1; }
+    n=$((n + 1))
+  done < "$TMPDIR/asm-pins.txt"
+  echo "repr-asm corpus check: $n tarballs equal to their pins"
+}
+
+# ensure: the corpora extracted into $src once for test/asm/corpora.edn's content (a stamp of its SHA-256 beside them), under a lock
+# so that the gate's steps that need them do not extract at once (AX10)
+ensure() {
+  local stamp=$src/.corpora.sha256 want
+  want=$(sha256sum "$corpora" | cut -d' ' -f1)
+  mkdir -p "$src"
+  (
+    flock 9
+    if [ "$(cat "$stamp" 2>"$TMPDIR/asm-stamp.err")" = "$want" ]; then echo "repr-asm corpus ensure: $src current"; exit 0; fi
+    extract && echo "$want" > "$stamp"
+  ) 9>"$src.lock"
+}
+
+# make_list ID: the corpus's files (its :dir under its :root, src by default, $ARBACE_GOROOT for :goroot, the checkout for
+# :checkout; its :match and not its :exclude), NAME<tab>PATH<tab>FLAGS
+make_list() {
+  local id=$1 dir match exclude rt syn base
+  read -r dir match exclude rt syn < <(edn "(let [x (first (filter #(= (:id %) :$id) (:corpora c)))] (println (:dir x) (:match x) (or (:exclude x) \"^\$\") (name (or (:root x) :src)) (name (or (:syntax x) :default))))")
+  case $rt in
+    goroot) base=$goroot
+      [ "$(head -1 "$goroot/VERSION" 2>"$TMPDIR/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
+        { echo "repr-asm: $goroot/VERSION is not the pin's (seed/goroot.sha256's toolchain)" >&2; return 1; } ;;
+    checkout) base=$root ;;
+    *) base=$src ;;
+  esac
+  [ -d "$base/$dir" ] || { echo "repr-asm: $base/$dir missing: bin/repr-asm corpus extract" >&2; return 1; }
+  mkdir -p "$lists"
+  local sd=$root/.tmp/repr-asm/split/$id f n p flags
+  rm -rf "$sd"
+  : > "$lists/$id.list"
+  (cd "$base/$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | grep -E "$match" | grep -vE "$exclude" || true) > "$TMPDIR/asm-files.txt"
+  while read -r f; do
+    p=$base/$dir/$f n=${f%.[sS]}; n=${n//\//-}
+    # the test's own verdict and target from its RUN lines (llvm/test's lit tests): reject when one runs `not llvm-mc`, other-arch
+    # when its triples name no x86
+    if [ "$arch" = amd64 ]; then
+    flags=$(awk '/RUN:/ { r = r " " $0 } END { f = ""; if (r ~ /not llvm-mc/) f = f " reject"
+                 if (r ~ /-triple|-mtriple|--triple/ && r !~ /(i[3-6]86|x86_64|x86-64|amd64)/) f = f " other-arch"
+                 # intel: the first llvm-mc that reads the file (else the first llvm-mc) reads Intel syntax
+                 np = split(r, pc, /RUN:|[|]/); first = ""; any = ""
+                 for (k = 1; k <= np; k++) { if (pc[k] ~ /llvm-mc/ && any == "") any = pc[k]
+                   if (pc[k] ~ /llvm-mc/ && pc[k] ~ /%s/ && first == "") first = pc[k] }
+                 if (first == "") first = any
+                 if (first ~ /-x86-asm-syntax[= ]intel/) f = f " intel"
+                 if (r != "" && r !~ /llvm-mc[^|]*%s/ && r !~ /split-file/) f = f " not-input"; print f }' "$p")
+    else
+    # arm64: apple when every triple the RUN lines name is Darwin's (`;` comments), other-arch when none is AArch64's
+    flags=$(awk '/RUN:/ { r = r " " $0 } END { f = ""; if (r ~ /not llvm-mc/) f = f " reject"
+                 n = 0; a = 0; d = 0; s = r
+                 while (match(s, /-?-m?triple[= ]+[^ ]+/)) { t = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+                   sub(/^-?-m?triple[= ]+/, "", t); n++; if (t ~ /^(aarch64|arm64)/) a++; if (t ~ /(apple|darwin|ios|macos)/) d++ }
+                 if (n > 0 && a == 0) f = f " other-arch"
+                 if (n > 0 && d == n) f = f " apple"
+                 if (r != "" && r !~ /llvm-mc[^|]*%s/ && r !~ /split-file/) f = f " not-input"; print f }' "$p")
+    fi
+    [ "$syn" = plan9 ] && flags="$flags plan9"
+    if grep -qE '^(#|//)--- ' "$p"; then
+      # a split-file test (`split-file %s %t`): its parts are the files llvm-mc reads, each listed as NAME.PART
+      mkdir -p "$sd/$n"
+      awk -v o="$sd/$n" '/^(#|\/\/)--- / { f = o "/" $2; printf "" > f; next } f { print > f }' "$p"
+      for q in $(cd "$sd/$n" && ls | grep -E '\.[sS]$' | LC_ALL=C sort); do
+        printf '%s\t%s\t%s\n' "$n.${q%.[sS]}" "$sd/$n/$q" "${flags# }" >> "$lists/$id.list"
+      done
+    else
+      printf '%s\t%s\t%s\n' "$n" "$p" "${flags# }" >> "$lists/$id.list"
+    fi
+  done < "$TMPDIR/asm-files.txt"
+  echo "repr-asm: $id: $(wc -l < "$lists/$id.list") files"
+}
+
+# obj_list ID: the object check's list: a corpus of test/asm/corpora.edn, or `synthetic`, Arbace's own object tests test/asm/obj/*.s
+obj_list() {
+  if [ "$1" = a64-synthetic ]; then
+    mkdir -p "$lists"; : > "$lists/a64-synthetic.list"
+    for f in "$root"/test/asm/obj-arm64/*.s; do n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/a64-synthetic.list"; done
+    echo "repr-asm: a64-synthetic: $(wc -l < "$lists/a64-synthetic.list") files"
+  elif [ "$1" = mc-aarch64-obj ]; then
+    # MC/AArch64's object tests: the top-level files with a -filetype=obj run for an ELF little-endian triple (not Darwin's, COFF's,
+    # ILP32's, big-endian's or arm64ec's), RUN lines' continuations joined (AR4)
+    local d=$src/llvm-project-23.1.5.src/llvm/test/MC/AArch64 f
+    [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; return 1; }
+    mkdir -p "$lists"; : > "$lists/mc-aarch64-obj.list"
+    for f in $(grep -l -e 'filetype=obj' -e 'filetype obj' "$d"/*.s | LC_ALL=C sort); do
+      awk '/RUN:/ { l = $0; sub(/.*RUN:[ \t]*/, "", l); cur = cont ? cur " " l : l
+                    if (cur ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", cur); cont = 1 } else { print cur; cont = 0 } }' "$f" |
+        grep -e 'filetype[= ]obj' | grep -o -e '-triple[= ]*[^ ]*' -e '-mtriple[= ]*[^ ]*' |
+        grep -v -i -e darwin -e apple -e ios -e macos -e win -e coff -e ilp32 -e arm64_32 -e _be -e arm64ec | grep -q . || continue
+      n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/mc-aarch64-obj.list"
+    done
+    echo "repr-asm: mc-aarch64-obj: $(wc -l < "$lists/mc-aarch64-obj.list") files"
+  elif [ "$1" = synthetic ]; then
+    mkdir -p "$lists"; : > "$lists/synthetic.list"
+    for f in "$root"/test/asm/obj/*.s; do n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/synthetic.list"; done
+    echo "repr-asm: synthetic: $(wc -l < "$lists/synthetic.list") files"
+  elif [ "$1" = mc-x86-obj ]; then
+    # MC/X86's object tests (-filetype=obj) for x86-64 ELF: the files whose first RUN lines name x86-64 and no option the object
+    # assembler does not take (split-file, --defsym, -mcpu, -mattr, the relaxation, CREL and padding options, Intel syntax,
+    # error tests, the x32 ABI); assembled with -triple x86_64-linux-musl
+    local d=$src/llvm-project-23.1.5.src/llvm/test/MC/X86 f r
+    [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; return 1; }
+    mkdir -p "$lists"; : > "$lists/mc-x86-obj.list"
+    for f in $(grep -l -e 'filetype=obj' -e 'filetype obj' -r --include='*.s' "$d" | LC_ALL=C sort); do
+      r=$(grep 'RUN:' "$f" | head -3 | tr '\n' ' ')
+      printf '%s\n' "$r" | grep -q -e x86_64 -e x86-64 || continue
+      printf '%s\n' "$r" | grep -q -e split-file -e -defsym -e 'not llvm-mc' -e -x86-asm-syntax=intel -e -mcpu -e -mattr \
+        -e -relax-relocations -e -crel -e -x86-pad -e -x86-align -e gnux32 && continue
+      n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/mc-x86-obj.list"
+    done
+    echo "repr-asm: mc-x86-obj: $(wc -l < "$lists/mc-x86-obj.list") files"
+  else
+    make_list "$1"
+  fi
+}
+
+# rows WORK ID: the check's rows [ID RESULT REASON], ID CORPUS/NAME
+rows() {
+  awk -F'\t' -v c="$2" 'function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+    FILENAME == ARGV[1] { fl[$1] = $3; next }
+    { why = $2 ($6 != "" ? " " $6 : "")
+      # a refusal of a test whose RUN lines say it is rejected, or that runs on another target, says so first
+      if ($2 == "refused" && fl[$1] ~ /reject/) why = "error-test " why
+      else if ($2 == "refused" && fl[$1] ~ /intel/) why = "intel-run " why
+      else if ($2 != "ok" && fl[$1] ~ /other-arch/) why = "other-arch " why
+      else if ($2 != "ok" && fl[$1] ~ /not-input/) why = "not-input " why
+      r = ($2 == "ok") ? ":pass \"\"" : ":fail " q(why)
+      print "[" q(c "/" $1) " " r "]" }' "$3" "$1/check.tsv"
+}
+
+case ${1:-} in
+  print-oracle|link-oracle|decode|decode-object|decode-check|x86i|x86i-check|x86i-decode-check)
+    [ "$arch" = amd64 ] || { echo "repr-asm: $1 is amd64's" >&2; exit 2; } ;;
+  a64i|a64i-check)
+    [ "$arch" = arm64 ] || { echo "repr-asm: $1 is arm64's (--arch arm64)" >&2; exit 2; } ;;
+esac
+case ${1:-} in
+  read|print) v=$1; shift; arbace_tool -m arbace.repr.asm "$v" --arch "$arch" "$@" ;;
+  corpus)
+    case ${2:-} in
+      extract) extract ;;
+      check) check_pins ;;
+      ensure) ensure ;;
+      lists) shift 2; ids=("$@"); [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(corpus_ids); for id in "${ids[@]}"; do make_list "$id"; done ;;
+      *) echo "repr-asm corpus extract|check|ensure|lists [CORPUS...]" >&2; exit 2 ;;
+    esac ;;
+  roundtrip)
+    shift; record=; ids=()
+    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    [ ${#ids[@]} -gt 0 ] || mapfile -t ids < <(corpus_ids)
+    all=$root/.tmp/repr-asm/rt/rows.edn; mkdir -p "${all%/*}"; : > "$all"
+    for id in "${ids[@]}"; do
+      make_list "$id"
+      work=$root/.tmp/repr-asm/rt/$id; rm -rf "$work"; mkdir -p "$work"
+      arbace_tool -m arbace.repr.asm check --arch "$arch" "$lists/$id.list" "$work"
+      rows "$work" "$id" "$lists/$id.list" >> "$all"
+    done
+    fails=0
+    # the negative controls: a subject's :full .ae printed back must differ from the reference's original
+    while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      sc=${subj%%/*} sn=${subj#*/} rc=${ref%%/*} rn=${ref#*/}
+      sa=$root/.tmp/repr-asm/rt/$sc/ae/$sn.ae
+      rp=$(awk -F'\t' -v n="$rn" '$1 == n { print $2 }' "$lists/$rc.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      if [ ! -f "$sa" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.repr.asm control "$sa" "$rp" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$controls"
+    judge=(-e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"$all\" \"$classes\" \"${record:-}\" \"${ids[*]}\")")
+    arbace_tool "${judge[@]}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  table)
+    if [ "$arch" = arm64 ]; then
+      case ${2:-} in gen) chk= ;; check) chk=--check ;; oracle) chk=oracle ;; *) echo "repr-asm --arch arm64 table gen|check|oracle" >&2; exit 2 ;; esac
+      llvm=$src/llvm-project-23.1.5.src/llvm
+      if [ "$chk" = oracle ]; then
+        # the oracle tier's, by hand (AR2's second slice): the host's llvm-tblgen 23.1.5 prints AArch64.td's records
+        # (-print-records); each instruction's AsmString and Inst bits (fixed, an operand field's, unset) against the table's
+        tblgen=${REPR_ASM_TBLGEN:-/usr/lib/llvm23/bin/llvm-tblgen}
+        o=$root/.tmp/repr-asm/table-oracle-arm64; mkdir -p "$o"
+        "$tblgen" -print-records -I "$llvm/lib/Target/AArch64" -I "$llvm/include" "$llvm/lib/Target/AArch64/AArch64.td" -o "$o/records.txt"
+        arbace_tool -e "(do (load-file \"$root/test/asm/table_oracle_arm64.ae\") nil)" \
+          -e "(asm.table-oracle-arm64/main \"$root/asm/arm64/table.edn\" \"$o/records.txt\")"; exit
+      fi
+      [ -f "$llvm/lib/Target/AArch64/AArch64.td" ] && [ -f "$llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp" ] ||
+        { echo "repr-asm: $llvm/lib/Target/AArch64 missing: bin/repr-asm corpus extract" >&2; exit 1; }
+      [ "$(head -1 "$goroot/VERSION" 2>"$TMPDIR/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
+        { echo "repr-asm: $goroot/VERSION is not the pin's (seed/goroot.sha256's toolchain)" >&2; exit 1; }
+      arbace_tool -m arbace.repr.asm.arm64.tablegen "$goroot" "$root/arbace/repr/asm/arm64/table.ae" ${chk:+"$chk"} || exit 1
+      # ARS24 (a): LLVM's AArch64 records by Arbace's TableGen (about 1 minute, 1.5 GiB)
+      GOMEMLIMIT=${REPR_ASM_TABLE_MEM:-1500MiB} arbace_tool -m arbace.asm.arm64.gen "$llvm" "$root/asm/arm64/table.edn" ${chk:+"$chk"}; exit
+    fi
+    case ${2:-} in gen|check|oracle) ;; *) echo "repr-asm table gen|check|oracle" >&2; exit 2 ;; esac
+    llvm=$src/llvm-project-23.1.5.src/llvm
+    [ -f "$llvm/lib/Target/X86/X86.td" ] || { echo "repr-asm: $llvm/lib/Target/X86/X86.td missing: bin/repr-asm corpus extract" >&2; exit 1; }
+    if [ "$2" = oracle ]; then
+      tblgen=${REPR_ASM_TBLGEN:-/usr/lib/llvm23/bin/llvm-tblgen}
+      o=$root/.tmp/repr-asm/oracle; mkdir -p "$o"; ofails=0
+      "$tblgen" -gen-asm-matcher -I "$llvm/include" -I "$llvm/lib/Target/X86" "$llvm/lib/Target/X86/X86.td" -o "$o/X86GenAsmMatcher.inc"
+      # MatchTable0's and MatchTable1's rows (the AT&T and Intel variants) as MNEMONIC INSTRUCTION CLASS..., the token classes by
+      # their text (the enum's comments), against the table's :match and :match-intel
+      for v in 0 1; do
+      key=match; [ $v = 1 ] && key=match-intel
+      awk -v T="MatchTable$v" '/^  MCK_[A-Za-z0-9_]+, \/\/ / { n = $1; sub(/^MCK_/, "", n); sub(/,$/, "", n); t = $0; sub(/.*\/\/ /, "", t)
+             if (t ~ /^'"'"'/) { gsub(/'"'"'/, "", t); tok[n] = t } }
+           $0 ~ "static const MatchEntry " T "\\[" { on = 1; next }
+           on && /^};/ { on = 0 }
+           on && /\/\* / { m = $0; sub(/.*\/\* /, "", m); sub(/ \*\/.*/, "", m)
+             i = $0; sub(/.*X86::/, "", i); sub(/,.*/, "", i)
+             c = $0; sub(/.*\{ /, "", c); sub(/ ?\}, \},.*/, "", c); gsub(/MCK_/, "", c); gsub(/,/, "", c)
+             k = split(c, cs, " "); out = m " " i
+             for (j = 1; j <= k; j++) out = out " " ((cs[j] in tok) ? tok[cs[j]] : cs[j])
+             print out }' "$o/X86GenAsmMatcher.inc" > "$o/llvm-$v.txt"
+      sed -n "/^ :$key\$/,/^ \]/p" "$root/asm/amd64/table.edn" | sed -n 's/^  \["\([^"]*\)" \[\([^]]*\)\] "\([^"]*\)".*/\1 \3 \2/p' |
+        sed -e 's/"[a-z]*:\([^"]*\)"/\1/g' -e 's/ *$//' > "$o/arbace-$v.txt"
+      if cmp -s "$o/llvm-$v.txt" "$o/arbace-$v.txt"; then
+        echo "repr-asm table oracle: llvm-tblgen's MatchTable$v and the table's :$key are the same $(wc -l < "$o/llvm-$v.txt") rows, in the same order"
+      else
+        echo "FAIL: repr-asm table oracle: llvm-tblgen's MatchTable$v ($(wc -l < "$o/llvm-$v.txt") rows) and the table's :$key ($(wc -l < "$o/arbace-$v.txt")) differ: diff $o/llvm-$v.txt $o/arbace-$v.txt"; ofails=$((ofails + 1))
+      fi
+      done
+      # the printer's aliases: -gen-asm-writer's printAliasInstr patterns (INSTRUCTION MI-OPERANDS CONDITIONS STRING, an operand
+      # $N) against the table's :print-aliases, and -asmwriternum=1's (X86GenAsmWriter1.inc, the Intel printer's) against :print-aliases-intel
+      for v in 0 1; do
+      key=print-aliases; [ $v = 1 ] && key=print-aliases-intel
+      "$tblgen" -gen-asm-writer -asmwriternum=$v -I "$llvm/include" -I "$llvm/lib/Target/X86" "$llvm/lib/Target/X86/X86.td" -o "$o/X86GenAsmWriter$v.inc"
+      # (busybox awk: no gawk's strtonum, the operand's \xNN decoded by hand)
+      awk 'function hx(h) { return (index("0123456789ABCDEF", substr(h, 1, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(h, 2, 1)) - 1 }
+           /static const AliasPattern Patterns/ { p = 1; next } p && /^  };/ { p = 0 }
+           p && /\/\/ X86::/ { n = $0; sub(/.*X86::/, "", n); sub(/ - .*/, "", n) }
+           p && /^    \{/ { s = $0; gsub(/[{} ]/, "", s); split(s, f, ","); pat[++np] = n " " f[1] " " f[3] " " f[4] }
+           /static const char AsmStrings/ { a = 1; next } a && /;$/ { a = 0 }
+           a && /\/\* [0-9]+ \*\// { off = $0; sub(/.*\/\* /, "", off); sub(/ \*\/.*/, "", off); t = $0; sub(/^[^"]*"/, "", t); sub(/\\0"$/, "", t)
+             while (match(t, /\\x[0-9A-F][0-9A-F]/)) { t = substr(t, 1, RSTART - 1) "$" (hx(substr(t, RSTART + 2, 2)) - 1) substr(t, RSTART + 4) }
+             str[off] = t }
+           END { for (i = 1; i <= np; i++) { split(pat[i], g, " "); print g[1], g[3], g[4], str[g[2]] } }' "$o/X86GenAsmWriter$v.inc" > "$o/llvm-aliases-$v.txt"
+      arbace_tool -e "(let [t (read-string (slurp \"$root/asm/amd64/table.edn\"))]
+                        (doseq [[i ps] ((keyword \"$key\") t) [fr n cs] ps]
+                          (println i n (count cs) (apply str (map #(if (string? %) % (str \"\$\" (first %))) fr)))))" > "$o/arbace-aliases-$v.txt"
+      if cmp -s "$o/llvm-aliases-$v.txt" "$o/arbace-aliases-$v.txt"; then
+        echo "repr-asm table oracle: llvm-tblgen's printAliasInstr (writer $v) and the table's :$key are the same $(wc -l < "$o/llvm-aliases-$v.txt") patterns"
+      else
+        echo "FAIL: repr-asm table oracle: the printer's aliases differ: diff $o/llvm-aliases-$v.txt $o/arbace-aliases-$v.txt"; ofails=$((ofails + 1))
+      fi
+      done
+      # AXS37: the conversions, the :insns entries' fields and the printers' strings (test/asm/table_oracle.ae), from
+      # -print-records' resolved fields (extracted: each def's name, its superclasses and the fields the table reads) and the inc
+      # files above
+      "$tblgen" -print-records -I "$llvm/include" -I "$llvm/lib/Target/X86" "$llvm/lib/Target/X86/X86.td" -o "$o/records.txt"
+      awk 'BEGIN { n = split("Opcode Form OpMap OpPrefix OpSize AdSize OpEnc ImmT explicitOpPrefix CD8_Scale hasREX_W hasVEX_4V hasVEX_L ignoresVEX_L hasEVEX_K hasEVEX_Z hasEVEX_L2 hasEVEX_B hasEVEX_RC hasEVEX_U hasEVEX_NF hasTwoConditionalOps hasLockPrefix hasREPPrefix hasNoTrackPrefix IgnoresW isCommutable isPseudo OutOperandList InOperandList Constraints MIOperandInfo isCodeGenOnly ForceDisassemble isAsmParserOnly Predicates", fs, " ")
+                   for (i = 1; i <= n; i++) want[fs[i]] = 1 }
+           /^def [^ ]+ \{/ { print "D " $2; c = $0; if (sub(/.*\/\/[ \t]*/, "", c)) print "S " c; next }
+           /^  [^ ].* = .*;$/ { l = $0; sub(/^  /, "", l); t = l; sub(/ = .*/, "", t); k = split(t, w, " "); f = w[k]
+             if (f in want) { v = l; sub(/^[^=]* = /, "", v); sub(/;$/, "", v); print "F " f "\t" v } }' "$o/records.txt" > "$o/records-fields.txt"
+      rm -f "$o/records.txt"
+      arbace_tool -e "(do (load-file \"$root/test/asm/table_oracle.ae\") nil)" \
+        -e "(let [n (asm.table-oracle/main \"$root/asm/amd64/table.edn\" \"$o\" \"$o/X86GenAsmMatcher.inc\" \"$o/X86GenAsmWriter0.inc\" \"$o/X86GenAsmWriter1.inc\" \"$o/records-fields.txt\")] (spit \"$o/fails\" (str n)))"
+      ofails=$((ofails + $(cat "$o/fails")))
+      [ $ofails = 0 ]; exit
+    fi
+    GOMEMLIMIT=${REPR_ASM_TABLE_MEM:-1200MiB} arbace_tool -m arbace.asm.amd64.gen "$2" "$llvm" "$root/asm/amd64/table.edn" ;;
+  encode-check)
+    shift; record=; ids=()
+    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    if [ "$arch" = arm64 ]; then
+      [ ${#ids[@]} -gt 0 ] || ids=(mc-aarch64 mc-asmparser-aarch64)
+      specs=()
+      for id in "${ids[@]}"; do make_list "$id"; specs+=("$id=$lists/$id.list"); done
+      export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
+      arbace_tool -m arbace.repr.asm.arm64.encheck "$root/test/asm/encode-results-arm64.edn" "$root/test/asm/divergences-encode-arm64.edn" \
+        "$root/test/asm/controls-encode-arm64.txt" "${record:-}" "${specs[@]}"; exit
+    fi
+    [ ${#ids[@]} -gt 0 ] || ids=(mc-x86)
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    works=()
+    for id in "${ids[@]}"; do
+      make_list "$id"
+      work=$root/.tmp/repr-asm/enc/$id; rm -rf "$work"; mkdir -p "$work"
+      arbace_tool -m arbace.asm.amd64.check check "$lists/$id.list" "$work"
+      works+=("$work")
+    done
+    fails=0
+    # the negative controls: a subject's statements judged against a reference's CHECK lines must not meet them all
+    while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.asm.amd64.check control "$sp" "$rp" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-encode.txt"
+    # the print level's: a subject's statements printed (in hex with `hex`) and judged against a reference's CHECK texts must not meet them all
+    while read -r cid subj ref hex; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.asm.amd64.check control-print "$sp" "$rp" ${hex:+"$hex"} | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-print.txt"
+    # the cross-syntax judge's: a subject's AT&T instructions printed in Intel and read back, held to a reference's, must differ
+    while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.asm.amd64.check control-cross "$sp" "$rp" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-cross.txt"
+    # a record only from a run whose controls all fail as they must
+    if [ -n "$record" ] && [ $fails != 0 ]; then echo "repr-asm encode-check: not recorded: $fails controls did not fail"; record=; fi
+    judge=(-e "(do (load-file \"$root/test/asm/encode_judge.ae\") nil)" -e "(asm.encode-judge/main \"$root/test/asm/encode-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-encode.edn\" \"${record:-}\" \"$root/test/asm/divergences-print.edn\" \"$root/test/asm/divergences-cross.edn\")")
+    arbace_tool "${judge[@]}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  print-oracle)
+    # the oracle tier's, by hand: each AT&T file's printed instructions against the host's llvm-mc 23.1.5 (REPR_ASM_MC, default
+    # /usr/lib/llvm23/bin/llvm-mc) run with the file's first AT&T run's triple, its instruction lines (comments dropped) diffed
+    # with the printer's (the statements the check does not print left out)
+    shift; id=${1:-mc-x86}; mc=${REPR_ASM_MC:-/usr/lib/llvm23/bin/llvm-mc}
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    make_list "$id"
+    o=$root/.tmp/repr-asm/print-oracle/$id; rm -rf "$o"; mkdir -p "$o"
+    arbace_tool -m arbace.asm.amd64.check print-list "$lists/$id.list" "$o"
+    files=0 same=0 lines=0 extra=0
+    for r in "$o"/*.run; do
+      n=${r%.run}; IFS=$'\t' read -r opts path < "$r"
+      # shellcheck disable=SC2086
+      "$mc" -triple $opts "$path" 2>"$n.err" | grep -P '^\t[^.]' | sed -e 's/[ \t]*#.*//' -e 's/[ \t]*$//' > "$n.llvm" || true
+      grep -v '^<' "$n.txt" | sed 's/[ \t]*$//' > "$n.ours" || true
+      files=$((files + 1)); lines=$((lines + $(wc -l < "$n.ours")))
+      if cmp -s "$n.llvm" "$n.ours"; then same=$((same + 1)); else
+        k=$(diff "$n.llvm" "$n.ours" | grep -c '^>' || true); extra=$((extra + k))
+        [ "$k" -gt 0 ] && echo "repr-asm print-oracle: ${n##*/}: $k printed lines not llvm-mc's"
+      fi
+    done
+    echo "repr-asm print-oracle: $files files, $same with llvm-mc's very lines; $lines lines printed, $extra of them not llvm-mc's (diff $o/NAME.llvm $o/NAME.ours)" ;;
+  object) shift; export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m $objns object "$@" ;;
+  object-dump) shift; arbace_tool -m $objns dump "$@" ;;
+  link)
+    shift; out= objs=()
+    while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift 2 ;; *) objs+=("$1"); shift ;; esac; done
+    [ -n "$out" ] && [ ${#objs[@]} -gt 0 ] || { echo "repr-asm link OBJ... -o OUT" >&2; exit 2; }
+    if [ "$arch" = arm64 ]; then arbace_tool -m arbace.asm.link link "$out" --arm64 "${objs[@]}"; else arbace_tool -m arbace.asm.link link "$out" "${objs[@]}"; fi
+    chmod +x "$out" ;;
+  object-record)
+    shift; id=${obj_default[0]}; [ $# -gt 0 ] && [ "${1#--}" = "$1" ] && id=$1
+    mc=${REPR_ASM_MC:-/usr/lib/llvm23/bin/llvm-mc}
+    "$mc" --version | grep -q 'LLVM version 23.1.5' || { echo "repr-asm object-record: $mc is not llvm-mc 23.1.5" >&2; exit 1; }
+    obj_list "$id"
+    rec=$root/test/asm/records/obj-$id-llvm-mc-23.1.5.edn o=$root/.tmp/repr-asm/obj-record/$id; rm -rf "$o"; mkdir -p "$o" "${rec%/*}"
+    {
+      echo ";; llvm-mc 23.1.5's objects of the corpus $id (the oracle tier's, by hand: bin/repr-asm object-record $id), each file"
+      echo ";; assembled by \`llvm-mc -triple $triple -filetype=obj\`, twice, the two byte for byte; the object as hex"
+      echo ";; with its SHA-256. Read by bin/repr-asm object-check (no llvm-mc); the file is pinned by its .sha256. Read with the"
+      echo ";; Clojure reader."
+      echo "{:tool \"llvm-mc 23.1.5\" :triple \"${triple%% *}\" :options \"$triple\" :corpus :$id"
+      echo " :objects"
+      echo " {"
+      while IFS=$'\t' read -r n p _; do
+        "$mc" -triple $triple -filetype=obj "$p" -o "$o/$n.o" 2>"$o/$n.err" || { echo "repr-asm object-record: llvm-mc refuses $n (left out)" >&2; continue; }
+        "$mc" -triple $triple -filetype=obj "$p" -o "$o/$n.2.o" 2>"$o/$n.err"
+        cmp -s "$o/$n.o" "$o/$n.2.o" || { echo "repr-asm object-record: $n differs between two runs" >&2; exit 1; }
+        printf '  "%s" {:sha256 "%s" :bytes %s\n   :hex "%s"}\n' "$n" "$(sha256sum "$o/$n.o" | cut -d' ' -f1)" "$(stat -c %s "$o/$n.o")" "$(od -An -v -tx1 "$o/$n.o" | tr -d ' \n')"
+      done < "$lists/$id.list"
+      echo " }}"
+    } > "$rec"
+    (cd "$root" && sha256sum "test/asm/records/${rec##*/}") > "${rec%.edn}.sha256"
+    echo "repr-asm object-record: $(grep -c ':sha256' "$rec") objects into ${rec#$root/}, pinned" ;;
+  object-check)
+    shift; record=; ids=()
+    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    [ ${#ids[@]} -gt 0 ] || ids=("${obj_default[@]}")
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    fails=0 works=()
+    for id in "${ids[@]}"; do
+      rec=$root/test/asm/records/obj-$id-llvm-mc-23.1.5.edn
+      (cd "$root" && sha256sum -c --quiet "${rec%.edn}.sha256") || { echo "FAIL: repr-asm object-check: ${rec#$root/} is not its pin" >&2; exit 1; }
+      obj_list "$id"
+      work=$root/.tmp/repr-asm/obj/$id; rm -rf "$work"; mkdir -p "$work"
+      # the files llvm-mc assembled when the record was made (a file it refuses has no object to judge against)
+      grep -o '^  "[^"]*"' "$rec" | tr -d ' "' > "$work/recorded.txt"
+      awk -F'\t' 'NR == FNR { r[$1] = 1; next } r[$1]' "$work/recorded.txt" "$lists/$id.list" > "$work/list"
+      arbace_tool -m $objns check "$work/list" "$work" "$rec" || fails=$((fails + 1))
+      works+=("$work")
+      # the negative controls: a file's object judged against another file's record must differ
+      while read -r cid subj ref; do
+        case $cid in ''|'#'*) continue ;; esac
+        [ "${subj%%/*}" = "$id" ] || continue
+        sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/$id.list")
+        [ -n "$sp" ] || { echo "FAIL: control $cid: left (its subject is not in $id's list)"; fails=$((fails + 1)); continue; }
+        v=$(arbace_tool -m $objns control "$sp" "${ref#*/}" "$rec" | tail -1)
+        if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+      done < "$obj_controls"
+    done
+    judge=(-e "(do (load-file \"$root/test/asm/object_judge.ae\") nil)" -e "(asm.object-judge/main \"$obj_results\" \"${works[*]}\" \"$obj_classes\" \"${record:-}\")")
+    arbace_tool "${judge[@]}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  object-verdict)
+    # AR4: MC/AArch64's object tests by their own CHECK lines (arbace.asm.arm64.objcheck; no LLVM tool): each object run's
+    # stated bytes and relocations held to Arbace's view of Arbace's object; rows test/asm/objverdict-results-arm64.edn, classes
+    # test/asm/divergences-object-arm64.edn, controls test/asm/controls-objverdict-arm64.txt (a test's object held to another's lines)
+    [ "$arch" = arm64 ] || { echo "repr-asm: object-verdict is arm64's" >&2; exit 2; }
+    shift; record=
+    for a in "$@"; do case $a in --record) record=1 ;; esac; done
+    obj_list mc-aarch64-obj
+    work=$root/.tmp/repr-asm/objverdict; rm -rf "$work"; mkdir -p "$work"
+    arbace_tool -m arbace.asm.arm64.objcheck check "$lists/mc-aarch64-obj.list" mc-aarch64-obj "$work"
+    fails=0
+    while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/mc-aarch64-obj.list")
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/mc-aarch64-obj.list")
+      if [ -z "$sp" ] || [ -z "$rp" ]; then echo "FAIL: control $cid: left (not in the corpus)"; fails=$((fails + 1)); continue; fi
+      v=$(arbace_tool -m arbace.asm.arm64.objcheck control "$sp" "$rp" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-objverdict-arm64.txt"
+    if [ -n "$record" ] && [ $fails != 0 ]; then echo "repr-asm object-verdict: not recorded: $fails controls did not fail"; record=; fi
+    arbace_tool -m arbace.asm.arm64.objcheck judge "$root/test/asm/objverdict-results-arm64.edn" "$work" "$root/test/asm/divergences-object-arm64.edn" "${record:-}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  run-check)
+    # AX4's runs: each test of test/asm/run/ (its own verdict in its header) assembled and linked by Arbace into WORK/NAME, run by
+    # the CPU under a time limit (the test's own program, nothing else), judged by its verdict; rows against
+    # test/asm/run-results-amd64.edn, classes test/asm/divergences-run.edn, controls test/asm/controls-run.txt
+    shift; record=
+    for a in "$@"; do case $a in --record) record=1 ;; esac; done
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    # arm64's (AR4): test/asm/run-arm64/, run natively on an arm64 host only (else the build alone, the runs left: not judged)
+    case $arch in amd64) rdir=run sfx=amd64 rctl=controls-run.txt rcls=divergences-run.edn ;; *) rdir=run-arm64 sfx=arm64 rctl=controls-run-arm64.txt rcls=divergences-run-arm64.edn ;; esac
+    work=$root/.tmp/repr-asm/$rdir/run; rm -rf "$work"; mkdir -p "$work" "$lists"
+    : > "$lists/$rdir.list"
+    for f in "$root"/test/asm/$rdir/*.s; do n=${f##*/}; printf '%s\t%s\n' "${n%.s}" "$f" >> "$lists/$rdir.list"; done
+    musl=$src/musl-1.2.6
+    arbace_tool -m arbace.asm.link build "$lists/$rdir.list" "$work" "$musl" "$arch"
+    # the CPU that runs them: this host's when it is the arch's, else an emulator (REPR_ASM_RUNNER, for arm64 by default
+    # qemu-aarch64 when present: an emulation, said so in the summary; ARS12)
+    case $(uname -m) in x86_64) native=amd64 ;; aarch64|arm64) native=arm64 ;; *) native= ;; esac
+    runner=
+    if [ "$native" != "$arch" ]; then
+      runner=${REPR_ASM_RUNNER:-$( [ "$arch" = arm64 ] && command -v qemu-aarch64 || true)}
+      [ -n "$runner" ] || { echo "FAIL: repr-asm run-check: the $arch programs need an $arch CPU or an emulator (REPR_ASM_RUNNER; this is $(uname -m))"; exit 1; }
+      echo "repr-asm run-check: the $arch programs run by $runner (an emulation, not an $arch CPU)"
+    fi
+    fails=0
+    while IFS=$'\t' read -r n c _; do
+      [ "$c" = built ] || continue
+      t_prog=$SECONDS
+      chmod +x "$work/$n"
+      st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" $runner "./$n" > "$n.out" 2> "$n.err") || st=$?
+      echo "$st" > "$work/$n.status"
+    done < "$work/build.tsv"
+    arbace_tool -m arbace.asm.link verdicts "$work"
+    while read -r cid subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      v=$(arbace_tool -m arbace.asm.link control "$work" "$subj" "$ref" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/$rctl"
+    arbace_tool -e "(do (load-file \"$root/test/asm/run_judge.ae\") nil)" -e "(asm.run-judge/main \"$root/test/asm/run-results-$sfx.edn\" \"$work\" \"$root/test/asm/$rcls\" \"${record:-}\")" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  link-oracle)
+    # the oracle tier's, by hand: the host's GNU ld (REPR_ASM_LD, default ld.bfd; ld.lld when present) links the run check's
+    # objects (the last run-check's WORK) and the two executables are compared at the canonical level
+    shift
+    ld=${REPR_ASM_LD:-$(command -v ld.lld || command -v ld.bfd)}
+    work=$root/.tmp/repr-asm/run/run o=$root/.tmp/repr-asm/run/oracle; rm -rf "$o"; mkdir -p "$o"
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    arbace_tool -m arbace.asm.link oracle-objects "$lists/run.list" "$o" "$src/musl-1.2.6"
+    while IFS=$'\t' read -r n objs; do
+      # shellcheck disable=SC2086
+      "$ld" -static -o "$o/$n.ref" $objs 2> "$o/$n.ld.err" || { echo "$n: $ld refuses: $(head -1 "$o/$n.ld.err")"; continue; }
+      st=0; (cd "$o" && timeout 10 "./$n.ref" > "$n.ref.out" 2>&1) || st=$?
+      echo "$n: ${ld##*/}'s run exit $st, stdout $(cmp -s "$o/$n.ref.out" "$work/$n.out" && echo same || echo differs) as Arbace's"
+      arbace_tool -m arbace.asm.link compare "$work/$n" "$o/$n.ref"
+    done < "$o/objects.tsv" ;;
+  decode) shift; export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.decode-check decode "$@" ;;
+  decode-object) shift; export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.decode-check decode-object "$@" ;;
+  decode-check)
+    shift; record=; levels=()
+    for a in "$@"; do case $a in --record) record=1 ;; dis|rt|obj) levels+=("$a") ;; *) echo "repr-asm decode-check [--record] [dis|rt|obj...]" >&2; exit 2 ;; esac; done
+    [ ${#levels[@]} -gt 0 ] || levels=(dis rt obj)
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    work=$root/.tmp/repr-asm/decode; rm -rf "$work"; mkdir -p "$work" "$lists"
+    dl= rl= ol=
+    for l in "${levels[@]}"; do
+      case $l in
+        dis) d=$src/$(edn '(println (:dir (first (filter #(= (:id %) :mc-x86-dis) (:decode-corpora c)))))')
+             [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; exit 1; }
+             (cd "$d" && find . -type f \( -name '*.txt' -o -name '*.s' \) | sed 's|^\./||' | LC_ALL=C sort) |
+               awk -v d="$d" '{ n = $0; sub(/\.(txt|s)$/, "", n); gsub("/", "-", n); print n "\t" d "/" $0 }' > "$lists/mc-x86-dis.list"
+             echo "repr-asm: mc-x86-dis: $(wc -l < "$lists/mc-x86-dis.list") files"; dl=$lists/mc-x86-dis.list ;;
+        rt) make_list mc-x86; rl=$lists/mc-x86.list ;;
+        obj) make_list musl; ol=$lists/musl.list ;;
+      esac
+    done
+    arbace_tool -m arbace.asm.amd64.decode-check check "$dl" "$rl" "$ol" "$work"
+    fails=0
+    # the negative controls: KIND SUBJECT REFERENCE (dis: a test's bytes against another test's CHECK lines; rt: a file's met
+    # encodings decoded in another mode; obj: a musl object's code held to another file's instructions)
+    while read -r cid kind subj ref; do
+      case $cid in ''|'#'*) continue ;; esac
+      case $kind in
+        dis) [ -n "$dl" ] || continue
+             a=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$dl"); b=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$dl") ;;
+        rt) [ -n "$rl" ] || continue
+            a=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$rl"); b=$ref ;;
+        obj) [ -n "$ol" ] || continue
+             a=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$ol"); b=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$ol") ;;
+        *) continue ;;
+      esac
+      if [ -z "$a" ] || [ -z "$b" ]; then echo "control $cid: left (not in this run)"; continue; fi
+      v=$(arbace_tool -m arbace.asm.amd64.decode-check control "$kind" "$a" "$b" | tail -1)
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/asm/controls-decode.txt"
+    arbace_tool -e "(do (load-file \"$root/test/asm/decode_judge.ae\") nil)" -e "(asm.decode-judge/main \"$root/test/asm/decode-results-amd64.edn\" \"$work\" \"$root/test/asm/divergences-decode.edn\" \"${record:-}\")" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  link-dump) shift; arbace_tool -m arbace.asm.link dump "$@" ;;
+  a64i)
+    # AR5: a64i, arm64's machine (go/arbace/a64i over the frame go/arbace/emu)
+    case ${2:-} in
+      light) a64i_light ;;
+      run|decode-text|forms-check|trace) v=$2; shift 2; [ -x "$a64i_exe" ] || a64i_light; exec "$a64i_exe" "$v" "$@" ;;
+      eval-build) shift 2; [ $# -eq 2 ] || { echo "repr-asm a64i eval-build LIST WORK" >&2; exit 2; }
+        export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
+        arbace_tool -m arbace.asm.arm64.eval build "$1" "$2" "$src/musl-1.2.6" ;;
+      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|eval-build LIST WORK" >&2; exit 2 ;;
+    esac ;;
+  a64i-check)
+    # AR5: test/asm/run-arm64/'s and test/asm/a64i/'s programs built for AOT (arbace.asm.link build: WORK/NAME) and for eval
+    # (arbace.asm.arm64.eval: WORK/NAME.eval, WORK/NAME.forms), each run by a64i both ways (WORK/NAME.aot.*, WORK/NAME.eval.*),
+    # its forms against its decoded words (WORK/NAME.fc); on an arm64 host run by the CPU too (WORK/NAME.status, .out, .err) and
+    # the lockstep in the sys and step modes (WORK/NAME.sys, .step; a header's `# step-limit: N` bounds the step mode); the
+    # controls' runs; judged by test/asm/a64i_judge.ae. --only NAME,...: those programs alone (not recordable)
+    shift; record= only=
+    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; *) echo "repr-asm --arch arm64 a64i-check [--record] [--only NAME,...]" >&2; exit 2 ;; esac; done
+    [ -z "$only" ] || [ -z "$record" ] || { echo "repr-asm a64i-check: --only is not recordable" >&2; exit 2; }
+    export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
+    work=$root/.tmp/repr-asm/a64i; rm -rf "$work"; mkdir -p "$work" "$lists"
+    : > "$lists/a64i.list"
+    for f in "$root"/test/asm/run-arm64/*.s "$root"/test/asm/a64i/*.s; do
+      n=${f##*/}; n=${n%.s}
+      case $n in duplicate|undefined) continue ;; esac
+      [ -z "$only" ] || case ",$only," in *",$n,"*) ;; *) continue ;; esac
+      printf '%s\t%s\n' "$n" "$f" >> "$lists/a64i.list"
+    done
+    arbace_tool -m arbace.asm.link build "$lists/a64i.list" "$work" "$src/musl-1.2.6" arm64
+    arbace_tool -m arbace.asm.arm64.eval build "$lists/a64i.list" "$work" "$src/musl-1.2.6"
+    [ -x "$a64i_exe" ] || a64i_light
+    case $(uname -m) in aarch64|arm64) native=1 ;; *) native=0; echo "a64i-check: not an arm64 host: the CPU's runs and the lockstep are the arm64 VM's (their recorded rows stand)" ;; esac
+    ctl=$root/test/asm/controls-a64i.txt
+    while IFS=$'\t' read -r n c _; do
+      [ "$c" = built ] || continue
+      chmod +x "$work/$n"
+      st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$a64i_exe" run --coverage "$n.cov" "./$n" > "$n.aot.out" 2> "$n.aot.err") || st=$?
+      echo "$st" > "$work/$n.aot.status"
+      if [ -f "$work/$n.forms" ]; then
+        st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$a64i_exe" run --forms "$n.forms" "./$n.eval" > "$n.eval.out" 2> "$n.eval.err") || st=$?
+        echo "$st" > "$work/$n.eval.status"
+        "$a64i_exe" forms-check "$work/$n" "$work/$n.forms" > "$work/$n.fc" || true
+      fi
+      if [ $native = 1 ]; then
+        st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" "./$n" > "$n.out" 2> "$n.err") || st=$?
+        echo "$st" > "$work/$n.status"
+        (cd "$work" && GOMAXPROCS=1 timeout 120 "$a64i_exe" trace --mode sys "./$n" > "$n.sys" 2>&1) || true
+        lim=$(sed -n 's/^#[[:space:]]*step-limit:[[:space:]]*\([0-9]*\).*/\1/p' "$(awk -F'\t' -v n="$n" '$1==n{print $2}' "$lists/a64i.list")" | head -1)
+        (cd "$work" && A64I_STEP_LIMIT=${lim:-0} GOMAXPROCS=1 timeout "${REPR_ASM_STEP_TIMEOUT:-600}" "$a64i_exe" trace --mode step "./$n" > "$n.step" 2>&1) || true
+      fi
+      while read -r cid kind subj ref; do
+        case $cid in ''|'#'*) continue ;; esac
+        [ "$subj" = "$n" ] || continue
+        tag=${ref/:/-}
+        case $kind in
+          inject) st=0; (cd "$work" && A64I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$a64i_exe" run "./$n" > "$n.inject-$tag.out" 2> "$n.inject-$tag.err") || st=$?
+                  echo "$st" > "$work/$n.inject-$tag.status" ;;
+          forms) [ -f "$work/$ref" ] && "$a64i_exe" forms-check "$work/$ref" "$work/$n.forms" > "$work/$n.forms-$ref" || true ;;
+          sys|step|bisect) [ $native = 1 ] || continue
+            (cd "$work" && A64I_INJECT=$ref A64I_STEP_LIMIT=200000 GOMAXPROCS=1 timeout 120 "$a64i_exe" trace --mode $kind "./$n" > "$n.$kind-$tag" 2>&1) || true ;;
+        esac
+      done < "$ctl"
+    done < "$work/build.tsv"
+    fails=0
+    judge=(-e "(do (load-file \"$root/test/asm/a64i_judge.ae\") nil)")
+    if [ -z "$only" ]; then
+      arbace_tool "${judge[@]}" -e "(asm.a64i-judge/controls \"$work\" \"$ctl\" $([ $native = 1 ] && echo true || echo false))" || fails=$((fails + 1))
+      arbace_tool "${judge[@]}" -e "(asm.a64i-judge/main \"$root/test/asm/a64i-results-arm64.edn\" \"$work\" \"$root/test/asm/divergences-a64i.edn\" \"${record:-}\" \"$native\")" || fails=$((fails + 1))
+    else
+      arbace_tool "${judge[@]}" -e "(doseq [r (asm.a64i-judge/rows \"$work\" $([ $native = 1 ] && echo true || echo false))] (prn r))"
+    fi
+    [ $fails = 0 ] ;;
+  x86i)
+    shift
+    case ${1:-} in
+      light) x86i_light ;;
+      run) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" run "$@" ;;
+      decode-text) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" decode-text "$@" ;;
+      decode-hex) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" decode-hex "$@" ;;
+      claimed) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" claimed ;;
+      trace) shift; [ -x "$x86i_exe" ] || x86i_light; exec "$x86i_exe" trace "$@" ;;
+      gen) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen gen "$root/go/arbace/x86i/dectab.ae" ;;
+      gen-check) export REPR_ASM_TABLE=$root/asm/amd64/table.edn; arbace_tool -m arbace.asm.amd64.dgen check "$root/go/arbace/x86i/dectab.ae" ;;
+      synth) shift; [ $# -ge 1 ] || { echo "repr-asm x86i synth DIR [--record]" >&2; exit 2; }
+        rec=; [ "${2:-}" = --record ] && rec=1
+        arbace_tool -e "(do (load-file \"$root/test/asm/x86i/gen.ae\") nil)" -e "(asm.x86i-gen/main \"$1\" \"$root/test/asm/x86i/lib/hex.s\" \"$root/test/asm/x86i/synth-digests.edn\" \"$rec\")" ;;
+      *) echo "repr-asm x86i light|run EXE [ARG...]|decode-text EXE|decode-hex FILE|claimed|trace --mode sys|step|bisect EXE [ARG...]|gen|gen-check|synth DIR [--record]" >&2; exit 2 ;;
+    esac ;;
+  x86i-check)
+    # AX5.2: each test of test/asm/run/ assembled and linked by Arbace into WORK/NAME (as run-check), run by the CPU (WORK/NAME.status,
+    # .out, .err) and by x86i (WORK/NAME.x86i.*), decoded by x86i (WORK/NAME.dec), the injected runs the controls name
+    # (WORK/NAME.inject-FAMILY-FLAG.*); judged by test/asm/x86i_judge.ae
+    # AXS89 (a): --only LIST (a file of program names, one a line, as the gate's rotation writes its list) runs those programs alone,
+    # each with its lockstep's sys and step modes, judged on what it ran: the recorded rows of the others are left, the coverage
+    # is not held, the controls whose programs are not in the list are not judged, and one more control, slice-foreign, judges the
+    # run against the recorded rows of the programs it did not run, which must fail; --record needs the whole set
+    shift; record=; only=
+    while [ $# -gt 0 ]; do case $1 in
+      --record) record=1 ;;
+      --only) [ $# -ge 2 ] && [ -f "$2" ] || { echo "repr-asm x86i-check --only LIST: LIST is a file of program names" >&2; exit 2 ; }; only=$2; shift ;;
+      *) echo "repr-asm x86i-check [--record] [--only LIST]" >&2; exit 2 ;; esac; shift; done
+    [ -z "$record" ] || [ -z "$only" ] || { echo "repr-asm x86i-check: --record records the whole set: no --only" >&2; exit 2; }
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    work=$root/.tmp/repr-asm/x86i; rm -rf "$work"; mkdir -p "$work" "$lists"
+    : > "$lists/x86i.list"
+    # the synthetic programs (AX5.4): written by test/asm/x86i/gen.ae into WORK/synth, their digests the recorded ones
+    "$0" x86i synth "$work/synth"
+    for f in "$root"/test/asm/run/*.s "$root"/test/asm/x86i/*.s "$work"/synth/*.s; do n=${f##*/}; printf '%s\t%s\n' "${n%.s}" "$f" >> "$lists/x86i.list"; done
+    if [ -n "$only" ]; then
+      unknown=$(awk -F'\t' 'FNR == NR { if ($0 != "") want[$0] = 1; next } { have[$1] = 1 } END { for (n in want) if (!(n in have)) print n }' "$only" "$lists/x86i.list")
+      [ -z "$unknown" ] || { echo "repr-asm x86i-check: --only names programs that do not exist:" $unknown >&2; exit 2; }
+      awk -F'\t' 'FNR == NR { want[$0] = 1; next } $1 in want' "$only" "$lists/x86i.list" > "$lists/x86i.list.slice"
+      mv "$lists/x86i.list.slice" "$lists/x86i.list"
+      [ -s "$lists/x86i.list" ] || { echo "repr-asm x86i-check: --only LIST is empty" >&2; exit 2; }
+    fi
+    t_start=$SECONDS; : > "$work/times.tsv"
+    arbace_tool -m arbace.asm.link build "$lists/x86i.list" "$work" "$src/musl-1.2.6"
+    x86i_light
+    t_progs0=$SECONDS
+    ctl=$root/test/asm/controls-x86i.txt
+    while IFS=$'\t' read -r n c _; do
+      [ "$c" = built ] || continue
+      t_prog=$SECONDS
+      chmod +x "$work/$n"
+      st=0; (cd "$work" && timeout "${REPR_ASM_RUN_TIMEOUT:-10}" $runner "./$n" > "$n.out" 2> "$n.err") || st=$?
+      echo "$st" > "$work/$n.status"
+      st=0; (cd "$work" && GOMAXPROCS=1 timeout 60 "$x86i_exe" run --coverage "$n.cov" "./$n" > "$n.x86i.out" 2> "$n.x86i.err") || st=$?
+      echo "$st" > "$work/$n.x86i.status"
+      "$x86i_exe" decode-text "$work/$n" > "$work/$n.dec"
+      (cd "$work" && GOMAXPROCS=1 timeout 60 "$x86i_exe" trace --mode sys "./$n" > "$n.trace" 2>&1) || true
+      # the step mode (AX5.3): every instruction compared; a program's header may bound it (`# step-limit: N`, the rest in sys mode)
+      lim=$(sed -n 's/^#[[:space:]]*step-limit:[[:space:]]*\([0-9]*\).*/\1/p' "$(awk -F'\t' -v n="$n" '$1==n{print $2}' "$lists/x86i.list")" | head -1)
+      (cd "$work" && X86I_STEP_LIMIT=${lim:-0} GOMAXPROCS=1 timeout "${REPR_ASM_STEP_TIMEOUT:-600}" "$x86i_exe" trace --mode step "./$n" > "$n.step" 2>&1) || true
+      while read -r cid kind subj ref; do
+        case $cid in ''|'#'*) continue ;; esac
+        [ "$subj" = "$n" ] || continue
+        case $kind in
+          inject)
+            sfx=inject-${ref/:/-}
+            st=0; (cd "$work" && X86I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$x86i_exe" run "./$n" > "$n.$sfx.out" 2> "$n.$sfx.err") || st=$?
+            echo "$st" > "$work/$n.$sfx.status" ;;
+          lockstep)
+            (cd "$work" && X86I_INJECT=$ref GOMAXPROCS=1 timeout 60 "$x86i_exe" trace --mode sys "./$n" > "$n.trace-${ref/:/-}" 2>&1) || true ;;
+          step|bisect|loader)
+            m=$kind; [ "$kind" = loader ] && m=sys
+            (cd "$work" && X86I_INJECT=$ref X86I_STEP_LIMIT=200000 GOMAXPROCS=1 timeout 120 "$x86i_exe" trace --mode $m "./$n" > "$n.$kind-${ref/:/-}" 2>&1) || true ;;
+        esac
+      done < "$ctl"
+      printf '%s\t%s\n' "$n" "$((SECONDS - t_prog))" >> "$work/times.tsv"
+    done < "$work/build.tsv"
+    echo "repr-asm x86i-check: $(wc -l < "$lists/x86i.list" | tr -d ' ') programs${only:+ (--only $only)}: built in $((t_progs0 - t_start))s, run in $((SECONDS - t_progs0))s (WORK/times.tsv: each program's seconds)"
+    fails=0
+    # the per-run coverage (AX5.5): the instructions the families claim (x86i claimed) against those the runs executed (their
+    # .cov), the claimed ones never executed listed by family in WORK/coverage.txt; held to (or recorded into)
+    # test/asm/x86i-coverage-amd64.txt: an instruction executed when recorded and not now fails
+    "$x86i_exe" claimed > "$work/claimed.txt"
+    cat "$work"/*.cov > "$work/executed.txt"
+    awk 'FNR == NR { ex[$1] = 1; next } { n[$2]++; if ($1 in ex) e[$2]++; else un[$2] = un[$2] " " $1 }
+         END { for (f in n) { printf "%s %d of %d executed;%s\n", f, e[f], n[f], un[f]; t += n[f]; te += e[f] }
+               printf "all %d of %d executed\n", te, t > tot }' tot="$work/coverage-total.txt" "$work/executed.txt" "$work/claimed.txt" |
+      LC_ALL=C sort > "$work/coverage.txt"
+    echo "repr-asm x86i-check: coverage: $(cat "$work/coverage-total.txt") (the families' claimed instructions; WORK/coverage.txt)"
+    cov=$root/test/asm/x86i-coverage-amd64.txt
+    if [ -n "${record:-}" ]; then
+      { echo "# x86i's per-run coverage (bin/repr-asm x86i-check --record; AX5.5): by family, the claimed instructions executed by the"
+        echo "# check's programs, then those never executed. Written by the check; an instruction executed here and not in a later run fails it."
+        cat "$work/coverage.txt"; } > "$cov"
+    elif [ -n "$only" ]; then
+      echo "repr-asm x86i-check: coverage of this slice only, not held to the record"
+    elif [ -f "$cov" ]; then
+      lost=$(awk 'FNR == NR { if ($0 !~ /^#/) for (i = 6; i <= NF; i++) was[$i] = 1; next } { for (i = 6; i <= NF; i++) if (!($i in was)) print $i }' "$cov" "$work/coverage.txt")
+      if [ -n "$lost" ]; then echo "FAIL: x86i-check: coverage: executed when recorded, not now:" $lost; fails=$((fails + 1)); fi
+    fi
+    judge=(-e "(do (load-file \"$root/test/asm/x86i_judge.ae\") nil)")
+    arbace_tool "${judge[@]}" -e "(asm.x86i-judge/controls \"$work\" \"$lists/x86i.list\" \"$ctl\" \"${only:+partial}\")" || fails=$((fails + 1))
+    arbace_tool "${judge[@]}" -e "(asm.x86i-judge/main \"$root/test/asm/x86i-results-amd64.edn\" \"$work\" \"$lists/x86i.list\" \"$root/test/asm/divergences-x86i.edn\" \"${record:-}\" \"${only:+partial}\")" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  x86i-decode-check)
+    # AX5.5, AXS70 (b): x86i's Go decoder against arbace.asm.amd64.decode over the decode check's corpora in 64-bit mode (MC/X86's
+    # met encodings, MC/Disassembler/X86's byte strings): WORK/expected.tsv by arbace.asm.amd64.decode-check's x86i-corpus,
+    # WORK/x86i.tsv by `x86i decode-hex`, judged by test/asm/x86i_decode_judge.ae with its controls
+    shift; record=
+    for a in "$@"; do case $a in --record) record=1 ;; *) echo "repr-asm x86i-decode-check [--record]" >&2; exit 2 ;; esac; done
+    export REPR_ASM_TABLE=$root/asm/amd64/table.edn
+    work=$root/.tmp/repr-asm/x86i-decode; rm -rf "$work"; mkdir -p "$work" "$lists"
+    d=$src/$(edn '(println (:dir (first (filter #(= (:id %) :mc-x86-dis) (:decode-corpora c)))))')
+    [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; exit 1; }
+    (cd "$d" && find . -type f \( -name '*.txt' -o -name '*.s' \) | sed 's|^\./||' | LC_ALL=C sort) |
+      awk -v d="$d" '{ n = $0; sub(/\.(txt|s)$/, "", n); gsub("/", "-", n); print n "\t" d "/" $0 }' > "$lists/mc-x86-dis.list"
+    make_list mc-x86
+    arbace_tool -m arbace.asm.amd64.decode-check x86i-corpus "$lists/mc-x86-dis.list" "$lists/mc-x86.list" "$work/expected.tsv"
+    [ -x "$x86i_exe" ] || x86i_light
+    "$x86i_exe" decode-hex "$work/expected.tsv" > "$work/x86i.tsv"
+    fails=0
+    judge=(-e "(do (load-file \"$root/test/asm/x86i_decode_judge.ae\") nil)")
+    arbace_tool "${judge[@]}" -e "(asm.x86i-decode-judge/controls \"$work/expected.tsv\" \"$work/x86i.tsv\" \"$root/test/asm/controls-x86i-decode.txt\")" || fails=$((fails + 1))
+    arbace_tool "${judge[@]}" -e "(asm.x86i-decode-judge/main \"$root/test/asm/x86i-decode-results-amd64.edn\" \"$work/expected.tsv\" \"$work/x86i.tsv\" \"$root/test/asm/divergences-x86i.edn\" \"${record:-}\")" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  divergences)
+    arbace_tool -e "(do (load-file \"$root/test/asm/judge.ae\") nil)" -e "(asm.judge/main \"$results\" \"${2:-$results}\" \"$classes\" \"\" \"\")" ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2; exit 2 ;;
+esac

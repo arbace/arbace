@@ -1184,6 +1184,12 @@ The SysV x86-64 psABI's, which gcc follows (cc's `abi.go` holds the same tables 
   `unsigned long` or `long` (measured: `enum { A0, A1 }` is `unsigned`, its constants `int`;
   `enum { X = 1, Y = 0x100000000 }` is `unsigned long`, C23's constants of the enumerated type).
 - `#pragma pack(n)`, `__attribute__((packed))`, `aligned(n)`, `alignas` change the layout as gcc does.
+- `__attribute__((ms_struct))` lays a structure out as gcc's documented Microsoft layout (x86 type attributes, `-mms-bitfields`):
+  bit-fields share a unit of their type's size only while the types' sizes agree and the next one fits; a new unit at the type's
+  alignment (1 when packed, capped by `#pragma pack`); an unnamed bit-field's type aligns the record; a zero-width bit-field ends
+  the run it follows and aligns the record and the next member to its type, and is ignored after a non-bit-field. `gcc_struct`,
+  the default here, undoes it (of the two, the first written wins); `-mms-bitfields` itself is not read. Measured:
+  `test/c/run/ms-struct.c`.
 - Padding bytes' values: zero in static storage; otherwise unspecified (6.2.6.1), and a struct
   assignment copies them (as gcc's `-O0` code does with `rep movs` or moves of the whole object).
 
