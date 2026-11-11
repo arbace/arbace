@@ -160,9 +160,24 @@ def findtests(testdir, exclude=(), split_test_dirs=SPLITTESTDIRS, base_mod=""):
     return sorted(tests)
 
 
+def split_test_dirs(testdir):
+    """The tree's own SPLITTESTDIRS (queue 252): its libregrtest/findtests.py's set literal, so 3.15.2's Lib/test splits
+    test_io and test_os as its regrtest does (REPR_PYTHON_VERSION=3.15); the copy above when the file is absent."""
+    try:
+        with open(os.path.join(testdir, "libregrtest", "findtests.py"), encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return SPLITTESTDIRS
+    m = re.search(r"^SPLITTESTDIRS[^=]*=\s*\{(.*?)\}", src, re.M | re.S)
+    if not m:
+        return SPLITTESTDIRS
+    names = set(re.findall(r'"([A-Za-z0-9_.]+)"', m.group(1)))
+    return names or SPLITTESTDIRS
+
+
 def cmd_find(args):
     testdir, out = arg(args, "--testdir"), arg(args, "--out")
-    mods = sorted(findtests(testdir))
+    mods = sorted(findtests(testdir, split_test_dirs=split_test_dirs(testdir)))
     text = "".join(m + "\n" for m in mods)
     if out:
         with open(out, "w", encoding="utf-8") as o:

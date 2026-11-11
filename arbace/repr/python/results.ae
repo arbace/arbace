@@ -52,13 +52,18 @@
    :lex "the token check (bin/repr-python lex-check --record): the native lexer against CPython's tokenizer"
    :parse "the tree check (bin/repr-python parse-check --record, and --full): the native parser against ast.parse"})
 
-(def ^:private rank {:pass 0 :known 1 :fail 2})
+(def ^:private rank {:pass 0 :pending 1 :known 2 :fail 3})
 
 (defn write
   "OUT rewritten with the rows of `corpus` `rows` ([NAME RESULT REASON]); `mode` :lines or :full for the tree check (a
-  row shared by the two runs), nil otherwise"
-  [kind ^String out corpus rows mode]
+  row shared by the two runs), nil otherwise. A whole run (`partial?` false: no --only list) replaces every row of its
+  corpus, a row of a file it did not run dropped (queue 265: a file gone from the corpus, a mutant of another pool, stayed
+  a pass); a partial run keeps the corpus's other rows. The tree check's row is the worst of its two modes' parts, and
+  :pending while one mode has no part (queue 265: the cell counts both modes; a :lines run alone passed every file
+  :full never judged), so bin/reap holds a record of one mode a problem (a row neither pass nor known)"
+  [kind ^String out corpus rows mode partial?]
   (let [old (if (.exists (java.io.File. out)) (read-string (slurp out)) [])
+        pre (str (name corpus) " ")
         by-id (into {} (map (fn [r] [(first r) r]) old))
         new (for [[nm r why] rows
                   :let [id (str (name corpus) " " nm)]]
@@ -66,18 +71,23 @@
                 (let [[_ _r ow] (get by-id id)
                       parts (into {} (when ow (for [[_ k v] (re-seq #"(lines|full): ([^;]*)" ow)] [k v])))
                       parts (assoc parts (name mode) (str (name r) " " (str/replace (clip why) ";" ",")))
-                      other (get parts (if (= mode :lines) "full" "lines"))
-                      ores (if other (keyword (first (str/split other #" "))) :pass)
-                      res (if (>= (long (rank r 2)) (long (rank ores 0))) r ores)]
-                  [id res (str/join "; " (for [k ["lines" "full"] :when (get parts k)] (str k ": " (get parts k))))])
+                      res (reduce (fn [a v] (if (> (long (rank v 3)) (long (rank a 0))) v a)) :pass
+                                  (for [k ["lines" "full"] :let [p (get parts k)] :when p] (keyword (first (str/split p #" ")))))
+                      res (if (and (= :pass res) (some #(nil? (get parts %)) ["lines" "full"])) :pending res)]
+                  [id res (str/join "; " (for [k ["lines" "full"]] (str k ": " (get parts k "not run"))))])
                 [id r (clip why)]))
         ids (set (map first new))
-        all (sort-by first (concat (remove #(ids (first %)) old) new))
+        gone (filter #(and (not partial?) (not (ids (first %))) (str/starts-with? (first %) pre)) old)
+        gone-ids (set (map first gone))
+        all (sort-by first (concat (remove #(or (ids (first %)) (gone-ids (first %))) old) new))
         fr (frequencies (map second new))]
     (spit out (str ";; " (get headers kind) ": every file run, [ID RESULT REASON], ID \"CORPUS FILE\", RESULT :pass, :known (its\n"
-                   ";; known file accounts for it) or :fail (arbace.repr.python.results; bin/reap counts the passes).\n[\n"
+                   ";; known file accounts for it) or :fail"
+                   (if mode ", the worst of the two modes' parts, :pending while one mode is not run" "")
+                   " (arbace.repr.python.results; bin/reap counts the passes).\n[\n"
                    (str/join "\n" (map pr-str all)) "\n]\n"))
-    (println (str "recorded " out ": " (count new) " files of " (name corpus) " " (pr-str (into (sorted-map) fr))))))
+    (println (str "recorded " out ": " (count new) " files of " (name corpus) " " (pr-str (into (sorted-map) fr))
+                  (when (seq gone) (str "; " (count gone) " rows of " (name corpus) " dropped (not in this whole run)"))))))
 
 (defn read-controls
   "The crossed pairs of FILE (test/python/controls-read.edn: [{:id :corpus :subject :reference :why}]) for corpus

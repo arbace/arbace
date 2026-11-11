@@ -42,7 +42,12 @@
 #                                  entries: a file the writer cannot class by rule is printed, not written, exit 3).
 #                                  Each stage's time and peak RSS per file and per process into
 #                                  .tmp/repr-python/rt/CORPUS/ (costs.edn); --record also writes the corpora's costs into
-#                                  test/python/roundtrip-costs.edn. The helper's stages run in N processes (default 2)
+#                                  test/python/roundtrip-costs.edn. The helper's stages run in N processes (default 2).
+#                                  In records mode (queue 257) levels 2 and 3 are CPython's recorded rows: the originals'
+#                                  (python-pydump-CORPUS's tree rows) and the print's (python-pydump-printed-CORPUS, keyed by
+#                                  the printed file's bytes, recorded by REPR_PYTHON_ORACLE=record bin/repr-python roundtrip
+#                                  CORPUS), once that pack is pinned (before: the oracle tier's, a line says so); their own
+#                                  negative control: the reference's print with the subject's print's digests fails level 2
 #   bin/repr-python roundtrip --text [--record] [--jobs N] [CORPUS...]
 #                                  PY3, mode :full: each file also read in mode :full (every node's :pos, the tokens), the
 #                                  forms checked against the tokens (positions on tokens' edges, leaves equal to their
@@ -93,7 +98,8 @@
 # The oracle (queue 213; doc/ORACLE-RECORDS-SURVEY.md, "As built: Python"; tools/pydump/records.bash): REPR_PYTHON_ORACLE
 # records (the default with the shared tooling, test/oracle-records/oracle.bash: no python3; the originals' dumps, the
 # syntax-errors corpus and the verdicts of spec-check and samples from test/python/records/, a missing or stale entry a
-# failure; the round trips' print read natively, levels 2, 3 and 5 the oracle tier's, and since queue 240 their originals
+# failure; the round trips' print read natively, levels 2 and 3 from the print's recorded rows since queue 257 (level 5 the
+# oracle tier's), and since queue 240 their originals
 # too, REPR_PYTHON_RT_ORIG; the syntax-errors cases made by pyi with their own verdicts, bin/pyi script; pins --check
 # without the oracle's pin, the tests and the rejected files; the default since queue 240 vendored main's
 # test/oracle-records/oracle.bash: a missing record fails, REPR_PYTHON_ORACLE=live is day work's), live (python3 as before: every level; the oracle tier), record (live, and what
@@ -472,6 +478,29 @@ only_filter() { # LIST ID
   [ -s "$1" ]
 }
 
+# rt_levels TSV RECORDED: the native dumps' rows (REL STATUS - - - SHA ...) given CPython's recorded columns, its status
+# when it rejects the file, ast, code and marshal (queue 257); a row of no record, or of another SHA-256, refused
+rt_levels() {
+  awk -F'\t' -v OFS='\t' 'NR == FNR { st[$1] = $2; a[$1] = $3; c[$1] = $4; m[$1] = $5; sh[$1] = $6; next }
+    !($1 in a) { print "pyrec: no recorded row for " $1 > "/dev/stderr"; bad = 1; next }
+    sh[$1] != $6 { print "pyrec: the recorded row of " $1 " is of other bytes" > "/dev/stderr"; bad = 1; next }
+    { if (st[$1] != "ok" && $2 == "ok") $2 = st[$1]; $3 = a[$1]; $4 = c[$1]; $5 = m[$1]; print }
+    END { exit bad }' "$2" "$1" > "$1.rec" && mv "$1.rec" "$1"
+}
+
+# rt_recorded_levels ID BASE DIR ORIGR (records mode, mode :lines; queue 257): levels 2 and 3 from CPython's records: the
+# originals' rows (python-pydump-ID's tree rows, as parse-check reads them; with REPR_PYTHON_RT_ORIG=helper they are the
+# rows already) and the print's (python-pydump-printed-ID, keyed by the printed file's bytes) into the TSVs compare reads
+rt_recorded_levels() {
+  local id=$1 base=$2 d=$3 origr=$4
+  if [ "$origr" = native ]; then
+    timed rec-orig pyrec_read tree "$id" "$base" "$d/list" "" "$d/rec-orig.tsv" || return 1
+    rt_levels "$d/helper-orig.tsv" "$d/rec-orig.tsv" || return 1
+  fi
+  timed rec-printed pyrec_read tree "printed-$id" "$d/printed" "$d/printed.list" "" "$d/rec-printed.tsv" || return 1
+  rt_levels "$d/helper-printed.tsv" "$d/rec-printed.tsv"
+}
+
 roundtrip_one() {
   local id=$1 record=$2
   local -a info; mapfile -t info < <(corpus_base "$id")
@@ -513,15 +542,35 @@ roundtrip_one() {
     timed convert-print py_arbace convert --dumps "$d/orig" --forms "$d/forms" --printed "$d/printed" --tsv "$d/convert-print.tsv"
   fi
   (cd "$d/printed" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) > "$d/printed.list"
-  # the print: the helper's dumps live (levels 2, 3 and 5 judged), the native reader's in records mode (level 1 and 4;
-  # 2, 3 and 5 the oracle tier's, compare --deferred: queue 213)
-  local deferred=""
-  if pyrec_live; then timed helper-printed pyrec_run_helper tree "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
-  else deferred=1; timed native-printed native_dumps "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"; fi
+  # the print: the helper's dumps live (levels 2, 3 and 5 judged; mode record also records the print's rows, mode verify
+  # checks them: python-pydump-printed-ID, queue 257), the native reader's in records mode (level 1 and 4); levels 2 and 3
+  # in records mode (queue 257, mode :lines): CPython's recorded rows, the original's (python-pydump-ID's tree rows) and
+  # the print's (python-pydump-printed-ID), once that pack is pinned; before, and level 5, the oracle tier's (compare
+  # --deferred: queue 213)
+  local deferred="" recorded=""
+  if pyrec_live; then
+    timed helper-printed pyrec_run_helper tree "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
+    if [ -z "$TEXT" ]; then
+      case $PYREC_MODE in
+        record) pyrec_stage tree "printed-$id" "$d/printed" "$d/printed.list" "" "$d/helper-printed.tsv" ;;
+        verify) pyrec_verify_dump tree "printed-$id" "$d/printed" "$d/printed.list" "" "$d/helper-printed.tsv" ;;
+      esac
+    fi
+  else
+    deferred=1; timed native-printed native_dumps "$d/printed" "$d/printed.list" "$d/cand" "$d/helper-printed.tsv"
+    if [ -z "$TEXT" ]; then
+      if [ -f "$(pyrec_pin "printed-$id")" ]; then
+        rt_recorded_levels "$id" "$base" "$d" "$origr" || { echo "roundtrip $id: FAILED: no record of levels 2 and 3 (the oracle's records, above)"; return 1; }
+        deferred=""; recorded=1
+      else
+        echo "roundtrip $id: levels 2 and 3 the oracle tier's: no record of the print (test/python/records/python-pydump-printed-$id.sha256: REPR_PYTHON_ORACLE=record bin/repr-python roundtrip $id)"
+      fi
+    fi
+  fi
   local rc=0
   timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
     --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" --controls "$CONTROLS_READ" \
-    ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} ${deferred:+--deferred} \
+    ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} ${deferred:+--deferred} ${recorded:+--recorded} \
     ${record:+--results-file "$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"} || rc=$?
   { echo "{:corpus :$id :jobs $JOBS"
     echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"

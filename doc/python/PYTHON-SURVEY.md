@@ -5439,3 +5439,517 @@ stage's `:steps` and the stub runs of read and AOT).
 
 ## As built: py-aot-classid (2026-11-10)
 queue 259's Low: `aot.ae`'s `judge` took `(:class c)` of a class (key `:id`) at its two classed rows, recording `:differs`/`:refused`; now `(:id c)`. `test/python/aot_judge_test.ae` (`ARBACE_PATH=.:test $ARBACE_HOST_EXE -m python.aot-judge-test`) judges fabricated runs, with the unclassed control. `aot_gen` (aot.ae's digest) changes: the AOT's printed packages and the runner rerun (`pyi-aot-runtime`, then pyi-aot-essential, pyi-check-aot). The records are not touched: night 11's AOT record writes the ids.
+## As built: 256, Lib/test's universe as data; the check without python3, proved again (2026-11-10, the Mac VM, queue 256)
+
+The brief (from the main host's facts at main-ro, `bin/pyi:183 pyall() { python3`) asked for `bin/pyi check` with no python3 at
+check time. That held at the base already: since queue 234 the check's runner is `tools/pyi/libtest_all.py` compiled by pyi's
+AOT (`pyrun`, `runner_exe`), and since queue 240 the universe's modules are regrtest's findtests run on it. What still came from
+CPython's runs at check time was the method inventory: the own verdict read every reference file (`ref-cpython314-lib-test*.edn`,
+outcomes and all) for its ids. 256 makes that inventory a record of its own.
+
+- **`test/python/universe-cpython314.edn`**: a line a module, `{:module M :tests [T ...] :cpython-skips {T REASON ...}}`, the
+  modules (529) and test ids (47,836) CPython 3.14.10's recorded runs name and the tests they skipped on the recording platform
+  (2,449, with the reason: information for the classing, never read by the judge). `test/python/universe.ae` writes it on stage 0
+  (no python3, a second), keyed (`;; key`) by the SHA-256 of the generator and the references; `bin/pyi universe` writes it,
+  `record-ref` writes it after Lib/test's references, `bin/pyi universe --check` writes it afresh and compares byte for byte, its
+  negative control a universe from one reference less, which must differ (in `pyi-essential` and `make python-essential`).
+- **The judge**: `libtest_judge.ae --universe FILE` takes the inventory from it (read-universe, the same rule as read-inventory)
+  and, with the own verdict, reads no reference at all (only `--verdict ref` and `--agreement` need CPython's outcomes).
+  `bin/pyi check` passes it to the judge and to the controls' judge and refuses a universe whose key is not its inputs' ("the
+  universe ... is stale"); `universe_diff` compares findtests' modules with the record's.
+- **Verdicts unchanged**: over all 529 modules (a fabricated run, every module empty) the judge's rows with `--universe` equal the
+  rows from the references byte for byte (47,922 rows; t1); a real run over 11 modules of the four corpora judged by the head and by
+  the base gives the same `results.tsv` (337 rows).
+- **Proved with python3 removed**: python3, python and python3.14 first on PATH, each logging its call and exiting 99: `bin/pyi
+  check --fresh` over test_bool, test_int, test_getopt, test_filecmp, test_augassign, test_colorsys, test_textwrap, test_winreg,
+  test_shlex, test_asyncio.test_locks, test_fnmatch (the runner compiled cold): 337 methods, 313 pass, 23 classed, 1 failing, the
+  three controls failing as they must, the stubs' log empty; the stub's own control, the same runner verb by python3
+  (`PYI_RUNNER=python3 bin/pyi runner owned`), exits 99 and logs its call.
+- **The one failing method**, on the base too: test_augassign's testCustomMethods1, `__iadd__ = None` in a class falls back to
+  `__add__` under pyi where CPython raises TypeError ('NoneType' object is not callable): a runtime gap, in no class.
+- **Independence** (main's `bin/crops-score --crop python --ref mac/mac/201-python-py7-py11` in a scratch clone of main-ro with
+  the patch): main-ro's facts 80.0% (judge 0, stale); 258's patch 79.4%; 256's patch 79.4%, judge 0.971 with `:cases {:self 51638
+  :recorded 3187}`: 240's 48,546 inventory methods counted 710 ids twice (12 modules both lib-test's and lib-test-all's references
+  record), 47,836 distinct.
+
+## As built: 257, the read cell judged from records: the round trip's levels 2 and 3 (2026-11-10, the Mac VM, queue 257)
+
+The brief asked that every check of the read cell judge from data, not from CPython live. At the base most already did (queue 240,
+records mode the default): lex-check and parse-check read CPython's tokens and trees from the python-pydump packs (240r's, the
+essential corpora's members committed), syntax-errors' cases are judged by their own verdicts, and the round trips' levels 1 and 4
+are each file's own. One part did not: in records mode the round trip's levels 2 (ast.dump) and 3 (the normalized code) were not
+judged at all (`compare --deferred`, "the oracle tier's"), so the round trip's 30 `:code-lines` files passed there while the
+record (`roundtrip --record`, live) classes them.
+
+- **The print's rows, a pack per corpus** (`tools/pydump/records.bash`): `python-pydump-printed-CORPUS`, the rows alone
+  (`tree/REL.row`: CPython's status, ast.dump's digest, the normalized code's, marshal's) of each file the round trip printed,
+  keyed as every entry is, by the input's bytes (the printed file's) and pydump.py's. `pyrec_read` and `pyrec_stage` take an empty
+  OUT for the rows alone; verify mode compares them row by row, its crossed pair on the rows. `printed-samples` is essential (its
+  members committed under `test/python/records/essential/printed-samples/` by the main host's record).
+- **`bin/repr-python roundtrip`, mode :lines:** mode record stages the print's rows, mode verify checks them; records mode, once
+  `test/python/records/python-pydump-printed-CORPUS.sha256` is pinned, reads the originals' tree rows (python-pydump-CORPUS, as
+  parse-check does) and the print's (`rt_recorded_levels`, `rt_levels`: each native row given CPython's columns; a row of no
+  record or other bytes refused) and judges levels 2 and 3 as live does: "level 2 (ast) N, level 3 (code) M (CPython's,
+  recorded)". A missing or stale entry fails the run (UNRECORDED, STALE; a member that differs from its manifest REFUSED), as every
+  record. Without the pin the run says "levels 2 and 3 the oracle tier's: no record of the print" and judges as before, so the
+  branch stays green until the main host records. Level 5 (`--text`, marshal) stays the oracle tier's: given level 4 (the same
+  bytes under the same name) it checks CPython's determinism, not Arbace.
+- **The levels' own negative control** (`arbace.repr.python`'s compare, live and records alike): controls-read.edn's pair, the
+  reference's original against its own print's dump (level 1 equal) with the subject's print's digests, which must fail at level
+  2 or 3 ("roundtrip (levels 2 and 3) control ...: failed as it must: level ast"). The existing control fails at level 1 first and
+  never reached levels 2 and 3.
+- **Verdicts unchanged:** live mode is as before (the new control aside). Records mode now gives live's verdicts: on a 14-file sample
+  of lib-test, site-packages and stdlib (with test_patma.py, support/__init__.py and packaging/version.py, three `:code-lines`
+  files, and bad_coding.py, `:rejected`) the lines equal live's but for their wording; on the base records mode passed the three.
+- **Proof (the VM, run):** the print's rows recorded by hand with the VM's python3 3.14.10 in a scratch worktree, never committed;
+  240r's samples tree rows equal byte for byte to the VM's (the record's manifest unchanged); then with python3, python and
+  python3.14 stubs first on PATH: python-read-essential's command passes, the stubs' log empty; `records verify` 0 differ.
+- **Independence:** no case moves (the round trip's files are read's 3,115, already judged by CPython's records at 0.5); the
+  judge stays 0.971 (51,638 own, 3,187 recorded), independence 79.4%; the facts' evidence refreshed
+  (`.tmp/q257/257-independence.patch`, superseding 256's).
+- **The night's command (main host, python3):** `REPR_PYTHON_ORACLE=record bin/repr-python roundtrip samples stdlib site-packages
+  lib-test`, then commit the four `python-pydump-printed-*` pins and manifests and `essential/printed-samples/` (report 257).
+
+## As built: 251, pyi on goi's speed: `:slow-on-goi` and `:clib-on-goi` (2026-11-10, the Mac VM, queue 251)
+
+The brief: profile pyi's eval loop under goi on the two classes' tests, port CPython 3.14's fast paths that apply, run the C
+library cores natively where goi's table allows, each test's time before and after.
+
+**Where the time goes (run, the VM).** Each of the eight tests was timed alone (`unittest` on the one test id, `bin/pyi run`, two
+at a time, base 836dd541 and head in separate worktrees sharing one IR cache):
+
+| test | class | base: load + run | head: load + run | what bounds it |
+|---|---|---:|---:|---|
+| test_traceback ...keyword_suggestions_from_command_string | slow | 34 + 499 s, ok | 34 + 487 s, ok | 22 children of pyi on goi, 18-22 s each to start |
+| test_traceback ...keyword_suggestions_from_file | slow | 33 + 513 s, ok | 33 + 489 s, ok | the same |
+| test_queue ...shutdown_immediate_all_methods_in_many_threads | slow | 27 + 49 s, ok | 31 + 38 s, ok | the eval loop (64K put/get under 12 threads) |
+| test_xml_etree ...test_deeply_nested_deepcopy | slow | 42 + 190 s, ok | 45 + 161 s, ok | the eval loop (500,000 SubElement calls, then deepcopy) |
+| test_subprocess ...test_communicate_timeout_large_input | slow | 75 + 13 s, error | 77 + 13 s, error | the child's start: `server.accept()` times out at the test's own 10 s |
+| test_bz2 ...testDecompressLimited | clib | 405 + 700 s, ok | (not rerun) | ci interpreted by goi (the module's `BIG_DATA` compressed at import) |
+| test_lzma ...test_decompress_limited | clib | killed at 1,200 s | (not rerun) | the same |
+| test_bz2 ...testThreading | clib | killed at 1,200 s | (not rerun) | the same (50 MB) |
+
+Three bounds, of which only one is the eval loop's:
+- **pyi's start on goi** (traceback's two, subprocess's): `bin/pyi python -c pass` is 18.3 s at base and head; a Go profile of
+  stage 0 (`ARBACE_CPUPROFILE`) puts it in reading the runtime's 23 MB of mode-`:full` forms (about 21% of the CPU), goi's checker
+  over `arbace/py` (12%), goi's builder (5%), the evaluated front end (`arbace/python`, 25%) and Go's collector (29%). None of it is
+  pyi's runtime running; all of it goes when W2 compiles `arbace/py` into the executable and embeds `arbace/python` (PYS28 (a),
+  W-D1 (a)). test_subprocess's test is a failure, not a timeout: its child must connect within 10 s.
+- **ci interpreted by goi** (the three `:clib-on-goi`): nothing in the eval loop; goi's table on this branch already lists
+  `arbace/ci` and `arbace/crt` (queue 214, 208's DECISION 1 (a)), so W2's executable runs ci's interpreter compiled (cirun's speed,
+  about 130 times, 208's table). No REQUEST is needed: the table allows it at W2, and before W2 nothing on the VM can.
+- **The eval loop on goi** (queue, deepcopy): what this task changed.
+
+**goi's cost model (probed, `bin/goi run` of a Go program on stage 0, ns per operation):** a push and a pop with `append` and
+re-slicing 421, with an index and an int 204, inline 81; `f.Fast[i]` 33, a local slice's `fast[i]` 11; `in := c.Instrs[pc]` 136
+(a struct copy), `in := &instrs[pc]` 34; a call 28, a call of a function with a `defer` 233; an interface method call 41. goi
+loads a slice, struct or pointer from a field through `reflect.NewAt(...).Elem().Interface()` and stores one through `reflect`'s
+`Set` (`go/arbace/goi/types.ae`'s `load` and `store`); only empty-interface, interpreted-interface and scalar fields are plain
+loads. A pyi instruction was about 1 us on goi, two-fifths of it the value stack's slice header.
+
+**The changes (run, `go/arbace/py`, `arbace/python/aot.ae`):**
+- **The value stack as `Stack[:SP]`** (CPython's `stack_pointer`): `Frame.Stack` holds the room, `Frame.SP` the depth; a push or a
+  pop moves an int, not the slice's header. Every `len(f.Stack)` is `f.SP`, every open slice of the stack bounded by it,
+  `growStack` copies `Stack[:SP]`, the collector's walk (`finalize.go`) visits `Stack[:SP]`; arbace.python.aot's depth checks read
+  `(.-SP f)`.
+- **step's instructions by address**, `c.Instrs` and `f.Fast` held in locals (a frame's fast locals are made with it and never
+  replaced).
+- **CPython 3.14's FOR_ITER_RANGE, FOR_ITER_LIST, FOR_ITER_TUPLE**: the exact range, list and tuple iterators' next inline in step,
+  their slots' code.
+- **LOAD_ATTR and STORE_ATTR in step's switch** (through `opImpls` each copied its instruction; CPython's are the loop's own; the
+  registered implementations stay for `AotExec`), LOAD_FAST, STORE_FAST and POP_TOP's push and pop inline, CALL's keyword names
+  read only when given. The specializations 202b and 210 had already ported (LOAD_ATTR's and LOAD_GLOBAL's inline caches, the
+  exact int and float BINARY_OPs, CALL_PY_EXACT_ARGS's binding, CALL_ALLOC_AND_ENTER_INIT, the method variant) were kept.
+
+**Measured on goi** (`bin/pyi run`, 100,000 iterations, the base and the head alternated twice): an empty `for` 0.36 -> 0.23 s, a
+function call 2.5 -> 2.1 s, a method call 3.3 -> 2.5 s, an attribute load 1.5 -> 1.0-1.2 s, a class's call 2.7 -> 2.1-2.3 s,
+`list.append` 1.7 -> 1.2 s; 20,000 SubElement calls 3.9 -> 3.1 s; the tests above. Not taken: a call that stays in step (CPython's
+`goto start_frame`; each Python call returns to runFrames and enters its callee through guardedStep's `defer`, about 0.5 us of a
+call's 21 us on goi), and the collector's knobs (`PYI_GOMEMLIMIT=8GiB GOGC=400`: 6% for twice the memory).
+
+**After W2 (probed, `bin/pyi aot`):** the runtime compiled, the tests on its loop as W2's executable runs them: deepcopy's test
+0.8 s, the queue's 0.1 s.
+
+**The classes:** `:slow-on-goi` 5 and `:clib-on-goi` 3 before and after: on the VM no member passes within the driver's 300 s that
+did not already (deepcopy's and the queue's pass alone at base, in 190 s and 49 s; their rows are the night's runs, with other
+modules beside them); the night's record decides. test_subprocess's member is a failure of its own 10 s timeout, kept in
+`:slow-on-goi` (the child's start is the cause) until W2. Checks: `make python-essential`, `bin/pyi runtime vet`, `bin/pyi
+table-check --configs tamago/amd64,tamago/arm64`, a sampled `bin/pyi runtime check`, `test-251-stack.bash` (report 251), and
+`bin/pyi lib-test test_range test_iter test_with test_sys_settrace` in both worktrees: every method's outcome the same (588
+methods), the four modules' wall 309 s at base, 195 s at the head.
+
+## As built: 252f, the codec registry imports `encodings` before its first use, under 3.14 too (2026-11-10, the Mac VM, queue 252f)
+
+252's finding 4, the user's DECISION 4 (a): `codecEnsureEncodings` (was `codecEnsureEncodings315`, `go/arbace/py/builtins_codecs.ae`)
+runs under 3.14 as under 3.15, at the registry's first `register` or `lookup`. CPython imports `encodings` in
+`_PyCodec_InitRegistry` (3.14.10's Python/codecs.c, line 1573 on; the interpreter's start), so its search function is first even
+when a program registers one before any lookup: `codecs.register(lambda n: None); codecs.lookup("koi8_r")` gave `LookupError` in
+pyi, `koi8-r` in CPython. The old lazy import (`if len(r.search) == 0`) went: with the registry initialized, an empty search list
+raises "no codec search functions registered" as `_PyCodec_Lookup` does. The import stays lazy (first use, not interpreter start):
+the one visible difference is `"encodings" in sys.modules` before any codec use (CPython True, pyi False; a Low). 3.15's
+`normalizestring` stays gated under 3.15. Checks: `lib-test test_codecs test_codeccallbacks` the same at base and head (332
+methods: 310 pass, 22 classed, 0 failing; test_codecs 266, test_codeccallbacks 44), `make python-essential`, `bin/pyi runtime
+vet`, `table-check`, 252's `t252-binascii.sh`; no record or class in `divergences.edn` names a test this changes.
+
+## As built: 265, the read and print cells' results files; the five runtime tables made by Arbace (2026-11-10, the Mac VM, queue 265)
+
+**The results files (completeness).** The writers of `test/python/{roundtrip,full,lex-check,parse-check}-results.edn`
+(`arbace.repr.python.results`, queue 201's R1) were in place: `--record` writes a row `["CORPUS FILE" :pass|:known|:fail REASON]` for
+every file run, and `test/reap/cells.edn`'s Python read and print cells read them (`:c-known`, `:results`, the three read checks one
+`:count-once` group). The cells counted no pass because no `--record` run's files were ever committed (the night's `records record`
+runs the checks without `--record`). Two writer defects, fixed: a whole run kept its corpus's rows of files it did not run (a file
+gone, a mutant of another pool stayed a pass), now replaced, a partial run (`--only-list`) keeps them; and the tree check's shared
+row (`:lines` and `:full`) passed on one mode alone, now `:pending` ("full: not run") until both ran, which `bin/reap` holds a
+problem (a row neither pass nor known). Proved on samples, lex-errors and syntax-errors (VM records, not committed): `bin/reap`
+counts their passes, a `:pending` row is a problem. The night's commands, all live (mutants have no records):
+`REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --record`, `... roundtrip --text --record`, `... lex-check --record`, `...
+parse-check --record`, `... parse-check --full --record`; expected cells: read 3,670 / 66 / 0 (3,736 files: samples 6, stdlib 720,
+site-packages 921, lib-test 1,153, lex-errors 62, syntax-errors 874; the mutants not counted), print 2,795 / 5 / 0 (2,800 files).
+
+**The five runtime tables (independence).** `builtins_{opcode,errno,fcntl,socket,posix}_table.go`, recorded by
+`tools/pyi/*_table.py` from CPython's own modules (python3 at record time), are made by Arbace at check time:
+`tools/pyi/runtime_tables.ae` on stage 0, `bin/pyi runtime gen-tables` (Python's essential chain, `pyi-runtime-tables`; `make
+python-essential`). Each module's own C is preprocessed by repr/c's preprocessor (`arbace.repr.c.pp`) with its constant-adding calls
+made markers (`PyModule_AddIntMacro`, `PyModule_AddIntConstant`, `add_errcode`, `INTRINSIC_FUNC_ENTRY`, `ADD_NB_OP`, the metadata
+table's entries), the values evaluated as C's integer constant expressions (casts, `sizeof` on LP64, enumerators), for x86_64 and
+aarch64. Sources: the CPython 3.14.10 tarball; musl 1.2.6's (the C crop's pin; its install's header layout composed: `alltypes.h`
+by `mkalltypes.sed`'s rules, `bits/syscall.h`; `__strerror.h`, `sysconf.c`, `fpathconf.c`, `confstr.c` by their own rules); Go's
+`zerrors_linux_{amd64,arm64}.go` (a name Go declares on both with musl's value is written `syscall.NAME`; one whose values differ
+`archConst`: posix_table.py's hand-listed MUSL_ARCH, O_ACCMODE, O_LARGEFILE, O_TMPFILE, now derived); for fcntl, socket and posix
+Alpine's `pyconfig.h` (python3 3.14.10-r1's), Linux's UAPI headers (linux-headers 7.2.1-r0) and BlueZ's (bluez-headers 5.87-r0),
+the oracle's build inputs, pinned in `tools/pyi/header-apks.sha256` for both architectures. All five are byte for byte the committed
+files, gofmt'd by TamaGo's gofmt; each table's control changes one source fact in a copy of the sources (BINARY_OP's HAS_ARG_FLAG,
+EPERM's strerror text, F_ADD_SEALS, AI_NUMERICSERV, `_SC_CLK_TCK`) and must differ. `bin/pyi runtime tables` (the oracle tier)
+checks the five python3 generators against the same files. `pyconfig.h` is CPython's configure output on Alpine's builder: whether
+it counts as a pinned input (eval and AOT 1) or a toolchain's record (0.5, as C's configured musl) is the user's call (report 265's
+DECISION); the patch scores 0.5 until then.
+
+## As built: 253, the interpreter's end: Py_FinalizeEx and finalize_modules (2026-11-10, the Mac VM, queue 253; 241's DECISION 2 (a))
+
+Ported from CPython 3.14.10's Python/pylifecycle.c (`_Py_Finalize`, `finalize_modules` and its helpers, `flush_std_files`,
+`finalize_subinterpreters`), Objects/moduleobject.c (`_PyModule_ClearDict`), Python/gc.c (`PyGC_Collect`,
+`_PyGC_CollectNoFail`, `_PyGC_DumpShutdownStats`), Python/import.c (`_PyImport_FiniExternal`) and Python/_warnings.c's
+shutdown path, into `go/arbace/py/pylifecycle.go` (new) and its call sites. One function, `(*Interp).Finalize(status)`, ends
+every run: `RunModule`'s exits (the main module's end, SystemExit, an uncaught exception, a SyntaxError of the main file) and
+the REPL's; the interpreted loop (goi) and the compiled one (AOT) share it.
+
+- **The order** (`_Py_Finalize`): `threading._shutdown()`; the finalizer queue drained (`_Py_FinishPendingCalls`'s place); the
+  atexit functions; the subinterpreters left open ended with CPython's RuntimeWarning; then `sys.is_finalizing()` true and the
+  other threads stopped: a thread that takes the GIL from then on hangs (`gilState.final`, PyThread_hang_thread's); sys.stdout
+  and sys.stderr flushed (a failed flush of sys.stdout: "Exception ignored while flushing sys.stdout" and exit status 120;
+  pyi's standard stream's `flush` now raises its write error as OSError); `gc.collect()`'s collection unless `gc.disable()`,
+  `gc.callbacks` called; `sys.path_importer_cache` and `sys.path_hooks` set to None; `finalize_modules`; the streams flushed again.
+- **`finalize_modules`**: `builtins._` and sys's `path argv ps1 ps2 last_exc last_type last_value last_traceback
+  __interactivehook__ meta_path` set to None, `sys.stdin/stdout/stderr` restored from `__stdin__`...; every module of sys.modules
+  set to None in its order (the weak list kept) and the dictionary cleared; the builtins restored to the interpreter's first
+  copy (`Interp.builtinsCopy`, taken at `NewInterp` less site's `exit quit copyright credits license help`); the collection;
+  `gc.garbage` reported (ResourceWarning "gc: N uncollectable objects at shutdown"); the modules still alive cleared, the latest
+  imported first, by `_PyModule_ClearDict`'s two passes (one leading underscore, then all but `__builtins__`), a collection
+  after each pass; sys's dictionary, then the builtins', cleared the same way; the last collection.
+- **Which modules are dead at the collection.** CPython frees the dictionaries of the modules nothing reaches any more as cyclic
+  garbage, so their objects' `__del__` run with every global in place (test_sys' `test_is_finalizing`, test_threading's
+  `test_main_thread_during_shutdown`). pyi asks it in two parts. `exitMark` marks what CPython's interpreter state still reaches
+  once sys.modules is empty: sys and its dictionary, the restored builtins, the codecs' registry, `gc.callbacks` and
+  `gc.garbage`, the warnings module's filters, and what they reach by Python's references (`exitRefs`: 241's `cyTraverse` for
+  every object, a heap class's namespace, bases and MRO, an instance's class, a module's dictionary, a weak reference's callback
+  but not its referent, the Go fields of the runtime's other types by reflection). A module that held a module object is
+  "alive" (cleared in the weak list's pass), a dictionary reached without its module is left as it is (CPython's dead module
+  whose functions are still referenced), and every other module's dictionary (but the runtime's own modules') is given to the
+  cycle collector as dead (`cyForced`): it is probed as garbage and an edge into it reaches nothing, so what those dictionaries
+  alone hold, through nodes, is found and finalized in PEP 442's order, while Go's collector still vetoes anything held another
+  way. That second part matters because pyi's classes are held by the runtime's registries (241's finding 2): Go alone would keep
+  every module that defines a class. The dictionaries are not cleared afterwards (CPython's `tp_clear`): what they hold through no
+  node (a class's attribute, a Go container's item) is left alone, silent rather than finalized with its globals gone.
+- **At the shutdown's moments**: an import raises `ImportError("sys.meta_path is None, Python is likely shutting down")` once
+  `meta_path` is None; a traceback printed by the Go display shows no source lines (CPython's import of io fails); the unraisable
+  hook writes nothing once `sys.stderr` is None; a warning raised by the runtime (an unawaited coroutine, ResourceWarning, the
+  shutdown's own) goes through `finalWarn`, _warnings.c's C path (the filters kept from the warnings module, else the
+  interpreter's defaults; "<sys>:0: RuntimeWarning: coroutine 'f' was never awaited" when no frame runs); `sysAttr` and
+  `sysModule` read the interpreter's own sys module (`Interp.sysMod`, interp->sysdict) rather than sys.modules' entry;
+  `_thread.start_new_thread`/`start_joinable_thread` raise PythonFinalizationError "can't create new thread at interpreter
+  shutdown" and a join of a running thread "cannot join thread at interpreter shutdown" (gh-123940), as _threadmodule.c.
+- **The collections' order** (`cyOrder`): a collection's trash runs its finalizers and weak callbacks as CPython's lists hold
+  it, containers before what they hold (its collector moves what a container reaches behind it): breadth first from what
+  nothing else in the trash holds (the dead module dictionaries first, in sys.modules' order, then by the records' order,
+  `finTrack.seq`), through the slots in their order; no longer Go's map order (`gc.collect()` too). An unclosed text file is
+  finalized before its buffer and its raw file, so its data is flushed at exit, as CPython's io does. At the shutdown a weak
+  reference that the interpreter state no longer reaches is in the trash itself: no callback (handle_weakrefs).
+- **io and warnings, C in CPython**: pyi runs `_pyio` and `_py_warnings`, whose code imports at the moment CPython's C needs
+  no import (`_pyio`'s `_dealloc_warn` imports warnings before it closes the file). At the shutdown an import made by their
+  code (`cImplModules`) is answered from the modules finalize_modules took out, `warnings` by a stand-in whose `warn` is
+  `finalWarn`, and their frames are not counted for a warning's stacklevel (C has none: "<sys>:0: ResourceWarning: unclosed
+  file ..." under `-W always`); any other code's import fails as CPython's does.
+- **Cost**: a shutdown collection runs only when a tracked object has work or weak callbacks due, and after a module
+  dictionary's pass only when a value it dropped reaches such an object (`exitReachesWork`, not through modules); a program importing asyncio,
+  unittest, json, re, threading, typing, dataclasses, logging, tempfile and subprocess (114 module dictionaries given dead, 22
+  alive) ends in 0.62 s compiled on the VM, the same with or without an object to finalize; under goi a program printing a traceback ends in 24.5 s against the
+  base's 23 s (36 s before the pass filter). `PYI_GC_DEBUG=1` lists each module's
+  state at the shutdown and each collection.
+
+**Not ported** (Lows in the report): Py_EndInterpreter's `finalize_modules` (a subinterpreter's end runs its atexit functions
+only, as before), the daemon threads' frames (CPython clears them; their goroutines keep them), `-v`'s cleanup lines,
+`_PySignal_Fini`, the order of several deaths in one collection beyond `cyOrder`'s approximation of CPython's gc lists, an
+object reachable from a dead module only through a class or a Go value (not finalized), a pure-Python
+`warnings.warn` from a `__del__` at shutdown (pyi's warnings is `_py_warnings`, whose `warn_explicit` imports linecache: the
+ImportError CPython's own Python implementation would raise; CPython's C `_warnings` prints the warning). Under goi (the
+runtime interpreted) an object the main module's last statements handled can stay in goi's registers and miss the shutdown's
+collection (test_gc's ordinary-module test, an unclosed file written last: `:finalization-goi`, W2).
+
+**The classes** (each test's own verdict, sampled on the VM): `:sys-module` 4 to 2 (test_is_finalizing, test_issue20602);
+`:gc-collector` 23 to 19 (test_gc's test_gc_main_module_at_shutdown and test_global_del_SystemExit, test_threading's
+test_main_thread_during_shutdown served; test_gc_ordinary_module_at_shutdown to `:finalization-goi`: it passes compiled, its
+child runs on goi); `:finalization` 63 to 59 (test_struct's test_struct_cleans_up_at_runtime_shutdown, test_threading's
+test_join_daemon_thread_in_finalization, test_join_finished_daemon_thread_in_finalization, test_start_new_thread_at_finalization);
+test_module's test_module_finalization_at_shutdown, failing in no class at the base, passes; `:finalization-collect` stays 8 (its
+tests are collections at run time, not at exit); divergences-aot.edn's `:finalization-goi` (synth/datamodel/del.py) stays, both
+runs now print the rest at exit in different orders.
+
+**The samples** (the VM): `.tmp/q253/t/check253.sh ROOT` (26 exit cases compiled against CPython 3.14's runs, stdout, stderr,
+status and a file the case leaves unclosed; its control: e3's run judged by e1's reference): PASS on the head, FAIL at the base
+c25cce1d1 (21 differ). `bin/pyi lib-test --aot` of test_gc, test_finalization, test_weakref (216 methods), test_module,
+test_struct, test_linecache, test_tempfile, test_exceptions, test_traceback (735): every method's verdict the base's or better
+(test_tempfile's TestMktemp.test_basic fails at both, a shared TMPDIR). `bin/pyi lib-test-all --fresh test_sys test_warnings
+test_threading test_atexit`: 0 failing but test_atexit's test_general, which fails at the base too (its child's atexit tests).
+`make python-essential` (golden 127 programs, check --aot 20 pass, 1 classed), `bin/pyi runtime vet`, `bin/pyi table-check
+--configs tamago/amd64,tamago/arm64`: ok. `bin/pyi runtime check` with `PYI_SMOKE_ONLY` (20 programs: asyncio, coroutines,
+generators, subprocess, threads, signals, io, struct, the REPL session): the forms printed and read again the same, 20 equal,
+the REPL equal, the controls fail.
+
+## As built: 260, ctypes objects export their buffer (PEP 3118) (2026-11-10, the Mac VM, queue 260)
+
+244's follow-up 1 (the VM's proposal P1): CPython 3.14.10's `PyCData_NewGetBuffer` (Modules/_ctypes/_ctypes.c) on 249's
+`BufferExports`, and what memoryview needs of it.
+
+- **pyctypes** (`go/arbace/pyctypes/ctypes.go`): `CData` embeds a `BufferExports` and answers `Exports()`, so memoryview's
+  managed buffer counts its views; nothing calls `Refuse`: CPython's `CDataObject` has no `ob_exports` and `ctypes.resize`
+  refuses nothing (a view of a resized object reads the object's memory as it is at each access). `BytesLike` and
+  `WritableBytes` are the object's memory in the C world in place (b_ptr, b_size: `bytes(c_int(1))`, `binascii.hexlify(obj)`,
+  `bytearray(create_string_buffer(3))`, a write through `memoryview(d).cast("B")` changes `d`); `BufferShape` is the view's
+  format (the StgInfo's, "B" when it has none: a union, an incomplete structure), its shape (ndim its length) and its itemsize
+  (the innermost array item type's size, `PyCData_item_type`). `memoryview_at` is `PyMemoryView_FromMemory` over the world's
+  memory (writes seen both ways, read-only on request, "memoryview_at: size is negative (or overflowed)"); it was a copy.
+- **The format strings as _ctypes.c makes them**: `_ctypes_alloc_format_string_for_type`'s codes (ctypes' own but `l`/`L` as
+  `q`/`Q` on LP64: `c_char_p` "<z", `c_wchar` "<u", `c_void_p` "<P"; pyi had "<P" and "<w"); a pointer's format with its item's
+  shape and "B" for an incomplete item (`PyCPointerType_SetProto`: "&(2)<h", "&B"); the swapped simple types named `NAME_be`
+  with the class's `__qualname__` (`create_other_endian_type`, `st->swapped_suffix`); `StructUnionType_init` sets `_fields_`
+  through `PyObject_SetAttr`, so `_endian.py`'s `_swapped_meta.__setattr__` gives a `BigEndianStructure`'s fields their swapped
+  types ("T{>q:x:>d:y:}"; pyi laid out the class's own fields, so a big-endian structure stored native-endian values: the
+  aligned and byte-swapped structure tests, which had been put down to `_align_` and nesting, were this).
+- **memoryview** (`go/arbace/py/memoryview.go`, a commit of its own: its core is PY6's 1-D bytes view): a view of a
+  `BufferShaper` carries the exporter's format, itemsize and shape, C-contiguous (`len`: "0-dim memory has no length";
+  `shape`, `strides`, `ndim`, `itemsize`; memory_subscript's 0-dim rules, items by index and tuple of indices, a contiguous slice
+  of the first dimension; `adjust_fmt`'s NotImplementedError "memoryview: unsupported format <i" for a format that is not a
+  native single character, as CPython's, which leaves ctypes' formats to the struct module; `tolist` over the shape;
+  `cast_to_1D`'s checks of a shaped source; `memory_richcompare`'s shapes and a format the struct module cannot unpack making
+  views unequal, a view itself included). Kept to what export needs: the shaped cast is queue 263's.
+
+**Counts** (each test's own verdict; `bin/pyi lib-test-all --fresh test_ctypes`, goi): base b672a5810 621 methods, 491 pass, 130
+classed (`:ctypes-port` 66); head 531 pass, 90 classed (`:ctypes-port` 26), 0 failing. The 40 that pass: test_pickling's 12,
+test_pep3118's 2, test_byteswap's 12 (the five endian tests, the struct and union cases, the field alignment ones),
+test_aligned_structures' 7, test_array_in_pointer's 2, test_memfunctions' 2 (`memoryview_at`), test_buffers'
+`test_buffer_interface`, test_struct_fields' two `test_5`. `bin/pyi lib-test test_memoryview test_array`: 944 to 945 pass
+(test_memoryview's `OtherTest.test_ctypes_cast`, out of `:ctypes-port`), no method lost, the 7 failing the base's. Left in
+`:ctypes-port` (26 test_ctypes tests and 2 outside): the C crop's layouts (Packed1-3, msvc bit fields), bit fields over unions
+and swapped uint32, the pointer caches, `test_bad_length`, `test_max_field_size_gh126937`, `from_address` of an array's memory and
+`from_buffer` of one (Go memory, by design), the issue18060 ABI tests, `test_values`' tables, `test_typeerror`, `_objects`,
+`test_open`'s errno, `test_c_char_p`'s keep object, `test_swapped_type_creation`, `test_p2a_objects`.
+
+**The check** `.tmp/q260/t/check260.sh ROOT` (not committed; the report's appendix): `probe260.py`, 478 lines over 30 ctypes
+types (format, shape, strides, len, bytes, items, slices, casts, hash, equality), the cast writes, `memoryview_at`, pickling,
+a view across `resize`, `from_buffer` and `from_buffer_copy` of ctypes objects, against python3 3.14.10's run; its negative
+control judges the run against a mutated reference, which must fail. PASS on the head, FAIL on the base (every `memoryview` of
+a ctypes object a TypeError).
+
+## As built: 264, a number dunder set to None is called, as CPython's slots call it (2026-11-10, the Mac VM, queue 264)
+
+256's finding 4, 259f's class `:inplace-slot-none`. CPython 3.14.10's `update_one_slot` (Objects/typeobject.c) gives a class
+whose `__iadd__` (or `__add__`, `__radd__`, any number dunder) is None the generic slot like any other value (only `__hash__`
+= None is special), and the slot calls what it finds: `SLOT1` (`slot_nb_inplace_*`) by `vectorcall_method`, `SLOT1BINFULL`
+(`slot_nb_add` ... `slot_nb_divmod`, `slot_nb_power`'s binary and ternary halves) by `vectorcall_maybe`, whose NotImplemented
+answers a *missing* method only. So `x += 1` with `__iadd__ = None` raises TypeError ('NoneType' object is not callable): no
+fallback to `__add__` (`binary_iop1` returns the slot's error), and `x + 1` with `__add__ = None`, `1 + x` with
+`__radd__ = None`, `pow(x, 2, 3)` with `__pow__ = None` and `divmod` with `__divmod__`/`__rdivmod__` = None raise the same.
+pyi's class slots dispatch through `callSpecialOr` (`go/arbace/py/class.ae`), which took a None for a missing method; it now
+answers NotImplemented only when the type has no such attribute, and `builtinDivmod` (`builtins.ae`) goes through it instead of
+`CallSpecial` (which keeps skipping None for its other callers: abs, round, `__fspath__` ...). The interpreted loop
+(`eval.go`'s in-place op) and the compiled path (`AotInplace`, `AotBinary`) reach it through `InPlaceOp`/`BinaryOp`; their
+int/float fast path (`numberFast`) is untouched and runs first, so the common case does no more work. test_augassign's
+testCustomMethods1 passes and `:inplace-slot-none` leaves `test/python/divergences.edn`. Proof: a probe of every in-place dunder
+(set to None with and without the binary one, inherited and blocked in a subclass, on a list subclass, set after the class
+statement and deleted again), every binary and reflected one, the ternary pow, divmod and `operator.iadd`, 139 lines equal to
+`python3 -I -B`'s interpreted (`bin/pyi run`) and compiled (`bin/pyi aot`), 109 of them different on the base; a negative
+control (a reference with the first case changed to the base's fallback) differs. A second probe of the built-in subclasses
+(int, float, str, tuple, set, dict) agrees too.
+
+Found on the way (the brief's `lib-test test_binop`, on the base too, in no class): `doRichCompare` (`abstract.ae`) tried b's
+swapped method first only when b's class is a proper subclass of a's that overrides it (`overridesReflected`, since PY5c), then
+a's, then b's again. CPython's do_richcompare (Objects/object.c) tries b's first whenever b's class is a proper subclass of a's,
+overriding or not, and keeps `checked_reverse_op` so it does not try it a second time. test_binop's test_comparison_orders logged
+`['C.__eq__', 'B.__eq__', 'C.__eq__']` for `B() == C()`, and `B() <= D()` with D overriding nothing logged `['B.__le__',
+'B.__ge__']` where CPython logs `['B.__ge__', 'B.__le__']`. Both rules are ported (their own commits); the method passes, as does test_compare's
+test_ne_low_priority (`['Derived.__ne__', 'Base.__eq__', 'Derived.__ne__']`, the same double try, also in no class), and a
+probe of `==`, `!=`, `<=` and `<` over unrelated classes, an overriding and a non-overriding subclass agrees with `python3 -I -B`
+interpreted and compiled.
+Checks: `lib-test test_augassign test_binop test_descr test_class test_compare test_richcmp`, 251 methods, the base 217 pass, 32
+classed, 2 failing, the head 220 pass, 31 classed, 0 failing, method by method exactly the three above from failure to ok;
+`make python-essential`, `bin/pyi runtime vet`, `table-check --configs tamago/amd64,tamago/arm64`, and a sample of `runtime
+check` (live oracle: 9 programs and 1 session equal, controls failing as they must).
+
+## As built: 262, the C API's next slices and `_testlimitedcapi` on ci (2026-11-10, the Mac VM, queue 262; 244-3 (a), 244-4 (a))
+
+244's follow-up 3 (the VM's proposal P3): the limited C API beyond the first slice, with reference counts on the handles,
+then the first part of 244-4, CPython's own `_testlimitedcapi` built by ci into pyi's C world.
+
+- **The headers are CPython's own** (`tools/pyi/clib/ctypestest/lib.conf`): every source of the world defines `Py_LIMITED_API`
+  (`_ctypes_test.c` 3.13, `_testlimitedcapi`'s parts 3.5 to 3.14), and ci's checker and builder take CPython 3.14.10's
+  `Include/` in that mode as gcc does (a probe of `_testlimitedcapi/float.c` first). The clean-room `Python.h` of 244 is
+  removed; `tools/pyi/capi/include/pyconfig.h` is Arbace's configuration of `Include/` for ci's target (LP64, musl, the GIL;
+  `HAVE_SYS_TYPES_H`, `SIZEOF_PID_T` and the others `Include/` consults). `pycapi.c` defines the data `Include/` declares
+  without including it (under the limited API the type objects' type is incomplete): the singletons' and the type objects'
+  heads, and a `PyExc_NAME` pointer for every built-in exception, bound at the world's start to the objects' handles
+  (`bindData`). The node program grew from 1.44 to 2.54 MB.
+- **The world's modules**: `_testlimitedcapi.c` and its parts but `heaptype_relative.c` and `vectorcall_limited.c` (their Init
+  functions make types from `PyType_Spec`s: natives that add nothing, the next slice's). The module is single-phase
+  (`PyModule_Create2`): `extModuleObj` keeps the module PyInit made, its functions bound to it (`cMethod`: METH_VARARGS,
+  KEYWORDS, NOARGS, O, FASTCALL; their messages name `module.func()` as `_PyObject_FunctionStr`; a result with an error
+  set, or NULL without one, `_Py_CheckFunctionResult`'s SystemErrors).
+- **Reference counts on the handles** (`go/arbace/pyctypes/world.go`): a proxy is a `PyVarObject` head (ob_refcnt, ob_type,
+  ob_size: the limited API inlines `Py_SIZE`; a list's or bytearray's refreshed after every native, which may have run Python
+  code) whose count is the references C holds. A proxy is made at 0 (a borrowed reference); a new reference C receives raises
+  it; `Py_DecRef`, `_Py_DecRef`, and an inline `Py_DECREF` through `_Py_Dealloc`, lower it; at the end of the outermost C
+  entry from Python (a ctypes foreign call, an extension module's function, its PyInit: `capiEnter`/`capiLeave`, after the
+  result was taken) the proxies at 0 are released, their map entries dropped and their memory freed, so an object C held only
+  during a call is Go's alone again (the probe's weak reference dies). A result C returns is stolen (the cMethod's, PyInit's,
+  a `py_object` restype's: GetResult's `Py_XDECREF` after `O_get`). Types and the singletons are immortal with CPython's
+  `_Py_IMMORTAL_INITIAL_REFCNT`, which the inline `Py_INCREF`/`Py_DECREF` of the old limited versions leave alone. A
+  `py_object` stored in a ctypes object's memory pins its object (CPython keeps it in `_objects`, which the handles cannot
+  follow); one a `from_param` CArg holds is given back when the CArg is collected.
+- **The natives** (`capi_limited.go`, `capi_objects.go`, ports of `Objects/` and `Python/`): `PyModule_*`, `PyArg_Parse` and
+  `PyArg_ParseTuple` (getargs.c's `vgetargs1_impl`, `convertsimple`'s units and `seterror`'s messages), `Py_BuildValue`,
+  the errors (`PyErr_SetObject`, `ExceptionMatches`, `GetRaisedException` and the rest), capsules (`PyCapsule_New` over py's
+  `PyCapsule`, its C destructor run when the capsule is collected; `PyCapsule_Import` as capsule.c), slices (sliceobject.c's
+  `PySlice_Unpack`, `AdjustIndices`, `GetIndicesEx`, `GetIndices`), `PyEval_GetFrame*` and the recursion limit, `PyFrame_Get*`,
+  `PyGILState_*`, `PySys_GetObject`/`SetObject`/`GetXOptions`, `Py_GetConstant[Borrowed]`, the object protocol (attributes,
+  items, `HasAttr*` with the unraisable report of 3.13), sequences (abstract.c's `PySequence_GetItem` and its sq_item index
+  rule), tuples, lists, dicts, numbers', strings' and types' cores, imports. 119 of the 320 C API functions the world
+  references; the other 201 are natives that raise NotImplementedError "pyi's C API does not provide NAME (queue 262)"
+  (`bindMissing`; the C stack unwound as by a longjmp), so the module loads whole and a function reaching one fails alone
+  (`:capi-port`).
+- **pythonapi**: `PyFrame_GetLocals` and the other `PyFrame_Get*`, `PyEval_GetFrame*`, `PyGILState_Ensure`/`Release`/`Check` (a
+  thread that calls C holds the GIL already: `PyGILState_LOCKED`), `Py_PACK_VERSION`, and every native above, resolved by name.
+
+**Counts** (each test's own verdict; `bin/pyi lib-test-all --fresh MODULES`, goi; base 9de32029b, head this branch):
+
+| module | base | head |
+|---|---|---|
+| test_capi (1,195) | 4 pass; `:testcapi` 1,116, `:extension-modules` 71 (7 modules skip on `_testlimitedcapi`) | 37 pass; `:testcapi` 1,154, 0 failing |
+| test_ctypes (621) | 531 pass, `:ctypes-port` 26 | the same, 0 failing |
+| test_bytes (325) | does not import (SkipTest at `ByteArrayTest`'s class body: `:extension-modules` 325) | 253 pass, `:bytes-gaps` 54, 0 failing |
+| test_class (42) | 31 pass | 32 pass (`testHasAttrString`) |
+| test_frame (61) | 47 pass, `:ctypes-port` 1 | 48 pass (`TestFrameCApi.test_basic`); the base's 2 failing |
+| test_codecs, test_support | 266, 64 pass | the same (test_support's 3 failing the base's) |
+
+test_capi's 33 new passes are test_build's 6, test_capsule's 7, test_eval's 11 and test_slice's 9 (none lost); `:testcapi`
+grows by 38 because test_bytearray, test_bytes and test_object of test_capi now import `_testlimitedcapi` and stop at
+`_testcapi` instead (from `:extension-modules`). `:bytes-gaps` (new, deferred) holds test_bytes' 54 failures: pyi's bytes and
+bytearray, two of them Go panics (`test_mutating_index`, `test_resize`), none the C API's. `:capi-port` (new) matches the
+not-provided natives; no sampled row reaches one.
+
+**The check** `.tmp/q262/t/check262.sh ROOT` (the report's appendix): `probe262.py`, 61 lines over every reachable part
+(build, version, slices with their index rules, eval and frames, capsules and `PyCapsule_Import`'s errors, sys, the sequence
+protocol through `bytearray`, `HasAttrString`, getargs' messages, a weak reference that dies once C has let go, pythonapi's
+frames and GIL state), against python3 3.14.10's run of CPython's own `_testlimitedcapi`; its negative control judges the run
+against a mutated reference, which must fail. PASS on the head, FAIL on the base (no `_testlimitedcapi`).
+
+**What remains of 244-4**: the types a spec makes (`PyType_FromSpec`, `FromModuleAndSpec`, `FromMetaclass`: objects whose
+memory is C's, their slots C functions; `heaptype_relative.c`, `vectorcall_limited.c`, `_testcapi`'s heap types), the 201
+natives of `:capi-port`, and `_testcapi` itself: it uses the full API, whose macros read objects' layouts (`PyTuple_GET_ITEM`'s
+`ob_item`, `PyBytes_AS_STRING`, `PyFloat_AS_DOUBLE`, the compact unicode's data), which proxies of a head alone cannot give
+(the DECISION of the report); `_testinternalcapi` by design (244-4 (a)).
+
+## As built: 263, P6's second pass and the shaped memoryview cast (2026-11-10, the Mac VM, queue 263)
+
+The main host's proposal P6 (queue 260-264's P4): 252's first pass of 3.15.2's module changes left the modules below behind
+the switch; this pass ports what their 3.15 tests ask, each change gated by `py315()` unless marked "both", from CPython
+3.15.2's Modules/ (the VM's oracle build, `.tmp/oracle315`), and 3.14.10's memoryobject.c for the cast:
+
+- **memoryview.cast with a shape** (both): `memoryview_cast_impl`, `cast_to_1D`, `cast_to_ND`, every format
+  `get_native_fmtchar` accepts, assignment to a full multi-index and to a 0-dim view, count and index on N-D views; under
+  3.15 the Zf/Zd formats and 3.15's error message.
+- **struct**: 3.15.2's `s_new`/`s_init` split (the FutureWarning and DeprecationWarning paths, `set_format`'s non-ASCII
+  ValueError, the uninitialised struct's AttributeError), Zf and Zd; pack_into's and unpack_from's Py_ssize_t offsets
+  raise OverflowError (unpack_from under 3.14 too: 3.14.10's clinic converts it, pyi gave IndexError).
+- **resource**: unsigned RLIM_INFINITY, RLIM_SAVED_CUR/MAX, a -1 limit's DeprecationWarning, prlimit through the same
+  rlim2py; the limits by PyNumber_Index (both).
+- **math**: fmax, fmin, signbit, isnormal, issubnormal; loghelper with a huge `__index__`.
+- **zlib**: crc32_combine and adler32_combine (zlib 1.3's multmodp/x2nmodp, adler32_combine_), `__version__` deprecated.
+- **mmap**: an anonymous map's size(), trackfd=False's ValueError, find's start unclamped, flush(offset, size=-1, *, flags)
+  with MS_*.
+- **ssl**: `_SSLSocket.group()`, `SSLContext.set_groups`/`get_groups` (Go's CurveIDs), load_cert_chain's OSError with its
+  filename, and got_eof_error (gh-148292: after an SSLEOFError, read, write and do_handshake raise it again).
+- **array**: typecodes 'e', 'Zf', 'Zd' (get, set, byteswap, repr, reduce, mformat codes 22-27 and the reconstructor).
+- **_sqlite3**: connect, Connection and five methods with 3.15.2's positional-only and keyword-only parameters.
+
+3.15's classes live in `test/python/divergences-315.edn` (252's DECISION 3 (a); the user's decision (a) on 263's DECISION,
+2026-11-10): a copy of `divergences.edn` followed by a section marked `;; 3.15.2's own classes (queue 263)`, which the flip
+keeps while the copy above it is refreshed. Its classes: `:unicodedata-315` (deferred: block, the grapheme, InCB and
+Extended_Pictographic properties, iter_graphemes), `:ssl-sigalgs-315`, `:ssl-ciphersuites-315`, `:ssl-ktls-315` (design: Go's
+crypto/tls neither sets nor reports signature algorithms, does not configure TLS 1.3's suites, has no kTLS),
+`:memoryview-formats-315` (test_compare_equal, an array's view of format 'B'). `:ssl-go-tls` (both files) takes
+test_wrong_cert_tls13: Go's server sends bad_certificate for any error its VerifyConnection callback returns where OpenSSL
+sends unknown_ca; the client passes only when the race gives it EOF first (1 run of 6 on the head, 0 of 6 on the base), so the
+3.14 count of the head's first measure (166 against the base's 167) was this flake.
+
+Counts (the VM, `bin/pyi aot test/python/libtest.py MODULE`, each test's own verdict: pyi ok / methods, the oracle's ok;
+3.14: python3 3.14.10, 3.15: the 3.15.2 build):
+
+| module | 3.14 base | 3.14 head | 3.15 base | 3.15 head | oracle 3.14 / 3.15 |
+|---|---|---|---|---|---|
+| test_memoryview | 105 / 171 | 106 / 171 | 105 / 173 | 107 / 173 | 152 / 154 |
+| test_base64 | 37 / 41 | 39 / 41 | 64 / 67 | 66 / 67 | 41 / 67 |
+| test_buffer | 5 / 95 | 5 / 95 | 5 / 97 | 5 / 97 | 93 / 95 |
+| test_struct | 39 / 44 | 39 / 44 | 33 / 47 | 42 / 47 | 44 / 47 |
+| test_resource | 13 / 13 | 13 / 13 | 11 / 14 | 14 / 14 | 13 / 14 |
+| test_math | 83 / 89 | 83 / 89 | 74 / 89 | 84 / 89 | 85 / 86 |
+| test_array | 847 / 893 | 847 / 893 | 866 / 1098 | 1043 / 1098 | 893 / 1098 |
+| test_zlib | 75 / 79 | 75 / 79 | 75 / 88 | 84 / 88 | 77 / 86 |
+| test_mmap | 45 / 53 | 45 / 53 | 42 / 55 | 47 / 55 | 45 / 47 |
+| test_sqlite3.test_dbapi | 201 / 205 | 201 / 205 | 201 / 206 | 202 / 206 | 205 / 206 |
+| test_sqlite3.test_userfunctions | | | 66 / 74 | 72 / 74 | - / 72 |
+| test_ssl | 167 / 206 | 166 / 206 (flake) | 153 / 222 | 158 / 222 | 189 / 204 |
+| test_unicodedata | 53 / 61 | 53 / 61 | 55 / 73 | 55 / 73 | 56 / 66 |
+
+test_sqlite3's regression (38 / 38) and types (46 / 48) and test_select (5 / 6) are equal on both. Judged against the classes
+(`test/python/libtest_judge.ae --verdict own`), the 3.15 head's 16 modules: 2,068 pass, 325 classed, 2 failing, the two
+sqlite3 tests the full run's module id `test_sqlite3/...` classes (this harness ran the submodule); the 3.14 head's 12: 1,672
+pass, 275 classed, 3 failing, those two and test_base64's test_b64encode (on the base too). Proofs: `t/check263.sh mvcast`,
+`p315`, `arr315` (references from 3.14.10 and 3.15.2, PASS on the head, FAIL on the base, negative controls failing), the
+got_eof probe's five answers equal to 3.15.2's.
+
+## As built: 266, bytes and bytearray: `:bytes-gaps` closed (2026-11-10, the Mac VM, queue 266)
+
+262's finding 1: test_bytes ran on pyi for the first time with 54 failing methods, `:bytes-gaps`. Ported from CPython 3.14.10's
+Objects/bytesobject.c, bytearrayobject.c, bytes_methods.c and stringlib (split.h, join.h) into `go/arbace/py/bytes.ae`,
+`bytearray.ae`, `bytesmethods.ae` (and small hunks of `percent.ae`, `float.ae`, `sys.ae`, `builtins_codecs.ae`); by cause:
+- **the two panics**: `bytearray_ass_subscript` reads the index, then the value (`_getbytevalue`, whose `__index__` may clear the
+  bytearray, gh-91153), then checks the bounds; `resize` and the constructors past `maxBytesAlloc` (2^32) are MemoryError
+  (`bytes(sys.maxsize)`: OverflowError "byte string is too large", as `_PyBytes_FromSize`).
+- **constructors**: `_getbytevalue` (an `__index__`'s own error propagates, an int too large for a long is ValueError), the order
+  of `bytes_new_impl` and `bytearray___init___impl` (encoding/errors messages, `__bytes__` looked up for every class and a None one
+  called, `_PyObject_LookupSpecial` runs a property), `PyBytes_FromObject`'s buffer/iterable path (`__buffer__` classes too),
+  an emptied bytearray first (a failing list or tuple leaves it empty).
+- **find, rfind, index, rindex, count, startswith, endswith**: clinic's `slice_index` (clipped, `_PyEval_SliceIndex`'s TypeError),
+  `ADJUST_INDICES` (a start past the end stays: nothing matches, not even an empty sub), `parse_args_finds_byte`, tailmatch,
+  `bytes.__contains__` (`_Py_bytes_contains`) for both types.
+- **split, rsplit, removeprefix, removesuffix, partition**: stringlib's split with the whitespace remainder kept as CPython keeps it,
+  rsplit from the right, buffer arguments with "a bytes-like object is required, not 'X'".
+- **fromhex** (`_PyBytes_FromHex`: bytes-like input, error positions, subclasses), **maketrans**, **join** (`PySequence_Fast`, size
+  recheck after each `__buffer__`), **extend** (the size read before the buffer, clamped; `can't extend bytearray with X`),
+  slice assignment (`can assign only bytes, buffers, or iterables of ints`), a shrink in place, `__alloc__`, `sys.getsizeof` of a
+  bytearray, `__doc__`, bytearray's repr (an escaped quote), `%` (`format_obj`, `byte_converter`, `__rmod__`), `float(bytearray)`.
+- **`-X dev`'s `unicode_check_encoding_errors`**: `checkEncodingErrors` in `codecEncodeText`/`codecDecodeText` (a LookupError for an
+  unknown encoding or error handler even for an empty or ASCII text); `sys.flags.dev_mode` follows it.
+Result (`bin/pyi lib-test test_bytes`, interpreted): 325 methods, 308 pass, 17 classed (buffer-exports 4, cpython-only 2,
+skipped-by-test 8, testcapi 3), 0 failing; `:bytes-gaps` is removed from `divergences.edn` and `divergences-315.edn`. Proof: the probe
+`t/probe.py` (1,950 lines of bytes and bytearray answers against python3 3.14.10): 438 lines differ on the base, 0 on the head, run
+and aot.

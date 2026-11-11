@@ -38,7 +38,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-ocaml-native-check repr-ocaml-menhir repr-ocaml-ocamllex-check repr-ocaml-ocamlyacc-check oi-reap-switch \
   oi-typer-check oi-stdlib-check oi-check-native oi-typer-probe oi-repl-check-native repr-ocaml-types oi-judges-fixtures \
   oi-check-ocdump oi-own-verdicts \
-  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base
+  repr-haskell-native-check repr-haskell-target-probe repr-haskell-tables-check repr-haskell-rename-check repr-haskell-typecheck-check repr-haskell-lib-check repr-haskell-lib-check-record repr-haskell-lib-stg repr-haskell-lib-check-own repr-haskell-lib-stg-own repr-haskell-stg-check repr-haskell-run-check repr-haskell-run-check-nofib hsi-pins hsi-spec-check hsi-tests hsi-dumps hsi-generate hsi-record-ref hsi-build hsi-stubs-build hsi-repl-session hsi-check hsi-check-core hsi-check-essential hsi-check-aot hsi-check-aot-o1 hsi-record-ref-o1 hsi-primops hsi-libm-check hsi-runtime-check repr-haskell-test-oracle repr-haskell-record-corpus hsi-record-libs hsi-record-progs oracle-records-list oracle-records-check oracle-records-verify oracle-records-record oracle-records-mirror pyi-bytecode-check pyi-golden repr-haskell-lib-check-own-base repr-haskell-lib-stg-own-base pyi-universe pyi-universe-check
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -969,11 +969,17 @@ pyi-aot-check: ## PY8: the synthetic corpus and the samples compiled, against CP
 pyi-aot-check-record: ## PY8: the same, its results recorded into test/python/check-aot-linux-ARCH.edn (bin/pyi check --aot --record)
 	bin/pyi check --aot --record
 
-pyi-check: ## PY7: Lib/test under pyi, every method against CPython's references, every non-pass in a class of test/python/divergences.edn, against the record (bin/pyi check; CORPUS=a,b: --corpus; ONLY=FILE: a selection)
+pyi-check: ## PY7: Lib/test under pyi, every method by its own verdict (the inventory test/python/universe-cpython314.edn), every non-pass in a class of test/python/divergences.edn, against the record (bin/pyi check; CORPUS=a,b: --corpus; ONLY=FILE: a selection)
 	bin/pyi check $(if $(CORPUS),--corpus $(CORPUS)) $(if $(ONLY),--only $(ONLY))
 
 pyi-check-record: ## PY7: the same over the whole universe, test/python/check-lib-test-linux-amd64.edn written (the main host's; bin/pyi check --record)
 	bin/pyi check --record
+
+pyi-universe: ## queue 256: Lib/test's universe as data, test/python/universe-cpython314.edn, from CPython's recorded runs (bin/pyi universe; record-ref writes it)
+	bin/pyi universe
+
+pyi-universe-check: ## queue 256: the universe written afresh equal to the committed one byte for byte, its negative control (bin/pyi universe --check; seconds)
+	bin/pyi universe --check
 
 pyi-divergences: ## PY7: the check's record classified by test/python/divergences.edn, no run (bin/pyi divergences)
 	bin/pyi divergences
@@ -1000,7 +1006,9 @@ python-essential: ## PY10: Python's essential chain as the gate's proposed steps
 	bin/repr-python roundtrip --text samples
 	bin/pyi gen --check
 	bin/pyi golden
+	bin/pyi universe --check
 	bin/pyi scope-check samples synthetic errors
+	bin/pyi runtime gen-tables
 	bin/pyi compile-check --full samples synthetic errors
 	bin/pyi check --aot --no-pyi --only-list test/python/essential-aot.txt
 
