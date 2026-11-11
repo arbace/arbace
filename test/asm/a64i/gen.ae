@@ -1557,6 +1557,99 @@
 (def vf-families
   [["neon-fp" "the Advanced SIMD FP lanes (4s, 2s, 2d): fadd, fsub, fmul, fdiv, fmax, fmin, fmaxnm, fminnm, faddp, fmaxp, fminp, fmaxnmp, fminnmp, fabd, fmulx, fmla, fmls, fcmeq, fcmge, fcmgt, facge, facgt; fabs, fneg, fsqrt, frint[npmzaxi], scvtf, ucvtf, fcvt[npmza][su], the compares with zero" vf-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the vector FP under FPCR (AR10, ARS60 (a)): the FP lanes' rounding paths (simdfp.ae's FPRound) at FPCR's directed rounding
+;; modes (RMode 1-3) and DN, each case's stub setting FPCR before the instruction and clearing it after; the operands drawn as the
+;; scalar rm families draw them (near the largest finite and the smallest normal too); the model the scalar rm model lane by lane,
+;; FPSR's exceptions accumulated over the lanes; fsqrt's exact root by BigIntegers.
+
+(defn- isqrt
+  "floor(sqrt(N)) of a non-negative BigInteger, Newton's iteration."
+  ^BigInteger [^BigInteger n]
+  (if (< (.bitLength n) 2)
+    n
+    (loop [x (.shiftLeft BigInteger/ONE (int (inc (quot (.bitLength n) 2))))]
+      (let [y (.shiftRight (.add x (.divide n x)) 1)]
+        (if (>= (.compareTo y x) 0) x (recur y))))))
+
+(defn fp-sqrt-rm
+  "fp-sqrt at FPCR's MODE and DN: the root of N/D scaled by 2^700 floored, a sticky half added when inexact, rounded."
+  [t a mode dn?]
+  (dn t dn?
+      (if (or (nans t a) (f-zero? t a) (f-sign t a) (f-inf? t a))
+        (fp-sqrt t a)
+        (let [[_ ^BigInteger n ^BigInteger d] (bd-rat (bd (f-val t a)))
+              k 700
+              sc (.divide (.shiftLeft n (int (* 2 k))) d)
+              s (isqrt sc)
+              exact (and (zero? (.signum (.remainder (.shiftLeft n (int (* 2 k))) d))) (zero? (.compareTo (.multiply s s) sc)))]
+          (if exact
+            (round-rat t false s (.shiftLeft BigInteger/ONE (int k)) mode)
+            (round-rat t false (.add (.shiftLeft s 1) BigInteger/ONE) (.shiftLeft BigInteger/ONE (int (inc k))) mode))))))
+
+(defn- vfr-lane
+  "One lane of OP at MODE and DN: [RESULT FPSR]; D the addend lane (fmla, fmls)."
+  [op t a b d mode dn?]
+  (case op
+    ("fadd" "faddp") (fp-arith-rm t :add a b mode dn?)
+    "fsub" (fp-arith-rm t :sub a b mode dn?)
+    "fmul" (fp-arith-rm t :mul a b mode dn?)
+    "fdiv" (fp-arith-rm t :div a b mode dn?)
+    "fabd" (let [[r fl] (fp-arith-rm t :sub a b mode dn?)] [(f-abs t r) fl])
+    "fmulx" (dn t dn? (or (nans t a b)
+                          (if (or (and (f-inf? t a) (f-zero? t b)) (and (f-zero? t a) (f-inf? t b)))
+                            [(let [two (f-bits t 2.0)] (if (not= (f-sign t a) (f-sign t b)) (f-neg t two) two)) 0]
+                            (fp-arith-rm t :mul a b mode dn?))))
+    "fmla" (fp-muladd-rm t d a b mode dn?)
+    "fmls" (fp-muladd-rm t d (f-neg t a) b mode dn?)
+    "fmaxnm" (dn t dn? (fp-minmax t :maxnm a b))
+    "fmin" (dn t dn? (fp-minmax t :min a b))
+    "fsqrt" (fp-sqrt-rm t a mode dn?)
+    "frintx" (dn t dn? (fp-rint t a mode true))
+    "frinti" (dn t dn? (fp-rint t a mode false))
+    "scvtf" (fp-cvtf-rm t a (:bits (ft t)) true mode)
+    "ucvtf" (fp-cvtf-rm t a (:bits (ft t)) false mode)))
+
+(defn- vfr-case [op a v1 v2 mode dn?]
+  (let [e (ar-e a) n (ar-n a) q (second (arrs a)) d (v0-of v1 v2) t (if (= e 64) :d :s)
+        src (when (= op "faddp") (vec (concat (vls v1 e n) (vls v2 e n))))
+        rs (for [i (range n)]
+             (if src
+               (vfr-lane op t (src (* 2 i)) (src (inc (* 2 i))) 0 mode dn?)
+               (vfr-lane op t (vlane v1 i e) (vlane v2 i e) (vlane d i e) mode dn?)))
+        [lo hi] (half (vpack (map first rs) e) q)]
+    [lo (bit-xor (long hi) (long (reduce bit-or 0 (map second rs))))]))
+
+(defn vfr-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        rnd (fn [t]
+              (let [x (nx) sp (vec (fp-specials t)) {:keys [fb bits]} (ft t)
+                    maxf (dec (f-inf t false)) minn (bit-shift-left 1 (long fb))]
+                (case (mod (unsigned-bit-shift-right x 3) 6)
+                  0 (sp (mod (unsigned-bit-shift-right x 9) (count sp)))
+                  1 (bit-and x (ones bits))
+                  2 (f-bits t (* (if (odd? x) -1.0 1.0) (+ 1.0 (/ (double (bit-and (unsigned-bit-shift-right x 11) 0xfffff)) 1048576.0))))
+                  3 (bit-or (if (odd? x) (f-zero t true) 0) (- maxf (bit-and (unsigned-bit-shift-right x 12) 0xffff)))
+                  4 (bit-or (if (odd? x) (f-zero t true) 0) (+ (- minn 0x8000) (bit-and (unsigned-bit-shift-right x 12) 0xffff)))
+                  5 (f-bits t (double (bit-shift-right x 40))))))
+        vec-of (fn [a] (let [e (ar-e a) t (if (= e 64) :d :s)] (vpack (for [_ (range (quot 128 e))] (rnd t)) e)))
+        ops3 ["fadd" "fsub" "fmul" "fdiv" "faddp" "fabd" "fmulx" "fmla" "fmls" "fmaxnm" "fmin"]
+        ops2 ["fsqrt" "frintx" "frinti" "scvtf" "ucvtf"]]
+    (concat
+     (for [[mode fpcr dn?] rm-modes op ops3 a ["2s" "4s" "2d"] i (range 6)
+           :let [e (ar-e a) t (if (= e 64) :d :s) v1 (vec-of a)
+                 ;; every sixth case's v2 the negated (fadd) or equal (fsub) v1: the exact zero sums, -0 under RMode 2
+                 v2 (if (zero? (mod i 6)) (if (= op "fsub") v1 (vpack (map #(f-neg t %) (vls v1 e (quot 128 e))) e)) (vec-of a))]]
+       (ncase (str "mov\tx10, #0x" (Long/toHexString fpcr) "\n\tmsr\tfpcr, x10\n\t" op "\tv0." a ", v1." a ", v2." a "\n\tmsr\tfpcr, xzr\n")
+              v1 v2 (vfr-case op a v1 v2 mode dn?)))
+     (for [[mode fpcr dn?] rm-modes op ops2 a ["2s" "4s" "2d"] _ (range 6)
+           :let [v1 (if (#{"scvtf" "ucvtf"} op) [(nx) (nx)] (vec-of a)) v2 (vec-of a)]]
+       (ncase (str "mov\tx10, #0x" (Long/toHexString fpcr) "\n\tmsr\tfpcr, x10\n\t" op "\tv0." a ", v1." a "\n\tmsr\tfpcr, xzr\n")
+              v1 v2 (vfr-case op a v1 v2 mode dn?))))))
+
+(def vfr-families
+  [["neon-fp-rm" "the Advanced SIMD FP lanes (4s, 2s, 2d) under FPCR's directed rounding modes (RMode 1-3) and DN, FPCR set by each case's stub: fadd, fsub, fmul, fdiv, faddp, fabd, fmulx, fmla, fmls, fmaxnm, fmin; fsqrt, frintx, frinti, scvtf, ucvtf" vfr-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -1602,6 +1695,11 @@
          ;; review 1111 (4): the scalar FP under FPCR's directed rounding modes and DN
          (for [[i [nm what t]] (map-indexed vector fp-rm-families)
                :let [text (fp-rm-program nm what t (vec (fp-rm-cases t (rng (+ seed 600 i)))))]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR10 (ARS60 (a)): the Advanced SIMD FP lanes under FPCR's directed rounding modes and DN
+         (for [[i [nm what f]] (map-indexed vector vfr-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 700 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)
