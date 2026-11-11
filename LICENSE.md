@@ -1843,6 +1843,12 @@ covers what.
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`
   file it is or is compiled from, as above (`arbace/asm/...` classes under ASM's BSD 3-Clause
   License, `arbace/lang/Murmur3*` under the Apache License 2.0, and so on).
+- `test/programs/junit4/patches/`: two variants of pinned third-party sources (bin/java-project's `:patches`, A10 of the
+  Ghidra case study's G1 plan), whose context lines are theirs: `hamcrest-core-1.3-javac.patch`, of hamcrest-core 1.3
+  (`org.hamcrest:hamcrest-core:1.3`'s sources jar, http://hamcrest.org), under the BSD License below ("Hamcrest");
+  `junit-4.13.2-jdk18.patch`, of JUnit 4.13.2 (`junit:junit:4.13.2`'s sources jar, https://github.com/junit-team/junit4
+  at `r4.13.2`), under the Eclipse Public License 1.0 (text below). The artifacts themselves are fetched by pin
+  (`test/java/project/maven-pins.edn`) into `.tmp/maven`, never committed.
 
 ## Arbace, Clojure, spec.alpha and core.specs.alpha: Eclipse Public License 1.0
 
@@ -5819,4 +5825,36 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## Hamcrest: BSD License
+
+```
+BSD License
+
+Copyright (c) 2000-2006, www.hamcrest.org
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+Redistributions of source code must retain the above copyright notice, this list of
+conditions and the following disclaimer. Redistributions in binary form must reproduce
+the above copyright notice, this list of conditions and the following disclaimer in
+the documentation and/or other materials provided with the distribution.
+
+Neither the name of Hamcrest nor the names of its contributors may be used to endorse
+or promote products derived from this software without specific prior written
+permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY
+WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
 ```
