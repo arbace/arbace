@@ -681,6 +681,37 @@
   [^String nm]
   (str "_ZTW" (if (str/starts-with? nm "_Z") (subs nm 2) (str (count nm) nm))))
 
+(defn- tls-internal?
+  "review 1111 #1: whether the thread-local variable `v` has internal linkage ([basic.link]/4: `static` at namespace scope or
+  a member of an unnamed namespace), its _ZTH and _ZTW internal too. A static data member is not: sema's :internal also
+  holds for the members a class declares `static` (thread_local11.h's T::u3, whose global is emitted internal: CP369)."
+  [v]
+  (boolean (and (:internal v) (not= :member-static (:storage v)))))
+
+(defn- extern-tls-wrapper!
+  "review 1111 #1: the wrapper of the thread-local variable `nm` defined in another unit (clang's
+  ItaniumCXXABI::EmitThreadLocalInitFuncs for a variable this unit does not define): _ZTW, linkonce_odr and hidden (the
+  defining unit's weak_odr one wins at link), calling the init function _ZTH, declared extern_weak (absent when the defining
+  unit needs no dynamic initialization of its thread-local variables), when it is there, then returning the variable's
+  address in this thread. Once per unit."
+  [^String nm]
+  (when-not (contains? (:tls-ext @*top*) nm)
+    (swap! *top* update :tls-ext (fnil conj #{}) nm)
+    (let [w (tls-wrapper-name nm) th (str "_ZTH" (subs w 4))]
+      (swap! *top* update :declared conj th)
+      (add-top! (list 'llvm/declare (gsym th) 'void [] :linkage :extern_weak))
+      (declare! "llvm.threadlocal.address.p0" 'ptr '[ptr])
+      (add-top! (list 'llvm/define (gsym w) 'ptr [] :linkage :linkonce_odr :visibility :hidden
+                      :body [(list 'block nil
+                                   (list '= '%t1 (list 'icmp :ne 'ptr (gsym th) 'null))
+                                   (list 'br 'i1 '%t1 '%init '%exit))
+                             (list 'block '%init
+                                   (list 'call 'void (gsym th) [])
+                                   (list 'br '%exit))
+                             (list 'block '%exit
+                                   (list '= '%t2 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
+                                   '(ret ptr %t2))])))))
+
 (defn- var-addr [id]
   (or (get-in @*f* [:addr id])
       (let [v (sema/var* id)]
@@ -697,9 +728,15 @@
                                                        :linkage :external :align (abi/align-of (:ty v)))))
                                      ;; a thread-local variable with dynamic initialization: through its wrapper (outside the
                                      ;; unit's __tls_init, which initializes it)
-                                     (if (and (:tls v) (not *in-tls-init*) (some #(= nm (second %)) (:tls-dyn @*top*)))
+                                     (cond
+                                       (and (:tls v) (not *in-tls-init*) (some #(= nm (second %)) (:tls-dyn @*top*)))
                                        (val! (list 'call 'ptr (gsym (tls-wrapper-name nm)) []))
-                                       (gsym nm)))
+                                       ;; (review 1111 #1: a thread-local variable defined in another unit, whose dynamic
+                                       ;; initialization is that unit's: through the discardable wrapper clang writes for it)
+                                       (and (:tls v) (:extern v))
+                                       (do (extern-tls-wrapper! nm)
+                                           (val! (list 'call 'ptr (gsym (tls-wrapper-name nm)) [])))
+                                       :else (gsym nm)))
           :static-local (gsym (abi/mangle-local-static (sema/fnd (:fn-of v)) (:name v) (long (:disc v))))
           (fail :codegen "no address for " (:name v))))))
 
@@ -2771,16 +2808,21 @@
            (add-top! (apply list 'llvm/define (gsym "__tls_init") 'void [] :linkage :internal
                             (concat (when (:personality s) [:personality ['ptr (gsym "__gxx_personality_v0")]])
                                     [:body (vec (concat [entry] (rest blocks) (:pad-blocks s)))])))))
-       (doseq [[_ nm] tv]
-         (add-top! (list 'llvm/alias (gsym (str "_ZTH" (subs (tls-wrapper-name nm) 4))) '(fn void []) ['ptr (gsym "__tls_init")])))
+       ;; (review 1111 #1: an internal variable's _ZTH alias and _ZTW wrapper are internal too, as clang's
+       ;; getThreadLocalWrapperLinkage and EmitThreadLocalInitFuncs give them the variable's local linkage: two units'
+       ;; `static thread_local int x = f();` each keep their own, neither a duplicate _ZTHL1x nor one merged _ZTWL1x)
+       (doseq [[id nm] tv]
+         (add-top! (apply list 'llvm/alias (gsym (str "_ZTH" (subs (tls-wrapper-name nm) 4))) '(fn void []) ['ptr (gsym "__tls_init")]
+                          (when (tls-internal? (sema/var* id)) [:linkage :internal]))))
        (declare! "llvm.threadlocal.address.p0" 'ptr '[ptr])
-       (doseq [[_ nm] tv]
+       (doseq [[id nm] tv]
          (let [w (tls-wrapper-name nm)]
-           (add-top! (list 'llvm/define (gsym w) 'ptr [] :linkage :weak_odr :visibility :hidden
-                           :body [(list 'block nil
-                                        (list 'call 'void (gsym (str "_ZTH" (subs w 4))) [])
-                                        (list '= '%t1 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
-                                        '(ret ptr %t1))])))))
+           (add-top! (apply list 'llvm/define (gsym w) 'ptr []
+                            (concat (if (tls-internal? (sema/var* id)) [:linkage :internal] [:linkage :weak_odr :visibility :hidden])
+                                    [:body [(list 'block nil
+                                                  (list 'call 'void (gsym (str "_ZTH" (subs w 4))) [])
+                                                  (list '= '%t1 (list 'call 'ptr (gsym "llvm.threadlocal.address.p0") [['ptr (gsym nm)]]))
+                                                  '(ret ptr %t1))]]))))))
      (when (seq @entries)
        (add-top! (list 'llvm/global (gsym "llvm.global_ctors") (list 'array (count @entries) '(struct i32 ptr ptr))
                        (apply list 'array (for [[prio nm] @entries] ['(struct i32 ptr ptr) (list 'struct ['i32 prio] ['ptr (gsym nm)] ['ptr 'null])]))
