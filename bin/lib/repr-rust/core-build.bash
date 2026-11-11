@@ -152,3 +152,31 @@ core_export() {
   CORE_ONLY="$re" CORE_EXPORT_NAMES="$re" CORE_EXPORT=$out core_check --records $files
   [ -s "$out" ] && echo "core-export: $(grep -c '^(core/body' "$out") bodies in $out"
 }
+
+# RF19: bin/rust-front core-attrs: the codegen attributes of core's functions after expansion (the macro-made ones core's sources
+# do not show as items: int_impl!'s and uint_impl!'s methods, the operator impls' macros, cmp's), from the interface pass (no body
+# built) over test/rust/front/core-attrs.txt's module files, into .tmp/rust-front/core/core-attrs.edn ({def-path [names]}), which
+# rsi-build gives mono (RF_CORE_ATTRS); kept by a key (the list, the copy of core's sources, the front end's expansion, resolution,
+# lowering and collection; not mono.ae, whose local-attrs names them) in core-attrs.edn.key; light: one process, about 23
+# minutes (num/mod.rs 18), 2.3 GB
+core_attrs_key() {
+  local lib=$1
+  { cat "$root/test/rust/front/core-attrs.txt"
+    (cd "$lib/core/src" && grep -v '^#' "$root/test/rust/front/core-attrs.txt" | xargs sha256sum)
+    (cd "$root" && sha256sum arbace/rust/front/{expand,expand_derive,expand_format,resolve,lower,collect,core_check}.ae)
+    cat "$(records_front)/std-iface.edn" | sha256sum; } | sha256sum | cut -c1-64
+}
+
+core_attrs() {
+  local lib m fd out=$work/core/core-attrs.edn key
+  lib=$(core_lib) || return 1
+  m=$(core_modules) || return 1
+  fd=$(records_front) || return 1
+  key=$(core_attrs_key "$lib")
+  if [ -s "$out" ] && [ "$(cat "$out.key" 2>/dev/null)" = "$key" ]; then echo "core-attrs: current ($out)"; return 0; fi
+  rm -f "$out" "$out.key"
+  (cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-1800MiB} arbace_tool -m arbace.rust.front.core-check "$lib" --attrs "$fd" "$work/core" "$m" "$out" \
+     $(grep -v '^#' "$root/test/rust/front/core-attrs.txt" | sed "s|^|$lib/core/src/|") 2>&1 | grep --line-buffered -v -E '^Reflection warning|recur arg|^Auto-boxing')
+  [ -s "$out" ] || { echo "core-attrs: no $out"; return 1; }
+  echo "$key" > "$out.key"
+}

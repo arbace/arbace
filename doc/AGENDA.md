@@ -51,7 +51,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | Scheme | 97.4 (98.9) | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
-| LLVM IR | 97.6 (98.5) | 100 | 96.9 | |
+| LLVM IR | 97.6 (98.5) | 100 | 96.9 | llvm-ind1 (LLS46): judge 0.8455 (16 more own verdicts), independence 96.91; proposals LLS47-LLS50 (the rest of the judge is the probes, llvmi's 177, the split sections) |
 | Python | 0 | 83.3 | 20.0 | all three |
 
 Six crops are above 90 on all three. What the others still need:
@@ -95,6 +95,9 @@ Six crops are above 90 on all three. What the others still need:
   equal, 0 lost) not reached: 10 lost in three classes (a case on the void token, output differences, NonTermination); next
   P20's tail, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
+  hsi's eval cell (`hsi-e1`, HES88): 797 to 809 of 908 (HE9's six recorded, the static pointer table, forkOn#'s locked threads,
+  the SIMD primops); 99 left in classes (60 no reference, 12 speed, 10 Cmm); HES89 (`simd/` in the corpora) and HES90 (all.T's
+  `ignore_stdout`) proposed; rts_clearMemory's record for a night.
 - **Rust** (all three): the AOT cell has no record yet (RE4's `bin/rsi check --aot --record`, tonight: completeness and
   maturity rise with it); eval 0.5 until rsi runs the native front end's MIR (RF10b's passes: 506 of 616 bodies equal;
   RF11, `rust-rf11`). Since RFP53 (a) (the user, 2026-11-10; branch `crops-rulings`) eval and AOT are case-weighted: a case
@@ -372,7 +375,7 @@ items below are the ones whose work is still ahead or tied to a night.
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
   OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
   on `ocaml-s2` (its compiled runs a night's), OC216 on `ocaml-s3` and its rest (AF_UNIX and signals at the compiled level) on `ocaml-s4`, then OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.
-- **Haskell** ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md)): HES83 (b) (the own verdict where a
+- **Haskell** ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md)): HES89, HES90 (hsi-e1's proposals); HES83 (b) (the own verdict where a
   `.stdout` ships, GHC's references at the oracle tier); HF9-P7 with slice 7; HF10-P20 to P27 (above, the plan's stages 2-9); HF10's lib-stg
   measures on night 11; `bin/gate --full --plan` to confirm `haskell-lib-own-base` plans after `haskell-lib-check-own`.
 - **Rust** ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md)): RF11, RF12 (RES54's ceiling until it); RFP29 (a) later;
@@ -395,7 +398,10 @@ items below are the ones whose work is still ahead or tied to a night.
   rust-rf17, "As built: RF18"): RFP62 (a) built (opaque types revealed in mono, closures' layouts and `dyn Fn` vtable entries with
   call_once's VTableShim, the record's `dyn Fn(..)` read): 66 of 67 own; RFP63 (a)'s reader (`RF_STD_EXPORTS`). Next: RFP63 (a)'s
   night (the helper's `--std-exports`, every rust-front pack recorded again: panic-assert-eq); the night: the whole plan's
-  rsi-build, rsi-native over the own programs RF15-RF18 added, `rsi check --front own`.
+  rsi-build, rsi-native over the own programs RF15-RF18 added, `rsi check --front own`. RF19 (`rust-rf19` on next, "As built:
+  RF19"): `Box<dyn Fn>` calls native (the builtin Tuple candidate), collections 2.62 -> 2.09 GB (the whole corpus 2.24 GB at
+  RF11_BATCH=3), core's macro-made functions' attributes by `bin/rust-front core-attrs` (native callees 4,528 -> 4,985 of 4,985):
+  66 of 67 own, independence unchanged.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
   ported, completeness 97.6.

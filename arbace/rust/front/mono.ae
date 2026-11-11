@@ -974,13 +974,29 @@
 
 (defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
 
+(defn- drop-fn-bodies
+  "RF19: a parsed file's items without what ext-attrs and src-adt never read (they read the items' kinds, names, attributes,
+  headers, fields and macro calls): functions' bodies and macro definitions' token trees (each `(Fn ... :body B ...)`'s and
+  `(MacroDef :body B ...)`'s B None) and doc comments (`(Attribute :kind (DocComment ..) ..)`); the cache held 355 MiB in
+  collections' run (51 of core's files)"
+  [x]
+  (cond (and (seq? x) (#{'Fn 'MacroDef} (first x)) (some #{:body} x))
+        (with-meta (apply list (first x) (mapcat (fn [[k v]] [k (if (= k :body) 'None (drop-fn-bodies v))]) (partition 2 (rest x)))) (meta x))
+        (seq? x) (with-meta (apply list (map drop-fn-bodies x)) (meta x))
+        (vector? x) (with-meta (into [] (comp (remove (fn [a] (and (seq? a) (= 'Attribute (first a))
+                                                                   (let [k (fget a :kind)] (and (seq? k) (= 'DocComment (first k)))))))
+                                              (map drop-fn-bodies))
+                                     x)
+                               (meta x))
+        :else x))
+
 (defn- parse-rs [^String f]
   (or (get @parsed-files f)
       (let [lx (requiring-resolve 'arbace.repr.rust.lex/source) ps (requiring-resolve 'arbace.repr.rust.parse/parse-file)
             out (requiring-resolve 'arbace.repr.rust.native/out) errs (requiring-resolve 'arbace.repr.rust.parse/*errs*)
             src (lx (slurp f))
             {:keys [tree toks mt]} (with-bindings {errs (java.util.ArrayList.)} (ps src 2021))
-            items (fget (out tree src toks mt 2021) :items)]
+            items (drop-fn-bodies (fget (out tree src toks mt 2021) :items))]
         (swap! parsed-files assoc f items)
         items)))
 
@@ -1293,6 +1309,12 @@
              (:attrs (:node (c/def-of id))))))
 
 (def ^:dynamic *native-attrs* {})   ; RF12-P6: core's definitions' attributes from core-check's export (a nested fn's too)
+(def ^:dynamic *macro-attrs* {})   ; RF19: core's functions' attributes after expansion (bin/rust-front core-attrs, RF_CORE_ATTRS)
+
+(defn load-macro-attrs
+  "RF19: bin/rust-front core-attrs' file ({def-path [names]}), {} without one"
+  [f]
+  (if (and f (.exists (File. ^String f))) (read-string (slurp f)) {}))
 
 (defn- impl-trait-method
   "RF14: a trait impl's method's trait method (the trait's item of its name), or nil"
@@ -1314,7 +1336,10 @@
   (cond
     (number? d) {:names (set (local-attrs d)) :known true}
     (contains? *native-attrs* d) {:names (set (get *native-attrs* d)) :known true}
-    :else (let [a (ext-attrs d)] {:names (set a) :known (some? a)})))
+    :else (let [a (ext-attrs d)
+                ;; RF19: an item core's sources do not show (a macro-made one): its attributes after expansion
+                a (if (and (nil? a) (contains? *macro-attrs* d)) (get *macro-attrs* d) a)]
+            {:names (set a) :known (some? a)})))
 
 (defn attrs-of
   "{:names #{...} :known BOOL}: a definition's codegen attributes (known false: an item core's sources did not show); a trait

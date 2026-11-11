@@ -19,6 +19,22 @@
 (defn- read-forms [s] (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
                         (loop [acc []] (let [x (read {:eof ::eof} r)] (if (= x ::eof) acc (recur (conj acc x)))))))
 
+(defn- write-forms
+  "RF19: FORMS printed one a line into the file F as they are written (the module's text never whole in memory: collections'
+  as one string was its run's peak)"
+  [^String f forms]
+  (with-open [w (java.io.BufferedWriter. (java.io.FileWriter. f))]
+    (binding [*out* w] (doseq [x forms] (prn x)))))
+
+(defn mem-mark
+  "RF19: with RF_MEM_TRACE, the live heap after a collection (HeapInuse, MiB) at WHAT, on the standard error"
+  [what]
+  (when (System/getenv "RF_MEM_TRACE")
+    (System/gc)
+    (let [rt (Runtime/getRuntime)]
+      (binding [*out* *err*] (println (str "debug mem " what " " (quot (- (.totalMemory rt) (.freeMemory rt)) 1048576) " MiB at "
+                                                  (quot (System/currentTimeMillis) 1000)))))))
+
 (def ^:dynamic *control*
   "The run's negative control (RF10_CONTROL=1, or bound by the batch): every Add of our bodies a Sub, so the run must differ"
   nil)
@@ -825,9 +841,14 @@
   statics' and lang items' symbols, the layouts; a fact mono refuses taken from the record (counted); core's bodies the
   record's (RF12); our bodies' own type forms (no record's DefIds). {:forms :lines :tally :judged}: with JUDGE, a seq of
   [NAME RECORD-FORMS], RFP40 (c)'s mono-check of the same pipeline run, each [tally differences] of
-  arbace.rust.front.mono-check/judge (the program's facts against each record) in :judged"
+  arbace.rust.front.mono-check/judge (the program's facts against each record) in :judged. RECORD the record's file, or
+  its forms already read (RF19)"
   [crates front-dir record n abort? judge]
-  (let [forms (read-forms (slurp record))
+  (let [_ (mem-mark (str n " native-run"))
+        ;; RF19: the record's forms as the batch read them for the judge (one copy: a second read of collections' 35 MB
+        ;; record was 477 MiB of a 2.2 GiB peak), else read from the file
+        forms (if (string? record) (read-forms (slurp record)) record)
+        _ (mem-mark (str n " record read"))
         rec-bodies (for [f forms :when (= 'mir/body (first f))] (second f))
         rfacts (record-facts rec-bodies)
         rec-callees (atom {})
@@ -845,9 +866,12 @@
         (binding [mono/*crates* (mono/load-crates crates) mono/*lib-dir* (System/getenv "RF_MONO_LIB")
                   ;; RF18 (RFP63 (a)'s reader): std's exported generic instances (the helper's --std-exports, recorded at night)
                   mono/*upstream* (mono/load-upstream (System/getenv "RF_STD_EXPORTS"))
+                  ;; RF19: core's macro-made functions' attributes (bin/rust-front core-attrs; rsi-build's RF_CORE_ATTRS)
+                  mono/*macro-attrs* (mono/load-macro-attrs (System/getenv "RF_CORE_ATTRS"))
                   mono/*native-attrs* (if (System/getenv "RF_CORE_PACK") {} (into {} (for [[d e] (native-core-map) :when (:attrs e)] [d (:attrs e)])))]
           (bc/build-program front-dir n
             (fn [bodies]
+              (mem-mark (str n " bodies built"))
               (let [;; RFP49 (a): the function constants of the record's std instances' bodies, whose local instances mono's
                     ;; collector adds (rustc's std bodies are the pack's, RF12's part; what they reach of ours is mono's)
                     std-calls (let [acc (java.util.LinkedHashSet.)]
@@ -862,6 +886,7 @@
                                            [_ a] (:alloc-data b) :when (= :fn (:kind a))]
                                        (:symbol a)))
                     facts (mono/program-facts n bodies std-calls std-fn-syms)
+                    _ (mem-mark (str n " facts"))
                     ;; RF12-P6: the record's core bodies the program reaches, built natively where they and their closure can be
                     core-plan (when (and (seq (native-core-map)) (not (System/getenv "RF_CORE_PACK")))
                                 (native-core-plan (for [x (:ext-items facts) :let [rec (some #(when (= (:symbol x) (:symbol %)) %) rec-bodies)] :when rec]
@@ -896,6 +921,7 @@
                     facts (cond-> facts core-f (-> (update :callees merge (:callees core-f)) (update :fsyms merge (:fsyms core-f))
                                                    (assoc :native-core-syms native-syms)))
                     _ (reset! judged (vec (for [[rn rforms] judge] [rn (mc/judge n bodies facts (mc/record-entries rforms) rforms)])))
+                    _ (mem-mark (str n " judged"))
                     root-file (or *loc-file* build/*root-file*)
                     ;; RF17: the program's own constants (a `const` item's body, construct_const's, by its text `const NAME`), each
                     ;; evaluated once as CTFE evaluates it (eval-promoted over its built body, _0's value): a scalar's (scalar BITS
@@ -1084,6 +1110,7 @@
                       [(list 'mir/langsyms (into {} (for [ln (distinct (concat (keys (:langsyms facts)) (keys rec-langs)))]
                                                       [ln (let [o (get (:langsyms facts) ln)] (if (and o (not (mono/error? o))) (do (fact! :langsyms true) o) (do (fact! :langsyms false) (get rec-langs ln))))])))]
                       (for [f forms :when (= 'mir/entry (first f))] (do (fact! :entry false) f))))
+                    _ (mem-mark (str n " module's forms"))
                     our-forms (mono/ty-forms (keep first (vals ours)))
                     core-forms (mono/ty-forms (for [f new-forms :when (= 'mir/body (first f)) :let [b (second f)] :when (not= "arbace-built+cleanup" (:phase b))] (dissoc b :alloc-data)))
                     ;; a layout mono refuses: the record's, when it has that type
@@ -1144,7 +1171,7 @@
 
 (defn native-main [crates front-dir record out n & flags]
   (let [r (native-run crates front-dir record n (some #{"--panic-abort"} flags) nil)]
-    (spit out (with-out-str (doseq [f (:forms r)] (prn f))))
+    (write-forms out (:forms r))
     (doseq [l (run-lines n r)] (println l))
     (System/exit 0)))
 
@@ -1174,7 +1201,8 @@
   [dir n]
   ;; RF13: a failure past codegen (the printer's) is the program's refusal, not the batch's end
   (let [[st what] (try ((requiring-resolve 'arbace.rust.back.check/emit-mono) dir n *std-linked*)
-                       (catch Throwable e [:unsupported (str "the module's printing: " (.getMessage e))]))]
+                       (catch Throwable e [:unsupported (str "the module's printing: " (.getMessage e))]))
+        _ (mem-mark (str n " codegen done"))]
     (if (not= st :ok)
       (str "codegen refused (" (name st) " " what ")")
       (or (when-let [why (lower-c dir n)] (str "rsi's lowering refused (" why ")"))
@@ -1214,13 +1242,16 @@
       (binding [*loc-file* rel *std-linked* (boolean (:std opts)) bc/*file-name* rel mono/*unknown-refused* (boolean (:std opts))]
       (let [dir (str work "/" n)
             own (read-forms (slurp (rec-file n)))
+            _ (mem-mark (str n " batch: record read"))
             other (cond (= n ca) cb (= n cb) ca)
             judge (cond-> [[n own]] other (conj [other (read-forms (slurp (rec-file other)))]))
-            r (try (native-run crates front-dir (rec-file n) n abort? judge)
+            r (try (native-run crates front-dir own n abort? judge)
                    (catch Throwable e (when (System/getenv "RF11_TRACE") (.printStackTrace e)) {:error (str e)}))]
         (if (:error r)
           (println (str "run-built: " n ": the pipeline failed (" (:error r) ")"))
-          (let [_ (spit (str dir "/" n ".mono.edn") (with-out-str (doseq [f (:forms r)] (prn f))))
+          (let [_ (mem-mark (str n " batch: native-run done"))
+                _ (write-forms (str dir "/" n ".mono.edn") (:forms r))
+                _ (mem-mark (str n " batch: module written"))
                 rl (run-lines n r)
                 _ (println (str/join "\n" (filter #(str/starts-with? % "build-run: ") rl)))
                 _ (spit (str dir "/build-run.log") (str (str/join "\n" rl) "\n"))
@@ -1234,11 +1265,12 @@
                                              (for [d (take 3 cdiffs)] (str "   " (pr-str d))))])
               (doseq [[k [e t]] ctally] (swap! ctl-total update k (fnil (fn [[a b]] [(+ a e) (+ b t)]) [0 0]))))
             (println (str "run-built: " n ": " (if-let [why (emit-and-lower dir n)] why "ready")))
+            (mem-mark (str n " batch: codegen and lowering done"))
             (when (= n (:control opts))
               (let [cdir (str work "/_control/" n)
                     _ (.mkdirs (File. cdir))
                     c (binding [*control* true] (native-run crates front-dir (rec-file n) n abort? nil))]
-                (spit (str cdir "/" n ".mono.edn") (with-out-str (doseq [f (:forms c)] (prn f))))
+                (write-forms (str cdir "/" n ".mono.edn") (:forms c))
                 (println (str "run-built: _control/" n ": " (if-let [why (emit-and-lower cdir n)] why "ready"))))))))))
     (spit (str work "/mono.log")
           (str (str/join "\n" (concat @mono-lines [(str "mono-check: " (count progs) " programs: " (tally-line @total " of "))])) "\n"))

@@ -6057,3 +6057,68 @@ qemu-aarch64 user mode (`REPR_ASM_RUNNER`, an emulation). doc/asm/ARM64-SURVEY.m
 - Results: the AOT cell 2,161 / 592 deferred → 2,904 / 0 / 152 (95.0%); object verdict 1,970 of 2,538 → 2,687 of 2,833; object check 86 → 104 of
   110; a64i eval and AOT 72 → 80 programs, coverage 474 of 653 claimed executed. Proposed ARS43-ARS47 (the error tests' messages, the VM's part,
   AR6's next slice, the essential step's time, `-implicit-mapsyms` and `.org`).
+
+## 2026-11-11: llvm-ind1, LLVM IR's independence (the judge) and the two reported mutants-oracle gaps (branch `llvm-ind1`, from `mac/next` 235b9cdd2)
+
+What: `bin/crops-score`'s per-stage facts for LLVM: read, eval, AOT and print 1.0, the judge 0.843 alone below (948 of 3,016 cases by a
+toolchain's record: 478 probes and 116 llvm/test modules by opt's, 177 llvmi modules at each level by lli's). Built the part that is light
+and in Arbace's own tools: `own_verdicts` no longer takes a redirection (`> /dev/null`, `2> %t`, `2>&1`) for an option, so 16 more llvm/test
+modules are judged by their own `not llvm-as` (706 own verdicts of 806, was 690, all met by Arbace's verifier; control
+`_control/redirect-vs-valid`); judge 0.8428 to 0.8455, independence 96.86 to 96.91. The second gap (`pr79354.g2.di-retarget.500483`, expect
+says invalid, opt debug) was `expect/stripped-reachable` following a loop id's DILocation operands, which StripDebugInfo drops
+(`stripDebugLocFromLoopID`): fixed in expect.ae and in verify.ae (the verifier's own walk had the same gap, which also made three recorded verify-rt-heldout rows fail: coroutine.g0.di-retarget.500278, io.g0.di-retarget.600072, io.g0.di-drop.600358, now passing; the pack's pr79354 mutant line is stale until its remake and its row is a classed :verdict), two unit cases and a control (the first fails on the old rule), `heldout-check` 886 of 886, the whole families as recorded. The first gap
+(record mode's `; MUTANT:` message against opt's first message only) is a limit of the record (`:first`): written up as LLS47 with three
+options (verdict-only in record mode, the rules emit opt's first message, record all messages), recommended (a). Not built, proposals
+LLS48 (probes), LLS49 (llvmi's 177: agreement with ci is no judge, llvmi lowers the IR to C and runs it on ci), LLS50 (split-file sections'
+`valid`), in doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS46". Considered and left: stating the probes' expectations from opt's record
+(the record under another name). Found: a fresh worktree has no `.tmp/ci-musl/forms`, llvmi's build step then writes no `build.tsv`.
+Sources: bin/repr-llvm (own_verdicts), arbace/repr/llvm/expect.ae, llvm-project 23.1.5's DebugInfo.cpp (read from the recorded survey's
+line references, no network), test/crops/independence.edn.
+
+## 2026-11-11: hsi's eval cell, the cheap groups (HES88; branch hsi-e1)
+
+The Haskell crop's REAP eval cell (797 of 908, 111 in a class) taken class by class, the cheapest first, in hsi's runtime only
+(`go/arbace/hs`, edited as printed Go and read back, `bin/hsi runtime read`; the front end left to hs-p21). doc/haskell/HASKELL-EVAL-SURVEY.md,
+"As built: HES88, the eval cell's cheap groups (write-ahead)".
+
+- Recorded HE9's six (cgrun057, T16916, allocLimit1-4): they passed since the port (129b38e43), the record had not been taken.
+- The static pointer table: the loader enters each top-level StaticPtr of literal key words (a constructor, or a thunk whose body
+  under its lets is one: T12622_A's CAF) as GHC's module initializers' `hs_spt_insert` would (GHC 9.14.1,
+  compiler/GHC/Iface/Tidy/StaticPtrTable.hs, rts/StaticPtrTable.c, read in the pinned source tarball); `hs_spt_lookup` answers a
+  HaskellObj word, `addrToAny#` (new) takes it back. CgStaticPointers, CgStaticPointersNoFullLazyness, T12622 pass.
+- forkOn#'s threads locked (threadStatus#'s third field): conc071, conc072 pass.
+- The SIMD primops (primops.txt.pp's VECTOR family, `simd.ae`): T22296 passes; HES12 (a)'s design class `:simd` goes. Only T22296 of
+  the run corpora uses them: HES89 proposes the testsuite's `simd/` tests.
+- The images' magic bumped (`hsimg\x08`): an image keeps a closure's unknown primop as an error node, so an older hsi's images hid
+  `addrToAny#` from the new one (the first CgStaticPointers run showed it).
+- Tried and reverted: a safe `sleep` blocking only its thread (the threaded RTS's way). conc037 passed, but GHC's recorded normal-way
+  runs of conc038 and foreignInterruptible are neither that nor hsi's whole-machine sleep, and foreignInterruptible (a pass) failed;
+  no model tried matches the three references, so none is kept; HES84 (a) judges them.
+
+Checks (light, 2 jobs, 3 GiB): the 26 moved and regression programs, 24 pass and conc037, conc038 in `:rts` (recorded with
+`--only ... --record`); hsi-essential 122 pass and 1 `:threaded-way` of 123, the controls failing; `bin/hsi runtime check`.
+`bin/hsi divergences`: 908, 809 pass, 99 in a class: the eval cell 87.8% to 89.1% (94.4% to 95.7% without by design); Haskell's
+completeness 0.9632 to 0.9665 (`bin/reap --record`, `bin/crops-score --record`, `--judge --strict`). Proposed: HES89 (the `simd/`
+tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict: conc065, conc066). Night: rts_clearMemory
+(about 2.4 GB) recorded alone, then the whole record as HES86's night.
+
+## 2026-11-11: RF19: the trait object's Fn calls, collections under 2 GiB, core's macro-made functions' attributes (branch `rust-rf19`, from `mac/next` `c572f6753`)
+
+- `<Box<dyn Fn(..)> as Fn<..>>::call` resolved natively: the missing piece was not the object candidate (typeck's
+  `dyn-implements?` had it) but the builtin `Tuple` candidate of alloc's impl's `Args: Tuple` clause (rustc 1.99.1's
+  assemble_candidate_for_tuple): closures' callees 106 -> 108 of 109. Alternative considered: an object candidate keyed on Box,
+  which rustc does not have.
+- collections' memory found and cut (measured with build-run's new `RF_MEM_TRACE`): the record was read twice (the batch's judge
+  and native-run, 477 MiB), mono cached core's parsed files whole (355 MiB; now without functions' bodies, macro definitions'
+  tokens and doc comments, which nothing reads) and the module was printed into one string before being written. 2.62 GB -> 2.09
+  GB alone; the whole corpus at RF11_BATCH=3 2.24 GB (RF18's batch was killed at 2.66). Interning the record's strings was tried
+  and dropped (larger: 1,233 MiB against 939).
+- The record's callee facts for core's macro-made items (449 refusals in RF18's run) replaced by Arbace's own: `bin/rust-front
+  core-attrs`, core-check's interface pass over ten module files writing each function's attributes after expansion, read by mono
+  only where core's sources do not show the item; core-check's macro table now prefers the shallowest of equally near files
+  (num's `uint_impl!`, not num/imp/int_bits.rs' private one) and the expander transcribes `${concat(..)}`. Synthetic corpus:
+  66 of 67 own (unchanged), native callees 4,528 -> 4,985 of 4,985 (with fmt rebuilt after `${concat}`), function constants' symbols 1,933 -> 2,343 of 2,346,
+  mono-check's equal callees 2,000 -> 2,409 of 2,414. Alternatives considered: the core export (RF12-P8's night, bodies too: 40
+  minutes per num/mod.rs and a night slot), reading the attributes from rustc's metadata (a toolchain product).
+- Independence unchanged (Rust 80.0: every case still consumes std's records, RFP43 (a)); the record facts the own front end
+  reads shrink. Details and the night's commands: doc/rust/FRONTEND-SURVEY.md, "As built: RF19".

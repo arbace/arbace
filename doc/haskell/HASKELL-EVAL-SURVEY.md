@@ -2305,3 +2305,72 @@ Built 2026-11-08 on branch `hs-props` from `mac/hs-hf9` (7ed40299a) with `mac/hs
   nofib --only` the same `--record`, or the night's whole `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core --jobs 4
   --record` (which also writes the four `:threaded-way` rows), `bin/hsi divergences`, `bin/reap --record`, `bin/crops-score --record`;
   the eval fact's `:c` count 87 to 82 when the record shows it.
+
+## As built: HES88, the eval cell's cheap groups (write-ahead)
+
+Built 2026-11-11 on branch `hsi-e1` from next `235b9cdd2` (light: 2 jobs, `ARBACE_MEM_GIB=3`, `GOGC=50`). The REAP eval cell's
+111 non-passing programs taken class by class, the cheapest groups first; hsi's runtime only (`go/arbace/hs`, made on the printed
+Go as HE9's port: `bin/hsi runtime print`, the edit, `gofmt`, `go vet`, `bin/hsi runtime read`; `bin/hsi runtime check` passes).
+The front end (`arbace/repr/haskell`) is not touched.
+
+- **HE9's six, recorded.** cgrun057, T16916 (`:rts-options`) and allocLimit1-4 (`:rts`) passed since HE9's port (129b38e43) but
+  the record still had them failing ("As built: HE9 on main": until the night's record). Run and recorded: 6 of 6 pass; the class
+  `:rts-options` goes.
+- **The static pointer table** (CgStaticPointers, CgStaticPointersNoFullLazyness, T12622). GHC's code generator enters each
+  top-level `StaticPtr` of a module in the table by its key's two words (the module's initializer's `hs_spt_insert`,
+  `GHC.Iface.Tidy.StaticPtrTable`); the dumps carry no initializer, but the bindings are visible: a top-level `(rcon StaticPtr
+  [(word64 W1) (word64 W2) ...])`, or a top-level thunk whose body, under its lets, is `(con StaticPtr [(word64 W1) (word64 W2)
+  ...])` (T12622_A's `sg2`, whose info CorePrep let-bound). The loader (`load.ae`) enters both kinds as it loads a module;
+  `hs_spt_lookup` loads every module of the program first (as GHC's initializers run before main), reads the key's two words
+  and answers the entry as a HaskellObj word (`hobj`), which `addrToAny#`, new, takes back (`hval`). `hs_spt_keys` and
+  `hs_spt_key_count` stay the empty table's (no program of the corpora lists the keys). 3 of 3 pass; DsStaticPointers still passes.
+- **forkOn#'s locked threads** (conc071, conc072). `threadStatus#`'s third field is the thread's lock to its capability: a
+  `forkOn#` thread is locked (GHC's `TSO_LOCKED`), its capability `n mod 1` = 0 on hsi's one capability; GHC's normal-way runs
+  give `(0,False)`, `(0,True)`, `(0,True)` and `(0,True)`, `(0,True)`. 2 of 2 pass; threadstatus-9333 still passes.
+- **SIMD** (T22296, the class `:simd`, HES12 (a)'s design class). The vector primops of primops.txt.pp's `VECTOR` (Int8 to
+  Int64, Word8 to Word64, Float, Double; 128, 256 and 512 bits): broadcast, pack, unpack, insert, plus, minus, times, quot and
+  rem (integers), divide (floats), negate (signed and floats), min, max, the four fused multiply-adds (floats), shuffle, and the
+  byte array and address loads and stores in vectors and in elements (`...ArrayAs...#`, `...OffAddrAs...#`), lane by lane in
+  the elements' scalar representations (`simd.ae`, new): wrapping integer arithmetic, IEEE floats, min and max as x86's minps
+  and maxps (the second operand on a NaN or two zeros). T22296 passes; the class `:simd` goes. Only T22296 of the run corpora
+  reaches a SIMD primop: the testsuite's `simd/` directory is not in the core (`test/haskell/eval-corpora.edn`), so the other
+  operations are checked by no recorded run yet (HES89 below).
+- **The images' format.** `imgMagic` `hsimg\x07` to `\x08`: an image keeps a closure's compilation error (an unknown primop)
+  as an `Unimpl` node, so the images an older hsi made kept `addrToAny#` unknown though the new hsi knew it (found by the run:
+  CgStaticPointers failed with "unimplemented: primop addrToAny#" from ghc-internal's image). The images are keyed by the
+  module's size and time only; the magic is the hsi's, changed with any new primop or C function (written beside it).
+- **Tried, not kept: a safe `sleep` that lets the other threads run.** conc037 and conc038 fail because a safe call to
+  `sleep` blocks hsi's one thread. Blocking only the calling thread (the threaded RTS's semantics) made conc037 pass and gave
+  conc038's and foreignInterruptible's shipped (threaded) outputs, but GHC's recorded normal-way runs differ from those two
+  (conc038: "mainThread" before "newThread back again" but "Haskell: 2" after "2 secs later"; foreignInterruptible: "fail",
+  the kill not delivered during the call), so foreignInterruptible, a pass, would fail: no model of the non-threaded RTS tried
+  matches all three references. Reverted; conc037 and conc038 stay in `:rts` (HES84 (a)'s threaded references would judge them).
+- **Checks.** The moved programs and a regression set (every passing core program whose source names `sleep`, `forkOn`,
+  `threadCapability`, `threadStatus`, `StaticPtr` or a vector type: 12) by `bin/hsi check --corpus samples,synthetic,testsuite-core
+  --only ...`: 26 programs, 24 pass, conc037 and conc038 fail in `:rts` as recorded, recorded with `--record` (the other lines
+  kept). hsi-essential's command: own-verdicts current, 123 programs, 122 pass and 1 `:threaded-way` as before, the controls
+  failing as they must. `bin/hsi divergences`: **908 programs, 809 pass, 99 in a class** (797 and 111 before): the eval cell
+  87.8% to 89.1% (94.4% to 95.7% without by design).
+- **Left** (99): `:no-reference` 60 (design: GHC built no reference), `:speed` 12, `:test-cmm` 10 (a Cmm interpreter, HES67),
+  `:rts` 6 (conc037, conc038 above; conc065 and conc066: all.T's `ignore_stdout`, HES90 below; T3279: an interrupted thunk's
+  resumption, HES56; setnumcapabilities001: nqueens 12 at the CPU limit), `:threaded-way` 4 and `:threaded-only` 1 (HES84 (a)),
+  `:test-c` 3 (C threads; rts_clearMemory needs about 2.4 GB, over the light cap: the night's record), `:process` 1, `:skipped` 1,
+  `:async-revert` 1.
+- **Night** (light enough for a day slot, but its record is the night's): `bin/hsi check --corpus testsuite-core --only
+  testsuite/ffi/should_run/rts_clearMemory --record` (about 2.4 GB under the default 16 GiB cap, seconds), then rts_clearMemory
+  out of `:test-c` if it passes (HES83's expectation); the whole `bin/hsi check --corpus nofib,samples,synthetic,testsuite-core
+  --jobs 4 --record` at the next whole recording (as HES86's night), `bin/hsi divergences`, `bin/reap --record`,
+  `bin/crops-score --record`; the AOT level's record `bin/hsi check --aot ... --record` likewise (the primop table is shared).
+
+### Proposed (HES89, HES90)
+
+- **HES89: the testsuite's `simd/` tests in the run corpora.** The SIMD primops are now implemented but checked by T22296 alone.
+  (a) add `simd/should_run` to `testsuite-core`'s directories (its programs' references recorded by `bin/hsi record-ref` at the
+  oracle tier, their STG into haskell-stg-progs: GHC by hand; some need `-mavx` or the LLVM backend, which all.T's `req_` options
+  name: those classed); (b) leave the corpora as they are. *Recommended: (a)*, at the next oracle-tier recording.
+- **HES90: all.T's `ignore_stdout`.** conc065 and conc066 print "alive" a scheduling-dependent number of times; all.T says
+  `ignore_stdout`, so the testsuite judges only their status and stderr, but `bin/hsi check` compares stdout with GHC's recorded
+  run. (a) the check judges a test whose all.T options include `ignore_stdout` (or `ignore_stderr`) without that output, as the
+  testsuite driver does (`test/haskell/eval/testsuite-run.edn` has the options; 21 tests of the testsuite name it), the result
+  marked `:judge :ignore-stdout`; conc065 and conc066 would pass if their status and stderr match (both 0 and empty in the record);
+  (b) as now. *Recommended: (a)*: it is the test's own verdict (the user's decision of 2026-11-07), not a looser judge.

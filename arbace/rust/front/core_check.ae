@@ -157,7 +157,13 @@
                  :let [ds (remove #(= file (:file %)) ds)]
                  :when (seq ds)]
              (let [common (fn [^String a ^String b] (count (take-while true? (map = a b))))
-                   d (apply max-key #(common file (:file %)) ds)]
+                   ;; RF19: of the files equally near, the shallowest (num/mod.rs: `#[macro_use] mod uint_macros;`'s uint_impl!,
+                   ;; not num/imp/int_bits.rs' private one, a module deeper that does not export it)
+                   depth (fn [^String f] (count (filter #(= \/ %) f)))
+                   best (apply max (map #(common file (:file %)) ds))
+                   near (filter #(= best (common file (:file %))) ds)
+                   shallow (apply min (map #(depth (:file %)) near))
+                   d (last (filter #(= shallow (depth (:file %))) near))]
                [nm (cond-> {:name nm :arms (try (ex/macro-arms (ex/dump-tts->items (:body d) 0)) (catch Throwable _ []))}
                      (:def-site d) (assoc :def-site (:def-site d)))]))))
 
@@ -467,6 +473,9 @@
                                                                   (:expr (:node d))))))
 
 (def ^:dynamic *collect-only* false)   ; RF12-P2: the interface pass: each module collected, no body built
+(def ^:dynamic *attrs-out* nil)   ; RF19: atom {def-path [attribute names]}: every function's codegen attributes, macro-made ones too
+
+(declare def-path-string)
 
 (defn run-module
   "A module file's bodies, each [[name key] body-or-nil error-or-nil detail] handed to ON-BODY as it is built (its value
@@ -499,6 +508,13 @@
                       (fn []
                         (swap! stages assoc :collect :ok)
                         (reset! native (try (native-iface path si) (catch Throwable e (when (System/getenv "CORE_TRACE") (.printStackTrace e)) nil)))
+                        ;; RF19: the functions' attributes after expansion (a macro-made item's: int_impl!'s methods, the
+                        ;; operator impls' add_impl!, cmp's ord_impl!), as mono reads core's sources' for the others
+                        (when *attrs-out*
+                          (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs)]
+                            (doseq [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))]
+                              (try (swap! *attrs-out* assoc (def-path-string (:id d)) (la (:id d)))
+                                   (catch Throwable _ nil)))))
                         (binding [build/*allocs* (atom {:next 1 :ids {}}) passes/*opaque-cache* (atom {}) passes/*panic-abort* false
                                   ;; RF12-P6: the exported bodies through the 21 passes to runtime MIR
                                   build/*after-finish* (when-let [re (some-> (System/getenv "CORE_EXPORT_NAMES") re-pattern)]
@@ -647,6 +663,33 @@
 (defn -main [lib-dir & args]
   (binding [ex/*cfg-names* core-cfg]
     (case (first args)
+      ;; RF19: --attrs FRONT-DIR CACHE-DIR MODULES-FILE OUT FILE...: the interface pass over FILEs (core's index from CACHE-DIR,
+      ;; made by a core-check run), each function's attributes after expansion into OUT, {def-path [names]} (mono's
+      ;; RF_CORE_ATTRS: the macro-made items core's sources do not show)
+      "--attrs"
+      (let [[_ front-dir cache-dir modules-file out & files] args
+            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v] (str/split l #" ")]] [f {:path p :file f :vendored (= v "vendored")}]))
+            std-file (str front-dir "/std-names.edn")
+            std (collect/load-std std-file)
+            si (collect/load-std-iface (str front-dir "/std-iface.edn"))
+            index (let [cache (File. (str cache-dir "/index.edn"))]
+                    (if (.exists cache)
+                      (read-string (slurp cache))
+                      (let [t (crate-index (remove :vendored (vals mods)))] (spit cache (pr-str t)) t)))
+            table (:macros index)
+            names (with-core-names (resolve/load-std-names std-file) (:names index))
+            native-file (File. (str cache-dir "/native-iface.edn"))
+            si (if (.exists native-file) (with-native-iface si (read-string (slurp native-file))) si)
+            acc (atom {})]
+        (doseq [f files]
+          (if-let [m (get mods (.getCanonicalPath (File. ^String f)))]
+            (let [t0 (System/nanoTime) n0 (count @acc)
+                  {:keys [stages]} (binding [*collect-only* true *attrs-out* acc] (run-module m table names std-file std si lib-dir identity))]
+              (println (format "core-attrs: %s stages %s: %d functions (%d s)" (:path m) (pr-str stages) (- (count @acc) n0)
+                               (quot (- (System/nanoTime) t0) 1000000000))))
+            (println "core-attrs: not a module file:" f)))
+        (spit out (pr-str (into (sorted-map) @acc)))
+        (println "core-attrs:" (count @acc) "functions' attributes to" out))
       "--list" (doseq [m (module-files lib-dir)] (println (:path m) (:file m) (if (:vendored m) "vendored" "")))
       "--check"
       (let [[_ front-dir oracle-dir cache-dir modules-file & files] args
