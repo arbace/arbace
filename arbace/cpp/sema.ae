@@ -883,7 +883,20 @@
         nm (:name n)
         body (body-of n)
         pn (param-nodes n)
-        f {:name nm :kind k :cls cid :ty ty :cq (method-const? qt) :refq (when cid (method-refq qt)) :op (when (and nm (not= k :conv)) (fn-op nm))
+        ;; cpp-s3: an explicit object parameter (C++23, P0847R7) of reference type to the class: the member function as an
+        ;; implicit object one with that ref-qualifier and cv ([over.match.funcs]/4: the same object parameter), the
+        ;; parameter's type kept for the mangling (Itanium's H <prefix> <name> E with it first among the parameters);
+        ;; explicit-obj-default2.C's defaulted assignments. By value, deduced (this auto&&) or named in a body: refused
+        xobj (when (and cid (:isExplicitObjectParameter (first pn)))
+               (let [o (first (:ps ty))]
+                 (when-not (and (abi/ref? o) (abi/class? (abi/unq (:to o))) (= cid (:id (abi/unq (:to o)))))
+                   (fail :xobj "an explicit object parameter not a reference to its class"))
+                 (when (and (:name (first pn)) body) (fail :xobj "an explicit object parameter named in a body"))
+                 o))
+        ty (if xobj (update ty :ps (comp vec rest)) ty)
+        pn (if xobj (vec (rest pn)) pn)
+        f {:name nm :kind k :cls cid :ty ty :cq (if xobj (boolean (:c (:to xobj))) (method-const? qt))
+           :refq (if xobj (if (= :rref (:k xobj)) "&&" "&") (when cid (method-refq qt))) :op (when (and nm (not= k :conv)) (fn-op nm))
            ;; (a class's allocation and deallocation functions are static members, [class.free]/1)
            :static (and cid (or (= "static" (:storageClass n)) (contains? #{"operator new" "operator new[]" "operator delete" "operator delete[]"} nm)))
            :virtual (boolean (:virtual n)) :pure (boolean (:pure n))
@@ -915,6 +928,7 @@
            :pos (long (or (:_b n) 0))
            :src *src*}
         ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
+        f (cond-> f xobj (assoc :xobj xobj))
         f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
                                        :access (when cid *member-access*)))
         old (find-redecl home f)
@@ -1287,6 +1301,16 @@
          (every? #(let [f (fnd %)] (or (not (copy-ctor? f id)) (and (or (:implicit f) (:defaulted f)) (:trivial f)))) (:ctors c))
          (every? trivial-copy? (class-like-members id)))))
 
+(defn- trivial-assign?
+  "cpp-s3: the class's copy and move assignments trivial ([class.copy.assign]/9) as far as trivial-copy? does not tell:
+  no user-provided one, its bases' and members' trivial too. (An implicit or defaulted assignment over a member whose
+  operator= is user-provided is a call of it, not a copy of the bytes: explicit-obj-default2.C's S over A.)"
+  [id]
+  (and (not (abi/dynamic? id))
+       (not-any? #(let [f (fnd %)] (and (or (copy-assign? f id) (move-assign? f id)) (not (or (:implicit f) (:defaulted f)))))
+                 (:methods (abi/cls id)))
+       (every? trivial-assign? (class-like-members id))))
+
 (defn- implicit-fn! [id k nm ty & {:as more}]
   (let [fid (next-id)
         c (abi/cls id)
@@ -1366,7 +1390,7 @@
     (doseq [x (:ctors (abi/cls id))]
       (let [g (fnd x)] (when (and (:defaulted g) (copy-ctor? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
     (when-not (some #(copy-assign? (fnd %) id) (:methods (abi/cls id)))
-      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (trivial-copy? id))]
+      (let [fid (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [assign-p] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)))]
         (when del (upd-fn! fid merge del)))))
     ;; CX12 (the checker): the implicit move constructor and move assignment ([class.copy.ctor]/8, [class.copy.assign]/4:
     ;; declared when the class declares no copy or move member and no destructor); one defined as deleted is no
@@ -1377,9 +1401,9 @@
                (let [d (:dtor (abi/cls id))] (or (nil? d) (:implicit (fnd d)))))
       (let [rref {:k :rref :to t}]
         (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [rref] :va false} :trivial (trivial-copy? id) :cx-move true)
-        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (trivial-copy? id) :cx-move true))))
+        (implicit-fn! id :method "operator=" {:k :fn :ret (abi/lref t) :ps [rref] :va false} :op "=" :trivial (and (trivial-copy? id) (trivial-assign? id)) :cx-move true))))
     (doseq [x (:methods (abi/cls id))]
-      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (trivial-copy? id)))))
+      (let [g (fnd x)] (when (and (:defaulted g) (copy-assign? g id)) (upd-fn! x assoc :trivial (and (trivial-copy? id) (trivial-assign? id))))))
     (abi/update-cls! id assoc :user-ctor (boolean (seq (filter #(not (:implicit (fnd %))) (:ctors (abi/cls id)))))
                      :user-dtor (boolean (let [d (:dtor (abi/cls id))] (and d (not (:implicit (fnd d))))))
                      :user-copy-assign (boolean (some #(let [g (fnd %)] (and (copy-assign? g id) (not (:implicit g)))) (:methods (abi/cls id)))))
@@ -5133,7 +5157,9 @@
                                                              (if (abi/arr? t) {:i :copy-bytes :e (field-node src cls (:i fl))}
                                                                  (init-for t [(field-node src cls (:i fl))] ctx :direct)))}))})))))
     (when (and (= :method (:kind f)) (= "=" (:op f)))
-      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (checking?) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
+      ;; (a defaulted move assignment's source an xvalue in the code generator's mode too, its members moved:
+      ;; explicit-obj-default2.C, cpp-s3)
+      (let [src {:op :deref :e {:op :load :e {:op :var :id (first pids) :ty (first (:ps (:ty f))) :cat :lv :raw true} :ty (abi/ptr (:to (first (:ps (:ty f))))) :cat :pr} :ty (:to (first (:ps (:ty f)))) :cat (if (and (or (checking?) (:defaulted f)) (= :rref (:k (first (:ps (:ty f)))))) :xv :lv)}
             me (deref-node (this-expr ctx))
             c (abi/cls cls)]
         (binding [*cutoff* Long/MAX_VALUE]
