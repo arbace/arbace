@@ -514,7 +514,15 @@
                         [[_ e]] (packs-named scope [nm])]
                     (if e (count (or (:elems e) (:ids e))) {:k :texpr :o "sizeof..." :name nm}))
                   (= t "sizeof") (let [_ (next!)
-                                       ty (abi/non-ref (sema/resolve-type scope (run "(" ")")))]
+                                       r (str/trim (run "(" ")"))
+                                       ;; (cpp-s4: sizeof of a member or a variable named alone, [expr.sizeof]/1's expression
+                                       ;; operand: any's `unsigned char _M_buffer[sizeof(_M_ptr)];`)
+                                       e (when (re-matches #"[A-Za-z_][A-Za-z_0-9]*" r)
+                                           (first (filter #(#{:field :var} (:e %)) (sema/lookup scope r))))
+                                       ty (abi/non-ref (case (:e e)
+                                                         :field (:ty (nth (:fields (abi/cls (:cls e))) (:i e)))
+                                                         :var (:ty (sema/var* (:id e)))
+                                                         (sema/resolve-type scope r)))]
                                    (if (dependent? ty) {:k :texpr :o "sizeof" :type ty} (abi/size-of ty)))
                   ;; a value trait (G4): __is_same(T, U), its arguments types
                   (and (= k :id) (= "(" (peek)) (contains? value-traits t))
@@ -653,9 +661,13 @@
     (let [e (first (filter #(and (= :tmpl (:e %)) (= :var (:tk %))) (sema/lookup scope (name (second f)))))
           t (tmpl (:id e))
           args (or (complete-args t (resolve-args scope t (vec (nnext f)) false)) (fail :template "the template arguments of " (:name t)))
-          _ (when (some dependent? args) (fail :template "constant " (pr-str f)))
-          v (sema/var* (var-template-inst t args))]
-      (if (and (:c (:ty v)) (:init v)) (sema/const-int (or (:def-scope v) scope) (:init v)) (fail :template "not a constant: " (pr-str f))))
+          ;; (cpp-s4: with dependent arguments, in a template's symbolic signature, the expression standing for it: any's
+          ;; `enable_if_t<is_copy_constructible_v<_VTp> && ..., bool> = true`, a non-type parameter's type)
+          dep? (some dependent? args)]
+      (if dep?
+        {:k :texpr :o :vt :name (:name t) :args args}
+        (let [v (sema/var* (var-template-inst t args))]
+          (if (and (:c (:ty v)) (:init v)) (var-value v (sema/const-int (or (:def-scope v) scope) (:init v))) (fail :template "not a constant: " (pr-str f))))))
     ;; a call without arguments of a static member (function template's specialization), G5c
     (and (seq? f) (= 'fn (first f)) (= [] (second f)) (let [c (nth f 2 nil)] (and (seq? c) (#{'cpp/scope '<>} (first c)))))
     (static-call-value scope (nth f 2))
@@ -1262,7 +1274,16 @@
   TDF_None in the partial ordering of a call (the references' and qualifiers' rules inside the match)."
   [tid2 p2s p1s]
   (let [b (atom {})]
-    (every? true? (map (fn [p2 p1] (deduce-by-type-match b tid2 p2 p1 #{} :call)) p2s p1s))))
+    ;; (cpp-s4: a function parameter pack's pattern against each parameter it stands for, [temp.deduct.partial]/8 and /11:
+    ;; deduced apart; a pack against a non-pack fails -- any's `_S_create(_Storage&, _Up&&)` over its
+    ;; `_S_create(_Storage&, _Args&&...)`)
+    (every? true? (map (fn [p2 p1]
+                         (let [pk2 (= :pack-exp (:k p2)) pk1 (= :pack-exp (:k p1))]
+                           (cond (and pk1 (not pk2)) false
+                                 (and pk2 pk1) (deduce-by-type-match (atom @b) tid2 (:of p2) (:of p1) #{} :call)
+                                 pk2 (deduce-by-type-match (atom @b) tid2 (:of p2) p1 #{} :call)
+                                 :else (deduce-by-type-match b tid2 p2 p1 #{} :call))))
+                       p2s p1s))))
 
 (declare concept-of)
 
@@ -1355,7 +1376,10 @@
 (defn more-specialized-fn?
   "getMoreSpecialized for a call with `n` arguments: tid1 at least as specialized as tid2 and not the reverse."
   [tid1 tid2 n]
-  (let [s1 (take n (:ps (sym-sig (tmpl tid1)))) s2 (take n (:ps (sym-sig (tmpl tid2))))]
+  (let [;; (cpp-s4: a trailing function parameter pack stands for each argument it takes)
+        upto (fn [ps] (let [v (vec ps)]
+                        (take n (if (= :pack-exp (:k (peek v))) (concat (pop v) (repeat (peek v))) v))))
+        s1 (upto (:ps (sym-sig (tmpl tid1)))) s2 (upto (:ps (sym-sig (tmpl tid2))))]
     (let [a (at-least-as-specialized? tid2 s2 s1) b (at-least-as-specialized? tid1 s1 s2)
           variadic? (fn [tid] (some #(= :pack-exp (:k %)) (:ps (sym-sig (tmpl tid)))))]
       (or (and a (not b))
@@ -1848,7 +1872,9 @@
   [args nm]
   (distinct
    (for [a args
-         :let [t (abi/unq (abi/non-ref (:ty a)))] :when (abi/class? t)
+         ;; (cpp-s4: a pointer's, [basic.lookup.argdep]/3.4, its pointee's: any's `any_cast<_Up>(&__any)` finds the
+         ;; pointer overloads declared after it)
+         :let [t (loop [t (abi/unq (abi/non-ref (:ty a)))] (if (abi/ptr? t) (recur (abi/unq (:to t))) t))] :when (abi/class? t)
          ns (sema/adl-class-nss (:id t))
          e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names ns nm)) :when (and (= :tmpl (:e e)) (= :fn (:tk e)))]
      (:id e))))
