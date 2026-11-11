@@ -4784,3 +4784,14 @@ tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict:
   minutes per num/mod.rs and a night slot), reading the attributes from rustc's metadata (a toolchain product).
 - Independence unchanged (Rust 80.0: every case still consumes std's records, RFP43 (a)); the record facts the own front end
   reads shrink. Details and the night's commands: doc/rust/FRONTEND-SURVEY.md, "As built: RF19".
+
+## 2026-11-11: LLVM IR, llvm-ind2 (LLS47 (a), LLS50)
+
+By the user's decision of 2026-11-11 (LLS47 (a), LLS50; LLS48 and LLS49 left). `bin/repr-llvm mutants-oracle` in record mode compares
+the verdict only (the message is the live mode's, the oracle tier's authority): the four message gaps (builtin-prefetch-5 x2,
+rs.g0.attr-dup.600096, p1-first.lto.attr-dup.600342) read "same" without a live opt; no record changed. `own_verdicts` judges a
+split-file section by its parent test's RUN lines (`section_verdict`: `valid` when opt, llc, llvm-as or llvm-link take `%t/SECTION` as
+an input, none under `not` or with `--disable-verify`): verify-llvmtest 706 to 758 own verdicts, the recorded passes unchanged (800 of
+806), a control in verify-controls.txt and a fake-tree case in controls-test.bash. Alternative considered: the proposal's 57 valid rows
+all as own (a rule that also took sections concatenated by `cat` or read by other tools): not done, those 7 stay opt's. Judge stage
+0.8455 to 0.8541, independence 96.91 to 97.08. Details: doc/llvm/LLVM-CROP-SURVEY.md, "As built: LLS47, LLS50".
