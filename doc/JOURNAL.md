@@ -3679,3 +3679,16 @@ From `.tmp/night12/DIAGNOSIS-N11.md` (rows cpp-route, rejected/cpp-dg, lb-dg-ref
   lists' duplicates).
 - **Slips**: two process substitutions (`diff <(sort ...)`) in a throwaway comparison early on, against the day's rules; the first
   runtime build attempt stopped at the disk rule (83%), retried when the disk was at 78%.
+
+## 2026-11-11: cpp-cp338b, cpp-cp338 rebased onto cpp-n12 (branch `cpp-cp338b`, from `mac/cpp-cp338` f13582d5a)
+
+The three commits of `cpp-cp338` rebased onto `cpp-n12` (340566cd2, on mac/next a7e6c4f03, which carries cpp-cp352, cpp-print-own and
+cpp-props5). Conflicts: `arbace/repr/cpp/parse.ae`'s asm statement (cp338's parse into parts kept, with cp352's `__attribute (` start of
+an attributed statement); the journal and the survey (both lines' sections kept, cp338's after cp352's); the agenda's C++ line (CP243 (a)
+and CP352 merged into next, then cp338's text); `test/reap/matrix.edn` taken from the base and recorded again. cp338's proposal "CP352"
+(-fstrict-enums, -fno-threadsafe-statics modelled) renumbered CP355 (cp352's CP352 stays): the survey's "Proposed (CP353-CP355)" and
+cp338's journal entry. Checks (light): `bin/cppi codegen-gen` 154 of 154, the two negative controls failing; `bin/repr-cpp
+roundtrip-corpus gxx-dg-essential --judge own` 33 of 33 and `samples --judge own` 9 of 9 (the control failing), 0 regressions; `bin/reap`
+0 problems after `--record`; `bin/crops-score --record`, `--judge --strict`. Running when committed, not yet read: gen-batch over the 82 run
+programs (`.tmp/G4`) and the dg every-10th sample (`.tmp/sE`). Not run (over the 2 GiB rule): the lowered runtime and the six programs by
+our route.
