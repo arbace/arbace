@@ -491,6 +491,8 @@ data, `:java`:
   `--resources` a module in the plan's order (the class path's jars: A5's one URL a jar for
   `ClassLoader.getResources`, each module's services and native-image metadata its own; `resources.all`,
   the modules' resources merged, stays for reading).
+  `java.class.path` is then the modules' directories' names in that order (`001-util:002-app`; names only, GH4 (iii),
+  ghidra-gh4iii, J2G-SPEC §10.3 "The class path's entries by name"), also for `resources/`'s directories.
 - **A dependency's variants** (`:patches`, 2026-11-11, ghidra-g1b; GH8 (iii) for third-party sources): an
   artifact module's `:patches`, unified diffs applied in order (`patch -p1`) over its unpacked sources jar
   before the closure, each in the module's sources key and listed with its digest and the files it changes

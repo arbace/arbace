@@ -776,7 +776,14 @@
       (when (seq roots)
         (let [f (io/file dir "roots")]
           (write! (str f) roots)
-          {meta/roots-resource f})))))
+          {meta/roots-resource f}))
+      ;; GH4 (iii): the class path's entries by name, and which resources each has first
+      (when (seq (:resources opts))
+        (let [f (io/file dir "classpath")
+              g (io/file dir "owners")]
+          (write! (str f) (meta/classpath-index-text (embed/resource-dir-names (:resources opts))))
+          (write! (str g) (meta/owners-text (:user-owners opts)))
+          {meta/classpath-resource f meta/owners-resource g})))))
 
 (defn- meta-report
   "report.edn's part of a program's metadata: the registry, the metadata's roots, the reflective
@@ -794,6 +801,13 @@
   [opts]
   (reset! nm/qualified-prefixes (vec (:qualify opts)))
   (let [t0 (now)
+        ;; GH4 (iii): java.class.path lists the --resources directories' names in order (names only), unless
+        ;; --property sets it
+        opts (let [names (embed/resource-dir-names (:resources opts))]
+               (if (and (:program opts) (seq names)
+                        (not-any? #(= "java.class.path" (first %)) (:properties opts)))
+                 (update opts :properties (fnil conj []) ["java.class.path" (meta/classpath-property names)])
+                 opts))
         root-dir "."
         ;; the converted JDK: --jdk, else $JRT_CONV, else the committed forms (jdk/README.md)
         jdk (or (:jdk opts) (System/getenv "JRT_CONV") "jdk/forms")
@@ -802,7 +816,7 @@
                      ;; the JDK's resource data, next to the converted JDK (jdk/data)
                      data (embed/data (str (.getParent (io/file jdk)) "/data"))
                      ;; a user's program's directories (--resources, REAP7)
-                     [usrcs udata] (embed/user-resources (:resources opts) (into (set (keys srcs)) (keys data)))
+                     [usrcs udata uowners] (embed/user-resources (:resources opts) (into (set (keys srcs)) (keys data)))
                      srcs (merge srcs usrcs)
                      srcs (merge srcs (embed/package-loaders (:java-namespaces opts) (into (set (keys srcs)) (keys data))))
                      data (merge data udata)
@@ -810,7 +824,8 @@
                      ;; index embedded, its roots applied below
                      pm (program-meta opts jdk data)]
                  (assoc opts :embedded srcs :cut-candidates (sort (embed/cut-candidates srcs))
-                        :embedded-data (merge data (write-meta-resources! opts pm data))
+                        :user-owners uowners
+                        :embedded-data (merge data (write-meta-resources! (assoc opts :user-owners uowners) pm data))
                         :program-meta pm))
                ;; --analyze-only with --resources: the metadata read and reported, nothing embedded
                (if (and (:analyze-only opts) (seq (:resources opts)))

@@ -5986,3 +5986,19 @@ shared_ptr_base.h, ext/atomicity.h from the pinned gcc-15.2.0 tarball; P2201R1 (
 Records: the dg own sample recorded again (120 → 125 own passes of 454) and independence.edn's read fact with it; C++ completeness 90.99
 (unchanged), independence 71.28 → 71.30 (read 0.657 → 0.658; eval and AOT still 0.5 until the records say which programs our route runs,
 CP356); the route's gains count at the night's records. doc/cpp/CPP-SURVEY.md, "As built: cpp-s2", has the measures and the night's commands.
+
+## 2026-11-11: ghidra-gh4iii, GH4 (iii)'s names-only `java.class.path` (branch `ghidra-gh4iii`, from `mac/java-night` adba65cea)
+
+The user approved GH4 (iii)'s names-only listing (2026-11-11). Sources: the demo's plan/G1.md and .tmp/plans/GHIDRA-CASE-STUDY.md (GH4 (iii)),
+ghidra-g1b's `resources.jars` (one class-path directory per module); Ghidra 12.2's `ApplicationUtilities`, `ClasspathFilter` and
+`GenericApplicationLayout` read for what they ask of the property (pinned tree, not edited).
+- j2g: a program with `--resources` sets `java.class.path` to the directories' names in order, `:`-joined, unless `--property`/`:properties` sets
+  it (`arbace.j2g.main/run*`); embeds `META-INF/arbace/classpath` (`K NAME`, every directory) and `META-INF/arbace/owners` (`K PATH`: the
+  directory that has each plain path first, `embed/user-resources`' third result), which the roots' index could not tell (it lists copies only).
+- jrt: `ClassPathResources.classPath()`, `findIn(entry, name)` (K's root copy, else the plain path when K owns it) and `inDirectory` answering for
+  a directory that is an entry's name, so a `URLClassLoader` over `new File(entry)`'s URL finds the entry's embedded resources. Alternatives:
+  a table entry-to-prefix in Go (no: Java side already has the natives), per-entry resource listings (no: Ghidra's would be MBs; owners hold
+  one line a path); `java.io.File` over entries (not built: a file-system layer, outside the names-only scope).
+- Fixture `test/programs/classpath` (two modules, `001-core:002-plugin`), unit tests in `test/j2g/unit.ae`; docs: J2G-SPEC §10.3, BUILD.md.
+- Finding: `ApplicationUtilities.findPrimaryApplicationRootDir` resolves entries as `java.io.File`, so SolverTest's Application still needs
+  either File over an entry or a real directory by `:properties` (demo plan/G1.md, branch g1c).
