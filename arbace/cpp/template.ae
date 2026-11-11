@@ -1642,7 +1642,7 @@
   err_template_recursion_depth_exceeded)."
   0)
 
-(declare instantiate-class*)
+(declare instantiate-class* select-instance! incomplete-instance!)
 
 (defn instantiate-class
   "The class of the class template `tid` for the complete arguments `args`: an explicit specialization's, the most
@@ -1669,21 +1669,74 @@
         (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of 1024 (" (:name (tmpl tid)) ")")
                         {:codegen/refused :depth})))
       (let [t (tmpl tid)]
-        (if-let [node (get (:specs t) args)]
-          (declare-instance! t args node [] [] true)
-          (let [ms (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t))
-                best (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms)]
-            (cond
-              (empty? ms) (do (when-not (:pattern t) (fail :template "an incomplete class template " (:name t)))
-                              (declare-instance! t args (:pattern t) (:params t) args false))
-              (= 1 (count best)) (let [[pt b] (first best)
-                                       c (declare-instance! t args (:node pt) (:params pt) b false)]
-                                   ;; its out-of-line members
-                                   (abi/update-cls! (:id c) assoc :from-partial [(:id pt) (:params pt) b])
-                                   (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
-                                   c)
-              :else (fail :template "ambiguous partial specializations of " (:name t)
-                          (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args))))))))))))
+        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args)) *provisional* sema/*main-retry*)
+          (incomplete-instance! t args)
+          (select-instance! t args nil)))))))
+
+(defn- select-instance!
+  "The class of the template `t` for `args`, its definition chosen ([temp.spec.partial.match]) and declared; `cid0` the class
+  id to make it under (CP372 (a): an incomplete instance completed in place), else a new one."
+  [t args cid0]
+  (if-let [node (get (:specs t) args)]
+    (declare-instance! t args node [] [] true cid0)
+    (let [ms (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t))
+          best (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms)]
+      (cond
+        (empty? ms) (do (when-not (:pattern t) (fail :template "an incomplete class template " (:name t)))
+                        (declare-instance! t args (:pattern t) (:params t) args false cid0))
+        (= 1 (count best)) (let [[pt b] (first best)
+                                 c (declare-instance! t args (:node pt) (:params pt) b false cid0)]
+                             ;; its out-of-line members
+                             (abi/update-cls! (:id c) assoc :from-partial [(:id pt) (:params pt) b])
+                             (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
+                             c)
+        :else (fail :template "ambiguous partial specializations of " (:name t)
+                    (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args))))))))
+
+(defn- incomplete-instance!
+  "CP372 (a): a specialization of a class template not defined yet, named in the main file (prov2.C's `using ctx = Ctx<int,
+  short>;` before Ctx's definition): an incomplete class ([temp.inst]/2: naming it does not instantiate it), cached as the
+  template's instance and completed in place, the same class id, when the template's definition arrives (template-defined!).
+  Before, \"an incomplete class template\" and CP338's retry of the typedef, which a later use of the alias's name did not
+  wait for. The headers keep their retry (sema's *retry*): only while the main file is declared (*main-retry* bound)."
+  [t args]
+  (let [tid (:id t) cid (next-id)
+        ps (bind-scope (:scope t) (:params t) args nil)
+        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]))]
+    (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
+                                    :tmpl tid :targs args})
+    (upd-tmpl! tid assoc-in [:insts args] cid)
+    (swap! *provisional* update-in [:templates tid] (fnil conj #{}) cid)
+    (when (System/getenv "CPP_TMPL_TRACE")
+      (binding [*out* *err*] (println "incomplete instance" (:name t) cid "waiting for its template's definition")))
+    {:k :class :id cid}))
+
+(defn- drop-layouts! []
+  (swap! abi/*classes* (fn [m] (reduce-kv (fn [m k v] (if (:layout v) (assoc m k (dissoc v :layout)) m)) m m))))
+
+(defn- complete-instance!
+  "CP372 (a): the incomplete instance `cid` of `t` for `args` made in place by `f` (its definition chosen now, or an explicit
+  specialization's), out of the waiting set; the layouts computed again on use. A refusal leaves it incomplete (a use that
+  needs it complete refuses then, as before)."
+  [t cid f]
+  (swap! *provisional* update-in [:templates (:id t)] disj cid)
+  (when (System/getenv "CPP_TMPL_TRACE")
+    (binding [*out* *err*] (println "incomplete instance" (:name t) cid "completed")))
+  (try (f)
+       (catch arbace.lang.ExceptionInfo e
+         (when-not (:codegen/refused (ex-data e)) (throw e))))
+  (drop-layouts!))
+
+(defn- incomplete-waiting? [tid cid]
+  (boolean (and *provisional* (contains? (get-in @*provisional* [:templates tid]) cid))))
+
+(defn- template-defined!
+  "CP372 (a): the class template `tid` defined; its incomplete instances completed in place."
+  [tid]
+  (when-let [p *provisional*]
+    (doseq [cid (sort (get-in @p [:templates tid]))
+            :let [t (tmpl tid) args (:targs (abi/cls cid))]]
+      (complete-instance! t cid #(select-instance! t args cid)))))
 
 (defn- tmpl-of-entity [es]
   (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)
@@ -2422,7 +2475,9 @@
           (let [olds (:params (tmpl tid)) news (tparams n)]
             (upd-tmpl! tid assoc :pattern pattern
                        :params (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get olds i))) (inherit-default p olds news i) p))
-                                                 news))))
+                                                 news)))
+            ;; (CP372 (a): its instances named before, completed in place)
+            (template-defined! tid))
           ;; a later declaration's defaults merged (G5: <iosfwd>'s istreambuf_iterator declared again after its
           ;; definition, by the headers' retry)
           (let [news (tparams n)]
@@ -2576,7 +2631,10 @@
           args (complete-args t (vec (map-indexed (fn [i a] (node-arg scope (nth (:params t) i) a)) (filter #(= "TemplateArgument" (:kind %)) (kids n)))))]
       (if (:completeDefinition n)
         (do (upd-tmpl! tid assoc-in [:specs args] n)
-            (when-not (get-in @*tmpls* [tid :insts args]) (declare-instance! (tmpl tid) args n [] [] true)))
+            (let [ic (get-in @*tmpls* [tid :insts args])]
+              (cond (nil? ic) (declare-instance! (tmpl tid) args n [] [] true)
+                    ;; (CP372 (a): an incomplete instance named before its explicit specialization: completed by it)
+                    (incomplete-waiting? tid ic) (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic)))))
         nil)
       :template)
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "VarDecl")

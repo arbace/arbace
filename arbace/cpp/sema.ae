@@ -1030,7 +1030,11 @@
       ;; a qualified definition of a namespace member declared `extern` (libsupc++'s `const nothrow_t std::nothrow = ...`,
       ;; `terminate_handler __cxxabiv1::__terminate_handler = ...`): the definition, no longer extern ([basic.def]/2)
       (do (upd-var! old assoc :init init :init-style (:init n) :defined true :extern false :def-scope scope)
-          (when (header-node? n) (upd-var! old #(cond-> (assoc % :defined false :pending-def true) (not (:internal %)) (assoc :linkonce true))))
+          ;; (cpp-s7: a static data member's out-of-line definition in a header is an ordinary definition, not linkonce:
+          ;; before CP369 every such member was internal and so never linkonce here; now external, thread_local11.h's
+          ;; `thread_local S T::u3` would have been taken for a template's member, thread_local12e.C refused)
+          (when (header-node? n) (upd-var! old #(cond-> (assoc % :defined false :pending-def true)
+                                                  (not (or (:internal %) (= :member-static (:storage %)))) (assoc :linkonce true))))
           old)
       (let [id (next-id)
             v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
@@ -1059,9 +1063,15 @@
             v (cond-> v (and (checking?) (empty? q) (= :ns (:kind home)) (not (header-node? n)))
                 (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl {:range (:range n)}))]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
-        (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
+        (swap! *vars* assoc id (cond
+                                 (and (header-node? n) (:defined v) (= st :global))
                                  (cond-> (assoc v :defined false :pending-def true) (not (:internal v)) (assoc :linkonce true))
-                                 v))
+                                 ;; (cpp-s7: an inline static data member, its in-class declaration a definition ([class.static.data]/4,
+                                 ;; [dcl.inline]/6): defined when used, linkonce_odr as clang emits an inline variable; member_kinds.C's
+                                 ;; `static inline int i = f();` had no definition, lower's "unknown global _ZN1A1iE")
+                                 (and (= st :member-static) (empty? q) (:inline n) (init-kid n))
+                                 (assoc v :pending-def true :linkonce true :internal-l false)
+                                 :else v))
         (when (= (:name n) (System/getenv "CPP_LOOKUP_TRACE")) (binding [*out* *err*] (println "declare" (:name n) (:path home) (System/identityHashCode (:names home)) (:pos v))))
         (enter! home (:name n) {:e :var :id id :pos (:pos v)})
         (when (:cls home) (abi/update-cls! (:cls home) update :statics (fnil conj []) id))
