@@ -3227,6 +3227,12 @@ commit only links again. `-ldflags -X` rather than a constant j2g writes: j2g's 
 function of the sources, and the version is the checkout's when linking, not when translating.
 Go's `-buildvcs` does not apply: the program builds from a generated module.
 
+**A program's properties** (2026-11-11, the Ghidra case study's A13; doc/go/BUILD.md, "A program's
+properties"). `--property K=V` (repeated) makes `main` call `System.setProperty(K, V)` for each pair, in
+order, right after `arbace.version` and before jrt's host, the image and the program's `main` (in both
+mains, the REPL's and a user program's): a class initializer of the program sees them. With none, `main`
+is the same forms as before (`bin/j2g-unit`'s `properties:` checks).
+
 ### 10.7 Stack traces
 
 The evaluated Clojure code's frames are not Go frames: the Go stack shows only the

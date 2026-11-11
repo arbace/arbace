@@ -5741,6 +5741,7 @@ Risks: the shipped executable now roots the world's two providers when their ser
 LoginModule) and translates real ServiceLoader calls where it stubbed them (URLConnection's content handlers,
 KeyStoreUtil): empty iterations instead of UnsupportedOperationException. log4j's ServiceLoaderUtil calls `ServiceLoader.load`
 through a MethodHandle (`invokeExact`), which is F15's area, not this branch's.
+
 ## 2026-11-10: Java sources by module, the Ghidra case study's read half (A1, A2, A3, A11; branch `ghidra-read`, from `mac/java-p1` 4428594d1)
 
 The Ghidra case study (`.tmp/plans/GHIDRA-CASE-STUDY.md` §2.1-2.2, GH2, GH3; the demo repository `/root/arbace-ghidra.git`,
@@ -5801,3 +5802,80 @@ chunk of ANTLR's generated parsers (`SleighParser.java`, 751 KB; MemAvailable ab
   expression type mismatch" verdicts; the night 11 rejected tree's records applied (night 11, `.tmp/night11/rejected/llvm`).
 - CLAUDE.md: bin/reap's matrix has thirteen rows and 52 cells (Haskell, x86-64 and arm64 assembly joined the ten), crops-score thirteen crops;
   a sentence for the assembly crops.
+## 2026-11-10: the native provider's two G1 fixes (branch `java-nread-g1`, from `mac/java-p1` 4428594d1)
+
+Ghidra's G1 read proof found two files whose `read --no-javac` forms differ from javac's (its repros, Arbace-only Java, in
+the ghidra-read worktree's `.tmp/nread-repro`). Both fixed in the native provider by porting javac's rule (jdk26u at
+`baf63fb`), each case a sample of `test/repr/java/java/sample/` with a control (doc/classes/JAVA-FRONTEND-SURVEY.md, "As
+built: JN9 fixes from G1"):
+
+- `expr.ae`'s `mref-check`: a void referent against a value-returning descriptor is an incompatible return type
+  (`Attr.checkReferenceCompatible`, Attr.java:3830-3849), so `run(Supplier<T>)` is inapplicable to `this::work` with `work`
+  void and `run(Runnable)` is chosen, as javac does (sample `MrefVoid`, its control a value method's reference: Supplier).
+- `decls.ae`'s `find-var`: a field reached through static on-demand imports is cloned with the star import scope's origin,
+  the last such import in the source that includes it (`StarImportScope.importAll` prepends, Scope.java:897;
+  `CompoundScope.getOrigin`, Scope.java:1102-1108; `Resolve.findVar`, Resolve.java:1551-1569), so
+  `import static Base.*; import static Sub.*;` names `Sub/MASK` (samples `StarBase`, `StarSub`, `StarImports`, and the
+  control `StarImportsBase`, the imports the other way round: `StarBase/MASK`). Static methods were already javac's.
+
+Alternatives: keeping both imports' origins and choosing at the use (no: javac's origin is the scope's, not the
+lookup's); fixing the method references' check only in the overload phase (no: javac's check is one, in every mode). Checks
+(light, stage 0, javac's tool `javac-5ad35733`): the samples' attr-check, nojavac-check (and, the fix reverted, the negative
+control: FAILED on the three files), parse-check, front-check over samples and baseline, nojavac-check over the baseline,
+`bin/repr-java check` (expected forms written for the five samples) and the samples' round trip recorded (the classes level of
+`StarImports` and `StarImportsBase` known: the constant pool's order alone). Left to a night: nojavac-check and attr-check over
+jdk, javac and jdk26u (over 2 GiB), `bin/repr-java check --jdk` (GTS137 (a)), and the four provenance writers for the new
+reader hash (the essential `provenance` step fails on the branch until they run).
+
+## 2026-11-11: Ghidra G1's remaining work items by day: A9, A10, A12's plan, A13, A1 with A5 (branch `ghidra-g1b`, from `mac/java-night` e382ea11b)
+
+The branch merges `mac/java-p1` (4428594d1), `mac/ghidra-run` (b25ba9e57, A4-A7), `mac/ghidra-read` (cc0fe8cfb, A1-A3, A11) and
+`mac/java-nread-g1` (e1d5c5b70) into `java-night` (conflicts in the journal and the agenda, both sides kept; `bin/arbace-go`'s
+`program_edn` and `build_program` take both branches' keys, `:roots` and `:java`). Then G1's remaining items of the demo
+repository's `plan/G1.md` §2 (`/root/arbace-ghidra.git`, branch `g1b`), each general machinery with Arbace's own fixtures:
+
+- **A1 with A5**: `bin/java-project read` also writes `WORK/resources.jars/NNN-MODULE`, a directory a module in the plan's
+  order, and `--build-program` gives each to j2g as its own `--resources` (the class path's jars: `getResources` finds one URL a
+  module, each module's services and native-image metadata its own) in place of `resources.all`, which merged them. `bin/java-project
+  test`'s new case (25 of 25).
+- **A13, a program's properties** (GH8 (ii)): `program.edn :properties {"K" "V"}`, j2g's `--property K=V`: `System.setProperty` in the
+  main package's `main` after `arbace.version`, before the host, the image and any class of the program (J2G-SPEC §10.6, BUILD.md "A
+  program's properties"). With none both mains are the same forms as before (checked against java-night's main.ae). Sample
+  `test/programs/properties` (a class initializer reads them; its forms, interpreted on stage 0 with the properties set by hand, print
+  `runs/main.out` exactly); `bin/j2g-unit`'s six `properties:` checks with a control. Alternative: a launcher class per program (the
+  survey's GH8 (i)): code for what is data.
+- **A9, Deflater's bytes** (JRT-NOTES "Deflater's bytes"): the JDK's Deflater is jdk26u's libzip over the host's zlib 1.3.2, jrt's a
+  port of it. `test/jrt/deflate.ae`: a corpus of Arbace's own (an LCG: text, zeros, random, packed small integers, runs, the window's and
+  the stored block's edges, 1 MB) deflated eleven ways (`DeflaterOutputStream` whole, bytewise, in chunks, a 64-byte buffer, levels 1
+  and 9, nowrap, filtered, Huffman only, a sync flush, gzip); `bin/jrt deflate --record` on the frozen JVM wrote
+  `test/jrt/deflate-jdk26.edn` (171 rows, 1 min 56 s with the frozen jar's build in the worktree, 1.8 GB); `bin/jrt deflate` on stage 0:
+  **171 of 171 equal**, the control (crossed digests) failing as it must; the essential step `jrt-deflate` on the gate's executable
+  (`:crops :java`, with `jrt-derive` and `java-project`, which the merged branches had left in no crop: costs-test). Alternative: Python's
+  zlib as the reference (the same libz, but not the JDK's code path: DeflaterOutputStream's buffering is the JDK's).
+- **A10, JUnit 4 with rules** (GH7 (b)): `test/programs/junit4`: JUnit 4.13.2 and hamcrest-core 1.3 read from their pinned sources jars
+  (`test/java/project/maven-pins.edn`, the bytes the demo's `pin/maven.edn` pins; `bin/java-project fetch [--from DIR] [--check]` into the
+  main checkout's `.tmp/maven`, a model's `$maven-pins` root; fetched here `--from` the demo's store, no network), Arbace's runner
+  `arbace.junit.EdnRun` (JUnitCore and a RunListener, one EDN map a method), tests of the lifecycle, rules on annotated fields (a class
+  rule, RuleChain, TestName, TemporaryFolder, ExpectedException, ErrorCollector, TestWatcher), hamcrest, Parameterized and a timeout;
+  `runs/all.out` written from the tests' own verdicts. Two findings: hamcrest-core 1.3's `AnyOf`/`AllOf` (`anyOf(Arrays.asList(m))`) and
+  hamcrest 2.2's nine such calls are rejected by javac on Arbace at release 25 for a wildcard's capture, and JUnit 4.13.2's `Result`
+  does not compile against jdk26u (`GetField.get` throws `ClassNotFoundException` since JDK 18); JUnit does not compile against
+  hamcrest 2.2 (`@Factory`, `everyItem`). So `bin/java-project` gains `:patches`, a dependency's variants (GH8 (iii) for third-party
+  sources: unified diffs over the unpacked sources jar, keyed and listed in `WORK/src/M.patches.edn`, a patch that does not apply a
+  failure; `bin/java-project test`'s case and control, 28 of 28), and the fixture carries two (`patches/`, LICENSE.md's new entries:
+  Hamcrest's BSD License, JUnit's EPL 1.0). Whether the JDK's javac rejects hamcrest's two calls too is the oracle tier's (the night
+  slot `ghidra-g1b-oracle`, by hand): if not, javac on Arbace has an inference divergence. The fixture's forms: `bin/java-project read`
+  over it, 263 files converted, 0 failed, 21 s, 0.79 GB; it does not run interpreted (`test/java/run.ae` cannot order JUnit's package
+  cycles), so its run is the night's compiled build. Alternatives: hamcrest 2.2 (JUnit 4.13.2 does not compile against it), the
+  closure dropping the failing files (CoreMatchers and ExpectedException fall with them), `-source`/`--release` older (javac on Arbace's
+  platform has no `ct.sym`: release 8 finds no `java.lang`; `-source 11` keeps jdk26u's API).
+- **A12** (the ANTLR tool built by Arbace) needs no Arbace code beyond A1-A5: it is the demo's `plan/antlr-tool.edn` and `bin/antlr-g1`
+  (build at night, run, judged against `ref/antlr.edn`). **A8** (java.desktop's declarations in the edge) waits for the night's
+  `--analyze-only` of SleighCompile's program: only if A7 leaves many refusals reached by type.
+- Night 18's slots, not run: `.tmp/night18/slots/` (README.txt: the order, the estimates; the samples' builds, SoftwareModeling's nread,
+  the test program's classes, the ANTLR tool, SleighCompile's analysis, build, run and judgment, the tests' build, run and judgment; the
+  oracle slot by hand only).
+
+Checks by day: `bin/java-project test` 28 of 28; `bin/j2g-unit` all passed; `bin/jrt deflate` 171 of 171 and its control; `bin/java-project
+read` of `test/programs/junit4`; the gate's `costs-test` after the crops fix; the demo's three judges over their references (all equal) and
+with one row tampered (each fails).

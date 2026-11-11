@@ -12,8 +12,9 @@
 #     (the cascade), Unused not reached, PlainFormat kept; the multi-release list names the binary jar's
 #     release 11 Helper; Platform read at release 25's layer ("release 11"); the split package demo.common
 #     merged with both loads; the resources (the services file, toylib.properties, util's words.txt; not
-#     Maven's pom.properties);
-#   - the controls, each of which must fail (test/java/project/controls/): a model with an unknown key, a
+#     Maven's pom.properties), and the same a directory a module (resources.jars, A5's class path);
+#   - :patches: toylib read with a variant applied (controls/patched.edn), listed in WORK/src/toylib.patches.edn;
+#   - the controls, each of which must fail (test/java/project/controls/): a patch that does not apply; a model with an unknown key, a
 #     cycle, :closure on a module of sources; a root naming an absent type; a module naming the
 #     annotations jar's type without the jar (and with it, compiled); release 10 reads Platform's base
 #     layer; a forms file changed in a copy of the native trees is found by the comparison.
@@ -57,7 +58,15 @@ expect "split package: demo.common's namespace loads both modules' classes" \
   bash -c 'grep -q "(load \"common/Other\")" "$1" && grep -q "(load \"common/Shared\")" "$1"' _ "$w/fx/forms.all/demo/common.ae"
 expect "resources: the services file, toylib.properties and words.txt, not Maven's metadata" \
   bash -c 'cd "$1" && [ -f META-INF/services/org.example.toylib.ext.Format ] && [ -f toylib.properties ] && [ -f demo/util/words.txt ] && [ ! -e META-INF/maven ] && [ ! -e META-INF/MANIFEST.MF ]' _ "$w/fx/resources.all"
+expect "resources by module: util's words.txt in 001-util, toylib's services file in 002-toylib, app none" \
+  bash -c 'cd "$1" && [ "$(ls | tr "\n" " ")" = "001-util 002-toylib " ] && [ -f 001-util/demo/util/words.txt ] && [ -f 002-toylib/META-INF/services/org.example.toylib.ext.Format ] && [ ! -e 001-util/META-INF ]' _ "$w/fx/resources.jars"
 expect "the forms name their files by module (no work path)" bash -c '! grep -rq "$1" "$2"' _ "$w" "$w/fx/forms.all"
+
+expect ":patches: the variant applied before the closure, read, and listed" \
+  bash -c '"$1" read "$2" "$3/p" --base "$4" --root "controls=$5" --no-classes > "$3/patched.log" 2>&1 \
+    && grep -q "\"patched \"" "$3/p/forms.all/org/example/toylib/Greeter.ae" \
+    && grep -q ":patch \"greeter-hello.patch\" :sha256 \"[0-9a-f]*\" :files \[\"org/example/toylib/Greeter.java\"\]" "$3/p/src/toylib.patches.edn"' \
+  _ "$jp" "$ctl/patched.edn" "$w" "$fx" "$ctl"
 
 echo "controls:"
 must_fail "an unknown module key" "$w/c1.log" "$jp" plan "$ctl/unknown-key.edn" --base "$fx"
@@ -73,6 +82,8 @@ expect "  (with the jar it compiles)" logged "$w/c5b.log" "$jp" classes "$w/with
 "$jp" read "$ctl/release-10.edn" "$w/c6" --base "$fx" --no-classes > "$w/c6.log" 2>&1
 must_fail "release 10 reads the layer of release 11" "$w/c6.grep" grep -q '"release 11"' "$w/c6/forms/toylib/org/example/toylib/Platform.ae"
 expect "  (it reads the base)" has "$w/c6/forms/toylib/org/example/toylib/Platform.ae" '"base"'
+must_fail "a patch whose context the sources lack" "$w/c8.log" "$jp" sources "$ctl/patch-absent.edn" "$w/c8" --base "$fx" --root "controls=$ctl"
+expect "  (its message names the patch)" has "$w/c8.log" "greeter-absent.patch does not apply"
 cp -a "$w/fx/check-front/app" "$w/c7"
 sed -i 's/"world"/"wereld"/' "$w/c7/demo/app/Main.ae"
 must_fail "a forms file changed in the native trees' copy" "$w/c7.log" bash -c '

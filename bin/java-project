@@ -15,7 +15,13 @@
 #   bin/java-project read MODEL WORK [OPTIONS]     then each module read by repr/java into WORK/forms/MODULE
 #                                                  (A1), merged into WORK/forms (a package split over
 #                                                  modules: its namespace's loads united), the
-#                                                  resources into WORK/resources
+#                                                  resources into WORK/resources.all and, a directory
+#                                                  a module, WORK/resources.jars
+#   bin/java-project fetch [--from DIR] [--check]  the pinned artifacts of Arbace's own fixtures
+#                                                  (test/java/project/maven-pins.edn) into the main checkout's
+#                                                  .tmp/maven, a model's $maven-pins root (--from: a local
+#                                                  repository of Maven's layout, no network; --check: present
+#                                                  and the pinned bytes)
 #   bin/java-project test                          the fixtures (test/java/project/, test/programs/java-project),
 #                                                  with their negative controls
 # MODEL: a directory holding program.edn, or a plan file. OPTIONS:
@@ -44,6 +50,35 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 usage() { sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
 verb=${1:-}; [ $# -gt 0 ] && shift || usage
 if [ "$verb" = test ]; then exec "$root/test/java/project/test.bash" "$@"; fi
+# the pinned artifacts' store: the main checkout's .tmp/maven (shared by the worktrees), a model's $maven-pins
+# (a linked worktree's and the clean clone's, .tmp/worktrees/* and .tmp/gate-clean/*: the main checkout's, as bin/si's corpora)
+pins_store() {
+  local m=$root
+  case $root in */.tmp/worktrees/*|*/.tmp/gate-clean/*) m=${root%%/.tmp/*} ;; esac
+  echo "${JAVA_PROJECT_MAVEN_PINS:-$m/.tmp/maven}"
+}
+if [ "$verb" = fetch ]; then
+  # fetch [--from DIR] [--check]: test/java/project/maven-pins.edn's files into the store, each held to its size and
+  # SHA-256; --from DIR copies them from a local repository of Maven's layout (no network), else Maven Central
+  from= chk=
+  while [ $# -gt 0 ]; do case $1 in --from) from=$2; shift 2 ;; --check) chk=1; shift ;; *) usage ;; esac; done
+  store=$(pins_store); pins=$root/test/java/project/maven-pins.edn
+  url=$(sed -n 's/^{:repository "\([^"]*\)".*/\1/p' "$pins")
+  st=0 n=0
+  while read -r path size sha; do
+    n=$((n + 1)); f=$store/$path
+    if [ ! -f "$f" ] && [ -z "$chk" ]; then
+      mkdir -p "$(dirname "$f")"
+      if [ -n "$from" ]; then cp "$from/$path" "$f.part" || { st=1; continue; }
+      else wget -q -O "$f.part" "$url/$path" || { echo "java-project fetch: $url/$path failed" >&2; rm -f "$f.part"; st=1; continue; }; fi
+      if [ "$(stat -c %s "$f.part")" = "$size" ] && [ "$(sha256sum < "$f.part" | cut -c1-64)" = "$sha" ]; then mv "$f.part" "$f"
+      else echo "java-project fetch: $path: not the pinned bytes" >&2; rm -f "$f.part"; st=1; continue; fi
+    fi
+    if [ ! -f "$f" ] || [ "$(sha256sum < "$f" | cut -c1-64)" != "$sha" ]; then echo "java-project fetch: $path: absent or not the pinned bytes ($store)" >&2; st=1; fi
+  done < <(sed -n 's/^ *\[\?{:path "\([^"]*\)" :size \([0-9]*\) :sha256 "\([0-9a-f]*\)"}.*/\1 \2 \3/p' "$pins")
+  [ $st = 0 ] && echo "java-project fetch: $n pinned files in $store"
+  exit $st
+fi
 model=${1:-}; [ -n "$model" ] || usage; shift
 work=
 if [ "$verb" != plan ]; then work=${1:-}; [ -n "$work" ] || usage; shift; fi
@@ -66,6 +101,7 @@ else mfile=$model; [ -n "$base" ] || base=$(dirname "$model"); fi
 [ -f "$mfile" ] || { echo "java-project: no model $mfile" >&2; exit 2; }
 mfile=$(cd "$(dirname "$mfile")" && pwd)/$(basename "$mfile")
 base=$(cd "$base" && pwd)
+printf '%s\n' "${plan_opts[@]}" | grep -q '^maven-pins=' || plan_opts+=(--root "maven-pins=$(pins_store)")
 [ -n "${ARBACE_MAVEN_REPO:-}" ] && ! printf '%s\n' "${plan_opts[@]}" | grep -qx -- --repository \
   && plan_opts+=(--repository "$ARBACE_MAVEN_REPO")
 
@@ -255,11 +291,23 @@ sources() {
   [ -f "$srcj" ] || { echo "java-project: $m: no sources jar $srcj (${P[$m:coord]})" >&2; return 1; }
   k=$( { echo sources; sha < "$srcj"; [ ! -f "$(vals "$m" binary-jar)" ] || sha < "$(vals "$m" binary-jar)"; echo "$rel"
          vals "$m" roots; echo --; vals "$m" optional; vals "$m" javac; vals "$m" jars
-         vals "$m" resources-jar; for d in $(vals "$m" deps); do cat "$work/keys/$d.sources" 2>&1 || src_roots "$d"; done
+         vals "$m" resources-jar; vals "$m" patches | xargs -r -d '\n' cat; for d in $(vals "$m" deps); do cat "$work/keys/$d.sources" 2>&1 || src_roots "$d"; done
          [ -z "$(vals "$m" roots)$(vals "$m" optional)" ] || tool_id; self_digest; } | sha)
   if key_same "$m.sources" "$k" && [ -f "$work/src/$m.roots" ]; then return 0; fi
   tree=$work/src/$m
   unpack "$srcj" "$rel" "$tree" || return 1
+  # :patches, the dependency's variants (each a unified diff over the unpacked sources, -p1), in order; listed
+  # with their digests and the files they change in WORK/src/M.patches.edn
+  if [ -n "$(vals "$m" patches)" ]; then
+    { echo "{:module \"$m\" :patches"; echo " ["
+      vals "$m" patches | while IFS= read -r p; do
+        [ -f "$p" ] || { echo "java-project: $m: no patch $p" >&2; exit 1; }
+        patch -s -p1 -d "$tree" --no-backup-if-mismatch < "$p" >&2 || { echo "java-project: $m: the patch $p does not apply" >&2; exit 1; }
+        echo "  {:patch \"$(basename "$p")\" :sha256 \"$(sha < "$p")\" :files [$(sed -n 's|^+++ [^/]*/\([^[:space:]]*\).*|"\1"|p' "$p" | tr '\n' ' ' | sed 's/ $//')]}"
+      done || exit 1
+      echo " ]}"; } > "$work/src/$m.patches.edn" || return 1
+    echo "  $m: $(vals "$m" patches | wc -l) patches applied ($work/src/$m.patches.edn)"
+  fi
   mr_report "$m"
   if [ -n "$(vals "$m" roots)$(vals "$m" optional)" ]; then
     closure "$m" "$tree" || return 1
@@ -432,7 +480,26 @@ if [ $status = 0 ] && [ "$verb" = read ]; then
         done || status=1
       done
     done
-    echo "java-project: the forms merged in $work/forms.all ($(find "$work/forms.all" -name '*.ae' | wc -l) files), the resources in $work/resources.all ($(find "$work/resources.all" -type f | wc -l) files)"
+    # the same resources as the class path's directories, one a module in the plan's order
+    # (resources.jars/NNN-MODULE): what bin/arbace-go --build-program gives j2g, each its own --resources,
+    # so that ClassLoader.getResources finds a path several modules hold once a module and each module's
+    # services and native-image metadata are its own (A5, J2G-SPEC §10.3)
+    rm -rf "$work/resources.jars"; mkdir -p "$work/resources.jars"
+    i=0
+    for m in "${want[@]}"; do
+      i=$((i + 1))
+      for r in $(vals "$m" resources) $( [ ! -d "$work/resources/$m" ] || echo "$work/resources/$m"); do
+        d=$work/resources.jars/$(printf '%03d' $i)-$m; mkdir -p "$d"
+        (cd "$r" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while IFS= read -r f; do
+          mkdir -p "$(dirname "$d/$f")"
+          if [ -e "$d/$f" ]; then
+            case $f in META-INF/services/*) cat "$r/$f" >> "$d/$f" ;;
+                       *) cmp -s "$r/$f" "$d/$f" || { echo "java-project: the resource $f twice in $m (differing)" >&2; exit 1; } ;; esac
+          else cp "$r/$f" "$d/$f"; fi
+        done || status=1
+      done
+    done
+    echo "java-project: the forms merged in $work/forms.all ($(find "$work/forms.all" -name '*.ae' | wc -l) files), the resources in $work/resources.all ($(find "$work/resources.all" -type f | wc -l) files; by module in $work/resources.jars)"
   fi
 fi
 exit $status
