@@ -4320,3 +4320,16 @@ servers). The frameworks: `@run testng` 1,500 actions (784 `othervm`), `@run jun
   corpus for all of `:run-lib` at once. *Recommended: (a)*.
 - **JCS333** `othervm` (1,162 framework actions, a fresh JVM per test in jtreg): (a) ignored, as the check runs every test in a
   fresh process anyway; (b) by design. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-10, about 10:30): JCS370-JCS378 as recommended, JCV10 (b)
+
+The proposals of the plan for Java's completeness above 90% (`.tmp/plans/JAVA-90-PLAN.md`, 2026-11-10, §5), each as
+recommended: **JCS370 (a)** the record first, from night 12's `--full` outputs; **JCS371 (b)** = **JCV10 (b)**: the ranking by
+tests freed per missing jrt class, on the fresh records, orders the port batches P1-P3; **JCS372 (a)** with (b)'s reporting
+(90% on the grown corpus, the base corpus's number beside it); **JCS373 (a)** print's 72 unnamed class-file differences
+reviewed; **JCS374 (a)** the port batches as Java nights: P1 on night 15 (after JCS359's measure: the security and
+serialization tails, PhantomReference, thread groups), P2 on night 17, P3 on night 19, never on night 16; **JCS375 (a)** XML
+only if P3 leaves Java short; **JCS376 (a)** interpreter speed outside this plan; **JCS377 (a)** a javac-world shard measured
+in P1's night; **JCS378 (a)** `--release` through a generated ct.sym after JCS359 stage 5.
+
+P1's day work: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)" (branch `java-p1`), with JCS379-JCS383.

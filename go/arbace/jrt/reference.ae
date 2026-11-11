@@ -1,7 +1,8 @@
 ;; jrt: java.lang.ref (J2G-SPEC §8; JAVA-SURFACE.md; doc/go/JRT-NOTES.md, phase 2a):
-;; Reference, WeakReference, SoftReference, ReferenceQueue over Go's weak pointers and
-;; runtime.AddCleanup. Keyword's and Symbol's interning tables hold WeakReferences with a
-;; queue that Util.clearCache polls.
+;; Reference, WeakReference, SoftReference, PhantomReference (F17, JCS321 (a)), ReferenceQueue
+;; over Go's weak pointers and runtime.AddCleanup, the collected referents' references enqueued
+;; by the thread "Reference Handler" as the JVM's. Keyword's and Symbol's interning tables hold
+;; WeakReferences with a queue that Util.clearCache polls.
 (in-ns 'go.arbace.jrt)
 
 (go/file "reference.go"
@@ -37,7 +38,8 @@ queue.\n"
           ^{:tag (* ReferenceQueue)} queue
           ^bool enqueued
           ^{:tag runtime/Cleanup} cleanup
-          ^bool hasCleanup))
+          ^bool hasCleanup
+          ^{:tag bool :doc "a PhantomReference's: get answers null, refersTo still the referent (F17)\n"} phantom))
 
 (go/var Reference_class
   (Define (addr (lit ClassInfo :Name "java.lang.ref.Reference" :Kind KindClass
@@ -60,12 +62,60 @@ that enqueues it.\n"
       (set! (.-cleanup r) (runtime/AddCleanup h referentCollected r))
       (set! (.-hasCleanup r) true))))
 
-(go/func referentCollected "referentCollected is the cleanup of a weak referent: enqueue its Reference.\n"
+(go/func referentCollected
+  "referentCollected is the cleanup of a weak referent: its Reference pending for the thread
+\"Reference Handler\", which enqueues it (a cleanup runs on Go's cleanup goroutine and should not
+block on a queue's lock; F17).\n"
   [^{:tag (* Reference)} r]
-  (.enqueue r))
+  (startReferenceHandler)
+  (.Lock pendingMu)
+  (set! pendingRefs (append pendingRefs r))
+  (.Unlock pendingMu)
+  (select
+    (case (>! pendingSignal (lit (struct))))
+    (default)))
 
-(go/method Impl_Get__O "Impl_Get__O is get(): the referent, or null once it was collected or cleared.\n"
+(go/var ^{:tag sync/Mutex} pendingMu)
+(go/var ^{:doc "pendingRefs: the references whose referents were collected, not yet enqueued (pendingMu): the JVM's
+pending list\n"
+          :tag (slice (* Reference))} pendingRefs)
+(go/var ^{:tag (chan (struct))} pendingSignal (make (chan (struct)) 1))
+(go/var ^{:tag sync/Once} referenceHandlerOnce)
+
+(go/func startReferenceHandler
+  "startReferenceHandler starts, once, the daemon thread \"Reference Handler\" of the system thread
+group, at the maximum priority, as the JVM's (jdk26u's Reference.startReferenceHandlerThread): it
+enqueues the pending references, one by one, in the order their referents were found collected. RunMain
+starts it before main, so it is alive from the program's start (NullQueue finds it); a program that does
+not run through RunMain starts it with its first collected referent.\n"
+  []
+  (.Do referenceHandlerOnce
+       (fn []
+         (let [t (Thread_New_Runnable_String (RunnableOf referenceHandler) (Str "Reference Handler"))]
+           (set! (.-group t) systemThreadGroup)
+           (.Store (.-priority t) 10)
+           (.Store (.-daemon t) true)
+           (.Start__V t)))))
+
+(go/func referenceHandler "referenceHandler is the thread \"Reference Handler\"'s run.\n" []
+  (while true
+    (<! pendingSignal)
+    (.Lock pendingMu)
+    (let [rs pendingRefs]
+      (set! pendingRefs nil)
+      (.Unlock pendingMu)
+      (range [_ r rs]
+        (.enqueue r)))))
+
+(go/method Impl_Get__O "Impl_Get__O is get(): the referent, or null once it was collected or cleared (a
+PhantomReference's: always null).\n"
   ^any [^{:tag (* Reference)} r ^Reference_I this]
+  (when (.-phantom r)
+    (return nil))
+  (.referent r))
+
+(go/method referent "referent is the referent, or nil once it was collected or cleared (whatever the kind).\n"
+  ^any [^{:tag (* Reference)} r]
   (.Lock (.-mu r))
   (defer (.Unlock (.-mu r)))
   (when (.-cleared r)
@@ -77,8 +127,11 @@ that enqueues it.\n"
       (return nil))
     (makeAny (.-typ r) (conv unsafe/Pointer p))))
 
-(go/method Impl_RefersTo_O__Z ^bool [^{:tag (* Reference)} r ^Reference_I this ^any o]
-  (== (.Get__O this) o))
+(go/method Impl_RefersTo_O__Z
+  "Impl_RefersTo_O__Z is refersTo(o): whether the referent is o (null: cleared or collected), the referent
+itself, not get()'s answer (a PhantomReference's get is null; jdk26u's refersTo0 is the VM's).\n"
+  ^bool [^{:tag (* Reference)} r ^Reference_I this ^any o]
+  (== (.referent r) o))
 
 (go/method Impl_Clear__V "Impl_Clear__V is clear(): the referent dropped, without enqueueing.\n"
   [^{:tag (* Reference)} r ^Reference_I this]
@@ -227,6 +280,50 @@ maps in soft references; JRT-NOTES.md, \"Time\").\n"
     v))
 
 ;; ---------------------------------------------------------------------------------------
+;; PhantomReference (F17, JCS321 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by day)"): a
+;; weak reference whose get answers null; enqueued when its referent is collected, as the weak ones. Go has
+;; no finalization between the two (Java's weak references are cleared before finalization, its phantom ones
+;; after): jrt runs no finalizers, so the two kinds are enqueued alike. A non-leaf, as Weak and Soft: the
+;; Java forms' classes extend it (jdk26u's PhantomCleanable, the tests' own).
+
+(go/type PhantomReference_I
+  "PhantomReference_I is java.lang.ref.PhantomReference's class interface.\n"
+  (interface Reference_I
+    (Self_PhantomReference ^{:tag (* PhantomReference)} [])))
+
+(go/type PhantomReference (struct Reference))
+
+(go/var PhantomReference_class
+  (Define (addr (lit ClassInfo :Name "java.lang.ref.PhantomReference" :Kind KindClass :Modifiers AccPublic
+                     :Super Reference_class :Go "arbace/jrt.PhantomReference"))))
+
+(go/func PhantomReference_New_O_ReferenceQueue ^{:tag (* PhantomReference)} [^any o ^{:tag (* ReferenceQueue)} q]
+  (let [r (addr (lit PhantomReference))] (.Ctor_O_ReferenceQueue r r o q) r))
+
+(go/method Ctor_O_ReferenceQueue
+  "Ctor_O_ReferenceQueue is PhantomReference(referent, queue), its only constructor (a null queue: never
+enqueued, as the JDK's).\n"
+  [^{:tag (* PhantomReference)} r ^Reference_I this ^any o ^{:tag (* ReferenceQueue)} q]
+  (set! (.-phantom (.-Reference r)) true)
+  (.initWeak (.-Reference r) this o q))
+(go/method Self_PhantomReference ^{:tag (* PhantomReference)} [^{:tag (* PhantomReference)} r] r)
+(go/method Get__O ^any [^{:tag (* PhantomReference)} r] (.Impl_Get__O r r))
+(go/method Clear__V [^{:tag (* PhantomReference)} r] (.Impl_Clear__V r r))
+(go/method Enqueue__Z ^bool [^{:tag (* PhantomReference)} r] (.Impl_Enqueue__Z r r))
+(go/method IsEnqueued__Z ^bool [^{:tag (* PhantomReference)} r] (.Impl_IsEnqueued__Z r r))
+(go/method RefersTo_O__Z ^bool [^{:tag (* PhantomReference)} r ^any o] (.Impl_RefersTo_O__Z r r o))
+(go/method Ref ^any [^{:tag (* PhantomReference)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* PhantomReference)} t] PhantomReference_class)
+(go/method Clone__O ^any [^{:tag (* PhantomReference)} t] (panic (CloneNotSupportedException_New)))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* PhantomReference)} t] (Object_toString t))
+(go/func PhantomReference_InstanceOf ^bool [^any x] (let [(values _ ok) (assert PhantomReference_I x)] ok))
+(go/func PhantomReference_Cast ^PhantomReference_I [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert PhantomReference_I x)]
+    (when (not ok) (panic (ClassCast x PhantomReference_class)))
+    v))
+
+;; ---------------------------------------------------------------------------------------
 ;; ReferenceQueue
 
 (go/type ReferenceQueue
@@ -289,4 +386,5 @@ gate wakes remove.\n"
   (set! (.-IsInstance (.Info Reference_class)) Reference_InstanceOf)
   (set! (.-IsInstance (.Info WeakReference_class)) WeakReference_InstanceOf)
   (set! (.-IsInstance (.Info SoftReference_class)) SoftReference_InstanceOf)
+  (set! (.-IsInstance (.Info PhantomReference_class)) PhantomReference_InstanceOf)
   (set! (.-IsInstance (.Info ReferenceQueue_class)) ReferenceQueue_InstanceOf))

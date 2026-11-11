@@ -1,0 +1,227 @@
+;; jrt: java.lang.ThreadGroup (JCS322 (a), P1 by day; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P1 (by
+;; day)"): jdk26u's ThreadGroup (https://github.com/openjdk/jdk26u at baf63fb,
+;; src/java.base/share/classes/java/lang/ThreadGroup.java) transcribed into Go, as JDK 19 and later have it: a
+;; group does not track its threads (activeCount, enumerate and interrupt walk the live platform threads,
+;; management.ae's registry, and keep those whose group the group is a parent of), it holds its subgroups (the
+;; system group's and the main group's strongly, every later one weakly), and its priorities and daemon status
+;; are plain fields (the daemon status means nothing since JDK 19). The groups are those of the JVM: "system"
+;; (no parent: the thread "Reference Handler"'s), "main" in it (the main thread's and every adopted
+;; goroutine's), "VirtualThreads" in it (every virtual thread's). A leaf: no test of the corpus extends it
+;; (list(), which prints to System.out, is left out: no test of the corpus calls it). Copyright (c) Oracle and/or
+;; its affiliates, under the GNU General Public License version 2 with the Classpath Exception (LICENSE.md).
+(in-ns 'go.arbace.jrt)
+
+(go/file "threadgroup.go"
+  :imports [[strconv "strconv"] [sync "sync"] [atomic "sync/atomic"] [weak "weak"]])
+
+(go/type ThreadGroup
+  "ThreadGroup is java.lang.ThreadGroup's struct.\n"
+  (struct Object
+          ^{:tag (* ThreadGroup)} parent
+          ^{:tag (* String)} name
+          ^{:tag atomic/Int32} maxPriority
+          ^{:tag atomic/Bool} daemon
+          ^{:tag sync/Mutex :doc "guards groups and weaks (jdk26u's synchronized (this))\n"} mu
+          ^{:tag (slice (* ThreadGroup)) :doc "the subgroups made before the VM booted: the system group's main and
+VirtualThreads\n"} groups
+          ^{:tag (slice (weak/Pointer ThreadGroup)) :doc "every later subgroup, weakly\n"} weaks))
+
+(go/var ThreadGroup_class
+  (Define (addr (lit ClassInfo :Name "java.lang.ThreadGroup" :Kind KindClass :Modifiers AccPublic
+                     :Super Object_class
+                     :Interfaces (lit (slice (* Class)) Thread_UncaughtExceptionHandler_class)
+                     :Go "arbace/jrt.ThreadGroup"))))
+
+(go/func newSystemThreadGroup
+  "newSystemThreadGroup is jdk26u's private ThreadGroup(): the system group, the root.\n"
+  ^{:tag (* ThreadGroup)} []
+  (let [g (addr (lit ThreadGroup :name (Str "system")))]
+    (.Store (.-maxPriority g) 10)
+    g))
+
+(go/func newThreadGroup
+  "newThreadGroup is jdk26u's ThreadGroup(parent, name, maxPriority, daemon); strong: added to its parent
+strongly (the groups the VM makes before it has booted).\n"
+  ^{:tag (* ThreadGroup)} [^{:tag (* ThreadGroup)} parent ^{:tag (* String)} name ^int32 maxPriority ^bool daemon
+                           ^bool strong]
+  (let [g (addr (lit ThreadGroup :parent parent :name name))]
+    (.Store (.-maxPriority g) maxPriority)
+    (.Store (.-daemon g) daemon)
+    (.Lock (.-mu parent))
+    (if strong
+      (set! (.-groups parent) (append (.-groups parent) g))
+      (do
+        (.pruneWeaks parent)
+        (set! (.-weaks parent) (append (.-weaks parent) (weak/Make g)))))
+    (.Unlock (.-mu parent))
+    g))
+
+(go/var ^{:doc "systemThreadGroup is the root group, \"system\".\n"} systemThreadGroup (newSystemThreadGroup))
+(go/var ^{:doc "mainThreadGroup is the group \"main\": the main thread's, and every adopted goroutine's.\n"}
+  mainThreadGroup (newThreadGroup systemThreadGroup (Str "main") 10 false true))
+(go/var ^{:doc "virtualThreadGroup is the group \"VirtualThreads\" of every virtual thread (jdk26u's
+Thread.virtualThreadGroup()).\n"}
+  virtualThreadGroup (newThreadGroup systemThreadGroup (Str "VirtualThreads") 10 false true))
+
+(go/func ThreadGroup_New_String
+  "ThreadGroup_New_String is ThreadGroup(name): a subgroup of the current thread's group.\n"
+  ^{:tag (* ThreadGroup)} [^{:tag (* String)} name]
+  (ThreadGroup_New_ThreadGroup_String (.GetThreadGroup__ThreadGroup (CurrentThread)) name))
+
+(go/func ThreadGroup_New_ThreadGroup_String
+  "ThreadGroup_New_ThreadGroup_String is ThreadGroup(parent, name): the parent's maximum priority and daemon
+status.\n"
+  ^{:tag (* ThreadGroup)} [^{:tag (* ThreadGroup)} parent ^{:tag (* String)} name]
+  (when (== parent nil)
+    (panic (NullPointerException_New)))
+  (newThreadGroup parent name (.Load (.-maxPriority parent)) (.Load (.-daemon parent)) false))
+
+(go/method pruneWeaks "pruneWeaks drops the collected subgroups (g.mu held).\n" [^{:tag (* ThreadGroup)} g]
+  (let [ws (subslice (.-weaks g) 0 0)]
+    (range [_ w (.-weaks g)]
+      (when (!= (.Value w) nil)
+        (set! ws (append ws w))))
+    (set! (.-weaks g) ws)))
+
+(go/method subgroups "subgroups is a snapshot of g's subgroups: the strong ones, then the weak ones alive.\n"
+  ^{:tag (slice (* ThreadGroup))} [^{:tag (* ThreadGroup)} g]
+  (.Lock (.-mu g))
+  (defer (.Unlock (.-mu g)))
+  (.pruneWeaks g)
+  (let [s (make (slice (* ThreadGroup)) 0 (+ (len (.-groups g)) (len (.-weaks g))))]
+    (set! s (append s (spread (.-groups g))))
+    (range [_ w (.-weaks g)]
+      (let [sg (.Value w)]
+        (when (!= sg nil)
+          (set! s (append s sg)))))
+    s))
+
+(go/func allPlatformThreads
+  "allPlatformThreads is jdk26u's Thread.getAllThreads(): the live platform threads.\n"
+  ^{:tag (slice (* Thread))} []
+  (let [ts (liveThreads)
+        out (subslice ts 0 0)]
+    (range [_ t ts]
+      (when (and (not (.-virtual t)) (== (.Load (.-state t)) threadAlive))
+        (set! out (append out t))))
+    out))
+
+(go/method GetName__String ^{:tag (* String)} [^{:tag (* ThreadGroup)} g] (.-name g))
+(go/method GetParent__ThreadGroup ^{:tag (* ThreadGroup)} [^{:tag (* ThreadGroup)} g] (.-parent g))
+(go/method GetMaxPriority__I ^int32 [^{:tag (* ThreadGroup)} g] (.Load (.-maxPriority g)))
+(go/method IsDaemon__Z ^bool [^{:tag (* ThreadGroup)} g] (.Load (.-daemon g)))
+(go/method IsDestroyed__Z ^bool [^{:tag (* ThreadGroup)} g] false)
+(go/method SetDaemon_Z__V [^{:tag (* ThreadGroup)} g ^bool on] (.Store (.-daemon g) on))
+(go/method CheckAccess__V [^{:tag (* ThreadGroup)} g])
+(go/method Destroy__V [^{:tag (* ThreadGroup)} g])
+
+(go/method SetMaxPriority_I__V
+  "SetMaxPriority_I__V is setMaxPriority: within the parent's, for g and its subgroups (out of range:
+ignored; the virtual threads' group's stays the maximum).\n"
+  [^{:tag (* ThreadGroup)} g ^int32 pri]
+  (when (or (< pri 1) (> pri 10))
+    (return))
+  (cond
+    (== (.-parent g) nil) (.Store (.-maxPriority g) pri)
+    (!= g virtualThreadGroup) (.Store (.-maxPriority g) (min pri (.Load (.-maxPriority (.-parent g))))))
+  (range [_ sg (.subgroups g)]
+    (.SetMaxPriority_I__V sg pri)))
+
+(go/method ParentOf_ThreadGroup__Z "ParentOf_ThreadGroup__Z is parentOf(g2): g2 or one of its ancestors is g.\n"
+  ^bool [^{:tag (* ThreadGroup)} g ^{:tag (* ThreadGroup)} g2]
+  (for [] (!= g2 nil) (set! g2 (.-parent g2))
+    (when (== g2 g)
+      (return true)))
+  false)
+
+(go/method ActiveCount__I "ActiveCount__I is activeCount(): the live platform threads in g or a subgroup.\n"
+  ^int32 [^{:tag (* ThreadGroup)} g]
+  (let [n (conv int32 0)]
+    (range [_ t (allPlatformThreads)]
+      (when (.ParentOf_ThreadGroup__Z g (.-group t))
+        (inc! n)))
+    n))
+
+(go/method Enumerate_Thread1__I ^int32 [^{:tag (* ThreadGroup)} g ^{:tag (* RefArray)} list]
+  (.Enumerate_Thread1_Z__I g list true))
+
+(go/method Enumerate_Thread1_Z__I
+  "Enumerate_Thread1_Z__I is enumerate(list, recurse): the live platform threads of g (and of its
+subgroups, recurse) into list, as many as fit; their number.\n"
+  ^int32 [^{:tag (* ThreadGroup)} g ^{:tag (* RefArray)} list ^bool recurse]
+  (when (== list nil)
+    (panic (NullPointerException_New)))
+  (let [n (conv int32 0)]
+    (when (> (len (.-A list)) 0)
+      (range [_ t (allPlatformThreads)]
+        (let [tg (.-group t)]
+          (when (or (== tg g) (and recurse (.ParentOf_ThreadGroup__Z g tg)))
+            (.Store list n (.-self t))
+            (inc! n)
+            (when (== (conv int n) (len (.-A list)))
+              (break))))))
+    n))
+
+(go/method ActiveGroupCount__I "ActiveGroupCount__I is activeGroupCount(): g's subgroups, recursively.\n"
+  ^int32 [^{:tag (* ThreadGroup)} g]
+  (let [n (conv int32 0)]
+    (range [_ sg (.subgroups g)]
+      (set! n (+ n (.ActiveGroupCount__I sg) 1)))
+    n))
+
+(go/method Enumerate_ThreadGroup1__I ^int32 [^{:tag (* ThreadGroup)} g ^{:tag (* RefArray)} list]
+  (.Enumerate_ThreadGroup1_Z__I g list true))
+
+(go/method Enumerate_ThreadGroup1_Z__I ^int32 [^{:tag (* ThreadGroup)} g ^{:tag (* RefArray)} list ^bool recurse]
+  (when (== list nil)
+    (panic (NullPointerException_New)))
+  (.enumerateGroups g list 0 recurse))
+
+(go/method enumerateGroups ^int32 [^{:tag (* ThreadGroup)} g ^{:tag (* RefArray)} list ^int32 i ^bool recurse]
+  (let [sgs (.subgroups g)]
+    (for [j 0] (and (< j (len sgs)) (< (conv int i) (len (.-A list)))) (inc! j)
+      (let [sg (aget sgs j)]
+        (.Store list i sg)
+        (inc! i)
+        (when recurse
+          (set! i (.enumerateGroups sg list i true)))))
+    i))
+
+(go/method Interrupt__V "Interrupt__V is interrupt(): every live platform thread of g or a subgroup interrupted.\n"
+  [^{:tag (* ThreadGroup)} g]
+  (range [_ t (allPlatformThreads)]
+    (when (.ParentOf_ThreadGroup__Z g (.-group t))
+      (.Interrupt__V (.-self t)))))
+
+(go/method Is_Thread_UncaughtExceptionHandler [^{:tag (* ThreadGroup)} g])
+
+(go/method UncaughtException_Thread_Throwable__V
+  "UncaughtException_Thread_Throwable__V is uncaughtException(t, e): the parent's, else the default
+handler's, else \"Exception in thread ...\" on the standard error.\n"
+  [^{:tag (* ThreadGroup)} g ^Thread_I t ^Throwable_I e]
+  (when (!= (.-parent g) nil)
+    (.UncaughtException_Thread_Throwable__V (.-parent g) t e)
+    (return))
+  (let [h (.Load Thread_defaultHandler)]
+    (if (!= h nil)
+      (.UncaughtException_Thread_Throwable__V h t e)
+      (Uncaught (.String (.GetName__String t)) e))))
+
+(go/method ToString__String "ToString__String is ThreadGroup.toString: java.lang.ThreadGroup[name=N,maxpri=P].\n"
+  ^{:tag (* String)} [^{:tag (* ThreadGroup)} g]
+  (Str (+ "java.lang.ThreadGroup[name=" (.String (.-name g)) ",maxpri="
+          (strconv/Itoa (conv int (.Load (.-maxPriority g)))) "]")))
+
+(go/method Ref ^any [^{:tag (* ThreadGroup)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ThreadGroup)} t] ThreadGroup_class)
+(go/method Clone__O ^any [^{:tag (* ThreadGroup)} t] (panic (CloneNotSupported t)))
+
+(go/func ThreadGroup_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ThreadGroup) x)] ok))
+(go/func ThreadGroup_Cast ^{:tag (* ThreadGroup)} [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert (* ThreadGroup) x)]
+    (when (not ok) (panic (ClassCast x ThreadGroup_class)))
+    v))
+
+(go/func init []
+  (set! (.-IsInstance (.Info ThreadGroup_class)) ThreadGroup_InstanceOf))
