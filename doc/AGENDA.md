@@ -82,6 +82,9 @@ Six crops are above 90 on all three. What the others still need:
   equal, 0 lost) not reached: 10 lost in three classes (a case on the void token, output differences, NonTermination); next
   P20's tail, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
+  hsi's eval cell (`hsi-e1`, HES88): 797 to 809 of 908 (HE9's six recorded, the static pointer table, forkOn#'s locked threads,
+  the SIMD primops); 99 left in classes (60 no reference, 12 speed, 10 Cmm); HES89 (`simd/` in the corpora) and HES90 (all.T's
+  `ignore_stdout`) proposed; rts_clearMemory's record for a night.
 - **Rust** (all three): the AOT cell has no record yet (RE4's `bin/rsi check --aot --record`, tonight: completeness and
   maturity rise with it); eval 0.5 until rsi runs the native front end's MIR (RF10b's passes: 506 of 616 bodies equal;
   RF11, `rust-rf11`). Since RFP53 (a) (the user, 2026-11-10; branch `crops-rulings`) eval and AOT are case-weighted: a case
@@ -315,7 +318,7 @@ items below are the ones whose work is still ahead or tied to a night.
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
   OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
   on `ocaml-s2` (its compiled runs a night's), OC216 on `ocaml-s3` and its rest (AF_UNIX and signals at the compiled level) on `ocaml-s4`, then OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.
-- **Haskell** ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md)): HES83 (b) (the own verdict where a
+- **Haskell** ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md)): HES89, HES90 (hsi-e1's proposals); HES83 (b) (the own verdict where a
   `.stdout` ships, GHC's references at the oracle tier); HF9-P7 with slice 7; HF10-P20 to P27 (above, the plan's stages 2-9); HF10's lib-stg
   measures on night 11; `bin/gate --full --plan` to confirm `haskell-lib-own-base` plans after `haskell-lib-check-own`.
 - **Rust** ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md)): RF11, RF12 (RES54's ceiling until it); RFP29 (a) later;
