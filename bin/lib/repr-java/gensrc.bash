@@ -346,10 +346,41 @@ gensrc_post_java_base() {
     for s in boolean byte short char int long float double; do cat "$f.snippet.$s"; done; echo "}"; } > "$f.tmp" && mv "$f.tmp" "$f" || gfail=1
   # SetupTextFileProcessing's substitutions (GensrcMisc.gmk, Gensrc.gmk's release.txt)
   gensrc_substs java.base || gfail=1
-  # GensrcMisc.gmk's generate-preproc-src: UnixConstants, SocketOptionRegistry (JCS369 (a)), not yet
+  # GensrcMisc.gmk's generate-preproc-src: UnixConstants, SocketOptionRegistry (JCS369 (a))
+  gensrc_preproc "$jdk/src/java.base/unix/classes/sun/nio/fs/UnixConstants.java.template" "$o/sun/nio/fs/UnixConstants.java" || gfail=1
+  gensrc_preproc "$jdk/src/java.base/share/classes/sun/nio/ch/SocketOptionRegistry.java.template" "$o/sun/nio/ch/SocketOptionRegistry.java" || gfail=1
   gensrc_module_info java.base || gfail=1
   gensrc_zh_hk java.base || gfail=1
   return $gfail
+}
+# gensrc_preproc TEMPLATE OUT: GensrcMisc.gmk's generate-preproc-src (JCS369 (a)): the template's lines before
+# @@END_COPYRIGHT@@, then its C-preprocessed text from @@START_HERE@@ on, that line renamed, PREFIX_ dropped and a line
+# marker made empty, as make's awk and sed do; the preprocessing repr/c's on C's own target (musl's headers, c/target),
+# gcc -E's layout by bin/lib/repr-java/cppout.ae, with the build's -D, -U, -I and -std (platform-build.edn's :cpp)
+gensrc_preproc() {
+  local t=$1 o=$2 opts=()
+  mkdir -p "$(dirname "$o")"
+  pb_get_top cpp | grep -e '^-[DUI]' -e '^-std' > "$work/gensrc/cpp.opts"
+  mapfile -t opts < "$work/gensrc/cpp.opts"
+  ( . "$root/bin/lib/repr-c/sysroot.bash" && c_sysroot &&
+    mex=$(. "$root/bin/lib/host.bash" && arbace_host_exe) &&
+    "$mex" "$root/bin/lib/repr-java/cppout.ae" "$root/test/c/host" "$t" "${opts[@]}" ) > "$o.E" 2>> "$work/gensrc/log/$gm.log" ||
+    { echo "javac-vendor gensrc: $gm: preprocessing $t failed ($work/gensrc/log/$gm.log)" >&2; return 1; }
+  { awk '/@@END_COPYRIGHT@@/{exit}1' "$t"
+    awk '/@@START_HERE@@/,0' "$o.E" | sed -e 's/@@START_HERE@@/\/\/ AUTOMATICALLY GENERATED FILE - DO NOT EDIT/' -e 's/PREFIX_//' -e 's/^#.*//'
+  } > "$o" && rm -f "$o.E"
+}
+# pb_get_top FIELD: the strings of platform-build.edn's top-level vector FIELD, a line each
+pb_get_top() {
+  awk -v field=" :$1 [" 'index($0, field) == 1 {
+      s = substr($0, length(field) + 1); ins = 0; buf = ""
+      for (j = 1; j <= length(s); j++) {
+        c = substr(s, j, 1)
+        if (ins) { if (c == "\\") { j++; buf = buf substr(s, j, 1) } else if (c == "\"") { print buf; ins = 0; buf = "" } else buf = buf c }
+        else if (c == "\"") ins = 1
+        else if (c == "]") exit
+      }
+      exit }' "$pbuild"
 }
 # gensrc_substs MODULE: each subst record of MODULE: TEMPLATE through sed's s|FROM|TO|g in order
 gensrc_substs() {
