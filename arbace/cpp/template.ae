@@ -525,7 +525,7 @@
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
         v))))
 
-(declare resolve-args complete-args instantiate-fn var-template-inst)
+(declare resolve-args complete-args instantiate-fn var-template-inst written-qualifier)
 
 (defn- static-call-value
   "The value of a call without arguments of a constexpr static member function, or of a specialization of a static
@@ -538,9 +538,15 @@
         [nsym targs] (if (and (seq? tf) (= '<> (first tf))) [(second tf) (vec (nnext tf))] [tf nil])
         ;; (a qualified name read as one symbol, P/f: its qualifier the class)
         [cls nm] (if (and (nil? cls) (symbol? nsym) (namespace nsym)) [(symbol (namespace nsym)) (name nsym)] [cls (str nsym)])
-        ct (when cls (sema/resolve-type-form scope cls))]
+        ct (when cls (sema/resolve-type-form scope cls))
+        ;; (the qualifier as written when it is a typedef's or an alias template's name: its mangling is that name, an
+        ;; unresolved-qualifier-level <simple-id> with the alias template's arguments as written, Itanium 5.1.5.3, clang's
+        ;; mangleUnresolvedTypeOrSimpleId on the TypedefType or the alias's TemplateSpecializationType; not the class it
+        ;; names: libstdc++'s pair<_T1, _T2>::_PCCP, `using _PCCP = _PCC<true, _T1, _T2>`, mangles sr5_PCCPE, not
+        ;; sr3std4_PCCILb1E...E with the class's arguments substituted; eh_alloc.cc's two pair constructors)
+        wb (written-qualifier scope cls)]
     (if (and ct (dependent? ct))
-      {:k :texpr :o :mcall :base ct :name nm}
+      (cond-> {:k :texpr :o :mcall :base ct :name nm} wb (assoc :wbase wb))
       (try
       (let [_ (when (and ct (not (abi/class? (abi/unq ct)))) (fail :template "a member call of a non-class: " nm))
             es (if ct (map second (sema/class-lookup (:id (abi/unq ct)) nm false)) (sema/lookup scope nm))
@@ -554,7 +560,22 @@
                   (:id (or (first (filter #(and (= :fn (:e %)) (empty? (:ps (:ty (sema/fnd (:id %)))))) es)) (fail :template "no function " nm))))]
         (sema/ce-call-fn fid []))
       (catch arbace.lang.ExceptionInfo x
-        (if (::dependent (ex-data x)) {:k :texpr :o :mcall :base ct :name nm :targs (::targs (ex-data x))} (throw x)))))))
+        (if (::dependent (ex-data x)) (cond-> {:k :texpr :o :mcall :base ct :name nm :targs (::targs (ex-data x))} wb (assoc :wbase wb)) (throw x)))))))
+
+(defn- written-qualifier
+  "A static member call's qualifier as written, when it is a typedef's name (`_PCCP`) or an alias template's
+  specialization (`_PCCFP<_U1, _U2>`): {:name s} or {:name s :args [...]} (the arguments resolved, as written); nil for a
+  class's own name, a template parameter or a qualified name (mangled from the type)."
+  [scope cls]
+  (cond
+    (and (symbol? cls) (nil? (namespace cls)))
+    (when (:typedef (first (filter #(= :type (:e %)) (sema/lookup scope (name cls)))))
+      {:name (name cls)})
+    (and (seq? cls) (= '<> (first cls)) (symbol? (second cls)) (nil? (namespace (second cls))))
+    (let [e (first (filter #(= :tmpl (:e %)) (sema/lookup scope (name (second cls)))))
+          t (when e (tmpl (:id e)))]
+      (when (and t (= :alias (:tk t)))
+        {:name (name (second cls)) :args (or (resolve-args scope t (vec (nnext cls)) false) (fail :template "the template arguments of " (:name t)))}))))
 
 (defn- const-form
   "A constant of a template argument's or array bound's form: a number, a name, X<T>::member, (cpp/text s)."
