@@ -1590,13 +1590,37 @@
   (let [ded (fn [pa pb] (match-args (atom {}) (:id pa) (:args pa) (:args pb)))]
     (and (ded p2 p1) (not (ded p1 p2)))))
 
+(def ^:dynamic *inst-depth*
+  "CP368 (a): the class instantiations under way, nested (clang's -ftemplate-depth, 1024 by default:
+  err_template_recursion_depth_exceeded)."
+  0)
+
+(declare instantiate-class*)
+
 (defn instantiate-class
   "The class of the class template `tid` for the complete arguments `args`: an explicit specialization's, the most
-  specialized matching partial specialization's, or the primary template's ([temp.spec.partial.match])."
+  specialized matching partial specialization's, or the primary template's ([temp.spec.partial.match]). CP368 (a): at
+  most 1024 instantiations nested, as clang's -ftemplate-depth; the analysis' stack may end first (about 900 on the tools'
+  host's thread), so the outermost one turns a StackOverflowError under it into the same refusal, a diagnostic, not a
+  crash."
+  [tid args]
+  (if (pos? (long *inst-depth*))
+    (instantiate-class* tid args)
+    (try (instantiate-class* tid args)
+         (catch StackOverflowError _
+           (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth (the analysis' stack, under "
+                                (:name (tmpl tid)) ")")
+                           {:codegen/refused :depth}))))))
+
+(defn- instantiate-class*
   [tid args]
   (sema/tick!)
   (binding [sema/*decltype-failed* nil] ; (a class's own members' dependent decltypes are not its user's failure)
   (or (when-let [cid (get-in @*tmpls* [tid :insts args])] {:k :class :id cid})
+      (binding [*inst-depth* (inc (long *inst-depth*))]
+      (when (> (long *inst-depth*) 1024)
+        (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of 1024 (" (:name (tmpl tid)) ")")
+                        {:codegen/refused :depth})))
       (let [t (tmpl tid)]
         (if-let [node (get (:specs t) args)]
           (declare-instance! t args node [] [] true)
@@ -1612,7 +1636,7 @@
                                    (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
                                    c)
               :else (fail :template "ambiguous partial specializations of " (:name t)
-                          (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args)))))))))))
+                          (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args))))))))))))
 
 (defn- tmpl-of-entity [es]
   (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)

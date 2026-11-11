@@ -577,6 +577,22 @@
             :else (recur (inc i))))))
     (.toString sb)))
 
+(defn- located-file
+  "The file a location's relative name `file` is: as named, else under the main file's directory, else (CP368 (a)) under
+  the root the main file's own name is relative to (the dg read names the main file `coroutines/x.C` and its quoted header
+  `coroutines/coro.h`, both relative to g++.dg, while *main-dir* is the main file's directory)."
+  ^java.io.File [^String file]
+  (let [f (java.io.File. file)]
+    (if (or (.isFile f) (.isAbsolute f) (nil? *main-dir*))
+      f
+      (let [g (java.io.File. ^String *main-dir* file)
+            p (when *main-name* (.getParent (java.io.File. ^String *main-name*)))
+            ^String md *main-dir*]
+        (if (or (.isFile g) (nil? p) (not (str/ends-with? md (str "/" p))))
+          g
+          (let [h (java.io.File. (subs md 0 (- (count md) (count p) 1)) file)]
+            (if (.isFile h) h g)))))))
+
 (defn text-of
   "The text of the file `file` names in the tree's locations: the main file's *src*, a header's read once (G4: header
   bodies are parsed, so their nodes' text is their own file's)."
@@ -585,8 +601,7 @@
     *src*
     ;; (CP322 (a): read once a process, so the text is keyed by the file's resolved path: a header named relative to
     ;; the main file's directory is another file for another main file, and the dg read's threads read many)
-    (let [f (java.io.File. ^String file)
-          f (if (or (.isFile f) (.isAbsolute f) (nil? *main-dir*)) f (java.io.File. ^String *main-dir* ^String file))
+    (let [f (located-file file)
           k (.getAbsolutePath f)]
       (or (get @file-texts k)
           (if (.isFile f)
@@ -599,7 +614,7 @@
   "Whether a node is a header's (G4: its location's file a header's path, not the main file's)."
   [n]
   (let [f (:file (loc-of (get-in n [:range :begin])))]
-    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (java.io.File. ^String *main-dir* ^String f))))))))
+    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))))))
 
 (defn- node-text ^String [n]
   (let [bl (loc-of (get-in n [:range :begin])) el (loc-of (get-in n [:range :end]))
@@ -1097,7 +1112,7 @@
       (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))})))
     (when (:completeDefinition n)
       (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
-      (abi/update-cls! id assoc :complete true
+      (abi/update-cls! id assoc :complete true :defining true
                        :bases (vec (for [[bi bs] (map-indexed vector (:bases n))
                                          ;; (cpp-s4: a pack expansion among the bases, [temp.variadic]/5's base-specifier-list:
                                          ;; one base per element of the packs it names, variant's `_Build_FUN<_Ind, _Tp, _Ti>...`)
@@ -1126,11 +1141,23 @@
         ;; (cpp-s5: the unnamed class an anonymous member's type names is this body's last one: a class the members'
         ;; declarations instantiate meanwhile declares its own unnamed ones, which took its place; <format>'s
         ;; _Arg_value's union, after basic_format_args' had been declared in between)
+        (try
         (binding [*last-anon* (atom nil)]
         (doseq [k (kids n)]
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
-            "FieldDecl" (let [ft (resolve-type cs (get-in k [:type :qualType]))
+            "FieldDecl" (if-let [bad (let [et (loop [t (resolve-type cs (get-in k [:type :qualType]))] (if (abi/arr? t) (recur (:of t)) t))]
+                                       ;; (CP368 (a): a member of a class still being defined, its own or an enclosing one's,
+                                       ;; or a class template's instance being instantiated: an incomplete type,
+                                       ;; [class.mem.general]/7, clang's err_field_incomplete_or_sizeless; pr67405.C's `S f;` in
+                                       ;; S, template/instantiate1.C's Z<int> through Y<Z<int>> and X<Z<int>>: the class had
+                                       ;; contained itself, and trivial-copy? and the layout recursed without end. The checker
+                                       ;; reports it and leaves the member out; the code generator refuses)
+                                       (when (and (abi/class? et) (:defining (abi/cls (:id et))))
+                                         (ex-info (str "codegen: field has incomplete type '" (:name (abi/cls (:id et))) "'")
+                                                  {:codegen/refused :incomplete :cx/node k})))]
+                          (if (checking?) (swap! *order* conj [:cx-error bad]) (throw bad))
+                          (let [ft (resolve-type cs (get-in k [:type :qualType]))
                               i (count (:fields (abi/cls id)))
                               bits (when (:isBitfield k) (const-int cs (first (kids k))))
                               init (when (:hasInClassInitializer k) (if bits (second (kids k)) (first (kids k))))]
@@ -1142,7 +1169,7 @@
                             (when (and (not bits) (abi/class? ft))
                               (doseq [[mn es] (.entrySet ^java.util.HashMap (:names (:scope (abi/cls-of ft))))
                                       e es :when (#{:field :indirect} (:e e))]
-                                (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1})))))
+                                (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1}))))))
             (do (when (and (checking?) (= "FriendDecl" (:kind k)))
                   ;; (CP313 (a): the friends each class declares, clang's EffectiveContext's matching by them: a function's
                   ;; or a function template's name, else a class, else unknown)
@@ -1160,7 +1187,8 @@
                                                        ""))
                                            (and (nil? fd) (nil? (get-in k [:type :qualType])) (not-any? (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k)))
                                            (assoc :friend-unknown true)))))
-                (binding [*member-access* @access] (declare-node! cs k)))))))
+                (binding [*member-access* @access] (declare-node! cs k))))))
+        (finally (abi/update-cls! id dissoc :defining))))
       (finish-class! id)
       (when-not nm (reset! *last-anon* t)))
     t))
