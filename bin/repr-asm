@@ -44,7 +44,7 @@
 #   bin/repr-asm print-oracle [CORPUS]              the oracle tier's, by hand: the printer's lines of each AT&T file against the host's
 #                                                    llvm-mc 23.1.5 (REPR_ASM_MC), file by file; table oracle also compares the printer's
 #                                                    aliases with llvm-tblgen -gen-asm-writer's printAliasInstr
-#   bin/repr-asm encode-check [--record] [CORPUS...] amd64's encoder (AX2): the stated encodings of each file (default mc-x86) judged
+#   bin/repr-asm encode-check [--record|--only LIST] [CORPUS...] amd64's encoder (AX2): the stated encodings of each file (default mc-x86) judged
 #                                                    by the test's own CHECK lines (arbace.asm.amd64.check; no llvm-mc), against
 #                                                    test/asm/encode-results-amd64.edn (--record rewrites the corpora's rows), every
 #                                                    non-pass in a class of test/asm/divergences-encode.edn, and the negative controls of
@@ -540,8 +540,13 @@ case ${1:-} in
     fi
     GOMEMLIMIT=${REPR_ASM_TABLE_MEM:-1200MiB} arbace_tool -m arbace.asm.amd64.gen "$2" "$llvm" "$root/asm/amd64/table.edn" ;;
   encode-check)
-    shift; record=; ids=()
-    for a in "$@"; do case $a in --record) record=1 ;; *) ids+=("$a") ;; esac; done
+    shift; record=; ids=(); only=
+    while [ $# -gt 0 ]; do case $1 in
+      --record) record=1 ;;
+      --only) [ $# -ge 2 ] && [ -f "$2" ] || { echo "repr-asm encode-check --only LIST: LIST is a file of file names" >&2; exit 2; }; only=$2; shift ;;
+      *) ids+=("$1") ;; esac; shift; done
+    [ -z "$only" ] || [ -z "$record" ] || { echo "repr-asm encode-check: --record records the whole set: no --only" >&2; exit 2; }
+    [ -z "$only" ] || [ "$arch" = amd64 ] || { echo "repr-asm encode-check: --only is amd64's" >&2; exit 2; }
     if [ "$arch" = arm64 ]; then
       [ ${#ids[@]} -gt 0 ] || ids=(mc-aarch64 mc-asmparser-aarch64)
       specs=()
@@ -555,6 +560,16 @@ case ${1:-} in
     works=()
     for id in "${ids[@]}"; do
       make_list "$id"
+      if [ -n "$only" ]; then
+        # AXS91 (a): --only LIST (a file of file names, one a line, bare as the corpus's names, as the gate's rotation writes its list)
+        # runs those files alone, judged on what it ran
+        [ "$id" = mc-x86 ] || { echo "repr-asm encode-check: --only names files of mc-x86 alone" >&2; exit 2; }
+        unknown=$(awk -F'\t' 'FNR == NR { if ($0 != "") want[$0] = 1; next } { have[$1] = 1 } END { for (n in want) if (!(n in have)) print n }' "$only" "$lists/$id.list")
+        [ -z "$unknown" ] || { echo "repr-asm encode-check: --only names files that do not exist:" $unknown >&2; exit 2; }
+        awk -F'\t' 'FNR == NR { want[$0] = 1; next } $1 in want' "$only" "$lists/$id.list" > "$lists/$id.list.slice"
+        [ -s "$lists/$id.list.slice" ] || { echo "repr-asm encode-check: --only LIST is empty" >&2; exit 2; }
+        mv "$lists/$id.list.slice" "$lists/$id.list"
+      fi
       work=$root/.tmp/repr-asm/enc/$id; rm -rf "$work"; mkdir -p "$work"
       arbace_tool -m arbace.asm.amd64.check check "$lists/$id.list" "$work"
       works+=("$work")
@@ -589,7 +604,8 @@ case ${1:-} in
     done < "$root/test/asm/controls-cross.txt"
     # a record only from a run whose controls all fail as they must
     if [ -n "$record" ] && [ $fails != 0 ]; then echo "repr-asm encode-check: not recorded: $fails controls did not fail"; record=; fi
-    judge=(-e "(do (load-file \"$root/test/asm/encode_judge.ae\") nil)" -e "(asm.encode-judge/main \"$root/test/asm/encode-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-encode.edn\" \"${record:-}\" \"$root/test/asm/divergences-print.edn\" \"$root/test/asm/divergences-cross.edn\")")
+    judge=(-e "(do (load-file \"$root/test/asm/encode_judge.ae\") nil)" -e "(asm.encode-judge/main \"$root/test/asm/encode-results-amd64.edn\" \"${works[*]}\" \"$root/test/asm/divergences-encode.edn\" \"${record:-}\" \"$root/test/asm/divergences-print.edn\" \"$root/test/asm/divergences-cross.edn\" \"${only:+partial}\")")
+    [ -z "$only" ] || echo "repr-asm encode-check: the slice only (--only $only), not held to the record's other files"
     arbace_tool "${judge[@]}" || fails=$((fails + 1))
     [ $fails = 0 ] ;;
   print-oracle)
