@@ -2774,8 +2774,13 @@
   ::operator new (t) without <new>)."
   [nm]
   (let [d (implicit-alloc-fns nm)
-        ds (if (string? (first d)) [d] d)]
-    (doseq [[qt ps] ds]
+        ds (if (string? (first d)) [d] d)
+        ;; (cpp-s3: those of the signatures no declaration has: a unit that declares only a placement form,
+        ;; `void *operator new(size_t, void *)`, still has the implicit `operator new(size_t)`, pr77550.C)
+        have (set (for [e (binding [*cutoff* Long/MAX_VALUE] (own-names *root* nm)) :when (= :fn (:e e))]
+                    (mapv abi/unq (:ps (:ty (fnd (:id e)))))))]
+    (.put ^java.util.HashMap (:names *root*) (str " implicit " nm) [])
+    (doseq [[qt ps] ds :when (not (have (mapv #(abi/unq (resolve-type *root* %)) ps)))]
       (declare-fn! *root* {:kind "FunctionDecl" :name nm :type {:qualType qt}
                            :inner (mapv (fn [t] {:kind "ParmVarDecl" :type {:qualType t}}) ps)}))))
 
@@ -2786,7 +2791,8 @@
               (lookup-qualified (:scope ctx) (conj q nm) g)
               (lookup (:scope ctx) nm))
         es (lk)
-        es (if (and (empty? es) (empty? q) (implicit-alloc-fns nm)) (do (implicit-alloc! nm) (lk)) es)
+        es (if (and (empty? q) (implicit-alloc-fns nm) (not (.containsKey ^java.util.HashMap (:names *root*) (str " implicit " nm))))
+             (do (implicit-alloc! nm) (lk)) es)
         ;; class members found through a class's scope keep their class
         es (if (and (seq q) (seq es)) es es)]
     ;; nothing visible: a call's argument-dependent lookup may still find a function (template)
@@ -3095,14 +3101,38 @@
         (recur pa (conj out pa))
         out))))
 
+(defn adl-class-nss
+  "cpp-s3: the namespaces associated with the class `cid` ([basic.lookup.argdep]/3): its innermost enclosing namespace's
+  (adl-nss), its bases', and for a class template's specialization its template type arguments' (classes, and the classes
+  pointers, references and arrays name), each class once; pr77550.C's distance(begin, end), std::distance found through an
+  iterator adaptor's argument std::F<...>. Scopes by identity."
+  [cid]
+  (let [seen (java.util.HashSet.) out (java.util.ArrayList.) nss (java.util.IdentityHashMap.)]
+    (letfn [(ty! [t]
+              (cond (map? t) (let [t (abi/unq t)]
+                               (cond (abi/class? t) (cls! (:id t))
+                                     (#{:ptr :ref :rref :arr} (:k t)) (ty! (or (:to t) (:of t)))
+                                     (:pack t) (doseq [x (:pack t)] (ty! x))
+                                     :else nil))
+                    :else nil))
+            (cls! [cid]
+              (when (and cid (.add seen cid))
+                (let [c (abi/cls cid)]
+                  (when-let [o (:outer c)]
+                    (doseq [n (adl-nss (loop [s o] (if (or (nil? s) (= :ns (:kind s))) s (recur (:parent s)))))]
+                      (when (and n (not (.containsKey nss n))) (.put nss n true) (.add out n))))
+                  (doseq [b (:bases c)] (cls! (:cls b)))
+                  (doseq [a (:targs c)] (ty! a)))))]
+      (cls! cid)
+      (vec out))))
+
 (defn- adl-fns
   "The functions named `nm` in the namespaces of the class arguments' classes ([basic.lookup.argdep], for classes)."
   [args nm]
   (distinct
    (for [a args
          :let [cid (class-id (:ty a))] :when cid
-         :let [outer (loop [s (:outer (abi/cls cid))] (if (= :ns (:kind s)) s (recur (:parent s))))]
-         ns (adl-nss outer)
+         ns (adl-class-nss cid)
          e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (= :fn (:e e))]
      (:id e))))
 
@@ -3330,7 +3360,7 @@
                       (catch arbace.lang.ExceptionInfo _ nil)))
         frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) found))) (adl-fns args nm) tspecs)
         cands (concat (map (fn [m] [:m m]) members) (map (fn [f] [:f f]) (distinct frees)))]
-    (when (and (empty? cands) (System/getenv "CPP_OP_TRACE")) (binding [*out* *err*] (println "operator" o "no candidates for" (pr-str (map :ty args)))))
+    (when (and (empty? cands) (System/getenv "CPP_OP_TRACE")) (binding [*out* *err*] (println "operator" o "no candidates for" (pr-str (map :ty args)) (pr-str (map #(some-> (class-id (:ty %)) abi/cls ((juxt :name :lambda :targs))) args)))))
     (if (empty? cands)
       (cond
         (= o "=") (fail :assign "no operator=")
@@ -5011,7 +5041,10 @@
                    body)]
         (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))
         ;; (a generic lambda's body with no return statement: void, [expr.prim.lambda.closure]/4's deduction)
-        (when (and glam (has-auto? (:ret (:ty (fnd fid))))) (upd-fn! fid assoc-in [:ty :ret] abi/void))))))
+        ;; (cpp-s3: any function's declared `auto` with no return statement in its body, [dcl.spec.auto.general]/10:
+        ;; pr77550.C's `static auto construct(_Alloc, _Tp p2, _Args) { _S_construct(p2); }`)
+        (when (or (and glam (has-auto? (:ret (:ty (fnd fid))))) (and body (= :auto (:k (:ret (:ty (fnd fid)))))))
+          (upd-fn! fid assoc-in [:ty :ret] abi/void))))))
 
 (defn- defaulted-comparison!
   "A defaulted == or <=> ([class.compare.default], [class.eq], [class.spaceship]): the bases' and members' comparisons
