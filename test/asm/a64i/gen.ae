@@ -1303,6 +1303,81 @@
 (def vm-families
   [["neon-ldst" "the Advanced SIMD loads and stores of structures: ld1-ld4, st1-st4 (multiple structures, ld1 and st1 of one to four registers, every arrangement; a single structure's lane, b, h, s, d), ld1r-ld4r, with no offset, a post-index immediate and a post-index register" vm-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the Advanced SIMD FP lanes (AR9, ARS53 (a)'s second part): three same (FP) and two-register miscellaneous (FP) on 4s, 2s and
+;; 2d, v1 and v2 as for neon, v0 their mix (fmla's and fmls's addend), FPCR 0, FPSR cleared; v0's halves and FPSR (the lanes'
+;; exceptions accumulated) against the model: the scalar FP's model above (Java's IEEE arithmetic, BigDecimal's exact
+;; comparisons) lane by lane.
+
+(defn- f-abs ^long [t ^long b] (bit-and b (bit-not (bit-shift-left 1 (dec (long (:bits (ft t))))))))
+
+(def ^:private vf3-ops
+  {"fadd" #(fp-arith %1 :add %2 %3) "fsub" #(fp-arith %1 :sub %2 %3) "fmul" #(fp-arith %1 :mul %2 %3) "fdiv" #(fp-arith %1 :div %2 %3)
+   "fmax" #(fp-minmax %1 :max %2 %3) "fmin" #(fp-minmax %1 :min %2 %3) "fmaxnm" #(fp-minmax %1 :maxnm %2 %3) "fminnm" #(fp-minmax %1 :minnm %2 %3)
+   "faddp" #(fp-arith %1 :add %2 %3) "fmaxp" #(fp-minmax %1 :max %2 %3) "fminp" #(fp-minmax %1 :min %2 %3)
+   "fmaxnmp" #(fp-minmax %1 :maxnm %2 %3) "fminnmp" #(fp-minmax %1 :minnm %2 %3)
+   "fabd" (fn [t a b] (let [[r fl] (fp-arith t :sub a b)] [(f-abs t r) fl]))
+   "fmulx" (fn [t a b] (or (nans t a b)
+                           (if (or (and (f-inf? t a) (f-zero? t b)) (and (f-zero? t a) (f-inf? t b)))
+                             [(let [two (f-bits t 2.0)] (if (not= (f-sign t a) (f-sign t b)) (f-neg t two) two)) 0]
+                             (fp-arith t :mul a b))))
+   "fcmeq" (fn [t a b] (let [[r fl] (fp-compare t a b false)] [(if (= r 6) -1 0) fl]))
+   "fcmge" (fn [t a b] (let [[r fl] (fp-compare t a b true)] [(if (#{6 2} r) -1 0) fl]))
+   "fcmgt" (fn [t a b] (let [[r fl] (fp-compare t a b true)] [(if (= r 2) -1 0) fl]))
+   "facge" (fn [t a b] (let [[r fl] (fp-compare t (f-abs t a) (f-abs t b) true)] [(if (#{6 2} r) -1 0) fl]))
+   "facgt" (fn [t a b] (let [[r fl] (fp-compare t (f-abs t a) (f-abs t b) true)] [(if (= r 2) -1 0) fl]))})
+
+
+(def ^:private vf2-ops
+  (merge
+   {"fabs" (fn [t a] [(f-abs t a) 0]) "fneg" (fn [t a] [(f-neg t a) 0]) "fsqrt" fp-sqrt
+    "frintn" #(fp-rint %1 %2 :n false) "frinta" #(fp-rint %1 %2 :a false) "frintp" #(fp-rint %1 %2 :p false)
+    "frintm" #(fp-rint %1 %2 :m false) "frintz" #(fp-rint %1 %2 :z false) "frintx" #(fp-rint %1 %2 :n true) "frinti" #(fp-rint %1 %2 :n false)
+    "scvtf" (fn [t a] (fp-cvtf t a (:bits (ft t)) true)) "ucvtf" (fn [t a] (fp-cvtf t a (:bits (ft t)) false))}
+   (into {} (for [[c m] [["n" :n] ["p" :p] ["m" :m] ["z" :z] ["a" :a]] [s sg] [["s" true] ["u" false]]]
+              [(str "fcvt" c s) (fn [t a] (fp-toint t a m (:bits (ft t)) sg))]))
+   (into {} (for [[nm ok e] [["fcmeq" #{6} false] ["fcmge" #{6 2} true] ["fcmgt" #{2} true] ["fcmle" #{6 8} true] ["fcmlt" #{8} true]]]
+              [(str nm "0") (fn [t a] (let [[r fl] (fp-compare t a 0 e)] [(if (ok r) -1 0) fl]))]))))
+
+(defn- vf-case [op a v1 v2]
+  (let [e (ar-e a) n (ar-n a) q (second (arrs a)) d (v0-of v1 v2) t (if (= e 64) :d :s)
+        pair? (#{"faddp" "fmaxp" "fminp" "fmaxnmp" "fminnmp"} op)
+        src (when pair? (vec (concat (vls v1 e n) (vls v2 e n))))
+        rs (for [i (range n)]
+             (cond pair? ((vf3-ops op) t (src (* 2 i)) (src (inc (* 2 i))))
+                   (= op "fmla") (fp-muladd t (vlane d i e) (vlane v1 i e) (vlane v2 i e))
+                   (= op "fmls") (fp-muladd t (vlane d i e) (f-neg t (vlane v1 i e)) (vlane v2 i e))
+                   (vf3-ops op) ((vf3-ops op) t (vlane v1 i e) (vlane v2 i e))
+                   :else ((vf2-ops op) t (vlane v1 i e))))
+        [lo hi] (half (vpack (map first rs) e) q)]
+    [lo (bit-xor (long hi) (long (reduce bit-or 0 (map second rs))))]))
+
+(defn vf-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        sp {:s (vec (fp-specials :s)) :d (vec (fp-specials :d))}
+        fv (fn [t] (case (mod (nx) 5)
+                     (0 1) (pick (nx) (sp t))
+                     2 (bit-and (nx) (ones (:bits (ft t))))
+                     3 (f-bits t (* (double (- (mod (nx) 2001) 1000)) (Math/pow 2.0 (double (- (mod (nx) 40) 20)))))
+                     (f-bits t (/ (double (nx)) 3.0e15))))
+        vec-of (fn [a] (let [e (ar-e a) t (if (= e 64) :d :s)] (vpack (for [_ (range (quot 128 e))] (fv t)) e)))
+        ops3 ["fadd" "fsub" "fmul" "fdiv" "fmax" "fmin" "fmaxnm" "fminnm" "faddp" "fmaxp" "fminp" "fmaxnmp" "fminnmp" "fabd" "fmulx"
+              "fmla" "fmls" "fcmeq" "fcmge" "fcmgt" "facge" "facgt"]
+        ops2 ["fabs" "fneg" "fsqrt" "frintn" "frinta" "frintp" "frintm" "frintz" "frintx" "frinti" "scvtf" "ucvtf"
+              "fcvtns" "fcvtnu" "fcvtps" "fcvtpu" "fcvtms" "fcvtmu" "fcvtzs" "fcvtzu" "fcvtas" "fcvtau"
+              "fcmeq0" "fcmge0" "fcmgt0" "fcmle0" "fcmlt0"]]
+    (concat
+     (for [op ops3 a ["2s" "4s" "2d"] _ (range 8)
+           :let [v1 (vec-of a) v2 (vec-of a)]]
+       (ncase (str op "\tv0." a ", v1." a ", v2." a "\n") v1 v2 (vf-case op a v1 v2)))
+     (for [op ops2 a ["2s" "4s" "2d"] _ (range 8)
+           :let [v1 (if (#{"scvtf" "ucvtf"} op) [(nx) (nx)] (vec-of a)) v2 (vec-of a)
+                 z? (str/ends-with? op "0") mn (if z? (subs op 0 (dec (count op))) op)]]
+       (ncase (str mn "\tv0." a ", v1." a (when z? ", #0.0") "\n") v1 v2 (vf-case op a v1 v2))))))
+
+(def vf-families
+  [["neon-fp" "the Advanced SIMD FP lanes (4s, 2s, 2d): fadd, fsub, fmul, fdiv, fmax, fmin, fmaxnm, fminnm, faddp, fmaxp, fminp, fmaxnmp, fminnmp, fabd, fmulx, fmla, fmls, fcmeq, fcmge, fcmgt, facge, facgt; fabs, fneg, fsqrt, frint[npmzaxi], scvtf, ucvtf, fcvt[npmza][su], the compares with zero" vf-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -1338,6 +1413,11 @@
          (for [[i [nm what f]] (map-indexed vector vm-families)
                :let [text (str (looped nm what vm-setup vm-flags-text (vec (f (rng (+ seed 400 i)))) :insn)
                                "\n// the buffer and the registers' place\n\t.bss\n\t.p2align\t4\nvbuf:\t.zero\t256\n")]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR9: the Advanced SIMD FP lanes
+         (for [[i [nm what f]] (map-indexed vector vf-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 500 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)])))))
 

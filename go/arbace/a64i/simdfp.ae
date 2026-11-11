@@ -1,0 +1,259 @@
+(in-ns 'go.arbace.a64i) (go/file "simdfp.go" :imports [
+
+    ^{:line 3} [big "math/big"]])
+
+;; Advanced SIMD's FP lanes (doc/asm/ARM64-SURVEY.md, "As built: AR9"; ARS53 (a), then (b)): the vector classes three same
+;; (FP) and two-register miscellaneous (FP) at single and double precision (4s, 2s, 2d), decoded, lowered from their forms
+;; and executed lane by lane with the scalar FP's functions (FPProcessNaNs, FPRound in FPCR's modes, FPSR's exceptions
+;; accumulated over the lanes): fadd, fsub, fmul, fdiv, fmax, fmin, fmaxnm, fminnm, their pairwise forms and faddp, fabd,
+;; fmulx, fmla, fmls, fcmeq, fcmge, fcmgt, facge, facgt; fabs, fneg, fsqrt, frint[npmzaxi], the compares with zero,
+;; fcvt[npmza][su], scvtf, ucvtf. Not built (:unimplemented simd): half precision, the scalar forms of these classes, the
+;; estimates (frecpe, frsqrte, frecps, frsqrts), the by-element forms, the fixed-point conversions, the narrowing and
+;; lengthening fcvtn, fcvtl, fcvtxn. Written from the Arm ARM's pseudocode (DDI 0487) by Arbace; no code copied.
+
+(go/var vf3Names (lit (array ... string) "fmaxnm" "fminnm" "fmaxnmp" "fminnmp" "fmla" "fmls" "fadd" "fsub" "faddp" "fabd" "fmulx" "fmul" "fcmeq" "fcmge" "fcmgt" "facge" "facgt" "fmax" "fmin" "fmaxp" "fminp" "fdiv"))
+
+(go/var vf2Names (lit (array ... string) "fcmgt" "fcmge" "fcmeq" "fcmle" "fcmlt" "fabs" "fneg" "frintn" "frinta" "frintp" "frintm" "frintx" "frintz" "frinti" "fcvtns" "fcvtnu" "fcvtps" "fcvtpu" "fcvtms" "fcvtmu" "fcvtzs" "fcvtzu" "fcvtas" "fcvtau" "scvtf" "ucvtf" "fsqrt"))
+
+
+
+^{:go/end 32} (go/func vf3Of "vf3Of is three same (FP)'s instruction by U, a (bit 23) and the opcode's low three bits (opcode 11000-11111): its\nvf3Names index, or -1.\n" ^int [^uint32 u ^uint32 a ^uint32 opc]
+  (let [k (lit (array 8 (array 4 int))
+        (lit _ 0 1 2 3)
+        (lit _ 4 5 -1 -1)
+        (lit _ 6 7 8 9)
+        (lit _ 10 -1 11 -1)
+        (lit _ 12 -1 13 14)
+        (lit _ -1 -1 15 16)
+        (lit _ 17 18 19 20)
+        (lit _ -1 -1 21 -1))]
+
+    (aget (aget k opc) (bit-or (<< u 1) a))))
+
+
+
+^{:go/end 45} (go/func vf2Of "vf2Of is two-register miscellaneous (FP)'s instruction by U, a (bit 23) and the opcode: its vf2Names index, or -1.\n" ^int [^uint32 u ^uint32 a ^uint32 opc]
+  ^{:go/breaks [[3 44]]} (let [key (bit-or (<< opc 2) (<< u 1) a)
+      ^{:line 37} m (lit (map uint32 int) [(bit-or (<< 12 2) 1) 0] [(bit-or (<< 12 2) 3) 1] [(bit-or (<< 13 2) 1) 2] [(bit-or (<< 13 2) 3) 3] [(bit-or (<< 14 2) 1) 4] [(bit-or (<< 15 2) 1) 5] [(bit-or (<< 15 2) 3) 6]
+        ^{:line 38} [(<< 24 2) 7] [(bit-or (<< 24 2) 2) 8] [(bit-or (<< 24 2) 1) 9] [(<< 25 2) 10] [(bit-or (<< 25 2) 2) 11] [(bit-or (<< 25 2) 1) 12] [(bit-or (<< 25 2) 3) 13]
+        ^{:line 39} [(<< 26 2) 14] [(bit-or (<< 26 2) 2) 15] [(bit-or (<< 26 2) 1) 16] [(bit-or (<< 26 2) 3) 17] [(<< 27 2) 18] [(bit-or (<< 27 2) 2) 19] [(bit-or (<< 27 2) 1) 20] [(bit-or (<< 27 2) 3) 21]
+        ^{:line 40} [(<< 28 2) 22] [(bit-or (<< 28 2) 2) 23] [(<< 29 2) 24] [(bit-or (<< 29 2) 2) 25] [(bit-or (<< 31 2) 3) 26])]
+    (when [(values k ok) (aget m key)] ok
+      (return k))
+
+    -1))
+
+
+
+^{:go/end 79} (go/func decodeSIMDFP "decodeSIMDFP is the vector FP classes a64i runs; false when the word is not one (the integer classes' decoder goes on).\n" [^uint32 w] :results [Inst string bool]
+  (when (or (!= (bf w 31 31) 0) (!= (bf w 28 24) 14))
+    (return (lit Inst) "" false))
+
+  (let [(values q u a sz) (values (== (bf w 30 30) 1) (bf w 29 29) (bf w 23 23) (bf w 22 22))
+      (values rd rn rm) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)) (conv uint8 (bf w 20 16)))]
+    (switch
+      (case [(and (== (bf w 21 21) 1) (== (bf w 10 10) 1) (== (bf w 15 14) 3))]
+        (let [k (vf3Of u a (bf w 13 11))]
+          (when (< k 0)
+            (return (lit Inst) unimpSIMD true))
+
+          (when (and (== sz 1) (not q))
+            (return (lit Inst) undef true))
+
+          (return (lit Inst :Op OpVF3 :Sf q :Size (+ (conv uint8 sz) 2) :Rd rd :Rn rn :Rm rm :Sys (conv uint32 k)) "" true)))
+      (case [(and (== (bf w 21 17) 16) (== (bf w 11 10) 2))]
+        (let [opc (bf w 16 12)]
+          (when (or (< opc 12) (== opc 16) (== opc 17) (== opc 18) (== opc 19) (== opc 20) (== opc 21) (== opc 22) (== opc 23))
+            (return (lit Inst) "" false))
+
+          (let [k (vf2Of u a opc)]
+            (when (< k 0)
+              (return (lit Inst) unimpSIMD true))
+
+            (when (and (== sz 1) (not q))
+              (return (lit Inst) undef true))
+
+            (return (lit Inst :Op OpVF2 :Sf q :Size (+ (conv uint8 sz) 2) :Rd rd :Rn rn :Sys (conv uint32 k)) "" true)))))
+
+    (return (lit Inst) "" false)))
+
+
+
+^{:go/end 115} (go/func lowerSIMDFP "lowerSIMDFP is the vector FP classes' forms; false when the form is not one.\n" [^string m ^{:tag (slice (* Sx))} ops] :results [Inst bool]
+  (when (or (< (len ops) 2) (> (len ops) 3))
+    (return (lit Inst) false))
+
+  (let [(values d dok) (asVec (aget ops 0))
+      (values n nok) (asVec (aget ops 1))]
+    (when (or (not dok) (not nok) (!= (.-kind d) \v) (!= (.-kind n) \v) (< (.-size d) 2))
+      (return (lit Inst) false))
+
+    (when (and (== (.-size d) 3) (not (.-q d)) ^:go/paren (or (>= (nameIndex (subslice vf3Names) m) 0) (>= (nameIndex (subslice vf2Names) m) 0)))
+      (ferr "%s of 1d" m))
+
+    (when (== (len ops) 3)
+      (when [(values r ok) (asVec (aget ops 2))] (and ok (== (.-kind r) \v))
+        (when [k (nameIndex (subslice vf3Names) m)] (>= k 0)
+          (return (lit Inst :Op OpVF3 :Sf (.-q d) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Sys (conv uint32 k)) true))
+
+        (return (lit Inst) false))
+
+      ;; the compares with zero: #0.0 or #0
+      (when [k (nameIndex (subslice vf2Names _ 5) m)] (and (>= k 0) (== (.head (aget ops 2)) "imm"))
+        (let [x (aget (.-List (aget ops 2)) 1)]
+          (when (or ^:go/paren (and (.-IsList x) (== (.head x) "float") (== (len (.-List x)) 2) ^:go/paren (or (== (.-Atom (aget (.-List x) 1)) "\"0.0\"") (== (.-Atom (aget (.-List x) 1)) "\"0\""))) ^:go/paren (and (not (.-IsList x)) (== (.-Atom x) "0")))
+            (return (lit Inst :Op OpVF2 :Sf (.-q d) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Sys (conv uint32 k)) true))
+
+          (ferr "a compare with a constant other than 0.0")))
+
+      (return (lit Inst) false))
+
+    (when [k (nameIndex (subslice vf2Names) m)] (>= k 5)
+      (return (lit Inst :Op OpVF2 :Sf (.-q d) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Sys (conv uint32 k)) true))
+
+    (return (lit Inst) false)))
+
+
+
+^{:go/end 123} (go/func vfName "vfName is the coverage's name: v.fadd.4s, a compare with zero v.fcmeq0.4s.\n" ^string [^{:tag (* Inst)} in]
+  (when (== (.-Op in) OpVF3)
+    (return (+ "v." (aget vf3Names (.-Sys in)) "." (arr (.-Size in) (.-Sf in)))))
+
+  (when (<= (.-Sys in) 4)
+    (return (+ "v." (aget vf2Names (.-Sys in)) "0." (arr (.-Size in) (.-Sf in)))))
+  (+ "v." (aget vf2Names (.-Sys in)) "." (arr (.-Size in) (.-Sf in))))
+
+
+^{:go/breaks [[4 129]] :go/end 130} (go/func boolMask ^uint64 [^bool b ^uint e]
+  (when b
+    (return (emask e)))
+
+  0)
+
+
+^{:go/end 134} (go/method abs ^uint64 [^fpt t ^uint64 b]
+  (bit-and-not b ^uint64 (<< 1 (- (.-bits t) 1))))
+
+
+
+^{:go/end 146} (go/method fpMulX "fpMulX is FPMulX: FPMul but infinity times zero is 2.0 with the product's sign.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^uint64 b]
+  (when [(values _ ok) (.processNaNs c t a b)] (and (not ok) ^:go/paren (or ^:go/paren (and (.isInf t a) (.isZero t b)) ^:go/paren (and (.isZero t a) (.isInf t b))))
+    (let [two (<< (conv uint64 1) (- (.-bits t) 2))]
+      (when (!= (.sign t a) (.sign t b))
+        (set! two (.neg t two)))
+
+      (return two)))
+
+  (.fpArith c t 0 a b))
+
+
+
+^{:go/end 190} (go/method vf3 "vf3 is one lane of three same (FP).\n" ^uint64 [^{:tag (* CPU)} c ^uint32 k ^fpt t ^uint64 a ^uint64 b ^uint64 d]
+  ^{:go/breaks [[3 189]]} (let [e (.-bits t)]
+    (switch (aget vf3Names k)
+      (case ["fmaxnm" "fmaxnmp"]
+        (return (.fpMinMax c t 6 a b)))
+      (case ["fminnm" "fminnmp"]
+        (return (.fpMinMax c t 7 a b)))
+      (case ["fmax" "fmaxp"]
+        (return (.fpMinMax c t 4 a b)))
+      (case ["fmin" "fminp"]
+        (return (.fpMinMax c t 5 a b)))
+      (case ["fmla"]
+        (return (.fpMulAdd c t d a b)))
+      (case ["fmls"]
+        (return (.fpMulAdd c t d (.neg t a) b)))
+      (case ["fadd" "faddp"]
+        (return (.fpArith c t 2 a b)))
+      (case ["fsub"]
+        (return (.fpArith c t 3 a b)))
+      (case ["fabd"]
+        (return (.abs t (.fpArith c t 3 a b))))
+      (case ["fmulx"]
+        (return (.fpMulX c t a b)))
+      (case ["fmul"]
+        (return (.fpArith c t 0 a b)))
+      (case ["fdiv"]
+        (return (.fpArith c t 1 a b)))
+      (case ["fcmeq"]
+        (return (boolMask (== (.fpCompare c t a b false) 6) e)))
+      (case ["fcmge"]
+        (let [r (.fpCompare c t a b true)]
+          (return (boolMask (or (== r 6) (== r 2)) e))))
+      (case ["fcmgt"]
+        (return (boolMask (== (.fpCompare c t a b true) 2) e)))
+      (case ["facge"]
+        (let [r (.fpCompare c t (.abs t a) (.abs t b) true)]
+          (return (boolMask (or (== r 6) (== r 2)) e))))
+      (case ["facgt"]
+        (return (boolMask (== (.fpCompare c t (.abs t a) (.abs t b) true) 2) e))))
+
+    0))
+
+
+
+^{:go/end 224} (go/method vf2 "vf2 is one lane of two-register miscellaneous (FP).\n" ^uint64 [^{:tag (* CPU)} c ^uint32 k ^fpt t ^uint64 a]
+  (let [e (.-bits t)]
+    (switch
+      (case [(<= k 4)]
+        (let [r (.fpCompare c t a 0 (!= k 2))]
+          (return (boolMask (aget (lit (slice bool) (== r 2) (or (== r 6) (== r 2)) (== r 6) (or (== r 6) (== r 8)) (== r 8)) k) e))))
+      (case [(== k 5)]
+        (return (.abs t a)))
+      (case [(== k 6)]
+        (return (.neg t a)))
+      (case [(<= k 10)]
+        (return (.fpRoundInt c t a (aget (lit (slice int) 0 4 1 2) (- k 7)) false)))
+      (case [(== k 11)]
+        (return (.fpRoundInt c t a (.rmode c) true)))
+      (case [(== k 12)]
+        (return (.fpRoundInt c t a 3 false)))
+      (case [(== k 13)]
+        (return (.fpRoundInt c t a (.rmode c) false)))
+      (case [(<= k 23)]
+        (let [mode (aget (lit (slice int) 0 1 2 3 4) (/ (- k 14) 2))]
+          (return (.fpToInt c t a mode e (== (% k 2) 0)))))
+      (case [(<= k 25)]
+        (let [x (hp)]
+          (if (== k 24)
+            (.SetInt64 x (>> (conv int64 (<< a (- 64 e))) (- 64 e)))
+
+            (.SetUint64 x a))
+
+          (return (.rounded c t x)))))
+
+    (.fpSqrt c t a)))
+
+
+
+^{:go/end 255} (go/method execSIMDFP "execSIMDFP executes a vector FP instruction lane by lane (the operands read before the destination is written).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (not (.fpCheck c in))
+    (return))
+
+  (let [t (fmtOf (.-Size in))
+      ^{:line 232} e (.-bits t)
+      ^{:line 233} n (/ 64 (conv int e))]
+    (when (.-Sf in)
+      (set! n (/ 128 (conv int e))))
+
+    (let [(values a b d) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)) (aget (.-Q c) (.-Rd in)))
+        ^{:line 238 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+      (for [i 0] (< i n) (inc! i)
+        (let [^uint64 x (zero uint64)]
+          (if (== (.-Op in) OpVF2)
+            (set! x (.vf2 c (.-Sys in) t (lane a i e)))
+            (if [k (aget vf3Names (.-Sys in))] (or (== k "faddp") (== k "fmaxp") (== k "fminp") (== k "fmaxnmp") (== k "fminnmp"))
+              (let [(values src j) (values a (* 2 i))]
+                (when (>= j n)
+                  (set! (values src j) (values b (- j n))))
+
+                (set! x (.vf3 c (.-Sys in) t (lane src j e) (lane src (+ j 1) e) 0)))
+
+              (set! x (.vf3 c (.-Sys in) t (lane a i e) (lane b i e) (lane d i e)))))
+
+          (setLane (addr r) i e x)))
+
+      (aset (.-Q c) (.-Rd in) r))))
+
+
+(go/var _ big/NewFloat)
