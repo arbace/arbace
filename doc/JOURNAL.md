@@ -3091,3 +3091,26 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
   mono-check's callees against the record 1,992 of 2,414 (1,865). `bin/rust-front essential` equal to its known file;
   `core-essential` equal to its own (564 of 567); `bin/reap` 0 problems; `bin/crops-score --judge --strict` exit 0, Rust unchanged.
   The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF17".
+
+## 2026-11-11: RF18, RFP62 (a): opaque types revealed in mono, closures' vtable entries; RFP63 (a)'s reader (branch `rust-rf18`, from `mac/rust-rf17` `50a17174b`)
+
+- RFP62 (a), decided by the user 2026-11-11, after rustc 1.99.1 (the pinned rust-src's `compiler/`): mono's program facts now read
+  each body after PostAnalysisNormalize (RFP33 (a)'s reveal, as rustc's collector reads runtime MIR), so a call through an
+  `impl Fn` return resolves to the closure behind it (`make_adder`'s, `make_counter`'s); a generic definer's own closures in its
+  hidden type carry the definer's arguments (ClosureArgs' parent_args: `compose`'s closure, instantiated at the use's); a closure's
+  layout is univariant over its upvars (layout_of's Closure arm; the upvars' types from the closure's built body, `:upvar-tys`,
+  which also give mono its closures' drop glue); a `dyn Fn` vtable's entries are the closure's body for `call` and `call_mut` and
+  `call_once`'s VTableShim (resolve_for_vtable; `vtable-shim-mangle`, the record's symbol, core's shim body the record's); a
+  record's `dyn Fn(..) -> R` argument type is read from its text so std's `Map` reaches `|f| f()`. Alternatives considered: the
+  record's items for closures behind opaque types and vtables (RFP62 (b), a record fact per closure), revealing at each use in
+  mono instead of the passes' reveal (two reveals to keep equal).
+- RFP63 (a)'s light part, the reader: `mono/*upstream*` from `RF_STD_EXPORTS` (the helper's future `--std-exports`), an instance
+  it lists taken as the upstream crate's (its symbol, external, not instantiated); without the file nothing changes. The helper's
+  dump and the packs' re-record are the night's (the helper's source is in every rust-front pack's key): written in
+  doc/rust/FRONTEND-SURVEY.md, "As built: RF18", not run.
+- Measured, light (each process watched under 2.5 GiB): `rsi-build` over the 67 synthetic programs: **66 own** (RF17 65): closures;
+  native vtables 35 -> 42 of 46, layouts 42,792 -> 43,727 of 45,881, callees 4,516 -> 4,528; mono-check's callees against the record
+  1,992 -> 2,000 of 2,414. The watcher stopped one batch at 2.66 GB (collections), rerun alone at 2.62 GB; RF17's code peaks the
+  same there (2.71 GB). `RF_STD_EXPORTS` with a one-entry sample from panic-assert-eq's record makes it own (the reader's check, not
+  the count). `bin/rust-front essential` and `core-essential` equal their known files; `bin/reap` 0 problems; `bin/crops-score
+  --judge --strict` exit 0, Rust unchanged. The night's commands in doc/rust/FRONTEND-SURVEY.md, "As built: RF18".

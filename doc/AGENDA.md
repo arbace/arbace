@@ -187,9 +187,11 @@ items below are the ones whose work is still ahead or tied to a night.
   constants further (`ptr::null`, `size_of`, checked operators and asserts, unsizing casts with vtables): 61 of 67 own.
   RF17 (`rust-rf17` on rust-rf16, "As built: RF17"): RF16's causes (local constants and an associated constant evaluated, a
   static with a pointer, generic closures at their parent's arguments in mono, closure types' unification and v0, std's
-  constructors' shims, `Variants::Empty`, a reified closure's ClosureOnceShim symbol): 65 of 67 own. Next: RFP62 (opaque types in
-  mono, closures' vtable entries: closures), RFP63 (upstream monomorphizations: panic-assert-eq); the night: the whole plan's
-  rsi-build, rsi-native over the own programs RF15-RF17 added, `rsi check --front own`.
+  constructors' shims, `Variants::Empty`, a reified closure's ClosureOnceShim symbol): 65 of 67 own. RF18 (`rust-rf18` on
+  rust-rf17, "As built: RF18"): RFP62 (a) built (opaque types revealed in mono, closures' layouts and `dyn Fn` vtable entries with
+  call_once's VTableShim, the record's `dyn Fn(..)` read): 66 of 67 own; RFP63 (a)'s reader (`RF_STD_EXPORTS`). Next: RFP63 (a)'s
+  night (the helper's `--std-exports`, every rust-front pack recorded again: panic-assert-eq); the night: the whole plan's
+  rsi-build, rsi-native over the own programs RF15-RF18 added, `rsi check --front own`.
 - **LLVM IR** ([llvm/LLVM-CROP-SURVEY.md](llvm/LLVM-CROP-SURVEY.md)): LLS28 (a), the 282 modules packed once with clang at
   night; LLS40-LLS42 (above).
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records
