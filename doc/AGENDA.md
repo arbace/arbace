@@ -85,8 +85,12 @@ Six crops are above 90 on all three. What the others still need:
   P17); P28 decided (a) (the user, 2026-11-11); `hs-p22` built P21 (run-check compiled on every package's own interfaces: the
   whole own set, ghc-internal and base both own, 51 of 63, 0 lost; classed rows `{:runs :all}`, `{:runs :all-base}`: o2-names 7,
   o0-report 2, hsi-memory 2, hsi 1) and P19 with P22-P23: `bin/hsi check --libs own`, the first own cases (programs on the own
-  interfaces run over the own STG alone; samples, synthetic and testsuite-core: 420 of 764 run own, 412 pass; `check-hsi-own.edn`, `own-fallback.txt`);
+  interfaces run over the own STG alone; samples, synthetic and testsuite-core: 420 of 764 run own, 412 pass in a merge of three light runs, interim; `check-hsi-own.edn`, `own-fallback.txt`);
   four elaborator classes (a pattern's IP givens, a field's qualified result, record fields checked, the innermost IP given).
+  `hs-p22b` (review 1111b): the second pattern guard's givens fixed (GuardGivens in run-check, judged by its stdout), own-only
+  failures classed by what fails (`divergences-own.edn`), own-fallback.txt honest and tried (`HSI_OWN_FALLBACK=try`), lib-stg's
+  run classes with outcomes; `check-hsi-own.edn` is INTERIM (a merge of light runs) until the night's whole run at 16 GiB
+  (its header's commands, night 13+).
   Next: P29 (the own cases in the gate, so crops-score counts them: independence about 85) and P30 (P17's packages)
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).

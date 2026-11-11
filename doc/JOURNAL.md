@@ -5118,3 +5118,26 @@ no gate, no host toolchain, no network). Notes in each crop's survey ("As built:
 - Rule slips: one foreground command ran two table checks with a plain `&` and `wait`; one shell test used `<(...)`; the first LLVM
   controls-test ran beside rust-front essential in the same fresh worktree and its llvmi cases failed on the shared `.tmp/ci-musl`
   (a race, "no build line"; llvmi check --essential alone passed 10 of 10 after).
+
+## 2026-11-11: review 1111b's fixes to hs-p22 and review-fix-1's guard givens (branch `hs-p22b`, from `mac/hs-p22` e9de0d3b7, `mac/review-fix-1` merged)
+
+The independent review `.tmp/reviews/1111/REVIEW-pending-hs-rust-fix1.md` (hs-p22, rust-rf20, review-fix-1 against mac/next),
+findings #1-#6, all Haskell; done by finding, light runs only (night 12 running; doc/haskell/FRONTEND-SURVEY.md, "As built: review
+1111b"):
+- #1: `arbace/repr/haskell/typecheck.ae`: each equality-giving pattern guard recorded with the givens before it; the GRHS's wanteds
+  rewritten stretch by stretch (the second guard's scrutinee no longer by its own pattern's `b ~~ c`). Alternative considered: drop
+  the eager rewrite and rely on `under-givens` with snapshot `:geqs` (the review's second option): wanteds made with no givens carry no
+  `:geqs`, so the eager rewrite stays needed for them. GuardGivens.hs gains two two-guard functions, expected output hand-derived.
+- #5: run-check plans `test/haskell/eval/front/` too, a program without GHC's reference judged by its committed `.stdout`; the
+  record has `front/GuardGivens :pass`. Before the fix it fails (lines 7, 10 `True`), after it passes.
+- #3: `bin/hsi check --libs own` judges an own non-pass by the pack's classes only when it fails as on the pack, else by
+  `test/haskell/divergences-own.edn` (outcome and stderr's first line): AtomicPrimops `:own-memory`, conc037 `:front-no-main`,
+  T24809 `:no-reference-own`. Alternative considered: a whole own divergences file for every own non-pass (duplicates the pack's
+  classes for programs failing alike).
+- #6: `libcheck` run rows keep `:outcomes`; a class holds only for its outcome.
+- #4: own-fallback.txt's header made true, `:untried-cap` and `:own-report` in place of `:light-cap` and `:o0-report`;
+  `HSI_OWN_FALLBACK=try` and a stale-id check enforce "may only shrink".
+- #2: `check-hsi-own.edn` marked INTERIM with the night commands (lib-check/lib-stg own of ghc-internal and base, then
+  `bin/heavy-lock env ARBACE_MEM_GIB=16 HSI_JOBS=1 bin/hsi check --libs own --corpus samples,synthetic,testsuite-core --record` and the
+  try run; about 10-16 GiB, 2 hours), for night 13 or later; not re-recorded by day.
+No key moves (crop paths only).

@@ -3257,3 +3257,53 @@ it, "main"), the pack's layout. Checks in the table below.
 |---|---|
 | `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` (finding 2) | 265 against 265, 0 worse, 0 better; the control differs; 21 min, 1.0 GB |
 | `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` (findings 2 and 8) | 5,533 of 7,639 bindings equal, as recorded, 0 worse or missing, 0 better; the control 0 of 171; 21 min, 1.3 GB |
+
+## As built: review 1111b (2026-11-11, branch `hs-p22b`, from `mac/hs-p22` e9de0d3b7 with `mac/review-fix-1` merged)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-pending-hs-rust-fix1.md`, findings #1-#6 on hs-p22 and
+review-fix-1). Each finding, what was done:
+
+- **#1 (two equality-giving guards).** `infer-guards` records `[WI GIVENS-BEFORE]` at every pattern guard that gives equalities
+  (`*guard-w*` held the first's index alone), and `infer-grhss` rewrites the wanteds stretch by stretch
+  (`rewrite-wanteds-by-stretch!`): from WI_k to WI_k+1 by the givens before pattern k+1, the last stretch by the GRHS's final
+  givens, as GHC nests one implication per pattern guard. `GuardGivens.hs` gains `two` (no clause givens: `a ~~ Int`, then
+  `b ~~ c`) and `twoG` (the same after a GADT match); their six lines of `GuardGivens.stdout` written by hand from GHC's semantics
+  (GHC not run). Before the fix (the merged elaborator) lines 7 and 10 printed `True`; after, all twelve lines as expected.
+- **#5 (GuardGivens run by a check).** run-check's default plan takes `test/haskell/eval/front/*.hs` beside samples and synthetic;
+  a program without a line in `ref-ghc914.edn` is judged by its own verdict, its committed `NAME.stdout` with status 0 and no
+  stderr (the negative control takes the same reference); `run-check.edn` records `front/GuardGivens :pass`. So `haskell-lib-stg`'s
+  `--run` (both library sets) and every run-check run it; its GHC reference can be recorded at the oracle window
+  (`run-check --record-ref`), which the judge then prefers.
+- **#3 (own failures hidden by the pack's classes).** `bin/hsi check --libs own` judges a `:libs :own` non-pass by
+  `divergences.edn` only when it fails as `check-hsi.edn`'s line of the program does (kind, status, differs); otherwise it is an
+  own-only failure, in a class of the new `test/haskell/divergences-own.edn` whose `:outcome` is its own and whose `:message` its
+  stderr's first line holds (a failure on the own libraries now records it, `:err`). Classed by what fails (light runs of
+  2026-11-11): AtomicPrimops `:own-memory` (Go's "runtime: out of memory" at the 2 GiB cap in 3-5 s; on the pack killed at the CPU
+  limit at 46 s: not the pack's speed), conc037 `:front-no-main` ("panic: no binding of main::Main/main", the front end's STG lacks
+  main, as conc036's in the fallback list; on the pack only the scheduling order differs), T24809 `:no-reference-own` (GHC's
+  reference did not build; the own front end compiles it).
+- **#6 (lib-stg's run classes by id).** `record-runs` writes each non-pass's `:outcomes` (result, differs, stage) beside
+  `:classes` and keeps a class only for the same outcome; `judge-runs` fails a classed non-pass whose outcome moved. The rows
+  recorded before (`:equal`, `:all`, `:all-base`) have no `:outcomes`: the judge says so and matches them by id until the night's
+  re-record writes them.
+- **#4 (own-fallback.txt).** The header now says what the list is (eligible programs that did not pass on the own libraries in
+  the light runs; 8 of them did not pass on the pack either in that run, each passing in `check-hsi.edn` at 16 GiB); `:light-cap`
+  became `:untried-cap` (over the cap on both, never tried at 16 GiB), `:o0-report` became `:own-report` (P28 (a)'s class was
+  decided for run-check's -O2/-O0 mix, not for own STG alone). "May only shrink" is enforced: `HSI_OWN_FALLBACK=try` runs the
+  listed programs on the own libraries (no `--record`) and fails on one that passes; every `--libs own` run without `--only` fails on
+  a listed id its corpora lack (`HSI_OWN_FALLBACK_LIST` names another list, the mode's own test).
+- **#2 (check-hsi-own.edn).** Not re-recorded by day: its header marks it INTERIM (three light runs over two states merged by id;
+  4 `:libs :pack` lines in no class) and names the night commands that replace it. The "420 own, 412 pass" of "As built: HF10-P21,
+  P19, P22, P23" is that merge, not a run of e9de0d3b7's.
+
+| check | result |
+|---|---|
+| `REPR_HASKELL_RUN_IFACES=pack HSI_LIBS=$(bin/hsi libs-pack) bin/repr-haskell run-check front/GuardGivens` | 1 of 1 pass (its own verdict); the record line added; 1m07, 0.75 GB |
+| the same with the merged elaborator (`typecheck.ae` of the merge commit) | 0 of 1: `:fail :differs [:stdout]`, lines 7 and 10 `True` |
+| `HSI_OWN_FALLBACK=try bin/hsi check --libs own --corpus testsuite-core --only AtomicPrimops,conc037,T9533,T24809` (ARBACE_MEM_GIB=2; hs-p22's own pools) | three in their own classes, T9533 still listed (`:fail :status 0 :differs [:stdout]`), 0 unclassed (exit 1: no negative control in a run of `--only`) |
+| the same mode with a test list naming samples/Hello | "passes on the own libraries and is listed in own-fallback.txt", 1 problem, exit 1 |
+| `judge-runs` on a crafted row with `:outcomes` | a non-pass whose differs moved: "fails otherwise than its class's recorded outcome", exit 1 |
+
+Not run (night, over the 1.5 GiB of night 12's day lane): lib-check and lib-stg `--ifaces own` of ghc-internal and base with this
+elaborator (the multi-guard change may move a binding) and the whole `--libs own` run; the commands are in `check-hsi-own.edn`'s
+header. No key moves (every path is a crop path).
