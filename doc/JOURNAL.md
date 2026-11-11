@@ -5353,3 +5353,53 @@ Risks: the shipped executable now roots the world's two providers when their ser
 LoginModule) and translates real ServiceLoader calls where it stubbed them (URLConnection's content handlers,
 KeyStoreUtil): empty iterations instead of UnsupportedOperationException. log4j's ServiceLoaderUtil calls `ServiceLoader.load`
 through a MethodHandle (`invokeExact`), which is F15's area, not this branch's.
+
+## 2026-11-10: Java sources by module, the Ghidra case study's read half (A1, A2, A3, A11; branch `ghidra-read`, from `mac/java-p1` 4428594d1)
+
+The Ghidra case study (`.tmp/plans/GHIDRA-CASE-STUDY.md` §2.1-2.2, GH2, GH3; the demo repository `/root/arbace-ghidra.git`,
+its `plan/G1.md` §2) needs a large Java program read from sources: modules in a graph, Maven artifacts by pin, jars on the
+class path. The user's rule (2026-11-10): only general machinery enters Arbace, each piece tested by Arbace's own fixtures;
+everything Ghidra-specific stays in the demo repository. Built, write-ahead in doc/go/BUILD.md, "Java sources by module":
+
+- A1, the project model: `program.edn`'s `:java {:release :javac :repository :modules [...]}`, a module `:src` directories
+  (or `$NAME/...` under a `--root`) or an `:artifact` coordinate, with `:deps`, `:artifacts`, `:javac`, `:release`,
+  `:resources`; `bin/java-project plan|sources|classes|read MODEL WORK` (data side `java.project`, `test/java/project.ae`, on
+  the tools' host), each step cached by the key of its inputs; the read of a module puts its dependencies' sources on javac's
+  source path and the jars on its class path (no compilation needed), names each file `MODULE/PATH` (`--origins`: forms
+  independent of the work directory), and the modules' forms are merged into one tree (a split package's namespace file with
+  both loads); `--chunk N` reads a large module by several processes, whole packages each (memory), the forms equal to one
+  process's (the fixture's test). `bin/arbace-go --build-program` runs `read --no-classes` when `program.edn` has `:java` and
+  translates `forms.all` with `java/`'s (`ARBACE_PROGRAM_JAVA_ARGS`: `--root`, `--repository`).
+- A2, artifacts sources-first: the sources jar unpacked with the release's multi-release layers laid over the base in order
+  (javac's own reading of a multi-release jar for a release); the binary jar's versioned classes without a source listed
+  (`WORK/src/M.mr.edn`); `:resources :jar`, the binary jar's build outputs (but classes, the manifest, Maven's metadata,
+  signatures) as resources.
+- A3, compile what resolves: `:closure {:roots [...] :optional [...]}`; javac on Arbace with `-implicit:class -verbose` over
+  the unpacked tree, a failing file removed and the compilation run again until clean (the cascade), a failing root the step's
+  failure; javac's default diagnostics read (the full path; `-XDrawDiagnostics` prints the name alone); the report as data
+  (`WORK/closure/M/report.edn`).
+- A11, jars on the class path: unpacked into directories (by digest and release). Chosen over zip in javac on Arbace's
+  `FileManager` because every class-path reader reads directories (javac on Arbace's file manager, repr/java's native provider
+  `arbace.repr.java.decls`, j2g's resources): one unpacking serves them all, javac's world is unchanged (no key moved, no tool
+  rebuild), and the multi-release choice is made once, visibly. The zip file manager stays possible later.
+- Fixtures: `test/programs/java-project` (two source modules with a split package, a toy library from its sources jar cut to
+  its closure, a binary-only class-retention annotations jar; its runs), its toy Maven repository made byte for byte by
+  `test/java/project/make-jars` (javac on Arbace, zip with fixed times); `bin/java-project test` (`test/java/project/test.bash`)
+  with the negative controls of `test/java/project/controls/`; a `--full` gate step `java-project` (chain java, after
+  javac-tool) and `programs-full` now needing javac's tool (`REPR_JAVA_EXE`); `make java-project-test`.
+
+Alternatives considered: `-sourcepath` against the dependencies' classes (couples every read to compiling the dependencies
+first; the classes step stays separate, A11's), a zip file manager (above), committing the toy jars without a recipe (no:
+`make-jars --check` proves them).
+
+Proofs by day (light; javac's tool `.tmp/gate-exe/javac-5ad357331dbcd7cfb0fd`, stage 0 the main checkout's): `bin/java-project
+test` 24 of 24 (the controls failing as they must), `test/java/project/make-jars --check` the same bytes. The demo
+repository's read half (its `results/read-g1.edn`, commit `fb82dbb`): front 4,893 of 4,893 files equal from both trees over
+the 13 modules; nread 3,229 of 3,232 equal, 0 fallbacks, over 12 (SoftwareModeling's is the night's); the ten Ghidra modules'
+6,009 class files by javac on Arbace equal to the JDK's byte for byte, the largest compilation 1.44 GiB. Two native-provider
+findings, each reproduced by four Arbace-only files (kept in the worktree's `.tmp/nread-repro`): a static method overloaded
+on `Runnable` and `Supplier<T>`, called with a method reference to a void method (javac `Runnable`, the native provider
+`Supplier`); an inherited static field reached through two static on-demand imports, the base's and the subclass's (javac names
+it through the subclass, the native provider through the base). Slips: SoftwareModeling's front read peaked at 9.2 GiB in its
+chunk of ANTLR's generated parsers (`SleighParser.java`, 751 KB; MemAvailable above 40 GiB, nothing else heavy), over the brief's
+4 GiB; its nread was held out of the run (by renaming the module in the scratch copy of the plan) for the night.
