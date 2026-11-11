@@ -1688,6 +1688,21 @@
                           (let [pre (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)*)$" (subs t 0 (- i (count (first m)))))]
                             [(second m) (str (str/replace (or (second pre) "") #"\s" "") (second m) (subs t i)) nested])))))))))))
 
+(defn- class-key-scope
+  "The scope a class template's (or its partial or explicit specialization's) declaration names with a
+  nested-name-specifier of plain names after its class-key (`template<...> class __format::_Arg_store {...}`, a member of
+  a namespace defined outside it, [class.pre]/3, [temp.spec.partial.general]/7; cpp-s5: <format>), else `scope`."
+  [scope n]
+  (let [t (sema/text-before-name n)
+        m (when t (re-find #"\b(?:class|struct|union)\s+((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)$" t))]
+    (if-not m
+      scope
+      (let [q (vec (map str/trim (remove str/blank? (str/split (second m) #"::"))))
+            e (first (filter #(#{:ns :type} (:e %)) (sema/lookup-qualified scope q)))]
+        (cond (= :ns (:e e)) (:scope e)
+              (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e)))
+              :else scope)))))
+
 (defn- attach-one!
   "An out-of-line member definition `o` given to the class `cid`, made from the primary (its arguments bound to the
   header's names) or from a partial specialization (its deduced arguments, `pb` [params args])."
@@ -2012,8 +2027,15 @@
   "A partial specialization's arguments as written after its name (struct Box<T*>), parsed from the main file's text."
   [n]
   (let [ts (vec (ct/tokens (node-text n)))
-        i (some (fn [i] (when (and (= (:name n) (nth (get ts i) 1 nil)) (= "<" (nth (get ts (inc i)) 1 nil))
-                                   (#{"struct" "class" "union"} (nth (get ts (dec i)) 1 nil)))
+        ;; (the class-key before the name, or before its nested-name-specifier: <format>'s `class
+        ;; __format::_Arg_store<_Context>`, a member of a namespace defined outside it, [class.pre]/3; cpp-s5)
+        key-before? (fn [i] (loop [j (dec i)]
+                              (let [t (nth (get ts j) 1 nil)]
+                                (cond (#{"struct" "class" "union"} t) true
+                                      (and (= "::" t) (>= j 1)) (if (= "::" (nth (get ts (dec j)) 1 nil)) false
+                                                                  (if (#{"struct" "class" "union"} (nth (get ts (dec j)) 1 nil)) true (recur (- j 2))))
+                                      :else false))))
+        i (some (fn [i] (when (and (= (:name n) (nth (get ts i) 1 nil)) (= "<" (nth (get ts (inc i)) 1 nil)) (key-before? i))
                           i))
                 (range 1 (dec (count ts))))]
     (when-not i (fail :template "partial specialization's arguments"))
@@ -2224,6 +2246,7 @@
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
         :template)
     (let [pattern (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))
+          scope (class-key-scope scope n)
           old (find-template scope (:name n) :class)
           tid (or old (next-id))]
       (if old
@@ -2362,7 +2385,7 @@
                  {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t) :forms forms :tmpl t})
       :template)
     "ClassTemplatePartialSpecializationDecl"
-    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary template " (:name n)))
+    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup (class-key-scope scope n) (:name n))) (fail :template "no primary template " (:name n)))
           t (tmpl tid)
           pid (next-id)
           params (tparams n)
@@ -2382,7 +2405,7 @@
           (upd-tmpl! tid update :partials conj pt)))
       :template)
     "ClassTemplateSpecializationDecl"
-    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary template " (:name n)))
+    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup (class-key-scope scope n) (:name n))) (fail :template "no primary template " (:name n)))
           t (tmpl tid)
           args (complete-args t (vec (map-indexed (fn [i a] (node-arg scope (nth (:params t) i) a)) (filter #(= "TemplateArgument" (:kind %)) (kids n)))))]
       (if (:completeDefinition n)

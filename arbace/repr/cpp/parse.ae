@@ -355,7 +355,7 @@
 ;; {:op "+"} {:conv type} {:dtor "S"} {:lit "_km"}, each with :i. An argument: {:k :type :t T} {:k :expr :x node}
 ;; {:k :tmpl :name name} with :b :e (its tokens) and :pack.
 
-(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr)
+(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr parse-expr tentatively)
 
 (defn- root-ent [^P p] {:k :ns :name "" :scope (stv p ROOT)})
 
@@ -474,7 +474,13 @@
            ;; decltype(e):: as the first part of a nested-name-specifier
            (let [i (ix p) close (loop [j (+ i 2) d 1] (let [^T x (tok-at p j)] (cond (identical? :eof (.-k x)) (perr p "decltype") (t= x "(") (recur (inc j) (inc d)) (t= x ")") (if (= d 1) j (recur (inc j) (dec d))) :else (recur (inc j) d))))]
              (if (t= (tok-at p (inc (long close))) "::")
-               (do (seek! p (+ 2 (long close))) (recur (conj parts {:s (str "decltype(" (tok-text p (+ i 2) (dec (long close))) ")") :i i :decltype true}) nil))
+               (do ;; (cpp-s5: the operand kept for the code generator's decltype, as a decl-specifier's is: `typename
+                   ;; decltype(_S_to_arg_type<_Tp>())::type`, <format>'s _Normalize)
+                   (when (and (= mode :parse) *full-headers* (not (skim? p)))
+                     (seek! p (inc i))
+                     (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
+                       (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str/replace (tok-text p (+ i 2) (dec (long close))) #"\s+" "") x))))
+                   (seek! p (+ 2 (long close))) (recur (conj parts {:s (str "decltype(" (tok-text p (+ i 2) (dec (long close))) ")") :i i :decltype true}) nil))
                (do (seek! p b) nil)))
            :else (do (seek! p b) (when (or g (seq parts)) (perr p "a name")) nil)))))))
 
@@ -3897,6 +3903,9 @@
       (or (t= t "namespace") (and (t= t "inline") (is-at? p 1 "namespace"))) (parse-namespace p)
       (t= t "using") (parse-using p)
       (or (t= t "template") (and (t= t "extern") (is-at? p 1 "template"))) (parse-template-decl p ctx b 1)
+      ;; (cpp-s5: `__extension__ template<...>`, clang's ParseExternalDeclaration consuming the keyword before the
+      ;; declaration: <type_traits>' __is_signed_integer alias template)
+      (and (t= t "__extension__") (is-at? p 1 "template")) (do (adv! p) (parse-template-decl p ctx (ix p) 1))
       ;; clang's recovery of `inline template <...>`: the stray specifier dropped, the template declaration read
       (and (t= t "inline") (is-at? p 1 "template")) (do (adv! p) (parse-template-decl p ctx (ix p) 1))
       (and (t= t "extern") (identical? :str (tk (nxt p 1))) (not (is-at? p 2 ";"))) (parse-linkage p)

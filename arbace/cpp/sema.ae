@@ -300,6 +300,9 @@
 (def ^:private builtin-syms
   {'void :void 'bool :bool 'char :char 'signed-char :schar 'unsigned-char :uchar 'short :short 'unsigned-short :ushort
    'int :int 'unsigned :uint 'long :long 'unsigned-long :ulong 'long-long :llong 'unsigned-long-long :ullong
+   ;; (cpp-s5: GNU's __int128, [basic.fundamental]/1's extended integer types as clang has them on x86-64: <format>'s
+   ;; _Arg_value union and _S_to_arg_type, under __SIZEOF_INT128__)
+   '__int128 :i128 'unsigned-__int128 :u128 '__int128_t :i128 '__uint128_t :u128
    'float :float 'double :double 'long-double :ldouble 'wchar_t :wchar 'char8_t :char8 'char16_t :char16 'char32_t :char32
    'std/nullptr_t :nullptr 'nullptr_t :nullptr 'decltype/nullptr :nullptr})
 
@@ -730,7 +733,8 @@
       (when-not (and (abi/integral? u) (not= :enum (:k u))) (fail :type "the mode " m " of " (pr-str t)))
       (let [signed (abi/signed? u)
             n (case (long w) 8 (if signed :schar :uchar) 16 (if signed :short :ushort) 32 (if signed :int :uint) 64 (if signed :long :ulong)
-                    (fail :type "the mode " m " (no 128-bit integer type modelled)"))]
+                    128 (if signed :i128 :u128)
+                    (fail :type "the mode " m))]
         (merge (abi/b n) (select-keys t [:c :v]))))
     t))
 
@@ -919,7 +923,9 @@
            :consteval (boolean (:_consteval n))
            ;; GNU's always_inline (clang's AlwaysInlineAttr, `alwaysinline` in the IR: inlined at -O0 by LLVM's
            ;; AlwaysInliner, arbace.cpp.inline; P16 (a))
-           :always-inline (always-inline-node? n)
+           ;; (CP362 (a), cpp-s5: a consteval constructor, for the code generator, inlined as always_inline (clang emits no
+           ;; immediate function: an immediate invocation is its value), its body not analyzed below)
+           :always-inline (or (always-inline-node? n) (and (:_consteval n) (= "CXXConstructorDecl" (:kind n)) (not (checking?))))
            ;; G5c: a call of it ends its block (clang's EmitCall: the call, then unreachable), so a catch (...) { abort(); }
            ;; ends no catch on the normal path
            :noreturn (noreturn-node? n)
@@ -1065,7 +1071,9 @@
   (let [nm (:name n)
         ;; a nested class defined outside its class (class L::F { ... }, [class.nest]/3): in the enclosing class's
         ;; scope (G5: <locale_classes.h>'s class locale::facet)
-        q (when (:completeDefinition n) (qualifier-before n))
+        ;; (not a class template's specialization's, declared in its parameters' scope: `template<...> class
+        ;; __format::_Arg_store`'s qualifier is its template's, cpp-s5)
+        q (when (and (:completeDefinition n) (not= :tparams (:kind scope0))) (qualifier-before n))
         scope (or (when (seq q)
                     (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope0 q)))]
                       (cond (= :ns (:e e)) (:scope e) (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e))) :else nil)))
@@ -1152,17 +1160,27 @@
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *main-retry* nil) ; atom [[scope node exception] ...]: the main file's typedefs to declare again (CP338 (a))
-(def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
+(def ^:dynamic *header-drops* nil) ; atom {place [class kind name message]}: the header declarations not declared (G4; CP364 (a):
+                                    ; one declared on a later round taken out, gen-batch's drops.tsv)
+
+(defn- drop-key
+  "A header declaration's key in *header-drops*: the node itself (a retry declares the same node), by identity."
+  [n]
+  [(System/identityHashCode n) (get-in n [:range :begin]) (:kind n) (:name n)])
 
 (defn declare-node!
   "Enters a declaration node of namespace or class scope. A header's declaration that the analysis refuses is dropped
   (G4: a use of it fails later as an unknown name; CPP_HDR_TRACE=1 prints each)."
   [scope n]
   (if (header-node? n)
-    (try (declare-node*! scope n)
+    (try (let [r (declare-node*! scope n)]
+           (when *header-drops* (swap! *header-drops* dissoc (drop-key n)))
+           r)
          (catch arbace.lang.ExceptionInfo e
            (if (or (:codegen/refused (ex-data e)) (:codegen/not-constant (ex-data e)))
-             (do (when *header-drops* (swap! *header-drops* conj [(:kind n) (:name n) (.getMessage e)]))
+             (do (when *header-drops*
+                   (swap! *header-drops* assoc (drop-key n)
+                          [(or (:codegen/refused (ex-data e)) :not-constant) (:kind n) (:name n) (.getMessage e)]))
                  ;; a declaration that named a class template's specialization before its specialization was defined
                  ;; (<stringfwd.h>'s typedef basic_string<char> string, char_traits<char> defined later): tried again
                  ;; after the headers (clang instantiates only when the type must be complete)
@@ -1839,7 +1857,7 @@
       (#{:bool :char :schar :uchar :short :ushort :char8 :char16} (abi/bn t)) abi/int*
       :else t)))
 
-(def ^:private unsigned-of {:int :uint :long :ulong :llong :ullong})
+(def ^:private unsigned-of {:int :uint :long :ulong :llong :ullong :i128 :u128})
 
 (defn arith-common
   "The usual arithmetic conversions' type ([expr.arith.conv])."
@@ -5182,7 +5200,10 @@
                                        (throw e)))
                             (g)))
             inits (when (= :ctor (:kind f)) (when-not (:implicit f) (trace #(ctor-inits ctx f))))
-            body (when (:body f) (trace #(stmt ctx (:body f))))
+            ;; (CP362 (a), the user 2026-11-11: a consteval constructor's body, which only checks (basic_format_string's runs
+            ;; the format string's scanner at compile time), is not evaluated by the code generator: the immediate invocation
+            ;; stores the mem-initializers' value, the program taken as valid, as clang and g++ accepted it)
+            body (when (:body f) (if (and (:consteval f) (= :ctor (:kind f)) (not (checking?))) {:s :block :items []} (trace #(stmt ctx (:body f)))))
             ;; a constructor's or destructor's function-try-block: control reaching a handler's end rethrows the exception
             ;; ([except.handle]/15; clang's ExitCXXTryStmt, doImplicitRethrow); another function's handler falls through to its end
             ;; ([except.handle]/16). The mem-initializers stay before the try (cpp-90: an exception of theirs is not caught by the
