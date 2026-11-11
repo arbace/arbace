@@ -1163,7 +1163,9 @@ error tests' CHECK lines the judge; no code copied.
 The AOT cell's classes left: `:unsupported-syntax` 38 (`sym@AUTH(ia,42)`, `%pltpcrel(f)`: repr/asm's reader; data-directive-specifier's
 error run's 6 among them), `:view-llvm-dwarfdump` 9, `:filecheck-var` 2, `:no-viewer` 1, `:unsupported-directive` 1 (`.macro`),
 `:unsupported-literal-pool` 1 (`ldr x0, =(-undef)`); the object check's 3 (two syntax, `.macro`). Not built: NEON (ARS45 (b)'s next),
-musl's C and torture as packs, FPCR.FZ, half precision. The CPU's rows of the four new programs wait for the VM (ARS44).
+musl's C and torture as packs, FPCR.FZ, half precision. The CPU's rows of the four new programs wait for the VM (ARS44). A fix
+on the way (amd64): x86i-check's CPU runs used run-check's `$runner`, unset under `set -u` there since AR4's merge (every CPU row
+`exit 1`); the subset 13 of 13 after.
 
 ### Proposed (AR7)
 

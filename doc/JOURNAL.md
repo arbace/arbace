@@ -4810,4 +4810,6 @@ doc/asm/ARM64-SURVEY.md, "As built: AR7", has the measures.
   coverage 474 → 653 of 653 claimed. NEON not reached (proposed ARS48).
 - Results: object verdict 2,687 → 2,781 of 2,833 (`:message`, `:mc-option`, `:error-accepted` gone); object check mc-aarch64-obj
   104 → 107 of 110; a64i 80 → 84 programs; the AOT cell 2,904 / 0 / 152 (95.0%) → 3,005 / 0 / 55 (98.2%); crops-score completeness 98.7 → 99.5. Proposed ARS48-ARS52 (NEON, `@AUTH`/`%pltpcrel`, the literal pool,
-  the diagnostics' columns, the memory programs in the essential subset).
+  the diagnostics' columns, the memory programs in the essential subset). A fix on the way: x86i-check ran its CPU runs through
+  run-check's `$runner`, unset there under `set -u` since AR4's merge (every CPU row `exit 1`; found by the AR7 proof's `--only` run of
+  the subset, 13 of 13 after).
