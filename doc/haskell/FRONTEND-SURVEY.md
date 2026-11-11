@@ -3449,6 +3449,8 @@ Costs: the generalisation 1-2 days, the first slice 1 day, each later slice 1-2 
 | `LIB_STG_REUSE=1 LIB_STG_OWN_POOL_TAR=... LIB_STG_OWN_OUT=... lib-stg --ifaces own` (hs-p22's own state copied into the worktree's `.tmp`, the pool tar made from it) | "the own closures in .tmp are the producer's pool's"; control 0 of 171; `ghc-internal-own.tar`: 265 interfaces, the wired-in Prim, 265 modules' STG (25.8 MB); 29 s, 0.25 GB |
 | the same for `--package base` | `base-own.tar`: 241 interfaces, 241 modules' STG (`stg/base-4.22.0.0-3875/`); control 0 of 23; 14 s, 0.24 GB |
 | `HSI_OWN_TARS=ghc-internal-own.tar:base-own.tar bin/hsi check --libs own --corpus samples --only samples/Hello,samples/Classes,samples/Arrays` (ARBACE_MEM_GIB=1, one front-end shard at 1.2 GiB; hs-p22's hsi executable, its `simd.ae` one change behind) | 507 own interfaces, 506 modules' STG from the tars; Hello `:libs :own` pass, Arrays `:libs :pack` pass, Classes `:libs :own` "runtime: out of memory" at the 1 GiB cap (passes at 2 GiB in the light runs): exit 1 for it alone; 1m19, 0.7 GB |
+| hsi-essential's command (`own-verdicts --check`, then the 123 programs; ARBACE_MEM_GIB=1, one at a time, hs-p22b's hsi executable, the same sources) | own-verdicts current; 120 pass, 2 fail (synthetic/primops-word, runtime-laziness: "runtime: out of memory" at the 1 GiB cap, the pack path this branch does not change; they pass in the record at 16 GiB), the four controls that ran fail as they must; 24m52, 0.87 GB |
+| `bin/reap`; `bin/crops-score --record`, `--judge --strict` | 0 problems; scores unchanged (Haskell 76.0), exit 0 |
 
 ### Night commands (not run; one at a time, in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
 
