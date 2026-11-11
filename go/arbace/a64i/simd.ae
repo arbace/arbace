@@ -1,0 +1,1415 @@
+(in-ns 'go.arbace.a64i) (go/file "simd.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [bits "math/bits"]
+    ^{:line 6} [strconv "strconv"]
+    ^{:line 7} [strings "strings"]])
+
+
+;; Advanced SIMD's integer lanes (doc/asm/ARM64-SURVEY.md, "As built: AR8"; ARS48 (a)): the vector classes on integer elements
+;; (three registers of the same type, two-register miscellaneous, across lanes, copy: DUP, INS, UMOV, SMOV; shift by
+;; immediate, modified immediate: MOVI, MVNI, ORR, BIC; permute: UZP, TRN, ZIP; EXT; TBL, TBX; three registers of different
+;; types: the long, wide and narrow forms) and their scalar forms on a D register (and DUP's scalar `mov b0, v1.b[1]`),
+;; decoded, lowered from their forms and executed lane by lane as the Arm ARM's pseudocode defines them (DDI 0487: the
+;; shared/functions/vector and the instructions' Operation; the saturating ones setting FPSR.QC). The FP lanes, the
+;; polynomial and the doubling multiplies, the saturating shifts and narrows, the by-element forms are :unimplemented.
+;; Written from the pseudocode by Arbace; no code copied.
+
+
+
+(go/const "The Advanced SIMD operations (after the FP ones); Sf is Q (128 bits), S the scalar form, Size the element's log2 bytes,\nSys the instruction (an index into its class's names).\n"
+  ^{:line 22} [^{:tag Op :val 95} OpV3 (+ opFPEnd 1 iota)] ; three same: Rd = Rn op Rm (Sys: v3Names)
+  ^{:line 23} [^{:val 96} OpV2] ; two-register miscellaneous (Sys: v2Names)
+  ^{:line 24} [^{:val 97} OpVACR] ; across lanes: a scalar Rd (Sys: vacrNames)
+  ^{:line 25} [^{:val 98} OpVDUP] ; dup (element): Imm the index; S the scalar form (mov b0, v1.b[1])
+  ^{:line 26} [^{:val 99} OpVDUPG] ; dup (general): Rn a general register
+  ^{:line 27} [^{:val 100} OpVMOVG] ; umov, smov (Signed): Rd a general register of Sf's width, Imm the index
+  ^{:line 28} [^{:val 101} OpVINSG] ; ins (general): Imm the index
+  ^{:line 29} [^{:val 102} OpVINSE] ; ins (element): Imm the destination's index, Imm2 the source's
+  ^{:line 30} [^{:val 103} OpVSHI] ; shift by immediate (Sys: vshiNames): Imm the shift
+  ^{:line 31} [^{:val 104} OpVIMM] ; modified immediate (Sys: 0 movi, 1 mvni, 2 orr, 3 bic): Imm the 64-bit pattern
+  ^{:line 32} [^{:val 105} OpVPERM] ; uzp1, trn1, zip1, uzp2, trn2, zip2 (Sys 1-3, 5-7, as the encoding's opcode)
+  ^{:line 33} [^{:val 106} OpVEXT] ; ext: Imm the byte index
+  ^{:line 34} [^{:val 107} OpVTBL] ; tbl, tbx (N): Imm the table's registers (1-4)
+  ^{:line 35} [^{:val 108} OpV3D] ; three different (Sys: v3dNames): Size the narrow element's
+  ^{:line 36} [^{:val 109} opSIMDEnd])
+
+
+(go/var simdOpNames (lit (array ... string) "v3" "v2" "vacr" "vdup" "vdupg" "vmovg" "vinsg" "vinse" "vshi" "vimm" "vperm" "vext" "vtbl" "v3d"))
+
+^{:go/end 43} (go/func isSIMDOp ^bool [^Op o]
+  (and (> o opFPEnd) (< o opSIMDEnd)))
+
+
+^{:go/end 47} (go/func simdOpName ^string [^Op o]
+  (aget simdOpNames (- o opFPEnd 1)))
+
+
+
+^{:go/breaks [[5 54]] :go/end 55} (go/func fpFamily "fpFamily is an FP or SIMD operation's family.\n" ^string [^Op o]
+  (when (isSIMDOp o)
+    (return "simd"))
+
+  "fp")
+
+
+(go/var v3Names ^{:go/breaks [16 30 45]} (lit (array ... string) "add" "sub" "and" "bic" "orr" "orn" "eor" "bsl" "bit" "bif" "cmeq" "cmgt" "cmhi" "cmge"
+    "cmhs" "cmtst" "smax" "umax" "smin" "umin" "shadd" "uhadd" "srhadd" "urhadd" "shsub" "uhsub" "sqadd" "uqadd"
+    "sqsub" "uqsub" "sabd" "uabd" "saba" "uaba" "mul" "mla" "mls" "addp" "smaxp" "umaxp" "sminp" "uminp" "sshl"
+    "ushl"))
+
+(go/var v2Names ^{:go/breaks [15]} (lit (array ... string) "rev64" "rev16" "rev32" "cls" "clz" "cnt" "not" "rbit" "cmgt" "cmge" "cmeq" "cmle" "cmlt"
+    "abs" "neg" "xtn"))
+
+(go/var vacrNames (lit (array ... string) "addv" "smaxv" "umaxv" "sminv" "uminv" "saddlv" "uaddlv"))
+
+(go/var vshiNames ^{:go/breaks [14]} (lit (array ... string) "sshr" "ushr" "ssra" "usra" "srshr" "urshr" "srsra" "ursra" "sri" "shl" "sli" "shrn"
+    "sshll" "ushll"))
+
+(go/var vimmNames (lit (array ... string) "movi" "mvni" "orr" "bic"))
+
+(go/var vpermNames (lit (array ... string) "" "uzp1" "trn1" "zip1" "" "uzp2" "trn2" "zip2"))
+
+(go/var v3dNames ^{:go/breaks [13]} (lit (array ... string) "saddl" "uaddl" "saddw" "uaddw" "ssubl" "usubl" "ssubw" "usubw" "addhn" "subhn" "sabal"
+    "uabal" "sabdl" "uabdl" "smlal" "umlal" "smlsl" "umlsl" "smull" "umull"))
+
+^{:go/breaks [[4 83]] :go/end 84} (go/func nameIndex ^int [^{:tag (slice string)} names ^string m]
+  (range [i n names]
+    (when (and (== n m) (!= n ""))
+      (return i)))
+
+
+  -1)
+
+
+(go/var esz "bhsd")
+
+
+^{:go/end 95} (go/func arr "arr is a vector's arrangement as an assembler writes it: 8b, 16b, 4h, 8h, 2s, 4s, 1d, 2d.\n" ^string [^uint8 size ^bool q]
+  (let [n ^int (>> 8 size)]
+    (when q
+      (set! n * 2))
+
+    (+ (strconv/Itoa n) (conv string (aget esz size)))))
+
+
+
+^{:go/end 155} (go/func simdName "simdName is an Advanced SIMD instruction's name for the coverage: its mnemonic and its arrangement (or element).\n" ^string [^{:tag (* Inst)} in]
+  (let [a (arr (.-Size in) (.-Sf in))]
+    (when (.-S in)
+      (set! a (conv string (aget esz (.-Size in)))))
+
+    (let [two ""]
+      (when (.-Sf in)
+        (set! two "2"))
+
+      (switch (.-Op in)
+        (case [OpV3]
+          (return (+ "v." (aget v3Names (.-Sys in)) "." a)))
+        (case [OpV2]
+          (when (== (.-Sys in) 15)
+            (return (+ "v.xtn" two "." (arr (.-Size in) false))))
+
+          (return (+ "v." (aget v2Names (.-Sys in)) "." a)))
+        (case [OpVACR]
+          (return (+ "v." (aget vacrNames (.-Sys in)) "." a)))
+        (case [OpVDUP]
+          (return (+ "v.dup." a)))
+        (case [OpVDUPG]
+          (return (+ "v.dup.g." a)))
+        (case [OpVMOVG]
+          (let [(values s w) (values "umov" "w")]
+            (when (.-Signed in)
+              (set! s "smov"))
+
+            (when (.-Sf in)
+              (set! w "x"))
+
+            (return (+ "v." s "." w "." (conv string (aget esz (.-Size in)))))))
+        (case [OpVINSG]
+          (return (+ "v.ins.g." (conv string (aget esz (.-Size in))))))
+        (case [OpVINSE]
+          (return (+ "v.ins." (conv string (aget esz (.-Size in))))))
+        (case [OpVSHI]
+          (when (>= (.-Sys in) 11)
+            (return (+ "v." (aget vshiNames (.-Sys in)) two "." (arr (.-Size in) false))))
+
+          (return (+ "v." (aget vshiNames (.-Sys in)) "." a)))
+        (case [OpVIMM]
+          (return (+ "v." (aget vimmNames (.-Sys in)) "." (aget (lit (map bool string) [false "64"] [true "128"]) (.-Sf in)))))
+        (case [OpVPERM]
+          (return (+ "v." (aget vpermNames (.-Sys in)) "." a)))
+        (case [OpVEXT]
+          (return (+ "v.ext." a)))
+        (case [OpVTBL]
+          (let [s "tbl"]
+            (when (.-N in)
+              (set! s "tbx"))
+
+            (return (+ "v." s (strconv/Itoa (conv int (.-Imm in))) "." a))))
+        (case [OpV3D]
+          (return (+ "v." (aget v3dNames (.-Sys in)) two "." (arr (.-Size in) false)))))
+
+      (.String (.-Op in)))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the decoder: the Advanced SIMD space (bits 28-25 x111, not the scalar FP classes)
+
+(go/var unimpSIMD ":unimplemented simd")
+
+
+^{:go/breaks [[5 210]] :go/end 211} (go/func v3Of "v3Of is three same's instruction by U, opcode and size: its v3Names index, or -1.\n" ^int [^uint32 u ^uint32 opc ^uint32 size]
+  (switch opc
+    (case [0]
+      (return (+ 20 (conv int u)))) ; shadd, uhadd
+    (case [1]
+      (return (+ 26 (conv int u)))) ; sqadd, uqadd
+    (case [2]
+      (return (+ 22 (conv int u)))) ; srhadd, urhadd
+    (case [3]
+      (return (aget (lit (slice int) 2 3 4 5 6 7 8 9) (bit-or (<< u 2) size))))
+    (case [4]
+      (return (+ 24 (conv int u)))) ; shsub, uhsub
+    (case [5]
+      (return (+ 28 (conv int u)))) ; sqsub, uqsub
+    (case [6]
+      (return (+ 11 (conv int u)))) ; cmgt, cmhi
+    (case [7]
+      (return (+ 13 (conv int u)))) ; cmge, cmhs
+    (case [8]
+      (return (+ 42 (conv int u)))) ; sshl, ushl
+    (case [12]
+      (return (+ 16 (conv int u)))) ; smax, umax
+    (case [13]
+      (return (+ 18 (conv int u)))) ; smin, umin
+    (case [14]
+      (return (+ 30 (conv int u)))) ; sabd, uabd
+    (case [15]
+      (return (+ 32 (conv int u)))) ; saba, uaba
+    (case [16]
+      (return (conv int u))) ; add, sub
+    (case [17]
+      (return (aget (lit (slice int) 15 10) u))) ; cmtst, cmeq
+    (case [18]
+      (return (+ 35 (conv int u)))) ; mla, mls
+    (case [19]
+      (when (== u 0)
+        (return 34))) ; mul
+
+    (case [20]
+      (return (+ 38 (conv int u)))) ; smaxp, umaxp
+    (case [21]
+      (return (+ 40 (conv int u)))) ; sminp, uminp
+    (case [23]
+      (when (== u 0)
+        (return 37)))) ; addp
+
+
+  -1)
+
+
+
+
+^{:go/breaks [[5 222]] :go/end 223} (go/func v3Kind "v3Sizes is which sizes (and Q for size 3) three same's instruction takes: \"any\" (size 3 with Q), \"no3\" (8-32 bits),\n\"d\" (64 bits only, in the scalar form), \"logic\" (the size field is the operation).\n" ^string [^int k]
+  (switch
+    (case [(and (>= k 2) (<= k 9))]
+      (return "logic"))
+    (case [(or (== k 0) (== k 1) ^:go/paren (and (>= k 10) (<= k 15)) (== k 42) (== k 43) ^:go/paren (and (>= k 26) (<= k 29)) (== k 37))]
+      (return "any")))
+
+  "no3")
+
+
+
+
+^{:go/breaks [[5 234]] :go/end 235} (go/func v3Scalar "v3Scalar is whether three same's instruction has a scalar form at size (bit 28 set): add, sub, the compares, the shifts\nat 64 bits; the saturating additions at any size.\n" ^bool [^int k ^uint32 size]
+  (switch
+    (case [(and (>= k 26) (<= k 29))]
+      (return true))
+    (case [(or (== k 0) (== k 1) ^:go/paren (and (>= k 10) (<= k 15)) (== k 42) (== k 43))]
+      (return (== size 3))))
+
+  false)
+
+
+
+^{:go/breaks [[5 265]] :go/end 266} (go/func v2Of "v2Of is two-register miscellaneous's instruction by U, opcode and size: its v2Names index, or -1.\n" ^int [^uint32 u ^uint32 opc ^uint32 size]
+  (switch
+    (case [(and (== opc 0) (== u 0))]
+      (return 0)) ; rev64
+    (case [(and (== opc 1) (== u 0))]
+      (return 1)) ; rev16
+    (case [(and (== opc 0) (== u 1))]
+      (return 2)) ; rev32
+    (case [(== opc 4)]
+      (return (+ 3 (conv int u)))) ; cls, clz
+    (case [(and (== opc 5) (== u 0) (== size 0))]
+      (return 5)) ; cnt
+    (case [(and (== opc 5) (== u 1) (== size 0))]
+      (return 6)) ; not
+    (case [(and (== opc 5) (== u 1) (== size 1))]
+      (return 7)) ; rbit
+    (case [(== opc 8)]
+      (return (+ 8 (conv int u)))) ; cmgt, cmge #0
+    (case [(== opc 9)]
+      (return (+ 10 (conv int u)))) ; cmeq, cmle #0
+    (case [(and (== opc 10) (== u 0))]
+      (return 12)) ; cmlt #0
+    (case [(== opc 11)]
+      (return (+ 13 (conv int u)))) ; abs, neg
+    (case [(and (== opc 18) (== u 0))]
+      (return 15))) ; xtn
+
+  -1)
+
+
+
+^{:go/end 297} (go/func expandImm "expandImm is AdvSIMDExpandImm: the 64-bit pattern of op, cmode and imm8; false for cmode 1111 (FMOV's).\n" [^uint32 op ^uint32 cmode ^uint32 imm8] :results [uint64 bool]
+  (let [i (conv uint64 imm8)
+      ^{:line 271} rep32 ^{:go/end 271} (fn ^uint64 [^uint64 v] (bit-or (<< v 32) v))
+      ^{:line 272} rep16 ^{:go/end 272} (fn ^uint64 [^uint64 v] (bit-or (<< v 48) (<< v 32) (<< v 16) v))]
+    (switch (>> cmode 1)
+      (case [0 1 2 3]
+        (return (rep32 (<< i (* 8 (>> cmode 1)))) true))
+      (case [4 5]
+        (return (rep16 (<< i (* 8 (bit-and (>> cmode 1) 1)))) true))
+      (case [6]
+        (when (== (bit-and cmode 1) 0)
+          (return (rep32 (bit-or (<< i 8) 255)) true))
+
+        (return (rep32 (bit-or (<< i 16) 65535)) true)))
+
+    (when (== cmode 14)
+      (when (== op 0)
+        (return (* i 0x0101010101010101) true))
+
+      (let [^uint64 v (zero uint64)]
+        (for [k (conv uint 0)] (< k 8) (inc! k)
+          (when (== (bit-and (>> i k) 1) 1)
+            (set! v bit-or ^uint64 (<< 255 (* 8 k)))))
+
+
+        (return v true)))
+
+    (return 0 false)))
+
+
+
+^{:go/end 554} (go/func decodeSIMD "decodeSIMD is the Advanced SIMD space a64i runs: the integer classes, vector and scalar.\n" [^uint32 w] :results [Inst string]
+  (let [q (== (bf w 30 30) 1)
+      ^{:line 302} u (bf w 29 29)
+      ^{:line 303} size (bf w 23 22)
+      (values rd rn rm) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)) (conv uint8 (bf w 20 16)))]
+    (when (!= (bf w 31 31) 0)
+      (return (lit Inst) unimpSIMD))
+
+    (let [scalar (== (bf w 28 28) 1)]
+      (when (and scalar (not q))
+        (return (lit Inst) unimpSIMD))
+
+      (switch
+        ;; three same: 0 Q U 01110 size 1 Rm opcode 1 Rn Rd (scalar: 01 U 11110 size 1 Rm opcode 1 Rn Rd)
+        (case [(and (== (bf w 27 24) 14) (== (bf w 21 21) 1) (== (bf w 10 10) 1))]
+          (let [k (v3Of u (bf w 15 11) size)]
+            (when (< k 0)
+              (return (lit Inst) unimpSIMD))
+
+            (when scalar
+              (when (not (v3Scalar k size))
+                (return (lit Inst) unimpSIMD))
+
+              (return (lit Inst :Op OpV3 :S true :Size (conv uint8 size) :Rd rd :Rn rn :Rm rm :Sys (conv uint32 k)) ""))
+
+            (switch (v3Kind k)
+              (case ["logic"]
+                (return (lit Inst :Op OpV3 :Sf q :Rd rd :Rn rn :Rm rm :Sys (conv uint32 k)) ""))
+              (case ["any"]
+                (when (and (== size 3) (not q))
+                  (return (lit Inst) undef)))
+
+              (default
+                (when (== size 3)
+                  (return (lit Inst) undef))))
+
+
+            (return (lit Inst :Op OpV3 :Sf q :Size (conv uint8 size) :Rd rd :Rn rn :Rm rm :Sys (conv uint32 k)) "")))
+        ;; two-register miscellaneous: 0 Q U 01110 size 10000 opcode 10 Rn Rd
+        (case [(and (== (bf w 27 24) 14) (== (bf w 21 17) 16) (== (bf w 11 10) 2))]
+          (let [k (v2Of u (bf w 16 12) size)]
+            (when (< k 0)
+              (return (lit Inst) unimpSIMD))
+
+            (when scalar
+              (when (and ^:go/paren (and (>= k 8) (<= k 14)) (== size 3))
+                (return (lit Inst :Op OpV2 :S true :Size 3 :Rd rd :Rn rn :Sys (conv uint32 k)) ""))
+
+              (return (lit Inst) unimpSIMD))
+
+            (let [ok true]
+              (switch k
+                (case [0]
+                  (set! ok (< size 3)))
+                (case [1]
+                  (set! ok (== size 0)))
+                (case [2]
+                  (set! ok (< size 2)))
+                (case [3 4 15]
+                  (set! ok (< size 3)))
+                (case [8 9 10 11 12 13 14]
+                  (set! ok (or (< size 3) q))))
+
+              (when (not ok)
+                (return (lit Inst) undef))
+
+              (return (lit Inst :Op OpV2 :Sf q :Size (conv uint8 size) :Rd rd :Rn rn :Sys (conv uint32 k)) ""))))
+        ;; across lanes: 0 Q U 01110 size 11000 opcode 10 Rn Rd
+        (case [(and (not scalar) (== (bf w 27 24) 14) (== (bf w 21 17) 24) (== (bf w 11 10) 2))]
+          (let [k -1]
+            (switch [opc (bf w 16 12)]
+              (case [(and (== opc 27) (== u 0))]
+                (set! k 0))
+              (case [(== opc 10)]
+                (set! k (+ 1 (conv int u))))
+              (case [(== opc 26)]
+                (set! k (+ 3 (conv int u))))
+              (case [(== opc 3)]
+                (set! k (+ 5 (conv int u)))))
+
+            (when (< k 0)
+              (return (lit Inst) unimpSIMD))
+
+            (when (or (== size 3) ^:go/paren (and (== size 2) (not q)))
+              (return (lit Inst) undef))
+
+            (return (lit Inst :Op OpVACR :Sf q :Size (conv uint8 size) :Rd rd :Rn rn :Sys (conv uint32 k)) "")))
+        ;; copy: 0 Q op 01110000 imm5 0 imm4 1 Rn Rd (scalar dup: 01 0 11110000 imm5 0 0000 1 Rn Rd)
+        (case [(and (== (bf w 27 21) 112) (== (bf w 15 15) 0) (== (bf w 10 10) 1))]
+          (let [(values imm5 imm4) (values (bf w 20 16) (bf w 14 11))]
+            (when (== (bit-and imm5 15) 0)
+              (return (lit Inst) undef))
+
+            (let [sz (conv uint8 (bits/TrailingZeros32 imm5))
+                ^{:line 394} idx (conv int64 (>> imm5 (+ sz 1)))]
+              (when scalar
+                (when (and (== u 0) (== imm4 0))
+                  (return (lit Inst :Op OpVDUP :S true :Size sz :Rd rd :Rn rn :Imm idx) ""))
+
+                (return (lit Inst) undef))
+
+              (when (== u 1)
+                (when (not q)
+                  (return (lit Inst) undef))
+
+                (return (lit Inst :Op OpVINSE :Sf true :Size sz :Rd rd :Rn rn :Imm idx :Imm2 (conv int64 (>> imm4 sz))) ""))
+
+              (switch imm4
+                (case [0]
+                  (when (and (== sz 3) (not q))
+                    (return (lit Inst) undef))
+
+                  (return (lit Inst :Op OpVDUP :Sf q :Size sz :Rd rd :Rn rn :Imm idx) ""))
+                (case [1]
+                  (when (and (== sz 3) (not q))
+                    (return (lit Inst) undef))
+
+                  (return (lit Inst :Op OpVDUPG :Sf q :Size sz :Rd rd :Rn rn) ""))
+                (case [3]
+                  (when (not q)
+                    (return (lit Inst) undef))
+
+                  (return (lit Inst :Op OpVINSG :Sf true :Size sz :Rd rd :Rn rn :Imm idx) ""))
+                (case [5]
+                  (when (or (== sz 3) ^:go/paren (and (== sz 2) (not q)))
+                    (return (lit Inst) undef))
+
+                  (return (lit Inst :Op OpVMOVG :Sf q :Signed true :Size sz :Rd rd :Rn rn :Imm idx) ""))
+                (case [7]
+                  (when (!= (== sz 3) q)
+                    (return (lit Inst) undef))
+
+                  (return (lit Inst :Op OpVMOVG :Sf q :Size sz :Rd rd :Rn rn :Imm idx) "")))
+
+              (return (lit Inst) undef))))
+        ;; modified immediate: 0 Q op 0111100000 abc cmode o2 1 defgh Rd
+        (case [(and (not scalar) (== (bf w 28 19) 480) (== (bf w 10 10) 1))]
+          (when (!= (bf w 11 11) 0)
+            (return (lit Inst) unimpSIMD))
+
+          (let [cmode (bf w 15 12)
+              ^{:line 441} imm8 (bit-or (<< (bf w 18 16) 5) (bf w 9 5))
+              (values v ok) (expandImm u cmode imm8)]
+            (when (not ok)
+              (return (lit Inst) ":unimplemented simd-fmov"))
+
+            (when (and (== u 1) (== cmode 14) (not q))
+              ;; movi Dd, #imm: the 64-bit scalar form
+              (return (lit Inst :Op OpVIMM :Rd rd :Imm (conv int64 v)) ""))
+
+            (let [k (conv uint32 0)]
+              (switch
+                (case [(== cmode 14)]
+                  (set! k 0))
+                (case [(and (< cmode 12) (== (bit-and cmode 1) 1))]
+                  (set! k (+ 2 u)))
+                (default
+                  (set! k u)))
+
+              (return (lit Inst :Op OpVIMM :Sf q :Rd rd :Imm (conv int64 v) :Sys k) ""))))
+        ;; shift by immediate: 0 Q U 011110 immh immb opcode 1 Rn Rd (scalar: 01 U 111110 ...)
+        (case [(and (== (bf w 27 23) 30) (!= (bf w 22 19) 0) (== (bf w 10 10) 1))]
+          (let [(values immh immb) (values (bf w 22 19) (bf w 18 16))
+              ^{:line 463} sz (conv uint8 (- 31 (bits/LeadingZeros32 immh)))
+              ^{:line 464} e (<< (conv int64 8) sz)
+              ^{:line 465} ih (conv int64 (bit-or (<< immh 3) immb))
+              ^{:line 466} k -1]
+            (switch [opc (bf w 15 11)]
+              (case [(== opc 0)]
+                (set! k (conv int u)))
+              (case [(== opc 2)]
+                (set! k (+ 2 (conv int u))))
+              (case [(== opc 4)]
+                (set! k (+ 4 (conv int u))))
+              (case [(== opc 6)]
+                (set! k (+ 6 (conv int u))))
+              (case [(and (== opc 8) (== u 1))]
+                (set! k 8))
+              (case [(== opc 10)]
+                (set! k (+ 9 (conv int u))))
+              (case [(and (== opc 16) (== u 0))]
+                (set! k 11))
+              (case [(== opc 20)]
+                (set! k (+ 12 (conv int u)))))
+
+            (when (< k 0)
+              (return (lit Inst) unimpSIMD))
+
+            (cond scalar
+              (when (or (> k 10) (!= sz 3))
+                (return (lit Inst) unimpSIMD))
+
+              (>= k 11)
+              (when (== sz 3)
+                (return (lit Inst) undef))
+
+              (and (== sz 3) (not q))
+              (return (lit Inst) undef))
+
+            (let [sh (- (* 2 e) ih)]
+              (when (or (== k 9) (== k 10) (== k 12) (== k 13))
+                (set! sh (- ih e)))
+
+              (return (lit Inst :Op OpVSHI :Sf (and q (not scalar)) :S scalar :Size sz :Rd rd :Rn rn :Imm sh :Sys (conv uint32 k)) ""))))
+        ;; permute: 0 Q 001110 size 0 Rm 0 opcode 10 Rn Rd
+        (case [(and (not scalar) (== u 0) (== (bf w 27 24) 14) (== (bf w 21 21) 0) (== (bf w 15 15) 0) (== (bf w 11 10) 2))]
+          (let [opc (bf w 14 12)]
+            (when (or (== opc 0) (== opc 4))
+              (return (lit Inst) undef))
+
+            (when (and (== size 3) (not q))
+              (return (lit Inst) undef))
+
+            (return (lit Inst :Op OpVPERM :Sf q :Size (conv uint8 size) :Rd rd :Rn rn :Rm rm :Sys opc) "")))
+        ;; ext: 0 Q 101110 op2 0 Rm 0 imm4 0 Rn Rd
+        (case [(and (not scalar) (== u 1) (== (bf w 27 24) 14) (== (bf w 23 21) 0) (== (bf w 15 15) 0) (== (bf w 10 10) 0))]
+          (let [imm4 (bf w 14 11)]
+            (when (and (not q) (>= imm4 8))
+              (return (lit Inst) undef))
+
+            (return (lit Inst :Op OpVEXT :Sf q :Rd rd :Rn rn :Rm rm :Imm (conv int64 imm4)) "")))
+        ;; tbl, tbx: 0 Q 001110 op2 0 Rm 0 len op 00 Rn Rd
+        (case [(and (not scalar) (== u 0) (== (bf w 27 24) 14) (== (bf w 23 21) 0) (== (bf w 15 15) 0) (== (bf w 11 10) 0))]
+          (return (lit Inst :Op OpVTBL :Sf q :N (== (bf w 12 12) 1) :Rd rd :Rn rn :Rm rm :Imm (+ (conv int64 (bf w 14 13)) 1)) ""))
+        ;; three different: 0 Q U 01110 size 1 Rm opcode 00 Rn Rd
+        (case [(and (not scalar) (== (bf w 27 24) 14) (== (bf w 21 21) 1) (== (bf w 11 10) 0))]
+          (let [k -1]
+            (switch [opc (bf w 15 12)] opc
+              (case [0 1 2 3]
+                (set! k (+ (aget (lit (slice int) 0 2 4 6) opc) (conv int u))))
+              (case [4 6]
+                (when (== u 0)
+                  (set! k (+ 8 (/ (conv int (- opc 4)) 2)))))
+
+              (case [5]
+                (set! k (+ 10 (conv int u))))
+              (case [7]
+                (set! k (+ 12 (conv int u))))
+              (case [8]
+                (set! k (+ 14 (conv int u))))
+              (case [10]
+                (set! k (+ 16 (conv int u))))
+              (case [12]
+                (set! k (+ 18 (conv int u)))))
+
+            (when (< k 0)
+              (return (lit Inst) unimpSIMD))
+
+            (when (== size 3)
+              (return (lit Inst) undef))
+
+            (return (lit Inst :Op OpV3D :Sf q :Size (conv uint8 size) :Rd rd :Rn rn :Rm rm :Sys (conv uint32 k)) ""))))
+
+      (return (lit Inst) unimpSIMD))))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the forms
+
+
+
+(go/type vecOp "vecOp is an Advanced SIMD operand: a vector register with its arrangement (8b ... 2d), a scalar register (b ... q), an\nelement (v1.s[2]).\n" (struct
+    ^{:line 562 :tag uint8} n ^uint8 size
+    ^{:line 563 :tag bool} q
+    ^{:line 564 :tag byte} kind ; 'v' a vector, 's' a scalar register, 'e' an element
+    ^{:line 565 :tag int64} idx))
+
+
+^{:go/end 604} (go/func asVec [^{:tag (* Sx)} o] :results [vecOp bool]
+  (when (and (== (.head o) "elt") (== (len (.-List o)) 3))
+    (let [r (aget (.-List o) 1)]
+      (when (or (!= (.head r) "reg") (!= (len (.-List r)) 3))
+        (return (lit vecOp) false))
+
+      (let [n (.-Atom (aget (.-List r) 1))
+          (values k err) (strconv/Atoi (subslice n 1))
+          ^{:line 576} t (strings/TrimPrefix (.-Atom (aget (.-List r) 2)) ":")
+          ^{:line 577} sz (strings/IndexByte esz (aget t (- (len t) 1)))]
+        (when (or (!= (aget n 0) \v) (!= err nil) (< sz 0))
+          (return (lit vecOp) false))
+
+        (return (lit vecOp :n (conv uint8 k) :size (conv uint8 sz) :kind \e :idx (value (aget (.-List o) 2))) true))))
+
+  (when (!= (.head o) "reg")
+    (return (lit vecOp) false))
+
+  (let [n (.-Atom (aget (.-List o) 1))]
+    (when (and (== (len (.-List o)) 3) (>= (len n) 2) (== (aget n 0) \v))
+      (let [(values k err) (strconv/Atoi (subslice n 1))
+          ^{:line 589} t (strings/TrimPrefix (.-Atom (aget (.-List o) 2)) ":")]
+        (when (or (!= err nil) (< (len t) 2))
+          (return (lit vecOp) false))
+
+        (let [sz (strings/IndexByte esz (aget t (- (len t) 1)))
+            (values cnt err2) (strconv/Atoi (subslice t _ (- (len t) 1)))]
+          (when (or (< sz 0) (!= err2 nil))
+            (return (lit vecOp) false))
+
+          (return (lit vecOp :n (conv uint8 k) :size (conv uint8 sz) :q (== (* cnt ^int (<< 8 sz)) 128) :kind \v) true))))
+
+    (when [(values r sz ok) (asVReg o)] (and ok (< sz 4))
+      (return (lit vecOp :n r :size sz :kind \s) true))
+
+    (return (lit vecOp) false)))
+
+
+^{:go/end 612} (go/func mustVec ^vecOp [^{:tag (* Sx)} o ^byte kind]
+  (let [(values v ok) (asVec o)]
+    (when (or (not ok) ^:go/paren (and (!= kind 0) (!= (.-kind v) kind)))
+      (ferr "not a SIMD operand: %s" o))
+
+    ^{:line 611} v))
+
+
+^{:go/breaks [[4 620]] :go/end 621} (go/func anyVec ^bool [^{:tag (slice (* Sx))} ops]
+  (range [_ o ops]
+    (when [(values v ok) (asVec o)] (and ok (!= (.-kind v) \s))
+      (return true)))
+
+
+  false)
+
+
+
+(go/var ^{:doc "simdMnemonics is the scalar forms' mnemonics (their operands scalar registers), the rest named by a vector operand.\n"} simdScalar (lit (map string bool) ["add" true] ["sub" true] ["cmeq" true] ["cmgt" true] ["cmhi" true] ["cmge" true] ["cmhs" true]
+    ^{:line 625} ["cmtst" true] ["cmle" true] ["cmlt" true] ["cmls" true] ["cmlo" true] ["sshl" true] ["ushl" true] ["sqadd" true] ["uqadd" true] ["sqsub" true]
+    ^{:line 626} ["uqsub" true] ["abs" true] ["neg" true] ["sshr" true] ["ushr" true] ["ssra" true] ["usra" true] ["srshr" true] ["urshr" true]
+    ^{:line 627} ["srsra" true] ["ursra" true] ["sri" true] ["shl" true] ["sli" true] ["movi" true]))
+
+
+
+^{:go/end 788} (go/func lowerSIMD "lowerSIMD is the Advanced SIMD instructions' forms; false when the form is not one (no vector operand, or a scalar\nregister with another mnemonic).\n" [^string m ^{:tag (slice (* Sx))} ops] :results [Inst bool]
+  (when (not (anyVec ops))
+    (when (or (== (len ops) 0) (not (aget simdScalar m)))
+      (return (lit Inst) false))
+
+    (when [(values v ok) (asVec (aget ops 0))] (or (not ok) (!= (.-kind v) \s))
+      (return (lit Inst) false)))
+
+
+  (let [(values base two) (values m false)]
+    (when [b (strings/TrimSuffix m "2")] (and (!= b m) ^:go/paren (or (>= (nameIndex (subslice v3dNames) b) 0) (== b "shrn") (== b "sshll") (== b "ushll") (== b "xtn") (== b "sxtl") (== b "uxtl")))
+      (set! (values base two) (values b true)))
+
+    (switch base
+      (case ["mov"]
+        (nargs ops 2)
+        (let [(values d dok) (asVec (aget ops 0))
+            (values n nok) (asVec (aget ops 1))]
+          (switch
+            (case [(and dok nok (== (.-kind d) \v) (== (.-kind n) \v))]
+              (return (lit Inst :Op OpV3 :Sf (.-q d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n n) :Sys 4) true))
+            (case [(and dok (== (.-kind d) \e) nok (== (.-kind n) \e))]
+              (return (lit Inst :Op OpVINSE :Sf true :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Imm (.-idx d) :Imm2 (.-idx n)) true))
+            (case [(and dok (== (.-kind d) \e))]
+              (return (lit Inst :Op OpVINSG :Sf true :Size (.-size d) :Rd (.-n d) :Rn (.-n (mustReg (aget ops 1))) :Imm (.-idx d)) true))
+            (case [(and dok (== (.-kind d) \s) nok (== (.-kind n) \e))]
+              (return (lit Inst :Op OpVDUP :S true :Size (.-size n) :Rd (.-n d) :Rn (.-n n) :Imm (.-idx n)) true))
+            (case [(and nok (== (.-kind n) \e))]
+              (let [g (mustReg (aget ops 0))]
+                (return (lit Inst :Op OpVMOVG :Sf (.-x g) :Size (.-size n) :Rd (.-n g) :Rn (.-n n) :Imm (.-idx n)) true))))))
+
+      (case ["umov" "smov"]
+        (nargs ops 2)
+        (let [g (mustReg (aget ops 0))
+            ^{:line 665} n (mustVec (aget ops 1) \e)]
+          (return (lit Inst :Op OpVMOVG :Sf (.-x g) :Signed (== m "smov") :Size (.-size n) :Rd (.-n g) :Rn (.-n n) :Imm (.-idx n)) true)))
+      (case ["ins"]
+        (nargs ops 2)
+        (let [d (mustVec (aget ops 0) \e)]
+          (when [(values n ok) (asVec (aget ops 1))] ok
+            (return (lit Inst :Op OpVINSE :Sf true :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Imm (.-idx d) :Imm2 (.-idx n)) true))
+
+          (return (lit Inst :Op OpVINSG :Sf true :Size (.-size d) :Rd (.-n d) :Rn (.-n (mustReg (aget ops 1))) :Imm (.-idx d)) true)))
+      (case ["dup"]
+        (nargs ops 2)
+        (let [d (mustVec (aget ops 0) 0)]
+          (when [(values n ok) (asVec (aget ops 1))] ok
+            (when (== (.-kind d) \s)
+              (return (lit Inst :Op OpVDUP :S true :Size (.-size n) :Rd (.-n d) :Rn (.-n n) :Imm (.-idx n)) true))
+
+            (return (lit Inst :Op OpVDUP :Sf (.-q d) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Imm (.-idx n)) true))
+
+          (return (lit Inst :Op OpVDUPG :Sf (.-q d) :Size (.-size d) :Rd (.-n d) :Rn (.-n (mustReg (aget ops 1)))) true)))
+      (case ["mvn"]
+        (nargs ops 2)
+        (let [(values d n) (values (mustVec (aget ops 0) \v) (mustVec (aget ops 1) \v))]
+          (return (lit Inst :Op OpV2 :Sf (.-q d) :Rd (.-n d) :Rn (.-n n) :Sys 6) true)))
+      (case ["sxtl" "uxtl"]
+        (nargs ops 2)
+        (let [(values d n) (values (mustVec (aget ops 0) \v) (mustVec (aget ops 1) \v))]
+          (return (lit Inst :Op OpVSHI :Sf (.-q n) :Size (.-size n) :Rd (.-n d) :Rn (.-n n) :Sys (aget (lit (map string uint32) ["sxtl" 12] ["uxtl" 13]) base)) true)))
+      (case ["movi" "mvni"]
+        (nargs ops 2 3)
+        (let [d (mustVec (aget ops 0) 0)
+            ^{:line 695} v (conv uint64 (value (aget ops 1)))
+            ^{:line 696} sh (conv int64 0)
+            ^{:line 697} msl false]
+          (when (== (len ops) 3)
+            (let [(values k a ok) (shiftOp (aget ops 2))]
+              (when (or (not ok) ^:go/paren (and (!= k "lsl") (!= k "msl")))
+                (ferr "movi's shift: %s" (aget ops 2)))
+
+              (set! (values sh msl) (values a (== k "msl")))))
+
+          (when (or (== (.-kind d) \s) ^:go/paren (and (== (.-size d) 3) (== m "movi")))
+            (return (lit Inst :Op OpVIMM :Sf (and (!= (.-kind d) \s) (.-q d)) :Rd (.-n d) :Imm (conv int64 v)) true))
+
+          (return (lit Inst :Op OpVIMM :Sf (.-q d) :Rd (.-n d) :Imm (conv int64 (vimmPattern v (.-size d) sh msl)) :Sys (conv uint32 (nameIndex (subslice vimmNames) m))) true)))
+      (case ["orr" "bic"]
+        (when (or (== (len ops) 2) ^:go/paren (and (== (len ops) 3) (== (.head (aget ops 2)) "shift")))
+          (let [d (mustVec (aget ops 0) \v)
+              ^{:line 712} sh (conv int64 0)]
+            (when (== (len ops) 3)
+              (set! (values _ sh _) (shiftOp (aget ops 2))))
+
+            (return (lit Inst :Op OpVIMM :Sf (.-q d) :Rd (.-n d) :Imm (conv int64 (vimmPattern (conv uint64 (value (aget ops 1))) (.-size d) sh false)) :Sys (conv uint32 (nameIndex (subslice vimmNames) m))) true))))
+
+      (case ["ext"]
+        (nargs ops 4)
+        (let [(values d n r) (values (mustVec (aget ops 0) \v) (mustVec (aget ops 1) \v) (mustVec (aget ops 2) \v))]
+          (return (lit Inst :Op OpVEXT :Sf (.-q d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Imm (value (aget ops 3))) true)))
+      (case ["tbl" "tbx"]
+        (nargs ops 3)
+        (let [(values d r) (values (mustVec (aget ops 0) \v) (mustVec (aget ops 2) \v))
+            (values first cnt) (tableRegs (aget ops 1))]
+          (return (lit Inst :Op OpVTBL :Sf (.-q d) :N (== m "tbx") :Rd (.-n d) :Rn first :Rm (.-n r) :Imm cnt) true))))
+
+    (when [k (nameIndex (subslice vpermNames) m)] (>= k 0)
+      (nargs ops 3)
+      (let [(values d n r) (values (mustVec (aget ops 0) \v) (mustVec (aget ops 1) \v) (mustVec (aget ops 2) \v))]
+        (return (lit Inst :Op OpVPERM :Sf (.-q d) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Sys (conv uint32 k)) true)))
+
+    (when [k (nameIndex (subslice vacrNames) m)] (>= k 0)
+      (nargs ops 2)
+      (let [n (mustVec (aget ops 1) \v)]
+        (return (lit Inst :Op OpVACR :Sf (.-q n) :Size (.-size n) :Rd (.-n (mustVec (aget ops 0) \s)) :Rn (.-n n) :Sys (conv uint32 k)) true)))
+
+    (when [k (nameIndex (subslice v3dNames) base)] (>= k 0)
+      (nargs ops 3)
+      (let [(values d n r) (values (mustVec (aget ops 0) \v) (mustVec (aget ops 1) \v) (mustVec (aget ops 2) \v))
+          ^{:line 741} sz (.-size r)]
+        (when (or (== k 8) (== k 9))
+          (set! sz (.-size d)))
+
+        (return (lit Inst :Op OpV3D :Sf two :Size sz :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Sys (conv uint32 k)) true)))
+
+    (when [k (nameIndex (subslice vshiNames) base)] (and (>= k 0) (== (len ops) 3) (not (isVecOrReg (aget ops 2))))
+      (let [(values d n) (values (mustVec (aget ops 0) 0) (mustVec (aget ops 1) 0))
+          ^{:line 749} in (lit Inst :Op OpVSHI :Sf (.-q d) :S (== (.-kind d) \s) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Imm (value (aget ops 2)) :Sys (conv uint32 k))]
+        (switch k
+          (case [11]
+            (set! (.-Sf in) two))
+          (case [12 13]
+            (set! (values (.-Sf in) (.-Size in)) (values two (.-size n)))))
+
+        (return in true)))
+
+    (when (== base "xtn")
+      (nargs ops 2)
+      (let [(values d n) (values (mustVec (aget ops 0) \v) (mustVec (aget ops 1) \v))]
+        (return (lit Inst :Op OpV2 :Sf two :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Sys 15) true)))
+
+    ;; the register compares' aliases: cmle, cmlt, cmls, cmlo are cmge, cmgt, cmhs, cmhi with the operands swapped
+    (when [(values sw ok) (aget (lit (map string string) ["cmle" "cmge"] ["cmlt" "cmgt"] ["cmls" "cmhs"] ["cmlo" "cmhi"]) m)] (and ok (== (len ops) 3) (isVecOrReg (aget ops 2)))
+      (set! ops (lit (slice (* Sx)) (aget ops 0) (aget ops 2) (aget ops 1)))
+      (set! m sw))
+
+    (when [k (nameIndex (subslice v3Names) m)] (and (>= k 0) (== (len ops) 3) (isVecOrReg (aget ops 2)))
+      (let [(values d n r) (values (mustVec (aget ops 0) 0) (mustVec (aget ops 1) 0) (mustVec (aget ops 2) 0))]
+        (when (== (v3Kind k) "logic")
+          (return (lit Inst :Op OpV3 :Sf (.-q d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Sys (conv uint32 k)) true))
+
+        (return (lit Inst :Op OpV3 :Sf (.-q d) :S (== (.-kind d) \s) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Sys (conv uint32 k)) true)))
+
+    (when [k (nameIndex (subslice v2Names) m)] (and (>= k 0) ^:go/paren (or (== (len ops) 2) ^:go/paren (and (== (len ops) 3) (>= k 8) (<= k 12))))
+      (let [(values d n) (values (mustVec (aget ops 0) 0) (mustVec (aget ops 1) 0))]
+        (when (and (== (len ops) 3) (!= (value (aget ops 2)) 0))
+          (ferr "a compare with a constant other than 0"))
+
+        (let [in (lit Inst :Op OpV2 :Sf (.-q d) :S (== (.-kind d) \s) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Sys (conv uint32 k))]
+          (when (or (== k 6) (== k 7))
+            (set! (.-Size in) (conv uint8 (- k 6))))
+
+          (return in true))))
+
+    (ferr "SIMD mnemonic %s" m)
+    (return (lit Inst) false)))
+
+
+^{:go/end 796} (go/func isVecOrReg ^bool [^{:tag (* Sx)} o]
+  (when [(values _ ok) (asVec o)] ok
+    (return true))
+
+  (let [(values _ ok) (asReg o)]
+    ^{:line 795} ok))
+
+
+
+^{:go/end 808} (go/func tableRegs "tableRegs is a TBL's list of registers ({v1.16b, v2.16b} or {v1.16b-v2.16b}): the first and the count.\n" [^{:tag (* Sx)} o] :results [uint8 int64]
+  (when (or (!= (.head o) "rlist") (< (len (.-List o)) 2))
+    (ferr "not a register list: %s" o))
+
+  (when (and (== (len (.-List o)) 2) (== (.head (aget (.-List o) 1)) "range"))
+    (let [(values a b) (values (mustVec (aget (.-List (aget (.-List o) 1)) 1) \v) (mustVec (aget (.-List (aget (.-List o) 1)) 2) \v))]
+      (return (.-n a) (+ (conv int64 (bit-and (- (.-n b) (.-n a)) 31)) 1))))
+
+  (return (.-n (mustVec (aget (.-List o) 1) \v)) (conv int64 (- (len (.-List o)) 1))))
+
+
+
+^{:go/end 823} (go/func vimmPattern "vimmPattern is a modified immediate's 64-bit pattern: imm8 shifted (msl: ones shifted in) in elements of size.\n" ^uint64 [^uint64 v ^uint8 size ^int64 sh ^bool msl]
+  (let [x (<< v (conv uint sh))]
+    (when msl
+      (set! x bit-or (- ^uint64 (<< 1 (conv uint sh)) 1)))
+
+    (switch size
+      (case [0]
+        (return (* (bit-and x 255) 0x0101010101010101)))
+      (case [1]
+        (return (* (bit-and x 65535) 0x0001000100010001))))
+
+    (* (bit-and x 4294967295) 0x0000000100000001)))
+
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the execution
+
+^{:go/end 835} (go/func lane ^uint64 [^{:tag (array 2 uint64)} v ^int i ^uint e]
+  (let [b (* (conv uint i) e)
+      ^{:line 830} x (>> (aget v (/ b 64)) (% b 64))]
+    (when (== e 64)
+      (return x))
+
+    (bit-and x (- ^uint64 (<< 1 e) 1))))
+
+
+^{:go/end 845} (go/func setLane [^{:tag (* (array 2 uint64))} v ^int i ^uint e ^uint64 x]
+  (let [b (* (conv uint i) e)]
+    (when (== e 64)
+      (aset v (/ b 64) x)
+      (return))
+
+    (let [m (<< (conv uint64 (- ^uint64 (<< 1 e) 1)) (% b 64))]
+      (aset v (/ b 64) (bit-or (bit-and-not (aget v (/ b 64)) m) (bit-and (<< x (% b 64)) m))))))
+
+
+^{:go/end 849} (go/func sx ^int64 [^uint64 x ^uint e]
+  (>> (conv int64 (<< x (- 64 e))) (- 64 e)))
+
+
+^{:go/end 856} (go/func emask ^uint64 [^uint e]
+  (when (== e 64)
+    (return 18446744073709551615))
+
+  (- ^uint64 (<< 1 e) 1))
+
+
+(go/const ^{:val 134217728} fpQC (<< 1 27))
+
+
+^{:go/end 871} (go/method satS "sat is a signed or unsigned value saturated to e bits (QC when it was).\n" ^uint64 [^{:tag (* CPU)} c ^int64 v ^uint e]
+  (let [(values lo hi) (values (- (<< (conv int64 1) (- e 1))) (- (<< (conv int64 1) (- e 1)) 1))]
+    (cond (< v lo) (do
+        (set! (.-FPSR c) bit-or fpQC)
+        (set! v lo))
+      (> v hi) (do
+        (set! (.-FPSR c) bit-or fpQC)
+        (set! v hi)))
+
+    (bit-and (conv uint64 v) (emask e))))
+
+
+^{:go/end 913} (go/method qadd ^uint64 [^{:tag (* CPU)} c ^uint64 x ^uint64 y ^uint e ^bool signed ^bool sub]
+  (when signed
+    (let [(values a b) (values (sx x e) (sx y e))]
+      (when (< e 64)
+        (when sub
+          (return (.satS c (- a b) e)))
+
+        (return (.satS c (+ a b) e)))
+
+      (let [^int64 s (zero int64)
+          ^{:line 883 :tag bool} ovf (zero bool)]
+        (if sub (do
+            (set! s (- a b))
+            (set! ovf (< (bit-and (bit-xor a b) (bit-xor a s)) 0)))
+          (do
+            (set! s (+ a b))
+            (set! ovf (< (bit-and (bit-xor a s) (bit-xor b s)) 0))))
+
+        (when ovf
+          (set! (.-FPSR c) bit-or fpQC)
+          (when (< a 0)
+            (return (<< 1 63)))
+
+          (return (- (<< 1 63) 1)))
+
+        (return (conv uint64 s)))))
+
+  (when sub
+    (when (< x y)
+      (set! (.-FPSR c) bit-or fpQC)
+      (return 0))
+
+    (return (- x y)))
+
+  (let [(values s carry) (bits/Add64 x y 0)]
+    (when (or (!= carry 0) (> s (emask e)))
+      (set! (.-FPSR c) bit-or fpQC)
+      (return (emask e)))
+
+    ^{:line 912} s))
+
+
+
+^{:go/end 935} (go/func shl "shl is the register shift (SSHL, USHL): by the signed low byte of y, right when negative.\n" ^uint64 [^uint64 x ^uint64 y ^uint e ^bool signed]
+  (let [s (conv int64 (conv int8 y))]
+    (when (>= s 0)
+      (when (>= s (conv int64 e))
+        (return 0))
+
+      (return (bit-and (<< x (conv uint s)) (emask e))))
+
+    (let [r (conv uint (- s))]
+      (when signed
+        (when (>= r e)
+          (set! r (- e 1)))
+
+        (return (bit-and (conv uint64 (>> (sx x e) r)) (emask e))))
+
+      (when (>= r e)
+        (return 0))
+
+      (>> x r))))
+
+
+^{:go/end 942} (go/func abs64 ^uint64 [^int64 v]
+  (when (< v 0)
+    (return (conv uint64 (- v))))
+
+  (conv uint64 v))
+
+
+^{:go/end 1024} (go/method v3 ^uint64 [^{:tag (* CPU)} c ^uint32 k ^uint64 x ^uint64 y ^uint64 d ^uint e]
+  ^{:go/breaks [[3 1023]]} (let [m (emask e)
+      ^{:line 946} t ^{:go/breaks [[3 950]] :go/end 951} (fn ^uint64 [^bool b]
+        (when b
+          (return m))
+
+        0)
+
+      (values sa sb) (values (sx x e) (sx y e))]
+    (switch k
+      (case [0]
+        (return (bit-and (+ x y) m)))
+      (case [1]
+        (return (bit-and (- x y) m)))
+      (case [10]
+        (return (t (== x y))))
+      (case [11]
+        (return (t (> sa sb))))
+      (case [12]
+        (return (t (> x y))))
+      (case [13]
+        (return (t (>= sa sb))))
+      (case [14]
+        (return (t (>= x y))))
+      (case [15]
+        (return (t (!= (bit-and x y) 0))))
+      (case [16 38]
+        (when (> sa sb)
+          (return x))
+
+        (return y))
+      (case [17 39]
+        (when (> x y)
+          (return x))
+
+        (return y))
+      (case [18 40]
+        (when (< sa sb)
+          (return x))
+
+        (return y))
+      (case [19 41]
+        (when (< x y)
+          (return x))
+
+        (return y))
+      (case [20]
+        (return (bit-and (conv uint64 (>> (+ sa sb) 1)) m)))
+      (case [21]
+        (return (bit-and (>> (+ x y) 1) m)))
+      (case [22]
+        (return (bit-and (conv uint64 (>> (+ sa sb 1) 1)) m)))
+      (case [23]
+        (return (bit-and (>> (+ x y 1) 1) m)))
+      (case [24]
+        (return (bit-and (conv uint64 (>> (- sa sb) 1)) m)))
+      (case [25]
+        (return (bit-and (conv uint64 (>> (- (conv int64 x) (conv int64 y)) 1)) m)))
+      (case [26 27 28 29]
+        (return (.qadd c x y e (== (% k 2) 0) (>= k 28))))
+      (case [30]
+        (return (bit-and (abs64 (- sa sb)) m)))
+      (case [31]
+        (return (bit-and (abs64 (- (conv int64 x) (conv int64 y))) m)))
+      (case [32]
+        (return (bit-and (+ d (abs64 (- sa sb))) m)))
+      (case [33]
+        (return (bit-and (+ d (abs64 (- (conv int64 x) (conv int64 y)))) m)))
+      (case [34]
+        (return (bit-and (* x y) m)))
+      (case [35]
+        (return (bit-and (+ d (* x y)) m)))
+      (case [36]
+        (return (bit-and (- d (* x y)) m)))
+      (case [37]
+        (return (bit-and (+ x y) m)))
+      (case [42 43]
+        (return (shl x y e (== k 42)))))
+
+    0))
+
+
+
+^{:go/end 1032} (go/method vwrite "vwrite is a vector result: Q's 128 bits, or the low 64 and the high cleared.\n" [^{:tag (* CPU)} c ^uint8 r ^{:tag (array 2 uint64)} v ^bool q]
+  (when (not q)
+    (aset v 1 0))
+
+  (aset (.-Q c) r v))
+
+
+^{:go/end 1100} (go/method execV2 ^{:tag (array 2 uint64)} [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint e ^int n]
+  (let [a (aget (.-Q c) (.-Rn in))
+      ^{:line 1036 :tag (array 2 uint64)} r (zero (array 2 uint64))
+      ^{:line 1037} m (emask e)]
+    (switch (.-Sys in)
+      (case [0 1 2]
+        (let [cont (aget (lit (slice uint) 64 16 32) (.-Sys in))
+            ^{:line 1041} per (conv int (/ cont e))]
+          (for [i 0] (< i n) (inc! i)
+            (let [base (* (/ i per) per)]
+              (setLane (addr r) (- (+ base per) 1 (- i base)) e (lane a i e))))
+
+          (return r)))
+      (case [15]
+        (for [i 0] (< i (/ 64 (conv int e))) (inc! i)
+          (setLane (addr r) i e (bit-and (lane a i (* 2 e)) m)))
+
+        (when (.-Sf in)
+          (set! r (lit (array 2 uint64) (aget (aget (.-Q c) (.-Rd in)) 0) (aget r 0))))
+
+        (return r)))
+
+    (for [i 0] (< i n) (inc! i)
+      (let [x (lane a i e)
+          ^{:line 1058} s (sx x e)
+          ^{:line 1059} t ^{:go/breaks [[3 1063]] :go/end 1064} (fn ^uint64 [^bool b]
+            (when b
+              (return m))
+
+            0)
+
+          ^{:line 1065 :tag uint64} v (zero uint64)]
+        (switch (.-Sys in)
+          (case [3]
+            (if (== e 64)
+              (set! v (- (conv uint64 (bits/LeadingZeros64 (conv uint64 (bit-xor s (>> s 63))))) 1))
+
+              (let [y (bit-and (conv uint64 (bit-xor s (>> s 63))) m)]
+                (set! v (- (conv uint64 (bits/LeadingZeros64 y)) (conv uint64 (- 64 e)) 1)))))
+
+          (case [4]
+            (set! v (- (conv uint64 (bits/LeadingZeros64 x)) (conv uint64 (- 64 e)))))
+          (case [5]
+            (set! v (conv uint64 (bits/OnesCount64 x))))
+          (case [6]
+            (set! v (bit-and (bit-not x) m)))
+          (case [7]
+            (set! v (conv uint64 (bits/Reverse8 (conv uint8 x)))))
+          (case [8]
+            (set! v (t (> s 0))))
+          (case [9]
+            (set! v (t (>= s 0))))
+          (case [10]
+            (set! v (t (== s 0))))
+          (case [11]
+            (set! v (t (<= s 0))))
+          (case [12]
+            (set! v (t (< s 0))))
+          (case [13]
+            (set! v (bit-and (abs64 s) m)))
+          (case [14]
+            (set! v (bit-and (conv uint64 (- s)) m))))
+
+        (setLane (addr r) i e v)))
+
+    ^{:line 1099} r))
+
+
+
+^{:go/end 1273} (go/method execSIMD "execSIMD executes an Advanced SIMD instruction.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [e (<< (conv uint 8) (.-Size in))
+      ^{:line 1105} width 64]
+    (when (.-Sf in)
+      (set! width 128))
+
+    (when (and (== (.-Op in) OpV2) ^:go/paren (or (== (.-Sys in) 6) (== (.-Sys in) 7)))
+      (set! e 8))
+
+    (let [n (/ width (conv int e))]
+      (when (.-S in)
+        (set! n 1))
+
+      (switch (.-Op in)
+        (case [OpV3]
+          (let [(values a b d) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)) (aget (.-Q c) (.-Rd in)))
+              ^{:line 1119 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+            (switch (.-Sys in)
+              (case [2 3 4 5 6 7 8 9]
+                (for [h 0] (< h 2) (inc! h)
+                  (let [(values x y z) (values (aget a h) (aget b h) (aget d h))]
+                    (aset r h (aget (lit (array ... uint64) (bit-and x y) (bit-and-not x y) (bit-or x y) (bit-or x (bit-not y)) (bit-xor x y) (bit-xor y (bit-and (bit-xor y x) z)) (bit-xor z (bit-and (bit-xor z x) y)) (bit-xor z (bit-and-not (bit-xor z x) y))) (- (.-Sys in) 2))))))
+
+              (case [37 38 39 40 41]
+                (for [i 0] (< i n) (inc! i)
+                  (let [(values src j) (values a (* 2 i))]
+                    (when (>= j n)
+                      (set! (values src j) (values b (- j n))))
+
+                    (setLane (addr r) i e (.v3 c (.-Sys in) (lane src j e) (lane src (+ j 1) e) 0 e)))))
+
+              (default
+                (for [i 0] (< i n) (inc! i)
+                  (setLane (addr r) i e (.v3 c (.-Sys in) (lane a i e) (lane b i e) (lane d i e) e)))))
+
+
+            (.vwrite c (.-Rd in) r (.-Sf in))))
+        (case [OpV2]
+          (.vwrite c (.-Rd in) (.execV2 c in e n) (.-Sf in)))
+        (case [OpVACR]
+          (let [a (aget (.-Q c) (.-Rn in))
+              ^{:line 1144 :tag uint64} acc (zero uint64)]
+            (for [i 0] (< i n) (inc! i)
+              (let [x (lane a i e)]
+                (when (and (== i 0) (>= (.-Sys in) 1) (<= (.-Sys in) 4))
+                  (set! acc x)
+                  (continue))
+
+                (switch (.-Sys in)
+                  (case [0 6]
+                    (set! acc + x))
+                  (case [5]
+                    (set! acc + (conv uint64 (sx x e))))
+                  (default
+                    (set! acc (.v3 c (aget (lit (array ... uint32) 0 16 17 18 19) (.-Sys in)) acc x 0 e))))))
+
+
+            (let [re e]
+              (when (>= (.-Sys in) 5)
+                (set! re (* 2 e)))
+
+              (aset (.-Q c) (.-Rd in) (lit (array 2 uint64) (bit-and acc (emask re)) 0)))))
+        (case [OpVDUP]
+          (let [x (lane (aget (.-Q c) (.-Rn in)) (conv int (.-Imm in)) e)
+              ^{:line 1167 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+            (for [i 0] (< i n) (inc! i)
+              (setLane (addr r) i e x))
+
+            (.vwrite c (.-Rd in) r (.-Sf in))))
+        (case [OpVDUPG]
+          (let [x (bit-and (aget (.-X c) (.-Rn in)) (emask e))]
+            (when (== (.-Rn in) 31)
+              (set! x 0))
+
+            (let [^{:tag (array 2 uint64)} r (zero (array 2 uint64))]
+              (for [i 0] (< i n) (inc! i)
+                (setLane (addr r) i e x))
+
+              (.vwrite c (.-Rd in) r (.-Sf in)))))
+        (case [OpVMOVG]
+          (let [x (lane (aget (.-Q c) (.-Rn in)) (conv int (.-Imm in)) e)]
+            (when (.-Signed in)
+              (set! x (conv uint64 (sx x e))))
+
+            (.set c (.-Rd in) x (.-Sf in) false)))
+        (case [OpVINSG]
+          (let [x (aget (.-X c) (.-Rn in))]
+            (when (== (.-Rn in) 31)
+              (set! x 0))
+
+            (let [r (aget (.-Q c) (.-Rd in))]
+              (setLane (addr r) (conv int (.-Imm in)) e (bit-and x (emask e)))
+              (aset (.-Q c) (.-Rd in) r))))
+        (case [OpVINSE]
+          (let [r (aget (.-Q c) (.-Rd in))]
+            (setLane (addr r) (conv int (.-Imm in)) e (lane (aget (.-Q c) (.-Rn in)) (conv int (.-Imm2 in)) e))
+            (aset (.-Q c) (.-Rd in) r)))
+        (case [OpVSHI]
+          (.execShift c in e n))
+        (case [OpVIMM]
+          (let [p (conv uint64 (.-Imm in))
+              ^{:line 1204} d (aget (.-Q c) (.-Rd in))
+              ^{:line 1205 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+            (for [h 0] (< h 2) (inc! h)
+              (aset r h (aget (lit (array ... uint64) p (bit-not p) (bit-or (aget d h) p) (bit-and-not (aget d h) p)) (.-Sys in))))
+
+            (.vwrite c (.-Rd in) r (.-Sf in))))
+        (case [OpVPERM]
+          (let [(values a b) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)))
+              ^{:line 1212 :tag (array 2 uint64)} r (zero (array 2 uint64))
+              ^{:line 1213} half (/ n 2)]
+            (for [i 0] (< i n) (inc! i)
+              (let [^uint64 x (zero uint64)]
+                (switch (.-Sys in)
+                  (case [1 5]
+                    (let [j (+ (* 2 i) (conv int (/ (.-Sys in) 5)))]
+                      (if (< j n)
+                        (set! x (lane a j e))
+
+                        (set! x (lane b (- j n) e)))))
+
+                  (case [2 6]
+                    (let [(values p o) (values (/ i 2) (conv int (/ (.-Sys in) 6)))]
+                      (if (== (% i 2) 0)
+                        (set! x (lane a (+ (* 2 p) o) e))
+
+                        (set! x (lane b (+ (* 2 p) o) e)))))
+
+                  (case [3 7]
+                    (let [p (+ (/ i 2) (* (conv int (/ (.-Sys in) 7)) half))]
+                      (if (== (% i 2) 0)
+                        (set! x (lane a p e))
+
+                        (set! x (lane b p e))))))
+
+
+                (setLane (addr r) i e x)))
+
+            (.vwrite c (.-Rd in) r (.-Sf in))))
+        (case [OpVEXT]
+          (let [(values a b) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)))
+              ^{:line 1244} bytes (/ width 8)
+              ^{:line 1245 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+            (for [i 0] (< i bytes) (inc! i)
+              (let [j (+ i (conv int (.-Imm in)))
+                  ^{:line 1248 :tag uint64} x (zero uint64)]
+                (if (< j bytes)
+                  (set! x (lane a j 8))
+
+                  (set! x (lane b (- j bytes) 8)))
+
+                (setLane (addr r) i 8 x)))
+
+            (.vwrite c (.-Rd in) r (.-Sf in))))
+        (case [OpVTBL]
+          (let [idx (aget (.-Q c) (.-Rm in))
+              ^{:line 1259} r (aget (.-Q c) (.-Rd in))]
+            (when (not (.-N in))
+              (set! r (lit (array 2 uint64))))
+
+            (for [i 0] (< i (/ width 8)) (inc! i)
+              (let [j (conv int (lane idx i 8))]
+                (when (< j (* 16 (conv int (.-Imm in))))
+                  (setLane (addr r) i 8 (lane (aget (.-Q c) (% (+ (conv int (.-Rn in)) (/ j 16)) 32)) (% j 16) 8)))))
+
+
+            (.vwrite c (.-Rd in) r (.-Sf in))))
+        (case [OpV3D]
+          (.execV3D c in e))))))
+
+
+
+^{:go/end 1340} (go/method execShift [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint e ^int n]
+  (let [(values a d) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rd in)))
+      ^{:line 1277} sh (conv uint (.-Imm in))
+      ^{:line 1278} m (emask e)
+      ^{:line 1279 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+    (switch (.-Sys in)
+      (case [11]
+        (for [i 0] (< i (/ 64 (conv int e))) (inc! i)
+          (setLane (addr r) i e (bit-and (>> (lane a i (* 2 e)) sh) m)))
+
+        (when (.-Sf in)
+          (set! r (lit (array 2 uint64) (aget d 0) (aget r 0))))
+
+        (aset (.-Q c) (.-Rd in) r)
+        (return))
+      (case [12 13]
+        (let [src (aget a 0)]
+          (when (.-Sf in)
+            (set! src (aget a 1)))
+
+          (for [i 0] (< i (/ 64 (conv int e))) (inc! i)
+            (let [x (lane (lit (array 2 uint64) src 0) i e)]
+              (when (== (.-Sys in) 12)
+                (set! x (conv uint64 (sx x e))))
+
+              (setLane (addr r) i (* 2 e) (bit-and (<< x sh) (emask (* 2 e))))))
+
+          (aset (.-Q c) (.-Rd in) r)
+          (return))))
+
+    (for [i 0] (< i n) (inc! i)
+      (let [(values x z) (values (lane a i e) (lane d i e))
+          ^{:line 1307 :tag uint64} v (zero uint64)]
+        (switch (.-Sys in)
+          (case [0 2 4 6]
+            (let [s (sx x e)
+                ^{:line 1311} q (>> (>> s (- sh 1)) 1)]
+              (when (and (>= (.-Sys in) 4) (== (bit-and (>> s (- sh 1)) 1) 1))
+                (inc! q))
+
+              (set! v (bit-and (conv uint64 q) m))))
+          (case [1 3 5 7]
+            (let [q (>> (>> x (- sh 1)) 1)]
+              (when (and (>= (.-Sys in) 5) (== (bit-and (>> x (- sh 1)) 1) 1))
+                (inc! q))
+
+              (set! v (bit-and q m))))
+          (case [8]
+            (let [mk (>> m sh)]
+              (when (>= sh 64)
+                (set! mk 0))
+
+              (set! v (bit-or (bit-and-not z mk) (bit-and (>> (>> x (- sh 1)) 1) mk)))))
+          (case [9]
+            (set! v (bit-and (<< x sh) m)))
+          (case [10]
+            (let [mk (bit-and (<< m sh) m)]
+              (set! v (bit-or (bit-and-not z mk) (bit-and (<< x sh) mk))))))
+
+        (when (or (== (.-Sys in) 2) (== (.-Sys in) 3) (== (.-Sys in) 6) (== (.-Sys in) 7))
+          (set! v (bit-and (+ z v) m)))
+
+        (setLane (addr r) i e v)))
+
+    (.vwrite c (.-Rd in) r (.-Sf in))))
+
+
+^{:go/end 1401} (go/method execV3D [^{:tag (* CPU)} c ^{:tag (* Inst)} in ^uint e]
+  (let [(values a b d) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)) (aget (.-Q c) (.-Rd in)))
+      ^{:line 1344} hi 0]
+    (when (.-Sf in)
+      (set! hi 1))
+
+    (let [k (.-Sys in)
+        ^{:line 1349} signed (== (% k 2) 0)
+        ^{:line 1350} ext ^{:go/end 1355} (fn ^uint64 [^uint64 x]
+          (when signed
+            (return (conv uint64 (sx x e))))
+
+          ^{:line 1354} x)
+
+        ^{:line 1356} n (/ 64 (conv int e))
+        ^{:line 1357} w (* 2 e)
+        ^{:line 1358} wm (emask w)
+        ^{:line 1359 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+      (when (or (== k 8) (== k 9))
+        (for [i 0] (< i n) (inc! i)
+          (let [(values x y) (values (lane a i w) (lane b i w))]
+            (when (== k 9)
+              (set! y (- y)))
+
+            (setLane (addr r) i e (>> (bit-and (+ x y) wm) e))))
+
+        (when (.-Sf in)
+          (set! r (lit (array 2 uint64) (aget d 0) (aget r 0))))
+
+        (aset (.-Q c) (.-Rd in) r)
+        (return))
+
+      (for [i 0] (< i n) (inc! i)
+        (let [(values nh mh) (values (lane (lit (array 2 uint64) (aget a hi) 0) i e) (lane (lit (array 2 uint64) (aget b hi) 0) i e))
+            ^{:line 1376 :tag uint64} v (zero uint64)]
+          (switch k
+            (case [0 1]
+              (set! v (+ (ext nh) (ext mh))))
+            (case [2 3]
+              (set! v (+ (lane a i w) (ext mh))))
+            (case [4 5]
+              (set! v (- (ext nh) (ext mh))))
+            (case [6 7]
+              (set! v (- (lane a i w) (ext mh))))
+            (case [10 11 12 13]
+              (set! v (abs64 (- (conv int64 (ext nh)) (conv int64 (ext mh)))))
+              (when (<= k 11)
+                (set! v + (lane d i w))))
+
+            (case [14 15]
+              (set! v (+ (lane d i w) (* (ext nh) (ext mh)))))
+            (case [16 17]
+              (set! v (- (lane d i w) (* (ext nh) (ext mh)))))
+            (case [18 19]
+              (set! v (* (ext nh) (ext mh)))))
+
+          (setLane (addr r) i w (bit-and v wm))))
+
+      (aset (.-Q c) (.-Rd in) r))))
+
+
+
+
+^{:go/end 1413} (go/method injectSIMD "injectSIMD is the injected fault `x` for an Advanced SIMD instruction: a general destination's lowest bit (UMOV, SMOV), else\nthe vector's.\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (== (.-Op in) OpVMOVG)
+    (when (!= (.-Rd in) 31)
+      (set! (aget (.-X c) (.-Rd in)) bit-xor 1))
+
+    (return))
+
+  (set! (aget (aget (.-Q c) (.-Rd in)) 0) bit-xor 1))
+
+
+(go/var _ fmt/Sprintf)

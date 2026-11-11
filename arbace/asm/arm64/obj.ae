@@ -258,7 +258,7 @@
    "MOVW_GOTOFF_G0" 0x12c "MOVW_GOTOFF_G0_NC" 0x12d "MOVW_GOTOFF_G1" 0x12e "MOVW_GOTOFF_G1_NC" 0x12f "MOVW_GOTOFF_G2" 0x130
    "MOVW_GOTOFF_G2_NC" 0x131 "MOVW_GOTOFF_G3" 0x132 "GOTREL64" 0x133 "GOTREL32" 0x134 "GOT_LD_PREL19" 0x135
    "LD64_GOTOFF_LO15" 0x136 "ADR_GOT_PAGE" 0x137 "LD64_GOT_LO12_NC" 0x138 "LD64_GOTPAGE_LO15" 0x139 "PLT32" 0x13a
-   "GOTPCREL32" 0x13b
+   "GOTPCREL32" 0x13b "FUNCINIT64" 0x13d
    "TLSGD_ADR_PREL21" 0x200 "TLSGD_ADR_PAGE21" 0x201 "TLSGD_ADD_LO12_NC" 0x202 "TLSGD_MOVW_G1" 0x203 "TLSGD_MOVW_G0_NC" 0x204
    "TLSLD_ADR_PREL21" 0x205 "TLSLD_ADR_PAGE21" 0x206 "TLSLD_ADD_LO12_NC" 0x207 "TLSLD_MOVW_G1" 0x208 "TLSLD_MOVW_G0_NC" 0x209
    "TLSLD_LD_PREL19" 0x20a "TLSLD_MOVW_DTPREL_G2" 0x20b "TLSLD_MOVW_DTPREL_G1" 0x20c "TLSLD_MOVW_DTPREL_G1_NC" 0x20d
@@ -335,9 +335,14 @@
         nm (cond
              (nil? k) (case spec
                         nil (if pcrel ({2 "PREL16" 4 "PREL32" 8 "PREL64"} size) ({2 "ABS16" 4 "ABS32" 8 "ABS64"} size))
-                        "plt" (when (and pcrel (= size 4)) "PLT32")
-                        "gotpcrel" (when (and pcrel (= size 4)) "GOTPCREL32")
+                        ;; %pltpcrel and %gotpcrel (ARS49 (a)): a .word's alone, else LLVM's error; PC-relative, PREL32
+                        ("plt" "pltpcrel" "gotpcrel")
+                        (if (= size 4)
+                          (cond pcrel "PREL32" (= spec "gotpcrel") "GOTPCREL32" :else "PLT32")
+                          (o/fail (str (if (= spec "gotpcrel") "%gotpcrel" "%pltpcrel") " can only be used in a .word directive")))
                         "dtprel" (when (and (not pcrel) (= size 8)) "TLS_DTPREL64")
+                        "funcinit" (when (and (not pcrel) (= size 8)) "FUNCINIT64")
+                        "auth" (when (and (not pcrel) (= size 8)) "AUTH_ABS64")
                         nil)
              (= k :call26) (when (contains? #{nil "plt"} spec) "CALL26")
              (= k :branch26) (when (contains? #{nil "plt"} spec) "JUMP26")
@@ -362,14 +367,14 @@
     (or (get reloc-numbers nm)
         ;; a specifier the table does not hold (the PAuth ABI's :got_auth:, ...) is not written yet; a known one on the wrong
         ;; instruction is LLVM's error
-        (if (and spec (not (re-matches #"(lo12|abs|pg_hi21(_nc)?|got(_lo12|page_lo15|_auth|_auth_lo12)?|tlsdesc_auth(_lo12)?|gottprel(_lo12|_g1|_g0_nc)?|tlsdesc(_lo12)?|tlsgd|tlsld|(d)?tprel_(hi12|lo12(_nc)?|g[0-2](_nc)?)|dtprel|abs_g[0-3](_s|_nc)?|prel_g[0-3](_nc)?|gotoff_g[0-3](_nc)?|tlsdesc_off_g1|tlsdesc_off_g0_nc|plt|gotpcrel|dtprel)" spec)))
+        (if (and spec (not (re-matches #"(lo12|abs|pg_hi21(_nc)?|got(_lo12|page_lo15|_auth|_auth_lo12)?|tlsdesc_auth(_lo12)?|gottprel(_lo12|_g1|_g0_nc)?|tlsdesc(_lo12)?|tlsgd|tlsld|(d)?tprel_(hi12|lo12(_nc)?|g[0-2](_nc)?)|dtprel|abs_g[0-3](_s|_nc)?|prel_g[0-3](_nc)?|gotoff_g[0-3](_nc)?|tlsdesc_off_g1|tlsdesc_off_g0_nc|plt|pltpcrel|gotpcrel|dtprel|funcinit|auth)" spec)))
           (o/unsupported :relocation-specifier (str ":" spec ":"))
           (bad)))))
 
 ;; needsRelocateWithSymbol: a specifier with S_GOT's bit (GOT, GOTTPREL, DTPREL, TPREL and their parts) or PLT, GOTPCREL
 (defn- keep-symbol? [spec]
   (boolean (when spec (let [s (str/lower-case (str spec))]
-                        (or (str/includes? s "got") (str/includes? s "tprel") (#{"plt" "gotpcrel"} s))))))
+                        (or (str/includes? s "got") (str/includes? s "tprel") (#{"plt" "pltpcrel" "gotpcrel"} s))))))
 
 (def ^:private tls-specs
   (into #{} (map str/upper-case)
@@ -393,13 +398,48 @@
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the directives AArch64's parser and streamer add or define otherwise
 
-(defn- data-spec
-  "A data value's specifier written AArch64's way, `%dtprel(var)` (AArch64AsmParser's parseDataExpr: (pct dtprel E)), as the
-  shared assembler's (at E dtprel)."
+(defn- strings->syms
+  "A data expression's strings as the names they are (`.quad \"_g 6\"@AUTH(db,0xff,addr)`: a directive's argument reads a
+  string as a string)."
   [e]
-  (if (and (seq? e) (= 'pct (first e)) (= 3 (count e)) (= "dtprel" (str/lower-case (str (second e)))))
-    (list 'at (nth e 2) "dtprel")
-    e))
+  (cond (string? e) (list 'sym e)
+        (and (seq? e) (#{'sym 'float 'local} (first e))) e
+        (seq? e) (apply list (first e) (map strings->syms (rest e)))
+        :else e))
+
+(defn- data-spec
+  "A data value's specifier written AArch64's way (AArch64AsmParser's parseDataExpr, ARS49 (a)): `%NAME(E)` (parseExprWithSpecifier,
+  parsePercentSpecifierName: pltpcrel, gotpcrel, dtprel, funcinit) as the shared assembler's (at E NAME); `E@AUTH(KEY,DISC[,addr])`
+  kept, its specifier `auth` (AArch64AuthMCExpr, S_AUTH and S_AUTHADDR alike: R_AARCH64_AUTH_ABS64)."
+  [e]
+  (let [e (strings->syms e)]
+    (cond
+      (and (seq? e) (= 'pct (first e)))
+      (let [nm (str/lower-case (str (o/sym-name (second e))))]
+        (when-not (#{"pltpcrel" "gotpcrel" "dtprel" "funcinit"} nm) (o/fail "invalid relocation specifier" e))
+        (when-not (= 3 (count e)) (o/fail "expected '('" e))
+        (list 'at (nth e 2) nm))
+      (and (seq? e) (= 'at (first e)) (= 4 (count e)))
+      (do (when (and (seq? (second e)) (= 'at (first (second e)))) (o/fail "invalid relocation specifier" (second e)))
+          (list 'at (second e) "auth" (nth e 3)))
+      :else e)))
+
+(defn- auth-bits
+  "The signed pointer's bits written into its 8 bytes (AArch64AsmBackend::applyFixup at ELF): the discriminator at 32, the key
+  (ia 0, ib 1, da 2, db 3) at 60, the address diversity at 63."
+  ^long [[k d addr]]
+  (bit-or (bit-shift-left (long d) 32)
+          (bit-shift-left (long ({"ia" 0 "ib" 1 "da" 2 "db" 3} (str/lower-case (name k)))) 60)
+          (if addr Long/MIN_VALUE 0)))
+
+(defn- data-value!
+  "A data directive's value of `size` bytes, its specifier AArch64's (data-spec); a signed pointer's bits in its bytes."
+  [ctx e ^long size]
+  (let [e (data-spec e)]
+    (o/emit-value! ctx (if (and (seq? e) (= 4 (count e))) (apply list (take 3 e)) e) size)
+    (when (and (seq? e) (= 4 (count e)) (= 8 size))
+      (let [^java.util.ArrayList b (:bytes @(o/cur-data! ctx)) base (- (.size b) 8) v (auth-bits (nth e 3))]
+        (dotimes [i 8] (.set b (+ base i) (bit-or (long (.get b (+ base i))) (bit-and (bit-shift-right v (* 8 i)) 0xff))))))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the build attributes (AR6): .aeabi_subsection and .aeabi_attribute (AArch64TargetStreamer's emitAttributesSubsection and
@@ -500,8 +540,10 @@
 (defn- directive [ctx h args]
   (let [cv (fn [e] (let [e (o/resolve-expr ctx e)] (or (o/const-value e @(:syms ctx)) (o/unsupported :expression (str "." h " " (pr-str e))))))]
     (case h
-      "word" (doseq [e args] (o/emit-value! ctx (data-spec e) 4))
-      ("xword" "dword") (doseq [e args] (o/emit-value! ctx (data-spec e) 8))
+      ("word" "long" "int" "4byte") (doseq [e args] (data-value! ctx e 4))
+      ("xword" "dword" "quad" "8byte") (doseq [e args] (data-value! ctx e 8))
+      ("hword" "short" "value" "2byte") (doseq [e args] (data-value! ctx e 2))
+      "byte" (doseq [e args] (data-value! ctx e 1))
       "align" (o/directive! ctx (cons 'asm/p2align args))
       "inst" (doseq [e args] (emit-word! ctx (cv e) []))
       "tlsdesccall" (let [e (o/resolve-expr ctx (first args))
@@ -559,6 +601,12 @@
    :wrap (fn [t] (binding [*attrs* (atom {:subs [] :active nil})] (t)))
    :finish (fn [ctx] (when *implicit-mapsyms* (implicit-end! ctx)) (attributes-section! ctx))
    :cfi cfi
+   ;; a macro's or a repetition's expanded body read as AArch64's GNU text (AX11's macros, ARS49 (a): macro-hex-int)
+   :read-text (fn [_ctx src] (asm/read-items src {:arch :arm64 :syntax :gnu}))
+   ;; .reloc's relocations merged with the section's own by offset (AX11's order), then PATCHINST last (AXS93:
+   ;; AArch64ELFObjectWriter::sortRelocs, a stable partition)
+   :reloc-directives-merged true
+   :sort-relocs (fn [rs] (vec (concat (remove #(= 0x13c (:type %)) rs) (filter #(= 0x13c (:type %)) rs))))
    :on-data (fn [ctx] (mapping! ctx :data))
    :nops nops
    :nops-max (fn [_] Long/MAX_VALUE)
@@ -572,17 +620,19 @@
   [items]
   (binding [o/*arch* arch] (o/assemble items)))
 
-(defn- assemble-file* [^String path]
+(defn- assemble-file* [^String path defsym]
   (let [items (try (asm/read-items (asm/latin1 path) (asm/dialect "arm64" nil path))
                    (catch arbace.lang.ExceptionInfo e
                      (if (= :syntax (:asm/refused (ex-data e))) {:unsupported :syntax :what (.getMessage e)} (throw e))))]
-    (if (map? items) items (assemble items))))
+    (if (map? items) items (binding [o/*arch* arch] (o/assemble items {:defsym defsym})))))
 
 (defn assemble-file
-  "The object of the file at PATH; with IMPLICIT, as -implicit-mapsyms assembles it (ARS47 (a))."
+  "The object of the file at PATH; with IMPLICIT, as -implicit-mapsyms assembles it (ARS47 (a)); DEFSYM {NAME VALUE}, llvm-mc's
+  --defsym (ARS49 (a))."
   ([^String path] (assemble-file path false))
-  ([^String path implicit]
-   (binding [*implicit-mapsyms* (boolean implicit)] (assemble-file* path))))
+  ([^String path implicit] (assemble-file path implicit nil))
+  ([^String path implicit defsym]
+   (binding [*implicit-mapsyms* (boolean implicit)] (assemble-file* path defsym))))
 
 (defn check-list [lst work record] (binding [o/*arch* arch] (o/check-list assemble-file lst work record)))
 (defn control [subj-path ref-name record] (binding [o/*arch* arch] (o/control assemble-file subj-path ref-name record)))

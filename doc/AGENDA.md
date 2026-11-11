@@ -300,8 +300,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   "As built: AR7"; ARS43 (a), ARS45 (b), ARS46 (b), ARS47 (a), the user's): `a64i-essential` sliced (`--essential`, judged on what it
   ran, slice-foreign control; 1 min 36 s → 36 s; the whole set the `--full` step `a64i-check`, rotated), every error of a file collected
   and judged as llvm-mc's diagnostics, `.org` and `-implicit-mapsyms`, the memory families' synthetic programs (801 cases; coverage 653
-  of 653): the AOT cell 95.0% → 98.2%, completeness 98.7 → 99.5. Proposed ARS48-ARS52. Next: the VM's CPU rows and lockstep of the twelve synthetic programs (ARS44),
-  NEON (ARS48), the reader's `@AUTH`/`%pltpcrel` (ARS49).
+  of 653): the AOT cell 95.0% → 98.2%, completeness 98.7 → 99.5. Proposed ARS48-ARS52. Then `asm-ar8` (from `mac/next` `4b8fc77e3`;
+  "As built: AR8"; ARS49 (a), AXS93, ARS48 (a), the user's): `@AUTH`/`%pltpcrel` read and assembled (`(asm/unread ...)` for refused
+  statements inside conditionals, `--defsym`, readelf's GNU view), `.reloc` merged with PATCHINST last (sortRelocs), NEON's integer lanes
+  in a64i (`simd.ae`, `synth-neon` 1,769 cases, coverage 1,358 of 1,358): mc-aarch64-obj 110 of 110, the AOT cell 98.2% → 99.6%,
+  completeness 99.5 → 99.8. Proposed ARS53-ARS55. Next: the VM's CPU rows and lockstep of the thirteen synthetic programs (ARS44),
+  NEON's structure loads and stores (ARS53), the literal pool with the C packs (ARS50).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
