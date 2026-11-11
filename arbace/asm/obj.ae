@@ -54,7 +54,11 @@
    :files (java.util.ArrayList.) :sec-names (java.util.HashMap.)
    :frames (java.util.ArrayList.) :frame (volatile! nil)
    :mode (volatile! 64) :intel (volatile! false)
-   :reloc-directives (java.util.ArrayList.)})   ; .reloc's [OFFSET-EXPR TYPE EXPR] (AR6, arm64's)
+   :reloc-directives (java.util.ArrayList.)   ; .reloc's [OFFSET-EXPR TYPE EXPR] (AR6, arm64's)
+   ;; AX11: the conditionals' stack ({:parent IGNORE :met :ignore :else}), the macros (name -> {:params :body :count}) and their
+   ;; instantiations, the DWARF line table's files (number -> [DIR-INDEX NAME]) and directories, a .loc seen
+   :conds (volatile! []) :macros (java.util.HashMap.) :macro-n (volatile! 0) :depth (volatile! 0)
+   :dwarf-files (java.util.TreeMap.) :dwarf-dirs (java.util.ArrayList.) :loc-seen (volatile! false)})
 
 (defn sym-name ^String [s]
   (cond (symbol? s) (name s) (string? s) s (and (seq? s) (= 'sym (first s))) (str (second s)) :else (fail (str "not a symbol: " (pr-str s)))))
@@ -106,6 +110,8 @@
 (defn ensure-align! [sec ^long a] (swap! sec update :align #(max (long %) a)))
 
 (defn switch! [ctx sec]
+  ;; a .loc does not bleed into another section (MCStreamer::switchSection, AX11; MC/X86's line-table-sections)
+  (when-not (identical? sec (cur-sec ctx)) (vreset! (:loc-seen ctx) false))
   (vreset! (:prev ctx) (cur-sec ctx))
   (vreset! (:cur ctx) sec))
 
@@ -250,9 +256,16 @@
 (defn bytes! [ctx bs]
   (let [^java.util.ArrayList b (:bytes @(cur-data! ctx))] (doseq [v bs] (.add b (bit-and (long v) 0xff)))))
 
+(defn line-entry!
+  "MCDwarfLineEntry::make: a .loc seen makes a line entry at the next instruction or data, which the line program does not
+  write yet (AX11: the line table's header alone)."
+  [ctx]
+  (when @(:loc-seen ctx) (unsupported :debug-line ".loc's line entries (the line program)")))
+
 (defn data!
   "Before data is emitted (emitBytes, emitValueImpl, emitFill): the arch's hook (AArch64's $d mapping symbol)."
   [ctx]
+  (line-entry! ctx)
   (when-let [f (:on-data *arch*)] (f ctx)))
 
 (defn emit-value! [ctx e ^long size]
@@ -282,7 +295,7 @@
 
 (defn code-section? [sec] (pos? (bit-and (long (:flags @sec)) elf/SHF_EXECINSTR)))
 
-(defn emit-insn! [ctx f] ((:emit-insn! *arch*) ctx f))
+(defn emit-insn! [ctx f] (line-entry! ctx) ((:emit-insn! *arch*) ctx f))
 
 (defn type-of [t]
   (let [t (cond (and (seq? t) (#{'at 'pct} (first t))) (str (second t)) (string? t) t :else (str t))]
@@ -446,6 +459,39 @@
               (set32! len-at (- (.size b) fde-start))
               (recur (rest frs) kk cie-start (inc k)))))))))
 
+(defn dwarf-file!
+  "`.file N \"NAME\"` or `.file N \"DIR\" \"NAME\"` (AsmParser::parseDirectiveFile, MCDwarfLineTableHeader::tryGetFile at
+  DWARF 4, llvm-mc's default): a NAME with a directory and no DIR split into both, the directory numbered from 1 in the order
+  met (0: none), file N recorded; the same file again is allowed, another one under N an error."
+  [ctx [n & ss]]
+  (let [[d nm] (if (= 2 (count ss)) ss ["" (first ss)])
+        ^String nm nm ^String d d
+        [d nm] (if (= "" d)
+                 (let [i (.lastIndexOf nm "/")] (if (pos? i) [(subs nm 0 i) (subs nm (inc i))] ["" nm]))
+                 [d nm])
+        ^java.util.ArrayList dirs (:dwarf-dirs ctx)
+        di (if (= "" d) 0 (let [i (.indexOf dirs d)] (if (neg? i) (do (.add dirs d) (.size dirs)) (inc i))))
+        ^java.util.TreeMap fs (:dwarf-files ctx)]
+    (when (< (long n) 1) (unsupported :debug-line (str ".file " n " (DWARF 5's root file)")))
+    (when-let [old (.get fs n)] (when-not (= old [di nm]) (fail "file number already allocated")))
+    (.put fs n [di nm])))
+
+(defn emit-debug-line!
+  "MCDwarfLineTable::emit at DWARF 4 (MCDwarfLineTableHeader::Emit): when a .file N made the table, .debug_line with its
+  header (the directories, the files) and, no line entry being written yet (line-entry!), no line program."
+  [ctx]
+  (let [^java.util.TreeMap fs (:dwarf-files ctx)]
+    (when (pos? (.size fs))
+      (when-not (= (vec (keys fs)) (vec (range 1 (inc (.size fs))))) (unsupported :debug-line "a file number left unassigned"))
+      (section! ctx ".debug_line" elf/SHT_PROGBITS 0 0 nil false)
+      (let [body (vec (concat [(long (or (:min-inst-align *arch*) 1)) 1 1 0xfb 14 13] [0 1 1 1 1 0 0 0 1 0 0 1]
+                              (mapcat #(concat (string-bytes %) [0]) (:dwarf-dirs ctx)) [0]
+                              (mapcat (fn [[di nm]] (concat (string-bytes nm) [0] (uleb di) [0 0])) (vals fs)) [0]))
+            u32 (fn [^long v] (for [i (range 4)] (bit-and (bit-shift-right v (* 8 i)) 0xff)))
+            hdr (concat [4 0] (u32 (count body)) body)]
+        (data! ctx)
+        (bytes! ctx (concat (u32 (count hdr)) hdr))))))
+
 (defn expr-text
   "A section's name read as an expression (`.note.GNU-stack` is (- .note.GNU stack)), as its tokens spell it (parseSectionName)."
   ^String [e]
@@ -540,9 +586,13 @@
         (register! ctx n)
         (swap! sym assoc :var e)
         (vswap! (:syms ctx) assoc n e))
-      "file" (if (and (= 1 (count args)) (string? (first args)))
-               (.add ^java.util.ArrayList (:files ctx) [(first args) (.size ^java.util.ArrayList (:order ctx))])
-               (unsupported :debug-line (str ".file " (pr-str args))))
+      "file" (cond (and (= 1 (count args)) (string? (first args)))
+                   (.add ^java.util.ArrayList (:files ctx) [(first args) (.size ^java.util.ArrayList (:order ctx))])
+                   ;; .file N "NAME" or .file N "DIR" "NAME": the line table's file N (AX11)
+                   (and (= 1 (count args)) (vector? (first args)) (integer? (ffirst args)) (every? string? (rest (first args)))
+                        (<= 2 (count (first args)) 3))
+                   (dwarf-file! ctx (first args))
+                   :else (unsupported :debug-line (str ".file " (pr-str args))))
       "ident" (let [cur (cur-sec ctx) prev @(:prev ctx)
                     sec (section! ctx ".comment" elf/SHT_PROGBITS (bit-or elf/SHF_MERGE elf/SHF_STRINGS) 1 nil false)]
                 (data! ctx)
@@ -550,7 +600,10 @@
                 (bytes! ctx (concat (string-bytes (first args)) [0]))
                 (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev))
       "even" (if (code-section? (cur-sec ctx)) (align! ctx 2 0 1 nil true) (align! ctx 2 0 1 nil false))
-      "loc" (unsupported :debug-line ".loc")
+      "loc" (let [a (first args) n (if (vector? a) (first a) a)]
+              (when-not (integer? n) (unsupported :debug-line (str ".loc " (pr-str args))))
+              (when-not (.containsKey ^java.util.TreeMap (:dwarf-files ctx) n) (fail "unassigned file number in '.loc' directive"))
+              (vreset! (:loc-seen ctx) true))
       "cfi_sections" (when-not (= ['.eh_frame] (vec args)) (unsupported :cfi (str ".cfi_sections " (pr-str args))))
       (if (.startsWith h "cfi_")
         (cfi! ctx h args)
@@ -641,7 +694,7 @@
   "Each chunk's fixups evaluated at the final layout: the resolved ones written into its bytes, the rest relocations
   {:offset :sym KEY :type :addend} of their section."
   [ctx]
-  (let [relocs (java.util.HashMap.)]
+  (let [relocs (java.util.HashMap.) dirs (java.util.LinkedHashMap.)]
     (doseq [sec (:sections ctx) c (:chunks @sec) :when (#{:data :relax} (:kind @c))]
       (let [m @c
             bs (if (= :data (:kind m)) (:bytes m) (java.util.ArrayList. ^java.util.Collection (map #(if (= % :fixup) 0 %) (:bytes (:enc m)))))
@@ -681,22 +734,31 @@
                 (put! 0 true)
                 (.put relocs (:sec m) (conj (vec (.get relocs (:sec m))) {:offset foff :sym key :type type :addend addend}))))))
         (when (= :relax (:kind m)) (swap! c assoc :final (vec bs)))))
-    ;; .reloc's relocations (MCObjectStreamer::emitRelocDirective: pending fixups added after the section's own), in their
-    ;; order: the offset's section and place, the type given, the expression's symbol (a local one in a section as its
-    ;; section symbol) and addend
+    ;; .reloc's relocations (MCObjectStreamer::emitRelocDirective), in their order: the offset's section and place, the type
+    ;; given, the expression's symbol and addend
     (doseq [[off-e type e] (:reloc-directives ctx)]
       (let [vo (value ctx off-e 0)
             [sec o] (or (when-let [a (:add vo)] (sym-offset ctx a 0)) (fail ".reloc offset is not relative to a section"))
             _ (when (or (= :abs sec) (:sub vo)) (fail ".reloc offset is not relative to a section"))
             v (value ctx e 0)
             _ (when (:sub v) (unsupported :expression (str ".reloc " (pr-str e))))
-            add (:add v) oa (when add (sym-offset ctx add 0))
-            sec-sym? (and add (= elf/STB_LOCAL (binding-of ctx add)) oa (not= :abs (first oa)))
-            [key addend] (cond sec-sym? [(sec-key ctx (first oa)) (+ (long (:c v)) (long (second oa)))]
+            add (:add v)
+            ;; AX11: the symbol named, a local one too, not its section's (llvm-mc 23.1.5 keeps `.Lbase` in MC/X86's
+            ;; reloc-directive-*; a section's own symbol names the section)
+            [key addend] (cond (and add (:section-sym @add)) [(sec-key ctx (:section-sym @add)) (long (:c v))]
                                add [(:name @add) (long (:c v))]
                                :else [nil (long (:c v))])]
         (when key (swap! (symbol! ctx key) assoc :used-in-reloc true))
-        (.put relocs sec (conj (vec (.get relocs sec)) {:offset (+ (long o) (long (:c vo))) :sym key :type type :addend addend}))))
+        (.put dirs sec (conj (vec (.get dirs sec)) {:offset (+ (long o) (long (:c vo))) :sym key :type type :addend addend}))))
+    ;; each section's own relocations and its .reloc's merged by offset, the directives in their order, a tie the own first
+    ;; (llvm-mc 23.1.5: MC/X86's reloc-directive-with-inst-relocs, "emitted in groups")
+    (doseq [[sec ds] dirs]
+      (.put relocs sec (loop [own (seq (.get relocs sec)) ds (seq ds) out []]
+                         (cond (and own ds) (if (< (long (:offset (first ds))) (long (:offset (first own))))
+                                              (recur own (next ds) (conj out (first ds)))
+                                              (recur (next own) ds (conj out (first own))))
+                               own (into out own)
+                               :else (into out ds)))))
     relocs))
 
 (defn section-bytes ^bytes [sec]
@@ -742,6 +804,210 @@
         (:temp m) false
         :else true))
 
+(defn item!
+  "One form of the file: a label, an assignment, a directive or an instruction."
+  [ctx f]
+  (let [h (first f)]
+    (cond
+      (= h 'asm/label)
+      (let [l (second f)]
+        (if (integer? l)
+          (let [k (inc (long (or (.get ^java.util.HashMap (:locals ctx) l) 0)))]
+            (label! ctx (local-name ctx l k))
+            (.put ^java.util.HashMap (:locals ctx) l k))
+          (label! ctx (sym-name l))))
+      (#{'asm/= 'asm/== 'asm/set 'asm/equ} h) (directive! ctx (cons 'asm/= (rest f)))
+      (= "asm" (namespace h)) (directive! ctx f)
+      :else (emit-insn! ctx f))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; AX11: conditional assembly and the macro-like blocks, as AsmParser runs them (parseDirectiveIf*, parseDirectiveElse*,
+;; parseDirectiveEndIf; parseDirectiveMacro, handleMacroEntry, expandMacro, parseMacroArguments; parseDirectiveRept,
+;; parseDirectiveIrp, parseDirectiveIrpc, instantiateMacroLikeBody). A body is text (arbace.repr.asm reads it so); it is
+;; expanded as text and read by the arch's `:read-text` (fn [ctx TEXT]: items) in the syntax current at the expansion.
+
+(def cond-heads #{"if" "ifne" "ifeq" "ifge" "ifgt" "ifle" "iflt" "ifdef" "ifndef" "ifnotdef" "ifb" "ifnb" "ifc" "ifnc"
+                  "ifeqs" "ifnes" "elseif" "else" "endif"})
+
+(defn- cond-ignore? [ctx] (boolean (:ignore (peek @(:conds ctx)))))
+
+(defn- cond-met?
+  "The condition of the conditional directive `h` with `args`."
+  [ctx ^String h args]
+  (let [cv (fn [e] (let [e (resolve-expr ctx e)]
+                     (long (or (const-value e @(:syms ctx)) (unsupported :expression (str "." h " " (pr-str e)))))))
+        ;; ifdef: the symbol is known and not undefined (a label, a section, an assignment)
+        defined (fn [s] (let [a (.get ^java.util.LinkedHashMap (:symbols ctx) (canon-name ctx (sym-name s)))]
+                          (boolean (when a (let [m @a] (or (:chunk m) (:var m) (some? (:section-sym m))))))))
+        text (fn [] (str/trim (str (or (first args) ""))))
+        two (fn [] (let [t (str (or (first args) "")) i (.indexOf t ",")]
+                     (when (neg? i) (fail (str "expected comma after first string for '." h "' directive")))
+                     [(str/trim (subs t 0 i)) (str/trim (subs t (inc i)))]))]
+    (case h
+      ("if" "ifne" "elseif") (not (zero? (cv (first args))))
+      "ifeq" (zero? (cv (first args)))
+      "ifge" (>= (cv (first args)) 0) "ifgt" (> (cv (first args)) 0)
+      "ifle" (<= (cv (first args)) 0) "iflt" (< (cv (first args)) 0)
+      "ifdef" (defined (first args))
+      ("ifndef" "ifnotdef") (not (defined (first args)))
+      "ifb" (= "" (text)) "ifnb" (not= "" (text))
+      "ifc" (let [[a b] (two)] (= a b)) "ifnc" (let [[a b] (two)] (not= a b))
+      "ifeqs" (= (first args) (second args)) "ifnes" (not= (first args) (second args)))))
+
+(defn- conditional!
+  "A conditional directive: the stack of {:parent IGNORE :met :ignore :else} (TheCondStack, TheCondState)."
+  [ctx ^String h args]
+  (let [st (:conds ctx) top (peek @st)]
+    (case h
+      "endif" (do (when-not top (fail "Encountered a .endif that doesn't follow an .if or .else")) (vswap! st pop))
+      "else" (do (when (or (not top) (:else top)) (fail "Encountered a .else that doesn't follow an .if or an .elseif"))
+                 (vswap! st #(conj (pop %) (assoc top :else true :ignore (boolean (or (:parent top) (:met top)))))))
+      "elseif" (do (when (or (not top) (:else top)) (fail "Encountered a .elseif that doesn't follow an .if or .elseif"))
+                   (if (or (:parent top) (:met top))
+                     (vswap! st #(conj (pop %) (assoc top :ignore true)))
+                     (let [c (cond-met? ctx h args)] (vswap! st #(conj (pop %) (assoc top :met c :ignore (not c)))))))
+      (let [p (cond-ignore? ctx) c (when-not p (cond-met? ctx h args))]
+        (vswap! st conj {:parent p :met (boolean c) :ignore (boolean (or p (not c)))})))))
+
+(defn- read-body
+  "The body's text read by the arch, the macros defined so far known to the reader as invocations (each declared before the
+  text by an empty definition, its form dropped)."
+  [ctx ^String text]
+  (let [rd (or (:read-text *arch*) (unsupported :directive "a macro's or a repetition's body"))
+        ms (vec (keys (:macros ctx)))]
+    (try (if (seq ms)
+           (vec (drop (count ms) (rd ctx (str (apply str (for [m ms] (str ".macro " m "\n.endm\n"))) text))))
+           (rd ctx text))
+         (catch arbace.lang.ExceptionInfo ex
+           (if (or (:obj/unsupported (ex-data ex)) (:obj/error (ex-data ex))) (throw ex) (fail (.getMessage ex)))))))
+
+(defn- head-expr
+  "A block's head read as an expression (.rept's count)."
+  [ctx ^String head]
+  (let [[f] (first (read-body ctx (str ".quad " head "\n")))]
+    (if (and (seq? f) (= 2 (count f))) (second f) (fail (str "expected an expression: " head)))))
+
+(defn- ident-char? [c] (let [c (long (int c))] (or (<= 97 c 122) (<= 65 c 90) (<= 48 c 57) (= c 95) (= c 46) (= c 36))))
+
+(defn expand-body
+  "expandMacro at a GNU target (not Darwin): a backslash and NAME a parameter's argument (a NAME no parameter has is kept),
+  backslash-at the instantiations so far (`at`, nil when not enabled), backslash-plus the macro's own count, backslash-()
+  nothing."
+  ^String [^String body params ^java.util.Map vals at ^long count]
+  (let [sb (StringBuilder.) n (.length body)]
+    (loop [i 0]
+      (if (>= i n)
+        (str sb)
+        (let [c (.charAt body i)]
+          (if (and (= c \\) (< (inc i) n))
+            (let [d (.charAt body (inc i))]
+              (cond
+                (and at (= d \@)) (do (.append sb (str at)) (recur (+ i 2)))
+                (= d \+) (do (.append sb (str count)) (recur (+ i 2)))
+                (and (= d \() (< (+ i 2) n) (= (.charAt body (+ i 2)) \))) (recur (+ i 3))
+                :else (let [j (long (loop [j (inc i)] (if (and (< j n) (ident-char? (.charAt body j))) (recur (inc j)) j)))
+                            nm (subs body (inc i) j)]
+                        (if (some #{nm} params) (.append sb (str (.get vals nm))) (.append sb (str "\\" nm)))
+                        (recur j))))
+            (do (.append sb c) (recur (inc i)))))))))
+
+(defn- macro-params
+  "A .macro's head: [NAME [{:name :default :req :vararg}...]], parameters separated by commas or blanks."
+  [^String head]
+  (let [h (str/trim head)
+        [_ nm rest] (or (re-matches #"(?s)([^\s,]+)[\s,]*(.*)" h) (fail "expected identifier in '.macro' directive"))
+        ps (if (str/includes? rest ",") (str/split rest #",") (str/split rest #"\s+"))]
+    [nm (vec (for [p ps :let [p (str/trim p)] :when (seq p)]
+               (let [[_ pn q dflt] (or (re-matches #"(?s)([^\s:=]+)\s*(?::\s*(\w+))?\s*(?:=\s*(.*))?" p) (fail (str "bad macro parameter " p)))]
+                 {:name pn :default (when dflt (str/trim dflt)) :req (= q "req") :vararg (= q "vararg")})))]))
+
+(defn- split-args
+  "parseMacroArguments: the arguments' text split at the commas outside parentheses; with no comma, at the blanks between
+  operands (a blank before or after an operator does not separate)."
+  [^String t]
+  (let [t (str/trim t)
+        parts (loop [i 0 depth 0 start 0 out []]
+                (if (>= i (count t))
+                  (conj out (subs t start))
+                  (let [c (.charAt t i)]
+                    (cond (#{\( \[} c) (recur (inc i) (inc depth) start out)
+                          (#{\) \]} c) (recur (inc i) (dec depth) start out)
+                          (and (= c \,) (zero? depth)) (recur (inc i) depth (inc i) (conj out (subs t start i)))
+                          (= c \") (let [j (long (loop [j (inc i)] (cond (>= j (count t)) j (= \\ (.charAt t j)) (recur (+ j 2))
+                                                                   (= \" (.charAt t j)) (inc j) :else (recur (inc j)))))]
+                                     (recur j depth start out))
+                          :else (recur (inc i) depth start out)))))]
+    (if (and (= 1 (count parts)) (re-find #"\s" (first parts)))
+      (let [ws (str/split (first parts) #"\s+")
+            op? (fn [^String w] (boolean (re-matches #"[-+*/|&^<>=%!~]+" w)))
+            joined (reduce (fn [out w] (if (and (seq out) (or (op? w) (op? (peek out)) (re-find #"[-+*/|&^<>=%!~]$" (peek out))
+                                                             (re-find #"^[+*/|&^<>=%!~]" w)))
+                                         (conj (pop out) (str (peek out) " " w))
+                                         (conj out w)))
+                           [] ws)]
+        joined)
+      (mapv str/trim (if (= [""] parts) [] parts)))))
+
+(declare run-items!)
+
+(defn- instantiate!
+  "The expanded text read and run, nested at most 20 deep (AsmMacroMaxNestingDepth)."
+  [ctx ^String text]
+  (when (>= (long @(:depth ctx)) 20) (fail "macros cannot be nested more than 20 levels deep"))
+  (vswap! (:depth ctx) inc)
+  (try (run-items! ctx (read-body ctx text))
+       (finally (vswap! (:depth ctx) dec))))
+
+(defn- invoke-macro! [ctx ^String nm ^String argt]
+  (let [m (or (.get ^java.util.HashMap (:macros ctx) nm) (fail (str "unknown macro " nm)))
+        ps (:params @m)
+        args (split-args (or argt ""))
+        ;; keyword arguments NAME=VALUE, the rest by position; a vararg takes the rest joined by commas
+        vals (java.util.HashMap.)
+        _ (loop [as args k 0]
+            (when (seq as)
+              (let [a (first as) [_ kn kv] (re-matches #"(?s)\s*([A-Za-z_.$][\w.$]*)\s*=(?!=)(.*)" a)]
+                (cond
+                  (and kn (some #(= kn (:name %)) ps)) (do (.put vals kn (str/trim kv)) (recur (rest as) k))
+                  (>= k (count ps)) (fail "too many positional arguments")
+                  (:vararg (nth ps k)) (.put vals (:name (nth ps k)) (str/join "," as))
+                  :else (do (.put vals (:name (nth ps k)) a) (recur (rest as) (inc k)))))))]
+    (doseq [p ps :when (not (.containsKey vals (:name p)))]
+      (when (:req p) (fail (str "missing value for required parameter '" (:name p) "' in macro '" nm "'")))
+      (.put vals (:name p) (or (:default p) "")))
+    (let [n @(:macro-n ctx)
+          text (expand-body (:body @m) (mapv :name ps) vals n (:count @m))]
+      (swap! m update :count inc)
+      (vswap! (:macro-n ctx) inc)
+      (instantiate! ctx text))))
+
+(defn run-items!
+  "The items run in order, the conditionals' ignored parts skipped and the blocks expanded."
+  [ctx items]
+  (doseq [[f] items :when (seq? f)]
+    (let [h (first f) hn (when (and (symbol? h) (= "asm" (namespace h))) (name h))]
+      (cond
+        (and hn (cond-heads hn)) (conditional! ctx hn (rest f))
+        (cond-ignore? ctx) nil
+        (= hn "macro") (let [[nm ps] (macro-params (second f))]
+                         (when (.containsKey ^java.util.HashMap (:macros ctx) nm) (fail (str "macro '" nm "' is already defined")))
+                         (.put ^java.util.HashMap (:macros ctx) nm (atom {:params ps :body (nth f 2) :count 0})))
+        (= hn "purgem") (let [nm (str/trim (str (second f)))]
+                          (when-not (.remove ^java.util.HashMap (:macros ctx) nm) (fail (str "macro '" nm "' is not defined"))))
+        (= hn "invoke") (invoke-macro! ctx (sym-name (second f)) (when (> (count f) 2) (str (nth f 2))))
+        (#{"rept" "rep"} hn)
+        (let [c (or (const-value (resolve-expr ctx (head-expr ctx (second f))) @(:syms ctx)) (fail "unexpected token in '.rept' directive"))
+              body (nth f 2)]
+          (when (neg? (long c)) (fail "Count is negative"))
+          (if (str/includes? body "\\")
+            (dotimes [k c] (instantiate! ctx (expand-body body [] {} nil k)))
+            (let [items (read-body ctx body)] (dotimes [_ c] (run-items! ctx items)))))
+        (#{"irp" "irpc"} hn)
+        (let [[p & vs] (split-args (second f))
+              vs (if (= hn "irpc") (map str (apply str vs)) (if (seq vs) vs [""]))]
+          (doseq [v vs] (instantiate! ctx (expand-body (nth f 2) [p] (doto (java.util.HashMap.) (.put p v)) nil 0))))
+        :else (item! ctx f)))))
+
 (defn assemble
   "The ELF64 object of the forms `items` ([FORM START END] as arbace.repr.asm/read-items gives them): {:bytes BYTES}, or
   {:unsupported CLASS :what TEXT}, or {:error MESSAGE}."
@@ -755,24 +1021,14 @@
         (section! ctx ".text" elf/SHT_PROGBITS (bit-or elf/SHF_ALLOC elf/SHF_EXECINSTR) 0 nil false)
         (vreset! (:prev ctx) nil)
         (align! ctx 4 0 1 nil true)
-        (doseq [[f] items :when (seq? f)]
-          (let [h (first f)]
-            (cond
-              (= h 'asm/label)
-              (let [l (second f)]
-                (if (integer? l)
-                  (let [k (inc (long (or (.get ^java.util.HashMap (:locals ctx) l) 0)))]
-                    (label! ctx (local-name ctx l k))
-                    (.put ^java.util.HashMap (:locals ctx) l k))
-                  (label! ctx (sym-name l))))
-              (#{'asm/= 'asm/== 'asm/set 'asm/equ} h) (directive! ctx (cons 'asm/= (rest f)))
-              (= "asm" (namespace h)) (directive! ctx f)
-              :else (emit-insn! ctx f))))
+        (run-items! ctx items)
+        (when (seq @(:conds ctx)) (fail "unmatched .ifs or .elses"))
         (when-let [f (:finish *arch*)] (f ctx))
         (layout! ctx)
         ;; the instructions' places at the layout (arm64's eval, arbace.asm.arm64.eval: AR5)
         (when-let [f (:after-layout *arch*)] (f ctx))
         (emit-frames! ctx)
+        (emit-debug-line! ctx)
         (let [relocs (apply-fixups! ctx)
               secs (vec (:sections ctx))
               sec-out (vec (for [s secs :let [m @s]]
