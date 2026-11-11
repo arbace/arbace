@@ -60,7 +60,7 @@
    :files (java.util.ArrayList.) :sec-names (java.util.HashMap.)
    :frames (java.util.ArrayList.) :frame (volatile! nil)
    :mode (volatile! 64) :intel (volatile! false)
-   :reloc-directives (java.util.ArrayList.)   ; .reloc's [OFFSET-EXPR TYPE EXPR] (AR6, arm64's)
+   :reloc-directives (java.util.ArrayList.)   ; .reloc's [OFFSET-EXPR TYPE EXPR PLACE] (AR6, arm64's; the place: review 1111 (6))
    :pos (volatile! nil)                      ; the current item's [START END] (ARS43 (a): the diagnostics' place)
    :errors (java.util.ArrayList.)            ; the errors met ({:pos :msg :expr}), each reported, the assembly going on
    ;; AX11: the conditionals' stack ({:parent IGNORE :met :ignore :else}), the macros (name -> {:params :body :count}) and their
@@ -931,10 +931,16 @@
         (when (= :relax (:kind m)) (swap! c assoc :final (vec bs)))))
     ;; .reloc's relocations (MCObjectStreamer::emitRelocDirective), in their order: the offset's section and place, the type
     ;; given, the expression's symbol and addend
-    (doseq [[off-e type e] (:reloc-directives ctx)]
+    ;; review 1111 (6): each directive's error reported at its place, the offset expression's (MCAssembler::layout's
+    ;; reportError at O.getLoc()), the next directive evaluated still
+    (doseq [[off-e type e pos dsec] (:reloc-directives ctx)]
+      (try
       (let [vo (value ctx off-e 0)
-            [sec o] (or (when-let [a (:add vo)] (sym-offset ctx a 0)) (fail ".reloc offset is not relative to a section"))
-            _ (when (or (= :abs sec) (:sub vo)) (fail ".reloc offset is not relative to a section"))
+            ;; an absolute offset is the directive's section's (emitRelocDirective: its begin symbol added)
+            [sec o] (or (when-let [a (:add vo)] (sym-offset ctx a 0))
+                        (when (and dsec (nil? (:add vo)) (nil? (:sub vo))) [dsec 0])
+                        (fail ".reloc offset is not relative to a section" off-e))
+            _ (when (or (= :abs sec) (:sub vo)) (fail ".reloc offset is not relative to a section" off-e))
             v (value ctx e 0)
             _ (when (:sub v) (unsupported :expression (str ".reloc " (pr-str e))))
             add (:add v)
@@ -944,7 +950,9 @@
                                add [(:name @add) (long (:c v))]
                                :else [nil (long (:c v))])]
         (when key (swap! (symbol! ctx key) assoc :used-in-reloc true))
-        (.put dirs sec (conj (vec (.get dirs sec)) {:offset (+ (long o) (long (:c vo))) :sym key :type type :addend addend}))))
+        (.put dirs sec (conj (vec (.get dirs sec)) {:offset (+ (long o) (long (:c vo))) :sym key :type type :addend addend})))
+        (catch arbace.lang.ExceptionInfo ex
+          (if-let [m (:obj/error (ex-data ex))] (report! ctx pos m (or (:obj/expr (ex-data ex)) off-e)) (throw ex)))))
     ;; each section's .reloc's after its own relocations, or with :reloc-directives-merged (x86-64's, AX11) merged with them by
     ;; offset, the directives in their order, a tie the own first (llvm-mc 23.1.5: MC/X86's reloc-directive-with-inst-relocs,
     ;; "emitted in groups", and reloc-directive-tlsgd; MC/AArch64's patchinst puts its PATCHINST after the JUMP26 at its offset)
