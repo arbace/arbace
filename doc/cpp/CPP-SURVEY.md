@@ -6065,3 +6065,122 @@ bin/repr-cpp dg --corpus dg-error --front native --record                   # th
 `.tmp/`: `G3/` (the 82 at the head), `t1/`-`t3/`, `lib1/`, `lib2/`, `lnv/`, `v1/`, `o1/` (generation runs of parts), `p/` (the probes), `pr1/`,
 `q1/`-`q8/`, `s1/`-`s4/`, `cp/`, `pk/`, `var1/` (the probes' runs), `cg/` (codegen-gen), `sB/`, `sD/` (the dg samples), `base/` (57dd92021's
 worktree), `m/` (cpp-props5's lists), `stubs/`, `env.sh`, `gen*.sh`, `gi.sh`, `gp.sh`, `g82.sh`, `sample*.sh`, `memwatch.sh`, `mw.sh`.
+
+## As built: cpp-s2 (2026-11-11; branch `cpp-s2` from mac/cpp-cp338b 63a1df5d7)
+
+Light, by day's rules (.tmp/night12/AGENT-RULES.md): main's stage 0 (`ARBACE_HOST_EXE`), at most two processes of at most about 1.5 GB
+(`GOMEMLIMIT=1400MiB GOGC=30 REPR_CPP_THREADS=2`; a watcher killing a process tree past 2.5 GB: the first eh_alloc.cc run at the default
+GOGC passed 2.6 GB and was killed, at GOGC=30 it peaked at 1.3 GB), the compiler stubs first on PATH (their log empty), no gate. The
+plans: .tmp/plans/CPP-90-PLAN.md S5a/S5b/S5c, CROPS-90-ROADMAP row 13; night 11's diagnosis lb-g5-ours.
+
+### 1. The mangler: a qualifier written as a typedef's name (P21 (b)'s blocker)
+
+Night 11's `CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build` built 197 of 198: libsupc++/eh_alloc.cc's names level missed two of std::pair's
+C++17 constructors, whose enable_if condition is `_PCCP::template _MoveConstructiblePair<_U1, _U2>() && ...`, `_PCCP` pair's member alias
+`using _PCCP = _PCC<true, _T1, _T2>`. Clang's IR (the pack cpp-runtime-ir, 378dbaff...) names them `...clsr5_PCCPE22_MoveConstructiblePairIT_T0_EE...`;
+ours wrote the class the alias names with the class's arguments substituted, `clsr3std4_PCCILb1ES3_iEE22_...`. The Itanium ABI (5.1.5.3,
+`<unresolved-name> ::= [gs] sr <unresolved-qualifier-level>+ E <base-unresolved-name>`, `<unresolved-qualifier-level> ::= <simple-id>`)
+mangles a dependent name as written; clang's mangleUnresolvedPrefix takes a TypedefType qualifier as its name (mangleUnresolvedTypeOrSimpleId:
+`mangleSourceNameWithAbiTags` of the typedef), and an alias template's specialization as its name with its arguments as written. Every
+`sr5_PCCPE` in the packs (124 uses) is that form, the second `5_PCCP` written again (no substitution), the template's own parameters `T_`
+and `T0_` substitutable as before (`ISB_SC_E`).
+
+Built: sema's typedef and alias-declaration entries carry `:typedef true`; template.ae's `static-call-value` records the qualifier as
+written (`written-qualifier`: a typedef's name, or an alias template's name and its arguments) on the dependent `:mcall` expression
+(`:wbase`); abi.ae's `mangle-expr` writes `clsr <source-name> [<template-args>] E <name> <template-args> E` from it, else the class as
+before. **Proved by the runtime route's generation alone** (gen-batch as `runtime_ours` runs it, records mode, no clang): eh_alloc.cc
+generated, its defined external names equal to the pack's clang IR (missing none, more none; it was 2 and 2); all 63 C++ units of
+libsupc++ by our route, **names 63 of 63 the pack's** (129 s, 572 MB). The runtime build itself (lowering, ci) is the night's (below).
+
+### 2. The own route's refusals (CP353 (a)'s next slices)
+
+The run corpora's 82 programs by our route (gen-batch over cpp-props5's lists, each program once, CP354 (a)), `.tmp/G2`:
+**65 generated (62 at cpp-cp338b), 17 refused**; the 62 all still generated, 59 of their IR byte for byte cpp-cp338b's and the other 3
+(hello.cpp, io.cpp, p1-first.cpp) equal after the inliner's local numbering (`.iN` suffixes; the same instructions, the same names);
+1,143 s, peak 1.4 GB. The three new: runtime/threads.cpp, runtime/thread-throw.cpp, runtime/atomics.cpp.
+
+- **Type-constraints with arguments** ([temp.param]/4: `C<A...> T` is the immediately-declared constraint `C<T, A...>`): checked now
+  (they were skipped, `:tc-args`), their arguments' forms read from the parameter's text (`tc-arg-forms`), resolved where the parameters
+  are bound; and the type-constraints before the requires-clause ([temp.constr.decl]/3.1, the conjunction's order). libstdc++'s C++23
+  tuple, `template<__eligible_tuple_like<tuple> _UTuple> requires (__constructible_from_tuple_like<_UTuple>())`: for a one-element tuple
+  and a non-tuple argument the requires-clause had been evaluated, instantiating a generic lambda over an index sequence whose
+  `decltype(std::get<_Is>(...))...` stays unexpanded (`no scope __and_<_Bn...>`): std::thread's constructor (threads.cpp,
+  thread-throw.cpp), any `std::tuple<T> t(x)`.
+- **A partial specialization's decltype that fails with every parameter bound is no match** ([temp.deduct.general]/8; libstdc++'s
+  `__shared_ptr::__has_esft_base<_Yp, __void_t<__esft_base_t<_Yp>>>`, whose `__void_t` dropped the failure, so every shared_ptr took the
+  enable_shared_from_this path, `unknown name __enable_shared_from_this_base`): sema's `*decltype-failed*`, set by decltype-of's dependent
+  stand-in only for its own operand (not for the decltypes its analysis meets on the way) and only for an unknown name (the analysis'
+  own gaps, `size_t{}` as an argument in `__is_allocator`'s, refuse with other classes and keep the stand-in: a first version that took
+  any failure lost std::string from a literal, codegen-gen's hdr-string and hdr-iostream, and the 82's hello.cpp and io.cpp).
+- **A declared `__atomic_*` function is called** (repr/cpp's parser): `<ext/atomicity.h>`'s `__atomic_add_single` and
+  `__atomic_add_dispatch` were read as clang's AtomicExpr builtins by their prefix; clang's AST has CallExprs. A name the parser's scope
+  declares is now a call (the shared_ptr copy in atomics.cpp).
+
+The 17 refused, by cause: coroutines 7 and GNU vector types 5 (with attribute-test-1's vector compound literal) as CP334 (b), CP335 (b)
+leave them; explicit-obj-default2 (explicit object parameters) and thread_local12e (the TLS wrapper), each about a day; pr77550 (`_CharT`),
+deferred.cpp (`__complex__`), library.cpp (variant's `_FUN_type`).
+
+### 3. CX12: two light diagnostics of the own front end
+
+- `asm volatile volatile (...)`: "duplicate asm qualifier", a soft diagnostic of the parser (the statement taken), g++.dg's asm-qual-2.C.
+- Adjacent string literals of two different encoding prefixes ([lex.string]/7 since P2201R1): "unsupported non-standard concatenation of
+  string literals" at the second (cpp23/mixed-concat1.C, ext/utf-badconcat.C, ext/utf-badconcat2.C, diagnostic/string-literal-concat.C).
+
+Measured: `bin/repr-cpp dg --corpus dg-error --front native --only` the 26 files whose dg-error lines name either diagnostic (and
+asm-qual-2.C): 5 own passes, none of them passing before (asm-qual-2, mixed-concat1 and utf-badconcat2 are in the every-10th sample's
+record as failing); asm-qual-3.C (qualifiers on a top-level asm) crashes the diagnostics (`NullPointerException`), as before. The
+every-10th sample (454 files, `.tmp/sG`): 122 → 125 own passes, recorded (below). The whole part's own record stays the night's (CP342/CP343: night 13; the
+slot `.tmp/night13/slots/cpp-dg-own.sh`, prepared, not run: `GOMEMLIMIT=2400MiB REPR_CPP_THREADS=2 REPR_CPP_DG_TIMEOUT=300`, a watcher
+every 30 s killing a process above 3 GiB, then night 10's cx12-independence.sh and the held run; about 230 minutes).
+
+### Checked (light; the stubs' log empty)
+
+| check | result |
+|---|---|
+| gen-batch over eh_alloc.cc (runtime_ours' line), before and after the mangler | 2 missing, 2 more → names equal to the pack's |
+| gen-batch over libsupc++'s 63 C++ units | 63 generated, names 63 of 63 the pack's; 129 s, 572 MB |
+| gen-batch over the 82 run programs (`.tmp/G2`) | 65 generated (cpp-cp338b 62, none lost), 17 refused; 1,143 s, 1.4 GB |
+| probes (`.tmp/p/`): one-element tuples, a thread, a lambda in a tuple, shared_ptr and weak_ptr, `__has_esft_base`'s shape (t16: the SFINAE'd specialization false for int, true for the class with the friend), `__and_v` with one and two elements | generate |
+| `bin/cppi codegen-gen` | 154 of 154 as recorded, the two negative controls failing as they must (the first version's 4 failures fixed, above) |
+| the dg every-10th sample (`.tmp/sF`, before §3) | 122 own passes, the same 122 files as cpp-cp338b's `sE` |
+| the dg every-10th sample at the head (`.tmp/sG`) | **125** own passes: asm-qual-2, mixed-concat1, utf-badconcat2 gained, none lost |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10 --record` | test/cpp/check-dg-own-linux-amd64.edn 120 → 125 passes (the record had been left at 120 by cpp-cp338's and cpp-route's 2 gains: desig29, variadic-ttp3); the other changed rows are those branches' too (five Sema crashes, the same in cpp-cp338b's sample) |
+| independence.edn's C++ read fact | `:dg-own [120 1] :dg-clang [4477 0.5]` → `[125 1] [4472 0.5]` |
+| `bin/repr-cpp target verify`, `pp-check --essential`; `roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own` (cpp-read-essential, cpp-print-essential) | pass, 33 of 33 and 9 of 9, the controls failing as they must |
+| cpp-lower-essential, cpp-check-essential | not run: they need the runtime's ci library (runtime-ci, 3 GB, over the day's 2.5 GB): the night's |
+| `bin/reap` | 0 problems (41 of 44 cells checked), no matrix change |
+| `bin/crops-score --record`, `--judge --strict` | 0 problems; C++ completeness 90.99 (unchanged), independence 71.28 → **71.30** (read 0.657 → 0.658) |
+
+### The night's commands (after this branch's merge; one process at a time)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1400MiB GOGC=30 CPPI_JOBS=1 CPPI_THREADS=1
+CPPI_RUNTIME_ROUTE=auto bin/cppi runtime-build .tmp/cppi/rt-ours        # P21 (b)'s proof: expect 198 of 198, libsupc++'s 63 by ours, names same (about 15 min, 1.5 GB)
+CPPI_RUNTIME_ROUTE=auto CPPI_CI_MEMLIMIT=3GiB bin/cppi runtime-ci .tmp/cppi/rt-ours   # ci's library from it (about 40 min, 3 GB)
+CPPI_RUNTIME=.tmp/cppi/rt-ours bin/cppi check --corpus samples          # cpp-check-essential on it (the samples' 6 by ours under auto)
+# all three hold: bin/cppi's cppi_runtime_route_default=auto (the one word, P21 (b)), then the gate's cpp-runtime builds it
+CPPI_ROUTE=ours bin/cppi check --corpus runtime --only <threads.cpp, thread-throw.cpp, atomics.cpp>   # the three new programs by their own verdicts (about 30 min, 2-3 GB: nodes-list)
+bin/cppi route-compare && bin/cppi route-compare --aot                  # samples and runtime: no clang pass lost
+```
+
+### Proposed (CP356-CP358)
+
+- **CP356: the eval and AOT facts from the route files.** next runs the run checks by `auto` since night 11, but the records do not say
+  which route made a passing program (night 11's slot counted 0: the route files are under the run's WORK and were not kept), so
+  independence.edn's eval and AOT stay 0.5. (a) `bin/cppi check --record` writes each row's route (`:route :ours|:clang`) beside its
+  result, and reap/crops-score read `:own-route [N 1] :pack [M 0.5]` from it, averaged with the runtime's per CP333 (b); (b) a count by
+  hand at each record. **Recommended: (a)**: the fact then follows the records, as the dg own record's does.
+- **CP357: packs inside a decltype's text** (`decltype(std::get<_Is>(std::declval<_UTuple>()))...`, the tuple-like constructors' generic
+  lambdas): the pack expansion's names are read from the form's symbols, not from a `cpp/text` operand, so the expansion stays unexpanded.
+  (a) Read identifiers of a `cpp/text` operand as the pattern's names too (tuple's construction from a pair or array); (b) as now (the
+  type-constraint now keeps these from being evaluated for non-tuple arguments). **Recommended: (a)**, when a program needs it.
+- **CP358: asm-qual-3.C's crash** (qualifiers on a top-level asm: `NullPointerException` in the diagnostics). (a) Fix it with GCC's
+  three top-level diagnostics ("not an asm qualifier", "qualifier outside of function body"); (b) leave it in its class. **Recommended: (a)**,
+  a light CX12 slice.
+
+### Scratch
+
+`.tmp/`: `rt1/` (eh_alloc.cc and libsupc++'s 63 by our route), `G1/` (the 82 at the first version: hello and io lost, fixed), `G2/` (the 82
+at the head), `th1/`, `rtA/`, `p/` (probes), `cppi/codegen-gen/`, `sF/`, `sG/` (the dg samples), `repr-cpp-dg-own/` (the `--only` runs),
+`m/` (the lists), `stubs/`, `env.sh`, `job.sh`, `watch.sh`, `gen*.sh`, `g82.sh`, `gi.sh`, `geneh.sh`, `names.sh`, `sample.sh`, `dgone.sh`,
+`cg.sh`, `ess.sh`.

@@ -200,8 +200,11 @@ items below are the ones whose work is still ahead or tied to a night.
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above). CP338-CP351 (the user,
   2026-11-10, as recommended): CP338 (a) and CP350 (a) built on `cpp-cp338` (the run corpora's refusals in the plan's order,
   the options our route models under `auto`; its runs by their own verdicts are a night's, the night commands in the survey's
-  "As built: CP338 (a) and CP350 (a)"); explicit object parameters, the TLS wrapper, `__complex__`, std::thread's tuple
-  constraints and library.cpp's variant/any still ahead; CP344-CP349, CP351 in the plan's order (.tmp/plans/CPP-90-PLAN.md).
+  "As built: CP338 (a) and CP350 (a)"); `cpp-s2` (2026-11-11, "As built: cpp-s2"): the mangler's written qualifiers close P21 (b)'s
+  blocker (libsupc++'s 63 units by our route name what clang's IR names; the runtime on auto is the night's), std::thread's tuple
+  constraints and shared_ptr's `__has_esft_base` (the 82 run programs 62 → 65 by our route), two CX12 diagnostics (+5 own dg passes);
+  explicit object parameters, the TLS wrapper, `__complex__` and library.cpp's variant/any still ahead; CP356-CP358 proposed;
+  CP344-CP349, CP351 in the plan's order (.tmp/plans/CPP-90-PLAN.md); CP342/CP343's dg own record on night 13 (its slot prepared).
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
   OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
   on `ocaml-s2` (its compiled runs a night's), OC216 on `ocaml-s3` and its rest (AF_UNIX and signals at the compiled level) on `ocaml-s4`, then OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.

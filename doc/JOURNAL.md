@@ -3692,3 +3692,30 @@ roundtrip-corpus gxx-dg-essential --judge own` 33 of 33 and `samples --judge own
 0 problems after `--record`; `bin/crops-score --record`, `--judge --strict`. Running when committed, not yet read: gen-batch over the 82 run
 programs (`.tmp/G4`) and the dg every-10th sample (`.tmp/sE`). Not run (over the 2 GiB rule): the lowered runtime and the six programs by
 our route.
+
+## 2026-11-11: cpp-s2, C++'s own route: the mangler's written qualifiers (P21 (b)'s blocker), three more programs, two CX12 diagnostics (branch `cpp-s2`, from `mac/cpp-cp338b` 63a1df5d7)
+
+Light, by day (.tmp/night12/AGENT-RULES.md; stage 0, the compiler stubs first on PATH, their log empty; no gate). Sources: the Itanium C++
+ABI's <unresolved-name> grammar (5.1.5.3) and clang 23.1.5's ItaniumMangle.cpp behaviour as its recorded IR shows it (the pack
+cpp-runtime-ir, test/cpp/records/cpp-runtime-ir.sha256's 378dbaff...: 124 uses of `sr5_PCCPE`); libstdc++ 15.2's stl_pair.h, tuple,
+shared_ptr_base.h, ext/atomicity.h from the pinned gcc-15.2.0 tarball; P2201R1 ([lex.string]/7). No live clang or g++.
+
+- The mangler: a static member call's qualifier written as a typedef's name (std::pair's `_PCCP`) or an alias template's specialization
+  is mangled as written (`clsr5_PCCPE...`), not as the class it names with its arguments substituted. Night 11's lb-g5-ours failure
+  (eh_alloc.cc, 2 missing and 2 more names) is closed by the route's generation: eh_alloc.cc's names equal the pack's, and all 63 C++
+  units of libsupc++ by our route name exactly what clang's IR names. Alternatives: substituting back to the alias at mangling time (no:
+  the alias is gone from the resolved type), or a name table from the pack (no: the IR is the oracle's).
+- The run corpora's 82 programs by our route: 62 → 65 generated (threads.cpp, thread-throw.cpp, atomics.cpp), none lost. Causes:
+  type-constraints with arguments (`__eligible_tuple_like<tuple> _UTuple`) were never checked, and were checked after the
+  requires-clause; a partial specialization's decltype failure under `__void_t` was taken for a match (now no match for its own operand's
+  unknown name only: taking any failure lost std::string's construction from a literal, since our analysis' gaps fail too); a declared
+  `__atomic_add_single` read as an atomic builtin. Considered: a wider SFINAE (every refusal class of the decltype's operand), rejected
+  for that reason; recorded as a later step once the analysis' gaps that refuse are classed apart.
+- CX12: the parser's soft diagnostics "duplicate asm qualifier" and "unsupported non-standard concatenation of string literals": 5 own
+  passes of the dg-error part's files that name them (asm-qual-2.C and four concatenation tests).
+- The night-13 slot for CP342/CP343's dg own record prepared (`.tmp/night13/slots/cpp-dg-own.sh`, not run; the user's decision of
+  2026-11-11 moved it to night 13).
+
+Records: the dg own sample recorded again (120 → 125 own passes of 454) and independence.edn's read fact with it; C++ completeness 90.99
+(unchanged), independence 71.28 → 71.30 (read 0.657 → 0.658; eval and AOT still 0.5 until the records say which programs our route runs,
+CP356); the route's gains count at the night's records. doc/cpp/CPP-SURVEY.md, "As built: cpp-s2", has the measures and the night's commands.
