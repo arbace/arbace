@@ -3690,3 +3690,77 @@ test/ocaml/oc216-compiled.txt` and `bin/heavy-lock bin/oi suite check --aot --le
 test/ocaml/oc216-suite-compiled.txt` (the lists now with the signal and socket programs and recvfrom_unix, recvfrom_linux); the passes
 `--record`ed with the same lists, recvfrom_unix's and recvfrom_linux's entries out of aot-compiled-known.edn when they pass (and the
 `:unix-java` class of the compiled levels then empty), a failure's class the day after.
+
+## As built: OC219 (a), Runtime_events before OC218's model (2026-11-11, branch `ocaml-s5`, from next `5d10a92fb`)
+
+Under a light lane (no gate, each process under 2 GiB, one run at a time). The by-design classes left after OC216, counted program by
+program from the records against the classes (test/reap/matrix.edn's OCaml cells, 2026-11-11): eval `:runtime-parameters` 19 (all `b=1`),
+`:c-runtime-internals` 19, `:gc-and-memory` 20, `:runtime-events` 7, `:dynlink` 6, `:backtraces` 4, `:unix-fork` 4,
+`:obj-representation` 1 (AOT: 19, 19, 23, 7, 6, 3, 4, 1, with `:c-api` 25). Cheapest first: `:runtime-events`' 7 need no heap model
+for the four that observe only the collections a program asks for and its own user events, so OC219 (a) (the user, 2026-11-10:
+"Runtime_events over OC218's model") is built ahead of OC218 for that part, the model's part (allocation buckets, the runtime's own
+collections) left to OC218. `:runtime-parameters`' 19 and `:backtraces`' 4 are OC217's (byte-exact backtraces: 5-8 days); of them only
+backtrace/backtraces_and_finalizers prints none (one program a level: left to OC217, which lifts `b=1`'s class for all at once).
+
+Sources: OCaml 5.5.0's tarball, runtime/runtime_events.c (caml_runtime_events_init, start, pause, resume, write_to_ring,
+caml_ev_lifecycle, caml_runtime_events_user_register, user_write, user_resolve, caml_ml_runtime_events_path), runtime/gc_ctrl.c
+(caml_gc_minor, gc_major_res, gc_full_major_res, caml_gc_compaction), runtime/major_gc.c (stw_finish_major_cycle, stw_cycle_all_domains,
+caml_finish_major_cycle), runtime/minor_gc.c (EV_MINOR), otherlibs/runtime_events/runtime_events.ml and runtime_events_consumer.c
+(format_runtime_ring_file, create_cursor's failures, read_poll, the ml_* callbacks, the user events' resolution).
+
+**The library.** bin/oi's `RELIB` (otherlibs/runtime_events' runtime_events.ml typed natively by `libs_native` with unix, threads and
+str; the keys take its sources), header.awk's `include runtime_events`, inc_units/inc_I/inc_dirs/inc_ref, and `aot-clib`'s list (the
+compiled level's library). 50 library units built natively, 0 refused.
+
+**The ports** (oi: `go/arbace/oi/ext_runtime_events.ae`; the AOT runtime: `jdk/ocaml/ocaml/rt/ExtRtEvents.ae`, the same design).
+- *The ring*: the process's own, in memory; Runtime_events.start creates its file (OCAML_RUNTIME_EVENTS_DIR or the current
+  directory, PID.events; removed at the program's end unless OCAML_RUNTIME_EVENTS_PRESERVE, OCAML_RUNTIME_EVENTS_START starts it with
+  the program) and writes EV_RING_START with the pid; pause and resume their lifecycle events; `path`, `are_active`, the timestamps
+  (monotonic nanoseconds). Messages are counted in words as write_to_ring writes them (header and timestamp, the content), a padding
+  message when one would straddle the ring's end, the oldest overwritten when the ring (OCAMLRUNPARAM e, 2^16 words) is full.
+- *The events*: those of the collections the program asks for, as the C runtime emits them: Gc.minor EV_EXPLICIT_GC_MINOR around one
+  EV_MINOR; Gc.major EV_EXPLICIT_GC_MAJOR around a minor and one major cycle; Gc.full_major EV_EXPLICIT_GC_FULL_MAJOR around three cycles;
+  Gc.compact EV_EXPLICIT_GC_COMPACT around three cycles, EV_COMPACT in the last; a cycle a minor, then EV_MAJOR_FINISH_CYCLE around
+  stw_cycle_all_domains' minor (so a full major is six minors and three cycles: test_caml's 6000 and 3000).
+- *User events*: register (the record {id; name; typ; tag}, the C's checks), write (unit, int, span directly; a custom value serialized
+  into the buffer when written, its bytes kept, deserialized when read).
+- *Cursors*: on the process's own ring (create_cursor None, or Some (dir, pid) naming this process's file), from the ring's start as the
+  C consumer's positions; the C's failures ("no ring for current process. ... Was runtime_events started?", "could not create cursor
+  for specified path."); read_poll calls each message's callbacks in order (lost_events with the words overwritten past the cursor), a
+  callback's exception ends the poll and is raised, a poll inside a poll of the same cursor is Failure "poll called concurrently or
+  reentrant"; max_events as the C stub reads it (Some n's tagged word); free_cursor closes it.
+- Divergences (in the class's `:why`): the collector's own collections (Go's, the JVM's) and the C runtime's other phases, counters and
+  allocation buckets are not emitted (OC218's model would give them: test_instrumented); one ring for all domains; the file holds no
+  ring, so another process's file is not mapped ("could not map underlying runtime_events").
+
+**Results (light).** `bin/oi check --only-list test/ocaml/oc219.txt` (native path): test_caml, test_caml_exception, test_caml_reentry,
+test_user_event_signal pass, each by its own verdict (the `.reference`); test_user_event_unknown forks (`:unix-fork`). `bin/oi check --aot
+--only-list test/ocaml/oc219.txt` (light level): the same four pass, the same as oi. The other two are classed by their other headers once
+the include is taken: test_create_cursor_failures `not-root` (the runner is root; ocamltest skips it as root), test_instrumented `flags
+-runtime-variant=i` (the instrumented runtime: OC218). The native record `check-oi-native.edn` has the five rows (`--record --only-list`);
+the matrix's eval and AOT cells still read ocamlc's path (check-oi.edn, check-aot.edn) until OC185's switch, and no ocamlc ran here
+(no host toolchain in this lane), so the matrix and test/crops/scores.edn are unchanged: completeness 85.3% before and after on this
+branch; after the switch (eval on the native records) +4 eval programs, about +0.15, and +4 AOT programs at the compiled level after its
+night run, about +0.15 more. A negative control (test/ocaml/controls.txt): test_caml's run against test_caml_exception's reference must
+differ, at oi's and the AOT level: it differs.
+
+**Checks (light).** `bin/oi test` (go vet, go test), `bin/oi stdlib` (71 units, 50 library units, 0 refused), the essential list 59 of
+59 with its controls differing, `repl-check --native`, `own-verdicts --check` 0 differing, the four oi-divergences commands 0 failing,
+`bin/reap --record` 0 problems (the matrix unchanged), `bin/crops-score --record` and `--judge --strict` 0 problems.
+
+**Left for the night (compiled level, j2g above 2 GiB; the library's translation, `aot-clib`, changes with runtime_events in it):**
+`bin/heavy-lock bin/oi check --aot --level compiled --only-list test/ocaml/oc219.txt`, then with `--record` on a pass. After night 12's
+OC185 switch (the native records rewritten whole by a run without this branch), on the merged tree: `bin/oi stdlib` (the library's key
+moved) and `bin/oi check --record --only-list test/ocaml/oc219.txt` (about 5 minutes), `bin/oi check --aot --record --only-list
+test/ocaml/oc219.txt` (the light native record), then `bin/reap --record` and `bin/crops-score --record`.
+
+**Proposals.**
+- **OC223 test_create_cursor_failures under root.** ocamltest's `not-root` action skips it when the runner is root, as the gate's runs
+  are; the regex of `:tools-and-targets` takes it as by design. (a) `:config-skipped` (`:na`, OC222 (a)'s rule) with the action `not-root`
+  and the runner's uid in the configuration file (ocamltest-config.edn's `:config` gains `"uid" "0"`): +1 a level out of the
+  denominators; (b) run it as root anyway with the chmod's effect emulated (no: it would test an emulation, not the runtime); (c) as
+  now. *Recommended: (a)*, beside OC222 (a).
+- **OC224 OC217's first step: `b=1` taken by header.awk.** With the parameter passed (as `l=` since OC216), the 19 programs of
+  `:runtime-parameters` run: backtraces_and_finalizers passes (+1 a level), the 18 that print backtraces fail as `known backtrace:` (the
+  class `:backtraces`, by design until OC217). (a) now, each failure pinned in oi-known.edn and aot-known.edn (half a day); (b) with
+  OC217's backtraces, one change. *Recommended: (b)* (the pins would be rewritten by OC217 days later).

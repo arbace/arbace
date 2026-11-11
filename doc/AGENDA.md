@@ -70,7 +70,10 @@ Six crops are above 90 on all three. What the others still need:
   ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md), [cpp/CODEGEN.md](cpp/CODEGEN.md)).
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
-  ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).
+  ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)). OC219 (a)'s first part
+  on `ocaml-s5` (2026-11-11): Runtime_events at oi and the AOT runtime (the asked collections' events, user events, cursors), 4 of
+  `:runtime-events`' 7 pass at oi (native record) and the light level; counted in the matrix after OC185's switch and the compiled
+  night run (`oc219.txt`); OC223, OC224 proposed.
 - **Haskell** (independence, 76.0): eval and AOT 0.5, the programs run over the STG GHC made. The front end compiles
   ghc-internal bottom-up on its own interfaces (258 of 265; the `--full` step `haskell-lib-check-own`, HF10-P11), the default
   methods' unfoldings after its Simplifier (HF10-P12: lib-stg 5,398 of 7,627 bindings equal to GHC's -O0, ahead of GHC's

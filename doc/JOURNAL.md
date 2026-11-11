@@ -4480,3 +4480,23 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   `.out`) passes on stage 0's goi (the base). Not built here (a light lane; jrt's package compile alone needs 2.7+ GB): the
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
+
+
+## 2026-11-11: OC219 (a), Runtime_events before OC218 (branch `ocaml-s5`, from next `5d10a92fb`)
+
+- Counted the by-design classes of OCaml's eval and AOT cells from test/reap/matrix.edn (eval: `:runtime-parameters` 19, all `b=1`
+  backtraces; `:c-runtime-internals` 19; `:gc-and-memory` 20; `:runtime-events` 7; `:dynlink` 6; `:backtraces` 4; `:unix-fork` 4;
+  `:obj-representation` 1). Picked `:runtime-events`: four of its seven programs observe only the collections they ask for and their
+  own user events, so OC219 (a) (decided "over OC218's model") was built ahead of OC218 for that part. Alternatives considered: OC217's
+  backtraces (23 programs a level, 5-8 days: not a light slice), `b=1` passed alone (one program a level passes: OC224), Dynlink's
+  init-info (needs a Dynlink unit table: OC220).
+- Built: the library unit (otherlibs/runtime_events/runtime_events.ml of the pinned OCaml 5.5.0 tarball, typed natively by `bin/oi
+  stdlib`'s libs_native as `RELIB`; header.awk's `include runtime_events`; aot-clib's list), oi's `go/arbace/oi/ext_runtime_events.ae` and
+  the AOT runtime's `jdk/ocaml/ocaml/rt/ExtRtEvents.ae`, written anew after runtime/runtime_events.c, gc_ctrl.c, major_gc.c, minor_gc.c and
+  otherlibs/runtime_events/runtime_events_consumer.c (LGPL-2.1 with the linking exception, read for their behaviour, as oi's other
+  externals). The asked collections emit the C runtime's phases (a full major: three cycles, six minors), Gc's externals call them.
+- Results (light, native path): test_caml, test_caml_exception, test_caml_reentry, test_user_event_signal pass at oi and at the light
+  AOT level by their own verdicts; recorded in check-oi-native.edn (`--record --only-list test/ocaml/oc219.txt`). The matrix still reads
+  ocamlc's path until OC185's switch and no host OCaml ran in this lane: completeness 85.3% before and after on the branch; +4 eval
+  programs (about +0.15) after the switch, +4 AOT after the compiled night run. A negative control added (test_caml against
+  test_caml_exception's reference). Proposals OC223 (test_create_cursor_failures under root, `:na`) and OC224 (`b=1` with OC217).
