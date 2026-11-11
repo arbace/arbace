@@ -2898,3 +2898,15 @@ Recorded in doc/rust/FRONTEND-SURVEY.md, "As built: RF11 (first slice)".
   `Drop::drop`). a6's 18 core bodies and its shim native; mono-check's core-closure 3 of 3; the 7 samples as rustc's. Alternatives
   considered: building the closure from rustc's optimized record (it inlines the callees: not independent) and copying the shim from
   the record (kept as the fallback). doc/rust/FRONTEND-SURVEY.md, "As built: RF12-P6, core's bodies in the program's run".
+
+## 2026-11-11: bin/hsi check --aot removes each program's executable after its run (branch `hs-aot-disk`)
+
+Night 11's `bin/hsi check --aot --corpus nofib,samples,synthetic,testsuite-core --jobs 2 --record` filled the disk: every compiled program's
+`hsi-aot` (20-50 MB) and its generated Go and build module stayed under `.tmp/hsi/progs/<corpus>/<program>/<key>/aot/` (34 GB+ for ~800
+programs) and the run was stopped. The user decided (2026-11-11): delete each program's binary after its run, keep logs, outputs and verdicts.
+`bin/lib/hsi/check`'s `one`, in `--aot` mode, now removes `aot/hsi-aot`, `hsi-aot.new`, `gen` and `mod` right after the compiled run (also
+when the build failed: `gen`, `mod`); `HSI_KEEP_BINS=1` keeps them. Nothing reads the binary afterwards (the verdict, `--record`, `divergences` and
+`record_progs_run` read results, outputs and the STG); a rerun rebuilds, as `bin/lib/hsi/aot`'s key hit needs `DIR/hsi-aot` to exist. The libraries'
+generated packages `.tmp/hsi/aot/lib/` (shared, built once per runtime and image) stay. Test (day, `--jobs 1`, no `--record`, samples/Arrays,
+Classes, Cont, Deadlock): progs 272 MB with HSI_KEEP_BINS=1, 271 KB without; verdicts 4 of 4 pass as recorded; peak 1.1 GiB; a second run
+rebuilt and passed. Alternative considered: deleting the whole `aot/` dir (also drops the small logs and the key: kept for debugging).
