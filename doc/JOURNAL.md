@@ -3272,3 +3272,9 @@ differing positions of UAX #29's WordBreakTest.txt (UCD 16.0.0), else the comman
 `test/gate/crops/scheme.edn` and `steps.edn`. Alternative kept by hand (a) was rejected: GTS81 (a) wants a control per check family in
 the gate. Measured: the control differs in 9 positions (16 s); si-essential's command, the scans and their controls, crops-test, reap and
 crops-score as before (Scheme 97.4 / 98.9 / 100 / 100). Recorded in doc/scheme/SCHEME-SURVEY.md, "As built: SCS25 (a), SCS26 (b)".
+
+## 2026-11-10: Scheme's deferred non-passes surveyed, SCS27 and SCS28 proposed (branch `scheme-compl2`, from next `6c3c87c02`)
+
+A light lane over the crops above 90% (doc/CROPS-SCORE.md) listed Scheme's 8 deferred cases (eval 6, AOT 2). The slow benchmarks
+(speed, SC109) and the AOT's syntax constants (psyntax's records as read-back constants, SC90) are designs of their own; the R7RS
+exponent sign (SCS27) and Chibi's ill-formed optional-test fallback (SCS28) need the user's choice. Nothing run, no record changed.

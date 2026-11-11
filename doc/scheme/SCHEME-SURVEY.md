@@ -4454,3 +4454,24 @@ On `scheme-props5` from `mac/next` 6c3c87c02, main's stage 0.
 same: a control adds no cell (the maturity checklist's 8 of 8 check families already had theirs).
 
 Night: the gate's `si-check` (its part `unicode` now runs the third command); nothing else moves.
+
+## Proposed (2026-11-10, branch `scheme-compl2`): the deferred eval and AOT classes
+
+A light lane (raising the crops above 90%, doc/CROPS-SCORE.md) listed Scheme's deferred non-passes: eval 6 (`:ecraven-too-slow` 3,
+`:r7rs-float-printing` 2, `:chibi-optional-fallback` 1), AOT 2 (`:syntax-constants`). None is a gap fixable without a choice:
+the slow benchmarks are the interpreter's speed (SM8 SC109: compiled in the heavy list); the syntax constants need a way to write
+psyntax's records (stx, rib, their eq?-compared marks) as constants that read back with their identity, a design of its own (SC90);
+the other two are below.
+
+- **SCS27 The R7RS mode's exponent sign.** Chibi's suite accepts only `"1.7976931348623157e+308"` (and its negative) for the extreme
+  flonums; si prints Chez's `1.7976931348623157e308` (SPEC 7: "exponent form without a sign"), which R7RS reads the same. 2 cases of
+  `bin/si r7rs` and 9 of `r7rs --chibi-test` (beside, not in the cell). (a) In R7RS mode only (the mode that already prints `d.0e-N` and
+  no `|N`), write a positive exponent with `+` (`1e+10`), Chibi's form; R6RS mode keeps Chez's, SPEC 7 states both; the R7RS suites,
+  the SRFIs and the corpora rerun and recorded. (b) Keep Chez's form everywhere and class the two `:design` (R7RS 6.2.6 leaves the
+  external representation's spelling to the implementation). *Recommended: (b)*: one printer rule for both modes keeps si's printing
+  Chez's, which the rest of the judges (SCS17 (c)'s printing scans) are stated over. (b) leaves the strict completeness as it is (by
+  design stays in its denominator) and raises the number without by design; (a) raises the strict one, +2 cases (eval 99.6 to 99.7).
+- **SCS28 Chibi's optional-test fallback.** `(chibi optional-test)`'s else branch for other Schemes defines a `test-error` of one
+  expression and calls it with two: the test library is ill-formed outside Chibi, si's `(chibi optional)` passes the other 24 tests.
+  (a) Class it `:na`, a test of no implementation but Chibi (as `:suite-ill-formed`); (b) keep it deferred. *Recommended: (a)*: no
+  change to si can make the library's own macro take two expressions.
