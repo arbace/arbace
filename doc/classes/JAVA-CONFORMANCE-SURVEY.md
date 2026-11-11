@@ -4879,7 +4879,7 @@ equal file `stale`). The logic is `test/javac-platform/gensrc.bash` (out of ever
     name, `TypeKind`, its loop over `Method.getParameters()` over the parameter types) and Nimbus' `Generator` (its templates,
     class resources, by `ClassLoader.getSystemClassLoader().getResourceAsStream` with the class's package's path: the Go
     build provides `Class.getResourceAsStream` but does not list it among Class's members, so the interpreter cannot call it:
-    JCS381); the templates are put on `ARBACE_PATH` as `make/CompileToolsJdk.gmk` copies them.
+    JCS391); the templates are put on `ARBACE_PATH` as `make/CompileToolsJdk.gmk` copies them.
 - **The C-preprocessed sources (JCS369 (a)).** `UnixConstants` and `SocketOptionRegistry`: repr/c's preprocessor on C's own target
   (musl 1.2.6's headers, `c/target`; no gcc) with the build's `-D`, `-U`, `-I` and `-std` (platform-build.edn's `:cpp`), laid out by
   `test/javac-platform/cppout.ae` as gcc -E lays out its output (a new line's column less 2 in spaces, newlines for fewer than 8
@@ -4901,7 +4901,7 @@ equal file `stale`). The logic is `test/javac-platform/gensrc.bash` (out of ever
 The two known (`jdk/javac/platform-gensrc-known.edn`):
 - `jdk/internal/lang/CaseFolding.java`, `:runtime-unicode` (JCS363 (a)): the tool's runtime is Unicode 17, the build's boot JDK
   Unicode 16, which keeps 28 case foldings more.
-- `java/lang/invoke/VarHandleGuards.java`, `:reflection-order` (JCS380): the same 117 methods, text for text, in another order: the
+- `java/lang/invoke/VarHandleGuards.java`, `:reflection-order` (JCS390): the same 117 methods, text for text, in another order: the
   generator writes in `Class.getMethods()`'s order, which Java SE leaves unspecified; HotSpot gives the template interface's
   declaration order, the interpreter of javac's tool another (`set get getAndUpdate compareAndExchange compareAndSet`).
   Stable from run to run.
@@ -4939,22 +4939,22 @@ step 1): `classes modules --jobs 3` (heavy, the measure), then `gensrc` (2 min, 
 outputs; with `JCS359_OWN_GENSRC=1` also the 16 modules compiled again from the own generated sources (`PB_GENSRC`), the plan's
 stage 2 proof (heavy, 15-30 min).
 
-### Proposed (JCS379-JCS382)
+### Proposed (JCS389-JCS392)
 
-- **JCS379** Where the six tools javac's tool does not hold run. (a) Interpreted from a fresh read at each `gensrc` (as built: no
+- **JCS389** Where the six tools javac's tool does not hold run. (a) Interpreted from a fresh read at each `gensrc` (as built: no
   key move, 10-20 s of the run's 2 minutes); (b) read into `jdk/javac/forms`' module buildtools with their variants and compiled
   into the tool (the plan's first idea: a `bin/javac-vendor convert` and edge night, a tool rebuild, and the world variants become
   javac's world's). *Recommended: (a)*: the run is light either way, and (b) puts StAX and Swing stand-ins into javac's world.
-- **JCS380** VarHandleGuards' order. (a) Known, as is (`:reflection-order`); (b) the interpreter's `Class.getMethods`/
+- **JCS390** VarHandleGuards' order. (a) Known, as is (`:reflection-order`); (b) the interpreter's `Class.getMethods`/
   `getDeclaredMethods` in declaration order, as HotSpot gives them in practice (a change to `arbace/classes`, so `gate_key`: a
   Java night), after which the file is the build's and jtreg tests that print members in that order may pass too.
   *Recommended: (a) now, (b) with the next Java night's batch.*
-- **JCS381** `Class.getResourceAsStream` (and `getResource`) in the Go build's class environment and reflection: j2g's `go/method`s
+- **JCS391** `Class.getResourceAsStream` (and `getResource`) in the Go build's class environment and reflection: j2g's `go/method`s
   exist, but `Class.getDeclaredMethods` does not list them, so neither the interpreter nor the reflector finds them (measured on
   javac's tool and on the gate's program). (a) List them in jrt's Class reflection (a jrt change, `gate_key`: a Java night); then
   Nimbus' generator runs unrenamed; (b) as is. *Recommended: (a)*, in a Java night's batch; the jtreg tests that load resources
   by class may gain.
-- **JCS382** Stage 5's reference for stages 2-3. (a) Pin the own outputs by digest (`jdk/javac/platform-gensrc.sha256`, per module,
+- **JCS392** Stage 5's reference for stages 2-3. (a) Pin the own outputs by digest (`jdk/javac/platform-gensrc.sha256`, per module,
   and the descriptors' in the platform's pin, JCS365 (a)), so that `gensrc` and `descriptors` judge without the build tree; the
   comparison with the build tree moves to the oracle tier's `javac-platform-oracle` (JCS366 (a)); (b) keep comparing with the
   build tree in `--full`. *Recommended: (a)*, at stage 4.

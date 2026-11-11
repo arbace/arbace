@@ -5479,3 +5479,11 @@ The entry above places `gensrc.bash`, `gensrc-run.ae`, `modinfo.ae` and `cppout.
 `test/javac-platform/` they are out of every key and of those steps' inputs (only `crops-score`'s whole `test/` sees them).
 The data's header (`jdk/javac/platform-gensrc.edn`) and the survey's section name the new place; the runs gave the same results
 (java.base, java.desktop, jdk.jdi, jdk.jlink; java.logging's and java.base's descriptors).
+
+## 2026-11-11: JCS359 stages 2-3's proposals renumbered JCS389-JCS392 (the main session)
+
+`java-p1` (on `java-night` since 2026-11-11) and this branch both numbered proposals JCS379-JCS382 (java-p1's JCS379-JCS383,
+P1's; this branch's four: the six tools interpreted, the interpreter's getMethods order, Class.getResource* listed, the own
+outputs' digests at stage 4); `java-p2` took JCS384-JCS388 (JCS388 recommends this renumbering). This branch's four are now
+JCS389 (was JCS379), JCS390 (JCS380), JCS391 (JCS381), JCS392 (JCS382) in the survey, AGENDA and
+`jdk/javac/platform-gensrc-known.edn`; the entries above keep their first numbers, read through this mapping.
