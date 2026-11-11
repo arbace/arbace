@@ -4971,3 +4971,34 @@ dependency check (not in psyntax's exports: the ids read from the record). Negat
 and si-aot-essential's commands exit 0, `bin/reap` 0 problems, `bin/crops-score --judge --strict` 0; no key moves (all paths are
 crop paths). doc/scheme/SCHEME-SURVEY.md, "As built: SCS30".
 
+
+## 2026-11-11: AR8, `@AUTH`/`%pltpcrel`, arm64's `.reloc` order, NEON's integer lanes in a64i (branch `asm-ar8`, from `mac/next` `4b8fc77e3`)
+
+The user's decisions of 2026-11-11 (ARS49 (a), AXS93 for arm64, ARS48 (a); ARS50 (a) later, ARS51 (b), ARS52 (b)), in that order. On the
+main host, light; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources read again: llvm-project 23.1.5's
+AArch64AsmParser.cpp (parseDataExpr, parseExprWithSpecifier, parseAuthExpr), AArch64MCAsmInfo.cpp (parsePercentSpecifierName),
+AArch64ELFObjectWriter.cpp (getRelocType, sortRelocs), AArch64AsmBackend.cpp (applyFixup), ELFDumper.cpp (GNU style) and
+BinaryFormat/ELFRelocs/AArch64.def (FUNCINIT64 0x13d), Apache-2.0 WITH LLVM-exception; the Arm ARM DDI 0487's Advanced SIMD pseudocode.
+No code copied.
+- ARS49 (a): the reader takes a data directive's `@AUTH(...)` after the whole operand (parseDataExpr's order and messages) and `%NAME(E)`
+  in an instruction; a statement it refuses inside a conditional block becomes `(asm/unread TEXT MESSAGE)` (the option `:unread`,
+  arm64's), assembled as its error. Alternatives considered: the AUTH suffix at the primary as before (`7 + _g4@AUTH(...)` and the error
+  cases `sym@AUTH(...) + 1` would read as different expressions than LLVM's, and blanks before `@` refuse); a permissive reading of the
+  malformed suffixes (syntax the forms cannot hold). The object assembler: PLT32, GOTPCREL32, FUNCINIT64, AUTH_ABS64 with the signed
+  pointer's bits, the specifiers on every data directive; the object verdict: `--defsym`, readelf's GNU `-S -r -x`, the `%` column.
+  mc-aarch64-obj 107 → 110 of 110 byte for byte (with arm64's `:read-text` for AX11's macros), object verdict 2,781 → 2,819 of 2,832.
+- AXS93: arm64's `.reloc` merged by offset and PATCHINST put last by the new `:sort-relocs`. The wording "after the other relocations at
+  its offset" is corrected by LLVM's source and the test: sortRelocs is a stable partition of the whole section (patchinst: JUMP26,
+  JUMP26, PATCHINST, PATCHINST), built as LLVM does it.
+- ARS48 (a): `go/arbace/a64i/simd.go` written as Go, compiled and run first from the printed module (TamaGo's go), then converted by
+  repr/go's native reader into `simd.ae`; the five hooks hand-edited as forms (`decodeFP`'s SIMD space, `isFPOp`'s range, the names, the
+  family `simd`, `execFP` and `injectX`'s dispatch, `lower`'s SIMD forms first). The synthetic program `synth-neon` (1,769 cases) and its
+  model in `gen.ae`; qemu-aarch64 agreed with the model on every case after one model fix (`Math/abs` on a boxed long resolved to the
+  int overload on this host: an explicit absolute value), a64i on its first run, the forms check after one decoder fix (the scalar
+  shifts' Q). Coverage 653 → 1,358 of 1,358 claimed executed; a64i 84 → 85 programs; controls verdict-5, forms-3, inject-17, and the
+  object verdict's patchinst-vs-ptrauth, ptrauth-vs-specifier.
+- Results: the AOT cell 98.2% → 99.6% (3,047 / 0 / 13), read 6,648 / 0 / 8, print 12,658 / 5 / 8, eval 301; crops-score completeness
+  99.5 → 99.8; `bin/reap` 0 problems; no key moves (crop paths). amd64's shared-code checks (round trip musl and mc-asmparser, run-check,
+  the three object checks) rerun unchanged. Proposed ARS53-ARS55.
+- Rule slips: two commands used `<(...)` process substitution and one wrote to /dev/null (comparisons of scratch files, nothing they
+  produced was used).

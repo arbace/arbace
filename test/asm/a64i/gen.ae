@@ -848,6 +848,354 @@
   (str (looped nm what mem-setup mem-hash-text (vec (remove nil? cases)) :insn)
        "\n// the buffer\n\t.bss\n\t.p2align\t4\nbuf:\t.zero\t64\n"))
 
+
+(set! *unchecked-math* true)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the Advanced SIMD integer lanes (AR8, ARS48 (a)): one program, its cases each an instruction on v1 and v2 (the row's x1, x2 and
+;; x3, x9 as their low and high halves, loaded by ldr q) with v0 their mix (x1 ^ x9, x2 ^ x3: the accumulating forms' and INS's
+;; destination), FPSR cleared; the result v0's two halves into x0 and x12, FPSR (QC) folded into x12. A general register's result
+;; (umov, smov) is moved into d0. The model: the Arm ARM's pseudocode lane by lane (Elem[], the vector shared functions, the
+;; instructions' Operation), on longs, unsigned compares by Long/compareUnsigned.
+
+(def ^:private QC (bit-shift-left 1 27))
+
+(defn- labs ^long [^long v] (if (neg? v) (- v) v))
+
+(defn- vlane ^long [v ^long i ^long e]
+  (let [b (* i e) w (long (nth v (quot b 64))) x (unsigned-bit-shift-right w (mod b 64))]
+    (if (= e 64) x (bit-and x (ones e)))))
+
+(defn- vpack
+  "The vector [LO HI] of the lanes xs of e bits (lanes beyond 128 bits ignored; missing ones zero)."
+  [xs ^long e]
+  (reduce (fn [v [i x]] (let [b (* (long i) e)] (update v (quot b 64) #(bit-or (long %) (bit-shift-left (bit-and (long x) (ones e)) (mod b 64))))))
+          [0 0] (map-indexed vector xs)))
+
+(defn- vls [v ^long e ^long n] (mapv #(vlane v % e) (range n)))
+(defn- ult [^long a ^long b] (neg? (Long/compareUnsigned a b)))
+(defn- mask-of ^long [b] (if b -1 0))
+
+(def ^:private arrs {"8b" [0 false] "16b" [0 true] "4h" [1 false] "8h" [1 true] "2s" [2 false] "4s" [2 true] "1d" [3 false] "2d" [3 true]})
+(defn- ar-e ^long [a] (bit-shift-left 8 (long (first (arrs a)))))
+(defn- ar-n ^long [a] (quot (if (second (arrs a)) 128 64) (ar-e a)))
+(defn- half [v q] (if q v [(first v) 0]))
+
+(defn- sat-s [^long v ^long e]
+  (let [lo (- (bit-shift-left 1 (dec e))) hi (dec (bit-shift-left 1 (dec e)))]
+    (cond (< v lo) [lo true] (> v hi) [hi true] :else [v false])))
+
+(defn- qop
+  "The saturating add or subtract of lanes x, y (e bits): [result saturated?]."
+  [op ^long x ^long y ^long e]
+  (if (= e 64)
+    (let [ux (fn [^long v] (.add (biginteger (bit-and v 0x7fffffffffffffff)) (if (neg? v) (.shiftLeft BigInteger/ONE 63) BigInteger/ZERO)))
+          [a b] (if (#{:sqadd :sqsub} op) [(biginteger x) (biginteger y)] [(ux x) (ux y)])
+          r (if (#{:sqadd :uqadd} op) (.add ^BigInteger a ^BigInteger b) (.subtract ^BigInteger a ^BigInteger b))
+          [lo hi] (if (#{:sqadd :sqsub} op)
+                    [(biginteger Long/MIN_VALUE) (biginteger Long/MAX_VALUE)]
+                    [BigInteger/ZERO (.subtract (.shiftLeft BigInteger/ONE 64) BigInteger/ONE)])
+          [r s] (cond (neg? (.compareTo ^BigInteger r lo)) [lo true] (pos? (.compareTo ^BigInteger r hi)) [hi true] :else [r false])]
+      [(.longValue ^BigInteger r) s])
+    (case op
+      :sqadd (sat-s (+ (sext x e) (sext y e)) e)
+      :sqsub (sat-s (- (sext x e) (sext y e)) e)
+      :uqadd (let [r (+ x y)] (if (> r (ones e)) [(ones e) true] [r false]))
+      :uqsub (if (< x y) [0 true] [(- x y) false]))))
+
+(defn- ushl ^long [^long x ^long y ^long e signed]
+  (let [s (long (unchecked-byte y))]
+    (cond (>= s 0) (if (>= s e) 0 (bit-and (bit-shift-left x s) (ones e)))
+          signed (bit-and (bit-shift-right (sext x e) (min (- s) (dec e))) (ones e))
+          :else (if (>= (- s) e) 0 (unsigned-bit-shift-right x (- s))))))
+
+(defn- v3-lane
+  "Three same's operation on one lane: [result saturated?]."
+  [op ^long x ^long y ^long d ^long e]
+  (let [m (ones e) sa (sext x e) sb (sext y e) u (fn [^long v] (bit-and v m)) n [(fn [v] [v false])]]
+    (case op
+      :add [(u (+ x y)) false] :sub [(u (- x y)) false]
+      :cmeq [(u (mask-of (= x y))) false] :cmgt [(u (mask-of (> sa sb))) false] :cmhi [(u (mask-of (ult y x))) false]
+      :cmge [(u (mask-of (>= sa sb))) false] :cmhs [(u (mask-of (not (ult x y)))) false] :cmtst [(u (mask-of (not (zero? (bit-and x y))))) false]
+      (:smax :smaxp) [(if (> sa sb) x y) false] (:umax :umaxp) [(if (ult y x) x y) false]
+      (:smin :sminp) [(if (< sa sb) x y) false] (:umin :uminp) [(if (ult x y) x y) false]
+      :shadd [(u (bit-shift-right (+ sa sb) 1)) false] :uhadd [(u (bit-shift-right (+ x y) 1)) false]
+      :srhadd [(u (bit-shift-right (+ sa sb 1) 1)) false] :urhadd [(u (bit-shift-right (+ x y 1) 1)) false]
+      :shsub [(u (bit-shift-right (- sa sb) 1)) false] :uhsub [(u (bit-shift-right (- x y) 1)) false]
+      (:sqadd :uqadd :sqsub :uqsub) (let [[r s] (qop op x y e)] [(u r) s])
+      :sabd [(u (labs (- sa sb))) false] :uabd [(u (labs (- x y))) false]
+      :saba [(u (+ d (labs (- sa sb)))) false] :uaba [(u (+ d (labs (- x y)))) false]
+      :mul [(u (* x y)) false] :mla [(u (+ d (* x y))) false] :mls [(u (- d (* x y))) false]
+      :addp [(u (+ x y)) false]
+      :sshl [(ushl x y e true) false] :ushl [(ushl x y e false) false])))
+
+(defn- vres
+  "A case's [res flags] from the result vector and QC."
+  [[lo hi] qc]
+  [lo (bit-xor (long hi) (if qc QC 0))])
+
+(def ^:private v3-any [:add :sub :cmeq :cmgt :cmhi :cmge :cmhs :cmtst :sqadd :uqadd :sqsub :uqsub :sshl :ushl :addp])
+(def ^:private v3-no3 [:smax :umax :smin :umin :shadd :uhadd :srhadd :urhadd :shsub :uhsub :sabd :uabd :saba :uaba :mul :mla :mls
+                       :smaxp :umaxp :sminp :uminp])
+
+(defn- ncase [stub v1 v2 [res flags]]
+  {:insn stub :x1 (first v1) :x2 (second v1) :x3 (first v2) :nzcv (second v2) :res res :flags flags})
+
+(defn- v0-of [v1 v2] [(bit-xor (long (first v1)) (long (second v2))) (bit-xor (long (second v1)) (long (first v2)))])
+
+(defn- three-same [op a v1 v2]
+  (let [e (ar-e a) n (ar-n a) q (second (arrs a)) d (v0-of v1 v2)
+        pair? (#{:addp :smaxp :umaxp :sminp :uminp} op)
+        src (when pair? (vec (concat (vls v1 e n) (vls v2 e n))))
+        rs (for [i (range n)]
+             (if pair?
+               (v3-lane op (src (* 2 i)) (src (inc (* 2 i))) 0 e)
+               (v3-lane op (vlane v1 i e) (vlane v2 i e) (vlane d i e) e)))]
+    (vres (half (vpack (map first rs) e) q) (some second rs))))
+
+(defn- logic-same [op q v1 v2]
+  (let [d (v0-of v1 v2)
+        f (fn [^long x ^long y ^long z]
+            (case op :and (bit-and x y) :bic (bit-and x (bit-not y)) :orr (bit-or x y) :orn (bit-or x (bit-not y)) :eor (bit-xor x y)
+                  :bsl (bit-xor y (bit-and (bit-xor y x) z)) :bit (bit-xor z (bit-and (bit-xor z x) y)) :bif (bit-xor z (bit-and (bit-xor z x) (bit-not y)))))]
+    (vres (half [(f (first v1) (first v2) (first d)) (f (second v1) (second v2) (second d))] q) false)))
+
+(defn- clz-e ^long [^long x ^long e] (- (Long/numberOfLeadingZeros x) (- 64 e)))
+
+(defn- misc-lane ^long [op ^long x ^long e]
+  (let [s (sext x e) m (ones e)]
+    (bit-and m
+             (case op
+               :cls (dec (clz-e (bit-and (bit-xor s (bit-shift-right s 63)) m) e))
+               :clz (clz-e x e)
+               :cnt (Long/bitCount x)
+               :not (bit-not x)
+               :rbit (bit-and (unsigned-bit-shift-right (Long/reverse x) 56) 0xff)
+               :cmgt (mask-of (> s 0)) :cmge (mask-of (>= s 0)) :cmeq (mask-of (zero? s)) :cmle (mask-of (<= s 0)) :cmlt (mask-of (< s 0))
+               :abs (labs s) :neg (- s)))))
+
+(defn- two-misc [op a v1]
+  (let [e (if (#{:not :rbit} op) 8 (ar-e a)) q (second (arrs a)) n (quot (if q 128 64) e)]
+    (vres (half (vpack (case op
+                         (:rev64 :rev32 :rev16)
+                         (let [per (quot ({:rev64 64 :rev32 32 :rev16 16} op) e)]
+                           (for [i (range n)] (let [b (* per (quot i per))] (vlane v1 (+ b (- per 1 (- i b))) e))))
+                         (for [i (range n)] (misc-lane op (vlane v1 i e) e)))
+                       e) q) false)))
+
+(defn- shift-lane [op ^long x ^long z ^long sh ^long e]
+  (let [m (ones e) s (sext x e)
+        ;; the shifts right by 1..e: Java's shifts take the count mod 64, so e = 64 is done in two steps
+        asr (fn [^long v ^long k] (bit-shift-right (bit-shift-right v (dec k)) 1))
+        lsr (fn [^long v ^long k] (unsigned-bit-shift-right (unsigned-bit-shift-right v (dec k)) 1))
+        rnd-s (fn [] (+ (asr s sh) (bit-and (bit-shift-right s (dec sh)) 1)))
+        rnd-u (fn [] (+ (lsr x sh) (bit-and (unsigned-bit-shift-right x (dec sh)) 1)))]
+    (bit-and m
+             (case op
+               :sshr (asr s sh) :ushr (lsr x sh)
+               :ssra (+ z (asr s sh)) :usra (+ z (lsr x sh))
+               :srshr (rnd-s) :urshr (rnd-u)
+               :srsra (+ z (rnd-s)) :ursra (+ z (rnd-u))
+               :sri (let [mk (if (>= sh 64) 0 (unsigned-bit-shift-right m sh))] (bit-or (bit-and z (bit-not mk)) (bit-and (lsr x sh) mk)))
+               :shl (bit-shift-left x sh)
+               :sli (let [mk (bit-and (bit-shift-left m sh) m)] (bit-or (bit-and z (bit-not mk)) (bit-and (bit-shift-left x sh) mk)))))))
+
+(defn- across [op a v1]
+  (let [e (ar-e a) n (ar-n a) xs (vls v1 e n)
+        r (case op
+            :addv (reduce + xs) :saddlv (reduce + (map #(sext % e) xs)) :uaddlv (reduce + xs)
+            :smaxv (reduce (fn [p x] (if (> (sext x e) (sext p e)) x p)) xs)
+            :sminv (reduce (fn [p x] (if (< (sext x e) (sext p e)) x p)) xs)
+            :umaxv (reduce max xs) :uminv (reduce min xs))]
+    (vres [(bit-and (long r) (ones (if (#{:saddlv :uaddlv} op) (* 2 e) e))) 0] false)))
+
+(defn- v3d-model [op narrow two v1 v2]
+  (let [e (ar-e narrow) w (* 2 e) n (quot 64 e) d (v0-of v1 v2)
+        hn (fn [v i] (vlane [(nth v (if two 1 0)) 0] i e))
+        signed (= \s (first (name op)))
+        ext (fn [^long x] (if signed (sext x e) x))
+        lanes (for [i (range n)]
+                (let [a (hn v1 i) b (hn v2 i)]
+                  (case op
+                    (:saddl :uaddl) (+ (ext a) (ext b)) (:ssubl :usubl) (- (ext a) (ext b))
+                    (:saddw :uaddw) (+ (vlane v1 i w) (ext b)) (:ssubw :usubw) (- (vlane v1 i w) (ext b))
+                    (:sabdl :uabdl) (labs (- (ext a) (ext b))) (:sabal :uabal) (+ (vlane d i w) (labs (- (ext a) (ext b))))
+                    (:smull :umull) (* (ext a) (ext b)) (:smlal :umlal) (+ (vlane d i w) (* (ext a) (ext b)))
+                    (:smlsl :umlsl) (- (vlane d i w) (* (ext a) (ext b))))))]
+    (vres (vpack lanes w) false)))
+
+(defn- hn-model [op two v1 v2]
+  (fn [narrow]
+    (let [e (ar-e narrow) w (* 2 e) n (quot 64 e) d (v0-of v1 v2)
+          r (first (vpack (for [i (range n)]
+                            (unsigned-bit-shift-right (bit-and (if (= op :addhn) (+ (vlane v1 i w) (vlane v2 i w)) (- (vlane v1 i w) (vlane v2 i w))) (ones w)) e))
+                          e))]
+      (vres (if two [(first d) r] [r 0]) false))))
+
+(defn- perm [op a v1 v2]
+  (let [e (ar-e a) n (ar-n a) q (second (arrs a)) h (quot n 2) l1 (vls v1 e n) l2 (vls v2 e n) cat (vec (concat l1 l2))]
+    (vres (half (vpack (for [i (range n)]
+                         (case op
+                           :uzp1 (cat (* 2 i)) :uzp2 (cat (inc (* 2 i)))
+                           :trn1 (if (even? i) (l1 i) (l2 (dec i))) :trn2 (if (even? i) (l1 (inc i)) (l2 i))
+                           :zip1 ((if (even? i) l1 l2) (quot i 2)) :zip2 ((if (even? i) l1 l2) (+ h (quot i 2)))))
+                       e) q) false)))
+
+(defn- byte-mask-imm ^long [^long b] (reduce (fn [v k] (if (bit-test b k) (bit-or v (bit-shift-left 0xff (* 8 k))) v)) 0 (range 8)))
+
+(defn- rep [^long x ^long e] (reduce (fn [v k] (bit-or v (bit-shift-left (bit-and x (ones e)) (* k e)))) 0 (range (quot 64 e))))
+
+(defn neon-cases [rs]
+  (let [nx (let [s (volatile! (drop 3000 rs))] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        es (vec (edges (drop 7000 rs) 0))
+        val (fn [] (if (zero? (mod (nx) 3)) (pick (nx) es) (nx)))
+        vv (fn [] [(val) (val)])
+        ;; lanes of edge values: each lane 0, the top bit, all ones, or 1 often
+        lanes (fn [^long e] (let [v (vpack (for [_ (range (quot 128 e))] (case (mod (nx) 6) 0 0 1 (bit-shift-left 1 (dec e)) 2 -1 3 1 4 (dec (bit-shift-left 1 (dec e))) (nx))) e)] v))
+        pv (fn [e] (if (even? (nx)) (vv) (lanes e)))
+        reps (fn [] (range 3))]
+    (concat
+     ;; three same, vector
+     (for [op v3-any a ["8b" "16b" "4h" "8h" "2s" "4s" "2d"] _ (reps)
+           :let [v1 (pv (ar-e a)) v2 (if (#{:sshl :ushl} op) (vpack (for [_ (range 16)] (- (mod (nx) (+ 6 (* 2 (ar-e a)))) (+ 3 (ar-e a)))) 8) (pv (ar-e a)))]]
+       (ncase (str (name op) "\tv0." a ", v1." a ", v2." a "\n") v1 v2 (three-same op a v1 v2)))
+     (for [op v3-no3 a ["8b" "16b" "4h" "8h" "2s" "4s"] _ (reps)
+           :let [v1 (pv (ar-e a)) v2 (pv (ar-e a))]]
+       (ncase (str (name op) "\tv0." a ", v1." a ", v2." a "\n") v1 v2 (three-same op a v1 v2)))
+     (for [op [:and :bic :orr :orn :eor :bsl :bit :bif] a ["8b" "16b"] _ (reps)
+           :let [v1 (vv) v2 (vv)]]
+       (ncase (str (name op) "\tv0." a ", v1." a ", v2." a "\n") v1 v2 (logic-same op (= a "16b") v1 v2)))
+     ;; three same, scalar: d's, and the saturating ones at every size
+     (for [op [:add :sub :cmeq :cmgt :cmhi :cmge :cmhs :cmtst :sshl :ushl] _ (reps)
+           :let [v1 (pv 64) v2 (if (#{:sshl :ushl} op) [(- (mod (nx) 140) 70) (nx)] (pv 64))]]
+       (ncase (str (name op) "\td0, d1, d2\n") v1 v2 (let [[r s] (v3-lane op (first v1) (first v2) 0 64)] (vres [r 0] s))))
+     (for [op [:sqadd :uqadd :sqsub :uqsub] [r e] [["b" 8] ["h" 16] ["s" 32] ["d" 64]] _ (range 6)
+           :let [v1 (pv e) v2 (pv e)]]
+       (ncase (str (name op) "\t" r "0, " r "1, " r "2\n") v1 v2 (let [[x s] (v3-lane op (vlane v1 0 e) (vlane v2 0 e) 0 e)] (vres [x 0] s))))
+     ;; the register compares' aliases
+     (for [[op sw] [[:cmle :cmge] [:cmlt :cmgt] [:cmls :cmhs] [:cmlo :cmhi]] a ["16b" "4s" "2d"]
+           :let [v1 (pv (ar-e a)) v2 (pv (ar-e a))]]
+       (ncase (str (name op) "\tv0." a ", v1." a ", v2." a "\n") v1 v2 (three-same sw a v2 v1)))
+     ;; two-register miscellaneous
+     (for [[op as] [[:rev64 ["8b" "16b" "4h" "8h" "2s" "4s"]] [:rev32 ["8b" "16b" "4h" "8h"]] [:rev16 ["8b" "16b"]]
+                    [:cls ["8b" "16b" "4h" "8h" "2s" "4s"]] [:clz ["8b" "16b" "4h" "8h" "2s" "4s"]] [:cnt ["8b" "16b"]]
+                    [:not ["8b" "16b"]] [:rbit ["8b" "16b"]] [:abs ["8b" "16b" "4h" "8h" "2s" "4s" "2d"]] [:neg ["8b" "16b" "4h" "8h" "2s" "4s" "2d"]]]
+           a as _ (reps)
+           :let [v1 (pv (ar-e a))]]
+       (ncase (str (name op) "\tv0." a ", v1." a "\n") v1 [0 0] (two-misc op a v1)))
+     (for [op [:cmgt :cmge :cmeq :cmle :cmlt] a ["8b" "16b" "4h" "8h" "2s" "4s" "2d"] _ (range 2)
+           :let [v1 (pv (ar-e a))]]
+       (ncase (str (name op) "\tv0." a ", v1." a ", #0\n") v1 [0 0] (two-misc op a v1)))
+     (for [op [:cmgt :cmge :cmeq :cmle :cmlt :abs :neg] _ (reps)
+           :let [v1 (pv 64)]]
+       (ncase (str (name op) "\td0, d1" (when-not (#{:abs :neg} op) ", #0") "\n") v1 [0 0] (vres [(misc-lane op (first v1) 64) 0] false)))
+     (for [[op] [[:mvn]] a ["8b" "16b"] :let [v1 (vv)]]
+       (ncase (str "mvn\tv0." a ", v1." a "\n") v1 [0 0] (two-misc :not a v1)))
+     (for [[na wa] [["8b" "8h"] ["4h" "4s"] ["2s" "2d"]] two [false true] _ (range 2)
+           :let [v1 (vv) v2 (vv) d (v0-of v1 v2) e (ar-e na)
+                 r (first (vpack (for [i (range (quot 64 e))] (vlane v1 i (* 2 e))) e))]]
+       (ncase (str (if two "xtn2" "xtn") "\tv0." (if two (str (* 2 (ar-n na)) (subs na 1)) na) ", v1." wa "\n") v1 v2 (vres (if two [(first d) r] [r 0]) false)))
+     ;; across lanes
+     (for [op [:addv :smaxv :umaxv :sminv :uminv :saddlv :uaddlv] a ["8b" "16b" "4h" "8h" "4s"] _ (reps)
+           :let [v1 (pv (ar-e a)) e (ar-e a) r ({8 "b" 16 "h" 32 "s" 64 "d"} (if (#{:saddlv :uaddlv} op) (* 2 e) e))]]
+       (ncase (str (name op) "\t" r "0, v1." a "\n") v1 [0 0] (across op a v1)))
+     ;; copy: dup (element, general), umov, smov, ins (general, element), mov's aliases
+     (for [a ["8b" "16b" "4h" "8h" "2s" "4s" "2d"] _ (range 2)
+           :let [v1 (vv) e (ar-e a) t (subs a (dec (count a))) i (mod (nx) (quot 128 e)) x (vlane v1 i e)]]
+       (ncase (str "dup\tv0." a ", v1." t "[" i "]\n") v1 [0 0] (vres (half (vpack (repeat (ar-n a) x) e) (second (arrs a))) false)))
+     (for [a ["8b" "16b" "4h" "8h" "2s" "4s" "2d"] _ (range 2)
+           :let [v1 (vv) e (ar-e a)]]
+       (ncase (str "dup\tv0." a ", " (if (= e 64) "x" "w") "1\n") v1 [0 0] (vres (half (vpack (repeat (ar-n a) (first v1)) e) (second (arrs a))) false)))
+     (for [[t e ws] [["b" 8 ["w"]] ["h" 16 ["w"]] ["s" 32 ["w"]] ["d" 64 ["x"]]] w ws _ (range 2)
+           :let [v1 (vv) i (mod (nx) (quot 128 e)) x (vlane v1 i e)]]
+       (ncase (str "umov\t" w "7, v1." t "[" i "]\n\tfmov\td0, x7\n") v1 [0 0] (vres [x 0] false)))
+     (for [[t e] [["s" 32] ["d" 64]] :let [v1 (vv) i (mod (nx) (quot 128 e))]]
+       (ncase (str "mov\t" (if (= e 64) "x" "w") "7, v1." t "[" i "]\n\tfmov\td0, x7\n") v1 [0 0] (vres [(vlane v1 i e) 0] false)))
+     (for [[t e ws] [["b" 8 ["w" "x"]] ["h" 16 ["w" "x"]] ["s" 32 ["x"]]] w ws _ (range 2)
+           :let [v1 (vv) i (mod (nx) (quot 128 e)) x (sext (vlane v1 i e) e)]]
+       (ncase (str "smov\t" w "7, v1." t "[" i "]\n\tfmov\td0, x7\n") v1 [0 0] (vres [(if (= w "w") (bit-and x m32) x) 0] false)))
+     (for [[t e] [["b" 8] ["h" 16] ["s" 32] ["d" 64]] mn ["ins" "mov"]
+           :let [v1 (vv) v2 (vv) d (v0-of v1 v2) i (mod (nx) (quot 128 e))]]
+       (ncase (str mn "\tv0." t "[" i "], " (if (= e 64) "x" "w") "1\n") v1 v2
+              (vres (vpack (assoc (vls d e (quot 128 e)) i (bit-and (long (first v1)) (ones e))) e) false)))
+     (for [[t e] [["b" 8] ["h" 16] ["s" 32] ["d" 64]] mn ["ins" "mov"]
+           :let [v1 (vv) v2 (vv) d (v0-of v1 v2) i (mod (nx) (quot 128 e)) j (mod (nx) (quot 128 e))]]
+       (ncase (str mn "\tv0." t "[" i "], v1." t "[" j "]\n") v1 v2 (vres (vpack (assoc (vls d e (quot 128 e)) i (vlane v1 j e)) e) false)))
+     (for [[t e] [["b" 8] ["h" 16] ["s" 32] ["d" 64]] mn ["mov" "dup"]
+           :let [v1 (vv) i (mod (nx) (quot 128 e))]]
+       (ncase (str mn "\t" t "0, v1." t "[" i "]\n") v1 [0 0] (vres [(vlane v1 i e) 0] false)))
+     (for [a ["8b" "16b"] :let [v1 (vv)]]
+       (ncase (str "mov\tv0." a ", v1." a "\n") v1 [0 0] (vres (half v1 (= a "16b")) false)))
+     ;; shift by immediate
+     (for [op [:sshr :ushr :ssra :usra :srshr :urshr :srsra :ursra :sri :shl :sli] a ["8b" "16b" "4h" "8h" "2s" "4s" "2d"] _ (range 2)
+           :let [e (ar-e a) left (#{:shl :sli} op) sh (if left (mod (nx) e) (inc (mod (nx) e))) v1 (pv e) v2 (vv) d (v0-of v1 v2)]]
+       (ncase (str (name op) "\tv0." a ", v1." a ", #" sh "\n") v1 v2
+              (vres (half (vpack (for [i (range (ar-n a))] (shift-lane op (vlane v1 i e) (vlane d i e) sh e)) e) (second (arrs a))) false)))
+     (for [op [:sshr :ushr :ssra :usra :srshr :urshr :srsra :ursra :sri :shl :sli] _ (range 2)
+           :let [left (#{:shl :sli} op) sh (if left (mod (nx) 64) (inc (mod (nx) 64))) v1 (pv 64) v2 (vv) d (v0-of v1 v2)]]
+       (ncase (str (name op) "\td0, d1, #" sh "\n") v1 v2 (vres [(shift-lane op (first v1) (first d) sh 64) 0] false)))
+     (for [[na wa] [["8b" "8h"] ["4h" "4s"] ["2s" "2d"]] two [false true] _ (range 2)
+           :let [v1 (vv) v2 (vv) d (v0-of v1 v2) e (ar-e na) sh (inc (mod (nx) e))
+                 r (first (vpack (for [i (range (quot 64 e))] (unsigned-bit-shift-right (vlane v1 i (* 2 e)) sh)) e))]]
+       (ncase (str (if two "shrn2" "shrn") "\tv0." (if two (str (* 2 (ar-n na)) (subs na 1)) na) ", v1." wa ", #" sh "\n") v1 v2
+              (vres (if two [(first d) r] [r 0]) false)))
+     (for [mn ["sshll" "ushll" "sxtl" "uxtl"] [na wa] [["8b" "8h"] ["4h" "4s"] ["2s" "2d"]] two [false true]
+           :let [v1 (vv) e (ar-e na) sh (if (str/includes? mn "xtl") 0 (mod (nx) e)) src (if two (second v1) (first v1))]]
+       (ncase (str mn (when two "2") "\tv0." wa ", v1." (if two (str (* 2 (ar-n na)) (subs na 1)) na) (when (pos? (count (re-find #"ll" mn))) (str ", #" sh)) "\n") v1 [0 0]
+              (vres (vpack (for [i (range (quot 64 e))] (let [x (vlane [src 0] i e)] (bit-shift-left (if (= \s (first mn)) (sext x e) x) sh))) (* 2 e)) false)))
+     ;; modified immediate
+     (for [a ["8b" "16b"] :let [b (bit-and (nx) 0xff)]]
+       (ncase (str "movi\tv0." a ", #" (hx b) "\n") [0 0] [0 0] (vres (half [(rep b 8) (rep b 8)] (= a "16b")) false)))
+     (for [[mn a sh] (concat (for [mn ["movi" "mvni" "orr" "bic"] a ["2s" "4s"] sh [0 8 16 24]] [mn a sh])
+                             (for [mn ["movi" "mvni" "orr" "bic"] a ["4h" "8h"] sh [0 8]] [mn a sh]))
+           :let [b (bit-and (nx) 0xff) e (ar-e a) p (rep (bit-shift-left b sh) e) v1 (vv) v2 (vv) d (v0-of v1 v2)
+                 f (fn [^long z] (case mn "movi" p "mvni" (bit-not p) "orr" (bit-or z p) "bic" (bit-and z (bit-not p))))]]
+       (ncase (str mn "\tv0." a ", #" (hx b) (when (pos? sh) (str ", lsl #" sh)) "\n") v1 v2 (vres (half [(f (first d)) (f (second d))] (second (arrs a))) false)))
+     (for [mn ["movi" "mvni"] a ["2s" "4s"] sh [8 16]
+           :let [b (bit-and (nx) 0xff) p (rep (bit-or (bit-shift-left b sh) (ones sh)) 32) r (if (= mn "movi") p (bit-not p))]]
+       (ncase (str mn "\tv0." a ", #" (hx b) ", msl #" sh "\n") [0 0] [0 0] (vres (half [r r] (= a "4s")) false)))
+     (for [k (range 4) :let [m (byte-mask-imm (bit-and (nx) 0xff))]]
+       (ncase (str "movi\tv0.2d, #" (hx m) "\n\tmovi\td3, #" (hx m) "\n\tadd\tv0.2d, v0.2d, v3.2d\n") [0 0] [0 0] (vres [(* 2 m) m] false)))
+     ;; permute, ext, tbl, tbx
+     (for [op [:uzp1 :uzp2 :trn1 :trn2 :zip1 :zip2] a ["8b" "16b" "4h" "8h" "2s" "4s" "2d"]
+           :let [v1 (vv) v2 (vv)]]
+       (ncase (str (name op) "\tv0." a ", v1." a ", v2." a "\n") v1 v2 (perm op a v1 v2)))
+     (for [a ["8b" "16b"] _ (range 3)
+           :let [v1 (vv) v2 (vv) n (if (= a "16b") 16 8) i (mod (nx) n)
+                 cat (vec (concat (vls v1 8 n) (vls v2 8 n)))]]
+       (ncase (str "ext\tv0." a ", v1." a ", v2." a ", #" i "\n") v1 v2 (vres (half (vpack (for [k (range n)] (cat (+ i k))) 8) (= a "16b")) false)))
+     ;; the table v1, v2, then v3 = v0 and v4 = ~v1; the index v5 = v0 & 0x3f (or 0x7f for three and four registers)
+     (for [mn ["tbl" "tbx"] k [1 2 3 4] a ["8b" "16b"] _ (range 2)
+           :let [v1 (vv) v2 (vv) d (v0-of v1 v2) im (if (> k 2) 0x7f 0x3f) idx (vpack (map #(bit-and (long %) im) (vls d 8 16)) 8)
+                 tab (vec (take (* 16 k) (concat (vls v1 8 16) (vls v2 8 16) (vls d 8 16) (vls [(bit-not (long (first v1))) (bit-not (long (second v1)))] 8 16))))
+                 n (if (= a "16b") 16 8)
+                 r (for [i (range n)] (let [j (vlane idx i 8)] (if (< j (count tab)) (tab j) (if (= mn "tbx") (vlane d i 8) 0))))]]
+       (ncase (str "movi\tv5.16b, #" (hx im) "\n\tand\tv5.16b, v0.16b, v5.16b\n\tmov\tv3.16b, v0.16b\n\tnot\tv4.16b, v1.16b\n\t"
+                   mn "\tv0." a ", {" (str/join ", " (map #(str "v" % ".16b") (range 1 (inc k)))) "}, v5." a "\n")
+              v1 v2 (vres (half (vpack r 8) (= a "16b")) false)))
+     ;; three different: long, wide, narrow
+     (for [op [:saddl :uaddl :ssubl :usubl :sabdl :uabdl :sabal :uabal :smull :umull :smlal :umlal :smlsl :umlsl]
+           [na wa] [["8b" "8h"] ["4h" "4s"] ["2s" "2d"]] two [false true]
+           :let [v1 (pv 8) v2 (pv 8) nn (if two (str (* 2 (ar-n na)) (subs na 1)) na)]]
+       (ncase (str (name op) (when two "2") "\tv0." wa ", v1." nn ", v2." nn "\n") v1 v2 (v3d-model op na two v1 v2)))
+     (for [op [:saddw :uaddw :ssubw :usubw] [na wa] [["8b" "8h"] ["4h" "4s"] ["2s" "2d"]] two [false true]
+           :let [v1 (vv) v2 (pv 8) nn (if two (str (* 2 (ar-n na)) (subs na 1)) na)]]
+       (ncase (str (name op) (when two "2") "\tv0." wa ", v1." wa ", v2." nn "\n") v1 v2 (v3d-model op na two v1 v2)))
+     (for [op [:addhn :subhn] [na wa] [["8b" "8h"] ["4h" "4s"] ["2s" "2d"]] two [false true]
+           :let [v1 (vv) v2 (vv) nn (if two (str (* 2 (ar-n na)) (subs na 1)) na)]]
+       (ncase (str (name op) (when two "2") "\tv0." nn ", v1." wa ", v2." wa "\n") v1 v2 ((hn-model op two v1 v2) na))))))
+
+(def neon-setup
+  (str "\tsub\tx5, x20, #32\n\tldr\tq1, [x5]\n\tldr\tq2, [x5, #16]\n"
+       "\teor\tx6, x1, x9\n\teor\tx7, x2, x3\n\tstp\tx6, x7, [sp, #-16]!\n\tldr\tq0, [sp], #16\n\tmsr\tfpsr, xzr\n"))
+
+(def neon-flags-text "\tstr\tq0, [sp, #-16]!\n\tldp\tx0, x12, [sp], #16\n\tmrs\tx13, fpsr\n\teor\tx12, x12, x13\n")
+
+(def neon-families
+  [["neon" "the Advanced SIMD integer lanes: three same (add, sub, the logic and bitwise selects, the compares, max, min, the halving, saturating and absolute-difference ones, mul, mla, mls, the pairwise ones, sshl, ushl; vector and scalar), two-register miscellaneous (rev16/32/64, cls, clz, cnt, not, rbit, the compares with zero, abs, neg, xtn), across lanes (addv, s/umaxv, s/uminv, s/uaddlv), dup, umov, smov, ins and mov's aliases, the shifts by immediate (sshr, ushr, the accumulating and rounding ones, sri, shl, sli, shrn, sshll, ushll, sxtl, uxtl), movi, mvni, orr, bic by immediate, uzp, trn, zip, ext, tbl, tbx, the long, wide and narrow forms" neon-cases]])
+
+(set! *unchecked-math* false)
+
 (defn- sha256 [^String s]
   (let [md (MessageDigest/getInstance "SHA-256")]
     (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md (.getBytes s "UTF-8"))))))
@@ -870,6 +1218,11 @@
          ;; AR7: the memory families
          (for [[i [nm what f]] (map-indexed vector mem-families)
                :let [text (mem-program nm what (vec (f (rng (+ seed 200 i)))))]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR8: the Advanced SIMD integer lanes
+         (for [[i [nm what f]] (map-indexed vector neon-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 300 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)])))))
 
