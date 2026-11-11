@@ -192,6 +192,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   (the gate's build, `bin/goi test`, `check`, the interpreted benchmark) on night 12 or 13, merged after it.
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).
 - Reviews: today's merged code on `next` (patches for the owners) and an audit of the independence facts.
+- repr/java: `java-nread-g1` (the native provider's two fixes from Ghidra's G1 read proof: a void method's reference against
+  Supplier, an inherited static field through two static on-demand imports; samples `MrefVoid`, `Star*`). Its night: the four
+  provenance writers (the reader hash moved), nojavac-check and attr-check over jdk, javac and jdk26u, `bin/repr-java check --jdk`.
 
 - Assembly: `asm-ax1` (AX1's first slice, doc/asm/AMD64-SURVEY.md, "As built: AX1"): repr/asm reads GNU as's AT&T text into
   assembly forms and prints it back byte for byte; musl 32/32, `MC/AsmParser` 139/157 and `MC/X86` 464/621 pass, the rest classed
