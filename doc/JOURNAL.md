@@ -5744,3 +5744,39 @@ chunk of ANTLR's generated parsers (`SleighParser.java`, 751 KB; MemAvailable ab
   expression type mismatch" verdicts; the night 11 rejected tree's records applied (night 11, `.tmp/night11/rejected/llvm`).
 - CLAUDE.md: bin/reap's matrix has thirteen rows and 52 cells (Haskell, x86-64 and arm64 assembly joined the ten), crops-score thirteen crops;
   a sentence for the assembly crops.
+
+## 2026-11-11: P2 by day: records' reflection, Clojure's types' serialization, the platform logging bean (branch `java-p2`, from `mac/java-night` ffec18089)
+
+What: P2's by-day part (the user's JCS374 (a): P2 on night 17; P1's JCS383 proposal, serialization's slices 5 and 8, taken as
+its brief with the plan's S5 list, `.tmp/plans/JAVA-90-PLAN.md`). Built (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2
+(by day)"): jrt's `java.lang.reflect.RecordComponent` and `Class.getRecordComponents` (`go/arbace/jrt/record.ae`, jdk26u's
+RecordComponent.java at https://github.com/openjdk/jdk26u `baf63fb` transcribed into Go) over new data lines beside the
+annotations, `R NAME DESC [SIG]` (every record's components, the Record attribute HotSpot reads) and `A NAME ANN` (their
+RECORD_COMPONENT annotations), written by `arbace.classes.annot`, which now also writes a record's derived accessors' Signatures
+and METHOD annotations as javac does; j2g's `Compiler$Dyn.defineClass` gives every class made at run time (defrecord, deftype,
+an Object proxy) a `SerialNew`, so ObjectInputStream can allocate one (slice 8: Clojure's suite's `serialization`; arbace.lang's
+own Serializable classes already had JCS167's rules as translated classes); JCS281 (b): jdk26u's PlatformLoggingImpl in the
+ManagementFactoryHelper overlay over LogManager's bean called directly, registered in the platform server, and
+`getPlatformMXBean(s)` over an MBeanServerConnection; t04792 and t04793 moved from `:design-also(-compiled)` into `:mxbeans`
+(deferred until the night). `bin/jrt manifest` regenerated jrt's tables (frozen JVM, -Xmx1800m).
+
+Why this way: the records' facts as data lines follow F25's (S, K, Q, G, E records) so that j2g's world and the interpreter
+share one encoder; the fallback to instance fields keeps a record without the lines answering. A Dyn's SerialNew allocates its
+slots null as ReflectionFactory allocates an Object subclass; the stream sets every field (a Dyn's hidden fields are listed
+too). The logging bean calls java.util.logging directly because java.logging is translated as java.base's (jdk26u reflects
+only across modules).
+
+Alternatives considered: RecordComponent over the instance fields alone (no Signature or component annotations for a JDK
+record whose private fields the tables leave out; the R lines cost a line a component); jdk26u's RecordComponent.java
+translated as Java (Class is jrt's Go, which cannot name a translated class); an evaluated fn's serialization by its form
+(JCS384, proposed: by design at eval recommended).
+
+Measured: no base-corpus test needs slice 5 (the 1,459 non-passing interp tests' sources scanned; t07726 is a JDK failure);
+its tests are the grown corpora's (java/io/Serializable/records 19, java/lang/reflect/records 3: nights 7 and 3). No
+executable holds serialization or JMX yet (night 11's Java night stopped at its conversion), so no moved test ran by day.
+Checks: `bin/jrt test --package jrt` (TestRecordComponents and the package), the encoder on a sample record on stage 0,
+`bin/j2g-unit` 55 of 55, j2g's dyn on the frozen JVM, the joint javac check 3,348 files 0 errors, `derive --check` 83 of 83,
+`bin/java-check --essential` 428 of 428 on the 11-10 gate executable, `golden`, `bin/reap` 0 problems after `--record`,
+`bin/crops-score --judge --strict` exit 0 (Java 77.2 strict unchanged; design 176 -> 174 eval, 200 -> 198 AOT). Night 17's
+commands and smoke in the triage section. Proposals JCS384-JCS388 (JCS388: JCS379-JCS382 numbered twice, by `java-p1` and
+`jcs359-s2`). Not built from S5: JCS220 (undecided), F18 (dates), the Proxy tail, JCS380/JCS381 (undecided).

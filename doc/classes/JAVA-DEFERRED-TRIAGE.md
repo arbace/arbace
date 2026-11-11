@@ -6867,6 +6867,208 @@ JCS243 (a), the suite's `serialization` 9) are not built by P1, which took the s
 P2 (night 17), with JCS241 (invokeDefault) and JCS242 if a test reads lambdas from a file; (b) slice 8 alone in P2, slice 5
 with F25's reflection records. *Recommended: (a)*: about 1.5 days, and both are measured by the same areas' run.
 
+## As built: P2 (by day): records' reflection, Clojure's types' serialization, the platform logging bean (branch `java-p2`, write-ahead)
+
+Branch `java-p2` from `mac/java-night` (`ffec18089`, which carries `java-p1`), 2026-11-11, by day under the light rules (no
+conversion, edge, build or level run). The user's decisions of 2026-11-10: JCS374 (a), P2 on night 17; JCS383 (proposed by P1:
+serialization's slices 5 and 8 as P2's) taken as P2's brief with the plan's S5 list (`.tmp/plans/JAVA-90-PLAN.md`). What the
+day built: **slice 5** (RecordComponent), **slice 8** (Clojure's own types: the classes made at run time), and of the plan's
+S5 list **JCS281 (b)** (decided 2026-11-09: the platform logging bean and getPlatformMXBean(s) over a connection). Not built:
+the rest of S5 (below, "What P2 leaves").
+
+**No executable has any of it, and none of the moved tests can run by day**: night 11's Java night stopped at its conversion
+(`.tmp/night11/java-retry.log`: p02 `bin/javac-vendor convert`, JCS170's MethodTooLargeException, fixed by `java-dyn-fix`), so
+`java-night`'s serialization slices (JCS167's 1-4, 6, 7), JMX-1 and P1 are sources only: `jdk/forms` has no
+`java/io/ObjectOutputStream` and no gate executable (the newest, `.tmp/gate-exe/15290d9735ea602053e8`, 11-10) holds
+serialization, JMX or RecordComponent. `bin/java-check --only` on the moved tests at the interp level would only measure the
+old world; it was not run for them. The light checks are those below.
+
+### What the tests need, measured
+
+- **Slice 5** in the base corpus: no non-passing test names `RecordComponent` or `getRecordComponents` (a scan of the 1,459
+  non-passing interp tests' sources); hotspot's `recordReflectionTest` (t07726) is a JDK failure in `ref-jdk26.edn` (its
+  `getName() == name` identity checks fail on the renamed package's JDK run too). The slice's tests are the grown corpora's:
+  `jdk/java/io/Serializable/records/` (16 JUnit tests, 3 more under `migration/`, `java-io-framework`, JCS337's night 7) and
+  `jdk/java/lang/reflect/records/` (3 TestNG tests, `java-lang-framework`, night 3); `javax/management/mxbean/RecordsMXBeanTest`
+  (TestNG) is in no corpus; JMX-1's `DefaultMXBeanMappingFactory` names `getRecordComponents` (the predicted world's stub, P1's
+  vet: now resolved).
+- **Slice 8**: Clojure's suite's `clojure.test-clojure.serialization` (9 tests, skipped in `test/arbace-go-results.edn` and
+  `test/arbace-go-aot-results.edn`, the Clojure classes' `:serialization`, 10 at eval and 10 at AOT with java-interop's
+  `test-proxy-non-serializable`). Its types: `arbace.lang`'s Serializable classes are translated Java forms, so JCS167's j2g rules
+  already give them their serial fields, hooks (`Keyword`, `Symbol`, `Namespace`, `RT$DefaultComparator` `readResolve`, `Var`'s
+  `writeReplace` and `Var$Serialized`, `Iterate`'s `readObject`) and `SerialNew`; what JCS167 left out is the classes made at
+  run time (`Compiler$Dyn.defineClass`: defrecord, deftype, an Object proxy), which had no `SerialNew` ("no valid
+  constructor"), and the evaluated fns (`defineFnClass`, subclasses of `Compiler$EvalFn`).
+- **JCS281 (b)**: t04792 `LoggingMXBeanTest` (newPlatformMXBeanProxy of `java.util.logging:type=Logging` on the platform
+  server, `getPlatformMXBean(mbs, PlatformLoggingMXBean.class)`) and t04793 `PlatformLoggingMXBeanTest` (the bean registered in
+  a server of its own and found in the platform server); both were in `:design-also` and `:design-also-compiled` (JCS129's JMX,
+  in the world since JMX-1).
+
+### What came in, and how (jdk26u at `baf63fb`)
+
+| part | how |
+|---|---|
+| RecordComponent (slice 5) | `go/arbace/jrt/record.ae`: jdk26u's `RecordComponent` transcribed (name interned, `getType`, `getGenericSignature` interned, `getGenericType` through the component's field's FieldRepository or the accessor's generic return type, `getAccessor`, `getDeclaringRecord`, `toString`, `AnnotatedElement`'s seven), and `Class.getRecordComponents` (null for a class that is not a record; a new array of new objects); `getAnnotatedType` left out (jrt's Field has none either: JCS385) |
+| the records' data | what HotSpot's `JVM_GetRecordComponents` reads from the Record attribute, as data lines beside the annotations (`ClassInfo.Annots`, classdata.ae's header): `R NAME DESC [SIG]` a component in order, written by `arbace.classes.annot/attribute-lines` for **every** record (j2g's world and the interpreter's: the JVM keeps the attribute for every record), and `A NAME ANN` its annotations with the members' data (those applicable to RECORD_COMPONENT, `analyze/for-target`, as javac keeps them); decoded by classdata.ae's `attrsOf` (R) and annotation.ae's `annotations` (A). A record whose data has no R line (a class translated before them) answers its instance fields in declaration order, as the ObjectStreamClass variant took them |
+| records' derived accessors | `annot.ae`'s `reflected-member?`: a record's derived accessor (`:derived :record-accessor`, no `:kind`) now writes its Signature (`G M`) and its METHOD annotations (`M`) as javac does; before, only declared methods did (an accessor's `getGenericReturnType` answered the erased type) |
+| the manifest, tables | `test/jrt/manifest.ae`: `java.lang.reflect.RecordComponent` (AnnotatedElement); `bin/jrt manifest` on the frozen JVM (`frozen_java tools -Xmx1800m`, as P1): Class's `getRecordComponents` and RecordComponent's 10 members in `reflect_tables.ae`, `manifest.edn`, `manifest_test.ae` |
+| Dyn's SerialNew (slice 8) | `arbace/j2g/dyn.ae`: `Compiler$Dyn.defineClass` gives every class made at run time a `SerialNew`, a Dyn of the class with its slots null (ReflectionFactory's rule for a class whose superclass is Object: Object's constructor; the stream sets every field: a Dyn's fields, hidden ones too, are all `getDeclaredFields`'), in a fn of its own (`dyn-serial-new-form`: native-forms's quoted constants stay within the frozen JVM's 64 KB static initializer, JCS170's MethodTooLargeException); `defineJavaProxy` still sets its own |
+| the platform logging bean (JCS281 (b)) | `overlay/jdk/java.base/sun/management/ManagementFactoryHelper.java`: jdk26u's `PlatformLoggingImpl` and `getPlatformLoggingMXBean`, its `LoggingMXBeanAccess` reflection replaced by direct calls on `LogManager.getLoggingMXBean()` (java.logging is in the world as java.base's; jdk26u reflects only because java.management may not read java.logging); `ManagementFactory.java`: the bean among the singletons, registered in `getPlatformMBeanServer`, in `getPlatformManagementInterfaces`, and jdk26u's `getPlatformMXBean(MBeanServerConnection, Class)` and `getPlatformMXBeans(MBeanServerConnection, Class)` over the singleton's object name |
+| the classes | `test/java/divergences.edn`: `:reflection`'s pattern without `RecordComponent` (in the world); t04792, t04793 out of `:design-also` and `:design-also-compiled` into `:mxbeans`'s `:tests` (deferred until the night; compiled, `:j2g-unresolved` takes them first by its pattern). `bin/reap --record`: Java eval by design 176 -> 174, deferred 1,283 -> 1,285; AOT 200 -> 198, 1,186 -> 1,188; `bin/crops-score --record`: completeness 77.2 unchanged (strict), 79.2 without by design |
+
+LICENSE.md: `record.ae`'s origin, `ManagementFactoryHelper.java`'s PlatformLoggingImpl.
+
+### Light checks done
+
+Main's stage 0 as `ARBACE_HOST_EXE`, javac's tool `javac-5ad357331dbcd7cfb0fd` with `REPR_JAVA_STALE_OK=1` (its key is not
+the checkout's), one process at a time, each under 2 GiB:
+
+- **jrt's package**, `bin/jrt test --arch amd64 --package jrt`: the new `TestRecordComponents` (a record class's R and A
+  lines: three components, the array's class, names interned, types, `TT;` interned, `toString`, the accessor, the component's
+  annotation and none on the others; a class that is not a record null; a record without R lines its instance fields) and the
+  whole package pass (5.0 s of tests, 23 s with the build);
+- **the encoder**: a sample record (`.tmp/p2/rec/src/p/Point.java`: `record Point<T>(int x, @RCA String name, @FO T val)`, RCA
+  targeting RECORD_COMPONENT and FIELD, FO FIELD only) read by `bin/repr-java read` and its classes' data printed on stage 0
+  (`.tmp/p2/rec/tool/p2/recdata.ae`, j2g.typeann's way): `R x I`, `R name Ljava.lang.String;`, `R val Ljava.lang.Object; TT;`,
+  `A name @Lp.Point$RCA; 0` and no A line for FO, `G M val ()Ljava.lang.Object; ()TT;` (new), the R lines also without
+  members;
+- **j2g**: `bin/j2g-unit` on stage 0, 55 of 55 pass (the type annotations' encoder against javac's among them); `arbace.j2g.dyn`,
+  `out` and `arbace.classes.annot` load on stage 0 and `arbace.j2g.dyn/native-forms` on the frozen JVM (`frozen_java tools`);
+- **the joint javac check** (`.tmp/night7/all9-run.sh`): 3,348 files, **0 errors**, 7,000 classes (18 s, 1.0 GB);
+  `bin/jrt-convert derive --check`: 83 overlays, 0 not as derived;
+- `bin/reap` 0 problems after `--record`; `bin/crops-score --judge --strict` exit 0; `bin/java-check --essential` on the
+  11-10 gate executable (the old world: a check of the records and forms, not of P2).
+
+Not checked by day: the two overlays' read (`bin/repr-java read-jdk --check` needs JMX-1's context, `REPR_JAVA_PATCH_ALL=1`
+with the slice: the night's conversion reads them), j2g's analysis of the new world (`bin/jrt-convert predict`: 73 minutes and
+4.98 GB for P1, over the day's rule), the Go of `j2g_dyn.go` (the night's build).
+
+### Expected yield (interp / compiled)
+
+- **The base corpus (Java's cells)**: t04792, t04793: **1-2 / 1-2** (both need JMX-1's server and introspection: the triage's
+  0.7). Slice 5 moves no base-corpus test. Java's completeness about **+0.02-0.03** (one test 0.0075 in eval and AOT each,
+  a quarter of the mean); the JCS129 split of the two (design -> deferred) moves nothing strict.
+- **The grown corpora**: of `java/io/Serializable/records`' 19 and `java/lang/reflect/records`' 3, the ones that need neither
+  `getAnnotatedType` (RecordReflectionTest's type annotation case) nor the record serialization the variant already has: about
+  **10-15** once nights 3 and 7 record their corpora (JUnit and TestNG, JCS331's runner).
+- **Clojure's row**: `serialization` unskipped (the night's command below): at eval **7-8 of 9** (function-serialization needs
+  an evaluated fn serialized: JCS384; CLJ-2839 needs `Repeat`/`Iterate`/`Cycle`'s hooks, translated), at AOT **8-9** (a compiled
+  fn is a translated class with its closed-over fields: JCS167's rules); `test-proxy-non-serializable` stays (arbace.inspector's
+  Swing). Clojure's eval and AOT each about +1 point of the row (9 of about 800 tests).
+
+### The night's commands (night 17, P2's Java night, JCS374 (a); in the night's worktree with `java-p2` merged after P1's night, heavy ones under `bin/heavy-lock`)
+
+```sh
+# 0. light (1 min, 1 GB): the joint javac check, the derivations, jrt's package tests
+/root/arbace/.tmp/night7/all9-run.sh $PWD && bin/jrt-convert derive --check \
+  && bin/jrt test --arch amd64 --package jrt -run 'TestRecord|TestClassData|TestAnnotation|TestReflect|TestManifest' -count=1
+# 1. jrt's manifest and tables are committed (check them: no diff), then the conversion (the two overlays changed: heavy,
+#    under the lock, ~40-75 min as P1's predict, GOMEMLIMIT as the Java night's)
+JAVA_TOOL_OPTIONS= bin/jrt manifest && git diff --exit-code go/arbace/jrt/
+REPR_JAVA_EXE=$(ls -td /root/arbace/.tmp/gate-exe/javac-*/ | head -1)arbace-javac REPR_JAVA_STALE_OK=1 \
+  ARBACE_HEAVY_CMD=$PWD/bin/heavy-lock bin/jrt-convert update
+# 2. j2g's edge (Class.getRecordComponents and RecordComponent are jrt's now; ManagementFactory's new members), javac's edge
+bin/jrt modules && bin/heavy-lock bin/j2g-edge update && bin/heavy-lock bin/javac-vendor edge
+# 3. the build (two Go-hosted builds, ~8 min; j2g's whole program under the lock, ~20 GiB); j2g's report: no
+#    :analysis-failures for DefaultMXBeanMappingFactory, ManagementFactory, ManagementFactoryHelper$PlatformLoggingImpl;
+#    j2g_dyn.go compiles (dyn-serial-new-form); then the test build for the suite
+bin/heavy-lock bin/arbace-go --build && bin/arbace-go --smoke && bin/jrt test && bin/heavy-lock bin/arbace-go --build-tests
+# 4. the smoke (below, .tmp/p2-smoke.clj): expect "record true", "colls true", "var true", "logging
+#    java.util.logging:type=Logging true", "logging-server true"
+target/arbace-go/amd64/arbace .tmp/p2-smoke.clj
+# 5. Java's levels interp and compiled on P2's areas (interp --jobs 2 under 8 GiB, ~10 min; compiled one shard under the
+#    lock): saved, not recorded; expect t04792, t04793 and no passing test lost
+JAVA_CHECK_EXE=$PWD/target/arbace-go/amd64/arbace J2G_GO_EXE=$PWD/target/arbace-go/amd64/arbace \
+  JAVA_CHECK_HEAVY=$PWD/bin/heavy-lock bin/java-check --levels interp,compiled --jobs 2 \
+  --only 'jdk/java/lang/management/|jdk/java/util/logging/|jdk/javax/management/|jdk/java/io/Serializable/|jdk/java/lang/(Class|reflect|Record)' \
+  --save .tmp/p2-night/check
+bin/java-check --judge .tmp/p2-night/check/*.edn
+# 6. Clojure's serialization namespace on the test build (1 GB, ~1 min): its skip removed from the reference first
+sed -i '/clojure.test-clojure.serialization "Java serialization/d' test/arbace-go-results.edn
+CLOJURE_TESTS_GO=$PWD/target/arbace-go/amd64/arbace-tests bin/clojure-tests -j 2 clojure.test-clojure.serialization
+# 7. the morning after: its counts into test/arbace-go-results.edn's :namespaces (and a test the eval level fails, such as
+#    function-serialization, in :skipped-tests or a narrower Clojure class than :serialization, JCS387), the AOT level in the
+#    next --full (bin/clojure-tests --aot: j2g's whole program, ~20 GiB, its own heavy step), bin/reap --record, crops-score
+```
+
+The smoke (`.tmp/p2-smoke.clj`):
+
+```clojure
+(import '(java.io ByteArrayOutputStream ObjectOutputStream ObjectInputStream ByteArrayInputStream)
+        '(java.lang.management ManagementFactory PlatformLoggingMXBean) '(javax.management ObjectName))
+(defmacro item [n & body] `(println ~n (try (eval '(do ~@body)) (catch Throwable t# (str "FAILED " t#)))))
+(defn rt [x] (let [b (ByteArrayOutputStream.) o (ObjectOutputStream. b)] (.writeObject o x) (.close o)
+               (.readObject (ObjectInputStream. (ByteArrayInputStream. (.toByteArray b))))))
+(defrecord SR [a b c])
+(item "record" (let [r (SR. 0 :foo (range 5)) s (rt r)] (and (= r s) (= (hash r) (hash s)) (instance? SR s))))
+(item "colls" (let [v [[1 2] {:a 1} #{'a} :kw 'sym 25/3 (sorted-set 3 1) (seq "s11n")]] (= v (rt v))))
+(item "var" (identical? #'arbace.core/conj (rt #'arbace.core/conj)))
+(item "logging" (let [b (ManagementFactory/getPlatformMXBean PlatformLoggingMXBean)]
+                  (str (.getObjectName b) " " (boolean (some #{""} (.getLoggerNames b))))))
+(item "logging-server" (.isRegistered (ManagementFactory/getPlatformMBeanServer) (ObjectName. "java.util.logging:type=Logging")))
+```
+
+**Risks and fallbacks**: (1) the R lines change the data of every record of the world (a few JDK records, the tests'):
+harmless to a reader that ignores them, but `bin/j2g-unit`'s type annotation sample and the gate's generated checks see the
+new lines (checked by day: 55 of 55); fallback: R lines only with `:members`. (2) `j2g_dyn.go`'s SerialNew does not compile:
+revert `arbace/j2g/dyn.ae`'s hunk (slice 8 then waits; nothing else depends on it). (3) the logging bean's registration fails
+the platform server's creation (`StandardMBean` of PlatformLoggingImpl): every `getPlatformMBeanServer` caller would fail;
+fallback: the bean out of the server's array (one line), t04793's second half then fails alone. (4) ManagementFactory's new
+overloads change j2g's overload choice in callers (none in the world calls `getPlatformMXBean` with two arguments).
+
+### What P2 leaves (the plan's S5 list)
+
+- **JCS270 (a), JCS272 (a)** (decided 2026-11-08: the JDK members' Signatures unrecorded and getDeclaredClasses' name order
+  until a test asks): nothing to build until S1's record names a test.
+- **The Proxy tail**: after the night's records show which proxy tests remain (JCS170's).
+- **JCS220** (the asynchronous channels, proposed, recommended (a) after F10a/F10b's records): not decided; 2-3 days.
+- **JCS160 (a)**: built (SOCKS, F12's); nothing left.
+- **F18** (jrt's dates, 16 / 14 tests, 4 days): not started.
+- **JCS377 (a)**: a javac-world shard measured in P1's night (night 15); P2 adopts it if it builds.
+- **JCS380, JCS381** (proposed by P1 for P2): not decided.
+
+## Proposed (P2): JCS384-JCS388
+
+Numbered after the newest number on `mac/java-night` and `mac/jcs359-s2`: both used **JCS379-JCS382** for different proposals
+(P1's on `java-night`, JCS359 stages 2-3's on `jcs359-s2`); one set needs renumbering at their merge (JCS388).
+
+### JCS384 An evaluated fn's serialization
+
+Clojure's `function-serialization` serializes fns made by the evaluator: their classes are made at run time
+(`Dyn.defineFnClass`, subclasses of `Compiler$EvalFn`) and their state is the evaluator's code tree and captured frame, which
+no other process could read. (a) By design at the eval level (a `:fn-serialization` Clojure class, eval only): the AOT level's
+fns are translated classes and serialize as on the JVM; (b) an evaluated fn written as its source form, its namespace and its
+closed-over values, and read back by evaluating the form again (`writeReplace` on EvalFn, a `readResolve` holder): 1.5 days,
+and a fn whose form is gone (made by `eval` of a generated form) still cannot. *Recommended: (a)*: the JVM's own answer
+needs the class file the evaluator does not make (J2G-SPEC §10.4); one test.
+
+### JCS385 RecordComponent.getAnnotatedType and Field.getAnnotatedType
+
+jrt's Field has no `getAnnotatedType`; RecordComponent leaves it out likewise. JCS271 (b)'s Y records hold the fields' type
+annotations already. (a) Both, over the Y F records and a new `Y R NAME HEX` (the Record attribute's
+RuntimeVisibleTypeAnnotations), through jdk26u's TypeAnnotationParser as Method's are: half a day; (b) when a test of the
+corpus needs it (RecordReflectionTest's type annotation case, java-lang-framework's, night 3). *Recommended: (b)*.
+
+### JCS386 ObjectStreamClass's record support from RecordComponent
+
+The variant (`test/jrt/serialization/variants.py`) takes a record's components as its instance fields
+(`recordComponentFields`) because RecordComponent was not in the world. (a) jdk26u's own `canonicalRecordCtr` and
+`RecordSupport` over `getRecordComponents`, with method handles once F15's java.lang.invoke is in the night's world: the
+variant shrinks; (b) as now (the fields are the components, JLS 8.10.3; the same answers). *Recommended: (a)* after F15's
+night, one variant fewer.
+
+### JCS387 Clojure's serialization namespace recorded
+
+After P2's night: (a) the namespace's counts into `test/arbace-go-results.edn` (unskipped) and the AOT reference, the tests
+that fail into narrower Clojure classes (JCS384's at eval), `:serialization` left with `test-proxy-non-serializable`'s
+Swing reason only; (b) keep it skipped until the AOT level passes too. *Recommended: (a)*.
+
+### JCS388 JCS379-JCS382 used twice
+
+`java-p1` (P1's finalization, the Cleaner's variants, thread makers, Reference Handler) and `jcs359-s2` (JCS359 stages 2-3's)
+both numbered from JCS379. (a) jcs359-s2's renumbered at its merge (it is the later and not yet merged into `java-night`'s
+line); (b) P1's renumbered. *Recommended: (a)*, the main session's at the merge.
+
 ## As built: F15 (java.lang.invoke), write-ahead
 
 Branch `java-invoke` from `mac/java-night` (`9e6160bbb`), 2026-11-09, by day under the light rules (no conversion, j2g run,

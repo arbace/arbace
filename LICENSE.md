@@ -669,6 +669,11 @@ covers what.
   Go: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with
   the Classpath Exception (text below); the PhantomReference and the thread "Reference Handler" in
   `go/arbace/jrt/reference.ae` and the thread groups' members of `thread.ae` are Arbace's own.
+- Records' reflection and the platform logging bean (P2, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by
+  day)", 2026-11-11): `go/arbace/jrt/record.ae` transcribes jdk26u's `java/lang/reflect/RecordComponent.java` (at
+  `baf63fb`) into Go, and `overlay/jdk/java.base/sun/management/ManagementFactoryHelper.java` now also holds jdk26u's
+  `PlatformLoggingImpl` (its calls made directly): Copyright (c) Oracle and/or its affiliates, under the GNU General
+  Public License version 2 with the Classpath Exception (text below); `go/arbace/jrt/record_test.ae` is Arbace's own.
 - java.util.logging (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F5 (write-ahead)"; recorded by the
   rule of B7): the variants `overlay/jdk/variants/LogManager.ae`, `Logger.ae`, `Level.ae`,
   `LogRecord.ae`, `SimpleFormatter.ae` and `LoggingFileHandler.ae` keep the code of the jdk26u members
