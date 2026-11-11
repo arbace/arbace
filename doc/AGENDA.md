@@ -173,7 +173,7 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   the light level unchanged, the recvfrom programs `:unix-java` there; the three OC216 timeouts are CPU, not load: classed as their
   gc class's timeouts and recorded; the night's: `bin/oi check --aot --level compiled --only-list test/ocaml/oc216-compiled.txt` and
   `bin/oi suite check --aot --level compiled --only-list test/ocaml/oc216-suite-compiled.txt` under the big lock, then recvfrom_unix's
-  and recvfrom_linux's entries out of aot-compiled-known.edn if they pass). `ocaml-props2` (OC191-OC197, OC206, OC207). Scheme: `scheme-props4` (SCS22-SCS24). LLVM IR: `llvm-props3`
+  and recvfrom_linux's entries out of aot-compiled-known.edn if they pass). `ocaml-props2` (OC191-OC197, OC206, OC207). Scheme: `scheme-props4` (SCS22-SCS24), `scheme-props5` (SCS25 (a), SCS26 (b)). LLVM IR: `llvm-props3`
   (LLS40-LLS42).
 - Java: `java-invoke2` (JCS350-JCS356 on F15), `java-testlib2` (JCS334-JCS339).
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).

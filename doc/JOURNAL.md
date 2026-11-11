@@ -3261,3 +3261,14 @@ tamago configurations alone, GOMEMLIMIT 3000MiB, window-w2c's tree with the fix 
 tamago/amd64 and tamago/arm64 (42 files each, the table of oi alone generated in both); linux's std read was not finished in the light
 lane's time (and its annotations are the same forms). Behaviour: `bin/oi test` ok; the five finaliser programs of OC192 pass by `bin/oi
 check --only-list`. Alternative (b), leaving oi out of the table at W2, not needed. The fix should be picked onto window-w2c.
+
+## 2026-11-09: SCS25 (a), SCS26 (b): TestWordBreakUAX29's control in the gate (branch `scheme-props5`, from next `6c3c87c02`)
+
+The user accepted scheme-props4's proposals as recommended (about 14:20). SCS25 (a): U+1E9E's exception in si's final sigma stays
+stated; Chez 10.3.0's `unicode-char-cases.ss` was not fetched (alternative (b), an hour and a download, for one character measured over
+every scalar value). SCS26 (b): `bin/si unit --control`, as `unicode-scan --control` does: the runtime's forms copied to
+`.tmp/si-control`, WB3c's rule dropped from `prim_char.ae`, `TestWordBreakUAX29` run on the copy and required to report exactly 9
+differing positions of UAX #29's WordBreakTest.txt (UCD 16.0.0), else the command fails; a part of `si-check.unicode` in
+`test/gate/crops/scheme.edn` and `steps.edn`. Alternative kept by hand (a) was rejected: GTS81 (a) wants a control per check family in
+the gate. Measured: the control differs in 9 positions (16 s); si-essential's command, the scans and their controls, crops-test, reap and
+crops-score as before (Scheme 97.4 / 98.9 / 100 / 100). Recorded in doc/scheme/SCHEME-SURVEY.md, "As built: SCS25 (a), SCS26 (b)".
