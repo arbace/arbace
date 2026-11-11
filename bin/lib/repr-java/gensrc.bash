@@ -164,27 +164,70 @@ gensrc_forms() {
     cp -r "$jdk/make/jdk/src/classes/build/tools/$d" "$t/src/build/tools/" || return 1
     # the tool-world variants replace the build's files of the same name
     [ ! -d "$v" ] || cp -r "$v/." "$t/src/build/tools/$d/" || return 1
+    # a tool whose uses of what javac's tool lacks are renamed to its variants' classes (gensrc_patch_DIR)
+    if declare -F "gensrc_patch_$d" > "$quiet"; then "gensrc_patch_$d" "$t/src/build/tools/$d" || return 1; fi
     REPR_JAVA_EXE=$gexe "$root/bin/repr-java" read --check "$t/forms" "$t/src" > "$t/read.log" 2>&1 ||
       { tail -5 "$t/read.log" >&2; return 1; }
     grep -q ' 0 failed, 0 javac errors, ' "$t/read.log" || { tail -3 "$t/read.log" >&2; return 1; }
+    # the tool's world variants (overlay/jdk/javac/buildtools-world/DIR/MODULE: the API it calls that javac's tool lacks),
+    # each module's read as a patch of that module against the platform, defined beside the tool
+    local w=$root/overlay/jdk/javac/buildtools-world/$d m
+    if [ -d "$w" ]; then
+      for m in $(ls "$w"); do
+        (cd "$t" && REPR_JAVA_EXE=$gexe "$root/bin/repr-java" read-jdk --check "$t/world/$m" "$m" "$w/$m") > "$t/read-$m.log" 2>&1 ||
+          { tail -5 "$t/read-$m.log" >&2; return 1; }
+        grep -q ' 0 failed, 0 javac errors, ' "$t/read-$m.log" || { tail -3 "$t/read-$m.log" >&2; return 1; }
+        rm -f "$t/world/$m/repr-java-report.edn"
+        cp -r "$t/world/$m/." "$t/forms/" || return 1
+      done
+    fi
     touch "$t/ok"
   fi
   echo "$t/forms"
 }
+# gensrc_patch_methodhandle DIR: VarHandleGuardMethodGenerator's MethodType, VarHandle.class and TypeKind as its
+# variants' GuardMethodType, the name className gives VarHandle ("VarHandle": java.lang.invoke's package dropped) and
+# GuardTypeKind, and its loop over a method's Parameters (java.lang.reflect.Parameter, not in the tool's world) over
+# its parameter types, as many (overlay/jdk/javac/buildtools/build/tools/methodhandle), as make/CopyInterimTZDB.gmk
+# renames a package: the build's file is read, never kept changed; each substitution must apply once at least
+gensrc_patch_methodhandle() {
+  local f=$1/VarHandleGuardMethodGenerator.java x
+  for x in '^import java\.lang\.classfile\.TypeKind;$' '^import java\.lang\.invoke\.MethodType;$' '^import java\.lang\.invoke\.VarHandle;$' \
+           'className(VarHandle\.class)' 'TypeKind\.from(pt)\.upperBound()\.descriptorString()' '\bMethodType\b' \
+           'for (var p : m\.getParameters())'; do
+    grep -q "$x" "$f" || { echo "javac-vendor gensrc: $f has no $x" >&2; return 1; }
+  done
+  sed -i -e '/^import java\.lang\.classfile\.TypeKind;$/d' -e '/^import java\.lang\.invoke\.MethodType;$/d' \
+    -e '/^import java\.lang\.invoke\.VarHandle;$/d' -e 's/className(VarHandle\.class)/"VarHandle"/' \
+    -e 's/TypeKind\.from(pt)\.upperBound()\.descriptorString()/GuardTypeKind.upperBoundDescriptor(pt)/' \
+    -e 's/\bMethodType\b/GuardMethodType/g' -e 's/for (var p : m\.getParameters())/for (Class<?> p : m.getParameterTypes())/' "$f"
+}
+# gensrc_patch_generatenimbus DIR: Generator's templates, its class resources (Class.getResourceAsStream("resources/..."),
+# which the Go build provides but does not list among Class's members, so that the interpreter cannot call it), read as
+# Class.getResourceAsStream resolves a relative name: by the class's package's path, from the system class loader (the
+# build's tools' class path; here ARBACE_PATH, where gensrc_post_java_desktop puts them as make/CompileToolsJdk.gmk does)
+gensrc_patch_generatenimbus() {
+  local f=$1/Generator.java x='getClass()\.getResourceAsStream('
+  [ "$(grep -c "$x" "$f")" = 1 ] || { echo "javac-vendor gensrc: $f has not one $x" >&2; return 1; }
+  sed -i 's|getClass()\.getResourceAsStream(|ClassLoader.getSystemClassLoader().getResourceAsStream("build/tools/generatenimbus/" +|' "$f"
+}
 # gensrc_tool CWD CLASS ARG...: the tool's main on javac's tool executable, in CWD (- the module's tree), its output
 # to the run's log
+# (the interpreted tools defined with --reflect: none since gensrc_patch_generatenimbus)
+gensrc_reflect_tools=""
 gensrc_tool() {
-  local cwd=$1 cls=$2 forms=- d; shift 2
+  local cwd=$1 cls=$2 forms=- d r=(); shift 2
   if ! gensrc_compiled "$cls"; then
     d=${cls#build.tools.}; d=${d%%.*}
     forms=$(gensrc_forms "$d") || { echo "javac-vendor gensrc: the tool $cls was not read" >&2; return 1; }
+    case " $gensrc_reflect_tools " in *" $d "*) r=(--reflect) ;; esac
   fi
   [ "$cwd" != - ] || cwd=$gout
   mkdir -p "$cwd"
   (cd "$cwd" && env "TMPDIR=$work/tmp" \
-     "ARBACE_PATH=$jdk/make/jdk/src/classes:$jdk/src/java.xml/share/classes:$jdk/make/langtools/tools" \
+     "ARBACE_PATH=$work/gensrc/tools/resources:$jdk/make/jdk/src/classes:$jdk/src/java.xml/share/classes:$jdk/make/langtools/tools" \
      "$gexe" "$root/bin/lib/repr-java/gensrc-run.ae" "-Djdk.internal.jrt.javac.platform=$work/platform" \
-     "$forms" "$cls" "$@")
+     "${r[@]}" "$forms" "$cls" "$@")
 }
 # pg_concrete: stdin's placeholders, {gensrc} the own tree
 pg_concrete() { PB_GENSRC=$gout pb_concrete "$gbuild"; }
@@ -306,7 +349,7 @@ gensrc_substs() {
   done < "$work/gensrc/subst-$1.txt"
 }
 gensrc_post_java_desktop() {
-  local o=$gout/java.desktop p n s
+  local gfail=0 o=$gout/java.desktop p n s
   # GensrcIcons.gmk: each X11 icon's int (32) and long (64) array by ToBin (its tool-world variant)
   mkdir -p "$o/sun/awt"
   for p in java-icon16.png java-icon24.png java-icon32.png java-icon48.png; do
@@ -320,10 +363,15 @@ gensrc_post_java_desktop() {
     done
     rm -f "$o/sun/awt/$s.bin"
   done
-  # GensrcSwing.gmk: Nimbus (JCS368 (b))
+  # GensrcSwing.gmk: Nimbus (JCS368 (b)): its templates are the tool's class resources, as make/CompileToolsJdk.gmk copies
+  # them (src/java.desktop/share/classes/javax/swing/plaf/nimbus/*.template into build/tools/generatenimbus/resources)
+  local res=$work/gensrc/tools/resources/build/tools/generatenimbus/resources
+  rm -rf "$res"; mkdir -p "$res"
+  cp "$jdk"/src/java.desktop/share/classes/javax/swing/plaf/nimbus/*.template "$res/" || gfail=1
   gensrc_tool_logged - build.tools.generatenimbus.Generator -skinFile "$jdk/src/java.desktop/share/classes/javax/swing/plaf/nimbus/skin.laf" \
-    -buildDir "$o" -packagePrefix javax.swing.plaf.nimbus -lafName Nimbus || return 1
-  gensrc_zh_hk java.desktop
+    -buildDir "$o" -packagePrefix javax.swing.plaf.nimbus -lafName Nimbus || gfail=1
+  gensrc_zh_hk java.desktop || gfail=1
+  return $gfail
 }
 gensrc_post_java_logging() { gensrc_zh_hk java.logging; }
 gensrc_post_jdk_charsets() {
