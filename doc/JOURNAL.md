@@ -3614,3 +3614,15 @@ rfr_name and takes the refusal branch. rust-rf13c and rust-rf13d do not touch th
 
 ## 2026-11-10 py-aot-classid: the AOT judge records a classed row's class by its id
 `arbace/python/aot.ae`'s `judge` read `(:class c)` of a class map (`divergences-aot.edn`'s key is `:id`), so a classed row's `:class` was `:differs` or `:refused` (queue 259's Low, P6; the main host's patch `.tmp/night-python/259-aot-classid.patch`, applied as is): now `(:id c)`. No other `(:class ...)` read of a class map in arbace/python/ (the rest read `(ex-data e)`). Test `test/python/aot_judge_test.ae` (fabricated refused and differing runs, with and without a class, as the negative control; fails on the unfixed aot.ae). aot.ae's digest (`aot_gen`) keys the AOT's printed packages and the runner: the next pyi AOT run reprints the runtime. bin/reap 0 problems, crops-score --strict 0 problems; no record written.
+
+## 2026-11-11: bin/hsi check --aot removes each program's executable after its run (branch `hs-aot-disk`)
+
+Night 11's `bin/hsi check --aot --corpus nofib,samples,synthetic,testsuite-core --jobs 2 --record` filled the disk: every compiled program's
+`hsi-aot` (20-50 MB) and its generated Go and build module stayed under `.tmp/hsi/progs/<corpus>/<program>/<key>/aot/` (34 GB+ for ~800
+programs) and the run was stopped. The user decided (2026-11-11): delete each program's binary after its run, keep logs, outputs and verdicts.
+`bin/lib/hsi/check`'s `one`, in `--aot` mode, now removes `aot/hsi-aot`, `hsi-aot.new`, `gen` and `mod` right after the compiled run (also
+when the build failed: `gen`, `mod`); `HSI_KEEP_BINS=1` keeps them. Nothing reads the binary afterwards (the verdict, `--record`, `divergences` and
+`record_progs_run` read results, outputs and the STG); a rerun rebuilds, as `bin/lib/hsi/aot`'s key hit needs `DIR/hsi-aot` to exist. The libraries'
+generated packages `.tmp/hsi/aot/lib/` (shared, built once per runtime and image) stay. Test (day, `--jobs 1`, no `--record`, samples/Arrays,
+Classes, Cont, Deadlock): progs 272 MB with HSI_KEEP_BINS=1, 271 KB without; verdicts 4 of 4 pass as recorded; peak 1.1 GiB; a second run
+rebuilt and passed. Alternative considered: deleting the whole `aot/` dir (also drops the small logs and the key: kept for debugging).
