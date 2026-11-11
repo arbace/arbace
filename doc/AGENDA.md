@@ -90,10 +90,12 @@ Six crops are above 90 on all three. What the others still need:
   interfaces), and base on that pool (HF10-P14: 235 of 241, `hs-p11`); HF10-P15 to P27 decided (a) (the user, 2026-11-10; P25 yes):
   `hs-p18` built P18 (GHC.Internal.Prim's interface from primops.txt.pp, 3,085 of 3,085 facts and every line but the header equal to
   GHC's: no GHC interface left on the own path), P15 (`haskell-lib-own-base`, on haskell-lib-check-own's pool) and started P20;
-  `hs-p20` carried P20 on (sixteen run-breaking classes fixed in the front end, lib-stg 5,473 of 7,637, 0 worse): the whole own set
-  runs 40 of run-check's 63 (0 of 10 before), the `equal` set 50 (83 modules), both recorded as run rows; P20's proof (all ≥
-  equal, 0 lost) not reached: 10 lost in three classes (a case on the void token, output differences, NonTermination); next
-  P20's tail, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
+  `hs-p20` carried P20 on (sixteen run-breaking classes, the whole own set 40 of run-check's 63); `hs-p21` closed P20: the
+  whole own set runs 50 of 63, every pass of the `equal` set kept, 0 lost (eight more classes: implicit-parameter synonyms,
+  qualified binders, guard implications, -O0 constructor layouts, ...; lib-stg 5,533 of 7,639, 0 worse), and the elaborator
+  keeps representation kinds (the `kinded-results` hard-code gone); P21 not built: the 13 programs neither set runs are the
+  other packages' -O2 ABI and -O0 exception reports, not the programs' (HF10-P28 proposed: P21's proof restated, those to
+  P17); next P28's decision, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
@@ -265,6 +267,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   `asm-amd64-encode` out of `:clean-only` into the nightly (9 min 31 s). asm-amd64's full tier is 17 min 25 s the heaviest night (256% of
   half a share, 6 min 48 s; `--costs` says 338%, it does not know the rotation): over, by the encode check. Proposed AXS91: encode-check
   rotated in sevenths (the night at about 8 min 20 s, 122%), or a larger share.
+  `asm-ax11` (from `mac/next`; doc/asm/AMD64-SURVEY.md, "As built: AX11"): the AOT cell's six object classes fixed (conditionals,
+  macros, `.rept`/`.irp`/`.irpc`, x86-64's `.reloc`, the DWARF 4 line table's header, `$0x80` as a name): 94.2% -> 100.0% (105 / 0 / 0, the
+  run check 19 of 19 with `run/macros`). Proposed AXS92 (the line program), AXS93 (arm64's `.reloc` order, for the arm64 line), AXS94
+  (`--defsym` tests into the object corpus).
+  `asm-ax11b` (from `mac/next` `f6ac54829`): AX11 merged with AR7, `arbace/asm/obj.ae`'s error collection inside `run-items!` (an expansion's
+  errors at its invocation); both crops' checks rerun, every record unchanged; x86-64 AOT 105 / 0 / 0, arm64 AOT 3,005 / 0 / 55.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed

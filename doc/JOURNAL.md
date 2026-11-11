@@ -6211,3 +6211,85 @@ doc/asm/ARM64-SURVEY.md, "As built: AR7", has the measures.
   the diagnostics' columns, the memory programs in the essential subset). A fix on the way: x86i-check ran its CPU runs through
   run-check's `$runner`, unset there under `set -u` since AR4's merge (every CPU row `exit 1`; found by the AR7 proof's `--only` run of
   the subset, 13 of 13 after).
+
+## 2026-11-11: AX11, the x86-64 AOT cell's classes (branch `asm-ax11`, from `mac/next` `15278e9c6`)
+
+- The asm-amd64 AOT cell was 98 / 0 / 6 (94.2%): six files of MC/X86's object tests (llvm-project 23.1.5, `llvm/test/MC/X86/`)
+  classed `:unsupported-directive` (`pltoff`'s `.ifdef`, `reloc-directive-elf-64` and `-with-inst-relocs`' `.reloc`,
+  `reloc-directive-tlsgd`'s `.rept`, `compact-unwind-cfi_def_cfa`'s `.macro`) and `:unsupported-debug-line` (`line-table-sections`).
+  Taken cheapest first, all six now llvm-mc 23.1.5's recorded objects byte for byte: conditional assembly, macros, `.rept`, `.irp` and
+  `.irpc` expanded by the object assembler as AsmParser does (bodies as text, read again by the arch's reader), `$` with an adjacent
+  integer a name (`$0x80`, AsmParser::parseIdentifier), x86-64's `.reloc` by name with its symbol kept and the directives merged by
+  offset with the section's own relocations (llvm-mc's order in the two tests), and the DWARF 4 line table's header for `.file N`
+  (no line program yet). A run program `test/asm/run/macros.s` judged by its own verdict exercises the expansion on the CPU and on x86i.
+  The cell is 105 / 0 / 0 (100.0%). Details: doc/asm/AMD64-SURVEY.md, "As built: AX11"; proposed AXS92-AXS94.
+- The `.reloc` order was inferred from the three recorded objects (no llvm-mc run); a first try merging for every arch reordered
+  MC/AArch64's `patchinst` (llvm-mc puts PATCHINST after the JUMP26s), so the merge is x86-64's (`:reloc-directives-merged`) and arm64
+  keeps its order (AXS93 for the arm64 line). Alternatives considered: expanding macros in the reader (the round trip keeps the text, so
+  no), and the line program now (no recorded object holds one: AXS92).
+- Shared files touched beside the arm64 line: `arbace/asm/obj.ae`, `arbace/repr/asm/gnu.ae`, `bin/repr-asm` (x86i-check's `$runner`,
+  unbound on `mac/next` since AR4: every native run of `x86i-check` failed; now `${runner:-}`). Records: object, run, x86i (eval cell
+  127 -> 130 with `macros`), the round trip's two rows' reasons, `test/reap/matrix.edn`, `test/crops/scores.edn` (x86-64 assembly 99.3%).
+
+## 2026-11-11: asm-ax11b, AX11 merged with AR7 (branch `asm-ax11b`, from `mac/next` `f6ac54829`, `mac/asm-ax11` `97c993ca5` merged)
+
+AR7 (merged into `mac/next`) and AX11 changed the shared object assembler `arbace/asm/obj.ae` in parallel from `15278e9c6`: AR7 collects
+every error of a file with its item's place (ARS43 (a)) in `assemble`'s item loop, AX11 replaced that loop by `run-items!` (conditionals,
+macros, `.rept`/`.irp`/`.irpc` expanded as text). Merged so both hold: the collection moved into `run-items!` (each item, the expanded ones
+too, reports its error and the next one runs; the place is the file's item's, an expansion's items keeping their invocation's, as LLVM
+reports a diagnostic within a macro instantiation at the instantiation); a conditional with an erroneous condition pushes its state first
+as parseDirectiveIf does (its `.endif` still matches); AX11's "unmatched .ifs or .elses" a reported error beside the others (it was a
+throw). The rest (AR7's `.org`, fixup places, the symbol table's errors; AX11's `.reloc` names and merge by offset, the DWARF 4 line table's
+header, `line-entry!`) merged by git without overlap. `bin/repr-asm`: both branches fixed x86i-check's unbound `$runner`; one line kept
+(`${runner:-}`, AX11's). Alternative considered: keeping AR7's loop around `run-items!` (a try per top-level item): an error inside an
+expansion would then end the whole expansion, where LLVM goes on with the body's next statement; not done.
+
+- Proofs (stage 0, light, each under 2 GiB; no gate): amd64 `object-check mc-x86-obj` 47 of 47, `musl` 32 of 32, `synthetic` 7 of 7 (each
+  with its control), `run-check` 19 of 19 and five controls, the round trip (3 controls) and `x86i-check` whole (43 of 44, `{:cpuid 2}`,
+  as recorded; 7 min 54 s); arm64 `object-check` 16 of 16 and `mc-aarch64-obj` 107 of 110 (as recorded), `object-verdict` (2,781 of 2,833
+  CHECK lines, as recorded), the round trip, `encode-check`, `run-check` by qemu-aarch64 17 of 17, `bin/a64i check --essential` 74 of 74 and
+  whole 84 of 84, every control failing as it must. No record moved: the amd64 records equal `mac/asm-ax11`'s, the arm64 ones `mac/next`'s.
+  A by-hand probe: a macro whose body has an error, invoked twice, beside a stray `.endif`, `.purgem` of an unknown macro and an unclosed
+  `.if`, gives five errors in order, the body's at each invocation's place. `bin/reap --record` 49 of 52 cells, 0 problems, the matrix
+  unchanged (x86-64 assembly AOT 105 / 0 / 0, arm64 3,005 / 0 / 55); `bin/crops-score --record` unchanged, `--judge --strict` 0.
+## 2026-11-11: HF10-P20 (a) closed: the whole own set runs 50 of 63, every pass of the `equal` set kept; the kinds kept (branch `hs-p21`, from `mac/next` 5d10a92fb)
+
+- Goal (the plan "Haskell on its own libraries", stage 2): `LIB_STG_REPLACE=all` (every ghc-internal module Arbace's own STG)
+  at least as good as `equal` on run-check's 63, none lost. Before: `all` 40 of 63, `equal` 50, 10 lost in three classes.
+  After: `all` **50 of 63**, every one of `equal`'s 50 passes kept (`libcheck judge-runs` on the `{:runs :all}` row, exit 0);
+  the row re-recorded 40 -> 50. lib-stg on the own interfaces 5,473 -> 5,533 of 7,639 (0 worse); lib-check own 265 against
+  265, 0 worse (re-recorded: Encoding.Types 13 -> 18 binders, Data.Dynamic errors -> ok); base's lib-check 241, lib-stg 547 of
+  1,024, both 0 worse.
+- Method as hs-p20's: a run, the first broken module bisected (`LIB_STG_SIDES=own`, `LIB_STG_REPLACE=@FILE`; the script
+  `.tmp/p20/bisect.sh` gained `PAT`, only a failure matching it counts, after a masking failure of a mixed set,
+  GHC.Internal.Maybe's `$tc'Nothing` asked by the -O2 packages, misled one bisection), or the module's STG read against GHC's
+  `-O0` (`stgcmp ... --why`); each fix judged by lib-check and lib-stg `--ifaces own --judge` before the next run. Sources:
+  GHC 9.14.1's pinned tarball (GHC.Tc.Gen.Match's tcGRHS, GHC.HsToCore.Match.Literal's tidyNPat, GHC.Iface.Tidy,
+  GHC.Tc.Solver.Dict, GHC.Types.Id.Make; BSD-3).
+- The classes, in the order the runs met them (doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P20 (a), closed"): an
+  implicit parameter's synonym (HasExceptionContext, HasCallStack) solved from a `let ?x` of its name (Exception.Type's
+  default `toException`'s context was free in every instance: the case on the void token in the forked threads' handlers);
+  a binder of a qualified type instantiated at its occurrence (withFrozenCallStack's `do_this`); a pattern guard's givens
+  scoped to its GRHS (Data.Typeable's `cast` rewrote `Typeable b` to `Typeable a`: every cast succeeded, NonTermination
+  taken for an AsyncException); Word literal patterns (`signum 0`); the own unit's constructors laid out at -O0 from their
+  types (`$WSrcLoc` unboxed fields the own SrcLoc keeps boxed), only in the own runs (`--o0-layout 1`): lib-stg on GHC's
+  interfaces merges over the -O2 pack's layout, and base's reference holds ghc-internal's constructors unpacked (GHC's -O0
+  dump compiles each package against the installed -O2 interfaces); NOINLINE bindings a rule's right-hand side mentions
+  external (Enum's eftInt; all of a rule's names first, which made List's `length` unequal on the GHC-interface lib-stg: the
+  narrower rule matches GHC's -O0 output); an imported constructor's context dictionaries in its arity (Backtrace's
+  `fmap SomeExceptionAnnotation`); an over-applied polymorphic result's representations from a lambda argument (listArray's
+  `foldr go (\_ s# -> s#) es 0# s2#`, a State# bound by a thunk: the writes never ran).
+- The kinds (the task's other item): `tostg/kinded-results` replaced. The elaborator keeps the kinds of a value's type
+  variables that fix a representation (`:tv-kinds`, from signatures' kinded binders and interfaces' foralls), the own
+  interfaces write them in GHC's spelling (`TYPE 'AddrRep`), tostg reads them for results and binders. Alternatives
+  considered: a fifth element of the elaborator's `:forall` (dropped by zonk and subst everywhere: rejected); keyed by type
+  variable name alone (GHC's interfaces name them `a`: collisions: rejected); every kind with variables (`TYPE r`: the
+  classes' kind arities read kinds' variables, a risk to lib-check's facts: only closed kinds kept).
+- HF10-P21 (stage 3) not built: its premise does not hold. GHC's own -O0 set (`ghc0`) runs the same 50, and 7 of the 13
+  others call ghc-internal's -O2-only names (`IO.Exception/ioException3`, `List/reverse1`) from the other packages' -O2 STG
+  (bytestring, directory, file-io, stm), not from the programs; 3 differ in the uncaught exception's report on -O0
+  libraries, 3 are recorded hsi classes. Proposal HF10-P28 (the survey).
+- Rule slips: three source edits while a run that could load them was running (`typecheck.ae` during the first MVarOrder
+  bisection, a Word-pattern change no probed program used; `tostg.ae` during the LibContainers bisection, which I stopped and
+  did not use; `tostg.ae`'s unit check during the GHC-interface lib-stg's program runs, a no-op for programs, unit main); one
+  `<(...)` in a `diff` command early on.
