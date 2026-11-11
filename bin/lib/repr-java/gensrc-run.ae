@@ -1,0 +1,100 @@
+;; bin/javac-vendor gensrc's runner (JCS359 (a)(2), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS359
+;; stages 2-3 (day)"): one JDK build tool's main on javac's tool executable, run as
+;;
+;;   EXE bin/lib/repr-java/gensrc-run.ae [-DNAME=VALUE]... FORMS CLASS [ARG...]
+;;
+;; Each -D sets a system property first (flagsgenerator's platform, jdk.internal.jrt.javac.platform).
+;; FORMS is "-" for a tool the executable holds compiled (module buildtools of jdk/javac/forms: its main
+;; called by name, as bin/jrt-convert's and bin/javac-vendor's generate steps call theirs), else the root
+;; of the tool's Java forms as `bin/repr-java read` wrote them (a namespace file per package, PKG.ae,
+;; loading its class files): every package under it defined by the interpreter (arbace.classes.interp),
+;; each package's classes in one top-level do, entered together before any body is analyzed (SPEC §9.2,
+;; 2), as javac compiles the build tool's sources together (test/java/run.ae's --load do), packages in
+;; the order of their imports of each other. The main is called through a public class defined in
+;; CLASS's package, so that a package-private tool class's main runs as the JDK's launcher runs it
+;; (jdwpgen's Main is package-private; a call by name from Clojure finds public members only).
+;; An uncaught exception is printed and the status is 1; System.exit's status is the tool's.
+(ns javac.gensrc.run
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-all [^File f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (loop [acc []]
+      (let [x (read {:eof ::eof} r)]
+        (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(defn- head [x] (when (seq? x) (first x)))
+
+(defn- packages
+  "[ns-symbol namespace-forms class-files] for every PKG.ae under ROOT whose first form is an ns form."
+  [^File root]
+  (let [files (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".ae")) (file-seq root))]
+    (for [^File f (sort-by #(.getPath ^File %) files)
+          :let [forms (read-all f) n (first forms)]
+          :when (= 'ns (head n))]
+      [(second n) forms
+       (for [l forms :when (= 'load (head l)) :let [p (str (second l))]]
+         (if (str/starts-with? p "/") (File. root (str (subs p 1) ".ae")) (File. (.getParentFile f) (str p ".ae"))))])))
+
+(defn- imports-of [class-forms]
+  (set (for [x class-forms :when (= 'import (head x))
+             spec (rest x)
+             :let [s (if (and (seq? spec) (= 'quote (first spec))) (second spec) spec)
+                   p (cond (sequential? s) (str (first s))
+                           (symbol? s) (let [t (str s) i (.lastIndexOf t ".")] (when (pos? i) (subs t 0 i))))]
+             :when p]
+         p)))
+
+(defn- order [pkgs]
+  (let [by (into {} (for [[n :as p] pkgs] [(str n) p]))
+        deps (into {} (for [[n _ cfs] pkgs]
+                        [(str n) (disj (set (filter by (imports-of (mapcat read-all cfs)))) (str n))]))]
+    (loop [done [] left (sort (keys by))]
+      (if (empty? left)
+        (map by done)
+        (let [ready (filter #(every? (set done) (deps %)) left)
+              nxt (or (first ready) (first left))]
+          (recur (conj done nxt) (remove #{nxt} left)))))))
+
+(defn- define! [pkgs]
+  (doseq [[n ns-forms cfs] (order pkgs)]
+    (binding [*ns* *ns*]
+      (doseq [x ns-forms :when (not= 'load (head x))] (eval x))
+      (let [classes (vec (for [cf cfs
+                               x (read-all cf)
+                               :let [_ (when-not (contains? '#{defclass defclasses} (head x)) (eval x))]
+                               :when (contains? '#{defclass defclasses} (head x))]
+                           x))]
+        (in-ns n)
+        (when (seq classes) (eval (cons 'do classes)))))))
+
+(defn -main [& argv]
+  (let [[props [forms cls & args]] (split-with #(str/starts-with? % "-D") argv)
+        _ (doseq [p props :let [[_ k v] (re-matches #"-D([^=]+)=(.*)" p)] :when k] (System/setProperty k v))
+        i (.lastIndexOf ^String cls ".")
+        pkg (subs cls 0 i)
+        simple (subs cls (inc i))]
+    (when-not (= forms "-") (define! (packages (File. ^String forms))))
+    (try
+      (if (= forms "-")
+        (eval (list (symbol cls "main") (list 'into-array 'String (vec args))))
+        (binding [*ns* *ns*]
+          (in-ns (symbol pkg))
+          (eval (list 'defclass (with-meta 'GensrcMain__ {:public true})
+                      (list 'method (with-meta 'run {:public true :static true})
+                            (with-meta [(with-meta 'a {:tag "[Ljava.lang.String;"})] {:tag 'void})
+                            (list (symbol simple "main") 'a))))
+          (eval (list (symbol (str pkg ".GensrcMain__") "run") (list 'into-array 'String (vec args))))))
+      (catch Throwable e
+        (.flush System/out)
+        (.print System/err "Exception in thread \"main\" ")
+        (.printStackTrace ^Throwable e)
+        (.flush System/err)
+        (System/exit 1)))
+    (.flush System/out)
+    (.flush System/err)
+    (System/exit 0)))
+
+(apply -main *command-line-args*)
