@@ -10,7 +10,9 @@
             [arbace.classes.annot :as annot]
             [arbace.j2g.code :as code]
             [arbace.j2g.edge :as edge]
+            [arbace.j2g.embed :as embed]
             [arbace.j2g.main :as jm]
+            [arbace.j2g.meta :as meta]
             [arbace.j2g.model :as m]
             [arbace.j2g.out :as out]
             [arbace.j2g.world :as w]
@@ -301,6 +303,79 @@
     (check "inner ctor: control: a static nested class's, its own descriptor, index 0"
            (and (has nested #"^C \(Ljava[.]lang[.]String;\)V ") (has nested #"^P <init> \(Ljava[.]lang[.]String;\)V 0 "))
            (pr-str nested))))
+;; A4-A7 of the Ghidra case study's G1 plan (J2G-SPEC §4.1, "Roots from a program's metadata", "Refusals, stubbed
+;; or dropped"; §10.3): the metadata's pure parts over the fixtures of test/programs/, and their negative controls
+
+(defn test-program-meta []
+  (let [P "test/programs/"
+        specs [(str P "services/resources/a") (str P "services/resources/b") (str P "reflect-meta/resources/lib")]
+        [_ data] (embed/user-resources specs #{})
+        fns (into {} (for [[p f] data] [p #(slurp (io/file f))]))
+        svcs (meta/services [["s.S" "w.M"]] fns)]
+    ;; A5: the second jar's copy of a path the first holds is a root copy, its index listed
+    (check "resources: the second jar's svc.Greeter is root 1's copy"
+           (and (contains? data "META-INF/services/svc.Greeter")
+                (contains? data "META-INF/arbace/roots/1/META-INF/services/svc.Greeter"))
+           (pr-str (keys data)))
+    (check "resources: the roots' index names root 1, the directory b"
+           (= "1 b\n" (meta/roots-index-text (keys data) (embed/resource-dir-names specs)))
+           (pr-str (meta/roots-index-text (keys data) (embed/resource-dir-names specs))))
+    (check "resources: a source two directories hold is an error"
+           (try (embed/user-resources [(str P "hello-java/java") (str P "hello-java/java")] #{}) false
+                (catch Exception _ true)))
+    ;; A4: the registry, the world's first, the jars in order, the duplicate once, the comment dropped
+    (check "services: the registry in the class path's order"
+           (= (get svcs "svc.Greeter") [["svc.English" :classpath] ["svc.French" :classpath] ["svc.Missing" :classpath]])
+           (pr-str svcs))
+    (check "services: the world's provides first, kind module"
+           (= (get svcs "s.S") [["w.M" :module]]))
+    (check "services: the registry's text"
+           (= (meta/services-text svcs)
+              "module s.S w.M\nclasspath svc.Greeter svc.English\nclasspath svc.Greeter svc.French\nclasspath svc.Greeter svc.Missing\n")
+           (pr-str (meta/services-text svcs)))
+    (check "services: control: the jars' order reversed is another registry"
+           (not= (get (meta/services [] (into {} (for [[p f] [["META-INF/services/svc.Greeter" (str P "services/resources/b/META-INF/services/svc.Greeter")]
+                                                               ["META-INF/arbace/roots/1/META-INF/services/svc.Greeter" (str P "services/resources/a/META-INF/services/svc.Greeter")]]]
+                                                   [p #(slurp f)])))
+                      "svc.Greeter")
+                 (get svcs "svc.Greeter")))
+    (check "services: jdk/provides.txt is read, its two providers"
+           (= 2 (count (meta/read-provides "jdk/provides.txt"))))
+    ;; A6: the reflect-config's roots, the conditional entry by its condition
+    (let [md (meta/data-metadata-roots fns)]
+      (check "metadata: reflect-config's roots"
+             (= (vec md) [[nil ["rm.Plugin#<clinit>" "rm.Plugin#<init>" "rm.Plugin#run"]]
+                          ["rm.Main" ["rm.Conditional#<clinit>" "rm.Conditional#<init>" "rm.Conditional"]]])
+             (pr-str md))
+      (check "metadata: no errors" (empty? (:errors (meta md))))
+      (check "metadata: control: malformed JSON is an error, not roots"
+             (let [bad (meta/data-metadata-roots {"META-INF/native-image/x/reflect-config.json" (constantly "[{\"name\": ")})]
+               (and (empty? bad) (= 1 (count (:errors (meta bad))))))))
+    ;; A7: the refusals sorted by their referrers
+    (let [r (meta/refusals {"ui/Tool" "analysis: Unable to resolve class: java.awt.Robot"
+                            "ui/Panel" "members: Unknown type: java.awt.datatransfer.Clipboard"}
+                           {["ui/Main" "main" "([Ljava/lang/String;)V"] #{"class ui/Tool failed analysis"}
+                            ["ui/Tool" "paint" "()I"] #{"class ui/Panel failed analysis"}})]
+      (check "refusals: Tool stubbed (Main needs it), Panel dropped (only a refused class names it)"
+             (and (= (map first (:stubbed r)) ["ui/Tool"]) (= (map first (:dropped r)) ["ui/Panel"]))
+             (pr-str r))
+      (check "refusals: control: with no referrer both are dropped"
+             (= 2 (count (:dropped (meta/refusals {"ui/Tool" "x" "ui/Panel" "y"} {}))))))))
+
+(defn test-reflective-sites
+  "A6: meta/site-roots over analyzed call nodes (the shapes arbace.classes.analyze makes), and the control."
+  []
+  (let [inv (fn [owner nme target & args] {:op :invoke :owner owner :name nme :target target :args (vec args)})
+        lit (fn [c] {:op :class-lit :class (str "L" c ";")})
+        s (fn [v] {:op :const :type "Ljava/lang/String;" :val v})]
+    (check "sites: Class.forName of a constant roots the class"
+           (= [:rooted ["p.C#<clinit>"]] (meta/site-roots (inv "java/lang/Class" "forName" nil (s "p.C")))))
+    (check "sites: C.class.getMethod(\"m\") roots C#m"
+           (= [:rooted ["p.C#m"]] (meta/site-roots (inv "java/lang/Class" "getMethod" (lit "p/C") (s "m") nil))))
+    (check "sites: getConstructor of a literal roots its constructors"
+           (= [:rooted ["p.C#<init>"]] (meta/site-roots (inv "java/lang/Class" "getConstructor" (lit "p/C") nil))))
+    (check "sites: control: a name not constant is listed, not rooted"
+           (= :dynamic (first (meta/site-roots (inv "java/lang/Class" "forName" nil {:op :local :name 'x})))))))
 
 (defn -main [& _]
   (test-support-tables)
@@ -313,6 +388,8 @@
   (test-invokers)
   (test-private-reflection)
   (test-inner-ctor-annotations)
+  (test-program-meta)
+  (test-reflective-sites)
   (println (str "j2g.unit: " (if (zero? @failures) "all passed" (str @failures " failed"))))
   (shutdown-agents)
   (System/exit (if (zero? @failures) 0 1)))

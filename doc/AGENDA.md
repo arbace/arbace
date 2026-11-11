@@ -300,6 +300,13 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   programs, 42 equal to the CPU (cpuid `:cpuid`), 43 of 43 step-equal; 23 controls. Proposed AXS82-AXS88. Next: AX5.6's musl
   harnesses (AXS88 (a)).
 
+- Ghidra G1's run half (2026-11-10, branch `ghidra-run` from `mac/java-p1`; GH4 (ii) approved): A4 (a closed-world
+  `java.util.ServiceLoader`, the registry j2g generates from META-INF/services and `jdk/provides.txt`), A5 (resources of
+  several jars, class files' URLs, ClassLoader's resource methods in translated code), A6 (native-image metadata and constant
+  reflective sites as roots), A7 (refusals stubbed or dropped, `report.edn`'s `:refused`); proved light by day, built and run
+  at night (the commands in J2G-SPEC's sections and the journal's entry): the conversion, the build, the four samples
+  `services`, `resources`, `reflect-meta`, `refusals`. A1-A3, A11 on `ghidra-read`.
+
 ## Decided, not built yet
 
 The user's decisions not yet in code, by crop; the texts are in the docs named. Every open proposal of 2026-11-08/09 was
