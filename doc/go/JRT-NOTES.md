@@ -4132,6 +4132,18 @@ does not have; a missing file is `NoSuchFileException` as there), no Windows bra
 objects of `SharedSecrets` kept by `jdk.internal.jrt.ZipAccess` (jrt's `SharedSecrets` holds
 `JavaLangAccess` alone).
 
+**Deflater's bytes** (2026-11-11, the Ghidra case study's A9; `bin/jrt deflate`, the essential step `jrt-deflate`):
+the JDK's `Deflater` is jdk26u's libzip over the host's zlib 1.3.2 (`libzip.so` links `/usr/lib/libz.so.1`),
+jrt's zlib 1.3.2's deflate ported, so a program's deflated output (Sleigh's `.sla`, through
+`DeflaterOutputStream` at the default level) should be the JDK's byte for byte. `test/jrt/deflate.ae` makes a
+corpus of Arbace's own from a linear congruential generator (text, zeros, incompressible bytes, packed small
+integers, runs up to 300, the sizes around 32 KiB and 64 KiB, 1 MB of text) and deflates it eleven ways
+(`DeflaterOutputStream` whole, byte by byte, in chunks, a 64-byte buffer; levels 1 and 9; nowrap; filtered;
+Huffman only; a sync flush midway; `GZIPOutputStream`), each row the output's size and SHA-256 and that it
+inflates back; `--record` writes the frozen JVM's rows, `test/jrt/deflate-jdk26.edn` (171 rows); `bin/jrt deflate
+[EXE]` holds an executable's to them, then the control (each row held to the next row's digest) must fail.
+First run (stage 0, 2026-11-11): 171 of 171 equal, 3.7 s, 0.36 GB.
+
 ## jar
 
 **Translated from jdk26u**: `Attributes`, `JarEntry` (variant: its copy constructor without the

@@ -301,6 +301,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   reflective sites as roots), A7 (refusals stubbed or dropped, `report.edn`'s `:refused`); proved light by day, built and run
   at night (the commands in J2G-SPEC's sections and the journal's entry): the conversion, the build, the four samples
   `services`, `resources`, `reflect-meta`, `refusals`. A1-A3, A11 on `ghidra-read`.
+- Ghidra G1b (2026-11-11, branch `ghidra-g1b` on `java-night` with `java-p1`, `ghidra-run`, `ghidra-read`, `java-nread-g1` merged):
+  A9 (`bin/jrt deflate`: 171 of 171 equal to the JDK's, the essential step `jrt-deflate`), A10's fixture (`test/programs/junit4`: JUnit
+  4.13.2 and hamcrest-core 1.3 from pinned sources with two variants, `bin/java-project fetch` and `:patches`), A13 (`program.edn
+  :properties`, j2g `--property`), `:java`'s resources a directory a module; A12 is the demo's plan; A8 after the night's analysis. Night
+  18: `.tmp/night18/slots/` (the samples, SoftwareModeling's nread, SleighCompile built and run over the 150 specs, the tests, the ANTLR
+  tool); by hand, the oracle slot (the JDK's javac on hamcrest-core's two calls, the junit4 fixture on the JDK).
 - repr/java: `java-nread-g1` (the native provider's two fixes from Ghidra's G1 read proof: a void method's reference against
   Supplier, an inherited static field through two static on-demand imports; samples `MrefVoid`, `Star*`). Its night: the four
   provenance writers (the reader hash moved), nojavac-check and attr-check over jdk, javac and jdk26u, `bin/repr-java check --jdk`.

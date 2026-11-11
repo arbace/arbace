@@ -392,6 +392,17 @@ DIR/
   `--check` builds each for the host's architecture and runs its runs as `bin/build-go test` does,
   an Arbace program's with `ARBACE_LOAD_TIMES=1`: none of its own sources may load from source.
 
+### A program's properties (2026-11-11: the Ghidra case study's A13, GH8 (ii))
+
+`program.edn`'s `:properties {"K" "V" ...}`: system properties set at the start of the program's `main`
+(j2g's `--property K=V`, repeated, in the keys' order), after `arbace.version` and before jrt's host, the
+image and any class of the program is initialized, so a class initializer reads them (a library's
+switches, `java.awt.headless`, a test harness's `-D` options). Keys are strings without `=` or a newline,
+values strings without a newline; the map is checked by `program_edn`. The glue as data: no launcher class.
+A path among them is taken relative to the run's working directory, as the JDK takes `-D` paths. The
+sample `test/programs/properties` reads them in a class initializer; `bin/j2g-unit`'s `properties:` checks
+the main package's forms (with none, both mains byte for byte as before).
+
 ### Java sources by module (2026-11-10, write-ahead: the Ghidra case study's A1, A2, A3, A11)
 
 The design note before the build (GH2 (a), GH3 (a) of `.tmp/plans/GHIDRA-CASE-STUDY.md`; its first user
@@ -476,8 +487,31 @@ data, `:java`:
   each one's source path, the forms equal to one process's: a large module within one process's memory), the data
   side `java.project` (`test/java/project.ae`, on the tools' host). `bin/arbace-go --build-program DIR`
   runs `read` when `program.edn` has `:java` and takes `WORK/forms.all` as j2g's input (with `java/`
-  when present) and `WORK/resources.all` as resources.
-- **The fixtures**: `test/programs/java-project` (two modules of sources with a split package, a
+  when present) and, since 2026-11-11 (ghidra-g1b), `WORK/resources.jars/NNN-MODULE` as the resources, one
+  `--resources` a module in the plan's order (the class path's jars: A5's one URL a jar for
+  `ClassLoader.getResources`, each module's services and native-image metadata its own; `resources.all`,
+  the modules' resources merged, stays for reading).
+- **A dependency's variants** (`:patches`, 2026-11-11, ghidra-g1b; GH8 (iii) for third-party sources): an
+  artifact module's `:patches`, unified diffs applied in order (`patch -p1`) over its unpacked sources jar
+  before the closure, each in the module's sources key and listed with its digest and the files it changes
+  in `WORK/src/M.patches.edn`; a patch that does not apply fails the sources step. For a pinned library whose
+  sources a current javac rejects: JUnit 4.13.2's `Result` (jdk26u's `GetField.get` throws
+  `ClassNotFoundException`, declared since JDK 18) and hamcrest-core 1.3's `AnyOf` and `AllOf` (two calls
+  javac on Arbace rejects for a wildcard's capture; the JDK's javac's answer is the oracle tier's to
+  confirm), `test/programs/junit4/patches/`. A variant is a program's, reported, never Arbace's world's.
+- **Pinned artifacts of Arbace's own fixtures** (`bin/java-project fetch [--from DIR] [--check]`,
+  2026-11-11): `test/java/project/maven-pins.edn`'s files (JUnit 4.13.2, hamcrest-core 1.3: path, size,
+  SHA-256) in the main checkout's `.tmp/maven` (a linked worktree's and the clean clone's too), Maven's
+  layout, never committed; a model's `$maven-pins` root names it (`--root maven-pins=` overrides,
+  `JAVA_PROJECT_MAVEN_PINS` too). `--from` copies from a local repository (no network), else Maven Central
+  (by hand). `programs-full` checks them first (`fetch --check`).
+- **The fixtures**: `test/programs/junit4` (A10, GH7 (b), 2026-11-11: JUnit 4.13.2 and hamcrest-core 1.3
+  read from their pinned sources jars with their variants, Arbace's own runner `arbace.junit.EdnRun`, one
+  EDN map a method, and tests of what JUnit does by reflection: the lifecycle's annotations, rules on
+  annotated fields with a class rule and a `RuleChain`, `TestName`, `TemporaryFolder`,
+  `ExpectedException`, `ErrorCollector`, `TestWatcher`, hamcrest's matchers, `@RunWith(Parameterized)`, a
+  timeout's thread; `runs/all.out` is the runner's output when every test's verdict is the designed one,
+  written from the tests' sources); `test/programs/properties` (A13); `test/programs/java-project` (two modules of sources with a split package, a
   library read from its toy sources jar at release 25's layer and cut to its closure, a binary-only
   annotations jar; its toy repository made by `test/java/project/make-jars` from
   `test/java/project/jars/`, byte for byte again with `--check`) and `bin/java-project test`
