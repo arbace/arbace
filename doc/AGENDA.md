@@ -48,7 +48,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | C | 96.0 (99.6) | 100 | 99.7 | |
 | OCaml | 84.2 (96.4); 82.5 before OC222 (a) | 100 | 51.3 | completeness, independence |
 | C++ | 76.3 (96.8); 89.1 (97.8) / 71.3 on `cpp-print-own` | 100 | 67.8 | completeness, independence |
-| Scheme | 97.4 (98.9) | 100 | 100 | |
+| Scheme | 98.4 (99.95); 97.4 before `scheme-aot1` | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
 | LLVM IR | 97.6 (98.5) | 100 | 96.9 | llvm-ind1 (LLS46): judge 0.8455 (16 more own verdicts), independence 96.91; proposals LLS47-LLS50 (the rest of the judge is the probes, llvmi's 177, the split sections) |
@@ -359,7 +359,8 @@ items below are the ones whose work is still ahead or tied to a night.
   night; LLS40-LLS42 (above); `llvm-compl2` (2026-11-10): llvmi on the checkout's ci and RES34's cilib, eight Verifier rules
   ported, completeness 97.6.
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records
-  merge; SCS22-SCS24 (above).
+  merge; SCS22-SCS24 (above); `scheme-aot1` (2026-11-11): SC90 (b) built, the AOT cell 90.0 -> 94.0 (100 without by design),
+  proposals SCS29 (one graph per program), SCS30 (SC94 (b)'s half).
 - **C** ([C23-SURVEY.md](C23-SURVEY.md)): CS281 (a) at W ((c) until); CS275 and CS280, the gmp and pcre2 packs at the next
   pack recording.
 - **The gate** ([GATE-SURVEY.md](GATE-SURVEY.md), [ORACLE-RECORDS-SURVEY.md](ORACLE-RECORDS-SURVEY.md)): GTS252 (a) later;

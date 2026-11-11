@@ -4784,3 +4784,16 @@ tests in the corpora), HES90 (all.T's `ignore_stdout` as the test's own verdict:
   minutes per num/mod.rs and a night slot), reading the attributes from rustc's metadata (a toolchain product).
 - Independence unchanged (Rust 80.0: every case still consumes std's records, RFP43 (a)); the record facts the own front end
   reads shrink. Details and the night's commands: doc/rust/FRONTEND-SURVEY.md, "As built: RF19".
+
+## 2026-11-11: Scheme's AOT: syntax objects among a compiled program's constants, SC90 (b) (branch `scheme-aot1`, from `mac/next` `15278e9c6`)
+
+The AOT cell's one deferred class, `:syntax-constants` (2 programs refused: Racket's `syntax-case.sps`, Larceny's
+`regression.sch`), built as SC90 (b) decided: a constant holding psyntax's records (stx, rib) is written as a recipe, the unit's
+graph of objects (each object once, so the marks psyntax compares with `eq?` and the shared, mutated ribs keep their identity;
+labels are gensyms read by uid as before), built by `scm.ReadLate` in the unit's setup after psyntax's boot, a record's type named
+among the types psyntax made while booting (`BootBegin`/`BootEnd`, noted by `NewRTD`). Alternatives considered: SC90 (c)
+(expanding the unit again at start: not AOT), the record's type by the psyntax location that holds it (the compiled psyntax's
+globals are package variables of their own, not named in the program's packages), datum labels in the constants' text (no record
+syntax to read back). `bin/si check --aot --record`: 47 of 52 (was 45), 0 refused, 50 of 50 compiled runs the same as si's; the AOT
+cell 90.0% (95.7% without by design) -> 94.0% (100%). SC94 (b) not built (SCS30); SCS29 (one graph per program). Details:
+doc/scheme/SCHEME-SURVEY.md, "As built: SC90 (b), syntax objects among a compiled program's constants".
