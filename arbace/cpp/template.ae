@@ -78,6 +78,15 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Template parameter lists
 
+(defn- tc-arg-forms
+  "A type-constraint's template arguments as written (`__eligible_tuple_like<tuple> _UTuple`: [tuple]), as forms, from the
+  parameter's text: the arguments after the concept's last name; nil when the text does not show them."
+  [k]
+  (let [ts (vec (ct/tokens (or (node-text k) "")))
+        nm (peek (:_tc k))
+        i (some (fn [i] (when (and (= nm (nth (get ts i) 1 nil)) (= "<" (nth (get ts (inc i)) 1 nil))) i)) (range 0 (dec (count ts))))]
+    (when i (first (ct/template-args ts (+ 2 i))))))
+
 (defn- tparams
   "The template parameters of a template declaration node's kids."
   [n]
@@ -87,7 +96,10 @@
              (case (:kind k)
                "TemplateTypeParmDecl" (cond-> {:name (:name k) :kind :type :default (some-> (first (kids (update k :inner (fn [is] (remove #(= "ConceptSpecializationExpr" (:kind %)) is))))) (get-in [:type :qualType]))}
                                         ;; a type-constraint ([temp.param]/4): the concept's name as written
-                                        (:_tc k) (assoc :tc (:_tc k) :tc-args (:_tcargs k)))
+                                        (:_tc k) (assoc :tc (:_tc k) :tc-args (:_tcargs k))
+                                        ;; (its arguments' forms as written, C<A...> T: the immediately-declared constraint
+                                        ;; C<T, A...>, [temp.param]/4; from the parameter's text)
+                                        (and (:_tc k) (:_tcargs k)) (assoc :tc-forms (tc-arg-forms k)))
                "NonTypeTemplateParmDecl" {:name (:name k) :kind :value :qt (str/replace (get-in k [:type :qualType]) #"\s*\.\.\.$" "")
                                           :default (some-> (first (kids k)) kids first)}
                "TemplateTemplateParmDecl" {:name (:name k) :kind :template})
@@ -1382,9 +1394,13 @@
                      ;; the partial specialization's arguments substituted ([temp.spec.partial.match]/2: a failure is no
                      ;; match, SFINAE: __void_t<typename _Alloc::value_type, decltype(...)>; G4) equal to the arguments
                      (or (nil? (:forms pt))
-                         (when-let [sub (try (resolve-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt) true)
-                                             (catch arbace.lang.ExceptionInfo _ nil))]
-                           (= (canonical sub) (canonical args)))))
+                         ;; (a decltype in them whose operand does not analyze with every parameter bound is a failure too,
+                         ;; though an alias like __void_t drops it: sema/*decltype-failed*, cpp-s2)
+                         (let [failed (atom false)]
+                           (when-let [sub (try (binding [sema/*decltype-failed* failed]
+                                                 (resolve-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt) true))
+                                               (catch arbace.lang.ExceptionInfo _ nil))]
+                             (and (or (not @failed) (dependent? ded)) (= (canonical sub) (canonical args)))))))
             ded))))))
 
 (defn- more-specialized-partial?
@@ -1399,6 +1415,7 @@
   specialized matching partial specialization's, or the primary template's ([temp.spec.partial.match])."
   [tid args]
   (sema/tick!)
+  (binding [sema/*decltype-failed* nil] ; (a class's own members' dependent decltypes are not its user's failure)
   (or (when-let [cid (get-in @*tmpls* [tid :insts args])] {:k :class :id cid})
       (let [t (tmpl tid)]
         (if-let [node (get (:specs t) args)]
@@ -1415,7 +1432,7 @@
                                    (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
                                    c)
               :else (fail :template "ambiguous partial specializations of " (:name t)
-                          (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args))))))))))
+                          (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args)))))))))))
 
 (defn- tmpl-of-entity [es]
   (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)
@@ -1666,11 +1683,18 @@
 (defn- type-constraints-satisfied?
   "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
   constraint C<T>)."
-  [t args]
+  [t args scope]
   (every? (fn [[p a]]
-            (if-let [c (when (and (:tc p) (not (:tc-args p)) (not (:pack p))) (concept-of t p))]
-              (concept-satisfied? c [a])
-              true))
+            (cond
+              (or (not (:tc p)) (:pack p)) true
+              ;; (C<A...> T: C<T, A...>, the arguments resolved where the parameters are bound, cpp-s2: std::tuple's
+              ;; `template<__eligible_tuple_like<tuple> _UTuple>`; arguments the text does not show: not checked, as before)
+              (:tc-args p) (if-let [c (when (:tc-forms p) (concept-of t p))]
+                             (let [rest-args (try (resolve-args scope (assoc c :params (vec (rest (:params c)))) (:tc-forms p) true)
+                                                  (catch arbace.lang.ExceptionInfo _ (sema/doubt!) ::unresolved))]
+                               (if (= ::unresolved rest-args) false (concept-satisfied? c (into [a] rest-args))))
+                             true)
+              :else (if-let [c (concept-of t p)] (concept-satisfied? c [a]) true)))
           (map vector (:params t) args)))
 
 (defn- name-pack-params!
@@ -1719,9 +1743,14 @@
             unsat (fn [what]
                     (throw (ex-info (str "codegen: " what " not satisfied for " (:name t))
                                     {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))})))
+            ;; (the type-constraints first: [temp.constr.decl]/3.1 puts them before the requires-clause in the conjunction,
+            ;; which is checked in order and stops at the first not satisfied, [temp.constr.op]/2; libstdc++'s C++23 tuple's
+            ;; `template<__eligible_tuple_like<tuple> _UTuple> requires (__constructible_from_tuple_like<_UTuple>())`, whose
+            ;; requires-clause for a non-tuple _UTuple instantiates a generic lambda over an index sequence: std::thread's
+            ;; constructor, cpp-s2)
+            _ (when-not (binding [sema/*constraint-doubt* d] (type-constraints-satisfied? t args ps)) (unsat "type-constraints"))
             _ (when-let [rc (:constraint t)]
                 (when-not (binding [sema/*constraint-doubt* d] (sema/constraint-satisfied? ps rc)) (unsat "constraints")))
-            _ (when-not (binding [sema/*constraint-doubt* d] (type-constraints-satisfied? t args)) (unsat "type-constraints"))
             fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (#'sema/declare-fn! ps (:pattern t)))
             _ (when-not fid (unsat "constraints"))
             ;; (CP332 (a): a decltype in the signature that does not analyze with every argument bound is a substitution
@@ -2696,7 +2725,7 @@
             (cond
               (= ::unsure back) :unsure
               (not= (canonical back) (canonical cls)) false
-              (not (type-constraints-satisfied? at args)) false
+              (not (type-constraints-satisfied? at args as)) false
               (:constraint at)
               (let [d (atom false)
                     v (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d] (sema/constraint-satisfied? as (:constraint at)))]
