@@ -1889,6 +1889,151 @@
 (def cvt-families
   [["neon-cvt" "NEON's conversions: fcvtn, fcvtn2 (2d to 2s/4s, 4s to 4h/8h), fcvtl, fcvtl2, fcvtxn, fcvtxn2 and fcvtxn's scalar (round to odd), and the fixed-point scvtf, ucvtf, fcvtzs, fcvtzu with #fbits (vector, scalar, from or into a general register), at FPCR 0 and under FPCR's directed rounding modes and DN" cvt-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; AR12 (ARS63 (a)): NEON's saturating doubling multiplies and saturating shifts and narrows: sqdmulh, sqrdmulh (three same,
+;; vector and scalar, and by element), sqdmull, sqdmlal, sqdmlsl and their 2 forms (three different and by element, vector and
+;; scalar), sqshl, uqshl, sqrshl, uqrshl by register (vector and scalar), sqshl, uqshl, sqshlu by immediate, sqshrn, sqrshrn,
+;; uqshrn, uqrshrn, sqshrun, sqrshrun and their 2 forms and scalars, sqxtn, uqxtn, sqxtun and theirs; on neon's setup (v1 and v2
+;; from the row, v0 their mix, the accumulator: its free words set so that its lanes are drawn near the limits too). The model:
+;; the pseudocode's exact integer (SignedSatQ, UnsignedSatQ on BigIntegers; a shift right of an integer its floor), FPSR.QC
+;; when a lane saturates (the check's flags hold FPSR).
+
+(defn- sat-big ^BigInteger [^long x ^long e signed]
+  (if signed (biginteger (sext x e)) (.and (biginteger x) (.subtract (.shiftLeft BigInteger/ONE (int e)) BigInteger/ONE))))
+
+(defn- sat-q
+  "SatQ: [the e-bit lane, saturated?] of the integer x."
+  [^BigInteger x ^long e unsigned]
+  (let [lo (if unsigned BigInteger/ZERO (.negate (.shiftLeft BigInteger/ONE (int (dec e)))))
+        hi (.subtract (.shiftLeft BigInteger/ONE (int (if unsigned e (dec e)))) BigInteger/ONE)
+        [r s] (cond (neg? (.compareTo x lo)) [lo true] (pos? (.compareTo x hi)) [hi true] :else [x false])]
+    [(bit-and (.longValue ^BigInteger r) (ones e)) s]))
+
+(defn- sat-shift
+  "x shifted left by sh (right when negative: its floor, rounded first when round)."
+  ^BigInteger [^BigInteger x ^long sh round]
+  (cond (>= sh 0) (.shiftLeft x (int sh))
+        round (.shiftRight (.add x (.shiftLeft BigInteger/ONE (int (- (- sh) 1)))) (int (- sh)))
+        :else (.shiftRight x (int (- sh)))))
+
+(defn- sat-dmul
+  "2 * a * b of the signed e-bit lanes (sqdmulh's and sqrdmulh's high half: [lane sat?]; the long ones' product saturated to 2e)."
+  [op ^long a ^long b ^long e]
+  (let [p (.shiftLeft (.multiply (sat-big a e true) (sat-big b e true)) 1)]
+    (case op
+      "sqdmulh" (sat-q (.shiftRight p (int e)) e false)
+      "sqrdmulh" (sat-q (.shiftRight (.add p (.shiftLeft BigInteger/ONE (int (dec e)))) (int e)) e false)
+      (sat-q p (* 2 e) false))))
+
+(defn- sat-long
+  "sqdmull, sqdmlal, sqdmlsl of lanes a, b (e bits) with the accumulator lane acc (2e bits): [lane sat?]."
+  [op ^long a ^long b ^long acc ^long e]
+  (let [w (* 2 e) [p s1] (sat-dmul op a b e)]
+    (if (= op "sqdmull") [p s1]
+        (let [pa (sat-big p w true) ac (sat-big acc w true)
+              [r s2] (sat-q (if (= op "sqdmlsl") (.subtract ac pa) (.add ac pa)) w false)]
+          [r (or s1 s2)]))))
+
+(defn- sat-arr-s [^long size] (nth "bhsd" size))
+
+(defn sat-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        ;; a lane of e bits: a limit (the signed ones, -1 and the unsigned largest), a small value, any bits
+        lv (fn [^long e] (let [x (nx) m (ones e) mn (bit-shift-left 1 (dec e))]
+                           (bit-and m (case (mod x 7)
+                                        0 mn 1 (dec mn) 2 (- (mod (unsigned-bit-shift-right x 8) 9) 4)
+                                        3 (+ mn (mod (unsigned-bit-shift-right x 8) 3)) 4 (- (dec mn) (mod (unsigned-bit-shift-right x 8) 3))
+                                        (nx)))))
+        lanes (fn [^long e] (vpack (for [_ (range (quot 128 e))] (lv e)) e))
+        ;; a shift lane: its low byte a signed count near the element's width, or any byte
+        sv (fn [^long e] (let [x (nx)] (bit-or (bit-and (nx) (bit-xor (ones e) 0xff))
+                                                (bit-and 0xff (if (zero? (mod x 5)) (nx) (- (mod (unsigned-bit-shift-right x 8) (+ (* 2 e) 7)) e 3))))))
+        ;; v0 = [v1lo ^ v2hi, v1hi ^ v2lo]: a word of v1 or v2 the instruction does not read is set so that v0's word is `want`
+        acc (fn [v1 v2 used ^long e]
+              (let [want (fn [] (vpack (for [_ (range (quot 64 e))] (lv e)) e))
+                    [v1 v2] (cond (not (used :1lo)) [(assoc v1 0 (bit-xor (long (first (want))) (long (second v2)))) v2]
+                                  (not (used :2hi)) [v1 (assoc v2 1 (bit-xor (long (first (want))) (long (first v1))))]
+                                  :else [v1 v2])]
+                (cond (not (used :1hi)) [(assoc v1 1 (bit-xor (long (first (want))) (long (first v2)))) v2]
+                      (not (used :2lo)) [v1 (assoc v2 0 (bit-xor (long (first (want))) (long (second v1))))]
+                      :else [v1 v2])))
+        out (fn [rs ^long e q] (vres (half (vpack (map first rs) e) q) (some second rs)))
+        sreg (fn [^long size n] (str (sat-arr-s size) n))
+        vecs ["8b" "16b" "4h" "8h" "2s" "4s" "2d"]]
+    (concat
+     ;; three same: sqdmulh, sqrdmulh (h, s), sqshl, uqshl, sqrshl, uqrshl (every arrangement, scalar every size)
+     (for [op ["sqdmulh" "sqrdmulh"] a ["4h" "8h" "2s" "4s" :h :s] i (range 8)
+           :let [sc (keyword? a) e (if sc ({:h 16 :s 32} a) (ar-e a)) n (if sc 1 (ar-n a)) q (or sc (second (arrs a)))
+                 v1 (lanes e) v2 (if (zero? (mod i 3)) v1 (lanes e))
+                 rs (for [k (range n)] (sat-dmul op (vlane v1 k e) (vlane v2 k e) e))]]
+       (ncase (if sc (str op "\t" (name a) "0, " (name a) "1, " (name a) "2\n") (str op "\tv0." a ", v1." a ", v2." a "\n"))
+              v1 v2 (out rs e (and q (not sc)))))
+     (for [op ["sqshl" "uqshl" "sqrshl" "uqrshl"] a (concat vecs [:b :h :s :d]) _ (range 6)
+           :let [sc (keyword? a) e (if sc ({:b 8 :h 16 :s 32 :d 64} a) (ar-e a)) n (if sc 1 (ar-n a)) q (and (not sc) (second (arrs a)))
+                 v1 (lanes e) v2 (vpack (for [_ (range (quot 128 e))] (sv e)) e) sg (= \s (first op))
+                 rs (for [k (range n)]
+                      (sat-q (sat-shift (sat-big (vlane v1 k e) e sg) (long (unchecked-byte (vlane v2 k e))) (str/includes? op "rshl")) e (not sg)))]]
+       (ncase (if sc (str op "\t" (name a) "0, " (name a) "1, " (name a) "2\n") (str op "\tv0." a ", v1." a ", v2." a "\n"))
+              v1 v2 (out rs e q)))
+     ;; three different: sqdmull, sqdmlal, sqdmlsl and their 2 forms, the scalar h into s and s into d
+     (for [op ["sqdmull" "sqdmlal" "sqdmlsl"] [na wa] [["4h" "4s"] ["2s" "2d"] [:h :s] [:s :d]] two [false true] i (range 4)
+           :when (not (and two (keyword? na)))
+           :let [sc (keyword? na) e (if sc ({:h 16 :s 32} na) (ar-e na)) n (if sc 1 (quot 64 e)) w (* 2 e)
+                 v1 (lanes e) v2 (if (zero? (mod i 3)) v1 (lanes e))
+                 [v1 v2] (acc v1 v2 (if two #{:1hi :2hi} #{:1lo :2lo}) w)
+                 d (v0-of v1 v2) hi (if two n 0)
+                 rs (for [k (range n)] (sat-long op (vlane v1 (+ k hi) e) (vlane v2 (+ k hi) e) (vlane d k w) e))]]
+       (ncase (if sc
+                (str op "\t" (name wa) "0, " (name na) "1, " (name na) "2\n")
+                (let [src (if two (str (* 2 n) (subs na 1)) na)] (str op (when two "2") "\tv0." wa ", v1." src ", v2." src "\n")))
+              v1 v2 (out rs w (not sc))))
+     ;; by element: sqdmulh, sqrdmulh (vector and scalar), sqdmull, sqdmlal, sqdmlsl and their 2 forms (vector and scalar)
+     (for [op ["sqdmulh" "sqrdmulh"] a ["4h" "8h" "2s" "4s" :h :s] i (range 6)
+           :let [sc (keyword? a) e (if sc ({:h 16 :s 32} a) (ar-e a)) n (if sc 1 (ar-n a)) q (and (not sc) (second (arrs a)))
+                 idx (mod (nx) (quot 128 e)) v1 (lanes e) v2 (if (zero? (mod i 3)) v1 (lanes e))
+                 y (vlane v2 idx e) rs (for [k (range n)] (sat-dmul op (vlane v1 k e) y e))
+                 el (str "v2." (if (= e 16) "h" "s") "[" idx "]")]]
+       (ncase (if sc (str op "\t" (name a) "0, " (name a) "1, " el "\n") (str op "\tv0." a ", v1." a ", " el "\n"))
+              v1 v2 (out rs e q)))
+     (for [op ["sqdmull" "sqdmlal" "sqdmlsl"] [na wa] [["4h" "4s"] ["2s" "2d"] [:h :s] [:s :d]] two [false true] i (range 4)
+           :when (not (and two (keyword? na)))
+           :let [sc (keyword? na) e (if sc ({:h 16 :s 32} na) (ar-e na)) n (if sc 1 (quot 64 e)) w (* 2 e)
+                 idx (mod (nx) (quot 128 e)) v1 (lanes e) v2 (if (zero? (mod i 3)) v1 (lanes e))
+                 [v1 v2] (acc v1 v2 (conj (if two #{:1hi} #{:1lo}) (if (< (* idx e) 64) :2lo :2hi)) w)
+                 d (v0-of v1 v2) hi (if two n 0) y (vlane v2 idx e)
+                 rs (for [k (range n)] (sat-long op (vlane v1 (+ k hi) e) y (vlane d k w) e))
+                 el (str "v2." (if (= e 16) "h" "s") "[" idx "]")]]
+       (ncase (if sc
+                (str op "\t" (name wa) "0, " (name na) "1, " el "\n")
+                (let [src (if two (str (* 2 n) (subs na 1)) na)] (str op (when two "2") "\tv0." wa ", v1." src ", " el "\n")))
+              v1 v2 (out rs w (not sc))))
+     ;; the left shifts by immediate: sqshl, uqshl, sqshlu (every arrangement, scalar every size)
+     (for [op ["sqshl" "uqshl" "sqshlu"] a (concat vecs [:b :h :s :d]) i (range 5)
+           :let [sc (keyword? a) e (if sc ({:b 8 :h 16 :s 32 :d 64} a) (ar-e a)) n (if sc 1 (ar-n a)) q (and (not sc) (second (arrs a)))
+                 sh (case (long i) 0 0 1 (dec e) (mod (nx) e)) v1 (lanes e) v2 (lanes e) sg (not= op "uqshl")
+                 rs (for [k (range n)] (sat-q (sat-shift (sat-big (vlane v1 k e) e sg) sh false) e (not= op "sqshl")))]]
+       (ncase (if sc (str op "\t" (name a) "0, " (name a) "1, #" sh "\n") (str op "\tv0." a ", v1." a ", #" sh "\n"))
+              v1 v2 (out rs e q)))
+     ;; the narrowing shifts and extracts, their 2 forms (v0's lower half kept) and scalars
+     (for [op ["sqshrn" "sqrshrn" "uqshrn" "uqrshrn" "sqshrun" "sqrshrun" "sqxtn" "uqxtn" "sqxtun"] na ["8b" "4h" "2s" :b :h :s]
+           two [false true] i (range (if (str/includes? op "xt") 3 5))
+           :when (not (and two (keyword? na)))
+           :let [sc (keyword? na) e (if sc ({:b 8 :h 16 :s 32} na) (ar-e na)) w (* 2 e) n (if sc 1 (quot 64 e))
+                 xt (str/includes? op "xt") sh (case (long i) 0 1 1 e (inc (mod (nx) e)))
+                 sg (= \s (first op)) un (or (not sg) (str/includes? op "un"))
+                 v1 (lanes w) v2 (lanes w) d (v0-of v1 v2)
+                 rs (for [k (range n)]
+                      (let [x (sat-big (vlane v1 k w) w sg)]
+                        (sat-q (if xt x (sat-shift x (- sh) (str/includes? op "rshr"))) e un)))
+                 p (first (vpack (map first rs) e)) qc (some second rs)
+                 sz ({8 0 16 1 32 2} e) wa (if sc (sreg (inc sz) 1) (str "v1." (vm-arr (inc sz) true)))
+                 da (if sc (sreg sz 0) (str "v0." (vm-arr sz two)))]]
+       (ncase (str op (when two "2") "\t" da ", " wa (when-not xt (str ", #" sh)) "\n") v1 v2
+              (vres (if two [(first d) p] [p 0]) qc))))))
+
+(def sat-families
+  [["neon-sat" "NEON's saturating doubling multiplies and saturating shifts and narrows: sqdmulh, sqrdmulh (vector, scalar, by element), sqdmull, sqdmlal, sqdmlsl and their 2 forms (vector, scalar, by element), sqshl, uqshl, sqrshl, uqrshl by register, sqshl, uqshl, sqshlu by immediate, sqshrn, sqrshrn, uqshrn, uqrshrn, sqshrun, sqrshrun, sqxtn, uqxtn, sqxtun and their 2 forms and scalars, FPSR.QC" sat-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -1949,6 +2094,11 @@
          ;; AR11 (ARS61 (b)): NEON's conversions
          (for [[i [nm what f]] (map-indexed vector cvt-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 900 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR12 (ARS63 (a)): NEON's saturating doubling multiplies and saturating shifts and narrows
+         (for [[i [nm what f]] (map-indexed vector sat-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1000 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)
