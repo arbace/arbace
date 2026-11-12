@@ -31,6 +31,9 @@ unset audit_step audit_all GATE_CLEAN_INNER
 # step: GATE_LANE_MODE=free, GATE_LANE_DIR, GATE_LANE_STEP, ...; bin/gate's GATE_LANES, GATE_LANE_HOST_DIR,
 # GATE_LANE_GATE), which would turn its budget cases into the free rule and its states into the gate's own
 for v in $(compgen -e); do case $v in GATE_LANES|GATE_LANES_*|GATE_LANE_*|GATE_MEM_BUDGET_GIB|GATE_MEM_RESERVE_GIB|GATE_MEM_LANE) unset "$v" ;; esac; done
+# and the --concurrent gate's lock: it holds the big lock once and exports ARBACE_HEAVY_HELD=1 (and its command and waits file)
+# into every step, which would turn the runner's light step into a held one (night 12: "the runner in the free lane: held=1")
+unset ARBACE_HEAVY_HELD ARBACE_HEAVY_CMD GATE_HEAVY_CMD HEAVY_LOCK_WAITS
 here=$(cd "$(dirname "$0")/../.." && pwd)
 : "${ARBACE_HOST_EXE:?set ARBACE_HOST_EXE to stage 0 (a tool must not build one here)}"
 mkdir -p "${TMPDIR:-$here/.tmp/tmp}"

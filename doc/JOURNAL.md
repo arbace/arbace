@@ -5037,3 +5037,32 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
   `bin/crops-score --record`, `--judge --strict` 0. No key moves (`arbace/asm/` and `bin/repr-asm` are crop paths or no key's:
   `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
 - Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
+
+## 2026-11-12: gf-gate, the gate's own bugs of night 12's `--full` (45 FAILED lines; triage `.tmp/night12/triage/TRIAGE.md`)
+
+By the user's decision (2026-11-12): fix them today, night 13 runs `--full` serially, haskell-roundtrip and rust-roundtrip (never passed)
+leave `--full` until fixed. Branch `gf-gate` (worktree `.tmp/worktrees/gf-gate`) from `next` bd6ab3ddd; test and table edits only, no key moves.
+- lanes-test (gate-tests, gate-reads-test, gate-tests-test): the `--concurrent` gate holds the big lock once and exports `ARBACE_HEAVY_HELD=1`
+  (and `ARBACE_HEAVY_CMD`, `GATE_HEAVY_CMD`, `HEAVY_LOCK_WAITS`) into every step, so the test's light step saw `held=1`; `test/gate/lanes-test.bash`
+  unsets them beside the GATE_LANE_* it already dropped. The other two failed only because they run `bin/gate-tests --nested`.
+- cpp-selftest: the gate unsets `ARBACE_HOST_EXE`; `test/cpp/selftest/lib.bash` took only that variable. It now takes `arbace_host_exe`
+  (`bin/lib/host.bash`) when unset (the dry mode, `ARBACE_HOST_EXE=/bin/true`, is untouched).
+- haskell-roundtrip, rust-roundtrip: out of `--full` by the table's existing mechanism for parked corpora, `:clean-only` parts
+  (`GATE_ALL_PARTS=1` and the clean run run them; by hand their commands). haskell-roundtrip had no parts: one part `all` (its command
+  has no `{part}`). rsi-check no longer `:needs rust-roundtrip` (only an order; rsi reads none of its output). `:mem-gib` 15 and 16, `:heavy true`
+  (measured 14.4 and 15.0 GiB): never co-admitted. A new phase or a planner key was rejected: the planner and runner are in every step's key.
+  test/gate/crops/llvm-rust.edn holds an older text of rust-roundtrip than steps.edn (a different command), not what was spliced; left.
+- repr-java-{roundtrip,front,attr}.jdk: `:mem-gib` 30/31/43 -> 53/48/55 (measured 47.5/43.1/49.4 GiB, +10%), the jdk part `:heavy true`
+  (the steps stay `:heavy :inner` for their small parts), so lane 1 admits one at a time (three kernel OOM kills, night 12).
+- haskell-lib-check-own, -own-base, -stg "not run: haskell-lib-check did not pass" although it passed: a step without `:chain` is a chain of its
+  own, `--concurrent` starts every chain at once, and `run_one` checks `:needs` at once (`ok_status`, no wait for another chain's step): the
+  needed step's status file did not exist yet. The four steps now share `:chain haskell-lib` (table order). The runner's general gap (a
+  `:needs` across chains is not waited on) stays: fixing it moves every step's key (bin/lib/gate-run.bash); other cross-chain `:needs` are
+  essential-phase ones, finished first.
+- repr-clojure: `:arbace` `:outside` 152 -> 153 (594 files, 441 equal, 0 differ): the one file in the outside set added since the count
+  is `repr/asm/arm64/lenc.ae` (8744bfdba, 2026-11-10, AR2): its ns form's text read changes, as for the other texts read itself changes.
+- c-roundtrip eval-limits entries of 4b4ac5de1 (libunicode.c, quickjs.c, limits-fndefn.c, limits-blockid.c, limits-externalid.c): the class is a
+  read past REPR_C_READ_BUDGET, so it depends on load and memory. Night 12 (ample memory) ran the two parts without a timeout (quickjs 62 s,
+  torture-compile 841 s at 15 GiB); alone under GOMEMLIMIT 1200MiB `bin/repr-c roundtrip --corpus quickjs --only` (2 files) passed in 78 s.
+  Removed. Risk: the limits-* files sit near the budget; a loaded night may need them back (a stale entry fails, a missing one fails: the judge does not
+  treat the class as time-dependent; a proposal). The three limits-* alone under the day's memory cap did not finish in 28 minutes (stopped).

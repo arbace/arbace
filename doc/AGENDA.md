@@ -28,6 +28,9 @@ The current state of the work (as of 2026-11-09). This file is rewritten as thin
 - **The gate** (at the morning's merge, `bin/gate --plan`): the essential tier 49 steps, about 44 minutes; `--full` 316
   steps, about 9:52 simulated serial; the oracle tier (`--oracle`, the host toolchains) 64 steps. The crops' fragments
   spliced: C++, Scheme, OCaml, LLVM IR, Rust, Haskell; Python's after its records night.
+  Branch `gf-gate` (2026-11-12, night 12's 45 failures): the gate's own bugs fixed (lanes-test and cpp-selftest environment, the
+  jdk corpus steps' memory declarations, haskell-lib's chain, repr-clojure's count); haskell-roundtrip and rust-roundtrip out of
+  `--full` (their parts `:clean-only`, `GATE_ALL_PARTS=1`) until their records and printers are fixed.
 - **The host** (Alpine edge, amd64, /dev/kvm; [ALPINE.md](ALPINE.md)): 62 GB of memory; the disk at 79% (the night's steps
   stop at 90%; agents' rule 80%). The Mac peer, an arm64 VM, develops the Python crop through the queue.
 - The JVM runs only the frozen jar of `arbace-for-java-26-v4` (the oracle's reference, the edges' recordings, the data
