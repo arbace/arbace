@@ -101,8 +101,13 @@ Six crops are above 90 on all three. What the others still need:
   `.cabal` files, a list of own pools, every dependency's reexports, Prelude, the package's source directory), DefaultSignatures'
   `$dm`; deepseq 1/1, array 15/15, stm 10/10 modules elaborate, every binder type GHC's pack holds equal, interface facts 202/211,
   388/388, 222/222 (`lib-check-own-{deepseq,array,stm}.edn`); lib-stg 26/26 `:ok`, unjudged (no -O0 reference); steps
-  `haskell-lib-own-{deepseq,array,stm}` `:clean-only` until the oracle window (its commands in the steps' comment). Next: the window
-  (P16's and P17's references), then containers.
+  `haskell-lib-own-{deepseq,array,stm}` `:clean-only` until the oracle window (its commands in the steps' comment). P32 and P33
+  decided (a) (the user, 2026-11-12); `hs-p32` built them: the slice gated in `--full` and in `hsi-check`/`hsi-check-aot`'s own
+  libraries, the six own-only failures fixed, none classed (local binders' types for tostg: thawSTArray's copy loop; derived Show's
+  isSym: `()`; unique dictionary-function names: Data.Array.Base's strict and lazy ST instances; `OPTIONS -cpp` ineligible), the 31
+  newly eligible programs 30 pass; ghc-internal's lib-stg 5,545 (0 worse), base's 1,046 bindings compared; default signatures in the
+  own interfaces (an importing module's instance applies `$dm` with their dictionaries). HF10-P34 proposed (DeriveGeneric). Next:
+  the window (P16's and P17's references), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).

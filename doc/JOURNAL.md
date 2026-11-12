@@ -5207,3 +5207,23 @@ all packages (rejected: stm's `:uses` of array's pool and a control per package 
 from the derived installation tree's records (rejected: it needs the whole extracted tarball, the corpus's tree is enough for the
 `.cabal` files); gating the slice's lib-stg now (rejected: no reference to judge against, it would gate a measure). Details:
 doc/haskell/FRONTEND-SURVEY.md, "As built: P17 (first slice)".
+
+## 2026-11-12: HF10-P32 (a), P33 (a): the deepseq/array/stm slice in hsi-check, default signatures in the own interfaces (branch `hs-p32`, from `mac/hs-p17` fb31a9fe0)
+
+The user decided HF10-P32 (a) and HF10-P33 (a). The six programs that failed only on the own libraries were all front-end or
+eligibility faults, each fixed rather than classed: (1) the elaborator noted no type for a let-bound local function (only pattern
+binders), so tostg took ghc-internal's `thawSTArray`'s `case copy 0# s2# of s3# -> ...` for a lifted value and the desugarer bound
+it lazily; unarisation dropped it and `//` read `arrEleBottom` (arr011, arr015): `tc-group` now notes every local binder's type;
+(2) derived Show parenthesised any name not starting with a letter, so `Show ()` printed `(())` (T3207): `sym?` is GHC.Utils.Lexeme's
+isSym; (3) two instances with the same dictionary-function name (Data.Array.Base's MArray for strict and lazy ST) shared one binding
+(arr014, cgrun026): names made unique as GHC's chooseUniqueOccTc (`0`, `1`, ... appended), which also gave base's lib-stg 17 more
+bindings to compare; (4) `{-# OPTIONS -cpp #-}` modules were eligible and read as empty (cgrun044; also conc036 and conc037, which
+leave own-fallback.txt and divergences-own.edn's `:front-no-main`). P33: the own interfaces carry a class's default signatures
+(`:dsigs`), read back so an importing instance that omits the method passes the context's dictionaries to `$dm`; the judge does not
+compare them (GHC's dump lacks them). Rebuilt ghc-internal, base and the slice as the gate's steps: 0 worse everywhere (lib-stg
+5,545 of 7,639 equal, was 5,536); the 31 newly eligible programs 30 pass (was 24, kahan `:speed`); samples and synthetic 0
+unclassed. The gate: the three steps lose `:clean-only`, hsi-check and hsi-check-aot take the five tars. Keys unmoved.
+Alternatives considered: classing the six in divergences-own.edn (rejected: each fix was small and the faults were general, two of
+them in ghc-internal's own STG that every program shares); a dfun naming per GHC's whole OccSet including derived instances' names
+first (not needed: explicit instances are named before derived ones here as in GHC). `deriving Generic` is not built (HF10-P34
+proposed); P33 is shown with a hand-written Generic instance. Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P32, P33".

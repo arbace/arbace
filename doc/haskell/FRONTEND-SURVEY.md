@@ -3654,3 +3654,99 @@ done   # about 8 minutes, 0.7 GB
   the interface's spelling), the elaborator reads them; the judge compares the class fact without them (GHC's dump lacks them)**;
   half a day. (b) the helper's iface verb dumps GenericDM too (the oracle window, a pack re-recorded). *Recommended: (a)*, then (b) at
   the window for the comparison.
+
+## Decided (the user, 2026-11-12: HF10-P32, HF10-P33)
+
+HF10-P32 (a): the deepseq/array/stm slice gated in `hsi-check` now: the three steps' `:clean-only` dropped, the six programs that
+fail only on the own libraries (arr011, arr014, arr015, T3207, cgrun026, cgrun044) fixed if cheap, else classed in
+`divergences-own.edn` by outcome with honest reasons, the `P-own.tar` outputs in `hsi-check`'s and `hsi-check-aot`'s `:uses`.
+HF10-P33 (a): the classes' default signatures written into the own interfaces, so an instance in another module that omits a method
+with a default signature works (a program's `instance NFData T` over Generic).
+
+## As built: HF10-P32, P33 (2026-11-12, branch `hs-p32`, from `mac/hs-p17` fb31a9fe0)
+
+By an agent during night 12's gate (one run at a time, each process under 1.5 GiB with GOMEMLIMIT 1200MiB, MemAvailable at least
+12 GiB before each run; stage 0; no GHC, no gate run but `--plan`, no network). **All six programs are fixed; none is classed.** Each
+was a front-end or eligibility fault that the slice's programs were the first to reach:
+
+| program | what failed on the own libraries | cause | fix |
+|---|---|---|---|
+| arr011, arr015 | `(Array.!): undefined array element` after `//` | ghc-internal's `thawSTArray`: `let copy i# s3# = ... in case copy 0# s2# of s3# -> ...`, an unsigned local function whose result is a `State#`; the elaborator noted no type for a let-bound function (only pattern binders), so tostg took `copy 0# s2#` for a lifted value, the desugarer's bindNonRec made it a lazy `let`, unarisation dropped it: the copy loop never ran | `tc-group` notes every local binder's type (unsigned: the generalised type, the abstracted ones' monomorphic binders too; signed: the signature) in `*ltypes*`, tostg's representations read it |
+| T3207 | prints `(())` for `()` | derived `Show`'s `wrapOpParens` took any non-letter first character as an operator: `deriving instance Show ()` in GHC.Internal.Show printed `"(" ++ "()" ++ ")"` | `deriv.ae`'s `sym?` is GHC.Utils.Lexeme's isSym: an ASCII symbol of `!#$%&*+./<=>?@\^|~-`, a colon, or a non-ASCII Unicode symbol (math, currency, modifier, other) |
+| arr014, cgrun026 | `hsi: case of an algebraic type on void` | Data.Array.Base's `instance MArray (STArray s) e (ST s)` and `... (Lazy.ST s)` both got the dictionary function `$fMArraySTArrayeST`; the lazy one's binding replaced the strict one's, so strict `newArray` ran lazy ST's code | `inst-decl!` names dictionary functions as GHC.Tc.Utils.Monad's chooseUniqueOccTc: a name the module's instances already took gets `0`, `1`, ... appended (GHC's `$fMArraySTArrayeST0`). base had such collisions too: its lib-stg now has 1,046 bindings to compare, not 1,029 |
+| cgrun044 | `no binding of main::Main/main` | `{-# OPTIONS -cpp #-}`: a CPP module the eligibility missed (it looked for `LANGUAGE CPP` and the flags), read as an empty module | `front_eligible` also refuses an `OPTIONS`/`OPTIONS_GHC` pragma with `-cpp` or `-XCPP`: cgrun044 runs on the pack (passes), and so do conc036 (leaves `own-fallback.txt`) and conc037 (fails as on the pack, `divergences.edn`'s class; `divergences-own.edn`'s `:front-no-main` goes, empty) |
+
+Also: `bin/lib/hsi/check`'s default own STG path (`ls ... | head -1` under `pipefail`) failed the whole check when `.tmp` had no
+lib-stg output of base even with `HSI_OWN_TARS` set: the `ls` may fail now.
+
+**HF10-P33.** `ownface.ae` writes a class's `:dsigs` (`[[METHOD TYPE] ...]`, each default signature's type over the class's
+variables in the interface's type forms) when it has any; `typecheck.ae`'s interface reader reads them into the class's `:dsigs` (the
+module-level interface of `typecheck.ae`, a program's own modules', too). An instance that omits the method then applies `$dm` to the
+dictionaries of the signature's context solved at its head, as in the defining module (P17's GenericDM); a signature with type
+variables of its own (NFData1's `liftRnf :: forall a. (Generic1 f, GNFData One (Rep1 f)) => ...`) is taken when its context does not
+mention them. The judge's class fact (`libcheck.ae`'s `cmp-map :classes`) selects `:ntvs :supers :methods :fundeps :defaults`, so
+`:dsigs` is not compared (GHC's dump lacks it; HF10-P33 (b) at the window). Shown by a program (`.tmp/p32/t/G1.hs` in the worktree,
+not committed): a hand-written `instance Generic T` (`type Rep T = D1 ... :+: ...`, `from`, `to`) and `instance NFData T` without
+`rnf`: `evaluate (rnf (T 1 [True, error "forced by rnf"]))` raises the error on the new deepseq interface; on hs-p17's it stops
+(`hsi: case of an algebraic type on <pap main:Main/$fNFDataT>`). `deriving Generic` itself is not built: the elaborator derives
+no Generic (HF10-P34 below), so a program's `deriving (Generic, NFData)` still fails to typecheck (`Rep T` does not reduce).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+| step | result | before (records) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 1 better (GHC.Internal.Exception.Context: errors → ok) | | 0.85 GB, 9m55 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,545 of 7,639 bindings equal, 0 worse, 6 better | 5,536 | 1.17 GB, 11m19 |
+| lib-check `--package base` | 0 worse, 1 better (Data.Functor.Classes: errors → ok) | | 0.69 GB, 4m02 |
+| lib-stg `--package base --judge` | 547 of 1,046 equal, 0 worse, 2 better (Data.Functor.Classes, Data.Foldable1: errors → ok) | 547 of 1,029 | 0.69 GB, 3m47 |
+| lib-check `--package deepseq/array/stm` | as recorded: 202/211, 388/388, 222/222 facts; 0 worse each; controls differ | same | 0.56/0.61/0.53 GB |
+| lib-stg `--package deepseq/array/stm` | 1, 15, 10 modules `:ok` (no reference) | same | 0.55-0.61 GB |
+
+Not re-recorded: the records are the night's (P29's night commands), the betters stay betters until then.
+
+**The programs** (`bin/hsi check --libs own`, ARBACE_MEM_GIB 2, one program at a time, on the five tars made above):
+
+| run | before (hs-p17) | after |
+|---|---|---|
+| the 31 programs the slice made eligible | 24 pass, 6 own-only failures in no class | 30 pass (28 own, 2 pack: throwto002, cgrun044), kahan `:speed` as on the pack; 0 unclassed; 2m60, 0.77 GB |
+| samples, synthetic | 45 own (44 pass), 18 pack (16 pass) | 50 own (49 pass), 13 pack (11 pass); 0 unclassed; the classes as before (AsyncRerun, Loop, runtime-deep); 2m53, 1.07 GB |
+
+**The gate** (`test/gate/steps.edn`): `haskell-lib-own-{deepseq,array,stm}` lose their `:clean-only` part (stm's dependency path is
+`haskell-lib-own-array/array-pool.tar` now, no `.own` part); `hsi-check` and `hsi-check-aot` take the slice's `deepseq-own.tar`,
+`array-own.tar`, `stm-own.tar` in `:uses` and `HSI_OWN_TARS` after ghc-internal's and base's. `--full` grows by the three steps,
+about 6 minutes in all under 0.7 GB (measured above). lib-stg of the slice stays a measure until the window records its -O0 STG.
+Keys: every path a crop path; `bin/arbace-go --gate-key` 314c8e5b04ab... as on `mac/hs-p17`.
+
+### Checks (light, night 12: one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| `bin/hsi check --libs own --only` the 31 newly eligible programs | 30 pass, kahan `:speed`; 0 unclassed; arr001's control fails as it must |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five tars | exit 0; 50 own (49 pass), 13 pack (11 pass), 0 unclassed, the controls fail as they must |
+| hsi-essential's command (ARBACE_MEM_GIB=1) | own-verdicts current; 120 pass, 2 fail (primops-word, runtime-laziness: status 2 at the 1 GiB cap on the pack path, as on hs-p17 and hs-p29; they pass at 16 GiB); 18m05, 0.87 GB |
+| P33's program (a hand-written Generic instance, NFData's default `rnf`) | the error inside the structure is forced by `rnf` (before: hsi stopped) |
+| `bin/gate --full --plan` | exit 0, no table error; the three steps plan "after" their producers, `hsi-check` and `hsi-check-aot` after all five |
+| `gate.crops check ROOT test/gate/steps.edn`; `bash test/gate/crops-test.bash` | 0 problems; ok |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved) |
+| `bin/reap --self-test`, `bin/reap` | ok (5 cases); 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged (Haskell 76.0) |
+
+Not run: testsuite-core's whole own run (about 800 programs; the gate's `hsi-check`, `:heavy`, at night) and `hsi-check-aot`.
+
+### Night commands (not run; in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+None is new. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB, about 1.5 h together) are the whole proof over
+testsuite-core and nofib once the branch is in `next`; P29's night commands record `check-hsi-own.edn` / `-aot-own.edn` whole (their
+lines for cgrun044, conc036, conc037 move to `:front :ineligible :libs :pack`, the slice's programs to `:libs :own`) and re-record
+the lib-check and lib-stg records with the betters above (`lib-stg-own-results.edn` 5,536 → 5,545; base's 1,029 → 1,046 bindings).
+
+### Proposals
+
+- **HF10-P34 DeriveGeneric.** `deriving (Generic)` (and `Generic1`) is not derived by the elaborator, so a program's
+  `deriving (Generic, NFData)` or `instance NFData T` over a derived Generic does not typecheck (`Rep T` does not reduce): deepseq's
+  Generic path works only with a hand-written instance (P33's proof). (a) **derive Generic as GHC.Tc.Deriv.Generics does: the
+  `Rep` family instance (`D1`/`C1`/`S1` with `MetaData`, `MetaCons`, `MetaSel` and their promoted constructors and Symbols, `:+:`
+  and `:*:` balanced as GHC splits them, `Rec0`, `U1`, `V1`), `from` and `to`; Generic1 after**; about a day, judged by the
+  testsuite's `generics/` programs (eligible once derived) and the interfaces' `R:Rep` instances. (b) leave it to a later slice
+  (containers and the run corpora need it little). *Recommended: (a)*, after the window: the generics/ tests are run programs.
