@@ -868,7 +868,18 @@
           (let [s (bind-scope (:scope t) (or (:dparams p) (subvec (:params t) 0 i)) args nil)
                 a (if (= :type (:kind p))
                     (sema/resolve-type s d)
-                    (value-arg (binding [sema/*cutoff* Long/MAX_VALUE] (sema/const-int s d)) (:name p) (param-type s p)))]
+                    (value-arg (binding [sema/*cutoff* Long/MAX_VALUE]
+                                 (try (sema/const-int s d)
+                                      (catch arbace.lang.ExceptionInfo e
+                                        ;; (cpp-s8: a default that names the parameters before it, given dependent
+                                        ;; arguments: the dependent expression standing for it, read from its text as a
+                                        ;; signature's -- <type_traits>' __match_cv_qualifiers<_Qualified, _Unqualified,
+                                        ;; bool _IsConst = is_const<_Qualified>::value, ...> under __copy_cv<_Xp, _Yp>, so
+                                        ;; __common_ref_impl's partial specializations had been dropped)
+                                        (let [v (when (some dependent? args)
+                                                  (try (eval-text s (#'sema/node-text d)) (catch arbace.lang.ExceptionInfo _ nil)))]
+                                          (if (map? v) v (throw e))))))
+                               (:name p) (param-type s p)))]
             (recur (inc i) (conj args a)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1599,6 +1610,19 @@
 
 (declare type-constraints-satisfied?)
 
+(defn- partial-args
+  "A partial specialization's arguments as written after its name, resolved in `scope`, and completed by the primary
+  template's default arguments ([temp.spec.partial.general]/8 with [temp.arg.general]/9: `template<class X, class Y>
+  struct __common_ref_impl<X&, Y&&>` of `template<class A, class B, class = void> struct __common_ref_impl` is
+  <X&, Y&&, void>; cpp-s8: before, its two arguments never matched an instance's three, so common_reference_t<char&,
+  char&&> was <type_traits>' bullet 3's char&, and indirectly_readable<char*> false); as written when a default does not
+  resolve."
+  [scope t forms]
+  (let [args (resolve-args scope t forms true)]
+    (if (< (count args) (count (:params t)))
+      (or (try (complete-args t args) (catch arbace.lang.ExceptionInfo _ nil)) args)
+      args)))
+
 (defn- partial-match
   "The partial specialization `pt`'s parameters deduced from the arguments, or nil ([temp.class.spec.match])."
   [pt args]
@@ -1629,7 +1653,7 @@
                          ;; though an alias like __void_t drops it: sema/*decltype-failed*, cpp-s2)
                          (let [failed (atom false)]
                            (when-let [sub (try (binding [sema/*decltype-failed* failed]
-                                                 (resolve-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt) true))
+                                                 (partial-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt)))
                                                (catch arbace.lang.ExceptionInfo _ nil))]
                              (and (or (not @failed) (dependent? ded)) (= (canonical sub) (canonical args)))))))
             ded))))))
@@ -1832,7 +1856,7 @@
         ;; headers' defaulted parameters); one that cannot be (a dependent value) is refused
         (let [written (count args)
               args (if (< (count args) (count (:params t)))
-                     (or (try (complete-args t args) (catch arbace.lang.ExceptionInfo _ nil))
+                     (or (try (complete-args t args) (catch arbace.lang.ExceptionInfo e (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "defaults of" (:name t) (pr-str args) (.getMessage e)))) nil))
                          (fail :template "a dependent template-id with default arguments"))
                      args)]
           ;; (as written, for an unresolved name's mangling: its arguments' count, the namespaces of its qualifier)
@@ -2005,7 +2029,8 @@
   doubtful, CP281 (a): sema/*constraint-doubt*)."
   [c args]
   (let [k [(:id c) (canonical args)]
-        eval1 (fn [] (let [d (atom false)
+        eval1 (fn [] (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "enter concept" (:name c) (pr-str (canonical args)))))
+                     (let [d (atom false)
                            r (binding [sema/*constraint-doubt* d]
                                (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))]
                        [r @d]))
@@ -2013,6 +2038,7 @@
                 (let [v (get @m k ::none)]
                   (if (= ::none v) (let [x (eval1)] (swap! m assoc k x) x) v))
                 (eval1))]
+    (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "concept" (:name c) (pr-str (canonical args)) "=>" r (if d "(doubt)" "") (pr-str (keep #(when (and (map? %) (= :class (:k %))) [(:id %) (select-keys (abi/cls (:id %)) [:defining :finished :complete])]) (tree-seq coll? seq args))))))
     (when d (sema/doubt!))
     r))
 
@@ -2132,8 +2158,10 @@
          ;; (cpp-s4: a pointer's, [basic.lookup.argdep]/3.4, its pointee's: any's `any_cast<_Up>(&__any)` finds the
          ;; pointer overloads declared after it)
          :let [t (loop [t (abi/unq (abi/non-ref (:ty a)))] (if (abi/ptr? t) (recur (abi/unq (:to t))) t))] :when (abi/class? t)
+         :let [acls (#'sema/adl-classes args)]
          ns (sema/adl-class-nss (:id t))
-         e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names ns nm)) :when (and (= :tmpl (:e e)) (= :fn (:tk e)))]
+         e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names ns nm))
+         :when (and (= :tmpl (:e e)) (= :fn (:tk e)) (#'sema/friend-visible? acls e))]
      (:id e))))
 
 (defn- too-few-args?
@@ -2150,7 +2178,10 @@
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
   [ctx callee args]
-  (let [tids (distinct (concat (:tmpls callee) (when (and (not (:obj callee)) (not (:qualified callee)) (:name callee)) (adl-templates args (:name callee)))))]
+  (let [acls (#'sema/adl-classes args)
+        ;; (cpp-s8: a hidden friend template only by ADL, its class associated: sema's friend-visible?)
+        tids (distinct (concat (filter #(#'sema/friend-visible? acls (tmpl %)) (:tmpls callee))
+                               (when (and (not (:obj callee)) (not (:qualified callee)) (:name callee)) (adl-templates args (:name callee)))))]
     (let [sure (atom 0) doubt (atom 0)
           fids (vec (for [tid tids
                           :let [t (tmpl tid)
@@ -2301,7 +2332,10 @@
           (when old
             (upd-fn! old assoc :body (:body f) :node k :def-scope fs :param-names (:param-names f) :inline true)
             (upd-fn! fid dissoc :body))
-          (when-not old (enter! ns (:name k) {:e :fn :id fid :pos (long (or (:_b k) 0))}))
+          ;; (cpp-s8: a hidden friend, found by ADL alone: sema's friend-visible?)
+          (when-not old
+            (enter! ns (:name k) (cond-> {:e :fn :id fid :pos (long (or (:_b k) 0))} (:cls scope) (assoc :friend-cls (:cls scope))))
+            (when (:cls scope) (upd-fn! fid assoc :friend-cls (:cls scope))))
           (upd-fn! id assoc :def-scope fs :inline true)
           ;; a defaulted <=> declares a defaulted == alongside it ([class.compare.default]/5)
           (when (and (:explicitlyDefaulted k) (= "operator<=>" (:name k))
@@ -2322,9 +2356,10 @@
                              (.get ^java.util.HashMap (:names ns) (:name k)))]
             (upd-tmpl! old assoc :pattern pat :params (tparams k) :scope fs :sig nil)
             (let [tid (next-id)]
-              (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name k) :scope fs :path (:path ns) :params (tparams k) :pattern pat
-                                        :pos (:_b k) :insts {}})
-              (enter! ns (:name k) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b k) 0))})))))
+              (swap! *tmpls* assoc tid (cond-> {:id tid :tk :fn :name (:name k) :scope fs :path (:path ns) :params (tparams k) :pattern pat
+                                                :pos (:_b k) :insts {}}
+                                         (:cls scope) (assoc :friend-cls (:cls scope))))
+              (enter! ns (:name k) (cond-> {:e :tmpl :tk :fn :id tid :pos (long (or (:_b k) 0))} (:cls scope) (assoc :friend-cls (:cls scope))))))))
       nil)
     :template))
 
@@ -2615,13 +2650,19 @@
           pid (next-id)
           params (tparams n)
           ss (bind-scope (:scope t) params nil pid)
-          args (resolve-args ss t (template-text-args n) true)]
+          args (partial-args ss t (template-text-args n))]
       ;; a redeclaration of a partial specialization (its declaration, then its definition: <iterator_concepts.h>'s
       ;; iterator_traits<_Tp*>) is the same one, its definition kept (G4); its requires-clause its constraint (P14 (b))
       ;; (CP311 (a)'s measure: two partial specializations of the same arguments that differ in their constraints are two,
       ;; [temp.spec.partial.general]/1 with [temp.over.link]/7; concepts-class's S3<T> requires Class<T>, requires Union<T>)
       (let [cspell (fn [rc] (some-> rc node-text str/trim))
-            same (first (filter #(and (= (canonical (:args %)) (canonical args)) (= (cspell (:constraint %)) (cspell (:requiresClause n)))) (:partials t)))
+            ;; (cpp-s8: and in their parameters' type-constraints, [temp.param]/4: <iterator_concepts.h>'s
+            ;; indirectly_readable_traits<__has_member_value_type _Tp> and <__has_member_element_type _Tp>, the second
+            ;; had replaced the first, so a __normal_iterator had no value_type and iter_value_t none)
+            tcs (fn [ps] (mapv (juxt :tc :tc-args) ps))
+            same (first (filter #(and (= (canonical (:args %)) (canonical args)) (= (cspell (:constraint %)) (cspell (:requiresClause n)))
+                                      (= (tcs (:params %)) (tcs params)))
+                                (:partials t)))
             pt {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
                 :forms (template-text-args n) :tmpl t}]
         (if same
