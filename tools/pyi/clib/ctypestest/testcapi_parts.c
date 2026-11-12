@@ -5,5 +5,4 @@
    (:testcapi, narrowed per file). A part built leaves this list (bin/pyi-clib's build fails on a doubled
    definition). Arbace's own. */
 
-int _PyTestCapi_Init_Watchers(void *m) { (void)m; return 0; }
 int _PyTestCapi_Init_Monitoring(void *m) { (void)m; return 0; }
