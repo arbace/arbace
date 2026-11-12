@@ -117,9 +117,38 @@
     (swap! *f* update :allocas conj (list '= a (list 'alloca t :align align)))
     a))
 
+(def ^:private va-tag
+  "x86-64's va_list element as clang names it, %struct.__va_list_tag = type { i32, i32, ptr, ptr } (cpp-gatefix)."
+  (symbol "%struct.__va_list_tag"))
+
+(defn- va-list-type?
+  "Whether the type `ty` is x86-64's va_list, sema's struct __va_list_tag[1] (sema's va-list-tag: a class of no path)."
+  [ty]
+  (let [t (abi/unq ty)]
+    (and (abi/arr? t) (= 1 (:n t)) (abi/class? (abi/unq (:of t)))
+         (let [c (abi/cls-of (:of t))] (and (= "__va_list_tag" (:name c)) (empty? (:path c)))))))
+
+(defn- va-tag!
+  "%struct.__va_list_tag, its definition among the module's types once (cpp-gatefix: the lowering knows a va_list by
+  this type, arbace.cpp.lower's va-field and :va-lists, as in clang's IR)."
+  []
+  (when-not (:va-tag @*top*) (swap! *top* assoc :va-tag true))
+  va-tag)
+
+(defn- va-field!
+  "The address of field `k` of the va_list element at `ap` (gp_offset 0, fp_offset 1, overflow_arg_area 2, reg_save_area
+  3), as clang's X86_64ABIInfo::EmitVAArg writes it: a getelementptr over %struct.__va_list_tag, which the lowering reads
+  as the field (arbace.cpp.lower's va-field; on ci its va_list is one pointer, not this struct: cpp-gatefix, runtime/deferred.cpp's
+  vsum read gp_offset and reg_save_area as plain bytes and faulted at 0x0)."
+  [ap ^long k]
+  (val! (list 'getelementptr :inbounds :nuw (va-tag!) ['ptr ap] ['i32 0] ['i32 k])))
+
 (defn- slot! [ty]
   (let [[s a] (abi/size-align ty)]
-    (alloca! (if (abi/scalar? (abi/unq ty)) (abi/llvm-type ty) (list 'array s 'i8)) a)))
+    (cond
+      ;; a va_list local: clang's alloca [1 x %struct.__va_list_tag], align 16 (the lowering's :va-lists)
+      (va-list-type? ty) (alloca! (list 'array 1 (va-tag!)) 16)
+      :else (alloca! (if (abi/scalar? (abi/unq ty)) (abi/llvm-type ty) (list 'array s 'i8)) a))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Memory
@@ -179,6 +208,13 @@
 (defn- memcpy! [dst src ^long n]
   (declare! "llvm.memcpy.p0.p0.i64" 'void '[ptr ptr i64 i1])
   (emit! (list 'call 'void (gsym "llvm.memcpy.p0.p0.i64") [['ptr dst] ['ptr src] ['i64 n] ['i1 false]])))
+
+(defn- empty-rec?
+  "Whether `t` is an empty class, whose zero-initialization and copies clang leaves out (CodeGenFunction's
+  EmitNullInitialization and EmitAggregateCopy: \"Ignore empty classes in C++\"): its one byte may be another member's
+  ([[no_unique_address]], an empty base; cpp-gatefix)."
+  [t]
+  (let [t (abi/unq t)] (and (abi/class? t) (abi/empty-class? (:id t)))))
 
 (defn- memset! [dst ^long n]
   (declare! "llvm.memset.p0.i64" 'void '[ptr i8 i64 i1])
@@ -619,7 +655,7 @@
       ;; the trivial special members: a copy of bytes, nothing
       (and (:trivial f) (= "=" (:op f)))
       (let [src (second (first (arg-values (:ps (:ty f)) inits)))]
-        (memcpy! obj src (abi/size-of {:k :class :id (:cls f)}))
+        (when-not (abi/empty-class? (:cls f)) (memcpy! obj src (abi/size-of {:k :class :id (:cls f)})))
         obj)
       (and (:trivial f) (= :dtor (:kind f))) nil
       (and (:trivial f) (= :ctor (:kind f)) (empty? (:ps (:ty f)))) nil
@@ -892,7 +928,7 @@
         _ (when (> (long (abi/align-of t)) 8) (fail :va "va_arg of an over-aligned class"))
         ap (emit-rv (:e e))
         mem! (fn []
-               (let [oa (offset! ap 8)
+               (let [oa (va-field! ap 2)
                      ov (val! (list 'load 'ptr ['ptr oa] :align 8))
                      n (* 8 (quot (+ (long (abi/size-of t)) 7) 8))]
                  (emit! (list 'store ['ptr (val! (list 'getelementptr 'i8 ['ptr ov] ['i32 n]))] ['ptr oa] :align 8))
@@ -900,16 +936,17 @@
     (if (= :ind c)
       (mem!)
       (let [ni (count (filter #(= :integer (first %)) c)) ns (- (count c) ni)
-            gp (when (pos? ni) (val! (list 'load 'i32 ['ptr ap] :align 4)))
-            fpa (offset! ap 4)
-            fp (when (pos? ns) (val! (list 'load 'i32 ['ptr fpa] :align 4)))
+            gpa (when (pos? ni) (va-field! ap 0))
+            gp (when gpa (val! (list 'load 'i32 ['ptr gpa] :align 4)))
+            fpa (when (pos? ns) (va-field! ap 1))
+            fp (when fpa (val! (list 'load 'i32 ['ptr fpa] :align 4)))
             g-ok (when gp (val! (list 'icmp :ule 'i32 gp (- 48 (* 8 ni)))))
             f-ok (when fp (val! (list 'icmp :ule 'i32 fp (- 176 (* 16 ns)))))
             fits (cond (and g-ok f-ok) (val! (list 'and 'i1 g-ok f-ok)) g-ok g-ok :else f-ok)
             lr (new-label "vaarg.in_reg") lm (new-label "vaarg.in_mem") le (new-label "vaarg.end")]
         (condbr! fits lr lm)
         (begin! lr)
-        (let [rsa (val! (list 'load 'ptr ['ptr (offset! ap 16)] :align 8))
+        (let [rsa (val! (list 'load 'ptr ['ptr (va-field! ap 3)] :align 8))
               ga (when gp (val! (list 'getelementptr 'i8 ['ptr rsa] ['i32 gp])))
               fa (when fp (val! (list 'getelementptr 'i8 ['ptr rsa] ['i32 fp])))
               ar (if (or (zero? ns) (and (zero? ni) (= 1 ns)))
@@ -924,7 +961,7 @@
                            (emit! (list 'store [pt v] ['ptr (offset! tmpa (* 8 i))] :align 8))
                            (recur (next ps) (inc i) (if sse? gi (inc gi)) (if sse? (inc si) si)))))
                      tmpa))]
-          (when gp (emit! (list 'store ['i32 (val! (list 'add 'i32 gp (* 8 ni)))] ['ptr ap] :align 4)))
+          (when gp (emit! (list 'store ['i32 (val! (list 'add 'i32 gp (* 8 ni)))] ['ptr gpa] :align 4)))
           (when fp (emit! (list 'store ['i32 (val! (list 'add 'i32 fp (* 16 ns)))] ['ptr fpa] :align 4)))
           (let [fr (:label @*f*)]
             (br! le) (close-block!) (start! lm)
@@ -1372,18 +1409,18 @@
                   sse (abi/floating? t)
                   _ (when (or (abi/class? t) (= :ldouble (abi/bn t)) (> (long (abi/size-of t)) 8)) (fail :va "va_arg of " (pr-str t)))
                   ap (emit-rv (:e e))
-                  op (if sse (offset! ap 4) ap)
+                  op (va-field! ap (if sse 1 0))
                   o (val! (list 'load 'i32 ['ptr op] :align 4))
                   fits (val! (list 'icmp :ule 'i32 o (if sse 160 40)))
                   lr (new-label "vaarg.in_reg") lm (new-label "vaarg.in_mem") le (new-label "vaarg.end")]
               (condbr! fits lr lm)
               (begin! lr)
-              (let [rsa (val! (list 'load 'ptr ['ptr (offset! ap 16)] :align 8))
+              (let [rsa (val! (list 'load 'ptr ['ptr (va-field! ap 3)] :align 8))
                     ar (val! (list 'getelementptr 'i8 ['ptr rsa] ['i32 o]))
                     _ (emit! (list 'store ['i32 (val! (list 'add 'i32 o (if sse 16 8)))] ['ptr op] :align 4))
                     fr (:label @*f*)]
                 (br! le) (close-block!) (start! lm)
-                (let [oa (offset! ap 8)
+                (let [oa (va-field! ap 2)
                       ov (val! (list 'load 'ptr ['ptr oa] :align 8))
                       _ (emit! (list 'store ['ptr (val! (list 'getelementptr 'i8 ['ptr ov] ['i32 8]))] ['ptr oa] :align 8))
                       fm (:label @*f*)]
@@ -1604,7 +1641,7 @@
       (emit! (list 'store ['ptr arr] ['ptr addr] :align 8))
       (emit! (list 'store ['i64 n] ['ptr (offset! addr 8)] :align 8)))
     (if (#{:lv :xv} (:cat e))
-      (memcpy! addr (emit-lv e) (abi/size-of (:ty e)))
+      (let [src (emit-lv e)] (when-not (empty-rec? (:ty e)) (memcpy! addr src (abi/size-of (:ty e)))))
       (fail :codegen "class prvalue " (:op e)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1616,11 +1653,11 @@
   (let [tu (abi/unq t)]
     (case (:i init)
       :none nil
-      :zero (if (abi/scalar? tu) (store! tu (zero-of tu) addr) (memset! addr (abi/size-of tu)))
-      :zero-then (do (memset! addr (abi/size-of tu)) (emit-init addr t (:then init)))
+      :zero (cond (abi/scalar? tu) (store! tu (zero-of tu) addr) (empty-rec? tu) nil :else (memset! addr (abi/size-of tu)))
+      :zero-then (do (when-not (empty-rec? tu) (memset! addr (abi/size-of tu))) (emit-init addr t (:then init)))
       :expr (if (abi/class? tu) (emit-into (:e init) addr) (store! tu (emit-rv (:e init)) addr))
       :ctor (call! (:fn init) addr (:args init) nil false)
-      (:copy :copy-bytes) (memcpy! addr (emit-lv (:e init)) (abi/size-of tu))
+      (:copy :copy-bytes) (let [src (emit-lv (:e init))] (when-not (empty-rec? tu) (memcpy! addr src (abi/size-of tu))))
       ;; a complex object's parts (cpp-s3); one not written zero
       :complex (let [et (:of tu) es (abi/size-of et) [a b] (:items init)]
                  (store! et (if a (emit-rv a) (zero-of et)) addr)
@@ -1771,7 +1808,7 @@
                          (#{:lv :xv} (:cat e)) (emit-lv e)
                          :else (emit-rv e))))
     :try (emit-try! s)
-    :copy-bytes (memcpy! (emit-lv (:dst s)) (emit-lv (:src s)) (abi/size-of (:ty (:dst s))))
+    :copy-bytes (let [d (emit-lv (:dst s)) r (emit-lv (:src s))] (when-not (empty-rec? (:ty (:dst s))) (memcpy! d r (abi/size-of (:ty (:dst s))))))
     :while (let [lc (new-label "while.cond") lb (new-label "while.body") le (new-label "while.end") d (cleanup-depth)]
              (begin! lc)
              (condbr! (with-full (emit-rv (:cond s))) lb le)
@@ -2903,6 +2940,8 @@
     (vec (concat [(list 'llvm/source-filename file)
                   (list 'llvm/datalayout "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
                   (list 'llvm/triple "x86_64-alpine-linux-musl")]
+                 ;; the module's named types, as clang's before the globals (cpp-gatefix: x86-64's va_list element)
+                 (when (:va-tag @*top*) [(list 'llvm/type va-tag '(struct i32 i32 ptr ptr))])
                  (:forms @*top*)))))
 
 (defn gen-file
