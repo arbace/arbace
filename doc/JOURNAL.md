@@ -5224,3 +5224,35 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
 - Memory: the 4.1 GiB was the step's `CPPI_CI_MEMLIMIT=4GiB` (a soft GOMEMLIMIT the heap grew to); the command now sets 2GiB, `:mem-gib
   3` kept (GTS215), the fragment's stale entry brought to steps.edn's.
 - Proofs and the rest: doc/cpp/CPP-SURVEY.md, "As built: cpp-gatefix". No key moves (crop paths only, and the gate's tables).
+
+## 2026-11-12: cpp-s9, CP377 (a), CP376 (a), CP374 (a), CP375 (a) and cpp-s8's proofs (branch `cpp-s9`, from `mac/cpp-s8` 8c97ced5b with `mac/cpp-gatefix` 9846aab35 merged)
+
+The user decided CP374 (a), CP375 (a), CP376 (a) and CP377 (a) (2026-11-12). cpp-gatefix merged into cpp-s8 first (JOURNAL, AGENDA and
+the survey in conflict: both sides kept). By night 12's rules while its gate ran (one process at a time, gated on MemAvailable >= 12 GiB
+and `df /` <= 88%, `GOMEMLIMIT=1200MiB GOGC=30`, main's stage 0, a watcher at 1.5 GiB; no clang, g++, gate or big lock). Details and
+numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s9".
+- CP377 (a): hello.cpp's undefined `resize_and_overwrite<to_string's lambda&>` had two causes: basic_string.tcc's definition has an
+  `#ifdef` between `basic_string<...>::` and the name, and sema read a declaration's text before its name with the directive in it (so
+  the definition became a namespace's template and the member template had no body): directives' lines are now left out of that text;
+  and a member template's specialization of an `extern template` class had been taken for the library's: [temp.explicit]/11 names only
+  the members that are no templates. Considered: special-casing the macro (no: the text is the cause, and any conditional in a declarator
+  hits it).
+- CP376 (a): clang's size floor, `setSize(max(size, offset + size))` for an empty potentially-overlapping member, an empty base and an
+  empty virtual base past the data size; the non-virtual size with it, the data size not. The codegen sample nua-layout.cpp (7 layouts,
+  llvmi 0). abi/vbase8-10.C's sizes moved (C2 8 -> 16, as clang's LayoutBase gives; no clang record: clang refuses the file's implicit
+  int).
+- CP374 (a): pointers into string literals and local arrays in sema's constant evaluator (decay, + and -, subscript, *, comparison,
+  difference, ++, +=), lambdas' call operators constexpr, an empty class's local. f8 (<format>'s vformat) moved from `:decay` to the
+  next refusal, `string_view __s(__enc)`: our code generator takes clang's predefined macros, so <bits/unicode.h> takes the
+  `__clang_literal_encoding__` branch, which needs class objects and `__builtin_is_constant_evaluated()` true in the evaluator (sema
+  folds it to 0). cpp-s8's CP374 text assumed the GNU branch; corrected in the survey, CP378 proposed. Considered: folding the two
+  functions by name (CP374 (b), declined by the user).
+- CP375 (a): too-few-arguments reads every declaration's default arguments (the template's `:decls`) and applies to every function
+  template before its deduction. Found on the way and fixed: a member template of a plain class defined out of line
+  (`template<class T> int S::h(T)`) had never been given its body (its redeclaration looked for in the namespace; its specialization's
+  types resolved in the class's scope, where T is not).
+- Proofs: the 81 run programs (library.cpp left out) in five parts against cpp-s8's and cpp-s7's: 69 generated, none lost, vexing.cpp
+  generated (cpp-s8 had not run it); the IR differences are cpp-gatefix's (empty classes' memsets and copies, va_list, tuple layout),
+  CP377's (hello.cpp and threads.cpp define resize_and_overwrite and its lambda) and CP376's (vbase8-10.C). codegen-gen recorded (155 of
+  155: nua-layout added; struct-bind's std::pair bindings by get<i>, as the sample's comment and [dcl.struct.bind]/4 have them, its llvmi
+  output unchanged; a crash of globals.cpp on a pointer folded to a long fixed before the record). cpp-print-essential's command passes.
