@@ -206,9 +206,26 @@
   (instance? arbace.lang.BigInt x))
 
 (defn- lng
-  "A value's 64-bit pattern as a long (an unsigned 64-bit BigInt wrapped: 18446744073709551615N is -1)."
+  "A value's 64-bit pattern as a long (an unsigned 64-bit BigInt wrapped: 18446744073709551615N is -1); a floating value
+  truncated toward zero ([conv.fpint]/1), one outside long's range (or a NaN) not a constant: a refusal."
   [x]
-  (if (u64? x) (.longValue (.toBigInteger ^arbace.lang.BigInt x)) (long x)))
+  (cond (u64? x) (.longValue (.toBigInteger ^arbace.lang.BigInt x))
+        (float? x) (let [d (double x)]
+                     (if (and (>= d -9.223372036854775808E18) (< d 9.223372036854775808E18))
+                       (long d)
+                       (fail :template "a floating constant outside long's range: " x)))
+        :else (long x)))
+
+(defn- dbl
+  "A value as a double: a floating value as it is, an integer converted ([conv.fpint]/2; an unsigned 64-bit BigInt by
+  its value)."
+  [x]
+  (if (u64? x) (.doubleValue (.toBigInteger ^arbace.lang.BigInt x)) (double x)))
+
+(defn- falsy?
+  "Whether a constant converts to false ([conv.bool]: zero, of an integer or a floating value; 0.5 is true)."
+  [x]
+  (if (float? x) (zero? (double x)) (zero? (lng x))))
 
 (defn- u64
   "A value as unsigned long long's ([conv.integral]/3: modulo 2^64), normalized: a long when it fits, else a BigInt."
@@ -225,7 +242,22 @@
   const-int. A division by zero and a shift by a count outside 0..63 are not constants: refusals, never Java's
   exceptions (review 1111 #5)."
   [o args]
-  (if (every? number? args)
+  (cond
+    (not (every? number? args)) {:k :texpr :o o :args (vec args)}
+    ;; (gf-cpp: a floating operand, a floating literal's double, makes the operation a double's, the usual arithmetic
+    ;; conversions' ([expr.arith.conv]/1.2-1.3): + - * / and the comparisons; ! && || ?: test it against zero; the integer
+    ;; operators (% << >> & | ^ ~) on it are ill-formed, and a division by zero is not a constant: refusals)
+    (some float? args)
+    (let [[a b c] args]
+      (case o
+        "neg" (- (dbl a)) "!" (if (falsy? a) 1 0) "?" (if (falsy? a) c b)
+        "+" (+ (dbl a) (dbl b)) "-" (- (dbl a) (dbl b)) "*" (* (dbl a) (dbl b))
+        "/" (if (zero? (dbl b)) (fail :template "division by zero in a constant expression") (/ (dbl a) (dbl b)))
+        "<" (if (< (dbl a) (dbl b)) 1 0) ">" (if (> (dbl a) (dbl b)) 1 0) "<=" (if (<= (dbl a) (dbl b)) 1 0)
+        ">=" (if (>= (dbl a) (dbl b)) 1 0) "==" (if (== (dbl a) (dbl b)) 1 0) "!=" (if (== (dbl a) (dbl b)) 0 1)
+        "&&" (if (or (falsy? a) (falsy? b)) 0 1) "||" (if (and (falsy? a) (falsy? b)) 0 1)
+        (fail :template "the operator " o " on a floating constant")))
+    :else
     (let [ok (fn [b] (cond (and (#{"/" "%"} o) (zero? b)) (fail :template "division by zero in a constant expression")
                            (and (#{"<<" ">>"} o) (not (<= 0 b 63))) (fail :template "a shift by " b " in a constant expression")
                            :else b))]
@@ -249,17 +281,19 @@
         (let [[a b c] (map long args)]
           (case o
             "neg" (unchecked-negate a) "!" (if (zero? a) 1 0) "~" (bit-not a) "?" (if (zero? a) c b)
-            (do (ok b) (long ((binary-fns o) a b)))))))
-    {:k :texpr :o o :args (vec args)}))
+            (do (ok b) (long ((binary-fns o) a b)))))))))
 
-(def ^:private cast-types #{"bool" "char" "short" "int" "long" "unsigned" "signed"})
+(def ^:private cast-types #{"bool" "char" "short" "int" "long" "unsigned" "signed" "float" "double"})
 
 (defn- cast-to
   "A constant converted to a builtin integral type named by its words (bool: 0 or 1; the others kept, the slice's
   values fitting)."
   [^String ty v]
   (cond (map? v) {:k :texpr :o "cast" :type ty :args [v]}
-        (str/starts-with? ty "bool") (if (zero? (lng v)) 0 1)
+        (str/starts-with? ty "bool") (if (falsy? v) 0 1)
+        ;; (gf-cpp: a floating type's value a double, float's rounded to float; long double's held as a double)
+        (= ty "float") (double (float (dbl v)))
+        (str/includes? ty "double") (dbl v)
         (#{"char" "signed char"} ty) (long (unchecked-byte (lng v)))
         (= ty "unsigned char") (bit-and (lng v) 0xff)
         (#{"short" "signed short"} ty) (long (unchecked-short (lng v)))
@@ -518,16 +552,27 @@
         ;; case and order; its value modulo 2^64 in fold's representation, a BigInt above Long/MAX_VALUE (an unsigned
         ;; long long: 18446744073709551615ULL; review 1111 #5: template/array32.C's 18446744073709551615 had thrown Java's
         ;; NumberFormatException, a crash of Sema; 0b literals and separators were not read; #3: one representation)
-        num (fn [^String t] (let [t (str/replace (str/replace (str/lower-case t) "'" "") #"[ulz]+$" "")
+        ;; (gf-cpp: a floating literal ([lex.fcon]: a decimal one with a . or an exponent, a hexadecimal one with a p
+        ;; exponent) a double, its suffix f (float's value) or l (long double's, held as a double) dropped: `(T) 1.0` in
+        ;; cpp2a/explicit6.C's explicit-specifier, which cpp-s7 had refused)
+        flt (fn [^String t]
+              (let [l (str/replace (str/lower-case t) "'" "")
+                    [_ m sfx] (re-matches #"(.*?)(bf16|f16|f32|f64|f128|f|l)?" l)
+                    d (try (Double/parseDouble ^String m) (catch NumberFormatException _ (fail :template "a floating literal " t)))]
+                (if (#{"f" "f32"} sfx) (double (float d)) d)))
+        num (fn [^String t] (let [l (str/lower-case t)]
+                              (if (if (str/starts-with? l "0x") (str/includes? l "p") (or (str/includes? l ".") (str/includes? l "e")))
+                                (flt t)
+                              (let [t (str/replace (str/replace l "'" "") #"[ulz]+$" "")
                                   [d r] (cond (str/starts-with? t "0x") [(subs t 2) 16]
                                               (str/starts-with? t "0b") [(subs t 2) 2]
                                               (and (> (count t) 1) (str/starts-with? t "0")) [(subs t 1) 8]
                                               :else [t 10])]
-                              ;; (cpp-s7: a floating literal, `(T) 1.0` in cpp2a/explicit6.C's explicit-specifier, is not read
-                              ;; here: a refusal, not Java's NumberFormatException, a crash of Sema since review 1111 #5)
+                              ;; (cpp-s7: digits outside the base, 09 or 0x without digits, a refusal, not Java's
+                              ;; NumberFormatException, a crash of Sema since review 1111 #5; floating literals are flt's)
                               (when-not (re-matches (case (int r) 16 #"[0-9a-f]+" 2 #"[01]+" 8 #"[0-7]*" #"[0-9]+") d)
                                 (fail :template "not an integer literal " t))
-                              (u64 (bigint (if (= "" d) java.math.BigInteger/ZERO (java.math.BigInteger. ^String d (int r)))))))
+                              (u64 (bigint (if (= "" d) java.math.BigInteger/ZERO (java.math.BigInteger. ^String d (int r)))))))))
         prec {"||" 1 "&&" 2 "|" 3 "^" 4 "&" 5 "==" 6 "!=" 6 "<" 7 ">" 7 "<=" 7 ">=" 7 "<<" 8 ">>" 8 "+" 9 "-" 9 "*" 10 "/" 10 "%" 10}
         ;; the tokens of a bracketed run from the current position (its opening token consumed), joined
         run (fn [^String open ^String close]
@@ -541,7 +586,7 @@
     (letfn [(cast-named [nm v]
               (let [ty (abi/unq (sema/resolve-type scope nm))]
                 (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
-                      (= :bool (:n ty)) (if (zero? (lng v)) 0 1)
+                      (= :bool (:n ty)) (if (falsy? v) 0 1)
                       ;; (cpp-s5b: a 128-bit type's constant is not evaluated in the text, a refusal)
                       (and (abi/integral? ty) (> (* 8 (long (abi/size-of ty))) 64)) (fail :template "a 128-bit constant expression " s)
                       ;; (an unsigned 64-bit type's value as fold's: modulo 2^64, a BigInt above Long/MAX_VALUE)
@@ -549,8 +594,9 @@
                                            (if (>= b 64) (if (abi/signed? ty) (lng v) (u64 (lng v)))
                                                (let [m (dec (bit-shift-left 1 b)) u (bit-and (lng v) m)]
                                                  (if (and (abi/signed? ty) (bit-test u (dec b))) (- u (inc m)) u))))
-                      ;; (cpp-s5: a floating type's value, the operators' integers: `double(-1) < double(0)`)
-                      (abi/floating? ty) v
+                      ;; (cpp-s5: a floating type's value: `double(-1) < double(0)`; gf-cpp: a double, float's rounded to
+                      ;; float, the operators then the floating ones)
+                      (abi/floating? ty) (if (= 4 (long (abi/size-of ty))) (double (float (dbl v))) (dbl v))
                       :else (fail :template "constant expression " s))))
             (primary []
               (let [[k t] (next!)]
