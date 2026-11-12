@@ -3616,6 +3616,7 @@ current elaborator).
 | lib-check and lib-stg `--package base --ifaces own --judge` | exit 0; 0 worse (1 and 2 better) |
 | `bin/hsi check --libs own --corpus samples,synthetic` on ghc-internal-own.tar and base-own.tar alone (the gate's set; the elaborator change) | exit 0; 45 own (44 pass), 18 pack (16 pass), 0 unclassed, the controls fail as they must: as `check-hsi-own.edn` records them; 2m48, 1.07 GB |
 | `bin/hsi check --libs own` on the 31 newly eligible programs | 24 pass, 6 own-only failures (above), arr001's control fails as it must; 3m13, 0.78 GB |
+| hsi-essential's command (`own-verdicts --check`, the 123 programs; ARBACE_MEM_GIB=1, HSI_JOBS 3 by default) | own-verdicts current; 120 pass, 2 fail (synthetic/primops-word, runtime-laziness: status 2 at the 1 GiB cap, the pack path, as on hs-p29; they pass at 16 GiB in the record), the four controls that ran fail as they must; 17m33, 0.88 GB |
 | `bin/gate --full --plan` | exit 0, no table error; the three steps absent (`:clean-only`); with `GATE_ALL_PARTS=1` they plan "after" their producers (stm after `haskell-lib-own-array.own`) |
 | `gate.crops check ROOT test/gate/steps.edn` | 0 problems |
 | `bash test/gate/crops-test.bash` | ok (42 ok) |
