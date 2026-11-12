@@ -486,7 +486,9 @@
                                         :fundeps (let [occs (mapv #(first (str/split (str %) #"#")) tvs)
                                                        pos (fn [o] (.indexOf ^java.util.List occs (str o)))]
                                                    (vec (for [[l r] (:fundeps info)] [(mapv pos l) (mapv pos r)])))
-                                        :defaults (into {} (keep (fn [[m d]] (when d [(strs m) (strs d)])) (:defaults info)))}))
+                                        :defaults (into {} (keep (fn [[m d]] (when d [(strs m) (strs d)])) (:defaults info)))
+                                        ;; HF10-P33 (a): the own interfaces' default signatures (P17's :dsigs)
+                                        :dsigs (into {} (for [[m ty] (:dsigs info)] [(strs m) (conv-type ty)]))}))
       tycon (let [info (nth t 6 {}) tn (strs (nth t 1))]
               (when (and *tycons* (contains? '#{data newtype} (nth t 3)))
                 (swap! *tycons* assoc tn {:flavour (nth t 3) :cons (mapv strs (nth t 4))})
@@ -2354,6 +2356,7 @@
                       ;; GHC's AbsBinds: each binder abstracted over the dictionaries, the group's monomorphic
                       ;; bindings inside (a letrec when recursive)
                       (let [monos (into {} (map (fn [[n _]] [(lv n) (list 'lv (occ n) (str "mono" (fresh-id)))]) all))
+                            _ (doseq [[n t] all] (note-type! (get monos (lv n)) t))
                             inner (mapv (fn [[n c]] [n (substitute monos c)]) results)]
                         (mapv (fn [[n c]]
                                 (list 'bind (bind-core top? n)
@@ -2363,6 +2366,12 @@
                                               (list 'letrec (mapv (fn [[m c2]] (list 'bind (get monos (lv m)) c2)) inner)
                                                     (get monos (lv n)))))))
                               inner)))]
+            ;; HF10-P32: a local binder's type for tostg's representations (an unsigned local function's result, a State#
+            ;; loop's: thawSTArray's `case copy 0# s2# of s3# -> ...` was bound by a lazy let, its writes never run), the
+            ;; abstracted ones' monomorphic binders too
+            (when-not top?
+              (doseq [[n t] all]
+                (note-type! (lv n) (if (or (seq tvs) (seq preds)) [:forall tvs preds t] t))))
             [env' out]))
         ;; the signed ones: checked against their signatures
         out2 (vec (for [b signed]
@@ -2381,6 +2390,8 @@
                               (assume-eqs! preds)
                               (let [[t c] (bind-rhs env b body)] (unify t body) (retry-implications! false) c))]
                       (solve-with-givens! @ws givens)
+                      ;; HF10-P32: a signed local binder's type, as an unsigned one's
+                      (when-not top? (note-type! (lv n) s))
                       (list 'bind (bind-core top? n) (if (empty? params) c (list 'lam params (wrap-ev-binds @evb c)))))))]
     [env (into out1 out2)]))
 
@@ -3585,7 +3596,11 @@
                                  (str/join " " (for [mn (:methods info)] (str "(" (name-str mn) " \"\" " (type-form (get (:types r) mn)) ")")))
                                  "] [" (str/join " " (for [[c ts] (:supers info)] (str "(tycon-app " (name-str c) " [" (str/join " " (map type-form ts)) "])")))
                                  "] {:tvs " (pr-str (:tvs info)) " :defaults ["
-                                 (str/join " " (for [[mn d] (:defaults info)] (str "[" (name-str mn) " " (name-str d) "]"))) "]})"))
+                                 (str/join " " (for [[mn d] (:defaults info)] (str "[" (name-str mn) " " (name-str d) "]"))) "]"
+                                 ;; HF10-P33 (a): the default signatures, as the own interfaces carry them
+                                 (when (seq (:dsigs info))
+                                   (str " :dsigs [" (str/join " " (for [[mn t] (:dsigs info)] (str "[" (name-str mn) " " (type-form t) "]"))) "]"))
+                                 "})"))
                           (for [[n [tvs rhs]] (:syns r) :when (= m (nmod n))]
                             (str "(tycon " (name-str n) " \"\" synonym [] " kind-type " {:synonym [" (pr-str tvs) " " (type-form rhs) "]})")))))
          "])\n"
