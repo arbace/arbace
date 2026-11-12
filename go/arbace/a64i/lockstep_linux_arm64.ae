@@ -2,6 +2,7 @@
 
 
     ^{:line 4} [bytes "bytes"]
+    [binary "encoding/binary"]
     ^{:line 5} [errors "errors"]
     ^{:line 6} [fmt "fmt"]
     ^{:line 7} [os "os"]
@@ -17,10 +18,12 @@
 ;; tracer, emu.Tracee: registers by PTRACE_GETREGSET NT_PRSTATUS, ASLR off) and by a64i from the native's own initial state
 ;; (its stack's bytes, the auxv's AT_SYSINFO_EHDR made AT_IGNORE in both: no vdso), compared in the sys mode at each system
 ;; call (the registers, the call's arguments, the bytes write(2) writes, the writable memory) or in the step mode after
-;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, the bytes stored, TPIDR_EL0 after an MSR). The world's
+;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, V0-V31, FPSR and FPCR (ARS44), the bytes stored, TPIDR_EL0 after
+;; an MSR). The world's
 ;; answers (read's bytes, clock_gettime's, getrandom's, the ids) are the native's, copied into a64i. Rules for
-;; single-stepping's artifacts: an exclusive load ends the step mode until the next system call (a single-stepped
-;; store-exclusive always fails: the step's exception clears the monitor), the region compared there as in the sys mode;
+;; single-stepping's artifacts: an exclusive region is not stepped (a single-stepped store-exclusive always fails: the step's
+;; exception clears the monitor): a64i runs it to its store-exclusive or clrex, the native to a brk at a64i's next pc, compared
+;; there (ARS44); a region that does not end so ends the step mode until the next system call, compared there as in the sys mode;
 ;; x7 at a system call stop is ptrace's (entry 0, exit 1), never compared.
 
 (go/type lockstep (struct
@@ -249,7 +252,34 @@
     (when (!= (bit-and (.-Pstate r) 0xf0000000) (.NZCV (.-c l)))
       (return (fmt/Sprintf "nzcv %#x, native %#x" (.NZCV (.-c l)) (bit-and (.-Pstate r) 0xf0000000))))
 
-    ""))
+    (.compareFP l)))
+
+
+(go/method compareFP "compareFP holds a64i's SIMD&FP registers V0-V31, FPSR and FPCR to the native's (PTRACE_GETREGSET NT_PRFPREG:\nLinux's user_fpsimd_state, the 32 registers' 16 bytes, then FPSR and FPCR; ARS44).\n" ^string [^{:tag (* lockstep)} l]
+  (let [^{:tag (array 528 byte)} b (zero (array 528 byte))
+      iov (lit (struct
+          ^{:tag (* byte)} base
+          ^{:tag uint64} n)
+        (addr (aget b 0)) 528)]
+    (when [(values _ _ e) (syscall/Syscall6 syscall/SYS_PTRACE 0x4204 (conv uintptr (.-Pid (.-t l))) 2 (conv uintptr (conv unsafe/Pointer (addr iov))) 0 0)] (!= e 0)
+      (return (fmt/Sprintf "the native's SIMD&FP registers unreadable: %v" e)))
+
+    (let [c (.-c l)]
+      (for [i 0] (< i 32) (inc! i)
+        (let [lo (.Uint64 binary/LittleEndian (subslice b (* 16 i)))
+            hi (.Uint64 binary/LittleEndian (subslice b (+ (* 16 i) 8)))]
+          (when (or (!= lo (aget (aget (.-Q c) i) 0)) (!= hi (aget (aget (.-Q c) i) 1)))
+            (return (fmt/Sprintf "v%d %016x_%016x, native %016x_%016x" i (aget (aget (.-Q c) i) 1) (aget (aget (.-Q c) i) 0) hi lo)))))
+
+      (let [fpsr (conv uint64 (.Uint32 binary/LittleEndian (subslice b 512)))
+          fpcr (conv uint64 (.Uint32 binary/LittleEndian (subslice b 516)))]
+        (when (!= fpsr (.-FPSR c))
+          (return (fmt/Sprintf "fpsr %#x, native %#x" (.-FPSR c) fpsr)))
+
+        (when (!= fpcr (.-FPCR c))
+          (return (fmt/Sprintf "fpcr %#x, native %#x" (.-FPCR c) fpcr)))
+
+        ""))))
 
 
 ^{:go/end 269} (go/method tpidr [^{:tag (* lockstep)} l] :results [uint64 error]
@@ -373,10 +403,71 @@
       ;; the step mode
       (let [(values in _ _) (.Fetch c (.-PC c))]
         (when (and (!= in nil) ^:go/paren (== (.-Op in) OpLDXR))
-          ;; an exclusive region: to the next system call in the sys mode's way (stepping would fail its store)
+          ;; an exclusive region (stepping would fail its store): a64i runs it to its store-exclusive or clrex (at most 64
+          ;; instructions, no system call), the native runs to a brk put at a64i's next pc, both compared there and the step
+          ;; mode goes on (ARS44); a region that does not end so: to the next system call in the sys mode's way (AR5's rule)
           (inc! (.-Exclusive (.-res l)))
-          (set! (values (.-stepping l) (.-resume l)) (values false true))
-          (continue))
+          (let [pc (.-PC c)
+              ended false]
+            (set! (values (.-Log (.-AS c)) (.-Stores (.-AS c))) (values true (subslice (.-Stores (.-AS c)) _ 0)))
+            (for [k 0] (< k 64) (inc! k)
+              (when [(values in2 _ _) (.Fetch c (.-PC c))] (and (!= in2 nil) (== (.-Op in2) OpSVC))
+                (break))
+
+              (when (or (not (.Step c)) (.-Done c))
+                (break))
+
+              (when (and (!= (.-Last c) nil) ^:go/paren (or (== (.-Op (.-Last c)) OpSTXR) (== (.-Op (.-Last c)) OpCLREX)))
+                (set! ended true)
+                (break)))
+
+            (set! (.-Log (.-AS c)) false)
+            (when (or (not ended) (.-Done c) (== (.-PC c) pc))
+              (set! (values (.-stepping l) (.-resume l)) (values false true))
+              (continue))
+
+            (let [target (.-PC c)
+                (values orig err) (.Read t target 4)]
+              (when (!= err nil)
+                (return nil err))
+
+              (when [err (.Write t target (lit (slice byte) 0x00 0x00 0x20 0xd4))] (!= err nil)
+                (return nil err))
+
+              (let [(values st err) (.Resume t 0)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (when (== st emu/StopExit)
+                  (return (.stepFail l pc "the exclusive region: the native ended (status %d), a64i at %#x" (.-Status t) target)))
+
+                (when [err (.Write t target orig)] (!= err nil)
+                  (return nil err))
+
+                (when (or (!= st emu/StopSignal) (!= (.-Sig t) SIGTRAP) (!= (.-Pc (.-Regs t)) target))
+                  (return (.stepFail l pc "the exclusive region: the native stopped (%d, signal %d) at %#x, a64i at %#x" st (.-Sig t) (.-Pc (.-Regs t)) target)))
+
+                (set! (.-afterSys l) false)
+                ;; the native's store-exclusive failed where a64i's succeeded (an exception in the region, as a first write's
+                ;; page fault, clears the CPU's monitor: architecturally allowed, the program retries): AR5's rule from here
+                (let [last (.-Last c)
+                    nx (nativeX (addr (.-Regs t)))]
+                  (when (and (== (.-Op last) OpSTXR) (< (.-Rm last) 31) (== (aget (.-X c) (.-Rm last)) 0) (== (aget nx (.-Rm last)) 1))
+                    (inc! (.-ExclusiveFailed (.-res l)))
+                    (set! (values (.-stepping l) (.-resume l)) (values false true))
+                    (continue)))
+
+                (when [d (.compareRegs l false)] (!= d "")
+                  (return (.stepFail l pc "the exclusive region to %#x: %s" target d)))
+
+                (for [i 0] (< (+ i 1) (len (.-Stores (.-AS c)))) (set! i + 2)
+                  (let [(values a n) (values (aget (.-Stores (.-AS c)) i) (conv int (aget (.-Stores (.-AS c)) (+ i 1))))
+                      (values mine _) (.ReadBytes (.-AS c) a n)
+                      (values theirs err) (.Read t a n)]
+                    (when (or (!= err nil) (not (bytes/Equal mine theirs)))
+                      (return (.stepFail l pc "the exclusive region to %#x: stored at %#x: %x, native %x" target a mine theirs)))))
+
+                (continue)))))
 
         (when (and (!= in nil) (== (.-Op in) OpSVC))
           ;; the system call stepped over in the native, its result fed to a64i
@@ -561,6 +652,11 @@
             (return r true err)))
 
         (when (or ^:go/paren (and (> (.-StepFrom (.-opts l)) 0) (== (.-Syscalls (.-res l)) (.-StepFrom (.-opts l)))) (.-resume l))
+          ;; to the step mode: the registers after the call compared first (x7 aside: the exit stop's), a difference the call's own
+          (when [d (.compareRegs l true)] (!= d "")
+            (let [(values r err) (.stepFail l (- (.-PC c) 4) "after the system call: %s" d)]
+              (return r true err)))
+
           (set! (values (.-stepping l) (.-resume l)) (values true false)))
 
         (return nil false nil)))))

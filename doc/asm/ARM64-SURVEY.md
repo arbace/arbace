@@ -1681,3 +1681,81 @@ Numbering from ARS68. Each with options, the recommended named; none taken.
 - **ARS70 the `:init-order` held by a step.** The table check found an annotation two branches stale. (a) `bin/a64i table-check` (the
   scratch wrapper made a verb, linux/arm64 only, under 0.6 GiB, about 40 s) in `a64i-essential`'s chain; (b) by hand at each AR branch.
   *Recommended: (a)*: the gate then catches it as oi's and pyi's table checks do.
+## As built: ARS44 (2026-11-12; branch `273-asm-arm64-ars44`, from `41e378554`: next `bd6ab3ddd` with `review-fix-3` `6bf064ab4`; queue task 273, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max, Linux 6.18), stage 0 and TamaGo's go; every check
+under 1 GiB; no LLVM or GNU tool in the checks. The user's ARS44 (a), with ARS55 (b) and ARS58 (a): the CPU's rows and the
+lockstep of the 18 synthetic programs (AR6's eight, AR7's four, AR8's synth-neon, AR9's synth-neon-ldst and synth-neon-fp,
+review 1111's synth-fp-d-rm, synth-fp-s-rm and synth-neon-e), the step mode taught the SIMD&FP state.
+
+- **V0-V31, FPSR and FPCR in the lockstep** (`go/arbace/a64i/lockstep_linux_arm64.ae`, hand-edited as forms): `compareFP` reads
+  the native's SIMD&FP state by PTRACE_GETREGSET with NT_PRFPREG (2; arm64 has no NT_ARM_FPSIMD: its FPSIMD regset is
+  NT_PRFPREG's `user_fpsimd_state`, the 32 registers' 16 bytes, then FPSR and FPCR) and holds a64i's `Q`, `FPSR` and `FPCR`
+  to it in `compareRegs`: after every step and at every system call stop of the sys mode. The cost is not measurable (the whole
+  check 1 min 9 s before and after). The injected faults gain `f` (FPSR's IOC flipped) and `r` (FPCR's bit 22) for the
+  controls.
+- **Exclusive regions compared, not skipped**: AR5's rule left the step mode at an exclusive load until the next system call
+  (synth-excl: 37 of 4,745 instructions stepped). Now a64i runs the region to its store-exclusive or clrex (at most 64
+  instructions, no system call), the native runs to a `brk #0` written at a64i's next pc (PTRACE_SYSCALL; the word restored at
+  the trap), and the registers, the SIMD&FP state and the region's stores are compared there; the step mode goes on. A native
+  store-exclusive that failed where a64i's succeeded (the first write to a page faults in the region and the exception clears the
+  CPU's monitor: architecturally allowed, the program retries) falls back to AR5's rule for that region, counted in the trace's
+  line (`N exclusive regions, K of them to the next system call`): ldxr-stxr and ldaxr-pair one region each, deterministic.
+  synth-excl 37 → 4,563 stepped (66 regions), ldxr-stxr 201 → 805, ldaxr-pair 197 → 650.
+- **The registers after the call where the lockstep turns to the step mode** (the bisection's `StepFrom`, an exclusive region's
+  fallback) are compared before stepping (x7 aside), a difference blamed on the call: a fault after an `svc` was blamed on the
+  next instruction before (found by the FPCR control's bisection).
+
+| program | cases | cpu | sys (calls) | step (stepped of instructions) |
+|---|---:|---|---:|---:|
+| synth-alu | 2,400 | pass | 1 | 45,627 of 45,629 |
+| synth-logic | 1,456 | pass | 1 | 27,691 of 27,693 |
+| synth-bitfield | 800 | pass | 1 | 15,227 of 15,229 |
+| synth-dp | 1,096 | pass | 1 | 20,851 of 20,853 |
+| synth-mul | 1,000 | pass | 1 | 19,027 of 19,029 |
+| synth-cond | 1,696 | pass | 1 | 32,251 of 32,253 |
+| synth-fp-d | 2,428 | pass | 1 | 62,671 of 62,673 |
+| synth-fp-s | 2,428 | pass | 1 | 62,691 of 62,693 |
+| synth-ldst | 374 | pass | 1 | 17,733 of 17,735 |
+| synth-pair | 93 | pass | 1 | 4,533 of 4,535 |
+| synth-excl | 94 | pass | 1 | 4,563 of 4,745 (66 exclusive regions) |
+| synth-lse | 240 | pass | 1 | 11,923 of 11,925 |
+| synth-neon | 1,769 | pass | 1 | 49,715 of 49,717 |
+| synth-neon-ldst | 1,020 | pass | 1 | 165,267 of 165,269 |
+| synth-neon-fp | 1,176 | pass | 1 | 32,955 of 32,957 |
+| synth-fp-d-rm | 1,168 | pass | 1 | 33,899 of 33,901 |
+| synth-fp-s-rm | 1,168 | pass | 1 | 33,899 of 33,901 |
+| synth-neon-e | 443 | pass | 1 | 12,470 of 12,472 |
+
+20,849 cases, every one passing on this CPU by its program's own verdict (the model's expectations, held before to
+qemu-aarch64 alone, hold on the hardware), a64i's AOT run equal to the CPU's, the lockstep equal in both modes: 652,993
+instructions stepped with the SIMD&FP state compared (the 72 hand-written programs: 626,396, AR5's 625,339 and the regions').
+No divergence of a64i's or of the model's. The bisection over each synthetic program under its family's injected fault names
+an instruction of that family (18 of 18, by hand; four are controls).
+
+| check (`bin/a64i check`, 1 min 9 s, whole; `--essential` 39 s) | before | after |
+|---|---|---|
+| eval, AOT, forms | 90 / 90 | 90 / 90 |
+| cpu, sys, step, loader (the VM's rows) | 72 of 72 each (18 not recorded) | **90 of 90 each** |
+| coverage | 2,015 of 2,015 | 2,015 of 2,015 |
+| controls (`test/asm/controls-a64i.txt`) | 48 | **56**: step-4 (FPSR, `synth-fp-d fp:f`), step-5 (FPCR, `synth-fp-d-rm sys:r`), step-6 (a lane, `synth-neon-fp simd:x`), step-7 (an exclusive region, `synth-excl excl:x`), sys-3, bisect-3, bisect-4, bisect-5 (the FPCR flip after an `svc`) |
+| `[:asm-arm64 :eval]` | 306 / 0 / 0 | **360 / 0 / 0** |
+
+`bin/reap --record`: 49 of 52 cells checked, 0 problems. **crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged,
+`--judge --strict` 0 problems. `test/gate/gate-key-crops-test.bash` passes. The a64i driver still builds for linux/amd64
+(`lockstep_other`).
+
+Found on the way (probed: a C program's `msr fpcr` / `mrs` on this CPU): the M2 keeps FPCR's trap enables, FZ, FZ16, DN and the
+modes (0x07ff9f00 of a64i's 0x07ff9f07) but reads FEAT_AFP's FIZ, AH and NEP (bits 0-2) as zero: it has no FEAT_AFP. a64i keeps
+them (as qemu's max CPU, review 1111 (4)) and refuses an FP instruction under them; a program that sets them would differ from
+this CPU at the `msr` (the lockstep now compares FPCR). No program sets them (ARS61).
+
+### Proposed (ARS44)
+
+Numbering from ARS61.
+
+- **ARS61 FEAT_AFP's FPCR bits against this CPU.** (a) a64i writes FPCR's bits 0-2 as RES0, as the M2 (no FEAT_AFP) does, and
+  drops their refusal (a program that sets them runs as on a CPU without FEAT_AFP); qemu's max CPU, the `--record`'s second judge,
+  differs only for such a program; (b) as built: kept as qemu's max CPU keeps them, refused at the next FP instruction, the
+  lockstep failing at the `msr` should a program set them. *Recommended: (a)*: the CPU is the eval's reference judge, and on a CPU
+  without FEAT_AFP setting the bits is harmless, where a64i's refusal turns a valid program into SIGILL.
