@@ -5,22 +5,5 @@
    (:testcapi, narrowed per file). A part built leaves this list (bin/pyi-clib's build fails on a doubled
    definition). Arbace's own. */
 
-int _PyTestCapi_Init_Vectorcall(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_DateTime(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Docstring(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Mem(void *m) { (void)m; return 0; }
 int _PyTestCapi_Init_Watchers(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Exceptions(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Code(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Buffer(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Run(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_File(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Codec(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_GC(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Time(void *m) { (void)m; return 0; }
 int _PyTestCapi_Init_Monitoring(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Config(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Import(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Frame(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Type(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Function(void *m) { (void)m; return 0; }
