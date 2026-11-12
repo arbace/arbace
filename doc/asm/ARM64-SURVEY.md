@@ -1588,3 +1588,96 @@ Numbering from ARS66. Each with options, the recommended named; none taken.
 - **ARS67 synth-neon-sat in the essential subset.** (a) a quarter of it (273 cases) beside synth-neon-e and synth-neon-el-e; (b) the
   rotation alone. *Recommended: (b)* until ARS64's quiet numbers are in; then (a) if
   synth-neon-el-e's cost stays near the 1 s measured at load 15-19 (a quarter of synth-neon-sat is about as large).
+
+## As built: AR13 (2026-11-12; branch `asm-ar13`, from `mac/asm-ar12` `ac5722aec`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go; until night 12's gate ended (about 14:00 UTC) one run at a time, every
+process under 1.5 GiB, MemAvailable at 12 GiB or more checked before each run; arm64 programs run by a64i and, for the synthetic
+program's `--record`, by qemu-aarch64 11.1.2 user mode (the model's second judge); no LLVM or GNU tool. The user's answers
+(2026-11-12): ARS66 (c), ARS67 (b), and ARS64 (c) measured once night 12's gate ended. The semantics read again from the Arm ARM (DDI
+0487: SRSHL, URSHL, PMUL, PMULL, RADDHN, RSUBHN, SADDLP, UADDLP, SADALP, UADALP, SUQADD, USQADD, SQABS, SQNEG, SHLL, RSHRN, ADDP
+(scalar); the AdvSIMD three same, three different, two-register miscellaneous, shift by immediate and scalar pairwise classes' decode,
+scalar and vector; SatQ, PolynomialMult); no code copied.
+
+- **First: the package's `:init-order`** (`go/arbace/a64i.ae`). AR12 had noted that it omits simdfp.go's variables. goi's checker over
+  arbace/a64i, as review-fix-1 did for oi (a scratch wrapper over `test/python/table_check.ae` taking arbace/a64i, arbace/emu and
+  arbace/crt as program packages, the list `go/arbace/gotable.edn` with arbace/a64i added; under 0.6 GiB, about 40 s a configuration)
+  found one error, in linux/arm64, the package's own configuration (the std forms of an earlier `bin/goi table` run's linux-arm64
+  cache): the order lacked `vf3Names vf2Names velNames vfcvtNames vfixNames halfFmt` and simdfp.go's blank, and simd.go's blank had
+  moved from line 1415 to 1451. Set to the checker's order (the blanks with their column, as SPEC §6.3 writes them): 0 errors in
+  linux/arm64, again after AR13's files (simd.go's blank now at 1465, `vintNames` before `vsatNames`). In tamago/amd64 and
+  tamago/arm64 the checker's order differs only by `world`, a variable of `lockstep_linux_arm64.go`, which those configurations'
+  build constraints do not select: the annotation is the package's `:config`'s (linux/arm64), so that one difference is expected.
+- **ARS66 (c): NEON's remaining integer lanes in a64i** (`go/arbace/a64i/simdint.ae`, new; written as Go in a copy of the light
+  driver's printed module, built and run there first, then converted by repr/go's native reader, `REPR_GO_JOBS=1`, 100 s, peak 1.06
+  GiB under a watchdog that would have stopped it at 1.45 GiB; `simdint.ae` taken whole from the conversion, the hooks in `simd.ae`
+  edited by hand as forms so its comments stay: `OpVINT` before `opSIMDEnd`, its name, `simdName`'s case, `decodeVINT` first in
+  `decodeSIMD`, `lowerVINT` first in `lowerSIMD`, `execVINT` first in `execSIMD`, the header comment; the package header's `:files`,
+  `(load "a64i/simdint")` and `vintNames` in its `:init-order`):
+  - one operation, `OpVINT`, 17 instructions by `vintNames`' class: three same (srshl, urshl on every arrangement but 1d and the
+    scalar d; pmul on 8b and 16b), three different (raddhn, rsubhn from 8h, 4s, 2d and their 2 forms; pmull and pmull2 of bytes into
+    halfwords), two-register miscellaneous (saddlp, uaddlp, sadalp, uadalp from 8b to 4s; suqadd, usqadd, sqabs, sqneg on every
+    arrangement but 1d and every scalar size, FPSR.QC set when a lane saturates; shll and shll2, by the element's size), the shift by
+    immediate rshrn and rshrn2, and addp's scalar (d from 2d). Reserved sizes and a 64-bit vector's Q clear are undefined; pmull's
+    1q from 1d (FEAT_PMULL, the crypto extension's) is not claimed (a64i's AT_HWCAP is 0) and stays `:unimplemented simd`.
+  - The rounding shifts are computed on the exact integer (math/big, AR12's `qshift`), the saturating ones by AR12's `satQ`, the
+    polynomial products by their bits (`clmul`). The integer classes the user's list named that a64i already claimed (uaba, saba,
+    uabal, sabal, uabdl, sabdl, cls, clz, cnt, rbit, rev16, rev32, rev64, sshl, ushl, srshr, urshr, srsra, ursra, addhn, subhn) are
+    left as they were. A scan of LLVM's table (`asm/arm64/table.edn`: each AdvSIMD and FP instruction outside SVE and SME, its
+    encoding with twelve random fillings of its fields, decoded by the written Go's a64i; a scratch, `.tmp/tbl-*.txt`) finds no integer
+    instruction of ARMv8.0's Advanced SIMD refused but the estimates urecpe and ursqrte (ARS66 (a)'s); of the FP side, ARMv8.0's
+    still refused are the estimates (frecpe, frsqrte, frecps, frsqrts, frecpx), the across-lanes fmaxv, fminv, fmaxnmv, fminnmv,
+    fmov's vector immediate, fcvt to and from half precision (scalar) and fmov to and from a register's upper doubleword; the rest
+    the scan lists is a feature's (FP16, RDM, DotProd, the crypto extensions with pmull's 1q, ComplxNum, I8MM, BF16, FP8, LUT,
+    FJCVTZS's JSCVT), none claimed. (A naming quirk noted, not changed: two-register miscellaneous's rbit is named `v.rbit.4h` and
+    `v.rbit.8h` by its size field, its arrangement is 8b and 16b; its execution is the bytes'.)
+  - Coverage names `v.srshl.4s`, `v.srshl.d`, `v.pmul.16b`, `v.raddhn2.8b` (the narrow destination's, as `v.addhn2.8b`), `v.pmull2.8b`
+    (the sources'), `v.saddlp.16b`, `v.sqabs.b`, `v.shll2.4h`, `v.rshrn2.2s`, `v.addp.d` (113 new, all simd). The synthetic program
+    `synth-neon-int` (560 cases, gen.ae's `int-cases`, seed + 1100; neon's setup; lanes at the signed and unsigned limits, small and
+    any; the shift counts near the width and any byte): the model is the pseudocode on longs and BigIntegers (`sat-shift`, `sat-q`,
+    `clmul`). qemu-aarch64 and a64i (AOT, eval, the forms check: 1,233 of 1,233 words) agreed with the model on their first runs. The
+    light driver printed from the forms compiles to the written Go (gofmt'd, comments aside, no difference in simd.go and simdint.go)
+    and claims the same 2,507 names. Controls verdict-16, forms-10, inject-30.
+- **ARS67 (b)**: synth-neon-sat stays in `--full`'s rotation only (no change).
+- **ARS64 (c): the essential step's time after night 12's gate** (it ended about 14:00 UTC): measured alone, alternating the subset
+  without synth-neon-el-e (AR10's 76 programs) and with it (AR11's 77), by `bin/a64i check --only LIST`, at 14:10-14:25 UTC, load 6-14
+  on 64 CPUs (the other agents' work; the host never idle): without 55.4 s, 55.9 s, 54.7 s, 55.6 s; with 56.9 s, 57.3 s, 59.1 s,
+  55.3 s, 57.3 s (means 55.4 s and 57.2 s: +1.8 s, about 3%), under 0.4 GiB; `--essential` itself (77 programs) 52 s. The time is
+  the builds' (the AOT and eval builds side by side 35-38 s, the synthetic programs' generation about 7 s, the runs 3-4 s), so the
+  step's growth comes from what it assembles, not from a64i. These runs are slower than AR12's 45-46 s at load 15-19: the host's
+  load average does not capture what the builds compete for. synth-neon-el-e costs about 2 s: ARS64 (a), keep it; the subset may
+  grow by a program of that size (a quarter of a synthetic program, 140-280 cases, about 2 s each), within the step's budget.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval and AOT | 96 / 96 | **97 / 97** (24 synthetic programs, 25,363 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,394 of 2,394 (simd 1,725) | **2,507 of 2,507** (simd 1,838) |
+| controls (`test/asm/controls-a64i.txt`) | 64 | **67** |
+| `--essential` | 77 programs, 19 controls judged | 77, 19 (unchanged) |
+| goi's checker over arbace/a64i (linux/arm64) | 1 error (`:init-order`) | **0** |
+| the eval cell `[:asm-arm64 :eval]` | 312 / 0 / 0 | **313 / 0 / 0** |
+| the AOT cell `[:asm-arm64 :aot]` | 3,058 / 0 / 13 (99.6%) | **3,059 / 0 / 13 (99.6%)** |
+
+**crops-score** (arm64 assembly): completeness 99.8 (99.8 without by design), maturity 100.0, independence 100.0, unchanged; `--judge
+--strict` 0 problems. `bin/reap --record`: 49 of 52 cells checked, 0 problems. Proofs (each once, by hand, one at a time): `bin/a64i synth
+--record` (24 programs under qemu-aarch64, 1 min 19 s), `bin/a64i check --record` whole (97 of 97, 2 min 4 s, under 0.4 GiB, the 67
+controls failing as they must), `--essential` (77 of 77, 52 s), the table check (linux/arm64 before and after, tamago/arm64 before and after, tamago/amd64
+before: there only `world` differs). Not rerun: object-check, run-check, encode-check and the round trips (no shared code moved: only
+`go/arbace/a64i/`, its header and `test/asm/`). The keys do not move (`test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go
+--gate-key` `314c8e5b04ab...`, AR12's, in both worktrees).
+
+### Proposed (AR13)
+
+Numbering from ARS68. Each with options, the recommended named; none taken.
+
+- **ARS68 NEON's slice after.** (a) the rest of ARMv8.0 the scan lists: the estimates (ARS66 (a): frecpe, frsqrte, frecps, frsqrts,
+  frecpx, urecpe, ursqrte), fmaxv, fminv, fmaxnmv, fminnmv, fmov's vector immediate, the scalar fcvt to and from half, fmov of the upper
+  doubleword; (b) FP16's arithmetic (FEAT_FP16, ARS63 (c)), claimed in AT_HWCAP with it; (c) the crypto
+  extension (FEAT_AES, FEAT_SHA1/SHA256, FEAT_PMULL: aese, aesd, aesmc, aesimc, sha1*, sha256*, pmull's 1q), claimed in AT_HWCAP with
+  them. *Recommended: (a)*: it completes ARMv8.0's Advanced SIMD and FP; the estimates' tables are the Arm ARM's, a page each.
+- **ARS69 synth-neon-int in the essential subset.** (a) a quarter of it (140 cases) beside synth-neon-e and synth-neon-el-e, about 2 s
+  by ARS64's numbers; (b) the rotation alone. *Recommended: (a)*: the new decoder sits first in `decodeSIMD`, so every SIMD word of the
+  essential programs passes through it; a quarter of its cases holds it there.
+- **ARS70 the `:init-order` held by a step.** The table check found an annotation two branches stale. (a) `bin/a64i table-check` (the
+  scratch wrapper made a verb, linux/arm64 only, under 0.6 GiB, about 40 s) in `a64i-essential`'s chain; (b) by hand at each AR branch.
+  *Recommended: (a)*: the gate then catches it as oi's and pyi's table checks do.

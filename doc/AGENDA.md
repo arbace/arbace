@@ -319,6 +319,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   and narrows (sqshl, uqshl, sqrshl, uqrshl, sqshlu, sqshrn, sqrshrn, uqshrn, uqrshrn, sqshrun, sqrshrun, sqxtn, uqxtn, sqxtun),
   FPSR.QC exact (`simdsat.ae`, `synth-neon-sat` 1,092 cases): a64i 96 of 96, coverage 2,394 of 2,394, eval 312, AOT 3,058 / 0 / 13;
   the essential step +0.7 to +1.0 s with synth-neon-el-e at load 15-19 (ARS64; the quiet run still to do, night 12's gate ran past 12:30). Proposed ARS66, ARS67. Next: ARS66, ARS67, the VM's rows (ARS55, ARS58).
+  Then `asm-ar13` (from `mac/asm-ar12` `ac5722aec`; "As built: AR13"; ARS66 (c), ARS67 (b), ARS64 (c), the user's): a64i's package
+  `:init-order` set to goi's checker's (simdfp.go's variables, missing since AR9; 0 errors in linux/arm64); in a64i NEON's remaining
+  integer lanes (srshl, urshl, pmul, raddhn, rsubhn, pmull, saddlp, uaddlp, sadalp, uadalp, suqadd, usqadd, sqabs, sqneg, shll, rshrn,
+  addp's scalar: `simdint.ae`, `synth-neon-int` 560 cases): a64i 97 of 97, coverage 2,507 of 2,507, eval 313, AOT 3,059 / 0 / 13; of
+  ARMv8.0's integer SIMD only urecpe and ursqrte left; the essential step +1.8 s with synth-neon-el-e after night 12 (load 6-14).
+  Proposed ARS68-ARS70. Next: ARS68 (the estimates and ARMv8.0's FP rest), ARS69, ARS70, the VM's rows (ARS55, ARS58).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,

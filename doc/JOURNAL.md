@@ -5226,3 +5226,51 @@ miscellaneous classes, SignedSatQ, UnsignedSatQ, SatQ; no code copied. doc/asm/A
   --gate-key` `314c8e5b04ab...` (AR11's); `test/gate/gate-key-crops-test.bash` passes. Proposed ARS66, ARS67.
 - Rule slips: `df /` stood at 86-87% throughout, over the general rules' 85% but under the brief's 88% for night 12 (the runs
   gated at 88%); the timing pair ran under load 15-19, not on a quiet host (the gate did not end in the window).
+
+## 2026-11-12: AR13, the package's :init-order held by goi's checker, NEON's remaining integer lanes in a64i, the essential step timed after night 12 (branch `asm-ar13`, from `mac/asm-ar12` `ac5722aec`)
+
+The user's decisions of 2026-11-12: ARS66 (c), ARS67 (b), ARS64 (c) once night 12's gate ended, and first a check of a64i's package
+`:init-order`. On the main host; until night 12's gate ended (about 14:00 UTC) one run at a time, each process under 1.5 GiB,
+MemAvailable at 12 GiB or more checked before each run; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources
+read again: the Arm ARM (DDI 0487), SRSHL, URSHL, PMUL, PMULL, RADDHN, RSUBHN, SADDLP, UADDLP, SADALP, UADALP, SUQADD, USQADD, SQABS,
+SQNEG, SHLL, RSHRN, ADDP (scalar), the AdvSIMD three same, three different, two-register miscellaneous, shift by immediate and scalar
+pairwise classes, SatQ, PolynomialMult; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR13".
+
+- `:init-order`: goi's checker over arbace/a64i (`.tmp/tc-a64i.ae`, review-fix-1's wrapper over `test/python/table_check.ae` with
+  arbace/a64i, arbace/emu and arbace/crt as program packages; `.tmp/gotable-a64i.edn`, the list with arbace/a64i; linux/arm64 from the
+  main checkout's `.tmp/goi-table/82d03d864128d2a9/linux-arm64`, read only; about 40 s, under 0.6 GiB) gave 1 error in linux/arm64: the
+  annotation lacked simdfp.go's six variables and blank (since AR9) and named simd.go's blank at its old line. Set to the checker's
+  order (commit `ef9296e53`), 0 errors; again 0 after AR13's files. tamago/amd64 and tamago/arm64 differ by `world` alone
+  (lockstep_linux_arm64.go, not selected there; the annotation is the package's linux/arm64 `:config`'s). Alternative considered:
+  widening the check to every configuration (rejected: one annotation cannot hold two configurations' orders).
+- ARS66 (c): a new file `go/arbace/a64i/simdint.ae` (one operation `OpVINT`, 17 instructions in five classes by `vintNames`' index:
+  srshl, urshl, pmul; raddhn, rsubhn, pmull; saddlp, uaddlp, sadalp, uadalp, suqadd, usqadd, sqabs, sqneg, shll; rshrn; addp's
+  scalar, with the 2 forms and the scalars), written as Go in a copy of the light driver's printed module (`.tmp/gomod`), built and run
+  there (the claimed list 2,394 -> 2,507; the synthetic program equal to the model under qemu-aarch64 and a64i, eval and AOT, and the
+  forms check 1,233 of 1,233, all on the first run), then converted by repr/go's native reader (`bin/repr-go read --goos linux --goarch
+  arm64 --out DIR arbace/a64i` in that module, `REPR_GO_JOBS=1`, 100 s, peak 1.06 GiB under a 1.45 GiB watchdog). `simdint.ae` taken
+  whole; `simd.ae`'s hooks (`OpVINT`, `simdOpNames`, `simdName`'s case, `decodeVINT`, `lowerVINT`, `execVINT` first in their
+  dispatchers) and its header comment by hand as forms; the package header gained the file, its load and `vintNames`. pmull's 1q
+  (FEAT_PMULL) not claimed. The light driver printed from the forms compiles to the written Go (comments aside, no difference) and
+  claims the same 2,507 names. The integer classes the brief listed "if missing" were all claimed already (uaba, saba, uabal, sabal,
+  sabdl, uabdl, cls, clz, cnt, rbit, rev16/32/64, sshl, ushl, srshr, urshr, srsra, ursra, addhn, subhn); a scan of LLVM's table through
+  the written a64i (each AdvSIMD and FP instruction outside SVE/SME, twelve random fillings of its fields) leaves of ARMv8.0's integer
+  side only urecpe and ursqrte (the estimates, ARS66 (a)). Alternatives considered: extending v3Names, v2Names, v3dNames and vshiNames
+  in place (rejected: five commented functions edited by hand, as AR12 decided); pmull's 1q with AT_HWCAP's PMULL bit (left: a64i
+  claims no feature).
+- `synth-neon-int` (560 cases, gen.ae's `int-cases`, seed + 1100; the model on longs and BigIntegers, `clmul` for the polynomial
+  products), in `--full`'s rotation only. Controls verdict-16, forms-10, inject-30. ARS67 (b): synth-neon-sat stays in the rotation.
+- ARS64 (c): night 12's gate ended about 14:00 UTC; the host was not idle (other agents, load 6-14 on 64 CPUs). Measured alone,
+  alternating, by `bin/a64i check --only LIST`: without synth-neon-el-e 55.4, 55.9, 54.7, 55.6 s; with it 56.9, 57.3, 59.1, 55.3, 57.3 s
+  (means 55.4 and 57.2 s: +1.8 s, about 3%); `--essential` 52 s; the builds take 35-38 s of it, the generation of every synthetic
+  program about 7 s, the runs 3-4 s. The survey recommends keeping it (ARS64 (a)); the subset may grow by programs of that
+  size.
+- Results: a64i 96 -> 97 programs eval and AOT (24,803 -> 25,363 synthetic cases), coverage 2,394 -> 2,507 of 2,507 (simd 1,725 ->
+  1,838), controls 64 -> 67; `--essential` 77 of 77 unchanged; `bin/reap --record` (arm64 eval 312 -> 313, AOT 3,058 -> 3,059 / 0 / 13),
+  `bin/reap` 0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0), `--judge --strict` 0. No key moves:
+  `bin/arbace-go --gate-key` `314c8e5b04ab...` (AR12's, in its worktree and in this one); `test/gate/gate-key-crops-test.bash` passes.
+  Proposed ARS68-ARS70.
+- Rule slips: `df /` stood at 86-87% throughout, over the general rules' 85%, under the brief's 88% (the runs gated at 88%); the first
+  timing set wrote two runs into one log each (`.tmp/essQ-*.log` overwritten), so its first run's minutes are lost (its seconds read
+  3.82, about 1 min 4 s) and the second set (`.tmp/essR*.log`) was run; the table check's linux/arm64 std forms came from an older
+  `bin/goi table` cache key than the checkout's (read only, std unchanged since).
