@@ -5081,3 +5081,12 @@ each process under 2.5 GiB, the gate's executable `9accb085d767…` or stage 0),
   arbace/scheme; SMR7's self-booted psyntax and SCS's Unicode tables among them) is the next step; the record stays pass.
 - Keys: `arbace/go` and `go/arbace/ci` are embedded, so gate_key moves (and the runtime key with go/); the OCaml, C-record and
   test/ changes move none. Not mergeable before W2's end (rules of window W).
+- Proofs beside each item's own: `bin/reap --record`, then `bin/reap` 49 of 52 checked, 0 problems (Go eval pass 1,754 -> 1,755;
+  C's annotations item-placement 3 -> 6; OCaml eval speed 4 -> 6, pass 378 -> 377); `bin/crops-score --record`, `--judge --strict` 0
+  problems (Go 97.03 -> 97.05%, OCaml 85.33 -> 85.29%); `bin/ci check --aot --only test/c/essential-aot.txt` 0 failing (CI_JOBS=2,
+  8 min); `bin/oi check --only-list test/ocaml/essential-check.txt` 59 of 59 with its controls and `own-verdicts --check` 0 differ;
+  the four `oi divergences` commands 0 failing; `test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go --gate-key`
+  `9accb085d767…` -> `a6e116c26b54…`. Not run here: goi's essential check and the gate (the gate's build at the new key is the
+  night's).
+- Rule slips: three commands wrote to /dev/null (`2>/dev/null` on two find/grep lines and `>/dev/null` on a `type` test); nothing they
+  produced was kept.
