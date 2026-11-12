@@ -5037,3 +5037,30 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
   `bin/crops-score --record`, `--judge --strict` 0. No key moves (`arbace/asm/` and `bin/repr-asm` are crop paths or no key's:
   `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
 - Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
+
+## 2026-11-12: CS299, the Python line's three requests of ci (branch `c-py1`, from `mac/next` `bd6ab3ddd`)
+
+The Mac VM's queue reports 261 (finding 5) and 269 (finding 2) asked the C crop for `#pragma pack` in a function body of an included
+file, gcc's `__atomic_*` builtins (and the generic `__atomic_load`/`__atomic_store`), and `#include` inside a function body, each as
+gcc behaves. Report 269 was made on the 201 branch at a53fe65a9, whose repr/c and ci date from 2026-11-03, before CS275 (b) and LLS21 (a):
+on next the include and most of the atomics were already there. What was built (doc/C23-SURVEY.md, "As built: CS299"):
+- CS299 (a): `arbace.repr.c.pp` queues every non-main file's pragma under ci's read (`*reentry*`), with its entry; `arbace.repr.c.convert`
+  takes the queue by seq range: a block's pragmas after its brace before each item and before its closing brace after the last, and the
+  file-scope ones as `c/pragma` forms of their own entry's unit. Found on the way: a header's file-scope `#pragma pack` was lost too (5 bytes
+  gave 8), and the old queue let a re-entered copy's file-scope pragma run in the next body. Alternative considered: placing the headers'
+  pragmas by offset as the main file's are (CS290 (a)); rejected, the header units' forms carry no offsets of their own file to place by.
+- CS299 (b): `arbace.c.build`'s `atomic-call` moves the generic forms' objects of a non-integer type of 1, 2, 4 or 8 bytes as the unsigned
+  integer of that size (extend.texi, gcc 15.2's tarball `gcc/doc/extend.texi`, "__atomic Builtins": the generic forms work on any type); other
+  sizes stay refused (libatomic's calls). Alternative: a byte copy of any size (memcpy); not needed by any program, and gcc's own call for those
+  sizes is a library's.
+- CS299 (c): `test/c/selfref.ae`: a ci-run program whose first line says `ci-run verdict: exit 0` is judged by its own verdict (exit 0),
+  needing no gcc run (no host toolchain may run here); the reference gains its entry. Alternative: recording gcc's runs by hand at the
+  oracle tier (`bin/ci record-ref --corpus ci-run --only`), left to the user; the three programs check themselves against gcc's documented
+  rules and report 261's gcc measurements. A negative control crosses ptr-sub-unsigned's status 3 with atomic-gcc's own verdict.
+- Programs: `test/c/run/{pack-in-include,include-in-body,atomic-gcc}.c` with their headers and `.inc` files; the three and
+  ptr-sub-unsigned.c in `test/c/essential-check.txt`; rows in `test/c/check-linux-amd64.edn` (`--corpus ci-run --record`, 22 of 22) and
+  `check-aot-linux-amd64.edn` (by hand after `--aot --only`, 3 of 3).
+- Keys: `arbace/c/build.ae`, `arbace/repr/c/pp.ae` and `convert.ae` are embedded, so gate_key moves (the whole `--full`), and the seed's
+  embedded sources; the runtime key does not (arbace/c is not in it). The musl forms' key moves (repr/c): the forms are the same bytes (musl's
+  read binds no `*reentry*`, so nothing is queued); for the runs here a complete cache of the same pre-change key was copied from another
+  worktree and its key file rewritten to the branch's (a shortcut, not a read): the night's `bin/ci musl read` makes it for real.
