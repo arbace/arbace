@@ -36,8 +36,8 @@
 (defn arr? [t] (= :arr (:k t)))
 (defn fn? [t] (= :fn (:k t)))
 (def int-ranks {:bool 0 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 3 :uint 3 :char32 3 :wchar 3
-                :long 4 :ulong 4 :llong 5 :ullong 5})
-(def unsigned-ns #{:bool :uchar :ushort :uint :ulong :ullong :char8 :char16 :char32})
+                :long 4 :ulong 4 :llong 5 :ullong 5 :i128 6 :u128 6})
+(def unsigned-ns #{:bool :uchar :ushort :uint :ulong :ullong :u128 :char8 :char16 :char32})
 (defn integral? [t] (or (contains? int-ranks (bn t)) (enum? t)))
 (defn floating? [t] (#{:float :double :ldouble} (bn t)))
 (defn arith? [t] (or (contains? int-ranks (bn t)) (floating? t)))
@@ -63,7 +63,7 @@
 ;; Sizes and alignments (x86-64 SysV, LP64)
 
 (def ^:private scalar-size {:bool 1 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 4 :uint 4 :char32 4
-                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :float 4 :double 8 :ldouble 16 :nullptr 8})
+                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :i128 16 :u128 16 :float 4 :double 8 :ldouble 16 :nullptr 8})
 
 (declare layout)
 
@@ -144,8 +144,19 @@
                        id)]
             (when-let [b (or found @first-ne)] {:cls (:cls b) :virtual true}))))))
 
-(defn empty-class? [id]
-  (let [c (cls id)] (and (empty? (:fields c)) (not (dynamic? id)) (every? #(empty-class? (:cls %)) (:bases c)))))
+(declare empty-class?)
+
+(defn empty-member?
+  "Whether field `f` is an empty data member (Itanium §1.1: a potentially-overlapping member, [[no_unique_address]], of an
+  empty class type; cpp-gatefix)."
+  [f]
+  (boolean (and (:nua f) (class? (unq (:ty f))) (empty-class? (:id (unq (:ty f)))))))
+
+(defn empty-class?
+  "Itanium's empty class (§1.1): no non-static data members other than empty data members, no virtual functions or bases,
+  no non-empty bases (clang's CXXRecordDecl::isEmpty)."
+  [id]
+  (let [c (cls id)] (and (every? empty-member? (:fields c)) (not (dynamic? id)) (every? #(empty-class? (:cls %)) (:bases c)))))
 
 (defn pod-for-layout?
   "POD as C++03 defined it, which Itanium's layout uses to decide whether a base's tail padding is reused."
@@ -200,6 +211,8 @@
 (defn- can-place? [em lst] (not-any? (fn [[c o]] (contains? (get @em o #{}) c)) lst))
 (defn- place! [em lst] (doseq [[c o] lst] (swap! em update o (fnil conj #{}) c)))
 
+(declare layout*)
+
 (defn layout
   "The class's layout (Itanium §2.4), cached: {:size :align (the complete object's) :nvsize :nvalign :dsize (the
   non-virtual part's, what a derived class lays out) :fields [offsets] :bitoffs [bit offsets of bit-fields] :bases
@@ -207,6 +220,14 @@
   :primary {:cls :virtual}}."
   [id]
   (or (:layout (cls id))
+      ;; (cpp-s6: a class whose size in bits passes a long, template/array32.C's char a[SIZE_MAX / 2]: a refusal, not the
+      ;; arithmetic's crash; GCC's limit is PTRDIFF_MAX bytes, the layout's 2^63 bits)
+      (try (layout* id)
+           (catch ArithmeticException _ (fail :type "the class " (:name (cls id)) " is too large for its layout")))))
+
+(defn- layout*
+  [id]
+  (do
       (let [c (cls id)
             dyn (dynamic? id)
             ;; a placeholder while the primary base is chosen (nearly-empty? asks a base's layout, never this one's)
@@ -218,6 +239,10 @@
             bases (vec (:bases c))
             pbi (when (and pb (not pbv)) (first (keep-indexed (fn [i b] (when (and (= (:cls b) (:cls pb)) (not (:virtual b))) i)) bases)))
             em (atom {}) ; the empty subobjects placed so far: {offset #{class-id}} (clang's EmptySubobjectMap)
+            ;; (CP376 (a): the size an empty subobject placed past the data size reaches, offset + its sizeof, which takes no
+            ;; data size: clang's LayoutBase and LayoutField `setSize(max(getSize(), Offset + Size))`, so the class's
+            ;; non-virtual size, and its size, include it while the next member and the virtual bases start at the data size)
+            floor (atom 0)
             order (if pbi (cons pbi (remove #(= % pbi) (range (count bases)))) (range (count bases)))
             [off align boffm]
             (reduce (fn [[off align m] i]
@@ -230,10 +255,11 @@
                           (:virtual b) [off align m]
                           (= i pbi) (do (place! em (class-empties bid 0 false)) [(max (long off) bsz) (max (long align) ba) (assoc m i 0)])
                           (and (empty-class? bid) (can-place? em (class-empties bid 0 false)))
-                          (do (place! em (class-empties bid 0 false)) [off (max (long align) ba) (assoc m i 0)])
+                          (do (place! em (class-empties bid 0 false)) (swap! floor max (long (:size bl))) [off (max (long align) ba) (assoc m i 0)])
                           :else (let [o (loop [o (align-up off ba)]
                                           (if (can-place? em (class-empties bid o false)) o (recur (+ o ba))))]
                                   (place! em (class-empties bid o false))
+                                  (when (empty-class? bid) (swap! floor max (+ o (long (:size bl)))))
                                   [(if (empty-class? bid) off (+ o bsz)) (max (long align) ba) (assoc m i o)]))))
                     [(long start) (long init-align) {}]
                     order)
@@ -253,7 +279,13 @@
                                         (not= (quot start ua) (quot (+ start w -1) ua)) (align-up start ua)
                                         :else start)]
                             [(if uni (max offb (+ b w)) (+ b w)) (if (:name f) (max (long align) a) align) (conj foffs (* a (quot b ua))) (conj bitoffs b)])
-                          (let [o (align-up (quot (+ start 7) 8) a)
+                          (let [;; a potentially-overlapping member ([[no_unique_address]], cpp-gatefix) as clang's
+                                ;; RecordLayoutBuilder::LayoutField lays it out: an empty one tried at 0 first, and it takes no
+                                ;; data size; a non-empty one takes its class's data size (dsize: nvsize, or sizeof for a POD),
+                                ;; so the next member may reuse its tail padding
+                                ovl (:nua f)
+                                emp (and ovl (empty-member? f))
+                                o (if emp 0 (align-up (quot (+ start 7) 8) a))
                                 dsz (quot (+ offb 7) 8)
                                 o (if (or uni (empty? (field-empties (:ty f) 0)))
                                     o
@@ -261,14 +293,20 @@
                                       (if (can-place? em (field-empties (:ty f) o))
                                         o
                                         (recur (if (and (zero? o) (not (zero? dsz))) (align-up dsz a) (+ o a))))))
-                                _ (when-not uni (place! em (field-empties (:ty f) o)))]
-                            [(if uni (max offb (* 8 (+ o s))) (* 8 (+ o s))) (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
+                                _ (when-not uni (place! em (field-empties (:ty f) o)))
+                                _ (when emp (swap! floor max (+ o s)))
+                                es (cond emp nil
+                                         ovl (let [fl (layout (:id (unq (:ty f))))] (long (if (:pod fl) (:size fl) (:nvsize fl))))
+                                         :else s)]
+                            [(cond (nil? es) offb uni (max offb (* 8 (+ o (long es)))) :else (* 8 (+ o (long es))))
+                             (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
                     [(* 8 (long off)) align [] []]
                     (:fields c))
-            nvsize (quot (+ (long offb) 7) 8)
+            dsize0 (quot (+ (long offb) 7) 8)
+            nvsize (max dsize0 (long @floor))
             ;; alignas on the class (:align-attr, [dcl.align])
             nvalign (max (long align) (long (or (:align-attr c) 1)))
-            pre {:nvsize nvsize :nvalign nvalign :dsize nvsize :fields foffs :bitoffs bitoffs :bases boffs :vptr dyn
+            pre {:nvsize nvsize :nvalign nvalign :dsize dsize0 :fields foffs :bitoffs bitoffs :bases boffs :vptr dyn
                  :pod (pod-for-layout? id) :primary pb}
             _ (update-cls! id assoc :layout (assoc pre :size (max 1 (align-up nvsize nvalign)) :align nvalign :vbases {} :partial true))
             ;; the virtual bases of the complete object: each indirect primary base where its class's subobject is,
@@ -290,13 +328,15 @@
                               o (if (and (empty-class? v) (can-place? em (class-empties v 0 false)))
                                   0
                                   (loop [o (align-up ds va)] (if (can-place? em (class-empties v o false)) o (recur (+ o va)))))
-                              _ (place! em (class-empties v o false))]
+                              _ (place! em (class-empties v o false))
+                              ;; (CP376 (a): an empty virtual base past the data size raises the size too, LayoutBase's setSize)
+                              _ (when (empty-class? v) (swap! floor max (+ (long o) (long (:size vl)))))]
                           (.put vbo v o)
                           (mark! v o)
                           [(if (empty-class? v) ds (+ o (long (:nvsize vl)))) (max (long al) (long (:nvalign vl)))])))
-                    [nvsize nvalign]
+                    [dsize0 nvalign]
                     (vbases id))
-            size (max 1 (align-up dsize align))
+            size (max 1 (align-up (max (long dsize) nvsize (long @floor)) align))
             l (assoc pre :size size :align align :vbases (into {} vbo))]
         ;; (an incomplete class's layout is not kept: its definition may come, G5: basic_ios<char> named before it)
         ;; (kept when the class and every class it holds are finished: a layout computed while a member's class was
@@ -344,6 +384,7 @@
             (:short :ushort :char16) 'i16
             (:int :uint :char32 :wchar) 'i32
             (:long :ulong :llong :ullong) 'i64
+            (:i128 :u128) 'i128
             :float 'float :double 'double :ldouble 'x86_fp80
             :nullptr 'ptr)
        (:ptr :ref :rref) 'ptr
@@ -376,7 +417,7 @@
 
 (def ^:private builtin-codes
   {:void "v" :bool "b" :char "c" :schar "a" :uchar "h" :short "s" :ushort "t" :int "i" :uint "j" :long "l" :ulong "m"
-   :llong "x" :ullong "y" :float "f" :double "d" :ldouble "e" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
+   :llong "x" :ullong "y" :i128 "n" :u128 "o" :float "f" :double "d" :ldouble "e" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
 
 (defn- seq-id ^String [^long n]
   (if (zero? n) "S_"
@@ -560,6 +601,9 @@
       ;; (cpp-s4: a variable template's specialization with dependent arguments, an unresolved name as written:
       ;; <source-name> <template-args>, clang's 23is_copy_constructible_vIT0_E in any's converting constructor)
       :vt (str (source-name (:name x)) (template-args (:args x)))
+      ;; (cpp-s8: a concept-id with dependent arguments, likewise an unresolved name, clang's mangleExpression of a
+      ;; ConceptSpecializationExpr as its written name and arguments)
+      :concept (str (source-name (:name x)) (template-args (:args x)))
       "sizeof" (str "st" (mangle-type* (:type x)))
       (str (or (expr-op-codes (:o x)) (fail :mangle "operator " (:o x))) (apply str (map mangle-expr (:args x)))))
     :else (fail :mangle "expression " (pr-str x))))

@@ -96,6 +96,11 @@
   e)
 
 (def ^:dynamic *cutoff* Long/MAX_VALUE)
+(def drop-count
+  "cpp-s8: the header declarations dropped so far (each drop counted, a later round's success not subtracted): a
+  provisional instance's test of whether a member of its definition was dropped (template.ae's declare-instance!)."
+  (java.util.concurrent.atomic.AtomicLong.))
+
 (def ^:dynamic *last-anon* nil) ; atom: the type of the last unnamed class declared (its member's or variable's type) ; a namespace-scope name declared at or after this token is not visible yet
 
 (declare class-lookup)
@@ -283,6 +288,15 @@
    "__builtin_snprintf" ["snprintf" "int (char *, unsigned long, const char *, ...)"]
    "__builtin_sprintf" ["sprintf" "int (char *, const char *, ...)"]
    "__builtin_abort" ["abort" "void ()"]
+   ;; (cpp-s8: <format>'s floating-point formatter, __formatter_fp::format's frexp of the value; clang calls libm's frexp,
+   ;; frexpf, frexpl for a value not constant; <format>'s _M_format_str's toupper)
+   "__builtin_frexp" ["frexp" "double (double, int *)"]
+   "__builtin_frexpf" ["frexpf" "float (float, int *)"]
+   "__builtin_frexpl" ["frexpl" "long double (long double, int *)"]
+   "__builtin_toupper" ["toupper" "int (int)"]
+   "__builtin_copysign" ["copysign" "double (double, double)"]
+   "__builtin_copysignf" ["copysignf" "float (float, float)"]
+   "__builtin_copysignl" ["copysignl" "long double (long double, long double)"]
    ;; never reached (clang writes LLVM's unreachable): abort stands for it (G4: the headers' __builtin_unreachable)
    "__builtin_unreachable" ["abort" "void ()"]})
 
@@ -300,6 +314,9 @@
 (def ^:private builtin-syms
   {'void :void 'bool :bool 'char :char 'signed-char :schar 'unsigned-char :uchar 'short :short 'unsigned-short :ushort
    'int :int 'unsigned :uint 'long :long 'unsigned-long :ulong 'long-long :llong 'unsigned-long-long :ullong
+   ;; (cpp-s5: GNU's __int128, [basic.fundamental]/1's extended integer types as clang has them on x86-64: <format>'s
+   ;; _Arg_value union and _S_to_arg_type, under __SIZEOF_INT128__)
+   '__int128 :i128 'unsigned-__int128 :u128 '__int128_t :i128 '__uint128_t :u128
    'float :float 'double :double 'long-double :ldouble 'wchar_t :wchar 'char8_t :char8 'char16_t :char16 'char32_t :char32
    'std/nullptr_t :nullptr 'nullptr_t :nullptr 'decltype/nullptr :nullptr})
 
@@ -574,6 +591,22 @@
             :else (recur (inc i))))))
     (.toString sb)))
 
+(defn- located-file
+  "The file a location's relative name `file` is: as named, else under the main file's directory, else (CP368 (a)) under
+  the root the main file's own name is relative to (the dg read names the main file `coroutines/x.C` and its quoted header
+  `coroutines/coro.h`, both relative to g++.dg, while *main-dir* is the main file's directory)."
+  ^java.io.File [^String file]
+  (let [f (java.io.File. file)]
+    (if (or (.isFile f) (.isAbsolute f) (nil? *main-dir*))
+      f
+      (let [g (java.io.File. ^String *main-dir* file)
+            p (when *main-name* (.getParent (java.io.File. ^String *main-name*)))
+            ^String md *main-dir*]
+        (if (or (.isFile g) (nil? p) (not (str/ends-with? md (str "/" p))))
+          g
+          (let [h (java.io.File. (subs md 0 (- (count md) (count p) 1)) file)]
+            (if (.isFile h) h g)))))))
+
 (defn text-of
   "The text of the file `file` names in the tree's locations: the main file's *src*, a header's read once (G4: header
   bodies are parsed, so their nodes' text is their own file's)."
@@ -582,8 +615,7 @@
     *src*
     ;; (CP322 (a): read once a process, so the text is keyed by the file's resolved path: a header named relative to
     ;; the main file's directory is another file for another main file, and the dg read's threads read many)
-    (let [f (java.io.File. ^String file)
-          f (if (or (.isFile f) (.isAbsolute f) (nil? *main-dir*)) f (java.io.File. ^String *main-dir* ^String file))
+    (let [f (located-file file)
           k (.getAbsolutePath f)]
       (or (get @file-texts k)
           (if (.isFile f)
@@ -596,7 +628,7 @@
   "Whether a node is a header's (G4: its location's file a header's path, not the main file's)."
   [n]
   (let [f (:file (loc-of (get-in n [:range :begin])))]
-    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (java.io.File. ^String *main-dir* ^String f))))))))
+    (boolean (and (string? f) (not= f *main-name*) (or (str/starts-with? f "/") (and *main-dir* (.isFile (located-file f))))))))
 
 (defn- node-text ^String [n]
   (let [bl (loc-of (get-in n [:range :begin])) el (loc-of (get-in n [:range :end]))
@@ -614,13 +646,23 @@
       (let [src (text-of (:file el)) a (min (count src) (+ (long e) (long (or l 0))))]
         (subs src a (min (count src) (+ a (long k))))))))
 
+(defn- strip-directives
+  "The text with its preprocessing directives' lines left out (a `#` first on a line, with its continuations): a
+  declaration's text before its name is the source's, and a conditional may stand between the qualifier and the name
+  (CP377 (a): libstdc++ 15's basic_string.tcc writes `basic_string<_CharT, _Traits, _Alloc>::` then `#ifdef
+  __glibcxx_string_resize_and_overwrite` before `resize_and_overwrite(`, so the definition had been taken for a namespace's
+  function template and the member template had no body)."
+  ^String [^String t]
+  (if (str/includes? t "#") (str/replace t #"(?m)^[ \t]*#(?:[^\n]*\\\n)*[^\n]*(?:\n|$)" "") t))
+
 (defn text-before-name
-  "The text a declaration's node has before its name (its location), in its own file, or nil."
+  "The text a declaration's node has before its name (its location), in its own file, or nil (its preprocessing
+  directives' lines left out)."
   ^String [n]
   (let [bl (loc-of (get-in n [:range :begin])) ll (loc-of (:loc n))
         b (:offset bl) l (:offset ll)]
     (when (and b l (< (long b) (long l)) (= (:file bl) (:file ll)))
-      (let [src (text-of (:file bl))] (subs src b (min (count src) (long l)))))))
+      (let [src (text-of (:file bl))] (strip-directives (subs src b (min (count src) (long l))))))))
 
 (defn- qualifier-before
   "The parts of the nested-name-specifier written before a declaration's name (`int ns::P::get()`: [\"ns\" \"P\"])."
@@ -629,7 +671,7 @@
         b (:offset bl) l (:offset ll)]
     (when (and b l (< (long b) (long l)) (= (:file bl) (:file ll)))
       (let [src (text-of (:file bl))
-            t (subs src b (min (count src) (long l)))
+            t (strip-directives (subs src b (min (count src) (long l))))
             m (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)(~\s*)?$" t)]
         (when m (vec (map str/trim (remove str/blank? (str/split (second m) #"::")))))))))
 
@@ -730,7 +772,8 @@
       (when-not (and (abi/integral? u) (not= :enum (:k u))) (fail :type "the mode " m " of " (pr-str t)))
       (let [signed (abi/signed? u)
             n (case (long w) 8 (if signed :schar :uchar) 16 (if signed :short :ushort) 32 (if signed :int :uint) 64 (if signed :long :ulong)
-                    (fail :type "the mode " m " (no 128-bit integer type modelled)"))]
+                    128 (if signed :i128 :u128)
+                    (fail :type "the mode " m))]
         (merge (abi/b n) (select-keys t [:c :v]))))
     t))
 
@@ -799,9 +842,10 @@
                     (boolean (and v (= :int (:op v)) (not (zero? (long (:v v)))))))
                   :else (let [v (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope e)))
                                      (catch arbace.lang.ExceptionInfo _ nil))]
-                          (and (number? v) (not= 0 (long v)))))))))))
+                          (and (number? v) (not (zero? (double v))))))))))))
 
 (def ^:dynamic *constraint-depth* 0)
+(def ^:dynamic *constraint-stack* nil)
 ;; CX12, CP281 (a) (the checker): an atom set when a satisfaction's evaluation met an expression the slice could not analyze
 ;; or evaluate (a refusal read as not satisfied): its false then not sure. A false with the atom unset is the program's own
 ;; (an atomic constraint that evaluated to false, [temp.constr.atomic]/3), a sure deduction failure.
@@ -814,14 +858,17 @@
   [scope rc]
   ;; (a satisfaction that needs itself, through the constraints of the templates it instantiates, is not satisfied:
   ;; clang's "satisfaction of constraint depends on itself", [temp.constr.atomic]/3; the depth bounds it, G5)
-  (try (when (> (long *constraint-depth*) 24) (fail :template "a constraint's satisfaction depends on itself"))
-       (binding [*constraint-depth* (inc (long *constraint-depth*))]
+  (try (when (> (long *constraint-depth*) 24)
+         (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "constraint depth" (pr-str *constraint-stack*))))
+         (fail :template "a constraint's satisfaction depends on itself"))
+       (binding [*constraint-depth* (inc (long *constraint-depth*))
+                 *constraint-stack* (when (System/getenv "CPP_CONCEPT_TRACE") (conj (or *constraint-stack* []) (let [t (str (node-text rc))] (subs t 0 (min 60 (count t))))))]
          ;; (the checker's position stays the call's: the constraint's nodes are the template's)
          (let [a *at* saved (some-> a deref)]
            (try (not= 0 (long (const-int scope rc)))
                 (finally (when a (reset! a saved))))))
        (catch arbace.lang.ExceptionInfo e
-         (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "constraint not satisfied:" (.getMessage e))))
+         (when (or (System/getenv "CPP_TMPL_TRACE") (System/getenv "CPP_CONCEPT_TRACE")) (binding [*out* *err*] (println "constraint not satisfied:" (.getMessage e))))
          (doubt!))))
 
 (defn- always-inline-node?
@@ -880,19 +927,25 @@
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
                scope)
         cid (:cls home)
+        ;; (cpp-s9: a qualified declaration declared in a scope within the qualifier's, a member template's specialization
+        ;; made from its out-of-line definition `template<class T> int S::h(T)` in a scope binding T over S's: its types
+        ;; resolved there, where the template's parameters are, S's names through it)
+        rs (if (and (seq q) (not (identical? scope home))
+                    (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s)))))
+             scope home)
         k (case (:kind n) "CXXConstructorDecl" :ctor "CXXDestructorDecl" :dtor "CXXConversionDecl" :conv (if cid :method :fn))
         qt (get-in n [:type :qualType])
         ;; (a trailing return type's decltype names the parameters: `-> decltype(make_move_iterator(__it.base()))`;
         ;; they are in its scope, [basic.scope.param]; G4)
         tscope (if (and qt (or (str/includes? qt "decltype") (str/includes? qt "noexcept(")))
-                 (let [ps (new-scope :block home)]
+                 (let [ps (new-scope :block rs)]
                    (doseq [pn (param-nodes n) :when (:name pn)]
-                     (when-let [t (try (resolve-type home (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+                     (when-let [t (try (resolve-type rs (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
                        (let [id (next-id)]
                          (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
                          (enter! ps (:name pn) {:e :var :id id}))))
                    ps)
-                 home)
+                 rs)
         ty (assoc (resolve-type tscope qt) :cq (method-const? qt))
         ty (dissoc ty :cq)
         nm (:name n)
@@ -919,7 +972,9 @@
            :consteval (boolean (:_consteval n))
            ;; GNU's always_inline (clang's AlwaysInlineAttr, `alwaysinline` in the IR: inlined at -O0 by LLVM's
            ;; AlwaysInliner, arbace.cpp.inline; P16 (a))
-           :always-inline (always-inline-node? n)
+           ;; (CP362 (a), cpp-s5: a consteval constructor, for the code generator, inlined as always_inline (clang emits no
+           ;; immediate function: an immediate invocation is its value), its body not analyzed below)
+           :always-inline (or (always-inline-node? n) (and (:_consteval n) (= "CXXConstructorDecl" (:kind n)) (not (checking?))))
            ;; G5c: a call of it ends its block (clang's EmitCall: the call, then unreachable), so a catch (...) { abort(); }
            ;; ends no catch on the normal path
            :noreturn (noreturn-node? n)
@@ -1009,7 +1064,11 @@
       ;; a qualified definition of a namespace member declared `extern` (libsupc++'s `const nothrow_t std::nothrow = ...`,
       ;; `terminate_handler __cxxabiv1::__terminate_handler = ...`): the definition, no longer extern ([basic.def]/2)
       (do (upd-var! old assoc :init init :init-style (:init n) :defined true :extern false :def-scope scope)
-          (when (header-node? n) (upd-var! old #(cond-> (assoc % :defined false :pending-def true) (not (:internal %)) (assoc :linkonce true))))
+          ;; (cpp-s7: a static data member's out-of-line definition in a header is an ordinary definition, not linkonce:
+          ;; before CP369 every such member was internal and so never linkonce here; now external, thread_local11.h's
+          ;; `thread_local S T::u3` would have been taken for a template's member, thread_local12e.C refused)
+          (when (header-node? n) (upd-var! old #(cond-> (assoc % :defined false :pending-def true)
+                                                  (not (or (:internal %) (= :member-static (:storage %)))) (assoc :linkonce true))))
           old)
       (let [id (next-id)
             v {:id id :name (:name n) :ty ty :storage st :init init :init-style (:init n) :path (:path home)
@@ -1017,12 +1076,20 @@
                :defined (not (or (= st :member-static) (= "extern" (:storageClass n))))
                :extern (= "extern" (:storageClass n))
                :internal-l (boolean (and (= st :global) (not (:cls home)) (or (= "static" (:storageClass n)) (and (:c ty) (not (:extern n)) (not= "extern" (:storageClass n)))) (not (:internal home))))
-               :internal (boolean (or (:internal home) (= "static" (:storageClass n)) (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
+               ;; (CP369 (a): `static` on a static data member is not its linkage, [basic.link]/4: internal only by an unnamed
+               ;; namespace on its class's path, its home's; clang's dso_local external global for `int A::y = f();`)
+               :internal (boolean (or (:internal home) (and (not= st :member-static) (= "static" (:storageClass n)))
+                                      (and (= st :global) (:c ty) (not= "extern" (:storageClass n)))))
                :def-scope scope
                :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv)
                :init-priority (let [x (gnu-attr-arg n "init_priority")] (when (number? x) x))
                ;; thread_local, _Thread_local, __thread ([basic.stc.thread]; G5c: libsupc++'s eh_globals.cc)
                :tls (boolean (:tls n))
+               ;; (cpp-s5b, pending review 1111 #4: the TLS kind, clang's VarDecl::getTLSKind: "dynamic" for C++'s
+               ;; thread_local, "static" for __thread and _Thread_local; with constinit, [dcl.constinit], a thread-local
+               ;; variable clang reads directly, never through its wrapper)
+               :tls-kind (:tls n)
+               :constinit (boolean (or (:_constinit n) (some #(= "ConstInitAttr" (:kind %)) (:inner n))))
                :pos (long (or (:_b n) 0))}
             ;; (CX12, the checker: a constexpr variable, its initializer checked as a constant expression)
             v (cond-> v (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
@@ -1030,9 +1097,15 @@
             v (cond-> v (and (checking?) (empty? q) (= :ns (:kind home)) (not (header-node? n)))
                 (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl {:range (:range n)}))]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
-        (swap! *vars* assoc id (if (and (header-node? n) (:defined v) (= st :global))
+        (swap! *vars* assoc id (cond
+                                 (and (header-node? n) (:defined v) (= st :global))
                                  (cond-> (assoc v :defined false :pending-def true) (not (:internal v)) (assoc :linkonce true))
-                                 v))
+                                 ;; (cpp-s7: an inline static data member, its in-class declaration a definition ([class.static.data]/4,
+                                 ;; [dcl.inline]/6): defined when used, linkonce_odr as clang emits an inline variable; member_kinds.C's
+                                 ;; `static inline int i = f();` had no definition, lower's "unknown global _ZN1A1iE")
+                                 (and (= st :member-static) (empty? q) (:inline n) (init-kid n))
+                                 (assoc v :pending-def true :linkonce true :internal-l false)
+                                 :else v))
         (when (= (:name n) (System/getenv "CPP_LOOKUP_TRACE")) (binding [*out* *err*] (println "declare" (:name n) (:path home) (System/identityHashCode (:names home)) (:pos v))))
         (enter! home (:name n) {:e :var :id id :pos (:pos v)})
         (when (:cls home) (abi/update-cls! (:cls home) update :statics (fnil conj []) id))
@@ -1065,7 +1138,9 @@
   (let [nm (:name n)
         ;; a nested class defined outside its class (class L::F { ... }, [class.nest]/3): in the enclosing class's
         ;; scope (G5: <locale_classes.h>'s class locale::facet)
-        q (when (:completeDefinition n) (qualifier-before n))
+        ;; (not a class template's specialization's, declared in its parameters' scope: `template<...> class
+        ;; __format::_Arg_store`'s qualifier is its template's, cpp-s5)
+        q (when (and (:completeDefinition n) (not= :tparams (:kind scope0))) (qualifier-before n))
         scope (or (when (seq q)
                     (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope0 q)))]
                       (cond (= :ns (:e e)) (:scope e) (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e))) :else nil)))
@@ -1084,7 +1159,7 @@
       (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))})))
     (when (:completeDefinition n)
       (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
-      (abi/update-cls! id assoc :complete true
+      (abi/update-cls! id assoc :complete true :defining true
                        :bases (vec (for [[bi bs] (map-indexed vector (:bases n))
                                          ;; (cpp-s4: a pack expansion among the bases, [temp.variadic]/5's base-specifier-list:
                                          ;; one base per element of the packs it names, variant's `_Build_FUN<_Ind, _Tp, _Ti>...`)
@@ -1110,22 +1185,50 @@
                                                 (try (abi/align-of (resolve-type scope a)) (catch arbace.lang.ExceptionInfo _ nil))
                                                 ((:const-bound @hooks) scope a)))))))
       (let [access (atom (if (= "class" (:tagUsed n)) :private :public))]
+        ;; (cpp-s5: the unnamed class an anonymous member's type names is this body's last one: a class the members'
+        ;; declarations instantiate meanwhile declares its own unnamed ones, which took its place; <format>'s
+        ;; _Arg_value's union, after basic_format_args' had been declared in between)
+        (try
+        (binding [*last-anon* (atom nil)]
         (doseq [k (kids n)]
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
-            "FieldDecl" (let [ft (resolve-type cs (get-in k [:type :qualType]))
+            "FieldDecl" (if (and (nil? @*last-anon*) (header-node? k)
+                                 (re-find #"\((unnamed|anonymous) (union|struct|class) at " (str (get-in k [:type :qualType]))))
+                          ;; (cpp-s8: an anonymous member whose unnamed class a header's drop left undeclared: left out, a
+                          ;; drop, so a provisional instance is made again later; before, a member of no type, and the
+                          ;; class's layout refused "no size for nil": <format>'s _Arg_value's union)
+                          (do (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong drop-count)
+                              (when (System/getenv "CPP_HDR_TRACE") (binding [*out* *err*] (println "header drop: an anonymous member of" (:name n) "(its class dropped)"))))
+                        (if-let [bad (let [et (loop [t (resolve-type cs (get-in k [:type :qualType]))] (if (abi/arr? t) (recur (:of t)) t))]
+                                       ;; (CP368 (a): a member of a class still being defined, its own or an enclosing one's,
+                                       ;; or a class template's instance being instantiated: an incomplete type,
+                                       ;; [class.mem.general]/7, clang's err_field_incomplete_or_sizeless; pr67405.C's `S f;` in
+                                       ;; S, template/instantiate1.C's Z<int> through Y<Z<int>> and X<Z<int>>: the class had
+                                       ;; contained itself, and trivial-copy? and the layout recursed without end. The checker
+                                       ;; reports it and leaves the member out; the code generator refuses)
+                                       (when (and (abi/class? et) (:defining (abi/cls (:id et))))
+                                         (ex-info (str "codegen: field has incomplete type '" (:name (abi/cls (:id et))) "'")
+                                                  {:codegen/refused :incomplete :cx/node k})))]
+                          (if (checking?) (swap! *order* conj [:cx-error bad]) (throw bad))
+                          (let [ft (resolve-type cs (get-in k [:type :qualType]))
                               i (count (:fields (abi/cls id)))
                               bits (when (:isBitfield k) (const-int cs (first (kids k))))
                               init (when (:hasInClassInitializer k) (if bits (second (kids k)) (first (kids k))))]
-                          (abi/update-cls! id update :fields conj {:name (:name k) :ty ft :init init :access @access :i i :bits bits
-                                                                   :anon (boolean (and (nil? (:name k)) (not bits)))})
+                          (abi/update-cls! id update :fields conj (cond-> {:name (:name k) :ty ft :init init :access @access :i i :bits bits
+                                                                            :anon (boolean (and (nil? (:name k)) (not bits)))}
+                                                                     ;; [[no_unique_address]] on a member of class type: potentially
+                                                                     ;; overlapping ([intro.object]/8, Itanium §1.1; cpp-gatefix)
+                                                                     (and (not bits) (abi/class? (abi/unq ft))
+                                                                          (some #(and (= "NativeAttr" (:kind %)) (= "no_unique_address" (:_std %))) (:inner k)))
+                                                                     (assoc :nua true)))
                           (if (:name k)
                             (enter! cs (:name k) {:e :field :cls id :i i :pos -1})
                             ;; an anonymous union or struct member: its members named in the class ([class.union.anon])
                             (when (and (not bits) (abi/class? ft))
                               (doseq [[mn es] (.entrySet ^java.util.HashMap (:names (:scope (abi/cls-of ft))))
                                       e es :when (#{:field :indirect} (:e e))]
-                                (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1})))))
+                                (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1})))))))
             (do (when (and (checking?) (= "FriendDecl" (:kind k)))
                   ;; (CP313 (a): the friends each class declares, clang's EffectiveContext's matching by them: a function's
                   ;; or a function template's name, else a class, else unknown)
@@ -1144,7 +1247,11 @@
                                            (and (nil? fd) (nil? (get-in k [:type :qualType])) (not-any? (fn [x] (= "ClassTemplateDecl" (:kind x))) (:inner k)))
                                            (assoc :friend-unknown true)))))
                 (binding [*member-access* @access] (declare-node! cs k))))))
+        (finally (abi/update-cls! id dissoc :defining))))
       (finish-class! id)
+      ;; (CP365 (a): finished, and the provisional instances that waited for it made again)
+      (abi/update-cls! id assoc :finished true)
+      (when-let [h (:class-completed @hooks)] (h id))
       (when-not nm (reset! *last-anon* t)))
     t))
 
@@ -1152,17 +1259,28 @@
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *main-retry* nil) ; atom [[scope node exception] ...]: the main file's typedefs to declare again (CP338 (a))
-(def ^:dynamic *header-drops* nil) ; atom [[kind name message] ...]: the header declarations not declared (G4)
+(def ^:dynamic *header-drops* nil) ; atom {place [class kind name message]}: the header declarations not declared (G4; CP364 (a):
+                                    ; one declared on a later round taken out, gen-batch's drops.tsv)
+
+(defn- drop-key
+  "A header declaration's key in *header-drops*: the node itself (a retry declares the same node), by identity."
+  [n]
+  [(System/identityHashCode n) (get-in n [:range :begin]) (:kind n) (:name n)])
 
 (defn declare-node!
   "Enters a declaration node of namespace or class scope. A header's declaration that the analysis refuses is dropped
   (G4: a use of it fails later as an unknown name; CPP_HDR_TRACE=1 prints each)."
   [scope n]
   (if (header-node? n)
-    (try (declare-node*! scope n)
+    (try (let [r (declare-node*! scope n)]
+           (when *header-drops* (swap! *header-drops* dissoc (drop-key n)))
+           r)
          (catch arbace.lang.ExceptionInfo e
            (if (or (:codegen/refused (ex-data e)) (:codegen/not-constant (ex-data e)))
-             (do (when *header-drops* (swap! *header-drops* conj [(:kind n) (:name n) (.getMessage e)]))
+             (do (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong drop-count)
+                 (when *header-drops*
+                   (swap! *header-drops* assoc (drop-key n)
+                          [(or (:codegen/refused (ex-data e)) :not-constant) (:kind n) (:name n) (.getMessage e)]))
                  ;; a declaration that named a class template's specialization before its specialization was defined
                  ;; (<stringfwd.h>'s typedef basic_string<char> string, char_traits<char> defined later): tried again
                  ;; after the headers (clang instantiates only when the type must be complete)
@@ -1501,7 +1619,27 @@
 
 (declare analyze rv init-list-elem)
 
-(declare ce-eval ce-wrap)
+(declare ce-eval ce-wrap ub! not-constant)
+
+(defn- wide?
+  "cpp-s5b (pending review 1111 #2): whether the integral type `t` is wider than 64 bits (__int128, unsigned __int128)."
+  [t]
+  (let [t (abi/underlying (abi/unq t))]
+    (and (abi/integral? t) (> (* 8 (long (abi/size-of t))) 64))))
+
+(defn- wide-binop
+  "cpp-s5b (pending review 1111 #2): a 128-bit type's arithmetic on the operands' values (longs: ce-wrap keeps a 128-bit
+  value only while it fits 64 bits) computed exactly, for ce-wrap to refuse a result outside 64 bits, never computed modulo
+  2^64 (`(unsigned __int128)1 << 64` was 0); a shift by a count outside 0..127 and a division by zero are not constants."
+  [^String o a b]
+  (let [a (long a) b (long b) A (bigint a) B (bigint b)]
+    (case o
+      "+" (+ A B) "-" (- A B) "*" (* A B)
+      ("/" "%") (if (zero? b) (not-constant "division by zero") (if (= o "/") (quot A B) (rem A B)))
+      "<<" (if (<= 0 b 127) (* A (bigint (.pow (java.math.BigInteger/valueOf 2) (int b)))) (not-constant "a shift by " b))
+      ">>" (if (<= 0 b 127) (bit-shift-right a (min b 63)) (not-constant "a shift by " b))
+      "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
+      nil)))
 
 (declare const-int)
 
@@ -1530,16 +1668,26 @@
                 ;; (CP325 (a): 64-bit arithmetic wraps, as the unsigned types' modulo 2^N does; a signed overflow is the
                 ;; program's error, which this evaluation does not judge -- parse/enum4.C's 9223372036854775807ULL * 2 + 1 had
                 ;; thrown Java's ArithmeticException, a crash of the analysis)
-                :unop (let [v (ev (:e e))] (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0)))
-                :binop (let [a (long (ev (:l e))) b (long (ev (:r e)))
+                :unop (let [v (ev (:e e))]
+                        (if (and (#{"-" "~"} (:o e)) (wide? (:ty e)))
+                          (ce-wrap (:ty e) (if (= "-" (:o e)) (- (bigint v)) (bit-not (long v))))
+                          (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0))))
+                ;; (review 1111 #5: && and || short-circuit, [expr.log.and]/1, so that 2 || 1 / 0 is 1; a division by zero is not a
+                ;; constant, as ce-eval's, never Java's ArithmeticException: warn/overflow-warn-3.C's enumerators had crashed Sema)
+                :binop (let [a (long (ev (:l e)))
+                             sc (case (:o e) "&&" (when (zero? a) 0) "||" (when-not (zero? a) 1) nil)
+                             b (if sc 0 (long (ev (:r e))))
                              u (and (abi/integral? (:ty e)) (not (abi/signed? (:ty e))))
-                             r (case (:o e) "+" (unchecked-add a b) "-" (unchecked-subtract a b) "*" (unchecked-multiply a b)
+                             _ (when (and (not sc) (#{"/" "%"} (:o e)) (zero? b))
+                                 (if (checking?) (ub! e "division by zero") (not-constant "division by zero")))
+                             r (if-some [w (when (and (not sc) (wide? (:ty e))) (wide-binop (:o e) a b))] w
+                               (case (:o e) "+" (unchecked-add a b) "-" (unchecked-subtract a b) "*" (unchecked-multiply a b)
                                      "/" (if u (Long/divideUnsigned a b) (quot a b)) "%" (if u (Long/remainderUnsigned a b) (rem a b))
                                      "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
                                      "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
                                      "<" (if (< a b) 1 0) ">" (if (> a b) 1 0) "<=" (if (<= a b) 1 0) ">=" (if (>= a b) 1 0)
                                      "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
-                                     "||" (if (or (not= a 0) (not= b 0)) 1 0))]
+                                     "||" (if (or (not= a 0) (not= b 0)) 1 0)))]
                          (if (abi/integral? (:ty e)) (ce-wrap (:ty e) r) r))
                 :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
                 ;; (compared in the operands' common type: unsigned ones as unsigned, [expr.rel]/5, [conv.arith])
@@ -1570,13 +1718,37 @@
 
 (defn- not-constant [& msg] (when (System/getenv "CPP_NC_STACK") (.printStackTrace (Exception. ^String (apply str msg)))) (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true})))
 
+(defn- ce-ptr?
+  "CP374 (a): whether the evaluator's value is a pointer: {::base B ::i I}, B the elements' values (a string literal's, a
+  vector) or a local array's atom holding them, I the index (0 to the count, one past the last element)."
+  [v]
+  (and (map? v) (contains? v ::base)))
+
+(defn- ce-elems [p] (let [b (::base p)] (if (vector? b) b @b)))
+
+(defn- ce-ptr-add
+  "The pointer `p` moved by `n` elements ([expr.add]/4: within its array or one past it, else not a constant)."
+  [p ^long n]
+  (let [i (+ (long (::i p)) n)]
+    (if (<= 0 i (count (ce-elems p))) (assoc p ::i i) (not-constant "a pointer out of its array"))))
+
+(defn- ce-same-base? [a b] (identical? (::base a) (::base b)))
+
 (defn ce-wrap
   "The value `v` as the type `t` holds it (integers wrapped to its width, bool 0/1, floats as doubles)."
   [t v]
   (let [t (abi/underlying (abi/unq t))]
     (cond
+      ;; (CP374 (a): a pointer into a string literal or a local array, ce-ptr's value, as a pointer type holds it)
+      (ce-ptr? v) (if (or (abi/ptr? t) (= :bool (abi/bn t))) (if (abi/ptr? t) v 1) (not-constant "a pointer as " (pr-str t)))
       (= :bool (abi/bn t)) (if (if (number? v) (not (zero? (double v))) v) 1 0)
       (abi/floating? t) (if (= :float (abi/bn t)) (double (float (double v))) (double v))
+      ;; (cpp-s5b, pending review 1111 #2: a 128-bit value is held as a long while it fits 64 bits, as the type's value
+      ;; (an unsigned one not negative); outside, not a constant, never truncated)
+      (wide? t) (let [x (if (float? v) (long (double v)) v)]
+                  (if (and (<= Long/MIN_VALUE x Long/MAX_VALUE) (or (abi/signed? t) (not (neg? x))))
+                    (long x)
+                    (not-constant "a " (* 8 (long (abi/size-of t))) "-bit value outside 64 bits")))
       (abi/integral? t) (let [bits (* 8 (abi/size-of t)) x (long (if (float? v) (long (double v)) v))]
                           (if (>= bits 64) x
                               (let [m (dec (bit-shift-left 1 bits)) y (bit-and x m)]
@@ -1602,7 +1774,9 @@
 
 (defn ce-eval
   "The constant value of the typed expression `e` (`env` {var-id atom} the locals of the evaluated calls)."
-  ([e] (binding [*ce-steps* (atom 0)] (ce-eval e {})))
+  ;; (CP374 (a): a pointer is a value inside an evaluation only: as its result, not a constant -- the callers fold integers
+  ;; and floats; codegen-gen's globals.cpp, a pointer global's initializer folded to a long, had crashed)
+  ([e] (binding [*ce-steps* (atom 0)] (let [v (ce-eval e {})] (if (ce-ptr? v) (not-constant "a pointer's value") v))))
   ([e env]
    (when (> (long (swap! *ce-steps* inc)) 1000000) (not-constant "too many steps"))
    (when (zero? (rem (long @*ce-steps*) 4096)) (tick!))
@@ -1615,11 +1789,11 @@
                    v (ev (:e e))]
                (case (:ck e)
                  (:noop :int :int->fp :fp :fp->int) (ce-wrap t (if (and (= :fp->int (:ck e))) (long (double v)) v))
-                 :to-bool (if (zero? (double v)) 0 1)
+                 :to-bool (if (ce-ptr? v) 1 (if (zero? (double v)) 0 1))
                  ;; ([expr.const]/5.15: a reinterpret_cast, as a conversion between a pointer and an integer is)
                  (not-constant "cast " (:ck e))))
        :unop (let [v (ev (:e e))]
-               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (- (long v))) "+" v "~" (bit-not (long v)))))
+               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (if (wide? t) (- (bigint v)) (- (long v)))) "+" v "~" (bit-not (long v)))))
        :not (if (zero? (long (ev (:e e)))) 1 0)
        :binop (let [a (ev (:l e)) b (ev (:r e))]
                 (if (abi/floating? t)
@@ -1646,13 +1820,20 @@
                                         (ub! e "signed left shift discards bits")
                                         :else nil)
                           nil)))
-                    (ce-wrap t (case (:o e)
+                    (ce-wrap t (if-some [w (when (wide? t) (wide-binop (:o e) a b))] w (case (:o e)
                                  "+" (+ a b) "-" (- a b) "*" (* a b)
                                  "/" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/divideUnsigned a b) (quot a b)))
                                  "%" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/remainderUnsigned a b) (rem a b)))
                                  "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
-                                 "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b))))))
+                                 "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)))))))
        :cmp (let [a (ev (:l e)) b (ev (:r e))
+                  ;; (CP374 (a): pointers of one array by their indices; a pointer and a null pointer unequal)
+                  [a b] (cond (and (ce-ptr? a) (ce-ptr? b))
+                              (if (ce-same-base? a b) [(::i a) (::i b)]
+                                  (if (#{"==" "!="} (:o e)) [0 1] (not-constant "pointers into different arrays compared")))
+                              (or (ce-ptr? a) (ce-ptr? b))
+                              (if (and (#{"==" "!="} (:o e)) (= 0 (if (ce-ptr? a) b a))) [0 1] (not-constant "a pointer compared"))
+                              :else [a b])
                   c (if (or (float? a) (float? b)) (compare (double a) (double b))
                         (if (abi/signed? (:ct e)) (compare (long a) (long b)) (Long/compareUnsigned (long a) (long b))))]
               (if (case (:o e) "<" (neg? c) ">" (pos? c) "<=" (<= c 0) ">=" (>= c 0) "==" (zero? c) "!=" (not (zero? c))) 1 0))
@@ -1669,6 +1850,11 @@
                (cond
                  (vector? ax) (let [i (long (ev (:n (:e x))))]
                                 (if (< -1 i (count ax)) (nth ax i) (not-constant "an element out of its array")))
+                 ;; (CP374 (a): an element read through a pointer, `__s[0]`, `*__p`)
+                 (= :deref (:op x)) (let [p (ev (:e x))]
+                                      (when-not (ce-ptr? p) (not-constant "a load through a pointer"))
+                                      (let [xs (ce-elems p) i (long (::i p))]
+                                        (if (< -1 i (count xs)) (nth xs i) (not-constant "an element out of its array"))))
                  (and (= :var (:op x)) (contains? env (:id x)))
                  @(get env (:id x))
                  :else
@@ -1689,13 +1875,18 @@
                  (let [v (ce-wrap (:ty x) (ev (:r e)))] (reset! (get env (:id x)) v) v))
        :cassign (let [x (:l e)] (when-not (and (= :var (:op x)) (contains? env (:id x))) (not-constant "an assignment"))
                   (let [old @(get env (:id x))
-                        r (ev (:r e))
-                        ct (:ct e)
-                        v (ce-eval {:op :binop :o (:o e) :ty ct :l {:op (if (float? old) :float :int) :v old} :r {:op (if (float? r) :float :int) :v r}} env)
-                        v (ce-wrap (:ty x) v)]
-                    (reset! (get env (:id x)) v) v))
+                        r (ev (:r e))]
+                    (if (ce-ptr? old)
+                      ;; (CP374 (a): a pointer moved, `__enc += 3`)
+                      (do (when-not (#{"+" "-"} (:o e)) (not-constant "a pointer's compound assignment"))
+                          (let [v (ce-ptr-add old (if (= "-" (:o e)) (- (long r)) (long r)))] (reset! (get env (:id x)) v) v))
+                      (let [ct (:ct e)
+                            v (ce-eval {:op :binop :o (:o e) :ty ct :l {:op (if (float? old) :float :int) :v old} :r {:op (if (float? r) :float :int) :v r}} env)
+                            v (ce-wrap (:ty x) v)]
+                        (reset! (get env (:id x)) v) v))))
        :incdec (let [x (:e e)] (when-not (and (= :var (:op x)) (contains? env (:id x))) (not-constant "an increment"))
-                 (let [old @(get env (:id x)) nv (ce-wrap (:ty x) ((if (= "++" (:o e)) + -) old 1))]
+                 (let [old @(get env (:id x))
+                       nv (if (ce-ptr? old) (ce-ptr-add old (if (= "++" (:o e)) 1 -1)) (ce-wrap (:ty x) ((if (= "++" (:o e)) + -) old 1)))]
                    (reset! (get env (:id x)) nv) (if (:post e) old nv)))
        :call (let [f (fnd (:fn e))]
                ;; ([expr.const]/5.2: a call of a function that is not constexpr: a namespace-scope function the main file
@@ -1705,7 +1896,7 @@
                  (ce-top-sure! "call to non-constexpr function '" (:name f) "'"))
                ;; (a constexpr member function of an empty class, its object nothing it can read: evaluated without it,
                ;; integral_constant's operator value_type() of `__is_invocable<...>{}`; CP332 (a))
-               (when (or (not (:constexpr f))
+               (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))))
                          (and (or (:obj e) (and (:cls f) (not (:static f))))
                               (not (and (:cls f) (not (:static f)) (abi/empty-class? (:cls f))))))
                  (not-constant "a call of " (:name f)))
@@ -1719,6 +1910,23 @@
                      env2 (into {} (map (fn [pid a] [pid (atom (if (= ::empty a) a (ce-wrap (:ty (var* pid)) a)))]) (:params f) args))
                      r (binding [*ce-in-call* true] (ce-exec (:tbody f) env2))]
                  (if (= :ret (first r)) (ce-wrap t (second r)) (not-constant "no return"))))
+       ;; (CP374 (a): pointers into string literals and arrays, as clang's ExprConstant's LValue with its designator: a
+       ;; string literal's or a local array's first element by decay, moved by + and -, read by a subscript or *, compared;
+       ;; <format>'s `if constexpr (__unicode::__literal_encoding_is_utf8())`, whose consteval function reads
+       ;; __GNUC_EXECUTION_CHARSET_NAME's characters through a `const char*`)
+       :decay (let [a (:e e)]
+                (cond
+                  (= :str (:op a)) (let [n (long (or (:n (abi/unq (:ty a))) (inc (count (:s a)))))
+                                         el (:of (abi/unq (:ty a)))
+                                         cs (mapv #(ce-wrap el (long (int %))) (:s a))]
+                                     {::base (into cs (repeat (max 0 (- n (count cs))) 0)) ::i 0})
+                  (and (= :var (:op a)) (contains? env (:id a)) (vector? @(get env (:id a)))) {::base (get env (:id a)) ::i 0}
+                  :else (not-constant "the decay of " (:op a))))
+       :ptradd (let [p (ev (:p e))]
+                 (when-not (ce-ptr? p) (not-constant "pointer arithmetic"))
+                 (let [n (long (ev (:n e)))] (ce-ptr-add p (if (= "-" (:o e)) (- n) n))))
+       :ptrdiff (let [a (ev (:l e)) b (ev (:r e))]
+                  (if (and (ce-ptr? a) (ce-ptr? b) (ce-same-base? a b)) (- (long (::i a)) (long (::i b))) (not-constant "a pointer difference")))
        (not-constant "the expression " (:op e))))))
 
 (defn- ce-exec
@@ -1736,11 +1944,15 @@
                            at (abi/unq (:ty v))
                            arr? (and (abi/arr? at) (= :list (:i init)) (:n at) (not (abi/class? (abi/unq (:of at)))))
                            el (fn [i] (case (:i i) :expr (ce-wrap (:of at) (ce-eval (:e i) @env)) (:zero :none nil) 0 (not-constant "an element's initializer")))
-                           val (if arr?
-                                 (let [xs (mapv el (:items init))]
-                                   (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill init)))))
-                                 (case (:i init) :expr (ce-eval (:e init) @env) (:zero :none) 0 (not-constant "a local's initializer")))]
-                       (swap! env assoc (:var x) (atom (if arr? val (ce-wrap (:ty v) val))))
+                           ;; (CP374 (a): a local of an empty class, a captureless lambda's closure, holds nothing to read: its calls
+                           ;; are evaluated without it, as ce-eval's :call does)
+                           emp? (and (abi/class? at) (abi/empty-class? (:id at)))
+                           val (cond
+                                 emp? ::empty
+                                 arr? (let [xs (mapv el (:items init))]
+                                        (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill init)))))
+                                 :else (case (:i init) :expr (ce-eval (:e init) @env) (:zero :none) 0 (not-constant "a local's initializer (" (:i init) " of " (:name v) ")")))]
+                       (swap! env assoc (:var x) (atom (if (or arr? emp?) val (ce-wrap (:ty v) val))))
                        (recur more))
                      (let [r (ce-exec x @env)] (if (= :normal (first r)) (recur more) r))))))
     :return (cond (:void-e s) [:ret 0] (:init s) [:ret (ce-eval (:e (:init s)) env)] :else [:ret 0])
@@ -1770,7 +1982,7 @@
       (binding [*ce-steps* (atom 0)]
         (let [env (into {} (map (fn [pid a] [pid (atom (ce-wrap (:ty (var* pid)) a))]) (:params f) args))
               r (ce-exec (:tbody f) env)]
-          (if (= :ret (first r)) (ce-wrap (:ret (:ty f)) (second r)) (not-constant "no return")))))))
+          (if (and (= :ret (first r)) (not (ce-ptr? (second r)))) (ce-wrap (:ret (:ty f)) (second r)) (not-constant "no return")))))))
 
 (defn ce-try
   "The constant `e` folds to (a typed literal of its type), or nil."
@@ -1839,7 +2051,7 @@
       (#{:bool :char :schar :uchar :short :ushort :char8 :char16} (abi/bn t)) abi/int*
       :else t)))
 
-(def ^:private unsigned-of {:int :uint :long :ulong :llong :ullong})
+(def ^:private unsigned-of {:int :uint :long :ulong :llong :ullong :i128 :u128})
 
 (defn arith-common
   "The usual arithmetic conversions' type ([expr.arith.conv])."
@@ -3035,6 +3247,15 @@
     (abi/class? (abi/unq t)) {:op :temp-obj :init (init-for t [e] ctx :direct) :ty (abi/unq t) :cat :pr}
     :else (convert-scalar (rv e) t true)))
 
+(defn- scalar-list-cast
+  "T{items...} of a non-class type `t` ([expr.type.conv]/2, [dcl.init.list]/3.10-3.11): no item, the value-initialized
+  prvalue; one, it converted to `t` (a narrowing conversion not diagnosed); more, a refusal."
+  [ctx t items]
+  (case (count items)
+    0 {:op :zero-val :ty (abi/unq t) :cat :pr}
+    1 (cast-expr ctx t (first items) true)
+    (fail :expr "a braced functional cast of a scalar type with " (count items) " elements")))
+
 (defn- cx-using-map
   "CP324 (a): {fn-id [class access]} for the functions among the entities `es` that a class's using-declaration named."
   [es]
@@ -3145,7 +3366,7 @@
                           (method-set-of (or qcid cid) nm))
           fids (if qcid fids fids)]
       (cond
-        (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))))))
+        (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))) " " (pr-str (:targs (abi/cls (or qcid cid)))) " fields " (pr-str (mapv :name (:fields (abi/cls (or qcid cid))))))))
         (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
                               (field-node (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) (:cls e) (:i e)))
         (= :indirect (:e e)) (reduce (fn [o [c i]] (field-node o c i)) (if (= :pr (:cat obj)) (materialize obj) obj) (:chain e))
@@ -3242,6 +3463,36 @@
       (cls! cid)
       (vec out))))
 
+(defn- adl-classes
+  "cpp-s8: the classes associated with the arguments `args` ([basic.lookup.argdep]/3: each class argument's class, its
+  bases, a specialization's template type arguments' classes; a pointer's or reference's pointee's), as a set of ids."
+  [args]
+  (let [seen (java.util.HashSet.)]
+    (letfn [(ty! [t]
+              (when (map? t)
+                (let [t (abi/unq t)]
+                  (cond (abi/class? t) (cls! (:id t))
+                        (#{:ptr :ref :rref :arr} (:k t)) (ty! (or (:to t) (:of t)))
+                        (sequential? (:pack t)) (doseq [x (:pack t)] (ty! x))
+                        :else nil))))
+            (cls! [cid]
+              (when (and cid (.add seen cid))
+                (let [c (abi/cls cid)]
+                  (doseq [b (:bases c)] (cls! (:cls b)))
+                  (doseq [a (:targs c)] (ty! a)))))]
+      (doseq [a args] (ty! (:ty a)))
+      (set seen))))
+
+(defn- friend-visible?
+  "cpp-s8: whether the entity `e` (a lookup's entry) is visible to a call with arguments of the associated classes `acls`:
+  a friend function (template) defined in a class and not declared in its namespace (a hidden friend, [class.friend]/7,
+  [namespace.memdef]/3) is found by argument-dependent lookup alone, when its class is associated ([basic.lookup.argdep]/4.3);
+  <bits/unreachable_sentinel.h>'s `template<weakly_incrementable _It> friend bool operator==(unreachable_sentinel_t,
+  const _It&)` had been a candidate for every `a == b`, and its constraint's satisfaction for a __normal_iterator recursed
+  through iterator_traits into itself."
+  [acls e]
+  (let [c (:friend-cls e)] (or (nil? c) (contains? acls c))))
+
 (defn- adl-fns
   "The functions named `nm` in the namespaces of the class arguments' classes ([basic.lookup.argdep], for classes)."
   [args nm]
@@ -3249,8 +3500,9 @@
    (for [a args
          ;; (cpp-s4: a pointer's, [basic.lookup.argdep]/3.4, its pointee's)
          :let [cid (class-id (loop [t (abi/unq (abi/non-ref (:ty a)))] (if (abi/ptr? t) (recur (abi/unq (:to t))) t)))] :when cid
+         :let [acls (adl-classes args)]
          ns (adl-class-nss cid)
-         e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (= :fn (:e e))]
+         e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (and (= :fn (:e e)) (friend-visible? acls e))]
      (:id e))))
 
 (defn- sure-assoc-nss
@@ -3395,6 +3647,8 @@
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
    "__builtin_addressof" :addressof
+   ;; (cpp-s8: the type-generic floating-point classifications <format>'s __formatter_fp uses)
+   "__builtin_signbit" :signbit "__builtin_isfinite" :isfinite
    "__builtin_alloca" :alloca
    "__builtin_clear_padding" :clear-padding
    "__atomic_always_lock_free" :lock-free "__atomic_is_lock_free" :lock-free
@@ -3425,7 +3679,10 @@
                  obj (:obj callee)
                  any-method (some #(and (:cls %) (not (:static %))) ms)
                  obj (or obj (when (and (:implicit-this callee) any-method (:this-type ctx)) (cx-via (deref-node (this-expr ctx)) (:cx-qcls callee))))
-                 cands (concat (:fns callee) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
+                 ;; (cpp-s8: a hidden friend only by ADL, friend-visible?)
+                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) (:fns callee))) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
+                 _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
+                     (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
                  _ (when (and (empty? cands) (empty? (:tmpls callee))) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args) (fail :name "unknown name " (:name callee)))
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
                  fid (binding [*drops* (meta tcands)] (resolve-overload (distinct cands) args obj))
@@ -3473,7 +3730,7 @@
                  (try ((:call-candidates @hooks) ctx {:op :fnset :fns [] :name nm :tmpls mtmpls :obj l} more)
                       (catch arbace.lang.ExceptionInfo _ nil)))
         members (when lc (concat (second (method-set-of lc nm)) mspecs))
-        found (lookup (:scope ctx) nm)
+        found (let [acls (adl-classes args)] (filter #(friend-visible? acls %) (lookup (:scope ctx) nm)))
         ;; the operator function templates found by lookup and ADL, their specializations deduced from the operands
         ;; (G4: <bits/stl_iterator.h>'s operator- of two __normal_iterators)
         tspecs (when-let [h (:call-candidates @hooks)]
@@ -4166,8 +4423,14 @@
                                                     :else ok))
                                             (or (:_ret r) (:_noexcept r)) (do (doubt!) true)
                                             :else true)))
-                                      (catch arbace.lang.ExceptionInfo e (if (and (checking?) (sure-expr-failure? e)) false (doubt!)))))]
-                       {:op :int :v (if (every? ok? (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
+                                      (catch arbace.lang.ExceptionInfo e
+                                        (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "requirement" (:kind r) "fails:" (ex-message e) "|" (some-> (node-text r) (subs 0 (min 120 (count (node-text r))))))))
+                                        (if (and (checking?) (sure-expr-failure? e)) false (doubt!)))))]
+                       {:op :int :v (if (every? (fn [r] (let [v (ok? r)]
+                                                         (when (and (not v) (System/getenv "CPP_CONCEPT_TRACE"))
+                                                           (binding [*out* *err*] (println "requirement" (:kind r) "false:" (pr-str (some-> (node-text r) (subs 0 (min 120 (count (node-text r)))))) (pr-str (keys r)))))
+                                                         v))
+                                                (:inner n)) 1 0) :ty abi/bool* :cat :pr}))
     ;; noexcept(e) ([expr.unary.noexcept]): e unevaluated, true when no function it calls may throw (an implicit or
     ;; defaulted special member counted as not throwing; G4)
     "CXXNoexceptExpr" (let [x (binding [*unevaluated* true] (analyze ctx (first (kids n))))
@@ -4284,6 +4547,24 @@
         :expect (convert-scalar (rv (analyze ctx (second (kids n)))) abi/long* false)
         :constant-p {:op :int :v (if (ce-try (rv (analyze ctx (second (kids n))))) 1 0) :ty abi/int* :cat :pr}
         :is-constant-evaluated {:op :int :v 0 :ty abi/bool* :cat :pr}
+        ;; (cpp-s8: __builtin_signbit(x), the sign bit of a floating x, -0 and a NaN's too: copysign(1, x) < 0 by libm's
+        ;; copysign of x's type (clang reads the bit of the value's representation, the same answer); __builtin_isfinite(x):
+        ;; x - x == x - x, false for an infinity and a NaN alone. Both an int, as clang's)
+        (:signbit :isfinite)
+        (let [xn (second (kids n))
+              t (abi/unq (:ty (rv (analyze ctx xn))))
+              qt (case (abi/bn t) :float "float" :ldouble "long double" :double "double"
+                   (fail :type (name b) " of " (pr-str t)))
+              lit (fn [v] {:kind "FloatingLiteral" :value v :type {:qualType qt} :valueCategory "prvalue" :range (:range n)})
+              node (if (= b :signbit)
+                     {:kind "BinaryOperator" :opcode "<" :range (:range n)
+                      :inner [{:kind "CallExpr" :range (:range n)
+                               :inner [{:kind "DeclRefExpr" :referencedDecl {:name (str "__builtin_copysign" (case qt "float" "f" "long double" "l" ""))} :range (:range n)}
+                                       (lit "1.0") xn]}
+                              (lit "0.0")]}
+                     (let [d {:kind "BinaryOperator" :opcode "-" :inner [xn xn] :range (:range n)}]
+                       {:kind "BinaryOperator" :opcode "==" :inner [d d] :range (:range n)}))]
+          (convert-scalar (rv (analyze ctx node)) abi/int* false))
         ;; __builtin_addressof(x): x's address, no operator& ([specialized.addressof])
         :addressof (let [e (analyze ctx (second (kids n)))] {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr})
         ;; __builtin_alloca(n): n bytes of the frame (clang's alloca i8, i64 n, align 16)
@@ -4327,7 +4608,7 @@
     (let [callee (analyze ctx cn)
           args (analyze-args ctx an)]
       (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
-        (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()"))
+        (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()" (when (System/getenv "CPP_HDR_TRACE") (str " of " (pr-str (:op callee)) " " (pr-str (:ty callee)) " " (some-> (class-id (:ty callee)) abi/cls :name)))))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args)))))
 )
 ))
@@ -4369,6 +4650,10 @@
                 :else (fail :expr "a functional cast of a scalar type with " (count args) " arguments")))
         (and (= "CXXFunctionalCastExpr" (:kind n)) (abi/class? (abi/unq t)))
         {:op :temp-obj :init (init-for t (if (= "InitListExpr" (:kind k)) (analyze ctx k) [(analyze ctx k)]) ctx :direct) :ty (abi/unq t) :cat :pr}
+        ;; (cpp-s8: T{} and T{e} of a scalar type, [expr.type.conv]/2 with [dcl.init.list]/3.9-3.11: value-initialized, or
+        ;; the one element converted; <concepts>' default_initializable<char*>, `requires { _Tp{}; ... }`, had been false)
+        (and (= "CXXFunctionalCastExpr" (:kind n)) (= "InitListExpr" (:kind k)) (not (abi/ref? t)))
+        (scalar-list-cast ctx t (analyze-args ctx (kids k)))
         :else (cast-expr ctx t (analyze ctx k) true))))
     ("CXXTemporaryObjectExpr" "CXXUnresolvedConstructExpr" "CXXConstructExpr")
     (if-let [ct (when-not (= "CXXConstructExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
@@ -4381,7 +4666,10 @@
           args (analyze-args ctx (kids n))]
       (if (abi/class? (abi/unq t))
         {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
-        (if (empty? args) {:op :zero-val :ty t :cat :pr} (cast-expr ctx t (first args) true)))))
+        (cond (empty? args) {:op :zero-val :ty t :cat :pr}
+              ;; (cpp-s8: T{...} of a scalar type in a template, its one argument the braced list)
+              (and (= 1 (count args)) (= :init-list (:op (first args))) (not (abi/ref? t))) (scalar-list-cast ctx t (:items (first args)))
+              :else (cast-expr ctx t (first args) true)))))
     "CXXScalarValueInitExpr" (let [qt (get-in n [:type :qualType])
                                    t (resolve-type (:scope ctx) qt)]
                                ;; (CX12, fifth slice: T() naming a member type, its access as a declaration's, check-type-access!)
@@ -4856,10 +5144,20 @@
   _Rb_tree::_S_key; CP332 (a))."
   [scope cn]
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} cn)))]
-    (if (abi/class? (abi/unq (:ty e)))
-      (let [v (binding [*cutoff* Long/MAX_VALUE] (ce-eval (to-bool e)))]
-        (if (number? v) v (if v 1 0)))
-      (const-int scope cn))))
+    (when (System/getenv "CPP_CONSTEXPR_IF_TRACE")
+      (binding [*out* *err*] (println "if constexpr" (pr-str (some-> (node-text cn) (subs 0 (min 200 (count (node-text cn)))))) (pr-str (loc-of (get-in cn [:range :begin]))))))
+    ;; (cpp-s8: a condition the evaluator cannot compute is a refusal, `constexpr-if`, not a crash of the analysis:
+    ;; <format>'s `if constexpr (__unicode::__literal_encoding_is_utf8())`, whose consteval body reads the execution
+    ;; character set's name through pointers into a string literal)
+    (try
+      (if (abi/class? (abi/unq (:ty e)))
+        (let [v (binding [*cutoff* Long/MAX_VALUE] (ce-eval (to-bool e)))]
+          (if (number? v) v (if v 1 0)))
+        (const-int scope cn))
+      (catch arbace.lang.ExceptionInfo x
+        (if (and (:codegen/not-constant (ex-data x)) (not (checking?)))
+          (fail :constexpr-if "an if constexpr's condition not evaluated (" (.getMessage x) ")")
+          (throw x))))))
 
 (defn stmt
   "The typed statement of a tree node."
@@ -5144,6 +5442,41 @@
     (let [vs (distinct @rets)]
       (when (and (= 1 (count vs)) (first vs) (= :local (:storage (var* (first vs))))) (first vs)))))
 
+(defn- consteval-ctor-body-stores?
+  "cpp-s5b (pending review 1111 #1, CP362 (a)'s scope): whether the body (its node) of class `cls`'s consteval constructor
+  may store to the object it constructs beyond its mem-initializers: an assignment, a compound assignment or ++/-- whose
+  operand is a member of *this (a member named alone, this->m, a member of one, an element of one, *this), a call of a
+  member function of the class named alone or through this, a call on a member, or `this`/`*this` passed. The scan is
+  syntactic and conservative (a member passed by reference is not counted: basic_format_string's
+  `_Checking_scanner<...> __scanner(_M_str)` only reads it)."
+  [cls body]
+  (let [member? (fn [nm] (and (string? nm) (seq nm)
+                              (some (fn [[_ e]] (or (= :field (:e e)) (and (= :fn (:e e)) (not (:static (fnd (:id e)))))))
+                                    (try (class-lookup cls nm) (catch arbace.lang.ExceptionInfo _ nil)))))
+        strip (fn [x] (loop [x x] (if (#{"ParenExpr" "ImplicitCastExpr"} (:kind x)) (recur (first (:inner x))) x)))
+        this? (fn [x] (let [x (strip x)] (or (= "CXXThisExpr" (:kind x))
+                                             (and (= "UnaryOperator" (:kind x)) (= "*" (:opcode x)) (= "CXXThisExpr" (:kind (strip (first (:inner x)))))))))
+        of-this? (fn of-this? [x]
+                   (let [x (strip x)]
+                     (case (:kind x)
+                       "CXXThisExpr" true
+                       "DeclRefExpr" (boolean (member? (get-in x [:referencedDecl :name])))
+                       ("MemberExpr" "CXXDependentScopeMemberExpr" "UnresolvedMemberExpr")
+                       (let [b (first (:inner x))] (or (nil? b) (of-this? b)))
+                       "ArraySubscriptExpr" (of-this? (first (:inner x)))
+                       "UnaryOperator" (and (= "*" (:opcode x)) (of-this? (first (:inner x))))
+                       false)))
+        store? (fn [x]
+                 (case (:kind x)
+                   "BinaryOperator" (and (= "=" (:opcode x)) (of-this? (first (:inner x))))
+                   "CompoundAssignOperator" (of-this? (first (:inner x)))
+                   "UnaryOperator" (and (#{"++" "--"} (:opcode x)) (of-this? (first (:inner x))))
+                   ("CallExpr" "CXXMemberCallExpr")
+                   (or (of-this? (first (:inner x))) (some this? (rest (:inner x))))
+                   ("CXXConstructExpr" "ParenListExpr" "InitListExpr" "CXXTemporaryObjectExpr") (some this? (:inner x))
+                   false))]
+    (boolean (some #(and (map? %) (store? %)) (tree-seq #(and (map? %) (seq (:inner %))) :inner body)))))
+
 (defn analyze-fn!
   "Analyzes a function's body (and a constructor's mem-initializers) into :tbody."
   [fid]
@@ -5182,7 +5515,13 @@
                                        (throw e)))
                             (g)))
             inits (when (= :ctor (:kind f)) (when-not (:implicit f) (trace #(ctor-inits ctx f))))
-            body (when (:body f) (trace #(stmt ctx (:body f))))
+            ;; (CP362 (a), the user 2026-11-11: a consteval constructor's body, which only checks (basic_format_string's runs
+            ;; the format string's scanner at compile time), is not evaluated by the code generator: the immediate invocation
+            ;; stores the mem-initializers' value, the program taken as valid, as clang and g++ accepted it)
+            ;; (pending review 1111 #1, cpp-s5b: only a body that stores to no member; one that does is analyzed, the
+            ;; constructor run when its immediate invocation is reached, its value the one clang folds)
+            body (when (:body f) (if (and (:consteval f) (= :ctor (:kind f)) (not (checking?)) (not (consteval-ctor-body-stores? cls (:body f))))
+                                   {:s :block :items []} (trace #(stmt ctx (:body f)))))
             ;; a constructor's or destructor's function-try-block: control reaching a handler's end rethrows the exception
             ;; ([except.handle]/15; clang's ExitCXXTryStmt, doImplicitRethrow); another function's handler falls through to its end
             ;; ([except.handle]/16). The mem-initializers stay before the try (cpp-90: an exception of theirs is not caught by the

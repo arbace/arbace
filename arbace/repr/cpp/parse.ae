@@ -355,7 +355,7 @@
 ;; {:op "+"} {:conv type} {:dtor "S"} {:lit "_km"}, each with :i. An argument: {:k :type :t T} {:k :expr :x node}
 ;; {:k :tmpl :name name} with :b :e (its tokens) and :pack.
 
-(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr)
+(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr parse-expr tentatively)
 
 (defn- root-ent [^P p] {:k :ns :name "" :scope (stv p ROOT)})
 
@@ -384,7 +384,13 @@
                         :else (recur (inc j) d pd))
         (or (t= t "(") (t= t "[") (t= t "{")) (recur (inc j) d 1)
         (or (t= t ")") (t= t "]") (t= t "}") (t= t ";")) nil
-        (t= t "<") (recur (inc j) (inc d) pd)
+        ;; (cpp-s5: a < after a ) not of `operator()` or after a number opens no template argument list, [temp.names]/3
+        ;; (only a name does): <type_traits>' `__bool_constant<_Tp(-1) < _Tp(0)>`, whose class was declined)
+        (t= t "<") (let [^T pv (tok-at p (dec j))]
+                     (if (or (identical? :num (.-k pv))
+                             (and (t= pv ")") (not (and (t= (tok-at p (- j 2)) "(") (t= (tok-at p (- j 3)) "operator")))))
+                       (recur (inc j) d pd)
+                       (recur (inc j) (inc d) pd)))
         (t= t ">") (if (= d 1) j (recur (inc j) (dec d) pd))
         :else (recur (inc j) d pd)))))
 
@@ -474,7 +480,13 @@
            ;; decltype(e):: as the first part of a nested-name-specifier
            (let [i (ix p) close (loop [j (+ i 2) d 1] (let [^T x (tok-at p j)] (cond (identical? :eof (.-k x)) (perr p "decltype") (t= x "(") (recur (inc j) (inc d)) (t= x ")") (if (= d 1) j (recur (inc j) (dec d))) :else (recur (inc j) d))))]
              (if (t= (tok-at p (inc (long close))) "::")
-               (do (seek! p (+ 2 (long close))) (recur (conj parts {:s (str "decltype(" (tok-text p (+ i 2) (dec (long close))) ")") :i i :decltype true}) nil))
+               (do ;; (cpp-s5: the operand kept for the code generator's decltype, as a decl-specifier's is: `typename
+                   ;; decltype(_S_to_arg_type<_Tp>())::type`, <format>'s _Normalize)
+                   (when (and (= mode :parse) *full-headers* (not (skim? p)))
+                     (seek! p (inc i))
+                     (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
+                       (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str/replace (tok-text p (+ i 2) (dec (long close))) #"\s+" "") x))))
+                   (seek! p (+ 2 (long close))) (recur (conj parts {:s (str "decltype(" (tok-text p (+ i 2) (dec (long close))) ")") :i i :decltype true}) nil))
                (do (seek! p b) nil)))
            :else (do (seek! p b) (when (or g (seq parts)) (perr p "a name")) nil)))))))
 
@@ -2291,11 +2303,18 @@
                               (adv! p)))
                           (when (and (#{"gnu" "__gnu__"} nsname) (not (known-gnu-attr? (ts (tok-at p (+ b 2))))))
                             (unknown-gnu-attr! p b (+ b 2) (t= (tok-at p (+ b 3)) "(")))
-                          (recur (if (cond (nil? nsname) (contains? std-attrs (ts (tok-at p b)))
-                                           (#{"gnu" "__gnu__"} nsname) (known-gnu-attr? (ts (tok-at p (+ b 2))))
-                                           :else (known-attr-ns? nsname))
-                                   (conj out (node p "NativeAttr" b (last-ix p) (if (#{"gnu" "__gnu__"} nsname) {:_gnu (ts (tok-at p (+ b 2)))} {})))
-                                   out)))
+                          ;; (cpp-gatefix: [[no_unique_address]] as libstdc++ writes it, [[__no_unique_address__]], which clang
+                          ;; normalizes to the same attribute: its node named, :_std, for the layout of a potentially-overlapping member;
+                          ;; the other standard attributes' __x__ spellings are left as they were)
+                          (let [nua (and (nil? nsname) (#{"no_unique_address" "__no_unique_address__"} (ts (tok-at p b))))]
+                            (recur (if (cond nua true
+                                             (nil? nsname) (contains? std-attrs (ts (tok-at p b)))
+                                             (#{"gnu" "__gnu__"} nsname) (known-gnu-attr? (ts (tok-at p (+ b 2))))
+                                             :else (known-attr-ns? nsname))
+                                     (conj out (node p "NativeAttr" b (last-ix p) (cond (#{"gnu" "__gnu__"} nsname) {:_gnu (ts (tok-at p (+ b 2)))}
+                                                                                       nua {:_std "no_unique_address"}
+                                                                                       :else {})))
+                                     out))))
                         :else (perr p "an attribute")))]
             (recur out)))
       (and (or (is? p "__attribute__") (is? p "__attribute")) (is-at? p 1 "("))
@@ -2408,7 +2427,9 @@
             (= s "constexpr") (do (adv! p) (recur (assoc ds :constexpr true) words))
             (= s "consteval") (do (adv! p) (recur (assoc ds :consteval true) words))
             (= s "constinit") (do (adv! p) (recur (assoc ds :constinit true) words))
-            (#{"thread_local" "_Thread_local" "__thread"} s) (do (adv! p) (recur (assoc ds :tls true) words))
+            ;; (cpp-s5b: the TLS kind as clang's VarDecl::getTLSKind gives it: thread_local's is dynamic, __thread's and
+            ;; _Thread_local's static)
+            (#{"thread_local" "_Thread_local" "__thread"} s) (do (adv! p) (recur (assoc ds :tls (if (= s "thread_local") "dynamic" "static")) words))
             (#{"_Noreturn" "__extension__" "export"} s) (if (and (= s "export") (not= ctx :top)) (assoc ds :e (last-ix p)) (do (adv! p) (recur ds words)))
             (#{"const" "__const"} s) (do (adv! p) (recur (assoc ds :c true) words))
             (#{"volatile" "__volatile" "__volatile__"} s) (do (adv! p) (recur (assoc ds :v true) words))
@@ -3282,6 +3303,14 @@
                   e1 (if (or pure dflt del) (last-ix p) ev)
                   body? (or (is? p "{") (is? p "try") (and (is? p ":") (not pure) (not dflt) (not del)))
                   cls (class-of-qualifier qn)
+                  ;; (cpp-s8: a function template's name declared before its body, [basic.scope.pdecl]/1: its point of
+                  ;; declaration is after its declarator, so the body names it -- qualified, <ranges_algobase.h>'s
+                  ;; `ranges::__copy_or_move<_IsMove>(...)` in __copy_or_move's own body, which had read as `(a < b) > (...)`
+                  ;; (unqualified, P0846's rule made it a template-name already); a stand-in, taken out before the
+                  ;; declaration proper below, so the entity is as before)
+                  pre (when (and body? nm (nil? (:args lp)) (not (:friend ds)) (not ctor) (not guide) (not (:lit lp))
+                                 tmpl (pos? (long (:n tmpl))) (nil? (.get ^java.util.HashMap (sc/names-of (sc/decl-scope (scope p))) nm)))
+                        (declare! p {:k :fn :name nm :tmpl true :pre true}))
                   [inits body] (when body?
                                  (let [old (stv p RET)]
                                    (st! p RET (when (= :f (:t ty)) (:r ty)))
@@ -3339,6 +3368,9 @@
                       n)
                   n (if (:friend ds) (node p "FriendDecl" (:b ds) e {:loc (loc p ni) :inner [n]}) n)]
               (when (:lit lp) (declare! p {:k :fn :name (str "operator\"\"" (:lit lp))}))
+              (when pre
+                (let [^java.util.HashMap m (sc/names-of (sc/decl-scope (scope p)))]
+                  (when (identical? pre (.get m nm)) (.remove m nm))))
               (when (and nm (nil? (:args lp)) (not (:friend ds)) (not ctor) (not guide))
                 (declare! p (cond-> {:k :fn :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :ptys (:types fs) :qt fqt}
                               (= "C" *linkage*) (assoc :clink true)
@@ -3399,7 +3431,8 @@
                               (#{"static" "extern"} (:storage ds)) (assoc :storageClass (:storage ds))
                               (:inline ds) (assoc :inline true)
                               (:constexpr ds) (assoc :constexpr true)
-                              (:tls ds) (assoc :tls "static")
+                              (:tls ds) (assoc :tls (:tls ds))
+                              (:constinit ds) (assoc :_constinit true)
                               init (assoc :init init)
                               (:args lp) (assoc :_args (:args lp))
                               ctad0 (assoc :_ctad ctad0)
@@ -3603,7 +3636,12 @@
       (= k "CXXRecordDecl")
       (if (:_args n)
         (node p "ClassTemplatePartialSpecializationDecl" (if (> depth 1) ob hb) e
-              (-> (dissoc n :_args :_qn :kind :range) (assoc :inner (vec (concat ps (:inner n))))))
+              (cond-> (-> (dissoc n :_args :_qn :kind :range) (assoc :inner (vec (concat ps (:inner n)))))
+                ;; (cpp-s5: the code generator's: the arguments' tokens as the preprocessor gave them, `<...>`, for a
+                ;; partial specialization a macro writes, whose source text is the macro's invocation: <refwrap.h>'s
+                ;; _GLIBCXX_MEM_FN_TRAITS's _Mem_fn_traits<_Res (_Class::*)(_ArgTypes...) const &>)
+                (and *full-headers* (:ab (last (:parts (:_qn n)))) (:ae (last (:parts (:_qn n)))))
+                (assoc :_targtext (tok-text p (long (:ab (last (:parts (:_qn n))))) (long (:ae (last (:parts (:_qn n)))))))))
         (node p "ClassTemplateDecl" hb e {:name (:name n) :loc (:loc n) :inner (conj (vec ps) (if (> depth 1) (set-begin p n ob) n))}))
       (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "CXXDeductionGuideDecl" "VarDecl"} k)
       (if (<= depth (long (or (:_qtmpl n) 0)))
@@ -3897,6 +3935,9 @@
       (or (t= t "namespace") (and (t= t "inline") (is-at? p 1 "namespace"))) (parse-namespace p)
       (t= t "using") (parse-using p)
       (or (t= t "template") (and (t= t "extern") (is-at? p 1 "template"))) (parse-template-decl p ctx b 1)
+      ;; (cpp-s5: `__extension__ template<...>`, clang's ParseExternalDeclaration consuming the keyword before the
+      ;; declaration: <type_traits>' __is_signed_integer alias template)
+      (and (t= t "__extension__") (is-at? p 1 "template")) (do (adv! p) (parse-template-decl p ctx (ix p) 1))
       ;; clang's recovery of `inline template <...>`: the stray specifier dropped, the template declaration read
       (and (t= t "inline") (is-at? p 1 "template")) (do (adv! p) (parse-template-decl p ctx (ix p) 1))
       (and (t= t "extern") (identical? :str (tk (nxt p 1))) (not (is-at? p 2 ";"))) (parse-linkage p)

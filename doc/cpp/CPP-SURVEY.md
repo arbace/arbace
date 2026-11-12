@@ -6427,3 +6427,910 @@ CPPI_ROUTE=ours bin/cppi check --corpus samples && CPPI_ROUTE=ours bin/cppi chec
 `.tmp/`: `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `L1/`-`L4/` (library.cpp at each step), `p/` (probes; `*.names`, `c.v`,
 `lib-clang.names` the name lists), `env.sh`, `job.sh`, `watch.sh`, `gen*.sh`, `gi.sh`, `gp.sh`, `pw.sh`, `pl.sh`, `plw.sh`, `probe.sh`,
 `snapgen.sh`, `cmp.sh` (no process substitution), `cg.sh`, `ess.sh`.
+
+## As built: cpp-s5 (2026-11-11; branch `cpp-s5` from mac/next 4b8fc77e3, which carries cpp-s4)
+
+Light, by day's rules (.tmp/night12/AGENT-RULES.md): main's stage 0 (`ARBACE_HOST_EXE`), at most two processes (`GOMEMLIMIT=1400MiB
+GOGC=30 REPR_CPP_THREADS=2`; a watcher, `.tmp/watchall.sh`, killing by PID any process of this worktree's TMPDIR past 2.5 GB, never
+reached: peaks 1.4 GB for the generator, 2.4 GB once for `xz -d` unpacking the snapshot's sysroot), the compiler stubs first on PATH
+(their log empty: no clang, g++ or LLVM tool ran), no gate. The 82 run programs generated at a snapshot worktree (`.tmp/snap`). The
+user's decisions of 2026-11-11: CP362 (a), CP363 (a), CP364 (a).
+
+### 1. CP364 (a): gen-batch's drops.tsv
+
+`gen-one` (so gen-batch, gen-list and `bin/cppi codegen`) writes `OUT/drops.tsv` beside gen.ll or gen.refused: the header
+declarations the analysis dropped (G4), grouped by cause (the refusal's class and message), the largest first, `count class message
+examples` (three `KIND:NAME`). sema's `*header-drops*` is now a map keyed by the node (its identity, place, kind and name): a
+declaration a later round of the headers' retry declares is taken out, so a drop is counted once and only when it stays dropped
+(`CPP_HDR_TRACE=1` prints every attempt: library.cpp's 764 trace lines were 168 drops). No file when nothing was dropped.
+
+library.cpp's drops, at cpp-s4's code (`.tmp/L0`): **168**, the largest causes 49 "partial specialization's arguments" (48 of them
+<refwrap.h>'s `_Mem_fn_traits`, written by the macro `_GLIBCXX_MEM_FN_TRAITS`, and <format>'s `_Arg_store<_Context>`), 26 "unknown
+type _Tp/element_type" (`indirectly_readable_traits`), 10 "an explicit specialization's qualifier", 6 `_GLIBCXX_STD_C`, 6
+`move_only_function`'s macro-written types. After this branch (`.tmp/G2/files/runtime/library.cpp/drops.tsv`): ****94****; the
+first two causes are gone (§2), the rest are listed there.
+
+### 2. The drops' largest causes, and <format> (CP362 (a))
+
+Each a general fix, found on library.cpp's way into <format> (probes `.tmp/p/f3.cpp`-`f9.cpp`, `x1`-`x13`):
+
+- **A partial specialization a macro writes**: its arguments' text is the macro's invocation; the parser now keeps the arguments'
+  tokens as the preprocessor gave them (`:_targtext`, the code generator's, under `*full-headers*`), read when the source text has
+  no `Name<` (`_Mem_fn_traits<_Res (_Class::*)(_ArgTypes...) const &>`: the 48).
+- **A partial specialization's type-constraints** ([temp.param]/4, [temp.constr.decl]/3.1): matched with its requires-clause; only
+  the latter was checked, so `formatter<__formattable_float _Tp, __char _CharT>` matched `formatter<int, char>` beside the integers'
+  one ("ambiguous partial specializations"); `indirectly_readable_traits`' constrained specializations (the 26) likewise.
+- **A class template defined with a qualified name** (`template<...> class __format::_Arg_store {...}`, [class.pre]/3): declared
+  in the namespace (or class) its nested-name-specifier names, its partial and explicit specializations' primary found there too
+  (`class-key-scope`); a partial specialization's arguments found after `class __format::` ([class.pre]/3); the specialization's own
+  class not re-scoped by the pattern's qualifier.
+- **A decltype-specifier as a nested-name-specifier** ([expr.prim.id.qual]/1; <format>'s `_Normalize = typename
+  decltype(_S_to_arg_type<_Tp>())::type`): the type reader makes `(cpp/scope (decltype ...) type)`, and the parser keeps the
+  operand for the code generator, as it did for a decl-specifier's decltype.
+- **`__extension__ template<...>`** (clang's ParseExternalDeclaration consumes the keyword first): <type_traits>' `__is_signed_integer`
+  and <iterator_concepts.h>'s `__is_signed_int128` had been declined.
+- **GNU's `__int128` and `unsigned __int128`** (`:i128`, `:u128`): size and alignment 16, LLVM's i128, mangled `n` and `o`, rank 6,
+  GCC's mode TI; <format>'s `_Arg_value` union and `_S_to_arg_type` name them under `__SIZEOF_INT128__`.
+- **CP362 (a)**: a consteval constructor, for the code generator, is always_inline (inlined and erased, as clang emits no immediate
+  function) and its body, which only checks (basic_format_string's runs the format string's scanner), is not analyzed: the
+  immediate invocation stores the mem-initializers' value at run time. clang stores the constant `{ i64 13, ptr @.str }` (the
+  checker of the mem-initializers' string_view(const char*) constructor, a constant evaluation of class objects, is CP362 (b));
+  the value is the same, the instructions not.
+- **An anonymous member's type is this class body's last unnamed class**: a class instantiated by a member's declaration declares
+  its own unnamed classes in between (`*last-anon*` bound per body); `_Arg_value`'s union had been given basic_format_args' union's
+  type, silently.
+- **An out-of-line member's names are looked up in its class's enclosing classes too** (the parser's lookup scope;
+  [basic.lookup.unqual]): <istream.tcc>'s `basic_istream<_CharT, _Traits>::sentry::sentry` names basic_istream's `__streambuf_type`
+  (`__streambuf_type* __sb = ...` had been read as a multiplication); a member class template named through its qualifier
+  (`any::_Manager_internal<_Tp>::_S_manage`).
+- **A `<` after a `)` or a number opens no template argument list** ([temp.names]/3, the parser's `angle-close` and the type
+  reader's argument split), and **a functional cast to a named type in constant text** (an unsigned 64-bit value above
+  Long/MAX_VALUE kept as the integer it is for the comparison): <type_traits>' `__is_signed_helper<_Tp, true> :
+  __bool_constant<_Tp(-1) < _Tp(0)>` had been declined, so **`is_signed_v<T>` was false for every T** (and `is_unsigned_v<int>`
+  true, `signed_integral<long>` and `weakly_incrementable<int*>` false); now as the standard says (probe x12: long, char, double,
+  __int128 signed; unsigned long, unsigned, bool not).
+
+**library.cpp** (the 82's 70th, CP359's last slice): it refused at make_format_args' `_Store` (cpp-s4); it now passes <format>'s
+make_format_args, basic_format_arg's constructor (formatter<int>), vformat_to's `output_iterator<_Sink_iter<char>, const char&>`
+constraint, and refuses at **<format>'s `_Seq_sink<string>::_M_reserve`, whose `this->_M_reset(_M_seq, __sz)` needs span<char>'s converting constructor from std::string ("no viable function among 1")**. Ahead of it: span's converting constructor from a contiguous range (std::string through
+ranges::begin's, end's and size's constraints, probe f8's trace), then the formatting
+machinery itself (clang's IR of library.cpp defines 663 functions, most of them <format>'s: `__do_vformat_to`, the scanner,
+formatter<int>, <double>, <const char*>, the Unicode tables' views). `_Arg_value<format_context>` is instantiated before
+`basic_format_context` is defined (its members dropped, "no size for nil"): CP365.
+
+### Checked (light; the stubs' log empty)
+
+| check | result |
+|---|---|
+| gen-batch over the 82 at 694c5e339 (`.tmp/G1`) | 69 generated, **the 69 of cpp-s4's G2 byte for byte**; 1,931 s |
+| gen-batch over the 82 at f1fd13481 (`.tmp/G2`, the head's code) | **69 generated, the 69 of cpp-s4's G2 byte for byte** (the is_signed fix changed none of their IR); library.cpp refused at `_M_reserve`, 94 drops; 1,784 s |
+| library.cpp alone (`.tmp/L0`-`L2`) | refused at `_Store` (L0, 168 drops), at sentry's `__streambuf_type` (L1, 94), at vformat (L2, 96) |
+| probes (`.tmp/p/`): a1 (any), x1-x9, x12, x13 | generate; x12's is_signed/is_unsigned answers the standard's |
+| `bin/cppi codegen-gen` | 154 of 154 as recorded, the two negative controls failing as they must (591 s) |
+| `bin/repr-cpp target verify`, `pp-check --essential`; `roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own` | pass, 33 of 33 and 9 of 9, the controls failing as they must |
+| `bin/reap` | 0 problems (49 of 52 cells checked), no record changed |
+| `bin/crops-score --record`, `--judge --strict` | 0 problems, no score changed |
+| keys | `test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go --gate-key` 314c8e5b... at mac/next and at the head: **no key moves** (arbace/cpp, arbace/repr/cpp are `arbace_crop_paths`) |
+
+### CP363 (a): variant.cpp and any.cpp
+
+`test/cpp/runtime/pending/variant.cpp` and `any.cpp` (cpp-s4's probes v1 and a1, by our route their defined names clang's) wait
+outside the runtime's list (`bin/cppi list runtime` reads `test/cpp/runtime/samples/*.cpp`), so that no record goes stale before the
+oracle tier records them. The oracle tier's commands (by hand, the host `:cxx`; then one process at a time):
+
+```
+git mv test/cpp/runtime/pending/variant.cpp test/cpp/runtime/pending/any.cpp test/cpp/runtime/samples/
+bin/cppi record-ref --corpus runtime --only          # g++ 15.2's runs of the runtime's 10, test/cpp/ref-gxx15.edn
+bin/cppi record-ir --corpus samples,runtime          # the pack cpp-ir-samples again (clang's IR of the two), its pin
+bin/cppi check --corpus runtime --record && bin/cppi check --aot --corpus runtime --record
+bin/cppi lower-corpus samples                        # the lowering's recorded list (samples+runtime) names the two: re-record it as its header says
+bin/reap --record && bin/crops-score --record && bin/crops-score --judge --strict
+printf 'runtime/variant.cpp\nruntime/any.cpp\n' > .tmp/cp363.txt && CPPI_ROUTE=ours bin/cppi check --corpus runtime --only .tmp/cp363.txt   # their runs by our route
+```
+
+### Proposed (CP365-CP366)
+
+- **CP365: a class template's specialization named before its argument's class is defined.** `_Arg_value<format_context>` (and
+  basic_format_arg's, _Arg_store's) is instantiated while `basic_format_context` is only declared, so its members that name
+  `_Context::char_type` are dropped and the instance stays broken (clang instantiates only where the type must be complete). (a)
+  An instance made while one of its arguments is an incomplete class is provisional: named again after the argument is complete,
+  it is made again (the headers' typedefs that hold it retried as G4's are); (b) instantiate the class lazily (on completeness),
+  sema's model changed throughout. **Recommended: (a).**
+- **CP366: <format>'s rest.** span's converting constructor from a contiguous range (ranges::begin, end and size's constraints on
+  std::string), then `__do_vformat_to`'s formatting machinery: (a) one slice a day as CP359, library.cpp's refusal and drops.tsv
+  the measure; (b) wait for CP362 (b)'s constant evaluator first. **Recommended: (a).**
+
+### The night's commands (after this branch's merge; one process at a time)
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace GOMEMLIMIT=1200MiB GOGC=30 REPR_CPP_THREADS=2 CPPI_JOBS=1 CPPI_THREADS=1
+bin/repr-cpp dg --corpus dg-error --own        # the checker over sema's changes (is_signed, partial specializations' type-constraints): the own dg record held (2-3 GB, about 60 min)
+bin/cppi route-compare --corpus gxx-dg-run --sample 25 && bin/cppi route-compare --aot --corpus gxx-dg-run --sample 25   # no clang pass lost (2-3 GB)
+CPPI_ROUTE=ours bin/cppi check --corpus samples && CPPI_ROUTE=ours bin/cppi check --corpus runtime   # about 60 min, 2-3 GB
+```
+
+### Rule slips
+
+A plain `&` once (the first watcher, `(bash watch.sh ... &)`); one `<(...)` (a `diff` of two drops files); source edits while a run
+that loads them was running (sema.ae and parse.ae/template.ae each once, after the run had loaded them: the runs' outputs were not
+used for a conclusion about the edited code); `git stash list` once (read-only).
+
+### Scratch
+
+`.tmp/`: `G0/` (cpp-s4's G2, the base), `G1/`, `G2/` (the 82), `snap/` (the snapshot worktree), `L0/`-`L2/` (library.cpp), `p/`
+(probes), `lib-clang.ll` (clang's recorded IR of library.cpp, from the pack), `env.sh`, `job.sh`, `watchall.sh`, `snapgen.sh`,
+`cmp.sh`, `cg.sh`, `ess.sh`, `probe.sh`, `gen.sh`.
+
+## As built: review 1111's fixes (2026-11-11; branch `review-fix-2` from mac/next a7916bb2a)
+
+The independent review `.tmp/reviews/1111/REVIEW-cpp-c-py.md` (area cpp-c-py, mac/next a7916bb2a), its C++ findings 1, 4 and 5. Light, by
+night 12's rules: main's stage 0 (`ARBACE_HOST_EXE`), one process at a time, `GOMEMLIMIT=1200MiB GOGC=30`, no clang, g++ or gate.
+
+### 1. cpp-s3's thread_local: internal wrappers, and an extern thread_local through its wrapper
+
+- An internal thread-local variable with a dynamic initializer (`static thread_local int x = f();`, or one of an unnamed namespace) now
+  gets an internal `_ZTH` alias and an internal `_ZTW` wrapper (no hidden visibility), as clang's ItaniumCXXABI
+  (`getThreadLocalWrapperLinkage`: a local linkage is the wrapper's; `EmitThreadLocalInitFuncs`: the alias takes the variable's linkage).
+  Before, two units with such a variable each defined the external `_ZTHL1x` (a duplicate symbol) and a weak_odr `_ZTWL1x` the linker
+  merged. A static data member is not internal (`tls-internal?`), so thread_local11.h's `T::u3` keeps clang's weak_odr hidden wrapper.
+- A thread-local variable defined in another unit (`extern thread_local int t;`, thread_local13.C's and thread_local14.C's) is read
+  through `_ZTW1t`, linkonce_odr hidden, which calls `_ZTH1t`, declared extern_weak, when it is not null, then returns
+  `llvm.threadlocal.address(@t)`: clang's discardable wrapper for a variable the unit does not define. Before, `@t` was read directly and
+  the first use in a thread read the zero-initialized object.
+- Proof (`arbace.cpp.codegen gen-batch`, before and after, `.tmp/tls/`): thread_local12e.C's IR unchanged (its wrapper and alias names
+  and linkages clang's, the recorded `cpp-ir-gxx-dg-run` x.ll); thread_local14-aux.cc and thread_local2.C, thread_local3.C,
+  thread_local-order1.C (refused `tls` both times) unchanged; a probe `static_tls.C` (`_ZTHL1x`, `_ZTHN12_GLOBAL__N_11yE` internal
+  aliases, `_ZTWL1x`, `_ZTWN12_GLOBAL__N_11yE` internal); thread_local13.C, thread_local14.C and a probe `extern_tls.C` (the reads through
+  `_ZTW1t`, `declare extern_weak void @_ZTH1t()`); each lowered to C. No IR record of clang has an internal or an extern thread_local with
+  a dynamic initializer (only thread_local12e.C's in the packs): the internal and extern shapes follow clang's source, named above.
+  `bin/cppi codegen-gen` (the 154 samples' refusals and forms' digests): 154 samples, 154 pass (the forms' digests unchanged, so neither this nor #5's sema and template changes move a sample's IR; the two negative controls fail as they must; 15 min, 1.15 GB).
+
+### 4. runtime/threads.cpp's class
+
+`test/cpp/divergences.edn`'s `:threads` had been widened by cpp-n12 with a regex on the reason alone (`_ZL4worki`), which would hide any
+program's segfault in a `static int work(int)` on a thread. threads.cpp's fault is now `:thread-exceptions` (deferred, CP367), anchored on
+threads.cpp's own frames (`_ZL4worki < g$_ZZ4mainENK3$24_N clEv`); `:threads` keeps `__clone` and `cx$thread_start`'s terminate, and no
+longer claims the threads unproven (runtime/atomics.cpp's four threads pass at both levels). `bin/cppi divergences` (and `--aot`,
+`--sample 25`): 15 programs, 13 pass, threads 1, thread-exceptions 1; `bin/reap --record`, then 0 problems.
+
+### 5. The own dg record's seven Sema crashes
+
+`bin/repr-cpp dg --corpus dg-error --front native --only` the seven files, before: `{:crash 7}`. Fixed: template.ae's `eval-text` reads an
+integer literal as [lex.icon] (0x, 0b, octal, digit separators, the suffixes u, l, ll, z), its value modulo 2^64 through BigInteger
+(template/array32.C's `18446744073709551615`: NumberFormatException), its `fold` wraps 64-bit arithmetic and refuses a division by zero;
+sema's `const-int` short-circuits `&&` and `||` and makes a division by zero not a constant, as `ce-eval` does (warn/overflow-warn-3.C's
+enumerators: ArithmeticException). After: `{:crash 5, :accepted 2}`, the two rows "missed: accepted" (as before the regression) written into
+`test/cpp/check-dg-own-linux-amd64.edn`. Left (CP368): the five below.
+
+### Proposed (CP367-CP370)
+
+- **CP367: throw and catch on ci's threads.** runtime/threads.cpp's four workers fault inside `work()`'s try/catch since the route auto
+  (cirun and ciaot, `segmentation fault (thread 1004: _ZL4worki < ...)`), while atomics.cpp's threads (a guarded static, shared_ptr counts)
+  pass. (a) Diagnose on one worker (`CPPI_ROUTE=ours`, then clang's route) to split the per-thread exception state (the pending-flag
+  layer's `cx$uncaught` per thread) from the route's try/catch codegen; (b) leave it deferred. **Recommended: (a)**, light, a day.
+- **CP368: the own dg record's five Sema crashes left.** (1-3) coroutines/co-yield-syntax-01-outside-fn.C,
+  coroutines/coro-bad-alloc-01-bad-op-del.C, coroutines/coro-missing-ret-value.C: NullPointerException in `sema.ae:1249`
+  (`NamespaceAliasDecl`: coro.h's `namespace coro = std;`, its node's text not matched, the target nil, `str/trim` of nil; the
+  native node's range across coro.h is the suspect); (4) pr67405.C and (5) template/instantiate1.C: StackOverflowError (an unbounded
+  instantiation or lookup; clang stops at its depth limit). (a) Fix the alias's text (the node's own range, or the target kept on the
+  node by the native parser) and bound the two recursions by clang's limits, each a refusal or clang's error; (b) leave them as failing
+  rows. **Recommended: (a)**, the alias first (three files).
+- **CP369: a static data member's global is internal.** sema's `declare-var!` sets `:internal` for a member a class declares `static`
+  (its storage class), so a dynamically initialized static data member's global is emitted `internal` (thread_local11.h's `T::u3`, a
+  probe's `A::y`; clang: a dso_local external global). Two units then each keep their own. (a) `:internal` only for namespace-scope
+  `static` (as `:internal-l`) or an internal home, the codegen samples' forms recorded again; (b) leave it. **Recommended: (a)** (it moves
+  the samples' digests: by itself, with its proof).
+- **CP370: an internal alias lowered to C is external.** arbace.cpp.lower writes every alias without `static` (`(dissoc lm :static)`,
+  1cf6a63ec), so the internal `_ZTHL1x` of #1 is an external C symbol and two C units' still clash at ci's link. (a) Keep `static` for an
+  internal alias when ci accepts `static T f(void) __attribute__((alias("g")))` (measure it first); (b) leave it. **Recommended: (a)**.
+
+## As built: cpp-s5b (2026-11-11; branch `cpp-s5b` from mac/cpp-s5 6c3575b77, review-fix-2's C++ commits picked)
+
+C++'s line as one branch: cpp-s5 with mac/review-fix-2's C++ and Python-input commits cherry-picked (a15645cd0 TLS, e11cf87cc the threads
+class, a2b9a8b96 the literals, f4df29be7 pyi-runtime-tables' inputs, 2c2d3e1b3 got.out; its goi commits aabb45df8 and 6542d2a11 wait for
+W2, they move `gate_key`), and the night review `.tmp/reviews/1111/REVIEW-pending-cpp-asm-fix23.md`'s C++ findings #1-#5 fixed. The section
+above ("As built: review 1111's fixes") is review-fix-2's, carried with its commits; its #5's "value modulo 2^64 as a long" is superseded by
+#3 below. Light, by night 12's rules: main's stage 0, one process at a time, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`.
+
+### #3 (merge): one representation of unsigned 64-bit values in template.ae's constant text
+
+cpp-s5's functional cast gave `size_t(-1)` as the BigInt 18446744073709551615N, review-fix-2's `num` gave `18446744073709551615ULL` as the
+long -1; merged as they were, `size_t(-1) == 18446744073709551615ULL` folded false, and any other operator on the BigInt (`(map long args)`)
+threw Java's IllegalArgumentException, a Sema crash. Now one representation, exact integers inside the text's evaluation: a long, or an
+unsigned 64-bit value above Long/MAX_VALUE as a BigInt (`num` for a literal above it, `cast-named` and `cast-to` for an unsigned 64-bit
+type). An operation with such an operand is unsigned long long's ([expr.arith.conv]/1.5): both operands and the result modulo 2^64, a
+comparison of the converted values (`size_t(-1) > -1` false, as C++), else 64-bit arithmetic wraps as before (sema's const-int). Outside
+the text (eval-text's value, subst-value's fold) a value is its 64-bit pattern, a long, as sema's typed `ce-wrap` holds it, so nothing past
+the text sees a BigInt. A division by zero stays a refusal (review-fix-2's); a shift by a count outside 0..63 is one too. The limit, by the
+untyped fold: a value that fits a long loses its unsignedness (`size_t(-1) / 2` is a plain long), and a name's value (a `static const
+size_t` member, read through sema) is its pattern.
+
+### #2: __int128 constants
+
+sema's `ce-wrap` held a 128-bit value as a long and `const-int`'s and `ce-eval`'s arithmetic wrapped at 64 bits, so `(unsigned __int128)1 <<
+64` folded to 0 (Java masks the count) and a constant above 2^63 was emitted truncated, silently. Now (`wide?`, `wide-binop`): a 128-bit
+type's arithmetic is exact (BigInt) and `ce-wrap` keeps the result while it fits 64 bits (an unsigned one not negative), else the
+expression is not a constant: a constexpr variable's initializer is then the program's dynamic initialization (i128 IR, the value right at
+run time; clang folds it), a template argument's a refusal. A shift count outside 0..127 and a division by zero are not constants. In the
+template text a cast to a 128-bit type is a refusal. Carrying 128-bit BigInts through sema and the code generator (every `(long v)` of the
+constant paths) was the alternative, left: libstdc++'s 128-bit constants above 64 bits are `<format>`/`<charconv>` internals none of the run
+programs reaches.
+
+### #1: CP362 (a) only for a consteval constructor whose body only checks
+
+`consteval-ctor-body-stores?` (sema) scans the body's node: an assignment, a compound assignment or ++/-- whose operand is a member of
+`*this` (a member named alone, `this->m`, a member or an element of one, `*this`), a call of a non-static member function named alone or
+through `this`, a call on a member, `this`/`*this` passed. Such a body is analyzed (the constructor, always-inline, runs at the immediate
+invocation: its value clang's, computed at run time); a body that stores nothing is still skipped (basic_format_string's
+`_Checking_scanner<...> __scanner(_M_str); __scanner._M_scan();` only reads `_M_str`). The scan is syntactic and conservative: a parameter
+that shadows a member counts as the member (analyzed, not wrong).
+
+### #4 and #5: thread_local as clang's TLS kinds
+
+- The native parser records the TLS kind as clang's `VarDecl::getTLSKind` (`"tls": "dynamic"` for `thread_local`, `"static"` for `__thread`
+  and `_Thread_local`; before, "static" for all three, against clang's dumps) and `constinit` (`:_constinit`, or clang's `ConstInitAttr`);
+  sema keeps `:tls-kind` and `:constinit`.
+- A variable defined in another unit is read through `_ZTW` only when clang's `usesThreadWrapperFunction` would: dynamic TLS, not
+  constinit, an `extern` variable or a static data member this unit does not define (`tls-defined-here?`: a definition after an `extern`
+  declaration is a variable of its own in sema). `extern __thread int x;` and `extern thread_local constinit int y;` are read directly
+  (before: a linkonce_odr `_ZTW` and an extern_weak `_ZTH` clang never emits); `struct C { static thread_local int x; };` used here and
+  defined elsewhere is read through `_ZTWN1C1xE`, the global declared external thread_local (before: read directly, and the lowering
+  refused the undeclared global); `extern thread_local int t;` used before its dynamic definition in the unit goes through the definition's
+  weak_odr `_ZTW1t` alone, before its constant definition reads `@t` directly.
+- `tls-internal?` (#5): a static data member is internal when an unnamed namespace is on its path ([basic.link]/4), its `_ZTH` alias and
+  `_ZTW` wrapper internal (`_ZTHN12_GLOBAL__N_11C1xE`); others stay as review-fix-2 left them (CP369: sema's `:internal` for every
+  `static` member).
+- Left: a reference's wrapper returns the reference's address where clang's loads the referent (pre-existing on both paths); CP371.
+
+### Proofs
+
+- Probes (`arbace.cpp.codegen gen-batch`, `.tmp/probe/`, 15 files, 373 MB): `consteval_store.C` (`v = x * 2` in the body: the
+  constructor inlined with its store, `s.v` 6; before, 0) and `consteval_check.C` (a checking body still skipped, its IR as cpp-s5's
+  rule gives); `i128_shift.C` (`(unsigned __int128)1 << 64`: not a constant, `k` dynamically initialized by `shl i128`, the value 2^64;
+  before, folded to 0), `i128_big.C` (`(__int128)9223372036854775807LL + 2`: dynamic, `add i128`; before, truncated), `i128_small.C`
+  (within 64 bits: still folded, `main` returns 0); `u64_text.C` (template arguments: `u64(-1) == 18446744073709551615ULL` 1,
+  `0x8000000000000000ULL > 0` 1, `u64(-1) / 2 > 0` 1, `!u64(-1)` 2, `u64(-1) > -1` 2, `u64(-1) * 2 == 18446744073709551614ULL` 1,
+  `U<u64(-1)>::v` the i64 -1: every value C++'s, no crash), `u64_div0.C` (`T<(1 / 0)>`: a `template` refusal, "division by zero in a
+  constant expression"); `tls_static_kind.C` (`extern __thread int x; extern thread_local constinit int y;`: both read directly, no
+  `_ZTW`/`_ZTH`), `tls_member.C` (`C::x` defined elsewhere: through `_ZTWN1C1xE`, `@_ZN1C1xE` declared external thread_local, lowered to C;
+  before, read directly), `tls_extern_def.C` (extern, use, dynamic definition: one weak_odr `_ZTW1t` and the `_ZTH1t` alias, no linkonce
+  duplicate), `tls_extern_cdef.C` (extern, use, constant definition: `@t` read directly), `tls_anon_member.C` (an unnamed namespace's
+  class's member: `_ZTHN12_GLOBAL__N_11C1xE` and `_ZTWN12_GLOBAL__N_11C1xE` internal); review-fix-2's `extern_tls.C`, `static_tls.C`,
+  `member_static.C` as review-fix-2 recorded them.
+- The 82 run programs (cpp-s5's G2 list, gen-batch, 2,563 s, peak 1.37 GB): the same 69 ok and 13 refusals by the same causes, all 69
+  `gen.ll` and every `forms.ae` byte for byte cpp-s5's G2 (which is the cpp-s5 tip's): neither the fold's representation, the 128-bit
+  rule, the consteval scan nor the TLS kinds move a run program's IR.
+- `bin/cppi codegen-gen`: 154 samples, 154 pass (the forms' digests unchanged), the two negative controls fail as they must (11.5 min,
+  peak 1.03 GB).
+- cpp-print-essential's command (the parser's TLS kind is in the native trees): `roundtrip-corpus gxx-dg-essential --judge own` 33 of 33
+  pass, `samples` 9 of 9, the control fails as it must (4.5 min, peak 1.47 GB).
+- `bin/reap`: 49 of 52 cells checked, 0 problems; `bin/crops-score --record` (scores unchanged, no diff) and `--judge --strict` exit 0.
+- Keys: `bin/arbace-go --gate-key` 314c8e5b04ab... (mac/next's, as review-fix-2 recorded it), `test/gate/gate-key-crops-test.bash` passes:
+  every file the branch changes is a crop path or a record; nothing moves a key.
+- Not run (night commands, over 1.5 GiB): `bin/cppi lower-essential` (3 GiB) and `bin/cppi check --corpus samples` (cpp-check-essential,
+  about 3 GiB), each about 10 min at one thread; the native tree check `bin/repr-cpp native-check ... --tree` over the C++ corpora (the
+  `"tls": "dynamic"` now as clang's dumps: expected improvements only, any `thread_local` VarDecl's row) and the own dg record's run
+  (`bin/repr-cpp dg --corpus dg-error --front native`, about 2.4 GiB).
+
+### Proposed (CP371)
+
+- **CP371: a thread-local reference's wrapper.** clang's `_ZTW` of `thread_local T& r` returns the referent (it loads the reference);
+  Arbace's returns the reference's address, on the defining and the extern paths, and the wrappers are weak or linkonce across units, so a
+  unit mixed with clang's objects reads the wrong address. (a) Load the referent in both wrappers for a reference type, with a two-unit
+  probe; (b) leave it (no run program has one). **Recommended: (a)**, small.
+
+## As built: cpp-s6 (2026-11-11; branch `cpp-s6` from mac/cpp-s5b 085ed6e14)
+
+The user's decisions of 2026-11-11: CP365-CP371 all (a). Light, by night 12's rules: main's stage 0 (`ARBACE_HOST_EXE`), one process
+at a time, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, no clang, g++, gate or big lock. Probes in `.tmp/probe/` (gen-batch).
+
+### CP371 (a): a thread-local reference's wrapper
+
+`_ZTW` of a reference (`thread_local int &r = pick();`, and `extern thread_local int &r;`, a static data member's) loads the reference and
+returns the referent's address, as clang's ItaniumCXXABI::EmitThreadLocalInitFuncs (`if (VD->getType()->isReferenceType()) Val =
+CreateAlignedLoad(...)`), on the defining wrapper (weak_odr hidden, or internal) and the extern one (linkonce_odr hidden); a read of the
+reference through its wrapper takes the call's value as the referent's address (EmitThreadLocalVarDeclLValue), no second load
+(`tls-via-wrapper?`, `tls-wrapper-ret`). Probes `tls_ref.C` (`%tr = load ptr, ptr %t1` in `_ZTW1r`, main stores 9 through the call's
+value) and `tls_ref_ext.C` (`_ZTW1r`, `_ZTWN1C1mE`); `static_tls.C`, `extern_tls.C`, `tls_member.C`, `tls_extern_def.C` byte for byte
+cpp-s5b's. Left: an extern reference's declaration is still `[8 x i8]` (clang's `ptr`), the same bytes.
+
+### CP368 (a): the own dg record's five Sema crashes
+
+- (1-3) the coroutines files: the native tree names the main file `coroutines/x.C` and its quoted header `coroutines/coro.h`, both
+  relative to g++.dg, while `*main-dir*` is the main file's own directory; `text-of` found no `coroutines/coroutines/coro.h` and gave the
+  main file's text, so the alias `namespace coro = std;` read `lude "coro.h"...`, no target, an NPE. `located-file` (sema) resolves a
+  relative name also under the root the main file's own name is relative to (`text-of`, `header-node?`; the code generator names the main
+  file by its base name, so its path is unchanged). The three now read; their rows "missed: accepted" (the coroutine checks Sema lacks).
+- (4, 5) pr67405.C (`struct S { S f; };`) and template/instantiate1.C (Z<int> through Y<Z<int>> and X<Z<int>>): the class contained itself
+  and `trivial-copy?` recursed without end. A class being defined is marked `:defining` (until its body ends, a `finally`); a member of
+  such a class type (or an array of it) is an incomplete type ([class.mem.general]/7, clang's err_field_incomplete_or_sizeless): the
+  checker reports "field has incomplete type" at the member (diag's rule `:incomplete`) and leaves it out, the code generator refuses
+  (`incomplete`). Both pass by their own dg-error lines.
+- The recursions bounded: class instantiations nested at most 1024 (clang's -ftemplate-depth, `*inst-depth*`), and since the analysis'
+  stack ends first (about 900 nested on the tools' host, probe `inst_depth.C`: `template<int N> struct R { R<N+1> r; };`) the outermost
+  `instantiate-class` turns a StackOverflowError under it into the same refusal, `depth` ("recursive template instantiation exceeded
+  maximum depth", diag's rule `:depth`): a diagnostic, not a crash.
+- template/array32.C had turned into a crash (ArithmeticException in the layout: `char a[SIZE_MAX / 2]`'s size in bits passes a long,
+  since cpp-s5b's exact 64-bit constants); a layout that overflows is now a refusal (`:type`, "too large for its layout"), the row back to
+  its recorded "missed: accepted".
+
+`bin/repr-cpp dg --corpus dg-error --front native --only` the five, `--record`: 3 crash rows now "missed: accepted", 2 now pass;
+`test/cpp/check-dg-own-linux-amd64.edn` changes in those five rows alone. The 34 files of a wider run (the five, the rows whose source
+includes a quoted header, 25 of template/) gave every other row as recorded.
+
+### CP365 (a): provisional instances
+
+A class template's instance whose definition did not finish (a header's drop, or a refusal thrown) while one of its arguments was a class
+not complete (declared only, or still `:defining`) is provisional (`*provisional*`: the arguments it waits for, and how to make it): when
+the last such argument's definition ends (sema's `declare-class!` marks `:finished` and calls the hook `:class-completed`), it is made
+again in place, the same class id (`declare-instance!` with `cid`: the record, scope and members afresh; the old members' functions left
+unlisted), its partial specialization's out-of-line members attached again, and every cached layout dropped (computed again on use: a
+class holding the instance had laid it out broken). An instance that finished is never remade (`box<node>` inside node's definition, the
+common case, stays as it is). Probes: `prov3.C` (a header with <format>'s shape: `_Arg_value<basic_format_context<char*, char>>` made
+inside basic_format_context's definition before `char_type`, its member `typename _Context::char_type _M_c` dropped; now made again,
+`basic_format_arg<format_context>` 16 bytes, the member read) and `prov1.C` (`typedef V<Ctx> VC;` with `struct Ctx;` declared only, in
+the main file) generate; before, "no size for nil" and "no default constructor for V". Not covered: naming a specialization of a class
+template not defined yet in the main file (`prov2.C`, "header type", the CP338 path).
+
+### CP369 (a): a static data member's global
+
+sema's `:internal` no longer follows `static` on a static data member ([basic.link]/4: its linkage is its class's): internal only by an
+unnamed namespace on its home's path. `int A::x = 3; int A::y = f();` are now `@_ZN1A1xE = global i32 3`, `@_ZN1A1yE = global [4 x i8]
+zeroinitializer` (clang's dso_local externals), before `internal`; review 1111's member probes unchanged otherwise.
+
+### CP370 (a): an internal alias lowered to C
+
+arbace.cpp.lower keeps `static` on an internal alias (`__attribute__((alias("__tls_init"))) static void _ZTHL1x(void);`). Measured first
+(`.tmp/cal/`): `bin/ci run` accepts `static void th(void) __attribute__((alias("init")))`; two units each with a static `_ZTHL1x` aliasing
+their own `init` link and run apart (exit 0), the negative control exits 1, and the same two units with the aliases external return the
+wrong unit's value (exit 1): the clash CP370 named.
+
+### Checked, and stopped at the disk's limit
+
+Done before 20:24 UTC: the probes above (gen-batch, peaks under 0.45 GB), the dg runs named (peak 0.43 GB), `bin/ci run` over `.tmp/cal/`
+(0.32 GB). At 20:24 `df /` passed the night rules' 85% (86%, the night's own runs; this worktree's `.tmp/` is 383 MB) and stayed there past
+20:54, so by the rules no further run was started: CP369's and CP370's probes after their edit ran once (`member_static.C`: the two
+members now external, as above; `tls_member.C`, `tls_anon_member.C` byte for byte cpp-s5b's; `static_tls.C`'s C now `static` on the alias),
+and the proofs below are left as commands.
+
+### Not run (by the rules; each one process, under 1.5 GiB, in this order)
+
+```
+. .tmp/env.sh   # GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1, ARBACE_HOST_EXE main's stage 0
+# 1. the 82 run programs against cpp-s5b's G3 (about 43 min, 1.4 GB): IR unchanged but CP369's member globals' linkage
+sed 's#/cpp-s5b/.tmp/G3/#/cpp-s6/.tmp/G4/#' ../cpp-s5b/.tmp/g3.tsv > .tmp/g4.tsv && .tmp/gen.sh $PWD/.tmp/g4.tsv
+bash ../cpp-s5/.tmp/cmp.sh ../cpp-s5b/.tmp/G3 .tmp/G4    # differences: only `internal` -> external on static data members
+# 2. library.cpp alone (CP365: _Arg_value<format_context> made again; its refusal and drops.tsv against cpp-s5's 94)
+# 3. the codegen samples (CP369 moves the digests of any sample with a static data member's definition): 12 min, 1.03 GB
+bin/cppi codegen-gen; bin/cppi codegen-gen --record     # the second only when the first's differences are CP369's linkage alone
+# 4. probe member_kinds.C (constexpr, inline, const, a template's and an unnamed namespace's static members)
+# 5. bin/reap; bin/crops-score --record && bin/crops-score --judge --strict; bash test/gate/gate-key-crops-test.bash
+```
+
+Keys: every file the branch changes is under `arbace/cpp/`, `arbace/repr/cpp/`, `test/cpp/` or `doc/` (crop paths and records,
+`arbace_crop_paths`): no key should move; the test above confirms it.
+
+### Proposed (CP372-CP373)
+
+- **CP372: a specialization of a class template not defined yet, named in the main file** (`prov2.C`: `using ctx = Ctx<int, short>;`
+  before `Ctx`'s definition, "header type"): (a) an incomplete instance completed in place when the template's definition arrives (the
+  mechanism of CP365 with the template as the awaited definition); (b) leave it to CP338's retry of typedefs. **Recommended: (a)**.
+- **CP373: an extern thread-local reference's declaration** is `[8 x i8]` (clang's `ptr`), as every non-scalar extern global: (a) `ptr`
+  for a reference; (b) leave it (the same bytes). **Recommended: (a)**, with the codegen samples re-recorded once.
+
+## As built: cpp-s7 (2026-11-11; branch `cpp-s7` from mac/cpp-s6 b14a077c0)
+
+The user's decisions of 2026-11-11: CP372 (a) and CP373 (a); first cpp-s6's unrun proofs. Light, by night 12's rules: main's stage 0
+(`ARBACE_HOST_EXE`), one process at a time, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, each run gated on MemAvailable >= 12 GiB
+and `df /` <= 85% in its command (`.tmp/run.sh`), no clang, g++, gate or big lock. Probes in `.tmp/probe/`.
+
+### cpp-s6's unrun proofs
+
+1. **The 82 run programs at cpp-s6's code** (`.tmp/G4`, one gen-batch, 58 min): against cpp-s5b's G3, 68 generated (69 before), 66 byte
+   for byte, 2 differing (init/array66.C, special/initp1.C: only CP369's static data members' globals, `internal global` -> `global`, and
+   their place, an external one no longer written lazily), 1 lost: **tls/thread_local12e.C**, refused "a template's thread-local static
+   member with dynamic initialization (u3)". Not CP369's intent: thread_local11.h's `thread_local S T::u1, ...` is an out-of-line
+   definition in a header, and a header's definition is linkonce unless internal (sema's qualified-definition branch); before CP369 every
+   static data member was internal, so never linkonce there; now external, it was taken for a template's member. Fixed below (cpp-s7's
+   first item). **Peak RSS 2.4 GB**, over the night rules' 1.5 GiB (one process over the 82; `GOMEMLIMIT` is a soft limit): a rule slip,
+   reported; the later runs of the 82 are in parts of 20 programs, library.cpp left to the night (below).
+2. **library.cpp** (the 82's, in G4): the refusal byte for byte cpp-s5b's (`overload`: "no viable function among 1 for 2 arguments"),
+   drops.tsv the same 48 causes. CP365 did not move it: _Arg_value<format_context> is made again (prov3.C's shape), but the refusal is
+   further on. Not run alone again (its peak is above the night's limit).
+3. **`bin/cppi codegen-gen`** (after cpp-s7's code, 14 min, 1.02 GB): 149 of 154 as recorded, the 5 failing exactly the samples with a
+   static data member's definition (bank, methods, mixed-features, staticmembers, tmpl-member-class), each gen.ll against cpp-s5b's differing
+   only in those globals' linkage (`internal global` -> `global`) and place; no sample declares an extern reference (CP373 moves none); the
+   two controls fail as they must. Then `--record` (14 min, 1.05 GB): `test/cpp/codegen/forms.sha256`'s five lines.
+4. **member_kinds.C** (constexpr, inline, const, a template's and an unnamed namespace's static members): generated, but lowering refused
+   "unknown global _ZN1A1iE": `static inline int i = f();` had no definition (a pre-existing gap: a static data member's in-class declaration
+   was never a definition). Fixed below; now `@_ZN1A1iE = linkonce_odr global [4 x i8]` with its guard `_ZGVN1A1iE`, A::c `global i32 7`,
+   B<int>::t linkonce_odr, the unnamed namespace's C::z `internal`, and `bin/llvmi run` of its IR exits 0 (the sum 21).
+5. `bin/reap` (0 problems), `bin/crops-score --record` then `--judge --strict` (exit 0, 0 problems; scores.edn unchanged),
+   `test/gate/gate-key-crops-test.bash` PASS: below, at cpp-s7's head.
+
+### CP369's follow-ups
+
+- **A static data member's out-of-line definition in a header is not linkonce** (sema's qualified-definition branch: linkonce now only for
+  a non-member, as before CP369 in effect): thread_local12e.C generates again, `@_ZN1T2u3E = thread_local global` (clang's), the rest of
+  its IR byte for byte cpp-s5b's.
+- **An inline static data member is defined when used**: `static inline T m = init;` in its class ([class.static.data]/4, [dcl.inline]/6)
+  is a definition, `:pending-def` and linkonce_odr as clang emits an inline variable (with its guard when dynamically initialized).
+  Left: a `static constexpr` member (implicitly inline) is still not defined: its reads fold, and an odr-use of it (its address) is
+  unresolved as before.
+
+### CP372 (a): an incomplete instance completed in place
+
+A specialization of a class template that has no definition yet, no partial specialization and no explicit specialization for the
+arguments, named while the main file is declared (sema's `*main-retry*` bound; the headers keep their retry, `*retry*`), is an incomplete
+class (`incomplete-instance!`: the template's instance cached, its scope bound, not `:complete`), as [temp.inst]/2 has it: naming it does
+not instantiate it. When the template's definition arrives (declare-template, the definition's branch: `template-defined!`), each such
+instance is made in place, the same class id, by the usual choice of partial specialization or primary (`select-instance!`, split out of
+`instantiate-class*`), and the layouts dropped; an explicit specialization declared for those arguments completes it likewise. The class
+completed fires CP365's hook, so the provisional instances that waited for it are made again. A refusal while completing leaves it
+incomplete. Probe prov2.C (`using ctx = Ctx<int, short>; using AC = A<ctx>;` before Ctx's definition, V<C> naming `C::char_type`):
+before, "header type Ctx<int, short>"; now generated, `CPP_TMPL_TRACE` shows Ctx 4 incomplete, V 7 and A 5 provisional, Ctx completed,
+V and A made again; `bin/llvmi run` of its IR exits 0 (sizeof(AC) 8, the members read). (The probe as cpp-s6 wrote it, and prov1.C, had
+`sizeof == 4` for a struct of a short and an int: exit 1 for the right reason, a negative control; corrected to 8, both exit 0.)
+
+### CP373 (a): an extern reference's declaration
+
+`var-addr`'s declaration of a variable defined elsewhere is `ptr` for a reference (clang's ConvertTypeForMem), before `[8 x i8]`:
+tls_ref_ext.C's `@r = external thread_local global ptr, align 8` and `@_ZN1C1mE` likewise. Every reference, not only a thread-local one
+(clang writes `ptr` for `extern int &r;` too). No codegen sample declares one: their digests move by CP369 alone.
+
+### A Sema crash found on the way
+
+The own dg record's run (`--sample 10`) failed one row: cpp2a/explicit6.C, a recorded own pass, crashed with Java's NumberFormatException
+on "1.0" (`explicit((T) 1.0)`): review 1111 #5's BigInteger read of eval-text's integer literals took a floating literal. eval-text now
+refuses a literal that is not an integer's (`:template`, "not an integer literal"); explicit-spec counts the refusal as explicit, as it did
+before; the row passes again.
+
+### Checked
+
+| Run | Result |
+|---|---|
+| gen-batch over the 82 at cpp-s6's code (`.tmp/G4`, one process) | 68 generated; vs cpp-s5b's G3: 66 byte for byte, 2 CP369 linkage, thread_local12e.C lost (fixed); 58 min, **2.4 GB** (over the rules' 1.5 GiB) |
+| gen-batch over 81 of them (library.cpp left out) at cpp-s7's code, in five parts (`.tmp/G5`) | 69 generated: vs G3 66 byte for byte, 3 differing only in CP369's linkage (array66, initp1, thread_local12e); vs G4 68 byte for byte, thread_local12e gained; peaks 0.48, 0.43, 0.37, 1.27, 0.30 GB, 55 min |
+| probes (gen-batch, `.tmp/probe`) | prov1, prov2, prov3, member_kinds, member_static, tls_ref, tls_ref_ext, extern_tls, static_tls, tls_member generate (peak 0.36 GB); `bin/llvmi run` of prov1, prov2, prov3, member_kinds, tls_ref exit 0 |
+| `bin/cppi codegen-gen`, then `--record` | 149 of 154 as recorded, the 5 CP369's; recorded: 154 generated, 0 refused (14 min, 1.05 GB each) |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` | 454 files, own pass 127 as recorded, none failing (after the eval-text fix; 11.5 min, 1.03 GB) |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0, 0 problems, scores unchanged |
+| `test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; the same key as cpp-s6's (314c8e5b04ab...): no key moves |
+
+### Not run (by the rules; each one process)
+
+```
+. .tmp/env.sh
+# library.cpp alone at cpp-s7's code (its peak in G4's single process was 2.4 GB: above the night's 1.5 GiB; about 15-25 min):
+# the inline static members (headers' `static inline`) may move it; refusal and drops.tsv against G4's (overload; 48 causes)
+.tmp/gen.sh $PWD/.tmp/g5lib.tsv
+```
+
+## As built: cpp-s8 (2026-11-12; branch `cpp-s8` from mac/cpp-s7 b7d9b0249)
+
+The user's decision CP366 (a): the rest of <format> one slice a day, library.cpp's refusal and drops.tsv the measure. Light, by night 12's
+rules until 07:00 UTC (one process at a time, each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB
+GOGC=20 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID any process of this worktree past 1.5 GiB), then the day's 2.5 GiB
+for library.cpp alone. No clang, g++, gate or big lock. Probes in `.tmp/probe/` (gen-batch), each reproducing a step of library.cpp's way
+on a header subset: `f8.cpp` (<format>'s vformat, about 1.0 GB, 150-220 s) for the whole way, and small ones (`s1`-`s3`, `c1`-`c15`,
+`r1`, `prov4`, `b1`, 0.3-0.8 GB) for each cause.
+
+### The way through span's converting constructor (library.cpp's refusal at cpp-s7)
+
+`_Seq_sink<string>::_M_reserve`'s `this->_M_reset(_M_seq, __sz)` needs span<char>(std::string&), whose constraints are ranges'
+contiguous_range and sized_range of string&. Probe s3 measured 16 iterator concepts on `char*` and on string's iterator
+(`__normal_iterator<char*, string>`): at cpp-s7, char* satisfied 6 of 16 and the iterator 5; now both 16 of 16. The causes, each general:
+
+- **A partial specialization's arguments completed by the primary's defaults** ([temp.spec.partial.general]/8, [temp.arg.general]/9):
+  `template<class X, class Y> struct __common_ref_impl<X&, Y&&>` of `template<class A, class B, class = void> struct __common_ref_impl`
+  is <X&, Y&&, void>; its two arguments had never matched an instance's three, so common_reference_t<char&, char&&> fell to
+  <type_traits>' third bullet (char&) and common_reference_with, indirectly_readable<char*> with it, were false (`partial-args`,
+  also in partial-match's substitution check; probe c1, c2).
+- **A dependent non-type default argument** in a dependent template-id (`__match_cv_qualifiers<_Qualified, _Unqualified, bool _IsConst =
+  is_const<_Qualified>::value, ...>` under `__copy_cv<_Xp, _Yp>`): the dependent expression read from its text, as a signature's
+  (eval-text), not a refusal; <type_traits>' `__common_ref_impl` partial specializations had been dropped ("a dependent template-id with
+  default arguments", one of drops.tsv's causes).
+- **T{} and T{e} of a scalar type** ([expr.type.conv]/2, [dcl.init.list]/3.10-3.11): value-initialized or the element converted
+  (`scalar-list-cast`); <concepts>' default_initializable<char*> (`requires { _Tp{}; }`) had been false, so semiregular, regular and
+  every iterator concept above input_iterator (probe c3, c4).
+- **Hidden friends by argument-dependent lookup alone** ([class.friend]/7, [basic.lookup.argdep]/4.3): a friend function or function
+  template defined in a class and not declared in its namespace is entered with its class (`:friend-cls`) and found by an operator's
+  lookup, a call's ADL or a named call only when its class is associated with the arguments (sema's `adl-classes`, `friend-visible?`;
+  template.ae's `adl-templates`, call-candidates). `unreachable_sentinel_t`'s `template<weakly_incrementable _It> friend bool
+  operator==(unreachable_sentinel_t, const _It&)` had been a candidate of every `a == b`, and its constraint for a __normal_iterator
+  recursed through iterator_traits into itself to the constraints' depth (24): weakly_incrementable<string::iterator> false (probe c6,
+  c7: a hidden friend still found through its class).
+- **Partial specializations told apart by their parameters' type-constraints** ([temp.param]/4): `indirectly_readable_traits<
+  __has_member_value_type _Tp>` and `<__has_member_element_type _Tp>` have the same arguments and no requires-clause; the second
+  had replaced the first as a redeclaration, so a __normal_iterator had no value_type (probe c9).
+
+### The rest of the way to vformat_to
+
+- **A concept-id as a template argument** (const-form; [temp.names]/8): `borrowed_iterator_t<_Range> = __conditional_t<borrowed_range<
+  _Range>, ...>` had refused ranges::copy's range operator() ("constant (<> borrowed_range _Range)"); a dependent one is `{:k :texpr :o
+  :concept}`, mangled as clang's unresolved name.
+- **A function template's name declared before its body** in the native parser ([basic.scope.pdecl]/1): `ranges::__copy_or_move<_IsMove>
+  (...)` in its own body, qualified, had read as `(a < b) > (...)` (probe r1); a stand-in taken out before the declaration proper, so the
+  entity is as before.
+- **Concept arguments short of its parameters** (a type-constraint whose text the parser did not split): completed by the concept's
+  defaults, else not checked (a doubt), not bound short (an IndexOutOfBoundsException, a crash).
+- **Partial specializations ordered by their constraints** ([temp.spec.partial.order]/1 with [temp.func.order]/6.2.2): of two whose
+  arguments deduce each other, the more constrained (`partial-constraints`, `more-constrained-partial?`); a qualified concept-id in a
+  requires-clause (`__detail::__has_member_element_type<_Tp>`) normalized through its concept (`concept-ref` by its qualifier). LWG 3446's
+  indirectly_readable_traits over the value_type and element_type ones and LWG 3541's: std::span's value_type had been "ambiguous
+  partial specializations" (probe c11).
+- **A specialization instantiated during its own selection**: the partial specializations' constraints for `__iterator_traits<span<char>,
+  void>` instantiated it (through iterator_traits<span>, whose base it is) before the outer selection declared a second class of the
+  same arguments; iterator_traits derived from the first while the cache held the second (`select-instance!` takes the one made; probe
+  c13-c15).
+- **A satisfaction that asked __is_base_of of a class still being defined is not memoized** (`*unstable*`): __primary_traits_iter<span>
+  had been memoized false while iterator_traits<span> had no base yet.
+- **A constructor template with more parameters than the arguments** is no candidate before its deduction and constraints
+  ([over.match.viable]/2): span's `template<contiguous_iterator _It> span(_It, size_type)` for is_constructible<span, span> had checked
+  contiguous_iterator<span>, which asks is_constructible<span, span> again. (Only for constructor templates: a function template's
+  defaults may be on an earlier declaration, `__do_vformat_to`'s `const locale* = nullptr`, which the pattern's own parameters do not show.)
+- **Provisional instances, CP365's follow-up**: an instance whose definition finished with a member's declaration dropped (a nested class's
+  among them) is provisional too, and an anonymous member whose unnamed class a header dropped is left out (a drop), not a member of no type
+  (the layout's "no size for nil"): <format>'s `_Arg_value<_Context>`'s anonymous union, `_CharT _M_c` dropping it whole, so `_M_none`
+  and the rest were no members of _Arg_value<format_context> (probe prov4, `bin/llvmi run` exit 0: the union member read after the remake).
+- **GNU builtins** of <format>'s floating-point formatter: `__builtin_frexp{,f,l}`, `__builtin_toupper`, `__builtin_copysign{,f,l}` as
+  libm's functions, and `__builtin_signbit(x)` (copysign(1, x) < 0) and `__builtin_isfinite(x)` (x - x == x - x) of x's floating type
+  (probe b1, `bin/llvmi run` exit 0; its control, the expectation changed, exit 1).
+- **An if constexpr's condition the evaluator cannot compute** is a refusal, `constexpr-if`, not a crash.
+
+Traces (each environment-gated, off by default): `CPP_CONCEPT_TRACE` (each concept's satisfaction, a requirement's failure, a partial
+ordering's normal forms, the constraint depth's stack), `CPP_INST_TRACE=NAME` (a class template's instances and cache misses),
+`CPP_CONSTEXPR_IF_TRACE`, `CPP_TMPL_TRACE`'s deduction failures of a call's templates and its default arguments' refusals.
+
+### Checked
+
+| Run | Result |
+|---|---|
+| f8.cpp (<format>'s `std::vformat("{}", make_format_args(i))`), the measure on the headers' way | cpp-s7's refusal byte for byte at the start (overload, "no viable function among 1 for 2 arguments" at `_M_reserve`, 55 causes, 111 drops); now **`constexpr-if`: "an if constexpr's condition not evaluated (not a constant: the expression :decay)"**, `if constexpr (__unicode::__literal_encoding_is_utf8())`, **47 causes, 98 drops**. On the way it refused, in order: no member _M_none, no operator() (ranges::copy, twice), no viable function among 0 (vformat_to's `__do_vformat_to`, by this branch's first too-few-arguments rule, taken back), unknown name __builtin_frexpl, __builtin_signbit. Peak 1.03-1.05 GB, 150-220 s |
+| probes s1-s3, c1-c15, r1, prov4, b1 | as above; s1 (span<char> from std::string) generates; `bin/llvmi run` of prov4 and b1 exit 0, b1's control 1 |
+| gen-batch over 80 of the 81 run programs, four parts (`.tmp/G6`), against cpp-s7's G5 | **68 generated, 68 byte for byte**, no program gained or lost; peaks 0.49, 0.43, 0.38, 1.35 GB; part 04 (samples/vexing.cpp) refused by `df /` at 86% |
+
+The first f8 run's busybox peak was 2.58 GB: the sysroot's `xz -d` of this worktree's first gen.sh (cpp-s5 saw it, 2.4 GB), not the
+analysis (the watcher's peak for it 0.99 GB): a slip of the night's 1.5 GiB, reported.
+
+### Stopped at the disk's limit
+
+From 07:16 UTC `df /` was 86-87% and rising (the night's runs, this worktree's `.tmp/` 0.3 GB), so by the rules no further run was
+started: library.cpp alone, part 04, the codegen samples, the print and dg checks, `bin/reap`, crops-score and the keys are left as commands.
+
+### Not run (by the rules; each one process, in this order)
+
+```
+. .tmp/env.sh
+# 1. library.cpp alone (2.4 GB at cpp-s7 in a single process with the 81: the day's 2.5 GiB; 15-25 min): its refusal and drops.tsv
+#    against cpp-s7's (overload at _M_reserve, 48 causes); f8's says constexpr-if at __literal_encoding_is_utf8 is expected
+bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh $PWD/.tmp/lib.tsv
+# 2. the 81's last part (vexing.cpp), then the comparison with cpp-s7's G5 (expected: 69 generated, byte for byte)
+bash .tmp/run.sh .tmp/g6-04.log bash .tmp/gen.sh $PWD/.tmp/g6part.04 && bash .tmp/cmp.sh ../cpp-s7/.tmp/G5 .tmp/G6
+# 3. the codegen samples (14 min, 1.05 GB): 154 as recorded expected (no IR of the 80 moved)
+bin/cppi codegen-gen
+# 4. the native parser's change (a function template's name before its body): cpp-print-essential's command (4.5 min, 1.47 GB)
+bin/repr-cpp roundtrip-corpus gxx-dg-essential --judge own && bin/repr-cpp roundtrip-corpus samples --judge own
+# 5. the checker over sema's changes (hidden friends, partial ordering): the own dg record's sample (11.5 min, 1.03 GB)
+bin/repr-cpp dg --corpus dg-error --front native --sample 10
+# 6. bin/reap; bin/crops-score --record && bin/crops-score --judge --strict; bash test/gate/gate-key-crops-test.bash
+```
+
+Keys: every file the branch changes is under `arbace/cpp/`, `arbace/repr/cpp/` or `doc/` (crop paths, `arbace_crop_paths`): no key
+should move; command 6's test confirms it.
+
+### Proposed (CP374-CP375)
+
+- **CP374: <format>'s literal-encoding checks.** `if constexpr (__unicode::__literal_encoding_is_utf8())` evaluates a consteval function
+  that reads `__GNUC_EXECUTION_CHARSET_NAME` through pointers into a string literal (`__s[0] == 'I'`, `string_view(__s + 3).starts_with(...)`);
+  sema's constant evaluator holds integers and floats only. (a) Pointers into string literals and arrays as evaluator values (decay,
+  subscript, `+`, comparison; string_view's constexpr members then run as they are), a slice of CP362 (b)'s evaluator; (b) fold the two
+  functions by name to the target's answer (UTF-8: true), a library special case. **Recommended: (a)**, the next slice.
+- **CP375: a function template's default arguments from an earlier declaration.** The too-few-arguments test reads the pattern's own
+  parameters; `__do_vformat_to`'s `const locale* = nullptr` is on its forward declaration only, so the test is kept to constructor
+  templates. (a) Merge a redeclaration's default arguments into the template's record (as [dcl.fct.default]/4 does), then drop every
+  template with too few arguments before its deduction and constraints; (b) leave it. **Recommended: (a)**, small.
+
+### Rule slips
+
+The sysroot unpack's 2.58 GB peak (above); one `/dev/null` in a command (a discarded `sed`, then rerun into `.tmp`).
+## As built: cpp-gatefix (2026-11-12; branch `cpp-gatefix` from mac/next bd6ab3ddd, the tree night 12 gated)
+
+Night 12's gate on next failed `cpp-check-essential` (and `cpp-check`'s samples-runtime part likewise): runtime/deferred.cpp
+(recorded pass) faulted at 0x0 in `vsum`, runtime/thread-throw.cpp (recorded in :threads) faulted in
+`execute_native_thread_routine`, and the step peaked at 4.1 GiB against its declared `:mem-gib 3`. Neither program's failure was a
+regression of code that had worked: under the default route auto both programs are now generated by our route (cpp-s3 made
+deferred.cpp generate; cpp-s2..s4's template work made the <thread> programs generate: at cpp-n12, 2d2d0bc73, our route refused
+thread-throw.cpp, `codegen: unknown type _Indices`, and clang's IR from the pack ran), and our route's IR was wrong for ci in two
+ways. mac/cpp-s7 (b7d9b0249) fixes neither (its codegen changes are TLS, static data members and the class-template provisional
+instances; its `:thread-exceptions` class is threads.cpp's fault in `work`, not this one); the branch merges with it without a
+conflict in code.
+
+### 1. va_arg by our route (runtime/deferred.cpp)
+
+Our route wrote x86-64's inline va_arg (clang's X86_64ABIInfo::EmitVAArg shape) with the va_list's fields as byte offsets (`load i32,
+ptr %ap`, `getelementptr i8, ptr %ap, i64 16`) and the va_list local as `[24 x i8]`. The lowering knows a va_list only by clang's
+types: `alloca [1 x %struct.__va_list_tag]` (`:va-lists`, the va_list itself passed to a call) and a `getelementptr
+%struct.__va_list_tag, ptr, i32 0, i32 K` (`va-field`: on ci the `cx$va_fK` macros, gp_offset 48, fp_offset 176, overflow_arg_area ci's
+pointer). So on ci `vsum` read reg_save_area from ci's one-pointer va_list: a null load. Now `arbace.cpp.codegen` writes clang's
+shape: the module's `%struct.__va_list_tag = type { i32, i32, ptr, ptr }` when used, a va_list local `alloca [1 x
+%struct.__va_list_tag], align 16`, and every field by `getelementptr inbounds nuw %struct.__va_list_tag, ptr AP, i32 0, i32 K` (both
+the scalar and the class va_arg paths). deferred.cpp's IR now has clang's va_list instructions; its call `vsum(n, ap)` lowers to the
+va_list itself (`*(__builtin_va_list *)l$t3`).
+
+### 2. [[no_unique_address]] and empty classes (runtime/thread-throw.cpp, and atomics.cpp, threads.cpp in cpp-check)
+
+ci's call trace (`CI_CALLTRACE=1` on the gate's node program): the new thread ran the runtime's `execute_native_thread_routine`,
+built its `unique_ptr<_State>` through the program's linkonce_odr copies of `std::tuple<_State*, default_delete<_State>>`'s
+constructors, and called `_M_run` through a null `_State`. Our layout of that tuple was 16 bytes (the `_Head_base<0, _State*>` at
+8) where clang's, and the runtime's (clang's IR), is 8: libstdc++ 15's `_Head_base<_Idx, _Head, true>` holds
+`[[__no_unique_address__]] _Head _M_head_impl;`, and our route knew no `[[no_unique_address]]` (the parser kept no node for the
+`__x__` spelling; the layout treated the member as a full member, the class as non-empty, so no empty-base placement). The
+runtime's `_M_start_thread` read the pointer at offset 0 of a 16-byte `unique_ptr` the program had filled at 8.
+
+- The parser: `[[no_unique_address]]` and `[[__no_unique_address__]]` (clang normalizes the second) give a `NativeAttr` node with
+  `:_std "no_unique_address"` (a `:_` key: the tree checks unchanged); the other standard attributes' `__x__` spellings as before.
+- Sema: a non-bit-field member of class type with it is `:nua` (potentially overlapping, [intro.object]/8).
+- The layout (`arbace.cpp.abi`), as clang's RecordLayoutBuilder::LayoutField: `empty-class?` is Itanium's (§1.1, clang's
+  CXXRecordDecl::isEmpty): no members but empty data members (`empty-member?`: `:nua` of an empty class type); an empty `:nua` member
+  is tried at offset 0 first (the empty-subobject conflicts as before) and takes no data size; a non-empty one takes its class's data
+  size (nvsize, sizeof for a POD), so a later member may reuse its tail padding. Not modelled: an empty member placed past the data
+  size by a conflict does not raise the class's size by its byte (clang's size floor; no sample needs it).
+- The code generator, as clang's EmitNullInitialization and EmitAggregateCopy ("Ignore empty classes in C++"): the zero-initialization
+  and the byte copies of an empty class are left out (its one byte may be another member's now): `emit-init`'s `:zero`,
+  `:zero-then`, `:copy`/`:copy-bytes`, a trivial `operator=`, a class lvalue copied into place, the `:copy-bytes` statement (the source
+  still evaluated). `_Head_base<1, default_delete, true>`'s constructor no longer memsets a byte (clang's is empty), `throw Other()`
+  of an empty class allocates and throws without a store.
+
+thread-throw.cpp's tuple constructors and `unique_ptr` temporary now match clang's IR (8 bytes, `_Head_base<0>` at 0), and on ci
+the thread runs its lambda, throws, and reaches `cx$uncaught`'s terminate: the recorded `:threads` row again.
+
+### 3. The step's memory
+
+The 4.1 GiB was the step's own `CPPI_CI_MEMLIMIT=4GiB` (GOMEMLIMIT of ci's builder, `nodes-list`, the runtime's checked units held):
+a soft limit the heap grew to, not the live set. Under `CPPI_CI_MEMLIMIT=1200MiB` with one thread the two programs' run peaked at
+1.45 GB for the whole process tree. The step's command now sets `CPPI_CI_MEMLIMIT=2GiB` (CPPI_THREADS=2 as before), `:mem-gib 3`
+kept (GTS215's limit for an essential check); the fragment test/gate/crops/cpp.edn's entry, stale since cppi-check (it still named
+`--corpus samples`), brought to steps.edn's.
+
+### Proofs
+
+Light, by night 12's rules while its gate ran (one process at a time, each at most 1.5 GiB, `GOMEMLIMIT=1200MiB GOGC=30`, a watcher
+killing a process tree whose largest process passed 1.5 GiB; main's stage 0 as `ARBACE_HOST_EXE`; the runtime and cirun copied
+from next's `.tmp`, at the checkout's runtime key: the runtime is clang's route, so the code generator is not in its key):
+
+- `bin/cppi check --only` (with `CPPI_JOBS=1 CPPI_THREADS=1 CPPI_CI_MEMLIMIT=1200MiB`) over the essential list's programs in parts:
+  runtime/deferred.cpp pass (was the fault), runtime/thread-throw.cpp `:threads` as recorded (the thread's terminate in
+  `cx$uncaught`; was the fault at 0x0), samples/vexing.cpp and samples/bitfields.cpp pass with the control
+  `_control/run/bitfields-vs-io` failing as it must, runtime/uncaught.cpp and runtime/ctor-throw.cpp pass, samples/coroutine.cpp pass:
+  7 of 8, peaks 1.0 to 1.45 GB. samples/io.cpp's IR by our route (<iostream>) takes more than 1.5 GiB (killed twice by the watcher,
+  1.58 and 1.60 GB): its run, and the step's exact command (`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only
+  test/cpp/essential-check.txt`) with its peak, wait for the end of night 12's gate (the day's 2.5 GiB): the command below.
+- `bin/cppi codegen-gen`: 154 samples, 150 as recorded and four forms changed as intended (va-args, va-class: clang's va_list;
+  eh-hierarchy: `throw Other()` of an empty class without its byte's store; hdr-string: the allocator's empty base's zero-initialization
+  and copies left out), the two controls failing as they must; recorded (gen-judge `--record` over that whole run). 12 min, 1.18 GB.
+- `bin/reap`: 49 of 52 cells checked, 0 problems; `bin/crops-score --record`, `--judge --strict` exit 0 (no record changed).
+- Keys: the changes are crop paths (`arbace/cpp/*`, `arbace/repr/cpp/*`), test records and the gate's tables:
+  `test/gate/gate-key-crops-test.bash` passes; no gate, runtime or seed key moves.
+
+The command left (after night 12's gate; about 30 min, peak to measure, expected under 3 GiB):
+`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt` under `/usr/bin/time -v` (the gate's
+rerun of `cpp-check-essential` is the same); if its peak passes 3 GiB, `CPPI_CI_MEMLIMIT=1500MiB` or `CPPI_THREADS=1`.
+
+### Proposed
+
+- CP376: the empty member's size floor (clang's `setSize(max(size, offset + FieldSize))` for an empty `[[no_unique_address]]` member
+  placed past the data size), with a sample of its own; and `[[no_unique_address]]`'s samples in test/cpp/codegen/
+  (cpp0x/attr-no_unique_address1.C, one of codegen's six left, is the first to take).
+- CP377: the full `cpp-check` part's other regression of night 12, runtime/hello.cpp (`undefined function
+  basic_string::resize_and_overwrite<to_string's lambda>`): not this branch's (not in the essential list); to diagnose next.
+
+## As built: cpp-s9 (2026-11-12; branch `cpp-s9` from mac/cpp-s8 8c97ced5b with mac/cpp-gatefix 9846aab35 merged)
+
+The user's decisions of 2026-11-12: CP374 (a), CP375 (a), CP376 (a), CP377 (a), in the order CP377, CP376, CP374, CP375, then cpp-s8's
+unrun proofs. cpp-gatefix merged first (its JOURNAL, AGENDA and survey sections beside cpp-s5..s8's: both kept). Light, by night 12's
+rules while its gate ran (one process at a time, each gated in its command on MemAvailable >= 12 GiB and `df /` <= 88%, `GOMEMLIMIT=1200MiB
+GOGC=30 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID any process of this worktree past 1.5 GiB), no clang, g++, gate or
+big lock. Probes in `.tmp/probe/` (gen-batch, then `bin/llvmi run` of the IR where it runs alone).
+
+### CP377 (a): hello.cpp's `resize_and_overwrite<to_string's lambda&>`
+
+Night 12's `cpp-check` failed runtime/hello.cpp (a recorded pass) on ci: `undefined function
+_ZNSt7__cxx1112basic_string...20resize_and_overwriteIRZNS_9to_stringEiEUlPcmE_EEvmT_`. libstdc++ 15's `std::to_string(int)` calls
+`__str.__resize_and_overwrite(n, lambda)`, whose always-inline definition calls `resize_and_overwrite<_Operation&>(__n, __op)`. Probe h1
+(`<string>`'s to_string alone) reproduced it: the call written, the function declared, never defined. Two causes, both general:
+
+- **A declaration's text before its name had its preprocessing directives in it.** basic_string.tcc writes the definition as
+  `basic_string<_CharT, _Traits, _Alloc>::` then `#ifdef __glibcxx_string_resize_and_overwrite` then `resize_and_overwrite(...)` (the
+  `#else` names `__resize_and_overwrite`). sema's `text-before-name` (and `qualifier-before`) read the source between the declaration's
+  start and its name, the `#ifdef` line with it, so `ool-qualifier` found no `Name<...>::` at the end and the definition was taken for a
+  namespace's function template named resize_and_overwrite: the member template kept its in-class pattern, no body. Now the directives'
+  lines (a `#` first on a line, with its continuations) are left out of that text (`strip-directives`).
+- **A member template's specialization of a class named by an explicit instantiation declaration** (`extern template class
+  basic_string<char>`) had been taken for the library's: `extern-inst?` covered every member function of the class. [temp.explicit]/11
+  names only the class's members that are no templates; a member template's specialization is implicitly instantiated where used, and
+  clang emits it linkonce_odr. `extern-inst?` is now false for a specialization (`:tinst`) not itself named by an explicit instantiation.
+
+h1 now defines `resize_and_overwrite<to_string's lambda&>` and its local `_Terminator`'s destructor (2,403 lines of IR, from 2,109).
+The run of hello.cpp on ci itself needs <iostream>'s IR by our route, above 1.5 GiB (as cpp-gatefix found for io.cpp): after the gate.
+
+### CP376 (a): an empty subobject past the data size raises the size
+
+clang's ItaniumRecordLayoutBuilder sets `setSize(max(getSize(), Offset + Size))` for an empty potentially-overlapping field
+(LayoutField's IsOverlappingEmptyField branch) and for every base (LayoutBase), while the data size stays: the next member and the virtual
+bases start at the data size, but the class's size, and its non-virtual size (NonVirtualSize is getSize() after the fields), include the
+empty subobject's byte. `arbace.cpp.abi`'s layout keeps that floor (an empty `[[no_unique_address]]` member placed by a conflict, an empty
+base at 0 or past a conflict, an empty virtual base past the data size), `:nvsize` the larger of the data size and it, `:dsize` the data size. The codegen sample
+`test/cpp/codegen/nua-layout.cpp` checks seven layouts by sizeof and offsetof (two empty members of one type: 2; a char and two:
+2; an empty base and an empty member of its type: 2; two empty members of different types and an int: 4; a non-POD's tail padding reused:
+8, the member at 5; three of one type: 3; a class deriving from an empty class whose size is 2: 2, its member at 0). `bin/llvmi run` of its
+IR exits 0; before the floor for an empty base at 0, S7's size was 1 and the run exited 64 (its bit), the sample's own control.
+
+(cpp-gatefix's note named cpp0x/attr-no_unique_address1.C among "codegen's six left": it is one of the print round trip's six dg-error
+files whose error recovery the forms do not keep (doc/cpp/CPP-SURVEY.md, CP342's list), a compile-only test of attribute diagnostics, no
+layout; not a codegen sample.)
+
+### CP374 (a): pointers in the constant evaluator
+
+sema's `ce-eval` holds a pointer into a string literal or a local array as `{::base B ::i I}` (B the elements' values, a vector, or a local
+array's atom; I the index, 0 to the count): `:decay` of a string literal (its characters and the terminating zeros, as the array type's
+count) or of a local array, `:ptradd` (`+`, `-`, within the array or one past it, else not a constant), a load through `:deref` (a
+subscript, `*p`), `:cmp` (indices of one array; a pointer and a null pointer unequal), `:ptrdiff`, `++`/`--` and `+=`/`-=` on a pointer
+local, `to-bool`; `ce-wrap` keeps a pointer as a pointer type holds it. A lambda's call operator is constexpr when it can be
+([expr.prim.lambda.closure]/5: the evaluator fails anyway on what it cannot compute); a local of an empty class (a captureless lambda's
+closure) holds nothing to read. Probes: e1 (the GNU path of `__literal_encoding_is_unicode<char>` written out: the lambda stripping
+"ISO-10646/", `enc += 3`, `++enc`, `enc[1] == '\0'`) generates with `if constexpr` taking the true branch; e2 (a string's characters summed
+through a pointer loop, 295, an array bound `int g[scan()]` of 1,180 bytes, a local array read through `p[2] - *(p + 1)`, a false
+encoding test) generates and `bin/llvmi run` exits 0.
+
+**f8.cpp's refusal moved, not passed**: from "not a constant: the expression :decay" to "not a constant: a local's initializer (:ctor of
+__s)". The code generator takes clang's predefined macros (cpp/target/host/predefined/clang/), which define `__clang_literal_encoding__`
+and not `__GNUC_EXECUTION_CHARSET_NAME`, so <bits/unicode.h> takes its `#elif defined __clang_literal_encoding__` branch: `string_view
+__s(__enc); if (__s == "UTF-8") return true;`, a class object constructed, copied by value into `operator==`, and string_view's
+`size()`/`compare` run on it, `char_traits<char>::length` and `compare` through `std::__is_constant_evaluated()`, which sema folds to 0
+at analysis (`:is-constant-evaluated`). CP374's text ("string_view's constexpr members then run as they are") assumed the GNU branch: a
+slip of cpp-s8's reading, corrected here. CP378 below is the slice it needs. The "local's initializer" message now names the initializer's
+kind and the variable.
+
+### CP375 (a): default arguments from every declaration
+
+`too-few-args?` counts a parameter as defaulted when any declaration of the template gives it a default argument (the template's `:decls`,
+the declarations its definition replaced, [dcl.fct.default]/4), and an explicit object parameter is the call's object, not an argument.
+call-candidates drops a function template with too few arguments before its deduction and constraints, for every function template (cpp-s8
+had it for constructor templates only); a drop by it stays a sure drop for the checker's count. Probe d1 (`f(T, int b = 2)` declared, then
+defined without the default, called `f(1)`; `g(T, int, int = 1)` beside `g(T)`; a member template's default on its in-class declaration)
+generates and `bin/llvmi run` exits 0; with g's comparison changed in the IR (`== 8`), exit 1.
+
+On the way, a pre-existing gap: **a member template of a class that is no template's specialization, defined outside it**
+(`template<class T> int S::h(T a) {...}`), had become a namespace's own template named h, the member's specialization declared and never
+defined (probe d2: `declare i32 @_ZN1S1hIiEEiT_`). The FunctionTemplateDecl branch now looks for the redeclaration in the scope a plain
+qualifier names (a class's or a namespace's), and sema's `declare-fn!` resolves a qualified declaration's types in the declaring scope when
+that scope lies within the qualifier's (a specialization made in a scope binding T over S's), so T is found. d2 now defines
+`_ZN1S1hIiEEiT_`.
+
+### A Sema crash found by the dg sample
+
+The own dg record's sample (`--sample 10`) read cpp23/ext-floating12.C (<complex>, <stdfloat>) to a crash, a NullPointerException in
+declare-instance!'s loop over the instance's functions (at cpp-s7 the file had timed out at 300 s). Its cause is cpp-s8's: a hidden
+friend whose trailing requires-clause is not satisfied (declare-fn!'s nil) was given `:friend-cls`, a function record of id nil. friend!
+now declares nothing for it. The file reads to `rejected` (no crash), alone: 5 min, 1.22 GB.
+
+### Checked
+
+| Run | Result |
+|---|---|
+| probes (`.tmp/probe`, gen-batch; `bin/llvmi run`) | h1 (to_string): resize_and_overwrite<lambda&> defined; h2-h5 (member templates, extern template): generated; nua (CP376's sample): llvmi 0 (64 before the base's floor); e1, e2 (CP374): generated, e2 llvmi 0; d1 (CP375): llvmi 0, its control (an expectation changed in the IR) 1; d2: `S::h<int>` defined; vb (vbase8-10's classes): sizes 1 1 16 16 32 24 56 72 88 104 |
+| f8.cpp (<format>'s vformat) | `constexpr-if`, "a local's initializer (:ctor of __s)" (was ":decay"); 47 causes, 98 drops as before; 1.18 GB, 156 s |
+| gen-batch over the 81 run programs (library.cpp left out), five parts (`.tmp/G7`), against cpp-s8's G6 (parts 00-03) and cpp-s7's G5 (vexing.cpp) | **69 generated, none lost**; vexing.cpp generates (G6 had not run it); of the 68 both generated: 55 byte for byte, 13 differing as intended: cpp-gatefix's empty classes' zero-initializations and copies left out (dr2137-1, embed-26, rv-life, fn-template3, ctor-fntry1, pr77550, io; vexing likewise against G5), its va_list and tuple layout (deferred, atomics, thread-throw, threads), CP377's resize_and_overwrite<to_string's lambda&> and to_chars defined (hello, threads), CP376's sizes (vbase8-10); peaks 0.55, 0.47, 0.41, 1.34, 0.36 GB, 28 min |
+| `bin/cppi codegen-gen`, then `--record` | 152 of 155 as recorded, the three: nua-layout new, globals a crash (a pointer folded to a long by ce-try: fixed, CP374's values kept inside an evaluation), struct-bind's std::pair bindings by get<i> (the sample's own comment and [dcl.struct.bind]/4's tuple-like case; before, the members read directly; `bin/llvmi run` output the same); controls failing as they must. Recorded: 155 generated, 0 refused (8 min, 1.20 GB each) |
+| cpp-print-essential's command (`roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own`) | 33 of 33, 9 of 9, the control `_control/bitfields-vs-io` failing as it must; 1.47 GB, 3 min |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` | 454 files, own pass 127 (cpp-s7's 127), one crash (above: fixed, then the file alone `rejected`); 1.22 GB, 7 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0, 0 problems, scores.edn unchanged |
+| `test/gate/gate-key-crops-test.bash` | PASS; the branch's own changes are under `arbace/cpp/`, `test/cpp/` and `doc/` (crop paths): no gate, runtime or seed key moves |
+
+### Not run (night 12's gate still running at 13:07 UTC; each one process, in this order, after it)
+
+```
+. .tmp/env.sh
+# 1. library.cpp alone (2.4 GB at cpp-s7; the day's 2.5 GiB; 15-25 min): its refusal and drops.tsv against cpp-s7's (overload, 48
+#    causes); f8 says `constexpr-if` at string_view __s (CP378) is expected
+bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh $PWD/.tmp/lib.tsv
+# 2. cpp-check-essential's exact command with its peak (cpp-gatefix's; io.cpp above 1.5 GiB): 8 of 8 as recorded expected
+busybox time -v env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt
+# 3. CP377's proof on ci: hello.cpp and threads.cpp (to_string), library.cpp's part of cpp-check: hello.cpp a pass again expected
+printf 'runtime/hello.cpp\nruntime/threads.cpp\n' > .tmp/h.list && env CPPI_THREADS=1 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only .tmp/h.list
+```
+
+### Proposed (CP378)
+
+- **CP378: class objects in the constant evaluator, and `__builtin_is_constant_evaluated()` in a manifestly constant-evaluated
+  context.** f8's next refusal is <bits/unicode.h>'s clang branch: `string_view __s(__enc); if (__s == "UTF-8") return true;`. (a) An
+  object value (its fields' values) for a local of class type made by a constexpr constructor (its mem-initializers, then its body with
+  `this`), copied by value into a call, read by `:field`, member calls on it with `this`; and sema's `:is-constant-evaluated`, folded to 0
+  at analysis today, a node that is 1 in the evaluator's manifestly constant-evaluated entries (if constexpr, constexpr variables,
+  static_assert, array bounds, template arguments) and 0 elsewhere, so that char_traits' length and compare take their constexpr loops; a
+  slice of CP362 (b)'s evaluator, about a day. (b) Fold `__literal_encoding_is_utf8()` and `_unicode()` by name to the target's answer
+  (CP374 (b)'s, declined once). (c) The code generator's predefined macros gcc's for this one (no: clang's are the route's model).
+  **Recommended: (a)**.
+
+### Rule slips
+
+The first probe's sysroot unpack (this worktree's first gen.sh: `xz -d`, 2.69 GB in busybox's peak; the watcher's sampling missed it, as
+cpp-s5 and cpp-s8 found). Process substitution `<(...)` twice in comparison commands (the define lists of hello.cpp, the llvmi outputs
+of struct-bind). One source edit (abi.ae's virtual-base floor) while gen-batch part 03's rerun was running: that process had loaded
+abi.ae before the edit, but part 04 after; every part was then run again from scratch at the final code (G7, the table's numbers). The
+gen-batch's first part-03 run read runtime and samples paths of the removed cpp-s5b worktree (the copied part lists): 13 crashes of
+"no such file", the lists corrected and the part rerun.
+
+## As built: gf-cpp (2026-11-12; branch `gf-cpp` from mac/next bd6ab3ddd with mac/cpp-s9 e2e446170 merged)
+
+Night 12's `--full` on next (bd6ab3ddd) failed cpp-check-essential, cpp-check.samples-runtime and cpp-dg.dg-error-own
+(.tmp/night12/triage/TRIAGE.md). mac/cpp-s9 (with cpp-s7, cpp-s8 and cpp-gatefix) merged into next's tree first: no conflict (the
+journal's, AGENDA's and this survey's sections fall apart). Light, one process at a time, main's stage 0.
+
+### A floating literal in the text evaluator's constant expressions
+
+gxx-dg/cpp2a/explicit6.C's `explicit((T) 1.0) operator T();` had crashed Sema since review 1111 #5 (eval-text read every :num token
+as an integer through BigInteger: Java's NumberFormatException on "1.0"). cpp-s7 (2dcb57f03) made it a refusal, and explicit-spec
+counts an expression it cannot evaluate as explicit: explicit6.C's recorded own pass came back, but by default, not by evaluation
+(`explicit((T) 0.0)` was explicit too). Now template.ae's eval-text reads a floating literal ([lex.fcon]: a decimal one with a `.` or
+an exponent, a hexadecimal one with a `p` exponent; digit separators; the suffix `f`/`f32` rounds to float's value, `l`, `f16`, `f64`,
+`f128`, `bf16` dropped, long double held as a double) as a double; `lng` truncates a double toward zero ([conv.fpint]/1; outside
+long's range or a NaN a refusal), so the C-style, functional and static_cast casts to integral types truncate; a cast to bool and
+`!`, `&&`, `||`, `?:` test it against zero ([conv.bool]: 0.5 is true); `float`, `double` and `long double` joined the cast types,
+and a cast to a named floating type gives a double (float's rounded); fold's `+ - * /` and the comparisons on a floating operand are
+the double's (the usual arithmetic conversions), a division by zero and the integer operators (`% << >> & | ^ ~`) on it refusals.
+sema's noexcept-specifier read through the same hook tests its value against zero as a double (0.5 had been truncated to false).
+
+Probe `.tmp/probe/p1.C` (diag/diagnose at c++20, `.tmp/probe/run.sh`): seven classes with conversion operators `explicit((T) 0.0)`,
+`(T) 0.5`, `(T) 2.5e0`, `1.5 > 1.0`, `1.5 < 1.0`, `(int) 0x1p-1`, `int(2.0f) == 2 && 3.0 / 2 == 1.5`, each copy-initialized: before,
+seven "no viable conversion" errors (all explicit); after, three, on the lines whose specifier is true (W, X, Q), as the standard says.
+
+### Checked (before → after; peaks by `/usr/bin/time -v`)
+
+| Run | Result |
+|---|---|
+| probe p1.C (above) | 7 errors (every specifier explicit) → 3 (the true ones) |
+| `bin/repr-cpp dg --corpus dg-error --front native --only` explicit6.C | night 12: crash (NumberFormatException) → cpp-s7's refusal: own pass (explicit by default; 2.45 GiB, 49 s, the first read of the worktree's headers) → gf-cpp: own pass, by evaluation |
+| the same over the 20 files of gxx-dg/cpp2a/explicit*.C | own pass 1 (explicit6.C, recorded pass), explicit11.C its recorded fail, the 18 others not in the sampled record; exit 0, no regression; 0.42 GiB, 48 s |
+| cpp-check-essential's command (`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt`) | runtime part as recorded: uncaught, ctor-throw, deferred.cpp pass (night 12: segfault in vsum), thread-throw.cpp back to its recorded fail of class threads (night 12: a segfault in pthread_create); the samples part NOT proved: its `nodes-list` (ci's build of the 4 samples, cold cache) passed 3.0 GiB and was killed at 3.16 GB by my guard, so the 4 samples are "not built" in that run (an artefact of the kill, not of the code). Peak 3.18 GB (the killed process), 49 min with musl's and the nodes' cold builds |
+| `bin/cppi runtime-ci` (the essential command's first step in a fresh worktree, the lowered runtime's 199 units read for ci) | first try (CPPI_JOBS 4, the 2GiB soft limit) 4.79 GB, stopped by PID; then `CPPI_CI_CHUNK` 40 and 10 killed at 2.5 GiB by the guard (a chunk's heap grows past it); `CPPI_CI_CHUNK=1 CPPI_JOBS=1 CPPI_CI_MEMLIMIT=1200MiB`: 199 units, peak 2.58 GiB (c++20/format.cc's unit), 73 min |
+| cpp-print-essential's command | 33 of 33, 9 of 9, the control failing as it must; 1.40 GiB, 4 min (cpp-s9's numbers) |
+| `bin/cppi lower-essential` (`CPPI_DISK_MAX=88`: its own guard stops at 80 %, the disk was at 81 %) | 6 of 6 pass; 1.57 GiB, 4.4 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --judge --strict` | exit 0 (scores.edn unchanged: nothing to record) |
+| `test/gate/gate-key-crops-test.bash` | PASS; gf-cpp's own change is `arbace/cpp/` (crop paths): no gate, runtime or seed key moves; the merge carries cpp-s9's `test/gate/steps.edn` and `crops/*.edn` edits |
+
+No record moved: explicit6.C's recorded own pass holds, and nothing ran that differs from a record.
+
+### Not run (night 12's rules from 18:45 UTC: at most 1.5 GiB a process)
+
+```
+# 1. cpp-check-essential's samples part, its exact command (the runtime's ci read is now cached in .tmp/cppi/runtime/ci; the samples'
+#    nodes-list measured above 3 GiB cold, night 12's 4.1 GiB under the 4GiB soft limit: its :mem-gib 3 looks low): 8 of 8 as recorded expected
+/usr/bin/time -v env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt
+# 2. cpp-check.samples-runtime as the gate runs it (declared 8 GiB; about 30-60 min): deferred, thread-throw (its class), threads, atomics,
+#    hello.cpp (CP377, cpp-s9) as recorded expected
+/usr/bin/time -v env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=4GiB bin/cppi check
+# 3. cpp-dg.dg-error-own whole (declared 3, night 12's peak 4.8 GiB; 76 min under load): own pass as recorded, explicit6.C a pass
+/usr/bin/time -v bin/repr-cpp dg --corpus dg-error --front native
+```
+
+### Proposed (CP379)
+
+- **CP379: cpp-check-essential's memory.** The samples' `nodes-list` (ci's build of four programs, io.cpp's <iostream> among them)
+  passes 3 GiB from a cold cache under `CPPI_CI_MEMLIMIT=2GiB`, and `runtime-ci`'s read of the 199 units by one process passes 4.7 GB.
+  (a) Raise the step's `:mem-gib` to 5 (what it measures; it then runs in the free lane's bigger slots). (b) Build the samples' nodes one
+  program a process (as `CPPI_CI_CHUNK` does for the runtime) and make `CPPI_CI_CHUNK=1` the runtime-ci default in the gate (the runtime
+  read 73 min at 2.6 GiB against about 8 min unchunked). (c) Move io.cpp out of the essential list to cpp-check (nightly). **Recommended:
+  (a) now, (b) later** (the gate's cpp-runtime build step already warms runtime-ci, so the step itself does not pay it).
+
+### Rule slips
+
+`runtime-ci`'s first read (started inside the essential command) reached 4.79 GB before I saw it and stopped it by PID; the
+day's limit is 2.5 GiB (3 GiB for the essential command). The chunked retries were stopped by a watcher at 2.5 GiB (twice) and the
+final one peaked at 2.58 GiB (under the essential command's 3 GiB allowance, over the 2.5 GiB of other runs). The essential
+command's samples `nodes-list` was killed at 3.16 GB by the 3 GiB guard. `bin/cppi lower-essential` ran with `CPPI_DISK_MAX=88` (the
+brief's df limit) where its default stops at 80 %.

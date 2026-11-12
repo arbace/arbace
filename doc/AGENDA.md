@@ -70,7 +70,19 @@ Six crops are above 90 on all three. What the others still need:
   0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the
   read stage 0.66 and eval and AOT 0.5 (the programs run from clang's IR packs); CX12's own front end (`dg --front
   native`, tonight's record) and CP240 (b), the programs by the own route without clang's IR (`cpp-route`), lift them
-  ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md), [cpp/CODEGEN.md](cpp/CODEGEN.md)).
+  ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md), [cpp/CODEGEN.md](cpp/CODEGEN.md)). `cpp-s6` (2026-11-11): CP365, CP368-CP371 (a) built
+  (the own dg record's five crashes gone, provisional instances for <format>); `cpp-s7` (2026-11-12): its proofs run (the 82's IR
+  only CP369's linkage, codegen-gen re-recorded, the five samples), CP372 (a) and CP373 (a) built, CP369's follow-ups (a header's
+  out-of-line static member not linkonce, inline static members defined) and an eval-text crash fixed; library.cpp alone left to a night.
+  `cpp-s8` (2026-11-12, CP366 (a)'s slice): ranges' iterator concepts on std::string and std::span right (16 of 16 on `char*` and
+  string's iterator, from 6 and 5), ranges::copy, provisional instances for a dropped member, <format>'s floating builtins; f8 (<format>'s
+  vformat) moved from _M_reserve to CP374's literal-encoding check, its drops 111 → 98; the 80 programs' IR byte for byte; library.cpp
+  alone and the other proofs left as commands (`df /` at 87% from 07:16); CP374, CP375 proposed. Night 12's `cpp-check-essential` failures fixed on
+  `cpp-gatefix` (our route's va_list as clang's; `[[no_unique_address]]` and empty classes as Itanium's: the <thread> programs' tuple
+  layout), its memory limit 2GiB; hello.cpp's `cpp-check` regression is CP377. `cpp-s9` (2026-11-12): CP377 (a) (a directive inside a declarator, a member template's specialization of an extern
+  template class: hello.cpp's resize_and_overwrite defined), CP376 (a) (clang's size floor; nua-layout.cpp), CP374 (a) (pointers in the
+  evaluator: f8 moved to `string_view __s`, CP378 proposed), CP375 (a); the 81's IR: 69 generated, none lost, 13 differing as intended;
+  codegen-gen recorded (155); library.cpp alone and the ci runs of cpp-check-essential and hello.cpp wait for night 12's gate's end.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).
@@ -349,7 +361,9 @@ items below are the ones whose work is still ahead or tied to a night.
   F10b's asynchronous channels after the night's records; JCS190's flip after the night's comparison; JCS231 after F9;
   JCS261 waits; JCS274 (`:nio`'s rest reclassified after the record); JCV11 (b) (reopens RPS9 (a)); JCV12 (b); JCS180
   later; F15 (JCS350-JCS356) for the next Java night.
-- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243 (a) (`cpp-print-own`) and CP352 (`cpp-cp352`, the five valid-code reader
+- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): `gf-cpp` (2026-11-12, "As built: gf-cpp"): cpp-s9 merged into next's tree, explicit6.C's
+  explicit((T) 1.0) evaluated (floating literals in eval-text), the runtime part of cpp-check-essential as recorded; its samples part,
+  cpp-check.samples-runtime and dg-error-own whole are night commands; CP379 (the essential step's memory) proposed. CP243 (a) (`cpp-print-own`) and CP352 (`cpp-cp352`, the five valid-code reader
   gaps) merged into next; CP250 when
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above). CP338-CP351 (the user,
   2026-11-10, as recommended): CP338 (a) and CP350 (a) built on `cpp-cp338` (the run corpora's refusals in the plan's order,
@@ -363,7 +377,13 @@ items below are the ones whose work is still ahead or tied to a night.
   (variant, any, format: CP359), coroutines and vectors (CP351) ahead; CP345 and CP349 the night's and P21 (b)'s (CP361); CP359-CP361
   proposed; the night's commands in the survey; CP342/CP343's dg own record on night 13 (its slot prepared); `cpp-s4` (2026-11-11,
   "As built: cpp-s4"): CP359 (a)'s variant and any slices (their names clang's; library.cpp now stops at <format>, the 82 still 69,
-  unroll1.C's names now clang's), CP362 (<format>'s consteval check) to CP364 proposed.
+  unroll1.C's names now clang's), CP362 (<format>'s consteval check) to CP364 proposed, the user's (a) each; `cpp-s5` (2026-11-11,
+  "As built: cpp-s5"): CP364 (a)'s drops.tsv and its largest causes, CP362 (a), <format>'s first slices (library.cpp now at
+  <format>'s `_M_reserve` (span from std::string)), is_signed_v corrected; CP363 (a)'s two samples wait in `test/cpp/runtime/pending/` for the oracle tier (its commands in the
+  survey); CP365-CP366 proposed; `cpp-s5b` (2026-11-11, "As built: cpp-s5b"): C++'s line as one branch, cpp-s5 with review-fix-2's
+  C++ commits (review 1111's #1, #4-#7; its goi commits wait for W2) and the night review's #1-#5 (a consteval constructor's storing body
+  analyzed, 128-bit constants exact or not constants, one representation of unsigned 64-bit values in the template text, TLS kinds as
+  clang's), the 82 run programs' IR byte for byte cpp-s5's; CP367-CP371 proposed.
 - **OCaml** ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md)): OC202 (a) after OC185's switch; OC182 waits for T12;
   OC191-OC207 (above); OC209-OC222 (a) (the user, 2026-11-10: the plan to 90%): S1 with OC209, OC210 on `ocaml-s1`, OC215 built
   on `ocaml-s2` (its compiled runs a night's), OC216 on `ocaml-s3` and its rest (AF_UNIX and signals at the compiled level) on `ocaml-s4`, then OC217, OC218 and OC219, OC220 and OC221; OC222 (the configuration's skips `:na`) with the scoring's next change.

@@ -59,6 +59,8 @@
 ;; a template-id with such arguments {:k :tspec :tmpl tid :name s :path p :args [...]}.
 
 (def ^:dynamic *tmpls* nil)
+;; CP365 (a): the provisional instances, {arg-class-id #{instance-class-id}}, and how to make each again {cid (fn [])}
+(def ^:dynamic *provisional* nil)
 
 (defn- same-arg? [a b] (if (and (map? a) (contains? a :val)) (= (:val a) (:val b)) (= a b)))
 (def ^:dynamic *scanned* nil)
@@ -121,6 +123,7 @@
 (defn- param-type [scope p] (abi/unq (sema/resolve-type scope (:qt p))))
 
 (declare arg-entity)
+(declare ^:dynamic *unstable*)
 
 (defn- bind-scope
   "A scope of the parameters `params` bound to `args` (a type each, or {:val n}) over `parent`; with `sym-tid` (and no
@@ -190,36 +193,118 @@
             (const-entity (:scope (abi/cls (:id t))) [nm]))))))
 
 (def ^:private binary-fns
-  {"+" + "-" - "*" * "/" quot "%" rem "<<" bit-shift-left ">>" bit-shift-right "&" bit-and "|" bit-or "^" bit-xor
+  {"+" unchecked-add "-" unchecked-subtract "*" unchecked-multiply "/" quot "%" rem "<<" bit-shift-left ">>" bit-shift-right "&" bit-and "|" bit-or "^" bit-xor
    "<" #(if (< %1 %2) 1 0) ">" #(if (> %1 %2) 1 0) "<=" #(if (<= %1 %2) 1 0) ">=" #(if (>= %1 %2) 1 0)
    "==" #(if (= %1 %2) 1 0) "!=" #(if (not= %1 %2) 1 0) "&&" #(if (and (not= %1 0) (not= %2 0)) 1 0)
    "||" #(if (or (not= %1 0) (not= %2 0)) 1 0)})
 
-(defn- fold
-  "An operator applied to constants: its value, or (an operand dependent) the expression {:k :texpr :o o :args [...]}."
-  [o args]
-  (if (every? number? args)
-    (let [[a b c] (map long args)]
-      (case o
-        "neg" (- a) "!" (if (zero? a) 1 0) "~" (bit-not a) "?" (if (zero? a) c b)
-        (long ((binary-fns o) a b))))
-    {:k :texpr :o o :args (vec args)}))
+(def ^:private two64 18446744073709551616N)
 
-(def ^:private cast-types #{"bool" "char" "short" "int" "long" "unsigned" "signed"})
+(defn- u64?
+  "An unsigned 64-bit value above Long/MAX_VALUE, the one value of the text's evaluation held as a BigInt."
+  [x]
+  (instance? arbace.lang.BigInt x))
+
+(defn- lng
+  "A value's 64-bit pattern as a long (an unsigned 64-bit BigInt wrapped: 18446744073709551615N is -1); a floating value
+  truncated toward zero ([conv.fpint]/1), one outside long's range (or a NaN) not a constant: a refusal."
+  [x]
+  (cond (u64? x) (.longValue (.toBigInteger ^arbace.lang.BigInt x))
+        (float? x) (let [d (double x)]
+                     (if (and (>= d -9.223372036854775808E18) (< d 9.223372036854775808E18))
+                       (long d)
+                       (fail :template "a floating constant outside long's range: " x)))
+        :else (long x)))
+
+(defn- dbl
+  "A value as a double: a floating value as it is, an integer converted ([conv.fpint]/2; an unsigned 64-bit BigInt by
+  its value)."
+  [x]
+  (if (u64? x) (.doubleValue (.toBigInteger ^arbace.lang.BigInt x)) (double x)))
+
+(defn- falsy?
+  "Whether a constant converts to false ([conv.bool]: zero, of an integer or a floating value; 0.5 is true)."
+  [x]
+  (if (float? x) (zero? (double x)) (zero? (lng x))))
+
+(defn- u64
+  "A value as unsigned long long's ([conv.integral]/3: modulo 2^64), normalized: a long when it fits, else a BigInt."
+  [x]
+  (let [v (mod (bigint x) two64)]
+    (if (<= v 9223372036854775807) (long v) v)))
+
+(defn- fold
+  "An operator applied to constants: its value, or (an operand dependent) the expression {:k :texpr :o o :args [...]}.
+  The values are exact integers, one representation (review 1111 #3, cpp-s5b): a long, or an unsigned 64-bit value above
+  Long/MAX_VALUE as a BigInt (`size_t(-1)`, `18446744073709551615ULL`, `0x8000000000000000`). An operand of that kind
+  makes the operation unsigned long long's, as the usual arithmetic conversions do ([expr.arith.conv]/1.5): the operands
+  taken modulo 2^64 and the result too, a comparison of the converted values; else 64-bit arithmetic wraps as sema's
+  const-int. A division by zero and a shift by a count outside 0..63 are not constants: refusals, never Java's
+  exceptions (review 1111 #5)."
+  [o args]
+  (cond
+    (not (every? number? args)) {:k :texpr :o o :args (vec args)}
+    ;; (gf-cpp: a floating operand, a floating literal's double, makes the operation a double's, the usual arithmetic
+    ;; conversions' ([expr.arith.conv]/1.2-1.3): + - * / and the comparisons; ! && || ?: test it against zero; the integer
+    ;; operators (% << >> & | ^ ~) on it are ill-formed, and a division by zero is not a constant: refusals)
+    (some float? args)
+    (let [[a b c] args]
+      (case o
+        "neg" (- (dbl a)) "!" (if (falsy? a) 1 0) "?" (if (falsy? a) c b)
+        "+" (+ (dbl a) (dbl b)) "-" (- (dbl a) (dbl b)) "*" (* (dbl a) (dbl b))
+        "/" (if (zero? (dbl b)) (fail :template "division by zero in a constant expression") (/ (dbl a) (dbl b)))
+        "<" (if (< (dbl a) (dbl b)) 1 0) ">" (if (> (dbl a) (dbl b)) 1 0) "<=" (if (<= (dbl a) (dbl b)) 1 0)
+        ">=" (if (>= (dbl a) (dbl b)) 1 0) "==" (if (== (dbl a) (dbl b)) 1 0) "!=" (if (== (dbl a) (dbl b)) 0 1)
+        "&&" (if (or (falsy? a) (falsy? b)) 0 1) "||" (if (and (falsy? a) (falsy? b)) 0 1)
+        (fail :template "the operator " o " on a floating constant")))
+    :else
+    (let [ok (fn [b] (cond (and (#{"/" "%"} o) (zero? b)) (fail :template "division by zero in a constant expression")
+                           (and (#{"<<" ">>"} o) (not (<= 0 b 63))) (fail :template "a shift by " b " in a constant expression")
+                           :else b))]
+      (if (some u64? args)
+        (let [[a b c] args
+              ua (bigint (u64 a))
+              ub (when (some? b) (bigint (u64 b)))
+              bit (fn [f] (u64 (bigint (f (.toBigInteger ^arbace.lang.BigInt ua) (.toBigInteger ^arbace.lang.BigInt ub)))))]
+          (case o
+            "neg" (u64 (- ua)) "!" (if (zero? ua) 1 0) "~" (u64 (- two64 1 ua)) "?" (if (zero? (lng a)) c b)
+            "+" (u64 (+ ua ub)) "-" (u64 (- ua ub)) "*" (u64 (* ua ub))
+            "/" (u64 (quot ua (ok ub))) "%" (u64 (rem ua (ok ub)))
+            "<<" (u64 (* ua (.pow (java.math.BigInteger/valueOf 2) (int (ok (lng b))))))
+            ">>" (u64 (quot ua (bigint (.pow (java.math.BigInteger/valueOf 2) (int (ok (lng b)))))))
+            "&" (bit #(.and ^java.math.BigInteger %1 ^java.math.BigInteger %2))
+            "|" (bit #(.or ^java.math.BigInteger %1 ^java.math.BigInteger %2))
+            "^" (bit #(.xor ^java.math.BigInteger %1 ^java.math.BigInteger %2))
+            "<" (if (< ua ub) 1 0) ">" (if (> ua ub) 1 0) "<=" (if (<= ua ub) 1 0) ">=" (if (>= ua ub) 1 0)
+            "==" (if (== ua ub) 1 0) "!=" (if (== ua ub) 0 1)
+            "&&" (if (and (not (zero? ua)) (not (zero? ub))) 1 0) "||" (if (or (not (zero? ua)) (not (zero? ub))) 1 0)))
+        (let [[a b c] (map long args)]
+          (case o
+            "neg" (unchecked-negate a) "!" (if (zero? a) 1 0) "~" (bit-not a) "?" (if (zero? a) c b)
+            (do (ok b) (long ((binary-fns o) a b)))))))))
+
+(def ^:private cast-types #{"bool" "char" "short" "int" "long" "unsigned" "signed" "float" "double"})
 
 (defn- cast-to
   "A constant converted to a builtin integral type named by its words (bool: 0 or 1; the others kept, the slice's
   values fitting)."
   [^String ty v]
   (cond (map? v) {:k :texpr :o "cast" :type ty :args [v]}
-        (str/starts-with? ty "bool") (if (zero? (long v)) 0 1)
-        (#{"char" "signed char"} ty) (long (unchecked-byte (long v)))
-        (= ty "unsigned char") (bit-and (long v) 0xff)
-        (#{"short" "signed short"} ty) (long (unchecked-short (long v)))
-        (= ty "unsigned short") (bit-and (long v) 0xffff)
-        (#{"int" "signed" "signed int"} ty) (long (unchecked-int (long v)))
-        (#{"unsigned" "unsigned int"} ty) (bit-and (long v) 0xffffffff)
-        :else (long v)))
+        (str/starts-with? ty "bool") (if (falsy? v) 0 1)
+        ;; (gf-cpp: a floating type's value a double, float's rounded to float; long double's held as a double)
+        (= ty "float") (double (float (dbl v)))
+        (str/includes? ty "double") (dbl v)
+        (#{"char" "signed char"} ty) (long (unchecked-byte (lng v)))
+        (= ty "unsigned char") (bit-and (lng v) 0xff)
+        (#{"short" "signed short"} ty) (long (unchecked-short (lng v)))
+        (= ty "unsigned short") (bit-and (lng v) 0xffff)
+        (#{"int" "signed" "signed int"} ty) (long (unchecked-int (lng v)))
+        (#{"unsigned" "unsigned int"} ty) (bit-and (lng v) 0xffffffff)
+        ;; (cpp-s5b: a 128-bit type's constant is not evaluated in the text, a refusal, never computed modulo 2^64)
+        (str/includes? ty "__int128") (fail :template "a constant of type " ty)
+        ;; (review 1111 #3: unsigned long (long) as unsigned long long's value, fold's representation)
+        (str/includes? ty "unsigned") (u64 (lng v))
+        :else (lng v)))
 
 ;; ---------------------------------------------------------------------------------------------
 (declare expand-type-pack)
@@ -337,7 +422,11 @@
    "__is_final" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (:final (abi/cls (:id u)))))))
    "__is_aggregate" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/arr? u) (and (abi/class? u) (boolean (sema/aggregate? (:id u)))))))
    "__has_virtual_destructor" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (some-> (:dtor (abi/cls (:id u))) sema/fnd :virtual)))))
-   "__is_base_of" (fn [_ [b d]] (let [b (abi/unq b) d (abi/unq d)] (and (abi/class? b) (abi/class? d) (or (= b d) (boolean (abi/derived-from? (:id d) (:id b)))))))
+   "__is_base_of" (fn [_ [b d]] (let [b (abi/unq b) d (abi/unq d)]
+                                  ;; (cpp-s8: a class whose definition is under way has not all its bases yet: the answer
+                                  ;; may change, so a concept's satisfaction that asked it is not kept, *unstable*)
+                                  (when (and (abi/class? d) (not (:finished (abi/cls (:id d))))) (some-> *unstable* (reset! true)))
+                                  (and (abi/class? b) (abi/class? d) (or (= b d) (boolean (abi/derived-from? (:id d) (:id b)))))))
    "__is_convertible" (fn [scope [f t]] (trait-convertible? scope f t))
    "__is_convertible_to" (fn [scope [f t]] (trait-convertible? scope f t))
    "__is_nothrow_convertible" (fn [scope [f t]] (trait-convertible? scope f t))
@@ -459,10 +548,31 @@
         pos (atom 0)
         peek (fn [] (nth (get ts @pos) 1 nil))
         next! (fn [] (let [t (get ts @pos)] (swap! pos inc) t))
-        num (fn [^String t] (let [t (str/replace (str/lower-case t) #"[ul]+$" "")]
-                              (cond (str/starts-with? t "0x") (Long/parseLong (subs t 2) 16)
-                                    (and (> (count t) 1) (str/starts-with? t "0")) (Long/parseLong (subs t 1) 8)
-                                    :else (Long/parseLong t))))
+        ;; an integer literal ([lex.icon]): decimal, 0x, 0b or octal, digit separators ', the suffixes u, l, ll, z in any
+        ;; case and order; its value modulo 2^64 in fold's representation, a BigInt above Long/MAX_VALUE (an unsigned
+        ;; long long: 18446744073709551615ULL; review 1111 #5: template/array32.C's 18446744073709551615 had thrown Java's
+        ;; NumberFormatException, a crash of Sema; 0b literals and separators were not read; #3: one representation)
+        ;; (gf-cpp: a floating literal ([lex.fcon]: a decimal one with a . or an exponent, a hexadecimal one with a p
+        ;; exponent) a double, its suffix f (float's value) or l (long double's, held as a double) dropped: `(T) 1.0` in
+        ;; cpp2a/explicit6.C's explicit-specifier, which cpp-s7 had refused)
+        flt (fn [^String t]
+              (let [l (str/replace (str/lower-case t) "'" "")
+                    [_ m sfx] (re-matches #"(.*?)(bf16|f16|f32|f64|f128|f|l)?" l)
+                    d (try (Double/parseDouble ^String m) (catch NumberFormatException _ (fail :template "a floating literal " t)))]
+                (if (#{"f" "f32"} sfx) (double (float d)) d)))
+        num (fn [^String t] (let [l (str/lower-case t)]
+                              (if (if (str/starts-with? l "0x") (str/includes? l "p") (or (str/includes? l ".") (str/includes? l "e")))
+                                (flt t)
+                              (let [t (str/replace (str/replace l "'" "") #"[ulz]+$" "")
+                                  [d r] (cond (str/starts-with? t "0x") [(subs t 2) 16]
+                                              (str/starts-with? t "0b") [(subs t 2) 2]
+                                              (and (> (count t) 1) (str/starts-with? t "0")) [(subs t 1) 8]
+                                              :else [t 10])]
+                              ;; (cpp-s7: digits outside the base, 09 or 0x without digits, a refusal, not Java's
+                              ;; NumberFormatException, a crash of Sema since review 1111 #5; floating literals are flt's)
+                              (when-not (re-matches (case (int r) 16 #"[0-9a-f]+" 2 #"[01]+" 8 #"[0-7]*" #"[0-9]+") d)
+                                (fail :template "not an integer literal " t))
+                              (u64 (bigint (if (= "" d) java.math.BigInteger/ZERO (java.math.BigInteger. ^String d (int r)))))))))
         prec {"||" 1 "&&" 2 "|" 3 "^" 4 "&" 5 "==" 6 "!=" 6 "<" 7 ">" 7 "<=" 7 ">=" 7 "<<" 8 ">>" 8 "+" 9 "-" 9 "*" 10 "/" 10 "%" 10}
         ;; the tokens of a bracketed run from the current position (its opening token consumed), joined
         run (fn [^String open ^String close]
@@ -473,7 +583,22 @@
                           (= x open) (recur (inc d))
                           (= x close) (if (= 1 d) (str/join " " (map second (subvec ts start (dec @pos)))) (recur (dec d)))
                           :else (recur d))))))]
-    (letfn [(primary []
+    (letfn [(cast-named [nm v]
+              (let [ty (abi/unq (sema/resolve-type scope nm))]
+                (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
+                      (= :bool (:n ty)) (if (falsy? v) 0 1)
+                      ;; (cpp-s5b: a 128-bit type's constant is not evaluated in the text, a refusal)
+                      (and (abi/integral? ty) (> (* 8 (long (abi/size-of ty))) 64)) (fail :template "a 128-bit constant expression " s)
+                      ;; (an unsigned 64-bit type's value as fold's: modulo 2^64, a BigInt above Long/MAX_VALUE)
+                      (abi/integral? ty) (let [b (* 8 (abi/size-of ty))]
+                                           (if (>= b 64) (if (abi/signed? ty) (lng v) (u64 (lng v)))
+                                               (let [m (dec (bit-shift-left 1 b)) u (bit-and (lng v) m)]
+                                                 (if (and (abi/signed? ty) (bit-test u (dec b))) (- u (inc m)) u))))
+                      ;; (cpp-s5: a floating type's value: `double(-1) < double(0)`; gf-cpp: a double, float's rounded to
+                      ;; float, the operators then the floating ones)
+                      (abi/floating? ty) (if (= 4 (long (abi/size-of ty))) (double (float (dbl v))) (dbl v))
+                      :else (fail :template "constant expression " s))))
+            (primary []
               (let [[k t] (next!)]
                 (cond
                   ;; a C-style cast to a builtin type: (bool)(x)
@@ -484,16 +609,15 @@
                   ;; parse_numbers.h's `(_IntType)_Val` in _Select_int_base's base; an integral type's value range)
                   (and (= t "(") (= :id (first (get ts @pos))) (= ")" (nth (get ts (inc @pos)) 1 nil))
                        (some #(= :type (:e %)) (sema/lookup scope (peek))))
-                  (let [[_ nm] (next!) _ (next!)
-                        ty (abi/unq (sema/resolve-type scope nm))
-                        v (primary)]
-                    (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
-                          (= :bool (:n ty)) (if (zero? (long v)) 0 1)
-                          (abi/integral? ty) (let [b (* 8 (abi/size-of ty))]
-                                               (if (>= b 64) (long v)
-                                                   (let [m (dec (bit-shift-left 1 b)) u (bit-and (long v) m)]
-                                                     (if (and (abi/signed? ty) (bit-test u (dec b))) (- u (inc m)) u))))
-                          :else (fail :template "constant expression " s)))
+                  (let [[_ nm] (next!) _ (next!)]
+                    (cast-named nm (primary)))
+                  ;; (cpp-s5: a functional cast to a type named by one identifier, [expr.type.conv]/2: <type_traits>'
+                  ;; __is_signed_helper's `__bool_constant<_Tp(-1) < _Tp(0)>`, so that is_signed_v<long> holds; an unsigned
+                  ;; 64-bit value above Long/MAX_VALUE as the integer it is, so that the comparison is the type's)
+                  (and (= k :id) (= "(" (peek)) (not (template-name? scope t))
+                       (some #(= :type (:e %)) (sema/lookup scope t)))
+                  (let [_ (next!) v (expr 0) _ (next!)]
+                    (cast-named t v))
                   (= t "(") (let [v (expr 0)] (next!) v)
                   (= t "-") (fold "neg" [(primary)])
                   (= t "+") (primary)
@@ -584,7 +708,8 @@
                     :else l))))]
       (let [v (expr 0)]
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
-        v))))
+        ;; (review 1111 #3: outside the text a value is its 64-bit pattern, a long, as sema's ce-wrap gives it)
+        (if (u64? v) (lng v) v)))))
 
 (declare resolve-args complete-args instantiate-fn var-template-inst written-qualifier)
 
@@ -638,6 +763,15 @@
       (when (and t (= :alias (:tk t)))
         {:name (name (second cls)) :args (or (resolve-args scope t (vec (nnext cls)) false) (fail :template "the template arguments of " (:name t)))}))))
 
+(defn- concept-named
+  "The entry of the concept the name `nm` (a symbol, n/C qualified) denotes in `scope`, or nil."
+  [scope nm]
+  (let [es (try (if (namespace nm) (sema/lookup-qualified scope (vec (concat (str/split (namespace nm) #"/") [(name nm)]))) (sema/lookup scope (name nm)))
+                (catch arbace.lang.ExceptionInfo _ nil))]
+    (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) es))))
+
+(declare concept-satisfied?)
+
 (defn- const-form
   "A constant of a template argument's or array bound's form: a number, a name, X<T>::member, (cpp/text s)."
   [scope f]
@@ -668,6 +802,16 @@
         {:k :texpr :o :vt :name (:name t) :args args}
         (let [v (sema/var* (var-template-inst t args))]
           (if (and (:c (:ty v)) (:init v)) (var-value v (sema/const-int (or (:def-scope v) scope) (:init v))) (fail :template "not a constant: " (pr-str f))))))
+    ;; (cpp-s8: a concept-id, [temp.names]/8: true when its concept is satisfied, a prvalue of type bool; with dependent
+    ;; arguments, in a template's symbolic signature, the expression standing for it -- <ranges_base.h>'s
+    ;; borrowed_iterator_t<_Range> = __conditional_t<borrowed_range<_Range>, iterator_t<_Range>, dangling>, whose refusal
+    ;; had taken ranges::copy's operator() for a range out)
+    (and (seq? f) (= '<> (first f)) (symbol? (second f)) (concept-named scope (second f)))
+    (let [c (tmpl (:id (concept-named scope (second f))))
+          args (or (complete-args c (resolve-args scope c (vec (nnext f)) false)) (fail :template "the template arguments of " (:name c)))]
+      (if (some dependent? args)
+        {:k :texpr :o :concept :name (:name c) :tid (:id c) :args args}
+        (if (concept-satisfied? c args) 1 0)))
     ;; a call without arguments of a static member (function template's specialization), G5c
     (and (seq? f) (= 'fn (first f)) (= [] (second f)) (let [c (nth f 2 nil)] (and (seq? c) (#{'cpp/scope '<>} (first c)))))
     (static-call-value scope (nth f 2))
@@ -794,7 +938,18 @@
           (let [s (bind-scope (:scope t) (or (:dparams p) (subvec (:params t) 0 i)) args nil)
                 a (if (= :type (:kind p))
                     (sema/resolve-type s d)
-                    (value-arg (binding [sema/*cutoff* Long/MAX_VALUE] (sema/const-int s d)) (:name p) (param-type s p)))]
+                    (value-arg (binding [sema/*cutoff* Long/MAX_VALUE]
+                                 (try (sema/const-int s d)
+                                      (catch arbace.lang.ExceptionInfo e
+                                        ;; (cpp-s8: a default that names the parameters before it, given dependent
+                                        ;; arguments: the dependent expression standing for it, read from its text as a
+                                        ;; signature's -- <type_traits>' __match_cv_qualifiers<_Qualified, _Unqualified,
+                                        ;; bool _IsConst = is_const<_Qualified>::value, ...> under __copy_cv<_Xp, _Yp>, so
+                                        ;; __common_ref_impl's partial specializations had been dropped)
+                                        (let [v (when (some dependent? args)
+                                                  (try (eval-text s (#'sema/node-text d)) (catch arbace.lang.ExceptionInfo _ nil)))]
+                                          (if (map? v) v (throw e))))))
+                               (:name p) (param-type s p)))]
             (recur (inc i) (conj args a)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -908,6 +1063,7 @@
 
 (declare deduce-by-type-match)
 (def ^:dynamic *satisfaction* nil)
+(def ^:dynamic *unstable* nil) ; cpp-s8: an atom set when a satisfaction asked about a class still being defined (not memoized)
 
 ;; CX12 (second slice, the checker: sema/checking?): a template's deduction that gives no candidate is the program's
 ;; error only for the reasons below, each sure ([temp.deduct.type]'s mismatches of a member function's qualifiers or a
@@ -933,7 +1089,7 @@
     (and (map? x) (= :tparam-v (:k x)) (= tid (:tid x))) (let [a (get b (:i x))] (cond (nil? a) x (contains? a :val) (:val a) :else a))
     (and (map? x) (= :texpr (:k x)) (:args x) (not= :sr (:o x)) (not= "cast" (:o x)))
     (let [args (mapv #(subst-value % b tid) (:args x))]
-      (if (every? number? args) (fold (:o x) args) (assoc x :args args)))
+      (if (every? number? args) (let [v (fold (:o x) args)] (if (u64? v) (lng v) v)) (assoc x :args args)))
     :else x))
 
 (defn- dependent-on? [x tid] (some #(and (map? %) (#{:tparam :tparam-v :ttp} (:k %)) (= tid (:tid %))) (tree-seq coll? seq x)))
@@ -1313,7 +1469,11 @@
   [scope n]
   (when (= "DeclRefExpr" (:kind n))
     (let [nm (get-in n [:referencedDecl :name])
-          es (when (string? nm) (try (sema/lookup scope nm) (catch arbace.lang.ExceptionInfo _ nil)))
+          ;; (cpp-s8: a qualified concept-id, `__detail::__has_member_element_type<_Tp>` in a requires-clause, looked up
+          ;; by its qualifier: before, an atom of its own, so no partial specialization subsumed another through it)
+          [_ q] (#'sema/ref-qualifier n)
+          es (when (string? nm) (try (if (seq q) (sema/lookup-qualified scope (conj (vec q) nm)) (sema/lookup scope nm))
+                                     (catch arbace.lang.ExceptionInfo _ nil)))
           e (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) es))]
       (when e
         (let [c (tmpl (:id e))
@@ -1447,16 +1607,23 @@
 (defn- declare-instance!
   "The class of the template `t` for `args` from the pattern node `node` in a scope binding `params` to `bargs`
   (a partial specialization's or the primary's); `explicit?`: an explicit specialization (its members ordinary)."
-  [t args node params bargs explicit?]
+  ([t args node params bargs explicit?] (declare-instance! t args node params bargs explicit? nil))
+  ([t args node params bargs explicit? cid0]
   (let [tid (:id t)
-        cid (next-id)
+        cid (or cid0 (next-id))
         ps (bind-scope (:scope t) params bargs nil)
         cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]))
-        first-fn (inc (long @sema/*ids*))]
+        first-fn (inc (long @sema/*ids*))
+        ;; (CP365 (a): the argument classes not complete yet, declared only or still being defined)
+        waits (set (for [a args :when (map? a) :let [u (abi/unq a)] :when (abi/class? u) :let [c (abi/cls (:id u))]
+                         :when (or (not (:complete c)) (:defining c))]
+                     (:id u)))]
     (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
                                     :union (= "union" (:tagUsed node)) :tmpl tid :targs args :header (sema/header-node? node)})
     (enter! ps (:name t) {:e :type :ty {:k :class :id cid} :pos -1})
     (upd-tmpl! tid assoc-in [:insts args] cid)
+    (when-let [nm (System/getenv "CPP_INST_TRACE")]
+      (when (= nm (:name t)) (binding [*out* *err*] (println "instance" (:name t) tid cid (pr-str args) (if cid0 "again" "") (System/identityHashCode *tmpls*) (count (:insts (tmpl tid))) (get-in (tmpl tid) [:insts args])))))
     (when (:completeDefinition node)
       ;; the bases dependent in the pattern, which unqualified lookup in the specialization does not search
       (when-not explicit?
@@ -1466,8 +1633,26 @@
                                                                     (catch arbace.lang.ExceptionInfo _ true))
                                                            i))
                                               (:bases node))))))
-      (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid)]
-        (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
+      ;; (CP365 (a): an instance whose definition did not finish while one of its arguments was incomplete, a header's
+      ;; declaration dropped or the refusal thrown: <format>'s _Arg_value<format_context> made inside basic_format_context's
+      ;; definition, its member naming `_Context::char_type` before the context declares it. Provisional: made again in
+      ;; place, the same class, once every such argument is complete (class-completed!); clang instantiates it only where
+      ;; it must be complete, by then)
+      ;; (cpp-s8: or that finished with a member declaration dropped, a nested class's among them: <format>'s
+      ;; _Arg_value<_Context>'s anonymous union, whose `_CharT _M_c` dropped it whole, so _M_none and the rest were no
+      ;; members)
+      (let [drops0 (.get ^java.util.concurrent.atomic.AtomicLong sema/drop-count)]
+      (try
+        (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid)]
+          (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
+        (finally
+          (when (and (seq waits) (not explicit?) *provisional*
+                     (or (not (:finished (abi/cls cid)))
+                         (> (.get ^java.util.concurrent.atomic.AtomicLong sema/drop-count) drops0)))
+            (when (System/getenv "CPP_TMPL_TRACE")
+              (binding [*out* *err*] (println "provisional instance" (:name t) cid "waiting for" (mapv #(:name (abi/cls %)) waits))))
+            (swap! *provisional* (fn [m] (-> (reduce (fn [m w] (update-in m [:waits w] (fnil conj #{}) cid)) m waits)
+                                             (assoc-in [:remake cid] [t args node params bargs]))))))))
       ;; the members' definitions: instantiated when used ([temp.inst]/11), linkonce_odr as clang writes them
       (when-not explicit?
         (doseq [[id f] @sema/*fns* :when (and (>= (long id) first-fn) (= cid (:cls f)) (:body f) (not (:implicit f)))]
@@ -1476,7 +1661,51 @@
       (doseq [[id f] @sema/*fns* :when (and (>= (long id) first-fn) (= cid (:cls f)) (:node f) (not (:implicit f)))]
         (name-pack-params! id (:node f)))
       (when (identical? node (:pattern t)) (abi/update-cls! cid assoc :from-primary true) (attach-ool! tid cid)))
-    {:k :class :id cid}))
+    {:k :class :id cid})))
+
+(defn- class-completed!
+  "CP365 (a): the class `id` complete; each provisional instance that waited for it and for no other incomplete class is
+  made again in place (declare-instance! with its class id: the class's record, scope and members made afresh, the old
+  members' functions left unlisted), its partial specialization's out-of-line members attached again, and the classes'
+  layouts computed again on use (a class holding the instance had laid it out broken)."
+  [id]
+  (when-let [p *provisional*]
+    (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "class completed" (:name (abi/cls id)) id (pr-str (get-in @p [:waits id])))))
+    (when-let [cids (seq (get-in @p [:waits id]))]
+      (swap! p update :waits dissoc id)
+      (doseq [cid cids
+              :let [still (some (fn [[w cs]] (and (contains? cs cid) (let [c (abi/cls w)] (or (not (:complete c)) (:defining c)))))
+                                (:waits @p))]
+              :when (not still)
+              :let [[t0 args node params bargs] (get-in @p [:remake cid])]
+              :when t0
+              :let [t (tmpl (:id t0))]]
+        (swap! p (fn [m] (-> m (update :remake dissoc cid)
+                             (update :waits (fn [ws] (into {} (for [[w cs] ws :let [cs (disj cs cid)] :when (seq cs)] [w cs])))))))
+        (when (System/getenv "CPP_TMPL_TRACE")
+          (binding [*out* *err*] (println "provisional instance" (:name t) cid "made again")))
+        (let [fp (abi/cls cid)]
+          (declare-instance! t args node params bargs false cid)
+          (when-let [[ptid pps pb] (:from-partial fp)]
+            (abi/update-cls! cid assoc :from-partial [ptid pps pb])
+            (when-let [pt (some #(when (= ptid (:id %)) %) (:partials t))]
+              (doseq [o (:ool pt)] (attach-one! (:id t) cid o [pps pb])))))
+        (swap! abi/*classes* (fn [m] (reduce-kv (fn [m k v] (if (:layout v) (assoc m k (dissoc v :layout)) m)) m m)))))))
+
+(declare type-constraints-satisfied?)
+
+(defn- partial-args
+  "A partial specialization's arguments as written after its name, resolved in `scope`, and completed by the primary
+  template's default arguments ([temp.spec.partial.general]/8 with [temp.arg.general]/9: `template<class X, class Y>
+  struct __common_ref_impl<X&, Y&&>` of `template<class A, class B, class = void> struct __common_ref_impl` is
+  <X&, Y&&, void>; cpp-s8: before, its two arguments never matched an instance's three, so common_reference_t<char&,
+  char&&> was <type_traits>' bullet 3's char&, and indirectly_readable<char*> false); as written when a default does not
+  resolve."
+  [scope t forms]
+  (let [args (resolve-args scope t forms true)]
+    (if (< (count args) (count (:params t)))
+      (or (try (complete-args t args) (catch arbace.lang.ExceptionInfo _ nil)) args)
+      args)))
 
 (defn- partial-match
   "The partial specialization `pt`'s parameters deduced from the arguments, or nil ([temp.class.spec.match])."
@@ -1486,7 +1715,16 @@
       (when (= (count @b) (count (:params pt)))
         (let [ded (mapv #(get @b %) (range (count (:params pt))))]
           ;; its associated constraints satisfied ([temp.spec.partial.match]/2; G4)
-          (when (and (or (nil? (:constraint pt))
+          (when (and ;; (its parameters' type-constraints too, [temp.param]/4's immediately-declared constraints first in its
+                     ;; associated constraints, [temp.constr.decl]/3.1; cpp-s5: <format>'s formatter<__formattable_float _Tp,
+                     ;; __char _CharT> matched formatter<int, char> beside the integers' one)
+                     (or (not-any? :tc (:params pt))
+                         (let [k [:partial-tc (:id pt) (canonical ded)] m *satisfaction* v (if m (get @m k ::none) ::none)]
+                           (if (= ::none v)
+                             (let [r (boolean (type-constraints-satisfied? pt ded (bind-scope (:scope pt) (:params pt) ded nil)))]
+                               (when m (swap! m assoc k r)) r)
+                             v)))
+                     (or (nil? (:constraint pt))
                          (let [k [:partial (:id pt) (canonical ded)] m *satisfaction* v (if m (get @m k ::none) ::none)]
                            (if (= ::none v)
                              (let [r (sema/constraint-satisfied? (bind-scope (:scope pt) (:params pt) ded nil) (:constraint pt))]
@@ -1499,41 +1737,161 @@
                          ;; though an alias like __void_t drops it: sema/*decltype-failed*, cpp-s2)
                          (let [failed (atom false)]
                            (when-let [sub (try (binding [sema/*decltype-failed* failed]
-                                                 (resolve-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt) true))
+                                                 (partial-args (bind-scope (:scope pt) (:params pt) ded nil) (:tmpl pt) (:forms pt)))
                                                (catch arbace.lang.ExceptionInfo _ nil))]
                              (and (or (not @failed) (dependent? ded)) (= (canonical sub) (canonical args)))))))
             ded))))))
+
+(defn- partial-constraints
+  "A class template partial specialization's associated constraints ([temp.constr.decl]/3) as one normal form or nil: its
+  parameters' type-constraints, then its requires-clause, as associated-constraints's for a function template."
+  [pt]
+  (let [ss (bind-scope (:scope pt) (:params pt) nil (:id pt))
+        tcs (for [p (:params pt)
+                  :when (and (:tc p) (not (:tc-args p)) (not (:pack p)))
+                  :let [c (concept-of pt p)]
+                  :when c
+                  :let [ty (:ty (first (sema/lookup ss (:name p))))]]
+              (normal-form (bind-scope (:scope c) (:params c) [ty] nil) (:expr c) (canonical [ty]) 1))
+        rc (when-let [x (:constraint pt)] (normal-form ss x nil 0))
+        parts (remove nil? (concat tcs [rc]))]
+    (when (seq parts) (reduce (fn [a b] [:and a b]) parts))))
+
+(defn- more-constrained-partial?
+  [p1 p2]
+  (let [p (try (partial-constraints p1) (catch arbace.lang.ExceptionInfo _ ::unknown))
+        q (try (partial-constraints p2) (catch arbace.lang.ExceptionInfo e (when (System/getenv "CPP_CONSTRAINT_TRACE") (binding [*out* *err*] (println "partial-constraints" (.getMessage e)))) ::unknown))]
+    (when (System/getenv "CPP_CONSTRAINT_TRACE") (binding [*out* *err*] (println "more-constrained-partial" (:id p1) (:id p2) (pr-str p) (pr-str q))))
+    (cond
+      (or (= ::unknown p) (= ::unknown q)) false
+      (nil? p) false
+      (nil? q) true
+      :else (and (subsumes? p q) (not (subsumes? q p))))))
 
 (defn- more-specialized-partial?
   "[temp.class.order]: the partial specialization p1 more specialized than p2 (p2's arguments deduced from p1's, not
   the reverse)."
   [p1 p2]
-  (let [ded (fn [pa pb] (match-args (atom {}) (:id pa) (:args pa) (:args pb)))]
-    (and (ded p2 p1) (not (ded p1 p2)))))
+  (let [ded (fn [pa pb] (match-args (atom {}) (:id pa) (:args pa) (:args pb)))
+        a (ded p2 p1)]
+    (or (and a (not (ded p1 p2)))
+        ;; (cpp-s8: of two whose arguments deduce each other, the more constrained, [temp.spec.partial.order]/1 with
+        ;; [temp.func.order]/6.2.2: <iterator_concepts.h>'s indirectly_readable_traits<__has_member_value_type _Tp>
+        ;; requires __has_member_element_type<_Tp> && same_as<...> (LWG 3446) over <__has_member_value_type _Tp> and over
+        ;; LWG 3541's, std::span's value_type had been "ambiguous partial specializations")
+        (and a (= (map (juxt :kind :pack) (:params p1)) (map (juxt :kind :pack) (:params p2)))
+             (more-constrained-partial? p1 p2)))))
+
+(def ^:dynamic *inst-depth*
+  "CP368 (a): the class instantiations under way, nested (clang's -ftemplate-depth, 1024 by default:
+  err_template_recursion_depth_exceeded)."
+  0)
+
+(declare instantiate-class* select-instance! incomplete-instance!)
 
 (defn instantiate-class
   "The class of the class template `tid` for the complete arguments `args`: an explicit specialization's, the most
-  specialized matching partial specialization's, or the primary template's ([temp.spec.partial.match])."
+  specialized matching partial specialization's, or the primary template's ([temp.spec.partial.match]). CP368 (a): at
+  most 1024 instantiations nested, as clang's -ftemplate-depth; the analysis' stack may end first (about 900 on the tools'
+  host's thread), so the outermost one turns a StackOverflowError under it into the same refusal, a diagnostic, not a
+  crash."
+  [tid args]
+  (if (pos? (long *inst-depth*))
+    (instantiate-class* tid args)
+    (try (instantiate-class* tid args)
+         (catch StackOverflowError _
+           (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth (the analysis' stack, under "
+                                (:name (tmpl tid)) ")")
+                           {:codegen/refused :depth}))))))
+
+(defn- instantiate-class*
   [tid args]
   (sema/tick!)
   (binding [sema/*decltype-failed* nil] ; (a class's own members' dependent decltypes are not its user's failure)
   (or (when-let [cid (get-in @*tmpls* [tid :insts args])] {:k :class :id cid})
+      (binding [*inst-depth* (inc (long *inst-depth*))]
+      (when (> (long *inst-depth*) 1024)
+        (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of 1024 (" (:name (tmpl tid)) ")")
+                        {:codegen/refused :depth})))
       (let [t (tmpl tid)]
-        (if-let [node (get (:specs t) args)]
-          (declare-instance! t args node [] [] true)
-          (let [ms (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t))
-                best (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms)]
-            (cond
-              (empty? ms) (do (when-not (:pattern t) (fail :template "an incomplete class template " (:name t)))
-                              (declare-instance! t args (:pattern t) (:params t) args false))
-              (= 1 (count best)) (let [[pt b] (first best)
-                                       c (declare-instance! t args (:node pt) (:params pt) b false)]
-                                   ;; its out-of-line members
-                                   (abi/update-cls! (:id c) assoc :from-partial [(:id pt) (:params pt) b])
-                                   (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
-                                   c)
-              :else (fail :template "ambiguous partial specializations of " (:name t)
-                          (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args)))))))))))
+        (when-let [nm (System/getenv "CPP_INST_TRACE")]
+          (when (= nm (:name t))
+            (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
+        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args)) *provisional* sema/*main-retry*)
+          (incomplete-instance! t args)
+          (select-instance! t args nil)))))))
+
+(defn- select-instance!
+  "The class of the template `t` for `args`, its definition chosen ([temp.spec.partial.match]) and declared; `cid0` the class
+  id to make it under (CP372 (a): an incomplete instance completed in place), else a new one."
+  [t args cid0]
+  (if-let [node (get (:specs t) args)]
+    (declare-instance! t args node [] [] true cid0)
+    (let [ms (vec (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t)))
+          best (vec (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms))
+          ;; (cpp-s8: the partial specializations' constraints, evaluated just now, may have instantiated this very
+          ;; specialization (std::span's __iterator_traits<span<char>, void>: __cpp17_iterator<span> through
+          ;; iterator_traits<span>, whose base it is): that one, not a second class of the same arguments -- iterator_traits
+          ;; had derived from the first while the cache held the second, so __primary_traits_iter<span> was false and
+          ;; ranges::input_range<span<char>&> with it)
+          made (when-not cid0 (get-in @*tmpls* [(:id t) :insts args]))]
+      (cond
+        made {:k :class :id made}
+        (empty? ms) (do (when-not (:pattern t) (fail :template "an incomplete class template " (:name t)))
+                        (declare-instance! t args (:pattern t) (:params t) args false cid0))
+        (= 1 (count best)) (let [[pt b] (first best)
+                                 c (declare-instance! t args (:node pt) (:params pt) b false cid0)]
+                             ;; its out-of-line members
+                             (abi/update-cls! (:id c) assoc :from-partial [(:id pt) (:params pt) b])
+                             (doseq [o (:ool pt)] (attach-one! (:id t) (:id c) o [(:params pt) b]))
+                             c)
+        :else (fail :template "ambiguous partial specializations of " (:name t)
+                    (when (System/getenv "CPP_TMPL_TRACE") (str " " (pr-str (map (fn [[p b]] [(:args p) b]) ms)) " for " (pr-str args))))))))
+
+(defn- incomplete-instance!
+  "CP372 (a): a specialization of a class template not defined yet, named in the main file (prov2.C's `using ctx = Ctx<int,
+  short>;` before Ctx's definition): an incomplete class ([temp.inst]/2: naming it does not instantiate it), cached as the
+  template's instance and completed in place, the same class id, when the template's definition arrives (template-defined!).
+  Before, \"an incomplete class template\" and CP338's retry of the typedef, which a later use of the alias's name did not
+  wait for. The headers keep their retry (sema's *retry*): only while the main file is declared (*main-retry* bound)."
+  [t args]
+  (let [tid (:id t) cid (next-id)
+        ps (bind-scope (:scope t) (:params t) args nil)
+        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]))]
+    (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
+                                    :tmpl tid :targs args})
+    (upd-tmpl! tid assoc-in [:insts args] cid)
+    (swap! *provisional* update-in [:templates tid] (fnil conj #{}) cid)
+    (when (System/getenv "CPP_TMPL_TRACE")
+      (binding [*out* *err*] (println "incomplete instance" (:name t) cid "waiting for its template's definition")))
+    {:k :class :id cid}))
+
+(defn- drop-layouts! []
+  (swap! abi/*classes* (fn [m] (reduce-kv (fn [m k v] (if (:layout v) (assoc m k (dissoc v :layout)) m)) m m))))
+
+(defn- complete-instance!
+  "CP372 (a): the incomplete instance `cid` of `t` for `args` made in place by `f` (its definition chosen now, or an explicit
+  specialization's), out of the waiting set; the layouts computed again on use. A refusal leaves it incomplete (a use that
+  needs it complete refuses then, as before)."
+  [t cid f]
+  (swap! *provisional* update-in [:templates (:id t)] disj cid)
+  (when (System/getenv "CPP_TMPL_TRACE")
+    (binding [*out* *err*] (println "incomplete instance" (:name t) cid "completed")))
+  (try (f)
+       (catch arbace.lang.ExceptionInfo e
+         (when-not (:codegen/refused (ex-data e)) (throw e))))
+  (drop-layouts!))
+
+(defn- incomplete-waiting? [tid cid]
+  (boolean (and *provisional* (contains? (get-in @*provisional* [:templates tid]) cid))))
+
+(defn- template-defined!
+  "CP372 (a): the class template `tid` defined; its incomplete instances completed in place."
+  [tid]
+  (when-let [p *provisional*]
+    (doseq [cid (sort (get-in @p [:templates tid]))
+            :let [t (tmpl tid) args (:targs (abi/cls cid))]]
+      (complete-instance! t cid #(select-instance! t args cid)))))
 
 (defn- tmpl-of-entity [es]
   (or (some #(when (and (= :tmpl (:e %)) (#{:class :alias} (:tk %))) (:id %)) es)
@@ -1625,7 +1983,7 @@
         ;; headers' defaulted parameters); one that cannot be (a dependent value) is refused
         (let [written (count args)
               args (if (< (count args) (count (:params t)))
-                     (or (try (complete-args t args) (catch arbace.lang.ExceptionInfo _ nil))
+                     (or (try (complete-args t args) (catch arbace.lang.ExceptionInfo e (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "defaults of" (:name t) (pr-str args) (.getMessage e)))) nil))
                          (fail :template "a dependent template-id with default arguments"))
                      args)]
           ;; (as written, for an unresolved name's mangling: its arguments' count, the namespaces of its qualifier)
@@ -1687,6 +2045,34 @@
                           ;; the whole nested-name-specifier (S::Y<char>), outer parts plain names
                           (let [pre (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)*)$" (subs t 0 (- i (count (first m)))))]
                             [(second m) (str (str/replace (or (second pre) "") #"\s" "") (second m) (subs t i)) nested])))))))))))
+
+(defn- class-key-scope
+  "The scope a class template's (or its partial or explicit specialization's) declaration names with a
+  nested-name-specifier of plain names after its class-key (`template<...> class __format::_Arg_store {...}`, a member of
+  a namespace defined outside it, [class.pre]/3, [temp.spec.partial.general]/7; cpp-s5: <format>), else `scope`."
+  [scope n]
+  (let [t (sema/text-before-name n)
+        m (when t (re-find #"\b(?:class|struct|union)\s+((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)$" t))]
+    (if-not m
+      scope
+      (let [q (vec (map str/trim (remove str/blank? (str/split (second m) #"::"))))
+            e (first (filter #(#{:ns :type} (:e %)) (sema/lookup-qualified scope q)))]
+        (cond (= :ns (:e e)) (:scope e)
+              (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e)))
+              :else scope)))))
+
+(defn- ool-class-template
+  "The class template an out-of-line member's qualifier `qt` (`any::_Manager_internal<_Tp>`, as ool-qualifier gives it)
+  names by `cn`: looked up unqualified, else through the qualifier's plain names before it (a member template of a class,
+  cpp-s5: <any>'s any::_Manager_internal<_Tp>::_S_manage)."
+  [scope cn qt]
+  (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn))
+      (let [pre (when (string? qt) (second (re-find #"^((?:[A-Za-z_][A-Za-z_0-9]*::)+)[A-Za-z_][A-Za-z_0-9]*<" qt)))
+            parts (when pre (conj (vec (remove str/blank? (str/split pre #"::"))) cn))]
+        (when parts
+          (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %))
+                (try (sema/lookup-qualified scope parts) (catch arbace.lang.ExceptionInfo _ nil)))))
+      (fail :template "no class template " cn)))
 
 (defn- attach-one!
   "An out-of-line member definition `o` given to the class `cid`, made from the primary (its arguments bound to the
@@ -1768,18 +2154,31 @@
 (defn- concept-satisfied?
   "The satisfaction of the concept `c` (its template entry) for the arguments `args`, memoized (with whether it was
   doubtful, CP281 (a): sema/*constraint-doubt*)."
-  [c args]
+  [c args0]
+  ;; (cpp-s8: fewer arguments than its parameters, a type-constraint's text short of them: completed by the concept's
+  ;; defaults, else not checked, a doubt -- bound short, an IndexOutOfBounds had crashed the analysis)
+  (if-let [args (if (< (count args0) (count (:params c)))
+                  (try (complete-args c (vec args0)) (catch arbace.lang.ExceptionInfo _ nil))
+                  args0)]
   (let [k [(:id c) (canonical args)]
-        eval1 (fn [] (let [d (atom false)
+        eval1 (fn [] (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "enter concept" (:name c) (pr-str (canonical args)))))
+                     (let [d (atom false)
                            r (binding [sema/*constraint-doubt* d]
                                (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))]
                        [r @d]))
         [r d] (if-let [m *satisfaction*]
                 (let [v (get @m k ::none)]
-                  (if (= ::none v) (let [x (eval1)] (swap! m assoc k x) x) v))
+                  (if (= ::none v)
+                    (let [u (atom false)
+                          x (binding [*unstable* u] (eval1))]
+                      (if @u (some-> *unstable* (reset! true)) (swap! m assoc k x))
+                      x)
+                    v))
                 (eval1))]
+    (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "concept" (:name c) (pr-str (canonical args)) "=>" r (if d "(doubt)" "") (pr-str (keep #(when (and (map? %) (= :class (:k %))) [(:id %) (select-keys (abi/cls (:id %)) [:defining :finished :complete])]) (tree-seq coll? seq args))))))
     (when d (sema/doubt!))
-    r))
+    r)
+  (do (sema/doubt!) true)))
 
 (defn- type-constraints-satisfied?
   "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
@@ -1795,7 +2194,11 @@
                                                   (catch arbace.lang.ExceptionInfo _ (sema/doubt!) ::unresolved))]
                                (if (= ::unresolved rest-args) false (concept-satisfied? c (into [a] rest-args))))
                              true)
-              :else (if-let [c (concept-of t p)] (concept-satisfied? c [a]) true)))
+              ;; (cpp-s8: a concept of more parameters whose further arguments the parameter's text did not give: not
+              ;; checked, as above, rather than bound short -- an IndexOutOfBounds, a crash of the analysis)
+              :else (if-let [c (concept-of t p)]
+                      (if (> (count (remove :pack (:params c))) 1) (do (sema/doubt!) true) (concept-satisfied? c [a]))
+                      true)))
           (map vector (:params t) args)))
 
 (defn- name-pack-params!
@@ -1897,25 +2300,39 @@
          ;; (cpp-s4: a pointer's, [basic.lookup.argdep]/3.4, its pointee's: any's `any_cast<_Up>(&__any)` finds the
          ;; pointer overloads declared after it)
          :let [t (loop [t (abi/unq (abi/non-ref (:ty a)))] (if (abi/ptr? t) (recur (abi/unq (:to t))) t))] :when (abi/class? t)
+         :let [acls (#'sema/adl-classes args)]
          ns (sema/adl-class-nss (:id t))
-         e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names ns nm)) :when (and (= :tmpl (:e e)) (= :fn (:tk e)))]
+         e (binding [sema/*cutoff* Long/MAX_VALUE] (#'sema/own-names ns nm))
+         :when (and (= :tmpl (:e e)) (= :fn (:tk e)) (#'sema/friend-visible? acls e))]
      (:id e))))
 
 (defn- too-few-args?
   "CX12 (the checker): the call's arguments fewer than the function template's parameters that are no pack and have no
-  default argument ([over.match.viable]/2, the deduction's TooFewArguments)."
+  default argument ([over.match.viable]/2, the deduction's TooFewArguments). A parameter's default argument may be on any
+  declaration of the template ([dcl.fct.default]/4: a later declaration adds to the earlier ones'; CP375 (a), cpp-s9:
+  <format>'s `__do_vformat_to`, whose `const locale* = nullptr` is on its forward declaration only, the definition's pattern
+  without it); an explicit object parameter is the call's object, not one of its arguments."
   [t args]
-  (let [pn (filter #(= "ParmVarDecl" (:kind %)) (:inner (:pattern t)))
-        req (count (take-while (fn [p] (and (not (re-find #"\.\.\." (str (get-in p [:type :qualType]))))
-                                            (not-any? #(re-find #"Expr$|Literal$" (str (:kind %))) (:inner p))))
-                               pn))]
-    (< (count args) req)))
+  (let [parms (fn [d] (vec (filter #(= "ParmVarDecl" (:kind %)) (:inner d))))
+        pn (parms (:pattern t))
+        alts (map parms (:decls t))
+        dflt? (fn [p] (some #(re-find #"Expr$|Literal$" (str (:kind %))) (:inner p)))]
+    (if (:isExplicitObjectParameter (first pn))
+      false
+      (let [req (count (take-while (fn [[i p]] (and (not (re-find #"\.\.\." (str (get-in p [:type :qualType]))))
+                                                    (not (dflt? p))
+                                                    (not-any? #(some-> (get % i) dflt?) alts)))
+                                   (map-indexed vector pn)))]
+        (< (count args) req)))))
 
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
   [ctx callee args]
-  (let [tids (distinct (concat (:tmpls callee) (when (and (not (:obj callee)) (not (:qualified callee)) (:name callee)) (adl-templates args (:name callee)))))]
+  (let [acls (#'sema/adl-classes args)
+        ;; (cpp-s8: a hidden friend template only by ADL, its class associated: sema's friend-visible?)
+        tids (distinct (concat (filter #(#'sema/friend-visible? acls (tmpl %)) (:tmpls callee))
+                               (when (and (not (:obj callee)) (not (:qualified callee)) (:name callee)) (adl-templates args (:name callee)))))]
     (let [sure (atom 0) doubt (atom 0)
           fids (vec (for [tid tids
                           :let [t (tmpl tid)
@@ -1924,17 +2341,24 @@
                                 ;; (the checker's position stays the call's: the template's signature and pattern are
                                 ;; analyzed while deducing, CX12)
                                 at sema/*at* at-saved (some-> at deref)
-                                fid (binding [*unsure* u *sure* sr]
+                                ;; (CP375 (a): too few arguments, no candidate before its deduction and constraints,
+                                ;; [over.match.viable]/2, for every function template as cpp-s8 did for the constructor ones)
+                                few (too-few-args? t args)
+                                fid (when-not few
+                                     (binding [*unsure* u *sure* sr]
                                       (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
-                                             (when-let [a (deduce-call t ex args)] (instantiate-fn tid a)))
+                                             (if-let [a (deduce-call t ex args)]
+                                               (instantiate-fn tid a)
+                                               (when (System/getenv "CPP_TMPL_TRACE")
+                                                 (binding [*out* *err*] (println "template" (:name t) "does not deduce from" (pr-str (map :ty args)) "explicit" (pr-str ex))))))
                                            (catch arbace.lang.ExceptionInfo e
                                              (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
                                              ;; (CP281 (a): a constraint surely false is the program's, a sure drop)
                                              (if (or (:cx/constraint-false (ex-data e)) (:cx/sure-drop (ex-data e))) (reset! sr true) (reset! u true))
                                              (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))
-                                           (finally (when at (reset! at at-saved)))))
+                                           (finally (when at (reset! at at-saved))))))
                                 ;; (CX12, the checker: a template whose deduction failed by the algorithm alone)
-                                _ (when-not fid (swap! (if (and (not @u) (or @sr (too-few-args? t args))) sure doubt) inc))]
+                                _ (when-not fid (swap! (if (and (not @u) (or @sr few)) sure doubt) inc))]
                           :when fid]
                       fid))]
       ;; the drops' counts for the checker's diagnostic (sema's resolve-overload*)
@@ -2012,12 +2436,22 @@
   "A partial specialization's arguments as written after its name (struct Box<T*>), parsed from the main file's text."
   [n]
   (let [ts (vec (ct/tokens (node-text n)))
-        i (some (fn [i] (when (and (= (:name n) (nth (get ts i) 1 nil)) (= "<" (nth (get ts (inc i)) 1 nil))
-                                   (#{"struct" "class" "union"} (nth (get ts (dec i)) 1 nil)))
+        ;; (the class-key before the name, or before its nested-name-specifier: <format>'s `class
+        ;; __format::_Arg_store<_Context>`, a member of a namespace defined outside it, [class.pre]/3; cpp-s5)
+        key-before? (fn [i] (loop [j (dec i)]
+                              (let [t (nth (get ts j) 1 nil)]
+                                (cond (#{"struct" "class" "union"} t) true
+                                      (and (= "::" t) (>= j 1)) (if (= "::" (nth (get ts (dec j)) 1 nil)) false
+                                                                  (if (#{"struct" "class" "union"} (nth (get ts (dec j)) 1 nil)) true (recur (- j 2))))
+                                      :else false))))
+        i (some (fn [i] (when (and (= (:name n) (nth (get ts i) 1 nil)) (= "<" (nth (get ts (inc i)) 1 nil)) (key-before? i))
                           i))
                 (range 1 (dec (count ts))))]
-    (when-not i (fail :template "partial specialization's arguments"))
-    (first (ct/template-args ts (+ 2 i)))))
+    (cond
+      i (first (ct/template-args ts (+ 2 i)))
+      ;; (cpp-s5: one a macro writes, its arguments' tokens as the parser kept them)
+      (:_targtext n) (first (ct/template-args (vec (ct/tokens (:_targtext n))) 1))
+      :else (fail :template "partial specialization's arguments"))))
 
 (defn- var-text-args
   "CP338 (a): a variable template's partial specialization's arguments as written after its name, parsed from its text."
@@ -2049,20 +2483,25 @@
       (when (or (sema/body-of k) (:explicitlyDefaulted k))
         ;; declared in the class's names (its type may name the class's parameters), entered in the namespace, or
         ;; defining the namespace's earlier declaration of it
-        (let [fid (#'sema/declare-fn! fs k)
-              f (sema/fnd fid)
+        ;; (cpp-s9: none when its trailing requires-clause is not satisfied, declare-fn!'s nil: cpp23/ext-floating12.C's
+        ;; <complex>, a nil function's record made by cpp-s8's :friend-cls, then a crash of the instance's members' loop)
+        (when-let [fid (#'sema/declare-fn! fs k)]
+        (let [f (sema/fnd fid)
               old (some (fn [e] (when (and (= :fn (:e e)) (#'sema/same-sig? (sema/fnd (:id e)) f)) (:id e))) (.get ^java.util.HashMap (:names ns) (:name k)))
               id (or old fid)]
           (when old
             (upd-fn! old assoc :body (:body f) :node k :def-scope fs :param-names (:param-names f) :inline true)
             (upd-fn! fid dissoc :body))
-          (when-not old (enter! ns (:name k) {:e :fn :id fid :pos (long (or (:_b k) 0))}))
+          ;; (cpp-s8: a hidden friend, found by ADL alone: sema's friend-visible?)
+          (when-not old
+            (enter! ns (:name k) (cond-> {:e :fn :id fid :pos (long (or (:_b k) 0))} (:cls scope) (assoc :friend-cls (:cls scope))))
+            (when (:cls scope) (upd-fn! fid assoc :friend-cls (:cls scope))))
           (upd-fn! id assoc :def-scope fs :inline true)
           ;; a defaulted <=> declares a defaulted == alongside it ([class.compare.default]/5)
           (when (and (:explicitlyDefaulted k) (= "operator<=>" (:name k))
                      (not (some #(= :fn (:e %)) (.get ^java.util.HashMap (:names ns) "operator=="))))
             (friend! scope (assoc n :inner [(assoc k :name "operator==" :type {:qualType (str/replace (str (get-in k [:type :qualType])) #"^\s*auto\b" "bool")})])))
-          (when *instance* (upd-fn! id assoc :lazy true))))
+          (when *instance* (upd-fn! id assoc :lazy true)))))
       "FunctionTemplateDecl"
       (let [pat (first (filter #(= "FunctionDecl" (:kind %)) (kids k)))]
         ;; each class specialization's friend template is a template of its own (its signature names the class)
@@ -2077,9 +2516,10 @@
                              (.get ^java.util.HashMap (:names ns) (:name k)))]
             (upd-tmpl! old assoc :pattern pat :params (tparams k) :scope fs :sig nil)
             (let [tid (next-id)]
-              (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name k) :scope fs :path (:path ns) :params (tparams k) :pattern pat
-                                        :pos (:_b k) :insts {}})
-              (enter! ns (:name k) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b k) 0))})))))
+              (swap! *tmpls* assoc tid (cond-> {:id tid :tk :fn :name (:name k) :scope fs :path (:path ns) :params (tparams k) :pattern pat
+                                                :pos (:_b k) :insts {}}
+                                         (:cls scope) (assoc :friend-cls (:cls scope))))
+              (enter! ns (:name k) (cond-> {:e :tmpl :tk :fn :id tid :pos (long (or (:_b k) 0))} (:cls scope) (assoc :friend-cls (:cls scope))))))))
       nil)
     :template))
 
@@ -2152,7 +2592,7 @@
     (if (re-find #"^\s*template\s*<\s*>" text)
       (let [cls (sema/resolve-type scope qt)]
         (attach-member-template! (:id cls) {:node n :pnames []} []))
-      (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
+      (let [tid (ool-class-template scope cn qt)
             o {:node n :pnames (header-params text)}]
         (upd-tmpl! tid update :ool-tmpls (fnil conj []) o)
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-member-template! cid o (:params (tmpl tid)))))))
@@ -2216,14 +2656,15 @@
   [scope n]
   (case (:kind n)
     "ClassTemplateDecl"
-    (if-let [[cn _ nested] (when (:completeDefinition (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))) (ool-qualifier n))]
+    (if-let [[cn qt nested] (when (:completeDefinition (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))) (ool-qualifier n))]
       ;; a member class of a class template defined outside it (G5: basic_ostream<_CharT, _Traits>::sentry)
-      (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
+      (let [tid (ool-class-template scope cn qt)
             o {:k :class :node (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n))) :pnames (mapv :name (tparams n)) :nested nested}]
         (upd-tmpl! tid update :ool (fnil conj []) o)
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
         :template)
     (let [pattern (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))
+          scope (class-key-scope scope n)
           old (find-template scope (:name n) :class)
           tid (or old (next-id))]
       (if old
@@ -2233,7 +2674,9 @@
           (let [olds (:params (tmpl tid)) news (tparams n)]
             (upd-tmpl! tid assoc :pattern pattern
                        :params (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get olds i))) (inherit-default p olds news i) p))
-                                                 news))))
+                                                 news)))
+            ;; (CP372 (a): its instances named before, completed in place)
+            (template-defined! tid))
           ;; a later declaration's defaults merged (G5: <iosfwd>'s istreambuf_iterator declared again after its
           ;; definition, by the headers' retry)
           (let [news (tparams n)]
@@ -2250,6 +2693,17 @@
     (if-let [q (ool-qualifier (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n))))]
       (ool-member-template! scope n q)
     (let [pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n)))
+          ;; (cpp-s9: a member template of a class that is no template's specialization, or a namespace's function template,
+          ;; defined outside it with a qualifier of plain names, `template<class T> int S::h(T)`: its redeclaration looked
+          ;; for in the class's or namespace's scope, so that the definition gives the template declared there its body;
+          ;; it had been a template of the enclosing namespace's own, the member's call declared and never defined)
+          scope (or (when-let [q (seq (#'sema/qualifier-before pattern))]
+                      (let [es (sema/lookup-qualified scope (vec q))
+                            e (first (filter #(#{:ns :type} (:e %)) es))]
+                        (cond (= :ns (:e e)) (:scope e)
+                              (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e)))
+                              :else nil)))
+                    scope)
           _ (when (= "CXXConversionDecl" (:kind pattern)) (fail :template "a conversion function template"))
           ctor? (= "CXXConstructorDecl" (:kind pattern))
           body? (sema/body-of pattern)
@@ -2362,18 +2816,24 @@
                  {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t) :forms forms :tmpl t})
       :template)
     "ClassTemplatePartialSpecializationDecl"
-    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary template " (:name n)))
+    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup (class-key-scope scope n) (:name n))) (fail :template "no primary template " (:name n)))
           t (tmpl tid)
           pid (next-id)
           params (tparams n)
           ss (bind-scope (:scope t) params nil pid)
-          args (resolve-args ss t (template-text-args n) true)]
+          args (partial-args ss t (template-text-args n))]
       ;; a redeclaration of a partial specialization (its declaration, then its definition: <iterator_concepts.h>'s
       ;; iterator_traits<_Tp*>) is the same one, its definition kept (G4); its requires-clause its constraint (P14 (b))
       ;; (CP311 (a)'s measure: two partial specializations of the same arguments that differ in their constraints are two,
       ;; [temp.spec.partial.general]/1 with [temp.over.link]/7; concepts-class's S3<T> requires Class<T>, requires Union<T>)
       (let [cspell (fn [rc] (some-> rc node-text str/trim))
-            same (first (filter #(and (= (canonical (:args %)) (canonical args)) (= (cspell (:constraint %)) (cspell (:requiresClause n)))) (:partials t)))
+            ;; (cpp-s8: and in their parameters' type-constraints, [temp.param]/4: <iterator_concepts.h>'s
+            ;; indirectly_readable_traits<__has_member_value_type _Tp> and <__has_member_element_type _Tp>, the second
+            ;; had replaced the first, so a __normal_iterator had no value_type and iter_value_t none)
+            tcs (fn [ps] (mapv (juxt :tc :tc-args) ps))
+            same (first (filter #(and (= (canonical (:args %)) (canonical args)) (= (cspell (:constraint %)) (cspell (:requiresClause n)))
+                                      (= (tcs (:params %)) (tcs params)))
+                                (:partials t)))
             pt {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
                 :forms (template-text-args n) :tmpl t}]
         (if same
@@ -2382,12 +2842,15 @@
           (upd-tmpl! tid update :partials conj pt)))
       :template)
     "ClassTemplateSpecializationDecl"
-    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary template " (:name n)))
+    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup (class-key-scope scope n) (:name n))) (fail :template "no primary template " (:name n)))
           t (tmpl tid)
           args (complete-args t (vec (map-indexed (fn [i a] (node-arg scope (nth (:params t) i) a)) (filter #(= "TemplateArgument" (:kind %)) (kids n)))))]
       (if (:completeDefinition n)
         (do (upd-tmpl! tid assoc-in [:specs args] n)
-            (when-not (get-in @*tmpls* [tid :insts args]) (declare-instance! (tmpl tid) args n [] [] true)))
+            (let [ic (get-in @*tmpls* [tid :insts args])]
+              (cond (nil? ic) (declare-instance! (tmpl tid) args n [] [] true)
+                    ;; (CP372 (a): an incomplete instance named before its explicit specialization: completed by it)
+                    (incomplete-waiting? tid ic) (complete-instance! (tmpl tid) ic #(declare-instance! (tmpl tid) args n [] [] true ic)))))
         nil)
       :template)
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "VarDecl")
@@ -2407,7 +2870,7 @@
         ;; a member of a class template defined outside it
         (and (re-find #"^\s*template\s*<\s*[^>\s]" text) (ool-class-name n))
         (let [[cn qt] (ool-qualifier n)
-              tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup scope cn)) (fail :template "no class template " cn))
+              tid (ool-class-template scope cn qt)
               t (tmpl tid)
               pnames (header-params text)
               o {:k (if (= "VarDecl" (:kind n)) :var :fn) :node n :pnames pnames :nested (nth (ool-qualifier n) 2 nil)}
@@ -3087,6 +3550,13 @@
          :ctad ctad
          :ctor-candidates (fn [cid args]
                             (vec (for [tid (:ctor-tmpls (abi/cls cid))
+                                       ;; (cpp-s8: a constructor template of more parameters without defaults than the
+                                       ;; arguments is no candidate, [over.match.viable]/2, before its deduction and
+                                       ;; constraints: span's `template<contiguous_iterator _It> span(_It, size_type)` for
+                                       ;; is_constructible<span, span> had checked contiguous_iterator<span>, which asks
+                                       ;; is_constructible<span, span> again, to the constraints' depth)
+                                       ;; (too-few-args? reads every declaration's default arguments, CP375 (a))
+                                       :when (not (too-few-args? (tmpl tid) args))
                                        :let [fid (try (let [a (deduce-call (tmpl tid) [] args)]
                                                         (when (and (nil? a) (System/getenv "CPP_TMPL_TRACE"))
                                                           (binding [*out* *err*] (println "constructor template of" (:name (abi/cls cid)) "does not deduce")))
@@ -3149,4 +3619,5 @@
          :instantiate-class (fn [tid args] (instantiate-class tid args))
          ;; (a transform trait's name, not a function type returning a type named __x: __c_locale ())
          :is-trait (fn [nm] (contains? type-traits nm))
-         :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{}) *satisfaction* (atom {})] (f)))})
+         :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{}) *satisfaction* (atom {}) *provisional* (atom {:waits {} :remake {}})] (f)))
+         :class-completed (fn [id] (class-completed! id))})
