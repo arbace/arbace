@@ -3690,3 +3690,17 @@ test/ocaml/oc216-compiled.txt` and `bin/heavy-lock bin/oi suite check --aot --le
 test/ocaml/oc216-suite-compiled.txt` (the lists now with the signal and socket programs and recvfrom_unix, recvfrom_linux); the passes
 `--record`ed with the same lists, recvfrom_unix's and recvfrom_linux's entries out of aot-compiled-known.edn when they pass (and the
 `:unix-java` class of the compiled levels then empty), a failure's class the day after.
+
+## As built: night 12's strings.ml, a character above U+FFFF taken for a byte mark (2026-11-12, branch `gf-misc`, from `next` `bd6ab3ddd`)
+
+Night 12's `--full` (`ocaml-roundtrip.testsuite`) found testsuite/tests/tool-toplevel/strings.ml's fourth string constant read back
+from the `:lines` print as bytes (`:printed "[34 225 188 136 ...`) where the original is text; both records pass it. The cause is
+OC214 (a)'s `text-bytes` (`d87ed4a2c`): it writes a char in U+DC80..U+DCFF as the byte below it (the mark of a quoted string's byte that
+is not UTF-8), and the string holds cuneiform characters above U+FFFF, whose UTF-16 low surrogates can fall in that range (U+12086 is
+U+D808 U+DC86): the low half was written as the byte 0x86 and the high half alone as `?`, so the print was not UTF-8 and the reread
+kept it as bytes. A mark is a lone low surrogate (no printed character is one), so `text-bytes` now takes a char of the range for a
+mark only when the char before it is not a high surrogate. Rerun alone before the fix the file differs the same way (not the night's
+load). Proof: `bin/repr-ocaml roundtrip --text --only-list` of the file, 1 equal at the tree and text levels (16 s); the testsuite part
+whole (`roundtrip --text --corpus testsuite`, 7 min 57 s): 1,862 files, 1,801 equal, 61 rejected by the helper (their recorded
+classes), 0 differ, and 1,801 text equal; the records unchanged (they already pass it). No key moves (`arbace/repr/ocaml` is a crop
+path).
