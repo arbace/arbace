@@ -2723,6 +2723,23 @@
             (if (some #(and (vector? %) (= :tv (first %))) (tree-seq vector? seq t)) [p] []))
       [p])))
 
+(defn- simplify-pred*
+  "HF10-P34: simplify-pred for a constraint of any arity, every argument matched (DeriveAnyClass' inferred context:
+  GHC.Tc.Deriv.Infer's inferConstraintsAnyclass simplifies the default signatures' contexts at the instance's head to
+  constraints on type variables); one that no instance matches and that mentions no type variable is dropped"
+  [[c ts] depth]
+  (let [ts (mapv #(deep-expand (zonk %)) ts) p [c ts]
+        tv? (fn [t] (some #(and (vector? %) (= :tv (first %))) (tree-seq vector? seq t)))]
+    (if (<= depth 0)
+      [p]
+      (if-let [[i m] (some (fn [i] (when (and (= (first (:head i)) c) (= (count (second (:head i))) (count ts)))
+                                     (when-let [m (reduce (fn [m [pt t]] (when m (match-ty (set (:tvs i)) m pt t))) {}
+                                                          (map vector (second (:head i)) ts))]
+                                       [i m])))
+                           (insts-of c))]
+        (vec (mapcat (fn [[pc pts]] (simplify-pred* [pc (mapv #(subst m %) pts)] (dec depth))) (:ctx i)))
+        (if (some tv? ts) [p] [])))))
+
 (defn- distinct-last
   "Duplicates dropped keeping the last occurrence: the order GHC's solver leaves an inferred derived context in"
   [xs]
@@ -2815,7 +2832,12 @@
                    (:stock :anyclass) nil
                    :via (:via r)
                    :newtype (rep-of r)
-                   (when (and (:newtype? (:desc r)) (not (:standalone? r))
+                   ;; (HF10-P34: a standalone declaration of a class no stock deriving knows on a newtype, with
+                   ;; GeneralizedNewtypeDeriving, by the newtype too: deriving instance Monoid c => Monoid (K1 i c p) took
+                   ;; the class's defaults, mempty = mconcat [] and mconcat's foldr over mempty, a loop)
+                   (when (and (:newtype? (:desc r))
+                              (or (not (:standalone? r))
+                                  (and (not (contains? deriv/generators (occ (:cls r)))) (contains? *exts* "GeneralizedNewtypeDeriving")))
                               (or (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r)))
                                   (and (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))
                                        ;; GHC's non_coercible_class: Read, Show, Generic, Generic1 (and Data, Lift) stock
@@ -2836,7 +2858,19 @@
         ctx-of (fn [r]
                  (cond
                    (:standalone? r) (:ctx r)
-                   (:anyclass? r) []
+                   ;; HF10-P34: DeriveAnyClass' context, the default signatures' contexts at the head simplified
+                   ;; (inferConstraintsAnyclass): deriving (Generic, NFData) on T a wants NFData a
+                   (:anyclass? r) (let [info (get @*classes* (:cls r))
+                                        sm (zipmap (:tvs info) (:ts r))]
+                                    (distinct-last
+                                     (for [[_ dt] (sort-by (comp str key) (:dsigs info))
+                                           :when (= :forall (first dt))
+                                           :let [own (set (nth dt 1))]
+                                           [pc pts] (nth dt 2)
+                                           :when (not-any? (fn [x] (and (vector? x) (= :tv (first x)) (contains? own (second x))))
+                                                           (tree-seq coll? seq pts))
+                                           q (simplify-pred* [pc (mapv #(subst sm %) pts)] 30)]
+                                       q)))
                    (gnd-of r) (vec (simplify-pred [(:cls r) [(gnd-of r)]]))
                    ;; HF10-P34: GHC.Tc.Deriv.Infer's inferConstraints for Generic: none (the representation needs no
                    ;; instance); for Generic1 Functor of each composition's outer type
@@ -2851,15 +2885,6 @@
                                                      (:cons (:desc r)))))
                    :else (distinct-last (mapcat (fn [c] (mapcat (fn [t] (simplify-pred [(:cls r) [t]])) (:tys c)))
                                                 (:cons (:desc r))))))]
-    (doseq [r reqs] (swap! *insts* conj {:dfun (dfun r) :tvs (:tvs r) :ctx (if (:standalone? r) (:ctx r) []) :head [(:cls r) (:ts r)]}))
-    ;; the contexts by fixpoint, every inferred one at once from the previous round's (GHC.Tc.Deriv.Infer's
-    ;; simplifyDeriv iterated by GHC.Tc.Deriv's inferInstanceContexts), until none changes
-    (loop [k 0]
-      (let [cur (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))
-            ctxs (into {} (for [r reqs :when (not (:standalone? r))] [(dfun r) (ctx-of r)]))]
-        (when (some (fn [[d c]] (not= c (get cur d))) ctxs)
-          (swap! *insts* (fn [is] (mapv (fn [i] (if-let [c (get ctxs (:dfun i))] (assoc i :ctx c) i)) is)))
-          (when (< k 20) (recur (inc k))))))
     ;; HF10-P34: a derived Generic's (Generic1's) representation, the family instance Rep (T a) = Rep_T a
     ;; (GHC.Tc.Deriv.Generics' gen_Generic_fam_inst, its axiom Rep_T), in the family table before any binding is typed
     (doseq [r reqs :when (and (generic? r) (or (= "Generic" (occ (:cls r))) (deriv/gen1-ok? (:desc r))))]
@@ -2875,9 +2900,22 @@
                                  :unit (cond (= tm m) *unit*
                                              (get-in @*iface-meta* [:units tm]) (get-in @*iface-meta* [:units tm])
                                              (str/starts-with? tm "GHC.Internal.") "ghc-internal" :else *unit*)})
-            eqn {:tvs (vec (:tvs r)) :lhs [t0] :rhs rhs :ax (str (if (= gk :gen1) "Rep1_" "Rep_") (occ tn))}]
+            ;; the equation's variables renamed apart from the head's (famenv's matching substitutes to a fixed point:
+            ;; Rep (W a) at the very variable a of the equation looped)
+            rn (into {} (map (fn [v] [v [:tv (str "rep$" v)]]) (:tvs r)))
+            eqn {:tvs (mapv #(str "rep$" %) (:tvs r)) :lhs [(subst rn t0)] :rhs (subst rn rhs)
+                 :ax (str (if (= gk :gen1) "Rep1_" "Rep_") (occ tn))}]
         (when *own-fam-insts* (swap! *own-fam-insts* conj [fam eqn]))
         (swap! *families* update fam (fn [old] (update (merge {:flavour :open} old) :eqns (fnil conj []) (dissoc eqn :ax))))))
+    (doseq [r reqs] (swap! *insts* conj {:dfun (dfun r) :tvs (:tvs r) :ctx (if (:standalone? r) (:ctx r) []) :head [(:cls r) (:ts r)]}))
+    ;; the contexts by fixpoint, every inferred one at once from the previous round's (GHC.Tc.Deriv.Infer's
+    ;; simplifyDeriv iterated by GHC.Tc.Deriv's inferInstanceContexts), until none changes
+    (loop [k 0]
+      (let [cur (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))
+            ctxs (into {} (for [r reqs :when (not (:standalone? r))] [(dfun r) (ctx-of r)]))]
+        (when (some (fn [[d c]] (not= c (get cur d))) ctxs)
+          (swap! *insts* (fn [is] (mapv (fn [i] (if-let [c (get ctxs (:dfun i))] (assoc i :ctx c) i)) is)))
+          (when (< k 20) (recur (inc k))))))
     (let [ctx-by (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))]
       (vec (for [r reqs]
              {:dfun (dfun r) :tvs (:tvs r) :ctx (get ctx-by (dfun r))
