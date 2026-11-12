@@ -5227,3 +5227,31 @@ Alternatives considered: classing the six in divergences-own.edn (rejected: each
 them in ghc-internal's own STG that every program shares); a dfun naming per GHC's whole OccSet including derived instances' names
 first (not needed: explicit instances are named before derived ones here as in GHC). `deriving Generic` is not built (HF10-P34
 proposed); P33 is shown with a hand-written Generic instance. Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P32, P33".
+
+## 2026-11-12: HF10-P34 (a), DeriveGeneric in the elaborator (branch `hs-p34`, from `mac/hs-p32` 506aaf7f5)
+
+The user decided HF10-P34 (a) now. Built in `arbace/repr/haskell/deriv.ae` (`gen-generic`, `rep-type`, ported from GHC 9.14.1's
+`compiler/GHC/Tc/Deriv/Generics.hs`, tag ghc-9.14.1-release: mkBindsRep, mkSum, mk1Sum, genLR_E/P, mkProd_E/P, wrapArg_E/P, argTyFold,
+foldBal, tc_mkRepTy, mkBoxTy; BSD-3-Clause, the notice already in the file and LICENSE.md) and `typecheck.ae`'s `derive-all!`:
+Generic and Generic1 derived (from/to, from1/to1; the `Rep`/`Rep1` family instance, axiom `Rep_T`, entered before bindings are typed
+and written to the own interface; `MetaData`/`MetaCons`/`MetaSel` with the names, the module, the unit, the fixity from the module or
+the interfaces, the source bangs and the -O0 decided strictness); Generic never by the newtype; DeriveAnyClass's context inferred from
+the default signatures (inferConstraintsAnyclass). The generics programs then failed in ghc-internal's own STG, which every program
+shares, five ways, each fixed rather than classed: pattern synonyms were never desugared (`psyn` taken for a wildcard: symbolVal
+returned a free variable), now a synonym of the module with known pattern and no context is matched as its pattern (the matcher
+itself is proposed, HF10-P36); `SingKind k` was unsolvable with kinds erased (GHC.Internal.Generics' 9 errors), now recovered by
+inverting a deferred `F ?k ~ t` on the family's one matching equation (and `F ?k ~ F x`), under the wanted's givens; KnownNat and
+KnownSymbol evidence are GHC's EvLit (`NS n##`, `unpackCString#`); every `data instance Sing (a :: K)` was one tycon `R:Sing`, now
+named as GHC (`R:SingBoola`); a standalone `deriving instance Monoid c => Monoid (K1 i c p)` took the class defaults (a loop), now by
+the newtype when the head is the newtype at all its parameters (a first, wider rule made base's Data.Foldable1 worse; narrowed).
+Results (one run at a time under night 12's limits): ghc-internal lib-check 0 worse, Generics errors → ok, interface facts 20,699 of
+20,891 (was 20,681); lib-stg 5,705 of 7,757 equal (was 5,545 of 7,639), 0 worse; base 0 worse, lib-stg 582 of 1,072 (was 547 of
+1,046); deepseq/array/stm as recorded. The `generics/` run tests are in the `:testsuite` corpus but not `:testsuite-core`, and GHC's
+runs of them are not recorded: the five single-module ones (GFullyStrict, GenNewtype, T10030, T11358, T19819) were run by hand on
+the own libraries and judged by their golden `.stdout`: 5 pass (none before); 12 of the 14 single-module compile tests elaborate.
+No program of the run corpora derives Generic; the 40 programs the slice or these fixes touch and samples/synthetic: as before, 0
+unclassed. Keys unmoved. Alternatives considered: writing `D1`/`C1`/`S1`/`Rec0` as the synonyms (rejected: the elaborator's
+interface types drop kind arguments and over-applied zero-parameter synonyms; the expansions are what the judge canonicalises to);
+classing the library faults (rejected: each was general and small); a matcher-based pattern-synonym desugaring now (left to
+HF10-P36: the local inlining is what the generics path needs). Proposals HF10-P35 (generics/ into the run corpora with GHC's runs at
+the window), P34 (b) (-O's decided strictness, left), P36. Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P34".

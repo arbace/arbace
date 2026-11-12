@@ -3799,7 +3799,18 @@ By an agent during the day of 2026-11-12 under night 12's limits (night 12's gat
 
 **The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
 
-TABLE-LIBS
+| step | result | before (hs-p32's run) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 2 better (GHC.Internal.Generics: errors 9 → ok; GHC.Internal.Exception.Context as at hs-p32); interface facts 20,699 of 20,891 equal, 252 of 265 modules every fact | 20,681; 248 of 265 | 0.97 GB, 12m37 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,705 of 7,757 bindings equal, 0 worse, 28 better (TypeLits 14 → 22, TypeNats 5 → 10, TH.Syntax 422 → 476, RTS.Flags 151 → 166, Generics errors → ok, the modules with derived Generic: their `$cfrom`/`$cto`) | 5,545 of 7,639 | 1.13 GB, 14m23 |
+| lib-check `--package base` | 0 worse, 1 better (Data.Functor.Classes, as at hs-p32); interface facts 6,784 of 6,785 | 6,780 of 6,785 | 0.71 GB, 4m42 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | 547 of 1,046 | 0.70 GB, 4m23 |
+| lib-check `--package deepseq/array/stm` | as recorded: 202/211, 388/388, 222/222 facts; 0 worse each; controls differ | same | 0.59/0.61/0.53 GB |
+| lib-stg `--package deepseq/array/stm` | `:ok` (no reference) | same | 0.58-0.62 GB |
+
+On the way (the runs are the branch's fourth; the first three found the faults above): standalone deriving by the newtype for every
+non-stock class made base's Data.Foldable1 worse (`Foldable1 (Alt f)`, a class of type constructors: 48 errors), so it is limited to
+heads that are the newtype at all its parameters. Not re-recorded: the betters stay betters until the night's records.
 
 **The programs.** The testsuite's `generics/` run tests are in the `:testsuite` corpus's run list (`test/haskell/eval/testsuite-run.edn`:
 GFullyStrict, GenNewtype, T10030, T11358, T19819 `compile_and_run`; T5462Yes1, T5462Yes2 `multimod_compile_and_run` with C files,
@@ -3809,11 +3820,28 @@ worktree, not committed: the native front end on the own interfaces of the last 
 libraries) and judged by their own verdict, the testsuite's golden `NAME.stdout` (exit 0, stdout equal); T5462Yes1/2 are ineligible
 (other modules, C). No program of the run corpora (samples, synthetic, testsuite-core, nofib) derives Generic or uses DeriveAnyClass.
 
-TABLE-PROGS
+| run | result |
+|---|---|
+| the five single-module `generics/` run tests on the own libraries | 5 pass: GFullyStrict (DeriveAnyClass over Generic, `selDecidedStrictness`), GenNewtype (`isNewtype`), T10030 (`packageName` of Maybe's and Bool's library instances: `ghc-internal`), T11358 (`conFixity`: `Prefix`, `Infix LeftAssociative 9`), T19819 (DerivingVia `Generically T`'s Semigroup and Monoid; its golden file lacks the last newline, which the testsuite driver ignores). Before: none (`Rep T` did not reduce; GenNewtype, T10030, T11358 also needed the library fixes) |
+| the fourteen single-module `generics/` compile tests, the front end alone | 12 elaborate without an error (GenCanDoRep0/1, GenDerivOutput, GenDerivOutput1_0/1_1, T8479, T9563, T10361a/b, T12220, T14266, T25148b); T21185 (a kind-polymorphic Generic1 over a type family) and T25148a (`Assert`'s TypeError) do not |
+| `deriving (Generic, NFData)` programs (`.tmp/p34/t/G4.hs`, `G5.hs` in the worktree) | `force`, `deepseq`, `rnf` of a structure with an error inside caught (deriving NFData by DeriveAnyClass, `NFData a => NFData (W a)` inferred); `to (from x) == x` for sums, records, infix constructors; Generic1's `from1`/`to1` with `Rec1`, `:.:` |
 
 ### Checks (light, one run at a time, under 1.5 GiB)
 
-TABLE-CHECKS
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| the five `generics/` run tests on the own libraries (golden `.stdout`) | 5 pass |
+| `bin/hsi check --libs own --only` the 31 programs P32 made eligible and the 9 testsuite-core programs that use TypeLits, KnownNat/KnownSymbol or pattern synonyms (T19289, DataTypeOrd, T16586, T24245, T16646, T19667, TcTypeNatSimpleRun, TcTypeSymbolSimpleRun; T17310 is no run test) | 39 programs: 38 pass, kahan `:speed`; 29 own (28 pass), 10 pack as recorded (the TypeLits programs' `:typecheck-errors` and `:fallback` as in `check-hsi-own.edn`); 0 unclassed; arr001's control fails as it must; 3m11, 0.86 GB |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five new tars | exit 0; 50 own (49 pass), 13 pack (11 pass), as hs-p32; 0 unclassed, the controls fail as they must; 2m55, 1.07 GB |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 3m08, 0.59 GB |
+| `bin/gate --full --plan` | exit 0, no table error |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p32`) |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+Not run: hsi-essential (the pack path, which the elaborator does not touch), testsuite-core's whole own run and `hsi-check-aot` (the
+gate's heavy steps, at night).
 
 ### Night commands (not run)
 

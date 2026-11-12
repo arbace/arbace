@@ -106,8 +106,14 @@ Six crops are above 90 on all three. What the others still need:
   libraries, the six own-only failures fixed, none classed (local binders' types for tostg: thawSTArray's copy loop; derived Show's
   isSym: `()`; unique dictionary-function names: Data.Array.Base's strict and lazy ST instances; `OPTIONS -cpp` ineligible), the 31
   newly eligible programs 30 pass; ghc-internal's lib-stg 5,545 (0 worse), base's 1,046 bindings compared; default signatures in the
-  own interfaces (an importing module's instance applies `$dm` with their dictionaries). HF10-P34 proposed (DeriveGeneric). Next:
-  the window (P16's and P17's references), then containers.
+  own interfaces (an importing module's instance applies `$dm` with their dictionaries). HF10-P34 decided (a) (the user,
+  2026-11-12); `hs-p34` built it: Generic and Generic1 derived as GHC.Tc.Deriv.Generics does (from/to, the `Rep`/`Rep1` family
+  instance with its metadata), DeriveAnyClass's context from the default signatures; the generics programs found five library
+  faults, fixed (pattern synonyms of the module matched as their pattern: symbolVal; SingKind's kind recovered by family inversion;
+  KnownNat/KnownSymbol evidence; data instances by kind named apart; standalone newtype deriving of Monoid (K1 ...)): the five
+  single-module `generics/` run tests pass on the own libraries (none before), 12 of 14 compile tests elaborate; ghc-internal's
+  lib-stg 5,705 of 7,757 (0 worse), GHC.Internal.Generics errors 9 → 0. HF10-P35 (generics/ into the run corpora), P34 (b), P36
+  (pattern-synonym matchers) proposed. Next: the window (P16's and P17's references), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
