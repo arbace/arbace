@@ -2034,6 +2034,103 @@
 (def sat-families
   [["neon-sat" "NEON's saturating doubling multiplies and saturating shifts and narrows: sqdmulh, sqrdmulh (vector, scalar, by element), sqdmull, sqdmlal, sqdmlsl and their 2 forms (vector, scalar, by element), sqshl, uqshl, sqrshl, uqrshl by register, sqshl, uqshl, sqshlu by immediate, sqshrn, sqrshrn, uqshrn, uqrshrn, sqshrun, sqrshrun, sqxtn, uqxtn, sqxtun and their 2 forms and scalars, FPSR.QC" sat-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; AR13 (ARS66 (c)): NEON's remaining integer lanes, one program: srshl, urshl (vector and scalar d), pmul, raddhn, rsubhn and
+;; their 2 forms, pmull and pmull2 (bytes), saddlp, uaddlp, sadalp, uadalp, suqadd, usqadd, sqabs, sqneg (vector and scalar),
+;; shll and shll2, rshrn and rshrn2, addp's scalar; on neon's setup (v1 and v2 from the row, v0 their mix: the accumulating and
+;; the 2 forms' destination). The model: the pseudocode's integers (a rounding shift's integer on BigIntegers, SatQ, the
+;; polynomial product by its bits), FPSR.QC when a saturating lane saturates.
+
+(defn- clmul ^long [^long x ^long y ^long e]
+  (reduce (fn [^long r ^long i] (if (bit-test y i) (bit-xor r (bit-shift-left x i)) r)) 0 (range e)))
+
+(defn int-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        lv (fn [^long e] (let [x (nx) m (ones e) mn (bit-shift-left 1 (dec e))]
+                           (bit-and m (case (mod x 7)
+                                        0 mn 1 (dec mn) 2 (- (mod (unsigned-bit-shift-right x 8) 9) 4)
+                                        3 (+ mn (mod (unsigned-bit-shift-right x 8) 3)) 4 (- (dec mn) (mod (unsigned-bit-shift-right x 8) 3))
+                                        (nx)))))
+        lanes (fn [^long e] (vpack (for [_ (range (quot 128 e))] (lv e)) e))
+        sv (fn [^long e] (let [x (nx)] (bit-or (bit-and (nx) (bit-xor (ones e) 0xff))
+                                                (bit-and 0xff (if (zero? (mod x 5)) (nx) (- (mod (unsigned-bit-shift-right x 8) (+ (* 2 e) 7)) e 3))))))
+        out (fn [rs ^long e q] (vres (half (vpack (map first rs) e) q) (some second rs)))
+        sc-e {:b 8 :h 16 :s 32 :d 64}
+        vecs ["8b" "16b" "4h" "8h" "2s" "4s" "2d"]
+        wide {"8b" "8h" "4h" "4s" "2s" "2d"}
+        ;; the 2 form's narrow arrangement: 16b for 8b's
+        dbl (fn [a] (str (* 2 (ar-n a)) (subs a (dec (count a)))))]
+    (concat
+     ;; three same: srshl, urshl (every arrangement but 1d, the scalar d); pmul (8b, 16b)
+     (for [op ["srshl" "urshl"] a (conj vecs :d) _ (range 6)
+           :let [sc (keyword? a) e (if sc 64 (ar-e a)) n (if sc 1 (ar-n a)) q (and (not sc) (second (arrs a)))
+                 v1 (lanes e) v2 (vpack (for [_ (range (quot 128 e))] (sv e)) e) sg (= op "srshl")
+                 rs (for [k (range n)]
+                      [(bit-and (.longValue ^BigInteger (sat-shift (sat-big (vlane v1 k e) e sg) (long (unchecked-byte (vlane v2 k e))) true)) (ones e)) false])]]
+       (ncase (if sc (str op "\td0, d1, d2\n") (str op "\tv0." a ", v1." a ", v2." a "\n")) v1 v2 (out rs e q)))
+     (for [a ["8b" "16b"] _ (range 8)
+           :let [v1 (lanes 8) v2 (lanes 8) q (second (arrs a))
+                 rs (for [k (range (ar-n a))] [(bit-and (clmul (vlane v1 k 8) (vlane v2 k 8) 8) 0xff) false])]]
+       (ncase (str "pmul\tv0." a ", v1." a ", v2." a "\n") v1 v2 (out rs 8 q)))
+     ;; three different: raddhn, rsubhn and their 2 forms (v0's lower half kept); pmull, pmull2 (bytes into halfwords)
+     (for [op ["raddhn" "rsubhn"] na ["8b" "4h" "2s"] two [false true] _ (range 5)
+           :let [e (ar-e na) w (* 2 e) n (quot 64 e) v1 (lanes w) v2 (lanes w) d (v0-of v1 v2)
+                 p (first (vpack (for [k (range n)]
+                                   (let [x (vlane v1 k w) y (vlane v2 k w) s (if (= op "raddhn") (+ x y) (- x y))
+                                         s (bit-and (+ s (bit-shift-left 1 (dec e))) (ones w))]
+                                     (unsigned-bit-shift-right s e)))
+                                 e))]]
+       (ncase (str op (when two "2") "\tv0." (if two (dbl na) na) ", v1." (wide na) ", v2." (wide na) "\n") v1 v2
+              (vres (if two [(first d) p] [p 0]) false)))
+     (for [two [false true] _ (range 8)
+           :let [v1 (lanes 8) v2 (lanes 8) hi (if two 8 0)
+                 r (vpack (for [k (range 8)] (clmul (vlane v1 (+ k hi) 8) (vlane v2 (+ k hi) 8) 8)) 16)]]
+       (ncase (str "pmull" (when two "2") "\tv0.8h, v1." (if two "16b" "8b") ", v2." (if two "16b" "8b") "\n") v1 v2 (vres r false)))
+     ;; two-register miscellaneous: saddlp, uaddlp, sadalp, uadalp (from 8b-4s)
+     (for [op ["saddlp" "uaddlp" "sadalp" "uadalp"] a ["8b" "16b" "4h" "8h" "2s" "4s"] _ (range 4)
+           :let [e (ar-e a) w (* 2 e) q (second (arrs a)) n (quot (ar-n a) 2) sg (= \s (first op))
+                 v1 (lanes e) v2 (lanes e) d (v0-of v1 v2)
+                 da (str (quot (ar-n a) 2) (nth "bhsd" (inc (first (arrs a)))))
+                 rs (for [k (range n)]
+                      (let [f (fn [x] (if sg (sext x e) x))
+                            s (+ (long (f (vlane v1 (* 2 k) e))) (long (f (vlane v1 (inc (* 2 k)) e))))]
+                        [(bit-and (if (str/includes? op "adalp") (+ s (vlane d k w)) s) (ones w)) false]))]]
+       (ncase (str op "\tv0." da ", v1." a "\n") v1 v2 (out rs w q)))
+     ;; suqadd, usqadd, sqabs, sqneg (every arrangement but 1d, every scalar size), QC
+     (for [op ["suqadd" "usqadd" "sqabs" "sqneg"] a (concat vecs [:b :h :s :d]) _ (range 5)
+           :let [sc (keyword? a) e (if sc (sc-e a) (ar-e a)) n (if sc 1 (ar-n a)) q (and (not sc) (second (arrs a)))
+                 v1 (lanes e) v2 (lanes e) d (v0-of v1 v2)
+                 rs (for [k (range n)]
+                      (let [x (vlane v1 k e) y (vlane d k e)]
+                        (case op
+                          "suqadd" (sat-q (.add (sat-big x e false) (sat-big y e true)) e false)
+                          "usqadd" (sat-q (.add (sat-big x e true) (sat-big y e false)) e true)
+                          "sqabs" (sat-q (.abs (sat-big x e true)) e false)
+                          (sat-q (.negate (sat-big x e true)) e false))))
+                 r (if sc (str (name a)) nil)]]
+       (ncase (if sc (str op "\t" r "0, " r "1\n") (str op "\tv0." a ", v1." a "\n")) v1 v2 (out rs e q)))
+     ;; shll, shll2 (by the element's size)
+     (for [na ["8b" "4h" "2s"] two [false true] _ (range 3)
+           :let [e (ar-e na) n (quot 64 e) v1 (lanes e) v2 (lanes e) hi (if two n 0)
+                 r (vpack (for [k (range n)] (bit-shift-left (vlane v1 (+ k hi) e) e)) (* 2 e))]]
+       (ncase (str "shll" (when two "2") "\tv0." (wide na) ", v1." (if two (dbl na) na) ", #" e "\n") v1 v2 (vres r false)))
+     ;; rshrn, rshrn2 (v0's lower half kept)
+     (for [na ["8b" "4h" "2s"] two [false true] i (range 5)
+           :let [e (ar-e na) w (* 2 e) n (quot 64 e) sh (case (long i) 0 1 1 e (inc (mod (nx) e)))
+                 v1 (lanes w) v2 (lanes w) d (v0-of v1 v2)
+                 p (first (vpack (for [k (range n)]
+                                   (bit-and (.longValue ^BigInteger (sat-shift (sat-big (vlane v1 k w) w false) (- sh) true)) (ones e)))
+                                 e))]]
+       (ncase (str "rshrn" (when two "2") "\tv0." (if two (dbl na) na) ", v1." (wide na) ", #" sh "\n") v1 v2
+              (vres (if two [(first d) p] [p 0]) false)))
+     ;; addp's scalar: d0 = v1.d[0] + v1.d[1]
+     (for [_ (range 8)
+           :let [v1 (lanes 64) v2 (lanes 64)]]
+       (ncase "addp\td0, v1.2d\n" v1 v2 (vres [(+ (long (first v1)) (long (second v1))) 0] false))))))
+
+(def int-families
+  [["neon-int" "NEON's remaining integer lanes: srshl, urshl (vector, scalar d), pmul, raddhn, rsubhn and their 2 forms, pmull, pmull2 (bytes), saddlp, uaddlp, sadalp, uadalp, suqadd, usqadd, sqabs, sqneg (vector, scalar; FPSR.QC), shll, shll2, rshrn, rshrn2, addp's scalar" int-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -2099,6 +2196,11 @@
          ;; AR12 (ARS63 (a)): NEON's saturating doubling multiplies and saturating shifts and narrows
          (for [[i [nm what f]] (map-indexed vector sat-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1000 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR13 (ARS66 (c)): NEON's remaining integer lanes
+         (for [[i [nm what f]] (map-indexed vector int-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1100 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)
