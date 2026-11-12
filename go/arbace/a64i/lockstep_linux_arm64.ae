@@ -2,6 +2,7 @@
 
 
     ^{:line 4} [bytes "bytes"]
+    [binary "encoding/binary"]
     ^{:line 5} [errors "errors"]
     ^{:line 6} [fmt "fmt"]
     ^{:line 7} [os "os"]
@@ -17,7 +18,8 @@
 ;; tracer, emu.Tracee: registers by PTRACE_GETREGSET NT_PRSTATUS, ASLR off) and by a64i from the native's own initial state
 ;; (its stack's bytes, the auxv's AT_SYSINFO_EHDR made AT_IGNORE in both: no vdso), compared in the sys mode at each system
 ;; call (the registers, the call's arguments, the bytes write(2) writes, the writable memory) or in the step mode after
-;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, the bytes stored, TPIDR_EL0 after an MSR). The world's
+;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, V0-V31, FPSR and FPCR (ARS44), the bytes stored, TPIDR_EL0 after
+;; an MSR). The world's
 ;; answers (read's bytes, clock_gettime's, getrandom's, the ids) are the native's, copied into a64i. Rules for
 ;; single-stepping's artifacts: an exclusive load ends the step mode until the next system call (a single-stepped
 ;; store-exclusive always fails: the step's exception clears the monitor), the region compared there as in the sys mode;
@@ -249,7 +251,34 @@
     (when (!= (bit-and (.-Pstate r) 0xf0000000) (.NZCV (.-c l)))
       (return (fmt/Sprintf "nzcv %#x, native %#x" (.NZCV (.-c l)) (bit-and (.-Pstate r) 0xf0000000))))
 
-    ""))
+    (.compareFP l)))
+
+
+(go/method compareFP "compareFP holds a64i's SIMD&FP registers V0-V31, FPSR and FPCR to the native's (PTRACE_GETREGSET NT_PRFPREG:\nLinux's user_fpsimd_state, the 32 registers' 16 bytes, then FPSR and FPCR; ARS44).\n" ^string [^{:tag (* lockstep)} l]
+  (let [^{:tag (array 528 byte)} b (zero (array 528 byte))
+      iov (lit (struct
+          ^{:tag (* byte)} base
+          ^{:tag uint64} n)
+        (addr (aget b 0)) 528)]
+    (when [(values _ _ e) (syscall/Syscall6 syscall/SYS_PTRACE 0x4204 (conv uintptr (.-Pid (.-t l))) 2 (conv uintptr (conv unsafe/Pointer (addr iov))) 0 0)] (!= e 0)
+      (return (fmt/Sprintf "the native's SIMD&FP registers unreadable: %v" e)))
+
+    (let [c (.-c l)]
+      (for [i 0] (< i 32) (inc! i)
+        (let [lo (.Uint64 binary/LittleEndian (subslice b (* 16 i)))
+            hi (.Uint64 binary/LittleEndian (subslice b (+ (* 16 i) 8)))]
+          (when (or (!= lo (aget (aget (.-Q c) i) 0)) (!= hi (aget (aget (.-Q c) i) 1)))
+            (return (fmt/Sprintf "v%d %016x_%016x, native %016x_%016x" i (aget (aget (.-Q c) i) 1) (aget (aget (.-Q c) i) 0) hi lo)))))
+
+      (let [fpsr (conv uint64 (.Uint32 binary/LittleEndian (subslice b 512)))
+          fpcr (conv uint64 (.Uint32 binary/LittleEndian (subslice b 516)))]
+        (when (!= fpsr (.-FPSR c))
+          (return (fmt/Sprintf "fpsr %#x, native %#x" (.-FPSR c) fpsr)))
+
+        (when (!= fpcr (.-FPCR c))
+          (return (fmt/Sprintf "fpcr %#x, native %#x" (.-FPCR c) fpcr)))
+
+        ""))))
 
 
 ^{:go/end 269} (go/method tpidr [^{:tag (* lockstep)} l] :results [uint64 error]
