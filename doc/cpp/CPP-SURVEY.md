@@ -6817,3 +6817,92 @@ Keys: every file the branch changes is under `arbace/cpp/`, `arbace/repr/cpp/`, 
   mechanism of CP365 with the template as the awaited definition); (b) leave it to CP338's retry of typedefs. **Recommended: (a)**.
 - **CP373: an extern thread-local reference's declaration** is `[8 x i8]` (clang's `ptr`), as every non-scalar extern global: (a) `ptr`
   for a reference; (b) leave it (the same bytes). **Recommended: (a)**, with the codegen samples re-recorded once.
+
+## As built: cpp-s7 (2026-11-11; branch `cpp-s7` from mac/cpp-s6 b14a077c0)
+
+The user's decisions of 2026-11-11: CP372 (a) and CP373 (a); first cpp-s6's unrun proofs. Light, by night 12's rules: main's stage 0
+(`ARBACE_HOST_EXE`), one process at a time, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, each run gated on MemAvailable >= 12 GiB
+and `df /` <= 85% in its command (`.tmp/run.sh`), no clang, g++, gate or big lock. Probes in `.tmp/probe/`.
+
+### cpp-s6's unrun proofs
+
+1. **The 82 run programs at cpp-s6's code** (`.tmp/G4`, one gen-batch, 58 min): against cpp-s5b's G3, 68 generated (69 before), 66 byte
+   for byte, 2 differing (init/array66.C, special/initp1.C: only CP369's static data members' globals, `internal global` -> `global`, and
+   their place, an external one no longer written lazily), 1 lost: **tls/thread_local12e.C**, refused "a template's thread-local static
+   member with dynamic initialization (u3)". Not CP369's intent: thread_local11.h's `thread_local S T::u1, ...` is an out-of-line
+   definition in a header, and a header's definition is linkonce unless internal (sema's qualified-definition branch); before CP369 every
+   static data member was internal, so never linkonce there; now external, it was taken for a template's member. Fixed below (cpp-s7's
+   first item). **Peak RSS 2.4 GB**, over the night rules' 1.5 GiB (one process over the 82; `GOMEMLIMIT` is a soft limit): a rule slip,
+   reported; the later runs of the 82 are in parts of 20 programs, library.cpp left to the night (below).
+2. **library.cpp** (the 82's, in G4): the refusal byte for byte cpp-s5b's (`overload`: "no viable function among 1 for 2 arguments"),
+   drops.tsv the same 48 causes. CP365 did not move it: _Arg_value<format_context> is made again (prov3.C's shape), but the refusal is
+   further on. Not run alone again (its peak is above the night's limit).
+3. **`bin/cppi codegen-gen`** (after cpp-s7's code, 14 min, 1.02 GB): 149 of 154 as recorded, the 5 failing exactly the samples with a
+   static data member's definition (bank, methods, mixed-features, staticmembers, tmpl-member-class), each gen.ll against cpp-s5b's differing
+   only in those globals' linkage (`internal global` -> `global`) and place; no sample declares an extern reference (CP373 moves none); the
+   two controls fail as they must. Then `--record` (14 min, 1.05 GB): `test/cpp/codegen/forms.sha256`'s five lines.
+4. **member_kinds.C** (constexpr, inline, const, a template's and an unnamed namespace's static members): generated, but lowering refused
+   "unknown global _ZN1A1iE": `static inline int i = f();` had no definition (a pre-existing gap: a static data member's in-class declaration
+   was never a definition). Fixed below; now `@_ZN1A1iE = linkonce_odr global [4 x i8]` with its guard `_ZGVN1A1iE`, A::c `global i32 7`,
+   B<int>::t linkonce_odr, the unnamed namespace's C::z `internal`, and `bin/llvmi run` of its IR exits 0 (the sum 21).
+5. `bin/reap` (0 problems), `bin/crops-score --record` then `--judge --strict` (exit 0, 0 problems; scores.edn unchanged),
+   `test/gate/gate-key-crops-test.bash` PASS: below, at cpp-s7's head.
+
+### CP369's follow-ups
+
+- **A static data member's out-of-line definition in a header is not linkonce** (sema's qualified-definition branch: linkonce now only for
+  a non-member, as before CP369 in effect): thread_local12e.C generates again, `@_ZN1T2u3E = thread_local global` (clang's), the rest of
+  its IR byte for byte cpp-s5b's.
+- **An inline static data member is defined when used**: `static inline T m = init;` in its class ([class.static.data]/4, [dcl.inline]/6)
+  is a definition, `:pending-def` and linkonce_odr as clang emits an inline variable (with its guard when dynamically initialized).
+  Left: a `static constexpr` member (implicitly inline) is still not defined: its reads fold, and an odr-use of it (its address) is
+  unresolved as before.
+
+### CP372 (a): an incomplete instance completed in place
+
+A specialization of a class template that has no definition yet, no partial specialization and no explicit specialization for the
+arguments, named while the main file is declared (sema's `*main-retry*` bound; the headers keep their retry, `*retry*`), is an incomplete
+class (`incomplete-instance!`: the template's instance cached, its scope bound, not `:complete`), as [temp.inst]/2 has it: naming it does
+not instantiate it. When the template's definition arrives (declare-template, the definition's branch: `template-defined!`), each such
+instance is made in place, the same class id, by the usual choice of partial specialization or primary (`select-instance!`, split out of
+`instantiate-class*`), and the layouts dropped; an explicit specialization declared for those arguments completes it likewise. The class
+completed fires CP365's hook, so the provisional instances that waited for it are made again. A refusal while completing leaves it
+incomplete. Probe prov2.C (`using ctx = Ctx<int, short>; using AC = A<ctx>;` before Ctx's definition, V<C> naming `C::char_type`):
+before, "header type Ctx<int, short>"; now generated, `CPP_TMPL_TRACE` shows Ctx 4 incomplete, V 7 and A 5 provisional, Ctx completed,
+V and A made again; `bin/llvmi run` of its IR exits 0 (sizeof(AC) 8, the members read). (The probe as cpp-s6 wrote it, and prov1.C, had
+`sizeof == 4` for a struct of a short and an int: exit 1 for the right reason, a negative control; corrected to 8, both exit 0.)
+
+### CP373 (a): an extern reference's declaration
+
+`var-addr`'s declaration of a variable defined elsewhere is `ptr` for a reference (clang's ConvertTypeForMem), before `[8 x i8]`:
+tls_ref_ext.C's `@r = external thread_local global ptr, align 8` and `@_ZN1C1mE` likewise. Every reference, not only a thread-local one
+(clang writes `ptr` for `extern int &r;` too). No codegen sample declares one: their digests move by CP369 alone.
+
+### A Sema crash found on the way
+
+The own dg record's run (`--sample 10`) failed one row: cpp2a/explicit6.C, a recorded own pass, crashed with Java's NumberFormatException
+on "1.0" (`explicit((T) 1.0)`): review 1111 #5's BigInteger read of eval-text's integer literals took a floating literal. eval-text now
+refuses a literal that is not an integer's (`:template`, "not an integer literal"); explicit-spec counts the refusal as explicit, as it did
+before; the row passes again.
+
+### Checked
+
+| Run | Result |
+|---|---|
+| gen-batch over the 82 at cpp-s6's code (`.tmp/G4`, one process) | 68 generated; vs cpp-s5b's G3: 66 byte for byte, 2 CP369 linkage, thread_local12e.C lost (fixed); 58 min, **2.4 GB** (over the rules' 1.5 GiB) |
+| gen-batch over 81 of them (library.cpp left out) at cpp-s7's code, in five parts (`.tmp/G5`) | 69 generated: vs G3 66 byte for byte, 3 differing only in CP369's linkage (array66, initp1, thread_local12e); vs G4 68 byte for byte, thread_local12e gained; peaks 0.48, 0.43, 0.37, 1.27, 0.30 GB, 55 min |
+| probes (gen-batch, `.tmp/probe`) | prov1, prov2, prov3, member_kinds, member_static, tls_ref, tls_ref_ext, extern_tls, static_tls, tls_member generate (peak 0.36 GB); `bin/llvmi run` of prov1, prov2, prov3, member_kinds, tls_ref exit 0 |
+| `bin/cppi codegen-gen`, then `--record` | 149 of 154 as recorded, the 5 CP369's; recorded: 154 generated, 0 refused (14 min, 1.05 GB each) |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` | 454 files, own pass 127 as recorded, none failing (after the eval-text fix; 11.5 min, 1.03 GB) |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0, 0 problems, scores unchanged |
+| `test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; the same key as cpp-s6's (314c8e5b04ab...): no key moves |
+
+### Not run (by the rules; each one process)
+
+```
+. .tmp/env.sh
+# library.cpp alone at cpp-s7's code (its peak in G4's single process was 2.4 GB: above the night's 1.5 GiB; about 15-25 min):
+# the inline static members (headers' `static inline`) may move it; refusal and drops.tsv against G4's (overload; 48 causes)
+.tmp/gen.sh $PWD/.tmp/g5lib.tsv
+```

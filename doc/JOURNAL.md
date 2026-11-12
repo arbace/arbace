@@ -5070,3 +5070,25 @@ The user decided CP365-CP371 all (a) (2026-11-11). Done in the brief's order, li
 - Stopped: at 20:24 UTC `df /` reached 86% (the night's runs) and stayed past 20:54; the rules say stop and report, so the 82
   programs' gen-batch, library.cpp, `bin/cppi codegen-gen [--record]` (CP369 moves the samples' digests), the member probe, `bin/reap`,
   crops-score and the keys' test are left as commands in doc/cpp/CPP-SURVEY.md, "As built: cpp-s6", with CP372-CP373 proposed.
+
+## 2026-11-12: cpp-s7, cpp-s6's proofs, CP372 (a) and CP373 (a) (branch `cpp-s7`, from `mac/cpp-s6` b14a077c0)
+
+The user decided CP372 (a) and CP373 (a) (2026-11-11), after cpp-s6's unrun proofs. Light, by night 12's rules (one process at a time,
+each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB GOGC=20 REPR_CPP_THREADS=1`, main's stage 0;
+no clang, g++, gate or big lock). Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s7".
+- cpp-s6's proofs: the 82 programs' gen-batch at cpp-s6's code against cpp-s5b's G3 gave CP369's linkage alone in two programs, and one
+  lost: thread_local12e.C, its header's out-of-line `thread_local S T::u3` definition taken for linkonce (a template's member) once CP369
+  made the member external. That process peaked at 2.4 GB, over the rules' 1.5 GiB (GOMEMLIMIT is soft): a slip; the later run of the 82
+  was in five parts (peak 1.27 GB) without library.cpp, which is left to a night. library.cpp's refusal and drops were cpp-s5b's.
+  member_kinds.C showed an inline static data member never defined (lower's "unknown global").
+- Fixes: a header's out-of-line static data member is not linkonce; an inline static data member is a definition, defined when used,
+  linkonce_odr (a constexpr one still not: considered, left, its reads fold and defining it would emit globals clang does not).
+- CP372 (a): a class template specialization named in the main file before the template's definition is an incomplete instance, completed
+  in place (same id) when the definition or an explicit specialization arrives, CP365's hook remaking what waited on it. Considered:
+  doing it in the headers too (dropped: the headers' retry works, and a header's use needing completeness would turn from a retried
+  refusal into a dropped declaration); CP372 (b), CP338's typedef retry (it cannot wait for a later use of the alias, prov2.C's A<ctx>).
+- CP373 (a): an extern reference's declaration `ptr`, every reference (clang's), not only thread-local ones.
+- The own dg record's sample run found cpp2a/explicit6.C crashed (NumberFormatException on "1.0", review 1111 #5's integer read): eval-text
+  refuses a non-integer literal; 127 own passes as recorded.
+- codegen-gen re-recorded once: the five samples with static data members, CP369's linkage alone. bin/reap 0 problems, crops-score
+  strict 0, the gate key the same as cpp-s6's.
