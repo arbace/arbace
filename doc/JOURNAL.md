@@ -5281,3 +5281,13 @@ numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s9".
   6 of 6; `bin/reap` 0 problems; crops-score strict 0; gate-key-crops-test PASS (no key moves). cpp-check.samples-runtime and the whole
   dg-error-own are night commands (the survey). No record moved. Slips: runtime-ci's first read at 4.79 GB (stopped by PID), 2.58 GiB on
   the chunked read.
+
+### 2026-11-12: CP381 (a): cpp-check-essential declared at 5 GiB, an essential cap per crop
+
+gf-cpp measured cpp-check-essential's command (`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only
+test/cpp/essential-check.txt`) at 3.18 GB from a cold cache (the samples' nodes-list), over its declared 3 GiB and over GTS215's
+3 GiB cap on an essential check. The user chose (a) (2026-11-12): declare it at 5 GiB now (test/gate/steps.edn and its fragment
+test/gate/crops/cpp.edn), the cap per crop (`:budgets :essential-mem-gib-by {:cpp 5}`, read by test/gate/crops.ae's GT9 check
+beside `:essential-mem-gib`); later (b), building the samples' nodes one program per process, may bring it back under 3.
+Considered: (c) io.cpp out of the essential list into the nightly cpp-check. Proofs: test/gate/crops-test.bash ok (the real
+table passes GT9's rules), `bin/gate --full --plan` status 0. (The name CP379 is cpp-s10's iterator_traits decision.)
