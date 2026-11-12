@@ -6214,3 +6214,39 @@ measured it):
 `HeapCTypeSubclass` now and stop at `import _testinternalcapi` (by design). **The checks** (`.tmp/q270b/t/`): `check270h.sh`
 (heaptype.c, 44 lines), `check270p.sh` (`:capi-port`'s natives and the new parts, 77 lines), `checkdw.sh` (the
 DeprecationWarning, 4 lines), each against python3 3.14.10's own `_testcapi` with a negative control.
+
+## As built: 274, the C API's watchers: dict, type, function, code and context events as hooks in pyi's core; `_testcapi`'s watchers.c (2026-11-12, the Mac VM, queue 274; 270b's DECISION (a), the user's)
+
+CPython 3.14.10's watchers (`Objects/dictobject.c` PyDict_AddWatcher/Watch/Unwatch/ClearWatcher and
+`_PyDict_SendEvent`, `Objects/typeobject.c` PyType_AddWatcher/Watch and `type_modified_unlocked`,
+`Objects/funcobject.c` `notify_func_watchers`, `Objects/codeobject.c` `notify_code_watchers`, `Python/context.c`
+`notify_context_watchers`) ported over pyi's objects:
+
+- **Hooks in the core** (`go/arbace/py/watchers.go`): `DictWatch`, `TypeWatch`, `FuncWatch`, `CodeWatch`,
+  `ContextWatch`, package variables nil until the C API sets them (pyctypes, while a watcher of the kind is
+  registered). A dict carries its watcher bits (`watched`, CPython's `_ma_watcher_tag`), checked where the dict already
+  writes: Set (ADDED; MODIFIED when the value changes), the instance-attribute fast path (MODIFIED always, CPython's
+  `store_instance_attr`), Delete and popitem (DELETED), Clear of a non-empty dict (CLEARED), Update of a compact dict into
+  an empty watched one (one CLONED, the other dict as key). A type carries `watched` and `versioned` (CPython's
+  `tp_version_tag`, kept only once a type was watched, `typeWatching`): PyType_Watch and a type's attribute lookup
+  (`typeGetAttr`) set the tags of the type and its MRO; a modification (`type.__setattr__`, the C API's
+  PyType_Modified) clears them, subclasses first, and reports a watched type once until its tag is set again (the
+  events' aggregation). Functions: CREATE where a function is made (MAKE_FUNCTION in the evaluator and in AOT code,
+  `types.FunctionType`), MODIFY_CODE, MODIFY_DEFAULTS, MODIFY_KWDEFAULTS on the attributes' sets and
+  PyFunction_SetDefaults/SetKwDefaults. Code: CREATE where a code object is made (the IR's loader: compile and import,
+  marshal, `code.replace`). Contexts: SWITCHED on Context.run's enter and exit.
+- **The C API** (`go/arbace/pyctypes/capi_watchers.go`): eight ids per kind (dict from 2, type from 1, as CPython
+  reserves the lower ones), CPython's messages for invalid and unassigned ids and for "no more ... watcher IDs
+  available", each callback's error written as unraisable with CPython's message; `_PyOnceFlag_CallOnceSlow`,
+  `PyErr_FormatUnraisable`.
+- **Not given** (classed): DEALLOCATED and DESTROY events (pyi's objects are Go's: no deallocation when the last
+  reference goes, `:finalization`), `clear_context_stack` (watchers.c reads PyThreadState's `context` and PyContext's
+  `ctx_prev` fields; pyi's Context.run always has a base context to return to).
+- **Cost** (the core's checks where no watcher is registered): a Go micro-bench of 1,024 dict mutations (Set new, Set
+  replaced, Delete, Clear) on the printed tree, base 9880b6113 against head, interleaved three times three: 32.45 µs
+  against 32.81 µs per iteration (+1.1%, inside the runs' spread of 31.4-33.6 µs); the dict's bits sit beside its two
+  flags, so a dict is no larger.
+- **Counts** (`bin/pyi lib-test-all --fresh test_capi`, the VM): 445 → 496 pass; `:testcapi-parts` 58 → 0 (51 of
+  test_watchers' 58 rows pass; 6 deallocation rows `:finalization`'s; clear_context_stack's `:testcapi-behaviour`'s);
+  `:testcapi` 592 and `:capi-port` 77 unchanged; 0 failing. monitoring.c (sys.monitoring's C API, test_monitoring's
+  TestCApiEventGeneration, 5 rows) is the next entry.
