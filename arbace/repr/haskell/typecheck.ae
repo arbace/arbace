@@ -2230,17 +2230,25 @@
 
 (def ^:dynamic *self-givens* nil) ; an instance's own dictionary and its superclasses, for its methods
 
+(declare invert-families!)
+
 (defn- solve-with-givens!
   "Solve the wanteds of a checked binding with its givens; the unsolved are deferred. In an instance's method a
   constraint the instances solve to a dictionary variable is solved so, else by the instance's own dictionary's
   superclasses when they give it (as GHC's solver chose on the corpora)"
   [wanteds givens]
   (doseq [w0 wanteds]
-    (if-let [term (under-givens w0 (fn [w]
-                    (let [t (solve-pred (:pred w) givens 0)]
-                      (if (and *self-givens* (not (and (seq? t) (contains? '#{v lv} (first t)))))
-                        (or (solve-pred (:pred w) *self-givens* 0) t)
-                        t))))]
+    (if-let [term (let [solve (fn [] (under-givens w0 (fn [w]
+                                        (let [t (solve-pred (:pred w) givens 0)]
+                                          (if (and *self-givens* (not (and (seq? t) (contains? '#{v lv} (first t)))))
+                                            (or (solve-pred (:pred w) *self-givens* 0) t)
+                                            t)))))]
+                    ;; HF10-P34: a wanted on a kind GHC knows (SingKind ?k) recovered from the deferred family
+                    ;; equalities while the givens are in scope (invert-families!)
+                    (or (solve)
+                        (when (and *deferred-eqs* (some #(= :mv (first (prune %))) (second (zonk-pred (:pred w0))))
+                                   (loop [k 0 any false] (if (and (< k 4) (invert-families! [(:pred w0)])) (recur (inc k) true) any)))
+                          (solve))))]
       (swap! *evidence* assoc (:ev w0) term)
       (swap! *wanteds* conj w0))))
 
@@ -3155,8 +3163,8 @@
   equation whose right-hand side could be t: ?k is that equation's left-hand side. The elaborator erases kinds, so the
   kind GHC knows (SingKind k at fromSing (sing :: Sing nt), nt :: Bool from the instance head 'MetaData n m p nt) is
   recovered from the result the program wants (DemoteRep k ~ Bool); a program GHC accepted has that k. True when
-  something was unified"
-  []
+  something was unified. preds: the wanteds still unsolved (default: the module's)"
+  [& [preds]]
   (let [changed (atom false)]
     (doseq [[a b] @*deferred-eqs*
             :let [a (zonk a) b (zonk b)
@@ -3171,6 +3179,20 @@
         (doseq [[x p] (map vector (nth f 2) (:lhs e))] (unify x (subst m p)))
         (unify a b)
         (reset! changed true)))
+    ;; then F ?k ~ F x (both stuck, the same family): ?k := x when ?k is an argument of a wanted still unsolved (the
+    ;; kind GHC knows: SingKind (Maybe a)'s fromSing (SJust a) = Just (fromSing a), DemoteRep k' ~ DemoteRep a, k' = a)
+    (when-not @changed
+      (let [wanted-metas (set (for [p (or preds (map :pred (some-> *wanteds* deref))) t (second (zonk-pred p))
+                                    :let [t (prune t)] :when (= :mv (first t))] (second t)))]
+        (doseq [[a b] @*deferred-eqs*
+                :let [a (zonk a) b (zonk b)]
+                :when (and (stuck-family? a) (stuck-family? b) (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2))))
+                [x y] (map vector (nth a 2) (nth b 2))
+                :let [x (prune x) y (prune y)]
+                :when (and (not= x y) (or (and (= :mv (first x)) (contains? wanted-metas (second x)))
+                                          (and (= :mv (first y)) (contains? wanted-metas (second y)))))]
+          (unify x y)
+          (reset! changed true))))
     @changed))
 
 (defn- default-ip
@@ -3518,7 +3540,24 @@
                         pats (vec (for [a (arg e 4) :when (and (seq? a) (= 'HsValArg (first a)))] (arg a 2)))
                         tvn (tv-names-of [(arg e 3) pats])
                         pts (fn [tvs] (mapv #(hs-type tvs %) pats))
-                        rep (ext-name "tc" m (str "R:" (occ fname) (head-occs (pts {}))))
+                        ;; HF10-P34: a pattern with a kind signature spelled as GHC's newFamInstTyConName does, the
+                        ;; kind's constructor and the variable (data instance Sing (a :: Bool): R:SingBoola); every
+                        ;; instance of Sing was R:Sing before, the last one's constructors replacing the others'
+                        ksig (fn [p] (loop [p p]
+                                       (let [v (lval p)]
+                                         (case (con v)
+                                           HsParTy (recur (arg v 2))
+                                           HsKindSig (let [tv (lval (arg v 2))]
+                                                       (str (head-occs [(hs-type {} (arg v 3))])
+                                                            (if (= 'HsTyVar (con tv)) (occ (nm (arg tv 3))) "")))
+                                           nil))))
+                        base-occ (if (some ksig pats)
+                                   (apply str (map (fn [p] (or (ksig p) (head-occs [(hs-type {} p)]))) pats))
+                                   (head-occs (pts {})))
+                        rep0 (str "R:" (occ fname) base-occ)
+                        rep (ext-name "tc" m (if (contains? @*tycons* (ext-name "tc" m rep0))
+                                               (some #(let [c (str rep0 %)] (when-not (contains? @*tycons* (ext-name "tc" m c)) c)) (range))
+                                               rep0))
                         names (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) tvn)]
                     ;; its family instance for the interface (FamInst's fi_rhs: the representation tycon at its variables)
                     (swap! *own-fam-insts* conj [fname {:tvs names :lhs (pts (zipmap tvn (map (fn [x] [:tv x]) names)))
