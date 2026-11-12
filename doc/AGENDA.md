@@ -83,8 +83,10 @@ Six crops are above 90 on all three. What the others still need:
   (2026-11-12): CP378 (a), class objects in sema's constant evaluator (constexpr constructors with `this`, copies by value, field reads and
   stores, member calls, references as locations) and `__builtin_is_constant_evaluated()` / `if consteval` true when manifestly
   constant-evaluated: f8 (<format>'s vformat) past the literal-encoding check (`constexpr-if` → the encoding branch of `__write_padded`,
-  basic_string from _Utf_iterator, an overload refusal: CP379 proposed); the 81's IR unchanged (none lost, byte for byte or by the
-  inliner's numbering).
+  basic_string from _Utf_iterator, an overload refusal: CP379 proposed; library.cpp alone the same, 39 causes of drops from 47); the
+  81's IR unchanged (none lost, byte for byte or by the inliner's numbering); codegen-gen 155 as recorded, print essential, the dg
+  sample (own pass 127), reap and crops-score unchanged; cpp-check-essential left (the disk at 86%, its lower step stops above 85%);
+  CP380 proposed (a plain global's constant initialization manifestly constant-evaluated).
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).
