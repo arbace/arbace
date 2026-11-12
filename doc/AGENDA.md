@@ -346,7 +346,9 @@ items below are the ones whose work is still ahead or tied to a night.
   F10b's asynchronous channels after the night's records; JCS190's flip after the night's comparison; JCS231 after F9;
   JCS261 waits; JCS274 (`:nio`'s rest reclassified after the record); JCV11 (b) (reopens RPS9 (a)); JCV12 (b); JCS180
   later; F15 (JCS350-JCS356) for the next Java night.
-- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): CP243 (a) (`cpp-print-own`) and CP352 (`cpp-cp352`, the five valid-code reader
+- **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): `gf-cpp` (2026-11-12, "As built: gf-cpp"): cpp-s9 merged into next's tree, explicit6.C's
+  explicit((T) 1.0) evaluated (floating literals in eval-text), the runtime part of cpp-check-essential as recorded; its samples part,
+  cpp-check.samples-runtime and dg-error-own whole are night commands; CP379 (the essential step's memory) proposed. CP243 (a) (`cpp-print-own`) and CP352 (`cpp-cp352`, the five valid-code reader
   gaps) merged into next; CP250 when
   needed; CP251 at the next re-record; CP264 a night task; CP240 (b) and CP320-CP324 (above). CP338-CP351 (the user,
   2026-11-10, as recommended): CP338 (a) and CP350 (a) built on `cpp-cp338` (the run corpora's refusals in the plan's order,

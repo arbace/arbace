@@ -7263,3 +7263,74 @@ of struct-bind). One source edit (abi.ae's virtual-base floor) while gen-batch p
 abi.ae before the edit, but part 04 after; every part was then run again from scratch at the final code (G7, the table's numbers). The
 gen-batch's first part-03 run read runtime and samples paths of the removed cpp-s5b worktree (the copied part lists): 13 crashes of
 "no such file", the lists corrected and the part rerun.
+
+## As built: gf-cpp (2026-11-12; branch `gf-cpp` from mac/next bd6ab3ddd with mac/cpp-s9 e2e446170 merged)
+
+Night 12's `--full` on next (bd6ab3ddd) failed cpp-check-essential, cpp-check.samples-runtime and cpp-dg.dg-error-own
+(.tmp/night12/triage/TRIAGE.md). mac/cpp-s9 (with cpp-s7, cpp-s8 and cpp-gatefix) merged into next's tree first: no conflict (the
+journal's, AGENDA's and this survey's sections fall apart). Light, one process at a time, main's stage 0.
+
+### A floating literal in the text evaluator's constant expressions
+
+gxx-dg/cpp2a/explicit6.C's `explicit((T) 1.0) operator T();` had crashed Sema since review 1111 #5 (eval-text read every :num token
+as an integer through BigInteger: Java's NumberFormatException on "1.0"). cpp-s7 (2dcb57f03) made it a refusal, and explicit-spec
+counts an expression it cannot evaluate as explicit: explicit6.C's recorded own pass came back, but by default, not by evaluation
+(`explicit((T) 0.0)` was explicit too). Now template.ae's eval-text reads a floating literal ([lex.fcon]: a decimal one with a `.` or
+an exponent, a hexadecimal one with a `p` exponent; digit separators; the suffix `f`/`f32` rounds to float's value, `l`, `f16`, `f64`,
+`f128`, `bf16` dropped, long double held as a double) as a double; `lng` truncates a double toward zero ([conv.fpint]/1; outside
+long's range or a NaN a refusal), so the C-style, functional and static_cast casts to integral types truncate; a cast to bool and
+`!`, `&&`, `||`, `?:` test it against zero ([conv.bool]: 0.5 is true); `float`, `double` and `long double` joined the cast types,
+and a cast to a named floating type gives a double (float's rounded); fold's `+ - * /` and the comparisons on a floating operand are
+the double's (the usual arithmetic conversions), a division by zero and the integer operators (`% << >> & | ^ ~`) on it refusals.
+sema's noexcept-specifier read through the same hook tests its value against zero as a double (0.5 had been truncated to false).
+
+Probe `.tmp/probe/p1.C` (diag/diagnose at c++20, `.tmp/probe/run.sh`): seven classes with conversion operators `explicit((T) 0.0)`,
+`(T) 0.5`, `(T) 2.5e0`, `1.5 > 1.0`, `1.5 < 1.0`, `(int) 0x1p-1`, `int(2.0f) == 2 && 3.0 / 2 == 1.5`, each copy-initialized: before,
+seven "no viable conversion" errors (all explicit); after, three, on the lines whose specifier is true (W, X, Q), as the standard says.
+
+### Checked (before → after; peaks by `/usr/bin/time -v`)
+
+| Run | Result |
+|---|---|
+| probe p1.C (above) | 7 errors (every specifier explicit) → 3 (the true ones) |
+| `bin/repr-cpp dg --corpus dg-error --front native --only` explicit6.C | night 12: crash (NumberFormatException) → cpp-s7's refusal: own pass (explicit by default; 2.45 GiB, 49 s, the first read of the worktree's headers) → gf-cpp: own pass, by evaluation |
+| the same over the 20 files of gxx-dg/cpp2a/explicit*.C | own pass 1 (explicit6.C, recorded pass), explicit11.C its recorded fail, the 18 others not in the sampled record; exit 0, no regression; 0.42 GiB, 48 s |
+| cpp-check-essential's command (`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt`) | runtime part as recorded: uncaught, ctor-throw, deferred.cpp pass (night 12: segfault in vsum), thread-throw.cpp back to its recorded fail of class threads (night 12: a segfault in pthread_create); the samples part NOT proved: its `nodes-list` (ci's build of the 4 samples, cold cache) passed 3.0 GiB and was killed at 3.16 GB by my guard, so the 4 samples are "not built" in that run (an artefact of the kill, not of the code). Peak 3.18 GB (the killed process), 49 min with musl's and the nodes' cold builds |
+| `bin/cppi runtime-ci` (the essential command's first step in a fresh worktree, the lowered runtime's 199 units read for ci) | first try (CPPI_JOBS 4, the 2GiB soft limit) 4.79 GB, stopped by PID; then `CPPI_CI_CHUNK` 40 and 10 killed at 2.5 GiB by the guard (a chunk's heap grows past it); `CPPI_CI_CHUNK=1 CPPI_JOBS=1 CPPI_CI_MEMLIMIT=1200MiB`: 199 units, peak 2.58 GiB (c++20/format.cc's unit), 73 min |
+| cpp-print-essential's command | 33 of 33, 9 of 9, the control failing as it must; 1.40 GiB, 4 min (cpp-s9's numbers) |
+| `bin/cppi lower-essential` (`CPPI_DISK_MAX=88`: its own guard stops at 80 %, the disk was at 81 %) | 6 of 6 pass; 1.57 GiB, 4.4 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --judge --strict` | exit 0 (scores.edn unchanged: nothing to record) |
+| `test/gate/gate-key-crops-test.bash` | PASS; gf-cpp's own change is `arbace/cpp/` (crop paths): no gate, runtime or seed key moves; the merge carries cpp-s9's `test/gate/steps.edn` and `crops/*.edn` edits |
+
+No record moved: explicit6.C's recorded own pass holds, and nothing ran that differs from a record.
+
+### Not run (night 12's rules from 18:45 UTC: at most 1.5 GiB a process)
+
+```
+# 1. cpp-check-essential's samples part, its exact command (the runtime's ci read is now cached in .tmp/cppi/runtime/ci; the samples'
+#    nodes-list measured above 3 GiB cold, night 12's 4.1 GiB under the 4GiB soft limit: its :mem-gib 3 looks low): 8 of 8 as recorded expected
+/usr/bin/time -v env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt
+# 2. cpp-check.samples-runtime as the gate runs it (declared 8 GiB; about 30-60 min): deferred, thread-throw (its class), threads, atomics,
+#    hello.cpp (CP377, cpp-s9) as recorded expected
+/usr/bin/time -v env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=4GiB bin/cppi check
+# 3. cpp-dg.dg-error-own whole (declared 3, night 12's peak 4.8 GiB; 76 min under load): own pass as recorded, explicit6.C a pass
+/usr/bin/time -v bin/repr-cpp dg --corpus dg-error --front native
+```
+
+### Proposed (CP379)
+
+- **CP379: cpp-check-essential's memory.** The samples' `nodes-list` (ci's build of four programs, io.cpp's <iostream> among them)
+  passes 3 GiB from a cold cache under `CPPI_CI_MEMLIMIT=2GiB`, and `runtime-ci`'s read of the 199 units by one process passes 4.7 GB.
+  (a) Raise the step's `:mem-gib` to 5 (what it measures; it then runs in the free lane's bigger slots). (b) Build the samples' nodes one
+  program a process (as `CPPI_CI_CHUNK` does for the runtime) and make `CPPI_CI_CHUNK=1` the runtime-ci default in the gate (the runtime
+  read 73 min at 2.6 GiB against about 8 min unchunked). (c) Move io.cpp out of the essential list to cpp-check (nightly). **Recommended:
+  (a) now, (b) later** (the gate's cpp-runtime build step already warms runtime-ci, so the step itself does not pay it).
+
+### Rule slips
+
+`runtime-ci`'s first read (started inside the essential command) reached 4.79 GB before I saw it and stopped it by PID; the
+day's limit is 2.5 GiB (3 GiB for the essential command). The chunked retries were stopped by a watcher at 2.5 GiB (twice) and the
+final one peaked at 2.58 GiB (under the essential command's 3 GiB allowance, over the 2.5 GiB of other runs). The essential
+command's samples `nodes-list` was killed at 3.16 GB by the 3 GiB guard. `bin/cppi lower-essential` ran with `CPPI_DISK_MAX=88` (the
+brief's df limit) where its default stops at 80 %.

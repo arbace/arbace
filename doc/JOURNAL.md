@@ -5262,3 +5262,22 @@ numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s9".
 - Not run (night 12's gate still running at 13:07 UTC): library.cpp alone, cpp-check-essential's exact command, hello.cpp and threads.cpp
   on ci (commands in the survey). Proposed CP378 (class objects and __builtin_is_constant_evaluated in the evaluator). Slips: the
   sysroot unpack's peak (2.69 GB) on the first probe, `<(...)` twice, one source edit during a run (all parts rerun after).
+
+## 2026-11-12: gf-cpp, night 12's C++ failures: cpp-s9 merged into next's tree, a floating literal in eval-text (branch `gf-cpp`, from `mac/next` `bd6ab3ddd`)
+
+- Merged mac/cpp-s9 (e2e446170: cpp-s7, cpp-s8, cpp-gatefix with it) into next's tree: no conflict.
+- explicit6.C (gxx-dg/cpp2a, `explicit((T) 1.0) operator T();`): night 12's crash was review 1111 #5's BigInteger read of every number
+  token in template.ae's eval-text; cpp-s7 (2dcb57f03) had made it a refusal, which explicit-spec counts as explicit, so the file passed by
+  default. The general fix (no bisect needed: the cause was named by cpp-s7's commit): eval-text reads floating literals as doubles
+  (suffixes, hex floats, separators), casts to integral types truncate, to bool test against zero, `float`/`double`/`long double` cast
+  types, fold's arithmetic and comparisons on a double operand the double's, the integer operators and division by zero on it refusals;
+  sema's noexcept-specifier through the same hook tests a double against zero. Alternatives: keep cpp-s7's refusal (passes explicit6.C
+  only because its specifier is true: `explicit((T) 0.0)` was wrongly explicit), or evaluate the specifier through sema's ce-eval (the
+  analyzed expression; the specifier is read as text at declaration, so the text evaluator is the one to extend). Probe p1.C: 7 errors →
+  3, the true specifiers'.
+- Proofs (doc/cpp/CPP-SURVEY.md, "As built: gf-cpp"): explicit6.C own pass by evaluation, the cpp2a explicit files as recorded;
+  cpp-check-essential's runtime part as recorded (deferred.cpp passes, thread-throw.cpp its recorded threads class: cpp-gatefix's fixes),
+  its samples part not proved (the cold `nodes-list` passed 3 GiB, killed; CP379 proposed); cpp-print-essential 33 + 9; cpp-lower-essential
+  6 of 6; `bin/reap` 0 problems; crops-score strict 0; gate-key-crops-test PASS (no key moves). cpp-check.samples-runtime and the whole
+  dg-error-own are night commands (the survey). No record moved. Slips: runtime-ci's first read at 4.79 GB (stopped by PID), 2.58 GiB on
+  the chunked read.
