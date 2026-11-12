@@ -5256,3 +5256,9 @@ numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s9".
   CP377's (hello.cpp and threads.cpp define resize_and_overwrite and its lambda) and CP376's (vbase8-10.C). codegen-gen recorded (155 of
   155: nua-layout added; struct-bind's std::pair bindings by get<i>, as the sample's comment and [dcl.struct.bind]/4 have them, its llvmi
   output unchanged; a crash of globals.cpp on a pointer folded to a long fixed before the record). cpp-print-essential's command passes.
+- A Sema crash of the own dg sample (cpp23/ext-floating12.C) traced to cpp-s8's hidden friends: a friend whose trailing requires-clause
+  fails was given a nil function's record; it now declares nothing. The sample: own pass 127 as cpp-s7's. `bin/reap` 0 problems,
+  crops-score strict 0 (unchanged), gate-key-crops-test PASS (crop paths only: no key moves).
+- Not run (night 12's gate still running at 13:07 UTC): library.cpp alone, cpp-check-essential's exact command, hello.cpp and threads.cpp
+  on ci (commands in the survey). Proposed CP378 (class objects and __builtin_is_constant_evaluated in the evaluator). Slips: the
+  sysroot unpack's peak (2.69 GB) on the first probe, `<(...)` twice, one source edit during a run (all parts rerun after).
