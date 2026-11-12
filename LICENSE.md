@@ -439,7 +439,9 @@ covers what.
   functions and the writer, `Python/getargs.c`'s units, `Objects/abstract.c`'s buffer protocol), `capi_heaptype.ae`,
   `capi_parts.ae` and `capi_port.ae` (queue 270b: `Objects/typeobject.c`'s metaclasses, tokens and module lookups, the
   managed dict, `Objects/funcobject.c`, `Python/codecs.c`, `Python/pytime.c`, `Python/errors.c`, `Objects/abstract.c`,
-  `Objects/longobject.c`, `Objects/dictobject.c`, `Python/ceval.c`'s `PyEval_EvalCodeEx`), of the C API's functions in its `Objects/` and `Python/`, under the PSF License
+  `Objects/longobject.c`, `Objects/dictobject.c`, `Python/ceval.c`'s `PyEval_EvalCodeEx`), `capi_watchers.ae` (queue 274:
+  the watchers of `Objects/dictobject.c`, `Objects/typeobject.c`, `Objects/funcobject.c`, `Objects/codeobject.c` and
+  `Python/context.c`), of the C API's functions in its `Objects/` and `Python/`, under the PSF License
   Agreement (section above).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
