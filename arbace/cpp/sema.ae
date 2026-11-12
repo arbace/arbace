@@ -288,6 +288,15 @@
    "__builtin_snprintf" ["snprintf" "int (char *, unsigned long, const char *, ...)"]
    "__builtin_sprintf" ["sprintf" "int (char *, const char *, ...)"]
    "__builtin_abort" ["abort" "void ()"]
+   ;; (cpp-s8: <format>'s floating-point formatter, __formatter_fp::format's frexp of the value; clang calls libm's frexp,
+   ;; frexpf, frexpl for a value not constant; <format>'s _M_format_str's toupper)
+   "__builtin_frexp" ["frexp" "double (double, int *)"]
+   "__builtin_frexpf" ["frexpf" "float (float, int *)"]
+   "__builtin_frexpl" ["frexpl" "long double (long double, int *)"]
+   "__builtin_toupper" ["toupper" "int (int)"]
+   "__builtin_copysign" ["copysign" "double (double, double)"]
+   "__builtin_copysignf" ["copysignf" "float (float, float)"]
+   "__builtin_copysignl" ["copysignl" "long double (long double, long double)"]
    ;; never reached (clang writes LLVM's unreachable): abort stands for it (G4: the headers' __builtin_unreachable)
    "__builtin_unreachable" ["abort" "void ()"]})
 
@@ -3559,6 +3568,8 @@
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
    "__builtin_addressof" :addressof
+   ;; (cpp-s8: the type-generic floating-point classifications <format>'s __formatter_fp uses)
+   "__builtin_signbit" :signbit "__builtin_isfinite" :isfinite
    "__builtin_alloca" :alloca
    "__builtin_clear_padding" :clear-padding
    "__atomic_always_lock_free" :lock-free "__atomic_is_lock_free" :lock-free
@@ -4457,6 +4468,24 @@
         :expect (convert-scalar (rv (analyze ctx (second (kids n)))) abi/long* false)
         :constant-p {:op :int :v (if (ce-try (rv (analyze ctx (second (kids n))))) 1 0) :ty abi/int* :cat :pr}
         :is-constant-evaluated {:op :int :v 0 :ty abi/bool* :cat :pr}
+        ;; (cpp-s8: __builtin_signbit(x), the sign bit of a floating x, -0 and a NaN's too: copysign(1, x) < 0 by libm's
+        ;; copysign of x's type (clang reads the bit of the value's representation, the same answer); __builtin_isfinite(x):
+        ;; x - x == x - x, false for an infinity and a NaN alone. Both an int, as clang's)
+        (:signbit :isfinite)
+        (let [xn (second (kids n))
+              t (abi/unq (:ty (rv (analyze ctx xn))))
+              qt (case (abi/bn t) :float "float" :ldouble "long double" :double "double"
+                   (fail :type (name b) " of " (pr-str t)))
+              lit (fn [v] {:kind "FloatingLiteral" :value v :type {:qualType qt} :valueCategory "prvalue" :range (:range n)})
+              node (if (= b :signbit)
+                     {:kind "BinaryOperator" :opcode "<" :range (:range n)
+                      :inner [{:kind "CallExpr" :range (:range n)
+                               :inner [{:kind "DeclRefExpr" :referencedDecl {:name (str "__builtin_copysign" (case qt "float" "f" "long double" "l" ""))} :range (:range n)}
+                                       (lit "1.0") xn]}
+                              (lit "0.0")]}
+                     (let [d {:kind "BinaryOperator" :opcode "-" :inner [xn xn] :range (:range n)}]
+                       {:kind "BinaryOperator" :opcode "==" :inner [d d] :range (:range n)}))]
+          (convert-scalar (rv (analyze ctx node)) abi/int* false))
         ;; __builtin_addressof(x): x's address, no operator& ([specialized.addressof])
         :addressof (let [e (analyze ctx (second (kids n)))] {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr})
         ;; __builtin_alloca(n): n bytes of the frame (clang's alloca i8, i64 n, align 16)
