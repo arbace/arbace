@@ -5155,3 +5155,12 @@ each process under 2.5 GiB, the gate's executable `9accb085d767…` or stage 0),
   night's).
 - Rule slips: three commands wrote to /dev/null (`2>/dev/null` on two find/grep lines and `>/dev/null` on a `type` test); nothing they
   produced was kept.
+
+### 2026-11-12: si-ecraven's limit 300 -> 600 s (the user's decision after night 12)
+
+Night 12's si-ecraven failed on `ecraven/ack`: gf-misc reran it alone, it times out at 300 s and passes in 407 s at a 900 s
+limit, against 146 s recorded on 2026-10-31: si is about 2.8x slower on it, a real regression not yet found. The user
+(2026-11-12) chose to class it slow and bisect later rather than hold main: the step `si-ecraven` (test/gate/steps.edn and its
+fragment test/gate/crops/scheme.edn) runs at `SI_TIMEOUT=600`, the record keeps ack's 146 s pass so the slowdown stays visible
+in the record's seconds, and a bisect over si's commits since 2026-10-31 is queued (.tmp/night13/CARRY.md). Considered: a
+per-program limit (si has no such mechanism; the oi-slow.edn pattern would need one), keeping the failure (main held).
