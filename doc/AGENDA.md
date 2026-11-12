@@ -314,6 +314,11 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   narrow type, round to odd) and the fixed-point scvtf, ucvtf, fcvtzs, fcvtzu with #fbits, vector, scalar and general register
   (`synth-neon-cvt`, 1,000 cases): a64i 95 of 95, coverage 2,176 of 2,176, eval 311, AOT 3,057 / 0 / 13. Proposed ARS63-ARS65. Next:
   ARS63, ARS64 (the essential time on a quiet host), ARS65, the VM's rows (ARS55, ARS58).
+  Then `asm-ar12` (from `mac/asm-ar11` `5740229b4`; "As built: AR12"; ARS63 (a), ARS64 (c), ARS65 (b), the user's): in a64i the
+  saturating doubling multiplies (sqdmulh, sqrdmulh, sqdmull, sqdmlal, sqdmlsl: vector, scalar, by element) and the saturating shifts
+  and narrows (sqshl, uqshl, sqrshl, uqrshl, sqshlu, sqshrn, sqrshrn, uqshrn, uqrshrn, sqshrun, sqrshrun, sqxtn, uqxtn, sqxtun),
+  FPSR.QC exact (`simdsat.ae`, `synth-neon-sat` 1,092 cases): a64i 96 of 96, coverage 2,394 of 2,394, eval 312, AOT 3,058 / 0 / 13;
+  AGENDA-TIMING. Proposed ARS66, ARS67. Next: ARS66, ARS67, the VM's rows (ARS55, ARS58).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,

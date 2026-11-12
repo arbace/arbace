@@ -5189,3 +5189,35 @@ FixedToFP, FPToFixed; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR11".
 - Rule slips: one diagnostic command carried a stray `diff <(echo) <(echo)` (process substitution, no output used); `test/asm/subsets.edn`
   was reverted to the old subset in the worktree for two timing runs and restored after each (no run loading it was running while it
   changed); the "before" gate key was computed in `asm-ar10`'s worktree (read only).
+
+## 2026-11-12: AR12, NEON's saturating doubling multiplies and saturating shifts and narrows in a64i (branch `asm-ar12`, from `mac/asm-ar11` `5740229b4`)
+
+The user's decisions of 2026-11-12: ARS63 (a), ARS64 (c), ARS65 (b). On the main host while night 12's gate still ran (one run at a
+time, each process under 1.5 GiB, MemAvailable at 12 GiB or more checked before each run); arm64 programs by a64i and by qemu-aarch64
+user mode for `--record`. Sources read again: the Arm ARM (DDI 0487), SQDMULH, SQRDMULH, SQDMULL, SQDMLAL, SQDMLSL (vector, scalar, by
+element), SQSHL, UQSHL, SQRSHL, UQRSHL (register), SQSHL, UQSHL, SQSHLU (immediate), SQSHRN, SQRSHRN, UQSHRN, UQRSHRN, SQSHRUN,
+SQRSHRUN, SQXTN, UQXTN, SQXTUN, the AdvSIMD three same, three different, vector x indexed element, shift by immediate and two-register
+miscellaneous classes, SignedSatQ, UnsignedSatQ, SatQ; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR12".
+
+- ARS63 (a): a new file `go/arbace/a64i/simdsat.ae` (one operation `OpVSAT`, 26 instructions in six classes by `vsatNames`' index), written
+  as Go in a copy of the light driver's printed module (`.tmp/gomod`), built and run there (the claimed list 2,176 -> 2,394; the
+  synthetic program equal to the model under qemu-aarch64 and a64i, eval and AOT, and the forms check 2,297 of 2,297, all on the first
+  run), then converted by repr/go's native reader (`bin/repr-go read --goos linux --goarch arm64 --out DIR arbace/a64i` in that module,
+  `REPR_GO_JOBS=1`, 84 s, peak 1.10 GiB under a 1.45 GiB watchdog). `simdsat.ae` taken whole from the conversion; `simd.ae`'s hooks
+  (`OpVSAT`, `simdOpNames`, `simdName`'s case, `decodeVSAT`, `lowerVSAT`, `execVSAT` first in their dispatchers) and its header comment
+  edited by hand as forms so every comment stays (AR11's splicer, `.tmp/splice/splice.py`, listed the changed forms; fp.ae's
+  `fpcrUnmodelled` it reports changed is a normalisation artefact, left as AR11 left it); the package header (`go/arbace/a64i.ae`)
+  gained the file, its load and `vsatNames bigOne` at the end of `:init-order` (the header's order already omits simdfp.go's vars, as
+  AR9-AR11 left it; not widened here). The lanes are computed on the exact integer (math/big) and saturated by SatQ, QC set when one
+  saturated. FEAT_RDM's sqrdmlah and sqrdmlsh left `:unimplemented simd`: a64i's AT_HWCAP is 0, it claims no ARMv8.1 feature. The
+  light driver printed from the forms compiles to the written Go (comments aside, one pair of parentheses dropped) and claims the same
+  2,394 names. Alternatives considered: the hooks inside each existing decoder (v3Of, the shift class, decodeVEL) instead of one decoder
+  first (rejected: five functions with comments changed by hand instead of three hooks); sqshlu left out (taken in: the same class, one
+  line); int64 arithmetic with overflow checks (rejected: 2·MIN·MIN at 32 bits and the shifts by up to 127 overflow it).
+- `synth-neon-sat` (1,092 cases, gen.ae's `sat-cases`, seed + 1000; the model `sat-q`, `sat-shift`, `sat-dmul`, `sat-long` on BigIntegers),
+  in `--full`'s rotation only. Controls verdict-15, forms-9, inject-29.
+- ARS64 (c): TIMING-PLACEHOLDER
+- Results: a64i 95 -> 96 programs eval and AOT (23,711 -> 24,803 synthetic cases), coverage 2,176 -> 2,394 of 2,394 (simd 1,507 -> 1,725),
+  controls 61 -> 64; `--essential` 77 of 77 unchanged; `bin/reap --record` (arm64 eval 311 -> 312, AOT 3,057 -> 3,058 / 0 / 13), `bin/reap`
+  0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0), `--judge --strict` 0. No key moves: `bin/arbace-go
+  --gate-key` `314c8e5b04ab...` (AR11's); `test/gate/gate-key-crops-test.bash` passes. Proposed ARS66, ARS67.

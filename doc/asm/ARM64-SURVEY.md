@@ -1514,3 +1514,69 @@ Numbering from ARS63. Each with options, the recommended named; none taken.
   (c)*, then (a) if the step stays within its budget.
 - **ARS65 synth-neon-cvt in the essential subset.** (a) a quarter of it (250 cases) as synth-neon-e and synth-neon-el-e; (b) the
   rotation alone. *Recommended: (b)* until ARS64 is measured: the essential step already grew twice in two days.
+
+## As built: AR12 (2026-11-12; branch `asm-ar12`, from `mac/asm-ar11` `5740229b4`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go, while night 12's gate still ran (one run at a time, every process
+under 1.5 GiB, MemAvailable at 12 GiB or more checked before each run); arm64 programs run by a64i and, for the synthetic program's
+`--record`, by qemu-aarch64 11.1.2 user mode (the model's second judge); no LLVM or GNU tool. The user's answers (2026-11-12): ARS63
+(a), ARS64 (c), ARS65 (b). The semantics read again from the Arm ARM (DDI 0487: SQDMULH, SQRDMULH, SQDMULL, SQDMLAL, SQDMLSL (vector,
+scalar, by element), SQSHL, UQSHL, SQRSHL, UQRSHL (register), SQSHL, UQSHL, SQSHLU (immediate), SQSHRN, SQRSHRN, UQSHRN, UQRSHRN,
+SQSHRUN, SQRSHRUN, SQXTN, UQXTN, SQXTUN; the AdvSIMD three same, three different, vector x indexed element, shift by immediate and
+two-register miscellaneous classes' decode, scalar and vector; SignedSatQ, UnsignedSatQ, SatQ); no code copied.
+
+- **ARS63 (a): NEON's saturating doubling multiplies and saturating shifts and narrows in a64i** (`go/arbace/a64i/simdsat.ae`, new; written
+  as Go in a copy of the light driver's printed module, built and run there first, then converted by repr/go's native reader,
+  `REPR_GO_JOBS=1`, 84 s, peak 1.10 GiB under a watchdog that would have stopped it at 1.45 GiB; `simdsat.ae` taken whole from the
+  conversion, the hooks in `simd.ae` hand-edited as forms so its comments stay: `OpVSAT` before `opSIMDEnd`, its name, `simdName`'s
+  case and the three hooks, `decodeVSAT` first in `decodeSIMD`, `lowerVSAT` first in `lowerSIMD`, `execVSAT` first in `execSIMD`; the
+  package header's `:files`, `(load "a64i/simdsat")` and `vsatNames bigOne` appended to its `:init-order`):
+  - one operation, `OpVSAT`, its 26 instructions by `vsatNames`' class: three same (sqdmulh, sqrdmulh on h and s; sqshl, uqshl, sqrshl,
+    uqrshl on every arrangement but 1d and every scalar size), three different (sqdmull, sqdmlal, sqdmlsl, h to s and s to d, the 2
+    forms, the scalars), by element (sqdmulh, sqrdmulh, sqdmull, sqdmlal, sqdmlsl, vector, 2 and scalar; an h element's register v0-v15),
+    the left shifts by immediate (sqshl, uqshl, sqshlu), the narrowing shifts (sqshrn, sqrshrn, uqshrn, uqrshrn, sqshrun, sqrshrun) and
+    extracts (sqxtn, uqxtn, sqxtun), with their 2 and scalar forms. The reserved sizes (sqdmulh's b and d, the long ones' b and d, a
+    narrowing's immh 1xxx, a vector's 64-bit lanes without Q) are undefined; a vector shift's immh 0000 stays the modified immediate's.
+  - each lane computed on the exact integer (math/big): 2·a·b (+ the rounding constant) shifted by the element's width for the
+    high halves, the long ones' product saturated to twice the width before the accumulation is saturated again, a shift right the
+    integer's floor after the rounding constant, then SatQ, signed or unsigned (sqshlu, sqshrun, sqrshrun, sqxtun: signed in,
+    unsigned out); FPSR.QC set when any lane saturated, and only then. FEAT_RDM's sqrdmlah and sqrdmlsh are not claimed (a64i's
+    AT_HWCAP is 0: it claims no feature beyond ARMv8.0's Advanced SIMD) and stay `:unimplemented simd`.
+  - Coverage names `v.sqdmulh.8h`, `v.sqshl.d`, `v.sqdmull2.8h` (the sources'), `v.sqdmlal.e.h`, `v.sqshlu.imm.16b`, `v.sqrshrun2.16b`
+    (the destination's), `v.sqxtn.b` (218 new, all simd). The synthetic program `synth-neon-sat` (1,092 cases, gen.ae's `sat-cases`;
+    neon's setup; lanes drawn at the signed and unsigned limits, small and any; a third of the multiplies with v2 = v1, so MIN·MIN meets
+    itself; the shift counts near the width and any byte; the accumulator's words that the instruction does not read set so that v0's
+    lanes are drawn too): the model is the pseudocode on BigIntegers (`sat-q`, `sat-shift`, `sat-dmul`, `sat-long`). qemu-aarch64 and a64i
+    (AOT, eval, the forms check: 2,297 of 2,297 words) agreed with the model on their first runs; the scalar cases alone set QC in 189 of
+    377. The light driver printed from the forms compiles to the written Go (gofmt'd, comments aside, one pair of parentheses dropped)
+    and claims the same 2,394 names. Controls verdict-15, forms-9, inject-29. `synth-neon-sat` runs in `--full`'s rotation only, not in
+    the essential subset (ARS64 first).
+- **ARS64 (c): the essential step's time on a quiet host**: TIMING-PLACEHOLDER
+- **ARS65 (b)**: synth-neon-cvt stays in the rotation only (no change).
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval and AOT | 95 / 95 | **96 / 96** (23 synthetic programs, 24,803 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,176 of 2,176 (simd 1,507) | **2,394 of 2,394** (simd 1,725) |
+| controls (`test/asm/controls-a64i.txt`) | 61 | **64** |
+| `--essential` | 77 programs, 19 controls judged | 77, 19 (unchanged) |
+| the eval cell `[:asm-arm64 :eval]` | 311 / 0 / 0 | **312 / 0 / 0** |
+| the AOT cell `[:asm-arm64 :aot]` | 3,057 / 0 / 13 (99.6%) | **3,058 / 0 / 13 (99.6%)** |
+
+**crops-score** (arm64 assembly): completeness 99.8 (99.8 without by design), maturity 100.0, independence 100.0, unchanged; `--judge
+--strict` 0 problems. `bin/reap --record`: 49 of 52 cells checked, 0 problems. Proofs (each once, by hand, one at a time): `bin/a64i synth
+--record` (23 programs under qemu-aarch64, 1 min 8 s), `bin/a64i check --record` whole (96 of 96, 1 min 39 s at load 17-25, under 0.4
+GiB), `--essential` (77 of 77, 45 s at load 19). Not rerun: object-check, run-check, encode-check and the round trips (no shared code
+moved: only `go/arbace/a64i/` and `test/asm/`). The keys do not move (`test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go
+--gate-key` `314c8e5b04ab...`, AR11's).
+
+### Proposed (AR12)
+
+Numbering from ARS66. Each with options, the recommended named; none taken.
+
+- **ARS66 NEON's slice after.** (a) the estimates (ARS61 (c): frecpe, frsqrte, frecps, frsqrts, frecpx, urecpe, ursqrte); (b) FP16's
+  arithmetic (FEAT_FP16, ARS63 (c)); (c) the rest of the integer lanes a64i refuses: sqabs, sqneg, suqadd, usqadd, srshl, urshl, rshrn,
+  pmul, pmull, the polynomial and the across-lanes long forms not yet claimed. *Recommended: (c)*: small, the same exact-integer
+  helpers, and compiled codec code meets them beside AR12's.
+- **ARS67 synth-neon-sat in the essential subset.** (a) a quarter of it (273 cases) beside synth-neon-e and synth-neon-el-e; (b) the
+  rotation alone. *Recommended: per ARS64's numbers*: RECOMMEND-PLACEHOLDER
