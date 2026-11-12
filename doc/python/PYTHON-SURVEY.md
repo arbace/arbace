@@ -6136,3 +6136,81 @@ the freelist) and `Objects/abstract.c`'s buffer protocol.
 - **`bin/pyi-clib`** (the coordinator's item): ci is run from the checkout with every source, glue file and `-I` relative
   to it, so `__FILE__` (assert's messages) and the statics' sizes no longer name the checkout's location: two checkouts at
   different paths build the same `nodes.ae`. The main host's next rebuild of ctypestest changes `nodes.ae` once for it.
+
+## As built: 270b, heaptype.c, the other `_testcapi` parts and `:capi-port`'s named natives (2026-11-12, the Mac VM, queue 270b; 268's DECISION (a), second half; the VM's proposal Q3)
+
+The second part of queue 270: `_testcapi`'s heaptype.c (the second half of 268's DECISION (a): C metaclasses, specs over
+int and over exceptions), 17 more of its parts, test_getargs' DeprecationWarning rows and `:capi-port`'s named natives.
+Ported from CPython 3.14.10's `Objects/typeobject.c` (`_PyType_CalculateMetaclass`, PyType_FromMetaclass's metaclass
+checks, `inherit_special`'s itemsize, `PyType_GetBaseByToken`, `PyType_GetModuleByDef`, `PyType_Freeze`,
+`_PyType_GetTextSignatureFromInternalDoc`, `solid_base`'s `extra_ivars`), `Objects/dictobject.c` (the managed dict,
+`_PyObject_ComputedDictPointer`'s negative offset, the `Ref` and `Pop` functions), `Objects/abstract.c`,
+`Objects/longobject.c` (`PyLong_AsNativeBytes`, `FromNativeBytes`, `GetNativeLayout`), `Objects/funcobject.c`,
+`Python/codecs.c`, `Python/pytime.c`, `Python/errors.c`, `Python/import.c` (`PyImport_ExecCodeModule*`), `Python/ceval.c`
+(`PyEval_EvalCodeEx`).
+
+- **Metaclasses** (`go/arbace/pyctypes/capi_types.ae`): PyType_FromMetaclass takes a metaclass other than type, the
+  winner of the given one and the bases' (`_PyType_CalculateMetaclass`: "metaclass conflict: ..."), refusing one with a
+  tp_new of its own ("Metaclasses with custom tp_new are not supported."); the type's `Meta` is it. A spec over `type`
+  (`HeapCTypeMetaclass`, sizeof(PyHeapTypeObject)) is a C metaclass: its instances are pyi types (type's own slots,
+  `type.__new__` with the metaclass), their handle `PyHeapTypeObject` plus the metaclass's C tail when its basicsize is
+  larger; Py_TPFLAGS_DISALLOW_INSTANTIATION refuses `HeapCTypeMetaclassNullNew(...)` as CPython's type_call.
+- **Specs over int, exceptions and Python classes**: a spec over int (`HeapCTypeWithBasesSlot`) or an exception
+  (`make_type_with_base(ValueError)`) makes C-born instances as 269's over list/tuple/bytes/float: an int's PyLongObject
+  mirrored, an exception's fields left to the functions (no mirror; the record on `Exception.Ext`); the built-in value made
+  by the base's `__new__` from the arguments (`HeapCTypeWithBasesSlot(5)` is 5; before, a spec over float without tp_new
+  gave 0.0). A Python class over object as a base (`test_from_spec_metatype_inheritance`) gives the spec's instances a
+  managed dict and weak references, as CPython's.
+- **The managed dict and weak references** (Py_TPFLAGS_MANAGED_DICT, MANAGED_WEAKREF): a C-born object's dict is a Go
+  dict beside its memory (`PyObject_GenericGetDict`/`SetDict`, `PyObject_ClearManagedDict`, `PyObject_VisitManagedDict`);
+  a negative `tp_dictoffset` counts from the object's end; the head of an object's weak references is written into its
+  `tp_weaklistoffset` slot (py's `ExtWeakrefHook`), so the C member `weakreflist` reads it; a C type whose basicsize is its
+  base's adds no layout (`ExtAddsNoLayout`: `class C(HeapCTypeWithManagedWeakref, HeapCTypeWithManagedDict)` and
+  `class C3(HeapCTypeWithManagedDict, list)` are layouts CPython accepts).
+- **The rest of heaptype.c**: bf_getbuffer/bf_releasebuffer for pyi's buffer users (`ExtBufferHook`: `bytes(obj)`,
+  `memoryview(obj)`) and for PyObject_GetBuffer; Py_tp_vectorcall (`ExtTypeCallHook`: the type called through it);
+  `tp_doc` (the spec's copy), `ht_name`/`ht_qualname`, `__text_signature__` from tp_doc (`ExtTextSignatureHook`); tokens
+  (`Py_TP_USE_SPEC` is NULL: the spec itself), `PyType_GetBaseByToken`, `PyModule_GetDef`, `PyType_GetModuleByDef`;
+  `PyType_GetSlot` of `Py_tp_base` and of a static type's slots from the type object; the spec's itemsize and
+  Py_TPFLAGS_ITEMS_AT_END inherited (`subclass_var_heaptype(HeapCCollection, ...)`); a spec without
+  Py_TPFLAGS_IMMUTABLETYPE is mutable (`ExtMutableType`), `PyType_Freeze` sets py's new `FlagImmutable`.
+- **DeprecationWarning** (py's `class.ae`): `__index__`, `__int__` and `__float__` returning an instance of a strict subclass
+  of int or float warn as CPython's (`_PyNumber_Index`, `PyNumber_Long`, `PyNumber_Float`) and give the exact value
+  (pyi gave none: test_getargs' 14 rows, which `:coroutines`' pattern took).
+- **`:capi-port`'s named natives** (`capi_port.ae`, `capi_parts.ae`): the number protocol's rest (Index, Float, Long,
+  the binary, in-place and unary operators, Power, ToBase, AsSsize_t), `PyLong_IsZero`/`IsPositive`/`IsNegative`/
+  `GetSign`/`FromUnicodeObject`, `PyLong_AsNativeBytes`/`FromNativeBytes`/`GetNativeLayout` (CPython's compact path
+  for one 30-bit digit kept: its byte counts), the optional lookups (`PyObject_GetOptionalAttr`,
+  `PyMapping_GetOptionalItem`), the dict's `Ref`, `SetDefault` and `Pop` functions, `PyIter_NextItem`,
+  `PyEval_EvalCodeEx` (an optimized code through `types.FunctionType`, a class body's in its locals),
+  `PyComplex_FromCComplex` (ci passes the `Py_complex` aggregate's bytes), `PyRun_String`/`SimpleString`,
+  `Py_CompileString` and their variants (`PyCF_IGNORE_COOKIE`), `PyImport_ExecCodeModule` and its variants
+  (`_fix_up_module`), `PyType_Freeze`, the function accessors, the codec registry and error handlers, the clocks, the
+  legacy error triple and the handled exception, the Unicode errors' start and end, `PyFrame_GetVar`, the charmap
+  codec, `PyUnicode_FSConverter` (getargs' `O&` with `Py_CLEANUP_SUPPORTED` called again on failure: Issue 6012),
+  `PyBytes_DecodeEscape`, `PyHash_GetFuncDef`, `PyCode_NewEmpty` (its `co_firstlineno` left: a Low),
+  `PyFile_FromFd`, one thread state (`PyEval_SaveThread` a no-op).
+- **The world**: heaptype.c and vectorcall, function, type, codec, exceptions, time, import, docstring, buffer, file,
+  frame, code, config, datetime, run, gc and mem built (36 of the 38 parts); watchers and monitoring stay stubs (they need
+  events from pyi's core: dict, type, function, code and context watchers; sys.monitoring's C API). `PyModule_AddType`
+  readies a static type first (docstring.c's). `pycapi.c` defines `PyFrame_Type`, `PyCode_Type`, `PyFunction_Type`,
+  `PyMethod_Type`, `PyCell_Type`, `PyCFunction_Type` and the weak references' type objects: an undefined data symbol is
+  a zeroed static of each unit in ci's link, so frame.c's `PyFrame_Check` read another struct than the one pyctypes
+  bound (269's Low on `PyWeakref_Check` through `_testlimitedcapi` is the same cause). Static types inherit
+  `tp_vectorcall_offset`, Py_TPFLAGS_HAVE_VECTORCALL and METHOD_DESCRIPTOR from a C base (`inherit_slots`), a C type's
+  `__flags__` is its type object's (`ExtTypeFlags`), type_new defers to a C metaclass (`ExtMetaclass`).
+
+Counts (`bin/pyi lib-test-all --fresh`, each test's own verdict, the VM; base c3d19bdf5 as the coordinator's verify
+measured it):
+
+| module | base | head |
+|---|---|---|
+| test_capi (1,195) | 324 pass; `:testcapi-parts` 442, `:testcapi` 282, `:capi-port` 116, `:coroutines` 14, ... ; 0 failing | **445 pass**; `:testcapi` 592, `:capi-port` 77, `:testcapi-parts` 58, `:testcapi-behaviour` 4, `:capi-refcounts` 3, int-core 4, cpython-only 3, skipped-by-test 4, finalization 2, gc-collector 2, `:coroutines` 1; **0 failing** |
+| test_call (189) | 125 pass; cpython-only 52, `:testcapi-parts` 11, `:capi-port` 1 | **129 pass**; cpython-only 52, `:testcapi-behaviour` 4, `:testcapi` 3, `:capi-port` 1; 0 failing |
+| test_descr (163), test_exceptions (113) | (269's integration at a53fe65a9: one new failing each, `_testcapi`'s) | 144 pass, 0 failing; 90 pass, 0 failing (`:testcapi-behaviour` 1 each) |
+| test_dataclasses, test_float, test_complex, test_codecs, test_bytes, test_str, test_ctypes, test_format | as the base | 277, 43, 34 (and the base's 3 failing), 266, 310, 128, 531, 10 pass: as the base |
+
+`:testcapi` grows by test_capi's test_misc (309) and test_exceptions (32), which import past heaptype.c's
+`HeapCTypeSubclass` now and stop at `import _testinternalcapi` (by design). **The checks** (`.tmp/q270b/t/`): `check270h.sh`
+(heaptype.c, 44 lines), `check270p.sh` (`:capi-port`'s natives and the new parts, 77 lines), `checkdw.sh` (the
+DeprecationWarning, 4 lines), each against python3 3.14.10's own `_testcapi` with a negative control.
