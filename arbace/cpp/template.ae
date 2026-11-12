@@ -123,6 +123,7 @@
 (defn- param-type [scope p] (abi/unq (sema/resolve-type scope (:qt p))))
 
 (declare arg-entity)
+(declare ^:dynamic *unstable*)
 
 (defn- bind-scope
   "A scope of the parameters `params` bound to `args` (a type each, or {:val n}) over `parent`; with `sym-tid` (and no
@@ -387,7 +388,11 @@
    "__is_final" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (:final (abi/cls (:id u)))))))
    "__is_aggregate" (fn [_ [a]] (let [u (abi/unq a)] (or (abi/arr? u) (and (abi/class? u) (boolean (sema/aggregate? (:id u)))))))
    "__has_virtual_destructor" (fn [_ [a]] (let [u (abi/unq a)] (and (abi/class? u) (boolean (some-> (:dtor (abi/cls (:id u))) sema/fnd :virtual)))))
-   "__is_base_of" (fn [_ [b d]] (let [b (abi/unq b) d (abi/unq d)] (and (abi/class? b) (abi/class? d) (or (= b d) (boolean (abi/derived-from? (:id d) (:id b)))))))
+   "__is_base_of" (fn [_ [b d]] (let [b (abi/unq b) d (abi/unq d)]
+                                  ;; (cpp-s8: a class whose definition is under way has not all its bases yet: the answer
+                                  ;; may change, so a concept's satisfaction that asked it is not kept, *unstable*)
+                                  (when (and (abi/class? d) (not (:finished (abi/cls (:id d))))) (some-> *unstable* (reset! true)))
+                                  (and (abi/class? b) (abi/class? d) (or (= b d) (boolean (abi/derived-from? (:id d) (:id b)))))))
    "__is_convertible" (fn [scope [f t]] (trait-convertible? scope f t))
    "__is_convertible_to" (fn [scope [f t]] (trait-convertible? scope f t))
    "__is_nothrow_convertible" (fn [scope [f t]] (trait-convertible? scope f t))
@@ -1012,6 +1017,7 @@
 
 (declare deduce-by-type-match)
 (def ^:dynamic *satisfaction* nil)
+(def ^:dynamic *unstable* nil) ; cpp-s8: an atom set when a satisfaction asked about a class still being defined (not memoized)
 
 ;; CX12 (second slice, the checker: sema/checking?): a template's deduction that gives no candidate is the program's
 ;; error only for the reasons below, each sure ([temp.deduct.type]'s mismatches of a member function's qualifiers or a
@@ -1417,7 +1423,11 @@
   [scope n]
   (when (= "DeclRefExpr" (:kind n))
     (let [nm (get-in n [:referencedDecl :name])
-          es (when (string? nm) (try (sema/lookup scope nm) (catch arbace.lang.ExceptionInfo _ nil)))
+          ;; (cpp-s8: a qualified concept-id, `__detail::__has_member_element_type<_Tp>` in a requires-clause, looked up
+          ;; by its qualifier: before, an atom of its own, so no partial specialization subsumed another through it)
+          [_ q] (#'sema/ref-qualifier n)
+          es (when (string? nm) (try (if (seq q) (sema/lookup-qualified scope (conj (vec q) nm)) (sema/lookup scope nm))
+                                     (catch arbace.lang.ExceptionInfo _ nil)))
           e (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) es))]
       (when e
         (let [c (tmpl (:id e))
@@ -1566,6 +1576,8 @@
                                     :union (= "union" (:tagUsed node)) :tmpl tid :targs args :header (sema/header-node? node)})
     (enter! ps (:name t) {:e :type :ty {:k :class :id cid} :pos -1})
     (upd-tmpl! tid assoc-in [:insts args] cid)
+    (when-let [nm (System/getenv "CPP_INST_TRACE")]
+      (when (= nm (:name t)) (binding [*out* *err*] (println "instance" (:name t) tid cid (pr-str args) (if cid0 "again" "") (System/identityHashCode *tmpls*) (count (:insts (tmpl tid))) (get-in (tmpl tid) [:insts args])))))
     (when (:completeDefinition node)
       ;; the bases dependent in the pattern, which unqualified lookup in the specialization does not search
       (when-not explicit?
@@ -1684,12 +1696,45 @@
                              (and (or (not @failed) (dependent? ded)) (= (canonical sub) (canonical args)))))))
             ded))))))
 
+(defn- partial-constraints
+  "A class template partial specialization's associated constraints ([temp.constr.decl]/3) as one normal form or nil: its
+  parameters' type-constraints, then its requires-clause, as associated-constraints's for a function template."
+  [pt]
+  (let [ss (bind-scope (:scope pt) (:params pt) nil (:id pt))
+        tcs (for [p (:params pt)
+                  :when (and (:tc p) (not (:tc-args p)) (not (:pack p)))
+                  :let [c (concept-of pt p)]
+                  :when c
+                  :let [ty (:ty (first (sema/lookup ss (:name p))))]]
+              (normal-form (bind-scope (:scope c) (:params c) [ty] nil) (:expr c) (canonical [ty]) 1))
+        rc (when-let [x (:constraint pt)] (normal-form ss x nil 0))
+        parts (remove nil? (concat tcs [rc]))]
+    (when (seq parts) (reduce (fn [a b] [:and a b]) parts))))
+
+(defn- more-constrained-partial?
+  [p1 p2]
+  (let [p (try (partial-constraints p1) (catch arbace.lang.ExceptionInfo _ ::unknown))
+        q (try (partial-constraints p2) (catch arbace.lang.ExceptionInfo e (when (System/getenv "CPP_CONSTRAINT_TRACE") (binding [*out* *err*] (println "partial-constraints" (.getMessage e)))) ::unknown))]
+    (when (System/getenv "CPP_CONSTRAINT_TRACE") (binding [*out* *err*] (println "more-constrained-partial" (:id p1) (:id p2) (pr-str p) (pr-str q))))
+    (cond
+      (or (= ::unknown p) (= ::unknown q)) false
+      (nil? p) false
+      (nil? q) true
+      :else (and (subsumes? p q) (not (subsumes? q p))))))
+
 (defn- more-specialized-partial?
   "[temp.class.order]: the partial specialization p1 more specialized than p2 (p2's arguments deduced from p1's, not
   the reverse)."
   [p1 p2]
-  (let [ded (fn [pa pb] (match-args (atom {}) (:id pa) (:args pa) (:args pb)))]
-    (and (ded p2 p1) (not (ded p1 p2)))))
+  (let [ded (fn [pa pb] (match-args (atom {}) (:id pa) (:args pa) (:args pb)))
+        a (ded p2 p1)]
+    (or (and a (not (ded p1 p2)))
+        ;; (cpp-s8: of two whose arguments deduce each other, the more constrained, [temp.spec.partial.order]/1 with
+        ;; [temp.func.order]/6.2.2: <iterator_concepts.h>'s indirectly_readable_traits<__has_member_value_type _Tp>
+        ;; requires __has_member_element_type<_Tp> && same_as<...> (LWG 3446) over <__has_member_value_type _Tp> and over
+        ;; LWG 3541's, std::span's value_type had been "ambiguous partial specializations")
+        (and a (= (map (juxt :kind :pack) (:params p1)) (map (juxt :kind :pack) (:params p2)))
+             (more-constrained-partial? p1 p2)))))
 
 (def ^:dynamic *inst-depth*
   "CP368 (a): the class instantiations under way, nested (clang's -ftemplate-depth, 1024 by default:
@@ -1723,6 +1768,9 @@
         (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of 1024 (" (:name (tmpl tid)) ")")
                         {:codegen/refused :depth})))
       (let [t (tmpl tid)]
+        (when-let [nm (System/getenv "CPP_INST_TRACE")]
+          (when (= nm (:name t))
+            (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
         (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args)) *provisional* sema/*main-retry*)
           (incomplete-instance! t args)
           (select-instance! t args nil)))))))
@@ -1733,9 +1781,16 @@
   [t args cid0]
   (if-let [node (get (:specs t) args)]
     (declare-instance! t args node [] [] true cid0)
-    (let [ms (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t))
-          best (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms)]
+    (let [ms (vec (keep (fn [pt] (when-let [b (partial-match pt args)] [pt b])) (:partials t)))
+          best (vec (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms))
+          ;; (cpp-s8: the partial specializations' constraints, evaluated just now, may have instantiated this very
+          ;; specialization (std::span's __iterator_traits<span<char>, void>: __cpp17_iterator<span> through
+          ;; iterator_traits<span>, whose base it is): that one, not a second class of the same arguments -- iterator_traits
+          ;; had derived from the first while the cache held the second, so __primary_traits_iter<span> was false and
+          ;; ranges::input_range<span<char>&> with it)
+          made (when-not cid0 (get-in @*tmpls* [(:id t) :insts args]))]
       (cond
+        made {:k :class :id made}
         (empty? ms) (do (when-not (:pattern t) (fail :template "an incomplete class template " (:name t)))
                         (declare-instance! t args (:pattern t) (:params t) args false cid0))
         (= 1 (count best)) (let [[pt b] (first best)
@@ -2067,7 +2122,12 @@
                        [r @d]))
         [r d] (if-let [m *satisfaction*]
                 (let [v (get @m k ::none)]
-                  (if (= ::none v) (let [x (eval1)] (swap! m assoc k x) x) v))
+                  (if (= ::none v)
+                    (let [u (atom false)
+                          x (binding [*unstable* u] (eval1))]
+                      (if @u (some-> *unstable* (reset! true)) (swap! m assoc k x))
+                      x)
+                    v))
                 (eval1))]
     (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "concept" (:name c) (pr-str (canonical args)) "=>" r (if d "(doubt)" "") (pr-str (keep #(when (and (map? %) (= :class (:k %))) [(:id %) (select-keys (abi/cls (:id %)) [:defining :finished :complete])]) (tree-seq coll? seq args))))))
     (when d (sema/doubt!))
@@ -2226,7 +2286,9 @@
                                 ;; (the checker's position stays the call's: the template's signature and pattern are
                                 ;; analyzed while deducing, CX12)
                                 at sema/*at* at-saved (some-> at deref)
-                                fid (binding [*unsure* u *sure* sr]
+                                ;; (cpp-s8: too few arguments, no deduction and no constraint checked: a sure drop below)
+                                fid (when-not (too-few-args? t args)
+                                     (binding [*unsure* u *sure* sr]
                                       (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
                                              (when-let [a (deduce-call t ex args)] (instantiate-fn tid a)))
                                            (catch arbace.lang.ExceptionInfo e
@@ -2234,7 +2296,7 @@
                                              ;; (CP281 (a): a constraint surely false is the program's, a sure drop)
                                              (if (or (:cx/constraint-false (ex-data e)) (:cx/sure-drop (ex-data e))) (reset! sr true) (reset! u true))
                                              (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))
-                                           (finally (when at (reset! at at-saved)))))
+                                           (finally (when at (reset! at at-saved))))))
                                 ;; (CX12, the checker: a template whose deduction failed by the algorithm alone)
                                 _ (when-not fid (swap! (if (and (not @u) (or @sr (too-few-args? t args))) sure doubt) inc))]
                           :when fid]
@@ -3415,6 +3477,12 @@
          :ctad ctad
          :ctor-candidates (fn [cid args]
                             (vec (for [tid (:ctor-tmpls (abi/cls cid))
+                                       ;; (cpp-s8: a constructor template of more parameters without defaults than the
+                                       ;; arguments is no candidate, [over.match.viable]/2, before its deduction and
+                                       ;; constraints: span's `template<contiguous_iterator _It> span(_It, size_type)` for
+                                       ;; is_constructible<span, span> had checked contiguous_iterator<span>, which asks
+                                       ;; is_constructible<span, span> again, to the constraints' depth)
+                                       :when (not (too-few-args? (tmpl tid) args))
                                        :let [fid (try (let [a (deduce-call (tmpl tid) [] args)]
                                                         (when (and (nil? a) (System/getenv "CPP_TMPL_TRACE"))
                                                           (binding [*out* *err*] (println "constructor template of" (:name (abi/cls cid)) "does not deduce")))
