@@ -5674,3 +5674,31 @@ the cache again once index.edn existed), and the next `musl read` found the key 
   fresh` fails, `ensure` repairs it without rereading (74 s), `bin/ci run` of torture-execute/20000314-1.c exits 0; `bin/ci check --only`
   four torture files pass; c-check-essential's command exits 0; `bin/reap` 41 of 44, 0 problems; `bin/crops-score --judge --strict` 0 problems;
   `test/c/musl-lock-test.bash` ok (the second reader waited 153 s behind the first's lock, held 6 s: the index build ran after it).
+
+## As built: night 12's C failures (2026-11-12, branch `gf-misc`, from `next` `bd6ab3ddd`)
+
+Night 12's `--full` ran concurrently and under load; each failure was rerun alone first.
+
+**c-annotations: torture-execute 20040629-1.c, tcc-tests2 95_bitfields.c, quickjs unicode_gen.c ("annotations differ", `port
+[]`).** Rerun alone (`bin/ci annotations --corpus torture-execute,tcc-tests2,quickjs --only`, 2 min 16 s) each differs exactly as on
+the night: real, not load, and not a new difference. They are the own target's triage's three `:item-placement` files (T.3: the
+re-entered main file, CDF.8, is the unit of the `#include` that entered it, whose items the checker does not annotate; unicode_gen.c's
+tables included inside a declaration since `*include-inside*`). `a5705351b` moved their known entries to a night patch to apply
+before `annotations --record` (T.7 step 4), because the committed results still passed them (refused before CDF.8); the patch was
+never applied, so the known file lacked them. Now: the three entries in `test/repr/c/annot-known.edn` and their rows in
+`annot-results.edn` `:known` with the run's own details (as `--record` writes them); the `--only` run: 3 of 3 known
+(item-placement). Not 883115fd0's ms_struct change: 95_bitfields' difference is its re-entered main file's items, unchanged.
+
+**c-aot: compcert/almabench.c, nbody.c, benchmarksgame/spectral-norm.c (timeouts, recorded pass).** Rerun alone (`bin/ci check
+--aot --only`, one job) nbody and spectral-norm still time out (almabench too with `CI_AOT_NODES=1` beside it): real. The seed's
+checker and builder (`CI_FRESH=0`) give the same times, so neither 883115fd0 nor 5728fe111 (ci's checker and the reader) is the
+cause. A profile of spectral-norm's executable (`perf`): 16% in `mallocgc` from the compiled callers, at every call. CS277 (a)
+(`9c3e1eb64`, 2026-11-06, after the last pass at `d86cb874a`) stored `Enter`'s argument slice in the frame (`fr.VArgs`, for
+`__builtin_va_arg_pack`); Go's escape analysis then leaks the parameter, so every compiled call's `[]ci.Arg{...}` literal moved to
+the heap. `Enter` and the interpreter's `Call` now keep a copy of the variadic arguments (`leaking param content: args`, no longer
+`leaking param`). Measured alone, the same executables before and after, two rounds at load 25-57: almabench 13.4/12.0 -> 11.4/10.5
+s, nbody 18.4/17.3 -> 9.1/8.4 s, spectral-norm 24.6/23.2 -> 11.1/10.7 s (quiet, before: 7.1, 9.9, 15.0 s); the outputs equal. Still
+at the 10 s default's edge, so the three get 30 s in `test/c/check-budget.edn`, as qsort and sha1 have. `go/arbace/ci` is in
+gate_key: the key moves.
+Proof: `CI_AOT_NODES=1 CI_JOBS=1 bin/ci check --aot --corpus compcert,benchmarksgame --only` of the three (as the step runs
+them, 5 min 12 s): 3 of 3 pass compiled, exit 0; the interpreted runs time out in their `speed` class, as before.
