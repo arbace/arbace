@@ -436,7 +436,10 @@ covers what.
   License 1.0; the rest a port of CPython 3.14.10's `Modules/_ctypes/` (queue 244) and, in `capi_limited.ae`,
   `capi_objects.ae` (queue 262), `capi_types.ae` and `capi_more.ae` (queue 268), `capi_mirror.ae` (queue 269: the
   layouts of `Include/cpython/`, `Objects/typeslots.inc`'s offsets, `PyType_Ready`'s part), `capi_unicode.ae` and `capi_getargs.ae` (queue 270: `Objects/unicodeobject.c`'s compact layout's
-  functions and the writer, `Python/getargs.c`'s units, `Objects/abstract.c`'s buffer protocol), of the C API's functions in its `Objects/` and `Python/`, under the PSF License
+  functions and the writer, `Python/getargs.c`'s units, `Objects/abstract.c`'s buffer protocol), `capi_heaptype.ae`,
+  `capi_parts.ae` and `capi_port.ae` (queue 270b: `Objects/typeobject.c`'s metaclasses, tokens and module lookups, the
+  managed dict, `Objects/funcobject.c`, `Python/codecs.c`, `Python/pytime.c`, `Python/errors.c`, `Objects/abstract.c`,
+  `Objects/longobject.c`, `Objects/dictobject.c`, `Python/ceval.c`'s `PyEval_EvalCodeEx`), of the C API's functions in its `Objects/` and `Python/`, under the PSF License
   Agreement (section above).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
