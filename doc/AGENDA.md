@@ -71,6 +71,8 @@ Six crops are above 90 on all three. What the others still need:
   (the own dg record's five crashes gone, provisional instances for <format>); `cpp-s7` (2026-11-12): its proofs run (the 82's IR
   only CP369's linkage, codegen-gen re-recorded, the five samples), CP372 (a) and CP373 (a) built, CP369's follow-ups (a header's
   out-of-line static member not linkonce, inline static members defined) and an eval-text crash fixed; library.cpp alone left to a night.
+  `cpp-s8` (2026-11-12, CP366 (a)'s slice): ranges' iterator concepts on std::string and std::span right (16 of 16 on `char*` and
+  string's iterator, from 6 and 5), ranges::copy, provisional instances for a dropped member, <format>'s floating builtins; LIBRESULT
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

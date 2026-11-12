@@ -6906,3 +6906,79 @@ before; the row passes again.
 # the inline static members (headers' `static inline`) may move it; refusal and drops.tsv against G4's (overload; 48 causes)
 .tmp/gen.sh $PWD/.tmp/g5lib.tsv
 ```
+
+## As built: cpp-s8 (2026-11-12; branch `cpp-s8` from mac/cpp-s7 b7d9b0249)
+
+The user's decision CP366 (a): the rest of <format> one slice a day, library.cpp's refusal and drops.tsv the measure. Light, by night 12's
+rules until 07:00 UTC (one process at a time, each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB
+GOGC=20 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID any process of this worktree past 1.5 GiB), then the day's 2.5 GiB
+for library.cpp alone. No clang, g++, gate or big lock. Probes in `.tmp/probe/` (gen-batch), each reproducing a step of library.cpp's way
+on a header subset: `f8.cpp` (<format>'s vformat, about 1.0 GB, 150-220 s) for the whole way, and small ones (`s1`-`s3`, `c1`-`c15`,
+`r1`, `prov4`, `b1`, 0.3-0.8 GB) for each cause.
+
+### The way through span's converting constructor (library.cpp's refusal at cpp-s7)
+
+`_Seq_sink<string>::_M_reserve`'s `this->_M_reset(_M_seq, __sz)` needs span<char>(std::string&), whose constraints are ranges'
+contiguous_range and sized_range of string&. Probe s3 measured 16 iterator concepts on `char*` and on string's iterator
+(`__normal_iterator<char*, string>`): at cpp-s7, char* satisfied 6 of 16 and the iterator 5; now both 16 of 16. The causes, each general:
+
+- **A partial specialization's arguments completed by the primary's defaults** ([temp.spec.partial.general]/8, [temp.arg.general]/9):
+  `template<class X, class Y> struct __common_ref_impl<X&, Y&&>` of `template<class A, class B, class = void> struct __common_ref_impl`
+  is <X&, Y&&, void>; its two arguments had never matched an instance's three, so common_reference_t<char&, char&&> fell to
+  <type_traits>' third bullet (char&) and common_reference_with, indirectly_readable<char*> with it, were false (`partial-args`,
+  also in partial-match's substitution check; probe c1, c2).
+- **A dependent non-type default argument** in a dependent template-id (`__match_cv_qualifiers<_Qualified, _Unqualified, bool _IsConst =
+  is_const<_Qualified>::value, ...>` under `__copy_cv<_Xp, _Yp>`): the dependent expression read from its text, as a signature's
+  (eval-text), not a refusal; <type_traits>' `__common_ref_impl` partial specializations had been dropped ("a dependent template-id with
+  default arguments", one of drops.tsv's causes).
+- **T{} and T{e} of a scalar type** ([expr.type.conv]/2, [dcl.init.list]/3.10-3.11): value-initialized or the element converted
+  (`scalar-list-cast`); <concepts>' default_initializable<char*> (`requires { _Tp{}; }`) had been false, so semiregular, regular and
+  every iterator concept above input_iterator (probe c3, c4).
+- **Hidden friends by argument-dependent lookup alone** ([class.friend]/7, [basic.lookup.argdep]/4.3): a friend function or function
+  template defined in a class and not declared in its namespace is entered with its class (`:friend-cls`) and found by an operator's
+  lookup, a call's ADL or a named call only when its class is associated with the arguments (sema's `adl-classes`, `friend-visible?`;
+  template.ae's `adl-templates`, call-candidates). `unreachable_sentinel_t`'s `template<weakly_incrementable _It> friend bool
+  operator==(unreachable_sentinel_t, const _It&)` had been a candidate of every `a == b`, and its constraint for a __normal_iterator
+  recursed through iterator_traits into itself to the constraints' depth (24): weakly_incrementable<string::iterator> false (probe c6,
+  c7: a hidden friend still found through its class).
+- **Partial specializations told apart by their parameters' type-constraints** ([temp.param]/4): `indirectly_readable_traits<
+  __has_member_value_type _Tp>` and `<__has_member_element_type _Tp>` have the same arguments and no requires-clause; the second
+  had replaced the first as a redeclaration, so a __normal_iterator had no value_type (probe c9).
+
+### The rest of the way to vformat_to
+
+- **A concept-id as a template argument** (const-form; [temp.names]/8): `borrowed_iterator_t<_Range> = __conditional_t<borrowed_range<
+  _Range>, ...>` had refused ranges::copy's range operator() ("constant (<> borrowed_range _Range)"); a dependent one is `{:k :texpr :o
+  :concept}`, mangled as clang's unresolved name.
+- **A function template's name declared before its body** in the native parser ([basic.scope.pdecl]/1): `ranges::__copy_or_move<_IsMove>
+  (...)` in its own body, qualified, had read as `(a < b) > (...)` (probe r1); a stand-in taken out before the declaration proper, so the
+  entity is as before.
+- **Concept arguments short of its parameters** (a type-constraint whose text the parser did not split): completed by the concept's
+  defaults, else not checked (a doubt), not bound short (an IndexOutOfBoundsException, a crash).
+- **Partial specializations ordered by their constraints** ([temp.spec.partial.order]/1 with [temp.func.order]/6.2.2): of two whose
+  arguments deduce each other, the more constrained (`partial-constraints`, `more-constrained-partial?`); a qualified concept-id in a
+  requires-clause (`__detail::__has_member_element_type<_Tp>`) normalized through its concept (`concept-ref` by its qualifier). LWG 3446's
+  indirectly_readable_traits over the value_type and element_type ones and LWG 3541's: std::span's value_type had been "ambiguous
+  partial specializations" (probe c11).
+- **A specialization instantiated during its own selection**: the partial specializations' constraints for `__iterator_traits<span<char>,
+  void>` instantiated it (through iterator_traits<span>, whose base it is) before the outer selection declared a second class of the
+  same arguments; iterator_traits derived from the first while the cache held the second (`select-instance!` takes the one made; probe
+  c13-c15).
+- **A satisfaction that asked __is_base_of of a class still being defined is not memoized** (`*unstable*`): __primary_traits_iter<span>
+  had been memoized false while iterator_traits<span> had no base yet.
+- **A constructor template with more parameters than the arguments** is no candidate before its deduction and constraints
+  ([over.match.viable]/2): span's `template<contiguous_iterator _It> span(_It, size_type)` for is_constructible<span, span> had checked
+  contiguous_iterator<span>, which asks is_constructible<span, span> again. (Only for constructor templates: a function template's
+  defaults may be on an earlier declaration, `__do_vformat_to`'s `const locale* = nullptr`, which the pattern's own parameters do not show.)
+- **Provisional instances, CP365's follow-up**: an instance whose definition finished with a member's declaration dropped (a nested class's
+  among them) is provisional too, and an anonymous member whose unnamed class a header dropped is left out (a drop), not a member of no type
+  (the layout's "no size for nil"): <format>'s `_Arg_value<_Context>`'s anonymous union, `_CharT _M_c` dropping it whole, so `_M_none`
+  and the rest were no members of _Arg_value<format_context> (probe prov4, `bin/llvmi run` exit 0: the union member read after the remake).
+- **GNU builtins** of <format>'s floating-point formatter: `__builtin_frexp{,f,l}`, `__builtin_toupper`, `__builtin_copysign{,f,l}` as
+  libm's functions, and `__builtin_signbit(x)` (copysign(1, x) < 0) and `__builtin_isfinite(x)` (x - x == x - x) of x's floating type
+  (probe b1, `bin/llvmi run` exit 0; its control, the expectation changed, exit 1).
+- **An if constexpr's condition the evaluator cannot compute** is a refusal, `constexpr-if`, not a crash.
+
+Traces (each environment-gated, off by default): `CPP_CONCEPT_TRACE` (each concept's satisfaction, a requirement's failure, a partial
+ordering's normal forms, the constraint depth's stack), `CPP_INST_TRACE=NAME` (a class template's instances and cache misses),
+`CPP_CONSTEXPR_IF_TRACE`, `CPP_TMPL_TRACE`'s deduction failures of a call's templates and its default arguments' refusals.

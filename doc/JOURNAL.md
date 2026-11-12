@@ -5092,3 +5092,27 @@ no clang, g++, gate or big lock). Details and numbers in doc/cpp/CPP-SURVEY.md, 
   refuses a non-integer literal; 127 own passes as recorded.
 - codegen-gen re-recorded once: the five samples with static data members, CP369's linkage alone. bin/reap 0 problems, crops-score
   strict 0, the gate key the same as cpp-s6's.
+
+## 2026-11-12: cpp-s8, CP366 (a)'s slice: <format>'s way through span, ranges and the formatting machinery (branch `cpp-s8`, from `mac/cpp-s7` b7d9b0249)
+
+The user decided CP366 (a) (2026-11-11): the rest of <format> one slice a day, library.cpp's refusal and drops.tsv the measure. By night
+12's rules until 07:00 UTC (one process at a time, each gated in its command on MemAvailable >= 12 GiB and `df /` <= 85%, `GOMEMLIMIT=1000MiB
+GOGC=20 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID past 1.5 GiB), library.cpp's refusal reproduced on header subsets
+(`.tmp/probe/`): `f8.cpp` (<format>'s vformat, 1.0 GB) for the whole way and a small probe for each cause. Details and numbers in
+doc/cpp/CPP-SURVEY.md, "As built: cpp-s8".
+- The refusal at cpp-s7 (`_Seq_sink<string>::_M_reserve`'s span<char>(string&)): ranges' concepts on `char*` and string's iterator
+  measured 6 and 5 of 16 true. Five causes, each general: a partial specialization's arguments completed by the primary's defaults
+  (common_reference_t<char&, char&&>), a dependent non-type default as a signature's expression (__copy_cv's __match_cv_qualifiers), T{}
+  of a scalar type (default_initializable), hidden friends by ADL alone (unreachable_sentinel_t's operator== had been a candidate of every
+  ==, recursing to the constraints' depth), partial specializations told apart by their type-constraints (indirectly_readable_traits'
+  value_type one had been replaced by the element_type one). Then 16 of 16 for both.
+- Further, each found by f8's next refusal: a concept-id as a template argument (borrowed_iterator_t), a function template's name declared
+  before its body in the native parser (a qualified recursive call read as a comparison), partial specializations ordered by their
+  constraints with qualified concept-ids normalized (LWG 3446/3541's indirectly_readable_traits for span), a specialization instantiated
+  during its own selection kept (two __iterator_traits<span, void>), satisfactions over a class still being defined not memoized, a
+  constructor template with too few arguments dropped before its constraints (span's iterator constructor asking is_constructible<span,
+  span> of itself), provisional instances also for a dropped member (CP365's follow-up: _Arg_value's anonymous union), GNU's frexp,
+  toupper, copysign, signbit and isfinite builtins, and an if constexpr's condition the evaluator cannot compute a refusal, not a crash.
+  Considered: the too-few-arguments drop for every call's templates (taken back: a function template's defaults may be on an earlier
+  declaration, `__do_vformat_to`'s, which the pattern does not show; constructor templates only); memoizing doubtful satisfactions not at
+  all (too broad; only those that asked __is_base_of of a class not finished).
