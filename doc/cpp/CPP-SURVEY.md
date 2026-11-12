@@ -7125,3 +7125,86 @@ rerun of `cpp-check-essential` is the same); if its peak passes 3 GiB, `CPPI_CI_
   (cpp0x/attr-no_unique_address1.C, one of codegen's six left, is the first to take).
 - CP377: the full `cpp-check` part's other regression of night 12, runtime/hello.cpp (`undefined function
   basic_string::resize_and_overwrite<to_string's lambda>`): not this branch's (not in the essential list); to diagnose next.
+
+## As built: cpp-s9 (2026-11-12; branch `cpp-s9` from mac/cpp-s8 8c97ced5b with mac/cpp-gatefix 9846aab35 merged)
+
+The user's decisions of 2026-11-12: CP374 (a), CP375 (a), CP376 (a), CP377 (a), in the order CP377, CP376, CP374, CP375, then cpp-s8's
+unrun proofs. cpp-gatefix merged first (its JOURNAL, AGENDA and survey sections beside cpp-s5..s8's: both kept). Light, by night 12's
+rules while its gate ran (one process at a time, each gated in its command on MemAvailable >= 12 GiB and `df /` <= 88%, `GOMEMLIMIT=1200MiB
+GOGC=30 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID any process of this worktree past 1.5 GiB), no clang, g++, gate or
+big lock. Probes in `.tmp/probe/` (gen-batch, then `bin/llvmi run` of the IR where it runs alone).
+
+### CP377 (a): hello.cpp's `resize_and_overwrite<to_string's lambda&>`
+
+Night 12's `cpp-check` failed runtime/hello.cpp (a recorded pass) on ci: `undefined function
+_ZNSt7__cxx1112basic_string...20resize_and_overwriteIRZNS_9to_stringEiEUlPcmE_EEvmT_`. libstdc++ 15's `std::to_string(int)` calls
+`__str.__resize_and_overwrite(n, lambda)`, whose always-inline definition calls `resize_and_overwrite<_Operation&>(__n, __op)`. Probe h1
+(`<string>`'s to_string alone) reproduced it: the call written, the function declared, never defined. Two causes, both general:
+
+- **A declaration's text before its name had its preprocessing directives in it.** basic_string.tcc writes the definition as
+  `basic_string<_CharT, _Traits, _Alloc>::` then `#ifdef __glibcxx_string_resize_and_overwrite` then `resize_and_overwrite(...)` (the
+  `#else` names `__resize_and_overwrite`). sema's `text-before-name` (and `qualifier-before`) read the source between the declaration's
+  start and its name, the `#ifdef` line with it, so `ool-qualifier` found no `Name<...>::` at the end and the definition was taken for a
+  namespace's function template named resize_and_overwrite: the member template kept its in-class pattern, no body. Now the directives'
+  lines (a `#` first on a line, with its continuations) are left out of that text (`strip-directives`).
+- **A member template's specialization of a class named by an explicit instantiation declaration** (`extern template class
+  basic_string<char>`) had been taken for the library's: `extern-inst?` covered every member function of the class. [temp.explicit]/11
+  names only the class's members that are no templates; a member template's specialization is implicitly instantiated where used, and
+  clang emits it linkonce_odr. `extern-inst?` is now false for a specialization (`:tinst`) not itself named by an explicit instantiation.
+
+h1 now defines `resize_and_overwrite<to_string's lambda&>` and its local `_Terminator`'s destructor (2,403 lines of IR, from 2,109).
+The run of hello.cpp on ci itself needs <iostream>'s IR by our route, above 1.5 GiB (as cpp-gatefix found for io.cpp): after the gate.
+
+### CP376 (a): an empty subobject past the data size raises the size
+
+clang's ItaniumRecordLayoutBuilder sets `setSize(max(getSize(), Offset + Size))` for an empty potentially-overlapping field
+(LayoutField's IsOverlappingEmptyField branch) and for every base (LayoutBase), while the data size stays: the next member and the virtual
+bases start at the data size, but the class's size, and its non-virtual size (NonVirtualSize is getSize() after the fields), include the
+empty subobject's byte. `arbace.cpp.abi`'s layout keeps that floor (an empty `[[no_unique_address]]` member placed by a conflict, an empty
+base at 0 or past a conflict, an empty virtual base past the data size), `:nvsize` the larger of the data size and it, `:dsize` the data size. The codegen sample
+`test/cpp/codegen/nua-layout.cpp` checks seven layouts by sizeof and offsetof (two empty members of one type: 2; a char and two:
+2; an empty base and an empty member of its type: 2; two empty members of different types and an int: 4; a non-POD's tail padding reused:
+8, the member at 5; three of one type: 3; a class deriving from an empty class whose size is 2: 2, its member at 0). `bin/llvmi run` of its
+IR exits 0; before the floor for an empty base at 0, S7's size was 1 and the run exited 64 (its bit), the sample's own control.
+
+(cpp-gatefix's note named cpp0x/attr-no_unique_address1.C among "codegen's six left": it is one of the print round trip's six dg-error
+files whose error recovery the forms do not keep (doc/cpp/CPP-SURVEY.md, CP342's list), a compile-only test of attribute diagnostics, no
+layout; not a codegen sample.)
+
+### CP374 (a): pointers in the constant evaluator
+
+sema's `ce-eval` holds a pointer into a string literal or a local array as `{::base B ::i I}` (B the elements' values, a vector, or a local
+array's atom; I the index, 0 to the count): `:decay` of a string literal (its characters and the terminating zeros, as the array type's
+count) or of a local array, `:ptradd` (`+`, `-`, within the array or one past it, else not a constant), a load through `:deref` (a
+subscript, `*p`), `:cmp` (indices of one array; a pointer and a null pointer unequal), `:ptrdiff`, `++`/`--` and `+=`/`-=` on a pointer
+local, `to-bool`; `ce-wrap` keeps a pointer as a pointer type holds it. A lambda's call operator is constexpr when it can be
+([expr.prim.lambda.closure]/5: the evaluator fails anyway on what it cannot compute); a local of an empty class (a captureless lambda's
+closure) holds nothing to read. Probes: e1 (the GNU path of `__literal_encoding_is_unicode<char>` written out: the lambda stripping
+"ISO-10646/", `enc += 3`, `++enc`, `enc[1] == '\0'`) generates with `if constexpr` taking the true branch; e2 (a string's characters summed
+through a pointer loop, 295, an array bound `int g[scan()]` of 1,180 bytes, a local array read through `p[2] - *(p + 1)`, a false
+encoding test) generates and `bin/llvmi run` exits 0.
+
+**f8.cpp's refusal moved, not passed**: from "not a constant: the expression :decay" to "not a constant: a local's initializer (:ctor of
+__s)". The code generator takes clang's predefined macros (cpp/target/host/predefined/clang/), which define `__clang_literal_encoding__`
+and not `__GNUC_EXECUTION_CHARSET_NAME`, so <bits/unicode.h> takes its `#elif defined __clang_literal_encoding__` branch: `string_view
+__s(__enc); if (__s == "UTF-8") return true;`, a class object constructed, copied by value into `operator==`, and string_view's
+`size()`/`compare` run on it, `char_traits<char>::length` and `compare` through `std::__is_constant_evaluated()`, which sema folds to 0
+at analysis (`:is-constant-evaluated`). CP374's text ("string_view's constexpr members then run as they are") assumed the GNU branch: a
+slip of cpp-s8's reading, corrected here. CP378 below is the slice it needs. The "local's initializer" message now names the initializer's
+kind and the variable.
+
+### CP375 (a): default arguments from every declaration
+
+`too-few-args?` counts a parameter as defaulted when any declaration of the template gives it a default argument (the template's `:decls`,
+the declarations its definition replaced, [dcl.fct.default]/4), and an explicit object parameter is the call's object, not an argument.
+call-candidates drops a function template with too few arguments before its deduction and constraints, for every function template (cpp-s8
+had it for constructor templates only); a drop by it stays a sure drop for the checker's count. Probe d1 (`f(T, int b = 2)` declared, then
+defined without the default, called `f(1)`; `g(T, int, int = 1)` beside `g(T)`; a member template's default on its in-class declaration)
+generates and `bin/llvmi run` exits 0; with g's comparison changed in the IR (`== 8`), exit 1.
+
+On the way, a pre-existing gap: **a member template of a class that is no template's specialization, defined outside it**
+(`template<class T> int S::h(T a) {...}`), had become a namespace's own template named h, the member's specialization declared and never
+defined (probe d2: `declare i32 @_ZN1S1hIiEEiT_`). The FunctionTemplateDecl branch now looks for the redeclaration in the scope a plain
+qualifier names (a class's or a namespace's), and sema's `declare-fn!` resolves a qualified declaration's types in the declaring scope when
+that scope lies within the qualifier's (a specialization made in a scope binding T over S's), so T is found. d2 now defines
+`_ZN1S1hIiEEiT_`.
