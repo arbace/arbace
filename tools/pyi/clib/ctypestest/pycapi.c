@@ -44,6 +44,9 @@ struct pyi_type PyGen_Type = { 1, 0 };
 /* Py_Version (Include/pylifecycle.h; queue 269: _testcapi reads it): Py_PACK_FULL_VERSION of 3.14.10 final */
 const unsigned long Py_Version = 0x030E0AF0;
 
+/* _PyByteArray_empty_string (Objects/bytearrayobject.c; queue 270): PyByteArray_AS_STRING of an empty bytearray */
+char _PyByteArray_empty_string[] = "";
+
 /* Python/pyctype.c's tables (queue 270: the full API's Py_ISALNUM and friends read them inline; CPython 3.14.10, the
    PSF's license, LICENSE.md): the flags PY_CTF_LOWER 0x01, UPPER 0x02, DIGIT 0x04, SPACE 0x08, XDIGIT 0x10 of the
    ASCII characters (none above 127), and Py_TOLOWER's and Py_TOUPPER's maps. */
