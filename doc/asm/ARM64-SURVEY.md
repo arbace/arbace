@@ -1748,14 +1748,71 @@ an instruction of that family (18 of 18, by hand; four are controls).
 Found on the way (probed: a C program's `msr fpcr` / `mrs` on this CPU): the M2 keeps FPCR's trap enables, FZ, FZ16, DN and the
 modes (0x07ff9f00 of a64i's 0x07ff9f07) but reads FEAT_AFP's FIZ, AH and NEP (bits 0-2) as zero: it has no FEAT_AFP. a64i keeps
 them (as qemu's max CPU, review 1111 (4)) and refuses an FP instruction under them; a program that sets them would differ from
-this CPU at the `msr` (the lockstep now compares FPCR). No program sets them (ARS61).
+this CPU at the `msr` (the lockstep now compares FPCR). No program sets them (ARS71; proposed by 273 as "ARS61", a number AR10
+had already taken for NEON's slice: renumbered by queue 276).
 
 ### Proposed (ARS44)
 
-Numbering from ARS61.
+Numbering from ARS71 (273 numbered it ARS61, which AR10 had already used; renumbered by queue 276, the next number after AR13's
+ARS70).
 
-- **ARS61 FEAT_AFP's FPCR bits against this CPU.** (a) a64i writes FPCR's bits 0-2 as RES0, as the M2 (no FEAT_AFP) does, and
+- **ARS71 FEAT_AFP's FPCR bits against this CPU.** (a) a64i writes FPCR's bits 0-2 as RES0, as the M2 (no FEAT_AFP) does, and
   drops their refusal (a program that sets them runs as on a CPU without FEAT_AFP); qemu's max CPU, the `--record`'s second judge,
   differs only for such a program; (b) as built: kept as qemu's max CPU keeps them, refused at the next FP instruction, the
   lockstep failing at the `msr` should a program set them. *Recommended: (a)*: the CPU is the eval's reference judge, and on a CPU
   without FEAT_AFP setting the bits is harmless, where a64i's refusal turns a valid program into SIGILL.
+
+## As built: ARS44 (AR10-AR13) and ARS71 (2026-11-12; branch `276-asm-arm64-cpu-rows`, from `1bfe6f6be`: `asm-ar13` `4f9b6a08c` with `273-asm-arm64-ars44` `1aceec4ca`; queue task 276, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max, Linux 6.18), stage 0 and TamaGo's go; every check under
+0.9 GiB; no LLVM or GNU tool. The user's answer (2026-11-12): ARS71 (a) (273's "ARS61", renumbered here: AR10 had used ARS61 for
+NEON's slice, and AR13's proposals end at ARS70). The semantics read again from the Arm ARM (DDI 0487: FPCR's fields and FEAT_AFP's
+FIZ, AH, NEP; FPSR.QC's cumulative definition); no code copied.
+
+- **The CPU's rows and the lockstep for AR10-AR13's programs**: the seven programs 273 did not record (simd-struct, synth-neon-fp-rm,
+  synth-neon-el, synth-neon-el-e, synth-neon-cvt, synth-neon-sat, synth-neon-int) run on this CPU and under the lockstep's sys and
+  step modes with V0-V31, FPSR and FPCR compared (ARS44's), equal on their first run: 4,514 synthetic cases pass on the M2 by their own
+  verdicts (the model's expectations, held to qemu-aarch64 alone until now), 135,872 instructions stepped. No divergence of a64i's or
+  of the model's. The bisection under each program's family fault (simd:x; synth-neon-cvt's fp:x too) names an instruction of that
+  family, 8 of 8 (by hand).
+- **FPSR.QC's stickiness against the M2** (`test/asm/a64i/simd-qc.s`, in the essential subset): the synthetic programs clear FPSR before
+  each case, so QC's survival past the instruction that set it was compared only up to the case's check. simd-qc sets QC by a saturating
+  sqdmulh (MIN·MIN doubled), keeps it through one that does not saturate, through an FP exception's IXC beside it and across write(2),
+  clears it alone by `msr fpsr` with IXC kept, sets it again by uqxtn's narrowing, and does the same with sqabs's scalar (AR13): twelve
+  lines derived by hand, the M2's output equal to them, a64i equal in the step mode (1,899 of 1,912 instructions stepped). The injected
+  fault gains `q` (QC flipped): controls inject-31 (the verdict) and step-8 (caught at a SIMD instruction).
+- **ARS71 (a): FEAT_AFP's FPCR bits RES0** (`go/arbace/a64i/exec.ae`, `fp.ae`, `cpu.ae`, hand-edited as forms): `msr fpcr` keeps
+  0x07ff9f00 (FIZ, AH, NEP dropped, as on the M2, which has no FEAT_AFP); `fpCheck` refuses FZ alone (`:unimplemented fpcr-fz`;
+  ARS59 (b)'s refusal of the FEAT_AFP bits is withdrawn by ARS71 (a), FZ stays refused), `fpcrUnmodelled` removed. `test/asm/a64i/fpcr-afp.s`
+  (in the essential subset): FIZ, AH and NEP written read back as zero; under the write a subnormal input is not flushed (FIZ), a
+  scalar fadd clears the upper lanes (NEP), fneg of the default NaN flips its sign (AH); every writable bit (0x07ff9f07) read back as
+  0x07ff9f00; six lines derived by hand, the M2's output equal to them. The injected fault gains `a` (after `msr fpcr` the written bits
+  0-2 kept: a64i before ARS71 (a)): controls inject-32 (the verdict: FIZ read back as 1 fails it) and step-9 (caught at the `msr`, `fpcr
+  0x7, native 0x0`). A test run on the parent (e9c2e6c14) and the head: the parent's a64i reads back 7 and refuses the next FP
+  instruction (`:unimplemented fpcr-ah fmov.d.x`, SIGILL), the head's runs the program to its stated output. qemu-aarch64's max CPU,
+  the synthetic `--record`'s second judge, keeps the bits; no synthetic program writes them.
+
+| program | cases | cpu | sys (calls) | step (stepped of instructions) |
+|---|---:|---|---:|---:|
+| simd-struct | - | pass | 21 | 3,342 of 3,364 |
+| synth-neon-fp-rm | 1,152 | pass | 1 | 35,739 of 35,741 |
+| synth-neon-el | 568 | pass | 1 | 15,931 of 15,933 |
+| synth-neon-el-e | 142 | pass | 1 | 4,003 of 4,005 |
+| synth-neon-cvt | 1,000 | pass | 1 | 30,547 of 30,549 |
+| synth-neon-sat | 1,092 | pass | 1 | 30,603 of 30,605 |
+| synth-neon-int | 560 | pass | 1 | 15,707 of 15,709 |
+| simd-qc (new) | - | pass | 12 | 1,899 of 1,912 |
+| fpcr-afp (new) | - | pass | 6 | 949 of 956 |
+
+| check (`bin/a64i check`, 1 min 25 s, whole, 0.83 GiB; `--essential`) | before | after |
+|---|---|---|
+| eval, AOT, forms | 97 / 97 | **99 / 99** |
+| cpu, sys, step, loader (the VM's rows) | 90 of 90 each (7 not recorded) | **99 of 99 each** |
+| coverage | 2,507 of 2,507 | 2,507 of 2,507 |
+| controls (`test/asm/controls-a64i.txt`) | 75 | **79**: inject-31, step-8 (QC), inject-32, step-9 (FEAT_AFP) |
+| `--essential` | 77 programs | **79** (with simd-qc and fpcr-afp) |
+| `[:asm-arm64 :eval]` | 313 / 0 / 0 (asm-ar13's record) | **396 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,059 / 0 / 13 | **3,061 / 0 / 13** |
+
+`bin/reap --record`: 49 of 52 cells checked, 0 problems. **crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged, `--judge
+--strict` 0 problems. `test/gate/gate-key-crops-test.bash` passes. The a64i driver still builds for linux/amd64 (`lockstep_other`).
