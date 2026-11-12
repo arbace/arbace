@@ -5037,3 +5037,84 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
   `bin/crops-score --record`, `--judge --strict` 0. No key moves (`arbace/asm/` and `bin/repr-asm` are crop paths or no key's:
   `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
 - Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
+
+## 2026-11-11: AR9, `(asm/unread ...)` for x86-64's dialects, NEON's structure loads and stores and FP lanes in a64i (branch `asm-ar9`, from `mac/next` `4ec952309`)
+
+The user's decisions of 2026-11-11: ARS53 (a) (the structure loads and stores first, then the FP lanes), ARS54 (a), ARS55 (b). On the
+main host, light; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources read again: the Arm ARM (DDI 0487), the
+shared decode and Operation of the AdvSIMD load/store multiple structures and single structure classes, FPCompareEQ/GE/GT, FPMulX,
+FPAbs, FPNeg and the vector FP instructions; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR9".
+
+- ARS54 (a): repr/asm's reader passes `:unread` for x86-64's AT&T and Intel too (`arbace/repr/asm.ae`), so a refused statement inside
+  a conditional block is `(asm/unread TEXT MESSAGE)` in every dialect but Plan 9's. amd64's round trip re-recorded whole: the record is
+  unchanged byte for byte (none of amd64's corpus files refuses a statement inside a conditional block); the six mc-x86 files with
+  conditional blocks' stated encodings unchanged. Alternative not taken: arm64 alone (ARS54 (b)), which left the dialects reading the
+  same text two ways. The object assembler (`arbace/asm/obj.ae`, asm-ax12's at the time) was not touched: its `unread` is AR8's.
+- ARS53 (a): `go/arbace/a64i/simdmem.go` written as Go (decode, the forms' lowering, the element loop), compiled and run from the
+  printed module first, then converted by repr/go's native reader into `simdmem.ae`; the hooks (three operations before `opSIMDEnd`,
+  their names, `simdName`, `lowerSIMD`'s first call, `execSIMD`'s dispatch, `decodeLdSt`'s class at bits 29-27 001 with V,
+  `a64i.ae`'s file list) hand-edited as forms, as AR8 did. Then the FP lanes (ARS53 (b), the user's order) the same way,
+  `simdfp.go`, reusing AR6's scalar functions lane by lane; the compares with zero named apart in the coverage (`v.fcmeq0.4s`).
+- The synthetic programs `synth-neon-ldst` (1,020 cases; a 128-byte buffer and eight registers folded after each case) and
+  `synth-neon-fp` (1,176 cases; the scalar FP model lane by lane): qemu-aarch64 agreed with both models on the first run, a64i (eval and
+  AOT) and the forms check on theirs. Coverage 1,358 → 2,015 of 2,015; a64i 85 → 87 programs; controls verdict-6/7, forms-4/5,
+  inject-18/19.
+- Results: the eval cell 301 → 303, the AOT cell 3,047 → 3,049 / 0 / 13 (99.6%), crops-score unchanged (99.8 / 100.0 / 100.0);
+  `bin/reap` 0 problems; no key moves (crop paths). Proposed ARS56-ARS58.
+- Rule slips: a background run of `bin/a64i check --essential` was still running when `test/asm/a64i/gen.ae` was edited (its synthetic
+  step had already read the file: 14 digests, the recorded ones; rerun after the change, passing); one comparison used `<(...)`
+  process substitution (scratch files, its output used for nothing).
+
+## 2026-11-11: review 1111's assembly findings fixed (branch `review-fix-3`, from `mac/next` `a7916bb2a` with `mac/asm-ar9` `198c25291` merged)
+
+The independent review of the assembly crops' merges into `mac/next` (`.tmp/reviews/1111/REVIEW-asm.md`, read whole; review 1111) found
+nine things, ranked medium to low; each is fixed in a commit of its own with its proof, in the order 2, 8, 1, 3, 6, 7, 9, 4, 5 (2 and 8
+first: (1)'s and (3)'s new verb and controls take the options by keyword and read them with the one parser). `mac/asm-ar9` was merged
+first (its journal entry beside AX12's; no other conflict) so the fixes apply to AR9's reader and a64i's SIMD too. Sources read, from
+the pinned llvm-project 23.1.5 tarball extracted into the worktree's `.tmp/llvm`: `llvm/lib/MC/MCParser/AsmParser.cpp`
+(parseDirectiveRept, instantiateMacroLikeBody, handleMacroEntry, printMacroInstantiations, printError, DiagHandler, parseDirectiveLoc,
+parseDirectiveReloc), `llvm/lib/MC/MCContext.cpp` (reportCommon), `MCAssembler.cpp` (layout's `.reloc` offsets), `MCObjectStreamer.cpp`
+(emitRelocDirective), `MCDwarf.cpp` (tryGetFile), `llvm/lib/Support/Path.cpp` (filename, parent_path), `StringRef.cpp`
+(getAutoSenseRadix, consumeUnsignedInteger, consumeSignedInteger), `llvm/tools/llvm-mc/llvm-mc.cpp` (fillCommandLineSymbols); the test
+`llvm/test/MC/AsmParser/macro-unknown-directive.s` for the instantiation notes' format. Apache-2.0 WITH LLVM-exception (in LICENSE.md);
+no code copied. doc/asm/AMD64-SURVEY.md and doc/asm/ARM64-SURVEY.md, "As built: review 1111's fixes".
+
+- (1) `arbace/asm/obj.ae`: an expansion (macro, `.rept`, `.irp`) runs as one instantiation, AsmParser's `<instantiation>` buffer (the
+  copies concatenated, the body from the line after its head, its items' places in that text), its errors printed as llvm-mc prints them:
+  `<instantiation>:L:C: error:`, the line, the caret, then `note: while in macro instantiation` a level, innermost first; none for an error
+  at the layout (ActiveMacros empty then). A `.rept` with no backslash, which ran at depth 0 and put body-relative offsets on the file,
+  counts toward the nesting limit now. The expected diagnostics of the new tests (`test/asm/obj-err/rept-place`, `rept-notes`,
+  `test/asm/obj-err-arm64/rept-notes`) were derived by hand from those sources, not recorded: the user's approval of hand-recorded llvm-mc
+  objects (AXS92, AXS94) covers those objects only, and diagnostics are not objects. Alternative considered: keeping the invoking
+  item's place (the review's minimal fix, depth+1); it would still not print llvm-mc's place, which is the instantiation's.
+- (2) both arches' `assemble-file` take `[PATH OPTIONS]` by keyword; (8) one `--defsym` value parser, llvm-mc's (checked by hand: `010`
+  8, `0b101` 5, `-0x10` -16, `08` and `12a` refused, 2^63 refused, -2^63 taken), read inside the check's try.
+- (3) a control runs with its reference's corpus and its subject's options; four new controls hold the diagnostics comparison; `control`
+  answers `left` for an unsupported subject against a refusal. Demonstrated by hand: judge-refusal rebound to call any two refusals equal
+  leaves the old `pltoff-vs-err` passing and fails `rept-notes-vs-err`.
+- (6) `.reloc`'s places and per-directive errors (`test/asm/obj-err/reloc-place`); an absolute `.reloc` offset is now the directive's
+  section's, as emitRelocDirective makes it (it was refused); (7) `.file`'s name split by sys::path's rules (eleven names checked by hand
+  against Path.cpp's algorithm: `/name.c` -> `/` and `name.c`, `a//b.c` -> `a`, `a/b/` -> `a/b` and `.`, `//net/x.c` -> `//net/`,
+  `//x.c` and `/` kept whole); (9) arm64's `:insn-text` (a macro defined by an expansion invoked from the file: two `add x0, x0, #1`).
+- (4) a64i's FPCR: `test/asm/a64i/gen.ae` gains FPRound at a mode (an exact rational rounded at the precision or the subnormal quantum,
+  overflow by the mode, tininess before rounding, an exact zero sum's sign under RM=2, DN) and two programs, `synth-fp-d-rm` and
+  `synth-fp-s-rm` (1,168 cases each, FPCR per case from the row). qemu-aarch64 agreed with the model on every case at the first
+  `--record`. a64i failed five FNMSUB cases in double: its big.Float precision (2,400 bits) dropped the product's low part when the
+  addend is near 2^1024 and the product near 2^-2148; raised to 3,328 bits (the span is about 3,172), all pass. `msr fpcr` keeps FIZ, AH
+  and NEP (it masked them off silently) and fpCheck refuses them as it refuses FZ. Alternative considered: modelling AH (FEAT_AFP);
+  proposed instead (ARS59 (b): no compiled program sets it).
+- (5) `synth-neon-e` (every fourth of synth-neon's cases, 443) in the essential subset with three controls; `a64i-essential` +12% (1 min
+  22 s against 1 min 13 s at load 24 on this host; about 41 s quiet). Alternative considered: synth-neon whole (1,769 cases, about four
+  times the increment).
+- Proofs (stage 0, light; one run at a time from 18:45): x86-64 object-check musl 32/32, synthetic 8/8 with obj-err 3/3, mc-x86-obj 49/49,
+  nine controls; arm64 object-check a64-musl 13/13, a64-synthetic 3/3 with obj-err-arm64 2/2, mc-aarch64-obj 110/110, five controls;
+  arm64 object-verdict 2,819 of 2,832 (unchanged), run-check 17/17 with four controls, roundtrip and encode-check ok (unchanged);
+  x86-64 run-check 19/19 with five controls, roundtrip musl mc-asmparser ok, x86i-check whole 43 of 44 (`{:cpuid 2}`, unchanged; 13 min 25 s
+  at load 15-25, 1.3 GiB, before 18:45);
+  `bin/a64i synth --record` 18 programs under qemu; `bin/a64i check --record` whole 90 of 90 (eval, AOT, forms), coverage 2,015 of 2,015;
+  `--essential` 75 of 75, 15 controls. `bin/reap --record` (arm64 eval 303 -> 306, AOT 3,049 -> 3,052 / 0 / 13), `bin/reap` 0 problems;
+  `bin/crops-score --record`, `--judge --strict` 0. No key moves: `bin/arbace-go --gate-key` `9accb085d767...`, the value AX12 recorded
+  for `mac/next` (`arbace/asm/`, `go/arbace/a64i/`, `bin/repr-asm` are crop paths), `test/gate/gate-key-crops-test.bash` passes.
+- Rule slips: one command wrote to `2>/dev/null` (a sourcing of bin/lib/tools.bash, nothing kept); the x86-64 and arm64 object checks
+  ran concurrently with one TMPDIR, so x86-64's musl list lost a file (rerun alone: 32 of 32); one `sleep 1` and one foreground
+  `until ... sleep` wait (stopped); one `git stash list` (read-only, no stash made).

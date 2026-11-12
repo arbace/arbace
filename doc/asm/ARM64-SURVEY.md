@@ -1265,3 +1265,114 @@ Numbering from ARS53. Each with options, the recommended named; none taken.
   (`:unread`). (a) x86-64's AT&T and Intel too (the amd64 round trip's error tests re-recorded); (b) arm64 alone. *Recommended: (a)*.
 - **ARS55 The VM's rows of `synth-neon`.** (a) a queue task: the CPU's runs and the lockstep (V0-V31 and FPSR in the step mode, ARS44's
   extension) of `synth-neon` on the Mac VM; (b) left to the VM's next run of ARS44. *Recommended: (b)*.
+
+## As built: AR9 (2026-11-11; branch `asm-ar9`, from `mac/next` `4ec952309`)
+
+On the main host (amd64, Alpine edge), stage 0 and TamaGo's go, light (every check under 0.9 GiB, the two conversions by repr/go's
+native reader 1.7 GiB each); arm64 programs run by a64i and, for the synthetic programs' `--record`, by qemu-aarch64 11.1.2 user mode
+(the model's second judge); no LLVM or GNU tool. The user's answers (2026-11-11): ARS53 (a) (the structure loads and stores first, then
+the FP lanes), ARS54 (a), ARS55 (b) (the VM's rows of the synthetic NEON programs wait for the Mac's ARS44 task). The semantics read
+again from the Arm ARM (DDI 0487: the shared decode of the AdvSIMD load/store multiple structures and single structure classes and
+their Operation; FPCompareEQ/GE/GT, FPMulX, FPAbs, FPNeg, the vector FP instructions' Operation); no code copied.
+
+- **ARS54 (a): `(asm/unread TEXT MESSAGE)` in every dialect but Plan 9's.** repr/asm's reader (`arbace/repr/asm.ae`, the option
+  `:unread` passed for x86-64's AT&T and Intel as for AArch64's; `arbace.repr.asm.gnu`'s docstring): a statement the reader refuses
+  inside a conditional block is kept as its text (assembled, the shared object assembler's `unread` fails with the message, AR8's).
+  amd64's round trip re-recorded whole (`bin/repr-asm roundtrip --record`: musl, mc-asmparser, mc-x86, 810 rows): the record is
+  unchanged byte for byte, no file of amd64's corpora having a refused statement inside a conditional block; the stated encodings of
+  the six mc-x86 files with conditional blocks (`encode-check --only`) unchanged. Shown by hand: `.ifdef ERR` / `movq %rax, %%rbx` /
+  `.endif` and an Intel `mov rax, rbx rcx` inside `.ifdef` read as `(asm/unread ...)` and print back.
+- **ARS53 (a): the loads and stores of structures in a64i** (`go/arbace/a64i/simdmem.ae`, written as Go and converted by repr/go's
+  native reader; the hooks in `simd.ae`, `decode.ae` and `a64i.ae` hand-edited as forms): LD1-LD4 and ST1-ST4 of multiple structures
+  (LD1's and ST1's lists of one to four registers, every arrangement; `.1d` only for one element), of a single structure (a lane of
+  b, h, s, d), LD1R-LD4R, each with no offset, a post-index immediate (the access's size, held by the lowering) and a post-index
+  register; decoded (the classes at bits 29-27 001 with V, every unallocated encoding `:undefined`), lowered from their forms (the
+  lists by element or as a range, wrapping from v31 to v0) and executed an element at a time (`OpVLDM`, `OpVLDS`, `OpVLDR`; a 64-bit
+  load clears the upper halves, a lane's load keeps the rest, SP's alignment checked as for the other loads). Coverage names
+  `v.ld3.4s.post`, `v.st1x2.16b.off`, `v.ld2.s.postr`, `v.ld4r.1d.off` (510).
+- **ARS53 (b), brought forward: the FP lanes' vector classes** (`go/arbace/a64i/simdfp.ae`, the same way): three same (FP) and
+  two-register miscellaneous (FP) on 4s, 2s and 2d, lane by lane with the scalar FP's functions (AR6's FPProcessNaNs, FPRound in
+  FPCR's modes, FPSR's exceptions accumulated over the lanes, FZ refused): fadd, fsub, fmul, fdiv, fmax, fmin, fmaxnm, fminnm, faddp,
+  fmaxp, fminp, fmaxnmp, fminnmp, fabd, fmulx, fmla, fmls, fcmeq, fcmge, fcmgt, facge, facgt; fabs, fneg, fsqrt, frint[npmzaxi],
+  fcvt[npmza][su], scvtf, ucvtf, the compares with zero (`v.fcmeq0.4s`). Not built (`:unimplemented simd`): half precision, these
+  classes' scalar forms, the estimates (frecpe, frsqrte, frecps, frsqrts), the by-element forms, the fixed-point conversions, fcvtn,
+  fcvtl, fcvtxn, and AR8's list (the polynomial and doubling multiplies, the saturating shifts and narrows).
+- **The synthetic programs** (`test/asm/a64i/gen.ae`): `synth-neon-ldst` (1,020 cases: every structure kind, arrangement and mode
+  twice) over a 128-byte buffer of sixteen words made from the row, v0-v3 and v28-v31 loaded from it, the stub moving x4 by an offset
+  (unaligned accesses included) before the instruction; `check` stores the eight registers after the buffer and folds them into x0, the
+  buffer and x4's distance into x12; the model is the pseudocode's element loop on bytes. `synth-neon-fp` (1,176 cases: each operation
+  and arrangement eight times, lanes from the scalar FP's specials, raw bits and scaled integers) on neon's setup; the model is the
+  scalar FP model lane by lane. `--record` ran both under qemu-aarch64 first: every case agreed with the model on the first run, and
+  a64i (eval and AOT) and the forms check agreed on their first run. Controls verdict-6, forms-4, inject-18 (structures), verdict-7,
+  forms-5, inject-19 (FP lanes). Both run in `--full`'s rotation (ARS46 (b)'s essential subset unchanged).
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval and AOT | 85 / 85 | **87 / 87** (15 synthetic programs, 18,070 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 1,358 of 1,358 claimed executed (simd 705) | **2,015 of 2,015** (simd 1,362: 510 structure names, 147 FP lanes') |
+| controls (`test/asm/controls-a64i.txt`) | 36 | **42** |
+| the eval cell `[:asm-arm64 :eval]` | 301 / 0 / 0 | **303 / 0 / 0** |
+| the AOT cell `[:asm-arm64 :aot]` | 3,047 / 0 / 13 (99.6%) | **3,049 / 0 / 13 (99.6%)** |
+| amd64's round trip (810 rows), read and print cells | unchanged | unchanged (ARS54's re-record byte for byte) |
+
+**crops-score** (arm64 assembly): completeness 99.8 (99.8 without by design), maturity 100.0, independence 100.0, unchanged (the AOT
+cell's 13 deferred are AR8's classes); x86-64 assembly unchanged; `--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells
+checked, 0 problems. The proofs (each once, by hand): arm64's `roundtrip`, `encode-check`, `object-check` (default and mc-aarch64-obj),
+`object-verdict`, `run-check`, `bin/a64i check` (whole, `--record`, 1 min 19 s, 0.45 GiB) and `--essential` (46 s); amd64's `roundtrip`
+(whole, `--record`), `run-check`, `object-check` musl, synthetic and mc-x86-obj, `decode-check obj`, `encode-check --only` the six files
+with conditional blocks; all with their controls. Not rerun here: amd64's whole `encode-check` (3 GiB declared, over this burst's 2.5 GiB)
+and the two table checks (no table or encoder changed). The keys do not move (`test/gate/gate-key-crops-test.bash` passes;
+`bin/arbace-go --gate-key` 9accb085... before and after). Shared files touched: `arbace/repr/asm.ae` and `arbace/repr/asm/gnu.ae`'s
+docstring (repr/asm's reader, ARS54); not the object assembler (`arbace/asm/obj.ae`).
+
+### Proposed (AR9)
+
+Numbering from ARS56. Each with options, the recommended named; none taken.
+
+- **ARS56 NEON's next slice.** (a) the by-element multiplies (mul, mla, mls, s/umull and their FP fmul, fmla, fmls, fmulx by element)
+  and the scalar forms of the FP vector classes (fabd, fcmeq, facge on s and d, the pairwise faddp's scalar), what compiled C's
+  vectorized loops use next; (b) half precision (the FP16 lanes and the scalar half FP, FPCR.FZ16); (c) the saturating shifts and
+  narrows, the doubling and polynomial multiplies, fcvtn/fcvtl. *Recommended: (a)*.
+- **ARS57 A structure load in the essential gate.** The essential subset (ARS46 (b)) runs no structure load or FP lane: the two new
+  synthetic programs rotate in `--full`. (a) a small hand-written program (`test/asm/a64i/simd-struct.s`: ld1-ld4, st1-st4, ld1r, a
+  lane, an FP add and compare, a few seconds) added to the subset; (b) the rotation alone. *Recommended: (a)*.
+- **ARS58 The VM's rows of the new programs.** With ARS55 (b), the Mac's next ARS44 run takes `synth-neon-ldst` and `synth-neon-fp`
+  too (their CPU runs; the lockstep's V0-V31 and FPSR in the step mode). (a) named in that task's brief; (b) a task of their own.
+  *Recommended: (a)*.
+
+## As built: review 1111's fixes (2026-11-11; branch `review-fix-3`, from `mac/next` `a7916bb2a` with `mac/asm-ar9` `198c25291` merged)
+
+The independent review of the assembly crops (`.tmp/reviews/1111/REVIEW-asm.md`) found nine things; the shared object assembler's
+(1-3, 6-8) are in doc/asm/AMD64-SURVEY.md, "As built: review 1111's fixes" (both arches' checks run them; arm64's error files
+`test/asm/obj-err-arm64/`). Here a64i's and arm64's:
+
+- **(4) FPCR's paths.** The synthetic programs `synth-fp-d-rm` and `synth-fp-s-rm` (`test/asm/a64i/gen.ae`, 1,168 cases each) set FPCR
+  per case from the row (RMode 1-3; DN with round to nearest) before fadd, fsub, fmul, fdiv, fmadd, fnmsub, frintx, frinti, fcvt between
+  precisions, scvtf, ucvtf, fmaxnm and fmin, the operands drawn near the largest finite and the smallest normal too. gen.ae's model
+  gains FPRound at a mode: the exact value as a rational of BigIntegers rounded at the type's precision or the subnormal quantum,
+  overflow to infinity or to the largest finite by the mode (OFC, IXC), UFC on tininess before rounding when inexact, an exact zero sum
+  -0 under RM=2 (FPAdd's and FPMulAdd's result_sign), the default NaN under DN. Held to qemu-aarch64 11.1.2 (its default CPU, max) at
+  `--record`: every case equal on the first run (in the double program 74 overflows, 46 to the largest finite, 49 -0, 34 default NaNs,
+  35 underflows). a64i failed 5 of the double program's cases, all FNMSUB: its exact values' precision (2,400 bits) lost an FMA's low
+  part when the addend is near 2^1024 and the product near 2^-2148 (no IXC, a directed rounding not taken); 3,328 bits now, and every
+  case passes. FEAT_AFP's FPCR bits FIZ, AH and NEP (0-2) are kept by `msr fpcr`, as qemu's max CPU keeps them (they were masked off,
+  silently), and refused by fpCheck as FZ is (`:unimplemented fpcr-ah` etc.).
+- **(5) SIMD in the essential gate.** `synth-neon-e`, every fourth of synth-neon's cases (443), is in test/asm/subsets.edn's `:a64i`, with
+  the controls verdict-8, forms-6 and inject-20 (and verdict-9, inject-21, inject-22 for (4)'s programs). `a64i-essential`: 1 min 22 s at
+  this host's load 24 against 1 min 13 s without it at the same load (+12%: about 41 s on a quiet host, where ARS46 measured 36 s).
+- **(9) arm64's `:insn-text`.** A macro defined by another macro's expansion and invoked from the file expands (it was an unknown
+  mnemonic): two `add x0, x0, #1` from an `inner` defined by `outer`.
+
+a64i's check, whole and `--record`: 90 of 90 programs eval and AOT, forms 90 of 90, coverage 2,015 of 2,015; the record's new rows those of
+the three new programs; `test/asm/a64i/synth-digests.edn` 15 -> 18 programs.
+
+### Proposed (review 1111)
+
+Numbering from ARS59.
+
+- **ARS59 FZ and FEAT_AFP in a64i.** FPCR.FZ, FIZ, AH and NEP are refused. (a) model them (flush to zero on inputs and outputs, AH's NaN
+  and min/max rules, NEP's upper lanes) with an rm-like synthetic family under each, qemu the second judge; (b) keep refusing until a
+  program needs them. *Recommended: (b)*: compiled C and Go do not set them.
+- **ARS60 The vector FP under FPCR.** The FP lanes (`synth-neon-fp`) run under FPCR 0 alone; the scalar's rm families do not reach
+  simdfp.ae's rounding. (a) a `neon-fp-rm` family, the same rows' FPCR; (b) as built. *Recommended: (a)*, small.
+
