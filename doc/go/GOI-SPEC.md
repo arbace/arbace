@@ -5108,6 +5108,32 @@ collector stress of slice and pointer loads and stores keeps every value (`GOGC=
 `test/goi/run/go/t/fields.ae` runs each kind (made from Go by repr/go's read, gc's run its `.out`). The harness:
 the worktree's `.tmp/p7/bench/` (kept in the main checkout's `.tmp/p7-goi-fields/`).
 
+## Since v1: night 12's escape lines and `go:norace` (2026-11-12, branch `gf-misc`)
+
+Night 12's `--full` (`goi-check-full`, next `bd6ab3ddd`) failed escape2.go and escape2n.go (`escape2.go:1546: missing error "moved
+to heap: x$"`, recorded pass) and fixedbugs/issue24651a.go (recorded unsupported, now judged: fail in no class). Rerun alone
+(`bin/goi check --only`, two jobs, the gate's executable at the checkout's key) the three fail the same way: not the night's load.
+The empty `.tmp/goi-check/escape-warm.log` is the warm-up's normal output (it writes only a failure; the tags were made, 10:20 to
+10:26 by their files' times), so the warm-up needs no change.
+
+**escape2's line.** A type switch's clause variable is reported by gc at its case clause (noder's writer positions the implicit
+object at the clause, its last type's end); goi's checker places it as go/types does, at the guard's name (`x` of `switch x :=
+v.(type)`). In mode `:lines` the name is a bare symbol without a line, so the checker's `new-local` fell back to the clause's line
+and the report was gc's; since the errorcheck programs run on mode `:full`'s forms (goi-full-forms, merged 2026-11-07, after the
+last pass of 2026-11-05) the name has a line of its own, the switch's, and "moved to heap: x" moved to 1545. `arbace.go.escape`'s
+type switch now sets each clause variable's location to its clause's line, as gc; the checker keeps go/types' position. (Not
+`f41197104`: P7 changed goi's loads and stores, not the analysis.)
+
+**issue24651a.** Under `-race` gc's CanInline refuses a `//go:norace` function ("marked go:norace with -race compilation", after
+`go:noinline`'s reason). `bin/goi check` passes `-race` to the analysis (`--escape-debug {:race true}`) and the function's record
+keeps the pragma (`:go/norace`): the program passes, its record row `:pass`. The standard library's cached tags are made without
+`-race`, as before (the cache's version unchanged: a `-race` program's imports' `go:norace` functions stay inlinable in their tags,
+which no program of the check reaches).
+
+**Proof.** `bin/goi check --list` of the 76 `-m` programs (the checkout's goi evaluated on the gate's executable): 58 pass, 0 fail
+in no class but issue24651a (fixed after), 9 in their classes; then escape2, escape2n, issue24651a and issue24651b: 4 of 4 pass, no
+regression. `arbace/go` is embedded: gate_key moves.
+
 ## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
 
 The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,
