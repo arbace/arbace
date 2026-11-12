@@ -3510,3 +3510,25 @@ HF10-P31 (a): the cells read the own records once they are whole; `check-hsi.edn
 - Checks (one run at a time, under 1.5 GiB): `bin/reap --self-test` ok; `bin/reap` 0 problems, Haskell eval 811 / 63 / 34 and AOT
   137 / 1 / 1 as before (the pack's); `bin/crops-score --judge --strict` 0; `gate-key-crops-test` PASS; `bin/gate --plan` reads the
   table. No key moves (test/ and bin/reap are in no key).
+
+## As built: HF10-P31b (2026-11-12, branch `hs-p31b`, from `mac/hs-p31` cf62b27b4)
+
+The six programs HF10-P31 (a)'s trial of the switch left in no class (samples/Loop, synthetic/runtime-deep, testsuite/codeGen/should_run/
+T16846, testsuite/concurrent/should_run/T21969 and readMVar1, testsuite/ffi/should_run/fptr02), run light (`bin/hsi check --libs own
+--only ID`, ARBACE_MEM_GIB=2, GOMEMLIMIT 1200MiB, one at a time, peak 0.71-0.78 GB; hs-p22's own pools). What fails, for each: Go's
+"runtime: out of memory" in 2 to 9 s (0.82-0.86 GB in use at the `ulimit -v` cap of the light runs), stdout empty, status 2; and none
+of the six runs on the own libraries: Loop, runtime-deep, readMVar1 and fptr02 are eligible but in own-fallback.txt (`:untried-cap`,
+:front :fallback), T16846 and T21969 are `:ineligible` (:libs :pack). So the failure is the pack's run at the light cap, not the
+own libraries'; each passes at 16 GiB in check-hsi.edn.
+
+- Two classes in `test/haskell/divergences-own.edn`, both `:deferred` (the night's whole record at 16 GiB settles them; then they go):
+  `:light-cap` (Loop, runtime-deep: `:result :fail :status 2 :differs [:status :stdout :stderr]`) and `:light-cap-stdout-ok` (the
+  other four: `:differs [:status :stderr]`). No `:message`: a `:libs :pack` line records no `:err`.
+- `bin/lib/hsi/check`'s own judge took only `:libs :own` lines; it takes a `:libs :pack` line too (a line equal to the pack's record in
+  outcome falls through to the pack's classes as before; one that differs, as these do against a passing pack line, needs an own
+  class). Run: Loop "in own class :light-cap", fptr02 "in own class :light-cap-stdout-ok", 0 in no class.
+- The switch tried on a copy of the interim record (first line's mark removed, not committed, restored): `bin/reap` finds no program in
+  no class; its 5 problems are matrix.edn's counts (the cell's numbers move with the own record: Haskell eval deferred 35 against 34
+  recorded and the rest), which the switch's `bin/reap --record` rewrites. On the branch (record as interim): `bin/reap` 0 problems,
+  `bin/crops-score --judge --strict` exit 0.
+- Moves no key of the seed or runtime (`bin/lib/hsi` and test/haskell are crop paths); bin/gate-key not run.

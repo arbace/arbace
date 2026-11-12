@@ -5179,3 +5179,13 @@ problems). Alternative considered: a flag in the cell naming the switch by hand:
 Tried the switch on a copy of the interim record: its 764 programs left 6 in no class, so the night's whole record needs its classes
 first. `bin/reap --self-test` in the reap step; the step's inputs gained `test/haskell/*.edn`. Details: doc/haskell/FRONTEND-SURVEY.md,
 "As built: HF10-P31".
+
+## 2026-11-12: HF10-P31b, the six programs the switch of the own records left in no class (branch `hs-p31b`)
+
+Ran each of samples/Loop, synthetic/runtime-deep, T16846, T21969, readMVar1, fptr02 light (`bin/hsi check --libs own --only ID`, 2 GiB
+cap, GOMEMLIMIT 1200MiB, peak <= 0.78 GB): all fail by Go's out of memory in 2-9 s on the pack (none runs on the own libraries: fallback
+or ineligible), and pass at 16 GiB in check-hsi.edn. Classed by that, in `test/haskell/divergences-own.edn` (`:light-cap`,
+`:light-cap-stdout-ok`, deferred, outcomes by `:differs`); the own judge in `bin/lib/hsi/check` now takes `:libs :pack` lines too, else
+the classes were unreachable for them. Alternative: leave them to the 16 GiB record only (the switch would then still fail at the
+interim); rejected, the task asked for classes before the switch. Switch tried on a copy: no program in no class; matrix.edn counts
+move with the switch's `--record`. Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P31b".
