@@ -11,8 +11,11 @@
     mir                                      c-tests' runner: the status NAME.c.expectrc's (0 without one), the output
                                              against NAME.expect when it has one
     compcert                                 test/c/Makefile: the output against Results/NAME, exit 0
-  The others (benchmarksgame, ci-run, cxgo) have no verdict of their own: gcc's recorded run stays their reference (0.5 in
-  bin/crops-score's judge stage). An entry gcc could not build (:status :no-build) stays gcc's.
+    ci-run                                   CS299 (c): a program whose first line says \"ci-run verdict: exit 0\" checks
+                                             itself (abort on a difference): exit 0, its output not compared; such a
+                                             program needs no gcc run (its entry is added when test/c/ref-gcc15.edn has none)
+  The others (benchmarksgame, cxgo, ci-run's programs without that line) have no verdict of their own: gcc's recorded run
+  stays their reference (0.5 in bin/crops-score's judge stage). An entry gcc could not build (:status :no-build) stays gcc's.
 
   ref ROOTS GCC-REF OUT     OUT: GCC-REF's entries, each with a verdict of its own replaced by it ({:id :status (0 or
                             a status) :stdout (a SHA-256, or :o2 :differ for an output left open) :judge :self :verdict
@@ -79,17 +82,36 @@
         (= c "compcert")
         (let [r (java.io.File. (.getParentFile f) (str "Results/" (base-name f)))]
           (when (.exists r) {:status 0 :stdout (sha256 r) :verdict :results}))
+        ;; CS299 (c): Arbace's own programs that check themselves
+        (= c "ci-run")
+        (when (re-find #"^/\* ci-run verdict: exit 0\." (slurp f)) {:status 0 :stdout :any :verdict :self-check})
         :else nil))))
 
+(defn- self-entry [id v]
+  ;; in arbace.c.run/result's terms (embedded, so unchanged): an output left open is :o2 :differ (the status alone)
+  (merge {:id id :status (:status v)}
+         (if (= :any (:stdout v)) {:stdout "-" :o2 :differ} {:stdout (:stdout v) :o2 :same})
+         {:judge :self :verdict (:verdict v)}))
+
 (defn- merged [roots gref]
-  (let [cs (corpora)]
-    (for [e (read-all gref)]
-      (if-let [v (and (not= :no-build (:status e)) (verdict roots cs (:id e)))]
-        ;; in arbace.c.run/result's terms (embedded, so unchanged): an output left open is :o2 :differ (the status alone)
-        (merge {:id (:id e) :status (:status v)}
-               (if (= :any (:stdout v)) {:stdout "-" :o2 :differ} {:stdout (:stdout v) :o2 :same})
-               {:judge :self :verdict (:verdict v)})
-        (assoc e :judge :gcc)))))
+  (let [cs (corpora)
+        es (read-all gref)
+        have (set (map :id es))
+        ;; CS299 (c): ci-run's programs that check themselves and have no gcc run recorded
+        dir (java.io.File. (str (:checkout roots) "/test/c/run"))
+        extra (for [n (sort (or (seq (.list dir)) []))
+                    :when (str/ends-with? n ".c")
+                    :let [id (str "ci-run/" n)]
+                    :when (not (contains? have id))
+                    :let [v (verdict roots cs id)]
+                    :when v]
+                (self-entry id v))]
+    (concat
+      (for [e es]
+        (if-let [v (and (not= :no-build (:status e)) (verdict roots cs (:id e)))]
+          (self-entry (:id e) v)
+          (assoc e :judge :gcc)))
+      extra)))
 
 (defn- corpus [^String id] (subs id 0 (.indexOf id "/")))
 

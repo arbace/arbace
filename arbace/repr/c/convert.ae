@@ -1297,6 +1297,17 @@
 
 (defn- dirs-at [owner i] (map second (placed-at owner i)))
 
+(defn- take-pragmas!
+  "CS290 (a), CS299 (a): the queued pragmas (the converter's :pragmas, a TreeMap seq -> [[text entry] ...]) before the tokens of
+  seq in (lo, hi], removed from the queue, in order: [[seq text entry] ...]."
+  [^long lo ^long hi]
+  (when-let [^java.util.TreeMap pq (cx :pragmas)]
+    (when (< lo hi)
+      (let [sub (.subMap pq (Long/valueOf lo) false (Long/valueOf hi) true)
+            out (vec (for [[sq ps] sub [t e] ps] [sq t e]))]
+        (.clear sub)
+        out))))
+
 (defn block-items
   "A BlockItemList's items, with the directives placed among them."
   [bil owner]
@@ -1335,14 +1346,11 @@
       (doseq [df (dirs-at owner i)] (.add out [:stmt df]))
       ;; CS290 (a): ci's read (*include-inside*): the re-entered copy's pragmas before this item's first token, as statement-level
       ;; c/pragma forms in the stream's order (gcc's deferred pragmas are tokens: a #pragma pack inside a body takes effect there)
-      (when *include-inside*
-        (when-let [^java.util.ArrayDeque pq (cx :pragmas)]
-          (loop []
-            (when-let [[sq texts] (.peekFirst pq)]
-              (when (<= (long sq) (aget (rng bi) 0))
-                (.pollFirst pq)
-                (doseq [t texts] (.add out [:stmt (list 'c/pragma t)]))
-                (recur))))))
+      ;; CS299 (a): an included file's pragmas too (the Mac VM's report 261: a body of a header's function, a file included inside
+      ;; the body), those after the block's opening brace alone (a file-scope pragma is its unit's, convert's)
+      (when (and *include-inside* lbrace (not= Long/MAX_VALUE (aget (rng bi) 0)))
+        (doseq [[_ t] (take-pragmas! (.-seq ^PTok lbrace) (aget (rng bi) 0))]
+          (.add out [:stmt (list 'c/pragma t)])))
       (when-let [[t j] (.get multi i)] (reset! pending [(.size out) t j]))
       ;; an item an #include inside the body brought in is the directive's; under *include-inside* (ci's read, CS275 (b)) the
       ;; body's own item, as the libc's tables are the declaration's
@@ -1358,6 +1366,10 @@
           :BlockItemFuncDef (.add out [:decl (function-definition (g bi :DeclarationSpecifiers) (g bi :Declarator) nil (g bi :CompoundStatement) nil bi)])))
       (when-let [[from t j] @pending]
         (when (= i j) (mark! from t) (reset! pending nil))))
+    ;; CS299 (a): the pragmas after the block's last item, before its closing brace (a pop at a block's end)
+    (when-let [^PTok rb (and *include-inside* lbrace (g owner :Token2))]
+      (doseq [[_ t] (take-pragmas! (.-seq ^PTok lbrace) (.-seq rb))]
+        (.add out [:stmt (list 'c/pragma t)])))
     (doseq [df (dirs-at owner (count bis))] (.add out [:stmt df]))
     (vec out)))
 
@@ -1920,7 +1932,11 @@
                       :unit-of-off unit-of-off :line-starts (line-starts main-bytes)
                       ;; CS290 (a): the re-entered copy's pragmas, [seq [text ...]] in seq order (the parser's :pragmas), placed by
                       ;; block-items before the item of the first token after them (ci's read)
-                      :pragmas (java.util.ArrayDeque. ^java.util.Collection (vec (:pragmas r)))}]
+                      ;; CS299 (a): a TreeMap seq -> [[text entry] ...], every included file's pragmas (pp's PRAGMAS), taken by range
+                      :pragmas (let [m (java.util.TreeMap.)]
+                                 (doseq [[sq ps] (:pragmas r)]
+                                   (.put m (Long/valueOf (long sq)) (into (or (.get m (Long/valueOf (long sq))) []) ps)))
+                                 m)}]
         (compute-ranges! ranges tree)
         (let [groups (when main-file (compute-groups! (tu-tokens tree)))
               eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))
@@ -1952,8 +1968,36 @@
               ;; judged by its file's first entry, as before)
               first-entry (reduce (fn [m [i e]] (if (or (not= (:directive e) "enter") (contains? m (:path e))) m (assoc m (:path e) i)))
                                   {} (map-indexed vector layer))
-              units (java.util.LinkedHashMap.)]
+              units (java.util.LinkedHashMap.)
+              ;; CS299 (a): the included files' pragmas at file scope (between the items, before the first, after the last; ci's read):
+              ;; each a c/pragma form of the unit of its own entry, in the stream's order among the unit's forms (the checker runs a
+              ;; unit at its #include, so a header's #pragma pack lays out its records and the main file's after it, as gcc's)
+              fpq (java.util.ArrayDeque.
+                    ^java.util.Collection
+                    (if *include-inside*
+                      (let [out (ArrayList.)]
+                        (loop [prev Long/MIN_VALUE es (seq eds)]
+                          (if es
+                            (let [r (rng (first es))]
+                              (if (= Long/MAX_VALUE (aget r 0))
+                                (recur prev (next es))
+                                (do (.addAll out (take-pragmas! prev (aget r 0))) (recur (max prev (aget r 1)) (next es)))))
+                            (.addAll out (take-pragmas! prev Long/MAX_VALUE))))
+                        (vec out))
+                      []))
+              flush-fpq! (fn [^long upto]
+                           (loop []
+                             (when-let [[sq t e] (.peekFirst fpq)]
+                               (when (<= (long sq) upto)
+                                 (.pollFirst fpq)
+                                 (when-let [off (when e (entry-root layer e))]
+                                   (let [^ArrayList a (or (.get hforms off) (let [a (ArrayList.)] (.put hforms off a) a))
+                                         ^ArrayList asys (or (.get hsys off) (let [a (ArrayList.)] (.put hsys off a) a))]
+                                     (.add a (list 'c/pragma t))
+                                     (.add asys (boolean (:system (nth layer e))))))
+                                 (recur)))))]
           (doseq [ed eds :when (not (has-main? ed))]
+            (when-not (= Long/MAX_VALUE (aget (rng ed) 0)) (flush-fpq! (aget (rng ed) 0)))
             (let [file (item-file ed)
                   ;; the main file entered again (pp's *reentry*) is entered by the path it was included by
                   file (if (and file (= file (str main-name "#again"))) main-name file)
@@ -1966,6 +2010,7 @@
                       fs (external ed)]
                   (.addAll a fs)
                   (doseq [_ fs] (.add asys sys))))))
+          (flush-fpq! Long/MAX_VALUE)
           (doseq [e (:layer r) :when (and (= (:directive e) "enter") (= (:from e) main-name))]
             (let [fs (vec (or (.get hforms (:off e)) []))
                   fsys (vec (or (.get hsys (:off e)) []))
