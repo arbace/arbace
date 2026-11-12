@@ -5189,3 +5189,21 @@ or ineligible), and pass at 16 GiB in check-hsi.edn. Classed by that, in `test/h
 the classes were unreachable for them. Alternative: leave them to the 16 GiB record only (the switch would then still fail at the
 interim); rejected, the task asked for classes before the switch. Switch tried on a copy: no program in no class; matrix.edn counts
 move with the switch's `--record`. Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P31b".
+
+## 2026-11-12: HF10-P30 (a), P17's first slice: `--package` beyond base, deepseq, array, stm own (branch `hs-p17`, from `mac/hs-p31b` 3727f3ce4)
+
+The user decided HF10-P30 (a) (P17 as stage 5: the run corpora's packages in dependency order, one GHC window later). Built the part
+that needs no GHC. `lib-check --package P --ifaces own` takes P's dependencies transitively from the pinned tarball's `.cabal` files
+(`arbace.repr.haskell.target` `package-deps`, verb `deps`), their own pools as a list (`LIB_CHECK_DEP_POOL_TAR=TAR:TAR...`, each
+`DEP-pool.tar`), every dependency's reexported modules (also written for lib-stg's per-module runs, which lacked them), Prelude in the
+closure above base, and the package's own source directory (deepseq, array, stm have no `src/`). One elaborator class: DefaultSignatures
+(`$dm` checked at its default signature, an omitting instance passing the extra dictionaries). `bin/hsi check --libs own` gains
+`HSI_OWN_PACKAGES`; its eligibility already read the own pools. Results: deepseq 1 of 1, array 15 of 15, stm 10 of 10 modules
+elaborate, every binder type GHC's pack holds equal (11, 107, 56); interface facts 202 of 211, 388 of 388, 222 of 222; lib-stg 26 of
+26 modules `:ok` without a reference. Recorded `test/haskell/lib-check-own-{deepseq,array,stm}.edn`, controls for lib-check and
+(for the window) lib-stg. Gate: three steps `haskell-lib-own-{deepseq,array,stm}`, each one `:clean-only` part, until the oracle window
+records their -O0 STG and interfaces (the commands in the steps' comment and the survey). Alternatives considered: one parted step for
+all packages (rejected: stm's `:uses` of array's pool and a control per package need steps of their own); reading the dependency order
+from the derived installation tree's records (rejected: it needs the whole extracted tarball, the corpus's tree is enough for the
+`.cabal` files); gating the slice's lib-stg now (rejected: no reference to judge against, it would gate a measure). Details:
+doc/haskell/FRONTEND-SURVEY.md, "As built: P17 (first slice)".

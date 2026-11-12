@@ -3532,3 +3532,124 @@ own libraries'; each passes at 16 GiB in check-hsi.edn.
   recorded and the rest), which the switch's `bin/reap --record` rewrites. On the branch (record as interim): `bin/reap` 0 problems,
   `bin/crops-score --judge --strict` exit 0.
 - Moves no key of the seed or runtime (`bin/lib/hsi` and test/haskell are crop paths); bin/gate-key not run.
+
+## As built: P17 (first slice) (2026-11-12, branch `hs-p17`, from `mac/hs-p31b` 3727f3ce4)
+
+HF10-P30 (a)'s generalisation that needs no GHC, and its first slice deepseq, array, stm, by an agent in night 12 (one run at a time,
+each process under 1.5 GiB with GOMEMLIMIT 1200MiB, MemAvailable at least 12 GiB before each run; stage 0; no GHC, no gate run but
+`--plan`, no network). The plan's six points, as built:
+
+1. **Dependency pools as a list.** `lib-check --package P --ifaces own` (any installation unit above ghc-internal) takes P's
+   dependencies, transitively and in dependency order, from the pinned tarball's `.cabal` files: `arbace.repr.haskell.target`'s new
+   `package-deps` (verb `deps PKG --src TREE`: NAME, CABAL, the number of exposed modules; each visited unit's `.cabal` finalized as
+   the installation's records are, its library `build-depends`; rts, whose `.cabal` the corpus's tree lacks, has no modules). Each
+   dependency that exposes modules needs its own pool: `LIB_CHECK_DEP_POOL_TAR=TAR:TAR...` (each `DEP-pool.tar`, a producer's
+   `LIB_CHECK_POOL_OUT`; the name gives the package), else `LIB_CHECK_DEP_POOLS` as given, else `.tmp`'s `lib-check/own/DEP/pool`; a
+   missing one is an error naming the command. base's run is the same as before (its dependencies rts, ghc-internal, ghc-prim; the one
+   pool ghc-internal's).
+2. **Every dependency's reexports.** The `.cabal` of every dependency gives its `reexported-modules` (base: ghc-internal's none and
+   ghc-prim's 13, as before; later template-haskell's). lib-check's own run also writes them as `OUT/reexports.edn`, and lib-stg's
+   per-module run reads that file beside the plan's own closures (`stg-one`): deepseq's `import GHC.Tuple (Solo (..))`, ghc-prim's
+   reexport, failed in lib-stg alone without it ("no constructor type for nil").
+3. **Prelude.** A package above base imports Prelude implicitly (the native dump does not name it; the renamer adds the import):
+   the driver's closure seeds Prelude when a dependency's pool holds it (not for base, whose pools lack it).
+4. **The package's source directory.** The dumps' tree is the package's (`src/` for ghc-internal, base, containers; the package's
+   root for deepseq, array, stm): lib-check finds the one lowercase top directory, else the root.
+5. **Eligibility from the own pools.** `bin/hsi check --libs own` already decided eligibility by the own interfaces present
+   (`front_eligible` over WORK/own/if, the copies of every own pool, and the pack's reexports whose target is own); the tars
+   (`HSI_OWN_TARS`) may name any number of packages; `HSI_OWN_PACKAGES=deepseq,array,stm` adds the `.tmp` pools and STG of the
+   packages above base to the defaults.
+6. **One step a package** (`test/gate/steps.edn`, after `haskell-lib-own-base`): `haskell-lib-own-deepseq`, `-array`, `-stm`, each
+   lib-check `--judge test/haskell/lib-check-own-P.edn` with its control `lib-check-controls-P.tsv`, then lib-stg as a measure (no
+   `--judge`: no -O0 reference yet), outputs `P-pool.tar` and `P-own.tar`, `:uses` the pools below (stm: array's). Each has the one
+   part `own` with `:clean-only true`: it runs only in the clean run (`GATE_ALL_PARTS=1`) until the oracle window records P's
+   references. The window's commands are in the steps' comment, as the plan wrote them; after it, the part's `:clean-only` goes,
+   lib-stg gains `--judge test/haskell/lib-stg-own-P-results.edn` (recorded with `--record`), and `hsi-check`, `hsi-check-aot` grow by
+   `P-own.tar` (`:uses`, `HSI_OWN_TARS`). The lib-stg controls `lib-stg-controls-P.txt` are written; they run once a reference exists.
+
+**One elaborator class** met on the way: DefaultSignatures (deepseq's `default rnf :: (Generic a, GNFData Zero (Rep a)) => a -> ()`).
+`class-decl!` keeps the default signatures (`:dsigs`), `default-methods` checks `$dm` at its default signature (its context the
+method's own givens: `$dmrnf :: forall a. NFData a => (Generic a, GNFData Zero (Rep a)) => a -> ()`), and an instance that omits the
+method applies `$dm` to the context's dictionaries solved at its head (GHC.Tc.TyCl.Instance's GenericDM). An importing module's
+instance cannot see the default signature (the interface's class carries only `:defaults` names): a program's `instance NFData T`
+without `rnf` over the own deepseq is not handled yet (P17's next item).
+
+**The first slice** (each `lib-check --package P --ifaces own` on the tars of hs-p29's state: ghc-internal's pool, base's pool, and
+for stm array's; judged against GHC's interfaces of the modules the pack haskell-ifaces-ghc-9.14.1 holds):
+
+| package | modules | elaborate | types equal (of modules GHC's pack holds) | interface facts equal | lib-stg | peak, time |
+|---|---:|---:|---|---|---|---|
+| deepseq | 1 | 1 | 11 of 11 binders (1 of 1) | 202 of 211 (8 GHC's only, 12 ours only) | 1 of 1 :ok, no reference | 0.63 GB, 2m13 + 0m28 |
+| array | 15 | 15 | 107 of 107 binders (9 of 9) | 388 of 388 | 15 of 15 :ok, no reference | 0.62 GB, 2m00 + 0m47 |
+| stm | 10 | 10 | 56 of 56 binders (8 of 8) | 222 of 222 (11 ours only) | 10 of 10 :ok, no reference | 0.59 GB, 1m38 + 0m37 |
+
+deepseq's interface differences are two classes, recorded, not fixed: its data family `RnfArgs` (GHC: an open family whose instances
+are eta-reduced, `R:RnfArgsZeroa`; ours: arity 2 with the variable, `R:RnfArgsZero a0`), and five instances over poly-kinded heads
+(`NFData1 (Sum f g)`, `NFData (Product f g a)`, `Fixed`, `Sum`, `Compose`: GHC's heads carry the kind arguments, ours not). Each
+control differs as it must (deepseq's subject against another package's module, Data.Array: deepseq has one module). The records
+`test/haskell/lib-check-own-{deepseq,array,stm}.edn` are whole runs; lib-stg is a measure (every module `:judge :no-reference`): the
+slice's STG is not judged until the window.
+
+**The programs** (`bin/hsi check --libs own`, HSI_OWN_TARS ghc-internal-own.tar and base-own.tar of hs-p29's state with the slice's
+three `P-own.tar`; ARBACE_MEM_GIB 2, one program at a time; `HSI_FRONT_DRY=1` for the counts): eligible for the own front end **551
+→ 582 of 908** (nofib, samples, synthetic, testsuite-core). The 31 new ones run: **24 pass** (23 on the own libraries, among them
+samples/Arrays, Stm, StmBlock, Deadlock, synthetic/runtime-stm, nofib's kahan, paraffins, tchan, simple and 14 of testsuite's
+arr001-arr019; throwto002 on the pack, the front end's `:typecheck-errors`), **6 fail on the own libraries** where the pack passes, in
+no class yet: arr011, arr015 (an uncaught ErrorCall: array's bounds error at -O0 own), arr014, cgrun026 (hsi: "case of an algebraic
+type on void"), T3207 (stdout differs), cgrun044 ("no binding of main::Main/main"). They do not touch the gate today: `hsi-check`
+takes only ghc-internal-own.tar and base-own.tar, so these programs stay `:ineligible` there. When a package's part is gated (after
+the window) they are its prerequisites: each fixed, or classed in `divergences-own.edn` and listed in `own-fallback.txt`.
+samples/StmBlock needs 2 GiB (Go's out of memory at the 1 GiB cap, as hs-p31b's light-cap programs).
+
+**No regression** (`--package base --ifaces own` on the same ghc-internal pool, with the generalised script, the reexports file and
+the DefaultSignatures change): lib-check 241 modules, 236 elaborate, judge "0 worse, missing or unclassed, 1 better" against
+`lib-check-own-base.edn`, control differs (7m45, 0.68 GB); lib-stg 547 of 1,029 bindings equal (recorded 547), "0 worse or missing, 2
+better", control 0 of 23 (4m13, 0.67 GB). Not re-recorded: the records are the night's (P29's night commands re-record base with the
+current elaborator).
+
+### Checks (light, night 12: one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| lib-check `--package deepseq/array/stm --ifaces own --judge` (records, controls) | exit 0 each; the table above |
+| lib-stg `--package deepseq/array/stm --ifaces own` | exit 0; 1, 15, 10 modules `:ok`, `:judge :no-reference` |
+| lib-check and lib-stg `--package base --ifaces own --judge` | exit 0; 0 worse (1 and 2 better) |
+| `bin/hsi check --libs own --corpus samples,synthetic` on ghc-internal-own.tar and base-own.tar alone (the gate's set; the elaborator change) | exit 0; 45 own (44 pass), 18 pack (16 pass), 0 unclassed, the controls fail as they must: as `check-hsi-own.edn` records them; 2m48, 1.07 GB |
+| `bin/hsi check --libs own` on the 31 newly eligible programs | 24 pass, 6 own-only failures (above), arr001's control fails as it must; 3m13, 0.78 GB |
+| `bin/gate --full --plan` | exit 0, no table error; the three steps absent (`:clean-only`); with `GATE_ALL_PARTS=1` they plan "after" their producers (stm after `haskell-lib-own-array.own`) |
+| `gate.crops check ROOT test/gate/steps.edn` | 0 problems |
+| `bash test/gate/crops-test.bash` | ok (42 ok) |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... on `mac/hs-p31b` and on the branch (no key moves: every path a crop path) |
+| `bin/reap --self-test`, `bin/reap` | ok; 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged (Haskell 76.0) |
+
+### Night commands (not run; one at a time, in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+None is needed for the slice (its runs fit the day lane). Once the branch is in `next`: the clean run (`bin/gate --full --clean`, which
+sets `GATE_ALL_PARTS=1`) runs the three steps, about 8 minutes in all under 1 GiB. With P29's night commands 1-2 (ghc-internal's and
+base's pools with the current elaborator), the slice again on those pools, `O=$PWD/.tmp/p29/outs`:
+
+```
+for p in deepseq array stm; do
+  d=$O/haskell-lib-own-$p; mkdir -p $d
+  t=$O/haskell-lib-check-own/ghc-internal-pool.tar:$O/haskell-lib-own-base/base-pool.tar; [ $p = stm ] && t=$t:$O/haskell-lib-own-array/array-pool.tar
+  env LIB_CHECK_DEP_POOL_TAR=$t LIB_CHECK_POOL_OUT=$d bin/repr-haskell lib-check --package $p --ifaces own --judge test/haskell/lib-check-own-$p.edn &&
+  env LIB_STG_OWN_OUT=$d bin/repr-haskell lib-stg --package $p --ifaces own || break
+done   # about 8 minutes, 0.7 GB
+```
+
+### Proposals
+
+- **HF10-P32 The slice in hsi-check before the window.** The slice's lib-check is judged now (GHC's interfaces of 18 of its 26
+  modules in the pack), only its STG waits for the window. (a) **drop the parts' `:clean-only` now (lib-check judged, lib-stg a
+  measure), class or fix the 6 own-only failures above, list the unfixed in `own-fallback.txt`, then add `P-own.tar` to `hsi-check`'s
+  and `hsi-check-aot`'s `:uses` and `HSI_OWN_TARS`: 31 programs more eligible, 24 own passes**; half a day, keys unmoved (crop paths),
+  `--full` grows by about 8 minutes. (b) wait for the window, as the plan wrote (the own STG of the slice is then judged before the
+  programs run on it). *Recommended: (a)*: the runs judge the slice's STG already (23 programs over it pass), and the window's date is
+  open.
+- **HF10-P33 DefaultSignatures across modules.** An instance in another module that omits a method with a default signature (a
+  program's `instance NFData T` over Generic) needs the signature's context; GHC's interface carries it (IfaceClassOp's `GenericDM`),
+  the helper's iface dump does not. (a) **the own interface writes the class's default signatures (`:dsigs`, the method's type in
+  the interface's spelling), the elaborator reads them; the judge compares the class fact without them (GHC's dump lacks them)**;
+  half a day. (b) the helper's iface verb dumps GenericDM too (the oracle window, a pack re-recorded). *Recommended: (a)*, then (b) at
+  the window for the comparison.

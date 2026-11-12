@@ -96,7 +96,13 @@ Six crops are above 90 on all three. What the others still need:
   STG judged and `--run`, its output `ghc-internal-own.tar`), `haskell-lib-own-base` keeps `base-own.tar`, `hsi-check` and
   `hsi-check-aot` run `--libs own` on them (`:uses`), crops-score counts `:libs :own` from `check-hsi-own.edn` (not while it is
   INTERIM: 76.0 stays; projected 80.6, about 85 with the AOT record); P30's plan (P17's packages in dependency order, one GHC
-  window) written; HF10-P31 proposed (the cells read the own records). Next: the night's runs (the survey's night commands), then P17's first slice.
+  window) written; HF10-P31 proposed (the cells read the own records). Next: the night's runs (the survey's night commands).
+  `hs-p17` built P17's first slice (HF10-P30 (a), no GHC): `lib-check --package P --ifaces own` beyond base (dependencies from the
+  `.cabal` files, a list of own pools, every dependency's reexports, Prelude, the package's source directory), DefaultSignatures'
+  `$dm`; deepseq 1/1, array 15/15, stm 10/10 modules elaborate, every binder type GHC's pack holds equal, interface facts 202/211,
+  388/388, 222/222 (`lib-check-own-{deepseq,array,stm}.edn`); lib-stg 26/26 `:ok`, unjudged (no -O0 reference); steps
+  `haskell-lib-own-{deepseq,array,stm}` `:clean-only` until the oracle window (its commands in the steps' comment). Next: the window
+  (P16's and P17's references), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
