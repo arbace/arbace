@@ -6489,7 +6489,27 @@ kept (GTS215's limit for an essential check); the fragment test/gate/crops/cpp.e
 
 ### Proofs
 
-PROOFS-PLACEHOLDER
+Light, by night 12's rules while its gate ran (one process at a time, each at most 1.5 GiB, `GOMEMLIMIT=1200MiB GOGC=30`, a watcher
+killing a process tree whose largest process passed 1.5 GiB; main's stage 0 as `ARBACE_HOST_EXE`; the runtime and cirun copied
+from next's `.tmp`, at the checkout's runtime key: the runtime is clang's route, so the code generator is not in its key):
+
+- `bin/cppi check --only` (with `CPPI_JOBS=1 CPPI_THREADS=1 CPPI_CI_MEMLIMIT=1200MiB`) over the essential list's programs in parts:
+  runtime/deferred.cpp pass (was the fault), runtime/thread-throw.cpp `:threads` as recorded (the thread's terminate in
+  `cx$uncaught`; was the fault at 0x0), samples/vexing.cpp and samples/bitfields.cpp pass with the control
+  `_control/run/bitfields-vs-io` failing as it must, runtime/uncaught.cpp and runtime/ctor-throw.cpp pass, samples/coroutine.cpp pass:
+  7 of 8, peaks 1.0 to 1.45 GB. samples/io.cpp's IR by our route (<iostream>) takes more than 1.5 GiB (killed twice by the watcher,
+  1.58 and 1.60 GB): its run, and the step's exact command (`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only
+  test/cpp/essential-check.txt`) with its peak, wait for the end of night 12's gate (the day's 2.5 GiB): the command below.
+- `bin/cppi codegen-gen`: 154 samples, 150 as recorded and four forms changed as intended (va-args, va-class: clang's va_list;
+  eh-hierarchy: `throw Other()` of an empty class without its byte's store; hdr-string: the allocator's empty base's zero-initialization
+  and copies left out), the two controls failing as they must; recorded (gen-judge `--record` over that whole run). 12 min, 1.18 GB.
+- `bin/reap`: 49 of 52 cells checked, 0 problems; `bin/crops-score --record`, `--judge --strict` exit 0 (no record changed).
+- Keys: the changes are crop paths (`arbace/cpp/*`, `arbace/repr/cpp/*`), test records and the gate's tables:
+  `test/gate/gate-key-crops-test.bash` passes; no gate, runtime or seed key moves.
+
+The command left (after night 12's gate; about 30 min, peak to measure, expected under 3 GiB):
+`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt` under `/usr/bin/time -v` (the gate's
+rerun of `cpp-check-essential` is the same); if its peak passes 3 GiB, `CPPI_CI_MEMLIMIT=1500MiB` or `CPPI_THREADS=1`.
 
 ### Proposed
 
