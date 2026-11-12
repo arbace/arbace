@@ -239,6 +239,10 @@
             bases (vec (:bases c))
             pbi (when (and pb (not pbv)) (first (keep-indexed (fn [i b] (when (and (= (:cls b) (:cls pb)) (not (:virtual b))) i)) bases)))
             em (atom {}) ; the empty subobjects placed so far: {offset #{class-id}} (clang's EmptySubobjectMap)
+            ;; (CP376 (a): the size an empty subobject placed past the data size reaches, offset + its sizeof, which takes no
+            ;; data size: clang's LayoutBase and LayoutField `setSize(max(getSize(), Offset + Size))`, so the class's
+            ;; non-virtual size, and its size, include it while the next member and the virtual bases start at the data size)
+            floor (atom 0)
             order (if pbi (cons pbi (remove #(= % pbi) (range (count bases)))) (range (count bases)))
             [off align boffm]
             (reduce (fn [[off align m] i]
@@ -251,10 +255,11 @@
                           (:virtual b) [off align m]
                           (= i pbi) (do (place! em (class-empties bid 0 false)) [(max (long off) bsz) (max (long align) ba) (assoc m i 0)])
                           (and (empty-class? bid) (can-place? em (class-empties bid 0 false)))
-                          (do (place! em (class-empties bid 0 false)) [off (max (long align) ba) (assoc m i 0)])
+                          (do (place! em (class-empties bid 0 false)) (swap! floor max (long (:size bl))) [off (max (long align) ba) (assoc m i 0)])
                           :else (let [o (loop [o (align-up off ba)]
                                           (if (can-place? em (class-empties bid o false)) o (recur (+ o ba))))]
                                   (place! em (class-empties bid o false))
+                                  (when (empty-class? bid) (swap! floor max (+ o (long (:size bl)))))
                                   [(if (empty-class? bid) off (+ o bsz)) (max (long align) ba) (assoc m i o)]))))
                     [(long start) (long init-align) {}]
                     order)
@@ -289,6 +294,7 @@
                                         o
                                         (recur (if (and (zero? o) (not (zero? dsz))) (align-up dsz a) (+ o a))))))
                                 _ (when-not uni (place! em (field-empties (:ty f) o)))
+                                _ (when emp (swap! floor max (+ o s)))
                                 es (cond emp nil
                                          ovl (let [fl (layout (:id (unq (:ty f))))] (long (if (:pod fl) (:size fl) (:nvsize fl))))
                                          :else s)]
@@ -296,10 +302,11 @@
                              (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
                     [(* 8 (long off)) align [] []]
                     (:fields c))
-            nvsize (quot (+ (long offb) 7) 8)
+            dsize0 (quot (+ (long offb) 7) 8)
+            nvsize (max dsize0 (long @floor))
             ;; alignas on the class (:align-attr, [dcl.align])
             nvalign (max (long align) (long (or (:align-attr c) 1)))
-            pre {:nvsize nvsize :nvalign nvalign :dsize nvsize :fields foffs :bitoffs bitoffs :bases boffs :vptr dyn
+            pre {:nvsize nvsize :nvalign nvalign :dsize dsize0 :fields foffs :bitoffs bitoffs :bases boffs :vptr dyn
                  :pod (pod-for-layout? id) :primary pb}
             _ (update-cls! id assoc :layout (assoc pre :size (max 1 (align-up nvsize nvalign)) :align nvalign :vbases {} :partial true))
             ;; the virtual bases of the complete object: each indirect primary base where its class's subobject is,
@@ -325,9 +332,9 @@
                           (.put vbo v o)
                           (mark! v o)
                           [(if (empty-class? v) ds (+ o (long (:nvsize vl)))) (max (long al) (long (:nvalign vl)))])))
-                    [nvsize nvalign]
+                    [dsize0 nvalign]
                     (vbases id))
-            size (max 1 (align-up dsize align))
+            size (max 1 (align-up (max (long dsize) nvsize) align))
             l (assoc pre :size size :align align :vbases (into {} vbo))]
         ;; (an incomplete class's layout is not kept: its definition may come, G5: basic_ios<char> named before it)
         ;; (kept when the class and every class it holds are finished: a layout computed while a member's class was
