@@ -23,7 +23,9 @@
                                            the tree into OUT (TREE: the tarball extracted, MUSL: musl's tree, LIBFFI: libffi's
                                            release tree, whose ffi.h and ffitarget.h go to sysroot/usr/include, named in SYSTEM)
     compare OUT PACK                       OUT's members against PACK's (the oracle tier: the pack GHC's installation made), byte
-                                           for byte; prints each differing member, exit 1 on a difference"
+                                           for byte; prints each differing member, exit 1 on a difference
+    deps PKG --src TREE                    PKG's library dependencies, transitively, in dependency order: NAME TAB CABAL TAB
+                                           MODULES a line (P17: lib-check --package PKG --ifaces own's pools and reexports)"
   (:require [arbace.repr.haskell.cabal :as cabal]
             [arbace.repr.haskell.configure :as conf]
             [arbace.string :as str])
@@ -113,6 +115,32 @@
                          (.add seen n)))]
       (doseq [n (keys us)] (visit n)))
     (vec seen)))
+
+(defn package-deps
+  "HF10-P30 (a), P17 (doc/haskell/FRONTEND-SURVEY.md, \"As built: P17 (first slice)\"): PKG's library dependencies, transitively
+  (each visited unit's .cabal finalized for the installation as units does, its build-depends the records' depends), each
+  after its own, PKG left out: [{:name :cabal :modules N}] (N its library's exposed modules, the ones an importer names: 0
+  for a unit of reexports alone, ghc-prim's (its Dummy hidden), ghc-bignum's). rts, whose .cabal the corpus's tree lacks, has no Haskell modules: :cabal nil"
+  [^String src ^String repo ^String pkg]
+  (let [facts (rd (str repo "/test/haskell/target/installation.edn"))
+        corpus (corpus-packages repo)
+        vars (merge (project-vars (:ghc facts)) {"Suffix" "" "SourceRoot" "."})
+        load (memoize (fn [name]
+                        (let [f (cabal-file src name facts corpus)]
+                          (cond (.isFile (File. ^String f))
+                                [f (cabal/package (subst-at (slurp f) vars) env
+                                                  (or (get-in facts [:cabal name :flags]) (:cabal-flags (get corpus name)) []))]
+                                (= name "rts") [nil nil]
+                                :else (throw (ex-info (str "package-deps: no " f " (bin/repr-haskell corpus fetch)") {}))))))
+        seen (java.util.LinkedHashSet.)]
+    (when-not (contains? (:units facts) pkg) (throw (ex-info (str "no unit " pkg " in the installation") {})))
+    (letfn [(visit [n] (when (and (contains? (:units facts) n) (not (.contains seen n)))
+                         (when-let [p (second (load n))] (doseq [d (cabal/deps p)] (when (not= d n) (visit d))))
+                         (.add seen n)))]
+      (visit pkg))
+    (vec (for [n seen :when (not= n pkg) :let [[f p] (load n)]]
+           {:name n :cabal f
+            :modules (if p (count (cabal/lib-field p "exposed-modules")) 0)}))))
 
 (defn conf-text
   "A unit's record, as the installation's package database holds it"
@@ -390,4 +418,8 @@
     (case verb
       "derive" (do (derive-tree (first pos) (get opts "--src") (get opts "--musl") repo (get opts "--libffi")) (System/exit 0))
       "compare" (System/exit (if (compare-trees (first pos) (second pos)) 0 1))
-      (do (println "usage: -m arbace.repr.haskell.target derive OUT --src TREE --musl MUSL | compare OUT PACK") (System/exit 2)))))
+      ;; deps PKG --src TREE: PKG's dependencies in dependency order, NAME TAB CABAL TAB MODULES a line (P17)
+      "deps" (do (doseq [{:keys [name cabal modules]} (package-deps (get opts "--src") repo (first pos))]
+                   (println (str name "\t" (or cabal "-") "\t" modules)))
+                 (System/exit 0))
+      (do (println "usage: -m arbace.repr.haskell.target derive OUT --src TREE --musl MUSL | compare OUT PACK | deps PKG --src TREE") (System/exit 2)))))

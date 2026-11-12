@@ -2820,7 +2820,7 @@
         tvs (zipmap tvn (map (fn [x] [:tv x]) names))
         supers (vec (keep (fn [c] (let [p (hs-type tvs c)] (when (= :tc (first p)) [(second p) (nth p 2)])))
                           (let [c (arg d 2)] (when (and (seq? c) (= 'Just (first c))) (lval (second c))))))
-        methods (atom [])
+        methods (atom []) dsigs (atom {})
         ;; the functional dependencies by parameter position, as an interface's are read (add-things!)
         fundeps (vec (for [fd (arg d 6) :let [fv (lval fd)] :when (= 'FunDep (con fv))]
                        [(mapv #(.indexOf ^java.util.List tvn (nm %)) (arg fv 2)) (mapv #(.indexOf ^java.util.List tvn (nm %)) (arg fv 3))]))]
@@ -2836,7 +2836,19 @@
             n (nm nl)]
         (swap! methods conj n)
         (swap! *genv* assoc n [:forall names [[cn (mapv (fn [x] [:tv x]) names)]] mt])))
-    (swap! *classes* assoc cn {:tvs names :supers supers :methods @methods :fundeps fundeps
+    ;; P17 (deepseq's NFData): DefaultSignatures' `default rnf :: (Generic a, GNFData Zero (Rep a)) => a -> ()`, the type its
+    ;; default method is checked at (GHC.Tc.TyCl.Class's tcClassSigs: the default's own signature; $dmrnf :: forall a. NFData a
+    ;; => (Generic a, GNFData Zero (Rep a)) => a -> ()), and an instance that omits the method applies $dm to the context's
+    ;; dictionaries solved at its head (GHC.Tc.TyCl.Instance's tc_default, GenericDM)
+    (doseq [s (arg d 7) :let [sv (lval s)] :when (and (= 'ClassOpSig (con sv)) (true? (arg sv 2)))
+            nl (arg sv 3)]
+      (let [sig (lval (arg sv 4)) body (arg sig 3)
+            own (remove (set tvn) (tv-names-of body))
+            onames (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) own)
+            mt (hs-type (merge tvs (zipmap own (map (fn [x] [:tv x]) onames))) body)
+            mt (if (seq onames) (if (= :forall (first mt)) [:forall onames (nth mt 2) (nth mt 3)] [:forall onames [] mt]) mt)]
+        (swap! dsigs assoc (nm nl) mt)))
+    (swap! *classes* assoc cn {:tvs names :supers supers :methods @methods :fundeps fundeps :dsigs @dsigs
                                :defaults (into {} (for [b (arg d 8) :let [n (bind-name b)] :when n]
                                                     [n (ext-name "var" m (str "$dm" (occ n)))]))
                                :binds (arg d 8)})))
@@ -2911,7 +2923,7 @@
     ;; the class's variables scope over its default methods (ScopedTypeVariables)
     (binding [*scoped-tvs* (merge *scoped-tvs* (into {} (map (fn [x] [x [:tv (str "sk_" x)]]) tvs)))]
       (vec (for [b (:binds info) :let [n (bind-name b)] :when n]
-             (let [ty (subst (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs)) (nth (get @*genv* n) 3))]
+             (let [ty (subst (zipmap tvs (map (fn [x] [:tv (str "sk_" x)]) tvs)) (or (get (:dsigs info) n) (nth (get @*genv* n) 3)))]
                (list 'bind (get (:defaults info) n) (check-method env b ty givens [p]))))))))
 
 ;; a superclass dictionary that applies a dictionary function to the instance's own parameters alone: GHC's simple
@@ -2972,8 +2984,17 @@
                           (if-let [dm (get (:defaults info) mn)]
                             ;; a default method with an INLINE pragma is inlined, as GHC does even at -O0
                             (let [d (if (empty? params) (list 'v dfun) (list 'app (list 'v dfun) params))
-                                  f (or (get @*unfoldings* dm) (list 'v dm))]
-                              (if (empty? params) (list 'app f [d]) (list 'lam params (list 'app f [d]))))
+                                  f (or (get @*unfoldings* dm) (list 'v dm))
+                                  ;; a default signature's context at the instance's head (P17): its dictionaries after the
+                                  ;; class's, solved from the instance's context and the instances
+                                  dsig (get (:dsigs info) mn)
+                                  dctx (when (and dsig (= :forall (first dsig)) (empty? (nth dsig 1))) (nth dsig 2))
+                                  extra (vec (for [[c xs] dctx]
+                                               (let [pr [c (mapv #(subst (zipmap (:tvs info) ts) %) xs)]]
+                                                 (or (solve-pred pr self-givens 0)
+                                                     (do (error! "unsolved: " (pr-str (zonk-pred pr))) (list 'lit "?"))))))
+                                  a (list 'app f (into [d] extra))]
+                              (if (empty? params) a (list 'lam params a)))
                             (list 'app (list 'v (ext-name "var" "GHC.Internal.Control.Exception.Base" "noMethodBindingError")) [(list 'lit (occ mn))]))))]))
         supers (for [[sc sts] (:supers info)]
                  (or (solve-pred [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)] (super-closure (mapv vector ctx params)) 0)
