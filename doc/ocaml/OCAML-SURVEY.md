@@ -3704,3 +3704,11 @@ difference is deterministic (the printer's bytes; the file was not rerun before 
 whole (`roundtrip --text --corpus testsuite`, 7 min 57 s): 1,862 files, 1,801 equal, 61 rejected by the helper (their recorded
 classes), 0 differ, and 1,801 text equal; the records unchanged (they already pass it). No key moves (`arbace/repr/ocaml` is a crop
 path).
+
+**oi-check.run's four timeouts (night 12).** lazy/lazy7, lib-bytes-utf/test, misc/darkening_work and parallel/churn timed out at
+120 s in the night's lanes (144 min of CPU in 53 min of wall). Rerun alone (`bin/oi check --only-list`, the default three jobs, load
+15-25): lazy7 and lib-bytes-utf pass (load); darkening_work and churn time out again. With `OI_TIMEOUT=900`, one job: darkening_work
+138 s (its known gc output), churn 165 s (pass). Both are now in `test/ocaml/oi-slow.edn` and recorded `slow` in `check-oi.edn` and
+`check-oi-native.edn` (the speed class), and the judgment takes a recorded slow program that finishes with its known result as no
+change, as it took one that passes (`test/ocaml/oi_check.ae`'s `near-limit?`). The four again, as the step runs them: 2 pass (lazy7
+92 s, lib-bytes-utf 89 s), darkening_work its known gc (115 s), churn slow; 0 failing, no change, exit 0.

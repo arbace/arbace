@@ -146,6 +146,12 @@ estimate fits before its lane's deadline; a crop's records are committed only wh
    every level (for `--full`'s `java-judge`), Python's records with 0 reap problems.
 3. **Night 12 (11-11/12): `bin/gate --full`**, keyed, with Python's chain for the first time. *Must prove:* the whole
    tree green after the consolidation, so that W's failures can be attributed.
+   Its goi, C, OCaml and si failures rerun alone by day on `gf-misc` (2026-11-12; journal): real and fixed: goi's escape lines on
+   `:full` forms and `go:norace` (escape2, escape2n, issue24651a), ci's compiled calls allocating since CS277 (c-aot's three; plus
+   30 s budgets), repr/ocaml's surrogate pairs (strings.ml); stale: C's three `:item-placement` annotation entries (a5705351b's
+   patch, applied); speed: oi's darkening_work and churn (oi-slow); open: si's ecraven/ack 407 s alone (146 s recorded 10-31, limit 300): a
+   real si slowdown, to bisect over si's commits since 10-31 (record left pass). gate_key moves (arbace/go,
+   go/arbace/ci): wait for W2's end to merge.
 4. **Night 13: W1**, the evaluator's speed alone (`eval-speed-w1` merged by day): the gate, the fixpoint, the bench, W2's
    light checks on the candidate, the keyed `--full`. *Must prove:* G2 = G3 and the gains of
    `doc/go/EVAL-SPEED.md` (on `eval-speed-w1`) with nothing else failing.
