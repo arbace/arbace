@@ -2262,13 +2262,22 @@
 
 (defn- too-few-args?
   "CX12 (the checker): the call's arguments fewer than the function template's parameters that are no pack and have no
-  default argument ([over.match.viable]/2, the deduction's TooFewArguments)."
+  default argument ([over.match.viable]/2, the deduction's TooFewArguments). A parameter's default argument may be on any
+  declaration of the template ([dcl.fct.default]/4: a later declaration adds to the earlier ones'; CP375 (a), cpp-s9:
+  <format>'s `__do_vformat_to`, whose `const locale* = nullptr` is on its forward declaration only, the definition's pattern
+  without it); an explicit object parameter is the call's object, not one of its arguments."
   [t args]
-  (let [pn (filter #(= "ParmVarDecl" (:kind %)) (:inner (:pattern t)))
-        req (count (take-while (fn [p] (and (not (re-find #"\.\.\." (str (get-in p [:type :qualType]))))
-                                            (not-any? #(re-find #"Expr$|Literal$" (str (:kind %))) (:inner p))))
-                               pn))]
-    (< (count args) req)))
+  (let [parms (fn [d] (vec (filter #(= "ParmVarDecl" (:kind %)) (:inner d))))
+        pn (parms (:pattern t))
+        alts (map parms (:decls t))
+        dflt? (fn [p] (some #(re-find #"Expr$|Literal$" (str (:kind %))) (:inner p)))]
+    (if (:isExplicitObjectParameter (first pn))
+      false
+      (let [req (count (take-while (fn [[i p]] (and (not (re-find #"\.\.\." (str (get-in p [:type :qualType]))))
+                                                    (not (dflt? p))
+                                                    (not-any? #(some-> (get % i) dflt?) alts)))
+                                   (map-indexed vector pn)))]
+        (< (count args) req)))))
 
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
@@ -2286,7 +2295,10 @@
                                 ;; (the checker's position stays the call's: the template's signature and pattern are
                                 ;; analyzed while deducing, CX12)
                                 at sema/*at* at-saved (some-> at deref)
-                                fid (do
+                                ;; (CP375 (a): too few arguments, no candidate before its deduction and constraints,
+                                ;; [over.match.viable]/2, for every function template as cpp-s8 did for the constructor ones)
+                                few (too-few-args? t args)
+                                fid (when-not few
                                      (binding [*unsure* u *sure* sr]
                                       (try (let [ex (explicit-args t (:targs-text callee) (or (:targs-scope callee) (:scope ctx)))]
                                              (if-let [a (deduce-call t ex args)]
@@ -2300,7 +2312,7 @@
                                              (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))
                                            (finally (when at (reset! at at-saved))))))
                                 ;; (CX12, the checker: a template whose deduction failed by the algorithm alone)
-                                _ (when-not fid (swap! (if (and (not @u) (or @sr (too-few-args? t args))) sure doubt) inc))]
+                                _ (when-not fid (swap! (if (and (not @u) (or @sr few)) sure doubt) inc))]
                           :when fid]
                       fid))]
       ;; the drops' counts for the checker's diagnostic (sema's resolve-overload*)
@@ -2633,6 +2645,17 @@
     (if-let [q (ool-qualifier (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n))))]
       (ool-member-template! scope n q)
     (let [pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n)))
+          ;; (cpp-s9: a member template of a class that is no template's specialization, or a namespace's function template,
+          ;; defined outside it with a qualifier of plain names, `template<class T> int S::h(T)`: its redeclaration looked
+          ;; for in the class's or namespace's scope, so that the definition gives the template declared there its body;
+          ;; it had been a template of the enclosing namespace's own, the member's call declared and never defined)
+          scope (or (when-let [q (seq (#'sema/qualifier-before pattern))]
+                      (let [es (sema/lookup-qualified scope (vec q))
+                            e (first (filter #(#{:ns :type} (:e %)) es))]
+                        (cond (= :ns (:e e)) (:scope e)
+                              (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e)))
+                              :else nil)))
+                    scope)
           _ (when (= "CXXConversionDecl" (:kind pattern)) (fail :template "a conversion function template"))
           ctor? (= "CXXConstructorDecl" (:kind pattern))
           body? (sema/body-of pattern)
@@ -3484,8 +3507,7 @@
                                        ;; constraints: span's `template<contiguous_iterator _It> span(_It, size_type)` for
                                        ;; is_constructible<span, span> had checked contiguous_iterator<span>, which asks
                                        ;; is_constructible<span, span> again, to the constraints' depth)
-                                       ;; (too-few-args? reads the pattern's own default arguments: a constructor
-                                       ;; template's are on its one declaration, in the class)
+                                       ;; (too-few-args? reads every declaration's default arguments, CP375 (a))
                                        :when (not (too-few-args? (tmpl tid) args))
                                        :let [fid (try (let [a (deduce-call (tmpl tid) [] args)]
                                                         (when (and (nil? a) (System/getenv "CPP_TMPL_TRACE"))
