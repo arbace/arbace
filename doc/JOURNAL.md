@@ -5103,3 +5103,55 @@ lock (`bin/heavy-lock`, one at a time), so that night 13 runs `--full` serially.
   --java-fixtures verify`, `bin/provenance-check`, `bin/reap` 0 problems, `test/gate/gate-key-crops-test.bash`. Not run: the
   Java level steps (the variants change the five classes' behaviour from stubs to code; a java-check record may show a
   test's change at the night's judge).
+## 2026-11-12: night 12's goi, C and OCaml failures, each rerun alone (branch `gf-misc`, from `next` `bd6ab3ddd`)
+
+Night 12's `--full` on next (`bd6ab3ddd`) ran concurrently, filled the disk (02:53-10:07) and ran under load; the triage
+(`.tmp/night12/triage/TRIAGE.md`) left five items to separate load from real. Each was rerun alone first, light (one run at a time,
+each process under 2.5 GiB, the gate's executable `9accb085d767…` or stage 0), the corpora caches copied (repr/go's) or hard-linked
+(godump's, gcc's tree) from next's worktree, read only.
+
+- **goi-check-full (real).** escape2.go and escape2n.go fail alone as on the night (`escape2.go:1546: missing error "moved to heap:
+  x$"`, recorded pass; goi reports 1545). The empty `escape-warm.log` is normal (the warm-up writes only failures; its tags were made).
+  Cause: since goi-full-forms (merged 2026-11-07, after the last pass 2026-11-05) the errorcheck programs run on mode `:full`'s forms,
+  where the type switch's guard name has its own line; the checker places the clause variable there, as go/types does, and gc at the
+  case clause (noder's writer). `arbace.go.escape` now sets each clause variable's location to its clause's line. Not `f41197104`
+  (P7: goi's loads and stores, not the analysis). fixedbugs/issue24651a.go (recorded unsupported, now fail in no class since -race
+  errorcheck tests are judged): gc's CanInline refuses a `//go:norace` function under `-race`; `bin/goi check` passes `-race` to the
+  analysis (`{:race true}`), the record row now `:pass`. Proof: the 76 `-m` programs (`--list`, the checkout's goi evaluated on the
+  gate's executable): 58 pass, 9 in their classes, issue24651a then fixed; escape2, escape2n, issue24651a, issue24651b 4 of 4 pass, no
+  regression. doc/go/GOI-SPEC.md, "Since v1: night 12's escape lines and `go:norace`".
+- **c-annotations (stale record, real differences already classed).** The three files differ alone exactly as on the night. They are
+  the own target's triage's `:item-placement` files; `a5705351b` (2026-11-08) moved their known entries into a night patch for
+  `annotations --record` that was never applied. Applied by hand (the known entries; the three result rows `:known` with the run's
+  details, as `--record` writes them); `bin/ci annotations --only` of the three: 3 known. Not 883115fd0's ms_struct.
+- **c-aot (real, plus the budget's edge).** nbody and spectral-norm time out alone, almabench with the interpreter beside it. The seed's
+  checker and builder (`CI_FRESH=0`) are as slow, so not 883115fd0 or 5728fe111; `perf` showed `mallocgc` at every compiled call:
+  CS277 (a) (`9c3e1eb64`, 2026-11-06) stored `Enter`'s argument slice in the frame (`fr.VArgs`), which made Go's escape analysis move
+  every compiled call's `[]ci.Arg{...}` to the heap. `Enter` and `Call` now keep a copy of the variadic arguments. Same executables
+  before/after, alone at load 25-57: almabench 13.4 -> 11.4 s, nbody 18.4 -> 9.1 s, spectral-norm 24.6 -> 11.1 s; still at the 10 s
+  default's edge, so the three get 30 s in `test/c/check-budget.edn`. Proof: `CI_AOT_NODES=1 bin/ci check --aot --only` of the three:
+  3 of 3 pass compiled (the interpreted runs in `speed`, as before); `bin/ci check [--aot] --only` ci-run/va-arg-pack.c and
+  torture-execute/va-arg-pack-1.c (CS277's): 2 of 2 at both levels. doc/C23-SURVEY.md, "As built: night 12's C failures".
+- **ocaml-roundtrip.testsuite (real).** strings.ml's cuneiform: OC214's `text-bytes` (`d87ed4a2c`) took a low surrogate in
+  U+DC80..U+DCFF after a high one (U+12086 is U+D808 U+DC86) for a byte mark; now only a lone one is a mark. Proof: the file alone 1
+  equal at both levels; the testsuite part whole 1,801 equal, 61 rejected in their classes, 0 differ, 1,801 text equal (7 min 57 s).
+  doc/ocaml/OCAML-SURVEY.md, "As built: night 12's strings.ml".
+- **oi-check.run (two load, two speed).** Alone (`bin/oi check --only-list`, three jobs, load 15-25): lazy/lazy7 and lib-bytes-utf/test
+  pass (92 s, 89 s); misc/darkening_work and parallel/churn time out again; with `OI_TIMEOUT=900` alone 138 s (its known gc output)
+  and 165 s (pass). Both into `test/ocaml/oi-slow.edn`, recorded `slow`, and `oi_check.ae`'s `near-limit?` takes a recorded slow
+  program that finishes with its known result as no change (as one that passes). The four again: 0 failing, no change, exit 0.
+  Alternative considered: OI_TIMEOUT raised for all (every program's budget; rejected: the speed class is per program).
+- **si-ecraven's ack (real, open).** Alone with the step's `SI_TIMEOUT=300` it times out; with 900 it passes in 407 s (recorded 146 s,
+  2026-10-31): si is about 2.8 times slower on ack, not the load. Not fixed: a bisect over si's commits since 10-31 (go/arbace/scm,
+  arbace/scheme; SMR7's self-booted psyntax and SCS's Unicode tables among them) is the next step; the record stays pass.
+- Keys: `arbace/go` and `go/arbace/ci` are embedded, so gate_key moves (and the runtime key with go/); the OCaml, C-record and
+  test/ changes move none. Not mergeable before W2's end (rules of window W).
+- Proofs beside each item's own: `bin/reap --record`, then `bin/reap` 49 of 52 checked, 0 problems (Go eval pass 1,754 -> 1,755;
+  C's annotations item-placement 3 -> 6; OCaml eval speed 4 -> 6, pass 378 -> 377); `bin/crops-score --record`, `--judge --strict` 0
+  problems (Go 97.03 -> 97.05%, OCaml 85.33 -> 85.29%); `bin/ci check --aot --only test/c/essential-aot.txt` 0 failing (CI_JOBS=2,
+  8 min); `bin/oi check --only-list test/ocaml/essential-check.txt` 59 of 59 with its controls and `own-verdicts --check` 0 differ;
+  the four `oi divergences` commands 0 failing; `test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go --gate-key`
+  `9accb085d767…` -> `a6e116c26b54…`. Not run here: goi's essential check and the gate (the gate's build at the new key is the
+  night's).
+- Rule slips: three commands wrote to /dev/null (`2>/dev/null` on two find/grep lines and `>/dev/null` on a `type` test); nothing they
+  produced was kept.
