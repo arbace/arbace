@@ -5116,3 +5116,8 @@ doc/cpp/CPP-SURVEY.md, "As built: cpp-s8".
   Considered: the too-few-arguments drop for every call's templates (taken back: a function template's defaults may be on an earlier
   declaration, `__do_vformat_to`'s, which the pattern does not show; constructor templates only); memoizing doubtful satisfactions not at
   all (too broad; only those that asked __is_base_of of a class not finished).
+- Measured: f8.cpp (<format>'s vformat) from cpp-s7's refusal (55 causes, 111 drops) to `constexpr-if` at `__literal_encoding_is_utf8()`
+  (47 causes, 98 drops); 80 of the 81 run programs' IR byte for byte cpp-s7's (68 generated). From 07:16 UTC `df /` stood at 86-87%, so
+  library.cpp alone, the last part, codegen-gen, the print and dg checks, reap, crops-score and the keys were not run: commands in the
+  survey. Proposed CP374 (pointers into string literals in the constant evaluator, the next refusal) and CP375 (a function template's
+  default arguments from its earlier declarations). Slips: the sysroot unpack's 2.58 GB peak on the first run, one /dev/null.

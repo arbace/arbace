@@ -6982,3 +6982,56 @@ contiguous_range and sized_range of string&. Probe s3 measured 16 iterator conce
 Traces (each environment-gated, off by default): `CPP_CONCEPT_TRACE` (each concept's satisfaction, a requirement's failure, a partial
 ordering's normal forms, the constraint depth's stack), `CPP_INST_TRACE=NAME` (a class template's instances and cache misses),
 `CPP_CONSTEXPR_IF_TRACE`, `CPP_TMPL_TRACE`'s deduction failures of a call's templates and its default arguments' refusals.
+
+### Checked
+
+| Run | Result |
+|---|---|
+| f8.cpp (<format>'s `std::vformat("{}", make_format_args(i))`), the measure on the headers' way | cpp-s7's refusal byte for byte at the start (overload, "no viable function among 1 for 2 arguments" at `_M_reserve`, 55 causes, 111 drops); now **`constexpr-if`: "an if constexpr's condition not evaluated (not a constant: the expression :decay)"**, `if constexpr (__unicode::__literal_encoding_is_utf8())`, **47 causes, 98 drops**. On the way it refused, in order: no member _M_none, no operator() (ranges::copy, twice), no viable function among 0 (vformat_to's `__do_vformat_to`, by this branch's first too-few-arguments rule, taken back), unknown name __builtin_frexpl, __builtin_signbit. Peak 1.03-1.05 GB, 150-220 s |
+| probes s1-s3, c1-c15, r1, prov4, b1 | as above; s1 (span<char> from std::string) generates; `bin/llvmi run` of prov4 and b1 exit 0, b1's control 1 |
+| gen-batch over 80 of the 81 run programs, four parts (`.tmp/G6`), against cpp-s7's G5 | **68 generated, 68 byte for byte**, no program gained or lost; peaks 0.49, 0.43, 0.38, 1.35 GB; part 04 (samples/vexing.cpp) refused by `df /` at 86% |
+
+The first f8 run's busybox peak was 2.58 GB: the sysroot's `xz -d` of this worktree's first gen.sh (cpp-s5 saw it, 2.4 GB), not the
+analysis (the watcher's peak for it 0.99 GB): a slip of the night's 1.5 GiB, reported.
+
+### Stopped at the disk's limit
+
+From 07:16 UTC `df /` was 86-87% and rising (the night's runs, this worktree's `.tmp/` 0.3 GB), so by the rules no further run was
+started: library.cpp alone, part 04, the codegen samples, the print and dg checks, `bin/reap`, crops-score and the keys are left as commands.
+
+### Not run (by the rules; each one process, in this order)
+
+```
+. .tmp/env.sh
+# 1. library.cpp alone (2.4 GB at cpp-s7 in a single process with the 81: the day's 2.5 GiB; 15-25 min): its refusal and drops.tsv
+#    against cpp-s7's (overload at _M_reserve, 48 causes); f8's says constexpr-if at __literal_encoding_is_utf8 is expected
+bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh $PWD/.tmp/lib.tsv
+# 2. the 81's last part (vexing.cpp), then the comparison with cpp-s7's G5 (expected: 69 generated, byte for byte)
+bash .tmp/run.sh .tmp/g6-04.log bash .tmp/gen.sh $PWD/.tmp/g6part.04 && bash .tmp/cmp.sh ../cpp-s7/.tmp/G5 .tmp/G6
+# 3. the codegen samples (14 min, 1.05 GB): 154 as recorded expected (no IR of the 80 moved)
+bin/cppi codegen-gen
+# 4. the native parser's change (a function template's name before its body): cpp-print-essential's command (4.5 min, 1.47 GB)
+bin/repr-cpp roundtrip-corpus gxx-dg-essential --judge own && bin/repr-cpp roundtrip-corpus samples --judge own
+# 5. the checker over sema's changes (hidden friends, partial ordering): the own dg record's sample (11.5 min, 1.03 GB)
+bin/repr-cpp dg --corpus dg-error --front native --sample 10
+# 6. bin/reap; bin/crops-score --record && bin/crops-score --judge --strict; bash test/gate/gate-key-crops-test.bash
+```
+
+Keys: every file the branch changes is under `arbace/cpp/`, `arbace/repr/cpp/` or `doc/` (crop paths, `arbace_crop_paths`): no key
+should move; command 6's test confirms it.
+
+### Proposed (CP374-CP375)
+
+- **CP374: <format>'s literal-encoding checks.** `if constexpr (__unicode::__literal_encoding_is_utf8())` evaluates a consteval function
+  that reads `__GNUC_EXECUTION_CHARSET_NAME` through pointers into a string literal (`__s[0] == 'I'`, `string_view(__s + 3).starts_with(...)`);
+  sema's constant evaluator holds integers and floats only. (a) Pointers into string literals and arrays as evaluator values (decay,
+  subscript, `+`, comparison; string_view's constexpr members then run as they are), a slice of CP362 (b)'s evaluator; (b) fold the two
+  functions by name to the target's answer (UTF-8: true), a library special case. **Recommended: (a)**, the next slice.
+- **CP375: a function template's default arguments from an earlier declaration.** The too-few-arguments test reads the pattern's own
+  parameters; `__do_vformat_to`'s `const locale* = nullptr` is on its forward declaration only, so the test is kept to constructor
+  templates. (a) Merge a redeclaration's default arguments into the template's record (as [dcl.fct.default]/4 does), then drop every
+  template with too few arguments before its deduction and constraints; (b) leave it. **Recommended: (a)**, small.
+
+### Rule slips
+
+The sysroot unpack's 2.58 GB peak (above); one `/dev/null` in a command (a discarded `sed`, then rerun into `.tmp`).
