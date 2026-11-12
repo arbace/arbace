@@ -598,9 +598,151 @@
                         (ap-con (map v* as) (map part (:tys c)) #(apply ap* (v* (:name c)) %))]))]
         [(funbind trav (map clause cons))]))))
 
+;;; Generic, Generic1 (HF10-P34) -----------------------------------------------------------------
+;;; GHC.Tc.Deriv.Generics: mkBindsRep's from and to (from x = M1 (case x of ...), to (M1 x) = case x of ...; the sum's
+;;; L1/R1 nesting genLR_E/genLR_P, the product's :*: by foldBal, each field M1 (K1 g) or its unlifted box UInt...),
+;;; and tc_mkRepTy's representation type for the Rep (Rep1) family instance, in the elaborator's types (kind arguments
+;;; left out, as the interfaces' are read): D1/C1/S1 written as M1 D/C/S (their synonyms' expansions), Rec0 as K1 R.
+
+(def ^:private gen-m "GHC.Internal.Generics")
+(defn- gtc [o] ["ext" "tc" gen-m o])
+(defn- gdc [o] ["ext" "data" gen-m o])
+(defn- gty [o & args] [:tc (gtc o) (vec args)])
+(defn- pdc [m o & args] [:tc ["ext" "data" m o] (vec args)])
+(defn- gty* [o & args] [:tc (gdc o) (vec args)])
+
+;; Note [Generics and unlifted types]: an unlifted field's URec instance, its constructor and its field
+(def ^:private unlifted-reps
+  {"Addr#" ["UAddr" "uAddr#" [:tc ["ext" "tc" "GHC.Internal.Ptr" "Ptr"] [[:tc ["ext" "tc" "GHC.Internal.Tuple" "Unit"] []]]]]
+   "Char#" ["UChar" "uChar#" [:tc ["ext" "tc" "GHC.Internal.Types" "Char"] []]]
+   "Double#" ["UDouble" "uDouble#" [:tc ["ext" "tc" "GHC.Internal.Types" "Double"] []]]
+   "Float#" ["UFloat" "uFloat#" [:tc ["ext" "tc" "GHC.Internal.Types" "Float"] []]]
+   "Int#" ["UInt" "uInt#" [:tc ["ext" "tc" "GHC.Internal.Types" "Int"] []]]
+   "Word#" ["UWord" "uWord#" [:tc ["ext" "tc" "GHC.Internal.Types" "Word"] []]]})
+
+(defn- unlifted-rep [t]
+  (when (and (vector? t) (= :tc (first t)) (= "GHC.Internal.Prim" (nth (second t) 2)) (empty? (nth t 2)))
+    (get unlifted-reps (nth (second t) 3))))
+
+(defn fold-bal
+  "foldBal: a balanced fold, the left half the first (n div 2) elements"
+  [op x xs]
+  (let [xs (vec xs) n (count xs)]
+    (case n 0 x 1 (first xs)
+          (let [nl (quot n 2)] (op (fold-bal op x (subvec xs 0 nl)) (fold-bal op x (subvec xs nl)))))))
+
+(defn- gen-lr
+  "genLR_E / genLR_P: constructor i of n under its L1/R1 nesting, wrap applies a sum constructor"
+  [wrap i n e]
+  (cond (= n 1) e
+        (<= i (quot n 2)) (wrap (gdc "L1") (gen-lr wrap i (quot n 2) e))
+        :else (let [m (quot n 2)] (wrap (gdc "R1") (gen-lr wrap (- i m) (- n m) e)))))
+
+(defn- m1e [e] (ap* (v* (gdc "M1")) e))
+(defn- m1p [p] (cp (gdc "M1") [p]))
+(defn- vpn [n] (L* (list 'VarPat nil (nmx n))))
+
+(defn arg-fold
+  "argTyFold over a field type for Generic1, the last type variable var: :rec0 (not mentioned), :par1 (the variable),
+  [:rec1 f] (f var, f without it), [:comp f inner] (f t, t mentioning it); nil when GHC cannot derive (the variable
+  under a function's argument or as a type constructor's other argument)"
+  [var t]
+  (cond (not (ty-contains? var t)) :rec0
+        (= t [:tv var]) :par1
+        :else (let [[f a] (split-app t)]
+                (cond (or (nil? f) (ty-contains? var f)) nil
+                      (= a [:tv var]) [:rec1 f]
+                      :else (when-let [k (arg-fold var a)] [:comp f k])))))
+
+(defn gen1-ok?
+  "Every field of every constructor folds (canDoGenerics1)"
+  [{:keys [cons var]}]
+  (every? (fn [c] (every? #(some? (arg-fold var %)) (:tys c))) cons))
+
+(defn gen1-functors
+  "The outer type constructors of the compositions (GHC's inferConstraints for Generic1: Functor of each)"
+  [{:keys [cons var]}]
+  (vec (distinct (for [c cons t (:tys c)
+                       f (loop [k (arg-fold var t) out []] (if (and (vector? k) (= :comp (first k))) (recur (nth k 2) (conj out (second k))) out))]
+                   f))))
+
+(defn gen-generic
+  "mkBindsRep: from and to (from1 and to1 when gk is :gen1)"
+  [gk {:keys [cons var]}]
+  (let [x (lname "x") n (count cons)
+        sum-e (fn [c e] (gen-lr (fn [k e] (ap* (v* k) e)) c n e))
+        sum-p (fn [c p] (gen-lr (fn [k p] (cp k [p])) c n p))
+        compose (gv base ".") fmap (gv base "fmap")
+        ;; Gen1's converters (wrapArg_E's and mk1Sum's argTo)
+        to1-conv (fn to1-conv [k] (cond (= k :rec0) (v* ["ext" "fld" gen-m "unK1"]) (= k :par1) (v* ["ext" "fld" gen-m "unPar1"])
+                                        (= :rec1 (first k)) (v* ["ext" "fld" gen-m "unRec1"])
+                                        :else (ap* (v* compose) (ap* (v* fmap) (to1-conv (nth k 2))) (v* ["ext" "fld" gen-m "unComp1"]))))
+        from1-conv (fn from1-conv [k] (cond (= k :rec0) (v* (gdc "K1")) (= k :par1) (v* (gdc "Par1"))
+                                            (= :rec1 (first k)) (v* (gdc "Rec1"))
+                                            :else (ap* (v* compose) (v* (gdc "Comp1")) (ap* (v* fmap) (from1-conv (nth k 2))))))
+        alts (map-indexed
+              (fn [i c]
+                (let [gs (as-names "g" (:arity c)) tys (vec (take (:arity c) (concat (:tys c) (repeat nil))))
+                      wrap-e (fn [g t] (m1e (if (= gk :gen1)
+                                              (ap* (from1-conv (arg-fold var t)) (v* g))
+                                              (ap* (v* (if-let [[k] (unlifted-rep t)] (gdc k) (gdc "K1"))) (v* g)))))
+                      wrap-p (fn [g t] (if (= gk :gen1)
+                                         (m1p (vpn g))
+                                         (m1p (cp (if-let [[k] (unlifted-rep t)] (gdc k) (gdc "K1")) [(vpn g)]))))
+                      prod-e (m1e (fold-bal (fn [a b] (ap* (v* (gdc ":*:")) a b)) (v* (gdc "U1")) (map wrap-e gs tys)))
+                      prod-p (m1p (fold-bal (fn [a b] (cp (gdc ":*:") [a b])) (cp (gdc "U1") []) (map wrap-p gs tys)))
+                      to-rhs (if (= gk :gen1)
+                               (apply ap* (v* (:name c)) (map (fn [g t] (ap* (to1-conv (arg-fold var t)) (v* g))) gs tys))
+                               (apply ap* (v* (:name c)) (map v* gs)))]
+                  [[(con-pat c gs) (sum-e (inc i) prod-e)]
+                   [(sum-p (inc i) prod-p) to-rhs]]))
+              cons)
+        [from-n to-n] (if (= gk :gen1) [(gv gen-m "from1") (gv gen-m "to1")] [(gv gen-m "from") (gv gen-m "to")])]
+    [(funbind from-n [[[(vp "x")] (m1e (hcase (v* x) (map first alts)))]])
+     (funbind to-n [[[(m1p (vp "x"))] (hcase (v* x) (map second alts))]])]))
+
+(defn rep-type
+  "tc_mkRepTy: the representation type of the described type for Rep (gk :gen0) or Rep1 (:gen1), its fields' types
+  as given (tys-of: a constructor's field types); opts :module :unit :name (the data type's) :newtype? :fix"
+  [gk {:keys [cons var fix newtype?]} {:keys [module unit name tys-of]}]
+  (let [bool (fn [b] (pdc types (if b "True" "False")))
+        sel-ty (fn [lbl [su ss]]
+                 (gty* "MetaSel"
+                       (if lbl (pdc "GHC.Internal.Maybe" "Just" [:lit (occ-of lbl)]) (pdc "GHC.Internal.Maybe" "Nothing"))
+                       (pdc gen-m (case su SrcUnpack "SourceUnpack" SrcNoUnpack "SourceNoUnpack" "NoSourceUnpackedness"))
+                       (pdc gen-m (case ss SrcStrict "SourceStrict" SrcLazy "SourceLazy" "NoSourceStrictness"))
+                       ;; the decided strictness as dataConSrcToImplBang at -O0 (bang_opt_unbox_disable): a bang is
+                       ;; strict, never unpacked
+                       (pdc gen-m (if (= ss 'SrcStrict) "DecidedStrict" "DecidedLazy"))))
+        arg-ty (fn arg-ty [t]
+                 (if (= gk :gen1)
+                   (let [conv (fn conv [k t]
+                                (cond (= k :rec0) (gty "K1" (gty "R") t)
+                                      (= k :par1) (gty "Par1")
+                                      (= :rec1 (first k)) (gty "Rec1" (second k))
+                                      :else (gty ":.:" (second k) (conv (nth k 2) (second (split-app t))))))]
+                     (conv (arg-fold var t) t))
+                   (if-let [[_ _ it] (unlifted-rep t)] (gty "URec" it) (gty "K1" (gty "R") t))))
+        con-ty (fn [c]
+                 (let [fx (when (:infix? c) (get fix (:name c) [9 'InfixL]))]
+                   (gty "M1" (gty "C")
+                        (gty* "MetaCons" [:lit (occ-of (:name c))]
+                              (if fx
+                                (gty* "InfixI" (pdc gen-m (case (second fx) InfixR "RightAssociative" InfixN "NotAssociative" "LeftAssociative"))
+                                      [:lit (first fx)])
+                                (pdc gen-m "PrefixI"))
+                              (bool (seq (:labels c))))
+                        (fold-bal (fn [a b] (gty ":*:" a b)) (gty "U1")
+                                  (map (fn [t i] (gty "M1" (gty "S") (sel-ty (get (:labels c) i) (get (:bangs c) i [nil nil])) (arg-ty t)))
+                                       (tys-of c) (range))))))]
+    (gty "M1" (gty "D")
+         (gty* "MetaData" [:lit (occ-of name)] [:lit module] [:lit unit] (bool newtype?))
+         (fold-bal (fn [a b] (gty ":+:" a b)) (gty "V1") (map con-ty cons)))))
+
 (def generators
   {"Eq" gen-eq "Ord" gen-ord "Show" gen-show "Read" gen-read "Enum" gen-enum "Bounded" gen-bounded "Ix" gen-ix
-   "Functor" gen-functor "Foldable" gen-foldable "Traversable" gen-traversable})
+   "Functor" gen-functor "Foldable" gen-foldable "Traversable" gen-traversable
+   "Generic" (partial gen-generic :gen0) "Generic1" (partial gen-generic :gen1)})
 
 (defn derive-binds
   "The bindings of class CLS (its occurrence name) for the described type, or nil"

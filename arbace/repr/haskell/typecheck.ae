@@ -34,6 +34,7 @@
   generative, standalone deriving of imported types, and the instance table indexed by class."
   (:require [arbace.string :as str]
             [arbace.set :as set]
+            [arbace.walk :as walk]
             [arbace.repr.haskell.deriv :as deriv]
             [arbace.repr.haskell.famenv :as fam]
             [arbace.repr.haskell.rename :as rename])
@@ -822,7 +823,15 @@
         (when (and (vector? c) (= 1 (count ts)) (#{"KnownNat" "KnownSymbol" "KnownChar"} (nth c 3)))
           (let [t (zonk (first ts))]
             (case (first t)
-              :lit (list 'lit (pr-str (second t)))
+              ;; HF10-P34: the evidence as GHC's EvLit makes it (GHC.HsToCore.Binds' dsEvTerm of EvNum/EvStr): a Natural
+              ;; (SNat's newtype of it), NS of the word when it fits, a String by mkStringExprFS (SSymbol's)
+              :lit (let [x (second t)]
+                     (cond (and (string? x) (not= "KnownChar" (nth c 3)))
+                           (list 'app (list 'v (ext-name "var" "GHC.Internal.CString" (if (every? #(< 0 (int %) 128) x) "unpackCString#" "unpackCStringUtf8#")))
+                                 [(list 'lit (str (pr-str x) "#"))])
+                           (and (integer? x) (<= 0 x) (< x 18446744073709551616N))
+                           (list 'app (list 'v (ext-name "var" "GHC.Internal.Bignum.Natural" "NS")) [(list 'lit (str x "##"))])
+                           :else (list 'lit (pr-str x))))
               :lit-char (list 'lit (str "'" (char (second t)) "'"))
               nil)))
         (when (and (< depth 30) (seq ts) (not= :mv (first (first ts))) (not= :tv (first (first ts))))
@@ -1859,8 +1868,15 @@
                                     [(occ f) (if (true? (arg fbv 4)) (list 'L nil (list 'VarPat nil (list 'L nil (list 'rn/name x)))) (arg fbv 3))]))]
                (mapv (fn [f] (get given (occ f) (list 'L nil (list 'WildPat nil)))) fields))
              (pat-args details))
-        [env' pcs] (reduce (fn [[env pcs] [p at]] (let [[e c] (tc-pat env p at)] [e (conj pcs c)])) [(ip-pat-env env dpreds dvars) []] (map vector ps ats))]
-    [env' (list 'psyn cn evs dvars pcs)]))
+        [env' pcs] (reduce (fn [[env pcs] [p at]] (let [[e c] (tc-pat env p at)] [e (conj pcs c)])) [(ip-pat-env env dpreds dvars) []] (map vector ps ats))
+        info (get @*patsyns* cn)]
+    ;; HF10-P34: the desugarer has no matcher ($mP) yet and took (psyn ...) for a wildcard, its variables unbound
+    ;; (GHC.Internal.TypeLits' symbolVal: case symbolSing of UnsafeSSymbol x -> x). A synonym of the module whose
+    ;; pattern is known and whose contexts are empty is matched as its pattern, the arguments' patterns in place of its
+    ;; variables (what the matcher's inlined body does)
+    (if (and (:pat info) (seq (:vars info)) (= (count (:vars info)) (count pcs)) (empty? req) (empty? prov))
+      [env' (walk/postwalk-replace (zipmap (:vars info) pcs) (:pat info))]
+      [env' (list 'psyn cn evs dvars pcs)])))
 
 (defn tc-pat [env p t]
   (let [v (lval p)]
@@ -2606,7 +2622,15 @@
         ;; a field's selector: forall tvs. T tvs -> field type; a naughty one (its type mentions an existential) has
         ;; type () (GHC.Tc.TyCl.Utils' mkOneRecordSelector: is_naughty, sel_ty = unitTy)
         (doseq [[f t] fields] (swap! *genv* assoc f (selector-type names res t)))
-        (swap! descs conj {:name cn :arity (count argtys) :labels (mapv first fields) :infix? (= 'InfixCon (con det)) :tys argtys})
+        (swap! descs conj {:name cn :arity (count argtys) :labels (mapv first fields) :infix? (= 'InfixCon (con det)) :tys argtys
+                           ;; HF10-P34: each field's source bang [unpackedness strictness] (HsSrcBang's), Generic's MetaSel
+                           :bangs (vec (for [x (case (con det)
+                                                 PrefixCon (last (rest det))
+                                                 InfixCon [(arg det 1) (arg det 2)]
+                                                 RecCon (mapcat (fn [f] (let [fv (lval f)] (repeat (count (arg fv 2)) (arg fv 3)))) (lval (arg det 1)))
+                                                 [])]
+                                         (let [x (if (and (seq? x) (= 'L (first x))) (nth x 2) x)]
+                                           (if (and (seq? x) (= 'CDF (first x))) [(nth x 2 nil) (nth x 3 nil)] [nil nil]))))})
         (swap! *cons* assoc cn {:arity (+ (count ctx) (count argtys)) :tycon tn :fields (mapv first fields)
                                 :ex (count exnames) :dicts (count ctx)
                                 :tag (inc (.indexOf ^java.util.List (vec (mapcat (fn [c] (con-names (lval c))) conlist)) cn))
@@ -2778,7 +2802,8 @@
                    (when (and (:newtype? (:desc r)) (not (:standalone? r))
                               (or (contains? #{"Eq" "Ord" "Ix" "Bounded"} (occ (:cls r)))
                                   (and (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))
-                                       (not (contains? #{"Show" "Read"} (occ (:cls r))))
+                                       ;; GHC's non_coercible_class: Read, Show, Generic, Generic1 (and Data, Lift) stock
+                                       (not (contains? #{"Show" "Read" "Generic" "Generic1"} (occ (:cls r))))
                                        ;; a class of type constructors by the newtype only when the representation
                                        ;; eta-reduces (GHC.Tc.Deriv's eta_ok: newtype T a = MkT (f a)); Par1 p = Par1 p
                                        ;; does not, and is derived stock
@@ -2790,11 +2815,19 @@
                                                          nil)]
                                              (and (= a x) (not (contains? (tvs-of f) (second x)))))))))
                      (rep-of r))))
+        generic? (fn [r] (and (= "GHC.Internal.Generics" (nmod (:cls r))) (contains? #{"Generic" "Generic1"} (occ (:cls r)))
+                              (not (gnd-of r)) (not (:anyclass? r))))
         ctx-of (fn [r]
                  (cond
                    (:standalone? r) (:ctx r)
                    (:anyclass? r) []
                    (gnd-of r) (vec (simplify-pred [(:cls r) [(gnd-of r)]]))
+                   ;; HF10-P34: GHC.Tc.Deriv.Infer's inferConstraints for Generic: none (the representation needs no
+                   ;; instance); for Generic1 Functor of each composition's outer type
+                   (generic? r) (if (= "Generic1" (occ (:cls r)))
+                                  (vec (distinct (mapcat (fn [f] (simplify-pred [(ext-name "tc" "GHC.Internal.Base" "Functor") [f]]))
+                                                         (deriv/gen1-functors (:desc r)))))
+                                  [])
                    (= "Enum" (occ (:cls r))) []
                    (:ctor? r) (vec (distinct (mapcat (fn [c] (mapcat (fn [t] (mapcat (fn [f] (simplify-pred [(:cls r) [f]]))
                                                                                     (deriv/fun-subtypes (:var (:desc r)) t)))
@@ -2811,12 +2844,28 @@
         (when (some (fn [[d c]] (not= c (get cur d))) ctxs)
           (swap! *insts* (fn [is] (mapv (fn [i] (if-let [c (get ctxs (:dfun i))] (assoc i :ctx c) i)) is)))
           (when (< k 20) (recur (inc k))))))
+    ;; HF10-P34: a derived Generic's (Generic1's) representation, the family instance Rep (T a) = Rep_T a
+    ;; (GHC.Tc.Deriv.Generics' gen_Generic_fam_inst, its axiom Rep_T), in the family table before any binding is typed
+    (doseq [r reqs :when (and (generic? r) (or (= "Generic" (occ (:cls r))) (deriv/gen1-ok? (:desc r))))]
+      (let [gk (if (= "Generic1" (occ (:cls r))) :gen1 :gen0)
+            fam (ext-name "tc" "GHC.Internal.Generics" (if (= gk :gen1) "Rep1" "Rep"))
+            t0 (first (:ts r))
+            sm (if (:standalone? r) (zipmap (:dnames r) (nth t0 2)) {})
+            tn (:tn r) tm (nmod tn)
+            rhs (deriv/rep-type gk (:desc r)
+                                {:module tm :name tn :tys-of (fn [c] (mapv #(subst sm %) (:tys c)))
+                                 :unit (cond (= tm m) *unit* (str/starts-with? tm "GHC.Internal.") "ghc-internal" :else *unit*)})
+            eqn {:tvs (vec (:tvs r)) :lhs [t0] :rhs rhs :ax (str (if (= gk :gen1) "Rep1_" "Rep_") (occ tn))}]
+        (when *own-fam-insts* (swap! *own-fam-insts* conj [fam eqn]))
+        (swap! *families* update fam (fn [old] (update (merge {:flavour :open} old) :eqns (fnil conj []) (dissoc eqn :ax))))))
     (let [ctx-by (into {} (map (fn [i] [(:dfun i) (:ctx i)]) @*insts*))]
       (vec (for [r reqs]
              {:dfun (dfun r) :tvs (:tvs r) :ctx (get ctx-by (dfun r))
               :cls (:cls r) :ts (:ts r)
               :gnd (gnd-of r)
-              :binds (when-not (or (gnd-of r) (:anyclass? r)) (deriv/derive-binds (occ (:cls r)) (:desc r)))})))))
+              :binds (when-not (or (gnd-of r) (:anyclass? r)
+                                   (and (generic? r) (= "Generic1" (occ (:cls r))) (not (deriv/gen1-ok? (:desc r)))))
+                       (deriv/derive-binds (occ (:cls r)) (:desc r)))})))))
 
 (defn- syn-decl! [d]
   (let [tn (nm (arg d 2)) tvn (qtvs-names (arg d 3))
@@ -3076,6 +3125,42 @@
             (when (not= want (zonk got)) (unify (nth ts p) got) (reset! changed true))))))
     @changed))
 
+(defn- may-match?
+  "A family equation's right-hand side p (its variables tvs) could equal t: a variable or a family application in p
+  matches anything, a meta in t too; else the same constructor and arguments"
+  [tvs p t]
+  (let [p (expand (prune p)) t (expand (zonk t))]
+    (cond (and (= :tv (first p)) (contains? tvs (second p))) true
+          (= :mv (first t)) true
+          (and (= :tc (first p)) (some-> *families* deref (get (second p)))) true
+          (and (= :tc (first p)) (= :tc (first t))) (and (= (second p) (second t)) (= (count (nth p 2)) (count (nth t 2)))
+                                                         (every? true? (map #(may-match? tvs %1 %2) (nth p 2) (nth t 2))))
+          (and (= :app (first p)) (= :app (first t))) (and (may-match? tvs (nth p 1) (nth t 1)) (may-match? tvs (nth p 2) (nth t 2)))
+          :else (= p t))))
+
+(defn- invert-families!
+  "HF10-P34: a deferred equality F ?k ~ t (F a type family stuck on a meta, t known) whose family has exactly one
+  equation whose right-hand side could be t: ?k is that equation's left-hand side. The elaborator erases kinds, so the
+  kind GHC knows (SingKind k at fromSing (sing :: Sing nt), nt :: Bool from the instance head 'MetaData n m p nt) is
+  recovered from the result the program wants (DemoteRep k ~ Bool); a program GHC accepted has that k. True when
+  something was unified"
+  []
+  (let [changed (atom false)]
+    (doseq [[a b] @*deferred-eqs*
+            :let [a (zonk a) b (zonk b)
+                  [f t] (cond (stuck-family? a) [a b] (stuck-family? b) [b a])]
+            :when (and f (not (stuck-family? t)) (not= :mv (first (prune t)))
+                       (some #(= :mv (first (prune %))) (nth f 2)))
+            :let [fam (get @*families* (second f))
+                  k (count (nth f 2))
+                  cands (filter (fn [e] (and (= (count (:lhs e)) k) (may-match? (set (:tvs e)) (:rhs e) t))) (:eqns fam))]
+            :when (= 1 (count cands))]
+      (let [e (first cands) m (zipmap (:tvs e) (repeatedly fresh-meta))]
+        (doseq [[x p] (map vector (nth f 2) (:lhs e))] (unify x (subst m p)))
+        (unify a b)
+        (reset! changed true)))
+    @changed))
+
 (defn- default-ip
   "GHC.Tc.Solver's simplifyTop defaulting of the implicit parameters it knows (defaultCallStacks, and
   defaultExceptionContext since 9.10): an unsolved ?callStack :: CallStack (HasCallStack) is the empty stack, an
@@ -3097,6 +3182,7 @@
   "Haskell 2010 §4.3.4: each ambiguous meta of the wanteds whose classes are standard, one numeric, defaulted to the
   first of (Integer, Double) that satisfies them all; then every wanted solved"
   [wanteds]
+  (loop [k 0] (when (and (< k 6) *deferred-eqs* (invert-families!)) (recur (inc k))))
   (loop [k 0] (when (and (< k 4) (improve! wanteds)) (recur (inc k))))
   (let [wanteds (map #(under-givens % identity) wanteds)]
   (let [ws (mapv #(assoc % :pred (zonk-pred (:pred %))) wanteds)
