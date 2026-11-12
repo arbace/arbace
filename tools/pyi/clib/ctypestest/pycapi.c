@@ -40,6 +40,19 @@ struct pyi_type PyProperty_Type = { 1, 0 };
 struct pyi_type PyCapsule_Type = { 1, 0 };
 struct pyi_type PyInstanceMethod_Type = { 1, 0 };
 struct pyi_type PyGen_Type = { 1, 0 };
+/* queue 270b: the type objects the full API's macros name that pyi's runtime has under another module's name (bound by
+   pyctypes to types.FrameType, CodeType, ...): defined here, so every translation unit's PyFrame_Check and friends read
+   the one bound struct (an undefined data symbol is a zeroed static of ci's link, its own per unit: _testcapi's frame.c
+   saw a frame's type differ from its PyFrame_Type) */
+struct pyi_type PyFrame_Type = { 1, 0 };
+struct pyi_type PyCode_Type = { 1, 0 };
+struct pyi_type PyFunction_Type = { 1, 0 };
+struct pyi_type PyMethod_Type = { 1, 0 };
+struct pyi_type PyCell_Type = { 1, 0 };
+struct pyi_type PyCFunction_Type = { 1, 0 };
+struct pyi_type _PyWeakref_RefType = { 1, 0 };
+struct pyi_type _PyWeakref_ProxyType = { 1, 0 };
+struct pyi_type _PyWeakref_CallableProxyType = { 1, 0 };
 
 /* Py_Version (Include/pylifecycle.h; queue 269: _testcapi reads it): Py_PACK_FULL_VERSION of 3.14.10 final */
 const unsigned long Py_Version = 0x030E0AF0;
