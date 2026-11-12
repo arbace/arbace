@@ -5722,3 +5722,28 @@ item is now held by a program of ci-run that checks itself.
 | `bin/ci check --only` the three, ptr-sub-unsigned, pack-in-body, builtin-atomic, ms-struct, nan-to-unsigned | pass 8, the new control differs (210 s, 0.35 GB) |
 | `bin/ci check --corpus ci-run --record` | 22 of 22 pass, three rows added (174 s, 0.43 GB) |
 | `bin/ci check --aot --only` the three | pass 3, compiled = interpreted; rows added by hand in place (267 s, 0.40 GB) |
+| `bin/ci judge-test` | 107 tests, 0 failures (1,052 s, 0.45 GB) |
+| `bin/ci dg --essential` | 92 of 92, the control differs (142 s, 0.38 GB) |
+| `env CI_LINK_CHECK=1 bin/ci check --only test/c/essential-check.txt` (CI_JOBS=1) | 0 failing, ci-run 6 of 6, the four controls differ (1,093 s, 0.61 GB) |
+| `bin/ci check --aot --only test/c/essential-aot.txt` (CI_JOBS=1) | 0 failing, the controls differ (1,046 s, 1.12 GB) |
+| `bin/repr-c check --c23 && bin/ci repl-session` | 59 pass, 3 expected failures, 0 failing; the session passes |
+| `bin/reap --record` | 49 of 52 checked, 0 problems; C eval 2153 to 2156, AOT 2161 to 2164 |
+| `bin/crops-score --record`, `--judge --strict` | C's completeness 0.9598 to 0.9599 (meant 0.9961, independence 0.9970 unchanged); 13 crops, 0 problems |
+
+`bin/reap`'s C eval source checks the record's cases against gcc's reference runs; the three programs have none, so the source names
+them in `:ref-runs-extra` (`test/reap/cells.edn`, read by `test/reap/main.ae`'s `case-problems`).
+
+### Rekeys
+
+Embedded (gate_key, the whole `--full` reruns; the seed's embedded sources too): `arbace/c/build.ae`, `arbace/repr/c/pp.ae`,
+`arbace/repr/c/convert.ae` (`bin/arbace-go --gate-key` 96f51415dfa0... on the branch). The runtime key does not move (arbace/c is
+not in it); `test/gate/gate-key-crops-test.bash` passes. The musl forms' key moves (repr/c): one `bin/ci musl read` (about an hour at
+`CI_THREADS=2`); the forms are the same bytes, nothing of musl's read queues a pragma. The branch's runs used a complete cache of the
+pre-change key copied from another worktree with its key file rewritten (no read here). Outside the keys: `test/c/`, `test/reap/`,
+`test/crops/scores.edn`. So the branch merges after W2 (nights 13-14).
+
+### The night's commands (not run here)
+
+`bin/ci musl read` (or the first C step's ensure; about an hour, under 2 GB at `CI_THREADS=2`), then the gate's C steps; `bin/ci check
+--aot --corpus ci-run` (whole, expected 22 of 22); after the merge, the Python line's `bin/pyi-clib build ctypestest` on next
+(test_generated_data should leave `:ctypes-port`) and pyconfig.h's `__atomic` macros and `bin/pyi-clib`'s `inline=` workaround dropped.

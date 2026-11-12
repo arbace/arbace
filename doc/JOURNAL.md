@@ -5064,3 +5064,9 @@ on next the include and most of the atomics were already there. What was built (
   embedded sources; the runtime key does not (arbace/c is not in it). The musl forms' key moves (repr/c): the forms are the same bytes (musl's
   read binds no `*reentry*`, so nothing is queued); for the runs here a complete cache of the same pre-change key was copied from another
   worktree and its key file rewritten to the branch's (a shortcut, not a read): the night's `bin/ci musl read` makes it for real.
+- Proofs (stage 0, light, one at a time under 1.5 GiB, each started at MemAvailable >= 13 GiB; no gate): `bin/ci run` of the three, before
+  (abort, abort, refused) and after (exit 0); `bin/ci check --corpus ci-run --record` 22 of 22; `--aot --only` the three 3 of 3; `bin/ci
+  judge-test` 107 tests, 0 failures; `bin/ci dg --essential` 92 of 92; `CI_LINK_CHECK=1 bin/ci check --only test/c/essential-check.txt` 0
+  failing, its four controls differ (the new one too); `bin/ci check --aot --only test/c/essential-aot.txt` 0 failing; `bin/repr-c check
+  --c23` and `bin/ci repl-session` pass; `bin/reap --record` 0 problems (C eval 2153 -> 2156, AOT 2161 -> 2164; `test/reap/cells.edn`'s
+  `:ref-runs-extra` names the three, which have no gcc run); `bin/crops-score --record`, `--judge --strict` 0 problems.
