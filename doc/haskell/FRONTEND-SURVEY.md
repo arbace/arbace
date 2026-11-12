@@ -3750,3 +3750,87 @@ the lib-check and lib-stg records with the betters above (`lib-stg-own-results.e
   and `:*:` balanced as GHC splits them, `Rec0`, `U1`, `V1`), `from` and `to`; Generic1 after**; about a day, judged by the
   testsuite's `generics/` programs (eligible once derived) and the interfaces' `R:Rep` instances. (b) leave it to a later slice
   (containers and the run corpora need it little). *Recommended: (a)*, after the window: the generics/ tests are run programs.
+
+## Decided (the user, 2026-11-12: HF10-P34)
+
+HF10-P34 (a), now: DeriveGeneric in the elaborator, Generic (and Generic1 if cheap) derived as GHC.Tc.Deriv.Generics does (the
+`Rep` family instance with its metadata, sums and products balanced as GHC balances them, `from` and `to`), and DeriveAnyClass's
+`deriving (NFData)` over it by P33's default-signature route; judged by the testsuite's `generics/` programs and lib-check where the
+boot libraries derive Generic (0 worse), a program with `deriving (Generic, NFData)` running under hsi on the own path.
+
+## As built: HF10-P34 (2026-11-12, branch `hs-p34`, from `mac/hs-p32` 506aaf7f5)
+
+By an agent during the day of 2026-11-12 under night 12's limits (night 12's gate running: one run at a time, each process under
+1.5 GiB, GOMEMLIMIT 1000MiB, MemAvailable at least 12 GiB before each run; stage 0; no GHC, no gate run but `--plan`, no network).
+
+**Generic and Generic1 derived** (`deriv.ae`'s `gen-generic` and `rep-type`, ported from GHC 9.14.1's
+`compiler/GHC/Tc/Deriv/Generics.hs`; `typecheck.ae`'s `derive-all!`):
+
+- `from x = M1 (case x of ...)`, `to (M1 x) = case x of ...` (mkBindsRep's factored outer M1), each constructor under its
+  `L1`/`R1` nesting (genLR_E, genLR_P: the left half `n div 2`), its fields by `:*:` balanced as foldBal (`U1` when none), each
+  field `M1 (K1 g)`, an unlifted one's URec box (`UInt`, `UChar`, `UDouble`, `UFloat`, `UWord`, `UAddr`); `from1`/`to1` by
+  argTyFold (`Par1`, `Rec1 f`, `f :.: ...` with `Comp1 . fmap` and `fmap ... . unComp1`, `Rec0` else). Locals `g1...` and `x` as
+  GHC names them.
+- The family instance `Rep (T a) = ...` (`Rep1` for Generic1), axiom `Rep_T` (`Rep1_T`) as GHC's, entered in the module's family
+  table before any binding is typed and written to the own interface (`*own-fam-insts*`): `D1`/`C1`/`S1`/`Rec0` as their
+  expansions `M1 D`/`M1 C`/`M1 S`/`K1 R` (kind arguments left out, as the elaborator reads every interface); `MetaData` with the type's
+  name, module, package (the module's unit, an imported type's from its interface's `hsiface/module`) and newtype flag;
+  `MetaCons` with `PrefixI` or `InfixI` of the constructor's fixity (the module's, else its interface's `hsiface/fixities`, `(:)`'s
+  `infixr 5` wired) and the record flag; `MetaSel` with `'Just "label"` or `'Nothing`, the source unpackedness and strictness from
+  the field's bang (the constructor descriptions carry `:bangs` now) and the decided strictness as at -O0 (a bang `DecidedStrict`,
+  never unpacked: the programs' level; the libraries' interfaces, made at -O2, say `DecidedUnpack` for small strict fields, HF10-P34
+  (b) below). The equation's variables are renamed apart from the head's (famenv's matching substitutes to a fixed point).
+- The context: none for Generic, `Functor f` of each composition's outer type for Generic1 (inferConstraints); Generic and
+  Generic1 never by the newtype (GHC's non-coercible classes); a Generic1 GHC cannot derive (the variable under a function's argument)
+  keeps the old empty instance.
+- DeriveAnyClass's context is inferred from the class's default signatures' contexts at the head, simplified by the instances to
+  constraints on variables (inferConstraintsAnyclass; `simplify-pred*`, every argument matched): `data W a = ... deriving (Generic,
+  NFData)` is `instance NFData a => NFData (W a)` (it was `NFData (W a)` with no context, its `$dm` wanting `NFData a` unsolved).
+
+**What the generics programs found beyond deriving** (each fixed; each one of ghc-internal's own STG every program shares):
+
+| fault | effect | fix |
+|---|---|---|
+| a pattern-synonym pattern (`psyn`) was never desugared: the desugarer took it for a wildcard, its variables unbound | ghc-internal's `symbolVal _ = case symbolSing of UnsafeSSymbol x -> x` compiled to a free `x`: `datatypeName`, `selName`, every `symbolVal` | a synonym of the module whose pattern is known and whose contexts are empty is matched as its pattern, the arguments' patterns in its variables' places (the matcher's inlined body); others as before (`$mP` not built) |
+| `SingKind k` unsolved: the elaborator erases kinds, so `fromSing (sing :: Sing nt)` in `instance (...) => Datatype ('MetaData n m p nt)` has no `k` | GHC.Internal.Generics had 9 unsolved `SingKind` (isNewtype, conFixity, conIsRecord, selName, the three selectors' strictness) | `invert-families!`: a deferred `F ?k ~ t` whose family has one equation whose right-hand side can be `t` sets `?k` to its left-hand side (`DemoteRep k ~ Bool`: `k = Bool`), and `F ?k ~ F x` (both stuck) sets `?k = x` when `?k` is in an unsolved wanted (`SingKind (Maybe a)`'s `Just (fromSing a)`); tried when a wanted with a meta is unsolved under its givens and before defaulting. A program GHC accepted has that `k` |
+| `KnownNat`/`KnownSymbol` evidence was `(lit "5")` / a lifted string literal | tostg: "literal not handled: 5"; `$fSingIInfixI`'s `KnownNat` | GHC's EvLit: `NS 5##` (SNat's Natural), `unpackCString# "s"#` (SSymbol's String) |
+| every `data instance Sing (a :: K)` was the representation tycon `R:Sing` | the last instance's constructors replaced the others' (`SFalse` unbound: `isNewtype`) | a pattern with a kind signature spelled as GHC's newFamInstTyConName (`R:SingBoola`, as GHC's own names), and a name already taken gets `0`, `1`, ... |
+| a standalone `deriving instance Monoid c => Monoid (K1 i c p)` on a newtype took the class's defaults | `mempty = mconcat []`, `mconcat = foldr mappend mempty`: a loop (T19819's `Generically T` ran out of memory) | standalone deriving of a class no stock deriving knows, on a newtype with GeneralizedNewtypeDeriving, by the newtype (classes of types only: `Foldable1 (Alt f)` in base's Data.Foldable1 stays as before, else 48 errors) |
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+TABLE-LIBS
+
+**The programs.** The testsuite's `generics/` run tests are in the `:testsuite` corpus's run list (`test/haskell/eval/testsuite-run.edn`:
+GFullyStrict, GenNewtype, T10030, T11358, T19819 `compile_and_run`; T5462Yes1, T5462Yes2 `multimod_compile_and_run` with C files,
+`req_c`), but not in `:testsuite-core`'s directories, so not in `bin/hsi check`'s plan, and GHC's runs of them are not recorded
+(`test/haskell/ref-ghc914.edn`, haskell-stg-progs: none). The five single-module ones were run by hand (`.tmp/p34/gen-run.sh` in the
+worktree, not committed: the native front end on the own interfaces of the last `bin/hsi check --libs own`, hsi on the own
+libraries) and judged by their own verdict, the testsuite's golden `NAME.stdout` (exit 0, stdout equal); T5462Yes1/2 are ineligible
+(other modules, C). No program of the run corpora (samples, synthetic, testsuite-core, nofib) derives Generic or uses DeriveAnyClass.
+
+TABLE-PROGS
+
+### Checks (light, one run at a time, under 1.5 GiB)
+
+TABLE-CHECKS
+
+### Night commands (not run)
+
+None new. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB) are the whole proof over testsuite-core and nofib once the
+branch is in `next`; the records' re-recording (P29's night commands) takes this branch's betters (lib-check, lib-stg).
+
+### Proposals
+
+- **HF10-P35 the generics programs in the run corpora.** `generics/` is not in `:testsuite-core`, so its five single-module run tests
+  are checked by hand only. (a) **add `generics` to `:testsuite-core`'s directories and record GHC's runs of its tests at the next
+  oracle window** (`bin/hsi record-ref --only`, haskell-stg-progs `--record-progs`: seven programs, about a minute of GHC); until then
+  their own verdicts (the golden `.stdout`) judge them, as `own-verdicts` does for others. (b) leave them out. *Recommended: (a).*
+- **HF10-P34 (b) -O's decided strictness in the libraries.** The libraries' interfaces are GHC's -O2 build's, where a small strict
+  field is `DecidedUnpack` (`-funbox-small-strict-fields`); the own derivation says `DecidedStrict` (the -O0 answer, the programs').
+  Only the `Rep` facts of strict fields in ghc-internal's Heap/Stats modules differ; no run depends on it. (a) **leave it (recorded
+  here)**; (b) port shouldUnpackArgTy's -O decision for the libraries' compilation. *Recommended: (a).*
+- **HF10-P36 pattern-synonym matchers.** A synonym with a context or one imported from another module is still not desugared (the
+  matcher `$mP` is neither built nor called; the pattern binds nothing). (a) **build `$mP` (and `$bP`) as GHC.Tc.TyCl.PatSyn does and
+  desugar `psyn` to a matcher call (GHC.HsToCore.Match's matchPatSyn)**, judged by lib-stg (ghc-internal's synonyms) and the run
+  corpora's PatternSynonyms programs; (b) inline imported synonyms' patterns through the own interfaces. *Recommended: (a).*
