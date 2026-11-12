@@ -3708,7 +3708,7 @@ Not re-recorded: the records are the night's (P29's night commands), the betters
 
 | run | before (hs-p17) | after |
 |---|---|---|
-| the 31 programs the slice made eligible | 24 pass, 6 own-only failures in no class | 30 pass (28 own, 2 pack: throwto002, cgrun044), kahan `:speed` as on the pack; 0 unclassed; 2m60, 0.77 GB |
+| the 31 programs the slice made eligible | 24 pass, 6 own-only failures in no class | 30 pass (28 own, 2 pack: throwto002, cgrun044), kahan `:speed` as on the pack; 0 unclassed; 3m00, 0.77 GB |
 | samples, synthetic | 45 own (44 pass), 18 pack (16 pass) | 50 own (49 pass), 13 pack (11 pass); 0 unclassed; the classes as before (AsyncRerun, Loop, runtime-deep); 2m53, 1.07 GB |
 
 **The gate** (`test/gate/steps.edn`): `haskell-lib-own-{deepseq,array,stm}` lose their `:clean-only` part (stm's dependency path is
