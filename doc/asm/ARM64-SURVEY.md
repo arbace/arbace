@@ -1551,7 +1551,14 @@ two-register miscellaneous classes' decode, scalar and vector; SignedSatQ, Unsig
     377. The light driver printed from the forms compiles to the written Go (gofmt'd, comments aside, one pair of parentheses dropped)
     and claims the same 2,394 names. Controls verdict-15, forms-9, inject-29. `synth-neon-sat` runs in `--full`'s rotation only, not in
     the essential subset (ARS64 first).
-- **ARS64 (c): the essential step's time on a quiet host**: TIMING-PLACEHOLDER
+- **ARS64 (c): the essential step's time on a quiet host**: measured twice alone, in pairs (the subset without synth-neon-el-e, AR10's 76
+  programs, then AR11's 77, by `bin/a64i check --only LIST`, the same work as `--essential`), at 11:35-11:40 UTC: 45.5 s and 46.2 s
+  without it, 46.4 s and 46.9 s with it (+0.7 to +1.0 s, about 2%), under 0.41 GiB. The host was not quiet: night 12's gate (`gate --full
+  --concurrent` and the Python slot) still ran past 12:30 UTC, load 15-19 during the runs (AR11's pairs: load 30-67, +5 to +9 s). The
+  quiet measurement is left as a command for when the host is idle (not run; about 4 minutes, under 0.5 GiB, one run at a time): in
+  `.tmp/worktrees/asm-ar12`, `for s in old new old new; do .tmp/run.sh bin/a64i check --only .tmp/ess-$s.txt > .tmp/essQ-$s.log 2>&1;
+  grep Elapsed .tmp/essQ-$s.log; done` (`.tmp/ess-old.txt`, `.tmp/ess-new.txt`: the two subsets). At load 15-19 synth-neon-el-e costs
+  about 1 s, so ARS64 (a), keeping it, looks right; the decision waits for the quiet numbers as the user asked.
 - **ARS65 (b)**: synth-neon-cvt stays in the rotation only (no change).
 
 | check | before | after |
@@ -1579,4 +1586,5 @@ Numbering from ARS66. Each with options, the recommended named; none taken.
   pmul, pmull, the polynomial and the across-lanes long forms not yet claimed. *Recommended: (c)*: small, the same exact-integer
   helpers, and compiled codec code meets them beside AR12's.
 - **ARS67 synth-neon-sat in the essential subset.** (a) a quarter of it (273 cases) beside synth-neon-e and synth-neon-el-e; (b) the
-  rotation alone. *Recommended: per ARS64's numbers*: RECOMMEND-PLACEHOLDER
+  rotation alone. *Recommended: (b)* until ARS64's quiet numbers are in; then (a) if
+  synth-neon-el-e's cost stays near the 1 s measured at load 15-19 (a quarter of synth-neon-sat is about as large).

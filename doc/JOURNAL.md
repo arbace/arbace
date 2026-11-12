@@ -5216,7 +5216,10 @@ miscellaneous classes, SignedSatQ, UnsignedSatQ, SatQ; no code copied. doc/asm/A
   line); int64 arithmetic with overflow checks (rejected: 2·MIN·MIN at 32 bits and the shifts by up to 127 overflow it).
 - `synth-neon-sat` (1,092 cases, gen.ae's `sat-cases`, seed + 1000; the model `sat-q`, `sat-shift`, `sat-dmul`, `sat-long` on BigIntegers),
   in `--full`'s rotation only. Controls verdict-15, forms-9, inject-29.
-- ARS64 (c): TIMING-PLACEHOLDER
+- ARS64 (c): the host never went quiet in the window (night 12's `gate --full --concurrent` and its Python slot still ran past 12:30
+  UTC). Measured alone at load 15-19 instead, two pairs by `bin/a64i check --only LIST` (the subset without synth-neon-el-e, then with
+  it): 45.5 s and 46.2 s without, 46.4 s and 46.9 s with (+0.7 to +1.0 s, about 2%; AR11's pairs at load 30-67: +5 to +9 s). The quiet
+  run is left as a command in the survey (about 4 minutes, under 0.5 GiB); the subset is unchanged.
 - Results: a64i 95 -> 96 programs eval and AOT (23,711 -> 24,803 synthetic cases), coverage 2,176 -> 2,394 of 2,394 (simd 1,507 -> 1,725),
   controls 61 -> 64; `--essential` 77 of 77 unchanged; `bin/reap --record` (arm64 eval 311 -> 312, AOT 3,057 -> 3,058 / 0 / 13), `bin/reap`
   0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0), `--judge --strict` 0. No key moves: `bin/arbace-go

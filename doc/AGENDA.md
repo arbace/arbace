@@ -318,7 +318,7 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   saturating doubling multiplies (sqdmulh, sqrdmulh, sqdmull, sqdmlal, sqdmlsl: vector, scalar, by element) and the saturating shifts
   and narrows (sqshl, uqshl, sqrshl, uqrshl, sqshlu, sqshrn, sqrshrn, uqshrn, uqrshrn, sqshrun, sqrshrun, sqxtn, uqxtn, sqxtun),
   FPSR.QC exact (`simdsat.ae`, `synth-neon-sat` 1,092 cases): a64i 96 of 96, coverage 2,394 of 2,394, eval 312, AOT 3,058 / 0 / 13;
-  AGENDA-TIMING. Proposed ARS66, ARS67. Next: ARS66, ARS67, the VM's rows (ARS55, ARS58).
+  the essential step +0.7 to +1.0 s with synth-neon-el-e at load 15-19 (ARS64; the quiet run still to do, night 12's gate ran past 12:30). Proposed ARS66, ARS67. Next: ARS66, ARS67, the VM's rows (ARS55, ARS58).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
