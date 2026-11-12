@@ -76,7 +76,10 @@ Six crops are above 90 on all three. What the others still need:
   vformat) moved from _M_reserve to CP374's literal-encoding check, its drops 111 → 98; the 80 programs' IR byte for byte; library.cpp
   alone and the other proofs left as commands (`df /` at 87% from 07:16); CP374, CP375 proposed. Night 12's `cpp-check-essential` failures fixed on
   `cpp-gatefix` (our route's va_list as clang's; `[[no_unique_address]]` and empty classes as Itanium's: the <thread> programs' tuple
-  layout), its memory limit 2GiB; hello.cpp's `cpp-check` regression is CP377.
+  layout), its memory limit 2GiB; hello.cpp's `cpp-check` regression is CP377. `cpp-s9` (2026-11-12): CP377 (a) (a directive inside a declarator, a member template's specialization of an extern
+  template class: hello.cpp's resize_and_overwrite defined), CP376 (a) (clang's size floor; nua-layout.cpp), CP374 (a) (pointers in the
+  evaluator: f8 moved to `string_view __s`, CP378 proposed), CP375 (a); the 81's IR: 69 generated, none lost, 13 differing as intended;
+  codegen-gen recorded (155); library.cpp alone and the ci runs of cpp-check-essential and hello.cpp wait for night 12's gate's end.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

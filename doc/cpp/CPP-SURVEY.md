@@ -7208,3 +7208,58 @@ defined (probe d2: `declare i32 @_ZN1S1hIiEEiT_`). The FunctionTemplateDecl bran
 qualifier names (a class's or a namespace's), and sema's `declare-fn!` resolves a qualified declaration's types in the declaring scope when
 that scope lies within the qualifier's (a specialization made in a scope binding T over S's), so T is found. d2 now defines
 `_ZN1S1hIiEEiT_`.
+
+### A Sema crash found by the dg sample
+
+The own dg record's sample (`--sample 10`) read cpp23/ext-floating12.C (<complex>, <stdfloat>) to a crash, a NullPointerException in
+declare-instance!'s loop over the instance's functions (at cpp-s7 the file had timed out at 300 s). Its cause is cpp-s8's: a hidden
+friend whose trailing requires-clause is not satisfied (declare-fn!'s nil) was given `:friend-cls`, a function record of id nil. friend!
+now declares nothing for it. The file reads to `rejected` (no crash), alone: 5 min, 1.22 GB.
+
+### Checked
+
+| Run | Result |
+|---|---|
+| probes (`.tmp/probe`, gen-batch; `bin/llvmi run`) | h1 (to_string): resize_and_overwrite<lambda&> defined; h2-h5 (member templates, extern template): generated; nua (CP376's sample): llvmi 0 (64 before the base's floor); e1, e2 (CP374): generated, e2 llvmi 0; d1 (CP375): llvmi 0, its control (an expectation changed in the IR) 1; d2: `S::h<int>` defined; vb (vbase8-10's classes): sizes 1 1 16 16 32 24 56 72 88 104 |
+| f8.cpp (<format>'s vformat) | `constexpr-if`, "a local's initializer (:ctor of __s)" (was ":decay"); 47 causes, 98 drops as before; 1.18 GB, 156 s |
+| gen-batch over the 81 run programs (library.cpp left out), five parts (`.tmp/G7`), against cpp-s8's G6 (parts 00-03) and cpp-s7's G5 (vexing.cpp) | **69 generated, none lost**; vexing.cpp generates (G6 had not run it); of the 68 both generated: 55 byte for byte, 13 differing as intended: cpp-gatefix's empty classes' zero-initializations and copies left out (dr2137-1, embed-26, rv-life, fn-template3, ctor-fntry1, pr77550, io, vexing), its va_list and tuple layout (deferred, atomics, thread-throw, threads), CP377's resize_and_overwrite<to_string's lambda&> and to_chars defined (hello, threads), CP376's sizes (vbase8-10); peaks 0.55, 0.47, 0.41, 1.34, 0.36 GB, 28 min |
+| `bin/cppi codegen-gen`, then `--record` | 152 of 155 as recorded, the three: nua-layout new, globals a crash (a pointer folded to a long by ce-try: fixed, CP374's values kept inside an evaluation), struct-bind's std::pair bindings by get<i> (the sample's own comment and [dcl.struct.bind]/4's tuple-like case; before, the members read directly; `bin/llvmi run` output the same); controls failing as they must. Recorded: 155 generated, 0 refused (8 min, 1.20 GB each) |
+| cpp-print-essential's command (`roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own`) | 33 of 33, 9 of 9, the control `_control/bitfields-vs-io` failing as it must; 1.47 GB, 3 min |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` | 454 files, own pass 127 (cpp-s7's 127), one crash (above: fixed, then the file alone `rejected`); 1.22 GB, 7 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0, 0 problems, scores.edn unchanged |
+| `test/gate/gate-key-crops-test.bash` | PASS; the branch's own changes are under `arbace/cpp/`, `test/cpp/` and `doc/` (crop paths): no gate, runtime or seed key moves |
+
+### Not run (night 12's gate still running at 13:07 UTC; each one process, in this order, after it)
+
+```
+. .tmp/env.sh
+# 1. library.cpp alone (2.4 GB at cpp-s7; the day's 2.5 GiB; 15-25 min): its refusal and drops.tsv against cpp-s7's (overload, 48
+#    causes); f8 says `constexpr-if` at string_view __s (CP378) is expected
+bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh $PWD/.tmp/lib.tsv
+# 2. cpp-check-essential's exact command with its peak (cpp-gatefix's; io.cpp above 1.5 GiB): 8 of 8 as recorded expected
+busybox time -v env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt
+# 3. CP377's proof on ci: hello.cpp and threads.cpp (to_string), library.cpp's part of cpp-check: hello.cpp a pass again expected
+printf 'runtime/hello.cpp\nruntime/threads.cpp\n' > .tmp/h.list && env CPPI_THREADS=1 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only .tmp/h.list
+```
+
+### Proposed (CP378)
+
+- **CP378: class objects in the constant evaluator, and `__builtin_is_constant_evaluated()` in a manifestly constant-evaluated
+  context.** f8's next refusal is <bits/unicode.h>'s clang branch: `string_view __s(__enc); if (__s == "UTF-8") return true;`. (a) An
+  object value (its fields' values) for a local of class type made by a constexpr constructor (its mem-initializers, then its body with
+  `this`), copied by value into a call, read by `:field`, member calls on it with `this`; and sema's `:is-constant-evaluated`, folded to 0
+  at analysis today, a node that is 1 in the evaluator's manifestly constant-evaluated entries (if constexpr, constexpr variables,
+  static_assert, array bounds, template arguments) and 0 elsewhere, so that char_traits' length and compare take their constexpr loops; a
+  slice of CP362 (b)'s evaluator, about a day. (b) Fold `__literal_encoding_is_utf8()` and `_unicode()` by name to the target's answer
+  (CP374 (b)'s, declined once). (c) The code generator's predefined macros gcc's for this one (no: clang's are the route's model).
+  **Recommended: (a)**.
+
+### Rule slips
+
+The first probe's sysroot unpack (this worktree's first gen.sh: `xz -d`, 2.69 GB in busybox's peak; the watcher's sampling missed it, as
+cpp-s5 and cpp-s8 found). Process substitution `<(...)` twice in comparison commands (the define lists of hello.cpp, the llvmi outputs
+of struct-bind). One source edit (abi.ae's virtual-base floor) while gen-batch part 03's rerun was running: that process had loaded
+abi.ae before the edit, but part 04 after; every part was then run again from scratch at the final code (G7, the table's numbers). The
+gen-batch's first part-03 run read runtime and samples paths of the removed cpp-s5b worktree (the copied part lists): 13 crashes of
+"no such file", the lists corrected and the part rerun.
