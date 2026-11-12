@@ -6093,3 +6093,46 @@ types with a C tail, over int and over exceptions), the other 21 parts (vectorca
 ...), the `:capi-port` gaps above; a mirror is synchronized when a native receives it or the world returns, so Python code a
 native runs that changes a mirrored object the native was not given is not seen by C until the next synchronization (none of
 the sampled tests does it), and each synchronization costs the mirror's size.
+
+## As built: 270, the compact unicode layout, getargs and the buffer protocol (2026-11-12, the Mac VM, queue 270; 262's DECISION (a), the VM's proposal Q3)
+
+The third entry of 262's DECISION (a): `_testcapi`'s unicode and getargs parts, over a str's CPython layout and a port of
+the rest of `Python/getargs.c`. Ported from CPython 3.14.10's `Objects/unicodeobject.c` (`PyUnicode_New`, `PyUnicode_Fill`,
+`PyUnicode_CopyCharacters` and `_copy_characters`, `PyUnicode_FromKindAndData`, `as_ucs4`, `unicode_kind_name`,
+`unicode_check_modifiable`, the `PyUnicodeWriter` API), `Python/getargs.c` (`converttuple`, `convertitem`, `convertsimple`'s
+D S Y U O& w* s* z* y* es et es# et#, `convertbuffer`, `getbuffer`, `convertcharerr`, `seterror`'s item levels, `skipitem`,
+the freelist) and `Objects/abstract.c`'s buffer protocol.
+
+- **A str's handle is a mirror** (`go/arbace/pyctypes/capi_unicode.ae`): the layout CPython would have made for its
+  characters, in their canonical kind (`PyASCIIObject` and the ASCII characters of a compact ASCII str, a
+  `PyCompactUnicodeObject` and 1, 2 or 4 bytes a character for another exact str, a `PyUnicodeObject` whose `data.any`
+  points after it for a str subclass's instance: CPython's legacy form, `PyUnicode_IS_COMPACT` 0), so `PyUnicode_GET_LENGTH`,
+  `PyUnicode_KIND`, `PyUnicode_DATA`, `PyUnicode_IS_ASCII`/`IS_COMPACT`, `PyUnicode_READ`/`READ_CHAR` and
+  `PyUnicode_MAX_CHAR_VALUE` read it in place; `state.interned` is 0 (pyi's interning is not CPython's). A str is immutable,
+  so Go writes its mirror once; the exception is a str `PyUnicode_New(size, maxchar)` made (the kind maxchar names, NUL
+  characters): C fills it in place (`PyUnicode_WRITE`, `Fill`, `CopyCharacters`, memcpy) and its characters are copied
+  back to the pyi str at each synchronization (`py.Str.SetRunesInPlace`, the one mutation of a str, before Python sees it).
+  `Fill` and `CopyCharacters` refuse a str that is not such a new one held by C alone (`unicode_check_modifiable`'s
+  SystemError).
+- **getargs.c's rest** (`capi_getargs.ae`, over 262's `vgetargs` and 268's `vgetargskeywords`): nested tuples with the
+  failing item's levels in the message (`argument 1, item 0`), their DeprecationWarning for a non-tuple sequence, the units
+  D, S, Y, U, O& (the converter called), w*, s*, z*, y* (a `Py_buffer` filled, released on a later unit's failure), es,
+  et, es#, et# (the encoded string in a `PyMem` block or the caller's buffer, its "encoded string too long"), c's and C's
+  length messages, `convertbuffer`'s "read-only bytes-like object" for bytearray and memoryview.
+- **The buffer protocol**: `PyObject_GetBuffer` (a bytes' mirror's `ob_sval` in place; another bytes-like object's
+  contents copied into the world, written back by `PyBuffer_Release` when writable), `PyBuffer_FillInfo`,
+  `PyObject_CheckBuffer`.
+- **Fixes the tests showed**: `Python/pyctype.c`'s tables (`_Py_ctype_table`, `_Py_ctype_tolower`/`toupper`) and
+  `_PyByteArray_empty_string` defined in `pycapi.c` (an undefined data symbol is a zeroed static of ci's link: `Py_ISALNUM`
+  faulted at `0x13c`, 4 times 'O'); getbuffer's pending exception kept (CPython's seterror leaves it: a non-contiguous
+  memoryview's BufferError, a non-buffer's TypeError); `PyFloat_FromString` refuses a number; `PyFloat_Pack2/4` and
+  `Unpack2/4` keep a NaN's type and payload bit by bit (Go's float32 conversion quiets a signaling NaN on arm64); `float()`
+  refuses a non-contiguous memoryview (`py/float.ae`); a keyword of a str subclass is a str; an invalid UTF-8 name of the
+  keyword list is new_kwtuple's UnicodeDecodeError.
+- **bytearray's and dict's layouts**: a bytearray's handle is a mirror too (`PyByteArrayObject`: `ob_alloc`, `ob_bytes`,
+  `ob_start`; synchronized both ways as a bytes', so `PyByteArray_AS_STRING` is its storage), a dict's handle carries
+  `ma_used` (`PyDict_GET_SIZE`).
+- **The world**: `Modules/_testcapi/unicode.c` and `getargs.c` built (18 of the 38 parts).
+- **`bin/pyi-clib`** (the coordinator's item): ci is run from the checkout with every source, glue file and `-I` relative
+  to it, so `__FILE__` (assert's messages) and the statics' sizes no longer name the checkout's location: two checkouts at
+  different paths build the same `nodes.ae`. The main host's next rebuild of ctypestest changes `nodes.ae` once for it.
