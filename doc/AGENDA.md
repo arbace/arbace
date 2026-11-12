@@ -74,7 +74,9 @@ Six crops are above 90 on all three. What the others still need:
   `cpp-s8` (2026-11-12, CP366 (a)'s slice): ranges' iterator concepts on std::string and std::span right (16 of 16 on `char*` and
   string's iterator, from 6 and 5), ranges::copy, provisional instances for a dropped member, <format>'s floating builtins; f8 (<format>'s
   vformat) moved from _M_reserve to CP374's literal-encoding check, its drops 111 → 98; the 80 programs' IR byte for byte; library.cpp
-  alone and the other proofs left as commands (`df /` at 87% from 07:16); CP374, CP375 proposed.
+  alone and the other proofs left as commands (`df /` at 87% from 07:16); CP374, CP375 proposed. Night 12's `cpp-check-essential` failures fixed on
+  `cpp-gatefix` (our route's va_list as clang's; `[[no_unique_address]]` and empty classes as Itanium's: the <thread> programs' tuple
+  layout), its memory limit 2GiB; hello.cpp's `cpp-check` regression is CP377.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).
@@ -264,6 +266,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   (`--defsym` tests into the object corpus).
   `asm-ax11b` (from `mac/next` `f6ac54829`): AX11 merged with AR7, `arbace/asm/obj.ae`'s error collection inside `run-items!` (an expansion's
   errors at its invocation); both crops' checks rerun, every record unchanged; x86-64 AOT 105 / 0 / 0, arm64 AOT 3,005 / 0 / 55.
+  `asm-ax12` (from `mac/next` `4ec952309`; doc/asm/AMD64-SURVEY.md, "As built: AX12"): AXS92 (a) the DWARF 4 line program (`.loc`'s
+  entries, emitOne's opcodes, MCDwarfLineAddr's advances, end_sequence; `synthetic/debug-line`) and AXS94 (a) MC/X86's `--defsym` cases
+  (`intel-syntax-quote-reserved`, `pltoff@ERR=1` held to llvm-mc's recorded refusal), objects recorded by hand with llvm-mc 23.1.5; x86-64
+  AOT 105 -> 108 / 0 / 0. Proposed AXS95 (the five left-out refusals), AXS96 (MC/AsmParser's DWARF tests).
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
@@ -291,8 +297,12 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   "As built: AR7"; ARS43 (a), ARS45 (b), ARS46 (b), ARS47 (a), the user's): `a64i-essential` sliced (`--essential`, judged on what it
   ran, slice-foreign control; 1 min 36 s → 36 s; the whole set the `--full` step `a64i-check`, rotated), every error of a file collected
   and judged as llvm-mc's diagnostics, `.org` and `-implicit-mapsyms`, the memory families' synthetic programs (801 cases; coverage 653
-  of 653): the AOT cell 95.0% → 98.2%, completeness 98.7 → 99.5. Proposed ARS48-ARS52. Next: the VM's CPU rows and lockstep of the twelve synthetic programs (ARS44),
-  NEON (ARS48), the reader's `@AUTH`/`%pltpcrel` (ARS49).
+  of 653): the AOT cell 95.0% → 98.2%, completeness 98.7 → 99.5. Proposed ARS48-ARS52. Then `asm-ar8` (from `mac/next` `4b8fc77e3`;
+  "As built: AR8"; ARS49 (a), AXS93, ARS48 (a), the user's): `@AUTH`/`%pltpcrel` read and assembled (`(asm/unread ...)` for refused
+  statements inside conditionals, `--defsym`, readelf's GNU view), `.reloc` merged with PATCHINST last (sortRelocs), NEON's integer lanes
+  in a64i (`simd.ae`, `synth-neon` 1,769 cases, coverage 1,358 of 1,358): mc-aarch64-obj 110 of 110, the AOT cell 98.2% → 99.6%,
+  completeness 99.5 → 99.8. Proposed ARS53-ARS55. Next: the VM's CPU rows and lockstep of the thirteen synthetic programs (ARS44),
+  NEON's structure loads and stores (ARS53), the literal pool with the C packs (ARS50).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
@@ -389,7 +399,8 @@ items below are the ones whose work is still ahead or tied to a night.
   ported, completeness 97.6.
 - **Scheme** ([scheme/SCHEME-SURVEY.md](scheme/SCHEME-SURVEY.md)): SCS2 (a), the Chez dumps pack with the oracle-records
   merge; SCS22-SCS24 (above); `scheme-aot1` (2026-11-11): SC90 (b) built, the AOT cell 90.0 -> 94.0 (100 without by design),
-  proposals SCS29 (one graph per program), SCS30 (SC94 (b)'s half).
+  proposals SCS29 (one graph per program), SCS30 (SC94 (b)'s half); `scheme-scs30` (2026-11-11): SCS29 (a) kept, SCS30 (a) built: compiled
+  libraries installed in psyntax, proved by `si/eval-library` (AOT cell 48 / 3 / 0).
 - **C** ([C23-SURVEY.md](C23-SURVEY.md)): CS281 (a) at W ((c) until); CS275 and CS280, the gmp and pcre2 packs at the next
   pack recording.
 - **The gate** ([GATE-SURVEY.md](GATE-SURVEY.md), [ORACLE-RECORDS-SURVEY.md](ORACLE-RECORDS-SURVEY.md)): GTS252 (a) later;

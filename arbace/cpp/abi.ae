@@ -144,8 +144,19 @@
                        id)]
             (when-let [b (or found @first-ne)] {:cls (:cls b) :virtual true}))))))
 
-(defn empty-class? [id]
-  (let [c (cls id)] (and (empty? (:fields c)) (not (dynamic? id)) (every? #(empty-class? (:cls %)) (:bases c)))))
+(declare empty-class?)
+
+(defn empty-member?
+  "Whether field `f` is an empty data member (Itanium §1.1: a potentially-overlapping member, [[no_unique_address]], of an
+  empty class type; cpp-gatefix)."
+  [f]
+  (boolean (and (:nua f) (class? (unq (:ty f))) (empty-class? (:id (unq (:ty f)))))))
+
+(defn empty-class?
+  "Itanium's empty class (§1.1): no non-static data members other than empty data members, no virtual functions or bases,
+  no non-empty bases (clang's CXXRecordDecl::isEmpty)."
+  [id]
+  (let [c (cls id)] (and (every? empty-member? (:fields c)) (not (dynamic? id)) (every? #(empty-class? (:cls %)) (:bases c)))))
 
 (defn pod-for-layout?
   "POD as C++03 defined it, which Itanium's layout uses to decide whether a base's tail padding is reused."
@@ -263,7 +274,13 @@
                                         (not= (quot start ua) (quot (+ start w -1) ua)) (align-up start ua)
                                         :else start)]
                             [(if uni (max offb (+ b w)) (+ b w)) (if (:name f) (max (long align) a) align) (conj foffs (* a (quot b ua))) (conj bitoffs b)])
-                          (let [o (align-up (quot (+ start 7) 8) a)
+                          (let [;; a potentially-overlapping member ([[no_unique_address]], cpp-gatefix) as clang's
+                                ;; RecordLayoutBuilder::LayoutField lays it out: an empty one tried at 0 first, and it takes no
+                                ;; data size; a non-empty one takes its class's data size (dsize: nvsize, or sizeof for a POD),
+                                ;; so the next member may reuse its tail padding
+                                ovl (:nua f)
+                                emp (and ovl (empty-member? f))
+                                o (if emp 0 (align-up (quot (+ start 7) 8) a))
                                 dsz (quot (+ offb 7) 8)
                                 o (if (or uni (empty? (field-empties (:ty f) 0)))
                                     o
@@ -271,8 +288,12 @@
                                       (if (can-place? em (field-empties (:ty f) o))
                                         o
                                         (recur (if (and (zero? o) (not (zero? dsz))) (align-up dsz a) (+ o a))))))
-                                _ (when-not uni (place! em (field-empties (:ty f) o)))]
-                            [(if uni (max offb (* 8 (+ o s))) (* 8 (+ o s))) (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
+                                _ (when-not uni (place! em (field-empties (:ty f) o)))
+                                es (cond emp nil
+                                         ovl (let [fl (layout (:id (unq (:ty f))))] (long (if (:pod fl) (:size fl) (:nvsize fl))))
+                                         :else s)]
+                            [(cond (nil? es) offb uni (max offb (* 8 (+ o (long es)))) :else (* 8 (+ o (long es))))
+                             (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
                     [(* 8 (long off)) align [] []]
                     (:fields c))
             nvsize (quot (+ (long offb) 7) 8)

@@ -378,17 +378,27 @@ obj_list() {
     echo "repr-asm: synthetic: $(wc -l < "$lists/synthetic.list") files"
   elif [ "$1" = mc-x86-obj ]; then
     # MC/X86's object tests (-filetype=obj) for x86-64 ELF: the files whose first RUN lines name x86-64 and no option the object
-    # assembler does not take (split-file, --defsym, -mcpu, -mattr, the relaxation, CREL and padding options, Intel syntax,
-    # error tests, the x32 ABI); assembled with -triple x86_64-linux-musl
+    # assembler does not take (split-file, -mcpu, -mattr, the relaxation, CREL and padding options, Intel syntax, error tests,
+    # the x32 ABI); assembled with -triple x86_64-linux-musl. AXS94 (a): --defsym is taken (a file whose other runs use it is
+    # kept), and each object run of a kept file that sets symbols with --defsym for x86-64 is a case of its own, NAME@SYM=V
+    # (`,` between several), its options (`--defsym SYM=V ...`) in the list's third field; an error run's case holds llvm-mc's
+    # refusal (its diagnostics)
     local d=$src/llvm-project-23.1.5.src/llvm/test/MC/X86 f r
     [ -d "$d" ] || { echo "repr-asm: $d missing: bin/repr-asm corpus extract" >&2; return 1; }
     mkdir -p "$lists"; : > "$lists/mc-x86-obj.list"
     for f in $(grep -l -e 'filetype=obj' -e 'filetype obj' -r --include='*.s' "$d" | LC_ALL=C sort); do
       r=$(grep 'RUN:' "$f" | head -3 | tr '\n' ' ')
       printf '%s\n' "$r" | grep -q -e x86_64 -e x86-64 || continue
-      printf '%s\n' "$r" | grep -q -e split-file -e -defsym -e 'not llvm-mc' -e -x86-asm-syntax=intel -e -mcpu -e -mattr \
+      printf '%s\n' "$r" | grep -q -e split-file -e 'not llvm-mc' -e -x86-asm-syntax=intel -e -mcpu -e -mattr \
         -e -relax-relocations -e -crel -e -x86-pad -e -x86-align -e gnux32 && continue
       n=${f##*/}; printf '%s\t%s\t\n' "${n%.s}" "$f" >> "$lists/mc-x86-obj.list"
+      { grep 'RUN:' "$f" | grep -e 'filetype[= ]obj' | grep -e x86_64 -e x86-64 | grep -e -defsym | grep -v -e -x86-asm-syntax=intel || true; } |
+        awk -v n="${n%.s}" -v f="$f" '
+          { syms = ""; opts = ""; l = $0
+            while (match(l, /-+defsym[= ][^ ]+/)) {
+              a = substr(l, RSTART, RLENGTH); sub(/^-+defsym[= ]/, "", a); l = substr(l, RSTART + RLENGTH)
+              syms = syms (syms == "" ? "" : ",") a; opts = opts (opts == "" ? "" : " ") "--defsym " a }
+            if (syms != "" && !(syms in seen)) { seen[syms] = 1; printf "%s@%s\t%s\t%s\n", n, syms, f, opts } }' >> "$lists/mc-x86-obj.list"
     done
     echo "repr-asm: mc-x86-obj: $(wc -l < "$lists/mc-x86-obj.list") files"
   else
@@ -649,16 +659,29 @@ case ${1:-} in
     {
       echo ";; llvm-mc 23.1.5's objects of the corpus $id (the oracle tier's, by hand: bin/repr-asm object-record $id), each file"
       echo ";; assembled by \`llvm-mc -triple $triple -filetype=obj\`, twice, the two byte for byte; the object as hex"
-      echo ";; with its SHA-256. Read by bin/repr-asm object-check (no llvm-mc); the file is pinned by its .sha256. Read with the"
-      echo ";; Clojure reader."
+      echo ";; with its SHA-256 (:options: the case's --defsym, AXS94 (a); a --defsym case llvm-mc refuses, an error run, holds"
+      echo ";; its diagnostics, :refused, the input's path as <input>). Read by bin/repr-asm object-check (no llvm-mc); the file is"
+      echo ";; pinned by its .sha256. Read with the Clojure reader."
       echo "{:tool \"llvm-mc 23.1.5\" :triple \"${triple%% *}\" :options \"$triple\" :corpus :$id"
       echo " :objects"
       echo " {"
-      while IFS=$'\t' read -r n p _; do
-        "$mc" -triple $triple -filetype=obj "$p" -o "$o/$n.o" 2>"$o/$n.err" || { echo "repr-asm object-record: llvm-mc refuses $n (left out)" >&2; continue; }
-        "$mc" -triple $triple -filetype=obj "$p" -o "$o/$n.2.o" 2>"$o/$n.err"
+      while IFS=$'\t' read -r n p opts; do
+        # shellcheck disable=SC2086
+        if ! "$mc" -triple $triple -filetype=obj $opts "$p" -o "$o/$n.o" 2>"$o/$n.err"; then
+          # AXS94 (a): a --defsym case llvm-mc refuses (an error run) is recorded as its refusal, the diagnostics with the input's
+          # path as <input>; another file it refuses is left out
+          if [ -z "$opts" ]; then echo "repr-asm object-record: llvm-mc refuses $n (left out)" >&2; continue; fi
+          # shellcheck disable=SC2086
+          if "$mc" -triple $triple -filetype=obj $opts "$p" -o "$o/$n.2.o" 2>"$o/$n.2.err"; then echo "repr-asm object-record: $n refused once" >&2; exit 1; fi
+          cmp -s "$o/$n.err" "$o/$n.2.err" || { echo "repr-asm object-record: $n's diagnostics differ between two runs" >&2; exit 1; }
+          printf '  "%s" {:options "%s"\n   :refused "%s"}\n' "$n" "$opts" \
+            "$(awk -v p="$p" '{ i = index($0, p); if (i == 1) $0 = "<input>" substr($0, length(p) + 1); gsub(/\\/, "\\\\\\\\"); gsub(/"/, "\\\""); printf "%s\\n", $0 }' "$o/$n.err")"
+          continue
+        fi
+        # shellcheck disable=SC2086
+        "$mc" -triple $triple -filetype=obj $opts "$p" -o "$o/$n.2.o" 2>"$o/$n.err"
         cmp -s "$o/$n.o" "$o/$n.2.o" || { echo "repr-asm object-record: $n differs between two runs" >&2; exit 1; }
-        printf '  "%s" {:sha256 "%s" :bytes %s\n   :hex "%s"}\n' "$n" "$(sha256sum "$o/$n.o" | cut -d' ' -f1)" "$(stat -c %s "$o/$n.o")" "$(od -An -v -tx1 "$o/$n.o" | tr -d ' \n')"
+        printf '  "%s" {%s:sha256 "%s" :bytes %s\n   :hex "%s"}\n' "$n" "${opts:+:options \"$opts\" }" "$(sha256sum "$o/$n.o" | cut -d' ' -f1)" "$(stat -c %s "$o/$n.o")" "$(od -An -v -tx1 "$o/$n.o" | tr -d ' \n')"
       done < "$lists/$id.list"
       echo " }}"
     } > "$rec"
