@@ -96,6 +96,11 @@
   e)
 
 (def ^:dynamic *cutoff* Long/MAX_VALUE)
+(def drop-count
+  "cpp-s8: the header declarations dropped so far (each drop counted, a later round's success not subtracted): a
+  provisional instance's test of whether a member of its definition was dropped (template.ae's declare-instance!)."
+  (java.util.concurrent.atomic.AtomicLong.))
+
 (def ^:dynamic *last-anon* nil) ; atom: the type of the last unnamed class declared (its member's or variable's type) ; a namespace-scope name declared at or after this token is not visible yet
 
 (declare class-lookup)
@@ -1163,7 +1168,14 @@
         (doseq [k (kids n)]
           (case (:kind k)
             "AccessSpecDecl" (reset! access (keyword (:access k)))
-            "FieldDecl" (if-let [bad (let [et (loop [t (resolve-type cs (get-in k [:type :qualType]))] (if (abi/arr? t) (recur (:of t)) t))]
+            "FieldDecl" (if (and (nil? @*last-anon*) (header-node? k)
+                                 (re-find #"\((unnamed|anonymous) (union|struct|class) at " (str (get-in k [:type :qualType]))))
+                          ;; (cpp-s8: an anonymous member whose unnamed class a header's drop left undeclared: left out, a
+                          ;; drop, so a provisional instance is made again later; before, a member of no type, and the
+                          ;; class's layout refused "no size for nil": <format>'s _Arg_value's union)
+                          (do (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong drop-count)
+                              (when (System/getenv "CPP_HDR_TRACE") (binding [*out* *err*] (println "header drop: an anonymous member of" (:name n) "(its class dropped)"))))
+                        (if-let [bad (let [et (loop [t (resolve-type cs (get-in k [:type :qualType]))] (if (abi/arr? t) (recur (:of t)) t))]
                                        ;; (CP368 (a): a member of a class still being defined, its own or an enclosing one's,
                                        ;; or a class template's instance being instantiated: an incomplete type,
                                        ;; [class.mem.general]/7, clang's err_field_incomplete_or_sizeless; pr67405.C's `S f;` in
@@ -1186,7 +1198,7 @@
                             (when (and (not bits) (abi/class? ft))
                               (doseq [[mn es] (.entrySet ^java.util.HashMap (:names (:scope (abi/cls-of ft))))
                                       e es :when (#{:field :indirect} (:e e))]
-                                (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1}))))))
+                                (enter! cs mn {:e :indirect :chain (into [[id i]] (if (= :field (:e e)) [[(:cls e) (:i e)]] (:chain e))) :pos -1})))))))
             (do (when (and (checking?) (= "FriendDecl" (:kind k)))
                   ;; (CP313 (a): the friends each class declares, clang's EffectiveContext's matching by them: a function's
                   ;; or a function template's name, else a class, else unknown)
@@ -1235,7 +1247,8 @@
            r)
          (catch arbace.lang.ExceptionInfo e
            (if (or (:codegen/refused (ex-data e)) (:codegen/not-constant (ex-data e)))
-             (do (when *header-drops*
+             (do (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong drop-count)
+                 (when *header-drops*
                    (swap! *header-drops* assoc (drop-key n)
                           [(or (:codegen/refused (ex-data e)) :not-constant) (:kind n) (:name n) (.getMessage e)]))
                  ;; a declaration that named a class template's specialization before its specialization was defined
