@@ -5262,3 +5262,31 @@ numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s9".
 - Not run (night 12's gate still running at 13:07 UTC): library.cpp alone, cpp-check-essential's exact command, hello.cpp and threads.cpp
   on ci (commands in the survey). Proposed CP378 (class objects and __builtin_is_constant_evaluated in the evaluator). Slips: the
   sysroot unpack's peak (2.69 GB) on the first probe, `<(...)` twice, one source edit during a run (all parts rerun after).
+
+## 2026-11-12: cpp-s10, CP378 (a): class objects in the constant evaluator (branch `cpp-s10`, from `mac/cpp-s9` e2e446170)
+
+The user decided CP378 (a) (2026-11-12): class objects in sema's constant evaluator and `__builtin_is_constant_evaluated()` true wherever
+the language requires a constant, false elsewhere, aimed at f8's refusal (<bits/unicode.h>'s `string_view __s(__enc)` under
+`__clang_literal_encoding__`). Light, by night 12's rules while its gate ran (one process at a time, gated on MemAvailable >= 12 GiB and
+`df /` <= 88%, `GOMEMLIMIT=1200MiB GOGC=30`, main's stage 0, a watcher at 1.5 GiB), then the day's 2.5 GiB for library.cpp after it ended
+(about 14:55 UTC); no clang, g++, gate or big lock. Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s10".
+- The evaluator (arbace/cpp/sema.ae's ce-eval, ce-exec) holds an object as a map of its fields' and bases' values (immutable: a copy is
+  the value) in a cell, and a glvalue as a location {cell, path}, which is also `this`, a pointer to an object and a reference's value;
+  initializers by init-for's shapes (ce-init), constexpr constructors by their mem-initializers then body (ce-construct), defaulted copy
+  and move constructors and assignments memberwise, member calls with `this`. Considered: mutable objects (an atom per object, copied
+  deeply on a copy): the immutable maps make every copy correct by construction and a store an assoc-in at the location's path.
+- `__builtin_is_constant_evaluated()` (and `std::__is_constant_evaluated()`, which sema replaces) stays the 0 the code generator emits,
+  marked, read as 1 while the evaluation is manifestly constant-evaluated (a dynamic flag bound by const-int, if constexpr, static_assert,
+  constexpr and const integral variables' initializers, ce-call-fn; ce-try's run-time folds and the analysis of a reached body bind it
+  false). `if consteval` keeps its run-time branch and carries the other in the statement's metadata for the evaluator (not analyzed for
+  the checker, whose verdicts it would move). Considered: a new node kind for the builtin (every consumer of :int would need it; the mark
+  leaves the code generator's IR byte for byte).
+- template.ae: a template argument written as a call of a constexpr function named alone (`T<ice()>`) evaluated.
+- Probes s1-s4 (classes; the builtin and if consteval in every manifest context and at run time; <string_view>; the clang branch of
+  <bits/unicode.h> written out) generate and run on llvmi with status 0, from refusals; controls s2c (an IR edit) and s4n (UTF-16) exit 1.
+- f8: `constexpr-if` "a local's initializer (:ctor of __s)" → past the check (the encoding is UTF-8), to the next refusal, an overload:
+  `basic_string<_CharT> __padstr(__v.begin(), __v.end())` in `__write_padded`'s encoding branch (_Utf_iterator, which has only an
+  iterator_concept: its iterator_category comes from C++20 iterator_traits' cpp17-input-iterator machinery); drops as before (47
+  causes, 98). CP379 proposed. library.cpp alone: the same refusal, 39 causes (cpp-s7's 47), 1.43 GB.
+- The 81 run programs' gen-batch against cpp-s9's: 69 generated, none lost, the IR byte for byte or equal by the inliner's numbering; the
+  first run found vector's `_S_max_size` no longer folded (an empty allocator by reference had become a location to bind), restored.

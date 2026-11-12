@@ -79,7 +79,12 @@ Six crops are above 90 on all three. What the others still need:
   layout), its memory limit 2GiB; hello.cpp's `cpp-check` regression is CP377. `cpp-s9` (2026-11-12): CP377 (a) (a directive inside a declarator, a member template's specialization of an extern
   template class: hello.cpp's resize_and_overwrite defined), CP376 (a) (clang's size floor; nua-layout.cpp), CP374 (a) (pointers in the
   evaluator: f8 moved to `string_view __s`, CP378 proposed), CP375 (a); the 81's IR: 69 generated, none lost, 13 differing as intended;
-  codegen-gen recorded (155); library.cpp alone and the ci runs of cpp-check-essential and hello.cpp wait for night 12's gate's end.
+  codegen-gen recorded (155); library.cpp alone and the ci runs of cpp-check-essential and hello.cpp wait for night 12's gate's end. `cpp-s10`
+  (2026-11-12): CP378 (a), class objects in sema's constant evaluator (constexpr constructors with `this`, copies by value, field reads and
+  stores, member calls, references as locations) and `__builtin_is_constant_evaluated()` / `if consteval` true when manifestly
+  constant-evaluated: f8 (<format>'s vformat) past the literal-encoding check (`constexpr-if` → the encoding branch of `__write_padded`,
+  basic_string from _Utf_iterator, an overload refusal: CP379 proposed); the 81's IR unchanged (none lost, byte for byte or by the
+  inliner's numbering).
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

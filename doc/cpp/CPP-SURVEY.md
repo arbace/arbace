@@ -7263,3 +7263,128 @@ of struct-bind). One source edit (abi.ae's virtual-base floor) while gen-batch p
 abi.ae before the edit, but part 04 after; every part was then run again from scratch at the final code (G7, the table's numbers). The
 gen-batch's first part-03 run read runtime and samples paths of the removed cpp-s5b worktree (the copied part lists): 13 crashes of
 "no such file", the lists corrected and the part rerun.
+
+## As built: cpp-s10 (2026-11-12; branch `cpp-s10` from mac/cpp-s9 e2e446170)
+
+The user's decision of 2026-11-12: CP378 (a), class objects in the constant evaluator and `__builtin_is_constant_evaluated()` true
+wherever the language requires a constant. By night 12's rules while its gate ran (one process at a time, each gated on MemAvailable
+>= 12 GiB and `df /` <= 88%, `GOMEMLIMIT=1200MiB GOGC=30 REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID any process of
+this worktree past 1.5 GiB), no clang, g++, gate or big lock. Probes in `.tmp/probe/` (gen-batch, then `bin/llvmi run` of the IR).
+
+### CP378 (a): class objects in sema's constant evaluator
+
+`ce-eval` and `ce-exec` (arbace/cpp/sema.ae) hold a class object as a map, its fields' values by index and its base subobjects' by
+`[:b B]` (`::cls` its class): immutable, so a copy ([class.copy.ctor]'s memberwise copy of a literal class) is the value itself. An object
+lives in a cell, an atom (a local's, a parameter's, a temporary's), and a glvalue of it or of a subobject evaluates to a location
+`{::cell A ::path P}` (`ce-lv`: a local, `:field`, `:base-lv` by the path of bases down to it, `:deref` of a pointer to an object or of an
+array pointer, `:temp`, `:temp-obj`, an lvalue conditional, a call returning a reference). A location is also the value of `this`, of a
+pointer to an object (`&x`) and of a reference: a reference parameter or local holds the location it is bound to, as sema's typed tree has
+references as pointers (`(:deref (:load (:var r :raw)))`).
+
+- **Initializers** (`ce-init`, over init-for's shapes): `:expr`, `:bind` (a location), `:bind-temp` (a new cell), `:ctor` (`ce-construct`),
+  `:copy`, `:zero` (`ce-zero-of`: every scalar 0, recursively), `:none`, `:zero-then`, `:list` (an aggregate's bases then its members, an
+  array's elements and filler). A local of class type, a parameter by value (`ce-args-env`), a returned object (`:return`'s initializer
+  against the function's return type, `::ret` in the environment) all go through it. A local whose class has a destructor that is not
+  trivial is not evaluated (the slice runs no destructor).
+- **Constructors** (`ce-construct`): a constexpr constructor's mem-initializers (sema's `:tinits`: a delegating one, else the bases' then
+  the members', [class.base.init]/13; a member with no initializer left uninitialized) then its body with `this` the new object's location;
+  a defaulted or implicit copy or move constructor (no body: the code generator synthesizes it) copies the source object's value; a class
+  with virtual bases is not evaluated.
+- **Member calls**: `this` the object's location (`:obj`'s, or the caller's own `this` for an implicit member access); a constexpr member
+  function of an empty class is still evaluated without its object (CP332 (a)), and an empty-class parameter, by value or by reference,
+  is still a value nothing reads (allocator_traits::max_size(const allocator_type&): the gen-batch below found that taking a reference
+  parameter's binding would stop vector's `_S_max_size` folding); a defaulted or implicit copy or move assignment stores the source's
+  value; a virtual call is not evaluated. Field reads, assignments, compound assignments and increments go through the location
+  (`this->_M_len -= __n`); reading a subobject never initialized is not a constant ([expr.const]/5.9).
+- **`__builtin_is_constant_evaluated()`** (and `std::__is_constant_evaluated()`, which sema replaces by the same constant, G4) stays the
+  int 0 the code generator emits, marked `:ice`; the evaluator reads it as 1 while `*ce-manifest*` is true. The manifestly
+  constant-evaluated entries bind it ([expr.const]/22): const-int (array bounds, template arguments, case labels, enumerators, bit-field
+  widths, constraints), an if constexpr's condition, static_assert's (the checker), a constexpr variable's initializer (the checker's
+  check, the local and global folds: `ce-try` takes `manifest` true for a constexpr variable or a const integral one, the variables
+  usable in constant expressions), the initializer of a variable read inside an evaluation, and `ce-call-fn`. `ce-try` (fold-mark's folds of
+  code that runs, `__builtin_constant_p`, the atomics' orders) binds it false, and the analysis of a body an evaluation reaches
+  (`analyze-fn!`) runs with it false, so no run-time fold sees true.
+- **`if consteval`** (and `if !consteval`): sema keeps the run-time branch as before and, except for the checker (whose verdicts it would
+  move), analyzes the other into the run-time statement's metadata (`::ce-alt`, invisible to the code generator's walks); `ce-exec` takes
+  it when manifestly constant-evaluated. libstdc++ 15's `std::__is_constant_evaluated()` is `if consteval { return true; } else { return
+  false; }` under C++23.
+- template.ae's `const-form`: a template argument written as a call of a constexpr function named alone, `T<ice()>`, evaluated by
+  `ce-call-fn` (it had been refused, "constant (fn [] ice)").
+
+Probes (`.tmp/probe`; gen-batch, then `bin/llvmi run`):
+
+| Probe | What | Before | After |
+|---|---|---|---|
+| s1 | a constexpr constructor with a body, a copy, a member's assignment, member calls changing `this`, a class member and a base built by mem-initializers, a class by value, `const int&` results of an lvalue conditional; `int g[f()]`, if constexpr, a constexpr local | refused, "a local's initializer (:ctor of p)" | generated, `g` 308 bytes (77), llvmi 0 |
+| s2 | `__builtin_is_constant_evaluated()`, `if consteval`, `if !consteval` in an array bound, static_assert, a constexpr local, a const integral local, if constexpr, a template argument, and at run time | refused, "constant (fn [] ice)" | generated, run time 2 + 20 + 30, constant 1, 10, 40, llvmi 0; its control (`ice()`'s run-time 2 changed to 1 in the IR) exits 1 |
+| s3 | <string_view>: a constructor from `const char*` (char_traits' length through `if (std::__is_constant_evaluated())`), `==` with a by-value `__type_identity_t` parameter, `ends_with`, `remove_suffix`, `compare` (std::min's references to members, `_S_compare`) | refused, "(:ctor of s)" | generated, `g` 524 bytes (131), llvmi 0 |
+| s4 | <bits/unicode.h>'s clang branch written out (`__clang_literal_encoding__`, `string_view __s(__enc); if (__s == "UTF-8")`) in a consteval function template | refused, `constexpr-if` "(:ctor of __s)", f8's | generated, if constexpr true, llvmi 0; its control s4n (compared with "UTF-16") generates the false branch, llvmi 1 |
+
+On the way, the order found: a defaulted copy constructor (string_view's, `= default`, which the class's constexpr members' by-value
+parameters call) has no body and no `:tinits`; and a reference bound to a string literal's character (char_traits' `eq(const char_type&,
+const char_type&)` on `__p[__i]`) needed a location of an element of a literal (its characters in a cell of their own; writing one is
+undefined anyway).
+
+### f8 and library.cpp
+
+**f8.cpp** (<format>'s vformat, after night 12's gate ended): from `constexpr-if`, "an if constexpr's condition not evaluated (not a
+constant: a local's initializer (:ctor of __s))" to `overload`, "no viable function among 15 for 2 arguments" (two `_Utf_iterator`s,
+constructing basic_string): the literal-encoding check now evaluates to true (`__clang_literal_encoding__` is "UTF-8"), so
+`__write_padded`'s branch for a fill character of several code units is live, and its `basic_string<_CharT> __padstr(__v.begin(),
+__v.end())` finds no constructor: the range constructor's `_RequireInputIter` asks `iterator_traits<_Utf_iterator>::iterator_category`,
+which _Utf_iterator (it declares only `iterator_concept`) gets from C++20's iterator_traits by the cpp17-input-iterator concepts
+(<bits/iterator_concepts.h>'s `__iterator_traits<_Iter, void>` with `__cpp17_input_iterator`). Drops as before (47 causes, 98); 1.18 GB,
+251 s. **library.cpp alone**: the same refusal (at cpp-s7, "no viable function among 1 for 2 arguments" in another place); 39 causes of
+drops (cpp-s7's 47: tuple_size's, `__common_ref_impl`'s, the `__constant_iterator`, `derived_from` and `random_access_iterator`
+constants, basic_format_arg's sizes and four member types gone, three conversion function templates grouped); 1.43 GB, 340 s.
+
+### Checked
+
+| Run | Result |
+|---|---|
+| probes s1-s4 (`.tmp/probe`; gen-batch, `bin/llvmi run`) | the table above: all four refused before, generated after, llvmi 0; controls s2c (the IR's run-time `ice()` 2 → 1) and s4n ("UTF-16") exit 1 |
+| gen-batch over the 81 run programs (library.cpp left out), five parts (`.tmp/G8`), against cpp-s9's G7 | **69 generated, none lost**; 62 byte for byte, 2 equal but for the inliner's `.iN` numbering, 5 differing: vector's `_S_max_size` (atomics, hello, threads, io, p1-first) had stopped folding `allocator_traits::max_size(__a)` (an empty allocator by reference, now bound as a location: not a constant); fixed (an empty-class parameter by reference is a value nothing reads again) and the five generated again (`.tmp/G8b`): atomics byte for byte, the other four equal but for the numbering. Peaks 0.47, 0.42, 0.53, 1.34, 0.36 GB; 1.29 GB for G8b |
+| `bin/cppi codegen-gen` | 155 of 155 as recorded (155 generated, 0 refused), the controls failing as they must; 1.18 GB, 13 min; not re-recorded (unchanged) |
+| cpp-print-essential's command (`roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own`) | 33 of 33, 9 of 9, the control `_control/bitfields-vs-io` failing as it must; 1.48 GB, 4.5 min |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` | 454 files, accepted 287, rejected 166, own pass 127, own x clang as cpp-s9's (fail/fail 101, fail/pass 226, pass/fail 14, pass/pass 113); cpp23/ext-floating12.C timed out at 300 s (alone it reads in 5 min, cpp-s9) where cpp-s9's sample had its crash; 1.22 GB, 9 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0, 0 problems, scores.edn unchanged |
+| `test/gate/gate-key-crops-test.bash` | PASS; the branch's changes are `arbace/cpp/` and `doc/` (crop paths): no gate, runtime or seed key moves |
+
+### Not run
+
+`df /` stood at 86-88% all afternoon; `bin/cppi check`'s lower step stops itself above 85% ("lower-check: the disk is at 86%,
+stopping"), so cpp-check-essential could not run (its runtime would also be built first in this worktree). Left, one at a time, when the
+disk allows:
+
+```
+. .tmp/env.sh; export GOMEMLIMIT_X=2200MiB
+# 1. cpp-check-essential's exact command (8 of 8 as recorded expected; io.cpp above 1.5 GiB, cpp-gatefix's; a runtime build first, minutes)
+bash .tmp/run.sh .tmp/ce.log env CPPI_THREADS=1 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only test/cpp/essential-check.txt
+# 2. cpp-lower-essential (about 2 minutes)
+bash .tmp/run.sh .tmp/le.log bin/cppi lower-essential
+# 3. CP377's proof on ci (cpp-s9's): hello.cpp a pass again expected
+printf 'runtime/hello.cpp\nruntime/threads.cpp\n' > .tmp/h.list && bash .tmp/run.sh .tmp/h.log env CPPI_THREADS=1 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only .tmp/h.list
+```
+
+### Proposed (CP379, CP380)
+
+- **CP379: iterator_traits' C++20 primary template for an iterator with no iterator_category** (<format>'s next slice, f8's and
+  library.cpp's refusal). (a) The `__iterator_traits<_Iter, void>` partial specializations constrained by `__cpp17_iterator`,
+  `__cpp17_input_iterator` and their `__cat` member deciding `iterator_category` (input_iterator_tag for _Utf_iterator), as
+  [iterator.traits]/3.2 has it, read from the headers as they are: find which of the constraints or the nested `__cat` the template
+  machinery refuses and fix that, a general gap of the concept-constrained partial specializations. (b) Leave the multi-code-unit fill
+  branch (`__write_padded`) to a refusal of its own and go on to vformat's next refusal in the other paths (no: the code generator
+  analyzes the branch; it is reached whatever the fill). **Recommended: (a)**.
+- **CP380: a namespace-scope variable's dynamic-or-constant initializer as manifestly constant-evaluated.** [expr.const]/22 counts "the
+  initializer of a variable that has constant initialization" (the standard's own example: `int y = std::is_constant_evaluated() ? 1 : 2;`
+  at namespace scope is 1). cpp-s10 binds it for constexpr and const integral variables only, as the decision's list read; a plain global's
+  initializer folds with it false. (a) True for every static-storage variable's constant-initialization attempt, as clang's
+  EvaluateAsInitializer (InConstantContext). (b) Leave it until a program needs it. **Recommended: (a)** when the next global of that
+  kind is met; no program of the 81 has one.
+
+### Rule slips
+
+`2>/dev/null` and `> /dev/null` twice in commands (a progress check and the G8b rerun's command), and one process substitution `<(...)` in
+the drops comparison of library.cpp; no source edit while a run that loads it ran (the probes and gen-batch parts each ran after the
+edits they test; the G8b fix was made after G8 ended).
