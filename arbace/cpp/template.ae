@@ -712,6 +712,15 @@
       (when (and t (= :alias (:tk t)))
         {:name (name (second cls)) :args (or (resolve-args scope t (vec (nnext cls)) false) (fail :template "the template arguments of " (:name t)))}))))
 
+(defn- concept-named
+  "The entry of the concept the name `nm` (a symbol, n/C qualified) denotes in `scope`, or nil."
+  [scope nm]
+  (let [es (try (if (namespace nm) (sema/lookup-qualified scope (vec (concat (str/split (namespace nm) #"/") [(name nm)]))) (sema/lookup scope (name nm)))
+                (catch arbace.lang.ExceptionInfo _ nil))]
+    (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) es))))
+
+(declare concept-satisfied?)
+
 (defn- const-form
   "A constant of a template argument's or array bound's form: a number, a name, X<T>::member, (cpp/text s)."
   [scope f]
@@ -742,6 +751,16 @@
         {:k :texpr :o :vt :name (:name t) :args args}
         (let [v (sema/var* (var-template-inst t args))]
           (if (and (:c (:ty v)) (:init v)) (var-value v (sema/const-int (or (:def-scope v) scope) (:init v))) (fail :template "not a constant: " (pr-str f))))))
+    ;; (cpp-s8: a concept-id, [temp.names]/8: true when its concept is satisfied, a prvalue of type bool; with dependent
+    ;; arguments, in a template's symbolic signature, the expression standing for it -- <ranges_base.h>'s
+    ;; borrowed_iterator_t<_Range> = __conditional_t<borrowed_range<_Range>, iterator_t<_Range>, dangling>, whose refusal
+    ;; had taken ranges::copy's operator() for a range out)
+    (and (seq? f) (= '<> (first f)) (symbol? (second f)) (concept-named scope (second f)))
+    (let [c (tmpl (:id (concept-named scope (second f))))
+          args (or (complete-args c (resolve-args scope c (vec (nnext f)) false)) (fail :template "the template arguments of " (:name c)))]
+      (if (some dependent? args)
+        {:k :texpr :o :concept :name (:name c) :tid (:id c) :args args}
+        (if (concept-satisfied? c args) 1 0)))
     ;; a call without arguments of a static member (function template's specialization), G5c
     (and (seq? f) (= 'fn (first f)) (= [] (second f)) (let [c (nth f 2 nil)] (and (seq? c) (#{'cpp/scope '<>} (first c)))))
     (static-call-value scope (nth f 2))
@@ -2034,7 +2053,12 @@
 (defn- concept-satisfied?
   "The satisfaction of the concept `c` (its template entry) for the arguments `args`, memoized (with whether it was
   doubtful, CP281 (a): sema/*constraint-doubt*)."
-  [c args]
+  [c args0]
+  ;; (cpp-s8: fewer arguments than its parameters, a type-constraint's text short of them: completed by the concept's
+  ;; defaults, else not checked, a doubt -- bound short, an IndexOutOfBounds had crashed the analysis)
+  (if-let [args (if (< (count args0) (count (:params c)))
+                  (try (complete-args c (vec args0)) (catch arbace.lang.ExceptionInfo _ nil))
+                  args0)]
   (let [k [(:id c) (canonical args)]
         eval1 (fn [] (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "enter concept" (:name c) (pr-str (canonical args)))))
                      (let [d (atom false)
@@ -2047,7 +2071,8 @@
                 (eval1))]
     (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "concept" (:name c) (pr-str (canonical args)) "=>" r (if d "(doubt)" "") (pr-str (keep #(when (and (map? %) (= :class (:k %))) [(:id %) (select-keys (abi/cls (:id %)) [:defining :finished :complete])]) (tree-seq coll? seq args))))))
     (when d (sema/doubt!))
-    r))
+    r)
+  (do (sema/doubt!) true)))
 
 (defn- type-constraints-satisfied?
   "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
@@ -2063,7 +2088,11 @@
                                                   (catch arbace.lang.ExceptionInfo _ (sema/doubt!) ::unresolved))]
                                (if (= ::unresolved rest-args) false (concept-satisfied? c (into [a] rest-args))))
                              true)
-              :else (if-let [c (concept-of t p)] (concept-satisfied? c [a]) true)))
+              ;; (cpp-s8: a concept of more parameters whose further arguments the parameter's text did not give: not
+              ;; checked, as above, rather than bound short -- an IndexOutOfBounds, a crash of the analysis)
+              :else (if-let [c (concept-of t p)]
+                      (if (> (count (remove :pack (:params c))) 1) (do (sema/doubt!) true) (concept-satisfied? c [a]))
+                      true)))
           (map vector (:params t) args)))
 
 (defn- name-pack-params!
