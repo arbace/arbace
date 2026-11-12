@@ -7,8 +7,6 @@
 
 int _PyTestCapi_Init_Vectorcall(void *m) { (void)m; return 0; }
 int _PyTestCapi_Init_Heaptype(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_Unicode(void *m) { (void)m; return 0; }
-int _PyTestCapi_Init_GetArgs(void *m) { (void)m; return 0; }
 int _PyTestCapi_Init_DateTime(void *m) { (void)m; return 0; }
 int _PyTestCapi_Init_Docstring(void *m) { (void)m; return 0; }
 int _PyTestCapi_Init_Mem(void *m) { (void)m; return 0; }
