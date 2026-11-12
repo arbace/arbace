@@ -5037,3 +5037,41 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
   `bin/crops-score --record`, `--judge --strict` 0. No key moves (`arbace/asm/` and `bin/repr-asm` are crop paths or no key's:
   `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
 - Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
+
+## 2026-11-12: gf-java, night 12's Java family fixed by day (branch `gf-java`, from `next` `bd6ab3ddd`)
+
+Night 12's `--full` on `next` (`bd6ab3ddd`) failed j2g-edge, javac-verify, javac-check, jrt-convert and java-fixtures
+(`.tmp/night12/triage/TRIAGE.md`). The user decided (2026-11-12) to fix them today, the heavy runs by day under the big
+lock (`bin/heavy-lock`, one at a time), so that night 13 runs `--full` serially.
+
+- javac-check, j2g's six analysis failures in both worlds (the shipped build's report had them too), present since the
+  11-07 refresh `b6a6093af`. Four are fixed on `mac/java-night`, taken as their variant hunks alone (not the commits, which
+  carry jdk.httpserver and the JCA's tail): `overlay/jdk/variants/HttpClient.ae` (`(.-serverSocket this)`, the inherited
+  field), `SimpleFormatter.ae` and `ThreadImpl.ae` (casts) from `1fe7fbe72` (F24); `GaloisCounterMode.ae`'s
+  `GCMEngine.overlapDetection` and `GCMDecrypt.doFinal` without their direct-buffer branches (the only `NIO_ACCESS` users) from
+  `848eb64a8` (F23). DatagramSocket: java-night's fix is F10b (`0bc16ca6e`), the whole variant replaced by the NIO adaptor
+  over DatagramChannelImpl, too wide here; instead the F11 variant casts `Objects/requireNonNull`'s erased result to
+  `DatagramSocketImpl` (jdk26u's declared local), so `NetMulticastSocket`'s constructor matches. Alternative considered:
+  cutting the five classes out of javac's world closure; refused, the shipped world fails them the same and the fixes are
+  small. On a merge of `next` into `java-night`, java-night's DatagramSocket.ae wins. Result: javac's tool build's j2g
+  run `4047 files, 30186 classes analyzed, 0 failures` (reachable 30,063 -> 30,088 classes, missing parts 679 -> 612),
+  the shipped build's `:analysis-failures []`; `bin/javac-vendor check --from` passes.
+- `bin/j2g-edge update` (frozen JVM): `:exists` gains `java.lang.Thread`, which `arbace.c.musl` (embedded since C9) names
+  fully qualified, `(java.lang.Thread/currentThread)` in the index's temp name, since `2f9881596` (c-musl-lock's review
+  fixes, 11-10), after the last record `20e40db75` (11-08). With the variants: the cut class `sun/net/www/http/HttpClient`
+  leaves the edge, `jdk/internal/misc/InnocuousThread`'s overload order enters it. Its chained `bin/javac-vendor edge`:
+  `jdk/javac/edge.edn` unchanged (javac's :exists Thread now answered by `jdk/edge.edn`), `:jdk-edge` `ce5b1200c41f`.
+- javac's world: `bin/javac-vendor verify` passes (920 files byte for byte), so no `convert` was needed; the provenance's
+  host taken from verify's fresh conversion (what convert writes). `bin/jrt-convert`: verify listed the hand-written
+  `jdk/repl-exports.txt` (`e3d5b57a5`, JCS136 (a)) as "Only in jdk"; it joins the hand-written entries verify skips
+  (java-night's `bin/jrt-convert` has the same list, so no commit there to take; `jdk/README.md` gains its row). `bin/jrt-convert
+  update`: 2,419 of 2,419 forms equal, the provenance's host alone changed (29 GiB, 11 min); then verify passes.
+  `bin/clojure-tests --java-fixtures update` (forms unchanged; `:repr-clojure`, `:host`), verify passes.
+- Keys: gate_key `9accb085d767...` -> `4c78a93d1fe3...` (overlay/jdk/variants, jdk/edge.edn, jdk/README.md); the javac key
+  `c126d18adc04...` -> `5bb2040681c2...`; the provenance files move neither. Both builds are in `.tmp/gate-exe`
+  (`4c78a93d1fe3fcec0ea1`, `javac-5bb2040681c2ff7b87ed`; go-build 40 min, 20.9 GB; javac's tool 28 min, 25.8 GB), so night 13's
+  `--full` hits them.
+- Proofs: `bin/j2g-edge verify`, `bin/javac-vendor verify`, `check --from`, `bin/jrt-convert verify`, `bin/clojure-tests
+  --java-fixtures verify`, `bin/provenance-check`, `bin/reap` 0 problems, `test/gate/gate-key-crops-test.bash`. Not run: the
+  Java level steps (the variants change the five classes' behaviour from stubs to code; a java-check record may show a
+  test's change at the night's judge).

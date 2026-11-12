@@ -117,6 +117,12 @@ Six crops are above 90 on all three. What the others still need:
   java-older, java-classfile, java-http, java-props2, the stage-0 patches (`33d04049c`), and before them F9, F10b, F14,
   JCV2, java-unix, java-serial and java-serial2. They need tonight's conversion (`bin/jrt-convert update`, `bin/j2g-edge
   update`) and reach `next` and `main` when tonight's Java night passes.
+- **gf-java (2026-11-12, by day under the big lock, the user's fix-today)**: night 12's stale Java family fixed on `next`'s
+  world: `jdk/edge.edn` (java.lang.Thread, named by arbace.c.musl), javac's provenance and `:jdk-edge`, `jdk/provenance.edn`,
+  the fixtures' provenance, `bin/jrt-convert verify` no longer reporting the hand-written `jdk/repl-exports.txt`, and
+  javac-check's six analysis failures (five variants: four hunks of java-night's, DatagramSocket's cast here). Every verify
+  passes; moves gate_key (`4c78a93d1fe3...`) and the javac key (`5bb2040681c2...`). When `next` merges into `java-night`,
+  java-night's `DatagramSocket.ae` (F10b) wins.
 - **Waiting**: `mac/201-python-py7-py11` (Python, night 11 then the morning's merge); `java-testlib` (onto `java-night`
   after tonight); `java-invoke` (F15, the next Java night); `window-w2b`, `w-retire`, `eval-speed-w1` (the re-seed W);
   java-props2's commits after the conversion stay on `java-night` for the next Java night.
