@@ -132,6 +132,11 @@ Six crops are above 90 on all three. What the others still need:
   java-older, java-classfile, java-http, java-props2, the stage-0 patches (`33d04049c`), and before them F9, F10b, F14,
   JCV2, java-unix, java-serial and java-serial2. They need tonight's conversion (`bin/jrt-convert update`, `bin/j2g-edge
   update`) and reach `next` and `main` when tonight's Java night passes.
+- **java-jdk (2026-11-13, light)**: the two parked jdk parts. `repr-java-roundtrip.jdk`: the corpus grew 906 -> 2,277 files
+  (11-07) without its references recorded again, and the printed tree's six javac rounds no longer converged: the loop fixed
+  (until accepted, at most 20); left: `roundtrip --corpus jdk --text --record` and a pass. `repr-java-attr.jdk`: GC slack at
+  GOGC 200, not retention; the jdk reads under GOMEMLIMIT 26GiB (estimated 27-28 GiB); left: the whole part, then `:clean-only`
+  lifted. Both whole runs wait for the rerun's end and the main session (journal, 2026-11-13).
 - **gf-java (2026-11-12, by day under the big lock, the user's fix-today)**: night 12's stale Java family fixed on `next`'s
   world: `jdk/edge.edn` (java.lang.Thread, named by arbace.c.musl), javac's provenance and `:jdk-edge`, `jdk/provenance.edn`,
   the fixtures' provenance, `bin/jrt-convert verify` no longer reporting the hand-written `jdk/repl-exports.txt`, and
