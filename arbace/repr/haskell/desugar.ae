@@ -153,6 +153,7 @@
         (head? p 'plazy) (pat-vars (second p))
         (head? p 'pbang) (pat-vars (second p))
         (head? p 'pview) (pat-vars (nth p 2))
+        (head? p 'psyn) (mapcat pat-vars (nth p 4))
         :else []))
 
 (declare match)
@@ -187,7 +188,7 @@
     [p {}]))
 
 (defn- pkind [p]
-  (case (first p) pwild :any pcon :con plitp :lit plit :npat pbang :bang pview :view :any))
+  (case (first p) pwild :any pcon :con plitp :lit plit :npat pbang :bang pview :view psyn :syn :any))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Matching: an equation is {:pats [PAT...] :sub {lv term} :rhs (fn [fail] core)}
@@ -274,8 +275,38 @@
                           (match (into [x] vars) (map (fn [e] (assoc e :pats (cons (nth (first (:pats e)) 2) (rest (:pats e))))) sg) f2))))))
             f (reverse sgs))))
 
+(def ^:private unit#-ty [:tc (ext "tc" "GHC.Internal.Types" "Unit#") []])
+(def ^:private unit#-core (list 'v (ext "var" "GHC.Internal.Types" "(##)")))
+
+(defn- void-binder [] (let [x (fresh "void")] (swap! fresh-types assoc x unit#-ty) x))
+
+(defn- match-syn
+  "matchPatSyn (GHC.HsToCore.Match, mkCoSynCaseMatchResult): equations whose first pattern is a pattern synonym's,
+  (psyn $mP REQ-EVIDENCE PROV-DICTIONARIES ARG-PATTERNS), grouped by their synonym as GHC's groupEquations groups them;
+  a group one call of the matcher, $mP req-evidence v (\\prov-dictionaries args -> the arguments' match) (\\(# #) -> fail),
+  the continuation a function of (# #) when the synonym has neither arguments nor provided dictionaries (patSynMatcher's
+  needs_void_lam); the other equations' dictionaries the first's (matchOneConLike's shift). HF10-P36 (a)"
+  [v vars g f]
+  ;; (sameGroup's PgSyn: the same synonym at the same types, here its required evidence: T11224's PRead at Int and at [Int]
+  ;; two groups)
+  (let [sgs (partition-by (fn [e] (let [p (first (:pats e))] [(nth p 1) (nth p 2)])) g)]
+    (reduce (fn [acc sg]
+              (with-fail acc
+                (fn [f2]
+                  (let [[_ mn evs ds1 ps1] (first (:pats (first sg)))
+                        xs (mapv fresh-like ps1)
+                        eqs (map (fn [e] (let [[_ _ _ ds ps] (first (:pats e))
+                                               sm (zipmap ds ds1)]
+                                           (assoc e :pats (concat (subst sm ps) (subst sm (rest (:pats e)))) :sub (merge (:sub e) sm))))
+                                 sg)
+                        body (match (into xs vars) eqs f2)
+                        cont (if (and (empty? ds1) (empty? xs)) (list 'lam [(void-binder)] body) (list 'lam (into (vec ds1) xs) body))]
+                    (list 'app (list 'v mn) (into (vec evs) [v cont (list 'lam [(void-binder)] f2)]))))))
+            f (reverse sgs))))
+
 (defn- match-group [v vars g f]
   (case (pkind (first (:pats (first g))))
+    :syn (match-syn v vars g f)
     :view (match-view v vars g f)
     :any (match vars (map drop-first g) f)
     :bang (match-bangs v vars g f)
