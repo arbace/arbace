@@ -4058,6 +4058,30 @@
       (let [x (tentatively p (fn [p] (seek! p (inc b)) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) e) x))))]
         (when (map? x) x)))))
 
+(defn- keep-decltypes!
+  "cpp-s11 (CP379 (a)): the operands of the decltypes among the tokens [from, to) of a requirement the parser keeps as its
+  text (a type requirement, a return-type-requirement), parsed tentatively and kept by their text for the code generator's
+  decltype as a decl-specifier's are (G4); the cursor put back."
+  [^P p ^long from ^long to]
+  (let [save (ix p)]
+    (loop [i from]
+      (when (< i to)
+        (let [^T t (tok-at p i)]
+          (if (and (or (t= t "decltype") (t= t "__decltype")) (t= (tok-at p (inc i)) "("))
+            (let [close (loop [j (+ i 2) d 1]
+                          (let [^T x (tok-at p j)]
+                            (cond (or (identical? :eof (.-k x)) (>= j to)) nil
+                                  (t= x "(") (recur (inc j) (inc d))
+                                  (t= x ")") (if (= d 1) j (recur (inc j) (dec d)))
+                                  :else (recur (inc j) d))))]
+              (when (and close (not (and (t= (tok-at p (+ i 2)) "auto") (= (long close) (+ i 3)))))
+                (seek! p (inc i))
+                (let [x (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))]
+                  (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str/replace (tok-text p (+ i 2) (dec (long close))) #"\s+" "") x))))
+              (recur (inc i)))
+            (recur (inc i))))))
+    (seek! p save)))
+
 (defn- parse-requires-body
   "A requires-expression's parameters and requirements ([expr.prim.req]), the cursor after its `requires`: the node with
   its requirements as clang's AST has them (SimpleRequirement, TypeRequirement, CompoundRequirement, NestedRequirement:
@@ -4071,15 +4095,15 @@
                  (cond
                    (accept! p "}") out
                    (is? p "typename") (let [rb (ix p)]
-                                        ;; (cpp-s11, CP379 (a): the type-id parsed tentatively, for its decltypes' operands
-                                        ;; alone, kept by their text as a decl-specifier's are: <iterator_concepts.h>'s
+                                        ;; (cpp-s11, CP379 (a): its decltypes' operands parsed tentatively and kept by their
+                                        ;; text as a decl-specifier's are (keep-decltypes!): <iterator_concepts.h>'s
                                         ;; __cpp17_input_iterator requires `typename common_reference_t<decltype(*__it++)&&,
                                         ;; ...>`, which had not resolved, "decltype(* __it ++)", so the requirement was false,
                                         ;; iterator_traits of a C++20 iterator declaring only iterator_concept took the output
                                         ;; iterator's specialization and <format>'s basic_string(_Utf_iterator, _Utf_iterator)
                                         ;; no constructor; the requirement is still kept as its text)
-                                        (tentatively p (fn [p] (parse-type-id p :targ)))
-                                        (skip-until! p #{";"}) (let [e (last-ix p)] (expect! p ";")
+                                        (skip-until! p #{";"})
+                                        (keep-decltypes! p (inc rb) (ix p)) (let [e (last-ix p)] (expect! p ";")
                                                                                   (recur (conj out {:kind "TypeRequirement" :type {:qualType (tok-text p (inc rb) e)}}))))
                    (is? p "{") (do (adv! p)
                                    (let [x (with-gt p true (parse-expr p))]
@@ -4088,6 +4112,9 @@
                                            ;; (CX12, CP281 (a): the return-type-requirement's type-constraint as written)
                                            rb (when (accept! p "->") (ix p))]
                                        (skip-until! p #{";"})
+                                       ;; (cpp-s11: its decltypes' operands kept too, __cpp17_randacc_iterator's
+                                       ;; `{ __it - __it } -> same_as<decltype(__n)>`)
+                                       (when rb (keep-decltypes! p rb (ix p)))
                                        (let [rt (when (and rb (> (long (ix p)) (long rb))) (tok-text p rb (last-ix p)))]
                                          (expect! p ";")
                                          (recur (conj out (cond-> {:kind "CompoundRequirement" :inner [x]}
