@@ -23,6 +23,15 @@ cppi_corpora_all=samples,runtime,libstdcxx,gxx-dg-run
 # gxx-dg-run are sampled (their reference holds every 25th program), run with --corpus and --sample 25
 cppi_corpora_recorded=samples,runtime
 
+# cppi_scratch: this run's own scratch directory, $cppi_tmp, made on first use and removed on exit (a subshell makes and removes
+# its own). The lists below were fixed $TMPDIR names: the gate runs steps side by side, and one run's list rewritten while
+# another's loop read it cut that list short (night 13's asm-arm64-print-essential, bin/repr-asm's make_list)
+cppi_scratch() {
+  if [ -z "${cppi_tmp:-}" ] || [ "${cppi_tmp_pid:-}" != "$BASHPID" ] || [ ! -d "$cppi_tmp" ]; then
+    cppi_tmp=$(mktemp -d "$TMPDIR/cppi.XXXXXX"); cppi_tmp_pid=$BASHPID; trap 'rm -rf "$cppi_tmp"' EXIT
+  fi
+}
+
 # the pinned tarball extracted (the testsuite and g++.dg), its digest checked once per extraction
 cppi_extract() {
   local t want main=$root
@@ -42,9 +51,10 @@ cppi_opts() {
 
 run_list_libstdcxx() {
   local f std opts s
-  ( cd "$cppi_ts" && find . -name '*.cc' -path './[0-9][0-9]_*' | LC_ALL=C sort ) | sed 's|^\./||' > "$TMPDIR/cppi-all.list"
-  ( cd "$cppi_ts" && xargs grep -L -E "dg-do (compile|link|preprocess)|dg-error|dg-additional-sources|dg-require-(thread|effective-target pthread)|-pthread|dg-require-sharedlib|dg-require-namedlocale|dg-require-fileio|dg-require-gthreads|dg-require-debug-mode|xfail" < "$TMPDIR/cppi-all.list" ) \
-    | grep -v '^30_threads' > "$TMPDIR/cppi-run.list" || true
+  cppi_scratch
+  ( cd "$cppi_ts" && find . -name '*.cc' -path './[0-9][0-9]_*' | LC_ALL=C sort ) | sed 's|^\./||' > "$cppi_tmp/cppi-all.list"
+  ( cd "$cppi_ts" && xargs grep -L -E "dg-do (compile|link|preprocess)|dg-error|dg-additional-sources|dg-require-(thread|effective-target pthread)|-pthread|dg-require-sharedlib|dg-require-namedlocale|dg-require-fileio|dg-require-gthreads|dg-require-debug-mode|xfail" < "$cppi_tmp/cppi-all.list" ) \
+    | grep -v '^30_threads' > "$cppi_tmp/cppi-run.list" || true
   while read -r f; do
     std=gnu++17
     if grep -q -E 'target c\+\+26' "$cppi_ts/$f"; then std=gnu++26
@@ -54,13 +64,14 @@ run_list_libstdcxx() {
     s=$(printf '%s' "$opts" | grep -o -- '-std=[a-z+0-9]*' | tail -1 | sed 's/-std=//' || true)
     [ -n "$s" ] && std=$s
     printf 'libstdcxx/%s\t%s\t%s\t%s\n' "$f" "$std" "-I$cppi_ts/util $(printf '%s' "$opts" | cppi_opts)" "$cppi_ts/$f"
-  done < "$TMPDIR/cppi-run.list"
+  done < "$cppi_tmp/cppi-run.list"
 }
 
 run_list_gxxdg() {
   local f sel std opts s
+  cppi_scratch
   ( cd "$cppi_gxxdg" && grep -rl --include='*.C' --include='*.cc' -E 'dg-do run' . | LC_ALL=C sort ) | sed 's|^\./||' \
-    | grep -v -E '^(modules|contracts)/' > "$TMPDIR/cppi-gxx.list" || true
+    | grep -v -E '^(modules|contracts)/' > "$cppi_tmp/cppi-gxx.list" || true
   while read -r f; do
     grep -q -E 'dg-additional-sources|-flto|dg-module' "$cppi_gxxdg/$f" && continue
     sel=$(grep -o -m1 'dg-do run.*' "$cppi_gxxdg/$f")
@@ -82,7 +93,7 @@ run_list_gxxdg() {
     s=$(printf '%s' "$opts" | grep -o -- '-std=[a-z+0-9]*' | tail -1 | sed 's/-std=//' || true)
     [ -n "$s" ] && std=$s
     printf 'gxx-dg-run/%s\t%s\t%s\t%s\n' "$f" "$std" "$(printf '%s' "$opts" | cppi_opts)" "$cppi_gxxdg/$f"
-  done < "$TMPDIR/cppi-gxx.list"
+  done < "$cppi_tmp/cppi-gxx.list"
 }
 
 run_list() { # run_list CORPUS

@@ -677,7 +677,11 @@ gate_crop_pins_list() {  # gate_crop_pins_list TABLE
 # release file), $GOROOT/test (seed/goroot-test.sha256, GTS50 (a)), C's gcc and musl tarballs, test/c/host/, go-whim's commit and ccorpus2's module hash,
 # the gated crops' :crop-pins commands (GTS211; C++'s pins and test/cpp/host/ among them, CX10); FILE gets them as a map. Exit 1 on a pin that fails
 clean_pins() {
-  local out=${1:-} st=0 g pv ph have gt tp jdk c jv jrel fj want got pd ft
+  local out=${1:-} st=0 g pv ph have gt tp jdk c jv jrel fj want got pd ft pt
+  # this run's own scratch for the lists it reads back (the crops' pins verbs, C's tarballs), not fixed $TMPDIR names that a
+  # run beside could rewrite under its loop (night 13, bin/repr-asm's make_list); removed at the return (the logs a FAILED line
+  # names stay in $TMPDIR)
+  pt=$(mktemp -d "$TMPDIR/gate-pins.XXXXXX")
   . "$root/bin/lib/seed-go.bash"
   g=$(seed_go_goroot)
   ph=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $1; exit}'); pv=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $2; exit}')
@@ -729,9 +733,9 @@ clean_pins() {
     local key=$1 env=$2 want f got; shift 2
     want=$(sed -n "/^ *{\\{0,1\\}:$key\$/,/:top/s/^ *:sha256 \"\([0-9a-f]*\)\"/\1/p" "$root/test/c/corpora.edn" | head -1)
     for f in $env "$@"; do [ -f "$f" ] && break; f=; done
-    if [ -z "$f" ]; then echo "pins: $key's tarball: no copy here (the tool fetches it from test/c/corpora.edn's URL and checks it by the pin)"; echo nil > "$TMPDIR/pins-c.$key"; return 0; fi
+    if [ -z "$f" ]; then echo "pins: $key's tarball: no copy here (the tool fetches it from test/c/corpora.edn's URL and checks it by the pin)"; echo nil > "$pt/pins-c.$key"; return 0; fi
     got=$(sha256sum < "$f" | cut -c1-64)
-    printf '{:path "%s" :sha256 "%s"}\n' "$f" "$got" > "$TMPDIR/pins-c.$key"
+    printf '{:path "%s" :sha256 "%s"}\n' "$f" "$got" > "$pt/pins-c.$key"
     if [ -n "$want" ] && [ "$got" = "$want" ]; then echo "pins: $key's tarball $f: test/c/corpora.edn's"
     else echo "pins: FAILED: $key's tarball $f is $got, test/c/corpora.edn pins ${want:-nothing}"; return 1; fi
   }
@@ -741,7 +745,7 @@ clean_pins() {
   cw=${root%%/.tmp/gate-clean/*}; cw=${cw%%/.tmp/worktrees/*}
   c_tarball gcc-15.2.0 "${REPR_C_GCC_TARBALL:-}" "$root/.tmp/repr-c/gcc-15.2.0.tar.xz" "$cw/.tmp/repr-c/gcc-15.2.0.tar.xz" || st=1
   c_tarball musl-1.2.6 "${CI_MUSL_TARBALL:-}" "$root/.tmp/ci-musl/musl-1.2.6.tar.gz" "$cw/.tmp/c1/musl/musl-1.2.6.tar.gz" || st=1
-  cg=$(cat "$TMPDIR/pins-c.gcc-15.2.0"); cm=$(cat "$TMPDIR/pins-c.musl-1.2.6")
+  cg=$(cat "$pt/pins-c.gcc-15.2.0"); cm=$(cat "$pt/pins-c.musl-1.2.6")
   # go-whim's commit (the C tools' checkout beside the main checkout, GOWHIM; the constant bin/repr-c's ccdump-build checks too:
   # test/c/corpora.edn's :go-whim-80c49bf5 :commit) and ccorpus2's module hash (Go's module cache, TamaGo's go: the ziphash
   # beside the download, against :ccorpus2-v1.6.0 :h1; no network)
@@ -764,12 +768,12 @@ clean_pins() {
   # GTS211 (a): the gated new crops' pins verbs, each run in the checkout; recorded as :crops (absent while no new crop is gated)
   local crop what cmd cok crops_edn=
   esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-  gate_crop_pins_list "${GATE_STEPS:-$root/test/gate/steps.edn}" > "$TMPDIR/pins-crops.tsv"
+  gate_crop_pins_list "${GATE_STEPS:-$root/test/gate/steps.edn}" > "$pt/pins-crops.tsv"
   while IFS=$'\t' read -r crop what cmd; do
     if (cd "$root" && bash -c "$cmd") > "$TMPDIR/pins-crop.$crop.log" 2>&1; then cok=true; echo "pins: $crop: $what ($cmd)"
     else cok=false; st=1; echo "pins: FAILED: $crop: $what ($cmd; $TMPDIR/pins-crop.$crop.log):"; tail -5 "$TMPDIR/pins-crop.$crop.log" | sed 's/^/   /'; fi
     crops_edn="$crops_edn {:crop :$crop :what \"$(esc "$what")\" :cmd \"$(esc "$cmd")\" :ok $cok}"
-  done < "$TMPDIR/pins-crops.tsv"
+  done < "$pt/pins-crops.tsv"
   [ -z "$crops_edn" ] || crops_edn=$'\n'"  :crops [${crops_edn# }]"
   # the oracles' packs (doc/ORACLE-RECORDS-SURVEY.md, ORS3 (a), ORS4 (a)): every pin of test/*/records/*.sha256 in the store
   # (ARBACE_ORACLE_PACKS, the main checkout's .tmp/oracle-packs by default) with its bytes and its members, and the
@@ -780,6 +784,7 @@ clean_pins() {
   [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s"\n  :c {:gcc-tarball %s :musl-tarball %s :host-check %s :go-whim {:dir "%s" :commit "%s"} :ccorpus2 {:version "v1.6.0" :h1 "%s"}}%s\n  :oracle-packs %s :ok %s}\n' \
     "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$cg" "$cm" "$ch" "$gw" "$gwh" "$cch" "$crops_edn" "$op" "$([ $st = 0 ] && echo true || echo false)" > "$out"
   [ $st = 0 ] && echo "pins: ok" || echo "pins: FAILED"
+  rm -rf "$pt"
   return $st
 }
 
