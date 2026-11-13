@@ -13,8 +13,9 @@
 ;; and integer and between precisions) at single and double precision, decoded, lowered from their forms and executed as the
 ;; pseudocode defines them (FPAdd, FPMul, FPMulAdd, FPDiv, FPSqrt, FPMax, FPMaxNum, FPCompare, FPRoundInt, FPToFixed,
 ;; FixedToFP, FPConvert; FPProcessNaNs, FPRound with FPCR's rounding mode, the exceptions accumulated in FPSR: IOC, DZC, OFC,
-;; UFC with tininess before rounding, IXC). The exact values are math/big's; FPCR.DN's default NaN taken, FPCR.FZ (review 1111) refused
-;; (:unimplemented; half precision is simdhalf's since AR15, queue 280); FEAT_AFP's FIZ, AH and NEP RES0, as on this VM's M2 (ARS71 (a), queue 276). Written from DDI 0487's pseudocode by Arbace; no code copied.
+;; UFC with tininess before rounding, IXC). The exact values are math/big's; FPCR.DN's default NaN taken, FPCR.FZ flushing
+;; subnormal operands (IDC) and results tiny before rounding (UFC) since AR16 (ARS75 (a), queue 282; refused before, review 1111;
+;; half precision is simdhalf's since AR15, queue 280); FEAT_AFP's FIZ, AH and NEP RES0, as on this VM's M2 (ARS71 (a), queue 276). Written from DDI 0487's pseudocode by Arbace; no code copied.
 
 
 (go/const "The FP operations (after the integer core's).\n"
@@ -425,7 +426,8 @@
   ^{:line 389} [^{:val 2} fpDZC (<< 1 1)]
   ^{:line 390} [^{:val 4} fpOFC (<< 1 2)]
   ^{:line 391} [^{:val 8} fpUFC (<< 1 3)]
-  ^{:line 392} [^{:val 16} fpIXC (<< 1 4)])
+  ^{:line 392} [^{:val 16} fpIXC (<< 1 4)]
+  [^{:val 128} fpIDC (<< 1 7)])
 
 
 (go/type fpt (struct
@@ -601,12 +603,7 @@
 
 
 
-^{:go/breaks [[6 561]] :go/end 562} (go/method fpCheck "fpCheck refuses what a64i does not model: FPCR.FZ (flush to zero; review 1111 (4)). FEAT_AFP's FIZ, AH and NEP\nare RES0 (ARS71 (a)): msr fpcr does not keep them.\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
-  (when (!= (bit-and (.-FPCR c) 0x1000000) 0)
-    (set! (.-PC c) - 4)
-    (.raise c SIGILL (+ ":unimplemented fpcr-fz " (fpName in)))
-    (return false))
-
+^{:go/end 562} (go/method fpCheck "fpCheck refuses half precision where a64i's single and double operations do not take it (simdhalf's execHalf runs FEAT_FP16\nfirst). FPCR.FZ is modelled since AR16 (ARS75 (a), queue 282: fz and rounded); FEAT_AFP's FIZ, AH and NEP are RES0 (ARS71\n(a)): msr fpcr does not keep them.\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
   (when (and (!= (.-Size in) 2) (!= (.-Size in) 3))
     (set! (.-PC c) - 4)
     (.raise c SIGILL (+ ":unimplemented fp-half " (fpName in)))
@@ -654,8 +651,24 @@
   (.defaultNaN t))
 
 
+(go/method fz "fz is FPUnpack's flush at single and double precision (AR16, ARS75 (a)): a subnormal operand a zero of its sign when FPCR.FZ\nis set, with IDC; half precision's is fz16 (FZ16, no IDC), its callers'. The injected fault `d` (A64I_INJECT=FAMILY:d, a\ncontrol) skips it.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a]
+  (when (and (!= (.-bits t) 16) (== (bit-and (>> (.-FPCR c) 24) 1) 1) (== (.exp t a) 0) (!= (.frac t a) 0) (!= injFlag "d"))
+    (set! (.-FPSR c) bit-or fpIDC)
+    (return (.zero t (.sign t a))))
+
+  a)
+
+
+(go/method flushes "flushes is FPRoundBase's flush: FPCR.FZ16 at half precision, FPCR.FZ at single and double, and the exact v tiny before\nrounding (a zero of its sign, UFC alone).\n" ^bool [^{:tag (* CPU)} c ^fpt t ^{:tag (* big/Float)} v]
+  (let [on (== (bit-and (>> (.-FPCR c) 24) 1) 1)]
+    (when (== (.-bits t) 16)
+      (set! on (== (bit-and (>> (.-FPCR c) 19) 1) 1)))
+
+    (and on (!= (.Sign v) 0) (< (- (.MantExp v nil) 1) (.-emin t)))))
+
+
 ^{:go/end 607} (go/method rounded ^uint64 [^{:tag (* CPU)} c ^fpt t ^{:tag (* big/Float)} v]
-  (when (and (== (.-bits t) 16) (== (bit-and (>> (.-FPCR c) 19) 1) 1) (!= (.Sign v) 0) (< (- (.MantExp v nil) 1) (.-emin t)))
+  (when (.flushes c t v)
     (set! (.-FPSR c) bit-or fpUFC)
     (return (.zero t (.Signbit v))))
 
@@ -666,6 +679,7 @@
 
 
 ^{:go/end 660} (go/method fpArith "fpArith is FPAdd, FPSub, FPMul, FPDiv (op 2, 3, 0, 1).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint32 op ^uint64 a ^uint64 b]
+  (set! (values a b) (values (.fz c t a) (.fz c t b)))
   (when [(values r ok) (.processNaNs c t a b)] ok
     (return r))
 
@@ -719,6 +733,7 @@
 
 
 ^{:go/end 691} (go/method fpMinMax "fpMinMax is FPMax, FPMin, FPMaxNum, FPMinNum (op 4, 5, 6, 7).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint32 op ^uint64 a ^uint64 b]
+  (set! (values a b) (values (.fz c t a) (.fz c t b)))
   (when (>= op 6)
     ;; FPMaxNum, FPMinNum: a quiet NaN against a number is the number
     (let [(values qa qb) (values (and (.isNaN t a) (not (.isSNaN t a))) (and (.isNaN t b) (not (.isSNaN t b))))]
@@ -772,6 +787,7 @@
 
 
 ^{:go/end 737} (go/method fpCompare "fpCompare is FPCompare: NZCV (0011 unordered, 0110 equal, 1000 less, 0010 greater); a signalling NaN, or any NaN when\n`e` (FCMPE, FCCMPE), raises IOC.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^uint64 b ^bool e]
+  (set! (values a b) (values (.fz c t a) (.fz c t b)))
   (when (or (.isNaN t a) (.isNaN t b))
     (when (or e (.isSNaN t a) (.isSNaN t b))
       (set! (.-FPSR c) bit-or fpIOC))
@@ -796,6 +812,7 @@
 
 
 ^{:go/end 774} (go/method fpMulAdd "fpMulAdd is FPMulAdd: addend + op1 * op2, one rounding.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^uint64 n ^uint64 m]
+  (set! (values a n m) (values (.fz c t a) (.fz c t n) (.fz c t m)))
   (when (and (.isNaN t a) (not (.isSNaN t a)) (not (.isNaN t n)) (not (.isNaN t m))
       ^:go/paren (or ^:go/paren (and (.isInf t n) (.isZero t m)) ^:go/paren (and (.isZero t n) (.isInf t m))))
     (return (.invalid c t)))
@@ -833,6 +850,7 @@
 
 
 ^{:go/end 803} (go/method fpSqrt "fpSqrt is FPSqrt.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a]
+  (set! a (.fz c t a))
   (when [(values r ok) (.processNaNs c t a)] ok
     (return r))
 
@@ -862,6 +880,7 @@
 
 
 ^{:go/end 822} (go/method fpRoundInt "fpRoundInt is FPRoundInt: an integral value of the type, by the mode; IXC only when `exact` (FRINTX).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^int mode ^bool exact]
+  (set! a (.fz c t a))
   (when [(values r ok) (.processNaNs c t a)] ok
     (return r))
 
@@ -885,6 +904,7 @@
   (.fpToFixed c t a 0 mode bits signed))
 
 ^{:go/end 908} (go/method fpToFixed "fpToFixed is FPToFixed: a times 2^fbits as the integer of `bits` width (signed or not), saturated (IOC) when out of range or a\nNaN (0), IXC when inexact.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^int fbits ^int mode ^uint bits ^bool signed]
+  (set! a (.fz c t a))
   (when (.isNaN t a)
     (set! (.-FPSR c) bit-or fpIOC)
     (return 0))
@@ -928,6 +948,7 @@
   (.fpConvertMode c from to a (.rmode c)))
 
 ^{:go/end 943} (go/method fpConvertMode "fpConvertMode is FPConvert between half, single and double at a rounding mode (5: round to odd, FCVTXN's): a NaN quieted\nwith its payload's top bits (IOC for a signalling one), a value rounded.\n" ^uint64 [^{:tag (* CPU)} c ^fpt from ^fpt to ^uint64 a ^int mode]
+  (set! a (.fz c from a))
   (when (.isNaN from a)
     (when (.isSNaN from a)
       (set! (.-FPSR c) bit-or fpIOC))
@@ -950,9 +971,14 @@
   (when (.isZero from a)
     (return (.zero to (.sign from a))))
 
-  (let [(values b fl) (.round to (.exact from a) mode)]
-    (set! (.-FPSR c) bit-or (conv uint64 fl))
-    ^{:line 942} b))
+  (let [x (.exact from a)]
+    (when (and (!= (.-bits to) 16) (.flushes c to x))
+      (set! (.-FPSR c) bit-or fpUFC)
+      (return (.zero to (.sign from a))))
+
+    (let [(values b fl) (.round to x mode)]
+      (set! (.-FPSR c) bit-or (conv uint64 fl))
+      ^{:line 942} b)))
 
 
 
