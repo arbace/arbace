@@ -1979,3 +1979,98 @@ Numbering from ARS74. Each with options, the recommended named; none taken.
   stores); (c) as built. *Recommended: (a)*: the flush is in place for half precision, and the M2 is the judge for it.
 - **ARS76 synth-neon-fp16 in the essential subset.** (a) a quarter of it (237 cases) beside the other quarters; (b) the rotation alone.
   *Recommended: (a)*: decodeHalf sits first in decodeFP, so every FP and SIMD word of the essential programs passes through it.
+
+## As built: AR16 (2026-11-13; branch `282-asm-arm64-ar16`, from `280-asm-arm64-ar15` `a5980c5a6`; queue task 282, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max, /proc/cpuinfo's asimddp, asimdrdm, asimdfhm, fcma and
+jscvt beside fphp and asimdhp), stage 0 and TamaGo's go; every check under 1 GiB but the conversion by repr/go's native reader (2.3
+GiB, one-off); no GNU tool (LLVM 23's llvm-objdump only to compare encodings by hand, in no check). The user's answers (2026-11-13):
+ARS74 (b), ARS75 (a), ARS76 (a). The semantics read again from the Arm ARM (DDI 0487: SDOT, UDOT (vector and by element), SQRDMLAH,
+SQRDMLSH (vector, scalar, by element), FMLAL, FMLAL2, FMLSL, FMLSL2 (vector and by element), FCMLA (vector and by element), FCADD,
+FJCVTZS; FPMulAddH, FPProcessNaNs3H, FPToFixedJS; FPUnpackBase's flush at single and double precision with FPProcessDenorm's IDC,
+FPRoundBase's flush, FPUnpackCV and FPRoundCV, FPRecipEstimate's flush of a large operand); no code copied. The CPU is the decisive
+judge; qemu-aarch64 (the synthetic `--record`'s second judge) is the main host's.
+
+- **ARS74 (b): the M2's ARMv8.2-8.4 Advanced SIMD and FP features in a64i** (`go/arbace/a64i/simdx.ae`, new; written as Go in a copy
+  of the light driver's printed module, built and run there first, then converted by repr/go's native reader, `REPR_GO_JOBS=1`, 78 s,
+  peak 2.3 GiB; `simdx.ae` taken whole from the conversion; the hooks hand-edited as forms: `OpVX` before `opSIMDEnd`, its name,
+  `simdName`'s case, `lowerVX` first in `lowerSIMD`, `execVX` first in `execSIMD` (simd.ae); `decodeVX` first in `decodeFP`,
+  `fpNameJS` first in `fpName`, `execJS` after `execFPX` in `execFP` (fp.ae); the header's `:files`, `(load "a64i/simdx")`, `vxNames`
+  in its `:init-order`; `emu/arm64.ae`'s AT_HWCAP):
+  - `OpVX`, Sys `vxNames`' index, N the by-element form (Imm its index), Amount the rotation's field: FEAT_DotProd's sdot and udot
+    (the three-register extension, 2s from 8b and 4s from 16b, and by a 4b element of v0-v31), FEAT_RDM's sqrdmlah and sqrdmlsh
+    (4h, 8h, 2s, 4s and scalar h and s, vector and by element: an h element's register v0-v15; (acc << e) +- 2ab + 2^(e-1), its floor
+    >> e signed-saturated, QC), FEAT_FHM's fmlal, fmlsl, fmlal2 and fmlsl2 (2s from 2h, 4s from 4h, the lower or upper half; vector
+    and by an h element of v0-v15; FPMulAddH: FPNeg of the first operand before FPUnpack, the halves flushed by FZ16 and widened
+    exactly, NaNs too, one rounding at single precision), FEAT_FCMA's fcmla (each rotation, 4h, 8h, 2s, 4s, 2d, and by element 4h,
+    8h, 4s) and fcadd (90 and 270; 4h, 8h, 2s, 4s, 2d) by FPMulAdd and FPAdd on the pseudocode's elements; FEAT_JSCVT's fjcvtzs as
+    OpFCVTI with Sys 5 (FPToFixedJS: towards zero, modulo 2^32, IOC out of range, IXC when inexact, NZCV 0:Z:00, Z clear for -0).
+    The other words of these classes (I8MM, BF16, FP8) fall through to the decoders as before.
+  - AT_HWCAP is FP, ASIMD, FPHP, ASIMDHP, ASIMDRDM, JSCVT, FCMA, ASIMDDP and ASIMDFHM (0x907603, was 0x603).
+  - Coverage names `v.sdot.4s`, `v.udot.e.2s`, `v.sqrdmlah.h`, `v.sqrdmlsh.e.8h`, `v.fmlal2.e.4s`, `v.fcmla.r90.4h`,
+    `v.fcmla.e.r180.4s`, `v.fcadd.r270.2d`, `fjcvtzs.w.d` (91 new: simd 90, fp 1).
+  - The encodings: 112 forms of the five features assembled by Arbace's assembler equal llvm-objdump's disassembly of the linked
+    words, form for form. A raw differential (112 forms over 40 rows each of specials, subnormals, limits and any bits under FPCR 0,
+    RMode 1-3, DN, FZ16 alone, with RMode 2, with DN and AHP; v0, FPSR, NZCV and a general result printed; not committed) gave this
+    CPU's output byte for byte, AOT and eval, at the first run; its 6-row run stepped equal (535,459 instructions with V0-V31, FPSR and
+    FPCR compared).
+  - The synthetic program `synth-neon-ext` (636 cases, gen.ae's `vx-cases`, seed + 1400; neon's setup; the half lanes under h-modes,
+    FHM's under h-modes without FZ, the single and double lanes under FPCR 0, RMode 1-3 and DN): the model the pseudocode's integers
+    (`rdm-lane` on BigIntegers, the dot products modulo 2^32), FPMulAddH as `widen-h` and fp-muladd-rm at :s, `fcmla-pair` and
+    `fcadd-pair` by fp-muladd-rm and fp-arith-rm (FPNeg before `hz`), `fjcvt` on BigDecimals. The M2 agreed with the model on every
+    case at the first run; a64i (eval, AOT, forms 2,636 of 2,636 words, lockstep sys and step 19,086 of 19,088 instructions) on its
+    first run. Controls verdict-21, forms-13, inject-40 (simd:x), inject-41 (fp:n), inject-42 (simd:q), step-12 (simd:x, caught at
+    an sdot). fp:x would not do for the fp family here: fjcvtzs's flipped bit is flipped back by the case's own `fmov d0, x5`, also
+    fp; fp:n flips fjcvtzs's N, read by the `mrs` before that fmov.
+- **ARS75 (a): FPCR.FZ at single and double precision**, ARS59 (b)'s refusal withdrawn (hand-edited as forms; the printed Go equal to
+  the written Go but for comments, literals' bases and parentheses): `fz` (fp.ae), FPUnpack's flush of a subnormal operand to a zero
+  of its sign with IDC, at the entry of fpArith, fpMinMax, fpCompare, fpMulAdd, fpSqrt, fpRoundInt, fpToFixed, fpConvertMode (its
+  source), fpMulX, fpRecipEstimate, fpRSqrtEstimate, fpRecpX and fpStepFused (after FPNeg), and in fjcvtzs (Z clear for a flushed
+  positive subnormal, FPToFixedJS's last case); `flushes`, FPRoundBase's flush of a result tiny before rounding, UFC alone, in
+  rounded (FZ16 at half precision as before, FZ at single and double) and in fpConvertMode's result (FPRoundCV: at single and double
+  only); FPRecipEstimate's flush of an operand of 2^126 or more (2^1022 at double precision) to a zero, UFC. A half operand is never
+  FZ's (fz is a no-op at 16 bits; FZ16 is fz16's at its callers), nor fcvt's from half (FPUnpackCV); fabs, fneg, fmov and fcsel do not
+  flush. The injected `d` skips fz (controls). `test/asm/a64i/fpcr-fz.s` (hand-written, in the essential subset; 31 lines derived by
+  hand before the run and equal to the M2's): FZ read back, fmul's flushed operand (IDC) and flushed result (UFC), fadd s exact under
+  the flush (IDC, no IXC), fneg not flushed, fcmp's equal with zero, fcvt to single of a subnormal (IDC) and of 2^-130 (UFC), fcvt to
+  half of a single subnormal (IDC), fcvt from a half subnormal and fadd h not flushed, fmlal's single accumulator flushed and its
+  half product not, fjcvtzs of a subnormal (0, Z clear, IDC) and of 1.0 (Z), frecpe of 2^127 (a zero, UFC). Controls inject-43 and
+  step-13 (fp:d; caught at the first fmul: `fpsr 0x8, native 0x80`). A raw differential beside it (355 forms over 40 rows: the
+  ARMv8.0 single and double FP classes, scalar and vector, compares, conversions between precisions and to integers, estimates,
+  across lanes, by element, and AR16's FP forms, under FZ alone and with RMode 1-3, DN and FZ16; not committed) gave this CPU's output
+  byte for byte, AOT and eval, 4,803 rows raising IDC; without the input flush (A64I_INJECT=fp:d) 6,609 of its lines differ: the M2
+  flushes as modelled; its 4-row run stepped equal (1,128,816 instructions).
+- **ARS76 (a): `synth-neon-fp16-e` in the essential subset**: every fourth case of synth-neon-fp16 (237), as the other quarters;
+  controls verdict-22, inject-44 (fp:h). The subset (83 programs) timed alone by `--only LIST`, without and with it in alternation,
+  at load 10-14 (275, 281 and 279's verification beside): without 36.3, 39.5, 37.9, 36.6 s (mean 37.6; a first run at load 17, 128.5
+  s), with 39.7, 46.6, 48.1, 33.3 s (mean 41.9: about +4 s, within the runs' noise of about 7 s); `--essential` 38.5 s, under 0.9 GiB.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 103 / 103 each | **106 / 106 each** (30 synthetic programs, 28,171 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,788 of 2,788 (fp 208, simd 2,045) | **2,879 of 2,879** (fp 209, simd 2,135) |
+| controls (`test/asm/controls-a64i.txt`) | 94 | **104**; table check's 1 |
+| `--essential` | 81 programs | **83** (with fpcr-fz and synth-neon-fp16-e) |
+| goi's checker over a64i (linux/arm64, `bin/a64i table-check`) | 0 errors | **0** (the `:init-order`'s blanks simd.go 1488, simdfp.go 900; a `:tag` on frecpe's shift) |
+| `[:asm-arm64 :eval]` | 412 / 0 / 0 | **424 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,065 / 0 / 13 | **3,068 / 0 / 13** |
+
+**crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged, `--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells
+checked, 0 problems. Proofs: `bin/a64i synth --record` (30 programs, the runner this CPU: `REPR_ASM_RUNNER=/usr/bin/env`), `bin/a64i
+check --record` whole (106 of 106, 1 min 39 s, 0.84 GiB), `--essential`, `bin/a64i table-check` (52 s warm). The keys do not move
+(`test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go --gate-key` `ee1501081ae8...` at the base and at each commit). The a64i
+driver still builds for linux/amd64. Left to the main host: `bin/a64i synth --record` under qemu-aarch64 (synth-neon-ext's and
+synth-neon-fp16-e's second judge), `bin/gate --plan`.
+
+### Proposed (AR16)
+
+Numbering from ARS77. Each with options, the recommended named; none taken.
+
+- **ARS77 NEON's slice after AR16.** (a) the crypto extension (FEAT_AES, FEAT_SHA1, FEAT_SHA256, FEAT_PMULL's pmull 1q; ARS74 (a)),
+  claimed in AT_HWCAP; (b) the M2's ARMv8.6 integer and bfloat matrix forms (FEAT_I8MM: usdot, sudot, smmla, ummla, usmmla; FEAT_BF16:
+  bfdot, bfmmla, bfmlal, bfcvt), claimed in AT_HWCAP2; (c) none: a64i's NEON stops at ARMv8.4, the crop's work moves to its other cells.
+  *Recommended: (a)*: compiled code meets AES and SHA through the crypto intrinsics and libraries' fast paths before I8MM's and BF16's
+  matrix forms, which machine-learning kernels alone emit.
+- **ARS78 synth-neon-ext in the essential subset.** (a) a quarter of it (159 cases) beside the other quarters; (b) the rotation alone.
+  *Recommended: (a)*: decodeVX sits first in decodeFP, so every FP and SIMD word of the essential programs passes through it, and a
+  quarter costs a few seconds by ARS76's numbers.
