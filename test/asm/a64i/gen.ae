@@ -315,8 +315,9 @@
 (defn- f-zero ^long [t neg] (if neg (bit-shift-left 1 (dec (long (:bits (ft t))))) 0))
 (defn- f-inf ^long [t neg] (bit-or (f-zero t neg) (bit-shift-left (ones (:eb (ft t))) (:fb (ft t)))))
 
-(defn- f-val ^double [t ^long b] (if (= t :d) (Double/longBitsToDouble b) (double (Float/intBitsToFloat (unchecked-int b)))))
-(defn- f-bits ^long [t ^double x] (if (= t :d) (Double/doubleToRawLongBits x) (bit-and (long (Float/floatToRawIntBits (unchecked-float x))) m32)))
+(declare h-val h-bits)
+(defn- f-val ^double [t ^long b] (case t :d (Double/longBitsToDouble b) :h (h-val b) (double (Float/intBitsToFloat (unchecked-int b)))))
+(defn- f-bits ^long [t ^double x] (case t :d (Double/doubleToRawLongBits x) :h (h-bits x) (bit-and (long (Float/floatToRawIntBits (unchecked-float x))) m32)))
 (defn- bd ^java.math.BigDecimal [^double x] (java.math.BigDecimal. x))
 
 (def ^:private IOC 1) (def ^:private DZC 2) (def ^:private OFC 4) (def ^:private UFC 8) (def ^:private IXC 16)
@@ -563,6 +564,11 @@
         x (if (= t :d) (.doubleValue v) (double (.floatValue v)))]
     (f-bits t (if neg (- x) x)))))
 
+(def ^:dynamic *fz16*
+  "AR15: FPCR.FZ16 in force: a half result tiny before rounding flushed to a zero of its sign, UFC alone (FPRoundBase's flush;
+  bound false around the conversions, whose FPRoundCV clears it)."
+  false)
+
 (defn round-rat
   "FPRound of the exact non-zero value NEG * NUM/DEN to the type under MODE (:n :p :m :z, AR11's :o: round to odd, FCVTXN's):
   [RESULT FPSR]."
@@ -583,7 +589,8 @@
         ;; the largest finite: (2^(fb+1) - 1) * 2^(emax - fb)
         maxm (.subtract (.shiftLeft BigInteger/ONE (int (inc (long fb)))) BigInteger/ONE)
         over (> (+ (dec (.bitLength ^BigInteger m)) q) emax)]
-    (cond over [(if (case mode :n true (:z :o) false :p (not neg) :m neg) (f-inf t neg) (rat-bits t neg maxm (- emax (long fb)))) (bit-or OFC IXC)]
+    (cond (and *fz16* (= t :h) tiny) [(f-zero t neg) UFC]
+          over [(if (case mode :n true (:z :o) false :p (not neg) :m neg) (f-inf t neg) (rat-bits t neg maxm (- emax (long fb)))) (bit-or OFC IXC)]
           (zero? (.signum ^BigInteger m)) [(f-zero t neg) (if inexact (bit-or IXC UFC) 0)]
           :else [(rat-bits t neg m q) (cond (not inexact) 0 tiny (bit-or IXC UFC) :else IXC)])))
 
@@ -1760,8 +1767,19 @@
   "A finite half's value."
   ^double [^long b]
   (let [e (f-exp :h b) f (f-frac :h b)
-        v (if (zero? e) (Math/scalb (double f) (int -24)) (Math/scalb (double (+ 1024 f)) (int (- e 25))))]
+        v (cond (zero? e) (Math/scalb (double f) (int -24))
+                ;; AR15: an infinity (f-val's :h, the compares) and a NaN
+                (= e 31) (if (zero? f) Double/POSITIVE_INFINITY Double/NaN)
+                :else (Math/scalb (double (+ 1024 f)) (int (- e 25))))]
     (if (f-sign :h b) (- v) v)))
+
+(defn- h-bits
+  "AR15: the bits of a half's value X (exact in half; an infinity, a zero with its sign)."
+  ^long [^double x]
+  (cond (Double/isNaN x) 0x7e00
+        (Double/isInfinite x) (if (pos? x) 0x7c00 0xfc00)
+        (zero? x) (if (neg? (Math/copySign 1.0 x)) 0x8000 0)
+        :else (binding [*fz16* false] (long (first (round-bd :h (bd x) :n))))))
 
 (defn- fval ^double [t ^long b] (if (= t :h) (h-val b) (f-val t b)))
 
@@ -2167,7 +2185,7 @@
                       (let [[ex fr] (cond (pos? ex) [ex fr]
                                           (bit-test fr 51) [0 (bit-and (bit-shift-left fr 1) m52)]
                                           :else [-1 (bit-and (bit-shift-left fr 2) m52)])
-                            re (- (if (= bits 32) 253 2045) (long ex))
+                            re (- (case (long bits) 16 29 32 253 2045) (long ex))
                             fr (bit-shift-left (bit-and (recip-est (bit-or 256 (unsigned-bit-shift-right fr 44))) 255) 44)
                             [re fr] (case re
                                       0 [0 (bit-or (bit-shift-left 1 51) (unsigned-bit-shift-right fr 1))]
@@ -2192,7 +2210,7 @@
                                     [ex (bit-and (bit-shift-left fr 1) m52)]
                                     (recur (dec ex) (bit-and (bit-shift-left fr 1) m52)))))
                       sc (if (even? ex) (bit-or 256 (unsigned-bit-shift-right fr 44)) (bit-or 128 (unsigned-bit-shift-right fr 45)))
-                      re (quot (- (if (= bits 32) 380 3068) (long ex)) 2)]
+                      re (quot (- (case (long bits) 16 44 32 380 3068) (long ex)) 2)]
                   [(bit-or (bit-shift-left re (long fb)) (bit-shift-left (bit-and (rsqrt-est sc) 255) (- (long fb) 8))) 0])))))
 
 (defn fp-recpx
@@ -2220,8 +2238,9 @@
   "VFPExpandImm: IMM8 as the bits of T's value."
   ^long [^long imm8 t]
   (let [s (bit-and (bit-shift-right imm8 7) 1) b6 (bit-and (bit-shift-right imm8 6) 1) c (bit-and (bit-shift-right imm8 4) 3) f (bit-and imm8 15)]
-    (if (= t :s)
-      (bit-or (bit-shift-left s 31) (bit-shift-left (bit-or (bit-shift-left (- 1 b6) 7) (* b6 31 4) c) 23) (bit-shift-left f 19))
+    (case t
+      :h (bit-or (bit-shift-left s 15) (bit-shift-left (bit-or (bit-shift-left (- 1 b6) 4) (* b6 3 4) c) 10) (bit-shift-left f 6))
+      :s (bit-or (bit-shift-left s 31) (bit-shift-left (bit-or (bit-shift-left (- 1 b6) 7) (* b6 31 4) c) 23) (bit-shift-left f 19))
       (bit-or (bit-shift-left s 63) (bit-shift-left (bit-or (bit-shift-left (- 1 b6) 10) (* b6 255 4) c) 52) (bit-shift-left f 48)))))
 
 (defn est-cases [rs]
@@ -2322,6 +2341,246 @@
 (def est-families
   [["neon-est" "the rest of ARMv8.0's Advanced SIMD and FP: frecpe, frsqrte, frecps, frsqrts (vector, scalar), frecpx, urecpe, ursqrte, fmaxv, fminv, fmaxnmv, fminnmv, fmov's vector immediate, fcvt to and from half precision, fmov of the upper doubleword, at FPCR 0 and under FPCR's directed rounding modes and DN" est-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; AR15 (ARS72 (a)): FEAT_FP16, one program: half precision's scalar FP classes (fadd, fsub, fmul, fdiv, fmax, fmin, fmaxnm,
+;; fminnm, fnmul, fmadd, fmsub, fnmadd, fnmsub, fabs, fneg, fsqrt, frint[npmzaxi], fcmp, fcmpe, fccmp, fcsel, fmov between h and
+;; w, x and h, fmov's immediate, scvtf, ucvtf from w and x and their fixed-point forms, fcvt[npmza][su] into w and x and fcvtz[su]'s
+;; fixed-point forms), the Advanced SIMD FP16 classes on 4h and 8h (three same, two-register miscellaneous, the compares with zero,
+;; frecpe, frsqrte, frecps, frsqrts), their scalar forms on h (frecpx too), the scalar pairwise faddp, fmaxp, fminp, fmaxnmp,
+;; fminnmp from 2h, the across lanes fmaxv, fminv, fmaxnmv, fminnmv on 4h and 8h, fmla, fmls, fmul, fmulx by an h element (vector
+;; and scalar), the fixed-point scvtf, ucvtf, fcvtzs, fcvtzu (4h, 8h, h) and fmov's vector immediate (4h, 8h); each FP one under
+;; one of h-modes: FPCR 0, RMode 1-3, DN, FZ16 (alone, with RMode 2, with DN, with FZ and RMode 1) and AHP (the arithmetic
+;; ignores it), the stub setting FPCR (a general register's or NZCV's result moved into d0 after FPCR is cleared: a64i refuses
+;; FZ at single and double precision, fmov's too); on neon's setup (v1 and v2 from the row, v0 their mix: the addends'). The model: the
+;; scalar rm models at :h (round-rat at the mode, exact rationals), FPUnpack's flush of a subnormal half under FZ16 (hz: a zero
+;; of its sign, no IDC) and FPRoundBase's flush before rounding (round-rat under *fz16*: UFC alone), FPRecipEstimate's flush of
+;; an operand of 2^14 or more under FZ16, the estimates at N = 16 (exponents 29 and 44), Reduce's halves, VFPExpandImm at :h.
+
+(def ^:private h-modes
+  "[MODE FPCR DN? FZ16?]."
+  [[:n 0 false false] [:p 0x400000 false false] [:m 0x800000 false false] [:z 0xc00000 false false] [:n 0x2000000 true false]
+   [:n 0x80000 false true] [:m 0x880000 false true] [:n 0x2080000 true true] [:n 0x4000000 false false] [:p 0x1480000 false true]])
+
+(defn- hz
+  "FPUnpack's flush of the half B under FZ16: a subnormal a zero of its sign."
+  ^long [fz ^long b]
+  (if (and fz (zero? (f-exp :h b))) (bit-and b 0x8000) b))
+
+(defn- h-cmp [ok e]
+  (fn [a b] (let [[r fl] (fp-compare :h a b e)] [(if (ok r) 0xffff 0) fl])))
+
+(defn h-lane
+  "One half lane of OP at MODE, DN? and FZ16?: [RESULT FPSR]; B the second operand, D the addend (fmla, fmls, fmadd's)."
+  [op ^long a ^long b ^long d mode dn? fz]
+  (binding [*fz16* fz]
+    (let [a' (hz fz a) b' (hz fz b) d' (hz fz d)
+          mm (fn [k] (dn :h dn? (fp-minmax :h k a' b')))
+          ti (fn [m sg] (fp-toint :h a' m 16 sg))]
+      (case op
+        ("fadd" "faddp") (fp-arith-rm :h :add a' b' mode dn?)
+        "fsub" (fp-arith-rm :h :sub a' b' mode dn?)
+        "fmul" (fp-arith-rm :h :mul a' b' mode dn?)
+        "fdiv" (fp-arith-rm :h :div a' b' mode dn?)
+        "fnmul" (let [[r fl] (fp-arith-rm :h :mul a' b' mode dn?)] [(f-neg :h r) fl])
+        "fabd" (let [[r fl] (fp-arith-rm :h :sub a' b' mode dn?)] [(f-abs :h r) fl])
+        "fmulx" (dn :h dn? (or (nans :h a' b')
+                               (if (or (and (f-inf? :h a') (f-zero? :h b')) (and (f-zero? :h a') (f-inf? :h b')))
+                                 [(if (not= (f-sign :h a') (f-sign :h b')) 0xc000 0x4000) 0]
+                                 (fp-arith-rm :h :mul a' b' mode dn?))))
+        ("fmla" "fmadd") (fp-muladd-rm :h d' a' b' mode dn?)
+        ("fmls" "fmsub") (fp-muladd-rm :h d' (f-neg :h a') b' mode dn?)
+        "fnmadd" (fp-muladd-rm :h (f-neg :h d') (f-neg :h a') b' mode dn?)
+        "fnmsub" (fp-muladd-rm :h (f-neg :h d') a' b' mode dn?)
+        ("fmax" "fmaxp") (mm :max)
+        ("fmin" "fminp") (mm :min)
+        ("fmaxnm" "fmaxnmp") (mm :maxnm)
+        ("fminnm" "fminnmp") (mm :minnm)
+        "fcmeq" ((h-cmp #{6} false) a' b')
+        "fcmge" ((h-cmp #{6 2} true) a' b')
+        "fcmgt" ((h-cmp #{2} true) a' b')
+        "facge" ((h-cmp #{6 2} true) (f-abs :h a') (f-abs :h b'))
+        "facgt" ((h-cmp #{2} true) (f-abs :h a') (f-abs :h b'))
+        "fcmeq0" ((h-cmp #{6} false) a' 0)
+        "fcmge0" ((h-cmp #{6 2} true) a' 0)
+        "fcmgt0" ((h-cmp #{2} true) a' 0)
+        "fcmle0" ((h-cmp #{6 8} true) a' 0)
+        "fcmlt0" ((h-cmp #{8} true) a' 0)
+        "fabs" [(f-abs :h a) 0]
+        "fneg" [(f-neg :h a) 0]
+        "fsqrt" (fp-sqrt-rm :h a' mode dn?)
+        "frintn" (dn :h dn? (fp-rint :h a' :n false))
+        "frinta" (dn :h dn? (fp-rint :h a' :a false))
+        "frintp" (dn :h dn? (fp-rint :h a' :p false))
+        "frintm" (dn :h dn? (fp-rint :h a' :m false))
+        "frintz" (dn :h dn? (fp-rint :h a' :z false))
+        "frintx" (dn :h dn? (fp-rint :h a' mode true))
+        "frinti" (dn :h dn? (fp-rint :h a' mode false))
+        "scvtf" (fp-from-fixed :h a 16 0 true mode)
+        "ucvtf" (fp-from-fixed :h a 16 0 false mode)
+        "fcvtns" (ti :n true) "fcvtnu" (ti :n false) "fcvtps" (ti :p true) "fcvtpu" (ti :p false) "fcvtms" (ti :m true)
+        "fcvtmu" (ti :m false) "fcvtzs" (ti :z true) "fcvtzu" (ti :z false) "fcvtas" (ti :a true) "fcvtau" (ti :a false)
+        "frecpe" (if (and fz (not (f-nan? :h a')) (not (f-inf? :h a')) (>= (f-exp :h a') 29))
+                   [(f-zero :h (f-sign :h a')) UFC]
+                   (fp-recip-est :h a' mode dn?))
+        "frsqrte" (fp-rsqrt-est :h a' dn?)
+        "frecpx" (fp-recpx :h a' dn?)
+        "frecps" (fp-step :h a' b' false mode dn?)
+        "frsqrts" (fp-step :h a' b' true mode dn?)))))
+
+(defn- h-reduce
+  "Reduce over the half lanes XS (fpMinMax's K at DN? and FZ16?): [RESULT FPSR], the lower half first."
+  [k xs dn? fz]
+  (if (= 1 (count xs))
+    [(hz fz (first xs)) 0]
+    (let [n (quot (count xs) 2) [hi f1] (h-reduce k (drop n xs) dn? fz) [lo f2] (h-reduce k (take n xs) dn? fz)
+          [r f3] (dn :h dn? (fp-minmax :h k lo hi))]
+      [r (bit-or (long f1) (long f2) (long f3))])))
+
+(defn fp16-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        sp [0 0x8000 0x7c00 0xfc00 0x7e00 0x7c01 0xfd05 0x7d55 1 0x8001 0x3ff 0x83ff 0x400 0x8400 0x200 0xff 0x100 0x101 0x7bff
+            0xfbff 0x3c00 0xbc00 0x3e00 0x4000 0x4200 0x7400 0x77ff 0x7800 0x3bff 0x3555 0x5640 0x3800 0xb800 0x3c01 0x401 0x7a00
+            0x6400 0xe400 0x5bff 0x3a00 0xc100 0x4900 0xbff]
+        ;; a half: a special, any bits, a subnormal, near the smallest normal, a large exponent (frecpe's flush, overflows), near
+        ;; one, an integral value or a half of one (frint's and fcvt's), any normal
+        hv (fn []
+             (let [x (nx) sg (if (odd? (unsigned-bit-shift-right x 9)) 0x8000 0) fr (bit-and (nx) 0x3ff)]
+               (case (mod x 8)
+                 0 (pick x sp)
+                 1 (bit-and (nx) 0xffff)
+                 2 (bit-or sg fr)
+                 3 (bit-or sg (bit-shift-left (inc (mod (unsigned-bit-shift-right x 11) 2)) 10) fr)
+                 4 (bit-or sg (bit-shift-left (+ 28 (mod (unsigned-bit-shift-right x 11) 3)) 10) fr)
+                 5 (bit-or sg (bit-shift-left (+ 14 (mod (unsigned-bit-shift-right x 11) 2)) 10) fr)
+                 6 (let [n (- (mod (nx) 4201) 2100)]
+                     (if (zero? n) sg (first (round-bd :h (.divide (java.math.BigDecimal. n) (java.math.BigDecimal. (inc (mod x 2)))) :n))))
+                 (bit-or sg (bit-shift-left (inc (mod (unsigned-bit-shift-right x 11) 30)) 10) fr))))
+        hvec (fn [] (vpack (for [_ (range 8)] (hv)) 16))
+        mode-of (fn [] (nth h-modes (mod (nx) (count h-modes))))
+        hout (fn [rs q] (let [[lo hi] (half (vpack (map first rs) 16) q)] [lo (bit-xor (long hi) (long (reduce bit-or 0 (map second rs))))]))
+        ar (fn [q] (if q "8h" "4h"))
+        ;; the operands of a case: v1, v2 (every sixth v2 the negated v1: exact zero sums; every seventh a step's pair whose product
+        ;; is exactly 2 or 3)
+        pair (fn [op i]
+               (let [v1 (hvec)]
+                 (cond (zero? (mod i 6)) [v1 (if (= op "fsub") v1 (vpack (map #(f-neg :h %) (vls v1 16 8)) 16))]
+                       (and (#{"frecps" "frsqrts"} op) (odd? i))
+                       (let [ks (for [_ (range 8)] (- (mod (nx) 15) 7))
+                             s3 (if (= op "frsqrts") 3.0 1.0)]
+                         [(vpack (for [k ks] (f-bits :h (* s3 (Math/pow 2.0 (double k))))) 16)
+                          (vpack (for [k ks] (f-bits :h (Math/pow 2.0 (double (- (if (= op "frsqrts") 0 1) k))))) 16)])
+                       :else [v1 (hvec)])))
+        ops3 ["fadd" "fsub" "fmul" "fdiv" "fmax" "fmin" "fmaxnm" "fminnm" "fmla" "fmls" "faddp" "fmaxp" "fminp" "fmaxnmp" "fminnmp"
+              "fabd" "fmulx" "fcmeq" "fcmge" "fcmgt" "facge" "facgt" "frecps" "frsqrts"]
+        ops2 ["fabs" "fneg" "fsqrt" "frintn" "frinta" "frintp" "frintm" "frintz" "frintx" "frinti" "fcvtns" "fcvtnu" "fcvtps" "fcvtpu"
+              "fcvtms" "fcvtmu" "fcvtzs" "fcvtzu" "fcvtas" "fcvtau" "scvtf" "ucvtf" "fcmeq0" "fcmge0" "fcmgt0" "fcmle0" "fcmlt0"
+              "frecpe" "frsqrte"]
+        z? (fn [op] (str/ends-with? op "0"))
+        mn (fn [op] (if (z? op) (subs op 0 (dec (count op))) op))
+        fpcr-of (fn [[_ fpcr]] fpcr)]
+    (concat
+     ;; the scalar FP classes: two sources, three sources, one source
+     (for [op ["fadd" "fsub" "fmul" "fdiv" "fmax" "fmin" "fmaxnm" "fminnm" "fnmul"] i (range 12)
+           :let [[mode fpcr dn? fz] (if (< i 10) (h-modes i) (mode-of)) [v1 v2] (pair op i)
+                 r (h-lane op (vlane v1 0 16) (vlane v2 0 16) 0 mode dn? fz)]]
+       (ncase (fpcr-stub fpcr (str op "\th0, h1, h2")) v1 v2 (hout [r] false)))
+     (for [op ["fmadd" "fmsub" "fnmadd" "fnmsub"] i (range 10)
+           :let [[mode fpcr dn? fz] (h-modes i) [v1 v2] (pair op (inc i)) d (v0-of v1 v2)
+                 r (h-lane op (vlane v1 0 16) (vlane v2 0 16) (vlane d 0 16) mode dn? fz)]]
+       (ncase (fpcr-stub fpcr (str op "\th0, h1, h2, h0")) v1 v2 (hout [r] false)))
+     (for [op ["fabs" "fneg" "fsqrt" "frintn" "frintp" "frintm" "frintz" "frinta" "frintx" "frinti"] i (range 8)
+           :let [[mode fpcr dn? fz] (mode-of) v1 (hvec) v2 (hvec) r (h-lane op (vlane v1 0 16) 0 0 mode dn? fz)]]
+       (ncase (fpcr-stub fpcr (str op "\th0, h1")) v1 v2 (hout [r] false)))
+     ;; fcmp, fcmpe (with h2 and #0.0), fccmp, fccmpe, fcsel: NZCV set before, moved into d0 after
+     (for [[op zero] [["fcmp" false] ["fcmpe" false] ["fcmp" true] ["fcmpe" true]] i (range 8)
+           :let [[_ fpcr _ fz] (mode-of) v1 (hvec) v2 (if (zero? (mod i 4)) v1 (hvec))
+                 [nz fl] (fp-compare :h (hz fz (vlane v1 0 16)) (if zero 0 (hz fz (vlane v2 0 16))) (= op "fcmpe"))]]
+       (ncase (str (fpcr-stub fpcr (str op "\th1, " (if zero "#0.0" "h2"))) "\tmrs\tx5, nzcv\n\tfmov\td0, x5\n") v1 v2 [(bit-shift-left (long nz) 28) fl]))
+     (for [op ["fccmp" "fccmpe" "fcsel"] i (range 8)
+           :let [[_ fpcr _ fz] (mode-of) v1 (hvec) v2 (hvec) nzcv (bit-and (nx) 15) imm (bit-and (nx) 15) c (pick (nx) conds)
+                 holds (cond-holds c nzcv)
+                 [res fl] (case op
+                            "fcsel" [(if holds (vlane v1 0 16) (vlane v2 0 16)) 0]
+                            (if holds
+                              (let [[nz fl] (fp-compare :h (hz fz (vlane v1 0 16)) (hz fz (vlane v2 0 16)) (= op "fccmpe"))] [(bit-shift-left (long nz) 28) fl])
+                              [(bit-shift-left imm 28) 0]))]]
+       (ncase (str (fpcr-stub fpcr (str "mov\tx5, #0x" (Long/toHexString (bit-shift-left nzcv 28)) "\n\tmsr\tnzcv, x5\n\t"
+                                        (if (= op "fcsel") (str "fcsel\th0, h1, h2, " c) (str op "\th1, h2, #" imm ", " c))))
+                   (when (not= op "fcsel") "\tmrs\tx5, nzcv\n\tfmov\td0, x5\n"))
+              v1 v2 [res fl]))
+     ;; fmov: between registers, from and into w and x, the immediate
+     (for [[txt f] [["fmov\th0, h1" (fn [v1] (vlane v1 0 16))] ["fmov\th0, w1" (fn [v1] (bit-and (long (first v1)) 0xffff))]
+                    ["fmov\th0, x1" (fn [v1] (bit-and (long (first v1)) 0xffff))] ["fmov\tw5, h1\n\tfmov\td0, x5" (fn [v1] (vlane v1 0 16))]
+                    ["fmov\tx5, h1\n\tfmov\td0, x5" (fn [v1] (vlane v1 0 16))]] _ (range 3)
+           :let [v1 [(nx) (nx)] v2 [(nx) (nx)]]]
+       (ncase (str txt "\n") v1 v2 [(f v1) 0]))
+     (for [a [:h "4h" "8h"] _ (range 6)
+           :let [imm8 (bit-and (nx) 0xff) b (vfp-expand imm8 :h)
+                 txt (.toPlainString (java.math.BigDecimal. (h-val b))) txt (if (str/includes? txt ".") txt (str txt ".0"))
+                 v1 [(nx) (nx)] v2 [(nx) (nx)]]]
+       (ncase (str "fmov\t" (if (= a :h) "h0" (str "v0." a)) ", #" txt "\n") v1 v2
+              (hout (repeat (case a :h 1 "4h" 4 8) [b 0]) (= a "8h"))))
+     ;; scvtf, ucvtf from w and x (x1 v1's lower half), with fraction bits; fcvt[npmza][su] and fcvtz[su]'s fixed point into w and x
+     (for [op ["scvtf" "ucvtf"] w [32 64] i (range 8)
+           :let [[mode fpcr dn? fz] (mode-of) fb (case (long (mod i 4)) 0 0 1 (inc (mod (nx) w)) 2 w (inc (mod (nx) 16)))
+                 v1 [(let [x (nx)] (if (odd? x) (nx) (bit-shift-right (nx) (+ 40 (mod x 24))))) (nx)] v2 [(nx) (nx)]
+                 g (if (= w 64) "x" "w")
+                 r (binding [*fz16* fz] (fp-from-fixed :h (first v1) w fb (= op "scvtf") mode))]]
+       (ncase (fpcr-stub fpcr (str op "\th0, " g "1" (when (pos? fb) (str ", #" fb)))) v1 v2 (hout [r] false)))
+     (for [[op m sg] [["fcvtzs" :z true] ["fcvtzu" :z false] ["fcvtns" :n true] ["fcvtnu" :n false] ["fcvtas" :a true] ["fcvtau" :a false]
+                      ["fcvtps" :p true] ["fcvtpu" :p false] ["fcvtms" :m true] ["fcvtmu" :m false]] w [32 64] i (range 3)
+           :let [[_ fpcr _ fz] (mode-of) v1 (hvec) v2 (hvec) a (hz fz (vlane v1 0 16)) g (if (= w 64) "x" "w")
+                 fb (if (and (= m :z) (= i 2)) (inc (mod (nx) w)) 0)
+                 [r fl] (if (pos? fb) (fp-to-fixed :h a fb w sg) (fp-toint :h a m w sg))]]
+       (ncase (str (fpcr-stub fpcr (str op "\t" g "5, h1" (when (pos? fb) (str ", #" fb)))) "\tfmov\td0, x5\n") v1 v2 [r fl]))
+     ;; the Advanced SIMD FP16 lanes: three same, two-register miscellaneous (4h, 8h)
+     (for [op ops3 q [false true] i (range 3)
+           :let [[mode fpcr dn? fz] (mode-of) [v1 v2] (pair op (+ i (if q 3 0))) d (v0-of v1 v2) n (if q 8 4)
+                 pw (boolean (#{"faddp" "fmaxp" "fminp" "fmaxnmp" "fminnmp"} op)) src (vec (concat (vls v1 16 n) (vls v2 16 n)))
+                 rs (for [k (range n)]
+                      (if pw
+                        (h-lane op (src (* 2 k)) (src (inc (* 2 k))) 0 mode dn? fz)
+                        (h-lane op (vlane v1 k 16) (vlane v2 k 16) (vlane d k 16) mode dn? fz)))]]
+       (ncase (fpcr-stub fpcr (str op "\tv0." (ar q) ", v1." (ar q) ", v2." (ar q))) v1 v2 (hout rs q)))
+     (for [op ops2 q [false true] _ (range 3)
+           :let [[mode fpcr dn? fz] (mode-of) v1 (if (#{"scvtf" "ucvtf"} op) [(nx) (nx)] (hvec)) v2 (hvec) n (if q 8 4)
+                 rs (for [k (range n)] (h-lane op (vlane v1 k 16) 0 0 mode dn? fz))]]
+       (ncase (fpcr-stub fpcr (str (mn op) "\tv0." (ar q) ", v1." (ar q) (when (z? op) ", #0.0"))) v1 v2 (hout rs q)))
+     ;; their scalar forms on h
+     (for [op ["fabd" "fmulx" "fcmeq" "fcmge" "fcmgt" "facge" "facgt" "frecps" "frsqrts"] i (range 4)
+           :let [[mode fpcr dn? fz] (mode-of) [v1 v2] (pair op (inc i)) r (h-lane op (vlane v1 0 16) (vlane v2 0 16) 0 mode dn? fz)]]
+       (ncase (fpcr-stub fpcr (str op "\th0, h1, h2")) v1 v2 (hout [r] false)))
+     (for [op ["fcvtns" "fcvtnu" "fcvtps" "fcvtpu" "fcvtms" "fcvtmu" "fcvtzs" "fcvtzu" "fcvtas" "fcvtau" "scvtf" "ucvtf"
+               "fcmeq0" "fcmge0" "fcmgt0" "fcmle0" "fcmlt0" "frecpe" "frsqrte" "frecpx"] _ (range 3)
+           :let [[mode fpcr dn? fz] (mode-of) v1 (hvec) v2 (hvec) r (h-lane op (vlane v1 0 16) 0 0 mode dn? fz)]]
+       (ncase (fpcr-stub fpcr (str (mn op) "\th0, h1" (when (z? op) ", #0.0"))) v1 v2 (hout [r] false)))
+     ;; the scalar pairwise (from 2h) and the across lanes (4h, 8h)
+     (for [op ["faddp" "fmaxp" "fminp" "fmaxnmp" "fminnmp"] _ (range 4)
+           :let [[mode fpcr dn? fz] (mode-of) v1 (hvec) v2 (hvec) r (h-lane op (vlane v1 0 16) (vlane v1 1 16) 0 mode dn? fz)]]
+       (ncase (fpcr-stub fpcr (str op "\th0, v1.2h")) v1 v2 (hout [r] false)))
+     (for [[op k] [["fmaxv" :max] ["fminv" :min] ["fmaxnmv" :maxnm] ["fminnmv" :minnm]] q [false true] _ (range 4)
+           :let [[_ fpcr dn? fz] (mode-of) v1 (hvec) v2 (hvec) r (h-reduce k (vls v1 16 (if q 8 4)) dn? fz)]]
+       (ncase (fpcr-stub fpcr (str op "\th0, v1." (ar q))) v1 v2 (hout [r] false)))
+     ;; by an h element (v2's lane), vector and scalar
+     (for [op ["fmla" "fmls" "fmul" "fmulx"] a ["4h" "8h" :h] i (range 3)
+           :let [[mode fpcr dn? fz] (mode-of) [v1 v2] (pair op (inc i)) d (v0-of v1 v2) idx (mod (nx) 8) y (vlane v2 idx 16)
+                 n (case a "4h" 4 "8h" 8 1)
+                 rs (for [k (range n)] (h-lane op (vlane v1 k 16) y (vlane d k 16) mode dn? fz))]]
+       (ncase (fpcr-stub fpcr (if (= a :h) (str op "\th0, h1, v2.h[" idx "]") (str op "\tv0." a ", v1." a ", v2.h[" idx "]")))
+              v1 v2 (hout rs (= a "8h"))))
+     ;; the fixed-point conversions (4h, 8h, h)
+     (for [op ["scvtf" "ucvtf" "fcvtzs" "fcvtzu"] a ["4h" "8h" :h] i (range 3)
+           :let [[mode fpcr dn? fz] (mode-of) to? (str/starts-with? op "fcvt") sg (#{"scvtf" "fcvtzs"} op)
+                 fb (case (long i) 0 1 1 16 (inc (mod (nx) 16))) v1 (if to? (hvec) [(nx) (nx)]) v2 (hvec)
+                 n (case a "4h" 4 "8h" 8 1)
+                 rs (for [k (range n)]
+                      (let [x (vlane v1 k 16)]
+                        (if to? (fp-to-fixed :h (hz fz x) fb 16 sg) (binding [*fz16* fz] (fp-from-fixed :h x 16 fb sg mode)))))]]
+       (ncase (fpcr-stub fpcr (if (= a :h) (str op "\th0, h1, #" fb) (str op "\tv0." a ", v1." a ", #" fb))) v1 v2 (hout rs (= a "8h")))))))
+
+(def fp16-families
+  [["neon-fp16" "FEAT_FP16: half precision's scalar FP classes (arithmetic, fused multiply-add, fsqrt, frint*, the compares, fccmp, fcsel, fmov, the conversions from and into w and x with their fixed-point forms) and the Advanced SIMD FP16 classes (three same, two-register miscellaneous, the estimates, the scalar forms, the pairwise and across lanes ones, by element, the fixed-point conversions, fmov's vector immediate), under FPCR's modes, DN, FZ16 and AHP" fp16-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -2397,6 +2656,11 @@
          ;; AR14 (ARS68 (a)): the rest of ARMv8.0's Advanced SIMD and FP
          (for [[i [nm what f]] (map-indexed vector est-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1200 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR15 (ARS72 (a)): FEAT_FP16
+         (for [[i [nm what f]] (map-indexed vector fp16-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1300 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)
