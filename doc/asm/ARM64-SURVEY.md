@@ -1894,3 +1894,88 @@ Numbering from ARS72. Each with options, the recommended named; none taken.
 - **ARS73 synth-neon-est in the essential subset.** (a) a quarter of it (170 cases) beside the other quarters; (b) the rotation alone.
   *Recommended: (a)*: its decoder sits first in decodeFP, so every FP and SIMD word of the essential programs passes through it, and
   a quarter costs under a second by ARS69's numbers.
+
+## As built: AR15 (2026-11-13; branch `280-asm-arm64-ar15`, from `277-asm-arm64-ar14` `4b5b4135b`; queue task 280, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max, /proc/cpuinfo's fphp and asimdhp), stage 0 and TamaGo's
+go; every check under 1 GiB but the conversion by repr/go's native reader (2.2 GiB, one-off); no GNU tool (LLVM 23's llvm-mc and
+llvm-objdump only to look at encodings by hand, in no check). The user's answers (2026-11-13): ARS72 (a), ARS73 (a). The semantics
+read again from the Arm ARM (DDI 0487: the A64 FP16 encodings of the scalar FP classes at ftype 11 and of the Advanced SIMD three
+same (FP16), two-register miscellaneous (FP16), scalar three same and two-register miscellaneous (FP16), scalar pairwise, across
+lanes, vector x indexed element and shift by immediate classes, FMOV (vector, immediate)'s o2; FPUnpack and FPUnpackBase (FPCR.FZ16,
+AHP forced 0), FPRoundBase's flush before rounding, FPUnpackCV and FPRoundCV (FZ16 cleared), FPRecipEstimate and FPRSqrtEstimate at
+N = 16, Reduce, VFPExpandImm); no code copied. The CPU is the decisive judge; qemu-aarch64 (the synthetic `--record`'s second judge)
+is the main host's.
+
+- **ARS72 (a): FEAT_FP16 in a64i** (`go/arbace/a64i/simdhalf.ae`, new; written as Go in a copy of the light driver's printed module,
+  built and run there first, then converted by repr/go's native reader, `REPR_GO_JOBS=1`, 40 s, peak 2.2 GiB; `simdhalf.ae` taken
+  whole from the conversion; the hooks hand-edited as forms: `decodeHalf` first in `decodeFP`, `execHalf` first in `execFP`,
+  `lowerHalf` first in `lowerSIMD`, `rounded`'s flush, the estimates' result exponents at N = 16 in `simdest.ae`, the injected `h` in
+  `cpu.ae`; the header's `:files`, `(load "a64i/simdhalf")`, `halfMnemonics` in its `:init-order`; `emu/arm64.ae`'s AT_HWCAP):
+  - the scalar FP classes at ftype 11 as the existing operations at Size 1 (OpFMOV, OpFMOVI with VFPExpandImm at half, OpFMOVG from
+    and into w and x, OpFP1, OpFP2, OpFP3, OpFCMP, OpFCCMP, OpFCSEL, OpCVTF and OpFCVTI with their fixed-point forms); fcvt between
+    half and single or double stays AR14's OpFCVT. The Advanced SIMD FP16 classes as OpVF3 and OpVF2 (vector 4h and 8h, scalar h),
+    OpVEST (frecpe, frsqrte, frecpx, frecps, frsqrts; fmaxnmv, fminnmv, fmaxv, fminv on 4h and 8h, Reduce's halves recursively; fmov's
+    vector immediate), OpVF3's scalar pairwise from 2h, OpVEL by an h element (H:L:M, the register v0-v15), OpVFIX (immh 001x, 1 to
+    16 fraction bits). `execHalf` runs them on the shared operations at `halfFmt`; the integer lanes' Size 1 (OpVEL's mul, 4h's
+    integer classes) are untouched.
+  - **FPCR.FZ16 as the Arm ARM has it, and as the M2 does**: FPUnpack's flush of a subnormal operand to a zero of its sign (no IDC at
+    half precision), FPRoundBase's flush of a result tiny before rounding (UFC alone), FPRecipEstimate's flush of an operand of 2^14 or
+    more (a zero, UFC); not in the conversions (FPConvert's FPUnpackCV and FPRoundCV clear it), nor in fabs, fneg, fmov, fcsel.
+    FPCR.AHP is ignored by the arithmetic (FPUnpack and FPRound force it to 0; fcvt's AHP stays refused), and FPCR.FZ, single and double
+    precision's, does not refuse a half instruction. FEAT_AFP stays absent (AH RES0, ARS71 (a)), so FPCR.AH's half-precision paths do
+    not arise.
+  - AT_HWCAP is FP, ASIMD, FPHP and ASIMDHP (0x603, was 0; the loader judge masks AT_HWCAP, the CPU's being the M2's).
+  - Coverage names `fadd.h`, `fmadd.h`, `fmov.h.w`, `scvtf.fix.h.x`, `fcvtzs.fix.w.h`, `v.fadd.8h`, `v.fabd.h`, `v.frecpe.4h`,
+    `v.frecpx.h`, `v.fmaxv.8h`, `v.fmla.e.4h`, `v.fmla.e.h`, `v.scvtf.fix.8h`, `v.fmov.imm.4h` (242 new: fp 68, simd 174).
+  - The synthetic program `synth-neon-fp16` (947 cases, gen.ae's `fp16-cases`, seed + 1300; neon's setup; each FP case under one of
+    `h-modes`: FPCR 0, RMode 1-3, DN, FZ16 alone, with RMode 2, with DN, with FZ and RMode 1, and AHP; operands across half's specials,
+    subnormals, the smallest normals, the large exponents of frecpe's flush, near one, integral values and halves of them, exact zero
+    sums, step pairs whose product is exactly 2 or 3): the model the scalar rm models at :h (gen.ae's `f-val` and `f-bits` now take
+    :h, the estimates their exponents at N = 16, `vfp-expand` :h), FPUnpack's flush (`hz`) and FPRoundBase's (`round-rat` under
+    `*fz16*`), FPRecipEstimate's flush, `h-reduce`. The M2 agreed with the model on every case at the first run; a64i (eval, AOT, forms
+    4,686 of 4,686 words, lockstep sys and step 29,222 of 29,224 instructions) on its first run; every other program's digest unchanged
+    by the model's edits. A raw differential beside it (170 FP16 forms over 48 rows each of specials and any bits under 12 FPCR
+    settings, FZ16, AHP and FZ among them, v0, FPSR, NZCV and a general result printed; not committed) gave this CPU's output byte for
+    byte, AOT and eval, its small run stepped equal (810,224 instructions with V0-V31, FPSR and FPCR). Without FZ16's input flush (a
+    scratch build) the probe differs from the CPU in 854 lines and 78 of synth-neon-fp16's cases fail: the M2 flushes as modelled.
+    Controls verdict-19, forms-12, inject-36 (simd:x), inject-37 (fp:x), inject-38 and step-11 (the injected `h`: FZ16's input flush
+    skipped, caught by the step mode at a half fsub: `fpsr 0x10, native 0x0`).
+- **ARS73 (a): `synth-neon-est-e` in the essential subset**: every fourth case of synth-neon-est (170), as the other quarters; controls
+  verdict-20, inject-39 (fp:x). The subset (81 programs) timed alone by `--only LIST`, without and with it in alternation, at load 5-12
+  (275 and 279 beside): 35.8 / 37.6, 31.6 / 41.3, 43.6 / 43.4, 43.6 / 43.2 and 40.5 s (means 38.7 and 41.2 s: about +2.5 s, within the
+  runs' noise of about 6 s); `--essential` 36.2 s, under 1 GiB.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 101 / 101 each | **103 / 103 each** (28 synthetic programs, 27,298 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,546 of 2,546 (fp 140, simd 1,871) | **2,788 of 2,788** (fp 208, simd 2,045) |
+| controls (`test/asm/controls-a64i.txt`) | 86 | **94**; table check's 1 |
+| `--essential` | 80 programs | **81** (with synth-neon-est-e) |
+| goi's checker over a64i (linux/arm64, `bin/a64i table-check`) | 0 errors | **0** (the `:init-order` with `halfMnemonics`) |
+| `[:asm-arm64 :eval]` | 404 / 0 / 0 | **412 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,063 / 0 / 13 | **3,065 / 0 / 13** |
+
+**crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged, `--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells
+checked, 0 problems. Proofs: `bin/a64i synth --record` (28 programs, the runner this CPU: `REPR_ASM_RUNNER=/usr/bin/env`), `bin/a64i
+check --record` whole (103 of 103, 1 min 24 s, 0.85 GiB), `--essential`, `bin/a64i table-check` (29 s warm). The keys do not move
+(`test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go --gate-key` `ee1501081ae8...` at the base and the head). The a64i driver
+still builds for linux/amd64. Found on the way: a64i's refusal of FPCR.FZ (ARS59 (b)) covers `fmov` between a general register and d0
+too, which FZ does not affect on the CPU; the generator moves a case's general result into d0 after FPCR is cleared (ARS75). Left to
+the main host: `bin/a64i synth --record` under qemu-aarch64 (synth-neon-fp16's and synth-neon-est-e's second judge), `bin/gate
+--plan`.
+
+### Proposed (AR15)
+
+Numbering from ARS74. Each with options, the recommended named; none taken.
+
+- **ARS74 NEON's slice after FEAT_FP16.** (a) the crypto extension (FEAT_AES, FEAT_SHA1, FEAT_SHA256, FEAT_PMULL's pmull 1q), claimed in
+  AT_HWCAP; (b) the M2's other ARMv8.2-8.4 SIMD features compiled code meets: FEAT_DotProd (sdot, udot), FEAT_RDM (sqrdmlah, sqrdmlsh),
+  FEAT_FHM (fmlal, fmlsl), FEAT_FCMA (fcmla, fcadd), FEAT_JSCVT (fjcvtzs); (c) none. *Recommended: (b)*: compilers emit DotProd and RDM
+  for `-march=armv8.2-a+` loops before crypto intrinsics, and each sits on lanes a64i now has (FHM on FP16's).
+- **ARS75 FPCR.FZ at single and double precision.** a64i refuses it at every single and double FP instruction, fmov's too (the M2 keeps
+  FZ and flushes). (a) model it as FZ16 is now modelled (FPUnpack's flush with IDC, FPRoundBase's flush), a program setting FZ then
+  running as on the M2; (b) keep the refusal, but not for the instructions FZ does not affect (fmov, fabs, fneg, fcsel, the loads and
+  stores); (c) as built. *Recommended: (a)*: the flush is in place for half precision, and the M2 is the judge for it.
+- **ARS76 synth-neon-fp16 in the essential subset.** (a) a quarter of it (237 cases) beside the other quarters; (b) the rotation alone.
+  *Recommended: (a)*: decodeHalf sits first in decodeFP, so every FP and SIMD word of the essential programs passes through it.
