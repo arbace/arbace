@@ -936,3 +936,74 @@ operation, so no build shows it. Nothing reported upstream.
 
 **Not done**: the legacy exceptions (WA8), the proposals beyond 3.0 (WAS4 (a)), mode `:full`'s text (byte for byte, the `$id`s and
 spellings as a layer: the user's "later"; it does not fit this branch beside WA3), the branch hints.
+
+## As built: WA4 (2026-11-13, branch `wasm-wa4`)
+
+The user's decisions of 2026-11-13: WAS27-WAS29 as recommended, and WA4 started. Built from `mac/wasm-wa3` (`6da9f9be2`). doc/wasm/WAI.md
+describes the engine, its internal code, its hosts and the check.
+
+**What was built**:
+
+- **`go/arbace/wai`** (WAS6 (a), WAS7 (a); a crop path since WA1, so no key moves): the decoder of the binary format (every section of
+  Wasm 3.0, GC's rec groups canonicalized for the process: iso-recursive equivalence as id equality, subtyping by the declared
+  supertypes), the translation of each body at load into a flat internal code (static stack heights: a branch carries its arity, its
+  target's height and pc; `try_table`'s clauses as handlers over pc ranges), the store, the linker (match.ml's rules: `unknown import`,
+  `incompatible import type`), instantiation in eval.ml's order, the interpreter (calls as Go calls under a depth of 20,000, tail calls
+  in place, traps as panics recovered at the boundary, exceptions looked up in the frames' handlers), SIMD128 and relaxed SIMD (each
+  lane written out; the relaxed choices the reference interpreter's, `relaxed_madd` fused and rounded once), GC's structs, arrays,
+  `i31`, casts and conversions, and the `spectest` host. 5,100 lines of Go written in a module copy (`.tmp/wai-src`), converted to forms
+  by repr/go's native reader (`bin/repr-go read --goos linux --goarch amd64`, a package at a time, about 75 s and 1.1 GB each under
+  GOMEMLIMIT=1100MiB GOGC=25 REPR_GO_JOBS=1: the driver's first conversion at the defaults passed 2.5 GiB and was killed by the watcher),
+  224 KB of forms; the op table `optab` generated from repr/wasm's `ops.ae` (`bin/wai ops gen|check`, `test/wasm/gen_wai_ops.awk`).
+  wai has no validator of its own yet (WAS30).
+- **The light driver** `test/wasm/wai-driver` (`waidriver wast|control|ops`), built with wai by TamaGo's go alone (`bin/wai light`:
+  `bin/build-go --print-only`, then `go build`, seconds; kept by its sources' digest).
+- **`arbace.wasm.check`** (`arbace/wasm/check.ae`): the planner, on the tools' host: each script read by repr/wasm, its modules written
+  as binaries (a `binary` one's own bytes, the rest encoded canonically), each command a line of the plan with its arguments and
+  expected results as tokens (doc/wasm/WAI.md §5.1-§5.2).
+- **`bin/wai`** (`light`, `check [--record] [--only LIST]`, `essential`, `divergences`, `ops gen|check`; Makefile `wai-*`): the plan, the
+  run, the judgment against `test/wasm/eval-results.edn` and `test/wasm/divergences-eval.edn`, the controls of
+  `test/wasm/controls-eval.txt`. The judges are the reference runner's (WAS8 (a)): `assert_return` by `assert_result` (the NaN
+  patterns by their bits, references by kind, `either`), `assert_trap`, `assert_exhaustion`, `assert_exception`, `assert_unlinkable`,
+  `assert_uninstantiable` (and `assert_trap` of a module), `register`, `get`, `invoke` across modules; each trap's and link failure's
+  message a `msg/` row by prefix (the second level). Beyond the root, a non-pass's reason is prefixed by its proposal as
+  `bin/repr-wasm wast`'s are, and classed by it.
+- **The row**: the eval cell's sources (`test/reap/cells.edn`: the commands, and the messages `:role :beside`); `test/crops/crops.edn`'s
+  controls, `test/crops/independence.edn`'s eval stage (1: wai, built by the seed's toolchain); the fragment `test/gate/crops/wasm.edn`
+  gains `wai-essential` (essential, chain `wasm-essential`) and `wai-check` (`--full`), not spliced (as WA1-WA3's steps: at the merge).
+- **A reader fix the run found**: repr/wasm's lexer ended a `;;` comment at U+0A alone; a newline is also U+0D (comments.wast's
+  `module quote` with `;; comment\0d`: the read and print levels passed, the forms read the same wrong way both times; wai's result
+  1 for 2 showed it).
+
+**Counts** (`bin/wai check --record`):
+
+| | before (WA3) | after (WA4) |
+|---|---|---|
+| root scripts, eval commands | no check | **60,498 of 60,498 pass** (modules, actions and every assertion of eval: the planner writes no line for assert_malformed and assert_invalid, the read cell's) |
+| root scripts, messages (msg/) | no check | **5,192 of 5,192** |
+| proposals/, legacy/, custom/ | no check | 1,437 commands: 395 pass, 1,042 classed (threads 259, custom-descriptors 496, wide-arithmetic 101, custom-page-sizes 54, compact-import-section 45, extended-name-section 12, legacy exceptions 75); messages 65 of 66 (1 threads) |
+| REAP eval cell | no check yet | 60,893 / 0 / 1,042 |
+| controls | | 12 fail as they must, 3 positive checks pass |
+
+The first whole run (a dev build from the module copy, before SIMD): 36,370 pass, 25,697 fail, all but four `unimplemented: simd`
+(the four: a canonical-type key whose separator was the byte 0x7c, f64's code, so `(func (param f64))` and `(func (result f64))`
+collided; an element trap's message without its index; comments.wast). That run's first try also exposed a growth overflow:
+`table.grow` on a table64 by 2^64-1 wrapped `old+n` and appended without end, 55 GB before the kernel killed it (a rule slip: the
+driver ran without a watcher; every run after under `.tmp/watch.sh`'s 2.5 GiB). With SIMD and relaxed SIMD: one failure, an f32
+`relaxed_madd` rounded twice (through float64), fixed by rounding the float64 sum to odd. Measured (stage 0 and TamaGo's go, by hand,
+one run at a time): the check over the 258 root scripts 263 s and 0.68 GB (the 293: 0.62 GB), almost all of it the planner on stage 0, the run on wai about 2.5 s; the essential command
+(`bin/wai ops check && bin/wai essential`, 53 scripts, 18,601 commands) 62 s and 0.54 GB.
+
+**Proposals** (numbered after WAS29):
+
+- **WAS30 wai's own validator.** (a) a validator in wai, judged against arbace.wasm.valid's verdicts over the testsuite as a `:beside`
+  source (the survey's §13.1), before WA9 runs modules Arbace did not validate; (b) none: wai runs only what Arbace validated.
+  *Recommended: (a)*, with WA5 (the Go-built modules are its first inputs not from the testsuite).
+- **WAS31 SIMD brought forward.** WA6's SIMD128 and relaxed SIMD were built here (Wasm 2.0 includes SIMD128: the brief's "2.0's
+  semantics"). (a) keep WA6 for what is left of it (the Go-built SIMD programs with `GOEXPERIMENT=simd`, a SIMD corpus beyond the
+  testsuite); (b) fold WA6 into WA4. *Recommended: (a)*.
+- **WAS32 The proposals' scripts at eval.** (a) as built: the 35 scripts beyond the root run and classed by proposal, as at read; (b)
+  only the root scripts until WA8. *Recommended: (a)*.
+
+**Not done**: WASI preview 1 and the Go-built `wasip1` programs (WA5; WAS11's start did not fit), wai's own validator (WAS30), the legacy
+exceptions and the proposals beyond 3.0, the AOT cell (WA7).

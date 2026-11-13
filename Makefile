@@ -1181,3 +1181,17 @@ check-makefile: ## every bin/ script this Makefile's recipes run exists and is e
 	    | grep -oE 'bin/[a-z0-9-]+' | sort -u); do \
 	  [ -x "$$s" ] || { echo "Makefile: $$s is not an executable script" >&2; missing=1; }; done; \
 	exit $$missing
+
+.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check
+wai-light: ## wai, Arbace's WebAssembly engine (WA4, doc/wasm/WAI.md): its light driver built alone by TamaGo's go into .tmp/wai/wai (bin/wai light)
+	bin/wai light
+wai-check: ## the testsuite's scripts planned by arbace.wasm.check and run on wai, each command by its own assertion, against test/wasm/eval-results.edn (bin/wai check)
+	bin/wai check
+wai-essential: ## wai's essential subset, test/wasm/essential-eval.txt, with the negative controls (bin/wai essential)
+	bin/wai essential
+wai-record: ## wai's check recorded into test/wasm/eval-results.edn (bin/wai check --record)
+	bin/wai check --record
+wai-divergences: ## the eval record's non-passes against test/wasm/divergences-eval.edn (bin/wai divergences)
+	bin/wai divergences
+wai-ops-check: ## wai's instruction table against repr/wasm's arbace/repr/wasm/ops.ae, row for row (bin/wai ops check)
+	bin/wai ops check

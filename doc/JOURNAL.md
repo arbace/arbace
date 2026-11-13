@@ -5558,3 +5558,43 @@ or above 0x80 is followed by a `nop`: `writeOpcode` (`src/cmd/internal/obj/wasm/
 the u32's two bytes, then writes 0x01 again. For the relaxed range it writes `writeUleb128(op - 0x100 + 0x80)` and 0x02: such an
 instruction would decode as the one 0x80 below its opcode, a `nop` and a `block` byte (by reading; archsimd exposes no relaxed
 operation to build). Not reported upstream, by the user's decision.
+
+## 2026-11-13: wasm-wa4, WA4: wai, Arbace's WebAssembly engine, and the testsuite at eval (branch `wasm-wa4`, from `mac/wasm-wa3` `6da9f9be2`)
+
+The user decided WAS27-WAS29 as recommended (2026-11-13) and asked to start WA4: `wai`, Arbace's own Wasm engine in Go forms as a light
+driver (WAS6 (a), WAS7 (a)), wasmi and wazero (v1.12.0, the pinned `.tmp/wasm/tree/wazero-1.12.0`) read as references, nothing
+converted; the judges the testsuite's own assertions (WAS8 (a)). Sources read: WebAssembly/spec at tag wg-3.0 (`9d360199`),
+`interpreter/exec/eval.ml` (the order of instantiation's effects, the trap messages, the call budget), `exec/v128.ml` and
+`exec/eval_vec.ml` (the relaxed SIMD choices), `exec/fxx.ml` (fma), `runtime/value.ml` (eq_ref), `host/spectest.ml`, `script/run.ml`
+(assert_result, assert_nan_pat, assert_ref_pat, the assertions' messages); the testsuite at `92a3d806`. Doc: doc/wasm/WAI.md and
+doc/wasm/WASM-SURVEY.md, "As built: WA4".
+
+Built: `go/arbace/wai` (the decoder with process-wide canonical types, the internal code with static stack heights and handlers, the
+store and linker, the interpreter, SIMD128 and relaxed SIMD, GC, the spectest host; written as Go in `.tmp/wai-src`, converted by
+`bin/repr-go read --goos linux --goarch amd64` a package at a time, AXS68 (a)'s way), its light driver `test/wasm/wai-driver` built
+by TamaGo's go alone, the planner `arbace.wasm.check` on stage 0 (each script read by repr/wasm, its modules written as binaries, each
+command a plan line), `bin/wai` (light, check, essential, divergences, ops), the record `test/wasm/eval-results.edn`, the classes
+`test/wasm/divergences-eval.edn` (the proposals beyond 3.0 and the legacy exceptions, by proposal as at read), the controls
+`test/wasm/controls-eval.txt` (12 negative: a wrong expected value, an assert_return judged as a trap, a trap, an exhaustion and an
+exception judged as returns, an action against another script's expected results, a trap's message against another's, a failing
+module judged as instantiable, a module judged as uninstantiable; 3 positive), the essential list `test/wasm/essential-eval.txt`
+(53 scripts), the REAP eval cell's sources, the crop's controls and independence (eval 1), the fragment's `wai-essential` and
+`wai-check` (not spliced), Makefile `wai-*`.
+
+Alternatives considered: the WAST scripts read in Go (rejected: repr/wasm already reads them, and the planner keeps one reader); a
+runtime label stack (rejected for static heights: a branch's copy known at load); values as 8-byte slots with v128 as two (rejected:
+the code would need every operand's type, i.e. a validator's pass, at load; 16-byte slots need none); SIMD left for WA6 as the
+survey's order had it (brought forward, WAS31: Wasm 2.0 includes SIMD128 and the brief asked for 2.0's semantics; it took the eval
+cell from 36,370 to 60,498 root commands).
+
+Results: the root scripts 60,498 of 60,498 commands and 5,192 of 5,192 messages; beyond the root 1,437 commands, 395 pass, 1,042
+classed; the REAP eval cell 60,893 / 0 / 1,042. Found on the way: repr/wasm's lexer ended a `;;` comment only at U+0A (fixed: U+0D
+too; comments.wast's quote module); a canonical-type key collision (the separator byte was f64's code); element traps' messages without
+their index. A rule slip: the first whole run went without a memory watcher and `table.grow` of a table64 by 2^64-1 wrapped its
+bound check and grew to 55 GB before the kernel killed it (host MemAvailable 50 GB then; the night-13 gate had ended); fixed (an
+overflow check, and the arrays' cap lowered to 2^24 elements), every later run under a 2.5 GiB watcher. Measured: the check 263 s and
+0.68 GB over the root scripts (the planner nearly all of it; the run on wai 2.5 s), the essential command 62 s and 0.54 GB. The branch
+moves no key beyond WA1's (gate-key-crops-test; `bin/arbace-go --gate-key` before and after).
+
+Proposals: WAS30 (wai's own validator, judged against arbace.wasm.valid), WAS31 (SIMD brought forward from WA6), WAS32 (the scripts
+beyond the root at eval). Not done: WASI preview 1 and the `wasip1` Go programs (WA5, WAS11's start), the AOT cell (WA7).

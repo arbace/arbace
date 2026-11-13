@@ -452,8 +452,11 @@ model's edges), 251 (pyi on goi's speed), 252 (3.15's P6-P8).
   (the text format and the testsuite's scripts at the read and print levels: "As built: WA2", "As built: WA2 (rest)": the
   proposals/, legacy/ and custom/ scripts classed by proposal, @custom and @name, the messages' second level); branch `wasm-wa3`: WA3
   built (`arbace.wasm.valid`, Wasm 3.0's validation: the root scripts 7,182 of 7,182 read cases, 4,668 of 4,668 messages; "As built:
-  WA3"); Go's SIMD encoding verified (a `nop` after each SIMD opcode at or above 0x80). The REAP row after the asm rows (read
-  7,840 / 0 / 454), eval and AOT "no check yet". To decide: WAS27-WAS29. Next: WA4 wai; mode :full's text; WA8's legacy exceptions.
+  WA3"); Go's SIMD encoding verified (a `nop` after each SIMD opcode at or above 0x80); WAS27-WAS29 decided as recommended (the
+  user 2026-11-13). Branch `wasm-wa4`: WA4 built (wai, the engine in Go forms as a light driver, with SIMD128 and relaxed SIMD and
+  GC; `bin/wai check`: the root scripts 60,498 of 60,498 commands, 5,192 of 5,192 messages, the 35 beyond classed by proposal;
+  doc/wasm/WAI.md, "As built: WA4"). The REAP row read 7,840 / 0 / 454, eval 60,893 / 0 / 1,042, AOT "no check yet". To decide:
+  WAS30-WAS32. Next: WA5 (WASI preview 1, the `wasip1` Go programs), WA7 w2g; mode :full's text; WA8's legacy exceptions.
   The branches move `gate_key` once (WA1's crop paths' lists): they merge in a key window.
 - repr/haskell and repr/rust's round trips stay out of `--full` until their rows fit the budget; Zed parked
   ([ZED-SURVEY.md](ZED-SURVEY.md)).

@@ -1,0 +1,107 @@
+(in-ns 'go.arbace.wai) (go/file "machine.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [runtime "runtime"]])
+
+
+
+(go/const ^{:val 20000 :doc "MaxDepth is the call depth beyond which a call exhausts the stack (assert_exhaustion's \"call stack exhausted\").\n"} MaxDepth 20000)
+
+
+(go/type Machine "Machine runs functions over one value stack.\n" (struct
+    ^{:line 13 :tag (* Store)} St
+    ^{:line 14 :tag (slice V)} stack
+    ^{:line 15 :tag int} sp ; the stack's top between the machine's calls (the base a host or a constant expression runs on)
+    ^{:line 16 :tag int} depth))
+
+
+
+^{:go/end 22} (go/func NewMachine "NewMachine is a machine over a new store.\n" ^{:tag (* Machine)} []
+  (addr (lit Machine :St (addr (lit Store)) :stack (make (slice V) (<< 1 12)))))
+
+
+^{:go/end 30} (go/method ensure [^{:tag (* Machine)} m ^int n]
+  (when (> n (len (.-stack m)))
+    (let [s (make (slice V) (* 2 n))]
+      (copy s (.-stack m))
+      (set! (.-stack m) s))))
+
+
+
+
+
+^{:go/end 56} (go/method recoverTo "recoverTo turns the engine's panics into errors at its boundary: a trap, an exhaustion, an uncaught exception, else a crash\n(a fault of wai's own, with its stack's first lines).\n" [^{:tag (* Machine)} m ^{:tag (* error)} err]
+  (let [x (recover)]
+    (when (== x nil)
+      (return))
+
+    (set! (.-depth m) 0)
+    (type-switch [e x]
+      (case [(* Trap)]
+        (set! @err e))
+      (case [Exhaustion]
+        (set! @err e))
+      (case [(* Uncaught)]
+        (set! @err e))
+      (case [(* LinkError)]
+        (set! @err e))
+      (case [(* Unimplemented)]
+        (set! @err e))
+      (default
+        (let [buf (make (slice byte) 2048)
+            ^{:line 53} n (runtime/Stack buf false)]
+          (set! @err (fmt/Errorf "crash: %v [%s]" x (firstFrames (conv string (subslice buf _ n))))))))))
+
+
+
+^{:go/end 71} (go/func firstFrames ^string [^string s]
+  (let [out ""
+      ^{:line 60} n 0]
+    (range [_ l (splitLines s)]
+      (when (and (> (len l) 0) (== (aget l 0) \tab))
+        (set! out + (+ (subslice l 1) "; "))
+        (inc! n)
+        (when (== n 6)
+          (break))))
+
+
+
+    ^{:line 70} out))
+
+
+^{:go/end 83} (go/func splitLines ^{:tag (slice string)} [^string s]
+  (let [^{:tag (slice string)} out (zero (slice string))
+      ^{:line 75} st 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (when (== (aget s i) \newline)
+        (set! out (append out (subslice s st i)))
+        (set! st (+ i 1))))
+
+
+    (append out (subslice s st))))
+
+
+
+^{:go/end 89} (go/method Call "Call invokes a function with its arguments: its results, or a *Trap, Exhaustion, *Uncaught or crash error.\n" [^{:tag (* Machine)} m ^{:tag (* Func)} f ^{:tag (slice V)} args] :results [^{:tag (slice V)} res ^error err]
+  (defer (.recoverTo m (addr err)))
+  (.call m f args))
+
+
+^{:go/end 108} (go/method call [^{:tag (* Machine)} m ^{:tag (* Func)} f ^{:tag (slice V)} args] :results [(slice V) error]
+  (let [t (aget ctypes (.-Type f))
+      ^{:line 93} base (.-sp m)]
+    (.ensure m (+ base (len args) 16))
+    (copy (subslice (.-stack m) base) args)
+    (when (!= (.-Host f) nil)
+      (return ((.-Host f) m args) nil))
+
+    (let [saved (.-sp m)]
+      (when [e (.run m f base)] (!= e nil)
+        (set! (.-sp m) saved)
+        (return nil (addr (lit Uncaught e))))
+
+      (set! (.-sp m) saved)
+      (let [res (make (slice V) (len (.-Results t)))]
+        (copy res (subslice (.-stack m) base (+ base (len (.-Results t)))))
+        (return res nil)))))

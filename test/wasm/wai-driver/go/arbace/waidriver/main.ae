@@ -1,0 +1,676 @@
+;; Command waidriver is wai's light driver (doc/wasm/WAI.md §5): it runs the plans arbace.wasm.check makes of the testsuite's
+;; scripts, each command judged by its own assertion, and writes the rows [ID RESULT REASON].
+;;
+;;	waidriver wast PLANS.LIST ROWS.EDN           every plan of the list (NAME<tab>PLAN<tab>MODDIR a line)
+;;	waidriver control PLAN MODDIR K MODE [PLAN2 K2]  a negative control on the command K (doc/wasm/WAI.md §5.4): differs or same
+(in-ns 'go.arbace.waidriver) (go/file "main.go" :doc "Command waidriver is wai's light driver (doc/wasm/WAI.md §5): it runs the plans arbace.wasm.check makes of the testsuite's\nscripts, each command judged by its own assertion, and writes the rows [ID RESULT REASON].\n\n\twaidriver wast PLANS.LIST ROWS.EDN           every plan of the list (NAME<tab>PLAN<tab>MODDIR a line)\n\twaidriver control PLAN MODDIR K MODE [PLAN2 K2]  a negative control on the command K (doc/wasm/WAI.md §5.4): differs or same\n" :imports [
+
+
+    ^{:line 9} [bufio "bufio"]
+    ^{:line 10} [hex "encoding/hex"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [os "os"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+
+    ^{:line 17} [wai "arbace/wai"]])
+
+
+(go/type row (struct ^string id ^string result ^string reason))
+
+(go/type runner (struct
+    ^{:line 23 :tag (* wai/Machine)} m
+    ^{:line 24 :tag string} dir
+    ^{:line 25 :tag (map string (* wai/Module))} mods
+    ^{:line 26 :tag (map string string)} modErr
+    ^{:line 27 :tag (map string (* wai/Instance))} insts
+    ^{:line 28 :tag (map string string)} instErr
+    ^{:line 29 :tag (map string (* wai/Instance))} reg
+    ^{:line 30 :tag (map string string)} regErr))
+
+
+^{:go/end 38} (go/func newRunner ^{:tag (* runner)} [^string dir]
+  (let [r (addr ^{:go/breaks [10]} (lit runner :m (wai/NewMachine) :dir dir :mods (lit (map string (* wai/Module))) :modErr (lit (map string string))
+          :insts (lit (map string (* wai/Instance))) :instErr (lit (map string string)) :reg (lit (map string (* wai/Instance))) :regErr (lit (map string string))))]
+    (aset (.-reg r) "spectest" (wai/Spectest (.-m r)))
+    ^{:line 37} r))
+
+
+^{:go/end 52} (go/func clean ^string [^string s]
+  (set! s (.Replace (strings/NewReplacer "\t" " " "\n" " " "\r" " " "\"" "'" "\\" "(backslash)") s))
+  (let [b (conv (slice byte) s)]
+    (range [i c b]
+      (when (or (< c 0x20) (> c 0x7e))
+        (aset b i \?)))
+
+
+    (when (> (len b) 300)
+      (set! b (append (subslice b _ 300) (spread "..."))))
+
+    (conv string b)))
+
+
+^{:go/end 60} (go/func unhex ^string [^string s]
+  (let [(values b err) (hex/DecodeString s)]
+    (when (!= err nil)
+      (return (+ "?" s)))
+
+    (conv string b)))
+
+
+^{:go/end 67} (go/func key ^string [^string n]
+  (when (== n "-")
+    (return ""))
+
+  ^{:line 66} n)
+
+
+^{:go/end 87} (go/func errText ^string [^error err]
+  (let [^{:tag (* wai/Trap)} t (zero (* wai/Trap))
+      ^{:line 71 :tag (* wai/Unimplemented)} u (zero (* wai/Unimplemented))
+      ^{:line 72 :tag (* wai/LinkError)} l (zero (* wai/LinkError))
+      ^{:line 73 :tag (* wai/Uncaught)} x (zero (* wai/Uncaught))]
+    (switch
+      (case [(errors/As err (addr u))]
+        (return (.Error u)))
+      (case [(errors/As err (addr t))]
+        (return (+ "trap: " (.-Msg t))))
+      (case [(errors/As err (addr l))]
+        (return (+ "link: " (.-Msg l))))
+      (case [(errors/As err (addr x))]
+        (return "uncaught exception"))
+      (case [(errors/Is err (lit wai/Exhaustion))]
+        (return "exhaustion: call stack exhausted")))
+
+    (.Error err)))
+
+
+^{:go/end 95} (go/method decode [^{:tag (* runner)} r ^string file] :results [(* wai/Module) error]
+  (let [(values b err) (os/ReadFile (+ (.-dir r) "/" file))]
+    (when (!= err nil)
+      (return nil err))
+
+    (wai/Decode b)))
+
+
+^{:go/end 104} (go/method resolve [^{:tag (* runner)} r ^string mod ^string name] :results [wai/Extern bool]
+  (let [(values inst ok) (aget (.-reg r) mod)]
+    (when (not ok)
+      (return (lit wai/Extern) false))
+
+    (let [(values x ^:assign ok) (aget (.-Exports inst) name)]
+      (return x ok))))
+
+
+^{:go/end 113} (go/method instantiate [^{:tag (* runner)} r ^{:tag (* wai/Module)} mod] :results [(* wai/Instance) error]
+  (range [_ im (.-Imports mod)]
+    (when [(values e ok) (aget (.-regErr r) (.-Module im))] ok
+      (return nil (errors/New e))))
+
+
+  (.Instantiate (.-m r) mod (.-resolve r)))
+
+
+^{:go/end 123} (go/method instance [^{:tag (* runner)} r ^string n] :results [(* wai/Instance) string]
+  (when [(values inst ok) (aget (.-insts r) (key n))] ok
+    (return inst ""))
+
+  (when [(values e ok) (aget (.-instErr r) (key n))] ok
+    (return nil e))
+
+  (return nil (+ "no instance " n)))
+
+
+
+^{:go/end 153} (go/func parseArg "value tokens (doc/wasm/WAI.md §5.2)\n" [^string tok] :results [wai/V error]
+  (let [(values k v _) (strings/Cut tok ":")]
+    (switch k
+      (case ["i32" "i64" "f32" "f64"]
+        (let [(values x err) (strconv/ParseUint v 16 64)]
+          (return (lit wai/V :L x) err)))
+      (case ["v128"]
+        (let [(values b err) (hex/DecodeString v)]
+          (when (or (!= err nil) (!= (len b) 16))
+            (return (lit wai/V) (fmt/Errorf "bad v128 %s" tok)))
+
+          (let [(values ^uint64 lo ^uint64 hi) (zero uint64)]
+            (for [i 7] (>= i 0) (dec! i)
+              (set! lo (bit-or (<< lo 8) (conv uint64 (aget b i))))
+              (set! hi (bit-or (<< hi 8) (conv uint64 (aget b (+ 8 i))))))
+
+            (return (lit wai/V :L lo :H hi) nil))))
+      (case ["null"]
+        (return (lit wai/V) nil))
+      (case ["extern"]
+        (let [(values x err) (strconv/ParseUint v 10 64)]
+          (return (wai/ExternRef x) err)))
+      (case ["host"]
+        (let [(values x err) (strconv/ParseUint v 10 64)]
+          (return (wai/HostRef x) err))))
+
+    (return (lit wai/V) (fmt/Errorf "bad argument %s" tok))))
+
+
+^{:go/end 160} (go/func fields ^{:tag (slice string)} [^string s]
+  (when (== s "")
+    (return nil))
+
+  (strings/Split s " "))
+
+
+^{:go/end 179} (go/func lanes ^{:tag (slice uint64)} [^wai/V v ^int bits]
+  (let [n (/ 128 bits)
+      ^{:line 164} out (make (slice uint64) n)]
+    (for [i 0] (< i n) (inc! i)
+      (let [off (* i bits)
+          ^{:line 167} w (.-L v)]
+        (when (>= off 64)
+          (set! w (.-H v))
+          (set! off - 64))
+
+        (let [x (>> w (conv uint off))]
+          (when (< bits 64)
+            (set! x bit-and (- ^uint64 (<< 1 (conv uint bits)) 1)))
+
+          (aset out i x))))
+
+    ^{:line 178} out))
+
+
+^{:go/breaks [[4 197]] :go/end 198} (go/func nanMatch ^bool [^string pat ^uint64 x ^int bits]
+  (if (== bits 32)
+    (switch pat
+      (case ["canonical"]
+        (return (== (bit-and x 0x7fffffff) 0x7fc00000)))
+      (case ["arithmetic"]
+        (return (== (bit-and x 0x7fc00000) 0x7fc00000))))
+
+
+    (switch pat
+      (case ["canonical"]
+        (return (== (bit-and x 0x7fffffffffffffff) 0x7ff8000000000000)))
+      (case ["arithmetic"]
+        (return (== (bit-and x 0x7ff8000000000000) 0x7ff8000000000000)))))
+
+
+  false)
+
+
+
+^{:go/end 287} (go/func match "match: a result against an expected token, by the reference runner's assert_result\n" ^bool [^string tok ^wai/V v ^wai/ValType t]
+  (when (strings/HasPrefix tok "either:")
+    (range [_ alt (strings/Split (subslice tok (len "either:")) "|")]
+      (when (match alt v t)
+        (return true)))
+
+
+    (return false))
+
+  (let [(values k rest _) (strings/Cut tok ":")
+      ^{:line 211} kind (.Kind t)]
+    (switch k
+      (case ["i32" "f32"]
+        (when (!= kind k)
+          (return false))
+
+        (when (or (== rest "canonical") (== rest "arithmetic"))
+          (return (nanMatch rest (.-L v) 32)))
+
+        (let [(values x _) (strconv/ParseUint rest 16 64)]
+          (return (== (conv uint32 (.-L v)) (conv uint32 x)))))
+      (case ["i64" "f64"]
+        (when (!= kind k)
+          (return false))
+
+        (when (or (== rest "canonical") (== rest "arithmetic"))
+          (return (nanMatch rest (.-L v) 64)))
+
+        (let [(values x _) (strconv/ParseUint rest 16 64)]
+          (return (== (.-L v) x))))
+      (case ["v128"]
+        (when (!= kind "v128")
+          (return false))
+
+        (let [(values shape ls ok) (strings/Cut rest ":")]
+          (when (not ok)
+            (let [(values w err) (parseArg tok)]
+              (return (and (== err nil) (== w v)))))
+
+          (let [bits (aget (lit (map string int) ["i8x16" 8] ["i16x8" 16] ["i32x4" 32] ["i64x2" 64] ["f32x4" 32] ["f64x2" 64]) shape)
+              ^{:line 241} got (lanes v bits)
+              ^{:line 242} want (strings/Split ls ",")]
+            (when (!= (len want) (len got))
+              (return false))
+
+            (range [i w want]
+              (when (or (== w "canonical") (== w "arithmetic"))
+                (when (not (nanMatch w (aget got i) bits))
+                  (return false))
+
+                (continue))
+
+              (let [(values x _) (strconv/ParseUint w 16 64)]
+                (when (!= (aget got i) x)
+                  (return false))))
+
+
+            (return true)))))
+
+    (when (!= kind "ref")
+      (return false))
+
+    ^{:go/breaks [[3 286]]} (let [rk (wai/RefKind v)]
+      (switch k
+        (case ["null"]
+          (return (== rk "null")))
+        (case ["extern"]
+          (let [(values x _) (strconv/ParseUint rest 10 64)]
+            (return (== v (wai/ExternRef x)))))
+        (case ["host"]
+          (let [(values x _) (strconv/ParseUint rest 10 64)]
+            (return (== v (wai/HostRef x)))))
+        (case ["ref"]
+          (switch rest
+            (case ["any"]
+              (return (!= rk "func")))
+            (case ["eq"]
+              (return (or (== rk "i31") (== rk "struct") (== rk "array"))))
+            (case ["extern"]
+              (return true))
+            (case ["none"]
+              (return (== rk "null"))))
+
+          (return (== rk rest))))
+
+      false)))
+
+
+^{:go/end 308} (go/func show ^string [^{:tag (slice wai/V)} vs ^{:tag (slice wai/ValType)} ts]
+  (let [^{:tag (slice string)} b (zero (slice string))]
+    (range [i v vs]
+      (let [k "?"]
+        (when (< i (len ts))
+          (set! k (.Kind (aget ts i))))
+
+        (switch k
+          (case ["i32" "f32"]
+            (set! b (append b (fmt/Sprintf "%s:%08x" k (conv uint32 (.-L v))))))
+          (case ["i64" "f64"]
+            (set! b (append b (fmt/Sprintf "%s:%016x" k (.-L v)))))
+          (case ["v128"]
+            (set! b (append b (fmt/Sprintf "v128:%016x%016x" (.-H v) (.-L v)))))
+          (default
+            (set! b (append b (+ "ref:" (wai/RefKind v))))))))
+
+
+    (strings/Join b " ")))
+
+
+
+^{:go/end 343} (go/method action "action runs an action's fields (KIND INST NAMEHEX ARGS): its results and their types, or the error.\n" [^{:tag (* runner)} r ^{:tag (slice string)} f] :results [(slice wai/V) (slice wai/ValType) error]
+  (let [(values inst why) (.instance r (aget f 1))]
+    (when (== inst nil)
+      (return nil nil (errors/New why)))
+
+    (let [name (unhex (aget f 2))
+        (values x ok) (aget (.-Exports inst) name)]
+      (when (not ok)
+        (return nil nil (fmt/Errorf "plan: no export %q" name)))
+
+      (when (== (aget f 0) "get")
+        (when (== (.-Global x) nil)
+          (return nil nil (fmt/Errorf "plan: export %q is no global" name)))
+
+        (return (lit (slice wai/V) (.-Val (.-Global x))) (lit (slice wai/ValType) (.-T (.-T (.-Global x)))) nil))
+
+      (when (== (.-Func x) nil)
+        (return nil nil (fmt/Errorf "plan: export %q is no function" name)))
+
+      (let [^{:tag (slice wai/V)} args (zero (slice wai/V))]
+        (range [_ t (fields (aget f 3))]
+          (let [(values v err) (parseArg t)]
+            (when (!= err nil)
+              (return nil nil err))
+
+            (set! args (append args v))))
+
+        (when (!= (len args) (len (wai/FuncParams (.-Func x))))
+          (return nil nil (fmt/Errorf "plan: wrong number of arguments: %d for %v (%q)" (len args) (wai/FuncParams (.-Func x)) (aget f 3))))
+
+        (let [(values res err) (.Call (.-m r) (.-Func x) args)]
+          (return res (wai/FuncResults (.-Func x)) err))))))
+
+
+^{:go/end 351} (go/func trapMsg [^error err] :results [string bool]
+  (let [^{:tag (* wai/Trap)} t (zero (* wai/Trap))]
+    (when (errors/As err (addr t))
+      (return (.-Msg t) true))
+
+    (return "" false)))
+
+
+^{:go/end 359} (go/func msgRow ^row [^string id ^string expect ^string got]
+  (let [mid (+ "msg/" (subslice id (+ (strings/IndexByte id \/) 1)))]
+    (when (strings/HasPrefix got expect)
+      (return (lit row mid ":pass" "")))
+
+    (lit row mid ":fail" (clean (fmt/Sprintf "message: expected '%s', got '%s'" expect got)))))
+
+
+^{:go/end 361} (go/func pass ^row [^string id] (lit row id ":pass" ""))
+^{:go/end 362} (go/func fail ^row [^string id ^string why] (lit row id ":fail" (clean why)))
+^{:go/end 363} (go/func failErr ^row [^string id ^error e] (fail id (errText e)))
+
+
+^{:go/end 501} (go/method command "command runs one plan line; it returns the command's rows (none for a register).\n" [^{:tag (* runner)} r ^string id ^{:tag (slice string)} f] :results [^{:tag (slice row)} rows]
+  (defer (^{:go/end 371} (fn []
+        (when [x (recover)] (!= x nil)
+          (set! rows (lit (slice row) (fail id (fmt/Sprintf "crash: driver: %v" x))))))))
+
+
+  (let [kind (aget f 0)]
+    (set! f (subslice f 1))
+    (switch kind
+      (case ["fail"]
+        (return (lit (slice row) (fail id (aget f 0)))))
+      (case ["module" "definition"]
+        (let [(values mod err) (.decode r (aget f 1))
+            ^{:line 379} n (key (aget f 0))]
+          (when (!= err nil)
+            (set! (values (aget (.-modErr r) n) (aget (.-modErr r) "")) (values (errText err) (errText err)))
+            (set! (values (aget (.-instErr r) n) (aget (.-instErr r) "")) (values (errText err) (errText err)))
+            (delete (.-mods r) n)
+            (delete (.-mods r) "")
+            (delete (.-insts r) n)
+            (delete (.-insts r) "")
+            (return (lit (slice row) (failErr id err))))
+
+          (set! (values (aget (.-mods r) n) (aget (.-mods r) "")) (values mod mod))
+          (when (== kind "definition")
+            (return (lit (slice row) (pass id))))
+
+          (let [(values inst ^:assign err) (.instantiate r mod)]
+            (when (!= err nil)
+              (let [e (+ "instantiation: " (errText err))]
+                (set! (values (aget (.-instErr r) n) (aget (.-instErr r) "")) (values e e))
+                (delete (.-insts r) n)
+                (delete (.-insts r) "")
+                (return (lit (slice row) (fail id e)))))
+
+            (set! (values (aget (.-insts r) n) (aget (.-insts r) "")) (values inst inst))
+            (delete (.-instErr r) n)
+            (delete (.-instErr r) "")
+            (return (lit (slice row) (pass id))))))
+      (case ["instance"]
+        (let [(values mod ok) (aget (.-mods r) (key (aget f 1)))
+            ^{:line 407} n (key (aget f 0))]
+          (when (not ok)
+            (let [e (+ "no module " (aget f 1))]
+              (when [(values me ok) (aget (.-modErr r) (key (aget f 1)))] ok
+                (set! e me))
+
+              (set! (values (aget (.-instErr r) n) (aget (.-instErr r) "")) (values e e))
+              (return (lit (slice row) (fail id e)))))
+
+          (let [(values inst err) (.instantiate r mod)]
+            (when (!= err nil)
+              (let [e (+ "instantiation: " (errText err))]
+                (set! (values (aget (.-instErr r) n) (aget (.-instErr r) "")) (values e e))
+                (return (lit (slice row) (fail id e)))))
+
+            (set! (values (aget (.-insts r) n) (aget (.-insts r) "")) (values inst inst))
+            (return (lit (slice row) (pass id))))))
+      (case ["register"]
+        (let [name (unhex (aget f 0))
+            (values inst why) (.instance r (aget f 1))]
+          (when (== inst nil)
+            (aset (.-regErr r) name why)
+            (delete (.-reg r) name)
+            (return nil))
+
+          (delete (.-regErr r) name)
+          (aset (.-reg r) name inst)
+          (return nil)))
+      (case ["action"]
+        (let [(values _ _ err) (.action r f)]
+          (when (!= err nil)
+            (return (lit (slice row) (failErr id err))))
+
+          (return (lit (slice row) (pass id)))))
+      (case ["assert_return"]
+        (let [(values res ts err) (.action r f)]
+          (when (!= err nil)
+            (return (lit (slice row) (failErr id err))))
+
+          (let [want (fields (aget f 4))]
+            (when (!= (len want) (len res))
+              (return (lit (slice row) (fail id (fmt/Sprintf "wrong number of results: %s, expected %s" (show res ts) (aget f 4))))))
+
+            (range [i w want]
+              (when (not (match w (aget res i) (aget ts i)))
+                (return (lit (slice row) (fail id (fmt/Sprintf "result %d: %s, expected %s" i (show res ts) (aget f 4)))))))
+
+
+            (return (lit (slice row) (pass id))))))
+      (case ["assert_trap" "assert_exhaustion"]
+        (let [(values res ts err) (.action r f)
+            ^{:line 458} expect (unhex (aget f 4))]
+          (when (== err nil)
+            (return (lit (slice row) (fail id (+ "returned " (show res ts) ", expected " (strings/TrimPrefix kind "assert_") " '" expect "'")))))
+
+          (cond (== kind "assert_trap")
+            (when [(values msg ok) (trapMsg err)] ok
+              (return (lit (slice row) (pass id) (msgRow id expect msg))))
+
+            (errors/Is err (lit wai/Exhaustion))
+            (return (lit (slice row) (pass id) (msgRow id expect "call stack exhausted"))))
+
+          (return (lit (slice row) (fail id (+ (errText err) ", expected " (subslice kind (len "assert_")) " '" expect "'"))))))
+      (case ["assert_exception"]
+        (let [(values res ts err) (.action r f)
+            ^{:line 472 :tag (* wai/Uncaught)} u (zero (* wai/Uncaught))]
+          (when (errors/As err (addr u))
+            (return (lit (slice row) (pass id))))
+
+          (when (== err nil)
+            (return (lit (slice row) (fail id (+ "returned " (show res ts) ", expected an exception")))))
+
+          (return (lit (slice row) (fail id (+ (errText err) ", expected an exception"))))))
+      (case ["assert_trap_module" "assert_uninstantiable" "assert_unlinkable"]
+        (let [expect (unhex (aget f 1))
+            (values mod err) (.decode r (aget f 0))]
+          (when (!= err nil)
+            (return (lit (slice row) (failErr id err))))
+
+          (set! (values _ err) (.instantiate r mod))
+          (when (== err nil)
+            (return (lit (slice row) (fail id (+ "instantiated, expected '" expect "'")))))
+
+          (let [^{:tag (* wai/LinkError)} l (zero (* wai/LinkError))]
+            (if (== kind "assert_unlinkable")
+              (when (errors/As err (addr l))
+                (return (lit (slice row) (pass id) (msgRow id expect (.-Msg l)))))
+
+              (when [(values msg ok) (trapMsg err)] ok
+                (return (lit (slice row) (pass id) (msgRow id expect msg)))))
+
+            (return (lit (slice row) (fail id (+ (errText err) ", expected '" expect "'"))))))))
+
+    (lit (slice row) (fail id (+ "plan: unknown command " kind)))))
+
+
+(go/type planLine (struct
+    ^{:line 504 :tag string} k
+    ^{:line 505 :tag (slice string)} f))
+
+
+^{:go/end 522} (go/func readPlan [^string path] :results [(slice planLine) error]
+  (let [(values b err) (os/ReadFile path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [^{:tag (slice planLine)} out (zero (slice planLine))]
+      (range [_ l (strings/Split (conv string b) "\n")]
+        (when (== l "")
+          (continue))
+
+        (let [fs (strings/Split l "\t")]
+          (set! out (append out (lit planLine (aget fs 0) (subslice fs 1))))))
+
+      (return out nil))))
+
+
+^{:go/end 535} (go/func runScript ^{:tag (slice row)} [^string name ^string plan ^string dir]
+  (let [(values lines err) (readPlan plan)]
+    (when (!= err nil)
+      (return (lit (slice row) (fail (+ name "#0") (.Error err)))))
+
+    (let [r (newRunner dir)
+        ^{:line 530 :tag (slice row)} rows (zero (slice row))]
+      (range [_ l lines]
+        (set! rows (append rows (spread (.command r (+ name "#" (.-k l)) (.-f l))))))
+
+      ^{:line 534} rows)))
+
+
+^{:go/end 541} (go/func writeRows [^{:tag (* bufio/Writer)} w ^{:tag (slice row)} rows]
+  (range [_ x rows]
+    (fmt/Fprintf w "[%q %s %q]\n" (.-id x) (.-result x) (.-reason x))))
+
+
+
+
+^{:go/end 634} (go/func control "control: the command K of a plan judged in another role (doc/wasm/WAI.md §5.4); differs when its judge rejects it\n" ^string [^string plan ^string dir ^string k ^string mode ^string plan2 ^string k2]
+  (let [(values lines err) (readPlan plan)]
+    (when (!= err nil)
+      (return (+ "error: " (.Error err))))
+
+    (let [r (newRunner dir)]
+      (range [_ l lines]
+        (when (!= (.-k l) k)
+          (.command r (+ "c#" (.-k l)) (.-f l))
+          (continue))
+
+        (let [f (append (lit (slice string)) (spread (.-f l)))]
+          (switch mode
+            (case ["self"])
+            ;; the positive check: the command as it is, which must pass
+            (case ["wrong-value"]
+              ;; the first expected result changed in its lowest bit
+              (when (!= (aget f 0) "assert_return")
+                (return "error: not an assert_return"))
+
+              (let [want (fields (aget f 5))]
+                (when (== (len want) 0)
+                  (return "error: no result"))
+
+                (let [(values kk v _) (strings/Cut (aget want 0) ":")
+                    (values x err) (strconv/ParseUint v 16 64)]
+                  (when (!= err nil)
+                    (return (+ "error: " (aget want 0))))
+
+                  (aset want 0 (+ kk ":" (strconv/FormatUint (bit-xor x 1) 16)))
+                  (aset f 5 (strings/Join want " ")))))
+            (case ["as-trap"]
+              ;; an assert_return judged as an assert_trap: it returns, so it must fail
+              (when (!= (aget f 0) "assert_return")
+                (return "error: not an assert_return"))
+
+              (aset f 0 "assert_trap")
+              (aset f 5 (hex/EncodeToString (conv (slice byte) "unreachable"))))
+            (case ["as-return"]
+              ;; an assert_trap (assert_exhaustion, assert_exception) judged as an assert_return of no result: it traps
+              (switch (aget f 0)
+                (case ["assert_trap" "assert_exhaustion"]
+                  (aset f 5 ""))
+                (case ["assert_exception"]
+                  (set! f (append f "")))
+                (default
+                  (return "error: not an assert_trap")))
+
+              (aset f 0 "assert_return"))
+            (case ["as-module"]
+              ;; an instantiation that must fail (assert_trap of a module, assert_unlinkable, assert_uninstantiable) judged as a module
+              (switch (aget f 0)
+                (case ["assert_trap_module" "assert_unlinkable" "assert_uninstantiable"])
+                (default
+                  (return "error: not a failing module")))
+
+              (set! f (lit (slice string) "module" "-" (aget f 1))))
+            (case ["as-uninstantiable"]
+              (when (!= (aget f 0) "module")
+                (return "error: not a module"))
+
+              (set! f (lit (slice string) "assert_uninstantiable" (aget f 2) (hex/EncodeToString (conv (slice byte) "unreachable")))))
+            (case ["vs" "msg-vs"]
+              (let [(values other err) (readPlan plan2)]
+                (when (!= err nil)
+                  (return (+ "error: " (.Error err))))
+
+                (let [^{:tag (slice string)} o (zero (slice string))]
+                  (range [_ l2 other]
+                    (when (== (.-k l2) k2)
+                      (set! o (.-f l2))))
+
+
+                  (when (or (== o nil) (< (len o) 6) (< (len f) 6))
+                    (return "error: no such command"))
+
+                  ;; this action judged against the other command's expectation (its results, or its trap's message)
+                  (aset f 5 (aget o 5)))))
+            (default
+              (return (+ "error: unknown mode " mode))))
+
+          (let [rows (.command r (+ "testsuite/c#" (.-k l)) f)]
+            (range [_ x rows]
+              (when (!= (.-result x) ":pass")
+                (return "differs")))
+
+
+            (return "same"))))
+
+      (+ "error: no command " k))))
+
+
+^{:go/end 678} (go/func main []
+  (when (< (len os/Args) 2)
+    (fmt/Fprintln os/Stderr "waidriver wast LIST ROWS | control PLAN MODDIR K MODE [PLAN2 K2]")
+    (os/Exit 2))
+
+  (switch (aget os/Args 1)
+    (case ["wast"]
+      (let [(values b err) (os/ReadFile (aget os/Args 2))]
+        (when (!= err nil)
+          (fmt/Fprintln os/Stderr err)
+          (os/Exit 1))
+
+        (let [(values out ^:assign err) (os/Create (aget os/Args 3))]
+          (when (!= err nil)
+            (fmt/Fprintln os/Stderr err)
+            (os/Exit 1))
+
+          (let [w (bufio/NewWriter out)]
+            (range [_ l (strings/Split (conv string b) "\n")]
+              (when (== l "")
+                (continue))
+
+              (let [fs (strings/Split l "\t")]
+                (writeRows w (runScript (aget fs 0) (aget fs 1) (aget fs 2)))
+                (.Flush w)))
+
+            (.Flush w)
+            (.Close out)))))
+    (case ["ops"]
+      (range [_ l (wai/OpRows)]
+        (fmt/Println l)))
+
+    (case ["control"]
+      (let [a (subslice os/Args 2)]
+        (while (< (len a) 6)
+          (set! a (append a "")))
+
+        (fmt/Println (control (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4) (aget a 5)))))
+    (default
+      (fmt/Fprintln os/Stderr "waidriver: unknown verb" (aget os/Args 1))
+      (os/Exit 2))))
