@@ -762,18 +762,40 @@
         (= "GHC.Internal.Prim" (nmod n)) (ext-name "var" "GHC.Internal.Types" (str "$tc" (occ n)))
         :else (ext-name "var" (nmod n) (str "$tc" (occ n)))))
 
+(def ^:private many-typeable
+  (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
+        [(list 'v (ext-name "var" "GHC.Internal.Types" "$tc'Many")) (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))]))
+(def ^:private lifted-rep-typeable
+  (let [con (fn [o] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
+                          [(list 'v (ext-name "var" "GHC.Internal.Types" (str "$tc'" o))) (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))]))]
+    (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep"))
+          [(list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [(con "BoxedRep") (con "Lifted")])])))
+(defn- typeable-fun [m a b] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrFun")) [m a b]))
+
 (defn- typeable-term
   "Typeable's evidence for a type without variables (GHC.Tc.Instance.Class's Typeable solver: a type constructor
   mkTrCon of its $tc binding, an application mkTrApp of its parts); nil for another type"
   [t]
   (let [t (deep-expand (zonk t))]
     (when (= :tc (first t))
+      (if (and (= fun-tc (second t)) (= 2 (count (nth t 2))))
+        ;; HF10-P39 (a): a function type's evidence (doFunTy, the desugarer's EvTypeableTrFun): mkTrFun of the
+        ;; multiplicity's ('Many, its promoted constructor's $tc'Many) and the argument's and result's
+        (let [[a b] (map typeable-term (nth t 2))]
+          (when (and a b) (typeable-fun many-typeable a b)))
       (let [[_ n args] t
             con (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
-                      [(list 'v (typeable-tycon-ref n)) (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))])
+                      [(list 'v (typeable-tycon-ref n))
+                       (if (= fun-tc n)
+                         ;; HF10-P39 (a): the arrow unapplied ((->) = FUN 'Many, funTyCon's typeRep @(->)): $tcFUN's three
+                         ;; kind arguments (splitForAllForAllTyBinders: m, q, r), 'Many and the defaulted LiftedRep twice
+                         (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
+                                 (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
+                                 [lifted-rep-typeable lifted-rep-typeable (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep")) [many-typeable])])
+                         (list 'v (ext-name "var" "GHC.Internal.Types" "[]")))])
             subs (mapv typeable-term args)]
         (when (every? some? subs)
-          (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])) con subs))))))
+          (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])) con subs)))))))
 
 (declare cls-callstack fresh-lv)
 
@@ -816,8 +838,12 @@
                     :app (let [f (part (nth t 1)) x (part (nth t 2))]
                            (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])))
                     :tc (when (seq (nth t 2))
+                          (if (and (= fun-tc (second t)) (= 2 (count (nth t 2))))
+                            ;; HF10-P39 (a): doFunTy with variables
+                            (let [a (part (first (nth t 2))) b (part (second (nth t 2)))]
+                              (when (and a b) (typeable-fun many-typeable a b)))
                           (let [f (part [:tc (second t) (vec (butlast (nth t 2)))]) x (part (last (nth t 2)))]
-                            (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x]))))
+                            (when (and f x) (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])))))
                     nil)))))
 ;; GHC.Tc.Instance.Class's matchDataToTag (HF9's second slice): DataToTag T for an algebraic data type T
         ;; (not a newtype), its dictionary the primop dataToTagSmall# (a family of fewer constructors than the pointer tag
