@@ -6338,3 +6338,48 @@ partial run is not recorded). Of the 181 modules the run finished, 549 methods w
 - **A whole run still needs**: the 347 modules night 12 did not reach (test.test_multiprocessing_spawn.* onwards, through
   test_zstd), and 1,821 `:runner-limits` rows of the run (test_pickle 477, test_subprocess 297, test_socket 246, test_os
   202, test_asyncio.test_events 131, ...) judged once 275's per-method timeout and fixes let them run.
+
+## As built: 279, the AOT record's dry run on arm64 and Lib/test compiled (2026-11-13, the Mac VM, queue 279)
+
+The user (2026-11-12): the AOT cell (`bin/pyi check --aot`, `test/python/check-aot-linux-amd64.edn`, reap's `:pyi-aot`)
+has never been recorded on amd64; run it on arm64 first as a dry run of the record's tooling. Base 201 bdf8c85ea.
+
+- **Two things**: the AOT cell's record is the 151 programs (synthetic corpus and samples); Lib/test by AOT was only
+  `lib-test --aot`, the driver compiled and every test module on its loop. **`bin/pyi check --aot --lib-test
+  [check's options] [MODULE...]`** (new) runs bin/pyi check's run and judge with each module's driver compiled with the
+  module ahead: `test/python/libtest_run.py` plus a never-run module-level `import MODULE` (`if sys.argv is None:`), so
+  the module and its static imports are compiled ahead and the driver's own import at run time (after regrtest's setup)
+  takes them compiled (AotRegister's key is the source's; probed: native 8 code objects against 2 without the import).
+  Each driver's compile seconds and peak memory in `RUN/aot-compile.tsv`, each driver run's in `RUN/MODULE.mem`; a
+  module not built is written as its IMPORT failure (not left to the loop); the run in `WORK/check/run-aot`, judged
+  against `PYI_CHECK_AOT_LIB_RECORD` (none committed); the drivers (about 220 MB each) removed after the run.
+  `bin/pyi aot-compile PKG FILE OUT`: one program compiled. The runner takes `PYI_LIB_TEST_DRIVER_DIR` (DIR/MODULE).
+- **The record's tooling**: `PYI_CHECK_AOT_RECORD` names check --aot's record (a dry run's scratch file; the committed
+  path was the only one).
+- **Fixed on the way**: the register generator put the dispatch label in a function whose only AotExec operation is
+  dead code ("label dispatch defined and not used": test_exception_variations did not build); a compiled driver ran
+  without bin/pyi run's environment (sys.executable '', every script_helper child "[Errno 13] Permission denied: ''"); a
+  compiled `reraise N` reported the reraise's lasti, f_lineno 0 after a handler's re-raise (AotReraise(f, i) as
+  OpReraise: test_exceptions' PEP626Tests, 7 methods, compiled only).
+- **The sample's runtime gaps** (compiled and on the loop alike, modules with no eval run on record): eight classes
+  before `:skipped-by-test` (`:property-core`, `:with-exit-traceback`, `:yield-from-iterator-value`,
+  `:dict-views-set-methods`, `:contains-none-blocks`, `:wrapper-attrs-shared`, `:setattr-str-subclass`,
+  `:entry-frame-teardown`; 35 methods); test_sys_settrace's 6 left to 278.
+- **Compile in parallel**: `PYI_AOT_LIB_JOBS` drivers at once (default `PYI_LIB_TEST_JOBS`), the first alone (a new
+  generator's packages dropped and made once), a package copied into the module through a name of its own; the AOT Go
+  cache trimmed after the run (`aot_cache_trim`). The judge of `check --aot` named a classed run `:differs` (it read
+  the class map's `:class`, the name is `:id`): del.py is now recorded `:finalization-goi` (reap re-classes by id, so the
+  matrix did not see it).
+- **Measured on the VM** (arm64, load about 13 from three agents; run): `bin/pyi check --aot --record` into a scratch
+  record, 151 programs: **150 pass, 1 classed (`:finalization-goi`), 0 failing**, the control failing as it must,
+  1 h 10 min, peak 3.0 GB (pyi on goi 56 min of it, about 25 s a program; the compiles 13 min after a generator change,
+  the compiled runs 9 s, the loop 5 s); copied in as the amd64 record, `bin/reap` reads it: AOT 150 / 0 / 1, the eval
+  cell's synthetic sources 150 / 1 / 0; its only problems the three stale `:until "PY8 ..."` and test/reap/matrix.edn
+  (`bin/reap --record` after the record). `check --aot --lib-test` over 47 modules (46 language-core and builtins
+  modules and test_capi, no process or thread module): **4,731 methods, 3,769 pass, 954 classed, 8 failing** (6 of
+  test_sys_settrace and test_fstring's test_many_expressions, 278's; test_exceptions' test_recursion_error_cleanup, a
+  flaky weakref timing test), 29.5 min at 2 jobs: the drivers 379 s (about 8 s each, 1.1-2.3 GB), the runs 23 min,
+  dominated by the modules whose children are pyi on goi (test_exceptions 21 min, two tests at the 300 s cap;
+  test_fstring, test_coroutines, test_frame, test_capi, test_getopt, test_list); the rest 1-15 s each against
+  3-12 min on goi (night 12: test_class 485 s, test_descr 687 s, test_patma 189 s; compiled 1-5 s). test_capi compiled:
+  496 pass, `:testcapi` 592, `:capi-port` 77, `:testcapi-parts` 0, as 274b's eval.

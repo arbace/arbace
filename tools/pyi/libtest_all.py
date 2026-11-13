@@ -289,10 +289,13 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
             e = dict(env(os.path.join(d, "_work")), PYTHONPATH=oracle, TMPDIR=tmp)
             if os.environ.get("PYI_LIB_TEST_ONLY"):
                 e["PYI_LIB_TEST_ONLY"] = os.environ["PYI_LIB_TEST_ONLY"]
-        elif os.environ.get("PYI_LIB_TEST_DRIVER_EXE"):
+        elif os.environ.get("PYI_LIB_TEST_DRIVER_EXE") or os.environ.get("PYI_LIB_TEST_DRIVER_DIR"):
             # the driver compiled by pyi's AOT (bin/pyi cover: built with Go's -cover), the module on its loop; each
-            # module's counters in PYI_LIB_TEST_COVER/MODULE (Go writes them at the process's exit, one file a run)
-            cmd = [os.environ["PYI_LIB_TEST_DRIVER_EXE"], driver, m, skipfile]
+            # module's counters in PYI_LIB_TEST_COVER/MODULE (Go writes them at the process's exit, one file a run).
+            # PYI_LIB_TEST_DRIVER_DIR (queue 279, bin/pyi check --aot --lib-test): DIR/MODULE, the driver compiled with
+            # the module and its imports ahead (the module's tests compiled, not on the loop)
+            exe = os.environ.get("PYI_LIB_TEST_DRIVER_EXE") or os.path.join(os.environ["PYI_LIB_TEST_DRIVER_DIR"], m)
+            cmd = [exe, driver, m, skipfile]
             e = dict(os.environ, TMPDIR=tmp)
             if os.environ.get("PYI_LIB_TEST_COVER"):
                 cov = os.path.join(os.environ["PYI_LIB_TEST_COVER"], m)
