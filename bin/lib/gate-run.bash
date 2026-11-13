@@ -423,7 +423,7 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
   done
   # GD4 (GDS12 (a)): a step whose log or outputs say "No space left on device" fails (a full disk's corrupt saves are no
   # pass), whatever its status; NAME.enospc names where
-  if enospc "$n"; then [ $st = 0 ] && st=28; fi
+  if enospc "$n" && [ $st = 0 ]; then st=28; echo $st > "$logs/$n.status"; fi
   [ -n "$aud" ] && audit_compare "$n" "$st"
   if [ $st = 0 ]; then rotation_note "$n" pass; else rotation_note "$n" fail; judge_note "$n"; fi
   if [ $st = 0 ] && [ "${dec[$n]}" = run ]; then

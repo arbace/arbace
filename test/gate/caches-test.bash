@@ -9,7 +9,8 @@
 #      the older generations (a day old), [:age-self D] an old test directory, :keep and :list nothing; --dry-run removes nothing;
 #      --cheap only the cheap rows; :max-entries warns; an unlisted entry is listed, never removed;
 #   4. worktrees_list names a merged worktree idle for a day, not an unmerged one, and removes nothing.
-# Usage: test/gate/caches-test.bash
+# Usage: test/gate/caches-test.bash [--coverage]   (in gate-tests: 1, 3 and 4; --coverage: 2 alone, the essential step caches-table,
+#        whose inputs are bin/ and the table: gate-tests' key does not hold bin/ whole)
 # needs: exe
 set -uo pipefail
 here=$(cd "$(dirname "$0")/../.." && pwd)
@@ -30,13 +31,14 @@ bad_rules=$(awk -F'\t' '$3 !~ /^(size|age|age-self|key-gen|count|builtin|keep|li
 [ -z "$bad_rules" ] && ok "every rule is a known one" || bad "unknown rules: $bad_rules"
 awk -F'\t' '$3 ~ /^(size|age|age-self|key-gen|count)$/ && $4 !~ /^[0-9]+$/ {print}' "$T/rows.tsv" > "$T/noarg"
 [ -s "$T/noarg" ] && bad "a rule without its number: $(head -2 "$T/noarg")" || ok "every counted rule has its number"
-. "$here/bin/lib/host.bash"
+root=$here; . "$here/bin/lib/host.bash"
 exe=${ARBACE_HOST_EXE:-$(arbace_host_exe)}
 if "$exe" -e "(let [v (read (java.io.PushbackReader. (java.io.FileReader. \"$tab\")))] (doseq [e v] (assert (string? (:path e)) (pr-str e)) (assert (string? (:owner e)) (pr-str e)) (assert (or (keyword? (:rule e)) (vector? (:rule e))) (pr-str e)) (assert (contains? #{:checkout :main :home nil} (:where e)) (pr-str e))) (println (count v)))" > "$T/read.out" 2>&1 \
    && [ "$(tail -1 "$T/read.out")" = "$n" ]; then ok "the Clojure reader reads the table: $n entries, each with :path, :owner, :rule"
 else bad "the Clojure reader: $(tail -3 "$T/read.out" | tr '\n' ' ')"; fi
 
 # 2. every .tmp name of bin/ is a row's
+if [ "${1:-}" = --coverage ]; then
 grep -rhoE '\.tmp/[A-Za-z0-9_][A-Za-z0-9_.-]*' "$here/bin" | sed 's/[.]$//; s|^\.tmp/||' | sort -u > "$T/names"
 awk -F'\t' '$1 ~ /^\.tmp\// {p = $1; sub(/^\.tmp\//, "", p); sub(/\/.*/, "", p); print p}' "$T/rows.tsv" | sort -u > "$T/globs"
 : > "$T/missing"
@@ -44,6 +46,9 @@ while IFS= read -r k; do
   awk -v k="$k" 'BEGIN { st = 1 } { g = $0; gsub(/\./, "\\.", g); gsub(/\*/, ".*", g); if (k ~ ("^" g "$")) st = 0 } END { exit st }' "$T/globs" || echo "$k" >> "$T/missing"
 done < "$T/names"
 [ ! -s "$T/missing" ] && ok "every .tmp name bin/ writes ($(wc -l < "$T/names")) is a row's" || bad "names no row covers: $(tr '\n' ' ' < "$T/missing")"
+[ $fail = 0 ] && rm -rf "$T"
+exit $fail
+fi
 
 # 3. the rules on a scratch tree
 R=$T/root M=$T/main H=$T/home G=$T/gocache

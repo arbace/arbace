@@ -12,7 +12,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
-  program programs-check programs-essential gate gate-full gate-full-parallel night night-plan gate-weekly-plan gate-plan gate-costs gate-why gate-audit gate-prune gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-subsets gate-subsets-check gate-demos java-check-judge provenance-check reap crops-score suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
+  program programs-check programs-essential gate gate-full gate-full-parallel night night-plan gate-weekly-plan gate-plan gate-costs gate-why gate-audit gate-prune gate-prune-worktrees gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-subsets gate-subsets-check gate-demos java-check-judge provenance-check reap crops-score records-check hooks suite oracle diffcheck generated-check gate-tests verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-target-gen repr-cpp-target-verify repr-cpp-target-oracle repr-cpp-record-dumps repr-cpp-verify-dumps repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-route-compare cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-musl-lock-test ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-verdicts \
@@ -115,7 +115,7 @@ gate-full: ## the full gate, one step after another, at milestones (bin/gate --f
 gate-full-parallel: ## the full gate's chains concurrently (GATE_FULL_PARALLEL=1 bin/gate --full)
 	GATE_FULL_PARALLEL=1 bin/gate --full
 night: ## the night's gate on this checkout: bin/gate --nightly, on the night that starts on Saturday bin/gate --weekly (GDS1 (a), GD1; bin/night; TIER=nightly|weekly)
-	bin/night $(if $(TIER),--tier $(TIER))
+	bin/night $(if $(TIER),--tier $(TIER)) $(if $(CONCURRENT),--concurrent)
 night-plan: ## the night's tier and its plan (bin/night --plan; TIER=nightly|weekly)
 	bin/night --plan $(if $(TIER),--tier $(TIER))
 gate-weekly-plan: ## the weekly tier's plan: --full with every part, the :clean-only weekly parts too (bin/gate --weekly --plan)
@@ -128,8 +128,10 @@ gate-why: ## why STEP=... runs: its key's inputs, its passes, what changed since
 	bin/gate --why $(STEP)
 gate-audit: ## audit STEP=... (every check without): the files a step reads under strace against its declared inputs in test/gate/steps.edn; an undeclared read fails (bin/gate --audit)
 	bin/gate --audit $(STEP)
-gate-prune: ## the gate's store of passes and the executables trimmed: the last 5 passes per step and the last 30 days kept, the newest 3 executables' directories (bin/gate --prune; DRY=--dry-run)
-	bin/gate --prune $(DRY)
+gate-prune: ## the gate's store, executables and every cache of test/gate/caches.edn by its rule (GD4): the last 5 passes and 30 days per step, the newest 3 executables, Go's cache to 8 GiB, ... (bin/gate --prune; DRY=--dry-run, CHEAP=--cheap)
+	bin/gate --prune $(DRY) $(CHEAP)
+gate-prune-worktrees: ## the worktrees merged into mac/next and idle for a day, listed, never removed (bin/gate --prune --dry-run --worktrees)
+	bin/gate --prune --dry-run --worktrees
 gate-clean: ## the essential gate clean: a fresh clone of HEAD's commit, empty caches, stage 0 and the executables built fresh, every step audited, its record test/gate/clean-TAG.edn (bin/gate --clean; TAG=...)
 	bin/gate --clean $(if $(TAG),--tag $(TAG))
 gate-full-clean: ## the clean run at a tag: bin/gate --full --clean (all parts, every step audited, Java's levels on the read's cache forced; hours; TAG=...)
@@ -172,6 +174,10 @@ oracle-records-mirror: ## the packs' mirror commands, the orphan branch oracle-p
 	bin/oracle-records mirror $(if $(PUSH),--push)
 reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C, C++, Scheme, OCaml, Python, LLVM IR, Rust, Haskell from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
 	bin/reap
+records-check: ## the records against their known files, judge-only: a :known row no known file lists, a stale entry, an unclassed row (bin/records-check; GD4, seconds)
+	bin/records-check
+hooks: ## the opt-in pre-commit hook: bin/records-check when a commit touches a known, results or divergences file (bin/records-check --install-hook; the user's choice)
+	bin/records-check --install-hook
 crops-score: ## each crop's completeness, maturity and independence as percentages, from the recorded results (bin/crops-score [ARGS="--newest|--ref REF|--crop C|--tsv"]; doc/CROPS-SCORE.md; no runs, seconds)
 	bin/crops-score $(ARGS)
 reap-record-native-check: ## Go's read level's numbers, test/repr/go/native-check-results.edn, from bin/repr-go native-check's report (bin/reap record-native-check [REPORT=...])
