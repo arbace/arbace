@@ -15,10 +15,13 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       checkout's paths"; a reason naming another path of the machine (under /root, /home, /tmp, /Users: Alpine's build
       directory) kept, the path's head written <home>/ and the like (queue 235: a record holds no host path; idempotent,
       rerun on a committed reference rewrites those lines alone)
-  run --root ROOT --modules FILE --dir DIR [--jobs N] [--test-timeout S] [--module-timeout S] [--oracle LIB] [--tmp-base D]
+  run --root ROOT --modules FILE --dir DIR [--jobs N] [--test-timeout S] [--idle-timeout S] [--module-timeout S] [--oracle LIB] [--tmp-base D]
       each module through test/python/libtest_run.py, by pyi (ROOT/bin/pyi run) or with --oracle by python3 (the
       control: PYTHONPATH LIB): DIR/MODULE.out, .err, .status in test/python/libtest_judge.ae's format. A test that
-      outlives S seconds (default 300) is killed and written "CASE ID timeout ..."; a driver that dies in a test (a Go
+      outlives S seconds (default 300) is killed and written "CASE ID timeout ..."; with --idle-timeout S (queue 275;
+      default 0, off; bin/pyi passes 90) one whose processes (the driver's session and its descendants, /proc) use under 5%
+      of one core for S seconds is a hang, killed then: "CASE ID timeout the test idle past S s, a hang ..."; each test's
+      wall and CPU seconds in DIR/MODULE.times (ID, outcome, wall, CPU; "#start N" lines: a driver start's import); a driver that dies in a test (a Go
       panic, a fatal error) is written "CASE ID crash FIRST-CAUSE"; either way the driver starts again on the module's
       other tests (its SKIPFILE the tests already reported), until DONE. A run that makes no progress, or the module's
       wall past its cap (default 3600), stops: no DONE, the judge's "crash" lines, status 124 for the cap. Modules
@@ -274,9 +277,49 @@ def first_cause(err, status=None):
     return last_line(err)[:200] or ("the driver died, status %s" % status if status is not None else "the driver died")
 
 
-def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
+try:
+    CLK_TCK = os.sysconf("SC_CLK_TCK") or 100
+except (ValueError, OSError, AttributeError):
+    CLK_TCK = 100
+
+
+def tree_cpu(pid):
+    """queue 275: the CPU seconds (user and system, with the reaped children's) of a driver's processes: its session
+    (start_new_session) and every process descended from it, from /proc; None where /proc cannot be read"""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    procs = {}
+    for n in names:
+        if not n.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % n) as f:
+                s = f.read()
+        except OSError:
+            continue
+        r = s[s.rfind(")") + 2:].split()
+        try:
+            procs[int(n)] = (int(r[1]), int(r[3]), sum(int(x) for x in r[11:15]))  # ppid, session, ticks
+        except (IndexError, ValueError):
+            continue
+    if pid not in procs:
+        return None
+    mine, grew = {q for q, v in procs.items() if q == pid or v[1] == pid}, True
+    while grew:
+        grew = False
+        for q, v in procs.items():
+            if q not in mine and v[0] in mine:
+                mine.add(q)
+                grew = True
+    return sum(procs[q][2] for q in mine) / CLK_TCK
+
+
+def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0):
     skipfile = os.path.join(d, m + ".skip")
     out_lines, err_parts, reported = [], [], set()
+    times = []  # queue 275: DIR/MODULE.times, a line a test: ID, outcome, wall and CPU seconds (the driver's processes)
     done = imported_fail = False
     status, t_mod, attempts = "0", time.monotonic(), 0
     driver = os.path.join(root, "test", "python", "libtest_run.py")
@@ -307,15 +350,30 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
         with open(errpath, "wb") as ef:
             p = subprocess.Popen(cmd, cwd=d, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=ef,
                                  text=True, encoding="utf-8", errors="replace", start_new_session=True)
-            state = {"current": None, "deadline": None, "killed": None}
+            state = {"current": None, "deadline": None, "killed": None, "t0": None, "cpu0": None, "samples": [],
+                     "t_start": time.monotonic()}
             lock = threading.Lock()
 
             def watch():
+                tick = 0
                 while p.poll() is None:
                     time.sleep(1)
+                    tick += 1
+                    # queue 275: every 5 s the driver's CPU; a test whose processes used less than 5% of one core over
+                    # the last idle_timeout seconds waits on something that does not come (a hang): killed then, not
+                    # at test_timeout
+                    c = tree_cpu(p.pid) if idle_timeout and tick % 5 == 0 else None
                     with lock:
                         now = time.monotonic()
                         why = None
+                        if c is not None and state["t0"] is not None:
+                            sm = state["samples"]
+                            sm.append((now, c))
+                            while len(sm) > 1 and now - sm[1][0] >= idle_timeout:
+                                sm.pop(0)
+                            if now - state["t0"] >= idle_timeout and now - sm[0][0] >= idle_timeout - 6 \
+                                    and c - sm[0][1] < 0.05 * (now - sm[0][0]):
+                                why = "idle"
                         if now - t_mod > module_timeout:
                             why = "module"
                         elif state["deadline"] and now > state["deadline"]:
@@ -335,8 +393,20 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
                 row = l.split("\t")
                 with lock:
                     if row[0] == "START" and len(row) > 1:
-                        state["current"], state["deadline"] = row[1], time.monotonic() + test_timeout
+                        now = time.monotonic()
+                        c = tree_cpu(p.pid)
+                        if state["t_start"] is not None:
+                            times.append("#start\t%d\t%.1f\t%s" % (attempts, now - state["t_start"],
+                                                                   "%.1f" % c if c is not None else "?"))
+                            state["t_start"] = None
+                        state["current"], state["deadline"] = row[1], now + test_timeout
+                        state["t0"], state["cpu0"], state["samples"] = now, c, ([(now, c)] if c is not None else [])
                     elif row[0] == "CASE" and len(row) > 1:
+                        if row[1] not in reported and state["t0"] is not None:
+                            c = tree_cpu(p.pid)
+                            times.append("%s\t%s\t%.1f\t%s" % (row[1], row[2] if len(row) > 2 else "?",
+                                         time.monotonic() - state["t0"],
+                                         "%.1f" % (c - state["cpu0"]) if c is not None and state["cpu0"] is not None else "?"))
                         reported.add(row[1])
                         progress = True
                     elif row[0] == "DONE":
@@ -359,8 +429,14 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
         if cur and cur not in reported:
             if state["killed"] == "test":
                 out_lines.append("CASE\t%s\ttimeout\tthe test past %d s (killed; the driver started again)" % (cur, test_timeout))
+            elif state["killed"] == "idle":
+                # queue 275: a hang told from a slow test: its processes idle (under 5% of a core) for idle_timeout s
+                out_lines.append("CASE\t%s\ttimeout\tthe test idle past %d s, a hang (killed; the driver started again)" % (cur, idle_timeout))
             else:
                 out_lines.append("CASE\t%s\tcrash\t%s" % (cur, first_cause(err, status).replace("\t", " ")))
+            if state["t0"] is not None:
+                times.append("%s\t%s\t%.1f\t?" % (cur, "timeout-" + state["killed"] if state["killed"] else "crash",
+                                                   time.monotonic() - state["t0"]))
             reported.add(cur)
             progress = True
         if not progress or attempts > 200:
@@ -371,6 +447,8 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
         f.write("".join(l + "\n" for l in out_lines))
     with open(os.path.join(d, m + ".err"), "w", encoding="utf-8") as f:
         f.write("\n".join(err_parts))
+    with open(os.path.join(d, m + ".times"), "w", encoding="utf-8") as f:
+        f.write("".join(t + "\n" for t in times))
     with open(os.path.join(d, m + ".attempts"), "w") as f:
         f.write("%d %.0f\n" % (attempts, time.monotonic() - t_mod))
     with open(os.path.join(d, m + ".status"), "w") as f:
@@ -382,6 +460,7 @@ def cmd_run(args):
     root, mods, d = arg(args, "--root"), read_list(arg(args, "--modules")), os.path.abspath(arg(args, "--dir"))
     jobs = int(arg(args, "--jobs", "1"))
     test_timeout, module_timeout = float(arg(args, "--test-timeout", "300")), float(arg(args, "--module-timeout", "3600"))
+    idle_timeout = float(arg(args, "--idle-timeout", "0"))
     oracle = arg(args, "--oracle")
     tbase = os.path.abspath(arg(args, "--tmp-base", os.path.join(d, "_tmp")))
     os.makedirs(d, exist_ok=True)
@@ -398,7 +477,7 @@ def cmd_run(args):
                 m = q.pop(0)
             t0 = time.monotonic()
             tmp = short_tmp(tbase, "j%d" % k)
-            n = run_module(m, root, d, oracle, test_timeout, module_timeout, tmp)
+            n = run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout)
             shutil.rmtree(tmp, ignore_errors=True)
             tmp_guard(m, os.path.join(d, "tmp-leftovers.log"))
             print("lib-test-all: %s run (%d s, %d driver run%s)" % (m, time.monotonic() - t0, n, "" if n == 1 else "s"),
