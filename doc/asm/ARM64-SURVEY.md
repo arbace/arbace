@@ -1816,3 +1816,81 @@ FIZ, AH, NEP; FPSR.QC's cumulative definition); no code copied.
 
 `bin/reap --record`: 49 of 52 cells checked, 0 problems. **crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged, `--judge
 --strict` 0 problems. `test/gate/gate-key-crops-test.bash` passes. The a64i driver still builds for linux/amd64 (`lockstep_other`).
+
+## As built: AR14 (2026-11-13; branch `277-asm-arm64-ar14`, from `276-asm-arm64-cpu-rows` `556568486`; queue task 277, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max), stage 0 and TamaGo's go; every check under 1 GiB but the
+std read below (2.9 GiB); no LLVM or GNU tool. The user's answers (2026-11-12): ARS68 (a), ARS69 (a), ARS70 (a). The semantics read
+again from the Arm ARM (DDI 0487: FRECPE, FRSQRTE, FRECPS, FRSQRTS, FRECPX, URECPE, URSQRTE, FMAXV, FMINV, FMAXNMV, FMINNMV, FMOV
+(vector, immediate), FCVT, FMOV (general); FPRecipEstimate, FPRSqrtEstimate, RecipEstimate, RecipSqrtEstimate, UnsignedRecipEstimate,
+UnsignedRSqrtEstimate, FPRecpX, FPRecipStepFused, FPRSqrtStepFused, Reduce, VFPExpandImm, FPConvert); no code copied. The CPU is the
+decisive judge here; qemu-aarch64 (the synthetic `--record`'s second judge) is the main host's.
+
+- **ARS68 (a): the rest of ARMv8.0's Advanced SIMD and FP in a64i** (`go/arbace/a64i/simdest.ae`, new; written as Go in a copy of the
+  light driver's printed module, built and run there first, then converted by repr/go's native reader, `REPR_GO_JOBS=1`, 45 s, peak
+  2.2 GiB; `simdest.ae` taken whole from the conversion, the hooks hand-edited as forms so the files' comments stay: in `simd.ae`
+  `OpVEST` before `opSIMDEnd`, its name, `simdName`'s case, `lowerVEST` first in `lowerSIMD`, `execVEST` first in `execSIMD`; in
+  `fp.ae` `decodeVEST` first in `decodeFP`, `fpNameX` first in `fpName`, `execFPX` before `fpCheck` in `execFP`; the header's `:files`,
+  `(load "a64i/simdest")`, `vestNames` in its `:init-order`):
+  - `OpVEST`, Sys `vestNames`' index: frecpe, frsqrte (vector 2s, 4s, 2d; scalar s, d), frecpx (scalar), frecps, frsqrts (vector and
+    scalar), urecpe, ursqrte (2s, 4s), fmaxnmv, fminnmv, fmaxv, fminv (4s; Reduce's halves, lanes 0-1 and 2-3 then the two), fmov's
+    vector immediate (2s, 4s, 2d; Imm VFPExpandImm's element). The estimates are the pseudocode's on the fields without FEAT_RPRES
+    (FPCR.AH RES0, ARS71 (a)): the tiny operand's overflow by the rounding mode, a subnormal's normalisation, the result's exponent 0
+    and -1; the steps negate the first operand before the NaNs are processed (a NaN's sign flips) and round the exact 2 - a*b or
+    (3 - a*b)/2 once. FPCR.FZ stays refused (fpCheck); fmov's immediate, urecpe and ursqrte run under any FPCR.
+  - In the FP classes: fcvt to and from half precision (`OpFCVT` with Size or Amount 1, by `fpConvert` with `halfFmt`; FPCR.AHP refused
+    `:unimplemented fpcr-ahp`; an h to h or the reserved opc undefined) and fmov to and from a register's upper doubleword (`OpFMOVG`
+    with Imm 1; names `fmov.d1.x`, `fmov.x.d1`). FP16's forms (FEAT_FP16: the h estimates, across lanes and fmov) stay unclaimed.
+  - Coverage names `v.frecpe.4s`, `v.frsqrts.d`, `v.frecpx.s`, `v.urecpe.2s`, `v.fmaxnmv.4s`, `v.fmov.imm.2d`, `fcvt.h.s`, `fcvt.d.h`,
+    `fmov.x.d1` (39 new: simd 33, fp 6). The synthetic program `synth-neon-est` (678 cases, gen.ae's `est-cases`, seed + 1200; neon's
+    setup; each FP case at FPCR 0 and under RMode 1-3 and DN: operands across the estimates' branches, step pairs whose product is
+    exactly 2 or 3, Newton's pairs, specials; fcvt's values across half's range and ties): the model the pseudocode on longs and
+    BigDecimals (`recip-est`, `rsqrt-est`, `fp-recip-est`, `fp-rsqrt-est`, `fp-recpx`, `fp-step`, `vfp-expand`, `fp-convert-x`). The M2
+    agreed with the model on every case at the first run, a64i (eval, AOT, forms 2,889 of 2,889 words, lockstep sys and step 20,431 of
+    20,433 instructions) on its first run. A raw differential beside it (36 instructions over 60 rows each of specials, any bits and
+    every FPCR mode, v0's halves and FPSR printed; not committed) gave this CPU's output byte for byte, 1,032,372 instructions stepped
+    with V0-V31, FPSR and FPCR compared. Controls verdict-17, forms-11, inject-33 (simd:x), inject-34 (fp:x), step-10 (fp:x, caught at
+    an fcvt to half).
+- **ARS69 (a): `synth-neon-int-e` in the essential subset**: every fourth case of synth-neon-int (140), as synth-neon-e and
+  synth-neon-el-e; controls verdict-18, inject-35. The subset (80 programs) timed alone by `--only LIST`, without and with it in
+  alternation, at load 6-10 (274b beside): 50.9 / 48.6, 45.7 / 43.9, 44.1 / 43.9 s, the cost below the noise (under 1 s); `--essential`
+  46.8 s, under 0.9 GiB.
+- **ARS70 (a): `bin/a64i table-check`** (`bin/repr-asm`'s `a64i_table_check`, `test/asm/a64i_table_check.ae` after
+  `test/python/table_check.ae`): goi's checker over arbace/crt, arbace/emu and arbace/a64i taken as a user's program's packages
+  (arbace.go.table's user-root) in linux/arm64, the header's `:init-order` and the forms' annotations held to the checker's; std's forms
+  bin/goi table's linux/arm64 cache when the checkout has it, else the closure's 101 std packages (`go list -deps` of the printed
+  module) read by repr/go once into `.tmp/a64i/table/KEY` (151 s with one job, 2.9 GiB with two); then its control
+  (`test/asm/controls-a64i-table.txt`: the `:init-order`'s first two entries swapped must fail on that annotation). Warm 32 s, under
+  1 GiB. The gate step `a64i-table` (essential, chain asm-arm64-essential after a64i-essential, `:mem-gib 3`, its controls file among
+  its inputs; `test/gate/crops/asm.edn` and `steps.edn` spliced by hand; `gate.crops check` 0 problems), Makefile `a64i-table-check`.
+  It found two stale annotations, both fixed: the `:init-order`'s simd.go blank (this branch's hooks moved it from 1465 to 1475) and
+  `lockstep_linux_arm64`'s `err` at line 437, assigned, not declared (273's exclusive region's Resume, a8330180a); the printed Go is
+  unchanged by either.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 99 / 99 each | **101 / 101 each** (26 synthetic programs, 26,181 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,507 of 2,507 (fp 134, simd 1,838) | **2,546 of 2,546** (fp 140, simd 1,871) |
+| controls (`test/asm/controls-a64i.txt`) | 79 | **86**; table check's 1 |
+| `--essential` | 79 programs | **80** (with synth-neon-int-e) |
+| goi's checker over a64i (linux/arm64) | 1 error (lockstep's `err`) | **0**, held by `a64i-table` |
+| `[:asm-arm64 :eval]` | 396 / 0 / 0 | **404 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,061 / 0 / 13 | **3,063 / 0 / 13** |
+
+**crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged, `--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells
+checked, 0 problems. Proofs: `bin/a64i synth --record` (26 programs, the runner this CPU: `REPR_ASM_RUNNER=/usr/bin/env`), `bin/a64i
+check --record` whole (101 of 101, 1 min 37 s, 0.9 GiB), `bin/a64i check` at the head (1 min 38 s), `--essential`, `bin/a64i
+table-check`. The keys do not move (`test/gate/gate-key-crops-test.bash` passes; `bin/arbace-go --gate-key` `ee1501081ae8...` at the
+base and the head). The a64i driver still builds for linux/amd64. Left to the main host: `bin/a64i synth --record` under qemu-aarch64
+(synth-neon-est's and synth-neon-int-e's second judge), `bin/gate --plan`.
+
+### Proposed (AR14)
+
+Numbering from ARS72. Each with options, the recommended named; none taken.
+
+- **ARS72 NEON's slice after ARMv8.0.** (a) FP16's arithmetic (FEAT_FP16, ARS63 (c)), claimed in AT_HWCAP with it; (b) the crypto
+  extension (ARS68 (c)); (c) none: a64i stays ARMv8.0's, the crop's work moves to its other cells. *Recommended: (a)*: compiled code
+  for the M2's class (`-march=armv8.2-a+fp16`) meets it first, and the half conversions and estimates are now in place for it.
+- **ARS73 synth-neon-est in the essential subset.** (a) a quarter of it (170 cases) beside the other quarters; (b) the rotation alone.
+  *Recommended: (a)*: its decoder sits first in decodeFP, so every FP and SIMD word of the essential programs passes through it, and
+  a quarter costs under a second by ARS69's numbers.
