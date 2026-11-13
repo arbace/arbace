@@ -2518,6 +2518,29 @@
 (def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
 (def ^:dynamic *conv-tmpl-cache* nil) ; atom {[class arg-type cat value op] bool}: a converting constructor template converts
 
+(defn- list-ctor-viable?
+  "cpp-s11 ([over.match.list], for [over.ics.list]/7): whether a constructor of the non-aggregate class `id` is viable
+  for the braced list's elements `items`: an initializer-list constructor taken as viable (its own conversion is the
+  element's, as before), an empty list as viable (value-initialization), else the constructors (the templates' deduced
+  specializations among them) for the elements as arguments; a refusal other than \"no viable function\" leaves it
+  viable, as before. Memoized per class and the elements' types and categories."
+  [id items]
+  (let [k [:list-ctor id (mapv (juxt :ty :cat :op) items)]
+        m *conv-tmpl-cache*
+        v (if m (get @m k ::none) ::none)]
+    (if (not= ::none v)
+      v
+      (let [r (cond
+                (empty? items) true
+                (some #(when-let [p0 (first (:ps (:ty (fnd %))))] (init-list-elem (abi/non-ref p0))) (ctor-candidates id)) true
+                :else
+                (let [cands (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id items)))]
+                  (try (resolve-overload cands items nil) true
+                       (catch arbace.lang.ExceptionInfo e
+                         (not (re-find #"^codegen: no viable function" (str (ex-message e))))))))]
+        (when m (swap! m assoc k r))
+        r))))
+
 (defn ics
   "The implicit conversion sequence of the argument `e` (a typed expression or {:op :init-list}) to the parameter type `p`."
   [e p]
@@ -2530,7 +2553,12 @@
       (cond (init-list-elem pt) (let [el (init-list-elem pt) rs (map #(ics % el) (:items e))]
                                   ;; [over.ics.list]/5: the worst conversion of an element
                                   (when (every? some? rs) {:rank (reduce max 0 (map #(long (:rank %)) rs))}))
-            (and (abi/class? pt) (or (aggregate? pt) (seq (ctor-candidates (:id pt))))) {:rank 3}
+            (and (abi/class? pt) (aggregate? pt)) {:rank 3}
+            ;; (cpp-s11: a non-aggregate class, [over.ics.list]/7: a user-defined conversion when [over.match.list] finds
+            ;; a viable constructor for the list, none when it finds none; <format>'s _Utf32_view<subrange<iterator>>
+            ;; ({__first, __last}) had taken _Utf_view's copy and move constructors for viable beside its explicit
+            ;; _Utf_view(_View), and refused initializing a _Utf_view from the two iterators)
+            (and (abi/class? pt) (seq (ctor-candidates (:id pt)))) (when (list-ctor-viable? (:id pt) (:items e)) {:rank 3})
             ;; (a non-const lvalue reference binds no list's temporary, [over.ics.list]/9 with [dcl.init.ref]/5)
             (and (= :ref (:k p)) (not (:c pt)) (not (and (= 1 (count (:items e))) (lv? (first (:items e)))))) nil
             (and (abi/scalar? pt) (<= (count (:items e)) 1)) {:rank (if (seq (:items e)) (or (std-rank (rv (first (:items e))) (:ty (rv (first (:items e)))) pt) 9) 0)}
@@ -2893,7 +2921,11 @@
       ;; copy-initialization from a prvalue of the class: in place ([dcl.init]/17.6.1)
       (and (= 1 (count args)) (not= :init-list (:op (first args))) (= (class-id (:ty (first args))) id) (= :pr (:cat (first args))))
       {:i :expr :e (first args)}
-      (and (= 1 (count args)) (= :init-list (:op (first args))))
+      ;; (cpp-s11: a braced list as the one argument of a parenthesized direct-initialization, `U u({3, 4})`, is no
+      ;; list-initialization of U: the constructors are chosen for the list as their argument, [dcl.init.general]/16.6.2.1
+      ;; with [over.ics.list]; it had initialized U from the list's elements, <format>'s _Utf32_view<subrange<iterator>>
+      ;; __uv({__first, __last}) "no viable function among 2 for 2 arguments")
+      (and (= 1 (count args)) (= :init-list (:op (first args))) (not= style :direct))
       (let [l (first args)]
         (if (aggregate? (abi/unq t))
           (init-for t l ctx :list)
@@ -5224,7 +5256,13 @@
            (init-for t ci ctx (if (= :init-list (:op ci)) :list :copy)))
       pre (init-for t pre ctx (if (= :init-list (:op pre)) :list :copy))
       (nil? init) (init-for t nil ctx :default)
-      (= "call" (:init n)) (init-for t (if (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init)) [(analyze ctx init)]) ctx :direct)
+      (= "call" (:init n)) (init-for t (cond (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init))
+                                             ;; (cpp-s11: `U u({3, 4});`, the native parser's CXXConstructExpr of the
+                                             ;; declaration's own type, untyped, around its arguments: they are the
+                                             ;; initializer's; it had crashed in resolve-type)
+                                             (and (= "CXXConstructExpr" (:kind init)) (nil? (get-in init [:type :qualType])))
+                                             (analyze-args ctx (kids init))
+                                             :else [(analyze ctx init)]) ctx :direct)
       (= "list" (:init n)) (init-for t (analyze ctx init) ctx :list)
       :else (let [a (analyze ctx init)] (init-for t a ctx (if (= :init-list (:op a)) :list :copy))))))
 
