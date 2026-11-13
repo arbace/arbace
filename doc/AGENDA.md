@@ -446,6 +446,8 @@ model's edges), 251 (pyi on goi's speed), 252 (3.15's P6-P8).
 - `arbace/c/repl.ae`'s back-end default and the judge tests that stand in for the compiled parser: at W.
 - The box can no longer build the program: `go/arbace/crt` calls `syscall.Access` and `syscall.Stat_t`, which TamaGo's
   syscall lacks (C9.2's hazard (e)); for the box's revival.
+- WebAssembly as a crop surveyed ([wasm/WASM-SURVEY.md](wasm/WASM-SURVEY.md), 2026-11-13, branch `wasm-survey`): WAS1-WAS26 for
+  the user (first WAS1, WAS2, WAS6, WAS7, WAS12, WAS17, WAS21); WA1 (the binary format over Go-built modules) needs no fetch.
 - repr/haskell and repr/rust's round trips stay out of `--full` until their rows fit the budget; Zed parked
   ([ZED-SURVEY.md](ZED-SURVEY.md)).
 

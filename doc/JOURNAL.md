@@ -5430,3 +5430,28 @@ own guard stopped it at 82%: the gate keeps the disk), C's two stale annotation 
 gf-misc's note), oi's two slow entries that now pass (parallel/churn, weak-ephe-final/weak_array_par). The rest reruns as-is: the
 Java levels after night 12's disk-full results, hsi-check's three CPU-limit programs, C++'s runtime samples (gf-cpp, merged in
 5ac770072). Considered: fixing the three first (a bisect over the jdk forms since 11-05, attr's memory, the pack: days).
+
+### 2026-11-13: WebAssembly as a crop surveyed (doc/wasm/WASM-SURVEY.md, WAS1-WAS26 for the user)
+
+The user (2026-11-13) asked for WebAssembly as a new crop, as the x86-64 and arm64 assembly crops are, with a minimal HTML and
+JavaScript shim for Wasm in the browser in the way of the single-page WebGPU games. Written: doc/wasm/WASM-SURVEY.md (branch
+`wasm-survey` from `mac/next` `ca3c7aff8`), modelled on doc/asm/AMD64-SURVEY.md and doc/asm/ARM64-SURVEY.md: the crop (repr/wasm for
+the binary format and WAT byte for byte, the validator, wai the engine in Go forms as a light driver, w2g for AOT, Wasm → Go forms),
+the testsuite judged by its own assertions, Arbace's own executable built for `GOOS=js` and `GOOS=wasip1`, the shim and its WebGPU
+bridge, the browser's judge (the Go side on a headless `gojs` world at check time; a browser only at the oracle tier), the row, the
+gate fragment, the keys, the plan WA1-WA12 (about 62 to 105 days) and proposals WAS1-WAS26. No code changed. Probes (seconds each,
+under 0.3 GiB, the worktree's `.tmp/wasm/`): TamaGo's go1.27.1 (`/root/tamago-go`) builds a hello program for `js/wasm` (2,532,430
+bytes, 20 `gojs` imports) and `wasip1/wasm` (2,503,267, 16 WASI imports), 1.05 times the native size; `lib/wasm/wasm_exec.js` (575
+lines) gives 24 `gojs` imports, Go's runtime imports 38 WASI preview 1 functions, `internal/buildcfg` keeps sign extension and
+saturating conversions always on and `runtime/memmove_wasm.s` uses bulk memory; the seed's module (`seed/arbace-seed-go.tar.xz`)
+resolves for both GOOS under `go list -deps` with no error, its linux-only host layer (jrt's `hostfs`, `hostproc`, `net`, `spawn`,
+`store`, ...) the part to port as the box's tamago variant was; stage 0's REPL starts in 0.25 s and 158 MB. clang 23.1.5 targets
+wasm32 with `wasm-ld`; the host has no Wasm engine, tool or browser. Sources: TamaGo's go1.27.1 tree (`lib/wasm/`, `misc/wasm/`,
+`src/runtime/*_wasm*`, `*_js*`, `*_wasip1*`, `src/syscall/js`, `src/syscall/fs_js.go`, `src/cmd/compile/internal/wasm/simdssa.go`),
+`tamago/cmd/go/cmd/{compile/internal/wasm,internal/obj/wasm,link/internal/wasm}` (forms), the pinned llvm-project 23.1.5 tarball's
+listing (`llvm/test/MC/WebAssembly` 106 files, `lld/test/wasm` 310), and Sourcegraph's public index of
+`github.com/WebAssembly/testsuite` (293 `.wast`, about 56,500 assertion lines, Apache-2.0; to verify on a pinned fetch). Considered: the
+engine as wazero converted by repr/go (WAS6 (b), kept as a fallback), the forms as WAT's concrete syntax (WAS2 (b)), the browser as a
+REAP cell or a JavaScript crop first (WAS17 (b)). To fetch with the user's OK: WebAssembly/testsuite at one commit (before WA2);
+optionally the spec's OCaml reference interpreter (to run on oi, WAS19); the oracle tier's wabt, wasmtime, nodejs and chromium only
+with that tier.
