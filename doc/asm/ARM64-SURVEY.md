@@ -2161,3 +2161,112 @@ Numbering from ARS79. Each with options, the recommended named; none taken.
   standards' vectors); (b) a quarter of synth-neon-crypto (104 cases) beside it. *Recommended: (a)*: crypto-fips already runs each of
   the 23 instructions (a64i's coverage names 24 with pmull2) in the essential gate, and the model's 416 cases run each night in --full's
   rotation.
+
+## As built: AR18 (2026-11-13; branch `285-asm-arm64-ar18`, from `283-asm-arm64-ar17` `9002155e4`; queue task 285, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max, /proc/cpuinfo's crc32, atomics, lrcpc, ilrcpc, uscat,
+flagm, flagm2 and frint), stage 0 and TamaGo's go; every check under 1 GiB; clang 23 and LLVM 23's llvm-objdump and llvm-mc only for
+probes by hand, in no check. The user's answers (2026-11-13): ARS79 (a), ARS80 (a). The semantics read from the Arm ARM (DDI 0487:
+CRC32, CRC32C with Poly32Mod2 and BitReverse; CFINV, XAFLAG, AXFLAG, RMIF, SETF8, SETF16; LDAPR, LDAPUR, LDAPURS*, STLUR; FRINT32Z,
+FRINT32X, FRINT64Z, FRINT64X with FPRoundIntN; FEAT_LSE2's alignment rules and SCTLR_ELx.nAA; CASP's register constraints); no code
+copied. The CPU is the decisive judge; qemu-aarch64 (the synthetic `--record`'s second judge) is the main host's.
+
+- **ARS79 (a): the M2's remaining base features of the integer core in a64i** (hand-edited as forms, no conversion):
+  - Four operations before `opCount` (inst.ae; the FP and SIMD operations' values move by 4, their `:val`s with them): `OpCRC32`
+    (Size the source's log2 bytes, Sys 1 crc32c), `OpFLAGM` (Sys: cfinv, xaflag, axflag, rmif with Imm the rotation and Imm2 the
+    mask, setf8, setf16), `OpLDAPUR` and `OpSTLUR` (Imm the unscaled offset, with ldar's and stlr's execution); FRINTTS as OpFP1's
+    opcodes 16-19 (scalar) and OpVF2's `vf2Names` 27-30 (vector 2s, 4s, 2d), `fpRoundIntN` (fp.ae: FPRoundIntN, a NaN, an infinity
+    or a value out of the signed range giving -2^(N-1) with IOC, IXC when inexact for both the Z and X forms, a value rounding to zero
+    keeping its sign, FZ's input flush with IDC). LRCPC's ldapr has been OpLDAR since AR5.
+  - The decoders: crc32 in data-processing (2 source), opcode 010 C sz, sf 1 with sz 11 only; rmif, setf8 and setf16 in the class
+    beside adc (`decodeFlagM`: its other words unallocated, the M2's SIGILL for each); cfinv, xaflag and axflag in MSR (immediate)
+    with CRm ignored, as the M2 runs every CRm (the Arm ARM's (0)(0)(0)(0): CONSTRAINED UNPREDICTABLE); ldapur and stlur in bits
+    29-24 011001 with bit 21 and bits 11-10 0 (size 11 with opc 1x and size 10 with opc 11 unallocated); the words of the classes
+    beside them (MOPS, LRCPC3, the FP16 forms of FRINTTS) are refused as before.
+  - **Acquire and release:** LDAPR, LDAPUR and STLUR run as plain loads and stores of their size (as ldar and stlr do). a64i's
+    programs are single-threaded: no other observer exists, so RCpc against RCsc ordering and the barriers' orders are not
+    observable and not modelled; the exclusive monitor stays single-threaded.
+  - **FEAT_LSE2's alignment, as the M2 (uscat) runs it** (probed natively: 34 programs, an access at every offset class): an
+    exclusive (ldxr, ldxp, stxr), an acquire or release (ldar, ldapr, ldapur, stlr, stlur) or an atomic (ld<op>, swp, cas, casp)
+    faults (SIGBUS) only when it crosses a 16-byte boundary; a64i faulted on any misalignment since AR5 (`aligned`, cpu.ae). Two more
+    AR5 divergences found beside it and fixed: those accesses through SP did not check SP's alignment (the M2 raises SIGBUS), and
+    their fault's PC was the next instruction's (the lockstep's sys mode: `signal 11 at 0x210184, native at 0x210180`; the step mode
+    did not see it): their bodies are methods now (`exclLoad`, `exclStore`, `atomic`, `atomicPair`), so exec puts PC back.
+  - AT_HWCAP is FP, ASIMD, AES, PMULL, SHA1, SHA2, CRC32, ATOMICS, FPHP, ASIMDHP, ASIMDRDM, JSCVT, FCMA, LRCPC, SHA3, ASIMDDP, SHA512,
+    ASIMDFHM, USCAT, ILRCPC and FLAGM (0xeb2f7fb, was 0xb2767b; ATOMICS for LSE, a64i's since AR5 and not claimed until now, USCAT for
+    the alignment above); AT_HWCAP2 FLAGM2 and FRINT (0x180, was 0). `test/asm/a64i/auxv-hwcap.s` prints both masked by the claims.
+  - Coverage names `crc32.8` .. `crc32c.64`, `cfinv`, `xaflag`, `axflag`, `rmif`, `setf8`, `setf16` (`Claimed` enumerates the
+    evaluate-into-flags class with its mask), `ldapur.x.32.sg.off.a`, `stlur.w.16.off.l`, `frint64x.d`, `v.frint32z.2d` (47 new).
+  - The encodings: a raw differential (46 integer, 24 FP and 102 memory forms over 40 rows each: any bits, the bounds of 32 and 64
+    bits, halves, subnormals and specials under FPCR 0, RMode 1-3, FZ and DN; the memory forms at offsets -256 to 255, unaligned within
+    16 bytes; not committed) gave this CPU's output byte for byte, AOT and eval, at the first run (15,560 lines); forms-check 2,738 of
+    2,738; stepped equal (2,508,399 instructions). A decode sweep of the new classes' 7,936 words (every value of their fields)
+    against the M2's SIGILL: equal but PACGA and MSR DIT/SSBS, which a64i does not claim.
+  - The synthetic programs (gen.ae): `synth-crc-flagm` (440 cases, `crc-flagm-cases`, seed + 1600; the model CRC32's pseudocode on
+    BigIntegers, BitReverse and Poly32Mod2, and the flags' definitions), `synth-frintts` (476, `frintts-cases`, seed + 1610; neon's
+    setup, FPCR 0, RMode 1-3, DN, FZ and FZ with RMode 2; FPRoundIntN on BigDecimals), `synth-rcpc2` (168, `rcpc2-cases`, seed + 1620;
+    the memory setup: ldapur* and stlur* at unscaled offsets, aligned and not, through SP too; ldar, ldapr, stlr, ldxr/stxr,
+    ldaxp/stlxp, ldaddal, swpa, casl and casp unaligned within 16 bytes). The M2 agreed with the model on every case at the first run;
+    a64i (eval, AOT, forms 1,008, 2,289 and 645 words, step 8,411, 14,579 and 8,067 instructions) at its first run.
+  - Hand-written, in the essential subset with every other hand-written program: `crc32.s` (CRC-32 and CRC-32C of "123456789", the
+    published check values 0xcbf43926 and 0xe3069283, by bytes, halfwords, words and a doubleword), `lse2-align.s` (the 16-byte
+    rule's accesses, their outputs derived by hand, then ldapur across 16 bytes: SIGBUS, exit 135), `auxv-hwcap.s`.
+  - Controls verdict-26..31, forms-15, inject-49 (dp2:x), inject-50 (cond:c), inject-51 (fp:x), inject-52 (fp:d), inject-53 (excl:x),
+    inject-54, inject-55, step-16 (dp2:x), step-17 (simd:x), step-18 (excl:x).
+- **ARS80 (a)**: crypto-fips stays the essential subset's only crypto program (checked: `test/asm/subsets.edn`'s :a64i names no other).
+  The subset is 88 programs (AR18's three hand-written ones added, as the subset takes every hand-written program); `--essential`
+  43 s at load 8-11, under 0.9 GiB.
+- **Item 3's scan (what remains of the M2's base ISA at EL0)**: LLVM's table (asm/arm64/table.edn) outside SVE and SME, each
+  instruction's encoding with twelve seeded fillings of its fields (38,700 words; svc, hvc, smc, brk, hlt, the wait and transactional
+  ones left out), each run once natively in a child process (SIGILL told apart at the word from one elsewhere), against a64i's decoding;
+  and the system space at EL0 (MRS and MSR with op0 3, op1 0 or 3, every CRn, CRm, op2; SYS's DC and IC), run in both:
+  - the M2 runs, a64i refuses: FEAT_PAuth (pac*, aut* of data, xpac*, braa, blraa, retaa, ldraa, pacga: 26 instructions; the hint
+    space's paciasp, autiasp and their kin are NOPs in a64i, but the M2 computes its PACs with an IMPLEMENTATION DEFINED algorithm, so
+    a model cannot match its values, and with FEAT_FPAC an authentication that fails raises SIGILL there); FEAT_BF16 (11) and FEAT_I8MM
+    (8), ARS79 (b)'s; FEAT_LOR's ldlar and stllr (8; ARMv8.1's, not in /proc/cpuinfo); FEAT_SB's sb; MSR and MRS of DIT (FEAT_DIT) and
+    SSBS; MRS of the EL0 registers CTR_EL0, DCZID_EL0, CNTVCT_EL0, CNTVCTSS_EL0 (FEAT_ECV), CNTFRQ_EL0, TPIDRRO_EL0 (a64i names
+    several of them, its MRS runs only NZCV, FPCR, FPSR and TPIDR_EL0) and the ID registers Linux emulates for EL0 (MIDR_EL1, MPIDR_EL1,
+    REVIDR_EL1, ID_AA64*, MVFR*: 51, HWCAP_CPUID's); the cache maintenance DC ZVA, CVAC, CVAU, CVAP (FEAT_DPB), CVADP (FEAT_DPB2), CIVAC and
+    IC IVAU. Go's runtime meets DCZID_EL0 and DC ZVA (memclr's block zeroing) and CNTVCT_EL0 (cputicks); compiled C meets CTR_EL0 and
+    the cache maintenance in JITs and __clear_cache.
+  - the M2 refuses, a64i runs: CASP with an odd Rs or Rt (UNDEFINED; 54 of its 143 words; fixed, `test-casp.sh` in queue 285's
+    report); the CONSTRAINED UNPREDICTABLE register overlaps the M2 resolves as UNDEFINED: a load or store with writeback whose Rt is
+    Rn (ldr, str, ldp, stp pre- and post-index; Rn not SP), LDP and LDXP with Rt equal to Rt2 (23 words; no assembler accepts them);
+    the hint space's aut* with an invalid signature (FPAC, above).
+  - Nothing else of ARMv8.0-8.6's base ISA outside SVE and SME: the rest of the table's words agree (the M2 lacks MOPS, CSSC, LSE128,
+    RCPC3, MTE, GCS, FP8, the 2-step features and the like, and a64i refuses them as the M2 does).
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 109 / 109 each | **115 / 115 each** (35 synthetic programs, 29,830 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,903 of 2,903 (simd 2,159) | **2,950 of 2,950** (fp 217, simd 2,171) |
+| controls (`test/asm/controls-a64i.txt`) | 114 | **131**; table check's 1 |
+| `--essential` | 85 programs | **88** (crc32, lse2-align, auxv-hwcap) |
+| goi's checker over a64i (linux/arm64, `bin/a64i table-check`) | 0 errors | **0** (simdfp.go's blank 906; an `^:assign`) |
+| `[:asm-arm64 :eval]` | 436 / 0 / 0 | **460 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,071 / 0 / 13 | **3,077 / 0 / 13** |
+
+**crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged, `--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells
+checked, 0 problems. Proofs: `bin/a64i synth --record` (35 programs, the runner this CPU: `REPR_ASM_RUNNER=/usr/bin/env`), `bin/a64i
+check --record` whole (115 of 115, 1 min 31 s at load 10), `--essential`, `bin/a64i table-check` (36 s warm). The keys do not move
+(`bin/arbace-go --gate-key` `ee1501081ae8...`; `test/gate/gate-key-crops-test.bash` passes). The a64i driver still builds for
+linux/amd64. Left to the main host: `bin/a64i synth --record` under qemu-aarch64 (the three programs' second judge), `bin/gate --plan`.
+
+### Proposed (AR18)
+
+Numbering from ARS81. Each with options, the recommended named; none taken.
+
+- **ARS81 a64i's slice after AR18.** (a) the EL0 system space the M2 runs: MRS of CTR_EL0, DCZID_EL0, CNTVCT_EL0, CNTVCTSS_EL0,
+  CNTFRQ_EL0, TPIDRRO_EL0 and the ID registers as Linux presents them (claiming CPUID), the cache maintenance (DC ZVA zeroing its
+  block, the others as no-ops after their fault checks; claiming DCPOP and DCPODP), MSR and MRS of DIT and SSBS (claiming DIT), sb
+  (claiming SB) and FEAT_LOR's ldlar and stllr; (b) FEAT_I8MM and FEAT_BF16 (ARS79 (b)), claimed in AT_HWCAP2; (c) none. *Recommended:
+  (a)*: Go's runtime zeroes memory by DC ZVA after reading DCZID_EL0 and counts ticks by CNTVCT_EL0, so a Go program on a64i needs them
+  before any matrix form; their values are the M2's (fixed registers) or a clock's. FEAT_PAuth stays unclaimed by design: the M2's PAC
+  algorithm is IMPLEMENTATION DEFINED, so no model of it can equal the CPU.
+- **ARS82 the CONSTRAINED UNPREDICTABLE register overlaps.** (a) decoded as UNDEFINED, as the M2 resolves them (writeback with Rt =
+  Rn on single and pair loads and stores, LDP and LDXP with Rt = Rt2); (b) left as now (a64i runs them). *Recommended: (a)*: the M2
+  is the judge, a decode check each, and no assembler or compiler produces them, so no program changes.
+- **ARS83 AR18's synthetic programs in the essential subset.** (a) the rotation alone, crc32, lse2-align and auxv-hwcap in the subset
+  as now; (b) a quarter of synth-frintts and synth-crc-flagm (119 and 110 cases) beside them. *Recommended: (a)*: none of AR18's
+  decoders sits first in its class, and the hand-written programs already run every crc32 form and the 16-byte rule in the essential
+  gate.
