@@ -2896,6 +2896,181 @@
 (def crypto-families
   [["neon-crypto" "the M2's cryptographic extension: FEAT_AES (aese, aesd, aesmc, aesimc), FEAT_SHA1 (sha1c, sha1p, sha1m, sha1h, sha1su0, sha1su1), FEAT_SHA256 (sha256h, sha256h2, sha256su0, sha256su1), FEAT_SHA512 (sha512h, sha512h2, sha512su0, sha512su1), FEAT_SHA3 (eor3, bcax, rax1, xar), FEAT_PMULL's pmull and pmull2 1q" crypto-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; AR18 (ARS79 (a), queue 285): the M2's remaining base features of the integer core. FEAT_CRC32 and FEAT_FlagM/FlagM2 as an
+;; integer program (x1, x2 the operands, x0 = x3, NZCV set; x0 and NZCV checked); FEAT_FRINTTS on neon's setup (v1 the operand's
+;; lanes, FPCR set by the stub: RMode 0-3, DN, FZ); FEAT_LRCPC2 and FEAT_LSE2's alignment as a memory program (the 64-byte buffer,
+;; x4 its middle: ldapur, ldapurs, stlur at every size and unscaled offset, any alignment that stays within 16 bytes; ldar, ldapr,
+;; stlr, the exclusives and the atomics at unaligned addresses within 16 bytes). The models: CRC32's pseudocode on BigIntegers
+;; (BitReverse, Poly32Mod2), CFINV, XAFLAG, AXFLAG, RMIF, SETF8, SETF16 on the flags, FPRoundIntN on BigDecimals (FPUnpack's flush
+;; under FZ, IDC), Mem[] on bytes.
+
+(defn- bit-rev ^long [^long v ^long n] (if (zero? n) 0 (unsigned-bit-shift-right (Long/reverse v) (- 64 n))))
+
+(defn crc32-model
+  "CRC32's and CRC32C's Operation: BitReverse(Poly32Mod2(BitReverse(acc):Zeros(size) EOR BitReverse(val):Zeros(32), poly))."
+  ^long [^long acc ^long v ^long size c?]
+  (let [poly (BigInteger/valueOf (if c? 0x1EDC6F41 0x04C11DB7))
+        data (.xor (.shiftLeft (BigInteger/valueOf (bit-rev (bit-and acc m32) 32)) (int size))
+                   (.shiftLeft (BigInteger/valueOf (bit-rev (if (= size 64) v (bit-and v (ones size))) size)) 32))
+        data (if (= size 64) (.and data (.subtract (.shiftLeft BigInteger/ONE 96) BigInteger/ONE)) data)
+        r (reduce (fn [^BigInteger d i] (if (.testBit d (int i)) (.xor d (.shiftLeft poly (int (- (long i) 32)))) d))
+                  data (range (+ 31 size) 31 -1))]
+    (bit-rev (bit-and (.longValue (.and ^BigInteger r (BigInteger/valueOf m32))) m32) 32)))
+
+(defn flagm-model
+  "The flag manipulation's NZCV (bits 3-0) after OP on NZCV and x."
+  ^long [op ^long nzcv ^long x [k m]]
+  (let [n (bit-test nzcv 3) z (bit-test nzcv 2) c (bit-test nzcv 1) v (bit-test nzcv 0)
+        pack (fn [n z c v] (bit-or (if n 8 0) (if z 4 0) (if c 2 0) (if v 1 0)))]
+    (case op
+      :cfinv (bit-xor nzcv 2)
+      :xaflag (pack (and (not c) (not z)) (and z c) (or c z) (and (not c) z))
+      :axflag (pack false (or z v) (and c (not v)) false)
+      :rmif (let [t (Long/rotateRight x (int k))] (bit-or (bit-and nzcv (bit-not (long m))) (bit-and t (long m))))
+      (:setf8 :setf16) (let [b (if (= op :setf8) 8 16)]
+                         (pack (bit-test x (dec b)) (zero? (bit-and x (ones b))) c (not= (bit-test x b) (bit-test x (dec b))))))))
+
+(defn crc-flagm-cases [rs]
+  (let [rs (atom (seq rs))
+        nx (fn [] (let [x (first @rs)] (swap! rs rest) x))
+        es (vec (edges (drop 1000 (seq @rs)) 8))]
+    (concat
+     ;; crc32{,c}{b,h,w,x}: x0 = CRC(w1, x2's low size bits)
+     (for [c? [false true] [sfx size] [["b" 8] ["h" 16] ["w" 32] ["x" 64]] i (range 24)]
+       (let [a (if (< i 8) (es (mod (* 3 i) (count es))) (nx)) b (if (< i 12) (es (mod (+ i 5) (count es))) (nx)) nzcv (bit-and (nx) 15)]
+         (case-of (str "crc32" (when c? "c") sfx "\tw0, w1, " (if (= size 64) "x2" "w2")) a b (nx) nzcv [(crc32-model a b size c?) nzcv])))
+     ;; Rd = Rn, the accumulator chained
+     (for [c? [false true] [sfx size] [["b" 8] ["w" 32] ["x" 64]] _ (range 4)]
+       (let [a (nx) b (nx) nzcv (bit-and (nx) 15)]
+         (case-of (str "crc32" (when c? "c") sfx "\tw0, w0, " (if (= size 64) "x2" "w2") "\n\tcrc32" (when c? "c") sfx "\tw0, w0, " (if (= size 64) "x1" "w1"))
+                  a b a nzcv [(crc32-model (crc32-model a b size c?) a size c?) nzcv])))
+     ;; cfinv, xaflag, axflag on every NZCV, twice
+     (for [op [:cfinv :xaflag :axflag] nzcv (range 16) _ (range 2)]
+       (let [x3 (nx)] (case-of (name op) (nx) (nx) x3 nzcv [x3 (flagm-model op nzcv 0 nil)])))
+     ;; rmif x1, #k, #mask over rotations and masks
+     (for [i (range 64)]
+       (let [x1 (if (< i 16) (es (mod i (count es))) (nx)) k (if (< i 8) ([0 1 3 4 31 32 60 63] i) (mod (nx) 64)) m (mod (nx) 16)
+             nzcv (bit-and (nx) 15) x3 (nx)]
+         (case-of (str "rmif\tx1, #" k ", #" m) x1 (nx) x3 nzcv [x3 (flagm-model :rmif nzcv x1 [k m])])))
+     ;; setf8, setf16 (C kept)
+     (for [op [:setf8 :setf16] i (range 32)]
+       (let [b (if (= op :setf8) 8 16)
+             x1 (case (mod i 8) 0 0 1 (bit-shift-left 1 (dec b)) 2 (ones b) 3 (bit-shift-left 1 b) 4 (ones (dec b)) 5 (bit-or (bit-shift-left 1 b) (bit-shift-left 1 (dec b))) (nx))
+             nzcv (bit-and (nx) 15) x3 (nx)]
+         (case-of (str (name op) "\tw1") x1 (nx) x3 nzcv [x3 (flagm-model op nzcv x1 nil)]))))))
+
+(def crc-flagm-families
+  [["crc-flagm" "FEAT_CRC32 (crc32b, crc32h, crc32w, crc32x, crc32cb, crc32ch, crc32cw, crc32cx), FEAT_FlagM (cfinv, rmif, setf8, setf16) and FEAT_FlagM2 (xaflag, axflag)" crc-flagm-cases]])
+
+(def ^:private IDC 0x80)
+
+(defn fp-rint-n
+  "FPRoundIntN: [RESULT FPSR] of a rounded to an integral value of T fitting a signed integer of BITS (NaN, infinity or out of
+  range: -2^(BITS-1), IOC), the input flushed to zero under FZ (IDC)."
+  [t ^long a mode ^long bits fz?]
+  (let [sub? (and (zero? (f-exp t a)) (not (zero? (f-frac t a))))
+        [a idc] (if (and fz? sub?) [(f-zero t (f-sign t a)) IDC] [a 0])
+        most (f-bits t (- (Math/pow 2.0 (double (dec bits)))))
+        lo (.negate (.shiftLeft BigInteger/ONE (int (dec bits)))) hi (.subtract (.shiftLeft BigInteger/ONE (int (dec bits))) BigInteger/ONE)]
+    (cond (or (f-nan? t a) (f-inf? t a)) [most (bit-or idc IOC)]
+          (f-zero? t a) [a idc]
+          :else (let [e (bd (f-val t a)) r (bd-round e mode) n (.toBigInteger r) inexact (not (zero? (.compareTo r e)))]
+                  (if (or (neg? (.compareTo n lo)) (pos? (.compareTo n hi)))
+                    [most (bit-or idc IOC)]
+                    [(if (zero? (.signum r)) (f-zero t (f-sign t a)) (f-bits t (.doubleValue r))) (bit-or idc (if inexact IXC 0))])))))
+
+(defn frintts-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        modes [[:n 0 false] [:p 0x400000 false] [:m 0x800000 false] [:z 0xc00000 false] [:n 0x2000000 false] [:n 0x1000000 true]
+               [:m 0x1800000 true]]
+        ;; a lane: a special, a value near a bound of 32 or 64 bits, a half, a subnormal, any bits, a value of any magnitude to 2^66
+        lane (fn [t]
+               (let [x (nx) {:keys [bits fb]} (ft t) sg (if (odd? (unsigned-bit-shift-right x 3)) -1.0 1.0)]
+                 (case (mod x 7)
+                   0 (pick x (vec (fp-specials t)))
+                   1 (let [b (f-bits t (* sg (Math/pow 2.0 (double (pick (unsigned-bit-shift-right x 5) [31 63])))))]
+                       (+ b (- (mod (unsigned-bit-shift-right x 9) 7) 3)))
+                   2 (f-bits t (* sg (+ 0.5 (double (mod (unsigned-bit-shift-right x 7) 9)))))
+                   3 (bit-or (if (neg? sg) (f-zero t true) 0) (inc (mod (unsigned-bit-shift-right x 7) (ones fb))))
+                   4 (bit-and (nx) (ones bits))
+                   (f-bits t (* sg (+ 1.0 (/ (double (bit-and (unsigned-bit-shift-right x 11) 0xfffff)) 1048576.0))
+                                (Math/pow 2.0 (double (- (mod (unsigned-bit-shift-right x 31) 70) 3))))))))
+        insns [["frint32z" :z 32] ["frint32x" nil 32] ["frint64z" :z 64] ["frint64x" nil 64]]]
+    (concat
+     ;; scalar s and d: s0, d0 written, the rest of v0 cleared
+     (for [[m md bits] insns t [:s :d] [mode fpcr fz?] modes _ (range 4)]
+       (let [a (lane t) v1 [(bit-or a (bit-shift-left (bit-and (nx) m32) 32)) (nx)] v1 (if (= t :d) [a (nx)] v1)
+             [r fl] (fp-rint-n t a (or md mode) bits fz?) r (if (= t :s) (bit-and r m32) r)]
+         (ncase (fpcr-stub fpcr (str m "\t" (if (= t :d) "d" "s") "0, " (if (= t :d) "d" "s") "1")) v1 [(nx) (nx)] [r fl])))
+     ;; vector 2s, 4s, 2d: each lane, the FPSR's flags of all
+     (for [[m md bits] insns a ["2s" "4s" "2d"] [mode fpcr fz?] modes _ (range 3)]
+       (let [e (ar-e a) t (if (= e 64) :d :s) n (ar-n a) ls (vec (for [_ (range (quot 128 e))] (lane t))) v1 (vpack ls e)
+             rs (mapv #(fp-rint-n t (ls %) (or md mode) bits fz?) (range n))
+             [lo hi] (vpack (map first rs) e)]
+         (ncase (fpcr-stub fpcr (str m "\tv0." a ", v1." a)) v1 [(nx) (nx)]
+                [lo (bit-xor (long hi) (long (reduce bit-or 0 (map second rs))))]))))))
+
+(def frintts-families
+  [["frintts" "FEAT_FRINTTS: frint32z, frint32x, frint64z, frint64x, scalar (s, d) and vector (2s, 4s, 2d), under FPCR's RMode 0-3, DN and FZ" frintts-cases]])
+
+(defn rcpc2-cases [rs]
+  (let [rs (atom (seq rs)) nx (fn [] (let [x (first @rs)] (swap! rs rest) x))
+        sfx {1 "b" 2 "h" 4 "" 8 ""}
+        ;; an offset from the middle in [-32, 32 - n] whose access stays within 16 bytes (the M2 faults on one that crosses);
+        ;; unaligned when UN? and n > 1
+        off (fn [^long n un?]
+              (loop [x (nx)]
+                (let [k (- (mod (long x) (- 65 n)) 32) o (bit-and (+ 32 k) 15)]
+                  (if (and (<= (+ o n) 16) (or (not un?) (= n 1) (not (zero? (mod k n))))) k (recur (nx))))))
+        at (fn [k] (str "\tadd\tx8, x4, #" (+ 32 k) "\n\tsub\tx8, x8, #32\n"))]
+    (concat
+     ;; ldapur, ldapurb, ldapurh, ldapursb, ldapursh, ldapursw at unscaled offsets
+     (for [[mn w n sg] [["ldapurb" 32 1 false] ["ldapurh" 32 2 false] ["ldapur" 32 4 false] ["ldapur" 64 8 false]
+                        ["ldapursb" 32 1 true] ["ldapursb" 64 1 true] ["ldapursh" 32 2 true] ["ldapursh" 64 2 true] ["ldapursw" 64 4 true]]
+           i (range 8)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (off n (odd? i)) m (mem-of (mem-words x3 x1 x9)) v (rd m k n) v (if sg (zext (sext v (* 8 n)) w) v)]
+         (mcase (str mn "\t" (r (= w 64) 0) ", [x4, #" k "]\n") x1 0 x3 x9 [v m 0])))
+     ;; stlur, stlurb, stlurh
+     (for [[mn w n] [["stlurb" 32 1] ["stlurh" 32 2] ["stlur" 32 4] ["stlur" 64 8]] i (range 8)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (off n (odd? i))]
+         (mcase (str mn "\t" (r (= w 64) 1) ", [x4, #" k "]\n") x1 0 x3 x9 [0 (wr (mem-of (mem-words x3 x1 x9)) k n x1) 0])))
+     ;; base SP: the stack's 16-byte aligned slot below sp, an ldapur and an stlur through it
+     (for [n [4 8] _ (range 2)]
+       (let [x1 (nx) x3 (nx) x9 (nx) rg (if (= n 8) "x" "w") m0 (mem-of (mem-words x3 x1 x9))]
+         (mcase (str "\tsub\tsp, sp, #16\n\tstlur\t" rg "1, [sp, #" (- 16 n) "]\n\tldapur\t" rg "0, [sp, #" (- 16 n) "]\n\tadd\tsp, sp, #16\n")
+                x1 0 x3 x9 [(zext x1 (* 8 n)) m0 0])))
+     ;; FEAT_LSE2: ldar, ldapr, stlr at unaligned addresses within 16 bytes
+     (for [n [2 4 8] [mn ld?] [["ldar" true] ["ldapr" true] ["stlr" false]] _ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (off n true) rg (if (= n 8) "x" "w") m0 (mem-of (mem-words x3 x1 x9))]
+         (if ld?
+           (mcase (str (at k) mn (sfx n) "\t" rg "0, [x8]\n") x1 0 x3 x9 [(rd m0 k n) m0 0])
+           (mcase (str (at k) mn (sfx n) "\t" rg "1, [x8]\n") x1 0 x3 x9 [0 (wr m0 k n x1) 0]))))
+     ;; the exclusives unaligned: ldxr, add, stxr (status 0); ldaxp/stlxp of w
+     (for [n [2 4 8] _ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (off n true) rg (if (= n 8) "x" "w") m0 (mem-of (mem-words x3 x1 x9))
+             v (zext (unchecked-add (rd m0 k n) x1) (* 8 n))]
+         (mcase (str (at k) "ldxr" (sfx n) "\t" rg "5, [x8]\n\tadd\t" rg "5, " rg "5, " rg "1\nstxr" (sfx n) "\tw0, " rg "5, [x8]\n")
+                x1 0 x3 x9 [0 (wr m0 k n v) 0])))
+     (for [_ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (off 8 true) m0 (mem-of (mem-words x3 x1 x9)) v1 (rd m0 k 4) v2 (rd m0 (+ k 4) 4)]
+         (mcase (str (at k) "ldaxp\tw5, w6, [x8]\nstlxp\tw0, w6, w5, [x8]\n") x1 0 x3 x9 [0 (-> m0 (wr k 4 v2) (wr (+ k 4) 4 v1)) 0])))
+     ;; the atomics unaligned: ldadd, swp, cas (hit), casp of w
+     (for [n [2 4 8] op [:ldadd :swp :cas] _ (range 2)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (off n true) rg (if (= n 8) "x" "w") m0 (mem-of (mem-words x3 x1 x9)) old (rd m0 k n)]
+         (case op
+           :ldadd (mcase (str (at k) "ldaddal" (sfx n) "\t" rg "1, " rg "0, [x8]\n") x1 0 x3 x9 [old (wr m0 k n (zext (unchecked-add old x1) (* 8 n))) 0])
+           :swp (mcase (str (at k) "swpa" (sfx n) "\t" rg "1, " rg "0, [x8]\n") x1 0 x3 x9 [old (wr m0 k n (zext x1 (* 8 n))) 0])
+           :cas (mcase (str (at k) "ldr" (sfx n) "\t" rg "5, [x8]\ncasl" (sfx n) "\t" rg "5, " rg "1, [x8]\n\tmov\tx0, x5\n")
+                       x1 0 x3 x9 [old (wr m0 k n (zext x1 (* 8 n))) 0]))))
+     (for [_ (range 3)]
+       (let [x1 (nx) x3 (nx) x9 (nx) k (off 8 true) m0 (mem-of (mem-words x3 x1 x9)) o1 (rd m0 k 4) o2 (rd m0 (+ k 4) 4)]
+         (mcase (str (at k) "ldp\tw6, w7, [x8]\n\tmov\tx14, x1\n\tmov\tx15, x9\ncasp\tw6, w7, w14, w15, [x8]\n\teor\tx0, x6, x7, ror #13\n")
+                x1 0 x3 x9 [(bit-xor o1 (Long/rotateRight o2 13)) (-> m0 (wr k 4 (zext x1 32)) (wr (+ k 4) 4 (zext x9 32))) 0]))))))
+
+(def rcpc2-families
+  [["rcpc2" "FEAT_LRCPC2 (ldapur, ldapurb, ldapurh, ldapursb, ldapursh, ldapursw, stlur, stlurb, stlurh at unscaled offsets, SP too) and FEAT_LSE2's alignment (ldar, ldapr, stlr, ldxr/stxr, ldaxp/stlxp, ldaddal, swpa, casl, casp at unaligned addresses within 16 bytes)" rcpc2-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -2986,6 +3161,19 @@
          ;; AR17 (ARS77 (a)): the M2's cryptographic extension
          (for [[i [nm what f]] (map-indexed vector crypto-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1500 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR18 (ARS79 (a)): the M2's remaining base features: CRC32 and FlagM, FRINTTS, LRCPC2 with LSE2's alignment
+         (for [[i [nm what f]] (map-indexed vector crc-flagm-families)
+               :let [text (program nm what (vec (f (rng (+ seed 1600 i)))))]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         (for [[i [nm what f]] (map-indexed vector frintts-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1610 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         (for [[i [nm what f]] (map-indexed vector rcpc2-families)
+               :let [text (mem-program nm what (vec (f (rng (+ seed 1620 i)))))]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)

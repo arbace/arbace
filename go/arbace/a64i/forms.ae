@@ -513,6 +513,30 @@
       (nargs ops 3)
       (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))]
         (return (lit Inst :Op (aget (lit (map string Op) ["mul" OpMADD] ["mneg" OpMSUB] ["smull" OpSMADDL] ["smnegl" OpSMSUBL] ["umull" OpUMADDL] ["umnegl" OpUMSUBL] ["smulh" OpSMULH] ["umulh" OpUMULH]) m) :Sf (.-x d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Ra 31))))
+    (case ["crc32b" "crc32h" "crc32w" "crc32x" "crc32cb" "crc32ch" "crc32cw" "crc32cx"]
+      ;; AR18: FEAT_CRC32
+      (nargs ops 3)
+      (let [(values d n r) (values (mustReg (aget ops 0)) (mustReg (aget ops 1)) (mustReg (aget ops 2)))
+          ^{:tag uint8} sz (conv uint8 (strings/IndexByte "bhwx" (aget m (- (len m) 1))))
+          ^{:tag uint32} sys (zero uint32)]
+        (when (== (aget m 5) \c)
+          (set! sys 1))
+
+        (return (lit Inst :Op OpCRC32 :Sf (== sz 3) :Rd (.-n d) :Rn (.-n n) :Rm (.-n r) :Size sz :Sys sys))))
+    (case ["cfinv" "xaflag" "axflag"]
+      ;; AR18: FEAT_FlagM's cfinv, FEAT_FlagM2's xaflag and axflag
+      (nargs ops 0)
+      (return (lit Inst :Op OpFLAGM :Sys (aget (lit (map string uint32) ["cfinv" 0] ["xaflag" 1] ["axflag" 2]) m))))
+    (case ["rmif"]
+      (nargs ops 3)
+      (return (lit Inst :Op OpFLAGM :Sf true :Rn (.-n (mustReg (aget ops 0))) :Imm (value (aget ops 1)) :Imm2 (value (aget ops 2)) :Sys 3)))
+    (case ["setf8" "setf16"]
+      (nargs ops 1)
+      (let [sys (conv uint32 4)]
+        (when (== m "setf16")
+          (set! sys 5))
+
+        (return (lit Inst :Op OpFLAGM :Rn (.-n (mustReg (aget ops 0))) :Sys sys))))
     (case ["svc" "brk" "udf"]
       (nargs ops 1)
       (return (lit Inst :Op (aget (lit (map string Op) ["svc" OpSVC] ["brk" OpBRK] ["udf" OpUDF]) m) :Imm (value (aget ops 0)))))
@@ -779,6 +803,25 @@
               (ferr "pair register offset"))
 
             (return in true))))
+      (case ["ldapur" "ldapurb" "ldapurh" "ldapursb" "ldapursh" "ldapursw" "stlur" "stlurb" "stlurh"]
+        ;; AR18: FEAT_LRCPC2's unscaled load-acquire RCpc and store-release, [Rn|SP{, #simm9}]
+        (nargs ops 2)
+        (let [t (mustReg (aget ops 0))
+            (values op suf) (values OpSTLUR (subslice m 5))]
+          (when (== (aget m 0) \l)
+            (set! (values op suf) (values OpLDAPUR (subslice m 6))))
+
+          (let [signed (strings/HasPrefix suf "s")
+              ^int sz (aget (lit (map string int) ["b" 0] ["h" 1] ["sb" 0] ["sh" 1] ["sw" 2]) suf)]
+            (when (== suf "")
+              (set! sz (conv int (sizeOf "" t))))
+
+            (let [in (ldst op (conv uint8 sz) signed (and signed (.-x t)) t (subslice ops 1) pc)]
+              (when (or (!= (.-Mode in) ModeOff) (< (.-Imm in) -256) (> (.-Imm in) 255))
+                (ferr "unscaled ordered address"))
+
+              (set! (values (.-Acq in) (.-Rel in)) (values (== op OpLDAPUR) (== op OpSTLUR)))
+              (return in true)))))
       (case ["clrex"]
         (return (lit Inst) false)))
 
