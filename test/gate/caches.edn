@@ -1,0 +1,125 @@
+;; The caches and scratch areas the gate's prune knows (GD4: doc/GATE-DIET-SURVEY.md §3, GDS17 (a), GDS18 (a), "As built: GD4"),
+;; read by bin/lib/gate-run.bash's caches_rows (bin/gate --prune [--dry-run] [--cheap] [--worktrees]; the cheap rows at every gate's
+;; start and before a step at most every 5 minutes; every row at the end of every --full, --nightly and --weekly). In no key: it
+;; decides what is removed, never what a step sees (a cache a step needs is rebuilt by its tool, keyed as before).
+;;
+;; One entry a line (caches_rows reads the lines; test/gate/caches-test.bash reads the file with the Clojure reader too, and holds
+;; every .tmp name a bin/ script writes to a row): {:path P :where W :owner O :rule R ...}
+;;   :path    under the checkout (".tmp/NAME", a glob in its last part), or "{gocache}" (Go's build cache, go env GOCACHE)
+;;   :where   :checkout (this checkout's: each worktree prunes its own), :main (the main checkout's, shared by the worktrees),
+;;            :home (under HOME)
+;;   :rule    [:size GIB :lru] | [:age DAYS] | [:age DAYS :atime] | [:key-gen N] | [:count N] | [:age-self DAYS] | :builtin | :keep
+;;            | :list
+;;            (bin/lib/gate-run.bash's header of caches_prune says what each removes)
+;;   :match   (key-gen, count) an ERE the children's names must match; :cheap true: also in the cheap tier; :max-entries N: a
+;;            directory under :path holding more is a warning; :shared true: content-keyed, one copy by key at the main checkout's
+;;            .tmp/shared for the worktrees
+;;   :doc     why, and (:keep rows) the survey's rule left to the tool or to a later stage
+;; The rules are conservative: a tool directory whose layout mixes keyed builds with pinned corpora (fetched by pin, no network at
+;; night) is :keep until its tool names its generations; §3.1's "key generation" rows are the ones whose children are keys.
+[
+ ;; ---- the gate's own (gate_prune_store: the store per step the last 5 and 30 days; the executables but the newest 3; ci's runtime)
+ {:path ".tmp/gate-pass" :where :main :owner "bin/gate" :rule :builtin :doc "the store of passes: per step the last 5, 30 days (GTS27 (a))"}
+ {:path ".tmp/gate-exe" :where :main :owner "bin/arbace-go --gate-build" :rule :builtin :doc "the executables by key: the newest 3 of each kind, a day old (GTS27 (a))"}
+ {:path ".tmp/ci-runtime" :owner "bin/ci" :rule :builtin :doc "ci's prebuilt runtime, per library the newest 3 (CS272 (a))"}
+ {:path ".tmp/gate-clean" :where :main :owner "bin/gate --clean" :rule :keep :doc "the clean runs' logs, which the committed clean records cite (--only reads them)"}
+ {:path ".tmp/gate" :owner "bin/gate" :rule :keep :doc "the latest run's logs, replaced by the next run"}
+ {:path ".tmp/gate-audit" :owner "bin/gate --audit" :rule :keep :doc "the audit's logs; bin/gate --loads-update reads them"}
+ {:path ".tmp/gate-audit-stage0.log" :owner "bin/gate --audit" :rule :keep :doc "a log"}
+ {:path ".tmp/gate-plan" :owner "bin/gate --plan" :rule :keep :doc "the latest plan, replaced"}
+ {:path ".tmp/gate-clean-plan" :owner "bin/gate --clean --plan" :rule :keep :doc "the latest clean plan, replaced"}
+ {:path ".tmp/gate-lanes" :where :main :owner "bin/gate-lane" :rule :keep :doc "the shared lane's state (GTS248 (a))"}
+ {:path ".tmp/gate-demos" :owner "bin/gate-demos" :rule :keep :doc "the demonstrations' plans, replaced"}
+ {:path ".tmp/gate-javac" :owner "bin/javac-vendor tool" :rule :keep :doc "javac's tool build scratch"}
+ {:path ".tmp/gate-concurrent.lock" :owner "bin/gate --concurrent" :rule :keep :doc "a lock"}
+ {:path ".tmp/big.lock*" :where :main :owner "bin/heavy-lock" :rule :keep :doc "the host's big lock and its tickets"}
+ {:path ".tmp/heavy" :owner "bin/heavy-lock" :rule :keep :doc "the big lock's FIFO"}
+ {:path ".tmp/night" :owner "bin/night" :rule :keep :doc "the nights' logs (the triage reads them)"}
+ {:path ".tmp/plan-check" :owner "bin/gate" :rule :keep :doc "scratch of the plan's checks"}
+ {:path ".tmp/arbace-go-gate" :owner "bin/arbace-go --gate-build" :rule :keep :doc "the gate build's scratch"}
+ {:path ".tmp/arbace-go-smoke*" :owner "bin/arbace-go --gate" :rule :keep :doc "the smoke test's scratch"}
+ ;; ---- the main session's (GDS18 (a): listed, never removed)
+ {:path ".tmp/worktrees" :where :main :owner "the main session" :rule :list :doc "listed by --prune --worktrees when merged and idle a day; removed by the main session once the report is read"}
+ {:path ".tmp/keep" :where :main :owner "the main session" :rule :list :doc "scratch a report names (memory: keep worktree scratch); §3.1: 14 days after the merge, at most 10 GiB, by hand"}
+ {:path ".tmp/shared" :where :main :owner "bin/lib/ci/musl" :rule [:age 30] :shared true :doc "content-keyed caches by key for every worktree (the musl forms: .tmp/shared/ci-musl-forms/KEY); a key unused 30 days out"}
+ ;; ---- the cheap tier: Go's caches by size, TMPDIR by age
+ {:path "{gocache}" :where :home :owner "Go's toolchain" :rule [:size 8 :lru] :cheap true :doc "Go's build cache, 8 GiB by the least recently used (§3.1; was bin/lib/gocache.bash's 90-minute wipe)"}
+ {:path ".tmp/gocache" :owner "ci, cppi, rsi AOT builds" :rule [:size 2 :lru] :cheap true :doc "the AOT tools' Go cache"}
+ {:path ".tmp/repr-go-print-cache" :owner "bin/build-go --print-cache" :rule [:size 2 :lru] :cheap true :doc "printed packages, by use"}
+ {:path ".tmp/tmp" :owner "bin/lib/tmpdir.bash" :rule [:age 2] :cheap true :doc "TMPDIR: files older than 2 days"}
+ ;; ---- caches by key
+ {:path ".tmp/goi-table" :owner "bin/goi table" :rule [:key-gen 2] :doc "goi's tables, one directory a key: the current and one older"}
+ {:path ".tmp/java-check" :where :main :owner "bin/java-check" :rule :keep :max-entries 10000 :doc "the read forms' cache, sharded since 7df3e67e5 (night 12: 208,000 entries filled ext4's index); §3.1's 3 days unused by atime waits for a per-entry index"}
+ {:path ".tmp/clojure-tests*" :owner "bin/clojure-tests" :rule :keep :doc "keyed AOT builds and the suite's translation; §3.1: the current key's and one older (its layout mixes them with the fixtures)"}
+ {:path ".tmp/diffcheck" :owner "bin/diffcheck" :rule :keep :doc "keyed builds"}
+ {:path ".tmp/oracle-packs" :where :main :owner "bin/oracle-records" :rule :keep :doc "the packs the committed pins name"}
+ {:path ".tmp/oracle*" :owner "bin/oracle" :rule :keep :doc "the frozen jar, the oracle's scratch"}
+ {:path ".tmp/frozen*" :owner "bin/lib/frozen.bash, bin/lib/tools.bash" :rule :keep :doc "the frozen tree extracted from its tag"}
+ {:path ".tmp/seed*" :owner "bin/seed" :rule :keep :doc "stage 0's build and verify scratch, locks"}
+ {:path ".tmp/host*" :owner "bin/lib/host.bash" :rule :keep :doc "the host's build and its logs"}
+ {:path ".tmp/j2g*" :owner "bin/j2g, bin/j2g-edge" :rule :keep :doc "j2g's host by key (197 MiB a worktree; §3.1: one copy by key in the main checkout, which moves gate_key: window W)"}
+ {:path ".tmp/repr-go*" :owner "bin/repr-go" :rule :keep :doc "repr/go's host, corpora and candidates (repr-go-host as j2g's)"}
+ {:path ".tmp/godump" :owner "bin/repr-go" :rule :keep :doc "the helper's build and corpus"}
+ {:path ".tmp/goi*" :owner "bin/goi" :rule :keep :doc "gc's references and runs"}
+ {:path ".tmp/javac-vendor" :owner "bin/javac-vendor" :rule :keep :doc "javac's world's scratch"}
+ {:path ".tmp/jrt*" :owner "bin/jrt, bin/jrt-convert" :rule :keep :doc "jrt's scratch"}
+ {:path ".tmp/repr-java*" :owner "bin/repr-java" :rule :keep :doc "repr/java's checks and platform"}
+ {:path ".tmp/java-speed" :owner "bin/java-check" :rule :keep :doc "scratch"}
+ {:path ".tmp/pins-platform" :owner "bin/gate --pins" :rule :keep :doc "scratch, removed by its writer"}
+ {:path ".tmp/generated-check" :owner "bin/generated-check" :rule :keep :doc "scratch"}
+ {:path ".tmp/programs-check" :owner "bin/arbace-go --build-program --check" :rule :keep :doc "scratch"}
+ {:path ".tmp/build-go-tests" :owner "bin/build-go" :rule :keep :doc "scratch"}
+ {:path ".tmp/x509roots-vendor" :owner "bin/x509roots-vendor" :rule :keep :doc "scratch"}
+ {:path ".tmp/cover-tool" :owner "bin/lib/cover.bash" :rule :keep :doc "the cover builds"}
+ {:path ".tmp/module_table.ae.new" :owner "bin/goi table" :rule :keep :doc "a temporary"}
+ {:path ".tmp/native-corpus.err" :owner "bin/repr-go" :rule :keep :doc "a log"}
+ {:path ".tmp/net-check*" :owner "bin/net-check" :rule :keep :doc "scratch"}
+ {:path ".tmp/alpine-env" :owner "bin/alpine-env" :rule :keep :doc "scratch"}
+ {:path ".tmp/cache" :owner "bin/lib/tools.bash" :rule :keep :doc "the tools' caches"}
+ {:path ".tmp/intrinsics.json" :owner "bin/repr-llvm" :rule :keep :doc "a generated table"}
+ {:path ".tmp/errors-check.err" :owner "bin/repr-haskell" :rule :keep :doc "a log"}
+ {:path ".tmp/reject*" :owner "bin/repr-go syntax-errors" :rule :keep :doc "markers"}
+ {:path ".tmp/clean-base.edn" :owner "bin/gate --clean --only" :rule :keep :doc "the base record"}
+ {:path ".tmp/arch" :owner "bin/lib/host.bash" :rule :keep :doc "the host's architecture"}
+ ;; ---- C (ci, repr/c) and the crops
+ {:path ".tmp/ci-musl" :owner "bin/lib/ci/musl" :rule :keep :doc "musl's tree and its forms by key (shared at .tmp/shared/ci-musl-forms since GD4)"}
+ {:path ".tmp/ci*" :owner "bin/ci" :rule :keep :doc "ci's checks, its AOT libraries and references"}
+ {:path ".tmp/c1" :owner "C1" :rule :keep :doc "C1's fetches (the musl tarball)"}
+ {:path ".tmp/c-*" :owner "bin/repr-c" :rule :keep :doc "the sysroot and the target description"}
+ {:path ".tmp/c2j*" :owner "bin/ci c2j-check" :rule :keep :doc "c2j's checks"}
+ {:path ".tmp/cinterp" :owner "bin/ci cinterp-check" :rule :keep :doc "scratch"}
+ {:path ".tmp/repr-c*" :owner "bin/repr-c" :rule :keep :doc "the token, tree, annotation and round trip checks (the gcc tarball's tree)"}
+ {:path ".tmp/repr-clojure*" :owner "bin/repr-clojure" :rule :keep :doc "scratch"}
+ {:path ".tmp/cpp*" :owner "bin/cppi, bin/repr-cpp" :rule :keep :doc "cppi's checks, the target, the pins"}
+ {:path ".tmp/cppi*" :owner "bin/cppi" :rule :keep :doc "cppi's checks"}
+ {:path ".tmp/repr-cpp*" :owner "bin/repr-cpp" :rule :keep :doc "repr/cpp's checks"}
+ {:path ".tmp/rsi*" :owner "bin/rsi" :rule :keep :doc "rsi's runtime, std, checks"}
+ {:path ".tmp/rust*" :owner "bin/rust-front" :rule :keep :doc "the front's scratch"}
+ {:path ".tmp/repr-rust" :owner "bin/repr-rust" :rule :keep :doc "the apks, the crates (by pin), the dumps"}
+ {:path ".tmp/hsi" :owner "bin/hsi" :rule :keep :doc "hsi's checks and image"}
+ {:path ".tmp/hsdump" :owner "bin/repr-haskell" :rule :keep :doc "the helper's build"}
+ {:path ".tmp/repr-haskell" :owner "bin/repr-haskell" :rule :keep :doc "the corpus and the dumps"}
+ {:path ".tmp/oi" :owner "bin/oi" :rule :keep :doc "oi's checks"}
+ {:path ".tmp/o6" :owner "bin/oi" :rule :keep :doc "O6's scratch"}
+ {:path ".tmp/o7" :owner "bin/oi" :rule :keep :doc "O7's scratch"}
+ {:path ".tmp/ocdump" :owner "bin/repr-ocaml" :rule :keep :doc "the oracle's helper"}
+ {:path ".tmp/repr-ocaml" :owner "bin/repr-ocaml" :rule :keep :doc "the corpora (by pin)"}
+ {:path ".tmp/si*" :owner "bin/si" :rule :keep :doc "si's checks"}
+ {:path ".tmp/scheme" :where :main :owner "bin/repr-scheme, bin/si" :rule :keep :doc "the corpora fetched by pin (no network at night)"}
+ {:path ".tmp/repr-scheme" :owner "bin/repr-scheme" :rule :keep :doc "scratch"}
+ {:path ".tmp/pyi*" :owner "bin/pyi, bin/pyi-clib" :rule :keep :doc "pyi's C library host"}
+ {:path ".tmp/repr-python" :owner "bin/repr-python" :rule :keep :doc "the corpora"}
+ {:path ".tmp/llvm*" :owner "bin/llvmi, bin/repr-llvm" :rule :keep :doc "LLVM IR's checks"}
+ {:path ".tmp/repr-llvm" :owner "bin/repr-llvm" :rule :keep :doc "scratch"}
+ {:path ".tmp/asm" :owner "bin/repr-asm" :rule :keep :doc "the assembly crops' scratch"}
+ {:path ".tmp/repr-asm" :owner "bin/repr-asm" :rule :keep :doc "scratch"}
+ {:path ".tmp/x86i" :owner "bin/x86i" :rule :keep :doc "scratch"}
+ {:path ".tmp/a64i" :owner "bin/a64i" :rule :keep :doc "scratch"}
+ {:path ".tmp/t6i" :owner "bin/oi" :rule :keep :doc "scratch"}
+ ;; ---- the box and the vendoring tools (parked)
+ {:path ".tmp/box*" :owner "bin/box-*" :rule :keep :doc "the box's builds and VM"}
+ {:path ".tmp/tamago-vendor" :owner "bin/tamago-vendor" :rule :keep :doc "scratch"}
+ {:path ".tmp/toolchain-vendor" :owner "bin/toolchain-vendor" :rule :keep :doc "scratch"}
+ ;; ---- the gate's own tests' scratch (test/gate/*-test.bash), removed when two days old
+ {:path ".tmp/*-test" :owner "test/gate/*-test.bash" :rule [:age-self 2] :doc "a test's scratch, rewritten by each run: removed two days after its last"}
+]

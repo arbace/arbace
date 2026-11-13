@@ -15,7 +15,8 @@
       MODE essential or full; LOGS holds files.sha256 (sha256sum's lines of the checkout's files,
       bin/gate's) and hosts.edn ({:gate ID ...}); writes LOGS/plan.tsv (one step a line, the
       columns NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM-GIB BUDGET-S SUMMARY-N SUMMARY-RE
-      WHY AUDIT-CMD OUTPUTS USES KIND CMD, '-' for an empty one; DECISION after: the runner keys the step
+      WHY AUDIT-CMD OUTPUTS USES KIND DECLARED DISK-GIB CMD, '-' for an empty one (GD4: MEM-GIB the admission, GDS13 (a);
+      DECLARED the table's :mem-gib, DISK-GIB its :disk-gib); DECISION after: the runner keys the step
       once its :uses' producers ran (GT5); HEAVY yes, inner or -; BUDGET-S: three times the longest of the step's last three passes,
       GTS17 (a); GATE_STEPS names another table, for the gate's own tests), LOGS/plan/NAME.inputs (each step's material) and prints the plan: each step,
       its decision and why. --rerun: every check runs (passes are still recorded)
@@ -203,7 +204,8 @@
   ;; GD3: :closure (the load closure's files: they are the key's file lines), :also-changed and :weekly-why (when a
   ;; weekly step runs, not what it checks), :weekly (its phase as the table declares it: a weekly step's key is the same
   ;; in the weekly tier and on a night its :also-changed files changed)
-  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :failed-as :rotated-part :whole-list :judges
+  ;; GD4 (GDS12 (a)): :disk-gib (the runner's disk floor beside it, never what passes)
+  #{:doc :summary :mem-gib :disk-gib :heavy :audit-cmd :rotate :list :failed-re :failed-as :rotated-part :whole-list :judges
     :closure :also-changed :weekly-why :weekly :keyed :universe-n})
 
 ;; ---- GD3 (doc/GATE-DIET-SURVEY.md, GDS9 (a), GDS11 (a), GDS4 (b), "As built: GD3"): the epoch, the load closures, the
@@ -724,6 +726,39 @@
                 (str "weekly, run tonight: its :also-changed files changed since its pass at " (subs (str (:key p)) 0 12)
                      " (" (:date p) "): " (short-list (distinct (map subject diff)))))))))
 
+;; ---- GD4 (doc/GATE-DIET-SURVEY.md, GDS13 (a), "As built: GD4"): admission by the recorded peak
+
+(def under-margin
+  "a pass's peak over its declaration by more than this (10% and 0.5 GiB, gate.lanes mem-check's margin) is UNDER"
+  [1.1 0.5])
+
+(defn- pass-peak-gib
+  "a pass's peak in GiB: the larger of its largest process's (:maxrss-kib) and its tree's (:tree-peak-kib), or nil"
+  [p]
+  (let [n (fn [x] (if (number? x) x 0))
+        k (max (n (:maxrss-kib p)) (n (:tree-peak-kib p)))]
+    (when (pos? k) (/ (double k) 1048576.0))))
+
+(defn- ceil-half [x] (/ (Math/ceil (* 2.0 x)) 2.0))
+
+(defn admission
+  "GDS13 (a): what the runner admits a step by, {:gib G :declared D :recorded R :under N}: the larger of its declared
+  :mem-gib and 1.1 x the largest peak of its passes (rounded up to half a GiB); :under the count of passes whose peak is
+  over the declaration by the margin (UNDER: two or more, the plan prints its new figure). G nil: neither is known (the
+  runner's default, 1 GiB)"
+  [decl ps]
+  (let [peaks (keep pass-peak-gib ps)
+        rec (when (seq peaks) (apply max peaks))
+        [f m] under-margin
+        under (if (number? decl) (count (filter #(> % (+ (* decl f) m)) peaks)) 0)
+        g (cond (and (number? decl) rec) (max (double decl) (ceil-half (* 1.1 rec)))
+                (number? decl) (double decl)
+                rec (ceil-half (* 1.1 rec)))]
+    {:gib g :declared decl :recorded rec :under under}))
+
+(defn- gib-text [x]
+  (when x (let [r (Math/round (* 10.0 (double x)))] (if (zero? (mod r 10)) (str (quot r 10)) (str (/ r 10.0))))))
+
 (defn plan [root logs store mode rerun? & [rotation weekly?]]
   (set-counted! (str logs "/ancestors.txt"))
   (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
@@ -858,7 +893,7 @@
                                                 (str "changed since the pass at " (subs (str (:key p)) 0 12) " (" (:date p) "): "
                                                      (short-list (changes lines then)))
                                                 (str "no pass at this key (the latest " (subs (str (:key p)) 0 12) ")")))))})
-                     d (merge {:step s :name nm :kind kind :budget bud} d)
+                     d (merge {:step s :name nm :kind kind :budget bud :admit (admission (:mem-gib s) ps)} d)
                      d (if-let [w (:weekly-why s)] (update d :why #(str w "; " %)) d)]
                  (-> acc (update :v conj d) (assoc-in [:by nm] d))))))
          {:v [] :by {}} steps)
@@ -901,16 +936,20 @@
                          d)))]
     (spit (str logs "/plan.tsv")
           (apply str
-                 (for [{:keys [step name decision key why budget kind]} decided
+                 (for [{:keys [step name decision key why budget kind admit]} decided
                        :let [[sre sn] (:summary step)]]
                    (str (str/join "\t" [name decision (dash key) (subs (str (:phase step)) 1)
                                         (dash (or (:chain step) name))
                                         (dash (str/join "," (needs-of step)))
                                         (dash (:start-after step))
-                                        (case (:heavy step) true "yes" :inner "inner" "-") (dash (:mem-gib step)) (dash budget)
+                                        (case (:heavy step) true "yes" :inner "inner" "-")
+                                        ;; GD4 (GDS13 (a)): MEM-GIB the admission (the declaration, or 1.1 x the recorded peak when larger)
+                                        (dash (or (gib-text (:gib admit)) (:mem-gib step))) (dash budget)
                                         (dash sn) (dash sre) (dash why) (dash (:audit-cmd step))
                                         (if (:outputs step) "yes" "-") (dash (str/join "," (map str (:uses step))))
-                                        (subs (str kind) 1) (:cmd step)])
+                                        (subs (str kind) 1)
+                                        ;; GD4: DECLARED (the table's :mem-gib) and DISK-GIB (:disk-gib, GDS12 (a)), before the command
+                                        (dash (:mem-gib step)) (dash (:disk-gib step)) (:cmd step)])
                         "\n"))))
     (let [freq (frequencies (map :decision decided))]
       (println (str "gate plan (" mode "): " (count decided) " steps; "
@@ -921,7 +960,14 @@
                     "; " (str/join ", " (for [d decided :let [s (:step d)] :when (:rotation s)]
                                           (str (:name d) " " (count (:list s)) " files"))))))
     (doseq [{:keys [name decision why]} decided]
-      (println (format "   %-6s %-28s %s" (if (= decision "none") "-" decision) name why)))))
+      (println (format "   %-6s %-28s %s" (if (= decision "none") "-" decision) name why)))
+    ;; GD4 (GDS13 (a)): a step UNDER its declaration in two passes or more, with the figure it is admitted at and the one to declare
+    (doseq [{:keys [name admit]} decided
+            :let [{:keys [gib declared recorded under]} admit]
+            :when (and admit (>= under 2))]
+      (println (str "   UNDER  " name ": declared " declared " GiB, " under " passes above it by the margin (the largest "
+                    (gib-text recorded) " GiB): admitted at " (gib-text gib) " GiB; declare :mem-gib "
+                    (long (Math/ceil (* 1.1 recorded))))))))
 
 (defn why [root logs store nm]
   (let [f (File. (str logs "/plan/" nm ".inputs"))]

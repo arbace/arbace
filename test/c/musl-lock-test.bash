@@ -14,6 +14,8 @@ if [ -z "$seed" ]; then for c in "$root/.tmp/ci-musl/forms" "$cmain/.tmp/ci-musl
 [ -n "$seed" ] || { echo "musl-lock-test: no complete forms cache to copy (CI_MUSL_TEST_SEED)" >&2; exit 1; }
 w=$root/.tmp/musl-lock-test; rm -rf "$w"; mkdir -p "$w"
 export CI_MUSL_FORMS=$w/forms
+# (GD4: the main checkout's shared copies by key are section 4's, in a store of its own; sections 1-3 read here alone)
+export CI_MUSL_NO_SHARED=1 CI_MUSL_SHARED=$w/shared
 cp -R "$seed" "$CI_MUSL_FORMS"
 # through bin/ci: it evaluates the checkout's arbace/c when the host embeds another (bin/lib/ci/fresh.bash)
 musl() { "$root/bin/ci" musl "$@"; }
@@ -57,5 +59,17 @@ read s e < "$w/second"
 [ $((e - s)) -ge 3 ] || fail "the second reader did not wait ($((e - s)) s)"
 musl fresh || fail "not fresh after two readers"
 echo "musl-lock-test: two readers serialized (second waited $((e - s)) s)"
+
+# 4. GD4 (doc/GATE-DIET-SURVEY.md, "As built: GD4"): a shared copy at the key is taken whole, nothing read; a read publishes one
+unset CI_MUSL_NO_SHARED
+k=$(musl key); mkdir -p "$CI_MUSL_SHARED"; cp -R "$CI_MUSL_FORMS" "$CI_MUSL_SHARED/$k"
+rm -rf "$CI_MUSL_FORMS"
+musl read > "$w/out.log" 2>&1
+grep -q 'taken from' "$w/out.log" || fail "the shared copy at the key was not taken ($(tail -2 "$w/out.log" | tr '\n' ' '))"
+musl fresh || fail "not fresh after taking the shared copy"
+rm -rf "$CI_MUSL_SHARED"; rm "$CI_MUSL_FORMS/index.edn"
+musl read > "$w/out.log" 2>&1
+[ -f "$CI_MUSL_SHARED/$k/index.edn" ] && [ "$(cat "$CI_MUSL_SHARED/$k/key")" = "$k" ] || fail "a read published no shared copy"
+echo "musl-lock-test: a shared copy taken, a read's published"
 rm -rf "$w"
 echo "musl-lock-test: ok"
