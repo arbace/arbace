@@ -25,6 +25,14 @@
 #                                                    a class of test/wasm/divergences-read.edn, the negative controls of
 #                                                    test/wasm/controls.txt failing (and its positive check passing), and the
 #                                                    instructions the modules use summed into WORK/ops.tsv; WORK .tmp/repr-wasm/rt/CORPUS
+#   bin/repr-wasm wast [--record] [--only LIST]        WA2: the testsuite's root scripts (test/wasm/corpora.edn's :testsuite, extracted by
+#                                                    corpus fetch; --only LIST: the scripts named in LIST, a path under the testsuite a
+#                                                    line), each command judged at the read level by its own assertion (doc/wasm/SPEC.md
+#                                                    §8: a module read, the cross-format judge, a binary one byte for byte, its canonical
+#                                                    text read again; assert_malformed rejected; assert_invalid read, WA3's), rows against
+#                                                    test/wasm/wast-results.edn (--record rewrites the run's scripts' rows), every non-pass
+#                                                    in a class of test/wasm/divergences-wast.edn, the controls of
+#                                                    test/wasm/controls-wast.txt failing; WORK .tmp/repr-wasm/wast
 #   bin/repr-wasm divergences [RESULTS]              the results' non-passes judged against the classes (none unclassed)
 #   bin/repr-wasm ops gen|check                      the instruction table arbace/repr/wasm/ops.ae from the spec's pin
 #                                                    (interpreter/binary/decode.ml, interpreter/text/lexer.mll; test/wasm/gen_ops.ae):
@@ -168,6 +176,36 @@ case ${1:-} in
     n=$(cut -f2 "$root/.tmp/repr-wasm/rt/ops.tsv" | sort -u | wc -l)
     echo "repr-wasm roundtrip: $n distinct instructions in the modules (.tmp/repr-wasm/rt/ops.tsv)"
     judge roundtrip "$results" "$all" "$classes" "${record:-}" "${ids[*]}" || fails=$((fails + 1))
+    [ $fails = 0 ] ;;
+  wast)
+    shift; record=; only=
+    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; *) echo "repr-wasm wast: $1?" >&2; exit 2 ;; esac; done
+    ts=$tree/$(edn '(println (:top (:testsuite (:pins c))))')
+    [ -d "$ts" ] || { echo "repr-wasm: $ts missing: bin/repr-wasm corpus fetch" >&2; exit 1; }
+    mkdir -p "$lists"; work=$root/.tmp/repr-wasm/wast; rm -rf "$work"; mkdir -p "$work"
+    if [ -n "$only" ]; then
+      grep -v '^#' "$only" | sed '/^$/d' | while read -r f; do printf 'testsuite/%s\t%s\n' "$f" "$ts/$f"; done > "$lists/testsuite.list"
+    else
+      (cd "$ts" && ls *.wast) | while read -r f; do printf 'testsuite/%s\t%s\n' "$f" "$ts/$f"; done > "$lists/testsuite.list"
+    fi
+    arbace_tool -m arbace.repr.wasm.wast "$lists/testsuite.list" "$work"
+    fails=0
+    while read -r cid subj mode other; do
+      case $cid in ''|'#'*) continue ;; esac
+      sp=${subj%#*} sk=${subj##*#}
+      grep -q "^testsuite/$sp	" "$lists/testsuite.list" || { echo "control $cid: left (not in this run)"; continue; }
+      if [ "$mode" = vs ]; then op=${other%#*} ok=${other##*#}; v=$(arbace_tool -m arbace.repr.wasm.wast control "$ts/$sp" "$sk" vs "$ts/$op" "$ok" | tail -1)
+      else v=$(arbace_tool -m arbace.repr.wasm.wast control "$ts/$sp" "$sk" "$mode" | tail -1); fi
+      if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
+    done < "$root/test/wasm/controls-wast.txt"
+    ids=; [ -n "$only" ] || ids=testsuite
+    if [ -n "$only" ]; then
+      # a partial run: judged on its scripts' rows alone
+      arbace_tool -e "(let [run (set (map #(first (arbace.string/split (first %) #\"#\")) (read-string (str \"[\" (slurp \"$work/rows.edn\") \"]\")))) old (read-string (slurp \"$root/test/wasm/wast-results.edn\"))] (spit \"$work/old.edn\" (pr-str (vec (filter #(run (first (arbace.string/split (first %) #\"#\"))) old)))))"
+      judge wast "$work/old.edn" "$work/rows.edn" "$root/test/wasm/divergences-wast.edn" "" "" || fails=$((fails + 1))
+    else
+      judge wast "$root/test/wasm/wast-results.edn" "$work/rows.edn" "$root/test/wasm/divergences-wast.edn" "${record:-}" "$ids" || fails=$((fails + 1))
+    fi
     [ $fails = 0 ] ;;
   divergences)
     r=${2:-$results}
