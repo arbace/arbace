@@ -2074,3 +2074,90 @@ Numbering from ARS77. Each with options, the recommended named; none taken.
 - **ARS78 synth-neon-ext in the essential subset.** (a) a quarter of it (159 cases) beside the other quarters; (b) the rotation alone.
   *Recommended: (a)*: decodeVX sits first in decodeFP, so every FP and SIMD word of the essential programs passes through it, and a
   quarter costs a few seconds by ARS76's numbers.
+
+## As built: AR17 (2026-11-13; branch `283-asm-arm64-ar17`, from `282-asm-arm64-ar16` `17acef923`; queue task 283, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max, /proc/cpuinfo's aes, pmull, sha1, sha2, sha3 and sha512),
+stage 0 and TamaGo's go; every check under 1 GiB; no GNU tool (LLVM 23's llvm-objdump only to compare encodings by hand, in no check).
+The user's answers (2026-11-13): ARS77 (a), ARS78 (a). The semantics read from the Arm ARM (DDI 0487: AESE, AESD, AESMC, AESIMC,
+AESShiftRows, AESInvShiftRows, AESSubBytes, AESInvSubBytes, AESMixColumns, AESInvMixColumns; SHA1C, SHA1P, SHA1M, SHA1H, SHA1SU0,
+SHA1SU1, SHAchoose, SHAparity, SHAmajority; SHA256H, SHA256H2, SHA256SU0, SHA256SU1, SHA256hash, SHAhashSIGMA0, SHAhashSIGMA1;
+SHA512H, SHA512H2, SHA512SU0, SHA512SU1; EOR3, BCAX, RAX1, XAR; PMULL, PolynomialMult) and the standards (FIPS 197 for the S-box's
+definition, 5.1.1; FIPS 180-4 and FIPS 202 for the test vectors); no code or table copied. The CPU is the decisive judge;
+qemu-aarch64 (the synthetic `--record`'s second judge) is the main host's.
+
+- **ARS77 (a): the M2's cryptographic extension in a64i** (`go/arbace/a64i/simdcrypto.ae`, new, written as forms by hand, no
+  conversion; the hooks as forms: `OpVC` before `opSIMDEnd`, its name `vc`, `simdName`'s case, `lowerVC` first in `lowerSIMD`,
+  `execVC` first in `execSIMD` (simd.ae); `decodeVC` first in `decodeFP` (fp.ae); the header's `:files`, `(load "a64i/simdcrypto")`,
+  `vcNames vcOps aesBox` in its `:init-order` after simd.go's blank, now at 1498; `emu/arm64.ae`'s AT_HWCAP; simdint's doc: pmull's
+  1q is OpVC's):
+  - `OpVC`, Sys `vcNames`' index: FEAT_AES's aese, aesd (state ^ key, then (Inv)ShiftRows and (Inv)SubBytes), aesmc, aesimc;
+    FEAT_SHA1's sha1c, sha1p, sha1m (four rounds of SHAchoose, SHAparity, SHAmajority on Qd and Sn with Vm's words), sha1h (ROL 30),
+    sha1su0, sha1su1; FEAT_SHA256's sha256h, sha256h2 (SHA256hash, part 1 and 2), sha256su0, sha256su1; FEAT_SHA512's sha512h,
+    sha512h2, sha512su0, sha512su1; FEAT_SHA3's eor3, bcax (Ra the fourth register), rax1, xar (Imm the rotation); FEAT_PMULL's pmull
+    and pmull2 1q (Sf: the upper doublewords; size 11 of the three-different class, which decodeVC takes before decodeVINT). The S-box
+    and its inverse computed at the package's initialisation (`aesBox`: each byte's inverse in GF(2^8), then FIPS 197's affine
+    transformation). The forms by a table of each instruction's operands (`vcOps`: q, s or an arrangement, 1q among them). The other
+    words of these classes (SM3, SM4: not the M2's) fall through to the decoders as before; an unallocated size or opcode in the AES and
+    SHA classes is `:undefined`.
+  - AT_HWCAP is FP, ASIMD, AES, PMULL, SHA1, SHA2, FPHP, ASIMDHP, ASIMDRDM, JSCVT, FCMA, SHA3, ASIMDDP, SHA512 and ASIMDFHM (0xb2767b,
+    was 0x907603).
+  - Coverage names `v.aese.16b`, `v.sha1c.4s`, `v.sha1h.s`, `v.sha256h2.4s`, `v.sha512su0.2d`, `v.eor3.16b`, `v.xar.2d`, `v.pmull.1q`,
+    `v.pmull2.1q` (24 new, simd).
+  - The encodings: 76 forms assembled by Arbace's assembler equal llvm-objdump's disassembly of the linked words, form for form. A raw
+    differential (76 forms, the register choices among them Rd = Rn, Rd = Rm and v3's, over 40 rows each of any bits, words of zeros and
+    ones and single words, under FPCR's modes; v0, v3, FPSR and NZCV printed; not committed) gave this CPU's output byte for byte, AOT
+    and eval, at the first run (18,240 lines); forms-check 2,186 of 2,186; stepped equal (2,930,103 instructions).
+  - The synthetic program `synth-neon-crypto` (416 cases: each of 26 forms 16 times, gen.ae's `crypto-cases`, seed + 1500; neon's
+    setup): the model the pseudocode on longs (`crypto-model`: `aes-rows` and `aes-columns`, MixColumns by FIPS 197's column formulas,
+    the S-box by its bit formula; `sha1-rounds`, `sha256-rounds`, `clmul128`). The M2 agreed with the model on every case at the first
+    run; a64i (eval, AOT, forms 945 of 945 words, lockstep sys and step 11,675 of 11,677 instructions) at its first run.
+  - `test/asm/a64i/crypto-fips.s` (written by a script recorded in queue 283's report; in the essential subset), a second judge beside
+    the model, self-checking against the standards' published vectors: AES-128 of FIPS 197 C.1 encrypted (aese, aesmc) and decrypted by
+    the equivalent inverse cipher (aesd, aesimc; the decryption keys by aesimc), SHA-1, SHA-256 and SHA-512 of "abc" (FIPS 180-4's
+    examples; the schedules by sha1su0/sha1su1, sha256su0/sha256su1, sha512su0/sha512su1, two SHA-512 rounds a step by sha512h and
+    sha512h2 on the state in general registers), SHA3-256 of "abc" (FIPS 202) by Keccak-f[1600]'s 24 rounds on eor3 (theta's C), rax1
+    (D), xar (rho and pi) and bcax (chi), and pmull and pmull2 1q of six pairs against a shift-and-xor loop on general registers; the
+    constants (round keys, K, H, rho's offsets, the round constants) computed from the standards' definitions. Ok on the M2 at the first
+    run; a64i equal (eval, AOT, forms 726, step 12,248 of 12,256).
+  - Controls verdict-23, forms-14, inject-45, step-14 (synth-neon-crypto; simd:x caught at an instruction of the family), verdict-24,
+    inject-46, step-15 (crypto-fips).
+- **ARS78 (a): `synth-neon-ext-e` in the essential subset**: every fourth case of synth-neon-ext (159), as the other quarters; controls
+  verdict-25, inject-47 (simd:x), inject-48 (fp:n, fjcvtzs's N as inject-41). The subset (85 programs)
+  timed alone by `--only LIST`, without and with it in alternation, at load 15-17 (281, 284 and the coordinator's runs beside):
+  without 78.2, 79.7, 68.0, 77.9 s (mean 75.9), with 45.2, 62.5, 71.7, 76.9 s (mean 64.1): its cost is below the runs' noise of about
+  15 s (`--only synth-neon-ext-e` alone 12.6 s with the check's fixed cost; its step 4,788 instructions); `--essential` 69.1 s, under
+  0.9 GiB.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 106 / 106 each | **109 / 109 each** (32 synthetic programs, 28,746 cases) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,879 of 2,879 (simd 2,135) | **2,903 of 2,903** (simd 2,159) |
+| controls (`test/asm/controls-a64i.txt`) | 104 | **114**; table check's 1 |
+| `--essential` | 83 programs | **85** (with crypto-fips and synth-neon-ext-e) |
+| goi's checker over a64i (linux/arm64, `bin/a64i table-check`) | 0 errors | **0** (simd.go's blank 1498) |
+| `[:asm-arm64 :eval]` | 424 / 0 / 0 | **436 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,068 / 0 / 13 | **3,071 / 0 / 13** |
+
+**crops-score** (arm64 assembly) 99.8 / 100.0 / 100.0 unchanged, `--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells
+checked, 0 problems. Proofs: `bin/a64i synth --record` (32 programs, the runner this CPU: `REPR_ASM_RUNNER=/usr/bin/env`), `bin/a64i
+check --record` whole (109 of 109, 2 min 22 s at load 15, 0.93 GiB), `--essential`, `bin/a64i table-check` (289 s cold). The keys do
+not move (`bin/arbace-go --gate-key` `ee1501081ae8...` at the base and the head; `test/gate/gate-key-crops-test.bash` flaky at load 15
+at the base as at the head: its `echo "$x" | grep -q` under pipefail, a SIGPIPE when grep stops early, a different assertion each run).
+The a64i driver still builds for linux/amd64. Left to the main host: `bin/a64i synth --record` under qemu-aarch64 (synth-neon-crypto's
+and synth-neon-ext-e's second judge), `bin/gate --plan`.
+
+### Proposed (AR17)
+
+Numbering from ARS79. Each with options, the recommended named; none taken.
+
+- **ARS79 a64i's slice after AR17.** (a) the M2's remaining base features in the integer core, claimed in AT_HWCAP and AT_HWCAP2:
+  FEAT_CRC32 (crc32b/h/w/x, crc32cb/h/w/x), FEAT_LRCPC and FEAT_LRCPC2 (ldapr, ldapur, stlur), FEAT_FlagM and FEAT_FlagM2 (cfinv,
+  rmif, setf8, setf16, axflag, xaflag), FEAT_FRINTTS (frint32z, frint32x, frint64z, frint64x); (b) the M2's ARMv8.6 matrix and bfloat
+  forms (FEAT_I8MM, FEAT_BF16), claimed in AT_HWCAP2; (c) none: a64i stops at the M2's ARMv8.4 NEON and crypto. *Recommended: (a)*:
+  Go's own standard library now meets a64i's AES, PMULL and SHA claims (crypto/aes, crypto/sha256 and crypto/sha512 select their
+  assembly by AT_HWCAP) and hash/crc32 selects its CRC32 path the same way; the matrix forms only machine-learning kernels emit.
+- **ARS80 synth-neon-crypto in the essential subset.** (a) crypto-fips alone, as now (every OpVC instruction run there against the
+  standards' vectors); (b) a quarter of synth-neon-crypto (104 cases) beside it. *Recommended: (a)*: crypto-fips already runs each of
+  the 23 instructions (a64i's coverage names 24 with pmull2) in the essential gate, and the model's 416 cases run each night in --full's
+  rotation.
