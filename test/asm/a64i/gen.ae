@@ -2733,6 +2733,169 @@
 (def vx-families
   [["neon-ext" "the M2's ARMv8.2-8.4 Advanced SIMD and FP features: FEAT_DotProd (sdot, udot), FEAT_RDM (sqrdmlah, sqrdmlsh), FEAT_FHM (fmlal, fmlsl, fmlal2, fmlsl2), FEAT_FCMA (fcmla, fcadd), FEAT_JSCVT (fjcvtzs), vector, scalar and by element, under FPCR's modes, DN and FZ16" vx-cases]])
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; AR17 (ARS77 (a)): the M2's cryptographic extension: FEAT_AES (aese, aesd, aesmc, aesimc), FEAT_SHA1 (sha1c, sha1p,
+;; sha1m, sha1h, sha1su0, sha1su1), FEAT_SHA256 (sha256h, sha256h2, sha256su0, sha256su1), FEAT_SHA512 (sha512h, sha512h2,
+;; sha512su0, sha512su1), FEAT_SHA3 (eor3, bcax, rax1, xar), FEAT_PMULL's pmull and pmull2 1q. The model: the Arm ARM's
+;; pseudocode (AESShiftRows, AESSubBytes, AESMixColumns and their inverses; SHA1C's, SHA256hash's and SHA512H's rounds,
+;; the schedule updates), on longs; the S-box from FIPS 197's definition (5.1.1), MixColumns as FIPS 197's column formulas
+;; (5.1.3, 5.3.3), each written apart from a64i's Go.
+
+(defn- gf*
+  "The product of bytes a and b in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1 (FIPS 197, 4.2)."
+  ^long [^long a ^long b]
+  (loop [a a b b r 0]
+    (if (zero? b)
+      r
+      (recur (bit-and (bit-xor (bit-shift-left a 1) (if (bit-test a 7) 0x1b 0)) 0xff) (unsigned-bit-shift-right b 1)
+             (if (odd? b) (bit-xor r a) r)))))
+
+(def ^:private aes-sbox
+  (vec (for [x (range 256)]
+         (let [inv (if (zero? x) 0 (long (first (filter #(= 1 (gf* x %)) (range 1 256)))))
+               bit (fn [^long i] (bit-and (unsigned-bit-shift-right inv (mod i 8)) 1))]
+           ;; FIPS 197 (5.1): b'_i = b_i ^ b_(i+4) ^ b_(i+5) ^ b_(i+6) ^ b_(i+7) ^ c_i, c = 0x63
+           (reduce bit-or 0 (for [i (range 8)]
+                              (bit-shift-left (bit-xor (long (bit i)) (long (bit (+ i 4))) (long (bit (+ i 5))) (long (bit (+ i 6)))
+                                                       (long (bit (+ i 7))) (bit-and (unsigned-bit-shift-right 0x63 i) 1))
+                                              i)))))))
+
+(def ^:private aes-inv-sbox (let [m (into {} (map-indexed (fn [i s] [s i]) aes-sbox))] (mapv m (range 256))))
+
+(defn- cr-bytes [[lo hi]] (vec (for [i (range 16)] (bit-and (unsigned-bit-shift-right (long (if (< i 8) lo hi)) (* 8 (mod i 8))) 0xff))))
+(defn- cr-w4 [[lo hi]] (let [lo (long lo) hi (long hi)] [(bit-and lo m32) (unsigned-bit-shift-right lo 32) (bit-and hi m32) (unsigned-bit-shift-right hi 32)]))
+(defn- cr-v [ws] (vpack ws 32))
+(defn- rl32 ^long [^long x ^long k] (let [x (bit-and x m32) k (mod k 32)] (bit-and (bit-or (bit-shift-left x k) (unsigned-bit-shift-right x (- 32 k))) m32)))
+(defn- a32 ^long [& xs] (bit-and (long (reduce unchecked-add 0 xs)) m32))
+(defn- vxor [[a b] [c d]] [(bit-xor (long a) (long c)) (bit-xor (long b) (long d))])
+
+(defn- aes-rows
+  "AESShiftRows (AESInvShiftRows when INV) then the S-box (its inverse) of the state's bytes s (byte r + 4c: row r, column c)."
+  [s inv]
+  (vec (for [i (range 16) :let [r (mod i 4) c (quot i 4) src (+ r (* 4 (mod (if inv (- (+ c 4) r) (+ c r)) 4)))]]
+         ((if inv aes-inv-sbox aes-sbox) (s src)))))
+
+(defn- aes-columns
+  "AESMixColumns (AESInvMixColumns when INV) of the state's bytes s: FIPS 197's column formulas (5.1.3, 5.3.3)."
+  [s inv]
+  (vec (mapcat (fn [c]
+                 (let [[a0 a1 a2 a3] (subvec s (* 4 c) (+ 4 (* 4 c))) m gf*]
+                   (if inv
+                     [(bit-xor (m 14 a0) (m 11 a1) (m 13 a2) (m 9 a3)) (bit-xor (m 9 a0) (m 14 a1) (m 11 a2) (m 13 a3))
+                      (bit-xor (m 13 a0) (m 9 a1) (m 14 a2) (m 11 a3)) (bit-xor (m 11 a0) (m 13 a1) (m 9 a2) (m 14 a3))]
+                     [(bit-xor (m 2 a0) (m 3 a1) a2 a3) (bit-xor a0 (m 2 a1) (m 3 a2) a3)
+                      (bit-xor a0 a1 (m 2 a2) (m 3 a3)) (bit-xor (m 3 a0) a1 a2 (m 2 a3))])))
+               (range 4))))
+
+(defn- sha1-rounds
+  "SHA1C, SHA1P or SHA1M (F the round's function) of X (four words), Y (a word) and W (four words): X after four rounds."
+  [f x y w]
+  (loop [e 0 x x y y]
+    (if (= e 4)
+      x
+      (let [[x0 x1 x2 x3] x y (a32 y (rl32 x0 5) (f x1 x2 x3) (w e))]
+        (recur (inc e) [y x0 (rl32 x1 30) x2] x3)))))
+
+(defn- sha-ch ^long [^long x ^long y ^long z] (bit-xor (bit-and (bit-xor y z) x) z))
+(defn- sha-par ^long [^long x ^long y ^long z] (bit-xor x y z))
+(defn- sha-maj ^long [^long x ^long y ^long z] (bit-or (bit-and x y) (bit-and (bit-or x y) z)))
+
+(defn- sha256-rounds
+  "SHA256hash(X, Y, W, part1) on four-word vectors: X (part1) or Y after four rounds."
+  [x y w part1]
+  (loop [e 0 x x y y]
+    (if (= e 4)
+      (if part1 x y)
+      (let [[x0 x1 x2 x3] x [y0 y1 y2 y3] y
+            t (a32 y3 (bit-xor (rl32 y0 26) (rl32 y0 21) (rl32 y0 7)) (sha-ch y0 y1 y2) (w e))
+            x3 (a32 t x3)
+            y3 (a32 t (bit-xor (rl32 x0 30) (rl32 x0 19) (rl32 x0 10)) (sha-maj x0 x1 x2))]
+        ;; <Y, X> = ROL(Y:X, 32)
+        (recur (inc e) [y3 x0 x1 x2] [x3 y0 y1 y2])))))
+
+(defn- ror64 ^long [^long x ^long k] (Long/rotateRight x (int k)))
+
+(defn- clmul128
+  "The carry-less product of the 64-bit x and y: [LO HI]."
+  [^long x ^long y]
+  (reduce (fn [[lo hi] i]
+            (let [i (long i)]
+              (if (bit-test y i)
+                [(bit-xor (long lo) (bit-shift-left x i)) (if (zero? i) hi (bit-xor (long hi) (unsigned-bit-shift-right x (- 64 i))))]
+                [lo hi])))
+          [0 0] (range 64)))
+
+(defn crypto-model
+  "The result vector [LO HI] of the instruction M on d (V[d]), n (V[n]), m (V[m]) and a (V[a], eor3 and bcax), the rotation k
+  (xar)."
+  [m d n mm a ^long k]
+  (let [[d0 d1] d [n0 n1] n [m0 m1] mm]
+    (case m
+      "aese" (vpack (aes-rows (cr-bytes (vxor d n)) false) 8)
+      "aesd" (vpack (aes-rows (cr-bytes (vxor d n)) true) 8)
+      "aesmc" (vpack (aes-columns (cr-bytes n) false) 8)
+      "aesimc" (vpack (aes-columns (cr-bytes n) true) 8)
+      ("sha1c" "sha1p" "sha1m") (cr-v (sha1-rounds ({"sha1c" sha-ch "sha1p" sha-par "sha1m" sha-maj} m) (cr-w4 d) (bit-and (long n0) m32) (cr-w4 mm)))
+      "sha1h" [(rl32 n0 30) 0]
+      "sha1su0" (vxor (vxor [d1 n0] d) mm)
+      "sha1su1" (let [[x0 x1 x2 x3] (cr-w4 d) [_ y1 y2 y3] (cr-w4 n) t0 (bit-xor x0 y1) t1 (bit-xor x1 y2) t2 (bit-xor x2 y3) t3 x3]
+                  (cr-v [(rl32 t0 1) (rl32 t1 1) (rl32 t2 1) (bit-xor (rl32 t3 1) (rl32 t0 2))]))
+      "sha256h" (cr-v (sha256-rounds (cr-w4 d) (cr-w4 n) (cr-w4 mm) true))
+      "sha256h2" (cr-v (sha256-rounds (cr-w4 n) (cr-w4 d) (cr-w4 mm) false))
+      "sha256su0" (let [x (cr-w4 d) [y0] (cr-w4 n) t (conj (subvec x 1) y0)]
+                    (cr-v (for [e (range 4) :let [v (long (t e))]]
+                            (a32 (bit-xor (rl32 v 25) (rl32 v 14) (unsigned-bit-shift-right v 3)) (x e)))))
+      "sha256su1" (let [x (cr-w4 d) y (cr-w4 n) z (cr-w4 mm) t0 [(y 1) (y 2) (y 3) (z 0)]
+                        s1 (fn [^long v] (bit-xor (rl32 v 15) (rl32 v 13) (unsigned-bit-shift-right v 10)))
+                        r0 (a32 (s1 (z 2)) (x 0) (t0 0)) r1 (a32 (s1 (z 3)) (x 1) (t0 1))]
+                    (cr-v [r0 r1 (a32 (s1 r0) (x 2) (t0 2)) (a32 (s1 r1) (x 3) (t0 3))]))
+      "sha512h" (let [S1 (fn [^long v] (bit-xor (ror64 v 14) (ror64 v 18) (ror64 v 41)))
+                      hi (unchecked-add (unchecked-add (bit-xor (bit-and m1 n0) (bit-and (bit-not m1) n1)) (S1 m1)) d1)
+                      t (unchecked-add hi m0)
+                      lo (unchecked-add (unchecked-add (bit-xor (bit-and t m1) (bit-and (bit-not t) n0)) (S1 t)) d0)]
+                  [lo hi])
+      "sha512h2" (let [S0 (fn [^long v] (bit-xor (ror64 v 28) (ror64 v 34) (ror64 v 39)))
+                       hi (unchecked-add (unchecked-add (bit-xor (bit-and n0 m1) (bit-and n0 m0) (bit-and m1 m0)) (S0 m0)) d1)
+                       lo (unchecked-add (unchecked-add (bit-xor (bit-and hi m0) (bit-and hi m1) (bit-and m1 m0)) (S0 hi)) d0)]
+                   [lo hi])
+      "sha512su0" (let [s0 (fn [^long v] (bit-xor (ror64 v 1) (ror64 v 8) (unsigned-bit-shift-right v 7)))]
+                    [(unchecked-add d0 (s0 d1)) (unchecked-add d1 (s0 n0))])
+      "sha512su1" (let [s1 (fn [^long v] (bit-xor (ror64 v 19) (ror64 v 61) (unsigned-bit-shift-right v 6)))]
+                    [(unchecked-add (unchecked-add d0 (s1 n0)) m0) (unchecked-add (unchecked-add d1 (s1 n1)) m1)])
+      "eor3" (vxor (vxor n mm) a)
+      "bcax" (let [[a0 a1] a] [(bit-xor n0 (bit-and m0 (bit-not a0))) (bit-xor n1 (bit-and m1 (bit-not a1)))])
+      "rax1" [(bit-xor n0 (Long/rotateLeft m0 1)) (bit-xor n1 (Long/rotateLeft m1 1))]
+      "xar" [(ror64 (bit-xor n0 m0) k) (ror64 (bit-xor n1 m1) k)]
+      "pmull" (clmul128 n0 m0)
+      "pmull2" (clmul128 n1 m1))))
+
+(defn crypto-cases [rs]
+  (let [nx (let [s (volatile! rs)] (fn [] (let [v (first @s)] (vswap! s rest) (long v))))
+        ;; a vector: any bits, words of zeros and ones, a word alone, a byte pattern
+        vv (fn [] (let [x (nx)]
+                    (case (mod x 5)
+                      0 [(nx) (nx)]
+                      1 [(nx) (nx)]
+                      2 (cr-v (for [_ (range 4)] (let [y (nx)] (pick y [0 m32 (bit-and y m32) (bit-and y m32)]))))
+                      3 (cr-v (assoc [0 0 0 0] (mod (unsigned-bit-shift-right x 9) 4) (bit-and (nx) m32)))
+                      (let [b (bit-and (nx) 0xff)] (vpack (repeat 16 (if (odd? (unsigned-bit-shift-right x 11)) b (bit-xor b (bit-and (nx) 0xff)))) 8)))))
+        forms [["aese" "v0.16b, v1.16b"] ["aesd" "v0.16b, v1.16b"] ["aesmc" "v0.16b, v1.16b"] ["aesimc" "v0.16b, v1.16b"]
+               ["sha1c" "q0, s1, v2.4s"] ["sha1p" "q0, s1, v2.4s"] ["sha1m" "q0, s1, v2.4s"] ["sha1su0" "v0.4s, v1.4s, v2.4s"]
+               ["sha1h" "s0, s1"] ["sha1su1" "v0.4s, v1.4s"]
+               ["sha256h" "q0, q1, v2.4s"] ["sha256h2" "q0, q1, v2.4s"] ["sha256su0" "v0.4s, v1.4s"] ["sha256su1" "v0.4s, v1.4s, v2.4s"]
+               ["sha512h" "q0, q1, v2.2d"] ["sha512h2" "q0, q1, v2.2d"] ["sha512su0" "v0.2d, v1.2d"] ["sha512su1" "v0.2d, v1.2d, v2.2d"]
+               ["eor3" "v0.16b, v1.16b, v2.16b, v0.16b"] ["eor3" "v0.16b, v1.16b, v2.16b, v1.16b"]
+               ["bcax" "v0.16b, v1.16b, v2.16b, v0.16b"] ["bcax" "v0.16b, v1.16b, v2.16b, v1.16b"]
+               ["rax1" "v0.2d, v1.2d, v2.2d"] ["xar" "v0.2d, v1.2d, v2.2d"] ["pmull" "v0.1q, v1.1d, v2.1d"] ["pmull2" "v0.1q, v1.2d, v2.2d"]]]
+    (for [[m ops] forms i (range 16)
+          :let [v1 (vv) v2 (if (= (mod i 7) 3) v1 (vv)) d (v0-of v1 v2) k (mod (nx) 64)
+                a (if (str/ends-with? ops "v1.16b") v1 d)
+                r (crypto-model m d v1 v2 a k)]]
+      (ncase (str m "\t" ops (when (= m "xar") (str ", #" k)) "\n") v1 v2 [(first r) (second r)]))))
+
+(def crypto-families
+  [["neon-crypto" "the M2's cryptographic extension: FEAT_AES (aese, aesd, aesmc, aesimc), FEAT_SHA1 (sha1c, sha1p, sha1m, sha1h, sha1su0, sha1su1), FEAT_SHA256 (sha256h, sha256h2, sha256su0, sha256su1), FEAT_SHA512 (sha512h, sha512h2, sha512su0, sha512su1), FEAT_SHA3 (eor3, bcax, rax1, xar), FEAT_PMULL's pmull and pmull2 1q" crypto-cases]])
+
 (set! *unchecked-math* false)
 
 (defn- sha256 [^String s]
@@ -2818,6 +2981,11 @@
          ;; AR16 (ARS74 (b)): the M2's ARMv8.2-8.4 Advanced SIMD and FP features
          (for [[i [nm what f]] (map-indexed vector vx-families)
                :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1400 i)))) :insn)]]
+           (do (spit (str dir "/synth-" nm ".s") text)
+               [(str "synth-" nm) (sha256 text)]))
+         ;; AR17 (ARS77 (a)): the M2's cryptographic extension
+         (for [[i [nm what f]] (map-indexed vector crypto-families)
+               :let [text (looped nm what neon-setup neon-flags-text (vec (f (rng (+ seed 1500 i)))) :insn)]]
            (do (spit (str dir "/synth-" nm ".s") text)
                [(str "synth-" nm) (sha256 text)]))
          ;; review 1111 (5): the essential gate's Advanced SIMD integer program, a quarter of synth-neon's cases (every fourth)
