@@ -187,3 +187,61 @@ driver (`bin/lib/wai/go-run.bash`).
    `test/wasm/divergences-go.edn`.
 5. **The controls** (`test/wasm/controls-go.txt`): a subject's run judged against another program's gc reference must fail; `self`
    must pass.
+
+## 9. w2g, the AOT level (`w2g.go`; WA7)
+
+WAS10 (a): Wasm translated to Go and built by TamaGo's go. The unit is wai's internal code (§3), not the binary: its static stack
+heights (`Code.H`, each instruction's height before it runs, recorded by the compiler since WA7) make every operand a slot of the
+frame known at translation, and its branches carry their arity, target height and target pc. A defined function becomes one Go
+function `func(m *Machine, f *Func, fp int) *Exn` over the machine's stack (the interpreter's calling convention: the arguments at
+the frame's base, the results left there), so translated functions, interpreted ones and the hosts call one another freely:
+
+1. **the body**: a label `Lpc` before each instruction a branch targets, then each instruction as Go: `sp = fp + H` (a constant the
+   compiler folds), then its statements;
+2. **the transfers of control** written by w2g: `br` as `br()`'s move and a `goto`, a branch to the function's end as the results'
+   move and `return nil`, `br_if` and `if` as Go's `if`, `br_table` as a `switch` (its entries grouped by target), `br_on_null`,
+   `br_on_non_null`, `br_on_cast[_fail]`; `call`, `call_indirect` and `call_ref` as the interpreter's call sequence (a host's call,
+   or `Machine.run` on the callee: its depth counted, a translated callee run as Go); `throw` and `throw_ref` returning the
+   exception;
+3. **every other instruction** the interpreter's own case of `Machine.exec`'s switch, verbatim: `w2gCases` (`w2gcases.go`) is
+   generated from `exec.go` by `waidriver w2g-cases` (`bin/wai w2g gen|check`), each case's statements printed with the
+   instruction's fields made placeholders, which w2g replaces by constants (`uint16(N)` for the op, so a case shared by several ops
+   folds to its own branch) or, for the instructions whose fields hold the process's canonical type ids (struct, array, ref, the
+   casts, `call_indirect`), by the function's code read at run time; the SIMD instructions through the switch's default (their
+   lane functions). So the AOT level runs the interpreter's semantics instruction for instruction, and an interpreter fix is w2g's
+   by regeneration.
+
+A function with `try_table`'s handlers or a tail call (`return_call*`) is left to the interpreter (the first part of WA7). The
+translated functions of a module are registered under its bytes' SHA-256 (`RegisterAOT`, in the generated file's `init`) and
+attached at instantiation (`Func.Native`, run by `Machine.run` in place of `exec`). `Machine.Interpreted` counts the Wasm calls the
+interpreter ran in an AOT program; a command (or a Go program's run) that passes but counted any is not an AOT pass: its row is
+`fail "w2g: N calls on the interpreter (REASON)"`.
+
+**The programs.** `waidriver w2g OUT.go [--stats FILE] MODULE...` writes the modules' Go as one file of package wai; it is copied
+beside wai's printed sources in a copy of the light driver's module and built by TamaGo's go alone (`bin/lib/wai/aot.bash`'s
+`aot_exe`, kept by the driver's sources' digest and the file's): an AOT program is the light driver itself (its verbs `wast`,
+`control`, `run`) with the modules' functions compiled.
+
+### 9.1 The testsuite at AOT (`bin/wai check --aot`)
+
+The plans of §5 (the same planner, the same modules, the same plan lines), the scripts in batches (`WAI_AOT_BATCH`, 24 a program):
+each batch's modules translated, its AOT program built and run (`waiaot wast`), the rows judged as §5.3 judges them, then the AOT
+rule; the validator's rows are eval's (the same code) and are not repeated. Rows against `test/wasm/aot-results.edn`, classes
+`test/wasm/divergences-aot.edn`, the controls `test/wasm/controls-aot.txt` (§9.4) run by the subject's batch's program; the
+essential subset `test/wasm/essential-aot.txt` (`bin/wai aot-essential`).
+
+### 9.2 The Go corpus at AOT (`bin/wai go --aot`)
+
+The programs of `test/wasm/go-aot.txt` built as §8 builds them, each module translated and built into its own AOT program (the
+main checkout's `.tmp/wai-go/aot`, by key), run and judged as §8 judges them, under the same limit (three times the action's), then
+the AOT rule (`WAI_AOT_STATS`: the run's interpreted calls). Rows against `test/wasm/go-aot-results.edn`.
+
+### 9.3 Cost
+
+A Go-built module (about 2 MB of Wasm, a few thousand functions) is some tens of MB of Go, built in one package with wai; see the
+survey's "As built: WA7 (first part)" for the measures and why the whole Go corpus is not run at AOT yet.
+
+### 9.4 The controls
+
+`controls-eval.txt`'s modes run by the AOT program, and `as-interpreted`: the command run by the same AOT program with its
+translated functions not attached (`AOTDisable`), which passes on the interpreter and so must be refused by the AOT judge.

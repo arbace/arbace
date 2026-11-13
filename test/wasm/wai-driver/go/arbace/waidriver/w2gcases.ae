@@ -1,0 +1,509 @@
+(in-ns 'go.arbace.waidriver) (go/file "w2gcases.go" :imports [
+
+    ;; waidriver w2g-cases WAIDIR OUTDIR: w2g's instruction bodies (doc/wasm/WAI.md §9; WA7) generated from the interpreter's own source: each
+    ;; case of Machine.exec's switch on the op that is not a transfer of control (those w2g writes itself), its statements printed with
+    ;; the instruction's fields made placeholders (in.Op as W2G_IN_Op ..., in itself as W2G_IN), so that w2g's Go is the interpreter's
+    ;; semantics instruction for instruction; the names of package wai the bodies use that are not exported (functions, methods,
+    ;; variables, constants) renamed X_NAME and exported by OUTDIR/w2gexports.go's wrappers, since w2g's Go is packages of their own
+    ;; that dot-import wai. Writes OUTDIR/w2gcases.go and OUTDIR/w2gexports.go (gofmt'd).
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [ast "go/ast"]
+    ^{:line 14} [format "go/format"]
+    ^{:line 15} [parser "go/parser"]
+    ^{:line 16} [printer "go/printer"]
+    ^{:line 17} [scanner "go/scanner"]
+    ^{:line 18} [token "go/token"]
+    ^{:line 19} [os "os"]
+    ^{:line 20} [sort "sort"]
+    ^{:line 21} [strconv "strconv"]
+    ^{:line 22} [strings "strings"]])
+
+
+
+(go/var ^{:doc "the ops w2g translates itself: the transfers of control, the calls and the throws\n"} w2gControl (lit (map string bool) ["OpBr" true] ["OpBrIf" true] ["OpBrTable" true] ["OpIf" true] ["OpJump" true] ["OpReturn" true]
+    ^{:line 27} ["OpBrOnNull" true] ["OpBrOnNonNull" true] ["OpBrOnCast" true] ["OpBrOnCastFail" true] ["OpCall" true] ["OpReturnCall" true]
+    ^{:line 28} ["OpCallIndirect" true] ["OpReturnCallIndirect" true] ["OpCallRef" true] ["OpReturnCallRef" true] ["OpThrow" true]
+    ^{:line 29} ["OpThrowRef" true]))
+
+
+(go/var ^{:doc "the names of wai's own that w2g's templates use (w2g.go), exported whether the bodies use them or not\n"} w2gAlways (lit (slice string) "br" "trap" "ctypes" "subCanon" ".ensure" ".run" ".refTest"))
+
+(go/type waiPkg (struct
+    ^{:line 35 :tag (map string (* ast/FuncDecl))} funcs
+    ^{:line 36 :tag (map string (* ast/FuncDecl))} methods
+    ^{:line 37 :tag (map string bool)} vars
+    ^{:line 38 :tag (map string bool)} consts
+    ^{:line 39 :tag (* token/FileSet)} fset))
+
+
+^{:go/end 88} (go/func scanWai [^string dir] :results [(* waiPkg) error]
+  (let [p (addr ^{:go/breaks [10]} (lit waiPkg :funcs (lit (map string (* ast/FuncDecl))) :methods (lit (map string (* ast/FuncDecl))) :vars (lit (map string bool)) :consts (lit (map string bool))
+          :fset (token/NewFileSet)))
+      (values es err) (os/ReadDir dir)]
+    (when (!= err nil)
+      (return nil err))
+
+    (range [_ e es]
+      (let [n (.Name e)]
+        (when (or (not (strings/HasSuffix n ".go")) (strings/HasSuffix n "_test.go") (== n "w2gcases.go") (== n "w2gexports.go") (strings/HasPrefix n "zz_"))
+          (continue))
+
+        (let [(values f err) (parser/ParseFile (.-fset p) (+ dir "/" n) nil 0)]
+          (when (!= err nil)
+            (return nil err))
+
+          (range [_ d (.-Decls f)]
+            (type-switch [d d]
+              (case [(* ast/FuncDecl)]
+                (when (or (ast/IsExported (.-Name (.-Name d))) (== (.-Name (.-Name d)) "init"))
+                  (continue))
+
+                (if (== (.-Recv d) nil)
+                  (aset (.-funcs p) (.-Name (.-Name d)) d)
+
+                  (aset (.-methods p) (.-Name (.-Name d)) d)))
+
+              (case [(* ast/GenDecl)]
+                (range [_ sp (.-Specs d)]
+                  (when [(values vs ok) (assert (* ast/ValueSpec) sp)] ok
+                    (range [_ id (.-Names vs)]
+                      (when (or (ast/IsExported (.-Name id)) (== (.-Name id) "_"))
+                        (continue))
+
+                      (cond (== (.-Tok d) token/VAR)
+                        (aset (.-vars p) (.-Name id) true)
+                        (== (.-Tok d) token/CONST)
+                        (aset (.-consts p) (.-Name id) true)))))))))))
+
+
+
+
+
+
+
+    (return p nil)))
+
+
+
+^{:go/end 127} (go/method rename "rename: wai's unexported names in a body (an identifier not after a period, a method after one) made X_NAME; used notes them\n" ^string [^{:tag (* waiPkg)} p ^string s ^{:tag (map string bool)} used]
+  (let [^scanner/Scanner sc (zero scanner/Scanner)
+      ^{:line 93} fs (token/NewFileSet)
+      ^{:line 94} file (.AddFile fs "" (.Base fs) (len s))]
+    (.Init sc file (conv (slice byte) s) nil 0)
+    (let [^strings/Builder b (zero strings/Builder)
+        (values last prev) (values 0 token/ILLEGAL)]
+      (while true
+        (let [(values pos t lit) (.Scan sc)]
+          (when (== t token/EOF)
+            (break))
+
+          (when (== t token/IDENT)
+            (let [off (.Offset file pos)
+                ^{:line 105} rep ""]
+              (cond (== prev token/PERIOD)
+                (when (!= (aget (.-methods p) lit) nil)
+                  (set! (values rep (aget used (+ "." lit))) (values (+ "X_" lit) true)))
+
+                (or (!= (aget (.-funcs p) lit) nil) (aget (.-consts p) lit))
+                (set! (values rep (aget used lit)) (values (+ "X_" lit) true))
+                (aget (.-vars p) lit)
+                (set! (values rep (aget used lit)) (values (+ "(*X_" lit ")") true)))
+
+              (when (!= rep "")
+                (.WriteString b (subslice s last off))
+                (.WriteString b rep)
+                (set! last (+ off (len lit))))))
+
+
+          (when (not (and (== t token/SEMICOLON) (== lit "\n")))
+            (set! prev t))))
+
+
+      (.WriteString b (subslice s last))
+      (.String b))))
+
+
+
+^{:go/end 217} (go/method exports "exports: the wrappers of the used names\n" [^{:tag (* waiPkg)} p ^{:tag (map string bool)} used] :results [(slice byte) error]
+  (let [^{:tag (slice string)} names (zero (slice string))]
+    (range [n used]
+      (set! names (append names n)))
+
+    (sort/Strings names)
+    (let [^bytes/Buffer b (zero bytes/Buffer)]
+      (.WriteString b "// Code generated by waidriver w2g-cases (bin/wai w2g gen); DO NOT EDIT.\n\npackage wai\n\n")
+      (.WriteString b "// The names of wai's own that w2g's Go uses (doc/wasm/WAI.md §9), exported for its packages, which dot-import wai.\n\n")
+      (let [sig ^{:go/end 181} (fn [^{:tag (* ast/FuncDecl)} fd] :results [^string params ^string args ^string results ^bool ret]
+            (let [(values ^{:tag (slice string)} ps ^{:tag (slice string)} as) (zero (slice string))
+                ^{:line 141} k 0]
+              (range [_ f (.-List (.-Params (.-Type fd)))]
+                (let [^bytes/Buffer tb (zero bytes/Buffer)]
+                  (printer/Fprint (addr tb) (.-fset p) (.-Type f))
+                  (let [n (len (.-Names f))]
+                    (when (== n 0)
+                      (set! n 1))
+
+                    (for [i 0] (< i n) (inc! i)
+                      (let [nm (fmt/Sprintf "p%d" k)]
+                        (inc! k)
+                        (set! ps (append ps (+ nm " " (.String tb))))
+                        (if [(values _ ok) (assert (* ast/Ellipsis) (.-Type f))] ok
+                          (set! as (append as (+ nm "...")))
+
+                          (set! as (append as nm))))))))
+
+
+
+              (when (and (!= (.-Results (.-Type fd)) nil) (> (len (.-List (.-Results (.-Type fd)))) 0))
+                (let [^{:tag (slice string)} rs (zero (slice string))]
+                  (range [_ f (.-List (.-Results (.-Type fd)))]
+                    (let [^bytes/Buffer tb (zero bytes/Buffer)]
+                      (printer/Fprint (addr tb) (.-fset p) (.-Type f))
+                      (let [n (len (.-Names f))]
+                        (when (== n 0)
+                          (set! n 1))
+
+                        (for [i 0] (< i n) (inc! i)
+                          (set! rs (append rs (.String tb)))))))
+
+
+                  (if (== (len rs) 1)
+                    (set! results (+ " " (aget rs 0)))
+
+                    (set! results (+ " (" (strings/Join rs ", ") ")")))
+
+                  (set! ret true)))
+
+              (return (strings/Join ps ", ") (strings/Join as ", ") results ret)))]
+
+        (range [_ n names]
+          (switch
+            (case [(strings/HasPrefix n ".")]
+              (let [fd (aget (.-methods p) (subslice n 1))]
+                (when (== fd nil)
+                  (return nil (fmt/Errorf "no method %s" n)))
+
+                (let [^bytes/Buffer rt (zero bytes/Buffer)]
+                  (printer/Fprint (addr rt) (.-fset p) (.-Type (aget (.-List (.-Recv fd)) 0)))
+                  (let [(values ps as rs ret) (sig fd)
+                      ^{:line 192} r ""]
+                    (when ret
+                      (set! r "return "))
+
+                    (fmt/Fprintf (addr b) "func (x %s) X_%s(%s)%s { %sx.%s(%s) }\n\n" (.String rt) (subslice n 1) ps rs r (subslice n 1) as)))))
+            (case [(!= (aget (.-funcs p) n) nil)]
+              (let [fd (aget (.-funcs p) n)]
+                (when (!= (.-TypeParams (.-Type fd)) nil)
+                  (return nil (fmt/Errorf "generic function %s" n)))
+
+                (let [(values ps as rs ret) (sig fd)
+                    ^{:line 203} r ""]
+                  (when ret
+                    (set! r "return "))
+
+                  (fmt/Fprintf (addr b) "func X_%s(%s)%s { %s%s(%s) }\n\n" n ps rs r n as))))
+            (case [(aget (.-vars p) n)]
+              (fmt/Fprintf (addr b) "var X_%s = &%s\n\n" n n))
+            (case [(aget (.-consts p) n)]
+              (fmt/Fprintf (addr b) "const X_%s = %s\n\n" n n))
+            (default
+              (return nil (fmt/Errorf "no name %s" n)))))
+
+
+        (format/Source (.Bytes b))))))
+
+
+^{:go/end 239} (go/func w2gGen ^error [^string dir ^string out]
+  (let [(values pk err) (scanWai dir)]
+    (when (!= err nil)
+      (return err))
+
+    (let [(values cases used ^:assign err) (w2gCases (+ dir "/exec.go") pk)]
+      (when (!= err nil)
+        (return err))
+
+      (range [_ n w2gAlways]
+        (aset used n true))
+
+      (let [(values ex ^:assign err) (.exports pk used)]
+        (when (!= err nil)
+          (return err))
+
+        (when [err (os/WriteFile (+ out "/w2gcases.go") cases 0644)] (!= err nil)
+          (return err))
+
+        (os/WriteFile (+ out "/w2gexports.go") ex 0644)))))
+
+
+^{:go/end 327} (go/func w2gCases [^string path ^{:tag (* waiPkg)} pk] :results [(slice byte) (map string bool) error]
+  (let [used (lit (map string bool))
+      (values src err) (os/ReadFile path)]
+    (when (!= err nil)
+      (return nil nil err))
+
+    (let [fset (token/NewFileSet)
+        (values f ^:assign err) (parser/ParseFile fset path src parser/ParseComments)]
+      (when (!= err nil)
+        (return nil nil err))
+
+      (let [^{:tag (* ast/SwitchStmt)} sw (zero (* ast/SwitchStmt))]
+        (range [_ d (.-Decls f)]
+          (let [(values fd ok) (assert (* ast/FuncDecl) d)]
+            (when (or (not ok) (!= (.-Name (.-Name fd)) "exec") (== (.-Recv fd) nil))
+              (continue))
+
+            (ast/Inspect (.-Body fd) ^{:go/breaks [[4 270]] :go/end 271} (fn ^bool [^ast/Node n]
+                (when (!= sw nil)
+                  (return false))
+
+                (when [(values s ok) (assert (* ast/SwitchStmt) n)] ok
+                  (when [(values se ok) (assert (* ast/SelectorExpr) (.-Tag s))] (and ok (== (.-Name (.-Sel se)) "Op"))
+                    (when [(values id ok) (assert (* ast/Ident) (.-X se))] (and ok (== (.-Name id) "in"))
+                      (set! sw s)
+                      (return false))))
+
+
+
+                true))))
+
+
+        (when (== sw nil)
+          (return nil nil (fmt/Errorf "%s: no switch on in.Op in Machine.exec" path)))
+
+        (let-type [entry (struct ^string key ^string body)]
+          (let [^{:tag (slice entry)} es (zero (slice entry))]
+            (range [_ st (.-List (.-Body sw))]
+              (let [cc (assert (* ast/CaseClause) st)
+                  ^{:line 280 :tag bytes/Buffer} buf (zero bytes/Buffer)]
+                (range [_ s (.-Body cc)]
+                  (when [err (printer/Fprint (addr buf) fset s)] (!= err nil)
+                    (return nil nil err))
+
+                  (.WriteByte buf \newline))
+
+                (when (== (.-List cc) nil)
+                  (set! es (append es (lit entry "w2gDefault" (.rename pk (placeholders (.String buf)) used))))
+                  (continue))
+
+                (range [_ e (.-List cc)]
+                  (let [(values id ok) (assert (* ast/Ident) e)]
+                    (when (not ok)
+                      (return nil nil (fmt/Errorf "%s: a case not an op constant" path)))
+
+                    (when (aget w2gControl (.-Name id))
+                      (continue))
+
+                    ;; a case shared by several ops: its inner switches on the op reduced to this op's clause
+                    (let [body (.String buf)]
+                      (when (> (len (.-List cc)) 1)
+                        (when [(set! (values body err) (specialize body (.-Name id)))] (!= err nil)
+                          (return nil nil err)))
+
+
+                      (set! es (append es (lit entry (.-Name id) (.rename pk (placeholders body) used)))))))))
+
+
+            (sort/SliceStable es ^{:go/end 309} (fn ^bool [^int i ^int j] (< (.-key (aget es i)) (.-key (aget es j)))))
+            (let [^bytes/Buffer out (zero bytes/Buffer)]
+              (.WriteString out "// Code generated by waidriver w2g-cases from exec.go (bin/wai w2g gen); DO NOT EDIT.\n\npackage wai\n\n")
+              (.WriteString out "// w2gCases are the interpreter's instruction bodies by op (Machine.exec's cases but the transfers of control), the\n")
+              (.WriteString out "// instruction's fields as placeholders: w2g's translation of an instruction (doc/wasm/WAI.md §9).\n")
+              (.WriteString out "var w2gCases = map[uint16]string{\n")
+              (let [^string def (zero string)]
+                (range [_ e es]
+                  (when (== (.-key e) "w2gDefault")
+                    (set! def (.-body e))
+                    (continue))
+
+                  (fmt/Fprintf (addr out) "\t%s: %s,\n" (.-key e) (strconv/Quote (.-body e))))
+
+                (.WriteString out "}\n\n// w2gDefault is the switch's default: the SIMD instructions' functions.\n")
+                (fmt/Fprintf (addr out) "const w2gDefault = %s\n" (strconv/Quote def))
+                (let [(values b ^:assign err) (format/Source (.Bytes out))]
+                  (return b used err))))))))))
+
+
+
+^{:go/end 370} (go/func placeholders "placeholders: in.F as W2G_IN_F and in alone as W2G_IN, token by token\n" ^string [^string s]
+  (let [^scanner/Scanner sc (zero scanner/Scanner)
+      ^{:line 332} fs (token/NewFileSet)
+      ^{:line 333} file (.AddFile fs "" (.Base fs) (len s))]
+    (.Init sc file (conv (slice byte) s) nil scanner/ScanComments)
+    (let-type [tk (struct
+          ^{:line 336 :tag int} off
+          ^{:line 337 :tag token/Token} t
+          ^{:line 338 :tag string} lit)]
+
+      (let [^{:tag (slice tk)} ts (zero (slice tk))]
+        (while true
+          (let [(values p t lit) (.Scan sc)]
+            (when (== t token/EOF)
+              (break))
+
+            (when (and (== t token/SEMICOLON) (== lit "\n"))
+              (continue))
+
+            (set! ts (append ts (lit tk (.Offset file p) t lit)))))
+
+        (let [^strings/Builder b (zero strings/Builder)
+            ^{:line 352} last 0]
+          (for [i 0] (< i (len ts)) (inc! i)
+            (let [x (aget ts i)]
+              (when (or (!= (.-t x) token/IDENT) (!= (.-lit x) "in") ^:go/paren (and (> i 0) (== (.-t (aget ts (- i 1))) token/PERIOD)))
+                (continue))
+
+              (.WriteString b (subslice s last (.-off x)))
+              (if (and (< (+ i 2) (len ts)) (== (.-t (aget ts (+ i 1))) token/PERIOD) (== (.-t (aget ts (+ i 2))) token/IDENT)) (do
+                  (.WriteString b (+ "W2G_IN_" (.-lit (aget ts (+ i 2)))))
+                  (set! last (+ (.-off (aget ts (+ i 2))) (len (.-lit (aget ts (+ i 2))))))
+                  (set! i + 2))
+                (do
+                  (.WriteString b "W2G_IN")
+                  (set! last (+ (.-off x) 2))))))
+
+
+          (.WriteString b (subslice s last))
+          (.String b))))))
+
+
+
+^{:go/end 431} (go/func specialize "specialize: the statements with every `switch in.Op` replaced by the block of the clause naming op (or the default's)\n" [^string body ^string op] :results [string error]
+  (let [src (+ "package p\nfunc _() {\n" body "}\n")
+      ^{:line 375} fset (token/NewFileSet)
+      (values f err) (parser/ParseFile fset "" src 0)]
+    (when (!= err nil)
+      (return "" err))
+
+    (let [fd (assert (* ast/FuncDecl) (aget (.-Decls f) 0))
+        ^{:line 381 :tag (func [^{:tag (slice ast/Stmt)} list] [(slice ast/Stmt)])} walk (zero (func [^{:tag (slice ast/Stmt)} list] [(slice ast/Stmt)]))]
+      (set! walk ^{:go/end 421} (fn ^{:tag (slice ast/Stmt)} [^{:tag (slice ast/Stmt)} list]
+          (let [out (make (slice ast/Stmt) 0 (len list))]
+            (range [_ st list]
+              (when [(values sw ok) (assert (* ast/SwitchStmt) st)] (and ok (== (.-Init sw) nil))
+                (when [(values se ok) (assert (* ast/SelectorExpr) (.-Tag sw))] (and ok (== (.-Name (.-Sel se)) "Op"))
+                  (when [(values id ok) (assert (* ast/Ident) (.-X se))] (and ok (== (.-Name id) "in"))
+                    (let [(values ^{:tag (slice ast/Stmt)} pick ^{:tag (slice ast/Stmt)} def) (zero (slice ast/Stmt))
+                        ^{:line 389} found false]
+                      (range [_ c (.-List (.-Body sw))]
+                        (let [cc (assert (* ast/CaseClause) c)]
+                          (when (== (.-List cc) nil)
+                            (set! def (.-Body cc)))
+
+                          (range [_ e (.-List cc)]
+                            (when [(values x ok) (assert (* ast/Ident) e)] (and ok (== (.-Name x) op))
+                              (set! (values pick found) (values (.-Body cc) true))))))
+
+
+
+                      (when (not found)
+                        (set! pick def))
+
+                      (set! out (append out (addr (lit ast/BlockStmt :List (walk pick)))))
+                      (continue)))))
+
+
+
+              (type-switch [x st]
+                (case [(* ast/BlockStmt)]
+                  (set! (.-List x) (walk (.-List x))))
+                (case [(* ast/IfStmt)]
+                  (set! (.-List (.-Body x)) (walk (.-List (.-Body x))))
+                  (when [(values e ok) (assert (* ast/BlockStmt) (.-Else x))] ok
+                    (set! (.-List e) (walk (.-List e))))))
+
+
+              (set! out (append out st)))
+
+            ^{:line 420} out)))
+
+      (set! (.-List (.-Body fd)) (walk (.-List (.-Body fd))))
+      (let [^bytes/Buffer buf (zero bytes/Buffer)]
+        (range [_ st (.-List (.-Body fd))]
+          (when [err (printer/Fprint (addr buf) fset st)] (!= err nil)
+            (return "" err))
+
+          (.WriteByte buf \newline))
+
+        (return (.String buf) nil)))))
+
+
+
+
+^{:go/end 510} (go/func w2gCheck "w2gCheck: the bodies generated afresh from WAIDIR's exec.go against WAIDIR's w2gcases.go (printed from the committed forms,\nin another layout: compared entry by entry, the bodies' text), and the exports' declared names against w2gexports.go's\n" ^error [^string dir]
+  (let [(values tmp err) (os/MkdirTemp "" "w2gcheck")]
+    (when (!= err nil)
+      (return err))
+
+    (defer (os/RemoveAll tmp))
+    (when [err (w2gGen dir tmp)] (!= err nil)
+      (return err))
+
+    ^{:go/breaks [[3 509]]} (let [entries ^{:go/end 485} (fn [^string path] :results [(map string string) error]
+          (let [(values f err) (parser/ParseFile (token/NewFileSet) path nil 0)]
+            (when (!= err nil)
+              (return nil err))
+
+            (let [out (lit (map string string))]
+              (range [_ d (.-Decls f)]
+                (type-switch [d d]
+                  (case [(* ast/FuncDecl)]
+                    (let [k (.-Name (.-Name d))]
+                      (when (!= (.-Recv d) nil)
+                        (set! k (+ "method " k)))
+
+                      (aset out k "func")))
+                  (case [(* ast/GenDecl)]
+                    (range [_ sp (.-Specs d)]
+                      (let [(values vs ok) (assert (* ast/ValueSpec) sp)]
+                        (when (not ok)
+                          (continue))
+
+                        (range [i id (.-Names vs)]
+                          (aset out (.-Name id) "decl")
+                          (when (>= i (len (.-Values vs)))
+                            (continue))
+
+                          (type-switch [v (aget (.-Values vs) i)]
+                            (case [(* ast/CompositeLit)]
+                              (range [_ e (.-Elts v)]
+                                (let [kv (assert (* ast/KeyValueExpr) e)
+                                    (values s _) (strconv/Unquote (.-Value (assert (* ast/BasicLit) (.-Value kv))))]
+                                  (aset out (+ "case " (.-Name (assert (* ast/Ident) (.-Key kv)))) s))))
+
+                            (case [(* ast/BasicLit)]
+                              (let [(values s _) (strconv/Unquote (.-Value v))]
+                                (aset out (.-Name id) s))))))))))
+
+
+
+
+
+              (return out nil))))]
+
+      (range [_ n (lit (slice string) "w2gcases.go" "w2gexports.go")]
+        (let [(values a err) (entries (+ tmp "/" n))]
+          (when (!= err nil)
+            (return err))
+
+          (let [(values b ^:assign err) (entries (+ dir "/" n))]
+            (when (!= err nil)
+              (return err))
+
+            ;; the layouts differ (repr/go's printing): the bodies compared without their white space
+            (let [norm ^{:go/end 496} (fn ^string [^string s] (strings/Join (strings/Fields s) ""))]
+              (range [k v a]
+                (when (!= (norm (aget b k)) (norm v))
+                  (return (fmt/Errorf "%s: %s differs from the regenerated one" n k))))
+
+
+              (range [k b]
+                (when [(values _ ok) (aget a k)] (not ok)
+                  (return (fmt/Errorf "%s: %s is not regenerated" n k))))
+
+
+              (fmt/Printf "%s: %d entries, the regenerated ones\n" n (len a))))))
+
+      nil)))

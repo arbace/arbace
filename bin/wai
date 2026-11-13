@@ -29,6 +29,18 @@
 #   bin/wai run [WAIDRIVER-RUN-ARGS...]   one WASI program run by the light driver (waidriver run: --dir GUEST=HOST[:ro], --env K=V,
 #                                         --seed N, MODULE ARG...)
 #   bin/wai divergences [RESULTS]         the record's non-passes judged against the classes
+#   bin/wai check --aot [--record] [--only LIST]
+#                                         WA7 (doc/wasm/WAI.md §9, bin/lib/wai/aot.bash): the same plans, every module translated by w2g
+#                                         and the scripts run by AOT programs (the light driver built by TamaGo's go with the modules'
+#                                         functions compiled, WAI_AOT_BATCH scripts a program), judged by the same assertions; a command
+#                                         that called a function the interpreter ran fails ("w2g: ..."); rows against
+#                                         test/wasm/aot-results.edn, classes test/wasm/divergences-aot.edn, controls test/wasm/controls-aot.txt
+#   bin/wai aot-essential                 check --aot --only test/wasm/essential-aot.txt
+#   bin/wai go --aot [--record] [--list FILE]
+#                                         the Go programs of test/wasm/go-aot.txt as AOT programs (a program each, kept by key in the main
+#                                         checkout's .tmp/wai-go/aot), judged as bin/wai go judges them; rows against test/wasm/go-aot-results.edn
+#   bin/wai w2g gen DIR|check             w2g's instruction bodies (wai/w2gcases.go) and wai's exports (wai/w2gexports.go) generated from
+#                                         the interpreter's exec.go; check compares them with the committed ones, entry by entry
 #   bin/wai ops gen|check                 go/arbace/wai's instruction table (optab.go) from repr/wasm's arbace/repr/wasm/ops.ae
 #                                         (test/wasm/gen_wai_ops.awk, gofmt'd: gen prints it, to be converted by repr/go's native
 #                                         reader with the package); check compares the driver's table (waidriver ops) with ops.ae
@@ -50,6 +62,9 @@ classes=$root/test/wasm/divergences-eval.edn
 controls=$root/test/wasm/controls-eval.txt
 wai_dir=$root/.tmp/wai
 wai_exe=${WAI_EXE:-$wai_dir/wai}
+aot_results=$root/test/wasm/aot-results.edn
+aot_classes=$root/test/wasm/divergences-aot.edn
+aot_controls=$root/test/wasm/controls-aot.txt
 
 edn() { arbace_tool -e "(let [c (read-string (slurp \"$corpora\"))] $1)"; }
 
@@ -76,16 +91,17 @@ light() {
 
 judge() { # RESULTS ROWS CLASSES RECORD IDS [KIND]
   local kind=${6:-eval} label="wai check"
-  [ "$kind" = go ] && label="wai go"
+  case $kind in go) label="wai go" ;; go-aot) label="wai go --aot" ;; aot) label="wai check --aot" ;; esac
   arbace_tool -e "(do (load-file \"$root/test/wasm/judge.ae\") nil)" \
     -e "(wasm.judge/main \"$label\" \"$kind\" \"$1\" \"$2\" \"$3\" \"${4:-}\" \"${5:-}\")"
 }
 
 check() {
-  local record=$1 only=$2 ts work lst fails=0
+  local record=$1 only=$2 ts work lst fails=0 res=$results cls=$classes ctl=$controls kind=eval label="wai check" ids="testsuite msg valid"
+  if [ -n "${aot:-}" ]; then res=$aot_results cls=$aot_classes ctl=$aot_controls kind=aot label="wai check --aot" ids="testsuite msg"; fi
   ts=$tree/$(edn '(println (:top (:testsuite (:pins c))))')
   [ -d "$ts" ] || { echo "wai: $ts missing: bin/repr-wasm corpus fetch" >&2; return 1; }
-  work=$wai_dir/check; rm -rf "$work"; mkdir -p "$work"
+  work=$wai_dir/check${aot:+-aot}; rm -rf "$work"; mkdir -p "$work"
   lst=$work/scripts.list
   if [ -n "$only" ]; then
     grep -v '^#' "$only" | sed '/^$/d' | while read -r f; do printf 'testsuite/%s\t%s\n' "$f" "$ts/$f"; done > "$lst"
@@ -97,8 +113,16 @@ check() {
   light
   echo "wai check: planning $(wc -l < "$lst") scripts"
   arbace_tool -m arbace.wasm.check plan "$lst" "$work"
-  echo "wai check: running"
-  GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} timeout "${WAI_TIMEOUT:-1800}" "$wai_exe" wast "$work/plans.list" "$work/rows.raw"
+  if [ -n "${aot:-}" ]; then
+    # WA7: the scripts' modules translated by w2g and run as AOT programs; the validator's rows are eval's (the same code)
+    echo "wai check --aot: translating and building"
+    aot_run_batches "$work" || return 1
+    grep -v '^\["valid/' "$work/rows.raw" > "$work/rows.aot" || true
+    mv -f "$work/rows.aot" "$work/rows.raw"
+  else
+    echo "wai check: running"
+    GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} timeout "${WAI_TIMEOUT:-1800}" "$wai_exe" wast "$work/plans.list" "$work/rows.raw"
+  fi
   # a non-pass's reason beyond the root scripts prefixed by what its script tests (arbace.repr.wasm.wast/tag-of's tags)
   awk '$2 != ":pass" { if (match($1, /^\["[a-z]+\/proposals\/[^\/]+\//)) { t = substr($1, RSTART, RLENGTH); sub(/^\["[a-z]+\/proposals\//, "", t); sub(/\/$/, "", t); tag = "[proposal " t "] " }
          else if ($1 ~ /^\["[a-z]+\/legacy\//) tag = "[legacy exceptions] "
@@ -111,51 +135,71 @@ check() {
     sp=${subj%#*} sk=${subj##*#}
     slug=$(printf '%s' "$sp" | sed 's|/|__|g')
     grep -q "^testsuite/$sp	" "$lst" || { echo "control $cid: left (not in this run)"; continue; }
+    local cexe=$wai_exe
+    [ -z "${aot:-}" ] || cexe=$(awk -F'\t' -v p="$work/plans/$slug.plan" '$1 == p { print $2; exit }' "$work/aot/exe.tsv")
     if [ -n "${other:-}" ]; then
       op=${other%#*} ok=${other##*#}; oslug=$(printf '%s' "$op" | sed 's|/|__|g')
       [ -f "$work/plans/$oslug.plan" ] || { echo "control $cid: left (its other script not in this run)"; continue; }
-      v=$(GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$wai_exe" control "$work/plans/$slug.plan" "$work/mods/$slug" "$sk" "$mode" "$work/plans/$oslug.plan" "$ok")
+      v=$(GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$cexe" control "$work/plans/$slug.plan" "$work/mods/$slug" "$sk" "$mode" "$work/plans/$oslug.plan" "$ok")
     else
-      v=$(GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$wai_exe" control "$work/plans/$slug.plan" "$work/mods/$slug" "$sk" "$mode")
+      v=$(GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$cexe" control "$work/plans/$slug.plan" "$work/mods/$slug" "$sk" "$mode")
     fi
     case $cid in
       _check/*) if [ "$v" = same ]; then echo "check $cid: passes, as it must"; else echo "FAIL: check $cid: $v"; fails=$((fails + 1)); fi ;;
       *) if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi ;;
     esac
-  done < "$controls"
+  done < "$ctl"
   if [ -n "$only" ]; then
     # a partial run: judged on its scripts' rows alone
-    arbace_tool -e "(let [run (set (map #(first (arbace.string/split (first %) #\"#\")) (read-string (str \"[\" (slurp \"$work/rows.edn\") \"]\")))) old (read-string (slurp \"$results\"))] (spit \"$work/old.edn\" (pr-str (vec (filter #(run (first (arbace.string/split (first %) #\"#\"))) old)))))"
-    judge "$work/old.edn" "$work/rows.edn" "$classes" "" "" || fails=$((fails + 1))
+    arbace_tool -e "(let [run (set (map #(first (arbace.string/split (first %) #\"#\")) (read-string (str \"[\" (slurp \"$work/rows.edn\") \"]\")))) old (if (.exists (java.io.File. \"$res\")) (read-string (slurp \"$res\")) [])] (spit \"$work/old.edn\" (pr-str (vec (filter #(run (first (arbace.string/split (first %) #\"#\"))) old)))))"
+    judge "$work/old.edn" "$work/rows.edn" "$cls" "" "" "$kind" || fails=$((fails + 1))
   else
-    judge "$results" "$work/rows.edn" "$classes" "$record" "testsuite msg valid" || fails=$((fails + 1))
+    judge "$res" "$work/rows.edn" "$cls" "$record" "$ids" "$kind" || fails=$((fails + 1))
   fi
   [ $fails = 0 ]
 }
 
 . "$root/bin/lib/wai/go-run.bash"
+. "$root/bin/lib/wai/aot.bash"
 
 case ${1:-} in
   light) light; echo "wai: $wai_exe" ;;
   run) shift; light; exec "$wai_exe" run "$@" ;;
   go)
-    shift; record=; list=
+    shift; record=; list=; gorun_aot=
     while [ $# -gt 0 ]; do
       case $1 in
         --record) record=1; shift ;;
         --list) list=$2; shift 2 ;;
         --essential) list=$root/test/wasm/essential-go.txt; shift ;;
+        --aot) gorun_aot=1; shift ;;
         *) echo "wai go: $1?" >&2; exit 2 ;;
       esac
     done
-    [ -z "$record" ] || [ -z "$list" ] || { echo "wai go: --record takes the whole corpus" >&2; exit 2; }
+    # --aot (WA7): the programs of test/wasm/go-aot.txt through w2g, recorded as their own record
+    if [ -n "${gorun_aot:-}" ] && [ -z "$list" ]; then list=$root/test/wasm/go-aot.txt; fi
+    [ -z "$record" ] || [ -z "$list" ] || [ -n "${gorun_aot:-}" ] || { echo "wai go: --record takes the whole corpus" >&2; exit 2; }
     gorun_check "$record" "$list" ;;
   check)
-    shift; record=; only=
-    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; *) echo "wai check: $1?" >&2; exit 2 ;; esac; done
+    shift; record=; only=; aot=
+    while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --only) only=$2; shift 2 ;; --aot) aot=1; shift ;; *) echo "wai check: $1?" >&2; exit 2 ;; esac; done
     check "$record" "$only" ;;
   essential) check "" "$root/test/wasm/essential-eval.txt" ;;
-  divergences) r=${2:-$results}; judge "$r" "$r" "$classes" "" "" ;;
+  aot-essential) aot=1; check "" "$root/test/wasm/essential-aot.txt" ;;
+  divergences)
+    if [ "${2:-}" = --aot ]; then r=${3:-$aot_results}; judge "$r" "$r" "$aot_classes" "" "" aot
+    else r=${2:-$results}; judge "$r" "$r" "$classes" "" ""; fi ;;
+  w2g)
+    # w2g's instruction bodies and wai's exports for its packages, generated from the interpreter's exec.go (doc/wasm/WAI.md §9):
+    # gen writes them into DIR (to be converted by repr/go's native reader with the package); check regenerates them from the light
+    # build's printed exec.go and compares them with the printed w2gcases.go and w2gexports.go, entry by entry
+    [ -z "${WAI_EXE:-}" ] || { echo "wai w2g: needs the light build (WAI_EXE unset)" >&2; exit 2; }
+    light
+    case ${2:-} in
+      gen) [ -n "${3:-}" ] || { echo "wai w2g gen DIR" >&2; exit 2; }; mkdir -p "$3"; "$wai_exe" w2g-cases "$wai_dir/print/mod/wai" "$3" ;;
+      check) "$wai_exe" w2g-check "$wai_dir/print/mod/wai" ;;
+      *) echo "wai w2g gen DIR|check" >&2; exit 2 ;;
+    esac ;;
   ops)
     case ${2:-} in
       gen) awk -f "$root/test/wasm/gen_wai_ops.awk" "$root/arbace/repr/wasm/ops.ae" | "$goroot/bin/gofmt" ;;

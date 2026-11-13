@@ -280,8 +280,9 @@
         (imm r nm kind)
         (if-let [tbl (prefixed op)]
           (let [c (u32 r)]
-            ;; memory.init and data.drop name a data segment: the data count section is required (p[3] notes it)
-            (when (and (= op 0xfc) (or (= c 8) (= c 9))) (aset ^longs (:p r) 3 1))
+            ;; memory.init, data.drop, array.new_data and array.init_data name a data segment: the data count section is required
+            ;; (p[3] notes it; decode.ml's Free.func datas, WAS33)
+            (when (or (and (= op 0xfc) (or (= c 8) (= c 9))) (and (= op 0xfb) (or (= c 9) (= c 18)))) (aset ^longs (:p r) 3 1))
             (if-let [[nm kind] (tbl c)]
               (imm r nm kind)
               (malformed (format "illegal opcode %02x %02x" op c) at)))
@@ -813,6 +814,14 @@
                           (when (not= f 1) (wexpr w (get-in m [:active :offset])))
                           (let [b (unhex bs)] (wuleb w (alength b)) (wbytes w b)))))))
 
+(def ^:private data-ops '#{memory.init data.drop array.new_data array.init_data})
+
+(defn uses-data?
+  "Whether a function item's body names a data segment (memory.init, data.drop, array.new_data, array.init_data): the binary
+  format's data count section is required then (WAS33)."
+  [f]
+  (boolean (some #(and (seq? %) (contains? data-ops (first %))) (tree-seq coll? seq (drop 3 f)))))
+
 (defn encode
   "The module's bytes from its items; with `layer` (mode :full) the original's bytes."
   ^bytes [items layer]
@@ -822,6 +831,11 @@
                       ;; a section a custom section is placed after is written, empty or not
                       (keep #(:after (if (= 'wasm/names (kind-of %)) (second %) (nth % 2))) (filter #(#{'wasm/custom 'wasm/names} (kind-of %)) items)))
         by-sec (group-by section-of (remove #(#{'wasm/custom 'wasm/names} (kind-of %)) items))
+        ;; WAS33: the data count section whenever a body names a data segment (encode.ml's Free.module_ datas), when the
+        ;; forms do not carry it (the text reader's do)
+        by-sec (if (and (empty? (by-sec :datacount)) (some uses-data? (by-sec :func)))
+                 (assoc by-sec :datacount [(list 'wasm/datacount (count (by-sec :data)))])
+                 by-sec)
         funcs (by-sec :func)
         customs (filter #(#{'wasm/custom 'wasm/names} (kind-of %)) items)
         after (group-by #(:after (nth % 2)) (map (fn [c] (if (= 'wasm/names (kind-of c)) (list 'wasm/names nil (second c)) c)) customs))
