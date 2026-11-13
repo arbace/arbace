@@ -1,0 +1,830 @@
+(ns arbace.repr.wasm.binary
+  "repr/wasm's binary format (doc/wasm/SPEC.md §2-§5; doc/wasm/WASM-SURVEY.md §4, WA1): a module's bytes decoded into Wasm
+  forms (the spec's abstract syntax, one item a field) and encoded back. `decode` reads the spec's binary grammar as the
+  reference interpreter does (WebAssembly/spec wg-3.0, interpreter/binary/decode.ml: the same order of reads, the same
+  checks and messages) and returns {:items :layer}; `encode` writes the items canonically (minimal LEB128s, the sections
+  in the spec's order, the custom sections where their :after places them) or, with the layer, the original's bytes:
+  the layer of mode :full holds what the forms do not, the widths of the LEB128s that are not minimal (keyed by their
+  ordinal among the module's LEB128 reads, which `encode` makes in the same order), the empty sections, the local
+  declarations' grouping when it is not the canonical one and the element and data segments' flags when another
+  encoding than the canonical one was chosen. A malformed module throws ex-info {:wasm/malformed MESSAGE :at POS}."
+  (:require [arbace.repr.wasm.ops :as ops]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the instruction table
+
+(def ^:private one-byte
+  ;; opcode -> [name-symbol kind], the one-byte instructions
+  (let [a (object-array 256)]
+    (doseq [[p c n k] ops/rows :when (nil? p)] (aset a (int c) [(symbol n) k]))
+    a))
+
+(def ^:private prefixed
+  ;; prefix -> {code [name-symbol kind]}
+  (reduce (fn [m [p c n k]] (if p (assoc-in m [p c] [(symbol n) k]) m)) {} ops/rows))
+
+(def ^:private by-name
+  ;; name-symbol -> [[prefix code kind] ...]
+  (reduce (fn [m [p c n k]] (update m (symbol n) (fnil conj []) [p c k])) {} ops/rows))
+
+(def ^:private nullary
+  ;; the forms of the instructions without immediates, one list each (immutable, shared)
+  (into {} (for [[_ _ n k] ops/rows :when (= k :none)] [(symbol n) (list (symbol n))])))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the reader: {:b bytes :p longs [pos ordinal end] :w ArrayList of [ordinal width]}
+
+(defn- malformed [msg ^long at] (throw (ex-info (str msg " (at byte " at ")") {:wasm/malformed msg :at at})))
+
+(defn- reader [^bytes b] {:b b :p (long-array [0 0 (alength b)]) :w (java.util.ArrayList.)})
+
+(defn- pos ^long [r] (aget ^longs (:p r) 0))
+(defn- end ^long [r] (aget ^longs (:p r) 2))
+(defn- set-end! [r ^long e] (aset ^longs (:p r) 2 e))
+
+(defn- u8 ^long [r]
+  (let [^longs p (:p r) i (aget p 0)]
+    (when (>= i (aget p 2)) (malformed "unexpected end of section or function" i))
+    (aset p 0 (inc i))
+    (bit-and (long (aget ^bytes (:b r) (int i))) 0xff)))
+
+(defn- peek8 ^long [r]
+  (let [^longs p (:p r) i (aget p 0)]
+    (if (>= i (aget p 2)) -1 (bit-and (long (aget ^bytes (:b r) (int i))) 0xff))))
+
+(defn- note-width!
+  "Counts a LEB128 read of `width` bytes whose minimal width is `minw`; a wider one is noted in the layer."
+  [r ^long width ^long minw]
+  (let [^longs p (:p r) o (aget p 1)]
+    (aset p 1 (inc o))
+    (when (not= width minw) (.add ^java.util.ArrayList (:w r) [o width]))))
+
+(defn- uwidth ^long [^long v] (loop [v (unsigned-bit-shift-right v 7) n 1] (if (zero? v) n (recur (unsigned-bit-shift-right v 7) (inc n)))))
+(defn- swidth ^long [^long v]
+  (loop [v v n 1]
+    (let [rest (bit-shift-right v 7) b (bit-and v 0x7f)]
+      (if (or (and (zero? rest) (zero? (bit-and b 0x40))) (and (= rest -1) (not (zero? (bit-and b 0x40))))) n (recur rest (inc n))))))
+
+(defn- uleb
+  "An unsigned LEB128 of at most `bits` bits (decode.ml's uN)."
+  ^long [r ^long bits]
+  (let [start (pos r)]
+    (loop [n bits shift 0 x 0]
+      (when (<= n 0) (malformed "integer representation too long" (pos r)))
+      (let [b (u8 r)]
+        (when (and (< n 7) (>= (bit-and b 0x7f) (bit-shift-left 1 n))) (malformed "integer too large" (dec (pos r))))
+        (let [x (bit-or x (bit-shift-left (bit-and b 0x7f) shift))]
+          (if (zero? (bit-and b 0x80))
+            (do (note-width! r (- (pos r) start) (uwidth x)) x)
+            (recur (- n 7) (+ shift 7) x)))))))
+
+(defn- sleb
+  "A signed LEB128 of at most `bits` bits (decode.ml's sN)."
+  ^long [r ^long bits]
+  (let [start (pos r)]
+    (loop [n bits shift 0 x 0]
+      (when (<= n 0) (malformed "integer representation too long" (pos r)))
+      (let [b (u8 r)
+            mask (bit-and (bit-shift-left -1 (dec n)) 0x7f)]
+        (when (and (< n 7) (not (zero? (bit-and b mask))) (not= (bit-and b mask) mask)) (malformed "integer too large" (dec (pos r))))
+        (let [x (bit-or x (bit-shift-left (bit-and b 0x7f) shift))
+              shift (+ shift 7)]
+          (if (zero? (bit-and b 0x80))
+            (let [x (if (and (< shift 64) (not (zero? (bit-and b 0x40)))) (bit-or x (bit-shift-left -1 shift)) x)]
+              (note-width! r (- (pos r) start) (swidth x)) x)
+            (recur (- n 7) shift x)))))))
+
+(defn- u32 ^long [r] (uleb r 32))
+(defn- u64 ^long [r] (uleb r 64))
+
+(defn- len32 ^long [r]
+  (let [at (pos r) n (u32 r)]
+    (if (<= n (- (end r) (pos r))) n (malformed "length out of bounds" at))))
+
+(defn- get-bytes ^bytes [r ^long n]
+  (let [at (pos r)]
+    (when (or (neg? n) (> (+ at n) (end r))) (malformed "unexpected end of section or function" (end r)))
+    (aset ^longs (:p r) 0 (long (+ at n)))
+    (java.util.Arrays/copyOfRange ^bytes (:b r) (int at) (int (+ at n)))))
+
+(def ^:private hexf (java.util.HexFormat/of))
+(defn- hex [^bytes bs] (list 'hex (.formatHex ^java.util.HexFormat hexf bs)))
+(defn- unhex ^bytes [h]
+  (when-not (and (seq? h) (= 'hex (first h)) (string? (second h))) (throw (ex-info (str "not a (hex \"...\") form: " (pr-str h)) {})))
+  (.parseHex ^java.util.HexFormat hexf ^CharSequence (second h)))
+
+(defn- wname ^String [r]
+  ;; UTF-8 checked by decoding and encoding again: an ill-formed sequence decodes to U+FFFD, which encodes otherwise
+  (let [at (pos r) n (len32 r) bs (get-bytes r n)
+        s (String. bs java.nio.charset.StandardCharsets/UTF_8)]
+    (if (java.util.Arrays/equals bs (.getBytes s java.nio.charset.StandardCharsets/UTF_8)) s (malformed "malformed UTF-8 encoding" at))))
+
+(defn- vec-of [r f] (let [n (len32 r)] (loop [i 0 out (transient [])] (if (< i n) (recur (inc i) (conj! out (f r))) (persistent! out)))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; types
+
+(def ^:private valtype-bytes
+  {0x7f 'i32 0x7e 'i64 0x7d 'f32 0x7c 'f64 0x7b 'v128
+   0x74 'nullexnref 0x73 'nullfuncref 0x72 'nullexternref 0x71 'nullref 0x70 'funcref 0x6f 'externref
+   0x6e 'anyref 0x6d 'eqref 0x6c 'i31ref 0x6b 'structref 0x6a 'arrayref 0x69 'exnref})
+(def ^:private valtype-codes (into {} (map (fn [[k v]] [v k]) valtype-bytes)))
+(def ^:private heap-bytes
+  {0x74 'noexn 0x73 'nofunc 0x72 'noextern 0x71 'none 0x70 'func 0x6f 'extern 0x6e 'any 0x6d 'eq 0x6c 'i31
+   0x6b 'struct 0x6a 'array 0x69 'exn})
+(def ^:private heap-codes (into {} (map (fn [[k v]] [v k]) heap-bytes)))
+
+(defn- heaptype [r]
+  (let [b (peek8 r)]
+    (if (and (>= b 0) (= 0x40 (bit-and b 0xc0)))
+      (do (u8 r) (or (heap-bytes b) (malformed "malformed heap type" (dec (pos r)))))
+      (let [at (pos r) x (sleb r 33)]
+        (if (neg? x) (malformed "malformed heap type" at) x)))))
+
+(defn- reftype-after [r ^long b]
+  (case b
+    0x64 (list 'ref (heaptype r))
+    0x63 (list 'ref 'null (heaptype r))
+    nil))
+
+(defn- valtype [r]
+  (let [at (pos r) b (u8 r)]
+    (or (valtype-bytes b) (reftype-after r b)
+        (malformed (if (or (<= 0x7c b 0x7f) (= b 0x7b)) "malformed number type" "malformed value type") at))))
+
+(defn- reftype [r]
+  (let [at (pos r) v (valtype r)]
+    (if (or (seq? v) (#{'nullexnref 'nullfuncref 'nullexternref 'nullref 'funcref 'externref 'anyref 'eqref 'i31ref 'structref 'arrayref 'exnref} v))
+      v (malformed "malformed reference type" at))))
+
+(defn- mutability [r] (case (u8 r) 0 false 1 true (malformed "malformed mutability" (dec (pos r)))))
+
+(defn- storagetype [r]
+  (case (peek8 r) 0x78 (do (u8 r) 'i8) 0x77 (do (u8 r) 'i16) (valtype r)))
+
+(defn- fieldtype [r] (let [t (storagetype r) m (mutability r)] (list 'field t m)))
+
+(defn- comptype [r]
+  (let [at (pos r)]
+    (case (u8 r)
+      0x60 (let [ps (vec-of r valtype) rs (vec-of r valtype)] (list 'func ps rs))
+      0x5f (list 'struct (vec-of r fieldtype))
+      0x5e (list 'array (fieldtype r))
+      (malformed "malformed definition type" at))))
+
+(defn- subtype [r]
+  (case (peek8 r)
+    0x50 (do (u8 r) (let [s (vec-of r u32)] (list 'sub {:final false :supers s} (comptype r))))
+    0x4f (do (u8 r) (let [s (vec-of r u32)] (list 'sub {:final true :supers s} (comptype r))))
+    (comptype r)))
+
+(defn- limits [r]
+  (let [at (pos r) flags (u8 r)]
+    (when-not (zero? (bit-and flags 0xfa)) (malformed "malformed limits flags" at))
+    (let [i64? (= 4 (bit-and flags 4))
+          mn (if i64? (u64 r) (u64 r))
+          mx (when (= 1 (bit-and flags 1)) (u64 r))]
+      (cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true)))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; instructions
+
+(declare instrs)
+
+(defn- blocktype [r]
+  (let [b (peek8 r)]
+    (cond
+      (= b 0x40) (do (u8 r) {})
+      (and (>= b 0) (= 0x40 (bit-and b 0xc0))) {:bt [(valtype r)]}
+      :else (let [at (pos r) x (sleb r 33)] (if (neg? x) (malformed "malformed type index" at) {:bt x})))))
+
+(defn- memarg [r]
+  (let [at (pos r) flags (u32 r)]
+    (when (>= flags 0x80) (malformed "malformed memop flags" at))
+    (let [m (when-not (zero? (bit-and flags 0x40)) (u32 r))
+          o (u64 r)]
+      (cond-> {:align (bit-and flags 0x3f) :offset o} m (assoc :memory m)))))
+
+(defn- f32-form [^long bits]
+  (let [f (Float/intBitsToFloat (unchecked-int bits))]
+    (if (Float/isNaN f) (list :nan bits) (double f))))
+
+(defn- f64-form [^long bits]
+  (let [d (Double/longBitsToDouble bits)]
+    (if (Double/isNaN d) (list :nan bits) d)))
+
+(defn- word ^long [r ^long n]
+  (loop [i 0 x 0] (if (< i n) (recur (inc i) (bit-or x (bit-shift-left (u8 r) (* 8 i)))) x)))
+
+(defn- end! [r] (let [at (pos r)] (when-not (= 0x0b (u8 r)) (malformed "END opcode expected" at))))
+
+(defn- catch-clause [r]
+  (let [at (pos r)]
+    (case (u8 r)
+      0x00 (let [x (u32 r) l (u32 r)] (list 'catch x l))
+      0x01 (let [x (u32 r) l (u32 r)] (list 'catch_ref x l))
+      0x02 (list 'catch_all (u32 r))
+      0x03 (list 'catch_all_ref (u32 r))
+      (malformed "malformed catch clause" at))))
+
+(defn- imm [r nm kind]
+  (case kind
+    :none (nullary nm)
+    :idx (list nm (u32 r))
+    :idx2 (let [x (u32 r) y (u32 r)] (list nm x y))
+    :idx2-rev (let [y (u32 r) x (u32 r)] (list nm x y))
+    :idx-field (let [x (u32 r) i (u32 r)] (list nm x i))
+    :mem (list nm (memarg r))
+    :mem-lane (let [m (memarg r) l (u8 r)] (list nm m l))
+    :lane (list nm (u8 r))
+    :shuffle (list nm (vec (repeatedly 16 #(u8 r))))
+    :br-table (let [ls (vec-of r u32) d (u32 r)] (list nm ls d))
+    :idx-u32 (let [x (u32 r) n (u32 r)] (list nm x n))
+    :heap (list nm (heaptype r))
+    :ref-test (list nm (list 'ref (heaptype r)))
+    :ref-null-test (list nm (list 'ref 'null (heaptype r)))
+    :i32 (list nm (sleb r 32))
+    :i64 (list nm (sleb r 64))
+    :f32 (list nm (f32-form (word r 4)))
+    :f64 (list nm (f64-form (word r 8)))
+    :v128 (list nm (hex (get-bytes r 16)))
+    :select-t (list nm (vec-of r valtype))
+    :br-on-cast (let [at (pos r) flags (u8 r)]
+                  (when-not (zero? (bit-and flags 0xfc)) (malformed "malformed br_on_cast flags" at))
+                  (let [l (u32 r)
+                        h1 (heaptype r) h2 (heaptype r)
+                        t (fn [n? h] (if n? (list 'ref 'null h) (list 'ref h)))]
+                    (list nm l (t (= 1 (bit-and flags 1)) h1) (t (= 2 (bit-and flags 2)) h2))))))
+
+(defn- instr [r]
+  (let [at (pos r) op (u8 r)]
+    (case op
+      0x02 (let [bt (blocktype r) body (instrs r)] (end! r) (list 'block bt body))
+      0x03 (let [bt (blocktype r) body (instrs r)] (end! r) (list 'loop bt body))
+      0x04 (let [bt (blocktype r) then (instrs r)]
+             (if (= 0x05 (peek8 r))
+               (do (u8 r) (let [els (instrs r)] (end! r) (list 'if bt then els)))
+               (do (end! r) (list 'if bt then))))
+      0x1f (let [bt (blocktype r) cs (vec-of r catch-clause) body (instrs r)] (end! r) (list 'try_table bt cs body))
+      0x05 (malformed "misplaced ELSE opcode" at)
+      0x0b (malformed "misplaced END opcode" at)
+      (if-let [[nm kind] (aget ^objects one-byte (int op))]
+        (imm r nm kind)
+        (if-let [tbl (prefixed op)]
+          (let [c (u32 r)]
+            (if-let [[nm kind] (tbl c)]
+              (imm r nm kind)
+              (malformed (format "illegal opcode %02x %02x" op c) at)))
+          (malformed (format "illegal opcode %02x" op) at))))))
+
+(defn- instrs [r]
+  (loop [out (transient [])]
+    (let [b (peek8 r)]
+      (if (or (= b 0x0b) (= b 0x05) (= b -1)) (persistent! out) (recur (conj! out (instr r)))))))
+
+(defn- const-expr [r] (let [e (instrs r)] (end! r) e))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; sections
+
+(def ^:private section-key
+  {1 :type 2 :import 3 :func 4 :table 5 :memory 6 :global 7 :export 8 :start 9 :elem 10 :code 11 :data 12 :datacount 13 :tag})
+(def ^:private section-id (into {} (map (fn [[k v]] [v k]) section-key)))
+;; the spec's order of the sections (decode.ml's module_)
+(def ^:private order [:type :import :func :table :memory :tag :global :export :start :elem :datacount :code :data])
+(def ^:private rank (into {} (map-indexed (fn [i k] [k i]) order)))
+
+(defn- import-desc [r]
+  (let [at (pos r)]
+    (case (u8 r)
+      0x00 [:func (u32 r)]
+      0x01 [:table (let [t (reftype r) l (limits r)] (assoc l :type t))]
+      0x02 [:memory (limits r)]
+      0x03 [:global (let [t (valtype r) m (mutability r)] {:type t :mut m})]
+      0x04 [:tag (do (when-not (zero? (u8 r)) (malformed "zero byte expected" (dec (pos r)))) (u32 r))]
+      (malformed "malformed import kind" at))))
+
+(defn- export-desc [r]
+  (let [at (pos r)]
+    (case (u8 r)
+      0x00 (list 'func (u32 r)) 0x01 (list 'table (u32 r)) 0x02 (list 'memory (u32 r)) 0x03 (list 'global (u32 r))
+      0x04 (list 'tag (u32 r))
+      (malformed "malformed export kind" at))))
+
+(defn- locals [r]
+  (let [at (pos r)
+        groups (vec-of r (fn [r] (let [n (u32 r) t (valtype r)] [n t])))]
+    (when-not (< (reduce + 0 (map first groups)) 0x100000000) (malformed "too many locals" at))
+    groups))
+
+(defn- flat-locals [groups] (vec (mapcat (fn [[n t]] (repeat n t)) groups)))
+(defn- group-locals [ls] (mapv (fn [g] [(count g) (first g)]) (partition-by identity ls)))
+
+(defn- elem-seg [r]
+  (let [at (pos r) flags (u32 r)
+        kind (fn [r] (let [at (pos r)] (when-not (zero? (u8 r)) (malformed "malformed element kind" at)) '(ref func)))]
+    (when (> flags 7) (malformed "malformed elements segment kind" at))
+    (let [mode (case (bit-and flags 3)
+                 0 {:active {:table 0 :offset (const-expr r)}}
+                 2 (let [t (u32 r)] {:active {:table t :offset (const-expr r)}})
+                 1 {:passive true}
+                 3 {:declare true})
+          exprs? (= 4 (bit-and flags 4))
+          ;; decode.ml: flags 0 (ref func), 4 funcref (ref null func); the others their elemkind or reftype
+          t (cond (zero? (bit-and flags 3)) (if exprs? 'funcref '(ref func))
+                  exprs? (reftype r)
+                  :else (kind r))
+          init (if exprs? {:exprs (vec-of r const-expr)} {:funcs (vec-of r u32)})]
+      [flags (merge mode {:type t} init)])))
+
+(defn- elem-flags
+  "The canonical flags of an element segment's form: indices when :funcs (their type (ref func)), else expressions; the
+  table's index written when it is not 0 or the type is not the flags' implicit one."
+  ^long [m]
+  (let [exprs? (contains? m :exprs)]
+    (+ (cond (:passive m) 1
+             (:declare m) 3
+             (and (zero? (long (get-in m [:active :table]))) (= (:type m) (if exprs? 'funcref '(ref func)))) 0
+             :else 2)
+       (if exprs? 4 0))))
+
+(defn- data-seg [r]
+  (let [at (pos r) flags (u32 r)]
+    (case flags
+      0 (let [o (const-expr r)] [0 {:active {:memory 0 :offset o}} (hex (get-bytes r (len32 r)))])
+      1 [1 {:passive true} (hex (get-bytes r (len32 r)))]
+      2 (let [m (u32 r) o (const-expr r)] [2 {:active {:memory m :offset o}} (hex (get-bytes r (len32 r)))])
+      (malformed "malformed data segment kind" at))))
+
+(defn- data-flags ^long [m] (if (:passive m) 1 (if (zero? (long (get-in m [:active :memory]))) 0 2)))
+
+;; the name section (the spec's appendix, its subsections 0 module, 1 functions, 2 locals): decoded when its canonical
+;; encoding is the original's (else kept as raw bytes)
+(declare encode-names names-of kind-of widths-of)
+
+(defn- decode-names [^bytes payload]
+  (try
+    (let [r (reader payload)
+          subs (loop [out [] last -1]
+                 (if (neg? (peek8 r)) out
+                   (let [id (u8 r) n (u32 r) e (+ (pos r) n)]
+                     (when (or (<= id last) (> id 2) (> e (end r))) (throw (ex-info "names" {})))
+                     (let [saved (end r)]
+                       (set-end! r e)
+                       (let [v (case id
+                                 0 (wname r)
+                                 1 (vec-of r (fn [r] [(u32 r) (wname r)]))
+                                 2 (vec-of r (fn [r] [(u32 r) (vec-of r (fn [r] [(u32 r) (wname r)]))])))]
+                         (when-not (= (pos r) e) (throw (ex-info "names" {})))
+                         (set-end! r saved)
+                         (recur (conj out [id v]) id))))))
+          _ (when (some (fn [[_ v]] (and (vector? v) (empty? v))) subs) (throw (ex-info "names" {})))
+          m (into {} subs)
+          names {:module (m 0) :funcs (m 1) :locals (m 2)}
+          ws (widths-of r)]
+      (when (java.util.Arrays/equals payload ^bytes (encode-names names (contains? m 0) ws))
+        [names ws]))
+    (catch Exception _ nil)))
+
+(defn- section-items
+  "The items of one section's content (r bounded to it), and its flags' layer entries."
+  [r k state]
+  (case k
+    :type (let [n (len32 r)]
+            (loop [i 0 idx 0 out []]
+              (if (< i n)
+                (if (= 0x4e (peek8 r))
+                  (do (u8 r) (let [ts (vec-of r subtype)] (recur (inc i) (+ idx (count ts)) (conj out (list 'wasm/rec idx ts)))))
+                  (recur (inc i) (inc idx) (conj out (list 'wasm/type idx (subtype r)))))
+                out)))
+    :import (let [counts (:imports state)]
+              (vec-of r (fn [r]
+                          (let [m (wname r) nm (wname r) [k d] (import-desc r)
+                                i (get @counts k 0)]
+                            (swap! counts assoc k (inc i))
+                            (list 'wasm/import m nm (case k
+                                                      :func (list 'func i {:type d})
+                                                      :table (list 'table i d)
+                                                      :memory (list 'memory i d)
+                                                      :global (list 'global i d)
+                                                      :tag (list 'tag i {:type d})))))))
+    :func (do (reset! (:func-types state) (vec-of r u32)) [])
+    :table (let [base (get @(:imports state) :table 0)]
+             (vec (map-indexed
+                    (fn [i [t l init]] (list 'wasm/table (+ base i) (cond-> (assoc l :type t) init (assoc :init init))))
+                    (vec-of r (fn [r]
+                                (if (= 0x40 (peek8 r))
+                                  (do (u8 r) (when-not (zero? (u8 r)) (malformed "zero byte expected" (dec (pos r))))
+                                      (let [t (reftype r) l (limits r)] [t l (const-expr r)]))
+                                  (let [t (reftype r) l (limits r)] [t l nil])))))))
+    :memory (let [base (get @(:imports state) :memory 0)]
+              (vec (map-indexed (fn [i l] (list 'wasm/memory (+ base i) l)) (vec-of r limits))))
+    :tag (let [base (get @(:imports state) :tag 0)]
+           (vec (map-indexed (fn [i t] (list 'wasm/tag (+ base i) {:type t}))
+                             (vec-of r (fn [r] (when-not (zero? (u8 r)) (malformed "zero byte expected" (dec (pos r)))) (u32 r))))))
+    :global (let [base (get @(:imports state) :global 0)]
+              (vec (map-indexed (fn [i [t m e]] (list 'wasm/global (+ base i) {:type t :mut m} e))
+                                (vec-of r (fn [r] (let [t (valtype r) m (mutability r)] [t m (const-expr r)]))))))
+    :export (vec-of r (fn [r] (let [nm (wname r)] (list 'wasm/export nm (export-desc r)))))
+    :start [(list 'wasm/start (u32 r))]
+    :elem (let [segs (vec-of r elem-seg)]
+            (vec (map-indexed (fn [i [flags m]]
+                                (when-not (= flags (elem-flags m)) (swap! (:flags state) assoc [:elem i] flags))
+                                (list 'wasm/elem i m))
+                              segs)))
+    :datacount [(list 'wasm/datacount (u32 r))]
+    :code (let [types @(:func-types state)
+                base (get @(:imports state) :func 0)
+                n (len32 r)]
+            (when-not (= n (count types)) (malformed "function and code section have inconsistent lengths" (pos r)))
+            (loop [i 0 out (transient [])]
+              (if (< i n)
+                (let [size (len32 r) start (pos r) saved (end r)
+                      _ (set-end! r (+ start size))
+                      groups (locals r)
+                      ls (flat-locals groups)
+                      body (instrs r)]
+                  (end! r)
+                  (when-not (= (pos r) (+ start size)) (malformed "section size mismatch" start))
+                  (set-end! r saved)
+                  (when-not (= groups (group-locals ls)) (swap! (:flags state) assoc [:locals (+ base i)] groups))
+                  (recur (inc i) (conj! out (apply list 'wasm/func (+ base i)
+                                                   (cond-> {:type (nth types i)} (seq ls) (assoc :locals ls))
+                                                   body))))
+                (persistent! out))))
+    :data (let [segs (vec-of r data-seg)]
+            (vec (map-indexed (fn [i [flags m bs]]
+                                (when-not (= flags (data-flags m)) (swap! (:flags state) assoc [:data i] flags))
+                                (list 'wasm/data i m bs))
+                              segs)))))
+
+(defn- apply-names
+  "The items with the name section's names on the functions (imported and defined): :name, :local-names."
+  [items {:keys [funcs locals]}]
+  (let [fnames (into {} funcs) lnames (into {} (map (fn [[i ls]] [i (into (sorted-map) ls)]) locals))]
+    (mapv (fn [it]
+            (cond
+              (and (seq? it) (= 'wasm/func (first it)))
+              (let [i (second it) m (nth it 2)
+                    m (cond-> m (fnames i) (assoc :name (fnames i)) (lnames i) (assoc :local-names (lnames i)))]
+                (apply list 'wasm/func i m (drop 3 it)))
+              (and (seq? it) (= 'wasm/import (first it)) (= 'func (first (nth it 3))))
+              (let [[_ m nm [_ i d]] it
+                    d (cond-> d (fnames i) (assoc :name (fnames i)) (lnames i) (assoc :local-names (lnames i)))]
+                (list 'wasm/import m nm (list 'func i d)))
+              :else it))
+          items)))
+
+(defn decode
+  "The module's items and its layer, {:items [...] :layer {...}}; throws ex-info {:wasm/malformed MSG} on a malformed module."
+  [^bytes b]
+  (let [r (reader b)
+        _ (when-not (and (>= (alength b) 4) (= 0x6d736100 (word r 4))) (malformed "magic header not detected" 0))
+        _ (when-not (and (>= (alength b) 8) (= 1 (word r 4))) (malformed "unknown binary version" 4))
+        state {:imports (atom {}) :func-types (atom []) :flags (atom {})}
+        empty (atom [])
+        names (atom nil)]
+    (loop [items [] last nil]
+      (if (neg? (peek8 r))
+        (let [nws (atom nil)
+              items (if-let [[[nm ws] payload] @names]
+                      (let [named (apply-names items nm)
+                            m (some #(when (= 'wasm/names (kind-of %)) (second %)) items)]
+                        ;; kept as names only when they print back to the payload (every index named a function's)
+                        (if (java.util.Arrays/equals ^bytes payload ^bytes (encode-names (names-of named (:module m)) (contains? m :module) ws))
+                          (do (reset! nws ws) named)
+                          (mapv #(if (= 'wasm/names (kind-of %)) (list 'wasm/custom "name" {:after (:after (second %))} (hex payload)) %) items)))
+                      items)]
+          (when (and (seq @(:func-types state)) (not (some #(and (seq? %) (= 'wasm/func (first %))) items)))
+            (malformed "function and code section have inconsistent lengths" (alength b)))
+          (let [dc (some #(when (and (seq? %) (= 'wasm/datacount (first %))) (second %)) items)
+                nd (count (filter #(and (seq? %) (= 'wasm/data (first %))) items))]
+            (when (and dc (not= dc nd)) (malformed "data count and data section have inconsistent lengths" (alength b))))
+          {:items items
+           :layer (let [w (widths-of r)
+                        flags @(:flags state)]
+                    (cond-> {}
+                      (seq w) (assoc :widths w)
+                      (seq @nws) (assoc :name-widths @nws)
+                      (seq @empty) (assoc :empty @empty)
+                      (seq flags) (assoc :flags (into (sorted-map-by (fn [a b] (compare (str a) (str b)))) flags))))})
+        (let [at (pos r) id (u8 r)
+              _ (when (> id 13) (malformed "malformed section id" at))
+              size (len32 r) start (pos r) saved (end r)]
+          (set-end! r (+ start size))
+          (if (zero? id)
+            (let [nm (wname r)
+                  payload (get-bytes r (- (+ start size) (pos r)))
+                  parsed (when (and (= nm "name") (nil? @names)) (decode-names payload))]
+              (set-end! r saved)
+              (if parsed
+                (do (reset! names [parsed payload])
+                    (recur (conj items (list 'wasm/names (cond-> {:after last} (:module (first parsed)) (assoc :module (:module (first parsed)))))) last))
+                (recur (conj items (list 'wasm/custom nm {:after last} (hex payload))) last)))
+            (let [k (section-key id)]
+              (when (and last (<= (long (rank k)) (long (rank last)))) (malformed "unexpected content after last section" at))
+              (let [its (section-items r k state)]
+                (when-not (= (pos r) (+ start size)) (malformed "section size mismatch" start))
+                (set-end! r saved)
+                (when (and (empty? its) (not= k :func)) (swap! empty conj k))
+                (when (and (= k :func) (empty? @(:func-types state))) (swap! empty conj k))
+                (recur (into items its) k)))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the writer: {:o ByteArrayOutputStream :p longs [ordinal] :w {ordinal width}}
+
+(defn- widths-of
+  "A reader's noted LEB128 widths as the layer keeps them: {width [ordinal ...]}."
+  [r]
+  (reduce (fn [m [o n]] (update m n (fnil conj []) o)) (sorted-map) (vec (.toArray ^java.util.ArrayList (:w r)))))
+
+(declare write-section)
+
+(defn- writer [layer]
+  {:o (java.io.ByteArrayOutputStream.) :p (long-array 1)
+   :w (let [m (java.util.HashMap.)]
+        (doseq [[n os] (:widths layer) o os] (.put m (long o) (long n)))
+        m)})
+
+(defn- sub-writer [w] (assoc w :o (java.io.ByteArrayOutputStream.)))
+(defn- out ^java.io.ByteArrayOutputStream [w] (:o w))
+(defn- w8 [w ^long b] (.write (out w) (int b)))
+(defn- wbytes [w ^bytes bs] (.write (out w) bs 0 (alength bs)))
+
+(defn- width ^long [w ^long minw]
+  (let [^longs p (:p w) o (aget p 0)]
+    (aset p 0 (inc o))
+    (let [x (.get ^java.util.HashMap (:w w) o)] (if x (long x) minw))))
+
+(defn- wuleb [w ^long v]
+  (let [n (width w (uwidth v))]
+    (loop [i 0 v v]
+      (when (< i n)
+        (w8 w (bit-or (bit-and v 0x7f) (if (< i (dec n)) 0x80 0)))
+        (recur (inc i) (unsigned-bit-shift-right v 7))))))
+
+(defn- wsleb [w ^long v]
+  (let [n (width w (swidth v))]
+    (loop [i 0 v v]
+      (when (< i n)
+        (w8 w (bit-or (bit-and v 0x7f) (if (< i (dec n)) 0x80 0)))
+        (recur (inc i) (bit-shift-right v 7))))))
+
+(defn- wword [w ^long x ^long n] (dotimes [i n] (w8 w (bit-and (unsigned-bit-shift-right x (* 8 i)) 0xff))))
+
+(defn- wname! [w ^String s] (let [bs (.getBytes s java.nio.charset.StandardCharsets/UTF_8)] (wuleb w (alength bs)) (wbytes w bs)))
+
+(defn- wvec [w xs f] (wuleb w (count xs)) (doseq [x xs] (f w x)))
+
+(defn- bad [msg x] (throw (ex-info (str msg ": " (pr-str x)) {:wasm/form x})))
+
+(defn- wheap [w h]
+  (if (integer? h) (wsleb w h) (w8 w (or (heap-codes h) (bad "an unknown heap type" h)))))
+
+(defn- wvaltype [w t]
+  (cond
+    (symbol? t) (w8 w (or (valtype-codes t) (bad "an unknown value type" t)))
+    (and (seq? t) (= 'ref (first t)) (= 'null (second t))) (do (w8 w 0x63) (wheap w (nth t 2)))
+    (and (seq? t) (= 'ref (first t))) (do (w8 w 0x64) (wheap w (second t)))
+    :else (bad "an unknown value type" t)))
+
+(defn- wfield [w [_ t m]]
+  (case t i8 (w8 w 0x78) i16 (w8 w 0x77) (wvaltype w t))
+  (w8 w (if m 1 0)))
+
+(defn- wcomp [w c]
+  (case (first c)
+    func (do (w8 w 0x60) (wvec w (nth c 1) wvaltype) (wvec w (nth c 2) wvaltype))
+    struct (do (w8 w 0x5f) (wvec w (nth c 1) wfield))
+    array (do (w8 w 0x5e) (wfield w (nth c 1)))
+    (bad "an unknown type" c)))
+
+(defn- wsub [w t]
+  (if (= 'sub (first t))
+    (let [{:keys [final supers]} (second t)]
+      (w8 w (if final 0x4f 0x50)) (wvec w supers wuleb) (wcomp w (nth t 2)))
+    (wcomp w t)))
+
+(defn- wlimits [w l]
+  (w8 w (+ (if (:max l) 1 0) (if (:i64 l) 4 0)))
+  (wuleb w (:min l))
+  (when (:max l) (wuleb w (:max l))))
+
+(declare winstrs)
+
+(defn- wblocktype [w bt]
+  (let [t (:bt bt)]
+    (cond (nil? t) (w8 w 0x40) (vector? t) (wvaltype w (first t)) :else (wsleb w t))))
+
+(defn- wmemarg [w m]
+  (wuleb w (+ (long (:align m)) (if (contains? m :memory) 0x40 0)))
+  (when (contains? m :memory) (wuleb w (:memory m)))
+  (wuleb w (:offset m)))
+
+(defn- wfloat [w x ^long n]
+  (if (seq? x)
+    (wword w (second x) n)
+    (wword w (if (= n 4) (long (Float/floatToRawIntBits (float x))) (Double/doubleToRawLongBits (double x))) n)))
+
+(defn- wop [w p c]
+  (if p (do (w8 w p) (wuleb w c)) (w8 w c)))
+
+(defn- winstr [w x]
+  (let [nm (first x)]
+    (case nm
+      block (do (w8 w 0x02) (wblocktype w (nth x 1)) (winstrs w (nth x 2)) (w8 w 0x0b))
+      loop (do (w8 w 0x03) (wblocktype w (nth x 1)) (winstrs w (nth x 2)) (w8 w 0x0b))
+      if (do (w8 w 0x04) (wblocktype w (nth x 1)) (winstrs w (nth x 2))
+             (when (> (count x) 3) (w8 w 0x05) (winstrs w (nth x 3)))
+             (w8 w 0x0b))
+      try_table (do (w8 w 0x1f) (wblocktype w (nth x 1))
+                    (wvec w (nth x 2) (fn [w c]
+                                        (case (first c)
+                                          catch (do (w8 w 0) (wuleb w (nth c 1)) (wuleb w (nth c 2)))
+                                          catch_ref (do (w8 w 1) (wuleb w (nth c 1)) (wuleb w (nth c 2)))
+                                          catch_all (do (w8 w 2) (wuleb w (nth c 1)))
+                                          catch_all_ref (do (w8 w 3) (wuleb w (nth c 1))))))
+                    (winstrs w (nth x 3)) (w8 w 0x0b))
+      (let [rows (or (by-name nm) (bad "an unknown instruction" x))
+            [p c kind] (if (= 1 (count rows))
+                         (first rows)
+                         (let [a (second x)]
+                           (or (first (filter (fn [[_ _ k]]
+                                                (case k
+                                                  :none (nil? a) :select-t (vector? a)
+                                                  :ref-null-test (and (seq? a) (= 'null (second a)))
+                                                  :ref-test (and (seq? a) (not= 'null (second a)))
+                                                  false))
+                                              rows))
+                               (bad "an instruction of no row" x))))]
+        (wop w p c)
+        (case kind
+          :none nil
+          :idx (wuleb w (nth x 1))
+          :idx2 (do (wuleb w (nth x 1)) (wuleb w (nth x 2)))
+          :idx2-rev (do (wuleb w (nth x 2)) (wuleb w (nth x 1)))
+          :idx-field (do (wuleb w (nth x 1)) (wuleb w (nth x 2)))
+          :mem (wmemarg w (nth x 1))
+          :mem-lane (do (wmemarg w (nth x 1)) (w8 w (nth x 2)))
+          :lane (w8 w (nth x 1))
+          :shuffle (doseq [l (nth x 1)] (w8 w l))
+          :br-table (do (wvec w (nth x 1) wuleb) (wuleb w (nth x 2)))
+          :idx-u32 (do (wuleb w (nth x 1)) (wuleb w (nth x 2)))
+          :heap (wheap w (nth x 1))
+          :ref-test (wheap w (second (nth x 1)))
+          :ref-null-test (wheap w (nth (nth x 1) 2))
+          :i32 (wsleb w (nth x 1))
+          :i64 (wsleb w (nth x 1))
+          :f32 (wfloat w (nth x 1) 4)
+          :f64 (wfloat w (nth x 1) 8)
+          :v128 (wbytes w (unhex (nth x 1)))
+          :select-t (wvec w (nth x 1) wvaltype)
+          :br-on-cast (let [[_ l t1 t2] x
+                            nul? (fn [t] (= 'null (second t)))
+                            ht (fn [t] (last t))]
+                        (w8 w (+ (if (nul? t1) 1 0) (if (nul? t2) 2 0)))
+                        (wuleb w l) (wheap w (ht t1)) (wheap w (ht t2))))))))
+
+(defn- winstrs [w xs] (doseq [x xs] (winstr w x)))
+(defn- wexpr [w xs] (winstrs w xs) (w8 w 0x0b))
+
+(defn encode-names
+  "The name section's payload of {:module :funcs :locals} (subsection 0 written when `module?`), its LEB128s of the widths
+  `ws` ({width [ordinal ...]}, the ordinals the payload's own)."
+  ^bytes [{:keys [module funcs locals]} module? ws]
+  (let [w (writer {:widths ws})]
+    (when module? (write-section w 0 #(wname! % module)))
+    (when (some? funcs) (write-section w 1 (fn [s] (wvec s funcs (fn [s [i n]] (wuleb s i) (wname! s n))))))
+    (when (some? locals) (write-section w 2 (fn [s] (wvec s locals (fn [s [i ls]] (wuleb s i) (wvec s ls (fn [s [j n]] (wuleb s j) (wname! s n))))))))
+    (.toByteArray (out w))))
+
+(defn- kind-of [it] (when (seq? it) (first it)))
+
+(defn- section-of [it]
+  (case (kind-of it)
+    (wasm/type wasm/rec) :type wasm/import :import wasm/func :func wasm/table :table wasm/memory :memory wasm/tag :tag
+    wasm/global :global wasm/export :export wasm/start :start wasm/elem :elem wasm/datacount :datacount wasm/data :data
+    (wasm/custom wasm/names) nil
+    (bad "not a module's item" it)))
+
+(defn- names-of
+  "The name section's {:module :funcs :locals} from the items' :name and :local-names (nil parts absent)."
+  [items module]
+  (let [fs (for [it items
+                 :let [k (kind-of it)
+                       [i m] (cond (= k 'wasm/func) [(second it) (nth it 2)]
+                                   (and (= k 'wasm/import) (= 'func (first (nth it 3)))) [(second (nth it 3)) (nth (nth it 3) 2)])]
+                 :when m]
+             [i m])
+        fs (sort-by first fs)
+        funcs (vec (for [[i m] fs :when (:name m)] [i (:name m)]))
+        locals (vec (for [[i m] fs :when (:local-names m)] [i (vec (:local-names m))]))]
+    {:module module :funcs (when (seq funcs) funcs) :locals (when (seq locals) locals)}))
+
+(defn- write-section [w id f]
+  (w8 w id)
+  (let [o (aget ^longs (:p w) 0)
+        _ (aset ^longs (:p w) 0 (inc o))
+        s (sub-writer w)]
+    (f s)
+    ;; the size's LEB128 is read before the content's: its ordinal is the first
+    (let [bs (.toByteArray (out s))
+          n (let [x (.get ^java.util.HashMap (:w w) o)] (if x (long x) (uwidth (alength bs))))]
+      (loop [i 0 v (long (alength bs))]
+        (when (< i n)
+          (w8 w (bit-or (bit-and v 0x7f) (if (< i (dec n)) 0x80 0)))
+          (recur (inc i) (unsigned-bit-shift-right v 7))))
+      (wbytes w bs))))
+
+(defn- section-content [w k its flags]
+  (case k
+    :type (wvec w its (fn [w it]
+                        (if (= 'wasm/rec (first it))
+                          (do (w8 w 0x4e) (wvec w (nth it 2) wsub))
+                          (wsub w (nth it 2)))))
+    :import (wvec w its (fn [w [_ m nm [k i d]]]
+                          (wname! w m) (wname! w nm)
+                          (case k
+                            func (do (w8 w 0) (wuleb w (:type d)))
+                            table (do (w8 w 1) (wvaltype w (:type d)) (wlimits w d))
+                            memory (do (w8 w 2) (wlimits w d))
+                            global (do (w8 w 3) (wvaltype w (:type d)) (w8 w (if (:mut d) 1 0)))
+                            tag (do (w8 w 4) (w8 w 0) (wuleb w (:type d))))))
+    :func (wvec w its (fn [w it] (wuleb w (:type (nth it 2)))))
+    :table (wvec w its (fn [w [_ _ d]]
+                         (if (:init d)
+                           (do (w8 w 0x40) (w8 w 0) (wvaltype w (:type d)) (wlimits w d) (wexpr w (:init d)))
+                           (do (wvaltype w (:type d)) (wlimits w d)))))
+    :memory (wvec w its (fn [w [_ _ l]] (wlimits w l)))
+    :tag (wvec w its (fn [w [_ _ d]] (w8 w 0) (wuleb w (:type d))))
+    :global (wvec w its (fn [w [_ _ d e]] (wvaltype w (:type d)) (w8 w (if (:mut d) 1 0)) (wexpr w e)))
+    :export (wvec w its (fn [w [_ nm [k i]]]
+                          (wname! w nm)
+                          (w8 w (case k func 0 table 1 memory 2 global 3 tag 4)) (wuleb w i)))
+    :start (wuleb w (second (first its)))
+    :elem (wvec w its (fn [w [_ i m]]
+                        (let [f (long (get flags [:elem i] (elem-flags m)))]
+                          (wuleb w f)
+                          (when (= 2 (bit-and f 3)) (wuleb w (get-in m [:active :table])))
+                          (when (even? f) (wexpr w (get-in m [:active :offset])))
+                          (when-not (zero? (bit-and f 3))
+                            (if (= 4 (bit-and f 4)) (wvaltype w (:type m)) (w8 w 0)))
+                          (if (= 4 (bit-and f 4))
+                            (wvec w (:exprs m) wexpr)
+                            (wvec w (:funcs m) wuleb)))))
+    :datacount (wuleb w (second (first its)))
+    :code (wvec w its (fn [w it]
+                        (let [o (aget ^longs (:p w) 0)
+                              _ (aset ^longs (:p w) 0 (inc o))
+                              s (sub-writer w)
+                              m (nth it 2)
+                              groups (get flags [:locals (second it)] (group-locals (:locals m [])))]
+                          (wvec s groups (fn [s [n t]] (wuleb s n) (wvaltype s t)))
+                          (winstrs s (drop 3 it))
+                          (w8 s 0x0b)
+                          (let [bs (.toByteArray (out s))
+                                n (let [x (.get ^java.util.HashMap (:w w) o)] (if x (long x) (uwidth (alength bs))))]
+                            (loop [i 0 v (long (alength bs))]
+                              (when (< i n)
+                                (w8 w (bit-or (bit-and v 0x7f) (if (< i (dec n)) 0x80 0)))
+                                (recur (inc i) (unsigned-bit-shift-right v 7))))
+                            (wbytes w bs)))))
+    :data (wvec w its (fn [w [_ i m bs]]
+                        (let [f (long (get flags [:data i] (data-flags m)))]
+                          (wuleb w f)
+                          (when (= f 2) (wuleb w (get-in m [:active :memory])))
+                          (when (not= f 1) (wexpr w (get-in m [:active :offset])))
+                          (let [b (unhex bs)] (wuleb w (alength b)) (wbytes w b)))))))
+
+(defn encode
+  "The module's bytes from its items; with `layer` (mode :full) the original's bytes."
+  ^bytes [items layer]
+  (let [w (writer layer)
+        flags (:flags layer {})
+        empties (set (:empty layer))
+        by-sec (group-by section-of (remove #(#{'wasm/custom 'wasm/names} (kind-of %)) items))
+        funcs (by-sec :func)
+        customs (filter #(#{'wasm/custom 'wasm/names} (kind-of %)) items)
+        after (group-by #(:after (nth % 2)) (map (fn [c] (if (= 'wasm/names (kind-of c)) (list 'wasm/names nil (second c)) c)) customs))
+        write-custom (fn [c]
+                       (write-section w 0
+                                      (fn [s]
+                                        (if (= 'wasm/names (first c))
+                                          (let [m (nth c 2)]
+                                            (wname! s "name")
+                                            (wbytes s (encode-names (names-of items (:module m)) (contains? m :module) (:name-widths layer))))
+                                          (do (wname! s (second c)) (wbytes s (unhex (nth c 3))))))))]
+    (wword w 0x6d736100 4)
+    (wword w 1 4)
+    (doseq [c (after nil)] (write-custom c))
+    (doseq [k order]
+      (let [its (case k
+                  :func funcs
+                  :code funcs
+                  (by-sec k))]
+        (when (or (seq its) (empties k))
+          (write-section w (section-id k) (fn [s] (section-content s k its flags))))
+        (doseq [c (after k)] (write-custom c))))
+    (.toByteArray (out w))))

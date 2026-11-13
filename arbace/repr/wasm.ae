@@ -1,0 +1,193 @@
+(ns arbace.repr.wasm
+  "repr/wasm, WebAssembly's bridge (doc/wasm/SPEC.md; doc/wasm/WASM-SURVEY.md §4, §5, WA1): a module's binary format as Wasm
+  forms and back. `arbace.repr.wasm.binary` decodes and encodes; this namespace writes the forms as `.ae` text (a header
+  form, then an item a line, a function's instructions a line each; mode :full's layer in the last line), reads it back,
+  and judges one module's round trip by its own verdict: the bytes printed back from the forms and the layer equal to
+  the original's byte for byte, the `.ae` text read back to the same forms and layer, the canonical print read again to
+  the same forms with no layer. `-main` is bin/repr-wasm's read, print and the Arbace half of its round trip."
+  (:require [arbace.repr.wasm.binary :as bin]
+            [arbace.string :as str])
+  (:import [java.util.concurrent Executors Callable Future]))
+
+(set! *warn-on-reflection* true)
+
+(def header '(wasm/unit {:format :binary}))
+
+(defn- slurp-bytes ^bytes [^String path] (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))))
+(defn- spit-bytes [^String path ^bytes bs]
+  (let [f (java.io.File. path)] (when-let [d (.getParentFile f)] (.mkdirs d))
+    (with-open [o (java.io.FileOutputStream. f)] (.write o bs))))
+(defn- spit-text [^String path ^String s]
+  (spit-bytes path (.getBytes s java.nio.charset.StandardCharsets/UTF_8)))
+(defn- slurp-text ^String [^String path] (String. (slurp-bytes path) java.nio.charset.StandardCharsets/UTF_8))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the .ae text
+
+(defn- indent ^String [^long depth] (apply str (repeat (min depth 32) " ")))
+
+(defn- emit-instrs [^StringBuilder sb xs ^long depth]
+  (let [ind (indent depth)]
+    (doseq [x xs]
+      (case (first x)
+        (block loop) (do (.append sb ind) (.append sb (str "(" (first x) " " (pr-str (second x)) " [\n"))
+                         (emit-instrs sb (nth x 2) (inc depth))
+                         (.append sb ind) (.append sb "])\n"))
+        if (do (.append sb ind) (.append sb (str "(if " (pr-str (second x)) " [\n"))
+               (emit-instrs sb (nth x 2) (inc depth))
+               (when (> (count x) 3)
+                 (.append sb ind) (.append sb "] [\n")
+                 (emit-instrs sb (nth x 3) (inc depth)))
+               (.append sb ind) (.append sb "])\n"))
+        try_table (do (.append sb ind) (.append sb (str "(try_table " (pr-str (second x)) " " (pr-str (nth x 2)) " [\n"))
+                      (emit-instrs sb (nth x 3) (inc depth))
+                      (.append sb ind) (.append sb "])\n"))
+        (do (.append sb ind) (.append sb (pr-str x)) (.append sb "\n"))))))
+
+(defn layer-text ^String [layer] (str "#_(wasm/layer " (pr-str layer) ")\n"))
+
+(defn ae-text
+  "The `.ae` text of a module's items: the header, then an item a line (a function's instructions a line each, nested
+  blocks indented); with `layer` (mode :full), its line last."
+  ^String [items layer]
+  (binding [*print-length* nil *print-level* nil *print-meta* false]
+    (let [sb (StringBuilder.)]
+      (.append sb (pr-str header)) (.append sb "\n")
+      (doseq [it items]
+        (if (= 'wasm/func (first it))
+          (do (.append sb (str "(wasm/func " (second it) " " (pr-str (nth it 2)) "\n"))
+              (emit-instrs sb (drop 3 it) 1)
+              (.append sb ")\n"))
+          (do (.append sb (pr-str it)) (.append sb "\n"))))
+      (when (seq layer) (.append sb (layer-text layer)))
+      (str sb))))
+
+(defn read-ae
+  "The items of an `.ae` text (its header checked and left out)."
+  [^String text]
+  (let [r (java.io.PushbackReader. (java.io.StringReader. text))
+        eof (Object.)
+        xs (loop [out (transient [])] (let [x (read r false eof)] (if (identical? x eof) (persistent! out) (recur (conj! out x)))))]
+    (when-not (= header (first xs)) (throw (ex-info "not a Wasm .ae text: no (wasm/unit {:format :binary}) header" {})))
+    (vec (rest xs))))
+
+(defn layer-of-ae
+  "The layer of an `.ae` text written in :full ({} when it has none)."
+  [^String text]
+  (let [k (.lastIndexOf text "\n#_(wasm/layer ")]
+    (if (neg? k) {} (second (read-string (subs text (+ k 3)))))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the round trip
+
+(defn- reason ^String [^Throwable e]
+  (str (if-let [m (:wasm/malformed (ex-data e))] (str "malformed: " m) (str "crash: " (.getMessage e)))
+       ""))
+
+(defn- clean ^String [^String s]
+  (-> s (str/replace #"[\t\n\r]" " ") (str/replace "\"" "'") (str/replace "\\" "(backslash)") (str/replace #"[^ -~]" "?")))
+
+(defn op-counts
+  "The instructions of the items' functions and constant expressions: name -> count (structured ones by their name)."
+  [items]
+  (let [m (java.util.HashMap.)
+        bump (fn [k] (.put m k (inc (long (or (.get m k) 0)))))
+        walk (fn walk [xs]
+               (doseq [x xs]
+                 (bump (str (first x)))
+                 (case (first x)
+                   (block loop) (walk (nth x 2))
+                   if (do (walk (nth x 2)) (when (> (count x) 3) (walk (nth x 3))))
+                   try_table (walk (nth x 3))
+                   nil)))]
+    (doseq [it items]
+      (case (first it)
+        wasm/func (walk (drop 3 it))
+        wasm/global (walk (nth it 3))
+        nil))
+    (into (sorted-map) m)))
+
+(defn- ae-step
+  "The `.ae` text written and read back: nil, or the level that failed. (Each step a function of its own, so that its
+  copies are garbage once it returns: a Go-built module's forms are some hundreds of MB.)"
+  [items layer ^String ae-path]
+  (let [ae (ae-text items layer)]
+    (spit-text ae-path ae)
+    (cond (not= (read-ae ae) items) "ae-differs"
+          (not= (layer-of-ae ae) layer) "layer-differs")))
+
+(defn- full-step [items layer ^bytes src]
+  (let [full (bin/encode items layer)]
+    (when-not (java.util.Arrays/equals full src) ["bytes-differ" (str (alength full) " bytes printed, " (alength src) " read")])))
+
+(defn- canon-step [items]
+  (let [again (bin/decode (bin/encode items nil))]
+    (cond (not= (:items again) items) "forms-differ"
+          (seq (:layer again)) "canon-layer")))
+
+(defn check-one
+  "One module's round trip: decoded in :full; the `.ae` text written at `ae-path` and read back (the same items and layer);
+  printed back with the layer (the original byte for byte); the canonical print decoded again (the same items, no layer).
+  [status detail items layer-widths ops], status ok, malformed, crash, ae-differs, layer-differs, bytes-differ,
+  forms-differ or canon-layer."
+  [^String path ^String ae-path]
+  (try
+    (let [src (slurp-bytes path)
+          {:keys [items layer]} (bin/decode src)
+          nw (reduce + 0 (map count (vals (:widths layer))))
+          [status detail] (or (when-let [s (ae-step items layer ae-path)] [s ""])
+                              (full-step items layer src)
+                              (when-let [s (canon-step items)] [s ""])
+                              ["ok" ""])]
+      [status detail (count items) nw (op-counts items)])
+    (catch Throwable e
+      [(if (:wasm/malformed (ex-data e)) "malformed" "crash") (clean (reason e)) 0 0 {}])))
+
+(defn control
+  "A negative control: the subject's `.ae` (written in :full) printed back with its layer, against the reference module's
+  bytes: `differs` (as it must) or `same`. With `flip` the reference's bytes have one byte flipped (its middle one) first."
+  [^String subject-ae ^String ref-path flip]
+  (let [ae (slurp-text subject-ae)
+        bs (bin/encode (read-ae ae) (layer-of-ae ae))
+        ref (slurp-bytes ref-path)]
+    (when flip (let [i (quot (alength ref) 2)] (aset ref i (unchecked-byte (bit-xor 0x01 (aget ref i))))))
+    (if (java.util.Arrays/equals bs ref) "same" "differs")))
+
+(defn- pool-map [f rows]
+  (let [threads (Integer/parseInt (or (System/getenv "REPR_WASM_THREADS") "1"))
+        pool (Executors/newFixedThreadPool threads)
+        futs (mapv (fn [r] (.submit pool ^Callable (fn [] (f r)))) rows)
+        res (mapv #(.get ^Future %) futs)]
+    (.shutdown pool)
+    res))
+
+(defn- opt [r k] (second (drop-while #(not= k %) r)))
+
+(defn -main
+  "bin/repr-wasm read [--full] FILE.wasm [-o OUT.ae]; print [--full] FILE.ae -o OUT.wasm; check LIST WORK (each line
+  NAME<tab>PATH: WORK/check.tsv, NAME STATUS ITEMS WIDTHS DETAIL; WORK/ops.tsv, NAME OP COUNT; the .ae texts in WORK/ae/);
+  control SUBJECT.ae REFERENCE.wasm [flip]."
+  [& args]
+  (let [[verb & r] args
+        full? (some #{"--full"} r)
+        r (remove #{"--full"} r)
+        out (opt r "-o")
+        r (take-while #(not= "-o" %) r)]
+    (case verb
+      "read" (let [{:keys [items layer]} (bin/decode (slurp-bytes (first r)))
+                   t (ae-text items (when full? layer))]
+               (if out (spit-text out t) (do (print t) (flush))))
+      "print" (let [ae (slurp-text (first r))
+                    bs (bin/encode (read-ae ae) (when full? (layer-of-ae ae)))]
+                (when-not out (throw (ex-info "repr-wasm print: -o OUT.wasm is required (the output is binary)" {})))
+                (spit-bytes out bs))
+      "check" (let [[lst work] r
+                    rows (for [l (str/split-lines (slurp lst)) :when (seq l)] (str/split l #"\t"))
+                    res (pool-map (fn [[n p]] (into [n] (check-one p (str work "/ae/" n ".ae")))) rows)]
+                (spit-text (str work "/check.tsv")
+                           (apply str (map (fn [[n s d i w]] (str n "\t" s "\t" i "\t" w "\t" d "\n")) res)))
+                (spit-text (str work "/ops.tsv")
+                           (apply str (for [[n _ _ _ _ ops] res [o c] ops] (str n "\t" o "\t" c "\n")))))
+      "control" (println (control (first r) (second r) (= "flip" (nth r 2 nil))))
+      (do (println "repr-wasm: read [--full] FILE.wasm [-o OUT.ae] | print [--full] FILE.ae -o OUT.wasm | check LIST WORK | control SUBJECT.ae REFERENCE.wasm [flip]")
+          (System/exit 2)))))

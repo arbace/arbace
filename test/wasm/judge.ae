@@ -1,0 +1,67 @@
+(ns wasm.judge
+  "bin/repr-wasm's judgments (doc/wasm/SPEC.md §6): a run's rows [ID RESULT REASON] (ID CORPUS/NAME) against a record (every
+  recorded :pass of the run's corpora passes; every case of the run is recorded and every recorded case of its corpora was
+  run) and every non-pass against the classes (goi's format: a row is in the first class that names its id in :ids, else
+  the first whose :match finds its REASON); with RECORD the corpora's rows are rewritten from the run. The asm crops'
+  judge's shape (test/asm/judge.ae)."
+  (:require [arbace.string :as str]))
+
+(defn- read-rows [path]
+  (let [r (java.io.PushbackReader. (java.io.StringReader. (slurp path)))
+        eof (Object.)
+        xs (loop [out []] (let [x (read r false eof)] (if (identical? x eof) out (recur (conj out x)))))]
+    (if (and (= 1 (count xs)) (or (empty? (first xs)) (vector? (first (first xs))))) (first xs) xs)))
+
+(defn classify [classes [id result reason]]
+  (when-not (= result :pass)
+    (or (some (fn [c] (when (some #{id} (:ids c)) (:id c))) classes)
+        (some (fn [c] (when (some #(re-find % (str reason)) (:match c)) (:id c))) classes))))
+
+(def headers
+  {"roundtrip"
+   (str ";; repr/wasm's round trip (bin/repr-wasm roundtrip; doc/wasm/SPEC.md §6): each module of test/wasm/corpora.edn's corpora decoded\n"
+        ";; in mode :full, its .ae text read back to the same forms and layer, printed back byte for byte, the canonical print decoded\n"
+        ";; again to the same forms with no layer: :pass, else :fail with the first level that failed (malformed: the decoder's\n"
+        ";; rejection, with its class). Written by `bin/repr-wasm roundtrip --record`; read by bin/repr-wasm's judgment. Read with the\n"
+        ";; Clojure reader.\n")
+   "wast"
+   (str ";; repr/wasm's read of the testsuite (bin/repr-wasm wast; doc/wasm/SPEC.md §7; WA2): each command of each .wast script of\n"
+        ";; test/wasm/corpora.edn's :testsuite judged by its own assertion at the read level: a module (text, binary or quote) read\n"
+        ";; into forms, encoded, decoded again to the same forms and its text printed and read again to the same forms; an\n"
+        ";; assert_malformed rejected; :pass, else :fail with the reason (an assertion the read level does not judge yet is\n"
+        ";; classed). Written by `bin/repr-wasm wast --record`; read by bin/repr-wasm's judgment. Read with the Clojure reader.\n")})
+
+(defn- q [s] (pr-str (str s)))
+
+(defn main [label kind results run-path classes-path record ids]
+  (let [ids (set (remove empty? (str/split (str ids) #" ")))
+        run (read-rows run-path)
+        old (if (.exists (java.io.File. ^String results)) (read-rows results) [])
+        classes (read-string (slurp classes-path))
+        in-run? (fn [[id]] (or (empty? ids) (contains? ids (first (str/split id #"/")))))
+        old-run (filter in-run? old)
+        oldm (into {} (map (fn [[i r]] [i r]) old-run))
+        runm (into {} (map (fn [[i r]] [i r]) run))
+        per (group-by #(first (str/split (first %) #"/")) run)
+        problems (atom [])]
+    (doseq [[c rs] (sort per)]
+      (let [by (frequencies (map #(or (classify classes %) (when (= :pass (second %)) :pass) :unclassed) rs))]
+        (println (str label " " c ": " (count rs) " cases, " (get by :pass 0) " pass"
+                      (apply str (for [[k n] (sort-by str (dissoc by :pass))] (str ", " n " " (name k))))))))
+    (doseq [r run :when (and (not= :pass (second r)) (not (classify classes r)))]
+      (swap! problems conj (str "unclassed: " (first r) " " (nth r 2))))
+    (if (seq record)
+      (let [kept (remove in-run? old)
+            rows (sort-by first (concat kept run))]
+        (spit results (str (headers kind) "[\n" (apply str (map (fn [[i r why]] (str "[" (q i) " " r " " (q why) "]\n")) rows)) "]\n"))
+        (println (str label ": recorded " (count run) " rows of " (str/join " " (sort ids)) " into " results)))
+      (do
+        (doseq [[i r] oldm :when (and (= r :pass) (not= (runm i) :pass))]
+          (swap! problems conj (str "was :pass, now " (runm i) ": " i)))
+        (doseq [[i] run :when (not (contains? oldm i))] (swap! problems conj (str "not recorded: " i)))
+        (doseq [[i] old-run :when (not (contains? runm i))] (swap! problems conj (str "recorded, not run: " i)))))
+    (doseq [p (take 40 @problems)] (println (str "FAIL: " p)))
+    (when (> (count @problems) 40) (println (str "FAIL: ... " (- (count @problems) 40) " more")))
+    (if (empty? @problems)
+      (println (str label ": ok"))
+      (do (println (str label ": " (count @problems) " problems")) (System/exit 1)))))

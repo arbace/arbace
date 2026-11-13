@@ -1,0 +1,131 @@
+(ns wasm.gen-ops
+  "The instruction table of repr/wasm (doc/wasm/SPEC.md §3; doc/wasm/WASM-SURVEY.md, \"As built: WA1\"), generated from the
+  WebAssembly specification's reference interpreter at its pin (WebAssembly/spec, tag wg-3.0, test/wasm/corpora.edn's :spec):
+  `interpreter/binary/decode.ml`'s `instr` function gives each opcode (with its prefix 0xfb, 0xfc or 0xfd), the constructor
+  it decodes to and the immediates it reads, in order; `interpreter/text/lexer.mll`'s keywords give each constructor its
+  text name (the constructor is the keyword with `.` spelled `_`). Each arm's reading of immediates is classed by its
+  shape into an immediate kind; a shape the table does not know fails the generation, so a new revision of the
+  specification cannot slip a kind past it. The structured instructions (block, loop, if, try_table) and the arms that
+  reject (illegal, misplaced) are the decoder's own, not rows.
+
+  By hand: bin/repr-wasm ops gen|check (check: regenerated and compared byte for byte with arbace/repr/wasm/ops.ae)."
+  (:require [arbace.string :as str]))
+
+(def shapes
+  ;; the normalized immediates' reading of an arm -> its kind (doc/wasm/SPEC.md §3.2)
+  {"" :none
+   "memop" :mem
+   "memop laneidx" :mem-lane
+   "laneidx" :lane
+   "repeat16laneidx" :shuffle
+   "idx" :idx
+   "idx idx" :idx2
+   "idx idx/rev" :idx2-rev
+   "idx idx1" :idx-field
+   "vecidx idx" :br-table
+   "idx u32" :idx-u32
+   "heaptype" :heap
+   "heaptype/null" :ref-null-test
+   "heaptype/nonull" :ref-test
+   "s32" :i32
+   "s64" :i64
+   "f32" :f32
+   "f64" :f64
+   "v128" :v128
+   "vecvaltype" :select-t
+   "brcast" :br-on-cast})
+
+(defn- keywords [^String lexer]
+  (into {} (for [[_ k] (re-seq #"\| \"([a-z0-9_.]+)\" ->" lexer)] [(str/replace k "." "_") k])))
+
+(defn- region [^String decode]
+  (let [a (.indexOf decode "let rec instr s =")
+        b (.indexOf decode "and instr_block s")]
+    (when (or (neg? a) (neg? b)) (throw (ex-info "decode.ml: no `let rec instr s` ... `and instr_block s`" {})))
+    (subs decode a b)))
+
+(defn- arms
+  "The case arms of `instr`: [prefix code body], prefix nil or 0xfb/0xfc/0xfd."
+  [^String text]
+  (let [parts (rest (str/split text #"\n *\| "))]
+    (loop [ps parts prefix nil out []]
+      (if-let [p (first ps)]
+        (let [p (str/trim (str/replace p #"\s+" " "))
+              [_ codes body] (or (re-matches #"((?:0x[0-9a-f]+l?(?: \| )?)+)(?: as [a-z]+)? -> (.*)" p) [nil nil nil])]
+          (cond
+            (nil? codes) (recur (rest ps) prefix out)
+            :else
+            (let [cs (re-seq #"0x[0-9a-f]+l?" codes)
+                  long? (.endsWith ^String (first cs) "l")
+                  code (Long/parseLong (subs (str/replace (first cs) "l" "") 2) 16)]
+              (if (and (not long?) (.startsWith ^String body "(match u32 s with"))
+                (recur (rest ps) code out)
+                (recur (rest ps) (if long? prefix nil)
+                       (if (and (> (count cs) 1) (not (re-find #"br_on_cast" body))) out (conj out [(if long? prefix nil) code body])))))))
+        out))))
+
+(defn- shape
+  "The arm body's immediates' reading, normalized, and the constructor's name."
+  [^String body]
+  (let [lets (re-seq #"let ([^=]+?) = (.+?) in" body)
+        tail (str/trim (last (str/split body #" in ")))
+        nm (first (str/split tail #" "))
+        r (fn [^String e] (-> e (str/replace #"\bat " "") (str/replace " s" "") (str/replace "(" "") (str/replace ")" "") (str/replace " " "")))
+        reads (mapv (fn [[_ v e]] [(str/trim v) (r e)]) lets)
+        s (str/join " " (map second reads))
+        s (cond
+            (= reads [["y" "idx"] ["x" "idx"]]) "idx idx/rev"
+            (= reads [["x" "idx"] ["i" "idx"]]) "idx idx1"
+            (= nm "ref_test") (if (re-find #"\(Null" tail) "heaptype/null" "heaptype/nonull")
+            (= nm "ref_cast") (if (re-find #"\(Null" tail) "heaptype/null" "heaptype/nonull")
+            (re-find #"br_on_cast" body) "brcast"
+            (= reads [["x, a, o" "memop"]]) "memop"
+            (= reads [["x, a, o" "memop"] ["i" "laneidx"]]) "memop laneidx"
+            (= reads [["is" "repeat16laneidx"]]) "repeat16laneidx"
+            (= reads [["xs" "vecidx"] ["x" "idx"]]) "vecidx idx"
+            :else s)
+        nm (cond (re-find #"br_on_cast" body) nil (= tail "select None") "select" :else nm)]
+    [s nm]))
+
+(defn table
+  "The rows [prefix code name kind] of the instruction table, in the decoder's order."
+  [^String decode ^String lexer]
+  (let [kw (keywords lexer)
+        rows (for [[prefix code body] (arms (region decode))
+                   :when (not (re-find #"illegal|error s|misplaced" body))
+                   :when (not (and (nil? prefix) (#{0x02 0x03 0x04 0x1f} code)))]
+               (if (re-find #"br_on_cast" body)
+                 (let [s (str/trim body)]
+                   ;; one arm decodes both: 0x18 br_on_cast, 0x19 br_on_cast_fail
+                   [[prefix 0x18 "br_on_cast" :br-on-cast] [prefix 0x19 "br_on_cast_fail" :br-on-cast]])
+                 (let [[s nm] (shape body)
+                       k (get shapes s)
+                       t (get kw nm)]
+                   (when-not k (throw (ex-info (str "decode.ml: an arm of an unknown shape: " (pr-str s) " in " body) {})))
+                   (when-not t (throw (ex-info (str "lexer.mll: no keyword for the constructor " nm) {})))
+                   [[prefix code t k]])))]
+    (vec (apply concat rows))))
+
+(def header
+  (str ";; Generated by test/wasm/gen_ops.ae (bin/repr-wasm ops gen) from WebAssembly/spec at tag wg-3.0 (test/wasm/corpora.edn's\n"
+       ";; :spec): interpreter/binary/decode.ml's `instr` and interpreter/text/lexer.mll's keywords. Do not edit: regenerate\n"
+       ";; and check with bin/repr-wasm ops check. Each row [PREFIX CODE NAME KIND]: PREFIX nil (a one-byte opcode) or the\n"
+       ";; prefix byte (0xfb GC, 0xfc numeric and bulk, 0xfd vector), CODE the opcode (after a prefix, its u32), NAME the\n"
+       ";; instruction's text name, KIND its immediates (doc/wasm/SPEC.md §3.2). The structured instructions (block, loop,\n"
+       ";; if, try_table) are the decoder's own.\n"))
+
+(defn text [rows]
+  (str header
+       "(ns arbace.repr.wasm.ops\n  \"repr/wasm's instruction table (generated; doc/wasm/SPEC.md §3).\")\n\n"
+       "(def rows\n  [\n"
+       (apply str (for [[p c n k] rows]
+                    (str "   [" (if p (format "0x%02x" (long p)) "nil") " " (format "0x%02x" (long c)) " \"" n "\" " k "]\n")))
+       "  ])\n"))
+
+(defn main [decode-path lexer-path out check?]
+  (let [t (text (table (slurp decode-path) (slurp lexer-path)))]
+    (if check?
+      (if (= t (slurp out))
+        (println (str "repr-wasm ops: " out " is decode.ml's table (" (count (re-seq #"\n   \[" t)) " rows)"))
+        (do (println (str "FAIL: repr-wasm ops: " out " differs from the table generated from " decode-path)) (System/exit 1)))
+      (do (spit out t) (println (str "repr-wasm ops: wrote " out " (" (count (re-seq #"\n   \[" t)) " rows)"))))))
