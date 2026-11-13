@@ -44,6 +44,15 @@
   (from __future__ import annotations; queue 225)"
   nil)
 
+(def ^:dynamic *ast-unparse*
+  "false, or true for ast_unparse's spellings where the parser's values differ from the source's (from __future__
+  import annotations; queue 278): a debug field (f'{x=}') as its text and the field with conversion !r unless it has
+  one or a format spec (the parser's Constant and FormattedValue), an infinite float or imaginary literal as 1e309
+  (ast_unparse.c's _str_replace_inf: \"1e\" DBL_MAX_10_EXP + 1); and ast_unparse's precedences where the printer's
+  differ: a comprehension's tuple target bare, an int's attribute as `1 .real`, a field's value at PR_TEST + 1 and an
+  if-expression's else at PR_TEST (a lambda bare there)"
+  false)
+
 (defn- fstring [h parts o]
   (let [prefix (get o :prefix (if (= h 'joined-str) "f" "t"))
         q (get o :quote "\"")]
@@ -53,12 +62,14 @@
   (let [[h p o _] (node x)
         conv (when-let [c (:conversion o)] (str "!" c))
         spec (when-let [s (:format-spec o)] (str ":" (fstring-parts s)))
-        e (or (:debug o)
-              (if (= h 'interpolation)
-                (second p)
-                (let [s (expr (first p) 3)]
-                  (if (str/starts-with? s "{") (str " " s) s))))]
-    (str "{" e conv spec "}")))
+        value (fn [] (if (= h 'interpolation)
+                       (second p)
+                       (let [s (expr (first p) (if *ast-unparse* 4 3))]
+                         (if (str/starts-with? s "{") (str " " s) s))))]
+    (if (and *ast-unparse* (:debug o) (not= h 'interpolation))
+      (str (-> (:debug o) (str/replace "{" "{{") (str/replace "}" "}}"))
+           "{" (value) (or conv (when-not spec "!r")) spec "}")
+      (str "{" (or (:debug o) (value)) conv spec "}"))))
 
 (defn fstring-parts [parts]
   (apply str (map #(if (string? %) % (field %)) parts)))
@@ -118,10 +129,17 @@
 
 (defn- elts [xs] (str/join ", " (map #(expr % 2) xs)))
 
+(defn- comprehension-target
+  "A comprehension's target; under *ast-unparse* a tuple without its parentheses (ast_unparse's PR_TUPLE)"
+  [t]
+  (if (and *ast-unparse* (seq? t) (= 'tuple (first t)) (seq (second t)))
+    (let [es (second t)] (str (elts es) (when (= 1 (count es)) ",")))
+    (expr t 0)))
+
 (defn- comprehension-text [gens]
   (str/join " " (for [g gens]
                   (let [[_ [t it] o _] (node g)]
-                    (str (when (:async o) "async ") "for " (expr t 0) " in " (expr it 4)
+                    (str (when (:async o) "async ") "for " (comprehension-target t) " in " (expr it 4)
                          (apply str (map #(str " if " (expr % 4)) (:ifs o))))))))
 
 (defn- call-args [pos kws]
@@ -148,7 +166,12 @@
       (case h
         name (ident (first p))
         const (str (first p))
-        (int float imag) (first p)
+        int (first p)
+        (float imag) (let [t (first p)]
+                       (if (and *ast-unparse*
+                                (Double/isInfinite (Double/parseDouble (str/replace (str/replace (str t) "_" "") #"[jJ]$" ""))))
+                         (str "1e309" (when (= h 'imag) "j"))
+                         t))
         (str bytes) (if (and *string-repr* (= h 'str)) (*string-repr* x) (string-token h (first p) o))
         (joined-str template-str) (fstring h (first p) o)
         str-concat (paren (str/join " " (map #(expr % 18) (rest x))) 17 level)
@@ -168,7 +191,7 @@
                      (paren (str (case op + "+" - "-" bit-not "~") (expr v 15)) 15 level)))
         lambda (let [ps (args-text (first p) false)]
                  (paren (str "lambda" (when (seq ps) (str " " (str/join ", " ps))) ": " (expr (second p) 2)) 2 level))
-        if-exp (let [[t b e] p] (paren (str (expr b 4) " if " (expr t 4) " else " (expr e 3)) 3 level))
+        if-exp (let [[t b e] p] (paren (str (expr b 4) " if " (expr t 4) " else " (expr e (if *ast-unparse* 2 3))) 3 level))
         dict (let [[ks vs] p]
                (str "{" (str/join ", " (map (fn [k v] (if (nil? k) (str "**" (expr v 9)) (str (expr k 3) ": " (expr v 3)))) ks vs)) "}"))
         set (str "{" (elts (first p)) "}")
@@ -191,7 +214,9 @@
                   (paren (apply str (expr l 8) (map (fn [op c] (str " " (cmp-ops op) " " (expr c 8))) ops cs)) 7 level))
         call (str (expr (first p) 18) "(" (call-args (second p) (:keywords o)) ")")
         attribute (let [v (first p)]
-                    (str (if (int-literal? v) (str "(" (expr v 0) ")") (expr v 18)) "." (ident (second p))))
+                    (cond (and *ast-unparse* (int-literal? v)) (str (expr v 18) " ." (ident (second p)))
+                          (int-literal? v) (str "(" (expr v 0) ")." (ident (second p)))
+                          :else (str (expr v 18) "." (ident (second p)))))
         subscript (str (expr (first p) 18) "[" (subscript-text (second p)) "]")
         starred (str "*" (expr (first p) 9))
         slice (slice-text x)
