@@ -5430,3 +5430,37 @@ own guard stopped it at 82%: the gate keeps the disk), C's two stale annotation 
 gf-misc's note), oi's two slow entries that now pass (parallel/churn, weak-ephe-final/weak_array_par). The rest reruns as-is: the
 Java levels after night 12's disk-full results, hsi-check's three CPU-limit programs, C++'s runtime samples (gf-cpp, merged in
 5ac770072). Considered: fixing the three first (a bisect over the jdk forms since 11-05, attr's memory, the pack: days).
+
+### 2026-11-13: gate-tests' nested lanes-test failure: admission timing, made robust
+
+The step gate-tests failed on nights 12 and 13 and on the rerun on next ca3c7aff8 (12:43). In each case gate-reads-test's
+`bin/gate-tests --nested`, run under `strace -f`, reported "failed: lanes-test.bash". The outer run of lanes-test passed. The
+nested log was lost: `TMPDIR/gate-tests.lanes-test.bash.log` was overwritten by the outer run.
+
+Reproduced by hand under `strace -f` on the loaded host, without the gate's environment: 2 of 3 runs of the committed
+lanes-test failed. The leaked variables gf-gate unset were not the cause; timing was.
+- Section 7b (the free lane), "small beside a big one: 0": the blocker's fixed 1.2 s ended before b1, b3 and b4 registered.
+- After a first fix, "blocker {b2 b3 s1} b1 b4": bin/gate-lane admits a waiter at the waiter's own poll. Under strace a
+  waiter takes its admission seconds late. A step of its round that had already ended (fixed 0.6-2 s runs) then let the
+  next round in beside the late one.
+
+Fixed in the test, not with longer sleeps. The synthetic steps hold on conditions (`syn_body`'s HOLD, at most 60 s):
+- section 2's and 7b's blockers until every waiter of the case has registered (the lane's wait/ entries);
+- the steps of one round (2: b2 and s1; 7b: b1, b2 and s1) until each other has started;
+- 8b's blocker until b1 and a2 wait on the host's state, or, for the control, until b1 has started beside it.
+
+The checks themselves are unchanged. Proof: four runs under `strace -f` and one plain run pass (51 of 51). The whole
+`bin/gate-tests` passes (36 of 36 on branch `gate-lanes-fix`, 32 min, gate-reads-test's nested run included; 37 of 37
+on `gate-gts`).
+
+Also changed:
+- `bin/gate-tests --nested` writes `TMPDIR/gate-tests.nested.NAME.log`.
+- A failing test's `FAIL` lines are printed first.
+- gate-reads-test prints the nested run's failures, and keeps its output, when the nested run fails.
+
+Considered:
+- raising the sleeps. This only moves the race.
+- skipping lanes-test when nested. This loses the reads check of a test that reads the planner.
+
+(The other nested failures in next's `.tmp/tmp/gate-reads.*.out` of 12:51-13:07, audited-test and audit-trace-test, came
+from runs that were not the gate's step and were not looked into.)

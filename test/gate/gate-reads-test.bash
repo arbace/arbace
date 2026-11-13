@@ -21,7 +21,8 @@ trace=$TMPDIR/gate-reads.$$.strace
 rm -f "$trace" "$trace.paths"
 GATE_TESTS_NESTED= strace -f -qq -y -s 4096 -e "trace=%file,execve,execveat,clone,clone3,fork,vfork,chdir,fchdir" -o "$trace" \
   bash -c 'read -r canary < "$1"; shift; exec "$@"' _ "$src/LICENSE.md" "$src/bin/gate-tests" --nested > "$TMPDIR/gate-reads.$$.out" 2>&1 \
-  || { echo "FAIL: bin/gate-tests under strace failed"; tail -5 "$TMPDIR/gate-reads.$$.out"; exit 1; }
+  || { echo "FAIL: bin/gate-tests under strace failed (its output kept: $TMPDIR/gate-reads.$$.out; each test's log TMPDIR/gate-tests.nested.NAME.log)"
+       grep -a -A40 ' FAILED' "$TMPDIR/gate-reads.$$.out" | head -80; tail -5 "$TMPDIR/gate-reads.$$.out"; exit 1; }
 [ -s "$trace" ] || { echo "FAIL: strace wrote no trace ($trace)"; exit 1; }
 # (calls that failed - a lookup along the class path - read nothing)
 grep -v ' = -1 ' "$trace" | awk -v root="$src" -f "$src/test/gate/audit.awk" > "$trace.paths" || { echo "FAIL: the reducer failed"; exit 1; }
