@@ -846,7 +846,7 @@ GD3 also showed what the closures cannot do: `arbace/core.ae` (258) and `arbace/
 ### Checks run on the branch
 
 All of these pass:
-- `bin/gate-tests` (@@GT@@), with the new `test/gate/weekly-test.bash`: 19 checks for the weekly phase (a `:weekly` step and part
+- `bin/gate-tests` (36 tests: 34 in one run, then gate-reads-test and gate-tests-test again after the planner tests of the real table took `GATE_LOADS` none, the closures' text scan reading `arbace/` that gate-tests does not declare), with the new `test/gate/weekly-test.bash`: 19 checks for the weekly phase (a `:weekly` step and part
   only with `--weekly`; `:also-changed` in and out; a dropped `:needs` kept in the key), the epoch (the planner's text moves no key,
   the epoch's bump moves every one) and the closures (reads plus the sources they name, a require in code too; a source outside
   them moves no key; `:never [:go]` takes goi's unit out of a `:prog` identity).

@@ -35,8 +35,23 @@ The current state of the work (as of 2026-11-09). This file is rewritten as thin
   6 h budget, rerunning 311 of 331 steps; GDS1-GDS20 decided as recommended (the user, 2026-11-13). GD1 built on branch
   `gate-gd1` (to merge after main advances): `bin/night` (nightly every night, `bin/gate --weekly` on Saturday's), the weekly
   `:clean-only` parts, gate-tests in the full tier, `:tools` and C's records narrowed, the declarations from `--mem-check`; the
-  plans' serial sums nightly 29:04 -> 22:28, essential 3:04 -> 2:42. Next: GD1's first night (it reruns the rekeyed steps once),
-  then GD2 (Java's subsets to ~20%, C's read checks, cpp-dg, cpp-roundtrip and repr-go-native rotated).
+  plans' serial sums nightly 29:04 -> 22:28, essential 3:04 -> 2:42. GD2 and GD3 built on branch `gate-gd23` (from `gate-gd1`;
+  "As built: GD2", "As built: GD3"):
+  - every rotated subset by one rule (`bin/gate-subsets`). Java's jdk-run fell from 1,189 to 304 of 1,498, and Java's other
+    levels, C's read checks, repr-go-native, cpp-dg and cpp-roundtrip rotate;
+  - the logic epoch `test/gate/epoch`;
+  - the load closures `test/gate/loads.edn` (`bin/gate --loads-update`);
+  - `:phase :weekly` with `:also-changed` (the fixpoint and programs-full);
+  - `bin/night`'s weekly fast-forward back, the parked parts out of the weekly tier.
+
+  The nightly plan's serial sum fell from 17:30 to 14:10, and its `--concurrent` lanes' wall from 7:39 to 3:56 (rsi-essential's
+  outlier pass left out). `gate_key` is unmoved, and every step's key moves once.
+
+  Next:
+  - GD1's and GD23's first nights;
+  - audit records for the crops' 116 steps (`bin/gate --audit` at night, then `--loads-update`);
+  - GD4 (the runner's one policy, `--nightly --concurrent` as a run);
+  - GD5 (split repr-java-nojavac.jdk, 59 GiB).
 - **The host** (Alpine edge, amd64, /dev/kvm; [ALPINE.md](ALPINE.md)): 62 GB of memory; the disk at 79% (the night's steps
   stop at 90%; agents' rule 80%). The Mac peer, an arm64 VM, develops the Python crop through the queue.
 - The JVM runs only the frozen jar of `arbace-for-java-26-v4` (the oracle's reference, the edges' recordings, the data

@@ -651,9 +651,12 @@ Prior art:
   `bin/j2g-edge update`). `--full` is serial by default since GT3 (GTS13 (a); at once its chains overload a 62 GB host:
   REAP9's runs, 2026-10-26). Since GD1 (doc/GATE-DIET-SURVEY.md, GDS1-GDS20 decided 2026-11-13, "As built: GD1") the night
   runs `bin/night` (its header the contract: a clean checkout at its upstream, the disk at most 85%, one gate, a pass
-  fast-forwarding `--ff DIR`): `bin/gate --nightly` (GT8.4's subsets and slices), on the night that starts on Saturday `bin/gate
-  --weekly` (`--full` with every part, `GATE_ALL_PARTS=1`: the `:clean-only` parts are the weekly tier's, the jdk corpora of
-  repr/java's tree checks, rsi-check, haskell-target-probe, llvmi-aot, the fixpoint and programs-full among them); `gate-tests`
+  fast-forwarding `--ff DIR`): `bin/gate --nightly` (GT8.4's subsets and slices; since GD2 every rotated subset by one rule, `bin/gate-subsets`), on the
+  night that starts on Saturday `bin/gate --weekly` (since GD3 `--full` with the `:phase :weekly` steps and parts: the jdk corpora
+  of repr/java's front and nojavac checks, rsi-check, haskell-target-probe, llvmi-aot, the fixpoint and programs-full, these two also
+  on a night whose changes touch their `:also-changed` files; the parked `:clean-only` parts the clean run's alone); since GD3
+  every key holds the epoch `test/gate/epoch` in place of the runner's and planner's text, and an audited step's arbace/ files are
+  its load closure, `test/gate/loads.edn` (`bin/gate --loads-update`); `gate-tests`
   is a `--full` step, CLAUDE.md's own test the essential `claude-md`; each C level's steps key its own records (`:c-records-*`).
   Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
   first trims Go's build cache of entries unused for 90 minutes (`bin/lib/gocache.bash`,

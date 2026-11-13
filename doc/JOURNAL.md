@@ -5559,3 +5559,61 @@ Alternatives considered:
 - Keeping the fixpoint nightly: the survey's list moves it to the weekly run. Its "nights that touch j2g" rule waits for
   the planner change (GDS4 (b)).
 - For repr-go, a 40 GiB declaration under GDS3's ceiling was set aside for its measured ⌈1.1 × 37.3⌉ = 42.
+
+## 2026-11-13: GD2 and GD3, the gate's diet continued (branch `gate-gd23`, from `gate-gd1` `86d9afed2`)
+
+The user (2026-11-13) accepted GD1's open points:
+1. no fast-forward on a weekly night until `:phase :weekly`;
+2. the fixpoint and programs-full stay weekly until they also run on nights that touch j2g, repr/go or the build's scripts;
+3. repr-go stays at 42 GiB;
+4. rust-full apart from the serial run;
+5. the C split proven by the next clean audit;
+6. GD1 merges after main advances.
+
+The user asked for GD2 and GD3 at once. doc/GATE-DIET-SURVEY.md has "As built: GD2" and "As built: GD3".
+
+Done:
+- `e51ba2698`: `bin/night` fast-forwards nothing on a weekly night. It is separate so it can go ahead of the rest.
+- `7a826f64a`: the gate's tests no longer end a pipe in `grep -q` under `pipefail` (the Mac's finding). grep exits on its first
+  match, the writer dies of SIGPIPE, and the pipeline fails though the pattern matched. That was gate-key-crops-test's flake under
+  load. 48 places in 13 tests now use here-strings and command substitutions. gate-key-crops-test passed 8 of 8 at load 46-58.
+- GD2 (GDS5 (a), GDS6 (a)): `bin/gate-subsets` (`test/gate/subsets.ae`) regenerates every rotated part's subset by one rule and
+  checks them with `--check`:
+  - kept: the controls, the ids a class names, the ids that ever failed (`test/gate/failed-ever.tsv`, the store's snapshot), and
+    one representative per `:match` class;
+  - each area filled to a fifth in SHA-256 order.
+
+  Java's jdk-run subsets fell from 1,189 and 1,190 to 304 of 1,498. Java's read, classes, print and diagnostics levels, C's four
+  read checks, repr-go-native, cpp-dg.dg-error-own and cpp-roundtrip's every-10 lists rotate for the first time.
+  java-compiled-full.jdk-run's part declares 31 GiB.
+- GD3:
+  - the epoch file `test/gate/epoch` replaces the runner's, the planner's and gate-cache.bash's text in every key (GDS11 (a));
+  - `test/gate/loads.edn` holds the load closures of 235 audited steps, from the clean runs of 2026-10-29 to 11-06 (`bin/gate
+    --loads-update`, `gate.loads`). It narrows a step's `arbace/` files to those it read and the sources they name, and on the
+    program hosts adds `arbace.go` and `arbace.c`/`arbace.repr.c` to `:never-loads` when the step never loaded them (GDS9 (a)).
+    The audit holds the same closure;
+  - `:phase :weekly` (GDS4 (b)) with `:also-changed` for the fixpoint and programs-full (the user's (2)). `bin/gate --weekly`
+    no longer sets `GATE_ALL_PARTS`, so the parked parts are the clean run's alone;
+  - `bin/night` fast-forwards on a weekly pass again (`NIGHT_WEEKLY_FF=0` not);
+  - the plan view estimates a rotated check by its share of its part. `--nightly --concurrent --plan` is allowed as a plan.
+
+Numbers (plans of GATE_NIGHT=20405, `--rerun`, rsi-essential's outlier pass of 19,767 s left out):
+- nightly: 377 → 493 checks. The serial sum fell from 17:30 to 14:10, the essential lane's wall from 12:39 to 8:24, and the
+  `--concurrent` lanes' wall from 7:39 to 3:56.
+- full: 20:26 → 20:53.
+- weekly: 27:03 → 27:02.
+- `gate_key` is unmoved (`126c321af14f`). Every step's key moves once (the epoch).
+- Fan-out of `arbace/go/escape.ae`: 213 → 149. Of the 149, 116 are crop steps with no load record yet.
+
+Alternatives considered:
+- The closure from the logged namespaces alone (`.loaded`) was set aside. The reads (`.paths`) are what stage 0 compares, and a
+  namespace added after the audit (`arbace.go.escape`, 11-06) would be missed; the text scan of the read sources catches it.
+- A static require graph was set aside: it misses `(require 'NS)` in code, which the text scan sees.
+- Comparing `:also-changed` against git's commits since the latest pass was set aside for its key's own material: no git in the
+  planner, and the same rule on every night.
+- Keeping GTS205's coverage subsets for Java was set aside: kept at 80-96%, they do not compress (GDS5 (a)).
+
+Left:
+- the crops' steps need audit records (`bin/gate --audit STEP...` at night, or the next clean run, then `bin/gate --loads-update`);
+- `--nightly --concurrent` as a run (GD4);
+- repr-java-nojavac.jdk declares 59 GiB on a 54.7 GiB host, so the weekly night will fail on it until it is split (GD5).
