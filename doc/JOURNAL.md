@@ -5346,3 +5346,23 @@ clang or g++. Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s11".
   against cpp-s10's: 69 generated, none lost, the IR byte for byte or equal by the inliner's numbering (an intermediate run had lost
   hello.cpp to the list change: "lvalue :init-list", a trivial copy from a list; fixed and its IR equal again); the rest in the survey.
   library.cpp alone not run (the brief: after PID 65142 ends and with the main session's agreement).
+
+## 2026-11-13: cpp-s12, CP382 (b) then (a): wide and Unicode string literals, and f8's and library.cpp's next refusals (branch `cpp-s12`, from `mac/cpp-s11` eadeca9d6)
+
+The user decided (2026-11-13) CP382 (b) then (a), CP383 (b), and approved library.cpp alone (about 1.4 GB). Light, one process at a time
+(each under 1.4 GB, the watcher's limit 2.5 GiB never reached), no gate, big lock, clang or g++. Details and numbers in
+doc/cpp/CPP-SURVEY.md, "As built: cpp-s12".
+- library.cpp alone, at cpp-s11's code: refused at `a functional cast of a scalar type with 3 arguments` in <format>'s make_format_args
+  (1.22 GB, 254 s), not at f8's wide string.
+- CP382 (b): no use instantiates the wchar_t path; `_GLIBCXX_WIDEN(S)` is `_Widen<_CharT>(S, L##S)`, so every char instantiation names the
+  wide literal as an argument of a consteval selector. (a) built: sema keeps a wide or Unicode literal's code units by its element type
+  (UTF-32 for L and U, UTF-16 for u as the parser encodes them; u8's char8_t narrow), the constant evaluator reads them, arrays are
+  initialized and sized from them, and the code generator emits `[N x i32]`/`[N x i16]` globals as clang does. Considered: holding the
+  units in the Java string (a UTF-32 unit above 0xFFFF does not fit a char); a separate `:units` with one accessor was the smaller change.
+- CP383 (b): nothing changed (cpp-s11's rule is the narrow one).
+- Then, each general, with probes and controls: `using enum` at every scope ([enum.udecl]/2; f8's <bits/unicode.h>), `_Float16` and
+  `__float128` as types of their own (library.cpp's `_S_to_arg_type<const char*>` reached their `is_same_v` tests under clang's predefined
+  `__FLT16_DIG__` and `__SIZEOF_FLOAT128__`; a constant of either refused by name), a constexpr static data member implicitly inline from
+  C++17 (<charconv>'s `__from_chars_alnum_to_val_table<false>::value`, an unknown global at lowering), and a static data member's
+  redeclaration without an initializer keeping the in-class one (found by a probe: `constexpr int A::n;` had made it zero).
+- f8 and library.cpp now generate and lower (41,366 and 45,920 lines of IR); their runs need the client crop's runtime and gcc, not run.

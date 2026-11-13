@@ -91,7 +91,11 @@ Six crops are above 90 on all three. What the others still need:
   then f8 through seven more refusals, each general (ADL of enumerations, abbreviated function templates, [over.ics.list]/7 and `T x({...})`,
   sizeof(T) as a template argument, a CRTP base's requires-clauses at overload resolution, an unknown-bound global array, a pack named in a
   constant's text, which had made `__or_<false_type, false_type>` true); f8 now stops at "a wide string" (CP382 proposed); the 81's IR
-  unchanged (69 generated, none lost); CP380 not needed by any run; library.cpp alone waits for the main session.
+  unchanged (69 generated, none lost); CP380 not needed by any run; library.cpp alone waits for the main session. `cpp-s12` (2026-11-13, "As built:
+  cpp-s12"): CP382 (b) (`_GLIBCXX_WIDEN` names the wide literal in every char instantiation) then (a) (wide and Unicode literals: code
+  units, i16/i32 globals, the evaluator's element reads), CP383 (b) kept; library.cpp alone first refused at make_format_args (`_Float16`
+  and `__float128` unknown); then `using enum`, the extended floating types, constexpr static members inline since C++17: **f8 and
+  library.cpp both generate and lower**; their runs need gcc (not run); the 81's IR byte for byte (69); CP384, CP385 proposed.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

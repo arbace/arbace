@@ -7568,3 +7568,102 @@ same time, sema.ae edited while t11 ran (it had loaded sema at its start; its re
 the final code). One earlier edit of parse.ae while t4n's gen-batch ran (loaded before; t4n repeated after). `ps` piped to `grep` once
 (a process count), one `<(...)` process substitution (a drops comparison) and one `> /dev/null` in commands. The gen-batch parts and the
 proofs each ran alone after their edits.
+
+## As built: cpp-s12 (2026-11-13; branch `cpp-s12` from mac/cpp-s11 eadeca9d6)
+
+The user's decision of 2026-11-13: CP382 (b) then (a), first find which use instantiates the wchar_t path for a char vformat (f8's
+refusal "a wide string"), then build wide and Unicode string literals; CP383 (b), a member's trailing requires-clause deferred only while
+its class is incomplete (cpp-s11's rule, kept as it is); library.cpp alone approved (about 1.4 GB). Then f8's and library.cpp's next
+refusals, each a general fix with a probe and a control. Light, one process at a time, `GOMEMLIMIT=1200MiB GOGC=30
+REPR_CPP_THREADS=1`, main's stage 0, a watcher killing by PID any process of this worktree past 2.5 GiB (none was); no gate, big lock,
+clang or g++. Probes in `.tmp/probe/` (gen-batch, then `bin/llvmi run` of the IR, `.tmp/pl.sh`).
+
+### CP382 (b): which use names the wide literal
+
+None instantiates the wchar_t path. <format>'s `_GLIBCXX_WIDEN(S)` is `::std::__format::_Widen<_CharT>(S, L##S)`, a consteval function
+template taking both literals and returning the narrow one unless `_CharT` is wchar_t (`if constexpr (is_same_v<_CharT, wchar_t>)`): every
+char instantiation names the wide literal as an argument (f8's at `_Escapes<char>::_S_all()`, offset 26018). So (a) is f8's next step, not
+a detour.
+
+### CP382 (a): wide and Unicode string literals
+
+sema.ae's StringLiteral by its element type: char, signed and unsigned char and char8_t (u8 since C++20) keep the narrow bytes (`:s`);
+wchar_t, char16_t and char32_t keep their code units (`:units`, `:w` the unit's width), read from the literal's value as the native
+parser prints it (`wide-units`: each unit a printable character or an escape, `\Uxxxxxxxx` for the others; the parser already encodes UTF-16
+surrogates for u and UTF-32 for U and L). `str-units` gives either kind's units to the constant evaluator (a decayed literal's elements, so
+`L"abc"[1]`, a constexpr loop over a `const wchar_t*`), to an array's bound from its initializer (`char16_t a[] = u"xyz"`) and to array
+initialization from a literal, now for every character type (`wchar_t a[8] = L"ab"`). codegen.ae's `wide-global`: the literal as clang's
+GetAddrOfConstantStringFromLiteral emits it, `[N x i32]` or `[N x i16]` of the units with the terminating zero, all zero as
+zeroinitializer, aligned to the unit, in the same `.str` numbering; a local array's initialization copies a padded global, a constant
+global's initializer has i16 or i32 leaves.
+
+### f8's and library.cpp's next refusals, each fixed generally
+
+library.cpp alone (the approved run) refused first at `codegen: a functional cast of a scalar type with 3 arguments` (<format>'s
+make_format_args, `_Store(__fmt_args...)`), f8 at "a wide string":
+
+| # | Refusal (before) | Cause | Fix |
+|---|---|---|---|
+| 1 | f8: `string` "a wide string" (<format>, `_GLIBCXX_WIDEN`) | CP382 | above |
+| 2 | f8: `decl` "local declaration UsingEnumDecl" (<bits/unicode.h>'s `_M_is_break`: `using enum _Gcb_property;`) | `using enum` was declared at no scope | sema.ae declare-node*!'s UsingEnumDecl ([enum.udecl]/2): the enumeration's enumerators entered in the scope as by using-declarations (namespace, class, block; with the class's access for the checker); decl-stmt passes it on |
+| 3 | library.cpp: `expr` "a functional cast of a scalar type with 3 arguments" (`_Store(__fmt_args...)`, `_Store` an `_Arg_store<_Context, typename _Fmt_arg::template _Normalize<_Args>...>`) | `_Normalize<const char*>` = `typename decltype(_S_to_arg_type<const char*>())::type` stayed dependent: _S_to_arg_type's if-constexpr chain reaches `is_same_v<_Td, _Float16>` (clang's predefined `__FLT16_DIG__`) and `__float128` (`__SIZEOF_FLOAT128__`) for a pointer, and neither type was known ("unknown type _Float16"); int and double returned before | abi.ae and sema.ae: `_Float16` and `__float128` as clang has them on x86-64 ([basic.extended.fp]), floating types of their own (sizes 2 and 16, LLVM half and fp128, mangled DF16_ and g, SSE class, in the usual arithmetic conversions above long double and below float); a constant of either is refused by name in the code generator (no program needs one). The refusal's message now names the type it got |
+| 4 | library.cpp: `lower-name` "unknown global _ZNSt8__detail31__from_chars_alnum_to_val_tableILb0EE5valueE" (<charconv>) | `static constexpr type value = (_DecOnly, _S_make_table());` in a class template: a constexpr static data member, implicitly inline since C++17 ([dcl.constexpr]/1), was neither defined nor pending | sema.ae declare-var!: a constexpr static data member with an initializer is inline from C++17 on (`*cxx-year*`), defined when used, linkonce_odr, as cpp-s7's explicit inline members are |
+| 5 | (probe s2a, on the way) `constexpr int A::n;` emitted as zero | the out-of-line redeclaration (deprecated since C++17, [depr.static.constexpr]) replaced the in-class initializer with none | a redeclaration without an initializer keeps the in-class one |
+
+After them **f8 and library.cpp both generate** (f8 41,366 lines of IR, library.cpp 45,920, each lowered to C: gen.c); neither can run
+here (llvmi refuses a module that unwinds, "its runtime is the client crop's", and the codegen route's run needs gcc for gen.c: not run).
+Drops: f8 36 causes, 87 drops → 35, 86; library.cpp 26 causes, 67 drops.
+
+Probes (`.tmp/probe`, each generated then run by llvmi; a control `...n` with one expected value changed exits non-zero by the bit it tests):
+
+| Probe | What | Before | After |
+|---|---|---|---|
+| w1a, w1n | wide literals: `L`, `u` (with a surrogate pair), `U`, `u8`; a constexpr length over `const wchar_t*` and `const char16_t*`, `L"abc"[1]`, `sizeof` of each kind, globals and local arrays from literals (padded), `_Widen`-like consteval selection | refused, "a wide string" | llvmi 0; w1n 65 |
+| u1a, u1n | `using enum` at namespace, class and block scope, in a class template's constexpr member, scoped and unscoped | refused, UsingEnumDecl | llvmi 0; u1n 8 |
+| l1 | `std::make_format_args(s, i, d)` of a `const char*`, int and double | refused (library.cpp's) | generated (as library.cpp) |
+| l2 | the alias of a pack expansion of a member alias template, then `S(a...)`, without headers | llvmi 0 (not the cause) | |
+| l3 | _S_to_arg_type's string_view, string and pointer branches with <type_traits> and <string> | llvmi 0 (not the cause) | |
+| l4a, l4n | the extended floating branches of _S_to_arg_type; `_Float16`, `__float128` distinct, sizes and alignment | refused, "unknown type _Float16" | llvmi 0; l4n 16 |
+| s1a, s1n | a class template's static constexpr data member of class type from a constexpr function's loops (__from_chars_alnum_to_val_table), and of an aggregate, odr-used | refused, "unknown global" | llvmi 0; s1n 2 |
+| s2a, s2n | constexpr static data members with out-of-line redeclarations (a scalar, an array, a template's) | llvmi 3 (zero) | llvmi 0; s2n 4 |
+
+### Checked (peaks by busybox `time -v`)
+
+| Run | Result |
+|---|---|
+| library.cpp alone (`CPP_GEN_WHERE=1 bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh .tmp/LIB/todo`), three times | at cpp-s11's code: refused, `expr` "a functional cast of a scalar type with 3 arguments" (1.22 GB, 254 s); after the floating types: `lower-name` "unknown global ..._from_chars_alnum_to_val_table...valueE" (1.32 GB); after the inline members: **generated and lowered** (45,920 lines of IR, 26 causes and 67 drops; 1.30 GB, 507 s). `bin/llvmi run` of its IR: refused (personality), as every unwinding module |
+| f8 (`.tmp/f8.sh`) | from "a wide string" through `using enum` to **generated and lowered** (41,366 lines; drops 36, 87 → 35, 86); 1.21 GB, 266 s |
+| the probes above | as the table says: every after generated, run by llvmi with status 0, each control non-zero by its bit |
+| gen-batch over the 81 run programs (library.cpp left out), five parts, against cpp-s11's G9b (`.tmp/G10`, `.tmp/cmp.sh`) | **69 generated, none lost or gained, all 69 byte for byte**; peaks 0.36 to 1.35 GB, 35 min |
+| `bin/cppi codegen-gen` | 155 of 155 as recorded (155 generated, 0 refused), the controls failing as they must; 1.20 GB, 9.1 min; not re-recorded (unchanged) |
+| cpp-print-essential's command (`roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own`) | 33 of 33, 9 of 9, the control `_control/bitfields-vs-io` failing as it must; 0.77 GB |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` | 454 files, accepted 287, rejected 167, own pass 127, own x clang as cpp-s11's (fail/fail 101, fail/pass 226, pass/fail 14, pass/pass 113); 1.23 GB, 7 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0, scores.edn unchanged |
+| `test/gate/gate-key-crops-test.bash` | PASS; the branch changes only `arbace/cpp/` (a crop path, `arbace_crop_paths`) and `doc/`: no gate, runtime or seed key moves |
+
+### Not run
+
+f8's and library.cpp's runs: their IR unwinds (llvmi refuses it), and the code generator's run route (`bin/cppi codegen FILE OUT`)
+builds gen.c with gcc against the client runtime (`bin/cppi runtime-build`), a host toolchain this brief does not allow. As a command for
+when the user allows gcc (about 1.4 GB each, 10 minutes with the runtime built): `bin/cppi codegen test/cpp/runtime/samples/library.cpp
+.tmp/cg-lib --runtime DIR`, its stdout against `test/cpp/ref-gxx15.edn`'s `runtime/library.cpp` (295 bytes, first line `Counter()`).
+cpp-check-essential and cpp-lower-essential were not in this brief's list (the branch changes no lowering).
+
+### Proposed (CP384, CP385)
+
+- **CP384: immediate invocations folded by the code generator.** A call of a consteval function outside an immediate function context
+  ([expr.const]/16) is emitted as a run-time call of the function (w1a's `pick<char>(...)`: `call @_Z4pickIcEPKT_PKcPKw`, with the wide
+  literal's global emitted beside), where clang emits its value; cpp-s5's CP362 inlines only consteval constructors. (a) Evaluate every
+  immediate invocation by sema's constant evaluator at analysis (a pointer into a string literal as its global, a class value as a
+  constant), refusing one that does not evaluate; (b) leave it until a program's output or link depends on it. **Recommended: (a)** when
+  the next <format> or <chrono> path needs it (`std::format(_GLIBCXX_WIDEN("{}"), ...)` names a consteval selector at run time), (b) now.
+- **CP385: constant initialization of a static data member.** s1a's `Table<false>::value` (a constexpr member of class type initialized
+  by a constexpr function) is emitted zero with a guarded dynamic initializer, where clang emits the constant (`linkonce_odr constant`):
+  correct, but run at startup. This is CP380's question for members (a plain global's constant initialization manifestly constant-
+  evaluated); **recommended: decide it with CP380**.
+
+### Rule slips
+
+One `> /dev/null` and one `git stash list` (listing only, nothing stashed) in the first commands; a few waiting loops left in the
+background after their 170 s limit (each only polled a log). Every proof ran alone after the last source edit.
