@@ -1,0 +1,413 @@
+(in-ns 'go.arbace.a64i) (go/file "simdx.go" :imports [
+
+    ^{:line 3} [big "math/big"]])
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "AR16 (ARS74 (b), queue 282): the M2's ARMv8.2-8.4 Advanced SIMD and FP features compiled code meets, OpVX. Sys is vxNames'\nindex: 0-1 FEAT_DotProd (sdot, udot: the three-register extension and by element, 2s and 4s from 8b and 16b), 2-3 FEAT_RDM\n(sqrdmlah, sqrdmlsh: vector 4h, 8h, 2s, 4s, scalar h and s, by element), 4-7 FEAT_FHM (fmlal, fmlsl, fmlal2, fmlsl2: 2s and 4s\nfrom the lower or upper half of 2h and 4h, vector and by an h element of v0-v15), 8-9 FEAT_FCMA (fcmla: vector 4h, 8h, 2s, 4s,\n2d and by element 4h, 8h, 4s; fcadd: vector 4h, 8h, 2s, 4s, 2d). Size is the destination's element, Sf Q, S the scalar form,\nN the by-element form (Imm the index), Amount the rotation's field (fcmla 0-3: 0, 90, 180, 270; fcadd 0-1: 90, 270). FEAT_JSCVT's\nfjcvtzs is an FP conversion: OpFCVTI with Sys 5 (Size 3, Signed). The semantics are the Arm ARM's (DDI 0487: SDOT, UDOT,\nSQRDMLAH, SQRDMLSH, FMLAL, FMLSL, FPMulAddH, FCMLA, FCADD, FJCVTZS, FPToFixedJS); no code copied.\n"} vxNames (lit (array ... string) "sdot" "udot" "sqrdmlah" "sqrdmlsh" "fmlal" "fmlsl" "fmlal2" "fmlsl2" "fcmla" "fcadd"))
+
+
+^{:go/end 95} (go/func decodeVX "decodeVX is the instructions' words; false when the word is another instruction (the FP and SIMD decoders go on).\n" [^uint32 w] :results [Inst string bool]
+  (let [(values rd rn rm) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)) (conv uint8 (bf w 20 16)))]
+    (when (== (bit-and w 0xfffffc00) 0x1e7e0000)
+      (return (lit Inst :Op OpFCVTI :Size 3 :Rd rd :Rn rn :Signed true :Sys 5) "" true))
+
+    (let [(values q u size) (values (== (bf w 30 30) 1) (bf w 29 29) (bf w 23 22))]
+      (switch
+        (case [(or (== (bit-and w 0x9f208400) 0x0e008400) (== (bit-and w 0xdf208400) 0x5e008400))]
+          ;; the three-register extension (bits 28-24 01110, 21 0, 15 1, 10 1) and its scalar form (bits 31-30 01, 28-24 11110)
+          (let [scalar (== (bf w 28 28) 1)
+              ^{:line 26} opc (bf w 14 11)]
+            (switch
+              (case [(and (== u 1) (<= opc 1))]
+                (when (or (== size 0) (== size 3))
+                  (return (lit Inst) undef true))
+
+                (return (lit Inst :Op OpVX :Sf (and q (not scalar)) :S scalar :Size (conv uint8 size) :Rd rd :Rn rn :Rm rm :Sys (+ 2 opc)) "" true))
+              (case [scalar]
+                (return (lit Inst) "" false))
+              (case [(and (== opc 2) (== size 2))]
+                (return (lit Inst :Op OpVX :Sf q :Size 2 :Rd rd :Rn rn :Rm rm :Sys u) "" true))
+              (case [(and (== u 1) (== (>> opc 2) 2)) (and (== u 1) (== (bit-and opc 5) 4))]
+                (when (or (== size 0) ^:go/paren (and (== size 3) (not q)))
+                  (return (lit Inst) undef true))
+
+                (when (== (>> opc 2) 2)
+                  (return (lit Inst :Op OpVX :Sf q :Size (conv uint8 size) :Rd rd :Rn rn :Rm rm :Amount (conv uint8 (bit-and opc 3)) :Sys 8) "" true))
+
+                (return (lit Inst :Op OpVX :Sf q :Size (conv uint8 size) :Rd rd :Rn rn :Rm rm :Amount (conv uint8 (bit-and (>> opc 1) 1)) :Sys 9) "" true)))
+
+            (return (lit Inst) "" false)))
+        (case [(or (== (bit-and w 0xbf60fc00) 0x0e20ec00) (== (bit-and w 0xbf60fc00) 0x2e20cc00))]
+          ;; FEAT_FHM's vector forms (three same: U 0, opcode 11101; U 1, opcode 11001; size<0> 0; size<1> fmlsl's)
+          (let [k (+ (conv uint32 4) (conv uint32 (bf w 23 23)))]
+            (when (== u 1)
+              (set! k + 2))
+
+            (return (lit Inst :Op OpVX :Sf q :Size 2 :Rd rd :Rn rn :Rm rm :Sys k) "" true)))
+        (case [(or (== (bit-and w 0x9f000400) 0x0f000000) (== (bit-and w 0xdf000400) 0x5f000000))]
+          ;; the vector x indexed element class (bits 28-24 01111, 10 0) and its scalar form
+          (let [scalar (== (bf w 28 28) 1)
+              ^{:line 57} opc (bf w 15 12)
+              (values l mm h) (values (bf w 21 21) (bf w 20 20) (bf w 11 11))]
+            (switch
+              (case [(and (== u 1) ^:go/paren (or (== opc 13) (== opc 15)))]
+                (let [k (conv uint32 2)]
+                  (when (== opc 15)
+                    (set! k 3))
+
+                  (switch size
+                    (case [1]
+                      (return (lit Inst :Op OpVX :Sf (and q (not scalar)) :S scalar :N true :Size 1 :Rd rd :Rn rn :Rm (conv uint8 (bf w 19 16)) :Imm (conv int64 (bit-or (<< h 2) (<< l 1) mm)) :Sys k) "" true))
+                    (case [2]
+                      (return (lit Inst :Op OpVX :Sf (and q (not scalar)) :S scalar :N true :Size 2 :Rd rd :Rn rn :Rm rm :Imm (conv int64 (bit-or (<< h 1) l)) :Sys k) "" true)))
+
+                  (return (lit Inst) undef true)))
+              (case [scalar]
+                (return (lit Inst) "" false))
+              (case [(and (== opc 14) (== size 2))]
+                (return (lit Inst :Op OpVX :Sf q :N true :Size 2 :Rd rd :Rn rn :Rm rm :Imm (conv int64 (bit-or (<< h 1) l)) :Sys u) "" true))
+              (case [(and (== size 2) ^:go/paren (or ^:go/paren (and (== u 0) ^:go/paren (or (== opc 0) (== opc 4))) ^:go/paren (and (== u 1) ^:go/paren (or (== opc 8) (== opc 12)))))]
+                (let [k (+ (conv uint32 4) (bit-and (>> opc 2) 1))]
+                  (when (== u 1)
+                    (set! k + 2))
+
+                  (return (lit Inst :Op OpVX :Sf q :N true :Size 2 :Rd rd :Rn rn :Rm (conv uint8 (bf w 19 16)) :Imm (conv int64 (bit-or (<< h 2) (<< l 1) mm)) :Sys k) "" true)))
+              (case [(and (== u 1) (== (bit-and opc 9) 1))]
+                (let [rot (conv uint8 (bit-and (>> opc 1) 3))]
+                  (switch
+                    (case [(and (== size 1) ^:go/paren (or q (== h 0)))]
+                      (return (lit Inst :Op OpVX :Sf q :N true :Size 1 :Rd rd :Rn rn :Rm rm :Imm (conv int64 (bit-or (<< h 1) l)) :Amount rot :Sys 8) "" true))
+                    (case [(and (== size 2) q (== l 0))]
+                      (return (lit Inst :Op OpVX :Sf true :N true :Size 2 :Rd rd :Rn rn :Rm rm :Imm (conv int64 h) :Amount rot :Sys 8) "" true)))
+
+                  (return (lit Inst) undef true))))
+
+            (return (lit Inst) "" false))))
+
+      (return (lit Inst) "" false))))
+
+
+
+
+
+^{:go/end 186} (go/func lowerVX "lowerVX is the instructions' forms: sdot v0.4s, v1.16b, v2.16b; udot v0.2s, v1.8b, v2.4b[3]; sqrdmlah v0.8h, v1.8h, v2.h[7];\nsqrdmlsh s0, s1, s2; fmlal2 v0.4s, v1.4h, v2.h[5]; fcmla v0.4s, v1.4s, v2.s[1], #90; fcadd v0.2d, v1.2d, v2.2d, #270;\nfjcvtzs w0, d1; false when the form is not one.\n" [^string m ^{:tag (slice (* Sx))} ops] :results [Inst bool]
+  (when (== m "fjcvtzs")
+    (nargs ops 2)
+    (let [g (mustReg (aget ops 0))
+        (values r sz) (mustFPReg (aget ops 1))]
+      (when (or (.-x g) (!= sz 3))
+        (ferr "fjcvtzs of %s from %s" (aget ops 0) (aget ops 1)))
+
+      (return (lit Inst :Op OpFCVTI :Size 3 :Rd (.-n g) :Rn r :Signed true :Sys 5) true)))
+
+  (let [k (nameIndex (subslice vxNames) m)]
+    (when (< k 0)
+      (return (lit Inst) false))
+
+    (nargs ops 3 4)
+    (when (!= (>= k 8) (== (len ops) 4))
+      (ferr "%s's operands" m))
+
+    (let [(values d n x) (values (mustVec (aget ops 0) 0) (mustVec (aget ops 1) 0) (mustVec (aget ops 2) 0))
+        ^{:line 119} in (lit Inst :Op OpVX :Sf (.-q d) :Rd (.-n d) :Rn (.-n n) :Rm (.-n x) :Sys (conv uint32 k))
+        ^{:line 120} elem (== (.-kind x) \e)]
+      (when elem
+        (set! (values (.-N in) (.-Imm in)) (values true (.-idx x))))
+
+      (switch
+        (case [(<= k 1)]
+          (when (or (!= (.-kind d) \v) (!= (.-size d) 2) (!= (.-kind n) \v) (!= (.-size n) 0) (!= (.-q n) (.-q d)) (!= (.-size x) 0) ^:go/paren (and (not elem) ^:go/paren (or (!= (.-kind x) \v) (!= (.-q x) (.-q d)))))
+            (ferr "%s of %s, %s, %s" m (aget ops 0) (aget ops 1) (aget ops 2)))
+
+          (set! (.-Size in) 2)
+          (when (and elem ^:go/paren (or (< (.-idx x) 0) (> (.-idx x) 3)))
+            (ferr "%s's index %d" m (.-idx x))))
+
+        (case [(<= k 3)]
+          (when (or (and (!= (.-size d) 1) (!= (.-size d) 2)) (!= (.-kind n) (.-kind d)) (!= (.-size n) (.-size d)) (!= (.-q n) (.-q d)) (== (.-kind d) \e) (!= (.-size x) (.-size d)))
+            (ferr "%s of %s, %s, %s" m (aget ops 0) (aget ops 1) (aget ops 2)))
+
+          (when (and (not elem) ^:go/paren (or (!= (.-kind x) (.-kind d)) (!= (.-q x) (.-q d))))
+            (ferr "%s of %s" m (aget ops 2)))
+
+          (set! (values (.-Size in) (.-S in)) (values (.-size d) (== (.-kind d) \s)))
+          (when (.-S in)
+            (set! (.-Sf in) false))
+
+          (when (and elem ^:go/paren (or ^:go/paren (and (== (.-size d) 1) ^:go/paren (or (> (.-n x) 15) (< (.-idx x) 0) (> (.-idx x) 7))) ^:go/paren (and (== (.-size d) 2) ^:go/paren (or (< (.-idx x) 0) (> (.-idx x) 3)))))
+            (ferr "%s's element %s" m (aget ops 2))))
+
+        (case [(<= k 7)]
+          (when (or (!= (.-kind d) \v) (!= (.-size d) 2) (!= (.-kind n) \v) (!= (.-size n) 1) (!= (.-size x) 1))
+            (ferr "%s of %s, %s, %s" m (aget ops 0) (aget ops 1) (aget ops 2)))
+
+          (when (!= (arrCount (aget ops 1)) (arrCount (aget ops 0)))
+            (ferr "%s of %s from %s" m (aget ops 0) (aget ops 1)))
+
+          (when (and (not elem) ^:go/paren (or (!= (.-kind x) \v) (!= (arrCount (aget ops 2)) (arrCount (aget ops 0)))))
+            (ferr "%s of %s" m (aget ops 2)))
+
+          (when (and elem ^:go/paren (or (> (.-n x) 15) (< (.-idx x) 0) (> (.-idx x) 7)))
+            (ferr "%s's element %s" m (aget ops 2)))
+
+          (set! (.-Size in) 2))
+        (default
+          (when (or (!= (.-kind d) \v) (== (.-size d) 0) (!= (.-kind n) \v) (!= (.-size n) (.-size d)) (!= (.-q n) (.-q d)) (!= (.-size x) (.-size d)) ^:go/paren (and (== (.-size d) 3) (not (.-q d))))
+            (ferr "%s of %s, %s, %s" m (aget ops 0) (aget ops 1) (aget ops 2)))
+
+          (set! (.-Size in) (.-size d))
+          (let [rot (value (aget ops 3))]
+            (if (== k 9) (do
+                (when (or elem ^:go/paren (and (!= rot 90) (!= rot 270)))
+                  (ferr "fcadd of %s, #%d" (aget ops 2) rot))
+
+                (set! (.-Amount in) (conv uint8 (/ rot 180))))
+              (do
+                (when (or (!= (% rot 90) 0) (< rot 0) (> rot 270))
+                  (ferr "fcmla's rotation #%d" rot))
+
+                (set! (.-Amount in) (conv uint8 (/ rot 90)))
+                (when (and elem ^:go/paren (or ^:go/paren (and (== (.-size d) 1) ^:go/paren (or (< (.-idx x) 0) (>= (.-idx x) (conv int64 (/ (arrCount (aget ops 0)) 2))))) ^:go/paren (and (== (.-size d) 2) ^:go/paren (or (not (.-q d)) (< (.-idx x) 0) (> (.-idx x) 1))) (== (.-size d) 3)))
+                  (ferr "fcmla's element %s" (aget ops 2)))))
+
+
+            (when (and (not elem) ^:go/paren (or (!= (.-kind x) \v) (!= (.-q x) (.-q d))))
+              (ferr "%s of %s" m (aget ops 2))))))
+
+
+      (return in true))))
+
+
+
+
+^{:go/end 205} (go/func vxName "vxName is the coverage's name: v.sdot.4s, v.sdot.e.2s, v.sqrdmlah.h, v.sqrdmlah.e.8h, v.fmlal2.e.4s, v.fcmla.r90.4h,\nv.fcmla.e.r180.4s, v.fcadd.r270.2d.\n" ^string [^{:tag (* Inst)} in]
+  (let [s (+ "v." (aget vxNames (.-Sys in)))]
+    (when (.-N in)
+      (set! s + ".e"))
+
+    (switch (.-Sys in)
+      (case [8]
+        (set! s + (aget (lit (slice string) ".r0" ".r90" ".r180" ".r270") (.-Amount in))))
+      (case [9]
+        (set! s + (aget (lit (slice string) ".r90" ".r270") (.-Amount in)))))
+
+    (when (.-S in)
+      (return (+ s "." (conv string (aget esz (.-Size in))))))
+
+    (+ s "." (arr (.-Size in) (.-Sf in)))))
+
+
+
+^{:go/end 213} (go/func fpNameJS "fpNameJS is fjcvtzs' name (fjcvtzs.w.d).\n" [^{:tag (* Inst)} in] :results [string bool]
+  (when (and (== (.-Op in) OpFCVTI) (== (.-Sys in) 5))
+    (return "fjcvtzs.w.d" true))
+
+  (return "" false))
+
+
+
+^{:go/breaks [[5 222]] :go/end 223} (go/method vxFZ "vxFZ refuses FPCR.FZ for the instructions on single and double precision (ARS59 (b): a64i does not model FZ).\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (!= (bit-and (.-FPCR c) 16777216) 0)
+    (set! (.-PC c) - 4)
+    (.raise c SIGILL (+ ":unimplemented fpcr-fz " (fpName in)))
+    (return false))
+
+  true)
+
+
+
+
+^{:go/end 263} (go/method execJS "execJS executes fjcvtzs (FPToFixedJS: towards zero, the result modulo 2^32 into Wd, NZCV 0:Z:00 with Z when the conversion\nwas exact and in range and the operand not -0); false when the instruction is another.\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (when (or (!= (.-Op in) OpFCVTI) (!= (.-Sys in) 5))
+    (return false))
+
+  (when (not (.vxFZ c in))
+    (return true))
+
+  (let [t (fmtOf 3)
+      ^{:line 235} a (aget (aget (.-Q c) (.-Rn in)) 0)
+      ^{:line 236} z true
+      ^{:line 237 :tag uint64} r (zero uint64)]
+    (switch
+      (case [(or (.isNaN t a) (.isInf t a))]
+        (set! (.-FPSR c) bit-or fpIOC)
+        (set! z false))
+      (default
+        (let [(values n inexact) (rint (.exact t a) 3)]
+          (set! r (.Uint64 (.And (new big/Int) n (big/NewInt 4294967295))))
+          (switch
+            (case [(or (< (.Cmp n (big/NewInt -2147483648)) 0) (> (.Cmp n (big/NewInt 2147483647)) 0))]
+              (set! (.-FPSR c) bit-or fpIOC)
+              (set! z false))
+            (case [inexact]
+              (set! (.-FPSR c) bit-or fpIXC)
+              (set! z false))
+            (case [(and (.isZero t a) (.sign t a))]
+              (set! z false))))))
+
+
+    (.set c (.-Rd in) r false false)
+    ^{:go/breaks [4]} (let [nz (conv uint64 0)]
+      (when z
+        (set! nz (<< 1 30)))
+
+      (.SetNZCV c nz)
+      true)))
+
+
+
+
+^{:go/end 276} (go/func widenH "widenH is a half's single precision bits, exactly (a NaN's payload shifted up, its quiet bit kept: FPConvertNaN of\nFPProcessNaNs3H's halves).\n" ^uint64 [^uint64 b]
+  (let [(values s e f) (values (bit-and (>> b 15) 1) (bit-and (>> b 10) 31) (bit-and b 1023))]
+    (switch
+      (case [(== e 31)]
+        (return (bit-or (<< s 31) (<< 255 23) (<< f 13))))
+      (case [(and (== e 0) (== f 0))]
+        (return (<< s 31))))
+
+    (fpBits (halfValue b) 2)))
+
+
+
+
+^{:go/end 282} (go/method fpMulAddH "fpMulAddH is FPMulAddH: addend (single) + op1 * op2 (halves), one rounding at single precision; the halves flushed by\nFPCR.FZ16 (FPUnpack at N = 16).\n" ^uint64 [^{:tag (* CPU)} c ^uint64 addend ^uint64 x ^uint64 y]
+  (.fpMulAdd c (fmtOf 2) addend (widenH (.fz16 c x)) (widenH (.fz16 c y))))
+
+
+
+^{:go/end 290} (go/method fzH "fzH is FPUnpack's flush of a half operand (FZ16, fz16) before an operation shared with single and double precision.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a]
+  (when (== (.-bits t) 16)
+    (return (.fz16 c a)))
+
+  ^{:line 289} a)
+
+
+
+
+^{:go/end 414} (go/method execVX "execVX executes OpVX lane by lane (the operands read before the destination is written; a 64-bit form's upper half and a\nscalar's other lanes cleared).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [k (aget vxNames (.-Sys in))]
+    (when (or ^:go/paren (and (>= (.-Sys in) 4) (<= (.-Sys in) 7)) ^:go/paren (and (>= (.-Sys in) 8) (>= (.-Size in) 2)))
+      (when (not (.vxFZ c in))
+        (return)))
+
+
+    (let [(values a b d) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)) (aget (.-Q c) (.-Rd in)))
+        ^{:line 302 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+      (switch
+        (case [(<= (.-Sys in) 1)]
+          (let [n 2]
+            (when (.-Sf in)
+              (set! n 4))
+
+            (for [e 0] (< e n) (inc! e)
+              (let [acc (lane d e 32)]
+                (for [i 0] (< i 4) (inc! i)
+                  (let [j (+ (* 4 e) i)]
+                    (when (.-N in)
+                      (set! j (+ (* 4 (conv int (.-Imm in))) i)))
+
+                    (let [(values x y) (values (lane a (+ (* 4 e) i) 8) (lane b j 8))]
+                      (if (== (.-Sys in) 0)
+                        (set! acc + (conv uint64 (* (sx x 8) (sx y 8))))
+
+                        (set! acc + (* x y))))))
+
+
+                (setLane (addr r) e 32 (bit-and acc 4294967295))))))
+
+        (case [(<= (.-Sys in) 3)]
+          (let [e (<< (conv uint 8) (.-Size in))
+              ^{:line 327} n (conv int (/ 64 e))]
+            (when (.-Sf in)
+              (set! n (conv int (/ 128 e))))
+
+            (when (.-S in)
+              (set! n 1))
+
+            (for [i 0] (< i n) (inc! i)
+              (let [j i]
+                (when (.-N in)
+                  (set! j (conv int (.-Imm in))))
+
+                (let [p (.Mul (new big/Int) (big/NewInt (sx (lane a i e) e)) (big/NewInt (sx (lane b j e) e)))]
+                  (.Lsh p p 1)
+                  (let [v (.Lsh (new big/Int) (big/NewInt (sx (lane d i e) e)) e)]
+                    (if (== (.-Sys in) 3)
+                      (.Sub v v p)
+
+                      (.Add v v p))
+
+                    (.Add v v (.Lsh (new big/Int) bigOne (- e 1)))
+                    (.Rsh v v e)
+                    (let [(values x sat) (satQ v e false)]
+                      (when sat
+                        (set! (.-FPSR c) bit-or fpQC))
+
+                      (setLane (addr r) i e x))))))))
+
+        (case [(<= (.-Sys in) 7)]
+          (let [n 2]
+            (when (.-Sf in)
+              (set! n 4))
+
+            (let [off 0]
+              (when (>= (.-Sys in) 6)
+                (set! off n))
+
+              (for [i 0] (< i n) (inc! i)
+                (let [x (lane a (+ off i) 16)
+                    ^{:line 366} y (lane b (+ off i) 16)]
+                  (when (.-N in)
+                    (set! y (lane b (conv int (.-Imm in)) 16)))
+
+                  (when (or (== k "fmlsl") (== k "fmlsl2"))
+                    (set! x bit-xor 32768))
+
+                  (setLane (addr r) i 32 (.fpMulAddH c (lane d i 32) x y)))))))
+
+        (default
+          (let [t (fmtOfH (.-Size in))
+              ^{:line 377} e (.-bits t)
+              ^{:line 378} n (conv int (/ 64 e))]
+            (when (.-Sf in)
+              (set! n (conv int (/ 128 e))))
+
+            (for [p 0] (< p (/ n 2)) (inc! p)
+              (let [(values re im) (values (* 2 p) (+ (* 2 p) 1))
+                  (values mre mim) (values (lane b re e) (lane b im e))]
+                (when (.-N in)
+                  (set! (values mre mim) (values (lane b (* 2 (conv int (.-Imm in))) e) (lane b (+ (* 2 (conv int (.-Imm in))) 1) e))))
+
+                (when (== (.-Sys in) 9)
+                  (let [(values e1 e3) (values (.neg t mim) mre)]
+                    (when (== (.-Amount in) 1)
+                      (set! (values e1 e3) (values mim (.neg t mre))))
+
+                    (setLane (addr r) re e (.fpArith c t 2 (.fzH c t (lane a re e)) (.fzH c t e1)))
+                    (setLane (addr r) im e (.fpArith c t 2 (.fzH c t (lane a im e)) (.fzH c t e3)))
+                    (continue)))
+
+                (let [(values nre nim) (values (lane a re e) (lane a im e))
+                    (values ^uint64 e1 ^uint64 e2 ^uint64 e3 ^uint64 e4) (zero uint64)]
+                  (switch (.-Amount in)
+                    (case [0]
+                      (set! (values e1 e2 e3 e4) (values mre nre mim nre)))
+                    (case [1]
+                      (set! (values e1 e2 e3 e4) (values (.neg t mim) nim mre nim)))
+                    (case [2]
+                      (set! (values e1 e2 e3 e4) (values (.neg t mre) nre (.neg t mim) nre)))
+                    (default
+                      (set! (values e1 e2 e3 e4) (values mim nim (.neg t mre) nim))))
+
+                  (setLane (addr r) re e (.fpMulAdd c t (.fzH c t (lane d re e)) (.fzH c t e2) (.fzH c t e1)))
+                  (setLane (addr r) im e (.fpMulAdd c t (.fzH c t (lane d im e)) (.fzH c t e4) (.fzH c t e3)))))))))
+
+
+      (aset (.-Q c) (.-Rd in) r))))
