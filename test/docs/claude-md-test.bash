@@ -1,5 +1,5 @@
 #!/bin/bash
-# CLAUDE.md's sentences the review 045 corrected stay corrected. Usage: test/gate/claude-md-test.bash
+# CLAUDE.md's sentences the review 045 corrected stay corrected (the gate's step claude-md since GD1). Usage: test/docs/claude-md-test.bash
 here=$(cd "$(dirname "$0")/../.." && pwd)
 fail=0
 has() { grep -qF -- "$2" "$here/$1" && echo "ok   $1 has: $2" || { echo "FAIL $1 lacks: $2"; fail=1; }; }
