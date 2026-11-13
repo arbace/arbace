@@ -7459,3 +7459,112 @@ day's limit is 2.5 GiB (3 GiB for the essential command). The chunked retries we
 final one peaked at 2.58 GiB (under the essential command's 3 GiB allowance, over the 2.5 GiB of other runs). The essential
 command's samples `nodes-list` was killed at 3.16 GB by the 3 GiB guard. `bin/cppi lower-essential` ran with `CPPI_DISK_MAX=88` (the
 brief's df limit) where its default stops at 80 %.
+
+## As built: cpp-s11 (2026-11-13; branch `cpp-s11` from mac/cpp-s10 c77ecab08 with mac/gf-cpp df35aae0f merged)
+
+The user's decision of 2026-11-13: CP379 (a), C++20 iterator_traits for an iterator that declares only `iterator_concept`
+(f8's and library.cpp's refusal), built generally; CP380 (a) only when a program needs it (none did). Then f8's next refusals, each a
+general fix with a probe, an llvmi run and a control. By the RERUN rules (a serial `bin/gate --full` on next, PID 65142, all afternoon):
+one process at a time, MemAvailable >= 12 GiB before each, `GOMEMLIMIT=1200MiB GOGC=30 REPR_CPP_THREADS=1`, main's stage 0, a watcher
+killing by PID any process of this worktree past 2.5 GiB (none was; peaks below); no gate, big lock, clang or g++. The merge of
+mac/gf-cpp: journal, AGENDA and this survey in union (gf-cpp's "CP379", the essential step's memory, is CP381 as its merge to next named
+it). Probes in `.tmp/probe/` (gen-batch, then `bin/llvmi run` of the IR, `.tmp/pl.sh`).
+
+### CP379 (a): what iterator_traits' C++20 machinery needed
+
+libstdc++'s `__iterator_traits<_Iter, void>` partial specializations constrained by `__iter_with_nested_types`, `__iter_without_nested_types
+&& __cpp17_input_iterator` and `__cpp17_iterator`, the nested `__cat` partial specializations deciding `iterator_category` by
+`__cpp17_randacc_iterator`, `__cpp17_bidi_iterator`, `__cpp17_fwd_iterator`, and their subsumption, were already handled by template.ae's
+partial-match (constraint satisfaction, cpp-s5's type-constraints), more-constrained-partial? (cpp-s8's subsumption) and sema's
+requires-expressions. The one gap: `__cpp17_input_iterator`'s type requirement `typename common_reference_t<decltype(*__it++)&&,
+typename indirectly_readable_traits<_Iter>::value_type&>` names a decltype whose operand the native parser had not kept (a requirement is
+kept as its text, and only a decl-specifier's decltype operand was parsed for the code generator), so "decltype(* __it ++)" did not
+resolve, the requirement was false, `__cpp17_input_iterator<_Utf_iterator>` false, and `__iterator_traits` took the output iterator's
+specialization: `iterator_category` output_iterator_tag, `value_type` void, and `_RequireInputIter` rejected basic_string's range
+constructor. Now repr/cpp's parser (`keep-decltypes!`) parses the operands of every decltype in a type requirement and in a compound
+requirement's return-type-requirement (`{ __it - __it } -> same_as<decltype(__n)>`, `__cpp17_randacc_iterator`'s) tentatively, with the
+requirement's parameters in scope, and keeps them by their text as a decl-specifier's are; the requirement is still its text.
+
+### f8's next refusals, each fixed generally
+
+| # | f8's refusal (before) | Cause | Fix |
+|---|---|---|---|
+| 1 | `overload` "no viable function among 15 for 2 arguments" (constructing basic_string from two `_Utf_iterator`s) | CP379 above | parse.ae: `keep-decltypes!` |
+| 2 | `overload` "no viable function among 1 for 1 arguments: (enum)" in <system_error>'s `error_condition(_ErrorConditionEnum)` | `make_error_condition(__e)` after `using __adl_only::make_error_condition;` (a deleted nullary function): std::make_error_condition(errc) is found by argument-dependent lookup of the enumeration errc, and adl-fns took class arguments only | sema.ae: enum-assoc, [basic.lookup.argdep]/3.3: an enumeration's innermost enclosing namespace (adl-nss's inline enclosers) and a member enumeration's class, also as a template argument's (adl-class-nss, adl-classes) |
+| 3 | `overload` "no viable function among 2 for 2 arguments: (const char*, const char*)" at `_Utf32_view<ranges::subrange<iterator>> __uv({__first, __last});` | three gaps: (a) subrange's `subrange(__convertible_to_non_slicing<_It> auto __i, _Sent __s)`, an abbreviated function template, was dropped ("type form (constrained ...) auto"); (b) a braced list counted as converting to any class with a constructor ([over.ics.list]/7 wants a viable one), so _Utf_view's copy and move constructors were viable beside `_Utf_view(_Range&&)`; (c) `T x({...})`, direct-initialization with one braced argument, was taken for list-initialization of T from the list's elements | (a) sema.ae `abbreviated-template` ([dcl.fct]/22): a declaration with a placeholder parameter (`auto`, `C auto`, `C<A...> auto`, cv and declarator operators around it, `auto...`) declared as the function template it is, an invented type parameter per placeholder after the declared ones, its type-constraint the invented parameter's (`:_tc`, `:_tctext` for tc-arg-forms); (b) `list-ctor-viable?`: [over.match.list] for the elements (an initializer-list constructor, an empty list, or the constructors with the templates' deduced ones), memoized; (c) class-init's list case only for list-initialization; the native parser's untyped CXXConstructExpr of `U u({3, 4})` read as its arguments; a trivial copy from a braced list initializes the list's temporary |
+| 4 | `type` "unknown type _Up" in <charconv>'s `__to_chars_i` (`using _Up = __detail::__unsigned_least_t<_Tp>;`) | `__select<sizeof(_Tp), _UInts>`: the template argument `sizeof(_Tp)` reads as the form of a call of sizeof, which const-form took for a functional cast of a constant | template.ae const-form: `sizeof(T)` of a type, dependent while T is (as eval-text's) |
+| 5 | `call` "no operator()" for `ranges::begin(_M_base)` in `_Utf_view::begin()` (subrange) | `view_interface<subrange<...>>`, subrange's CRTP base, is instantiated while subrange is declared: its members' requires-clauses (`empty() requires forward_range<_Derived>`) were evaluated then, before subrange's `begin()`, the members dropped, and `forward_range<subrange>`, `__member_begin<subrange&>` kept false for every later ask | sema.ae declare-fn!: a member of a specialization whose template arguments name a class not finished yet keeps its trailing requires-clause (`:trailing-defer`) for overload resolution's viability (`trailing-ok?`, [over.match.viable]/3) and is declared; template.ae concept-satisfied?: no satisfaction kept for an argument naming an unfinished class |
+| 6 | `crash` (NullPointerException in value-arg) at `std::upper_bound(__width_edges, std::end(__width_edges), __c)` | <bits/unicode-data.h>'s `inline constexpr char32_t __width_edges[] = {...}`: a namespace-scope array of unknown bound kept nil until its emission, so std::end's `N` deduced nil | sema.ae declare-var!: an array of unknown bound of scalars completed by its braced initializer's count at its declaration ([dcl.array]/7) |
+| 7 | `conversion` "from const char* to unsigned long" at `_WidthPrecVisitor`'s `return __arg;` | `__is_unsigned_integer<const char*>::value` true: <type_traits>' `__or_` is `decltype(__or_fn<_Bn...>(0))`, `__or_fn(int) -> __first_t<false_type, __enable_if_t<!bool(_Bn::value)>...>`, whose expansion failed ("no scope _Bn": the pack named only in the constant's text), so __or_fn(...)'s true_type won: `__or_<false_type, false_type>` was true_type | template.ae form-symbols: the names of a constant written as text, so expand-type-pack finds the pack |
+| 8 | `string` "a wide string" (<format>, offset 26018) | not fixed: proposed, CP382 | |
+
+On the way, from the probes: x = {} and x = {e} on a scalar ([expr.assign]/8: <charconv>'s `__res.ec = {};` on errc), and a scalar argument
+value-initialized (`f({})`, a default argument `= {}`) emitted as its zero (the code generator's arg-values had taken it for an
+expression, "rvalue nil"; its other shapes are now named in the refusal). Drops (drops.tsv) 47 causes, 98 drops → 36 causes, 87 drops.
+
+Probes (`.tmp/probe`, each generated then run by llvmi; a control `...n` of the same program with one expected value changed exits
+non-zero by the bit it tests):
+
+| Probe | What | Before | After |
+|---|---|---|---|
+| t1 | an iterator with iterator_concept only; `std::string(It, It)` | refused, overload (f8's) | generated (its run unwinds: llvmi refuses a personality) |
+| t2, t3 | the concepts and traits of t1's iterator bit by bit | t3: `common_reference_t<decltype(*__it++)&&, ...>` false, `__cpp17_input_iterator` false; t2: category, value_type, reference wrong | all 14 / 10 bits |
+| t4, t4n | `_RequireInputIter`, std::distance's tag dispatch, the category input_iterator_tag | (t1's refusal) | llvmi 0; t4n (forward_iterator_tag expected) 8 |
+| t5a, t5n | a random access iterator with iterator_concept only: random_access_iterator_tag through `__cpp17_randacc_iterator` | | llvmi 0; t5n 32 |
+| t6a, t6n | ADL for enumerations: plain, scoped, a member enumeration's friend, a later declaration at instantiation, a template argument's namespace | (f8's refusal 2) | llvmi 0; t6n 1 |
+| t7, t9 | subrange's abbreviated constructor from <ranges>; t9 the same written out without headers | t7 refused, overload | t7 generated (unwinds); t9 llvmi 0 |
+| t8a, t8n | abbreviated templates: constrained constructors of a class template, a member template with explicit and invented parameters, an overload by type-constraint, a pack `const auto&...` | | llvmi 0; t8n 16 |
+| t10a, t10n | `h()`, `h({})`, `k({}, {})`, a default argument `= {}` | (t7's "rvalue") | llvmi 0; t10n 8 |
+| t11 | f8's `_Utf32_view<subrange<...>> uv({b, e})` alone | refused, overload | generated (unwinds) |
+| t12a, t12n | `U u({3, 4})` with an explicit `U(P)`; `f({1, 2})` and `f({5})` over f(P) and f(Q) | crash, then overload | llvmi 0; t12n 4 |
+| t13, t13n | std::to_chars of int, long, unsigned char (base 16), unsigned long long (base 2) | refused, type `_Up`, then `= {}` | llvmi 0; t13n 1 |
+| t14a, t14n | a base's member templates (__select with a default argument reading a pack partial specialization's static member) | refused, "not a constant: T" | llvmi 0; t14n 8 |
+| t15 | `ranges::begin(subrange)`, `__member_begin<subrange&>` | refused, "no operator()" | generated, all bits (unwinds) |
+| t16a, t16n | a CRTP base's members constrained on the derived class both ways | 16 (the !HasBegin one kept) | llvmi 0; t16n 8 |
+| t17a, t17n | a namespace-scope array of unknown bound through `T (&)[N]` | | llvmi 0; t17n 1 |
+| t18, t18b, t18c | `__is_unsigned_integer`, `__or_` | t18c: `__or_<false_type, false_type>` true (also at cpp-s10's tree: the five earlier commits checked out in turn, `.tmp/bis.sh`) | llvmi 0 each |
+| t19 | __or_fn written out without headers | exit 13 | llvmi 0 |
+| t21a, t21n | a trivially copyable class (and an aggregate) direct-initialized from a braced list | (G9's hello.cpp) | llvmi 0; t21n 2 |
+
+### Checked (peaks by busybox `time -v`)
+
+| Run | Result |
+|---|---|
+| the probes above | as the table says: every after generated, the ones without unwinding run by llvmi with status 0, each control non-zero by its bit |
+| gen-batch over the 81 run programs (library.cpp left out), five parts, against cpp-s10's G8 with G8b (`.tmp/G9b`, `.tmp/cmp.sh`) | **69 generated, none lost; 63 byte for byte, 6 equal but for the inliner's `.iN` numbering, none differing**; peaks 0.36 to 1.34 GB, 36 min. An earlier run at the code before the last fix (`.tmp/G9`) had lost runtime/hello.cpp ("lvalue :init-list": `T x({...})` of a trivially copyable class chose its trivial copy, emitted as a copy of the list); fixed (t21) and hello.cpp's IR equal to G8b's again |
+| `bin/cppi codegen-gen` | 155 of 155 as recorded (155 generated, 0 refused), the controls failing as they must; 1.20 GB, 8.6 min; not re-recorded (unchanged) |
+| cpp-print-essential's command (`roundtrip-corpus gxx-dg-essential --judge own`, `samples --judge own`) | 33 of 33, 9 of 9, the control `_control/bitfields-vs-io` failing as it must; 1.49 GB, 2.9 min |
+| `bin/repr-cpp dg --corpus dg-error --front native --sample 10` | 454 files, accepted 287, rejected 167, own pass 127, own x clang as cpp-s10's (fail/fail 101, fail/pass 226, pass/fail 14, pass/pass 113); cpp23/ext-floating12.C, which cpp-s10's sample timed out on, read this time; 1.22 GB, 7 min |
+| f8 (`.tmp/f8.sh`, `CPP_GEN_WHERE=1`) | from `overload` (basic_string from _Utf_iterator) through the seven refusals of the table to `string` "a wide string"; drops 47 causes, 98 → 36, 87; 1.21 GB, 3.5 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0, scores.edn unchanged |
+| `test/gate/gate-key-crops-test.bash` | PASS; the branch's own changes are `arbace/cpp/`, `arbace/repr/cpp/` and `doc/` (crop paths): no gate, runtime or seed key moves (the merge carries gf-cpp's CP381 edits of `test/gate/steps.edn` and `crops/cpp.edn`, already on next) |
+
+### Not run
+
+library.cpp alone (the brief: only after PID 65142 ends, which it did at about 16:15 UTC, and with the main session's agreement; cpp-s10
+measured it at 1.43 GB, 340 s): `bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh .tmp/LIB/todo` with the todo line of cpp-s10's
+`.tmp/lib.tsv` (library.cpp, c++23, `.tmp/LIB/files/...`). Expected: past `overload` to the same `string` refusal as f8's, or one of
+its own <format> paths. cpp-check-essential and cpp-lower-essential were not in this brief's list (the branch changes no lowering).
+
+### Proposed (CP382, CP383)
+
+- **CP382: wide and Unicode string literals** (f8's next refusal, `string` "a wide string" in <format> at offset 26018, a
+  `_GLIBCXX_WIDEN` literal of a wchar_t instantiation). (a) sema's StringLiteral by its prefix (`L`, `u`, `U`, `u8`): the code units
+  of the encoding (UTF-32 for `U` and, on x86-64 Linux, `L`; UTF-16 for `u`; `u8` as char8_t's bytes), the string global an array of
+  i16 or i32 as clang emits it, and the constant evaluator's element reads; (b) first find which use instantiates the wchar_t path for
+  vformat<char> (a discarded branch analyzed would be a different gap), then (a). **Recommended: (b) then (a)**: (a) is needed by
+  <format>'s wchar_t formatters anyway, and (b) says whether it is f8's next step or a detour.
+- **CP383: when a member's trailing requires-clause is checked.** cpp-s11 keeps it for overload resolution (`:trailing-defer`) only for a
+  specialization whose template arguments name an unfinished class (the CRTP case); elsewhere declare-fn! still drops an unsatisfied
+  member at its declaration, which is [over.match.viable]/3's answer whenever the answer cannot change. (a) Defer always (every
+  constrained member a candidate whose constraint is checked at the call; redeclaration matching by the constraint's spelling, as the
+  partial specializations' CP311 (a) measure). (b) Keep the narrow rule until a program shows the difference. **Recommended: (b)**.
+
+### Rule slips
+
+Two runs at once briefly (14:20 UTC: t12's probes started while t11's gen-batch ran; stopped by TaskStop within a minute) and, at the
+same time, sema.ae edited while t11 ran (it had loaded sema at its start; its result was only diagnostic and every probe was run again at
+the final code). One earlier edit of parse.ae while t4n's gen-batch ran (loaded before; t4n repeated after). `ps` piped to `grep` once
+(a process count), one `<(...)` process substitution (a drops comparison) and one `> /dev/null` in commands. The gen-batch parts and the
+proofs each ran alone after their edits.

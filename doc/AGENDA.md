@@ -86,7 +86,12 @@ Six crops are above 90 on all three. What the others still need:
   basic_string from _Utf_iterator, an overload refusal: CP379 proposed; library.cpp alone the same, 39 causes of drops from 47); the
   81's IR unchanged (none lost, byte for byte or by the inliner's numbering); codegen-gen 155 as recorded, print essential, the dg
   sample (own pass 127), reap and crops-score unchanged; cpp-check-essential left (the disk at 86%, its lower step stops above 85%);
-  CP380 proposed (a plain global's constant initialization manifestly constant-evaluated).
+  CP380 proposed (a plain global's constant initialization manifestly constant-evaluated). `cpp-s11` (2026-11-13, "As built: cpp-s11"):
+  CP379 (a) built (a requirement's decltype operands kept by the parser: iterator_traits of an iterator with only iterator_concept),
+  then f8 through seven more refusals, each general (ADL of enumerations, abbreviated function templates, [over.ics.list]/7 and `T x({...})`,
+  sizeof(T) as a template argument, a CRTP base's requires-clauses at overload resolution, an unknown-bound global array, a pack named in a
+  constant's text, which had made `__or_<false_type, false_type>` true); f8 now stops at "a wide string" (CP382 proposed); the 81's IR
+  unchanged (69 generated, none lost); CP380 not needed by any run; library.cpp alone waits for the main session.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

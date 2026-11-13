@@ -5319,3 +5319,30 @@ test/gate/crops/cpp.edn), the cap per crop (`:budgets :essential-mem-gib-by {:cp
 beside `:essential-mem-gib`); later (b), building the samples' nodes one program per process, may bring it back under 3.
 Considered: (c) io.cpp out of the essential list into the nightly cpp-check. Proofs: test/gate/crops-test.bash ok (the real
 table passes GT9's rules), `bin/gate --full --plan` status 0. (The name CP379 is cpp-s10's iterator_traits decision.)
+
+## 2026-11-13: cpp-s11, CP379 (a): C++20 iterator_traits for an iterator with only iterator_concept, and f8's next refusals (branch `cpp-s11`, from `mac/cpp-s10` c77ecab08 with `mac/gf-cpp` df35aae0f merged)
+
+The user decided CP379 (a) (2026-11-13): build what libstdc++'s concept-constrained `__iterator_traits` partial specializations need of
+Sema, generally; CP380 (a) only when a program needs it (none of the runs did). Light, one process at a time by the RERUN rules (a serial
+`bin/gate --full` on next until about 16:15 UTC), each process under 2.5 GiB (the largest 1.35 GB, gen-batch's part 03), no gate, big lock,
+clang or g++. Details and numbers in doc/cpp/CPP-SURVEY.md, "As built: cpp-s11".
+- Merged mac/gf-cpp into mac/cpp-s10: journal, AGENDA and the survey in union; gf-cpp's survey proposal "CP379" (the essential step's memory)
+  named CP381 there, as its merge to next had named it.
+- CP379: the constrained partial specializations, their satisfaction and subsumption were in place (cpp-s5, cpp-s8); what failed was a
+  requirement's decltype: `typename common_reference_t<decltype(*__it++)&&, ...>` in `__cpp17_input_iterator`, whose operand the native
+  parser had not kept (a requirement is kept as text). repr/cpp's parser now keeps the decltype operands of type requirements and of
+  return-type-requirements (`keep-decltypes!`). Considered: parsing the requirement's type-id as a type (it would also need concept-ids
+  in it, and the text is what sema resolves); keeping the operands is what decl-specifiers already do.
+- f8 then went through seven refusals, each fixed generally in arbace/cpp/sema.ae or template.ae: ADL for enumeration arguments
+  ([basic.lookup.argdep]/3.3, <system_error>'s error_condition(errc)); abbreviated function templates ([dcl.fct]/22, <ranges>' subrange
+  constructor); [over.ics.list]/7's viable-constructor test for a braced list to a class and `T x({...})` as direct-initialization with one
+  list argument; sizeof(T) as a template argument's form (<charconv>); a CRTP base's members' requires-clauses kept for overload resolution
+  while the derived class is unfinished, and no concept satisfaction memoized for an unfinished class (view_interface<subrange>); a
+  namespace-scope array of unknown bound completed by its initializer at declaration (unicode-data.h through std::end); and a pack named
+  only in a constant's text found for a type pack expansion, which had made <type_traits>' `__or_<false_type, false_type>` true_type (at
+  cpp-s10's tree too, checked by checking out the earlier commits in turn). On the way: `x = {}` on scalars, a value-initialized scalar
+  argument emitted as zero, a trivial copy from a braced list. f8 stops at "a wide string" (CP382 proposed); drops 47 causes, 98 → 36, 87.
+- Proofs: 21 probes generated and run by llvmi (controls exit by the bit they test); gen-batch over the 81 run programs at the final code
+  against cpp-s10's: 69 generated, none lost, the IR byte for byte or equal by the inliner's numbering (an intermediate run had lost
+  hello.cpp to the list change: "lvalue :init-list", a trivial copy from a list; fixed and its IR equal again); the rest in the survey.
+  library.cpp alone not run (the brief: after PID 65142 ends and with the main session's agreement).
