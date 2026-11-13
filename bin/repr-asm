@@ -205,6 +205,10 @@ case $arch in
   *) classes=$root/test/asm/divergences-read-$arch.edn controls=$root/test/asm/controls-$arch.txt ;;
 esac
 lists=$root/.tmp/repr-asm/lists
+# this run's own scratch: the gate runs repr-asm's steps side by side (its lanes), and a fixed $TMPDIR/asm-files.txt, truncated by
+# one step's make_list while another's loop read it, cut that list short (night 13: asm-arm64-print-essential's mc-aarch64 184 of
+# 409 files, asm-amd64-read-essential's make_list beside it)
+asm_tmp=$(mktemp -d "$TMPDIR/repr-asm.XXXXXX"); trap 'rm -rf "$asm_tmp"' EXIT
 # the object assembler, its llvm-mc triple, records and classes by arch (AX4; AR4)
 case $arch in
   amd64) objns=arbace.asm.amd64.obj triple=x86_64-linux-musl obj_results=$root/test/asm/object-results-amd64.edn
@@ -253,30 +257,30 @@ corpus_ids() { edn "(doseq [x (:corpora c) :when (= (or (:arch x) :amd64) :$arch
 extract() {
   local id tar sum top want
   mkdir -p "$src"
-  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$TMPDIR/asm-pins.txt"
+  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$asm_tmp/asm-pins.txt"
   while read -r id tar sum top; do
     [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host (a fetch by its pin, the user's)" >&2; return 1; }
     want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
     [ "$want" = "$sum" ] || { echo "repr-asm: $tar's SHA-256 $want is not the pin's $sum" >&2; return 1; }
-    edn "(doseq [x (concat (:corpora c) (:tables c) (:decode-corpora c)) :when (= (:pin x) :$id) m (:extract x)] (println m))" > "$TMPDIR/asm-members.txt"
-    echo "repr-asm: extracting $(wc -l < "$TMPDIR/asm-members.txt") members of $id"
+    edn "(doseq [x (concat (:corpora c) (:tables c) (:decode-corpora c)) :when (= (:pin x) :$id) m (:extract x)] (println m))" > "$asm_tmp/asm-members.txt"
+    echo "repr-asm: extracting $(wc -l < "$asm_tmp/asm-members.txt") members of $id"
     case $tar in
-      *.tar.gz) tar -xzf "$main/$tar" -C "$src" --wildcards -T "$TMPDIR/asm-members.txt" ;;
-      *.tar.xz) tar -xJf "$main/$tar" -C "$src" --wildcards -T "$TMPDIR/asm-members.txt" ;;
+      *.tar.gz) tar -xzf "$main/$tar" -C "$src" --wildcards -T "$asm_tmp/asm-members.txt" ;;
+      *.tar.xz) tar -xJf "$main/$tar" -C "$src" --wildcards -T "$asm_tmp/asm-members.txt" ;;
     esac
-  done < "$TMPDIR/asm-pins.txt"
+  done < "$asm_tmp/asm-pins.txt"
 }
 
 # check_pins: every pinned tarball on this host with its pin's SHA-256 (AX10: the crops' pins, bin/gate --pins); no extraction
 check_pins() {
   local id tar sum top want n=0
-  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$TMPDIR/asm-pins.txt"
+  edn '(doseq [[k p] (:pins c) :when (:sha256 p)] (println (name k) (:fetched-into p) (:sha256 p) (:top p)))' > "$asm_tmp/asm-pins.txt"
   while read -r id tar sum top; do
     [ -f "$main/$tar" ] || { echo "repr-asm: the pin $id's tarball $main/$tar is not on this host" >&2; return 1; }
     want=$(sha256sum "$main/$tar" | cut -d' ' -f1)
     [ "$want" = "$sum" ] || { echo "repr-asm: $tar's SHA-256 $want is not the pin's $sum" >&2; return 1; }
     n=$((n + 1))
-  done < "$TMPDIR/asm-pins.txt"
+  done < "$asm_tmp/asm-pins.txt"
   echo "repr-asm corpus check: $n tarballs equal to their pins"
 }
 
@@ -288,7 +292,7 @@ ensure() {
   mkdir -p "$src"
   (
     flock 9
-    if [ "$(cat "$stamp" 2>"$TMPDIR/asm-stamp.err")" = "$want" ]; then echo "repr-asm corpus ensure: $src current"; exit 0; fi
+    if [ "$(cat "$stamp" 2>"$asm_tmp/asm-stamp.err")" = "$want" ]; then echo "repr-asm corpus ensure: $src current"; exit 0; fi
     extract && echo "$want" > "$stamp"
   ) 9>"$src.lock"
 }
@@ -300,7 +304,7 @@ make_list() {
   read -r dir match exclude rt syn < <(edn "(let [x (first (filter #(= (:id %) :$id) (:corpora c)))] (println (:dir x) (:match x) (or (:exclude x) \"^\$\") (name (or (:root x) :src)) (name (or (:syntax x) :default))))")
   case $rt in
     goroot) base=$goroot
-      [ "$(head -1 "$goroot/VERSION" 2>"$TMPDIR/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
+      [ "$(head -1 "$goroot/VERSION" 2>"$asm_tmp/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
         { echo "repr-asm: $goroot/VERSION is not the pin's (seed/goroot.sha256's toolchain)" >&2; return 1; } ;;
     checkout) base=$root ;;
     *) base=$src ;;
@@ -309,8 +313,8 @@ make_list() {
   mkdir -p "$lists"
   local sd=$root/.tmp/repr-asm/split/$id f n p flags
   rm -rf "$sd"
-  : > "$lists/$id.list"
-  (cd "$base/$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | grep -E "$match" | grep -vE "$exclude" || true) > "$TMPDIR/asm-files.txt"
+  : > "$asm_tmp/$id.list"
+  (cd "$base/$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | grep -E "$match" | grep -vE "$exclude" || true) > "$asm_tmp/asm-files.txt"
   while read -r f; do
     p=$base/$dir/$f n=${f%.[sS]}; n=${n//\//-}
     # the test's own verdict and target from its RUN lines (llvm/test's lit tests): reject when one runs `not llvm-mc`, other-arch
@@ -341,12 +345,13 @@ make_list() {
       mkdir -p "$sd/$n"
       awk -v o="$sd/$n" '/^(#|\/\/)--- / { f = o "/" $2; printf "" > f; next } f { print > f }' "$p"
       for q in $(cd "$sd/$n" && ls | grep -E '\.[sS]$' | LC_ALL=C sort); do
-        printf '%s\t%s\t%s\n' "$n.${q%.[sS]}" "$sd/$n/$q" "${flags# }" >> "$lists/$id.list"
+        printf '%s\t%s\t%s\n' "$n.${q%.[sS]}" "$sd/$n/$q" "${flags# }" >> "$asm_tmp/$id.list"
       done
     else
-      printf '%s\t%s\t%s\n' "$n" "$p" "${flags# }" >> "$lists/$id.list"
+      printf '%s\t%s\t%s\n' "$n" "$p" "${flags# }" >> "$asm_tmp/$id.list"
     fi
-  done < "$TMPDIR/asm-files.txt"
+  done < "$asm_tmp/asm-files.txt"
+  mv "$asm_tmp/$id.list" "$lists/$id.list"  # whole, at once: a reader beside never sees it half written
   echo "repr-asm: $id: $(wc -l < "$lists/$id.list") files"
 }
 
@@ -453,7 +458,7 @@ case ${1:-} in
       case $cid in ''|'#'*) continue ;; esac
       sc=${subj%%/*} sn=${subj#*/} rc=${ref%%/*} rn=${ref#*/}
       sa=$root/.tmp/repr-asm/rt/$sc/ae/$sn.ae
-      rp=$(awk -F'\t' -v n="$rn" '$1 == n { print $2 }' "$lists/$rc.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="$rn" '$1 == n { print $2 }' "$lists/$rc.list" 2>"$asm_tmp/asm-ctl.err" || true)
       if [ ! -f "$sa" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
       v=$(arbace_tool -m arbace.repr.asm control "$sa" "$rp" | tail -1)
       if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
@@ -476,7 +481,7 @@ case ${1:-} in
       fi
       [ -f "$llvm/lib/Target/AArch64/AArch64.td" ] && [ -f "$llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp" ] ||
         { echo "repr-asm: $llvm/lib/Target/AArch64 missing: bin/repr-asm corpus extract" >&2; exit 1; }
-      [ "$(head -1 "$goroot/VERSION" 2>"$TMPDIR/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
+      [ "$(head -1 "$goroot/VERSION" 2>"$asm_tmp/asm-ver.err")" = "$(edn '(println (:version (:tamago-go (:pins c))))')" ] ||
         { echo "repr-asm: $goroot/VERSION is not the pin's (seed/goroot.sha256's toolchain)" >&2; exit 1; }
       arbace_tool -m arbace.repr.asm.arm64.tablegen "$goroot" "$root/arbace/repr/asm/arm64/table.ae" ${chk:+"$chk"} || exit 1
       # ARS24 (a): LLVM's AArch64 records by Arbace's TableGen (about 1 minute, 1.5 GiB)
@@ -590,8 +595,8 @@ case ${1:-} in
     # the negative controls: a subject's statements judged against a reference's CHECK lines must not meet them all
     while read -r cid subj ref; do
       case $cid in ''|'#'*) continue ;; esac
-      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
-      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$asm_tmp/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$asm_tmp/asm-ctl.err" || true)
       if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
       v=$(arbace_tool -m arbace.asm.amd64.check control "$sp" "$rp" | tail -1)
       if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
@@ -599,8 +604,8 @@ case ${1:-} in
     # the print level's: a subject's statements printed (in hex with `hex`) and judged against a reference's CHECK texts must not meet them all
     while read -r cid subj ref hex; do
       case $cid in ''|'#'*) continue ;; esac
-      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
-      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$asm_tmp/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$asm_tmp/asm-ctl.err" || true)
       if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
       v=$(arbace_tool -m arbace.asm.amd64.check control-print "$sp" "$rp" ${hex:+"$hex"} | tail -1)
       if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
@@ -608,8 +613,8 @@ case ${1:-} in
     # the cross-syntax judge's: a subject's AT&T instructions printed in Intel and read back, held to a reference's, must differ
     while read -r cid subj ref; do
       case $cid in ''|'#'*) continue ;; esac
-      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
-      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$TMPDIR/asm-ctl.err" || true)
+      sp=$(awk -F'\t' -v n="${subj#*/}" '$1 == n { print $2 }' "$lists/${subj%%/*}.list" 2>"$asm_tmp/asm-ctl.err" || true)
+      rp=$(awk -F'\t' -v n="${ref#*/}" '$1 == n { print $2 }' "$lists/${ref%%/*}.list" 2>"$asm_tmp/asm-ctl.err" || true)
       if [ -z "$sp" ] || [ -z "$rp" ]; then echo "control $cid: left (not in this run)"; continue; fi
       v=$(arbace_tool -m arbace.asm.amd64.check control-cross "$sp" "$rp" | tail -1)
       if [ "$v" = differs ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: $v"; fails=$((fails + 1)); fi
