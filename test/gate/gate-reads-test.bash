@@ -52,7 +52,7 @@ undeclared=$(awk -F'\t' '$1 == "R" || $1 == "X" || $1 == "H" { print $2 }' "$tra
     [ -n "$ok" ] || echo "$f"
   done)
 # the canary must be among the undeclared, or the trace saw nothing
-echo "$undeclared" | grep -qx "LICENSE.md" || { echo "FAIL: the canary read of LICENSE.md is not in the trace: the trace is blind"; exit 1; }
+grep -qx "LICENSE.md" <<< "$undeclared" || { echo "FAIL: the canary read of LICENSE.md is not in the trace: the trace is blind"; exit 1; }
 undeclared=$(echo "$undeclared" | grep -vx "LICENSE.md")
 rm -f "$trace" "$trace.paths" "$TMPDIR/gate-reads.$$.out"
 if [ -z "$undeclared" ]; then echo "gate-reads-test: passed (canary seen; every other file read or executed is declared)"; exit 0; fi
