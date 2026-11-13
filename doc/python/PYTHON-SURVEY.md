@@ -6291,3 +6291,50 @@ CPython 3.14.10's `Python/instrumentation.c` 2598-2920 (`capi_call_instrumentati
   75 failing → **40 pass**, 49 classed (`:monitoring-events` 45), 0 failing (TestCApiEventGeneration's 5 pass, also
   alone); test_context 25 pass, 9 failing → **33 pass**, 0 failing; test_capi 496 pass, 0 failing, `:testcapi` 592,
   `:capi-port` 77, `:testcapi-parts` 0: unchanged; test_sys_setprofile 26 pass (the same); test_cprofile 26 pass.
+
+## As built: 278, night 12's partial Lib/test run classed (2026-11-13, the Mac VM, queue 278)
+
+Night 12's amd64 eval run (`bin/pyi check --fresh` on a53fe65a9 + next, stopped by the user at 182 of 529 modules; the
+queue's `data/night12-py-run.tar.xz`) judged again on mac/201 bdf8c85ea (`bin/pyi check --judge RUN`, no record: a
+partial run is not recorded). Of the 181 modules the run finished, 549 methods were in no class; each has its cause now.
+
+- **Fixed** (15 rows of the run, and 2 base rows):
+  - the runner (`tools/pyi/libtest_all.py run`): each driver run in a working directory of its own, beside its TMPDIR
+    (`TMPDIR + "c"`, made afresh each attempt, removed with the module), as regrtest's worker runs in its own; the run
+    directory was every module's cwd, so `test.support.os_helper.temp_cwd()`'s `tempcwd` collided between the two jobs and
+    after a killed driver ("[Errno 17] File exists: 'tempcwd'", 7 rows);
+  - `from __future__ import annotations`' texts as `Python/ast_unparse.c` writes them (`arbace/python/compile.ae`'s
+    annotation-text binding `arbace/repr/python/print.ae`'s new `*ast-unparse*`): a `u` prefix kept (the Constant's kind),
+    a debug field as the parser's Constant and FormattedValue (`f'{x=!r}'` -> `f'x={x!r}'`, `!r` unless a conversion or a
+    spec), an infinite float or imaginary literal as `1e309`, ast_unparse's precedences (a comprehension's tuple target bare,
+    `1 .real`, a field's value at PR_TEST + 1, an if-expression's else at PR_TEST): test_future's 3 rows, every case of its
+    `test_annotations` equal; the printer's round trip unchanged (`bin/repr-python roundtrip samples`: 6 of 6 at the three
+    levels). Left: other numbers keep their spelling where ast_unparse writes the value's repr (`1_0.0e1_0`);
+  - the runtime (`go/arbace/py`, through `bin/pyi runtime print`/`read`): `select.epoll.fromfd` a classmethod; a class's
+    `__module__` set drops its `__firstlineno__` (`type_set_module`: inspect.getsource of `_py_abc`'s ABCMeta raises
+    OSError); `types.MappingProxyType` of a dict subclass keeps the mapping (OrderedDict's repr and order-sensitive
+    equality: inspect's `Signature.parameters`), an exact dict still by its storage; `__hello_only__` frozen
+    (Tools/freeze/flag.py beside Lib/, no origname, `__origname__` only for a module that has one); an exact float's and
+    complex's `from_number` is itself; a class's `__class_getitem__` of None makes it not subscriptable
+    (`PyObject_GetItem`): 5 rows of the run, test_complex's test_from_number and test_genericclass' row.
+- **Classed** (534 rows, `divergences.edn` and the copy part of `divergences-315.edn` alike): `:fork` +283 (os.fork's
+  AttributeError by pattern; the not-run methods of classes whose setUpClass forked; the fork bomb's child); `:data-model`
+  +185 (no method-wrapper, method_descriptor or classmethod_descriptor types, so inspect takes bound methods and
+  classmethods for built-ins, "no signature found for builtin" by pattern; no `__text_signature__` on built-ins; int's
+  getsets not on the type; multiprocessing.reduction's method-descriptor reducer registered for
+  builtin_function_or_method, so the spawn and forkserver managers' setUpClass fails on `__objclass__`, 164 methods not
+  run); `:memoryview-formats` +22 (assignment to a non-byte format, by pattern); `:finalization-collect` +18 (objects
+  held after gc_collect); `:multiprocessing` +12 (the forkserver's server dies on os.fork: "unexpected EOF");
+  `:finalization` +4; `:child-is-pyi`, `:slow-on-goi`, `:c-accelerators`, `:pyi-command-line` +1 each; new, deferred:
+  `:stdio-text` (5: pyi's standard streams have no `reconfigure`, test_inspect's TestMain), `:host-memory` (1:
+  test_many_expressions killed by the host's memory). The base's own rows: `:settrace-events` (new, deferred:
+  test_sys_settrace's 7, test_20_async_for_loop's flake among them) and `:complex-core` (new, deferred: test_complex's
+  test_mul and test_pow).
+- **Samples** (`bin/pyi lib-test-all --fresh`, each test's own verdict, the VM): test_epoll 9 -> 10 pass, test_tstring 15
+  -> 15 (its tempcwd row passes alone, the probe), test_future 20 -> 23, test_inspect 288 -> 291 (33 failing -> 0 with
+  the classes), test_complex 34 -> 35, test_genericclass 20 -> 21, test_descr 144 pass, 0 failing; test_sys_settrace 0
+  failing with `:settrace-events`. `:testcapi` 54 in the run's modules, unchanged; `:testcapi-parts` (3.14 retired) and
+  `:capi-port` 0 in them.
+- **A whole run still needs**: the 347 modules night 12 did not reach (test.test_multiprocessing_spawn.* onwards, through
+  test_zstd), and 1,821 `:runner-limits` rows of the run (test_pickle 477, test_subprocess 297, test_socket 246, test_os
+  202, test_asyncio.test_events 131, ...) judged once 275's per-method timeout and fixes let them run.
