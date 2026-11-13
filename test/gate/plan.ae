@@ -200,15 +200,112 @@
   ;; GT8.4: :rotate (a part run whole keeps its key), :list (its digest is the line list SHA N), :failed-re and
   ;; :rotated-part (the runner's bookkeeping, never a verdict)
   ;; GT8 (the tools' lists): :failed-as (the ids' replacement) and :judges (a judge's failures noted for its producers)
-  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :failed-as :rotated-part :whole-list :judges})
+  ;; GD3: :closure (the load closure's files: they are the key's file lines), :also-changed and :weekly-why (when a
+  ;; weekly step runs, not what it checks), :weekly (its phase as the table declares it: a weekly step's key is the same
+  ;; in the weekly tier and on a night its :also-changed files changed)
+  #{:doc :summary :mem-gib :heavy :audit-cmd :rotate :list :failed-re :failed-as :rotated-part :whole-list :judges
+    :closure :also-changed :weekly-why :weekly :keyed :universe-n})
+
+;; ---- GD3 (doc/GATE-DIET-SURVEY.md, GDS9 (a), GDS11 (a), GDS4 (b), "As built: GD3"): the epoch, the load closures, the
+;; weekly phase
+
+(def epoch-file
+  "GDS11 (a): the gate's logic in every key, as one file: bumped by hand (its number and a line why) when a change to the
+  runner (bin/lib/gate-run.bash), the planner (this file) or bin/lib/gate-cache.bash alters what a step sees (its command
+  line, its environment, its inputs, its verdict); gate-tests proves the runner, the weekly --full and the clean run at a
+  tag rerun everything anyway"
+  "test/gate/epoch")
+
+(def loads-file "test/gate/loads.edn")
+
+(defn read-loads
+  "the load closures (test/gate/loads.edn, gate.loads), GATE_LOADS's file when given; none for another table (GATE_STEPS:
+  the gate's own tests) unless GATE_LOADS names one"
+  [root]
+  (let [f (or (System/getenv "GATE_LOADS") (when-not (System/getenv "GATE_STEPS") (str root "/" loads-file)))]
+    (when (and f (.isFile (File. ^String f))) (read-file f))))
+
+(defn- loads-entry
+  "a step's entry in LOADS (gate.loads/lookup's rule: the step, its rotated check's part or subset, the union of its step's
+  parts, its step's), or nil"
+  [loads ^String nm]
+  (when (seq loads)
+    (let [strip (fn [^String n] (str/replace n #"\.(sub|s[0-9]+|whole)$" ""))
+          n1 (strip nm)
+          base (first (str/split n1 #"\." 2))
+          parts (for [[k v] loads :when (str/starts-with? (str k) (str base "."))] v)]
+      (or (get loads nm) (get loads n1) (get loads (str n1 ".sub"))
+          (when (seq parts)
+            {:from "parts" :reads (vec (distinct (mapcat :reads parts)))
+             :never (vec (filter (fn [f] (every? #(some #{f} (:never %)) parts)) [:go :c]))})
+          (get loads base)))))
+
+(def ^:private family-nss {:go '[arbace.go] :c '[arbace.c arbace.repr.c]})
+
+(defn- mentions
+  "the checkout's namespace sources a source F names in its text (GD3's closure over the audited reads: a namespace
+  required since the audit, also by a (require 'NS) in its code, arbace.go.run's of arbace.go.escape): every arbace.NAME
+  whose source is a file of FILES, every (load \"PATH\") relative to F's directory (or to the root, a leading /);
+  memoized in MEMO"
+  [root files memo ^String f]
+  (or (get @memo f)
+      (let [txt (try (slurp (str root "/" f)) (catch Throwable _ ""))
+            dir (let [i (.lastIndexOf f "/")] (if (pos? i) (subs f 0 i) ""))
+            named (for [[_ n] (re-seq #"(?<![A-Za-z0-9_./-])(arbace(?:\.[A-Za-z0-9_-]+)+)" txt)
+                        :let [p (str (ns-path n) ".ae")]
+                        :when (contains? files p)]
+                    p)
+            loaded (for [[_ l] (re-seq #"\(load \"([^\"]+)\"" txt)
+                         :let [p (str (if (str/starts-with? l "/") (subs l 1) (str dir "/" l)) ".ae")]
+                         :when (contains? files p)]
+                     p)
+            v (set (concat named loaded))]
+        (swap! memo assoc f v)
+        v)))
+
+(defn closure
+  "the files of a load closure: the entry's reads (under arbace/) that are files of FILES, and every source they name,
+  transitively"
+  [root files memo reads]
+  (loop [seen (set (filter #(contains? files %) reads)) todo (vec seen)]
+    (if-let [f (peek todo)]
+      (let [new (remove seen (mentions root files memo f))]
+        (recur (into seen new) (into (pop todo) new)))
+      seen)))
+
+(defn with-loads
+  "STEP with its load closure (GDS9 (a)) when LOADS has its entry: :closure, the files under arbace/ its key keeps (its
+  arbace/ files that the closure leaves out are not in its key), and on a program host (:prog, :javac-prog) the families
+  of namespaces it never loaded added to its :never-loads (goi's arbace.go, C's arbace.c and arbace.repr.c: their units
+  out of the host's identity, their sources out of its files)"
+  [root files memo loads step]
+  (if-let [e (loads-entry loads (str (:name step)))]
+    (let [prog? (some #{:prog :javac-prog} (:hosts step))
+          extra (when prog? (mapcat family-nss (map keyword (:never e))))
+          nl (vec (distinct (concat (:never-loads step) extra)))]
+      (cond-> (assoc step :closure (closure root files memo (:reads e)))
+        (seq extra) (assoc :never-loads nl)))
+    step))
+
+(defn in-closure?
+  "is the file P kept by the step's :closure (a file outside arbace/ always is)"
+  [step ^String p]
+  (let [cl (:closure step)]
+    (or (nil? cl) (not (str/starts-with? p "arbace/")) (contains? cl p))))
 
 (defn- material
   "the lines a step's key is the hash of (but its :uses lines, use-lines'); a host whose identity is
   pending gives the line host NAME pending"
   [step rules files hosts cache]
-  (let [decl (into (sorted-map) (apply dissoc step unkeyed))
-        logic ["bin/lib/gate-run.bash" "bin/lib/gate-cache.bash" "test/gate/plan.ae"]
-        sel (sort (matching cache (keys files) (into (vec rules) (never-rules (:never-loads step)))))]
+  (let [;; (GD3: :keyed, the :needs and :start-after the table declares, when the plan dropped a weekly step's: the key the same
+        ;; on the weekly night and the others)
+        decl (into (sorted-map) (apply dissoc (merge step (:keyed step)) unkeyed))
+        ;; GDS11 (a), GD3: the logic's one line, the epoch (bin/lib/gate-run.bash, bin/lib/gate-cache.bash and this file before)
+        logic [epoch-file]
+        sel (sort (distinct (concat (filter #(in-closure? step %) (matching cache (keys files) (into (vec rules) (never-rules (:never-loads step)))))
+                                    ;; GD3: a weekly step's :also-changed files (expanded rules) are its key's too, so that its
+                                    ;; latest pass's material names them (also-why)
+                                    (when-let [a (:also-changed step)] (matching cache (keys files) a)))))]
     (concat
      [(str "step " (:name step))
       (str "decl " (pr-str decl))]
@@ -302,7 +399,10 @@
        (fn [s]
          (let [nm (str (:name s))]
            (concat
-            (when-not (#{:pre :build :essential :full :oracle} (:phase s)) [(str nm ": unknown :phase " (:phase s))])
+            (when-not (#{:pre :build :essential :full :weekly :oracle} (:phase s)) [(str nm ": unknown :phase " (:phase s))])
+            ;; GD3: :also-changed (input rules: a :weekly step runs on another night when the files they select changed since
+            ;; its latest pass) on a :weekly step alone
+            (when (and (:also-changed s) (not= :weekly (:phase s))) [(str nm ": :also-changed on a step that is not :phase :weekly")])
             (when-not (contains? #{nil :check :build :always} (:kind s)) [(str nm ": unknown :kind " (:kind s))])
             (for [x (:needs s) :when (not (known (str x)))] (str nm ": :needs names no step: " x))
             ;; night 7 (crops-score ran beside reap and found no status): the essential phase runs its chains at once and
@@ -356,7 +456,8 @@
                   :let [sc (second t)]
                   :when (not (ok-script? sc))]
               (str nm ": :cmd runs " sc ", which is not a file"))
-            (check-rules groups nm (:inputs s) paths cache))))
+            (check-rules groups nm (:inputs s) paths cache)
+            (check-rules groups (str nm "'s :also-changed") (:also-changed s) paths cache))))
        steps)
       (mapcat (fn [[g rules]] (check-rules groups (str "group " g) rules paths cache)) groups)))))
 
@@ -566,6 +667,8 @@
                     mk (fn [suffix ids tag]
                          (-> (dissoc s :rotate)
                              (assoc :name (symbol (str (:name s) "." suffix)) :rotation tag :list ids
+                                    ;; (GD2: the universe's size, for the plan's view: a check's share of its part's time)
+                                    :universe-n (count (:universe lists))
                                     :rotated-part (str (:name s)) :failed-re (:failed-re (:rotate s))
                                     :failed-as (:failed-as (:rotate s))
                                     :cmd (with-only (:cmd s) frag))))]
@@ -599,7 +702,29 @@
              (:uses s) (update :uses fix-uses)
              (:start-after s) (update :start-after #(if-let [n (get renamed (str %))] (last n) %)))))))
 
-(defn plan [root logs store mode rerun? & [rotation]]
+(defn- also-why
+  "GD3 (GDS4 (b), the user's (2) of 2026-11-13): why a :weekly step with :also-changed runs on a night that is not the weekly
+  one, or nil: the files its :also-changed rules select among its key's files changed since its latest pass (any file
+  added, changed or removed), or it never passed. The latest pass's material (KEY.inputs) is the reference"
+  [store step sel]
+  (let [rules (:also-changed step)
+        m (fn [paths] (matching (atom {}) paths rules))
+        path (fn [l] (last (str/split l #" " 3)))
+        now (let [ps (m (map path sel))] (set (filter #(ps (path %)) sel)))
+        p (first (passes store (str (:name step))))
+        then (when p (try (str/split-lines (slurp (str/replace (:file p) #"\.edn$" ".inputs"))) (catch Throwable _ nil)))]
+    (cond
+      (nil? p) "weekly, run tonight: it never passed"
+      (nil? then) "weekly, run tonight: its latest pass has no material"
+      :else (let [tf (filter #(str/starts-with? % "file ") then)
+                  ps (m (map #(last (str/split % #" " 3)) tf))
+                  was (set (filter #(ps (last (str/split % #" " 3))) tf))
+                  diff (concat (remove was now) (remove now was))]
+              (when (seq diff)
+                (str "weekly, run tonight: its :also-changed files changed since its pass at " (subs (str (:key p)) 0 12)
+                     " (" (:date p) "): " (short-list (distinct (map subject diff)))))))))
+
+(defn plan [root logs store mode rerun? & [rotation weekly?]]
   (set-counted! (str logs "/ancestors.txt"))
   (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
         steps (expand-parts steps)
@@ -616,7 +741,38 @@
             (println (str "gate plan: " root "/test/gate/steps.edn has " (count problems) " problem(s):"))
             (doseq [p problems] (println (str "   " p)))
             (System/exit 1))
-        steps (filter #(phases (:phase %)) steps)
+        ;; GD3 (GDS9 (a)): each step's load closure (test/gate/loads.edn), before the phases: a weekly step's :also-changed
+        ;; is judged on the files its key holds
+        memo (atom {})
+        loads (read-loads root)
+        steps (map #(cond-> (with-loads root files memo loads %)
+                      (:also-changed %) (update :also-changed (fn [a] (expand groups a))))
+                   steps)
+        weekly-names (set (for [s steps :when (= :weekly (:phase s))] (str (:name s))))
+        ;; GD3 (GDS4 (b)): the weekly phase, --full's steps of the weekly tier (bin/gate --weekly, the clean run, --audit:
+        ;; WEEKLY?); on another night of --full or --nightly a :weekly step with :also-changed whose files changed since its
+        ;; latest pass. A weekly step in the plan is a :full one (its chain and order the table's)
+        week (fn [s] (when (and full? (= :weekly (:phase s)))
+                       (if weekly?
+                         "the weekly tier"
+                         (when (:also-changed s)
+                           (also-why store s (for [l (material s (expand groups (:inputs s)) files hosts cache)
+                                                   :when (str/starts-with? l "file ")] l))))))
+        steps (keep (fn [s] (if (= :weekly (:phase s))
+                              (when-let [w (week s)] (assoc s :phase :full :weekly true :weekly-why w))
+                              (when (phases (:phase s)) s)))
+                    steps)
+        ;; a :needs, :uses or :start-after naming a weekly step this plan leaves out is dropped (as a :clean-only part's)
+        gone (reduce disj weekly-names (map (comp str :name) steps))
+        steps (if (empty? gone)
+                steps
+                (for [s steps]
+                  (cond-> (if (or (some #(gone (str %)) (:needs s)) (gone (str (:start-after s))))
+                            (assoc s :keyed (select-keys s [:needs :start-after]))
+                            s)
+                    (:needs s) (update :needs #(vec (remove (fn [x] (gone (str x))) %)))
+                    (:uses s) (update :uses #(vec (remove (fn [u] (gone (producer u))) %)))
+                    (and (:start-after s) (gone (str (:start-after s)))) (dissoc :start-after))))
         ;; GT8.4: the rotated parts (--nightly: the subset and the night's slice; the clean run: the subset)
         _ (when (and (= mode "nightly") (not (integer? rotation)))
             (println "gate plan: nightly needs --night N") (System/exit 2))
@@ -635,7 +791,8 @@
             (spit (str rdir "/" (:name s) ".list") (apply str (map #(str % "\n") l)))
             (spit (str rdir "/" (:name s) ".rot")
                   (str "part\t" (:rotated-part s) "\nslice\t" tag "\nruns\t" rn "\nlist-sha\t" (list-sha l)
-                       "\nfailed-re\t" (or (:failed-re s) "") "\nfailed-as\t" (or (:failed-as s) "\\1") "\n")))
+                       "\nfailed-re\t" (or (:failed-re s) "") "\nfailed-as\t" (or (:failed-as s) "\\1") "\n"
+                       (when-let [u (:universe-n s)] (str "universe\t" u "\n")))))
         ;; GT8: a judge of rotated checks (:judges {:failed-re ERE :failed-as REPL}): its producers and expressions, for
         ;; the runner's judge_note (a producer that is not rotated has no .rot and is passed over)
         _ (doseq [s steps :when (:judges s) :let [j (:judges s)]]
@@ -701,7 +858,8 @@
                                                 (str "changed since the pass at " (subs (str (:key p)) 0 12) " (" (:date p) "): "
                                                      (short-list (changes lines then)))
                                                 (str "no pass at this key (the latest " (subs (str (:key p)) 0 12) ")")))))})
-                     d (merge {:step s :name nm :kind kind :budget bud} d)]
+                     d (merge {:step s :name nm :kind kind :budget bud} d)
+                     d (if-let [w (:weekly-why s)] (update d :why #(str w "; " %)) d)]
                  (-> acc (update :v conj d) (assoc-in [:by nm] d))))))
          {:v [] :by {}} steps)
         decided (:v decided)
@@ -843,8 +1001,9 @@
                  night (second (drop-while #(not= "--night" %) more))
                  rot (second (drop-while #(not= "--rotation" %) more))]
              (plan root logs store mode (some #{"--rerun"} more)
-                   (cond night (Long/parseLong night) (= rot "subset") :subset :else nil)))
+                   (cond night (Long/parseLong night) (= rot "subset") :subset :else nil)
+                   (boolean (some #{"--weekly"} more))))
     "rotation-status" (let [[_ root store & more] args] (rotation-status root store more))
     "why" (let [[_ root logs store nm] args] (why root logs store nm))
-    (do (println "usage: gate.plan plan ROOT LOGS STORE MODE [--rerun] [--night N|--rotation subset] | why ROOT LOGS STORE NAME | rotation-status ROOT STORE")
+    (do (println "usage: gate.plan plan ROOT LOGS STORE MODE [--rerun] [--night N|--rotation subset] [--weekly] | why ROOT LOGS STORE NAME | rotation-status ROOT STORE")
         (System/exit 2))))
