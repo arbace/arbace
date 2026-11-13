@@ -31,6 +31,9 @@ The current state of the work (as of 2026-11-09). This file is rewritten as thin
   Branch `gf-gate` (2026-11-12, night 12's 45 failures): the gate's own bugs fixed (lanes-test and cpp-selftest environment, the
   jdk corpus steps' memory declarations, haskell-lib's chain, repr-clojure's count); haskell-roundtrip and rust-roundtrip out of
   `--full` (their parts `:clean-only`, `GATE_ALL_PARTS=1`) until their records and printers are fixed.
+- **The gate's diet** (2026-11-13, [GATE-DIET-SURVEY.md](GATE-DIET-SURVEY.md), branch `gate-diet`): night 13 took 18.6 h for a
+  6 h budget, rerunning 311 of 331 steps; GDS1-GDS20 and the stages GD1-GD6 wait for the user. GD1 (a day): nights on
+  `--nightly`, a weekly tier, gate-tests out of the essential path, `:tools`/`:c` narrowed, memory declarations from the store.
 - **The host** (Alpine edge, amd64, /dev/kvm; [ALPINE.md](ALPINE.md)): 62 GB of memory; the disk at 79% (the night's steps
   stop at 90%; agents' rule 80%). The Mac peer, an arm64 VM, develops the Python crop through the queue.
 - The JVM runs only the frozen jar of `arbace-for-java-26-v4` (the oracle's reference, the edges' recordings, the data

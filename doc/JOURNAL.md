@@ -5499,3 +5499,26 @@ Considered:
 
 (The other nested failures in next's `.tmp/tmp/gate-reads.*.out` of 12:51-13:07, audited-test and audit-trace-test, came
 from runs that were not the gate's step and were not looked into.)
+
+## 2026-11-13: GATE-DIET-SURVEY, the gate measured and a diet proposed (branch `gate-diet`, from `mac/next` `3b25e0d43`)
+
+The user (2026-11-13): "Our testing harness is still a behemoth, that we need to address asap." doc/GATE-DIET-SURVEY.md measures
+night 13's serial `bin/gate --full` (`.tmp/night13/g-full-1.log`, next `265cab86a`, 18.6 h, 339 steps, 21 failed), the store of
+passes (`.tmp/gate-pass/`: each pass's seconds, CPU, peaks and `.inputs`), today's plans (`bin/gate --full --plan`,
+`bin/gate --nightly --plan`), `bin/gate --full --costs` and `--mem-check`, and `du`/`find` over `.tmp` and `~/.cache`. Its
+per-step data is `doc/gate-diet/costs-2026-11-13.tsv`. Nothing was run beyond those reads and plans; no key moves (docs only).
+
+Findings: the steps' wall sums to 30 h 24 min and 145 CPU-hours (7.8 of 64 cores); Java 23%, C 16%, C++ 12%, Rust 10%. The keyed
+night reran 311 of 331 steps: comparing each pass's `.inputs` with the one before, `arbace/go/escape.ae` reran 176 steps and four
+C record files 138 (79 for nothing else); night 12's gate-logic change rekeyed 163. GT8.4's `bin/gate --nightly` (decided GTS202)
+never ran at night (`_rotation/` holds no slice's runs); its Java subsets are 80-96% of their corpora. Four `repr-java-*.jdk`
+parts peak at 47-61 GiB; 19 steps are declared under their peaks and 82 parts far above (java-interp 53 GiB for 0.5-13.6).
+`:tools` misses five crop exclusions (`arbace/rust/`, `arbace/llvm/`, `arbace/asm/`, `arbace/repr/asm*`), so an asm edit reruns
+201 steps. `.tmp` holds 121 GiB: 48 worktrees 74 GiB (15 merged, about 18 GiB), `keep/` 15.5 GiB, 711 unreferenced scratch
+entries 22.9 GiB. Twenty self-inflicted failures of the week are listed with the rule that prevents each.
+
+Proposed (none decided): GDS1-GDS20 and the stages GD1-GD6. GD1, a day of table edits and small fixes: the night on
+`--nightly`, a weekly tier for the >40 GiB and the longest crop steps, gate-tests out of the essential path, `:tools` and `:c`
+narrowed, declarations from `--mem-check`; estimated serial 16.8 h to about 12 h, and about 7 h of wall concurrent at peaks
+<= 40 GiB. Alternatives considered: a 6 h serial budget (GTS200's letter: most corpora weekly), and narrowing keys by crop
+alone (it would have saved 2 h of night 13: the day's own churn, not the fan-out across crops, dominates).
