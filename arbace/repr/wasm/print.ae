@@ -1,0 +1,157 @@
+(ns arbace.repr.wasm.print
+  "repr/wasm's canonical text printer (doc/wasm/SPEC.md §7.4; doc/wasm/WASM-SURVEY.md §5, WA2): Wasm forms as the text format,
+  flat (one instruction a line, unfolded), every index numeric, every type use explicit (`(type N)`), every memory
+  argument's offset and alignment written, the fields in the binary's section order. What the text format has no field
+  for (custom sections, the name section's names, the binary's data count section) is not printed: `print-items` names
+  the forms the text keeps, and the print level compares those (mode :full's text, later, keeps the rest as annotations)."
+  (:require [arbace.repr.wasm.binary :as bin]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn print-items
+  "The items as the text keeps them: no custom section, no names, no data count section."
+  [items]
+  (vec (for [it items
+             :when (not (#{'wasm/custom 'wasm/names 'wasm/datacount} (first it)))]
+         (case (first it)
+           wasm/func (apply list 'wasm/func (second it) (dissoc (nth it 2) :name :local-names) (drop 3 it))
+           wasm/import (let [[_ m n [k i d]] it] (list 'wasm/import m n (list k i (if (map? d) (dissoc d :name :local-names) d))))
+           it))))
+
+(defn- vt ^String [t] (pr-str t))
+
+(defn- flt ^String [x ^long bits]
+  (cond
+    (seq? x) (let [b (long (second x))
+                   neg (if (= bits 32) (not (zero? (bit-and b 0x80000000))) (neg? b))
+                   p (if (= bits 32) (bit-and b 0x7fffff) (bit-and b 0xfffffffffffff))]
+               (str (if neg "-" "") "nan:0x" (Long/toHexString p)))
+    (Double/isInfinite (double x)) (if (pos? (double x)) "inf" "-inf")
+    :else (let [d (double x)]
+            ;; hexadecimal, exact for both widths
+            (Double/toHexString d))))
+
+(defn- string-lit ^String [^bytes bs]
+  (let [sb (StringBuilder. "\"")]
+    (dotimes [i (alength bs)]
+      (let [c (bit-and (long (aget bs i)) 0xff)]
+        (if (and (>= c 0x20) (< c 0x7f) (not= c 0x22) (not= c 0x5c))
+          (.append sb (char c))
+          (.append sb (format "\\%02x" c)))))
+    (.append sb "\"")
+    (str sb)))
+
+(defn- name-lit ^String [^String s] (string-lit (.getBytes s java.nio.charset.StandardCharsets/UTF_8)))
+
+(defn- hexbytes ^bytes [h] (.parseHex (java.util.HexFormat/of) ^CharSequence (second h)))
+
+(defn- bt ^String [m]
+  (let [t (:bt m)] (cond (nil? t) "" (vector? t) (str " (result " (vt (first t)) ")") :else (str " (type " t ")"))))
+
+(defn- memarg ^String [m]
+  (str (when (contains? m :memory) (str " " (:memory m))) " offset=" (Long/toUnsignedString (long (:offset m)))
+       " align=" (Long/toUnsignedString (bit-shift-left 1 (long (:align m))))))
+
+(defn- reft ^String [t] (pr-str t))
+
+(defn- instr-line
+  "The text of a plain (non-structured) instruction."
+  ^String [x]
+  (let [nm (str (first x)) a (rest x)]
+    (case nm
+      ("i32.const" "i64.const") (str nm " " (first a))
+      "f32.const" (str nm " " (flt (first a) 32))
+      "f64.const" (str nm " " (flt (first a) 64))
+      "v128.const" (str nm " i8x16 " (str/join " " (map #(bit-and (long %) 0xff) (hexbytes (first a)))))
+      "select" (if (seq a) (str nm " (result" (apply str (map #(str " " (vt %)) (first a))) ")") nm)
+      "br_table" (str nm " " (str/join " " (concat (first a) [(second a)])))
+      ("call_indirect" "return_call_indirect") (str nm " " (first a) " (type " (second a) ")")
+      "i8x16.shuffle" (str nm " " (str/join " " (first a)))
+      ("ref.test" "ref.cast") (str nm " " (reft (first a)))
+      ("br_on_cast" "br_on_cast_fail") (str nm " " (first a) " " (reft (second a)) " " (reft (nth a 2)))
+      (cond
+        (and (seq a) (map? (first a))) (str nm (memarg (first a)) (when (second a) (str " " (second a))))
+        :else (str nm (apply str (map #(str " " (if (symbol? %) (str %) (pr-str %))) a)))))))
+
+(defn- emit [^StringBuilder sb xs ^long depth]
+  (let [ind (apply str (repeat (min 40 (* 2 depth)) " "))]
+    (doseq [x xs]
+      (case (first x)
+        (block loop) (do (.append sb (str ind (first x) (bt (second x)) "\n"))
+                         (emit sb (nth x 2) (inc depth))
+                         (.append sb (str ind "end\n")))
+        if (do (.append sb (str ind "if" (bt (second x)) "\n"))
+               (emit sb (nth x 2) (inc depth))
+               (when (> (count x) 3)
+                 (.append sb (str ind "else\n"))
+                 (emit sb (nth x 3) (inc depth)))
+               (.append sb (str ind "end\n")))
+        try_table (do (.append sb (str ind "try_table" (bt (second x))
+                                       (apply str (map (fn [c] (str " (" (str/join " " c) ")")) (nth x 2))) "\n"))
+                      (emit sb (nth x 3) (inc depth))
+                      (.append sb (str ind "end\n")))
+        (.append sb (str ind (instr-line x) "\n"))))))
+
+(defn- expr-text ^String [xs]
+  (let [sb (StringBuilder.)] (emit sb xs 0) (str/trim (str/replace (str sb) "\n" " "))))
+
+(defn- limits ^String [l]
+  (str (when (:i64 l) " i64") " " (Long/toUnsignedString (long (:min l))) (when (:max l) (str " " (Long/toUnsignedString (long (:max l)))))))
+
+(defn- field ^String [[_ t m]] (if m (str "(field (mut " t "))") (str "(field " (vt t) ")")))
+
+(defn- comptype ^String [c]
+  (case (first c)
+    func (str "(func" (when (seq (nth c 1)) (str " (param" (apply str (map #(str " " (vt %)) (nth c 1))) ")"))
+              (when (seq (nth c 2)) (str " (result" (apply str (map #(str " " (vt %)) (nth c 2))) ")")) ")")
+    struct (str "(struct" (apply str (map #(str " " (field %)) (nth c 1))) ")")
+    array (let [[_ t m] (nth c 1)] (str "(array " (if m (str "(mut " t ")") (vt t)) ")"))
+    sub (let [{:keys [final supers]} (second c)]
+          (str "(sub" (when final " final") (apply str (map #(str " " %) supers)) " " (comptype (nth c 2)) ")"))))
+
+(defn module-text
+  "The canonical text of a module's items."
+  ^String [items]
+  (let [sb (StringBuilder. "(module\n")]
+    (doseq [it (print-items items)]
+      (case (first it)
+        wasm/type (.append sb (str "  (type (;" (second it) ";) " (comptype (nth it 2)) ")\n"))
+        wasm/rec (.append sb (str "  (rec" (apply str (map #(str " (type " (comptype %) ")") (nth it 2))) ")\n"))
+        wasm/import (let [[_ m n [k i d]] it]
+                      (.append sb (str "  (import " (name-lit m) " " (name-lit n) " ("
+                                       (case k
+                                         func (str "func (type " (:type d) ")")
+                                         tag (str "tag (type " (:type d) ")")
+                                         table (str "table" (limits d) " " (vt (:type d)))
+                                         memory (str "memory" (limits d))
+                                         global (str "global " (if (:mut d) (str "(mut " (vt (:type d)) ")") (vt (:type d)))))
+                                       "))\n")))
+        wasm/func (let [m (nth it 2)]
+                    (.append sb (str "  (func (;" (second it) ";) (type " (:type m) ")"
+                                     (when (seq (:locals m)) (str " (local" (apply str (map #(str " " (vt %)) (:locals m))) ")")) "\n"))
+                    (emit sb (drop 3 it) 2)
+                    (.append sb "  )\n"))
+        wasm/table (let [d (nth it 2)]
+                     (.append sb (str "  (table (;" (second it) ";)" (limits d) " " (vt (:type d))
+                                      (when (:init d) (str " " (expr-text (:init d)))) ")\n")))
+        wasm/memory (.append sb (str "  (memory (;" (second it) ";)" (limits (nth it 2)) ")\n"))
+        wasm/tag (.append sb (str "  (tag (;" (second it) ";) (type " (:type (nth it 2)) "))\n"))
+        wasm/global (let [d (nth it 2)]
+                      (.append sb (str "  (global (;" (second it) ";) " (if (:mut d) (str "(mut " (vt (:type d)) ")") (vt (:type d)))
+                                       " " (expr-text (nth it 3)) ")\n")))
+        wasm/export (let [[_ n [k i]] it] (.append sb (str "  (export " (name-lit n) " (" k " " i "))\n")))
+        wasm/start (.append sb (str "  (start " (second it) ")\n"))
+        wasm/elem (let [m (nth it 2)
+                        mode (cond (:passive m) "" (:declare m) " declare"
+                                   :else (str " (table " (get-in m [:active :table]) ") (offset " (expr-text (get-in m [:active :offset])) ")"))
+                        init (if (contains? m :funcs)
+                               (str " func" (apply str (map #(str " " %) (:funcs m))))
+                               (str " " (vt (:type m)) (apply str (map #(str " (item " (expr-text %) ")") (:exprs m)))))]
+                    (.append sb (str "  (elem (;" (second it) ";)" mode init ")\n")))
+        wasm/data (let [m (nth it 2)
+                        mode (if (:passive m) ""
+                                 (str " (memory " (get-in m [:active :memory]) ") (offset " (expr-text (get-in m [:active :offset])) ")"))]
+                    (.append sb (str "  (data (;" (second it) ";)" mode " " (string-lit (hexbytes (nth it 3))) ")\n")))))
+    (.append sb ")\n")
+    (str sb)))

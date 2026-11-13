@@ -1,0 +1,791 @@
+(ns arbace.repr.wasm.text
+  "repr/wasm's text format reader (doc/wasm/SPEC.md §7; the specification's chapter 6, Wasm 3.0's grammar; WA2): a module's
+  S-expression (arbace.repr.wasm.lex) into the same Wasm forms the binary decoder makes (arbace.repr.wasm.binary), so that
+  a module's text and its binary read to equal forms. Identifiers resolve to indices and are not kept (WA2; the text's
+  spelling is mode :full's, later); the abbreviations are expanded as the specification's text chapter defines them:
+  inline imports and exports, inline type uses (a function type not defined is appended to the type section in the order
+  of its first use), folded instructions, `(param $x t)`, a table's inline elements and a memory's inline data, the MVP's
+  element and data spellings. A malformed text throws ex-info {:wasm/malformed MSG} with the reference interpreter's
+  message where the testsuite states one (\"unexpected token\", \"unknown operator\", \"constant out of range\", \"unknown
+  label\", \"import after function\", ...)."
+  (:require [arbace.repr.wasm.lex :as lex]
+            [arbace.repr.wasm.ops :as ops]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- malformed
+  ([msg] (throw (ex-info msg {:wasm/malformed msg})))
+  ([msg x] (throw (ex-info (str msg (when-let [p (:p x)] (str " (at char " p ")"))) {:wasm/malformed msg :at (:p x)}))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; numbers
+
+(defn- digits ^String [^String s] (str/replace s "_" ""))
+
+(defn- big-int
+  "An integer literal's value (BigInteger), sign included; nil when it is not one."
+  [^String s]
+  (when (re-matches #"[+-]?(?:[0-9](?:_?[0-9])*|0x[0-9a-fA-F](?:_?[0-9a-fA-F])*)" s)
+    (let [neg (.startsWith s "-")
+          s (digits (if (or (.startsWith s "-") (.startsWith s "+")) (subs s 1) s))
+          v (if (.startsWith s "0x") (BigInteger. (subs s 2) 16) (BigInteger. s 10))]
+      (if neg (.negate v) v))))
+
+(defn- nat ^long [x]
+  (when-not (= :num (:t x)) (malformed "unexpected token" x))
+  (let [s (:s x) v (when-not (re-find #"^[+-]" s) (big-int s))]
+    (when-not v (malformed "unexpected token" x))
+    (when (> (.bitLength ^BigInteger v) 32) (malformed "constant out of range" x))
+    (.longValue ^BigInteger v)))
+
+(defn- nat64 ^long [x]
+  (when-not (= :num (:t x)) (malformed "unexpected token" x))
+  (let [s (:s x) v (when-not (re-find #"^[+-]" s) (big-int s))]
+    (when-not v (malformed "unexpected token" x))
+    (when (> (.bitLength ^BigInteger v) 64) (malformed "constant out of range" x))
+    (.longValue ^BigInteger v)))
+
+(defn- int-lit
+  "An i32 or i64 literal (`bits` 32 or 64): signed or unsigned spelling, the value as a signed long."
+  ^long [x ^long bits]
+  (when-not (= :num (:t x)) (malformed "unexpected token" x))
+  (let [v (big-int (:s x))]
+    (when-not v (malformed "unexpected token" x))
+    (let [lo (.negate (.shiftLeft BigInteger/ONE (int (dec bits))))
+          hi (.subtract (.shiftLeft BigInteger/ONE (int bits)) BigInteger/ONE)]
+      (when (or (neg? (.compareTo ^BigInteger v lo)) (pos? (.compareTo ^BigInteger v hi))) (malformed "constant out of range" x))
+      (let [m (if (neg? (.signum ^BigInteger v)) v v)]
+        (if (= bits 32)
+          (long (unchecked-int (.longValue ^BigInteger m)))
+          (.longValue ^BigInteger m))))))
+
+(defn- float-lit
+  "An f32 or f64 literal's form: a double, or (:nan BITS)."
+  [x ^long bits]
+  (when-not (= :num (:t x)) (malformed "unexpected token" x))
+  (let [s (:s x)
+        neg (.startsWith ^String s "-")
+        body (if (or (.startsWith ^String s "-") (.startsWith ^String s "+")) (subs s 1) s)
+        f32? (= bits 32)]
+    (cond
+      (= body "inf") (if neg ##-Inf ##Inf)
+      (= body "nan") (list :nan (if f32? (+ (if neg 0x80000000 0) 0x7fc00000) (bit-or (if neg Long/MIN_VALUE 0) 0x7ff8000000000000)))
+      (.startsWith ^String body "nan:0x")
+      (let [p (BigInteger. (digits (subs body 6)) 16)
+            mb (if f32? 23 52)]
+        (when (or (zero? (.signum p)) (> (.bitLength p) mb)) (malformed "constant out of range" x))
+        (list :nan (if f32?
+                     (+ (if neg 0x80000000 0) 0x7f800000 (.longValue p))
+                     (bit-or (if neg Long/MIN_VALUE 0) 0x7ff0000000000000 (.longValue p)))))
+      :else
+      (let [t (digits body)
+            t (if (and (.startsWith t "0x") (not (re-find #"[pP]" t))) (str t "p0") t)
+            t (if (.startsWith t "0x") (str/replace t #"\.([pP])" ".0$1") t)
+            v (if f32? (double (Float/parseFloat (str (if neg "-" "") t))) (Double/parseDouble (str (if neg "-" "") t)))]
+        (when (Double/isInfinite v) (malformed "constant out of range" x))
+        v))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the instruction table, by name
+
+(def ^:private kinds
+  ;; name -> [kind ...] (ref.test and ref.cast two; select two)
+  (reduce (fn [m [_ _ n k]] (update m n (fnil conj []) k)) {} ops/rows))
+
+(def ^:private idx-space
+  ;; the index space of an :idx instruction's immediate (:table and :memory optional, 0 when omitted)
+  {"throw" :tag "br" :label "br_if" :label "call" :func "return_call" :func "call_ref" :type "return_call_ref" :type
+   "local.get" :local "local.set" :local "local.tee" :local "global.get" :global "global.set" :global
+   "table.get" :table "table.set" :table "table.grow" :table "table.size" :table "table.fill" :table
+   "memory.size" :memory "memory.grow" :memory "memory.fill" :memory "ref.func" :func "br_on_null" :label "br_on_non_null" :label
+   "struct.new" :type "struct.new_default" :type "array.new" :type "array.new_default" :type "array.get" :type
+   "array.get_s" :type "array.get_u" :type "array.set" :type "array.fill" :type "data.drop" :data "elem.drop" :elem})
+
+(def ^:private idx2-space
+  ;; [space1 space2 optional?] in the forms' order
+  {"memory.copy" [:memory :memory true] "table.copy" [:table :table true] "array.copy" [:type :type false]
+   "array.new_data" [:type :data false] "array.new_elem" [:type :elem false] "array.init_data" [:type :data false]
+   "array.init_elem" [:type :elem false] "memory.init" [:memory :data true] "table.init" [:table :elem true]})
+
+(defn- natural-align
+  "The natural alignment exponent of a load or store."
+  ^long [^String nm]
+  (let [[_ a _ b] (re-find #"(?:load|store)(\d+)(x(\d+))?" nm)
+        bits (cond b (* (Long/parseLong a) (Long/parseLong b))
+                   a (Long/parseLong a)
+                   (.startsWith nm "v128") 128
+                   :else (Long/parseLong (subs nm 1 3)))]
+    (Long/numberOfTrailingZeros (quot bits 8))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the context: index spaces and their identifiers
+
+(defn- new-ctx []
+  {:ids (atom {}) :counts (atom {}) :types (atom []) :implicit (atom []) :fields (atom {}) :defined (atom #{})})
+
+(defn- bind! [ctx space id x]
+  (let [n (get @(:counts ctx) space 0)]
+    (when id
+      (when (contains? (get @(:ids ctx) space) id) (malformed (str "duplicate " (name space)) x))
+      (swap! (:ids ctx) assoc-in [space id] n))
+    (swap! (:counts ctx) assoc space (inc n))
+    n))
+
+(defn- resolve-idx
+  "An index or an identifier of `space` (a type's index must name a defined type: the text needs its definition)."
+  ^long [ctx space x]
+  (case (:t x)
+    :num (nat x)
+    :id (or (get-in @(:ids ctx) [space (:s x)]) (malformed (str "unknown " (name space) " $" (:s x)) x))
+    (malformed "unexpected token" x)))
+
+(defn- idx? [x] (or (= :id (:t x)) (and (= :num (:t x)) (not (re-find #"^[+-]" (:s x))) (big-int (:s x)))))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; types
+
+(def ^:private valtypes
+  #{"i32" "i64" "f32" "f64" "v128" "funcref" "externref" "anyref" "eqref" "i31ref" "structref" "arrayref" "exnref"
+    "nullref" "nullfuncref" "nullexternref" "nullexnref"})
+(def ^:private heaptypes #{"func" "extern" "any" "eq" "i31" "struct" "array" "exn" "none" "nofunc" "noextern" "noexn"})
+
+(defn- heaptype [ctx x]
+  (cond
+    (and (= :kw (:t x)) (heaptypes (:s x))) (symbol (:s x))
+    (idx? x) (resolve-idx ctx :type x)
+    :else (malformed "unexpected token" x)))
+
+(defn- valtype [ctx x]
+  (cond
+    (and (= :kw (:t x)) (valtypes (:s x))) (symbol (:s x))
+    (lex/list-of? x "ref")
+    (let [[_ a b & more] (:xs x)]
+      (cond
+        (and (lex/kw? a "null") b (nil? more)) (list 'ref 'null (heaptype ctx b))
+        (and a (nil? b)) (list 'ref (heaptype ctx a))
+        :else (malformed "unexpected token" x)))
+    :else (malformed "unexpected token" x)))
+
+(defn- storagetype [ctx x]
+  (if (and (= :kw (:t x)) (#{"i8" "i16"} (:s x))) (symbol (:s x)) (valtype ctx x)))
+
+(defn- fieldtype [ctx x]
+  (if (lex/list-of? x "mut")
+    (let [[_ t & more] (:xs x)] (when (or (nil? t) more) (malformed "unexpected token" x)) (list 'field (storagetype ctx t) true))
+    (list 'field (storagetype ctx x) false)))
+
+(defn- params+results
+  "The (param ...) and (result ...) lists at the head of `xs`: [params param-ids results rest]; with `anon`, a named param
+  is malformed (block types, call_indirect: the text's grammar names params only in functions)."
+  ([ctx xs] (params+results ctx xs false))
+  ([ctx xs anon]
+  (loop [xs xs ps [] ids [] rs [] seen-result false]
+    (let [x (first xs)]
+      (cond
+        (lex/list-of? x "param")
+        (do (when seen-result (malformed "unexpected token" x))
+            (let [ys (rest (:xs x))]
+              (if (= :id (:t (first ys)))
+                (do (when (or anon (not= 2 (count ys))) (malformed "unexpected token" x))
+                    (recur (rest xs) (conj ps (valtype ctx (second ys))) (conj ids (:s (first ys))) rs false))
+                (let [ts (mapv #(valtype ctx %) ys)]
+                  (recur (rest xs) (into ps ts) (into ids (repeat (count ts) nil)) rs false)))))
+        (lex/list-of? x "result")
+        (let [ys (rest (:xs x))]
+          (when (= :id (:t (first ys))) (malformed "unexpected token" x))
+          (recur (rest xs) ps ids (into rs (map #(valtype ctx %) ys)) true))
+        :else [ps ids rs xs])))))
+
+(defn- comptype [ctx x]
+  (case (lex/head x)
+    "func" (let [[ps _ rs more] (params+results ctx (rest (:xs x)))]
+             (when (seq more) (malformed "unexpected token" (first more)))
+             (list 'func ps rs))
+    "struct" (list 'struct
+                   (vec (mapcat (fn [f]
+                                  (when-not (lex/list-of? f "field") (malformed "unexpected token" f))
+                                  (let [ys (rest (:xs f))]
+                                    (if (= :id (:t (first ys)))
+                                      (do (when-not (= 2 (count ys)) (malformed "unexpected token" f)) [(fieldtype ctx (second ys))])
+                                      (map #(fieldtype ctx %) ys))))
+                                (rest (:xs x)))))
+    "array" (let [[_ f & more] (:xs x)] (when (or (nil? f) more) (malformed "unexpected token" x)) (list 'array (fieldtype ctx f)))
+    (malformed "unexpected token" x)))
+
+(defn- field-ids
+  "A struct's field identifiers: {id index}."
+  [x]
+  (when (lex/list-of? x "struct")
+    (let [ps (keep-indexed (fn [i f] (let [y (second (:xs f))] (when (= :id (:t y)) [(:s y) i]))) (rest (:xs x)))]
+      (when-not (= (count ps) (count (distinct (map first ps)))) (malformed "duplicate field" x))
+      (into {} ps))))
+
+(defn- subtype [ctx x]
+  (if (lex/list-of? x "sub")
+    (let [ys (rest (:xs x))
+          final? (lex/kw? (first ys) "final")
+          ys (if final? (rest ys) ys)
+          supers (vec (take-while idx? ys))
+          ct (drop (count supers) ys)]
+      (when-not (= 1 (count ct)) (malformed "unexpected token" x))
+      (list 'sub {:final final? :supers (mapv #(resolve-idx ctx :type %) supers)} (comptype ctx (first ct))))
+    (comptype ctx x)))
+
+(defn- typeuse
+  "A type use at the head of `xs`: [type-index param-ids rest]; an inline function type not defined appended (implicit)."
+  ([ctx xs] (typeuse ctx xs false))
+  ([ctx xs anon]
+  (let [x (first xs)
+        [idx xs] (if (lex/list-of? x "type")
+                   (let [[_ t & more] (:xs x)] (when (or (nil? t) more) (malformed "unexpected token" x)) [(resolve-idx ctx :type t) (rest xs)])
+                   [nil xs])
+        [ps ids rs more] (params+results ctx xs anon)]
+    (cond
+      idx (let [t (get @(:types ctx) idx)]
+            ;; the inline params and results need the type's definition (parser.mly's inline_functype_explicit)
+            (when (and (or (seq ps) (seq rs)) (>= idx (get @(:counts ctx) :type 0))) (malformed "unknown type" x))
+            ;; the inline params and results must match the type's (when given)
+            (when (and (or (seq ps) (seq rs)) t (not= t (list 'func ps rs))) (malformed "inline function type" x))
+            [idx (if (seq ps) ids (vec (repeat (count (second t)) nil))) more])
+      :else (let [ft (list 'func ps rs)
+                  known (first (keep-indexed (fn [i t] (when (= t ft) i)) @(:types ctx)))]
+              [(or known
+                   (let [i (count @(:types ctx))] (swap! (:types ctx) conj ft) (swap! (:implicit ctx) conj ft) i))
+               ids more])))))
+
+(defn- limits [ctx xs x]
+  (let [i64? (lex/kw? (first xs) "i64")
+        xs (if (or i64? (lex/kw? (first xs) "i32")) (rest xs) xs)
+        [a b & more] xs]
+    (when-not (and a (= :num (:t a))) (malformed "unexpected token" (or a x)))
+    (let [mn (nat64 a)
+          mx (when (and b (= :num (:t b))) (nat64 b))]
+      [(cond-> {:min mn} mx (assoc :max mx) i64? (assoc :i64 true)) (if mx more (rest xs))])))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; instructions
+
+(declare instrs folded)
+
+(defn- label-of
+  "The label of a block: an optional $id at the head of xs: [label rest]."
+  [xs] (if (= :id (:t (first xs))) [(:s (first xs)) (rest xs)] [nil xs]))
+
+(defn- blocktype [ctx xs]
+  (let [x (first xs)]
+    (if (lex/list-of? x "type")
+      (let [[i _ more] (typeuse ctx xs true)] [{:bt i} more])
+      (let [[ps _ rs more] (params+results ctx xs true)]
+        (cond
+          (and (empty? ps) (empty? rs)) [{} more]
+          (and (empty? ps) (= 1 (count rs))) [{:bt [(first rs)]} more]
+          :else (let [ft (list 'func ps rs)
+                      known (first (keep-indexed (fn [i t] (when (= t ft) i)) @(:types ctx)))
+                      i (or known (let [i (count @(:types ctx))] (swap! (:types ctx) conj ft) (swap! (:implicit ctx) conj ft) i))]
+                  [{:bt i} more]))))))
+
+(defn- label-idx ^long [env x]
+  (case (:t x)
+    :num (nat x)
+    :id (let [ls (:labels env) i (.indexOf ^java.util.List ls (:s x))]
+          (if (neg? i) (malformed "unknown label" x) i))
+    (malformed "unexpected token" x)))
+
+(defn- local-idx ^long [env x]
+  (case (:t x)
+    :num (nat x)
+    :id (or (get (:locals env) (:s x)) (malformed (str "unknown local $" (:s x)) x))
+    (malformed "unexpected token" x)))
+
+(defn- space-idx ^long [ctx env space x]
+  (case space :label (label-idx env x) :local (local-idx env x) (resolve-idx ctx space x)))
+
+(defn- memarg [nm xs]
+  (loop [xs xs m {:align (natural-align nm) :offset 0} seen #{}]
+    (let [x (first xs)]
+      (cond
+        (and (= :kw (:t x)) (.startsWith ^String (:s x) "offset="))
+        (do (when (or (seen :offset) (seen :align)) (malformed "unexpected token" x))
+            (let [v (subs (:s x) 7)]
+              (recur (rest xs) (assoc m :offset (nat64 {:t :num :s v :p (:p x)})) (conj seen :offset))))
+        (and (= :kw (:t x)) (.startsWith ^String (:s x) "align="))
+        (do (when (seen :align) (malformed "unexpected token" x))
+            (let [v (nat64 {:t :num :s (subs (:s x) 6) :p (:p x)})]
+              (when-not (= 1 (Long/bitCount v)) (malformed "alignment" x))
+              (recur (rest xs) (assoc m :align (Long/numberOfTrailingZeros v)) (conj seen :align))))
+        :else [m xs]))))
+
+(def ^:private shapes {"i8x16" [16 8] "i16x8" [8 16] "i32x4" [4 32] "i64x2" [2 64] "f32x4" [4 32] "f64x2" [2 64]})
+
+(defn- v128-const [xs x]
+  (let [sh (first xs) [n bits] (shapes (:s sh))]
+    (when-not n (malformed "unexpected token" (or sh x)))
+    (let [lanes (take n (rest xs))
+          _ (when-not (= n (count lanes)) (malformed "wrong number of lane literals" x))
+          bb (java.nio.ByteBuffer/allocate 16)
+          _ (.order bb java.nio.ByteOrder/LITTLE_ENDIAN)]
+      (doseq [l lanes]
+        (case (:s sh)
+          "f32x4" (let [v (float-lit l 32)] (.putInt bb (if (seq? v) (unchecked-int (second v)) (Float/floatToRawIntBits (.floatValue (Double/valueOf (double v)))))))
+          "f64x2" (let [v (float-lit l 64)] (.putLong bb (if (seq? v) (long (second v)) (Double/doubleToRawLongBits (double v)))))
+          (let [v (int-lit l bits)]
+            (case (long bits) 8 (.put bb (unchecked-byte v)) 16 (.putShort bb (unchecked-short v)) 32 (.putInt bb (unchecked-int v)) 64 (.putLong bb v)))))
+      [(list 'hex (.formatHex (java.util.HexFormat/of) (.array bb))) (drop (inc n) xs)])))
+
+(defn- reftype-of [ctx x]
+  (let [t (valtype ctx x)]
+    (if (seq? t) t
+        (case t
+          funcref '(ref null func) externref '(ref null extern) anyref '(ref null any) eqref '(ref null eq) i31ref '(ref null i31)
+          structref '(ref null struct) arrayref '(ref null array) exnref '(ref null exn) nullref '(ref null none)
+          nullfuncref '(ref null nofunc) nullexternref '(ref null noextern) nullexnref '(ref null noexn)
+          (malformed "unexpected token" x)))))
+
+(defn- plain
+  "One plain instruction `nm` whose immediates are the head of xs: [form rest]."
+  [ctx env nm x xs]
+  (let [ks (or (kinds nm) (malformed "unknown operator" x))
+        k (first ks)
+        nmsym (symbol nm)]
+    (case k
+      :none (if (= nm "select")
+              (let [rs (take-while #(lex/list-of? % "result") xs)]
+                (if (seq rs)
+                  [(list nmsym (vec (mapcat (fn [r] (map #(valtype ctx %) (rest (:xs r)))) rs))) (drop (count rs) xs)]
+                  [(list nmsym) xs]))
+              [(list nmsym) xs])
+      :select-t [(list nmsym []) xs]
+      :idx (let [sp (idx-space nm)]
+             (if (and (#{:table :memory} sp) (not (idx? (first xs))))
+               [(list nmsym 0) xs]
+               (do (when-not (first xs) (malformed "unexpected token" x))
+                   [(list nmsym (space-idx ctx env sp (first xs))) (rest xs)])))
+      :idx2 (let [[s1 s2 opt?] (idx2-space nm)
+                  [a b] xs]
+              (cond
+                (and (idx? a) (idx? b)) [(list nmsym (space-idx ctx env s1 a) (space-idx ctx env s2 b)) (drop 2 xs)]
+                (and opt? (not (idx? a))) [(list nmsym 0 0) xs]
+                :else (malformed "unexpected token" (or a x))))
+      :idx2-rev (case nm
+                  ("call_indirect" "return_call_indirect")
+                  (let [[t xs] (if (idx? (first xs)) [(resolve-idx ctx :table (first xs)) (rest xs)] [0 xs])
+                        [ti _ xs] (typeuse ctx xs true)]
+                    [(list nmsym t ti) xs])
+                  (let [[s1 s2] (idx2-space nm) [a b] xs]
+                    (cond
+                      (and (idx? a) (idx? b)) [(list nmsym (space-idx ctx env s1 a) (space-idx ctx env s2 b)) (drop 2 xs)]
+                      (idx? a) [(list nmsym 0 (space-idx ctx env s2 a)) (rest xs)]
+                      :else (malformed "unexpected token" (or a x)))))
+      :idx-field (let [[a b] xs
+                       t (resolve-idx ctx :type a)
+                       f (if (= :id (:t b)) (or (get-in @(:fields ctx) [t (:s b)]) (malformed "unknown field" b)) (nat b))]
+                   [(list nmsym t f) (drop 2 xs)])
+      :idx-u32 (let [[a b] xs] [(list nmsym (resolve-idx ctx :type a) (nat b)) (drop 2 xs)])
+      :mem (let [[mi xs] (if (idx? (first xs)) [(resolve-idx ctx :memory (first xs)) (rest xs)] [nil xs])
+                 [m xs] (memarg nm xs)]
+             [(list nmsym (cond-> m mi (assoc :memory mi))) xs])
+      :mem-lane (let [ma? (fn [y] (and (= :kw (:t y)) (re-find #"^(offset|align)=" (:s y))))
+                      [mi xs] (if (and (idx? (first xs)) (or (idx? (second xs)) (ma? (second xs)))) [(resolve-idx ctx :memory (first xs)) (rest xs)] [nil xs])
+                      [m xs] (memarg nm xs)]
+                  (when-not (first xs) (malformed "unexpected token" x))
+                  [(list nmsym (cond-> m mi (assoc :memory mi)) (nat (first xs))) (rest xs)])
+      :lane (do (when-not (first xs) (malformed "unexpected token" x))
+                (let [l (nat (first xs))] (when (> l 255) (malformed "malformed lane index" (first xs))) [(list nmsym l) (rest xs)]))
+      :shuffle (let [ls (take 16 xs)]
+                 (when-not (and (= 16 (count ls)) (every? #(= :num (:t %)) ls)) (malformed "invalid lane length" x))
+                 [(list nmsym (mapv #(let [l (nat %)] (when (> l 255) (malformed "malformed lane index" %)) l) ls)) (drop 16 xs)])
+      :br-table (let [ls (take-while idx? xs)]
+                  (when (empty? ls) (malformed "unexpected token" x))
+                  [(list nmsym (mapv #(label-idx env %) (butlast ls)) (label-idx env (last ls))) (drop (count ls) xs)])
+      :heap [(list nmsym (heaptype ctx (first xs))) (rest xs)]
+      (:ref-test :ref-null-test) (let [rt (reftype-of ctx (first xs))] [(list nmsym rt) (rest xs)])
+      :i32 [(list nmsym (int-lit (or (first xs) (malformed "unexpected token" x)) 32)) (rest xs)]
+      :i64 [(list nmsym (int-lit (or (first xs) (malformed "unexpected token" x)) 64)) (rest xs)]
+      :f32 [(list nmsym (float-lit (or (first xs) (malformed "unexpected token" x)) 32)) (rest xs)]
+      :f64 [(list nmsym (float-lit (or (first xs) (malformed "unexpected token" x)) 64)) (rest xs)]
+      :v128 (let [[h xs] (v128-const xs x)] [(list nmsym h) xs])
+      :br-on-cast (let [[l a b & more] xs]
+                    [(list nmsym (label-idx env l) (reftype-of ctx a) (reftype-of ctx b)) more])
+      (malformed "unknown operator" x))))
+
+(defn- catch-clause [ctx env x]
+  (let [[_ a b] (:xs x)]
+    (case (lex/head x)
+      "catch" [(list 'catch (resolve-idx ctx :tag a) (label-idx env b))]
+      "catch_ref" [(list 'catch_ref (resolve-idx ctx :tag a) (label-idx env b))]
+      "catch_all" [(list 'catch_all (label-idx env a))]
+      "catch_all_ref" [(list 'catch_all_ref (label-idx env a))]
+      nil)))
+
+(defn- end-label!
+  "A block's closing `end $l` or `else $l`: the label must be the block's."
+  [lbl x]
+  (when (= :id (:t x)) (when-not (= lbl (:s x)) (malformed "mismatching label" x))))
+
+(defn- instrs
+  "The instructions of xs (plain and folded), until a keyword in `stops` (returned with the rest): [forms rest]."
+  [ctx env xs stops]
+  (loop [xs xs out (transient [])]
+    (let [x (first xs)]
+      (cond
+        (nil? x) [(persistent! out) nil]
+        (and (= :kw (:t x)) (stops (:s x))) [(persistent! out) xs]
+        (= :list (:t x)) (recur (rest xs) (reduce conj! out (folded ctx env x)))
+        (= :kw (:t x))
+        (let [nm (:s x)]
+          (case nm
+            ("block" "loop")
+            (let [[lbl ys] (label-of (rest xs))
+                  [bt ys] (blocktype ctx ys)
+                  env2 (assoc env :labels (cons lbl (:labels env)))
+                  [body ys] (instrs ctx env2 ys #{"end"})]
+              (when-not (lex/kw? (first ys) "end") (malformed "unexpected end of input" x))
+              (let [ys (rest ys) ys (if (= :id (:t (first ys))) (do (end-label! lbl (first ys)) (rest ys)) ys)]
+                (recur ys (conj! out (list (symbol nm) bt body)))))
+            "if"
+            (let [[lbl ys] (label-of (rest xs))
+                  [bt ys] (blocktype ctx ys)
+                  env2 (assoc env :labels (cons lbl (:labels env)))
+                  [then ys] (instrs ctx env2 ys #{"else" "end"})]
+              (if (lex/kw? (first ys) "else")
+                (let [ys (rest ys) ys (if (= :id (:t (first ys))) (do (end-label! lbl (first ys)) (rest ys)) ys)
+                      [els ys] (instrs ctx env2 ys #{"end"})]
+                  (when-not (lex/kw? (first ys) "end") (malformed "unexpected end of input" x))
+                  (let [ys (rest ys) ys (if (= :id (:t (first ys))) (do (end-label! lbl (first ys)) (rest ys)) ys)]
+                    (recur ys (conj! out (list 'if bt then els)))))
+                (do (when-not (lex/kw? (first ys) "end") (malformed "unexpected end of input" x))
+                    (let [ys (rest ys) ys (if (= :id (:t (first ys))) (do (end-label! lbl (first ys)) (rest ys)) ys)]
+                      (recur ys (conj! out (list 'if bt then)))))))
+            "try_table"
+            (let [[lbl ys] (label-of (rest xs))
+                  [bt ys] (blocktype ctx ys)
+                  cs (take-while #(catch-clause ctx env %) ys)
+                  catches (vec (mapcat #(catch-clause ctx env %) cs))
+                  ys (drop (count cs) ys)
+                  env2 (assoc env :labels (cons lbl (:labels env)))
+                  [body ys] (instrs ctx env2 ys #{"end"})]
+              (when-not (lex/kw? (first ys) "end") (malformed "unexpected end of input" x))
+              (let [ys (rest ys) ys (if (= :id (:t (first ys))) (do (end-label! lbl (first ys)) (rest ys)) ys)]
+                (recur ys (conj! out (list 'try_table bt catches body)))))
+            ("end" "else" "then") (malformed "unexpected token" x)
+            (let [[f ys] (plain ctx env nm x (rest xs))] (recur ys (conj! out f)))))
+        :else (malformed (if (= :reserved (:t x)) "unknown operator" "unexpected token") x)))))
+
+(defn- folded
+  "A folded instruction's forms, its operands first."
+  [ctx env x]
+  (let [nm (lex/head x) xs (rest (:xs x))]
+    (when-not nm (malformed "unexpected token" x))
+    (case nm
+      ("block" "loop")
+      (let [[lbl ys] (label-of xs)
+            [bt ys] (blocktype ctx ys)
+            [body more] (instrs ctx (assoc env :labels (cons lbl (:labels env))) ys #{})]
+        (when (seq more) (malformed "unexpected token" (first more)))
+        [(list (symbol nm) bt body)])
+      "if"
+      (let [[lbl ys] (label-of xs)
+            [bt ys] (blocktype ctx ys)
+            conds (take-while #(and (= :list (:t %)) (not (lex/list-of? % "then"))) ys)
+            ys (drop (count conds) ys)
+            [th & ys] ys
+            [el & ys] ys
+            env2 (assoc env :labels (cons lbl (:labels env)))]
+        (when-not (lex/list-of? th "then") (malformed "unexpected token" (or th x)))
+        (when (or (seq ys) (and el (not (lex/list-of? el "else")))) (malformed "unexpected token" (or (first ys) el)))
+        (let [pre (vec (mapcat #(folded ctx env %) conds))
+              [then more] (instrs ctx env2 (rest (:xs th)) #{})
+              _ (when (seq more) (malformed "unexpected token" (first more)))
+              els (when el (let [[e more] (instrs ctx env2 (rest (:xs el)) #{})] (when (seq more) (malformed "unexpected token" (first more))) e))]
+          (conj pre (if el (list 'if bt then els) (list 'if bt then)))))
+      "try_table"
+      (let [[lbl ys] (label-of xs)
+            [bt ys] (blocktype ctx ys)
+            cs (take-while #(catch-clause ctx env %) ys)
+            catches (vec (mapcat #(catch-clause ctx env %) cs))
+            [body more] (instrs ctx (assoc env :labels (cons lbl (:labels env))) (drop (count cs) ys) #{})]
+        (when (seq more) (malformed "unexpected token" (first more)))
+        [(list 'try_table bt catches body)])
+      (let [[f ys] (plain ctx env nm (first (:xs x)) xs)
+            pre (vec (mapcat (fn [y] (if (= :list (:t y)) (folded ctx env y) (malformed "unexpected token" y))) ys))]
+        (conj pre f)))))
+
+(defn- expr
+  "A constant or offset expression: the instructions of xs."
+  [ctx xs]
+  (let [[es more] (instrs ctx {:labels () :locals {}} xs #{})]
+    (when (seq more) (malformed "unexpected token" (first more)))
+    es))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; the module's fields
+
+(defn- strings->hex [xs]
+  (let [o (java.io.ByteArrayOutputStream.)]
+    (doseq [x xs] (when-not (= :str (:t x)) (malformed "unexpected token" x)) (.write o ^bytes (:b x) 0 (alength ^bytes (:b x))))
+    (list 'hex (.formatHex (java.util.HexFormat/of) (.toByteArray o)))))
+
+(defn- name-str ^String [x]
+  (when-not (= :str (:t x)) (malformed "unexpected token" x))
+  (let [s (String. ^bytes (:b x) java.nio.charset.StandardCharsets/UTF_8)]
+    (when-not (java.util.Arrays/equals ^bytes (:b x) (.getBytes s java.nio.charset.StandardCharsets/UTF_8)) (malformed "malformed UTF-8 encoding" x))
+    s))
+
+(defn- id-of [xs] (when (= :id (:t (first xs))) (:s (first xs))))
+(defn- after-id [xs] (if (= :id (:t (first xs))) (rest xs) xs))
+
+(defn- exports+import
+  "The inline (export \"n\")* and (import \"m\" \"n\")? at the head of xs: [export-names import rest]."
+  [xs]
+  (let [es (take-while #(lex/list-of? % "export") xs)
+        xs (drop (count es) xs)
+        names (mapv (fn [e] (let [[_ n & more] (:xs e)] (when more (malformed "unexpected token" e)) (name-str n))) es)
+        [imp xs] (if (lex/list-of? (first xs) "import")
+                   (let [[_ m n & more] (:xs (first xs))] (when more (malformed "unexpected token" (first xs))) [[(name-str m) (name-str n)] (rest xs)])
+                   [nil xs])]
+    (when (and imp (some #(lex/list-of? % "export") xs)) (malformed "unexpected token" (first xs)))
+    [names imp xs]))
+
+(def ^:private space-of {"func" :func "table" :table "memory" :memory "global" :global "tag" :tag})
+
+(defn- field-space
+  "The index space a field defines and whether it imports: [space import?]."
+  [f]
+  (let [h (lex/head f) xs (after-id (rest (:xs f)))]
+    (case h
+      "import" (let [d (nth (:xs f) 3 nil)] [(space-of (lex/head d)) true])
+      ("func" "table" "memory" "global" "tag")
+      (let [[_ imp] (exports+import xs)] [(space-of h) (boolean imp)])
+      [nil false])))
+
+(defn- index-pass!
+  "The first pass: every field's identifier bound to its index (types, the definitions with their imports, element and
+  data segments), the text's rule that imports precede the definitions of their space checked."
+  [ctx fields]
+  (doseq [f fields]
+    (let [h (lex/head f)]
+      (case h
+        "type" (let [id (id-of (rest (:xs f)))
+                     i (bind! ctx :type id f)
+                     ct (last (:xs f))
+                     ct (if (lex/list-of? ct "sub") (last (:xs ct)) ct)]
+                 (when-let [fs (field-ids ct)] (swap! (:fields ctx) assoc i fs)))
+        "rec" (doseq [t (rest (:xs f))]
+                (when-not (lex/list-of? t "type") (malformed "unexpected token" t))
+                (let [i (bind! ctx :type (id-of (rest (:xs t))) t)
+                      ct (last (:xs t)) ct (if (lex/list-of? ct "sub") (last (:xs ct)) ct)]
+                  (when-let [fs (field-ids ct)] (swap! (:fields ctx) assoc i fs))))
+        ("func" "table" "memory" "global" "tag" "import")
+        (let [[sp imp?] (field-space f)
+              id (if (= h "import") (id-of (rest (:xs (nth (:xs f) 3)))) (id-of (rest (:xs f))))]
+          (when-not sp (malformed "unexpected token" f))
+          ;; parser.mly's module_fields: an import after any definition of a function, table, memory, global or tag
+          (when (and imp? (seq @(:defined ctx))) (malformed (str "import after " (name (first @(:defined ctx))) " definition") f))
+          (when-not imp? (swap! (:defined ctx) conj sp))
+          (bind! ctx sp id f)
+          ;; a table's inline elements and a memory's inline data are segments of their own, numbered in field order
+          (when (and (not imp?) (= h "table") (some #(lex/list-of? % "elem") (rest (:xs f)))) (bind! ctx :elem nil f))
+          (when (and (not imp?) (= h "memory") (some #(lex/list-of? % "data") (rest (:xs f)))) (bind! ctx :data nil f)))
+        "elem" (bind! ctx :elem (id-of (rest (:xs f))) f)
+        "data" (bind! ctx :data (id-of (rest (:xs f))) f)
+        ("export" "start") nil
+        (malformed "unexpected token" f)))))
+
+(defn- elem-list
+  "An element list at xs: [type init] (init {:funcs [...]} or {:exprs [...]})."
+  [ctx xs x]
+  (cond
+    (lex/kw? (first xs) "func") [(list 'ref 'func) {:funcs (mapv #(resolve-idx ctx :func %) (rest xs))}]
+    (or (empty? xs) (idx? (first xs))) [(list 'ref 'func) {:funcs (mapv #(resolve-idx ctx :func %) xs)}]
+    :else (let [t (valtype ctx (first xs))
+                items (mapv (fn [it] (if (lex/list-of? it "item") (expr ctx (rest (:xs it))) (expr ctx [it]))) (rest xs))]
+            [t {:exprs items}])))
+
+(defn- offset [ctx x]
+  (if (lex/list-of? x "offset") (expr ctx (rest (:xs x))) (expr ctx [x])))
+
+(defn- type-item [ctx i t]
+  (list 'wasm/type i (subtype ctx (last (:xs t)))))
+
+(defn- parse-fields
+  "The second pass: the fields in order into items (by section, as the binary decoder orders them)."
+  [ctx fields]
+  (let [out (atom {:type [] :import [] :func [] :table [] :memory [] :tag [] :global [] :export [] :start [] :elem [] :data []})
+        add! (fn [k it] (swap! out update k conj it))
+        n (fn [k] (count (get @out k)))
+        counter (atom {})
+        next! (fn [sp] (let [i (get @counter sp 0)] (swap! counter assoc sp (inc i)) i))
+        ninline (atom 0)
+        export! (fn [names kind i] (doseq [nm names] (add! :export (list 'wasm/export nm (list kind i)))))
+        tindex (atom 0)]
+    (doseq [f fields]
+      (let [h (lex/head f) xs (rest (:xs f))]
+        (case h
+          "type" (let [i @tindex] (swap! tindex inc) (add! :type (type-item ctx i f)))
+          "rec" (let [i @tindex ts (rest (:xs f))]
+                  (swap! tindex + (count ts))
+                  (add! :type (list 'wasm/rec i (mapv #(subtype ctx (last (:xs %))) ts))))
+          "import" (let [[_ m nm d & more] (:xs f)
+                         _ (when (or (nil? d) more) (malformed "unexpected token" f))
+                         sp (space-of (lex/head d))
+                         _ (when-not sp (malformed "unexpected token" d))
+                         i (next! sp)
+                         ds (after-id (rest (:xs d)))]
+                     (add! :import
+                           (list 'wasm/import (name-str m) (name-str nm)
+                                 (case sp
+                                   :func (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) (list 'func i {:type ti}))
+                                   :tag (let [[ti _ more] (typeuse ctx ds)] (when (seq more) (malformed "unexpected token" (first more))) (list 'tag i {:type ti}))
+                                   :global (let [[g more] [(first ds) (rest ds)]]
+                                             (when (or (nil? g) (seq more)) (malformed "unexpected token" d))
+                                             (list 'global i (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})))
+                                   :memory (let [[l more] (limits ctx ds d)] (when (seq more) (malformed "unexpected token" (first more))) (list 'memory i l))
+                                   :table (let [[l more] (limits ctx ds d)]
+                                            (when-not (= 1 (count more)) (malformed "unexpected token" d))
+                                            (list 'table i (assoc l :type (valtype ctx (first more)))))))))
+          "func" (let [i (next! :func)
+                       [names imp ys] (exports+import (after-id xs))
+                       [ti pids ys] (typeuse ctx ys)
+                       t (get @(:types ctx) ti)]
+                   (export! names 'func i)
+                   (if imp
+                     (do (when (seq ys) (malformed "unexpected token" (first ys)))
+                         (add! :import (list 'wasm/import (first imp) (second imp) (list 'func i {:type ti}))))
+                     (let [ls (take-while #(lex/list-of? % "local") ys)
+                           body (drop (count ls) ys)
+                           pids (if (and (seq? t) (= 'func (first t))) (vec (take (count (second t)) (concat pids (repeat nil)))) pids)
+                           locals (vec (mapcat (fn [l]
+                                                 (let [zs (rest (:xs l))]
+                                                   (if (= :id (:t (first zs)))
+                                                     (do (when-not (= 2 (count zs)) (malformed "unexpected token" l)) [[(:s (first zs)) (valtype ctx (second zs))]])
+                                                     (map (fn [z] [nil (valtype ctx z)]) zs))))
+                                               ls))
+                           ids (concat pids (map first locals))
+                           lmap (reduce (fn [m [k id]] (if id (do (when (contains? m id) (malformed "duplicate local" f)) (assoc m id k)) m))
+                                        {} (map-indexed vector ids))
+                           [es more] (instrs ctx {:labels () :locals lmap} body #{})]
+                       (when (seq more) (malformed "unexpected token" (first more)))
+                       (add! :func (apply list 'wasm/func i (cond-> {:type ti} (seq locals) (assoc :locals (mapv second locals))) es)))))
+          "table" (let [i (next! :table)
+                        [names imp ys] (exports+import (after-id xs))]
+                    (export! names 'table i)
+                    (if (and (not imp) (some #(lex/list-of? % "elem") ys))
+                      ;; (table $t? i64? reftype (elem ...)): limits from the elements' count, an active segment at 0
+                      (let [i64? (lex/kw? (first ys) "i64") ys (if i64? (rest ys) ys)
+                            t (valtype ctx (first ys)) e (second ys)
+                            [et init] (if (or (empty? (rest (:xs e))) (idx? (second (:xs e))))
+                                        [(list 'ref 'func) {:funcs (mapv #(resolve-idx ctx :func %) (rest (:xs e)))}]
+                                        [t {:exprs (mapv (fn [it] (if (lex/list-of? it "item") (expr ctx (rest (:xs it))) (expr ctx [it]))) (rest (:xs e)))}])
+                            cnt (count (or (:funcs init) (:exprs init)))
+                            ei (next! :elem)]
+                        (add! :table (list 'wasm/table i (cond-> {:min cnt :max cnt :type t} i64? (assoc :i64 true))))
+                        (add! :elem (list 'wasm/elem ei (merge {:active {:table i :offset [(list (if i64? 'i64.const 'i32.const) 0)]} :type (if (:funcs init) (list 'ref 'func) t)} init))))
+                      (let [[l more] (limits ctx ys f)
+                            _ (when (empty? more) (malformed "unexpected token" f))
+                            t (valtype ctx (first more))
+                            init (when (seq (rest more)) (expr ctx (rest more)))
+                            d (cond-> (assoc l :type t) init (assoc :init init))]
+                        (if imp
+                          (do (when init (malformed "unexpected token" f)) (add! :import (list 'wasm/import (first imp) (second imp) (list 'table i d))))
+                          (add! :table (list 'wasm/table i d))))))
+          "memory" (let [i (next! :memory)
+                         [names imp ys] (exports+import (after-id xs))]
+                     (export! names 'memory i)
+                     (if (and (not imp) (some #(lex/list-of? % "data") ys))
+                       (let [i64? (lex/kw? (first ys) "i64") ys (if i64? (rest ys) ys)
+                             bs (strings->hex (rest (:xs (first ys))))
+                             len (quot (count (second bs)) 2)
+                             pages (quot (+ len 65535) 65536)
+                             di (next! :data)]
+                         (add! :memory (list 'wasm/memory i (cond-> {:min pages :max pages} i64? (assoc :i64 true))))
+                         (add! :data (list 'wasm/data di {:active {:memory i :offset [(list (if i64? 'i64.const 'i32.const) 0)]}} bs)))
+                       (let [[l more] (limits ctx ys f)]
+                         (when (seq more) (malformed "unexpected token" (first more)))
+                         (if imp
+                           (add! :import (list 'wasm/import (first imp) (second imp) (list 'memory i l)))
+                           (add! :memory (list 'wasm/memory i l))))))
+          "global" (let [i (next! :global)
+                         [names imp ys] (exports+import (after-id xs))
+                         g (first ys)
+                         d (if (lex/list-of? g "mut") {:type (valtype ctx (second (:xs g))) :mut true} {:type (valtype ctx g) :mut false})]
+                     (export! names 'global i)
+                     (if imp
+                       (do (when (seq (rest ys)) (malformed "unexpected token" (second ys)))
+                           (add! :import (list 'wasm/import (first imp) (second imp) (list 'global i d))))
+                       (add! :global (list 'wasm/global i d (expr ctx (rest ys))))))
+          "tag" (let [i (next! :tag)
+                      [names imp ys] (exports+import (after-id xs))
+                      [ti _ more] (typeuse ctx ys)]
+                  (when (seq more) (malformed "unexpected token" (first more)))
+                  (export! names 'tag i)
+                  (if imp
+                    (add! :import (list 'wasm/import (first imp) (second imp) (list 'tag i {:type ti})))
+                    (add! :tag (list 'wasm/tag i {:type ti}))))
+          "export" (let [[_ nm d & more] (:xs f)
+                         sp (space-of (lex/head d))]
+                     (when (or more (nil? sp)) (malformed "unexpected token" f))
+                     (let [[_ x & more2] (:xs d)] (when (or (nil? x) more2) (malformed "unexpected token" d))
+                       (add! :export (list 'wasm/export (name-str nm) (list (symbol (lex/head d)) (resolve-idx ctx sp x))))))
+          "start" (let [[_ x & more] (:xs f)]
+                    (when (or (nil? x) more) (malformed "unexpected token" f))
+                    (when (seq (:start @out)) (malformed "multiple start sections" f))
+                    (add! :start (list 'wasm/start (resolve-idx ctx :func x))))
+          "elem" (let [i (next! :elem)
+                       ys (after-id xs)]
+                   (cond
+                     (lex/kw? (first ys) "declare")
+                     (let [[t init] (elem-list ctx (rest ys) f)] (add! :elem (list 'wasm/elem i (merge {:declare true :type t} init))))
+                     ;; active: (table x)? or an MVP table index, then (offset ...) or a folded expression
+                     (or (lex/list-of? (first ys) "table") (and (idx? (first ys)) (= :list (:t (second ys))))
+                         (and (= :list (:t (first ys))) (not (lex/list-of? (first ys) "item")) (not (lex/list-of? (first ys) "ref"))))
+                     (let [[ti ys] (cond (lex/list-of? (first ys) "table") [(resolve-idx ctx :table (second (:xs (first ys)))) (rest ys)]
+                                         (idx? (first ys)) [(resolve-idx ctx :table (first ys)) (rest ys)]
+                                         :else [0 ys])
+                           off (offset ctx (first ys))
+                           [t init] (elem-list ctx (rest ys) f)]
+                       (add! :elem (list 'wasm/elem i (merge {:active {:table ti :offset off} :type t} init))))
+                     :else
+                     (let [[t init] (elem-list ctx ys f)] (add! :elem (list 'wasm/elem i (merge {:passive true :type t} init))))))
+          "data" (let [i (next! :data)
+                       ys (after-id xs)]
+                   (if (or (empty? ys) (= :str (:t (first ys))))
+                     (add! :data (list 'wasm/data i {:passive true} (strings->hex ys)))
+                     (let [[mi ys] (cond (lex/list-of? (first ys) "memory") [(resolve-idx ctx :memory (second (:xs (first ys)))) (rest ys)]
+                                         (idx? (first ys)) [(resolve-idx ctx :memory (first ys)) (rest ys)]
+                                         :else [0 ys])
+                           off (offset ctx (first ys))]
+                       (add! :data (list 'wasm/data i {:active {:memory mi :offset off}} (strings->hex (rest ys))))))))))
+    (let [o @out
+          ;; the implicit types, appended after the explicit ones in the order of their first use
+          types (into (:type o) (map-indexed (fn [k t] (list 'wasm/type (+ @tindex k) t)) @(:implicit ctx)))
+          ;; the elements and data defined inline (a table's, a memory's) are numbered in their field's order: sort by index
+          elems (vec (sort-by second (:elem o)))
+          datas (vec (sort-by second (:data o)))]
+      (vec (concat types (:import o) (:table o) (:memory o) (:tag o) (:global o) (:export o) (:start o) elems
+                   (when (seq datas)
+                     ;; a datacount section when a function uses memory.init or data.drop (the binary requires it then)
+                     (when (some (fn [f] (some #(and (seq? %) (#{'memory.init 'data.drop} (first %))) (tree-seq coll? seq f))) (:func o))
+                       [(list 'wasm/datacount (count datas))]))
+                   (:func o) datas)))))
+
+(defn module-items
+  "The items of a `(module $id? field*)` S-expression's fields."
+  [fields]
+  (let [ctx (new-ctx)]
+    (index-pass! ctx fields)
+    ;; the explicit types first, so that a type use can find them
+    (let [tf (filter #(#{"type" "rec"} (lex/head %)) fields)]
+      (doseq [f tf]
+        (if (= "rec" (lex/head f))
+          (doseq [t (rest (:xs f))] (swap! (:types ctx) conj (subtype ctx (last (:xs t)))))
+          (swap! (:types ctx) conj (subtype ctx (last (:xs f)))))))
+    (parse-fields ctx fields)))
+
+(defn read-module
+  "The items of a module's text (a `(module ...)` or its fields alone)."
+  [^String text]
+  (let [xs (lex/read-sexps text)
+        fields (if (and (= 1 (count xs)) (lex/list-of? (first xs) "module")) (after-id (rest (:xs (first xs)))) xs)]
+    (doseq [f fields] (when-not (= :list (:t f)) (malformed "unexpected token" f)))
+    (module-items fields)))

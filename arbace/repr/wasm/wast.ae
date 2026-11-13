@@ -1,0 +1,167 @@
+(ns arbace.repr.wasm.wast
+  "repr/wasm's reading of the testsuite's scripts (doc/wasm/SPEC.md §7-§8; doc/wasm/WASM-SURVEY.md §10.1, WA2): each command of a
+  .wast script is a case judged at the read level by its own assertion. A module (text, `binary` or `quote`; `definition`
+  ones too) is read into forms and the cross-format judge applied: encoded to the binary format and decoded again to the
+  same forms; a binary module also printed back byte for byte from its forms and layer; and the print level, the forms
+  printed as canonical text (arbace.repr.wasm.print) and read again to the same forms. An `assert_malformed` module must be
+  rejected (the message the testsuite states is a second level, by prefix, WAS8 (a); recorded beside, not required). An
+  `assert_invalid` module must read; its rejection is the validator's (WA3): recorded as such. The modules of
+  assert_unlinkable, assert_uninstantiable, assert_trap and assert_exception read as modules. The other commands are the
+  eval cell's (WA4)."
+  (:require [arbace.repr.wasm.lex :as lex]
+            [arbace.repr.wasm.text :as text]
+            [arbace.repr.wasm.binary :as bin]
+            [arbace.repr.wasm.print :as print]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn- clean ^String [s]
+  (-> (str s) (str/replace #"[\t\n\r]" " ") (str/replace "\"" "'") (str/replace "\\" "(backslash)") (str/replace #"[^ -~]" "?")))
+
+(defn- msg ^String [^Throwable e]
+  (if-let [m (:wasm/malformed (ex-data e))] (str "malformed: " m) (str "crash: " (.getMessage e))))
+
+(defn- strings-bytes ^bytes [xs]
+  (let [o (java.io.ByteArrayOutputStream.)]
+    (doseq [x xs]
+      (when-not (= :str (:t x)) (throw (ex-info "unexpected token" {:wasm/malformed "unexpected token"})))
+      (.write o ^bytes (:b x) 0 (alength ^bytes (:b x))))
+    (.toByteArray o)))
+
+(defn module-of
+  "A module command's S-expression as [kind payload]: [:text fields], [:binary bytes], [:quote text], or nil (instance)."
+  [m]
+  (let [xs (rest (:xs m))
+        xs (if (= :id (:t (first xs))) (rest xs) xs)
+        xs (if (lex/kw? (first xs) "definition") (rest xs) xs)
+        xs (if (= :id (:t (first xs))) (rest xs) xs)]
+    (cond
+      (lex/kw? (first xs) "instance") nil
+      (lex/kw? (first xs) "binary") [:binary (strings-bytes (rest xs))]
+      (lex/kw? (first xs) "quote") [:quote (String. (strings-bytes (rest xs)) java.nio.charset.StandardCharsets/UTF_8)]
+      :else [:text xs])))
+
+(defn read-items
+  "A module command's items (throws on a malformed module)."
+  [[kind p]]
+  (case kind
+    :text (do (doseq [f p] (when-not (= :list (:t f)) (throw (ex-info "unexpected token" {:wasm/malformed "unexpected token"}))))
+              (text/module-items p))
+    :quote (text/read-module p)
+    :binary (:items (bin/decode p))))
+
+(defn judge-module
+  "A module that must read: {:read R :print P}, R nil (it reads, both formats agree, a binary one prints back byte for byte)
+  or the reason; P (when it reads) nil (its canonical text reads again to the same forms) or the reason."
+  [[kind p :as m]]
+  (let [items (try (read-items m) (catch Throwable e (msg e)))]
+    (if (string? items)
+      {:read items}
+      {:read (try
+               (or (when (= kind :binary)
+                     (let [{:keys [layer]} (bin/decode p)]
+                       (when-not (java.util.Arrays/equals ^bytes (bin/encode items layer) ^bytes p) "print: the bytes differ")))
+                   (let [again (:items (bin/decode (bin/encode items nil)))]
+                     (when-not (= again items) "cross-format: the binary's forms differ")))
+               (catch Throwable e (str "cross-format: " (msg e))))
+       :print (let [t (try (print/module-text items) (catch Throwable e (str "!" (msg e))))]
+                (if (.startsWith ^String t "!")
+                  (str "print: " (subs t 1))
+                  (let [back (try (text/read-module t) (catch Throwable e (msg e)))]
+                    (cond (string? back) (str "print: the canonical text does not read: " back)
+                          (not= (print/print-items back) (print/print-items items)) "print: the canonical text reads to other forms"))))})))
+
+(defn- module-rows
+  "The rows of a module case: its read row and, when it reads, its print row (id print/NAME#K)."
+  [id m]
+  (let [{r :read p :print} (judge-module m)
+        pid (str "print/" (subs id (inc (.indexOf ^String id "/"))))]
+    (cond-> [(if r [id :fail (clean r)] [id :pass ""])]
+      (nil? r) (conj (if p [pid :fail (clean p)] [pid :pass ""])))))
+
+(defn- rejected?
+  "A malformed module's rejection: [true message] or [false nil]."
+  [m]
+  (try (read-items m) [false nil]
+       (catch Throwable e (if (:wasm/malformed (ex-data e)) [true (:wasm/malformed (ex-data e))] [true (str "crash: " (.getMessage e))]))))
+
+(defn script-rows
+  "The read and print levels' rows of a script: [ID RESULT REASON] (ID NAME#K, K the command's ordinal from 1; a print row
+  print/PATH#K)."
+  [^String name ^String text]
+  (let [cmds (try (lex/read-sexps text) (catch Throwable e e))]
+    (cond
+      (instance? Throwable cmds)
+      [[(str name "#0") :fail (clean (str "script: " (msg cmds)))]]
+      ;; a script of a module's fields alone is that module (inline-module.wast)
+      (and (seq cmds) (#{"func" "memory" "type" "import" "export" "table" "global" "data" "elem" "start" "tag" "rec"} (lex/head (first cmds))))
+      (module-rows (str name "#1") [:text cmds])
+      :else
+      (vec
+        (apply concat
+          (keep-indexed
+            (fn [i c]
+              (let [id (str name "#" (inc i))
+                    h (lex/head c)]
+                (case h
+                  "module" (when-let [m (try (module-of c) (catch Throwable e [:error (msg e)]))]
+                             (if (= :error (first m)) [[id :fail (clean (second m))]] (module-rows id m)))
+                  "assert_malformed"
+                  (let [[_ m expect] (:xs c)
+                        mm (try (module-of m) (catch Throwable _ [:binary-error nil]))]
+                    (if (= :binary-error (first mm))
+                      [[id :pass ""]]
+                      (let [[r why] (rejected? mm)]
+                        (if r
+                          (if (.startsWith (str why) "crash: ") [[id :fail (clean (str "rejected by a crash: " why))]] [[id :pass ""]])
+                          [[id :fail (clean (str "malformed accepted: expected " (String. ^bytes (:b expect) java.nio.charset.StandardCharsets/UTF_8)))]]))))
+                  "assert_invalid"
+                  (let [[_ m expect] (:xs c)
+                        mm (try (module-of m) (catch Throwable e [:error (msg e)]))
+                        r (if (= :error (first mm)) (second mm) (try (read-items mm) nil (catch Throwable e (msg e))))]
+                    (if r
+                      [[id :fail (clean (str "invalid module does not read: " r))]]
+                      [[id :fail (clean (str "invalid: the validator's (WA3): " (String. ^bytes (:b expect) java.nio.charset.StandardCharsets/UTF_8)))]]))
+                  ("assert_unlinkable" "assert_uninstantiable" "assert_trap" "assert_exception")
+                  (let [m (second (:xs c))]
+                    (when (lex/list-of? m "module")
+                      (when-let [mm (module-of m)] (module-rows id mm))))
+                  nil)))
+            cmds))))))
+
+(defn- command-at
+  "The K-th command (from 1) of a script's text."
+  [^String text ^long k]
+  (nth (lex/read-sexps text) (dec k)))
+
+(defn control
+  "A negative control on the command `k` of a script (GTS81 (a)): `as-module` judges its module (an assert_malformed's) as
+  a module that must read; `as-malformed` judges a module command's as one that must be rejected; `vs TEXT2 K2` compares
+  its forms with another command's module. `differs` (the control fails, as it must) or `same`."
+  [^String text ^long k mode ^String text2 k2]
+  (let [c (command-at text k)
+        m (if (lex/list-of? c "module") c (second (:xs c)))
+        mm (module-of m)]
+    (case mode
+      "as-module" (if (:read (judge-module mm)) "differs" "same")
+      "as-malformed" (if (first (rejected? mm)) "same" "differs")
+      "vs" (let [c2 (command-at text2 k2)
+                 m2 (if (lex/list-of? c2 "module") c2 (second (:xs c2)))]
+             (if (= (read-items mm) (read-items (module-of m2))) "same" "differs")))))
+
+(defn -main
+  "repr-wasm wast LIST WORK: each script of LIST (NAME<tab>PATH) read; WORK/rows.edn the rows."
+  [& args]
+  (if (= "control" (first args))
+    (let [[_ path k mode path2 k2] args]
+      (println (control (slurp path) (Long/parseLong k) mode (when path2 (slurp path2)) (when k2 (Long/parseLong k2)))))
+  (let [[lst work] args
+        rows (for [l (str/split-lines (slurp lst)) :when (seq l)
+                   :let [[n p] (str/split l #"\t")]
+                   r (script-rows n (slurp p))]
+               r)
+        sb (StringBuilder.)]
+    (doseq [[i r why] rows] (.append sb (str "[" (pr-str i) " " r " " (pr-str why) "]\n")))
+    (.mkdirs (java.io.File. ^String work))
+    (spit (str work "/rows.edn") (str sb)))))
