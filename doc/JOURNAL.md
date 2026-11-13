@@ -5430,3 +5430,39 @@ own guard stopped it at 82%: the gate keeps the disk), C's two stale annotation 
 gf-misc's note), oi's two slow entries that now pass (parallel/churn, weak-ephe-final/weak_array_par). The rest reruns as-is: the
 Java levels after night 12's disk-full results, hsi-check's three CPU-limit programs, C++'s runtime samples (gf-cpp, merged in
 5ac770072). Considered: fixing the three first (a bisect over the jdk forms since 11-05, attr's memory, the pack: days).
+
+### 2026-11-13: night 13's Java "No space left" was ext4's directory index; hsi's three CPU-limit programs classed :speed
+
+The Java levels' ENOSPC (java-forms-verify's `environment: line 47: /root/arbace/.tmp/java-check/forms/f4d899f8338604b3f6ffef64.log:
+No space left on device`, the read failures behind java-judge's 174 read, 118 interp, 394 compiled and 427 print regressions)
+came with `/` at 80-84 % and its inodes at 15 %: no tmpfs, quota, ulimit -f or size cap is involved (`mount`: `/` the only
+writable disk, `/dev/shm` and `/run` near empty). dmesg named it: `EXT4-fs warning (device vda2): ext4_dx_add_entry: Directory
+(ino: 837812) index full, reach max htree level :2` and `Large directory feature is not enabled on this filesystem`; inode 837812
+is the read level's shared cache `/root/arbace/.tmp/java-check/forms` (bin/lib/gate-run.bash's GATE_JAVA_FORMS), one flat
+directory of 208,010 entries (52,000 keys, a forms directory, `.lock`, `.log`, `.result` each, from every reader key since
+JC1). Without ext4's large_dir a directory's htree has two levels, so once its leaves fill, creating a name that hashes to a
+full leaf fails with ENOSPC while others still succeed (a `touch` passed, t03224's log and the night's reads did not), and the
+rerun of 12:15 hit it again at 13:30 with the disk at 84 %. The fix (bin/java-check): every read cache (the read level's
+`forms`, `forms-nojavac`, print's `forms-full`) is now `CACHE/KK/KEY`, KK the key's first two hex characters, 256 shards
+of about 800 entries for today's 52,000 keys (`cache_slot`), and a flat entry of the old layout is moved into its shard
+under the shard's lock when the key is next used (`cache_take`). The shared cache was moved once by hand (the flat directory
+renamed aside, each prefix's entries moved into its shard, the empty old directory removed), since even a shard's `mkdir` failed in
+the full directory; it now has 258 entries at the top. A shard reaches ext4's limit at about 50 times today's size; the cache
+is never pruned, so later, if needed, old reader keys can be trimmed per shard. Considered: enabling large_dir with tune2fs (a
+host change, not ours); pruning the flat directory (it refills); a new cache per reader key (the same growth, one level down).
+Proofs: `bin/java-check --forms verify` passes (428 tests, 55 s; before the move it failed on t03558's shard); the 175 tests
+the night's read saves had not passing, read again with `--levels read --only`: 174 pass, t05973 its recorded class (javac's
+`--release` without ct.sym). The night's Java level steps passed with corrupted saves, so they must run again (bin/gate
+--rerun of java-read, java-interp, java-compiled-full and java-print), then java-judge.
+
+hsi-check's three (status 137 `:reason :limit` on night 13 at four at a time and other lanes' load) run alone with `bin/hsi
+check --only ... --jobs 1`: nofib/shootout/fasta passes at 43.16 s of wall (recorded 38.79; the night 47.25), nofib/spectral/
+exact-reals at 45.57 s (recorded 41.24), testsuite/codeGen/should_run/T16846 at 31.46 s (recorded 29.44; the night 43.97 killed).
+Each run's user and system CPU together (Go's collector threads counted against the 60 s `ulimit -t`) came close to the
+limit, so they are listed under `:speed` (test/haskell/divergences.edn, the times in its `:why`), as T8726, T23071 and
+CarryOverflow are: passing alone, near the limit. hsi has no per-program limit to raise (HSI_TIMEOUT is global). fasta and T16846
+need more than 3 GiB (Go's out of memory at ARBACE_MEM_GIB=3, 1.87 GB in use); fasta ran at 8, T16846 needs above 8 GiB of address
+space and ran at the default 16 (the coordinator's go-ahead). `bin/hsi divergences --results` of the rerun's results: 908 programs,
+0 not in a class (3 before).
+Proofs: `bin/reap` 0 problems; `bin/crops-score --judge --strict` 0; `bin/arbace-go --gate-key` unchanged (1170c98c...).
+

@@ -173,6 +173,10 @@ estimate fits before its lane's deadline; a crop's records are committed only wh
    patch, applied); speed: oi's darkening_work and churn (oi-slow); open: si's ecraven/ack 407 s alone (146 s recorded 10-31, limit 300): a
    real si slowdown, to bisect over si's commits since 10-31 (record left pass). gate_key moves (arbace/go,
    go/arbace/ci): wait for W2's end to merge.
+   Night 13's two left (`n14-fix`, 2026-11-13; journal): the Java levels' "No space left" was ext4's directory index on the
+   flat forms cache (208,010 entries), not the disk: the read caches sharded (`CACHE/KK/KEY`), the shared one migrated; the
+   Java level steps that passed on night 13 with ENOSPC in their saves must run again (`--rerun` of them), then `java-judge`.
+   hsi-check's fasta, exact-reals and T16846 pass alone near the CPU limit: classed `:speed`.
 4. **Night 13: W1**, the evaluator's speed alone (`eval-speed-w1` merged by day): the gate, the fixpoint, the bench, W2's
    light checks on the candidate, the keyed `--full`. *Must prove:* G2 = G3 and the gains of
    `doc/go/EVAL-SPEED.md` (on `eval-speed-w1`) with nothing else failing.
