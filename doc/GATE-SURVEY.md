@@ -5196,3 +5196,43 @@ after.
   `/root/arbace/.tmp/gate-lanes/events.tsv`: seven columns, one gate id. Check that `.tmp/gate/lanes/events.tsv` holds
   the same admissions.
 - A `--full --concurrent` now uses the free rule; `GATE_LANE_RULE=budget` gives GTS227 (a)'s fixed budget.
+
+## As built: GTS-A, a needed step of another chain waited for (branch `gate-gts`, 2026-11-13)
+
+The user's decision of 2026-11-12. Night 12's `bin/gate --full --concurrent` reported three `haskell-lib-*` steps as "not run:
+haskell-lib-check did not pass" while haskell-lib-check was still running in another chain: `run_one` checked a step's `:needs`
+at once (`ok_status`, its status file) and never waited. gf-gate worked around it by giving the four steps one `:chain`.
+
+- **The runners** (`bin/lib/gate-run.bash`): `run_queue ID STEP...` runs its steps one after the other as the runner ID, its
+  queue in `LOGS/runners/ID.queue`, its PID in `ID.pid`, its end in `ID.end`. `run_chain PHASE CHAIN` is the runner
+  `PHASE.CHAIN`; `bin/gate`'s serial loops are runners too (`essential.serial` in the clean run, `full.serial` beside GTS216 (a)'s
+  crop chains). Every queue is written before any runner starts (`queue_chains PHASE`, `queue_write`), so no runner looks for
+  a step whose runner has not started yet.
+- **The wait** (`need_wait`): a needed step not done, in another runner's queue, is waited for (its `.done`, every
+  `GATE_NEED_POLL` seconds, default 5), the wait in `ID.waits` ("STEP NEEDED") and `LOGS/runners/waits.log`. Then its status
+  decides, as before.
+- **No deadlock.** The step fails at once, its status `notrun NEEDED: WHY` and the report "not run: needs NEEDED: WHY", when:
+  - the need is later in its own runner's queue ("later in its own chain");
+  - its runner ended without it, or is gone without its end, a dead PID ("never run");
+  - the waits make a cycle back to this runner (`need_cycle`: the needed step's runner waits at a step whose need's runner
+    waits ... on a step of this runner, not done). A runner's steps run in order, so this also catches a cycle through
+    the chains' order: a1 needs b2 and b1 needs a2.
+  A need in no runner's queue (an earlier phase's, done; a later phase's, never started) and every need outside a runner (the
+  builds, the oracle tier's loop) is decided at once, as before. `GATE_NEED_WAIT=0` restores the old behaviour; it exists
+  for the test's demonstration.
+- **The test**, `test/gate/needs-wait-test.bash` (seconds, run by `bin/gate-tests`), uses made-up steps through the real
+  `run_one`, `run_chain` and `run_queue`:
+  - night 12's case without the wait (the old failure) and with it (run after its need passed);
+  - a need that fails still fails its dependant;
+  - the serial runner and a chain beside it, each way;
+  - a two-chain cycle, and the cycle through the order, both failing at once;
+  - a need later in the step's own chain, and one of a later phase;
+  - a runner ended without its step, and one killed.
+- **Keys.** `bin/lib/gate-run.bash` is in every check's key (with the planner), so every check reruns once at its next
+  gate. `gate_key`, the runtime key and the seed's keys do not move: `gate-run.bash` is out of `gate_key`.
+- gf-gate's shared `:chain` for the haskell-lib steps stays. It is still right (they run in order on one host) and no longer
+  needed for correctness.
+- Considered:
+  - having the planner order chains so that no need crosses one. That forbids the useful cases: a light crop chain needing
+    one step of the serial run.
+  - a global scheduler in place of the chains. Too large for this fix.
