@@ -23,10 +23,10 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       other tests (its SKIPFILE the tests already reported), until DONE. A run that makes no progress, or the module's
       wall past its cap (default 3600), stops: no DONE, the judge's "crash" lines, status 124 for the cap. Modules
       already run in DIR (a .status) are kept: the run resumes. Each run's TMPDIR a short directory under D (default
-      DIR/_tmp), removed after its module; after each module what the runs left in /tmp (perf-PID.map, pymp-*,
-      tempfile's names) removed and logged into DIR/tmp-leftovers.log (the VM forbids /tmp). PYI_LIB_TEST_ONLY (PY7, bin/pyi
-      check --only): the driver runs only the listed MODULE/TEST-ID of a module it names. PYI_LIB_TEST_DRIVER_EXE (PY7, bin/pyi
-      cover): the driver compiled by pyi's AOT runs each module (on its loop), PYI_LIB_TEST_COVER/MODULE its GOCOVERDIR.
+      DIR/_tmp), removed after its module, each driver run's working directory beside it (TMPDIR + "c"), made afresh
+      (queue 278); after each module what the runs left in /tmp (perf-PID.map, pymp-*, tempfile's names) removed and
+      logged into DIR/tmp-leftovers.log (the VM forbids /tmp). PYI_LIB_TEST_ONLY (PY7, bin/pyi check --only): the
+      driver runs only the listed MODULE/TEST-ID of a module it names. PYI_LIB_TEST_DRIVER_EXE (PY7, bin/pyi cover): the driver compiled by pyi's AOT runs each module (on its loop), PYI_LIB_TEST_COVER/MODULE its GOCOVERDIR.
   find --testdir DIR [--out FILE]
       queue 240: the same discovery with no CPython: regrtest's findtests (Lib/test/libregrtest/findtests.py of the pinned
       3.14.10, its SPLITTESTDIRS; copied below) over DIR, the tarball's Lib/test, sorted as cmd_list sorts; run by pyi
@@ -304,8 +304,14 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp):
             cmd = [os.path.join(root, "bin", "pyi"), "run", driver, m, skipfile]
             e = dict(os.environ, TMPDIR=tmp)
         errpath = os.path.join(d, "%s.err.%d" % (m, attempts))
+        # queue 278: each driver run in a working directory of its own, as regrtest's worker in its own temp dir:
+        # test.support's temp_cwd() ('tempcwd') and TESTFN are relative to it, so two modules at once (--jobs 2) and a
+        # driver started again after a kill (which leaves its tempcwd) collided in DIR ("[Errno 17] File exists")
+        cwd = tmp + "c"  # beside TMPDIR, not in it (a test may list TMPDIR); removed after the module by the worker
+        shutil.rmtree(cwd, ignore_errors=True)
+        os.makedirs(cwd)
         with open(errpath, "wb") as ef:
-            p = subprocess.Popen(cmd, cwd=d, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=ef,
+            p = subprocess.Popen(cmd, cwd=cwd, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=ef,
                                  text=True, encoding="utf-8", errors="replace", start_new_session=True)
             state = {"current": None, "deadline": None, "killed": None}
             lock = threading.Lock()
@@ -400,6 +406,7 @@ def cmd_run(args):
             tmp = short_tmp(tbase, "j%d" % k)
             n = run_module(m, root, d, oracle, test_timeout, module_timeout, tmp)
             shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(tmp + "c", ignore_errors=True)
             tmp_guard(m, os.path.join(d, "tmp-leftovers.log"))
             print("lib-test-all: %s run (%d s, %d driver run%s)" % (m, time.monotonic() - t0, n, "" if n == 1 else "s"),
                   flush=True)
