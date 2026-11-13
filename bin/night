@@ -1,0 +1,97 @@
+#!/bin/bash
+# The night's runner (GDS1 (a), GD1; doc/GATE-DIET-SURVEY.md, "As built: GD1"): the gate a night runs on the checkout it is
+# started in (the gate's checkout, the main checkout's .tmp/worktrees/next by the main session's convention), by its tier:
+#   nightly  bin/gate --nightly: --full's steps keyed as --full keys them, each rotated part as its subset and the night's
+#            slice (GT8.4), the :clean-only parts left out; every night but the weekly one
+#   weekly   bin/gate --weekly: --full with every part (GATE_ALL_PARTS=1), the weekly tier's :clean-only parts (GDS4 (a): the
+#            jdk corpora of repr/java's tree checks, rsi-check, cpp-roundtrip's libstdcxx-testsuite-every-40, haskell-target-probe,
+#            llvmi-aot, the fixpoint, programs-full) and the parked ones (GTS19 (a)) beside --full's; the night that starts on
+#            Saturday (UTC; NIGHT_WEEKLY_DAY, date +%u's number, default 6)
+#   auto     (the default) weekly on the weekly night, else nightly. The night is the date of the start less 12 hours, as
+#            bin/gate's GATE_NIGHT, so that a night that crosses midnight is one.
+# The clean run at a tag stays bin/gate --full --clean, by hand (ORS1 (a): with bin/gate --oracle).
+#
+# The contract (what the main session's night slot relies on; the slot's own script under .tmp/ is scratch):
+#   - it starts only when the disk is at most NIGHT_DISK_MAX percent full (default 85), the checkout's tracked files are clean,
+#     and, with --upstream REMOTE/BRANCH, HEAD is that branch's head after a fetch (a gate on a stale or dirty checkout records
+#     passes nobody merged); else it says why in the progress log and exits 1, running nothing;
+#   - the environment's host and lock variables are dropped (ARBACE_HOST_EXE, ARBACE_HEAVY_CMD, ARBACE_HEAVY_HELD,
+#     GATE_HEAVY_CMD): the gate takes its own (bin/gate's gate_keep_env keeps what chooses only where things are kept);
+#   - one gate, in the foreground of this script, its log LOG/gate.log, the progress LOG/progress.log (a line at the start, the
+#     status and minutes at the end, the FAILED lines), the status LOG/status (the gate's exit status), LOG/tier, LOG/commit;
+#   - with --ff DIR: on a pass, DIR's checked-out branch is fast-forwarded to the commit the gate ran on (git merge --ff-only,
+#     never a merge commit or a force), then pushed to each --push REMOTE (its branch of the same name); nothing on a failure;
+#   - exit status: the gate's (0 a pass), or 1 when it did not start, or the fast-forward's or a push's failure.
+# Usage: bin/night [--tier auto|nightly|weekly] [--plan] [--upstream REMOTE/BRANCH] [--ff DIR [--push REMOTE]...]
+#                  [--log DIR] [--detach]
+#   --plan    the tier's plan alone (bin/gate --nightly|--weekly --plan), no checks of the checkout, nothing run
+#   --log     the logs' directory (default .tmp/night/NIGHT, NIGHT the night's date)
+#   --detach  the same command started in a new session (setsid nohup), its PID in LOG/run.pid, its output LOG/run.out; stop
+#             it by that PID
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
+usage() { echo "usage: bin/night [--tier auto|nightly|weekly] [--plan] [--upstream REMOTE/BRANCH] [--ff DIR [--push REMOTE]...] [--log DIR] [--detach]" >&2; exit 2; }
+tier=auto plan= upstream= ff= log= detach= push=() args=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --tier) [ $# -ge 2 ] || usage; tier=$2; args+=("$1" "$2"); shift ;;
+    --plan) plan=1 ;;
+    --upstream) [ $# -ge 2 ] && [ "${2#*/}" != "$2" ] || usage; upstream=$2; args+=("$1" "$2"); shift ;;
+    --ff) [ $# -ge 2 ] && [ -d "$2" ] || usage; ff=$(cd "$2" && pwd); args+=("$1" "$ff"); shift ;;
+    --push) [ $# -ge 2 ] || usage; push+=("$2"); args+=("$1" "$2"); shift ;;
+    --log) [ $# -ge 2 ] || usage; log=$2; shift ;;
+    --detach) detach=1 ;;
+    *) usage ;;
+  esac
+  shift
+done
+case $tier in auto|nightly|weekly) ;; *) usage ;; esac
+[ ${#push[@]} -gt 0 ] && [ -z "$ff" ] && usage
+[ -n "$plan" ] && [ -n "$detach$ff" ] && usage
+night_start=$(( $(date +%s) - 43200 ))
+night=$(date -u -d "@$night_start" +%F)
+if [ "$tier" = auto ]; then
+  if [ "$(date -u -d "@$night_start" +%u)" = "${NIGHT_WEEKLY_DAY:-6}" ]; then tier=weekly; else tier=nightly; fi
+fi
+if [ -n "$plan" ]; then
+  echo "night $night: the $tier tier (bin/gate --$tier --plan)"
+  exec "$root/bin/gate" "--$tier" --plan
+fi
+log=${log:-$root/.tmp/night/$night}
+mkdir -p "$log" || exit 1
+log=$(cd "$log" && pwd)
+if [ -n "$detach" ]; then
+  setsid nohup "$0" "${args[@]}" --tier "$tier" --log "$log" > "$log/run.out" 2>&1 &
+  echo $! > "$log/run.pid"
+  echo "night $night: the $tier tier detached, PID $(cat "$log/run.pid"), logs $log"
+  exit 0
+fi
+say() { echo "== $(date -u +%T) $*" | tee -a "$log/progress.log"; }
+unset ARBACE_HOST_EXE ARBACE_HEAVY_CMD ARBACE_HEAVY_HELD GATE_HEAVY_CMD
+cd "$root" || exit 1
+pct=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
+[ "$pct" -le "${NIGHT_DISK_MAX:-85}" ] || { say "night $night: the disk is at ${pct}% (more than ${NIGHT_DISK_MAX:-85}%): not started"; exit 1; }
+[ -z "$(git status --porcelain --untracked-files=no)" ] || { say "night $night: the checkout is not clean: not started"; exit 1; }
+if [ -n "$upstream" ]; then
+  git fetch -q "${upstream%%/*}" "${upstream#*/}" || { say "night $night: git fetch ${upstream%%/*} ${upstream#*/} failed: not started"; exit 1; }
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse "$upstream")" ] \
+    || { say "night $night: HEAD $(git rev-parse --short=9 HEAD) is not $upstream $(git rev-parse --short=9 "$upstream"): not started"; exit 1; }
+fi
+commit=$(git rev-parse HEAD)
+echo "$tier" > "$log/tier"; echo "$commit" > "$log/commit"; rm -f "$log/status"
+say "night $night starts: the $tier tier (bin/gate --$tier) on $(git rev-parse --short=9 HEAD), disk ${pct}%, MemAvailable $(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo) GiB"
+start=$(date +%s)
+"$root/bin/gate" "--$tier" > "$log/gate.log" 2>&1; st=$?
+echo "$st" > "$log/status"
+say "bin/gate --$tier status $st ($(( ($(date +%s) - start) / 60 )) min); FAILED: $(grep -c '^   FAILED' "$log/gate.log")"
+grep -E '^   FAILED' "$log/gate.log" | cut -c1-160 >> "$log/progress.log"
+[ "$st" = 0 ] || { say "the gate did not pass: nothing fast-forwarded"; exit "$st"; }
+[ -n "$ff" ] || exit 0
+branch=$(git -C "$ff" symbolic-ref --short HEAD) || { say "--ff $ff: no branch checked out"; exit 1; }
+git -C "$ff" merge --ff-only -q "$commit" > "$log/ff.log" 2>&1 || { say "--ff $ff: $branch not fast-forwarded to $(git rev-parse --short=9 "$commit") (log $log/ff.log)"; exit 1; }
+say "$branch fast-forwarded to $(git -C "$ff" rev-parse --short=9 HEAD) in $ff"
+for r in "${push[@]}"; do
+  git -C "$ff" push -q "$r" "$branch" >> "$log/ff.log" 2>&1 || { say "push of $branch to $r FAILED (log $log/ff.log)"; exit 1; }
+  say "$branch pushed to $r"
+done

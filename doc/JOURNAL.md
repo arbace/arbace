@@ -5541,3 +5541,63 @@ from runs that were not the gate's step and were not looked into.)
 - **Proof:** the gate's exact command, whole: `bin/oi check` (380 pass, 0 failing, 0 CHANGED against the native record; churn and
   weak_array_par passed this time, STALE notes only) and `bin/oi suite check` (131 programs, 110 pass, 0 failing) exit 0 in 48 min
   (3 jobs); `bin/oi suite rollup` exit 0 after its record.
+
+## 2026-11-13: GATE-DIET-SURVEY, the gate measured and a diet proposed (branch `gate-diet`, from `mac/next` `3b25e0d43`)
+
+The user (2026-11-13): "Our testing harness is still a behemoth, that we need to address asap." doc/GATE-DIET-SURVEY.md measures
+night 13's serial `bin/gate --full` (`.tmp/night13/g-full-1.log`, next `265cab86a`, 18.6 h, 339 steps, 21 failed), the store of
+passes (`.tmp/gate-pass/`: each pass's seconds, CPU, peaks and `.inputs`), today's plans (`bin/gate --full --plan`,
+`bin/gate --nightly --plan`), `bin/gate --full --costs` and `--mem-check`, and `du`/`find` over `.tmp` and `~/.cache`. Its
+per-step data is `doc/gate-diet/costs-2026-11-13.tsv`. Nothing was run beyond those reads and plans; no key moves (docs only).
+
+Findings: the steps' wall sums to 30 h 24 min and 145 CPU-hours (7.8 of 64 cores); Java 23%, C 16%, C++ 12%, Rust 10%. The keyed
+night reran 311 of 331 steps: comparing each pass's `.inputs` with the one before, `arbace/go/escape.ae` reran 176 steps and four
+C record files 138 (79 for nothing else); night 12's gate-logic change rekeyed 163. GT8.4's `bin/gate --nightly` (decided GTS202)
+never ran at night (`_rotation/` holds no slice's runs); its Java subsets are 80-96% of their corpora. Four `repr-java-*.jdk`
+parts peak at 47-61 GiB; 19 steps are declared under their peaks and 82 parts far above (java-interp 53 GiB for 0.5-13.6).
+`:tools` misses five crop exclusions (`arbace/rust/`, `arbace/llvm/`, `arbace/asm/`, `arbace/repr/asm*`), so an asm edit reruns
+201 steps. `.tmp` holds 121 GiB: 48 worktrees 74 GiB (15 merged, about 18 GiB), `keep/` 15.5 GiB, 711 unreferenced scratch
+entries 22.9 GiB. Twenty self-inflicted failures of the week are listed with the rule that prevents each.
+
+Proposed (none decided): GDS1-GDS20 and the stages GD1-GD6. GD1, a day of table edits and small fixes: the night on
+`--nightly`, a weekly tier for the >40 GiB and the longest crop steps, gate-tests out of the essential path, `:tools` and `:c`
+narrowed, declarations from `--mem-check`; estimated serial 16.8 h to about 12 h, and about 7 h of wall concurrent at peaks
+<= 40 GiB. Alternatives considered: a 6 h serial budget (GTS200's letter: most corpora weekly), and narrowing keys by crop
+alone (it would have saved 2 h of night 13: the day's own churn, not the fan-out across crops, dominates).
+
+## 2026-11-13: GD1 built (branch `gate-gd1`, from `mac/next` `3b25e0d43`)
+
+The user decided GDS1-GDS20 of doc/GATE-DIET-SURVEY.md as recommended and asked for GD1 at once, on a branch to be
+merged right after main advances. Built as the survey defines it (doc/GATE-DIET-SURVEY.md, "As built: GD1"):
+- GDS1 (a): `bin/night`, the night's runner. Its header holds the contract the night slots' scratch scripts had: the tier
+  (weekly on the night that starts on Saturday, nightly otherwise), the start conditions, one gate, the logs, and a pass
+  fast-forwarding `--ff DIR` and pushing it. `bin/gate --weekly` is `--full` with `GATE_ALL_PARTS=1`. `make night`,
+  `night-plan` and `gate-weekly-plan` were added.
+- GDS4 (a): the weekly list of §4.2 became `:clean-only` parts:
+  - repr-java-{nojavac,front}.jdk;
+  - rsi-check.{samples,synthetic};
+  - cpp-roundtrip.libstdcxx-testsuite-every-40;
+  - one `weekly` part each for haskell-target-probe, llvmi-aot, fixpoint and programs-full.
+- GDS7 (a): gate-tests was moved to `:phase :full`. Its inputs no longer include `arbace/` or `CLAUDE.md`: of `arbace/` it
+  lists the tool namespaces stage 0 loads from the checkout (the clean run's `gate-tests.loaded`). CLAUDE.md's test is now
+  the essential step `claude-md` (`test/docs/claude-md-test.bash`).
+- GDS8 (a): `:tools` gained five crop exclusions (`arbace/rust/`, `arbace/llvm/`, `arbace/repr/asm{.ae,/}`, `arbace/asm/`).
+- GDS10 (a), the C part: `:c` keeps only test/c/'s shared data. Each C level names its own records in a group
+  (`:c-records-run`, `-aot`, `-dg`, `-tokens`, `-parse`, `-annot`, `-roundtrip`, `-c23`, all of them `:c-records`), drawn
+  from the scripts' paths and the clean runs' audits of 2026-11-05/06.
+- GDS13 (a), the table part: the `:mem-gib` values come from `--mem-check`'s peaks at ⌈1.1 × peak⌉. 13 were raised and 81
+  lowered: java-interp from 53 to 3-16, java-compiled-full from 50 to 23-26, 66 C parts to 1-4.
+- rsi's disk guard now stops at 90%, like cppi's (`e7debd721`).
+
+Results:
+- `gate_key` is unchanged (`126c321af14f`), and neither the planner nor the runner changed.
+- On the plans' `--rerun` serial sums: nightly 29:04 to 22:28, full 32:00 to 25:23, essential 3:04 to 2:42 (gate-tests'
+  53 min out of it).
+- Fan-out: a C known file reruns 24 steps instead of 149; an asm, Rust or LLVM namespace 10-24 instead of 201.
+
+Alternatives considered:
+- GDS4 (b), a planner phase `:weekly`, was set aside: it rekeys every step until GD3's epoch.
+- Making a whole step weekly without the one-part form would also have needed the planner.
+- Keeping the fixpoint nightly: the survey's list moves it to the weekly run. Its "nights that touch j2g" rule waits for
+  the planner change (GDS4 (b)).
+- For repr-go, a 40 GiB declaration under GDS3's ceiling was set aside for its measured ⌈1.1 × 37.3⌉ = 42.
