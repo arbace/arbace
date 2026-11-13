@@ -5366,3 +5366,24 @@ doc/cpp/CPP-SURVEY.md, "As built: cpp-s12".
   C++17 (<charconv>'s `__from_chars_alnum_to_val_table<false>::value`, an unknown global at lowering), and a static data member's
   redeclaration without an initializer keeping the in-class one (found by a probe: `constexpr int A::n;` had made it zero).
 - f8 and library.cpp now generate and lower (41,366 and 45,920 lines of IR); their runs need the client crop's runtime and gcc, not run.
+
+## 2026-11-13: llvm-eh, llvmi runs modules that unwind (branch `llvm-eh`, from `mac/cpp-s12` ff95fe3e3)
+
+The user decided (2026-11-13) that llvmi runs C++'s exceptions on Arbace's own engine, in llvmi's model of the program, f8 and
+library.cpp first. Light, one process at a time, a watcher at 2.5 GiB; no gate, big lock, clang, g++ or gcc. Details in
+doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvm-eh".
+- Found: the shared lowering already lowers exceptions by the pending flag and C++'s check route runs them on ci with libsupc++ lowered
+  and the hand-written unwinder and personality (arbace/cpp/rt/eh.c.ae); llvmi refused them only because its one unit links musl and
+  the personality-free layer. Built LLS22 (a): an unwinding module with C++'s personality is lowered as cppi lowers a program and
+  linked with cppi's lowered runtime by arbace.cpp.run (`bin/llvmi run`, `check` eval and AOT); another personality is still refused.
+  Considered: a second unwinder of llvmi's own (two models of one ABI to keep equal) and host unwinding (excluded by the decision).
+- Completed in the layer: a filter's rejection (`__cxa_call_unexpected` as eh_personality.cc: the handler's new exception admitted, else
+  std::bad_exception, else std::terminate; the lowering records a filter's types through `cx$spec_catches`), and the adjusted pointer
+  set to the thrown object at each landing pad (a rejection's `__cxa_begin_catch` read zero).
+- bin/cppi runtime-ci's chunked read resumes after a killed chunk (its reader key written first); llvmi's full steps need cpp-runtime.
+- Proofs: hand IR probes i1a/i2a pass, their controls i1n/i2n fail by their bits; of the 24 unwinding programs of cpp-s12's IR (22 of the
+  81 with f8 and library.cpp) 16 pass against g++'s records, 3 fail in cppi's own classes (pretty1's oracle text, ci's threads), 5 not
+  run (their link passes 2.5 GiB: f8, library.cpp, pr77550, atomics, hello). c++20/tzdb.cc's read alone passes 2.5 GiB: the library used
+  leaves it out (by hand). Stopped by the disk at 86% (not this worktree's: 0.5 GB): the C++ probes, llvmi's checks with the 13
+  `:personality` modules and their records are the night's commands in the survey. gate_key unchanged (314c8e5b...), the crops' key test
+  passes. Proposed LLS51 (the search phase), LLS52 (the link's memory), LLS53 (llvmi-check needing cpp-runtime).

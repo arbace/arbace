@@ -2397,3 +2397,105 @@ verify-llvmtest (43) and verify-probes (4), 0 failing; expect-test 44 cases, 13 
 **Independence.** The judge stage 0.8455 to 0.8541 (2136 own, 880 recorded: independence 96.91 to 97.08; `test/crops/independence.edn`'s
 `:llvm :judge`, `scores.edn`). Left: the 478 probes (LLS48 (a)) and llvmi's 177 modules (LLS49 (a)), as decided, and 48 llvm/test
 modules on opt's record (41 whole files of split-file tests, 7 sections).
+
+## As built: llvm-eh, llvmi runs modules that unwind (2026-11-13, branch `llvm-eh` from mac/cpp-s12 ff95fe3e3)
+
+The user's decision of 2026-11-13: llvmi runs C++'s exceptions on Arbace's own engine (`invoke`, `landingpad` with cleanup, catch and filter
+clauses, `resume`, the Itanium ABI as libsupc++ uses it, `__gxx_personality_v0`'s selection by type info, std::terminate, nested
+exceptions, frames llvmi runs), in llvmi's model of the program, not by host unwinding; f8 and library.cpp (cpp-s12: generated, refused
+by llvmi) first. This is LLS22 (a) (Proposed of LL4), built. Light, one process at a time, main's stage 0, a watcher killing by PID any
+process of the worktree past 2.5 GiB; no gate, big lock, clang, g++ or gcc.
+
+**What was there.** The shared lowering (`arbace/cpp/lower.ae`) already lowers exceptions by a pending flag (doc/cpp/LLVM.md §8, CP86 (c)):
+a call that may unwind is tested after it, an invoke takes its unwind edge while the flag is set, a landing pad computes its selector by
+asking the runtime of each clause (`cx$catches`, which does `__gxx_personality_v0`'s search for one clause through the type_info's own
+`__do_catch`), `resume` raises again; the unwinder and the personality are the hand-written layer `arbace/cpp/rt/eh.c.ae`, and
+everything else of the ABI is libsupc++'s own code, lowered with libstdc++ from the recorded IR pack (`bin/cppi runtime-build`,
+`runtime-ci`: ci's library). cppi's check route runs clang's IR of C++ programs that way on ci. llvmi refused any such module
+(`:personality`) because its single unit links musl and the personality-free layer (`arbace/llvm/rt/none.c.ae`) alone.
+
+**Built.**
+- `arbace.llvm.run`: a module that unwinds with C++'s personality (`__gxx_personality_v0`, or gcc's C cleanup personality) is lowered as
+  C++'s check route lowers a program (`*ci*` false: the runtime it links is lowered that way, so their va_list and stack conventions
+  agree), without the personality-free layer, and marked `:eh` (`lower`: `OUT.c.eh` beside; `lower-list`: class `eh` on an `ok` row); a
+  module with another personality (Rust's) is still refused `:personality`, naming it.
+- `bin/llvmi run`: an `:eh` module is linked by `arbace.cpp.run nodes` with C++'s lowered runtime (`bin/cppi runtime-ci`, built when stale;
+  `LLVMI_CPP_RUNTIME` another runtime directory, `LLVMI_CPP_RTLIB` a read library used as it is, by hand) and musl's forms, and run by
+  ci's back end (tools/cirun). `bin/llvmi check`: the `:eh` modules built by `arbace.cpp.run nodes-list` (eval) or `compile-list`
+  (AOT, in shards of their own), the rest as before; so llvmi-check and llvmi-aot need the cpp-runtime build (`test/gate/steps.edn`:
+  `:needs` cpp-runtime, inputs `:cpp`).
+- The pending-flag layer, completed where the user's list asked more than it did:
+  - **filter clauses' rejection** (a dynamic exception specification, the landing pad's selector -1, `__cxa_call_unexpected`): the lowering
+    asks a filter's types through `cx$spec_catches`, which records them (reset at each landing pad, `cx$exception`); `__cxa_call_unexpected`
+    is eh_personality.cc's: the exception caught, the unexpected handler called, its new exception goes on when the specification admits it,
+    else a `std::bad_exception` when the specification admits that (libsupc++'s vtable and type_info), else std::terminate, the original's
+    catch ended either way (before: it called the handler, then std::terminate even when the handler's exception was admitted);
+  - **the adjusted pointer** starts as the thrown object at each landing pad (eh_personality.cc saves it for the handler it finds, a
+    filter's rejection too): `__cxa_begin_catch` after a rejection read zero before (probe i1a's empty filter faulted).
+- `bin/cppi runtime-ci`'s chunked read (`CPPI_CI_CHUNK`) writes the reader's key and the units' digests first, so a read stopped part way
+  (a chunk killed by the watcher) resumes at the units not read instead of reading the 199 again.
+
+**Probes** (`.tmp/probe/` of the worktree; each control exits by the bit it tests, so a throw caught by the wrong handler fails):
+
+| Probe | What | Result |
+|---|---|---|
+| i1a (IR by hand) | a cleanup with a catch of `long` that an int passes (the cleanup runs, `resume`), clause order and `llvm.eh.typeid.for`'s selectors (`long`, `int`, catch-all), a filter that admits the exception (resumed to the caller), an empty filter's rejection (selector < 0, the thrown object read through `__cxa_begin_catch`) | llvmi 0 (after the adjusted pointer's fix; before: a fault at 0) |
+| i1n | i1a with the catch-all before `int` in the caller: the int taken by the catch-all | llvmi 1 (bit 0) |
+| i2a (IR by hand) | `throw(long)` rejecting an int, the unexpected handler throwing a long (admitted: caught as 77); `throw(long, std::bad_exception)` with the handler throwing an int (std::bad_exception in its place); `throw(long)` with an int from the handler (std::terminate, the program's terminate handler) | llvmi 0 |
+| i2n | i2a without std::bad_exception in the second specification: std::terminate at its stage | llvmi 4 |
+
+The C++ probes e1a-e4n (the ABI from C++ through Arbace's code generator: type selection, base and pointer conversions, multiple
+inheritance, cleanups across frames in order, rethrow, nested handlers, constructors' members, std::exception's hierarchy, exception_ptr,
+nested_exception, uncaught_exceptions, typeid, bad_cast, noexcept's std::terminate, an exception leaving main) are written with their
+controls (`.tmp/probe/e*.cpp`) and not run: the night's df rule stopped the session at their generation (below).
+
+**Programs that now run on llvmi** (Arbace's code generator's IR of cpp-s12, `bin/llvmi run`'s steps, judged by test/cpp/ref-gxx15.edn's
+status and stdout; f8 by its own verdict, "3"): of the 22 of the 81 run programs whose IR unwinds (all refused by llvmi before), with f8
+and library.cpp:
+
+| Result | Programs |
+|---|---|
+| pass (16) | gxx-dg-run's cpp0x/initlist-throw2, eh/ctor-fntry1, eh/omit-frame-pointer2, eh/uncaught4, expr/for5, inherit/virtual15, init/array66, init/no-elide2, opt/dtor1, opt/unroll1, torture/pr40389, ubsan/vptr-1; runtime/deferred; samples/classes, io, p1-first |
+| fail, cppi's own classes for clang's IR (3) | template/pretty1 (`__PRETTY_FUNCTION__` is clang's text, the test compares g++'s: test/cpp/check-every-25's `oracle-text`), runtime/thread-throw and runtime/threads (ci's threads, test/cpp/check-linux-amd64.edn's rows: status 139 there too) |
+| not run: the link above 2.5 GiB (5) | f8 and library.cpp (their IR lowered: 41,366 and 45,920 lines; the link's read and check of their C passed 2.5 GiB), gxx-dg-run/pr77550, runtime/atomics, runtime/hello (the link of libstdc++'s iostream and string units); the night's command below |
+
+Each small program: lowered in 13-21 s, linked in 43-64 s (io 221 s), run in about a second, 1.0-1.1 GB. Not run here: llvm-90's own
+corpora's 13 modules refused `:personality` (ee.MCJIT.eh, eh-lg-pic; cpp.samples.classes, coroutine, io, p1-first; cpp.runtime.atomics,
+ctor-throw, hello, library, thread-throw, threads, uncaught) through `bin/llvmi check`, and the checks after it (below).
+
+**The runtime read.** `bin/cppi runtime-ci` read 198 of the 199 units here: `c++20/tzdb.cc` alone passed the watcher's 2.5 GiB (2.6 GB
+before it was killed), so the library the runs above used leaves it out (`list-notzdb.tsv`, by hand; `LLVMI_CPP_RTLIB`), keyless: no
+program here names its symbols. The gate's cpp-runtime step declares 3 GiB.
+
+### The night's commands (not run: each above 2.5 GiB, or stopped by the disk at 86%)
+
+```
+# 1. the runtime whole, at the branch's key (about 25 min; tzdb.cc's read alone 2.6-3 GB)
+CPPI_CI_CHUNK=4 CPPI_JOBS=2 bin/cppi runtime-build && CPPI_CI_CHUNK=1 bin/cppi runtime-ci
+# 2. the five programs whose link passes 2.5 GiB (3-4 GB each, 5-15 min): .tmp/judge2.sh's steps, as bin/llvmi run
+bin/llvmi run IR.ll   # for f8, library, pr77550, atomics, hello (the IR of cpp-s12's .tmp/probe/f8, .tmp/LIB, .tmp/G10)
+# 3. llvmi's checks with the 13 modules that unwind, then record (eval about 5 min, AOT about 40 min, 1.5-3 GB)
+bin/llvmi check --record && bin/llvmi check --aot --record && bin/reap --record && bin/crops-score --record
+# 4. the C++ probes (each 1-4 min, 1.5 GB): .tmp/pg.sh e1a e1n e2a e2n e3a e3n e4a e4n
+```
+
+### Proposed (llvm-eh)
+
+- **LLS51 The search phase.** The pending-flag model is one phase: an exception no handler takes runs the cleanups of the frames it leaves,
+  then std::terminate (`cx$uncaught`), where libgcc's two phases terminate before any cleanup ([except.handle]/9 leaves it to the
+  implementation; doc/cpp/LLVM.md §8 says so). A program printing in a destructor on that path differs from g++'s run (no recorded program
+  does). (a) A search phase: each invoke whose landing pad has clauses registers them on a thread-local handler stack, and
+  `_Unwind_RaiseException` asks it before raising (the lowering and the layer, the runtime rebuilt, about 1 day); (b) keep one phase, a class
+  where a program shows it. **Recommended: (b).**
+- **LLS52 The memory of a C++ program's link on ci.** f8's, library.cpp's and iostream's links pass 2.5 GiB (the program's C read and
+  checked with libstdc++'s units it pulls). (a) Run them in the night lanes as cpp-check does (`CPPI_CI_MEMLIMIT=2GiB`, `:mem-gib` 3-5); (b)
+  cut the link's memory first (the pruned units' checked forms kept per unit on disk). **Recommended: (a) now, (b) when cpp-check's runtime
+  part grows.**
+- **LLS53 llvmi-check needs cpp-runtime.** The branch makes llvmi's full steps depend on C++'s runtime build (`:needs`, `:cpp` inputs): a
+  C++ change reruns them. (a) as built; (b) keep the `:eh` modules out of the gate's llvmi-check (a `--no-eh` there, cppi's check covering
+  them). **Recommended: (a)**: the same modules are the row's.
+
+### Keys
+
+The branch changes `arbace/llvm/`, `arbace/cpp/`, `bin/llvmi`, `bin/cppi` and `test/gate/steps.edn` (llvmi's two steps), and doc/: crop paths
+and the steps' table (see the report's key check).
