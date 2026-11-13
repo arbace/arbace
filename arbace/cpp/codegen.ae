@@ -70,6 +70,28 @@
     (swap! *top* update :declared conj nm)
     (add-top! (apply list 'llvm/declare (gsym nm) ret (cond-> (mapv (fn [t i] (into [t] (nth pattrs i nil))) ps (range)) va (conj '&)) (when nounwind [:attrs [:nounwind]])))))
 
+;; (cpp-s12, CP382 (a): a wide or Unicode literal's global, its code units as an array of i16 or i32, clang's
+;; GetAddrOfConstantStringFromLiteral: the same `.str` numbering, all zero as zeroinitializer, aligned to the unit)
+(declare string-global)
+
+(defn- wide-global [us ^long w]
+  (let [k [w us]]
+    (or (get-in @*top* [:strings k])
+        (let [n (count (:strings @*top*))
+              nm (if (zero? n) ".str" (str ".str." n))
+              lt (case w 2 'i16 4 'i32)
+              vs (conj (vec us) 0)]
+          (swap! *top* assoc-in [:strings k] nm)
+          (add-top! (list 'llvm/global (gsym nm) (list 'array (count vs) lt)
+                          (if (every? zero? vs) 'zeroinitializer (apply list 'array (map (fn [u] [lt u]) vs)))
+                          :linkage :private :unnamed-addr :unnamed_addr :constant true :align w))
+          nm))))
+
+(defn- str-global
+  "A string literal node's global."
+  [e]
+  (if (:units e) (wide-global (:units e) (:w e)) (string-global (:s e))))
+
 (defn- string-global [^String s]
   (or (get-in @*top* [:strings s])
       (let [n (count (:strings @*top*))
@@ -890,6 +912,7 @@
         (format "f0x%04X%016X" (bit-or (if neg 0x8000 0) (+ (long e) 16383)) m)))))
 
 (defn- fp-const [t ^double v & [lit]]
+  (when (#{:float16 :float128} (abi/bn (abi/unq t))) (fail :codegen "a constant of " (name (abi/bn (abi/unq t)))))
   (if (= :float (abi/bn (abi/unq t)))
     (list 'fp (str "0x" (str/upper-case (format "%016x" (Double/doubleToRawLongBits (double (float v)))))))
     (if (= :ldouble (abi/bn (abi/unq t)))
@@ -1622,7 +1645,7 @@
     :base-lv (base-addr! (emit-lv (:e e)) (:id (abi/unq (:ty (:e e)))) (:to e))
     :derived-lv (offset! (emit-lv (:e e)) (- (long (base-offset (:to e) (:id (abi/unq (:ty (:e e))))))))
     :reinterpret-lv (emit-lv (:e e))
-    :str (gsym (string-global (:s e)))
+    :str (gsym (str-global e))
     :exn-obj (:exn-adj @*f*)
     :mfield (let [a (emit-lv (:obj e)) o (emit-rv (:m e))] (val! (list 'getelementptr :inbounds 'i8 ['ptr a] ['i64 o])))
     :mcall (if (= :pr (:cat e)) (materialize! e) (mcall! e nil))
@@ -1767,8 +1790,11 @@
       :complex (let [et (:of tu) es (abi/size-of et) [a b] (:items init)]
                  (store! et (if a (emit-rv a) (zero-of et)) addr)
                  (store! et (if b (emit-rv b) (zero-of et)) (offset! addr es)))
-      :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
-                (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n))
+      :string (if-let [us (:units (:e init))]
+                (let [w (long (:w (:e init))) n (long (or (:n init) (inc (count us))))]
+                  (memcpy! addr (gsym (wide-global (vec (take (dec n) (concat us (repeat 0)))) w)) (* n w)))
+                (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
+                  (memcpy! addr (gsym (string-global (subs (str s (apply str (repeat n (char 0)))) 0 (dec n)))) n)))
       :bind (store! (abi/ptr abi/void) (let [e (:e init)] (binding [*extend-root* (when *extend* (extend-root e))] (emit-lv e))) addr)
       :bind-temp (let [tt (:ty init) tmpa (slot! tt)]
                    (emit-init tmpa tt (:init init))
@@ -2748,7 +2774,7 @@
                                     :int (:v e)
                                     :float (fp-const (:ty e) (:v e) (:lit e))
                                     :null 'null
-                                    :decay (when (= :str (:op (:e e))) (gsym (string-global (:s (:e e)))))
+                                    :decay (when (= :str (:op (:e e))) (gsym (str-global (:e e))))
                                     :addr (when (= :var (:op (:e e))) (let [v (sema/var* (:id (:e e)))] (when (#{:global :member-static} (:storage v)) (gsym (abi/mangle-var v)))))
                                     :fnaddr (want-fn! (:fn e))
                                     :cast (case (:ck e)
@@ -2775,8 +2801,11 @@
                                  (map (fn [i] [(nth (:fields l) i) (:ty (nth (:fields c) i))]) (or (:fields-used init) (range (count (:fields c))))))
                     ls (map (fn [[o st] it] (const-leaves st it (+ off (long o)))) subs (:items init))]
                 (when (and (not (abi/dynamic? cid)) (not-any? :bits (:fields c)) (every? some? ls)) (vec (apply concat ls)))))
-      :string (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
-                (vec (map-indexed (fn [i ch] [(+ off i) 'i8 (long (int ch))]) (subs (str s (apply str (repeat n (char 0)))) 0 n))))
+      :string (if-let [us (:units (:e init))]
+                (let [w (long (:w (:e init))) n (long (or (:n init) (inc (count us)))) lt (case w 2 'i16 4 'i32)]
+                  (vec (map-indexed (fn [i u] [(+ off (* i w)) lt u]) (take n (concat us (repeat 0))))))
+                (let [s (:s (:e init)) n (long (or (:n init) (inc (count s))))]
+                  (vec (map-indexed (fn [i ch] [(+ off i) 'i8 (long (int ch))]) (subs (str s (apply str (repeat n (char 0)))) 0 n)))))
       :zero-then (const-leaves t (:then init) off)
       ;; an implicit or defaulted default constructor that only stores constants (constexpr: clang initializes the
       ;; object as a constant, its vptrs included)

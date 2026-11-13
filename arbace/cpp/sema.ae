@@ -317,6 +317,7 @@
    ;; (cpp-s5: GNU's __int128, [basic.fundamental]/1's extended integer types as clang has them on x86-64: <format>'s
    ;; _Arg_value union and _S_to_arg_type, under __SIZEOF_INT128__)
    '__int128 :i128 'unsigned-__int128 :u128 '__int128_t :i128 '__uint128_t :u128
+   '_Float16 :float16 '__float128 :float128
    'float :float 'double :double 'long-double :ldouble 'wchar_t :wchar 'char8_t :char8 'char16_t :char16 'char32_t :char32
    'std/nullptr_t :nullptr 'nullptr_t :nullptr 'decltype/nullptr :nullptr})
 
@@ -1538,6 +1539,15 @@
                                                              ;; access as a member of its class, [namespace.udecl]/19)
                                                              (and (checking?) (:cls scope) (= :fn (:e e)) (:cls (fnd (:id e))))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
+    ;; (cpp-s12: `using enum E;`, [enum.udecl]/2: E's enumerators declared in the scope as by using-declarations, at
+    ;; namespace, class or block scope; <bits/unicode.h>'s _Grapheme_cluster_iterator::_M_is_break, f8's)
+    "UsingEnumDecl" (let [t (node-text n)
+                          [_ target] (re-find #"using\s+enum\s+([^;]+?)\s*;?\s*$" (or t ""))
+                          et (when target (abi/unq (resolve-type scope target)))]
+                      (when-not (abi/enum? et) (fail :decl "using enum of a non-enumeration " (pr-str target)))
+                      (doseq [[nm es] (:names (:scope (abi/enm (:id et)))) e es]
+                        (enter! scope nm (cond-> (assoc e :pos (long (or (:_b n) 0)))
+                                           (and (checking?) (:cls scope)) (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
     ;; (CX12, the checker: a namespace-scope static_assert of the main file checked in the analysis' order)
     "StaticAssertDecl" (when (and (checking?) (= :ns (:kind scope)) (not (header-node? n)))
                          (swap! *order* conj [:sassert {:node n :scope scope}]))
@@ -1868,6 +1878,8 @@
 
 (defn- ce-cell-loc [v] {::cell (atom v) ::path []})
 
+(declare str-units)
+
 (defn ce-wrap
   "The value `v` as the type `t` holds it (integers wrapped to its width, bool 0/1, floats as doubles)."
   [t v]
@@ -2084,9 +2096,10 @@
        ;; __GNUC_EXECUTION_CHARSET_NAME's characters through a `const char*`)
        :decay (let [a (:e e)]
                 (cond
-                  (= :str (:op a)) (let [n (long (or (:n (abi/unq (:ty a))) (inc (count (:s a)))))
+                  (= :str (:op a)) (let [us (str-units a)
+                                         n (long (or (:n (abi/unq (:ty a))) (inc (count us))))
                                          el (:of (abi/unq (:ty a)))
-                                         cs (mapv #(ce-wrap el (long (int %))) (:s a))]
+                                         cs (mapv #(ce-wrap el %) us)]
                                      {::base (into cs (repeat (max 0 (- n (count cs))) 0)) ::i 0})
                   (and (= :var (:op a)) (contains? env (:id a)) (vector? @(get env (:id a)))) {::base (get env (:id a)) ::i 0}
                   :else (not-constant "the decay of " (:op a))))
@@ -2378,9 +2391,11 @@
     (fail :type "arithmetic on " (pr-str (select-keys a [:k :n :id])) " and " (pr-str (select-keys b [:k :n :id]))))
   (let [a (promote-type a) b (promote-type b)]
     (cond
+      (or (= :float128 (abi/bn a)) (= :float128 (abi/bn b))) (abi/b :float128)
       (or (= :ldouble (abi/bn a)) (= :ldouble (abi/bn b))) (abi/b :ldouble)
       (or (= :double (abi/bn a)) (= :double (abi/bn b))) abi/double*
       (or (= :float (abi/bn a)) (= :float (abi/bn b))) abi/float*
+      (or (= :float16 (abi/bn a)) (= :float16 (abi/bn b))) (abi/b :float16)
       (= a b) a
       :else
       (let [ra (long (abi/int-ranks (abi/bn a))) rb (long (abi/int-ranks (abi/bn b)))
@@ -3237,7 +3252,7 @@
         (abi/arr? tu)
         (let [items (:items (brace-elide tu src))
               el (:of tu)]
-          (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar} (abi/bn (abi/unq el))))
+          (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar :char8 :wchar :char16 :char32} (abi/bn (abi/unq el))))
             {:i :string :e (first items) :n (:n tu)}
             ;; (the elements not written value-initialized: analyzed only when there are some, [dcl.init.aggr]/5)
             {:i :list :items (mapv #(init-for el % ctx :copy) items) :fill (when (and (:n tu) (< (count items) (long (:n tu)))) (init-for el nil ctx :value)) :n (:n tu)}))
@@ -3318,6 +3333,32 @@
                           (recur (+ i 2)))))
             (do (.append sb c) (recur (inc i)))))))
     (str sb)))
+
+(defn- wide-units
+  "The code units of a wide or Unicode string literal as clang prints it (L\"...\", u\"...\", U\"...\": each unit a
+  printable character or an escape, \\Uxxxxxxxx for the others, cpp-s12, CP382 (a))."
+  [^String s]
+  (let [s (subs s (inc (.indexOf s "\"")) (.lastIndexOf s "\""))
+        n (count s) hex? #(re-matches #"[0-9a-fA-F]" (str %))]
+    (loop [i 0 out []]
+      (if (>= i n)
+        out
+        (let [c (.charAt s i)]
+          (if (= c \\)
+            (let [d (.charAt s (inc i))]
+              (cond
+                (#{\u \U} d) (let [j (+ i 2 (if (= d \u) 4 8))] (recur j (conj out (Long/parseLong (subs s (+ i 2) j) 16))))
+                (= d \x) (let [j (loop [j (+ i 2)] (if (and (< j n) (hex? (.charAt s j))) (recur (inc j)) j))]
+                           (recur j (conj out (Long/parseLong (subs s (+ i 2) j) 16))))
+                (Character/isDigit d) (let [j (loop [j (inc i) k 0] (if (and (< j n) (< k 3) (Character/isDigit (.charAt s j))) (recur (inc j) (inc k)) j))]
+                                        (recur j (conj out (Long/parseLong (subs s (inc i) j) 8))))
+                :else (recur (+ i 2) (conj out (long (int (case d \n \newline \t \tab \r \return \a (char 7) \b (char 8) \f (char 12) \v (char 11) d)))))))
+            (recur (inc i) (conj out (long (int c))))))))))
+
+(defn str-units
+  "A string literal node's code units, without the terminating zero."
+  [a]
+  (or (:units a) (mapv #(long (int %)) (:s a))))
 
 (declare capture-field)
 
@@ -4753,11 +4794,17 @@
     "CXXBoolLiteralExpr" {:op :int :v (if (:value n) 1 0) :ty abi/bool* :cat :pr}
     "FloatingLiteral" (let [qt (get-in n [:type :qualType])]
                         {:op :float :v (Double/parseDouble (:value n)) :lit (when (= qt "long double") (:value n))
-                         :ty (case qt "float" abi/float* "long double" (abi/b :ldouble) abi/double*) :cat :pr})
-    "StringLiteral" (let [s (decode-string (:value n))
-                          t (resolve-type (:scope ctx) (get-in n [:type :qualType]))]
-                      (when-not (= :char (abi/bn (abi/unq (:of t)))) (fail :string "a wide string"))
-                      {:op :str :s s :ty t :cat :lv})
+                         :ty (case qt "float" abi/float* "long double" (abi/b :ldouble) "_Float16" (abi/b :float16) "__float128" (abi/b :float128) abi/double*) :cat :pr})
+    ;; (cpp-s12, CP382 (a): a wide or Unicode literal, L, u, U, as its code units, :units, the element type's width
+    ;; each: UTF-32 for U and L (wchar_t on x86-64 Linux), UTF-16 for u, as the parser encoded them; u8's char8_t a narrow
+    ;; literal's bytes. <format>'s _GLIBCXX_WIDEN(S) is `_Widen<_CharT>(S, L##S)`, so every char instantiation names the
+    ;; wide literal too, its consteval call choosing the narrow one)
+    "StringLiteral" (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
+                          eb (abi/bn (abi/unq (:of t)))]
+                      (cond
+                        (#{:char :schar :uchar :char8} eb) {:op :str :s (decode-string (:value n)) :ty t :cat :lv}
+                        (#{:wchar :char16 :char32} eb) {:op :str :units (wide-units (:value n)) :w (abi/size-of (abi/unq (:of t))) :ty t :cat :lv}
+                        :else (fail :string "a string literal of " (pr-str (:of t)))))
     ;; __func__, __FUNCTION__, __PRETTY_FUNCTION__ ([dcl.fct.def.general]/8): the enclosing function's name (the pretty
     ;; one approximated by the name: G4, the headers' assertions, whose strings no run reads)
     "PredefinedExpr" (let [nm (or (:name (fnd (:fn-id ctx))) "")]
@@ -5032,7 +5079,7 @@
           (cond (abi/class? (abi/unq t)) {:op :temp-obj :init (init-for t args ctx (if (empty? args) :value :direct)) :ty (abi/unq t) :cat :pr}
                 (empty? args) {:op :zero-val :ty t :cat :pr}
                 (= 1 (count args)) (cast-expr ctx t (first args) true)
-                :else (fail :expr "a functional cast of a scalar type with " (count args) " arguments")))
+                :else (fail :expr "a functional cast of a scalar type with " (count args) " arguments: " (pr-str t) " from " (get-in n [:type :qualType]))))
         (and (= "CXXFunctionalCastExpr" (:kind n)) (abi/class? (abi/unq t)))
         {:op :temp-obj :init (init-for t (if (= "InitListExpr" (:kind k)) (analyze ctx k) [(analyze ctx k)]) ctx :direct) :ty (abi/unq t) :cat :pr}
         ;; (cpp-s8: T{} and T{e} of a scalar type, [expr.type.conv]/2 with [dcl.init.list]/3.9-3.11: value-initialized, or
@@ -5285,8 +5332,8 @@
         init (init-kid n)
         t (if (and (abi/arr? t) (nil? (:n t)) init)
             (let [a (analyze ctx init)]
-              (cond (= :init-list (:op a)) (if (and (= 1 (count (:items a))) (= :str (:op (first (:items a))))) (assoc t :n (inc (count (:s (first (:items a)))))) (assoc t :n (count (:items a))))
-                    (= :str (:op a)) (assoc t :n (inc (count (:s a))))
+              (cond (= :init-list (:op a)) (if (and (= 1 (count (:items a))) (= :str (:op (first (:items a))))) (assoc t :n (inc (count (str-units (first (:items a)))))) (assoc t :n (count (:items a))))
+                    (= :str (:op a)) (assoc t :n (inc (count (str-units a))))
                     :else t))
             t)
         pre (when (and init (has-auto? t) (not (#{"call" "list"} (:init n)))) (analyze ctx init))
@@ -5480,7 +5527,7 @@
            "CXXRecordDecl" (do (declare-class! (:scope ctx) d) {:s :null})
            "FunctionDecl" (do (declare-fn! (:scope ctx) d) {:s :null}) ; a block-scope function declaration
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
-           ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
+           ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
            "StaticAssertDecl" (do (when-not (some-> (:fn-id ctx) fnd :tinst) (check-static-assert! ctx d)) {:s :null})
            (fail :decl "local declaration " (:kind d)))))))
