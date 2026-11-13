@@ -6383,3 +6383,41 @@ has never been recorded on amd64; run it on arm64 first as a dry run of the reco
   test_fstring, test_coroutines, test_frame, test_capi, test_getopt, test_list); the rest 1-15 s each against
   3-12 min on goi (night 12: test_class 485 s, test_descr 687 s, test_patma 189 s; compiled 1-5 s). test_capi compiled:
   496 pass, `:testcapi` 592, `:capi-port` 77, `:testcapi-parts` 0, as 274b's eval.
+
+## As built: 275, why the process and thread modules take an hour: the runner's hang timeout and the measures (2026-11-13, the Mac VM, queue 275)
+
+Night 12's eval run (amd64, 2 jobs) stopped after 182 of 529 modules in 18.6 h; 13 modules hit the 3600 s cap. Each of
+the task's seven was run whole on the VM (base bdf8c85ea, beside two other agents' pyi runs, load 5-14 on 8 cores),
+each test's wall and the CPU of the driver's processes (pyi and its children) measured:
+
+| module | night 12 | VM: tests' wall (CPU) | class |
+|---|---|---|---|
+| test_multiprocessing_fork.test_misc | 3601 s cap, 5 timeouts | 1146 s (1804 s), none | child starts: 8 tests 78-186 s take 1096 s |
+| test_concurrent_futures.test_shutdown | 3392 s, 5 timeouts | 722 s + one hang | `test_del_shutdown` hangs (idle: 9 s CPU in 229 s); the rest child starts |
+| test_signal | 3602 s cap, 3 timeouts | 1496 s (2610 s), none | child starts: 25 tests take 1479 s |
+| test_os | 3603 s cap, 3 timeouts | 1239 s (2191 s), none | child starts: 25 tests take 1073 s |
+| test_str | 1179 s | 942 s (1626 s) | the eval loop: find_periodic_pattern 275 s, index 158 s |
+| test_unicodedata | 1500 s | 797 s (1534 s) | the eval loop: no_names_in_pua 155 s and 181 s (CPython 0.2 s) |
+| test_pickle | 3601 s cap, 1 timeout | 2903 s (3661 s), none | the eval loop: 1014 tests, 7 past 60 s take 1106 s (multiple_unpicklings 168-240 s) |
+
+- **No busy loop** was found: every test past 60 s burned one to two and a half cores of work, its own or its children's.
+- **One hang**: `test_del_shutdown`'s `del executor` fires no weakref callback under goi (`:finalization-goi`: goi's
+  registers keep the value), so the workers wait on their queue forever; compiled (`bin/pyi aot`) all five end at once.
+- **The night's timeouts of tests with children do not reproduce here**: they pass in 31-186 s (a child is a pyi start:
+  31 s wall and 60 s CPU alone, two to four times longer under load); also under the night's runner (the AOT
+  `p_libtest_all`). The next main-host run's `MODULE.times` (below) tells a hang from a slow start there.
+- **Where a start goes** (`ARBACE_CPUPROFILE` of `bin/pyi run` of one line): 58% Go's collector (GOGC=50 over a 2 GB heap
+  of goi's built runtime), 10% the reader of the runtime's forms; GOGC=200 cuts the CPU by 35% (wall 13%) for 0.9 GB
+  more. Each clib-backed import builds its interpreted package again per process: `_bz2` 9.7 s, `_lzma` 8.7 s, `_zstd`
+  15.9 s, `_testcapi` 18.8 s, `pyexpat` 25.3 s, `_sqlite3` 34 s; `zipfile` (three of them) 42 s, so every driver start
+  of a module that imports test.support.script_helper pays it. The eval loop under goi: test_no_names_in_pua's loop is
+  ~70x the compiled loop's (8.9 s against 0.13 s for 20,000 code points; compiled 0.88 s for all 137,469, CPython 0.20 s).
+  Remedies proposed, not built: W2 (pyi's runtime in goi's table: no forms read and built at a start, the loop
+  compiled), goi's built packages kept across processes for the clib modules, GOGC raised for a child's start.
+
+**The runner** (`tools/pyi/libtest_all.py run`): `--idle-timeout S` (bin/pyi passes `PYI_LIB_TEST_IDLE_TIMEOUT`, default
+90; 0 off): every 5 s the CPU of the driver's session and its descendants (/proc); a test under 5% of one core for S
+seconds is a hang, killed then and written `timeout the test idle past 90 s, a hang (killed; the driver started again)`
+(`:runner-limits` matches it); a busy test keeps `--test-timeout` (300 s). `DIR/MODULE.times`: each test's ID, outcome,
+wall and CPU seconds, and a `#start` line a driver start (its import). A/B under the same load: test_del_shutdown's
+run 401 s on the base (killed at 240 s) and 270 s with it (killed idle at 94 s).
