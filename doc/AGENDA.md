@@ -197,7 +197,7 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
 - OCaml: `ocaml-indep2` (2026-11-10, on `ocaml-indep`: night 10's native-path gaps, TYPER.md §27: the C stubs classed, nondep,
   -safer-matching, Tmc's [@tailcall], id_pos_list, the -I units' shadowing) and `ocaml-indep3` on it (TYPER.md §28: Ctype's
   pattern mode, is_instantiable, mcomp, reify, record_equation; the or-pattern's equations scoped: immediate64 and sexplib0
-  pass, the night-10 list closed; night 12 records the native records after the merge); `ocaml-s1` on it (2026-11-10: OC213 (a),
+  pass, the night-10 list closed; night 12 records the native records after the merge; `oi-fix`, 2026-11-13: check-oi-native.edn recorded whole, oi-check.run 379 pass, 0 failing, its two slow entries restored); `ocaml-s1` on it (2026-11-10: OC213 (a),
   the read cell's 61 testsuite rejections judged by their own tests, `bin/repr-ocaml own-read`, all pass; OC214 (a), the quoted
   strings' bytes, the print rows at the night's `--record-results testsuite opam-re`; OC209 (a), OC210 (a), the own verdicts' rest;
   completeness 82.5 to 83.0 on its base); `ocaml-s2` on it (2026-11-10: regression_value_kinds fixed, TYPER.md §29, Typecore's
