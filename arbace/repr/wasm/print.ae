@@ -1,23 +1,40 @@
 (ns arbace.repr.wasm.print
   "repr/wasm's canonical text printer (doc/wasm/SPEC.md §7.4; doc/wasm/WASM-SURVEY.md §5, WA2): Wasm forms as the text format,
   flat (one instruction a line, unfolded), every index numeric, every type use explicit (`(type N)`), every memory
-  argument's offset and alignment written, the fields in the binary's section order. What the text format has no field
-  for (custom sections, the name section's names, the binary's data count section) is not printed: `print-items` names
-  the forms the text keeps, and the print level compares those (mode :full's text, later, keeps the rest as annotations)."
+  argument's offset and alignment written, the fields in the binary's section order; custom sections as `(@custom NAME
+  (after S) BYTES)` annotations and the module's and the defined functions' names as `(@name ...)` (WA2's rest). What the
+  text has no syntax for (the binary's data count section, an imported function's or a local's name) is not printed:
+  `print-items` names the forms the text keeps, and the print level compares those."
   (:require [arbace.repr.wasm.binary :as bin]
             [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
 
-(defn print-items
-  "The items as the text keeps them: no custom section, no names, no data count section."
+(defn- names-printable?
+  "Whether the text's @name annotations can say the items' names: the module's and the defined functions' (the reference's
+  handler has no annotation for an imported function's name or for locals' names)."
   [items]
-  (vec (for [it items
-             :when (not (#{'wasm/custom 'wasm/names 'wasm/datacount} (first it)))]
-         (case (first it)
-           wasm/func (apply list 'wasm/func (second it) (dissoc (nth it 2) :name :local-names) (drop 3 it))
-           wasm/import (let [[_ m n [k i d]] it] (list 'wasm/import m n (list k i (if (map? d) (dissoc d :name :local-names) d))))
-           it))))
+  (not (some (fn [it]
+               (case (first it)
+                 wasm/func (contains? (nth it 2) :local-names)
+                 wasm/import (let [d (nth (nth it 3) 2)] (and (map? d) (or (:name d) (:local-names d))))
+                 false))
+             items)))
+
+(defn print-items
+  "The items as the text keeps them: the custom sections as @custom annotations (but one named \"name\"), the names as @name
+  annotations when names-printable?, no data count section."
+  [items]
+  (let [names? (names-printable? items)]
+    (vec (for [it items
+               :when (not (or (= 'wasm/datacount (first it))
+                              (and (= 'wasm/names (first it)) (not names?))
+                              (and (= 'wasm/custom (first it)) (= "name" (second it)))))]
+           (case (first it)
+             wasm/func (apply list 'wasm/func (second it) (if names? (nth it 2) (dissoc (nth it 2) :name :local-names)) (drop 3 it))
+             wasm/import (let [[_ m n [k i d]] it] (list 'wasm/import m n (list k i (if (map? d) (dissoc d :name :local-names) d))))
+             it)))))
+
 
 (defn- vt ^String [t] (pr-str t))
 
@@ -113,9 +130,15 @@
 (defn module-text
   "The canonical text of a module's items."
   ^String [items]
-  (let [sb (StringBuilder. "(module\n")]
-    (doseq [it (print-items items)]
+  (let [its (print-items items)
+        mname (some #(when (= 'wasm/names (first %)) (:module (second %))) its)
+        sb (StringBuilder. (str "(module" (when mname (str " (@name " (name-lit mname) ")")) "\n"))]
+    (doseq [it its]
       (case (first it)
+        wasm/names nil
+        wasm/custom (let [[_ n {a :after} bs] it]
+                      (.append sb (str "  (@custom " (name-lit n) " " (if a (str "(after " (name a) ")") "(before first)") " "
+                                       (string-lit (hexbytes bs)) ")\n")))
         wasm/type (.append sb (str "  (type (;" (second it) ";) " (comptype (nth it 2)) ")\n"))
         wasm/rec (.append sb (str "  (rec" (apply str (map #(str " (type " (comptype %) ")") (nth it 2))) ")\n"))
         wasm/import (let [[_ m n [k i d]] it]
@@ -128,7 +151,7 @@
                                          global (str "global " (if (:mut d) (str "(mut " (vt (:type d)) ")") (vt (:type d)))))
                                        "))\n")))
         wasm/func (let [m (nth it 2)]
-                    (.append sb (str "  (func (;" (second it) ";) (type " (:type m) ")"
+                    (.append sb (str "  (func (;" (second it) ";)" (when (:name m) (str " (@name " (name-lit (:name m)) ")")) " (type " (:type m) ")"
                                      (when (seq (:locals m)) (str " (local" (apply str (map #(str " " (vt %)) (:locals m))) ")")) "\n"))
                     (emit sb (drop 3 it) 2)
                     (.append sb "  )\n"))

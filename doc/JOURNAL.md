@@ -5513,3 +5513,48 @@ A slip, corrected the same day: the first form of the decoder's "data count sect
 instructions after decoding (tree-seq): the confirming round trip under it took 7,895 s and peaked at 3.54 GB, over the burst rules'
 2.5 GiB per process. The check now notes memory.init and data.drop as the decoder reads them (a flag in the reader): the round trip
 again 798 s and 1.54 GB, 20 of 20; the essential testsuite subset 55 s, 0.51 GB, unchanged results.
+
+## 2026-11-13: wasm-wa3, WA2's rest and WA3 the validator; Go's SIMD encoding verified (branch `wasm-wa3`, from `mac/wasm-wa1` `ec5f2689f`)
+
+The user's decisions of 2026-11-13: the text's `$id`s stay dropped (mode :full's layer later), the name section on `:name` confirmed,
+the gate fragment spliced at the merge (a key window), and Go 1.27.1's suspected `writeOpcode` defect verified only, journaled, not
+reported upstream.
+
+WA3 (doc/wasm/WASM-SURVEY.md, "As built: WA3"; doc/wasm/SPEC.md §9): `arbace.wasm.valid` (`arbace/wasm/valid.ae`), a port of the
+reference interpreter's `interpreter/valid/valid.ml` and `match.ml` (WebAssembly/spec, tag wg-3.0, `9d36019973201a19f9c9ebb0f10828b2fe2374aa`,
+Apache-2.0, already recorded in LICENSE.md's WebAssembly section): Wasm 3.0's typing rules with GC's subtyping (a type index's identity
+its canonical form: its recursive group with the group's own indices as `[:rec J]` and other indices by their canonical forms), the
+same order of checks and the same messages. Considered: hash-consed deftypes as the interpreter's (equal values suffice for one
+module), a typing table generated from the interpreter's `Value.type_of_op` (the names' shapes give every numeric and vector
+signature; the rest are typed one by one). `bin/repr-wasm wast` validates every module that must read and judges every
+`assert_invalid` by rejection (WAS9 (a)); each rejection's message is a second level by prefix (WAS8 (a)), rows `msg/PATH#K`, a
+`:beside` source of the read cell. The first whole run: 7,174 of the root scripts' 7,182 read cases; the eight were text reader faults
+(field ids after `(field t t)`, an implicit type use matched to a member of a larger rec group, a table's inline elements typed as
+`(ref func)`) and three rules where the testsuite's pin is newer than wg-3.0's interpreter (at most one supertype; an access's offset
+bound by the accessed memory, wg-3.0 reads memory 0's; `immutable array` and `immutable field`): WAS27 (a) proposes the testsuite as
+the judge there. The messages went from 4,198 of 4,663 to 4,668 of 4,668 by aligning the decoder (decode.ml reads a section and a body
+in the module's stream, not bounded by their sizes; `len32` against what remains before its LEB128; heap types' `either`; the code
+count compared after the last section; the magic and version read as words) and the text reader (lexer.mll's `unknown operator` for
+any keyword its table does not know, the table generated into `ops.ae` from lexer.mll's `keyword as s` rule by `test/wasm/gen_ops.ae`;
+its messages for control and non-ASCII characters, `$` and `(@` with no well-formed string; the parser's lane counts and the import's
+nearest definition). Root scripts after: 7,182 of 7,182 read, 4,668 of 4,668 messages, 2,514 of 2,514 print. The Go-built round trip
+validates each module: 20 of 20, 1,115 s, 1.56 GB.
+
+WA2's rest (doc/wasm/WASM-SURVEY.md, "As built: WA2 (rest)"): the 35 scripts of `proposals/`, `legacy/` and `custom/` join the run, a
+non-pass classed by what its script tests (WAS5 (a)): 1,092 read cases, 638 pass, 454 classed in eight classes (six proposals beyond
+3.0, the legacy exceptions with WA8, the branch hints); `(@custom ...)` and `(@name ...)` read after `interpreter/custom/handler_custom.ml`
+and `handler_name.ml` (the module's and the defined functions' names into the name section; a tag's name accepted, not kept: WAS28) and
+printed back by the canonical printer. Mode :full's text did not fit beside WA3: left. The record `test/wasm/wast-results.edn` holds
+16,094 rows (8,274 read, 5,060 messages, 2,760 print); `bin/reap` 0 problems (WebAssembly read 7,840 / 0 / 454, print 2,780 / 0 / 0);
+`bin/crops-score --judge --strict` 0 problems (completeness 48.6%). The ten controls of `test/wasm/controls-wast.txt` fail as they must
+(four new: two assert_invalid modules judged as valid, a valid module judged as invalid, a rejection against another assertion's
+message). Measured: the whole `wast` 441 s and 0.60 GB; the essential command 101 s and 0.53 GB (40 scripts). `bin/arbace-go --gate-key`
+is `dbf88e978ca5...` on the base and the head: no key moves beyond WA1's; `gate-key-crops-test` passes.
+
+Go's SIMD encoding, verified: a probe of `simd/archsimd` (Int8x16.Add 0x6e, Int16x8.Abs 0x80, Int32x4.Add 0xae, Int32x4.Mul 0xb5,
+Float32x4.Add 0xe4, Float64x2.Mul 0xf2), built by TamaGo's go1.27.1 (`/root/tamago-go`, seed/goroot.sha256's) for wasip1 with
+`GOEXPERIMENT=simd`, 2,476,196 bytes, read by repr/wasm: it decodes, round-trips byte for byte and validates, and each instruction at
+or above 0x80 is followed by a `nop`: `writeOpcode` (`src/cmd/internal/obj/wasm/wasmobj.go`) calls `writeUleb128`, which already writes
+the u32's two bytes, then writes 0x01 again. For the relaxed range it writes `writeUleb128(op - 0x100 + 0x80)` and 0x02: such an
+instruction would decode as the one 0x80 below its opcode, a `nop` and a `block` byte (by reading; archsimd exposes no relaxed
+operation to build). Not reported upstream, by the user's decision.

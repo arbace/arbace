@@ -124,7 +124,8 @@ them, the segments' flags the shortest that encode the form.
 
 `arbace.repr.wasm.lex` reads the text format's tokens (the specification's lexical grammar: keywords, `$id` and `$"..."`,
 strings with `\hh`, `\u{...}` and the named escapes, numbers with `_`, hexadecimal floats, `inf`, `nan`, `nan:0x...`; `;;` and
-nested `(; ;)` comments; annotations `(@...)` skipped) into S-expressions. `arbace.repr.wasm.text` reads a module's fields into the
+nested `(; ;)` comments; annotations `(@...)` skipped but `@custom` and `@name`, §8) into S-expressions; a keyword the reference's
+lexer does not know (`ops.ae`'s `keywords`, from lexer.mll) is its `unknown operator`. `arbace.repr.wasm.text` reads a module's fields into the
 items of §2, identifiers resolved to indices (not kept: WA2), the abbreviations expanded (inline imports and exports; inline type
 uses, an undefined function type appended to the types in the order of first use; folded instructions; named params and locals; a
 table's inline `(elem ...)` and a memory's inline `(data ...)`; the MVP's element and data spellings); the data count section added
@@ -140,12 +141,19 @@ count section have no text here (`print-items`: what the text keeps).
 
 - a module (text, `binary`, `quote`, `definition`): read; cross-format (encoded, decoded again, equal); a binary one printed back byte
   for byte; the print level (its canonical text read again to the same `print-items`);
-- `assert_malformed`: rejected (the message the script states is not required: WAS8 (a));
-- `assert_invalid`: read, its rejection the validator's (WA3, classed);
+- `assert_malformed` (and `assert_malformed_custom`): rejected; the message the script states is a second level (§9);
+- `assert_invalid`: read, then rejected by the validator (§9); `assert_invalid_custom` (a custom section's own checks): not built;
 - the modules of `assert_unlinkable`, `assert_uninstantiable`, `assert_trap`, `assert_exception`: read as modules.
 
-Case ids `testsuite/PATH#K` (K the command's ordinal from 1), results `test/wasm/wast-results.edn`, classes
-`test/wasm/divergences-wast.edn`, controls `test/wasm/controls-wast.txt`.
+Case ids `testsuite/PATH#K` (K the command's ordinal from 1; PATH a root script, or one under `proposals/`, `legacy/` or
+`custom/`, whose non-passes' reasons are prefixed `[proposal NAME]`, `[legacy exceptions]`, `[custom FILE]` and classed by it),
+`print/PATH#K`, `msg/PATH#K`; results `test/wasm/wast-results.edn`, classes `test/wasm/divergences-wast.edn`, controls
+`test/wasm/controls-wast.txt`.
+
+The annotations `(@custom "NAME" (before|after SECTION)? "BYTES"*)` and `(@name "NAME")` are read (the reference's custom
+handlers): a custom section, `(after S)` kept as `{:after S}`, `(before S)` and the default after the last present section before S
+(or of all); the module's name (an annotation before every field) and a defined function's (before its type use) into `wasm/names`
+and the function's `:name`. The canonical printer writes them back as such annotations.
 
 ## 9. Validation (WA3)
 

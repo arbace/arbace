@@ -47,7 +47,7 @@
   "A module command's items (throws on a malformed module)."
   [[kind p]]
   (case kind
-    :text (do (doseq [f p] (when-not (= :list (:t f)) (throw (ex-info "unexpected token" {:wasm/malformed "unexpected token"}))))
+    :text (do (doseq [f p] (when-not (#{:list :annot} (:t f)) (throw (ex-info "unexpected token" {:wasm/malformed "unexpected token"}))))
               (text/module-items p))
     :quote (text/read-module p)
     :binary (:items (bin/decode p))))
@@ -126,7 +126,7 @@
                 (case h
                   "module" (when-let [m (try (module-of c) (catch Throwable e [:error (msg e)]))]
                              (if (= :error (first m)) [[id :fail (clean (second m))]] (module-rows id m)))
-                  "assert_malformed"
+                  ("assert_malformed" "assert_malformed_custom")
                   (let [[_ m expect] (:xs c)
                         mm (try (module-of m) (catch Throwable _ [:binary-error nil]))]
                     (if (= :binary-error (first mm))
@@ -148,6 +148,13 @@
                           :invalid [[id :pass ""] (msg-row id (utf8 expect) v)]
                           :crash [[id :fail (clean (str "crash in validation: " v))]]
                           [[id :fail (clean (str "invalid module accepted: expected " (utf8 expect)))]]))))
+                  "assert_invalid_custom"
+                  ;; a custom section's own validity (handler_branch_hint.ml's, handler_name.ml's checks): not built
+                  (let [[_ m expect] (:xs c)
+                        items (try (read-items (module-of m)) (catch Throwable e (msg e)))]
+                    (if (string? items)
+                      [[id :fail (clean (str "invalid module does not read: " items))]]
+                      [[id :fail (clean (str "custom: the custom sections' own checks are not built: " (utf8 expect)))]]))
                   ("assert_unlinkable" "assert_uninstantiable" "assert_trap" "assert_exception")
                   (let [m (second (:xs c))]
                     (when (lex/list-of? m "module")
@@ -163,17 +170,38 @@
 (defn control
   "A negative control on the command `k` of a script (GTS81 (a)): `as-module` judges its module (an assert_malformed's) as
   a module that must read; `as-malformed` judges a module command's as one that must be rejected; `vs TEXT2 K2` compares
-  its forms with another command's module. `differs` (the control fails, as it must) or `same`."
+  its forms with another command's module; `as-valid` judges an assert_invalid's module as one that must read and validate,
+  `as-invalid` a valid module as one the validator must reject, `msg-vs TEXT2 K2` an assert_invalid's rejection against
+  another assert_invalid's message. `differs` (the control fails, as it must) or `same`."
   [^String text ^long k mode ^String text2 k2]
   (let [c (command-at text k)
         m (if (lex/list-of? c "module") c (second (:xs c)))
         mm (module-of m)]
     (case mode
       "as-module" (if (:read (judge-module mm)) "differs" "same")
+      ;; an assert_invalid's module judged as a module that must read and validate (WA3)
+      "as-valid" (if (:read (judge-module mm)) "differs" "same")
+      ;; a valid module judged as an assert_invalid's: rejected by the validator or not
+      "as-invalid" (if (= :invalid (first (validate (read-items mm)))) "same" "differs")
+      ;; an assert_invalid's rejection judged against another assert_invalid's message (the second level, by prefix)
+      "msg-vs" (let [c2 (command-at text2 k2)
+                     expect (utf8 (nth (:xs c2) 2))
+                     [k v] (validate (read-items mm))]
+                 (if (and (= k :invalid) (.startsWith (str v) expect)) "same" "differs"))
       "as-malformed" (if (first (rejected? mm)) "same" "differs")
       "vs" (let [c2 (command-at text2 k2)
                  m2 (if (lex/list-of? c2 "module") c2 (second (:xs c2)))]
              (if (= (read-items mm) (read-items (module-of m2))) "same" "differs")))))
+
+(defn tag-of
+  "A non-pass's reason's prefix that names what its script tests beyond the root scripts (WAS5 (a): the classes by proposal):
+  `[proposal NAME] ` for proposals/NAME/, `[legacy exceptions] ` for legacy/, `[custom FILE] ` for custom/FILE.wast; \"\" else."
+  ^String [^String id]
+  (let [p (subs id (inc (.indexOf id "/")))]
+    (cond (.startsWith p "proposals/") (str "[proposal " (second (re-find #"^proposals/([^/]+)/" p)) "] ")
+          (.startsWith p "legacy/") "[legacy exceptions] "
+          (.startsWith p "custom/") (str "[custom " (second (re-find #"^custom/([^#]+)\.wast" p)) "] ")
+          :else "")))
 
 (defn -main
   "repr-wasm wast LIST WORK: each script of LIST (NAME<tab>PATH) read; WORK/rows.edn the rows."
@@ -187,6 +215,6 @@
                    r (script-rows n (slurp p))]
                r)
         sb (StringBuilder.)]
-    (doseq [[i r why] rows] (.append sb (str "[" (pr-str i) " " r " " (pr-str why) "]\n")))
+    (doseq [[i r why] rows] (.append sb (str "[" (pr-str i) " " r " " (pr-str (if (= r :pass) why (str (tag-of i) why))) "]\n")))
     (.mkdirs (java.io.File. ^String work))
     (spit (str work "/rows.edn") (str sb)))))

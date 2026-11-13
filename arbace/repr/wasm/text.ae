@@ -5,7 +5,8 @@
   spelling is mode :full's, later); the abbreviations are expanded as the specification's text chapter defines them:
   inline imports and exports, inline type uses (a function type not defined is appended to the type section in the order
   of its first use), folded instructions, `(param $x t)`, a table's inline elements and a memory's inline data, the MVP's
-  element and data spellings. A malformed text throws ex-info {:wasm/malformed MSG} with the reference interpreter's
+  element and data spellings; the annotations `(@custom ...)` (custom sections, placed as written) and `(@name ...)` (the
+  module's and the functions' names, the name section), as the reference's custom handlers read them. A malformed text throws ex-info {:wasm/malformed MSG} with the reference interpreter's
   message where the testsuite states one (\"unexpected token\", \"unknown operator\", \"constant out of range\", \"unknown
   label\", \"import after function\", ...)."
   (:require [arbace.repr.wasm.lex :as lex]
@@ -273,7 +274,7 @@
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; instructions
 
-(declare instrs folded)
+(declare module-items* instrs folded)
 
 (defn- label-of
   "The label of a block: an optional $id at the head of xs: [label rest]."
@@ -588,7 +589,9 @@
                   (when-let [fs (field-ids ct)] (swap! (:fields ctx) assoc i fs))))
         ("func" "table" "memory" "global" "tag" "import")
         (let [[sp imp?] (field-space f)
-              id (if (= h "import") (id-of (rest (:xs (nth (:xs f) 3)))) (id-of (rest (:xs f))))]
+              id (if (= h "import")
+                   (let [d (nth (:xs f) 3 nil)] (when-not (= :list (:t d)) (malformed "unexpected token" f)) (id-of (rest (:xs d))))
+                   (id-of (rest (:xs f))))]
           (when-not sp (malformed "unexpected token" f))
           ;; parser.mly's module_fields: an import after any definition of a function, table, memory, global or tag
           ;; the definition named is the last one before the import (module_fields is right-recursive: the nearest errs first)
@@ -786,8 +789,154 @@
                        [(list 'wasm/datacount (count datas))]))
                    (:func o) datas)))))
 
+;; ---------------------------------------------------------------------------------------------------------------
+;; the annotations @custom and @name (the reference's custom handlers, interpreter/custom/handler_custom.ml and
+;; handler_name.ml; the testsuite's custom/ scripts): custom sections and the name section's names
+
+(defn- annot? [x] (= :annot (:t x)))
+
+(defn- annot-error [msg x] (throw (ex-info msg {:wasm/malformed msg :at (:p x)})))
+
+(def ^:private custom-sections
+  {"type" :type "import" :import "func" :func "table" :table "memory" :memory "tag" :tag "global" :global "export" :export
+   "start" :start "elem" :elem "code" :code "data" :data "datacount" :datacount "first" :first "last" :last})
+
+(defn- parse-custom
+  "A @custom annotation's [name place bytes]: place [:after S] or [:before S] (S a section keyword, :first or :last)."
+  [a]
+  (let [[n & more] (:xs a)
+        _ (when-not (= :str (:t n)) (annot-error "@custom annotation: missing section name" a))
+        nm (String. ^bytes (:b n) java.nio.charset.StandardCharsets/UTF_8)
+        _ (when-not (java.util.Arrays/equals ^bytes (:b n) (.getBytes nm java.nio.charset.StandardCharsets/UTF_8))
+            (annot-error "@custom annotation: malformed UTF-8 encoding" a))
+        [place more] (if (= :list (:t (first more)))
+                       (let [[d sec & extra] (:xs (first more))
+                             dir (cond (lex/kw? d "before") :before (lex/kw? d "after") :after
+                                       :else (annot-error "@custom annotation: malformed placement" a))
+                             k (or (when (= :kw (:t sec)) (custom-sections (:s sec)))
+                                   (annot-error "@custom annotation: malformed section kind" a))]
+                         (when (seq extra) (annot-error "@custom annotation: unexpected token" a))
+                         [[dir k] (rest more)])
+                       [[:after :last] more])
+        bs (java.io.ByteArrayOutputStream.)]
+    (doseq [x more]
+      (when-not (= :str (:t x)) (annot-error "@custom annotation: unexpected token" a))
+      (.write bs ^bytes (:b x) 0 (alength ^bytes (:b x))))
+    [nm place (.toByteArray bs)]))
+
+(defn- name-of-annot ^String [a]
+  (let [[n & more] (:xs a)]
+    (when-not (= :str (:t n)) (annot-error "@name annotation: string expected" a))
+    (when (seq more) (annot-error "@name annotation: unexpected token" a))
+    (let [s (String. ^bytes (:b n) java.nio.charset.StandardCharsets/UTF_8)]
+      (when-not (java.util.Arrays/equals ^bytes (:b n) (.getBytes s java.nio.charset.StandardCharsets/UTF_8))
+        (annot-error "malformed UTF-8 encoding" a))
+      s)))
+
+(defn- strip-deep
+  "x without annotations; one inside it is misplaced (`msg` names the error for a @name, a @custom is always misplaced)."
+  [x name-msg]
+  (if (= :list (:t x))
+    (assoc x :xs (vec (for [y (:xs x)]
+                        (if (annot? y)
+                          (annot-error (if (= "custom" (:name y)) "misplaced @custom annotation" name-msg) y)
+                          (strip-deep y name-msg)))))
+    x))
+
+(defn- strip-field
+  "A module field without its annotations: [field name-or-nil] (a func's or a tag's @name, handler_name.ml's locate_func and
+  locate_tag; a @custom inside a field is misplaced)."
+  [f]
+  (let [kind (lex/head f)
+        xs (:xs f)
+        out (java.util.ArrayList.)
+        nm (atom nil)]
+    (doseq [[i y] (map-indexed vector xs)]
+      (if (annot? y)
+        (if (= "custom" (:name y))
+          (annot-error "misplaced @custom annotation" y)
+          (let [s (name-of-annot y)
+                before (subvec xs (min 1 i) i)]
+            (case kind
+              "func" (cond
+                       ;; before the function's type use: its name
+                       (every? #(or (#{:id :kw} (:t %)) (lex/list-of? % "export")) before)
+                       (do (when @nm (annot-error "@name annotation: multiple function names" y)) (reset! nm s))
+                       (every? #(some (fn [k] (lex/list-of? % k)) ["type" "param" "result" "local" "export"]) before)
+                       (annot-error "@name annotation: local names not yet supported" y)
+                       :else (annot-error "@name annotation: misplaced annotation" y))
+              "tag" (do (when @nm (annot-error "@name annotation: multiple tag names" y)) (reset! nm s))
+              ("type" "rec") (annot-error "@name annotation: type and field names not yet supported" y)
+              (annot-error "misplaced @name annotation" y))))
+        (.add out (strip-deep y (if (= kind "func") "@name annotation: misplaced annotation" "misplaced @name annotation")))))
+    [(assoc f :xs (vec out)) @nm]))
+
+(defn- annotations
+  "The module's fields without their annotations, and what they say: {:fields :customs [[name place bytes]...] :module NAME
+  :funcs [NAME-or-nil ...] (one a function field that is not an import)}."
+  [fields]
+  (loop [fs (seq fields) seen? false out [] customs [] module nil funcs []]
+    (if-let [f (first fs)]
+      (cond
+        (and (annot? f) (= "custom" (:name f))) (recur (next fs) seen? out (conj customs (parse-custom f)) module funcs)
+        (annot? f) (let [s (name-of-annot f)]
+                     (when seen? (annot-error "misplaced @name annotation" f))
+                     (when module (annot-error "@name annotation: multiple module names" f))
+                     (recur (next fs) seen? out customs s funcs))
+        :else (let [[g nm] (strip-field f)
+                    imp? (some #(lex/list-of? % "import") (after-id (rest (:xs g))))]
+                (recur (next fs) true (conj out g) customs module
+                       (if (and (= "func" (lex/head g)) (not imp?)) (conj funcs nm) funcs))))
+      {:fields out :customs customs :module module :funcs funcs})))
+
+(def ^:private section-order [:type :import :func :table :memory :tag :global :export :start :elem :datacount :code :data])
+(def ^:private section-rank (into {} (map-indexed (fn [i k] [k i]) section-order)))
+
+(defn- item-section [it]
+  (case (first it)
+    (wasm/type wasm/rec) :type wasm/import :import wasm/func :code wasm/table :table wasm/memory :memory wasm/tag :tag
+    wasm/global :global wasm/export :export wasm/start :start wasm/elem :elem wasm/datacount :datacount wasm/data :data
+    nil))
+
+(defn- with-annotations
+  "The items with the annotations' custom sections and names (the name section after the last section, as the reference's
+  name handler places it; a custom section where its placement puts it: (after S) after S, (before S) and the default
+  after the last present section before S or of all)."
+  [items {:keys [customs module funcs]}]
+  (let [present (set (concat (keep item-section items) (when (some #(= 'wasm/func (first %)) items) [:func])))
+        last-at (fn [^long r] (last (filter #(and (present %) (<= (long (section-rank %)) r)) section-order)))
+        after-of (fn [[dir k]]
+                   (case k
+                     :first nil
+                     :last (last-at 100)
+                     ;; (after S) is kept as written (the binary writes S, empty or not, before the custom section);
+                     ;; (before S) is after the last present section before S
+                     (if (= dir :after) k (last-at (dec (long (section-rank k)))))))
+        nimports (count (filter #(and (= 'wasm/import (first %)) (= 'func (first (nth % 3)))) items))
+        named (into {} (keep-indexed (fn [k n] (when n [(+ nimports k) n])) funcs))
+        items (mapv (fn [it] (if (and (= 'wasm/func (first it)) (named (second it)))
+                               (apply list 'wasm/func (second it) (assoc (nth it 2) :name (named (second it))) (drop 3 it))
+                               it))
+                    items)
+        cs (for [[nm place bs] customs]
+             (list 'wasm/custom nm {:after (after-of place)} (list 'hex (.formatHex (java.util.HexFormat/of) ^bytes bs))))
+        ns (when (or module (seq named)) [(list 'wasm/names (cond-> {:after (last-at 100)} module (assoc :module module)))])
+        rank (fn [it] (if (#{'wasm/custom 'wasm/names} (first it))
+                        (let [a (:after (if (= 'wasm/names (first it)) (second it) (nth it 2)))] (if a (+ 0.5 (section-rank a)) -0.5))
+                        (double (section-rank (item-section it)))))]
+    (if (and (empty? cs) (empty? ns))
+      items
+      (vec (sort-by rank (concat items cs ns))))))
+
 (defn module-items
-  "The items of a `(module $id? field*)` S-expression's fields."
+  "The items of a `(module $id? field*)` S-expression's fields (their @custom and @name annotations included)."
+  [fields]
+  (let [an (annotations fields)
+        items (module-items* (:fields an))]
+    (with-annotations items an)))
+
+(defn- module-items*
+  "The items of a module's fields (no annotation among them)."
   [fields]
   (let [ctx (new-ctx)]
     (index-pass! ctx fields)
@@ -808,7 +957,7 @@
   [^String text]
   (let [xs (lex/read-sexps text)
         fields (if (and (= 1 (count xs)) (lex/list-of? (first xs) "module")) (after-id (rest (:xs (first xs)))) xs)]
-    (doseq [f fields] (when-not (= :list (:t f)) (malformed "unexpected token" f)))
+    (doseq [f fields] (when-not (#{:list :annot} (:t f)) (malformed "unexpected token" f)))
     (module-items fields)))
 
 (defn read-module

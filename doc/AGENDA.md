@@ -449,9 +449,12 @@ model's edges), 251 (pyi on goi's speed), 252 (3.15's P6-P8).
 - WebAssembly, the new crop ([wasm/WASM-SURVEY.md](wasm/WASM-SURVEY.md); WAS1-WAS26 decided as recommended, the user 2026-11-13;
   branch `wasm-wa1`): WA1 built (repr/wasm's binary format, every Wasm 3.0 instruction, the 20 Go-built modules byte for byte, the
   pins fetched: the testsuite, the spec at wg-3.0, wazero, webgpu.idl; wabt, wasmtime and node installed for the oracle tier) and WA2
-  begun (the text format and the testsuite's root scripts at the read and print levels: "As built: WA2"); the REAP row after the asm
-  rows, eval and AOT "no check yet". Next: WA2's classes worked down, WA3 the validator, WA4 wai. The branch moves `gate_key` once (the
-  crop paths' lists): it merges in a key window.
+  (the text format and the testsuite's scripts at the read and print levels: "As built: WA2", "As built: WA2 (rest)": the
+  proposals/, legacy/ and custom/ scripts classed by proposal, @custom and @name, the messages' second level); branch `wasm-wa3`: WA3
+  built (`arbace.wasm.valid`, Wasm 3.0's validation: the root scripts 7,182 of 7,182 read cases, 4,668 of 4,668 messages; "As built:
+  WA3"); Go's SIMD encoding verified (a `nop` after each SIMD opcode at or above 0x80). The REAP row after the asm rows (read
+  7,840 / 0 / 454), eval and AOT "no check yet". To decide: WAS27-WAS29. Next: WA4 wai; mode :full's text; WA8's legacy exceptions.
+  The branches move `gate_key` once (WA1's crop paths' lists): they merge in a key window.
 - repr/haskell and repr/rust's round trips stay out of `--full` until their rows fit the budget; Zed parked
   ([ZED-SURVEY.md](ZED-SURVEY.md)).
 

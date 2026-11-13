@@ -835,3 +835,104 @@ completeness 40.5%, maturity 83.3% (the fragment counted half), independence 60.
 `(@custom ...)` annotations and names as `(@name ...)` (the `custom/` scripts), the `proposals/` and `legacy/` scripts (28 and 4,
 read by `--only` but not in the record), the messages' second level (WAS8 (a): the reason's prefix against the script's). WA3 (the
 validator) takes the 2,723 next.
+
+## As built: WA2 (rest) (2026-11-13, branch `wasm-wa3`)
+
+The user's decisions of 2026-11-13: the text's `$id`s stay dropped (into mode :full's layer later); the name section on `:name` stays;
+the gate fragment is spliced when the branch merges (a key window). Built from `mac/wasm-wa1` (`ec5f2689f`).
+
+- **The scripts beyond the root** (WAS5 (a)): `bin/repr-wasm wast` reads all 293 scripts by default, the 258 root ones and then
+  `proposals/` (28), `legacy/` (4) and `custom/` (3); a non-pass's reason in those is prefixed by what its script tests
+  (`arbace.repr.wasm.wast/tag-of`: `[proposal NAME]`, `[legacy exceptions]`, `[custom FILE]`) and classed by it in
+  `test/wasm/divergences-wast.edn`: the six proposals beyond Wasm 3.0 deferred by WAS4 (a) (threads by WAS26 (a)), the legacy
+  exceptions with WA8, the branch hints' annotations not built. Over the 35: **1,092 read cases, 638 pass, 454 classed** (threads 73,
+  custom-descriptors 215, custom-page-sizes 42, compact-import-section 28, wide-arithmetic 10, extended-name-section 69, legacy 14,
+  branch hints 3); the print level 246 of 246.
+- **Annotations** (`custom/custom_annot.wast`, `custom/name_annot.wast`): the lexer keeps `(@custom ...)` and `(@name ...)` as
+  annotation nodes (any other annotation still skipped); `arbace.repr.wasm.text` reads them as the reference's custom handlers do
+  (`interpreter/custom/handler_custom.ml`, `handler_name.ml` at wg-3.0): a custom section's name, placement (`(after S)` kept as
+  written, `(before S)` and the default after the last present section before it or of all) and bytes, with the handler's messages
+  (`@custom annotation: missing section name`, `malformed placement`, `malformed section kind`, `unexpected token`, `misplaced @custom
+  annotation`); the module's name (before every field) and each defined function's (before its type use) into the name section
+  (`wasm/names`, `:name`), `@name annotation: multiple module names`, `misplaced @name annotation`, `local names not yet supported`. A
+  tag's `@name` is accepted and not kept (the extended name section's subsection, `proposals/extended-name-section`). The canonical
+  printer writes the custom sections back as `(@custom "N" (after S) "...")` and the names as `(@name ...)`, and the print level
+  compares them (but an imported function's or a local's name, which the annotations cannot say). `assert_malformed_custom` is
+  judged as `assert_malformed`; `assert_invalid_custom` (the custom sections' own checks) is not built (branch hints).
+- **The messages' second level** (WAS8 (a)): each rejection's reason against the script's message by prefix, the reference runner's
+  rule, as rows `msg/PATH#K` beside the read cell (`test/reap/cells.edn`'s `:role :beside` source). Over the root scripts **4,668 of
+  4,668** after aligning the decoder and the text reader with the reference (and, where the testsuite's pin is newer than the
+  interpreter's wg-3.0, with the testsuite: WAS27): lexer.mll's `unknown operator` for any keyword its table does not know and any
+  reserved token (the keyword table generated into `arbace/repr/wasm/ops.ae` from lexer.mll's `keyword as s` rule, `ops gen`), its
+  `misplaced control character`, `misplaced unicode character`, `illegal character` inside an annotation, `empty identifier` and
+  `empty annotation id` for a `$` or `(@` with no well-formed string; decode.ml's stream not bounded by a section's or a body's size (a
+  read past it fails as the module's stream does, the size checked after), its `len32` against what remains before the LEB128, its
+  `either` for heap types (`integer representation too long`), the function and code counts compared after the last section; the
+  text's `import after function definition` for the import's nearest definition, `wrong number of lane literals` and `... lane
+  indices`, `i8 constant out of range` for a lane, `alignment must be a power of two`, `malformed UTF-8 codepoint`. Over the 35 scripts
+  beyond the root 330 of 392, the rest in the same classes.
+- Two text reader fixes the validator found: a struct's field ids counted after a `(field t t)` of several types (`struct.wast`), an
+  implicit type use not matched to a member of a recursive group of more than one (`type-rec.wast`); and a table's inline elements
+  typed as the table (parser.mly: function indices as `ref.func` expressions unless the type is `(ref func)`).
+
+## As built: WA3 (2026-11-13, branch `wasm-wa3`)
+
+**What was built** (doc/wasm/SPEC.md §9): `arbace.wasm.valid` (`arbace/wasm/valid.ae`, a crop path since WA1), Wasm 3.0's validation
+as the reference interpreter's `interpreter/valid/valid.ml` and `match.ml` state it at the spec's pin: the recursive type groups with
+their subtype checks, GC's matching (iso-recursive equivalence by canonical forms, declared supertypes), the imports, tags, functions,
+memories, tables with their initializers (a table without one initialized with `ref.null`), globals, data and element segments,
+constant expressions, then every body by the algorithm of the spec's appendix (an operand stack with an ellipsis and `bot`, labels, the
+locals' initialization), the start function, the exports and their names; every one of the table's 493 instructions typed (the
+numeric and vector ones by their names' shapes, the rest one by one), with valid.ml's messages. Three rules follow the testsuite's pin
+where it is newer than wg-3.0's interpreter (WAS27): at most one supertype (`multiple supertypes`), a memory access's offset bound by
+the accessed memory's address type (wg-3.0 reads memory 0's), and the words `immutable array`, `immutable field`.
+
+**The judges**: `bin/repr-wasm wast` validates every module that must read (a valid module rejected fails: `valid module rejected:
+MESSAGE (function I)`) and judges every `assert_invalid` by its own assertion, rejected (WAS9 (a): read's acceptance), the message the
+second level; `bin/repr-wasm roundtrip` validates each Go-built module first (`invalid` a status). The negative controls
+(`test/wasm/controls-wast.txt`, four more, ten in all): an assert_invalid's module judged as one that must validate (two), a valid
+module judged as one the validator must reject, an assert_invalid's rejection against another assertion's message: each fails as it
+must.
+
+**Counts** (before: WA2's record; after: this branch's, `test/wasm/wast-results.edn`):
+
+| | before (WA2) | after (WA3) |
+|---|---|---|
+| root scripts, read cases | 7,182: 4,459 pass, 2,723 `:validation` | 7,182: **7,182 pass** |
+| root scripts, messages (msg/) | not judged | **4,668 of 4,668** |
+| root scripts, print | 2,514 of 2,514 | 2,514 of 2,514 (with customs and names) |
+| proposals/, legacy/, custom/ | not in the record | 1,092 read cases: 638 pass, 454 classed; messages 330 of 392; print 246 of 246 |
+| Go-built modules (round trip) | 20 of 20 | 20 of 20, each validated |
+| REAP read cell | 4,479 / 0 / 2,723 | 7,840 / 0 / 454 |
+| REAP print cell | 2,534 / 0 / 0 | 2,780 / 0 / 0 |
+
+The first whole run with the validator: 7,174 of 7,182 (eight: the struct field ids, the rec group's implicit type, the inline
+elements' type, the offset's memory, multiple supertypes); the messages 4,198 of 4,663 before the alignment above. `bin/reap` 0
+problems; `bin/crops-score --judge --strict` 0 problems, WebAssembly's completeness 40.5% → 48.6%, maturity 83.3%, independence
+60.0%. Measured (stage 0, by hand, one run at a time): `bin/repr-wasm wast` over the 293 scripts 441 s and 0.60 GB; the essential
+command (`ops check` and 40 scripts, `test/wasm/essential-wast.txt` with type-subtyping, unreached-invalid and the two annotation
+scripts) 101 s and 0.53 GB; the round trip 1,115 s and 1.56 GB (validation adds about 300 s). The branch moves no key beyond WA1's
+(`bin/arbace-go --gate-key` `dbf88e978ca5...` before and after; `gate-key-crops-test` passes).
+
+**Go 1.27.1's SIMD encoding, verified** (the brief: verify only, no upstream report). WA1's reading of
+`cmd/internal/obj/wasm/wasmobj.go`'s `writeOpcode` was that the two SIMD ranges at or above 0x80 write a byte after the opcode's
+u32. A probe (`.tmp/simd/main.go` in the worktree: `simd/archsimd`'s `Int8x16.Add` (0x6e), `Int16x8.Abs` (0x80), `Int32x4.Add` (0xae),
+`Int32x4.Mul` (0xb5), `Float32x4.Add` (0xe4), `Float64x2.Mul` (0xf2)) built by TamaGo's go1.27.1 for wasip1 with
+`GOEXPERIMENT=simd` (2,476,196 bytes) and read by repr/wasm: it decodes, round-trips byte for byte and validates, and each of the five
+instructions at or above 0x80 is followed by a `nop` (the stray 0x01: `writeUleb128` already writes the u32's two bytes), the one below
+0x80 is not. So the finding holds as a size and fidelity defect that happens to stay valid: the stray byte is an opcode. For the
+relaxed range the same code writes `writeUleb128(op - 0x100 + 0x80)` and 0x02, so a relaxed instruction would decode as the
+instruction 0x80 below its opcode (i16x8.abs ...), a `nop`, then 0x02 (`block`): wrong code, by reading; `archsimd` exposes no relaxed
+operation, so no build shows it. Nothing reported upstream.
+
+**Proposals** (numbered after WAS26):
+
+- **WAS27 The messages' reference.** Where the testsuite's pin (92a3d806) and the spec's interpreter (wg-3.0) disagree, (a) the
+  testsuite's assertions decide (done: six rules above), the interpreter read for the rest; (b) wg-3.0's interpreter, the testsuite's
+  newer cases classed. *Recommended: (a)*: the testsuite is the judge.
+- **WAS28 A tag's name.** (a) accepted and dropped until the extended name section (its subsection 11), with that proposal; (b) the
+  extended name section's subsections read now (types, fields, tags, labels, segments). *Recommended: (a)*.
+- **WAS29 Branch hints.** (a) the `@metadata.code.branch_hint` annotations and their custom section with WA8; (b) now. *Recommended: (a)*.
+
+**Not done**: the legacy exceptions (WA8), the proposals beyond 3.0 (WAS4 (a)), mode `:full`'s text (byte for byte, the `$id`s and
+spellings as a layer: the user's "later"; it does not fit this branch beside WA3), the branch hints.
