@@ -150,6 +150,12 @@
 #                                  line, # and blank lines ignored); classes test/python/divergences-aot.edn and the
 #                                  rule :as-pyi; a negative control; --record: test/python/check-aot-linux-ARCH.edn
 #                                  (PYI_CHECK_AOT_RECORD another: a dry run's scratch record, queue 279)
+#   bin/pyi check --aot --lib-test [check's options] [MODULE...]
+#                                  queue 279: Lib/test by pyi's AOT, the check's run and judge (bin/pyi check) with each
+#                                  module's driver (libtest_run.py) compiled with the module and its imports ahead
+#                                  (WORK/aot/bin/lt/MODULE; RUN/aot-compile.tsv: seconds, peak KB, built|refused|no-build;
+#                                  a module not built is not run), in WORK/check/run-aot; judged against
+#                                  PYI_CHECK_AOT_LIB_RECORD (none committed: unset, no regressions; --record writes only there)
 #   bin/pyi golden                 queue 247: the programs' own verdict: test/python/golden/ID.out is a program's expected stdout, reviewed
 #                                  line by line against the Language Reference and the library docs (review-*.edn: the status, the digest
 #                                  of the reviewed text, entries [LINES SECTIONS BASIS WHY], the implementation-defined lines named); checks
@@ -987,6 +993,8 @@ pyi_key() {
 }
 
 cmd_check_aot() {
+  # --lib-test (queue 279): Lib/test's modules, each compiled ahead with its driver (cmd_check_lib --aot)
+  if [ "${1:-}" = --lib-test ]; then shift; cmd_check_lib --aot "$@"; return; fi
   local record="" pyi=1 ids=() id
   while [ $# -gt 0 ]; do case $1 in --record) record=1; shift ;; --no-pyi) pyi=""; shift ;; --only) ids+=("$2"); shift 2 ;;
     --only-list) local lst n0=${#ids[@]}; lst=$(cd "$caller_pwd" && realpath -e "$2" 2>/dev/null) || die "check --aot: no list $2"
@@ -1266,12 +1274,21 @@ module_corpora() {
 # of no class); --judge DIR: DIR's run judged again, nothing run; --oracle: the driver by python3 (the runner's control:
 # every method equal but the references' :excluded and the 2 of test_tracemalloc's frames, PY6i).
 cmd_check_lib() {
-  local corpora="" only="" record="" judge="" oracle="" fresh="" cover="" verdict="" mods=() d rc=0 onlyf="" runner=pyrun
+  local corpora="" only="" record="" judge="" oracle="" fresh="" cover="" verdict="" mods=() d rc=0 onlyf="" runner=pyrun aot=""
   while [ $# -gt 0 ]; do case $1 in --corpus) corpora=$2; shift 2 ;; --only) only=$(cd "$caller_pwd" && realpath "$2"); shift 2 ;;
-    --cover) cover=$2; shift 2 ;; --verdict) verdict=$2; shift 2 ;;
+    --cover) cover=$2; shift 2 ;; --verdict) verdict=$2; shift 2 ;; --aot) aot=1; shift ;;
     --record) record=1; shift ;; --judge) judge=$2; shift 2 ;; --oracle) oracle=1; shift ;; --fresh) fresh=1; shift ;;
     -*) die "check: unknown option $1" ;; *) mods+=("$1"); shift ;; esac; done
   [ -z "$record" ] || [ -z "$only$oracle$cover" ] || die "check --record of a selection, the oracle or the cover run: refused"
+  # --aot (bin/pyi check --aot --lib-test, queue 279): each module's driver compiled with the module ahead (aot_lib_drivers),
+  # the run in WORK/check/run-aot, judged against PYI_CHECK_AOT_LIB_RECORD (no record is committed: unset, no regression
+  # judged; --record writes only there)
+  local rec="$CHECK_RECORD"
+  if [ -n "$aot" ]; then
+    [ -z "$oracle$cover" ] || die "check --aot --lib-test: no --oracle or --cover"
+    [ -z "$record" ] || [ -n "${PYI_CHECK_AOT_LIB_RECORD:-}" ] || die "check --aot --lib-test --record: PYI_CHECK_AOT_LIB_RECORD names the record (none is committed)"
+    rec="${PYI_CHECK_AOT_LIB_RECORD:-$WORK/check/no-aot-lib-record.edn}"
+  fi
   verdict=${verdict:-$(judge_verdict "$oracle")}
   # the oracle's runs and the cover run (its own AOT module, WORK/aot-cover) keep python3's runner
   [ -z "$oracle$cover" ] || runner=pyall
@@ -1287,14 +1304,14 @@ cmd_check_lib() {
     local sel="$WORK/universe.now"
     if [ -n "$corpora" ]; then awk -F'\t' -v cs=",$corpora," 'index(cs, "," $2 ",")' "$sel" > "$WORK/check-sel.tsv"; sel="$WORK/check-sel.tsv"; fi
     if [ ${#mods[@]} -gt 0 ]; then module_corpora "${mods[@]}" > "$WORK/check-mods.tsv"; sel="$WORK/check-mods.tsv"; fi
-    d="$WORK/check/run${oracle:+-oracle}"; [ -z "$cover" ] || d="$cover/run"
+    d="$WORK/check/run${oracle:+-oracle}${aot:+-aot}"; [ -z "$cover" ] || d="$cover/run"
     if [ -n "$only" ]; then
       local ok="$WORK/check-only.txt"
       # the controls' subjects (GTS81 (a)) run whole with every selection, so every rotated run judges its controls
       { grep -v '^[[:space:]]*\(#\|$\)' "$only" | sed 's/[[:space:]]*$//'; sed -n 's/.*:subject "\([^"]*\)".*/\1/p' "$CONTROLS"; } | sort -u > "$ok" || true
       awk -F'\t' 'NR == FNR {split($1, p, "/"); want[p[1]] = 1; next} want[$1]' "$ok" "$sel" > "$WORK/check-only.tsv"
       sel="$WORK/check-only.tsv"
-      d="$WORK/check/only-$(sha256sum < "$ok" | cut -c1-12)${oracle:+-oracle}"; [ -z "$cover" ] || d="$cover/run-$(sha256sum < "$ok" | cut -c1-12)"
+      d="$WORK/check/only-$(sha256sum < "$ok" | cut -c1-12)${oracle:+-oracle}${aot:+-aot}"; [ -z "$cover" ] || d="$cover/run-$(sha256sum < "$ok" | cut -c1-12)"
     fi
     [ -s "$sel" ] || die "check: no module selected"
     [ -z "$fresh" ] || rm -rf "$d"
@@ -1304,17 +1321,20 @@ cmd_check_lib() {
     # each test's counters in DIR/tests/N (tools/pyi/libtest_cover.go)
     local drv="" ctests=""
     if [ -n "$cover" ]; then AOT="$WORK/aot-cover"; drv=$(cover_driver) || return 1; ctests="$cover/tests"; mkdir -p "$ctests"; fi
-    PYI_LIB_TEST_DRIVER_EXE="$drv" PYI_AOT_COMPILER="${drv:+$AOT/compiler.sh}" PYI_LIB_TEST_COVER_TESTS="$ctests" \
+    local drvdir=""; if [ -n "$aot" ]; then drvdir=$(aot_lib_drivers "$d") || return 1; fi
+    PYI_LIB_TEST_DRIVER_EXE="$drv" PYI_LIB_TEST_DRIVER_DIR="$drvdir" PYI_AOT_COMPILER="${drv:+$AOT/compiler.sh}${drvdir:+$AOT/compiler.sh}" PYI_LIB_TEST_COVER_TESTS="$ctests" \
     PYI_LIB_TEST_ONLY="${only:+$WORK/check-only.txt}" PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
       $runner run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
       --test-timeout "${PYI_LIB_TEST_TEST_TIMEOUT:-300}" --module-timeout "${PYI_LIB_TEST_TIMEOUT:-3600}" ${oracle:+--oracle "$lib"} \
       --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"
     if [ -n "$only" ]; then cp "$WORK/check-only.txt" "$d/only.txt"; else rm -f "$d/only.txt"; fi
+    # the compiled drivers (about 220 MB each) not kept past their run
+    [ -z "$drvdir" ] || rm -rf "$drvdir"
   fi
   [ ! -f "$d/only.txt" ] || onlyf="$d/only.txt"
   "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --name "pyi check" --dir "$d" --modules "$d/modules.tsv" "${refs[@]}" "${uni[@]}" --verdict "$verdict" \
     ${onlyf:+--only "$onlyf"} --save "$d/results.tsv" \
-    $(if [ -n "$oracle" ]; then echo --no-classes; else echo --classes "$DIV" --record "$CHECK_RECORD"; fi) ${record:+--write-record} > "$d/judge.log" || rc=$?
+    $(if [ -n "$oracle" ]; then echo --no-classes; else echo --classes "$DIV" --record "$rec"; fi) ${record:+--write-record} > "$d/judge.log" || rc=$?
   grep -v '^  FAIL \|^   failing: \|^pyi check test' "$d/judge.log" || true
   grep '^   failing: ' "$d/judge.log" | head -n "${PYI_CHECK_SHOW:-200}" || true
   echo "pyi check: $(grep -c '^   failing: ' "$d/judge.log") methods failing (listed in $d/judge.log)"
@@ -1323,6 +1343,35 @@ cmd_check_lib() {
     $runner controls --dir "$d" --controls "$CONTROLS" --ref "$refsc" --judge "$(arbace_exe)" "$root/test/python/libtest_judge.ae" "${uni[@]}" --verdict "$verdict" || rc=1
   fi
   return $rc
+}
+
+# aot_lib_drivers RUN (queue 279, check --aot --lib-test): for each module of RUN/modules.txt, test/python/libtest_run.py with
+# the module's import put in its module-level code where it never runs (the driver's own import of it at run time, after
+# regrtest's setup, takes the module compiled ahead: AotRegister's key is its source's), compiled by pyi's AOT into
+# WORK/aot/bin/lt/MODULE (bin/pyi aot-compile, under busybox time); each module's compile in RUN/aot-compile.tsv (MODULE
+# SECONDS PEAK-KB STATE REASON; STATE built, refused or no-build). A module not built is not run (its methods "no result":
+# failing, not left to the loop). Prints the drivers' directory
+aot_lib_drivers() {
+  local run=$1 m w pkg out t0 st why kb; local dir="$AOT/bin/lt" src="$AOT/lt-src"
+  aot_module >&2; mkdir -p "$dir" "$src"; : >> "$run/aot-compile.tsv"
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    [ ! -f "$run/$m.status" ] || continue  # run already (the runner keeps it: the run resumes)
+    w="$src/$m.py"; pkg=p_lt_$(echo "$m" | tr -c 'A-Za-z0-9\n' '_'); out="$dir/$m"
+    { cat "$root/test/python/libtest_run.py"
+      printf '\n# queue 279: compiled ahead with the driver; never run here (main imports it after regrtest_setup)\nif sys.argv is None:\n    import %s\n' \
+        "$(case $m in test.*) echo "$m" ;; *) echo "test.$m" ;; esac)"; } > "$w"
+    t0=$(date +%s%N)
+    busybox time -v -o "$run/$m.aot-compile.time" "$root/bin/pyi" aot-compile "$pkg" "$w" "$out" > "$run/$m.aot-compile.log" 2>&1 || true
+    kb=$(sed -n 's/.*Maximum resident set size (kbytes): //p' "$run/$m.aot-compile.time"); st=built why=""
+    if [ -f "$out.refused" ]; then st=refused why=$(head -c 200 "$out.refused" | tr '\t\n' '  '); rm -f "$out"
+    elif [ ! -x "$out" ]; then st=no-build why="see ${AOT#$root/}/log/$pkg.build"; fi
+    # a module not built: its run written as the driver's IMPORT line (the runner keeps it; the judge: every method no result)
+    if [ "$st" != built ]; then printf '\nIMPORT\tpyi AOT %s: %s\n' "$st" "$why" > "$run/$m.out"; : > "$run/$m.err"; echo aot > "$run/$m.status"; fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$m" $(( ($(date +%s%N) - t0) / 1000000000 )) "${kb:--}" "$st" "$why" >> "$run/aot-compile.tsv"
+    echo "pyi check --aot: $m's driver $st" >&2
+  done < "$run/modules.txt"
+  echo "$dir"
 }
 
 # cover_driver: test/python/libtest_run.py compiled by pyi's AOT (PY8) in the module of WORK/aot-cover, its runtime with
@@ -2297,6 +2346,7 @@ case "${1:-}" in
   lib-test-all) shift; mkdir -p "$WORK"; cmd_lib_test_all "$@" ;;
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
   aot) shift; mkdir -p "$WORK"; cmd_aot "$@" ;;
+  aot-compile) shift; mkdir -p "$WORK"; aot_module >&2; aot_compile "$@" ;;
   bench) shift; mkdir -p "$WORK"; cmd_bench "$@" ;;
   check) shift; mkdir -p "$WORK"; if [ "${1:-}" = --aot ]; then shift; cmd_check_aot "$@"; else cmd_check_lib "$@"; fi ;;
   divergences) shift; mkdir -p "$WORK"; cmd_divergences "$@" ;;
