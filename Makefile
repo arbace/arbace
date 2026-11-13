@@ -1182,7 +1182,7 @@ check-makefile: ## every bin/ script this Makefile's recipes run exists and is e
 	  [ -x "$$s" ] || { echo "Makefile: $$s is not an executable script" >&2; missing=1; }; done; \
 	exit $$missing
 
-.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check wai-go wai-go-essential wai-go-record
+.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check wai-go wai-go-essential wai-go-record wai-aot wai-aot-essential wai-aot-record wai-go-aot wai-go-aot-record wai-w2g-check
 wai-light: ## wai, Arbace's WebAssembly engine (WA4, doc/wasm/WAI.md): its light driver built alone by TamaGo's go into .tmp/wai/wai (bin/wai light)
 	bin/wai light
 wai-check: ## the testsuite's scripts planned by arbace.wasm.check and run on wai, each command by its own assertion, against test/wasm/eval-results.edn (bin/wai check)
@@ -1201,3 +1201,15 @@ wai-divergences: ## the eval record's non-passes against test/wasm/divergences-e
 	bin/wai divergences
 wai-ops-check: ## wai's instruction table against repr/wasm's arbace/repr/wasm/ops.ae, row for row (bin/wai ops check)
 	bin/wai ops check
+wai-aot: ## w2g's AOT level (WA7): the testsuite's scripts run by AOT programs, every module translated by w2g and built by TamaGo's go, against test/wasm/aot-results.edn (bin/wai check --aot)
+	bin/wai check --aot
+wai-aot-essential: ## w2g's essential subset, test/wasm/essential-aot.txt, with the AOT controls (bin/wai aot-essential)
+	bin/wai aot-essential
+wai-aot-record: ## the AOT level recorded into test/wasm/aot-results.edn (bin/wai check --aot --record)
+	bin/wai check --aot --record
+wai-go-aot: ## the Go programs of test/wasm/go-aot.txt as AOT programs, against test/wasm/go-aot-results.edn (bin/wai go --aot)
+	bin/wai go --aot
+wai-go-aot-record: ## the Go programs at AOT recorded (bin/wai go --aot --record)
+	bin/wai go --aot --record
+wai-w2g-check: ## w2g's bodies and wai's exports regenerated from exec.go and compared with the committed ones (bin/wai w2g check)
+	bin/wai w2g check

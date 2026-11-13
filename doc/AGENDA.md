@@ -458,8 +458,13 @@ model's edges), 251 (pyi on goi's speed), 252 (3.15's P6-P8).
   doc/wasm/WAI.md, "As built: WA4"); WAS30-WAS32 decided (a) (the user 2026-11-13). Branch `wasm-wa5`: WA5 built (wai's own
   validator, 5,237 of 5,237 root modules agreeing with arbace.wasm.valid; WASI preview 1; `bin/wai go`: `$GOROOT/test`'s 1,051 run
   programs and 6 own programs built for wasip1 and run on wai, 1,001 pass, 53 n/a, 3 over budget; "As built: WA5"). The REAP row
-  read 7,840 / 0 / 454, eval 61,890 / 0 / 1,046, AOT "no check yet". To decide: WAS33-WAS37. Next: WA5b (the directory tests,
-  WAS34), WA7 w2g; mode :full's text; WA8's legacy exceptions.
+  read 7,840 / 0 / 454, eval 61,890 / 0 / 1,046, AOT "no check yet". WAS33-WAS37 decided (a) (the user 2026-11-13). Branch
+  `wasm-wa6`: WAS33 (the data count section written by the encoder and the text reader, required by the decoder, wai's validator
+  strict), WA5b (the 131 directory tests built for wasip1 as Go's test driver builds them: 123 pass; the Go corpus 1,124 of 1,188) and
+  WA7's first part (w2g: wai's internal code translated to Go packages over the interpreter's own cases, generated from exec.go;
+  `bin/wai check --aot`: the testsuite at AOT equal to eval, 60,498 of 60,498 root commands, every function translated; `bin/wai go
+  --aot`: 18 of 18, the 3 over eval's budget among them; "As built: WAS33, WA5b, WA7 (first part)"). To decide: WAS38-WAS42. Next:
+  WA7's rest (the whole Go corpus at AOT as a rotation, WAS40; a register allocation), mode :full's text; WA8's legacy exceptions.
   The branches move `gate_key` once (WA1's crop paths' lists): they merge in a key window.
 - repr/haskell and repr/rust's round trips stay out of `--full` until their rows fit the budget; Zed parked
   ([ZED-SURVEY.md](ZED-SURVEY.md)).

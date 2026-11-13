@@ -170,7 +170,8 @@ WAS11 (a): Go programs built for `GOOS=wasip1 GOARCH=wasm` by TamaGo's go1.27.1 
 driver (`bin/lib/wai/go-run.bash`).
 
 1. **The programs**: `$GOROOT/test`'s run programs (the ids of goi's record `test/goi/check-linux-amd64.edn` whose action is `run`, as
-   Go's test driver reads the first line: 1,051 of its 1,837; the directory tests and errorcheck programs are not run programs here),
+   Go's test driver reads the first line: 1,051 of its 1,837; the directory tests since WA5b, item 6; the errorcheck programs are not
+   runs),
    and Go's own small programs of `test/wasm/go-run.txt` (`test/wasm/go/NAME/main.go`: hello, goroutines, maps, fmt, time, files).
 2. **The build**: as goi's gc reference builds the original (GOPATH mode in its directory, the action's build flags and the files
    it names, `run cmplxdivide1.go`; an action setting `-goexperiment` or `-godebug` a skip, as goi's; a program Go's test driver would
@@ -187,6 +188,15 @@ driver (`bin/lib/wai/go-run.bash`).
    `test/wasm/divergences-go.edn`.
 5. **The controls** (`test/wasm/controls-go.txt`): a subject's run judged against another program's gc reference must fail; `self`
    must pass.
+6. **The directory tests** (WA5b, WAS34 (a)): goi's record's rundir, buildrundir and runindir tests and `test/wasm/go-dirs.txt`'s
+   (`wasmmemsize.go`'s `//go:build wasm` keeps it out of goi's linux record), built for wasip1 as cmd/internal/testdir builds them
+   (`gorun_dir_build`: rundir's packages of the `.dir` compiled in the files' order by `go tool compile -e -D test -p test/NAME`
+   against `go list -export std`'s export data for wasip1 and the last linked as main; buildrundir's `.go` files compiled as main
+   with its `.s` files assembled, packed and linked; runindir's directory copied into a module named after it, `go build .`),
+   cached by the directory's files' digest; run by wai in Go's driver's directory (rundir's and buildrundir's a fresh work
+   directory, runindir's the module's copy, preopened beside `$GOROOT`), standard output and error combined, judged as the
+   driver judges them: status 0 and the golden `.out` byte for byte (none: no output). Their controls, the mode `golden [OTHER]`:
+   a run against another directory test's golden output must fail, against its own pass.
 
 ## 9. w2g, the AOT level (`w2g.go`; WA7)
 

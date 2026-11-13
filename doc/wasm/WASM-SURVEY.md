@@ -1093,3 +1093,110 @@ branch moves no key (gate-key-crops-test passes; `bin/arbace-go --gate-key` equa
 
 **Not done**: the directory tests (WAS34), Go's js/wasm programs and the headless world (WA11), `wasmexport.go` and
 `wasmexport2.go` (errorcheck programs: gc's errors for wasm, not runs), `wasmmemsize.go` (a runindir test: WAS34's), the AOT cell (WA7), the legacy exceptions (WA8).
+
+## As built: WAS33, WA5b, WA7 (first part) (2026-11-13, branch `wasm-wa6`)
+
+The user's decisions of 2026-11-13: WAS33-WAS37 all (a). Built from `mac/wasm-wa5` (`114e8b256`). doc/wasm/WAI.md §8 (the directory
+tests) and §9 (w2g) describe the new parts.
+
+**WAS33 (a), the data count section.** `arbace.repr.wasm.binary/encode` writes the data count section whenever a function's body
+names a data segment and the forms carry none (encode.ml's rule: `Free.module_`'s datas, the data segments' count, zero when there
+are none); the text reader (`text.ae`) adds the `wasm/datacount` item by the same rule (before: only for `memory.init` and
+`data.drop`, and only with data segments: `array.new_data` and `array.init_data` were missed, and `(data.drop 0)` with no segment);
+the decoder requires the section for all four instructions, as decode.ml does (before: two). wai's validator is strict again: a body
+naming a data segment without the section is malformed ("data count section required"), its WA5 leniency (the data section's own
+count) removed. Proofs: `bin/repr-wasm wast` over the 293 scripts unchanged (the record holds: 7,820 of 8,274, the root's all; 2,760
+of 2,760 print cases; 4,998 of 5,060 messages), `bin/wai check` unchanged (60,498 of 60,498 root commands, the 5,237 root modules'
+validator rows all agreeing, now with no lenient case); the round trip over every corpus: see "Proofs" below.
+
+**WA5b (WAS34 (a)), the directory tests.** `bin/wai go` builds goi's record's 127 directory tests and the four of `$GOROOT/test`'s
+that goi's linux record does not hold (`test/wasm/go-dirs.txt`: `wasmmemsize.go`, `//go:build wasm`, and three that skip) for
+wasip1 as cmd/internal/testdir builds them (`bin/lib/wai/go-run.bash`'s `gorun_dir_build`): rundir, each package of the `.dir` in the
+files' order compiled by `go tool compile -e -D test -p test/NAME` against the standard library's export data for wasip1 (`go list
+-export std`, once a run), the last linked as main by `go tool link -s -w -buildid=test`; buildrundir, every `.go` compiled as main
+with the `.s` files assembled (`-gensymabis`, `-asmhdr`), packed and linked; runindir, a shallow copy made a module named after the
+directory (`-gomodversion`'s go line), `go build .`; cached by the directory's files' digest. Run by wai in Go's driver's directory
+(rundir's and buildrundir's a fresh work directory, runindir's the module's copy, preopened beside `$GOROOT` read-only), standard
+output and error combined, judged as Go's test driver and goi's check judge them: status 0 and the output the golden `.out` byte for
+byte (none: no output). Two negative controls and two positive checks of the new mode `golden` (`test/wasm/controls-go.txt`); five
+directory tests added to the essential list (`wasmmemsize.go` among them).
+
+**WA7 (first part), w2g** (WAS10 (a); doc/wasm/WAI.md §9): wai's internal code translated to Go and built by TamaGo's go.
+
+- **The unit and the bodies.** w2g translates wai's internal code, not the binary: its static stack heights (`Code.H`, recorded by
+  the compiler since WA7) make each operand a slot of the frame known at translation, and its branches carry their targets. A
+  function becomes one Go function over the machine's stack (the interpreter's calling convention): a label a branch target, a
+  `goto` a branch, `br_table` a `switch`, calls through `Machine.run`; every instruction that is not a transfer of control is the
+  interpreter's own case of `Machine.exec`, generated from `exec.go` (`waidriver w2g-cases`; `bin/wai w2g gen|check`), a case
+  shared by several ops reduced to the op's own clause and the instruction's fields made constants (those that hold the process's
+  canonical type ids read at run time). So the AOT level runs the interpreter's semantics instruction for instruction (WAS39).
+- **Tail calls and handlers.** `return_call*` leaves its callee to `Machine.run`'s trampoline (the callee runs in the same frame once
+  the caller returned: neither Go's stack nor the depth grows; the interpreter tail-calling a translated function does the same); a
+  function with `try_table`'s handlers sends every exception raised inside it to a label that asks `Machine.catch` at the raising
+  instruction, as the interpreter's `throw:` does. The first runs left them to the interpreter (185 root commands); since then every
+  function of the testsuite's 2,000 modules and of the Go programs is translated.
+- **The programs.** `waidriver w2g OUTDIR MODULE...` writes packages `w2gout/pN` of about 1.5 MB of Go each, which dot-import wai
+  (its names the bodies use and wai does not export are wrapped as `X_NAME` by the generated `w2gexports.go`), each registering its
+  functions by their module's SHA-256; an AOT program is the light driver built by TamaGo's go with these packages
+  (`bin/lib/wai/aot.bash`), its translated functions attached at instantiation. One package was the first try: a Go-built module
+  (`hello.wasm`, 2.5 MB, 1,624 functions, 646,000 instructions) is 52 MB of Go, and its one compilation passed the watcher's 2.5 GiB
+  in 82 s; in 37 packages compiled one at a time it builds in 134 s at 0.84 GB.
+- **The judge.** The same plans and judges as eval, and one rule more: `Machine.Interpreted` counts the Wasm calls the interpreter
+  ran in an AOT program, and a command (or a Go program's run) that passes having counted any is no AOT pass ("w2g: N calls on the
+  interpreter (REASON)", class `:w2g-left`, none now). Its controls (`test/wasm/controls-aot.txt`): the eval controls' modes run by
+  the AOT programs (11 negative, 4 positive) and `as-interpreted`, three commands run by their AOT program with its translated
+  functions detached (`AOTDisable`), which the AOT judge must refuse and does.
+- **`bin/wai check --aot`** (the testsuite, 13 programs of 24 scripts) and **`bin/wai go --aot`** (`test/wasm/go-aot.txt`), their
+  records `test/wasm/aot-results.edn` and `test/wasm/go-aot-results.edn`, the classes `test/wasm/divergences-aot.edn` (w2g's own,
+  then eval's by proposal); the REAP AOT cell's sources (commands; messages beside; the Go programs); the fragment gains
+  `wasm-aot-essential` (essential: `bin/wai w2g check && bin/wai aot-essential`, `test/wasm/essential-aot.txt`'s 31 scripts) and
+  `wai-aot`, `wai-go-aot` (`--full`), not spliced (WAS37 (a): the fragment's `wai-go-essential` was already essential; spliced at
+  the merge).
+
+**Counts**:
+
+| | before (WA5) | after (WA6 branch) |
+|---|---|---|
+| root scripts, eval commands | 60,498 of 60,498 | **60,498 of 60,498** (the strict validator: unchanged) |
+| root scripts, AOT commands (w2g) | no check | **60,498 of 60,498** (every function of the 2,000 modules translated: 7,456 of 7,456) |
+| root messages at AOT | no check | **5,257 of 5,258** pass (the one left: threads) |
+| beyond the root, AOT | no check | 391 pass, 1,046 classed by proposal: eval's, row for row |
+| AOT controls | none | 14 negative (3 `as-interpreted`), 4 positive: all as they must |
+| the Go run corpus (eval) | 1,057 programs: 1,001 pass, 53 :na, 3 :budget | **1,188 programs: 1,124 pass**, 59 :na, 2 :na (actions goi skips), 3 :budget |
+| of them directory tests | none | **131: 123 pass** (122 of goi's 127, `wasmmemsize.go`), 6 :na (build constraints), 2 :na (`-goexperiment`) |
+| the Go programs at AOT (`go-aot.txt`) | none | **18 of 18 pass**, the 3 over eval's budget among them (`finprofiled.go`, `fixedbugs/issue78081.go`, `fixedbugs/issue79186.go`) |
+| REAP AOT cell | no check yet | see "Proofs" |
+
+**Measured** (one run at a time, under the 2.5 GiB watcher, while night 13's gate ran on next): `bin/wai check` 386-417 s, 0.69-0.71
+GB; `bin/wai check --aot` 439-540 s, 0.62-1.0 GB (the planner as eval's, then 13 translations and builds of about 10 s each, the
+runs); `bin/wai go` with the directory tests 712 s cold for the 131 new builds, 1.89 GB summed over three jobs; `bin/wai go --aot`
+over 18 programs 3,454 s, 0.68 GB (a Go program's translation 2 s and 0.21 GB, its 37 packages built in about 2.5 minutes);
+`bin/wai go --essential` warm 10 s; `bin/repr-wasm wast` 592 s, 0.61 GB. The conversions by repr/go's native reader: wai 94-140 s and
+1.03-1.06 GB, the driver 99-140 s and 0.97 GB.
+
+**Proposals** (numbered after WAS37):
+
+- **WAS38 w2g's form.** (a) as built: w2g is wai's (Go forms, a light driver's code), translating wai's internal code and writing Go
+  source in packages for TamaGo's go; (b) the survey's `arbace.wasm.w2g` on the tools' host, writing Go forms printed by repr/go. A
+  Go-built module is about 50 MB of Go: as forms on stage 0 and through repr/go's printer that is hours a program, where (a) takes
+  2 s. *Recommended: (a)*; (b) stays possible for small modules (the forms of a translation, when they are wanted as data).
+- **WAS39 The bodies from the interpreter.** (a) as built: every non-control instruction is the interpreter's case, generated from
+  exec.go (`bin/wai w2g check` in `wasm-aot-essential`); (b) templates of w2g's own per op. (a) keeps one semantics (an interpreter
+  fix is w2g's at the next generation) and made the whole testsuite pass at AOT once the transfers of control were right; its cost is
+  speed (the cases' slot accesses through the stack's slice, not registers). *Recommended: (a)*; a register allocation over the
+  static heights is a later optimization, judged by the same records.
+- **WAS40 The whole Go corpus at AOT.** About 3 minutes a program (the translation's 37 packages built), 1,130 programs: about 57
+  hours. (a) `go-aot.txt` (18 programs: the own programs, the three over budget, the controls' subjects, two directory tests) as the
+  `--full` step, and the rest as a rotation (GT8.4's `:rotate`, e.g. 100 programs a night, the whole corpus in about 11 nights); (b)
+  only `go-aot.txt`; (c) translate a Go program's runtime and libraries once (their functions keyed by content, calls through the
+  module's tables): much faster, but a translation keyed across programs is a design of its own (WA7's rest). *Recommended: (a)*,
+  then (c) if the rotation's cost matters.
+- **WAS41 The AOT judge's strictness.** (a) as built: a command or a program whose run called any function the interpreter ran is
+  no AOT pass; (b) by module (a module some of whose functions were translated counts). *Recommended: (a)*: an AOT pass that
+  interpreted is not one, and since this branch nothing is left.
+- **WAS42 The AOT level's time limit.** (a) the Go programs at AOT keep eval's three times the action's limit (as built); (b) gc's own
+  limit (one time), now that the code is compiled. *Recommended: (a)* until the rotation measures the whole corpus.
+
+**Not done**: the whole Go corpus at AOT (WAS40), the forms of w2g's output (WAS38 (b)), a register allocation, the js/wasm programs and
+the headless world (WA11), `wasmexport.go` and `wasmexport2.go` (errorcheck programs: gc's errors for wasm), the legacy exceptions
+(WA8), Go's SIMD programs and WA6's SIMD corpus.
