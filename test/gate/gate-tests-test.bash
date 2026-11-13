@@ -109,10 +109,13 @@ root=$src
 for h in $(arbace_tool -p "$src/test" -m gate.crops host-names "$src/test/gate/steps.edn"); do
   grep -q ":$h \"" "$scratch/logs/hosts.edn" || sed -i "\$ s/}\$/ :$h \"x\"}/" "$scratch/logs/hosts.edn"
 done
+# (GD1, GDS7 (a): gate-tests is a step of the full tier; the planner checks every step's rules in the essential mode too, and
+# its full mode would read the rotated steps' universes and subsets, which this step does not declare)
 arbace_tool -p "$src/test" -m gate.plan plan "$src" "$scratch/logs" "$scratch/store" essential > "$scratch/plan.out" 2>&1
 if grep -q "problem(s)" "$scratch/plan.out"; then bad "the planner rejects the table: $(grep -A5 'problem(s)' "$scratch/plan.out")"
-elif grep -q "^ *run *gate-tests " "$scratch/plan.out"; then ok "the planner accepts the table and plans gate-tests"
-else bad "gate-tests not planned: $(head -5 "$scratch/plan.out")"; fi
+elif grep -q "^ *run *claude-md " "$scratch/plan.out" && grep -q '^  {:name gate-tests :mem-gib [0-9]* :phase :full ' "$src/test/gate/steps.edn"; then
+  ok "the planner accepts the table, plans claude-md, and gate-tests is a step of the full tier"
+else bad "claude-md not planned or gate-tests not :phase :full: $(head -5 "$scratch/plan.out")"; fi
 
 [ "$fails" = 0 ] && echo "gate-tests-test: passed" || echo "gate-tests-test: $fails failed"
 exit $((fails > 0))

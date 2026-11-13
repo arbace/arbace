@@ -2,7 +2,8 @@
 
 The user (2026-11-13): "Our testing harness is still a behemoth, that we need to address asap." This survey measures where
 `bin/gate` spends its time, memory and disk, and why one edit reruns so much. It proposes decisions (GDS1-GDS20) and a
-staged plan (GD1-GD6). Nothing here is implemented, and nothing was run beyond `bin/gate --full --plan`, `bin/gate --nightly
+staged plan (GD1-GD6); the user decided GDS1-GDS20 as recommended on 2026-11-13, and GD1 is built ("As built: GD1", at the end).
+As first written nothing here was implemented, and nothing was run beyond `bin/gate --full --plan`, `bin/gate --nightly
 --plan`, `bin/gate --full --costs` and `bin/gate --full --mem-check`, which read and plan only, plus `du` and `find` over
 `.tmp`. It continues doc/GATE-SURVEY.md (GT1-GT9, GTS1-GTS255). It changes no step's key: it adds this file and its data
 file alone.
@@ -550,3 +551,127 @@ preparation looked into.
 - The fan-out of §2.2 counts every step that would rerun, including those whose `:uses` cutoff would stop them early
   (judges).
 - Go's cache growth is from two trim lines (7.1 GB and 10.6 GB at the gates' starts), not a series.
+
+## As built: GD1 (branch `gate-gd1`, 2026-11-13)
+
+The user decided GDS1-GDS20 as recommended (2026-11-13) and asked for GD1 at once, on a branch merged after main advances.
+GD1 changes the table, `bin/gate`'s option parsing and two scripts. It changes neither the planner (`test/gate/plan.ae`) nor
+the runner (`bin/lib/gate-run.bash`), so no step's logic key moves. `gate_key` is the same before and after
+(`126c321af14f…`, `bin/arbace-go --gate-key` on `3b25e0d43` and on the branch; `test/gate/gate-key-crops-test.bash` passes).
+The steps whose inputs changed (C's, gate-tests, the `:tools` steps) are rekeyed and run once on GD1's first night. Changes
+to `:mem-gib` and `:clean-only` are not in a key.
+
+**GDS1 (a): the night's command.** `bin/night` is the night's runner. It replaces the main session's scratch scripts
+(`.tmp/nightNN/run.sh`), and its header states the contract:
+- The tier is `auto` by default. The night that starts on Saturday (UTC, the start time less 12 h, as `GATE_NIGHT` counts
+  it; `NIGHT_WEEKLY_DAY`) runs `bin/gate --weekly`. Every other night runs `bin/gate --nightly`.
+- The runner starts only on a clean checkout. The disk must be at most 85% full (`NIGHT_DISK_MAX`). With
+  `--upstream REMOTE/BRANCH`, HEAD must be that branch's head after a fetch. Otherwise it writes the reason to the progress
+  log and exits 1 without running anything.
+- It drops the host and lock variables, then runs one gate in the foreground. It writes `LOG/gate.log`, `progress.log`,
+  `status`, `tier` and `commit`; LOG defaults to `.tmp/night/NIGHT`.
+- With `--ff DIR [--push REMOTE]...`, a pass fast-forwards DIR's branch to the commit the gate ran on. The fast-forward is
+  `--ff-only` and never forced, and each push follows it. A failure fast-forwards nothing.
+- `--detach` starts the run with setsid and writes its PID to `LOG/run.pid`. `--plan` prints the tier's plan.
+- `make night`, `make night-plan`.
+
+The main session's slot becomes `bin/night --upstream mac/next --ff /root/arbace --push origin --push mac --detach`, run in
+`.tmp/worktrees/next`.
+
+**GDS4 (a): the weekly tier.** `bin/gate --weekly` is `--full` with every part (`GATE_ALL_PARTS=1`); `make
+gate-weekly-plan` prints its plan. §4.2's weekly list is now `:clean-only` parts:
+- repr-java-nojavac.jdk (declared 59 GiB, `:heavy true`) and repr-java-front.jdk. Beside the two the user had already made
+  `:clean-only`, repr-java-attr.jdk and repr-java-roundtrip.jdk, they make four.
+- rsi-check.samples and rsi-check.synthetic.
+- cpp-roundtrip.libstdcxx-testsuite-every-40.
+- Four whole steps as one part `weekly` each: haskell-target-probe (its chain named, so `:night-concurrent` keeps it),
+  llvmi-aot, fixpoint and programs-full.
+
+A `:clean-only` part now means weekly and the clean run.
+- **Every peak in the nightly tier is now 40 GiB or less** (GDS3 (a)). The largest is repr-go's 37.3 GiB, declared 42.
+- **Not built: GDS4's "and on a night whose commits touch j2g, repr/go or the build's scripts".** Without a planner change
+  (GDS4 (b), with GD3's epoch), the fixpoint and programs-full wait for the weekly night.
+
+**GDS7 (a): gate-tests.** gate-tests is now `:phase :full`, which takes 53 minutes off the essential path. Its inputs no
+longer include `arbace/` or `CLAUDE.md`:
+- Of `arbace/` it declares only the tool namespaces that stage 0 loads from the checkout when they differ from its embedded
+  copies. These come from the clean run's `gate-tests.loaded` and the `.paths` of 2026-11-06, checked again on the branch by
+  gate-reads-test: box, classes, go's checker (not `run.ae`, `escape.ae` or `table.ae`), j2g's start, jrt, model, names and
+  embed, repr/go's reader and printer, and the lexers of repr/c and repr/java.
+- `test/gate/claude-md-test.bash` moved to `test/docs/claude-md-test.bash`. It runs as the new essential step `claude-md`,
+  which takes seconds and whose inputs are `CLAUDE.md`, `doc/GATE-SURVEY.md` and `arbace/j2g/embed.ae`.
+
+**GDS8 (a): `:tools`.** It gains `!arbace/rust/`, `!arbace/llvm/`, `!arbace/repr/asm.ae`, `!arbace/repr/asm/` and
+`!arbace/asm/`. These are the rest of `arbace_crop_paths` under `arbace/`; `arbace/rust.ae` does not exist. No namespace
+outside these trees requires them, and every step that runs their scripts declares its own group (`:rust`, `:rsi`, `:llvm`
+or `:asm`).
+
+**GDS10 (a), the C part.** `:c` keeps the tools and test/c/'s shared data: the manifest, `host/`, `records/`, the controls,
+dg-targets, synth/, run/, judge/, c23/ and cinterp/. It loses test/c/'s level files and all of test/repr/c/. Each level
+names its own group:
+- `:c-records-run` (c-check, c-check-essential with `essential-check.txt`);
+- `:c-records-aot` (c-aot, c-aot-essential);
+- `:c-records-dg` (c-dg, c-dg-essential);
+- `:c-records-tokens`;
+- `:c-records-parse` (with the token level's known file, which parsecheck reads);
+- `:c-records-annot` (with `parse-gcc.tsv` and the token level's known file);
+- `:c-records-roundtrip` (with `parse-check-results.edn`, which rtcheck reads, `parse-gcc.tsv` and `records/`);
+- `:c-records-c23`;
+- `:c-records`, every one of them, for c-judge-test and c-records-verify.
+
+The groups are drawn from the C scripts' and namespaces' paths and the clean runs' audits (2026-11-05/06). The crops that
+list `:c` read no C record: cppi, rsi and llvmi read their own. The next clean run's audit is the proof.
+
+**The declarations (GDS13 (a), the table part).** From `bin/gate --full --mem-check` and the store's and clean records'
+peaks: each UNDER step was raised to ⌈1.1 × its peak⌉, and each step declared far above (more than 2 × its peak + 2 GiB)
+was lowered to it.
+- **13 raised**: suite-go 19, java-compiled 28, suite-aot-essential 32, programs 28, haskell-lib-own-base 4,
+  repr-java-nojavac.jdk 59, fixpoint 30, programs-full 30, repr-go 42, c-parse.benchmarksgame 11, cpp-builtins 3,
+  rsi-essential 8, and oi-essential 3 (its 2.8 GiB within the margin of 3, GTS215's essential limit).
+- **81 lowered**:
+  - java-interp's parts from 53 to 3-16 (jdk-run 16; the step's own 53 kept for the whole level);
+  - java-compiled-full's five parts from 50 to 23-26;
+  - 66 of C's parts (tokens, parse, annotations, roundtrip, aot) to 1-4;
+  - cpp-selftest to 1, cpp-dg's preprocess and dg-error to 1;
+  - rust-roundtrip's two measured parts to 3.
+- After the edit, `--mem-check` lists none UNDER and none far above. java-interp keeps its step-level 53 GiB for the whole level, the reaps-3-crops-v2 clean run's 47.7 GiB, and its parts
+declare their own. `gate.lanes mem-check` now compares a parted step's whole-step entries of older records with the larger
+of its parts' and its own `:mem-gib`. lanes.ae is in no key, and lanes-test holds the committed records to it.
+`gate-tests-test` plans gate-tests in the full mode. A consequence: rsi-essential at 8 GiB takes rust-full
+  out of GTS216's beside-the-serial chains (`:max-step-gib` 4). `crops-test` now expects the chains without it.
+
+**rsi's disk guard** stops past 90% (`RSI_DISK_MAX`), as cppi's does since `e7debd721`.
+
+**Not in GD1, as the survey said.** The main session removes the merged worktrees and caps Go's cache (§3.3, GD1 item 8).
+GDS9, GDS11, GDS12, GDS14-GDS18 and GDS20 are GD3-GD6's.
+
+### Before and after (the plans of 2026-11-13 on `3b25e0d43` and on the branch; durations from the store, `--rerun`: every check run)
+
+| plan | steps | serial sum | simulated wall (the essential memory lane) |
+|---|---|---|---|
+| essential (`bin/gate --plan --rerun`) | 59 → 59 (gate-tests out, claude-md in) | 3:04 → 2:42 | 0:55 → 0:56 |
+| `--full --plan --rerun` | 337 → 329 | 32:00 → 25:23 | 22:46 → 18:40 |
+| `--nightly --plan --rerun` (the nights from now) | 385 → 377 | 29:04 → 22:28 | 21:45 → 17:37 |
+| `--weekly --plan --rerun` (Saturday) | – → 358 | – → 32:01 | – → 26:30 |
+| `--full --plan` (keyed, today's store) | 159 run → 295 run | 20:54 → 24:47 | 17:50 → 18:14 |
+
+The keyed row runs more steps after GD1, because GD1's input edits rekey them once. The wall comes from the plan's
+simulation, which uses the essential memory lane's free rule, not `--concurrent`'s lanes. The 23 parts with no pass yet
+count as 0: the `.weekly` parts and the new `claude-md`.
+
+### Fan-out (steps a change to one file reruns; their wall is night 13's, from `costs-2026-11-13.tsv`)
+
+| file | before | after |
+|---|---|---|
+| `test/repr/c/annot-known.edn` | 149 steps, 11 h 54 | 24, 0 h 59 |
+| `test/repr/c/roundtrip-known.edn` | 149, 11 h 54 | 24, 0 h 51 |
+| `test/c/check-budget.edn` | 149, 11 h 54 | 35, 2 h 33 |
+| `test/c/check-linux-amd64.edn` | 150, 12 h 46 | 36, 3 h 26 |
+| `arbace/cpp/abi.ae` | 50, 9 h 34 | 45, 5 h 06 |
+| `arbace/go/escape.ae` | 222, 23 h 59 | 213, 18 h 43 |
+| `arbace/asm/amd64/asm.ae`, `arbace/repr/asm.ae` | 201, 22 h 52 | 24, 1 h 19 |
+| `arbace/rust/check.ae` | 201, 22 h 52 | 10, 1 h 39 |
+| `arbace/llvm/check.ae` | 201, 22 h 52 | 19, 1 h 34 |
+| `CLAUDE.md` | 1 (gate-tests), 52 min | 1 (claude-md), seconds |
+
+For `arbace/go/escape.ae` the count still includes the program hosts. The `:never-loads` for goi is GD3's (GDS9).
