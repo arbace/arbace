@@ -713,13 +713,19 @@
 
 (declare expr)
 
+(declare sum-comps)
+
 (defn- tuple-comps-of
-  "An application of an unboxed tuple type (a function's or a primop's result): its components' representations"
+  "An application of an unboxed tuple type (a function's or a primop's result): its components' representations; of an
+  unboxed sum type its tag's and slots' (HF10-P37: ubxSumRepType's)"
   [a]
   (when (head? a 'app)
     (let [[_ f args] a
           t (when (or (head? f 'v) (lv? f) (head? f 'cast)) (app-type f args))]
-      (when (and t (tuple-ty? t)) (mapv type-reps (nth (strip-forall t) 2))))))
+      (cond (and t (tuple-ty? t)) (mapv type-reps (nth (strip-forall t) 2))
+            t (sum-comps t)))))
+
+(declare sum-args)
 
 (defn- with-atoms
   "Atoms for the arguments, their bindings let around k's expression, the last argument's outermost; an argument of an
@@ -861,8 +867,8 @@
         :else (with-atoms args (fn [as] (list 'app (gname (second f)) as)))))
     (and (head? f 'v) (newtype-selector? (second f)))
     (if (= 1 (count args)) (expr (first args)) (expr (list 'app (first args) (vec (rest args)))))
-    (lv? f) (with-atoms args (fn [as] (list 'app (local-name f) as)))
-    (head? f 'v) (with-atoms args (fn [as] (list 'app (gname (second f)) as)))
+    (lv? f) (with-atoms (sum-args f args) (fn [as] (list 'app (local-name f) as)))
+    (head? f 'v) (with-atoms (sum-args f args) (fn [as] (list 'app (gname (second f)) as)))
     :else (let [n (fresh "sat")]
             (list 'let (list 'bind [n :L] (rhs f)) (with-atoms args (fn [as] (list 'app n as)))))))
 
@@ -883,11 +889,12 @@
 
 (defn- binders
   "A lambda's binders; one of an unboxed tuple type unarised into its components (Unarise's unariseFunArgBinder: the
-  tuple's binder stands for them, a case on it binds them, HF10-P20)"
+  tuple's binder stands for them, a case on it binds them, HF10-P20), one of an unboxed sum type into its tag and slots
+  (HF10-P37: unariseFunArgBinder's ubxSumRepType)"
   [bs]
   (vec (mapcat (fn [b]
                  ;; (# #)'s binder stays one void binder (GHC's: a void argument)
-                 (if-let [comps (let [c (tuple-comps b)] (when (some seq c) c))]
+                 (if-let [comps (let [c (or (tuple-comps b) (when (lv? b) (some-> (get (:ltypes *r*) b) sum-comps)))] (when (some seq c) c))]
                    (let [cs (vec (for [rs comps :when (seq rs)] (let [n (fresh "ubx") r (reps->rep rs)] (swap! *reps* assoc n r) [n r])))]
                      (swap! *mcomps* assoc b comps)
                      (swap! *multi* assoc b cs)
@@ -965,6 +972,13 @@
   (let [t (when t (expand-syn (strip-forall t)))]
     (when (and (vector? t) (= :tc (first t)) (sum-tc? (second t))) t)))
 
+(defn- sum-comps
+  "HF10-P37: a type of an unboxed sum whose slots are known: its tag's and slots' representations, one component each
+  (ubxSumRepType), else nil"
+  [t]
+  (when (sum-type t)
+    (let [rs (type-reps t)] (when (not= [:L] rs) (mapv vector rs)))))
+
 (defn- utuple-core [k] ["ext" "var" "GHC.Internal.Types" (if (= 1 k) "MkSolo#" (str "(#" (apply str (repeat (dec k) ",")) "#)"))])
 
 (defn- sum-rubbish
@@ -1028,6 +1042,24 @@
     (and (head? e 'case) (some (fn [[_ c]] (usum-con c)) (nth e 3)))
     (when-let [st (sum-type (or (get (:ltypes *r*) (nth e 2)) (expr-type (second e))))] (sum-case (second e) (nth e 2) (nth e 3) st))
     :else nil))
+
+(defn- sum-args
+  "HF10-P37: an unboxed sum built as a function's argument (its alternative's constructor applied: T14228's foo (Just' x)
+  after the builder's inlining, (# x | #) itself): its unboxed tuple (mkUbxSum), at the parameter's type the function's type
+  gives (its dictionaries first), which with-atoms unarises as the callee's binders are (binders); the other arguments as
+  they are"
+  [f args]
+  (if (some #(and (head? % 'app) (head? (second %) 'v) (usum-con (second (second %)))) args)
+    (let [t (cond (head? f 'v) (global-type (second f)) (lv? f) (get (:ltypes *r*) f))
+          p (if (and (vector? t) (= :forall (first t))) (count (nth t 2)) 0)
+          ats (when t (vec (arg-types t)))]
+      (mapv (fn [a i]
+              (or (when (and (head? a 'app) (head? (second a) 'v) (usum-con (second (second a))) (>= i p))
+                    (when-let [st (sum-type (get ats (- i p)))]
+                      (let [[k n] (usum-con (second (second a)))] (sum-construct k n (nth a 2) st))))
+                  a))
+            args (range)))
+    args))
 
 (defn expr
   "A Core expression as an STG expression"
