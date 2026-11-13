@@ -13,7 +13,7 @@
 #                      (default read,interp; JCS6 (a)):
 #                        read     repr/java's read of the renamed sources on javac's tool executable
 #                                 (REPR_JAVA_EXE, bin/repr-java), every file converted (cached in
-#                                 .tmp/java-check/forms by the sources, javac's options, the reader's
+#                                 .tmp/java-check/forms/KK/KEY, cache_slot, by the sources, javac's options, the reader's
 #                                 sources and the tool's key)
 #                        nread    the read without javac (JFS123 (b), doc/classes/JAVA-FRONTEND-SURVEY.md,
 #                                 "As built: JN9f"): bin/repr-java read --no-javac of the same sources
@@ -575,6 +575,22 @@ run_exe() {
 # one that did not finish (a crash, Go's out of memory, the tool missing) is not (report 003's finding 6)
 read_finished() { grep -qE '^[0-9]+ Java files, [0-9]+ converted, |^FAILED ' "$1"; }
 
+# cache_slot CACHE KEY: the path of KEY's entry in a cache of reads (CACHE/KK/KEY, KK the key's first two
+# characters), its shard made. The caches were flat until night 13 (2026-11-13): the read level's shared
+# cache, .tmp/java-check/forms, reached 208,010 entries (52,000 keys, four files each) and ext4 without
+# large_dir caps a directory's htree at two levels, so creating some names failed with ENOSPC ("index full,
+# reach max htree level", dmesg) with the disk at 82 %: java-forms-verify's t03224 and the levels' reads
+# cache_take CACHE KEY SLOT: under SLOT's lock, a flat entry of KEY (the old layout) moved into SLOT
+cache_slot() { mkdir -p "$1/${2:0:2}" && echo "$1/${2:0:2}/$2"; }
+cache_take() {
+  local x
+  [ -e "$1/$2.result" ] || [ -e "$1/$2.unfinished" ] || [ -e "$1/$2" ] || return 0
+  for x in "" .result .unfinished .log; do
+    if [ -e "$1/$2$x" ] && [ ! -e "$3$x" ]; then mv "$1/$2$x" "$3$x"; else rm -rf "$1/$2$x"; fi
+  done
+  rm -f "$1/$2.lock"
+}
+
 # read_opts: javac's options for repr/java's read (the source level and the encoding; the rest
 # change javac's output, not the forms)
 read_opts() {
@@ -973,10 +989,11 @@ check_one() {
         ro=()
         while IFS= read -r k; do [ -n "$k" ] && ro+=("$k"); done <<< "$(read_opts ${opts[@]+"${opts[@]}"})"
         key=$( { echo "$reader_key"; printf '%s\n' ${ro[@]+"${ro[@]}"}; (cd "$p/src" && find . -type f | LC_ALL=C sort | xargs -d '\n' sha256sum); } | sha256sum | cut -c1-24)
-        forms=$formsc/$key
+        forms=$(cache_slot "$formsc" "$key")
         echo "$key" > "$p/forms.key"
         # one reader per key: two descriptions of one file share their source set
         exec 7> "$forms.lock"; flock 7
+        cache_take "$formsc" "$key" "$forms"
         if [ ! -f "$forms.result" ] && [ -n "${forms_only:-}" ] && [ -f "$forms.unfinished" ]; then
           # the read ran and did not finish (not cached, report 003's finding 6): the test unread, no miss
           cp "$forms.unfinished" "$p/read.result"
@@ -1074,9 +1091,9 @@ check_one() {
 nread_one() {
   local id=$1 p=$2 key=$3 forms=$4 nf st reason d
   if ! grep -qs '^pass' "$forms.result"; then printf '%s\tnread\tunread\tthe read failed\n' "$id"; return 0; fi
-  mkdir -p "$work/forms-nojavac"
-  nf=$work/forms-nojavac/$key
+  nf=$(cache_slot "$work/forms-nojavac" "$key")
   exec 6> "$nf.lock"; flock 6
+  cache_take "$work/forms-nojavac" "$key" "$nf"
   if [ ! -f "$nf.result" ]; then
     rm -rf "$nf" "$nf.tmp"
     st=0
@@ -1204,7 +1221,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe${texe:+; the tests naming the javac API on $texe})" >&2
-  export -f tool_test cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own
+  export -f cache_slot cache_take tool_test cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe texe tplatform tool_re reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
@@ -1275,8 +1292,9 @@ print_read() {
   local link=$1 src=$2 cache=$3 key f st reason unfinished=""
   shift 3
   key=$( { echo "$reader_key"; printf '%s\n' "$@" ${ro[@]+"${ro[@]}"}; (cd "$src" && find . -type f -name '*.java' | LC_ALL=C sort | xargs -d '\n' sha256sum); } | sha256sum | cut -c1-24)
-  mkdir -p "$cache"; f=$cache/$key
+  f=$(cache_slot "$cache" "$key")
   exec 8> "$f.lock"; flock 8
+  cache_take "$cache" "$key" "$f"
   if [ ! -f "$f.result" ]; then
     rm -rf "$f" "$f.tmp"
     st=0
@@ -1357,7 +1375,7 @@ print_level() {
     grep -q '^kind	diagnostics' "$work/run/$id/plan.tsv" && continue
     if [ -f "$work/run/$id/forms.dir" ]; then echo "$id" >> "$list"; else printf '%s\tprint\tunread\tthe read failed\n' "$id"; fi
   done < "$work/run.list"
-  export -f print_ro print_read read_finished print_full_one print_check_one classes_sha classes_verdict
+  export -f cache_slot cache_take print_ro print_read read_finished print_full_one print_check_one classes_sha classes_verdict
   echo "== java-check print: $(wc -l < "$list") tests read in mode :full ($(since_t0))" >&2
   xargs -a "$list" -P "$jobs" -I{} bash -c 'print_full_one "$1"' _ {}
   echo "== java-check print: printed (java.print, the tools' host) ($(since_t0))" >&2
@@ -1413,13 +1431,13 @@ forms_cmd() {
   while read -r id; do
     key=
     [ ! -f "$work/run/$id/forms.key" ] || key=$(cat "$work/run/$id/forms.key")
-    if [ -z "$key" ] || [ ! -d "$formsc/$key" ]; then
+    if [ -z "$key" ] || [ ! -d "$formsc/${key:0:2}/$key" ]; then
       # the read did not reach the test: say why (javac's tool missing or stale, the read's own failure)
-      echo "java-check --forms: $id was not read (the read level exited $rst; ${key:+$formsc/$key.log, }$work/forms-read.txt):" >&2
+      echo "java-check --forms: $id was not read (the read level exited $rst; ${key:+$formsc/${key:0:2}/$key.log, }$work/forms-read.txt):" >&2
       grep -E 'java-check|repr_java_host|rebuild|error|no javac tool' "$work/forms-read.txt" | head -5 >&2
       return 1
     fi
-    cp -r "$formsc/$key" "$work/forms-new/$id"
+    cp -r "$formsc/${key:0:2}/$key" "$work/forms-new/$id"
     n=$((n + 1))
   done < "$work/essential.list"
   # the first line's source: the test's file in jdk26u's test/ (or the checkout's test/java/jls), not
