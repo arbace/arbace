@@ -6306,7 +6306,7 @@ each test's wall and the CPU of the driver's processes (pyi and its children) me
 | test_os | 3603 s cap, 3 timeouts | 1239 s (2191 s), none | child starts: 25 tests take 1073 s |
 | test_str | 1179 s | 942 s (1626 s) | the eval loop: find_periodic_pattern 275 s, index 158 s |
 | test_unicodedata | 1500 s | 797 s (1534 s) | the eval loop: no_names_in_pua 155 s and 181 s (CPython 0.2 s) |
-| test_pickle | 3601 s cap, 1 timeout | see the queue's report | the eval loop and child starts |
+| test_pickle | 3601 s cap, 1 timeout | 2903 s (3661 s), none | the eval loop: 1014 tests, 7 past 60 s take 1106 s (multiple_unpicklings 168-240 s) |
 
 - **No busy loop** was found: every test past 60 s burned one to two and a half cores of work, its own or its children's.
 - **One hang**: `test_del_shutdown`'s `del executor` fires no weakref callback under goi (`:finalization-goi`: goi's
