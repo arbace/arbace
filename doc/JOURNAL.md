@@ -5499,3 +5499,45 @@ Considered:
 
 (The other nested failures in next's `.tmp/tmp/gate-reads.*.out` of 12:51-13:07, audited-test and audit-trace-test, came
 from runs that were not the gate's step and were not looked into.)
+### 2026-11-13: oi-fix, night 13's oi-check.run (branch `oi-fix`, from `mac/next` ca3c7aff8)
+
+- **The two slow entries restored.** ca3c7aff8 dropped `parallel/churn` and `weak-ephe-final/weak_array_par` from
+  `test/ocaml/oi-slow.edn` on their STALE lines, but both stay recorded `slow` "timeout 120s" in check-oi.edn and
+  check-oi-native.edn, and `oi_check.ae`'s `near-limit?` excuses a recorded slow row only for a listed id: the next run would fail
+  CHANGED on them whether they pass or time out (review 1113's finding 1). The STALE line is a `println`, it never failed the step.
+  Restored with their comment. Considered: re-recording them as pass (rejected: 165 s alone against a 120 s limit; load decides).
+- **What failed the step.** Rerun alone with the gate's exact command (`bin/oi check && bin/oi suite check && bin/oi suite
+  rollup`, native path, 3 jobs, 32 min, peak under 2 GiB): `bin/oi check` exits 1 on the native judgment alone, "202 results
+  differ from check-oi-native.edn"; 379 pass, 0 failing (every non-pass classed). The second comparison, against ocamlc's path
+  (check-oi.edn, its 10 CHANGED lines), is printed for information (`|| true` in `cmd_check_native`) and fails nothing.
+- **The 202, by cause: a record that should move.** check-oi-native.edn had been recorded by list only (4700fce37, b45b8aa4f,
+  d73b7e2fd: 357 rows of 545), so a whole run differs on every row it never held: 123 header-classed rows (`nil -> class`), 54
+  passes, 15 fails all in their classes (the C stubs below, `caml_unix_fork` :unix-fork, backtrace/callstack's known, Memprof's
+  moved_while_blocking) and 2 slow (ast-invariants/test, parallel/fib_threads, both listed in oi-slow.edn); 5 statmemprof rows
+  `dump "typer: Unbound constructor ..."` now typed and failing with their known gc entry (the typer's progress since the record);
+  3 known bigarray fails now pass (bigarrays, reshape_overflow, marshal_bigarray). No row went from pass to anything else: no
+  regression. Recorded whole from that run (the judge in record mode on its rows, as `--record` does), misc/darkening_work and
+  weak_array_par kept `slow` (load-sensitive: this run finished them, night 12's timed out).
+- **The 10 against check-oi.edn** (not judged by the step): the C API on ci (ef4f24416, fb8a73f19, 2026-11-08) made header.awk run
+  `modules = X.c` tests with their stubs, after check-oi.edn's class rows were last recorded whole. locale/test now passes;
+  alloc_async, test_c_thread_has_lock(_systhread), lib-systhreads/ and parallel/test_c_thread_register fail `cstubs: read-error:
+  include file not found <caml/gc.h>`, `<caml/domain_state.h>`, `<caml/gc_ctrl.h>`: those are OCaml's runtime-internal headers,
+  which oi's clean-room `test/ocaml/capi/include/caml/` does not provide by design (not the host: no host header is read);
+  embedded/cmcaml's `cmmain.c` (caml_startup embedding) does not parse on them; pr3612 (custom finalizers), statmemprof/bigarray
+  (output) and regression/pr11865/mkroot (timeout, global roots) run and differ: all in `:c-runtime-internals` (OT6 (a), :design),
+  whose `:match` already takes `fail cstubs:`, `fail output differs` and `fail timeout`. Environment differences: none. Left as
+  recorded: check-oi.edn is ocamlc's path, re-recorded only with `--ocdump` (the oracle's ocdump on the host's OCaml, by hand).
+- **Not mine, met on the way:** the first run sat 5 hours in `bin/lib/ci/musl read` (a fresh worktree reads musl's forms on one
+  core, and the C stubs wait on its lock); stopped by PID and next's forms copied in (`bin/lib/ci/musl key` the same,
+  90921e33..., `musl fresh` 0). A worktree's first oi check should take the main checkout's or next's forms.
+- Keys: only test/ocaml/ changes; gate_key, the runtime key and the seed's keys do not move.
+- **The rollup.** With the native judgment passing, the step's third command failed: `bin/oi suite rollup`, "the rollup differs
+  from the record". It runs nothing: test/ocaml/testsuite-results.edn is derived from the levels' records (check-oi.edn,
+  check-suite-oi.edn, check-aot.edn, roundtrip-known.edn, the classes, the headers' roles), and 16 of its rows lagged records
+  committed since it was written (OC216 (a)'s Gc and Marshal ports: compaction, gctweaks, reachable_words, fuzzy, intext, Tests.ml,
+  weaktest, weaklifetime, pr5233 pass; d73b7e2fd's and OC216's slow rows: churn, weak_array_par, darkening_work `class:speed`;
+  OC193's ocamlrunparam headers: pr7168, stackoverflow now run rows; lexing/newlines.ml read pass, night 12's text-bytes fix).
+  No program's result moved here; recorded again (`bin/oi suite rollup --record`), then the judgment 0 files without a result.
+- **Proof:** the gate's exact command, whole: `bin/oi check` (380 pass, 0 failing, 0 CHANGED against the native record; churn and
+  weak_array_par passed this time, STALE notes only) and `bin/oi suite check` (131 programs, 110 pass, 0 failing) exit 0 in 48 min
+  (3 jobs); `bin/oi suite rollup` exit 0 after its record.
