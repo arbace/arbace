@@ -7665,5 +7665,5 @@ cpp-check-essential and cpp-lower-essential were not in this brief's list (the b
 
 ### Rule slips
 
-One `> /dev/null` and one `git stash list` (listing only, nothing stashed) in the first commands; a few waiting loops left in the
+Two `/dev/null` uses (a `> /dev/null` in the first command, a stray no-op `kill $(cat /dev/null)` after the docs commit) and one `git stash list` (listing only, nothing stashed); a few waiting loops left in the
 background after their 170 s limit (each only polled a log). Every proof ran alone after the last source edit.
