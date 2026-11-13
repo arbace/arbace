@@ -6488,3 +6488,46 @@ license) ported over pyi's IR and its bytecode view:
 - **What the IR cannot give exactly**: INSTRUCTION inside an await or a yield from (the view's SEND loop is one IR
   instruction: every instruction of it fires at each step), a view instruction of no IR instruction reached by a jump;
   LINE stays 219t's rule over the IR (test_sys_settrace's), not the view's line table.
+
+## As built: 284, the compiled launcher: Lib/test's children compiled in the AOT cell (2026-11-13, the Mac VM, queue 284; 279's DECISION (a))
+
+The user chose 279's DECISION (a): Lib/test compiled (`bin/pyi check --aot --lib-test`) becomes a recorded source of the
+AOT cell, after a compiled launcher (a child of a compiled driver ran as pyi on goi, 30 s and more a start) and 275's
+per-method timeout (the runner's idle timeout, already in the compiled runner: `runner_exe` is keyed by
+`tools/pyi/libtest_all.py`'s digest, and check passes `--idle-timeout`). Base 201 7ba1d69c2.
+
+- **The launcher**: `tools/pyi/launcher.py` compiled once by pyi's AOT (`script_exe`, kept by the runtime's key, the
+  generator's and the script's digests), its never-run imports (`if sys.argv is None:`) the modules a child commonly
+  imports (test.support and its helpers, unittest, subprocess, json, asyncio, ...) compiled ahead with it. Its wrapper
+  `WORK/aot/bin/python3` (`bin/pyi launcher` prints it; `launcher_py`) runs `bin/pyi python` with `PYI_LAUNCHER`:
+  `cmd_python` parses CPython's command line as for goi (the -c file, -m's wrapper, stdin's, the options' variables),
+  then execs the launcher with **`PYI_AOT_MAIN`** naming the file to run: AotMain (`go/arbace/py/aot.go`) runs it as
+  `__main__` in place of the program's own main module (RunModule's charset path: decoded by its coding spec, compiled at
+  run time by the host's compiler or its IR cache; a module compiled ahead with the launcher runs native),
+  `sys.path[0]` its directory, the variable removed at start. `sys.executable` is the wrapper, whose paths are written in
+  it, so a grandchild, even with `env={}`, starts compiled too. check --aot --lib-test exports it as `PYI_EXECUTABLE`
+  (`PYI_AOT_LAUNCHER=0`: goi as before). A child's start: 4-10 s on the VM (about 3 s of it the host compiler's start for a
+  source not in the IR cache), against 30-60 s on goi.
+- **Fixed on the way** (runtime by print, read, gofmt, vet): the launcher's main file that does not decode names the
+  file ("Non-UTF-8 code starting with '\x89' in file F on line 1", as the tokenizer and goi's error-answer report it;
+  `mainSourceError`, asked only when the bytes are not UTF-8: test_exceptions' test_non_utf8); `socket.getaddrinfo`
+  takes an int port outside 0-65535 as its text and a numeric service past 65535 is EAI_SERVICE (gh-74895, musl;
+  test_socket's test_getaddrinfo_int_port_overflow; goi too).
+- **The record**: `--record` writes `test/python/check-aot-lib-test-linux-ARCH.edn` (the eval check's format, a row a
+  method; the main host's night), `PYI_CHECK_AOT_LIB_RECORD` another (a dry run's).
+- **Classes** (both files; each probed the same on goi, so the runtime's): `:signal-wakeup-errors` (new, deferred, PY6f:
+  set_wakeup_fd's write errors and full buffer not reported, test_signal's 3); `:pyi-command-line` +4 (test_subprocess's
+  test_empty_env: bin/pyi's own variables in an env={} child's os.environ; test_communicate_errors' undecodable -c
+  argument); `:multiprocessing` +2 (test_get_event_loop_new_process: the forkserver's EOF); `:capi-port` +1 (test_pickle's
+  test_clear_unpickler_memo_memory_error: `_testcapi.set_nomemory`).
+- **Measured on the VM** (arm64, 2 jobs, beside two other agents; run): 279's 47 modules: 4,731 methods, **3,771 pass,
+  960 classed, 0 failing** (279's run judged with this base's classes: 3,769 / 962 / 0; test_exceptions' two 300 s
+  timeouts now pass), wall 11.4 min against 29.5 min (5.5 min of it test_fstring's test_many_expressions at its 300 s
+  cap), each driver's peak 0.1-0.4 GB against 2.0-2.1 GB for the child-heavy ones (test_fstring 714 s -> 1 s, test_frame
+  130 -> 1, test_coroutines 197 -> 2, test_list 99 -> 1, test_getopt 65 -> 1, test_capi 105 -> 7). Then 101 more of night
+  12's modules (all it finished but multiprocessing, concurrent_futures, free_threading, the thread modules and
+  test_queue; test_subprocess, test_signal, test_os, test_socket, test_pickle among them): 13,140 methods, 11 failing
+  before the fix and the classes above, 0 after; 44 min. The 148 together: **17,871 methods, 14,452 pass, 3,419 classed,
+  0 failing**, the 3 controls failing as they must; the drivers' compile 14 s each (summed 35 min, peak 3.0 GB), the
+  runs 2,585 s summed against night 12's 88,211 s on goi for the 109 it ran (2.8%; test_subprocess 3,602 s capped ->
+  251 s, test_signal 3,602 -> 449, test_os 3,602 -> 83, test_pickle 3,601 -> 67).
