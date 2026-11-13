@@ -6250,3 +6250,44 @@ CPython 3.14.10's watchers (`Objects/dictobject.c` PyDict_AddWatcher/Watch/Unwat
   test_watchers' 58 rows pass; 6 deallocation rows `:finalization`'s; clear_context_stack's `:testcapi-behaviour`'s);
   `:testcapi` 592 and `:capi-port` 77 unchanged; 0 failing. monitoring.c (sys.monitoring's C API, test_monitoring's
   TestCApiEventGeneration, 5 rows) is the next entry.
+
+## As built: 274b, sys.monitoring's C API: `_testcapi`'s monitoring.c, the last of its 38 parts; `_contextvars`' messages and Context's equality (2026-11-13, the Mac VM, queue 274b; 270b's DECISION (a), the user's)
+
+CPython 3.14.10's `Python/instrumentation.c` 2598-2920 (`capi_call_instrumentation`, `PyMonitoring_EnterScope`,
+`PyMonitoring_ExitScope`, the `_PyMonitoring_Fire*Event` functions; the PSF's license) ported over pyi's sys.monitoring:
+
+- **py** (`go/arbace/py/monitoring.go`): the interpreter's instrumentation version (`monVersion`), raised when a tool's
+  global events change (`monUpdate`, against the events last seen: `_PyMonitoring_SetEvents` leaves the version alone
+  when the events are the same); `MonitoringTools(ev)`, `_Py_GlobalMonitors`' `tools[ev]` (an extension's tool's
+  events as `monitoring_set_events_impl` stores them: BRANCH as BRANCH_LEFT and BRANCH_RIGHT, C_RETURN and C_RAISE left
+  out); `MonitoringCall`, `call_one_instrument` (the thread's tracing count up, DISABLE told apart); the event names.
+- **pyctypes** (`go/arbace/pyctypes/capi_monitoring.go`): `PyMonitoring_EnterScope` writes each `PyMonitoringState`'s
+  `active` byte (the world's memory, which `monitoring.h`'s inline wrappers read) when the scope's version is not the
+  interpreter's; the 17 `_PyMonitoring_Fire*Event` call the active tools' callbacks, the most significant first, with
+  `(codelike, offset, ...)` (LINE: `(codelike, lineno)`); DISABLE clears the tool's bit for the local events and is
+  refused for the others ("Cannot disable %s events. Callback removed.", the callback cleared); the exception events
+  take the raised exception (a ValueError "Firing event %d with no exception set" without one) and raise it again when
+  the callbacks succeed; STOP_ITERATION makes its StopIteration as PyErr_SetObject does.
+- **pyi's own monitoring** (test_monitoring's cascade: two failing tests left a tool's events set, so every later
+  class's setUp failed, TestCApiEventGeneration's included): C_RETURN and C_RAISE follow CALL (CPython's ancillary
+  events; `set_events` stores the set as `monitoring_set_events_impl` does: C_RETURN and C_RAISE dropped, BRANCH as
+  BRANCH_LEFT and BRANCH_RIGHT); a callback's DISABLE turns its local event off at the location (code object, offset)
+  for the tool, the others raise "Cannot disable %s events. Callback removed." and lose the callback;
+  `restart_events` turns them on again.
+- **The world**: `Modules/_testcapi/monitoring.c` built (lib.conf; `_testcapi.CodeLike`, a static C type);
+  `tools/pyi/clib/ctypestest/testcapi_parts.c`, the stubs of the parts not built, removed: all 38 parts are built.
+- **`_contextvars`** (`builtins_contextvars.go`; `Python/context.c`): ContextVar's argument checks (`"O|$O:ContextVar"`:
+  the name positional-only, `default` keyword-only), the name hashed at creation (gh-132002: an unhashable str
+  subclass refused), `set`/`get`/`reset`'s arity and keyword messages, the reset's messages naming the token by its
+  repr, Token's repr (`<Token used var=...>`) and `Token()`'s refusal, Context's key checks for `in` and `get`,
+  `get`'s arity, Context's equality (`context_tp_richcompare`: the mappings compared).
+- **PyCode_NewEmpty** reports one code CREATE event (274's Low): the compiled step is made with the code watchers off.
+- **Classes**: `:monitoring-events` (new, deferred, queue 220's owner): test_monitoring's 45 rows pyi's monitoring does not
+  fire (the local events, LINE, INSTRUCTION, JUMP, BRANCH*, RAISE, RERAISE, EXCEPTION_HANDLED, `_all_events`,
+  `co_branches`), the base's own; `:testcapi-parts` retired from divergences.edn (no part left to build), kept in
+  divergences-315.edn for 3.15's tests reaching attributes of 3.15's `_testcapi` that the world's lacks;
+  test_context's `test_reset_with_reentrant_finalizer` (`__del__` when `reset` drops the last reference) `:finalization`.
+- **Counts** (`bin/pyi lib-test-all --fresh`, each test's own verdict, the VM; base 28a89513d): test_monitoring 12 pass,
+  75 failing → **40 pass**, 49 classed (`:monitoring-events` 45), 0 failing (TestCApiEventGeneration's 5 pass, also
+  alone); test_context 25 pass, 9 failing → **33 pass**, 0 failing; test_capi 496 pass, 0 failing, `:testcapi` 592,
+  `:capi-port` 77, `:testcapi-parts` 0: unchanged; test_sys_setprofile 26 pass (the same); test_cprofile 26 pass.
