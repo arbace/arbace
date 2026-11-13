@@ -4008,3 +4008,129 @@ Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy st
 - **HF10-P39 `$tc'Many`.** The own STG lacks the Typeable binding of the promoted `'Many` (`$tcMany`), so `typeRep`'s kind of a
   function type stops (Type.Reflection's `App` on `Maybe Int`). (a) **name and bind the promoted constructors' TyCon bindings as GHC's
   mkPrimTypeableTodos/Typeable binds them**; (b) leave it. *Recommended: (a)*, after checking which promoted constructors are missing.
+
+## As built: HF10-P37-P39 (2026-11-13, branch `hs-p37`, from `mac/hs-p36` 6f8bf239c)
+
+The user's decisions of 2026-11-13: `:oracle-pending` accepted; HF10-P37 (a), P38 (a), P39 (a). By an agent after the RERUN of
+2026-11-13: one run at a time, each process under 1.5 GiB (GOMEMLIMIT 1000MiB), MemAvailable at least 12 GiB beyond the run; stage
+0; no GHC, no gate run, no network. Read from GHC 9.14.1's source tarball (the corpus pin): `compiler/GHC/Stg/Unarise.hs`
+(unariseArgBinder, unariseFunArg, unariseConArg, unariseConArgBinder, unariseSumAlt, mapSumIdBinders, castArgRename, mkCast,
+mkUbxSum, ubxSumRubbishArg, Note [Casting slot arguments]), `compiler/GHC/Builtin/PrimOps/Casts.hs` (getCasts and its helpers),
+`compiler/GHC/Tc/Instance/Class.hs` (doFunTy, doTyConApp, onlyNamedBndrsApplied), `compiler/GHC/Tc/Instance/Typeable.hs`
+(mkTyConRepBinds' splitForAllForAllTyBinders), `libraries/ghc-internal/src/GHC/Internal/Data/Typeable/Internal.hs` (mkTrCon,
+tyConKind, instantiateKindRep, mkTrFun, mkTrApp, typeRepTyCon, splitApps, showTypeable, trMany); BSD-3-Clause, the notice already
+in the files and LICENSE.md.
+
+**HF10-P37: unboxed sums unarised** (`tostg.ae`), as GHC's Unarise does and as hs-p17's unboxed tuples already were:
+
+- **Binders and arguments.** A lambda's binder of an unboxed sum type is its tag's and slots' binders (unariseFunArgBinder's
+  ubxSumRepType: `foo :: (# String | () #) -> IO ()` takes `[ubx :word] [ubx :L]`, was one binder `[:word :L]`), the sum's binder
+  standing for them (`*multi*`, as a tuple's); a sum built as a function's argument (`foo (# x | #)`, T14228's builder inlined) is
+  its unboxed tuple at the parameter's type (mkUbxSum: `foo 1# x`), with-atoms splicing it as a tuple's; a call returning a sum
+  passed as an argument is taken apart by a case, as a tuple-returning call is.
+- **Casts.** A field whose representation is not its slot's is cast (getCasts ported: Int# in a WordSlot `int2Word#`, back
+  `word2Int#`; the sized ints and words, Addr#, Float# in a DoubleSlot): mkUbxSum's castArg on construction, mapSumIdBinders'
+  `case op slot of cst_sum { DEFAULT -> ... }` on a match. Before, a sum with an Int# alternative (`(# Int# | Float# #)`: slots
+  Word, Float) had no rewrite and its case fell to the pattern-match failure.
+- **Other binders.** A case binding a sum (DEFAULT alternatives alone: the desugarer's mkDefaultCase for a sum-typed `let`) binds the
+  tuple's components, its binder standing for them; a `let` of a sum built in place is built at its binder's type; an alternative's
+  field of several representations (an unboxed tuple: `(# (# a, b #) | #)`, or a nested sum) is the tuple of its slots, each cast.
+- **Constructor fields** (unariseConArgs, unariseConArgBinders): a data constructor's field of an unboxed sum's or tuple's type takes
+  its components as fields (the `stg/data` declaration's reps flattened: unboxedsums2's `D (# Int# | Float# #)` is
+  `[:word :word :float]`, marks `:lazy` each), its construction splices the components (the field's sum built at the field's type),
+  its match binds them (the field's binder standing for them); such a constructor is no floatable `rcon`.
+- **Void components.** An unboxed tuple argument's void components (atoms: `(##)`, `void#`, `realWorld#`, a void local) vanish,
+  a tuple of nothing else is one `void#` (unariseFunArg's `MultiVal []`: unarise.hs's `f2 (# (# #), (# #) #)` passed two
+  arguments to a one-binder function). `(##)` itself as an argument stays the global, as GHC's -O0 STG writes it (a first change to
+  `void#` made 8 ghc-internal modules worse, reverted).
+
+**HF10-P38: patsyn/ in `:testsuite-core`** (722 run tests, 708 before): `bin/hsi own-verdicts --record` lists patsyn/should_run's 14
+run tests in `own-verdicts-pending.tsv` (21 lines with generics/'s 7), judged by their shipped stdout; T13688 (TemplateHaskell,
+ineligible for the own path) is `:oracle-pending`.
+
+**HF10-P39: Typeable of promoted constructors and functions** (`typecheck.ae`'s Typeable solver). The bindings were there
+(`promoted-typeable-binds`: GHC.Internal.Types' `$tc'Many`, `$tc'Lifted`, ...): the evidence named them wrong.
+
+- A promoted constructor's evidence is `mkTrCon $tc'O []` (it was `$tcO`: 34 references of the own STG to an unbound `$tc` name,
+  `$tcMany`, `$tcLifted`, `$tcBoxedRep`, `$tc:`, the RuntimeRep and VecCount constructors), GHC.Internal.Prim's tycons'
+  GHC.Internal.Types' `$tcO` (`$tcTYPE` was named in GHC.Internal.Prim).
+- A function type's evidence is `mkTrFun trMany a b` (doFunTy's EvTypeableTrFun; it was `mkTrApp (mkTrApp (mkTrCon $tcFUN []) a) b`),
+  with variables too; the arrow unapplied (`typeRep @(->)`, typeRepTyCon's and funTyCon's) is `mkTrCon $tcFUN [SomeTypeRep 'Many,
+  LiftedRep, LiftedRep]`: `$tcFUN` has three kind arguments (splitForAllForAllTyBinders: m, q, r) and TrTyCon's kind is a strict
+  field, so the empty list stopped on its KindRep's variables (`(Array.!): undefined array element`) whenever a TrFun was shown
+  or its tycon asked.
+- Left open: a poly-kinded tycon's kind arguments in general (`typeRep @Proxy`, `'[]`): the elaborator's types erase kind
+  arguments, so its evidence passes `[]` (HF10-P41 below).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+| step | result | before (hs-p36) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 2 better; facts 20,699 of 20,891 | same | 0.95 GB, 11m52 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 bindings equal, 0 worse, 33 better | same | 1.14 GB, 15m26 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.72 GB, 4m37 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.70 GB, 4m57 |
+| lib-check `--package deepseq/array/stm` | as recorded (202/211, 388/388, 222/222 facts); 0 worse each; controls differ | same | 0.54-0.63 GB |
+| lib-stg `--package deepseq/array/stm` | `:ok` (no reference) | same | 0.58-0.61 GB |
+
+The equal counts do not move: the reference's sums are few at -O0 in ghc-internal and base, and the Typeable references changed
+(Typeable.Internal's `trMany` now `$tc'Many`, Data.Typeable's and Data.Dynamic's `$tcTYPE`, `$tc'BoxedRep`, `$tc'Lifted`) sit in
+bindings that differ for other reasons. A first run with `(##)` as `void#` was 5,715 of 7,789, 8 worse (GHC.Internal.Prim.Exception,
+the Bignum modules, Show, TypeError, ReadP, Conc.Sync): the reference writes `(##)`; reverted, as above.
+
+**The programs** (the native front end on the branch's own libraries, hsi; judged by their own verdict: exit 0, stdout the golden
+file; `.tmp/p37/ps-run.sh` in the worktree, not committed):
+
+| set | before (hs-p36) | after |
+|---|---|---|
+| unboxedsums/'s 19 run tests (all.T's compile_and_run; unboxedsums_unit_tests needs `-package ghc`, ManyUbxSums a generator: left out) | 5 pass (thunk, unpack_sums_1, 3, 4, 8) | 18 pass; unpack_sums_6 imports Data.Time (the time package: no own interfaces), its front end stops |
+| patsyn/should_run's 13 single-module run tests | 12 pass (T14228: no sum unarisation) | 13 pass |
+| T14228 alone, and `.tmp/p36/t/S1.hs` (the same without synonyms) | fail (`unboxed tuple of the wrong size`) | pass |
+| hs-p36's X6 (`case typeRep @(Maybe Int) of App f x`) | fail (`no binding of GHC.Internal.Types/$tcMany`) | pass |
+| Typeable probes `.tmp/p37/ty/T1`-`T9`, `Q1` (App, `show (typeRep @(Int -> Bool))`, `Fun`, `typeRepKind` of Maybe, `typeOf`, `typeRep @'True`, `cast`, `Dynamic`, `SomeTypeRep` equality, `typeRepTyCon` of a function) | T1 stopped at its second line (`(Array.!): undefined array element`) | all pass, the outputs as GHC's documented ones |
+
+The testsuite's own Typeable programs (typecheck/should_run's TypeOf, TypeRep, TypeableEq, T14341, T16646, ...) stay on the pack
+path, as before: the native front end stops on other things (`HsStarTy`, `HsExplicitTupleTy`, Typeable of a type literal; HF10-P42).
+
+
+### Checks (light, one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above; ghc-internal's lib-stg and base's run three times, the last on the final code, the same numbers but the reverted first) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| unboxedsums/'s 19 run tests, patsyn/'s 13, S1, the Typeable probes, on the branch's own libraries (golden `.stdout`) | 18, 13, pass, 11 of 11 |
+| `bin/hsi own-verdicts --record` | 21 pending tests (generics/'s 7, patsyn/'s 14), 10 threaded-only |
+| `bin/hsi check --libs own --corpus testsuite-core --only` hs-p36's 48 programs and patsyn/'s 14 | exit 0; 62 programs: 57 pass (29 own, 28 pack), AtomicPrimops and foundation in their classes as recorded, T5462Yes1/2 and T13688 `:oracle-pending`; 0 unclassed; arr001's control fails as it must; 3m04, 0.92 GB |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five new tars | exit 0; 50 own (49 pass), 13 pack (11 pass), as hs-p36; 0 unclassed; the controls fail as they must; 3m15, 1.06 GB |
+| hsi-essential's command (ARBACE_MEM_GIB=2, 2 jobs) | exit 0: own-verdicts current (21 pending); 123 programs, 122 pass, ffi014 `:threaded-way`; 0 unclassed; controls fail as they must; 19m35, 0.84 GB |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 3m14, 0.58 GB |
+| `bin/hsi pins --check` | OK (`:testsuite-core` 722 run tests) |
+| `bin/gate --full --plan` | exit 0, no table error |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p36`): every changed path is a crop path or a test record |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night).
+
+### Night commands (not run; the oracle window, GHC; in the branch's worktree)
+
+1. GHC's runs of patsyn/ with generics/'s (hs-p36's night command 1): `bin/hsi record-ref --corpus testsuite-core --only` the 14
+   patsyn/should_run ids, then `bin/hsi check --live --dump-only --record-progs --corpus testsuite-core --only` the same ids, then
+   `bin/hsi own-verdicts --record`. Light (under 2 GiB, minutes).
+2. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB) once the branch is in `next`.
+
+### Proposals
+
+- **HF10-P40 unboxedsums/ in the run corpora.** `unboxedsums/` is not in `:testsuite-core`; 18 of its 19 run tests pass on the own
+  path by hand here. (a) **add it as P35 and P38 added generics/ and patsyn/ (judged by their own verdicts until the oracle window
+  records them)**; (b) leave it. *Recommended: (a)*.
+- **HF10-P41 Typeable's kind arguments.** The elaborator's types erase kind arguments, so a poly-kinded tycon's evidence is
+  `mkTrCon $tcT []` (only the arrow's are written, by hand); TrTyCon's kind is strict, so `typeRep @Proxy`, `typeRep @'[]` or a
+  promoted constructor of a poly-kinded type stops as FUN did. (a) **recover the kind arguments at the use site (the tycon's kind
+  from its interface unified with the argument kinds the elaborator knows, doTyConApp's kind_args) and write them**; (b) leave it
+  until a program needs it. *Recommended: (a)*, after counting the uses in ghc-internal and base.
+- **HF10-P42 the testsuite's Typeable programs on the own path.** typecheck/should_run's TypeOf, TypeRep, TypeableEq, T14341 and
+  T16646 fall back to the pack: the native front end stops on `HsStarTy` (`*` as a kind), `HsExplicitTupleTy` (a promoted tuple),
+  Typeable of a type-level literal (`typeRep @"hi"`, GHC's doTyLit), a skolem unified with Integer. (a) **port those four**; (b)
+  leave them on the pack. *Recommended: (a)*.
+

@@ -118,7 +118,11 @@ Six crops are above 90 on all three. What the others still need:
   synonyms' contexts, record synonyms' construction, update and selectors, across modules through the own interfaces; patsyn/'s 14
   single-module run tests 13 pass on the own libraries (3 before; T14228: unboxed sums as arguments, HF10-P37); ghc-internal's
   lib-stg 5,734 of 7,789 (0 worse); generics/ in `:testsuite-core` (708 run tests), judged by their shipped stdout
-  (`own-verdicts-pending.tsv`, `:oracle-pending` where GHC's STG is needed) until the window records GHC's runs. P37-P39 proposed.
+  (`own-verdicts-pending.tsv`, `:oracle-pending` where GHC's STG is needed) until the window records GHC's runs. P37-P39 decided (a) (the user, 2026-11-13; `:oracle-pending` accepted); `hs-p37` built them:
+  unboxed sums unarised as GHC's Unarise does (binders, arguments, slot casts, case and let binders, constructor fields; unboxedsums/'s
+  run tests 18 of 19 on the own path, 5 before; T14228 passes, patsyn/ 13 of 13), patsyn/ in `:testsuite-core` (722 run tests, pending
+  by their own verdicts), Typeable evidence of promoted constructors (`$tc'Many`) and functions (`mkTrFun`, the arrow's kind arguments):
+  Type.Reflection's App, Fun and a function's `show` run; ghc-internal's lib-stg 5,734 of 7,789 (0 worse). P40-P42 proposed.
   Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).

@@ -5291,3 +5291,31 @@ decision); an INLINE unfolding on every matcher (rejected: not GHC 9.14.1's rule
 divergences (rejected: ORS10 (a)); leaving generics/ out of the plan until recorded (rejected: the five own-path programs would go
 unchecked). Proposals HF10-P37 (unboxed sums as arguments), P38 (patsyn/ in the run corpora), P39 (`$tc'Many`). Details:
 doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P36, P35".
+
+## 2026-11-13: HF10-P37 (a), unboxed sums unarised; HF10-P38 (a), patsyn/ in :testsuite-core; HF10-P39 (a), Typeable of promoted constructors and functions (branch `hs-p37`, from `mac/hs-p36` 6f8bf239c)
+
+The user decided (2026-11-13): `:oracle-pending` accepted; HF10-P37 (a), P38 (a), P39 (a). Read from GHC 9.14.1's source tarball (the
+corpus pin, `ghc-9.14.1-src.tar.xz`): `compiler/GHC/Stg/Unarise.hs`, `compiler/GHC/Builtin/PrimOps/Casts.hs` (getCasts, ported rule
+for rule), `compiler/GHC/Tc/Instance/Class.hs` (doFunTy, doTyConApp), `compiler/GHC/Tc/Instance/Typeable.hs` (mkTyConRepBinds),
+`libraries/ghc-internal/src/GHC/Internal/Data/Typeable/Internal.hs`; BSD-3-Clause, already in LICENSE.md. Built in
+`arbace/repr/haskell/tostg.ae`: an unboxed sum's binder is its tag's and slots' binders (unariseFunArgBinder), a sum built as an
+argument is its unboxed tuple at the parameter's type (mkUbxSum), fields whose representation is not the slot's are cast both ways
+(castArg, mapSumIdBinders), a case binding a sum with DEFAULT alternatives and a let of a sum bind its components, fields of several
+representations (tuples, nested sums) in a sum are tuples of slots, constructors' sum fields take their components as fields
+(unariseConArgs/Binders, the data declaration's reps flattened), and an unboxed tuple argument's void components vanish (one `void#`
+when nothing else is left); `(##)` itself stays the global (a first change to `void#` made 8 ghc-internal modules worse against
+GHC's -O0 STG, which writes `(##)`: reverted). In `typecheck.ae`: a promoted constructor's Typeable evidence names `$tc'O` (it named
+`$tcO`, unbound: 34 references in the own STG, `$tcMany` among them), GHC.Internal.Prim's tycons' bindings in GHC.Internal.Types; a
+function type's evidence is `mkTrFun trMany a b` (doFunTy), and the unapplied arrow's `mkTrCon $tcFUN` carries its three kind
+arguments ('Many, LiftedRep, LiftedRep), since TrTyCon's kind field is strict and the empty list stopped on the KindRep's variables
+(`(Array.!): undefined array element` whenever a TrFun was shown). `test/haskell/eval-corpora.edn`'s `:testsuite-core` takes
+`patsyn/should_run` (722 run tests); `bin/hsi own-verdicts --record` lists its 14 run tests in `own-verdicts-pending.tsv` (T13688,
+TemplateHaskell, `:oracle-pending`). Results (one run at a time, under 1.2 GB): unboxedsums/'s run tests 18 of 19 on the own path (5
+before; unpack_sums_6 needs the time package), patsyn/'s 13 single-module run tests 13 (12), T14228 passes, Type.Reflection's App,
+Fun, show of a function's TypeRep, typeRepKind, cast and Dynamic probes pass; ghc-internal lib-check 0 worse, lib-stg 5,734 of
+7,789 (as before), 0 worse; base 0 worse, 582 of 1,072; deepseq/array/stm as recorded; hsi-essential's and haskell-read-essential's
+commands pass. Alternatives considered: unarising sums in hsi instead of tostg (rejected: GHC's STG is post-Unarise, the judge compares
+against it); binding the missing `$tcMany` names as aliases (rejected: GHC has no such bindings, the evidence was wrong); writing every
+poly-kinded tycon's kind arguments now (deferred: the elaborator erases kind arguments; HF10-P41). Proposals HF10-P40 (unboxedsums/ in
+the run corpora), P41 (Typeable's kind arguments), P42 (the testsuite's Typeable programs on the own path). Details:
+doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P37-P39".
