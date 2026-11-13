@@ -3649,6 +3649,16 @@
         (recur pa (conj out pa))
         out))))
 
+(defn- enum-assoc
+  "cpp-s11: an enumeration's associated entities ([basic.lookup.argdep]/3.3): its innermost enclosing namespace (with
+  adl-nss's inline enclosers), and when it is a class member that class, as [:ns NS] and [:cls CID]."
+  [eid]
+  (when-let [es (:scope (abi/enm eid))]
+    (let [ds (:parent es)
+          ns (loop [s ds] (if (or (nil? s) (= :ns (:kind s))) s (recur (:parent s))))]
+      (concat (when ns (map (fn [n] [:ns n]) (adl-nss ns)))
+              (when-let [c (:cls ds)] [[:cls c]])))))
+
 (defn adl-class-nss
   "cpp-s3: the namespaces associated with the class `cid` ([basic.lookup.argdep]/3): its innermost enclosing namespace's
   (adl-nss), its bases', and for a class template's specialization its template type arguments' (classes, and the classes
@@ -3659,6 +3669,10 @@
     (letfn [(ty! [t]
               (cond (map? t) (let [t (abi/unq t)]
                                (cond (abi/class? t) (cls! (:id t))
+                                     ;; (cpp-s11: an enumeration's namespace and class, [basic.lookup.argdep]/3.3, also as
+                                     ;; a template argument's, /3.2)
+                                     (abi/enum? t) (doseq [[k x] (enum-assoc (:id t))]
+                                                     (if (= :cls k) (cls! x) (when-not (.containsKey nss x) (.put nss x true) (.add out x))))
                                      (#{:ptr :ref :rref :arr} (:k t)) (ty! (or (:to t) (:of t)))
                                      (:pack t) (doseq [x (:pack t)] (ty! x))
                                      :else nil))
@@ -3671,7 +3685,7 @@
                       (when (and n (not (.containsKey nss n))) (.put nss n true) (.add out n))))
                   (doseq [b (:bases c)] (cls! (:cls b)))
                   (doseq [a (:targs c)] (ty! a)))))]
-      (cls! cid)
+      (if (map? cid) (ty! cid) (cls! cid))
       (vec out))))
 
 (defn- adl-classes
@@ -3683,6 +3697,8 @@
               (when (map? t)
                 (let [t (abi/unq t)]
                   (cond (abi/class? t) (cls! (:id t))
+                        ;; (cpp-s11: a member enumeration's class, [basic.lookup.argdep]/3.3)
+                        (abi/enum? t) (doseq [[k x] (enum-assoc (:id t)) :when (= :cls k)] (cls! x))
                         (#{:ptr :ref :rref :arr} (:k t)) (ty! (or (:to t) (:of t)))
                         (sequential? (:pack t)) (doseq [x (:pack t)] (ty! x))
                         :else nil))))
@@ -3710,7 +3726,12 @@
   (distinct
    (for [a args
          ;; (cpp-s4: a pointer's, [basic.lookup.argdep]/3.4, its pointee's)
-         :let [cid (class-id (loop [t (abi/unq (abi/non-ref (:ty a)))] (if (abi/ptr? t) (recur (abi/unq (:to t))) t)))] :when cid
+         :let [pt (loop [t (abi/unq (abi/non-ref (:ty a)))] (if (abi/ptr? t) (recur (abi/unq (:to t))) t))
+               ;; (cpp-s11: an enumeration's too, [basic.lookup.argdep]/3.3: <system_error>'s error_condition(errc) calls
+               ;; make_error_condition(__e) after `using __adl_only::make_error_condition;`, a deleted nullary function,
+               ;; and std::make_error_condition(errc) is found by the enumeration errc's namespace alone; it had been
+               ;; "no viable function among 1 for 1 arguments")
+               cid (or (class-id pt) (when (abi/enum? pt) pt))] :when cid
          :let [acls (adl-classes args)]
          ns (adl-class-nss cid)
          e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (and (= :fn (:e e)) (friend-visible? acls e))]
