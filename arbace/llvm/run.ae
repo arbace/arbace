@@ -3,8 +3,13 @@
   LLVM forms by repr/llvm, lowered to C forms by the shared lowering (arbace.cpp.lower, doc/llvm/LOWER.md §7-§8), printed
   as C by repr/c, with the personality-free layer (arbace/llvm/rt/none.c.ae) appended, so that the module is one C
   translation unit that ci (bin/ci run, eval) and cf2g (bin/ci check --aot's compile-list, AOT) take with musl alone.
-  A module with a personality (invoke, landingpad, resume: C++'s or Rust's exceptions) is refused (:personality): its
-  runtime is the client crop's (C++'s lowered libsupc++, bin/cppi), not linked on ci yet (LLS15)."
+  A module that unwinds (a personality, invoke, landingpad, resume: C++'s exceptions; llvm-eh, doc/llvm/LLVM-CROP-SURVEY.md,
+  \"As built: llvm-eh\") is lowered as C++'s check route lowers a program (arbace.cpp.lower's pending flag: a call that may unwind
+  tested after it, an invoke's unwind edge taken while the flag is set, a landing pad's catch, filter and cleanup clauses asked of
+  the runtime), without the personality-free layer: :eh in the result, and the caller links it with C++'s lowered runtime
+  (bin/cppi runtime-ci: libsupc++ and libstdc++ lowered from their recorded IR, with the pending-flag layer arbace/cpp/rt/eh.c.ae,
+  the unwinder and __gxx_personality_v0's clause matching) through arbace.cpp.run, so the exception is the program's own state on
+  ci, no host unwinding. A personality other than C++'s is refused (:personality)."
   (:require [arbace.string :as str]
             [arbace.repr.llvm :as llvm]
             [arbace.repr.c :as rc]
@@ -105,12 +110,27 @@
                        [(strip f)]))
                    forms)))))
 
+(def cxx-personalities
+  "The personality functions whose runtime llvmi links (C++'s Itanium ABI, libsupc++'s; clang's C cleanups name gcc's, whose
+  landing pads have no catch clause the runtime is asked about)."
+  #{"__gxx_personality_v0" "__gcc_personality_v0"})
+
+(defn- personalities
+  "The personality functions the module's defines name (their global names)."
+  [forms]
+  (set (for [f forms :when (and (seq? f) (= 'llvm/define (first f)))
+             :let [p (:personality (apply hash-map (drop 4 f)))] :when p]
+         ;; (written [ptr @NAME], a typed value)
+         (let [g (if (vector? p) (peek p) p)] (try (lower/gname-str g) (catch Throwable _ (pr-str p)))))))
+
 (defn- lower-c
-  "The module's C text by the shared lowering (arbace.cpp.lower's lower-file, with run-inits between the forms and the print)."
-  [forms ^String c-name]
+  "The module's C text by the shared lowering (arbace.cpp.lower's lower-file, with run-inits between the forms and the print).
+  ci?: llvmi's own C (the IR's SysV va_list kept, the dynamic allocas on a chain: LL6); else C++'s check route's, which the lowered
+  runtime it is linked with shares (llvm-eh)."
+  [forms ^String c-name ci?]
   (try
     ;; ci holds a va_list as a pointer to its next slot: the IR's SysV va_list kept (arbace.cpp.lower/*ci*, LL6)
-    (binding [lower/*ci* true]
+    (binding [lower/*ci* ci?]
       (let [[ff cs] (lower/lower-module forms c-name)
             ns (str "c.llvmi." (str/replace (str/replace c-name #"\.c$" "") #"[^A-Za-z0-9_]" "_"))
             [ff2 cs2] (rc/read-unit-text (lower/c-forms-text ns ff cs))]
@@ -128,17 +148,22 @@
       (instance? Throwable forms)
       {:refused :read :message (str/replace (str (.getMessage ^Throwable forms)) #"\s+" " ")}
       (unwinds? forms)
-      {:refused :personality :message "the module unwinds (a personality, invoke, landingpad or resume): its runtime is the client crop's"}
+      (let [ps (personalities forms) other (remove cxx-personalities ps)]
+        (if (seq other)
+          {:refused :personality :message (str "the module unwinds with the personality " (str/join ", " other) ": llvmi links C++'s runtime alone")}
+          (let [r (lower-c forms c-name false)]
+            (if (:refused r) (update r :message #(str/replace (str %) #"\s+" " ")) (assoc r :eh true)))))
       :else
-      (let [r (lower-c forms c-name)]
+      (let [r (lower-c forms c-name true)]
         (if (:refused r)
           (update r :message #(str/replace (str %) #"\s+" " "))
           {:c (str (:c r) "\n/* llvmi: the personality-free layer (" layer-path ") */\n" layer)})))))
 
 (defn -main
-  "lower FILE.ll OUT.c: one module lowered (exit 3 when refused, its class and message on stderr);
+  "lower FILE.ll OUT.c: one module lowered (exit 3 when refused, its class and message on stderr; OUT.c.eh written beside
+  when the module unwinds: its C links C++'s runtime);
   lower-list LIST OUTDIR [THREADS]: each NAME<tab>PATH line of LIST lowered into OUTDIR/NAME.c, or OUTDIR/NAME.refused
-  (CLASS<tab>MESSAGE); OUTDIR/lower.tsv: NAME STATUS CLASS MESSAGE."
+  (CLASS<tab>MESSAGE); OUTDIR/lower.tsv: NAME STATUS CLASS MESSAGE (a module that unwinds: ok, the class eh)."
   [verb & args]
   (let [layer (lower/runtime-c layer-path)]
     (case verb
@@ -146,7 +171,8 @@
                     r (lower-one f (.getName (java.io.File. ^String out)) layer)]
                 (if (:refused r)
                   (do (binding [*out* *err*] (println (str f ": refused (" (name (:refused r)) "): " (:message r)))) (System/exit 3))
-                  (llvm/spit-latin1 out (:c r))))
+                  (do (llvm/spit-latin1 out (:c r))
+                      (let [m (java.io.File. (str out ".eh"))] (if (:eh r) (spit m "eh\n") (.delete m))))))
       "lower-list" (let [[lst out threads] args
                          rows (vec (for [l (str/split-lines (slurp lst)) :when (and (seq l) (not (str/starts-with? l "#")))]
                                      (str/split l #"\t")))
@@ -160,7 +186,7 @@
                                                           (do (spit (str out "/" n ".refused") (str (name (:refused r)) "\t" (:message r) "\n"))
                                                               (str n "\trefused\t" (name (:refused r)) "\t" (str/replace (str (:message r)) #"[\t\n]" " ")))
                                                           (do (llvm/spit-latin1 (str out "/" n ".c") (:c r))
-                                                              (str n "\tok\t\t")))))))
+                                                              (str n "\tok\t" (when (:eh r) "eh") "\t")))))))
                                     rows)
                          lines (mapv #(.get ^java.util.concurrent.Future %) futs)]
                      (.shutdown pool)
