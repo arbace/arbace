@@ -906,20 +906,46 @@
         true)
       false)))
 
+(defn- unfinished-targs?
+  "cpp-s11: whether `scope` is a class template specialization's (or within one) whose template arguments name a class
+  not finished yet (abi's :finished)."
+  [scope]
+  (loop [s scope]
+    (cond (nil? s) false
+          (:cls s) (let [c (abi/cls (:cls s))]
+                     (or (boolean (some #(and (map? %) (= :class (:k %)) (not (:finished (abi/cls (:id %))))) (tree-seq coll? seq (:targs c))))
+                         (recur (:parent s))))
+          :else (recur (:parent s)))))
+
+(defn trailing-ok?
+  "cpp-s11: a function declared with its trailing requires-clause deferred (declare-fn!'s :trailing-defer) satisfies it
+  now; any other true."
+  [f]
+  (if-let [[ps rc] (:trailing-defer f)]
+    (constraint-satisfied? ps rc)
+    true))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
   [scope n]
-  (if (and (:trailingRequiresClause n)
-           ;; (its parameters in scope: requires { __lhs.base() == __rhs.base(); }, G4)
-           (not (constraint-satisfied? (let [ps (new-scope :block scope)]
-                                         (doseq [pn (param-nodes n) :when (:name pn)]
-                                           (when-let [t (try (resolve-type scope (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
-                                             (let [id (next-id)]
-                                               (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
-                                               (enter! ps (:name pn) {:e :var :id id}))))
-                                         ps)
-                                       (:trailingRequiresClause n))))
+  (let [rc (:trailingRequiresClause n)
+        ;; (its parameters in scope: requires { __lhs.base() == __rhs.base(); }, G4)
+        rps (when rc (let [ps (new-scope :block scope)]
+                       (doseq [pn (param-nodes n) :when (:name pn)]
+                         (when-let [t (try (resolve-type scope (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+                           (let [id (next-id)]
+                             (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
+                             (enter! ps (:name pn) {:e :var :id id}))))
+                       ps))
+        ;; (cpp-s11: a member of a class template's specialization whose arguments name a class not finished yet, the
+        ;; derived class of a CRTP base being instantiated for it -- view_interface<subrange<...>>'s `empty() requires
+        ;; forward_range<_Derived>` while subrange<...> is declared -- keeps its constraint for overload resolution,
+        ;; [over.match.viable]/3, where it is checked: declared now, neither dropped nor kept by an answer that would
+        ;; change once the class is complete)
+        defer (boolean (and rc (unfinished-targs? scope)))
+        sat (or (nil? rc) defer (constraint-satisfied? rps rc))]
+  (if (and (not sat) (not defer))
     nil
   (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n)) (qualifier-before n))
         home (if (seq q)
@@ -1038,7 +1064,8 @@
           (when (and cid (:explicitlyDefaulted n) (= "operator<=>" nm)
                      (not (some #(= :fn (:e %)) (.get ^java.util.HashMap (:names home) "operator=="))))
             (declare-fn! scope (assoc n :name "operator==" :type {:qualType (str/replace (str qt) #"^\s*auto\b" "bool")})))))
-    id)))
+    (when defer (upd-fn! id assoc :trailing-defer [rps rc]))
+    id))))
 
 (declare ctad-var)
 
@@ -2650,7 +2677,7 @@
                            ps (:ps (:ty f))
                            nreq (- (count ps) (count (filter some? (take-last (count ps) (concat (repeat (count ps) nil) (:defaults f))))))
                            n (count args)]
-                     :when (and (>= n nreq) (or (<= n (count ps)) (:va (:ty f))))
+                     :when (and (>= n nreq) (or (<= n (count ps)) (:va (:ty f))) (trailing-ok? f))
                      :let [convs (map-indexed (fn [i a] (if (< i (count ps)) (ics a (nth ps i)) {:rank 4})) args)
                            ;; the implicit object parameter: a const method takes a const object, a non-const prefers a non-const one
                            oc (if (and obj (:cls f) (not (:static f)) (not= :ctor (:kind f)))
@@ -3540,7 +3567,16 @@
   (cond
     (abi/class? (abi/unq (:ty l))) (operator-call ctx "=" [l r])
     :else (do (when-not (lv? l) (fail :assign "assignment to an rvalue"))
-              {:op :assign :l l :r (convert-scalar (rv r) (abi/unq (:ty l)) false) :ty (:ty l) :cat :lv})))
+              (let [t (abi/unq (:ty l))
+                    ;; (cpp-s11: a braced list on the right of a scalar, [expr.assign]/8: x = {} assigns a value-initialized
+                    ;; T, x = {e} e converted as T{e}; <charconv>'s `__res.ec = {};` of the enumeration errc)
+                    r (if (= :init-list (:op r))
+                        (case (count (:items r))
+                          0 (convert-scalar {:op :int :v 0 :ty abi/int* :cat :pr} t true)
+                          1 (convert-scalar (rv (first (:items r))) t false)
+                          (fail :assign "a list of several values assigned to a scalar"))
+                        (convert-scalar (rv r) t false))]
+                {:op :assign :l l :r r :ty (:ty l) :cat :lv}))))
 
 (defn- compound-node [o l r]
   (let [lt (abi/unq (:ty l)) r (rv r)]
