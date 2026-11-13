@@ -635,6 +635,8 @@
     (lv? a) [(local-name a) []]
     ;; Unarise's unariseFunArg: a global is no binder of rho, kept (realWorld#: dsFCall's and runRW#'s token); void# itself
     (and (head? a 'v) (void-global? (second a))) [(if (= "realWorld#" (nth (second a) 3)) (gname (second a)) (void-atom)) []]
+    ;; HF10-P37: (##) as an argument is a void argument (unariseFunArg's MultiVal [] -> voidArg)
+    (and (head? a 'v) (unboxed-con? (second a)) (= "(##)" (nth (second a) 3))) [(void-atom) []]
     (and (head? a 'v) (con-name? (second a)) (newtype-con? (as-data (second a)))) (let [n (fresh "sat")] [n [[n (rhs a)]]])
     ;; a data constructor of fields as an argument: CorePrep saturates it (maybeSaturate), a function closure
     (and (head? a 'v) (con-name? (second a)) (not (unboxed-con? (second a))) (not (class-of-dcon (second a)))
@@ -727,6 +729,14 @@
 
 (declare sum-args)
 
+(defn- void-atomic?
+  "HF10-P37: an argument of a void representation that evaluates nothing: (##), void#, realWorld#, a void local, an unboxed
+  tuple of such"
+  [a]
+  (or (and (head? a 'v) (or (void-global? (second a)) (and (unboxed-con? (second a)) (= "(##)" (nth (second a) 3)))))
+      (and (lv? a) (not (contains? @*joins* (local-name a))) (empty? (local-reps a)) (empty? (get @*multi* a)))
+      (and (head? a 'app) (head? (second a) 'v) (unboxed-con? (second (second a))) (every? void-atomic? (nth a 2)))))
+
 (defn- with-atoms
   "Atoms for the arguments, their bindings let around k's expression, the last argument's outermost; an argument of an
   unboxed tuple type unarised into its components (Unarise's unariseFunArg, HF10-P20): an unarised local's, a tuple's
@@ -741,7 +751,10 @@
                    (cond
                      (and (lv? a) (seq (get @*multi* a))) (step (rest as) (into acc (map first (get @*multi* a))))
                      (and (head? a 'app) (head? (second a) 'v) (unboxed-con? (second (second a))) (seq (nth a 2)))
-                     (step (concat (nth a 2) (rest as)) acc)
+                     ;; HF10-P37: its void components (atoms) vanish (Unarise's MultiVal has none), a tuple of nothing
+                     ;; else is one void argument (unariseFunArg's MultiVal [] -> voidArg)
+                     (let [cs (remove void-atomic? (nth a 2))]
+                       (if (empty? cs) (step (rest as) (conj acc (void-atom))) (step (concat cs (rest as)) acc)))
                      (and (not (lv? a)) (some seq (tuple-comps-of a)))
                      (let [comps (tuple-comps-of a)
                            cs (vec (for [rs comps :when (seq rs)] (let [n (fresh "ubx") r (reps->rep rs)] (swap! *reps* assoc n r) [n r])))
@@ -773,9 +786,12 @@
   "A saturated constructor application, its strict fields' arguments evaluated first ($WCon's work)"
   ([c atoms] (strict-con c atoms #{}))
   ([c atoms done]
-  (let [st (con-strict c)
-        ats (concat (field-alt-types c) (repeat '(poly)))
-        reps (concat (con-reps c) (repeat :L))
+  (let [rs0 (con-reps c)
+        ;; HF10-P37: a field of several representations takes as many atoms, none evaluated
+        flat (fn [xs d] (if (some vector? rs0) (mapcat (fn [r x] (if (vector? r) (repeat (count r) d) [x])) rs0 (concat xs (repeat d))) xs))
+        st (flat (con-strict c) false)
+        ats (concat (flat (field-alt-types c) '(poly)) (repeat '(poly)))
+        reps (concat (if (some vector? rs0) (mapcat #(if (vector? %) % [%]) rs0) rs0) (repeat :L))
         evald (mapv (fn [a s r] (if (and s (= :L r) (string? a) (not (contains? done a))) [a (fresh "sat")] [a nil])) atoms (concat st (repeat false)) reps)
         body (list 'con (gname c) (mapv (fn [[a a2]] (or a2 a)) evald))]
     (reduce (fn [b [[a a2] at]] (if a2 (list 'case (list 'app a []) [a2 :L] at [(list 'alt :default [] b)]) b))
@@ -794,7 +810,9 @@
     (when (and (head? e 'app) (head? (second e) 'v) (con-name? (second (second e))))
       (let [g (second (second e)) c (as-data g) args (nth e 2)]
         (when (and (not (newtype-con? c)) (not (and (class-of-dcon g) (newtype-class? (class-of-dcon g))))
-                   (= (:arity (con-info c)) (count args)) (not (lifted-strict? c)))
+                   (= (:arity (con-info c)) (count args)) (not (lifted-strict? c))
+                   ;; HF10-P37: a field of several representations takes several atoms (with-atoms')
+                   (not (some vector? (con-reps c))))
           [c args])))))
 
 (defn- app-expr [f args]
@@ -848,7 +866,9 @@
           (doseq [[x t] (map vector xs tys)] (swap! *lreps* assoc x (type-reps t)))
           (expr (list 'lam xs (list 'app f (into (vec args) xs)))))))
     (and (head? f 'v) (con-name? (second f)))
-    (let [c (as-data (second f)) ar (or (:arity (con-info c)) (count args))]
+    (let [c (as-data (second f)) ar (or (:arity (con-info c)) (count args))
+          ;; HF10-P37: a sum built as a field, as its tuple at the field's type
+          args (if (some vector? (con-reps c)) (sum-args f args) args)]
       (cond
         (or (newtype-con? c) (and (class-of-dcon (second f)) (newtype-class? (class-of-dcon (second f)))))
         (if (= 1 (count args)) (expr (first args)) (expr (list 'app (first args) (vec (rest args)))))
@@ -987,16 +1007,62 @@
   (case sl :lifted (list 'v ["ext" "var" "GHC.Internal.Prim.Panic" "absentSumFieldError"]) :word (list 'lit "0##")
         :word64 (list 'lit "0#w64") :float (list 'lit "0.0#") :double (list 'lit "0.0##") nil))
 
+;;; HF10-P37 (a): GHC.Builtin.PrimOps.Casts' getCasts (BSD-3, The University of Glasgow; LICENSE.md), the primops that take a
+;;; field's representation to its slot's and back (Note [Casting slot arguments]: an Int# in a WordSlot, a Float# in a
+;;; DoubleSlot)
+(def ^:private int-reps #{:int :int8 :int16 :int32 :int64})
+(def ^:private word-reps #{:word :word8 :word16 :word32 :word64})
+(defn- rep-sfx [r] (case r :int8 "8" :int16 "16" :int32 "32" :int64 "64" :word8 "8" :word16 "16" :word32 "32" :word64 "64" ""))
+(defn- int->word [r] (case r :int [:word "int2Word#"] [(keyword (str "word" (rep-sfx r))) (str "int" (rep-sfx r) "ToWord" (rep-sfx r) "#")]))
+(defn- word->int [r] (case r :word [:int "word2Int#"] [(keyword (str "int" (rep-sfx r))) (str "word" (rep-sfx r) "ToInt" (rep-sfx r) "#")]))
+(defn- sized-int [a b]
+  (cond (= a b) [] (= b :int) [[(str "int" (rep-sfx a) "ToInt#") :int]] (= a :int) [[(str "intToInt" (rep-sfx b) "#") b]]
+        :else [[(str "int" (rep-sfx a) "ToInt#") :int] [(str "intToInt" (rep-sfx b) "#") b]]))
+(defn- sized-word [a b]
+  (cond (= a b) [] (= b :word) [[(str "word" (rep-sfx a) "ToWord#") :word]] (= a :word) [[(str "wordToWord" (rep-sfx b) "#") b]]
+        :else [[(str "word" (rep-sfx a) "ToWord#") :word] [(str "wordToWord" (rep-sfx b) "#") b]]))
+(defn sum-casts
+  "getCasts: [[primop result-rep]...] from rep a to rep b, [] when they are equal, nil when no cast applies"
+  [a b]
+  (cond (= a b) []
+        (= b :float) (when (= a :double) [["double2Float#" :float]])
+        (= b :double) (when (= a :float) [["float2Double#" :double]])
+        (= b :addr) (cond (= a :int) [["int2Addr#" :addr]]
+                          (int-reps a) (conj (sized-int a :int) ["int2Addr#" :addr])
+                          (word-reps a) (let [[r op] (word->int a)] (into [[op r]] (conj (sized-int r :int) ["int2Addr#" :addr]))))
+        (= a :addr) (cond (int-reps b) (into [["addr2Int#" :int]] (sized-int :int b))
+                          (word-reps b) (into [["addr2Int#" :int] ["int2Word#" :word]] (sized-word :word b)))
+        (and (int-reps a) (int-reps b)) (sized-int a b)
+        (and (word-reps a) (word-reps b)) (sized-word a b)
+        (and (word-reps a) (int-reps b)) (let [[r op] (word->int a)] (into [[op r]] (sized-int r b)))
+        (and (int-reps a) (word-reps b)) (let [[r op] (int->word a)] (into [[op r]] (sized-word r b)))
+        :else nil))
+
+(defn- prim-app [op x] (list 'app (list 'v ["ext" "var" "GHC.Internal.Prim" op]) [x]))
+
+(declare sum-at)
+
 (defn- sum-construct
   "mkUbxSum: alternative k (of n) applied to its field as the unboxed tuple of the tag (an Int# literal) and the slots, the
-  field in the slot layoutUbxSum gives it, the others rubbish; nil when the sum's type is not known here or a field needs a
-  cast (castArg)"
+  field in the slot layoutUbxSum gives it (cast to the slot's representation, castArg: HF10-P37), the others rubbish; nil
+  when the sum's type is not known here"
   [k n args st]
   (let [targs (nth st 2) alt-reps (vec (map type-reps targs)) slots (sum-slots alt-reps)]
     (when (and slots (= n (count targs)) (<= (count args) 1))
-      (let [frs (nth alt-reps (dec k)) lay (layout-sum slots (map prim-rep-slot frs))]
-        (when (and lay (<= (count frs) 1) (or (empty? frs) (= (first frs) (slot-prim-rep (nth slots (first lay))))))
-          (let [vals (map-indexed (fn [i sl] (if (and (seq frs) (= i (first lay))) (first args) (sum-rubbish sl))) slots)]
+      (let [frs (nth alt-reps (dec k)) lay (layout-sum slots (map prim-rep-slot frs))
+            ;; the field's values, one a representation: the field itself, or an unboxed tuple's built in place (its
+            ;; non-void components; HF10-P37: unboxedsums6's (# (# a, b #) | #))
+            fvals (cond (empty? frs) []
+                        (= 1 (count frs)) [(first args)]
+                        :else (let [a (sum-at (first args) (nth targs (dec k)))]
+                                (when (and (head? a 'app) (head? (second a) 'v) (unboxed-con? (second (second a))))
+                                  (let [cs (vec (remove void-atomic? (nth a 2)))]
+                                    (when (every? #(= 1 (count (expr-reps %))) cs) cs)))))
+            casts (when (and lay (= (count fvals) (count frs)))
+                    (mapv (fn [r i] (sum-casts r (slot-prim-rep (nth slots i)))) frs lay))]
+        (when (and lay fvals (= (count fvals) (count frs)) (every? some? casts))
+          (let [fields (zipmap lay (map (fn [x cs] (reduce (fn [x [op _]] (prim-app op x)) x cs)) fvals casts))
+                vals (map-indexed (fn [i sl] (if (contains? fields i) (get fields i) (sum-rubbish sl))) slots)]
             (when (every? some? vals)
               (list 'app (list 'v (utuple-core (inc (count slots)))) (into [(list 'lit (str k "#"))] vals)))))))))
 
@@ -1011,27 +1077,49 @@
 (defn- sum-case
   "unariseSumAlts: a case on an unboxed sum as a case on its unboxed tuple (the tag and the slots), then on the tag (a
   literal alternative an alternative of the sum, its binder the slot layoutUbxSum gives it: mapSumIdBinders; the DEFAULT
-  first, mkDefaultLitAlt); nil when the sum's type is not known or a field needs a cast"
+  first, mkDefaultLitAlt; a field of another representation than its slot's cast back, mapSumIdBinders' castArgRename:
+  HF10-P37); a case of DEFAULT alternatives alone binds the tuple's components, its binder standing for them (HF10-P37:
+  the desugarer's case binding a sum, mkDefaultCase); a scrutinee building the sum (its constructor applied) built as its
+  tuple (mkUbxSum); nil when the sum's type is not known"
   [s b alts st]
   (let [targs (nth st 2) alt-reps (vec (map type-reps targs)) slots (sum-slots alt-reps)]
     (when slots
       (let [vars (vec (for [_ (range (inc (count slots)))] (list 'lv "us" (str "sum" (swap! *n* inc)))))
             _ (doseq [[v r] (map vector vars (cons :word (map slot-prim-rep slots)))] (swap! *lreps* assoc v [r]))
+            s (or (when (and (head? s 'app) (head? (second s) 'v) (usum-con (second (second s))))
+                    (let [[k n] (usum-con (second (second s)))] (sum-construct k n (nth s 2) st)))
+                  s)
             ialts (for [[_ c xs rhs :as a] alts]
                     (if (= :default c) a
                         (when-let [[k n] (usum-con c)]
                           (let [frs (nth alt-reps (dec k) nil) lay (when frs (layout-sum slots (map prim-rep-slot frs)))
-                                x (first xs)]
-                            (when (and lay (= n (count targs)) (<= (count frs) 1)
-                                       (or (empty? frs) (= (first frs) (slot-prim-rep (nth slots (first lay))))))
+                                x (first xs)
+                                ;; each field's casts from its slot's representation (mapSumIdBinders' castArgRename)
+                                casts (when (and lay (= (count lay) (count frs)))
+                                        (mapv (fn [i r] (sum-casts (slot-prim-rep (nth slots i)) r)) lay frs))]
+                            (when (and lay (= n (count targs)) (every? some? casts))
                               (list 'alt (list 'lit (str k "#")) []
-                                    (cond (nil? x) rhs
-                                          (empty? frs) (replace-var x (list 'v (utuple-core 0)) rhs)
-                                          :else (replace-var x (nth vars (inc (first lay))) rhs))))))))]
+                                    (if (nil? x) rhs
+                                        ;; case op slot of cst_sum { DEFAULT -> ... }, the last cast's binder the field; a
+                                        ;; field of several representations (an unboxed tuple, HF10-P37) the tuple of them
+                                        (let [chains (mapv (fn [i cs]
+                                                             (let [cvs (vec (for [[_ r] cs] (let [v (list 'lv "cst_sum" (str "sum" (swap! *n* inc)))] (swap! *lreps* assoc v [r]) v)))]
+                                                               [(if (seq cvs) (peek cvs) (nth vars (inc i)))
+                                                                (map vector cs (cons (nth vars (inc i)) cvs) cvs)]))
+                                                           lay casts)
+                                              val (case (count frs)
+                                                    0 (list 'v (utuple-core 0))
+                                                    1 (first (first chains))
+                                                    (list 'app (list 'v (utuple-core (count frs))) (mapv first chains)))]
+                                          (reduce (fn [body [[op _] in out]] (list 'case (prim-app op in) out [(list 'alt :default [] body)]))
+                                                  (replace-var x val rhs)
+                                                  (reverse (mapcat second chains)))))))))))]
         (when (every? some? ialts)
           (list 'case s b [(list 'alt (assoc (utuple-core (count vars)) 1 "data") vars
-                                 (list 'case (first vars) (list 'lv "tag" (str "sum" (swap! *n* inc)))
-                                       (vec (sort-by (fn [[_ c]] (if (= :default c) 0 1)) ialts))))]))))))
+                                 (if (every? (fn [[_ c]] (= :default c)) ialts)
+                                   (nth (first ialts) 3)
+                                   (list 'case (first vars) (list 'lv "tag" (str "sum" (swap! *n* inc)))
+                                         (vec (sort-by (fn [[_ c]] (if (= :default c) 0 1)) ialts)))))]))))))
 
 (defn- sum-rewrite
   "HF10-P8 (a): an unboxed sum's construction or case rewritten into its unboxed tuple's, or nil"
@@ -1041,7 +1129,18 @@
     (let [[k n] (usum-con (second (second e)))] (when-let [st (sum-type *body-type*)] (sum-construct k n (nth e 2) st)))
     (and (head? e 'case) (some (fn [[_ c]] (usum-con c)) (nth e 3)))
     (when-let [st (sum-type (or (get (:ltypes *r*) (nth e 2)) (expr-type (second e))))] (sum-case (second e) (nth e 2) (nth e 3) st))
+    ;; HF10-P37: a case binding a sum (DEFAULT alternatives alone), its binder's type the sum's
+    (and (head? e 'case) (seq (nth e 3)) (every? (fn [[_ c]] (= :default c)) (nth e 3)) (lv? (nth e 2))
+         (not (get @*multi* (second e))))
+    (when-let [st (sum-type (get (:ltypes *r*) (nth e 2)))] (sum-case (second e) (nth e 2) (nth e 3) st))
     :else nil))
+
+(defn- sum-at
+  "HF10-P37: e, a sum's constructor applied, as its unboxed tuple at the type t (mkUbxSum), else e"
+  [e t]
+  (or (when (and t (head? e 'app) (head? (second e) 'v) (usum-con (second (second e))))
+        (when-let [st (sum-type t)] (let [[k n] (usum-con (second (second e)))] (sum-construct k n (nth e 2) st))))
+      e))
 
 (defn- sum-args
   "HF10-P37: an unboxed sum built as a function's argument (its alternative's constructor applied: T14228's foo (Just' x)
@@ -1108,7 +1207,7 @@
               (if join?
                 (float-past-join (list 'bind [fname :L] (list 'closure :j :fvs [[v :v]] (expr fe))) body)
                 (list 'let (list 'bind [fname :L] (list 'closure :r :fvs [[v :v]] (expr fe))) body)))
-          (do
+          (let [e (list 'let (mapv (fn [[h x e2 :as bd]] (if (lv? x) (with-meta (list h x (sum-at e2 (get (:ltypes *r*) x))) (meta bd)) bd)) (second e)) (nth e 2))]
            (doseq [[_ x e2] (second e)]
              (when (and (lv? x) (not (get (:ltypes *r*) x))) (swap! *lreps* assoc x (expr-reps e2)))
              ;; a binder of an unboxed tuple: its components (Unarise)
@@ -1221,8 +1320,16 @@
                                     (when (lv? b) (swap! *multi* assoc b bs) (swap! *mcomps* assoc b comps))
                                     (list 'alt (unboxed-name (count bs)) bs (expr body))))
                                 :else (let [reps (con-reps c)
-                                            bs (mapv (fn [x r] (let [n (local-name x)] (swap! *reps* assoc n r) [n r]))
-                                                     xs (concat reps (repeat :L)))]
+                                            ;; HF10-P37: a field of several representations (an unboxed sum's or
+                                            ;; tuple's) binds one binder each, the field's binder standing for them
+                                            ;; (unariseConArgBinder)
+                                            bs (vec (mapcat (fn [x r]
+                                                              (if (vector? r)
+                                                                (let [cs (vec (for [r1 r] (let [n (fresh "ubx")] (swap! *reps* assoc n r1) [n r1])))]
+                                                                  (when (lv? x) (swap! *multi* assoc x cs) (swap! *mcomps* assoc x (mapv vector r)))
+                                                                  cs)
+                                                                (let [n (local-name x)] (swap! *reps* assoc n r) [[n r]])))
+                                                            xs (concat reps (repeat :L))))]
                                         (list 'alt (gname c) bs (expr body))))))]
              ;; the scrutinee's lets floated out of the case (CorePrep's cpeBody floats)
              ;; and its case floats (a strict context: StrictContextFloatable, Note [BindInfo and FloatInfo])
@@ -1366,7 +1473,12 @@
   (for [[t info] (:tycons *r*) :when (= (module) (nth t 2))]
     {:data (list 'stg/data (ext-str (module) (nth t 3))
                  (vec (for [c (:cons info) :let [ci (con-info c)]]
-                        (list 'dc (gname c) (:tag ci) (con-reps c) (mapv #(if % :strict :lazy) (or (:strict ci) (repeat (:arity ci) false)))))))
+                        (let [rs (con-reps c) ms (mapv #(if % :strict :lazy) (or (:strict ci) (repeat (:arity ci) false)))]
+                          ;; HF10-P37: a field of several representations as its components (Unarise's constructor arguments)
+                          (if (some vector? rs)
+                            (list 'dc (gname c) (:tag ci) (vec (mapcat #(if (vector? %) % [%]) rs))
+                                  (vec (mapcat (fn [r m] (if (vector? r) (repeat (count r) :lazy) [m])) rs (concat ms (repeat :lazy)))))
+                            (list 'dc (gname c) (:tag ci) rs ms))))))
      :binds (for [c (:cons info) :let [ci (con-info c)] :when (= 'data (:flavour info))]
               (if (zero? (:arity ci))
                 (list 'bind [(gname c) :L] (list 'rcon (gname c) []))
