@@ -122,7 +122,7 @@
 ;; the context: index spaces and their identifiers
 
 (defn- new-ctx []
-  {:ids (atom {}) :counts (atom {}) :types (atom []) :implicit (atom []) :fields (atom {}) :defined (atom #{})})
+  {:ids (atom {}) :counts (atom {}) :types (atom []) :implicit (atom []) :fields (atom {}) :defined (atom []) :multi (atom #{})})
 
 (defn- bind! [ctx space id x]
   (let [n (get @(:counts ctx) space 0)]
@@ -217,7 +217,14 @@
   "A struct's field identifiers: {id index}."
   [x]
   (when (lex/list-of? x "struct")
-    (let [ps (keep-indexed (fn [i f] (let [y (second (:xs f))] (when (= :id (:t y)) [(:s y) i]))) (rest (:xs x)))]
+    ;; a (field t t ...) without an id declares as many fields as types: the indices count them
+    (let [ps (loop [fs (rest (:xs x)) i 0 out []]
+               (if-let [f (first fs)]
+                 (let [y (second (:xs f))]
+                   (if (= :id (:t y))
+                     (recur (rest fs) (inc i) (conj out [(:s y) i]))
+                     (recur (rest fs) (+ i (max 1 (count (rest (:xs f))))) out)))
+                 out))]
       (when-not (= (count ps) (count (distinct (map first ps)))) (malformed "duplicate field" x))
       (into {} ps))))
 
@@ -249,7 +256,7 @@
             (when (and (or (seq ps) (seq rs)) t (not= t (list 'func ps rs))) (malformed "inline function type" x))
             [idx (if (seq ps) ids (vec (repeat (count (second t)) nil))) more])
       :else (let [ft (list 'func ps rs)
-                  known (first (keep-indexed (fn [i t] (when (= t ft) i)) @(:types ctx)))]
+                  known (first (keep-indexed (fn [i t] (when (and (= t ft) (not (@(:multi ctx) i))) i)) @(:types ctx)))]
               [(or known
                    (let [i (count @(:types ctx))] (swap! (:types ctx) conj ft) (swap! (:implicit ctx) conj ft) i))
                ids more])))))
@@ -281,7 +288,7 @@
           (and (empty? ps) (empty? rs)) [{} more]
           (and (empty? ps) (= 1 (count rs))) [{:bt [(first rs)]} more]
           :else (let [ft (list 'func ps rs)
-                      known (first (keep-indexed (fn [i t] (when (= t ft) i)) @(:types ctx)))
+                      known (first (keep-indexed (fn [i t] (when (and (= t ft) (not (@(:multi ctx) i))) i)) @(:types ctx)))
                       i (or known (let [i (count @(:types ctx))] (swap! (:types ctx) conj ft) (swap! (:implicit ctx) conj ft) i))]
                   [{:bt i} more]))))))
 
@@ -312,7 +319,7 @@
         (and (= :kw (:t x)) (.startsWith ^String (:s x) "align="))
         (do (when (seen :align) (malformed "unexpected token" x))
             (let [v (nat64 {:t :num :s (subs (:s x) 6) :p (:p x)})]
-              (when-not (= 1 (Long/bitCount v)) (malformed "alignment" x))
+              (when-not (= 1 (Long/bitCount v)) (malformed "alignment must be a power of two" x))
               (recur (rest xs) (assoc m :align (Long/numberOfTrailingZeros v)) (conj seen :align))))
         :else [m xs]))))
 
@@ -323,6 +330,8 @@
     (when-not n (malformed "unexpected token" (or sh x)))
     (let [lanes (take n (rest xs))
           _ (when-not (= n (count lanes)) (malformed "wrong number of lane literals" x))
+          ;; parser.mly reads the lane literals as one list: one too many is the wrong number too
+          _ (when (= :num (:t (nth (vec (rest xs)) n nil))) (malformed "wrong number of lane literals" x))
           bb (java.nio.ByteBuffer/allocate 16)
           _ (.order bb java.nio.ByteOrder/LITTLE_ENDIAN)]
       (doseq [l lanes]
@@ -345,7 +354,7 @@
 (defn- plain
   "One plain instruction `nm` whose immediates are the head of xs: [form rest]."
   [ctx env nm x xs]
-  (let [ks (or (kinds nm) (malformed "unknown operator" x))
+  (let [ks (or (kinds nm) (malformed (if (contains? ops/keywords nm) "unexpected token" "unknown operator") x))
         k (first ks)
         nmsym (symbol nm)]
     (case k
@@ -391,10 +400,11 @@
                   (when-not (first xs) (malformed "unexpected token" x))
                   [(list nmsym (cond-> m mi (assoc :memory mi)) (nat (first xs))) (rest xs)])
       :lane (do (when-not (first xs) (malformed "unexpected token" x))
-                (let [l (nat (first xs))] (when (> l 255) (malformed "malformed lane index" (first xs))) [(list nmsym l) (rest xs)]))
-      :shuffle (let [ls (take 16 xs)]
-                 (when-not (and (= 16 (count ls)) (every? #(= :num (:t %)) ls)) (malformed "invalid lane length" x))
-                 [(list nmsym (mapv #(let [l (nat %)] (when (> l 255) (malformed "malformed lane index" %)) l) ls)) (drop 16 xs)])
+                (let [l (nat (first xs))] (when (> l 255) (malformed "i8 constant out of range" (first xs))) [(list nmsym l) (rest xs)]))
+      ;; parser.mly reads the lane indices as one list of numbers: other than 16 is the wrong number
+      :shuffle (let [ls (vec (take-while #(= :num (:t %)) xs))]
+                 (when-not (= 16 (count ls)) (malformed "wrong number of lane indices" x))
+                 [(list nmsym (mapv #(let [l (nat %)] (when (> l 255) (malformed "i8 constant out of range" %)) l) ls)) (drop 16 xs)])
       :br-table (let [ls (take-while idx? xs)]
                   (when (empty? ls) (malformed "unexpected token" x))
                   [(list nmsym (mapv #(label-idx env %) (butlast ls)) (label-idx env (last ls))) (drop (count ls) xs)])
@@ -581,7 +591,9 @@
               id (if (= h "import") (id-of (rest (:xs (nth (:xs f) 3)))) (id-of (rest (:xs f))))]
           (when-not sp (malformed "unexpected token" f))
           ;; parser.mly's module_fields: an import after any definition of a function, table, memory, global or tag
-          (when (and imp? (seq @(:defined ctx))) (malformed (str "import after " (name (first @(:defined ctx))) " definition") f))
+          ;; the definition named is the last one before the import (module_fields is right-recursive: the nearest errs first)
+          (when (and imp? (seq @(:defined ctx)))
+            (malformed (str "import after " (let [k (name (peek @(:defined ctx)))] (if (= k "func") "function" k)) " definition") f))
           (when-not imp? (swap! (:defined ctx) conj sp))
           (bind! ctx sp id f)
           ;; a table's inline elements and a memory's inline data are segments of their own, numbered in field order
@@ -675,12 +687,17 @@
                       (let [i64? (lex/kw? (first ys) "i64") ys (if i64? (rest ys) ys)
                             t (valtype ctx (first ys)) e (second ys)
                             [et init] (if (or (empty? (rest (:xs e))) (idx? (second (:xs e))))
-                                        [(list 'ref 'func) {:funcs (mapv #(resolve-idx ctx :func %) (rest (:xs e)))}]
+                                        ;; parser.mly: the segment's type is the table's; function indices are ref.func expressions
+                                        ;; unless that type is (ref func), the binary's elemkind
+                                        (let [fs (mapv #(resolve-idx ctx :func %) (rest (:xs e)))]
+                                          (if (= t (list 'ref 'func))
+                                            [t {:funcs fs}]
+                                            [t {:exprs (mapv (fn [x] [(list 'ref.func x)]) fs)}]))
                                         [t {:exprs (mapv (fn [it] (if (lex/list-of? it "item") (expr ctx (rest (:xs it))) (expr ctx [it]))) (rest (:xs e)))}])
                             cnt (count (or (:funcs init) (:exprs init)))
                             ei (next! :elem)]
                         (add! :table (list 'wasm/table i (cond-> {:min cnt :max cnt :type t} i64? (assoc :i64 true))))
-                        (add! :elem (list 'wasm/elem ei (merge {:active {:table i :offset [(list (if i64? 'i64.const 'i32.const) 0)]} :type (if (:funcs init) (list 'ref 'func) t)} init))))
+                        (add! :elem (list 'wasm/elem ei (merge {:active {:table i :offset [(list (if i64? 'i64.const 'i32.const) 0)]} :type et} init))))
                       (let [[l more] (limits ctx ys f)
                             _ (when (empty? more) (malformed "unexpected token" f))
                             t (valtype ctx (first more))
@@ -778,14 +795,33 @@
     (let [tf (filter #(#{"type" "rec"} (lex/head %)) fields)]
       (doseq [f tf]
         (if (= "rec" (lex/head f))
-          (doseq [t (rest (:xs f))] (swap! (:types ctx) conj (subtype ctx (last (:xs t)))))
+          (let [ts (rest (:xs f))]
+            ;; a member of a group of more than one is not the type an implicit type use denotes (the text chapter: the
+            ;; implicit type is the rec group of one, (rec (type (func ...))))
+            (doseq [t ts]
+              (when (> (count ts) 1) (swap! (:multi ctx) conj (count @(:types ctx))))
+              (swap! (:types ctx) conj (subtype ctx (last (:xs t))))))
           (swap! (:types ctx) conj (subtype ctx (last (:xs f)))))))
     (parse-fields ctx fields)))
 
-(defn read-module
-  "The items of a module's text (a `(module ...)` or its fields alone)."
+(defn- read-module*
   [^String text]
   (let [xs (lex/read-sexps text)
         fields (if (and (= 1 (count xs)) (lex/list-of? (first xs) "module")) (after-id (rest (:xs (first xs)))) xs)]
     (doseq [f fields] (when-not (= :list (:t f)) (malformed "unexpected token" f)))
     (module-items fields)))
+
+(defn read-module
+  "The items of a module's text (a `(module ...)` or its fields alone). The reference's lexer rejects a token it does not
+  know when its parser reaches it: a text with such a token is malformed, `unknown operator TOKEN`, unless the reader finds
+  another fault before it."
+  [^String text]
+  (let [u (try (lex/first-unknown text) (catch Throwable _ nil))
+        unknown! (fn [] (throw (ex-info (str "unknown operator " (:s u)) {:wasm/malformed (str "unknown operator " (:s u)) :at (:p u)})))]
+    (let [items (try (read-module* text)
+                     (catch arbace.lang.ExceptionInfo e
+                       (let [{m :wasm/malformed at :at} (ex-data e)]
+                         ;; an `unexpected token` is placed at the form that holds it: the unknown token may be inside
+                         (if (and m u (or (nil? at) (= m "unexpected token") (<= (long (:p u)) (long at)))) (unknown!) (throw e)))))]
+      (when u (unknown!))
+      items)))

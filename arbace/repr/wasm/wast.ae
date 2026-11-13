@@ -12,6 +12,7 @@
             [arbace.repr.wasm.text :as text]
             [arbace.repr.wasm.binary :as bin]
             [arbace.repr.wasm.print :as print]
+            [arbace.wasm.valid :as valid]
             [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
@@ -51,15 +52,23 @@
     :quote (text/read-module p)
     :binary (:items (bin/decode p))))
 
+(defn validate
+  "The validator's verdict on a module's items (WA3, arbace.wasm.valid): nil (valid), [:invalid MESSAGE] or [:crash MESSAGE]."
+  [items]
+  (try (when-let [{m :message f :func} (valid/explain items)] [:invalid m f])
+       (catch Throwable e [:crash (str (.getName (class e)) ": " (.getMessage e))])))
+
 (defn judge-module
-  "A module that must read: {:read R :print P}, R nil (it reads, both formats agree, a binary one prints back byte for byte)
-  or the reason; P (when it reads) nil (its canonical text reads again to the same forms) or the reason."
+  "A module that must read: {:read R :print P}, R nil (it reads, both formats agree, a binary one prints back byte for byte,
+  it validates) or the reason; P (when it reads) nil (its canonical text reads again to the same forms) or the reason."
   [[kind p :as m]]
   (let [items (try (read-items m) (catch Throwable e (msg e)))]
     (if (string? items)
       {:read items}
       {:read (try
-               (or (when (= kind :binary)
+               (or (when-let [[k v f] (validate items)]
+                     (if (= k :crash) (str "crash in validation: " v) (str "valid module rejected: " v (when f (str " (function " f ")")))))
+                   (when (= kind :binary)
                      (let [{:keys [layer]} (bin/decode p)]
                        (when-not (java.util.Arrays/equals ^bytes (bin/encode items layer) ^bytes p) "print: the bytes differ")))
                    (let [again (:items (bin/decode (bin/encode items nil)))]
@@ -86,6 +95,16 @@
   (try (read-items m) [false nil]
        (catch Throwable e (if (:wasm/malformed (ex-data e)) [true (:wasm/malformed (ex-data e))] [true (str "crash: " (.getMessage e))]))))
 
+(defn- msg-row
+  "The message's second level (WAS8 (a), the reference runner's rule): the reason given starts with the script's."
+  [id ^String expect ^String got]
+  (let [mid (str "msg/" (subs id (inc (.indexOf ^String id "/"))))]
+    (if (.startsWith (str got) expect)
+      [mid :pass ""]
+      [mid :fail (clean (str "message: expected '" expect "', got '" got "'"))])))
+
+(defn- utf8 ^String [x] (String. ^bytes (:b x) java.nio.charset.StandardCharsets/UTF_8))
+
 (defn script-rows
   "The read and print levels' rows of a script: [ID RESULT REASON] (ID NAME#K, K the command's ordinal from 1; a print row
   print/PATH#K)."
@@ -111,18 +130,24 @@
                   (let [[_ m expect] (:xs c)
                         mm (try (module-of m) (catch Throwable _ [:binary-error nil]))]
                     (if (= :binary-error (first mm))
-                      [[id :pass ""]]
+                      [[id :pass ""] (msg-row id (utf8 expect) "unexpected token")]
                       (let [[r why] (rejected? mm)]
                         (if r
-                          (if (.startsWith (str why) "crash: ") [[id :fail (clean (str "rejected by a crash: " why))]] [[id :pass ""]])
-                          [[id :fail (clean (str "malformed accepted: expected " (String. ^bytes (:b expect) java.nio.charset.StandardCharsets/UTF_8)))]]))))
+                          (if (.startsWith (str why) "crash: ")
+                            [[id :fail (clean (str "rejected by a crash: " why))]]
+                            [[id :pass ""] (msg-row id (utf8 expect) why)])
+                          [[id :fail (clean (str "malformed accepted: expected " (utf8 expect)))]]))))
                   "assert_invalid"
                   (let [[_ m expect] (:xs c)
                         mm (try (module-of m) (catch Throwable e [:error (msg e)]))
-                        r (if (= :error (first mm)) (second mm) (try (read-items mm) nil (catch Throwable e (msg e))))]
-                    (if r
-                      [[id :fail (clean (str "invalid module does not read: " r))]]
-                      [[id :fail (clean (str "invalid: the validator's (WA3): " (String. ^bytes (:b expect) java.nio.charset.StandardCharsets/UTF_8)))]]))
+                        items (if (= :error (first mm)) (second mm) (try (read-items mm) (catch Throwable e (msg e))))]
+                    (if (string? items)
+                      [[id :fail (clean (str "invalid module does not read: " items))]]
+                      (let [[k v] (validate items)]
+                        (case k
+                          :invalid [[id :pass ""] (msg-row id (utf8 expect) v)]
+                          :crash [[id :fail (clean (str "crash in validation: " v))]]
+                          [[id :fail (clean (str "invalid module accepted: expected " (utf8 expect)))]]))))
                   ("assert_unlinkable" "assert_uninstantiable" "assert_trap" "assert_exception")
                   (let [m (second (:xs c))]
                     (when (lex/list-of? m "module")

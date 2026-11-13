@@ -146,3 +146,29 @@ count section have no text here (`print-items`: what the text keeps).
 
 Case ids `testsuite/PATH#K` (K the command's ordinal from 1), results `test/wasm/wast-results.edn`, classes
 `test/wasm/divergences-wast.edn`, controls `test/wasm/controls-wast.txt`.
+
+## 9. Validation (WA3)
+
+`arbace.wasm.valid/check` (`arbace/wasm/valid.ae`) validates a module's items (§2) by the specification's typing rules, Wasm 3.0's,
+as the reference interpreter states them (`interpreter/valid/valid.ml` and `match.ml` at the spec's pin): the same order of checks
+(the type section's recursive groups with their subtype checks, the imports, tags, functions' types, memories, tables with their
+initializers, globals, data and element segments, then the functions' bodies, the start function and the exports) and the same
+messages (`type mismatch: instruction requires [i32] but stack has [i64]`, `unknown local 3`, `alignment must not be larger than
+natural`, `constant expression required`, `undeclared function reference 0`, `sub type 1 does not match super type 0`, ...). A valid
+module returns nil; an invalid one throws ex-info `{:wasm/invalid MESSAGE}` (`:func I` when the fault is in function I's body);
+`explain` returns `{:message :func}` or nil.
+
+- The operand stack is the reference's algorithm: value types with an ellipsis for an unreachable stack's unknown bottom and `bot`
+  for a type the code cannot know; the label stack; the locals' initialization (a non-defaultable local is set by `local.set` or
+  `local.tee` for the rest of its block).
+- Type identity: a type index's canonical form is its recursive group, the group's own indices as `[:rec J]` and every other index
+  replaced by its own canonical form, with its place in the group; two indices are the same type when their canonical forms are
+  equal (iso-recursive equivalence), and a subtype when equal or one of its declared supertypes is (GC's `match_deftype`).
+- A table without an initializer is initialized with `ref.null` of its element type (the reference's decoding), so a table of a
+  non-nullable type needs one.
+- Not checked (the reference's custom section handlers): the name section's and the annotations' own checks.
+
+`bin/repr-wasm wast` validates every module that must read (a valid module rejected is a failure, `valid module rejected: MESSAGE`)
+and every `assert_invalid` module (rejected passes; accepted fails, `invalid module accepted`). The message is a second level
+(WAS8 (a), the reference runner's rule): the row `msg/PATH#K` passes when the reason given starts with the script's, for
+`assert_invalid` the validator's message and for `assert_malformed` the decoder's or the text reader's.

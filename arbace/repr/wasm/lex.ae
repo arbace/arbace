@@ -6,7 +6,8 @@
   signed integer or float spelling, `_` kept), :reserved (any other run of idchars). Comments (`;;` to the line's end,
   `(; ... ;)` nested) and annotations `(@name ...)` are skipped (WA2 keeps no annotation). A lexical error throws
   ex-info {:wasm/malformed MSG}."
-  (:require [arbace.string :as str]))
+  (:require [arbace.repr.wasm.ops :as ops]
+            [arbace.string :as str]))
 
 (set! *warn-on-reflection* true)
 
@@ -47,7 +48,7 @@
                                h (when (pos? e) (subs s (inc k) e))]
                            (when-not (and h (re-matches #"[0-9a-fA-F](?:_?[0-9a-fA-F])*" h)) (malformed "illegal escape" j))
                            (let [cp (try (Long/parseLong (str/replace h "_" "") 16) (catch Exception _ -1))]
-                             (when (or (neg? cp) (> cp 0x10ffff) (<= 0xd800 cp 0xdfff)) (malformed "illegal escape" j))
+                             (when (or (neg? cp) (> cp 0x10ffff) (<= 0xd800 cp 0xdfff)) (malformed "malformed UTF-8 codepoint" j))
                              (let [bs (.getBytes (String. (Character/toChars (int cp))) java.nio.charset.StandardCharsets/UTF_8)]
                                (.write o bs 0 (alength bs)))
                              (recur (inc e)))))
@@ -103,7 +104,8 @@
             (and (= c 0x28) (< (inc i) n) (= \@ (.charAt s (int (inc i)))))
             (if (and (< (+ i 2) n) (= \" (.charAt s (int (+ i 2)))))
               ;; (@"..."): an annotation id written as a string (3.0)
-              (let [[b e] (string-at s (+ i 2))]
+              ;; lexer.mll: `(@` and no well-formed string after it is `(@` alone, "empty annotation id"
+              (let [[b e] (try (string-at s (+ i 2)) (catch arbace.lang.ExceptionInfo _ (malformed "empty annotation id" i)))]
                 (when (zero? (alength ^bytes b)) (malformed "empty annotation id" i))
                 (when-not (java.util.Arrays/equals ^bytes b (.getBytes (String. ^bytes b java.nio.charset.StandardCharsets/UTF_8) java.nio.charset.StandardCharsets/UTF_8))
                   (malformed "malformed UTF-8 encoding" i))
@@ -125,7 +127,12 @@
             ;; one string is a string, `$` and one string an identifier, idchars alone a keyword, number, identifier or reserved
             (let [[j strs] (loop [j i strs []]
                              (cond (>= j n) [j strs]
-                                   (= \" (.charAt s (int j))) (let [[b e] (string-at s j)] (recur e (conj strs [j e b])))
+                                   (= \" (.charAt s (int j)))
+                                   ;; lexer.mll: `$` and no well-formed string after it is `$` alone, "empty identifier"
+                                   (let [[b e] (if (and (= j (inc i)) (= \$ (.charAt s (int i))))
+                                                 (try (string-at s j) (catch arbace.lang.ExceptionInfo _ (malformed "empty identifier" i)))
+                                                 (string-at s j))]
+                                     (recur e (conj strs [j e b])))
                                    (or (idchar? (long (.charAt s (int j)))) (run-char? s j n)) (recur (inc j) strs)
                                    :else [j strs]))
                   w (subs s i j)]
@@ -135,8 +142,9 @@
                 (and (= 1 (count strs)) (= (inc i) (first (first strs))) (= j (second (first strs))) (= \$ (.charAt s (int i))))
                 (let [^bytes b (nth (first strs) 2)
                       nm (String. b java.nio.charset.StandardCharsets/UTF_8)]
-                  (when (or (zero? (alength b)) (not (java.util.Arrays/equals b (.getBytes nm java.nio.charset.StandardCharsets/UTF_8))))
-                    (malformed "empty identifier" i))
+                  (when (zero? (alength b)) (malformed "empty identifier" i))
+                  (when-not (java.util.Arrays/equals b (.getBytes nm java.nio.charset.StandardCharsets/UTF_8))
+                    (malformed "malformed UTF-8 encoding" i))
                   (.add out {:t :id :s nm :p i}) (recur j))
                 (seq strs) (do (.add out {:t :reserved :s w :p i}) (recur j))
                 (not (idchar? c)) (do (.add out {:t :reserved :s w :p i}) (recur j))
@@ -145,7 +153,13 @@
                 (re-matches num-re w) (do (.add out {:t :num :s w :p i}) (recur j))
                 (<= 0x61 c 0x7a) (do (.add out {:t :kw :s w :p i}) (recur j))
                 :else (do (.add out {:t :reserved :s w :p i}) (recur j))))
-            :else (malformed "malformed UTF-8 encoding" i)))))))
+            ;; lexer.mll: inside an annotation any other character is `illegal character`; outside, a control character is
+            ;; misplaced, a character beyond ASCII too (U+FFFD: an ill-formed sequence the decoding replaced)
+            :else (malformed (cond (= c 0xfffd) "malformed UTF-8 encoding"
+                                   (pos? (aget ad 0)) "illegal character"
+                                   (or (< c 0x20) (= c 0x7f)) "misplaced control character"
+                                   :else "misplaced unicode character")
+                             i)))))))
 
 (defn read-sexps
   "The text's S-expressions (annotations left out)."
@@ -178,3 +192,26 @@
 (defn kw? [x ^String k] (and (= :kw (:t x)) (= k (:s x))))
 (defn head [x] (when (= :list (:t x)) (let [f (first (:xs x))] (when (= :kw (:t f)) (:s f)))))
 (defn list-of? [x ^String k] (= k (head x)))
+
+(defn unknown?
+  "An atom the reference's lexer rejects as `unknown operator` (lexer.mll: a keyword its table does not know, or a reserved
+  token; `offset=N` and `align=N` are tokens of their own)."
+  [x]
+  (case (:t x)
+    :reserved true
+    :kw (let [w (:s x)]
+          (not (or (contains? ops/keywords w)
+                   (re-matches #"(?:offset|align)=(?:[0-9](?:_?[0-9])*|0x[0-9a-fA-F](?:_?[0-9a-fA-F])*)" w))))
+    false))
+
+(defn first-unknown
+  "The first atom of a text's tokens the reference's lexer rejects (unknown?), annotations' contents left out, or nil."
+  [^String s]
+  (loop [ts (seq (tokens s)) depth 0]
+    (when-let [t (first ts)]
+      (cond
+        (and (vector? t) (= :annot (first t))) (recur (next ts) (inc depth))
+        (and (vector? t) (= :open (first t))) (recur (next ts) (if (pos? depth) (inc depth) 0))
+        (and (vector? t) (= :close (first t))) (recur (next ts) (max 0 (dec depth)))
+        (and (zero? depth) (map? t) (unknown? t)) t
+        :else (recur (next ts) depth)))))

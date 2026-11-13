@@ -100,8 +100,9 @@
 (defn- u64 ^long [r] (uleb r 64))
 
 (defn- len32 ^long [r]
+  ;; decode.ml's len32: the length against what remains from before its own LEB128
   (let [at (pos r) n (u32 r)]
-    (if (<= n (- (end r) (pos r))) n (malformed "length out of bounds" at))))
+    (if (<= n (- (end r) at)) n (malformed "length out of bounds" at))))
 
 (defn- get-bytes ^bytes [r ^long n]
   (let [at (pos r)]
@@ -140,8 +141,13 @@
   (let [b (peek8 r)]
     (if (and (>= b 0) (= 0x40 (bit-and b 0xc0)))
       (do (u8 r) (or (heap-bytes b) (malformed "malformed heap type" (dec (pos r)))))
-      (let [at (pos r) x (sleb r 33)]
-        (if (neg? x) (malformed "malformed heap type" at) x)))))
+      ;; decode.ml's heaptype: `either` a type index (s33, not negative) or an abstract heap type (s7); when the index fails,
+      ;; the s7 read of a byte with its continuation bit set is `integer representation too long`
+      (let [at (pos r)
+            x (try (sleb r 33) (catch arbace.lang.ExceptionInfo _ -1))]
+        (if (neg? x)
+          (if (>= b 0x80) (malformed "integer representation too long" at) (malformed "malformed heap type" at))
+          x)))))
 
 (defn- reftype-after [r ^long b]
   (case b
@@ -172,7 +178,7 @@
       0x60 (let [ps (vec-of r valtype) rs (vec-of r valtype)] (list 'func ps rs))
       0x5f (list 'struct (vec-of r fieldtype))
       0x5e (list 'array (fieldtype r))
-      (malformed "malformed definition type" at))))
+      (malformed (if (>= (bit-and 0xff (aget ^bytes (:b r) (int at))) 0x80) "integer representation too long" "malformed definition type") at))))
 
 (defn- subtype [r]
   (case (peek8 r)
@@ -440,11 +446,14 @@
     :code (let [types @(:func-types state)
                 base (get @(:imports state) :func 0)
                 n (len32 r)]
-            (when-not (= n (count types)) (malformed "function and code section have inconsistent lengths" (pos r)))
+            ;; decode.ml compares the two counts after the last section (\"unexpected content after last section\" first)
+            (when-not (= n (count types)) (reset! (:inconsistent state) true))
             (loop [i 0 out (transient [])]
               (if (< i n)
                 (let [size (len32 r) start (pos r) saved (end r)
-                      _ (set-end! r (+ start size))
+                      ;; decode.ml reads a body (and a section, below) in the module's stream, not bounded by its size:
+                      ;; a read past it fails as the stream does, the size is checked after (\"section size mismatch\")
+                      _ nil
                       groups (locals r)
                       ls (flat-locals groups)
                       body (instrs r)]
@@ -453,7 +462,7 @@
                   (set-end! r saved)
                   (when-not (= groups (group-locals ls)) (swap! (:flags state) assoc [:locals (+ base i)] groups))
                   (recur (inc i) (conj! out (apply list 'wasm/func (+ base i)
-                                                   (cond-> {:type (nth types i)} (seq ls) (assoc :locals ls))
+                                                   (cond-> {:type (nth types i nil)} (seq ls) (assoc :locals ls))
                                                    body))))
                 (persistent! out))))
     :data (let [segs (vec-of r data-seg)]
@@ -483,9 +492,9 @@
   "The module's items and its layer, {:items [...] :layer {...}}; throws ex-info {:wasm/malformed MSG} on a malformed module."
   [^bytes b]
   (let [r (reader b)
-        _ (when-not (and (>= (alength b) 4) (= 0x6d736100 (word r 4))) (malformed "magic header not detected" 0))
-        _ (when-not (and (>= (alength b) 8) (= 1 (word r 4))) (malformed "unknown binary version" 4))
-        state {:imports (atom {}) :func-types (atom []) :flags (atom {})}
+        _ (when-not (= 0x6d736100 (word r 4)) (malformed "magic header not detected" 0))
+        _ (when-not (= 1 (word r 4)) (malformed "unknown binary version" 4))
+        state {:imports (atom {}) :func-types (atom []) :flags (atom {}) :inconsistent (atom false)}
         empty (atom [])
         names (atom nil)]
     (loop [items [] last nil]
@@ -499,7 +508,7 @@
                           (do (reset! nws ws) named)
                           (mapv #(if (= 'wasm/names (kind-of %)) (list 'wasm/custom "name" {:after (:after (second %))} (hex payload)) %) items)))
                       items)]
-          (when (and (seq @(:func-types state)) (not (some #(and (seq? %) (= 'wasm/func (first %))) items)))
+          (when (or @(:inconsistent state) (and (seq @(:func-types state)) (not (some #(and (seq? %) (= 'wasm/func (first %))) items))))
             (malformed "function and code section have inconsistent lengths" (alength b)))
           (let [dc (some #(when (and (seq? %) (= 'wasm/datacount (first %))) (second %)) items)
                 nd (count (filter #(and (seq? %) (= 'wasm/data (first %))) items))]
@@ -520,7 +529,6 @@
         (let [at (pos r) id (u8 r)
               _ (when (> id 13) (malformed "malformed section id" at))
               size (len32 r) start (pos r) saved (end r)]
-          (set-end! r (+ start size))
           (if (zero? id)
             (let [nm (wname r)
                   payload (get-bytes r (- (+ start size) (pos r)))
