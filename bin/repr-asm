@@ -247,6 +247,60 @@ a64i_light() {
      "$goroot/bin/go" build -p 2 -trimpath -o "$a64i_exe" ./a64idriver/)
 }
 
+# a64i's table check (queue 277, AR14; ARS70 (a)): goi's checker over arbace/crt, arbace/emu and arbace/a64i as a user's program's
+# packages in linux/arm64 (test/asm/a64i_table_check.ae, the model test/python/table_check.ae), against the std forms of their
+# closure: bin/goi table's linux/arm64 cache of std when this checkout has it, else the closure's std packages (go list -deps of the
+# printed module) read by repr/go into .tmp/a64i/table/KEY/linux-arm64 once (KEY: goi's linux_forms inputs and the list); then
+# test/asm/controls-a64i-table.txt's controls, each the package header changed in a scratch root, which must fail
+a64i_table_check() {
+  local w=$a64i_dir/table pk key std gkey ctl id kind what rc=0 t0=$SECONDS
+  mkdir -p "$w"
+  [ -n "${A64I_EXE:-}" ] || a64i_light >/dev/null
+  pk=$(cd "$a64i_dir/print/mod" && GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+         GOOS=linux GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$goroot/bin/go" list -deps -f '{{if .Standard}}{{.ImportPath}}{{end}}' ./a64i | grep . | LC_ALL=C sort) \
+    || { echo "FAIL: a64i table-check: go list -deps"; return 1; }
+  gkey=$( { echo std; cat "$goroot/VERSION"
+            (cd "$root" && find arbace/repr/go.ae arbace/repr/go arbace/go/check.ae arbace/go/check arbace/box/plan.ae tools/godump -type f | LC_ALL=C sort | xargs sha256sum); } \
+          | sha256sum | cut -c1-16)
+  std=$root/.tmp/goi-table/$gkey/linux-arm64
+  if [ ! -f "$std/.done" ]; then
+    key=$( { echo "$gkey"; printf '%s\n' "$pk"; } | sha256sum | cut -c1-16)
+    std=$w/$key/linux-arm64
+    if [ ! -f "$std/.done" ]; then
+      echo "a64i table-check: the closure's $(printf '%s\n' "$pk" | wc -l) std packages read by repr/go for linux/arm64 (cached in $std)"
+      rm -rf "$w"/*/; mkdir -p "$(dirname "$std")"
+      # shellcheck disable=SC2086
+      (cd "$root" && REPR_GO_JOBS=${REPR_GO_JOBS:-1} REPR_GO_DUMPS=$std.dumps bin/repr-go read --goos linux --goarch arm64 --out "$std" $pk) > "$std.log" 2>&1 \
+        || { tail -5 "$std.log"; echo "FAIL: a64i table-check: reading std for linux/arm64 ($std.log)"; return 1; }
+      rm -rf "$std.dumps"; touch "$std/.done"
+    fi
+  fi
+  tcheck() { # ROOT: the checker over ROOT's packages
+    (cd "$root" && GOMEMLIMIT=${A64I_TABLE_GOMEMLIMIT:-1GiB} arbace_tool "$root/test/asm/a64i_table_check.ae" "$1" arbace/crt,arbace/emu,arbace/a64i \
+       --config "linux/arm64=$std") 2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; }
+    return "${PIPESTATUS[0]}"
+  }
+  tcheck "$root" | tee "$w/table-check.log"; rc=${PIPESTATUS[0]}
+  # the controls (test/asm/controls-a64i-table.txt: ID KIND PACKAGE), each must fail: init-order, the header's :init-order with its
+  # first two entries swapped
+  while read -r id kind what; do
+    case $id in ''|'#'*) continue ;; esac
+    ctl=$w/control-$id; rm -rf "$ctl"; mkdir -p "$ctl/go/arbace"
+    ln -s "$root/go/arbace/crt.ae" "$root/go/arbace/crt" "$root/go/arbace/emu.ae" "$root/go/arbace/emu" "$root/go/arbace/$what" "$ctl/go/arbace/"
+    case $kind in
+      init-order) sed -E 's/^(  :init-order \[)([^ ]+) ([^ ]+) /\1\3 \2 /' "$root/go/arbace/$what.ae" > "$ctl/go/arbace/$what.ae" ;;
+      *) echo "FAIL: a64i table-check: control $id: no kind $kind"; rc=1; continue ;;
+    esac
+    if cmp -s "$root/go/arbace/$what.ae" "$ctl/go/arbace/$what.ae"; then echo "FAIL: control $id: the header unchanged"; rc=1
+    elif tcheck "$ctl" > "$ctl.log"; then echo "FAIL: control $id: passes"; rc=1
+    elif grep -q "annotation :$kind on package" "$ctl.log"; then echo "control $id: fails as it must"
+    else echo "FAIL: control $id: fails otherwise: $(grep -m1 '^ \|^FAIL' "$ctl.log")"; rc=1; fi
+  done < "$root/test/asm/controls-a64i-table.txt"
+  echo "a64i table-check: $((SECONDS - t0)) s"
+  [ $rc = 0 ] && echo "a64i table-check: ok" || echo "FAIL: a64i table-check"
+  return $rc
+}
+
 edn() { arbace_tool -e "(let [c (read-string (slurp \"$corpora\"))] $1)"; }
 
 # corpus_ids: the corpora's ids of the architecture, in order
@@ -863,6 +917,7 @@ case ${1:-} in
     # AR5: a64i, arm64's machine (go/arbace/a64i over the frame go/arbace/emu)
     case ${2:-} in
       light) a64i_light ;;
+      table-check) a64i_table_check ;;
       run|decode-text|forms-check|trace|claimed) v=$2; shift 2; [ -x "$a64i_exe" ] || a64i_light; exec "$a64i_exe" "$v" "$@" ;;
       synth) shift 2; [ $# -ge 1 ] || { echo "repr-asm --arch arm64 a64i synth DIR [--record]" >&2; exit 2; }
         # AR6, ARS42 (b): a64i's synthetic programs (test/asm/a64i/gen.ae, seeded, self-checking against its model), written into
@@ -891,7 +946,7 @@ case ${1:-} in
       eval-build) shift 2; [ $# -eq 2 ] || { echo "repr-asm a64i eval-build LIST WORK" >&2; exit 2; }
         export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
         arbace_tool -m arbace.asm.arm64.eval build "$1" "$2" "$src/musl-1.2.6" ;;
-      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|claimed|synth DIR [--record]|eval-build LIST WORK" >&2; exit 2 ;;
+      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|claimed|synth DIR [--record]|eval-build LIST WORK|table-check" >&2; exit 2 ;;
     esac ;;
   a64i-check)
     # AR5: test/asm/run-arm64/'s and test/asm/a64i/'s programs built for AOT (arbace.asm.link build: WORK/NAME) and for eval

@@ -25,7 +25,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
-  a64i-light a64i-run a64i-trace a64i-check a64i-record \
+  a64i-light a64i-run a64i-trace a64i-check a64i-record a64i-table-check \
   x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
   repr-rust-native-check \
   repr-rust-native-errors \
@@ -528,8 +528,8 @@ repr-asm-ensure: ## repr/asm's corpora extracted once for test/asm/corpora.edn's
 	bin/repr-asm corpus ensure
 asm-amd64-essential: ## the x86-64 assembly crop's essential gate steps by hand (AX10): the round trip of musl and MC/AsmParser, the run check, the object check of musl and the synthetic files (test/gate/crops/asm.edn)
 	bin/repr-asm corpus ensure && bin/repr-asm roundtrip musl mc-asmparser && bin/repr-asm run-check && bin/repr-asm object-check musl && bin/repr-asm object-check synthetic
-asm-arm64-essential: ## the arm64 assembly crop's essential gate steps by hand (AX10, AR4): the arm64 round trip, encode check, object checks, object verdict, run check and a64i's check (test/gate/crops/asm.edn)
-	bin/repr-asm corpus ensure && bin/repr-asm --arch arm64 roundtrip && bin/repr-asm --arch arm64 encode-check && bin/repr-asm --arch arm64 object-check && bin/repr-asm --arch arm64 object-check mc-aarch64-obj && bin/repr-asm --arch arm64 object-verdict && bin/repr-asm --arch arm64 run-check && bin/a64i check --essential
+asm-arm64-essential: ## the arm64 assembly crop's essential gate steps by hand (AX10, AR4): the arm64 round trip, encode check, object checks, object verdict, run check, a64i's check and its table check (test/gate/crops/asm.edn)
+	bin/repr-asm corpus ensure && bin/repr-asm --arch arm64 roundtrip && bin/repr-asm --arch arm64 encode-check && bin/repr-asm --arch arm64 object-check && bin/repr-asm --arch arm64 object-check mc-aarch64-obj && bin/repr-asm --arch arm64 object-verdict && bin/repr-asm --arch arm64 run-check && bin/a64i check --essential && bin/a64i table-check
 asm-essential: asm-amd64-essential asm-arm64-essential ## both assembly crops' essential steps by hand (AX10)
 repr-asm-lists: ## repr/asm's corpus lists, split-file parts and RUN-line flags (bin/repr-asm [--arch ARCH] corpus lists; ARCH=amd64|arm64)
 	bin/repr-asm $(if $(ARCH),--arch $(ARCH)) corpus lists
@@ -591,6 +591,8 @@ a64i-check: ## test/asm/run-arm64/'s and test/asm/a64i/'s programs on a64i from 
 	bin/a64i check
 a64i-record: ## a64i's check recorded into test/asm/a64i-results-arm64.edn (bin/a64i check --record)
 	bin/a64i check --record
+a64i-table-check: ## goi's checker over a64i's packages in linux/arm64, the package header's :init-order held to it, with its control (bin/a64i table-check; ARS70 (a))
+	bin/a64i table-check
 x86i-light: ## x86i, the x86-64 integer machine (AX5.2): its light driver built alone by TamaGo's go into .tmp/x86i/x86i (bin/repr-asm x86i light)
 	bin/repr-asm x86i light
 x86i-run: ## a static x86-64 executable run on x86i: its status, or 128 + the signal (bin/repr-asm x86i run EXE [ARG...]; EXE=..., ARGS=...)
