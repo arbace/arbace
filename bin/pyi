@@ -158,7 +158,12 @@
 #                                  (WORK/aot/bin/lt/MODULE; RUN/aot-compile.tsv: seconds, peak KB, built|refused|no-build;
 #                                  a module not built is not run; RUN/MODULE.mem: each driver run's busybox time -v), in
 #                                  WORK/check/run-aot; judged against
-#                                  PYI_CHECK_AOT_LIB_RECORD (none committed: unset, no regressions; --record writes only there)
+#                                  PYI_CHECK_AOT_LIB_RECORD (none committed: unset, no regressions; --record writes only there);
+#                                  queue 284: the drivers' children (sys.executable: script_helper, subprocess) run by the
+#                                  compiled launcher (tools/pyi/launcher.py, WORK/aot/bin/python3), not pyi on goi
+#                                  (PYI_AOT_LAUNCHER=0: on goi as before)
+#   bin/pyi launcher               queue 284: the compiled launcher (tools/pyi/launcher.py by pyi's AOT) built when stale; prints its
+#                                  wrapper, a sys.executable that runs CPython's command line compiled (check --aot --lib-test's)
 #   bin/pyi golden                 queue 247: the programs' own verdict: test/python/golden/ID.out is a program's expected stdout, reviewed
 #                                  line by line against the Language Reference and the library docs (review-*.edn: the status, the digest
 #                                  of the reviewed text, entries [LINES SECTIONS BASIS WHY], the implementation-defined lines named); checks
@@ -271,6 +276,24 @@ judge_verdict() { if [ -n "${PYI_VERDICT:-}" ]; then echo "$PYI_VERDICT"; elif [
 # runner_exe: tools/pyi/libtest_all.py compiled by pyi's AOT into WORK/aot/bin/p_libtest_all, kept by the runtime's key,
 # the generator's digest and the script's (compiled again when one changes); prints its path. Its progress on stderr
 runner_exe() { script_exe "$root/tools/pyi/libtest_all.py"; }
+# launcher_py (queue 284, 279's DECISION (a)): the compiled launcher, tools/pyi/launcher.py compiled by pyi's AOT (script_exe),
+# and its wrapper WORK/aot/bin/python3, sys.executable of a compiled Lib/test driver: CPython's command line by bin/pyi python
+# (cmd_python), the program run by the launcher's executable, not pyi on goi (a child's start about 3 s where goi's took 30 s
+# and more). The paths are written into the wrapper, so a child started with an empty environment starts compiled too.
+# Prints the wrapper's path
+launcher_py() {
+  local exe w="$AOT/bin/python3" arch
+  exe=$(script_exe "$root/tools/pyi/launcher.py") || return 1
+  arch=$(uname -m)
+  # platform.libc_ver(sys.executable) reads the next line as tools/pyi/python3's (test.support.linked_to_musl)
+  printf '#!/bin/sh
+# bin/pyi'"'"'s compiled launcher (queue 284): pyi'"'"'s C library semantics are musl'"'"'s, ld-musl-%s.so.1
+PYI_LAUNCHER=%q PYI_LAUNCHER_PY=%q PYI_LAUNCHER_COMPILER=%q exec %q python "$@"
+' \
+    "$arch" "$exe" "$w" "$AOT/compiler.sh" "$root/bin/pyi" > "$w.$$"
+  chmod +x "$w.$$"; mv "$w.$$" "$w"
+  echo "$w"
+}
 # script_exe SCRIPT (queue 240): a tool's Python script (tools/pyi, tools/pydump) compiled by pyi's AOT into
 # WORK/aot/bin/p_NAME, kept by the runtime's key, the generator's digest and the script's; prints its path
 script_exe() {
@@ -663,7 +686,7 @@ cmd_run() {
 cmd_python() {
   local code="" mod="" file="" have="" xopts="" noenv="" safe=0
   # sys.orig_argv (queue 242): the executable and the command line as given, joined by the unit separator
-  local oa="${PYI_EXECUTABLE:-$root/tools/pyi/python3}" oarg
+  local oa="${PYI_LAUNCHER_PY:-${PYI_EXECUTABLE:-$root/tools/pyi/python3}}" oarg
   for oarg in "$@"; do oa+=$'\x1f'"$oarg"; done
   export PYI_ORIG_ARGV="$oa"
   while [ $# -gt 0 ]; do
@@ -754,6 +777,13 @@ PYI_M
   if [ -n "$xopts" ]; then export PYI_XOPTIONS="$xopts"; else unset PYI_XOPTIONS; fi
   if [ -n "$noenv" ]; then export PYI_IGNORE_ENV=1; else unset PYI_IGNORE_ENV; fi
   export PYI_SAFE_PATH=$safe
+  # the compiled launcher (queue 284; its wrapper WORK/aot/bin/python3 sets PYI_LAUNCHER, launcher_py): the program run by
+  # tools/pyi/launcher.py's executable, PYI_AOT_MAIN naming it (AotMain compiles its source at run time), sys.executable
+  # the wrapper, so the child's children start compiled too; no executable (a runtime change since): pyi on goi
+  if [ -n "${PYI_LAUNCHER:-}" ] && [ -x "$PYI_LAUNCHER" ]; then
+    export PYI_EXECUTABLE="$PYI_LAUNCHER_PY" PYI_AOT_COMPILER="$PYI_LAUNCHER_COMPILER" PYI_AOT_MAIN="$src"
+    exec "$PYI_LAUNCHER" "$argv0" "$@"
+  fi
   ARBACE_PATH="$root:$root/x509roots" GOMEMLIMIT=${PYI_GOMEMLIMIT:-3GiB} GOMAXPROCS=${PYI_THREADS:-4} \
     exec "$(arbace_exe)" -m arbace.python run ${dump[@]+"${dump[@]}"} --file "$src" --lib "$lib" ${site_args[@]+"${site_args[@]}"} --argv0 "$argv0" -- "$@"
 }
@@ -1332,6 +1362,10 @@ cmd_check_lib() {
     # a compiled driver is a compiled program: bin/pyi run's environment (pyi_env: sys.executable tools/pyi/python3, so
     # script_helper's and subprocess's children start pyi as bin/pyi run's do; it was '': "[Errno 13] Permission denied")
     [ -z "$drv$drvdir" ] || pyi_env
+    # queue 284: the drivers' children by the compiled launcher (launcher_py), sys.executable its wrapper
+    if [ -n "$drvdir" ] && [ "${PYI_AOT_LAUNCHER:-1}" != 0 ]; then
+      local lpy; lpy=$(launcher_py) || return 1; export PYI_EXECUTABLE="$lpy"
+    fi
     PYI_LIB_TEST_DRIVER_EXE="$drv" PYI_LIB_TEST_DRIVER_DIR="$drvdir" PYI_AOT_COMPILER="${drv:+$AOT/compiler.sh}${drvdir:+$AOT/compiler.sh}" PYI_LIB_TEST_COVER_TESTS="$ctests" \
     PYI_LIB_TEST_ONLY="${only:+$WORK/check-only.txt}" PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
       $runner run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
@@ -2374,6 +2408,7 @@ case "${1:-}" in
   runtime) shift; mkdir -p "$WORK"; cmd_runtime "$@" ;;
   aot) shift; mkdir -p "$WORK"; cmd_aot "$@" ;;
   aot-compile) shift; mkdir -p "$WORK"; aot_module >&2; aot_compile "$@" ;;
+  launcher) shift; mkdir -p "$WORK"; [ $# = 0 ] || die "usage: bin/pyi launcher"; launcher_py ;;
   bench) shift; mkdir -p "$WORK"; cmd_bench "$@" ;;
   check) shift; mkdir -p "$WORK"; if [ "${1:-}" = --aot ]; then shift; cmd_check_aot "$@"; else cmd_check_lib "$@"; fi ;;
   divergences) shift; mkdir -p "$WORK"; cmd_divergences "$@" ;;
