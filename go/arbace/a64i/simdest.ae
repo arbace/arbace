@@ -1,0 +1,464 @@
+(in-ns 'go.arbace.a64i) (go/file "simdest.go" :imports [
+
+    ^{:line 3} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "AR14 (ARS68 (a)): the rest of ARMv8.0's Advanced SIMD and FP, OpVEST. Sys is vestNames' index: 0-2 two-register miscellaneous\n(FP) (frecpe, frsqrte: vector and scalar; frecpx: scalar), 3-4 three same (FP) (frecps, frsqrts: vector and scalar), 5-6\ntwo-register miscellaneous (urecpe, ursqrte: 2s and 4s), 7-10 across lanes (FP) (fmaxnmv, fminnmv, fmaxv, fminv: 4s), 11 fmov's\nvector immediate (Imm the element's bits; 2s, 4s, 2d). Size is the element's, Sf Q, S the scalar form. The estimates are the Arm\nARM's (FPRecipEstimate, FPRSqrtEstimate, RecipEstimate, RecipSqrtEstimate, UnsignedRecipEstimate, UnsignedRSqrtEstimate,\nFPRecpX, FPRecipStepFused, FPRSqrtStepFused) without FEAT_RPRES (FPCR.AH is RES0). Beside them, in the FP classes: fcvt to and\nfrom half precision (OpFCVT with Size or Amount 1; FPCR.AHP refused) and fmov to and from a register's upper doubleword\n(OpFMOVG with Imm 1). FP16's forms (FEAT_FP16) are not claimed: they stay :unimplemented.\n"} vestNames (lit (array ... string) "frecpe" "frsqrte" "frecpx" "frecps" "frsqrts" "urecpe" "ursqrte" "fmaxnmv" "fminnmv" "fmaxv" "fminv" "fmov"))
+
+
+^{:go/end 91} (go/func decodeVEST "decodeVEST is the instructions' words; false when the word is another instruction (the FP and SIMD decoders go on).\n" [^uint32 w] :results [Inst string bool]
+  (let [(values rd rn rm) (values (conv uint8 (bf w 4 0)) (conv uint8 (bf w 9 5)) (conv uint8 (bf w 20 16)))]
+    (when (== (bit-and w 0xff3e7c00) 0x1e224000)
+      (let [(values ft opc) (values (bf w 23 22) (bf w 16 15))]
+        (switch
+          (case [(and (== ft 3) (<= opc 1))]
+            (return (lit Inst :Op OpFCVT :Size 1 :Amount (+ (conv uint8 opc) 2) :Rd rd :Rn rn) "" true))
+          (case [(== ft 3)]
+            (return (lit Inst) undef true))
+          (case [(and (<= ft 1) (== opc 3))]
+            (return (lit Inst :Op OpFCVT :Size (+ (conv uint8 ft) 2) :Amount 1 :Rd rd :Rn rn) "" true)))
+
+        (return (lit Inst) "" false)))
+
+    (when (== (bit-and w 0xfffefc00) 0x9eae0000)
+      (return (lit Inst :Op OpFMOVG :Sf true :Size 3 :Rd rd :Rn rn :Ext (conv uint8 (- 1 (bf w 16 16))) :Imm 1) "" true))
+
+    (when (!= (bf w 31 31) 0)
+      (return (lit Inst) "" false))
+
+    (let [(values q u a sz) (values (== (bf w 30 30) 1) (bf w 29 29) (bf w 23 23) (bf w 22 22))
+        ^{:line 37} scalar (== (bf w 28 28) 1)]
+      (when (and scalar (not q))
+        (return (lit Inst) "" false))
+
+      (switch
+        (case [(and (== (bf w 27 24) 14) (== (bf w 21 17) 16) (== (bf w 11 10) 2) (== a 1))]
+          (let [opc (bf w 16 12)
+              ^{:line 44} k -1]
+            (switch
+              (case [(== opc 29)]
+                (set! k (conv int u)))
+              (case [(and (== opc 31) (== u 0) scalar)]
+                (set! k 2))
+              (case [(and (== opc 28) (not scalar))]
+                (set! k (+ 5 (conv int u)))))
+
+            (when (< k 0)
+              (return (lit Inst) "" false))
+
+            (when (>= k 5)
+              (when (== sz 1)
+                (return (lit Inst) undef true))
+
+              (return (lit Inst :Op OpVEST :Sf q :Size 2 :Rd rd :Rn rn :Sys (conv uint32 k)) "" true))
+
+            (when (and (not scalar) (== sz 1) (not q))
+              (return (lit Inst) undef true))
+
+            (return (lit Inst :Op OpVEST :Sf (and q (not scalar)) :S scalar :Size (+ (conv uint8 sz) 2) :Rd rd :Rn rn :Sys (conv uint32 k)) "" true)))
+        (case [(and (== (bf w 27 24) 14) (== (bf w 21 21) 1) (== (bf w 15 10) 63) (== u 0))]
+          (when (and (not scalar) (== sz 1) (not q))
+            (return (lit Inst) undef true))
+
+          (return (lit Inst :Op OpVEST :Sf (and q (not scalar)) :S scalar :Size (+ (conv uint8 sz) 2) :Rd rd :Rn rn :Rm rm :Sys (+ 3 a)) "" true))
+        (case [(and (not scalar) (== (bf w 27 24) 14) (== (bf w 21 17) 24) (== (bf w 11 10) 2) (== u 1) ^:go/paren (or (== (bf w 16 12) 12) (== (bf w 16 12) 15)))]
+          (when (or (== sz 1) (not q))
+            (return (lit Inst) undef true))
+
+          (let [k (+ 7 a)]
+            (when (== (bf w 16 12) 15)
+              (set! k + 2))
+
+            (return (lit Inst :Op OpVEST :Sf true :Size 2 :Rd rd :Rn rn :Sys k) "" true)))
+        (case [(and (== (bf w 28 19) 480) (== (bf w 15 10) 61))]
+          (let [imm8 (bit-or (<< (bf w 18 16) 5) (bf w 9 5))]
+            (when (== u 1)
+              (when (not q)
+                (return (lit Inst) undef true))
+
+              (return (lit Inst :Op OpVEST :Sf true :Size 3 :Rd rd :Imm (conv int64 (vfpExpandImm imm8 3)) :Sys 11) "" true))
+
+            (return (lit Inst :Op OpVEST :Sf q :Size 2 :Rd rd :Imm (conv int64 (vfpExpandImm imm8 2)) :Sys 11) "" true))))
+
+      (return (lit Inst) "" false))))
+
+
+
+
+^{:go/end 174} (go/func lowerVEST "lowerVEST is the instructions' forms: frecpe v0.4s, v1.4s; frecpx d0, d1; frecps s0, s1, s2; fmaxv s0, v1.4s; fmov v0.2d,\n#1.0; fcvt h0, s1; fmov x0, v1.d[1]; false when the form is not one.\n" [^string m ^{:tag (slice (* Sx))} ops] :results [Inst bool]
+  (when (and (== m "fcvt") (== (len ops) 2))
+    (let [(values d dsz dok) (fpReg (aget ops 0))
+        (values n nsz nok) (fpReg (aget ops 1))]
+      (when (or (not dok) (not nok) ^:go/paren (and (!= dsz 1) (!= nsz 1)))
+        (return (lit Inst) false))
+
+      (when (== dsz nsz)
+        (ferr "fcvt of the same type"))
+
+      (return (lit Inst :Op OpFCVT :Size nsz :Amount dsz :Rd d :Rn n) true)))
+
+  (when (and (== m "fmov") (== (len ops) 2))
+    (when [(values e ok) (asVec (aget ops 1))] (and ok (== (.-kind e) \e))
+      (when (or (!= (.-size e) 3) (!= (.-idx e) 1))
+        (ferr "fmov of %s" (aget ops 1)))
+
+      (let [g (mustReg (aget ops 0))]
+        (when (not (.-x g))
+          (ferr "fmov of a w register and %s" (aget ops 1)))
+
+        (return (lit Inst :Op OpFMOVG :Sf true :Size 3 :Rd (.-n g) :Rn (.-n e) :Ext 1 :Imm 1) true)))
+
+    (when [(values e ok) (asVec (aget ops 0))] (and ok (== (.-kind e) \e))
+      (when (or (!= (.-size e) 3) (!= (.-idx e) 1))
+        (ferr "fmov of %s" (aget ops 0)))
+
+      (let [g (mustReg (aget ops 1))]
+        (when (not (.-x g))
+          (ferr "fmov of a w register and %s" (aget ops 0)))
+
+        (return (lit Inst :Op OpFMOVG :Sf true :Size 3 :Rd (.-n e) :Rn (.-n g) :Ext 0 :Imm 1) true)))
+
+    (when [(values d ok) (asVec (aget ops 0))] (and ok (== (.-kind d) \v))
+      (when (or (< (.-size d) 2) ^:go/paren (and (== (.-size d) 3) (not (.-q d))))
+        (ferr "fmov of %s" (aget ops 0)))
+
+      (return (lit Inst :Op OpVEST :Sf (.-q d) :Size (.-size d) :Rd (.-n d) :Imm (conv int64 (fpBits (fpConst (aget ops 1)) (.-size d))) :Sys 11) true))
+
+    (return (lit Inst) false))
+
+  (let [k (nameIndex (subslice vestNames _ 11) m)]
+    (when (or (< k 0) (< (len ops) 2) (> (len ops) 3))
+      (return (lit Inst) false))
+
+    (let [d (mustVec (aget ops 0) 0)
+        ^{:line 141} n (mustVec (aget ops 1) 0)]
+      (when (>= k 7)
+        (when (or (!= (len ops) 2) (!= (.-kind d) \s) (!= (.-size d) 2) (!= (.-kind n) \v) (!= (.-size n) 2) (not (.-q n)))
+          (ferr "%s of %s from %s" m (aget ops 0) (aget ops 1)))
+
+        (return (lit Inst :Op OpVEST :Sf true :Size 2 :Rd (.-n d) :Rn (.-n n) :Sys (conv uint32 k)) true))
+
+      (let [three (or (== k 3) (== k 4))]
+        (when (!= three (== (len ops) 3))
+          (ferr "%s's operands" m))
+
+        (when (or (== (.-kind d) \e) (!= (.-kind n) (.-kind d)) (!= (.-size n) (.-size d)) (!= (.-q n) (.-q d)) (< (.-size d) 2))
+          (ferr "%s of %s from %s" m (aget ops 0) (aget ops 1)))
+
+        (let [in (lit Inst :Op OpVEST :Sf (.-q d) :S (== (.-kind d) \s) :Size (.-size d) :Rd (.-n d) :Rn (.-n n) :Sys (conv uint32 k))]
+          (when three
+            (let [r (mustVec (aget ops 2) (.-kind d))]
+              (when (or (!= (.-size r) (.-size d)) (!= (.-q r) (.-q d)))
+                (ferr "%s of %s" m (aget ops 2)))
+
+              (set! (.-Rm in) (.-n r))))
+
+          (switch
+            (case [(and (.-S in) (>= k 5))]
+              (ferr "%s of a scalar" m))
+            (case [(and (not (.-S in)) (== k 2))]
+              (ferr "%s of a vector" m))
+            (case [(and (not (.-S in)) (== (.-size d) 3) (not (.-q d)))]
+              (ferr "%s of 1d" m))
+            (case [(and (>= k 5) (!= (.-size d) 2))]
+              (ferr "%s of %s" m (aget ops 0))))
+
+          (return in true))))))
+
+
+
+^{:go/end 186} (go/func vestName "vestName is the coverage's name: v.frecpe.4s, v.frecps.d, v.fmaxv.4s, v.fmov.imm.2d.\n" ^string [^{:tag (* Inst)} in]
+  (let [nm (aget vestNames (.-Sys in))]
+    (when (== (.-Sys in) 11)
+      (set! nm + ".imm"))
+
+    (when (.-S in)
+      (return (+ "v." nm "." (conv string (aget esz (.-Size in))))))
+
+    (+ "v." nm "." (arr (.-Size in) (.-Sf in)))))
+
+
+
+
+^{:go/end 198} (go/func fpNameX "fpNameX is the coverage's name of the FP instructions AR14 adds to the FP classes (fmov.d1.x, fmov.x.d1; fcvt's half\nprecision is OpFCVT's own name, fcvt.h.s).\n" [^{:tag (* Inst)} in] :results [string bool]
+  (when (and (== (.-Op in) OpFMOVG) (== (.-Imm in) 1))
+    (when (== (.-Ext in) 0)
+      (return "fmov.d1.x" true))
+
+    (return "fmov.x.d1" true))
+
+  (return "" false))
+
+
+
+^{:go/breaks [[5 228]] :go/end 229} (go/method execFPX "execFPX executes the FP instructions AR14 adds to the FP classes; false when the instruction is another.\n" ^bool [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (switch
+    (case [(and (== (.-Op in) OpFMOVG) (== (.-Imm in) 1))]
+      (when (not (.fpCheck c in))
+        (return true))
+
+      (if (== (.-Ext in) 0)
+        (aset (aget (.-Q c) (.-Rd in)) 1 (.regw c (.-Rn in) true))
+
+        (.set c (.-Rd in) (aget (aget (.-Q c) (.-Rn in)) 1) true false))
+
+      (return true))
+    (case [(and (== (.-Op in) OpFCVT) ^:go/paren (or (== (.-Size in) 1) (== (.-Amount in) 1)))]
+      (when (!= (bit-and (.-FPCR c) 16777216) 0)
+        (set! (.-PC c) - 4)
+        (.raise c SIGILL (+ ":unimplemented fpcr-fz " (fpName in)))
+        (return true))
+
+      (when (== (bit-and (>> (.-FPCR c) 26) 1) 1)
+        (set! (.-PC c) - 4)
+        (.raise c SIGILL (+ ":unimplemented fpcr-ahp " (fpName in)))
+        (return true))
+
+      (let [(values from to) (values (fmtOfH (.-Size in)) (fmtOfH (.-Amount in)))]
+        (.vset c (.-Rd in) (.fpConvert c from to (bit-and (aget (aget (.-Q c) (.-Rn in)) 0) (emask (.-bits from)))))
+        (return true))))
+
+  false)
+
+
+
+^{:go/end 237} (go/func fmtOfH "fmtOfH is fmtOf with half precision (size 1).\n" ^fpt [^uint8 size]
+  (when (== size 1)
+    (return halfFmt))
+
+  (fmtOf size))
+
+
+
+^{:go/end 272} (go/method execVEST "execVEST executes OpVEST lane by lane (the operands read before the destination is written).\n" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [k (aget vestNames (.-Sys in))]
+    (when (and (!= k "fmov") (!= k "urecpe") (!= k "ursqrte") (not (.fpCheck c in)))
+      (return))
+
+    (let [t (fmtOf (.-Size in))
+        ^{:line 246} e (.-bits t)
+        ^{:line 247} n (/ 64 (conv int e))]
+      (when (.-Sf in)
+        (set! n (/ 128 (conv int e))))
+
+      (when (.-S in)
+        (set! n 1))
+
+      (let [(values a b) (values (aget (.-Q c) (.-Rn in)) (aget (.-Q c) (.-Rm in)))
+          ^{:line 255 :tag (array 2 uint64)} r (zero (array 2 uint64))]
+        (switch
+          (case [(== k "fmov")]
+            (for [i 0] (< i n) (inc! i)
+              (setLane (addr r) i e (conv uint64 (.-Imm in)))))
+
+          (case [(strings/HasSuffix k "v")]
+            (let [op (aget (lit (map string uint32) ["fmaxv" 4] ["fminv" 5] ["fmaxnmv" 6] ["fminnmv" 7]) k)
+                ^{:line 263} hi (.fpMinMax c t op (lane a 2 e) (lane a 3 e))
+                ^{:line 264} lo (.fpMinMax c t op (lane a 0 e) (lane a 1 e))]
+              (setLane (addr r) 0 e (.fpMinMax c t op lo hi))))
+          (default
+            (for [i 0] (< i n) (inc! i)
+              (setLane (addr r) i e (.vestLane c k t (lane a i e) (lane b i e))))))
+
+
+        (aset (.-Q c) (.-Rd in) r)))))
+
+
+
+^{:go/end 297} (go/method vestLane "vestLane is one lane of the estimates and their steps.\n" ^uint64 [^{:tag (* CPU)} c ^string k ^fpt t ^uint64 a ^uint64 b]
+  (switch k
+    (case ["frecpe"]
+      (return (.fpRecipEstimate c t a)))
+    (case ["frsqrte"]
+      (return (.fpRSqrtEstimate c t a)))
+    (case ["frecpx"]
+      (return (.fpRecpX c t a)))
+    (case ["frecps"]
+      (return (.fpStepFused c t a b false)))
+    (case ["frsqrts"]
+      (return (.fpStepFused c t a b true)))
+    (case ["urecpe"]
+      (when (== (>> a 31) 0)
+        (return 4294967295))
+
+      (return (<< (recipEstimate (>> a 23)) 23))))
+
+  (when (== (>> a 30) 0)
+    (return 4294967295))
+
+  (<< (recipSqrtEstimate (>> a 23)) 23))
+
+
+
+^{:go/end 304} (go/func recipEstimate "recipEstimate is RecipEstimate: a (256 to 511, 0.5 to 1.0 in steps of 1/512) to its reciprocal's estimate (256 to 511).\n" ^uint64 [^uint64 a]
+  (set! a (+ (* a 2) 1))
+  (let [b (/ (<< 1 19) a)]
+    (/ (+ b 1) 2)))
+
+
+
+^{:go/end 319} (go/func recipSqrtEstimate "recipSqrtEstimate is RecipSqrtEstimate: a (128 to 511, 0.25 to 1.0) to its reciprocal square root's estimate (256 to 511).\n" ^uint64 [^uint64 a]
+  (if (< a 256)
+    (set! a (+ (* a 2) 1))
+    (do
+      (set! a (<< (>> a 1) 1))
+      (set! a (* (+ a 1) 2))))
+
+  (let [b (conv uint64 512)]
+    (while (< (* a (+ b 1) (+ b 1)) (<< 1 28))
+      (inc! b))
+
+    (/ (+ b 1) 2)))
+
+
+
+^{:go/end 324} (go/func fraction52 "fraction52 is an operand's fraction as FPRecipEstimate takes it: 52 bits, a single's shifted up by 29.\n" ^uint64 [^fpt t ^uint64 a]
+  (<< (.frac t a) (- 52 (.-fbits t))))
+
+
+
+^{:go/end 382} (go/method fpRecipEstimate "fpRecipEstimate is FPRecipEstimate (N 32 and 64; FPCR.FZ refused before).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a]
+  (when [(values r ok) (.processNaNs c t a)] ok
+    (return r))
+
+  (let [sign (.sign t a)]
+    (switch
+      (case [(.isInf t a)]
+        (return (.zero t sign)))
+      (case [(.isZero t a)]
+        (set! (.-FPSR c) bit-or fpDZC)
+        (return (.inf t sign))))
+
+    (let [exp (conv int (.exp t a))
+        ^{:line 340} fraction (fraction52 t a)]
+      (when (and (== exp 0) (== (>> fraction 50) 0))
+        (let [up false]
+          (switch (.rmode c)
+            (case [0]
+              (set! up true))
+            (case [1]
+              (set! up (not sign)))
+            (case [2]
+              (set! up sign)))
+
+          (set! (.-FPSR c) bit-or (bit-or fpOFC fpIXC))
+          (when up
+            (return (.inf t sign)))
+
+          (return (.max t sign))))
+
+      (let [^:const ^{:val 4503599627370495} m52 (- (<< 1 52) 1)]
+        (when (== exp 0)
+          (if (== (bit-and (>> fraction 51) 1) 0) (do
+              (set! exp -1)
+              (set! fraction (bit-and (<< fraction 2) m52)))
+
+            (set! fraction (bit-and (<< fraction 1) m52))))
+
+
+        (let [resultExp (- 2045 exp)]
+          (when (== (.-bits t) 32)
+            (set! resultExp (- 253 exp)))
+
+          (set! fraction (<< (bit-and (recipEstimate (bit-or 256 (>> fraction 44))) 255) 44))
+          (cond (== resultExp 0)
+            (set! fraction (bit-or (<< 1 51) (>> fraction 1)))
+            (== resultExp -1) (do
+              (set! fraction (bit-or (<< 1 50) (>> fraction 2)))
+              (set! resultExp 0)))
+
+          (let [r (bit-or (<< (conv uint64 resultExp) (.-fbits t)) (>> fraction (- 52 (.-fbits t))))]
+            (when sign
+              (set! r bit-or ^uint64 (<< 1 (- (.-bits t) 1))))
+
+            ^{:line 381} r))))))
+
+
+
+^{:go/end 417} (go/method fpRSqrtEstimate "fpRSqrtEstimate is FPRSqrtEstimate (N 32 and 64).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a]
+  (when [(values r ok) (.processNaNs c t a)] ok
+    (return r))
+
+  (switch
+    (case [(.isZero t a)]
+      (set! (.-FPSR c) bit-or fpDZC)
+      (return (.inf t (.sign t a))))
+    (case [(.sign t a)]
+      (return (.invalid c t)))
+    (case [(.isInf t a)]
+      (return (.zero t false))))
+
+  (let [exp (conv int (.exp t a))
+      ^{:line 399} fraction (fraction52 t a)
+      ^:const ^{:line 400 :val 4503599627370495} m52 (- (<< 1 52) 1)]
+    (when (== exp 0)
+      (while (== (bit-and (>> fraction 51) 1) 0)
+        (set! fraction (bit-and (<< fraction 1) m52))
+        (dec! exp))
+
+      (set! fraction (bit-and (<< fraction 1) m52)))
+
+    (let [scaled (bit-or 256 (>> fraction 44))]
+      (when (== (bit-and exp 1) 1)
+        (set! scaled (bit-or 128 (>> fraction 45))))
+
+      (let [resultExp (/ (- 3068 exp) 2)]
+        (when (== (.-bits t) 32)
+          (set! resultExp (/ (- 380 exp) 2)))
+
+        (bit-or (<< (conv uint64 resultExp) (.-fbits t)) (<< (bit-and (recipSqrtEstimate scaled) 255) (- (.-fbits t) 8)))))))
+
+
+
+^{:go/end 431} (go/method fpRecpX "fpRecpX is FPRecpX: the exponent inverted, the fraction cleared (a zero's or a subnormal's exponent the largest finite's).\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a]
+  (when [(values r ok) (.processNaNs c t a)] ok
+    (return r))
+
+  (let [s (bit-and a ^uint64 (<< 1 (- (.-bits t) 1)))
+      ^{:line 425} all (- (<< (conv uint64 1) (.-ebits t)) 1)
+      ^{:line 426} ex (.exp t a)]
+    (when (== ex 0)
+      (return (bit-or s (<< (- all 1) (.-fbits t)))))
+
+    (bit-or s (<< (bit-and (bit-not ex) all) (.-fbits t)))))
+
+
+
+
+^{:go/end 465} (go/method fpStepFused "fpStepFused is FPRecipStepFused (2 - a*b) and, `sqrt`, FPRSqrtStepFused ((3 - a*b) / 2): a negated first (a NaN's sign too),\none rounding.\n" ^uint64 [^{:tag (* CPU)} c ^fpt t ^uint64 a ^uint64 b ^bool sqrt]
+  (set! a (.neg t a))
+  (when [(values r ok) (.processNaNs c t a b)] ok
+    (return r))
+
+  (let [(values ia ib za zb) (values (.isInf t a) (.isInf t b) (.isZero t a) (.isZero t b))
+      ^{:line 441} k (conv int64 2)]
+    (when sqrt
+      (set! k 3))
+
+    (when (or ^:go/paren (and ia zb) ^:go/paren (and za ib))
+      (let [v (.SetInt64 (hp) k)]
+        (when sqrt
+          (.SetMantExp v v -1))
+
+        (let [(values r _) (.round t v 0)]
+          (return r))))
+
+    (when (or ia ib)
+      (return (.inf t (!= (.sign t a) (.sign t b)))))
+
+    (let [x (.Mul (hp) (.exact t a) (.exact t b))]
+      (.Add x x (.SetInt64 (hp) k))
+      (when sqrt
+        (.SetMantExp x x -1))
+
+      (when (== (.Sign x) 0)
+        (return (.zero t (== (.rmode c) 2))))
+
+      (.rounded c t x))))
