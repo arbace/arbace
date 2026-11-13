@@ -5255,3 +5255,39 @@ interface types drop kind arguments and over-applied zero-parameter synonyms; th
 classing the library faults (rejected: each was general and small); a matcher-based pattern-synonym desugaring now (left to
 HF10-P36: the local inlining is what the generics path needs). Proposals HF10-P35 (generics/ into the run corpora with GHC's runs at
 the window), P34 (b) (-O's decided strictness, left), P36. Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P34".
+
+## 2026-11-13: HF10-P36 (a), pattern-synonym matchers and builders; HF10-P35 (a), generics/ in :testsuite-core (branch `hs-p36`, from `mac/hs-p34` 385276b4f)
+
+The user decided both (2026-11-12). Read from GHC 9.14.1's source tarball (the corpus pin `ghc-9.14.1-src.tar.xz`, tag
+ghc-9.14.1-release): `compiler/GHC/Tc/TyCl/PatSyn.hs` (tcPatSynMatcher, mkPatSynBuilder, tcPatSynBuilderBind, tcPatToExpr, Note
+[Pragmas for pattern synonyms]), `compiler/GHC/HsToCore/Match.hs` (matchPatSyn, sameGroup), `compiler/GHC/HsToCore/Utils.hs`
+(mkPatSynCase), `testsuite/driver/testlib.py` (compare_outputs); BSD-3-Clause, the notice already in the files and LICENSE.md.
+Built in `arbace/repr/haskell/typecheck.ae` and `desugar.ae`: every synonym gets its matcher `$mP` (req dictionaries, scrutinee,
+continuation, failure; the continuation on `(# #)` with neither arguments nor provided dictionaries) and, when bidirectional, its
+builder `$bP` (the where clause, or the pattern as an expression; the `(# #)` dummy for an unlifted nullary one), the builders
+checked after all bindings as GHC's later pass does; every `psyn` pattern is desugared by `match-syn` into one matcher call per
+group of equations on the same synonym at the same required evidence, hs-p34's same-module shortcut removed. On the way: a
+signature's variables in the required context are universal; an inferred synonym gets its required context (the quantified wanteds)
+and its provided context and existentials (the dictionaries its constructors bind, minimal by superclasses); record synonyms'
+construction, update (through matcher and builder, type-changing) and selectors (through the matcher, contexts too) are built, their
+selectors' types entered first, and a synonym's group that mentions no value of the module is typed before the others (the
+renamer's order missed record fields); the interface reader derives `$mP`/`$bP`'s types for imported synonyms, the judge leaves them
+out of the facts; a provided constraint with no type variable is not given beyond its alternative (it solved the scrutinee's own
+`KnownNat 7`). No INLINE pragma is added: GHC 9.14.1 adds one only for a user's pragma. COMPLETE pragmas change no generated code a
+run can see (only the matcher's unreachable fail alternative). Results (one run at a time, under 1.2 GB): ghc-internal lib-check 0
+worse (facts 20,699 of 20,891 as before), lib-stg 5,734 of 7,789 bindings equal (was 5,705 of 7,757), 0 worse, 33 better (TypeLits
+14 → 30, TypeNats 5 → 14, IO.Encoding.Types 15 → 22, Natural, Tuple, Typeable.Internal, Exception); base 0 worse, 582 of 1,072;
+deepseq/array/stm as recorded. The testsuite's `patsyn/should_run`: 14 single-module run tests, all eligible, 13 pass on the own
+libraries by their golden stdout (3 before); T14228 fails on an unboxed sum built as a function's argument (pre-existing in tostg:
+the same program without synonyms fails; HF10-P37 proposed; a first tostg change was reverted, hsi's sum binders are not
+unarised); T13688 needs TemplateHaskell. A cross-module program (ghc-internal's SNat, SSymbol, Con, base's NatS#) passes.
+HF10-P35: `:testsuite-core` takes `generics` (708 run tests); GHC's runs are not recorded, so `bin/hsi own-verdicts` writes
+`test/haskell/own-verdicts-pending.tsv` (the testsuite-core run tests without a record that ship `NAME.stdout`), which `bin/hsi
+check` judges by the shipped files as the testsuite driver compares (the last newline not compared), and a pending program that
+needs GHC's STG is `:oracle-pending` (not run, not failing; ORS10 (a)'s `:unrecorded` unchanged for every other program): the five
+single-module ones pass on the own path, T5462Yes1/2 are `:oracle-pending`. The GHC commands are written as night commands (not
+run). Alternatives considered: inlining imported synonyms' patterns through the interfaces (HF10-P36 (b), rejected by the
+decision); an INLINE unfolding on every matcher (rejected: not GHC 9.14.1's rule); classing T5462Yes1/2 as `:unrecorded` in
+divergences (rejected: ORS10 (a)); leaving generics/ out of the plan until recorded (rejected: the five own-path programs would go
+unchecked). Proposals HF10-P37 (unboxed sums as arguments), P38 (patsyn/ in the run corpora), P39 (`$tc'Many`). Details:
+doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P36, P35".

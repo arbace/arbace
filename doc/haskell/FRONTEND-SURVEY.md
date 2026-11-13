@@ -3862,3 +3862,149 @@ branch is in `next`; the records' re-recording (P29's night commands) takes this
   matcher `$mP` is neither built nor called; the pattern binds nothing). (a) **build `$mP` (and `$bP`) as GHC.Tc.TyCl.PatSyn does and
   desugar `psyn` to a matcher call (GHC.HsToCore.Match's matchPatSyn)**, judged by lib-stg (ghc-internal's synonyms) and the run
   corpora's PatternSynonyms programs; (b) inline imported synonyms' patterns through the own interfaces. *Recommended: (a).*
+
+## Decided (the user, 2026-11-12: HF10-P36, HF10-P35)
+
+HF10-P36 (a): build pattern-synonym matchers and builders as GHC does (`$mP` with its continuation and failure arguments, `$bP`;
+bidirectional, explicitly bidirectional with where clauses, unidirectional; record pattern synonyms; COMPLETE pragmas' effect on
+the checker if any; required and provided contexts with their dictionaries; across modules through the own interfaces), and
+desugar every `psyn` pattern through its matcher, replacing hs-p34's same-module shortcut. HF10-P35 (a): add `generics/` to
+`:testsuite-core`: the corpus entry and the program list, judged by each test's own `.stdout` now; GHC's recorded runs wait for
+the oracle window (the command written, GHC not run).
+
+## As built: HF10-P36, P35 (2026-11-13, branch `hs-p36`, from `mac/hs-p34` 385276b4f)
+
+By an agent during the RERUN of 2026-11-13 (a serial `bin/gate --full` on `next`): one run at a time, each process under 1.5 GiB
+(GOMEMLIMIT 1000MiB), MemAvailable at least 12 GiB beyond the run; stage 0; no GHC, no gate run, no network. Read from GHC 9.14.1's
+source tarball (`ghc-9.14.1-src.tar.xz`, the corpus pin): `compiler/GHC/Tc/TyCl/PatSyn.hs` (tcPatSynMatcher, mkPatSynBuilder,
+tcPatSynBuilderBind, tcPatToExpr, Note [Pragmas for pattern synonyms]), `GHC/HsToCore/Match.hs` (matchPatSyn, sameGroup's
+`PgSyn`), `GHC/HsToCore/Utils.hs` (mkCoSynCaseMatchResult, mkPatSynCase), and `testsuite/driver/testlib.py` (compare_outputs).
+
+**HF10-P36: matchers and builders** (`typecheck.ae`; `desugar.ae`'s `match-syn`):
+
+- **The matcher** `$mP = \req-dictionaries scrut cont fail -> case scrut of PAT -> cont prov-evidence args; _ -> fail (# #)`, the
+  continuation applied to `(# #)` when the synonym has neither arguments nor provided dictionaries (tcPatSynMatcher's `is_unlifted`),
+  its type `forall r univ. req => res -> (forall ex. prov => args -> r) -> ((# #) -> r) -> r` in the environment. No INLINE: GHC
+  9.14.1 adds one only for a user's pragma on the synonym (Note [Pragmas for pattern synonyms]); the -O0 Simplifier inlines a small
+  matcher within its module as GHC's does (TypeLits' symbolVal: `\d _ -> d`, equal to GHC's).
+- **The builder** `$bP`: an explicitly bidirectional synonym's where clause, an implicitly bidirectional one's pattern as an
+  expression (tcPatToExpr: variables, constructors applied, literals, tuples, lists, unboxed sums, parentheses), checked at
+  `forall univ ex. (req, prov) => args -> res`; a function of `(# #)` when the result is unlifted and there are no arguments and no
+  context (need_dummy_arg: unboxed-wrapper's `pattern P1 = 42#`); none for a unidirectional synonym (its name leaves the value
+  environment). The builders are checked after every binding of the module (tcPatSynBuilderBind's later pass: bidir-explicit-scope's
+  builder uses `foo`, which matches on the synonym). An occurrence of the synonym as an expression is `$bP` (applied to `(# #)` when
+  it takes the dummy).
+- **Every `psyn` pattern through its matcher** (matchPatSyn, mkPatSynCase): consecutive equations on the same synonym at the same
+  required evidence one group (sameGroup's `PgSyn` compares the instantiating types: T11224's `PRead` at Int and at [Int] are two
+  groups, one call each), `$mP req-evidence v (\prov-dictionaries args -> the arguments' match) (\(# #) -> fail)`, the other
+  equations' dictionaries renamed to the first's (matchOneConLike's shift). hs-p34's shortcut (a synonym of the module matched as
+  its pattern) is gone.
+- **Contexts.** A signature's implicitly bound variables the required context mentions are universal (Note [The pattern-synonym
+  signature splitting rule]; T11224's `Read a => () => a -> String` took `a` for an existential). An inferred synonym
+  (tcInferPatSynDecl) quantifies its pattern's wanteds as its required context (`pattern P1 <- 0`: `(Eq a, Num a)`, T9783), and its
+  provided context and existentials are the dictionaries and skolems its constructors bind (tcCollectEx; minimal by superclasses,
+  Note [Remove redundant provided dicts]; ex-prov-run's `pattern P x y <- MkT x y`: `Eq b`). A provided constraint with no type
+  variable is not given beyond its alternative (the module's `*skolem-givens*`: `case natSing @7 of SNat -> ...` solved the
+  scrutinee's own `KnownNat 7` by the alternative's dictionary); the instances solve it.
+- **Records.** `P {f = e}` is `$bP` applied to the fields in order; an update `e {f = x}` of synonym fields is GHC's `case e of P x1
+  .. xn -> $bP x1' .. xn'` through the matcher and builder, the result at another instance of the universals (records-poly-update's
+  `Just True {j = A}`); the selectors `\req-dictionaries ds -> case ds of P{f = x} -> x; _ -> recSelError` match through the
+  matcher (a synonym with a context too; a field whose type mentions an existential has none), their types entered with the
+  synonym, before any use. A synonym's group whose pattern mentions no value of the module is typed first (the renamer's order
+  does not see a record synonym's fields as uses of it: records-run's `main` came before `pattern Bi{a, b}`).
+- **Across modules.** The own interfaces carry the synonyms as before (`patsyn` with univ, req, ex, prov, args, res, fields,
+  builder; an inferred one's contexts now filled); the reader enters `$mP`'s and `$bP`'s types from them (and from GHC's
+  interfaces' iface2 forms), the importing module calls them, and the own STG has their bindings (exported as GHC's). The judge's
+  interface facts leave the derived `$m`/`$b` types out (they are no facts of their own).
+- **COMPLETE pragmas.** No effect on the generated code here: GHC's coverage checker only warns, and the one use in code generation,
+  the matcher's `isIrrefutableHsPat` with `irrefutableConLikeTc` (a pattern on the only member of a COMPLETE set needs no `fail`
+  alternative), changes nothing a run can see (the `fail` alternative is then unreachable); the STG differs from GHC's only for a
+  synonym defined by another such synonym (none in ghc-internal or base).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+| step | result | before (hs-p34) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 2 better (as at hs-p34); interface facts 20,699 of 20,891, 112 ours only (was 114), 252 of 265 modules every fact | 20,699 | 0.95 GB, 12m22 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 bindings equal, 0 worse, 33 better | 5,705 of 7,757 | 1.13 GB, 16m03 |
+| lib-check `--package base` | 0 worse, 1 better; interface facts 6,784 of 6,785 | same | 0.72 GB, 4m46 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.71 GB, 4m30 |
+| lib-check `--package deepseq/array/stm` | as recorded; 0 worse each; controls differ | same | 0.54-0.63 GB |
+| lib-stg `--package deepseq/array/stm` | `:ok` (no reference) | same | 0.57-0.62 GB |
+
+ghc-internal's synonyms' modules (lib-stg, bindings equal to GHC's -O0): TypeLits 14 → 30 of 51, TypeNats 5 → 14 of 23, Natural
+26 → 30 of 32, Tuple 66 → 68 of 68, IO.Encoding.Types 15 → 22 of 23, Data.Typeable.Internal 34 → 37 of 73, Exception 2 → 3 of 11:
+the matchers, builders and record selectors GHC has, and their uses.
+
+**The programs.** The testsuite's `patsyn/should_run` run tests (all.T): 14 `compile_and_run` and T13688 (`multimod_compile_and_run`,
+`req_th`: TemplateHaskell quasi-quotes, ineligible); `ghci` and T11985 are GHCi scripts. All 14 are eligible for the own path (one
+module, imports of base alone). Run by hand (`.tmp/p36/ps-run.sh` in the worktree, not committed: the native front end on the own
+interfaces of the run below, hsi on the own libraries) and judged by their own verdict (exit 0, stdout the golden `NAME.stdout`):
+
+| program | before (hs-p34) | after |
+|---|---|---|
+| eval, ex-prov-run, match | pass (the shortcut) | pass |
+| T9783 | fail (an inferred synonym's context unsolved: `Eq`, `Num`) | pass |
+| match-unboxed | fail (status 0, a wrong stdout) | pass |
+| T11224 | fail (`Read a` taken for existential) | pass |
+| T24552, bidir-explicit, bidir-explicit-scope, unboxed-wrapper | fail (no builder: `no binding of main:Main/First`) | pass |
+| records-run, records-poly-update | fail (no field types, no update) | pass |
+| T14228 | fail (no builder) | fail: an unboxed sum built as a function's argument (`foo (# x | #)` once the builder is inlined; the same program without synonyms fails alike, `.tmp/p36/t/S1.hs`): hsi's lambda binder of a sum is one multi-valued binder, not unarised (HF10-P37 below) |
+
+13 of 14 pass (3 before). A cross-module program (`.tmp/p36/t/X1.hs`: a local synonym with a required context at Int and Double,
+an explicitly bidirectional one with a provided `Show b`, ghc-internal's `SNat` (matcher and builder), `SSymbol`, `Con`, base's
+`NatS#`) passes; Type.Reflection's `App` on `Maybe Int` stops in hsi on `$tcMany` (`no binding of ghc-internal:GHC.Internal.Types/$tcMany`:
+the own STG has no Typeable binding of the promoted `'Many`, on hs-p34 too; not the synonym's).
+
+**HF10-P35: generics/ in `:testsuite-core`.** `test/haskell/eval-corpora.edn`'s `:testsuite-core` takes `"generics"` (708 run tests,
+701 before): GFullyStrict, GenNewtype, T10030, T11358, T19819 (`compile_and_run`), T5462Yes1, T5462Yes2 (`multimod_compile_and_run`,
+`req_c`). GHC's runs of them are not recorded, so `bin/hsi own-verdicts` writes beside `own-verdicts.tsv` the list
+`test/haskell/own-verdicts-pending.tsv` (`--record`, `--check`: the testsuite-core run tests without a line in `ref-ghc914.edn` that
+ship `NAME.stdout`): `bin/hsi check` judges those by their shipped files, compared as the testsuite driver compares them
+(compare_outputs after normalise_output's `modify_lines`, which joins the lines: the last newline not compared; T19819's golden
+file lacks it), `:judge :own :pending true`; a pending program that would need GHC's STG (ineligible for the own path, or on the
+pack) is `:oracle-pending`, not run, counted, in no class and not failing the check (ORS10 (a)'s `:unrecorded` stays a failure for
+every other program). The list empties when record-ref records them. On the own path the five single-module tests pass, the two
+multi-module ones are `:oracle-pending`.
+
+### Checks (light, one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above; run twice, the second on the final code, the same numbers) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| patsyn/'s 14 single-module run tests on the own libraries (golden `.stdout`) | 13 pass (T14228: HF10-P37) |
+| the cross-module program X1 (SNat, SSymbol, Con, NatS#, local synonyms with contexts) | pass |
+| `bin/hsi check --libs own --corpus testsuite-core --only` the 40 testsuite-core programs that use synonyms, TypeLits, Typeable or Type.Reflection, generics/'s 7 and arr001 (the control) | exit 0; 48 programs: 44 pass (16 own, 28 pack), AtomicPrimops and foundation in their classes as recorded, T5462Yes1/2 `:oracle-pending`; every other line as `check-hsi-own.edn` records it; 0 unclassed; arr001's control fails as it must; 3m00, 0.91 GB |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five new tars | exit 0; 50 own (49 pass), 13 pack (11 pass), as hs-p34; 0 unclassed; the controls fail as they must; 7m18, 1.03 GB |
+| hsi-essential's command (ARBACE_MEM_GIB=2, 2 jobs) | exit 0: own-verdicts current (587 own, 10 threaded-only, 7 pending); 123 programs, 122 pass, ffi014 `:threaded-way`; 0 unclassed; controls fail as they must; 20m58, 0.85 GB |
+| `bin/hsi check --corpus testsuite-core --only` generics/'s 7 on the pack path | 7 `:oracle-pending`, 0 unclassed (no control in the selection) |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 3m14, 0.59 GB |
+| `bin/gate --full --plan` | exit 0, no table error |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p34`): every changed path is a crop path or a test record |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night).
+
+### Night commands (not run; the oracle window, GHC; in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+1. GHC's runs of generics/ (about a minute of GHC): `bin/hsi record-ref --corpus testsuite-core --only testsuite/generics/GFullyStrict,testsuite/generics/GenNewtype,testsuite/generics/T10030,testsuite/generics/T11358,testsuite/generics/T19819,testsuite/generics/T5462Yes1,testsuite/generics/T5462Yes2`
+   (into `test/haskell/ref-ghc914.edn`), then their -O0 STG: `bin/hsi check --live --dump-only --record-progs --corpus testsuite-core --only` the same ids
+   (haskell-stg-progs, a commit naming `:ghc`'s identity), then `bin/hsi own-verdicts --record` (the pending list empties; the five
+   whose shipped files are GHC's output move to `own-verdicts.tsv`). Light (under 2 GiB, minutes).
+2. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB) are the whole proof over testsuite-core (with generics) and nofib
+   once the branch is in `next`; the records' re-recording (P29's night commands) takes the betters above.
+
+### Proposals
+
+- **HF10-P37 unboxed sums as arguments.** A function's argument of an unboxed sum type is one binder of several representations in
+  tostg's STG (`["x" [:word :L]]`), and a call passing a sum built in place has no unarised form (T14228, `foo (# x | #)`); GHC's
+  Unarise makes the sum's tag and slots separate arguments and binders (unariseFunArgBinder, ubxSumRepType). (a) **unarise sum
+  binders and arguments as unboxed tuples' are (`*multi*`), with mkUbxSum at the parameter's type**; (b) leave it (one testsuite
+  program). *Recommended: (a)*, small.
+- **HF10-P38 patsyn/ in the run corpora.** `patsyn/should_run` is not in `:testsuite-core`; its 14 single-module programs are checked by
+  hand here. (a) **add it as P35 added generics/ (judged by their own verdicts until the oracle window records them; T13688 needs
+  TemplateHaskell, ineligible)**; (b) leave it. *Recommended: (a)*.
+- **HF10-P39 `$tc'Many`.** The own STG lacks the Typeable binding of the promoted `'Many` (`$tcMany`), so `typeRep`'s kind of a
+  function type stops (Type.Reflection's `App` on `Maybe Int`). (a) **name and bind the promoted constructors' TyCon bindings as GHC's
+  mkPrimTypeableTodos/Typeable binds them**; (b) leave it. *Recommended: (a)*, after checking which promoted constructors are missing.

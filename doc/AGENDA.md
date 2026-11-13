@@ -113,7 +113,13 @@ Six crops are above 90 on all three. What the others still need:
   KnownNat/KnownSymbol evidence; data instances by kind named apart; standalone newtype deriving of Monoid (K1 ...)): the five
   single-module `generics/` run tests pass on the own libraries (none before), 12 of 14 compile tests elaborate; ghc-internal's
   lib-stg 5,705 of 7,757 (0 worse), GHC.Internal.Generics errors 9 → 0. HF10-P35 (generics/ into the run corpora), P34 (b), P36
-  (pattern-synonym matchers) proposed. Next: the window (P16's and P17's references), then containers.
+  (pattern-synonym matchers) proposed. P35 and P36 decided (a) (the user, 2026-11-12); `hs-p36` built them: matchers `$mP` and
+  builders `$bP` as GHC.Tc.TyCl.PatSyn makes them, every `psyn` pattern desugared through its matcher (matchPatSyn), inferred
+  synonyms' contexts, record synonyms' construction, update and selectors, across modules through the own interfaces; patsyn/'s 14
+  single-module run tests 13 pass on the own libraries (3 before; T14228: unboxed sums as arguments, HF10-P37); ghc-internal's
+  lib-stg 5,734 of 7,789 (0 worse); generics/ in `:testsuite-core` (708 run tests), judged by their shipped stdout
+  (`own-verdicts-pending.tsv`, `:oracle-pending` where GHC's STG is needed) until the window records GHC's runs. P37-P39 proposed.
+  Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
