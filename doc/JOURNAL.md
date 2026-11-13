@@ -5417,3 +5417,16 @@ test/gate/crops/cpp.edn), the cap per crop (`:budgets :essential-mem-gib-by {:cp
 beside `:essential-mem-gib`); later (b), building the samples' nodes one program per process, may bring it back under 3.
 Considered: (c) io.cpp out of the essential list into the nightly cpp-check. Proofs: test/gate/crops-test.bash ok (the real
 table passes GT9's rules), `bin/gate --full --plan` status 0. (The name CP379 is cpp-s10's iterator_traits decision.)
+
+### 2026-11-13: night 13's failures: three parked by the user's decision, the cheap ones fixed
+
+Night 13 (serial `bin/gate --full` on next 265cab86a, 11-12 17:12 to 11-13 11:49) failed 21 steps; the triage
+(.tmp/night13/triage/TRIAGE.md, read-only) found three that block for days. The user (2026-11-13) chose to park them, as the
+Haskell and Rust round trips were, and advance: `repr-java-roundtrip`'s jdk part (a regression since 11-05: classes 1,081 fail,
+javac's inference errors in the converted jdk forms; not an OOM, nothing killed at 47 GiB), `repr-java-attr`'s jdk part (61.4 GiB
+peak, OOM-killed on this 54.7 GiB host) and `rsi-check-ui` (its IR pack, the oracle tier's rustc, was never made) are
+`:clean-only` until fixed. Fixed here: cpp-dg declared at 6 GiB (dg-error-own peaked 5.1), cpp-lower run with CPPI_DISK_MAX=90 (its
+own guard stopped it at 82%: the gate keeps the disk), C's two stale annotation entries (pr33855.c, pr54559.c: test/repr/c/annot-known.edn,
+gf-misc's note), oi's two slow entries that now pass (parallel/churn, weak-ephe-final/weak_array_par). The rest reruns as-is: the
+Java levels after night 12's disk-full results, hsi-check's three CPU-limit programs, C++'s runtime samples (gf-cpp, merged in
+5ac770072). Considered: fixing the three first (a bisect over the jdk forms since 11-05, attr's memory, the pack: days).
