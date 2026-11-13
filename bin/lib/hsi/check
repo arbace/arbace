@@ -388,6 +388,10 @@ own_ref() {
   [ "${HSI_JUDGE:-}" != ref ] || return 0
   local id=$1 line ex so se d e
   line=$(awk -F'\t' -v i="$id" '$1 == i' "$root/test/haskell/own-verdicts.tsv")
+  # HF10-P35 (a): a testsuite-core test GHC's record does not have yet (own-verdicts-pending.tsv): its shipped files compared
+  # as the testsuite driver compares them (modify_lines' join: the last line's newline not compared), each given one
+  local pending=""
+  [ -n "$line" ] || { line=$(awk -F'\t' -v i="$id" '$1 == i' "$root/test/haskell/own-verdicts-pending.tsv"); pending=1; }
   [ -n "$line" ] || return 0
   IFS=$'\t' read -r _ ex so se <<< "$line"
   case $id in
@@ -396,9 +400,16 @@ own_ref() {
     *) return 0 ;;
   esac
   e=$(printf '' | sha256sum | cut -c1-64)
-  echo "$ex $(sha256sum < "$d/$so" | cut -c1-64) $(if [ "$se" = - ]; then echo "$e"; else sha256sum < "$d/$se" | cut -c1-64; fi)"
+  if [ -n "$pending" ]; then
+    echo "$ex $(awk 1 "$d/$so" | sha256sum | cut -c1-64) $(if [ "$se" = - ]; then echo "$e"; else awk 1 "$d/$se" | sha256sum | cut -c1-64; fi) pending"
+  else
+    echo "$ex $(sha256sum < "$d/$so" | cut -c1-64) $(if [ "$se" = - ]; then echo "$e"; else sha256sum < "$d/$se" | cut -c1-64; fi)"
+  fi
 }
 export -f own_ref
+# oracle_pending ID: success when the program waits for GHC's records at the oracle window (own-verdicts-pending.tsv)
+oracle_pending() { awk -F'\t' -v i="$1" '$1 == i {f = 1} END {exit !f}' "$root/test/haskell/own-verdicts-pending.tsv"; }
+export -f oracle_pending
 
 # ignore_stdout ID: success when all.T gives the test ignore_stdout unconditionally (HES90): the testsuite driver does not
 # compare its stdout, so neither does the judge (status and stderr still are); test/haskell/eval/testsuite-run.edn's
@@ -449,6 +460,10 @@ one() {
     # the record's STG (ORS12): an entry whose key is not this program's is STALE, an absent one UNRECORDED (both :unrecorded, in no class)
     local man=$root/test/haskell/records/haskell-stg-progs.tsv pk
     pk=$(awk -F'\t' -v p="$id/" -v k="$key" 'index($1, p) == 1 {n++; if ($2 != k) bad = 1} END {print (n == 0 ? "none" : (bad ? "stale" : "ok"))}' "$man")
+    # HF10-P35 (a): a test GHC's runs are not recorded for yet runs only from the native front end's STG until the oracle window
+    if [ "$pk" = none ] && oracle_pending "$id"; then
+      echo "{:id \"$id\" :result :oracle-pending $srcs :error \"no GHC record yet (test/haskell/own-verdicts-pending.tsv): bin/hsi record-ref --only, bin/hsi check --live --dump-only --record-progs at the oracle window\"}" > "$res"; return 0
+    fi
     if [ "$pk" != ok ]; then
       echo "{:id \"$id\" :result :unrecorded :error \"$([ "$pk" = none ] && echo UNRECORDED || echo STALE): no current entry in haskell-stg-progs (bin/hsi check --live --dump-only --record-progs)\"}" > "$res"; return 0
     fi
@@ -589,7 +604,9 @@ one() {
   local own; own=$(own_ref "$id")
   if [ -n "$own" ]; then
     # the program's own verdict: its expected status and shipped outputs, the record not read
-    read -r rst rso rse <<< "$own"; tm="$tm :judge :own"
+    local opend; read -r rst rso rse opend <<< "$own"; tm="$tm :judge :own"
+    # HF10-P35 (a): a pending test's outputs compared as the driver compares (the last newline not compared)
+    if [ -n "$opend" ]; then so=$(awk 1 "$o.stdout" | sha256sum | cut -c1-64); se=$(awk 1 "$o.stderr" | sha256sum | cut -c1-64); tm="$tm :pending true"; fi
   else
   if [ -z "$rl" ]; then echo "{:id \"$id\" :result :no-ref $tm}" > "$res"; return 0; fi
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl")
@@ -716,7 +733,7 @@ out=$work/results.edn
   cat "$work"/res/* | sort
 } > "$out"
 total=$(grep -c '^{' "$out" || true)
-for r in pass threaded-way fail hsi skipped no-dump no-ref unrecorded dumped; do
+for r in pass threaded-way fail hsi skipped no-dump no-ref unrecorded oracle-pending dumped; do
   echo "hsi check: $r $(grep -c ":result :$r" "$out" || true)"
 done
 echo "hsi check: $total programs ($out)"
@@ -800,7 +817,7 @@ while IFS= read -r line; do
     echo "hsi check: $id in class $c, but hsi's message is not the class's (\"$cmsg\")"; unclassed=$((unclassed + 1)); continue
   fi
   echo "hsi check: $id in class $c"
-done < <(grep '^{' "$out" | grep -v ':result :pass')
+done < <(grep '^{' "$out" | grep -v ':result :pass' | grep -v ':result :oracle-pending')
 echo "hsi check: $unclassed not passing in no class of test/haskell/divergences$sfx.edn${sfx:+ or test/haskell/divergences.edn}$([ "$libs_set" != own ] || echo " or test/haskell/divergences-own.edn")"
 [ "$libs_set" != own ] || echo "hsi check: own-fallback.txt: $fbad problems"
 unclassed=$((unclassed + fbad))
@@ -830,7 +847,7 @@ while read -r subj refid over; do
   rst=$(sed -n 's/.* :status \([^ ]*\) .*/\1/p' <<< "$rl"); rso=$(sed -n 's/.* :stdout "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   rse=$(sed -n 's/.* :stderr "\([0-9a-f]*\)".*/\1/p' <<< "$rl")
   # a reference with its own verdict is judged by it, as its program is (the own judge's control)
-  ownr=$(own_ref "$refid"); [ -z "$ownr" ] || { read -r rst rso rse <<< "$ownr"; refid="$refid (its own verdict)"; }
+  ownr=$(own_ref "$refid"); [ -z "$ownr" ] || { read -r rst rso rse _ <<< "$ownr"; refid="$refid (its own verdict)"; }
   # status=N: the reference with another status (a control of the status's comparison alone)
   case $over in status=*) rst=${over#status=}; refid="$refid ($over)" ;; esac
   so=$(sha256sum < "$o.stdout" | cut -c1-64); se=$(sha256sum < "$o.stderr" | cut -c1-64)

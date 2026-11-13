@@ -12,6 +12,11 @@
 # others keep the recorded run (0.5: a toolchain's record). No run: the trees and the record are read.
 #   --record   writes the list (by hand, beside a new record-ref)
 #   --check    the list against a fresh computation (exit 1 on a difference); default: prints the counts
+# HF10-P35 (a): beside it, test/haskell/own-verdicts-pending.tsv (the same columns): the run tests of eval-corpora.edn's
+# :testsuite-core directories that GHC's record does not have yet (generics/, added before the oracle window records its runs),
+# each with its shipped NAME.stdout: bin/hsi check judges them by these files alone, as the testsuite driver compares (its
+# modify_lines: the last line's newline not compared), and a run that needs GHC's STG (haskell-stg-progs) is :oracle-pending,
+# not run. The list empties when record-ref records them (then they are own-verdicts.tsv's, or the record's).
 # HES87 (a): beside it, test/haskell/threaded-way.tsv (ID<TAB>WAYS): the testsuite's tests all.T runs only in threaded ways
 # (only_ways, every way a threaded one: threaded1, threaded2, nonmoving_thr, profthreaded) whose recorded normal-way run is not
 # their own verdict (its status not all.T's, or its stdout or stderr not the shipped file, a missing one empty): the
@@ -21,7 +26,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 mode=${1:-}
-ref=$root/test/haskell/ref-ghc914.edn list=$root/test/haskell/own-verdicts.tsv
+ref=$root/test/haskell/ref-ghc914.edn list=$root/test/haskell/own-verdicts.tsv pend=$root/test/haskell/own-verdicts-pending.tsv
 tests=$root/.tmp/hsi/ghc-9.14.1/testsuite/tests nofib=$root/.tmp/hsi/nofib
 [ -d "$tests" ] || "$root/bin/hsi" pins --fetch >&2
 work=$root/.tmp/hsi/own-verdicts; rm -rf "$work"; mkdir -p "$work"
@@ -57,6 +62,24 @@ while IFS= read -r line; do
   own=$((own + 1))
 done < <(grep '^{' "$ref")
 LC_ALL=C sort -o "$work/new.tsv" "$work/new.tsv"
+# HF10-P35 (a): the testsuite-core tests without a recorded run, by their shipped files
+dirs=$(ae -e "(println (apply str (interpose \",\" (get-in (some #(when (= :testsuite-core (:id %)) %) (:corpora (read-string (slurp \"$root/test/haskell/eval-corpora.edn\")))) [:where :dirs]))))")
+ae "$root/test/haskell/eval/run_plan.ae" "$root/test/haskell/eval/testsuite-run.edn" "$tests" "$dirs" 2>> "$work/plan.notes" |
+  awk -F'\t' '{print $1 "\t" $2 "\t" $7 "\t" $8}' > "$work/core.tsv"
+grep -o '^{:id "[^"]*"' "$ref" | sed 's/^{:id "//; s/"$//' | LC_ALL=C sort -u > "$work/recorded.txt"
+: > "$work/pend.tsv"
+while IFS=$'\t' read -r id dir exit name; do
+  grep -qxF "$id" "$work/recorded.txt" && continue
+  d=$tests/$dir; [ -f "$d/$name.stdout" ] || continue
+  se=$name.stderr; [ -f "$d/$se" ] || se=-
+  printf '%s\t%s\t%s\t%s\n' "$id" "$exit" "$name.stdout" "$se" >> "$work/pend.tsv"
+done < "$work/core.tsv"
+LC_ALL=C sort -o "$work/pend.tsv" "$work/pend.tsv"
+pendhdr() {
+  echo "# HF10-P35 (a) (bin/hsi own-verdicts): the run tests of eval-corpora.edn's :testsuite-core directories without GHC's recorded run"
+  echo "# (test/haskell/ref-ghc914.edn), judged by their own verdict until the oracle window records them: ID, the expected status, the"
+  echo "# shipped expected stdout and stderr (- an empty one), compared as the testsuite driver compares (the last newline not compared)"
+}
 # HES87 (a): the threaded-only tests whose recorded run is not their own verdict
 tw=$root/test/haskell/threaded-way.tsv
 grep -o ':dir "[^"]*", :name "[^"]*", .*(only_ways \[[^]]*\])' "$root/test/haskell/eval/testsuite-run.edn" |
@@ -86,13 +109,17 @@ hdr() {
 }
 case $mode in
   --record) { hdr; cat "$work/new.tsv"; } > "$list"; echo "own-verdicts: $own of $n programs recorded in $list"
-    { twhdr; cat "$work/tw.tsv"; } > "$tw"; echo "own-verdicts: $(wc -l < "$work/tw.tsv") threaded-only tests without their own verdict recorded in $tw" ;;
+    { twhdr; cat "$work/tw.tsv"; } > "$tw"; echo "own-verdicts: $(wc -l < "$work/tw.tsv") threaded-only tests without their own verdict recorded in $tw"
+    { pendhdr; cat "$work/pend.tsv"; } > "$pend"; echo "own-verdicts: $(wc -l < "$work/pend.tsv") tests without a recorded run, by their own verdict, recorded in $pend" ;;
   --check)
     grep -v '^#' "$list" > "$work/old.tsv" || true
     if cmp -s "$work/old.tsv" "$work/new.tsv"; then echo "own-verdicts: $own of $n programs by their own verdict, the list current"
     else echo "own-verdicts: the list differs from the trees and the record:"; diff "$work/old.tsv" "$work/new.tsv" | head -10; exit 1; fi
     grep -v '^#' "$tw" > "$work/tw-old.tsv" 2> "$work/tw.err" || true
     if cmp -s "$work/tw-old.tsv" "$work/tw.tsv"; then echo "own-verdicts: $(wc -l < "$work/tw.tsv") threaded-only tests without their own verdict, $tw current"
-    else echo "own-verdicts: $tw differs from the trees and the record:"; diff "$work/tw-old.tsv" "$work/tw.tsv" | head -10; exit 1; fi ;;
+    else echo "own-verdicts: $tw differs from the trees and the record:"; diff "$work/tw-old.tsv" "$work/tw.tsv" | head -10; exit 1; fi
+    grep -v '^#' "$pend" > "$work/pend-old.tsv" 2> "$work/pend.err" || true
+    if cmp -s "$work/pend-old.tsv" "$work/pend.tsv"; then echo "own-verdicts: $(wc -l < "$work/pend.tsv") tests without a recorded run, by their own verdict, $pend current"
+    else echo "own-verdicts: $pend differs from the trees and the record:"; diff "$work/pend-old.tsv" "$work/pend.tsv" | head -10; exit 1; fi ;;
   *) echo "own-verdicts: $own of $n programs would be judged by their own verdict (--record writes $list)" ;;
 esac
