@@ -855,16 +855,37 @@
   (doseq [i (metas-of k)] (soft-unify [:mv i] star-kind))
   (zonk k))
 
+(defn tycon-kind-info
+  "HF10-P41 (a): a type constructor n applied to as at the expected kind ek (or nil): [kind-args param-kinds], its kind
+  arguments (doTyConApp's kind_args) and each argument's expected kind (nil where not closed), closed kinds; [[] nil]
+  when its kind is not known"
+  [n as & [ek]]
+  (binding [*kind-env* (atom {})]
+    (if (and (vector? n) (= "GHC.Internal.Types" (nmod n)) (re-matches #"(Tuple|Sum)[0-9]+#" (str (occ n))))
+      ;; an unboxed tuple's or sum's kind arguments are its components' representations (TupleN# :: forall r1 .. rn.
+      ;; TYPE r1 -> .. -> TYPE (TupleRep [r1 .. rn]), the elaborator's types leave them out)
+      (let [rep-of (fn [k] (let [k (deep-expand (zonk k))]
+                             (when (and (= :tc (first k)) (= "TYPE" (str (occ (second k)))) (= 1 (count (nth k 2))))
+                               (first (nth k 2)))))
+            reps (mapv (fn [a] (or (rep-of (kind-of a)) (rep-of star-kind))) as)]
+        [(if (every? some? reps) (mapv default-kind reps) []) nil])
+    (if-let [[ms k] (tycon-kind n)]
+      (let [aks (mapv kind-of as)
+            [pks r] (reduce (fn [[pks k] ak]
+                              (if-let [[p r] (arrow-kind k)]
+                                (do (soft-unify p ak) [(conj pks p) r])
+                                (let [r (fresh-meta)] (soft-unify k (fn-ty ak r)) [(conj pks ak) r])))
+                            [[] k] aks)]
+        (when ek (soft-unify r ek))
+        (let [kargs (mapv default-kind ms)]
+          [kargs (mapv (fn [p] (let [p (zonk p)] (when (empty? (metas-of p)) p))) pks)]))
+      [[] nil]))))
+
 (defn tycon-kind-args
   "HF10-P41 (a): the kind arguments of a type constructor n applied to as (doTyConApp's kind_args), closed kinds; [] when
   it has none or its kind is not known"
-  [n as]
-  (binding [*kind-env* (atom {})]
-    (if-let [[ms k] (tycon-kind n)]
-      (if (seq ms)
-        (do (apply-kind k (mapv kind-of as)) (mapv default-kind ms))
-        [])
-      [])))
+  [n as & [ek]]
+  (first (tycon-kind-info n as ek)))
 
 (defn- typeable-tycon-ref
   "HF10-P39 (a): the TyCon binding of a type constructor's Typeable evidence (GHC.Tc.Instance.Typeable's names, which
@@ -919,8 +940,13 @@
 (defn- typeable-term
   "Typeable's evidence for a type without variables (GHC.Tc.Instance.Class's Typeable solver: a type constructor
   mkTrCon of its $tc binding, an application mkTrApp of its parts, a type-level literal's doTyLit); nil for another type"
-  [t]
-  (let [t (promote-kind-names (deep-expand (zonk t)))]
+  [t & [ek]]
+  (let [t (promote-kind-names (deep-expand (zonk t)))
+        ;; HF10-P41 (a): a tuple of constraints is a constraint tuple ((Eq Int, Eq String) :: Constraint, GHC's CTuple2)
+        t (if (and (= :tc (first t)) (re-matches #"Tuple[0-9]+" (str (occ (second t)))) (= "GHC.Internal.Tuple" (nmod (second t)))
+                   (seq (nth t 2)) (every? #(and (= :tc (first %)) (contains? @*classes* (second %))) (nth t 2)))
+            [:tc (ext-name "tc" "GHC.Internal.Classes" (str "C" (occ (second t)))) (nth t 2)]
+            t)]
     (if (#{:lit :lit-char} (first t))
       (typeable-lit t)
     (when (= :tc (first t))
@@ -930,6 +956,7 @@
         (let [[a b] (map typeable-term (nth t 2))]
           (when (and a b) (typeable-fun many-typeable a b)))
       (let [[_ n args] t
+            [kargs pks] (tycon-kind-info n args ek)
             con (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrCon"))
                       [(list 'v (typeable-tycon-ref n))
                        (if (= fun-tc n)
@@ -942,11 +969,11 @@
                          ;; evidence
                          (let [ks (mapv (fn [k] (when-let [e (typeable-term k)]
                                                   (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "SomeTypeRep")) [e])))
-                                        (tycon-kind-args n args))]
+                                        kargs)]
                            (reduce (fn [acc x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x acc]))
                                    (list 'v (ext-name "var" "GHC.Internal.Types" "[]"))
                                    (reverse (if (every? some? ks) ks [])))))])
-            subs (mapv typeable-term args)]
+            subs (mapv (fn [a i] (typeable-term a (get pks i))) args (range))]
         (when (every? some? subs)
           (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])) con subs))))))))
 
@@ -1131,8 +1158,14 @@
                          b (let [tele (arg x 2)] (when (seq? tele) (arg tele 2)))
                          :let [bb (arg (lval b) 3)] :when (= 'HsBndrVar (con bb))]
                      (nm (arg bb 2))))
+        ;; HF10-P41 (a): an explicit forall's binders in their written order first (forall k (a :: k). Typeable a =>
+        ;; SomeKindedTypeRep k: k, then a, as a type application instantiates them; their first occurrences gave a, k)
+        outer (lval (arg s 2))
+        explicit (when (and (seq? outer) (= 'HsOuterExplicit (con outer)))
+                   (vec (keep (fn [b] (let [bb (arg (lval b) 3)] (when (and (seq? bb) (= 'HsBndrVar (con bb))) (nm (arg bb 2)))))
+                              (arg outer 2))))
         ns (remove #(or (contains? *scoped-tvs* (tv-key %)) (some-> *pat-tvs* deref (contains? (tv-key %))) (contains? inner %))
-                   (tv-names-of body))
+                   (distinct (concat explicit (tv-names-of body))))
         names (mapv tv-key ns)
         tvs (zipmap ns (map (fn [x] [:tv x]) names))
         t (hs-type tvs body)]
@@ -3915,7 +3948,8 @@
   "The TyCon representation's binding of a type constructor (ext NS M O): a promoted constructor's $tc'O, GHC.Internal.Prim's
   in GHC.Internal.Types"
   [[_ ns m o]]
-  (if (= 'data ns)
+  ;; (a form's namespace is a symbol, the elaborator's names' a string: HF10-P41 (a)'s kinds name promoted constructors as data)
+  (if (= "data" (str ns))
     (list 'v (ext-name "var" m (str "$tc'" o)))
     (list 'v (ext-name "var" (if (= m "GHC.Internal.Prim") "GHC.Internal.Types" m) (str "$tc" o)))))
 
