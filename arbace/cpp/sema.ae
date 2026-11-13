@@ -1304,8 +1304,81 @@
                (throw e))))
       (declare-node*! scope n))))
 
+(defn- placeholder-split
+  "cpp-s11: a parameter's type as written with a placeholder ([dcl.spec.auto]: `auto`, `C auto`, `C<A...> auto`, cv and
+  declarator operators around it, `auto...`): [before the type-constraint, the type-constraint's text or nil, after
+  `auto`], or nil when it has none (decltype(auto) is none: a parameter may not be declared with it)."
+  [^String qt]
+  (let [m (re-matcher #"\bauto\b" qt)]
+    (when (.find m)
+      (let [j (.start m) e (.end m)]
+        (when-not (re-find #"decltype\s*\(\s*$" (subs qt 0 j))
+          (let [k (loop [k j] (if (and (pos? k) (Character/isWhitespace (.charAt qt (dec k)))) (recur (dec k)) k))
+                ;; (a type-constraint's template arguments, balanced back to their `<`)
+                k2 (if (and (pos? k) (= \> (.charAt qt (dec k))))
+                     (loop [i (- k 2) d 1]
+                       (cond (neg? i) nil
+                             (= \> (.charAt qt i)) (recur (dec i) (inc d))
+                             (= \< (.charAt qt i)) (if (= d 1) i (recur (dec i) (dec d)))
+                             :else (recur (dec i) d)))
+                     k)
+                cs (when k2 (loop [i k2] (if (and (pos? i) (let [c (.charAt qt (dec i))] (or (Character/isLetterOrDigit c) (= c \_) (= c \:)))) (recur (dec i)) i)))
+                c (when (and cs (< (long cs) (long k))) (str/trim (subs qt cs k)))
+                ;; (cv-qualifiers are no type-constraint: `const auto&`)
+                c (when (and c (not (re-matches #"(?:const|volatile)" c))) c)]
+            [(subs qt 0 (if c cs j)) c (subs qt e)]))))))
+
+(defn- abbreviated-template
+  "cpp-s11: an abbreviated function template ([dcl.fct]/22): a function declaration with a placeholder in a parameter's
+  type is a function template with an invented type template parameter for each, after the declared ones (a pack for
+  `auto...`), the placeholder's type-constraint the invented parameter's ([temp.param]/4: `C<A...> auto` the immediately-
+  declared constraint C<P, A...>). The node `n` (a function declaration, or a FunctionTemplateDecl whose function has
+  such parameters) as the FunctionTemplateDecl it declares, or nil when it has none. <bits/ranges_util.h>'s
+  subrange(__convertible_to_non_slicing<_It> auto __i, _Sent __s) had been dropped (\"type form (constrained ...)\"), so
+  <format>'s _Utf32_view<subrange<iterator>>({__first, __last}) found no constructor."
+  [n]
+  (let [fkinds #{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"}
+        [wrap f] (cond (fkinds (:kind n)) [nil n]
+                       (= "FunctionTemplateDecl" (:kind n)) [n (first (filter #(fkinds (:kind %)) (kids n)))]
+                       :else [nil nil])
+        pn (when f (param-nodes f))]
+    (when (some #(placeholder-split (str (get-in % [:type :qualType]))) pn)
+      (let [inv (atom 0) tps (atom [])
+            fqt (atom (str (get-in f [:type :qualType]))) at (atom (max 0 (long (or (str/index-of @fqt "(") 0)))) ok (atom true)
+            pn2 (mapv (fn [p]
+                        (let [qt (str (get-in p [:type :qualType]))]
+                          (if-let [[pre c post] (placeholder-split qt)]
+                            (let [nm (str "__auto_" (swap! inv inc))
+                                  nqt (str pre nm post)
+                                  i (str/index-of @fqt qt (long @at))]
+                              (if i
+                                (do (reset! fqt (str (subs @fqt 0 i) nqt (subs @fqt (+ (long i) (count qt)))))
+                                    (reset! at (+ (long i) (count nqt))))
+                                (reset! ok false))
+                              (swap! tps conj (cond-> {:kind "TemplateTypeParmDecl" :name nm :inner [] :isImplicit true}
+                                                (re-find #"\.\.\.\s*$" post) (assoc :isParameterPack true)
+                                                c (assoc :_tc (vec (remove str/blank? (str/split (str/replace c #"\s*<.*$" "") #"\s*::\s*")))
+                                                         :_tcargs (boolean (str/includes? c "<")) :_tctext c)))
+                              (assoc-in p [:type :qualType] nqt))
+                            p)))
+                      pn)]
+        (when @ok
+          (let [pi (atom -1)
+                f2 (-> f
+                       (assoc-in [:type :qualType] @fqt)
+                       (assoc :inner (mapv #(if (= "ParmVarDecl" (:kind %)) (nth pn2 (swap! pi inc)) %) (:inner f))))]
+            (if wrap
+              (assoc wrap :inner (let [ks (:inner wrap)
+                                       last-tp (long (or (last (keep-indexed (fn [i k] (when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind k)) i)) ks)) -1))]
+                                   (vec (concat (take (inc last-tp) ks) @tps
+                                                (map #(if (identical? % f) f2 %) (drop (inc last-tp) ks))))))
+              (cond-> {:kind "FunctionTemplateDecl" :name (:name f) :inner (conj @tps f2) :_b (:_b f) :_abbreviated true}
+                (:range f) (assoc :range (:range f))
+                (:_e f) (assoc :_e (:_e f))))))))))
+
 (defn- declare-node*!
   [scope n]
+  (let [n (or (abbreviated-template n) n)]
   (if-let [r (when-let [h (:declare @hooks)] (h scope n))]
     r
   (case (:kind n)
@@ -1435,7 +1508,7 @@
     "StaticAssertDecl" (when (and (checking?) (= :ns (:kind scope)) (not (header-node? n)))
                          (swap! *order* conj [:sassert {:node n :scope scope}]))
     ("EmptyDecl" "AccessSpecDecl" "FriendDecl") nil
-    (if (str/ends-with? (str (:kind n)) "Attr") nil (fail :decl "declaration " (:kind n))))))
+    (if (str/ends-with? (str (:kind n)) "Attr") nil (fail :decl "declaration " (:kind n)))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Classes completed: special members, virtual functions
