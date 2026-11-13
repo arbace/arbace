@@ -5290,3 +5290,31 @@ the language requires a constant, false elsewhere, aimed at f8's refusal (<bits/
   causes, 98). CP379 proposed. library.cpp alone: the same refusal, 39 causes (cpp-s7's 47), 1.43 GB.
 - The 81 run programs' gen-batch against cpp-s9's: 69 generated, none lost, the IR byte for byte or equal by the inliner's numbering; the
   first run found vector's `_S_max_size` no longer folded (an empty allocator by reference had become a location to bind), restored.
+## 2026-11-12: gf-cpp, night 12's C++ failures: cpp-s9 merged into next's tree, a floating literal in eval-text (branch `gf-cpp`, from `mac/next` `bd6ab3ddd`)
+
+- Merged mac/cpp-s9 (e2e446170: cpp-s7, cpp-s8, cpp-gatefix with it) into next's tree: no conflict.
+- explicit6.C (gxx-dg/cpp2a, `explicit((T) 1.0) operator T();`): night 12's crash was review 1111 #5's BigInteger read of every number
+  token in template.ae's eval-text; cpp-s7 (2dcb57f03) had made it a refusal, which explicit-spec counts as explicit, so the file passed by
+  default. The general fix (no bisect needed: the cause was named by cpp-s7's commit): eval-text reads floating literals as doubles
+  (suffixes, hex floats, separators), casts to integral types truncate, to bool test against zero, `float`/`double`/`long double` cast
+  types, fold's arithmetic and comparisons on a double operand the double's, the integer operators and division by zero on it refusals;
+  sema's noexcept-specifier through the same hook tests a double against zero. Alternatives: keep cpp-s7's refusal (passes explicit6.C
+  only because its specifier is true: `explicit((T) 0.0)` was wrongly explicit), or evaluate the specifier through sema's ce-eval (the
+  analyzed expression; the specifier is read as text at declaration, so the text evaluator is the one to extend). Probe p1.C: 7 errors →
+  3, the true specifiers'.
+- Proofs (doc/cpp/CPP-SURVEY.md, "As built: gf-cpp"): explicit6.C own pass by evaluation, the cpp2a explicit files as recorded;
+  cpp-check-essential's runtime part as recorded (deferred.cpp passes, thread-throw.cpp its recorded threads class: cpp-gatefix's fixes),
+  its samples part not proved (the cold `nodes-list` passed 3 GiB, killed; CP379 proposed); cpp-print-essential 33 + 9; cpp-lower-essential
+  6 of 6; `bin/reap` 0 problems; crops-score strict 0; gate-key-crops-test PASS (no key moves). cpp-check.samples-runtime and the whole
+  dg-error-own are night commands (the survey). No record moved. Slips: runtime-ci's first read at 4.79 GB (stopped by PID), 2.58 GiB on
+  the chunked read.
+
+### 2026-11-12: CP381 (a): cpp-check-essential declared at 5 GiB, an essential cap per crop
+
+gf-cpp measured cpp-check-essential's command (`env CPPI_THREADS=2 CPPI_CI_MEMLIMIT=2GiB bin/cppi check --only
+test/cpp/essential-check.txt`) at 3.18 GB from a cold cache (the samples' nodes-list), over its declared 3 GiB and over GTS215's
+3 GiB cap on an essential check. The user chose (a) (2026-11-12): declare it at 5 GiB now (test/gate/steps.edn and its fragment
+test/gate/crops/cpp.edn), the cap per crop (`:budgets :essential-mem-gib-by {:cpp 5}`, read by test/gate/crops.ae's GT9 check
+beside `:essential-mem-gib`); later (b), building the samples' nodes one program per process, may bring it back under 3.
+Considered: (c) io.cpp out of the essential list into the nightly cpp-check. Proofs: test/gate/crops-test.bash ok (the real
+table passes GT9's rules), `bin/gate --full --plan` status 0. (The name CP379 is cpp-s10's iterator_traits decision.)
