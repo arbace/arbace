@@ -441,7 +441,8 @@ covers what.
   managed dict, `Objects/funcobject.c`, `Python/codecs.c`, `Python/pytime.c`, `Python/errors.c`, `Objects/abstract.c`,
   `Objects/longobject.c`, `Objects/dictobject.c`, `Python/ceval.c`'s `PyEval_EvalCodeEx`), `capi_watchers.ae` (queue 274:
   the watchers of `Objects/dictobject.c`, `Objects/typeobject.c`, `Objects/funcobject.c`, `Objects/codeobject.c` and
-  `Python/context.c`), of the C API's functions in its `Objects/` and `Python/`, under the PSF License
+  `Python/context.c`), `capi_monitoring.ae` (queue 274b: sys.monitoring's C API of `Python/instrumentation.c`), of the
+  C API's functions in its `Objects/` and `Python/`, under the PSF License
   Agreement (section above).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
