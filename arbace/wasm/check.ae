@@ -95,6 +95,19 @@
   ^bytes [[kind p :as m]]
   (if (= kind :binary) p (bin/encode (wast/read-items m) nil)))
 
+(defn- verdict
+  "arbace.wasm.valid's verdict on a module command's module (WAS30 (a): wai's validator is judged against it): `ok`, `invalid:MSGHEX`,
+  or `none:REASONHEX` when its items do not read or the validator crashes."
+  ^String [m]
+  (let [items (try (wast/read-items m) (catch Throwable e e))]
+    (if (instance? Throwable items)
+      (str "none:" (hex-str (str "does not read: " (.getMessage ^Throwable items))))
+      (let [[k v] (wast/validate items)]
+        (case k
+          :invalid (str "invalid:" (hex-str (str v)))
+          :crash (str "none:" (hex-str (str "crash in validation: " v)))
+          "ok")))))
+
 (defn- tsv ^String [& fs] (str/join "\t" (map str fs)))
 
 (defn script-plan
@@ -104,7 +117,11 @@
   [^String text]
   (let [cmds (lex/read-sexps text)
         mods (java.util.ArrayList.)
-        add-mod! (fn [k m] (let [f (str k ".wasm")] (.add mods [f (module-bytes m)]) f))
+        vlines (java.util.ArrayList.)
+        add-mod! (fn [k m] (let [f (str k ".wasm")]
+                             (.add mods [f (module-bytes m)])
+                             (.add vlines (tsv k "valid" f (verdict m)))
+                             f))
         inline? (and (seq cmds) (#{"func" "memory" "type" "import" "export" "table" "global" "data" "elem" "start" "tag" "rec"} (lex/head (first cmds))))
         cmds (if inline? [{:t :list :xs (into [{:t :kw :s "module"}] cmds)}] cmds)
         lines (vec
@@ -139,11 +156,20 @@
                                 (tsv k (case h "assert_trap" "assert_trap_module" h) f msg))
                               (apply tsv k h (concat (action a) [msg]))))
                           "assert_exception" (let [[_ a] (:xs c)] (apply tsv k "assert_exception" (action a)))
+                          ;; an invalid module: no eval case (the read cell's), only wai's validator's verdict against Arbace's
+                          "assert_invalid" (let [mm (try (wast/module-of (second (:xs c))) (catch Throwable e nil))
+                                                 b (try (module-bytes mm) (catch Throwable e e))]
+                                             (if (instance? Throwable b)
+                                               (do (.add vlines (tsv k "valid" "-" (str "none:" (hex-str (str "not encoded: " (.getMessage ^Throwable b)))))) nil)
+                                               (let [f (str k ".wasm")]
+                                                 (.add mods [f b])
+                                                 (.add vlines (tsv k "valid" f (verdict mm)))
+                                                 nil)))
                           nil)
                         (catch Throwable e
                           (tsv k "fail" (str/replace (str "plan: " (#'arbace.repr.wasm.wast/clean (.getMessage e))) "\t" " "))))))
                   cmds))]
-    [lines (vec mods)]))
+    [(into lines vlines) (vec mods)]))
 
 (defn -main
   "check plan LIST WORK: each script of LIST (NAME<tab>PATH) planned into WORK/plans/SLUG.plan with its modules in

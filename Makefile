@@ -1182,7 +1182,7 @@ check-makefile: ## every bin/ script this Makefile's recipes run exists and is e
 	  [ -x "$$s" ] || { echo "Makefile: $$s is not an executable script" >&2; missing=1; }; done; \
 	exit $$missing
 
-.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check
+.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check wai-go wai-go-essential wai-go-record
 wai-light: ## wai, Arbace's WebAssembly engine (WA4, doc/wasm/WAI.md): its light driver built alone by TamaGo's go into .tmp/wai/wai (bin/wai light)
 	bin/wai light
 wai-check: ## the testsuite's scripts planned by arbace.wasm.check and run on wai, each command by its own assertion, against test/wasm/eval-results.edn (bin/wai check)
@@ -1191,6 +1191,12 @@ wai-essential: ## wai's essential subset, test/wasm/essential-eval.txt, with the
 	bin/wai essential
 wai-record: ## wai's check recorded into test/wasm/eval-results.edn (bin/wai check --record)
 	bin/wai check --record
+wai-go: ## the Go run corpus (WA5): $GOROOT/test's run programs and Go's own small programs built for wasip1 and run on wai under WASI preview 1, against gc's runs (bin/wai go)
+	bin/wai go
+wai-go-essential: ## the Go run corpus's essential part: goi's essential run programs and the own programs, with the negative controls (bin/wai go --essential)
+	bin/wai go --essential
+wai-go-record: ## the Go run corpus recorded into test/wasm/go-results.edn (bin/wai go --record)
+	bin/wai go --record
 wai-divergences: ## the eval record's non-passes against test/wasm/divergences-eval.edn (bin/wai divergences)
 	bin/wai divergences
 wai-ops-check: ## wai's instruction table against repr/wasm's arbace/repr/wasm/ops.ae, row for row (bin/wai ops check)

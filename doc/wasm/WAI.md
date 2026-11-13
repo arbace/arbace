@@ -17,9 +17,8 @@ reference types, multiple tables and memories, memory64 and table64, SIMD128 and
 `any.convert_extern`, the subtyping of iso-recursive canonical types). A module using what is not built (a shared memory, an atomic, the
 legacy `try`/`catch`/`delegate`) is refused at decoding as `unimplemented: FEATURE (WHAT)`, not as malformed.
 
-wai has no validator of its own: the modules it runs are the ones arbace.wasm.valid (WA3) accepted, and the decoder assumes a valid
-module (a fault it meets is a decode error, never a crash past the engine's boundary). A validator in wai, judged against Arbace's as a
-`:beside` source (the survey's §13.1), is WAS30.
+Since WA5 wai validates every module before it decodes it (`valid.go`, §7; WAS30 (a)): the driver runs no module its own validator
+rejects, and the decoder still assumes a valid module (a fault it meets is a decode error, never a crash past the engine's boundary).
 
 ## 2. Values and the store
 
@@ -103,3 +102,86 @@ and link failure's message against the script's by prefix is a `msg/` row, the s
 `waidriver control PLAN MODDIR K MODE [PLAN2 K2]`: the plan run up to its command K, which is then judged in another role:
 `wrong-value`, `as-trap`, `as-return`, `vs`, `msg-vs`, `as-module`, `as-uninstantiable` must fail (`differs`); `self` (the command
 unchanged) must pass (`same`), a `_check/` line.
+
+## 6. WASI preview 1 (`wasi.go`)
+
+The module `wasi_snapshot_preview1` over one guest's world (`WASI`: its arguments, environment, standard streams, preopened
+directories, a seed), written after the snapshot's witx (WebAssembly/WASI, `legacy/preview1`) as Go's `syscall/fs_wasip1.go` and
+`runtime/os_wasip1.go` read it; wazero's `imports/wasi_snapshot_preview1` (v1.12.0, `.tmp/wasm/tree`) read for the layouts, nothing
+of it converted. The 36 names Go's wasip1 port imports (runtime, syscall, internal/syscall/unix; the survey's "38" counted two
+names declared twice) and the rest of the snapshot's:
+
+- **arguments and environment**: `args_sizes_get`, `args_get`, `environ_sizes_get`, `environ_get`;
+- **clocks and randomness**: `clock_time_get` (0 the real clock, 1-3 the monotonic one from the world's start), `clock_res_get`,
+  `random_get` (a generator seeded by the world, `--seed`, so a check's runs are reproducible);
+- **the process**: `proc_exit` (an `*Exit` panic recovered at the engine's boundary: the guest's status), `proc_raise` (ENOSYS),
+  `sched_yield`, `poll_oneoff` (clock subscriptions, relative or absolute, sleep until the earliest; an `fd_read` or `fd_write`
+  subscription is ready at once: Go's netpoll on wasip1);
+- **descriptors**: `fd_write`, `fd_read`, `fd_pwrite`, `fd_pread`, `fd_close`, `fd_seek`, `fd_tell`, `fd_sync`, `fd_datasync`,
+  `fd_advise`, `fd_allocate` (ENOTSUP), `fd_renumber`, `fd_fdstat_get`, `fd_fdstat_set_flags` (append, nonblock),
+  `fd_fdstat_set_rights`, `fd_filestat_get`, `fd_filestat_set_size`, `fd_filestat_set_times`, `fd_prestat_get`,
+  `fd_prestat_dir_name`, `fd_readdir` (`.` and `..` first, then the entries sorted by name; the cookie an entry's ordinal);
+- **paths**: `path_open` (the rights choose read, write or both; `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_DIRECTORY`, append, the lookup
+  flag's symbolic-link following), `path_filestat_get`, `path_filestat_set_times`, `path_create_directory`, `path_remove_directory`,
+  `path_unlink_file`, `path_readlink`, `path_symlink`, `path_link`, `path_rename`;
+- **sockets**: `sock_accept` (ENOTSUP, EBADF for no descriptor), `sock_shutdown` (ENOTSOCK), `sock_recv`, `sock_send` (ENOTSUP).
+
+**The sandbox.** Descriptors 0-2 are the standard streams, 3 on the preopened directories in their order (`--dir GUEST=HOST[:ro]`),
+then the opened files. A path is resolved component by component inside the preopen of its directory descriptor: `.` and empty
+components dropped, `..` never above the preopen (ENOTCAPABLE), a symbolic link (an intermediate component, or the last one when the
+lookup follows) read and spliced in, an absolute link target refused (ENOTCAPABLE), at most 40 links (ELOOP); an absolute path is
+refused. Under a read-only preopen every change (a write, a creation, a truncation, a removal, a rename, a link, the times) is EROFS.
+Host errors map to the snapshot's errnos (`wasiErr`); a guest pointer outside its memory is EFAULT.
+
+**The driver's run** (`waidriver run [--dir GUEST=HOST[:ro]]... [--env K=V]... [--seed N] [--no-validate] MODULE [ARG...]`): the
+module validated (§7), decoded, linked against `wasi_snapshot_preview1` alone, its memory bound, its `_start` called; standard
+output buffered and flushed before each write to standard error (the program's order kept); the status the guest's (`proc_exit`'s, 0
+when `_start` returns), or wai's own: 125 a module wai does not run (unimplemented), 126 an invalid module, a link failure, a trap or
+a crash, each with a line `wai: ...` on standard error.
+
+## 7. The validator (`valid.go`)
+
+`Validate(bytes)`: the module's sections read again on their own (not the decoder's pass) and checked by Wasm 3.0's typing rules, as
+the specification's validation algorithm (its appendix) and valid.ml at wg-3.0 state them, which arbace.wasm.valid (WA3) follows too:
+the type section's rec groups (references inside the group or before it, at most one supertype, declared before its subtype, not
+final, its composite type matching), canonicalized as the decoder does (`canonGroup`, so subtyping is the decoder's); limits
+(memories at most 2^16 pages for i32 and 2^48 for i64, tables 2^32-1 and 2^64-1, minimum not above maximum); imports, functions,
+tables (a table without an initializer of a nullable element type), memories, tags (no results), globals (their initializers seeing
+the globals before them), exports (indices known, names unique), the start function (`[] -> []`), element segments (their type
+matching the table's), the data count, the bodies, the data segments. A constant expression admits the constants, `ref.null`,
+`ref.func`, `ref.i31`, the extended constants' `add`, `sub`, `mul`, `global.get` of an immutable global, `struct.new[_default]`,
+`array.new[_default|_fixed]` and the two conversions; a function body is checked over an operand stack of value types (an unknown
+type, K 0, below an unreachable frame's height; an unknown heap type `hBot`) and a control stack of frames (block, loop, if, else,
+try_table with its catch clauses checked against the enclosing labels), the non-defaultable locals' initialization undone at each
+frame's end, `ref.func` of a function declared outside the bodies. The numeric and vector instructions' signatures come from their
+names, as arbace.wasm.valid's `simple-sig` and `mem-size`. Results: nil, `*Invalid` (a message after valid.ml's), `*Malformed` (a
+module it cannot read: not judged as invalid) or `*Unimplemented` (the legacy exceptions, the atomics).
+
+**Its judgment** (WAS30 (a), the `valid/` rows, `:beside` in the eval cell): the planner writes, for every module of the testsuite it
+writes as a binary (a module command's, an `assert_unlinkable`'s, `assert_uninstantiable`'s and `assert_trap`'s module's) and for every
+`assert_invalid`'s module, a line `K valid FILE VERDICT`, VERDICT arbace.wasm.valid's on the module's items (`ok`, `invalid:MSGHEX`,
+or `none:REASONHEX` when they do not read); the driver's row `valid/SCRIPT#K` passes when wai's validator agrees (both accept, or
+both reject). The messages are not compared (valid.ml's wording is the read cell's second level).
+
+## 8. The Go run corpus (`bin/wai go`)
+
+WAS11 (a): Go programs built for `GOOS=wasip1 GOARCH=wasm` by TamaGo's go1.27.1 at check time (not a host toolchain) and run by the
+driver (`bin/lib/wai/go-run.bash`).
+
+1. **The programs**: `$GOROOT/test`'s run programs (the ids of goi's record `test/goi/check-linux-amd64.edn` whose action is `run`, as
+   Go's test driver reads the first line: 1,051 of its 1,837; the directory tests and errorcheck programs are not run programs here),
+   and Go's own small programs of `test/wasm/go-run.txt` (`test/wasm/go/NAME/main.go`: hello, goroutines, maps, fmt, time, files).
+2. **The build**: as goi's gc reference builds the original (GOPATH mode in its directory, the action's build flags; an action
+   setting `-goexperiment` or `-godebug` a skip, as goi's), cached by the source's, the flags' and the toolchain's hashes in the main
+   checkout's `.tmp/wai-go/bin`; a build that build constraints refuse for wasip1/wasm is a skip.
+3. **The run**: `waidriver run` in `$GOROOT/test` with `$GOROOT/test` preopened read-only at its own path (the guest's working
+   directory, `PWD`), `/tmp` a fresh scratch directory (`TMPDIR=/tmp`), the environment Go's test driver gives a run test (goi's
+   `run_env`), the action's arguments; under `limited` at three times the action's limit (`WAI_GO_SLOW`), the driver's
+   `GOMEMLIMIT` 1200 MiB; three programs at a time (`WAI_GO_JOBS`).
+4. **The judge**: goi's: against gc's linux/amd64 build and run of the original (its reference, goi's cache `.tmp/goi-check/gcref` read
+   by goi's own key, a missing one made the same way into `.tmp/wai-go/gcref`): exit status, standard output byte for byte, standard
+   error up to the goroutines' traces; a program gc's own run does not pass is a skip. Go's own programs by their `want.out` (status
+   0, standard error empty). Rows `[go/ID RESULT REASON]` against `test/wasm/go-results.edn`, every non-pass in a class of
+   `test/wasm/divergences-go.edn`.
+5. **The controls** (`test/wasm/controls-go.txt`): a subject's run judged against another program's gc reference must fail; `self`
+   must pass.
