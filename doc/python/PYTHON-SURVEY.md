@@ -6338,3 +6338,70 @@ partial run is not recorded). Of the 181 modules the run finished, 549 methods w
 - **A whole run still needs**: the 347 modules night 12 did not reach (test.test_multiprocessing_spawn.* onwards, through
   test_zstd), and 1,821 `:runner-limits` rows of the run (test_pickle 477, test_subprocess 297, test_socket 246, test_os
   202, test_asyncio.test_events 131, ...) judged once 275's per-method timeout and fixes let them run.
+
+## As built: 281, sys.monitoring's local, line, jump, branch, instruction and exception events (2026-11-13, the Mac VM, queue 281)
+
+CPython 3.14.10's `Python/instrumentation.c` (`monitoring_set_local_events_impl`, `_PyMonitoring_SetLocalEvents`,
+`monitoring__all_events_impl`, `_PyMonitoring_RegisterCallback`'s branch handlers, `branchesiter_next`,
+`call_instrumentation_vector`'s order) and `Python/bytecodes.c`'s instrumented instructions (INSTRUMENTED_JUMP_FORWARD and
+_BACKWARD, _POP_JUMP_IF_*, _NOT_TAKEN, _FOR_ITER, _POP_ITER, _END_ASYNC_FOR, monitor_reraise, monitor_handled; the PSF's
+license) ported over pyi's IR and its bytecode view:
+
+- **Local events** (`go/arbace/py/monitoring.go`): a code object's events by tool (`Code.monLocal`, nil for none), each
+  with the tool's version when set: `clear_tool_id` and `free_tool_id` raise the tool's version, which turns them off
+  while `get_local_events` still reads them (CPython's `tool_versions`); `set_local_events`' checks and messages (a code
+  object, the tool, C_RETURN/C_RAISE only with CALL, BRANCH as BRANCH_LEFT and BRANCH_RIGHT, "invalid local event set
+  0x%x", the tool in use); the codes with local events are a registry whose union `monEvents` holds, so the hot path's
+  checks are the same loads as before. A tool fires for an event when its global events or the frame's code's local
+  events have it; the tools are called most significant first (the legacy tracer, then the profiler, then tools 5 to 0).
+  `set_events` refuses C_RETURN or C_RAISE without both and CALL, as CPython does.
+- **DISABLE** at the instruction (the code, the event, its location: the IR instruction for LINE, the view's offset for
+  INSTRUCTION, JUMP and BRANCH); an event turned off and on again (set_events, set_local_events) is instrumented anew, its
+  disabled locations dropped. `register_callback(BRANCH)` installs CPython's legacy branch handlers on BRANCH_LEFT and
+  BRANCH_RIGHT: a DISABLE turns off the other side at the source too (a FOR_ITER's right not from its left), and a side
+  whose source instruction is no longer instrumented answers DISABLE without calling ("Already disabled").
+- **JUMP, BRANCH_LEFT, BRANCH_RIGHT, INSTRUCTION** from the loop (`trace.go`'s `traceInstr`, frames on the loop while a
+  tool has LINE, INSTRUCTION, JUMP or BRANCH): the view (`bytecode_asm.go`) keeps its instructions (offset, opcode,
+  size, jump target, the IR instruction each came from); the event of a jump is decided where the jump leads, before the
+  destination's LINE: an IR jump the view has a JUMP_FORWARD or JUMP_BACKWARD for fires JUMP (its offset, its target), a
+  conditional jump the view has a POP_JUMP_IF_* for fires BRANCH_RIGHT when the view's jump is taken (the sense compared:
+  the view may invert the IR's) or BRANCH_LEFT past the NOT_TAKEN, a FOR_ITER BRANCH_LEFT on a value and BRANCH_RIGHT
+  past END_FOR and POP_ITER at the end, an async for's END_SEND BRANCH_LEFT past its NOT_TAKEN and its END_ASYNC_FOR
+  BRANCH_RIGHT from the END_SEND. INSTRUCTION fires for the view's instructions an IR instruction came from (NOT_TAKEN and
+  POP_ITER on their path, RESUME never), and for the view's instructions of no IR instruction just before them on a
+  straight path (PUSH_NULL). `code.co_branches()` is `branchesiter_next` over the view. A JUMP or BRANCH callback runs
+  with f_lasti the jump and may set f_lineno (CPython's what_event, now set for every monitoring callback).
+- **Exceptions** (`eval.go`'s unwinding): RERAISE where pyi re-raises (a bare raise, the IR's reraise, END_ASYNC_FOR's),
+  EXCEPTION_HANDLED where a handler is entered, and for a generator's or coroutine's frame left by an exception the
+  handled-and-reraised pair of the handler codegen wraps its body in (the view's trailing CALL_INTRINSIC_1, RERAISE).
+- **CALL's callable and first argument** as the instrumented CALL has them: a bound method expanded into its function and
+  self (`_MAYBE_EXPAND_METHOD`), a built-in method or slot wrapper bound at the attribute load (pyi's IR binds where
+  CPython's method form keeps the descriptor and self) with its object.
+- `_all_events()` is each ungrouped event's tools with it among their global events.
+- **The view**: LOAD_SUPER_ATTR only when the module's scope has no symbol super (`can_optimize_super_call`; test_monitoring's
+  TestLoadSuperAttr checks it).
+- **Classes**: `:monitoring-events` retired (both files). Of its 45 rows 41 pass; test_generator_with_line `:finalization`
+  (its last LINE is CPython's close of a yield-from generator at its last reference), test_match and test_except_star
+  `:dis` (the view's offsets: a match's value patterns keep the subject's COPY and POP_TOPs, except* lacks a LIST_APPEND),
+  test_vs_other_type_call `:data-model` (no method-wrapper type: super().__repr__'s bound slot wrapper is a method like
+  int().__repr__'s, CALL's arg0 self where CPython's is MISSING).
+- **settrace** (the line machinery's other user): a jump (f_lineno) from a yield's event goes on at the target, the value
+  not yielded (INSTRUMENTED_YIELD_VALUE's instr_ptr check): test_jump_from_yield passes. `:settrace-events` narrowed to
+  test_20_async_for_loop's flake: test_13_genexp (four rows) and test_reentrancy are `:finalization`'s (a generator any()
+  leaves is closed at its last reference, its GeneratorExit and finally traced; `__del__` sets the trace function;
+  `.tmp/q281/t/pf.py`: with a reference kept CPython gives pyi's events).
+- **Cost** (`bin/pyi aot` of `.tmp/q281/t/bench281.py`: a loop with a call, a branch and a caught exception; base 08b32e300
+  and head built alike and run interleaved, CPU seconds, the VM shared): no tool, compiled: median 0.378 s base, 0.388 s
+  head (8 runs each, spread 0.336-0.518); on the loop (PYI_AOT_LOOP): 0.664 against 0.659 (spread 0.608-0.900): inside the
+  noise, the checks with no tool being the same loads of `monEvents` (the local events in it). With a LINE tool (300,000
+  iterations, every frame on the loop): 0.907, 1.110, 1.145 base against 0.714, 0.638, 0.652 head compiled-built, 0.992,
+  0.943, 1.090 against 0.645, 0.665, 0.751 on the loop: head faster, the base making an INSTRUCTION and a JUMP call's
+  arguments at every instruction for no tool.
+- **Counts** (`bin/pyi lib-test-all --fresh`, each test's own verdict, the VM; base 08b32e300): test_monitoring 40 pass, 49
+  classed (`:monitoring-events` 45) → **81 pass**, 8 classed (4 skipped by the test, 4 above), 0 failing; test_sys_settrace
+  365 → **366** pass, 0 failing; test_bdb 36 → 36 (its one row, test_skip, the base's own, classed); test_sys_setprofile
+  26 → 26; test_cprofile 26 → 26; test_pdb 86 → 87 equal, the same 11 rows in no class at the base and the head (the
+  base's own: PdbTestReadline's nine not run, test_compile_error_message's Go panic, `-i`).
+- **What the IR cannot give exactly**: INSTRUCTION inside an await or a yield from (the view's SEND loop is one IR
+  instruction: every instruction of it fires at each step), a view instruction of no IR instruction reached by a jump;
+  LINE stays 219t's rule over the IR (test_sys_settrace's), not the view's line table.
