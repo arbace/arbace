@@ -446,8 +446,12 @@ model's edges), 251 (pyi on goi's speed), 252 (3.15's P6-P8).
 - `arbace/c/repl.ae`'s back-end default and the judge tests that stand in for the compiled parser: at W.
 - The box can no longer build the program: `go/arbace/crt` calls `syscall.Access` and `syscall.Stat_t`, which TamaGo's
   syscall lacks (C9.2's hazard (e)); for the box's revival.
-- WebAssembly as a crop surveyed ([wasm/WASM-SURVEY.md](wasm/WASM-SURVEY.md), 2026-11-13, branch `wasm-survey`): WAS1-WAS26 for
-  the user (first WAS1, WAS2, WAS6, WAS7, WAS12, WAS17, WAS21); WA1 (the binary format over Go-built modules) needs no fetch.
+- WebAssembly, the new crop ([wasm/WASM-SURVEY.md](wasm/WASM-SURVEY.md); WAS1-WAS26 decided as recommended, the user 2026-11-13;
+  branch `wasm-wa1`): WA1 built (repr/wasm's binary format, every Wasm 3.0 instruction, the 20 Go-built modules byte for byte, the
+  pins fetched: the testsuite, the spec at wg-3.0, wazero, webgpu.idl; wabt, wasmtime and node installed for the oracle tier) and WA2
+  begun (the text format and the testsuite's root scripts at the read and print levels: "As built: WA2"); the REAP row after the asm
+  rows, eval and AOT "no check yet". Next: WA2's classes worked down, WA3 the validator, WA4 wai. The branch moves `gate_key` once (the
+  crop paths' lists): it merges in a key window.
 - repr/haskell and repr/rust's round trips stay out of `--full` until their rows fit the budget; Zed parked
   ([ZED-SURVEY.md](ZED-SURVEY.md)).
 

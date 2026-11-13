@@ -719,3 +719,119 @@ The worktree's `.tmp/wasm/` (about 160 MB, kept): `hello/` and `hello-{js,wasip1
 dumper), `add.c`, `add.wasm` (P6), `arbace-seed-go/` (the seed extracted, P4) and `list-{linux,js,wasip1}.txt` (its `go list`),
 `llvm-wasm-list.txt` (P9), `sg*.txt`, `ts-files.txt`, `root.txt` (P8's Sourcegraph answers), `fib.ae` (P5). Each command ran in seconds
 under 0.3 GiB; the commands are in §3.
+
+## As built: WA1 (2026-11-13, branch `wasm-wa1`)
+
+The user's decisions of 2026-11-13: WAS1-WAS26 all as recommended, and the fetches of WAS21 approved, each pinned. Built from
+`mac/wasm-survey` (`837db6460`).
+
+**The fetches** (`test/wasm/corpora.edn`'s `:pins`, `bin/repr-wasm corpus fetch|check`; into the main checkout's `.tmp/wasm/src/`,
+extracted under `.tmp/wasm/tree/`; SHA-256 and SHA-512 each):
+
+| pin | revision | file | bytes | extracted |
+|---|---|---|---:|---:|
+| WebAssembly/testsuite | `92a3d806c7d70f5b63f125e6155b8d76304509f1` | `testsuite-92a3d806.tar.gz` | 605,183 | 12.3 MB |
+| WebAssembly/spec | tag `wg-3.0`, `9d36019973201a19f9c9ebb0f10828b2fe2374aa` | `spec-wg-3.0.tar.gz` | 12,763,603 | 46.5 MB |
+| tetratelabs/wazero | tag `v1.12.0`, `2ab480b55fa408d6b35df97fe32a60d08bd6e201` | `wazero-v1.12.0.tar.gz` | 4,279,128 | 42.7 MB |
+| gpuweb/gpuweb `webgpu.idl` | `gh-pages` `025b9eaa4e3c3fc956d5f31a72540a15f33dfdf7` | `webgpu-025b9eaa.idl` | 38,683 | |
+
+P8 verified on the pin: 293 `.wast` (258 at the root, 28 under `proposals/`, 4 `legacy/`, 3 `custom/`), 11.8 MB, 64,236 `(assert_`
+occurrences (64,231 lines that begin with one; the survey's Sourcegraph estimate was about 56,500). `webgpu.idl` is not on gpuweb's
+main branch (the IDL is generated from `spec/index.bs`): the pin is the published copy on `gh-pages`. The oracle tier's packages
+(WAS18 (a)): `apk add wabt wasmtime nodejs` (Alpine edge; all three present: wabt 1.0.41-r0 from testing, wasmtime 47.0.3-r1 from
+community, nodejs 24.22.3-r0 from main), recorded in `:oracle-packages`; no check-time step runs them. Chromium not installed.
+
+**What was built** (doc/wasm/SPEC.md §1-§6):
+
+- `arbace.repr.wasm.binary`: the binary format decoded into Wasm forms and encoded back, Wasm 3.0's whole binary grammar (types with
+  GC's `rec`, `sub`, `struct` and `array`; imports, functions, tables with initializers, memories with i64 limits, tags, globals,
+  exports, start, the eight element segment encodings, data count, code, data, custom sections), decode.ml's order of reads, checks
+  and messages; the name section read into the functions' `:name` and `:local-names` when it prints back byte for byte.
+- `arbace.repr.wasm.ops`: the instruction table, **493 instructions** (every one of Wasm 3.0 but the four structured ones: SIMD128,
+  relaxed SIMD, bulk memory and tables, reference types, GC, tail calls, exceptions), generated from the spec's pin by
+  `test/wasm/gen_ops.ae` (`bin/repr-wasm ops gen|check`: decode.ml's `instr` arms classed by the shape of their immediates' reads into
+  20 kinds, lexer.mll's keywords their names; an arm of an unknown shape fails the generation).
+- **Every opcode Go emits** (`test/wasm/go_ops.ae`, in `ops check`): the 446 instructions of Go's wasm assembler
+  (`$GOROOT/src/cmd/internal/obj/wasm`'s `a.out.go`, numbered by `writeOpcode`'s ranges) are all in the table, under Go's name (five by
+  Go's own spellings: `CurrentMemory`, `GrowMemory`, `I8x16Shuffle16`, two relaxed truncations without `_zero`). A finding, to report
+  upstream or to verify with a `GOEXPERIMENT=simd` build: `writeOpcode` writes, for the 128 SIMD instructions whose u32 is 0x80 or more,
+  a byte (0x01 or 0x02) after the u32's LEB128, which the spec's encoding does not have (and for the relaxed ones the u32 itself is
+  0x80 less than theirs); Go's default build emits no SIMD, so no module of the corpus has it.
+- Mode `:full` (§5): the LEB128s' widths by ordinal, the empty sections, the segments' flags and the locals' grouping when not
+  canonical; the name section's own widths. Canonical printing writes minimal LEB128s.
+- `arbace.repr.wasm`: the `.ae` text (an item a line, a function's instructions a line each), its reading back, the round trip
+  `check-one` and the negative `control`; `bin/repr-wasm` (read, print, corpus fetch|check|build|lists, roundtrip, divergences, ops).
+- The crop's paths in `bin/lib/version.bash`'s `arbace_crop_paths` (`arbace/repr/wasm.ae`, `arbace/repr/wasm/*`, `arbace/wasm/*`,
+  `go/arbace/wai.ae`, `go/arbace/wai/*`, `bin/lib/repr-wasm/*`, `bin/lib/wai/*`), mirrored in `arbace/j2g/embed.ae`'s excluded and the
+  audit's `crop-rules` (`test/gate/audit.ae`); `test/gate/gate-key-crops-test.bash` passes (347 checks): a file under any of them moves
+  no key. The lists' own bytes move `gate_key` once (`6a2138a2...` → `dbf88e97...`, as AX1's did, `ab91839f8`): the branch merges in
+  a key window (W2's end or the next), WAS24.
+
+**The corpus** (WAS11 (a)): `bin/repr-wasm corpus build` builds ten Go programs (`test/wasm/go/hello/main.go`, Arbace's: a goroutine,
+a channel, fmt, time; and nine `// run` programs of `$GOROOT/test` from goi's essential list: `235.go`, `chan/sieve1.go`, `defer.go`,
+`ken/divconst.go`, `ken/cplx2.go`, `float_lit.go`, `map.go`, `recover.go`, `zerodivide.go`) by TamaGo's go1.27.1 for `wasip1` and `js`
+(20 modules, 23.5 and 23.7 MB, 1.9 to 3.8 MB each; about 23 s cold), keyed by the toolchain's VERSION and the sources' digest.
+
+**The round trip** (`bin/repr-wasm roundtrip`, the module's own verdict): **20 of 20 modules pass** at every level (decoded in :full,
+the `.ae` text, 22 to 41 MB each, read back to the same items and layer, printed back byte for byte, the canonical encoding decoded
+again to the same items with no layer), recorded in `test/wasm/roundtrip-results.edn` (no class needed: `test/wasm/divergences-read.edn`
+is empty of round-trip classes). 22,064 to 52,267 items a module (a function an item); the layer holds 133 to 1,231 non-minimal
+LEB128s a module (Go's linker pads the section and body sizes and its relocated operands to 5 bytes; the wasip1 ones and the js ones
+alike); the js modules' name section reads into the functions' names (1,647 in hello's). The modules use 107 distinct instructions
+(`.tmp/repr-wasm/rt/ops.tsv`): the MVP's integer, float, memory and control instructions, sign extension (`i64.extend8_s` ...),
+saturating truncation (`i64.trunc_sat_f64_s`, `_u`) and bulk memory (`memory.copy`, `memory.fill`), as P3 said. The negative controls
+(`test/wasm/controls.txt`): a module's :full print against another program's bytes, against the other GOOS's, against its own bytes
+with the middle byte flipped: each differs, as it must; the positive check (a module against its own bytes) is the same. Measured
+(stage 0, by hand, one run): 1,322 s for the 20 modules and the four controls, about 65 s a module, peak 1.55 GB (GOMEMLIMIT
+1500MiB, one module at a time). `bin/repr-wasm ops check` (the table regenerated byte for byte and Go's 446) a few seconds.
+
+**Not done in WA1**: `:full` for the text format (WA2's), the custom sections as the text's `(@custom ...)` annotations, a gate
+fragment (`test/gate/crops/wasm.edn`, WA10's: the essential steps of §13.4 measured first).
+
+## As built: WA2 (begun, 2026-11-13, branch `wasm-wa1`)
+
+**What was built** (doc/wasm/SPEC.md §7, §8):
+
+- `arbace.repr.wasm.lex`: the text format's lexer (keywords, `$id` and 3.0's `$"..."`, strings with every escape, numbers with `_`,
+  hexadecimal floats, `inf`, `nan`, `nan:0x...`; `;;` and nested `(; ;)` comments; annotations `(@...)` skipped) and the S-expression
+  reader.
+- `arbace.repr.wasm.text`: a module's fields into the items of the binary decoder (one vocabulary: WAS2 (a)), identifiers resolved
+  (two passes: the index spaces first, with the text's rule that imports precede definitions), the abbreviations expanded (inline
+  imports and exports, inline type uses with implicit types appended in order of first use, folded instructions, named params and
+  locals, labels by name, a table's inline elements and a memory's inline data, the MVP's element and data spellings), numbers by the
+  spec's ranges (`constant out of range`), GC's types and field names, the data count section when `memory.init` or `data.drop` is used.
+- `arbace.repr.wasm.print`: the canonical text printer (flat, numeric indices, explicit type uses, explicit memargs, hexadecimal
+  floats, data with `\hh` escapes).
+- `arbace.repr.wasm.wast` and `bin/repr-wasm wast [--record] [--only LIST]`: each command of the testsuite's root scripts judged at the
+  read level by its own assertion (doc/wasm/SPEC.md §8), with a print row for each module that reads; the negative controls of
+  `test/wasm/controls-wast.txt` (an assert_malformed's module judged as a module, a module judged as malformed, two modules' forms).
+- The REAP row `:wasm` ("WebAssembly", after the asm rows; WAS1 (a)): read (the Go-built round trip and the testsuite's read rows),
+  print (the round trip's :full and the testsuite's print rows), eval and AOT "no check yet" (WA4, WA7); `test/crops/crops.edn`'s crop
+  and `test/crops/independence.edn`'s stages.
+
+**The testsuite at the read and print levels** (`bin/repr-wasm wast`, the testsuite's 258 root scripts; recorded in
+`test/wasm/wast-results.edn`, classes `test/wasm/divergences-wast.edn`): **7,182 read cases, 4,459 pass, 2,723 classed, none failing**:
+the 2,514 modules (text, `binary`, `quote`, `definition`, and those of assert_unlinkable, assert_uninstantiable, assert_trap,
+assert_exception) all read, both formats agreeing (encoded and decoded again to the same forms; the binary ones printed back byte for
+byte); the 1,945 `assert_malformed` all rejected (binary and quote); the 2,723 `assert_invalid` modules all read, their rejection the
+validator's (`:validation`, `:deferred`, WA3). The print level: **2,514 of 2,514 modules' canonical text read again to the same
+forms** (`print/...` rows). The controls (`test/wasm/controls-wast.txt`, six: assert_malformed modules judged as modules, modules
+judged as malformed, two modules' forms compared) fail as they must. Measured (stage 0, by hand, one run): the whole 362 s and 0.58
+GB; the essential subset (`test/wasm/essential-wast.txt`, 36 scripts, 2,195 cases, with `ops check`) 62 s and 0.49 GB.
+
+The first whole run's 44 failures, fixed on the way (each a rule of the reference's parser): named params in block types and
+`call_indirect` (`unexpected token`); any import after any definition (parser.mly's `module_fields`: `import after ... definition`);
+duplicate field names; `unknown type` for an explicit type use with inline params whose index has no definition; 3.0's token rule
+(a run of idchars, strings and `, ; [ ] { }` is one token, so `"a""b"` and `$"l"0` are reserved tokens: `unknown operator`); `(@"...")`
+annotation ids and `(@` with no id inside an annotation; u64 memarg offsets and alignments and u64 limits printed unsigned; an empty
+section that a custom section is placed after (written, not a layer fact); `float` casts of infinities (Arbace's `float` rejects
+them: `.floatValue`).
+
+**The row** (`bin/reap`): WebAssembly read 4,479 / 0 / 2,723 (pass / by design / deferred), print 2,534 / 0 / 0, eval and AOT "no
+check yet" (WA4, WA7); `bin/reap` 0 problems (51 of 56 cells checked); `bin/crops-score --judge --strict` 0 problems, WebAssembly's
+completeness 40.5%, maturity 83.3% (the fragment counted half), independence 60.0% (eval and AOT 0 until built).
+
+**Not done in WA2 yet**: mode `:full` for the text (byte for byte, the identifiers and spellings as a layer), custom sections as
+`(@custom ...)` annotations and names as `(@name ...)` (the `custom/` scripts), the `proposals/` and `legacy/` scripts (28 and 4,
+read by `--only` but not in the record), the messages' second level (WAS8 (a): the reason's prefix against the script's). WA3 (the
+validator) takes the 2,723 next.
