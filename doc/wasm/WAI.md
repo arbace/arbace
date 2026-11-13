@@ -211,7 +211,13 @@ the frame's base, the results left there), so translated functions, interpreted 
    lane functions). So the AOT level runs the interpreter's semantics instruction for instruction, and an interpreter fix is w2g's
    by regeneration.
 
-A function with `try_table`'s handlers or a tail call (`return_call*`) is left to the interpreter (the first part of WA7). The
+A tail call (`return_call*`) moves the callee's arguments to the frame's base and leaves the call to `Machine.run`'s trampoline
+(`X_tailTo`): the callee runs in the same frame once the caller has returned, so a chain of tail calls grows neither Go's stack nor
+the depth (the interpreter, tail-calling a translated function, leaves it to the trampoline too). A function with `try_table`'s
+handlers sends every exception raised inside it (a callee's, a `throw`'s, a `throw_ref`'s) to its label `Lthrow`, which asks
+`Machine.catch` at the raising instruction's pc, as the interpreter's `throw:` does, and jumps to the clause's target (a `switch`
+over the handlers' pcs) with the clause's values pushed, or returns the exception to the caller. A function with an op neither the
+cases nor w2g know is left to the interpreter (none in the testsuite's or the Go programs' modules). The
 translated functions of a module are registered under its bytes' SHA-256 (`RegisterAOT`, in the generated file's `init`) and
 attached at instantiation (`Func.Native`, run by `Machine.run` in place of `exec`). `Machine.Interpreted` counts the Wasm calls the
 interpreter ran in an AOT program; a command (or a Go program's run) that passes but counted any is not an AOT pass: its row is

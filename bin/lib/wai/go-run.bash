@@ -406,6 +406,15 @@ gorun_controls_run() {
     o=$gorun_work/run/${subj//\//__}
     [ -f "$o.exit" ] || { echo "control $cid: left (its subject was not run)"; continue; }
     local target=${other:-$subj}
+    if [ "$mode" = golden ]; then
+      # WA5b: a directory test's run judged against another directory test's golden output (or its own, a _check/ line)
+      v=$(gorun_dir_verdict "go/$subj" "$o" "$(cat "$o.exit")" "$goroot/test/${target%.go}.out" | cut -f2)
+      case $cid in
+        _check/*) if [ "$v" = pass ]; then echo "check $cid: passes, as it must"; else echo "FAIL: check $cid: $v"; fails=$((fails + 1)); fi ;;
+        *) if [ "$v" != pass ]; then echo "control $cid: fails as it must"; else echo "FAIL: control $cid: passes"; fails=$((fails + 1)); fi ;;
+      esac
+      continue
+    fi
     gorun_parse "$target" || { echo "FAIL: control $cid: $target is no run program"; fails=$((fails + 1)); continue; }
     gorun_ref "$target" > "$TMPDIR/ctl.row" || { echo "FAIL: control $cid: no reference for $target"; fails=$((fails + 1)); continue; }
     v=$(gorun_judge "go/$subj" "$o" "$ref" | cut -f2)
