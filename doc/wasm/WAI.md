@@ -101,7 +101,8 @@ and link failure's message against the script's by prefix is a `msg/` row, the s
 
 `waidriver control PLAN MODDIR K MODE [PLAN2 K2]`: the plan run up to its command K, which is then judged in another role:
 `wrong-value`, `as-trap`, `as-return`, `vs`, `msg-vs`, `as-module`, `as-uninstantiable` must fail (`differs`); `self` (the command
-unchanged) must pass (`same`), a `_check/` line.
+unchanged) must pass (`same`), a `_check/` line. Since WA5 the validator's rows too: `valid-flip` (a module's `valid/` row judged
+against the opposite of arbace.wasm.valid's verdict) must fail, `valid-self` must pass.
 
 ## 6. WASI preview 1 (`wasi.go`)
 
@@ -171,11 +172,12 @@ driver (`bin/lib/wai/go-run.bash`).
 1. **The programs**: `$GOROOT/test`'s run programs (the ids of goi's record `test/goi/check-linux-amd64.edn` whose action is `run`, as
    Go's test driver reads the first line: 1,051 of its 1,837; the directory tests and errorcheck programs are not run programs here),
    and Go's own small programs of `test/wasm/go-run.txt` (`test/wasm/go/NAME/main.go`: hello, goroutines, maps, fmt, time, files).
-2. **The build**: as goi's gc reference builds the original (GOPATH mode in its directory, the action's build flags; an action
-   setting `-goexperiment` or `-godebug` a skip, as goi's), cached by the source's, the flags' and the toolchain's hashes in the main
+2. **The build**: as goi's gc reference builds the original (GOPATH mode in its directory, the action's build flags and the files
+   it names, `run cmplxdivide1.go`; an action setting `-goexperiment` or `-godebug` a skip, as goi's; a program Go's test driver would
+   not run on wasip1/wasm by its build constraints, `waidriver buildok` after cmd/internal/testdir's `shouldTest`, a skip, class :na), cached by the source's, the flags' and the toolchain's hashes in the main
    checkout's `.tmp/wai-go/bin`; a build that build constraints refuse for wasip1/wasm is a skip.
-3. **The run**: `waidriver run` in `$GOROOT/test` with `$GOROOT/test` preopened read-only at its own path (the guest's working
-   directory, `PWD`), `/tmp` a fresh scratch directory (`TMPDIR=/tmp`), the environment Go's test driver gives a run test (goi's
+3. **The run**: `waidriver run` in `$GOROOT/test` with `$GOROOT` preopened read-only at its own path (`$GOROOT/test` the guest's
+   working directory, `PWD`), `/tmp` a fresh scratch directory (`TMPDIR=/tmp`), the environment Go's test driver gives a run test (goi's
    `run_env`), the action's arguments; under `limited` at three times the action's limit (`WAI_GO_SLOW`), the driver's
    `GOMEMLIMIT` 1200 MiB; three programs at a time (`WAI_GO_JOBS`).
 4. **The judge**: goi's: against gc's linux/amd64 build and run of the original (its reference, goi's cache `.tmp/goi-check/gcref` read

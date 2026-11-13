@@ -1007,3 +1007,89 @@ one run at a time): the check over the 258 root scripts 263 s and 0.68 GB (the 2
 
 **Not done**: WASI preview 1 and the Go-built `wasip1` programs (WA5; WAS11's start did not fit), wai's own validator (WAS30), the legacy
 exceptions and the proposals beyond 3.0, the AOT cell (WA7).
+
+## As built: WA5 (2026-11-13, branch `wasm-wa5`)
+
+The user's decisions of 2026-11-13: WAS30 (a) (wai gets a validator of its own, judged against arbace.wasm.valid as a `:beside`
+source), WAS31 (a) (SIMD stays in WA4; WA6 keeps Go's SIMD programs and a SIMD corpus beyond the testsuite), WAS32 (a) (the 35
+scripts beyond the root stay run and classed by proposal), and WA5 started. Built from `mac/wasm-wa4` (`d673e51c9`). doc/wasm/WAI.md
+§6-§8 describe the new parts.
+
+**What was built**:
+
+- **wai's validator** (`go/arbace/wai/valid.go`, WAS30 (a); doc/wasm/WAI.md §7): Wasm 3.0's typing rules over the binary, on its own
+  pass (the decoder still assumes a valid module), after the specification's validation algorithm and valid.ml as arbace.wasm.valid
+  follows them: rec groups and subtyping on the decoder's canonical types, limits, the index spaces, constant expressions, the bodies
+  over an operand stack with an unknown bottom and a control stack (try_table's clauses, the non-defaultable locals' initialization,
+  undeclared `ref.func`), the numeric and vector signatures by name. The driver validates every module before it decodes it, so the
+  eval cell's commands now run only modules wai's own validator accepts.
+- **Its judgment**: the planner (`arbace.wasm.check`) writes, for every module it writes as a binary and for every `assert_invalid`'s
+  module (encoded canonically, as the eval modules are), arbace.wasm.valid's verdict (`K valid FILE ok|invalid:MSG|none:REASON`); the
+  driver's `valid/SCRIPT#K` row passes when the two validators agree. Its controls (`valid-flip`, `valid-self`) in
+  `test/wasm/controls-eval.txt`.
+- **WASI preview 1** (`go/arbace/wai/wasi.go`; doc/wasm/WAI.md §6): the 36 names Go's wasip1 port imports (the survey's "38" counted
+  two names declared twice: `fd_write` and `clock_time_get` in both runtime and syscall) and the rest of the snapshot's, over
+  preopened directories resolved component by component inside their preopen (no `..` above it, symbolic links followed inside it,
+  absolute targets refused), read-only preopens refusing every change; `proc_exit` an `*Exit` recovered at the engine's boundary;
+  `random_get` seeded; `poll_oneoff`'s clocks sleep until the earliest. The driver's `run` (WASI command: validate, decode, link,
+  `_start`) and `buildok` (Go's test driver's build-constraint rule for wasip1/wasm, cmd/internal/testdir's `shouldTest`).
+- **The Go run corpus** (`bin/wai go`, `bin/lib/wai/go-run.bash`, WAS11 (a); doc/wasm/WAI.md §8): `$GOROOT/test`'s run programs (the
+  ids of goi's record whose action is `run`: 1,051) and Go's own small programs of `test/wasm/go-run.txt` (hello, goroutines, maps,
+  fmt, time, files: `test/wasm/go/NAME/main.go` with `want.out`, the first five's equal to gc's linux run, files' a sandbox test),
+  built for wasip1 by TamaGo's go1.27.1 (cached by key in the main checkout's `.tmp/wai-go`), run on wai with `$GOROOT` preopened
+  read-only and `$GOROOT/test` the working directory, judged as goi's check judges goi (gc's linux/amd64 run of the original, goi's own
+  references read by goi's own key; status, standard output, standard error's head); the record `test/wasm/go-results.edn`, the
+  classes `test/wasm/divergences-go.edn`, the controls `test/wasm/controls-go.txt` (4 negative, 2 positive), the essential list
+  `test/wasm/essential-go.txt` (the own programs, every fifteenth of goi's essential run programs, the controls' subjects: 44).
+- **The row and the gate**: the eval cell's sources gain `bin/wai go` (programs) and the validator's rows (`:role :beside`); the
+  crop's controls and independence (eval and judge stages name the new steps); the fragment gains `wai-go-essential` (essential,
+  chain `wasm-essential`) and `wai-go` (`--full`), not spliced; Makefile `wai-go`, `wai-go-essential`, `wai-go-record`.
+
+**Counts**:
+
+| | before (WA4) | after (WA5) |
+|---|---|---|
+| root scripts, eval commands | 60,498 of 60,498 | **60,498 of 60,498** (every module now validated by wai first) |
+| root messages (msg/) | 5,192 of 5,192 | 5,192 of 5,192 |
+| wai's validator against arbace.wasm.valid, root (valid/) | none | **5,237 of 5,237 agree** (2,514 accepted by both, 2,723 rejected by both, the assert_invalid's) |
+| the same beyond the root | none | 567: 341 agree, 226 classed by proposal (all modules arbace.wasm.valid gives no verdict on: they do not read or encode) |
+| beyond the root, eval commands | 395 pass, 1,042 classed | 391 pass, 1,046 classed: 4 more in custom-descriptors (wai's validator now rejects, as arbace.wasm.valid does, two br_on_cast modules of exact types; two exact.wast modules) |
+| the Go run corpus | none | **1,057 programs: 1,001 pass**, 53 :na (Go's test driver would not run them on wasip1/wasm), 3 over budget (`finprofiled.go`, `fixedbugs/issue78081.go`, `fixedbugs/issue79186.go`: past three times the action's limit) |
+| of them goi's essential run programs | none | 533: 500 pass, the rest :na or over budget |
+| controls | 12 negative, 3 positive | eval 16 negative, 5 positive; Go 4 negative, 2 positive: all as they must |
+| REAP eval cell | 60,893 / 0 / 1,042 | **61,890 / 0 / 1,046** (3 over budget in the denominator; 53 n/a beside) |
+
+The first whole Go run (before the build-constraint rule): 1,026 of 1,057 passed, every failure but five a program Go's test driver
+would not run on wasip1/wasm (it runs the go command, needs `syscall.Mmap`, or states `!wasm`); the five: `cmplxdivide.go`'s action
+names a second file (`run cmplxdivide1.go`: built with it since, as goi's forms' `:files` list it), `winbatch.go` reads
+`$GOROOT/src/all.bat` (the preopen widened from `$GOROOT/test` to `$GOROOT`, read-only), and the three over budget. The testsuite's
+first run with the validator: 57 + 31 root commands refused for "data count section required" (Arbace's canonical encoder writes no
+data count section, WAS33), five element segments typed `(ref null func)` where Wasm 3.0's binary format gives a segment of function
+indices `(ref func)`, and one heap index 2^31 read as a negative abstract type; fixed.
+
+Measured (one run at a time, under a 2.5 GiB watcher): the testsuite's check about 370 s and 0.69 GB (the planner now also running
+arbace.wasm.valid over every module), the essential command 107 s and 0.54 GB (with the driver's rebuild); the Go corpus cold 17.7
+minutes and 1.86 GB summed over three jobs (the builds the cost), warm 9 minutes; `bin/wai go --essential` warm 6 s and 0.19 GB (cold,
+its 44 builds, about a minute). The conversions by repr/go's native reader: wai 123 s and 1.05 GB, the driver 64 s and 1.02 GB. The
+branch moves no key (gate-key-crops-test passes; `bin/arbace-go --gate-key` equal on `wasm-wa4` and `wasm-wa5`).
+
+**Proposals** (numbered after WAS32):
+
+- **WAS33 The data count section.** Arbace's canonical encoder (`arbace.repr.wasm.binary/encode`) writes no data count section, which
+  the binary format requires where a body uses a data index (`memory.init`, `data.drop`, `array.new_data`, `array.init_data`); the
+  testsuite's modules so encoded are malformed by the letter. (a) the encoder writes it when a body uses a data index (repr/wasm's round
+  trips and records rerun); (b) as built: wai's validator bounds the data indices by the data section's count when the section is
+  absent. *Recommended: (a)*, then wai's validator strict again.
+- **WAS34 The Go corpus's directory tests.** goi's record has 127 directory tests (rundir, buildrundir, runindir) beside its 1,051
+  run programs. (a) build them for wasip1 as goi's check builds them (their packages as a GOPATH tree) in a WA5b; (b) leave them to
+  WA6. *Recommended: (a)*.
+- **WAS35 The speed limit.** (a) as built: three times the action's limit (`WAI_GO_SLOW`), the programs past it `:budget` until w2g
+  (WA7) gives the AOT level; (b) a timeouts file of wai's own, as goi's. *Recommended: (a)*.
+- **WAS36 The validator's messages.** (a) as built: the verdicts alone (both accept or both reject); (b) a second level, wai's
+  message against arbace.wasm.valid's by prefix. *Recommended: (a)*: the testsuite's messages are the read cell's second level
+  already.
+- **WAS37 `wai-go-essential` in the essential gate.** (a) as proposed in the fragment: 44 programs, about a minute cold and seconds
+  warm (builds cached by key in the main checkout); (b) `--full` only. *Recommended: (a)*.
+
+**Not done**: the directory tests (WAS34), Go's js/wasm programs and the headless world (WA11), `wasmexport.go` and
+`wasmexport2.go` (errorcheck programs: gc's errors for wasm, not runs), `wasmmemsize.go` (a runindir test: WAS34's), the AOT cell (WA7), the legacy exceptions (WA8).

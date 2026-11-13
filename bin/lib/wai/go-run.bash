@@ -2,7 +2,7 @@
 # programs (the ids of goi's record test/goi/check-linux-amd64.edn whose action is `run`, as Go's test driver reads it) and Go's own
 # small programs of test/wasm/go-run.txt, each built for GOOS=wasip1 GOARCH=wasm by TamaGo's go (GOPATH mode in its directory with
 # its action's build flags, as goi's gc reference is built; cached by the source's, the flags' and the toolchain's hashes) and run
-# by wai's light driver (`waidriver run`: WASI preview 1, $GOROOT/test preopened read-only at its own path and the working
+# by wai's light driver (`waidriver run`: WASI preview 1, $GOROOT preopened read-only at its own path, $GOROOT/test the working
 # directory, /tmp a scratch directory), judged against gc's linux/amd64 build and run of the original as goi's check judges goi:
 # exit status, standard output byte for byte, standard error up to the goroutines' traces (goi's gc references, the main
 # checkout's .tmp/goi-check/gcref, read by goi's own key; a missing one made the same way into .tmp/wai-go/gcref); a program gc's
@@ -24,10 +24,11 @@ gorun_action_of() {
   awk 'NF==0{next} /^\/\/go:build/{next} /^\/\/ \+build/{next} {sub(/^\/\/ ?/, ""); print; exit}' "$1"
 }
 
-# gorun_parse PROGRAM: sets tmo, bflags, args (the caller's locals) from its action line, or why and returns 1
+# gorun_parse PROGRAM: sets tmo, bflags, files, args (the caller's locals) from its action line, or why and returns 1; files the
+# program's and the .go files its action names first (`run cmplxdivide1.go`: compiled with it, as goi's forms' :files list them)
 gorun_parse() {
   local act x w=()
-  tmo=10 bflags=() args=()
+  tmo=10 bflags=() args=() files=("$(basename "$1")")
   act=$(gorun_action_of "$goroot/test/$1")
   if [[ $act == *[\'\"]* ]]; then
     x=$(printf '%s\n' "$act" | xargs printf '%s\n' 2>&1) || { why="fail	the action cannot be split: $act"; return 1; }
@@ -45,6 +46,7 @@ gorun_parse() {
       *) bflags+=("$1"); shift ;;
     esac
   done
+  while [ $# -gt 0 ] && [ "${1%.go}" != "$1" ]; do files+=("$1"); shift; done
   args=("$@")
 }
 
@@ -56,8 +58,8 @@ gorun_gc_env() {
 # gorun_ref PROGRAM: gc's reference (goi's gc_ref: the same key, layout and judgment), sets ref; 1 with a row printed when gc's
 # build fails or its run times out
 gorun_ref() {
-  local p=$1 g=$goroot/test/$1 key rt gst
-  key=$( { cat "$goroot/VERSION"; basename "$p"; cat "$g"
+  local p=$1 g=$goroot/test/$1 key rt gst x
+  key=$( { cat "$goroot/VERSION"; for x in "${files[@]}"; do echo "$x"; cat "$(dirname "$g")/$x"; done
            echo "flags:"; printf '%s\n' ${bflags[@]+"${bflags[@]}"}; echo "args:"; printf '%s\n' ${args[@]+"${args[@]}"}
            declare -f stderr_head run_env; } | sha256sum | cut -c1-24)
   ref=$main/.tmp/goi-check/gcref/$key
@@ -65,7 +67,7 @@ gorun_ref() {
   ref=$gorun_dir/gcref/$key
   [ -f "$ref/exit" ] && return 0
   rt=$ref.tmp.$$; rm -rf "$rt"; mkdir -p "$rt"
-  if ! (cd "$(dirname "$g")" && env $(gorun_gc_env) "$goroot/bin/go" build ${bflags[@]+"${bflags[@]}"} -o "$rt/exe" "$(basename "$p")") > "$rt/build.log" 2>&1; then
+  if ! (cd "$(dirname "$g")" && env $(gorun_gc_env) "$goroot/bin/go" build ${bflags[@]+"${bflags[@]}"} -o "$rt/exe" "${files[@]}") > "$rt/build.log" 2>&1; then
     printf '%s\tfail\tgc reference: the original'"'"'s build failed: %s\n' "go/$p" "$(head -1 "$rt/build.log" | cut -c1-200)"; rm -rf "$rt"; return 1
   fi
   local gcwork=$main/.tmp/goi-check
@@ -92,17 +94,18 @@ gorun_ref_fails() {
   fi
 }
 
-# gorun_build SRCDIR FILE OUT: the program built for wasip1/wasm (cached by key), sets bin; on failure the build's first error line in
+# gorun_build SRCDIR OUT FILE...: the program built for wasip1/wasm (cached by key), sets bin; on failure the build's first error line in
 # OUT.why
 gorun_build() {
-  local dir=$1 file=$2 out=$3 key
-  key=$( { cat "$goroot/VERSION"; echo "$file"; cat "$dir/$file"; echo "flags:"; printf '%s\n' ${bflags[@]+"${bflags[@]}"}; } | sha256sum | cut -c1-24)
+  local dir=$1 out=$2 key x
+  shift 2
+  key=$( { cat "$goroot/VERSION"; for x in "$@"; do echo "$x"; cat "$dir/$x"; done; echo "flags:"; printf '%s\n' ${bflags[@]+"${bflags[@]}"}; } | sha256sum | cut -c1-24)
   bin=$gorun_dir/bin/$key.wasm
   [ -f "$bin" ] && return 0
   mkdir -p "$gorun_dir/bin"
   if ! (cd "$dir" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GO111MODULE=off GOPROXY=off GOEXPERIMENT= CGO_ENABLED=0 \
           GOOS=wasip1 GOARCH=wasm GOCACHE="$main/.tmp/wasm/gocache" GOMAXPROCS=2 \
-          "$goroot/bin/go" build -p 1 ${bflags[@]+"${bflags[@]}"} -o "$bin.tmp.$$" "$file") > "$out.build.log" 2>&1; then
+          "$goroot/bin/go" build -p 1 ${bflags[@]+"${bflags[@]}"} -o "$bin.tmp.$$" "$@") > "$out.build.log" 2>&1; then
     rm -f "$bin.tmp.$$"
     grep -v '^#' "$out.build.log" | head -1 | cut -c1-200 > "$out.why"
     return 1
@@ -118,7 +121,7 @@ gorun_wai() {
   local gcwork=$main/.tmp/goi-check env=() kv
   for kv in $(run_env); do env+=(--env "$kv"); done
   (cd "$goroot/test" && GOMEMLIMIT=${WAI_GOMEMLIMIT:-1200MiB} ARBACE_MEM_GIB=0 limited "$((tmo * ${WAI_GO_SLOW:-3}))" "$wai_exe" run \
-     --dir "$goroot/test=$goroot/test:ro" --dir "/tmp=$scratch" --env "PWD=$goroot/test" --env TMPDIR=/tmp ${env[@]+"${env[@]}"} \
+     --dir "$goroot=$goroot:ro" --dir "/tmp=$scratch" --env "PWD=$goroot/test" --env TMPDIR=/tmp ${env[@]+"${env[@]}"} \
      "$w" "$@" > "$o.out" 2> "$o.err.raw" < "$gorun_dir/empty") || st=$?
   rm -rf "$scratch"
   stderr_head "$o.err.raw" > "$o.err"
@@ -127,13 +130,13 @@ gorun_wai() {
 
 # gorun_one ID: one program's row (ID go/PATH for $GOROOT/test's, go/own/NAME for Go's own small programs)
 gorun_one() {
-  local id=$1 p=${1#go/} tmo=10 bflags=() args=() why ref x o st want
+  local id=$1 p=${1#go/} tmo=10 bflags=() args=() files=() why ref x o st want
   o=$gorun_work/run/${p//\//__}
   mkdir -p "$gorun_work/run"
   case $p in
     own/*)
       local src=$root/test/wasm/go/${p#own/}
-      gorun_build "$src" main.go "$o" || { printf '%s\tfail\tbuild: %s\n' "$id" "$(cat "$o.why")"; return 0; }
+      gorun_build "$src" "$o" main.go || { printf '%s\tfail\tbuild: %s\n' "$id" "$(cat "$o.why")"; return 0; }
       gorun_wai "$o" "$bin"
       st=$(cat "$o.exit")
       if [ "$st" != 0 ]; then printf '%s\tfail\tstatus %s: %s\n' "$id" "$st" "$(head -c 200 "$o.err" | tr '\t\n' '  ')"
@@ -143,10 +146,13 @@ gorun_one() {
       return 0 ;;
   esac
   gorun_parse "$p" || { printf '%s\t%s\n' "$id" "$why"; return 0; }
+  # Go's test driver's own build constraints (cmd/internal/testdir's shouldTest) for wasip1/wasm: a program it would not run is a skip
+  x=$("$wai_exe" buildok "$goroot/test/$p")
+  [ "$x" = ok ] || { printf '%s\tskip\tthe test driver'"'"'s build constraint excludes wasip1/wasm: %s\n' "$id" "$x"; return 0; }
   gorun_ref "$p" || return 0
   x=$(gorun_ref_fails "$ref")
   [ -z "$x" ] || { printf '%s\tskip\tgc'"'"'s own run does not pass here: %s\n' "$id" "$x"; return 0; }
-  gorun_build "$goroot/test/$(dirname "$p")" "$(basename "$p")" "$o" || {
+  gorun_build "$goroot/test/$(dirname "$p")" "$o" "${files[@]}" || {
     x=$(cat "$o.why")
     case $x in
       *"build constraints exclude all Go files"*) printf '%s\tskip\tbuild constraints exclude wasip1/wasm: %s\n' "$id" "$x" ;;
@@ -209,7 +215,7 @@ gorun_check() {
 # the negative controls (GTS81 (a)): `vs OTHER`, the subject's run on wai judged against another program's gc reference, must fail;
 # `self`, the subject's run against its own, must pass (a _check/ line)
 gorun_controls_run() {
-  local cid subj mode other v fails=0 tmo bflags args why ref o
+  local cid subj mode other v fails=0 tmo bflags args files why ref o
   while read -r cid subj mode other; do
     case $cid in ''|'#'*) continue ;; esac
     o=$gorun_work/run/${subj//\//__}

@@ -5598,3 +5598,52 @@ moves no key beyond WA1's (gate-key-crops-test; `bin/arbace-go --gate-key` befor
 
 Proposals: WAS30 (wai's own validator, judged against arbace.wasm.valid), WAS31 (SIMD brought forward from WA6), WAS32 (the scripts
 beyond the root at eval). Not done: WASI preview 1 and the `wasip1` Go programs (WA5, WAS11's start), the AOT cell (WA7).
+
+## 2026-11-13: wasm-wa5, WA5: wai's own validator, WASI preview 1 and the Go run corpus (branch `wasm-wa5`, from `mac/wasm-wa4` `d673e51c9`)
+
+The user's decisions of 2026-11-13: WAS30 (a), WAS31 (a), WAS32 (a) (doc/wasm/WASM-SURVEY.md, "As built: WA4"), and WA5 started.
+
+Done (doc/wasm/WASM-SURVEY.md, "As built: WA5"; doc/wasm/WAI.md §6-§8): three files of Go written in the module copy
+`.tmp/wai-src` and converted to forms by repr/go's native reader (`bin/repr-go read --goos linux --goarch amd64 arbace/wai`, then
+`arbace/waidriver`, under GOMEMLIMIT=1100MiB GOGC=25 REPR_GO_JOBS=1: 123 s and 1.05 GB, 64 s and 1.02 GB), the unchanged files' forms
+equal to WA4's: `go/arbace/wai/valid.go` (wai's validator: Wasm 3.0's rules over the binary, after the specification's validation
+algorithm and valid.ml at WebAssembly/spec wg-3.0 as arbace.wasm.valid states them, on the decoder's canonical types),
+`go/arbace/wai/wasi.go` (WASI preview 1, written after WebAssembly/WASI's `legacy/preview1` witx as Go's `syscall/fs_wasip1.go`
+and `runtime/os_wasip1.go` at TamaGo's go1.27.1 call it; wazero v1.12.0's `imports/wasi_snapshot_preview1` read for the layouts,
+nothing converted), the driver's `run` and `buildok` (`test/wasm/wai-driver`: buildok after cmd/internal/testdir's `shouldTest` and
+its context's `match` at the same toolchain), a `valid-flip`/`valid-self` control; `machine.go` recovers proc_exit's `*Exit`. The
+planner writes arbace.wasm.valid's verdict for each module it writes and each assert_invalid's module (valid/ rows); `bin/wai go`
+with `bin/lib/wai/go-run.bash` (goi's `stderr_head` and `run_env` taken from bin/goi's text, so its gc references' keys are goi's),
+`bin/wai run`; Go's own programs `test/wasm/go/{goroutines,maps,fmt,time,files}` with hello's `want.out`; the records
+`test/wasm/eval-results.edn` (re-recorded) and `test/wasm/go-results.edn`, the classes `test/wasm/divergences-go.edn`, the controls
+`test/wasm/controls-go.txt`, the essential list `test/wasm/essential-go.txt`; the REAP eval cell's sources, the crop's controls and
+independence, the fragment's `wai-go-essential` and `wai-go` (not spliced), Makefile `wai-go*`.
+
+Results: the root scripts 60,498 of 60,498 commands (unchanged, now every module validated by wai first) and 5,192 of 5,192 messages;
+wai's validator agrees with arbace.wasm.valid on all 5,237 root modules (2,514 accepted, 2,723 rejected) and on 341 of 567 beyond the
+root (the 226 others modules arbace.wasm.valid has no verdict on, classed by proposal); beyond the root 391 commands pass, 1,046
+classed (4 more custom-descriptors commands than WA4, whose modules wai's validator now rejects as Arbace's does). The Go corpus:
+1,057 programs, 1,001 pass (500 of goi's 533 essential run programs), 53 :na (Go's test driver would not run them on wasip1/wasm), 3
+over budget. The REAP eval cell 61,890 / 0 / 1,046 (3 over budget, 53 n/a beside); bin/reap 0 problems; crops-score `--judge
+--strict` 0 problems.
+
+Found on the way: Arbace's canonical encoder writes no data count section where the binary format requires one (WAS33); a segment of
+function indices is `(ref func)` in Wasm 3.0's binary format, not `(ref null func)`; the Go corpus's first run counted programs Go's
+own runner skips on wasm (it evaluates `//go:build` itself; go build of a named file does not), whence `buildok`; `run X.go` actions
+compile their named files with the program; `winbatch.go` reads `$GOROOT/src`, so `$GOROOT` is preopened read-only.
+
+Alternatives considered: wai validating inside the decoder's pass (rejected: the decoder assumes a valid module and translates as it
+reads; a validator of its own is the judge WAS30 asks for); arbace.wasm.valid's verdicts taken from the read cell's record
+(rejected: the planner asks arbace.wasm.valid itself, about 100 s more over the testsuite); preopening `$GOROOT/test` only (widened
+for winbatch.go: still read-only, the scratch /tmp the only writable directory); a virtual clock for poll_oneoff (rejected for now:
+the real clock is what gc's runs see, and the corpus's sleeps are short).
+
+Rule slips: three commands used `/dev/null` (a `2>/dev/null` on a `git mv`, one on a `type` check) or `<(...)` (a diff), against the
+burst rules; and `bin/wai` was edited (its `--essential` list) while a `bin/wai check` whose case branch was already parsed ran (its
+results unaffected: the check was rerun from scratch afterwards for the record). No run passed 2.5 GiB (peak 1.86 GB, the cold Go
+corpus at three jobs). The branch moves no key: gate-key-crops-test passes, `bin/arbace-go --gate-key` is
+`c01784b6c08edc46...` on both `wasm-wa4` and `wasm-wa5`.
+
+Proposals: WAS33 (the encoder's data count section), WAS34 (the directory tests), WAS35 (the speed limit), WAS36 (the validator's
+messages), WAS37 (`wai-go-essential` essential). Not done: the directory tests, the js/wasm programs and the headless world (WA11),
+the AOT cell (WA7), the legacy exceptions (WA8).
