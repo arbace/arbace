@@ -41,6 +41,12 @@ t=$(mktemp -d "${TMPDIR:-$here/.tmp/tmp}/gate-lanes-test.XXXXXX") || exit 2
 [ -n "${KEEP:-}" ] || trap 'rm -rf "$t"' EXIT
 n=0 bad=0
 ok() { n=$((n + 1)); echo "ok   $*"; }
+# the synthetic steps' body: SECS seconds, or with a HOLD (a shell condition) until it holds (at most 60 s) and SECS more. A blocker
+# holds until every waiter of its case has registered: a fixed sleep raced them under strace and a loaded host (the nested
+# gate-tests of gate-reads-test, the gate's rerun of 2026-11-13: a waiter registered after the blocker ended and went first)
+syn_body='echo "$(date +%s%N) start $0 $1" >> "$2"
+if [ -n "$4" ]; then i=0; until eval "$4"; do i=$((i + 1)); [ $i -ge 600 ] && { echo "$(date +%s%N) hold-timeout $0" >> "$2"; break; }; sleep 0.1; done; fi
+sleep "$3"; echo "$(date +%s%N) end $0 $1" >> "$2"'
 no() { n=$((n + 1)); bad=$((bad + 1)); echo "FAIL $*"; }
 root=$here; . "$here/bin/lib/tools.bash"
 lanes() { (cd "$here" && arbace_tool -p "$here/test" -m gate.lanes "$@"); }
@@ -72,17 +78,17 @@ rule order        58 16 "R:53"      "W:x:4 W:y:6 W:z:1"   "x "
 # small, in that order); the rule's order: blocker, b1 (b2 big beside it no, s1 and s2 not past b2's place), then b2 with
 # s1 (6 + 3 <= 10), then s2
 L=$t/lanes; mkdir -p "$L"
-run_step() {  # run_step NAME GIB ORDER SECS: through bin/gate-lane, its start and end in $t/steps.log
+run_step() {  # run_step NAME GIB ORDER SECS [HOLD]: through bin/gate-lane, its start and end in $t/steps.log
   GATE_LANE_DIR=$L GATE_LANE_STEP=$1 GATE_LANE_GIB=$2 GATE_LANE_ORDER=$3 GATE_MEM_BUDGET_GIB=10 GATE_LANE_BIG_GIB=6 GATE_LANE_POLL=0.1 \
-    "$here/bin/gate-lane" bash -c 'echo "$(date +%s%N) start $0 $1" >> "$2"; sleep "$3"; echo "$(date +%s%N) end $0 $1" >> "$2"' \
-    "$1" "$2" "$t/steps.log" "$4" 2>>"$t/waits.log"
+    "$here/bin/gate-lane" bash -c "$syn_body" "$1" "$2" "$t/steps.log" "$4" "${5:-}" 2>>"$t/waits.log"
 }
-run_step blocker 10 0 1.2 &
+run_step blocker 10 0 0.3 "[ \$(ls '$L/wait' | wc -l) -ge 4 ]" &
 pids=($!)
 for i in $(seq 1 50); do [ -s "$t/steps.log" ] && break; sleep 0.1; done
+# (b2 and s1, the second round, each hold until the other has started: see 7b's round)
 run_step s2 3 4 0.6 & pids+=($!)
-run_step s1 3 3 0.6 & pids+=($!)
-run_step b2 6 2 0.6 & pids+=($!)
+run_step s1 3 3 0.3 "grep -q ' start b2 ' '$t/steps.log'" & pids+=($!)
+run_step b2 6 2 0.3 "grep -q ' start s1 ' '$t/steps.log'" & pids+=($!)
 run_step b1 6 1 0.6 & pids+=($!)
 wait "${pids[@]}"
 order=$(awk '$2 == "start" {print $3}' "$t/steps.log" | tr '\n' ' ')
@@ -250,17 +256,20 @@ F=$t/free; mkdir -p "$F"
 free_step() {  # free_step NAME GIB ORDER SECS
   GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$((13 * 1048576)) GATE_LANE_DIR=$F GATE_LANE_STEP=$1 \
     GATE_LANE_GIB=$2 GATE_LANE_ORDER=$3 GATE_LANE_BIG_GIB=5 GATE_LANE_POLL=0.1 GATE_LANE_WAITS=$t/free-$1.wait \
-    "$here/bin/gate-lane" bash -c 'echo "$(date +%s%N) start $0 $1" >> "$2"; sleep "$3"; echo "$(date +%s%N) end $0 $1" >> "$2"' \
-    "$1" "$2" "$t/free.log" "$4" 2>>"$t/free-waits.log"
+    "$here/bin/gate-lane" bash -c "$syn_body" "$1" "$2" "$t/free.log" "$4" "${5:-}" 2>>"$t/free-waits.log"
 }
-free_step blocker 13 0 1.2 &
+free_step blocker 13 0 0.3 "[ \$(ls '$F/wait' | wc -l) -ge 5 ]" &
 pids=($!)
 for i in $(seq 1 50); do [ -s "$t/free.log" ] && break; sleep 0.1; done
-free_step s1 1 5 2.0 & pids+=($!)
+# (b1, b2 and s1, the rule's second round, each hold until the other two have started: a waiter takes its admission at its
+# own poll, under strace and a loaded host seconds late, and a step of the round that ended first let the next round in
+# beside the late one; the rerun of 2026-11-13, "small beside a big one: 0", and "blocker {b2 b3 s1} b1 b4")
+started() { local x c=; for x in "$@"; do c="$c${c:+ && }grep -q ' start $x ' '$t/free.log'"; done; echo "$c"; }
+free_step s1 1 5 0.5 "$(started b1 b2)" & pids+=($!)
 free_step b4 6 4 0.6 & pids+=($!)
 free_step b3 6 3 0.6 & pids+=($!)
-free_step b2 6 2 2.0 & pids+=($!)
-free_step b1 6 1 2.0 & pids+=($!)
+free_step b2 6 2 0.5 "$(started b1 s1)" & pids+=($!)
+free_step b1 6 1 0.5 "$(started b2 s1)" & pids+=($!)
 wait "${pids[@]}"
 admits=$(awk -F'\t' '$2 == "admit" {print $3}' "$F/events.tsv" | tr '\n' ' ')
 sort -n "$t/free.log" > "$t/free.sorted"
@@ -354,6 +363,11 @@ else no "the free view: status $st: $(cat "$t/view-free.txt")"; fi
 if grep -q 'mem_lane=1; export GATE_LANES=free' "$here/bin/gate" && grep -q '"${GATE_MEM_LANE:-1}" != 0' "$here/bin/gate"; then
   ok "bin/gate: the essential memory lane on by default without --concurrent (GATE_MEM_LANE=0 off)"
 else no "bin/gate does not set the essential lane"; fi
+# review 1113 finding 3: nor with --concurrent and GATE_LANES=0 (GTS37 (a)'s private lock, no lane): the condition that turns
+# the essential lane on tests --concurrent itself, not only the lanes' variable
+if grep -B1 'mem_lane=1; export GATE_LANES=free' "$here/bin/gate" | grep -q '\[ -z "\$lanes" \] && \[ -z "\$concurrent" \]'; then
+  ok "bin/gate: no essential memory lane under --concurrent with GATE_LANES=0"
+else no "bin/gate: the essential lane's condition does not test --concurrent"; fi
 
 # ---- 8. GTS248 (a), GTS249
 # 8a. the plan's order across gates: gate A (started first) waits a (order 5, 15 GiB), gate B b (order 1, 15 GiB), 10 GiB
@@ -381,13 +395,16 @@ else no "the gates' order: free [$(cat "$t/order-shared.free")|$(cat "$t/order-p
 two_gates() {  # two_gates TAG SHARED
   local H=$t/host-$1 sh=$2 tag=$1 p=()
   mkdir -p "$H" "$t/gA-$tag" "$t/gB-$tag"
-  gstep() {  # gstep GATE OWN NAME GIB ORDER SECS
+  gstep() {  # gstep GATE OWN NAME GIB ORDER SECS [HOLD]
     env GATE_LANE_MODE=free GATE_LANE_MARGIN_GIB=0 GATE_LANE_MEMAVAIL_KIB=$((13 * 1048576)) GATE_LANE_POLL=0.1 \
       ${sh:+GATE_LANE_HOST_DIR=$H} GATE_LANE_GATE=$1 GATE_LANE_DIR=$2 GATE_LANE_STEP=$3 GATE_LANE_GIB=$4 GATE_LANE_ORDER=$5 \
-      "$here/bin/gate-lane" bash -c 'echo "$(date +%s%N) start $0" >> "$1"; sleep "$2"; echo "$(date +%s%N) end $0" >> "$1"' \
-      "$3" "$t/two-$tag.log" "$6" 2>>"$t/two-$tag.waits"
+      "$here/bin/gate-lane" bash -c "$syn_body" "$3" "" "$t/two-$tag.log" "$6" "${7:-}" 2>>"$t/two-$tag.waits"
   }
-  gstep $ga "$t/gA-$tag" blocker 10 0 1.5 & p+=($!)
+  # the blocker holds until b1 and a2 wait on the host's state (both registered), or on their own states until b1 has
+  # started beside it and a2 waits in A's
+  if [ -n "$sh" ]; then hold="[ \$(ls '$H/wait' | wc -l) -ge 2 ]"
+  else hold="grep -q ' start b1 ' '$t/two-$tag.log' && [ \$(ls '$t/gA-$tag/wait' | wc -l) -ge 1 ]"; fi
+  gstep $ga "$t/gA-$tag" blocker 10 0 0.3 "$hold" & p+=($!)
   for i in $(seq 1 50); do [ -s "$t/two-$tag.log" ] && break; sleep 0.1; done
   gstep $gb "$t/gB-$tag" b1 8 1 0.6 & p+=($!)
   sleep 0.3
