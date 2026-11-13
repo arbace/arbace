@@ -943,7 +943,11 @@ aot_compile() {
       rm -rf "$cache/$nm.old.$$"; [ ! -d "$cache/$nm" ] || mv "$cache/$nm" "$cache/$nm.old.$$" 2>/dev/null || true
       mv "$cache/.$nm.$$" "$cache/$nm" 2>/dev/null || rm -rf "$cache/.$nm.$$"; rm -rf "$cache/$nm.old.$$"
     fi
-    [ -d "$AOT/mod/pyaot/$nm" ] || cp -r "$cache/$nm" "$AOT/mod/pyaot/$nm"
+    # through a name of its own (queue 279: check --aot --lib-test compiles drivers in parallel in one module)
+    if [ ! -d "$AOT/mod/pyaot/$nm" ]; then
+      rm -rf "$AOT/mod/pyaot/.$nm.$$"; cp -r "$cache/$nm" "$AOT/mod/pyaot/.$nm.$$"
+      mv -T "$AOT/mod/pyaot/.$nm.$$" "$AOT/mod/pyaot/$nm" 2>/dev/null || rm -rf "$AOT/mod/pyaot/.$nm.$$"
+    fi
   done < <(awk '$1 == "module" && $4 != "-" {print $4, $5} $1 == "main" {print $2, $3}' "$log.compile")
   mkdir -p "$AOT/mod/pyaot/$pkg"; cp -r "$w/mod/pyaot/$pkg/prog" "$AOT/mod/pyaot/$pkg/"
   rm -rf "$src" "$w"
@@ -1333,7 +1337,7 @@ cmd_check_lib() {
       --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"
     if [ -n "$only" ]; then cp "$WORK/check-only.txt" "$d/only.txt"; else rm -f "$d/only.txt"; fi
     # the compiled drivers (about 220 MB each) not kept past their run
-    [ -z "$drvdir" ] || rm -rf "$drvdir"
+    [ -z "$drvdir" ] || { rm -rf "$drvdir"; aot_cache_trim; }
   fi
   [ ! -f "$d/only.txt" ] || onlyf="$d/only.txt"
   "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --name "pyi check" --dir "$d" --modules "$d/modules.tsv" "${refs[@]}" "${uni[@]}" --verdict "$verdict" \
@@ -1357,30 +1361,42 @@ cmd_check_lib() {
 # SECONDS PEAK-KB STATE REASON; STATE built, refused or no-build). A module not built is not run (its methods "no result":
 # failing, not left to the loop). Prints the drivers' directory
 aot_lib_drivers() {
-  local run=$1 m w pkg out t0 st why kb; local dir="$AOT/bin/lt" src="$AOT/lt-src"
+  local run=$1 m n=0 jobs=${PYI_AOT_LIB_JOBS:-${PYI_LIB_TEST_JOBS:-2}} running=0; local dir="$AOT/bin/lt" src="$AOT/lt-src"
   aot_module >&2; mkdir -p "$dir" "$src"; : >> "$run/aot-compile.tsv"
+  # PYI_AOT_LIB_JOBS drivers at once (default PYI_LIB_TEST_JOBS; about 1-2.5 GB each, a cold generator's first 4.5 GB):
+  # the first alone (a new generator's packages dropped and made once, aot_compile), then the rest in parallel
   while IFS= read -r m; do
     [ -n "$m" ] || continue
     [ ! -f "$run/$m.status" ] || continue  # run already (the runner keeps it: the run resumes)
-    w="$src/$m.py"; pkg=p_lt_$(echo "$m" | tr -c 'A-Za-z0-9\n' '_'); out="$dir/$m.exe"
-    { cat "$root/test/python/libtest_run.py"
-      printf '\n# queue 279: compiled ahead with the driver; never run here (main imports it after regrtest_setup)\nif sys.argv is None:\n    import %s\n' \
-        "$(case $m in test.*) echo "$m" ;; *) echo "test.$m" ;; esac)"; } > "$w"
-    t0=$(date +%s%N)
-    busybox time -v -o "$run/$m.aot-compile.time" "$root/bin/pyi" aot-compile "$pkg" "$w" "$out" > "$run/$m.aot-compile.log" 2>&1 || true
-    kb=$(sed -n 's/.*Maximum resident set size (kbytes): //p' "$run/$m.aot-compile.time"); st=built why=""
-    if [ -f "$out.refused" ]; then st=refused why=$(head -c 200 "$out.refused" | tr '\t\n' '  '); rm -f "$out"
-    elif [ ! -x "$out" ]; then st=no-build why="see ${AOT#$root/}/log/$pkg.build"; fi
-    # a module not built: its run written as the driver's IMPORT line (the runner keeps it; the judge: every method no result)
-    if [ "$st" != built ]; then printf '\nIMPORT\tpyi AOT %s: %s\n' "$st" "$why" > "$run/$m.out"; : > "$run/$m.err"; echo aot > "$run/$m.status"
-    else
-      # DIR/MODULE runs the driver under busybox time: each driver run's seconds and peak memory appended to RUN/MODULE.mem
-      printf '#!/bin/sh\nexec busybox time -v -a -o %q %q "$@"\n' "$run/$m.mem" "$out" > "$dir/$m"; chmod +x "$dir/$m"; rm -f "$run/$m.mem"
-    fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$m" $(( ($(date +%s%N) - t0) / 1000000000 )) "${kb:--}" "$st" "$why" >> "$run/aot-compile.tsv"
-    echo "pyi check --aot: $m's driver $st" >&2
+    n=$((n + 1))
+    if [ "$n" = 1 ]; then aot_lib_driver "$run" "$m" "$dir" "$src"; continue; fi
+    if [ "$running" -ge "$jobs" ]; then wait -n || true; running=$((running - 1)); fi
+    aot_lib_driver "$run" "$m" "$dir" "$src" &
+    running=$((running + 1))
   done < "$run/modules.txt"
+  wait
   echo "$dir"
+}
+# aot_lib_driver RUN MODULE DIR SRC: one module's driver (aot_lib_drivers)
+aot_lib_driver() {
+  local run=$1 m=$2 dir=$3 src=$4 w pkg out t0 st why kb
+  w="$src/$m.py"; pkg=p_lt_$(echo "$m" | tr -c 'A-Za-z0-9\n' '_'); out="$dir/$m.exe"
+  { cat "$root/test/python/libtest_run.py"
+    printf '\n# queue 279: compiled ahead with the driver; never run here (main imports it after regrtest_setup)\nif sys.argv is None:\n    import %s\n' \
+      "$(case $m in test.*) echo "$m" ;; *) echo "test.$m" ;; esac)"; } > "$w"
+  t0=$(date +%s%N)
+  busybox time -v -o "$run/$m.aot-compile.time" "$root/bin/pyi" aot-compile "$pkg" "$w" "$out" > "$run/$m.aot-compile.log" 2>&1 || true
+  kb=$(sed -n 's/.*Maximum resident set size (kbytes): //p' "$run/$m.aot-compile.time"); st=built why=""
+  if [ -f "$out.refused" ]; then st=refused why=$(head -c 200 "$out.refused" | tr '\t\n' '  '); rm -f "$out"
+  elif [ ! -x "$out" ]; then st=no-build why="see ${AOT#$root/}/log/$pkg.build"; fi
+  # a module not built: its run written as the driver's IMPORT line (the runner keeps it; the judge: every method no result)
+  if [ "$st" != built ]; then printf '\nIMPORT\tpyi AOT %s: %s\n' "$st" "$why" > "$run/$m.out"; : > "$run/$m.err"; echo aot > "$run/$m.status"
+  else
+    # DIR/MODULE runs the driver under busybox time: each driver run's seconds and peak memory appended to RUN/MODULE.mem
+    printf '#!/bin/sh\nexec busybox time -v -a -o %q %q "$@"\n' "$run/$m.mem" "$out" > "$dir/$m"; chmod +x "$dir/$m"; rm -f "$run/$m.mem"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$m" $(( ($(date +%s%N) - t0) / 1000000000 )) "${kb:--}" "$st" "$why" >> "$run/aot-compile.tsv"
+  echo "pyi check --aot: $m's driver $st" >&2
 }
 
 # cover_driver: test/python/libtest_run.py compiled by pyi's AOT (PY8) in the module of WORK/aot-cover, its runtime with
