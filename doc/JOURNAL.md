@@ -5290,6 +5290,7 @@ the language requires a constant, false elsewhere, aimed at f8's refusal (<bits/
   causes, 98). CP379 proposed. library.cpp alone: the same refusal, 39 causes (cpp-s7's 47), 1.43 GB.
 - The 81 run programs' gen-batch against cpp-s9's: 69 generated, none lost, the IR byte for byte or equal by the inliner's numbering; the
   first run found vector's `_S_max_size` no longer folded (an empty allocator by reference had become a location to bind), restored.
+
 ## 2026-11-12: gf-cpp, night 12's C++ failures: cpp-s9 merged into next's tree, a floating literal in eval-text (branch `gf-cpp`, from `mac/next` `bd6ab3ddd`)
 
 - Merged mac/cpp-s9 (e2e446170: cpp-s7, cpp-s8, cpp-gatefix with it) into next's tree: no conflict.
