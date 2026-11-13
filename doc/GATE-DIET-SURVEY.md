@@ -634,7 +634,8 @@ was lowered to it.
   - 66 of C's parts (tokens, parse, annotations, roundtrip, aot) to 1-4;
   - cpp-selftest to 1, cpp-dg's preprocess and dg-error to 1;
   - rust-roundtrip's two measured parts to 3.
-- After the edit, `--mem-check` lists none UNDER and none far above. java-interp keeps its step-level 53 GiB for the whole level, the reaps-3-crops-v2 clean run's 47.7 GiB, and its parts
+- After the edit, `--mem-check` passes: none UNDER, and one far above, goi-aot. That is a whole-step entry of an older record
+  (1.9 GiB), set against its parts' 8. java-interp keeps its step-level 53 GiB for the whole level, the reaps-3-crops-v2 clean run's 47.7 GiB, and its parts
 declare their own. `gate.lanes mem-check` now compares a parted step's whole-step entries of older records with the larger
 of its parts' and its own `:mem-gib`. lanes.ae is in no key, and lanes-test holds the committed records to it.
 `gate-tests-test` plans gate-tests in the full mode. A consequence: rsi-essential at 8 GiB takes rust-full
@@ -675,3 +676,19 @@ count as 0: the `.weekly` parts and the new `claude-md`.
 | `CLAUDE.md` | 1 (gate-tests), 52 min | 1 (claude-md), seconds |
 
 For `arbace/go/escape.ae` the count still includes the program hosts. The `:never-loads` for goi is GD3's (GDS9).
+
+### Checks run on the branch
+
+All of these pass:
+- `bin/gate-tests`: 35 of 35, gate-reads-test among them. It holds gate-tests' narrowed inputs to what the step reads
+  under strace.
+- `gate.crops check`: 0 problems.
+- `test/gate/crops-test.bash`, `test/gate/gate-key-crops-test.bash` and `test/gate/lanes-test.bash`.
+- `bin/gate --full --mem-check`.
+- `bin/gate --full|--nightly|--weekly --plan [--rerun]` and `bin/night --plan --tier weekly`.
+- `make check-makefile`.
+- `test/docs/claude-md-test.bash`.
+- `bin/reap`: 0 problems.
+- `bin/crops-score --judge --strict`.
+
+No gate was run.
