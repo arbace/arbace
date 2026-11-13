@@ -5508,3 +5508,8 @@ runs, annotation ids, u64 offsets printed unsigned, an empty section a custom se
 `test/crops/independence.edn`: `bin/reap` 0 problems, `bin/crops-score --judge --strict` 0 problems. The gate fragment
 `test/gate/crops/wasm.edn` is written, not spliced (the merge's decision). Considered: names from the text's `$id`s kept in the forms
 (the cross-format judge would need them stripped; mode :full's layer is their place), validation folded into WA2 (WA3's, as planned).
+
+A slip, corrected the same day: the first form of the decoder's "data count section required" check walked every function's
+instructions after decoding (tree-seq): the confirming round trip under it took 7,895 s and peaked at 3.54 GB, over the burst rules'
+2.5 GiB per process. The check now notes memory.init and data.drop as the decoder reads them (a flag in the reader): the round trip
+again 798 s and 1.54 GB, 20 of 20; the essential testsuite subset 55 s, 0.51 GB, unchanged results.
