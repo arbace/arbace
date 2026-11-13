@@ -7543,8 +7543,8 @@ non-zero by the bit it tests):
 ### Not run
 
 library.cpp alone (the brief: only after PID 65142 ends, which it did at about 16:15 UTC, and with the main session's agreement; cpp-s10
-measured it at 1.43 GB, 340 s): `bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh .tmp/LIB/todo` with the todo line of cpp-s10's
-`.tmp/lib.tsv` (library.cpp, c++23, `.tmp/LIB/files/...`). Expected: past `overload` to the same `string` refusal as f8's, or one of
+measured it at 1.43 GB, 340 s): `CPP_GEN_WHERE=1 bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh .tmp/LIB/todo` (the todo line:
+test/cpp/runtime/samples/library.cpp, c++23, `.tmp/LIB/files/runtime/library.cpp`). Expected: past `overload` to the same `string` refusal as f8's, or one of
 its own <format> paths. cpp-check-essential and cpp-lower-essential were not in this brief's list (the branch changes no lowering).
 
 ### Proposed (CP382, CP383)
