@@ -55,18 +55,18 @@ listed() {
     "$3"' _ "$r" "$d/fns.bash" "$1" "$ver"
 }
 gk=$(listed gate_key); rk=$(listed gate_rest_key)
-echo "$gk" | grep -qx go-fake && echo "$gk" | grep -qx arbace/core.ae || { echo "FAIL: gate_key's stubbed run printed no list"; echo "$gk" | head; exit 1; }
+grep -qx go-fake <<< "$gk" && grep -qx arbace/core.ae <<< "$gk" || { echo "FAIL: gate_key's stubbed run printed no list"; echo "$gk" | head; exit 1; }
 for f in $excluded; do
-  if echo "$gk" | grep -qxF "$f"; then bad "gate_key hashes $f"; else ok "gate_key leaves out $f"; fi
+  if grep -qxF "$f" <<< "$gk"; then bad "gate_key hashes $f"; else ok "gate_key leaves out $f"; fi
 done
 for f in $kept; do
-  if echo "$gk" | grep -qxF "$f"; then ok "gate_key hashes $f"; else bad "gate_key leaves out $f"; fi
+  if grep -qxF "$f" <<< "$gk"; then ok "gate_key hashes $f"; else bad "gate_key leaves out $f"; fi
 done
 for f in bin/lib/ci/check bin/lib/oi/suite.bash bin/lib/repr-cpp/roundtrip bin/lib/crops/c2j-check bin/lib/hsi/check; do
-  if echo "$rk" | grep -qxF "$f"; then bad "gate_rest_key hashes $f"; else ok "gate_rest_key leaves out $f"; fi
+  if grep -qxF "$f" <<< "$rk"; then bad "gate_rest_key hashes $f"; else ok "gate_rest_key leaves out $f"; fi
 done
 for f in bin/lib/tls-checks.bash bin/lib/cimore/x overlay/go/runtime.ae x509roots/x; do
-  if echo "$rk" | grep -qxF "$f"; then ok "gate_rest_key hashes $f"; else bad "gate_rest_key leaves out $f"; fi
+  if grep -qxF "$f" <<< "$rk"; then ok "gate_rest_key hashes $f"; else bad "gate_rest_key leaves out $f"; fi
 done
 
 # the audit's identities: :gate's and :prog's vectors (up to the next host) name the same exclusions
@@ -77,10 +77,10 @@ gb=$(host_block gate); pb=$(host_block prog)
 for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!jdk/ocaml/' '!go/arbace/oi.ae' \
          '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!bin/lib/hsi/' '!go/arbace/hs.ae' '!go/arbace/hs/' '!go/arbace/py.ae' '!go/arbace/py/' \
          '!go/arbace/libm.ae' '!go/arbace/libm/'; do
-  if echo "$gb" | grep -qF "\"$p\""; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
+  if grep -qF "\"$p\"" <<< "$gb"; then ok "audit :gate names $p"; else bad "audit :gate does not name $p"; fi
 done
 for p in '!bin/lib/ci/' '!bin/lib/oi/' '!bin/lib/repr-cpp/' '!bin/lib/hsi/'; do
-  if echo "$pb" | grep -qF "\"$p\""; then ok "audit :prog names $p"; else bad "audit :prog does not name $p"; fi
+  if grep -qF "\"$p\"" <<< "$pb"; then ok "audit :prog names $p"; else bad "audit :prog does not name $p"; fi
 done
 # the runtime's and javac's tool's keys (the re-seed after the backlog, the user 2026-11-03): computed for real on the
 # fabricated checkout, before and after a change to one file; the crops' Go forms (scminterp: the embedding's gaps,
@@ -100,7 +100,7 @@ keys() {
     . "$3"; . "$2"; echo "runtime $(arbace_runtime_key "$1")"; echo "javac $(arbace_javac_key "$1")"' _ "$r" "$d/keys.bash" "$ver"
 }
 k0=$(keys)
-echo "$k0" | grep -qE '^runtime [0-9a-f]{64}$' && echo "$k0" | grep -qE '^javac [0-9a-f]{64}$' \
+grep -qE '^runtime [0-9a-f]{64}$' <<< "$k0" && grep -qE '^javac [0-9a-f]{64}$' <<< "$k0" \
   || { echo "FAIL: the keys' run printed no keys"; echo "$k0"; exit 1; }
 for f in $crop_go; do
   echo changed >> "$r/$f"
@@ -121,7 +121,7 @@ jb=$(host_block javac)
 [ -n "$jb" ] || { echo "FAIL: no :javac in $aud"; exit 1; }
 for p in '!go/arbace/oi.ae' '!go/arbace/oi/' '!go/arbace/scm.ae' '!go/arbace/scm/' '!go/arbace/scminterp.ae' \
          '!go/arbace/scminterp/' '!go/arbace/py.ae' '!go/arbace/py/' '!go/arbace/libm.ae' '!go/arbace/libm/'; do
-  if echo "$jb" | grep -qF "\"$p\""; then ok "audit :javac names $p"; else bad "audit :javac does not name $p"; fi
+  if grep -qF "\"$p\"" <<< "$jb"; then ok "audit :javac names $p"; else bad "audit :javac does not name $p"; fi
 done
 # PYS30 (a), the keys commit (doc/GATE-SURVEY.md, "As built: GT9 (write-ahead)"): bin/lib/version.bash's arbace_crop_paths, the one
 # list of the crops' paths, out of all three keys: gate_key, arbace_runtime_key and arbace_javac_key computed for real on the
@@ -140,7 +140,7 @@ keys3() {
 crops=$(env -i PATH="$PATH" bash -c '. "$1"; printf "%s\n" "${arbace_crop_paths[@]}"' _ "$ver")
 [ "$(echo "$crops" | wc -l)" -ge 40 ] && ok "arbace_crop_paths: $(echo "$crops" | wc -l) patterns" || bad "arbace_crop_paths: $(echo "$crops" | wc -l) patterns"
 b0=$(keys3)
-echo "$b0" | grep -qE '^gate [0-9a-f]{64}$' && echo "$b0" | grep -qE '^runtime [0-9a-f]{64}$' && echo "$b0" | grep -qE '^javac [0-9a-f]{64}$' \
+grep -qE '^gate [0-9a-f]{64}$' <<< "$b0" && grep -qE '^runtime [0-9a-f]{64}$' <<< "$b0" && grep -qE '^javac [0-9a-f]{64}$' <<< "$b0" \
   || { echo "FAIL: the three keys' run printed no keys"; echo "$b0"; exit 1; }
 for p in $crops; do
   f=${p%\*}; case $p in *'*') f=${f}gt9-new.ae ;; esac
@@ -161,12 +161,12 @@ done
 emb=$(sed -n '/^(def excluded/,/^   "arbace\/instant_timestamp.ae"\])/p' "$src/arbace/j2g/embed.ae")
 for p in $(echo "$crops" | grep '^arbace/'); do
   q=${p%\*}
-  if echo "$emb" | grep -qF "\"$q\""; then ok "embed.ae's excluded names $q"; else bad "embed.ae's excluded does not name $q"; fi
+  if grep -qF "\"$q\"" <<< "$emb"; then ok "embed.ae's excluded names $q"; else bad "embed.ae's excluded does not name $q"; fi
 done
 cr=$(sed -n '/^(def crop-rules/,/\])$/p' "$aud")
 for p in $crops; do
   q="!${p%\*}"
-  if echo "$cr" | grep -qF "\"$q\""; then ok "the audit's crop-rules name $q"; else bad "the audit's crop-rules do not name $q"; fi
+  if grep -qF "\"$q\"" <<< "$cr"; then ok "the audit's crop-rules name $q"; else bad "the audit's crop-rules do not name $q"; fi
 done
 [ "$(echo "$cr" | grep -o '"![^"]*"' | wc -l)" = "$(echo "$crops" | wc -l)" ] && ok "the audit's crop-rules are the list, no more" \
   || bad "the audit's crop-rules: $(echo "$cr" | grep -o '"![^"]*"' | wc -l) rules, the list $(echo "$crops" | wc -l)"
