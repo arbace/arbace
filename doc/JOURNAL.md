@@ -5698,3 +5698,40 @@ asm-arm64-read-essential (221: "not recorded: musl/src-...-x86_64-..."): both la
 `.tmp/repr-asm/rt/rows.edn`, so each judge read the other architecture's rows. asm-fix (e815d223b, 075af761f) had moved the lists and
 the file lists onto a run's own scratch but not the rows. Now `$asm_tmp/rows.edn`. Proof: the two steps' commands run at once in a
 worktree: both `ok` (amd64 musl 32 of 32; arm64's corpora as recorded). The main session, under the user's overnight rule.
+
+### 2026-11-14: n15-fix2, the user's decisions on night 13's last two failures (round 33) and the key-moving fixes
+
+The user decided on 2026-11-14 (round 33): merge the two key-moving fixes now; retry goi's failed recorded passes once; make
+oi's `near-limit?` symmetric. Branch `n15-fix2` is based on mac/asm-fix2 (6c9d27191, on next 362c7ad34).
+
+- **Cherry-picked:** fb27a9966 (j2g: a lambda adapter whose SAM is clone()) and 5eb576998 (repr/c's round trip: the :full read
+  under a budget of its own). Both are described in the entry above. They move gate_key from 126c321af14f8a9da7e6 to a new key.
+- **goi's retry (typeparam/chans.go).** `bin/goi check` reruns, alone and once, every program that the reference records
+  passing and that failed among the others. This happens after the existing retry of timeouts. The second result stands, and
+  the first row is kept in `first-fails.tsv`. `--record` and box bundles do not retry.
+  - Two test hooks in `check_one`: `GOI_CHECK_FAIL_ONCE=ID` makes the first run fail; its marker is made atomically in the
+    check's work directory and cleared at each check's start. `GOI_CHECK_FAIL=ID` makes every run fail. The gate sets neither.
+  - `test/goi/retry-test.bash` runs both on helloworld.go (by hand, about a minute warm):
+    - forced once: the retry passes it, the check passes, and the forced row is in first-fails.tsv;
+    - the control, forced always: the retry fails too, the check fails, and it names the regression.
+    Both pass.
+- **oi's boundary both ways (lazy/lazy7).** `near-limit?` in test/ocaml/oi_check.ae excused only a listed program recorded
+  `slow` that now passes. It now also excuses a listed program recorded passing that the CPU limit stops. A program not
+  listed in oi-slow.edn that times out still fails.
+  - oi-slow.edn now lists lazy/lazy7 and lib-bytes-utf/test. Their CPU seconds (quiet / night 12 / night 13, against 120):
+    74.4 / 89.6 / 126.9 and 73.7 / 86.8 / 119.9. Next in line, not listed: lazy5 (52 / 61 / 109) and basic/tailcalls
+    (58 / 73 / 109).
+  - Three new judges_test cases:
+    - the excused timeout;
+    - control: the same timeout unlisted fails;
+    - control: a listed program's other failure is CHANGED.
+    `OI_JUDGES_NO_HOST=1 bash test/ocaml/judges_test.bash` (the gate's `--fixtures`): 49 cases run, all pass. Without it, the
+    expect action's cases need the host's OCaml and this worktree's stdlib build: the oracle tier's.
+  - Night 13's judgment replayed: next's last check-native.tsv with lazy7's row set back to the night's (124, 126.95 s,
+    "timeout 120s"), judged against check-oi-native.edn by the old and the new oi_check.ae. Old: `FAILING lazy/lazy7` and
+    `CHANGED lazy/lazy7`. New: neither. The other 39 CHANGED lines are the same in both: they come from mixing that tsv with a
+    corpus.tsv regenerated at 06:51 by the stopped gate 13b.
+- **t05359.** It compiles and passes with the j2g fix (the entry above). Its row in test/java/check-compiled.edn is still
+  `:refused`, so java-judge reports it until `bin/java-check --levels compiled --record`, the first night after the merge.
+- `bash test/gate/gate-key-crops-test.bash` passes. `bin/gate --full --concurrent --plan` plans without error: the
+  gate_key-moved steps rerun, for example cpp-dg's parts on rtcheck.ae.
