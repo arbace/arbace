@@ -21,7 +21,8 @@
   ^{:line 21} [^{:val 22} eINVAL 22]
   ^{:line 22} [^{:val 38} eNOSYS 38]
   ^{:line 23} [^{:val 19} eNODEV 19]
-  ^{:line 24} [^{:val 9} eBADF 9])
+  ^{:line 24} [^{:val 9} eBADF 9]
+  [^{:val 13} eACCES 13])
 
 
 
@@ -73,21 +74,10 @@
         (when (or (== size 0) (!= (bit-and a1 pageMask) 0))
           (return (- eINVAL) nil))
 
-        (when (== (bit-and a4 0x20) 0) ; MAP_ANONYMOUS: file mappings not yet
-          (return (- eNODEV) nil))
+        (when (== (bit-and a4 0x20) 0) ; not MAP_ANONYMOUS: a file's mapping (AR22)
+          (return (.fileMap k a1 size a3 a4 a5 a6)))
 
-        (let [addr a1]
-          (cond (!= (bit-and a4 0x10) 0) ; MAP_FIXED
-            (.Unmap (.-AS k) addr size)
-            (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (- StackTop StackSize))) (do
-              (set! addr (- (.-MmapNext k) size))
-              (while (.Mapped (.-AS k) addr size)
-                (set! addr - pageSize))
-
-              (set! (.-MmapNext k) addr)))
-
-          (.Map (.-AS k) addr size (protPerm a3) "mmap")
-          (return (conv int64 addr) nil))))
+        (return (conv int64 (.MapAnon k a1 size a3 a4)) nil)))
     (case [11] ; munmap
       (when (or (!= (bit-and a1 pageMask) 0) (== a2 0))
         (return (- eINVAL) nil))
@@ -118,6 +108,81 @@
       (return (.passthru k n a1 a2 (.within k a2 a3) a4 a5 a6))))
 
   (.passthru k n a1 a2 a3 a4 a5 a6))
+
+
+(go/method MapAnon "MapAnon maps size bytes (page-aligned) of zeros with prot (mmap's) as mmap does under flags: at addr with MAP_FIXED, else\nat addr when it is free and below the stack's area, else at Linux's next address of mmap's area; the address.\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags]
+  (cond (!= (bit-and flags 0x10) 0) ; MAP_FIXED
+    (.Unmap (.-AS k) addr size)
+    (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (- StackTop StackSize))) (do
+      (set! addr (- (.-MmapNext k) size))
+      (while (.Mapped (.-AS k) addr size)
+        (set! addr - pageSize))
+
+      (set! (.-MmapNext k) addr)))
+
+  (.Map (.-AS k) addr size (protPerm prot) "mmap")
+  addr)
+
+
+(go/method fileMap "fileMap is mmap of a file's descriptor fd (AR22, queue 294: cmd/compile's export data, cmd/internal/bio's and\nbase.MapFile's MAP_SHARED PROT_READ mappings): Linux's checks in its order (an offset not page-aligned EINVAL, the descriptor\nEBADF, no mapping type EINVAL, a descriptor not open for reading, or a shared writable mapping of one not open for writing,\nEACCES, not a regular file ENODEV), then MapAnon's pages with the file's bytes from off read in by crt's pread64, to the file's\nend (the rest zero). The mapping is a copy: a shared one does not see later writes to the file, a shared writable one (its\nwrites could not reach the file) is ENODEV, and the pages past the file's end read as zeros where Linux raises SIGBUS.\n" [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags ^uint64 fd ^uint64 off] :results [^int64 ret ^{:tag (* Exited)} exit]
+  (when (!= (bit-and off pageMask) 0)
+    (return (- eINVAL) nil))
+
+  (let [(values fl e) (.passthru k 72 fd 3 0 0 0 0)] ; fcntl(fd, F_GETFL)
+    (when (!= e nil)
+      (return 0 e))
+
+    (when (< fl 0)
+      (return fl nil))
+
+    (let [typ (bit-and flags 3)
+          acc (bit-and fl 3)
+          shared (or (== typ 1) (== typ 3))
+          writes (!= (bit-and prot 2) 0)]
+      (when (== typ 0)
+        (return (- eINVAL) nil))
+
+      (when (or (== acc 1) (and shared writes (!= acc 2)))
+        (return (- eACCES) nil))
+
+      ;; pread64 of no bytes: a pipe's ESPIPE, a directory's EISDIR (not a regular file)
+      (let [(values r e) (.passthru k 17 fd 0 0 off 0 0)]
+        (when (!= e nil)
+          (return 0 e))
+
+        (when (== r (- eBADF))
+          (return r nil))
+
+        (when (< r 0)
+          (return (- eNODEV) nil)))
+
+      (when (and shared writes)
+        (return (- eNODEV) nil))
+
+      (let [a (.MapAnon k addr size prot flags)
+            s (.Slab (.-M (.-AS k)) a)
+            ro (.-RO s)
+            ^uint64 done 0]
+        ;; crt's pread64 writes into the slab even when the mapping is read-only
+        (set! (.-RO s) false)
+        (while (< done size)
+          (let [(values r e) (.passthru k 17 fd (+ a done) (- size done) (+ off done) 0 0)]
+            (when (!= e nil)
+              (set! (.-RO s) ro)
+              (return 0 e))
+
+            (when (< r 0)
+              (set! (.-RO s) ro)
+              (.Unmap (.-AS k) a size)
+              (return r nil))
+
+            (when (== r 0)
+              (break))
+
+            (set! done + (conv uint64 r))))
+
+        (set! (.-RO s) ro)
+        (return (conv int64 a) nil)))))
 
 
 (go/method within "within is n, or less: the bytes from a that lie in a's mapping (crt's slab), so that crt sees one slab; n when a is\nunmapped (crt's EFAULT then).\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 a ^uint64 n]
