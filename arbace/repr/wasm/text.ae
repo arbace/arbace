@@ -479,7 +479,30 @@
               (when-not (lex/kw? (first ys) "end") (malformed "unexpected end of input" x))
               (let [ys (rest ys) ys (if (= :id (:t (first ys))) (do (end-label! lbl (first ys)) (rest ys)) ys)]
                 (recur ys (conj! out (list 'try_table bt catches body)))))
-            ("end" "else" "then") (malformed "unexpected token" x)
+            "try"
+            ;; the legacy exceptions (WA8): try ... (catch TAG ...)* (catch_all ...)? end, try ... delegate L
+            (let [[lbl ys] (label-of (rest xs))
+                  [bt ys] (blocktype ctx ys)
+                  env2 (assoc env :labels (cons lbl (:labels env)))
+                  [body ys] (instrs ctx env2 ys #{"catch" "catch_all" "delegate" "end"})]
+              (if (lex/kw? (first ys) "delegate")
+                (recur (drop 2 ys) (conj! out (list 'try bt body (list 'delegate (label-idx env (second ys))))))
+                (let [[hs ys] (loop [ys ys hs []]
+                                (cond
+                                  (lex/kw? (first ys) "catch")
+                                  (let [t (resolve-idx ctx :tag (or (second ys) (malformed "unexpected token" x)))
+                                        [es ys] (instrs ctx env2 (drop 2 ys) #{"catch" "catch_all" "end"})]
+                                    (recur ys (conj hs (list 'catch t es))))
+                                  (lex/kw? (first ys) "catch_all")
+                                  (let [[es ys] (instrs ctx env2 (rest ys) #{"catch" "catch_all" "end"})]
+                                    (when-not (lex/kw? (first ys) "end") (malformed "unexpected token" (or (first ys) x)))
+                                    [(conj hs (list 'catch_all es)) ys])
+                                  :else [hs ys]))]
+                  (when-not (lex/kw? (first ys) "end") (malformed "unexpected end of input" x))
+                  (let [ys (rest ys) ys (if (= :id (:t (first ys))) (do (end-label! lbl (first ys)) (rest ys)) ys)]
+                    (recur ys (conj! out (list 'try bt body hs)))))))
+            "rethrow" (recur (drop 2 xs) (conj! out (list 'rethrow (label-idx env (second xs)))))
+            ("end" "else" "then" "catch" "catch_all" "delegate" "do") (malformed "unexpected token" x)
             (let [[f ys] (plain ctx env nm x (rest xs))] (recur ys (conj! out f)))))
         :else (malformed (if (= :reserved (:t x)) "unknown operator" "unexpected token") x)))))
 
@@ -518,6 +541,33 @@
             [body more] (instrs ctx (assoc env :labels (cons lbl (:labels env))) (drop (count cs) ys) #{})]
         (when (seq more) (malformed "unexpected token" (first more)))
         [(list 'try_table bt catches body)])
+      "try"
+      ;; the legacy exceptions (WA8): (try BT (do ...) (catch TAG ...)* (catch_all ...)?), (try BT (do ...) (delegate L))
+      (let [[lbl ys] (label-of xs)
+            [bt ys] (blocktype ctx ys)
+            [d & ys] ys
+            env2 (assoc env :labels (cons lbl (:labels env)))
+            seq-of (fn [y] (let [[es more] (instrs ctx env2 y #{})] (when (seq more) (malformed "unexpected token" (first more))) es))]
+        (when-not (lex/list-of? d "do") (malformed "unexpected token" (or d x)))
+        (let [body (seq-of (rest (:xs d)))]
+          (if (lex/list-of? (first ys) "delegate")
+            (let [[_ l & more] (:xs (first ys))]
+              (when (or (nil? l) (seq more) (seq (rest ys))) (malformed "unexpected token" (or (first more) (second ys) (first ys))))
+              [(list 'try bt body (list 'delegate (label-idx env l)))])
+            (loop [ys ys hs []]
+              (let [y (first ys)]
+                (cond
+                  (nil? y) [(list 'try bt body hs)]
+                  (and (lex/list-of? y "catch") (not (some #(= 'catch_all (first %)) hs)))
+                  (let [[_ t & es] (:xs y)]
+                    (recur (rest ys) (conj hs (list 'catch (resolve-idx ctx :tag (or t (malformed "unexpected token" y))) (seq-of es)))))
+                  (and (lex/list-of? y "catch_all") (not (some #(= 'catch_all (first %)) hs)))
+                  (recur (rest ys) (conj hs (list 'catch_all (seq-of (rest (:xs y))))))
+                  :else (malformed "unexpected token" y)))))))
+      "rethrow" (let [[l & ys] xs
+                      pre (vec (mapcat (fn [y] (if (= :list (:t y)) (folded ctx env y) (malformed "unexpected token" y))) ys))]
+                  (conj pre (list 'rethrow (label-idx env l))))
+      ("catch" "catch_all" "delegate" "do") (malformed "unexpected token" x)
       (let [[f ys] (plain ctx env nm (first (:xs x)) xs)
             pre (vec (mapcat (fn [y] (if (= :list (:t y)) (folded ctx env y) (malformed "unexpected token" y))) ys))]
         (conj pre f)))))

@@ -23,7 +23,7 @@ aot_exe() {
   mv "$out/mod/w2gout/imports.go" "$out/mod/waidriver/zz_w2g_imports.go"
   if ! (cd "$out/mod" && export GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
           GOCACHE="${WAI_GOCACHE:-$wai_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${WAI_AOT_GOMEMLIMIT:-1500MiB} GOGC=${WAI_AOT_GOGC:-50} &&
-          "$goroot/bin/go" build -p 1 -trimpath -o "$out/waiaot" ./waidriver/) > "$gen.build.log" 2>&1; then
+          "$goroot/bin/go" build -p 1 -gcflags="arbace/w2gout/...=-c=${WAI_AOT_GC_C:-2}" -trimpath -o "$out/waiaot" ./waidriver/) > "$gen.build.log" 2>&1; then
     rm -rf "$out"
     return 1
   fi
@@ -64,10 +64,15 @@ aot_run_batches() {
                     for (k in left) printf ", %d left (%s)", left[k], k; printf "\n" }' "$work/aot/stats.tsv"
 }
 
-# aot_go_exe WASM OUT: a Go program's AOT program (the corpus's, bin/wai go --aot): its module translated (OUT.gen.go, the summary
-# OUT.w2g.tsv) and built, kept by key in the main checkout's .tmp/wai-go/aot; sets aexe, or 1 with OUT.why
+# aot_go_exe WASM OUT: a Go program's AOT program (the corpus's, bin/wai go --aot): with WAI_AOT_SHARED_EXE (WAS50 (a), the
+# default) that program, the run's modules translated by shape into one (aot_go_shared); else (WAI_AOT_SHARED=0, WA7's) its module
+# translated alone (OUT.gen, the summary OUT.w2g.tsv) and built, kept by key in the main checkout's .tmp/wai-go/aot; sets aexe, or 1
+# with OUT.why
 aot_go_exe() {
   local w=$1 o=$2
+  # WAS50 (a): the run's first pass collects the modules (OUT.mod); the second runs them all on the one program of their shapes
+  if [ -n "${gorun_collect:-}" ]; then echo "$w" > "$o.mod"; echo "collected" > "$o.why"; return 1; fi
+  if [ -n "${WAI_AOT_SHARED_EXE:-}" ]; then aexe=$WAI_AOT_SHARED_EXE; return 0; fi
   rm -rf "$o.gen"
   if ! GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$wai_exe" w2g "$o.gen" --stats "$o.w2g.tsv" "$w" 2> "$o.w2g.err"; then
     echo "w2g: $(head -1 "$o.w2g.err" | cut -c1-200)" > "$o.why"; return 1
@@ -89,4 +94,32 @@ aot_go_verdict() {
       else printf '%s\tfail\tw2g: %s calls on the interpreter (%s)\n' "$id" "${n:-no stats}" "$(sed -n 's/^why //p' "$o.aot" 2>"$TMPDIR/aot-stats.err")"; fi ;;
     *) printf '%s\n' "$r" ;;
   esac
+}
+
+# aot_go_shared WORK: WAS40 (c), WAS50 (a): the modules the run's first pass collected (WORK/run/*.mod) translated by shape (w2g
+# --shared: each shape of the programs' functions once, their runtime and libraries shared) into one AOT program, kept by key in
+# the main checkout's .tmp/wai-go/aot-shared (the newest WAI_AOT_SHARED_KEEP, default 3, kept); exports WAI_AOT_SHARED_EXE, or 1
+aot_go_shared() {
+  local work=$1 gen=$1/shared.gen t0 d n
+  find "$work/run" -name '*.mod' -exec cat {} + | LC_ALL=C sort -u > "$work/mods.list"
+  echo "wai go --aot: $(wc -l < "$work/mods.list") modules translated by shape into one program"
+  t0=$(date +%s)
+  rm -rf "$gen"
+  if ! GOMEMLIMIT=${WAI_GOMEMLIMIT:-1500MiB} "$wai_exe" w2g "$gen" --shared --stats "$work/shared.tsv" "@$work/mods.list" 2> "$work/shared.err"; then
+    echo "FAIL: wai go --aot: w2g --shared: $(head -1 "$work/shared.err" | cut -c1-200)"; return 1
+  fi
+  awk -F'\t' '{f+=$2; t+=$3; a+=$5} END {printf "wai go --aot: %d of %d functions translated, %d shapes\n", t, f, a}' "$work/shared.tsv"
+  mkdir -p "$gorun_dir/aot-shared"
+  if ! AOT_BIN_DIR=$gorun_dir/aot-shared aot_exe "$gen"; then
+    echo "FAIL: wai go --aot: the shared program does not build: $(grep -v '^#' "$gen.build.log" | head -2 | tr '\n' ' ' | cut -c1-300)"; return 1
+  fi
+  echo "wai go --aot: the shared program $(du -m "$aexe" | cut -f1) MB, translated and built in $(( $(date +%s) - t0 )) s"
+  rm -rf "$gen"
+  touch "$(dirname "$aexe")"
+  n=0
+  for d in $(ls -t "$gorun_dir/aot-shared"); do
+    case $d in *.tmp.*) continue ;; esac
+    n=$((n + 1)); [ $n -le "${WAI_AOT_SHARED_KEEP:-3}" ] || rm -rf "${gorun_dir:?}/aot-shared/$d"
+  done
+  export WAI_AOT_SHARED_EXE=$aexe
 }

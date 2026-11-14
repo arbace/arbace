@@ -50,7 +50,10 @@ HEAP an abstract heap type symbol (`func`, `extern`, `any`, `eq`, `i31`, `struct
 An instruction is a list headed by its text name (`(i32.add)`, `(local.get 0)`); a structured one holds its body as vectors:
 `(block BT [INSTR...])`, `(loop BT [...])`, `(if BT [THEN...])` or `(if BT [THEN...] [ELSE...])` (the binary's `else` present or not),
 `(try_table BT [CATCH...] [INSTR...])` with CATCH `(catch TAG L)`, `(catch_ref TAG L)`, `(catch_all L)`, `(catch_all_ref L)`. BT is
-`{}` (no result), `{:bt [V]}` (one result) or `{:bt T}` (a type index).
+`{}` (no result), `{:bt [V]}` (one result) or `{:bt T}` (a type index). The legacy exceptions (WA8; the testsuite's `legacy/`, binary
+0x06, 0x07, 0x19, 0x18, 0x09, outside the generated table as the structured instructions are): `(try BT [INSTR...] [HANDLER...])` with
+HANDLER `(catch TAG [INSTR...])` or a last `(catch_all [INSTR...])` (none: `try ... end`), `(try BT [INSTR...] (delegate L))`, and
+`(rethrow L)`, L a catch's label.
 
 ### 3.1 The table
 

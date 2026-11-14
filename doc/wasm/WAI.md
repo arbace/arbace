@@ -248,9 +248,25 @@ essential subset `test/wasm/essential-aot.txt` (`bin/wai aot-essential`).
 
 ### 9.2 The Go corpus at AOT (`bin/wai go --aot`)
 
-The programs of `test/wasm/go-aot.txt` built as §8 builds them, each module translated and built into its own AOT program (the
-main checkout's `.tmp/wai-go/aot`, by key), run and judged as §8 judges them, under the same limit (three times the action's), then
-the AOT rule (`WAI_AOT_STATS`: the run's interpreted calls). Rows against `test/wasm/go-aot-results.edn`.
+The programs (`test/wasm/go-aot.txt`, or `--list`, or the whole corpus with `--vs-eval`) built as §8 builds them, run and judged as
+§8 judges them, under the same limit (three times the action's), then the AOT rule (`WAI_AOT_STATS`: the run's interpreted calls).
+Rows against `test/wasm/go-aot-results.edn` (`--vs-eval`: against eval's record, program for program).
+
+**Translated by shape** (WAS40 (c), WAS50 (a); the default since WA8's branch). Go-built modules share most of their code (the
+runtime, the libraries) but not its constants: a function's data addresses, function and global indices and its own resume
+points differ from program to program, so the per-module translation (one AOT program a module, `WAI_AOT_SHARED=0`) shares
+nothing. `W2GShape` translates a function with every immediate that is not a transfer of control's read from the function's own
+code at run time (through an array pointer `ins := (*[N]Ins)(code.Ins)`, N the instructions' count, so no bounds check), so its Go
+is a function of its shape alone: the parameters' and locals' counts, each instruction's op and stack height, the branches'
+arities, heights and targets, br_table's entries, the handlers' clause kinds and targets. `ShapeKey` hashes exactly these (the
+first 16 bytes of a SHA-256, `w2gShapeVersion` first); `waidriver w2g --shared` writes each shape once across all the modules it
+is given (`--verify`: every function's Go written and two of one key required equal; else a shape met again is known by its key
+alone) and registers them by key (`RegisterShapes`); at instantiation a module the per-module registry does not name takes, function
+by function, the shape registry's (`ShapeKey` of each code). A run is two passes: the first builds every program and collects its
+module (`gorun_collect`: `aot_go_exe` notes the module and stops), the modules are translated by shape into one AOT program
+(`aot_go_shared`, kept by key in the main checkout's `.tmp/wai-go/aot-shared`, the newest three kept), and the second runs every
+program on it (`WAI_GO_JOBS`, default 2). A function whose shape the program lacks runs on the interpreter and fails the AOT rule, as
+before.
 
 ### 9.3 Cost
 

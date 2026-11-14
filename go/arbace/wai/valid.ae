@@ -28,7 +28,7 @@
 ^{:go/end 28} (go/func invalid [^string f & ^{:tag (slice any)} a] (panic (addr (lit Invalid (fmt/Sprintf f (spread a))))))
 
 (go/type vframe (struct
-    ^{:line 31 :tag byte} op ; 0x02 block, 0x03 loop, 0x04 if, 0x05 else, 0x1f try_table, 0 the function
+    ^{:line 31 :tag byte} op ; 0x02 block, 0x03 loop, 0x04 if, 0x05 else, 0x1f try_table, 0x06 a legacy try, 0x07 and 0x19 its catch and catch_all, 0 the function
     ^{:line 32 :tag (slice ValType)} start ^{:tag (slice ValType)} end
     ^{:line 33 :tag int} height
     ^{:line 34 :tag bool} unreachable
@@ -886,7 +886,7 @@
 
 
 
-^{:go/end 979} (go/method instr [^{:tag (* validator)} v]
+^{:go/end 985} (go/method instr [^{:tag (* validator)} v]
   (let [r (.-r v)
       ^{:line 891} b (.u8 r)]
     (switch b
@@ -956,7 +956,13 @@
 
           (return)))
       (case [0x06 0x07 0x09 0x18 0x19]
-        (panic (addr (lit Unimplemented "legacy-exceptions" (fmt/Sprintf "opcode 0x%02x" b))))))
+        ;; the legacy exceptions (WA8; the spec's legacy/ documents): try a block (frame 0x06), catch TAG and catch_all frames
+        ;; 0x07 and 0x19 after it, delegate L its end, rethrow L inside a catch frame
+        (when (.-konst v)
+          (invalid "constant expression required"))
+
+        (.legacy v b)
+        (return)))
 
     (let [^uint16 op (zero uint16)]
       (switch b
@@ -978,15 +984,53 @@
       (.op v op))))
 
 
-^{:go/end 1001} (go/method memarg ^Limits [^{:tag (* validator)} v ^uint64 size]
+^{:go/end 1023} (go/method legacy [^{:tag (* validator)} v ^byte b]
+  (let [r (.-r v)]
+    (switch b
+      (case [0x06]
+        (let [(values in out) (.blocktype v)]
+          (.pops v in)
+          (.pushCtrl v 0x06 in out)))
+      (case [0x07 0x19]
+        (let [^uint32 x (zero uint32)]
+          (when (== b 0x07)
+            (set! x (.u32 r)))
+
+          (let [f (.popCtrl v)]
+            (when (and (!= (.-op f) 0x06) (!= (.-op f) 0x07))
+              (panic (addr (lit Malformed "catch without try"))))
+
+            (if (== b 0x07)
+              (.pushCtrl v 0x07 (.-Params (.tag v x)) (.-end f))
+
+              (.pushCtrl v 0x19 nil (.-end f))))))
+
+      (case [0x18]
+        (let [d (.u32 r)
+            ^{:line 1010} f (.popCtrl v)]
+          (when (!= (.-op f) 0x06)
+            (panic (addr (lit Malformed "delegate without try"))))
+
+          (.label v d)
+          (.pushs v (.-end f))))
+      (case [0x09]
+        (let [f (.label v (.u32 r))]
+          (when (and (!= (.-op f) 0x07) (!= (.-op f) 0x19))
+            (invalid "invalid rethrow label"))
+
+          (.unreachable v))))))
+
+
+
+^{:go/end 1045} (go/method memarg ^Limits [^{:tag (* validator)} v ^uint64 size]
   (let [r (.-r v)
-      ^{:line 983} f (.u32 r)
-      ^{:line 984 :tag uint32} x (zero uint32)]
+      ^{:line 1027} f (.u32 r)
+      ^{:line 1028 :tag uint32} x (zero uint32)]
     (when (!= (bit-and f 0x40) 0)
       (set! x (.u32 r)))
 
     (let [align (bit-and-not f 0x40)
-        ^{:line 989} off (.uleb r 64)]
+        ^{:line 1033} off (.uleb r 64)]
       (when (>= align 64)
         (panic (addr (lit Malformed "malformed memop flags"))))
 
@@ -997,18 +1041,18 @@
         (when (and (not (.-Addr64 l)) (> off 0xffffffff))
           (invalid "offset out of range"))
 
-        ^{:line 1000} l))))
+        ^{:line 1044} l))))
 
 
 (go/var
-  ^{:line 1004} [i32T (lit ValType :K tI32)]
-  ^{:line 1005} [i64T (lit ValType :K tI64)]
-  ^{:line 1006} [f32T (lit ValType :K tF32)]
-  ^{:line 1007} [f64T (lit ValType :K tF64)]
-  ^{:line 1008} [v128T (lit ValType :K tV128)])
+  ^{:line 1048} [i32T (lit ValType :K tI32)]
+  ^{:line 1049} [i64T (lit ValType :K tI64)]
+  ^{:line 1050} [f32T (lit ValType :K tF32)]
+  ^{:line 1051} [f64T (lit ValType :K tF64)]
+  ^{:line 1052} [v128T (lit ValType :K tV128)])
 
 
-^{:go/end 1023} (go/func shapeType [^string s] :results [ValType bool]
+^{:go/end 1067} (go/func shapeType [^string s] :results [ValType bool]
   (switch s
     (case ["i32"]
       (return i32T true))
@@ -1025,44 +1069,44 @@
 (go/var laneOf (lit (map string ValType) ["i8x16" i32T] ["i16x8" i32T] ["i32x4" i32T] ["i64x2" i64T] ["f32x4" f32T] ["f64x2" f64T]))
 (go/var laneN (lit (map string int) ["i8x16" 16] ["i16x8" 8] ["i32x4" 4] ["i64x2" 2] ["f32x4" 4] ["f64x2" 2]))
 
-^{:go/end 1034} (go/func setOf ^{:tag (map string bool)} [^string s]
+^{:go/end 1078} (go/func setOf ^{:tag (map string bool)} [^string s]
   (let [m (lit (map string bool))]
     (range [_ x (strings/Fields s)]
       (aset m x true))
 
-    ^{:line 1033} m))
+    ^{:line 1077} m))
 
 
 (go/var
-  ^{:line 1037} [numCmp (setOf "eq ne lt_s lt_u gt_s gt_u le_s le_u ge_s ge_u lt gt le ge")]
-  ^{:line 1038} [numUn (setOf "clz ctz popcnt abs neg ceil floor trunc nearest sqrt extend8_s extend16_s extend32_s")]
-  ^{:line 1039} [numBin (setOf "add sub mul div_s div_u rem_s rem_u and or xor shl shr_s shr_u rotl rotr div min max copysign")]
-  ^{:line 1040} [vecTern (setOf "bitselect relaxed_madd relaxed_nmadd relaxed_laneselect relaxed_dot_i8x16_i7x16_add_s")]
-  ^{:line 1041} [vecUnPf (strings/Fields "not abs neg popcnt sqrt ceil floor trunc nearest extend convert demote promote extadd relaxed_trunc")])
+  ^{:line 1081} [numCmp (setOf "eq ne lt_s lt_u gt_s gt_u le_s le_u ge_s ge_u lt gt le ge")]
+  ^{:line 1082} [numUn (setOf "clz ctz popcnt abs neg ceil floor trunc nearest sqrt extend8_s extend16_s extend32_s")]
+  ^{:line 1083} [numBin (setOf "add sub mul div_s div_u rem_s rem_u and or xor shl shr_s shr_u rotl rotr div min max copysign")]
+  ^{:line 1084} [vecTern (setOf "bitselect relaxed_madd relaxed_nmadd relaxed_laneselect relaxed_dot_i8x16_i7x16_add_s")]
+  ^{:line 1085} [vecUnPf (strings/Fields "not abs neg popcnt sqrt ceil floor trunc nearest extend convert demote promote extadd relaxed_trunc")])
 
 
 (go/type opSig (struct
-    ^{:line 1045 :tag (slice ValType)} in ^{:tag (slice ValType)} out
-    ^{:line 1046 :tag uint64} mem ; a memory access's size
-    ^{:line 1047 :tag bool} store
-    ^{:line 1048 :tag bool} lane
-    ^{:line 1049 :tag bool} ok))
+    ^{:line 1089 :tag (slice ValType)} in ^{:tag (slice ValType)} out
+    ^{:line 1090 :tag uint64} mem ; a memory access's size
+    ^{:line 1091 :tag bool} store
+    ^{:line 1092 :tag bool} lane
+    ^{:line 1093 :tag bool} ok))
 
 
 (go/var ^{:tag (array opTableEnd (* opSig))} sigCache)
 
 
-^{:go/end 1139} (go/func sigOf "sigOf is a numeric or vector instruction's signature by its name (arbace.wasm.valid's simple-sig and mem-size), or ok false.\n" ^{:tag (* opSig)} [^uint16 op]
+^{:go/end 1183} (go/func sigOf "sigOf is a numeric or vector instruction's signature by its name (arbace.wasm.valid's simple-sig and mem-size), or ok false.\n" ^{:tag (* opSig)} [^uint16 op]
   (when [s (aget sigCache op)] (!= s nil)
     (return s))
 
   (let [s (addr (lit opSig))
-      ^{:line 1060} nm (.-name (aget opInfos op))
-      ^{:line 1061} k (strings/IndexByte nm \.)]
+      ^{:line 1104} nm (.-name (aget opInfos op))
+      ^{:line 1105} k (strings/IndexByte nm \.)]
     (when (> k 0)
       (let [(values shape o) (values (subslice nm _ k) (subslice nm (+ k 1)))
           (values t isNum) (shapeType shape)
-          ^{:line 1065} size (aget (lit (map string uint64) ["i32" 4] ["i64" 8] ["f32" 4] ["f64" 8]) shape)]
+          ^{:line 1109} size (aget (lit (map string uint64) ["i32" 4] ["i64" 8] ["f32" 4] ["f64" 8]) shape)]
         (switch
           (case [(and isNum (== o "load"))]
             (set! @s (lit opSig :out (lit (slice ValType) t) :mem size :ok true)))
@@ -1092,12 +1136,12 @@
 
           (case [(or (and (== shape "v128") (strings/HasPrefix o "load")) (and (== shape "v128") (strings/HasPrefix o "store")))]
             (let [sizes (lit (map string uint64) ["load" 16] ["store" 16] ["load8x8_s" 8] ["load8x8_u" 8] ["load16x4_s" 8] ["load16x4_u" 8]
-                  ^{:line 1095} ["load32x2_s" 8] ["load32x2_u" 8] ["load8_splat" 1] ["load16_splat" 2] ["load32_splat" 4] ["load64_splat" 8]
-                  ^{:line 1096} ["load32_zero" 4] ["load64_zero" 8] ["load8_lane" 1] ["load16_lane" 2] ["load32_lane" 4] ["load64_lane" 8]
-                  ^{:line 1097} ["store8_lane" 1] ["store16_lane" 2] ["store32_lane" 4] ["store64_lane" 8])
-                ^{:line 1098} n (aget sizes o)
-                ^{:line 1099} st (strings/HasPrefix o "store")
-                ^{:line 1100} ln (strings/HasSuffix o "_lane")]
+                  ^{:line 1139} ["load32x2_s" 8] ["load32x2_u" 8] ["load8_splat" 1] ["load16_splat" 2] ["load32_splat" 4] ["load64_splat" 8]
+                  ^{:line 1140} ["load32_zero" 4] ["load64_zero" 8] ["load8_lane" 1] ["load16_lane" 2] ["load32_lane" 4] ["load64_lane" 8]
+                  ^{:line 1141} ["store8_lane" 1] ["store16_lane" 2] ["store32_lane" 4] ["store64_lane" 8])
+                ^{:line 1142} n (aget sizes o)
+                ^{:line 1143} st (strings/HasPrefix o "store")
+                ^{:line 1144} ln (strings/HasSuffix o "_lane")]
               (switch
                 (case [(and ln st)]
                   (set! @s (lit opSig :in (lit (slice ValType) v128T) :mem n :store true :lane true :ok (> n 0))))
@@ -1135,24 +1179,24 @@
 
 
     (aset sigCache op s)
-    ^{:line 1138} s))
+    ^{:line 1182} s))
 
 
-^{:go/end 1146} (go/method localAt ^ValType [^{:tag (* validator)} v ^uint32 x]
+^{:go/end 1190} (go/method localAt ^ValType [^{:tag (* validator)} v ^uint32 x]
   (when (>= (conv int x) (len (.-locals v)))
     (invalid "unknown local %d" x))
 
   (aget (.-locals v) x))
 
 
-^{:go/end 1153} (go/method setInit [^{:tag (* validator)} v ^uint32 x]
+^{:go/end 1197} (go/method setInit [^{:tag (* validator)} v ^uint32 x]
   (when (not (aget (.-init v) x))
     (aset (.-init v) x true)
     (set! (.-inits v) (append (.-inits v) x))))
 
 
 
-^{:go/end 1163} (go/method resultsMatch [^{:tag (* validator)} v ^{:tag (slice ValType)} ts]
+^{:go/end 1207} (go/method resultsMatch [^{:tag (* validator)} v ^{:tag (slice ValType)} ts]
   (let [ok (== (len ts) (len (.-results v)))]
     (for [i 0] (and ok (< i (len ts))) (inc! i)
       (set! ok (match (aget ts i) (aget (.-results v) i))))
@@ -1162,17 +1206,17 @@
 
 
 
-^{:go/end 1169} (go/method tableFuncs [^{:tag (* validator)} v ^TableType t]
+^{:go/end 1213} (go/method tableFuncs [^{:tag (* validator)} v ^TableType t]
   (when (not (match (.-Elem t) (lit ValType :K tRef :Null true :H hFunc)))
     (invalid "type mismatch: instruction requires table of function type but table has element type %s" (.-Elem t))))
 
 
 
-^{:go/end 1171} (go/func refT ^ValType [^bool null ^int32 h] (lit ValType :K tRef :Null null :H h))
+^{:go/end 1215} (go/func refT ^ValType [^bool null ^int32 h] (lit ValType :K tRef :Null null :H h))
 
-^{:go/end 1677} (go/method op [^{:tag (* validator)} v ^uint16 op]
+^{:go/end 1721} (go/method op [^{:tag (* validator)} v ^uint16 op]
   (let [r (.-r v)
-      ^{:line 1175} in (aget opInfos op)]
+      ^{:line 1219} in (aget opInfos op)]
     (switch op
       (case [OpUnreachable]
         (.unreachable v))
@@ -1187,7 +1231,7 @@
           (.pushs v lt)))
       (case [OpBrTable]
         (let [n (conv int (.u32 r))
-            ^{:line 1190} ls (make (slice uint32) (+ n 1))]
+            ^{:line 1234} ls (make (slice uint32) (+ n 1))]
           (range [i ls]
             (aset ls i (.u32 r)))
 
@@ -1207,7 +1251,7 @@
             (.unreachable v))))
       (case [OpBrOnNull]
         (let [lt (.labelTypes v (.label v (.u32 r)))
-            ^{:line 1210} t (.popRef v)]
+            ^{:line 1254} t (.popRef v)]
           (.pops v lt)
           (.pushs v lt)
           (.push v (refT false (.-H t)))))
@@ -1226,8 +1270,8 @@
             (panic (addr (lit Malformed "malformed br_on_cast flags"))))
 
           (let [l (.u32 r)
-              ^{:line 1229} rt1 (refT (!= (bit-and f 1) 0) (.heap v))
-              ^{:line 1230} rt2 (refT (!= (bit-and f 2) 0) (.heap v))]
+              ^{:line 1273} rt1 (refT (!= (bit-and f 1) 0) (.heap v))
+              ^{:line 1274} rt2 (refT (!= (bit-and f 2) 0) (.heap v))]
             (when (not (match rt2 rt1))
               (invalid "type mismatch on cast: type %s does not match %s" rt2 rt1))
 
@@ -1261,8 +1305,8 @@
 
       (case [OpCallIndirect OpReturnCallIndirect]
         (let [x (.u32 r)
-            ^{:line 1264} tb (.table v (.u32 r))
-            ^{:line 1265} t (aget ctypes (.funcType v x))]
+            ^{:line 1308} tb (.table v (.u32 r))
+            ^{:line 1309} t (aget ctypes (.funcType v x))]
           (.tableFuncs v tb)
           (when (== op OpReturnCallIndirect)
             (.resultsMatch v (.-Results t)))
@@ -1276,8 +1320,8 @@
 
       (case [OpCallRef OpReturnCallRef]
         (let [x (.u32 r)
-            ^{:line 1279} id (.funcType v x)
-            ^{:line 1280} t (aget ctypes id)]
+            ^{:line 1323} id (.funcType v x)
+            ^{:line 1324} t (aget ctypes id)]
           (when (== op OpReturnCallRef)
             (.resultsMatch v (.-Results t)))
 
@@ -1299,7 +1343,7 @@
       (case [OpSelect]
         (.popT v i32T)
         (let [t1 (.pop v)
-            ^{:line 1302} t2 (.pop v)]
+            ^{:line 1346} t2 (.pop v)]
           (when (or (== (.-K t1) tRef) (== (.-K t2) tRef))
             (invalid "type mismatch: instruction requires numeric or vector type"))
 
@@ -1323,7 +1367,7 @@
             (.push v t))))
       (case [OpLocalGet]
         (let [x (.u32 r)
-            ^{:line 1326} t (.localAt v x)]
+            ^{:line 1370} t (.localAt v x)]
           (when (not (aget (.-init v) x))
             (invalid "uninitialized local %d" x))
 
@@ -1334,13 +1378,13 @@
           (.setInit v x)))
       (case [OpLocalTee]
         (let [x (.u32 r)
-            ^{:line 1337} t (.localAt v x)]
+            ^{:line 1381} t (.localAt v x)]
           (.popT v t)
           (.setInit v x)
           (.push v t)))
       (case [OpGlobalGet]
         (let [x (.u32 r)
-            ^{:line 1343} g (.global v x)]
+            ^{:line 1387} g (.global v x)]
           (when (and (.-konst v) ^:go/paren (or (>= (conv int x) (.-nglob v)) (.-Mut g)))
             (when (>= (conv int x) (.-nglob v))
               (invalid "unknown global %d" x))
@@ -1376,7 +1420,7 @@
           (.popT v (addrOf (.-L t)))))
       (case [OpTableCopy]
         (let [t1 (.table v (.u32 r))
-            ^{:line 1379} t2 (.table v (.u32 r))]
+            ^{:line 1423} t2 (.table v (.u32 r))]
           (when (not (match (.-Elem t2) (.-Elem t1)))
             (invalid "type mismatch: source element type %s does not match destination element type %s" (.-Elem t2) (.-Elem t1)))
 
@@ -1389,7 +1433,7 @@
             (.popT v (addrOf (.-L t1))))))
       (case [OpTableInit]
         (let [e (.elem v (.u32 r))
-            ^{:line 1392} t (.table v (.u32 r))]
+            ^{:line 1436} t (.table v (.u32 r))]
           (when (not (match e (.-Elem t)))
             (invalid "type mismatch: element segment's type %s does not match table's element type %s" e (.-Elem t)))
 
@@ -1411,8 +1455,8 @@
           (.popT v a)))
       (case [OpMemoryCopy]
         (let [a (addrOf (.mem v (.u32 r)))
-            ^{:line 1414} b (addrOf (.mem v (.u32 r)))
-            ^{:line 1415} n i32T]
+            ^{:line 1458} b (addrOf (.mem v (.u32 r)))
+            ^{:line 1459} n i32T]
           (when (and (== (.-K a) tI64) (== (.-K b) tI64))
             (set! n i64T))
 
@@ -1421,7 +1465,7 @@
           (.popT v a)))
       (case [OpMemoryInit]
         (let [d (.u32 r)
-            ^{:line 1424} a (addrOf (.mem v (.u32 r)))]
+            ^{:line 1468} a (addrOf (.mem v (.u32 r)))]
           (.data v d)
           (.popT v i32T)
           (.popT v i32T)
@@ -1432,7 +1476,7 @@
         (.push v (refT true (.heap v))))
       (case [OpRefFunc]
         (let [x (.u32 r)
-            ^{:line 1435} id (.fn v x)]
+            ^{:line 1479} id (.fn v x)]
           (cond (.-konst v)
             (aset (.-refs v) x true)
             (not (aget (.-refs v) x))
@@ -1465,7 +1509,7 @@
         (.push v i32T))
       (case [OpStructNew OpStructNewDefault]
         (let [x (.u32 r)
-            ^{:line 1468} st (.structType v x)]
+            ^{:line 1512} st (.structType v x)]
           (if (== op OpStructNew)
             (for [i (- (len (.-Fields st)) 1)] (>= i 0) (dec! i)
               (.popT v (unpack (.-T (aget (.-Fields st) i)))))
@@ -1480,8 +1524,8 @@
           (.push v (refT false (conv int32 (aget (.-canon (.-d v)) x))))))
       (case [OpStructGet OpStructGetS OpStructGetU OpStructSet]
         (let [x (.u32 r)
-            ^{:line 1483} i (.u32 r)
-            ^{:line 1484} st (.structType v x)]
+            ^{:line 1527} i (.u32 r)
+            ^{:line 1528} st (.structType v x)]
           (when (>= (conv int i) (len (.-Fields st)))
             (invalid "unknown field %d" i))
 
@@ -1504,8 +1548,8 @@
             (.push v (unpack (.-T f))))))
       (case [OpArrayNew OpArrayNewDefault OpArrayNewFixed OpArrayNewData OpArrayNewElem]
         (let [x (.u32 r)
-            ^{:line 1507} at (.arrayType v x)
-            ^{:line 1508} f (aget (.-Fields at) 0)]
+            ^{:line 1551} at (.arrayType v x)
+            ^{:line 1552} f (aget (.-Fields at) 0)]
           (switch op
             (case [OpArrayNew]
               (.popT v i32T)
@@ -1538,7 +1582,7 @@
           (.push v (refT false (conv int32 (aget (.-canon (.-d v)) x))))))
       (case [OpArrayGet OpArrayGetS OpArrayGetU]
         (let [x (.u32 r)
-            ^{:line 1541} f (aget (.-Fields (.arrayType v x)) 0)]
+            ^{:line 1585} f (aget (.-Fields (.arrayType v x)) 0)]
           (when (!= (!= op OpArrayGet) (packed (.-T f)))
             (when (== op OpArrayGet)
               (invalid "array is packed"))
@@ -1550,7 +1594,7 @@
           (.push v (unpack (.-T f)))))
       (case [OpArraySet OpArrayFill]
         (let [x (.u32 r)
-            ^{:line 1553} f (aget (.-Fields (.arrayType v x)) 0)]
+            ^{:line 1597} f (aget (.-Fields (.arrayType v x)) 0)]
           (when (not (.-Mut f))
             (invalid "immutable array"))
 
@@ -1565,9 +1609,9 @@
         (.push v i32T))
       (case [OpArrayCopy]
         (let [x (.u32 r)
-            ^{:line 1568} y (.u32 r)
-            ^{:line 1569} fd (aget (.-Fields (.arrayType v x)) 0)
-            ^{:line 1570} fs (aget (.-Fields (.arrayType v y)) 0)]
+            ^{:line 1612} y (.u32 r)
+            ^{:line 1613} fd (aget (.-Fields (.arrayType v x)) 0)
+            ^{:line 1614} fs (aget (.-Fields (.arrayType v y)) 0)]
           (when (not (.-Mut fd))
             (invalid "immutable array"))
 
@@ -1581,8 +1625,8 @@
           (.popT v (refT true (conv int32 (aget (.-canon (.-d v)) x))))))
       (case [OpArrayInitData OpArrayInitElem]
         (let [x (.u32 r)
-            ^{:line 1584} s (.u32 r)
-            ^{:line 1585} f (aget (.-Fields (.arrayType v x)) 0)]
+            ^{:line 1628} s (.u32 r)
+            ^{:line 1629} f (aget (.-Fields (.arrayType v x)) 0)]
           (when (not (.-Mut f))
             (invalid "immutable array"))
 
@@ -1640,7 +1684,7 @@
         (let [nm (.-name in)]
           (when (== (.-kind in) kLane)
             (let [shape (subslice nm _ (strings/IndexByte nm \.))
-                ^{:line 1643} l (.u8 r)]
+                ^{:line 1687} l (.u8 r)]
               (when (>= (conv int l) (aget laneN shape))
                 (invalid "invalid lane index"))
 

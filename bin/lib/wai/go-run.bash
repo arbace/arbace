@@ -383,7 +383,14 @@ gorun_check() {
   light
   echo "wai go: $(wc -l < "$gorun_work/ids") programs ($jobs at a time)"
   WAI_SRCS_KEY=$(srcs_key)
-  export root main goroot wai_exe wai_dir gorun_work gorun_dir TMPDIR gorun_aot WAI_SRCS_KEY
+  export root main goroot wai_exe wai_dir gorun_work gorun_dir TMPDIR gorun_aot WAI_SRCS_KEY gorun_collect
+  if [ -n "${gorun_aot:-}" ] && [ "${WAI_AOT_SHARED:-1}" != 0 ]; then
+    # WAS40 (c), WAS50 (a): a first pass builds the programs and collects their modules, translated by shape into one AOT program;
+    # the second runs every program on it, WAI_GO_JOBS at a time (the per-program translation, WA7's: WAI_AOT_SHARED=0)
+    jobs=${WAI_GO_JOBS:-2}
+    gorun_collect=1 xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$gorun_work/ids" > "$gorun_work/collect.tsv"
+    aot_go_shared "$gorun_work" || return 1
+  fi
   xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$gorun_work/ids" > "$gorun_work/rows.tsv"
   LC_ALL=C sort -o "$gorun_work/rows.tsv" "$gorun_work/rows.tsv"
   gorun_tsv2edn "$gorun_work/rows.tsv" > "$gorun_work/rows.edn"

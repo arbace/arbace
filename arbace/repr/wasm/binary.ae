@@ -274,6 +274,18 @@
                (do (u8 r) (let [els (instrs r)] (end! r) (list 'if bt then els)))
                (do (end! r) (list 'if bt then))))
       0x1f (let [bt (blocktype r) cs (vec-of r catch-clause) body (instrs r)] (end! r) (list 'try_table bt cs body))
+      ;; the legacy exceptions (WA8; the spec's legacy/ documents): try, its catch and catch_all clauses or its delegate, rethrow
+      0x06 (let [bt (blocktype r) body (instrs r)]
+             (if (= 0x18 (peek8 r))
+               (do (u8 r) (list 'try bt body (list 'delegate (u32 r))))
+               (loop [hs (transient [])]
+                 (case (int (peek8 r))
+                   0x07 (do (u8 r) (let [t (u32 r) es (instrs r)] (recur (conj! hs (list 'catch t es)))))
+                   0x19 (do (u8 r) (let [es (instrs r)] (end! r) (list 'try bt body (persistent! (conj! hs (list 'catch_all es))))))
+                   (do (end! r) (list 'try bt body (persistent! hs)))))))
+      0x09 (list 'rethrow (u32 r))
+      (0x07 0x19) (malformed "misplaced CATCH opcode" at)
+      0x18 (malformed "misplaced DELEGATE opcode" at)
       0x05 (malformed "misplaced ELSE opcode" at)
       0x0b (malformed "misplaced END opcode" at)
       (if-let [[nm kind] (aget ^objects one-byte (int op))]
@@ -291,7 +303,7 @@
 (defn- instrs [r]
   (loop [out (transient [])]
     (let [b (peek8 r)]
-      (if (or (= b 0x0b) (= b 0x05) (= b -1)) (persistent! out) (recur (conj! out (instr r)))))))
+      (if (or (= b 0x0b) (= b 0x05) (= b 0x07) (= b 0x18) (= b 0x19) (= b -1)) (persistent! out) (recur (conj! out (instr r)))))))
 
 (defn- const-expr [r] (let [e (instrs r)] (end! r) e))
 
@@ -663,6 +675,16 @@
                                           catch_all (do (w8 w 2) (wuleb w (nth c 1)))
                                           catch_all_ref (do (w8 w 3) (wuleb w (nth c 1))))))
                     (winstrs w (nth x 3)) (w8 w 0x0b))
+      try (do (w8 w 0x06) (wblocktype w (nth x 1)) (winstrs w (nth x 2))
+              (let [hs (nth x 3)]
+                (if (seq? hs)
+                  (do (w8 w 0x18) (wuleb w (second hs)))
+                  (do (doseq [h hs]
+                        (case (first h)
+                          catch (do (w8 w 0x07) (wuleb w (nth h 1)) (winstrs w (nth h 2)))
+                          catch_all (do (w8 w 0x19) (winstrs w (nth h 1)))))
+                      (w8 w 0x0b)))))
+      rethrow (do (w8 w 0x09) (wuleb w (nth x 1)))
       (let [rows (or (by-name nm) (bad "an unknown instruction" x))
             [p c kind] (if (= 1 (count rows))
                          (first rows)
