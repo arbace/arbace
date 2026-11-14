@@ -100,8 +100,15 @@ aot_go_verdict() {
 # --shared: each shape of the programs' functions once, their runtime and libraries shared) into one AOT program, kept by key in
 # the main checkout's .tmp/wai-go/aot-shared (the newest WAI_AOT_SHARED_KEEP, default 3, kept); exports WAI_AOT_SHARED_EXE, or 1
 aot_go_shared() {
-  local work=$1 gen=$1/shared.gen t0 d n
-  find "$work/run" -name '*.mod' -exec cat {} + | LC_ALL=C sort -u > "$work/mods.list"
+  local work=$1 ids=${2:-} gen=$1/shared.gen t0 d n id
+  if [ -n "$ids" ]; then
+    # a slice: the modules of its programs alone
+    while read -r id; do
+      id=${id#go/}; if [ -f "$work/run/${id//\//__}.mod" ]; then cat "$work/run/${id//\//__}.mod"; fi
+    done < "$ids" | LC_ALL=C sort -u > "$work/mods.list"
+  else
+    find "$work/run" -name '*.mod' -exec cat {} + | LC_ALL=C sort -u > "$work/mods.list"
+  fi
   echo "wai go --aot: $(wc -l < "$work/mods.list") modules translated by shape into one program"
   t0=$(date +%s)
   rm -rf "$gen"

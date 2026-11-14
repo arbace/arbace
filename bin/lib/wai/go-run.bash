@@ -377,6 +377,8 @@ gorun_check() {
   local record=$1 list=$2 fails=0 jobs=${WAI_GO_JOBS:-3} res=$gorun_results kind=go
   # WA7: --aot, each program's module translated by w2g and built as an AOT program (one at a time: the builds' memory)
   if [ -n "${gorun_aot:-}" ]; then jobs=${WAI_GO_JOBS:-1} res=$gorun_aot_results kind=go-aot; fi
+  # WAS50 (a): by shape, one program for the run: the runs WAI_GO_JOBS at a time
+  if [ -n "${gorun_aot:-}" ] && [ "${WAI_AOT_SHARED:-1}" != 0 ]; then jobs=${WAI_GO_JOBS:-2}; fi
   gorun_work=$wai_dir/go${gorun_aot:+-aot}; rm -rf "$gorun_work"; mkdir -p "$gorun_work" "$gorun_dir"
   : > "$gorun_dir/empty"
   if [ -n "$list" ]; then grep -v '^#' "$list" | sed '/^$/d; s|^|go/|' > "$gorun_work/ids"; else gorun_ids > "$gorun_work/ids"; fi
@@ -387,11 +389,26 @@ gorun_check() {
   if [ -n "${gorun_aot:-}" ] && [ "${WAI_AOT_SHARED:-1}" != 0 ]; then
     # WAS40 (c), WAS50 (a): a first pass builds the programs and collects their modules, translated by shape into one AOT program;
     # the second runs every program on it, WAI_GO_JOBS at a time (the per-program translation, WA7's: WAI_AOT_SHARED=0)
-    jobs=${WAI_GO_JOBS:-2}
     gorun_collect=1 xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$gorun_work/ids" > "$gorun_work/collect.tsv"
-    aot_go_shared "$gorun_work" || return 1
+    # WAI_AOT_SLICE=N: N programs a shared program (the disk's and the build's measure: the whole corpus is about 9,000 shapes,
+    # 360 MB of Go), each slice's program built, its programs run, its build's cache and program removed before the next
+    local slice=${WAI_AOT_SLICE:-0} sl
+    if [ "$slice" -gt 0 ]; then
+      split -l "$slice" -d -a 3 "$gorun_work/ids" "$gorun_work/slice."
+      : > "$gorun_work/rows.tsv"
+      for sl in "$gorun_work"/slice.*; do
+        echo "wai go --aot: slice ${sl##*.}: $(wc -l < "$sl") programs"
+        WAI_GOCACHE=$gorun_work/aot-gocache WAI_AOT_SHARED_KEEP=1 aot_go_shared "$gorun_work" "$sl" || return 1
+        rm -rf "$gorun_work/aot-gocache"
+        xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$sl" >> "$gorun_work/rows.tsv"
+      done
+    else
+      aot_go_shared "$gorun_work" || return 1
+    fi
   fi
-  xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$gorun_work/ids" > "$gorun_work/rows.tsv"
+  if [ -z "${gorun_aot:-}" ] || [ "${WAI_AOT_SHARED:-1}" = 0 ] || [ "${WAI_AOT_SLICE:-0}" = 0 ]; then
+    xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$gorun_work/ids" > "$gorun_work/rows.tsv"
+  fi
   LC_ALL=C sort -o "$gorun_work/rows.tsv" "$gorun_work/rows.tsv"
   gorun_tsv2edn "$gorun_work/rows.tsv" > "$gorun_work/rows.edn"
   gorun_controls_run || fails=$((fails + 1))
