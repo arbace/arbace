@@ -388,8 +388,12 @@ gorun_check() {
   LC_ALL=C sort -o "$gorun_work/rows.tsv" "$gorun_work/rows.tsv"
   gorun_tsv2edn "$gorun_work/rows.tsv" > "$gorun_work/rows.edn"
   gorun_controls_run || fails=$((fails + 1))
-  if [ -n "$list" ] && [ -z "${gorun_aot:-}" ]; then
-    arbace_tool -e "(let [run (set (map first (read-string (str \"[\" (slurp \"$gorun_work/rows.edn\") \"]\")))) old (read-string (slurp \"$res\"))] (spit \"$gorun_work/old.edn\" (pr-str (vec (filter #(run (first %)) old)))))"
+  if { [ -n "$list" ] && [ -z "${gorun_aot:-}" ]; } || [ -n "${gorun_vs_eval:-}" ]; then
+    # a partial run judged on its programs' rows alone; --aot --vs-eval (WAS40 (a)'s rotation): against eval's record, the AOT
+    # level equal to eval's verdicts program for program
+    local src=$res
+    [ -z "${gorun_vs_eval:-}" ] || src=$gorun_results
+    arbace_tool -e "(let [run (set (map first (read-string (str \"[\" (slurp \"$gorun_work/rows.edn\") \"]\")))) old (read-string (slurp \"$src\"))] (spit \"$gorun_work/old.edn\" (pr-str (vec (filter #(run (first %)) old)))))"
     judge "$gorun_work/old.edn" "$gorun_work/rows.edn" "$gorun_classes" "" "" "$kind" || fails=$((fails + 1))
   else
     judge "$res" "$gorun_work/rows.edn" "$gorun_classes" "$record" "go" "$kind" || fails=$((fails + 1))

@@ -167,6 +167,12 @@ covers what.
   same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
   `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
   Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
+- `wasm/web/arbace.js`'s part 1 (the gojs imports and the `Go` class; doc/wasm/WEB.md; doc/wasm/WASM-SURVEY.md, "As built:
+  WA11, WA12 (begun)") and wai's headless world `go/arbace/wai/gojs.ae` (the same imports, the reference table and the run
+  written in Go after it): derived from TamaGo's go1.27.1 tree's `lib/wasm/wasm_exec.js` and `lib/wasm/wasm_exec_node.js`
+  (above: `VERSION` "go1.27.1"), Copyright 2018 and 2021 The Go Authors, under Go's BSD 3-Clause License (text below); the
+  notice is kept at the top of `arbace.js`. The rest of `arbace.js`, `wasm/web/index.html` and wai's `js*.ae`, `gojsnode.ae`
+  and `gojspage.ae` are Arbace's own, under the Eclipse Public License 1.0.
 - `arbace/go/escape.ae` (doc/go/GOI-SPEC.md, "Since v1: gc's escape analysis and inliner"): a port to Arbace of
   gc's escape analysis and inliner from TamaGo's go1.27.1 tree (above: `VERSION` "go1.27.1"):
   `src/cmd/compile/internal/escape/` (`escape.go`, `graph.go`, `solve.go`, `expr.go`, `stmt.go`, `assign.go`,

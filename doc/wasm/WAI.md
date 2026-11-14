@@ -261,3 +261,96 @@ survey's "As built: WA7 (first part)" for the measures and why the whole Go corp
 
 `controls-eval.txt`'s modes run by the AOT program, and `as-interpreted`: the command run by the same AOT program with its
 translated functions not attached (`AOTDisable`), which passes on the interpreter and so must be refused by the AOT judge.
+
+## 10. gojs, the headless world (`gojs.go`, `js.go`, `jsrt.go`, `jseval.go`, `gojsnode.go`, `gojspage.go`; WA11)
+
+WAS13 (a), WAS16 (a), WAS17 (a): Go's `js/wasm` port run with no browser and no JavaScript engine. A Go program built for `GOOS=js`
+imports module `gojs` (and syscall/js's tests `_gotest` too) and exports `run`, `resume`, `getsp` and its memory `mem`; the world
+implements the imports over a model of JavaScript's values, as the pinned TamaGo go1.27.1's `lib/wasm/wasm_exec.js` (BSD-3; LICENSE.md)
+implements them in a browser and `wasm_exec_node.js` under Node.js.
+
+### 10.1 The imports
+
+The 24 names of `wasm_exec.js`'s gojs object (and its `debug`), each a function of Go's stack pointer reading its arguments from Go's
+stack at wasm_exec.js's offsets: `runtime.wasmExit`, `wasmWrite`, `resetMemoryDataView`, `nanotime1`, `walltime`,
+`scheduleTimeoutEvent`, `clearTimeoutEvent`, `getRandomData`; `syscall/js.finalizeRef`, `stringVal`, `valueGet`, `valueSet`,
+`valueDelete`, `valueIndex`, `valueSetIndex`, `valueCall`, `valueInvoke`, `valueNew`, `valueLength`, `valuePrepareString`,
+`valueLoadString`, `valueInstanceOf`, `copyBytesToGo`, `copyBytesToJS`. The reference table is wasm_exec.js's: a value slot is a
+float64, 0 `undefined`, a number itself, else a NaN-boxed reference (head `0x7FF8xxxx`, the type flag 1 object, 2 string, 3 symbol, 4
+function) whose low word indexes `_values`; the ids 0-6 predefined (NaN, 0, null, true, false, the global, the Go object), the rest
+counted by `_goRefCounts`, interned by SameValueZero (`_ids`) and pooled after `finalizeRef` (`_idPool`). After a call that may run
+Go (a getter, a call, a constructor) the stack pointer is read again through `getsp`, as wasm_exec.js does.
+
+**Re-entry.** A JavaScript function made by `js.FuncOf` is the Go object's `_makeFuncWrapper(id)`: called (by the world, by code the
+world evaluates, by another import), it sets `_pendingEvent` and calls the export `resume` inside the running import, so Go runs
+inside Go's own call; `_gotest.callExport` calls the exports `testExport0` and `testExport` the same way. The machine supports it
+since WA11: a host function runs with the machine's base moved above its caller's operands (`Machine.HostCall`, used by the
+interpreter and by w2g's calls), so the inner run's frames sit above the outer's. At the world's top an export runs as
+`Machine.Call` (its traps and crashes stop the world); inside an import it runs on the running machine, its failures unwinding to the
+top. `wasmExit` marks the world exited (Go's `exit` then unwinds by itself); an import called after it unwinds the machine as an
+`*Exit`.
+
+### 10.2 The values and the runtime (`js.go`, `jsrt.go`)
+
+A value is `JSUndefined`, `JSNull`, a `bool`, a `float64`, a Go `string` (its length counted in UTF-16 units), a `*JSSymbol` or a
+`*JSObject` (its own properties in insertion order, a prototype, and the slots of its class: an Array's elements, a typed array's bytes,
+a wrapper's or a Date's value, a function's call and construct, frozen, an exotic getter and setter). Thrown values are panics of
+`*JSThrow`, caught where JavaScript catches: wasm_exec.js's `try` around `valueCall`, `valueInvoke` and `valueNew` (the exception
+stored with ok 0, so Go panics with `js.Error`), a promise's reaction, the evaluator's `try`. The realm (`NewRealm`) holds what Go's
+packages and the programs use, after ECMA-262's algorithms for what is built (their names kept: `ToNumber`, `ToString`,
+`ToPrimitive`, `[[Get]]`, `[[Set]]`, `OrdinaryHasInstance`, `===`, `==`): `Object` (`freeze`, `keys`, `assign`,
+`getPrototypeOf`, `hasOwnProperty`, `toString`), `Function.prototype` (`call`, `apply`, `bind`), `Array` (`push`, `pop`, `shift`,
+`concat`, `slice`, `indexOf`, `join`, `forEach`, `map`, `isArray`, `from`), `Uint8Array`, `Uint8ClampedArray`, `Float32Array`
+(`subarray`, `slice`, `set`, `fill`), `Number`, `Boolean`, `String` (`indexOf`, `substring`, `split`, `charCodeAt`), `Symbol`, the
+errors, `Date` (the world's clock, UTC: `getTimezoneOffset` 0, which `time`'s js zone reads), `Promise` (`then`, `catch`,
+`resolve`, `reject`; reactions as microtasks), `Math`, `isNaN`, `parseInt`, `eval`, `TextEncoder`, `TextDecoder`, `console`,
+`performance.now`, `crypto.getRandomValues`, `setTimeout`, `clearTimeout`, `queueMicrotask`. Numbers print by Number::toString.
+
+### 10.3 `eval` (`jseval.go`, WAS43 (a))
+
+A small subset of JavaScript, lexed, parsed and evaluated over the realm: literals (numbers, strings with escapes, objects with
+methods' shorthand, arrays), function expressions and declarations, arrow functions, `this`, `var`/`let`/`const`, `if`, `while`,
+`for(;;)`, `return`, `throw`, `try`/`catch`/`finally`, `break`, `continue`, the assignments (`=`, `+=`, ...), `?:`, `||`, `&&`, `??`,
+equality, relations, arithmetic, bitwise, `typeof`, `void`, `delete`, `instanceof`, `in`, `new`, calls and member access. syscall/js's
+tests evaluate an object literal and an immediately invoked function; the own programs use it for their JavaScript halves. A program
+outside the subset is a SyntaxError that says so. It is not a JavaScript engine (WAS17 (b) would be its own crop).
+
+### 10.4 Node's part (`gojsnode.go`)
+
+`globalThis.fs`: Node's callback API as `syscall/fs_js.go` calls it, each callback called before the call returns (as wasm_exec.js's
+own `fs` does): `open`, `close`, `read`, `write`, `writeSync`, `fstat`, `stat`, `lstat`, `readdir`, `mkdir`, `unlink`, `rmdir`,
+`rename`, `truncate`, `ftruncate`, `fsync`, `chmod`, `fchmod`, `chown`, `fchown`, `lchown`, `utimes`, `readlink`, `symlink`, `link`;
+`fs.constants` Linux's values (so the flags Go hands `open` are the host's). Paths: resolved against `process.cwd()`, cleaned, mapped
+by the longest mount (`--dir GUEST=HOST[:ro]`); nothing exists outside a mount; a write under a read-only one is EROFS; errors are
+Node's (`code` the errno's name, which `fs_js.go` maps back). Descriptors 0-2 the world's standard streams. `process`: `cwd`,
+`chdir`, the ids -1 and `pid`, `ppid` -1, `getgroups` and `umask` ENOSYS (wasm_exec.js's own); `path.resolve`.
+
+### 10.5 The page's part (`gojspage.go`)
+
+doc/wasm/WEB.md §4: `window` (the global), `document` with one canvas (id `screen`, 800 × 600, `devicePixelRatio` 1), `navigator.gpu`,
+`requestAnimationFrame`, `addEventListener`, and the bridge `globalThis.arbace` (`gpu.handle`, `gpu.release`, `gpu.exec`,
+`input.ring`). Every GPU object is a recording fake (`fakeSpec`: each kind's methods and what they return; a promise for
+`requestAdapter` and `requestDevice`); each call, and each property a program sets on a fake, is a line of the recording. The command
+buffer is decoded by `gpuBridge.exec`, the shim's `exec` statement for statement, calling the fakes.
+
+### 10.6 The event loop and the clock (WAS44 (a))
+
+`waidriver gojs` writes argv (the module's path and its arguments, as go_js_wasm_exec gives them) and the environment (`--env`, sorted)
+at 4096 as wasm_exec.js's `run` does, calls `run`, then runs the loop: the microtasks after each task; the earliest timer (Go's
+`scheduleTimeoutEvent`, whose callback resumes Go, with wasm_exec.js's missed-event retry; `setTimeout`, at least 1 ms as Node's), the
+clock moved to its time; in the page's mode (`--frames N`) an animation frame whenever one is asked and due before the next timer
+(the input script's events of that frame delivered first), until N frames ran. Idle with nothing pending: in Node's mode the program is
+resumed with event 0, as `wasm_exec_node.js`'s exit handler does, and Go reports its deadlock; in the page's mode the world ends. The
+clock is virtual: the monotonic time starts at 0 and advances 1 µs a reading and to each timer's or frame's time when the world
+waits, the wall clock from 2026-01-01T00:00:00Z (`GoJS.Epoch`); a run past a virtual day fails. So a run is a function of the
+module, its arguments and its input, and its outputs judge it. The status: the program's (`wasmExit`'s), 0 when the frames are done,
+126 a trap or a crash (with `wai: ...`).
+
+### 10.7 The corpus (`bin/wai js`)
+
+`bin/lib/wai/js-run.bash`: syscall/js's tests (`go test -c syscall/js` for js/wasm, run with `-test.v`), Go's own programs of
+`test/wasm/js-run.txt` (`test/wasm/js/NAME/main.go`: `want.out`, `want.status`, `want.err`, `args`), the demo scene's frames
+(doc/wasm/WEB.md §5) and the shim's checks, built by TamaGo's go (cached by key in the main checkout's `.tmp/wai-go/js`) and run by
+the light driver; rows `[js/ID RESULT REASON]` against `test/wasm/js-results.edn`, classes `test/wasm/divergences-js.edn`, the negative
+controls `test/wasm/controls-js.txt` (a program against another's statement, the scene one frame off and without its key press, the
+shim without an import and with an argument count changed: each must fail; `self` checks must pass). Not a REAP cell (WAS17 (a)).

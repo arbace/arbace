@@ -1,0 +1,55 @@
+(ns wasm.frames
+  "The headless world's frames judge (doc/wasm/WEB.md §5, doc/wasm/WAI.md §10.6; WAS17 (a), WAS22 (a)): a page program's
+  recording by frame (waidriver gojs --record: [{:frame N :t T :digest D :lines [...]} ...]) against what its authors state in
+  expected/frames.edn (:expect, each {:frame N :writes [[K [F ...]] ...]}: the frame's K-th queue.writeBuffer's first float32s,
+  each within 1e-5, written from the scene's arithmetic) and against the digests of expected/digests.edn (each frame's lines'
+  SHA-256, recorded from a run: --record rewrites them). SHIFT judges frame N's statement against the recording's frame N+SHIFT
+  (a negative control: it must fail)."
+  (:require [arbace.string :as str]))
+
+(defn- floats-of [line]
+  (when-let [m (re-find #"f32\[([^\]]*)\]" line)]
+    (mapv #(Double/parseDouble %) (remove empty? (str/split (second m) #" ")))))
+
+(defn- writes [frame]
+  (vec (filter #(str/includes? % ".writeBuffer(") (:lines frame))))
+
+(defn main [rec-path expected-path digests-path shift record]
+  (let [rec (read-string (slurp rec-path))
+        by (into {} (map (fn [f] [(:frame f) f]) rec))
+        exp (read-string (slurp expected-path))
+        shift (Long/parseLong (str shift))
+        problems (atom [])
+        fail! (fn [s] (swap! problems conj s))]
+    (when (not= (count rec) (inc (:frames exp)))
+      (fail! (str "the recording has " (count rec) " frames, the statement " (inc (:frames exp)) " (frame 0 and " (:frames exp) ")")))
+    (doseq [{:keys [frame] ws :writes} (:expect exp)]
+      (let [f (by (+ frame shift))]
+        (if-not f
+          (fail! (str "frame " frame ": not recorded"))
+          (let [fw (writes f)]
+            (doseq [[k want] ws]
+              (let [got (some-> (get fw k) floats-of)]
+                (cond
+                  (nil? got) (fail! (str "frame " frame ": no write " k " with floats"))
+                  (< (count got) (count want)) (fail! (str "frame " frame ": write " k " has " (count got) " floats, " (count want) " stated"))
+                  :else (doseq [i (range (count want))]
+                          (when (> (Math/abs (- (double (nth got i)) (double (nth want i)))) 1e-5)
+                            (fail! (str "frame " frame ": write " k " float " i ": " (nth got i) ", stated " (nth want i))))))))))))
+    (if (and (seq record) (empty? @problems))
+      (do (spit digests-path
+                (str ";; the frames' digests of the headless world's run (bin/wai js --record; doc/wasm/WEB.md §5): each frame's recorded\n"
+                     ";; lines' SHA-256, frame 0 the setup's. Written by bin/wai js --record from a run that meets expected/frames.edn's\n"
+                     ";; statements; read by test/wasm/frames.ae. Read with the Clojure reader.\n"
+                     "{\n" (apply str (for [f rec] (str " " (:frame f) " " (pr-str (:digest f)) "\n"))) "}\n"))
+          (println (str "frames: recorded " (count rec) " digests into " digests-path)))
+      (let [ds (if (.exists (java.io.File. ^String digests-path)) (read-string (slurp digests-path)) {})]
+        (when (empty? ds) (fail! (str "no digests recorded: " digests-path)))
+        (doseq [[n d] (sort ds)]
+          (let [f (by (+ n shift))]
+            (when (not= d (:digest f))
+              (fail! (str "frame " n ": digest " (:digest f) ", recorded " d)))))))
+    (doseq [p (take 12 @problems)] (println (str "frames: " p)))
+    (if (empty? @problems)
+      (println (str "frames: ok (" (count (:expect exp)) " frames stated, " (count rec) " recorded)"))
+      (do (println (str "frames: " (count @problems) " problems")) (System/exit 1)))))
