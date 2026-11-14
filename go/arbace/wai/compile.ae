@@ -266,7 +266,7 @@
     (return code nil)))
 
 
-^{:go/end 458} (go/method step ^error [^{:tag (* compiler)} c]
+^{:go/end 465} (go/method step ^error [^{:tag (* compiler)} c]
   (let [r (.-r c)
       ^{:line 271} at (.-p r)
       ^{:line 272} b (.u8 r)
@@ -328,6 +328,10 @@
           (return nil)))
       (case [0x0b]
         (let [l (aget (.-labels c) (- (len (.-labels c)) 1))]
+          (when (and (== (.-kind l) lLegacy) (.-inCatch l) (not (.-outerDead l)) (not (.-dead c)))
+            ;; the last catch's results moved down over its slot (a branch to the try's end)
+            (.brIns c OpBr 0))
+
           (set! (.-labels c) (subslice (.-labels c) _ (- (len (.-labels c)) 1)))
           (when (== (.-kind l) lFunc)
             ;; the end of the function: its results to the frame's base
@@ -359,7 +363,7 @@
       (case [0x06]
         ;; legacy try (WA8): a block whose body's range has a handler, closed by its first catch, catch_all or delegate
         (let [(values np nr) (.blocktype c)
-            ^{:line 362} l (addr (lit label :kind lLegacy :np np :nr nr :outerDead (.-dead c) :height (- (.-h c) np)))]
+            ^{:line 366} l (addr (lit label :kind lLegacy :np np :nr nr :outerDead (.-dead c) :height (- (.-h c) np)))]
           (when (not (.-dead c))
             (set! (.-h l) (addr (lit handler :Start (conv uint32 (len (.-Ins (.-code c))))))))
 
@@ -369,18 +373,21 @@
         ;; catch TAG, catch_all: the body (or the previous catch) jumps to the end; the clause's code starts here with the
         ;; exception's reference in the slot at the try's height, then the tag's values
         (let [l (aget (.-labels c) (- (len (.-labels c)) 1))
-            ^{:line 372 :tag uint32} tag (zero uint32)
-            ^{:line 373} np 0
-            ^{:line 374} kind (conv byte catchAllLegacy)]
+            ^{:line 376 :tag uint32} tag (zero uint32)
+            ^{:line 377} np 0
+            ^{:line 378} kind (conv byte catchAllLegacy)]
           (when (== b 0x07)
             (set! tag (.u32 r))
             (set! np (len (.-Params (aget ctypes (aget (.-TagTypes (.-m c)) tag)))))
             (set! kind catchLegacy))
 
           (when (not (.-outerDead l))
-            (when (not (.-dead c))
+            (cond (and (not (.-dead c)) (.-inCatch l))
+              ;; a catch's results above its slot: moved down to the try's height as a branch to its end moves them
+              (.brIns c OpBr 0)
+              (not (.-dead c))
               (let [j (.emit c (lit Ins :Op OpJump))]
-                (set! (.-patches l) (append (.-patches l) ^{:go/end 383} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) j)) (conv uint64 pc)))))))
+                (set! (.-patches l) (append (.-patches l) ^{:go/end 390} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) j)) (conv uint64 pc)))))))
 
             (when (not (.-inCatch l))
               (set! (.-End (.-h l)) (conv uint32 (len (.-Ins (.-code c)))))
@@ -400,7 +407,7 @@
       (case [0x18]
         ;; delegate L: the try ends; an exception of its body goes on past the handlers of the blocks between it and the label L
         (let [d (.u32 r)
-            ^{:line 403} l (aget (.-labels c) (- (len (.-labels c)) 1))]
+            ^{:line 410} l (aget (.-labels c) (- (len (.-labels c)) 1))]
           (set! (.-labels c) (subslice (.-labels c) _ (- (len (.-labels c)) 1)))
           (when (not (.-outerDead l))
             (let [pc (len (.-Ins (.-code c)))]
@@ -457,10 +464,10 @@
     (.instr c op)))
 
 
-^{:go/end 647} (go/method instr ^error [^{:tag (* compiler)} c ^uint16 op]
+^{:go/end 654} (go/method instr ^error [^{:tag (* compiler)} c ^uint16 op]
   (let [r (.-r c)
-      ^{:line 462} in (aget opInfos op)
-      ^{:line 463} ins (lit Ins :Op op)]
+      ^{:line 469} in (aget opInfos op)
+      ^{:line 470} ins (lit Ins :Op op)]
     (switch (.-kind in)
       (case [kIdx]
         (set! (.-A ins) (.u32 r)))
@@ -499,13 +506,13 @@
         (set! (.-C ins) (.Uint64 binary/LittleEndian (.bytes r 8))))
       (case [kSelectT]
         (let [n (conv int (.u32 r))
-            ^{:line 502} d (addr (lit dec :r r :m (.-m c) :canon (.-Types (.-m c))))]
+            ^{:line 509} d (addr (lit dec :r r :m (.-m c) :canon (.-Types (.-m c))))]
           (for [i 0] (< i n) (inc! i)
             (.valtype d false))))
 
       (case [kBrTable]
         (let [n (conv int (.u32 r))
-            ^{:line 508} ds (make (slice uint32) (+ n 1))]
+            ^{:line 515} ds (make (slice uint32) (+ n 1))]
           (range [i ds]
             (aset ds i (.u32 r)))
 
@@ -518,7 +525,7 @@
             (let [^int arity (zero int)]
               (range [i d ds]
                 (let [i i
-                    (values a h) (.branch c d ^{:go/end 521} (fn [^int pc] (set! (.-PC (aget (aget (.-Tables (.-code c)) ti) i)) (conv uint32 pc))))]
+                    (values a h) (.branch c d ^{:go/end 528} (fn [^int pc] (set! (.-PC (aget (aget (.-Tables (.-code c)) ti) i)) (conv uint32 pc))))]
                   (set! (.-Height (aget (aget (.-Tables (.-code c)) ti) i)) (conv uint32 h))
                   (set! arity a)))
 
@@ -527,7 +534,7 @@
               (return nil)))))
       (case [kBrOnCast]
         (let [f (.u8 r)
-            ^{:line 530} d (.u32 r)]
+            ^{:line 537} d (.u32 r)]
           (.sleb r 33)
           (let [h2 (.heap c)]
             (when (.-dead c)
@@ -535,7 +542,7 @@
 
             ;; D: the target type's nullability, E its heap type
             (let [i (.emit c (lit Ins :Op op :D (conv uint32 (bit-and (>> f 1) 1)) :E h2))
-                (values a h) (.branch c d ^{:go/end 538} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) i)) (conv uint64 pc))))]
+                (values a h) (.branch c d ^{:go/end 545} (fn [^int pc] (set! (.-C (aget (.-Ins (.-code c)) i)) (conv uint64 pc))))]
               (set! (.-A (aget (.-Ins (.-code c)) i)) (conv uint32 a))
               (set! (.-B (aget (.-Ins (.-code c)) i)) (conv uint32 h))
               (return nil))))))
@@ -621,7 +628,7 @@
           (.adj c (conv int (.-B ins)) 1)
           (return nil))
         (case [OpStructNewDefault OpStructGet OpStructGetS OpStructGetU OpStructSet OpArrayNew OpArrayNewDefault OpArrayNewData
-            ^{:line 624} OpArrayNewElem OpArrayGet OpArrayGetS OpArrayGetU OpArraySet OpArrayFill OpArrayInitData OpArrayInitElem]
+            ^{:line 631} OpArrayNewElem OpArrayGet OpArrayGetS OpArrayGetU OpArraySet OpArrayFill OpArrayInitData OpArrayInitElem]
           (set! (.-A ins) (conv uint32 (aget (.-Types m) (.-A ins)))))
         (case [OpArrayCopy]
           (set! (.-A ins) (conv uint32 (aget (.-Types m) (.-A ins))))

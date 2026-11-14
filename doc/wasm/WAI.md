@@ -272,15 +272,23 @@ first 16 bytes of a SHA-256, `w2gShapeVersion` first); `waidriver w2g --shared` 
 is given (`--verify`: every function's Go written and two of one key required equal; else a shape met again is known by its key
 alone) and registers them by key (`RegisterShapes`); at instantiation a module the per-module registry does not name takes, function
 by function, the shape registry's (`ShapeKey` of each code). A run is two passes: the first builds every program and collects its
-module (`gorun_collect`: `aot_go_exe` notes the module and stops), the modules are translated by shape into one AOT program
-(`aot_go_shared`, kept by key in the main checkout's `.tmp/wai-go/aot-shared`, the newest three kept), and the second runs every
-program on it (`WAI_GO_JOBS`, default 2). A function whose shape the program lacks runs on the interpreter and fails the AOT rule, as
-before.
+module (`gorun_collect`: `aot_go_exe` notes the module and stops); then, a slice of `WAI_AOT_SLICE` programs at a time (default 400:
+the disk's measure; the whole corpus is 8,869 shapes, 364 MB of Go), the slice's modules are translated by shape into one AOT program
+(`aot_go_shared`, kept by key in the main checkout's `.tmp/wai-go/aot-shared`, its build's cache and the previous slice's program
+removed) and the slice's programs run on it (`WAI_GO_JOBS`, default 2). A function whose shape the program lacks runs on the
+interpreter and fails the AOT rule, as before. Since WAS51 (a) `bin/wai go --aot` is the whole corpus (`--list FILE` a part, judged on
+its programs' rows: `test/wasm/go-aot.txt`, WA7's 18).
+
+**Large functions** (WAS54 (a)): a function of more than `w2gSegMax` (2,000) instructions is a dispatcher over segments, each a Go
+function `NAME_sK(m, f, fp, pc0) (int, *Exn)` entered by a switch over its labels (its branch targets and its first instruction),
+returning the next pc (a branch to another segment, the fall to the next) or -1 with the function's result; the frame and the stack
+heights are the function's, so nothing else changes.
 
 ### 9.3 Cost
 
-A Go-built module (about 2 MB of Wasm, a few thousand functions) is some tens of MB of Go, built in one package with wai; see the
-survey's "As built: WA7 (first part)" for the measures and why the whole Go corpus is not run at AOT yet.
+A Go-built module (about 2 MB of Wasm, a few thousand functions) is some tens of MB of Go; translated a module (WA7), about 150 s a
+program. By shape (WAS50 (a)) the whole Go corpus, 1,188 programs, runs at AOT in about 37 minutes (three slices' programs of 187 to
+239 MB built in 9 to 11 minutes each, the runs about 6 minutes; 2.05 GB at most); see the survey's "As built: WAS40 (c), WA8".
 
 ### 9.4 The controls
 

@@ -468,8 +468,14 @@ model's edges), 251 (pyi on goi's speed), 252 (3.15's P6-P8).
   model, a small eval, fs, a virtual clock, the page's recording fakes; syscall/js's tests 37 of 37 on wai, 6 own js programs) and WA12
   begun (the shim `wasm/web/index.html` and `arbace.js` with its import-list check, the WebGPU bridge's command buffer, the demo scene's
   90 frames against its stated values; `bin/wai js` 47 of 47; `bin/wasm build|serve|check`; doc/wasm/WEB.md; "As built: WA11, WA12
-  (begun)"); WAS40 (a)'s rotation declared, unspliced. To decide: WAS43-WAS49 (taken as recommended on the branch). Next: WA9 (Arbace's
-  own js build, at the key window), then the scene from Arbace with the REPL in the page; WA7's rest; WA8's legacy exceptions.
+  (begun)"); WAS40 (a)'s rotation declared, unspliced. Branch `wasm-wa8` (WAS43-WAS49 taken as recommended): WAS40 (c), w2g by
+  shape (a function's immediates read from its code: the 1,176 Go modules' 1.6 million functions are 8,869 shapes; one AOT program a
+  slice of 400 programs; functions over 2,000 instructions in segments): the whole Go corpus at AOT in 37 minutes, 1,127 of 1,188 pass,
+  61 n/a, equal to eval but the 3 over its budget (WAS51 (a): the rotation removed); WA8's rest, the legacy exceptions (try, catch,
+  delegate, rethrow) at read, eval and AOT, legacy/ all passing; REAP read 7,854 / 0 / 440, eval 62,088 / 0 / 971, AOT 62,091 / 0 /
+  971, print 2,785 / 0 / 0 ("As built: WAS40 (c), WA8"). To decide: WAS50-WAS54 (taken as recommended on the branch). Next: WA9
+  (Arbace's own js build, at the key window), then the scene from Arbace with the REPL in the page; a persistent cache of shape
+  packages; the proposals beyond 3.0 (threads WA13).
   The branches move `gate_key` once (WA1's crop paths' lists): they merge in a key window.
 - repr/haskell and repr/rust's round trips stay out of `--full` until their rows fit the budget; Zed parked
   ([ZED-SURVEY.md](ZED-SURVEY.md)).

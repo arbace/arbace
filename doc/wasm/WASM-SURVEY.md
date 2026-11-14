@@ -1316,3 +1316,125 @@ build` writes the page. Not run: `bin/wasm serve` (by hand only), the whole `wai
 **Not done**: Arbace's own js build and its REPL in the page (WA9: the key window), the scene from Arbace (`arbace.web.gpu`, WAS22's
 second step), the oracle tier's headless Chromium pack and the Mac's checklist (no browser here), textures and meshes fetched as assets
 (the shim's fs mounts no HTTP tree yet), the demo as Go forms (WAS46), WAS40 (c).
+
+## As built: WAS40 (c), WA8 (the legacy exceptions) (2026-11-14, branch `wasm-wa8`)
+
+Built from `mac/wasm-wa7` (`316d72073`); WAS40-WAS49 taken as recommended on that branch. doc/wasm/WAI.md §1, §3, §7, §9 and
+doc/wasm/SPEC.md §3 describe the new parts. Everything is in `arbace_crop_paths` or outside every key: no key moves.
+
+**WA8's state, checked first.** The plan's WA8 (§14) lists tail calls, exceptions, memory64, multiple memories, extended constants,
+typed function references and GC, each at read, eval and AOT over the testsuite's root scripts. The testsuite's root is Wasm 3.0's:
+those proposals' scripts are root scripts (`return_call*.wast`, `try_table.wast`, `throw*.wast`, `memory64.wast`, `memory_multi.wast`,
+`*_ext_const`-style scripts, `call_ref.wast`, `br_on_*.wast`, `gc/`-style `struct.wast`, `array.wast`, `i31.wast`, `ref_cast.wast`,
+...), and the records already held every root command passing at all three levels since WA4 and WA7 (eval 60,498 of 60,498, AOT the
+same, read 7,182 of 7,182 cases): GC's type system (rec groups, subtyping, the casts) was built with wai in WA4 and with
+arbace.wasm.valid in WA3. What WA8 had left was `legacy/`: the first exceptions proposal (`try`, `catch`, `catch_all`, `delegate`,
+`rethrow`), 84 eval commands and 14 read cases classed `:legacy-exceptions`. This branch builds it at every level.
+
+**WAS40 (c): w2g by shape** (WAS50 (a)). See doc/wasm/WAI.md §9.2. Go-built modules share their runtime and libraries but not their
+constants (data addresses, function and global indices, the resume points' own function index), so WA7's translation a module shares
+nothing and costs a build of about 37 packages a program. `W2GShape` writes a function with every immediate that is not a transfer of
+control's read from its own code (`ins := (*[N]Ins)(code.Ins)`, no bounds check), so its Go is a function of its shape alone, and
+`ShapeKey` (16 bytes of a SHA-256 over the counts, each instruction's op and height, the branches' arities, heights and targets,
+br_table's entries, the handlers' clause kinds and targets) names it. `waidriver w2g --shared` writes each shape once for all the
+modules given (`--verify` writes every function's Go and requires two of one key equal); `RegisterShapes` registers them; at
+instantiation each function of a module the per-module registry does not name takes its shape's. A function over 2,000 instructions
+is written as segments under a dispatcher (`w2gSegMax`: each segment a Go function entered at a pc, returning the next): Go's compiler
+took over 2 GB and more than ten minutes (at a 1.5 GiB GOMEMLIMIT) on a 22,724-instruction runtime function in one piece, 19 s and 0.76 GB
+in segments. `bin/wai go --aot` builds the programs and collects their modules (a first pass), translates a slice's modules by shape
+into one AOT program (`WAI_AOT_SLICE`, default 400 programs: the disk's measure), runs the slice's programs on it (two at a time), and
+removes the slice's build cache and program before the next.
+
+| | before (WA7's translation a module) | after (by shape) |
+|---|---|---|
+| shapes | — | 50 programs: 66,905 functions, 1,983 shapes (78 MB of Go; `--verify`: no two functions of one shape differ); the whole build cache, 1,176 modules: 1,625,910 functions, 8,869 shapes, 364 MB of Go |
+| `test/wasm/go-aot.txt`'s 18 programs | 2,694 s (about 150 s a program: 37 packages built each) | **390 s**: one program of 1,812 shapes, 90 MB, built in 260 s; 18 of 18 |
+| the whole Go corpus at AOT | about 57 hours (estimated; never run) | **2,206 s for 1,188 programs** (three slices: 3,607, 5,080 and 4,283 shapes, programs of 187 to 239 MB built in 564 to 652 s; the runs about 6 minutes); peak 2.05 GB |
+| the Go corpus's AOT record | 18 programs, 18 pass | **1,188 programs: 1,127 pass**, 61 :skip (eval's 59 build constraints and 2 actions); equal to eval's record program for program but the 3 over eval's budget, which pass at AOT |
+| the testsuite at AOT (essential) | 16,234 of 16,234 | 16,234 of 16,234 (functions over 2,000 instructions now in segments in the per-module mode too) |
+
+**WA8: the legacy exceptions** (WAS52 (a), WAS53 (a)).
+
+- **Read** (`arbace/repr/wasm`): the forms `(try BT [INSTR...] [HANDLER...])`, HANDLER `(catch TAG [INSTR...])` or a last
+  `(catch_all [INSTR...])`, `(try BT [INSTR...] (delegate L))` and `(rethrow L)` (doc/wasm/SPEC.md §3); the binary's 0x06, 0x07, 0x19,
+  0x18 and 0x09 decoded and encoded (an instruction sequence also ends at a catch, a catch_all or a delegate); the text's plain and
+  folded `try` (`(do ...)`, `(catch TAG ...)`, `(catch_all ...)`, `(delegate L)`, a delegate's label in the try's enclosing context),
+  `rethrow`, and the misplaced keywords as `unexpected token`; the lexer's keywords beyond lexer.mll's at wg-3.0
+  (`lex/legacy-keywords`: `try`, `do`, `catch`, `catch_all`, `delegate`, `rethrow`; the generated ops table is unchanged); the canonical
+  printer's `try ... catch ... end` and `try ... delegate L`; arbace.wasm.valid's rules (a try's body as a block's, each catch's from
+  its tag's values with its label marked a catch's, `rethrow` requiring one, `invalid rethrow label`; a delegate's label checked in
+  the try's context, `unknown label`).
+- **Eval** (wai; doc/wasm/WAI.md §3): lowered onto 3.0's handlers. A try's body is a handler's range closed at its first catch,
+  catch_all or delegate; a catch is a clause (`catchLegacy`, `catchAllLegacy`) whose code starts after a jump to the try's end, the
+  caught exception's reference in the slot at the try's height, below the tag's values, so `rethrow L` is `local.get` of label L's
+  slot and `throw_ref`; a delegate is a clause (`catchDelegate`) counting the active handlers of the blocks between the try and its
+  label, which `Machine.catch` skips. wai's validator takes the same rules (frames 0x06, 0x07, 0x19). w2g needs nothing more (a
+  delegate clause is no target).
+- **AOT**: the testsuite's AOT programs run the legacy scripts as the interpreter does (the same handlers, `X_catch`). Two fixes the
+  AOT level found that eval had hidden: a catch block's results sit above its slot, and the interpreter's dynamic stack top carried
+  them to the try's end, where w2g's static heights did not (three commands: the end of a catch is now a branch to the try's end,
+  which moves them, as `br` does); and a function whose handlers no instruction can reach (no call or throw) has no `Lthrow`, so its
+  catch targets are no labels (Go refuses an unused label).
+
+**Counts**:
+
+| | before (WA7's record) | after (this branch) |
+|---|---|---|
+| legacy/, read (`bin/repr-wasm wast`) | 14 cases classed `:legacy-exceptions`, 5 messages | **every case passes**: the testsuite 7,820 → 7,834 of 8,274 (the rest proposals beyond 3.0 and branch hints, classed), messages 4,998 → 5,012, print 2,760 → 2,765 |
+| legacy/, eval (`bin/wai check`) | 5 pass, 84 classed `:legacy-exceptions` | **96 of 96 rows pass** (the commands 76 of 76); the testsuite 60,889 → 60,964 of 61,935; the validator's rows 5,578 → 5,592 agreeing; every other row unchanged |
+| legacy/, AOT (`bin/wai check --aot`) | 76 classed | **78 of 78 rows pass**; the testsuite at AOT 60,964 of 61,935, equal to eval row for row (two messages of failing custom-descriptors rows name other canonical type ids: the batch's process) |
+| the Go corpus at AOT | 18 programs | **1,188 programs, 1,127 pass**, 61 n/a (see above) |
+| REAP, WebAssembly | read 7,840 / 0 / 454, eval 62,013 / 0 / 1,046, AOT 60,907 / 0 / 1,046, print 2,780 / 0 / 0 | **read 7,854 / 0 / 440, eval 62,088 / 0 / 971, AOT 62,091 / 0 / 971, print 2,785 / 0 / 0** |
+| crops-score, WebAssembly | completeness 0.9779, maturity 0.9167, independence 1.0000 | **0.9790**, 0.9167, 1.0000 |
+
+The class `:legacy-exceptions` is gone from `test/wasm/divergences-{wast,eval,aot}.edn` (no row left in it). The gate's fragment:
+`wai-go-aot` is the whole corpus (`:mem-gib 2.2`), `wai-go-aot-rest` and `test/wasm/subsets.edn` removed (WAS51 (a)); still not
+spliced.
+
+**Measured** (one run at a time under the 2.5 GiB watcher; a morning gate rerun until 07:30 held the disk above 85%, so the first
+runs were small dev steps only): `bin/wai go --aot` over the whole corpus 2,206 s, 2.05 GB at most (a slice's build); over go-aot.txt
+390 s, 0.71 GB; `waidriver w2g --shared` over the 1,176 modules of the build cache 118 s, 1.49 GB (`--verify` over 50: 92 s, 0.38 GB);
+`bin/repr-wasm wast` 347 s, 0.62 GB; `bin/wai check` 259-263 s, 0.70 GB; `bin/wai check --aot` 281-289 s, 0.68 GB; the conversions by
+repr/go's native reader: wai 163 s at 0.95 GB (under a 750 MiB GOMEMLIMIT) and 1.18 GB without, the driver 0.85 GB.
+
+**Proofs**: the fragment's essential commands (`bin/repr-wasm ops check && bin/repr-wasm wast --only test/wasm/essential-wast.txt`:
+2,431 of 2,431, 1,427 messages, 1,004 prints; `bin/wai ops check && bin/wai essential`: 18,601 commands, 2,458 messages, 1,720
+validator rows; `bin/wai go --essential` 49 of 49; `bin/wai w2g check && bin/wai aot-essential`: 16,234 commands; `bin/wai js
+--essential` 43 of 43 with the frames); the whole `bin/repr-wasm wast`, `bin/wai check`, `bin/wai check --aot` and `bin/wai go --aot`
+recorded, their controls failing as they must; `bin/wai divergences` and `--aot`; `bin/reap --record` then `bin/reap`: 0 problems (53
+of 56 cells); `bin/crops-score --record` then `--judge --strict`: 0 problems; the fragment spliced into a copy of `test/gate/steps.edn`
+and `gate.crops check` on it: 0 problems; `make check-makefile`; `test/gate/gate-key-crops-test.bash` passes and `bin/arbace-go
+--gate-key` is `c01784b6...` before and after. The Go corpus's AOT record comes from the run before the last two fixes (the catch's
+move and the unused labels): both change only functions with legacy handlers or with handlers and no raise, which no Go-built module
+has (Go's wasm has no exceptions); on the final code `bin/wai go --aot --list test/wasm/go-aot.txt` passes 18 of 18 (335 s,
+0.57 GB), judged on its programs' rows of the whole record. Not run: `bin/wai go` (eval's Go corpus: wai's interpreter changed only in its handler lookup and
+the legacy instructions; its essential list passes), `bin/repr-wasm roundtrip` over the Go-built modules (the decoder's change is the
+legacy opcodes and an instruction sequence's end at 0x07, 0x18, 0x19, none of which a Go module holds: about 18 minutes, 1.6 GB, a
+night command), `bin/wai js` whole (its essential list passes).
+
+**Not done**: the proposals beyond Wasm 3.0 (WAS4 (a); threads WA13), a persistent cache of shape packages across slices and runs (a
+slice's build is most of the corpus's time: the same runtime shapes built three times), Arbace's own js build (WA9, the key window),
+the scene from Arbace, the demo as Go forms (WAS46).
+
+**Proposals** (numbered after WAS49; each taken as recommended on the branch):
+
+- **WAS50 The translation shared across programs** (WAS40 (c)). (a) as built: by shape, every immediate that is not a transfer of
+  control's read from the function's code, keyed by `ShapeKey`, one AOT program for a slice of programs; (b) by content with the
+  constants kept (only identical functions shared: a Go program's runtime functions differ from another's in their data addresses and
+  indices, so almost nothing would be); (c) a base of the runtime's functions built once and a delta a program through Go's build
+  cache (two kinds of package, a base to choose and keep). *Recommended: (a)*: 1,625,910 functions are 8,869 shapes; the cost of
+  reading the immediates from the code is the interpreter's own (the bodies are its cases), and the judge is unchanged.
+- **WAS51 The Go corpus at AOT in the gate.** (a) as built: `wai-go-aot` runs the whole corpus (`bin/wai go --aot`: about 37 minutes,
+  2.05 GB at most), its record the whole corpus, `go-aot.txt` a list for `--list`; WAS40 (a)'s rotation (`wai-go-aot-rest`,
+  `test/wasm/subsets.edn`) removed, WAS48's question with it; (b) keep the rotation over the shared programs; (c) `go-aot.txt` only.
+  *Recommended: (a)*: the whole corpus now costs less than a seventh of it did.
+- **WAS52 The legacy exceptions in wai.** (a) as built: lowered onto Wasm 3.0's handlers (a try's body a handler's range, its catches
+  clauses with the exception's reference in a slot of the catch block, `rethrow` a `local.get` of that slot and `throw_ref`, `delegate`
+  a clause that skips the handlers between it and its label), so the interpreter, `Machine.catch` and w2g serve both; (b) an
+  interpreter of their own for the legacy instructions (as the reference interpreter's `legacy` path). *Recommended: (a)*.
+- **WAS53 The legacy exceptions' forms and keywords.** (a) as built: `try`, `delegate` and `rethrow` forms outside the generated
+  instruction table (as `block` and `try_table` are), the lexer's keywords beyond wg-3.0's in `lex/legacy-keywords`; (b) regenerate
+  ops.ae from the exception-handling proposal's legacy interpreter (a second pin for four scripts). *Recommended: (a)*.
+- **WAS54 Large functions in w2g.** (a) as built: a function over 2,000 instructions written as segments under a dispatcher, in both
+  modes; (b) a larger memory for Go's compiler (over 2.5 GiB for one runtime function, past the agents' limit); (c) large functions left
+  to the interpreter (the AOT judge refuses them). *Recommended: (a)*.

@@ -392,7 +392,7 @@ gorun_check() {
     gorun_collect=1 xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$gorun_work/ids" > "$gorun_work/collect.tsv"
     # WAI_AOT_SLICE=N: N programs a shared program (the disk's and the build's measure: the whole corpus is about 9,000 shapes,
     # 360 MB of Go), each slice's program built, its programs run, its build's cache and program removed before the next
-    local slice=${WAI_AOT_SLICE:-0} sl
+    local slice=${WAI_AOT_SLICE:-400} sl
     if [ "$slice" -gt 0 ]; then
       split -l "$slice" -d -a 3 "$gorun_work/ids" "$gorun_work/slice."
       : > "$gorun_work/rows.tsv"
@@ -406,13 +406,13 @@ gorun_check() {
       aot_go_shared "$gorun_work" || return 1
     fi
   fi
-  if [ -z "${gorun_aot:-}" ] || [ "${WAI_AOT_SHARED:-1}" = 0 ] || [ "${WAI_AOT_SLICE:-0}" = 0 ]; then
+  if [ -z "${gorun_aot:-}" ] || [ "${WAI_AOT_SHARED:-1}" = 0 ] || [ "${WAI_AOT_SLICE:-400}" = 0 ]; then
     xargs -P "$jobs" -I{} bash -c '. "$root/bin/lib/wai/go-run.bash"; . "$root/bin/lib/wai/aot.bash"; gorun_one "$1"' _ {} < "$gorun_work/ids" > "$gorun_work/rows.tsv"
   fi
   LC_ALL=C sort -o "$gorun_work/rows.tsv" "$gorun_work/rows.tsv"
   gorun_tsv2edn "$gorun_work/rows.tsv" > "$gorun_work/rows.edn"
   gorun_controls_run || fails=$((fails + 1))
-  if { [ -n "$list" ] && [ -z "${gorun_aot:-}" ]; } || [ -n "${gorun_vs_eval:-}" ]; then
+  if [ -n "$list" ] || [ -n "${gorun_vs_eval:-}" ]; then
     # a partial run judged on its programs' rows alone; --aot --vs-eval (WAS40 (a)'s rotation): against eval's record, the AOT
     # level equal to eval's verdicts program for program
     local src=$res

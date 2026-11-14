@@ -1207,9 +1207,9 @@ wai-aot-essential: ## w2g's essential subset, test/wasm/essential-aot.txt, with 
 	bin/wai aot-essential
 wai-aot-record: ## the AOT level recorded into test/wasm/aot-results.edn (bin/wai check --aot --record)
 	bin/wai check --aot --record
-wai-go-aot: ## the Go programs of test/wasm/go-aot.txt as AOT programs, against test/wasm/go-aot-results.edn (bin/wai go --aot)
+wai-go-aot: ## the Go run corpus at AOT (WAS50, WAS51: its functions translated by shape, one AOT program a slice of 400), against test/wasm/go-aot-results.edn (bin/wai go --aot)
 	bin/wai go --aot
-wai-go-aot-record: ## the Go programs at AOT recorded (bin/wai go --aot --record)
+wai-go-aot-record: ## the Go run corpus at AOT recorded (bin/wai go --aot --record)
 	bin/wai go --aot --record
 wai-w2g-check: ## w2g's bodies and wai's exports regenerated from exec.go and compared with the committed ones (bin/wai w2g check)
 	bin/wai w2g check
