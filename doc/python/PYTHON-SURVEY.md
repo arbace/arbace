@@ -6531,3 +6531,49 @@ per-method timeout (the runner's idle timeout, already in the compiled runner: `
   0 failing**, the 3 controls failing as they must; the drivers' compile 14 s each (summed 35 min, peak 3.0 GB), the
   runs 2,585 s summed against night 12's 88,211 s on goi for the 109 it ran (2.8%; test_subprocess 3,602 s capped ->
   251 s, test_signal 3,602 -> 449, test_os 3,602 -> 83, test_pickle 3,601 -> 67).
+
+## As built: 289, test_pdb's last rows: a source nested too deep, `python -i`, the readline module (2026-11-14, the Mac VM, queue 289)
+
+test_pdb's 11 failing rows no class covered (281's verification): test_compile_error_message, TestREPLSession's
+test_return_from_inline_mode_to_REPL and PdbTestReadline's nine.
+
+- **A source nested past the reader's depth** (`arbace/python/run.ae`): `compile('-' * 100_000 + '1')` overflowed the host
+  reader (the evaluator's StackOverflowError, from about 5,000 levels on the VM) outside compile-uncached's catch, and the
+  hook's panic came back as "SystemError: pyi: Go panic: ...". compile-source now answers CPython's parser error,
+  "MemoryError: Parser stack overflowed - Python source too complex to parse" (pegen's `_Pypegen_stack_overflow` past
+  MAXSTACK; CPython gives it from about 6,000 levels), and an overflow in the compiler "RecursionError: maximum recursion
+  depth exceeded during compilation"; compileSource and parseAST raise them (`compilerLimitError`, import.go). The level
+  where each starts differs from CPython's (its C stack and MAXSTACK, the evaluator's depth here); the kind of error is
+  CPython's.
+- **`python -i`** (bin/pyi python, `go/arbace/py/interp.go`, `repl.go`): `-i` sets `PYI_INSPECT` (`1` after -c, -m, a file
+  or `-`; `repl`, or `repl-quiet` under -q, with no code: the run is the REPL on stdin, an empty stdin module before it,
+  `sys.argv` `['']`, the banner on stderr but under -q), read once at the runtime's start as config's inspect:
+  `sys.flags.inspect` and `interactive` 1 (PYTHONINSPECT at start, but under -E or -I, sets inspect alone). RunModule's
+  ends go through `endMain`: under pymain_repl's test (-i, or PYTHONINSPECT at start or left in the environment by the
+  program with stdin a terminal) the REPL runs in `__main__`'s namespace after the module, the module's exception printed
+  first (SystemExit's too, as handle_system_exit leaves it under -i), `sys.flags.inspect` 0 in it, and its status is the
+  run's. The compiled launcher (AotMain) ends through RunModule too. The REPL's loop is `Interp.repl`; a statement after
+  the first runs in `__main__`'s dict without making the module again.
+- **The readline module** (`go/arbace/py/builtins_readline.go`, over a line editor of pyi's own in GNU readline's place):
+  Modules/readline.c's functions over GNU's history list (history_get from history_base, 0-based remove and replace,
+  stifling by `set history-size`, history files a line an entry, history_truncate_file's last lines, append_history's
+  ENOENT), its hooks (startup before the prompt, pre-input after it, the completer, the matches' display), the init file
+  (INPUTRC, else ~/.inputrc, else /etc/inputrc, at import, as setup_readline's rl_initialize reads it), parse_and_bind's
+  `set`, `KEY: FUNCTION` and `KEY: "MACRO"` lines. input() with sys.stdin and sys.stdout the process's terminals reads by
+  the editor (builtin_input's tty path, call_readline): the terminal as rl_prep_terminal sets it (no ICANON, ECHO,
+  ICRNL, INLCR, ISTRIP, INPCK; VMIN 1; OPOST kept), the prompt on stdout after the program's output, the emacs keymap's
+  common keys (C-a/b/d/e/f/h/k/u/w, DEL, arrows, Home/End, history), TAB self-insert as setup_readline binds it until
+  bound to complete. Completion is rl_complete's: the word back to a delimiter of set_completer_delims, the completer's
+  matches for state 0, 1, ... until a non-string (an exception ends them, as on_completion's PyErr_Clear), one match
+  replaces the word, several their common prefix, a second TAB that changed nothing lists them (in columns, or by the
+  display hook with the substitution, the sorted unique matches and the longest's length); no completer: file names;
+  begidx and endidx in characters, as flex_complete gives them. The line goes to the history unless set_auto_history(False)
+  or equal to the last. `backend` "readline", `_READLINE_VERSION` 0x803 (the library's interface it follows). On tamago
+  there is no module (builtins_os_other.go's stubs). `:c-modules-deferred` (both files) no longer names readline.
+- **Measured on the VM** (arm64, 4 cores, `bin/pyi lib-test-all --fresh` at 1 job, base 5c6371975 in a worktree of its
+  own; run): test_pdb 87 pass, 55 classed, **11 failing -> 98 pass, 54 classed (doctests 3, skipped-by-test 51), 0
+  failing**; test_readline 16 classed (did not import) -> 15 pass, 1 skipped by the test; test_cmd 4 pass, 4 classed -> 6
+  pass, 1 classed (cpython-only); test_bdb 36 / 1 and test_sys_settrace 366 / 82, 0 failing, unchanged. Probes (each
+  against python3 3.14.10's run, a mutated reference as the control; base FAIL, head PASS): the nested sources (compile,
+  exec, eval, ast.parse, pdb's `_compile_error_message`), `python -i` (after -c, SystemExit and an error under -i, the
+  no-code REPL's flags and argv, the banner, test_pdb's REPL session), PdbTestReadline and test_readline by unittest.
