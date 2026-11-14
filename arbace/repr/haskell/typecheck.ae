@@ -1639,7 +1639,7 @@
                 [tr (wrap-lets binds cr)])
       (do (error! "statement not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
-(declare infer-listcomp pat-binders tc-local-binds)
+(declare infer-listcomp pat-binders tc-local-binds var-occ)
 
 (defn- stmts-binders
   "The variables a comprehension's statements bind, in order (collectLStmtsBinders): generators' patterns, lets'
@@ -1721,6 +1721,40 @@
            env2 (reduce (fn [e [n c t]] (note-type! c t) (assoc e n {:mono t :core c})) env new)]
        (k env2 (list 'gen pat gen-e))))))
 
+(defn- par-stmt
+  "HF10-P46 (a): a ParallelListComp qualifier (| quals1 | quals2 ...) as GHC.HsToCore.ListComp's deListComp makes it: each
+  block a comprehension of its binders' tuple, typed in the scope before the qualifier (a block does not see another's
+  binders), the blocks zipped (mkZipBind's zip, here GHC.Internal.List's zip nested to the right: (t1, (t2, t3))), the
+  result a generator binding every block's binders for the qualifiers after it; k is called with [env qualifier]"
+  [env v k]
+  (let [blocks (mapv (fn [b] (let [b (lval b)] (arg b 2))) (arg v 2))
+        go (fn go [i acc]
+             (if (= i (count blocks))
+               (let [parts (map (fn [[ns ts tt inner]]
+                                  (let [new (mapv (fn [n t] [n (fresh-lv (occ n)) t]) ns ts)]
+                                    {:new new :tt tt :inner inner
+                                     :pat (if (empty? ns) (list 'pwild) (big-tup-pat (mapv second new)))}))
+                                acc)
+                     zip* (fn zip* [ps]
+                            (if (= 1 (count ps))
+                              (first ps)
+                              (let [a (first ps) b (zip* (rest ps))]
+                                {:tt [:tc (tuple-tc 2) [(:tt a) (:tt b)]]
+                                 :inner (list 'app (list 'v (ext-name "var" "GHC.Internal.List" "zip")) [(:inner a) (:inner b)])
+                                 :pat (list 'pcon (ext-name "data" "GHC.Internal.Tuple" (occ (tuple-con 2))) [(:pat a) (:pat b)])})))
+                     z (zip* parts)
+                     env2 (reduce (fn [e [n c t]] (note-type! c t) (assoc e n {:mono t :core c})) env (mapcat :new parts))]
+                 (k env2 (list 'gen (:pat z) (:inner z))))
+               (infer-listcomp
+                env (nth blocks i) nil []
+                (fn [env1 iq]
+                  (let [ns (filterv #(get env1 %) (stmts-binders (nth blocks i)))
+                        occs (mapv #(var-occ env1 %) ns)
+                        ts (mapv first occs)]
+                    (go (inc i) (conj acc [ns ts (if (empty? ns) (con-ty (tuple-tc 0)) (big-tup-ty ts))
+                                           (list 'listcomp iq (if (empty? ns) (list 'v (tuple-con 0)) (big-tup-core (mapv second occs))))])))))))]
+    (go 0 [])))
+
 (defn- infer-listcomp
   "A list comprehension's qualifiers then its result: [type core], the core (listcomp [QUAL...] RESULT); et, the
   element type expected (checking mode). A generator's pattern gives its equalities to the qualifiers after it and
@@ -1731,6 +1765,7 @@
     (case (if (empty? ss) ::end (con v))
       ::end (k env quals)
       TransStmt (trans-stmt env v (fn [env2 q] (infer-listcomp env2 (rest ss) et (conj quals q) k)))
+      ParStmt (par-stmt env v (fn [env2 q] (infer-listcomp env2 (rest ss) et (conj quals q) k)))
       LastStmt (if et
                  [(list-ty et) (list 'listcomp quals (check-expr env (arg v 2) et))]
                  (let [[t c] (infer env (arg v 2))] [(list-ty t) (list 'listcomp quals c)]))
