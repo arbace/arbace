@@ -132,7 +132,7 @@ Six crops are above 90 on all three. What the others still need:
   P49 (taken on the way): TransformListComp, ParallelListComp, monad comprehensions' transforms and parallel blocks, CallStack
   implicit parameters of any name, constraint synonyms in contexts, static pointers (GHC's table keys), withDict's T16646, the own
   classes' kinds, GADT binders' kind annotations and standalone kind signatures; hs-p40's proofs run: the libraries 0 worse (counts
-  unchanged), the front end 437 of 483 testsuite-core programs (391 of 465 before; 447 with P46, P49), 30 programs more pass on the
+  unchanged), the front end 437 of 483 testsuite-core programs (391 of 465 before; 447 with P46, P49), 29 programs more pass on the
   own path. P47 (Code's signature, (b)), P48 (a variable superclass), P50 (the next gaps) proposed.
   Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
