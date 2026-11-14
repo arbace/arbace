@@ -195,3 +195,22 @@ expect "pins: a header key that is not the current run's is noted" 0 'note: the 
 out=$(cd "$root" && OI_PINS_RUNS=$W/no-runs OI_PINS_FAKE_KEY=fake1 OI_PINS_ATTESTED=$W/pins.oldkey bin/oi pins 2>&1); st=$?
 expect "pins: with no run present nothing is compared" 0 "^oi: pins: $(grep -vc '^#' "$root/test/ocaml/pins-attested.tsv") pins, each attested" "$out" $st
 if echo "$out" | grep -q 'note:'; then echo "FAIL pins: a note with no run present"; bad=1; fi
+
+# the user, 2026-11-14, round 33 (night 13's lazy/lazy7): the boundary the other way. A program listed in oi-slow.edn and recorded passing
+# that the CPU limit stops ("slow") is no change; the controls: the same timeout of a program not listed changes, and a listed program
+# recorded passing that now fails otherwise changes
+s=$W/slow-boundary; mk "$s"
+printf '[{:id :speed :match [#"^slow timeout "]}]\n' > "$s/classes.edn"
+printf '[\n ["a" "pass" ""]\n ["b" "pass" ""]\n ["c" "pass" ""]\n]\n' > "$s/oi-results.edn"
+printf 'a\t0\th\t1\t1.0\t\nb\t124\tx\t0\t120\ttimeout 120s\nc\t0\th\t1\t1.0\t\n' > "$s/check.tsv"
+printf '["b"]\n' > "$s/oi-slow.edn"
+out=$(judge_oi judge "$s/check.tsv" "$s/corpus.tsv" "$s/refs.edn" "$s/oi-results.edn" "$s/classes.edn"); st=$?
+expect "oi: a listed slow program recorded passing that the limit stops is no change" 0 'oi: 2 pass, 0 failing' "$out" $st
+if echo "$out" | grep -q '^CHANGED b'; then echo "FAIL oi: the listed slow program at the boundary was reported CHANGED"; bad=1; fi
+printf '[]\n' > "$s/oi-slow.edn"
+out=$(judge_oi judge "$s/check.tsv" "$s/corpus.tsv" "$s/refs.edn" "$s/oi-results.edn" "$s/classes.edn"); st=$?
+expect "oi: control: the same timeout of a program not listed is failing" 1 'FAILING b: fail timeout 120s' "$out" $st
+printf '["b"]\n' > "$s/oi-slow.edn"
+printf 'a\t0\th\t1\t1.0\t\nb\t2\tx\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$s/check.tsv"
+out=$(judge_oi judge "$s/check.tsv" "$s/corpus.tsv" "$s/refs.edn" "$s/oi-results.edn" "$s/classes.edn"); st=$?
+expect "oi: control: a listed program recorded passing that now fails otherwise changes" 1 '^CHANGED b' "$out" $st
