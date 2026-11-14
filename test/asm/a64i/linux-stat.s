@@ -2,7 +2,7 @@
 # in a page of 0xaa bytes: the 16 bytes after the buffer (the page's middle) and before it (the page's end, the next page unmapped)
 # are still 0xaa after the call; the executable's own fstat is a regular file with one link, its size lseek's end, the padding
 # (bytes 40-47, 60-63, 120-127) zero; newfstatat by path and by AT_EMPTY_PATH give the same st_dev and st_ino; ENOENT, EBADF and
-# EFAULT leave the buffer as it was
+# EFAULT leave the buffer as it was; ftruncate of the read-only descriptor EINVAL, of a closed one EBADF, fdatasync of it 0 (gofmt -w)
 # with: lib/out.s
 # exit: 0
 # stdout: "0000000000000000\n"
@@ -20,6 +20,9 @@
 # stdout: "fffffffffffffff7\n"
 # stdout: "fffffffffffffff2\n"
 # stdout: "0000000000000001\n"
+# stdout: "ffffffffffffffea\n"
+# stdout: "fffffffffffffff7\n"
+# stdout: "0000000000000000\n"
 # stdout: "done.\n"
 	.text
 	.globl	_start
@@ -152,6 +155,21 @@ _start:
 	b.lo	2b
 	cmp	x0, x9
 	cset	x0, eq
+	bl	put_hex
+	// ftruncate(fd, 0), ftruncate(99, 0), fdatasync(fd)
+	mov	x0, x19
+	mov	x1, #0
+	mov	x8, #46
+	svc	#0
+	bl	put_hex
+	mov	x0, #99
+	mov	x1, #0
+	mov	x8, #46
+	svc	#0
+	bl	put_hex
+	mov	x0, x19
+	mov	x8, #83
+	svc	#0
 	bl	put_hex
 	adr	x0, msg
 	mov	x1, #6
