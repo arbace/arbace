@@ -2270,3 +2270,102 @@ Numbering from ARS81. Each with options, the recommended named; none taken.
   as now; (b) a quarter of synth-frintts and synth-crc-flagm (119 and 110 cases) beside them. *Recommended: (a)*: none of AR18's
   decoders sits first in its class, and the hand-written programs already run every crc32 form and the 16-byte rule in the essential
   gate.
+
+## As built: AR19 (2026-11-14; branch `288-asm-arm64-ar19`, from `285-asm-arm64-ar18` `d0427a08b`; queue task 288, the Mac VM)
+
+On the light lane of the Mac VM (Alpine edge aarch64 on the user's M2 Max, pinned to 4 of its 8 cores; /proc/cpuinfo adds dcpop, dit,
+sb, dcpodp, cpuid, paca, pacg, i8mm, bf16, bti, evtstrm to AR18's), stage 0 and TamaGo's go. The user's answers (2026-11-13): ARS81
+(a), ARS82 (a), ARS83 (a). The semantics read from the Arm ARM (DDI 0487: MRS, MSR (register) and MSR (immediate) with PSTATE.DIT and
+PSTATE.SSBS, CTR_EL0, DCZID_EL0, CNTVCT_EL0, CNTVCTSS_EL0, CNTFRQ_EL0, DC ZVA and the cache maintenance, SB, LDLAR and STLLR, the
+CONSTRAINED UNPREDICTABLE register overlaps of LDR, STR, LDP, STP, LDXP) and Linux's arm64 user ABI (clone, rt_sigaction's struct,
+stack_t, epoll_event's 16 bytes); no code copied. The CPU is the judge; every value below was read on it.
+
+- **ARS81 (a): the EL0 system space, and a real Go program to its end.**
+  - MRS of CTR_EL0 (0x9444c004), DCZID_EL0 (4: 64-byte blocks), TPIDRRO_EL0 (0), CNTFRQ_EL0 (24 MHz), the M2's values;
+    CNTVCT_EL0 and CNTVCTSS_EL0 a64i's counter (`Counter`: the time since the process's start plus 1000 s, crt's CLOCK_MONOTONIC
+    origin, at 24 MHz, never back); PSTATE.DIT (bit 24) and PSTATE.SSBS (bit 12, set at the start as this M2's Linux does) by MRS,
+    MSR (register) and MSR (immediate, CRm<0> the bit, every CRm run as on the M2). Every other system register is UNDEFINED at
+    decode (it was decoded and refused at execution); NZCV, FPCR, FPSR and TPIDR_EL0 as before.
+  - **FPSR keeps bits 27-0 of a write** (QC and the cumulative flags; bits 31-28 are AArch32's, RES0): a64i kept 31-28 since AR5
+    (found by a probe of every register's write of all ones; fixed).
+  - SYS's dc zva (the 64-byte block holding Xt zeroed, each byte writable or SIGSEGV at Xt), dc cvac, cvau, cvap, cvadp, civac and ic
+    ivau (no effect on a single memory with no caches, a64i's decoded instructions checked against their bytes at each fetch; SIGSEGV
+    at Xt when its page is unmapped or PROT_NONE, read-only and execute-only pages passing, as probed on the M2); `OpSYS` sits past
+    the SIMD operations (127) so that no `:val` moves. FEAT_SB's sb (CRm 0 only, the M2's SIGILL for the others); FEAT_LOR's ldlar and
+    stllr as ldar and stlr (LORegions order nothing a single thread sees). The hints (yield, wfe, wfi, sev, sevl) stay NOPs: one
+    thread runs at a time, so no event or interrupt is waited for.
+  - AT_HWCAP adds DCPOP, DIT and SB (0x2fb3f7fb), AT_HWCAP2 DCPODP (0x181). Not CPUID: the 51 ID registers Linux emulates are not
+    a64i's (Go's internal/cpu reads MIDR_EL1 only when HWCAP_CPUID is set, its GOARM64 v8.0 runtime no ID register), nor SSBS, which
+    this M2's Linux does not advertise either.
+  - The decode sweep of the whole system space (101,376 words: the hints, barriers and MSR (immediate) with Rt 31, SYS, SYSL, MRS
+    and MSR with every op0, op1, CRn, CRm, op2), each run natively in a child against a64i's decoding: 56 differ, the 51 ID registers
+    and 5 PAuth hints (autib1716, autiaz, autiasp, autibz, autibsp: FEAT_FPAC's SIGILL); 65,512 differed at AR18.
+  - **The process's part Go's runtime asks of Linux** (thread.go): threads (clone with CLONE_VM, CLONE_THREAD and CLONE_SIGHAND: a
+    copy of the calling CPU on a goroutine of its own, run by crt's scheduler, ci's since CS11 (a): one thread at a time, the baton
+    passing where a thread waits (futex, nanosleep, sched_yield, epoll_pwait, its exit) and every 4,096 instructions, in a fixed
+    round-robin order; the parent's and child's tid words, CLONE_CHILD_CLEARTID's word cleared and woken at the end; a thread's exit
+    ends it alone, exit_group or a fatal signal in any thread ends the process, raised in the main thread); rt_sigaction (Linux's
+    arm64 struct sigaction kept per signal), rt_sigprocmask (per thread), sigaltstack (per thread); kill, tkill and tgkill drop a
+    signal that is blocked, ignored (SIG_IGN or by default) or has a handler, and end the process otherwise; epoll_create1,
+    epoll_ctl, epoll_pwait and eventfd2 for Go's netpoll (its descriptors a64i's own, from 900; epoll_ctl of another descriptor
+    EPERM, Linux's answer for a regular file). **No signal is delivered to a handler**: Go's runtime sends itself SIGURG, its
+    asynchronous preemption's request, which it does not need answered; a fault in a Go program ends the process with its signal
+    rather than becoming Go's panic (ARS84).
+  - `A64I_STRACE` prints each system call (thread, name, arguments, result).
+  - **Go programs** (`bin/a64i go-check`, `test/asm/a64i-go/`): hello, goroutines (16 goroutines with a WaitGroup and a Mutex,
+    channels, select, Gosched, GC, a recovered nil-map panic), timers (Sleep, a Timer, a Ticker, time.After, a context's deadline)
+    and maps (10,000 keys grown and deleted, struct keys, sha256, json, strconv), built for linux/arm64 by TamaGo's go1.27.1 (no cgo),
+    each run on a64i to its end with this M2's output (`want.txt`; natively again on arm64); a control (`go-1`) must fail.
+  - The lockstep: the step mode takes cntvct_el0's, cntvctss_el0's and ssbs's values from the native (the counter is the world's;
+    this M2's Linux, its Spectre-v4 mitigation off, sets PSTATE.SSBS at every context switch, and a stepped native switches at every
+    step, where a run without one keeps the value written), and compares a fatal signal's pc as the sys mode does (285's low).
+  - Hand-written: `sys-el0.s` (every register above, the write masks, dc zva in a 0xff buffer, the cache maintenance, sb, ldlar,
+    stllr, the hints), `fault-dczva.s` (dc cvau and civac on a read-only page pass, dc zva on it SIGSEGV), in the essential subset.
+- **ARS82 (a): the CONSTRAINED UNPREDICTABLE register overlaps** (`overlaps`, decode.ae): 226 words probed on the M2 (every size and
+  opc of LDR and STR pre- and post-index, LDP, LDPSW, LDNP, STP of each index, the SIMD&FP pairs, LDXP and LDAXP, STXR, STLXR, STXP,
+  STLXP, and controls without the overlap): UNDEFINED, as the M2 resolves them, a general register's writeback into Rt or Rt2 (Rn not
+  SP; stores too) and a load pair, general or SIMD&FP, plain, no-allocate or exclusive, into one register twice (125 words, all
+  claimed before); the store-exclusives' status register equal to Rt, Rt2 or Rn runs on the M2, the store made and the status written
+  after, as a64i does (1,000 runs each; an exclusive across a first write to a page fails there, the page fault clearing the monitor:
+  not modelled, a64i's exclusives never fail spuriously). `overlap-wb.s`, `overlap-pair.s` (the words by `.inst`: no assembler takes
+  them; their eval run stops at the word too, as a word with no form).
+- **ARS83 (a)**: AR18's synthetic programs stay in the rotation only; the essential subset takes the four new hand-written programs.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 115 / 115 each | **119 / 119 each** (sys-el0, fault-dczva, overlap-wb, overlap-pair) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,950 of 2,950 | **2,958 of 2,958** (dc.zva .. ic.ivau, msr.imm, sb's barrier) |
+| controls (`test/asm/controls-a64i.txt`) | 131 | **137** (verdict-32, verdict-33, aot-4, cpu-2, inject-56, step-19); table check's 1; go-check's go-1 |
+| the system space's sweep against the M2 | 65,512 of 101,376 differ | **56** (the ID registers, the FPAC hints) |
+| the overlaps' sweep against the M2 | 125 of 226 differ | **0** |
+| Go programs on a64i to their end (`bin/a64i go-check`) | 0 of 4 (SIGILL at hello's first `mrs dczid_el0`) | **4 of 4** |
+| `--essential` | 88 programs | **92** |
+| goi's checker over a64i (`bin/a64i table-check`) | 0 errors | **0** (:init-order gains strace, sysOpNames) |
+| `[:asm-arm64 :eval]` | 460 / 0 / 0 | **476 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,077 / 0 / 13 | **3,081 / 0 / 13** |
+
+**crops-score** (arm64 assembly) unchanged in its percentages, `--judge --strict` 0 problems. `bin/reap --record`: 49 of 52 cells
+checked, 0 problems. The keys do not move (`bin/arbace-go --gate-key` `ee1501081ae8...`). The proofs (queue 288's report): the
+whole system space and the overlaps' sweeps, the MSR probe, the four Go programs, each failing at `d0427a08b` (or `459f065b9`).
+Left to the main host: `bin/gate --plan`; `bin/a64i check` there (no CPU leg: the VM's rows stand).
+
+### Proposed (AR19)
+
+Numbering from ARS84. Each with options, the recommended named; none taken.
+
+- **ARS84 signals delivered to their handlers.** (a) a64i delivers a signal to its handler as Linux does on arm64: the rt_sigframe
+  (siginfo, ucontext with the general registers, the FP/SIMD record, the mask) on the thread's stack or its alternate stack, x30 a
+  sigreturn trampoline a64i maps (no vdso), rt_sigreturn restoring it; synchronous faults (SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE)
+  and kill/tgkill to a thread, at an instruction boundary; checked against the M2 by C programs with handlers (the lockstep's sys
+  mode) and by Go programs that recover a nil dereference and are preempted asynchronously; (b) as now: dispositions kept, nothing
+  delivered (a Go nil dereference ends the process with SIGSEGV, 139, where the M2 prints its recovered panic and exits 0).
+  *Recommended: (a)*: every Go program that recovers a runtime error, and Go's asynchronous preemption, need it; it is the next
+  thing a real program meets after AR19.
+- **ARS85 the ID registers.** (a) MRS of the 51 registers Linux emulates for EL0, with a64i's own values (the M2's, each feature
+  field a64i does not implement made 0, as Linux sanitizes them), claiming HWCAP_CPUID; (b) the M2's values as they are (they
+  advertise I8MM, BF16, PAuth, BTI, which a64i lacks); (c) none (UNDEFINED, as now). *Recommended: (a)*: a program that probes
+  features by ID register (Go does with HWCAP_CPUID, for MIDR_EL1 only) then sees what a64i runs, and the lockstep compares the
+  fields a64i claims.
+- **ARS86 the Go programs in the gate.** (a) `bin/a64i go-check` as a step of the arm64 crop (test/gate/crops/asm.edn, beside
+  a64i-check: TamaGo's go is a pinned input already, about 10 s here); (b) by hand only. *Recommended: (a)*: the four programs run in
+  seconds and are the only check that a64i carries a real runtime end to end.
