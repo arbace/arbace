@@ -5350,3 +5350,34 @@ night command 1: round 8's deepseq/array/stm, the programs again, `bin/hsi own-v
 and haskell-read-essential's commands, `bin/reap`, `bin/crops-score`, the keys' test. Proposals HF10-P43 (the next gaps: TransStmt,
 CallStack implicit parameters, HsStatic), P44 (withDict's polytype argument's given), P45 (class kinds in the inference). Details:
 doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P40-P42".
+
+## 2026-11-14: HF10-P43-P46, P49 built (branch `hs-p43`); hs-p40's proofs run
+
+The user's decisions of 2026-11-14, HF10-P43 (a), P44 (a), P45 (a), built on `hs-p43` from `mac/hs-p40` (c3ac830fa) by an agent
+during the night's gate and its rerun (one run at a time, each under 1.2 GiB; the disk limit as the main session set it, 85-88%).
+Sources read: GHC 9.14.1's tarball (the corpus pin): GHC.Tc.Gen.Match (tcLcStmt), GHC.HsToCore.ListComp (dsTransStmt, mkUnzipBind,
+deListComp's ParStmt, dsMcStmt, mkMcUnzipM), GHC.Core.Make (mkChunkified), GHC.Tc.Gen.Expr and GHC.HsToCore.Expr (HsStatic,
+makeStatic), GHC.Iface.Tidy.StaticPtrTable (sptCreateStaticBinds, mkStaticPtrFingerprint), GHC.Tc.Solver.Dict and Note [Overview of
+implicit CallStacks], GHC.Tc.Instance.Class (matchWithDict), GHC.Tc.TyCl (kcTyClGroup); BSD-3, already in LICENSE.md. Built in
+`typecheck.ae` alone: TransformListComp (the inner qualifiers' tuple, `using` at the tuple, mkUnzipBind's foldr, the binders rebound),
+ParallelListComp (zip of the blocks, HF10-P46, a decision taken on the way), monad comprehensions' transforms and parallel blocks
+(`>>=`, `fmap` selectors, `mzip`, HF10-P49, taken on the way), big tuples chunked by 64; implicit parameters of type CallStack of any
+name pushed and defaulted as HasCallStack (isCallStackPred); constraint synonyms expanded in contexts, nullary instances; static
+forms as GHC's top-level StaticPtr bindings (the key mkStaticPtrFingerprint's, so hsi's static pointer table finds them; a body
+with a local built in place); withDict's T16646: qualified arguments checked after the others, type applications on rank-n
+lambda binders, functional-dependency improvement from givens; the own classes' kinds inferred, GADT binders' kind annotations and
+leading-forall standalone kind signatures read (Q, TExp, SomeKindedTypeRep as GHC's; Code's forall-to-the-right signature left to
+the inference, HF10-P47). First hs-p40's left proofs, on this branch's code: the libraries' round (lib-check and lib-stg of
+ghc-internal, base, deepseq, array, stm): 0 worse everywhere, the counts unchanged (20,699 of 20,891 facts; 5,734 of 7,789 and 582
+of 1,072 bindings); `bin/hsi own-verdicts --record` (40 pending, unboxedsums/' 19 added); the front end over testsuite-core's 483
+eligible programs: 437 compile (hs-p40: 391 of 465), none that compiled before fails, the same 5 time out; with P46 and P49 after
+it 447. Programs on the own path, judged by their own verdicts: TransStmt 8 of 8, static pointers 3 of 3, CallStack IPs 3 of 3
+(IPLocation's stdout is GHC's recorded run, hash for hash), T14218, T23761, T16646, TypeOf, TypeRep, TypeableEq, T14341, dsrun023,
+tcrun013, mc01-03, mc05-08, mc17 pass; T23761b does not (UndecidableSuperClasses, HF10-P48). Negative controls (outputs against
+other programs' expected) differ. Keys unmoved (gate-key-crops-test PASS, `--gate-key` 314c8e5b04ab as hs-p40); `bin/reap` 0
+problems; `bin/crops-score` unchanged. Alternatives considered: a static form always built in place (rejected: the table's lookup,
+CgStaticPointers' lookupKey, needs the top-level binding); constraint tuples as CTupleN dictionaries as GHC's Core passes them
+(deferred: no library uses a constraint synonym in a context but HasCallStack's, kept; the expansion is consistent within a
+program); solving qualified arguments' implications at the end of the whole binding (rejected for now: checking them last in their
+application suffices for the corpora). Proposals HF10-P47 (Code's signature, (b) recommended), P48 (a variable superclass), P50 (the
+next gaps). Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P43-P46".

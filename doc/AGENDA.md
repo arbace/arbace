@@ -128,7 +128,12 @@ Six crops are above 90 on all three. What the others still need:
   `$tc'` bindings, classes' TyCons; an explicit forall's binder order), `*`, promoted tuples, literal Typeable: TypeableEq and T14341 pass
   on the own path, TypeOf and TypeRep but IO's lines (fixed after, not rerun); P43 in part (monad comprehensions, `main`'s type);
   ghc-internal lib-check 0 worse (3 better), lib-stg 5,734 of 7,789, base as before. The proofs after round 8 stopped at `df /` 89%
-  (the night's gate): night command 1. P43-P45 proposed.
+  (the night's gate): night command 1. P43-P45 proposed. P43-P45 decided (a) (the user, 2026-11-14); `hs-p43` built them with P46 and
+  P49 (taken on the way): TransformListComp, ParallelListComp, monad comprehensions' transforms and parallel blocks, CallStack
+  implicit parameters of any name, constraint synonyms in contexts, static pointers (GHC's table keys), withDict's T16646, the own
+  classes' kinds, GADT binders' kind annotations and standalone kind signatures; hs-p40's proofs run: the libraries 0 worse (counts
+  unchanged), the front end 437 of 483 testsuite-core programs (391 of 465 before; 447 with P46, P49), 30 programs more pass on the
+  own path. P47 (Code's signature, (b)), P48 (a variable superclass), P50 (the next gaps) proposed.
   Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).

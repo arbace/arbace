@@ -4248,3 +4248,121 @@ to be confirmed by that test.
   annotation are not read, so Q, Code, TExp and SomeKindedTypeRep come out more poly-kinded than GHC's (their Typeable shows a kind
   argument GHC does not): (a) **infer the classes' kinds as the data types' and read the binders' annotations**; (b) leave it.
   *Recommended: (a)*, no program of the corpora shows it yet.
+
+
+## As built: HF10-P43-P46 (2026-11-14, branch `hs-p43`, from `mac/hs-p40` c3ac830fa)
+
+The user's decisions of 2026-11-14: HF10-P43 (a), P44 (a), P45 (a). By an agent during the night's gate and its rerun (one run at a
+time, each process under 1.2 GiB; stage 0; no GHC, no gate run, no network; runs only while `df /` allowed them). Read from GHC
+9.14.1's source tarball (the corpus pin): `compiler/GHC/Tc/Gen/Match.hs` (tcLcStmt's TransStmt and ParStmt),
+`compiler/GHC/HsToCore/ListComp.hs` (dsTransStmt, mkUnzipBind, deListComp's ParStmt, mkZipBind), `compiler/GHC/Core/Make.hs`
+(mkBigCoreTup, mkChunkified), `compiler/GHC/Tc/Gen/Expr.hs` and `compiler/GHC/HsToCore/Expr.hs` (HsStatic, makeStatic),
+`compiler/GHC/Iface/Tidy/StaticPtrTable.hs` (sptCreateStaticBinds, mkStaticPtrFingerprint), `compiler/GHC/Tc/Solver/Dict.hs` and
+Note [Overview of implicit CallStacks] (isCallStackPred, EvCsPushCall, defaultCallStacks, pickQuantifiablePreds' "never infer a
+CallStack constraint"), `compiler/GHC/Tc/Instance/Class.hs` (matchWithDict), `compiler/GHC/Tc/TyCl.hs` (kcTyClGroup, the standalone
+kind signatures' kcCheckDeclHeader_sig); BSD-3-Clause, the notice already in the files and LICENSE.md. Everything is in `typecheck.ae`.
+
+**HF10-P43 (a): the next front-end gaps.**
+
+- **TransformListComp** (`trans-stmt`): `then f`, `then f by e`, `then group using f`, `then group by e using f` as tcLcStmt and
+  dsTransStmt make them: the inner qualifiers a comprehension of their binders' tuple (`stmts-binders`, collectLStmtsBinders' order;
+  `infer-listcomp` takes a continuation for qualifiers without a LastStmt), `f` typed in the outer scope at `((a -> t) ->) [a] -> [a]`
+  (`[[a]]` for a group) with `a` the tuple, applied to `\tuple -> e` and the inner list, a group's lists of tuples unzipped by
+  mkUnzipBind's `foldr` (strict on both tuples, as GHC's mkTupleCase), the result a generator rebinding the binders (a group's at
+  list types, fresh core binders) for the qualifiers after it. Big tuples are chunked as mkChunkified (64 a tuple).
+- **Implicit CallStack parameters of any name** (`callstack-ip`, `want-at!`, `default-ip`): an occurrence of a function whose context
+  has `?loc :: CallStack` pushes its call site onto `?loc`'s stack (EvCsPushCall, a new wanted of the same name), and any unsolved
+  IP of type CallStack defaults to the empty stack (defaultCallStacks); the generalization already never quantified it (no inner
+  metas). Constraint synonyms in a context are expanded (`ctx-preds`: `type C2 = (?x :: Int, ?y :: Int)`, a constraint tuple's
+  components, `() :: Constraint` none; HasCallStack and HasExceptionContext kept, the solver knows them), and a nullary class's
+  instance solves it (`class Trivial; instance Trivial`).
+- **StaticPointers** (`HsStatic`, `static-ptr!`): `static e` is `fromStaticPtr` (IsStatic p, Typeable t) of `StaticPtr k1 k2 info e`,
+  the key mkStaticPtrFingerprint's (MD5 of `"main:Main:N"`), the info `StaticPtrInfo unit module (line, col)` of the body; a body whose
+  free variables are top-level is bound at the top level (`$sptN`, the static pointer table's entry hsi enters, HES88), one that
+  mentions a local (CgStaticPointers' where-bound `g`, which GHC floats with it) built in place.
+
+**HF10-P44 (a): withDict's polytype argument.** The `(cls => r)` argument was given its context already (check-poly); what T16646
+lacked: an argument checked against a qualified type is checked after the others (`tc-app`: its givens' metas are the other
+arguments' types first, `withGift (\_ -> foo False) (23 :: Int) Proxy`), a type application on a lambda-bound binder of a rank-n
+type takes its quantifiers (`k @Any`), and a functional dependency improves a wanted from a given (`Reifies s a` given, `Reifies s ?b`
+wanted: `?b := a`).
+
+**HF10-P45 (a): kinds the inference reads.** The own classes' kinds (`*classes*`' `:kind`, from the superclasses and the methods'
+types, generalized and defaulted as the data types'; `tycon-kind` reads it: Quasi is `(Type -> Type) -> Constraint`, so Q is
+`Type -> Type`), a GADT constructor's binders' kind annotations (`:gadt :tv-anns`: `forall k (a :: k)`, so SomeKindedTypeRep is
+`Type -> Type`), and a standalone kind signature whose quantifiers all lead (`type TExp :: TYPE r -> Type`, a class's too: DataToTag,
+HasField, Unsatisfiable) the kind as written, not inferred. Code's signature has a forall to the right of an arrow
+(`(Type -> Type) -> forall r. TYPE r -> Type`): left to the inference (HF10-P47).
+
+**HF10-P46 (a), taken here: ParallelListComp in list comprehensions** (`par-stmt`): each block a comprehension of its binders' tuple
+typed in the scope before the qualifier, the blocks zipped (GHC.Internal.List's `zip`, nested to the right), a generator binding all
+of them.
+
+**HF10-P49 (a), taken here: monad comprehensions' transforms and parallel blocks** (`mc-trans-stmt`, `mc-par-stmt`, dsMcStmt's
+TransStmt and ParStmt): the inner statements a comprehension ending in `return` of their binders' tuple (`mc-inner`, a synthetic last
+statement where the binders and the by expression are typed), `using` at `((a -> t) ->) m a -> m a` (`m (m a)` for a group) bound
+by `>>=` to the new binders, a group's each `fmap` of its selector (mkMcUnzipM); parallel blocks `mzip`'ed to the right. Taken after
+the library round: neither extension occurs in ghc-internal, base, deepseq, array or stm, so the libraries' results stand.
+
+**The libraries again** (`.tmp/p40/chain-libs.sh`, as the gate's steps run them; one at a time):
+
+| step | result | before (hs-p40) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 3 better; facts 20,699 of 20,891 | same | 0.99 GB, 12m17 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 equal, 0 worse, 33 better | same | 1.17 GB, 15m34 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.73 GB, 4m46 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.73 GB, 4m37 |
+| deepseq, array, stm (lib-check, lib-stg) | 0 worse each; facts 202/211, 388/388, 222/222; controls differ | as recorded (hs-p40's round 7) | 0.55-0.66 GB |
+
+**The programs** (the native front end on these libraries, hsi, each judged by its own verdict; `.tmp/p40/ps-run.sh`):
+
+| program | before | after |
+|---|---|---|
+| dsrun016-022, mc04 (TransStmt) | front end: `qualifier not handled: TransStmt` | 8 of 8 pass |
+| DsStaticPointers, CgStaticPointers, CgStaticPointersNoFullLazyness | front end: HsStatic | 3 of 3 pass (the table's lookups too) |
+| IPLocation, T10845, T10846 | front end: IP `loc` unsolved | 3 of 3; IPLocation's stdout is GHC 9.14.1's recorded run (SHA-256 5583120c..., 608 bytes: f0's empty line, the real lines; the shipped `.stdout` is older, `:expected :differs`) |
+| T14218, T23761 | front end: constraint synonyms, `Trivial` | pass |
+| T23761b | front end | still: `class c => IdCt c` (UndecidableSuperClasses, a variable superclass), HF10-P48 |
+| T16646 | front end: withDict | pass |
+| TypeOf, TypeRep (hs-p40: IO's lines, not rerun) | 26/27, 28 lines | pass |
+| TypeableEq, T14341 | pass | pass |
+| dsrun023, tcrun013 (ParStmt) | front end | pass (dsrun023: 100 binders, chunked tuples) |
+| mc01-03, mc05-08, mc17 (MonadComp's TransStmt, ParStmt) | front end | 8 of 8 pass (HF10-P49, after the after-count below) |
+| negative controls (a program's output against another's expected: dsrun016/dsrun017, dsrun019/dsrun020, DsStaticPointers/CgStaticPointers, T10846/T10845, T16646/T14218; DsStaticPointers' position shifted) | | differ, as they must |
+
+The front end over testsuite-core's eligible programs (`.tmp/p40/front-all.sh`, 26m14, 1.15 GB): **437 compile of 483** (hs-p40:
+391 of 465; unboxedsums/' 18 joined the plan), 41 type errors, the same 5 time out (dsrun011, T5913, TcCoercible, tcrun030,
+tcrun032, as before); no program that compiled before fails now; with HF10-P46's 2 and P49's 8 built after it (each compiled and passing alone), 447. The next gaps by count:
+superclass dictionaries (T21973b, T3731-short, T5751, tcrun033: 4), type-level naturals' and symbols'
+Known* on metas (2), OrPat, NPlusKPat, RecStmt, mdo, InvisPat (1 each).
+
+### Checks
+
+| check | result |
+|---|---|
+| the libraries (the table) | exit 0 each, 0 worse; controls differ as they must |
+| the programs above | as the table says |
+| `bin/hsi own-verdicts --record` | 40 pending tests (unboxedsums/' 19 added), 10 threaded-only |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p40`): the changed paths are `arbace/repr/haskell/typecheck.ae` and `test/haskell/own-verdicts-pending.tsv` |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+### Proposals
+
+- **HF10-P46 ParallelListComp** (a new decision on the way, taken): (a) **port deListComp's ParStmt (zip of the blocks' tuples)**;
+  (b) leave dsrun023 and tcrun013 on the pack. *Recommended and taken: (a)*.
+- **HF10-P47 a standalone kind signature with a forall to the right** (Code :: (Type -> Type) -> forall r. TYPE r -> Type). The
+  elaborator's kinds and the own interfaces' kind placeholders count a tycon's invisible arguments as its leading foralls; Code's
+  r sits between m and a (GHC's tyConBinders m, r, a: `:arity 3`), so the signature is not read and the inference gives
+  `forall k0. (Type -> Type) -> k0 -> Type`. (a) count invisible binders anywhere in the kind (the placeholders at their positions in
+  every application, the readers' kind arity by position); (b) leave Code's kind inferred until a program needs it (no program of the
+  corpora takes Typeable of Code; its interface fact differs from GHC's as before). *Recommended: (b)*, taken: it moves every reader
+  of the own interfaces for one tycon.
+- **HF10-P48 a class whose superclass is its parameter** (T23761b: UndecidableSuperClasses' `class c => IdCt c; instance c => IdCt
+  c`, `type IPInt = IdCt (?ipInt :: Int)`): a given IdCt (?ipInt :: Int) gives ?ipInt through its superclass, a variable constraint
+  instantiated. (a) **the superclass closure takes a :cvar superclass at the class's argument (the given's dictionary's selector)**;
+  (b) leave T23761b on the pack. *Recommended: (a)*, next round (not built here).
+- **HF10-P49 monad comprehensions' transforms and parallel blocks** (a new decision on the way, taken): (a) **port dsMcStmt's
+  TransStmt and ParStmt**; (b) leave mc01-08 and mc17 on the pack. *Recommended and taken: (a)*.
+- **HF10-P50 the next gaps** (by count over the 483: superclass dictionaries of a derived or instance's own class 4, Known* on metas
+  2, OrPat, NPlusKPat, RecStmt, mdo, InvisPat 1 each): (a) **port them in that order**; (b) leave them on the pack. *Recommended: (a)*.
