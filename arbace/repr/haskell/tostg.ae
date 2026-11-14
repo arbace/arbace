@@ -113,11 +113,13 @@
 
 (declare newtype-class?)
 
+(declare dcon-class)
+
 (defn- class-con-info
   "A class's dictionary constructor C:Cls as a constructor: its superclasses' and methods' fields"
   [c]
-  (when (and (vector? c) (str/starts-with? (nth c 3) "C:"))
-    (let [cls ["ext" "tc" (nth c 2) (subs (nth c 3) 2)] i (get (:all-classes *r*) cls)]
+  (when-let [cls (dcon-class c)]
+    (let [i (get (:all-classes *r*) cls)]
       (when (and i (not (newtype-class? cls)))
         {:arity (+ (or (:nsupers i) (count (:supers i))) (count (:methods i))) :tycon cls :tag 1}))))
 
@@ -146,6 +148,21 @@
 (defn- tycon-of [c] (:tycon (con-info c)))
 (defn- newtype-con? [c] (= 'newtype (:flavour (get (:tycons *r*) (tycon-of c)))))
 
+;; HF10-P48 (a): the constraint tuples' superclass selectors count from 0 ($p0CTuple2, $p1CTuple2: GHC.Builtin.Types'
+;; wired-in CTupleN and CSolo, mkConstraintTupleTyCon), every other class's from 1 ($p1Eq)
+(defn- sc-base [cls] (if (and (vector? cls) (= "GHC.Internal.Classes" (nth cls 2 nil)) (re-matches #"CTuple[0-9]+|CSolo" (str (nth cls 3 nil)))) 0 1))
+
+;; HF10-P48 (a): a constraint tuple's dictionary constructor is named as its class (GHC.Builtin.Types' CTupleN, CSolo),
+;; every other class's C:Cls
+(defn- dcon-occ [cls] (if (zero? (sc-base cls)) (nth cls 3) (str "C:" (nth cls 3))))
+(defn- dcon-class
+  "The class whose dictionary constructor g names, or nil"
+  [g]
+  (when (vector? g)
+    (let [o (str (nth g 3 nil))]
+      (cond (str/starts-with? o "C:") ["ext" "tc" (nth g 2) (subs o 2)]
+            (zero? (sc-base ["ext" "tc" (nth g 2 nil) o])) ["ext" "tc" (nth g 2) o]))))
+
 (def ^:private cls-ip ["ext" "tc" "GHC.Internal.Classes" "IP"])
 
 (defn- newtype-class? [cls]
@@ -156,8 +173,7 @@
 (defn- class-of-dcon
   "C:Cls's class"
   [g]
-  (when (and (vector? g) (str/starts-with? (nth g 3) "C:"))
-    (let [cls ["ext" "tc" (nth g 2) (subs (nth g 3) 2)]] (when (or (get (:all-classes *r*) cls) (= cls cls-ip)) cls))))
+  (when-let [cls (dcon-class g)] (when (or (get (:all-classes *r*) cls) (= cls cls-ip)) cls)))
 
 (defn- newtype-selector?
   "The one method or superclass selector of a newtype class"
@@ -165,7 +181,7 @@
   (and (vector? g)
        (some (fn [[cls i]] (and (newtype-class? cls)
                                 (or (= g (first (:methods i)))
-                                    (and (seq (:supers i)) (= (nth g 3) (str "$p1" (nth cls 3))) (= (nth g 2) (nth cls 2))))))
+                                    (and (seq (:supers i)) (= (nth g 3) (str "$p" (sc-base cls) (nth cls 3))) (= (nth g 2) (nth cls 2))))))
              (:all-classes *r*))))
 
 (defn- lib-cons
@@ -613,8 +629,8 @@
             ;; the dictionary's class: a selector's superclass (the class's :supers), a DFun's result (a type or a
             ;; predicate [CLASS TYPES])
             sel (when-let [[_ k c] (re-find #"^\$p([0-9]+)(.*)$" o)]
-                  (let [info (get (:all-classes *r*) ["ext" "tc" (nth g 2) c])]
-                    (first (nth (vec (:supers info)) (dec (Long/parseLong k)) nil))))
+                  (let [cn ["ext" "tc" (nth g 2) c] info (get (:all-classes *r*) cn)]
+                    (first (nth (vec (:supers info)) (- (Long/parseLong k) (sc-base cn)) nil))))
             cls (or sel
                     (when (vector? res) (cond (= :tc (first res)) (second res) (vector? (first res)) (first res))))
             alg (fn [] (if (vector? cls) (list 'alg (ext-str (nth cls 2) (nth cls 3))) '(poly)))]
@@ -1459,8 +1475,8 @@
   "The module's classes that are not newtypes: their data and their selectors (MkId.mkDictSelId)"
   []
   (for [[cls info] (:all-classes *r*) :when (and (= (module) (nth cls 2)) (not (newtype-class? cls)))]
-    (let [fields (concat (map-indexed (fn [i _] (str "$p" (inc i) (nth cls 3))) (:supers info)) (map #(nth % 3) (:methods info)))
-          dc (ext-str (module) (str "C:" (nth cls 3)))
+    (let [fields (concat (map-indexed (fn [i _] (str "$p" (+ i (sc-base cls)) (nth cls 3))) (:supers info)) (map #(nth % 3) (:methods info)))
+          dc (ext-str (module) (dcon-occ cls))
           k (count fields)]
       {:data (list 'stg/data (ext-str (module) (nth cls 3)) [(list 'dc dc 1 (vec (repeat k :L)) (vec (repeat k :lazy)))])
        :binds (cons (list 'bind [dc :L] (let [xs (mapv (fn [_] (fresh "eta")) fields)]
