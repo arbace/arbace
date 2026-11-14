@@ -598,7 +598,7 @@ a64i-go-check: ## real Go programs (test/asm/a64i-go/) built for linux/arm64 by 
 
 a64i-go-tools: ## gofmt and go vet's analyzers (test/asm/a64i-go/gofmt, vet) built from GOROOT for linux/arm64 and run on a64i over a fixed input set, judged against this M2's runs (bin/a64i go-check --tools gofmt vet; AR21; the gate's a64i-go-tools)
 	bin/a64i go-check --tools gofmt vet
-a64i-go-compile: ## cmd/compile and cmd/asm (test/asm/a64i-go/compile) built from GOROOT for linux/arm64 and run on a64i over a fixed module, the objects judged against this M2's runs (bin/a64i go-check --tools compile; AR22, ARS92 (a); the gate's a64i-go-compile)
+a64i-go-compile: ## cmd/compile, cmd/asm, cmd/pack and cmd/link (test/asm/a64i-go/compile) built from GOROOT for linux/arm64 and run on a64i over a fixed module, the objects and the linked program judged against this M2's runs, the program run on a64i (bin/a64i go-check --tools compile; AR22, AR23, ARS92 (a); the gate's a64i-go-compile)
 	bin/a64i go-check --tools compile
 x86i-light: ## x86i, the x86-64 integer machine (AX5.2): its light driver built alone by TamaGo's go into .tmp/x86i/x86i (bin/repr-asm x86i light)
 	bin/repr-asm x86i light

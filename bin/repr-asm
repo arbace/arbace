@@ -258,16 +258,20 @@ a64i_light() {
 #   build   N DIR PKG [IMPORT=FILE...] (cmd/compile's, AR22, queue 294): PKG's import configuration as go build writes it (importmap
 #           lines, then a packagefile line for each import with export data) in work/N/importcfg, each import's export data (go list
 #           -trimpath -export -deps PKG in DIR, the host's go, as go build -trimpath makes it) copied to work/N/pkg/IMPORT.a; IMPORT=FILE:
-#           that import's packagefile is FILE instead (a file a run makes, relative to the run's directory);
+#           that import's packagefile is FILE instead (a file a run makes, relative to the run's directory); with -link among them
+#           (cmd/link's, AR23, queue 295) the configuration is the link's: a packagefile line for PKG and every package it depends on
+#           (go list -deps -export's), as go build writes importcfg.link (no modinfo: the module's build information is the host's);
 # Each run is judged by want/ID.out, ID.err (a64i's statistics line left out), ID.status and ID.files; on an arm64 host the same
 # runs run natively on a second copy and must give the same. With several tools in `tool` (cmd/compile and cmd/asm, AR22) a run's
-# ARGS begin with the tool's name. ARGS are evaluated in the run's directory ($PWD in a -trimpath). a64i_go_tool NAME [--record]:
+# ARGS begin with the tool's name, or (AR23) with ./FILE, an executable an earlier run made (cmd/link's): on a64i a64i's own, natively
+# the native's. ARGS are evaluated in the run's directory ($PWD in a -trimpath), GOROOT unset (as go build -trimpath runs cmd/link:
+# its GOROOT would go into the executable). a64i_go_tool NAME [--record]:
 # --record (arm64) writes want/ from the native runs.
 a64i_go_env() { env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=linux \
   GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$@"; }
 a64i_go_tool() {
   local n=$1 rec=${2:-} d=$root/test/asm/a64i-go/$1 gw=$a64i_dir/go/$1 pkg tool dest srcp vn vdir vpat work b id files fpaths args x o \
-    side st bad=0 nrun=0 t0=$SECONDS ins tot=0 native=
+    side st bad=0 nrun=0 t0=$SECONDS ins tot=0 native= exe
   case $(uname -m) in aarch64|arm64) native=1 ;; esac
   [ -n "$rec" ] && [ -z "$native" ] && { echo "FAIL: a64i go-check: $n: --record needs an arm64 host"; return 1; }
   local tools=() bn bdir bpkg bover kind spec file o
@@ -308,6 +312,10 @@ a64i_go_tool() {
            > "$gw/build-$bn.imports") > "$gw/build-$bn.exports" 2> "$gw/build-$bn.log" \
         || { echo "FAIL: a64i go-check: $n: go list $bpkg: $(head -c 300 "$gw/build-$bn.log")"; return 1; }
       { echo '# import config'
+        case " $bover " in
+          *" -link "*) awk '{ print "packagefile", $1 }' "$gw/build-$bn.exports" ;;
+          *) cat "$gw/build-$bn.imports" ;;
+        esac > "$gw/build-$bn.lines"
         while read -r kind spec; do
           [ -n "$kind" ] || continue
           if [ "$kind" = importmap ]; then echo "importmap $spec"; continue; fi
@@ -319,7 +327,7 @@ a64i_go_tool() {
             file=work/$bn/pkg/$spec.a; mkdir -p "$(dirname "$gw/r0/$file")"; cp "$x" "$gw/r0/$file" || return 1
           fi
           echo "packagefile $spec=$file"
-        done < "$gw/build-$bn.imports"; } > "$gw/r0/work/$bn/importcfg"
+        done < "$gw/build-$bn.lines"; } > "$gw/r0/work/$bn/importcfg"
     done < "$d/build"
   fi
   for side in a64i ${native:+native}; do cp -a "$gw/r0" "$gw/$side"; mkdir -p "$gw/$side/.out"; done
@@ -348,16 +356,17 @@ a64i_go_tool() {
     tool=${tools[0]}
     if [ ${#tools[@]} -gt 1 ]; then
       tool=${args%% *}; args=${args#"$tool"}
-      case " ${tools[*]} " in *" $tool "*) ;; *) echo "FAIL: a64i go-check: $n/$id: no tool $tool"; bad=1; continue ;; esac
+      case $tool in ./*) ;; *) case " ${tools[*]} " in *" $tool "*) ;; *) echo "FAIL: a64i go-check: $n/$id: no tool $tool"; bad=1; continue ;; esac ;; esac
     fi
     for side in a64i ${native:+native}; do
-      o=$gw/$side/.out/$id; st=0
+      o=$gw/$side/.out/$id; st=0 exe=$gw/$tool
+      case $tool in ./*) exe=$gw/$side/${tool#./} ;; esac # AR23: a run's own executable, this side's
       if [ $side = a64i ]; then
-        (cd "$gw/$side" && eval "timeout 300 \"$a64i_exe\" run --stats \"$gw/$tool\" $args" < /dev/null > "$o.out" 2> "$o.err.raw") || st=$?
+        (cd "$gw/$side" && unset GOROOT && eval "timeout 300 \"$a64i_exe\" run --stats \"$exe\" $args" < /dev/null > "$o.out" 2> "$o.err.raw") || st=$?
         ins=$(sed -n 's/^a64i: \([0-9]*\) instructions in .*/\1/p' "$o.err.raw" | tail -1); tot=$((tot + ${ins:-0}))
         grep -Ev '^a64i: [0-9]+ instructions in ' "$o.err.raw" > "$o.err"
       else
-        (cd "$gw/$side" && eval "timeout 60 \"$gw/$tool\" $args" < /dev/null > "$o.out" 2> "$o.err") || st=$?
+        (cd "$gw/$side" && unset GOROOT && eval "timeout 60 \"$exe\" $args" < /dev/null > "$o.out" 2> "$o.err") || st=$?
       fi
       echo $st > "$o.status"; : > "$o.files"
       for x in "${fpaths[@]}"; do

@@ -2605,3 +2605,45 @@ On the light lane of the Mac VM (the M2 Max, 4 of its 8 cores, load about 13), s
   (`--tools gofmt vet`, controls go-3 to go-6): 272 s, 0.46 GiB. Each step's inputs leave out the other's directories
   (`!test/asm/a64i-go/compile/`; `!test/asm/a64i-go/gofmt/`, `!test/asm/a64i-go/vet/`), so a change to one reruns only its step;
   the Makefile's `a64i-go-tools` and the new `a64i-go-compile` run them. `gate.crops check` 0 problems.
+- **cmd/link on a64i** (`bin/a64i go-check --tools compile`; test/asm/a64i-go/compile). The directory's `tool` adds cmd/link and
+  cmd/pack; its module adds m (package main over p and r). Six runs after AR22's ten, as go build -trimpath -x runs them: `pack r
+  out/p.a out/add_arm64.o` (go build's pack of the assembly's object), m compiled against the runs' p.a and r.a, `link` (the
+  configuration a new `build` line makes with `-link`: m and every package it depends on, as importcfg.link, without modinfo; a
+  fixed -buildid; GOROOT unset for every run, as go build -trimpath runs the linker, else its GOROOT goes into the executable), the
+  linked `out/m` run (a run's first word `./FILE`: an executable an earlier run made, on a64i a64i's own), with an argument (status
+  3), and `link -V=full`. The executable (2,372,900 bytes, sha256 `00d020ea...`) is byte for byte the M2's native link, and a64i's
+  run of its own executable gives the native's output. Controls go-10 to go-12 (pack by compile, link by m, the run with an
+  argument by the plain run). Ten consecutive `go-check --tools compile` runs (the 16 runs each) gave every run as wanted with the six
+  controls failing as they must, in 198-431 s (237-577 M instructions on a64i; the counts follow the wall clock, the outputs never
+  varied); the link run alone 91-146 M instructions. The step's peak 0.35 GiB warm (1.39 GiB with the tools' build cold).
+- **What a64i lacked, built generally in emu (x86i's kernel too)**:
+  - **MAP_SHARED file mappings written back** (cmd/link maps its output `MAP_SHARED PROT_READ|PROT_WRITE` and exits with "mapping
+    output file failed" without it; AR22's shared writable mapping was ENODEV). `fileMap` records each shared mapping (`share`):
+    when its descriptor is open for writing, a descriptor of its own (fcntl F_DUPFD from 0x40000000: the program's numbers stay
+    Linux's, and the mapping outlives the program's close, as Linux's holds its file) and its bytes as read in (the shadow). Its
+    changed pages go back to the file (`writeBack`: in each page the bytes from the first the program changed to the last, against
+    the shadow, by pwrite64 at their offsets, as far as the file's end reaches: no page's part past it, the file never grows) at
+    msync (MS_SYNC and MS_ASYNC), munmap (a part of a mapping too: the rest kept, its own descriptor duplicated when both sides
+    remain), mmap's MAP_FIXED over it, and the process's end (`Kernel.End`, from a64i's and x86i's Run: exit, exit_group, a fatal
+    signal).
+  - **msync** (arm64 227, x86-64 26): Linux's checks (a flag beyond MS_ASYNC, MS_INVALIDATE, MS_SYNC; an address not page-aligned;
+    MS_ASYNC with MS_SYNC: EINVAL; a wrapping range ENOMEM), the write-back, then ENOMEM for a range with an unmapped page.
+  - **fallocate** (arm64 47, x86-64 285; cmd/link's before the mapping, and its ENOSYS was fatal there): vfs_fallocate's order
+    (EBADF, EINVAL, a mode beyond FALLOC_FL_KEEP_SIZE EOPNOTSUPP as on a file system without them, a descriptor not open for
+    writing EBADF, a pipe ESPIPE, EFBIG), then the file made offset + len long unless KEEP_SIZE (crt's ftruncate).
+  - **mprotect's EACCES**: PROT_WRITE over a shared mapping of a descriptor not open for writing.
+  - **mmap's top-down placement** (`topDown`, vm_unmapped_area): the highest free gap below the area's top, so a hole munmap left is
+    reused as Linux reuses it (the area grew down from the last mapping before; the lockstep found it: `system call 57 returns
+    0xfffff7ff4000, native 0xfffff7ff6000`, after the test's munmaps).
+  - Divergences, documented: the mapping is still a copy, so it does not see the file's later writes by write(2) or by another
+    process (Linux's page cache is one copy); writeBack's per-byte comparison keeps a write(2) into a mapped page that the program
+    did not also change through the mapping (the test's "xyz"). FALLOC_FL_PUNCH_HOLE and the other modes are EOPNOTSUPP.
+- **The lockstep**: fallocate and unlinkat are the world's (the native's descriptors and files); mprotect's EACCES the native's;
+  the shared file mappings' pages are taken from the native after a call of the world's that may change a file (write, writev,
+  ftruncate, fallocate: the native's mapping shows its file's change at once); msync is a64i's own (its mappings').
+- `linux-msync.s` (essential; controls verdict-39, cpu-7): a file of its own (the executable's name, `.msync.`, 16 letters of
+  getrandom's), fallocate and its errors, two pages mapped shared, written, msync and pread64's bytes, msync's errors, a write(2)
+  into a mapped page kept, munmap of one page, msync over the hole ENOMEM, a mapping outliving its descriptor, the last page past
+  the file's end, mprotect's EACCES and a writable remap, MAP_FIXED over a shared mapping, an offset and MS_ASYNC, the file
+  removed. a64i (eval and AOT), the CPU, lockstep sys and step (90 system calls) and the loader agree; before AR23, a64i's run was
+  fallocate's ENOSYS and then SIGSEGV (status 139) at the first store into the ENODEV mapping.
