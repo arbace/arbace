@@ -134,6 +134,11 @@ Six crops are above 90 on all three. What the others still need:
   classes' kinds, GADT binders' kind annotations and standalone kind signatures; hs-p40's proofs run: the libraries 0 worse (counts
   unchanged), the front end 437 of 483 testsuite-core programs (391 of 465 before; 447 with P46, P49), 29 programs more pass on the
   own path. P47 (Code's signature, (b)), P48 (a variable superclass), P50 (the next gaps) proposed.
+  P48 and P50 decided (a) (the user, 2026-11-14, round 34); `hs-p48` built them: a variable superclass (T23761b's IP shadowing),
+  the constraint tuples' GHC superclass fields, selectors and constructor names, recursive dictionaries, superclass loops
+  prohibited, the builtin families' interactions, or-patterns, n+k, rec, mdo, `@a` lambdas, rank-n applications' evidence; the
+  libraries 0 worse (ghc-internal's lib-stg 7,961 of 9,931, was 5,734 of 7,789), the front end 483 of 501 testsuite-core programs
+  (469 before), 47 of 47 changed programs pass on the own path. P51-P53 taken (b); P54 (the next 18 gaps) proposed.
   Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).

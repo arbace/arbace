@@ -5381,3 +5381,33 @@ CgStaticPointers' lookupKey, needs the top-level binding); constraint tuples as 
 program); solving qualified arguments' implications at the end of the whole binding (rejected for now: checking them last in their
 application suffices for the corpora). Proposals HF10-P47 (Code's signature, (b) recommended), P48 (a variable superclass), P50 (the
 next gaps). Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P43-P46".
+
+## 2026-11-14: HF10-P48 (a) and P50 (a) built (branch `hs-p48`, from `mac/hs-p43` 828b14b58)
+
+The user's decisions of round 34: HF10-P48 (a), the superclass closure takes a variable superclass; HF10-P50 (a), the next front-end
+gaps in order, each from GHC 9.14.1's source with a probe and a negative control. By an agent during the night gate's rerun on next
+(one run at a time, under 1.3 GiB but one slip, stage 0, no GHC, no network). Read from the corpus pin's source tarball: GHC.Tc.Solver.Dict
+(prohibitedSuperClassSolve, Note [Solving superclass constraints]), GHC.Tc.Solver.InertSet (updInertDicts, Note [Shadowing of
+implicit parameters]), GHC.Builtin.Types (mkConstraintTupleTyCon), GHC.Builtin.Types.Literals (interactTopAdd, Sub, Mul, Exp,
+AppendSymbol), GHC.Tc.Deriv (deriveTyData), GHC.Tc.Gen.Pat (OrPat, NPlusKPat, InvisPat), GHC.HsToCore.Match (matchNPlusK),
+GHC.Rename.Expr (rnRecStmtsAndThen, glomSegments), GHC.HsToCore.Expr (dsDo's RecStmt), GHC.Tc.Gen.Match, GHC.Tc.Gen.App
+(tcInstFun); BSD-3, already in LICENSE.md. Built in `arbace/repr/haskell/` (typecheck, rename, desugar, tostg, simplify): a variable
+superclass `[:cvar [t]]` in the closure, IPs given through superclasses innermost and a wanted that mentions a let-bound IP solved at
+that binding (T23761b's shadowing); the constraint tuples' superclass fields, their selectors from 0 and their constructors named
+CTupleN, CSolo as GHC's wired-in ones; instances matching a skolem, recursive dictionaries as letrecs, an instance's superclass not
+solved through its own head (T21973b's loop), superclass equalities given and family givens rewriting; own constructor classes
+derived by their kind; the builtin families' top-level interactions (also before generalization); or-patterns and n+k as view
+patterns, with two view-pattern bugs fixed (the view expression desugared, and substituted by the earlier arguments' binders); rec
+and mdo by mfix of a lazy tuple, mdo segmented; `@a` in a lambda checked against a polytype; a rank-n binder's application with its
+evidence (it was dropped). Results: the libraries 0 worse everywhere; ghc-internal's lib-stg 7,961 of 9,931 bindings equal (hs-p43:
+5,734 of 7,789; GHC.Internal.Classes 96 to 2,302 of 2,315), lib-check's facts unchanged (20,699 of 20,891; base 6,784 of 6,785);
+the front end over testsuite-core's 506 eligible programs 483 of 501 compile (469 on hs-p43's code), none lost; the 14 newly
+compiling with hs-p43's 33 pass on the own libraries (47 of 47), 15 probes pass, 6 controls differ; samples/synthetic 62 of 63,
+hsi-essential 122 of 123, haskell-read-essential 51 of 51, `bin/reap` 0 problems, crops-score unchanged, keys unmoved
+(gate-key-crops-test PASS, 314c8e5b04ab). Alternatives considered: GHC's match groups for or-patterns and n+k (deferred, HF10-P51
+(b)), GHC's rec_ids/later_ids for rec's tuple (HF10-P52 (b)), a kind check for skolem-matching instances (HF10-P53 (b)); a size
+bound on superclass solving instead of the head check (rejected before running it: it would refuse a superclass of a same-sized
+context given, which GHC solves). Slips: the libraries' first
+round was stopped after a source edit while it ran (rerun whole on the final code); samples/synthetic ran without
+`ARBACE_MEM_GIB=2` and peaked at 7.0 GB, over the 2.5 GiB per process. Proposal HF10-P54 (the next 18 gaps, (a)). Details:
+doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P48, P50".

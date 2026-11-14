@@ -4373,3 +4373,135 @@ Known* on metas (2), OrPat, NPlusKPat, RecStmt, mdo, InvisPat (1 each).
 
 Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night), GHC's runs of unboxedsums/, patsyn/
 and generics/ (the oracle window: hs-p40's night command 2).
+
+
+## Decided (the user, 2026-11-14, round 34: HF10-P48, HF10-P50)
+
+HF10-P48 (a): the superclass closure takes a variable superclass (T23761b). HF10-P50 (a): the next gaps in order, superclass
+dictionaries (4), Known* constraints on metas (2), then OrPat, NPlusKPat, RecStmt, mdo, InvisPat, each from GHC 9.14.1's source with
+a probe and a negative control, the libraries 0 worse, the programs judged by their own verdicts. New decisions: proposals with
+options and a recommendation, the recommended one taken.
+
+## As built: HF10-P48, P50 (2026-11-14, branch `hs-p48`, from `mac/hs-p43` 828b14b58)
+
+By an agent during the night gate's rerun (one run at a time, each process under 1.3 GiB; stage 0; no GHC, no gate run, no
+network; the libraries' runs only while `df /` allowed them). Read from GHC 9.14.1's source tarball (the corpus pin):
+`compiler/GHC/Tc/Solver/Dict.hs` (prohibitedSuperClassSolve, Note [Solving superclass constraints], the solved dictionaries of
+Note [Recursive instances and superclasses]), `compiler/GHC/Tc/Solver/InertSet.hs` (updInertDicts, Note [Shadowing of implicit
+parameters]), `compiler/GHC/Builtin/Types.hs` (mkConstraintTupleTyCon: the constraint tuples' data constructor named as the class,
+superclass selectors from 0), `compiler/GHC/Builtin/Types/Literals.hs` (interactTopAdd, interactTopSub, interactTopMul,
+interactTopExp, interactTopAppendSymbol), `compiler/GHC/Tc/Deriv.hs` (deriveTyData: the class's last parameter's kind drops the
+type's arguments), `compiler/GHC/Tc/Gen/Pat.hs` (OrPat, NPlusKPat with instStupidTheta's Integral, InvisPat),
+`compiler/GHC/HsToCore/Match.hs` (matchNPlusK, the or-patterns' alternatives in order), `compiler/GHC/Rename/Expr.hs`
+(rnRecStmtsAndThen, the mdo segments and glomSegments), `compiler/GHC/HsToCore/Expr.hs` (dsDo's RecStmt: mfix of a lazy tuple),
+`compiler/GHC/Tc/Gen/Match.hs` (tcMatchPats' InvisPat), `compiler/GHC/Tc/Gen/App.hs` (tcInstFun); BSD-3-Clause, the notice already
+in the files and LICENSE.md.
+
+**HF10-P48 (a): a variable superclass** (`typecheck.ae`, `tostg.ae`). A class's superclass that is a type variable (`class c => IdCt
+c`; the constraint tuples' `class (c1, c2) => CTuple2 c1 c2`) is `[:cvar [t]]`, a field of the dictionary; the superclass closure of a
+given `IdCt (?ipInt :: Int)` gives `?ipInt :: Int` (its selector), a variable constraint is solved from a given of its own (the
+instance `c => IdCt c`'s superclass), and the IPs a polytype argument's givens give through their superclasses are the innermost
+(check-poly), so a wanted that mentions an implicit parameter a `let ?x` binds is solved there, from the binding and the instances,
+the binding shadowing the enclosing givens (Note [Shadowing of implicit parameters]: T23761b's 7, not 3). A newtype class's
+dictionary constructor on an atom is the atom (`C:IP x`), also at the top level and when the program loaded no interface of IP. The
+constraint tuples now have their GHC superclass fields: their selectors count from 0 (`$p0CTuple2`) and their dictionary
+constructors are named as GHC's wired-in ones (`CTuple2`, `CSolo`), so GHC.Internal.Classes' 2,079 selectors meet GHC's.
+
+**HF10-P50 (a): the next gaps** (`typecheck.ae`; `rename.ae` for n+k, rec and `@a`; `desugar.ae` for views):
+
+- **Superclass dictionaries** (T21973b, T3731-short, T5751, tcrun033): an instance's head may match a skolem (only an instance
+  whose head is a variable there matches it, after the givens: `instance Eq c => ClassLedger c`, `ClassA a String`); a predicate
+  met again while its instance is solved is the dictionary being made, a `letrec` around it (T3731-short's Data Expression needing
+  Data [Expression] needing Data Expression); an instance's superclass is not solved through its own head met again among its
+  context's superclasses (prohibitedSuperClassSolve: T21973b's `Def (D c)` by `Def (D a)`'s instance, not by `ClassLedger c`'s
+  superclass `ClassDecode (D c)`, the dictionary being defined, which looped at run time); a signature's givens' superclass
+  equalities are given (ClassDecode a's `Share a ~ a`), a given equality on a stuck family application rewrites it; a deriving
+  clause of an own class of type constructors (T5751's MonadIO, its kind HF10-P45's) drops the type's last parameter.
+- **Known\* on metas** (TcTypeNatSimpleRun, TcTypeSymbolSimpleRun): the builtin families' top-level interactions on the deferred
+  equalities (`x + y ~ 5` with `y ~ 3`, `x + y ~ 0`, `x * y ~ 1`, `x ^ y ~ z` by exact root or logarithm, `AppendSymbol x y ~ z` by
+  prefix or suffix), also before a binding is generalized (a let pattern binding's metas fixed first, as GHC's eager interactions).
+- **OrPat** (Or5): the alternatives at the scrutinee's type, matched as the view pattern `((\x -> case x of p1 -> True; ...; _ ->
+  False) -> True)`, left to right. On the way, two bugs of view patterns: the view expression was not desugared (a lambda's case
+  was left a `match`, compiled as a literal) and did not see the earlier arguments' binders (`f3 a ((== a) -> True)`).
+- **NPlusKPat** (dsrun004): renamed (n bound, fromInteger, `>=`, `-`), typed with Integral as instStupidTheta, matched as
+  `((\x -> (x >= k, x - k)) -> (True, n))`.
+- **RecStmt and mdo** (T5742, T24411): `rec` renamed with its binders over its statements, desugared as dsDo's `tuple <- mfix (\
+  ~tuple -> do { stmts; return tuple })` (the tuple every binder, chunked by 64), mdo's statements segmented into minimal
+  recursive intervals (a statement using a binder of itself or a later one), each a rec.
+- **InvisPat** (T17594e): `\ @a x -> ...` checked against a polytype binds `a` to the next quantifier's skolem; on the way, an
+  application of a rank-n binder (`f :: forall a. (Num a, Bounded a) => a -> a` applied in `higherRank`) instantiates it with its
+  constraints' evidence applied (split-fun's instantiation dropped it: the dictionaries were missing).
+
+**The libraries again** (`.tmp/p40/chain-libs.sh`, as the gate's steps run them, one at a time, each on the pools made before it;
+the final code's run, the third: the first was stopped when the constraint tuples' numbering was found, the second by `df /` at 86%):
+
+| step | result | before (hs-p43) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 3 better; facts 20,699 of 20,891 | same | 1.13 GB, 15m52 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | **7,961 of 9,931** bindings equal, 0 worse, 36 better (GHC.Internal.Classes 96 → 2,302 of 2,315: the constraint tuples' selectors and dictionary functions; TypeNats 5 → 14, TypeLits 14 → 30, TH.Syntax 422 → 476, Data.Data 66 → 72, ...) | 5,734 of 7,789, 33 better | 1.20 GB, 17m24 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.73 GB, 5m17 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.74 GB, 4m47 |
+| deepseq, array, stm (lib-check, lib-stg) | 0 worse each; facts 202/211, 388/388, 222/222; controls differ | same | 0.56-0.68 GB |
+
+(GHC.Internal.Classes' 2,315 compared bindings were 173: its constraint tuples had no superclass fields, so GHC's 2,080 selectors
+`$p0CTuple2` .. `$p63CTuple64` and `$p0CSolo` were GHC's only; with the fields they were compared and differed by GHC's numbering
+from 0 and its constructor names, then equal.)
+
+**The programs** (the native front end over testsuite-core's 506 eligible programs on the final libraries, `.tmp/p40/front-all.sh`,
+before on hs-p43's code and libraries, after on this branch's; deepseq, array and stm own too, so 23 more are eligible than hs-p43's
+483):
+
+| | before (hs-p43's code) | after |
+|---|---|---|
+| compile (of 501; the same 5 time out) | 469 | **483** |
+| type errors | 32 | 18 |
+| newly compiling | | Or5, T5742, dsrun004, T17594e, T21973b, T23761b, T24411, T3731-short, T5751, TcTypeNatSimpleRun, TcTypeSymbolSimpleRun, tcrun033, and on the way throwto002 and T3500a |
+| compiled before, failing now | | none |
+
+`bin/hsi check --libs own --corpus testsuite-core --only` the 14 with hs-p43's 33 (arr001/arr002 the control): **47 of 47 pass on
+the own libraries**, 0 unclassed; arr001's control fails as it must (1m41, 0.88 GB). The probes (`.tmp/p48/t`, through
+`.tmp/p40/ps-run.sh`, each judged by its own expected output): a variable superclass (`Id (Show a)`), a recursive dictionary (`C T`
+needing `C [T]`), an own constructor class derived through GND, `x + y ~ 10` and `x + y ~ 0` in a let pattern, or-patterns (a
+Maybe, polymorphic literals, list patterns with a guard, a view pattern on an earlier argument, nested or-patterns), a lambda view
+pattern, n+k, `rec` with a let, mdo, `\ @b (x :: b)`: 15 of 15 pass; six negative controls (a probe's output against another's
+expected) differ, as they must.
+
+The next gaps by the first error over the 18: a class constraint left unsolved where an instance head holds a functional
+dependency or a type family (T17104's F, T5759's Container, tcrun028's ConcatPS, tcrun031's C, testeq2's TypeCast: 5), OverloadedStrings in patterns and view patterns (T3126, T3382: `IsString`'s literal patterns, 2), ConstraintKinds' `a =>`
+GADT contexts (tcrun046), Read of a skolem's list (tcrun039), Show of the sized primitive types (ShowPrim), ByteArray's IsList
+(Monoid_ByteArray), a rank-n field (tcrun043, tcrun041), DsPostfixOperators, dsrun015, T15598, T3500b, tcrun034 (1 each).
+
+### Checks
+
+| check | result |
+|---|---|
+| the libraries (the table) | exit 0 each, 0 worse; controls differ as they must |
+| the front end over the 506 (the table) | 483 of 501 compile (469 before), none lost; 33m36, 1.13 GB |
+| `bin/hsi own-verdicts --record` | unchanged: 587 of 908 by their own verdict, 40 pending, 10 threaded-only |
+| `bin/hsi check --libs own --corpus testsuite-core --only` (47 programs) | exit 0; 47 of 47 pass on the own libraries; arr001's control fails as it must |
+| the probes and their controls | 15 of 15 pass; 6 controls differ |
+| `bin/hsi check --libs own --corpus samples,synthetic` (own deepseq, array, stm) | exit 0; 50 own of 63, 62 pass, AsyncRerun in `:async-revert`; 0 unclassed; controls fail as they must; 4m04, peak 7.0 GB (run without `ARBACE_MEM_GIB=2`: a rule slip) |
+| hsi-essential's command (`ARBACE_MEM_GIB=2`, 2 jobs) | exit 0: own-verdicts current; 123 programs, 122 pass, 1 in its class; 0 unclassed; controls fail as they must; 24m15, 0.85 GB |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51, 7 controls differ; 3m34, 0.58 GB |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged (no record moved) |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as hs-p43): the changed paths are `arbace/repr/haskell/` alone |
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night), GHC's runs of unboxedsums/, patsyn/
+and generics/ (the oracle window), the libraries' records (`lib-stg --record`: 36 modules better in ghc-internal, 10 in base, by
+hand at the next window: `bin/repr-haskell lib-stg --ifaces own --record test/haskell/lib-stg-own-results.edn` and base's).
+
+### Proposals
+
+- **HF10-P51 or-patterns and n+k as view patterns** (taken: the recommendation). GHC's match compiler groups them (PgOr's
+  alternatives sharing one right-hand side, matchNPlusK's `>=` then `-`); here each is a view pattern of a lambda, the same
+  behaviour, other STG. No library uses either. (a) port the groups into `desugar.ae`'s match; (b) keep the view encoding until a
+  library needs GHC's STG. *Recommended and taken: (b)*.
+- **HF10-P52 rec's tuple** (taken). GHC's dsDo tuples `rec_ids ++ later_ids` (the renamer's segment analysis); here every binder of
+  the rec. (a) compute GHC's sets; (b) keep every binder. *Recommended and taken: (b)*: the same behaviour, no library uses rec.
+- **HF10-P53 a skolem against a variable-headed instance** (taken). The instance matching now takes a skolem first argument when
+  no given matches; kinds are erased, so a poly-kinded class's `instance KnownSymbol a => SingI a` would match a skolem of another
+  kind with no given (no program or library showed it: 0 worse). (a) check the instance head's kind when the class is
+  poly-kinded; (b) leave it until a program shows it. *Recommended and taken: (b)*.
+- **HF10-P54 the next gaps** (the 18 above: constraints with fundeps or families in instance heads 5, OverloadedStrings' pattern
+  literals 2, then one each): (a) **port them in that order**, as P50; (b) leave them on the pack. *Recommended: (a)*, next round.
