@@ -1587,6 +1587,92 @@
         (swap! *static-binds* conj (list 'bind b ptr))
         (list 'v b)))))
 
+(declare stmts-binders big-tup-ty big-tup-core big-tup-pat)
+
+(defn- mc-inner
+  "HF10-P49 (a): dsInnerMonadComp: the statements then return of their binders' tuple, in the monad: [type core info]"
+  [env stmts by rec]
+  (let [out (atom nil)
+        [t c] (rec env (conj (vec stmts) (list 'tc/ret-binders {:ns (stmts-binders stmts) :out out :by by})))]
+    [t c @out]))
+
+(defn- mc-bind
+  "rhs >>= \\d -> case d of pat -> body (the pattern a variable or a tuple of the new binders)"
+  [env [trhs crhs] elt pat-or-scrut body-t body-c]
+  (let [[tb cb] (global-occ env ">>=" "GHC.Internal.Base")
+        r (fresh-meta) d (fresh-lv "ds")]
+    (note-type! d elt)
+    (unify tb (fn-ty trhs (fn-ty (fn-ty elt body-t) r)))
+    [r (app* cb [crhs (list 'lam [d] (pat-or-scrut d body-c))])]))
+
+(defn- mc-trans-stmt
+  "HF10-P49 (a): a monad comprehension's transform (GHC.HsToCore.ListComp's dsMcStmt TransStmt, mkMcUnzipM): using
+  ((\\tuple -> by) and) the inner comprehension, at ((a -> t) ->) m a -> m a (m (m a), a group), bound to the new
+  binders, a group's each fmap of its selector"
+  [env v more rec]
+  (let [mm (fresh-meta)
+        byx (arg v 6) by (when (and (seq? byx) (= 'Just (first byx))) (second byx))
+        [tin cin {:keys [ns ts tt vs] :as info}] (mc-inner env (arg v 3) by rec)
+        _ (unify tin (mk-app mm tt))
+        group? (= 'GroupForm (arg v 2))
+        elt (if group? (mk-app mm tt) tt)
+        res (mk-app mm elt)
+        [tu cu] (infer env (arg v 5))
+        bres (:by info)
+        _ (unify tu (cond->> (fn-ty tin res) bres (fn-ty (fn-ty tt (first bres)))))
+        by-lam (when bres
+                 (let [d (fresh-lv "tup")]
+                   (note-type! d tt)
+                   (list 'lam [d] (list 'match [d] [(list 'clause [(if (empty? ns) (list 'pwild) (big-tup-pat vs))] (second bres))]))))
+        rhs (app* cu (if bres [by-lam cin] [cin]))
+        new (mapv (fn [n t] [n (fresh-lv (occ n)) (if group? (mk-app mm t) t)]) ns ts)
+        env2 (reduce (fn [e [n c t]] (note-type! c t) (assoc e n {:mono t :core c})) env new)
+        [tr cr] (rec env2 more)
+        pat (if (empty? ns) (list 'pwild) (big-tup-pat (mapv second new)))]
+    (if (and group? (> (count ns) 1))
+      ;; mkMcUnzipM: (fmap (\\tup -> x1) d, ..., fmap (\\tup -> xn) d)
+      (mc-bind env [res rhs] elt
+               (fn [d body]
+                 (let [sels (mapv (fn [i t]
+                                    (let [[tf cf] (global-occ env "fmap" "GHC.Internal.Base")
+                                          tp (fresh-lv "tup")]
+                                      (note-type! tp tt)
+                                      (unify tf (fn-ty (fn-ty tt t) (fn-ty elt (mk-app mm t))))
+                                      (app* cf [(list 'lam [tp] (list 'match [tp] [(list 'clause [(big-tup-pat vs)] (nth vs i))])) d])))
+                                  (range (count ns)) ts)
+                       e (fresh-lv "unzip")]
+                   (note-type! e (big-tup-ty (mapv #(nth % 2) new)))
+                   (list 'app (list 'lam [e] (list 'match [e] [(list 'clause [pat] body)])) [(big-tup-core sels)])))
+               tr cr)
+      (mc-bind env [res rhs] elt (fn [d body] (list 'match [d] [(list 'clause [pat] body)])) tr cr))))
+
+(defn- mc-par-stmt
+  "HF10-P49 (a): a monad comprehension's parallel blocks (dsMcStmt ParStmt): each block's inner comprehension, mzip'ed to
+  the right, bound to the nested pairs of their tuples"
+  [env v more rec]
+  (let [blocks (mapv (fn [b] (arg (lval b) 2)) (arg v 2))
+        inners (mapv #(mc-inner env % nil rec) blocks)
+        mm (fresh-meta)
+        _ (doseq [[t _ info] inners] (unify t (mk-app mm (:tt info))))
+        parts (mapv (fn [[t c info]]
+                      (let [new (mapv (fn [n ty] [n (fresh-lv (occ n)) ty]) (:ns info) (:ts info))]
+                        {:t t :c c :tt (:tt info) :new new
+                         :pat (if (empty? new) (list 'pwild) (big-tup-pat (mapv second new)))}))
+                    inners)
+        zip* (fn zip* [ps]
+               (if (= 1 (count ps))
+                 (first ps)
+                 (let [a (first ps) b (zip* (rest ps))
+                       [tz cz] (global-occ env "mzip" "GHC.Internal.Control.Monad.Zip")
+                       tt [:tc (tuple-tc 2) [(:tt a) (:tt b)]]]
+                   (unify tz (fn-ty (:t a) (fn-ty (:t b) (mk-app mm tt))))
+                   {:t (mk-app mm tt) :tt tt :c (app* cz [(:c a) (:c b)])
+                    :pat (list 'pcon (ext-name "data" "GHC.Internal.Tuple" (occ (tuple-con 2))) [(:pat a) (:pat b)])})))
+        z (zip* parts)
+        env2 (reduce (fn [e [n c t]] (note-type! c t) (assoc e n {:mono t :core c})) env (mapcat :new parts))
+        [tr cr] (rec env2 more)]
+    (mc-bind env [(:t z) (:c z)] (:tt z) (fn [d body] (list 'match [d] [(list 'clause [(:pat z)] body)])) tr cr)))
+
 (defn- infer-stmts
   "A do block's statements in a monad: [type core]; mc a monad comprehension's (HF10-P43 (a): GHC.HsToCore.ListComp's
   dsMonadComp, as its statements desugar: the result return e, a guard qualifier guard b >> rest)"
@@ -1594,6 +1680,22 @@
   (let [s (first stmts) v (lval s) more (rest stmts)
         infer-stmts (fn [env stmts] (infer-stmts env stmts mc))]
     (case (con v)
+      ;; HF10-P49 (a): a transform's or a parallel block's end (mc-inner): return of its binders' tuple, the binders and
+      ;; the by expression typed here, where the inner statements bound them
+      tc/ret-binders (let [{:keys [ns out by]} (second v)
+                           ns (filterv #(get env %) ns)
+                           occs (mapv #(var-occ env %) ns)
+                           ts (mapv first occs)
+                           tt (if (empty? ns) (con-ty (tuple-tc 0)) (big-tup-ty ts))
+                           tc (if (empty? ns) (list 'v (tuple-con 0)) (big-tup-core (mapv second occs)))
+                           [tr cr] (global-occ env "return" "GHC.Internal.Base")
+                           r (fresh-meta)]
+                       (reset! out {:ns ns :ts ts :tt tt :vs (mapv #(or (:core (get env %)) (lv %)) ns)
+                                    :by (when by (infer env by))})
+                       (unify tr (fn-ty tt r))
+                       [r (app* cr [tc])])
+      TransStmt (if mc (mc-trans-stmt env v more infer-stmts) (do (error! "statement not handled: TransStmt") [(fresh-meta) (list 'lit "?")]))
+      ParStmt (if mc (mc-par-stmt env v more infer-stmts) (do (error! "statement not handled: ParStmt") [(fresh-meta) (list 'lit "?")]))
       LastStmt (let [[te ce] (infer env (arg v 2))
                      [tr cr] (global-occ env "return" "GHC.Internal.Base")
                      r (fresh-meta)]
