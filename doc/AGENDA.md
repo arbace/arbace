@@ -101,7 +101,12 @@ Six crops are above 90 on all three. What the others still need:
   class, sizeof... in signatures, unions' destructors, non-negative enumerations' bit-fields unsigned, 128-bit constants inside
   evaluations, CP388 (a)); the full runtime with tzdb.cc (its table a string literal, CP387 (a), read in 2.2 GB); drops f8 35/86 → 12/20,
   library.cpp 26/67 → 14/33; the 81's IR byte for byte (69), codegen-gen 155, the essentials, reap and crops-score pass; no gate key
-  moves; CP389 (conversion function templates) proposed.
+  moves; CP389 (conversion function templates) proposed. `cpp-s14` (2026-11-14, "As built: cpp-s14"): CP389 (a), conversion function
+  templates deduced from the target type ([temp.deduct.conv]), references bound directly to conversions' results; partial
+  specializations' preprocessed arguments, noexcept(B) deduced false (CP390 (b)), explicit specializations' defaults, qualified variable
+  template partials, enumerators' attributes; local statics constant-initialized, `decltype(e)::name`: drops f8 12/20 → 4/4, library.cpp
+  14/33 → 5/6, both pass on llvmi; the 81's IR 66 byte for byte, 3 changed by constant initializations (as clang); the essentials, reap and
+  crops-score pass; no gate key moves; CP391 (decltype mangling), CP392 (parser reads) proposed.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).

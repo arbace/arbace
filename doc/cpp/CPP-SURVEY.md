@@ -7852,3 +7852,119 @@ watcher's, tzdb.cc's read). `bin/cppi` stops past `CPPI_DISK_MAX` (80% by defaul
   P the return type, its reference and the target's top-level cv dropped), its specialization a candidate of conv-for and of the class
   conversions; (b) leave them dropped until a run needs one. **Recommended: (a)** in the next session, with probes over references,
   cv and deduction failure; its gen-batch over the 81 then decides whether any IR changes.
+
+## As built: cpp-s14 (2026-11-14; branch `cpp-s14` from mac/cpp-s13 87bab53ba)
+
+The user's decision of 2026-11-14: CP389 (a), conversion function templates deduced from the target type as [temp.deduct.conv] does,
+with probes and negative controls; then f8's and library.cpp's remaining drops reduced (f8 20, library.cpp 33), general fixes each
+with a probe; then cpp-s13's two findings (a function-local `static T a[N] = {}` initialized statically, `decltype(...)` as a
+nested-name qualifier). Light, one run at a time, main's stage 0, the watcher of cpp-s13 (no process of the worktree passed 2.1 GB);
+no gate, big lock, clang, g++ or gcc. The disk stood at 85-89% most of the session (not this worktree's: 0.45 GB of scratch): the
+runs waited in `run.sh`'s 10-minute re-checks, the probes (each under 0.5 GB) started at 87% or less, the proofs at 85% or less.
+
+### CP389 (a): conversion function templates
+
+| Part | Built |
+|---|---|
+| Declaration | template.ae's declare-template: a CXXConversionDecl pattern no longer refused; the template is entered by its name as before and recorded on its class's `:conv-tmpls` (sema/conv-tmpls: the class's and its bases'); its out-of-line definition attached as other member templates' (attach-member-template!, ool-member-template!) |
+| Deduction | template.ae's deduce-conv, [temp.deduct.conv]: P the template's return type, the type referred to when it is a reference (/2); when the target A is no reference, an array P decays to a pointer, a function P to a pointer to function, else P's top-level cv dropped (/3), and A's (/4); when A is a reference, A the type it refers to, at least as cv-qualified as P (/4, clang's TDF_ArgWithReferenceType: deduce-by-type-match's :param-with-reference after the check); a pointer or pointer-to-member A with :ignore-qualifiers (/5, TDF_IgnoreQualifiers; the specialization's own type then ranked by conv-for) |
+| Candidates | template.ae's conv-candidates (the `:conv-candidates` hook, memoized per program in `*conv-specs*`): each template deduced, instantiated (its constraints checked: a failure no candidate); sema's conv-for ranks them after the non-template conversion functions ([over.match.best]/2.4's preference by order); a specialization is no member of the class's `:methods` (conv-fns would have offered a specialization made for one target to the next: `T*` deduced for int* chosen for const int*) |
+| Mangling | `cv <the template's type> I <args> E` (`_ZNK1ScvT_IiEEv`, `_ZN3PtrcvPT_IKiEEv`, `_ZNK3MemcvM2PtT_IiEEv`, `_ZNK1FcvRFT_T0_EIiiEEv`), as glam-conv!'s, the template's declared type (:mangle-ret) |
+| Pointers to members | deduce-by-type-match's MemberPointer branch, the checker's since CX12, now the code generator's too for a known class (the code generator's types keep no dependent class: not deduced) |
+| References | sema's ref-conv-for: a reference bound directly to a conversion function's lvalue (an lvalue reference, [dcl.init.ref]/5.1.2) or xvalue (an rvalue reference, /5.3.2; [over.match.ref]), the templates' specializations deduced for the reference among them; init-for's reference branch and ics (a user-defined conversion, rank 3). Before, every such reference was bound to a temporary copy (a const one) or refused (a non-const one), the non-template conversions' too |
+| On the way | conv-for decays an array or function result before ranking; rv's decay of a function glvalue that a call returns no longer takes the call's :fn for the designated function (codegen's :fnaddr emits the call's value); a reference to function bound to an overload set (`return twice;` for `R(&)(A)`, [over.over]) |
+
+| Probe | What | llvmi (control) |
+|---|---|---|
+| c1a, c1n | values (int, double, const short, a call's argument), a const object, `T*` to int* and const int* (T = const int), `T Pt::*`, deduction failure falling back to a non-template, a constraint failing (sizeof(T) == 8), explicit (static_cast), a class template's, defined out of line, to a class (an aggregate) | 0 (255) |
+| c2a, c2n | `operator T&()` bound by int& and const int& (the object's own member's address), `operator const T&() const`, `operator T&&()` bound by int&&, `operator fn<R,A>&()` to `int(*)(int)` (function decay), `operator a3<T>&()` to int* (array decay) | 0 (32) |
+
+### f8's and library.cpp's drops (gen-batch's drops.tsv, causes / drops)
+
+| Program | cpp-s13 | after CP389 (a) and the fixes below |
+|---|---|---|
+| f8 | 12 / 20 | **4 / 4** |
+| runtime/library.cpp | 14 / 33 | **5 / 6** |
+
+| # | Drop (before) | Cause | Fix | Probe (control) |
+|---|---|---|---|---|
+| 1 | 7 each: "a conversion function template" (`operator _CIt`, `_PairLike`, `_Tp`) | refused at declaration | CP389 (a) above | c1, c2 |
+| 2 | f8 4, library.cpp 4+6: types spelled `_GLIBCXX_NOEXCEPT_QUAL`, `_GLIBCXX_MOF_CV _GLIBCXX_MOF_REF noexcept(_Noex)`; library.cpp's `_Hash_merge_helper<_GLIBCXX_STD_C::...>` and kin (5 of the 6 `_GLIBCXX_STD_C`) | a partial specialization's arguments read from the source text, a macro's name where its expansion stands | template-text-args takes the arguments' tokens as the preprocessor gave them (the parser's `:_targtext`) first, the text's only when the parser kept none (the same tokens when no macro is written) | d2a, d2n: 0 (4) |
+| 3 | (then) `_Weak_result_type_impl<_Res(_ArgTypes...) noexcept(_NE)>` never matched | `_NE` deduced from nothing: the slice's function types carry no exception specification | CP390 (b) below: such a bool parameter deduced false | d2 |
+| 4 | (on the way) `decltype(f)` of a function an overload set's type, `{:k :overload}` | decltype-of took an id-expression's type, a set's | the function's type when the set holds one function and no template ([dcl.type.decltype]/1.3) | d2 |
+| 5 | f8 3, library.cpp 3: "unknown type _Tp" (__promote<long double> and kin) | the parser gives an explicit specialization's unwritten arguments their defaults as written, `std::__is_integer<_Tp>::__value`, which do not resolve in the specialization's scope | from the first that does not resolve, the rest completed by complete-args, each default in a scope binding the arguments before it ([temp.arg.general]/9) | d1a, d1n: 0 (2) |
+| 6 | f8 1, library.cpp 1: "no primary variable template __is_subrange" | `inline constexpr bool __detail::__is_subrange<subrange<...>> = true;`: the primary looked up by its plain name | the qualifier written before the name looked up first | d4a, d4n: 0 (2) |
+| 7 | f8 1, library.cpp 1: "expression NativeAttr" (_Ios_Openmode) | an enumerator's `__attribute__((__unused__))` taken for its value | an enumerator's attributes skipped | e6a, e6n: 0 (2) |
+
+cpp-s13's two findings:
+
+| # | Finding | Fix | Probe (control) |
+|---|---|---|---|
+| 8 | a function-local `static unsigned short t[256] = {};` initialized under a guard (`__cxa_guard_acquire`), where clang initializes it statically | codegen.ae's static-local!: an initializer whose leaves are constants (const-leaves, emit-globals!'s: CP380's rule for locals, [basic.start.static]/2) is the global's constant, no guard; a class with a non-trivial destructor keeps its guard. On the way two faults of const-leaves, the namespace-scope variables' too: an array of every element written had no fill and was taken for dynamic; an int-to-long cast's 64-bit mask overflowed (`1 << 63` less one) | s1a, s1n: 0 (2); no `_ZGV` left |
+| 9 | `decltype(e)::name` as a nested-name-specifier | sema's lookup-qualified: a first part `decltype(...)` names its type's scope (decltype-of) | q2a, q2n: 0 (4) |
+
+Found on the way, not fixed (the brief's paths are arbace/cpp/ and the records): `decltype(g(0))::type x = 7;` as a declaration
+statement is declined by the native parser ("statement: expected ;", arbace/repr/cpp/parse.ae; in an expression and a trailing return type
+it reads); a dependent decltype in a function template's signature is mangled from its stand-in (`NT-2_21decltype(h ( t , t ))E4type`, not
+clang's `DTcl1hfp_fp_EE`): the program runs (one unit), a second unit's would not link with clang's. Probes d3 (a member type named before
+its declaration in a constexpr body), d6 (a __max_size_type-like class with a 128-bit `__rep`) and d7 (an explicit instantiation of a class
+template whose out-of-line member takes a base's typedef) pass, so the drops they were written for (`__rep`, `clear of basic_ios`) have
+another cause, not found.
+
+The remaining drops: f8: `using _GLIBCXX_STD_C::vector;` (a using-declaration read from its text: the parser keeps no preprocessed tokens
+for it), `__common_reference_impl`'s template template argument `__xref<_Tp1>::template __type`, `__make_unsigned_selector` (a header's
+alias of a specialization nothing defines: the drop is right, clang diagnoses only a use), `__max_size_type`'s `__rep`; library.cpp the same
+but `__make_unsigned_selector`, and `extern template class basic_ios<...>`'s clear (2), `noexcept(::new(...) _Tp(...))` in a base's
+template argument (the text evaluator knows no noexcept-expression).
+
+### f8 and library.cpp, run
+
+**Both pass** (the IR generated at the branch's last code, linked with C++'s lowered runtime on the prebuilt link, bin/llvmi run): f8
+"3", status 0 (7 min 23 s, 1.87 GB); runtime/library.cpp status 0, stdout 70c08058... as g++'s (7 min 44 s, 2.01 GB). f8 generates 34,977
+lines (43,794 before), in 359 s, 1.22 GB; library.cpp 569 s, 1.31 GB.
+
+### Checked (one at a time, peaks by busybox `time -v`)
+
+| Run | Result |
+|---|---|
+| gen-batch over the 81 run programs (library.cpp left out), five parts, against cpp-s13's G11 | **69 generated, none lost or gained; 66 byte for byte, 3 differ**, each a constant initialization clang also writes (fix 8's leaves): decomp1.C's `@a` and pretty1.C's `_ZL5names` (namespace-scope arrays of every element written, a global constructor before) and atomics.cpp's `_Sp_make_shared_tag::_S_ti`'s `__tag` (a local static, a guard before); run on llvmi against ref-gxx15: decomp1 and atomics pass, pretty1 fails as recorded (its oracle-text class: `__PRETTY_FUNCTION__`); 0.36-1.36 GB |
+| cpp-print-essential's command | 33 of 33, 9 of 9; 1.40 GB |
+| llvm-essential's commands (`bin/repr-llvm check roundtrip-llvmtest`, `verify-llvmtest`, `verify-probes`, `text-llvmtest`, `--essential`) | pass, 0 failing, their controls failing as they must; 0.17-0.28 GB |
+| `bin/llvmi check --essential`, `test/repr/llvm/controls-test.bash` | 10 of 10, 4 controls judged, 0 pass; all ok; 0.37 GB |
+| `bin/cppi lower-essential` | 6 of 6; 1.58 GB |
+| cpp-check-essential's command (`CPPI_THREADS=1`) | samples 4 programs, pass 4; the run control differs as it must; 1.25 GB |
+| `bin/cppi codegen-gen` | first 154 of 155: `globals` forms-differ, its `table[4] = {1, 2, 3, 4}` now a constant (fix 8: an array of every element written; clang's `@table = global [4 x i32] [...]`), its global constructor's four stores gone; its hash in test/cpp/codegen/forms.sha256 replaced by this run's (the one line `--record` would change); then run again: **155 of 155** as recorded, the controls failing as they must; 1.14-1.19 GB |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --judge --strict` | exit 0, 0 problems (scores.edn unchanged) |
+| `test/gate/gate-key-crops-test.bash` | PASS: the branch changes `arbace/cpp/` (codegen.ae, sema.ae, template.ae), `test/cpp/codegen/forms.sha256` and doc/: no gate, runtime or seed key moves |
+
+### Decided (the brief's rule: the recommended option taken)
+
+- **CP390 noexcept(B) of a function type in a partial specialization's arguments.** The slice's function types carry no exception
+  specification (noexcept is the function's, `:noexcept`), so `_Weak_result_type_impl<_Res(_ArgTypes...) noexcept(_NE)>` never matched once
+  its arguments were read: (a) function types with their exception specification (`Do` in manglings, [conv.fctptr], deduction of B): every
+  type comparison and mangling of a function type touched; (b) such a bool parameter, named only as a noexcept(B), deduced false: the
+  partial specialization matches as libstdc++'s C++14 configuration (no such parameter) would, the one divergence that a noexcept
+  function's `decltype(f)` deduces B false where clang deduces true; (c) leave it unmatched. **Recommended and taken: (b)**; (a) when a
+  program's run needs a noexcept function type told apart (none of the 81, f8 or library.cpp does).
+
+### Proposed (CP391, CP392)
+
+- **CP391 A dependent decltype in a signature mangled as clang does** (`DT <expression> E`, Itanium 5.1.5.3; abi.ae's mangle-expr has the
+  operators and template parameters since cpp-s13's `sZ`): today the stand-in's spelling is mangled, `NT-2_21decltype(h ( t , t ))E4type`,
+  consistent within a program but not clang's. (a) mangle decltype's operand (calls, function parameters `fp_`, member access) and refuse
+  what it cannot write; (b) leave it until a program links two units that name one. **Recommended: (a)**, with a probe of two units.
+- **CP392 The native parser's remaining reads** (arbace/repr/cpp, outside this brief's paths): `decltype(e)::type x = ...;` as a declaration
+  statement ("statement: expected ;"), and a using-declaration's preprocessed tokens (`using _GLIBCXX_STD_C::vector;`, read from the
+  source text by sema's UsingDecl). (a) the parser keeps a declaration's tokens as it keeps `:_targtext` (`:_text`) and reads a
+  decltype-specifier at a statement's start; (b) leave them. **Recommended: (a)** in a branch that may touch arbace/repr/cpp.
+
+### Rule slips
+
+The first probe pair c1a/c1n judged the exit status 8 bits wide while the probe set bits up to 1024 (c1n's control passed: its bit 512
+read 0): found by the control, the probe rewritten to exit 255 for a high bit, both run again (0 and 255). Two probes were wrong C++ at
+first (d7's unqualified enumerator; its `extern template` member, which no unit defines) and were rewritten before their results were
+taken. test/cpp/codegen/forms.sha256's `globals` line was replaced while the proofs' chain ran (between its reap and crops-score steps,
+which do not read it); reap, crops-score and the key test were run again after it (0 problems, exit 0, PASS). A Clojure regex in a Python-written edit (`\s` unescaped) made one probe's generation fail at read (no result taken). No
+run started above the limits (the runs waited at 86-89%); no source was edited while a run that loads it ran (the llvmi runs of f8 and
+library.cpp load no sema, template or codegen; the edits of the probe sources were before their runs started).

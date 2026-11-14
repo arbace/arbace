@@ -5430,3 +5430,30 @@ units read); gen-batch over the 81 byte for byte (69), codegen-gen 155 of 155, c
 llvmi check --essential, lower-essential, cpp-check-essential, bin/reap (0 problems), crops-score strict (0) and the crops' key test pass,
 every peak under 2.1 GB. Proposed CP389, conversion function templates (f8's largest remaining drop). The kill of 06:29 used PIDs from a
 snapshot taken seconds earlier (not re-read before the kill): since then a helper reads each PID's command line before killing it.
+
+## 2026-11-14: cpp-s14: conversion function templates (CP389 (a)), f8's and library.cpp's drops 20 → 4 and 33 → 6
+
+The user's decision of the day: CP389 (a), then the two programs' drops, then cpp-s13's two findings. Branch `cpp-s14` from mac/cpp-s13
+(87bab53ba); doc/cpp/CPP-SURVEY.md, "As built: cpp-s14". All in arbace/cpp/ (template.ae, sema.ae, codegen.ae), one record line
+(test/cpp/codegen/forms.sha256's `globals`): no gate, runtime or seed key moves (gate-key-crops-test PASS).
+- Conversion function templates: declared on their class (`:conv-tmpls`), each deduced from the conversion's target type as
+  [temp.deduct.conv] says (a reference P's referred type; an array or function P decayed and top-level cv dropped for a non-reference
+  target; a reference target's referred type at least as qualified; pointers and pointers to members by a qualification conversion;
+  clang's TDF flags), instantiated with its constraints and ranked after the non-template conversion functions; mangled `cv T_ I...E`.
+  On the way, references bound directly to a conversion's lvalue or xvalue ([dcl.init.ref]/5.1.2, 5.3.2), non-template ones too (before:
+  a copy, or refused), references to functions bound to an overload set, and member-pointer deduction for the code generator. Considered:
+  a template's specializations kept among the class's conversion functions (rejected: one made for int* was offered for const int*).
+- The drops, each general with a probe and a control: a partial specialization's arguments taken as the preprocessor gave them (a
+  macro's name had stood in them: _GLIBCXX_NOEXCEPT_QUAL, _GLIBCXX_MOF_CV, _GLIBCXX_STD_C); noexcept(B) of a function type deduced false
+  (CP390 (b), decided by the brief's rule: the slice's function types carry no exception specification; (a), modelling them, left for a
+  program that needs it); decltype of a function's name its type; an explicit specialization's defaulted arguments completed in their
+  own scope (`__promote<long double>`); a variable template's partial specialization by a qualified name (`__detail::__is_subrange`); an
+  enumerator's attributes not its value (`_Ios_Openmode`).
+- cpp-s13's findings: a local static whose initializer is constant initialized statically (no guard), with two faults of the constant
+  leaves fixed (an array of every element written, an int-to-long cast's mask); `decltype(e)::name` as a qualifier.
+- Results: f8 and runtime/library.cpp generate (drops 4 and 6 causes) and pass on llvmi (f8 "3"; library.cpp g++'s stdout); gen-batch over
+  the 81: 69 generated, none lost, 66 byte for byte, 3 changed only by constant initializations clang also writes (their runs as recorded);
+  codegen-gen 155 (one record line re-hashed for the same reason), cpp-print-essential, llvm-essential's commands, llvmi's essential check,
+  lower-essential, cpp-check-essential, bin/reap (0 problems), crops-score strict (0) pass, every peak under 2.1 GB.
+- Proposed CP391 (a dependent decltype in a signature mangled as clang's DT...E) and CP392 (the native parser's decltype statements and a
+  using-declaration's tokens, outside arbace/cpp/). The disk stood at 85-89% most of the day (not this worktree's); runs waited for it.
