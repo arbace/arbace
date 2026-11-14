@@ -162,7 +162,9 @@
 #                                  none yet: no regressions; PYI_CHECK_AOT_LIB_RECORD another, a dry run's scratch record);
 #                                  queue 284: the drivers' children (sys.executable: script_helper, subprocess) run by the
 #                                  compiled launcher (tools/pyi/launcher.py, WORK/aot/bin/python3), not pyi on goi
-#                                  (PYI_AOT_LAUNCHER=0: on goi as before)
+#                                  (PYI_AOT_LAUNCHER=0: on goi as before); queue 287: in batches of PYI_AOT_LIB_BATCH
+#                                  modules (default 40, 0 all at once), each batch's drivers compiled, run and removed
+#                                  before the next's (a driver is 170-260 MB)
 #   bin/pyi launcher               queue 284: the compiled launcher (tools/pyi/launcher.py by pyi's AOT) built when stale; prints its
 #                                  wrapper, a sys.executable that runs CPython's command line compiled (check --aot --lib-test's)
 #   bin/pyi golden                 queue 247: the programs' own verdict: test/python/golden/ID.out is a program's expected stdout, reviewed
@@ -1360,22 +1362,33 @@ cmd_check_lib() {
     # each test's counters in DIR/tests/N (tools/pyi/libtest_cover.go)
     local drv="" ctests=""
     if [ -n "$cover" ]; then AOT="$WORK/aot-cover"; drv=$(cover_driver) || return 1; ctests="$cover/tests"; mkdir -p "$ctests"; fi
-    local drvdir=""; if [ -n "$aot" ]; then drvdir=$(aot_lib_drivers "$d") || return 1; fi
-    # a compiled driver is a compiled program: bin/pyi run's environment (pyi_env: sys.executable tools/pyi/python3, so
-    # script_helper's and subprocess's children start pyi as bin/pyi run's do; it was '': "[Errno 13] Permission denied")
-    [ -z "$drv$drvdir" ] || pyi_env
-    # queue 284: the drivers' children by the compiled launcher (launcher_py), sys.executable its wrapper
-    if [ -n "$drvdir" ] && [ "${PYI_AOT_LAUNCHER:-1}" != 0 ]; then
-      local lpy; lpy=$(launcher_py) || return 1; export PYI_EXECUTABLE="$lpy"
+    # queue 287: with --aot the modules go in batches of PYI_AOT_LIB_BATCH (default 40; 0: all at once): each batch's
+    # drivers compiled, run and removed before the next's, so the drivers on disk are a batch's (about 170-260 MB
+    # each: the whole universe at once held about 529 of them, over 100 GB)
+    local parts=("$d/modules.txt") part batch=${PYI_AOT_LIB_BATCH:-40}
+    if [ -n "$aot" ] && [ "$batch" -gt 0 ] 2>/dev/null; then
+      rm -f "$d"/_batch.*; split -l "$batch" -d -a 3 "$d/modules.txt" "$d/_batch."
+      parts=("$d"/_batch.*)
     fi
-    PYI_LIB_TEST_DRIVER_EXE="$drv" PYI_LIB_TEST_DRIVER_DIR="$drvdir" PYI_AOT_COMPILER="${drv:+$AOT/compiler.sh}${drvdir:+$AOT/compiler.sh}" PYI_LIB_TEST_COVER_TESTS="$ctests" \
-    PYI_LIB_TEST_ONLY="${only:+$WORK/check-only.txt}" PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
-      $runner run --root "$root" --modules "$d/modules.txt" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
-      --test-timeout "${PYI_LIB_TEST_TEST_TIMEOUT:-300}" --idle-timeout "${PYI_LIB_TEST_IDLE_TIMEOUT:-90}" --module-timeout "${PYI_LIB_TEST_TIMEOUT:-3600}" ${oracle:+--oracle "$lib"} \
-      --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"
+    for part in "${parts[@]}"; do
+      local drvdir=""; if [ -n "$aot" ]; then drvdir=$(aot_lib_drivers "$d" "$part") || return 1; fi
+      # a compiled driver is a compiled program: bin/pyi run's environment (pyi_env: sys.executable tools/pyi/python3, so
+      # script_helper's and subprocess's children start pyi as bin/pyi run's do; it was '': "[Errno 13] Permission denied")
+      [ -z "$drv$drvdir" ] || pyi_env
+      # queue 284: the drivers' children by the compiled launcher (launcher_py), sys.executable its wrapper
+      if [ -n "$drvdir" ] && [ "${PYI_AOT_LAUNCHER:-1}" != 0 ]; then
+        local lpy; lpy=$(launcher_py) || return 1; export PYI_EXECUTABLE="$lpy"
+      fi
+      PYI_LIB_TEST_DRIVER_EXE="$drv" PYI_LIB_TEST_DRIVER_DIR="$drvdir" PYI_AOT_COMPILER="${drv:+$AOT/compiler.sh}${drvdir:+$AOT/compiler.sh}" PYI_LIB_TEST_COVER_TESTS="$ctests" \
+      PYI_LIB_TEST_ONLY="${only:+$WORK/check-only.txt}" PYI_LIB_TEST_SKIP="${PYI_LIB_TEST_SKIP-$root/test/python/lib-test-skip.tsv}" \
+        $runner run --root "$root" --modules "$part" --dir "$d" --jobs "${PYI_LIB_TEST_JOBS:-2}" \
+        --test-timeout "${PYI_LIB_TEST_TEST_TIMEOUT:-300}" --idle-timeout "${PYI_LIB_TEST_IDLE_TIMEOUT:-90}" --module-timeout "${PYI_LIB_TEST_TIMEOUT:-3600}" ${oracle:+--oracle "$lib"} \
+        --tmp-base "${PYI_LIB_TEST_TMP:-$root/.tmp/t6i}"
+      # the compiled drivers (about 220 MB each) not kept past their run
+      [ -z "$drvdir" ] || { rm -rf "$drvdir"; aot_cache_trim; }
+    done
+    rm -f "$d"/_batch.*
     if [ -n "$only" ]; then cp "$WORK/check-only.txt" "$d/only.txt"; else rm -f "$d/only.txt"; fi
-    # the compiled drivers (about 220 MB each) not kept past their run
-    [ -z "$drvdir" ] || { rm -rf "$drvdir"; aot_cache_trim; }
   fi
   [ ! -f "$d/only.txt" ] || onlyf="$d/only.txt"
   "$(arbace_exe)" "$root/test/python/libtest_judge.ae" --name "pyi check" --dir "$d" --modules "$d/modules.tsv" "${refs[@]}" "${uni[@]}" --verdict "$verdict" \
@@ -1391,7 +1404,7 @@ cmd_check_lib() {
   return $rc
 }
 
-# aot_lib_drivers RUN (queue 279, check --aot --lib-test): for each module of RUN/modules.txt, test/python/libtest_run.py with
+# aot_lib_drivers RUN [LIST] (queue 279, check --aot --lib-test): for each module of LIST (default RUN/modules.txt; queue 287: a batch's), test/python/libtest_run.py with
 # the module's import put in its module-level code where it never runs (the driver's own import of it at run time, after
 # regrtest's setup, takes the module compiled ahead: AotRegister's key is its source's), compiled by pyi's AOT into
 # WORK/aot/bin/lt/MODULE.exe (bin/pyi aot-compile, under busybox time; MODULE runs it under busybox time, RUN/MODULE.mem
@@ -1399,7 +1412,7 @@ cmd_check_lib() {
 # SECONDS PEAK-KB STATE REASON; STATE built, refused or no-build). A module not built is not run (its methods "no result":
 # failing, not left to the loop). Prints the drivers' directory
 aot_lib_drivers() {
-  local run=$1 m n=0 jobs=${PYI_AOT_LIB_JOBS:-${PYI_LIB_TEST_JOBS:-2}} running=0; local dir="$AOT/bin/lt" src="$AOT/lt-src"
+  local run=$1 list=${2:-$1/modules.txt} m n=0 jobs=${PYI_AOT_LIB_JOBS:-${PYI_LIB_TEST_JOBS:-2}} running=0; local dir="$AOT/bin/lt" src="$AOT/lt-src"
   aot_module >&2; mkdir -p "$dir" "$src"; : >> "$run/aot-compile.tsv"
   # PYI_AOT_LIB_JOBS drivers at once (default PYI_LIB_TEST_JOBS; about 1-2.5 GB each, a cold generator's first 4.5 GB):
   # the first alone (a new generator's packages dropped and made once, aot_compile), then the rest in parallel
@@ -1411,7 +1424,7 @@ aot_lib_drivers() {
     if [ "$running" -ge "$jobs" ]; then wait -n || true; running=$((running - 1)); fi
     aot_lib_driver "$run" "$m" "$dir" "$src" &
     running=$((running + 1))
-  done < "$run/modules.txt"
+  done < "$list"
   wait
   echo "$dir"
 }
