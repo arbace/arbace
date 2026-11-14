@@ -6684,3 +6684,86 @@ test_descrdoc to `:pyio`; test_cycle_through_dict and test_remove_subclass to `:
 class); the class keeps its other named tests. `:capi-port` takes test_signature_parsing_with_defaults (a C type's
 method keeps no ml_doc), `:set-core` loses three. The record's 21 rows read "in no class" until the main host's run
 replaces night 12's. Queue 290's report: `.tmp/q290/290-python-deferred-classes-2.md` (the VM).
+
+## As built: 287, the compiled cell over the whole Lib/test on arm64, and the amd64 night's recipe (2026-11-14, the Mac VM, queue 287)
+
+284's launcher made Lib/test compiled (`bin/pyi check --aot --lib-test`) a candidate for one night; 287 ran it over every
+module of the universe (`test/python/universe-cpython314.edn`, 529 modules) on arm64, judged and classed it as 279 did,
+and writes down the main host's night. Base 5c6371975 (201 with 278, 279, 275, 281 and 284).
+
+- **The run** (the VM, arm64, `PYI_AOT_LIB_JOBS=2 PYI_LIB_TEST_JOBS=2`, GOGC=50, the scratch record
+  `PYI_CHECK_AOT_LIB_RECORD`; 48 pieces resumed into one run directory, then one invocation naming no module that ran
+  nothing and judged all): **529 modules, 48,162 methods: 38,834 pass, 8,646 classed, 682 failing** on the base; the 3
+  controls fail as they must. None of the 682 is in 284's 148 modules: night 12 never reached them on goi either.
+- **Times and memory** (the VM; 104 modules at 8 shared cores, from 21:28 UTC every process pinned to 4 cores, about 2x
+  slower): 5 h 40 min wall at 2 jobs; the drivers' compile summed 13,266 s (18.4 s a driver unpinned, 26.7 s pinned;
+  peak median 1.17 GB, p90 1.32 GB, max 4.0 GB, test_typing); the modules' runs summed 19,348 s (the runner's
+  "run (N s)"; 2,049 s for the 104 unpinned), each driver's peak median 0.15 GB, p90 0.35 GB, max 5.7 GB (test_zipfile),
+  then 2.2 GB (test_lzma). The slowest modules (pinned): test_cmd_line_script 1,493 s (4 tests at the 300 s cap: the REPL
+  flush tests), test_multiprocessing_main_handling 1,115 s (3 at the cap), test_email 789 s (2 at the cap), test_io 728 s
+  (7 idle hangs), test_cmd_line 723 s, test_cext 537 s (pip into a venv), test_dbm_sqlite3 475 s, test_fstring 456 s.
+  28 timeout rows (12 idle hangs at 90 s, 16 busy at 300 s), all in existing classes.
+- **The goi probe**, 279's way: on goi (`bin/pyi check --only` of the failing methods) 6 modules took 45 min pinned
+  (multiprocessing's 935-1,517 s), so the probe is 279's loop control instead: the same compiled drivers with
+  `PYI_AOT_LOOP=1` (every code object on the dispatch loop, the runtime's own semantics), `--only` the 682: 606 the same
+  outcome, 56 not run on either, 10 another failure (none passes), 10 pass on the loop only (the 2 PdbTestColorize and
+  the 8 of `:compiled-flaky`). The goi rows that ran (test_pydoc,
+  test___all__, test__interpreters, test_argparse, test_multiprocessing_fork's two) failed the same on goi.
+- **Fixed** (runtime by print, edit, read, gofmt, vet clean; each a test on goi, base FAIL, head PASS):
+  - a SimpleNamespace subclass's instance (an *Instance holding the *Namespace, wrapNew) panicked in GetAttr, SetAttr
+    and `__reduce__` (`o.(*Namespace)`): now by `builtinValue`, `__reduce__` an objectDescr method so a subclass reduces
+    to its class (test_zipfile's `class Invoked(types.SimpleNamespace)`, 45 methods);
+  - posix had SEEK_SET/CUR/END, which posixmodule.c has not, so os.__all__ named them twice (test___all__); posix's
+    `_is_inputhook_installed()` (False) and `_inputhook()` (0), which _pyrepl's unix console asks (test_pyrepl);
+  - object's own slot wrappers (`object.__str__`, `__repr__`, `__format__`) took a built-in subclass's value, so
+    `__str__ = object.__str__` in an int-mixin enum gave the int's text; an empty format spec of an int, float or complex
+    subclass is its str() (long__format__'s rule; test_enum's 23 str-override and format tests);
+  - defaultdict's `|` gave a plain dict (defdict_or: `type(dd)(dd.default_factory, left)` updated with right), and
+    `__missing__` is setdefault (3.14.10's gh-145492: a value the factory stored stays; test_defaultdict).
+  - bin/pyi: `check --aot --lib-test` compiled every selected module's driver before running any: the whole universe at
+    once is 529 drivers of 170-260 MB, over 100 GB of disk. Now in batches of **`PYI_AOT_LIB_BATCH`** modules (default
+    40; 0: all at once), each batch's drivers compiled, run and removed before the next's.
+- **Not fixed, compiled only**: after `Pdb.set_trace(commands=[..., 'c'])` in a compiled test method, the method's
+  frame is entered again at its resume point after a stack call with one value fewer than its spill left (PC 24, SP 3
+  for 4), so AotCallMethodV takes a bound method as a function: a Go panic (test_pdb's PdbTestColorize, reproducer by
+  `bin/pyi aot`); a guard keeping a handed-over frame on the loop changed nothing (no AotToLoop on that path).
+  `:aot-trace-resume`.
+- **Classes** (test/python/divergences.edn and divergences-315.edn, before `:skipped-by-test`; 21 new ones only, each
+  naming its methods in `:tests`, 597 rows): `:aot-trace-resume` (compiled only, above), `:compiled-flaky` (9 rows that
+  failed once compiled under the load and passed on the loop control and on the rerun), `:audit-hooks` (sys.audit calls
+  no hook), `:multiprocessing-children`, `:pydoc-builtins` (no `__text_signature__`, no built-in subclasses,
+  object.__dict__ without slot wrappers), `:c-bisect`, `:hash-algorithm`, `:ordered-dict-c`, `:structseq-protocol`,
+  `:io-c-checks`, `:compileall-pyc`, `:dbm-sqlite3-locking`, `:interactive-mode` (no -i, no REPL), `:venv-and-build`
+  (by design), `:run-dir-zip-main`, `:partial-python`, `:zoneinfo-c`, `:source-decoding`, `:core-objects-287`,
+  `:os-and-files-misc`, `:tools-misc`. No existing class touched.
+- **The head**: the fixes' modules and 12 neighbours compiled again at the head (`--only`, in batches of 6: test_zipfile,
+  test_enum, test_defaultdict, test___all__, test_pyrepl, test_os, test_posix, test_descr, test_class, test_float,
+  test_complex, test_str, test_long, test_types, test_fstring, test_collections and the loop-only rows), 86 of the 682
+  pass, none of the rest newly failing but test_float's test_hash_nan (99 != 100, once: `:compiled-flaky`). The whole
+  run's directory with those modules' head runs put in, judged with the head's classes: **529 modules, 48,162 methods:
+  38,919 pass, 9,243 classed, 0 failing**; the 3 controls fail as they must.
+
+### The amd64 night (the main host, one slot)
+
+```
+cd MAIN-CHECKOUT
+GOGC=50 PYI_AOT_LIB_JOBS=4 PYI_LIB_TEST_JOBS=4 PYI_AOT_LIB_BATCH=40 \
+  bin/pyi check --aot --lib-test --fresh --record
+```
+
+- It writes `test/python/check-aot-lib-test-linux-amd64.edn` (the cell's record; the first one: no regressions judged).
+  Without `--fresh` it resumes (a module with a `.status` is kept), so a night cut short continues the next.
+- Limits, the defaults: `PYI_LIB_TEST_TEST_TIMEOUT=300` (a busy test), `PYI_LIB_TEST_IDLE_TIMEOUT=90` (275's hang),
+  `PYI_LIB_TEST_TIMEOUT=3600` (a module); `PYI_GOMEMLIMIT=3GiB` for the host compiler and pyi; GOGC=50 (the user's).
+- **Expected time**: from the VM's unpinned rates (18.4 s a driver's compile, the runs at about half their pinned
+  sum): about 9.7k s of compile and 11-12k s of runs, so **about 1.5-2 h at 4 jobs** on a quiet host, with the
+  slowest modules (test_cmd_line_script, test_multiprocessing_main_handling) about 10-25 min each in the tail. Add
+  about 12 min when the runtime changed since the last AOT build (the runtime printed, the five clib aots, the
+  launcher and the runner compiled: `bin/pyi launcher` alone took 12 min 20 s here) and the drivers' first compile
+  after a generator change (4.5 GB, alone).
+- **Expected peak**: 4 compiles (median 1.2 GB, up to 4.0 GB) and 4 drivers (median 0.15 GB, up to 5.7 GB) at once:
+  about 8 GB typical, under 22 GB at worst. Disk: a batch's drivers, about 8 GB at 40 (plus the launcher's 262 MB and
+  the runner's 170 MB).
+- **Expected outcome**: the VM's whole run had 682 failing on the base; with this branch's fixes and classes 0 failing
+  is expected, apart from what amd64 adds (the timeouts the load moves, a first whole run's new rows).
+- After it: name the record in `test/reap/cells.edn`'s `:pyi-aot` sources (284's REQUEST), then `bin/reap --record`.
