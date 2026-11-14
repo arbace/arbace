@@ -707,7 +707,10 @@
   (let [i (fresh-id)]
     ;; a wanted made under given equalities keeps them (its implication's givens, GHC.Tc.Types.Constraint's
     ;; Implication ic_given): it is solved later, after the alternative or the binding that gave them, rewritten by them
-    (swap! *wanteds* conj (cond-> {:ev i :pred pred} (and *given-eqs* (seq @*given-eqs*)) (assoc :geqs *given-eqs*)))
+    (swap! *wanteds* conj (cond-> {:ev i :pred pred} (and *given-eqs* (seq @*given-eqs*)) (assoc :geqs *given-eqs*)
+                            ;; HF10-P54 (a): the let ?x = e bindings in scope, for a constraint family's reduction later
+                            (and (seq *ip-givens*) (vector? (first pred)) (some-> *families* deref (get (first pred))))
+                            (assoc :ipg *ip-givens*)))
     (list 'ev i)))))
 
 (def ^:private inst-index (atom [nil {}])) ; [the *insts* vector it was made of, {CLASS [inst...]}]
@@ -720,6 +723,21 @@
     (if (identical? v v0)
       (get m c)
       (let [m (group-by (comp first :head) v)] (reset! inst-index [v m]) (get m c)))))
+
+(def ^:private var-head-index (atom [nil #{}])) ; [the *insts* vector, #{CLASS...}]
+
+(defn- var-head-class?
+  "HF10-P54 (a): class c has an instance whose head's first argument is one of its variables (instance TypeCast' () a b
+  => TypeCast a b), so a wanted whose first argument is a meta may be solved by it (inst-candidate decides)"
+  [c]
+  (let [v @*insts* [v0 cs] @var-head-index]
+    (if (identical? v v0)
+      (contains? cs c)
+      (let [cs (set (keep (fn [i] (let [h (first (second (:head i)))]
+                                    (when (and (vector? h) (= :tv (first h)) (some #{(second h)} (:tvs i))) (first (:head i)))))
+                          v))]
+        (reset! var-head-index [v cs])
+        (contains? cs c)))))
 
 (defn- zonk-pred [[c ts]]
   (let [ts (mapv (comp deep-expand zonk) ts)]
@@ -771,7 +789,12 @@
   (loop [todo givens out []]
     (if (empty? todo)
       out
-      (let [[[c ts] term :as g] (first todo)
+      (let [g (first todo)
+            ;; HF10-P54 (a): a variable constraint given at a class's application is that class's given (tcrun046's MkT
+            ;; :: a => T a matched at T (Ord x): Ord x, GHC's given after its rewriting)
+            g (let [[[c ts] term] g t (when (= :cvar c) (zonk (first ts)))]
+                (if (and t (= :tc (first t)) (some-> *classes* deref (get (second t)))) [[(second t) (nth t 2)] term] g))
+            [[c ts] term] g
             info (get @*classes* c)
             subs (map-indexed (fn [i [sc sts]]
                                 (let [p [sc (mapv #(subst (zipmap (:tvs info) ts) %) sts)]
@@ -1036,7 +1059,91 @@
         (when (every? some? subs)
           (reduce (fn [f x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Data.Typeable.Internal" "mkTrApp")) [f x])) con subs))))))))
 
-(declare cls-callstack fresh-lv)
+(declare cls-callstack fresh-lv solve-pred ctx-preds rewrite-by-givens)
+
+;; HF10-P54 (a): functional dependencies and overlapping instances in the solver (GHC.Core.InstEnv's lookupInstEnv,
+;; GHC.Tc.Instance.FunDeps' improveFromInstEnv), read from GHC 9.14.1's source
+
+(defn- improve-one!
+  "A wanted [c ts]'s improvement by the functional dependencies of its class from the instances (GHC.Tc.Instance.FunDeps'
+  improveFromInstEnv: an instance whose head matches the wanted at a dependency's left positions gives its right
+  positions, the instance's other variables fresh); only metas are fixed (HF10-P42 (a)); true when something was unified"
+  [[c ts]]
+  (let [changed (atom false) fds (some-> *classes* deref (get c) :fundeps)]
+    (doseq [[ls rs] fds :when (and (every? #(< -1 % (count ts)) ls) (every? #(< -1 % (count ts)) rs))
+            :let [ts (mapv zonk ts)
+                  inst (some (fn [{:keys [tvs head] :as i}]
+                               (when (= (first head) c)
+                                 (when-let [m (reduce (fn [m p] (match-ty (set tvs) m (nth (second head) p) (nth ts p))) {} ls)]
+                                   [i m])))
+                             (insts-of c))]
+            :when inst]
+      (let [[{:keys [tvs head]} m] inst
+            m (into (into {} (map (fn [v] [v (fresh-meta)]) tvs)) m)]
+        (doseq [p rs]
+          (let [want (zonk (nth ts p)) got (subst m (nth (second head) p))]
+            (when (and (not= want (zonk got)) (seq (metas-of want))) (unify (nth ts p) got) (reset! changed true))))))
+    @changed))
+
+(defn- inst-unify
+  "GHC.Core.Unify's tcUnifyTys as instEnvMatchesAndUnifiers' check_unifiers uses it: the substitution s ({[:tv v] or
+  [:mv i] type}) extended so that p (an instance head's type, its variables vs) and t (a wanted's, its metas variables)
+  are equal, or nil when they are apart; a stuck family application may become anything (MaybeApart)"
+  [vs s p t]
+  (when s
+    (let [walk (fn walk [x] (let [x (expand (prune x))] (if-let [r (and (#{:tv :mv} (first x)) (get s x))] (walk r) x)))
+          a (walk p) b (walk t)
+          var? (fn [x] (or (= :mv (first x)) (and (= :tv (first x)) (contains? vs (second x)))))
+          args (fn [s xs ys] (reduce (fn [s [x y]] (inst-unify vs s x y)) s (map vector xs ys)))]
+      (cond (= a b) s
+            (var? a) (assoc s a b)
+            (var? b) (assoc s b a)
+            (or (stuck-family? a) (stuck-family? b)) s
+            (and (= :tc (first a)) (= :tc (first b)))
+            (when (and (= (second a) (second b)) (= (count (nth a 2)) (count (nth b 2)))) (args s (nth a 2) (nth b 2)))
+            (and (= :app (first a)) (= :tc (first b)) (seq (nth b 2)))
+            (args s [(nth a 1) (nth a 2)] [[:tc (second b) (vec (butlast (nth b 2)))] (last (nth b 2))])
+            (and (= :tc (first a)) (= :app (first b)) (seq (nth a 2)))
+            (args s [[:tc (second a) (vec (butlast (nth a 2)))] (last (nth a 2))] [(nth b 1) (nth b 2)])
+            (and (= :app (first a)) (= :app (first b))) (args s [(nth a 1) (nth a 2)] [(nth b 1) (nth b 2)])
+            :else nil))))
+
+(defn- head-match [i ts]
+  (reduce (fn [m [p t]] (match-ty (set (:tvs i)) m p t)) {} (map vector (second (:head i)) ts)))
+
+(defn- inst-candidate
+  "The instance [inst match] that solves [c ts] (GHC.Core.InstEnv's lookupInstEnv): of the instances whose heads match,
+  those another more specific one overlaps are pruned (pruneOverlappedMatches: the program was accepted, so the overlap
+  is allowed), the first left; none when ts has metas and an instance that does not match unifies with it (its choice
+  waits for them: Note [Overlapping instances])"
+  [c ts]
+  (let [is (insts-of c)
+        ms (vec (keep (fn [i] (when-let [m (head-match i ts)] [i m])) is))]
+    (when (seq ms)
+      (let [spec? (fn [a b] (some? (head-match b (second (:head a))))) ; a's head an instance of b's
+            pruned (if (= 1 (count ms)) ms
+                       (filterv (fn [[a _]] (not-any? (fn [[b _]] (and (not (identical? a b)) (spec? b a) (not (spec? a b)))) ms)) ms))
+            metas? (some #(seq (metas-of %)) ts)]
+        (when-not (and metas?
+                       (let [mset (set (map first ms))]
+                         (some (fn [i] (and (not (contains? mset i))
+                                            (inst-unify (set (:tvs i)) {} [:tc :h (second (:head i))] [:tc :h (vec ts)])))
+                               is)))
+          (first pruned))))))
+
+(defn- solve-ctx
+  "An instance's context [pred...] solved together (GHC's solver works on the wanteds as a set): each round every
+  unsolved one improved by its class's dependencies and tried again, until all are solved or a round changes nothing;
+  the terms, or nil"
+  [preds givens depth]
+  (loop [k 0 terms (vec (repeat (count preds) nil))]
+    (let [before (mapv zonk-pred preds)
+          terms' (mapv (fn [t p] (or t (do (when (seq (some-> *classes* deref (get (first (zonk-pred p))) :fundeps)) (improve-one! (zonk-pred p)))
+                                           (solve-pred p givens depth))))
+                       terms preds)]
+      (cond (every? some? terms') terms'
+            (or (> k 8) (and (= (count (filter some? terms')) (count (filter some? terms))) (= before (mapv zonk-pred preds)))) nil
+            :else (recur (inc k) terms')))))
 
 (def ^:dynamic *solving* {}) ; {pred (atom lv)}: the predicates whose instance is being solved (recursive dictionaries)
 
@@ -1054,6 +1161,41 @@
     (if (eq-pred? [c ts])
       (do (unify (last (butlast ts)) (last ts)) (list 'co))
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
+        ;; HF10-P54 (a): a given rewritten by the given equalities (tcrun039's Read b with b ~ [a] from MkG :: GADT [a]:
+        ;; the wanted Read [a]; GHC's inert givens are rewritten by the given equalities, GHC.Tc.Solver.Rewrite)
+        ;; and a given whose arguments reduce (T3500b's Show (Id (f (Mu f))), a family application: Show (f (Mu f)))
+        (let [eqs? (and *given-eqs* (seq @*given-eqs*))
+              rw (fn [t] (deep-expand (if eqs? (rewrite-by-givens t) (zonk t))))
+              rts (delay (mapv rw ts))]
+          (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (count gts) (count ts)) (= (mapv rw gts) @rts)) term)) givens)
+              ;; HF10-P54 (a): a given type family of constraints reduced (tcrun043's Indexed a b with a ~ T: Show b), the
+              ;; wanted one of its predicates: the given's evidence, a constraint tuple's component selected
+              (some (fn [[[gc gts] term]]
+                      (when (and (vector? gc) (some-> *families* deref (get gc)) (not (some-> *classes* deref (get gc))))
+                        (let [t [:tc gc (mapv rw gts)] r (expand t)]
+                          (when (not= r t)
+                            (let [ps (ctx-preds r)]
+                              (some (fn [[i [pc pts]]]
+                                      (when (and (= pc c) (= (mapv rw pts) @rts))
+                                        (if (= 1 (count ps))
+                                          term
+                                          (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" (str "$p" i "CTuple" (count ps)))) [term]))))
+                                    (map-indexed vector ps)))))))
+                    givens)))
+        ;; HF10-P54 (a): a type family of constraints applied (ConstraintKinds' type family F x :: Constraint; T17104's F
+        ;; Int = (?x :: String)) is its reduction's predicates, solved with the let ?x = e bindings in scope (the
+        ;; innermost first); the evidence theirs (GHC's cast by the family's coercion, erased), a tuple's the constraint
+        ;; tuple's constructor applied
+        (when (and (vector? c) (some-> *families* deref (get c)) (not (some-> *classes* deref (get c))) (< depth 30))
+          (let [t [:tc c ts] r (expand t)]
+            (when (not= r t)
+              (let [ipg (vec (for [[n it d] (reverse *ip-givens*)] [[cls-ip [[:lit n] it]] d]))
+                    subs (mapv #(solve-pred % (into ipg givens) (inc depth)) (ctx-preds r))]
+                (when (every? some? subs)
+                  (case (count subs)
+                    0 (list 'v (ext-name "var" "GHC.Internal.Classes" "CUnit"))
+                    1 (first subs)
+                    (list 'app (list 'v (ext-name "var" "GHC.Internal.Classes" (str "CTuple" (count subs)))) subs)))))))
         ;; HF10-P44 (a): a functional dependency's improvement from a given (GHC.Tc.Solver.Dict's improvement by the
         ;; inert givens: reify's Reifies s a given, reflect p's Reifies s ?b wanted, ?b := a), then the given itself
         (when-let [fds (seq (some-> *classes* deref (get c) :fundeps))]
@@ -1126,16 +1268,25 @@
         ;; (a nullary class's instance too: MultiParamTypeClasses' class Trivial; instance Trivial, HF10-P43)
         ;; HF10-P50 (a): a skolem as the first argument too (T21973b's ClassLedger c by instance Eq c => ClassLedger c,
         ;; tcrun033's ClassA a String): only an instance whose head is a variable there matches it, after the givens
+        ;; HF10-P54 (a): a meta as the first argument too, when an instance's head is a variable there (testeq2's
+        ;; TypeCast ?b HTrue by instance TypeCast' () a b => TypeCast a b): committed when it is the only match and no
+        ;; other instance unifies (inst-candidates, GHC.Core.InstEnv's lookupInstEnv)
         (when (and (< depth 30) (or (and (empty? ts) (some-> *classes* deref (get c)))
-                                    (and (seq ts) (not= :mv (first (first ts))))))
+                                    (and (seq ts) (not= :mv (first (first ts))))
+                                    (and (seq ts) (var-head-class? c))))
           (let [inst-term (fn []
-                            (some (fn [{:keys [dfun tvs ctx head]}]
-                                    (when (= (first head) c)
-                                      (when-let [m (reduce (fn [m [p t]] (match-ty (set tvs) m p t)) {} (map vector (second head) ts))]
-                                        (let [subs (map (fn [[pc pts]] (solve-pred [pc (mapv #(subst m %) pts)] givens (inc depth))) ctx)]
-                                          (when (every? some? subs)
-                                            (if (empty? ctx) (list 'v dfun) (list 'app (list 'v dfun) (vec subs))))))))
-                                  (insts-of c)))
+                            ;; HF10-P54 (a): a class with functional dependencies improves the wanted from the instances
+                            ;; first (GHC.Tc.Solver.Dict's improvement: Container (Cont Integer) ?b by Container (Cont a) a)
+                            (when (seq (some-> *classes* deref (get c) :fundeps)) (improve-one! [c ts]))
+                            (let [ts (second (zonk-pred [c ts]))]
+                              (when-let [[{:keys [dfun tvs ctx]} m] (inst-candidate c ts)]
+                                ;; an instance's variables its head does not bind (its context's, a functional
+                                ;; dependency determines them: T5759's b of Container a b) fresh metas, its context
+                                ;; solved together, each improved by the others' solutions (solve-ctx)
+                                (let [m (into (into {} (map (fn [v] [v (fresh-meta)]) tvs)) m)
+                                      subs (solve-ctx (mapv (fn [[pc pts]] [pc (mapv #(subst m %) pts)]) ctx) givens (inc depth))]
+                                  (when subs
+                                    (if (empty? ctx) (list 'v dfun) (list 'app (list 'v dfun) (vec subs))))))))
                 key [c ts]]
             ;; HF10-P50 (a): recursive dictionaries (T3731-short's Data Expression needing Data [Expression] needing Data
             ;; Expression): a predicate met again while its instance is being solved is the dictionary being made, bound by
@@ -1225,7 +1376,12 @@
                       (do (error! "type literal not handled: " (con l)) (fresh-meta))))
       HsParTy (hs-type tvs (arg v 2))
       HsBangTy (hs-type tvs (arg v 3))
-      HsOpTy (let [op (nm (arg v 4))] [:tc op [(hs-type tvs (arg v 3)) (hs-type tvs (arg v 5))]])
+      HsOpTy (let [op (nm (arg v 4))]
+               (if (= "tv" (nth op 1))
+                 ;; HF10-P54 (a): a type variable used infix (tcrun034's a `m` b): its application, as HsTyVar's
+                 (let [f (or (get tvs op) (get *scoped-tvs* (tv-key op)) (some-> *pat-tvs* deref (get (tv-key op))) [:tv (occ op)])]
+                   (mk-app (mk-app f (hs-type tvs (arg v 3))) (hs-type tvs (arg v 5))))
+                 [:tc op [(hs-type tvs (arg v 3)) (hs-type tvs (arg v 5))]]))
       HsQualTy (let [ctx (lval (arg v 2)) body (hs-type tvs (arg v 3))]
                  [:forall [] (vec (mapcat (fn [c] (ctx-preds (hs-type tvs c))) ctx)) body])
       ;; RankNTypes: an inner forall a quantified type of its own (runST's (forall s. ST s a)); the elaborator
@@ -1558,6 +1714,26 @@
             v)
       default))
 
+(def ^:private is-list-m "GHC.Internal.IsList")
+
+(defn- ovl-lists?
+  "HF10-P54 (a): OverloadedLists on, and IsList's interface loaded (a module that never imports it keeps its lists)"
+  []
+  (and (contains? *exts* "OverloadedLists") (not (contains? *exts* "RebindableSyntax"))
+       (contains? @*genv* (ext-name "var" is-list-m "fromListN"))))
+
+(declare var-occ)
+
+(defn- ovl-list
+  "HF10-P54 (a): an explicit list [type core] of n elements under OverloadedLists (GHC.Rename.Expr's rnExpr of
+  ExplicitList): fromListN n of it, IsList's (the literal n at Int)"
+  [env [tl cl :as plain] n]
+  (if-not (ovl-lists?)
+    plain
+    (let [[tf cf] (var-occ env (ext-name "var" is-list-m "fromListN")) r (fresh-meta)]
+      (unify tf (fn-ty (con-ty tc-int) (fn-ty tl r)))
+      [r (app* cf [(list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str n "#"))]) cl])])))
+
 (defn- overlit
   "An overloaded literal: its type a fresh meta constrained by Num (Fractional), the core resolved at the end"
   [v]
@@ -1589,6 +1765,24 @@
         t (if (str/includes? t ".") t (str t ".0"))]
     ;; a literal is a Rational (GHC's LitDouble, LitFloat): -0.0## is 0.0
     t))
+
+(declare hslit)
+
+(defn- ovl-string?
+  "HF10-P54 (a): a string literal under OverloadedStrings (GHC.Rename.Expr's rnExpr and GHC.Rename.Pat's rnPatAndThen
+  make it an HsOverLit's HsIsString, a pattern's an NPat)"
+  [v]
+  (and (contains? *exts* "OverloadedStrings") (seq? (arg v 2)) (= 'HsString (con (arg v 2)))
+       (not (contains? *exts* "RebindableSyntax"))))
+
+(defn- ovl-string
+  "HF10-P54 (a): an overloaded string literal (GHC.Tc.Utils.Instantiate's newOverloadedLit of HsIsString): its type a
+  fresh meta constrained by IsString, the core fromString of the String literal, resolved at the end (lit-core :str)"
+  [v]
+  (let [a (fresh-meta)
+        fs (implicit-name v "fromString" (ext-name "var" "GHC.Internal.Data.String" "fromString"))
+        ev (want! [(ext-name "tc" "GHC.Internal.Data.String" "IsString") [a]])]
+    [a (list 'olit :str (arg (arg v 2) 2) a ev fs)]))
 
 (defn- hslit [v]
   (let [l (arg v 2)]
@@ -2097,7 +2291,10 @@
   (let [v (lval e)]
     (case (con v)
       HsVar (if-let [n (nm (arg v 2))]
-              (var-occ env n (lsp (arg v 2)))
+              ;; HF10-P54 (a): [] is an ExplicitList (GHC.Rename.Expr's rnExpr of nilDataConName, Note [Empty lists])
+              (if (and (= n (ext-name "data" "GHC.Internal.Types" "[]")) (ovl-lists?))
+                (ovl-list env [(list-ty (fresh-meta)) (list 'v n)] 0)
+                (var-occ env n (lsp (arg v 2))))
               (do (error! "unrenamed variable: " (pr-str (lval (arg v 2)))) [(fresh-meta) (list 'lit "?")]))
       HsApp (let [[h args] (app-spine v)] (tc-app env h args nil))
       OpApp (tc-app env (arg v 3) [(arg v 2) (arg v 4)] nil)
@@ -2109,10 +2306,13 @@
       HsPar (infer env (arg v 2))
       HsPragE (infer env (arg v 3))
       HsOverLit (overlit v)
-      HsLit (hslit v)
-      SectionL (let [[te ce] (infer env (arg v 2)) [to co] (infer env (arg v 3)) b (fresh-meta) r (fresh-meta)]
-                 (unify to (fn-ty te (fn-ty b r)))
-                 [(fn-ty b r) (app* co [ce])])
+      HsLit (if (ovl-string? v) (ovl-string v) (hslit v))
+      ;; HF10-P54 (a): PostfixOperators' left section (e op) is op e (GHC.Tc.Gen.Expr's SectionL, its postfix_ops)
+      SectionL (if (contains? *exts* "PostfixOperators")
+                 (tc-app env (arg v 3) [(arg v 2)] nil)
+                 (let [[te ce] (infer env (arg v 2)) [to co] (infer env (arg v 3)) b (fresh-meta) r (fresh-meta)]
+                   (unify to (fn-ty te (fn-ty b r)))
+                   [(fn-ty b r) (app* co [ce])]))
       SectionR (let [[to co] (infer env (arg v 2)) [te ce] (infer env (arg v 3)) a (fresh-meta) r (fresh-meta)
                      x (fresh-lv "x")]
                  (unify to (fn-ty a (fn-ty te r)))
@@ -2145,14 +2345,25 @@
                MonadComp (infer-stmts env (lval (arg v 3)) true)
                (do (error! "do flavour not handled: " (pr-str fl)) [(fresh-meta) (list 'lit "?")])))
       ExplicitList (let [a (fresh-meta)
-                         cs (mapv (fn [x] (let [[t c] (infer env x)] (unify t a) c)) (arg v 2))]
-                     [(list-ty a) (reduce (fn [tl x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x tl]))
-                                          (list 'v (ext-name "var" "GHC.Internal.Types" "[]")) (reverse cs))])
-      ExplicitTuple (let [rs (mapv (fn [p] (infer env (arg (lval p) 2))) (arg v 2))]
-                      (if (= 'Unboxed (arg v 3))
-                        [[:tc (utuple-tc (count rs)) (mapv first rs)]
-                         (app* (list 'v (unboxed-con (count rs))) (mapv second rs))]
-                        [[:tc (tuple-tc (count rs)) (mapv first rs)] (app* (list 'v (tuple-con (count rs))) (mapv second rs))]))
+                         cs (mapv (fn [x] (let [[t c] (infer env x)] (unify t a) c)) (arg v 2))
+                         l [(list-ty a) (reduce (fn [tl x] (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" ":")) [x tl]))
+                                                (list 'v (ext-name "var" "GHC.Internal.Types" "[]")) (reverse cs))]]
+                     (ovl-list env l (count cs)))
+      ;; HF10-P54 (a): TupleSections' missing components (GHC.Tc.Gen.Expr's ExplicitTuple, GHC.HsToCore.Expr's
+      ;; dsExplicitTuple): a lambda of a fresh variable each, the tuple inside
+      ExplicitTuple (let [rs (mapv (fn [p] (let [pv (lval p)]
+                                             (if (= 'Missing (con pv))
+                                               (let [t (fresh-meta) x (fresh-lv "ds")] (note-type! x t) [t x :missing])
+                                               (infer env (arg pv 2)))))
+                                   (arg v 2))
+                          lams (vec (keep (fn [[t x m]] (when m [t x])) rs))
+                          [tt tc] (if (= 'Unboxed (arg v 3))
+                                    [[:tc (utuple-tc (count rs)) (mapv first rs)]
+                                     (app* (list 'v (unboxed-con (count rs))) (mapv second rs))]
+                                    [[:tc (tuple-tc (count rs)) (mapv first rs)] (app* (list 'v (tuple-con (count rs))) (mapv second rs))])]
+                      (if (seq lams)
+                        [(reduce (fn [r [t _]] (fn-ty t r)) tt (reverse lams)) (list 'lam (mapv second lams) tc)]
+                        [tt tc]))
       ;; HF10-P43 (a): StaticPointers (GHC.Tc.Gen.Expr's HsStatic, GHC.HsToCore.Expr's makeStatic, GHC.Iface.Tidy.StaticPtrTable's
       ;; sptCreateStaticBinds): static e is fromStaticPtr (IsStatic p, Typeable t) of a StaticPtr of e's type t, its key
       ;; mkStaticPtrFingerprint's, its info the body's position (static-ptr!)
@@ -2726,6 +2937,9 @@
       AsPat (let [n (nm (arg v 2)) _ (note-type! (lv n) t) [env1 pc] (tc-pat (assoc env n {:mono t}) (arg v 3) t)] [env1 (list 'pas (lv n) pc)])
       ConPat (cond
                (some-> *patsyns* deref (get (nm (arg v 2)))) (tc-patsyn-pat env v t (get @*patsyns* (nm (arg v 2))))
+               ;; HF10-P54 (a): [] under OverloadedLists is the list pattern [] (GHC.Rename.Pat's ConPat of nilDataCon)
+               (and (= (nm (arg v 2)) (ext-name "data" "GHC.Internal.Types" "[]")) (ovl-lists?))
+               (tc-pat env (list 'ListPat nil []) t)
                (= 'RecCon (con (arg v 3))) (tc-rec-pat env v t)
                :else (tc-con-pat env v t))
       TuplePat (if (= 'Unboxed (arg v 3))
@@ -2763,10 +2977,14 @@
                    _ (unify t [:tc (usum-tc n) ts])
                    [env' pc] (tc-pat env (arg v 2) (nth ts (dec alt)))]
                [env' (list 'pcon (usum-con alt n) [pc])])
+      ;; HF10-P54 (a): under OverloadedLists a view pattern (toList -> [p1, ...]) (GHC.Rename.Pat's rnPatAndThen of
+      ;; ListPat, Note [Desugaring overloaded list patterns])
       ListPat (let [a (fresh-meta)
-                    _ (unify t (list-ty a))
+                    ovl (and (ovl-lists?) (contains? @*genv* (ext-name "var" is-list-m "toList")))
+                    [tl cl] (when ovl (var-occ env (ext-name "var" is-list-m "toList")))
+                    _ (if ovl (unify tl (fn-ty t (list-ty a))) (unify t (list-ty a)))
                     [env' pcs] (reduce (fn [[env pcs] p1] (let [[e c] (tc-pat env p1 a)] [e (conj pcs c)])) [env []] (arg v 2))]
-                [env' (list 'plist pcs)])
+                [env' (if ovl (list 'pview cl (list 'plist pcs)) (list 'plist pcs))])
       ;; GHC's tcNPat: the equality first, then the literal
       NPat (let [eqn (implicit-name v "==" (ext-name "var" "GHC.Internal.Classes" "=="))
                  [te ce] (var-occ env eqn)
@@ -2774,7 +2992,15 @@
              (unify lt t)
              (unify te (fn-ty t (fn-ty t (con-ty tc-bool))))
              [env (list 'plit ce lc t)])
-      LitPat (let [[lt lc] (hslit v)] (unify lt t) [env (list 'plit lc)])
+      ;; HF10-P54 (a): an overloaded string pattern is an NPat (rnPatAndThen's LitPat under OverloadedStrings): tcNPat's
+      ;; (==) at the scrutinee's type and the literal fromString's
+      LitPat (if (ovl-string? v)
+               (let [[te ce] (var-occ env (implicit-name v "==" (ext-name "var" "GHC.Internal.Classes" "==")))
+                     [lt lc] (ovl-string v)]
+                 (unify lt t)
+                 (unify te (fn-ty t (fn-ty t (con-ty tc-bool))))
+                 [env (list 'plit ce lc t)])
+               (let [[lt lc] (hslit v)] (unify lt t) [env (list 'plit lc)]))
       ;; HF10-P50 (a): n+k (GHC.Tc.Gen.Pat's NPlusKPat: the literal, (>=) and (-) at the scrutinee's type, Integral of it
       ;; as instStupidTheta, its evidence unused; GHC.HsToCore.Match's matchNPlusK: x >= k, then n = x - k) as the view
       ;; pattern ((\x -> (x >= k, x - k)) -> (True, n))
@@ -2987,6 +3213,12 @@
     (letfn [(w [x] (cond
                      (and (seq? x) (contains? '#{VarPat AsPat NPlusKPat} (first x)))
                      (do (when-let [n (nm (arg x 2))] (swap! out conj n)) (doseq [y (drop 3 x)] (w y)))
+                     ;; HF10-P54 (a): a record wildcard's variables (RecordWildCards' C {..} in a pattern binding:
+                     ;; dsrun015's let (C {..}, d) = v; GHC.Hs.Utils' collectPatBinders over the rec_dotdot fields)
+                     (and (seq? x) (= 'rn/dotdot (first x)) (vector? (nth x 2 nil)))
+                     (doseq [[_ n] (partition 2 (nth x 2))] (swap! out conj n))
+                     ;; a view pattern's expression binds nothing
+                     (and (seq? x) (= 'ViewPat (first x))) (w (arg x 3))
                      (coll? x) (doseq [y x] (w y))
                      :else nil))]
       (w p))
@@ -3765,7 +3997,23 @@
         (let [body (loop [b (lval (arg (lval sg) 3))]
                      ;; a class documented in the clause (-- ^ @since ...): HsDocTy around it
                      (if (#{'HsDocTy 'HsParTy} (con b)) (recur (lval (arg b 2))) b))
-              cls (when (= 'HsTyVar (con body)) (nm (arg body 3)))]
+              ;; HF10-P54 (a): a multi-parameter class applied to its other arguments (tcrun031's deriving (C [a]) on a
+              ;; newtype, GeneralizedNewtypeDeriving: GHC.Tc.Deriv's deriveTyData, the newtype its last argument)
+              [hd cargs] (loop [b body as []]
+                           (if (= 'HsAppTy (con b))
+                             (recur (let [f (lval (arg b 2))] (if (#{'HsParTy} (con f)) (lval (arg f 2)) f)) (cons (arg b 3) as))
+                             [b (vec as)]))
+              cls (when (= 'HsTyVar (con hd)) (nm (arg hd 3)))
+              cls (when (or (empty? cargs)
+                            (and (:newtype? desc) (contains? *exts* "GeneralizedNewtypeDeriving") (not (contains? *exts* "DeriveAnyClass"))))
+                    cls)
+              ctvn (when (seq cargs) (vec (distinct (mapcat tv-names-of cargs))))
+              cnames (mapv #(str (occ %) "_" (str/join "_" (drop 3 %))) ctvn)
+              cts (mapv #(hs-type (zipmap ctvn (map (fn [x] [:tv x]) cnames)) %) cargs)]
+          (if (seq cargs)
+            (when cls
+              (swap! *derivs* conj {:cls cls :tn tn :tvs (into (vec names) cnames) :ts (conj cts res)
+                                    :ctor? false :desc (assoc desc :var (last names)) :stock? false :strat :newtype}))
           (when cls
             (cond
               ;; a strategy written in the clause (DerivingStrategies, DerivingVia): the request carries it
@@ -3803,7 +4051,7 @@
                                    :ctx (if (= "Generic" (occ cls))
                                           []
                                           (vec (for [[n x] (map vector tvn names) :when (contains? used n)] [cls [[:tv x]]])))
-                                   :head [cls [res]]}))))))
+                                   :head [cls [res]]})))))))
     (swap! *ddescs* assoc tn {:desc {:tn tn :cons @descs :fix @*fixities* :newtype? (= 'NewTypeCon (con cs))} :names names})))
 
 (defn- simplify-pred
@@ -3985,7 +4233,10 @@
                                                            (tree-seq coll? seq pts))
                                            q (simplify-pred* [pc (mapv #(subst sm %) pts)] 30)]
                                        q)))
-                   (gnd-of r) (vec (simplify-pred [(:cls r) [(gnd-of r)]]))
+                   ;; (HF10-P54 (a): a multi-parameter class's other arguments before the representation)
+                   (gnd-of r) (if (next (:ts r))
+                                (vec (simplify-pred* [(:cls r) (conj (vec (butlast (:ts r))) (gnd-of r))] 30))
+                                (vec (simplify-pred [(:cls r) [(gnd-of r)]])))
                    ;; HF10-P34: GHC.Tc.Deriv.Infer's inferConstraints for Generic: none (the representation needs no
                    ;; instance); for Generic1 Functor of each composition's outer type
                    (generic? r) (if (= "Generic1" (occ (:cls r)))
@@ -4201,7 +4452,7 @@
                         b (get defined (occ mn))
                         ;; a coerced method whose representation dictionary is one of the instance's own parameters is
                         ;; trivial: GHC's simple optimiser inlines it into the dictionary function
-                        gd (when gnd (solve-pred [cls [(subst skol gnd)]] givens 0))
+                        gd (when gnd (solve-pred [cls (conj (vec (butlast ts)) (subst skol gnd))] givens 0))
                         gnd-inline? (and gd (or (and (seq params) (= 'lv (first gd)))
                                                  ;; a class of one method and no superclass has a newtype dictionary: the
                                                  ;; coerced method is the dictionary
@@ -4287,29 +4538,12 @@
 (def ^:dynamic *defaults* nil) ; the module's default declaration's types (Haskell 2010 §4.3.4), nil: (Integer, Double)
 
 (defn- improve!
-  "Functional dependencies' improvement (GHC.Tc.Solver.Dict's improvement from instances): a wanted whose class has a
-  fundep a -> b and an instance whose head matches it at a's positions gets b's positions unified with the instance's;
+  "Functional dependencies' improvement (GHC.Tc.Solver.Dict's improvement from instances) of each wanted (improve-one!);
   true when something was unified"
   [wanteds]
   (let [changed (atom false)]
-    (doseq [w wanteds
-            :let [[c ts] (zonk-pred (:pred w)) fds (:fundeps (get @*classes* c))]
-            :when (seq fds)
-            [ls rs] fds :when (and (every? #(< -1 % (count ts)) ls) (every? #(< -1 % (count ts)) rs))
-            :let [inst (some (fn [{:keys [tvs head] :as i}]
-                               (when (= (first head) c)
-                                 (when-let [m (reduce (fn [m p] (match-ty (set tvs) m (nth (second head) p) (nth ts p))) {} ls)]
-                                   [i m])))
-                             (insts-of c))]
-            :when inst]
-      (let [[{:keys [tvs head]} m] inst
-            m (into (into {} (map (fn [v] [v (fresh-meta)]) tvs)) m)]
-        (doseq [p rs]
-          (let [want (zonk (nth ts p)) got (subst m (nth (second head) p))]
-            ;; HF10-P42 (a): improvement only fixes metas: a position without one (a skolem: T16646's reify, Reifies
-            ;; (Any @Type) a against KnownNat n => Reifies n Integer, an instance GHC does not match, n's kind Natural
-            ;; and Any's Type, which the elaborator does not see) is left to the givens
-            (when (and (not= want (zonk got)) (seq (metas-of want))) (unify (nth ts p) got) (reset! changed true))))))
+    (doseq [w wanteds :let [p (zonk-pred (:pred w))] :when (seq (:fundeps (get @*classes* (first p))))]
+      (when (improve-one! p) (reset! changed true)))
     @changed))
 
 (defn- may-match?
@@ -4453,11 +4687,20 @@
           (when-let [t (first (filter (fn [t] (every? (fn [w] (solve-pred [(first (:pred w)) [t]] [] 0)) group))
                                       (cond-> (or *defaults* [(con-ty tc-integer) (con-ty tc-double)]) *control* reverse)))]
             (unify [:mv i] t)))))
-    (doseq [w ws]
-      (if-let [term (or (if-let [g (:geqs w)] (binding [*given-eqs* g] (solve-pred (:pred w) [] 0)) (solve-pred (:pred w) [] 0))
-                        (default-ip (:pred w)))]
-        (swap! *evidence* assoc (:ev w) term)
-        (error! "unsolved: " (pr-str (zonk-pred (:pred w)))))))))
+    ;; HF10-P54 (a): in rounds, until one solves nothing (a wanted a later one's instance improves: testeq2's Show ?b
+    ;; after TypeEq [Char] [Char] ?b gave ?b := HTrue); a wanted made under a let ?x = e's bindings solved with them
+    ;; (:ipg, T17104's F Int, a family reducing to ?x :: String)
+    (loop [ws ws]
+      (let [left (filterv (fn [w]
+                            (if-let [term (binding [*ip-givens* (or (:ipg w) *ip-givens*)]
+                                            (or (if-let [g (:geqs w)] (binding [*given-eqs* g] (solve-pred (:pred w) [] 0)) (solve-pred (:pred w) [] 0))
+                                                (default-ip (:pred w))))]
+                              (do (swap! *evidence* assoc (:ev w) term) false)
+                              true))
+                          ws)]
+        (if (and (seq left) (< (count left) (count ws)))
+          (recur left)
+          (doseq [w left] (error! "unsolved: " (pr-str (zonk-pred (:pred w)))))))))))
 
 (defn- fl-ratio
   "A FractionalLit (FL (src S) NEG (:% N D) EXP BASE) as the Core of its Rational: (:%) of two Integers, reduced"
@@ -4477,6 +4720,10 @@
   [kind val ty ev f]
   (let [t (expand (zonk ty)) tn (when (= :tc (first t)) (second t))]
     (case kind
+      ;; HF10-P54 (a): an overloaded string at String is the String literal (tcShortCutLit's go_string, isStringTy),
+      ;; else fromString of it
+      :str (let [l (second (hslit (list 'HsLit nil (list 'HsString nil val))))]
+             (if (= (deep-expand t) (list-ty (con-ty tc-char))) l (list 'app (list 'v f) [ev l])))
       :int (cond (= tn tc-int) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str val "#"))])
                  (= tn tc-double) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "D#")) [(list 'lit (str val ".0##"))])
                  (= tn tc-float) (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "F#")) [(list 'lit (str val ".0#"))])
@@ -4512,6 +4759,11 @@
     ;; GHC's tidyNPat: a numeric literal pattern at a type with built-in literals is matched directly, no (==)
     (and (seq? c) (= 'plit (first c)) (= 4 (count c)))
     (let [t (expand (zonk (nth c 3)))]
+      (cond
+        ;; HF10-P54 (a): an overloaded string pattern at String is the string's pattern (tidyNPat's isStringTy)
+        (and (seq? (nth c 2)) (= 'olit (first (nth c 2))) (= :str (second (nth c 2))) (= (deep-expand t) (list-ty (con-ty tc-char))))
+        (list 'plit (resolve-core (nth c 2)))
+        :else
       (if (and (= :tc (first t)) (contains? #{"Int" "Word" "Char" "Double" "Float"} (occ (second t)))
                (contains? #{"GHC.Internal.Types"} (nmod (second t))))
         (let [l (nth c 2)]
@@ -4520,7 +4772,7 @@
           (if (and (= "Word" (occ (second t))) (seq? l) (= 'olit (first l)) (= :int (second l)))
             (list 'plit (list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "W#")) [(list 'lit (str (nth l 2) "##"))]))
             (list 'plit (resolve-core l))))
-        (list 'plit (resolve-core (nth c 1)) (resolve-core (nth c 2)))))
+        (list 'plit (resolve-core (nth c 1)) (resolve-core (nth c 2))))))
     (seq? c) (let [c' (apply list (map resolve-core c))]
                ;; flatten (app (app f a) b)
                (if (and (= 'app (first c')) (seq? (second c')) (= 'app (first (second c'))))
