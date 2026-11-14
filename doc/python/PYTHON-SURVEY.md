@@ -6582,3 +6582,52 @@ and the rest unchanged. One regression found on the way and fixed: the Unicode-d
 interpreted under goi, made the digits limit's refusal slow (test_int's denial-of-service tests); an ASCII str (its
 flag) is parsed as it is and the error's object made only on an error. Queue 286's report:
 `.tmp/q286/286-python-deferred-classes.md` (the VM).
+
+## As built: 290, the next deferred classes: the built-ins' signatures, method-wrapper, classmethod_descriptor (2026-11-14, the Mac VM, queue 290)
+
+Night 12's partial eval record (181 modules, 16,042 methods), judged with 286's classes: the deferred classes are
+`:runner-limits` 1,812 (whole modules past the night's cap: no pyi fix), `:multiprocessing` 96 (82 of them the
+forkserver test_manager's not-run rows behind its setUpClass, the forkserver's own os.fork), `:testcapi` 53 (the
+`_testinternalcapi` and `_datetime` C API skips, by design since 244-4 (a)), `:data-model` 25, `:finalization-collect` 25,
+`:remote-debugging` 22, `:memoryview-formats` 22 (286's, the record not run since), `:signal-timing` 12,
+`:finalization-goi` 10, `:ssl-finalization` 8, `:pyi-command-line` 6, `:socket-gaps` 4 and smaller. Closed:
+`:data-model`'s 25 rows, and a regression of 286's found by the coordinator:
+
+- **The built-ins' `__text_signature__`** (`go/arbace/py/textsig.ae`, `builtins_textsig_table.ae`): CPython keeps a C
+  callable's signature at the head of its docstring, which pyi's built-ins do not carry; `tools/pyi/textsig_table.py`
+  records the oracle's own (CPython 3.14.10: every type, dict callable, module function and slot wrapper of the built-in
+  and lib-dynload modules but the test modules, 2,519 entries) into `builtins_textsig_table.go`, checked by `bin/pyi
+  runtime tables`. A heap type's comes from its `__doc__` (_PyType_GetTextSignatureFromInternalDoc), a module's
+  function's `__self__` is its module (inspect drops `$module`), a built-in type's `__new__` is bound to its type
+  (`object.__new__.__self__`, `T.__new__` its qualified name). inspect.signature of object and of a class without its own
+  `__init__` or `__new__`, of `str.join`, `len`, classmethod, staticmethod, getfullargspec of `os.stat`, rlcompleter's
+  `f()` and pydoc's descriptions follow.
+- **method-wrapper and classmethod_descriptor** (`descr.ae`): a slot wrapper bound to an instance was a Python bound
+  method, which inspect's `_NonUserDefinedCallables` took for user code; it is a method-wrapper (a `*Method` over a
+  `*slotWrapper`: its call, repr, comparison, `__self__`, `__objclass__`, `__name__`, `__qualname__`, `__reduce__`, no
+  `__func__`). A built-in type's class method (`dict.fromkeys`) is a classmethod_descriptor, no longer an instance of
+  classmethod (classmethod_get's and classmethoddescr_call's checks, repr, `__reduce__`). dict's and list's `__getitem__`,
+  dict's, set's and frozenset's `__contains__` are method descriptors (METH_COEXIST; `keyword.iskeyword` a
+  builtin_function_or_method), bound to the instance itself as the slot wrappers were (a dict subclass's `__missing__`).
+- **The data model's rest**: a dict's or set's subclass keeps the keys of its stores and lookups as they are (Counter's
+  float-subclass keys were stored as floats: test_statistics' TestMode.test_types_conserved), set_contains, discard and
+  remove take a set subclass's instance as a frozenset of its items (PySet_Check), an exact exception's `__dict__`
+  assignment goes through its getset (test_descr's test_set_dict), `__getnewargs_ex__`'s result is checked as
+  _PyObject_GetNewArguments does and an empty keyword dict reduces through `__newobj__` (test_reduce; test_enum's
+  test_subclasses_with_getnewargs_ex).
+- **286's regression**: int's `numerator` and float's `real` became getsets in 286, which `int.__dict__['numerator']`
+  found but `int.__dict__.get('numerator')` did not; enum's `__set_name__` looks for a base's descriptor that way to
+  redirect a shadowing member, so an IntEnum member `numerator` took every member's attribute (test_enum's two
+  test_shadowed_attr). mappingproxy.get answers as its subscript does.
+
+Measured (`bin/pyi lib-test-all --fresh`, each test's own verdict, base 0eec2c528 in a base worktree -> head 3c6ab10ed,
+pass/classed/failing): test.test_inspect.test_inspect 297/66/0 -> 315/48/0; test_pydoc 74/9/38 -> 92/9/20; test_set
+609/21/0 -> 612/18/0; test_descr 145/18/0 -> 147/16/0; test_statistics 393/7/0 -> 394/6/0; test_rlcompleter 9/2/0 ->
+11/0/0; test_enum (`bin/pyi lib-test`) 30 failing -> 27; test_exceptions 80/24/0 -> 89/24/0 (the base's run lost four
+to the VM's load); test_dict, test_collections, test_copy, test_funcattrs, test_keyword, test_types unchanged; 286's
+test_int 35/17/0, test_long 36/8/4, test_fractions 50/0/0 as 286 left them. No row got worse. Classes on night 12's
+rows: `:data-model` 25 -> 0 (21 pass; test_excluding_predicates to `:c-accelerators`, _pydatetime's timedelta.days;
+test_descrdoc to `:pyio`; test_cycle_through_dict and test_remove_subclass to `:finalization-collect`, a cycle through a
+class); the class keeps its other named tests. `:capi-port` takes test_signature_parsing_with_defaults (a C type's
+method keeps no ml_doc), `:set-core` loses three. The record's 21 rows read "in no class" until the main host's run
+replaces night 12's. Queue 290's report: `.tmp/q290/290-python-deferred-classes-2.md` (the VM).
