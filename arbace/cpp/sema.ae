@@ -334,6 +334,127 @@
 ;; reads as no match (libstdc++'s __shared_ptr::__has_esft_base<_Yp, __void_t<__esft_base_t<_Yp>>>, whose __void_t drops it)
 (def ^:dynamic *decltype-failed* nil)
 
+;; (cpp-s15, CP391 (a): a dependent decltype in a function template's signature is mangled as clang mangles it, Itanium
+;; 5.1.5.3's DT <expression> E with 5.1.6's expressions. Its operand is kept beside the stand-in as plain data (`:dt`),
+;; made here where the names resolve: the function's parameters fp_ (their index and top-level cv, recorded by
+;; declare-fn!'s trailing-return scope), the template's non-type parameters, the types written resolved (their template
+;; parameters without their template's id: inert to substitution and deduction, which match parameters by it), the
+;; unresolved names as written. What it cannot write is kept as {:x :fail}, refused only when the name is mangled.)
+(defn- dt-dependent?
+  "Whether a type names a template's parameter (template.ae's dependent?, which sema does not reach)."
+  [x]
+  (cond (map? x) (or (contains? #{:tparam :tparam-v :tspec :tdep :texpr :pack-exp} (:k x)) (boolean (some dt-dependent? (vals x))))
+        (sequential? x) (boolean (some dt-dependent? x))
+        :else false))
+
+(defn- dt-strip [t]
+  (cond (and (map? t) (#{:tparam :tparam-v :ttp} (:k t))) (dissoc t :tid)
+        (map? t) (into {} (map (fn [[k v]] [k (dt-strip v)]) t))
+        (vector? t) (mapv dt-strip t)
+        :else t))
+
+(defn- dt-type [scope ^String s]
+  (try (dt-strip (resolve-type scope s))
+       (catch arbace.lang.ExceptionInfo _ {:x :fail :what (str "type " s)})))
+
+(defn- dt-targ
+  "An explicit template argument as written: an integer literal, a non-type parameter, else a type."
+  [scope ^String s]
+  (let [s (str/trim s)]
+    (cond
+      (re-matches #"\d+" s) {:val (Long/parseLong s) :ty (abi/b :int)}
+      :else (let [e (when (re-matches #"[A-Za-z_]\w*" s) (first (lookup scope s)))]
+              (if (= :nttp (:e e)) {:k :tparam-v :i (:i e)} (dt-type scope s))))))
+
+
+(def ^:private dt-unops {"*" "de" "&" "ad" "-" "ng" "+" "ps" "!" "nt" "~" "co"})
+(def ^:private dt-binops
+  {"+" "pl" "-" "mi" "*" "ml" "/" "dv" "%" "rm" "<<" "ls" ">>" "rs" "&" "an" "|" "or" "^" "eo" "<" "lt" ">" "gt"
+   "<=" "le" ">=" "ge" "==" "eq" "!=" "ne" "&&" "aa" "||" "oo" "=" "aS" "," "cm" "+=" "pL" "-=" "mI" "*=" "mL" "/=" "dV"
+   "%=" "rM" "&=" "aN" "|=" "oR" "^=" "eO" "<<=" "lS" ">>=" "rS" "<=>" "ss" ".*" "ds" "->*" "pm"})
+(def ^:private dt-casts {"CXXStaticCastExpr" "sc" "CStyleCastExpr" "cv" "CXXReinterpretCastExpr" "rc" "CXXConstCastExpr" "cc"
+                         "CXXDynamicCastExpr" "dc"})
+
+(defn- dt-written-type
+  "A cast's or construction's type as written: the node's type with the reference its value category says."
+  ^String [n]
+  (str (get-in n [:type :qualType]) (case (:valueCategory n) "lvalue" " &" "xvalue" " &&" "")))
+
+(defn- dt-ir
+  "The operand `n` (the native parser's node) of a dependent decltype as the mangler's data, its names resolved in `scope`."
+  [scope n]
+  (let [ir #(dt-ir scope %)
+        in (vec (filter map? (:inner n)))
+        targs (fn [n] (when-let [as (:explicitTemplateArgs n)] (mapv #(dt-targ scope %) as)))
+        simple (fn [nm] (if (or (empty? nm) (str/starts-with? nm "~") (str/starts-with? nm "operator"))
+                          {:x :fail :what (str "name " nm)} nm))
+        member (fn [n base]
+                 (let [nm (simple (or (:member n) (:name n) (get-in n [:referencedDecl :name])))]
+                   (cond (map? nm) nm
+                         (seq (:qualifier n)) {:x :fail :what "a qualified member"}
+                         (or (nil? base) (and (= "CXXThisExpr" (:kind base)) (:implicit base)))
+                         {:x :mem :implicit true :n nm :targs (targs n)}
+                         :else {:x :mem :arrow (boolean (:isArrow n)) :base (ir base) :n nm :targs (targs n)})))]
+    (case (:kind n)
+      ("ParenExpr" "ImplicitCastExpr") (ir (first in))
+      ("CallExpr" "CXXMemberCallExpr") {:x :call :f (ir (first in)) :args (mapv ir (rest in))}
+      ("MemberExpr" "CXXDependentScopeMemberExpr") (member n (first in))
+      "UnresolvedMemberExpr" (member n (first in))
+      ("DeclRefExpr" "UnresolvedLookupExpr")
+      (let [nm (get-in n [:referencedDecl :name]) q (:qualifier n)]
+        (cond
+          (:_this n) (member n nil)
+          (:globalQualifier n) {:x :fail :what "a ::-qualified name"}
+          (map? (simple nm)) (simple nm)
+          (seq q)
+          (let [e (when (= 1 (count q)) (type-entity (lookup scope (str/trim (first q)))))
+                qt (when e (abi/unq (:ty e)))]
+            (cond
+              ;; T::f, a template parameter's member: sr <unresolved-type> <base-unresolved-name>
+              (= :tparam (:k qt)) {:x :name :qt (dt-strip qt) :n nm :targs (targs n)}
+              (some #(not (re-matches #"\s*[A-Za-z_]\w*\s*" (str %))) q) {:x :fail :what (str "a qualifier " (pr-str q))}
+              :else {:x :name :q (mapv str/trim q) :n nm :targs (targs n)}))
+          :else
+          (let [es (lookup scope nm) e (first es) v (when (= :var (:e e)) (var* (:id e)))]
+            (cond
+              (:fpi v) {:x :fp :i (:fpi v) :c (boolean (:c (:ty v))) :v (boolean (:v (:ty v)))}
+              (= :nttp (:e e)) {:x :tpv :i (:i e)}
+              ;; (a variable not a parameter: clang's L <mangled> E, not written)
+              v {:x :fail :what (str "variable " nm)}
+              ;; a function's or template's name, or nothing found: an unresolved name (the call's ADL)
+              :else {:x :name :n nm :targs (targs n)}))))
+      "CXXThisExpr" {:x :raw :s "fpT"}
+      "UnaryOperator" (if-let [c (dt-unops (:opcode n))] {:x :op :code c :args [(ir (first in))]} {:x :fail :what (str "operator " (:opcode n))})
+      ("BinaryOperator" "CompoundAssignOperator")
+      (if-let [c (dt-binops (:opcode n))] {:x :op :code c :args (mapv ir in)} {:x :fail :what (str "operator " (:opcode n))})
+      "ConditionalOperator" {:x :op :code "qu" :args (mapv ir in)}
+      "ArraySubscriptExpr" (if (= 2 (count in)) {:x :op :code "ix" :args (mapv ir in)} {:x :fail :what "a subscript"})
+      "PackExpansionExpr" {:x :op :code "sp" :args [(ir (first in))]}
+      "CXXNoexceptExpr" {:x :op :code "nx" :args [(ir (first in))]}
+      "IntegerLiteral" (let [v (str (:value n))]
+                         (if (re-matches #"\d+" v) {:x :lit :t (dt-type scope (or (get-in n [:type :qualType]) "int")) :v v} {:x :fail :what (str "literal " v)}))
+      "CXXBoolLiteralExpr" {:x :raw :s (if (:value n) "Lb1E" "Lb0E")}
+      "CXXNullPtrLiteralExpr" {:x :raw :s "LDnE"}
+      "UnaryExprOrTypeTraitExpr"
+      (let [k (get {"sizeof" ["st" "sz"] "alignof" ["at" "az"] "_Alignof" ["at" "az"] "__alignof" ["at" "az"]} (:name n))]
+        (cond (nil? k) {:x :fail :what (:name n)}
+              (:argType n) {:x :tyop :code (first k) :t (dt-type scope (get-in n [:argType :qualType]))}
+              :else {:x :op :code (second k) :args [(ir (first in))]}))
+      ;; sizeof...(P): sZ <template-param> or sZ <function-param>
+      "SizeOfPackExpr" (let [es (lookup scope (:name n)) te (type-entity es) e (first es)
+                             v (when (= :var (:e e)) (var* (:id e)))]
+                         (cond (= :tparam (:k (:ty te))) {:x :sz :i (:i (:ty te))}
+                               (= :nttp (:e e)) {:x :sz :i (:i e)}
+                               (:fpi v) {:x :op :code "sZ" :args [{:x :fp :i (:fpi v) :c false :v false}]}
+                               :else {:x :fail :what "sizeof..."}))
+      ("CXXUnresolvedConstructExpr" "CXXTemporaryObjectExpr" "CXXFunctionalCastExpr")
+      (let [li (and (= 1 (count in)) (= "InitListExpr" (:kind (first in))))]
+        {:x :construct :t (dt-type scope (dt-written-type n)) :list li
+         :args (mapv ir (if li (filter map? (:inner (first in))) in))})
+      (if-let [c (dt-casts (:kind n))]
+        {:x :cast :code c :t (dt-type scope (dt-written-type n)) :args [(ir (first in))]}
+        {:x :fail :what (str "a " (:kind n))}))))
+
 (defn- decltype-of
   "decltype(e) ([dcl.type.decltype]/1): the operand the native parser kept for the text `t`, analyzed in `scope`
   (unevaluated: its result is not kept); an unparenthesized id-expression or member access its entity's declared type,
@@ -359,7 +480,18 @@
                          {:dependent-decltype t})
                      (throw e))))]
       (cond
-        (:dependent-decltype x) {:k :tdep :base {:k :tparam :i -1 :tid -1 :name "decltype"} :names [(str "decltype(" t ")")]}
+        ;; (cpp-s15, CP391 (a): in a function's type, an operand that analyzed but is type-dependent ([temp.dep.expr]: its
+        ;; type, or a parameter it names, depends on the template's parameters) is the dependent decltype too, clang's DT
+        ;; in the mangling, not the type the pattern's analysis gave: `decltype(ns::id<T>(t))`, `decltype(hh(t, t))::type`)
+        (or (:dependent-decltype x)
+            (and (loop [s scope] (cond (nil? s) false (:fn-type s) true :else (recur (:parent s))))
+                 (or (dt-dependent? (:ty x))
+                     (some #(and (map? %) (#{"DeclRefExpr" "UnresolvedLookupExpr"} (:kind %)) (empty? (:qualifier %))
+                                 (let [e (first (lookup scope (str (get-in % [:referencedDecl :name])))) v (when (= :var (:e e)) (var* (:id e)))]
+                                   (and (:fpi v) (dt-dependent? (:ty v)))))
+                           (tree-seq map? #(filter map? (:inner %)) n)))))
+        {:k :tdep :base {:k :tparam :i -1 :tid -1 :name "decltype"} :names [(str "decltype(" t ")")]
+         :dt (dt-ir scope n)}
         (and (= "DeclRefExpr" (:kind n)) (= :var (:op x))) (:ty (var* (:id x)))
         ;; (cpp-s14: a function's name, an overload set of one function and no template: the function's type
         ;; ([dcl.type.decltype]/1.3, [over.over]/1's set of one: `decltype(f)`, <refwrap.h>'s users); several, ill-formed)
@@ -960,6 +1092,23 @@
     (constraint-satisfied? ps rc)
     true))
 
+(defn fn-type-scope
+  "The scope a function declaration's type is resolved in: `rs`, or when its spelling has a decltype or a noexcept(e), a
+  block scope over it with the parameters ([basic.scope.param]: a trailing return type's decltype names them, `->
+  decltype(make_move_iterator(__it.base()))`, G4), each with its index (:fpi, a dependent decltype's fp_ in the mangling,
+  CP391 (a))."
+  [rs n]
+  (let [qt (get-in n [:type :qualType])]
+    (if (and qt (or (str/includes? qt "decltype") (str/includes? qt "noexcept(")))
+      (let [ps (new-scope :block rs :fn-type true)]
+        (doseq [[i pn] (map-indexed vector (param-nodes n)) :when (:name pn)]
+          (when-let [t (try (resolve-type rs (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+            (let [id (next-id)]
+              (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param :fpi i})
+              (enter! ps (:name pn) {:e :var :id id}))))
+        ps)
+      rs)))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -999,15 +1148,7 @@
         qt (get-in n [:type :qualType])
         ;; (a trailing return type's decltype names the parameters: `-> decltype(make_move_iterator(__it.base()))`;
         ;; they are in its scope, [basic.scope.param]; G4)
-        tscope (if (and qt (or (str/includes? qt "decltype") (str/includes? qt "noexcept(")))
-                 (let [ps (new-scope :block rs)]
-                   (doseq [pn (param-nodes n) :when (:name pn)]
-                     (when-let [t (try (resolve-type rs (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
-                       (let [id (next-id)]
-                         (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
-                         (enter! ps (:name pn) {:e :var :id id}))))
-                   ps)
-                 rs)
+        tscope (fn-type-scope rs n)
         ty (assoc (resolve-type tscope qt) :cq (method-const? qt))
         ty (dissoc ty :cq)
         nm (:name n)
@@ -1543,7 +1684,9 @@
                            (.add ^java.util.ArrayList (:usings scope) (:scope e)))
     ;; (a using-declaration naming a dependent base's member, resolved in the specialization: G4)
     ("UsingDecl" "UnresolvedUsingValueDecl" "UnresolvedUsingTypenameDecl")
-                (let [t (node-text n)
+                ;; (cpp-s15, CP392 (a): its tokens as the preprocessor gave them when the parser kept them, a macro's
+                ;; expansion where its name stands: <vector>'s `using _GLIBCXX_STD_C::vector;`)
+                (let [t (or (:_text n) (node-text n))
                       [_ target] (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
                       ;; (cpp-s4: a pack expansion, `using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;` of variant's _Build_FUNs,
                       ;; [namespace.udecl]/1, [temp.variadic]/5: the declaration once per element of the packs its qualifier

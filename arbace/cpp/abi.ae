@@ -613,6 +613,43 @@
       (str (or (expr-op-codes (:o x)) (fail :mangle "operator " (:o x))) (apply str (map mangle-expr (:args x)))))
     :else (fail :mangle "expression " (pr-str x))))
 
+(declare template-arg)
+
+(defn- dt-unresolved
+  "<unresolved-name> of a dependent decltype's operand (clang's mangleUnresolvedName): [sr <namespace levels> E | sr
+  <unresolved-type>] <simple-id>, the simple-id's template arguments as written."
+  ^String [x]
+  (str (cond (:qt x) (str "sr" (mangle-type* (:qt x)))
+             (seq (:q x)) (str "sr" (apply str (map source-name (:q x))) "E"))
+       (source-name (:n x))
+       (when (:targs x) (str "I" (apply str (map template-arg (:targs x))) "E"))))
+
+(defn- mangle-dt-expr
+  "The <expression> of a dependent decltype (sema's dt-ir data; Itanium 5.1.6, as clang's mangleExpression writes it):
+  calls cl ... E, function parameters fp_ (fpK_, fp0_ ...), this fpT, members dt/pt (an implicit this dtdefpT, as gcc
+  and clang), unresolved names, operators, literals, sizeof and alignof, casts and constructions (cv <type> _ ... E)."
+  ^String [x]
+  (case (:x x)
+    :fail (fail :mangle "a dependent decltype's " (:what x))
+    :fp (str "fp" (when (:v x) "V") (when (:c x) "K") (when (pos? (long (:i x))) (dec (long (:i x)))) "_")
+    :tpv (template-param (:i x))
+    :sz (str "sZ" (template-param (:i x)))
+    :raw (:s x)
+    :name (dt-unresolved x)
+    :call (str "cl" (mangle-dt-expr (:f x)) (apply str (map mangle-dt-expr (:args x))) "E")
+    :mem (str (if (:implicit x) "dtdefpT" (str (if (:arrow x) "pt" "dt") (mangle-dt-expr (:base x)))) (dt-unresolved x))
+    :op (str (:code x) (apply str (map mangle-dt-expr (:args x))))
+    :lit (str "L" (mangle-type* (:t x)) (:v x) "E")
+    :tyop (str (:code x) (mangle-type* (:t x)))
+    :cast (str (:code x) (mangle-type* (:t x)) (mangle-dt-expr (first (:args x))))
+    :construct (let [n (count (:args x))]
+                 (if (:list x)
+                   (str "tl" (mangle-type* (:t x)) (apply str (map mangle-dt-expr (:args x))) "E")
+                   (str "cv" (mangle-type* (:t x)) (when (not= 1 n) "_") (apply str (map mangle-dt-expr (:args x))) (when (not= 1 n) "E"))))
+    (fail :mangle "a dependent decltype's " (pr-str x))))
+
+(defn- dt-standin? [t] (and (= :tdep (:k t)) (= "decltype" (get-in t [:base :name])) (= -1 (get-in t [:base :i])) (contains? t :dt)))
+
 (defn- template-arg
   "<template-arg>: a type, or an integral value as <expr-primary> L <type> <number> E (n for a minus, bool 0/1)."
   ^String [a]
@@ -630,9 +667,14 @@
                           (template-prefix "" (:tmpl a) (:name a))
                           (str "N" (template-prefix (mangle-prefix (:path a)) (:tmpl a) (:name a)) "E"))
     (= :ttp (:k a)) (sub-or [:t a] #(template-param (:i a)))
+    ;; (cpp-s15: a dependent member template's name as a template template argument, X<T>::template Y: not written)
+    (= :ttdep (:k a)) (fail :mangle "a dependent template name " (:name a))
     (contains? a :val) (let [v (:val a) t (unq (:ty a))]
                          (str "L" (mangle-type* t)
                               (cond (= :bool (bn t)) (if (and v (not= 0 v) (not (false? v))) "1" "0")
+                                    ;; (CP393 (a): an unsigned type's value as its unsigned number, clang's
+                                    ;; Lm18446744073709551615E for span's dynamic_extent; a negative number only for a signed type)
+                                    (and (neg? (long v)) (contains? unsigned-ns (bn (underlying t)))) (Long/toUnsignedString (long v))
                                     (neg? (long v)) (str "n" (- (long v)))
                                     :else v)
                               "E"))
@@ -679,9 +721,14 @@
                   :tparam (sub-or [:qparam 0 (:i bare)] #(template-param (:i bare)))
                   :pack-exp (sub-or [:t sk] #(str "Dp" (mangle-type* (:of bare))))
                   ;; T::name, a dependent member type: N <prefix> <name> E
+                  ;; (CP391 (a): a dependent decltype, DT <expression> E, a substitution candidate after its operand's)
                   :tdep (sub-or [:t sk] #(let [base (unq (:base bare))]
+                                             (if (dt-standin? bare)
+                                               (if-let [f (first (filter (fn [m] (and (map? m) (= :fail (:x m)))) (tree-seq coll? (fn [c] (if (map? c) (vals c) (seq c))) (:dt bare))))]
+                                                 (fail :mangle "a dependent decltype's " (:what f))
+                                                 (str "DT" (mangle-dt-expr (:dt bare)) "E"))
                                              (str "N" (if (= :tspec (:k base)) (sub-or [:t base] (fn [] (tspec-unwrapped base))) (mangle-type* base))
-                                                  (apply str (map (fn [x] (if (map? x) (str (source-name (:name x)) (template-args (:args x))) (source-name x))) (:names bare))) "E")))
+                                                  (apply str (map (fn [x] (if (map? x) (str (source-name (:name x)) (template-args (:args x))) (source-name x))) (:names bare))) "E"))))
                   ;; (::std::X<...> is St X I...E, no N ... E: <unscoped-template-name>)
                   :tspec (sub-or [:t sk] #(if (or (empty? (:path bare)) (= [[:ns "std"]] (vec (:path bare))))
                                               (tspec-unwrapped bare) (str "N" (tspec-unwrapped bare) "E")))))]

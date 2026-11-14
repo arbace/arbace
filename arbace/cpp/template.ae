@@ -661,6 +661,20 @@
                                                                  (list 'pack-expand (ct/parse-type (str/trim (subs a 0 (- (count a) 3)))))
                                                                  (list 'cpp/text a)))
                                                (split-top-commas txt))))
+                  ;; (cpp-s15: a noexcept-expression, [expr.unary.noexcept], its operand the parser kept by its text: analyzed
+                  ;; as sema analyzes one, true when nothing it calls may throw; dependent while the operand does not analyze
+                  ;; with the template's parameters unbound. <type_traits>' __is_nothrow_new_constructible_impl's base)
+                  (and (= t "noexcept") (= "(" (peek)))
+                  (let [_ (next!) r (run "(" ")")
+                        x (get sema/*decltypes* (str "noexcept-expr:" (str/replace r #"\s+" "")))]
+                    (when-not x (fail :template "a noexcept-expression's operand not kept: " r))
+                    (let [v (try (sema/analyze {:scope scope :statics (atom [])} {:kind "CXXNoexceptExpr" :inner [x]})
+                                 (catch arbace.lang.ExceptionInfo e
+                                   (if (and (:codegen/refused (ex-data e)) (some #(and (= :type (:e %)) (dependent? (:ty %)))
+                                                                                   (mapcat #(sema/lookup scope %) (re-seq #"[A-Za-z_]\w*" r))))
+                                     nil
+                                     (throw e))))]
+                      (if v (:v v) {:k :texpr :o "noexcept" :text r})))
                   (= k :num) (num t)
                   (= k :chr) (long (int (.charAt ^String t 1)))
                   ;; a call of a constexpr function (an array bound `int[sq(3)]`) on constant arguments
@@ -850,8 +864,23 @@
   "A template template argument (a class template's name): {:tmpl tid :name :path}, or a signature's template template
   parameter {:k :ttp}."
   [scope f]
-  (let [[scope f] (if (and (seq? f) (= 'cpp/global (first f))) [(loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)] [scope f])
-        nm (if (and (seq? f) (= 'cpp/text (first f))) (symbol (str/replace (str/trim (second f)) "::" "/")) f)
+  (let [[scope f] (if (and (seq? f) (= 'cpp/global (first f))) [(loop [s scope] (if (:parent s) (recur (:parent s)) s)) (second f)] [scope f])]
+  (if (and (seq? f) (= 'cpp/scope (first f)) (= 3 (count f)) (not (symbol? (second f))))
+    ;; (cpp-s15: a member template of a class named by a template-id, `X<T>::template Y` ([temp.arg.template]/1, a
+    ;; qualified template name): the class's member template when the class is known; while it depends on the template's
+    ;; parameters, a dependent template name ({:k :ttdep}), the argument then resolved again where they are bound.
+    ;; <type_traits>' __basic_common_ref's `__xref<_Tp1>::template __type`)
+    (let [l (last f)
+          mn (cond (symbol? l) (name l) (and (seq? l) (= 'template (first l)) (symbol? (second l))) (name (second l))
+                   :else (fail :template "a template template argument " (pr-str f)))
+          bt (abi/unq (sema/resolve-type-form scope (second f)))]
+      (if (dependent? bt)
+        {:k :ttdep :base bt :name mn}
+        (let [e (when (abi/class? bt) (first (filter #(= :tmpl (:e %)) (.get ^java.util.HashMap (:names (:scope (abi/cls (:id bt)))) mn))))]
+          (if e
+            (let [t (tmpl (:id e))] {:tmpl (:id e) :name (:name t) :path (:path t)})
+            (fail :template "no member template " mn " of " (pr-str (second f)))))))
+  (let [nm (if (and (seq? f) (= 'cpp/text (first f))) (symbol (str/replace (str/trim (second f)) "::" "/")) f)
         _ (when-not (symbol? nm) (fail :template "a template template argument " (pr-str f)))
         parts (if (namespace nm) (concat (str/split (namespace nm) #"/") [(name nm)]) [(name nm)])
         es (if (= 1 (count parts)) (sema/lookup scope (first parts)) (sema/lookup-qualified scope (vec parts)))
@@ -862,7 +891,7 @@
       :type (if-let [tid (and (abi/class? (:ty e)) (:tmpl (abi/cls (:id (:ty e)))))]
               (let [t (tmpl tid)] {:tmpl tid :name (:name t) :path (:path t)})
               (fail :template "not a template: " nm))
-      (fail :template "not a template: " nm))))
+      (fail :template "not a template: " nm))))))
 
 (defn- decl-arg
   "The argument of a pointer or reference non-type parameter of type `pt` ([temp.arg.nontype]): a function or a
@@ -1283,7 +1312,8 @@
       ;; (a signature whose decltype calls the template itself, `-> decltype(__niter_base(...))`: refused inside, G4)
       (do (when (:sig-pending (tmpl (:id t))) (fail :template "a signature that names its own template " (:name t)))
           (upd-tmpl! (:id t) assoc :sig-pending true)
-          (let [s (try (sema/resolve-type (sym-scope t) (get-in (:pattern t) [:type :qualType]))
+          ;; (cpp-s15: with the parameters in scope for a decltype that names them, as declare-fn!'s: CP391 (a)'s fp_)
+          (let [s (try (sema/resolve-type (sema/fn-type-scope (sym-scope t) (:pattern t)) (get-in (:pattern t) [:type :qualType]))
                        (finally (upd-tmpl! (:id t) dissoc :sig-pending)))
                 s (dissoc s :cq)]
             (upd-tmpl! (:id t) assoc :sig s)
