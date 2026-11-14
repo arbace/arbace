@@ -5417,3 +5417,16 @@ at a time, a watcher at 2.5 GiB; no gate, big lock, clang, g++ or gcc. Details i
   generation and runs, the full runtime, gen-batch over the 81, codegen-gen, the essential commands, reap, crops-score and the key test
   are the survey's night commands. Proposed CP386 (the prebuilt link as cppi's default), CP387 (long strings as literals), CP388
   (128-bit constants).
+
+## 2026-11-14: cpp-s13 finished: the five programs pass, the full runtime, the proofs
+
+After the disk's stops (the main session's limits 85-88%, one run at a time): CP386 (a), CP387 (a), CP388 (a) decided by the main session
+for the user's overnight rule. Fixed on the way, each with a probe and a control: `sizeof...(P)` in a signature mangled `sZ
+<template-param>`; a union's destructor destroys no variant member (`_Optional_locale` had destroyed a locale it never held); an
+enumeration without a fixed type and with no negative enumerator read from a bit-field zero-extended, as clang's unsigned int (`_Spec`'s
+`_M_align` had read `_Align_right` as -2, so `{:>6}` padded the wrong side). Results: f8 ("3") and runtime/library.cpp (g++'s stdout)
+pass on llvmi with C++'s lowered runtime, beside pr77550, atomics and hello; the runtime at the branch's key with tzdb.cc (199 of 199
+units read); gen-batch over the 81 byte for byte (69), codegen-gen 155 of 155, cpp-print-essential, llvm-essential's commands,
+llvmi check --essential, lower-essential, cpp-check-essential, bin/reap (0 problems), crops-score strict (0) and the crops' key test pass,
+every peak under 2.1 GB. Proposed CP389, conversion function templates (f8's largest remaining drop). The kill of 06:29 used PIDs from a
+snapshot taken seconds earlier (not re-read before the kill): since then a helper reads each PID's command line before killing it.

@@ -7801,3 +7801,54 @@ code, as said).
   `I<sizeof...(P)> g(P...)`) written.
 - Stopped again at 89% (`/`, the gate's rerun or other lanes; this worktree 0.5 GB): z1a/z1n and everything after are not run.
   Rule slip: abi.ae and template.ae edited while library.cpp's generation ran (it had loaded them; its result is the pre-edit code's).
+
+### Finished (2026-11-14 04:40-09:20; CP386 (a), CP387 (a), CP388 (a) decided by the main session for the user's overnight rule)
+
+Two more of f8's and library.cpp's faults, each fixed generally with a probe and a control:
+
+| # | Fault | Cause | Fix |
+|---|---|---|---|
+| 8 | z1's probe written for fix 7's sizeof...: f8 and library.cpp then generated | (the probe's `decltype(g(...))::v` qualifier rewritten as an alias: a decltype-specifier as a nested-name-specifier is not read, not f8's) | as above; z1a 0, z1n 1, f8's mangling `_Z1fIJicEEN9enable_ifIXeqsZT_Li2EEiE4typeEDpT_` |
+| 9 | library.cpp's run: a fault at 0 in `std::locale::_Impl::_M_remove_reference` under `_Optional_locale`'s destructor | a union's destructor destroyed its members: variant members, which it never destroys ([class.dtor]/13); `_Optional_locale`'s anonymous union destroyed a locale it never held | codegen.ae's destructor: no member cleanups for a union. u2a 0, u2n 1 |
+| 10 | library.cpp's output: `ab    |ff|2.5` where g++'s is `    ab|ff|2.5` (295 bytes alike, the one difference) | `_Spec`'s `_Align _M_align : 2` held `_Align_right`, 2, read back sign-extended as -2: an enumeration without a fixed type and with no negative enumerator has unsigned int as its integer type in clang ([dcl.enum]/7) | sema.ae marks such an enumeration :nonneg; codegen.ae's bit-field load zero-extends it. e5a 0, e5n 2 |
+
+**The five programs, after** (bin/llvmi run of the IR generated at the branch's code, linked with C++'s lowered runtime on the prebuilt
+link, judged against test/cpp/ref-gxx15.edn; f8 by its own verdict):
+
+| Program | Result | Link and run, peak |
+|---|---|---|
+| f8 (`std::vformat("{}", make_format_args(i))`) | **pass**: "3", status 0 | 7 min 22 s, 2.02 GB |
+| runtime/library.cpp | **pass**: status 0, stdout 70c08058... (g++'s) | 7 min 48 s, 2.04 GB |
+| gxx-dg-run/pr77550.C, runtime/atomics.cpp, runtime/hello.cpp | **pass** (llvm-eh's IR; unchanged by this branch, the 81's IR being byte for byte) | 16-71 s, 0.47-0.88 GB |
+
+f8 generates 43,794 lines (drops 12/20), library.cpp 14/33.
+
+**The full runtime with tzdb.cc**: `bin/cppi runtime-build` at the branch's key (198 of 198 units lowered and judged, 657 s, one job), then
+`runtime-ci` read the 2 units whose lowered C changed (tzdb.cc 173.8 s), 199 of 199 units read; every process's peak under 2.08 GB (the
+watcher's, tzdb.cc's read). `bin/cppi` stops past `CPPI_DISK_MAX` (80% by default): run with 88 under the main session's limit.
+
+### Checked (one at a time, peaks by busybox `time -v`)
+
+| Run | Result |
+|---|---|
+| gen-batch over the 81 run programs (library.cpp left out), five parts, against cpp-s12's G10 | **69 generated, none lost or gained, all 69 byte for byte**; 0.36-1.35 GB |
+| cpp-print-essential's command | 33 of 33, 9 of 9, `_control/bitfields-vs-io` failing as it must; 1.40 GB |
+| llvm-essential's commands (`bin/repr-llvm check roundtrip-llvmtest`, `verify-llvmtest`, `verify-probes`, `text-llvmtest`, `--essential`) | pass, 0 failing, their controls failing as they must; 0.16-0.27 GB |
+| `bin/llvmi check --essential`, `test/repr/llvm/controls-test.bash` | 10 of 10, 4 controls judged, 0 pass; all ok; 0.38 GB |
+| `bin/cppi lower-essential` | 6 of 6; 1.57 GB |
+| cpp-check-essential's command (`CPPI_THREADS=1`, on the prebuilt link) | samples 4 programs, pass 4; the run control differs as it must; 1.40 GB |
+| `bin/cppi codegen-gen` | 155 of 155 as recorded, the controls failing as they must; 1.15 GB, 9.3 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --judge --strict` | exit 0, 0 problems (scores.edn unchanged) |
+| `test/gate/gate-key-crops-test.bash` | PASS: the branch changes only `arbace/cpp/` (crop paths) and doc/; no gate, runtime or seed key moves (the cpp runtime's key moves) |
+
+### Decided (the main session for the user's overnight rule, 2026-11-14): CP386 (a), CP387 (a), CP388 (a)
+
+### Proposed (CP389)
+
+- **CP389 Conversion function templates.** f8's largest remaining drop (7: `template<class _Tp> operator _Tp() const` and its kin in
+  <ranges>' and <tuple>'s helpers), refused at declaration ("a conversion function template"); a non-template conversion and a generic
+  lambda's (CP301 (a)) are converted to. (a) Declare them on their class and deduce one from the conversion's target type ([temp.deduct.conv]:
+  P the return type, its reference and the target's top-level cv dropped), its specialization a candidate of conv-for and of the class
+  conversions; (b) leave them dropped until a run needs one. **Recommended: (a)** in the next session, with probes over references,
+  cv and deduction failure; its gen-batch over the 81 then decides whether any IR changes.

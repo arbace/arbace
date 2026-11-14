@@ -95,13 +95,13 @@ Six crops are above 90 on all three. What the others still need:
   cpp-s12"): CP382 (b) (`_GLIBCXX_WIDEN` names the wide literal in every char instantiation) then (a) (wide and Unicode literals: code
   units, i16/i32 globals, the evaluator's element reads), CP383 (b) kept; library.cpp alone first refused at make_format_args (`_Float16`
   and `__float128` unknown); then `using enum`, the extended floating types, constexpr static members inline since C++17: **f8 and
-  library.cpp both generate and lower**; their runs need gcc (not run); the 81's IR byte for byte (69); CP384, CP385 proposed. `cpp-s13` (2026-11-14, "As built: cpp-s13", stopped by the disk at 86-88% before its proofs): C++'s link on ci's prebuilt runtime
-  (CS273 (a), decided 2026-11-03 and never taken: a fragment per unit, the link's prune): llvm-eh's five links above 2.5 GiB now 0.47-1.94 GB,
-  pr77550, atomics and hello pass, f8 and library.cpp fail on two code generator gaps then fixed (constructor templates defined outside a
-  class template; GNU abi_tag on a class); tzdb.cc's read 2.20 GB (a long byte string lowered as a literal); drops f8 35/86 → 12/20,
-  library.cpp 26/67 → 14/33 (headers' incomplete instances, variable templates' explicit specializations, members of explicit
-  specializations defined outside them, 128-bit constants inside evaluations); f8's next refusal (ctlz of unsigned __int128) fixed, not
-  run; the proofs and the full runtime are the survey's night commands; CP386-CP388 proposed.
+  library.cpp both generate and lower**; their runs need gcc (not run); the 81's IR byte for byte (69); CP384, CP385 proposed. `cpp-s13` (2026-11-14, "As built: cpp-s13"): C++'s link on ci's prebuilt runtime (CS273 (a): a fragment per unit, the link's
+  prune; CP386 (a)): llvm-eh's five links above 2.5 GiB now 0.47-2.04 GB and **all five pass** (f8 by its "3", library.cpp as g++'s run,
+  pr77550, atomics, hello), after the code generator's fixes (constructor templates defined outside a class template, GNU abi_tag on a
+  class, sizeof... in signatures, unions' destructors, non-negative enumerations' bit-fields unsigned, 128-bit constants inside
+  evaluations, CP388 (a)); the full runtime with tzdb.cc (its table a string literal, CP387 (a), read in 2.2 GB); drops f8 35/86 → 12/20,
+  library.cpp 26/67 → 14/33; the 81's IR byte for byte (69), codegen-gen 155, the essentials, reap and crops-score pass; no gate key
+  moves; CP389 (conversion function templates) proposed.
 - **OCaml** (completeness, independence): eval's 207 and AOT's 202 by-design cases and AOT's 64 deferred; OC202 (a)
   (about 29 AOT passes, after OC185's switch) and the native records (tonight) move the AOT stage from 0.5 to 1
   ([ocaml/OCAML-SURVEY.md](ocaml/OCAML-SURVEY.md), [ocaml/DEFERRED-TRIAGE.md](ocaml/DEFERRED-TRIAGE.md)).
