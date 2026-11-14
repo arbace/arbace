@@ -607,6 +607,13 @@ check_one() {
   g=$goroot/test/$p
   f=$cforms/go/test/$(forms_rel "$p").ae
   [ -f "$f" ] || { printf '%s\terror\tno forms (%s)\n' "$id" "${f#$root/}"; return; }
+  # the retry's controls (test/goi/retry-test.bash): GOI_CHECK_FAIL_ONCE=ID fails ID's first run of this check (a
+  # marker in cwork, made atomically), GOI_CHECK_FAIL=ID every run of it; neither is set by the gate
+  if [ -n "${GOI_CHECK_FAIL:-}" ] && [ "$id" = "$GOI_CHECK_FAIL" ]; then printf '%s\tfail\tforced (GOI_CHECK_FAIL)\n' "$id"; return; fi
+  if [ -n "${GOI_CHECK_FAIL_ONCE:-}" ] && [ "$id" = "$GOI_CHECK_FAIL_ONCE" ] \
+     && mkdir "$cwork/fail-once.$(printf '%s' "$id" | tr '/' '_')" 2>"$cwork/fail-once.err"; then
+    printf '%s\tfail\tforced once (GOI_CHECK_FAIL_ONCE)\n' "$id"; return
+  fi
   # the forms of mode :full when the program has them (GOI-DESIGN-REVIEW.md, "As built: :full forms"):
   # positions within a line (/*line directives, a call split over lines, an index's [); at the AOT
   # level only with GOI_AOT_LAYOUT=full (printed back to the original text: Proposed 8), else the
@@ -1565,6 +1572,7 @@ check() {
   export -f cover_env cover_settle forms_rel no_forms_row limited limited_cpu program_tmo ref_commit action_parse check_one check_dir check_err check_err_aot run_verdict dir_verdict syn_verdict err_verdict err_aot_verdict controls_of action_of action_words gc_ref gc_ref_fails aot_build aot_dir_root stderr_head gc_env run_env box_run box_input
   export root goroot rexe hexe cforms cfull dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp gocmp_key esyntax eraw
   local t0=$SECONDS
+  rm -rf "$cwork"/fail-once.*
   # a job that dies prints no row: xargs's status is not the check's (missing_rows reports the program)
   { xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
       || echo "goi check: xargs exited $?" >&2; } | LC_ALL=C sort > "$cwork/results.tsv"
@@ -1581,6 +1589,24 @@ check() {
     # (a subject's controls' rows come with it, GTS86 (b): those the first run did not print added)
     awk -F'\t' 'NR==FNR { r[$1] = $0; next } ($1 in r) { print r[$1]; delete r[$1]; next } { print } END { for (k in r) print r[k] }' "$cwork/retried.tsv" "$cwork/results.tsv" \
       | LC_ALL=C sort > "$cwork/results.r" && mv "$cwork/results.r" "$cwork/results.tsv"
+  fi
+  # a program the reference records passing that failed among the others runs again alone, once, as a timeout does:
+  # a program that waits on the wall clock for the collector (typeparam/chans.go's _Ranger: a finalizer must run
+  # within time.Minute of one runtime.GC, which under a loaded host can find the receiving goroutine not yet gone)
+  # fails at 8 at a time beside the concurrent gate and passes by itself (night 13); its second result stands, its
+  # first row kept in $cwork/first-fails.tsv. A real regression fails again and is judged as before
+  : > "$cwork/first-fails.tsv"
+  if [ -f "$ref" ] && [ -z "$record$bundle" ]; then
+    sed -n 's/^ *\["\([^"]*\)" :pass.*/\1/p' "$ref" > "$cwork/ref-pass.pre"
+    awk -F'\t' 'NR==FNR { p[$1] = 1; next } ($1 in p) && $2 == "fail" { print $1 }' "$cwork/ref-pass.pre" "$cwork/results.tsv" > "$cwork/fails.txt"
+    if [ -s "$cwork/fails.txt" ]; then
+      echo "== goi check: $(wc -l < "$cwork/fails.txt") passing in $(basename "$ref") failed, run again one at a time (their first rows kept in $cwork/first-fails.tsv)" >&2
+      awk -F'\t' 'NR==FNR { f[$1] = 1; next } ($1 in f)' "$cwork/fails.txt" "$cwork/results.tsv" > "$cwork/first-fails.tsv"
+      xargs -a "$cwork/fails.txt" -P 1 -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+        > "$cwork/refailed.tsv" || echo "goi check: xargs exited $? (the retry of the failed)" >&2
+      awk -F'\t' 'NR==FNR { r[$1] = $0; next } ($1 in r) { print r[$1]; delete r[$1]; next } { print } END { for (k in r) print r[k] }' "$cwork/refailed.tsv" "$cwork/results.tsv" \
+        | LC_ALL=C sort > "$cwork/results.r" && mv "$cwork/results.r" "$cwork/results.tsv"
+    fi
   fi
   if [ -n "$bundle" ]; then
     # the bundle's list: PROGRAM, the timeout, the status expected, the comparison
