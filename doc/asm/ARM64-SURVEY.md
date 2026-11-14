@@ -2594,3 +2594,14 @@ Numbering from ARS92. Each with options, the recommended named; none taken.
   about 11 minutes on the VM; (c) fewer compile runs (the listing and the unoptimized build out: about 5 minutes) in the one step.
   *Recommended: (a)*: no run lost, and each step under the time a step takes; their inputs narrowed to their directories, a change to
   one reruns only its step.
+
+## As built: AR23 (2026-11-14; branch `295-asm-arm64-ar23`, from `294-asm-arm64-ar22` `b147c457e`; queue task 295, the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, 4 of its 8 cores, load about 13), stage 0 and TamaGo's go. The user's answer: ARS92 (a).
+
+- **ARS92 (a): `a64i-go-compile`, a step of its own** (`bin/a64i go-check --tools compile`, `--full`, chain asm-arm64-full; its
+  fragment in test/gate/crops/asm.edn, spliced by hand into steps.edn, its controls go-7 to go-9 in test/asm/controls-a64i-go.txt):
+  323 s on the VM, a peak of 1.39 GiB (busybox time -v: `:mem-gib 2`). `a64i-go-tools` keeps gofmt's and vet's
+  (`--tools gofmt vet`, controls go-3 to go-6): 272 s, 0.46 GiB. Each step's inputs leave out the other's directories
+  (`!test/asm/a64i-go/compile/`; `!test/asm/a64i-go/gofmt/`, `!test/asm/a64i-go/vet/`), so a change to one reruns only its step;
+  the Makefile's `a64i-go-tools` and the new `a64i-go-compile` run them. `gate.crops check` 0 problems.
