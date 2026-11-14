@@ -5678,3 +5678,15 @@ and, where it could be, reproduced alone in the worktree.
   changed until it is recorded.
 - **Keys.** The j2g fix and repr/c's budget move gate_key. 126c321af14f8a9da7e6 was the key before them. The rest of the
   branch touches only tests, data and crop paths.
+
+## 2026-11-14: n15-fix's non-key commits on next; its two key-moving fixes held for window W
+
+Of n15-fix (mac, a2a629a60), next takes the commits that leave gate_key alone (the main session, under the user's overnight rule, the
+fix agent's recommended decision 1 (b)): mac/asm-fix (075af761f, e815d223b), the tests' and the packs' races (3a4e328f3), the C++ run
+budget of runtime/atomics.cpp (17b868b32) and n15-fix's journal entry above. Held on n15-fix for window W, since they move gate_key
+(126c321af14f8a9da7e6 -> d12279d7579d64392d52): fb27a9966 (j2g: the lambda adapter whose SAM is clone(), t05359) and 5eb576998 (repr/c's
+round trip: the :full read under its own budget). Until they merge, java-judge's jdk-run shard 2 fails on t05359 and limits-blockid.c's
+level 2 may run out of time under load. Left for the user: goi's typeparam/chans.go (a retry of a recorded pass, or :known under
+finalizer timing) and oi's lazy7 near its 120 s limit. The main session's night-13 disk guard trimmed Go's build cache at 45 minutes and
+deleted entries live builds had counted as hits (java-judge's two shard link failures, cause (a)); the guard keeps 90 minutes since,
+as bin/lib/gocache.bash does.
