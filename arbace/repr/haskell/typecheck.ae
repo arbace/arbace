@@ -1004,6 +1004,18 @@
     (if (eq-pred? [c ts])
       (do (unify (last (butlast ts)) (last ts)) (list 'co))
     (or (some (fn [[[gc gts] term]] (when (and (= gc c) (= (mapv zonk gts) ts)) term)) givens)
+        ;; HF10-P44 (a): a functional dependency's improvement from a given (GHC.Tc.Solver.Dict's improvement by the
+        ;; inert givens: reify's Reifies s a given, reflect p's Reifies s ?b wanted, ?b := a), then the given itself
+        (when-let [fds (seq (some-> *classes* deref (get c) :fundeps))]
+          (some (fn [[[gc gts] term]]
+                  (when (and (= gc c) (= (count gts) (count ts)))
+                    (let [gts (mapv zonk gts)]
+                      (when (some (fn [[ls rs]] (and (seq ls) (every? #(and (<= 0 %) (= (nth gts % nil) (nth ts % nil))) ls)
+                                                     (every? #(<= 0 % (dec (count ts))) rs)
+                                                     (do (doseq [r rs] (soft-unify (nth ts r) (nth gts r))) true)))
+                                  fds)
+                        (when (= (mapv zonk gts) (mapv zonk ts)) term)))))
+                givens))
         ;; an implicit parameter (GHC.Tc.Solver.Dict's IP: its name determines its type, as a functional
         ;; dependency): a given of the same name, HasCallStack being ?callStack :: CallStack
         ;; HF10-P21: HasExceptionContext too, ?exceptionContext :: ExceptionContext (SomeException's constructor gives it:
@@ -1061,7 +1073,9 @@
         ;; GHC.Tc.Instance.Class's matchKnownNat, matchKnownSymbol, matchKnownChar: a literal's dictionary is the literal
         (when (and (vector? c) (= 1 (count ts)) (#{"KnownNat" "KnownSymbol" "KnownChar"} (nth c 3)))
           (known-lit-dict (nth c 3) (zonk (first ts))))
-        (when (and (< depth 30) (seq ts) (not= :mv (first (first ts))) (not= :tv (first (first ts))))
+        ;; (a nullary class's instance too: MultiParamTypeClasses' class Trivial; instance Trivial, HF10-P43)
+        (when (and (< depth 30) (or (and (empty? ts) (some-> *classes* deref (get c)))
+                                    (and (seq ts) (not= :mv (first (first ts))) (not= :tv (first (first ts))))))
           (some (fn [{:keys [dfun tvs ctx head]}]
                   (when (= (first head) c)
                     (when-let [m (reduce (fn [m [p t]] (match-ty (set tvs) m p t)) {} (map vector (second head) ts))]
@@ -1625,7 +1639,7 @@
                 [tr (wrap-lets binds cr)])
       (do (error! "statement not handled: " (con v)) [(fresh-meta) (list 'lit "?")]))))
 
-(declare infer-listcomp)
+(declare infer-listcomp pat-binders tc-local-binds)
 
 (defn- stmts-binders
   "The variables a comprehension's statements bind, in order (collectLStmtsBinders): generators' patterns, lets'
@@ -1756,7 +1770,13 @@
         rq (let [x (prune r)] (when (and (vector? x) (= :forall (first x)) (empty? (nth x 1)) (seq (nth x 2))) x))
         r (if rq (nth rq 3) r)
         _ (when expected (unify r expected))
-        cs (mapv (fn [a at] (check-expr env a at)) args ats)]
+        ;; HF10-P44 (a): an argument checked against a qualified type ((cls => r), withDict's, a rank-n context) after the
+        ;; others, so its givens' metas are the other arguments' types first (GHC solves the implication at the end:
+        ;; withGift (\_ -> foo False) (23 :: Int) Proxy's Given ?a against foo's Given Int)
+        qual? (fn [at] (let [x (prune at)] (and (vector? x) (= :forall (first x)) (seq (nth x 2)))))
+        later (set (keep-indexed (fn [i at] (when (qual? at) i)) ats))
+        cs1 (into {} (keep-indexed (fn [i [a at]] (when-not (later i) [i (check-expr env a at)])) (map vector args ats)))
+        cs (vec (map-indexed (fn [i [a at]] (if (later i) (check-expr env a at) (get cs1 i))) (map vector args ats)))]
     (if rq
       (let [n (when (= 'HsVar (con head)) (nm (arg head 2)))
             sp (when n (lsp (arg head 2)))
@@ -1882,7 +1902,11 @@
                       le (when n (get env n))
                       sigma (cond (nil? n) nil
                                   (nil? le) (get @*genv* n)
-                                  (:sig le) (:poly le))]
+                                  (:sig le) (:poly le)
+                                  ;; HF10-P44 (a): a lambda-bound binder of a rank-n type (reify's k :: forall s. Reifies s a
+                                  ;; => Proxy s -> r): its specified quantifiers taken by the type arguments (k @Any)
+                                  (:mono le) (let [mt (prune (:mono le))] (when (and (vector? mt) (= :forall (first mt)) (seq (nth mt 1))) mt)))
+                      le (if (and le (:mono le) (not (:core le))) (do (note-type! (lv n) (:mono le)) (assoc le :core (lv n))) le)]
                   (if (and sigma (= :forall (first sigma)))
                     (let [occurs (fn [x t] (contains? (set (keep (fn [y] (when (and (vector? y) (= :tv (first y))) (second y))) (tree-seq coll? seq t))) x))
                           [t preds] (loop [t sigma tas tas m {} preds []]
