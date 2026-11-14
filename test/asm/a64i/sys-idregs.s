@@ -1,7 +1,7 @@
 # a64i's program (AR20, queue 291; ARS85 (a)): the ID registers Linux emulates for EL0, MRS of op0 3, op1 0, CRn 0, CRm 0-7, op2
 # 0-7 (by their encodings), each printed, ID_AA64ISAR1_EL1 without API, GPI, BF16 and I8MM and ID_AA64PFR1_EL1 without BT (the
 # features a64i does not implement: on this M2 they are set, in a64i 0); a register Linux does not emulate (CRm 0's op2 1-4 and 7,
-# CRm 1) is SIGILL, its handler printing 0x51611 and stepping over it
+# CRm 1) is SIGILL, its handler printing 0x51611 and stepping over it (those by .inst: the forms have no system register for them)
 # with: lib/out.s
 # exit: 0
 # stdout: "00000000610f0000\n"
@@ -82,16 +82,16 @@ _start:
 	mrs	x0, s3_0_c0_c0_0
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c0_1
+	.inst	0xd5380020			// mrs x0, s3_0_c0_c0_1: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c0_2
+	.inst	0xd5380040			// mrs x0, s3_0_c0_c0_2: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c0_3
+	.inst	0xd5380060			// mrs x0, s3_0_c0_c0_3: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c0_4
+	.inst	0xd5380080			// mrs x0, s3_0_c0_c0_4: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
 	mrs	x0, s3_0_c0_c0_5
@@ -100,31 +100,31 @@ _start:
 	mrs	x0, s3_0_c0_c0_6
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c0_7
+	.inst	0xd53800e0			// mrs x0, s3_0_c0_c0_7: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_0
+	.inst	0xd5380100			// mrs x0, s3_0_c0_c1_0: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_1
+	.inst	0xd5380120			// mrs x0, s3_0_c0_c1_1: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_2
+	.inst	0xd5380140			// mrs x0, s3_0_c0_c1_2: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_3
+	.inst	0xd5380160			// mrs x0, s3_0_c0_c1_3: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_4
+	.inst	0xd5380180			// mrs x0, s3_0_c0_c1_4: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_5
+	.inst	0xd53801a0			// mrs x0, s3_0_c0_c1_5: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_6
+	.inst	0xd53801c0			// mrs x0, s3_0_c0_c1_6: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
-	mrs	x0, s3_0_c0_c1_7
+	.inst	0xd53801e0			// mrs x0, s3_0_c0_c1_7: SIGILL (no assembler form: UNDEFINED at EL0)
 	bl	put_hex
 	mov	x0, #0
 	mrs	x0, s3_0_c0_c2_0

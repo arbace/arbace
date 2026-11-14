@@ -158,7 +158,7 @@ handler:
 2:	add	x1, x1, x3
 	b	1b
 3:	cbz	x23, 4f
-	and	x0, x0, #~0x3f
+	and	x0, x0, #0xffffffffffffffc0
 4:	bl	put_hex
 	adrp	x1, altstk
 	add	x1, x1, :lo12:altstk
