@@ -25,7 +25,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   repr-asm-link repr-asm-link-dump repr-asm-run-check repr-asm-run-record repr-asm-link-oracle \
   repr-asm-table-arm64 repr-asm-table-check-arm64 repr-asm-table-oracle-arm64 repr-asm-encode-check-arm64 repr-asm-encode-record-arm64 \
   repr-asm-decode repr-asm-decode-object repr-asm-decode-check repr-asm-decode-record \
-  a64i-light a64i-run a64i-trace a64i-check a64i-record a64i-table-check \
+  a64i-light a64i-run a64i-trace a64i-check a64i-record a64i-table-check a64i-go-check \
   x86i-light x86i-run x86i-decode-text x86i-trace x86i-gen x86i-gen-check x86i-synth x86i-check x86i-record x86i-decode-check x86i-decode-record \
   repr-rust-native-check \
   repr-rust-native-errors \
@@ -593,6 +593,8 @@ a64i-record: ## a64i's check recorded into test/asm/a64i-results-arm64.edn (bin/
 	bin/a64i check --record
 a64i-table-check: ## goi's checker over a64i's packages in linux/arm64, the package header's :init-order held to it, with its control (bin/a64i table-check; ARS70 (a))
 	bin/a64i table-check
+a64i-go-check: ## real Go programs (test/asm/a64i-go/) built for linux/arm64 by TamaGo's go and run on a64i to their end, judged by their own output (bin/a64i go-check; AR19)
+	bin/a64i go-check
 x86i-light: ## x86i, the x86-64 integer machine (AX5.2): its light driver built alone by TamaGo's go into .tmp/x86i/x86i (bin/repr-asm x86i light)
 	bin/repr-asm x86i light
 x86i-run: ## a static x86-64 executable run on x86i: its status, or 128 + the signal (bin/repr-asm x86i run EXE [ARG...]; EXE=..., ARGS=...)

@@ -943,10 +943,40 @@ case ${1:-} in
           [ $bad = 0 ] || exit 1
         fi
         arbace_tool -e "(do (load-file \"$root/test/asm/a64i/gen.ae\") nil)" -e "(asm.a64i-gen/main \"$dir\" \"$root/test/asm/a64i/lib/out.s\" \"$root/test/asm/a64i/synth-digests.edn\" \"$rec\")" ;;
+      go-check) shift 2
+        # AR19 (queue 288, ARS81 (a)): real Go programs on a64i, test/asm/a64i-go/NAME/main.go (or the names given) built for
+        # linux/arm64 by TamaGo's go (no cgo) into .tmp/a64i/go, each run on a64i to its end and judged by its own output, NAME/want.txt
+        # (written from this M2's native run), with status 0; on an arm64 host also run natively, the same output required
+        [ -x "$a64i_exe" ] || a64i_light
+        gw=$a64i_dir/go; mkdir -p "$gw"; bad=0; n_ok=0
+        names=("$@"); [ ${#names[@]} -gt 0 ] || names=($(cd "$root/test/asm/a64i-go" && ls -d */ | tr -d /))
+        for n in "${names[@]}"; do
+          d=$root/test/asm/a64i-go/$n; [ -f "$d/main.go" ] || { echo "FAIL: a64i go-check: no $d/main.go"; bad=1; continue; }
+          rm -rf "$gw/$n"; mkdir -p "$gw/$n"; cp "$d/main.go" "$gw/$n/"; printf 'module a64igo%s\ngo 1.27\n' "$n" > "$gw/$n/go.mod"
+          (cd "$gw/$n" && GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=linux \
+             GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$goroot/bin/go" build -trimpath -o "$n" .) > "$gw/$n/build.log" 2>&1 \
+            || { echo "FAIL: a64i go-check: $n: go build: $(head -c 300 "$gw/$n/build.log")"; bad=1; continue; }
+          st=0; (cd "$gw/$n" && timeout 120 "$a64i_exe" run --stats "./$n" > a64i.out 2> a64i.err) || st=$?
+          if [ $st != 0 ] || ! cmp -s "$gw/$n/a64i.out" "$d/want.txt"; then
+            echo "FAIL: a64i go-check: $n: status $st: $(head -c 300 "$gw/$n/a64i.out") $(tail -2 "$gw/$n/a64i.err")"; bad=1; continue
+          fi
+          case $(uname -m) in aarch64|arm64)
+            st=0; (cd "$gw/$n" && timeout 60 "./$n" > native.out 2>&1) || st=$?
+            if [ $st != 0 ] || ! cmp -s "$gw/$n/native.out" "$d/want.txt"; then echo "FAIL: a64i go-check: $n: the CPU's run differs (status $st)"; bad=1; continue; fi ;;
+          esac
+          n_ok=$((n_ok + 1)); echo "a64i go-check: $n: to its end, its output as wanted ($(tail -1 "$gw/$n/a64i.err" | sed 's/^a64i: //'))"
+        done
+        echo "a64i go-check: $n_ok of ${#names[@]} Go programs"
+        # the negative control: the first program's run judged by the second's want.txt must fail
+        if [ ${#names[@]} -ge 2 ] && [ -f "$gw/${names[0]}/a64i.out" ]; then
+          if cmp -s "$gw/${names[0]}/a64i.out" "$root/test/asm/a64i-go/${names[1]}/want.txt"; then echo "FAIL: control go-1: ${names[0]}'s run passes as ${names[1]}"; bad=1
+          else echo "control go-1: fails as it must (${names[0]}'s run judged by ${names[1]}'s output)"; fi
+        fi
+        [ $bad = 0 ] || { echo "FAIL: a64i go-check"; exit 1; } ;;
       eval-build) shift 2; [ $# -eq 2 ] || { echo "repr-asm a64i eval-build LIST WORK" >&2; exit 2; }
         export REPR_ASM_ARM64_TABLE=$root/asm/arm64/table.edn
         arbace_tool -m arbace.asm.arm64.eval build "$1" "$2" "$src/musl-1.2.6" ;;
-      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|claimed|synth DIR [--record]|eval-build LIST WORK|table-check" >&2; exit 2 ;;
+      *) echo "repr-asm a64i light|run [--forms FORMS] EXE [ARG...]|decode-text EXE|forms-check EXE FORMS|trace --mode sys|step|bisect EXE [ARG...]|claimed|synth DIR [--record]|eval-build LIST WORK|table-check|go-check [NAME...]" >&2; exit 2 ;;
     esac ;;
   a64i-check)
     # AR5: test/asm/run-arm64/'s and test/asm/a64i/'s programs built for AOT (arbace.asm.link build: WORK/NAME) and for eval
