@@ -146,14 +146,18 @@
 (defn- tycon-of [c] (:tycon (con-info c)))
 (defn- newtype-con? [c] (= 'newtype (:flavour (get (:tycons *r*) (tycon-of c)))))
 
+(def ^:private cls-ip ["ext" "tc" "GHC.Internal.Classes" "IP"])
+
 (defn- newtype-class? [cls]
-  (let [i (get (:all-classes *r*) cls)] (and i (= 1 (+ (count (:methods i)) (or (:nsupers i) (count (:supers i))))))))
+  ;; (HF10-P48 (a): IP's is one even when the program loaded no interface of its class, T23761b's IdCt (?ipInt :: Int))
+  (or (= cls cls-ip)
+      (let [i (get (:all-classes *r*) cls)] (and i (= 1 (+ (count (:methods i)) (or (:nsupers i) (count (:supers i)))))))))
 
 (defn- class-of-dcon
   "C:Cls's class"
   [g]
   (when (and (vector? g) (str/starts-with? (nth g 3) "C:"))
-    (let [cls ["ext" "tc" (nth g 2) (subs (nth g 3) 2)]] (when (get (:all-classes *r*) cls) cls))))
+    (let [cls ["ext" "tc" (nth g 2) (subs (nth g 3) 2)]] (when (or (get (:all-classes *r*) cls) (= cls cls-ip)) cls))))
 
 (defn- newtype-selector?
   "The one method or superclass selector of a newtype class"
@@ -645,10 +649,11 @@
       (doseq [[x r] (map vector xs rs)] (swap! *lreps* assoc x (if (= :v r) [] [r])))
       [n [[n (rhs (list 'lam xs (list 'app a xs)))]]])
     ;; a newtype class's selector on an atom (ip d): d |> co, trivial (CorePrep: the selector has no binding, its
-    ;; unfolding \d -> d |> co)
+    ;; unfolding \d -> d |> co); HF10-P48 (a): its dictionary constructor on an atom too (C:IP x: x |> co)
     (let [a (flatten-app a)]
-      (and (head? a 'app) (head? (second a) 'v) (newtype-selector? (second (second a))) (= 1 (count (nth a 2)))
-           (atomic-args? (nth a 2))))
+      (and (head? a 'app) (head? (second a) 'v) (= 1 (count (nth a 2))) (atomic-args? (nth a 2))
+           (or (newtype-selector? (second (second a)))
+               (and (class-of-dcon (second (second a))) (newtype-class? (class-of-dcon (second (second a))))))))
     (atom-of (first (nth (flatten-app a) 2)))
     ;; a newtype class's dictionary constructor on an expression (C:IP e): its unfolding \x -> x |> co applied, a
     ;; thunk of let x = e in x
@@ -1385,6 +1390,8 @@
               (do (float! rs) (list 'rcon (gname c) (rename rs)))))
           (rhs e)))
       (and (head? f 'v) (newtype-selector? (second f))) (rhs e)
+      ;; (HF10-P48 (a): a newtype class's dictionary constructor, C:IP x: the identity, app-expr's)
+      (and (head? f 'v) (class-of-dcon (second f)) (newtype-class? (class-of-dcon (second f)))) (rhs e)
       ;; a primop's or a foreign call's application is no function call (HF10-P20: Real's divZeroError = raise# e was
       ;; an application of raise#, which has no binding)
       (and (head? f 'v) (or (primop? (second f)) (= "ffi" (nth (second f) 1)) (unboxed-con? (second f)))) (rhs e)
