@@ -434,6 +434,10 @@
           (return))
         (case ["gettid"]
           (aset (.-X c) 0 (conv uint64 (.tid c)))
+          (return))
+        (case ["newfstatat" "fstat"]
+          ;; AR21: arm64's struct stat (statA64)
+          (aset (.-X c) 0 (conv uint64 (.statA64 c (.-Name s) args)))
           (return)))
 
       (let [(values r exit) (.SyscallByName (.-K c) s (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5))]
@@ -446,6 +450,42 @@
 
 
 (go/const ^{:val 18446744073709551578N :doc "enosys is -ENOSYS as x0 holds it.\n"} enosys (bit-not (conv uint64 37)))
+
+(go/method statA64 "statA64 is newfstatat and fstat with arm64's 128-byte struct stat (AR21, queue 292: gofmt's and vet's files): crt's x86-64\ncall (newfstatat 262, fstat 5) fills its 144-byte layout over the buffer and the 16 bytes after it (or before it, when those are\nunmapped), which are kept and put back; the fields then move to arm64's places (nlink 32 bits after mode, blksize 32 bits, the\npadding zero). Linux leaves the buffer as it was on an error, and so does this.\n" ^int64 [^{:tag (* CPU)} c ^string name ^{:tag (array 6 uint64)} args]
+  (let [^int i 2
+        ^int64 n 262]
+    (when (== name "fstat")
+      (set! (values i n) (values 1 5)))
+
+    (let [buf (aget args i)
+          lo buf
+          at (+ buf 128)
+          (values keep ok) (.ReadBytes (.-AS c) at 16)]
+      (when (not ok)
+        (set! (values lo at) (values (- buf 16) (- buf 16)))
+        (set! (values keep ok) (.ReadBytes (.-AS c) at 16)))
+
+      (when (not ok)
+        (return (- eFAULT)))
+
+      (aset args i lo)
+      (let [r (.Syscall (.-Sys (.-K c)) n (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5))
+            (values x ok2) (.ReadBytes (.-AS c) lo 144)]
+        (.WriteBytes (.-AS c) at keep)
+        (when (or (< r 0) (not ok2))
+          (return r))
+
+        (let [y (make (slice byte) 128)]
+          (copy (subslice y 0 16) (subslice x 0 16)) ; st_dev, st_ino
+          (copy (subslice y 16 20) (subslice x 24 28)) ; st_mode
+          (copy (subslice y 20 24) (subslice x 16 20)) ; st_nlink
+          (copy (subslice y 24 32) (subslice x 28 36)) ; st_uid, st_gid
+          (copy (subslice y 32 40) (subslice x 40 48)) ; st_rdev
+          (copy (subslice y 48 60) (subslice x 48 60)) ; st_size, st_blksize
+          (copy (subslice y 64 120) (subslice x 64 120)) ; st_blocks, st_atim, st_mtim, st_ctim
+          (.WriteBytes (.-AS c) buf y)
+          r)))))
+
 
 
 (go/const "The M2's identification a program reads at EL0 (AR19, queue 288; read on the VM's M2 under Linux 7.3): CTR_EL0 (64-byte\nlines, DIC and IDC clear), DCZID_EL0 (dc zva allowed, 64-byte blocks), CNTFRQ_EL0 (24 MHz).\n"
