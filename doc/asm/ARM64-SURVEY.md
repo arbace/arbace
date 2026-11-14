@@ -2578,4 +2578,19 @@ configuration and the flags); no code copied.
     copy written (the file unchanged), read(2) into the read-only mapping EFAULT, then EINVAL, EBADF, EINVAL, EACCES, ENODEV (a
     directory), munmap 0.
 - **The gate**: `a64i-go-tools` as it is (`--full`, chain asm-arm64-full): its runs are 25 + 10, the compile directory's 10 about
-  300-350 M instructions on a64i, 185-241 s on the VM; the step about 7 minutes on the VM.
+  240-390 M instructions on a64i, 185-462 s on the VM (ten consecutive runs 241-462 s, every one as wanted, load 12-15); the whole
+  step 653 s on the VM (compile 422 s, gofmt 9 s, vet 221 s), a peak of 0.35 GiB: over the 10 minutes the task allows (ARS92).
+- Go programs stay out of the lockstep (AR19's rule: it follows one native thread): compile under `trace --mode sys` is a DIFF at
+  its first system call (2,345 instructions in, a byte of the runtime's CPU features: AT_HWCAP is a64i's own), so the Go tools are
+  judged by their outputs and objects.
+
+### Proposed (AR22)
+
+Numbering from ARS92. Each with options, the recommended named; none taken.
+
+- **ARS92 the compile runs' step.** The step `a64i-go-tools` went from 219 s to 653 s on the VM with cmd/compile's runs. (a) a step
+  of their own, `a64i-go-compile` (`bin/a64i go-check --tools compile`, `--full`, chain asm-arm64-full), `a64i-go-tools` keeping
+  gofmt's and vet's (`--tools gofmt vet`): two steps of 4 and 7 minutes the planner keys and skips apart; (b) one step as built,
+  about 11 minutes on the VM; (c) fewer compile runs (the listing and the unoptimized build out: about 5 minutes) in the one step.
+  *Recommended: (a)*: no run lost, and each step under the time a step takes; their inputs narrowed to their directories, a change to
+  one reruns only its step.
