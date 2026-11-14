@@ -1,7 +1,8 @@
 # a64i's program (AR21, queue 292): read, pread64, write and getrandom over a buffer that two adjacent mappings hold (two pages
 # mapped, the second mapped again MAP_FIXED: Go's heap grows so, and vet's read of its export data met it): the executable's first
 # eight bytes read across the boundary (its ELF magic, class, data and version), again by pread64 at offset 0, six bytes written
-# from across it, sixteen random bytes into it; each call's count the whole
+# from across it, sixteen random bytes into it; each call's count the whole; fstat's struct across it (a regular file, one link);
+# newfstatat of a missing file into address 16: ENOENT first, as Linux checks the path before it copies
 # with: lib/out.s
 # exit: 0
 # stdout: "0000000000000008\n"
@@ -12,6 +13,10 @@
 # stdout: "cd\n"
 # stdout: "0000000000000006\n"
 # stdout: "0000000000000010\n"
+# stdout: "0000000000000000\n"
+# stdout: "0000000000008000\n"
+# stdout: "0000000000000001\n"
+# stdout: "fffffffffffffffe\n"
 # stdout: "done.\n"
 	.text
 	.globl	_start
@@ -90,9 +95,30 @@ _start:
 	mov	x8, #278
 	svc	#0
 	bl	put_hex
+	// fstat(fd, page+4096-64)
+	add	x25, x21, #4032
+	mov	x0, x19
+	mov	x1, x25
+	mov	x8, #80
+	svc	#0
+	bl	put_hex
+	ldr	w0, [x25, #16]
+	and	w0, w0, #0xf000
+	bl	put_hex
+	ldr	w0, [x25, #20]
+	bl	put_hex
+	// newfstatat(AT_FDCWD, "/nonexistent/a64i", 16, 0)
+	mov	x0, #-100
+	adr	x1, nofile
+	mov	x2, #16
+	mov	x3, #0
+	mov	x8, #79
+	svc	#0
+	bl	put_hex
 	adr	x0, msg
 	mov	x1, #6
 	bl	put_str
 	b	exit0
+nofile:	.asciz	"/nonexistent/a64i"
 msg:	.ascii	"done.\n"
 	.balign	4
