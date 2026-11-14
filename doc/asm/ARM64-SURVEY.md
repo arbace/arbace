@@ -2535,3 +2535,47 @@ Numbering from ARS89. Each with options, the recommended named; none taken.
   gofmt and vet. *Recommended: (a)*: the compiler is the largest Go program at the pin that needs no exec, and its output is bytes.
 - **ARS91 the tools step's lane.** (a) as built: `a64i-go-tools` in `--full` (about 4 minutes on the VM); (b) gofmt's 9 runs (about
   30 s) in the essential `a64i-go`, vet's in `--full`. *Recommended: (a)*: the essential a64i-go already runs eight real programs.
+
+## As built: AR22 (2026-11-14; branch `294-asm-arm64-ar22`, from `292-asm-arm64-ar21` `9657c12fa`; queue task 294, the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, 4 of its 8 cores, load about 12), stage 0 and TamaGo's go. The user's answers: ARS89 (a),
+ARS90 (a), ARS91 (a). The semantics read from Linux's mmap(2) and its arm64 entry (mm/mmap.c's do_mmap order of checks: the offset,
+the descriptor, the mapping type, the descriptor's modes, the file's mmap) and from Go's own sources at the GOROOT pin (cmd/compile's
+base.MapFile and cmd/internal/bio's sliceOS: MAP_SHARED PROT_READ of the imports' export data; cmd/go's build actions for the import
+configuration and the flags); no code copied.
+
+- **ARS90 (a): cmd/compile and cmd/asm on a64i** (`bin/a64i go-check --tools`; test/asm/a64i-go/compile).
+  - The tool directory names two commands in `tool` (cmd/compile, cmd/asm); with several, a run's command line begins with the
+    tool's. Its module `a64ic` holds p (generics, closures, interfaces, a defer, errors and strconv, and `Add` in add_arm64.s) and r
+    (p's importer, with slices: p's generic code from its export data instantiated and inlined), and bad (a type error each kind and
+    an assembly file with three errors).
+  - `build` (new): `N DIR PKG [IMPORT=FILE...]`, PKG's import configuration as go build writes it (importmap lines, then a packagefile
+    line for each import with export data), each import's export data copied from `go list -trimpath -export -deps` (the host's go,
+    built as go build -trimpath builds it) into work/N/pkg; `IMPORT=FILE` points an import at a file a run makes (r's a64ic/p at the
+    run's own out/p.a, so r's object is made from a64i's p on a64i and from the native's natively).
+  - The 10 runs are go build -trimpath -x's for a64ic/p and a64ic/r (`$WORK/b001` made out/, the package's directory `$PWD/p`, a
+    fixed -buildid: go's is its action's hash, which names the host's own tools): `compile -V=full`; asm -gensymabis (symabis); compile
+    p with -symabis and -asmhdr (p.a, go_asm.h); asm (add_arm64.o); compile r against out/p.a (r.a); r's listing (`-S` into a file:
+    480 KB, digested, its object equal to r.a); p unoptimized (`-N -l`); bad.go (three type errors, status 2: compile's errors are on
+    stdout); bad_arm64.s (status 1); a missing file (status 2). Each run's out, err, status and files on a64i equal this M2's native run.
+  - The controls go-7 to go-9 (a run judged by another's want, now with its files' digests, names aside): noopt by compile, asm by
+    symabis, asmbad by bad.
+- **What a64i lacked, built generally**:
+  - **mmap of a file** (compile's import was "could not import errors (no such device)": emu's mmap was ENODEV without
+    MAP_ANONYMOUS). `emu.Kernel.fileMap` (x86i's too): Linux's checks in do_mmap's order (an offset not page-aligned EINVAL, the
+    descriptor EBADF by crt's fcntl F_GETFL, no mapping type EINVAL, a descriptor not open for reading, or a shared writable mapping of
+    one not open for writing, EACCES; not a regular file ENODEV: a zero-byte pread64's ESPIPE or EISDIR), then `Kernel.MapAnon`'s
+    pages (mmap's anonymous path, now one method) with the file's bytes from the offset read in by crt's pread64 to the file's end, the
+    rest zero, the slab read-only again after the fill (read(2) into it is EFAULT, as Linux). A copy: a shared mapping does not see
+    later writes to the file, a shared writable one (whose writes could not reach the file) is ENODEV, and a page past the file's
+    end reads as zeros where Linux raises SIGBUS.
+  - The lockstep: the native's descriptors are the world's (openat is the native's), so a file's mmap there maps a64i's own pages
+    where its kernel would (MapAnon; the registers' comparison holds the address to the native's) and takes the native's bytes, a page
+    at a time to the first the native cannot read; the native's error as it is. Without it the sys mode is `system call 3 returns
+    0xfffffffffffffff7, native 0xfffff7ff6000` (probed).
+  - `linux-mmap.s` (essential; controls verdict-38, cpu-6): the executable (12 KiB of data in it) mapped MAP_PRIVATE at 0 (its ELF
+    magic, its 8 KiB pread64's), MAP_SHARED at 4096 (pread64's), its last page (its bytes pread64's, the rest zero), a private writable
+    copy written (the file unchanged), read(2) into the read-only mapping EFAULT, then EINVAL, EBADF, EINVAL, EACCES, ENODEV (a
+    directory), munmap 0.
+- **The gate**: `a64i-go-tools` as it is (`--full`, chain asm-arm64-full): its runs are 25 + 10, the compile directory's 10 about
+  300-350 M instructions on a64i, 185-241 s on the VM; the step about 7 minutes on the VM.

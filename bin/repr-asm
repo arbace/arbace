@@ -255,9 +255,14 @@ a64i_light() {
 #           made relative and Stdout cleared, so a run prints the same paths on any host; @N:ID in a run names ID's vet.cfg;
 #   runs    ID FILES ARGS: the tool run with ARGS (a shell's words) in the run's directory, the runs in their order on one copy of
 #           the inputs; FILES (a comma list, - none; @N:ID there is that configuration's facts, vet.out) digested after it.
+#   build   N DIR PKG [IMPORT=FILE...] (cmd/compile's, AR22, queue 294): PKG's import configuration as go build writes it (importmap
+#           lines, then a packagefile line for each import with export data) in work/N/importcfg, each import's export data (go list
+#           -trimpath -export -deps PKG in DIR, the host's go, as go build -trimpath makes it) copied to work/N/pkg/IMPORT.a; IMPORT=FILE:
+#           that import's packagefile is FILE instead (a file a run makes, relative to the run's directory);
 # Each run is judged by want/ID.out, ID.err (a64i's statistics line left out), ID.status and ID.files; on an arm64 host the same
-# runs run natively on a second copy and must give the same. a64i_go_tool NAME [--record]: --record (arm64) writes want/ from
-# the native runs.
+# runs run natively on a second copy and must give the same. With several tools in `tool` (cmd/compile and cmd/asm, AR22) a run's
+# ARGS begin with the tool's name. ARGS are evaluated in the run's directory ($PWD in a -trimpath). a64i_go_tool NAME [--record]:
+# --record (arm64) writes want/ from the native runs.
 a64i_go_env() { env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=linux \
   GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$@"; }
 a64i_go_tool() {
@@ -265,10 +270,14 @@ a64i_go_tool() {
     side st bad=0 nrun=0 t0=$SECONDS ins tot=0 native=
   case $(uname -m) in aarch64|arm64) native=1 ;; esac
   [ -n "$rec" ] && [ -z "$native" ] && { echo "FAIL: a64i go-check: $n: --record needs an arm64 host"; return 1; }
-  pkg=$(head -1 "$d/tool"); tool=${pkg##*/}
+  local tools=() bn bdir bpkg bover kind spec file o
   rm -rf "$gw"; mkdir -p "$gw/r0"
-  a64i_go_env "$goroot/bin/go" build -trimpath -o "$gw/$tool" "$pkg" > "$gw/build.log" 2>&1 \
-    || { echo "FAIL: a64i go-check: $n: go build $pkg: $(head -c 300 "$gw/build.log")"; return 1; }
+  while read -r pkg; do
+    case $pkg in ''|'#'*) continue ;; esac
+    tool=${pkg##*/}; tools+=("$tool")
+    a64i_go_env "$goroot/bin/go" build -trimpath -o "$gw/$tool" "$pkg" > "$gw/build.log" 2>&1 \
+      || { echo "FAIL: a64i go-check: $n: go build $pkg: $(head -c 300 "$gw/build.log")"; return 1; }
+  done < "$d/tool"
   ln -s "$goroot" "$gw/r0/goroot"
   while read -r dest srcp; do
     case $dest in ''|'#'*) continue ;; esac
@@ -289,6 +298,29 @@ a64i_go_tool() {
         id=$(sed -n 's/^\t"ID": "\(.*\)",$/\1/p' "$b"); b=${b%/vet.cfg}; echo "$id ${b##*/}" >> "$gw/r0/work/$vn/ids"
       done
     done < "$d/vet"
+  fi
+  if [ -f "$d/build" ]; then
+    while read -r bn bdir bpkg bover; do
+      case $bn in ''|'#'*) continue ;; esac
+      mkdir -p "$gw/r0/work/$bn/pkg"
+      (cd "$gw/r0/$bdir" && a64i_go_env "$goroot/bin/go" list -trimpath -export -deps -f '{{if .Export}}{{.ImportPath}} {{.Export}}{{end}}' "$bpkg" &&
+         a64i_go_env "$goroot/bin/go" list -trimpath -f '{{range $k, $v := .ImportMap}}{{if ne $k $v}}importmap {{$k}}={{$v}}{{"\n"}}{{end}}{{end}}{{range .Imports}}packagefile {{.}}{{"\n"}}{{end}}' "$bpkg" \
+           > "$gw/build-$bn.imports") > "$gw/build-$bn.exports" 2> "$gw/build-$bn.log" \
+        || { echo "FAIL: a64i go-check: $n: go list $bpkg: $(head -c 300 "$gw/build-$bn.log")"; return 1; }
+      { echo '# import config'
+        while read -r kind spec; do
+          [ -n "$kind" ] || continue
+          if [ "$kind" = importmap ]; then echo "importmap $spec"; continue; fi
+          file=
+          for o in $bover; do [ "${o%%=*}" = "$spec" ] && file=${o#*=}; done
+          if [ -z "$file" ]; then
+            x=$(awk -v i="$spec" '$1 == i { print $2 }' "$gw/build-$bn.exports")
+            [ -n "$x" ] || continue   # no export data (unsafe): go build lists it not
+            file=work/$bn/pkg/$spec.a; mkdir -p "$(dirname "$gw/r0/$file")"; cp "$x" "$gw/r0/$file" || return 1
+          fi
+          echo "packagefile $spec=$file"
+        done < "$gw/build-$bn.imports"; } > "$gw/r0/work/$bn/importcfg"
+    done < "$d/build"
   fi
   for side in a64i ${native:+native}; do cp -a "$gw/r0" "$gw/$side"; mkdir -p "$gw/$side/.out"; done
   [ -n "$rec" ] && { rm -rf "$d/want"; mkdir -p "$d/want"; }
@@ -312,6 +344,11 @@ a64i_go_tool() {
           fpaths+=("$x=work/${BASH_REMATCH[1]}/$b/vet.out")
         else fpaths+=("$x=$x"); fi
       done
+    fi
+    tool=${tools[0]}
+    if [ ${#tools[@]} -gt 1 ]; then
+      tool=${args%% *}; args=${args#"$tool"}
+      case " ${tools[*]} " in *" $tool "*) ;; *) echo "FAIL: a64i go-check: $n/$id: no tool $tool"; bad=1; continue ;; esac
     fi
     for side in a64i ${native:+native}; do
       o=$gw/$side/.out/$id; st=0
@@ -1078,10 +1115,12 @@ case ${1:-} in
           case $id in ''|'#'*) continue ;; esac
           case $ran in *" ${subj%%/*} "*) ;; *) continue ;; esac # a subject this run did not run is not judged
           case $subj in
-            */*) # a tool's run (AR21): NAME/RUN's out, err and status judged by REF's (NAME/RUN) want
+            */*) # a tool's run (AR21): NAME/RUN's out, err and status judged by REF's (NAME/RUN) want, and since AR22 (queue 294) its
+              # files' digests (their names aside: cmd/compile's objects)
               sf=$gw/${subj%%/*}/a64i/.out/${subj#*/} rf=$root/test/asm/a64i-go/${ref%%/*}/want/${ref#*/}
               [ -f "$sf.status" ] && [ -f "$rf.status" ] || continue
-              if cmp -s "$sf.out" "$rf.out" && cmp -s "$sf.err" "$rf.err" && cmp -s "$sf.status" "$rf.status"; then
+              if cmp -s "$sf.out" "$rf.out" && cmp -s "$sf.err" "$rf.err" && cmp -s "$sf.status" "$rf.status" &&
+                 [ "$(cut -c1-64 "$sf.files")" = "$(cut -c1-64 "$rf.files")" ]; then
                 echo "FAIL: control $id: $subj's run passes as $ref"; bad=1
               else echo "control $id: fails as it must ($subj's run judged by $ref's output)"; fi
               continue ;;
