@@ -1245,15 +1245,16 @@
                             (bind-arg! b (:i n) {:val (:n A) :bound true})
                             (= n (:n A)))))
               ;; (CX12, the checker) MemberPointer: the pointee, then the class ([temp.deduct.type]/8, T::*)
-              :mptr (if (sema/checking?)
-                      (and (abi/mptr? A)
-                           (deduce-by-type-match b tid (:to P) (:to A) (set (filter #{:ignore-qualifiers} tdf)) down)
-                           (let [c (:cls P)]
-                             (cond (and (map? c) (= :tparam (:k c)) (= tid (:tid c))) (bind-arg! b (:i c) {:k :class :id (:cls A)})
-                                   (map? c) (unsure!)
-                                   (= c (:cls A)) true
-                                   :else (sure!))))
-                      false)
+              ;; (cpp-s14: the code generator's too, for a class it knows -- its types keep no dependent class, nil:
+              ;; not deduced -- [temp.deduct.conv]'s pointers to members, CP389 (a))
+              :mptr (and (abi/mptr? A)
+                         (deduce-by-type-match b tid (:to P) (:to A) (set (filter #{:ignore-qualifiers} tdf)) down)
+                         (let [c (:cls P)]
+                           (cond (and (map? c) (= :tparam (:k c)) (= tid (:tid c))) (bind-arg! b (:i c) {:k :class :id (:cls A)})
+                                 (map? c) (unsure!)
+                                 (nil? c) false
+                                 (= c (:cls A)) true
+                                 :else (sure!))))
               :fn (and (abi/fn? A) (= (boolean (:va P)) (boolean (:va A)))
                        ;; (CX12, the checker: a member function's qualifiers match exactly, FunctionProto's getMethodQuals)
                        (or (not (sema/checking?)) (and (= (boolean (:cq P)) (boolean (:cq A))) (= (boolean (:vq P)) (boolean (:vq A)))) (sure!))
@@ -1735,7 +1736,9 @@
   "The partial specialization `pt`'s parameters deduced from the arguments, or nil ([temp.class.spec.match])."
   [pt args]
   (let [b (atom {}) tid (:id pt)]
-    (when (match-args b tid (:args pt) args)
+    (when (and (match-args b tid (:args pt) args)
+               ;; (CP390 (b): an exception specification's parameter, deduced false when nothing else deduced it)
+               (do (doseq [i (:nx pt) :when (not (contains? @b i))] (swap! b assoc i {:val 0 :ty abi/bool*})) true))
       (when (= (count @b) (count (:params pt)))
         (let [ded (mapv #(get @b %) (range (count (:params pt))))]
           ;; its associated constraints satisfied ([temp.spec.partial.match]/2; G4)
@@ -2306,6 +2309,13 @@
             ;; the specialization is found through its template, not by its name in the parameters' scope
             _ (.remove ^java.util.HashMap (:names ps) (:name (:pattern t)))]
         (when (and (sema/checking?) (:access t)) (upd-fn! fid assoc :access (:access t)))
+        ;; (cpp-s14, CP389 (a): a conversion function template's specialization mangled with the template's own type,
+        ;; `cv T_ I <args> E`, as glam-conv!'s, Itanium 5.1.3's <operator-name> of the template's declaration)
+        ;; (and a candidate through its template alone, not one of the class's conversion functions: conv-fns would offer
+        ;; a specialization made for one target to the next, `T*` deduced for int* chosen for const int*)
+        (when (= :conv (:kind (sema/fnd fid)))
+          (upd-fn! fid assoc :mangle-ret (:ret (sym-sig t)))
+          (abi/update-cls! (:cls (sema/fnd fid)) update :methods (fn [ms] (vec (remove #{fid} ms)))))
         (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true
                  :tinst (cond-> {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t)}
                           (:constraint t) (assoc :q {:node (:constraint t) :pidx (into {} (map-indexed (fn [i p] [(:name p) i]) (:params t)))
@@ -2478,9 +2488,12 @@
                           i))
                 (range 1 (dec (count ts))))]
     (cond
-      i (first (ct/template-args ts (+ 2 i)))
-      ;; (cpp-s5: one a macro writes, its arguments' tokens as the parser kept them)
+      ;; (cpp-s14: the arguments' tokens as the preprocessor gave them first, when the parser kept them: the source text
+      ;; holds a macro's name where the arguments use one, <refwrap.h>'s `_Weak_result_type_impl<_Res(_ArgTypes...)
+      ;; _GLIBCXX_NOEXCEPT_QUAL>`, <mofunc_impl.h>'s `move_only_function<_Res(_ArgTypes...) _GLIBCXX_MOF_CV ...>`; the
+      ;; same tokens as the text's when none does)
       (:_targtext n) (first (ct/template-args (vec (ct/tokens (:_targtext n))) 1))
+      i (first (ct/template-args ts (+ 2 i)))
       :else (fail :template "partial specialization's arguments"))))
 
 (defn- var-text-args
@@ -2596,7 +2609,7 @@
   (let [n (:node o)
         c (abi/cls cid)
         params (tparams n)
-        pat (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind %)) (kids n)))
+        pat (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n)))
         ;; (cpp-s13: a constructor template is its class's :ctor-tmpls, not a name of its scope: basic_format_args'
         ;; template<typename... _Args> basic_format_args(const _Store<_Args...>&), defined outside the class template)
         cands (filter #(and (= :tmpl (:e %)) (= :fn (:tk %)) (= (count params) (count (:params (tmpl (:id %))))))
@@ -2623,7 +2636,7 @@
   of the primary; template <> template <class U> R A<int>::f(U): for that specialization only."
   [scope n [cn qt]]
   ;; the pattern's range starts at the outer template header (the FunctionTemplateDecl's at the inner one)
-  (let [text (or (node-text (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind %)) (kids n)))) "")]
+  (let [text (or (node-text (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids n)))) "")]
     (if (re-find #"^\s*template\s*<\s*>" text)
       (let [cls (sema/resolve-type scope qt)]
         (attach-member-template! (:id cls) {:node n :pnames []} []))
@@ -2739,8 +2752,10 @@
                               (and e (abi/class? (:ty e))) (:scope (abi/cls-of (:ty e)))
                               :else nil)))
                     scope)
-          _ (when (= "CXXConversionDecl" (:kind pattern)) (fail :template "a conversion function template"))
           ctor? (= "CXXConstructorDecl" (:kind pattern))
+          ;; (cpp-s14, CP389 (a): a conversion function template, found by its name as before and through its class's
+          ;; :conv-tmpls by the conversions, each deduced from the conversion's target type, [temp.deduct.conv])
+          conv? (and (= "CXXConversionDecl" (:kind pattern)) (:cls scope))
           body? (sema/body-of pattern)
           qt (get-in pattern [:type :qualType])
           ;; a redeclaration (a declaration, then the definition) is the same template
@@ -2787,7 +2802,8 @@
           ;; a constructor template is found through its class (class-init's candidates), not by name
           (if ctor?
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
-            (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))}))))
+            (do (when conv? (abi/update-cls! (:cls scope) update :conv-tmpls (fnil conj []) tid))
+                (enter! scope (:name n) {:e :tmpl :tk :fn :id tid :pos (long (or (:_b n) 0))})))))
       :template)))
     "CXXDeductionGuideDecl" (or (user-guide! scope n [] n) :template)
     ;; a concept ([temp.concept]): its parameters and constraint expression; a concept-id is its satisfaction (G4)
@@ -2840,7 +2856,12 @@
     ;; (CP338 (a): a variable template's partial specialization, kept as a class template's is: its arguments as written
     ;; after its name, matched when a specialization is named, var-template-inst)
     "VarTemplatePartialSpecializationDecl"
-    (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :var (:tk %))) (:id %)) (sema/lookup scope (:name n))) (fail :template "no primary variable template " (:name n)))
+    (let [pick #(when (and (= :tmpl (:e %)) (= :var (:tk %))) (:id %))
+          ;; (cpp-s14: one declared with a qualified name, its primary in the namespace the qualifier names, [temp.spec.partial]
+          ;; /1 with [dcl.meaning]/1: <bits/ranges_util.h>'s `inline constexpr bool __detail::__is_subrange<subrange<...>>`)
+          q (seq (#'sema/qualifier-before n))
+          tid (or (when q (some pick (try (sema/lookup-qualified scope (conj (vec q) (:name n))) (catch arbace.lang.ExceptionInfo _ nil))))
+                  (some pick (sema/lookup scope (:name n))) (fail :template "no primary variable template " (:name n)))
           t (tmpl tid)
           pid (next-id)
           params (tparams n)
@@ -2869,8 +2890,17 @@
             same (first (filter #(and (= (canonical (:args %)) (canonical args)) (= (cspell (:constraint %)) (cspell (:requiresClause n)))
                                       (= (tcs (:params %)) (tcs params)))
                                 (:partials t)))
-            pt {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
-                :forms (template-text-args n) :tmpl t}]
+            ;; (cpp-s14, CP390 (b): a bool parameter the arguments name only as a function type's noexcept(B) -- <refwrap.h>'s
+            ;; `_Weak_result_type_impl<_Res(_ArgTypes...) noexcept(_NE)>` -- is deduced false: the slice's function types
+            ;; carry no exception specification (C++14's, where libstdc++ writes no such parameter); clang deduces it)
+            atext (str (or (:_targtext n) (node-text n)))
+            nx (vec (keep-indexed (fn [i p] (when (and (= :value (:kind p)) (= "bool" (str/trim (str (:qt p)))) (:name p)
+                                                        (re-find (re-pattern (str "\\bnoexcept\\s*\\(\\s*" (java.util.regex.Pattern/quote (:name p)) "\\s*\\)")) atext))
+                                               i))
+                                  params))
+            pt (cond-> {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
+                        :forms (template-text-args n) :tmpl t}
+                 (seq nx) (assoc :nx nx))]
         (if same
           (when (:completeDefinition n)
             (upd-tmpl! tid update :partials (fn [ps] (mapv #(if (identical? % same) pt %) ps))))
@@ -2879,7 +2909,17 @@
     "ClassTemplateSpecializationDecl"
     (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup (class-key-scope scope n) (:name n))) (fail :template "no primary template " (:name n)))
           t (tmpl tid)
-          args (complete-args t (vec (map-indexed (fn [i a] (node-arg scope (nth (:params t) i) a)) (filter #(= "TemplateArgument" (:kind %)) (kids n)))))]
+          ;; (cpp-s14: the parser gives the parameters with no written argument their defaults as written, in the
+          ;; primary's terms -- <ext/type_traits.h>'s __promote<long double>, `bool = std::__is_integer<_Tp>::__value` --
+          ;; which do not resolve here: from the first that does not, the rest completed by complete-args, each default in a
+          ;; scope binding the arguments before it, [temp.arg.general]/9)
+          args (complete-args t (loop [as (filter #(= "TemplateArgument" (:kind %)) (kids n)) i 0 out []]
+                                  (if-let [a (first as)]
+                                    (let [p (nth (:params t) i)
+                                          r (try (node-arg scope p a)
+                                                 (catch arbace.lang.ExceptionInfo e (if (and (pos? i) (:default p)) ::default (throw e))))]
+                                      (if (= ::default r) out (recur (rest as) (inc i) (conj out r))))
+                                    out)))]
       (if (:completeDefinition n)
         (do (upd-tmpl! tid assoc-in [:specs args] n)
             (let [ic (get-in @*tmpls* [tid :insts args])]
@@ -3589,6 +3629,57 @@
       (finally (cleanup!)))))
 
 ;; ---------------------------------------------------------------------------------------------
+;; Conversion function templates (cpp-s14, CP389 (a))
+
+(def ^:dynamic *conv-specs* nil) ; atom {[class target n] [fid ...]}: the conversion templates' specializations for a target
+
+(defn deduce-conv
+  "[temp.deduct.conv]: the arguments of the conversion function template `t` deduced from the conversion's target type
+  `A0` (a reference when a reference binds to the result), or nil. P is the template's return type, the type referred to
+  when it is a reference (/2); when A0 is no reference, an array P decays to a pointer, a function P to a pointer to
+  function, else P's top-level cv-qualifiers are dropped (/3), and A's are (/4); when A0 is a reference, A is the type it
+  refers to, which may be more cv-qualified than the deduced A (/4, clang's TDF_ArgWithReferenceType), and a pointer
+  or pointer to member A may differ from the deduced one by a qualification conversion (/5, TDF_IgnoreQualifiers):
+  the specialization's own type is then checked by the conversion's ranking."
+  [t A0]
+  (let [tid (:id t)
+        P (abi/non-ref (:ret (sym-sig t)))
+        aref (abi/ref? A0)
+        A (abi/non-ref A0)
+        [P A] (if aref
+                [P A]
+                [(cond (abi/arr? P) (abi/ptr (:of P)) (abi/fn? P) (abi/ptr P) :else (unq-array P)) (unq-array A)])
+        tdf (cond-> #{}
+              aref (conj :param-with-reference)
+              (or (abi/ptr? A) (abi/mptr? A)) (conj :ignore-qualifiers))
+        b (atom {})]
+    (when (System/getenv "CPP_CONV_TRACE") (binding [*out* *err*] (println "deduce-conv" (:name t) (pr-str P) (pr-str A) (pr-str tdf))))
+    ;; (/4: A at least as qualified as P when A0 is a reference: P's qualifiers are not dropped to match)
+    (when (or (not aref) (every? (quals A) (quals P)))
+      (when (deduce-by-type-match b tid P A tdf :none)
+        (finish-deduction t @b)))))
+
+(defn conv-candidates
+  "The specializations of the conversion function templates of class `cid` and its bases for the target type `A`
+  (deduce-conv, then instantiated: its constraints checked, a failure no candidate), memoized per program."
+  [cid A]
+  (let [tids (distinct ((fn walk [id] (let [c (abi/cls id)] (concat (:conv-tmpls c) (mapcat #(walk (:cls %)) (:bases c))))) cid))]
+    (when (seq tids)
+      (let [k [cid A (count tids)]
+            m *conv-specs*]
+        (or (when m (get @m k))
+            (let [r (vec (for [tid tids
+                               :let [fid (try (when-let [a (deduce-conv (tmpl tid) A)] (instantiate-fn tid a))
+                                              (catch arbace.lang.ExceptionInfo e
+                                                (when (System/getenv "CPP_TMPL_TRACE")
+                                                  (binding [*out* *err*] (println "conversion template of" (:name (abi/cls cid)) "drops out:" (.getMessage e))))
+                                                nil))]
+                               :when fid]
+                           fid))]
+              (when m (swap! m assoc k r))
+              r))))))
+
+;; ---------------------------------------------------------------------------------------------
 ;; The hooks
 
 (reset! sema/hooks
@@ -3666,8 +3757,9 @@
                           (when-let [args (finish-deduction t @b)]
                             (try (instantiate-fn tid args) (catch arbace.lang.ExceptionInfo _ nil))))))
          :fnaddr-specs fnaddr-specs
+         :conv-candidates conv-candidates
          :instantiate-class (fn [tid args] (instantiate-class tid args))
          ;; (a transform trait's name, not a function type returning a type named __x: __c_locale ())
          :is-trait (fn [nm] (contains? type-traits nm))
-         :wrap (fn [f] (binding [*tmpls* (atom {}) *scanned* (atom #{}) *satisfaction* (atom {}) *provisional* (atom {:waits {} :remake {}})] (f)))
+         :wrap (fn [f] (binding [*tmpls* (atom {}) *conv-specs* (atom {}) *scanned* (atom #{}) *satisfaction* (atom {}) *provisional* (atom {:waits {} :remake {}})] (f)))
          :class-completed (fn [id] (class-completed! id))})

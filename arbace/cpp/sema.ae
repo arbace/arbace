@@ -361,6 +361,10 @@
       (cond
         (:dependent-decltype x) {:k :tdep :base {:k :tparam :i -1 :tid -1 :name "decltype"} :names [(str "decltype(" t ")")]}
         (and (= "DeclRefExpr" (:kind n)) (= :var (:op x))) (:ty (var* (:id x)))
+        ;; (cpp-s14: a function's name, an overload set of one function and no template: the function's type
+        ;; ([dcl.type.decltype]/1.3, [over.over]/1's set of one: `decltype(f)`, <refwrap.h>'s users); several, ill-formed)
+        (and (= :fnset (:op x)) (not (:obj x)) (empty? (:tmpls x)) (= 1 (count (distinct (:fns x)))))
+        (:ty (fnd (first (:fns x))))
         (#{"DeclRefExpr" "MemberExpr"} (:kind n)) (:ty x)
         (= :lv (:cat x)) (abi/lref (:ty x))
         (= :xv (:cat x)) (abi/rref (:ty x))
@@ -2468,7 +2472,8 @@
       (= :mptr-fnset (:op e)) (if (= 1 (count (:fns e))) (mptr-fn-node (first (:fns e))) e)
       (abi/arr? t) {:op :decay :e e :ty (abi/ptr (:of t)) :cat :pr}
       ;; a function lvalue: its address; *p of a function pointer p: p itself
-      (abi/fn? t) (if (= :deref (:op e)) (:e e) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr})
+      ;; (cpp-s14: a call's :fn is the function called, not the one its reference result designates)
+      (abi/fn? t) (if (= :deref (:op e)) (:e e) {:op :fnaddr :e e :fn (when-not (= :call (:op e)) (:fn e)) :ty (abi/ptr t) :cat :pr})
       (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
       ;; (cpp-s13: a 128-bit constant outside 64 bits too, its i128 constant: __numeric_traits_integer<__int128>::__max)
       (let [c (try (binding [*ce-wide* (boolean (wide? t))] (var-const-int (:id e))) (catch arbace.lang.ExceptionInfo _ nil))]
@@ -2605,6 +2610,18 @@
 
 (declare deduced! method-call init-for var-node)
 
+(defn conv-tmpls
+  "cpp-s14 (CP389 (a)): the conversion function templates of class `id` and its bases ([class.conv.fct]/1, [temp.mem]/5)."
+  [id]
+  (let [c (abi/cls id)] (distinct (concat (:conv-tmpls c) (mapcat #(conv-tmpls (:cls %)) (:bases c))))))
+
+(defn- conv-specs
+  "cpp-s14 (CP389 (a)): the conversion function templates' specializations of class `id` for the target type `t`
+  ([temp.deduct.conv]; [over.match.conv]/1: a template's specialization deduced for the target is a candidate)."
+  [id t]
+  (when (seq (conv-tmpls id))
+    (when-let [h (:conv-candidates @hooks)] (h id t))))
+
 (defn- glam-conv!
   "CP301 (a): the conversion of a captureless generic lambda's closure (class `cid`) to a pointer to the function type
   `F` ([expr.prim.lambda.closure]/9-10): the specialization of its conversion function template for F, made once per F,
@@ -2653,7 +2670,7 @@
   ;; (CP301 (a): a captureless generic lambda's conversion to a pointer to function made for the target's function type)
   (when (and (:glam-conv (abi/cls id)) (abi/ptr? (abi/unq t)) (abi/fn? (abi/unq (:to (abi/unq t)))))
     (glam-conv! id (abi/unq (:to (abi/unq t)))))
-  (let [cands (for [fid (conv-fns id)
+  (let [cands (for [fid (concat (conv-fns id) (conv-specs id t))
                     :let [f (fnd fid)] :when (or explicit? (not (:explicit f)))
                     ;; (CX12: a const object's conversion functions are the const ones, the implicit object parameter's
                     ;; binding, [over.match.funcs]/4-5; the checker's, since CP312 (a) the code generator's too)
@@ -2663,9 +2680,32 @@
                     ;; the code generator too)
                     :when (or (not explicit?) (not (:explicit f)) (abi/class? (abi/unq t))
                               (= (abi/unq (abi/non-ref (:ret (:ty f)))) (abi/unq t)))
+                    ;; (cpp-s14: an array or function result decayed first, [over.best.ics]'s second standard conversion
+                    ;; from the lvalue: a conversion function template returning a reference to one, [temp.deduct.conv]/3)
                     :let [rt (abi/non-ref (:ret (:ty f)))
+                          rt (cond (abi/arr? rt) (abi/ptr (:of rt)) (abi/fn? rt) (abi/ptr rt) :else rt)
                           r (if (= (abi/unq rt) (abi/unq t)) 0 (std-rank {:op :call :ty rt} rt t))] :when r]
                 [r fid])]
+    (second (first (sort-by first cands)))))
+
+(defn- ref-conv-for
+  "cpp-s14: the conversion function of class `id` whose result the reference type `t` binds to directly ([dcl.init.ref]
+  /5.1.2 for an lvalue reference: an lvalue of a type `t` is reference-compatible with; /5.3.2 for an rvalue reference:
+  an xvalue of one; [over.match.ref]), a conversion function template's specialization deduced for the reference
+  ([temp.deduct.conv]/4) among them; an exact type before a base's; or nil. (A prvalue result binds through a
+  temporary as before.)"
+  [id t & [obj-c]]
+  (let [pt (:to t)
+        cands (for [fid (concat (conv-fns id) (conv-specs id t))
+                    :let [f (fnd fid) r (:ret (:ty f)) rt (:to r)]
+                    :when (and (not (:explicit f)) (or (not obj-c) (:cq f) (:cq (:ty f)))
+                               (= (if (= :ref (:k t)) :ref :rref) (:k r)))
+                    :let [same (= (arr-unq rt) (arr-unq pt))
+                          derived (and (not same) (class-id rt) (class-id pt) (abi/derived-from? (class-id rt) (class-id pt)))]
+                    :when (and (or same derived)
+                               (or (:c (arr-cv pt)) (not (:c (arr-cv rt))))
+                               (or (:v (arr-cv pt)) (not (:v (arr-cv rt)))))]
+                [(if same 0 1) fid])]
     (second (first (sort-by first cands)))))
 
 (def ^:dynamic *no-user* false) ; inside a user-defined conversion: standard conversions only ([over.best.ics]/4)
@@ -2730,6 +2770,8 @@
             ;; (CX12, the checker: [over.ics.rank]/3.2.6 orders two such bindings by their cv-qualifiers' inclusion)
             (checking?) (assoc :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))))
           (and (= :rref (:k p)) (not= :lv (:cat e)) (or same derived) cv-sup) {:rank (if derived 2 0) :sub -1}
+          ;; (cpp-s14: a class's conversion function binding the reference directly, [over.ics.ref]/1, [dcl.init.ref]/5.1.2)
+          (and (not *no-user*) (class-id at) (not (or same derived)) (ref-conv-for (class-id at) p (:c at))) {:rank 3}
           ;; (CX12, the checker: a reference-related type losing a qualifier binds neither directly nor to a temporary,
           ;; [dcl.init.ref]/5.4.4)
           (not cv-sup) nil
@@ -3325,11 +3367,26 @@
             same (= (arr-unq at) (arr-unq pt))
             derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))]
         (cond
+          ;; (cpp-s14: a reference to function bound to a function named by an overload set, [dcl.init.ref]/5.1 with
+          ;; [over.over]: `int (&f)(int) = twice;`, a conversion function template's `return twice;`)
+          (and (= :fnset (:op e)) (abi/fn? (abi/unq pt)))
+          (if-let [f (fn-matching e (abi/unq pt))]
+            {:i :bind :e {:op :deref :e {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} :ty (:ty (fnd f)) :cat :lv}}
+            (fail :init "no function of the set matches the reference"))
           (and (lv? e) (or same derived) (or (= :lv (:cat e)) (= :rref (:k t)) (:c pt))
                (or (not= :rref (:k t)) (not= :lv (:cat e))))
           {:i :bind :e (if derived {:op :base-lv :e e :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c at)) :cat (:cat e)} e)}
           (and (= :pr (:cat e)) (or same derived) (abi/class? (abi/unq at)))
           {:i :bind-temp :init {:i :expr :e e} :ty (abi/unq at) :to (when derived (class-id pt))}
+          ;; (cpp-s14: bound directly to a conversion function's lvalue (an lvalue reference) or xvalue (an rvalue
+          ;; reference), [dcl.init.ref]/5.1.2, /5.3.2 with [over.match.ref]; a conversion function template's
+          ;; specialization deduced for the reference, [temp.deduct.conv]/4, CP389 (a))
+          (and (class-id at) (not (or same derived)) (ref-conv-for (class-id at) t (:c at)))
+          (let [fid (ref-conv-for (class-id at) t (:c at))
+                c (method-call ctx fid (if (= :pr (:cat e)) (materialize e) e) [] true)
+                rt (:ty c)
+                d (not= (class-id rt) (class-id pt))]
+            {:i :bind :e (if (and d (class-id pt)) {:op :base-lv :e c :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c rt)) :cat (:cat c)} c)})
           (or (:c pt) (= :rref (:k t)))
           {:i :bind-temp :init (init-for (abi/unq pt) e ctx :copy) :ty (abi/unq pt)}
           :else (fail :init "a non-const reference to a temporary")))
@@ -4074,7 +4131,7 @@
     (let [nm (str "operator" o)
           cids (keep #(class-id (:ty %)) args)]
       (when (and (seq cids)
-                 (every? #(empty? (conv-fns %)) cids)
+                 (every? #(and (empty? (conv-fns %)) (empty? (conv-tmpls %))) cids)
                  (not (some #(= :enum (:k (abi/unq (abi/non-ref (:ty %))))) args))
                  (empty? (class-lookup (first cids) nm))
                  (or (nil? (class-id (:ty (first args)))) (= (first cids) (class-id (:ty (first args)))))

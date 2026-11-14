@@ -1402,7 +1402,8 @@
               :else (load! (:ty e) (emit-lv x))))
     :cast (cast! e)
     :decay (emit-lv (:e e))
-    :fnaddr (want-fn! (:fn e))
+    ;; (cpp-s14: a function glvalue's decay, a reference to function's value: the reference's own address)
+    :fnaddr (if (:fn e) (want-fn! (:fn e)) (emit-lv (:e e)))
     :addr (emit-lv (:e e))
     :this (or (when (identical? (first *this-val*) *f*) (second *this-val*)) (val! (list 'load 'ptr ['ptr (:this-slot @*f*)] :align 8)))
     :unop (let [v (emit-rv (:e e)) t (:ty e)]
@@ -1855,6 +1856,8 @@
             (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
             (push-cleanup! {:addr addr :cls (:id bt)})))))))
 
+(declare const-leaves leaves-constant)
+
 (defn- static-local! [vid]
   (let [v (sema/var* vid)
         f (sema/fnd (:fn-of v))
@@ -1864,7 +1867,19 @@
         init (:sinit v)
         cinit (when (#{:none :zero} (:i init)) (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer))
         cexpr (when (and (= :expr (:i init)) (abi/scalar? (abi/unq t))) (let [e (:e init)] (when (#{:int :float :null} (:op e)) (emit-rv e))))
-        ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8))]
+        ;; (cpp-s14: another constant initializer -- an array's or a class's elements constants, `static unsigned short
+        ;; t[256] = {};` -- is constant initialization ([basic.start.static]/2, [stmt.dcl]/3: no guard), its leaves
+        ;; written as a namespace-scope variable's are (emit-globals!'s const-leaves, CP380's rule for locals), as clang
+        ;; does; a class with a non-trivial destructor keeps its guard, which registers the destructor)
+        leaves (when-not (or cinit cexpr (abi/ref? t) (let [bt (loop [x (abi/unq t)] (if (abi/arr? x) (recur (abi/unq (:of x))) x))]
+                                                         (and (abi/class? bt) (nontrivial-dtor? (:id bt)))))
+                 (const-leaves t init 0))
+        [ltype lval] (cond (nil? leaves) [nil nil]
+                           (abi/scalar? (abi/unq t)) (when (<= (count leaves) 1) [nil (if (seq leaves) (nth (first leaves) 2) (zero-mem t))])
+                           (empty? leaves) [nil 'zeroinitializer]
+                           :else (leaves-constant leaves s))
+        cexpr (or cexpr lval)
+        ltype (or ltype (if (abi/scalar? (abi/unq t)) (abi/llvm-type t) (list 'array s 'i8)))]
     (when (and (:tls v) (not (or cinit cexpr))) (fail :tls "a thread-local static with dynamic initialization (" (:name v) ")"))
     (add-top! (list 'llvm/global (gsym nm) ltype (or cinit cexpr (if (abi/scalar? (abi/unq t)) (zero-mem t) 'zeroinitializer)) :linkage :internal :align a))
     (when-not (or cinit cexpr)
@@ -2783,8 +2798,10 @@
                                     :fnaddr (want-fn! (:fn e))
                                     :cast (case (:ck e)
                                             (:int :noop) (when-let [x (cv (:e e))] (if (number? x)
-                                                                                     (let [bits (* 8 (abi/size-of tu)) m (dec (bit-shift-left 1 (min 63 bits)))]
-                                                                                       (if (= bits 64) x (let [y (bit-and (long x) (bit-or m (if (= bits 64) -1 0)))]
+                                                                                     (let [bits (* 8 (abi/size-of tu))]
+                                                                                       ;; (cpp-s14: the mask only below 64 bits: 1 << 63 less one overflowed, an int to
+                                                                                       ;; long cast among a local static's constants)
+                                                                                       (if (>= bits 64) x (let [m (dec (bit-shift-left 1 bits)) y (bit-and (long x) m)]
                                                                                                            (if (and (abi/signed? tu) (>= y (bit-shift-left 1 (dec bits)))) (- y (bit-shift-left 1 bits)) y))))
                                                                                      x))
                                             :int->fp (when-let [x (cv (:e e))] (when (number? x) (fp-const tu (double x))))
@@ -2799,7 +2816,8 @@
               (let [et (:of tu) sz (abi/size-of et)
                     ls (map-indexed (fn [i it] (const-leaves et it (+ off (* i sz)))) (:items init))
                     fill (:fill init)]
-                (when (and (every? some? ls) (#{:none :zero} (:i fill))) (vec (apply concat ls))))
+                ;; (cpp-s14: every element written, no fill: `static int u[3] = {1, 2, 3};`)
+                (when (and (every? some? ls) (or (nil? fill) (#{:none :zero} (:i fill)))) (vec (apply concat ls))))
               (let [cid (:id tu) l (abi/layout cid) c (abi/cls cid)
                     subs (concat (map-indexed (fn [i b] [(nth (:bases l) i) {:k :class :id (:cls b)}]) (:bases c))
                                  (map (fn [i] [(nth (:fields l) i) (:ty (nth (:fields c) i))]) (or (:fields-used init) (range (count (:fields c))))))
