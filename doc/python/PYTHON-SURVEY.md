@@ -6584,3 +6584,64 @@ test_return_from_inline_mode_to_REPL and PdbTestReadline's nine.
   test_expression_in_interactive_after_buffer_resize (`:child-is-pyi`), test_cmd_line's test_displayhook_unencodable
   (`:pyi-command-line`) and test_cmd_line_script's test_stdin_loader (`:pyi-main-module`) still fail, in their classes;
   `bin/pyi repl --check` 2 of 2.
+
+## As built: 293, settrace and setprofile around the code that stands for C, the REPL's console (2026-11-14, the Mac VM, queue 293)
+
+289 left test_bdb's and test_sys_settrace's classed rows and opened `:repl-console` (test_repl's 11 that `-i` reaches);
+`:profile-events` (test_sys_setprofile's 3) is the same events' profiler side.
+
+- **No event inside the code that stands for C** (`go/arbace/py/trace.go`'s `Frame.inCImpl`, monitoring.go's `monFireAt`,
+  trace.go's `traceInstr`): the frames of `cImplModules` (pylifecycle.go: io's _pyio, warnings' _py_warnings) fire no
+  sys.monitoring event, and so no trace or profile event, as none fires inside CPython's C; the answer is kept in the code
+  object (`Code.cimpl`) from its first frame's globals. test_bdb's test_skip saw the source loader's open_code (_pyio's
+  open, a Python function). Python code those frames call is traced as code C calls is (a callback, a codec: _pyio's
+  StringIO runs codecs' incremental coder, CPython's C StringIO none: a Low).
+- **getattr with a default** (builtins.go) looks up as hasattr does, module_getattro's suppress (`getAttrSuppressed`):
+  a module's missing name gets a plain AttributeError (imp_bootstrap.go's `moduleNoAttr`), no Python code run for its
+  message (_pyio's `getattr(os, 'O_BINARY', 0)` called the spec's has_location property under a tracer).
+- **A replaced hook's `__del__`** (trace.go's `setTrace`, monitoring.go's `setProfile`, finalize.go's `finAddr`): the
+  function sys.settrace or sys.setprofile replaces is checked at once by 222's `finDeleted` (Go's collector asked
+  whether that was its last reference), its `__del__` then, as CPython's decref runs it (test_sys_settrace's and
+  test_sys_setprofile's test_reentrancy). On goi a hook that was called (setprofile's own c_call) stays in goi's
+  registers: setprofile's passes compiled (`bin/pyi aot`), `:finalization-goi`.
+- **CALL's events expand a method over a C function** (monitoring.go's `monExpandMethod`, `monCallSite`'s `expand`):
+  classmethod(repr)'s bound method gives CALL and C_RETURN the function and self, as `_MAYBE_EXPAND_METHOD` does before
+  `_MONITOR_CALL`, so the profiler's c_call and c_return name it; CALL_FUNCTION_EX does not expand (no c_call:
+  test_method_with_c_function's three cases).
+- **The REPL** (repl.go, interp.go): a last line without its newline prints ps2 and the end of input's newline before
+  the statement runs (the tokenizer's second read); a compiler's SyntaxError of the interactive source gets its line
+  from the source (`replSyntaxText`; CPython compiles under a name linecache holds); with no code to run, PYTHONSTARTUP's
+  file runs in `__main__` first (`runStartup`, pymain_run_startup: not under -E or -I, `__file__` for the run, an error
+  printed, SystemExit the run's end, "Could not open PYTHONSTARTUP").
+- **A module's code called as a function** (frame.go's `newFrame`): a code without CO_OPTIMIZED has the function's
+  globals as its locals, as `_PyFunction_Vectorcall` gives them (`types.FunctionType(code, globals)()`, the asyncio
+  REPL's runcode: every name panicked).
+- **compile() of an AST object** (builtins_exec.go) ignores PyCF_ALLOW_INCOMPLETE_INPUT and PyCF_DONT_IMPLY_DEDENT,
+  the tokenizer's flags (the asyncio console's per-statement `ast.Interactive` was "incomplete input" for any compound
+  statement).
+- **The asyncio REPL** (`python -m asyncio`) still ends at once: asyncio/__main__.py imports asyncio.tools, which imports
+  the C module _remote_debugging (`:remote-debugging`, deferred, survey §6.6; its eight test_repl rows moved there). With
+  a stand-in module in sys.modules (`.tmp/q293/t/pa.py`, probed) its console runs as CPython's: banner, contextvars at the
+  top level and in an awaited coroutine, the traceback, "exiting asyncio REPL...". The task's DECISION 1.
+- **Still classed**: test_sys_settrace's four test_13_genexp and test_sys_setprofile's test_unfinished_generator
+  (`:finalization`): a generator a call leaves suspended (`any(gen())`, `next(f())`) is closed by CPython at its last
+  reference, the call's return; test_20_async_for_loop's flake (`:settrace-events`), probably such a generator closed by a
+  later collection inside its trace (read). The task's DECISION 2.
+- **test_pyrepl's pty sessions** (the coordinator's note on 289's verification): TestMain's 19 and TestDumbTerminal's
+  test_dumb_terminal_exits_cleanly start `python -i -u` on a pty and give up after 30 s of silence; pyi's start on the
+  VM takes about 65 s before its banner (`.tmp/q293/t/ptyrun.py`, probed; the session then runs), so all fail "Timeout
+  while waiting for output". Past the time, on a terminal CPython runs _pyrepl (pymain_run_stdin, unless
+  PYTHON_BASIC_REPL or TERM=dumb) where pyi runs its basic REPL; _pyrepl's unix console needs fcntl.ioctl with a buffer
+  and posix._is_inputhook_installed. `:repl-console` now holds these 20 (both files; the task's DECISION 3).
+- `:profile-events` leaves both files, `:repl-console` keeps only test_pyrepl's pty sessions; `:pyio` and
+  `:finalization` lose their tracing rows.
+- **Measured on the VM** (arm64, 4 cores under load, `bin/pyi lib-test-all --fresh`, each test's own verdict; base
+  679314248, or 289's run where the code is the same; run): test_bdb 36 -> **37 pass**; test_sys_settrace 366 -> **367**;
+  test_sys_setprofile 26 -> **27** (and setprofile's test_reentrancy compiled); test_repl 4 -> **7** (8 in
+  `:remote-debugging`); test_monitoring 81, test_pdb 98 and test_cprofile 26 unchanged; 0 failing in these. test_pyrepl:
+  the 20 pty sessions classed, test_interact's test_runsource_show_syntax_error_location (the AST compile) and
+  test_pep_765_warning now pass; its other 21 failing rows are the base's own (test_unix_console's 19 without
+  `posix._is_inputhook_installed` and fcntl.ioctl with a buffer, two of test_interact's, TestPyReplCompleter's). Probes
+  (`.tmp/q293/t/`, against python3 3.14.10, a mutated reference the control; base FAIL, head PASS): the events around
+  _pyio (pb), compile and FunctionType as the asyncio console uses them (pc), test_skip, test_method_with_c_function and
+  settrace's test_reentrancy (ptf), test_repl's three (prr); the replaced hooks' `__del__` compiled (pe).
