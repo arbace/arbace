@@ -2469,3 +2469,69 @@ Numbering from ARS87. Each with options, the recommended named; none taken.
   over a package) as a64i's go-check program, its output this M2's; (b) more small programs as AR20's. *Recommended: (a)*: a real
   tool is the strongest end-to-end check of the runtime and std a64i now runs (signals, threads, the poller), and gofmt needs no
   network or exec.
+
+## As built: AR21 (2026-11-14; branch `292-asm-arm64-ar21`, from `291-asm-arm64-ar20` `b8ed6d308`; queue task 292, the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, 4 of its 8 cores, load about 14), stage 0 and TamaGo's go. The user's answers: ARS88 (a)
+(and ARS87 (b): as built, nothing changed). The semantics read from Linux's arm64 user ABI (asm-generic's struct stat, 128 bytes:
+st_dev, st_ino, st_mode, st_nlink as 32 bits, st_uid, st_gid, st_rdev, a pad, st_size, st_blksize as 32 bits, a pad, st_blocks, the
+three timespecs, two unused words) and from Go's own sources at the GOROOT pin (cmd/gofmt; cmd/vet over
+golang.org/x/tools/go/analysis/unitchecker, its `Config`); no code copied.
+
+- **ARS88 (a): gofmt and go vet's analyzers on a64i** (`bin/a64i go-check --tools`; test/asm/a64i-go/gofmt and vet).
+  - A Go tool's directory holds `tool` (GOROOT's command: cmd/gofmt, cmd/vet) in place of main.go, `inputs` (files of GOROOT and of
+    test/asm/a64i-go copied into the run's directory), `runs` (an id, files to digest after it, the command line; in order, on one
+    copy of the inputs) and `want/ID.{out,err,status,files}`, this M2's native runs (`go-check NAME --record`, arm64 only). On an
+    arm64 host each run runs natively too, on a second copy, and must give the same; a64i's statistics line is left out of err.
+  - vet's `vet` file: `go vet -a -work PATTERNS` (the host's go, a cross vet for linux/arm64; `-a` because go vet keeps no
+    configuration for a vet its cache already holds) makes every package's `vet.cfg`, export data and facts; the configurations are
+    kept with the run's paths and $GOROOT's (a link `goroot`) made relative and `Stdout` cleared, so the diagnostics name the same
+    files on any host; `@N:ID` in a run names ID's configuration, in FILES its facts (vet.out, digested under that name: go's action
+    numbers are not part of the want).
+  - gofmt's 9 runs: `-l` over the eight Go programs, go/format and an unformatted file (go/format's testdata_tamago_test.go is
+    unformatted at the pin), go/format/format.go printed, the unformatted file printed, `-d -s` (gofmt's own diff), `-r` (a rewrite
+    rule), `-e` over a file with syntax errors (status 2), a missing file (lstat's error, status 2), `-w -s` (the file rewritten
+    through its backup, then digested), `-l` again (empty).
+  - vet's 16 runs: `help` (the analyzers' list), a package with a mistake for each analyzer a package without cgo, assembly or tests
+    can show (vp: 30 diagnostics of 24 analyzers, status 1, its facts digested), the same `-json`, `-fix -diff` (the fixes' diff),
+    log's facts (a VetxOnly run: its printf wrappers), container/list (with its facts) and text/tabwriter, the eight Go programs
+    (none with a diagnostic), then `-fix` (vp.go rewritten, digested).
+  - Each run on a64i equals this M2's native run: out, err, status and files.
+- **What a64i lacked, built generally** (each with a test in test/asm/a64i/ and controls):
+  - `fstat` and `newfstatat` (gofmt's first lstat was ENOSYS): `CPU.statA64` lets crt's x86-64 call (newfstatat 262, fstat 5) fill
+    its 144-byte layout in one mapping (at the buffer, 16 bytes before it, or below sp: those bytes kept and put back), then writes
+    the fields at arm64's places into the buffer; an error leaves the buffer as Linux does. The lockstep takes both from the
+    native (the descriptors are the world's, as openat's).
+  - `ftruncate` and `fdatasync` by name (crt's; gofmt -w restores its file by ftruncate), the lockstep taking them and fsync from the
+    native.
+  - **A buffer over adjacent mappings** (found by vet's runs: 1 in 3 ended "read work/all/b068/_pkg_.a: bad address"): Go's heap
+    grows by adjacent mmaps, each its own crt slab, and crt's calls take a buffer within one slab, so a read of export data into a
+    large heap object across two was EFAULT, by where the heap happened to stand. emu's kernel (`Kernel.spanned`, x86i's too) now
+    makes read, write, pread64, pwrite64 and getrandom a mapping's part at a time (the offset moved on; until a part is short, an
+    error or the end), cuts getdents64's count at the buffer's first mapping (fewer entries, as Linux may give), and statA64 fills
+    crt's layout in one mapping (at the buffer, 16 bytes before it or below sp) before it writes arm64's struct, a buffer that is not
+    writable EFAULT after the call's own error. `linux-span.s` (essential; controls verdict-37, cpu-5): two pages, the second mapped
+    again in place, read, pread64, write, getrandom and fstat across the boundary; newfstatat of a missing file into address 16 is
+    ENOENT. Left (crt's, C's owner): a path (CString) or an iovec across two slabs is still EFAULT; none met.
+  - `linux-stat.s` (essential): the buffers in a page of 0xaa bytes, the 16 bytes after one (mid-page) and before one (at the page's
+    end, the next page unmapped) still 0xaa after the call; the executable a regular file with one link, its size lseek's end, the
+    padding zero; by path and by AT_EMPTY_PATH the same st_dev and st_ino; ENOENT, EBADF and EFAULT leaving the buffer as it was;
+    ftruncate's EINVAL and EBADF, fdatasync's 0. Controls verdict-36, cpu-4.
+  - go-check's controls go-3 to go-6 (test/asm/controls-a64i-go.txt): a tool's run judged by another run's want.
+- **The gate**: the step `a64i-go-tools` (`--full`, chain asm-arm64-full; test/gate/crops/asm.edn and steps.edn, spliced by hand):
+  25 runs, 300-400 M instructions on a64i (1.5-3.5 M/s), 219 s on the VM with a peak of 0.28 GiB (ten runs 201-339 s, every one
+  as wanted): over the minute of the essential lane, so beside a64i-go rather than in it.
+
+### Proposed (AR21)
+
+Numbering from ARS89. Each with options, the recommended named; none taken.
+
+- **ARS89 the CPUs a64i shows.** sched_getaffinity is ENOSYS on a64i, so Go's runtime there runs with one P where the M2 gives it 4:
+  (a) as now: no output judged depends on it, and one P keeps a64i's runs deterministic at 3 M instructions/s; (b) answer a mask of
+  the host's CPUs (or a fixed 4), so a program's GOMAXPROCS is the native's: more threads and interleavings, the runs slower.
+  *Recommended: (a)*, until a program's output depends on runtime.NumCPU.
+- **ARS90 the next Go tools.** (a) cmd/compile and cmd/asm over a small package on a64i (one process each, no exec), their objects
+  byte for byte the M2's; (b) the go command itself (go build, go vet: it needs fork and exec, and a64i is one process); (c) stop at
+  gofmt and vet. *Recommended: (a)*: the compiler is the largest Go program at the pin that needs no exec, and its output is bytes.
+- **ARS91 the tools step's lane.** (a) as built: `a64i-go-tools` in `--full` (about 4 minutes on the VM); (b) gofmt's 9 runs (about
+  30 s) in the essential `a64i-go`, vet's in `--full`. *Recommended: (a)*: the essential a64i-go already runs eight real programs.

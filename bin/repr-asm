@@ -247,6 +247,99 @@ a64i_light() {
      "$goroot/bin/go" build -p 2 -trimpath -o "$a64i_exe" ./a64idriver/)
 }
 
+# a64i's Go tools (AR21, queue 292; ARS88 (a)): test/asm/a64i-go/NAME/ with a file `tool` (a command of GOROOT, cmd/gofmt or cmd/vet)
+# in place of main.go, built for linux/arm64 by TamaGo's go into .tmp/a64i/go/NAME and run over a fixed input set:
+#   inputs  DEST SRC: SRC (goroot:PATH, $GOROOT's; test:PATH, test/asm/a64i-go's) copied to DEST in the run's directory;
+#   vet     N DIR PATTERNS (vet's): `go vet -a -work PATTERNS` in DIR made their configurations and their dependencies' export data and
+#           facts (the host's go; a cross vet), kept in work/N with every path of the run's directory and $GOROOT (a link goroot)
+#           made relative and Stdout cleared, so a run prints the same paths on any host; @N:ID in a run names ID's vet.cfg;
+#   runs    ID FILES ARGS: the tool run with ARGS (a shell's words) in the run's directory, the runs in their order on one copy of
+#           the inputs; FILES (a comma list, - none; @N:ID there is that configuration's facts, vet.out) digested after it.
+# Each run is judged by want/ID.out, ID.err (a64i's statistics line left out), ID.status and ID.files; on an arm64 host the same
+# runs run natively on a second copy and must give the same. a64i_go_tool NAME [--record]: --record (arm64) writes want/ from
+# the native runs.
+a64i_go_env() { env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=linux \
+  GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$@"; }
+a64i_go_tool() {
+  local n=$1 rec=${2:-} d=$root/test/asm/a64i-go/$1 gw=$a64i_dir/go/$1 pkg tool dest srcp vn vdir vpat work b id files fpaths args x o \
+    side st bad=0 nrun=0 t0=$SECONDS ins tot=0 native=
+  case $(uname -m) in aarch64|arm64) native=1 ;; esac
+  [ -n "$rec" ] && [ -z "$native" ] && { echo "FAIL: a64i go-check: $n: --record needs an arm64 host"; return 1; }
+  pkg=$(head -1 "$d/tool"); tool=${pkg##*/}
+  rm -rf "$gw"; mkdir -p "$gw/r0"
+  a64i_go_env "$goroot/bin/go" build -trimpath -o "$gw/$tool" "$pkg" > "$gw/build.log" 2>&1 \
+    || { echo "FAIL: a64i go-check: $n: go build $pkg: $(head -c 300 "$gw/build.log")"; return 1; }
+  ln -s "$goroot" "$gw/r0/goroot"
+  while read -r dest srcp; do
+    case $dest in ''|'#'*) continue ;; esac
+    case $srcp in goroot:*) srcp=$goroot/${srcp#goroot:} ;; test:*) srcp=$root/test/asm/a64i-go/${srcp#test:} ;;
+      *) echo "FAIL: a64i go-check: $n: input $srcp"; return 1 ;; esac
+    mkdir -p "$(dirname "$gw/r0/$dest")"; cp -r "$srcp" "$gw/r0/$dest" || return 1
+  done < "$d/inputs"
+  if [ -f "$d/vet" ]; then
+    while read -r vn vdir vpat; do
+      case $vn in ''|'#'*) continue ;; esac
+      # -a: go vet keeps no configuration for a vet it finds in its cache
+      (cd "$gw/r0/$vdir" && a64i_go_env "$goroot/bin/go" vet -a -work $vpat) > "$gw/vet-$vn.log" 2>&1
+      work=$(sed -n 's/^WORK=//p' "$gw/vet-$vn.log" | head -1)
+      [ -n "$work" ] && [ -f "$work/b001/vet.cfg" ] || { echo "FAIL: a64i go-check: $n: go vet $vpat: $(head -c 300 "$gw/vet-$vn.log")"; return 1; }
+      mkdir -p "$gw/r0/work"; mv "$work" "$gw/r0/work/$vn"
+      for b in "$gw/r0/work/$vn"/b*/vet.cfg; do
+        sed -i -e "s|$work/|work/$vn/|g" -e "s|$gw/r0/||g" -e "s|\"$goroot/|\"goroot/|g" -e 's|"Stdout": ".*"|"Stdout": ""|' "$b"
+        id=$(sed -n 's/^\t"ID": "\(.*\)",$/\1/p' "$b"); b=${b%/vet.cfg}; echo "$id ${b##*/}" >> "$gw/r0/work/$vn/ids"
+      done
+    done < "$d/vet"
+  fi
+  for side in a64i ${native:+native}; do cp -a "$gw/r0" "$gw/$side"; mkdir -p "$gw/$side/.out"; done
+  [ -n "$rec" ] && { rm -rf "$d/want"; mkdir -p "$d/want"; }
+  while read -r id files args; do
+    case $id in ''|'#'*) continue ;; esac
+    nrun=$((nrun + 1))
+    # @N:ID: the configuration vet made for ID in work/N
+    args=$(printf '%s' "$args" | sed -E 's|@([A-Za-z0-9_-]+):([^ ]+)|@\1:\2@|g')
+    while [[ $args =~ @([A-Za-z0-9_-]+):([^@ ]+)@ ]]; do
+      b=$(awk -v i="${BASH_REMATCH[2]}" '$1 == i { print $2 }' "$gw/r0/work/${BASH_REMATCH[1]}/ids" 2>/dev/null)
+      [ -n "$b" ] || { echo "FAIL: a64i go-check: $n/$id: no configuration ${BASH_REMATCH[0]}"; bad=1; continue 2; }
+      args=${args/"${BASH_REMATCH[0]}"/work/${BASH_REMATCH[1]}/$b/vet.cfg}
+    done
+    # in FILES, @N:ID is that configuration's facts (vet.out), named so in the digests (go's action numbers are not)
+    fpaths=()
+    if [ "$files" != - ]; then
+      for x in ${files//,/ }; do
+        if [[ $x =~ ^@([A-Za-z0-9_-]+):(.+)$ ]]; then
+          b=$(awk -v i="${BASH_REMATCH[2]}" '$1 == i { print $2 }' "$gw/r0/work/${BASH_REMATCH[1]}/ids" 2>/dev/null)
+          [ -n "$b" ] || { echo "FAIL: a64i go-check: $n/$id: no configuration $x"; bad=1; continue 2; }
+          fpaths+=("$x=work/${BASH_REMATCH[1]}/$b/vet.out")
+        else fpaths+=("$x=$x"); fi
+      done
+    fi
+    for side in a64i ${native:+native}; do
+      o=$gw/$side/.out/$id; st=0
+      if [ $side = a64i ]; then
+        (cd "$gw/$side" && eval "timeout 300 \"$a64i_exe\" run --stats \"$gw/$tool\" $args" < /dev/null > "$o.out" 2> "$o.err.raw") || st=$?
+        ins=$(sed -n 's/^a64i: \([0-9]*\) instructions in .*/\1/p' "$o.err.raw" | tail -1); tot=$((tot + ${ins:-0}))
+        grep -Ev '^a64i: [0-9]+ instructions in ' "$o.err.raw" > "$o.err"
+      else
+        (cd "$gw/$side" && eval "timeout 60 \"$gw/$tool\" $args" < /dev/null > "$o.out" 2> "$o.err") || st=$?
+      fi
+      echo $st > "$o.status"; : > "$o.files"
+      for x in "${fpaths[@]}"; do
+        printf '%s  %s\n' "$( (sha256sum < "$gw/$side/${x#*=}" || echo missing) 2>/dev/null | cut -c1-64)" "${x%%=*}" >> "$o.files"
+      done
+    done
+    if [ -n "$rec" ]; then for x in out err status files; do cp "$gw/native/.out/$id.$x" "$d/want/$id.$x"; done; fi
+    for side in a64i ${native:+native}; do
+      for x in out err status files; do
+        cmp -s "$gw/$side/.out/$id.$x" "$d/want/$id.$x" \
+          || { echo "FAIL: a64i go-check: $n/$id: $side's $x differs from want/$id.$x: $(diff "$d/want/$id.$x" "$gw/$side/.out/$id.$x" 2>&1 | head -5 | tr '\n' ' ' | head -c 400)"; bad=1; continue 3; }
+      done
+    done
+    echo "a64i go-check: $n/$id: as wanted (status $(cat "$gw/a64i/.out/$id.status"); ${ins:-?} instructions)"
+  done < "$d/runs"
+  echo "a64i go-check: $n: $nrun runs, $tot instructions on a64i, $((SECONDS - t0)) s"
+  return $bad
+}
+
 # a64i's table check (queue 277, AR14; ARS70 (a)): goi's checker over arbace/crt, arbace/emu and arbace/a64i as a user's program's
 # packages in linux/arm64 (test/asm/a64i_table_check.ae, the model test/python/table_check.ae), against the std forms of their
 # closure: bin/goi table's linux/arm64 cache of std when this checkout has it, else the closure's std packages (go list -deps of the
@@ -948,10 +1041,22 @@ case ${1:-} in
         # linux/arm64 by TamaGo's go (no cgo) into .tmp/a64i/go, each run on a64i to its end and judged by its own output, NAME/want.txt
         # (written from this M2's native run), with status 0; on an arm64 host also run natively, the same output required
         [ -x "$a64i_exe" ] || a64i_light
-        gw=$a64i_dir/go; mkdir -p "$gw"; bad=0; n_ok=0
-        names=("$@"); [ ${#names[@]} -gt 0 ] || names=($(cd "$root/test/asm/a64i-go" && ls -d */ | tr -d /))
+        # AR21 (queue 292): a directory with a file `tool` is a Go tool's (a64i_go_tool); --tools: all of those (by default the
+        # programs alone, main.go's); --record (arm64): the tools' want/ written from the native runs
+        gw=$a64i_dir/go; mkdir -p "$gw"; bad=0; n_ok=0; tools=; grec=; names=(); ran=
+        for a in "$@"; do case $a in --tools) tools=1 ;; --record) grec=--record ;; *) names+=("$a") ;; esac; done
+        if [ ${#names[@]} = 0 ]; then
+          for x in "$root"/test/asm/a64i-go/*/; do x=${x%/}
+            if [ -n "$tools" ]; then [ -f "$x/tool" ] && names+=("${x##*/}"); else [ -f "$x/main.go" ] && names+=("${x##*/}"); fi
+          done
+        fi
         for n in "${names[@]}"; do
-          d=$root/test/asm/a64i-go/$n; [ -f "$d/main.go" ] || { echo "FAIL: a64i go-check: no $d/main.go"; bad=1; continue; }
+          d=$root/test/asm/a64i-go/$n; ran=" ${ran:-}$n "
+          if [ -f "$d/tool" ]; then
+            if a64i_go_tool "$n" $grec; then n_ok=$((n_ok + 1)); else bad=1; fi
+            continue
+          fi
+          [ -f "$d/main.go" ] || { echo "FAIL: a64i go-check: no $d/main.go"; bad=1; continue; }
           rm -rf "$gw/$n"; mkdir -p "$gw/$n"; cp "$d/main.go" "$gw/$n/"; printf 'module a64igo%s\ngo 1.27\n' "$n" > "$gw/$n/go.mod"
           (cd "$gw/$n" && GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=linux \
              GOARCH=arm64 GOCACHE="${A64I_GOCACHE:-$a64i_dir/gocache}" "$goroot/bin/go" build -trimpath -o "$n" .) > "$gw/$n/build.log" 2>&1 \
@@ -966,11 +1071,21 @@ case ${1:-} in
           esac
           n_ok=$((n_ok + 1)); echo "a64i go-check: $n: to its end, its output as wanted ($(tail -1 "$gw/$n/a64i.err" | sed 's/^a64i: //'))"
         done
-        echo "a64i go-check: $n_ok of ${#names[@]} Go programs"
+        echo "a64i go-check: $n_ok of ${#names[@]} Go programs${tools:+ (the tools)}"
         # the negative controls (test/asm/controls-a64i-go.txt: ID SUBJECT REFERENCE; queue 291, ARS86 (a)): SUBJECT's run judged by
         # REFERENCE's want.txt must fail; one whose subject did not run here is not judged
         while read -r id subj ref; do
           case $id in ''|'#'*) continue ;; esac
+          case $ran in *" ${subj%%/*} "*) ;; *) continue ;; esac # a subject this run did not run is not judged
+          case $subj in
+            */*) # a tool's run (AR21): NAME/RUN's out, err and status judged by REF's (NAME/RUN) want
+              sf=$gw/${subj%%/*}/a64i/.out/${subj#*/} rf=$root/test/asm/a64i-go/${ref%%/*}/want/${ref#*/}
+              [ -f "$sf.status" ] && [ -f "$rf.status" ] || continue
+              if cmp -s "$sf.out" "$rf.out" && cmp -s "$sf.err" "$rf.err" && cmp -s "$sf.status" "$rf.status"; then
+                echo "FAIL: control $id: $subj's run passes as $ref"; bad=1
+              else echo "control $id: fails as it must ($subj's run judged by $ref's output)"; fi
+              continue ;;
+          esac
           [ -f "$gw/$subj/a64i.out" ] && [ -f "$root/test/asm/a64i-go/$ref/want.txt" ] || continue
           if cmp -s "$gw/$subj/a64i.out" "$root/test/asm/a64i-go/$ref/want.txt"; then echo "FAIL: control $id: $subj's run passes as $ref"; bad=1
           else echo "control $id: fails as it must ($subj's run judged by $ref's output)"; fi
