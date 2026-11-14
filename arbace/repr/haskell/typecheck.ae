@@ -769,6 +769,7 @@
 (def kind-type-tc (ext-name "tc" "GHC.Internal.Types" "Type"))
 (def ^:private star-kind [:tc kind-type-tc []])
 (def ^:private constraint-kind [:tc (ext-name "tc" "GHC.Internal.Types" "Constraint") []])
+(def ^:private type-tc (ext-name "tc" "GHC.Internal.Prim" "TYPE"))
 
 (defn- soft-unify
   "unify without an error, a deferred or an implication's equality: a kind the inference cannot fit is left as it is"
@@ -836,8 +837,13 @@
   (let [t (expand (prune t))]
     (case (first t)
       :tc (let [[_ n as] t]
-            (if (and (= fun-tc n) (= 2 (count as)))
-              (do (doseq [a as] (kind-of a)) star-kind)
+            (cond
+              (and (= fun-tc n) (= 2 (count as))) (do (doseq [a as] (kind-of a)) star-kind)
+              ;; an unboxed tuple's or sum's components: each of a kind TYPE r (its representation, defaulted to
+              ;; LiftedRep by the inference when nothing fixes it), the whole of TYPE of their TupleRep (left open)
+              (and (vector? n) (= "GHC.Internal.Types" (nmod n)) (re-matches #"(Tuple|Sum)[0-9]+#" (str (occ n))))
+              (do (doseq [a as] (soft-unify (kind-of a) [:tc type-tc [(fresh-meta)]])) [:tc type-tc [(fresh-meta)]])
+              :else
               (if-let [[_ k] (tycon-kind n)] (apply-kind k (mapv kind-of as)) (do (doseq [a as] (kind-of a)) (fresh-meta)))))
       :app (apply-kind (kind-of (nth t 1)) [(kind-of (nth t 2))])
       :lit (if (string? (second t)) [:tc (ext-name "tc" "GHC.Internal.Types" "Symbol") []]
@@ -3081,8 +3087,19 @@
             (doseq [[i a] (map-indexed vector (nth res 2)) :let [pk (get-in pkinds [n i])] :when pk]
               (soft-unify (kind-of a) pk)))
           (doseq [f fields] (soft-unify (kind-of f) star-kind)))))
+    ;; a representation variable is not generalized (GHC defaults a kind's RuntimeRep variables to LiftedRep): TYPE ?r
+    ;; is Type
+    (let [lifted (first (nth (deep-expand star-kind) 2 [nil]))]
+      (doseq [[n _] own x (tree-seq coll? seq (zonk (get-in @*tycons* [n :kind])))
+              :when (and (vector? x) (= :tc (first x)) (= type-tc (second x)) (= 1 (count (nth x 2))) (= :mv (first (prune (first (nth x 2))))))]
+        (when lifted (soft-unify (first (nth x 2)) lifted))))
     (doseq [[n _] own]
       (let [k (zonk (get-in @*tycons* [n :kind]))
+            ;; TYPE LiftedRep written as Type
+            k (letfn [(w [t] (cond (= t (deep-expand star-kind)) star-kind
+                                   (= :tc (first t)) [:tc (second t) (mapv w (nth t 2))]
+                                   :else t))]
+                (w k))
             ms (metas-of k)]
         (if (and poly? (seq ms))
           (let [names (mapv #(str "k" %) (range (count ms)))]
