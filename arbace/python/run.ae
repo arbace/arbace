@@ -146,6 +146,13 @@
       (keep-compile-warnings! ex)
       (syntax-error (:msg d) (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)])))))
 
+(def ^:private too-deep-to-compile "RecursionError: maximum recursion depth exceeded during compilation")
+
+(def ^:private too-deep-to-parse
+  "The answer for a source nested too deep for the reader (queue 289): the parser's MemoryError, as pegen's
+  _Pypegen_stack_overflow raises it past MAXSTACK (Parser/pegen_errors.c), not a Go panic's SystemError"
+  "MemoryError: Parser stack overflowed - Python source too complex to parse")
+
 (defn- compile-uncached [mode source]
   ;; mode single-complete: compile()'s single without PyCF_ALLOW_INCOMPLETE_INPUT, codeop's rule not applied (PY7)
   ;; mode single parsed as CPython parses it (queue 203: Py_single_input's start rule, one statement, then pegen's
@@ -188,6 +195,9 @@
       (cv/error-form? form)(syntax-error (str (second form)) (nth form 2) (reader-loc form) (reader-kind form) (reader-text form))
       :else
       (try ((resolve 'arbace.python/ir-text) (pc/compile-source form (keyword mode)))
+           ;; nested too deep for the compiler's recursion (queue 289): CPython's compiler raises RecursionError
+           ;; (Python/compile.c's _Py_EnterRecursiveCall " during compilation"), not a Go panic's SystemError
+           (catch StackOverflowError _ too-deep-to-compile)
            (catch Throwable e
              (if (= 'SyntaxError (:class (ex-data e)))
                (do (keep-compile-warnings! e)
@@ -207,9 +217,10 @@
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
     (if (.exists cf)
       (slurp cf)
-      (let [r (if (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:") (= mode "source-error"))
-                (native-answer mode file source)
-                (compile-uncached mode source))]
+      (let [r (try (if (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:") (= mode "source-error"))
+                     (native-answer mode file source)
+                     (compile-uncached mode source))
+                   (catch StackOverflowError _ too-deep-to-parse))]
         (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
                   (str/starts-with? r "SyntaxError: ") (str/starts-with? r "\u0001"))
           (.mkdirs (.getParentFile cf))
