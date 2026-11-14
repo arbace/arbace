@@ -968,6 +968,51 @@ user's to run) writes an opt-in pre-commit hook that runs the check when a commi
 **The plan view's median (gate-gd23's note 6).** An even count of passes takes the lower middle one (`gate.lanes`). With two passes,
 the upper one had put rsi-essential's 19,767 s outlier into every plan.
 
+### Before and after (the plans of 2026-11-14 on `dc685b3df` and on the branch, the same store, GATE_NIGHT=20405, keyed)
+
+| plan | checks | serial sum | wall, the essential memory lane | wall, `--concurrent` lanes |
+|---|---|---|---|---|
+| `--nightly` | 492 → 494 | 18:53 → 13:48 | 12:39 → 8:22 | 9:29 → **4:04** |
+| `--full` | 330 → 332 | 26:52 → 21:03 | 19:36 → 14:43 | – → 7:13 |
+| `--weekly` | – → 340 | – → 25:35 | – → 18:59 | – |
+| essential | 59 → 61 (records-check, caches-table) | 2:44 → 2:38 | 0:56 → 0:56 | – |
+
+These are the plan view's estimates. The drop comes from the median fix: with two passes, an outlier no longer counts. The admission
+changes no duration, only how the lanes pack the steps. In the nightly plan the admission is above the declaration for 31 checks,
+the largest diffcheck's 31 → 36.5 GiB and jrt-convert's 34 → 37. No check is UNDER twice, since GD1 raised the declarations from
+the same store. The real effects of GD4 show only in a run: no ENOSPC-corrupted passes, deferred steps instead of failed ones, and
+Go's cache warm across the night.
+
+`bin/gate --prune --dry-run --worktrees` on the main store, which removed nothing, took 17 s. It found:
+- 2,881 passes, all within the store's rule;
+- Go's build cache under its 8 GiB;
+- `.tmp/java-check/forms-full` with 65,800 entries in one directory, over the 10,000 limit. This is night 12's ext4 risk again, in the
+  unsharded full-forms cache;
+- two merged worktrees idle a day (night12-lb, night12-oc).
+
+### Checks run on the branch
+
+- `bin/gate-tests` (without `GOMEMLIMIT` in the environment): 39 tests, with three new ones:
+  - `disk-policy-test`, 18 checks: the floor, the shared wait, deferred and its dependents, the retry, ENOSPC in a log and in
+    the outputs, `GATE_STEP_MEM_GIB`, `bin/gate-policy`;
+  - `admit-test`, 9 checks: the admission, UNDER, `DECLARED` and `DISK-GIB`, `:disk-gib` in no key;
+  - `caches-test`, 14 checks on a scratch root, main checkout, HOME and Go cache: every rule, `--dry-run`, `--cheap`,
+    `:max-entries`, the unlisted entries, `--worktrees` on a scratch repository. `--coverage` covers 172 names.
+
+  The first run failed costs-test, because the new steps were in no crop: `records-check` and `caches-table` joined `:shared`.
+  It also failed rotation-test, which read the command from column 18; it now reads column 20. With those two, gate-reads-test,
+  which nests them, failed too. The second run: 39 of 39 tests passed, in 50 min 55 s.
+- `bin/records-check`: 9 pairs, 0 problems (41 accepted), its four controls fail as they must.
+- `gate.crops check`: 0 problems. `test/gate/crops-test.bash`, `gate-key-crops-test.bash`, `lanes-test.bash` (50 of 50),
+  `plan-logic-test.bash`, `rotation-test.bash` and `costs-test.bash` pass.
+- Every plan above passed, and so did `bin/gate --clean --plan`, `--full --clean --plan`, `--plan --rerun`, `bin/night --plan` and
+  `bin/night --plan --concurrent`.
+- `make check-makefile` passes. `bin/reap`: 49 of 52 cells checked, 0 problems. `bin/crops-score --judge --strict` exits 0.
+- `test/c/musl-lock-test.bash`'s new case was not run: it reads musl through repr/c on the tools' host, which is heavier than this
+  brief's light runs. It is a night command.
+
+No gate was run.
+
 **Not built (GD4's part of §6 left).** GDS14's may-pass time classes (not in this brief); GDS13's "the morning's table edit takes
 it in" is the main session's, from the plan's UNDER lines; the shared host builds (j2g, repr/go) and `gocache.bash`'s rule outside
 the gate wait for window W (`gate_key`); records-check's count and provenance pairs (repr-clojure's `:counts` need a run to derive;
