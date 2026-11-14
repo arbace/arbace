@@ -5319,3 +5319,34 @@ against it); binding the missing `$tcMany` names as aliases (rejected: GHC has n
 poly-kinded tycon's kind arguments now (deferred: the elaborator erases kind arguments; HF10-P41). Proposals HF10-P40 (unboxedsums/ in
 the run corpora), P41 (Typeable's kind arguments), P42 (the testsuite's Typeable programs on the own path). Details:
 doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P37-P39".
+
+## 2026-11-14: HF10-P40-P42 built (branch `hs-p40`), P43 in part; the proofs stopped by the disk
+
+The user's decisions of 2026-11-13, HF10-P40 (a), P41 (a), P42 (a), built on `hs-p40` from `mac/hs-p37` (b37527e7d) by an agent during
+the night's RERUN (one run at a time, under 1.2 GiB). Sources read: GHC 9.14.1's tarball (the corpus pin): GHC.Tc.Instance.Class
+(doTyConApp, doTyLit), GHC.Tc.TyCl (kcTyClGroup), GHC.Tc.Instance.Typeable (todoForTyCons), GHC.HsToCore.Binds (EvTypeableTyLit),
+GHC.HsToCore.ListComp (dsMonadComp), GHC.Tc.Module (checkMain), ghc-internal's GHC.Internal.Data.Typeable.Internal (mkTrCon,
+instantiateKindRep, runtimeRepTypeRep); BSD-3, already in LICENSE.md. First the native front end over testsuite-core's 465 eligible
+programs (`.tmp/p40/front-all.sh`, the front end alone): 391 compile; the first errors by count MonadComp 9, TransStmt 8, CallStack
+implicit parameters 6, HsStatic 3, `main`'s type 3. Built in `typecheck.ae` (with `ownface.ae`, `rename.ae`'s `:language`,
+`desugar.ae`): `eval-corpora.edn` takes `unboxedsums`; Typeable's kind arguments recovered at the use site from the tycon's kind
+(`tycon-kind-info`, expected kinds passed down, constraint tuples, unboxed tuples' representations); the own data types' kinds inferred
+(`infer-tycon-kinds!`, PolyKinds' generalization, RuntimeRep variables defaulted) and written into the own interfaces and the `$tc`
+bindings; every module's promoted constructors' `$tc'` bindings and the classes' TyCons; `tc-rep-ref` took only a symbol namespace
+(every promoted constructor the elaborator named was `$tcO`); `sig-type` quantifies an explicit forall's binders in their written order
+(`kindedTypeRep @k @a` was `@a @k`: every `KindRepTYPE r` stopped, `typeRep @Int#` among them); `HsStarTy`, `HsExplicitTupleTy`,
+literal Typeable (typeNatTypeRep...), fundep improvement from instances only on metas (T16646), monad comprehensions, `main :: IO t`,
+the literal order past a Long. Eight library rounds (lib-check and lib-stg of ghc-internal and base as the gate runs them, about 55
+minutes each), each followed by a check that every `$tc`/`$tc'` reference of the own STG is bound, which found the unbound names and
+the too-general kinds (IO, Endo, JoinWith, DictBox) the earlier rounds made. Results: ghc-internal lib-check 0 worse, 3 better (the
+binder order: Typeable.Internal's errors 30 → 16), facts unchanged (20,699 of 20,891); lib-stg 5,734 of 7,789, 0 worse; base 0 worse,
+582 of 1,072; deepseq/array/stm 0 worse on round 7's code. TypeableEq and T14341 pass on the own path (they were own-fallback.txt's);
+TypeOf and TypeRep match GHC's documented output but IO's lines on round 6's libraries (IO was generalized; fixed in round 7, not
+rerun); every other TypeRep line checked alone passes. Alternatives considered: writing kind arguments into the elaborator's types
+everywhere (rejected: every interface type and the judge's canonical forms would change; the use site is where Typeable needs them);
+a kind inference by SCCs (deferred: the module as one group fits ghc-internal's 29 poly-kinded tycons; four come out more general,
+HF10-P45). At 02:47 UTC `df /` reached 89% (the night's gate; the branch's `.tmp` is 0.9 GB): by the rules no further run; left as
+night command 1: round 8's deepseq/array/stm, the programs again, `bin/hsi own-verdicts --record`, the after-count, hsi-essential's
+and haskell-read-essential's commands, `bin/reap`, `bin/crops-score`, the keys' test. Proposals HF10-P43 (the next gaps: TransStmt,
+CallStack implicit parameters, HsStatic), P44 (withDict's polytype argument's given), P45 (class kinds in the inference). Details:
+doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P40-P42".

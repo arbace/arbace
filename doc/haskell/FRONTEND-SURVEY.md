@@ -4134,3 +4134,117 @@ Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy st
   Typeable of a type-level literal (`typeRep @"hi"`, GHC's doTyLit), a skolem unified with Integer. (a) **port those four**; (b)
   leave them on the pack. *Recommended: (a)*.
 
+
+
+## As built: HF10-P40-P42 (2026-11-13/14, branch `hs-p40`, from `mac/hs-p37` b37527e7d)
+
+The user's decisions of 2026-11-13: HF10-P40 (a), P41 (a), P42 (a). By an agent during the night's RERUN (one run at a time, each
+process under 1.2 GiB, `GOMEMLIMIT=1000MiB`; stage 0; no GHC, no gate run, no network). Read from GHC 9.14.1's source tarball (the
+corpus pin): `compiler/GHC/Tc/Instance/Class.hs` (doTyConApp, doTyLit, doFunTy, onlyNamedBndrsApplied), `compiler/GHC/Tc/TyCl.hs`
+(kcTyClGroup, generaliseTcTyCon), `compiler/GHC/Tc/Instance/Typeable.hs` (todoForTyCons, mkTyConKindRep), `compiler/GHC/HsToCore/Binds.hs`
+(dsEvTypeable's EvTypeableTyLit), `compiler/GHC/HsToCore/ListComp.hs` (dsMonadComp), `compiler/GHC/Tc/Module.hs` (checkMain),
+`libraries/ghc-internal/src/GHC/Internal/Data/Typeable/Internal.hs` (mkTrCon, mkTrApp, instantiateKindRep, runtimeRepTypeRep,
+showTypeable, typeNatTypeRep); BSD-3-Clause, the notice already in the files and LICENSE.md.
+
+**HF10-P40: unboxedsums/ in `:testsuite-core`** (`test/haskell/eval-corpora.edn`; 743 programs planned, 722 before). Its run tests are
+judged by their own verdicts as generics/ and patsyn/ are; `bin/hsi own-verdicts --record` is still to run (below: the disk).
+
+**HF10-P41: Typeable's kind arguments** (`typecheck.ae`). The elaborator erases kind arguments; they are recovered where Typeable
+needs them:
+
+- **At the use site** (`tycon-kind-info`): the tycon's kind instantiated (an interface's kind form, its leading invisible binders the
+  kind arguments; a promoted constructor's type; a class's arity to Constraint; the tuples' and lists'), its visible arguments' kinds
+  (`kind-of`, from their own heads) unified with its parameters', the expected kind of an argument passed down (`'[] @Natural` under
+  `':`), the metas nothing fixes defaulted to Type. `mkTrCon $tcT [SomeTypeRep k...]`; an unboxed tuple's kind arguments are its
+  components' representations; a tuple of constraints is the constraint tuple `CTupleN`.
+- **The own data types' kinds** (`infer-tycon-kinds!`, kcTyClGroup for declarations without a standalone kind signature, the module one
+  group): each parameter a meta (its `(t :: k)` signature's), unified with the constructors' fields (Type), GADT results' arguments,
+  contexts (Constraint), quantified fields' bodies, function and unboxed-tuple components (TYPE r, the representation defaulted to
+  LiftedRep, never generalized: GHC's defaulting of RuntimeRep variables), the rest generalized under PolyKinds (GHC2021's; the
+  module's language through the renamed tree's new `:language`) in order of first occurrence, else Type. The kind is written into the
+  own interface's tycon form (`ownface.ae`: `forall k0. k0 -> Type` for Proxy, the tycon's applications with the kind placeholders, so
+  an importer's kind arity is GHC's) and into the `$tcT` binding (its kind variables' count and KindRep). 29 own tycons of ghc-internal
+  and base come out poly-kinded: Proxy, Const, Compose, Product, Sum, Fixed, `:~:`, `:~~:`, Coercion, Alt, Ap, the Generics
+  representation types, ...; four are more general than GHC's (Q, Code, TExp, SomeKindedTypeRep: a class's or a GADT binder's kind
+  annotation the inference does not read).
+- **Every module's promoted constructors' `$tc'` bindings** (todoForTyCons; GHC.Internal.Types' alone before), the classes' TyCons
+  (`$tcEq`, `$tcCTuple2`), KindReps through synonyms (Type as `krep$*`, Constraint as `krep$Constraint`), promoted constructors written
+  without their quote (`(a :: TYPE DoubleRep)`) as the data constructor's, none through a type family or a promoted constructor of a
+  poly-kinded type. `tc-rep-ref` took only a form's symbol namespace, so every promoted constructor the elaborator named came out `$tcO`.
+- **An explicit forall's binders in their written order** (`sig-type`): `kindedTypeRep :: forall k (a :: k). ...` quantified `a, k` by
+  first occurrence, so `kindedTypeRep @(RuntimeRep -> Type) @TYPE` gave `typeRep @(RuntimeRep -> Type)` and `instantiateKindRep` of
+  any `KindRepTYPE r` stopped (`Ill-kinded type application`): `typeRep @Int#` runs now. GHC.Internal.Data.Typeable.Internal's lib-check
+  errors 30 → 16.
+
+**HF10-P42: the testsuite's Typeable programs' front-end gaps** (`typecheck.ae`): `HsStarTy` is Type, `HsExplicitTupleTy` the promoted
+tuple constructor, Typeable of a type-level literal doTyLit's (`typeNatTypeRep`, `typeSymbolTypeRep`, `typeCharTypeRep` at the
+literal's Known dictionary), and functional-dependency improvement from an instance only fixes metas (T16646's `Reifies (Any @Type) a`
+against `KnownNat n => Reifies n Integer`, an instance GHC does not match by kind).
+
+**The next gaps** (the native front end over testsuite-core's 465 eligible programs before, `.tmp/p40/front-all.sh`: 391 compile, 67
+type errors, 2 STG, 5 stopped; by the first error): MonadComp 9, TransStmt 8, HsStatic 3, `main` without a signature 3, implicit
+CallStack parameters 6, ParStmt 2, the two Word literals past a Long 2, then singletons. Taken here (HF10-P43, below): monad
+comprehensions (dsMonadComp: `return`, `guard b >>`, the do statements' binds), `main`'s type unified with `IO t` before its group is
+generalized (checkMain), the match compiler's literal order as a big integer (CmmSwitchTest64, T10246).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; the final code's run):
+
+| step | result | before (hs-p37) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 3 better (Typeable.Internal errors 30 → 16, Exception.Context and Generics ok); facts 20,699 of 20,891 | 2 better, same facts | 0.97 GB, 15m04 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 equal, 0 worse, 33 better; every `$tc`/`$tc'`/`$krep` reference bound (2,335) | same | 1.15 GB, 20m08 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.71 GB, 7m18 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.72 GB, 7m41 |
+| deepseq, array, stm | 0 worse each on the previous code (runs 4-7); the final code's run refused by the disk (89%) | as recorded | 0.58-0.63 GB |
+
+Seven rounds were needed: unbound references the new bindings made (`$tcType`, `$tcDoubleRep`, `$tc[]`: the namespace, the
+synonyms, the quote-less constructors) and kinds that came out too general (IO, Endo, JoinWith, DictBox) were found by checking every
+reference of the own STG against its bindings after each round.
+
+**The programs** (the native front end on the branch's own libraries, hsi, each judged by its own verdict; `.tmp/p40/ps-run.sh`):
+
+| program | before (hs-p37) | after |
+|---|---|---|
+| T14341, TypeableEq | own-fallback.txt (`$tcMany`, HF10-P39), Proxy without its kind argument | pass |
+| TypeOf | front end: `HsStarTy`, `HsExplicitTupleTy` | 26 of 27 lines on round 6's libraries (`IO * ()`: IO generalized, fixed in round 7, not rerun) |
+| TypeRep | front end: `HsStarTy`, literal Typeable | 28 lines but `IO`'s two (the same), each other line checked alone (R1-R12 probes: CTuple2, Int#, `(##)`, `(# Int#,Int #)`, Proxy at Constraint, at `RuntimeRep -> *`, at `*`, at `'BoxedRep 'Lifted`, RealWorld, `'[1,2,3]`) |
+| T16646 | front end: a skolem unified with Integer | front end: withDict's `(cls => r)` argument gives no given (`Reifies Any a`, `Given a` unsolved): left, HF10-P44 |
+| mc01 | front end: MonadComp | front end: TransStmt alone (the other MonadComp programs not rerun) |
+| cgrun053, DsStrictLet | front end: `Monad ?` unsolved (`main` without a signature) | front end compiles them (their runs waited for round 8's libraries) |
+
+### Checks
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg (the table) | exit 0 each, 0 worse; controls differ as they must |
+| the programs above | as the table says |
+
+Not run (stopped by the rules at 02:47 UTC on 2026-11-14: `df /` at 89%, over 85%, filled by the night's gate, not this branch, whose
+`.tmp` is 0.9 GB): the final code's deepseq/array/stm round, TypeOf and TypeRep on round 8's libraries, `bin/hsi own-verdicts
+--record` (unboxedsums' pending lines), the front end's after-count over testsuite-core, samples/synthetic, hsi-essential's and
+haskell-read-essential's commands, `bin/reap`, `bin/crops-score --record` / `--judge --strict`, `bash test/gate/gate-key-crops-test.bash`.
+Every changed path is a crop path (`arbace/repr/haskell/`) or a test record (`test/haskell/eval-corpora.edn`): the keys should not move,
+to be confirmed by that test.
+
+### Night commands (not run; in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+1. When `df /` is under 85%: `.tmp/p40/chain-small.sh` (deepseq/array/stm, 0.6 GB, 10 min), then `HSI_FRONT_DRY=1 bin/hsi check
+   --libs own --corpus testsuite-core` (composes the own libraries), `.tmp/p40/ps-run.sh $PWD/.tmp/p40/t TypeOf TypeRep TypeableEq T14341`,
+   `bin/hsi own-verdicts --record`, `.tmp/p40/front-all.sh .tmp/hsi/check-own/front/plan.tsv .tmp/p40/after` (1.2 GB, 30 min), then the
+   proofs listed above (hsi-essential's command 0.9 GB, 20 min; the rest light).
+2. GHC's runs of unboxedsums/ with patsyn/'s and generics/'s (hs-p37's night command 1, the oracle window): `bin/hsi record-ref --corpus
+   testsuite-core --only` the ids, `bin/hsi check --live --dump-only --record-progs` the same, `bin/hsi own-verdicts --record`.
+3. `test/haskell/own-fallback.txt`'s T14341 and TypeableEq lines can go (`HSI_OWN_FALLBACK=try` fails on them once they pass): with the
+   gate's whole `hsi-check` own run (heavy, at night).
+
+### Proposals
+
+- **HF10-P43 the next front-end gaps** (taken in part here, (a) by the brief's "keep going"): monad comprehensions, `main`'s type, the
+  literal order. Next by count: TransStmt (TransformListComp, 8), implicit CallStack parameters of any name (`?loc :: CallStack`,
+  isCallStackPred, 6), HsStatic (StaticPointers, 3). (a) **port them in that order**; (b) leave them on the pack. *Recommended: (a)*.
+- **HF10-P44 withDict's polytype argument.** T16646: the `(cls => r)` argument of withDict checked as a polytype gives its context as a
+  given (GHC's tcSkolemise): (a) **do so**; (b) leave T16646 on the pack. *Recommended: (a)*.
+- **HF10-P45 class kinds in the inference.** A class's parameters' kinds (Quasi :: (Type -> Type) -> Constraint) and a GADT binder's kind
+  annotation are not read, so Q, Code, TExp and SomeKindedTypeRep come out more poly-kinded than GHC's (their Typeable shows a kind
+  argument GHC does not): (a) **infer the classes' kinds as the data types' and read the binders' annotations**; (b) leave it.
+  *Recommended: (a)*, no program of the corpora shows it yet.

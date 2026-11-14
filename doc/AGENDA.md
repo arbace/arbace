@@ -122,7 +122,13 @@ Six crops are above 90 on all three. What the others still need:
   unboxed sums unarised as GHC's Unarise does (binders, arguments, slot casts, case and let binders, constructor fields; unboxedsums/'s
   run tests 18 of 19 on the own path, 5 before; T14228 passes, patsyn/ 13 of 13), patsyn/ in `:testsuite-core` (722 run tests, pending
   by their own verdicts), Typeable evidence of promoted constructors (`$tc'Many`) and functions (`mkTrFun`, the arrow's kind arguments):
-  Type.Reflection's App, Fun and a function's `show` run; ghc-internal's lib-stg 5,734 of 7,789 (0 worse). P40-P42 proposed.
+  Type.Reflection's App, Fun and a function's `show` run; ghc-internal's lib-stg 5,734 of 7,789 (0 worse). P40-P42 proposed. P40-P42 decided
+  (a) (the user, 2026-11-13); `hs-p40` built them: unboxedsums/ in `:testsuite-core` (743 programs); Typeable's kind arguments at the
+  use site and the own data types' kinds inferred (kcTyClGroup lite, written into the own interfaces and `$tc` bindings; every module's
+  `$tc'` bindings, classes' TyCons; an explicit forall's binder order), `*`, promoted tuples, literal Typeable: TypeableEq and T14341 pass
+  on the own path, TypeOf and TypeRep but IO's lines (fixed after, not rerun); P43 in part (monad comprehensions, `main`'s type);
+  ghc-internal lib-check 0 worse (3 better), lib-stg 5,734 of 7,789, base as before. The proofs after round 8 stopped at `df /` 89%
+  (the night's gate): night command 1. P43-P45 proposed.
   Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
