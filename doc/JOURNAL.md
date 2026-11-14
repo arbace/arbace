@@ -5735,3 +5735,15 @@ oi's `near-limit?` symmetric. Branch `n15-fix2` is based on mac/asm-fix2 (6c9d27
   `:refused`, so java-judge reports it until `bin/java-check --levels compiled --record`, the first night after the merge.
 - `bash test/gate/gate-key-crops-test.bash` passes. `bin/gate --full --concurrent --plan` plans without error: the
   gate_key-moved steps rerun, for example cpp-dg's parts on rtcheck.ae.
+
+## 2026-11-14: llvmi holds ci's musl forms (gate 13c's llvm-controls-test)
+
+Gate 13c (next 45b9b2ef1, `--full --concurrent`) failed llvm-controls-test: its `bin/llvmi check --essential` (LLVMI_WORK in the test's
+own scratch) found "no build line" for all 10 modules. Cause: llvmi reads musl's forms cache (`.tmp/ci-musl/forms`, ci's) through
+`arbace.c.musl/index` without ci's lock, and the gate key's move (n15-fix2) moved musl's forms key, so a C step's `bin/ci musl read`
+removed and reread the cache (11:17-11:33) while the test ran (11:16-11:18); nodes.log: FileNotFoundException on
+`forms/index.edn.tmp...`, the directory gone. The same failure reproduces in a fresh worktree with no forms (nothing reads them for
+llvmi). Now `bin/llvmi check` runs `bin/ci musl ensure` (a read under ci's exclusive flock when stale, else nothing; its prepare a no-op
+after llvmi's own `musl_prepare`) and then holds a shared flock on FORMS.lock for the rest of its run, so no reader removes the cache
+underneath it. bin/llvmi is in arbace_crop_paths: no key moves. Proof: test/repr/llvm/controls-test.bash in a worktree at 45b9b2ef1,
+12 of 12 (both llvmi lines ok; before the fix, in a worktree without forms, the two llvmi lines failed as in the gate). The main session.
