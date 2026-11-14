@@ -12,7 +12,21 @@
     ^{:line 12 :tag (* crt/Sys)} Sys
     ^{:line 13 :tag uint64} BrkBase
     ^{:line 14 :tag uint64} Brk
-    ^{:line 15 :tag uint64} MmapNext))
+    ^{:line 15 :tag uint64} MmapNext ; the top of mmap's area (topDown)
+    ^{:tag (slice (* sharedMap))} shared))
+
+
+(go/type sharedMap "sharedMap is a shared file mapping (MAP_SHARED, AR23, queue 295): its pages [Base, Base+Size) hold the file's bytes from Off
+as fileMap read them in; MayWrite when its descriptor was open for writing, and then Fd is the mapping's own descriptor (the
+program's duplicated above its own numbers, as Linux's mapping holds its file past the descriptor's close) and Shadow the bytes
+as last read from or written to the file, against which writeBack finds the pages the program changed.
+" (struct
+    ^{:tag uint64} Base
+    ^{:tag uint64} Size
+    ^{:tag uint64} Off
+    ^{:tag int64} Fd
+    ^{:tag bool} MayWrite
+    ^{:tag (slice byte)} Shadow))
 
 
 
@@ -22,7 +36,10 @@
   ^{:line 22} [^{:val 38} eNOSYS 38]
   ^{:line 23} [^{:val 19} eNODEV 19]
   ^{:line 24} [^{:val 9} eBADF 9]
-  [^{:val 13} eACCES 13])
+  [^{:val 13} eACCES 13]
+  [^{:val 27} eFBIG 27]
+  [^{:val 95} eOPNOTSUPP 95]
+  [^{:val 1073741824} sharedFdBase 0x40000000]) ; a shared mapping's own descriptor: fcntl F_DUPFD's lowest
 
 
 
@@ -78,15 +95,23 @@
           (return (.fileMap k a1 size a3 a4 a5 a6)))
 
         (return (conv int64 (.MapAnon k a1 size a3 a4)) nil)))
-    (case [11] ; munmap
+    (case [11] ; munmap: a shared file mapping's pages written back first (AR23)
       (when (or (!= (bit-and a1 pageMask) 0) (== a2 0))
         (return (- eINVAL) nil))
 
+      (.release k a1 (pageUp a2))
       (.Unmap (.-AS k) a1 (pageUp a2))
       (return 0 nil))
+    (case [26] ; msync (AR23)
+      (return (.msync k a1 a2 a3) nil))
+    (case [285] ; fallocate (AR23)
+      (return (.fallocate k a1 a2 a3 a4) nil))
     (case [10] ; mprotect
       (when (!= (bit-and a1 pageMask) 0)
         (return (- eINVAL) nil))
+
+      (when (.sharedDenies k a1 (pageUp a2) a3)
+        (return (- eACCES) nil))
 
       (when (not (.Protect (.-AS k) a1 (pageUp a2) (protPerm a3)))
         (return (- eNOMEM) nil))
@@ -110,21 +135,27 @@
   (.passthru k n a1 a2 a3 a4 a5 a6))
 
 
-(go/method MapAnon "MapAnon maps size bytes (page-aligned) of zeros with prot (mmap's) as mmap does under flags: at addr with MAP_FIXED, else\nat addr when it is free and below the stack's area, else at Linux's next address of mmap's area; the address.\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags]
-  (cond (!= (bit-and flags 0x10) 0) ; MAP_FIXED
-    (.Unmap (.-AS k) addr size)
-    (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (- StackTop StackSize))) (do
-      (set! addr (- (.-MmapNext k) size))
-      (while (.Mapped (.-AS k) addr size)
-        (set! addr - pageSize))
-
-      (set! (.-MmapNext k) addr)))
+(go/method MapAnon "MapAnon maps size bytes (page-aligned) of zeros with prot (mmap's) as mmap does under flags: at addr with MAP_FIXED, else\nat addr when it is free and below the stack's area, else where Linux's top-down search puts it (topDown); the address.\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags]
+  (cond (!= (bit-and flags 0x10) 0) (do ; MAP_FIXED: what it replaces unmapped as munmap does (AR23)
+      (.release k addr size)
+      (.Unmap (.-AS k) addr size))
+    (or (== addr 0) (.Mapped (.-AS k) addr size) (> (+ addr size) (- StackTop StackSize)))
+    (set! addr (.topDown k size)))
 
   (.Map (.-AS k) addr size (protPerm prot) "mmap")
   addr)
 
 
-(go/method fileMap "fileMap is mmap of a file's descriptor fd (AR22, queue 294: cmd/compile's export data, cmd/internal/bio's and\nbase.MapFile's MAP_SHARED PROT_READ mappings): Linux's checks in its order (an offset not page-aligned EINVAL, the descriptor\nEBADF, no mapping type EINVAL, a descriptor not open for reading, or a shared writable mapping of one not open for writing,\nEACCES, not a regular file ENODEV), then MapAnon's pages with the file's bytes from off read in by crt's pread64, to the file's\nend (the rest zero). The mapping is a copy: a shared one does not see later writes to the file, a shared writable one (its\nwrites could not reach the file) is ENODEV, and the pages past the file's end read as zeros where Linux raises SIGBUS.\n" [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags ^uint64 fd ^uint64 off] :results [^int64 ret ^{:tag (* Exited)} exit]
+(go/method topDown "topDown is the address of a mapping of size bytes in mmap's area as Linux's top-down search gives it (vm_unmapped_area; AR23,\nqueue 295): the highest free gap that holds it below the area's top (MmapNext), so a hole munmap left is reused as on Linux\n(before AR23 the area grew down from the last mapping, a hole never reused).\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 size]
+  (let [a (- (.-MmapNext k) size)]
+    (for [p (- (.-MmapNext k) pageSize)] (>= p a) (set! p - pageSize)
+      (when (.Mapped (.-AS k) p pageSize)
+        (set! a (- p size))))
+
+    a))
+
+
+(go/method fileMap "fileMap is mmap of a file's descriptor fd (AR22, queue 294: cmd/compile's export data, cmd/internal/bio's and\nbase.MapFile's MAP_SHARED PROT_READ mappings): Linux's checks in its order (an offset not page-aligned EINVAL, the descriptor\nEBADF, no mapping type EINVAL, a descriptor not open for reading, or a shared writable mapping of one not open for writing,\nEACCES, not a regular file ENODEV), then MapAnon's pages with the file's bytes from off read in by crt's pread64, to the file's\nend (the rest zero). The mapping is a copy: a shared one does not see later writes to the file, and the pages past the file's\nend read as zeros where Linux raises SIGBUS. A shared one is recorded (share, AR23, queue 295): its changed pages written back\nto the file at msync, munmap and the process's end (End), as Linux's page cache keeps them.\n" [^{:tag (* Kernel)} k ^uint64 addr ^uint64 size ^uint64 prot ^uint64 flags ^uint64 fd ^uint64 off] :results [^int64 ret ^{:tag (* Exited)} exit]
   (when (!= (bit-and off pageMask) 0)
     (return (- eINVAL) nil))
 
@@ -156,9 +187,6 @@
         (when (< r 0)
           (return (- eNODEV) nil)))
 
-      (when (and shared writes)
-        (return (- eNODEV) nil))
-
       (let [a (.MapAnon k addr size prot flags)
             s (.Slab (.-M (.-AS k)) a)
             ro (.-RO s)
@@ -182,7 +210,219 @@
             (set! done + (conv uint64 r))))
 
         (set! (.-RO s) ro)
+        (when shared
+          (.share k a size off fd (== acc 2)))
+
         (return (conv int64 a) nil)))))
+
+
+(go/method share "share records the shared file mapping [a, a+size) of fd from off (AR23, queue 295): when fd is open for writing, with a
+descriptor of its own (fcntl F_DUPFD from sharedFdBase: the program's numbers stay Linux's) and its bytes as read in.
+" [^{:tag (* Kernel)} k ^uint64 a ^uint64 size ^uint64 off ^uint64 fd ^bool mayWrite]
+  (let [m (addr (lit sharedMap :Base a :Size size :Off off :Fd -1 :MayWrite mayWrite))]
+    (when mayWrite
+      (let [(values d _) (.passthru k 72 fd 0 sharedFdBase 0 0 0)
+            (values b _) (.ReadBytes (.-AS k) a (conv int size))]
+        (set! (.-Fd m) d)
+        (set! (.-Shadow m) b)))
+
+    (set! (.-shared k) (append (.-shared k) m))))
+
+
+(go/method fileSize "fileSize is the size of the file of fd (lseek's SEEK_END, the descriptor's offset, which the program's descriptor shares,
+put back), or -errno (a pipe's ESPIPE).
+" ^int64 [^{:tag (* Kernel)} k ^int64 fd]
+  (let [(values cur _) (.passthru k 8 (conv uint64 fd) 0 1 0 0 0)]
+    (when (< cur 0)
+      (return cur))
+
+    (let [(values end _) (.passthru k 8 (conv uint64 fd) 0 2 0 0 0)]
+      (.passthru k 8 (conv uint64 fd) (conv uint64 cur) 0 0 0 0)
+      end)))
+
+
+(go/method writeBack "writeBack writes the pages of [lo, hi) (page-aligned, within m) of the shared mapping m that the program changed to m's
+file (AR23, queue 295): each page's bytes from its first changed one to its last (against m's Shadow) by pwrite64 on m's own
+descriptor at their offsets, as far as the file's end reaches (Linux writes no page's part past it: the file does not grow);
+the Shadow then holds them. A mapping whose descriptor was not open for writing has nothing to write.
+" [^{:tag (* Kernel)} k ^{:tag (* sharedMap)} m ^uint64 lo ^uint64 hi]
+  (when (or (< (.-Fd m) 0) (>= lo hi))
+    (return))
+
+  (let [end (.fileSize k (.-Fd m))]
+    (when (< end 0)
+      (return))
+
+    (for [p lo] (< p hi) (set! p + pageSize)
+      (let [i (- p (.-Base m))
+            fo (+ (.-Off m) i)
+            ^uint64 n pageSize]
+        (when (>= fo (conv uint64 end))
+          (break))
+
+        (when (> (+ fo n) (conv uint64 end))
+          (set! n (- (conv uint64 end) fo)))
+
+        (let [(values b ok) (.ReadBytes (.-AS k) p (conv int n))]
+          (when (not ok)
+            (continue))
+
+          (let [old (subslice (.-Shadow m) i (+ i n))
+                ^int j 0
+                e (conv int n)]
+            (while (and (< j e) (== (aget b j) (aget old j)))
+              (inc! j))
+
+            (while (and (> e j) (== (aget b (- e 1)) (aget old (- e 1))))
+              (dec! e))
+
+            (when (< j e)
+              (let [(values r _) (.passthru k 18 (conv uint64 (.-Fd m)) (+ p (conv uint64 j)) (conv uint64 (- e j)) (+ fo (conv uint64 j)) 0 0)]
+                (when (== r (conv int64 (- e j)))
+                  (copy (subslice old j e) (subslice b j e)))))))))))
+
+
+(go/method release "release is munmap's part for the shared file mappings over [base, base+size) (munmap, and mmap's MAP_FIXED over them;
+AR23, queue 295): their pages there written back, then the mappings cut there, a part left on either side keeping the file (its
+own descriptor duplicated when both sides remain), a mapping wholly gone its descriptor closed.
+" [^{:tag (* Kernel)} k ^uint64 base ^uint64 size]
+  (let [hi (+ base size)
+        ^{:tag (slice (* sharedMap))} kept nil]
+    (range [_ m (.-shared k)]
+      (let [mend (+ (.-Base m) (.-Size m))]
+        (when (or (>= base mend) (<= hi (.-Base m)))
+          (set! kept (append kept m))
+          (continue))
+
+        (let [lo (.-Base m)
+              up mend]
+          (when (> base lo)
+            (set! lo base))
+
+          (when (< hi up)
+            (set! up hi))
+
+          (.writeBack k m lo up)
+          (let [left (> base (.-Base m))
+                right (< hi mend)]
+            (when right
+              (let [r (.cut k m hi left)]
+                (set! kept (append kept r))))
+
+            (cond left (do
+                (set! (.-Size m) (- base (.-Base m)))
+                (when (!= (.-Shadow m) nil)
+                  (set! (.-Shadow m) (subslice (.-Shadow m) 0 (.-Size m))))
+
+                (set! kept (append kept m)))
+              (and (not right) (>= (.-Fd m) 0))
+              (.passthru k 3 (conv uint64 (.-Fd m)) 0 0 0 0 0))))))
+
+    (set! (.-shared k) kept)))
+
+
+(go/method cut "cut is the part of m from hi to its end (release's right side): its file from the offset there, its Shadow's part; dup a
+descriptor of its own (m keeps its part on the left), else m's.
+" ^{:tag (* sharedMap)} [^{:tag (* Kernel)} k ^{:tag (* sharedMap)} m ^uint64 hi ^bool dup]
+  (let [d (- hi (.-Base m))
+        r (addr (lit sharedMap :Base hi :Size (- (.-Size m) d) :Off (+ (.-Off m) d) :Fd (.-Fd m) :MayWrite (.-MayWrite m)))]
+    (when (!= (.-Shadow m) nil)
+      (set! (.-Shadow r) (subslice (.-Shadow m) d)))
+
+    (when (and dup (>= (.-Fd m) 0))
+      (let [(values fd _) (.passthru k 72 (conv uint64 (.-Fd m)) 0 sharedFdBase 0 0 0)]
+        (set! (.-Fd r) fd)))
+
+    r))
+
+
+(go/method msync "msync(addr, len, flags) (AR23, queue 295): Linux's checks (a flag beyond MS_ASYNC, MS_INVALIDATE and MS_SYNC, an address not
+page-aligned, MS_ASYNC with MS_SYNC: EINVAL; a range that wraps ENOMEM), the shared file mappings' changed pages in the range
+written back (writeBack; MS_ASYNC too: the copy's nearest to Linux's page cache), then ENOMEM when a page of it is not mapped.
+" ^int64 [^{:tag (* Kernel)} k ^uint64 base ^uint64 n ^uint64 flags]
+  (when (or (!= (bit-and flags (bit-not (conv uint64 7))) 0) (!= (bit-and base pageMask) 0) (== (bit-and flags 5) 5))
+    (return (- eINVAL)))
+
+  (let [hi (+ base (pageUp n))]
+    (when (< hi base)
+      (return (- eNOMEM)))
+
+    (range [_ m (.-shared k)]
+      (let [lo (.-Base m)
+            up (+ (.-Base m) (.-Size m))]
+        (when (< lo base)
+          (set! lo base))
+
+        (when (> up hi)
+          (set! up hi))
+
+        (when (< lo up)
+          (.writeBack k m lo up))))
+
+    (for [p base] (< p hi) (set! p + pageSize)
+      (when (not (.Mapped (.-AS k) p pageSize))
+        (return (- eNOMEM))))
+
+    0))
+
+
+(go/method fallocate "fallocate(fd, mode, offset, len) (AR23, queue 295: cmd/link's output file before it maps it shared): Linux's checks in
+vfs_fallocate's order (the descriptor EBADF; offset < 0 or len <= 0 EINVAL; a mode beyond FALLOC_FL_KEEP_SIZE EOPNOTSUPP, as
+a file system without them; a descriptor not open for writing EBADF; a pipe ESPIPE; offset + len past the largest offset
+EFBIG), then the file made offset + len long when it is shorter and KEEP_SIZE is not asked (crt's ftruncate). The blocks are
+the host's.
+" ^int64 [^{:tag (* Kernel)} k ^uint64 fd ^uint64 mode ^uint64 off ^uint64 n]
+  (let [(values fl _) (.passthru k 72 fd 3 0 0 0 0)] ; fcntl(fd, F_GETFL)
+    (when (< fl 0)
+      (return fl))
+
+    (when (or (< (conv int64 off) 0) (<= (conv int64 n) 0))
+      (return (- eINVAL)))
+
+    (when (!= (bit-and mode (bit-not (conv uint64 1))) 0)
+      (return (- eOPNOTSUPP)))
+
+    (when (== (bit-and fl 3) 0)
+      (return (- eBADF)))
+
+    (let [size (.fileSize k (conv int64 fd))
+          end (+ (conv int64 off) (conv int64 n))]
+      (when (< size 0)
+        (return size))
+
+      (when (< end 0)
+        (return (- eFBIG)))
+
+      (when (or (!= (bit-and mode 1) 0) (>= size end))
+        (return 0))
+
+      (let [(values r _) (.passthru k 77 fd (conv uint64 end) 0 0 0 0)]
+        r))))
+
+
+(go/method sharedDenies "sharedDenies is mprotect's EACCES (AR23, queue 295): PROT_WRITE over a shared file mapping whose descriptor was not open
+for writing.
+" ^bool [^{:tag (* Kernel)} k ^uint64 base ^uint64 size ^uint64 prot]
+  (when (== (bit-and prot 2) 0)
+    (return false))
+
+  (range [_ m (.-shared k)]
+    (when (and (not (.-MayWrite m)) (< base (+ (.-Base m) (.-Size m))) (< (.-Base m) (+ base size)))
+      (return true)))
+
+  false)
+
+
+(go/method End "End is the process's end for the kernel (AR23, queue 295): each shared file mapping's changed pages written back to its
+file, as Linux's page cache keeps them past the process (exit, exit_group, a fatal signal), and its descriptor closed. The
+machines' Run calls it.
+" [^{:tag (* Kernel)} k]
+  (let [ms (.-shared k)]
+    (set! (.-shared k) nil)
+    (range [_ m ms]
+      (.writeBack k m (.-Base m) (+ (.-Base m) (.-Size m)))
+      (when (>= (.-Fd m) 0)
+        (.passthru k 3 (conv uint64 (.-Fd m)) 0 0 0 0 0)))))
 
 
 (go/method within "within is n, or less: the bytes from a that lie in a's mapping (crt's slab), so that crt sees one slab; n when a is\nunmapped (crt's EFAULT then).\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 a ^uint64 n]

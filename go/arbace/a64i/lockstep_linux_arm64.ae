@@ -40,7 +40,8 @@
     ^{:line 32 :tag bool} resume ; the step mode resumed after the next system call (an exclusive region)
     ^{:line 33 :tag bool} afterSys ; the last step was a system call's
     ^{:line 34 :tag uint64} stackLo
-    ^{:line 35 :tag uint64} stackHi))
+    ^{:line 35 :tag uint64} stackHi
+    ^{:tag (slice (array 2 uint64))} shared)) ; AR23: the shared file mappings' base and size (refreshShared)
 
 
 
@@ -53,7 +54,8 @@
     ^{:line 45} ["set_tid_address" (lit _ -1 0)] ["nanosleep" (lit _ -1 0)] ["clock_nanosleep" (lit _ -1 0)] ["sched_yield" (lit _ -1 0)]
     ^{:line 46} ["openat" (lit _ -1 0)] ["close" (lit _ -1 0)] ["lseek" (lit _ -1 0)] ["write" (lit _ -1 0)] ["writev" (lit _ -1 0)] ["ioctl" (lit _ -1 0)]
     ^{:line 47} ["prlimit64" (lit _ 3 16)] ["getrlimit" (lit _ 1 16)] ["fcntl" (lit _ -1 0)] ["getcwd" (lit _ 0 -1)] ["readlinkat" (lit _ 2 -1)]
-    ["newfstatat" (lit _ 2 128)] ["fstat" (lit _ 1 128)] ["ftruncate" (lit _ -1 0)] ["fdatasync" (lit _ -1 0)] ["fsync" (lit _ -1 0)])) ; AR21: the files' stat, the native's (its descriptors are the world's)
+    ["newfstatat" (lit _ 2 128)] ["fstat" (lit _ 1 128)] ["ftruncate" (lit _ -1 0)] ["fdatasync" (lit _ -1 0)] ["fsync" (lit _ -1 0)]
+    ["fallocate" (lit _ -1 0)] ["unlinkat" (lit _ -1 0)])) ; AR21: the files' stat, the native's (its descriptors are the world's); AR23: fallocate and unlinkat (msync is a64i's own: its mappings')
 
 
 ^{:go/end 55} (go/func nativeX ^{:tag (array 32 uint64)} [^{:tag (* syscall/PtraceRegs)} r]
@@ -341,6 +343,15 @@
       (when (and (== (.-Name s) "mmap") (== (bit-and (aget args 3) 0x20) 0))
         (return (.fileMap l nret args) true))
 
+      ;; AR23: a shared file mapping unmapped (munmap, mmap's MAP_FIXED) is forgotten (refreshShared); a64i's kernel unmaps it
+      (when (or (== (.-Name s) "munmap") (and (== (.-Name s) "mmap") (!= (bit-and (aget args 3) 0x10) 0)))
+        (.dropShared l (aget args 0) (aget args 1)))
+
+      ;; AR23: mprotect's EACCES (PROT_WRITE over a shared mapping of a descriptor not open for writing) is the descriptor's, the
+      ;; world's: a64i's kernel knows no descriptor of the native's
+      (when (and (== (.-Name s) "mprotect") (== (conv int64 nret) -13))
+        (return -13 true))
+
       (let [(values w inWorld) (aget world (.-Name s))]
         (when (not inWorld)
           (return 0 false))
@@ -360,7 +371,35 @@
 
 
 
+        (switch (.-Name s)
+          (case ["write" "writev" "ftruncate" "fallocate"]
+            (.refreshShared l)))
+
         (return (conv int64 nret) true)))))
+
+
+(go/method refreshShared "refreshShared takes the native's pages of the shared file mappings after a call of the world's that may change a file
+(AR23, queue 295): the file is the world's, and the native's mapping shows its file's change at once (a64i's kernel holds a copy,
+written back at msync, munmap and the end).
+" [^{:tag (* lockstep)} l]
+  (range [_ m (.-shared l)]
+    (for [p (aget m 0)] (< p (+ (aget m 0) (aget m 1))) (set! p + 4096)
+      (let [(values b err) (.Read (.-t l) p 4096)]
+        (when (!= err nil)
+          (break))
+
+        (.WriteBytes (.-AS (.-c l)) p b)))))
+
+
+(go/method dropShared "dropShared forgets the shared file mappings over [base, base+n) (AR23).
+" [^{:tag (* lockstep)} l ^uint64 base ^uint64 n]
+  (let [hi (+ base (bit-and-not (+ n 4095) 4095))
+        ^{:tag (slice (array 2 uint64))} kept nil]
+    (range [_ m (.-shared l)]
+      (when (or (>= base (+ (aget m 0) (aget m 1))) (<= hi (aget m 0)))
+        (set! kept (append kept m))))
+
+    (set! (.-shared l) kept)))
 
 
 
@@ -377,6 +416,9 @@
           (break))
 
         (.WriteBytes (.-AS (.-c l)) (+ a p) b)))
+
+    (when [typ (bit-and (aget args 3) 3)] (or (== typ 1) (== typ 3))
+      (set! (.-shared l) (append (.-shared l) (lit (array 2 uint64) a size))))
 
     (conv int64 a)))
 
