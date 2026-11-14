@@ -2647,3 +2647,15 @@ On the light lane of the Mac VM (the M2 Max, 4 of its 8 cores, load about 13), s
   the file's end, mprotect's EACCES and a writable remap, MAP_FIXED over a shared mapping, an offset and MS_ASYNC, the file
   removed. a64i (eval and AOT), the CPU, lockstep sys and step (90 system calls) and the loader agree; before AR23, a64i's run was
   fallocate's ENOSYS and then SIGSEGV (status 139) at the first store into the ENODEV mapping.
+
+### Proposed (AR23)
+
+Numbering from ARS93. Each with options, the recommended named; none taken.
+
+- **ARS93 a shared mapping's coherence with the file.** a64i's shared file mapping is a copy written back at msync, munmap and the
+  end; Linux's is the page cache itself, so a write(2) into a mapped range shows in the mapping at once (the lockstep takes the
+  native's pages after such calls; a64i's eval and AOT runs would not see it). No program met it (cmd/link writes only through
+  its mapping). (a) as built, the divergence documented (recommended): nothing a test or a tool needs; (b) coherence for the
+  process's own calls: the shared mappings written back before each file call and read again after each writing one (write,
+  pwrite64, writev, ftruncate, fallocate), a cost on every such call while a shared mapping exists (cmd/compile's runs map their
+  imports shared); another process's writes stay unseen.
