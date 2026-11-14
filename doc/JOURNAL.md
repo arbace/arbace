@@ -5747,3 +5747,54 @@ llvmi). Now `bin/llvmi check` runs `bin/ci musl ensure` (a read under ci's exclu
 after llvmi's own `musl_prepare`) and then holds a shared flock on FORMS.lock for the rest of its run, so no reader removes the cache
 underneath it. bin/llvmi is in arbace_crop_paths: no key moves. Proof: test/repr/llvm/controls-test.bash in a worktree at 45b9b2ef1,
 12 of 12 (both llvmi lines ok; before the fix, in a worktree without forms, the two llvmi lines failed as in the gate). The main session.
+
+## 2026-11-14: gate 13c's failures diagnosed (n16-fix)
+
+Gate 13c (`bin/gate --full --concurrent` on next 45b9b2ef1, 10:02-19:54 UTC, log .tmp/night13/g-full-13c.log), each failure from its
+step log in next's .tmp/gate/ (read only), reproduced where a step's judge could run alone on the night's saved inputs:
+- **suite-aot-essential**: environment (i). Its log (11:53) ends in `could not import fmt (open /root/.cache/go-build/...-d: no such
+  file or directory)` for every package: build-cache entries deleted under a running build by the main session's stray disk guard
+  (entries unused 20 min, until 13:40). Rerun as is.
+- **llvm-controls-test**: fixed by 946d16c2b (the entry above), in this branch.
+- **hsi-check-aot, "not run: hsi-check did not pass"**: a race of `--concurrent`, not hsi. hsi-check-aot was its own :chain with no
+  :start-after, so its chain began at once and run_one read hsi-check's status (none yet: `notrun hsi-check` at 11:59:02) before hsi-check
+  had started (11:59:18; it passed at 12:08). `:needs` is read, never waited on (bin/lib/gate-run.bash's run_one/ok_status), and the
+  planner's lint holds only the essential phase to one chain. Fix: `:start-after hsi-check` on hsi-check-aot (its own key alone moves),
+  and test/gate/chain-needs-test.bash (gate-tests; outside the planner, which is in every step's key): every :full step whose need is
+  a :full step of another chain sits in a chain whose first step starts after that need or a later step of its chain; hsi-check-aot was
+  the only one (the java chain starts after javac-tool); a made-up table without :start-after is flagged (the control), one with it passes.
+- **java-judge**: no environment. No step log or saved result holds an ENOSPC or a missing file; read, classes and diagnostics are as
+  recorded. The six levels ran on whole corpora for the first time since the interp and compiled records of night 8 (e6447047b,
+  2026-11-08; java-judge's last pass 2026-11-07): interp 689 now passing, 350 new or changed, 43 in no class, 1 regression; compiled 650,
+  206, 45, 2; print 1 regression. The in-no-class results are tests that load or translate now (records `:load-failed`/`:refused`) and
+  fail on what the world lacks (jdk.internal.logger.DefaultLoggerFinder, jdk.internal.platform.Metrics, System.inheritedChannel,
+  signed jars, cacerts), plus timeouts under the lanes' load (t03897 interp, t05126, t05165, t07997, t08138, t08163). Regressions:
+  t03897 interp (timeout 20 s then 40 s; compiled passes), t05567 compiled (ObjectOutputStream not in the world in Thread-2, jtreg's
+  rule for other threads), t08123 compiled (NPE in Thread-2, interp too), t05749 print (a local's initializer). t05359 now passes compiled
+  (the clone() SAM fix). Not fixed here: classes for the 88 and the regressions' triage, then `--record` of interp and compiled, are the
+  main session's decision.
+- **oi-aot.run** (13:50-16:47) and **oi-suite-aot.suite**: the night's judgments reproduced exactly by test/ocaml/o2j_check.ae on next's
+  saved .tmp/o6 and .tmp/o7 tsvs (9 and 3 CHANGED). Neither comes from eabae0298, which changed oi_check.ae (oi's level) only. The third
+  column (vs-oi) "-" means one side did not run or both timed out. (a) opam/cmdliner/example_chorus and example_rm: a bug in vs-oi. Both
+  runs exit 124, which is cmdliner's own Cmd.Exit.cli_error (ocamlc's and ocamlopt's recorded status is 124 too), and vs-oi read every
+  124 as a timeout. Since e9a1048ad (11-01) the record's "same" of 10-31 has been unreachable. Fix: 124 is a timeout only when the row's
+  note says "timeout" (bin/oi's note for a limit's kill); 137, 152 and "timeout" as before. test/ocaml/judges_test.bash's two cases:
+  own 124 compared, "same"; the control, both runs stopped by the limit, "-". With the fix the suite's judge leaves 1 CHANGED.
+  (b) lib-systhreads/testyield (suite), weak-ephe-final/ephetest, parallel/churn, weak_array_par and weaktest: known nondeterminism
+  (schedule, gc) or "slow" rows. Their reason's byte count, or vs-oi against oi's own timing-dependent run, moves from run to run.
+  A judge change that masks these was not made ("never loosen a judge"): a decision. (c) lib-digest/md5: run alone on the quiet host
+  with the night's dumps on stage 0, it passes ("Test vectors passed.") in 159.4 s of CPU, against the AOT limit of 140 (120 + 20). With
+  jdk/ocaml at b45b8aa4f^ (before OC216) it takes 159.6 s: the runtime's changes since did not slow it. Its speed, not the load: the
+  record's "pass" (10-30) is stale. Its row needs aot-slow.edn and a recorded "slow", or a larger limit; misc/hamming and
+  statmemprof/lists_in_minor, measured the same way (two at once), take 152.2 s (pass) and 192.3 s (status 2, its known Memprof result)
+  of CPU: the same, stale records. (d) lib-systhreads/boundscheck passes now (record: known gc timeout), and
+  weak-ephe-final/ephetest3 finishes with output that differs (737 bytes; record: known gc timeout): gc timing.
+- Go's build cache while the gate runs (environment (ii): 13 to 32 GB, the disk at 100%): .tmp/night13/run.sh, the main session's runner,
+  now bounds it during the gate. Every 10 min, when ~/.cache/go-build is over 8 GiB, it deletes entries (`*-a`, `*-d`) whose mtime is over
+  2 h old. Go refreshes an entry's mtime at most hourly when it uses it (cmd/go/internal/cache's markUsed, mtimeInterval one hour), so an
+  entry a running build hit is under an hour old at the hit, and the bound leaves a build an hour between its hit and its read. A GOCACHE
+  apart per run was not chosen: it starts every build cold and still does not bound the growth within the run. GD4's in-gate LRU cap
+  supersedes this when it merges.
+- No key moves: `bin/arbace-go --gate-key` 66c29674829e..., test/gate/gate-key-crops-test.bash passes. Steps to rerun:
+  suite-aot-essential, hsi-check-aot (hsi-check passed in 13c at an unchanged key: skipped), oi-aot.run, oi-suite-aot.suite and ocaml-judges after
+  the decision on (b) and (c), and java-judge and java-held after the Java records' triage.

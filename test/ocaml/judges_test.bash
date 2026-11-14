@@ -214,3 +214,17 @@ printf '["b"]\n' > "$s/oi-slow.edn"
 printf 'a\t0\th\t1\t1.0\t\nb\t2\tx\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$s/check.tsv"
 out=$(judge_oi judge "$s/check.tsv" "$s/corpus.tsv" "$s/refs.edn" "$s/oi-results.edn" "$s/classes.edn"); st=$?
 expect "oi: control: a listed program recorded passing that now fails otherwise changes" 1 '^CHANGED b' "$out" $st
+
+# gate 13c (2026-11-14): a program's own exit status 124 (cmdliner's Cmd.Exit.cli_error, opam/cmdliner/example_chorus: ocamlc's and
+# ocamlopt's 124 too) is a status oi's and the AOT level's runs are compared on, not a timeout: the record's "same" stands. The control:
+# both runs stopped by the limit (124 with the limit's note "timeout ...") are still "-", two partial outputs
+c=$W/own-124; mk "$c"
+printf '[{:test "a" :ocamlc {:status "124" :sha256 "h" :bytes 1} :ocamlopt {:status "124" :sha256 "h" :bytes 1}}\n {:test "b" :ocamlc {:status "0" :sha256 "h" :bytes 1} :ocamlopt {:status "0" :sha256 "h" :bytes 1}}\n {:test "c" :ocamlc {:status "0" :sha256 "h" :bytes 1} :ocamlopt {:status "0" :sha256 "h" :bytes 1}}]\n' > "$c/refs.edn"
+printf 'a\t124\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
+printf 'a\t124\th\t1\t1.0\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
+printf '[\n ["a" "pass" "" "same"]\n ["b" "pass" "" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$c/aot-results.edn"
+out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
+expect "aot: a program's own exit 124 is compared with oi's run (same), not read as two timeouts" 0 'against oi: \{"same" 3\}' "$out" $st
+printf 'a\t124\th\t1\t140\ttimeout 120s of CPU\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
+out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
+expect "aot: control: both runs stopped by the limit are two timeouts, -" 1 '^CHANGED a: .* "-"\]$' "$out" $st
