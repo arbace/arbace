@@ -51,6 +51,13 @@
     ^{:tag (* proc) :doc "P is the process's part its threads share (thread.go, AR19), nil until a signal's disposition or a thread\n"} P
     ^{:tag uint64 :doc "the thread's signal mask and alternate stack (AR19)\n"} SigMask
     ^{:tag uint64} AltSP ^uint64 AltSize
+    ^{:tag uint64 :doc "AltFlags is the alternate stack's flags as sigaltstack was given them (0, or SS_DISABLE), the frames' uc_stack.ss_flags\n(AR20)\n"} AltFlags
+    ^{:tag uint64 :doc "the thread's pending signals and their siginfo (AR20, signal.go)\n"} Pending
+    ^{:tag (array 65 sigInfo)} pendInfo
+    ^{:tag uint64 :doc "faultISS is the faulting access's ESR bits beyond the fault status: WnR (a write), CM (cache maintenance) (AR20)\n"} faultISS
+    ^{:tag (slice Delivery) :doc "Delivered are the signals delivered to handlers, in order (the lockstep takes them)\n"} Delivered
+    ^{:tag (slice int) :doc "Ignored are the signals dropped as ignored, in order (the lockstep's: the traced native reports them)\n"} Ignored
+    ^{:tag uint64 :doc "SysX0 is the last system call's result, before any signal delivered at its end (the lockstep's)\n"} SysX0
     ^{:tag (* crt/Task) :doc "the thread's task in crt's scheduler, once the process has several threads (AR19)\n"} task
     ^bool threaded
     ^bool exited
@@ -179,15 +186,17 @@
 
 
 
-^{:go/end 182} (go/method Step "Step executes one instruction; false when the process has ended.\n" ^bool [^{:tag (* CPU)} c]
+^{:go/end 182} (go/method Step "Step executes one instruction; false when the process has ended. AR20: a synchronous fault with a handler is\ndelivered to it, and the signals pending and not blocked at the instruction's end (signal.go).\n" ^bool [^{:tag (* CPU)} c]
   (when (.-Done c)
     (return false))
 
-  (let [(values in sig r) (.Fetch c (.-PC c))]
+  (let [pc (.-PC c)
+        (values in sig r) (.Fetch c pc)]
     (when (== in nil)
-      (set! (.-FaultAddr c) (.-PC c))
+      (set! (.-FaultAddr c) pc)
       (.raise c sig r)
-      (return false))
+      (.signalled c pc true)
+      (return (not (.-Done c))))
 
     (set! (.-Last c) in)
     (inc! (.-Steps c))
@@ -195,8 +204,14 @@
       (inc! (aget (.-Cover c) (+ (.Name in) " " (.Family in)))))
 
     (.exec c in)
+    (when (.-Done c)
+      (.signalled c pc false))
+
     (when (and (!= injFamily "") (not (.-Done c)))
       (.inject c in))
+
+    (when (and (!= (.-Pending c) 0) (not (.-Done c)))
+      (.deliverPending c))
 
     (not (.-Done c))))
 
@@ -254,8 +269,13 @@
 ;; memory
 
 ^{:go/end 235} (go/method segv [^{:tag (* CPU)} c ^uint64 addr]
-  (set! (.-FaultAddr c) addr)
+  (set! (values (.-FaultAddr c) (.-faultISS c)) (values addr 0))
   (.raise c SIGSEGV (fmt/Sprintf ":segv %#x" addr)))
+
+
+(go/method segvW "segvW is segv for a write (the ESR's WnR; AR20)\n" [^{:tag (* CPU)} c ^uint64 addr]
+  (.segv c addr)
+  (set! (.-faultISS c) 0x40))
 
 
 ^{:go/end 243} (go/method load [^{:tag (* CPU)} c ^uint64 addr ^uint8 size] :results [uint64 bool]
@@ -268,7 +288,7 @@
 
 ^{:go/breaks [[5 254]] :go/end 255} (go/method store ^bool [^{:tag (* CPU)} c ^uint64 addr ^uint8 size ^uint64 v]
   (when (not (.Write (.-AS c) addr ^int (<< 1 size) v))
-    (.segv c (.-FaultAddr (.-AS c)))
+    (.segvW c (.-FaultAddr (.-AS c)))
     (return false))
 
   ;; a store to a marked address clears the monitor (the global monitor's effect, one thread)
@@ -280,7 +300,7 @@
 
 ^{:go/breaks [[4 263]] :go/end 264} (go/method aligned "aligned is FEAT_LSE2's rule for the exclusives, the acquires and releases and the atomics (AR18; the M2's uscat, its\nSCTLR_EL1.nAA as Linux sets it): SIGBUS only for an access that crosses a 16-byte boundary.\n" ^bool [^{:tag (* CPU)} c ^uint64 addr ^uint64 n]
   (when (> (+ (bit-and addr 15) n) 16)
-    (set! (.-FaultAddr c) addr)
+    (set! (values (.-FaultAddr c) (.-faultISS c)) (values addr 0))
     (.raise c SIGBUS (fmt/Sprintf ":alignment %#x" addr))
     (return false))
 
@@ -343,11 +363,14 @@
 
 (go/method svc "the system call (SVC #0), traced when strace is set\n" [^{:tag (* CPU)} c]
   (if (not strace)
-    (.svcCall c)
+    (do
+      (.svcCall c)
+      (set! (.-SysX0 c) (aget (.-X c) 0)))
     (let [n (aget (.-X c) 8)
           args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))
           (values s _) (emu/SyscallA64 (conv int n))]
       (.svcCall c)
+      (set! (.-SysX0 c) (aget (.-X c) 0))
       (let [r (fmt/Sprintf "%#x" (aget (.-X c) 0))]
         (when (.-Done c)
           (set! r (fmt/Sprintf "(the end: status %d)" (.Status c))))
@@ -377,7 +400,7 @@
 
       (switch (.-Name s)
         (case ["rt_sigaction"]
-          ;; AR19: the dispositions, signals' masks and alternate stacks (thread.go); no signal is delivered to a handler
+          ;; AR19: the dispositions, signals' masks and alternate stacks (thread.go); AR20: delivered (signal.go)
           (aset (.-X c) 0 (conv uint64 (.sigaction c (aget args 0) (aget args 1) (aget args 2) (aget args 3))))
           (return))
         (case ["rt_sigprocmask"]
@@ -390,8 +413,12 @@
           ;; AR19: a thread (thread.go); a process (fork) stays refused
           (aset (.-X c) 0 (conv uint64 (.clone c (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4))))
           (return))
-        (case ["rt_sigreturn" "clone3" "execve" "rseq" "set_robust_list"]
-          ;; no signal frame to return from (no handler is run), clone3 (callers fall back on clone), exec, rseq, the robust
+        (case ["rt_sigreturn"]
+          ;; AR20: the signal frame restored (signal.go); x0 is the frame's
+          (.sigreturn c)
+          (return))
+        (case ["clone3" "execve" "rseq" "set_robust_list"]
+          ;; clone3 (callers fall back on clone), exec, rseq, the robust
           ;; futex list
           (aset (.-X c) 0 enosys)
           (return))

@@ -3,9 +3,8 @@
 ;; stacks (sigaltstack). A thread is a CPU of its own over the process's address space and kernel, run on a goroutine of its
 ;; own by crt's scheduler (go/arbace/crt's sched.go, ci's since CS11 (a)): one thread runs at a time, the baton passing where
 ;; a thread waits (futex, nanosleep, sched_yield, its exit) and every quantum of instructions, in a fixed round-robin order.
-;; No signal is delivered to a handler: a kill, tkill or tgkill of a signal whose disposition is a handler, or which is
-;; blocked, is dropped (Go's runtime sends itself SIGURG, its asynchronous preemption's request, which it does not need
-;; answered); one whose disposition is the default ends the process as before.
+;; AR20 (queue 291): a kill, tkill or tgkill makes the signal pending in its target thread, delivered to its handler there
+;; (signal.go); an ignored one not blocked is dropped, SIGKILL and a kill of a default-fatal one not blocked end the process.
 (in-ns 'go.arbace.a64i) (go/file "thread.go" :imports [
     [fmt "fmt"]
     [os "os"]
@@ -17,6 +16,8 @@
 (go/type proc "proc is the process's part the threads share: the signals' dispositions (each Linux's struct sigaction on arm64:\nhandler, flags, restorer, mask) and the scheduler's tasks by thread id.\n" (struct
     ^{:tag (array 65 (array 4 uint64))} actions
     ^{:tag (map int (* crt/Task))} tasks
+    ^{:tag (map int (* CPU)) :doc "the threads' CPUs by thread id (AR20: a signal's target)\n"} cpus
+    ^{:tag uint64 :doc "the sigreturn trampoline's page, once mapped (AR20)\n"} tramp
     ^{:tag (map int (* pollObj)) :doc "the poller's descriptors (epoll, eventfd), from pollFd\n"} polls
     ^int nextFd))
 
@@ -46,7 +47,7 @@
 
 (go/method p "p is the process's shared part, made at its first use.\n" ^{:tag (* proc)} [^{:tag (* CPU)} c]
   (when (== (.-P c) nil)
-    (set! (.-P c) (addr (lit proc :tasks (lit (map int (* crt/Task)))))))
+    (set! (.-P c) (addr (lit proc :tasks (lit (map int (* crt/Task))) :cpus (lit (map int (* CPU)))))))
 
   (.-P c))
 
@@ -114,11 +115,14 @@
     0))
 
 
-(go/method sigaltstack "sigaltstack is sigaltstack(ss, old_ss) for the thread (stack_t: ss_sp, ss_flags, ss_size): never on it, as no handler\nruns.\n" ^int64 [^{:tag (* CPU)} c ^uint64 ss ^uint64 old]
+(go/method sigaltstack "sigaltstack is sigaltstack(ss, old_ss) for the thread (stack_t: ss_sp, ss_flags, ss_size): SS_ONSTACK reported while\nthe thread runs on it, and no change made then (EPERM), as Linux (AR20).\n" ^int64 [^{:tag (* CPU)} c ^uint64 ss ^uint64 old]
   (when (!= old 0)
     (let [^uint64 flags 0]
-      (when (== (.-AltSize c) 0)
-        (set! flags ssDisable))
+      (cond
+        (== (.-AltSize c) 0)
+        (set! flags ssDisable)
+        (.onAltStack c (aget (.-X c) 31))
+        (set! flags ssOnstack))
 
       (when (not (and (.Write (.-AS c) old 8 (.-AltSP c)) (.Write (.-AS c) (+ old 8) 8 flags) (.Write (.-AS c) (+ old 16) 8 (.-AltSize c))))
         (return (- eFAULT)))))
@@ -133,13 +137,16 @@
       (when (!= (bit-and-not flags ssDisable) 0)
         (return (- eINVAL)))
 
+      (when (and (.onAltStack c (aget (.-X c) 31)) (!= (.-AltSize c) 0))
+        (return (- ePERM)))
+
       (if (!= flags 0)
-        (set! (values (.-AltSP c) (.-AltSize c)) (values 0 0))
+        (set! (values (.-AltSP c) (.-AltSize c) (.-AltFlags c)) (values 0 0 ssDisable))
         (do
           (when (< size minSigStk)
             (return (- eNOMEM)))
 
-          (set! (values (.-AltSP c) (.-AltSize c)) (values sp size))))))
+          (set! (values (.-AltSP c) (.-AltSize c) (.-AltFlags c)) (values sp size 0))))))
 
   0)
 
@@ -164,18 +171,41 @@
     (when (== sig 0)
       (return 0))
 
-    (let [^uint64 h 0]
-      (when (!= (.-P c) nil)
-        (set! h (aget (aget (.-actions (.-P c)) sig) 0)))
-
-      (when (and (!= sig sigKILL) ^:go/paren (or (!= h 0) (!= (bit-and (.-SigMask c) ^uint64 (<< 1 (- sig 1))) 0) (== sig 17) (== sig 18) (== sig 23) (== sig 28) (and (>= sig 19) (<= sig 22))))
-        (when strace
-          (fmt/Fprintf os/Stderr "a64i: [%d] signal %d dropped (disposition %#x)\n" (.tid c) sig h))
-
+    (let [h (aget (.handler c sig) 0)
+          blocked (fn [^{:tag (* CPU)} x] :results [bool] (return (!= (bit-and (.-SigMask x) (sigBit sig)) 0)))]
+      (when (or (== sig sigKILL) ^:go/paren (and (== h 0) (not (defaultIgnored sig)) (not (blocked c)) (== target (.-Pid c)) (== name "kill")))
+        (.raise c sig (fmt/Sprintf ":signal %d" sig))
         (return 0))
 
-      (.raise c sig (fmt/Sprintf ":signal %d" sig))
-      0)))
+      (when (and (not (blocked c)) ^:go/paren (or (== h 1) (and (== h 0) (defaultIgnored sig))))
+        (when strace
+          (fmt/Fprintf os/Stderr "a64i: [%d] signal %d ignored (disposition %#x)\n" (.tid c) sig h))
+
+        (set! (.-Ignored c) (append (.-Ignored c) sig))
+        (return 0))
+
+      ;; AR20: made pending in its target thread (tkill, tgkill: the thread named; kill: the calling thread unless it blocks the
+      ;; signal and another does not), delivered there at an instruction's end (signal.go)
+      (let [x c
+            ^int32 code -6]
+        (if (== name "kill")
+          (do
+            (set! code 0)
+            (when (and (blocked c) (!= (.-P c) nil))
+              (let [^int best 0]
+                (range [tid o (.-cpus (.-P c))]
+                  (when (and (not (blocked o)) (not (.-Done o)) ^:go/paren (or (== best 0) (< tid best)))
+                    (set! (values best x) (values tid o)))))))
+          (when (and (!= target (.tid c)) (!= (.-P c) nil))
+            (when [o (aget (.-cpus (.-P c)) target)] (!= o nil)
+              (set! x o))))
+
+        (set! (.-Pending x) bit-or (sigBit sig))
+        (aset (.-pendInfo x) sig (lit sigInfo code (conv int32 (.-Pid c)) (conv uint32 (os/Getuid))))
+        (when strace
+          (fmt/Fprintf os/Stderr "a64i: [%d] signal %d pending in thread %d\n" (.tid c) sig (.tid x)))
+
+        0))))
 
 
 (go/method clone "clone is clone(flags, stack, parent_tid, tls, child_tid) of a thread (CLONE_VM, CLONE_THREAD and CLONE_SIGHAND): a copy of\nthe calling CPU, x0 0, its stack and (CLONE_SETTLS) TPIDR_EL0 the given ones, made runnable last; CLONE_PARENT_SETTID and\nCLONE_CHILD_SETTID store its id, CLONE_CHILD_CLEARTID's word is cleared and woken at its end. The new thread's id, or\n-ENOSYS for a process (fork, vfork: one process).\n" ^int64 [^{:tag (* CPU)} c ^uint64 flags ^uint64 stack ^uint64 ptid ^uint64 tls ^uint64 ctid]
@@ -186,12 +216,15 @@
         p (.p c)]
     (when (== (.-Sched sys) nil)
       (let [m (.-Main (.Threads sys))]
-        (aset (.-tasks p) (.-Tid m) m)))
+        (aset (.-tasks p) (.-Tid m) m)
+        (aset (.-cpus p) (.tid c) c)))
 
     (let [task (.NewTask sys)
           n (new CPU)]
       (set! (deref n) (deref c))
       (set! (values (.-Tid n) (.-task n) (.-Last n) (.-Steps n) (.-SysHook n) (.-AltSP n) (.-AltSize n)) (values (.-Tid task) task nil 0 nil 0 0))
+      ;; AR20: a new thread's alternate stack is disabled, nothing pending (Linux's sas_ss_reset)
+      (set! (values (.-AltFlags n) (.-Pending n) (.-Delivered n)) (values ssDisable 0 nil))
       (aset (.-X n) 0 0)
       (when (!= stack 0)
         (aset (.-X n) 31 stack))
@@ -214,6 +247,7 @@
       (set! (.-threaded c) true)
       (set! (.-threaded n) true)
       (aset (.-tasks p) (.-Tid task) task)
+      (aset (.-cpus p) (.-Tid task) n)
       (.Ready sys task)
       (go (.thread n))
       (conv int64 (.-Tid task)))))
@@ -233,6 +267,7 @@
     (.Start sys (.-task c))
     (.run c)
     (delete (.-tasks (.-P c)) (.-Tid c))
+    (delete (.-cpus (.-P c)) (.-Tid c))
     (cond
       (.-exited c)
       (.ExitTask sys (.-Code c))
