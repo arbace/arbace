@@ -2499,3 +2499,20 @@ bin/llvmi check --record && bin/llvmi check --aot --record && bin/reap --record 
 
 The branch changes `arbace/llvm/`, `arbace/cpp/`, `bin/llvmi`, `bin/cppi` and `test/gate/steps.edn` (llvmi's two steps), and doc/: crop paths
 and the steps' table (see the report's key check).
+
+### Checked (2026-11-14, after the disk came back to 82%; one at a time, peaks by busybox `time -v`)
+
+| Run | Result |
+|---|---|
+| llvm-essential's commands: `bin/repr-llvm check roundtrip-llvmtest`, `verify-llvmtest`, `verify-probes`, `text-llvmtest` (`--essential`) | 43, 43, 4, 43 pass, 0 failing, their controls failing as they must; 0.17-0.28 GB |
+| `bin/llvmi check --essential` | 10 of 10 pass (none unwinds: the musl-only route, unchanged), 4 controls judged, 0 pass; 0.38 GB |
+| `test/repr/llvm/controls-test.bash` | all ok |
+| cpp-print-essential's command | gxx-dg-essential 33 of 33, samples 9 of 9, `_control/bitfields-vs-io` failing as it must; 1.44 GB |
+| `bin/cppi codegen-gen` | 155 of 155 as recorded; 1.17 GB, 9.5 min |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --judge --strict` | exit 0 (no record changed) |
+
+## Decided (the main session for the user's overnight rule, 2026-11-14): LLS51 (b), LLS52 (a), LLS53 (a)
+
+One phase stays (a class where a program shows it); the links above 2.5 GiB run in the night lanes only when no gate runs and the main
+session schedules them (the night's commands above); llvmi's full steps keep needing cpp-runtime.

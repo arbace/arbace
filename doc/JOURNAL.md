@@ -5387,3 +5387,10 @@ doc/llvm/LLVM-CROP-SURVEY.md, "As built: llvm-eh".
   leaves it out (by hand). Stopped by the disk at 86% (not this worktree's: 0.5 GB): the C++ probes, llvmi's checks with the 13
   `:personality` modules and their records are the night's commands in the survey. gate_key unchanged (314c8e5b...), the crops' key test
   passes. Proposed LLS51 (the search phase), LLS52 (the link's memory), LLS53 (llvmi-check needing cpp-runtime).
+
+## 2026-11-14: llvm-eh's light proofs, and LLS51 (b), LLS52 (a), LLS53 (a)
+
+After the disk came back to 82%: llvm-essential's commands (43, 43, 4, 43 pass; llvmi's 10 of 10, controls failing as they must),
+controls-test, cpp-print-essential's command (33 and 9 of 9), `bin/cppi codegen-gen` (155 of 155), `bin/reap` (0 problems) and
+`bin/crops-score --judge --strict` (0), each under 1.5 GB. Decided by the main session for the user's overnight rule: LLS51 (b), LLS52 (a)
+(the >2.5 GiB runs scheduled by the main session when no gate runs), LLS53 (a).

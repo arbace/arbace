@@ -51,7 +51,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 | Scheme | 98.4 (99.95); 97.4 before `scheme-aot1` | 100 | 100 | |
 | Haskell | 96.3 (98.4) | 100 | 78.9 | independence |
 | Rust | 75.0 (75.0) | 95.8 | 80.0 | all three |
-| LLVM IR | 97.6 (98.5) | 100 | 97.1 | llvm-ind2 (LLS47 (a), LLS50): judge 0.8541 (52 split-file sections by their parent's RUN lines), independence 97.08; left as decided: the probes (LLS48), llvmi's 177 (LLS49); llvm-eh (2026-11-13): llvmi runs modules that unwind with C++'s lowered runtime (16 of cpp-s12's 24 unwinding programs pass, 3 in cppi's classes, 5 links above 2.5 GiB: f8, library.cpp; the 13 `:personality` modules' check and records the night's), LLS51-LLS53 to decide |
+| LLVM IR | 97.6 (98.5) | 100 | 97.1 | llvm-ind2 (LLS47 (a), LLS50): judge 0.8541 (52 split-file sections by their parent's RUN lines), independence 97.08; left as decided: the probes (LLS48), llvmi's 177 (LLS49); llvm-eh (2026-11-13): llvmi runs modules that unwind with C++'s lowered runtime (16 of cpp-s12's 24 unwinding programs pass, 3 in cppi's classes, 5 links above 2.5 GiB: f8, library.cpp; the 13 `:personality` modules' check and records the night's), LLS51 (b), LLS52 (a), LLS53 (a) decided; the light proofs pass |
 | Python | 0 | 83.3 | 20.0 | all three |
 
 Six crops are above 90 on all three. What the others still need:
