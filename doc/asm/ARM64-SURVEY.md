@@ -2369,3 +2369,103 @@ Numbering from ARS84. Each with options, the recommended named; none taken.
 - **ARS86 the Go programs in the gate.** (a) `bin/a64i go-check` as a step of the arm64 crop (test/gate/crops/asm.edn, beside
   a64i-check: TamaGo's go is a pinned input already, about 10 s here); (b) by hand only. *Recommended: (a)*: the four programs run in
   seconds and are the only check that a64i carries a real runtime end to end.
+
+## As built: AR20 (2026-11-14; branch `291-asm-arm64-ar20`, from `288-asm-arm64-ar19` `9bbead6ff`; queue task 291, the Mac VM)
+
+On the light lane of the Mac VM (the M2 Max, 4 of its 8 cores, load about 21), stage 0 and TamaGo's go. The user's answers (taken
+overnight by the user's rule, 2026-11-14): ARS84 (a), ARS85 (a), ARS86 (a). The semantics read from Linux's arm64 user ABI (the signal
+frame: struct rt_sigframe, siginfo_t, ucontext_t, sigcontext with its records `fpsimd_context`, `esr_context` and the terminator, the
+frame record; rt_sigaction's flags; sigaltstack) and the Arm ARM (DDI 0487: ESR_EL1's data and instruction abort syndromes, the SP and
+PC alignment faults, PSTATE.BTYPE, the ID registers' fields); no code copied. Every value below was read on the M2 (queue 291's
+probes `sigframe.c`, `sig2.c`, `sig3.c`, `idregs.c`: the frame word by word on an alternate stack filled with 0xaa first).
+
+- **ARS84 (a): signals delivered to their handlers** (go/arbace/a64i/signal.ae).
+  - The frame, as the M2's Linux builds it: 4,688 bytes (struct rt_sigframe) below a 16-byte frame record (x29, x30) at the
+    interrupted sp less 16 rounded down to 16, or at the alternate stack's top (SA_ONSTACK, the alternate stack set and sp not on
+    it); siginfo's 128 bytes only with SA_SIGINFO (zeroed, then signo, si_code, si_addr, or si_pid and si_uid); uc_flags and uc_link
+    0, uc_stack (ss_sp, ss_flags as sigaltstack was given them: 0 for a process that never set one, SS_DISABLE for a new thread or
+    after a disable; the M2 writes 4 bytes there), uc_sigmask the interrupted mask, fault_address, x0-x30, sp, pc, pstate (NZCV, DIT,
+    SSBS, and PSTATE.BTYPE when the target of a br or blr faults at its fetch: 01 or 10, the M2 having FEAT_BTI), the FP/SIMD record
+    (528 bytes: FPSR, FPCR, V0-V31), the ESR record (16 bytes) for a data or instruction abort and an SP or PC alignment fault (not
+    for SIGILL, SIGTRAP or a signal sent), the terminator's 8 bytes. Nothing else of the frame is written (the padding keeps the
+    stack's bytes).
+  - The faults: SIGSEGV (SEGV_MAPERR for an address no page maps, SEGV_ACCERR for a mapped one; si_addr and fault_address the
+    address; the ESR 0x92000000 with WnR for a store, a store pair, an atomic's store, dc zva, and CM and WnR for the cache
+    maintenance, the fault status a translation fault at the level the walk stops (0-3, by the 512 GB, 1 GB and 2 MB regions mapped:
+    `emu.AS.TableLevel`) or a level-3 permission fault; the fetch's 0x82000000), SIGBUS (an LSE2 alignment fault 0x92000021,
+    fault_address the address; SP alignment 0x9a000000 with si_addr sp, PC alignment 0x8a000000 with si_addr pc, fault_address 0),
+    SIGILL (ILL_ILLOPC, si_addr pc), SIGTRAP (brk: TRAP_BRKPT, si_addr pc); each at the faulting instruction's pc, the instruction
+    without effect, when the thread does not block the signal and its disposition is a handler; else the process's end as before
+    (a blocked or ignored synchronous fault is fatal, as Linux's force_sig_fault).
+  - Signals sent: kill, tkill and tgkill make the signal pending in their target thread (tkill, tgkill: the thread named; kill:
+    the caller unless it blocks it and another thread does not), delivered at the end of an instruction where it is pending and not
+    blocked (a thread's own: at the system call's return, x0 its result), the synchronous ones first, then the lowest, all pending at
+    once as Linux stacks them; SI_TKILL or SI_USER with the sender's pid and uid; an ignored one (SIG_IGN, or by default SIGCHLD,
+    SIGCONT, SIGURG, SIGWINCH and the stop signals) dropped unless blocked; SIGKILL and a kill of a default-fatal one the end.
+  - The handler starts with x0 the signal, x1 and x2 siginfo and the ucontext (with SA_SIGINFO; else the interrupted values), x29
+    the frame record, sp the frame, x30 the restorer (SA_RESTORER) or a64i's trampoline page (mov x8, #139; svc #0, mapped at its
+    first use: Linux's is the vdso's, which a64i has none of), the mask with sa_mask and the signal (unless SA_NODEFER) added,
+    SA_RESETHAND's disposition back to SIG_DFL, the exclusive monitor cleared. rt_sigreturn restores x0-x30, sp, pc, NZCV, DIT, SSBS,
+    the FP/SIMD record and the mask, and the alternate stack from uc_stack when sp is not on it (Linux's restore_altstack); a frame
+    Linux refuses (sp not 16-aligned, no FP/SIMD record, an unknown record or size) ends the process with SIGSEGV. sigaltstack
+    reports SS_ONSTACK while the thread runs on it and refuses a change then (EPERM).
+  - Not modelled: a pending signal interrupting a blocking system call (a64i's futex, nanosleep and epoll waits end first: a delay
+    Linux allows; ARS87), the real-time signals' queue (one pending each), SVE's, SME's and the extra context's records, TBI.
+  - The lockstep: a delivery is the native's signal-delivery stop at the same pc, the native resumed with the signal (the sys mode)
+    or stepped with it (the step mode: its next stop the handler's first instruction; after a system call, past the step's own
+    SIGTRAP stop at its return first); the frame is compared with the rest of memory (the step mode's stores, the sys mode's
+    writable pages). The world's: the ESR record's fault status (bits 5-0) when both are a translation or permission fault (the
+    kernel makes its tables lazily, and a page read before faults as a permission fault where an untouched one is a translation
+    fault: the probes saw 0x46, 0x47 and 0x4f for one store into a read-only page); in the step mode PSTATE.SS in the frame's pstate
+    and SIGTRAP never blocked (each step's trap is a forced SIGTRAP, which unblocks it in the native); a signal a64i ignored is the
+    native's stop too (a ptraced thread reports every signal): resumed with it in the sys mode, the step mode left for the sys
+    mode until the next system call.
+  - Hand-written: `signal-fault.s` (a load from 0, a store into .rodata, udf, brk and an unaligned ldxr, each to a handler on an
+    alternate stack, which prints the signal, si_code, si_addr, fault_address, the ESR, the frame's place, uc_stack's flags, the
+    masks and pstate, edits the frame's pc and x22; then the load with SIGSEGV blocked: 139) and `signal-kill.s` (tgkill and kill to
+    a SA_SIGINFO handler on the thread's stack; the signal sent again in its handler, delivered after rt_sigreturn; SIGUSR2 blocked,
+    held, delivered at rt_sigprocmask's return to a handler without SA_SIGINFO; SIGURG ignored; SA_RESETHAND's default end, 138), in
+    the essential subset.
+  - **Go programs** (`bin/a64i go-check`): `nilderef` (a nil pointer's load and store, a nil func's call, each recovered as Go's
+    runtime error, in the main goroutine, in four others and a hundred times in a loop), `preempt` (one P, goroutines spinning in a
+    loop with no call, so main's timer waits for sysmon's SIGURG and the handler's asyncPreempt; with GODEBUG=asyncpreemptoff=1 it
+    never ends, on a64i as on the M2), `ossignal` (os/signal's Notify of SIGUSR1, SIGUSR2 and SIGTERM sent by kill, tgkill and
+    Process.Signal, then Stop, Ignore and Reset) and `selectpanic` (select over a fan-in, a quit channel, a default and a timeout, a
+    goroutine's panic recovered, the runtime's index and division errors recovered): 8 of 8 programs to their end with the M2's
+    output, its controls go-1 and go-2 failing as they must.
+- **ARS85 (a): the ID registers Linux emulates for EL0** (`a64i.IDReg`): MRS of op0 3, op1 0, CRn 0 with CRm 0 (MIDR_EL1 0x610f0000,
+  MPIDR_EL1 0x80000000, REVIDR_EL1 0; the other five UNDEFINED, SIGILL) and CRm 2-7 (48 registers, the unallocated ones 0): the M2's
+  values under Linux 7.3 with the fields of what a64i does not implement made 0 (ID_AA64ISAR1_EL1's API, GPI, BF16 and I8MM:
+  0x0010101110211402 -> 0x0000001100211002; ID_AA64PFR1_EL1's BT: 1 -> 0); ID_AA64PFR0_EL1 0x0001000000110011, ID_AA64DFR0_EL1 6,
+  ID_AA64ISAR0_EL1 0x0021100110212120, ID_AA64MMFR0_EL1 0x00000111ff000000, ID_AA64MMFR2_EL1 0x0000000100000000 as the M2's. AT_HWCAP
+  claims CPUID (0x2fb3fffb). The lockstep's step mode compares the fields a64i shows and takes the others from the native
+  (`IDHidden`). `sys-idregs.s`: all 64 encodings of CRm 0-7 read (the UNDEFINED ones by `.inst`, to a SIGILL handler), in the
+  essential subset. The system space's sweep against the M2: 56 of 101,376 words differed at AR19, **5** now (FEAT_FPAC's
+  autib1716, autiaz, autiasp, autibz, autibsp: PAuth stays unclaimed by design, ARS81).
+- **ARS86 (a): `bin/a64i go-check` in the gate**: the step `a64i-go` (test/gate/crops/asm.edn and steps.edn, spliced by hand), essential
+  in the chain asm-arm64-essential after a64i-essential, :mem-gib 1 (19.5 s and 0.26 GiB on the VM at load 21, the Go cache warm), its
+  negative controls in `test/asm/controls-a64i-go.txt` (go-1, go-2: a program's run judged by another's want.txt); `gate.crops check`
+  0 problems.
+
+| check | before | after |
+|---|---|---|
+| `bin/a64i check` eval, AOT, forms; cpu, sys, step, loader | 119 / 119 each | **122 / 122 each** (signal-fault, signal-kill, sys-idregs) |
+| coverage (`test/asm/a64i-coverage-arm64.txt`) | 2,958 of 2,958 | 2,958 of 2,958 |
+| controls (`test/asm/controls-a64i.txt`) | 137 | **142** (verdict-34, verdict-35, cpu-3, sys-3, step-20); table check's 1; go-check's **2** |
+| the system space's sweep against the M2 | 56 of 101,376 differ | **5** (the FPAC hints) |
+| Go programs on a64i to their end (`bin/a64i go-check`) | 4 of 4 (a recovered nil dereference: SIGSEGV, 139) | **8 of 8** |
+| `--essential` | 92 programs | **95** |
+
+### Proposed (AR20)
+
+Numbering from ARS87. Each with options, the recommended named; none taken.
+
+- **ARS87 a signal interrupting a blocking system call.** (a) a pending signal not blocked ends a64i's futex, nanosleep, epoll_pwait
+  and read waits as Linux does (EINTR, or the call restarted under SA_RESTART: x0 and pc put back), checked against the M2 by a
+  C program whose handler runs while a thread sleeps; (b) as now: the wait ends first, the signal delivered after (a delay Linux
+  allows, no program seen to need more). *Recommended: (b)*, until a program needs it: Go's runtime handles both, and the one place
+  it matters, a thread woken from a long futex sleep by a signal, has not been met.
+- **ARS88 the next real Go programs.** (a) a Go tool built for linux/arm64 from GOROOT (gofmt over a file, then go vet's analyzers
+  over a package) as a64i's go-check program, its output this M2's; (b) more small programs as AR20's. *Recommended: (a)*: a real
+  tool is the strongest end-to-end check of the runtime and std a64i now runs (signals, threads, the poller), and gofmt needs no
+  network or exec.
