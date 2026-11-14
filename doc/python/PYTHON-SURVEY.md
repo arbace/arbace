@@ -6584,3 +6584,103 @@ test_return_from_inline_mode_to_REPL and PdbTestReadline's nine.
   test_expression_in_interactive_after_buffer_resize (`:child-is-pyi`), test_cmd_line's test_displayhook_unencodable
   (`:pyi-command-line`) and test_cmd_line_script's test_stdin_loader (`:pyi-main-module`) still fail, in their classes;
   `bin/pyi repl --check` 2 of 2.
+
+## As built: 286, the largest deferred classes of the eval record: method_descriptor, cast memoryviews, reconfigure, int (2026-11-14, the Mac VM, queue 286)
+
+The eval record of Lib/test on the VM is night 12's partial run (181 modules, 16,042 methods; 278's judged rows), its
+deferred classes counted with the base's (5c6371975) divergences: `:runner-limits` 1,812 (1,753 of them whole modules
+past night 12's module cap: 275's per-method timeout and 284's compiled cell judge them; no pyi fix), `:data-model` 448,
+`:testcapi` 53, `:finalization-collect` 24, `:remote-debugging` and `:memoryview-formats` 22 each, `:multiprocessing` 14,
+`:signal-timing` 12, `:finalization-goi` 10, ..., `:int-core` 6, `:stdio-text` 5. Closed by fixes in pyi, largest first:
+
+- **method_descriptor** (`go/arbace/py/func.ae`, `descr.ae`, `registry.ae`): `:data-model`'s 420 rows of one cause,
+  `'builtin_function_or_method' object has no attribute '__objclass__'`: `type(list.append)` was
+  builtin_function_or_method, so `multiprocessing.reduction`'s `register(type(list.append), _reduce_method_descriptor)`
+  took every built-in function ForkingPickler pickled (the spawn and forkserver managers' setUpClass, the process pools).
+  A `*Builtin` with an Owner and no Self is now of type `method_descriptor` (`MethodDescrType`, hidden from builtins):
+  BuiltinType's call (method_vectorcall's instance check), `<method 'join' of 'str' objects>`, `__get__` (descr_check),
+  `__reduce__` (descr_reduce), `__name__`, `__qualname__`, `__objclass__` (member), `__doc__`; builtin_function_or_method
+  keeps the functions and the bound methods and loses `__objclass__`. inspect's predicates, `classify_class_attrs`
+  ('method' for `int.to_bytes`), pydoc's getset_descriptor and test_descr's test_qualname follow.
+- **cast memoryviews by item** (`memoryview.ae`): `:memoryview-formats`' 22 rows (`assignment to format 'i'`:
+  multiprocessing's Barrier over `BufferWrapper.create_memoryview().cast('i')`). An unshaped view of a format other than
+  'B' indexed its bytes and refused assignment; now multiGet (unpack_single; a slice keeps the format, a step its stride,
+  `data()` gathers a strided slice item by item), multiSet and mvPack (pack_single: the integer formats by `__index__`
+  with type_error_int/value_error_int, f/d/e by PyFloat_AsDouble, '?' by truth, 'c' one byte; a slice from a view of the
+  same structure), and shaped 1-D and 0-dim views assign wider formats too.
+- **`TextIOWrapper.reconfigure`** for the standard streams (`sys.ae`, `builtins_sys_info.ae`): `:stdio-text`'s 5 rows
+  (`python -m inspect`): encoding, errors (strict with an encoding alone), newline (checked), line_buffering, write_through;
+  each stream's encoding and errors its own. The class is retired: its one row left (test_details_undecodable_path) is
+  `:pyi-command-line`'s, pyi reads no PYTHONPATH.
+- **int** (`format.ae`, `int.ae`, `numbers.ae`): `:int-core`'s rows: an int past 64 bits formatted (its big value's
+  digits, the decimal ones under the int max str digits limit; the float types by PyLong_AsDouble; 'z' refused as
+  format_long_internal does); int(str) maps Unicode decimal digits and spaces to ASCII first
+  (_PyUnicode_TransformDecimalAndSpaceToASCII; an ASCII text told by `utf8.RuneCountInString`, as a loop under goi made
+  test_int's denial-of-service timing fail); int() of a str subclass, a bytearray or a buffer, and with a base only of a
+  str, bytes or bytearray (and their subclasses); a bytes text's error names it as bytes; int's real, imag, numerator,
+  denominator and float's real, imag are getsets (they were a GetAttr slot that shadowed an int subclass's numerator).
+
+Measured (`bin/pyi lib-test-all --fresh`, each test's own verdict, base 5c6371975 -> head, pass/classed/failing):
+test_inspect 291/54/18 -> 297/54/12 (the 12 the base's own); test.test_concurrent_futures.test_as_completed 8/17/0 ->
+12/14/0 (the spawn pool runs; the forkserver's rows `:multiprocessing`, its EOF now a pattern); test_memoryview 99/65/7
+-> 105/59/7; test_fractions 45/5/0 -> 50/0/0; test_descr 144/19/0 -> 145/18/0; test_int 31/21/0 -> 35/17/0; test_long
+35/9/4 -> 36/8/4; test_decimal 380/204/0 -> 381/203/0; test_pydoc 73/9/39 -> 74/9/38; test_buffer, test_types,
+test_copy, test_float, test_numeric_tower, test_abstract_numbers unchanged. The forkserver test_manager's setUpClass now
+dies on the forkserver's os.fork (`:multiprocessing`); the spawn test_manager's setUpClass passes and its tests run
+(on the VM, pinned to 4 cores, the first two passed the 300 s test cap: the main host's run judges them). Class by
+class on night 12's 181 modules: `:data-model` 448 -> 25, `:memoryview-formats` 22 -> 0, `:int-core` 6 -> 0,
+`:stdio-text` 5 -> retired (its one row left, test_details_undecodable_path, `:pyi-command-line`: pyi reads no
+PYTHONPATH), `:finalization-collect` 24 -> 25; `:runner-limits` (1,812), `:testcapi` (53), `:remote-debugging` (22)
+and the rest unchanged. One regression found on the way and fixed: the Unicode-digit mapping's pass over the text,
+interpreted under goi, made the digits limit's refusal slow (test_int's denial-of-service tests); an ASCII str (its
+flag) is parsed as it is and the error's object made only on an error. Queue 286's report:
+`.tmp/q286/286-python-deferred-classes.md` (the VM).
+
+## As built: 290, the next deferred classes: the built-ins' signatures, method-wrapper, classmethod_descriptor (2026-11-14, the Mac VM, queue 290)
+
+Night 12's partial eval record (181 modules, 16,042 methods), judged with 286's classes: the deferred classes are
+`:runner-limits` 1,812 (whole modules past the night's cap: no pyi fix), `:multiprocessing` 96 (82 of them the
+forkserver test_manager's not-run rows behind its setUpClass, the forkserver's own os.fork), `:testcapi` 53 (the
+`_testinternalcapi` and `_datetime` C API skips, by design since 244-4 (a)), `:data-model` 25, `:finalization-collect` 25,
+`:remote-debugging` 22, `:memoryview-formats` 22 (286's, the record not run since), `:signal-timing` 12,
+`:finalization-goi` 10, `:ssl-finalization` 8, `:pyi-command-line` 6, `:socket-gaps` 4 and smaller. Closed:
+`:data-model`'s 25 rows, and a regression of 286's found by the coordinator:
+
+- **The built-ins' `__text_signature__`** (`go/arbace/py/textsig.ae`, `builtins_textsig_table.ae`): CPython keeps a C
+  callable's signature at the head of its docstring, which pyi's built-ins do not carry; `tools/pyi/textsig_table.py`
+  records the oracle's own (CPython 3.14.10: every type, dict callable, module function and slot wrapper of the built-in
+  and lib-dynload modules but the test modules, 2,519 entries) into `builtins_textsig_table.go`, checked by `bin/pyi
+  runtime tables`. A heap type's comes from its `__doc__` (_PyType_GetTextSignatureFromInternalDoc), a module's
+  function's `__self__` is its module (inspect drops `$module`), a built-in type's `__new__` is bound to its type
+  (`object.__new__.__self__`, `T.__new__` its qualified name). inspect.signature of object and of a class without its own
+  `__init__` or `__new__`, of `str.join`, `len`, classmethod, staticmethod, getfullargspec of `os.stat`, rlcompleter's
+  `f()` and pydoc's descriptions follow.
+- **method-wrapper and classmethod_descriptor** (`descr.ae`): a slot wrapper bound to an instance was a Python bound
+  method, which inspect's `_NonUserDefinedCallables` took for user code; it is a method-wrapper (a `*Method` over a
+  `*slotWrapper`: its call, repr, comparison, `__self__`, `__objclass__`, `__name__`, `__qualname__`, `__reduce__`, no
+  `__func__`). A built-in type's class method (`dict.fromkeys`) is a classmethod_descriptor, no longer an instance of
+  classmethod (classmethod_get's and classmethoddescr_call's checks, repr, `__reduce__`). dict's and list's `__getitem__`,
+  dict's, set's and frozenset's `__contains__` are method descriptors (METH_COEXIST; `keyword.iskeyword` a
+  builtin_function_or_method), bound to the instance itself as the slot wrappers were (a dict subclass's `__missing__`).
+- **The data model's rest**: a dict's or set's subclass keeps the keys of its stores and lookups as they are (Counter's
+  float-subclass keys were stored as floats: test_statistics' TestMode.test_types_conserved), set_contains, discard and
+  remove take a set subclass's instance as a frozenset of its items (PySet_Check), an exact exception's `__dict__`
+  assignment goes through its getset (test_descr's test_set_dict), `__getnewargs_ex__`'s result is checked as
+  _PyObject_GetNewArguments does and an empty keyword dict reduces through `__newobj__` (test_reduce; test_enum's
+  test_subclasses_with_getnewargs_ex).
+- **286's regression**: int's `numerator` and float's `real` became getsets in 286, which `int.__dict__['numerator']`
+  found but `int.__dict__.get('numerator')` did not; enum's `__set_name__` looks for a base's descriptor that way to
+  redirect a shadowing member, so an IntEnum member `numerator` took every member's attribute (test_enum's two
+  test_shadowed_attr). mappingproxy.get answers as its subscript does.
+
+Measured (`bin/pyi lib-test-all --fresh`, each test's own verdict, base 0eec2c528 in a base worktree -> head 3c6ab10ed,
+pass/classed/failing): test.test_inspect.test_inspect 297/66/0 -> 315/48/0; test_pydoc 74/9/38 -> 92/9/20; test_set
+609/21/0 -> 612/18/0; test_descr 145/18/0 -> 147/16/0; test_statistics 393/7/0 -> 394/6/0; test_rlcompleter 9/2/0 ->
+11/0/0; test_enum (`bin/pyi lib-test`) 30 failing -> 27; test_exceptions 80/24/0 -> 89/24/0 (the base's run lost four
+to the VM's load); test_dict, test_collections, test_copy, test_funcattrs, test_keyword, test_types unchanged; 286's
+test_int 35/17/0, test_long 36/8/4, test_fractions 50/0/0 as 286 left them. No row got worse. Classes on night 12's
+rows: `:data-model` 25 -> 0 (21 pass; test_excluding_predicates to `:c-accelerators`, _pydatetime's timedelta.days;
+test_descrdoc to `:pyio`; test_cycle_through_dict and test_remove_subclass to `:finalization-collect`, a cycle through a
+class); the class keeps its other named tests. `:capi-port` takes test_signature_parsing_with_defaults (a C type's
+method keeps no ml_doc), `:set-core` loses three. The record's 21 rows read "in no class" until the main host's run
+replaces night 12's. Queue 290's report: `.tmp/q290/290-python-deferred-classes-2.md` (the VM).
