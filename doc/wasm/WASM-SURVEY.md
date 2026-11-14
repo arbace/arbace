@@ -1107,7 +1107,11 @@ the decoder requires the section for all four instructions, as decode.ml does (b
 naming a data segment without the section is malformed ("data count section required"), its WA5 leniency (the data section's own
 count) removed. Proofs: `bin/repr-wasm wast` over the 293 scripts unchanged (the record holds: 7,820 of 8,274, the root's all; 2,760
 of 2,760 print cases; 4,998 of 5,060 messages), `bin/wai check` unchanged (60,498 of 60,498 root commands, the 5,237 root modules'
-validator rows all agreeing, now with no lenient case); the round trip over every corpus: see "Proofs" below.
+validator rows all agreeing, now with no lenient case); the round trip over every corpus (`bin/repr-wasm roundtrip`: go-wasip1
+and go-js) 20 of 20 modules byte for byte, 1,070 s and 1.56 GB. Its first two runs were killed by the watcher at 2.6 GB on
+`map.wasm`: the encoder's first test of a body's data indices walked every function through `tree-seq`, which cost more than the whole
+round trip (`map.wasm` alone over 2.6 GB in 216 s, against 1.48 GB in 50 s without the test); a walk of the instructions' lists and
+vectors that stops at the first (`uses-data?`) brought it back to 1.48 GB and 55 s.
 
 **WA5b (WAS34 (a)), the directory tests.** `bin/wai go` builds goi's record's 127 directory tests and the four of `$GOROOT/test`'s
 that goi's linux record does not hold (`test/wasm/go-dirs.txt`: `wasmmemsize.go`, `//go:build wasm`, and three that skip) for
@@ -1165,7 +1169,8 @@ directory tests added to the essential list (`wasmmemsize.go` among them).
 | the Go run corpus (eval) | 1,057 programs: 1,001 pass, 53 :na, 3 :budget | **1,188 programs: 1,124 pass**, 59 :na, 2 :na (actions goi skips), 3 :budget |
 | of them directory tests | none | **131: 123 pass** (122 of goi's 127, `wasmmemsize.go`), 6 :na (build constraints), 2 :na (`-goexperiment`) |
 | the Go programs at AOT (`go-aot.txt`) | none | **18 of 18 pass**, the 3 over eval's budget among them (`finprofiled.go`, `fixedbugs/issue78081.go`, `fixedbugs/issue79186.go`) |
-| REAP AOT cell | no check yet | see "Proofs" |
+| REAP AOT cell | no check yet | **60,907 / 0 / 1,046** (the testsuite's 60,889 and the 18 Go programs; eval's cell 62,013 / 0 / 1,046) |
+| crops-score, WebAssembly | completeness 0.7322, maturity 0.8750, independence 0.8000 | **0.9779, 0.9167, 1.0000** |
 
 **Measured** (one run at a time, under the 2.5 GiB watcher, while night 13's gate ran on next): `bin/wai check` 386-417 s, 0.69-0.71
 GB; `bin/wai check --aot` 439-540 s, 0.62-1.0 GB (the planner as eval's, then 13 translations and builds of about 10 s each, the
