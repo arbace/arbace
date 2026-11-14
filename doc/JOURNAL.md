@@ -5690,3 +5690,11 @@ level 2 may run out of time under load. Left for the user: goi's typeparam/chans
 finalizer timing) and oi's lazy7 near its 120 s limit. The main session's night-13 disk guard trimmed Go's build cache at 45 minutes and
 deleted entries live builds had counted as hits (java-judge's two shard link failures, cause (a)); the guard keeps 90 minutes since,
 as bin/lib/gocache.bash does.
+
+## 2026-11-14: repr-asm's round trip on its own rows file (gate 13b's read-essentials)
+
+Gate 13b (next 362c7ad34, `--full --concurrent`) failed asm-amd64-read-essential (7 problems: "not recorded: a64-libgcc/...") and
+asm-arm64-read-essential (221: "not recorded: musl/src-...-x86_64-..."): both lanes' `bin/repr-asm roundtrip` wrote one fixed
+`.tmp/repr-asm/rt/rows.edn`, so each judge read the other architecture's rows. asm-fix (e815d223b, 075af761f) had moved the lists and
+the file lists onto a run's own scratch but not the rows. Now `$asm_tmp/rows.edn`. Proof: the two steps' commands run at once in a
+worktree: both `ok` (amd64 musl 32 of 32; arm64's corpora as recorded). The main session, under the user's overnight rule.
