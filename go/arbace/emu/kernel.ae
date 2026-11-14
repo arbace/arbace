@@ -105,10 +105,56 @@
     (case [25] ; mremap
       (return (- eNOMEM) nil))
     (case [56 57 58 59 435] ; clone, fork, vfork, execve, clone3: one thread, no exec (AX5)
-      (return (- eNOSYS) nil)))
+      (return (- eNOSYS) nil))
+    (case [0 1 17 18] ; read, write, pread64, pwrite64: a buffer over adjacent mappings (AR21)
+      (let [oi -1]
+        (when (or (== n 17) (== n 18))
+          (set! oi 3))
+
+        (return (.spanned k n (lit (array 6 uint64) a1 a2 a3 a4 a5 a6) 1 2 oi))))
+    (case [318] ; getrandom(buf, count, flags)
+      (return (.spanned k n (lit (array 6 uint64) a1 a2 a3 a4 a5 a6) 0 1 -1)))
+    (case [217] ; getdents64: its count cut at the buffer's first mapping (fewer entries, as Linux may give)
+      (return (.passthru k n a1 a2 (.within k a2 a3) a4 a5 a6))))
 
   (.passthru k n a1 a2 a3 a4 a5 a6))
 
+
+(go/method within "within is n, or less: the bytes from a that lie in a's mapping (crt's slab), so that crt sees one slab; n when a is\nunmapped (crt's EFAULT then).\n" ^uint64 [^{:tag (* Kernel)} k ^uint64 a ^uint64 n]
+  (let [s (.Slab (.-M (.-AS k)) a)]
+    (when (or (== s nil) (<= n (- (.End s) a)))
+      (return n))
+
+    (- (.End s) a)))
+
+
+(go/method spanned "spanned is a call whose buffer (args[bi], args[ci] bytes) adjacent mappings may hold (AR21, queue 292: Go's heap grows by\nadjacent mmaps, and crt's call sees one slab): read, write, pread64, pwrite64 and getrandom made a mapping's part at a time, the\noffset (args[oi], when oi >= 0) moved on, until a part is short, an error (the bytes done so far, else the error) or the end.\n" [^{:tag (* Kernel)} k ^uint64 n ^{:tag (array 6 uint64)} args ^int bi ^int ci ^int oi] :results [^int64 ret ^{:tag (* Exited)} exit]
+  (let [^int64 total 0
+        rem (aget args ci)]
+    (while true
+      (let [part (.within k (aget args bi) rem)
+            a args]
+        (aset a ci part)
+        (let [(values r e) (.passthru k n (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4) (aget a 5))]
+          (when (!= e nil)
+            (return 0 e))
+
+          (when (< r 0)
+            (when (> total 0)
+              (return total nil))
+
+            (return r nil))
+
+          (set! total + r)
+          (when (or (< (conv uint64 r) part) (== part rem))
+            (return total nil))
+
+          (aset args bi (+ (aget args bi) part))
+          (set! rem - part)
+          (when (>= oi 0)
+            (aset args oi (+ (aget args oi) part))))))
+
+    (return total nil)))
 
 ^{:go/end 124} (go/method passthru [^{:tag (* Kernel)} k ^uint64 n ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6] :results [^int64 ret ^{:tag (* Exited)} exit]
   (defer (^{:go/end 122} (fn []
