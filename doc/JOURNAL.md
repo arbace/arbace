@@ -5798,3 +5798,54 @@ step log in next's .tmp/gate/ (read only), reproduced where a step's judge could
 - No key moves: `bin/arbace-go --gate-key` 66c29674829e..., test/gate/gate-key-crops-test.bash passes. Steps to rerun:
   suite-aot-essential, hsi-check-aot (hsi-check passed in 13c at an unchanged key: skipped), oi-aot.run, oi-suite-aot.suite and ocaml-judges after
   the decision on (b) and (c), and java-judge and java-held after the Java records' triage.
+
+## 2026-11-14: gate 13c's records (the user, 2026-11-14, round 38)
+
+The user decided (round 38): triage Java's 88 unclassed and 4 regressions and record interp and compiled from 13c's saved results; put
+the three slow OCaml AOT programs in aot-slow.edn; re-record the noisy known and slow rows; no rule that ignores the noise. All of it was
+judged on 13c's saved results, read from next's .tmp (the Java levels' out dirs copied into this worktree's .tmp/j13c, the o6 and o7
+tsvs read in place).
+- **OCaml AOT** (67791c84f): aot-slow.edn has lib-digest/md5, misc/hamming and statmemprof/lists_in_minor; their timings are the entry
+  above's (159.4, 152.2, 192.3 s of CPU alone, against 140). In aot-known.edn, weak-ephe-final/ephetest3's known entry also takes the
+  kind "output differs (": its AOT output is now oi's, 737 bytes, and oi-known.edn has that kind. Then `o2j_check.ae record` over 13c's
+  check-aot.tsv and the suite's check.tsv, with the vs-oi fix. check-aot.edn's 9 rows changed; lib-filename/quotecommand was put back
+  to "slow", since it is listed slow and finishing under the limit is no change. In check-suite-aot.edn, testyield changed and its
+  header was kept. Both judgments over the saved results pass (exit 0, the controls fail as they must); `divergences` for both records,
+  0 failing; judges_test's two new cases pass.
+- **Java's classes** (test/java/divergences.edn, each with a dated comment naming the tests and the evidence):
+  - **13 world classes** take the 88 unclassed:
+    - :logging takes jdk.internal.logger's DefaultLoggerFinder (9 tests by the match), t08123 and t05766. For t08123 (ProxyTest), its
+      run's stderr shows the client's HttpURLConnection failing on DefaultLoggerFinder; the proxy's handler then reads null, the NPE in
+      Thread-2.
+    - :mxbeans takes jdk.internal.platform.Metrics (t07849-t07852) and ThreadMXBean's t04806, t04807, t04811.
+    - :text-data takes jdk.internal.icu (t04952).
+    - :util-classes takes System.inheritedChannel and setProperties in the compiled wording (t05202, t05203, t04794).
+    - :system-properties takes t04681 (java.class.version) and t07657 (java.home).
+    - :jrt-dates takes t04927 (a cookie's expires).
+    - :net takes t04967, t04983, t04989, t05200.
+    - :nio takes t05098 (AsynchronousFileChannel.write with a handler).
+    - :reflection takes t05654 and t05713. t05654's main reaches instanceMain by getEnclosingClass and Method.invoke, and there is no
+      "Passed =" line. t05713 asks getDeclaredField("value") of jrt's AtomicInteger.
+    - :invoke takes VarHandle (t07745, t07752).
+    - :security takes signed jars (t05736, t05739, t05741), t07753 and t07793 (javax.crypto, the cause not named yet), and cacerts
+      (t08012, t08242).
+    - :tls takes t08013.
+    - :serialization takes t04402.
+  - **Timeouts**, measured by bin/java-speed's rerun at 600 s of CPU:
+    - :speed takes t03459 (254.6 s), t03897 (174.6 s) and t08163 (222.3 s), all passing; their limits are in timeouts.txt (128, 88,
+      112) and their rows in speed-measured.tsv.
+    - :speed-hang takes t05126, t05165, t07997 and t08138: idle, about 2 s of CPU until the 2400 s wall cap.
+    - :speed-hang-compiled takes t05126, t07997 and t08138: the wall cap at the compiled level.
+  - **Regressions**:
+    - t05567 is serialization: ObjectOutputStream in another thread, matched by :serialization; by design.
+    - t08123 is the logger, as above.
+    - t03897 is speed.
+    - t05749's print diff reproduces alone ("a local's initializer", :print-classes, by design).
+- **Java's records**: `bin/java-check --judge --record --levels interp,compiled,print` over 13c's saved results. Print is in it for
+  t05749 and print's 6 now passing; levels-known.edn was recorded with them. t05359 passes at both levels. `bin/java-check --judge` over
+  the six saved levels then passes (exit 0, every level as recorded), and `bin/java-speed check` passes.
+- test/reap/matrix.edn (`bin/reap --record`; 0 problems after) and test/crops/scores.edn (`bin/crops-score --record`; `--judge
+  --strict` 0 problems) follow the records: Java's eval and AOT completeness rises, and OCaml's AOT cell moves by the three programs.
+- Keys unmoved: `bin/arbace-go --gate-key` 66c29674829e..., test/gate/gate-key-crops-test.bash passes.
+- Steps to rerun: java-judge and java-held; oi-aot.run, oi-suite-aot.suite, ocaml-judges; reap and crops-score; suite-aot-essential;
+  hsi-check-aot.
