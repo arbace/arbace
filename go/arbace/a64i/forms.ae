@@ -571,7 +571,28 @@
       (return (lit Inst :Op OpMRS :Rd (.-n (mustReg (aget ops 0))) :Sys (sysReg (aget ops 1)))))
     (case ["msr"]
       (nargs ops 2)
+      (when (!= (.head (aget ops 1)) "reg")
+        ;; AR19: MSR (immediate) of PSTATE.DIT and PSTATE.SSBS
+        (let [sys (sysReg (aget ops 0))]
+          (when (and (!= sys SysDIT) (!= sys SysSSBS))
+            (ferr "msr immediate %s" (aget ops 0)))
+
+          (return (lit Inst :Op OpMSR :Rm 255 :Imm (bit-and (value (aget ops 1)) 1) :Sys sys))))
+
       (return (lit Inst :Op OpMSR :Rd (.-n (mustReg (aget ops 1))) :Sys (sysReg (aget ops 0)))))
+    (case ["dc" "ic"]
+      ;; AR19: SYS's dc and ic at EL0
+      (nargs ops 2)
+      (let [k (+ m "." (strings/ToLower (.-Atom (aget ops 0))))]
+        (range [crm name sysOpNames]
+          (when (== name k)
+            (return (lit Inst :Op OpSYS :Rd (.-n (mustReg (aget ops 1))) :Sys crm))))
+
+        (ferr "%s operation %s" m (aget ops 0))))
+    (case ["sb"]
+      ;; AR19: FEAT_SB
+      (nargs ops 0)
+      (return (lit Inst :Op OpBARRIER :Sys 0x70)))
     (case ["prfm"]
       (nargs ops 2)
       (let [in (ldst OpPRFM 3 false false (lit regOp :n (prfOp (aget ops 0))) (subslice ops 1) pc)]
@@ -595,10 +616,20 @@
 (go/var barrierOpts (lit (map string uint32) ["sy" 15] ["st" 14] ["ld" 13] ["ish" 11] ["ishst" 10] ["ishld" 9] ["nsh" 7] ["nshst" 6] ["nshld" 5] ["osh" 3] ["oshst" 2] ["oshld" 1]))
 
 (go/var sysRegs (lit (map string uint32) ["nzcv" SysNZCV] ["fpcr" SysFPCR] ["fpsr" SysFPSR] ["tpidr_el0" SysTPIDR] ["tpidrro_el0" SysTPIDRRO]
-    ^{:line 568} ["cntvct_el0" SysCNTVCT] ["cntfrq_el0" SysCNTFRQ] ["dczid_el0" SysDCZID] ["ctr_el0" SysCTR] ["midr_el1" SysMIDR]))
+    ^{:line 568} ["cntvct_el0" SysCNTVCT] ["cntfrq_el0" SysCNTFRQ] ["dczid_el0" SysDCZID] ["ctr_el0" SysCTR]
+    ["cntvctss_el0" SysCNTVCTSS] ["dit" SysDIT] ["ssbs" SysSSBS]))
 
 ^{:go/end 576} (go/func sysReg ^uint32 [^{:tag (* Sx)} o]
   (let [(values v ok) (aget sysRegs (strings/ToLower (.-Atom o)))]
+    (when (and (not ok) (not (.-IsList o)))
+      ;; AR19: a register by its encoding, S<op0>_<op1>_C<n>_C<m>_<op2>, those a64i models (the decoder's MRS and MSR)
+      (let [^{:tag (array 5 int)} f (zero (array 5 int))]
+        (when [(values k err) (fmt/Sscanf (strings/ToLower (.-Atom o)) "s%d_%d_c%d_c%d_%d" (addr (aget f 0)) (addr (aget f 1)) (addr (aget f 2)) (addr (aget f 3)) (addr (aget f 4)))] (and (== err nil) (== k 5))
+          (let [e (conv uint32 (bit-or (<< (aget f 0) 14) (<< (aget f 1) 11) (<< (aget f 2) 7) (<< (aget f 3) 3) (aget f 4)))]
+            (range [_ r sysRegs]
+              (when (== r e)
+                (set! (values v ok) (values e true))))))))
+
     (when (or (not ok) (.-IsList o))
       (ferr "system register %s" o))
 
@@ -833,7 +864,8 @@
               ^{:line 784 :tag bool} pair))
           (lit _ "ldxp" OpLDXR false false true) (lit _ "ldaxp" OpLDXR true false true) (lit _ "stxp" OpSTXR false false true) (lit _ "stlxp" OpSTXR false true true)
           (lit _ "ldxr" OpLDXR false false false) (lit _ "ldaxr" OpLDXR true false false) (lit _ "stxr" OpSTXR false false false) (lit _ "stlxr" OpSTXR false true false)
-          (lit _ "ldapr" OpLDAR true false false) (lit _ "ldar" OpLDAR true false false) (lit _ "stlr" OpSTLR false true false))]
+          (lit _ "ldapr" OpLDAR true false false) (lit _ "ldar" OpLDAR true false false) (lit _ "stlr" OpSTLR false true false)
+          (lit _ "ldlar" OpLDAR true false false) (lit _ "stllr" OpSTLR false true false))]
       (when (or (not (strings/HasPrefix m (.-pre p))) ^:go/paren (and (!= m (.-pre p)) (!= m (+ (.-pre p) "b")) (!= m (+ (.-pre p) "h"))))
         (continue))
 

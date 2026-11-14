@@ -5,6 +5,9 @@
     ^{:line 5} [os "os"]
     ^{:line 6} [strings "strings"]
 
+    [time "time"]
+
+    [crt "arbace/crt"]
     ^{:line 8} [emu "arbace/emu"]])
 
 
@@ -24,6 +27,8 @@
     ^{:line 24 :tag bool} N ^bool Z ^bool C ^bool V
     ^{:line 25 :tag uint64} TPIDR
     ^{:line 26 :tag uint64} FPCR ^uint64 FPSR
+    ^{:tag bool :doc "PSTATE.DIT and PSTATE.SSBS (AR19; SSBS set at the process's start, as the M2's Linux sets it)\n"} DIT ^bool SSBS
+    ^{:tag time/Time :doc "t0 is the counter's origin (CNTVCT_EL0, AR19)\n"} t0
     ^{:line 27 :tag (* emu/AS)} AS
     ^{:line 28 :tag (* emu/Kernel)} K
 
@@ -42,6 +47,13 @@
     ^{:line 42 :tag uint64} FaultAddr
     ^{:line 43 :tag (map string uint64)} Cover
     ^{:line 44 :tag int} Pid
+    ^{:tag int :doc "Tid is the thread's id (AR19: the main thread's is Pid)\n"} Tid
+    ^{:tag (* proc) :doc "P is the process's part its threads share (thread.go, AR19), nil until a signal's disposition or a thread\n"} P
+    ^{:tag uint64 :doc "the thread's signal mask and alternate stack (AR19)\n"} SigMask
+    ^{:tag uint64} AltSP ^uint64 AltSize
+    ^{:tag (* crt/Task) :doc "the thread's task in crt's scheduler, once the process has several threads (AR19)\n"} task
+    ^bool threaded
+    ^bool exited
 
     ^{:line 46 :tag (func [^uint64 n ^{:tag (array 6 uint64)} args] [int64 bool]) :doc "SysHook, when set, answers a system call first (the lockstep's): its result and true, or false to perform it\n"} SysHook
 
@@ -61,7 +73,7 @@
 
 
 ^{:go/end 67} (go/func New "New is a CPU at entry with the stack pointer sp.\n" ^{:tag (* CPU)} [^{:tag (* emu/AS)} as ^{:tag (* emu/Kernel)} k ^uint64 entry ^uint64 sp]
-  (let [c (addr (lit CPU :AS as :K k :PC entry :cache (lit (map uint64 cached))))]
+  (let [c (addr (lit CPU :AS as :K k :PC entry :cache (lit (map uint64 cached)) :SSBS true :t0 (time/Now)))]
     (aset (.-X c) 31 sp)
     ^{:line 66} c))
 
@@ -190,8 +202,12 @@
 
 
 
-^{:go/end 188} (go/method Run "Run executes until the process ends.\n" [^{:tag (* CPU)} c]
-  (while (.Step c)))
+^{:go/end 188} (go/method Run "Run executes until the process ends (AR19: its threads run in turn; another thread's end of the process raised\nwhere the main thread waits is taken here).\n" [^{:tag (* CPU)} c]
+  (defer ((fn []
+      (when [r (recover)] (!= r nil)
+        (.ended c r)))))
+
+  (.run c))
 
 
 
@@ -315,7 +331,30 @@
 
 
 
-^{:go/end 353} (go/method svc "the system call (SVC #0): x8 the number, x0-x5 the arguments, x0 the result\n" [^{:tag (* CPU)} c]
+(go/var ^{:tag bool :doc "strace, from A64I_STRACE (set, not empty), prints each system call to stderr: the thread, its name and arguments, x0 after\n(AR19, queue 288: the Go programs' runs followed)\n"} strace (!= (os/Getenv "A64I_STRACE") ""))
+
+
+(go/method tid "tid is the thread's id: Tid, else (the main thread) Pid\n" ^int [^{:tag (* CPU)} c]
+  (when (!= (.-Tid c) 0)
+    (return (.-Tid c)))
+
+  (.-Pid c))
+
+
+(go/method svc "the system call (SVC #0), traced when strace is set\n" [^{:tag (* CPU)} c]
+  (if (not strace)
+    (.svcCall c)
+    (let [n (aget (.-X c) 8)
+          args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))
+          (values s _) (emu/SyscallA64 (conv int n))]
+      (.svcCall c)
+      (let [r (fmt/Sprintf "%#x" (aget (.-X c) 0))]
+        (when (.-Done c)
+          (set! r (fmt/Sprintf "(the end: status %d)" (.Status c))))
+        (fmt/Fprintf os/Stderr "a64i: [%d] %s(%d) %#x %#x %#x %#x %#x %#x = %s at %#x\n" (.tid c) (.-Name s) n (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5) r (- (.-PC c) 4))))))
+
+
+^{:go/end 353} (go/method svcCall "the system call (SVC #0): x8 the number, x0-x5 the arguments, x0 the result\n" [^{:tag (* CPU)} c]
   (let [n (aget (.-X c) 8)
       ^{:line 312} args (lit (array 6 uint64) (aget (.-X c) 0) (aget (.-X c) 1) (aget (.-X c) 2) (aget (.-X c) 3) (aget (.-X c) 4) (aget (.-X c) 5))]
     (set! (.-LastSys c) n)
@@ -326,30 +365,48 @@
         (return)))
 
 
+    ;; AR19: the poller's calls and descriptors (thread.go)
+    (when [(values r ok) (.poll c n args)] ok
+      (aset (.-X c) 0 (conv uint64 r))
+      (return))
+
     (let [(values s ok) (emu/SyscallA64 (conv int n))]
       (when (not ok)
         (aset (.-X c) 0 enosys)
         (return))
 
       (switch (.-Name s)
-        (case ["rt_sigaction" "rt_sigprocmask" "sigaltstack" "rt_sigreturn" "clone" "clone3" "execve" "futex" "rseq" "set_robust_list"]
-          ;; signal handlers, threads and exec are AR6's (one thread, the default dispositions)
+        (case ["rt_sigaction"]
+          ;; AR19: the dispositions, signals' masks and alternate stacks (thread.go); no signal is delivered to a handler
+          (aset (.-X c) 0 (conv uint64 (.sigaction c (aget args 0) (aget args 1) (aget args 2) (aget args 3))))
+          (return))
+        (case ["rt_sigprocmask"]
+          (aset (.-X c) 0 (conv uint64 (.sigprocmask c (aget args 0) (aget args 1) (aget args 2) (aget args 3))))
+          (return))
+        (case ["sigaltstack"]
+          (aset (.-X c) 0 (conv uint64 (.sigaltstack c (aget args 0) (aget args 1))))
+          (return))
+        (case ["clone"]
+          ;; AR19: a thread (thread.go); a process (fork) stays refused
+          (aset (.-X c) 0 (conv uint64 (.clone c (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4))))
+          (return))
+        (case ["rt_sigreturn" "clone3" "execve" "rseq" "set_robust_list"]
+          ;; no signal frame to return from (no handler is run), clone3 (callers fall back on clone), exec, rseq, the robust
+          ;; futex list
           (aset (.-X c) 0 enosys)
           (return))
+        (case ["exit"]
+          ;; AR19: with several threads, a thread other than the main one ends alone (thread.go's run)
+          (when (.threadExit c (conv int (bit-and (aget args 0) 255)))
+            (return)))
         (case ["kill" "tkill" "tgkill"]
-          (when (or ^:go/paren (and (== (.-Name s) "kill") (== (conv int (aget args 0)) (.-Pid c))) ^:go/paren (and (!= (.-Name s) "kill") (== (conv int (aget args 0)) (.-Pid c))))
-            (let [sig (conv int (aget args 1))]
-              (when (== (.-Name s) "tgkill")
-                (set! sig (conv int (aget args 2))))
-
-              (when (!= sig 0)
-                (.raise c sig (fmt/Sprintf ":signal %d" sig)))
-
-              (aset (.-X c) 0 0)
-              (return))))
-
-        (case ["getpid" "gettid"]
+          (aset (.-X c) 0 (conv uint64 (.kill c (.-Name s) args)))
+          (return))
+        (case ["getpid"]
           (aset (.-X c) 0 (conv uint64 (.-Pid c)))
+          (return))
+        (case ["gettid"]
+          (aset (.-X c) 0 (conv uint64 (.tid c)))
           (return)))
 
       (let [(values r exit) (.SyscallByName (.-K c) s (aget args 0) (aget args 1) (aget args 2) (aget args 3) (aget args 4) (aget args 5))]
@@ -362,3 +419,15 @@
 
 
 (go/const ^{:val 18446744073709551578N :doc "enosys is -ENOSYS as x0 holds it.\n"} enosys (bit-not (conv uint64 37)))
+
+
+(go/const "The M2's identification a program reads at EL0 (AR19, queue 288; read on the VM's M2 under Linux 7.3): CTR_EL0 (64-byte\nlines, DIC and IDC clear), DCZID_EL0 (dc zva allowed, 64-byte blocks), CNTFRQ_EL0 (24 MHz).\n"
+  [^{:tag uint64 :val 2487533572} CTR 0x9444c004]
+  [^{:tag uint64 :val 4} DCZID 4]
+  [^{:tag uint64 :val 64} dczBlock 64]
+  [^{:tag uint64 :val 24000000} CNTFRQ 24000000])
+
+
+(go/method Counter "Counter is CNTVCT_EL0 (and CNTVCTSS_EL0): the time since the CPU's origin (a thread's is its process's) plus 1000 s, as crt's\nCLOCK_MONOTONIC counts, at CNTFRQ_EL0's 24 MHz; it never goes back.\n" ^uint64 [^{:tag (* CPU)} c]
+  (let [ns (conv uint64 (.Nanoseconds (+ (time/Since (.-t0 c)) (* 1000 time/Second))))]
+    (+ (* (/ ns 1000) 24) (/ (* (% ns 1000) 24) 1000))))

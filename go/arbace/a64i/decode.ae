@@ -197,19 +197,44 @@
           (case [2]
             (return (lit Inst :Op OpCLREX :Sys crm) ""))
           (case [4 5 6]
-            (return (lit Inst :Op OpBARRIER :Sys (bit-or (<< op2 4) crm)) "")))
+            (return (lit Inst :Op OpBARRIER :Sys (bit-or (<< op2 4) crm)) ""))
+          (case [7]
+            ;; AR19: FEAT_SB's sb (CRm 0000; the M2 raises SIGILL for the others)
+            (when (== crm 0)
+              (return (lit Inst :Op OpBARRIER :Sys (<< op2 4)) ""))))
 
         (return (lit Inst) ":unimplemented barrier"))
       (case [(and (== l 0) (== op0 0) (== op1 0) (== crn 4) (<= op2 2) (== rt 31))]
         ;; AR18: MSR (immediate)'s PSTATE forms of FEAT_FlagM (cfinv, op2 000) and FEAT_FlagM2 (xaflag 001, axflag 010); CRm,
         ;; (0)(0)(0)(0) in the Arm ARM, ignored as the M2 ignores it (each of its 16 values runs the instruction there)
         (return (lit Inst :Op OpFLAGM :Sys op2) ""))
+      (case [(and (== l 0) (== op0 0) (== op1 3) (== crn 4) (or (== op2 1) (== op2 2)) (== rt 31))]
+        ;; AR19: MSR (immediate) of PSTATE.SSBS (op2 001) and PSTATE.DIT (010): the bit CRm<0> (the M2 runs every CRm)
+        (let [^uint32 sys SysSSBS]
+          (when (== op2 2)
+            (set! sys SysDIT))
+
+          (return (lit Inst :Op OpMSR :Rm 255 :Imm (conv int64 (bit-and crm 1)) :Sys sys) "")))
+      (case [(and (== l 0) (== op0 1) (== op1 3) (== crn 7) (== op2 1))]
+        ;; AR19: SYS's dc zva, ic ivau, dc cvac, cvau, cvap, cvadp and civac, the M2's at EL0 (the other DC and IC
+        ;; operations, TLBI and AT are EL1's: SIGILL)
+        (when [(values _ ok) (aget sysOpNames crm)] ok
+          (return (lit Inst :Op OpSYS :Rd rt :Sys crm) "")))
       (case [(>= op0 2)]
-        (let [op OpMSR]
+        ;; the system registers EL0 reads and writes under Linux on the M2 (AR19: the others, Linux's emulated ID registers
+        ;; among them, UNDEFINED)
+        (let [(values op sys) (values OpMSR (bit-or (<< op0 14) (<< op1 11) (<< crn 7) (<< crm 3) op2))]
           (when (== l 1)
             (set! op OpMRS))
 
-          (return (lit Inst :Op op :Rd rt :Sys (bit-or (<< op0 14) (<< op1 11) (<< crn 7) (<< crm 3) op2)) ""))))
+          (switch sys
+            (case [SysNZCV SysFPCR SysFPSR SysTPIDR SysDIT SysSSBS]
+              (return (lit Inst :Op op :Rd rt :Sys sys) ""))
+            (case [SysTPIDRRO SysCNTFRQ SysCNTVCT SysCNTVCTSS SysDCZID SysCTR]
+              (when (== l 1)
+                (return (lit Inst :Op op :Rd rt :Sys sys) ""))))
+
+          (return (lit Inst) undef))))
 
     (return (lit Inst) ":unimplemented system")))
 
@@ -238,7 +263,8 @@
                 (return (lit Inst) undef))
 
               (return (lit Inst :Op OpCASP :Size (+ size 2) :Rm rs :Rd rt :Rn rn :Acq (== l 1) :Rel (== o0 1)) ""))
-            (case [(and (== o2 1) (== o1 0) (== o0 1))]
+            (case [(and (== o2 1) (== o1 0))]
+              ;; o0 0: AR19's FEAT_LOR ldlar and stllr, run as ldar and stlr (LORegions order nothing a single thread sees)
               (when (== l 1)
                 (return (lit Inst :Op OpLDAR :Size size :Rd rt :Rn rn :Acq true) ""))
 

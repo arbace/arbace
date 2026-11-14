@@ -20,7 +20,8 @@
 ;; call (the registers, the call's arguments, the bytes write(2) writes, the writable memory) or in the step mode after
 ;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, V0-V31, FPSR and FPCR (ARS44), the bytes stored, TPIDR_EL0 after
 ;; an MSR). The world's
-;; answers (read's bytes, clock_gettime's, getrandom's, the ids) are the native's, copied into a64i. Rules for
+;; answers (read's bytes, clock_gettime's, getrandom's, the ids; in the step mode cntvct_el0's and cntvctss_el0's, AR19) are the
+;; native's, copied into a64i. Rules for
 ;; single-stepping's artifacts: an exclusive region is not stepped (a single-stepped store-exclusive always fails: the step's
 ;; exception clears the monitor): a64i runs it to its store-exclusive or clrex, the native to a brk at a64i's next pc, compared
 ;; there (ARS44); a region that does not end so ends the step mode until the next system call, compared there as in the sys mode;
@@ -534,6 +535,10 @@
                 (when (!= (.-Sig t) (.-Signal c))
                   (return (.stepFail l pc "signal %d, native %d" (.-Signal c) (.-Sig t))))
 
+                ;; AR19 (285's low): the fatal signal's pc compared, as the sys mode compares it
+                (when (!= (.-Pc (.-Regs t)) (.-PC c))
+                  (return (.stepFail l pc "signal %d at %#x, native at %#x" (.-Sig t) (.-PC c) (.-Pc (.-Regs t)))))
+
                 (.Resume t (.-Sig t)))
 
               (return (.finish l)))
@@ -543,6 +548,14 @@
 
             (when (!= (.-Pc (.-Regs t)) (.-PC c))
               (return (.stepFail l pc "pc %#x, native %#x" (.-PC c) (.-Pc (.-Regs t)))))
+
+            ;; AR19: the counter is the world's: an mrs of cntvct_el0 or cntvctss_el0 takes the native's value; so does an mrs of
+            ;; ssbs, a single-stepping artifact: this M2's Linux (its Spectre-v4 mitigation off) sets PSTATE.SSBS at each context
+            ;; switch, and a stepped native switches at every step, where a run without one keeps the value written (as a64i does)
+            (when [last (.-Last c)] (and (!= last nil) (== (.-Op last) OpMRS) ^:go/paren (or (== (.-Sys last) SysCNTVCT) (== (.-Sys last) SysCNTVCTSS) (== (.-Sys last) SysSSBS)) (< (.-Rd last) 31))
+              (aset (.-X c) (.-Rd last) (aget (.-Regs (.-Regs t)) (.-Rd last)))
+              (when (== (.-Sys last) SysSSBS)
+                (set! (.-SSBS c) (!= (bit-and (aget (.-X c) (.-Rd last)) (<< 1 12)) 0))))
 
             (when [d (.compareRegs l false)] (!= d "")
               (return (.stepFail l pc "%s" d)))

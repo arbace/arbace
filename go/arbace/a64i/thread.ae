@@ -1,0 +1,417 @@
+;; a64i's threads and signals' bookkeeping (AR19, queue 288; doc/asm/ARM64-SURVEY.md, "As built: AR19"): what Go's runtime asks
+;; of Linux before main: clone(2)'s threads, the signals' dispositions (rt_sigaction), masks (rt_sigprocmask) and alternate
+;; stacks (sigaltstack). A thread is a CPU of its own over the process's address space and kernel, run on a goroutine of its
+;; own by crt's scheduler (go/arbace/crt's sched.go, ci's since CS11 (a)): one thread runs at a time, the baton passing where
+;; a thread waits (futex, nanosleep, sched_yield, its exit) and every quantum of instructions, in a fixed round-robin order.
+;; No signal is delivered to a handler: a kill, tkill or tgkill of a signal whose disposition is a handler, or which is
+;; blocked, is dropped (Go's runtime sends itself SIGURG, its asynchronous preemption's request, which it does not need
+;; answered); one whose disposition is the default ends the process as before.
+(in-ns 'go.arbace.a64i) (go/file "thread.go" :imports [
+    [fmt "fmt"]
+    [os "os"]
+    [time "time"]
+
+    [crt "arbace/crt"]])
+
+
+(go/type proc "proc is the process's part the threads share: the signals' dispositions (each Linux's struct sigaction on arm64:\nhandler, flags, restorer, mask) and the scheduler's tasks by thread id.\n" (struct
+    ^{:tag (array 65 (array 4 uint64))} actions
+    ^{:tag (map int (* crt/Task))} tasks
+    ^{:tag (map int (* pollObj)) :doc "the poller's descriptors (epoll, eventfd), from pollFd\n"} polls
+    ^int nextFd))
+
+
+(go/type threadEnd "threadEnd is the end of the process raised in the main thread when another thread ended it with a fatal signal.\n" (struct
+    ^int sig
+    ^string reason
+    ^uint64 pc))
+
+
+(go/const "Linux's numbers the threads' and signals' calls use.\n"
+  [^{:val 14} eFAULT 14]
+  [^{:val 22} eINVAL 22]
+  [^{:val 12} eNOMEM 12]
+  [^{:val 3} eSRCH 3]
+  [^{:val 1} ePERM 1]
+  [^{:val 38} eNOSYS 38]
+  [^{:val 9} sigKILL 9]
+  [^{:val 19} sigSTOP 19]
+  [^{:val 2} ssDisable 2]
+  [^{:val 1} ssOnstack 1]
+  [^{:val 5120} minSigStk 5120] ; MINSIGSTKSZ on arm64
+  [^{:tag uint64 :val 65792} cloneThreadFlags 0x10100] ; CLONE_VM | CLONE_THREAD
+  [^{:tag uint64 :val 2048} cloneSighand 0x800]
+  [^{:tag uint64 :val 4095} quantumMask 4095]) ; a thread runs 4,096 instructions before the next runnable one
+
+
+(go/method p "p is the process's shared part, made at its first use.\n" ^{:tag (* proc)} [^{:tag (* CPU)} c]
+  (when (== (.-P c) nil)
+    (set! (.-P c) (addr (lit proc :tasks (lit (map int (* crt/Task)))))))
+
+  (.-P c))
+
+
+(go/method sigaction "sigaction is rt_sigaction(sig, act, oact, sigsetsize): the old disposition written, the new one kept.\n" ^int64 [^{:tag (* CPU)} c ^uint64 sig ^uint64 act ^uint64 oact ^uint64 setsize]
+  (when (or (< sig 1) (> sig 64) (!= setsize 8))
+    (return (- eINVAL)))
+
+  (when (and (!= act 0) ^:go/paren (or (== sig sigKILL) (== sig sigSTOP)))
+    (return (- eINVAL)))
+
+  (let [p (.p c)
+        ^{:tag (array 4 uint64)} nw (zero (array 4 uint64))]
+    (when (!= act 0)
+      (for [i 0] (< i 4) (inc! i)
+        (let [(values v ok) (.Read (.-AS c) (+ act (conv uint64 (* 8 i))) 8)]
+          (when (not ok)
+            (return (- eFAULT)))
+
+          (aset nw i v))))
+
+    (when (!= oact 0)
+      (for [i 0] (< i 4) (inc! i)
+        (when (not (.Write (.-AS c) (+ oact (conv uint64 (* 8 i))) 8 (aget (aget (.-actions p) sig) i)))
+          (return (- eFAULT)))))
+
+    (when (!= act 0)
+      ;; the mask never holds SIGKILL or SIGSTOP
+      (aset nw 3 (bit-and-not (aget nw 3) (bit-or (<< 1 (- sigKILL 1)) (<< 1 (- sigSTOP 1)))))
+      (aset (.-actions p) sig nw))
+
+    0))
+
+
+(go/method sigprocmask "sigprocmask is rt_sigprocmask(how, set, oset, sigsetsize): the thread's mask (SIG_BLOCK 0, SIG_UNBLOCK 1, SIG_SETMASK 2),\nSIGKILL and SIGSTOP never in it.\n" ^int64 [^{:tag (* CPU)} c ^uint64 how ^uint64 set ^uint64 oset ^uint64 setsize]
+  (when (!= setsize 8)
+    (return (- eINVAL)))
+
+  (let [^uint64 v 0]
+    (when (!= set 0)
+      (when (> how 2)
+        (return (- eINVAL)))
+
+      (let [(values w ok) (.Read (.-AS c) set 8)]
+        (when (not ok)
+          (return (- eFAULT)))
+
+        (set! v w)))
+
+    (when (!= oset 0)
+      (when (not (.Write (.-AS c) oset 8 (.-SigMask c)))
+        (return (- eFAULT))))
+
+    (when (!= set 0)
+      (switch how
+        (case [0]
+          (set! (.-SigMask c) bit-or v))
+        (case [1]
+          (set! (.-SigMask c) bit-and-not v))
+        (case [2]
+          (set! (.-SigMask c) v)))
+
+      (set! (.-SigMask c) bit-and-not (bit-or (<< 1 (- sigKILL 1)) (<< 1 (- sigSTOP 1)))))
+
+    0))
+
+
+(go/method sigaltstack "sigaltstack is sigaltstack(ss, old_ss) for the thread (stack_t: ss_sp, ss_flags, ss_size): never on it, as no handler\nruns.\n" ^int64 [^{:tag (* CPU)} c ^uint64 ss ^uint64 old]
+  (when (!= old 0)
+    (let [^uint64 flags 0]
+      (when (== (.-AltSize c) 0)
+        (set! flags ssDisable))
+
+      (when (not (and (.Write (.-AS c) old 8 (.-AltSP c)) (.Write (.-AS c) (+ old 8) 8 flags) (.Write (.-AS c) (+ old 16) 8 (.-AltSize c))))
+        (return (- eFAULT)))))
+
+  (when (!= ss 0)
+    (let [(values sp ok1) (.Read (.-AS c) ss 8)
+          (values flags ok2) (.Read (.-AS c) (+ ss 8) 4)
+          (values size ok3) (.Read (.-AS c) (+ ss 16) 8)]
+      (when (not (and ok1 ok2 ok3))
+        (return (- eFAULT)))
+
+      (when (!= (bit-and-not flags ssDisable) 0)
+        (return (- eINVAL)))
+
+      (if (!= flags 0)
+        (set! (values (.-AltSP c) (.-AltSize c)) (values 0 0))
+        (do
+          (when (< size minSigStk)
+            (return (- eNOMEM)))
+
+          (set! (values (.-AltSP c) (.-AltSize c)) (values sp size))))))
+
+  0)
+
+
+(go/method kill "kill is kill(pid, sig), tkill(tid, sig) and tgkill(tgid, tid, sig) within the process: a signal blocked by the calling\nthread, ignored (SIG_IGN, or by default: SIGCHLD, SIGCONT, SIGURG, SIGWINCH and the stop signals, which have no job control\nhere) or with a handler is dropped; the others end the process. Any other process: ESRCH.\n" ^int64 [^{:tag (* CPU)} c ^string name ^{:tag (array 6 uint64)} args]
+  (let [(values target sig) (values (conv int (conv int32 (aget args 0))) (conv int (aget args 1)))]
+    (when (== name "tgkill")
+      (when (!= target (.-Pid c))
+        (return (- eSRCH)))
+
+      (set! (values target sig) (values (conv int (conv int32 (aget args 1))) (conv int (aget args 2)))))
+
+    (if (== name "kill")
+      (when (and (!= target (.-Pid c)) (!= target 0))
+        (return (- eSRCH)))
+      (when (and (!= target (.-Pid c)) ^:go/paren (or (== (.-P c) nil) (== (aget (.-tasks (.-P c)) target) nil)))
+        (return (- eSRCH))))
+
+    (when (or (< sig 0) (> sig 64))
+      (return (- eINVAL)))
+
+    (when (== sig 0)
+      (return 0))
+
+    (let [^uint64 h 0]
+      (when (!= (.-P c) nil)
+        (set! h (aget (aget (.-actions (.-P c)) sig) 0)))
+
+      (when (and (!= sig sigKILL) ^:go/paren (or (!= h 0) (!= (bit-and (.-SigMask c) ^uint64 (<< 1 (- sig 1))) 0) (== sig 17) (== sig 18) (== sig 23) (== sig 28) (and (>= sig 19) (<= sig 22))))
+        (when strace
+          (fmt/Fprintf os/Stderr "a64i: [%d] signal %d dropped (disposition %#x)\n" (.tid c) sig h))
+
+        (return 0))
+
+      (.raise c sig (fmt/Sprintf ":signal %d" sig))
+      0)))
+
+
+(go/method clone "clone is clone(flags, stack, parent_tid, tls, child_tid) of a thread (CLONE_VM, CLONE_THREAD and CLONE_SIGHAND): a copy of\nthe calling CPU, x0 0, its stack and (CLONE_SETTLS) TPIDR_EL0 the given ones, made runnable last; CLONE_PARENT_SETTID and\nCLONE_CHILD_SETTID store its id, CLONE_CHILD_CLEARTID's word is cleared and woken at its end. The new thread's id, or\n-ENOSYS for a process (fork, vfork: one process).\n" ^int64 [^{:tag (* CPU)} c ^uint64 flags ^uint64 stack ^uint64 ptid ^uint64 tls ^uint64 ctid]
+  (when (or (!= (bit-and flags cloneThreadFlags) cloneThreadFlags) (== (bit-and flags cloneSighand) 0))
+    (return (- eNOSYS)))
+
+  (let [sys (.-Sys (.-K c))
+        p (.p c)]
+    (when (== (.-Sched sys) nil)
+      (let [m (.-Main (.Threads sys))]
+        (aset (.-tasks p) (.-Tid m) m)))
+
+    (let [task (.NewTask sys)
+          n (new CPU)]
+      (set! (deref n) (deref c))
+      (set! (values (.-Tid n) (.-task n) (.-Last n) (.-Steps n) (.-SysHook n) (.-AltSP n) (.-AltSize n)) (values (.-Tid task) task nil 0 nil 0 0))
+      (aset (.-X n) 0 0)
+      (when (!= stack 0)
+        (aset (.-X n) 31 stack))
+
+      (when (!= (bit-and flags crt/CloneSettls) 0)
+        (set! (.-TPIDR n) tls))
+
+      (when (!= (bit-and flags crt/CloneParentSettid) 0)
+        (.Write (.-AS c) ptid 4 (conv uint64 (.-Tid task))))
+
+      (when (!= (bit-and flags crt/CloneChildSettid) 0)
+        (.Write (.-AS c) ctid 4 (conv uint64 (.-Tid task))))
+
+      (when (!= (bit-and flags crt/CloneChildCleartid) 0)
+        (set! (.-ClearTid task) ctid))
+
+      (when (== (.-task c) nil)
+        (set! (.-task c) (.-Main (.-Sched sys))))
+
+      (set! (.-threaded c) true)
+      (set! (.-threaded n) true)
+      (aset (.-tasks p) (.-Tid task) task)
+      (.Ready sys task)
+      (go (.thread n))
+      (conv int64 (.-Tid task)))))
+
+
+(go/method threadExit "threadExit is exit(2) in a thread other than the main one while others live: the thread ends (true); else false, and\nexit ends the process as before (the main thread's exit with others alive ends the process too: Go's runtime never makes it).\n" ^bool [^{:tag (* CPU)} c ^int code]
+  (let [q (.-Sched (.-Sys (.-K c)))]
+    (when (or (not (.-threaded c)) (== q nil) (== (.-task c) (.-Main q)))
+      (return false))
+
+    (set! (values (.-Done c) (.-Code c) (.-exited c)) (values true code true))
+    true))
+
+
+(go/method thread "thread runs a thread other than the main one on its goroutine: it waits for its turn, runs, and at its end gives the\nbaton on (its exit) or ends the process in the main thread (exit_group, a fatal signal).\n" [^{:tag (* CPU)} c]
+  (let [sys (.-Sys (.-K c))]
+    (.Start sys (.-task c))
+    (.run c)
+    (delete (.-tasks (.-P c)) (.-Tid c))
+    (cond
+      (.-exited c)
+      (.ExitTask sys (.-Code c))
+      (!= (.-Signal c) 0)
+      (.EndProgram sys (addr (lit threadEnd (.-Signal c) (fmt/Sprintf "%s (thread %d)" (.-Reason c) (.-Tid c)) (.-PC c))))
+      :else
+      (.EndProgram sys (addr (lit crt/Exit :Code (.-Code c)))))))
+
+
+(go/method run "run executes the thread until it ends, giving the other threads their turns every quantum of instructions.\n" [^{:tag (* CPU)} c]
+  (while (.Step c)
+    (when (and (.-threaded c) (== (bit-and (.-Steps c) quantumMask) 0))
+      (.Yield (.-Sys (.-K c))))))
+
+
+(go/method ended "ended is the main thread's end raised by another thread (crt's Sched.Over, raised where the main thread waited): its\nexit_group's code or its fatal signal.\n" [^{:tag (* CPU)} c ^any r]
+  (type-switch [v r]
+    (case [(* crt/Exit)]
+      (set! (values (.-Done c) (.-Code c)) (values true (.-Code v))))
+    (case [(* threadEnd)]
+      (set! (values (.-Done c) (.-Signal c) (.-Reason c) (.-PC c)) (values true (.-sig v) (.-reason v) (.-pc v))))
+    (default
+      (panic r))))
+
+
+;; the poller (AR19): epoll and eventfd as Go's runtime uses them (its netpoll: an epoll instance with one eventfd, netpollBreak's,
+;; registered for EPOLLIN; its timers sleep in epoll_pwait). Their descriptors are a64i's own, from pollFd up; an epoll_ctl of any
+;; other descriptor is EPERM, as Linux answers for a regular file, and Go then does its I/O without the poller.
+
+(go/const "The poller's numbers: arm64's system calls, the first descriptor, EPOLLIN, EFD_NONBLOCK, EAGAIN.\n"
+  [^{:val 19} sysEventfd2 19]
+  [^{:val 20} sysEpollCreate1 20]
+  [^{:val 21} sysEpollCtl 21]
+  [^{:val 22} sysEpollPwait 22]
+  [^{:val 900} pollFd 900]
+  [^{:tag uint64 :val 1} epollIn 1]
+  [^{:tag uint64 :val 2048} efdNonblock 0x800]
+  [^{:val 11} eAGAIN 11]
+  [^{:val 9} eBADF 9]
+  [^{:val 17} eEXIST 17]
+  [^{:val 2} eNOENT 2])
+
+
+(go/type pollObj "pollObj is one of the poller's descriptors: an eventfd (its counter) or an epoll instance (its interests by descriptor: the\nevents and the data).\n" (struct
+    ^bool epoll
+    ^uint64 count
+    ^uint64 flags
+    ^{:tag (map int (array 2 uint64))} interest))
+
+
+(go/method pollObjOf "pollObjOf is descriptor fd's poller object, nil when it is not one.\n" ^{:tag (* pollObj)} [^{:tag (* CPU)} c ^uint64 fd]
+  (when (or (== (.-P c) nil) (== (.-polls (.-P c)) nil))
+    (return nil))
+
+  (aget (.-polls (.-P c)) (conv int (conv int32 fd))))
+
+
+(go/method newPollObj ^int64 [^{:tag (* CPU)} c ^{:tag (* pollObj)} o]
+  (let [p (.p c)]
+    (when (== (.-polls p) nil)
+      (set! (values (.-polls p) (.-nextFd p)) (values (lit (map int (* pollObj))) pollFd)))
+
+    (let [fd (.-nextFd p)]
+      (inc! (.-nextFd p))
+      (aset (.-polls p) fd o)
+      (conv int64 fd))))
+
+
+(go/method poll "poll answers the poller's calls (true), or false for a call or descriptor that is not its own.\n" [^{:tag (* CPU)} c ^uint64 n ^{:tag (array 6 uint64)} args] :results [int64 bool]
+  (switch n
+    (case [sysEventfd2]
+      (return (.newPollObj c (addr (lit pollObj :count (bit-and (aget args 0) 0xffffffff) :flags (aget args 1)))) true))
+    (case [sysEpollCreate1]
+      (return (.newPollObj c (addr (lit pollObj :epoll true :interest (lit (map int (array 2 uint64)))))) true))
+    (case [sysEpollCtl]
+      (let [o (.pollObjOf c (aget args 0))
+            fd (conv int (conv int32 (aget args 2)))]
+        (when (or (== o nil) (not (.-epoll o)))
+          (return (- eBADF) true))
+
+        (when (== (.pollObjOf c (aget args 2)) nil)
+          (return (- ePERM) true))
+
+        (let [(values _ had) (aget (.-interest o) fd)]
+          (switch (aget args 1)
+            (case [1 3] ; EPOLL_CTL_ADD, EPOLL_CTL_MOD
+              (when (and (== (aget args 1) 1) had)
+                (return (- eEXIST) true))
+
+              (when (and (== (aget args 1) 3) (not had))
+                (return (- eNOENT) true))
+
+              (let [(values ev ok1) (.Read (.-AS c) (aget args 3) 4)
+                    (values data ok2) (.Read (.-AS c) (+ (aget args 3) 8) 8)]
+                (when (not (and ok1 ok2))
+                  (return (- eFAULT) true))
+
+                (aset (.-interest o) fd (lit (array 2 uint64) ev data))
+                (return 0 true)))
+            (case [2] ; EPOLL_CTL_DEL
+              (when (not had)
+                (return (- eNOENT) true))
+
+              (delete (.-interest o) fd)
+              (return 0 true)))
+
+          (return (- eINVAL) true))))
+    (case [sysEpollPwait]
+      (return (.epollWait c args) true))
+    (case [63 64 57] ; read, write, close of the poller's descriptors
+      (let [o (.pollObjOf c (aget args 0))]
+        (when (== o nil)
+          (return 0 false))
+
+        (switch n
+          (case [57]
+            (delete (.-polls (.-P c)) (conv int (conv int32 (aget args 0))))
+            (return 0 true))
+          (case [63]
+            (when (or (.-epoll o) (< (aget args 2) 8))
+              (return (- eINVAL) true))
+
+            (when (== (.-count o) 0)
+              (return (- eAGAIN) true))
+
+            (when (not (.Write (.-AS c) (aget args 1) 8 (.-count o)))
+              (return (- eFAULT) true))
+
+            (set! (.-count o) 0)
+            (return 8 true))
+          (default
+            (when (or (.-epoll o) (< (aget args 2) 8))
+              (return (- eINVAL) true))
+
+            (let [(values v ok) (.Read (.-AS c) (aget args 1) 8)]
+              (when (not ok)
+                (return (- eFAULT) true))
+
+              (set! (.-count o) + v)
+              (return 8 true)))))))
+
+  (return 0 false))
+
+
+(go/method epollWait "epollWait is epoll_pwait(epfd, events, maxevents, timeout, sigmask): the ready interests (an eventfd whose counter is not 0,\nfor EPOLLIN), else the wait until one is or the timeout (milliseconds; -1: none), the other threads running meanwhile.\n" ^int64 [^{:tag (* CPU)} c ^{:tag (array 6 uint64)} args]
+  (let [o (.pollObjOf c (aget args 0))
+        max (conv int (conv int32 (aget args 2)))
+        ms (conv int64 (conv int32 (aget args 3)))
+        deadline (.Add (time/Now) (* (conv time/Duration ms) time/Millisecond))]
+    (when (or (== o nil) (not (.-epoll o)))
+      (return (- eBADF)))
+
+    (when (<= max 0)
+      (return (- eINVAL)))
+
+    (while true
+      (let [k 0]
+        (range [fd in (.-interest o)]
+          (when (>= k max)
+            (break))
+
+          (when [e (.pollObjOf c (conv uint64 fd))] (and (!= e nil) (not (.-epoll e)) (!= (.-count e) 0) (!= (bit-and (aget in 0) epollIn) 0))
+            (let [a (+ (aget args 1) (conv uint64 (* 16 k)))]
+              (when (not (and (.Write (.-AS c) a 4 epollIn) (.Write (.-AS c) (+ a 8) 8 (aget in 1))))
+                (return (- eFAULT)))
+
+              (inc! k))))
+
+        (when (or (> k 0) (== ms 0) (and (> ms 0) (not (.Before (time/Now) deadline))))
+          (return (conv int64 k))))
+
+      ;; nothing ready: the other threads run, then a short real wait
+      (when (.-threaded c)
+        (.Yield (.-Sys (.-K c))))
+
+      (let [d (* 100 time/Microsecond)]
+        (when [r (time/Until deadline)] (and (> ms 0) (< r d))
+          (set! d r))
+
+        (time/Sleep d)))
+
+    0))

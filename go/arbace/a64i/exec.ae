@@ -433,6 +433,23 @@
                 (set! v (.-FPCR c)))
               (case [SysFPSR]
                 (set! v (.-FPSR c)))
+              (case [SysTPIDRRO]
+                ;; AR19: Linux leaves it 0 for a user thread
+                (set! v 0))
+              (case [SysCNTFRQ]
+                (set! v CNTFRQ))
+              (case [SysCNTVCT SysCNTVCTSS]
+                (set! v (.Counter c)))
+              (case [SysDCZID]
+                (set! v DCZID))
+              (case [SysCTR]
+                (set! v CTR))
+              (case [SysDIT]
+                (when (.-DIT c)
+                  (set! v (<< 1 24))))
+              (case [SysSSBS]
+                (when (.-SSBS c)
+                  (set! v (<< 1 12))))
               (default
                 (set! (.-PC c) pc)
                 (.raise c SIGILL (fmt/Sprintf ":unimplemented mrs %#x" (.-Sys in)))
@@ -441,7 +458,17 @@
             (.set c (.-Rd in) v true false)))
         (case [OpMSR]
           (let [v (.reg c (.-Rd in) false)]
+            (when (== (.-Rm in) 255)
+              ;; AR19: MSR (immediate): the bit in the register's place
+              (set! v 0)
+              (when (!= (.-Imm in) 0)
+                (set! v (aget (lit (map uint32 uint64) [SysDIT (<< 1 24)] [SysSSBS (<< 1 12)]) (.-Sys in)))))
+
             (switch (.-Sys in)
+              (case [SysDIT]
+                (set! (.-DIT c) (!= (bit-and v (<< 1 24)) 0)))
+              (case [SysSSBS]
+                (set! (.-SSBS c) (!= (bit-and v (<< 1 12)) 0)))
               (case [SysNZCV]
                 (.SetNZCV c v))
               (case [SysTPIDR]
@@ -449,11 +476,13 @@
               (case [SysFPCR]
                 (set! (.-FPCR c) (bit-and v 0x07ff9f00)))
               (case [SysFPSR]
-                (set! (.-FPSR c) (bit-and v 0xf800009f)))
+                (set! (.-FPSR c) (bit-and v 0x0800009f))) ; AR19: N, Z, C, V (bits 31-28) are AArch32's, RES0 here (the M2 keeps QC and the cumulative flags)
               (default
                 (set! (.-PC c) pc)
                 (.raise c SIGILL (fmt/Sprintf ":unimplemented msr %#x" (.-Sys in)))))))
 
+        (case [OpSYS]
+          (.sysOp c in))
         (case [OpBRK]
           (set! (.-PC c) pc)
           (.raise c SIGTRAP ":brk"))
@@ -749,3 +778,24 @@
 
         (.set c (.-Rm in) o1 (== (.-Size in) 3) false)
         (.set c (+ (.-Rm in) 1) o2 (== (.-Size in) 3) false)))))
+
+
+(go/method sysOp "sysOp is SYS's dc and ic at EL0 (AR19, as the M2 runs them under Linux): dc zva zeroes the DCZID-sized block (64 bytes)
+holding Xt, each byte writable or SIGSEGV at Xt; the cache maintenance (ic ivau, dc cvac, cvau, cvap, cvadp, civac) has no effect
+on a single memory with no caches (a64i's decoded instructions are checked against their bytes at each fetch) but faults
+(SIGSEGV at Xt) when Xt's page is not mapped or PROT_NONE; read-only and execute-only pages pass, as on the M2.
+" [^{:tag (* CPU)} c ^{:tag (* Inst)} in]
+  (let [x (.reg c (.-Rd in) false)]
+    (when (== (.-Sys in) 4)
+      (let [base (bit-and-not x (- dczBlock 1))]
+        (when (not (.Probe (.-AS c) base (conv int dczBlock)))
+          (.segv c x)
+          (return))
+
+        (for [a base] (< a (+ base dczBlock)) (set! a + 8)
+          (.store c a 3 0))
+
+        (return)))
+
+    (when (== (.Perm (.-AS c) x) 0)
+      (.segv c x))))
