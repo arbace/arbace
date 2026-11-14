@@ -5601,3 +5601,80 @@ Alternatives considered:
 - Keeping the fixpoint nightly: the survey's list moves it to the weekly run. Its "nights that touch j2g" rule waits for
   the planner change (GDS4 (b)).
 - For repr-go, a 40 GiB declaration under GDS3's ceiling was set aside for its measured ⌈1.1 × 37.3⌉ = 42.
+
+### 2026-11-14: n15-fix, night 13's rerun (`bin/gate --full --concurrent` on next 7658c750c, 495 min, 8 failed)
+
+Branch `n15-fix` from `mac/next` 7658c750c. Each failure was diagnosed from the night's logs (`.tmp/worktrees/next/.tmp/gate/`)
+and, where it could be, reproduced alone in the worktree.
+
+- **asm-arm64-print-essential: a scratch race.** It read 184 of mc-aarch64's 409 files: the list `$TMPDIR/asm-files.txt` is
+  one fixed name in the TMPDIR every concurrent step shares. The 123 problems are 35 "recorded, not run" files and 88 controls
+  "left" (the controls' subjects were not in the truncated list). mac/asm-fix (e815d223b: a private `mktemp -d` per run in
+  bin/repr-asm, bin/cppi, bin/lib/cppi/lists.bash, bin/gate --pins) fast-forwarded n15-fix (its base was 7658c750c, so the
+  journal and AGENDA had no conflict).
+- **hsi-check: the same race, in the packs' check.** `oracle_check_members` (test/oracle-records/oracle.bash) wrote
+  `$TMPDIR/oracle-check.{sums,out,files,ids}` and `oracle_make` `$TMPDIR/oracle-make.{files,ids}`. haskell-lib-check
+  unpacked its pack 2 s after hsi-check started, and the two checks overwrote each other's lists, so the message was "members
+  not in the manifest: " with an empty list. The pack, its unpack directory and the tsv are consistent: the store's
+  `unpacked/2bbf0aac.../haskell-stg-progs` checks clean against the tsv, 1126 members each. d8c4f9deb changed six entries'
+  keys and not their digests, so the pin did not move; that is correct. Nothing was re-recorded. Fixed with a private
+  `mktemp -d` per call. Reproduced: two `oracle_unpack` runs at once (haskell-stg-progs beside haskell-stg-libs), six times
+  each. The old library failed 8 of 12 runs. The new one failed 0 of 12.
+- **gate-tests: two flakes of the nested run under strace.**
+  - **gate-key-crops-test, "the audit's crop-rules do not name !go/arbace/hs/" (the rule is there).** The cause is
+    `echo "$cr" | grep -qF ...` under `set -o pipefail`. musl's stdio flushes bash's `echo` in 1024-byte writes. The rule
+    sits at byte 848 of the 1647-byte list. grep -q matched in the first write and exited, so the second write took
+    SIGPIPE, and the pipeline's status was 141. Every `echo|printf "$VAR" | grep -q` in the pipefail tests of test/gate/
+    became `grep -q ... <<< "$VAR"`: gate-key-crops, gate-cache, declared-env, frozen, ci-exe-relative, gate-tests-test
+    and gate-reads-test.
+  - **gate-reads-test, "files the step reads outside its :inputs: gate/crops.ae".** The loader looks for `gate/crops.ae`
+    along ARBACE_PATH, and the checkout's root comes first. On that root the lookup fails with ENOENT before the hit in
+    `test/`. strace can split such a failed `openat` across two lines (`<unfinished ...>`, then `<... openat resumed>) = -1
+    ENOENT`). The test's `grep -v ' = -1 '` dropped only the result line, so the reducer took the call for a read.
+    gate-reads-test now filters failed calls with a `failed_calls_out` that also drops an unfinished line whose resumed
+    result is -1. Its own made-up trace checks it before the run.
+  - Proof: the five light tests pass. `bin/gate-tests` was run whole in the worktree (see below).
+- **java-judge: two causes, neither memory.**
+  - **(a) A deleted cache entry.** The build of jdk-other's shard 0 (01:57 UTC) and of hotspot-runtime's (03:26) failed with
+    `link: cannot open file /root/.cache/go-build/..-d`. The night's disk guard (`.tmp/night13/disk-guard.sh`, run by the
+    main session) ran `find /root/.cache/go-build -type f -amin +45 -mmin +45 -delete` every 5 minutes while / was at 88%
+    or more. Its log has trims at 02:02 and 03:22-03:32. Go marks an entry used only when its mtime is over an hour old,
+    and atime does not move under relatime. So a 45-minute trim deletes entries that a running build has already taken as
+    hits. This is the guard's threshold, not the repository's: bin/lib/gocache.bash keeps 90 minutes. Nothing to fix in
+    the code. The guard should not trim below 90 minutes while builds run (see the report).
+  - **(b) A real j2g bug.** jdk-run's shard 2 failed with `(CertStoreParameters_Fn).Clone__O declared more than once in
+    jrt: j2g_lambdas.go`, an error attributed to no test. It reproduces with t05359 (jdk/java/security/misc/
+    GetInstanceNullsEmpties.java, `CertStoreParameters csp = () -> null;`) alone. The test is recorded `:refused` (analysis:
+    AlgorithmParameterGenerator unresolved). It now gets past the analysis and is the first lambda whose SAM is `clone()`.
+    j2g's lambda adapter (arbace/j2g/out.ae `adapter-forms`) always adds a `Clone__O` that throws
+    CloneNotSupportedException, and the SAM's own method has the same Go name. Fixed: the fixed `Clone__O` is left out
+    when the SAM is clone(). **This moves gate_key** (j2g is embedded).
+- **goi-check-full.linux-amd64: typeparam/chans.go, a finalizer's timing under load.** Its `_Ranger` waits `time.Minute`
+  after one `runtime.GC()` for the receiver's finalizer. The receiving goroutine may not have exited at that GC on a loaded
+  host, and then nothing runs another GC. The spec already lists this program under finalizer timing (GOI-SPEC.md §11). It
+  is recorded `:pass`, and it passes alone. Not changed here: every robust fix touches the judgment, a rerun alone of a
+  failed recorded pass, or a `:known` row. That is left for a decision.
+- **c-roundtrip.torture-compile: limits-blockid.c's level 2 "crash" was the deadline.** In arbace.repr.c.rtcheck, the
+  `:full` read ran under what was left of twice the read budget after the print and the reread. A deadline exception was
+  caught as a crash. Under the concurrent gate, the 1.2M-node file spent that remainder. On night 12, passing quietly, its
+  `:eval-limits` entry went stale and was removed (d1c4b1feb). The ping-pong is the symptom. Fixed: the full read gets a
+  budget of its own, like the first read, and a deadline is reported as "timeout". **This moves gate_key** (repr/c is
+  embedded).
+- **cpp-check.samples-runtime: runtime/atomics.cpp is slower than the default budget.** It timed out at 30.1 s in the night's
+  run and again in the rerun alone. Alone in the worktree, after the gate (load about 5), the program, `cirun` on its
+  nodes, ran 33.3 s wall and 34.4 s user, peak 2.9 GB, with its correct output: 4 threads spinning on compare-exchange
+  and yield. The default budget is 30 s. It was recorded passing on 2026-11-11 (340566cd2), close to the limit. Its budget
+  is now 120 s in test/cpp/check-budget.edn, the file CS216 made for this (its first entry). The step's whole run, 57 min
+  alone, was not repeated with the budget.
+- **oi-check.run: no regression in the C stubs.** The step fails only on the native judgment, where lazy/lazy7 went from
+  pass to "timeout 120s" of CPU. The 11 CHANGED lines against check-oi.edn (ocamlc's path) are printed for information
+  only (`|| true`, as oi-fix's entry of 2026-11-13 found). They come from the C API on ci (ef4f24416, fb8a73f19), and all
+  are in `:c-runtime-internals`. lazy7's CPU time follows the host's load: 75.7 s on oi-fix's run, 89.6 s on night 12's,
+  126.9 s on night 13's, against OI_TIMEOUT's 120. In that run lib-bytes-utf/test took 119.9 s and lazy5 and
+  basic/tailcalls about 109 s. Not changed here, because every way out touches the judgment: oi-slow.edn's list alone does
+  not do it, since `near-limit?` excuses only a program recorded slow that now passes. Left for a decision.
+- **t05359 compiled.** With the j2g fix, t05359 compiles and passes alone (565 s, peak 23 GB, j2g from the checkout on the
+  gate's compiled namespaces). Its check-compiled row is still `:refused`, so the night's judgment will report it as
+  changed until it is recorded.
+- **Keys.** The j2g fix and repr/c's budget move gate_key. 126c321af14f8a9da7e6 was the key before them. The rest of the
+  branch touches only tests, data and crop paths.
