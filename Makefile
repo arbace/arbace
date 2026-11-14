@@ -1182,7 +1182,7 @@ check-makefile: ## every bin/ script this Makefile's recipes run exists and is e
 	  [ -x "$$s" ] || { echo "Makefile: $$s is not an executable script" >&2; missing=1; }; done; \
 	exit $$missing
 
-.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check wai-go wai-go-essential wai-go-record wai-aot wai-aot-essential wai-aot-record wai-go-aot wai-go-aot-record wai-w2g-check
+.PHONY: wai-light wai-check wai-essential wai-record wai-divergences wai-ops-check wai-go wai-go-essential wai-go-record wai-aot wai-aot-essential wai-aot-record wai-go-aot wai-go-aot-record wai-w2g-check wai-js wai-js-essential wai-js-record wasm-shim-check
 wai-light: ## wai, Arbace's WebAssembly engine (WA4, doc/wasm/WAI.md): its light driver built alone by TamaGo's go into .tmp/wai/wai (bin/wai light)
 	bin/wai light
 wai-check: ## the testsuite's scripts planned by arbace.wasm.check and run on wai, each command by its own assertion, against test/wasm/eval-results.edn (bin/wai check)
@@ -1213,3 +1213,11 @@ wai-go-aot-record: ## the Go programs at AOT recorded (bin/wai go --aot --record
 	bin/wai go --aot --record
 wai-w2g-check: ## w2g's bodies and wai's exports regenerated from exec.go and compared with the committed ones (bin/wai w2g check)
 	bin/wai w2g check
+wai-js: ## Go's js/wasm programs on wai's headless world (WA11, doc/wasm/WAI.md §10): syscall/js's tests, the own programs, the demo's frames, the shim's checks, with the controls (bin/wai js)
+	bin/wai js
+wai-js-essential: ## the js/wasm corpus's essential list, test/wasm/essential-js.txt (bin/wai js --essential)
+	bin/wai js --essential
+wai-js-record: ## the js/wasm corpus recorded into test/wasm/js-results.edn and the scene's digests (bin/wai js --record)
+	bin/wai js --record
+wasm-shim-check: ## the shim's gojs imports against Go's, wasm_exec.js's and wai's, its WebGPU operation table against wai's (bin/wasm check)
+	bin/wasm check

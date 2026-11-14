@@ -1205,3 +1205,114 @@ over 18 programs 3,454 s, 0.68 GB (a Go program's translation 2 s and 0.21 GB, i
 **Not done**: the whole Go corpus at AOT (WAS40), the forms of w2g's output (WAS38 (b)), a register allocation, the js/wasm programs and
 the headless world (WA11), `wasmexport.go` and `wasmexport2.go` (errorcheck programs: gc's errors for wasm), the legacy exceptions
 (WA8), Go's SIMD programs and WA6's SIMD corpus.
+
+## As built: WA11, WA12 (begun) (2026-11-14, branch `wasm-wa7`)
+
+Built from `mac/wasm-wa6` (`176a00065`). The user's focus for the crop: a minimal HTML and JavaScript shim, Wasm in the browser as the
+single-page WebGPU games do it. doc/wasm/WAI.md §10 (the headless world) and doc/wasm/WEB.md (the shim, the bridge, the demo) describe
+the new parts. Everything is in `arbace_crop_paths` or outside every key (`wasm/`, `test/wasm/`): no key moves.
+
+**WA11, gojs: the headless world** (WAS13 (a), WAS16 (a), WAS17 (a)). Go's js/wasm import ABI in wai (`go/arbace/wai/gojs.ae`, written
+in Go after the pinned TamaGo go1.27.1's `lib/wasm/wasm_exec.js` and `wasm_exec_node.js`, BSD-3, origin in LICENSE.md's Go section):
+the 24 gojs imports and `debug`, each of Go's stack pointer at wasm_exec.js's offsets; the reference table (NaN-boxed ids, the seven
+predefined, reference counts, SameValueZero interning, the pool); `run`, `resume`, `getsp`; `_gotest` (syscall/js's tests' imports);
+re-entry (a `js.FuncOf` callback, an export called from an import) on the running machine, which needed one change to the engine:
+`Machine.HostCall` runs a host function with the machine's base above its caller's operands (the interpreter's calls and w2g's
+generated calls use it). Over it: the JS value model and runtime (`js.ae`, `jsrt.ae`: Object, Function, Array, the typed arrays,
+Number, Boolean, String, Symbol, the errors, Date, Promise with microtasks, Math, console, performance, crypto, timers), a small
+`eval` (`jseval.ae`, WAS43), Node's part (`gojsnode.ae`: `fs`'s callback API over the driver's mounts, `process`, `path`), the page's
+part (`gojspage.ae`: `window`, `document` with one canvas, `navigator.gpu` and every GPU object a recording fake, requestAnimationFrame,
+input events, the bridge's decoder) and the event loop on a virtual clock (WAS44). `waidriver gojs` runs a module as go_js_wasm_exec
+runs it (Node's mode) or as a page (`--frames N --input FILE --record FRAMES.EDN`).
+
+- **The exit**: syscall/js's tests (`go test -c syscall/js`, GOOS=js, by TamaGo's go; `-test.v`) on wai: **37 of 37 pass**, the binary's
+  PASS (TestWasmExport's export called from an import and TestInterleavedFunctions' callbacks among them). Go's own js programs
+  (`test/wasm/js/`: hello, timers, promise, files, callback, deadlock) **6 of 6** by their statements (`want.out`, `want.status`,
+  `want.err`: the deadlock program's status 2 and Go's message, as wasm_exec_node.js's exit handler gets it).
+- **The controls** (`test/wasm/controls-js.txt`): three programs judged against another's statement, the scene one frame off and without
+  its key press, the shim without an import and with an argument count changed: **7 of 7 fail as they must**; two `self` checks pass.
+
+**WA12 begun: the shim, the bridge, the demo** (WAS15 (a), WAS16 (a), WAS22 (a)).
+
+- **The shim** (`wasm/web/index.html`, `wasm/web/arbace.js`, 526 lines): part 1 the gojs imports and the `Go` class from wasm_exec.js
+  as they are; Arbace's own parts: a memory file system behind Node's API with standard input from the page's input line (WAS13 (a)),
+  the frame loop and resize, the input ring, the WebGPU bridge, the start. **The import-list check** (`bin/wai shim-check`, rows
+  `js/shim/imports` and `js/shim/gpu-ops`): the names of arbace.js's gojs object = the pinned Go's `//go:wasmimport gojs` directives (24,
+  with `debug` 25) = wasm_exec.js's = the headless world's; the bridge's argument counts = the world's table. No JavaScript runs at check
+  time (§10.3).
+- **The bridge**: setup through syscall/js into the shim's handle table; each frame one command buffer in linear memory, 13 operations
+  named after `webgpu.h` (doc/wasm/WEB.md §2), `QueueWriteBuffer` a view of linear memory; the input ring (§3). The Go side is the
+  package `arbace/webgpu` (`wasm/demo/webgpu/`); the world's decoder is the shim's statement for statement over the fakes.
+- **The demo** (`wasm/demo/scene/`): a lit rotating cube (a depth buffer, one render pass a frame) and a compute pass over 256 particles,
+  the arrow keys changing the spin, a fixed 60 Hz step. Its 90 frames on the headless world with `input.txt` (ArrowRight before frame
+  31) against `test/wasm/js/scene/expected/frames.edn`, the authors' statements from the scene's arithmetic (the projection; the model
+  matrix at frames 1, 15, 30, 31, 45, 60, 90, within 1e-5), and the frames' digests (`digests.edn`, a run's): **pass**; its standard
+  output `want.out`. Go text for now, not Go forms (WAS46).
+- **`bin/wasm`**: `build DIR [MODULE]` writes the page (index.html, arbace.js, the module); `serve DIR [PORT]` a development server
+  (`wasm/serve/main.go`, `net/http` on 127.0.0.1, `.wasm` as `application/wasm`) by hand only; `check` the shim's checks. Not run
+  against the network by anything here.
+- **`bin/wai js`** (`bin/lib/wai/js-run.bash`): the corpus `test/wasm/js-run.txt`, rows `js/...` against `test/wasm/js-results.edn`
+  (**47 of 47**), classes `test/wasm/divergences-js.edn`, the controls; `--essential` (`test/wasm/essential-js.txt`, 43 rows). Builds by
+  TamaGo's go for js/wasm, cached by key in the main checkout's `.tmp/wai-go/js`. Not a REAP cell (WAS17 (a)).
+
+**WAS40 (a)**: `wai-go-aot` was already the fragment's `--full` step over `go-aot.txt`; the rest of the Go corpus at AOT is the new step
+`wai-go-aot-rest` (`bin/wai go --aot --vs-eval`: each program at AOT judged against eval's record, program for program), with GT8.4's
+`:rotate` over `test/wasm/go-results.edn` and the subset `test/wasm/subsets.edn` (go-aot.txt's 18), not spliced (WAS48 on its cost).
+The fragment also gains `wai-js-essential` (essential) and `wai-js` (`--full`).
+
+**The caveat from WA6** (`bin/wai go --aot` on the final generated bodies): see "Counts" and "Measured".
+
+**Counts**:
+
+| | before (WA6) | after (this branch) |
+|---|---|---|
+| syscall/js's tests on wai | no check (no js host) | **37 of 37 pass** |
+| Go's own js programs | none | **6 of 6** |
+| the demo's frames | none | **90 frames, 8 stated, all digests: pass** |
+| the shim's checks | none | **imports 25 = 25 = 25 = 25; operation table 14 = 14** |
+| js corpus (`bin/wai js`) | none | **47 of 47**; controls 7 fail, 2 checks pass |
+| testsuite at eval (essential) | 18,601 commands | 18,601 (unchanged after HostCall) |
+| the Go programs at AOT (`go-aot.txt`) | 18 of 18 | **18 of 18** (rerun on the final generated bodies, with HostCall: equal to the record, nothing re-recorded) |
+
+**Measured** (one run at a time under the 2.5 GiB watcher, after night 13's gate): `bin/wai js` 23-24 s warm, 0.19 GB; its builds (the
+test binary and seven programs) 7 s on a warm Go cache; `waidriver gojs` on syscall/js's tests 20 s and 0.18 GB, on the scene's 90
+frames under a second; the conversions by repr/go's native reader: wai 105 s and 1.10 GB, the driver 115 s and 0.97 GB; `bin/wai
+essential` 67 s. `bin/wai go --aot` over the 18 programs 2,694 s and 0.69 GB; `bin/wai aot-essential` 61 s and 0.55 GB.
+
+**Proofs**: `bin/wai js` (47 of 47, controls) and `--essential` (43); `bin/wai essential` (18,601 commands, unchanged), `bin/wai go
+--essential` (49 of 49), `bin/wai aot-essential` (16,234 commands, 1,779 of 1,779 functions), `bin/wai go --aot` (18 of 18), `bin/wai w2g
+check` and `ops check`; the fragment spliced into a copy of `test/gate/steps.edn` (with its new `;;@ crops` and `;;@ controls` sections:
+every step a control file) and `gate.crops check` on it: 0 problems; `bin/reap` 0 problems (53 of 56 cells, the WebAssembly row
+unchanged: not a cell, WAS17 (a)); `bin/crops-score --record` (no score moved) and `--judge --strict` 0 problems; `make
+check-makefile`; `test/gate/gate-key-crops-test.bash` passes and `bin/arbace-go --gate-key` is `c01784b6...` before and after; `bin/wasm
+build` writes the page. Not run: `bin/wasm serve` (by hand only), the whole `wai-go-aot-rest` (about 57 hours), any browser.
+
+**Proposals** (numbered after WAS42):
+
+- **WAS43 eval in the headless world.** syscall/js's tests evaluate JavaScript text (an object literal with a function, an immediately
+  invoked function with `Object.freeze`). (a) as built: a small subset of JavaScript evaluated over the world's values (doc/wasm/WAI.md
+  §10.3), a SyntaxError naming the subset outside it; (b) a table of the strings the known programs pass; (c) a JavaScript crop first
+  (WAS17 (b)). *Recommended: (a)*: (b) is no judge of a new program and (c) is a survey of its own; the subset grows with the programs.
+- **WAS44 The world's clock.** (a) as built: virtual (the monotonic time 1 µs a reading and moved to the next timer or frame when the
+  world waits; the wall clock from 2026-01-01), so a run is a function of its module, arguments and input; (b) the host's real clock, as
+  Node's. *Recommended: (a)*: the frames and the timers' order are judged; a program measuring its own speed sees no real time.
+- **WAS45 The headless world's file system.** (a) as built: the driver's mounts (host directories, a lexical sandbox, read-only ones
+  EROFS), nothing outside them; (b) a memory tree, as the shim's. *Recommended: (a)* for the checks (Go's js programs read and write
+  files as wasip1's do), the memory tree for the browser.
+- **WAS46 The demo's form.** The brief asks for Go forms; repr/go's configurations are linux/amd64 and arm64 (`arbace.repr.go.load/config`
+  refuses GOARCH=wasm), and a js/wasm configuration is a change to `arbace/repr/go`, inside gate_key. (a) as built: `wasm/demo/` as Go
+  text (outside every key), converted to Go forms when repr/go reads js/wasm, at the key window W (with WA9's jrt and goi table files,
+  WAS24 (a)); (b) the change to repr/go now, moving gate_key. *Recommended: (a)*.
+- **WAS47 The development server's form.** (a) as built: `wasm/serve/main.go`, Go text built by TamaGo's go on demand, a person's tool;
+  (b) Go forms with the demo at W. *Recommended: (a)* now, (b) with WAS46.
+- **WAS48 The rotation's cost** (WAS40 (a)). GT8.4's seven slices give about 167 programs a night, about 3 minutes each when wai
+  changed (8 hours: over the half share, WAS23), nothing on a night with wai unchanged (the AOT programs and the passes kept by key).
+  (a) keep `wai-go-aot-rest` unspliced until WAS40 (c) (a Go program's runtime translated once, keyed by content) brings a program to
+  seconds; (b) splice it now; (c) a slicing of its own (a 21st a night). *Recommended: (a)*.
+- **WAS49 The frames' judge.** (a) as built: two levels, the authors' stated values (the arithmetic, within 1e-5) and a run's digests of
+  every frame's calls (`--record`); (b) the digests alone. *Recommended: (a)*: the stated values are the judge independent of a run; the
+  digests catch any other change of the stream.
+
+**Not done**: Arbace's own js build and its REPL in the page (WA9: the key window), the scene from Arbace (`arbace.web.gpu`, WAS22's
+second step), the oracle tier's headless Chromium pack and the Mac's checklist (no browser here), textures and meshes fetched as assets
+(the shim's fs mounts no HTTP tree yet), the demo as Go forms (WAS46), WAS40 (c).

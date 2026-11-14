@@ -59,7 +59,7 @@ Two files and the module, no npm, no build step:
 | 12 | `QueueWriteBuffer` | device, buffer, offset, pointer, length | `device.queue.writeBuffer(buffer, offset, new Uint8Array(memory, pointer, length))`: a view of linear memory |
 | 13 | `QueueSubmit` | device | `device.queue.submit([encoder.finish()])` |
 
-The Go side is the package `arbace/webgpu` (`wasm/demo/go/arbace/webgpu{.ae,/}`, Go forms): `Register`, `Release`, `Await`,
+The Go side is the package `arbace/webgpu` (`wasm/demo/webgpu/webgpu.go`; Go text until repr/go reads js/wasm, WAS46): `Register`, `Release`, `Await`,
 `Commands` (an encoder method per operation, `Exec`), `Bytes`/`Addr` (a slice's linear-memory view and address). The headless world's
 decoder (`go/arbace/wai/gojspage.ae`'s `gpuBridge.exec`) is the shim's statement for statement over its recording fakes, so the
 per-frame stream of WebGPU calls is data and judged (§5). Breadth later (WAS16 (c)): the Go API generated from `webgpu.idl`.
@@ -85,10 +85,11 @@ delivered before the frame's callbacks, into the ring and to the `addEventListen
 
 ## 5. The demo (WAS22 (a): Go first)
 
-**The scene** (`wasm/demo/go/arbace/scene{.ae,/}`, Go forms, package main; the bridge's package beside it): a lit rotating cube (36
+**The scene** (`wasm/demo/scene/main.go`, package main of the module `arbace` in `wasm/demo/`, the bridge's package beside it;
+Go text, not Go forms yet: repr/go's configurations are linux/amd64 and arm64, and a js/wasm one is a change to `arbace/repr/go`,
+inside the keys: WAS46): a lit rotating cube (36
 vertices, a colour a face, a depth buffer, one render pass a frame) and a compute pass over a field of 256 particles; the arrow keys
-change the spin; a fixed 60 Hz step (each step turns the cube by speed × 2π/120). Built for js/wasm by TamaGo's go from its forms
-printed by repr/go (`bin/wai scene-build`; `bin/wasm build DIR` writes the page with it).
+change the spin; a fixed 60 Hz step (each step turns the cube by speed × 2π/120). Built for js/wasm by TamaGo's go (`bin/wai scene-build`; `bin/wasm build DIR` writes the page with it).
 
 **Its judge** (`bin/wai js`'s row `js/scene`, `test/wasm/frames.ae`): 90 frames on the headless world with the input script
 `test/wasm/js/scene/input.txt` (ArrowRight before frame 31); standard output against `want.out`; the recording against
