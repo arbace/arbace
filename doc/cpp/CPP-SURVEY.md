@@ -7790,3 +7790,14 @@ sema.ae during the first probe round, whose i1a read a half-written file and was
 result was not taken as a proof); once two runs at once (the w2 probes beside library.cpp's generation, 1.3 GB each); a few waiting loops
 with a foreground `sleep 10`. Every result in the tables above is from a run after its last edit, except library.cpp's drops (fix 5's
 code, as said).
+
+### Continued (2026-11-14 04:00-04:35, the disk limit 88% after the night gate ended)
+
+- b1a, b1n (the bit builtins of unsigned __int128): llvmi 0, the control 1.
+- f8 and library.cpp generated again (264 s, 1.20 GB; 449 s, 1.30 GB; library.cpp at the code before the next fix): drops 12/20 and
+  14/33 as before; both now refused at `mangle` "operator sizeof...": `sizeof...(P)` of an unbound parameter pack in a signature
+  (<bits/stl_iterator_base_funcs.h> under <format>) had no mangling. Fixed (written, not run): template.ae records the pack's parameter
+  index, abi.ae's mangle-expr writes Itanium's `sZ <template-param>`; probe z1a/z1n (`enable_if<sizeof...(P) == 2, int>::type f(P...)`,
+  `I<sizeof...(P)> g(P...)`) written.
+- Stopped again at 89% (`/`, the gate's rerun or other lanes; this worktree 0.5 GB): z1a/z1n and everything after are not run.
+  Rule slip: abi.ae and template.ae edited while library.cpp's generation ran (it had loaded them; its result is the pre-edit code's).
