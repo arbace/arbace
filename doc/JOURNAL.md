@@ -5394,3 +5394,26 @@ After the disk came back to 82%: llvm-essential's commands (43, 43, 4, 43 pass; 
 controls-test, cpp-print-essential's command (33 and 9 of 9), `bin/cppi codegen-gen` (155 of 155), `bin/reap` (0 problems) and
 `bin/crops-score --judge --strict` (0), each under 1.5 GB. Decided by the main session for the user's overnight rule: LLS51 (b), LLS52 (a)
 (the >2.5 GiB runs scheduled by the main session when no gate runs), LLS53 (a).
+
+## 2026-11-14: cpp-s13, C++'s link within 2.5 GiB and f8's and library.cpp's drops (branch `cpp-s13`, from `mac/llvm-eh` 821192482)
+
+The chain's continuation under the user's overnight rule (recommended continuations, no key move, nothing fetched). Light, one process
+at a time, a watcher at 2.5 GiB; no gate, big lock, clang, g++ or gcc. Details in doc/cpp/CPP-SURVEY.md, "As built: cpp-s13".
+- The link's memory: arbace.cpp.run kept every linked runtime unit checked (forms and the checker's results) and built the program from
+  all of them at once. Taken: CS273 (a) (the user, 2026-11-03), `ci-prebuilt-cpp`'s build-linked-prebuilt (bbeab9fe7): each unit checked
+  alone into its fragment, cached by the library's key, the link over the fragments with link-text's prune; `CI_PREBUILT=0` the old
+  build. Considered: per-unit disk caches of the checked forms (LLS52 (b)'s wording), a GOMEMLIMIT alone (the units were live, not
+  garbage). The five links: 0.47-1.94 GB (before: killed past 2.5 GiB); pr77550, atomics and hello pass against g++'s records; f8 and
+  library.cpp fail (an undefined constructor template; an uncaught __ios_failure).
+- tzdb.cc's read: its 107,471-byte table was a list of integer constants; the lowering writes a c-string of 4,096 bytes or more as one
+  literal (only tzdb.cc's in the runtime): 2.20 GB (before 2.6+). Considered: reading the unit in parts (the read is per file), every
+  c-string a literal (every lowered C changes).
+- The drops, each general with a probe and a control: the headers' last round makes a never-defined template's specialization an
+  incomplete class; variable templates' explicit specializations; members of explicit specializations defined outside them (template-id
+  qualifiers); constructor templates defined outside a class template; GNU abi_tag on classes; 128-bit values inside the constant
+  evaluators (out of them only as an i128 constant); the generic bit builtins of 128-bit operands (not run). f8 35/86 → 12/20 causes/drops,
+  library.cpp 26/67 → 14/33.
+- Stopped when `/` reached 86% then 88% (the concurrent gate on next; this worktree 0.6 GB): the probes b1a/b1n, f8's and library.cpp's
+  generation and runs, the full runtime, gen-batch over the 81, codegen-gen, the essential commands, reap, crops-score and the key test
+  are the survey's night commands. Proposed CP386 (the prebuilt link as cppi's default), CP387 (long strings as literals), CP388
+  (128-bit constants).

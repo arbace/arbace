@@ -1781,6 +1781,41 @@
 
 (declare ce-eval ce-wrap ub! not-constant)
 
+(def ^:dynamic *ce-wide*
+  "cpp-s13: true inside an evaluation (const-int's, ce-eval's), where a 128-bit value outside 64 bits is a value (a BigInt);
+  its result outside 64 bits is not a constant (narrow-out), as before: only evaluations' own steps see them (an if
+  constexpr's comparison of __numeric_traits_integer<__int128>::__max)."
+  false)
+
+(defn ce-num
+  "An evaluation's integral value as a number to compute with: a long, or a BigInt outside 64 bits (a 128-bit value)."
+  [v]
+  (if (and (integer? v) (not (instance? Long v)) (or (> v Long/MAX_VALUE) (< v Long/MIN_VALUE))) (bigint v) (long v)))
+
+(defn- wide-value? [v] (and (integer? v) (not (instance? Long v)) (or (> v Long/MAX_VALUE) (< v Long/MIN_VALUE))))
+
+(defn- wide-literal
+  "cpp-s13: a 128-bit value as an :int node's :v (its LLVM constant): the signed representation, as a 64-bit unsigned one is a
+  negative long."
+  [v]
+  (let [x (bigint v)] (if (>= x 170141183460469231731687303715884105728N) (- x 340282366920938463463374607431768211456N) x)))
+
+(declare wide?)
+
+(defn- from-src
+  "cpp-s13: an integral value of the type `src` as the value it stands for when converted to a 128-bit type: a 64-bit unsigned
+  one held as a negative long is 2^64 more ([conv.integral]/2's zero extension)."
+  [src t v]
+  (let [src (when src (abi/underlying (abi/unq src)))]
+    (if (and (wide? t) src (abi/integral? src) (not (abi/signed? src)) (not (wide? src)) (instance? Long v) (neg? (long v)))
+      (+ (bigint v) 18446744073709551616N)
+      v)))
+
+(defn- narrow-out
+  "An evaluation's result `v` where it leaves the evaluator: a 128-bit value outside 64 bits not a constant (CP5b's rule)."
+  [v]
+  (if (wide-value? v) (not-constant "a 128-bit value outside 64 bits") v))
+
 (defn- wide?
   "cpp-s5b (pending review 1111 #2): whether the integral type `t` is wider than 64 bits (__int128, unsigned __int128)."
   [t]
@@ -1788,17 +1823,18 @@
     (and (abi/integral? t) (> (* 8 (long (abi/size-of t))) 64))))
 
 (defn- wide-binop
-  "cpp-s5b (pending review 1111 #2): a 128-bit type's arithmetic on the operands' values (longs: ce-wrap keeps a 128-bit
-  value only while it fits 64 bits) computed exactly, for ce-wrap to refuse a result outside 64 bits, never computed modulo
-  2^64 (`(unsigned __int128)1 << 64` was 0); a shift by a count outside 0..127 and a division by zero are not constants."
+  "cpp-s5b (pending review 1111 #2): a 128-bit type's arithmetic on the operands' values computed exactly (cpp-s13: the operands
+  themselves may be outside 64 bits, ce-wrap holding a 128-bit value as a BigInt then), for ce-wrap to reduce to the type's
+  width, never computed modulo 2^64 (`(unsigned __int128)1 << 64` was 0); a shift by a count outside 0..127 and a division by
+  zero are not constants."
   [^String o a b]
-  (let [a (long a) b (long b) A (bigint a) B (bigint b)]
+  (let [A (biginteger (ce-num a)) B (biginteger (ce-num b))]
     (case o
-      "+" (+ A B) "-" (- A B) "*" (* A B)
-      ("/" "%") (if (zero? b) (not-constant "division by zero") (if (= o "/") (quot A B) (rem A B)))
-      "<<" (if (<= 0 b 127) (* A (bigint (.pow (java.math.BigInteger/valueOf 2) (int b)))) (not-constant "a shift by " b))
-      ">>" (if (<= 0 b 127) (bit-shift-right a (min b 63)) (not-constant "a shift by " b))
-      "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)
+      "+" (bigint (.add A B)) "-" (bigint (.subtract A B)) "*" (bigint (.multiply A B))
+      ("/" "%") (if (zero? (.signum B)) (not-constant "division by zero") (bigint (if (= o "/") (.divide A B) (.remainder A B))))
+      "<<" (let [n (long (ce-num b))] (if (<= 0 n 127) (bigint (.shiftLeft A (int n))) (not-constant "a shift by " n)))
+      ">>" (let [n (long (ce-num b))] (if (<= 0 n 127) (bigint (.shiftRight A (int n))) (not-constant "a shift by " n)))
+      "&" (bigint (.and A B)) "|" (bigint (.or A B)) "^" (bigint (.xor A B))
       nil)))
 
 (declare const-int)
@@ -1818,32 +1854,32 @@
   [id]
   (let [v (var* id)]
     (if (contains? v :cint)
-      (:cint v)
-      (let [c (const-int (or (:def-scope v) *root*) (:init v))]
+      (if *ce-wide* (:cint v) (narrow-out (:cint v)))
+      (let [c (binding [*ce-wide* true] (const-int (or (:def-scope v) *root*) (:init v)))]
         (upd-var! id assoc :cint c)
-        c))))
+        (if *ce-wide* c (narrow-out c))))))
 
 (defn const-int [scope n]
   (tick!)
   (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
     (letfn [(ev [e]
               (case (:op e)
-                :int (if (:ice e) 1 (:v e))
+                :int (if (:ice e) 1 (if (and (:ty e) (wide? (:ty e))) (ce-wrap (:ty e) (:v e)) (:v e)))
                 ;; G5c: the value converted to the cast's type ([conv.integral]/3: modulo 2^N for an unsigned one), so that
                 ;; libstdc++'s __numeric_traits_integer<unsigned>::__is_signed, (_Value)(-1) < 0, is false
-                :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) (ce-wrap (:ty e) v) (fail :const "constant cast")))
+                :cast (let [v (ev (:e e))] (if (abi/integral? (:ty e)) (ce-wrap (:ty e) (from-src (:ty (:e e)) (:ty e) v)) (fail :const "constant cast")))
                 ;; (CP325 (a): 64-bit arithmetic wraps, as the unsigned types' modulo 2^N does; a signed overflow is the
                 ;; program's error, which this evaluation does not judge -- parse/enum4.C's 9223372036854775807ULL * 2 + 1 had
                 ;; thrown Java's ArithmeticException, a crash of the analysis)
                 :unop (let [v (ev (:e e))]
                         (if (and (#{"-" "~"} (:o e)) (wide? (:ty e)))
-                          (ce-wrap (:ty e) (if (= "-" (:o e)) (- (bigint v)) (bit-not (long v))))
-                          (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (long v)) 1 0))))
+                          (ce-wrap (:ty e) (if (= "-" (:o e)) (- (bigint v)) (- -1 (bigint v))))
+                          (case (:o e) "-" (unchecked-negate (long v)) "+" v "~" (bit-not (long v)) "!" (if (zero? (ce-num v)) 1 0))))
                 ;; (review 1111 #5: && and || short-circuit, [expr.log.and]/1, so that 2 || 1 / 0 is 1; a division by zero is not a
                 ;; constant, as ce-eval's, never Java's ArithmeticException: warn/overflow-warn-3.C's enumerators had crashed Sema)
-                :binop (let [a (long (ev (:l e)))
+                :binop (let [a (ce-num (ev (:l e)))
                              sc (case (:o e) "&&" (when (zero? a) 0) "||" (when-not (zero? a) 1) nil)
-                             b (if sc 0 (long (ev (:r e))))
+                             b (if sc 0 (ce-num (ev (:r e))))
                              u (and (abi/integral? (:ty e)) (not (abi/signed? (:ty e))))
                              _ (when (and (not sc) (#{"/" "%"} (:o e)) (zero? b))
                                  (if (checking?) (ub! e "division by zero") (not-constant "division by zero")))
@@ -1856,18 +1892,23 @@
                                      "==" (if (= a b) 1 0) "!=" (if (not= a b) 1 0) "&&" (if (and (not= a 0) (not= b 0)) 1 0)
                                      "||" (if (or (not= a 0) (not= b 0)) 1 0)))]
                          (if (abi/integral? (:ty e)) (ce-wrap (:ty e) r) r))
-                :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
-                ;; (compared in the operands' common type: unsigned ones as unsigned, [expr.rel]/5, [conv.arith])
-                :cmp (let [a (long (ev (:l e))) b (long (ev (:r e)))
-                           c (if (and (:ct e) (abi/integral? (:ct e)) (not (abi/signed? (:ct e)))) (Long/compareUnsigned a b) (compare a b))]
+                :cond (if (zero? (ce-num (ev (:c e)))) (ev (:else e)) (ev (:then e)))
+                ;; (compared in the operands' common type: unsigned ones as unsigned, [expr.rel]/5, [conv.arith]; a 128-bit
+                ;; value as its value, cpp-s13)
+                :cmp (let [a (ce-num (ev (:l e))) b (ce-num (ev (:r e)))
+                           c (cond (or (wide-value? a) (wide-value? b)) (compare (bigint a) (bigint b))
+                                   (and (:ct e) (abi/integral? (:ct e)) (not (abi/signed? (:ct e))) (not (wide? (:ct e)))) (Long/compareUnsigned a b)
+                                   :else (compare a b))]
                        (case (:o e) "<" (if (neg? c) 1 0) ">" (if (pos? c) 1 0) "<=" (if (<= c 0) 1 0) ">=" (if (>= c 0) 1 0)
                              "==" (if (zero? c) 1 0) "!=" (if (zero? c) 0 1)))
-                :not (if (zero? (long (ev (:e e)))) 1 0)
-                :land (if (and (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
-                :lor (if (or (not= 0 (long (ev (:l e)))) (not= 0 (long (ev (:r e))))) 1 0)
+                :not (if (zero? (ce-num (ev (:e e)))) 1 0)
+                :land (if (and (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
+                :lor (if (or (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
                 :load (let [v (var* (:id (:e e)))] (if (and (:c (:ty v)) (:init v)) (var-const-int (:id (:e e))) (ce-eval e)))
                 (ce-eval e)))]
-      (binding [*ce-manifest* true] (ev e)))))
+      (if *ce-wide*
+        (binding [*ce-manifest* true] (ev e))
+        (narrow-out (binding [*ce-manifest* true *ce-wide* true] (ev e)))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Constant evaluation ([expr.const]): the typed expressions of integral and floating values, calls of constexpr
@@ -1936,11 +1977,15 @@
       (abi/floating? t) (if (= :float (abi/bn t)) (double (float (double v))) (double v))
       ;; (cpp-s5b, pending review 1111 #2: a 128-bit value is held as a long while it fits 64 bits, as the type's value
       ;; (an unsigned one not negative); outside, not a constant, never truncated)
-      (wide? t) (let [x (if (float? v) (long (double v)) v)]
-                  (if (and (<= Long/MIN_VALUE x Long/MAX_VALUE) (or (abi/signed? t) (not (neg? x))))
-                    (long x)
-                    (not-constant "a " (* 8 (long (abi/size-of t))) "-bit value outside 64 bits")))
-      (abi/integral? t) (let [bits (* 8 (abi/size-of t)) x (long (if (float? v) (long (double v)) v))]
+      ;; (cpp-s13: reduced to the type's width, [conv.integral]/3, a BigInt when outside 64 bits: only inside an evaluation,
+      ;; narrow-out refusing such a result where it leaves)
+      (wide? t) (let [bits (int (* 8 (long (abi/size-of t))))
+                      x (biginteger (if (float? v) (long (double v)) (ce-num v)))
+                      m (.shiftLeft java.math.BigInteger/ONE bits)
+                      y (.mod x m)
+                      y (if (and (abi/signed? t) (.testBit y (int (dec bits)))) (.subtract y m) y)]
+                  (if (< (.bitLength y) 64) (.longValue y) (bigint y)))
+      (abi/integral? t) (let [bits (* 8 (abi/size-of t)) x (if (float? v) (long (double v)) (if (wide-value? v) (.longValue (biginteger v)) (long v)))]
                           (if (>= bits 64) x
                               (let [m (dec (bit-shift-left 1 bits)) y (bit-and x m)]
                                 (if (and (abi/signed? t) (>= y (bit-shift-left 1 (dec bits)))) (- y (bit-shift-left 1 bits)) y))))
@@ -1971,7 +2016,9 @@
   ;; (CP374 (a): a pointer is a value inside an evaluation only: as its result, not a constant -- the callers fold integers
   ;; and floats; codegen-gen's globals.cpp, a pointer global's initializer folded to a long, had crashed)
   ;; (CP378 (a): likewise an object's value or a location)
-  ([e] (binding [*ce-steps* (atom 0)] (let [v (ce-eval e {})] (if (or (ce-ptr? v) (map? v)) (not-constant (if (ce-ptr? v) "a pointer's value" "an object's value")) v))))
+  ([e] (binding [*ce-steps* (atom 0)]
+        (let [w *ce-wide* v (binding [*ce-wide* true] (ce-eval e {}))]
+          (if (or (ce-ptr? v) (map? v)) (not-constant (if (ce-ptr? v) "a pointer's value" "an object's value")) (if w v (narrow-out v))))))
   ([e env]
    (when (> (long (swap! *ce-steps* inc)) 1000000) (not-constant "too many steps"))
    (when (zero? (rem (long @*ce-steps*) 4096)) (tick!))
@@ -1979,7 +2026,7 @@
          t (:ty e)]
      (case (:op e)
        ;; (CP378 (a): `__builtin_is_constant_evaluated()`, an :int 0 marked :ice, true when manifestly constant-evaluated)
-       :int (if (and (:ice e) *ce-manifest*) 1 (:v e))
+       :int (if (and (:ice e) *ce-manifest*) 1 (if (and (:ty e) (wide? (:ty e))) (ce-wrap (:ty e) (:v e)) (:v e)))
        :float (:v e)
        ;; (CP378 (a): class objects: `this`, an address, a prvalue object, a value-initialized scalar)
        :this (or (::this env) (not-constant "this outside a member's evaluation"))
@@ -1989,18 +2036,18 @@
        :cast (let [_ (when (#{:ptr->int :int->ptr} (:ck e)) (ce-top-sure! "reinterpret_cast: conversion from pointer type"))
                    v (ev (:e e))]
                (case (:ck e)
-                 (:noop :int :int->fp :fp :fp->int) (ce-wrap t (if (and (= :fp->int (:ck e))) (long (double v)) v))
+                 (:noop :int :int->fp :fp :fp->int) (ce-wrap t (if (and (= :fp->int (:ck e))) (long (double v)) (from-src (:ty (:e e)) t v)))
                  :to-bool (if (or (ce-ptr? v) (ce-loc? v)) 1 (if (zero? (double v)) 0 1))
                  ;; ([expr.const]/5.15: a reinterpret_cast, as a conversion between a pointer and an integer is)
                  (not-constant "cast " (:ck e))))
        :unop (let [v (ev (:e e))]
-               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (if (wide? t) (- (bigint v)) (- (long v)))) "+" v "~" (bit-not (long v)))))
-       :not (if (zero? (long (ev (:e e)))) 1 0)
+               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (if (wide? t) (- (bigint v)) (- (long v)))) "+" v "~" (if (wide? t) (- -1 (bigint v)) (bit-not (long v))))))
+       :not (if (zero? (ce-num (ev (:e e)))) 1 0)
        :binop (let [a (ev (:l e)) b (ev (:r e))]
                 (if (abi/floating? t)
                   (let [a (double a) b (double b)]
                     (ce-wrap t (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b) "/" (/ a b) (not-constant "op " (:o e)))))
-                  (let [a (long a) b (long b) u (not (abi/signed? t))]
+                  (let [a (ce-num a) b (ce-num b) u (not (abi/signed? t))]
                     ;; (CX12, the checker: the operations whose result is undefined, ExprConstant's diagnostics)
                     (when (and (checking?) (abi/integral? t) (#{"+" "-" "*" "/" "%" "<<" ">>"} (:o e)))
                       (let [bits (* 8 (long (abi/size-of (abi/underlying (abi/unq t)))))
@@ -2041,11 +2088,13 @@
                               (if (and (#{"==" "!="} (:o e)) (= 0 (if (ce-ptr? a) b a))) [0 1] (not-constant "a pointer compared"))
                               :else [a b])
                   c (if (or (float? a) (float? b)) (compare (double a) (double b))
-                        (if (abi/signed? (:ct e)) (compare (long a) (long b)) (Long/compareUnsigned (long a) (long b))))]
+                        (cond (or (wide-value? a) (wide-value? b)) (compare (bigint a) (bigint b))
+                              (or (abi/signed? (:ct e)) (wide? (:ct e))) (compare (long a) (long b))
+                              :else (Long/compareUnsigned (long a) (long b))))]
               (if (case (:o e) "<" (neg? c) ">" (pos? c) "<=" (<= c 0) ">=" (>= c 0) "==" (zero? c) "!=" (not (zero? c))) 1 0))
-       :land (if (and (not (zero? (long (ev (:l e))))) (not (zero? (long (ev (:r e)))))) 1 0)
-       :lor (if (or (not (zero? (long (ev (:l e))))) (not (zero? (long (ev (:r e)))))) 1 0)
-       :cond (if (zero? (long (ev (:c e)))) (ev (:else e)) (ev (:then e)))
+       :land (if (and (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
+       :lor (if (or (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
+       :cond (if (zero? (ce-num (ev (:c e)))) (ev (:else e)) (ev (:then e)))
        :comma (do (ev (:l e)) (ev (:r e)))
        :load (let [x (:e e)
                    ;; (cpp-s4: an element of a local constant array, `__found[__i]` of libstdc++'s __find_uniq_type_in_pack,
@@ -2198,13 +2247,13 @@
                      (let [r (ce-exec x @env)] (if (= :normal (first r)) (recur more) r))))))
     :return (cond (:void-e s) [:ret 0] (:init s) [:ret (ce-init (::ret env) (:init s) env)] :else [:ret 0])
     :expr (do (ce-eval (:e s) env) [:normal])
-    :if (if (zero? (long (ce-eval (:cond s) env))) (if (:else s) (ce-exec (:else s) env) [:normal]) (ce-exec (:then s) env))
-    :while (loop [] (if (zero? (long (ce-eval (:cond s) env))) [:normal]
+    :if (if (zero? (ce-num (ce-eval (:cond s) env))) (if (:else s) (ce-exec (:else s) env) [:normal]) (ce-exec (:then s) env))
+    :while (loop [] (if (zero? (ce-num (ce-eval (:cond s) env))) [:normal]
                         (let [r (ce-exec (:body s) env)] (case (first r) :ret r :break [:normal] (recur)))))
     :do (loop [] (let [r (ce-exec (:body s) env)]
                    (case (first r) :ret r :break [:normal]
-                         (if (zero? (long (ce-eval (:cond s) env))) [:normal] (recur)))))
-    :for (loop [] (if (and (:cond s) (zero? (long (ce-eval (:cond s) env)))) [:normal]
+                         (if (zero? (ce-num (ce-eval (:cond s) env))) [:normal] (recur)))))
+    :for (loop [] (if (and (:cond s) (zero? (ce-num (ce-eval (:cond s) env)))) [:normal]
                       (let [r (ce-exec (:body s) env)]
                         (case (first r) :ret r :break [:normal]
                               (do (when (:inc s) (ce-eval (:inc s) env)) (recur))))))
@@ -2237,7 +2286,7 @@
                (update (ce-lv (:e e) env) ::path into p))
     :temp (ce-cell-loc (ce-init (:ty e) (:init e) env))
     :temp-obj (ce-cell-loc (ce-eval e env))
-    :cond (if (zero? (long (ce-eval (:c e) env))) (ce-lv (:else e) env) (ce-lv (:then e) env))
+    :cond (if (zero? (ce-num (ce-eval (:c e) env))) (ce-lv (:else e) env) (ce-lv (:then e) env))
     :call (let [v (ce-eval e env)] (if (ce-loc? v) v (ce-cell-loc v)))
     (not-constant "the object of " (:op e))))
 
@@ -2361,8 +2410,12 @@
   expressions' initializer (CP378 (a))."
   ([e] (ce-try e false))
   ([e manifest]
-  (try (let [v (binding [*ce-manifest* manifest] (ce-eval e)) t (abi/unq (:ty e))]
-         (if (abi/floating? t) {:op :float :v (double v) :ty t :cat :pr} {:op :int :v (long v) :ty t :cat :pr}))
+  (try (let [t (abi/unq (:ty e))
+             ;; (cpp-s13: a 128-bit type's value outside 64 bits folds to its i128 constant)
+             v (binding [*ce-manifest* manifest *ce-wide* (boolean (wide? t))] (ce-eval e))]
+         (cond (abi/floating? t) {:op :float :v (double v) :ty t :cat :pr}
+               (wide-value? v) {:op :int :v (wide-literal v) :ty t :cat :pr}
+               :else {:op :int :v (long v) :ty t :cat :pr}))
        (catch arbace.lang.ExceptionInfo x (when-not (:codegen/not-constant (ex-data x)) (when-not (:codegen/refused (ex-data x)) (throw x))) nil))))
 
 (defn fold-mark
@@ -2410,8 +2463,9 @@
       ;; a function lvalue: its address; *p of a function pointer p: p itself
       (abi/fn? t) (if (= :deref (:op e)) (:e e) {:op :fnaddr :e e :fn (:fn e) :ty (abi/ptr t) :cat :pr})
       (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
-      (let [c (try (var-const-int (:id e)) (catch arbace.lang.ExceptionInfo _ nil))]
-        (if c {:op :int :v c :ty (abi/unq t) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
+      ;; (cpp-s13: a 128-bit constant outside 64 bits too, its i128 constant: __numeric_traits_integer<__int128>::__max)
+      (let [c (try (binding [*ce-wide* (boolean (wide? t))] (var-const-int (:id e))) (catch arbace.lang.ExceptionInfo _ nil))]
+        (if c {:op :int :v (if (wide-value? c) (wide-literal c) c) :ty (abi/unq t) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
       ;; o.k of a constant static member: o evaluated, k folded (not an odr-use)
       (and (= :comma (:op e)) (= :var (:op (:r e))) (lv? e) (not (abi/class? t)))
       (let [r (rv (:r e))] (if (= :int (:op r)) {:op :comma :l (:l e) :r r :ty (:ty r) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
@@ -5014,7 +5068,10 @@
         (let [[which tn] b
               x (rv (analyze ctx (second (kids n))))
               t (if tn (abi/b tn) (abi/unq (:ty x)))
-              _ (when-not (and (abi/integral? t) (#{1 2 4 8} (abi/size-of t))) (fail :type (name which) " of " (pr-str t)))
+              ;; (cpp-s13: the generic ones of a 128-bit operand too, clang's llvm.ctlz.i128 and the rest, which the lowering
+              ;; splits in halves: <bit>'s __countl_zero<unsigned __int128> under <format>)
+              _ (when-not (and (abi/integral? t) (or (#{1 2 4 8} (abi/size-of t)) (and (= 16 (abi/size-of t)) (not= :bswap which))))
+                  (fail :type (name which) " of " (pr-str t)))
               fb (when-let [f (nth (kids n) 2 nil)] (convert-scalar (rv (analyze ctx f)) abi/int* false))]
           {:op :bitop :which which :e (convert-scalar x t false) :fb fb :ty (if (= :bswap which) t abi/int*) :cat :pr})
       (case b

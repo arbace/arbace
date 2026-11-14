@@ -7667,3 +7667,126 @@ cpp-check-essential and cpp-lower-essential were not in this brief's list (the b
 
 Two `/dev/null` uses (a `> /dev/null` in the first command, a stray no-op `kill $(cat /dev/null)` after the docs commit) and one `git stash list` (listing only, nothing stashed); a few waiting loops left in the
 background after their 170 s limit (each only polled a log). Every proof ran alone after the last source edit.
+
+## As built: cpp-s13 (2026-11-14; branch `cpp-s13` from mac/llvm-eh 821192482; stopped by the disk at 86-88%)
+
+The chain's continuation (the user's overnight rule: recommended continuations, no key move, nothing fetched): llvm-eh's five unwinding
+programs whose link passed 2.5 GiB (f8, library.cpp, gxx-dg-run/pr77550, runtime/atomics, runtime/hello) and c++20/tzdb.cc's read (2.6-3
+GB) made to fit 2.5 GiB, run and judged; then f8's and library.cpp's drops reduced generally. Light, one process at a time (two slips
+below), main's stage 0, a watcher killing by PID any process of the worktree past 2.5 GiB (it killed one: the profiled link before the
+change, 2.6 GB). No gate, big lock, clang, g++ or gcc. Stopped when `/` passed 85% (86%, then 88%: not this worktree's, 0.6 GB of
+scratch; the concurrent gate on next), before the proofs; what is left is the night's commands below.
+
+### Where the link's memory went, and CS273 (a) taken
+
+arbace.cpp.run's build-linked checked every linked unit of the C++ runtime (libstdc++'s units are 1-2.5 MB of C forms each) and kept all
+of them checked (forms and the checker's results, an IdentityHashMap of every expression) until the whole program was built from them
+at once (build-program-direct's route: the C++ units' forms pruned, the checker's results still holding the pruned forms). The design
+for this exists since the prebuilt runtime (doc/C23-SURVEY.md, "As built: ci's prebuilt runtime", CS273 (a), decided by the user
+2026-11-03: "the C++ adaptation goes to CX8's line"), never taken: `ci-prebuilt-cpp`'s `build-linked-prebuilt` (bbeab9fe7). It is taken
+now: each library unit is checked alone, built into its fragment (arbace.c.build/unit-fragment, plain data), the checked unit dropped,
+the fragment cached on disk by the library's key (arbace.c.runtime/prebuilt: `.tmp/ci-runtime/cpp-KEY12/`, musl's beside), and the
+link is link-text's over the fragments with `:prune` (the C++ libraries' candidates cut by the items' references, as prune cut the
+forms). `CI_PREBUILT=0` keeps the old build (build-linked-forms); `CPPI_NO_PRUNE`, `CPPI_TRACE` as before. The node texts differ from
+the old build's (the prune's unit differs, CS273's measure: the runs the same); `nodes-list` and `compile-list` (cppi's check) take the
+same route.
+
+| Link (`arbace.cpp.run nodes`, GOMEMLIMIT 2 GiB) | before (llvm-eh) | after |
+|---|---|---|
+| samples/io.cpp (cold: the fragments made) | 221 s; 2.6 GB with the heap profile (killed) | 128 s, 0.87 GB; same stdout |
+| f8 | killed past 2.5 GiB | 171 s, 1.87 GB |
+| runtime/library.cpp | killed | 198 s, 1.94 GB |
+| gxx-dg-run/pr77550.C (warm) | killed | 16 s, 0.47 GB |
+| runtime/atomics.cpp | killed | 71 s, 0.64 GB |
+| runtime/hello.cpp | killed | 61 s, 0.88 GB |
+
+**The five run and judged** (their IR as llvm-eh lowered it; status and stdout against test/cpp/ref-gxx15.edn, f8 by its own "3"):
+pr77550, atomics and hello **pass**; f8 fails (status 139: `undefined function
+_ZNSt17basic_format_argsI...EEC2IJiEEERKNS1_10_Arg_storeIS4_JDpT_EEE`, basic_format_args' constructor template defined outside its class
+template: the code generator's gap, fixed below, not run again); library.cpp fails (status 134 after `Counter()`: `terminate called after
+throwing an instance of 'std::__ios_failure'`: the program's `catch (const std::ios_base::failure&)` named `_ZTINSt8ios_base7failureE`,
+the old ABI's class, where libstdc++ throws one derived from `failure[abi:cxx11]`: GNU abi_tag on a class, fixed below, not run again).
+
+### tzdb.cc's read
+
+c++20/tzdb.cc's lowered C has one line of 552,344 bytes: tzdata_chars, 107,471 bytes as `{{10u, 35u, ...}}`, every byte a constant of the
+reader's tree (the array alone read in 0.86 GB, 49 s). The lowering (`arbace.cpp.lower/cinit`) now writes a c-string initializer of
+`long-string-min` (4,096) bytes or more as one string literal (`byte-string`, its trailing zeros left to the array's zero fill), below that
+the integers as before: in the runtime only tzdb.cc reaches it (no other c-string over 2,000 bytes in the 199 units' IR), so every other
+unit's lowered C is unchanged byte for byte (tzdb.cc's differs on that line alone). Its read: **2.20 GB, 199 s** (before: killed at 2.6
+GB). The full runtime with it (runtime-build at the branch's key, then runtime-ci, which reads only the units whose lowered C changed) is
+the night's command 1.
+
+### f8's and library.cpp's drops, each fixed generally (a probe and its control each, `.tmp/probe/`)
+
+| # | Drop or refusal (before) | Cause | Fix |
+|---|---|---|---|
+| 1 | 42 of f8's 86 drops, "an incomplete class template basic_istream" (and basic_ostream, the stringstreams, spanstreams, syncbufs: `<iosfwd>`'s typedefs without `<istream>`), then their uses ("unknown type ostream", istream_type) | a header's typedef of a specialization whose template the headers never define stayed in the retry until dropped (CP372 (a) made such an instance incomplete only in the main file) | sema.ae's header rounds end with one more under `*incomplete-ok*`: template.ae's incomplete-instance! for what is still refused that way, then the rounds again ([temp.inst]/2) |
+| 2 | 10 drops "an explicit specialization's qualifier" (`<compare>`'s `__cmp_cat_id<partial_ordering>`, `<format>`'s `__is_formattable_integer<char>`) | an explicit specialization of a variable template was taken for one of a class member | kept as a partial specialization of no parameters (exactly its arguments), its pattern the declaration without its TemplateArgument nodes |
+| 3 | 4 drops "unknown type mask" (ctype<char>::is, scan_is, scan_not) | a member of an explicit specialization defined outside it (`bool ctype<char>::is(mask, char) const`, no `template<>`): qualifier-before reads plain names only, so its home was the namespace | sema.ae's qualifier-tid-before: the qualifier's template-ids too, for declare-fn!'s home |
+| 4 | f8's run: undefined basic_format_args<...>::basic_format_args<int>(const _Arg_store&) | a constructor template defined outside its class template: attach-member-template! looked it up by name (constructor templates are the class's :ctor-tmpls) and took FunctionDecl/CXXMethodDecl patterns only | constructor templates found in :ctor-tmpls, CXXConstructorDecl patterns |
+| 5 | library.cpp's run: ios_base::failure not caught | GNU abi_tag on a class not mangled | sema.ae's declare-class!: the class's :mname with its tags (`7failureB5cxx11`), wherever its name is mangled |
+| 6 | f8 and library.cpp then refused "an if constexpr's condition not evaluated (a 128-bit value outside 64 bits)" (`__numeric_traits_integer<__int128>::__max`, reached once the explicit specializations of 2 were declared) | cpp-s5b's rule (pending review 1111 #2): a 128-bit value outside 64 bits not a constant | the evaluators (const-int, ce-eval) hold such a value as a BigInt inside an evaluation (`*ce-wide*`, ce-num; ce-wrap reduces to 128 bits; wide-binop exact; a 64-bit unsigned value zero-extended into a 128-bit type, from-src); a result outside 64 bits leaves the evaluator only as a 128-bit type's i128 constant (rv's and ce-try's folds, its signed representation), else not a constant (narrow-out), as before |
+| 7 | f8 then: "ctlz of unsigned __int128" (`<bit>`'s __countl_zero) | the generic bit builtins took 1-8 byte operands | 16 too (not bswap): llvm.ctlz.i128 and the rest, which the lowering already splits in halves. **Written, not run** (the disk) |
+
+| Probe | What | After (control) |
+|---|---|---|
+| i1a, i1n | a header's typedefs of a never-defined class template's specializations, used in the header's inline functions | llvmi 0 (i1n 1) |
+| v1a, v1n | variable templates' explicit specializations, a fold over them | llvmi 0 (2) |
+| p1a, p1n | an out-of-line member of an explicit specialization whose parameter type is a base's typedef | llvmi 0 (2) |
+| m1a, m1n | an out-of-line constructor template (with a pack and an alias template parameter) and member template of a class template | llvmi 0 (1) |
+| a1a, a1n | `catch (const std::ios_base::failure&)` of a failed extraction (linked with C++'s runtime), a tagged class's typeid name `6TaggedB2v1` | llvmi 0 (2) |
+| w2a, w2n (w3-w6 on the way) | 128-bit constants: `__max` of __int128 and unsigned __int128, an if constexpr comparing them with unsigned long long's, static_asserts, a 128-bit global initialized from a constant | llvmi 0 (2) |
+| b1a, b1n | __builtin_clzg, ctzg, popcountg of unsigned __int128 | not run (the disk) |
+
+Found on the way: a function-local `static unsigned short t[256] = {};` is initialized under a guard (`__cxa_guard_acquire`), where clang
+initializes it statically (CP380's question for locals); llvmi's musl-only route has no guard functions, so p1a was rewritten with a global.
+
+Drops (gen-batch's drops.tsv): **f8 35 causes, 86 drops → 12, 20**; **library.cpp 26, 67 → 14, 33** (at fix 5's code). Neither generates
+yet: f8 stops at 7 (fixed, not run), library.cpp at 6 (fixed after its last run, not run). f8's remaining drops: 7 "a conversion function
+template" (`operator _CIt`, `_PairLike`, `_Tp`), 3 __promote's "unknown type _Tp", 4 _Weak_result_type_impl's `_GLIBCXX_NOEXCEPT_QUAL`
+function types, one each of `__make_unsigned_selector`, `__is_subrange`, `__common_reference_impl`'s template template argument,
+`_Ios_Openmode`'s attribute, `_GLIBCXX_STD_C`, `__max_size_type`'s `__rep`.
+
+### Keys
+
+The branch changes `arbace/cpp/` (lower.ae, run.ae, sema.ae, template.ae; crop paths) and doc/: no gate, runtime or seed key moves. The
+cpp runtime's key moves (lower.ae and run.ae are among its inputs: runtime-build again; runtime-ci then reads tzdb.cc alone, the only unit
+whose lowered C changes). `test/gate/gate-key-crops-test.bash` not run (the disk).
+
+### Not run (the disk), the night's commands (each light, one at a time; MemAvailable >= 12 GiB, `/` under 85%)
+
+```
+# 0. the probes not run: b1a b1n (each about 1 min, 0.4 GB)
+bash .tmp/pl.sh b1a b1n
+# 1. f8 and library.cpp generated again, then linked and run (gen 5-8 min, 1.2-1.3 GB; link 3 min, 1.9 GB; .tmp/judge.sh's steps)
+CPP_GEN_WHERE=1 bash .tmp/probe.sh f8 c++23; bash .tmp/run.sh .tmp/lib.log bash .tmp/gen.sh .tmp/LIB/todo
+bin/llvmi run .tmp/probe/f8/gen.ll; bin/llvmi run .tmp/LIB/files/runtime/library.cpp/gen.ll
+# 2. the full runtime at the branch's key with tzdb.cc (relowered about 25-50 min at 1-2 jobs; tzdb.cc's read 2.2 GB, 3.5 min)
+CPPI_JOBS=1 bin/cppi runtime-build && CPPI_CI_CHUNK=1 CPPI_JOBS=1 CPPI_CI_MEMLIMIT=2GiB bin/cppi runtime-ci
+# 3. the proofs: gen-batch over the 81 in five parts against cpp-s12's G10 (.tmp/g11part.0[0-4], .tmp/cmp.sh G10 G11; 35 min,
+#    0.4-1.4 GB: 6's folds and 1-5's declarations may change some IR, each difference to read), bin/cppi codegen-gen (10 min, 1.2 GB),
+#    cpp-print-essential's command, llvm-essential's commands, bin/llvmi check --essential, bin/reap, bin/crops-score --judge --strict,
+#    test/gate/gate-key-crops-test.bash; cpp-check-essential (cppi's check now links on the prebuilt runtime)
+```
+
+### Proposed (CP386-CP388)
+
+- **CP386 C++'s link on the prebuilt runtime as cppi's default.** (a) as built (CS273 (a)'s decision taken: cppi's check, llvmi's `:eh`
+  route and `bin/cppi run` link fragments; `CI_PREBUILT=0` the old build); (b) only llvmi's route, cppi's check on the old build until its
+  records are compared. **Recommended: (a)**, with cpp-check-essential's and cpp-check's records compared on it at the next night (the
+  runs, not the node texts, are the records').
+- **CP387 Long byte strings as string literals in the lowering.** (a) as built, from 4,096 bytes (only tzdb.cc's in the runtime); (b) every
+  c-string as a literal (every program's lowered C changes, the reader's trees smaller everywhere; the lowering records re-recorded).
+  **Recommended: (a)**, (b) if another read is held up by a table.
+- **CP388 128-bit constants (review 1111 #2's question).** (a) as built: exact inside an evaluation, out of it only as a 128-bit type's
+  i128 constant; (b) cpp-s5b's rule again, `__int128`'s formatting paths refused as before. **Recommended: (a)**: clang folds them so,
+  and f8's and library.cpp's paths need it.
+
+### Rule slips
+
+Sources edited while a run that had loaded them ran (lower.ae during f8's link, which had loaded it before the edit and does not lower;
+sema.ae during the first probe round, whose i1a read a half-written file and was run again, and during library.cpp's generation, whose
+result was not taken as a proof); once two runs at once (the w2 probes beside library.cpp's generation, 1.3 GB each); a few waiting loops
+with a foreground `sleep 10`. Every result in the tables above is from a run after its last edit, except library.cpp's drops (fix 5's
+code, as said).
