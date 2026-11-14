@@ -6577,3 +6577,10 @@ test_return_from_inline_mode_to_REPL and PdbTestReadline's nine.
   against python3 3.14.10's run, a mutated reference as the control; base FAIL, head PASS): the nested sources (compile,
   exec, eval, ast.parse, pdb's `_compile_error_message`), `python -i` (after -c, SystemExit and an error under -i, the
   no-code REPL's flags and argv, the banner, test_pdb's REPL session), PdbTestReadline and test_readline by unittest.
+- **Other modules that start `python -i`** (sampled by unittest, head and base; run): test_repl's sessions now run, 7 of
+  its methods and test_cmd_line's test_run_module_bug1764407, test_inspect's TestRepl pass (all failed on the base);
+  the 10 still failing, all failing on the base too, are `:repl-console` (new, deferred, both files: the asyncio REPL,
+  PYTHONSTARTUP, a syntax error's source line, a last line without a newline). test_fstring's and test_tstring's
+  test_expression_in_interactive_after_buffer_resize (`:child-is-pyi`), test_cmd_line's test_displayhook_unencodable
+  (`:pyi-command-line`) and test_cmd_line_script's test_stdin_loader (`:pyi-main-module`) still fail, in their classes;
+  `bin/pyi repl --check` 2 of 2.
