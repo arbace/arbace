@@ -46,6 +46,20 @@ The current state of the work (as of 2026-11-09). This file is rewritten as thin
 
   The nightly plan's serial sum fell from 17:30 to 14:10, and its `--concurrent` lanes' wall from 7:39 to 3:56 (rsi-essential's
   outlier pass left out). `gate_key` is unmoved, and every step's key moves once.
+  GD4 built on branch `gate-gd4` (from `gate-gd23`; "As built: GD4"):
+  - the gate owns the disk: a 25 GiB floor before each step, `deferred` (retried at the end, a run left with some INCOMPLETE,
+    exit 3), ENOSPC failing a step, and the tools' guards yielding under `ARBACE_DISK_POLICY=gate`;
+  - the gate owns the memory: admission by the larger of `:mem-gib` and 1.1 x the recorded peak, UNDER printed by the plan,
+    `GATE_STEP_MEM_GIB` capping the tools' `GOMEMLIMIT` defaults;
+  - `--nightly --concurrent` runs (`bin/night --concurrent`);
+  - the caches' table `test/gate/caches.edn` and `bin/gate --prune [--cheap] [--worktrees]`, Go's cache capped at 8 GiB by LRU;
+  - musl's forms shared by key;
+  - `bin/records-check` as an essential step (41 drifted C rows accepted, to clear at C's next `--record`), with the `make hooks`
+    pre-commit hook;
+  - the plan view's lower median.
+
+  The epoch goes to 2 (with GD3's 1, one rerun if the two land together). `gate_key` is unmoved. Left for window W: j2g's and
+  repr/go's hosts shared by key, `gocache.bash`'s wipe outside the gate, `bin/j2g`'s 20 GiB default.
 
   Next:
   - GD1's and GD23's first nights;

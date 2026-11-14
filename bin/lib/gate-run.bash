@@ -837,8 +837,8 @@ caches_prune() {  # caches_prune DRY(--dry-run or "") all|cheap
       fi
       if [ "$x" != - ] && [ -d "$base" ]; then
         # GDS17 (a): no directory above :max-entries (night 12: ext4's directory index full at 208,000 entries)
-        find "$base" -type d -printf '%p\n' 2>"$lst.err" | while IFS= read -r g; do
-          n=$(ls -A "$g" 2>"$lst.err" | wc -l); [ "$n" -gt "$x" ] && printf '%s\t%s\n' "$n" "$g"; done > "$lst.big"
+        # (one pass: each entry's parent counted)
+        find "$base" -mindepth 1 -printf '%h\n' 2>"$lst.err" | sort | uniq -c | awk -v x="$x" '$1 > x {n = $1; sub(/^ *[0-9]+ /, ""); print n "\t" $0}' > "$lst.big"
         while IFS=$'\t' read -r n g; do
           echo "gate --prune: WARNING: $g holds $n entries, more than its :max-entries $x (test/gate/caches.edn)"; warn=$((warn + 1))
         done < "$lst.big"

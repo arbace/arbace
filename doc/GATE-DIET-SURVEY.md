@@ -859,3 +859,116 @@ All of these pass:
 - Every plan above.
 
 No gate was run.
+
+## As built: GD4 (branch `gate-gd4`, from `gate-gd23` `dc685b3df`, 2026-11-13/14)
+
+GD4 is §6's "one policy": the disk and the memory are the gate's, in its runner, and the tools' own guards yield to it (GDS12 (a),
+GDS13 (a)); the caches have one table that the prune reads (GDS17 (a), GDS18 (a)); the records are judged against their known files
+by an essential step (GDS15 (a)). It changes the runner (`bin/lib/gate-run.bash`), the planner (`test/gate/plan.ae`), `bin/gate`'s
+option parsing and summary, `bin/night`, the table, and the tools' guards. `gate_key` is the same before and after (`126c321af14f…`,
+`bin/arbace-go --gate-key` without `ARBACE_HOST_EXE` on `dc685b3df` and on the branch; `test/gate/gate-key-crops-test.bash`
+passes): nothing in `gate_key` moved (no `bin/lib` file but `gate-run.bash`, `ci/` and `repr-c/`, which it leaves out, and no build
+script). The epoch goes from 1 to 2, since every step's environment changes (`GATE_STEP_MEM_GIB`, `ARBACE_DISK_POLICY`,
+`ARBACE_GOCACHE_KEEP_MIN`): every check runs once, the same once as GD3's epoch 1 if the two land together, which neither has yet.
+
+**The disk (GDS12 (a)).**
+- Before each step of the plan (`run_one`'s `disk_admit`) the free disk of the checkout's file system must hold the floor
+  `GATE_DISK_FLOOR` (25 GiB) plus the step's `:disk-gib` (new, optional, in no key: the planner's `DISK-GIB` column).
+- Below it: the prune's cheap rules once a low spell (`gate_prune --cheap`, logged in `.tmp/gate/disk.log`), then a wait for the
+  disk to come back, `GATE_DISK_WAIT` (1800 s) polled every `GATE_DISK_POLL` (30 s). The wait is the run's, counted from the
+  spell's start (`.tmp/gate/disk.low-since`), so a night of low disk defers its later steps at once instead of 30 minutes each.
+- Then the step is `deferred`: no run, no pass, not `FAILED`; a step whose need was deferred is deferred with it. Once the chains are
+  done, `disk_retry` runs the deferred steps again in the plan's order, each checked once without a wait. A run left with deferred
+  steps and nothing failed ends `== gate INCOMPLETE: N step(s) deferred for the disk`, exit 3, so `bin/night` fast-forwards nothing.
+- After a step, "No space left on device" in its log, its failure lines or its outputs (`GATE_OUT`, where Java's levels save) fails
+  it (status 28 when it exited 0), its pass and outputs not recorded, its report saying where. The store held 37 such passes from
+  nights 12 and 13 (Java's level steps, the full disk and the 208,000-entry directory index), each of which this rule turns into a
+  failure.
+- The sampler writes `DiskAvail` beside `MemAvailable` every 5 s in `.tmp/gate/mem.tsv`.
+- The gate exports `ARBACE_DISK_POLICY=gate`. `bin/gate-policy disk-ok PCT` (new, in no key) is cppi's and rsi's light-tier guard
+  now: it yields under the gate and stops past PCT% outside it, as before. A grep of `bin/`, `tools/` and `test/` for `df` and
+  `DISK_MAX` found no third guard; `bin/night`'s 85% start rule stays, and over it `bin/night` now runs `bin/gate --prune --cheap`
+  once before deciding.
+- Each step's `.mem` and so its record keep busybox time's "File system outputs" as `:fs-out-kib`, the material of a measured
+  `:disk-gib` (GDS16's rule 3). No step declares `:disk-gib` yet: the writes are not the net growth (most are temporaries), and a
+  declaration from them alone would defer most of the night at today's 30-37 GiB free.
+
+**The memory (GDS13 (a)).**
+- The planner admits each check by the larger of its `:mem-gib` and 1.1 times the largest peak of its passes (the larger of
+  `:maxrss-kib` and `:tree-peak-kib`), rounded up to half a GiB (`gate.plan/admission`). That figure is plan.tsv's `MEM` column, by
+  which `bin/gate-lane` admits the step in both lane modes and the report flags a peak over it. Two columns join before the command,
+  `DECLARED` (the table's `:mem-gib`) and `DISK-GIB`. An undeclared step with passes is admitted by its record alone.
+- A check whose passes are over its declaration by the margin (10% and 0.5 GiB, `--mem-check`'s) twice or more is printed by the plan
+  as `UNDER  NAME: declared D GiB, N passes above it (the largest P GiB): admitted at A GiB; declare :mem-gib ⌈1.1 × P⌉`, for the
+  morning's table edit.
+- The runner exports the admission into the step as `GATE_STEP_MEM_GIB` (not for an undeclared, unrecorded step).
+  `bin/gate-policy mem DEFAULT` caps a tool's `GOMEMLIMIT` default at it, and prints DEFAULT unchanged outside the gate. It replaces
+  the 29 defaults of 3 GiB and more in rsi, cppi, pyi, ci's and the crops' c2j checks and repr/c's annotations (`${X:-6GiB}` becomes
+  `${X:-$(bin/gate-policy mem 6GiB)}`; a tool's own variable still wins). The 1,500 MiB-and-under defaults (oi, si, repr-ocaml,
+  repr-python, the C++ readers) are left: at or below the admission of any step that runs them. `bin/j2g`'s 20 GiB is left: the file is in
+  `gate_key` (window W). The runner never exports `GOMEMLIMIT` itself: a step's processes run in parallel, and a step-wide soft limit
+  per process would raise the limit of every tool that defaults lower (limit-test holds `bin/lib/limit.bash`'s default too).
+
+**`--nightly --concurrent` as a run.** `bin/gate --nightly --concurrent` runs (GD2 allowed its plan alone), and `bin/night
+--concurrent` (`make night CONCURRENT=1`) runs it, so the night can take the lanes' planned wall. The main session's slot chooses.
+
+**The caches' table (GDS17 (a), GDS18 (a)).** `test/gate/caches.edn` is in no key. It has 97 rows, one per line, and the runner's
+`caches_rows` reads it with awk, so the prune works before stage 0 and with a full disk. caches-test also reads it with the Clojure
+reader. A row names a path (`.tmp/NAME` with a glob, or `{gocache}`), where it is (`:checkout`, `:main` or `:home`), its owner and its
+rule:
+- `[:size G :lru]`: Go's build cache to 8 GiB, `.tmp/gocache` and `.tmp/repr-go-print-cache` to 2 GiB each;
+- `[:age D]`: TMPDIR's files after 2 days, `.tmp/shared` after 30;
+- `[:key-gen N]`: `.tmp/goi-table`'s generations, the newest 2;
+- `[:age-self D]`: the gate's tests' scratch directories;
+- `:builtin`: the store, the executables and ci's runtime, by `gate_prune_store`, GTS27's code unchanged;
+- `:keep`: the clean runs' logs, the packs, the locks and every tool directory whose layout mixes keyed builds with corpora fetched
+  by pin (there is no network at night, so a removed corpus fails the step);
+- `:list`: the worktrees and `keep/`.
+- `:cheap true` marks the rows the cheap tier runs; `:max-entries N` warns of a directory over N (`.tmp/java-check` at 10,000);
+  `:shared true` marks a content-keyed cache kept once by key.
+
+`bin/gate --prune [--dry-run] [--cheap] [--worktrees]` runs the store's prune, then every row, then lists this checkout's `.tmp`
+entries no row names (never removed). `--worktrees` lists the main checkout's worktrees whose branch is merged into `mac/next`
+(`GATE_PRUNE_MERGED`) and whose index is a day old (GDS18 (a): the main session removes them). The cheap tier runs:
+- at every gate's start, in place of `bin/lib/gocache.bash`'s 90-minute wipe;
+- before a step, at most every 5 minutes and one step at a time (`gate_cache_cap`);
+- in `disk_admit`.
+
+The gate exports `ARBACE_GOCACHE_KEEP_MIN=7200` (Go's own five days), so `bin/arbace-go`'s build-time trim, which is in `gate_key`,
+no longer empties the cache under the gate. Outside the gate it still does (window W). The essential step `caches-table`
+(`test/gate/caches-test.bash --coverage`, seconds) holds every `.tmp/NAME` a `bin/` script names (172) to a row. Its inputs are `bin/`
+and the table, so gate-tests' key does not take `bin/` whole.
+
+**Shared by key: musl's forms.** `bin/lib/ci/musl read` takes the main checkout's `.tmp/shared/ci-musl-forms/KEY` when it is there
+and whole (its key, its index listing its units), copying 11 MiB in place of the read that cost a worktree 5 h on 2026-11-13, and
+publishes its own after a read, through a temporary name. The forms hold no checkout path. The clean run's clone neither takes nor
+publishes (`CI_MUSL_NO_SHARED`). `test/c/musl-lock-test.bash` gains the case and keeps its first three cases on their own copy.
+j2g's and repr/go's hosts (197 MiB a worktree, §3.1) were left: their scripts are in `gate_key`.
+
+**records-check (GDS15 (a)).** `bin/records-check` (`records.check`, `test/records/check.ae`; essential step `records-check` on stage
+0, beside reap, seconds; `make records-check`) judges every recorded results file (rows `[ID RESULT REASON]`) against the known file
+that accounts for its non-passes. The pairs are the `:c-known` sources of `test/reap/cells.edn` that have a `:results` (9: C's four,
+C++'s token check, Python's four not recorded yet), and `test/records/pairs.edn` adds what the cells do not say. For C's tree check
+and annotations that is the token level's known file (`:also-known`). The tree check's mutants are excluded, since their `:known`
+goes through a generated list. The problems:
+- known-unlisted: a `:known` row that no section lists. reap does not see this one;
+- stale: a known entry whose row passes;
+- unclassed: a row neither `:pass` nor `:known`;
+- lacking: a known entry missing from results that hold its corpus.
+
+The negative controls always run: on mutated copies, the judge must find each of the four. On the tree as it is, it found 41
+known-unlisted rows:
+- annot's two torture-compile rows, pr33855.c and pr54559.c (§5.2's example);
+- 39 rows of the round trip: 25 objects-macro-body, 6 self-include, 5 eval-limits, 1 run-address, 1 split-declaration.
+
+They are `test/records/accepted.edn`'s: printed and not failed, C's to clear at its next `--record`. An accepted entry that stops
+being a problem fails the check until it is removed, so the list only drains. `bin/records-check --install-hook` (`make hooks`, the
+user's to run) writes an opt-in pre-commit hook that runs the check when a commit touches a known, results or divergences file.
+
+**The plan view's median (gate-gd23's note 6).** An even count of passes takes the lower middle one (`gate.lanes`). With two passes,
+the upper one had put rsi-essential's 19,767 s outlier into every plan.
+
+**Not built (GD4's part of §6 left).** GDS14's may-pass time classes (not in this brief); GDS13's "the morning's table edit takes
+it in" is the main session's, from the plan's UNDER lines; the shared host builds (j2g, repr/go) and `gocache.bash`'s rule outside
+the gate wait for window W (`gate_key`); records-check's count and provenance pairs (repr-clojure's `:counts` need a run to derive;
+the provenance pairs are `bin/provenance-check`'s, essential already); the runner's end trap (§5.4 #17).

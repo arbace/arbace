@@ -5617,3 +5617,39 @@ Left:
 - the crops' steps need audit records (`bin/gate --audit STEP...` at night, or the next clean run, then `bin/gate --loads-update`);
 - `--nightly --concurrent` as a run (GD4);
 - repr-java-nojavac.jdk declares 59 GiB on a 54.7 GiB host, so the weekly night will fail on it until it is split (GD5).
+
+## 2026-11-14: GD4, the gate's disk and memory policy, the caches' table, records-check (branch `gate-gd4`, from `gate-gd23` `dc685b3df`)
+
+The user accepted GDS1-GDS20, all (a); GD4 is §6's "one policy" (doc/GATE-DIET-SURVEY.md, "As built: GD4"). Built:
+- the disk is the gate's (GDS12 (a)). Before each step the runner checks the free disk against `GATE_DISK_FLOOR` (25 GiB) plus the
+  step's optional `:disk-gib`. Below it, the cheap prune runs, then a wait of `GATE_DISK_WAIT` (1800 s) shared by the run, then the
+  step is `deferred`: not failed and no pass, its dependents deferred with it. The deferred steps are retried once the chains are
+  done, and a run that leaves some ends INCOMPLETE, exit 3. "No space left on device" in a step's log or outputs fails the step, and
+  its pass is not recorded: the store held 37 passes of nights 12-13 that this rule would have failed. The gate exports
+  `ARBACE_DISK_POLICY=gate`, under which cppi's and rsi's guards yield (`bin/gate-policy disk-ok`). The sampler records `DiskAvail`,
+  and each pass records its file system outputs as `:fs-out-kib`;
+- the memory is the gate's (GDS13 (a)). The planner admits each check by the larger of its `:mem-gib` and 1.1 times its passes' peak,
+  and prints UNDER the checks over their declaration in two passes. The runner hands the admission to the step as
+  `GATE_STEP_MEM_GIB`, and `bin/gate-policy mem` caps 29 tool `GOMEMLIMIT` defaults of 3 GiB and more at it;
+- `bin/gate --nightly --concurrent` runs, as does `bin/night --concurrent`;
+- `test/gate/caches.edn` holds 97 rows. `bin/gate --prune [--cheap] [--worktrees]` reads it. Go's build cache is capped at 8 GiB by
+  the least recently used, in place of the 90-minute wipe under the gate (`ARBACE_GOCACHE_KEEP_MIN=7200`). The essential step
+  `caches-table` holds bin/'s 172 `.tmp` names to rows;
+- musl's forms are shared by key at the main checkout's `.tmp/shared/ci-musl-forms/KEY`;
+- `bin/records-check` and the essential step `records-check` (GDS15 (a)) judge reap's 9 `:c-known` pairs, with negative controls.
+  They found 41 known-unlisted rows (2 annot, 39 round trip), accepted in `test/records/accepted.edn` for C's next `--record`.
+  `make hooks` installs the opt-in pre-commit hook;
+- the plan view's median of an even count is the lower middle one.
+`gate_key` is unmoved (`126c321af14f`). The epoch goes to 2.
+
+Alternatives considered:
+- exporting `GOMEMLIMIT` from the runner was set aside. It is per process, so a step-wide figure would raise every lower tool default,
+  and limit-test holds the inherited one;
+- a fixed 30-minute wait per step was set aside: a long night of low disk would stall for hours. The wait is shared by the run;
+- deriving `:disk-gib` from the file system outputs now was set aside. The writes are mostly temporaries, and at today's 30-37 GiB
+  free most of the night would defer. They are recorded for a later declaration;
+- removing tool caches by a default age was set aside, since some tool directories hold corpora fetched by pin and the nights have
+  no network. Those rows are `:keep` until their tools name their generations;
+- making the 41 drifted rows fail at once was set aside, since that would fail the essential gate on C's records. They are accepted
+  and drain;
+- sharing j2g's and repr/go's hosts by key was left for window W: their scripts are in `gate_key`.

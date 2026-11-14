@@ -61,7 +61,7 @@ col() { awk -F'\t' -v n="$2" -v c="$3" '$1 == n {print $c}' "$1/plan.tsv"; }
 # 1. --full: whole parts, {only} gone, no list
 plan "$t/full" full || no "the full plan: $(cat "$t/full.out")"
 if [ "$(names "$t/full")" = "toy.toy toy.whole after-toy " ]; then ok "--full: the parts whole"; else no "--full: $(names "$t/full")"; fi
-if [ "$(col "$t/full" toy.toy 18)" = "bin/tool --corpus toy" ]; then ok "--full: the command without --only"; else no "--full's command: $(col "$t/full" toy.toy 18)"; fi
+if [ "$(col "$t/full" toy.toy 20)" = "bin/tool --corpus toy" ]; then ok "--full: the command without --only"; else no "--full's command: $(col "$t/full" toy.toy 20)"; fi
 
 # 2. the slices: a function of the name alone (SHA-256's first 8 hex digits mod 7), every file in one slice
 plan "$t/n0" nightly --night 0 || no "the nightly plan: $(cat "$t/n0.out")"
@@ -78,7 +78,7 @@ for k in 0 1 2 3 4 5 6; do
   [ -f "$f" ] && total=$((total + $(wc -l < "$f")))
 done
 if [ "$total" = 36 ]; then ok "the seven nights' slices cover the rest, 36 files, once each"; else no "the slices cover $total of 36"; fi
-if grep -q 'bin/tool --corpus toy --only "\$GATE_LIST"' "$t/n0/plan.tsv"; then ok "a rotated check's command takes \"\$GATE_LIST\""; else no "the rotated command: $(col "$t/n0" toy.toy.s0 18)"; fi
+if grep -q 'bin/tool --corpus toy --only "\$GATE_LIST"' "$t/n0/plan.tsv"; then ok "a rotated check's command takes \"\$GATE_LIST\""; else no "the rotated command: $(col "$t/n0" toy.toy.s0 20)"; fi
 if [ "$(col "$t/n0" after-toy 6)" = "toy.toy.sub,toy.toy.s0,toy.whole" ]; then ok ":needs naming the step names its rotated checks"; else no ":needs: $(col "$t/n0" after-toy 6)"; fi
 
 # 3. keys: over the list (a line list SHA N); the same list, the same key; another list, another key
