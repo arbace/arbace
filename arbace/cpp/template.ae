@@ -1835,7 +1835,7 @@
         (when-let [nm (System/getenv "CPP_INST_TRACE")]
           (when (= nm (:name t))
             (binding [*out* *err*] (println "instance miss" (:name t) tid (pr-str args) (System/identityHashCode *tmpls*) (count (:insts t))))))
-        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args)) *provisional* sema/*main-retry*)
+        (if (and (empty? (:partials t)) (nil? (:pattern t)) (not (contains? (:specs t) args)) *provisional* (or sema/*main-retry* sema/*incomplete-ok*))
           (incomplete-instance! t args)
           (select-instance! t args nil)))))))
 
@@ -2442,7 +2442,7 @@
         best (filter (fn [[p _]] (every? (fn [[q _]] (or (identical? p q) (more-specialized-partial? p q))) ms)) ms)
         _ (when (and (seq ms) (not= 1 (count best))) (fail :template "ambiguous partial specializations of " (:name t)))
         [pattern params bound] (if-let [[pt b] (first best)]
-                                 [(first (filter #(= "VarDecl" (:kind %)) (kids (:node pt)))) (:params pt) b]
+                                 [(or (:pattern pt) (first (filter #(= "VarDecl" (:kind %)) (kids (:node pt))))) (:params pt) b]
                                  [(:pattern t) (:params t) args])]
     (or (get-in @*tmpls* [(:id t) :insts args])
         (let [ps (bind-scope (:scope t) params bound nil)
@@ -2590,11 +2590,16 @@
   (let [n (:node o)
         c (abi/cls cid)
         params (tparams n)
+        pat (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind %)) (kids n)))
+        ;; (cpp-s13: a constructor template is its class's :ctor-tmpls, not a name of its scope: basic_format_args'
+        ;; template<typename... _Args> basic_format_args(const _Store<_Args...>&), defined outside the class template)
         cands (filter #(and (= :tmpl (:e %)) (= :fn (:tk %)) (= (count params) (count (:params (tmpl (:id %))))))
-                      (.get ^java.util.HashMap (:names (:scope c)) (:name n)))
+                      (if (= "CXXConstructorDecl" (:kind pat))
+                        (for [tid (:ctor-tmpls c)] {:e :tmpl :tk :fn :id tid})
+                        (.get ^java.util.HashMap (:names (:scope c)) (:name n))))
         ;; of overloaded member templates, the one declared with the same spelling (G4: basic_string's _M_construct
         ;; for input and forward iterators)
-        qt (get-in (first (filter #(#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) (kids n))) [:type :qualType])
+        qt (get-in pat [:type :qualType])
         ;; (the spellings with the parameters' names replaced by their positions: _InIterator and _FwdIterator alike)
         norm (fn [x ps] (reduce (fn [t [i p]] (if (:name p) (str/replace t (re-pattern (str "\\b" (java.util.regex.Pattern/quote (:name p)) "\\b")) (str "#P" i)) t))
                                 (str/replace (str x) #"\s+" " ") (map-indexed vector ps)))
@@ -2602,7 +2607,7 @@
     (when-not (or mid (sema/header-node? n)) (fail :template "no member template " (:name n) " to define"))
     ;; (a header's whose declaration in the class was dropped: none to define, G4)
     (when mid
-    (upd-tmpl! mid assoc :pattern (first (filter #(#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) (kids n))) :params params :sig nil
+    (upd-tmpl! mid assoc :pattern pat :params params :sig nil
                :scope (if (seq (:pnames o))
                         (bind-scope (:scope c) (mapv (fn [nm p] {:name nm :kind (:kind p)}) (:pnames o) outer-params) (:targs c) nil)
                         (:scope c))))))
@@ -2612,7 +2617,7 @@
   of the primary; template <> template <class U> R A<int>::f(U): for that specialization only."
   [scope n [cn qt]]
   ;; the pattern's range starts at the outer template header (the FunctionTemplateDecl's at the inner one)
-  (let [text (or (node-text (first (filter #(#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) (kids n)))) "")]
+  (let [text (or (node-text (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind %)) (kids n)))) "")]
     (if (re-find #"^\s*template\s*<\s*>" text)
       (let [cls (sema/resolve-type scope qt)]
         (attach-member-template! (:id cls) {:node n :pnames []} []))
@@ -2921,6 +2926,21 @@
           (when-not (abi/class? cls) (fail :template "an explicit specialization of a member of " qt))
           (explicit-fn-spec! (:scope (abi/cls (:id cls))) n (:id cls)))
         (re-find #"^\s*template\s*<\s*>\s*template" text) (fail :template "an explicit specialization of a member template")
+        ;; (cpp-s13: an explicit specialization of a variable template, [temp.expl.spec]/1: <compare>'s template<> inline constexpr
+        ;; unsigned __cmp_cat_id<partial_ordering> = 2, <format>'s __is_formattable_integer<char>: kept as a partial specialization
+        ;; of no parameters, the most specialized for exactly its arguments, var-template-inst; before, "an explicit
+        ;; specialization's qualifier")
+        (and (= "VarDecl" (:kind n)) (re-find #"^\s*template\s*<\s*>" text) (nil? (ool-qualifier n))
+             (some #(and (= :tmpl (:e %)) (= :var (:tk %))) (sema/lookup scope (:name n))))
+        (let [tid (some #(when (and (= :tmpl (:e %)) (= :var (:tk %))) (:id %)) (sema/lookup scope (:name n)))
+              t (tmpl tid)
+              args (complete-args t (resolve-args scope t (var-text-args n) true))]
+          (when-not args (fail :template "an explicit specialization of " (:name n) "'s arguments"))
+          (upd-tmpl! tid update :partials (fnil conj [])
+                     {:id (next-id) :params [] :args args :node n :explicit true :scope (:scope t) :tmpl t
+                      ;; (its pattern the declaration without the written arguments, whose nodes are no initializer)
+                      :pattern (update n :inner #(vec (remove (fn [k] (and (map? k) (= "TemplateArgument" (:kind k)))) %)))})
+          :template)
         ;; an explicit specialization of a member of a class template's specialization (template <> int Box<int>::get())
         (re-find #"^\s*template\s*<\s*>" text) (explicit-member-spec! scope n)
         :else nil))

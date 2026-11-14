@@ -676,6 +676,32 @@
             m (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)+)(~\s*)?$" t)]
         (when m (vec (map str/trim (remove str/blank? (str/split (second m) #"::")))))))))
 
+(defn- qualifier-tid-before
+  "cpp-s13: qualifier-before's parts when the nested-name-specifier names a template-id (`bool ctype<char>::is(...)`, a member
+  of an explicit specialization defined outside it, [temp.expl.spec]/5: no template<> before it): each part a name or a
+  template-id as written (lookup-qualified resolves those), or nil."
+  [n]
+  (when-let [^String t (text-before-name n)]
+    (let [t (str/trim (str/replace t #"~\s*$" ""))]
+      (when (str/ends-with? t "::")
+        (loop [t (str/trim (subs t 0 (- (count t) 2))) parts ()]
+          (let [part (if (str/ends-with? t ">")
+                       (let [i (loop [i (dec (count t)) d 0]
+                                 (when (>= i 0)
+                                   (let [c (.charAt t i)]
+                                     (cond (= c \>) (recur (dec i) (inc d))
+                                           (= c \<) (if (= d 1) i (recur (dec i) (dec d)))
+                                           :else (recur (dec i) d)))))
+                             m (when i (re-find #"([A-Za-z_][A-Za-z_0-9]*)\s*$" (subs t 0 i)))]
+                         (when m [(- i (count (first m))) (str (second m) (str/replace (subs t i) #"\s+" " "))]))
+                       (when-let [m (re-find #"([A-Za-z_][A-Za-z_0-9]*)\s*$" t)] [(- (count t) (count (first m))) (second m)]))]
+            (if-not part
+              (when (some #(str/includes? % "<") parts) (vec parts))
+              (let [[b p] part rest-t (str/trim (subs t 0 b)) parts (cons p parts)]
+                (if (str/ends-with? rest-t "::")
+                  (recur (str/trim (subs rest-t 0 (- (count rest-t) 2))) parts)
+                  (when (some #(str/includes? % "<") parts) (vec parts)))))))))))
+
 (defn- split-scope
   "A qualified name's parts: the text split at the :: outside template argument lists and parentheses."
   [^String t]
@@ -948,7 +974,8 @@
         sat (or (nil? rc) defer (constraint-satisfied? rps rc))]
   (if (and (not sat) (not defer))
     nil
-  (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n)) (qualifier-before n))
+  (let [q (when (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "FunctionDecl" "CXXConversionDecl"} (:kind n))
+            (or (qualifier-before n) (qualifier-tid-before n)))
         home (if (seq q)
                (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
                  (cond (= :ns (:e e)) (:scope e) (abi/class? (:ty e)) (:scope (abi/cls-of (:ty e))) :else (fail :lookup "qualifier " q)))
@@ -1199,6 +1226,13 @@
       (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
                                      :union (= "union" (:tagUsed n)) :header (header-node? n)})
       (when nm (enter! scope nm {:e :type :ty t :pos (long (or (:_b n) 0))})))
+    ;; (cpp-s13: GNU's abi_tag on a class, Itanium 5.1.2's <abi-tags> after its name wherever it is mangled: <ios_base.h>'s
+    ;; `class _GLIBCXX_ABI_TAG_CXX11 failure`, std::ios_base::failure[abi:cxx11], _ZTINSt8ios_base7failureB5cxx11E; without it
+    ;; a program's catch named the old ABI's failure, whose type_info no __ios_failure the library throws reaches)
+    (when-let [tags (and nm (not-empty (vec (sort (distinct (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"abi_tag" "__abi_tag__"} (:_gnu a)))
+                                                                  [_ t] (re-seq #"\"([^\"]*)\"" (str (:_arg a)))]
+                                                              t))))))]
+      (abi/update-cls! id assoc :mname (str (abi/source-name nm) (apply str (map #(str "B" (count %) %) tags)))))
     (when (:completeDefinition n)
       (when nm (.put ^java.util.HashMap (:names cs) nm [{:e :type :ty t :pos -1}])) ; the injected-class-name
       (abi/update-cls! id assoc :complete true :defining true
@@ -1301,6 +1335,8 @@
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *main-retry* nil) ; atom [[scope node exception] ...]: the main file's typedefs to declare again (CP338 (a))
+(def ^:dynamic *incomplete-ok* nil) ; cpp-s13: the headers' last round, a class template's specialization named before (or
+                                    ; without) its definition an incomplete class (template's incomplete-instance!, CP372 (a))
 (def ^:dynamic *header-drops* nil) ; atom {place [class kind name message]}: the header declarations not declared (G4; CP364 (a):
                                     ; one declared on a later round taken out, gen-batch's drops.tsv)
 
@@ -6242,10 +6278,18 @@ protected:
                  [hs ms] (split-with header-node? nodes)]
              (doseq [n hs] (declare-node! root n))
              ;; rounds until one declares nothing more
-             (loop [k 0]
-               (let [before (count @*retry*)]
-                 (retry!)
-                 (when (and (< k 6) (pos? before) (< (count @*retry*) before)) (recur (inc k)))))
+             (let [rounds! (fn [] (loop [k 0]
+                                    (let [before (count @*retry*)]
+                                      (retry!)
+                                      (when (and (< k 6) (pos? before) (< (count @*retry*) before)) (recur (inc k))))))]
+               (rounds!)
+               ;; (cpp-s13: what is still refused for a class template's specialization whose template is not defined by
+               ;; the headers (<iosfwd>'s typedef basic_istream<char> istream without <istream>): an incomplete class, as
+               ;; clang has it ([temp.inst]/2: naming a specialization does not instantiate it), completed in place should
+               ;; the main file define the template; then the rounds again for the declarations that named those)
+               (when (seq @*retry*)
+                 (binding [*incomplete-ok* true] (retry!))
+                 (rounds!)))
              (binding [*main-retry* (atom [])]
                (let [again! (fn [] (let [r @*main-retry*] (reset! *main-retry* []) (doseq [[sc n] r] (declare-node! sc n))))]
                  (doseq [n ms] (declare-node! root n) (when (seq @*main-retry*) (again!)))

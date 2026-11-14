@@ -610,12 +610,23 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Static initializers
 
+(def long-string-min
+  "The length from which a c-string initializer is lowered as a string literal (cinit): only tzdb.cc's in the runtime reaches it."
+  4096)
+
 (defn cinit
   "A global's initializer as a C initializer."
   [v t]
   (cond
     (and (symbol? v) (#{"zeroinitializer" "undef" "poison"} (name v)) (nil? (namespace v)))
     (if (and (aggregate? t) (not (complex-ld? t))) '(init) (value v t))
+    ;; cpp-s13: a long byte array (tzdb.cc's tzdata_chars, 107,471 bytes) as one string literal, its trailing zeros left to the
+    ;; array's zero fill ([dcl.init.string]; C23 6.7.11/15: a literal that fills the array exactly drops its terminator): as a list
+    ;; of integers the read of its unit passed 2.5 GiB (a cc tree a constant); below long-string-min the integers, as before
+    (and (seq? v) (= (first v) 'c-string) (>= (count (second v)) long-string-min))
+    (let [^String s (second v)
+          n (loop [n (count s)] (if (and (pos? n) (zero? (int (.charAt s (dec n))))) (recur (dec n)) n))]
+      (list 'init (list 'init (apply list 'byte-string (map #(long (int %)) (subs s 0 n))))))
     (and (seq? v) (= (first v) 'c-string)) (list 'init (apply list 'init (map #(int-lit (int %) 8) (second v))))
     (and (seq? v) ('#{array vector} (first v))) (list 'init (apply list 'init (map (fn [[et ev]] (slot-init (cinit ev et) et)) (rest v))))
     (complex-ld? t) (value v t)
