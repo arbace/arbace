@@ -4343,7 +4343,11 @@ Known* on metas (2), OrPat, NPlusKPat, RecStmt, mdo, InvisPat (1 each).
 | the libraries (the table) | exit 0 each, 0 worse; controls differ as they must |
 | the programs above | as the table says |
 | `bin/hsi own-verdicts --record` | 40 pending tests (unboxedsums/' 19 added), 10 threaded-only |
-| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p40`): the changed paths are `arbace/repr/haskell/typecheck.ae` and `test/haskell/own-verdicts-pending.tsv` |
+| `bin/hsi check --libs own --corpus testsuite-core --only` the 32 programs above with arr001/arr002 (the control) | exit 0; 34 pass (31 own, 3 pack: T23761b, arr001, arr002); 0 unclassed; arr001's control fails as it must; `own-fallback.txt`'s T14341 and TypeableEq lines removed (hs-p40's night command 3: they pass on the own path), own-fallback 0 problems; 0.86 GB, 50 s |
+| `bin/hsi check --libs own --corpus samples,synthetic` (`HSI_OWN_PACKAGES=deepseq,array,stm`) | exit 0; 50 own of 63, 60 pass, the 3 others in their classes, as hs-p37; 0 unclassed; controls fail as they must; 1.08 GB, 2m45 |
+| hsi-essential's command (`ARBACE_MEM_GIB=2`, 2 jobs) | exit 0: own-verdicts current (40 pending); 123 programs, 122 pass, ffi014 `:threaded-way`; 0 unclassed; controls fail as they must |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 0.58 GB, 3m07 |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p40`): the changed paths are `arbace/repr/haskell/typecheck.ae`, `test/haskell/own-verdicts-pending.tsv` and `test/haskell/own-fallback.txt` |
 | `bin/reap` | 49 of 52 cells checked, 0 problems |
 | `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
 
@@ -4366,3 +4370,6 @@ Known* on metas (2), OrPat, NPlusKPat, RecStmt, mdo, InvisPat (1 each).
   TransStmt and ParStmt**; (b) leave mc01-08 and mc17 on the pack. *Recommended and taken: (a)*.
 - **HF10-P50 the next gaps** (by count over the 483: superclass dictionaries of a derived or instance's own class 4, Known* on metas
   2, OrPat, NPlusKPat, RecStmt, mdo, InvisPat 1 each): (a) **port them in that order**; (b) leave them on the pack. *Recommended: (a)*.
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night), GHC's runs of unboxedsums/, patsyn/
+and generics/ (the oracle window: hs-p40's night command 2).
