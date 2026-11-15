@@ -12,7 +12,8 @@
 #   ref         a64i's run equal to the CPU's, the CPU's not passing the test (DETAIL why: gc's own run on arm64)
 #   differs     a64i's run not equal to the CPU's (DETAIL what)
 #   timeout     a64i over its budget (the CPU's run within its own)
-#   speed       not run on a64i: known over its budget, or the CPU's run over A64I_GOROOT_CPU_MAX ms
+#   speed       not run on a64i: known over its budget, or the CPU's run over A64I_GOROOT_CPU_MAX ms (a program with no
+#               recorded :pass: A64I_GOROOT_PASSED, queue 308)
 #   build       the build failed; constraint: the program's //go:build excludes linux/arm64 (the driver's shouldTest)
 #   skip        the action sets -goexperiment or -godebug (as goi's check), or the CPU's run timed out
 # STATS: the CPU's seconds, a64i's seconds and instructions.
@@ -126,7 +127,12 @@ case $cst in 124|137) row skip "the CPU's run timed out ($((tmo * 3)) s)" ;; esa
 # run took over A64I_GOROOT_CPU_MAX ms of CPU time (default 1000: a64i runs Go's code about a thousand times slower than the M2, so such a
 # run is far over any budget); an a64i timeout is a failure until known.edn names it
 if grep -qxF "$p" "${A64I_GOROOT_SPEED:-/dev/null}"; then row speed "known over a64i's budget (the CPU's run ${cs} ms)" "cpu ${cs}ms"; fi
-[ "$cs" -le "${A64I_GOROOT_CPU_MAX:-1000}" ] || row speed "the CPU's run ${cs} ms, over ${A64I_GOROOT_CPU_MAX:-1000} ms: a64i not run" "cpu ${cs}ms"
+# queue 308: the cut-off applies only to a program with no recorded :pass (A64I_GOROOT_PASSED, check.bash's list from the record):
+# a recorded pass always runs on a64i, judged by a64i's own budget alone, so the CPU's load never changes its class (gc2.go: 0.2 s
+# of CPU time alone, 1.5 s at load 20)
+if ! grep -qxF "$p" "${A64I_GOROOT_PASSED:-/dev/null}"; then
+  [ "$cs" -le "${A64I_GOROOT_CPU_MAX:-1000}" ] || row speed "the CPU's run ${cs} ms, over ${A64I_GOROOT_CPU_MAX:-1000} ms: a64i not run" "cpu ${cs}ms"
+fi
 s0=$(date +%s%N); ast=0
 (cd "$rdir" && env "${renv[@]}" PWD="$rdir" timeout -k 5 "${A64I_GOROOT_TMO:-120}" "$A64I" run --stats "$exe" ${args[@]+"${args[@]}"} > "$t/a.out" 2> "$t/a.raw" < /dev/null) || ast=$?
 as=$(( ($(date +%s%N) - s0) / 1000000 ))

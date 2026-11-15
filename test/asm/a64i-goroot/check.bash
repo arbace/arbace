@@ -42,6 +42,10 @@ fi
 # the programs known over a64i's budget (known.edn's :speed rows), not run on a64i
 sed -n 's/^ *\["\([^"]*\)" :speed .*/\1/p' "$root/test/asm/a64i-goroot/known.edn" > "$W/speed.txt"
 export A64I_GOROOT_SPEED=$W/speed.txt
+# queue 308: the programs the record has as :pass, never cut by one.bash's CPU-time cut-off (A64I_GOROOT_CPU_MAX): only a64i's own
+# budget can fail them, so a passing program does not change class with the host's load
+sed -n 's/^\["\([^"]*\)" :pass .*/\1/p' "$root/test/asm/a64i-goroot-results-arm64.edn" > "$W/passed.txt"
+export A64I_GOROOT_PASSED=$W/passed.txt
 # the corpus
 sed -n 's/^ \["\([^"]*\)" :.*/\1/p' "$root/test/goi/check-linux-amd64.edn" | while read -r p; do
   k=$(awk 'NF==0{next} /^\/\/go:build/{next} /^\/\/ \+build/{next} {sub(/^\/\/ ?/, ""); print $1; exit}' "$GOROOT/test/$p" 2>/dev/null)
@@ -66,6 +70,17 @@ while read -r p; do f=$W/res/${p//\//__}.tsv; if [ -f "$f" ]; then cat "$f"; els
 echo "a64i goroot-check: $n programs in $((SECONDS - t0)) s"
 partial=; { [ -n "$only" ] || [ "$from" != 1 ] || [ -n "$count" ]; } && partial=1
 [ -z "$rec" ] || [ -z "$partial" ] || { echo "a64i goroot-check: --record needs the whole corpus" >&2; exit 2; }
+# queue 308's rule and its control goroot-4: helloworld.go (recorded :pass) under A64I_GOROOT_CPU_MAX=-1, every CPU run (0 ms or more) over the
+# cut-off, in a directory of its own: with its recorded pass it runs on a64i (pass; without the rule it would be cut: speed); with
+# no recorded pass (an empty list) it is cut (speed), as it must
+rules=0 rw=$W/rule
+rule_run() { rm -rf "$rw"; mkdir -p "$rw"; cp "$W/importcfg" "$rw/"; W=$rw A64I_GOROOT_CPU_MAX=-1 A64I_GOROOT_PASSED=$1 bash "$root/test/asm/a64i-goroot/one.bash" helloworld.go; cut -f2 "$rw/res/helloworld.go.tsv" 2>/dev/null; }
+r1=$(rule_run "$W/passed.txt") r2=$(rule_run /dev/null); rm -rf "$rw"
+if [ "$r1" = pass ]; then echo "a64i goroot-check: rule: a recorded :pass runs past the CPU-time cut-off (helloworld.go under A64I_GOROOT_CPU_MAX=-1: pass)"
+else echo "FAIL: a64i goroot-check: rule: helloworld.go, recorded :pass, under A64I_GOROOT_CPU_MAX=-1: ${r1:-no row}, not pass"; rules=1; fi
+if [ "$r2" = speed ]; then echo "control goroot-4: fails as it must (helloworld.go with no recorded pass, A64I_GOROOT_CPU_MAX=-1: speed)"
+else echo "FAIL: control goroot-4: helloworld.go with no recorded pass under A64I_GOROOT_CPU_MAX=-1: ${r2:-no row}, not speed"; rules=1; fi
 . "$root/bin/lib/tools.bash"
 arbace_tool -e "(do (load-file \"$root/test/asm/a64i-goroot/judge.ae\") nil)" \
-  -e "(asm.a64i-goroot/main \"$root\" \"$W/results.tsv\" \"${rec:-}\" \"${partial:-}\")"
+  -e "(asm.a64i-goroot/main \"$root\" \"$W/results.tsv\" \"${rec:-}\" \"${partial:-}\")" || exit 1
+[ $rules = 0 ]
