@@ -155,6 +155,12 @@ printf '0m0,1s 0m0,2s\n0m1,5s 0m2,0s\n' > "$W/c2"; printf '0m0,1s 0m0,2s\n2m1,5s
 out=$(cd "$root" && bin/oi oi-cpu "$W/c2" "$W/c3" 2>&1); expect "oi: a comma locale's times parse" 0 '^121.25$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 152 3 2>&1); expect "oi: 152 (SIGXCPU) is a timeout" 0 '^124$' "$out" $?
 out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-status 2 3 2>&1); expect "oi: another status is kept" 0 '^2$' "$out" $?
+# review 300's finding 1: a 124 is the wall cap's (4 x 120 s) only when the wall seconds reach it; earlier it is the program's own exit
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 124 3 2.5 2>&1); expect "oi: a program's own 124 after 2.5 s is its status" 0 '^own$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 124 30 480.2 2>&1); expect "oi: 124 at the 480 s wall cap is the limit's" 0 '^timeout$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 137 121.5 130 2>&1); expect "oi: 137 after the CPU limit is the limit's" 0 '^timeout$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 137 5 6 2>&1); expect "oi: 137 after 5 s of CPU is no limit's" 0 '^own$' "$out" $?
+out=$(cd "$root" && OI_TIMEOUT=120 bin/oi oi-limit-kill 0 5 6 2>&1); expect "oi: status 0 is no limit's" 0 '^own$' "$out" $?
 
 # re-review 042's finding 6: a whole run against an unreadable record says so, as --only does (and before the run); the expect
 # action's, so the oracle tier's (OI_JUDGES_NO_HOST leaves it out, counted as run)
@@ -221,10 +227,16 @@ expect "oi: control: a listed program recorded passing that now fails otherwise 
 c=$W/own-124; mk "$c"
 printf '[{:test "a" :ocamlc {:status "124" :sha256 "h" :bytes 1} :ocamlopt {:status "124" :sha256 "h" :bytes 1}}\n {:test "b" :ocamlc {:status "0" :sha256 "h" :bytes 1} :ocamlopt {:status "0" :sha256 "h" :bytes 1}}\n {:test "c" :ocamlc {:status "0" :sha256 "h" :bytes 1} :ocamlopt {:status "0" :sha256 "h" :bytes 1}}]\n' > "$c/refs.edn"
 printf 'a\t124\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
-printf 'a\t124\th\t1\t1.0\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
+printf 'a\t124\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
 printf '[\n ["a" "pass" "" "same"]\n ["b" "pass" "" "same"]\n ["c" "pass" "" "same"]\n]\n' > "$c/aot-results.edn"
 out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
 expect "aot: a program's own exit 124 is compared with oi's run (same), not read as two timeouts" 0 'against oi: \{"same" 3\}' "$out" $st
 printf 'a\t124\th\t1\t140\ttimeout 120s of CPU\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
+printf 'a\t124\th\t1\t480\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
 out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
 expect "aot: control: both runs stopped by the limit are two timeouts, -" 1 '^CHANGED a: .* "-"\]$' "$out" $st
+# review 300's finding 1: one side stopped by the limit, the other's own 124 with the same partial output, is "differs", never "same"
+printf 'a\t124\th\t1\t1.0\t\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/check.tsv"
+printf 'a\t124\th\t1\t480\ttimeout 120s\nb\t0\th\t1\t1.0\t\nc\t0\th\t1\t1.0\t\n' > "$c/oi.tsv"
+out=$(judge_aot judge "$c/check.tsv" "$c/corpus.tsv" "$c/refs.edn" "$c/oi.tsv" "$c/aot-results.edn" "$c/classes.edn"); st=$?
+expect "aot: control: one run stopped by the limit against the other's own 124 differs" 1 '^CHANGED a: .* "differs"\]$' "$out" $st

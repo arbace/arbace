@@ -75,12 +75,19 @@ budget() { # ID: the run's seconds (30, or test/cpp/check-budget.edn's)
   local b; b=$(sed -n "s|^[{ ]*\"$1\" *\\([0-9][0-9]*\\).*|\\1|p" "$root/test/cpp/check-budget.edn" 2>"$TMPDIR/cppi-budget.err" | head -1)
   echo "${b:-${CPPI_BUDGET:-30}}"
 }
+# budget_cpu ID: the entry's CPU seconds (`"ID" WALL :cpu N`), none when it names none. gate 13e (2026-11-15): runtime/atomics.cpp ran
+# past 120 s of wall twice; under bin/cppi's GOMEMLIMIT=1500MiB it takes 210 s of wall and 750 s of CPU alone (the collector), without
+# it 33 s of both; a CPU limit (limit.bash's limited_cpu: ulimit -t N, the wall cap four times N and at least WALL) does not move
+# with the host's load. A run the CPU limit kills (137, its CPU at four fifths of N or more) or the wall cap stops (124) is a timeout
+budget_cpu() {
+  sed -n "s|^[{ ]*\"$1\" *[0-9]* *:cpu *\\([0-9][0-9]*\\).*|\\1|p" "$root/test/cpp/check-budget.edn" 2>"$TMPDIR/cppi-budget.err" | head -1
+}
 
 if [ -z "$judge" ]; then
   rtlib=$("$root/bin/cppi" runtime-ci) || exit 1
   cirun=${CIRUN:-$root/.tmp/ci/cirun}
   { [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure > "$work/cirun-build.log" 2>&1 || { cat "$work/cirun-build.log"; exit 1; }
-  "$root/bin/ci" musl ensure || exit 1
+  . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold || exit 1
   : > "$work/empty-stdin"
   ir1() { # ID STD ARGS PATH: the oracle's IR, its seconds
     local d=$work/files/$1 t0
@@ -93,10 +100,22 @@ if [ -z "$judge" ]; then
   }
   run1() { # ID
     local i=$1 f=$work/nodes/$1.nodes rd st t0 t1
+    local cpu wall; cpu=$(budget_cpu "$i"); wall=$(budget "$i")
     rd=$(mktemp -d "$work/run.XXXXXX"); t0=$(date +%s.%N)
-    (cd "$rd" && ulimit -f 1024 && timeout "$(budget "$i")" "$cirun" "$f" < "$work/empty-stdin" > out 2> err); st=$?
+    if [ -n "$cpu" ]; then
+      [ "$wall" -ge $((cpu * 4)) ] || wall=$((cpu * 4))
+      # its memory limit the run's own, not bin/cppi's tools' GOMEMLIMIT=1500MiB: atomics.cpp's heap is 2.8 GB, and under that soft
+      # limit Go collects without end (750 s of CPU, 210 s of wall, against 33 s of both without it; GOMAXPROCS does not matter):
+      # limited_cpu's cap, CPPI_RUN_MEM_GIB (default 8) of address space, three quarters of it as GOMEMLIMIT
+      (cd "$rd" && ulimit -f 1024 && { env -u GOMEMLIMIT ARBACE_MEM_GIB="${CPPI_RUN_MEM_GIB:-8}" bash -c 'limited_cpu "$@"' _ "$cpu" "$wall" "$cirun" "$f" < "$work/empty-stdin" > out 2> err; echo $? > st; times > cpu; }); st=$(cat "$rd/st")
+      # times' second line: the children's user and system time (the program's)
+      if [ "$st" = 137 ] && [ "$(awk 'NR == 2 { split($1, u, "m"); split($2, s, "m"); sub(/s$/, "", u[2]); sub(/s$/, "", s[2])
+             print (u[1] * 60 + u[2] + s[1] * 60 + s[2] >= '"$cpu"' * 0.8) ? 1 : 0 }' "$rd/cpu")" = 1 ]; then st=timeout; fi
+    else
+      (cd "$rd" && ulimit -f 1024 && timeout "$wall" "$cirun" "$f" < "$work/empty-stdin" > out 2> err); st=$?
+    fi
     t1=$(date +%s.%N)
-    [ $st = 124 ] && st=timeout
+    [ "$st" = 124 ] && st=timeout
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$st" "$(sha256sum < "$rd/out" | cut -d' ' -f1)" "$(wc -c < "$rd/out")" \
       "$(grep -m1 '^\(cirun: \(fault\|internal\)\|fatal error: \|runtime: \)' "$rd/err" | cut -c1-200 | tr '\t' ' ')" \
       "$(sha256sum < "$rd/err" | cut -d' ' -f1)" "$(echo "$t1 $t0" | awk '{printf "%.1f", $1 - $2}')"
@@ -104,7 +123,8 @@ if [ -z "$judge" ]; then
     [ -n "${CPPI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
   }
   cpr_prepare || exit 1
-  export -f ir1 run1 budget; export work cirun root
+  . "$root/bin/lib/limit.bash"
+  export -f ir1 run1 budget budget_cpu limited_cpu; export work cirun root
   for id in "${ids[@]}"; do
     d=$work/$id
     if [ -z "$resume" ]; then rm -rf "${d:?}" "${work:?}/files/$id" "${work:?}/nodes/$id"; fi
