@@ -131,26 +131,90 @@
 ;; JCS136 (a), JCS142 (a): the internal packages the REPL's world makes visible (jdk/repl-exports.txt, which j2g's
 ;; repl-visible? reads too): a test whose @modules entries are all `java.base/PKG` of that list stays in its category
 ;; (not :run-modules), its entries kept as the javac options `--add-exports=java.base/PKG=ALL-UNNAMED`, which the
-;; JDK's javac and java (--record-ref) and javac on Arbace take as the test's own exports
+;; JDK's javac and java (--record-ref) and javac on Arbace take as the test's own exports. JCS334 (a): the file's lines
+;; `MOD/PKG` (java.net.http's internal packages, and java.base's that java.net.http's tests name) are the library and
+;; framework corpora's alone (`wide`): a test of those corpora may name them, `--add-exports=MOD/PKG=ALL-UNNAMED`; the
+;; plain corpora read the unprefixed lines only, as before
+
+(def ^:private repl-export-lines
+  (delay (vec (for [l (lines "jdk/repl-exports.txt") :let [l (str/trim (str/replace l #"#.*$" ""))] :when (seq l)] l))))
 
 (def ^:private repl-exports
-  (delay (set (for [l (lines "jdk/repl-exports.txt") :let [l (str/trim (str/replace l #"#.*$" ""))] :when (seq l)] l))))
+  "JCS136 (a), JCS142 (a): java.base's packages of every corpus (the unprefixed lines)."
+  (delay (set (remove #(str/includes? % "/") @repl-export-lines))))
+
+(def ^:private repl-exports-wide
+  "JCS334 (a): every line as MOD/PKG (an unprefixed line java.base's), the library and framework corpora's."
+  (delay (set (for [l @repl-export-lines] (if (str/includes? l "/") l (str "java.base/" l))))))
+
+;; JCS336 (a): a plain module name in @modules (`java.logging`: the test needs the module, no export) is satisfied in
+;; the library and framework corpora when the world has the module: some of its API is in the Go build's world, one
+;; of the packages its module-info.java exports unqualified (or, for a module exporting none, one of the classes it
+;; provides as a service: jdk.zipfs, jdk.charsets) having forms in jdk/forms. java.base always. A test touching a part
+;; of the module the world lacks fails at its load, in that part's class
+
+(def ^:private jdk-src
+  "jdk26u's src/ (the platform's sources, beside the tests' test/), set by scan from its JDKTEST."
+  (atom nil))
+
+(defn- forms-of-package? [^String pkg]
+  (let [d (io/file "jdk/forms" (str/replace pkg "." "/"))]
+    (boolean (and (.isDirectory d) (some #(str/ends-with? (.getName ^File %) ".ae") (.listFiles d))))))
+
+(defn module-api
+  "The API of module M in jdk26u's sources SRC: [unqualified exported packages, provided service classes], or nil
+  when SRC has no module-info.java of M."
+  [src ^String m]
+  (let [f (io/file src m "share/classes/module-info.java")]
+    (when (.isFile f)
+      (let [t (-> (slurp f) (str/replace #"(?s)/\*.*?\*/" " ") (str/replace #"//[^\n]*" " "))]
+        [(vec (map second (re-seq #"\bexports\s+([\w.]+)\s*;" t)))
+         (vec (for [[_ cs] (re-seq #"\bprovides\s+[\w.$]+\s+with\s+([^;]+);" t) c (str/split (str/trim cs) #"[\s,]+") :when (seq c)] c))]))))
+
+(def ^:private module-in-world*
+  (memoize (fn [src m]
+             (or (= m "java.base")
+                 (boolean (when-let [[pkgs provs] (and src (module-api src m))]
+                            (or (some forms-of-package? pkgs)
+                                (some #(.isFile (io/file "jdk/forms" (str (str/replace % "." "/") ".ae"))) provs))))))))
+
+(defn module-in-world? [m] (module-in-world* @jdk-src m))
 
 (defn- module-exports
-  "The package exports of a description's @modules entries when every entry is java.base/PKG of the REPL's list
-  (JCS136 (a)), else nil (an entry of another module or package: the test stays :run-modules)."
-  [desc]
+  "The package exports of a description's @modules entries, [[MOD PKG] ...], when every entry is java.base/PKG of the
+  REPL's list (JCS136 (a)), else nil (an entry of another module or package: the test stays :run-modules). WIDE (the
+  library and framework corpora's, JCS334 (a), JCS336 (a)): also MOD/PKG of the file's prefixed lines, and a plain
+  module name the world has (module-in-world?, no option)."
+  [desc wide]
   (let [es (vec (for [[t v] desc :when (= t "modules") m (str/split (str/trim v) #"\s+") :when (seq m)] m))
-        pk (fn [m] (second (re-matches #"java\.base/([\w.]+)" m)))]
-    (when (and (seq es) (every? #(@repl-exports (pk %)) es))
-      (mapv pk es))))
+        one (fn [m]
+              (if-let [[_ mod pk] (re-matches #"([\w.]+)/([\w.]+)" m)]
+                (when (or (and (= mod "java.base") (@repl-exports pk)) (and wide (@repl-exports-wide m)))
+                  [[mod pk]])
+                (when (and wide (re-matches #"[\w.]+" m) (module-in-world? m))
+                  [])))
+        rs (map one es)]
+    (when (and (seq es) (every? some? rs))
+      (vec (distinct (apply concat rs))))))
+
+(def ^:private sysprop-opt
+  "JCS335 (a): a system property of a main action (`-Dk=v`, `-Dk`), passed to the run on both sides."
+  #"^-D[^=\s]+(=.*)?$")
+
+(defn run-props
+  "JCS335 (a): a main action's system properties (its -D options), each as -Dk=v (`-Dk` as -Dk=, the same empty
+  value java gives it)."
+  [opts]
+  (vec (for [o opts :when (re-matches sysprop-opt o)] (if (str/includes? o "=") o (str o "=")))))
 
 (defn- run-mode-ok? [modes]
   (every? #(or (= % "othervm") (re-matches #"timeout=\d+" %)) modes))
 
-(defn categorize
-  "A description's category (the survey's §3.1, the first that fits) and its actions."
-  [desc]
+(defn- categorize1
+  "A description's category (the survey's §3.1, the first that fits) and its actions. WIDE (the library and
+  framework corpora's :base, JCS334 (a)-JCS336 (a)): module-exports' wide entries, and -D options beside the dropped
+  JIT ones (not :run-vmopts)."
+  [desc wide]
   (let [has (fn [t] (some #(= t (first %)) desc))
         acts (vec (for [[t v] desc :when (#{"run" "compile" "build" "clean"} t)] (action t v)))
         runs (filter #(= :run (:tag %)) acts)
@@ -167,17 +231,37 @@
               (some #(some #{"fail"} (:modes %)) compiles) :compile-fail
               (and (empty? runs) (seq compiles)) :compile-only
               (has "library") :run-lib
-              (and (has "modules") (not (module-exports desc))) :run-modules
+              (and (has "modules") (not (module-exports desc wide))) :run-modules
               (has "requires") :run-requires
               (or (has "enablePreview") (has "clean")) :other
               (some #(not= "main" (:kind %)) runs) :other
               (not (every? #(run-mode-ok? (:modes %)) mains)) :other
               (some #(seq (:modes %)) compiles) :other
-              (some #(not (re-matches jit-opt %)) (mapcat :opts mains)) :run-vmopts
+              (some #(not (or (re-matches jit-opt %) (and wide (re-matches sysprop-opt %)))) (mapcat :opts mains)) :run-vmopts
               (seq (mapcat :opts mains)) :run-jitopts
               (seq compiles) :run-compile
               :else :run-plain)]
     {:category cat :actions acts}))
+
+(def framework-runner
+  "JCS331 (a): the check's own TestNG and JUnit runner (test/java/runner/, clean-room from the frameworks'
+  documented behaviour), the main class of a framework action (`@run testng C` runs it with the arguments testng C)."
+  "org.arbace.jtreg.Runner")
+
+(defn categorize
+  "A description's category (the survey's §3.1, the first that fits), its actions and its :base (JCS330 (a),
+  JCS331 (a)): the category the description would have without its @library tags and with its @run testng and
+  @run junit actions taken as main actions; a corpus admitting :run-lib or :framework takes the tests whose :base
+  is one of its :base categories (the libraries and the framework runner are what the check adds, the rest of
+  the description as for the plain runs)."
+  [desc]
+  (let [r (categorize1 desc false)]
+    (assoc r :base
+           (if (#{:run-lib :framework} (:category r))
+             (:category (categorize1 (vec (for [[t v] desc :when (not= t "library")]
+                                            [t (if (= t "run") (str/replace-first v #"^(?:testng|junit)(?=[/\s]|$)" "main") v)]))
+                                     true))
+             (:category r)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; scan
@@ -187,10 +271,15 @@
        (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".java")))
        (sort-by #(.getPath ^File %))))
 
-(defn- corpus-of [corpora ^String path cat]
+(defn- corpus-of
+  "The first corpus that takes a test: its area, its category and, for a corpus with :base (JCS332 (a): the
+  library and framework corpora), the category the test would have without its libraries and framework (categorize's
+  :base) one of those."
+  [corpora ^String path cat base]
   (some (fn [c] (when (and (some #(str/starts-with? path %) (:areas c))
                            (not-any? #(str/starts-with? path %) (:exclude c []))
-                           (some #{cat} (:categories c)))
+                           (some #{cat} (:categories c))
+                           (or (nil? (:base c)) (some #{base} (:base c))))
                   (:id c)))
         corpora))
 
@@ -225,16 +314,87 @@
 
 (defn- run-plan
   "A run test's plan lines (the levels read, interp, classes): javac's options, the files compiled,
-  the classes built, the main actions."
-  [skip opts main-file compiles acts runs base]
+  the classes built, the main actions; JCS330 (a): the source roots beside the test's directory (srcroot
+  ABS: its libraries, the framework runner's), and JCS331 (a): a framework action (@run testng C, @run junit C)
+  as a main action of the runner (framework-runner) with the arguments KIND C, C the test's class when the
+  action names none (jtreg's)."
+  [skip opts main-file compiles acts runs base srcroots]
   (concat (when skip [(str "skip\t" skip)])
           (for [o opts] (str "javac\t" o))
+          (for [r srcroots] (str "srcroot\t" r))
           (distinct (cons (str "compile\t" main-file)
                           (for [c compiles fl (:files c)] (str "compile\t" fl))))
           (for [a acts :when (= :build (:tag a)) c (:classes a)] (str "build\t" c))
-          (for [ru runs]
+          (when (some #(#{"testng" "junit"} (:kind %)) runs) [(str "build\t" framework-runner)])
+          (for [ru runs
+                :let [cls (str/replace (or (:class ru) base) "${test.main.class}" base)
+                      fw (#{"testng" "junit"} (:kind ru))]]
             (str "run\t" (or (some #(second (re-matches #"timeout=(\d+)" %)) (:modes ru)) "120") "\t"
-                 (str/replace (:class ru) "${test.main.class}" base) "\t" (str/join "\t" (:args ru))))))
+                 (if fw (str framework-runner "\t" fw "\t" cls) cls) "\t" (str/join "\t" (:args ru))))
+          ;; JCS335 (a): the system properties of run I (its -D options; the library and framework corpora's), given
+          ;; to java and to run.ae before the class on both sides
+          (for [[i ru] (map-indexed vector runs) :let [ps (run-props (:opts ru))] :when (seq ps)]
+            (str/join "\t" (concat ["props" i] ps)))))
+
+;; JCS330 (a): jtreg's @library (openjdk/jtreg's tag specification): each value a directory, relative to the
+;; test's directory, or with a leading / relative to the test suite's root (the nearest directory holding
+;; TEST.ROOT), else to one of TEST.ROOT's external.lib.roots (jdk's and langtools' ../../, hotspot's ../../../:
+;; /test/lib is jdk26u's test/lib); its classes compiled with the test's as its sources need them, in their
+;; packages. The check gives javac the directories as source roots beside the test's (bin/java-check's
+;; record_sources), the files the JDK's javac parsed the test's source set
+
+(defn- suite-root ^File [^File dir]
+  (loop [d dir] (cond (nil? d) nil (.isFile (io/file d "TEST.ROOT")) d :else (recur (.getParentFile d)))))
+
+(defn- external-lib-roots
+  "TEST.ROOT's external.lib.roots under the suite root SROOT, as directories."
+  [^File sroot]
+  (let [l (some #(second (re-matches #"\s*external\.lib\.roots\s*=\s*(.*?)\s*" %)) (lines (io/file sroot "TEST.ROOT")))]
+    (for [r (when l (str/split l #"\s+")) :when (seq r)] (io/file sroot r))))
+
+(defn library-dirs
+  "The @library values of DESC resolved as jtreg resolves them for a test in DIR: [[L DIR-or-nil] ...]."
+  [desc ^File dir]
+  (let [sroot (suite-root dir)]
+    (vec (for [[t v] desc :when (= t "library") l (str/split (str/trim v) #"\s+") :when (seq l)]
+           [l (let [cands (if (str/starts-with? l "/")
+                            (when sroot (cons (io/file sroot (subs l 1)) (for [r (external-lib-roots sroot)] (io/file r (subs l 1)))))
+                            [(io/file dir l)])]
+                (some #(when (.isDirectory ^File %) (.getCanonicalFile ^File %)) cands))]))))
+
+(defn- dir-property
+  "jtreg's TEST.properties: the value of KEY in the nearest TEST.properties at or above DIR (up to the suite root)
+  that has it, and that file's directory: [value dir], or nil."
+  [^File dir key]
+  (let [sroot (suite-root dir)]
+    (loop [d dir]
+      (when d
+        (let [f (io/file d "TEST.properties")
+              v (when (.isFile f)
+                  (with-open [r (io/reader f)] (.getProperty (doto (java.util.Properties.) (.load r)) key)))]
+          (cond v [(str/trim v) d]
+                (or (nil? sroot) (= (.getCanonicalPath d) (.getCanonicalPath sroot))) nil
+                :else (recur (.getParentFile d))))))))
+
+(defn with-dir-defaults
+  "JCS330 (a): a library or framework test's description with what its directory's TEST.properties give every test
+  there, as jtreg reads them: `modules` (the default @modules of a test that has none: java.net.http's tests'
+  internal packages) and `lib.dirs` (libraries of every test, relative to that file's directory or, with a leading
+  /, the suite root's), as @modules and @library tags."
+  [desc ^File dir]
+  (let [sroot (suite-root dir)
+        mods (when-not (some #(= "modules" (first %)) desc) (first (dir-property dir "modules")))
+        [libs ldir] (dir-property dir "lib.dirs")
+        rel (fn [l] (if (or (str/starts-with? l "/") (nil? sroot)) l
+                        (str "/" (.relativize (.toPath (.getCanonicalFile ^File sroot)) (.toPath (.getCanonicalFile (io/file ldir l)))))))]
+    (cond-> (vec desc)
+      (seq mods) (conj ["modules" (str/replace mods #"\s+" " ")])
+      (seq libs) (into (for [l (str/split libs #"\s+") :when (seq l)] ["library" (rel l)])))))
+
+(defn- runner-root
+  "The framework runner's sources (JCS331 (a)): the checkout's test/java/runner."
+  ^File []
+  (.getCanonicalFile (io/file "test/java/runner")))
 
 ;; the diagnostics level (JC3, "As built: JC3"): a golden-diagnostics test (compile-fail-ref) is run
 ;; as jtreg runs it, in place (no renaming: its golden files name its files and classes), its
@@ -272,8 +432,21 @@
             (for [[i a] (map-indexed vector acts)]
               (str/join "\t" (concat ["act" i (:kind a) (if (seq (:modes a)) (str/join "/" (:modes a)) "-")] (:toks a)))))))
 
+;; JCS337 (a): the corpora by night. A corpus with :night N joins the scan once test/java/corpora.edn's :night is N or
+;; more (JAVA_CHECK_NIGHT overrides it for a run by hand: a sample of a later night's corpus, its reference lines not
+;; committed); one without :night is always in. The night that records corpus N raises the file's :night to N and records
+;; it whole (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS334-JCS339"): until then its tests take no id
+
+(defn active-corpora
+  "The corpora of the file's map M that the scan takes (JCS337 (a)): those whose :night is at most the file's :night
+  (or JAVA_CHECK_NIGHT's)."
+  [{:keys [corpora night]}]
+  (let [n (or (some-> (System/getenv "JAVA_CHECK_NIGHT") not-empty Long/parseLong) night 0)]
+    (filter #(<= (:night % 0) n) corpora)))
+
 (defn scan [jdktest corpora-file ref work]
-  (let [{:keys [corpora]} (read-edn corpora-file)
+  (reset! jdk-src (.getCanonicalFile (io/file jdktest "../src")))
+  (let [corpora (active-corpora (read-edn corpora-file))
         rts (roots corpora jdktest)
         old (into {} (for [t (ref-tests ref)] [(:test t) (:id t)]))
         next-id (atom (inc (reduce max 0 (map id-num (vals old)))))
@@ -291,10 +464,14 @@
                    :let [ds (vec (descriptions text)) n (count ds)]
                    [i d] (map-indexed vector ds)
                    :let [tid (second (re-find #"^id=(\S+)" (second (first d))))
-                         {:keys [category actions]} (categorize d)]]
+                         {:keys [category actions base]} (categorize d)
+                         ;; JCS330 (a): a library or framework test with its directory's TEST.properties defaults
+                         lf (#{:run-lib :framework} category)
+                         d (if lf (with-dir-defaults d (.getParentFile f)) d)
+                         base (if lf (:base (categorize d)) base)]]
                {:key (test-key path i n tid) :path path :root croot :desc d
                 :root-kind (:root (first cs) :jdk26u) :category category :actions actions
-                :corpus (corpus-of cs path category) :file f})
+                :corpus (corpus-of cs path category base) :file f})
         rows (distinct rows)
         rows (vec (for [r (sort-by :key rows)]
                     (assoc r :id (when (:corpus r)
@@ -308,23 +485,39 @@
                   acts (:actions r)
                   base (str/replace (.getName ^File (:file r)) #"\.java$" "")
                   ;; the main actions, those equal once their JIT options are dropped run once
-                  runs (or (seq (vals (into (sorted-map) (map-indexed (fn [i r] [[(:class r) (:args r)] (assoc r :i i)]) (filter #(= :run (:tag %)) acts)))))
+                  runs (or (seq (vals (into (sorted-map) (map-indexed (fn [i r] [[(:class r) (:args r) (run-props (:opts r))] (assoc r :i i)]) (filter #(= :run (:tag %)) acts)))))
                            [{:class base :args [] :modes [] :opts []}])
                   runs (sort-by #(:i % 0) runs)
                   compiles (filter #(= :compile (:tag %)) acts)
                   opts (distinct (mapcat :opts compiles))
+                  libs (library-dirs (:desc r) dir)
+                  lib-or-fw (#{:run-lib :framework} (:category r))
+                  fw (= :framework (:category r))
                   skip (cond (not (compile-opts-ok? opts)) (str "@compile options: " (str/join " " opts))
                              (some #(str/includes? % "${") (mapcat :args runs)) "a substitution in @run's arguments"
+                             ;; JCS335 (a): a system property naming jtreg's substitutions (${test.src} ...)
+                             (some #(str/includes? % "${") (mapcat (comp run-props :opts) runs)) "a substitution in @run's system properties"
                              ;; a main class of a module (java.base/PKG.Main: the test patches the module)
-                             (some #(str/includes? (str (:class %)) "/") runs) "a module-qualified main class")]]
+                             (some #(str/includes? (str (:class %)) "/") runs) "a module-qualified main class"
+                             ;; JCS330 (a): a library that is no directory (a jar, or none at the place jtreg looks)
+                             (and lib-or-fw (some (comp nil? second) libs)) (str "@library " (first (first (filter (comp nil? second) libs))) ": no such directory")
+                             ;; a library or test class built into a module (@build java.net.http/PKG.C: a patch of that module)
+                             (and lib-or-fw (some #(str/includes? % "/") (for [a acts :when (= :build (:tag a)) c (:classes a)] c)))
+                             "a module-qualified @build class (a patch of that module)"
+                             ;; JCS331 (a): a framework action whose framework is neither TestNG nor JUnit, or a
+                             ;; framework test with a main action beside (one runner a test)
+                             (and fw (some #(not (#{"testng" "junit"} (:kind %))) runs)) "a framework test with a main action beside")
+                  srcroots (when lib-or-fw
+                             (distinct (concat (for [[_ d] libs :when d] (.getPath ^File d))
+                                               (when fw [(.getPath (runner-root))]))))]]
       (write-lines (str work "/record/" (:id r) "/plan.tsv")
                    (concat [(str "key\t" (:key r)) (str "path\t" (:path r)) (str "corpus\t" (name (:corpus r)))
                             (str "category\t" (name (:category r))) (str "dir\t" (.getPath dir))
                             (str "root\t" (name (:root-kind r)) "\t" (:root r))]
                            (if (= :compile-fail-ref (:category r))
                              (diag-plan (:desc r))
-                             (run-plan skip (distinct (concat opts (for [p (module-exports (:desc r))] (str "--add-exports=java.base/" p "=ALL-UNNAMED"))))
-                                       (.getName ^File (:file r)) compiles acts runs base)))))
+                             (run-plan skip (distinct (concat opts (for [[m p] (module-exports (:desc r) lib-or-fw)] (str "--add-exports=" m "/" p "=ALL-UNNAMED"))))
+                                       (.getName ^File (:file r)) compiles acts runs base srcroots)))))
     (write-lines (str work "/record.list") (map :id sel))
     ;; the counts, by area and category
     (let [cats (sort (distinct (map (comp name :category) rows)))
@@ -341,6 +534,12 @@
 (defn- plan-map [rows]
   (reduce (fn [m [k & vs]] (update m k (fnil conj []) (vec vs))) {} rows))
 
+(defn src-file
+  "A source set's file REL of a test in DIR: under DIR (a library's too, as ../ paths), or with ROOT: the
+  checkout's (JCS331 (a): the framework runner's, test/java/runner; the reference names no host path)."
+  ^File [dir ^String rel]
+  (if (str/starts-with? rel "ROOT:") (io/file (subs rel 5)) (io/file dir rel)))
+
 (defn rename [work]
   (doseq [id (lines (str work "/record.list"))
           :let [d (str work "/record/" id)
@@ -349,7 +548,7 @@
                 srcs (lines (str d "/sources.txt"))]
           :when (and (seq srcs) (not (pm "skip")))]
     (let [placed (for [rel srcs
-                       :let [text (slurp (io/file dir rel))
+                       :let [text (slurp (src-file dir rel))
                              p (package-of text)
                              base (.getName (io/file rel))]]
                    [rel (if p (str (str/replace p "." "/") "/" base) (str id "/" base)) (if p "0" "1")])
@@ -361,13 +560,24 @@
         (write-lines (str d "/rename.tsv") [(str "!\ttwo files of the source set at one place in the renamed tree")])
         (write-lines (str d "/rename.tsv") (for [p placed] (str/join "\t" p))))
       (write-lines (str d "/runs.tsv")
-                   (for [[i [tmo cls & args]] (map-indexed vector (pm "run"))]
-                     ;; a class without its package: the main file's package (jtreg's ${test.main.class}), or the test's
-                     (str/join "\t" (concat [i tmo (cond (str/includes? cls ".") cls
-                                                           main-pkg (str main-pkg "." cls)
-                                                           unnamed? (str id "." cls)
-                                                           :else cls)]
-                                            (remove str/blank? args)))))))
+                   (for [[i [tmo cls & args]] (map-indexed vector (pm "run"))
+                         ;; a class without its package: the main file's package (jtreg's ${test.main.class}), or the test's
+                         :let [qual (fn [cls] (cond (str/includes? cls ".") cls
+                                                    main-pkg (str main-pkg "." cls)
+                                                    unnamed? (str id "." cls)
+                                                    :else cls))
+                               args (remove str/blank? args)
+                               ;; JCS331 (a): the framework runner's test class, renamed as a main class is
+                               args (if (= cls framework-runner) (cons (first args) (cons (qual (second args)) (drop 2 args))) args)]]
+                     (str/join "\t" (concat [i tmo (qual cls)] args))))
+      ;; JCS335 (a): run I's system properties (props.tsv: I, then each -Dk=v); a value naming a class of the test's
+      ;; unnamed-package files (jdk.serialFilterFactory=SerialFactoryExample$FilterInThread) renamed with them, as a main
+      ;; class is (ID.C)
+      (let [unnamed-classes (set (for [[rel _ p] placed :when (= p "1")] (str/replace (.getName (io/file rel)) #"\.java$" "")))
+            prop (fn [p] (if-let [[_ k v c] (re-matches #"(-D[^=]+=)(([A-Za-z_][\w]*)(?:\$[\w$]+)?)" p)]
+                           (if (unnamed-classes c) (str k id "." v) p)
+                           p))]
+        (write-lines (str d "/props.tsv") (for [[i & ps] (pm "props")] (str/join "\t" (cons i (map prop ps))))))))
   (println "java-check rename: done"))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -429,6 +639,8 @@
                           g #(ffirst (pm %))
                           ren (tsv (str d "/rename.tsv"))
                           runs (tsv (str d "/runs.tsv"))
+                          ;; JCS335 (a): each run's system properties, by its index
+                          props (into {} (for [[i & ps] (tsv (str d "/props.tsv"))] [i (vec ps)]))
                           jst (slurp1 (str d "/javac.exit"))
                           base (second (first (pm "root")))
                           rs (vec (for [[i tmo cls & args] runs
@@ -444,13 +656,18 @@
                                               :err (or (clean (r "err1") work id base) "")
                                               :det (and (= e1 e2) (= o1 o2))}
                                        masked? (assoc :out-masked (subs m1 0 16)
-                                                      :det-masked (and (= e1 e2) (= m1 m2)))))))
+                                                      :det-masked (and (= e1 e2) (= m1 m2)))
+                                       (seq (props i)) (assoc :props (props i))))))
                           status* (cond (g "skip") [:skip (g "skip")]
                                        (empty? (lines (str d "/sources.txt"))) [:skip (str "the source set: " (or (slurp1 (str d "/sources.err")) "javac failed"))]
                                        (= "!" (ffirst ren)) [:skip (second (first ren))]
                                        (not= "0" jst) [:fail (str "javac: " (or (slurp1 (str d "/javac.err1")) "failed"))]
                                        :else (if-let [b (first (filter #(not= 0 (:exit %)) rs))]
-                                               [:fail (str "status " (:exit b) ": " (:err b))]
+                                               ;; JCS342 (a): an uncaught jtreg.SkippedException (jdk.test.lib's: the
+                                               ;; test cannot run here) is jtreg's skip
+                                               (if-let [[_ m] (re-find #"^Exception in thread \"[^\"]*\" (jtreg\.SkippedException\b.*)" (:err b))]
+                                                 [:skip m]
+                                                 [:fail (str "status " (:exit b) ": " (:err b))])
                                                [:pass nil]))
                           status [(first status*) (clean (second status*) work id base)]]]
                 (edn-map [[:id id] [:test (g "key")] [:corpus (keyword (g "corpus"))] [:category (keyword (g "category"))]
@@ -500,6 +717,13 @@
   (let [f (io/file (.getParent (io/file ref)) "verdicts.edn")]
     (if (.isFile f) (into {} (for [[id k] (read-edn (.getPath f))] [id k])) {})))
 
+(defn golden-path
+  "JCV2: a jls test's golden file, its expected stdout beside its program (test/java/jls/NAME.out), relative to
+  the checkout."
+  [t]
+  (let [n (last (str/split (str (:test t)) #"/"))]
+    (str (:dir t) "/" (str/replace n #"\.java$" "") ".out")))
+
 (defn- controls-judged!
   "GTS81 (a): the controls' results of RESULTS at the level LV (rows [id lv result reason]) against
   their subjects' (the run without them): a control that passes is a problem (the judge passes a run
@@ -509,9 +733,10 @@
   (doseq [c controls :when (some #{lv} (:levels c))
           :let [sub (first (filter #(and (= (:subject c) (first %)) (= lv (second %))) results))
                 row (first (filter #(and (= (:id c) (first %)) (= lv (second %))) results))
-                what (if (:inverted c)
-                       (str "control " (:id c) " (" (:subject c) "'s run judged by its own verdict inverted, JCV1)")
-                       (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)"))]
+                what (cond
+                       (:inverted c) (str "control " (:id c) " (" (:subject c) "'s run judged by its own verdict inverted, JCV1)")
+                       (:golden-of c) (str "control " (:id c) " (" (:subject c) "'s run judged against " (:golden-of c) "'s golden file, JCV2)")
+                       :else (str "control " (:id c) " (" (:subject c) "'s run judged against " (:reference c) "'s reference)"))]
           :when (or sub row)]
     (cond
       ;; GTS84 (a): a control whose crossed material was not made in this run (the print level's reference not
@@ -542,7 +767,7 @@
     (doseq [[controls by-id vm] [(let [cs (controls-of ref)] [cs (if (seq cs) (into {} (for [t (ref-tests ref)] [(:id t) t])) {}) (verdict-map ref)])]
             t ts
             :let [cs (for [c controls :when (= (:subject c) (:id t))
-                           :when (not (:inverted c))
+                           :when (not (or (:inverted c) (:golden-of c)))
                            :let [r (by-id (:reference c)) r0 (first (:runs r))]
                            :when r0]
                        [c r r0])]]
@@ -550,6 +775,8 @@
                    (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\t" (name (:root t :jdk26u))) (str "classes\t" (:classes t))
                             ;; JCV1: whose verdict judges it (test/java/verdicts.edn; none: the JDK's record)
                             (str "verdict\t" (name (vm (:id t) :stdout)))]
+                           ;; JCV2: a run test judged by its golden file (the jls programs'), the file
+                           (when (= :golden (vm (:id t))) [(str "golden\t" (golden-path t))])
                            (for [x (:javac t)] (str "javac\t" x))
                            (for [[src dst] (:files t)]
                              (str "file\t" src "\t" dst "\t" (if (some #{dst} (:unnamed t)) (str "package " (first (str/split dst #"/")) "; ") "")))
@@ -557,6 +784,9 @@
                              (str/join "\t" (concat ["run" i (:exit r) (:out r) (:out-len r) (if (:det r) "1" "0")
                                                       (or (:out-masked r) "-") (if (:det-masked r) "1" "0") (:main r)]
                                                      (:args r))))
+                           ;; JCS335 (a): run I's system properties
+                           (for [[i r] (map-indexed vector (:runs t)) :when (seq (:props r))]
+                             (str/join "\t" (concat ["props" i] (:props r))))
                            ;; GTS81 (a): the controls whose subject the test is: their reference's first
                            ;; action's expected status and stdout, its class files' digest
                            (for [[c r r0] cs]
@@ -566,6 +796,11 @@
                            ;; JCV1: the own verdict's controls (:inverted): the subject's run judged by its own
                            ;; verdict inverted (it must fail, as jtreg's main/fail and @compile/fail)
                            (for [c controls :when (and (:inverted c) (= (:subject c) (:id t)))] (str "control-own\t" (:id c)))
+                           ;; JCV2: the golden files' controls (:golden-of): the subject's run judged against another
+                           ;; program's golden file (it must differ)
+                           (for [c controls :when (and (:golden-of c) (= (:subject c) (:id t)))
+                                 :let [r (by-id (:golden-of c))] :when r]
+                             (str "control-golden\t" (:id c) "\t" (golden-path r)))
                            ;; GTS84 (a): the print level's controls: the subject's print judged against its
                            ;; reference's printed run (control-print CID REF); the reference keeps its printed
                            ;; class files for them (control-reference CID)
@@ -667,14 +902,15 @@
 (defn own-row
   "JCV1: a result row [id level result reason] judged by the test's own verdict (VM, verdict-map): at
   interp and compiled a :status test's stdout is not looked at (a differ, its status the expected 0,
-  passes; the JDK's status in a reason is jtreg's expected 0); at classes javac's acceptance judges (a
+  passes; the JDK's status in a reason is jtreg's expected 0; JCV2: a :golden test's too, its stdout
+  judged by its golden file, which a row of before JCV2 judged by the JDK's record, equal to it); at classes javac's acceptance judges (a
   differ, the class files not the JDK javac's, passes). Rows of JCV1's runs, and every other row, as
   they are."
   [vm [id lv r reason :as row]]
   (cond
     (and (#{:interp :compiled} lv) (= :status (vm id)) (= :differ r) (not (str/starts-with? reason "action ")))
     [id lv :pass ""]
-    (and (#{:interp :compiled} lv) (= :status (vm id)) (= :fail r) (re-find #"^(?:action \d+: )?status -?\d+ \(the JDK's 0\)" reason))
+    (and (#{:interp :compiled} lv) (#{:status :golden} (vm id)) (= :fail r) (re-find #"^(?:action \d+: )?status -?\d+ \(the JDK's 0\)" reason))
     [id lv r (str/replace-first reason #"\(the JDK's 0\)" "(expected 0)")]
     (and (= :classes lv) (= :differ r) (= reason "the class files differ from the JDK javac's"))
     [id lv :pass ""]
@@ -735,7 +971,7 @@
           :let [o (into {} (for [[id l r reason] own :when (and (= l lv) (not (control-ids id)))] [id [r reason]]))
                 j (into {} (for [[id l r reason] jdk :when (and (= l lv) (not (control-ids id)))] [id [r reason]]))
                 ids (sort (filter j (keys o)))
-                own-judged (count (filter #(if (#{:interp :compiled} lv) (= :status (vm %)) true) ids))
+                own-judged (count (filter #(if (#{:interp :compiled} lv) (#{:status :golden} (vm %)) true) ids))
                 dis (filter #(not= (first (o %)) (first (j %))) ids)]
           :when (seq ids)]
     (println (str "java-check " (name lv) ": the own verdict judges " own-judged " of " (count ids)
@@ -786,6 +1022,16 @@
                            (if (= :pass (nth sub 2))
                              [(:id c) lv :fail "status 0 (expected a failure: the verdict inverted, a control; from its subject's row)"]
                              [(:id c) lv :pass "(from its subject's row)"])))
+        ;; JCV2: a :golden-of control in saved results with no row of any :golden-of control (a run before JCV2: its
+        ;; subject's stdout is not saved, nothing to judge again) is left, said; one missing beside another's row is not
+        own-rows (let [gcs (filter :golden-of (controls-of ref))
+                       gids (set (map :id gcs))]
+                   (if (some #(gids (first %)) own-rows)
+                     own-rows
+                     (concat own-rows
+                             (for [c gcs lv (:levels c)
+                                   :when (some #(and (= (:subject c) (first %)) (= lv (second %))) own-rows)]
+                               [(:id c) lv :left "a run before JCV2: its subject's stdout is not in the saved results"]))))
         jdk-rows (let [jdk (into {} (for [[id lv :as x] raw :when (str/ends-with? lv ".jdk")]
                                       [[id (subs lv 0 (- (count lv) 4))] x]))]
                    (for [[id lv :as x] raw :when (not (str/ends-with? lv ".jdk"))
@@ -1169,11 +1415,20 @@
                      id))]
     (or (not-empty by-class) by-file (not-empty by-go))))
 
+(defn- root-first
+  "The failures with a class's own header, members or bridges failure first (JCS69 (b)'s root cause), the
+  analysis failures after them, each group in j2g's order: a test's reason is its first failure, and an outer
+  class's analysis that met a member class's unresolved members (\"Cannot convert value of method  of type
+  :null\") names no class for world/unresolved-cause to explain (JCS265 (b)'s re-measure)."
+  [found]
+  (let [root? (fn [[_ msg]] (boolean (re-find #"^(header|members|bridges): " (str msg))))]
+    (concat (filter root? found) (remove root? found))))
+
 (defn- refuse! [shard ix found what]
   (let [old (refused-ids shard)
         un (atom [])
         new (atom (sorted-map))]
-    (doseq [[n msg] found
+    (doseq [[n msg] (root-first found)
             :let [ids (attribute ix n msg)]]
       (if (seq ids)
         (doseq [id ids :when (and (not (old id)) (not (@new id)))]
@@ -1240,7 +1495,7 @@
 
 (defn- verdict-of
   "A test of REF's verdict: [kind why]. :golden (a golden-diagnostics test: its @compile modes and
-  golden files), :status (a run test whose source set can fail by itself: judged by its status,
+  golden files; JCV2: a jls program with its reviewed golden file, its expected stdout), :status (a run test whose source set can fail by itself: judged by its status,
   jtreg's), :stdout (a run test with no way to fail but a crash, or Arbace's own corpus jls, whose
   programs print what they check: judged by the JDK's recorded stdout, as before)."
   [t ^String jdktest]
@@ -1248,7 +1503,13 @@
     (= :compile-fail-ref (:category t))
     [:golden (str (count (filter #(re-find #"(?:^|/)ref=" (str (:modes %))) (:actions t))) " golden of "
                   (count (:actions t)) " actions")]
+    ;; JCV2: a jls program with its golden file, reviewed line by line against the JLS (test/java/jls/golden.edn)
+    (and (= :jls (:corpus t)) (.isFile (io/file (golden-path t))))
+    [:golden (str "jls: its golden file " (golden-path t) ", reviewed against the JLS (JCV2)")]
     (= :jls (:corpus t)) [:stdout "jls: Arbace's own programs, their output the check"]
+    ;; JCS331 (a): a framework test's verdict is the framework's (the check's runner exits 1 when a test method
+    ;; failed, jtreg's rule), its summary printed, not compared
+    (= :framework (:category t)) [:status "the framework runner's: no test method failed (JCS331 (a))"]
     :else
     (let [base (if (= :checkout (:root t)) "." jdktest)
           hits (for [[src] (:files t)
@@ -1276,7 +1537,8 @@
                                 ";; \"Decided (the user, 2026-11-07)\", \"As built: JCV1\"): [id kind why], kind :status (jtreg's main action,"
                                 ";; its source set can fail by itself: the status judges it, the JDK's stdout is the oracle tier's), :stdout"
                                 ";; (nothing in it but a crash can fail it, or Arbace's own jls corpus: the JDK's recorded stdout judges it, as"
-                                ";; before), :golden (a golden-diagnostics test: its @compile modes and shipped golden files). Written by"
+                                ";; before), :golden (a golden-diagnostics test: its @compile modes and shipped golden files; since JCV2 a jls"
+                                ";; program with its golden file test/java/jls/NAME.out, reviewed in test/java/jls/golden.edn). Written by"
                                 ";; bin/java-check verdicts (java.check/verdicts, from the sources at the platform's pin; --verify compares)."
                                 ";; Read with the Clojure reader."
                                 "["]
@@ -1289,12 +1551,17 @@
                                  (not= (boolean (re-find #"(?:^|/)ref=" (str (:modes a)))) (boolean (:golden a))))]
                    (str (:id t) " action " i))
         by (frequencies (map second vs))
-        run (count (remove #(= :golden (second %)) vs))]
+        ;; the golden-diagnostics tests (the diagnostics level's) apart from the run tests with a golden file (JCV2)
+        diag (set (for [t ts :when (= :compile-fail-ref (:category t))] (:id t)))
+        ndiag (count diag)
+        gold-run (count (filter #(and (= :golden (second %)) (not (diag (first %)))) vs))
+        run (- (count vs) ndiag)]
     (println (str "java-check verdicts: " (count vs) " tests: " (by :status 0) " :status, " (by :stdout 0) " :stdout, "
-                  (by :golden 0) " :golden"))
-    (println (str "   own verdict per level: interp, compiled " (by :status 0) " of " run
+                  (by :golden 0) " :golden (" ndiag " golden-diagnostics, " gold-run " run tests with a golden file)"))
+    (println (str "   own verdict per level: interp, compiled " (+ (by :status 0) gold-run) " of " run
+                  " (" (by :status 0) " by status, " gold-run " by a golden file)"
                   "; classes, print " run " of " run " (javac's acceptance; the original's class files); diagnostics "
-                  (by :golden 0) " of " (by :golden 0) "; read " run " of " run))
+                  ndiag " of " ndiag "; read " run " of " run))
     (println (str "   the golden tests' own expectations (their @compile modes, their ref= files) against the JDK's record: "
                   (if (seq diag-off) (str (count diag-off) " actions differ: " (str/join ", " (take 10 diag-off))) "the same for every action")))
     (if (some #{"--verify"} opts)
@@ -1303,9 +1570,67 @@
         (do (println (str "   " out ": DIFFERS (bin/java-check verdicts writes it)")) (shutdown-agents) (System/exit 1)))
       (do (spit out text) (println (str "   written " out))))))
 
+(defn- sha16
+  "The first 16 hex digits of a file's SHA-256 (sha256sum's, as the reference's digests)."
+  [^String f]
+  (let [md (java.security.MessageDigest/getInstance "SHA-256")
+        bs (.digest md (java.nio.file.Files/readAllBytes (.toPath (io/file f))))]
+    (subs (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bs)) 0 16)))
+
+(defn golden
+  "JCV2 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JCV2\"): bin/java-check golden [--oracle]: every
+  golden file of the jls programs reviewed in REVIEW (test/java/jls/golden.edn): each line of the file a
+  [line text sections basis why] of its program, in order, the text the line's, the sections and the why
+  given, the basis of :jls :api :jdk; every reviewed program with its golden file and a test of REF. The
+  counts by basis printed. --oracle (the oracle tier's, by hand): each golden file's digest and length the
+  JDK's recorded stdout's (test/java/ref-jdk26.edn); a golden file may leave the JDK's on purpose, then said."
+  [ref review & opts]
+  (let [oracle? (some #{"--oracle"} opts)
+        rv (read-edn review)
+        jls (for [t (ref-tests ref) :when (= :jls (:corpus t)) :when (= :pass (:jdk t))] t)
+        problems (atom [])
+        bad! #(swap! problems conj %)
+        bases (atom [])]
+    (doseq [t jls
+            :let [g (golden-path t)
+                  n (str/replace (last (str/split g #"/")) #"\.out$" "")
+                  rows (get rv n)]]
+      (cond
+        (not (.isFile (io/file g))) (bad! (str (:id t) " " n ": no golden file " g))
+        (nil? rows) (bad! (str (:id t) " " n ": " g " not reviewed in " review))
+        :else
+        (let [text (slurp g)
+              ls (str/split-lines text)]
+          (when-not (str/ends-with? text "\n") (bad! (str n ": " g " does not end with a newline")))
+          (when (not= (count ls) (count rows))
+            (bad! (str n ": " (count ls) " lines, " (count rows) " reviewed")))
+          (doseq [[i l [k lt sec basis why]] (map vector (range) ls rows)]
+            (swap! bases conj basis)
+            (cond
+              (not= k (inc i)) (bad! (str n " line " (inc i) ": the review's line " k))
+              (not= l lt) (bad! (str n " line " (inc i) ": the review's text " (pr-str lt) ", the file's " (pr-str l)))
+              (or (not (set? basis)) (empty? basis) (seq (remove #{:jls :api :jdk} basis)))
+              (bad! (str n " line " (inc i) ": basis " (pr-str basis) " (a set of :jls :api :jdk)"))
+              (or (str/blank? sec) (str/blank? why)) (bad! (str n " line " (inc i) ": no sections or why"))))
+          (when oracle?
+            (let [r (first (:runs t)) d (sha16 g) len (.length (io/file g))]
+              (if (and (= d (:out r)) (= len (:out-len r)))
+                (println (str "   " (:id t) " " n ": the JDK's recorded stdout (" d ", " len " bytes)"))
+                (println (str "   " (:id t) " " n ": leaves the JDK's recorded stdout (" d " " len " bytes, the JDK's "
+                              (:out r) " " (:out-len r) ")"))))))))
+    (doseq [n (keys rv) :when (not-any? #(= n (str/replace (last (str/split (golden-path %) #"/")) #"\.out$" "")) jls)]
+      (bad! (str n ": reviewed in " review ", no jls test of " ref)))
+    (let [fr (frequencies (map #(str/join "+" (map name (sort-by {:jls 0 :api 1 :jdk 2} %))) @bases))]
+      (println (str "java-check golden: " (count jls) " jls programs, " (count @bases) " lines reviewed: "
+                    (str/join ", " (for [[k v] (sort-by key fr)] (str v " " k))))))
+    (if (seq @problems)
+      (do (doseq [x @problems] (println (str "   " x))) (shutdown-agents) (System/exit 1))
+      (println (str "   every line of every golden file reviewed, as its text")))))
+
 (defn -main [cmd & args]
   (case cmd
     "verdicts" (apply verdicts args)
+    "golden" (apply golden args)
     "rejudge-records" (apply rejudge-records args)
     "scan" (apply scan args)
     "rename" (apply rename args)

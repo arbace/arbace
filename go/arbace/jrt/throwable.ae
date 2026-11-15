@@ -41,7 +41,9 @@ use.\n"
           ^{:tag (* RefArray)} stackTrace
           ^{:tag (slice Throwable_I)} suppressed
           ^bool noSuppression
-          ^bool notWritable))
+          ^bool notWritable
+          ^{:tag bool :doc "while writeObject writes (serial_classes.ae): the stackTrace field its sentinel when not writable\n"} serialOut
+          ^{:tag any :doc "the suppressedExceptions field as defaultReadObject read it, until readObject validates it\n"} serialList))
 
 (go/var Throwable_class
   (Define (addr (lit ClassInfo :Name "java.lang.Throwable" :Kind KindClass :Modifiers AccPublic
@@ -673,19 +675,25 @@ of the function that called it.\n"
               (set! fs (append fs f))))))
       (let [a (NewRefArray StackTraceElement_class (conv int32 (len fs)))]
         (range [i f fs]
-          (aset (.-A a) i (StackTraceElement_New_String_String_String_I
-                            (Str (.-cls f)) (Str (.-method f)) (Str (.-file f)) (conv int32 (.-line f)))))
+          (aset (.-A a) i (frameElement (.-cls f) (.-method f) (.-file f) (conv int32 (.-line f)))))
         a))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; StackTraceElement (shim, final)
 
-(go/type StackTraceElement "StackTraceElement is java.lang.StackTraceElement.\n"
+(go/type StackTraceElement
+  "StackTraceElement is java.lang.StackTraceElement, jdk26u's fields (its serial form,
+serial_classes.ae): the class loader's name, the module's name and version, the format (bit 1: the
+loader is a built-in one, its name not shown; bit 2: a JDK module, its version not shown).\n"
   (struct Object
+          ^{:tag (* String)} classLoaderName
+          ^{:tag (* String)} moduleName
+          ^{:tag (* String)} moduleVersion
           ^{:tag (* String)} declaringClass
           ^{:tag (* String)} methodName
           ^{:tag (* String)} fileName
-          ^int32 lineNumber))
+          ^int32 lineNumber
+          ^int8 format))
 
 (go/var StackTraceElement_class
   (Define (addr (lit ClassInfo :Name "java.lang.StackTraceElement" :Kind KindClass
@@ -714,17 +722,41 @@ methodName, fileName, lineNumber).\n"
 (go/method GetLineNumber__I ^int32 [^{:tag (* StackTraceElement)} t] (.-lineNumber t))
 (go/method IsNativeMethod__Z ^bool [^{:tag (* StackTraceElement)} t] (== (.-lineNumber t) -2))
 
+(go/func frameElement
+  "frameElement is a frame's StackTraceElement as the JVM fills it (StackTraceElement.of and
+computeFormat): a JDK class's (java., javax., jdk., sun.) in the module java.base of the boot loader,
+its version that of the run time (java.base's, the JDK build's short version: JCS192), the format both bits (shown as java.base/C.m(...)); another class's
+of the application loader \"app\", the format the built-in loader's bit (shown as C.m(...)).\n"
+  ^{:tag (* StackTraceElement)} [^string cls ^string method ^string file ^int32 line]
+  (let [e (StackTraceElement_New_String_String_String_I (Str cls) (Str method) (Str file) line)]
+    (if (or (strings/HasPrefix cls "java.") (strings/HasPrefix cls "javax.")
+            (strings/HasPrefix cls "jdk.") (strings/HasPrefix cls "sun."))
+      (do
+        (set! (.-moduleName e) (Str "java.base"))
+        (set! (.-moduleVersion e) (Str jdkVersionShort))
+        (set! (.-format e) 3))
+      (do
+        (set! (.-classLoaderName e) (Str "app"))
+        (set! (.-format e) 1)))
+    e))
+
+(go/func nonEmpty ^bool [^{:tag (* String)} s] (and (!= s nil) (> (len (.-value s)) 0)))
+
 (go/method ToString__String
-  "ToString__String is Java's format: [java.base/]class.method(file:line), with
-(Native Method) and (Unknown Source); JDK classes (java., javax., jdk., sun.) show the module
-java.base as the JVM's do.\n"
+  "ToString__String is jdk26u's StackTraceElement.toString: [loader/][module[@version]/]
+class.method(file:line), the loader's name left out for a built-in loader and the version for a JDK
+module (format), with (Native Method) and (Unknown Source).\n"
   ^{:tag (* String)} [^{:tag (* StackTraceElement)} t]
-  (let [cls (.String (.-declaringClass t))
-        s ""]
-    (when (or (strings/HasPrefix cls "java.") (strings/HasPrefix cls "javax.")
-              (strings/HasPrefix cls "jdk.") (strings/HasPrefix cls "sun."))
-      (set! s "java.base/"))
-    (set! s (+ s cls "." (.String (.-methodName t)) "("))
+  (let [s ""]
+    (when (and (== (bit-and (.-format t) 1) 0) (nonEmpty (.-classLoaderName t)))
+      (set! s (+ (.String (.-classLoaderName t)) "/")))
+    (when (nonEmpty (.-moduleName t))
+      (set! s (+ s (.String (.-moduleName t))))
+      (when (and (== (bit-and (.-format t) 2) 0) (nonEmpty (.-moduleVersion t)))
+        (set! s (+ s "@" (.String (.-moduleVersion t))))))
+    (when (!= s "")
+      (set! s (+ s "/")))
+    (set! s (+ s (.String (.-declaringClass t)) "." (.String (.-methodName t)) "("))
     (cond
       (== (.-lineNumber t) -2) (set! s (+ s "Native Method"))
       (== (.-fileName t) nil) (set! s (+ s "Unknown Source"))
@@ -732,12 +764,17 @@ java.base as the JVM's do.\n"
       :else (set! s (+ s (.String (.-fileName t)))))
     (Str (+ s ")"))))
 
-(go/method Equals_O__Z ^bool [^{:tag (* StackTraceElement)} t ^any o]
+(go/method Equals_O__Z
+  "Equals_O__Z is jdk26u's StackTraceElement.equals: every field but the format.\n"
+  ^bool [^{:tag (* StackTraceElement)} t ^any o]
   (let [(values e ok) (assert (* StackTraceElement) o)]
     (when (or (not ok) (== e nil))
       (return false))
-    (and (.Equals_O__Z (.-declaringClass t) (.-declaringClass e))
-         (== (.-lineNumber t) (.-lineNumber e))
+    (and (== (.-lineNumber t) (.-lineNumber e))
+         (.Equals_O__Z (.-declaringClass t) (.-declaringClass e))
+         (stringsEqual (.-classLoaderName t) (.-classLoaderName e))
+         (stringsEqual (.-moduleName t) (.-moduleName e))
+         (stringsEqual (.-moduleVersion t) (.-moduleVersion e))
          (stringsEqual (.-methodName t) (.-methodName e))
          (stringsEqual (.-fileName t) (.-fileName e)))))
 
@@ -746,11 +783,17 @@ java.base as the JVM's do.\n"
     (return (== b nil)))
   (.Equals_O__Z a (.Ref b)))
 
-(go/method HashCode__I ^int32 [^{:tag (* StackTraceElement)} t]
-  ;; Java's, with no class loader, module or version names
-  (let [r (+ (* 31 (.HashCode__I (.-declaringClass t))) (.HashCode__I (.-methodName t)))
-        ^int32 fh 0]
-    (when (!= (.-fileName t) nil)
-      (set! fh (.HashCode__I (.-fileName t))))
-    (set! r (+ (* 31 31 31 31 r) fh))
+(go/func stringHash ^int32 [^{:tag (* String)} s]
+  (when (== s nil)
+    (return 0))
+  (.HashCode__I s))
+
+(go/method HashCode__I
+  "HashCode__I is jdk26u's StackTraceElement.hashCode.\n"
+  ^int32 [^{:tag (* StackTraceElement)} t]
+  (let [r (+ (* 31 (.HashCode__I (.-declaringClass t))) (.HashCode__I (.-methodName t)))]
+    (set! r (+ (* 31 r) (stringHash (.-classLoaderName t))))
+    (set! r (+ (* 31 r) (stringHash (.-moduleName t))))
+    (set! r (+ (* 31 r) (stringHash (.-moduleVersion t))))
+    (set! r (+ (* 31 r) (stringHash (.-fileName t))))
     (+ (* 31 r) (.-lineNumber t))))

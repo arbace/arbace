@@ -1,0 +1,280 @@
+;; jrt's tests: native memory (nativemem.ae) and the natives of java.nio.file's default provider on Linux
+;; (nio_fs_linux.ae; doc/classes/JAVA-DEFERRED-TRIAGE.md, F9, "As built: F9 (write-ahead)"), on Go structs shaped as
+;; the translated UnixFileAttributes, UnixFileStoreAttributes and UnixMountEntry are (their F_ fields), with a
+;; UnixException stand-in (an IOException naming the error number).
+(in-ns 'go.arbace.jrt)
+
+(go/file "nio_fs_test.go"
+  :build ["//go:build linux"]
+  :imports [[os "os"] [filepath "path/filepath"] [strconv "strconv"] [strings "strings"] [syscall "syscall"]
+            [testing "testing"]])
+
+(go/type nioTestFactory (struct Object))
+(go/method Apply_I__O ^any [^{:tag (* nioTestFactory)} f ^int32 errno]
+  (IOException_New_String (Str (+ "errno " (strconv/Itoa (conv int errno))))))
+
+(go/type nioTestAttrs
+  (struct Object ^int32 F_st_mode ^int64 F_st_ino ^int64 F_st_dev ^int64 F_st_rdev ^int32 F_st_nlink ^int32 F_st_uid
+          ^int32 F_st_gid ^int64 F_st_size ^int64 F_st_atime_sec ^int64 F_st_atime_nsec ^int64 F_st_mtime_sec
+          ^int64 F_st_mtime_nsec ^int64 F_st_ctime_sec ^int64 F_st_ctime_nsec ^int64 F_st_birthtime_sec
+          ^int64 F_st_birthtime_nsec ^bool F_birthtime_available))
+
+(go/type nioTestStore (struct Object ^int64 F_f_frsize ^int64 F_f_blocks ^int64 F_f_bfree ^int64 F_f_bavail))
+
+(go/type nioTestMount
+  (struct Object ^{:tag (* ByteArray)} F_name ^{:tag (* ByteArray)} F_dir ^{:tag (* ByteArray)} F_fstype
+          ^{:tag (* ByteArray)} F_opts ^int64 F_dev))
+
+(go/func nioCString "nioCString is s as a C string in native memory: its address.\n" ^int64 [^string s]
+  (let [a (nativeAllocate (conv int64 (+ (len s) 1)))]
+    (copy (nativeBytes a (conv int64 (len s))) s)
+    a))
+
+(go/func nioText ^string [^{:tag (* ByteArray)} b]
+  (let [r (make (slice byte) (len (.-A b)))]
+    (for [i 0] (< i (len r)) (inc! i)
+      (aset r i (conv byte (aget (.-A b) i))))
+    (conv string r)))
+
+(go/func TestNativeMemory
+  "Unsafe's native memory: a block's bytes through the absolute and the null-base accesses, copies between it and
+an array, reallocation keeping the bytes, an access after free or beyond the block an InternalError.\n"
+  [^{:tag (* testing/T)} t]
+  (let [u theUnsafe
+        a (.AllocateMemory_J__J u 16)]
+    (when (or (== a 0) (!= (.AllocateMemory_J__J u 0) 0))
+      (.Fatal t "allocateMemory"))
+    (.PutLong_J_J__V u a 0x0102030405060708)
+    (.PutInt_O_J_I__V u nil (+ a 8) -2)
+    (.PutByte_J_B__V u (+ a 12) 7)
+    (when (or (!= (.GetByte_J__B u a) 8) (!= (.GetInt_J__I u (+ a 8)) -2) (!= (.GetByte_O_J__B u nil (+ a 12)) 7)
+              (!= (.GetLong_O_J__J u nil a) 0x0102030405060708))
+      (.Error t "get and put"))
+    (.PutIntVolatile_O_J_I__V u nil (+ a 4) 99)
+    (when (!= (.GetIntVolatile_O_J__I u nil (+ a 4)) 99)
+      (.Error t "the volatile int"))
+    (let [arr (NewByteArray 4)]
+      (aset (.-A arr) 0 1) (aset (.-A arr) 1 2) (aset (.-A arr) 2 3) (aset (.-A arr) 3 4)
+      (.CopyMemory_O_J_O_J_J__V u arr Unsafe_ARRAY_BYTE_BASE_OFFSET nil a 4)
+      (when (!= (.GetInt_J__I u a) 0x04030201)
+        (.Error t "copyMemory to native"))
+      (.SetMemory_J_J_B__V u a 2 9)
+      (.CopyMemory_O_J_O_J_J__V u nil a arr Unsafe_ARRAY_BYTE_BASE_OFFSET 4)
+      (when (or (!= (aget (.-A arr) 0) 9) (!= (aget (.-A arr) 1) 9) (!= (aget (.-A arr) 2) 3))
+        (.Error t "copyMemory from native, setMemory")))
+    (let [b (.ReallocateMemory_J_J__J u a 32)]
+      (when (!= (.GetByte_J__B u (+ b 2)) 3)
+        (.Error t "reallocateMemory keeps the bytes"))
+      (when (!= (res (fn ^string [] (.GetByte_J__B u a) "x")) "!java.lang.InternalError: Unsafe: an address outside native memory")
+        (.Error t "the old block freed"))
+      (when (!= (res (fn ^string [] (.GetLong_J__J u (+ b 28)) "x")) "!java.lang.InternalError: Unsafe: an access beyond its native block")
+        (.Error t "beyond the block"))
+      (.FreeMemory_J__V u b)
+      (.FreeMemory_J__V u 0))))
+
+(go/func TestNioFsNatives
+  "The default provider's natives on a temporary directory: open, fstat and stat into the attributes' fields,
+mkdir, symlink, readlink, realpath, lstat, the directory's entries, access, rename, chmod, utimensat, xattrs, the
+copies, statvfs, the mount table, users and groups, an error as UnixException, jrt's adoption of a descriptor.\n"
+  [^{:tag (* testing/T)} t]
+  (UnixNativeDispatcher_JrtExceptions_O__V_native (new nioTestFactory))
+  (let [dir (.TempDir t)
+        f (filepath/Join dir "a.txt")
+        attrs (new nioTestAttrs)]
+    (os/WriteFile f (conv (slice byte) "hello") 0644)
+    ;; stat0: the fields, 0
+    (when (or (!= (UnixNativeDispatcher_Stat0_J_UnixFileAttributes__I_native (nioCString f) attrs) 0)
+              (!= (.-F_st_size attrs) 5) (!= (bit-and (.-F_st_mode attrs) 0xf000) 0x8000)
+              (!= (bit-and (.-F_st_mode attrs) 0777) 0644) (!= (.-F_st_nlink attrs) 1) (== (.-F_st_ino attrs) 0)
+              (== (.-F_st_mtime_sec attrs) 0))
+      (.Errorf t "stat0: %+v" attrs))
+    (let [^{:tag syscall/Stat_t} st (lit syscall/Stat_t)]
+      (syscall/Stat f (addr st))
+      (when (or (!= (.-F_st_ino attrs) (conv int64 (.-Ino st))) (!= (.-F_st_dev attrs) (conv int64 (.-Dev st)))
+                (!= (.-F_st_mtime_nsec attrs) (conv int64 (.-Nsec (.-Mtim st)))))
+        (.Errorf t "stat0 against stat(2): ino %d/%d dev %d/%d" (.-F_st_ino attrs) (.-Ino st) (.-F_st_dev attrs) (.-Dev st))))
+    ;; a missing file: the error number, and lstat0's UnixException
+    (when (!= (UnixNativeDispatcher_Stat0_J_UnixFileAttributes__I_native (nioCString (+ f ".no")) attrs) (conv int32 syscall/ENOENT))
+      (.Error t "stat0 of a missing file"))
+    (when (!= (res (fn ^string [] (UnixNativeDispatcher_Lstat0_J_UnixFileAttributes__V_native (nioCString (+ f ".no")) attrs) "x"))
+              "!java.io.IOException: errno 2")
+      (.Error t "lstat0 of a missing file"))
+    ;; open0, fstat0, read0, close0
+    (let [fd (UnixNativeDispatcher_Open0_J_I_I__I_native (nioCString f) syscall/O_RDONLY 0)
+          a2 (new nioTestAttrs)
+          buf (nativeAllocate 16)]
+      (UnixNativeDispatcher_Fstat0_I_UnixFileAttributes__V_native fd a2)
+      (when (!= (.-F_st_ino a2) (.-F_st_ino attrs))
+        (.Error t "fstat0"))
+      (when (or (!= (UnixNativeDispatcher_Read0_I_J_I__I_native fd buf 16) 5) (!= (conv string (nativeBytes buf 5)) "hello"))
+        (.Error t "read0"))
+      (UnixNativeDispatcher_Close0_I__V_native fd)
+      (when (!= (res (fn ^string [] (UnixNativeDispatcher_Close0_I__V_native fd) "x")) "!java.io.IOException: errno 9")
+        (.Error t "close0 of a closed descriptor: EBADF")))
+    ;; mkdir0, symlink0, readlink0, realpath0, lstat0 of the link
+    (let [d (filepath/Join dir "d")
+          l (filepath/Join dir "link")]
+      (UnixNativeDispatcher_Mkdir0_J_I__V_native (nioCString d) 0755)
+      (UnixNativeDispatcher_Symlink0_J_J__V_native (nioCString "a.txt") (nioCString l))
+      (when (!= (nioText (UnixNativeDispatcher_Readlink0_J__B1_native (nioCString l))) "a.txt")
+        (.Error t "readlink0"))
+      (let [(values real _) (filepath/EvalSymlinks f)]
+        (when (!= (nioText (UnixNativeDispatcher_Realpath0_J__B1_native (nioCString l))) real)
+          (.Error t "realpath0")))
+      (let [la (new nioTestAttrs)]
+        (UnixNativeDispatcher_Lstat0_J_UnixFileAttributes__V_native (nioCString l) la)
+        (when (!= (bit-and (.-F_st_mode la) 0xf000) 0xa000)
+          (.Error t "lstat0 of a link")))
+      (when (!= (UnixNativeDispatcher_Fstatat0_I_J_I_UnixFileAttributes__I_native -100 (nioCString l) 0x100 attrs) 0)
+        (.Error t "fstatat0"))
+      ;; the directory's entries
+      (let [dp (UnixNativeDispatcher_Opendir0_J__J_native (nioCString dir))
+            names (make (slice string) 0)]
+        (while true
+          (let [n (UnixNativeDispatcher_Readdir0_J__B1_native dp)]
+            (when (== n nil)
+              (break))
+            (set! names (append names (nioText n)))))
+        (UnixNativeDispatcher_Closedir_J__V_native dp)
+        (let [all (strings/Join names ",")]
+          (when (or (!= (len names) 5) (not (strings/Contains all "a.txt")) (not (strings/Contains all "link"))
+                    (not (strings/Contains all "..")))
+            (.Errorf t "readdir0: %v" names))))
+      (let [dfd (UnixNativeDispatcher_Open0_J_I_I__I_native (nioCString d) syscall/O_RDONLY 0)
+            dp (UnixNativeDispatcher_Fdopendir_I__J_native dfd)]
+        (when (== (UnixNativeDispatcher_Readdir0_J__B1_native dp) nil)
+          (.Error t "fdopendir: no entry"))
+        (UnixNativeDispatcher_Closedir_J__V_native dp))
+      (UnixNativeDispatcher_Rmdir0_J__V_native (nioCString d)))
+    ;; access0, rename0, chmod0, utimensat0, unlink0
+    (when (or (!= (UnixNativeDispatcher_Access0_J_I__I_native (nioCString f) 4) 0)
+              (!= (UnixNativeDispatcher_Access0_J_I__I_native (nioCString (+ f ".no")) 0) (conv int32 syscall/ENOENT)))
+      (.Error t "access0"))
+    (let [g (filepath/Join dir "b.txt")]
+      (UnixNativeDispatcher_Rename0_J_J__V_native (nioCString f) (nioCString g))
+      (UnixNativeDispatcher_Chmod0_J_I__V_native (nioCString g) 0600)
+      (UnixNativeDispatcher_Utimensat0_I_J_J_J_I__V_native -100 (nioCString g) 1000000000500 2000000000700 0)
+      (let [ga (new nioTestAttrs)]
+        (UnixNativeDispatcher_Stat0_J_UnixFileAttributes__I_native (nioCString g) ga)
+        (when (or (!= (bit-and (.-F_st_mode ga) 0777) 0600) (!= (.-F_st_mtime_sec ga) 2000) (!= (.-F_st_mtime_nsec ga) 700)
+                  (!= (.-F_st_atime_sec ga) 1000))
+          (.Errorf t "chmod0, utimensat0: %+v" ga)))
+      ;; the copies: directCopy0 and bufferedCopy0
+      (let [c1 (filepath/Join dir "c1")
+            c2 (filepath/Join dir "c2")
+            src (UnixNativeDispatcher_Open0_J_I_I__I_native (nioCString g) syscall/O_RDONLY 0)
+            d1 (UnixNativeDispatcher_Open0_J_I_I__I_native (nioCString c1) (bit-or syscall/O_WRONLY syscall/O_CREAT) 0644)]
+        (when (!= (LinuxNativeDispatcher_DirectCopy0_I_I_J__I_native d1 src 0) 0)
+          (.Error t "directCopy0"))
+        (UnixNativeDispatcher_Close0_I__V_native d1)
+        (syscall/Seek (conv int src) 0 0)
+        (let [d2 (UnixNativeDispatcher_Open0_J_I_I__I_native (nioCString c2) (bit-or syscall/O_WRONLY syscall/O_CREAT) 0644)
+              buf (nativeAllocate 2)
+              cancel (nativeAllocate 4)]
+          (Fs_UnixFileSystem_BufferedCopy0_I_I_J_I_J__V_native d2 src buf 2 cancel)
+          (UnixNativeDispatcher_Close0_I__V_native d2))
+        (UnixNativeDispatcher_Close0_I__V_native src)
+        (let [(values b1 _) (os/ReadFile c1)
+              (values b2 _) (os/ReadFile c2)]
+          (when (or (!= (conv string b1) "hello") (!= (conv string b2) "hello"))
+            (.Errorf t "copies: %q %q" b1 b2))))
+      (UnixNativeDispatcher_Unlink0_J__V_native (nioCString g))
+      (when (== (UnixNativeDispatcher_Stat0_J_UnixFileAttributes__I_native (nioCString g) attrs) 0)
+        (.Error t "unlink0")))
+    ;; statvfs0
+    (let [sa (new nioTestStore)]
+      (UnixNativeDispatcher_Statvfs0_J_UnixFileStoreAttributes__V_native (nioCString dir) sa)
+      (when (or (<= (.-F_f_frsize sa) 0) (<= (.-F_f_blocks sa) 0) (> (.-F_f_bavail sa) (.-F_f_blocks sa)))
+        (.Errorf t "statvfs0: %+v" sa)))
+    ;; the mount table: / is among /proc/mounts' entries
+    (let [fp (LinuxNativeDispatcher_Setmntent0_J_J__J_native (nioCString "/proc/mounts") (nioCString "re"))
+          ^bool root false]
+      (when (< (UnixNativeDispatcher_Getlinelen_J__I_native fp) 1)
+        (.Error t "getlinelen"))
+      (UnixNativeDispatcher_Rewind_J__V_native fp)
+      (while true
+        (let [m (new nioTestMount)]
+          (when (< (LinuxNativeDispatcher_Getmntent0_J_UnixMountEntry_J_I__I_native fp m 0 0) 0)
+            (break))
+          (when (== (nioText (.-F_dir m)) "/")
+            (set! root true))))
+      (LinuxNativeDispatcher_Endmntent_J__V_native fp)
+      (when (not root)
+        (.Error t "getmntent0: no / entry")))
+    (when (!= (mntUnescape "a\\040b\\134") "a b\\")
+      (.Error t "the mount table's escapes"))
+    ;; users and groups
+    (when (or (!= (nioText (UnixNativeDispatcher_Getpwuid_I__B1_native 0)) "root")
+              (!= (UnixNativeDispatcher_Getpwnam0_J__I_native (nioCString "root")) 0)
+              (!= (UnixNativeDispatcher_Getpwnam0_J__I_native (nioCString "no-such-user-x")) -1))
+      (.Error t "getpwuid, getpwnam"))
+    (when (!= (nioText (UnixNativeDispatcher_Getgrgid_I__B1_native 0)) "root")
+      (.Error t "getgrgid"))
+    ;; strerror, getcwd
+    (when (!= (nioText (UnixNativeDispatcher_Strerror_I__B1_native 2)) "No such file or directory")
+      (.Errorf t "strerror: %s" (nioText (UnixNativeDispatcher_Strerror_I__B1_native 2))))
+    (let [(values wd _) (os/Getwd)]
+      (when (!= (nioText (UnixNativeDispatcher_Getcwd__B1_native)) wd)
+        (.Error t "getcwd")))
+    ;; adoption into jrt's file table
+    (let [h (filepath/Join dir "h.txt")]
+      (os/WriteFile h (conv (slice byte) "xyz") 0644)
+      (let [fd (UnixNativeDispatcher_Open0_J_I_I__I_native (nioCString h) syscall/O_RDONLY 0)
+            hd (HostFiles_Adopt0_I_String__I_native fd (Str h))
+            b (NewByteArray 3)]
+        (when (or (!= (HostFiles_Read0_I_B1_I_I__I_native hd b 0 3) 3) (!= (nioText b) "xyz"))
+          (.Error t "an adopted descriptor's reads"))
+        (HostFiles_Close0_I__V_native hd)))))
+
+(go/func TestNioFsXattr
+  "fsetxattr0, fgetxattr0 (the size with no buffer, then the value), flistxattr, fremovexattr0 on a user attribute;
+skipped when the file system refuses user attributes.\n"
+  [^{:tag (* testing/T)} t]
+  (UnixNativeDispatcher_JrtExceptions_O__V_native (new nioTestFactory))
+  (let [f (filepath/Join (.TempDir t) "x")]
+    (os/WriteFile f nil 0644)
+    (let [fd (UnixNativeDispatcher_Open0_J_I_I__I_native (nioCString f) syscall/O_RDWR 0)
+          name (nioCString "user.arbace")
+          v (nioCString "v1")]
+      (defer (UnixNativeDispatcher_Close0_I__V_native fd))
+      (let [r (res (fn ^string [] (UnixNativeDispatcher_Fsetxattr0_I_J_J_I__V_native fd name v 2) "ok"))]
+        (when (!= r "ok")
+          (.Skipf t "user xattrs: %s" r)))
+      (let [out (nativeAllocate 8)]
+        (when (or (!= (UnixNativeDispatcher_Fgetxattr0_I_J_J_I__I_native fd name 0 0) 2)
+                  (!= (UnixNativeDispatcher_Fgetxattr0_I_J_J_I__I_native fd name out 8) 2)
+                  (!= (conv string (nativeBytes out 2)) "v1"))
+          (.Error t "fgetxattr0")))
+      (let [lst (nativeAllocate 64)
+            n (UnixNativeDispatcher_Flistxattr_I_J_I__I_native fd lst 64)]
+        (when (not (strings/Contains (conv string (nativeBytes lst (conv int64 n))) "user.arbace"))
+          (.Error t "flistxattr")))
+      (UnixNativeDispatcher_Fremovexattr0_I_J__V_native fd name)
+      (when (!= (res (fn ^string [] (UnixNativeDispatcher_Fgetxattr0_I_J_J_I__I_native fd name 0 0) "x"))
+                (+ "!java.io.IOException: errno " (strconv/Itoa (conv int syscall/ENODATA))))
+        (.Error t "fremovexattr0")))))
+
+(go/func TestNioFsInotify
+  "LinuxWatchService's natives: inotify_init, a watch, a file created reported as IN_CREATE with its name, poll of the
+inotify descriptor and a socketpair's end.\n"
+  [^{:tag (* testing/T)} t]
+  (UnixNativeDispatcher_JrtExceptions_O__V_native (new nioTestFactory))
+  (let [dir (.TempDir t)
+        ifd (LinuxWatchService_InotifyInit__I_native)
+        sv (NewIntArray 2)]
+    (LinuxWatchService_Socketpair_I1__V_native sv)
+    (let [wd (LinuxWatchService_InotifyAddWatch_I_J_I__I_native ifd (nioCString dir) 0x100)]
+      (os/WriteFile (filepath/Join dir "new") nil 0644)
+      (when (!= (LinuxWatchService_Poll_I_I__I_native ifd (aget (.-A sv) 0)) 1)
+        (.Error t "poll"))
+      (LinuxWatchService_ConfigureBlocking_I_Z__V_native ifd false)
+      (let [buf (nativeAllocate 4096)
+            n (UnixNativeDispatcher_Read0_I_J_I__I_native ifd buf 4096)
+            u theUnsafe]
+        (when (or (< n 16) (!= (.GetInt_J__I u buf) wd) (== (bit-and (.GetInt_J__I u (+ buf 4)) 0x100) 0)
+                  (!= (conv string (nativeCString (+ buf 16))) "new"))
+          (.Errorf t "the event: %d bytes" n)))
+      (LinuxWatchService_InotifyRmWatch_I_I__V_native ifd wd))
+    (syscall/Close (conv int ifd))
+    (syscall/Close (conv int (aget (.-A sv) 0)))
+    (syscall/Close (conv int (aget (.-A sv) 1)))))

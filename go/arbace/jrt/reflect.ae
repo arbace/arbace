@@ -192,7 +192,9 @@ records setAccessible.\n"
 
 (go/var AccessibleObject_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.AccessibleObject" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class :Go "arbace/jrt.AccessibleObject"))))
+                     :Modifiers AccPublic :Super Object_class
+                     :Interfaces (lit (slice (* Class)) AnnotatedElement_class)
+                     :Go "arbace/jrt.AccessibleObject"))))
 
 (go/method Self_AccessibleObject ^{:tag (* AccessibleObject)} [^{:tag (* AccessibleObject)} a] a)
 (go/method SetAccessible_Z__V [^{:tag (* AccessibleObject)} a ^bool flag] (set! (.-override a) flag))
@@ -202,7 +204,8 @@ records setAccessible.\n"
   "CanAccess_O__Z is AccessibleObject.canAccess: true (the tables hold accessible members).\n"
   ^bool [^{:tag (* AccessibleObject)} a ^any obj] true)
 (go/method IsAnnotationPresent_Class__Z
-  "IsAnnotationPresent_Class__Z: false, annotations are not kept (J2G-SPEC §12).\n"
+  "IsAnnotationPresent_Class__Z: false for an AccessibleObject that is no Method, Constructor or
+Field (theirs: annotation.ae).\n"
   ^bool [^{:tag (* AccessibleObject)} a ^{:tag (* Class)} c] false)
 
 (go/type Executable_I
@@ -226,7 +229,7 @@ declaring class, the parameter classes and the modifiers of a member table entry
 (go/var Executable_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Executable" :Kind KindClass
                      :Modifiers (bit-or AccPublic AccAbstract) :Super AccessibleObject_class
-                     :Interfaces (lit (slice (* Class)) Member_class)
+                     :Interfaces (lit (slice (* Class)) Member_class GenericDeclaration_class)
                      :Go "arbace/jrt.Executable"))))
 
 (go/method Self_Executable ^{:tag (* Executable)} [^{:tag (* Executable)} e] e)
@@ -295,7 +298,8 @@ bridge, varargs and synthetic bits among them (toString masks them out).\n"
 
 (go/func executableString
   "executableString is Executable.sharedToString: the modifiers (default for an interface's
-default method), then the rest; the throws clause is not kept.\n"
+default method), then the rest (its throws clause the recorded Exceptions attribute's: F25,
+throwsClause).\n"
   ^string [^int32 mods ^bool isDefault ^string rest]
   (let [s ""]
     (if (and (!= mods 0) (not isDefault))
@@ -355,9 +359,9 @@ java.lang.String.valueOf(java.lang.Object).\n"
   ^{:tag (* String)} [^{:tag (* Method)} m]
   (Str (executableString (bit-and (.GetModifiers__I m) 0xD3F) (.IsDefault__Z m)
                          (+ (typeName (.-Return (.-info m))) " " (typeName (.-clazz m)) "."
-                            (.-Name (.-info m)) (paramList (.-params m))))))
+                            (.-Name (.-info m)) (paramList (.-params m))
+                            (throwsClause (.GetExceptionTypes__Class1 m))))))
 
-(go/method ToGenericString__String ^{:tag (* String)} [^{:tag (* Method)} m] (.ToString__String m))
 
 (go/method Equals_O__Z
   "Equals_O__Z is Method.equals: same declaring class, name, return type and parameters.\n"
@@ -422,8 +426,8 @@ boxed, void giving null.\n"
 (go/method ToString__String
   "ToString__String is Constructor.toString: public java.lang.String(java.lang.String).\n"
   ^{:tag (* String)} [^{:tag (* Constructor)} k]
-  (Str (executableString (bit-and (.GetModifiers__I k) (bit-or AccPublic AccProtected AccPrivate)) false (+ (typeName (.-clazz k)) (paramList (.-params k))))))
-(go/method ToGenericString__String ^{:tag (* String)} [^{:tag (* Constructor)} k] (.ToString__String k))
+  (Str (executableString (bit-and (.GetModifiers__I k) (bit-or AccPublic AccProtected AccPrivate)) false (+ (typeName (.-clazz k)) (paramList (.-params k))
+                                                                                                     (throwsClause (.GetExceptionTypes__Class1 k))))))
 (go/method Equals_O__Z ^bool [^{:tag (* Constructor)} k ^any o]
   (let [(values x ok) (assert (* Constructor) o)]
     (and ok (== (.-clazz k) (.-clazz x)) (sameParams (.-params k) (.-params x)))))
@@ -538,13 +542,25 @@ get).\n"
   (let [o (.receiver f obj)]
     (Box ((.-Get (.-info f)) o))))
 
+(go/method finalWritable
+  "finalWritable is Field.set's rule for a final field (java.lang.reflect.Field's javadoc, the JDK's
+FieldAccessor for a final field; JCS167): writable only when setAccessible(true) succeeded, the field is
+not static and its class is not a record (nor hidden: none in jrt). Serialization's field reflector
+writes final fields so (ObjectStreamClass's variant).\n"
+  ^bool [^{:tag (* Field)} f]
+  (and (.-override f)
+       (== (bit-and (.-Modifiers (.-info f)) AccStatic) 0)
+       (not (.IsRecord__Z (.-clazz f)))))
+
 (go/method Set_O_O__V
-  "Set_O_O__V is Field.set: IllegalAccessException for a final field, the value converted as
-Method.invoke converts arguments (IllegalArgumentException with the JVM's message otherwise).\n"
+  "Set_O_O__V is Field.set: IllegalAccessException for a final field but one finalWritable allows,
+the value converted as Method.invoke converts arguments (IllegalArgumentException with the JVM's
+message otherwise).\n"
   [^{:tag (* Field)} f ^any obj ^any v]
   (let [o (.receiver f obj)
         t (.-Type (.-info f))]
-    (when (or (!= (bit-and (.-Modifiers (.-info f)) AccFinal) 0) (== (.-Set (.-info f)) nil))
+    (when (or (and (!= (bit-and (.-Modifiers (.-info f)) AccFinal) 0) (not (.finalWritable f)))
+              (== (.-Set (.-info f)) nil))
       (panic (IllegalAccessException_New_String (.setMessage f v))))
     (if (.IsPrimitive__Z t)
       (let [(values x ok) (Unbox t v)]
@@ -555,6 +571,96 @@ Method.invoke converts arguments (IllegalArgumentException with the JVM's messag
         (when (and (!= v nil) (not (.IsInstance_O__Z t v)))
           (panic (IllegalArgumentException_New_String (.setMessage f v))))
         ((.-Set (.-info f)) o v)))))
+
+;; Field's primitive accessors (F14's first slice, with reflection's metadata): jdk26u's
+;; FieldAccessorImpl and its Unsafe*FieldAccessorImpl subclasses, rule for rule: a get widens the
+;; field's value to the asked type (newGetIllegalArgumentException otherwise, also for a reference
+;; field), a set widens the given value to a primitive field's type (getSetMessage's
+;; IllegalArgumentException otherwise, also for a reference field; IllegalAccessException for a
+;; final field but one finalWritable allows, as Set_O_O__V: JCS167's rule, which serialization's field
+;; reflector needs)
+
+(go/method getMessage
+  "getMessage is newGetIllegalArgumentException's \"Attempt to get T field \"C.f\" with illegal
+data type conversion to U\".\n"
+  ^{:tag (* String)} [^{:tag (* Field)} f ^string to]
+  (Str (+ "Attempt to get " (.GoName (.-Type (.-info f))) " field \"" (.GoName (.-clazz f)) "." (.-Name (.-info f))
+          "\" with illegal data type conversion to " to)))
+
+(go/method setPrimMessage
+  "setPrimMessage is getSetMessage(type, value) of a primitive value.\n"
+  ^{:tag (* String)} [^{:tag (* Field)} f ^string typ ^string value]
+  (let [m (.-Modifiers (.-info f))
+        s "Can not set"]
+    (when (!= (bit-and m AccStatic) 0) (set! s (+ s " static")))
+    (when (!= (bit-and m AccFinal) 0) (set! s (+ s " final")))
+    (Str (+ s " " (.GoName (.-Type (.-info f))) " field " (.GoName (.-clazz f)) "." (.-Name (.-info f))
+            " to (" typ ")" value))))
+
+(go/method getPrim "getPrim: the field's value widened to the primitive class to.\n"
+  ^any [^{:tag (* Field)} f ^any obj ^{:tag (* Class)} to]
+  (let [o (.receiver f obj)
+        t (.-Type (.-info f))]
+    (when (not (.IsPrimitive__Z t))
+      (panic (IllegalArgumentException_New_String (.getMessage f (.-Name (.-info to))))))
+    (let [(values r ok) (widen ((.-Get (.-info f)) o) (.-desc t) (.-desc to))]
+      (when (not ok)
+        (panic (IllegalArgumentException_New_String (.getMessage f (.-Name (.-info to))))))
+      r)))
+
+(go/method setPrim "setPrim: x, of the primitive class from, widened to the field's type and set.\n"
+  [^{:tag (* Field)} f ^any obj ^any x ^{:tag (* Class)} from ^string value]
+  (let [o (.receiver f obj)
+        t (.-Type (.-info f))]
+    (when (or (and (!= (bit-and (.-Modifiers (.-info f)) AccFinal) 0) (not (.finalWritable f)))
+              (== (.-Set (.-info f)) nil))
+      (panic (IllegalAccessException_New_String (.setPrimMessage f (.-Name (.-info from)) value))))
+    (when (not (.IsPrimitive__Z t))
+      (panic (IllegalArgumentException_New_String (.setPrimMessage f (.-Name (.-info from)) value))))
+    (let [(values r ok) (widen x (.-desc from) (.-desc t))]
+      (when (not ok)
+        (panic (IllegalArgumentException_New_String (.setPrimMessage f (.-Name (.-info from)) value))))
+      ((.-Set (.-info f)) o r))))
+
+(go/method GetBoolean_O__Z "GetBoolean_O__Z is Field.getBoolean.\n" ^bool [^{:tag (* Field)} f ^any obj]
+  (assert bool (.getPrim f obj Prim_boolean)))
+(go/method SetBoolean_O_Z__V "SetBoolean_O_Z__V is Field.setBoolean.\n" [^{:tag (* Field)} f ^any obj ^bool v]
+  (.setPrim f obj v Prim_boolean (.String (StrOfBool v))))
+
+(go/method GetByte_O__B "GetByte_O__B is Field.getByte.\n" ^int8 [^{:tag (* Field)} f ^any obj]
+  (assert int8 (.getPrim f obj Prim_byte)))
+(go/method SetByte_O_B__V "SetByte_O_B__V is Field.setByte.\n" [^{:tag (* Field)} f ^any obj ^int8 v]
+  (.setPrim f obj v Prim_byte (.String (StrOfInt (conv int32 v)))))
+
+(go/method GetChar_O__C "GetChar_O__C is Field.getChar.\n" ^uint16 [^{:tag (* Field)} f ^any obj]
+  (assert uint16 (.getPrim f obj Prim_char)))
+(go/method SetChar_O_C__V "SetChar_O_C__V is Field.setChar.\n" [^{:tag (* Field)} f ^any obj ^uint16 v]
+  (.setPrim f obj v Prim_char (.String (StrOfChar v))))
+
+(go/method GetShort_O__S "GetShort_O__S is Field.getShort.\n" ^int16 [^{:tag (* Field)} f ^any obj]
+  (assert int16 (.getPrim f obj Prim_short)))
+(go/method SetShort_O_S__V "SetShort_O_S__V is Field.setShort.\n" [^{:tag (* Field)} f ^any obj ^int16 v]
+  (.setPrim f obj v Prim_short (.String (StrOfInt (conv int32 v)))))
+
+(go/method GetInt_O__I "GetInt_O__I is Field.getInt.\n" ^int32 [^{:tag (* Field)} f ^any obj]
+  (assert int32 (.getPrim f obj Prim_int)))
+(go/method SetInt_O_I__V "SetInt_O_I__V is Field.setInt.\n" [^{:tag (* Field)} f ^any obj ^int32 v]
+  (.setPrim f obj v Prim_int (.String (StrOfInt v))))
+
+(go/method GetLong_O__J "GetLong_O__J is Field.getLong.\n" ^int64 [^{:tag (* Field)} f ^any obj]
+  (assert int64 (.getPrim f obj Prim_long)))
+(go/method SetLong_O_J__V "SetLong_O_J__V is Field.setLong.\n" [^{:tag (* Field)} f ^any obj ^int64 v]
+  (.setPrim f obj v Prim_long (.String (StrOfLong v))))
+
+(go/method GetFloat_O__F "GetFloat_O__F is Field.getFloat.\n" ^float32 [^{:tag (* Field)} f ^any obj]
+  (assert float32 (.getPrim f obj Prim_float)))
+(go/method SetFloat_O_F__V "SetFloat_O_F__V is Field.setFloat.\n" [^{:tag (* Field)} f ^any obj ^float32 v]
+  (.setPrim f obj v Prim_float (FormatFloat v)))
+
+(go/method GetDouble_O__D "GetDouble_O__D is Field.getDouble.\n" ^float64 [^{:tag (* Field)} f ^any obj]
+  (assert float64 (.getPrim f obj Prim_double)))
+(go/method SetDouble_O_D__V "SetDouble_O_D__V is Field.setDouble.\n" [^{:tag (* Field)} f ^any obj ^float64 v]
+  (.setPrim f obj v Prim_double (FormatDouble v)))
 
 (go/method Ref ^any [^{:tag (* Field)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Field)} t] Field_class)
@@ -578,18 +684,101 @@ Method.invoke converts arguments (IllegalArgumentException with the JVM's messag
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.InvocationHandler" :Kind KindInterface
                      :Modifiers (bit-or AccPublic AccInterface AccAbstract) :Go "arbace/jrt.InvocationHandler"))))
 (go/func InvocationHandler_InstanceOf ^bool [^any x] (let [(values _ ok) (assert InvocationHandler x)] (dynNominal x InvocationHandler_class ok)))
+(go/func InvocationHandler_Cast
+  "InvocationHandler_Cast is the checkcast of InvocationHandler (JCS170: with it j2g's Dyn has the interface's
+method, so that a class made at run time, an interpreted handler among them, is one; the nominal check
+dynNominal's).\n"
+  ^InvocationHandler [^any x]
+  (when (== x nil) (return nil))
+  (let [(values v ok) (assert InvocationHandler x)]
+    (when (not (dynNominal x InvocationHandler_class ok))
+      (panic (ClassCast x InvocationHandler_class)))
+    v))
+(go/func init
+  "init sets InvocationHandler's IsInstance (Class.isInstance of a class made at run time: the nominal check).\n"
+  []
+  (set! (.-IsInstance (.Info InvocationHandler_class)) InvocationHandler_InstanceOf))
 
 (go/var Proxy_class
   (Define (addr (lit ClassInfo :Name "java.lang.reflect.Proxy" :Kind KindClass
-                     :Modifiers AccPublic :Super Object_class :Go "arbace/jrt.Proxy"))))
+                     :Modifiers AccPublic :Super Object_class :Go "arbace/jrt.Proxy"
+                     ;; jdk26u's Proxy is Serializable (its field h, serial_classes.ae: a stream's proxy)
+                     :Interfaces (lit (slice (* Class)) Serializable_class)))))
+
+;; java.lang.reflect.Proxy's classes (JCS170 (a), the user's decision of 2026-11-08; doc/classes/
+;; JAVA-DEFERRED-TRIAGE.md, "As built: JCS170 (write-ahead)"): a proxy class is a class made at run time
+;; over j2g's Dyn (J2G-SPEC §5.12), its superclass Proxy, its methods' fns calling the handler.
+;; arbace/lang makes it (Compiler$ProxySupport.proxyClass, with jdk26u's ProxyBuilder's and
+;; ProxyGenerator's rules), through ProxyClassFor, which j2g_dyn.go sets; without the evaluator's Dyn
+;; (a world without arbace/lang) Proxy throws UnsupportedOperationException as before.
+
+(go/var ^{:tag (func [(* RefArray)] [(* Class)])
+          :doc "ProxyClassFor is the proxy class of the interfaces (Proxy.getProxyClass's cache): set by
+arbace/lang's j2g_dyn.go (Compiler$ProxySupport.proxyClass), nil in a world without the evaluator.\n"}
+  ProxyClassFor)
+
+(go/var ^{:tag sync/Map :doc "proxyClasses are the classes ProxyClassFor made (RegisterProxyClass).\n"} proxyClasses)
+
+(go/func RegisterProxyClass
+  "RegisterProxyClass records c as a class of java.lang.reflect.Proxy (Proxy.isProxyClass): called by
+j2g_dyn.go's Compiler$Dyn.defineJavaProxy.\n"
+  [^{:tag (* Class)} c]
+  (.Store proxyClasses c true))
+
+(go/func IsProxyClass
+  "IsProxyClass says whether c is a proxy class (RegisterProxyClass).\n"
+  ^bool [^{:tag (* Class)} c]
+  (let [(values _ ok) (.Load proxyClasses c)] ok))
+
+(go/type proxyFields
+  "proxyFields is a proxy's object as jrt sees it: a Dyn of arbace/lang, its fields (the handler the
+first) through dynCore's DynFields.\n"
+  (interface (DynFields ^{:tag (* (slice any))} [])))
+
+(go/func proxyHandlerField
+  "proxyHandlerField is the place of proxy p's handler (Proxy's field h): its first field.\n"
+  ^{:tag (* any)} [^any p]
+  (let [(values d ok) (assert proxyFields p)]
+    (when (or (not ok) (not (IsProxyClass (GetClass p))))
+      (panic (IllegalArgumentException_New_String (Str "not a proxy instance"))))
+    (let [f (.DynFields d)]
+      (when (== (len (deref f)) 0)
+        (set! (deref f) (make (slice any) 1)))
+      (return (addr (aget (deref f) 0))))))
+
+(go/func proxyNeeded
+  "proxyNeeded is ProxyClassFor, or UnsupportedOperationException in a world without the evaluator.\n"
+  ^{:tag (func [(* RefArray)] [(* Class)])} []
+  (when (== ProxyClassFor nil)
+    (panic (UnsupportedOperationException_New_String (Str "java.lang.reflect.Proxy"))))
+  ProxyClassFor)
 
 (go/func Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O
-  "Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O is Proxy.newProxyInstance:
-classes cannot be made at run time, so it throws UnsupportedOperationException.
-Reflector.boxArg's adaptation of an IFn to a functional interface goes through the
-interface's ClassInfo.FromFn instead (JRT-NOTES.md, proposed amendment A13).\n"
+  "Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O is Proxy.newProxyInstance: h
+required (NullPointerException), the proxy class of the interfaces (ProxyClassFor: jdk26u's checks,
+IllegalArgumentException), its object with h, made by its constructor (InvocationHandler).
+Reflector.boxArg's adaptation of an IFn to a functional interface goes through the interface's
+ClassInfo.FromFn instead (JRT-NOTES.md, proposed amendment A13).\n"
   ^any [^ClassLoader_I loader ^{:tag (* RefArray)} interfaces ^InvocationHandler h]
-  (panic (UnsupportedOperationException_New_String (Str "java.lang.reflect.Proxy"))))
+  (let [f (proxyNeeded)]
+    (when (== h nil) (panic (NPE)))
+    (when (== interfaces nil) (panic (NPE)))
+    (let [c (f interfaces)]
+      (EnsureMembers (.-info c))
+      (return ((.-New (aget (.-Ctors (.-info c)) 0)) (lit (slice any) h))))))
+
+(go/func Proxy_GetInvocationHandler_O__InvocationHandler
+  "Proxy_GetInvocationHandler_O__InvocationHandler is Proxy.getInvocationHandler: the handler of a
+proxy's object, IllegalArgumentException \"not a proxy instance\" for another object.\n"
+  ^InvocationHandler [^any p]
+  (when (== p nil) (panic (NPE)))
+  ;; an annotation (JCS210 (a), annotation.ae): its AnnotationInvocationHandler
+  (let [ah (annotationHandlerOf p)]
+    (when (!= ah nil)
+      (return ah)))
+  (let [h (deref (proxyHandlerField p))]
+    (when (== h nil) (return nil))
+    (return (assert InvocationHandler h))))
 
 (go/func AdaptFn
   "AdaptFn adapts f, an IFn, to the functional interface c through c's ClassInfo.FromFn
@@ -888,9 +1077,7 @@ C.<init>(T1,T2) when no public constructor takes those classes.\n"
   ^{:tag (* Class)} [^{:tag (* Class)} c]
   (.-Declaring (.-info c)))
 
-(go/method GetEnclosingClass__Class ^{:tag (* Class)} [^{:tag (* Class)} c] (.-Declaring (.-info c)))
 
-(go/method IsMemberClass__Z ^bool [^{:tag (* Class)} c] (!= (.-Declaring (.-info c)) nil))
 
 ;; ---- step 5 phase 2B: more of Class's members for the REPL (jdk26u's Class.java)
 
@@ -932,14 +1119,8 @@ UnsupportedOperationException for void.\n"
   ^{:tag (* String)} [^{:tag (* Class)} c]
   (Str (descriptorOf c)))
 
-(go/method IsAnonymousClass__Z "IsAnonymousClass__Z: false; the closed world's classes are named
-(an anonymous class's ClassInfo says nothing of it).\n"
-  ^bool [^{:tag (* Class)} c] false)
-(go/method IsLocalClass__Z ^bool [^{:tag (* Class)} c] false)
 (go/method IsHidden__Z ^bool [^{:tag (* Class)} c] false)
 (go/method IsSealed__Z ^bool [^{:tag (* Class)} c] false)
-(go/method GetEnclosingMethod__Method ^{:tag (* Method)} [^{:tag (* Class)} c] nil)
-(go/method GetEnclosingConstructor__Constructor ^{:tag (* Constructor)} [^{:tag (* Class)} c] nil)
 
 (go/method GetNestHost__Class "GetNestHost__Class is Class.getNestHost: the outermost enclosing
 class (arrays and primitives: themselves).\n"
@@ -987,47 +1168,10 @@ Object.\n"
       (return (Intern "")))
     (Str (subslice n _ i))))
 
-(go/method GetCanonicalName__String
-  "GetCanonicalName__String is Class.getCanonicalName for top-level, member and array
-classes ($ of member classes as .).\n"
-  ^{:tag (* String)} [^{:tag (* Class)} c]
-  (when (.IsArray__Z c)
-    (let [e (.GetCanonicalName__String (.-comp c))]
-      (when (== e nil)
-        (return nil))
-      (return (Concat e (Str "[]")))))
-  (when (!= (.-Declaring (.-info c)) nil)
-    (let [o (.GetCanonicalName__String (.-Declaring (.-info c)))]
-      (when (== o nil)
-        (return nil))
-      (return (Concat o (Str ".") (.GetSimpleName__String c)))))
-  (.GetName__String c))
 
 (go/method IsSynthetic__Z ^bool [^{:tag (* Class)} c] (!= (bit-and (.-Modifiers (.-info c)) AccSynthetic) 0))
 
-(go/method IsAnnotationPresent_Class__Z
-  "IsAnnotationPresent_Class__Z: annotations are not kept (J2G-SPEC §12), with one
-exception the evaluator needs (Compiler.FISupport): FunctionalInterface is present exactly on
-the interfaces whose ClassInfo has FromFn.\n"
-  ^bool [^{:tag (* Class)} c ^{:tag (* Class)} a]
-  (and (== (.-Name (.-info (NN a))) "java.lang.FunctionalInterface") (!= (.-FromFn (.-info c)) nil)))
 
-(go/method GetGenericInterfaces__Type1
-  "GetGenericInterfaces__Type1 is Class.getGenericInterfaces without generics: the
-interfaces as Class objects (generic types are cut, so HashMap.comparableClassFor finds no
-ParameterizedType).\n"
-  ^{:tag (* RefArray)} [^{:tag (* Class)} c]
-  (let [is (.-Interfaces (.-info c))
-        a (NewRefArray Type_class (conv int32 (len is)))]
-    (range [i x is]
-      (aset (.-A a) i x))
-    a))
-
-(go/method GetGenericSuperclass__Type ^Type [^{:tag (* Class)} c]
-  (let [s (.-Super (.-info c))]
-    (when (== s nil)
-      (return nil))
-    s))
 
 (go/method GetEnumConstants__O1
   "GetEnumConstants__O1 is Class.getEnumConstants: a copy of ClassInfo.Enum's array, null for

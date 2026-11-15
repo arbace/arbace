@@ -26,8 +26,10 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: F13 (write-ahead)"; JCS161 (a)): jrt's
  * java.lang.management.ManagementFactory, jdk26u's (https://github.com/openjdk/jdk26u at baf63fb,
- * src/java.management/share/classes/java/lang/management/ManagementFactory.java) without JMX (JCS95 (a)): no
- * platform MBean server (getPlatformMBeanServer), no MXBean proxies over an MBeanServerConnection
+ * src/java.management/share/classes/java/lang/management/ManagementFactory.java) without JMX (JCS95 (a)), but since
+ * JMX-1 (JCS263, "As built: JMX-1 (write-ahead)") the platform MBean server (getPlatformMBeanServer: jdk26u's, over
+ * the table below, each bean registered by jdk26u's addMXBean under its own ObjectName) and newPlatformMXBeanProxy
+ * (jdk26u's, over JMX.newMXBeanProxy); not the getPlatformMXBean(s) that take an MBeanServerConnection
  * (newPlatformMXBeanProxy and the getPlatformMXBean(s) taking one), no PlatformMBeanProvider found by
  * ServiceLoader. The platform components are a table of jrt's own, in jdk26u's precedence (jdk.management's
  * provider before java.management's): the threads' bean (jdk.management's HotSpotThreadImpl, which is also a
@@ -40,6 +42,20 @@
  */
 package java.lang.management;
 
+import javax.management.DynamicMBean;
+import javax.management.InstanceAlreadyExistsException;
+import javax.management.InstanceNotFoundException;
+import javax.management.JMX;
+import javax.management.MBeanServerConnection;
+import javax.management.MBeanRegistrationException;
+import javax.management.MBeanServer;
+import javax.management.MBeanServerFactory;
+import javax.management.MalformedObjectNameException;
+import javax.management.NotCompliantMBeanException;
+import javax.management.NotificationEmitter;
+import javax.management.ObjectName;
+import javax.management.StandardEmitterMBean;
+import javax.management.StandardMBean;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -142,6 +158,10 @@ public class ManagementFactory {
         if (n.equals("java.lang.management.ThreadMXBean") || n.equals("com.sun.management.ThreadMXBean")) {
             return threadBean();
         }
+        if (n.equals("java.lang.management.PlatformLoggingMXBean")) {
+            // JCS281 (b): the platform logging bean (jdk26u's ManagementFactoryHelper.PlatformLoggingImpl)
+            return sun.management.ManagementFactoryHelper.getPlatformLoggingMXBean();
+        }
         if (n.equals("java.lang.management.RuntimeMXBean")) {
             return sun.management.ManagementFactoryHelper.getRuntimeMXBean();
         }
@@ -173,6 +193,100 @@ public class ManagementFactory {
                     sun.management.ManagementFactoryHelper.getVMManagement());
         }
         return osImpl;
+    }
+
+    private static MBeanServer platformMBeanServer;
+
+    // jrt (JMX-1): jdk26u's, its platform components the beans the Go build makes (jdk26u registers every
+    // PlatformComponent's nameToMBeanMap, the beans' getObjectName()s)
+    public static synchronized MBeanServer getPlatformMBeanServer() {
+        if (platformMBeanServer == null) {
+            platformMBeanServer = MBeanServerFactory.createMBeanServer();
+            PlatformManagedObject[] beans = {
+                threadBean(), sun.management.ManagementFactoryHelper.getRuntimeMXBean(), osBean(),
+                sun.management.ManagementFactoryHelper.getPlatformLoggingMXBean()
+            };
+            for (PlatformManagedObject pmo : beans) {
+                addMXBean(platformMBeanServer, pmo.getObjectName().getCanonicalName(), pmo);
+            }
+        }
+        return platformMBeanServer;
+    }
+
+    // jrt (JMX-1): jdk26u's
+    public static <T> T
+        newPlatformMXBeanProxy(MBeanServerConnection connection,
+                               String mxbeanName,
+                               Class<T> mxbeanInterface)
+            throws java.io.IOException {
+
+        // Only allow MXBean interfaces from the platform modules loaded by the
+        // bootstrap or platform class loader
+        final Class<?> cls = mxbeanInterface;
+        ClassLoader loader = cls.getClassLoader();
+        if (!jdk.internal.misc.VM.isSystemDomainLoader(loader)) {
+            throw new IllegalArgumentException(mxbeanName +
+                " is not a platform MXBean");
+        }
+
+        try {
+            final ObjectName objName = new ObjectName(mxbeanName);
+            String intfName = mxbeanInterface.getName();
+            if (!isInstanceOf(connection, objName, intfName)) {
+                throw new IllegalArgumentException(mxbeanName +
+                    " is not an instance of " + mxbeanInterface);
+            }
+
+            // check if the registered MBean is a notification emitter
+            boolean emitter = connection.isInstanceOf(objName, NOTIF_EMITTER);
+
+            // create an MXBean proxy
+            return JMX.newMXBeanProxy(connection, objName, mxbeanInterface,
+                                      emitter);
+        } catch (InstanceNotFoundException|MalformedObjectNameException e) {
+            throw new IllegalArgumentException(e);
+        }
+    }
+
+    private static boolean isInstanceOf(MBeanServerConnection connection,
+            ObjectName objName, String intfName)
+            throws InstanceNotFoundException, java.io.IOException
+    {
+        // special case for java.util.logging.LoggingMXBean.
+        // java.util.logging.LoggingMXBean is deprecated and
+        // replaced with java.lang.management.PlatformLoggingMXBean,
+        // so we will consider that any MBean implementing
+        // java.lang.management.PlatformLoggingMXBean also implements
+        // java.util.logging.LoggingMXBean.
+        if ("java.util.logging.LoggingMXBean".equals(intfName)) {
+            if (connection.isInstanceOf(objName,
+                    PlatformLoggingMXBean.class.getName())) {
+                return true;
+            }
+        }
+        return connection.isInstanceOf(objName, intfName);
+    }
+
+    private static final String NOTIF_EMITTER =
+        "javax.management.NotificationEmitter";
+
+    private static void addMXBean(final MBeanServer mbs, String name, final Object pmo)
+    {
+        try {
+            ObjectName oname = ObjectName.getInstance(name);
+            // Make DynamicMBean out of MXBean by wrapping it with a StandardMBean
+            final DynamicMBean dmbean;
+            if (pmo instanceof DynamicMBean) {
+                dmbean = DynamicMBean.class.cast(pmo);
+            } else if (pmo instanceof NotificationEmitter) {
+                dmbean = new StandardEmitterMBean(pmo, null, true, (NotificationEmitter) pmo);
+            } else {
+                dmbean = new StandardMBean(pmo, null, true);
+            }
+            mbs.registerMBean(dmbean, oname);
+        } catch (MalformedObjectNameException | InstanceAlreadyExistsException | MBeanRegistrationException | NotCompliantMBeanException e) {
+            throw new IllegalArgumentException(e);
+        }
     }
 
     private static UnsupportedOperationException notYet(Class<?> intf) {
@@ -208,6 +322,43 @@ public class ManagementFactory {
         return l;
     }
 
+    // JCS281 (b): jdk26u's getPlatformMXBean(s) over a connection, the platform component of an interface the
+    // singleton bean the Go build makes (its object name the component's: jdk26u's PlatformComponent's
+    // getObjectNamePattern for a singleton)
+    public static <T extends PlatformManagedObject>
+            T getPlatformMXBean(MBeanServerConnection connection,
+                                Class<T> mxbeanInterface)
+        throws java.io.IOException
+    {
+        if (!isPlatformInterface(mxbeanInterface)) {
+            throw new IllegalArgumentException(mxbeanInterface.getName() +
+                    " is not a platform management interface");
+        }
+        PlatformManagedObject o = singleton(mxbeanInterface);
+        if (o == null) {
+            throw notYet(mxbeanInterface);
+        }
+        return newPlatformMXBeanProxy(connection, o.getObjectName().getCanonicalName(), mxbeanInterface);
+    }
+
+    public static <T extends PlatformManagedObject>
+            List<T> getPlatformMXBeans(MBeanServerConnection connection,
+                                       Class<T> mxbeanInterface)
+        throws java.io.IOException
+    {
+        if (!isPlatformInterface(mxbeanInterface)) {
+            throw new IllegalArgumentException(mxbeanInterface.getName()
+                    + " is not a platform management interface");
+        }
+        PlatformManagedObject o = singleton(mxbeanInterface);
+        if (o == null) {
+            throw notYet(mxbeanInterface);
+        }
+        List<T> l = new ArrayList<>();
+        l.add(newPlatformMXBeanProxy(connection, o.getObjectName().getCanonicalName(), mxbeanInterface));
+        return l;
+    }
+
     public static Set<Class<? extends PlatformManagedObject>>
            getPlatformManagementInterfaces()
     {
@@ -218,6 +369,7 @@ public class ManagementFactory {
         s.add(OperatingSystemMXBean.class);
         s.add(com.sun.management.OperatingSystemMXBean.class);
         s.add(com.sun.management.UnixOperatingSystemMXBean.class);
+        s.add(PlatformLoggingMXBean.class);
         return Collections.unmodifiableSet(s);
     }
 }

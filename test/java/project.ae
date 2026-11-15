@@ -1,0 +1,290 @@
+(ns java.project
+  "bin/java-project's data side (doc/go/BUILD.md, \"Java sources by module\"; GH2 (a), GH3 (a), the
+  Ghidra case study's A1, A2, A3 and A11; a namespace under test/java/, evaluated on the tools'
+  host, as java.check). bin/java-project runs the processes (unzip, javac on Arbace, repr/java's
+  read); this namespace reads the project model and the processes' logs:
+
+    plan FILE BASE [--root NAME=DIR]... [--repository DIR]
+        the model of FILE (a program.edn, or a plan file holding the same map) checked and
+        resolved: its modules in dependency order, one block a module, each line a key and its
+        values separated by tabs (bin/java-project reads it with read -a), the paths absolute
+        (relative to BASE; $NAME/... under --root NAME=DIR; a coordinate g:a:v in the Maven
+        repository)
+    closure-scan LOG ROOT
+        a javac log of the closure's compilation (A3): the files of ROOT javac parsed, one
+        `parsed FILE` line each, and each file with an error, `error FILE CAUSE NAME MESSAGE`
+        (CAUSE absent: a type or package javac cannot find, NAME its name; other: any other error)
+    closure-report OUT MODULE ROUNDS LEFT KEPT ROOTS
+        the closure's report as data (LEFT: the left-out rows, round, file, cause, name, message;
+        KEPT: the files kept; ROOTS: the roots): OUT, an EDN map
+    merge-forms OUT DIR...
+        the modules' forms trees merged into OUT (a package split over modules: its namespace
+        file's loads united)"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-edn [f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- fail [& msg]
+  (binding [*out* *err*] (println (apply str "java-project: " msg)))
+  (System/exit 2))
+
+(defn- lines [f]
+  (let [f (io/file f)]
+    (if (.isFile f) (remove str/blank? (str/split-lines (slurp f))) [])))
+
+;; ---------------------------------------------------------------------------------------------
+;; the model
+
+(def ^:private module-keys
+  #{:name :src :resources :deps :artifacts :javac :release :artifact :closure :patches})
+
+(def ^:private java-keys #{:release :javac :repository :modules})
+
+(defn- coord-parts [c]
+  (let [ps (str/split (str c) #":")]
+    (when-not (= 3 (count ps)) (fail "a coordinate is group:artifact:version, not " (pr-str c)))
+    ps))
+
+(defn- coord-path
+  "The path of coordinate `c`'s file of `kind` (:jar, :sources) in a Maven repository."
+  [repo c kind]
+  (let [[g a v] (coord-parts c)]
+    (str repo "/" (str/replace g "." "/") "/" a "/" v "/" a "-" v
+         (case kind :jar ".jar" :sources "-sources.jar"))))
+
+(defn- resolve-path
+  "A path of the model: $NAME/rest under the root NAME, absolute as is, else under base."
+  [base roots p]
+  (let [p (str p)]
+    (cond
+      (str/starts-with? p "$") (let [i (or (str/index-of p "/") (count p))
+                                     n (subs p 1 i)
+                                     d (or (get roots n) (fail "no root " n " (--root " n "=DIR) for " p))]
+                                 (str d (subs p i)))
+      (str/starts-with? p "/") p
+      :else (str base "/" p))))
+
+(defn model
+  "The :java map of the model in `file` (a program.edn or a plan file), checked."
+  [file]
+  (let [m (read-edn file)
+        j (:java m)]
+    (when-not (map? j) (fail file ": no :java map"))
+    (when-let [bad (seq (remove java-keys (keys j)))] (fail file ": unknown :java keys " (vec bad)))
+    (let [mods (:modules j)
+          names (map :name mods)]
+      (when-not (and (vector? mods) (seq mods)) (fail file ": :java's :modules is a vector of modules"))
+      (doseq [md mods]
+        (when-not (and (map? md) (string? (:name md)) (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" (:name md)))
+          (fail file ": a module needs a :name (letters, digits, . _ -): " (pr-str md)))
+        (when-let [bad (seq (remove module-keys (keys md)))]
+          (fail file ": module " (:name md) ": unknown keys " (vec bad)))
+        (when (= (boolean (:src md)) (boolean (:artifact md)))
+          (fail file ": module " (:name md) ": one of :src (source directories) and :artifact (a sources jar)"))
+        (when (and (:closure md) (not (:artifact md)))
+          (fail file ": module " (:name md) ": :closure is an artifact's (a library cut to what its roots reach)"))
+        (when-let [c (:closure md)]
+          (when-let [bad (seq (remove #{:roots :optional} (keys c)))]
+            (fail file ": module " (:name md) ": unknown :closure keys " (vec bad)))
+          (when-not (seq (concat (:roots c) (:optional c)))
+            (fail file ": module " (:name md) ": :closure needs :roots or :optional")))
+        (when (and (:patches md) (not (and (:artifact md) (vector? (:patches md)) (every? string? (:patches md)))))
+          (fail file ": module " (:name md) ": :patches is an artifact's vector of patch files (a dependency's variants)"))
+        (when-not (or (nil? (:resources md)) (= :jar (:resources md)) (vector? (:resources md)))
+          (fail file ": module " (:name md) ": :resources is a vector of directories, or :jar (an artifact's binary jar's)"))
+        (when (and (= :jar (:resources md)) (not (:artifact md)))
+          (fail file ": module " (:name md) ": :resources :jar is an artifact's"))
+        (doseq [d (:deps md)]
+          (when-not (some #{d} names) (fail file ": module " (:name md) ": no module " d " (:deps)"))))
+      (when-let [dup (seq (for [[n c] (frequencies names) :when (> c 1)] n))]
+        (fail file ": modules named twice: " (vec dup)))
+      j)))
+
+(defn- topo
+  "The modules in dependency order (a module after its :deps; else the model's order), or a failure
+  naming a cycle."
+  [mods]
+  (let [by (into {} (map (juxt :name identity) mods))]
+    (loop [done [] seen #{} todo (map :name mods)]
+      (if-let [n (first todo)]
+        (if (seen n)
+          (recur done seen (rest todo))
+          (let [visit (fn visit [n path acc]
+                        (cond
+                          (some #{n} path) (fail "a cycle of :deps: " (str/join " -> " (conj path n)))
+                          ((:seen acc) n) acc
+                          :else (let [acc (reduce #(visit %2 (conj path n) %1) acc (:deps (by n)))]
+                                  (-> acc (update :seen conj n) (update :done conj n)))))
+                acc (visit n [] {:seen seen :done done})]
+            (recur (:done acc) (:seen acc) (rest todo))))
+        (mapv by done)))))
+
+(defn- deps*
+  "Module `n`'s dependencies, transitively, in `order`'s order."
+  [by order n]
+  (let [all (loop [seen #{} todo (:deps (by n))]
+              (if-let [d (first todo)]
+                (if (seen d) (recur seen (rest todo)) (recur (conj seen d) (concat (rest todo) (:deps (by d)))))
+                seen))]
+    (filterv all order)))
+
+(defn- tsv-line [k vs]
+  (str/join "\t" (cons k (map str vs))))
+
+(defn plan
+  "Print the resolved plan of `file` (see the namespace's doc)."
+  [file base & opts]
+  (let [{:keys [roots repository]}
+        (loop [[a b & more :as os] opts acc {:roots {}}]
+          (case a
+            nil acc
+            "--root" (let [i (or (str/index-of b "=") (fail "--root NAME=DIR"))]
+                       (recur more (assoc-in acc [:roots (subs b 0 i)] (subs b (inc i)))))
+            "--repository" (recur more (assoc acc :repository b))
+            (fail "plan: unknown option " a)))
+        base (.getCanonicalPath (io/file base))
+        j (model file)
+        repo (or repository (some->> (:repository j) (resolve-path base roots)))
+        mods (topo (:modules j))
+        by (into {} (map (juxt :name identity) mods))
+        order (mapv :name mods)
+        rp (partial resolve-path base roots)
+        jar (fn [c kind] (when-not repo (fail "an artifact " c " but no repository (:repository, --repository)"))
+              (coord-path repo c kind))]
+    (doseq [{:keys [name src resources artifacts javac release artifact closure patches]} mods
+            :let [ds (deps* by order name)
+                  ;; the binary jars on the class path: its own :artifacts and its dependencies'
+                  arts (distinct (concat artifacts (mapcat #(:artifacts (by %)) ds)))]]
+      (println (tsv-line "module" [name]))
+      (println (tsv-line "kind" [(if artifact "artifact" "src")]))
+      (println (tsv-line "release" [(or release (:release j) "")]))
+      (println (tsv-line "src" (map rp src)))
+      (println (tsv-line "resources" (if (vector? resources) (map rp resources) [])))
+      (println (tsv-line "resources-jar" [(if (= :jar resources) "yes" "")]))
+      (println (tsv-line "deps" ds))
+      (println (tsv-line "artifacts" arts))
+      (println (tsv-line "jars" (map #(jar % :jar) arts)))
+      (println (tsv-line "javac" (concat (:javac j) javac)))
+      (println (tsv-line "coord" [(or artifact "")]))
+      (println (tsv-line "sources-jar" [(if artifact (jar artifact :sources) "")]))
+      (println (tsv-line "binary-jar" [(if artifact (jar artifact :jar) "")]))
+      (println (tsv-line "roots" (:roots closure)))
+      (println (tsv-line "optional" (:optional closure)))
+      (println (tsv-line "patches" (map rp patches)))
+      (println "end"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the closure (A3): javac's log read
+
+(defn- canonical [p] (try (.getCanonicalPath (io/file p)) (catch Throwable _ p)))
+
+(defn closure-scan
+  "Print the parsed files and the errors of javac's log `log` (default format, -verbose), for the
+  files under `root` (see the namespace's doc)."
+  [log root]
+  (let [root (canonical root)
+        ls (vec (str/split-lines (slurp log)))
+        rel (fn [p] (let [c (canonical p)] (when (str/starts-with? c (str root "/")) (subs c (inc (count root))))))]
+    (doseq [l ls
+            :let [[_ p] (re-find #"^\[parsing started (?:[A-Za-z]+\[)?(.*?\.java)\]?\]$" l)]
+            :when p
+            :let [r (rel p)]
+            :when r]
+      (println (str "parsed\t" r)))
+    (doseq [[i l] (map-indexed vector ls)
+            :let [[_ p msg] (re-find #"^(/.*?\.java):\d+: error: (.*)$" l)]
+            :when p
+            :let [r (rel p)]
+            :when r]
+      (let [follow (take-while #(not (re-find #"^(/.*?\.java):\d+: |^\d+ errors?$|^\[" %)) (subvec ls (inc i)))
+            sym (some #(second (re-find #"^\s+symbol:\s+(?:class|interface|enum|record|variable|method|static|package)\s+(\S+?)(?:\(.*)?$" %)) follow)
+            [cause nm] (cond
+                         (re-find #"^package (\S+) does not exist" msg) [:absent (second (re-find #"^package (\S+) does not exist" msg))]
+                         (re-find #"^cannot find symbol" msg) [:absent (or sym "?")]
+                         (re-find #"^cannot access (\S+)" msg) [:absent (second (re-find #"^cannot access (\S+)" msg))]
+                         (re-find #"^static import only from classes" msg) [:absent "?"]
+                         :else [:other ""])]
+        (println (str/join "\t" ["error" r (name cause) nm (str/replace msg "\t" " ")]))))))
+
+(defn- file->class [f]
+  (-> f (str/replace #"\.java$" "") (str/replace "/" ".")))
+
+(defn closure-report
+  "Write the closure's report (see the namespace's doc)."
+  [out module rounds left kept roots]
+  (let [left (for [l (lines left)] (str/split l #"\t" -1))
+        left-classes (set (map #(file->class (nth % 1)) left))
+        simple (into {} (map (fn [c] [(last (str/split c #"\.")) c]) left-classes))
+        kept (vec (sort (lines kept)))
+        rows (vec (for [[round f cause nm msg] left]
+                    (cond-> {:file f :round (Long/parseLong round) :cause (keyword cause)}
+                      (seq nm) (assoc :names nm)
+                      ;; a name of a file left out before (the cascade)
+                      (and (= cause "absent") (or (left-classes nm) (simple nm)))
+                      (assoc :left-out (or (left-classes nm) (simple nm)))
+                      (= cause "other") (assoc :message msg))))
+        absent (->> rows (filter #(and (= :absent (:cause %)) (not (:left-out %)))) (map :names) frequencies
+                    (into (sorted-map)))]
+    (io/make-parents out)
+    (spit out (with-out-str
+                (println (str ";; bin/java-project's closure of module " module " (A3, doc/go/BUILD.md, \"Java sources by module\"):"))
+                (println ";; the files its roots reach (javac's -implicit:class over the sources), less those that name a type")
+                (println ";; javac cannot find (:absent, the name) or a file left out before (:left-out), round by round")
+                (println "{:module" (pr-str module))
+                (println " :roots" (pr-str (vec (lines roots))))
+                (println " :rounds" rounds)
+                (println " :kept-count" (count kept))
+                (println " :left-out-count" (count rows))
+                (println " :absent-names" (pr-str absent))
+                (println " :left-out")
+                (println "  [")
+                (doseq [r (sort-by (juxt :round :file) rows)] (println "   " (pr-str r)))
+                (println "  ]")
+                (println " :kept")
+                (println "  [")
+                (doseq [k kept] (println "   " (pr-str k)))
+                (println "  ]}")))))
+
+;; ---------------------------------------------------------------------------------------------
+;; the forms merged
+
+(defn merge-forms
+  "Merge the forms trees `dirs` into `out`: each class's file copied (a class in two trees is an
+  error), each package's namespace file written once with the loads of every tree."
+  [out & dirs]
+  (let [out (io/file out)
+        nsfiles (atom {})]
+    (doseq [d dirs
+            :let [d (io/file d)
+                  dp (.getCanonicalPath d)]
+            ^File f (file-seq d)
+            :when (and (.isFile f) (str/ends-with? (.getName f) ".ae"))
+            :let [rel (subs (.getCanonicalPath f) (inc (count dp)))
+                  text (slurp f)]]
+      (if (re-find #"(?m)^\(ns " text)
+        (swap! nsfiles update rel (fnil conj []) text)
+        (let [o (io/file out rel)]
+          (when (.exists o) (fail "merge-forms: " rel " in two modules"))
+          (io/make-parents o)
+          (io/copy f o))))
+    (doseq [[rel texts] @nsfiles
+            :let [o (io/file out rel)
+                  t (first texts)
+                  loads (into (sorted-set) (mapcat #(re-seq #"(?m)^\(load \"[^\"]*\"\)$" %) texts))
+                  head (str/replace t #"(?m)^\(load \"[^\"]*\"\)\n?" "")]]
+      (io/make-parents o)
+      (spit o (str (str/trimr head) "\n\n" (str/join "\n" loads) "\n")))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "plan" (apply plan args)
+    "closure-scan" (apply closure-scan args)
+    "closure-report" (apply closure-report args)
+    "merge-forms" (apply merge-forms args)
+    (fail "unknown command " cmd))
+  (shutdown-agents)
+  (System/exit 0))

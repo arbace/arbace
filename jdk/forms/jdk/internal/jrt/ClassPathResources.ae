@@ -4,7 +4,8 @@
 
 (import '(java.io ByteArrayInputStream File FileNotFoundException IOException InputStream)
         '(java.net MalformedURLException URL URLClassLoader URLConnection)
-        '(java.util ArrayList Collections Enumeration List)
+        '(java.nio.charset StandardCharsets)
+        '(java.util ArrayList Collections Enumeration HashMap List Map)
         '(sun.net.www ParseUtil)
         '(sun.net.www.protocol.jar Handler))
 
@@ -35,6 +36,97 @@
           (when-not (.startsWith d "store:") (.add dirs d))))
       dirs))
 
+  (method ^:public ^:static embeddedBytes ^byte/1 [^String name]
+    (ClassPathResources/bytes0 name))
+
+  (field ^:private ^:static ^{:tag (List String)} roots)
+
+  (method ^:private ^:static roots ^{:tag (List String)} []
+    (locking ClassPathResources
+      (when (nil? roots)
+        (let [^{:tag (List String)} ks (ArrayList.)
+              b (ClassPathResources/bytes0 "META-INF/arbace/roots")]
+          (when (some? b)
+            (for-each [^String line (.split (String. b StandardCharsets/UTF_8) "\n")]
+              (let [i (.indexOf line \space)] (when (> i 0) (.add ks (.substring line 0 i))))))
+          (set! roots ks)))
+      roots))
+
+  (field ^:private ^:static ^{:tag (List String)} entries)
+
+  (method ^:private ^:static ^:synchronized entries ^{:tag (List String)} []
+    (when (nil? entries)
+      (let [^{:tag (List String)} names (ArrayList.)
+            b (ClassPathResources/bytes0 "META-INF/arbace/classpath")]
+        (when (some? b)
+          (for-each [^String line (.split (String. b StandardCharsets/UTF_8) "\n")]
+            (let [i (.indexOf line \space)]
+              (when (> i 0) (.add names (.substring line (unchecked-add-int i 1)))))))
+        (set! entries names)))
+    entries)
+
+  (field ^:private ^:static ^{:tag (Map String Integer)} owners)
+
+  (method ^:private ^:static ^:synchronized owners ^{:tag (Map String Integer)} []
+    (when (nil? owners)
+      (let [^{:tag (Map String Integer)} m (HashMap.)
+            b (ClassPathResources/bytes0 "META-INF/arbace/owners")]
+        (when (some? b)
+          (for-each [^String line (.split (String. b StandardCharsets/UTF_8) "\n")]
+            (let [i (.indexOf line \space)]
+              (when (> i 0)
+                (.put m
+                      (.substring line (unchecked-add-int i 1))
+                      (Integer/parseInt (.substring line 0 i)))))))
+        (set! owners m)))
+    owners)
+
+  (method ^:public ^:static classPath ^{:tag (List String)} []
+    (ArrayList. (ClassPathResources/entries)))
+
+  (method ^:private ^:static entryIndex ^int [^String name]
+    (if (nil? name) -1 (.indexOf (ClassPathResources/entries) name)))
+
+  (method ^:public ^:static findIn ^URL [^String entry ^String name]
+    (when (nil? name) (throw (NullPointerException.)))
+    (let [k (ClassPathResources/entryIndex entry)]
+      (when-not (or (< k 0) (.startsWith name "/"))
+        (let [copy (java-str "META-INF/arbace/roots/" k "/" name)]
+          (if (ClassPathResources/embedded0 copy)
+              (ClassPathResources/embeddedURL copy)
+              (do
+                (when (ClassPathResources/embedded0 name)
+                  (let [o (cast Integer (.get (ClassPathResources/owners) name))]
+                    (when (and (some? o) (== (.intValue o) k))
+                      (return (ClassPathResources/embeddedURL name)))))
+                nil))))))
+
+  (method ^:private ^:static entryOf ^String [^File dir]
+    (let [^{:tag (List String)} es (ClassPathResources/entries)]
+      (when-not (.isEmpty es)
+        (try
+          (let [d (.getCanonicalFile dir)]
+            (for-each [^String e es]
+              (when (or (.equals e (.getPath dir)) (.equals (.getCanonicalFile (File. e)) d))
+                (return e))))
+          (catch IOException x))
+        nil)))
+
+  (method ^:private ^:static classFile ^boolean [^String name]
+    (if (or (or (not (.endsWith name ".class")) (.startsWith name "/")) (>= (.indexOf name "..") 0))
+        false
+        (let [bn (.replace (.substring name
+                                       0
+                                       (unchecked-subtract-int (.length name) (.length ".class")))
+                           \/
+                           \.)]
+          (if (or (or (.isEmpty bn) (.endsWith bn "module-info")) (.endsWith bn "package-info"))
+              false
+              (try
+                (Class/forName bn false nil)
+                true
+                (catch [ClassNotFoundException LinkageError IllegalArgumentException] e false))))))
+
   (method ^:private ^:static embeddedURL ^URL [^String name]
     (try
       (URL. nil
@@ -58,7 +150,11 @@
                   (set! file (.getCanonicalFile (File. dir (.replace name \/ File/separatorChar))))
                   (when-not (.startsWith (.getPath file) (.getPath dir)) (return nil)))
                 (set! file (File. dir (.replace name \/ File/separatorChar))))
-            (when (.exists file) url))))
+            (cond
+              (and (not (.exists file)) (not (.exists dir)))
+                (let [e (ClassPathResources/entryOf dir)]
+                  (when (some? e) (ClassPathResources/findIn e name)))
+              (.exists file) url))))
       (catch [IOException IllegalArgumentException] e nil)))
 
   (method ^:private ^:static directoryURL ^URL [^String d]
@@ -75,12 +171,18 @@
             (let [b (ClassPathResources/directoryURL d)
                   ^URL u (when (some? b) (ClassPathResources/inDirectory b name))]
               (when (some? u) (return u))))
-          nil)))
+          (when (ClassPathResources/classFile name) (ClassPathResources/embeddedURL name)))))
 
   (method ^:public ^:static findAll ^{:tag (List URL)} [^String name]
     (when (nil? name) (throw (NullPointerException.)))
     (let [^{:tag (List URL)} urls (ArrayList.)]
       (when (ClassPathResources/embedded0 name) (.add urls (ClassPathResources/embeddedURL name)))
+      (for-each [^String k (ClassPathResources/roots)]
+        (let [copy (java-str "META-INF/arbace/roots/" k "/" name)]
+          (when (ClassPathResources/embedded0 copy)
+            (.add urls (ClassPathResources/embeddedURL copy)))))
+      (when (and (.isEmpty urls) (ClassPathResources/classFile name))
+        (.add urls (ClassPathResources/embeddedURL name)))
       (for-each [^String d (ClassPathResources/path)]
         (let [b (ClassPathResources/directoryURL d)
               ^URL u (when (some? b) (ClassPathResources/inDirectory b name))]
@@ -100,6 +202,19 @@
       (identical? loader (ClassLoader/getSystemClassLoader))
         (Collections/enumeration (ClassPathResources/findAll name))
       :else (do (when (nil? name) (throw (NullPointerException.))) (Collections/emptyEnumeration))))
+
+  (method ^:public ^:static getResourceAsStream ^InputStream [^ClassLoader loader ^String name]
+    (let [^URL u (if (nil? loader) (ClassPathResources/find name) (.getResource loader name))]
+      (try (when (some? u) (.openStream u)) (catch IOException e nil))))
+
+  (method ^:public ^:static systemResource ^URL [^String name]
+    (ClassPathResources/getResource (ClassLoader/getSystemClassLoader) name))
+
+  (method ^:public ^:static systemResources :throws [IOException] ^{:tag (Enumeration URL)} [^String name]
+    (ClassPathResources/getResources (ClassLoader/getSystemClassLoader) name))
+
+  (method ^:public ^:static systemResourceAsStream ^InputStream [^String name]
+    (ClassPathResources/getResourceAsStream (ClassLoader/getSystemClassLoader) name))
 
   (defclass ^:static ^:final EmbeddedHandler
     :extends Handler

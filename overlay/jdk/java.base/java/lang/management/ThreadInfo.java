@@ -1,4 +1,12 @@
 /*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JMX-1 (write-ahead)"; JCS263): jdk26u's
+ * java.lang.management.ThreadInfo (src/java.management/share/classes/java/lang/management/ThreadInfo.java
+ * at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):
+ * since the JVM's management interface makes ThreadInfo objects through their private constructors (JNI), a static initializer hands jdk.internal.jrt.HostManagement a factory over them for jrt's ThreadImpl (F13, JCS161 (a)); from(CompositeData) and its constructor as jdk26u's since JMX-1; nothing else changed. jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General
+ * Public License version 2 with the Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace
+ * authors; Eclipse Public License 1.0.
+ */
+/*
  * Copyright (c) 2003, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -23,22 +31,13 @@
  * questions.
  */
 
-/*
- * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, F13, "As built: F13 (write-ahead)"; JCS161 (a)): jrt's
- * java.lang.management.ThreadInfo, jdk26u's (https://github.com/openjdk/jdk26u at baf63fb, src/java.management/share/classes/java/lang/management/ThreadInfo.java)
- * transcribed with JMX's open data taken out: JMX is not in the Go build (JCS95 (a)), so from(CompositeData)
- * answers null for null and throws UnsupportedOperationException otherwise (its constructor from composite data gone);
- * and since the JVM's management interface makes ThreadInfo objects through their private constructors (JNI),
- * the static initializer hands jdk.internal.jrt.HostManagement a factory over them for jrt's ThreadImpl. Copyright (c) Oracle and/or its
- * affiliates, under the GNU General Public License version 2 with the Classpath Exception, as the notice above
- * says (LICENSE.md).
- */
-
 package java.lang.management;
 
 import java.lang.foreign.Linker;
+import javax.management.openmbean.ArrayType;
 import javax.management.openmbean.CompositeData;
 import sun.management.ManagementFactoryHelper;
+import sun.management.ThreadInfoCompositeData;
 
 /**
  * Thread information. {@code ThreadInfo} contains the information
@@ -285,6 +284,38 @@ public class ThreadInfo {
         }
         this.lockedMonitors = lockedMonitors;
         this.lockedSynchronizers = lockedSynchronizers;
+    }
+
+    /*
+     * Constructs a {@code ThreadInfo} object from a
+     * {@link CompositeData CompositeData}.
+     *
+     * @throws IllegalArgumentException if the given CompositeData does not
+     * contain all of the attributes defined for ThreadInfo of version <= N.
+     *
+     * @see ThreadInfo#from
+     */
+    private ThreadInfo(CompositeData cd) {
+        ThreadInfoCompositeData ticd = ThreadInfoCompositeData.getInstance(cd);
+
+        threadId = ticd.threadId();
+        threadName = ticd.threadName();
+        blockedTime = ticd.blockedTime();
+        blockedCount = ticd.blockedCount();
+        waitedTime = ticd.waitedTime();
+        waitedCount = ticd.waitedCount();
+        lockName = ticd.lockName();
+        lockOwnerId = ticd.lockOwnerId();
+        lockOwnerName = ticd.lockOwnerName();
+        threadState = ticd.threadState();
+        suspended = ticd.suspended();
+        inNative = ticd.inNative();
+        stackTrace = ticd.stackTrace();
+        lock = ticd.lockInfo();
+        lockedMonitors = ticd.lockedMonitors();
+        lockedSynchronizers = ticd.lockedSynchronizers();
+        daemon = ticd.isDaemon();
+        priority = ticd.getPriority();
     }
 
     /**
@@ -896,7 +927,12 @@ public class ThreadInfo {
         if (cd == null) {
             return null;
         }
-        throw new UnsupportedOperationException("JMX's open data are not in the Go build (javax.management.openmbean)");
+
+        if (cd instanceof ThreadInfoCompositeData) {
+            return ((ThreadInfoCompositeData) cd).getThreadInfo();
+        } else {
+            return new ThreadInfo(cd);
+        }
     }
 
     /**

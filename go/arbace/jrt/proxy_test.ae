@@ -1,0 +1,86 @@
+;; jrt's tests: java.lang.reflect.Proxy's part in jrt (JCS170 (a); doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
+;; JCS170 (write-ahead)"). The proxy classes are arbace/lang's (j2g_dyn.go's Dyn, Compiler$ProxySupport), outside
+;; jrt's package; here a stand-in ProxyClassFor makes a class as Compiler$Dyn.defineJavaProxy does (superclass
+;; Proxy, its interfaces, a constructor taking the handler, registered with RegisterProxyClass), its objects a
+;; stand-in of Dyn (the handler its first field, read through DynFields).
+(in-ns 'go.arbace.jrt)
+
+(go/file "proxy_test.go"
+  :imports [[testing "testing"]])
+
+(go/type testProxy (struct Object ^{:tag (* Class)} cls ^{:tag (slice any)} F))
+(go/method DynFields ^{:tag (* (slice any))} [^{:tag (* testProxy)} t] (addr (.-F t)))
+(go/method Ref ^any [^{:tag (* testProxy)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* testProxy)} t] (.-cls t))
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* testProxy)} t] (Object_toString t))
+(go/method Clone__O ^any [^{:tag (* testProxy)} t] (panic (CloneNotSupported t)))
+
+(go/type testInvHandler (struct Object ^string name))
+(go/method Is_InvocationHandler [^{:tag (* testInvHandler)} t])
+(go/method Invoke_O_Method_O1__O ^any [^{:tag (* testInvHandler)} t ^any proxy ^{:tag (* Method)} m ^{:tag (* RefArray)} args]
+  (Str (.-name t)))
+(go/method Ref ^any [^{:tag (* testInvHandler)} t] (when (== t nil) (return nil)) t)
+(go/var testInvHandler_class
+  (Define (addr (lit ClassInfo :Name "test.Handler" :Kind KindClass :Modifiers AccPublic :Super Object_class
+                     :Interfaces (lit (slice (* Class)) InvocationHandler_class) :Go "arbace/jrt.testInvHandler"))))
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* testInvHandler)} t] testInvHandler_class)
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* testInvHandler)} t] (Object_toString t))
+(go/method Clone__O ^any [^{:tag (* testInvHandler)} t] (panic (CloneNotSupported t)))
+
+(go/var ^{:tag (map (* Class) (* Class))} testProxyClasses (make (map (* Class) (* Class))))
+
+(go/func testProxyClassFor
+  "testProxyClassFor is ProxyClassFor's stand-in: one class per first interface.\n"
+  ^{:tag (* Class)} [^{:tag (* RefArray)} interfaces]
+  (let [i (assert (* Class) (aget (.-A interfaces) 0))
+        (values old ok) (aget testProxyClasses i)]
+    (when ok (return old))
+    (let [info (addr (lit ClassInfo :Name (+ "jdk.proxy1.$Proxy" (.-Name (.Info i))) :Kind KindClass
+                          :Modifiers (bit-or AccPublic AccFinal) :Super Proxy_class
+                          :Interfaces (lit (slice (* Class)) i) :Go "test.Proxy"))
+          c (DefineDynamic info)]
+      (set! (.-Ctors info)
+            (lit (slice CtorInfo)
+              (lit CtorInfo :Params (lit (slice (* Class)) InvocationHandler_class) :Modifiers AccPublic
+                   :New (fn ^any [^{:tag (slice any)} args]
+                          (return (addr (lit testProxy :cls c :F (lit (slice any) (aget args 0)))))))))
+      (RegisterProxyClass c)
+      (aset testProxyClasses i c)
+      c)))
+
+(go/func TestProxy [^{:tag (* testing/T)} t]
+  (let [saved ProxyClassFor
+        ifaces (RefArrayOf Class_class testShape_class)
+        h (addr (lit testInvHandler :name "h"))
+        h2 (addr (lit testInvHandler :name "h2"))]
+    (defer ((fn [] (set! ProxyClassFor saved))))
+    ;; a world without the evaluator: as before
+    (set! ProxyClassFor nil)
+    (when (!= (thrown (fn [] (Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O nil ifaces h))) "java.lang.reflect.Proxy")
+      (.Errorf t "newProxyInstance without the evaluator: not UnsupportedOperationException"))
+    (when (!= (thrown (fn [] (Proxy_GetProxyClass_ClassLoader_Class1__Class nil ifaces))) "java.lang.reflect.Proxy")
+      (.Errorf t "getProxyClass without the evaluator: not UnsupportedOperationException"))
+    (set! ProxyClassFor testProxyClassFor)
+    (let [p (Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O nil ifaces h)
+          c (GetClass p)]
+      (when (not (Proxy_IsProxyClass_Class__Z c)) (.Errorf t "isProxyClass of a proxy's class: false"))
+      (when (Proxy_IsProxyClass_Class__Z String_class) (.Errorf t "isProxyClass of String: true"))
+      (when (!= (Proxy_GetProxyClass_ClassLoader_Class1__Class nil ifaces) c) (.Errorf t "getProxyClass: another class"))
+      (when (!= (Proxy_GetInvocationHandler_O__InvocationHandler p) h) (.Errorf t "getInvocationHandler: not h"))
+      (when (not (.IsInstance_O__Z Proxy_class p)) (.Errorf t "a proxy is not a Proxy"))
+      (when (not (.IsAssignableFrom_Class__Z Serializable_class Proxy_class)) (.Errorf t "Proxy is not Serializable"))
+      (when (!= (thrown (fn [] (Proxy_GetInvocationHandler_O__InvocationHandler (Str "x")))) "not a proxy instance")
+        (.Errorf t "getInvocationHandler of a String: not IllegalArgumentException"))
+      (when (== (thrown (fn [] (Proxy_NewProxyInstance_ClassLoader_Class1_InvocationHandler__O nil ifaces nil))) "")
+        (.Errorf t "newProxyInstance with a null handler: no exception"))
+      ;; Proxy's serial form: serialVersionUID and the protected field h, read and written by reflection
+      (let [uid (.GetDeclaredField_String__Field Proxy_class (Str "serialVersionUID"))
+            f (.GetDeclaredField_String__Field Proxy_class (Str "h"))]
+        (.SetAccessible_Z__V uid true)
+        (.SetAccessible_Z__V f true)
+        (let [(values v _) (Unbox Prim_long (.Get_O__O uid nil))]
+          (when (!= v (conv int64 -2222568056686623797)) (.Errorf t "Proxy's serialVersionUID: %v" v)))
+        (when (!= (.GetModifiers__I f) AccProtected) (.Errorf t "h's modifiers: %d" (.GetModifiers__I f)))
+        (when (!= (.Get_O__O f p) h) (.Errorf t "h read by reflection: not h"))
+        (.Set_O_O__V f p h2)
+        (when (!= (Proxy_GetInvocationHandler_O__InvocationHandler p) h2) (.Errorf t "h written by reflection: not h2"))))))

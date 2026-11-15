@@ -209,6 +209,13 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; annotations (§4.4), kept as data for the emitter: [{:type desc :visible bool :values ...}]
 
+(def ^:dynamic *lenient*
+  "When true, an annotation whose type or values cannot be resolved (a type outside the world, an
+  undeclared fact of the edge) is left out of annotations-now instead of failing: the run-time
+  annotations' encoder (arbace.classes.annot, F14) records what resolves."
+  false)
+
+
 (defn- retention [n]
   (if-let [d (decl n)]
     (let [r (some (fn [[k v]] (when (and (symbol? k) (= "java/lang/annotation/Retention"
@@ -234,7 +241,7 @@
 (defn- ann-value [scope desc v]
   (cond
     (t/array? desc)
-    {:array (mapv #(ann-value scope (t/elem-type desc) %) (if (vector? v) v [v]))}
+    {:array (mapv #(ann-value scope (t/elem-type desc) %) (if (vector? v) v [v])) :desc (t/elem-type desc)}
 
     (and (seq? v) (symbol? (first v)))      ; nested annotation (B {:k v})
     (let [an (or (resolve-class-sym scope (first v)) (fail (str "Unknown annotation: " (first v))))]
@@ -249,7 +256,12 @@
     nil
 
     (= desc "Ljava/lang/Class;")
-    {:class (type-desc scope v)}
+    ;; a primitive class as the converter writes it, Integer/TYPE (int.class), Void/TYPE
+    {:class (or (when (and (symbol? v) (= "TYPE" (name v)))
+                  ({"Boolean" "Z" "Byte" "B" "Character" "C" "Short" "S" "Integer" "I" "Long" "J"
+                    "Float" "F" "Double" "D" "Void" "V"}
+                   (str/replace (str (namespace v)) #"^java\.lang\." "")))
+                (type-desc scope v))}
 
     (and (symbol? v) (namespace v) (t/class-desc? desc) (not= desc t/string-desc)
          (let [en (t/desc->internal desc)] (has? (:flags (env/info en)) Opcodes/ACC_ENUM)))
@@ -294,7 +306,9 @@
   "Declaration annotations in metadata m for declaration context `context` (an ElementType
   name): those without @Target or whose @Target includes it."
   [scope m context]
-  (delay (vec (filter #(let [ts (annotation-targets (t/desc->internal (:type %)))]
+  (delay (vec (filter #(let [ts (if *lenient*
+                                  (try (annotation-targets (t/desc->internal (:type %))) (catch Exception _ nil))
+                                  (annotation-targets (t/desc->internal (:type %))))]
                          (or (nil? ts) (ts context)
                              ;; an annotation interface is a type too
                              (and (= context "ANNOTATION_TYPE") (ts "TYPE"))))
@@ -344,20 +358,34 @@
                                bounds))))
                   tps)))))
 
+(defn- annotation-now [scope k v]
+  (let [n (or (resolve-class-sym scope k) (fail (str "Unknown annotation type: " k)))
+        r (retention n)]
+    (when (not= r :source)
+      {:type (t/internal->desc n)
+       :visible (= r :runtime)
+       :values (cond
+                 (true? v) {}
+                 (map? v) (into {} (for [[ek ev] v]
+                                     [(name ek) (ann-value scope (element-type n (name ek)) ev)]))
+                 :else {"value" (ann-value scope (element-type n "value") v)})})))
+
 (defn annotations-now
   [scope m]
   (vec (for [[k v] m
              :when (symbol? k)
-             :let [n (or (resolve-class-sym scope k) (fail (str "Unknown annotation type: " k)))
-                   r (retention n)]
-             :when (not= r :source)]
-         {:type (t/internal->desc n)
-          :visible (= r :runtime)
-          :values (cond
-                    (true? v) {}
-                    (map? v) (into {} (for [[ek ev] v]
-                                        [(name ek) (ann-value scope (element-type n (name ek)) ev)]))
-                    :else {"value" (ann-value scope (element-type n "value") v)})})))
+             :let [a (if *lenient*
+                       (try (annotation-now scope k v) (catch Exception _ nil))
+                       (annotation-now scope k v))]
+             :when a]
+         a)))
+
+(defn element-default
+  "The analyzed default (ann-value's form) of annotation element method mm (its :default,
+  §4.12), or nil when it has none."
+  [mm]
+  (when (:has-default mm)
+    (ann-value (:scope mm) (second (t/parse-method-desc (:desc mm))) (:default mm))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; declaring classes
@@ -2392,6 +2420,46 @@
 
 (declare type-arg-anns code-type-anns)
 
+;; jrt's java.lang.invoke (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F15 (java.lang.invoke)"): where
+;; the JVM links a signature polymorphic call of MethodHandle by its descriptor and gives MethodHandles.lookup()
+;; its caller's class, the Go build calls jdk.internal.jrt.Invokers (its header), when the world has it: the
+;; interpreter and j2g translate the calls below as any other static call.
+
+(def ^:private invokers "jdk/internal/jrt/Invokers")
+
+(defn- invokers? [] (some? (env/info invokers)))
+
+(defn- invokers-method [mname desc]
+  (or (first (filter #(= desc (:desc %)) (env/member-methods invokers mname)))
+      (fail (str "No method " mname desc " in jdk.internal.jrt.Invokers"))))
+
+(defn- invokers-call
+  "(R) mh.invokeExact(a...) as Invokers.invokeExactR(mh, R.class, new Class[] {A...}, new Object[] {a...}), R
+  the return type's kind (L: Object, cast to R); invoke likewise; nil when the call is not MethodHandle's or the
+  world has no Invokers."
+  [actx owner mname target ps ret args]
+  (when (and (= owner "java/lang/invoke/MethodHandle") (#{"invokeExact" "invoke"} mname) (invokers?))
+    (let [k (if (or (t/prim? ret) (= ret "V")) ret "L")
+          m (invokers-method (str mname k)
+                             (str "(Ljava/lang/invoke/MethodHandle;Ljava/lang/Class;[Ljava/lang/Class;[Ljava/lang/Object;)"
+                                  (if (= k "L") t/object-desc ret)))
+          classes {:op :array-init :type "[Ljava/lang/Class;" :elems (mapv #(class-lit actx %) ps)}
+          objects {:op :array-init :type "[Ljava/lang/Object;" :elems (mapv #(convert-node % t/object-desc) args)}
+          node (invoke-node actx nil (t/internal->desc invokers) m nil
+                            [(convert-node target "Ljava/lang/invoke/MethodHandle;") (class-lit actx ret) classes objects]
+                            false)]
+      (if (and (= k "L") (not= ret t/object-desc))
+        {:op :cast :class ret :expr node :type ret}
+        node))))
+
+(defn- invokers-lookup
+  "MethodHandles.lookup() in class C as Invokers.lookup(C.class), when the world has Invokers."
+  [actx cn mname args]
+  (when (and (= cn "java/lang/invoke/MethodHandles") (= mname "lookup") (empty? args) (invokers?))
+    (invoke-node actx nil (t/internal->desc invokers)
+                 (invokers-method "lookup" "(Ljava/lang/Class;)Ljava/lang/invoke/MethodHandles$Lookup;")
+                 nil [(class-lit actx (t/internal->desc (:class actx)))] false)))
+
 (defn analyze-method-call
   "(.name target args) where target is a node of static type `tt`."
   [actx target mname args & {:keys [special param-tags owner-override ret-tag type-args] :as opts}]
@@ -2427,9 +2495,11 @@
           (let [ps (if param-tags (mapv #(actx-desc actx %) param-tags)
                        (mapv #(value-type (:type %)) arg-nodes))
                 ret (if ret-tag (actx-desc actx ret-tag) t/object-desc)
-                desc (t/method-desc ps ret)]
-            {:op :invoke :kind :virtual :owner (:owner poly) :itf false :name mname :desc desc
-             :target target :args (mapv #(convert-node %1 %2) arg-nodes ps) :type ret})
+                desc (t/method-desc ps ret)
+                args (mapv #(convert-node %1 %2) arg-nodes ps)]
+            (or (invokers-call actx (:owner poly) mname target ps ret args)
+                {:op :invoke :kind :virtual :owner (:owner poly) :itf false :name mname :desc desc
+                 :target target :args args :type ret}))
           (let [[m va] (if (and (:clojure actx) (not special) (nil? param-tags))
                          (clj-select cands arg-nodes :instance mname cn)
                          (select-method actx cands arg-nodes (str "method " mname) param-tags))]
@@ -2439,6 +2509,8 @@
 
 (defn analyze-static-call [actx cn mname args & {:keys [param-tags]}]
   (let [arg-nodes (mapv #(analyze actx %) args)]
+    (or
+    (invokers-lookup actx cn mname args)
     (or-reflect
       actx
       #(let [cands (static-candidates (:class actx) cn mname)
@@ -2461,7 +2533,7 @@
       (fn [why]
         (reflection-warning actx (str "call to static method " mname " on " (str/replace cn "/" ".")) why)
         (reflective-node nil "invokeStaticMethod" "(Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
-                         [(class-lit actx (t/internal->desc cn)) (const-node t/string-desc mname) (objects arg-nodes)])))))
+                         [(class-lit actx (t/internal->desc cn)) (const-node t/string-desc mname) (objects arg-nodes)]))))))
 
 (declare analyze-field-access*)
 

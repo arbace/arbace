@@ -1,6 +1,6 @@
 # Agenda
 
-The current state of the work (as of 2026-11-09). This file is rewritten as things change. For the history, see
+The current state of the work (as of 2026-11-10). This file is rewritten as things change. For the history, see
 [JOURNAL.md](JOURNAL.md) (since 2026-11-07), the journals at the tags
 [`arbace-reaps-4-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-4-crops-v1/doc/JOURNAL.md)
 (2026-11-01 to 2026-11-07),
@@ -105,7 +105,20 @@ Six crops are above 90 on all three. What the others still need:
   serialization JCS167, the test library JCS330-JCS339) land with tonight's conversion; their gains count only once night
   11 records the whole corpus. Next: F15 (java.lang.invoke, `java-invoke`, for the next Java night), JCV11 (b) (the print
   cell judged by the round trip's own checks, class files a sub-level), the rest of
-  [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking.
+  [classes/JAVA-DEFERRED-TRIAGE.md](classes/JAVA-DEFERRED-TRIAGE.md)'s ranking. Independence 59.7: read, eval, AOT and print
+  0.5 while the platform is the JDK build's (the user's ruling, 2026-11-09); `java-indep` (JCS341-JCS343 built, for the
+  11-11 merge) measures the own platform (`bin/javac-vendor classes modules`). The user decided JCS359 (a) staged, JCS360 (a),
+  JCS362-JCS378 as recommended and JCV10 (b) (2026-11-10). Stage 1's tooling is on `jcs359-s1` (from `java-indep`): the build's
+  configuration as data, `jdk/javac/platform-build.edn` (JCS362 (a)); `classes modules --jobs N`; the known file
+  `jdk/javac/platform-own-known.edn` (JCS360 (a), 12 classes); the controls. Stages 2-3's day parts are on `jcs359-s2` (2026-11-11): `bin/javac-vendor gensrc`, the 16 modules' generated
+  sources by the build's own tools on javac's tool, 2,305 of 2,307 the build's byte for byte (2 known), the two `gcc -E` ones by
+  repr/c (JCS369 (a)); `descriptors`, the 68 module descriptors as the image holds them, 67 equal and java.base known
+  (ModuleHashes, JCS364 (a)); JCS389-JCS392 proposed. Next: stage 1's measure of all 68 modules on night 15 (JCS374 (a);
+  `.tmp/night13/slots/jcs359.sh`, which then runs stages 2-3 from its outputs), stage 4's `platform --own` and switch. The
+  score moves at stages 4-5: Java to 99.7.
+  P2 by day on `java-p2` (2026-11-11; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: P2 (by day)"): RecordComponent
+  (slice 5), the classes made at run time deserializable (slice 8: Clojure's `serialization`), the platform logging bean
+  (JCS281 (b)); its night is night 17 (commands in the section), its proposals JCS384-JCS388.
 - **C++** (completeness, independence): read 1,182 and print 1,665 by design are most of the gap (96.8 without them); the
   print cell is on the own round trip on `cpp-print-own` (CP243 (a): the records made by day, print 48.3 → 99.5, the judge
   0.735 → 0.907; CP352 fixes the five reader gaps of the 15 forms-differ on `cpp-cp352`: 10 left, the dg-error files). Independence: the
@@ -379,6 +392,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   `review-fix-1`: review 1111's eight findings (oi's :init-order and OC216's annotations, Haskell's guard givens and --o0-layout,
   hsi's Float FMA, RF19's key and attribute precedence, LLVM's section rule and renames) fixed and proven; its night: RF19's
   rsi-build makes core-attrs.edn again (23 min, 2.3 GB).
+- repr/java: `java-nread-g1` (the native provider's two fixes from Ghidra's G1 read proof: a void method's reference against
+  Supplier, an inherited static field through two static on-demand imports; samples `MrefVoid`, `Star*`). Its night: the four
+  provenance writers (the reader hash moved), nojavac-check and attr-check over jdk, javac and jdk26u, `bin/repr-java check --jdk`.
 
 - Assembly: `asm-ax1` (AX1's first slice, doc/asm/AMD64-SURVEY.md, "As built: AX1"): repr/asm reads GNU as's AT&T text into
   assembly forms and prints it back byte for byte; musl 32/32, `MC/AsmParser` 139/157 and `MC/X86` 464/621 pass, the rest classed
@@ -544,6 +560,33 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   (AXS70 (b): 20,531 byte strings equal to arbace.asm.amd64.decode's, none different, 62,457 EVEX/XOP/REX2 deferred). x86i-check: 43
   programs, 42 equal to the CPU (cpuid `:cpuid`), 43 of 43 step-equal; 23 controls. Proposed AXS82-AXS88. Next: AX5.6's musl
   harnesses (AXS88 (a)).
+- Ghidra G1's run half (2026-11-10, branch `ghidra-run` from `mac/java-p1`; GH4 (ii) approved): A4 (a closed-world
+  `java.util.ServiceLoader`, the registry j2g generates from META-INF/services and `jdk/provides.txt`), A5 (resources of
+  several jars, class files' URLs, ClassLoader's resource methods in translated code), A6 (native-image metadata and constant
+  reflective sites as roots), A7 (refusals stubbed or dropped, `report.edn`'s `:refused`); proved light by day, built and run
+  at night (the commands in J2G-SPEC's sections and the journal's entry): the conversion, the build, the four samples
+  `services`, `resources`, `reflect-meta`, `refusals`. A1-A3, A11 on `ghidra-read`.
+- Ghidra G1b (2026-11-11, branch `ghidra-g1b` on `java-night` with `java-p1`, `ghidra-run`, `ghidra-read`, `java-nread-g1` merged):
+  A9 (`bin/jrt deflate`: 171 of 171 equal to the JDK's, the essential step `jrt-deflate`), A10's fixture (`test/programs/junit4`: JUnit
+  4.13.2 and hamcrest-core 1.3 from pinned sources with two variants, `bin/java-project fetch` and `:patches`), A13 (`program.edn
+  :properties`, j2g `--property`), `:java`'s resources a directory a module; A12 is the demo's plan; A8 after the night's analysis. Night
+  18: `.tmp/night18/slots/` (the samples, SoftwareModeling's nread, SleighCompile built and run over the 150 specs, the tests, the ANTLR
+  tool); by hand, the oracle slot (the JDK's javac on hamcrest-core's two calls, the junit4 fixture on the JDK).
+- repr/java: `java-nread-g1` (the native provider's two fixes from Ghidra's G1 read proof: a void method's reference against
+  Supplier, an inherited static field through two static on-demand imports; samples `MrefVoid`, `Star*`). Its night: the four
+  provenance writers (the reader hash moved), nojavac-check and attr-check over jdk, javac and jdk26u, `bin/repr-java check --jdk`.
+
+- Ghidra G1's run half (2026-11-10, branch `ghidra-run` from `mac/java-p1`; GH4 (ii) approved): A4 (a closed-world
+  `java.util.ServiceLoader`, the registry j2g generates from META-INF/services and `jdk/provides.txt`), A5 (resources of
+  several jars, class files' URLs, ClassLoader's resource methods in translated code), A6 (native-image metadata and constant
+  reflective sites as roots), A7 (refusals stubbed or dropped, `report.edn`'s `:refused`); proved light by day, built and run
+  at night (the commands in J2G-SPEC's sections and the journal's entry): the conversion, the build, the four samples
+  `services`, `resources`, `reflect-meta`, `refusals`. A1-A3, A11 on `ghidra-read`.
+- Ghidra (G1, the demo repository `arbace-ghidra`): `ghidra-read` (A1, A2, A3, A11: `bin/java-project`, `program.edn`'s
+  `:java`, doc/go/BUILD.md "Java sources by module"; the gate's `java-project` step), `ghidra-run` (A4-A7). Night: the
+  demo's `bin/read-g1 --check nread --modules SoftwareModeling` (about 9 GiB); `test/programs/java-project`'s first build
+  (`--build-program --check java-project`, a whole-program j2g). Open: the two native-provider findings of the read half
+  (the journal, 2026-11-10).
 
 ## Decided, not built yet
 
@@ -555,7 +598,11 @@ items below are the ones whose work is still ahead or tied to a night.
   [classes/JAVA-CONFORMANCE-SURVEY.md](classes/JAVA-CONFORMANCE-SURVEY.md)): JCS169 after serialization's slices 2-4;
   F10b's asynchronous channels after the night's records; JCS190's flip after the night's comparison; JCS231 after F9;
   JCS261 waits; JCS274 (`:nio`'s rest reclassified after the record); JCV11 (b) (reopens RPS9 (a)); JCV12 (b); JCS180
-  later; F15 (JCS350-JCS356) for the next Java night.
+  later; F15 (JCS350-JCS356) for the next Java night. JCS370-JCS378 as recommended and JCV10 (b) (the user, 2026-11-10):
+  the record first (S1), then the port batches P1 (night 15), P2 (night 17), P3 (night 19). P1 built by day on `java-p1`
+  (PhantomReference and the thread "Reference Handler", System.runFinalization, thread groups, the Cleaner, jar verification
+  JCS231, DGCClient jdk26u's; "As built: P1 (by day)", its night commands there; JCS379-JCS383 proposed); P2 takes
+  serialization's slices 5 and 8 (JCS383).
 - **C++** ([cpp/CPP-SURVEY.md](cpp/CPP-SURVEY.md)): `gf-cpp` (2026-11-12, "As built: gf-cpp"): cpp-s9 merged into next's tree, explicit6.C's
   explicit((T) 1.0) evaluated (floating literals in eval-text), the runtime part of cpp-check-essential as recorded; its samples part,
   cpp-check.samples-runtime and dg-error-own whole are night commands; CP381 (the essential step's memory; CP379 on its branch) proposed. CP243 (a) (`cpp-print-own`) and CP352 (`cpp-cp352`, the five valid-code reader

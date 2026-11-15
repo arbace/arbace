@@ -454,6 +454,26 @@
       (dotimes [i (.size ks)]
         (when-let [impl (impl-of cx d (.get ks i))] (reach* st impl))))))
 
+(defn- serial-reach!
+  "JCS167 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: JCS167 (write-ahead)\"): what
+  serialization calls by reflection on an object of instantiated class d, when serialization is in
+  the world (m/serialization?) and d is Serializable: the serialization hooks (m/serial-hook?:
+  writeObject, readObject, readObjectNoData, writeReplace, readResolve) each class of d's
+  superclass chain declares, and the no-argument constructor of d's first superclass that is not
+  Serializable, which jrt's allocation runs (m/serial-super); an Externalizable's public
+  no-argument constructor is a root of the REPL's world already, and its readExternal and
+  writeExternal virtual calls of ObjectInputStream's and ObjectOutputStream's code."
+  [^State st d]
+  (when (and (m/serialization?) (.contains ^java.util.HashSet (supers-set (.-cx st) d) "java/io/Serializable"))
+    (loop [c d]
+      (when-let [cd (and c (get (.-cs st) c))]
+        (if (.contains ^java.util.HashSet (supers-set (.-cx st) c) "java/io/Serializable")
+          (do (doseq [mm (:methods cd) :when (m/serial-hook? mm)]
+                (reach* st [c (:name mm) (:desc mm)]))
+              (recur (:super cd)))
+          (when (some #(and (= "<init>" (:name %)) (= "()V" (:desc %))) (:methods cd))
+            (reach* st [c "<init>" "()V"])))))))
+
 (defn- instantiate-st
   "instantiate! in the run whose state is st."
   [^State st d]
@@ -462,7 +482,8 @@
       (.add inst d)
       (doseq [s (supertypes-of (.-cx st) d)]
         (add-to! (.-instBy st) s d))
-      (reach-impls! st d))))
+      (reach-impls! st d)
+      (serial-reach! st d))))
 
 (defmacro ^:private instantiate*
   "instantiate-st, at once (inline) for a class already instantiated."
@@ -577,6 +598,11 @@
     (or (and (= :static kind) (= "java/lang/invoke/VarHandle" owner)
              (#{"fullFence" "acquireFence" "releaseFence" "loadLoadFence" "storeStoreFence"} name))
         (and (= :static kind) (= "java/lang/invoke/MethodHandles" owner) (= "lookup" name))
+        ;; F15: the analyzer's Invokers.lookup(C.class) of a JDK class, a nil as before (code.ae's lookup-call?)
+        (and (= :static kind) (= "jdk/internal/jrt/Invokers" owner) (= "lookup" name)
+             (let [c (first (:args node))]
+               (and (= :class-lit (:op c)) (t/class-desc? (:class c))
+                    (= :jrt (nm/pkg-of (t/desc->internal (:class c)))))))
         (and (not= :static kind) (= "java/lang/invoke/VarHandle" owner)
              (let [tg (acc/unaccess (:target node))]
                (and (= :get-static (:op tg)) (vh-const? (:field tg))))))))
