@@ -5411,3 +5411,35 @@ context given, which GHC solves). Slips: the libraries' first
 round was stopped after a source edit while it ran (rerun whole on the final code); samples/synthetic ran without
 `ARBACE_MEM_GIB=2` and peaked at 7.0 GB, over the 2.5 GiB per process. Proposal HF10-P54 (the next 18 gaps, (a)). Details:
 doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P48, P50".
+
+## 2026-11-15: HF10-P54 (a) built (branch `hs-p54`, from `mac/hs-p48` 5a19578e8)
+
+By an agent (one run at a time, each process under 1.4 GiB; stage 0; no GHC, no network, no gate run). HF10-P54 (a), the 18 gaps
+hs-p48's front-end run left, as "As built: HF10-P48, P50" listed them. Read from the corpus pin's source tarball (GHC 9.14.1):
+GHC.Core.InstEnv (lookupInstEnv, pruneOverlappedMatches, check_unifiers), GHC.Core.Unify (tcUnifyTys), GHC.Tc.Instance.FunDeps
+(improveFromInstEnv), GHC.Tc.Solver.Dict, GHC.Tc.Solver.Rewrite, GHC.Rename.Expr and GHC.Rename.Pat (OverloadedLists,
+OverloadedStrings), GHC.Tc.Utils.Instantiate (newOverloadedLit), GHC.Tc.Gen.Expr (SectionL, ExplicitTuple), GHC.HsToCore.Expr
+(dsExplicitTuple), GHC.HsToCore.Match.Literal (tidyNPat, tcShortCutLit), GHC.Hs.Lit, GHC.Tc.Deriv, GHC.Tc.Deriv.Generate (show_arg,
+mk_shows_app), GHC.Tc.Utils.Monad (newDFunName), GHC.Parser.Header (getOptionsFromFile); BSD-3, already in LICENSE.md. Built in
+`arbace/repr/haskell/` (typecheck, deriv, tostg, rename): functional dependencies improving wanteds from the instances and
+overlapping instances chosen by specificity (none while a unifying instance waits on metas), an instance's unbound variables fresh
+metas and its context solved together, the generalization's reduction choosing as the solver does; constraint families reduced
+(with the let-bound implicit parameters in scope) and given families reduced; givens rewritten by the given equalities; a variable
+constraint given at a class's application; OverloadedStrings in expressions and patterns, OPTIONS_GHC's `-X` flags read;
+OverloadedLists; ExtendedLiterals' sized literals and their derived Show (`shows`, as GHC, for every unlifted field);
+multi-parameter GND with GHC's dictionary function names; PostfixOperators, TupleSections, an infix type variable, RecordWildCards
+in a pattern binding. The code of the first round was written while the disk forbade every run (two WIP commits); the runs then
+found six more gaps (the generalization's reduction, OPTIONS_GHC, a string pattern at Int, derived Show's precedence, a binding's
+wanteds tried once, a shared dictionary function name) and one regression, AtomicPrimops' front end from 9 s to a timeout (the
+solver's rounds retried every failed predicate: exponential), fixed by retrying only after a unification. Results on the final
+code: the libraries 0 worse everywhere, their counts hs-p48's (ghc-internal's lib-stg 7,961 of 9,931, lib-check's facts 20,699 of
+20,891, base 6,784 of 6,785 and 582 of 1,072); the front end over testsuite-core's 506 eligible programs 500 of 501 compile (483
+before), none lost, the same 5 time out; hs-p48's 47 programs and the 18, 65 of 65 pass (64 on the own libraries, T15598 on the
+pack), 8 probes pass, 8 controls differ; samples/synthetic 60 of 63 at the 2 GiB cap (the 3 classed), hsi-essential 122 of 123
+(ffi014 classed), haskell-read-essential 51 of 51; `bin/reap` 0 problems, crops-score unchanged, keys unmoved
+(gate-key-crops-test PASS, 314c8e5b04ab). Decisions taken as recommended: HF10-P55 (b) the most specific instance without its
+pragmas, HF10-P56 (b) the solver in rounds rather than GHC's work list, HF10-P57 (b) a constraint family's evidence without its
+cast; alternatives (a) each the fuller port, recorded in the survey. Proposed: HF10-P58 (a), RebindableSyntax's bind at a polytype
+(T15598), next round. Slips: none known; the night.sh chain's disk wait (`waitdisk.sh`) took its command as its limit and looped,
+stopped and fixed before any run; the `--only` list of night.sh named bare ids, which match nothing, replaced by the full ids.
+Details: doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P54".

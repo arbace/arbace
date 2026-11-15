@@ -4504,4 +4504,129 @@ hand at the next window: `bin/repr-haskell lib-stg --ifaces own --record test/ha
   kind with no given (no program or library showed it: 0 worse). (a) check the instance head's kind when the class is
   poly-kinded; (b) leave it until a program shows it. *Recommended and taken: (b)*.
 - **HF10-P54 the next gaps** (the 18 above: constraints with fundeps or families in instance heads 5, OverloadedStrings' pattern
-  literals 2, then one each): (a) **port them in that order**, as P50; (b) leave them on the pack. *Recommended: (a)*, next round.
+  literals 2, then one each): (a) **port them in that order**, as P50; (b) leave them on the pack. *Recommended: (a)*, next round. (Built (a), 2026-11-15: "As built: HF10-P54".)
+
+## As built: HF10-P54 (2026-11-15, branch `hs-p54`, from `mac/hs-p48` 5a19578e8)
+
+By an agent during the day (one run at a time, each process under 1.4 GiB; stage 0; no GHC, no gate run, no network). HF10-P54
+(a), the next gaps as proposed in "As built: HF10-P48, P50", built in two rounds: the code of the first (the two WIP commits,
+written while `df /` forbade every run), then what its first runs found. Read from GHC 9.14.1's source tarball (the corpus
+pin): `compiler/GHC/Core/InstEnv.hs` (lookupInstEnv, pruneOverlappedMatches, instEnvMatchesAndUnifiers' check_unifiers, Note
+[Overlapping instances]), `compiler/GHC/Core/Unify.hs` (tcUnifyTys, MaybeApart), `compiler/GHC/Tc/Instance/FunDeps.hs`
+(improveFromInstEnv), `compiler/GHC/Tc/Solver/Dict.hs` (the improvement from the instances), `compiler/GHC/Tc/Solver/Rewrite.hs`
+(the inert givens rewritten by the given equalities), `compiler/GHC/Rename/Expr.hs` (rnExpr of ExplicitList and of HsString under
+OverloadedLists and OverloadedStrings, Note [Empty lists]), `compiler/GHC/Rename/Pat.hs` (rnPatAndThen's LitPat and ListPat, Note
+[Desugaring overloaded list patterns]), `compiler/GHC/Tc/Utils/Instantiate.hs` (newOverloadedLit), `compiler/GHC/Tc/Gen/Expr.hs`
+(SectionL's postfix_ops, ExplicitTuple's missing components), `compiler/GHC/HsToCore/Expr.hs` (dsExplicitTuple),
+`compiler/GHC/HsToCore/Match/Literal.hs` (tidyNPat's isStringTy, tcShortCutLit's go_string), `compiler/GHC/Hs/Lit.hs` (HsInt8Prim
+.. HsWord32Prim), `compiler/GHC/Tc/Deriv.hs` (deriveTyData of a multi-parameter class), `compiler/GHC/Tc/Deriv/Generate.hs`
+(gen_Show_binds' show_arg: `shows` of an unlifted field's box, mk_shows_app; boxConTbl, postfixModTbl), `compiler/GHC/Tc/Utils/Monad.hs`
+(newDFunName, getDFunTyKey), `compiler/GHC/Driver/Pipeline/Execute.hs` and `compiler/GHC/Parser/Header.hs` (getOptionsFromFile: an
+OPTIONS_GHC pragma's flags); BSD-3-Clause, the notice already in the files and LICENSE.md.
+
+**The 18 gaps** (`typecheck.ae`; `deriv.ae` for Show; `tostg.ae` for the sized literals; `rename.ae` for OPTIONS_GHC):
+
+- **Functional dependencies and overlapping instances in the solver** (T5759, tcrun028, testeq2, tcrun031): a wanted of a class
+  with dependencies is improved from the instances before an instance is chosen (improveFromInstEnv, one function now for the
+  wanteds and the instances' contexts); the instance is chosen as lookupInstEnv does: the instances whose heads match, those a
+  more specific one overlaps pruned, and none while the wanted has metas and an instance that does not match unifies with it
+  (tcUnifyTys, a stuck family application MaybeApart; its choice waits); a meta as the first argument when the class has an
+  instance whose head is a variable there (testeq2's `TypeCast ?b HTrue` by `TypeCast' () a b => TypeCast a b`); an instance's
+  variables its head does not bind are fresh metas (T5759's `b` of `Container a b`), its context solved together, each improved
+  by the others' solutions (HF10-P56); the top-level wanteds, a checked binding's wanteds with its givens and an instance's context
+  each in rounds, again only after a round unified a meta. The generalization's simplification (reduce-by-instance) chooses as
+  the solver does: it took the first matching instance and left the unbound variables rigid (T5759's `Num (Cont Integer)` by
+  `instance (Container a b, ...) => Num a`, tcrun028's `ConcatPS`).
+- **Constraint families** (T17104, tcrun043): a type family of constraints applied is its reduction's predicates (a tuple's the
+  constraint tuple's constructor, `CUnit` for `()`), solved with the `let ?x = e` bindings in scope when the wanted was made (T17104's
+  `F Int = (?x :: String)`); a given family application reduced gives its predicates (a component selected by `$p<i>CTuple<n>`);
+  the family's coercion is erased (HF10-P57).
+- **Givens rewritten** (tcrun039, T3500b, tcrun046): a given whose arguments the given equalities rewrite or a family reduces
+  solves the wanted they equal (`Read b` with `b ~ [a]`; `Show (Id (f (Mu f)))`); a variable constraint given at a class's
+  application is that class's given (tcrun046's `MkT :: a => T a` at `T (Ord x)`).
+- **OverloadedStrings** (T3126, T3382): a string literal is `fromString` of it at a fresh type with IsString, the String literal itself
+  at String (tcShortCutLit); a string pattern an NPat, `(==)` at the scrutinee's type, the string's own pattern at String (tidyNPat);
+  an OPTIONS_GHC pragma's `-X` flags are the module's extensions too (T3382's `{-# OPTIONS_GHC -XOverloadedStrings #-}` was ignored:
+  no library has one), and a string pattern at Int keeps its `(==)` (it was matched as a literal and always matched).
+- **OverloadedLists** (Monoid_ByteArray): an explicit list `fromListN n [...]`, `[]` too; a list pattern the view `toList -> [...]`;
+  only when IsList's interface is loaded.
+- **Sized primitive types** (ShowPrim): ExtendedLiterals' `1#Int8 .. 2#Word32` literals (LitNumInt8 ..), derived Show of an
+  `Int8# .. Word64#` field boxed by `I8# .. W64#` with its suffix, and every unlifted field shown by `shows` (precedence 0, as
+  mk_shows_app: `-9223372036854775808#Int64` unparenthesized; `showsPrec 11` before).
+- **One each**: a multi-parameter class derived through GND (tcrun031's `deriving (C [a])`; the dictionary function named by
+  every head argument, `$fConvBoolAge`, as newDFunName: two derived instances of one class shared `$fConvAge`); PostfixOperators'
+  `(e op)` as `op e` (DsPostfixOperators); TupleSections (tcrun041's `(,True)`); a type variable used infix (tcrun034's ``a `m` b``);
+  RecordWildCards' `C {..}` in a pattern binding binds its fields (dsrun015).
+- **Left**: T15598 (RebindableSyntax's `do` with a rank-n `(>>=)`: HF10-P58), on the pack.
+
+**The libraries** (`.tmp/p54/chain-libs.sh`, as the gate's steps run them, one at a time, each on the pools made before it; the
+final code's run, the third: the first on the WIP code, the second on the first round's fixes):
+
+| step | result | before (hs-p48) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 3 better; facts 20,699 of 20,891 | same | 1.14 GB, 13m36 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 7,961 of 9,931 bindings equal, 0 worse, 36 better | same | 1.33 GB, 15m23 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.84 GB, 4m56 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.86 GB, 4m32 |
+| deepseq, array, stm (lib-check, lib-stg) | 0 worse each; facts 202/211, 388/388, 222/222; controls differ | same | 0.67-0.76 GB |
+
+No library declares a functional dependency the solver now improves differently, an overlapping instance, a constraint family, an
+OPTIONS_GHC `-X` flag or an overloaded literal: the counts are hs-p48's, binding for binding.
+
+**The programs** (the native front end over testsuite-core's 506 eligible programs on the final libraries, `.tmp/p54/front-all.sh`,
+before hs-p48's run of the same plan):
+
+| | before (hs-p48's code) | after |
+|---|---|---|
+| compile (of 501; the same 5 time out: dsrun011, T5913, TcCoercible, tcrun030, tcrun032) | 483 | **500** |
+| type errors | 18 | 1 (T15598, HF10-P58) |
+| newly compiling | | the 17 of the 18 but T15598: DsPostfixOperators, T3126, T3382, dsrun015, Monoid_ByteArray, ShowPrim, T17104, T3500b, T5759, tcrun028, tcrun031, tcrun034, tcrun039, tcrun041, tcrun043, tcrun046, testeq2 |
+| compiled before, failing now | | none (AtomicPrimops timed out in the second round's run, 9 s to over 4 minutes: HF10-P56's rounds, fixed) |
+
+The runs found, beyond the WIP code: the generalization's instance reduction (T5759, tcrun028: an instance's unbound context
+variables rigid), OPTIONS_GHC's `-X` flags ignored and a string pattern at Int matched as a literal (T3382), derived Show's
+`showsPrec 11` of an unlifted field (ShowPrim), a checked binding's wanteds tried once (the probe P54fd), two derived instances of a
+multi-parameter class with one dictionary function name (the probe P54gnd), and the rounds' exponential cost (AtomicPrimops).
+
+### Checks
+
+| check | result |
+|---|---|
+| the libraries (the table) | exit 0 each, 0 worse; controls differ as they must |
+| the front end over the 506 (the table) | 500 of 501 compile (483 before), none lost; 29m57, 1.25 GB |
+| `bin/hsi own-verdicts --record` | unchanged: 587 of 908 by their own verdict, 40 pending, 10 threaded-only |
+| `bin/hsi check --libs own --corpus testsuite-core --only` hs-p48's 47 and the 18 (65 programs) | exit 0; 65 of 65 pass, 64 on the own libraries (T15598 on the pack, its own front end failing); 0 unclassed; arr001's control fails as it must (1m33, 1.01 GB) |
+| the probes `.tmp/p54/t` (P54fd, P54ovl, P54tf, P54gnd, P54str, P54sect, P54given, P54lists), each by its own expected output through `.tmp/p54/ps-run.sh` | 8 of 8 pass; 8 controls (a probe's output against the next one's expected, P54ovl's against P54tf's among them) differ |
+| `bin/hsi check --libs own --corpus samples,synthetic` (own deepseq, array, stm; `ARBACE_MEM_GIB=2`) | exit 0; 63 programs, 60 pass, AsyncRerun in `:async-revert`, Loop and runtime-deep in `:light-cap` (the 2 GiB cap: hs-p48's 62 ran without it); 0 unclassed; controls fail as they must; 3m05, 1.19 GB |
+| hsi-essential's command (`ARBACE_MEM_GIB=2`, 2 jobs) | exit 0: own-verdicts current; 123 programs, 122 pass, ffi014 in `:threaded-way`; 0 unclassed; controls fail as they must; 21m50, 0.96 GB |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at the tree and text levels, 8 and 7 controls differ; 3m15, 0.69 GB |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged (no record moved) |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` (`ARBACE_HOST_EXE` stage 0) | PASS; 314c8e5b04ab... (unmoved): the changed paths are `arbace/repr/haskell/` alone |
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night), the libraries' records (`lib-stg
+--record`: hs-p48's 36 better modules in ghc-internal and 10 in base, by hand at the next window).
+
+### Proposals
+
+- **HF10-P55 overlapping instances without their pragmas** (taken). GHC chooses among matching instances by specificity and then
+  checks the pragmas (OVERLAPPING, OVERLAPPABLE, OVERLAPS, INCOHERENT; `-XOverlappingInstances`) and reports an overlap the pragmas do
+  not allow. Here the most specific one is taken and the pragmas are not read. (a) read the pragmas into the instance table and
+  report the disallowed overlaps as GHC; (b) take the most specific, trusting that GHC accepted the program (every corpus program
+  and library was). *Recommended and taken: (b)*: the same choice on every accepted program; INCOHERENT's choice among unifiers (an
+  incoherent instance may be committed to while another unifies) is not modelled and no program showed one.
+- **HF10-P56 the solver in rounds, not GHC's work list** (taken). GHC's solver keeps a work list and an inert set
+  (GHC.Tc.Solver.Monad, InertSet): a constraint kicked out when an inert equality rewrites it. Here the wanteds are tried in rounds,
+  again only after a round unified a meta, at most 9 for an instance's context. (a) port the work list and the kick-out; (b) the
+  rounds. *Recommended and taken: (b)*: the same solutions on every program and library seen, 0 worse; trying every failed
+  predicate again in each round was exponential in the instances' depth (AtomicPrimops' front end 9 s to over 4 minutes in the
+  first round's run), so a round follows only a unification and an instance's context without metas is one pass.
+- **HF10-P57 a constraint family's evidence without its cast** (taken). GHC's evidence for a wanted `F Int` is the reduction's
+  dictionary cast by the family's coercion (`d |> co`, erased by CorePrep). Here the dictionary itself. (a) carry the cast in Core;
+  (b) the dictionary. *Recommended and taken: (b)*: STG has no casts, so the programs' STG are the same; no library declares a
+  constraint family.
+- **HF10-P58 RebindableSyntax's bind at a polytype** (T15598). `do { _ <- e; prog }` with `(>>=) = InfDo :: String -> (forall a. a
+  -> InfDo) -> InfDo`: GHC's tcSyntaxOp checks the continuation against the bind's polytype argument (SynFun, SynRho), here the bind
+  is typed at `m a -> (a -> m b) -> m b` and fails (`[a]` against InfDo). (a) port tcSyntaxOp's shapes for a rebound `>>=`,
+  `>>`, `fail`; (b) leave it on the pack. *Recommended: (a)*, next round (the one testsuite-core program the front end does not
+  compile but the 5 that time out).
