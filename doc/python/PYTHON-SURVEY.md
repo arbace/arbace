@@ -6828,3 +6828,34 @@ GOGC=50 PYI_AOT_LIB_JOBS=4 PYI_LIB_TEST_JOBS=4 PYI_AOT_LIB_BATCH=40 \
   (`.tmp/q293/t/`, against python3 3.14.10, a mutated reference the control; base FAIL, head PASS): the events around
   _pyio (pb), compile and FunctionType as the asyncio console uses them (pc), test_skip, test_method_with_c_function and
   settrace's test_reentrancy (ptf), test_repl's three (prr); the replaced hooks' `__del__` compiled (pe).
+
+## As built: 297, a suspended generator closed at its call's return (2026-11-15, the Mac VM, queue 297)
+
+293's DECISION 2 (a), the user's (round 37): CPython's reference counting closes a generator a call leaves suspended
+(`any(gen())`, `next(f())`) as the call drops its arguments: GeneratorExit thrown in, its finally blocks and a
+monitor's events run there. pyi gives it that moment, in `go/arbace/py/finalize.go` (genDrop, genDropped, frameHolds,
+callDropped, drainOnly) and its call sites, without a full collection of its own:
+- **The trigger, per call.** Every call counts itself in `callSeq` (callStack, AotCallV, AotCallMethodV); a generator
+  records it when made (`madeAt`). A C callable's call site compares `pendCount` (218's pendGen) before and after:
+  when it moved, or while a monitor is set, the call's generator arguments are looked at. Off that path, a load, a
+  compare and an increment per call.
+- **The escape analysis.** A candidate is a generator made by the call just before the one it is an argument of (so on
+  the value stack alone in between, never handed to another call), left suspended where its close can be seen (a
+  handler in its code, or a monitor set), not the call's value and held by nothing of the frame (fast locals, cells,
+  stack, namespace, one level into an instance's dict, a function's globals). contextmanager's `next(self.gen)` and a
+  local's `next(g)` are not candidates: they cost nothing and are closed at their death, as before.
+- **The check.** 222's: the candidate tracked, its address kept, the call's own references gone first (callStack's frame
+  returned, its caller reads `t.drop`; a compiled call clears its variadic array and waits for the compiled code's next
+  call or its return, since the generated code keeps the argument in a variable live across the call), then Go's
+  collection and a drain of the candidate's items alone (`drainOnly`: the other deaths the collection finds, an
+  import's module locks' weakref callbacks, are left queued, not run inside the caller's traced code). Its own tenth of
+  the wall time (`genSpent`, 222's budget left to del) and a 20 ms quiet window for Go's finalizer goroutine.
+- **goi.** Stage 0's goi keeps a returned call's slots above its stack's top (c9047d52, the REQUEST, is not in it):
+  `scrubSlots` takes 48 windows of 16 slots first, which goi clears at a call's entry; compiled, nanoseconds.
+
+Measured on the VM (`bin/pyi lib-test-all --fresh`, goi): test_sys_settrace 367 -> 371 pass (test_13_genexp x4 out of
+`:finalization`), test_sys_setprofile 27 -> 28 (test_unfinished_generator); test_generators, test_coroutines,
+test_asyncgen, test_contextlib and test_monitoring as at the base. test_20_async_for_loop passed in the runs and stays
+in `:settrace-events` until the main host's runs show it steady. `bin/pyi bench` (7 benchmarks) within the runs' spread;
+the probe `.tmp/q297/t/mb.py`: 300,000 C calls and 20,000 local next() as at the base, 2,000 any() of a dropped
+generator 1 ms -> 70 ms (a collection each, held to the budget).
