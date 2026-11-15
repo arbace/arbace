@@ -181,6 +181,13 @@
 ;; builds); a build kept from before the units existed has none, and the identity is the source key
 (def ^:private prog-hosts {:prog [:prog-units :prog-rest :gate] :javac-prog [:javac-prog-units :javac-prog-rest :javac]})
 
+(defn cpu-hosts
+  "the hosts of a CPU (B1, the user 2026-11-15: :arm64): those whose :host-ids recipe holds an :arch item; a step on one whose
+  identity is none (bin/gate's gate_host_id: this machine's CPU is none of the item's) is absent in every phase, as the oracle
+  tier's steps are where their toolchain is not"
+  [host-ids]
+  (set (for [[h items] host-ids :when (some #(and (vector? %) (= :arch (first %))) items)] h)))
+
 (defn- host-id
   "a host's identity for STEP: a string, or :pending"
   [hosts step h]
@@ -761,10 +768,11 @@
 
 (defn plan [root logs store mode rerun? & [rotation weekly?]]
   (set-counted! (str logs "/ancestors.txt"))
-  (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
+  (let [{:keys [groups steps host-ids]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
         steps (expand-parts steps)
         files (files-table (str logs "/files.sha256"))
         hosts (read-file (str logs "/hosts.edn"))
+        cpus (cpu-hosts host-ids)
         ;; the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a), §3.6): bin/gate --oracle, its :oracle steps alone (with --full,
         ;; mode full-oracle, beside --full's); an :oracle step one of whose hosts is none here is absent, not failed
         phases (cond-> (case mode ("full" "nightly" "full-oracle") #{:pre :build :essential :full} "oracle" #{:pre :build} #{:pre :build :essential})
@@ -852,6 +860,13 @@
                (let [d {:step s :name nm :kind kind :decision "absent"
                         :why (str "host " (str/join ", " (map str (filter #(= "none" (get hosts %)) (:hosts s))))
                                   " none here: the oracle tier runs where its toolchain is (ORS1 (a))")}]
+                 (-> acc (update :v conj d) (assoc-in [:by nm] d)))
+               ;; B1 (the user, 2026-11-15): a step of any phase on a CPU's host (:arm64: its :host-ids recipe an :arch item)
+               ;; whose identity is none here (another CPU) is absent likewise: no key, no run, no failure, never a pass
+               (some #(and (cpus %) (= "none" (get hosts %))) (:hosts s))
+               (let [d {:step s :name nm :kind kind :decision "absent"
+                        :why (str "host " (str/join ", " (map str (filter #(and (cpus %) (= "none" (get hosts %))) (:hosts s))))
+                                  " none here: a step of that CPU runs on it alone (test/gate/steps.edn's :host-ids :arch)")}]
                  (-> acc (update :v conj d) (assoc-in [:by nm] d)))
                :else
                (let [lines (vec (material s (expand groups (:inputs s)) files hosts cache))

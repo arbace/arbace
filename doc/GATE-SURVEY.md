@@ -5236,3 +5236,31 @@ at once (`ok_status`, its status file) and never waited. gf-gate worked around i
   - having the planner order chains so that no need crosses one. That forbids the useful cases: a light crop chain needing
     one step of the serial run.
   - a global scheduler in place of the chains. Too large for this fix.
+
+## As built: the CPU hosts, `:arm64` (batch B1, branch `b1-1115`, 2026-11-15)
+
+The user (2026-11-15, with ARS94 (a) and ARS96 (a)): the steps whose reference is an arm64 CPU's own run (queue 301's a64i-goroot,
+later a64i-arbace) must not pass on amd64 by a command that skips itself. Before, a64i-goroot's command was `case $(uname -m) in
+aarch64|arm64) bin/a64i goroot-check ;; *) echo skipped ;; esac`: on the main host a pass recorded for a check that never ran.
+
+- **The host.** `test/gate/steps.edn`'s `:host-ids` gains `:arm64 [[:arch "aarch64" "arm64"]]`. A recipe's `:arch NAME...` item
+  (`test/gate/crops.ae`'s `ops`; `gate.crops check` requires a name) makes `bin/gate`'s `gate_host_id` print `none` unless this
+  machine's CPU (`uname -m`; `GATE_HOST_ARCH` in its place, for the tests) is one of the names. On one, the identity is the hash
+  of the items' lines, `arch NAME` among them. Like any `:host-ids` host, it is written into `hosts.edn` only when a step names it.
+- **The planner.** `gate.plan/cpu-hosts` is the set of hosts whose recipe holds an `:arch` item. A step of any phase on one whose
+  identity is `none` is `absent`, as the oracle tier's steps are where their toolchain is not (ORS1 (a)): no material, no key, no
+  run, no failure, never a pass. The runner (`run_one`, `report`) handled `absent` already. A step on a host that is `none` here
+  without an `:arch` item (`:gcc` on a host without gcc) is keyed and runs outside the oracle tier, as before.
+- **The fixture.** The essential step `arm64-host` (`:hosts [:arm64]`) fails wherever it runs off arm64, so a planner that ran it on
+  amd64 would fail the gate. It is absent on the main host and passes on an arm64 host.
+- **The test.** `test/gate/arm64-host-test.bash` (in `bin/gate-tests`), 13 checks: `gate_host_id` on x86_64, aarch64 and arm64, with
+  a recipe without `:arch` as its control; the planner on a made-up table, off and on arm64, both phases, with `:gcc none` and a
+  plain step as its controls; the runner's absent status, report, and the absence of a recorded pass; the checkout's table. With
+  the rule turned off, five checks fail, as they must.
+- **Keys.** Only the steps naming `:arm64` hold its identity. `plan.ae` and `bin/gate`'s host functions are in no step's key
+  (GD3's epoch stands for the planner), so the epoch is not bumped: the change alters nothing an existing step sees.
+
+Not done here: queue 301's step (`mac/301-asm-arm64-goroot-step`) is not in this batch. When it merges, a64i-goroot declares
+`:hosts [:stage0 :go :arm64]` and its command becomes `bin/a64i goroot-check` alone. a64i-arbace does the same when it is written.
+A step that `:needs` an absent step still runs, because `ok_status` counts `absent` as done, as in the oracle tier. arm64's steps
+each declare `:arm64` themselves.
