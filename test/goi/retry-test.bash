@@ -11,11 +11,18 @@ export TMPDIR=${TMPDIR:-$root/.tmp/tmp}; mkdir -p "$TMPDIR"
 bad=0
 out=$(cd "$root" && GOI_CHECK_FAIL_ONCE=helloworld.go bin/goi check --only '^helloworld\.go$' 2>&1); st=$?
 if [ "$st" = 0 ] && grep -q 'passing in check-linux-amd64.edn failed, run again one at a time' <<< "$out" \
-   && grep -q '1 pass, 0 fail' <<< "$out" && grep -q 'forced once' "$root/.tmp/goi-check/first-fails.tsv"; then
+   && grep -q '1 pass, 0 fail' <<< "$out" && grep -q 'forced once' "$root/.tmp/goi-check/first-fails.tsv" \
+   && grep -q '1 passed only on their retry: helloworld.go' <<< "$out"; then
   echo "ok   a recorded pass that fails once passes on its retry, its first row kept"
 else echo "FAIL the retry of a program failing once: status $st"; tail -8 <<< "$out"; bad=1; fi
 out=$(cd "$root" && GOI_CHECK_FAIL=helloworld.go bin/goi check --only '^helloworld\.go$' 2>&1); st=$?
 if [ "$st" = 1 ] && grep -q 'regression: helloworld.go: fail forced (GOI_CHECK_FAIL)' <<< "$out"; then
   echo "ok   control: a recorded pass that fails every time is a regression after its retry"
 else echo "FAIL the control (failing every time): status $st"; tail -8 <<< "$out"; bad=1; fi
+# review 300's finding 6 (b): above GOI_RETRY_MAX failed recorded passes the check judges at once (a broken build is not retried
+# program by program): with the cap 0 the program failing once is a regression
+out=$(cd "$root" && GOI_RETRY_MAX=0 GOI_CHECK_FAIL_ONCE=helloworld.go bin/goi check --only '^helloworld\.go$' 2>&1); st=$?
+if [ "$st" = 1 ] && grep -q 'more than GOI_RETRY_MAX=0: judged without the retry' <<< "$out" && grep -q 'regression: helloworld.go' <<< "$out"; then
+  echo "ok   above GOI_RETRY_MAX the failed are judged without the retry"
+else echo "FAIL the retry's cap: status $st"; tail -8 <<< "$out"; bad=1; fi
 exit $bad
