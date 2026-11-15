@@ -2807,3 +2807,33 @@ Numbering from ARS96. Each with options, the recommended named; none taken.
   (recommended: Arbace's own executable judged nightly as the user's programs are, light in memory); (b) the same at 3 jobs (about
   3 minutes, `:mem-gib 8`); (c) `--only e` essential on arm64 hosts (1 minute, 3 GiB: Arbace's start and its lockstep on every
   change to a64i) and the whole in `--full`.
+
+## As built: queue 309, open's flags (2026-11-15; branch `309-asm-emu-open-flags`, from `eb933b551`; the Mac VM)
+
+Review 306's findings 2 and 3 (`reports/306-review-emu-arm64.md`), on the light lane of the Mac VM (the M2 Max, load 11-15, at
+most 4 processes of this task's).
+
+- **arm64's flags as crt's**: a64i translates openat's flags and fcntl F_SETFL's argument from arm64's values to x86-64's, crt's,
+  and F_GETFL's result back (emu.OpenFlagsFromA64, OpenFlagsToA64; arch/arm64's uapi asm/fcntl.h: O_DIRECTORY 040000, O_NOFOLLOW
+  0100000, O_DIRECT 0200000, O_LARGEFILE 0400000, the same four bits as x86-64's O_DIRECT, O_LARGEFILE, O_DIRECTORY and O_NOFOLLOW;
+  the rest asm-generic's on both). Before, O_DIRECTORY was ignored, O_DIRECT read as O_DIRECTORY (ENOTDIR on a file), and musl's
+  every open (O_LARGEFILE, x86-64's O_NOFOLLOW) would have been O_NOFOLLOW once crt honoured it. x86i passes x86-64's own.
+- **crt's open as Linux 7.3's** (x86i's, ci's and a64i's): O_PATH keeps O_DIRECTORY, O_NOFOLLOW and O_CLOEXEC alone and opens no
+  host file (read, write, lseek, pread, pwrite, ftruncate, fsync, getdents, ioctl, F_SETFL and the record locks EBADF, poll
+  POLLNVAL, select ready, as natively; fstat by its path; as a dirfd a directory's); O_CREAT|O_DIRECTORY EINVAL; O_NOFOLLOW on a symlink ELOOP (O_DIRECTORY's
+  ENOTDIR first, O_CREAT|O_EXCL's EEXIST, with O_PATH the link itself: fstat S_IFLNK, readlinkat(fd, "") its target); O_DIRECTORY
+  on what is not a directory ENOTDIR before the open (before O_TRUNC); F_GETFL's flags Linux's f_flags (O_CREAT, O_EXCL, O_NOCTTY,
+  O_TRUNC and O_CLOEXEC dropped, O_DIRECTORY and O_NOFOLLOW kept, O_LARGEFILE forced, as force_o_largefile on 64-bit). The last
+  component is classified by Lstat before the open (a race with a concurrent rename the host's own O_NOFOLLOW would close; crt also
+  runs on tamago).
+- **symlinkat, linkat** (arm64 36 and 37; x86-64 266 and 265, symlink 88, link 86): an empty target ENOENT; linkat's flags other
+  than AT_SYMLINK_FOLLOW and AT_EMPTY_PATH EINVAL, a symlink linked itself without AT_SYMLINK_FOLLOW, AT_EMPTY_PATH the
+  descriptor's own file (a directory's EPERM); readlinkat's size <= 0 EINVAL first. The lockstep takes both from the world.
+- **Go's os.Root** holds: `os.OpenRoot(dir).Open` of a link out of the root, absolute or relative or through a directory link, is
+  "path escapes from parent" as natively; before, a64i read the file outside (and OpenFile with O_TRUNC truncated it).
+- Tests: `test/asm/a64i/linux-open-flags.s` (essential; eval, AOT, the CPU, lockstep sys and step: 72 system calls, 4,623
+  instructions) and `test/asm/a64i-go/osroot` (go-check). Controls: inject-15 (A64I_INJECT=FAMILY:o, a new injected fault: arm64's
+  open flags passed to crt untranslated), verdict-5, go-13 (osroot's run under the injection judged by its own want: a go-check
+  control may name an injection, a fourth field) and go-14: fail as they must.
+- Left: os.Root's Mkdir (mkdirat with a directory descriptor), Chmod (fchmodat), Chtimes (utimensat) and Lchown (fchownat) are
+  ENOSYS on a64i.
