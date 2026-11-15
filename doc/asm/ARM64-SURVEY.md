@@ -2917,3 +2917,26 @@ integrity changed (emu, so x86i's kernel too).
   O_APPEND): eval, AOT, the CPU, lockstep sys and step (49 system calls, 3,722 instructions) and the loader agree; before, eval, AOT
   and the CPU differ in 6 of 22 lines. x86i's twin `test/asm/x86i/linux-msync-wb.s` (control cpu-msyncwb-vs-misc), its rows the
   main host's `bin/repr-asm x86i-check --record`.
+## As built: queue 311 (2026-11-15; branch `311-asm-emu-uname-mmap-signals`, from eb933b551; review 306's findings 5-7, the Mac VM)
+
+- **uname** (F5): crt's Sys has a `Machine` (uname's machine field; empty: `x86_64`), which `emu.NewKernelA64` sets to `aarch64`.
+  The lockstep takes uname from the world, so the proof is the program's own output: `linux-uname` prints the field (eval, AOT
+  and the CPU judge it against `aarch64`). x86i keeps `x86_64`.
+- **A pending signal that comes to be ignored** (F7): a64i's rt_sigaction discards it in every thread when the new disposition is
+  SIG_IGN, or SIG_DFL of a signal Linux ignores by default (`kernelIgnored`: SIGCHLD, SIGCONT, SIGURG, SIGWINCH; the stop signals,
+  which a64i's delivery treats as ignored, kept as Linux keeps them), as do_sigaction's flush (`sig_handler_ignored`). Test
+  `signal-ignore` (SIGUSR1 to SIG_IGN, SIGURG to SIG_DFL: discarded; SIGTSTP to SIG_DFL and SIGUSR2 to a handler: kept).
+- **Reservations** (F6): emu's AS keeps its mappings as ranges (`vma`: base, end, permissions; PermCode a set of pages, x86i's)
+  where it kept a permission a page, and crt's `Mem.Reserve` backs a mapping from 64 KiB on by the host's demand-zero memory (on
+  Linux an anonymous private MAP_NORESERVE mapping: a page costs memory at its first touch, a reservation its record), returned at
+  munmap (the cut part's host pages freed, the host mapping unmapped when nothing of it is left) and madvise's MADV_DONTNEED
+  (`Mem.Zero`: the host's whole pages freed, the rest cleared); elsewhere (TamaGo) Go's memory as before. topDown searches the gaps
+  between the ranges (a page walk before), msync and mprotect check coverage by range, markAnon looks at its pages when they are
+  fewer than the range's, and mmap is ENOMEM when the host refuses the memory. Test `linux-mmap-reserve` (1 TiB PROT_NONE, two pages
+  mprotected and written, a MiB mapped over it and filled by getrandom, unmapped and reserved again at the same address). With the
+  guest's memory out of Go's heap, Go's collector ran far more often over the one allocation a step (Fetch's copy of the cached
+  instruction), so the decode cache now holds pointers. Measured on the M2 (4 of 8 cores, CPU seconds and peak RSS):
+  8 GiB PROT_NONE 171 MB, 0.2 s -> 11 MB, 0.000 s; 1 TiB killed a64i -> 9 MB; Arbace's `-e '(+ 1 2)'` (arbace-check e) 67.5 s,
+  2.94 GB -> 40.7 s, 0.78 GB; go-check's 8 programs 4.0 s, 233 MB -> 2.7 s, 88 MB; goroot-check's first 60 programs 153 s, 299 MB ->
+  99 s, 205 MB.
+- Controls verdict-u311-1..3 and cpu-u311-1; the three programs are in the essential subset.
