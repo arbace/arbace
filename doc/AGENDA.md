@@ -66,6 +66,12 @@ The current state of the work (as of 2026-11-09). This file is rewritten as thin
   - audit records for the crops' 116 steps (`bin/gate --audit` at night, then `--loads-update`);
   - GD4 (the runner's one policy, `--nightly --concurrent` as a run);
   - GD5 (split repr-java-nojavac.jdk, 59 GiB).
+  Branch `gate-lanes-fix` (2026-11-13, one commit on next ca3c7aff8): gate-tests' nested lanes-test failure was admission
+  timing under strace, now robust (conditions, not sleeps); 36 of 36. Branch `gate-gts` (2026-11-13, for after main advances):
+  GTS-A (a needed step of another chain waited for, no deadlock; needs-wait-test), GTS-B (C's `:time-dependent` round-trip
+  entries, the five restored; gate_key moves: arbace/repr/c), lenc.ae's shadowed `label` (repr-clojure back to 152 outside),
+  review 1113's findings 2-4 (finding 2 flags 298 C results rows recorded known but unlisted: reap fails on them until the
+  night's C runs re-record), the si bisect (no regression).
 - **The host** (Alpine edge, amd64, /dev/kvm; [ALPINE.md](ALPINE.md)): 62 GB of memory; the disk at 79% (the night's steps
   stop at 90%; agents' rule 80%). The Mac peer, an arm64 VM, develops the Python crop through the queue.
 - The JVM runs only the frozen jar of `arbace-for-java-26-v4` (the oracle's reference, the edges' recordings, the data
@@ -307,8 +313,9 @@ estimate fits before its lane's deadline; a crop's records are committed only wh
    Its goi, C, OCaml and si failures rerun alone by day on `gf-misc` (2026-11-12; journal): real and fixed: goi's escape lines on
    `:full` forms and `go:norace` (escape2, escape2n, issue24651a), ci's compiled calls allocating since CS277 (c-aot's three; plus
    30 s budgets), repr/ocaml's surrogate pairs (strings.ml); stale: C's three `:item-placement` annotation entries (a5705351b's
-   patch, applied); speed: oi's darkening_work and churn (oi-slow); open: si's ecraven/ack 407 s alone (146 s recorded 10-31, limit 300): a
-   real si slowdown, to bisect over si's commits since 10-31 (record left pass). gate_key moves (arbace/go,
+   patch, applied); speed: oi's darkening_work and churn (oi-slow); si's ecraven/ack: no regression after all (gate-gts,
+   2026-11-13: the 10-31 tree and next both 165 s on the same quiet host, 239/167 s under the rerun's load; the 407 s was the
+   host), SI_TIMEOUT stays 600 pending the user's (a) keep 600, (b) back to 300, (c) a per-program limit. gate_key moves (arbace/go,
    go/arbace/ci): wait for W2's end to merge.
    Night 13's two left (`n14-fix`, 2026-11-13; journal): the Java levels' "No space left" was ext4's directory index on the
    flat forms cache (208,010 entries), not the disk: the read caches sharded (`CACHE/KK/KEY`), the shared one migrated; the

@@ -375,9 +375,14 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     # the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a)): a step whose toolchain this host lacks
     absent) echo absent > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
   esac
+  local nw
   for x in ${needs[$n]}; do
     [ "$x" = - ] && continue
-    # GD4 (GDS12 (a)): a step whose need was deferred for the disk is deferred with it (retried with it), not failed
+    # GTS-A: a needed step of another runner (a chain beside this one) not done yet is waited for
+    nw=$(need_wait "$n" "$x")
+    [ -z "$nw" ] || { echo "notrun $x: $nw" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
+    # GD4 (GDS12 (a)): a step whose need was deferred for the disk is deferred with it (retried with it), not failed (after
+    # GTS-A's wait, so that a need of another chain is judged once it is done)
     if [ "$(cat "$logs/$x.status" 2>"$logs/$n.need.err")" = deferred ]; then
       echo "its need $x was deferred" > "$logs/$n.deferred"; echo deferred > "$logs/$n.status"; touch "$logs/$n.done"; return 1
     fi
@@ -523,6 +528,7 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
     absent) echo "   absent  $n (${why[$n]})"; return ;;
     # GD4 (GDS12 (a)): deferred for the disk: not a failure; bin/gate retries it at the end, and a run left with one is incomplete
     deferred) echo "   deferred  $n ($(cat "$logs/$n.deferred" 2>"$logs/count.err"))"; return ;;
+    notrun*:*) echo "   FAILED  $n (not run: needs ${st#notrun })"; status=1; return ;;
     notrun*) echo "   FAILED  $n (not run: ${st#notrun } did not pass)"; status=1; return ;;
   esac
   s=$(cat "$logs/$n.secs"); w=$(mmss "$s")
@@ -574,16 +580,100 @@ pre_step() {  # pre_step NAME REGEX LINES CMD...: before the plan, one after the
     tail -20 "$logs/$name.log"; echo "== gate FAILED ($(secs "$start"))"; exit 1
   fi
 }
-run_chain() {  # run_chain PHASE CHAIN: its steps one after the other (after its :start-after)
-  local n first=1
-  for n in "${order[@]}"; do
-    [ "${phase[$n]}" = "$1" ] && [ "${chain[$n]}" = "$2" ] || continue
-    if [ -n "$first" ] && [ "${after[$n]}" != - ]; then
-      while [ ! -f "$logs/${after[$n]}.done" ]; do sleep 5; done
-    fi
-    first=
-    run_one "$n"
+chain_steps() {  # chain_steps PHASE CHAIN: its steps in the plan's order
+  local n
+  for n in "${order[@]}"; do [ "${phase[$n]}" = "$1" ] && [ "${chain[$n]}" = "$2" ] && echo "$n"; done
+  return 0
+}
+queue_chains() {  # queue_chains PHASE: every chain's queue written (queue_write) before any of them starts (GTS-A)
+  local c
+  for c in $(chains_of "$1"); do queue_write "$1.$c" $(chain_steps "$1" "$c"); done
+}
+run_chain() {  # run_chain PHASE CHAIN: its steps one after the other (after its :start-after), a runner PHASE.CHAIN
+  local q=()
+  q=($(chain_steps "$1" "$2"))
+  [ ${#q[@]} -gt 0 ] || return 0
+  if [ "${after[${q[0]}]}" != - ]; then
+    while [ ! -f "$logs/${after[${q[0]}]}.done" ]; do sleep 5; done
+  fi
+  run_queue "$1.$2" "${q[@]}"
+}
+# The runners (GTS-A, doc/GATE-SURVEY.md, "As built: GTS-A"): run_queue ID STEP... runs its steps one after the other
+# as the runner ID, its queue in LOGS/runners/ID.queue (a step a line) and its end in ID.end. A step whose :needs names a
+# step of another runner not done yet waits for it (need_wait: its .done), the wait in ID.waits ("STEP NEEDED"); it fails
+# at once, as before, on a needed step in no runner's queue (a step of an earlier phase is done, of a later one never
+# started) or later in its own runner's queue, and while it waits on a needed step whose runner ended without it (never
+# started) or on a cycle of waits (its needed step's runner waits, through others, on this runner). Outside a runner
+# (the builds, the oracle tier's loop) every need is decided at once, as before
+# (queue_write ID STEP...: the queue alone, written before the runners start, so that no runner looks for a step of a
+# runner not yet started; bin/gate writes them all, queue_chains, before it starts any)
+queue_write() {
+  local id=$1; shift
+  mkdir -p "$logs/runners"
+  rm -f "$logs/runners/$id.end" "$logs/runners/$id.waits" "$logs/runners/$id.pid"
+  printf '%s\n' "$@" > "$logs/runners/$id.queue.tmp" && mv -f "$logs/runners/$id.queue.tmp" "$logs/runners/$id.queue"
+}
+run_queue() {  # run_queue ID STEP...
+  local gate_runner=$1 n; shift
+  queue_write "$gate_runner" "$@"
+  echo "$BASHPID" > "$logs/runners/$gate_runner.pid"
+  for n in "$@"; do run_one "$n"; done
+  touch "$logs/runners/$gate_runner.end"
+}
+runner_of() {  # runner_of STEP: the runner whose queue holds it (none: nothing)
+  local f
+  for f in "$logs"/runners/*.queue; do
+    [ -f "$f" ] && grep -qxF "$1" "$f" && { f=${f##*/}; echo "${f%.queue}"; return 0; }
   done
+  return 0
+}
+# need_wait STEP NEEDED: waits for NEEDED when it is another runner's and not done; prints why it will not be (a cycle,
+# its runner ended, later in this runner's own queue), else nothing
+need_wait() {
+  local n=$1 x=$2 r
+  [ -f "$logs/$x.done" ] && return 0
+  [ -n "${gate_runner:-}" ] || return 0
+  # GATE_NEED_WAIT=0: no wait, every need decided at once (before GTS-A; its test's demonstration of the old failure)
+  [ "${GATE_NEED_WAIT:-1}" = 0 ] && return 0
+  r=$(runner_of "$x")
+  [ -n "$r" ] || return 0
+  [ "$r" = "$gate_runner" ] && { echo "later in its own chain ($r): never run before $n"; return 0; }
+  echo "$n $x" > "$logs/runners/$gate_runner.waits"
+  echo "   $n waits for $x (runner $r)" >> "$logs/runners/waits.log"
+  local why=
+  while [ ! -f "$logs/$x.done" ]; do
+    if [ -f "$logs/runners/$r.end" ]; then
+      [ -f "$logs/$x.done" ] || why="never run: its chain ($r) ended without it"; break
+    fi
+    # a runner that started and is gone without its end (killed): its step will never run
+    local rp; rp=$(cat "$logs/runners/$r.pid" 2>"$logs/runners/pid.err")
+    if [ -n "$rp" ] && ! kill -0 "$rp" 2>"$logs/runners/pid.err" && [ ! -f "$logs/runners/$r.end" ] && [ ! -f "$logs/$x.done" ]; then
+      why="never run: its chain's runner ($r, PID $rp) is gone"; break
+    fi
+    why=$(need_cycle "$x" "$n -> $x")
+    [ -n "$why" ] && break
+    sleep "${GATE_NEED_POLL:-5}"
+  done
+  rm -f "$logs/runners/$gate_runner.waits"
+  [ -z "$why" ] || echo "$why"
+}
+# need_cycle NEEDED PATH: a cycle of waits back to this runner (gate_runner): NEEDED's runner waits on a step whose
+# runner waits ... on a step of this runner's queue not done (the steps of a runner run in order, so a step not done
+# in a waiting runner's queue is after its waiting step). Prints "a cycle of waits: PATH", else nothing
+need_cycle() {
+  local cur=$1 path=$2 r m y i=0
+  while [ $i -le 64 ]; do
+    i=$((i + 1))
+    [ -f "$logs/$cur.done" ] && return 0
+    r=$(runner_of "$cur")
+    [ -n "$r" ] || return 0
+    [ "$r" = "$gate_runner" ] && { echo "a cycle of waits: $path"; return 0; }
+    [ -f "$logs/runners/$r.waits" ] || return 0
+    read -r m y < "$logs/runners/$r.waits" 2>"$logs/runners/cycle.err" || return 0
+    [ -n "$y" ] || return 0
+    path="$path (in $r, waiting at $m) -> $y" cur=$y
+  done
+  return 0
 }
 chains_of() {  # chains_of PHASE: its chains, in the order of their first step
   local n seen=" "

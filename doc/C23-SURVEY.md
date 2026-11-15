@@ -5702,3 +5702,33 @@ at the 10 s default's edge, so the three get 30 s in `test/c/check-budget.edn`, 
 gate_key: the key moves.
 Proof: `CI_AOT_NODES=1 CI_JOBS=1 bin/ci check --aot --corpus compcert,benchmarksgame --only` of the three (as the step runs
 them, 5 min 12 s): 3 of 3 pass compiled, exit 0; the interpreted runs time out in their `speed` class, as before.
+
+## As built: GTS-B, the time-dependent known entries of the round trip (2026-11-13, branch `gate-gts`)
+
+The user's decision of 2026-11-12. The round trip's judge (`arbace.repr.c.rtcheck/judge`) fails on a stale `:known` entry (the
+file passed) and on a missing one (the file failed with no entry). Some files sit near the read's budget (`REPR_C_READ_BUDGET`,
+120 s; a third of it for the `:full` read), so the host's load decides which way they go: quickjs's libunicode.c and quickjs.c,
+and torture-compile's limits-fndefn.c, limits-blockid.c and limits-externalid.c. Night 12 passed them under load. gf-gate
+(d1c4b1feb) removed their entries, so they fail when the load is heavier.
+
+- An entry of `test/repr/c/roundtrip-known.edn` may carry `:time-dependent true`. It is accepted either way:
+  - it is known when its file fails, as any entry;
+  - it is not stale when its file passes in the run. The summary counts it as "N time-dependent entries passing (accepted)",
+    and `report.edn` lists it as `:time-dependent-passed`.
+  - An entry of a file the run does not hold is stale as any other.
+- `record` keeps a marked entry whatever its file's outcome, as long as the file is in the run.
+- `bin/reap`'s `:c-known` reader (`test/reap/main.ae`) matches. `c-results-problems` does not count a marked entry whose
+  results row is `:pass` as "a known entry the results pass". The cell counts it once, as that pass.
+- The five entries are restored, each marked (`{:class :eval-limits, :time-dependent true}`). The `:eval-limits` class text
+  says what the mark means.
+- The test is `c.judge-test/roundtrip-time-dependent-either-way` (`bin/ci judge-test`). It covers:
+  - a marked entry of a passing file is not stale, and a plain one is;
+  - a marked entry of a file that times out is known;
+  - the record keeps a marked entry whose file passed;
+  - a marked entry of a file not in the run is stale.
+- Keys: `arbace/repr/c/` is in `gate_key` (embedded since C9), so the key moves. It reruns `--full` and the round trip's steps.
+  `test/reap/main.ae` moves `reap`'s key.
+- Considered:
+  - raising those files' budgets (`REPR_C_READ_BUDGET` per file). This only moves the edge, and a budget long enough to
+    always pass costs minutes a night.
+  - a separate known file for timing classes. This adds a second place to look for the same class.

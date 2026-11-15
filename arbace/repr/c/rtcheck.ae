@@ -330,12 +330,18 @@
                                j)))
                    js))
         failing (filter #(= "fail" (:status %)) js)
-        stale (for [[nm _] known :when (not (some #(and (= (:name %) nm) (= (:status %) "known")) js))] nm)
+        ;; GTS-B (doc/C23-SURVEY.md, "As built: GTS-B"): an entry marked :time-dependent (a file near the read's budget,
+        ;; REPR_C_READ_BUDGET, whose outcome the host's load decides) is accepted either way: known when the file fails,
+        ;; never stale when it passes (a file of the run it names; a file the run does not hold stays stale)
+        ran (set (map :name js))
+        stale (for [[nm e] known :when (not (some #(and (= (:name %) nm) (= (:status %) "known")) js))
+                    :when (not (and (:time-dependent e) (ran nm)))] nm)
+        timed (for [[nm e] known :when (and (:time-dependent e) (some #(and (= (:name %) nm) (= (:status %) "pass")) js))] nm)
         unclassed (for [[nm k] known :when (not (contains? (:classes known-all) (:class k)))] nm)
         fr (fn [k] (into (sorted-map) (frequencies (map k js))))
         report {:corpus id :files (count js) :status (fr :status) :read (fr :read) :level1 (fr :l1) :level2 (fr :l2)
                 :level3 (fr :l3) :level4 (fr :l4) :accept (fr :accept) :failing (count failing) :stale-known (vec stale)
-                :known-classes (fr :class)}]
+                :time-dependent-passed (vec timed) :known-classes (fr :class)}]
     (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" [(:name %) (:status %) (:read %) (:l1 %) (:l2 %) (:l3 %) (:l4 %) (:accept %)
                                                                     (some-> (:class %) name) (:detail %)]) "\n") js)))
     (spit (str d "/report.edn") (pr-str report))
@@ -344,6 +350,7 @@
                   (when run? (str "; l4 " (pr-str (:level4 report)))) "; gcc " (pr-str (:accept report))
                   (when (seq failing) (str "; " (count failing) " failing"))
                   (when (seq stale) (str "; " (count stale) " known entries stale"))
+                  (when (seq timed) (str "; " (count timed) " time-dependent entries passing (accepted)"))
                   (when (seq unclassed) (str "; " (count unclassed) " of no class"))
                   (when names (str " (a partial run: " (count names) " listed files)"))))
     ;; GT8: each failing file as FAIL CORPUS/NAME WHY (the rotation's :failed-re)
@@ -493,9 +500,11 @@
         known (reduce (fn [known id]
                         (let [old (get-in known [:roundtrip (keyword id)] {})
                               rows (map #(str/split % #"\t" -1) (remove str/blank? (str/split-lines (slurp (str work "/" id "/files.tsv")))))
-                              es (into (sorted-map) (for [[nm st & more] rows :when (#{"fail" "known"} st)
-                                                          :let [e (get old nm)
-                                                                _ (when-not e (swap! left conj (str id " " nm ": " st " " (last more))))]
+                              es (into (sorted-map) (for [[nm st & more] rows
+                                                          :let [e (get old nm)]
+                                                          ;; GTS-B: a :time-dependent entry kept whatever its file's outcome
+                                                          :when (or (#{"fail" "known"} st) (:time-dependent e))
+                                                          :let [_ (when-not e (swap! left conj (str id " " nm ": " st " " (last more))))]
                                                           :when e]
                                                       [nm e]))]
                           (if (seq es) (assoc-in known [:roundtrip (keyword id)] es) (update known :roundtrip dissoc (keyword id)))))

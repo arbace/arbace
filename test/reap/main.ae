@@ -201,12 +201,18 @@
   (let [by (into {} (map (fn [[id r]] [id r]) rows))
         some-of (fn [xs] (str (str/join "; " (take 3 xs)) (when (> (count xs) 3) (str " ... (" (count xs) ")"))))
         bad (for [[id r why] rows :when (not (#{:pass :known} r))] (str id " " (name r) " " why))
-        passed (distinct (for [e entries :when (= :pass (by (:id e)))] (:id e)))
-        lacking (distinct (for [e entries :let [id (:id e)] :when (nil? (by id))] id))]
+        ;; GTS-B: an entry marked :time-dependent (C's round trip: a file near the read's budget) may pass
+        passed (distinct (for [e entries :when (and (= :pass (by (:id e))) (not (:time-dependent e)))] (:id e)))
+        lacking (distinct (for [e entries :let [id (:id e)] :when (nil? (by id))] id))
+        ;; review 1113 finding 2: a row recorded :known whose file the known file no longer lists (an entry removed after the
+        ;; record: the row's class names nothing; the record is stale until the full run records it again)
+        listed (set (map :id entries))
+        unlisted (distinct (for [[id r] rows :when (and (= :known r) (not (listed id)))] id))]
     (concat
      (when (seq bad) [(str (:name src) ": " (count bad) " rows of " (:results src) " neither pass nor known: " (some-of bad))])
      (when (seq passed) [(str (:name src) ": " (count passed) " files of " (:file src) " pass in " (:results src) ": " (some-of passed))])
-     (when (seq lacking) [(str (:name src) ": " (count lacking) " files of " (:file src) " absent from " (:results src) ": " (some-of lacking))]))))
+     (when (seq lacking) [(str (:name src) ": " (count lacking) " files of " (:file src) " absent from " (:results src) ": " (some-of lacking))])
+     (when (seq unlisted) [(str (:name src) ": " (count unlisted) " rows of " (:results src) " recorded known that " (:file src) " does not list: " (some-of unlisted))]))))
 
 (defmethod read-source :c-known [src]
   ;; C's known files (test/repr/c/*-known.edn: bin/ci annotations, bin/repr-c parse-check, check --tokens, roundtrip): the files
@@ -230,12 +236,15 @@
                        :let [texts (if (contains? cls sec) (get cls sec) cls)]
                        [corpus files] (get m sec)
                        [f v] (sort-by key files)]
-                   (entry (str (name corpus) sep f) :known
-                          (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))))
+                   (cond-> (entry (str (name corpus) sep f) :known
+                                  (str (name (:class v)) ": " (str/replace (str (get texts (:class v))) #"\s+" " ")))
+                     (:time-dependent v) (assoc :time-dependent true))))
         ex (set (:exclude-corpora src))
         counted? (fn [^String id] (not (ex (first (str/split id (re-pattern (java.util.regex.Pattern/quote sep)) 2)))))
-        es (filterv #(counted? (:id %)) all)
         rows (when (exists? (:results src)) (read-edn (:results src)))
+        ;; GTS-B: a :time-dependent entry whose file the results pass is that pass alone (counted once)
+        passing (set (for [[id r] rows :when (= :pass r)] id))
+        es (filterv #(and (counted? (:id %)) (not (and (:time-dependent %) (passing (:id %))))) all)
         crows (filter #(counted? (first %)) rows)
         missing (vec (remove #(contains? m %) secs))
         excluded (when (seq ex) (str "; not counted: the corpora " (str/join ", " (sort ex))))]

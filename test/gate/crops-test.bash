@@ -137,7 +137,7 @@ cat > "$w/rules.edn" <<'F'
          {:name b :phase :build :kind :build :cmd "true"}
          {:name four :phase :full :cmd "true"}]
  :crops {:ocaml [e1 e2 f1 f2 f3 f4 b] :c [four]}
- :budgets {:crops 10 :new-crops [:ocaml :rust] :shares {:rust 0.5 :zz 1}}
+ :budgets {:crops 10 :new-crops [:ocaml :rust] :shares {:rust 0.5 :zz 1} :essential-mem-gib-by {:ocmal 4 :rust "x"}}
  :host-ids {:h1 [[:frob "x"]] :h2 [[:digest-list "test/none.sha256"]] :h3 [[:version]]}
  :crop-pins [[:ocaml "w" "c"] [:java "w" "c"] [:rust "a \"q\"" "c"]]
  :controls {e1 "test/ocaml/controls.edn" e2 {:waived "judges records"} f2 "test/ocaml/other.edn" f3 "test/ocaml/nothing.edn" f4 {:why "x"} gone "x"}}
@@ -148,7 +148,8 @@ for p in 'ocaml e1: an essential check of 4 GiB' 'ocaml e2: an essential check :
          'f2: :controls: test/ocaml/other.edn is not among its :inputs' 'f3: :controls: test/ocaml/nothing.edn is no file' 'f4: :controls: a map without :waived' \
          ':controls: gone is no step' ':host-ids :h1: unknown op :frob' ':host-ids :h2: :digest-list test/none.sha256 is no file' ':host-ids :h3: :version without an argument' \
          ':crop-pins :java: crop :java is not in :budgets :new-crops' ':crop-pins :rust: a tab, newline or double quote' ':budgets :shares: :zz is not in :new-crops' \
-         'weights sum to 5.5, not :crops 10'; do
+         'weights sum to 5.5, not :crops 10' ':budgets :essential-mem-gib-by: :ocmal is not in :new-crops' \
+         ':budgets :essential-mem-gib-by: :rust'"'"'s "x" is not a positive number of GiB'; do
   grep -qF -- "$p" "$w/rules.out" && ok "rule: $p" || { bad "rule not found: $p"; }
 done
 grep -q ' four:' "$w/rules.out" && bad "a step of the four judged by GT9's rules" || ok "the four crops' steps are not GT9's rules' (no control or :mem-gib asked)"

@@ -5993,6 +5993,74 @@ space and ran at the default 16 (the coordinator's go-ahead). `bin/hsi divergenc
 0 not in a class (3 before).
 Proofs: `bin/reap` 0 problems; `bin/crops-score --judge --strict` 0; `bin/arbace-go --gate-key` unchanged (1170c98c...).
 
+### 2026-11-13: GTS-A: the gate's runner waits for a needed step of another chain
+
+The user's decision of 2026-11-12, built on branch `gate-gts` (from `next` ca3c7aff8), to merge after main advances. Under `bin/gate
+--full --concurrent`, `run_one` (bin/lib/gate-run.bash) judged a step's `:needs` at once, so a need still running in another chain
+read as "did not pass". Night 12 reported three haskell-lib-* steps "not run: haskell-lib-check did not pass" that way, and
+gf-gate worked around it with one shared `:chain`.
+
+What changed:
+- Each chain, and each of bin/gate's serial loops, is a runner (`run_queue`). Its queue is written before any runner starts.
+- A need in another runner's queue that is not done is waited for (its `.done`).
+- The step fails clearly ("not run: needs X: WHY") on a need later in its own chain, on a need whose runner ended or died
+  without it, and on a cycle of waits (`need_cycle`, which also catches a cycle through the chains' order).
+- Every other need is decided at once, as before.
+
+The proof is test/gate/needs-wait-test.bash: night 12's failure with `GATE_NEED_WAIT=0`, the fix, and the deadlock cases (11 of 11).
+
+Considered:
+- ordering chains in the planner so that no need crosses one. This forbids a crop chain needing a serial step.
+- a global scheduler. Too large for this fix.
+- keeping gf-gate's shared chain only. That hides the bug for one table and leaves it for the next.
+
+bin/lib/gate-run.bash is in every check's key, so every check reruns once. gate_key does not move. The details are in
+doc/GATE-SURVEY.md, "As built: GTS-A".
+
+### 2026-11-13: GTS-B: C's round trip accepts a time-dependent known entry either way
+
+The user's decision of 2026-11-12. Five files sit near the round trip's read budget (120 s; 40 s for the `:full` read), and the
+host's load decides their outcome:
+- quickjs libunicode.c, quickjs.c;
+- torture-compile limits-fndefn.c, limits-blockid.c, limits-externalid.c.
+
+The judge failed a stale entry and a missing one, so whichever state was committed failed some night. gf-gate (d1c4b1feb)
+removed the five entries after night 12 passed them under load.
+
+What changed:
+- An entry may carry `:time-dependent true`. `arbace.repr.c.rtcheck/judge` does not call it stale when its file passes in the
+  run, and it stays known when the file fails.
+- `record` keeps it.
+- bin/reap's `:c-known` reader neither reports such a passing entry nor counts it twice.
+- The five entries are restored, marked.
+
+The test is c.judge-test/roundtrip-time-dependent-either-way.
+
+Considered:
+- per-file budgets. These only move the edge.
+- a separate known file for timing. This makes two places for one class.
+
+arbace/repr/c is embedded, so gate_key moves. The details are in doc/C23-SURVEY.md, "As built: GTS-B".
+
+### 2026-11-13: repr/clojure: lenc.ae's outside was a shadowed core name, not a reader bug
+
+`bin/repr-clojure check --roundtrip` counted arbace/repr/asm/arm64/lenc.ae (8744bfdba, AR2) as outside read's image, and gf-gate
+raised `:arbace :outside` from 152 to 153. The first difference is line 14's `))`: read's `:core-names` rule appended
+`(:refer-clojure :exclude [label])` to the ns form. The file defines a private `label`, a name arbace.core adds (the Java forms'
+`label` macro, `{:added "arbace"}`). As Clojure source, such a file must exclude it, and read does exactly that.
+
+So this is neither a reader nor a printer bug. The .ae shadowed arbace.core/label without excluding it, and loading it
+replaces the core var with a warning. Fixed at the source: the function is renamed `pc-label` (two uses). The count is back to
+152, with a note in test/repr/clojure/roundtrip-known.edn.
+
+Considered:
+- adding the exclusion to lenc.ae. read would then append the name to the exclusion again, because core-names does not
+  look at the names already excluded, so the file would stay outside.
+- teaching core-names to skip names already excluded. That makes print ambiguous for a Clojure file that excludes such a
+  name itself.
+
+arbace/repr/asm is a crop path: no key moves but the crop's and repr-clojure's.
+
 ### 2026-11-13: gate-tests' nested lanes-test failure: admission timing, made robust
 
 The step gate-tests failed on nights 12 and 13 and on the rerun on next ca3c7aff8 (12:43). In each case gate-reads-test's
@@ -6286,6 +6354,54 @@ doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk parts' memory and round 
   GiB with javac's c1 compile beside the read, about 35 min; it rewrites test/repr/java/roundtrip/jdk{,-known,-text,-text-known}.edn,
   to review), then the same without `--record` to pass. Neither moves a key (gate_key unchanged; bin/lib/repr-java is out of the
   javac key).
+
+### 2026-11-13: review 1113's findings 2-4 (gate-gts)
+
+From /root/arbace/.tmp/reviews/1113/REVIEW-NEXT.md:
+- (3) bin/gate turned on the essential memory lane under `--concurrent` with `GATE_LANES=0`: its condition tested only
+  `$lanes`. It now also tests `--concurrent`, and lanes-test checks the condition.
+- (4) gate.crops check now validates `:budgets :essential-mem-gib-by`: its keys must be crops of `:new-crops`, its values
+  positive numbers. A bad value no longer crashes the check: the limit falls back to `:essential-mem-gib`. crops-test has
+  a misspelled crop and a string value.
+- (2) bin/reap's `c-results-problems` now reports a results row recorded `:known` whose file the known file does not
+  list. On this branch it flags 298 rows in three problems:
+  - `test/repr/c/parse-check-results.edn`: 262 rows (gcc-c23's c23-attr-syntax-6.c, -8.c, c23-concat-1.c, ...);
+  - `test/repr/c/annot-results.edn`: 2 rows, pr33855.c and pr54559.c, whose entries night 13's triage removed;
+  - `test/repr/c/roundtrip-results.edn`: 34 rows (benchmarksgame reverse-complement-5.c, gcc-bitint's bitint-28.c and
+    -29.c, ...).
+
+  GTS-B's five restored entries are not among them. As asked, the C results files are not re-recorded, so `bin/reap`
+  (an essential step) fails on these three problems until the night's full C runs re-record them. `bin/reap --record`
+  refuses then too: test/reap/matrix.edn was recorded with the new check off for that one run, and is right otherwise
+  (0 other problems: the annotations' 114 -> 112 left by ca3c7aff8, C print's deferred 39 -> 44 by GTS-B).
+
+### 2026-11-13: si's ecraven ack: no regression since 10-31, the 407 s was the host
+
+The bisect asked for after night 12: gf-misc had measured ecraven/ack at 407 s, against 146 s recorded on 2026-10-31
+(2b4a9b7c5), and si-ecraven runs at `SI_TIMEOUT=600` since 265cab86a.
+
+The method (.tmp/worktrees/gate-gts/.tmp/bisect/step.sh): a detached worktree at each commit, the light driver rebuilt
+(`bin/si light`), then `SI_TIMEOUT=900 bin/si ecraven ack`, one run at a time on the same host.
+
+| tree | load | ack |
+|---|---|---|
+| 2b4a9b7c5 (the record's tree) | 12-18, the gate's rerun running | 239 s |
+| ca3c7aff8 (next) | 12-18, the gate's rerun running | 167 s |
+| ca3c7aff8 | 10-14, the gate stopped | 166 s |
+| 2b4a9b7c5 | 10-14, the gate stopped | 165 s |
+
+The two drivers differ (5.01 MB and 5.19 MB, other digests), so the 61 commits of arbace/scheme, go/arbace/scm and scheme/
+since then cost nothing measurable on ack. There is no commit to find. gf-misc's 407 s (11-12 16:18-16:25, the day's merges)
+and night 12's timeout at 300 s were the host's load, not si: the same tree ran at 239 s and at 165 s here.
+
+SI_TIMEOUT stays at 600 in test/gate/steps.edn and test/gate/crops/scheme.edn. The user's condition for 300 was a fix
+proved near 146 s. Without a regression, 300 s is about 1.8x ack's quiet time, and night 12 showed that is not enough
+under the night's load. Proposed for the user:
+- (a) keep 600;
+- (b) back to 300, accepting a timeout on a loaded night;
+- (c) a per-program limit for ack (si has none yet).
+
+The record keeps ack's 146 s pass.
 
 ### 2026-11-14: n15-fix, night 13's rerun (`bin/gate --full --concurrent` on next 7658c750c, 495 min, 8 failed)
 

@@ -363,6 +363,11 @@ else no "the free view: status $st: $(cat "$t/view-free.txt")"; fi
 if grep -q 'mem_lane=1; export GATE_LANES=free' "$here/bin/gate" && grep -q '"${GATE_MEM_LANE:-1}" != 0' "$here/bin/gate"; then
   ok "bin/gate: the essential memory lane on by default without --concurrent (GATE_MEM_LANE=0 off)"
 else no "bin/gate does not set the essential lane"; fi
+# review 1113 finding 3: nor with --concurrent and GATE_LANES=0 (GTS37 (a)'s private lock, no lane): the condition that turns
+# the essential lane on tests --concurrent itself, not only the lanes' variable
+if grep -B1 'mem_lane=1; export GATE_LANES=free' "$here/bin/gate" | grep -q '\[ -z "\$lanes" \] && \[ -z "\$concurrent" \]'; then
+  ok "bin/gate: no essential memory lane under --concurrent with GATE_LANES=0"
+else no "bin/gate: the essential lane's condition does not test --concurrent"; fi
 
 # ---- 8. GTS248 (a), GTS249
 # 8a. the plan's order across gates: gate A (started first) waits a (order 5, 15 GiB), gate B b (order 1, 15 GiB), 10 GiB
