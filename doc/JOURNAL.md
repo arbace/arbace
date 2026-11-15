@@ -5203,6 +5203,158 @@ the new llvm-mc 23.1.5 objects recorded by hand at the oracle tier (the host's l
   `bin/arbace-go --gate-key` `9accb085d767...` before and after, `test/gate/gate-key-crops-test.bash` passes).
 - Rule slips: two commands wrote to /dev/null (`2>/dev/null` on a trial `object` run and on a `cat`; nothing either produced was kept).
 
+## 2026-11-11: AR9, `(asm/unread ...)` for x86-64's dialects, NEON's structure loads and stores and FP lanes in a64i (branch `asm-ar9`, from `mac/next` `4ec952309`)
+
+The user's decisions of 2026-11-11: ARS53 (a) (the structure loads and stores first, then the FP lanes), ARS54 (a), ARS55 (b). On the
+main host, light; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources read again: the Arm ARM (DDI 0487), the
+shared decode and Operation of the AdvSIMD load/store multiple structures and single structure classes, FPCompareEQ/GE/GT, FPMulX,
+FPAbs, FPNeg and the vector FP instructions; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR9".
+
+- ARS54 (a): repr/asm's reader passes `:unread` for x86-64's AT&T and Intel too (`arbace/repr/asm.ae`), so a refused statement inside
+  a conditional block is `(asm/unread TEXT MESSAGE)` in every dialect but Plan 9's. amd64's round trip re-recorded whole: the record is
+  unchanged byte for byte (none of amd64's corpus files refuses a statement inside a conditional block); the six mc-x86 files with
+  conditional blocks' stated encodings unchanged. Alternative not taken: arm64 alone (ARS54 (b)), which left the dialects reading the
+  same text two ways. The object assembler (`arbace/asm/obj.ae`, asm-ax12's at the time) was not touched: its `unread` is AR8's.
+- ARS53 (a): `go/arbace/a64i/simdmem.go` written as Go (decode, the forms' lowering, the element loop), compiled and run from the
+  printed module first, then converted by repr/go's native reader into `simdmem.ae`; the hooks (three operations before `opSIMDEnd`,
+  their names, `simdName`, `lowerSIMD`'s first call, `execSIMD`'s dispatch, `decodeLdSt`'s class at bits 29-27 001 with V,
+  `a64i.ae`'s file list) hand-edited as forms, as AR8 did. Then the FP lanes (ARS53 (b), the user's order) the same way,
+  `simdfp.go`, reusing AR6's scalar functions lane by lane; the compares with zero named apart in the coverage (`v.fcmeq0.4s`).
+- The synthetic programs `synth-neon-ldst` (1,020 cases; a 128-byte buffer and eight registers folded after each case) and
+  `synth-neon-fp` (1,176 cases; the scalar FP model lane by lane): qemu-aarch64 agreed with both models on the first run, a64i (eval and
+  AOT) and the forms check on theirs. Coverage 1,358 → 2,015 of 2,015; a64i 85 → 87 programs; controls verdict-6/7, forms-4/5,
+  inject-18/19.
+- Results: the eval cell 301 → 303, the AOT cell 3,047 → 3,049 / 0 / 13 (99.6%), crops-score unchanged (99.8 / 100.0 / 100.0);
+  `bin/reap` 0 problems; no key moves (crop paths). Proposed ARS56-ARS58.
+- Rule slips: a background run of `bin/a64i check --essential` was still running when `test/asm/a64i/gen.ae` was edited (its synthetic
+  step had already read the file: 14 digests, the recorded ones; rerun after the change, passing); one comparison used `<(...)`
+  process substitution (scratch files, its output used for nothing).
+
+## 2026-11-11: review 1111's assembly findings fixed (branch `review-fix-3`, from `mac/next` `a7916bb2a` with `mac/asm-ar9` `198c25291` merged)
+
+The independent review of the assembly crops' merges into `mac/next` (`.tmp/reviews/1111/REVIEW-asm.md`, read whole; review 1111) found
+nine things, ranked medium to low; each is fixed in a commit of its own with its proof, in the order 2, 8, 1, 3, 6, 7, 9, 4, 5 (2 and 8
+first: (1)'s and (3)'s new verb and controls take the options by keyword and read them with the one parser). `mac/asm-ar9` was merged
+first (its journal entry beside AX12's; no other conflict) so the fixes apply to AR9's reader and a64i's SIMD too. Sources read, from
+the pinned llvm-project 23.1.5 tarball extracted into the worktree's `.tmp/llvm`: `llvm/lib/MC/MCParser/AsmParser.cpp`
+(parseDirectiveRept, instantiateMacroLikeBody, handleMacroEntry, printMacroInstantiations, printError, DiagHandler, parseDirectiveLoc,
+parseDirectiveReloc), `llvm/lib/MC/MCContext.cpp` (reportCommon), `MCAssembler.cpp` (layout's `.reloc` offsets), `MCObjectStreamer.cpp`
+(emitRelocDirective), `MCDwarf.cpp` (tryGetFile), `llvm/lib/Support/Path.cpp` (filename, parent_path), `StringRef.cpp`
+(getAutoSenseRadix, consumeUnsignedInteger, consumeSignedInteger), `llvm/tools/llvm-mc/llvm-mc.cpp` (fillCommandLineSymbols); the test
+`llvm/test/MC/AsmParser/macro-unknown-directive.s` for the instantiation notes' format. Apache-2.0 WITH LLVM-exception (in LICENSE.md);
+no code copied. doc/asm/AMD64-SURVEY.md and doc/asm/ARM64-SURVEY.md, "As built: review 1111's fixes".
+
+- (1) `arbace/asm/obj.ae`: an expansion (macro, `.rept`, `.irp`) runs as one instantiation, AsmParser's `<instantiation>` buffer (the
+  copies concatenated, the body from the line after its head, its items' places in that text), its errors printed as llvm-mc prints them:
+  `<instantiation>:L:C: error:`, the line, the caret, then `note: while in macro instantiation` a level, innermost first; none for an error
+  at the layout (ActiveMacros empty then). A `.rept` with no backslash, which ran at depth 0 and put body-relative offsets on the file,
+  counts toward the nesting limit now. The expected diagnostics of the new tests (`test/asm/obj-err/rept-place`, `rept-notes`,
+  `test/asm/obj-err-arm64/rept-notes`) were derived by hand from those sources, not recorded: the user's approval of hand-recorded llvm-mc
+  objects (AXS92, AXS94) covers those objects only, and diagnostics are not objects. Alternative considered: keeping the invoking
+  item's place (the review's minimal fix, depth+1); it would still not print llvm-mc's place, which is the instantiation's.
+- (2) both arches' `assemble-file` take `[PATH OPTIONS]` by keyword; (8) one `--defsym` value parser, llvm-mc's (checked by hand: `010`
+  8, `0b101` 5, `-0x10` -16, `08` and `12a` refused, 2^63 refused, -2^63 taken), read inside the check's try.
+- (3) a control runs with its reference's corpus and its subject's options; four new controls hold the diagnostics comparison; `control`
+  answers `left` for an unsupported subject against a refusal. Demonstrated by hand: judge-refusal rebound to call any two refusals equal
+  leaves the old `pltoff-vs-err` passing and fails `rept-notes-vs-err`.
+- (6) `.reloc`'s places and per-directive errors (`test/asm/obj-err/reloc-place`); an absolute `.reloc` offset is now the directive's
+  section's, as emitRelocDirective makes it (it was refused); (7) `.file`'s name split by sys::path's rules (eleven names checked by hand
+  against Path.cpp's algorithm: `/name.c` -> `/` and `name.c`, `a//b.c` -> `a`, `a/b/` -> `a/b` and `.`, `//net/x.c` -> `//net/`,
+  `//x.c` and `/` kept whole); (9) arm64's `:insn-text` (a macro defined by an expansion invoked from the file: two `add x0, x0, #1`).
+- (4) a64i's FPCR: `test/asm/a64i/gen.ae` gains FPRound at a mode (an exact rational rounded at the precision or the subnormal quantum,
+  overflow by the mode, tininess before rounding, an exact zero sum's sign under RM=2, DN) and two programs, `synth-fp-d-rm` and
+  `synth-fp-s-rm` (1,168 cases each, FPCR per case from the row). qemu-aarch64 agreed with the model on every case at the first
+  `--record`. a64i failed five FNMSUB cases in double: its big.Float precision (2,400 bits) dropped the product's low part when the
+  addend is near 2^1024 and the product near 2^-2148; raised to 3,328 bits (the span is about 3,172), all pass. `msr fpcr` keeps FIZ, AH
+  and NEP (it masked them off silently) and fpCheck refuses them as it refuses FZ. Alternative considered: modelling AH (FEAT_AFP);
+  proposed instead (ARS59 (b): no compiled program sets it).
+- (5) `synth-neon-e` (every fourth of synth-neon's cases, 443) in the essential subset with three controls; `a64i-essential` +12% (1 min
+  22 s against 1 min 13 s at load 24 on this host; about 41 s quiet). Alternative considered: synth-neon whole (1,769 cases, about four
+  times the increment).
+- Proofs (stage 0, light; one run at a time from 18:45): x86-64 object-check musl 32/32, synthetic 8/8 with obj-err 3/3, mc-x86-obj 49/49,
+  nine controls; arm64 object-check a64-musl 13/13, a64-synthetic 3/3 with obj-err-arm64 2/2, mc-aarch64-obj 110/110, five controls;
+  arm64 object-verdict 2,819 of 2,832 (unchanged), run-check 17/17 with four controls, roundtrip and encode-check ok (unchanged);
+  x86-64 run-check 19/19 with five controls, roundtrip musl mc-asmparser ok, x86i-check whole 43 of 44 (`{:cpuid 2}`, unchanged; 13 min 25 s
+  at load 15-25, 1.3 GiB, before 18:45);
+  `bin/a64i synth --record` 18 programs under qemu; `bin/a64i check --record` whole 90 of 90 (eval, AOT, forms), coverage 2,015 of 2,015;
+  `--essential` 75 of 75, 15 controls. `bin/reap --record` (arm64 eval 303 -> 306, AOT 3,049 -> 3,052 / 0 / 13), `bin/reap` 0 problems;
+  `bin/crops-score --record`, `--judge --strict` 0. No key moves: `bin/arbace-go --gate-key` `9accb085d767...`, the value AX12 recorded
+  for `mac/next` (`arbace/asm/`, `go/arbace/a64i/`, `bin/repr-asm` are crop paths), `test/gate/gate-key-crops-test.bash` passes.
+- Rule slips: one command wrote to `2>/dev/null` (a sourcing of bin/lib/tools.bash, nothing kept); the x86-64 and arm64 object checks
+  ran concurrently with one TMPDIR, so x86-64's musl list lost a file (rerun alone: 32 of 32); one `sleep 1` and one foreground
+  `until ... sleep` wait (stopped); one `git stash list` (read-only, no stash made).
+
+## 2026-11-11: AR10, a structure load in the essential gate, the vector FP under FPCR, NEON's scalar FP and by-element forms in a64i (branch `asm-ar10`, from `mac/review-fix-3` `6bf064ab4`)
+
+The user's decisions of 2026-11-11: ARS56 (a), ARS57 (a), ARS59 (b) (FZ and FEAT_AFP stay refused), ARS60 (a), in the order ARS57,
+ARS60, ARS56. On the main host during night 12 (one run at a time, each process under 1.5 GiB, MemAvailable checked before each run);
+arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources read again: the Arm ARM (DDI 0487), the AdvSIMD scalar
+three same (FP), scalar two-register miscellaneous (FP), scalar pairwise and vector x indexed element classes (decode and Operation),
+FPMulX, FPMulAdd; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR10".
+
+- ARS57 (a): `test/asm/a64i/simd-struct.s`, a hand-written program (ld1-ld4, ld1r, ld4r, a lane's ld1 and st3, st1 and st2 with post-index
+  immediate and register; fadd, fcmge, fcmeq, fmul on 2d, fdiv with FPSR.IXC), its 21 expected lines derived by hand, then held to
+  qemu-aarch64's run and a64i's (both equal on the first run); in `test/asm/subsets.edn`'s `:a64i` with controls verdict-10 and inject-23.
+  `a64i-essential` measured alone at the same load (24-25): 53 s without, 55 s with. Alternative not taken: the rotation alone (ARS57 (b)).
+- ARS60 (a): `synth-neon-fp-rm` (1,152 cases), the FP lanes under RMode 1-3 and DN, FPCR set by each case's stub; gen.ae's model is the
+  scalar rm model lane by lane, fsqrt's directed rounding by an exact integer root (Newton's iteration on the value scaled by 2^1400, a
+  sticky half when inexact). qemu-aarch64 and a64i agreed with the model on their first runs. Controls verdict-11, inject-24.
+- ARS56 (a): a64i's scalar FP classes (three same: fabd, fmulx, the compares, facge, facgt; two-register miscellaneous: the compares with
+  zero, fcvt[npmza][su], scvtf, ucvtf; pairwise: faddp, fmaxp, fminp, fmaxnmp, fminnmp; on s and d) and the vector x indexed element class
+  (mul, mla, mls; s/umull, s/umlal, s/umlsl and their 2 forms; fmla, fmls, fmul, fmulx vector and scalar), written as Go in the printed
+  module (`.tmp/gomod`, a copy of the light driver's print), built and run there, then converted by repr/go's native reader (`bin/repr-go
+  read --goos linux --goarch arm64 --out DIR arbace/a64i` in that module, `REPR_GO_JOBS=1`, 113 s, peak 1.15 GiB under a watchdog that
+  would have stopped it at 1.45 GiB). The whole package's conversion differs from the committed forms by line metadata and the comments
+  the print drops, so the new functions were taken from it and the hooks spliced into simdfp.ae's existing functions as converted; the
+  light driver printed from the result compiles to the same Go (but the detached section comment) and claims the same 2,129 names.
+  `simd.ae`'s hooks (`OpVEL`, its name, `simdName`, `execSIMD`) by hand. `synth-neon-el` (568 cases): qemu-aarch64 and a64i (eval, AOT,
+  forms) equal to the model on their first runs. Controls verdict-12, forms-7, inject-25. Alternative considered: hand-writing the forms
+  (no conversion), which the print-and-build loop made slower to get right.
+- Results: a64i 90 -> 93 programs eval and AOT, coverage 2,015 -> 2,129 of 2,129, controls 48 -> 55; `bin/reap --record` (arm64 eval
+  306 -> 309, AOT 3,052 -> 3,055 / 0 / 13), `bin/reap` 0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0),
+  `--judge --strict` 0. No key moves (`go/arbace/a64i/` and `test/asm/` are crop paths): `bin/arbace-go --gate-key` `314c8e5b04ab...` with
+  the base's files and with AR10's; `test/gate/gate-key-crops-test.bash` passes. Proposed ARS61, ARS62.
+- Rule slips: one comparison used `<(...)` process substitution (two claimed lists, output read only); `bin/arbace-go --gate-key` ran
+  twice with `2>/dev/null`, and the watchdog script writes `2>/dev/null` for /proc reads of exiting processes; one `git stash list`
+  (read-only, no stash made); the gate key's "before" was taken by checking the base's versions of the changed files out in the worktree
+  for one command and back (no run was loading them).
+
+## 2026-11-11: AR11, synth-neon-el's quarter in the essential gate, NEON's conversions in a64i (branch `asm-ar11`, from `mac/asm-ar10` `a4f851948`)
+
+The user's decisions of 2026-11-11: ARS61 (b), ARS62 (a), ARS62 first. On the main host during night 12 (one run at a time, each process
+under 1.5 GiB, MemAvailable at 12 GiB or more checked before each run); arm64 programs by a64i and by qemu-aarch64 user mode for
+`--record`. Sources read again: the Arm ARM (DDI 0487), FCVTN, FCVTL, FCVTXN, the AdvSIMD shift by immediate class's fixed-point SCVTF,
+UCVTF, FCVTZS, FCVTZU, the conversions between floating-point and fixed-point class, FPConvert, FPRoundBase (FPRounding_ODD),
+FixedToFP, FPToFixed; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR11".
+
+- ARS62 (a): `synth-neon-el-e`, every fourth case of synth-neon-el (142), generated by gen.ae from the same seed, in `test/asm/subsets.edn`'s
+  `:a64i` with controls verdict-13 and inject-26; qemu-aarch64 equal to the model at `--record`. `a64i-essential` measured alone at night
+  12's load (30-67): 92 s and 80 s without it, 101 s and 85 s with it, more than the 2 s estimated (ARS64 proposes measuring again on a
+  quiet host). Alternative not taken: the rotation alone (ARS62 (b)).
+- ARS61 (b): a64i's fcvtn, fcvtl, fcvtxn (and their 2 forms, fcvtxn's scalar; half precision as the 4s forms' narrow type, FPCR.AHP
+  refused; round to odd as FPRound's mode 5) and the fixed-point scvtf, ucvtf, fcvtzs, fcvtzu with #fbits, vector, scalar and from or
+  into a general register (the class of `decodeFPFixed`, hooked in fp.go's decodeFP). Written as Go in a copy of the light driver's
+  printed module (`.tmp/gomod`), built and run there (the claimed list 2,129 -> 2,176; one decode slip found by it, the size bit in the
+  two-register class's mask, fixed before the conversion), then converted by repr/go's native reader (`bin/repr-go read --goos linux
+  --goarch arm64 --out DIR arbace/a64i` in that module, `REPR_GO_JOBS=1`, 240 s, peak 1.09 GiB under a 1.45 GiB watchdog). A splicer
+  (`.tmp/splice/splice.py`: the files' top-level forms keyed by kind and name, compared with the line metadata, hex spellings and
+  layout normalised) took the new forms and the changed ones that carry no comments from the conversion; decodeFP's, round's and
+  lowerSIMDFP's hooks and simd.ae's by hand, so every comment stays (one end-of-line comment the splice dropped in rint restored). The
+  light driver printed from the forms compiles to the written Go (comments aside; one parameter list grouped differently, `fbits,
+  mode int` for `fbits int, mode int`; the code commit's message says "but one comment", a slip: it is that grouping) and claims the
+  same 2,176 names. `synth-neon-cvt` (1,000 cases, each at FPCR 0 and under RMode 1-3 and DN; gen.ae's model `fp-convert-x`,
+  `fp-from-fixed`, `fp-to-fixed`, round-rat gaining the half's bits and `:o`): qemu-aarch64 and a64i (eval, AOT, forms) equal to the
+  model on their first runs. Controls verdict-14, forms-8, inject-27, inject-28. Alternatives considered: FP16's arithmetic with the
+  half type (left for ARS63 (c)); the general-register fixed-point forms left out (taken in: compiled C's `(int)(x * 16.0f)` uses them).
+- Results: a64i 93 -> 95 programs eval and AOT (22,569 -> 23,711 synthetic cases), coverage 2,129 -> 2,176 of 2,176 (fp 118 -> 134, simd
+  1,476 -> 1,507), controls 55 -> 61, `--essential` 77 programs with 19 controls; `bin/reap --record` (arm64 eval 309 -> 311, AOT 3,055 ->
+  3,057 / 0 / 13), `bin/reap` 0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0), `--judge --strict` 0. No
+  key moves: `bin/arbace-go --gate-key` `314c8e5b04ab...` at the base (in `asm-ar10`'s clean worktree, at `a4f851948`) and at AR11;
+  `test/gate/gate-key-crops-test.bash` passes. Proposed ARS63-ARS65.
+- Rule slips: one diagnostic command carried a stray `diff <(echo) <(echo)` (process substitution, no output used); `test/asm/subsets.edn`
+  was reverted to the old subset in the worktree for two timing runs and restored after each (no run loading it was running while it
+  changed); the "before" gate key was computed in `asm-ar10`'s worktree (read only).
+
 ## 2026-11-12: gf-gate, the gate's own bugs of night 12's `--full` (45 FAILED lines; triage `.tmp/night12/triage/TRIAGE.md`)
 
 By the user's decision (2026-11-12): fix them today, night 13 runs `--full` serially, haskell-roundtrip and rust-roundtrip (never passed)
@@ -5231,6 +5383,7 @@ leave `--full` until fixed. Branch `gf-gate` (worktree `.tmp/worktrees/gf-gate`)
   torture-compile 841 s at 15 GiB); alone under GOMEMLIMIT 1200MiB `bin/repr-c roundtrip --corpus quickjs --only` (2 files) passed in 78 s.
   Removed. Risk: the limits-* files sit near the budget; a loaded night may need them back (a stale entry fails, a missing one fails: the judge does not
   treat the class as time-dependent; a proposal). The three limits-* alone under the day's memory cap did not finish in 28 minutes (stopped).
+
 ## 2026-11-12: gf-java, night 12's Java family fixed by day (branch `gf-java`, from `next` `bd6ab3ddd`)
 
 Night 12's `--full` on `next` (`bd6ab3ddd`) failed j2g-edge, javac-verify, javac-check, jrt-convert and java-fixtures
@@ -5268,6 +5421,7 @@ lock (`bin/heavy-lock`, one at a time), so that night 13 runs `--full` serially.
   --java-fixtures verify`, `bin/provenance-check`, `bin/reap` 0 problems, `test/gate/gate-key-crops-test.bash`. Not run: the
   Java level steps (the variants change the five classes' behaviour from stubs to code; a java-check record may show a
   test's change at the night's judge).
+
 ## 2026-11-12: night 12's goi, C and OCaml failures, each rerun alone (branch `gf-misc`, from `next` `bd6ab3ddd`)
 
 Night 12's `--full` on next (`bd6ab3ddd`) ran concurrently, filled the disk (02:53-10:07) and ran under load; the triage
@@ -5329,6 +5483,7 @@ limit, against 146 s recorded on 2026-10-31: si is about 2.8x slower on it, a re
 fragment test/gate/crops/scheme.edn) runs at `SI_TIMEOUT=600`, the record keeps ack's 146 s pass so the slowdown stays visible
 in the record's seconds, and a bisect over si's commits since 2026-10-31 is queued (.tmp/night13/CARRY.md). Considered: a
 per-program limit (si has no such mechanism; the oi-slow.edn pattern would need one), keeping the failure (main held).
+
 ## 2026-11-12: cpp-gatefix, night 12's cpp-check-essential (branch `cpp-gatefix`, from `mac/next` `bd6ab3ddd`)
 
 - Night 12's gate on next failed `cpp-check-essential`: runtime/deferred.cpp (recorded pass) faulted at 0x0 in `vsum`,
@@ -5541,6 +5696,91 @@ from runs that were not the gate's step and were not looked into.)
 - **Proof:** the gate's exact command, whole: `bin/oi check` (380 pass, 0 failing, 0 CHANGED against the native record; churn and
   weak_array_par passed this time, STALE notes only) and `bin/oi suite check` (131 programs, 110 pass, 0 failing) exit 0 in 48 min
   (3 jobs); `bin/oi suite rollup` exit 0 after its record.
+
+## 2026-11-12: AR12, NEON's saturating doubling multiplies and saturating shifts and narrows in a64i (branch `asm-ar12`, from `mac/asm-ar11` `5740229b4`)
+
+The user's decisions of 2026-11-12: ARS63 (a), ARS64 (c), ARS65 (b). On the main host while night 12's gate still ran (one run at a
+time, each process under 1.5 GiB, MemAvailable at 12 GiB or more checked before each run); arm64 programs by a64i and by qemu-aarch64
+user mode for `--record`. Sources read again: the Arm ARM (DDI 0487), SQDMULH, SQRDMULH, SQDMULL, SQDMLAL, SQDMLSL (vector, scalar, by
+element), SQSHL, UQSHL, SQRSHL, UQRSHL (register), SQSHL, UQSHL, SQSHLU (immediate), SQSHRN, SQRSHRN, UQSHRN, UQRSHRN, SQSHRUN,
+SQRSHRUN, SQXTN, UQXTN, SQXTUN, the AdvSIMD three same, three different, vector x indexed element, shift by immediate and two-register
+miscellaneous classes, SignedSatQ, UnsignedSatQ, SatQ; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR12".
+
+- ARS63 (a): a new file `go/arbace/a64i/simdsat.ae` (one operation `OpVSAT`, 26 instructions in six classes by `vsatNames`' index), written
+  as Go in a copy of the light driver's printed module (`.tmp/gomod`), built and run there (the claimed list 2,176 -> 2,394; the
+  synthetic program equal to the model under qemu-aarch64 and a64i, eval and AOT, and the forms check 2,297 of 2,297, all on the first
+  run), then converted by repr/go's native reader (`bin/repr-go read --goos linux --goarch arm64 --out DIR arbace/a64i` in that module,
+  `REPR_GO_JOBS=1`, 84 s, peak 1.10 GiB under a 1.45 GiB watchdog). `simdsat.ae` taken whole from the conversion; `simd.ae`'s hooks
+  (`OpVSAT`, `simdOpNames`, `simdName`'s case, `decodeVSAT`, `lowerVSAT`, `execVSAT` first in their dispatchers) and its header comment
+  edited by hand as forms so every comment stays (AR11's splicer, `.tmp/splice/splice.py`, listed the changed forms; fp.ae's
+  `fpcrUnmodelled` it reports changed is a normalisation artefact, left as AR11 left it); the package header (`go/arbace/a64i.ae`)
+  gained the file, its load and `vsatNames bigOne` at the end of `:init-order` (the header's order already omits simdfp.go's vars, as
+  AR9-AR11 left it; not widened here). The lanes are computed on the exact integer (math/big) and saturated by SatQ, QC set when one
+  saturated. FEAT_RDM's sqrdmlah and sqrdmlsh left `:unimplemented simd`: a64i's AT_HWCAP is 0, it claims no ARMv8.1 feature. The
+  light driver printed from the forms compiles to the written Go (comments aside, one pair of parentheses dropped) and claims the same
+  2,394 names. Alternatives considered: the hooks inside each existing decoder (v3Of, the shift class, decodeVEL) instead of one decoder
+  first (rejected: five functions with comments changed by hand instead of three hooks); sqshlu left out (taken in: the same class, one
+  line); int64 arithmetic with overflow checks (rejected: 2·MIN·MIN at 32 bits and the shifts by up to 127 overflow it).
+- `synth-neon-sat` (1,092 cases, gen.ae's `sat-cases`, seed + 1000; the model `sat-q`, `sat-shift`, `sat-dmul`, `sat-long` on BigIntegers),
+  in `--full`'s rotation only. Controls verdict-15, forms-9, inject-29.
+- ARS64 (c): the host never went quiet in the window (night 12's `gate --full --concurrent` and its Python slot still ran past 12:30
+  UTC). Measured alone at load 15-19 instead, two pairs by `bin/a64i check --only LIST` (the subset without synth-neon-el-e, then with
+  it): 45.5 s and 46.2 s without, 46.4 s and 46.9 s with (+0.7 to +1.0 s, about 2%; AR11's pairs at load 30-67: +5 to +9 s). The quiet
+  run is left as a command in the survey (about 4 minutes, under 0.5 GiB); the subset is unchanged.
+- Results: a64i 95 -> 96 programs eval and AOT (23,711 -> 24,803 synthetic cases), coverage 2,176 -> 2,394 of 2,394 (simd 1,507 -> 1,725),
+  controls 61 -> 64; `--essential` 77 of 77 unchanged; `bin/reap --record` (arm64 eval 311 -> 312, AOT 3,057 -> 3,058 / 0 / 13), `bin/reap`
+  0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0), `--judge --strict` 0. No key moves: `bin/arbace-go
+  --gate-key` `314c8e5b04ab...` (AR11's); `test/gate/gate-key-crops-test.bash` passes. Proposed ARS66, ARS67.
+- Rule slips: `df /` stood at 86-87% throughout, over the general rules' 85% but under the brief's 88% for night 12 (the runs
+  gated at 88%); the timing pair ran under load 15-19, not on a quiet host (the gate did not end in the window).
+
+## 2026-11-12: AR13, the package's :init-order held by goi's checker, NEON's remaining integer lanes in a64i, the essential step timed after night 12 (branch `asm-ar13`, from `mac/asm-ar12` `ac5722aec`)
+
+The user's decisions of 2026-11-12: ARS66 (c), ARS67 (b), ARS64 (c) once night 12's gate ended, and first a check of a64i's package
+`:init-order`. On the main host; until night 12's gate ended (about 14:00 UTC) one run at a time, each process under 1.5 GiB,
+MemAvailable at 12 GiB or more checked before each run; arm64 programs by a64i and by qemu-aarch64 user mode for `--record`. Sources
+read again: the Arm ARM (DDI 0487), SRSHL, URSHL, PMUL, PMULL, RADDHN, RSUBHN, SADDLP, UADDLP, SADALP, UADALP, SUQADD, USQADD, SQABS,
+SQNEG, SHLL, RSHRN, ADDP (scalar), the AdvSIMD three same, three different, two-register miscellaneous, shift by immediate and scalar
+pairwise classes, SatQ, PolynomialMult; no code copied. doc/asm/ARM64-SURVEY.md, "As built: AR13".
+
+- `:init-order`: goi's checker over arbace/a64i (`.tmp/tc-a64i.ae`, review-fix-1's wrapper over `test/python/table_check.ae` with
+  arbace/a64i, arbace/emu and arbace/crt as program packages; `.tmp/gotable-a64i.edn`, the list with arbace/a64i; linux/arm64 from the
+  main checkout's `.tmp/goi-table/82d03d864128d2a9/linux-arm64`, read only; about 40 s, under 0.6 GiB) gave 1 error in linux/arm64: the
+  annotation lacked simdfp.go's six variables and blank (since AR9) and named simd.go's blank at its old line. Set to the checker's
+  order (commit `ef9296e53`), 0 errors; again 0 after AR13's files. tamago/amd64 and tamago/arm64 differ by `world` alone
+  (lockstep_linux_arm64.go, not selected there; the annotation is the package's linux/arm64 `:config`'s). Alternative considered:
+  widening the check to every configuration (rejected: one annotation cannot hold two configurations' orders).
+- ARS66 (c): a new file `go/arbace/a64i/simdint.ae` (one operation `OpVINT`, 17 instructions in five classes by `vintNames`' index:
+  srshl, urshl, pmul; raddhn, rsubhn, pmull; saddlp, uaddlp, sadalp, uadalp, suqadd, usqadd, sqabs, sqneg, shll; rshrn; addp's
+  scalar, with the 2 forms and the scalars), written as Go in a copy of the light driver's printed module (`.tmp/gomod`), built and run
+  there (the claimed list 2,394 -> 2,507; the synthetic program equal to the model under qemu-aarch64 and a64i, eval and AOT, and the
+  forms check 1,233 of 1,233, all on the first run), then converted by repr/go's native reader (`bin/repr-go read --goos linux --goarch
+  arm64 --out DIR arbace/a64i` in that module, `REPR_GO_JOBS=1`, 100 s, peak 1.06 GiB under a 1.45 GiB watchdog). `simdint.ae` taken
+  whole; `simd.ae`'s hooks (`OpVINT`, `simdOpNames`, `simdName`'s case, `decodeVINT`, `lowerVINT`, `execVINT` first in their
+  dispatchers) and its header comment by hand as forms; the package header gained the file, its load and `vintNames`. pmull's 1q
+  (FEAT_PMULL) not claimed. The light driver printed from the forms compiles to the written Go (comments aside, no difference) and
+  claims the same 2,507 names. The integer classes the brief listed "if missing" were all claimed already (uaba, saba, uabal, sabal,
+  sabdl, uabdl, cls, clz, cnt, rbit, rev16/32/64, sshl, ushl, srshr, urshr, srsra, ursra, addhn, subhn); a scan of LLVM's table through
+  the written a64i (each AdvSIMD and FP instruction outside SVE/SME, twelve random fillings of its fields) leaves of ARMv8.0's integer
+  side only urecpe and ursqrte (the estimates, ARS66 (a)). Alternatives considered: extending v3Names, v2Names, v3dNames and vshiNames
+  in place (rejected: five commented functions edited by hand, as AR12 decided); pmull's 1q with AT_HWCAP's PMULL bit (left: a64i
+  claims no feature).
+- `synth-neon-int` (560 cases, gen.ae's `int-cases`, seed + 1100; the model on longs and BigIntegers, `clmul` for the polynomial
+  products), in `--full`'s rotation only. Controls verdict-16, forms-10, inject-30. ARS67 (b): synth-neon-sat stays in the rotation.
+- ARS64 (c): night 12's gate ended about 14:00 UTC; the host was not idle (other agents, load 6-14 on 64 CPUs). Measured alone,
+  alternating, by `bin/a64i check --only LIST`: without synth-neon-el-e 55.4, 55.9, 54.7, 55.6 s; with it 56.9, 57.3, 59.1, 55.3, 57.3 s
+  (means 55.4 and 57.2 s: +1.8 s, about 3%); `--essential` 52 s; the builds take 35-38 s of it, the generation of every synthetic
+  program about 7 s, the runs 3-4 s. The survey recommends keeping it (ARS64 (a)); the subset may grow by programs of that
+  size.
+- Results: a64i 96 -> 97 programs eval and AOT (24,803 -> 25,363 synthetic cases), coverage 2,394 -> 2,507 of 2,507 (simd 1,725 ->
+  1,838), controls 64 -> 67; `--essential` 77 of 77 unchanged; `bin/reap --record` (arm64 eval 312 -> 313, AOT 3,058 -> 3,059 / 0 / 13),
+  `bin/reap` 0 problems; `bin/crops-score --record` (scores unchanged: 99.8 / 100.0 / 100.0), `--judge --strict` 0. No key moves:
+  `bin/arbace-go --gate-key` `314c8e5b04ab...` (AR12's, in its worktree and in this one); `test/gate/gate-key-crops-test.bash` passes.
+  Proposed ARS68-ARS70.
+- Rule slips: `df /` stood at 86-87% throughout, over the general rules' 85%, under the brief's 88% (the runs gated at 88%); the first
+  timing set wrote two runs into one log each (`.tmp/essQ-*.log` overwritten), so its first run's minutes are lost (its seconds read
+  3.82, about 1 min 4 s) and the second set (`.tmp/essR*.log`) was run; the table check's linux/arm64 std forms came from an older
+  `bin/goi table` cache key than the checkout's (read only, std unchanged since).
 
 ## 2026-11-13: GATE-DIET-SURVEY, the gate measured and a diet proposed (branch `gate-diet`, from `mac/next` `3b25e0d43`)
 
@@ -5898,3 +6138,4 @@ Gate 13e's gate-tests failed java-timeouts-test (and gate-reads-test and gate-te
 held test/java/timeouts.txt at 35 lines, 21 above 60 s, and n16-fix (30c598795; the user, 2026-11-14, round 38) added the measured limits of
 t03459 (128), t03897 (88) and t08163 (112). The test's counts are now 38 and 24; the data is unchanged. Proof: the test alone, 36 of 36.
 The main session, for 13e's revisit (the user, round 40: main advances anyway; the fix waits on next for the next gate).
+

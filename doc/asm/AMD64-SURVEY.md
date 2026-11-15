@@ -1793,3 +1793,52 @@ Numbering from AXS95.
 - **AXS96 MC/AsmParser's DWARF tests.** MC/AsmParser's `directive_loc*.s` and `directive_file*.s` are i386 or `-g` runs; the line program
   could also be held by their x86-64 objects recorded by hand: (a) a corpus `mc-asmparser-obj` of those that assemble for x86-64; (b) the
   synthetic file alone, as built. *Recommended: (b)* until the `-g` (MCGenDwarfInfo) work.
+
+## As built: review 1111's fixes (2026-11-11; branch `review-fix-3`, from `mac/next` `a7916bb2a` with `mac/asm-ar9` `198c25291` merged)
+
+The independent review of the assembly crops (`.tmp/reviews/1111/REVIEW-asm.md`, read whole) found nine things; the shared object
+assembler's are fixed here (arm64's a64i findings 4, 5 and 9: doc/asm/ARM64-SURVEY.md, "As built: review 1111's fixes"). One commit a
+finding. Sources read (llvm-project 23.1.5, the pinned tarball, extracted into the worktree's `.tmp/llvm`): `lib/MC/MCParser/AsmParser.cpp`
+(parseDirectiveRept, instantiateMacroLikeBody, handleMacroEntry, printMacroInstantiations, DiagHandler, parseDirectiveLoc,
+parseDirectiveReloc), `lib/MC/MCContext.cpp` (reportCommon), `lib/MC/MCAssembler.cpp` (layout's `.reloc` offsets),
+`lib/MC/MCObjectStreamer.cpp` (emitRelocDirective), `lib/MC/MCDwarf.cpp` (tryGetFile), `lib/Support/Path.cpp`, `lib/Support/StringRef.cpp`,
+`tools/llvm-mc/llvm-mc.cpp` (fillCommandLineSymbols). No code copied.
+
+- **(1) An expansion's places.** A `.rept`, `.irp` or macro runs as one instantiation, AsmParser's `<instantiation>` buffer: a `.rept`'s or
+  `.irp`'s copies concatenated (a body with no backslash too: it ran at depth 0 before, each item writing its body-relative offsets as the
+  file's place), the body from the line after its head. An error inside is at `<instantiation>:LINE:COL` with a `note: while in macro
+  instantiation` a level, innermost first; an error at the layout (a fixup's, a `.reloc`'s, a symbol's) has no note, ActiveMacros being
+  empty then. A repetition counts toward the nesting limit, which is checked at a macro's entry (handleMacroEntry; a `.rept` itself is not
+  checked). `read-body`'s offsets are the text's own (its macro declarations' length taken off). `.loc`'s file-number errors are at the
+  number's token. Arbace's own error files, `test/asm/obj-err/` (x86-64) and `test/asm/obj-err-arm64/`, each `NAME.s` with `NAME.err`, the
+  diagnostics derived by hand from LLVM's rules (not recorded: the user's llvm-mc approval covers AXS92's and AXS94's objects), are run
+  with the synthetic corpus (`object-check synthetic`, `--arch arm64 object-check a64-synthetic`; `arbace.asm.obj` verb `diag-check`):
+  `rept-place` (a layout error in each copy), `rept-notes` (a parse error in each copy, its note at the `.rept`), `reloc-place` (6).
+- **(2) `--defsym` by keyword.** Both arches' `assemble-file` take `[PATH OPTIONS]` (`{:defsym}`; arm64's `{:implicit :defsym}`), the
+  object check's call the same for both: arm64's second argument was IMPLICIT, a defsym there turned `-implicit-mapsyms` on and was lost.
+- **(3) The refusal's control.** A control runs with its reference's corpus, its subject from any list with the list's options or from
+  `test/asm/obj-err*/`, a reference there being expected diagnostics. New: `rept-notes-vs-err` (a refused file against llvm-mc's recorded
+  refusal), `err-vs-rept-place`, `rept-notes-vs-rept-place`, arm64's `loc-zero-vs-rept-notes`. `control` answers `left` for a refused
+  reference when the subject neither assembles nor is refused with errors. Shown by hand: a judge that calls any two refusals equal
+  leaves `pltoff-vs-err` passing (vacuously) and makes `rept-notes-vs-err` fail.
+- **(6) `.reloc`'s places.** Each directive keeps its place and section; its errors are reported at its offset expression and the next
+  directive is evaluated. An absolute offset is the directive's section's (emitRelocDirective), where it was refused.
+- **(7) `.file N "/x.c"`.** Split by sys::path's filename and parent_path (ported, POSIX style): `/x.c` is directory `/` and file `x.c`.
+- **(8) One `--defsym` parser.** llvm-mc's radix sensing (`0x`, `0b`, `0o`, a leading `0`), a leading `-`, the whole text, int64's range,
+  read inside the check's try (a value llvm-mc refuses: unsupported `:defsym` for the case). `010` is 8, `0b101` 5, `-0x10` -16.
+
+Checks (stage 0, light, one at a time after 18:45): object-check musl 32/32, synthetic 8/8 with obj-err 3/3, mc-x86-obj 49/49, the nine
+x86-64 object controls failing as they must; arm64 object-check a64-musl 13/13, a64-synthetic 3/3 with obj-err-arm64 2/2, mc-aarch64-obj
+110/110, five controls; the other steps of `test/gate/crops/asm.edn` in the journal's entry. No record changed but a64i's (arm64's survey).
+
+### Proposed (review 1111)
+
+Numbering from AXS97.
+
+- **AXS97 Tabs in the diagnostics.** SMDiagnostic::print expands a source line's tabs to tab stops of 8 (and the caret line with them);
+  `arbace.asm.obj/diagnostics` prints the line as it is. FileCheck's default whitespace folding hides it in the error tests; a recorded
+  refusal (AXS95) with a tab would not. (a) expand as printSourceLine does; (b) leave it until a record needs it. *Recommended: (a)*.
+- **AXS98 `.file`'s compilation directory and repeats.** tryGetFile empties a directory equal to llvm-mc's compilation directory (its
+  working directory) and refuses a file number seen before; Arbace keeps the directory and allows the same file again. (a) check both
+  against llvm-mc's sources and the recorded objects (the oracle tier's, by hand); (b) as built. *Recommended: (a)*.
+

@@ -51,7 +51,7 @@
     (case [(== (bf w 28 26) 5)]
       (return (decodeBranch w pc)))
     (case [(and (== (bf w 27 27) 1) (== (bf w 25 25) 0))]
-      (return (decodeLdSt w pc)))
+      (return (overlaps (decodeLdSt w pc))))
     (case [(== (bf w 27 25) 5)]
       (return (decodeDPReg w)))
     (case [(== (bf w 27 25) 7)]
@@ -197,17 +197,66 @@
           (case [2]
             (return (lit Inst :Op OpCLREX :Sys crm) ""))
           (case [4 5 6]
-            (return (lit Inst :Op OpBARRIER :Sys (bit-or (<< op2 4) crm)) "")))
+            (return (lit Inst :Op OpBARRIER :Sys (bit-or (<< op2 4) crm)) ""))
+          (case [7]
+            ;; AR19: FEAT_SB's sb (CRm 0000; the M2 raises SIGILL for the others)
+            (when (== crm 0)
+              (return (lit Inst :Op OpBARRIER :Sys (<< op2 4)) ""))))
 
         (return (lit Inst) ":unimplemented barrier"))
+      (case [(and (== l 0) (== op0 0) (== op1 0) (== crn 4) (<= op2 2) (== rt 31))]
+        ;; AR18: MSR (immediate)'s PSTATE forms of FEAT_FlagM (cfinv, op2 000) and FEAT_FlagM2 (xaflag 001, axflag 010); CRm,
+        ;; (0)(0)(0)(0) in the Arm ARM, ignored as the M2 ignores it (each of its 16 values runs the instruction there)
+        (return (lit Inst :Op OpFLAGM :Sys op2) ""))
+      (case [(and (== l 0) (== op0 0) (== op1 3) (== crn 4) (or (== op2 1) (== op2 2)) (== rt 31))]
+        ;; AR19: MSR (immediate) of PSTATE.SSBS (op2 001) and PSTATE.DIT (010): the bit CRm<0> (the M2 runs every CRm)
+        (let [^uint32 sys SysSSBS]
+          (when (== op2 2)
+            (set! sys SysDIT))
+
+          (return (lit Inst :Op OpMSR :Rm 255 :Imm (conv int64 (bit-and crm 1)) :Sys sys) "")))
+      (case [(and (== l 0) (== op0 1) (== op1 3) (== crn 7) (== op2 1))]
+        ;; AR19: SYS's dc zva, ic ivau, dc cvac, cvau, cvap, cvadp and civac, the M2's at EL0 (the other DC and IC
+        ;; operations, TLBI and AT are EL1's: SIGILL)
+        (when [(values _ ok) (aget sysOpNames crm)] ok
+          (return (lit Inst :Op OpSYS :Rd rt :Sys crm) "")))
       (case [(>= op0 2)]
-        (let [op OpMSR]
+        ;; the system registers EL0 reads and writes under Linux on the M2 (AR19; AR20: Linux's emulated ID registers, IDReg's;
+        ;; the others UNDEFINED)
+        (let [(values op sys) (values OpMSR (bit-or (<< op0 14) (<< op1 11) (<< crn 7) (<< crm 3) op2))]
           (when (== l 1)
             (set! op OpMRS))
 
-          (return (lit Inst :Op op :Rd rt :Sys (bit-or (<< op0 14) (<< op1 11) (<< crn 7) (<< crm 3) op2)) ""))))
+          (switch sys
+            (case [SysNZCV SysFPCR SysFPSR SysTPIDR SysDIT SysSSBS]
+              (return (lit Inst :Op op :Rd rt :Sys sys) ""))
+            (case [SysTPIDRRO SysCNTFRQ SysCNTVCT SysCNTVCTSS SysDCZID SysCTR]
+              (when (== l 1)
+                (return (lit Inst :Op op :Rd rt :Sys sys) ""))))
+
+          ;; AR20 (ARS85 (a)): the ID registers Linux emulates for EL0, read (MRS only)
+          (when [(values _ ok) (IDReg sys)] (and ok (== l 1))
+            (return (lit Inst :Op op :Rd rt :Sys sys) ""))
+
+          (return (lit Inst) undef))))
 
     (return (lit Inst) ":unimplemented system")))
+
+
+(go/func overlaps "overlaps makes UNDEFINED the loads and stores whose registers overlap where the Arm ARM says CONSTRAINED UNPREDICTABLE and\nthe M2 resolves it so (AR19, ARS82 (a); queue 288's sweep of 226 words, every one as the M2 runs it): a general register's\nwriteback with Rt or Rt2 the base (Rn not SP), and a load pair, general or SIMD&FP, plain, exclusive or acquire, into one\nregister twice (Rt = Rt2). The store-exclusives' status register equal to Rt, Rt2 or Rn runs on the M2 and here.\n" [^Inst in ^string r] :results [Inst string]
+  (when (!= r "")
+    (return in r))
+
+  (let [pair (or (== (.-Op in) OpLDP) (== (.-Op in) OpSTP))]
+    (when (and (or (== (.-Mode in) ModePre) (== (.-Mode in) ModePost)) (not (.-Vreg in)) (!= (.-Rn in) 31)
+            ^:go/paren (or (== (.-Op in) OpLDR) (== (.-Op in) OpSTR) pair)
+            ^:go/paren (or (== (.-Rd in) (.-Rn in)) (and pair (== (.-Ra in) (.-Rn in)))))
+      (return (lit Inst) undef))
+
+    (when (and (== (.-Rd in) (.-Ra in)) ^:go/paren (or (== (.-Op in) OpLDP) (and (== (.-Op in) OpLDXR) (.-Pair in))))
+      (return (lit Inst) undef))
+
+    (return in "")))
 
 
 ^{:go/end 373} (go/func decodeLdSt [^uint32 w ^uint64 pc] :results [Inst string]
@@ -229,8 +278,13 @@
 
               (return (lit Inst :Op OpSTXR :Size size :Rm rs :Rd rt :Ra rt2 :Rn rn :Pair true :Rel (== o0 1)) ""))
             (case [(and (== o2 0) (== o1 1) (== rt2 31))]
+              ;; AR18: an odd Rs or Rt is UNDEFINED (the Arm ARM's CASP; the M2 raises SIGILL)
+              (when (or (== (bit-and rs 1) 1) (== (bit-and rt 1) 1))
+                (return (lit Inst) undef))
+
               (return (lit Inst :Op OpCASP :Size (+ size 2) :Rm rs :Rd rt :Rn rn :Acq (== l 1) :Rel (== o0 1)) ""))
-            (case [(and (== o2 1) (== o1 0) (== o0 1))]
+            (case [(and (== o2 1) (== o1 0))]
+              ;; o0 0: AR19's FEAT_LOR ldlar and stllr, run as ldar and stlr (LORegions order nothing a single thread sees)
               (when (== l 1)
                 (return (lit Inst :Op OpLDAR :Size size :Rd rt :Rn rn :Acq true) ""))
 
@@ -239,6 +293,28 @@
               (return (lit Inst :Op OpCAS :Size size :Rm rs :Rd rt :Rn rn :Acq (== l 1) :Rel (== o0 1)) "")))
 
           (return (lit Inst) ":unimplemented ldst-ordered")))
+      (case [(and (== (bf w 29 27) 1) v)]
+        (return (decodeSIMDMem w)))
+      (case [(and (== (bf w 29 24) 0x19) (== (bf w 21 21) 0) (== (bf w 11 10) 0))]
+        ;; AR18: FEAT_LRCPC2's LDAPR/STLR (unscaled immediate): stlur (opc 00), ldapur (01), ldapurs to x (10), to w (11)
+        (let [in (lit Inst :Size size :Sf (== size 3) :Rd rt :Rn rn :Imm (sext (conv uint64 (bf w 20 12)) 9))]
+          (switch (bf w 23 22)
+            (case [0]
+              (set! (values (.-Op in) (.-Rel in)) (values OpSTLUR true)))
+            (case [1]
+              (set! (values (.-Op in) (.-Acq in)) (values OpLDAPUR true)))
+            (case [2]
+              (when (== size 3)
+                (return (lit Inst) undef))
+
+              (set! (values (.-Op in) (.-Acq in) (.-Sf in) (.-Signed in) (.-Wide in)) (values OpLDAPUR true true true true)))
+            (default
+              (when (>= size 2)
+                (return (lit Inst) undef))
+
+              (set! (values (.-Op in) (.-Acq in) (.-Signed in)) (values OpLDAPUR true true))))
+
+          (return in "")))
       (case [(and (== (bf w 29 27) 3) (== (bf w 25 24) 0))]
         (let [t (+ pc (conv uint64 (sext (<< (conv uint64 (bf w 23 5)) 2) 21)))]
           (when v
@@ -418,7 +494,8 @@
     (switch
       (case [(== op2 0)]
         (when (!= (bf w 15 10) 0)
-          (return (lit Inst) ":unimplemented rmif"))
+          ;; AR18: rotate right into flags and evaluate into flags (FEAT_FlagM)
+          (return (decodeFlagM w)))
 
         (let [op OpADC]
           (when (== (bf w 30 30) 1)
@@ -476,6 +553,14 @@
 
               (return in "")))
 
+          (when (and (>= opc 16) (<= opc 23))
+            ;; AR18: FEAT_CRC32's crc32b/h/w/x and crc32cb/h/w/x (opcode 010 C sz): sf 1 with sz 11 only
+            (let [sz (bit-and opc 3)]
+              (when (!= sf (== sz 3))
+                (return (lit Inst) undef))
+
+              (return (lit Inst :Op OpCRC32 :Sf sf :Rd rd :Rn rn :Rm rm :Size (conv uint8 sz) :Sys (bf w 12 12)) "")))
+
           (let [in (lit Inst :Sf sf :Rd rd :Rn rn :Rm rm)]
             (switch opc
               (case [2]
@@ -527,3 +612,22 @@
           (return in ""))))
 
     (return (lit Inst) ":unimplemented dp-reg")))
+
+
+
+(go/func decodeFlagM "decodeFlagM is FEAT_FlagM's data-processing words (AR18): rmif (sf 1, op 0, S 1, bits 14-10 00001, o2 0; imm6 the\nrotation, the mask bits 3-0) and setf8, setf16 (sf 0, op 0, S 1, opcode2 0, sz bit 14, bits 13-10 0010, o3 0, mask 1101); the\nclass's other words are unallocated.\n" [^uint32 w] :results [Inst string]
+  (let [rn (conv uint8 (bf w 9 5))
+      (values sf op s) (values (bf w 31 31) (bf w 30 30) (bf w 29 29))]
+    (switch
+      (case [(== (bf w 14 10) 1)]
+        (when (or (!= sf 1) (!= op 0) (!= s 1) (!= (bf w 4 4) 0))
+          (return (lit Inst) undef))
+
+        (return (lit Inst :Op OpFLAGM :Sf true :Rn rn :Imm (conv int64 (bf w 20 15)) :Imm2 (conv int64 (bf w 3 0)) :Sys 3) ""))
+      (case [(== (bf w 13 10) 2)]
+        (when (or (!= sf 0) (!= op 0) (!= s 1) (!= (bf w 20 15) 0) (!= (bf w 4 0) 13))
+          (return (lit Inst) undef))
+
+        (return (lit Inst :Op OpFLAGM :Rn rn :Sys (+ 4 (bf w 14 14))) "")))
+
+    (return (lit Inst) undef)))

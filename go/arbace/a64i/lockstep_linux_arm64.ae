@@ -2,6 +2,7 @@
 
 
     ^{:line 4} [bytes "bytes"]
+    [binary "encoding/binary"]
     ^{:line 5} [errors "errors"]
     ^{:line 6} [fmt "fmt"]
     ^{:line 7} [os "os"]
@@ -17,11 +18,18 @@
 ;; tracer, emu.Tracee: registers by PTRACE_GETREGSET NT_PRSTATUS, ASLR off) and by a64i from the native's own initial state
 ;; (its stack's bytes, the auxv's AT_SYSINFO_EHDR made AT_IGNORE in both: no vdso), compared in the sys mode at each system
 ;; call (the registers, the call's arguments, the bytes write(2) writes, the writable memory) or in the step mode after
-;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, the bytes stored, TPIDR_EL0 after an MSR). The world's
-;; answers (read's bytes, clock_gettime's, getrandom's, the ids) are the native's, copied into a64i. Rules for
-;; single-stepping's artifacts: an exclusive load ends the step mode until the next system call (a single-stepped
-;; store-exclusive always fails: the step's exception clears the monitor), the region compared there as in the sys mode;
+;; every instruction (PTRACE_SINGLESTEP: the registers, NZCV, V0-V31, FPSR and FPCR (ARS44), the bytes stored, TPIDR_EL0 after
+;; an MSR). The world's
+;; answers (read's bytes, clock_gettime's, getrandom's, the ids; in the step mode cntvct_el0's and cntvctss_el0's, AR19) are the
+;; native's, copied into a64i. Rules for
+;; single-stepping's artifacts: an exclusive region is not stepped (a single-stepped store-exclusive always fails: the step's
+;; exception clears the monitor): a64i runs it to its store-exclusive or clrex, the native to a brk at a64i's next pc, compared
+;; there (ARS44); a region that does not end so ends the step mode until the next system call, compared there as in the sys mode;
 ;; x7 at a system call stop is ptrace's (entry 0, exit 1), never compared.
+;; AR20 (queue 291): a signal a64i delivered to a handler is the native's signal-delivery stop at the same pc, the native then
+;; resumed with the signal (in the step mode stepped with it: its next stop is the handler's first instruction), the frame
+;; compared with the rest of memory; the ESR record's fault status of a translation or permission fault is the world's (the
+;; kernel makes its tables lazily: the level where a walk stops, a page untouched or read before), taken from the native.
 
 (go/type lockstep (struct
     ^{:line 27 :tag (* emu/Tracee)} t
@@ -32,7 +40,8 @@
     ^{:line 32 :tag bool} resume ; the step mode resumed after the next system call (an exclusive region)
     ^{:line 33 :tag bool} afterSys ; the last step was a system call's
     ^{:line 34 :tag uint64} stackLo
-    ^{:line 35 :tag uint64} stackHi))
+    ^{:line 35 :tag uint64} stackHi
+    ^{:tag (slice (array 2 uint64))} shared)) ; AR23: the shared file mappings' base and size (refreshShared)
 
 
 
@@ -44,7 +53,9 @@
     ^{:line 44} ["getuid" (lit _ -1 0)] ["geteuid" (lit _ -1 0)] ["getgid" (lit _ -1 0)] ["getegid" (lit _ -1 0)] ["uname" (lit _ 0 390)]
     ^{:line 45} ["set_tid_address" (lit _ -1 0)] ["nanosleep" (lit _ -1 0)] ["clock_nanosleep" (lit _ -1 0)] ["sched_yield" (lit _ -1 0)]
     ^{:line 46} ["openat" (lit _ -1 0)] ["close" (lit _ -1 0)] ["lseek" (lit _ -1 0)] ["write" (lit _ -1 0)] ["writev" (lit _ -1 0)] ["ioctl" (lit _ -1 0)]
-    ^{:line 47} ["prlimit64" (lit _ 3 16)] ["getrlimit" (lit _ 1 16)] ["fcntl" (lit _ -1 0)] ["getcwd" (lit _ 0 -1)] ["readlinkat" (lit _ 2 -1)]))
+    ^{:line 47} ["prlimit64" (lit _ 3 16)] ["getrlimit" (lit _ 1 16)] ["fcntl" (lit _ -1 0)] ["getcwd" (lit _ 0 -1)] ["readlinkat" (lit _ 2 -1)]
+    ["newfstatat" (lit _ 2 128)] ["fstat" (lit _ 1 128)] ["ftruncate" (lit _ -1 0)] ["fdatasync" (lit _ -1 0)] ["fsync" (lit _ -1 0)]
+    ["fallocate" (lit _ -1 0)] ["unlinkat" (lit _ -1 0)] ["mkdirat" (lit _ -1 0)])) ; AR21: the files' stat, the native's (its descriptors are the world's); AR23: fallocate and unlinkat, AR24 mkdirat (msync is a64i's own: its mappings')
 
 
 ^{:go/end 55} (go/func nativeX ^{:tag (array 32 uint64)} [^{:tag (* syscall/PtraceRegs)} r]
@@ -249,7 +260,34 @@
     (when (!= (bit-and (.-Pstate r) 0xf0000000) (.NZCV (.-c l)))
       (return (fmt/Sprintf "nzcv %#x, native %#x" (.NZCV (.-c l)) (bit-and (.-Pstate r) 0xf0000000))))
 
-    ""))
+    (.compareFP l)))
+
+
+(go/method compareFP "compareFP holds a64i's SIMD&FP registers V0-V31, FPSR and FPCR to the native's (PTRACE_GETREGSET NT_PRFPREG:\nLinux's user_fpsimd_state, the 32 registers' 16 bytes, then FPSR and FPCR; ARS44).\n" ^string [^{:tag (* lockstep)} l]
+  (let [^{:tag (array 528 byte)} b (zero (array 528 byte))
+      iov (lit (struct
+          ^{:tag (* byte)} base
+          ^{:tag uint64} n)
+        (addr (aget b 0)) 528)]
+    (when [(values _ _ e) (syscall/Syscall6 syscall/SYS_PTRACE 0x4204 (conv uintptr (.-Pid (.-t l))) 2 (conv uintptr (conv unsafe/Pointer (addr iov))) 0 0)] (!= e 0)
+      (return (fmt/Sprintf "the native's SIMD&FP registers unreadable: %v" e)))
+
+    (let [c (.-c l)]
+      (for [i 0] (< i 32) (inc! i)
+        (let [lo (.Uint64 binary/LittleEndian (subslice b (* 16 i)))
+            hi (.Uint64 binary/LittleEndian (subslice b (+ (* 16 i) 8)))]
+          (when (or (!= lo (aget (aget (.-Q c) i) 0)) (!= hi (aget (aget (.-Q c) i) 1)))
+            (return (fmt/Sprintf "v%d %016x_%016x, native %016x_%016x" i (aget (aget (.-Q c) i) 1) (aget (aget (.-Q c) i) 0) hi lo)))))
+
+      (let [fpsr (conv uint64 (.Uint32 binary/LittleEndian (subslice b 512)))
+          fpcr (conv uint64 (.Uint32 binary/LittleEndian (subslice b 516)))]
+        (when (!= fpsr (.-FPSR c))
+          (return (fmt/Sprintf "fpsr %#x, native %#x" (.-FPSR c) fpsr)))
+
+        (when (!= fpcr (.-FPCR c))
+          (return (fmt/Sprintf "fpcr %#x, native %#x" (.-FPCR c) fpcr)))
+
+        ""))))
 
 
 ^{:go/end 269} (go/method tpidr [^{:tag (* lockstep)} l] :results [uint64 error]
@@ -302,6 +340,18 @@
       (when (not ok)
         (return (conv int64 nret) true))
 
+      (when (and (== (.-Name s) "mmap") (== (bit-and (aget args 3) 0x20) 0))
+        (return (.fileMap l nret args) true))
+
+      ;; AR23: a shared file mapping unmapped (munmap, mmap's MAP_FIXED) is forgotten (refreshShared); a64i's kernel unmaps it
+      (when (or (== (.-Name s) "munmap") (and (== (.-Name s) "mmap") (!= (bit-and (aget args 3) 0x10) 0)))
+        (.dropShared l (aget args 0) (aget args 1)))
+
+      ;; AR23: mprotect's EACCES (PROT_WRITE over a shared mapping of a descriptor not open for writing) is the descriptor's, the
+      ;; world's: a64i's kernel knows no descriptor of the native's
+      (when (and (== (.-Name s) "mprotect") (== (conv int64 nret) -13))
+        (return -13 true))
+
       (let [(values w inWorld) (aget world (.-Name s))]
         (when (not inWorld)
           (return 0 false))
@@ -321,9 +371,56 @@
 
 
 
+        (switch (.-Name s)
+          (case ["write" "writev" "ftruncate" "fallocate"]
+            (.refreshShared l)))
+
         (return (conv int64 nret) true)))))
 
 
+(go/method refreshShared "refreshShared takes the native's pages of the shared file mappings after a call of the world's that may change a file
+(AR23, queue 295): the file is the world's, and the native's mapping shows its file's change at once (a64i's kernel holds a copy,
+written back at msync, munmap and the end).
+" [^{:tag (* lockstep)} l]
+  (range [_ m (.-shared l)]
+    (for [p (aget m 0)] (< p (+ (aget m 0) (aget m 1))) (set! p + 4096)
+      (let [(values b err) (.Read (.-t l) p 4096)]
+        (when (!= err nil)
+          (break))
+
+        (.WriteBytes (.-AS (.-c l)) p b)))))
+
+
+(go/method dropShared "dropShared forgets the shared file mappings over [base, base+n) (AR23).
+" [^{:tag (* lockstep)} l ^uint64 base ^uint64 n]
+  (let [hi (+ base (bit-and-not (+ n 4095) 4095))
+        ^{:tag (slice (array 2 uint64))} kept nil]
+    (range [_ m (.-shared l)]
+      (when (or (>= base (+ (aget m 0) (aget m 1))) (<= hi (aget m 0)))
+        (set! kept (append kept m))))
+
+    (set! (.-shared l) kept)))
+
+
+
+
+(go/method fileMap "fileMap is a file's mmap (AR22): the native's descriptors are the world's, so a64i maps its own pages where its kernel\nwould (emu.Kernel.MapAnon; the registers' comparison holds the address to the native's) and takes the native's bytes there, a\npage at a time to the first the native cannot read (past the file's end), the rest zero; the native's error as it is.\n" ^int64 [^{:tag (* lockstep)} l ^uint64 nret ^{:tag (array 6 uint64)} args]
+  (when (< (conv int64 nret) 0)
+    (return (conv int64 nret)))
+
+  (let [size (bit-and-not (+ (aget args 1) 4095) 4095)
+        a (.MapAnon (.-K (.-c l)) (aget args 0) size (aget args 2) (aget args 3))]
+    (for [p (conv uint64 0)] (< p size) (set! p + 4096)
+      (let [(values b err) (.Read (.-t l) (+ nret p) 4096)]
+        (when (!= err nil)
+          (break))
+
+        (.WriteBytes (.-AS (.-c l)) (+ a p) b)))
+
+    (when [typ (bit-and (aget args 3) 3)] (or (== typ 1) (== typ 3))
+      (set! (.-shared l) (append (.-shared l) (lit (array 2 uint64) a size))))
+
+    (conv int64 a)))
 
 
 ^{:go/end 343} (go/method compareWrite "the bytes write(2) would write: a64i's against the native's\n" ^string [^{:tag (* lockstep)} l ^uint64 n ^{:tag (array 6 uint64)} args]
@@ -373,10 +470,71 @@
       ;; the step mode
       (let [(values in _ _) (.Fetch c (.-PC c))]
         (when (and (!= in nil) ^:go/paren (== (.-Op in) OpLDXR))
-          ;; an exclusive region: to the next system call in the sys mode's way (stepping would fail its store)
+          ;; an exclusive region (stepping would fail its store): a64i runs it to its store-exclusive or clrex (at most 64
+          ;; instructions, no system call), the native runs to a brk put at a64i's next pc, both compared there and the step
+          ;; mode goes on (ARS44); a region that does not end so: to the next system call in the sys mode's way (AR5's rule)
           (inc! (.-Exclusive (.-res l)))
-          (set! (values (.-stepping l) (.-resume l)) (values false true))
-          (continue))
+          (let [pc (.-PC c)
+              ended false]
+            (set! (values (.-Log (.-AS c)) (.-Stores (.-AS c))) (values true (subslice (.-Stores (.-AS c)) _ 0)))
+            (for [k 0] (< k 64) (inc! k)
+              (when [(values in2 _ _) (.Fetch c (.-PC c))] (and (!= in2 nil) (== (.-Op in2) OpSVC))
+                (break))
+
+              (when (or (not (.Step c)) (.-Done c))
+                (break))
+
+              (when (and (!= (.-Last c) nil) ^:go/paren (or (== (.-Op (.-Last c)) OpSTXR) (== (.-Op (.-Last c)) OpCLREX)))
+                (set! ended true)
+                (break)))
+
+            (set! (.-Log (.-AS c)) false)
+            (when (or (not ended) (.-Done c) (== (.-PC c) pc))
+              (set! (values (.-stepping l) (.-resume l)) (values false true))
+              (continue))
+
+            (let [target (.-PC c)
+                (values orig err) (.Read t target 4)]
+              (when (!= err nil)
+                (return nil err))
+
+              (when [err (.Write t target (lit (slice byte) 0x00 0x00 0x20 0xd4))] (!= err nil)
+                (return nil err))
+
+              (let [(values st ^:assign err) (.Resume t 0)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (when (== st emu/StopExit)
+                  (return (.stepFail l pc "the exclusive region: the native ended (status %d), a64i at %#x" (.-Status t) target)))
+
+                (when [err (.Write t target orig)] (!= err nil)
+                  (return nil err))
+
+                (when (or (!= st emu/StopSignal) (!= (.-Sig t) SIGTRAP) (!= (.-Pc (.-Regs t)) target))
+                  (return (.stepFail l pc "the exclusive region: the native stopped (%d, signal %d) at %#x, a64i at %#x" st (.-Sig t) (.-Pc (.-Regs t)) target)))
+
+                (set! (.-afterSys l) false)
+                ;; the native's store-exclusive failed where a64i's succeeded (an exception in the region, as a first write's
+                ;; page fault, clears the CPU's monitor: architecturally allowed, the program retries): AR5's rule from here
+                (let [last (.-Last c)
+                    nx (nativeX (addr (.-Regs t)))]
+                  (when (and (== (.-Op last) OpSTXR) (< (.-Rm last) 31) (== (aget (.-X c) (.-Rm last)) 0) (== (aget nx (.-Rm last)) 1))
+                    (inc! (.-ExclusiveFailed (.-res l)))
+                    (set! (values (.-stepping l) (.-resume l)) (values false true))
+                    (continue)))
+
+                (when [d (.compareRegs l false)] (!= d "")
+                  (return (.stepFail l pc "the exclusive region to %#x: %s" target d)))
+
+                (for [i 0] (< (+ i 1) (len (.-Stores (.-AS c)))) (set! i + 2)
+                  (let [(values a n) (values (aget (.-Stores (.-AS c)) i) (conv int (aget (.-Stores (.-AS c)) (+ i 1))))
+                      (values mine _) (.ReadBytes (.-AS c) a n)
+                      (values theirs err) (.Read t a n)]
+                    (when (or (!= err nil) (not (bytes/Equal mine theirs)))
+                      (return (.stepFail l pc "the exclusive region to %#x: stored at %#x: %x, native %x" target a mine theirs)))))
+
+                (continue)))))
 
         (when (and (!= in nil) (== (.-Op in) OpSVC))
           ;; the system call stepped over in the native, its result fed to a64i
@@ -396,9 +554,50 @@
               (set! (.-SysHook c) (.sysHook l (aget (.-Regs (.-Regs t)) 0) args))
               (.Step c)
               (set! (.-SysHook c) nil)
+              (set! (.-SigMask c) bit-and-not (sigBit SIGTRAP))
               (inc! (.-Syscalls (.-res l)))
               (set! (.-afterSys l) true)
+              ;; AR20: a signal delivered at the call's return: the native's delivery stop (after the step's own stop at the return,
+              ;; a SIGTRAP stop of the step itself, the native stepped on to it), stepped with the signal into its handler; an ignored one, the native resumed with it
+              (when (and strace (> (len (.-Delivered c)) 0))
+                (fmt/Fprintf os/Stderr "a64i lockstep: after the call: stop %d signal %d at %#x, delivered %v\n" st (.-Sig t) (.-Pc (.-Regs t)) (.-Delivered c)))
+
+              (for [k 0] (and (< k 3) (.expecting l) (== (.-Pc (.-Regs t)) (.expectPC l)) ^:go/paren (or (== st emu/StopStep) (and (== st emu/StopSignal) (== (.-Sig t) SIGTRAP) (not (.expects l SIGTRAP))))) (inc! k)
+                (when [(set! (values st err) (.StepOnce t 0 false))] (!= err nil)
+                  (return nil err))
+
+                (when strace
+                  (fmt/Fprintf os/Stderr "a64i lockstep: after the call, stepped again: stop %d signal %d at %#x\n" st (.-Sig t) (.-Pc (.-Regs t)))))
+
+              (when (and (== st emu/StopSignal) (not (.-Done c)) (.ignored l (.-Sig t)))
+                ;; an ignored signal's stop: the sys mode to the next system call (the native resumed without it)
+                (set! (values (.-stepping l) (.-resume l)) (values false true))
+                (continue))
+
+              (while (== st emu/StopSignal)
+                (let [(values d ok) (.delivered l (.-Sig t) (.-Pc (.-Regs t)))]
+                  (when (not ok)
+                    (break))
+
+                  (when [(set! (values st err) (.StepOnce t (.-Sig d) false))] (!= err nil)
+                    (return nil err))
+
+                  (.worldESR l d)
+                  (.worldSS l d)
+                  (set! (.-afterSys l) false)))
+
+              (when (and (.-Done c) (!= st emu/StopSignal))
+                (return (.finish l)))
+
               (when (.-Done c)
+                ;; a fatal signal: past the step's own SIGTRAP stop to its delivery stop
+                (for [k 0] (and (< k 3) (== st emu/StopSignal) (== (.-Sig t) SIGTRAP) (!= (.-Signal c) SIGTRAP)) (inc! k)
+                  (when [(set! (values st err) (.StepOnce t 0 false))] (!= err nil)
+                    (return nil err)))
+
+                (when (== st emu/StopSignal)
+                  (.Resume t (.-Sig t)))
+
                 (return (.finish l)))
 
               (when [d (.compareRegs l false)] (!= d "")
@@ -417,6 +616,8 @@
           (set! (values (.-Log (.-AS c)) (.-Stores (.-AS c))) (values true (subslice (.-Stores (.-AS c)) _ 0)))
           (.Step c)
           (set! (.-Log (.-AS c)) false)
+          ;; AR20: each step's trap is a forced SIGTRAP, which unblocks SIGTRAP in the native (Linux's force_sig_info): so in a64i
+          (set! (.-SigMask c) bit-and-not (sigBit SIGTRAP))
           (let [(values st err) (.StepOnce t 0 (and (!= in nil) (== (.-Op in) OpBRK)))]
             (when (!= err nil)
               (return nil err))
@@ -433,6 +634,23 @@
             (when (and (!= in nil) (== (.-Op in) OpBRK) (== st emu/StopStep) (== (.-Pc (.-Regs t)) pc))
               (set! (values st (.-Sig t)) (values emu/StopSignal SIGTRAP)))
 
+            ;; AR20: a fault a64i delivered to its handler: the native's delivery stop at the instruction, stepped with the signal into
+            ;; the handler (each further delivery at once, the last delivered's handler first)
+            (when (and (== st emu/StopSignal) (not (.-Done c)) (.ignored l (.-Sig t)))
+              (set! (values (.-stepping l) (.-resume l)) (values false true))
+              (continue))
+
+            (while (== st emu/StopSignal)
+              (let [(values d ok) (.delivered l (.-Sig t) (.-Pc (.-Regs t)))]
+                (when (not ok)
+                  (break))
+
+                (when [(set! (values st err) (.StepOnce t (.-Sig d) false))] (!= err nil)
+                  (return nil err))
+
+                (.worldESR l d)
+                (.worldSS l d)))
+
             (set! (.-afterSys l) false)
             (inc! (.-Stepped (.-res l)))
             (when (or (== st emu/StopExit) (== st emu/StopSignal))
@@ -443,6 +661,10 @@
                 (when (!= (.-Sig t) (.-Signal c))
                   (return (.stepFail l pc "signal %d, native %d" (.-Signal c) (.-Sig t))))
 
+                ;; AR19 (285's low): the fatal signal's pc compared, as the sys mode compares it
+                (when (!= (.-Pc (.-Regs t)) (.-PC c))
+                  (return (.stepFail l pc "signal %d at %#x, native at %#x" (.-Sig t) (.-PC c) (.-Pc (.-Regs t)))))
+
                 (.Resume t (.-Sig t)))
 
               (return (.finish l)))
@@ -452,6 +674,21 @@
 
             (when (!= (.-Pc (.-Regs t)) (.-PC c))
               (return (.stepFail l pc "pc %#x, native %#x" (.-PC c) (.-Pc (.-Regs t)))))
+
+            ;; AR19: the counter is the world's: an mrs of cntvct_el0 or cntvctss_el0 takes the native's value; so does an mrs of
+            ;; ssbs, a single-stepping artifact: this M2's Linux (its Spectre-v4 mitigation off) sets PSTATE.SSBS at each context
+            ;; switch, and a stepped native switches at every step, where a run without one keeps the value written (as a64i does)
+            (when [last (.-Last c)] (and (!= last nil) (== (.-Op last) OpMRS) ^:go/paren (or (== (.-Sys last) SysCNTVCT) (== (.-Sys last) SysCNTVCTSS) (== (.-Sys last) SysSSBS)) (< (.-Rd last) 31))
+              (aset (.-X c) (.-Rd last) (aget (.-Regs (.-Regs t)) (.-Rd last)))
+              (when (== (.-Sys last) SysSSBS)
+                (set! (.-SSBS c) (!= (bit-and (aget (.-X c) (.-Rd last)) (<< 1 12)) 0))))
+
+            ;; AR20 (ARS85 (a)): an ID register's fields a64i shows are compared; the fields it makes 0 (features it lacks) are the
+            ;; CPU's, taken from the native
+            (when [last (.-Last c)] (and (!= last nil) (== (.-Op last) OpMRS) (< (.-Rd last) 31) (!= (IDHidden (.-Sys last)) 0))
+              (let [nat (aget (.-Regs (.-Regs t)) (.-Rd last))]
+                (when (== (bit-and-not nat (IDHidden (.-Sys last))) (aget (.-X c) (.-Rd last)))
+                  (aset (.-X c) (.-Rd last) nat))))
 
             (when [d (.compareRegs l false)] (!= d "")
               (return (.stepFail l pc "%s" d)))
@@ -470,6 +707,68 @@
 
 
 
+
+
+(go/method delivered "delivered takes a64i's first delivery not yet matched when it is the native's stop: signal sig at pc (AR20); the ESR\nrecord's fault status taken from the native's frame once it is written (worldESR).\n" [^{:tag (* lockstep)} l ^int sig ^uint64 pc] :results [Delivery bool]
+  (let [c (.-c l)]
+    (when (or (== (len (.-Delivered c)) 0) (!= (.-Sig (aget (.-Delivered c) 0)) sig) (!= (.-PC (aget (.-Delivered c) 0)) pc))
+      (return (lit Delivery) false))
+
+    (let [d (aget (.-Delivered c) 0)]
+      (set! (.-Delivered c) (subslice (.-Delivered c) 1))
+      (inc! (.-Signals (.-res l)))
+      (return d true))))
+
+
+(go/method worldESR "worldESR copies the native's ESR fault status (bits 5-0) into a64i's frame when both are a data or instruction abort's\ntranslation or permission fault (AR20).\n" [^{:tag (* lockstep)} l ^Delivery d]
+  (when (== (.-EsrAt d) 0)
+    (return))
+
+  (let [(values b err) (.Read (.-t l) (.-EsrAt d) 8)
+        (values mine ok) (.Read (.-AS (.-c l)) (.-EsrAt d) 8)]
+    (when (or (!= err nil) (not ok))
+      (return))
+
+    (let [theirs (.Uint64 binary/LittleEndian b)
+          fault (fn [^uint64 e] :results [bool]
+                  (let [(values ec fsc) (values (>> e 26) (bit-and e 0x3f))]
+                    (return (and ^:go/paren (or (== ec 0x24) (== ec 0x20)) (>= fsc 4) (<= fsc 15)))))]
+      (when (and (!= theirs mine) (fault theirs) (fault mine) (== (bit-and-not theirs 0x3f) (bit-and-not mine 0x3f)))
+        (.Write (.-AS (.-c l)) (.-EsrAt d) 8 theirs)))))
+
+
+(go/method worldSS "worldSS: in the step mode the native's frame holds PSTATE.SS (bit 21, the single step's state) in its saved pstate, a\nstepping artifact copied into a64i's frame (AR20).\n" [^{:tag (* lockstep)} l ^Delivery d]
+  (let [a (+ (.-Frame d) mcOff 272)
+        (values b err) (.Read (.-t l) a 8)
+        (values mine ok) (.Read (.-AS (.-c l)) a 8)]
+    (when (and (== err nil) ok (!= (bit-and (.Uint64 binary/LittleEndian b) (<< 1 21)) 0))
+      (.Write (.-AS (.-c l)) a 8 (bit-or mine (<< 1 21))))))
+
+
+(go/method ignored "ignored reports a signal a64i dropped as ignored (SIG_IGN, or ignored by default) while the traced native reports it (a\nptraced thread's signals are all reported; AR20), taken from a64i's list.\n" ^bool [^{:tag (* lockstep)} l ^int sig]
+  (let [c (.-c l)]
+    (when (or (== (len (.-Ignored c)) 0) (!= (aget (.-Ignored c) 0) sig))
+      (return false))
+
+    (set! (.-Ignored c) (subslice (.-Ignored c) 1))
+    true))
+
+
+(go/method expecting "expecting reports signals a64i delivered or ignored that the native has not reported yet (AR20).\n" ^bool [^{:tag (* lockstep)} l]
+  (or (> (len (.-Delivered (.-c l))) 0) (> (len (.-Ignored (.-c l))) 0)))
+
+
+(go/method expects ^bool [^{:tag (* lockstep)} l ^int sig]
+  (let [c (.-c l)]
+    (or ^:go/paren (and (> (len (.-Delivered c)) 0) (== (.-Sig (aget (.-Delivered c) 0)) sig)) ^:go/paren (and (> (len (.-Ignored c)) 0) (== (aget (.-Ignored c) 0) sig)))))
+
+
+(go/method expectPC "expectPC is the pc where the native reports the signal expected: the first delivery's, else a64i's.\n" ^uint64 [^{:tag (* lockstep)} l]
+  (let [c (.-c l)]
+    (when (> (len (.-Delivered c)) 0)
+      (return (.-PC (aget (.-Delivered c) 0))))
+
+    (.-PC c)))
 
 
 ^{:go/end 481} (go/method stepFail [^{:tag (* lockstep)} l ^uint64 pc ^string f & ^{:tag (slice any)} a] :results [(* LockstepResult) error]
@@ -493,6 +792,23 @@
         (let [(values r err) (.finish l)]
           (return r true err)))
       (case [emu/StopSignal]
+        ;; AR20: a signal a64i ignored: the native resumed with it
+        (when (and (not (.-Done c)) (.ignored l (.-Sig t)))
+          (let [(values st2 err) (.Resume t (.-Sig t))]
+            (when (!= err nil)
+              (return nil true err))
+
+            (return (.atStop l st2))))
+
+        ;; AR20: a signal a64i delivered to its handler: the native resumed with it, to its next stop
+        (when [(values d ok) (.delivered l (.-Sig t) (.-Pc (.-Regs t)))] ok
+          (let [(values st2 err) (.Resume t (.-Sig t))]
+            (when (!= err nil)
+              (return nil true err))
+
+            (.worldESR l d)
+            (return (.atStop l st2))))
+
         (when (or (not (.-Done c)) (!= (.-Signal c) (.-Sig t)))
           (let [(values r err) (.fail l "the native's signal %d at %#x, a64i's %d (%s) at %#x" (.-Sig t) (.-Pc (.-Regs t)) (.-Signal c) (.-Reason c) (.-PC c))]
             (return r true err)))
@@ -544,10 +860,15 @@
         (set! (.-SysHook c) nil)
         (inc! (.-Syscalls (.-res l)))
         (when (.-Done c)
-          ;; a64i ended with this call (exit): the native ends on resuming
+          ;; a64i ended with this call (exit): the native ends on resuming (AR20: a fatal signal's delivery stop first)
           (let [(values st err) (.Resume t 0)]
             (when (!= err nil)
               (return nil true err))
+
+            (when (and (== st emu/StopSignal) (== (.-Sig t) (.-Signal c)))
+              (set! (values st err) (.Resume t (.-Sig t)))
+              (when (!= err nil)
+                (return nil true err)))
 
             (when (!= st emu/StopExit)
               (let [(values r err) (.fail l "a64i ended at system call %d, the native did not" (.-Syscalls (.-res l)))]
@@ -556,11 +877,17 @@
             (let [(values r ^:assign err) (.finish l)]
               (return r true err))))
 
-        (when (!= (aget (.-X c) 0) (aget (.-Regs (.-Regs t)) 0))
-          (let [(values r err) (.fail l "system call %d (%#x) returns %#x, native %#x" (.-Syscalls (.-res l)) (- (.-PC c) 4) (aget (.-X c) 0) (aget (.-Regs (.-Regs t)) 0))]
+        (when (and (!= (aget (.-X c) 8) sysRtSigreturn) (!= (.-SysX0 c) (aget (.-Regs (.-Regs t)) 0)))
+          ;; AR20: the call's result before a signal delivered at its end (rt_sigreturn's x0 is the frame's, compared at the next stop)
+          (let [(values r err) (.fail l "system call %d returns %#x, native %#x" (.-Syscalls (.-res l)) (.-SysX0 c) (aget (.-Regs (.-Regs t)) 0))]
             (return r true err)))
 
         (when (or ^:go/paren (and (> (.-StepFrom (.-opts l)) 0) (== (.-Syscalls (.-res l)) (.-StepFrom (.-opts l)))) (.-resume l))
+          ;; to the step mode: the registers after the call compared first (x7 aside: the exit stop's), a difference the call's own
+          (when [d (.compareRegs l true)] (!= d "")
+            (let [(values r err) (.stepFail l (- (.-PC c) 4) "after the system call: %s" d)]
+              (return r true err)))
+
           (set! (values (.-stepping l) (.-resume l)) (values true false)))
 
         (return nil false nil)))))

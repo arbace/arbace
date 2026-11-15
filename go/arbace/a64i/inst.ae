@@ -93,7 +93,15 @@
   ^{:line 93} [^{:val 78} OpMSR]
   ^{:line 94} [^{:val 79} OpBRK]
   ^{:line 95} [^{:val 80} OpUDF]
-  ^{:line 96} [^{:val 81} opCount])
+  [^{:val 81} OpCRC32] ; FEAT_CRC32 (AR18): crc32b/h/w/x, Size the source's log2 bytes; Sys 1 crc32c*
+  [^{:val 82} OpFLAGM] ; FEAT_FlagM, FEAT_FlagM2 (AR18): Sys flagmNames' index; rmif's Imm the rotation and Imm2 the mask
+  [^{:val 83} OpLDAPUR] ; FEAT_LRCPC2 (AR18): load-acquire RCpc, unscaled offset (Imm): Size, Signed, Wide
+  [^{:val 84} OpSTLUR] ; store-release, unscaled offset (Imm)
+  ^{:line 96} [^{:val 85} opCount])
+
+(go/const ^{:tag Op :val 127 :doc "OpSYS is SYS's DC and IC (AR19, queue 288): Rd the address's register, Sys CRm (dc zva 4, ic ivau 5, dc cvac 10, cvau 11,\ncvap 12, cvadp 13, civac 14); past the FP and SIMD operations, so that theirs keep their values.\n"} OpSYS (+ opSIMDEnd 1))
+
+(go/var ^{:doc "sysOpNames are SYS's operations by CRm (AR19).\n"} sysOpNames (lit (map uint32 string) [4 "dc.zva"] [5 "ic.ivau"] [10 "dc.cvac"] [11 "dc.cvau"] [12 "dc.cvap"] [13 "dc.cvadp"] [14 "dc.civac"]))
 
 
 (go/var opNames ^{:go/breaks [14 30 45 59 74]} (lit (array ... string) "invalid" "addi" "subi" "addr" "subr" "addx" "subx" "adc" "sbc" "andi" "orri" "eori"
@@ -101,11 +109,14 @@
     "cbnz" "tbz" "tbnz" "br" "blr" "ret" "csel" "csinc" "csinv" "csneg" "ccmp" "rbit" "rev16" "rev32" "rev"
     "clz" "cls" "udiv" "sdiv" "lslv" "lsrv" "asrv" "rorv" "madd" "msub" "smaddl" "smsubl" "umaddl" "umsubl"
     "smulh" "umulh" "ldr" "str" "ldrlit" "prfm" "ldp" "stp" "ldxr" "stxr" "ldar" "stlr" "ldop" "swp" "cas"
-    "casp" "svc" "hint" "barrier" "clrex" "mrs" "msr" "brk" "udf"))
+    "casp" "svc" "hint" "barrier" "clrex" "mrs" "msr" "brk" "udf" "crc32" "flagm" "ldapur" "stlur"))
 
 ^{:go/end 111} (go/method String ^string [^Op o]
   (when (< (conv int o) (len opNames))
     (return (aget opNames o)))
+
+  (when (== o OpSYS)
+    (return "sys"))
 
   (fpOpName o))
 
@@ -161,6 +172,9 @@
   ^{:line 161} [^{:val 55303} SysDCZID (bit-or (<< 3 14) (<< 3 11) (<< 0 7) (<< 0 3) 7)]
   ^{:line 162} [^{:val 55297} SysCTR (bit-or (<< 3 14) (<< 3 11) (<< 0 7) (<< 0 3) 1)]
   ^{:line 163} [^{:val 49152} SysMIDR (bit-or (<< 3 14) (<< 0 11) (<< 0 7) (<< 0 3) 0)]
+  [^{:val 57094} SysCNTVCTSS (bit-or (<< 3 14) (<< 3 11) (<< 14 7) (<< 0 3) 6)] ; AR19: FEAT_ECV's self-synchronised counter
+  [^{:val 55829} SysDIT (bit-or (<< 3 14) (<< 3 11) (<< 4 7) (<< 2 3) 5)] ; AR19: PSTATE.DIT (bit 24)
+  [^{:val 55830} SysSSBS (bit-or (<< 3 14) (<< 3 11) (<< 4 7) (<< 2 3) 6)] ; AR19: PSTATE.SSBS (bit 12)
   ^{:line 164} [^{:val 65535} SysDAIFSet 0xffff]
   ^{:line 165} [^{:val 0} sysUnmodeled 0])
 
@@ -217,11 +231,11 @@
       (return "bitfield"))
     (case [OpB OpBL OpBCOND OpCBZ OpCBNZ OpTBZ OpTBNZ OpBR OpBLR OpRET]
       (return "branch"))
-    (case [OpCSEL OpCSINC OpCSINV OpCSNEG OpCCMP]
+    (case [OpCSEL OpCSINC OpCSINV OpCSNEG OpCCMP OpFLAGM]
       (return "cond"))
     (case [OpRBIT OpREV16 OpREV32 OpREV OpCLZ OpCLS]
       (return "dp1"))
-    (case [OpUDIV OpSDIV OpLSLV OpLSRV OpASRV OpRORV]
+    (case [OpUDIV OpSDIV OpLSLV OpLSRV OpASRV OpRORV OpCRC32]
       (return "dp2"))
     (case [OpMADD OpMSUB OpSMADDL OpSMSUBL OpUMADDL OpUMSUBL OpSMULH OpUMULH]
       (return "mul"))
@@ -229,7 +243,7 @@
       (return "ldst"))
     (case [OpLDP OpSTP]
       (return "pair"))
-    (case [OpLDXR OpSTXR OpLDAR OpSTLR]
+    (case [OpLDXR OpSTXR OpLDAR OpSTLR OpLDAPUR OpSTLUR]
       (return "excl"))
     (case [OpLDOP OpSWP OpCAS OpCASP]
       (return "lse")))
@@ -245,6 +259,24 @@
   (when (isFPOp (.-Op in))
     (return (fpName in)))
 
+  ;; AR18: crc32 and crc32c by the source's width; the flag manipulation by its instruction
+  (switch (.-Op in)
+    (case [OpCRC32]
+      (let [s "crc32"]
+        (when (== (.-Sys in) 1)
+          (set! s "crc32c"))
+
+        (return (fmt/Sprintf "%s.%d" s ^int (<< 8 (.-Size in))))))
+    (case [OpFLAGM]
+      (return (aget (lit (slice string) "cfinv" "xaflag" "axflag" "rmif" "setf8" "setf16") (.-Sys in))))
+    (case [OpSYS]
+      ;; AR19: dc and ic by their operation
+      (return (aget sysOpNames (.-Sys in))))
+    (case [OpMSR]
+      ;; AR19: MSR (immediate) of PSTATE.DIT and PSTATE.SSBS
+      (when (== (.-Rm in) 255)
+        (return "msr.imm"))))
+
   (let [s (.String (.-Op in))]
     (if (.-Sf in)
       (set! s + ".x")
@@ -258,7 +290,7 @@
       (set! s + ".n"))
 
     (switch (.-Op in)
-      (case [OpLDR OpSTR OpLDRLIT OpLDP OpSTP OpLDXR OpSTXR OpLDAR OpSTLR OpLDOP OpSWP OpCAS OpCASP]
+      (case [OpLDR OpSTR OpLDRLIT OpLDP OpSTP OpLDXR OpSTXR OpLDAR OpSTLR OpLDAPUR OpSTLUR OpLDOP OpSWP OpCAS OpCASP]
         (when (.-Vreg in)
           (set! s + ".v"))
 

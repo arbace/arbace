@@ -298,6 +298,10 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   entries, emitOne's opcodes, MCDwarfLineAddr's advances, end_sequence; `synthetic/debug-line`) and AXS94 (a) MC/X86's `--defsym` cases
   (`intel-syntax-quote-reserved`, `pltoff@ERR=1` held to llvm-mc's recorded refusal), objects recorded by hand with llvm-mc 23.1.5; x86-64
   AOT 105 -> 108 / 0 / 0. Proposed AXS95 (the five left-out refusals), AXS96 (MC/AsmParser's DWARF tests).
+  `review-fix-3` (from `mac/next` `a7916bb2a` with `mac/asm-ar9`; doc/asm/AMD64-SURVEY.md, "As built: review 1111's fixes"): review 1111's
+  findings, one commit each: an expansion's errors at LLVM's `<instantiation>` places with their notes (a `.rept` with no backslash
+  counted and placed), `--defsym` by keyword and one radix-sensing parser, the refusal's diagnostics controlled, `.reloc`'s places,
+  `.file`'s path split; hand-derived diagnostics in `test/asm/obj-err*/`; every object unchanged. Proposed AXS97, AXS98.
 - Assembly, arm64: `asm-ar1` (on `asm-ax1`; AR1, doc/asm/ARM64-SURVEY.md, "As built: AR1"): repr/asm reads arm64's GNU syntax (ELF
   and Apple's spelling) into assembly forms and Plan 9's text lexically, printed back byte for byte: musl 15/15, libgcc's `.S` 7/7,
   `MC/AArch64`'s base 400/409, the box 7/7, Go's testdata 5/5, the rest error tests classed; amd64's AX1 results unchanged. Proposed
@@ -330,7 +334,34 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   statements inside conditionals, `--defsym`, readelf's GNU view), `.reloc` merged with PATCHINST last (sortRelocs), NEON's integer lanes
   in a64i (`simd.ae`, `synth-neon` 1,769 cases, coverage 1,358 of 1,358): mc-aarch64-obj 110 of 110, the AOT cell 98.2% → 99.6%,
   completeness 99.5 → 99.8. Proposed ARS53-ARS55. Next: the VM's CPU rows and lockstep of the thirteen synthetic programs (ARS44),
-  NEON's structure loads and stores (ARS53), the literal pool with the C packs (ARS50).
+  NEON's structure loads and stores (ARS53), the literal pool with the C packs (ARS50). Then `asm-ar9` (from `mac/next` `4ec952309`;
+  "As built: AR9"; ARS53 (a), ARS54 (a), ARS55 (b), the user's): `(asm/unread ...)` for x86-64's AT&T and Intel (amd64's round trip
+  re-recorded, unchanged), NEON's structure loads and stores (`simdmem.ae`, `synth-neon-ldst` 1,020 cases) and FP lanes' vector classes
+  (`simdfp.ae`, `synth-neon-fp` 1,176 cases) in a64i: coverage 2,015 of 2,015, eval 303, AOT 3,049 / 0 / 13. Proposed ARS56-ARS58.
+  Next: the by-element and scalar forms (ARS56), a structure load in the essential subset (ARS57), the VM's rows (ARS55, ARS58).
+  Then `review-fix-3` ("As built: review 1111's fixes"): a64i's FPCR paths held (`synth-fp-[ds]-rm`, RMode 1-3 and DN, the model's
+  FPRound at a mode, qemu at `--record`; an FMA precision bug fixed in a64i; FIZ, AH, NEP refused), `synth-neon-e` in the essential
+  subset, arm64's `:insn-text`: a64i 90 of 90. Proposed ARS59, ARS60.
+  Then `asm-ar10` (from `mac/review-fix-3` `6bf064ab4`; "As built: AR10"; ARS56 (a), ARS57 (a), ARS59 (b), ARS60 (a), the user's):
+  `simd-struct.s` (structure loads and stores and FP lanes by hand) in the essential subset (+2 s), `synth-neon-fp-rm` (the FP lanes
+  under FPCR, 1,152 cases), and in a64i the scalar FP classes and the by-element multiplies (`synth-neon-el`, 568 cases): a64i 93 of 93,
+  coverage 2,129 of 2,129, eval 309, AOT 3,055 / 0 / 13. Proposed ARS61, ARS62. Next: ARS61, ARS62, the VM's rows (ARS55, ARS58).
+  Then `asm-ar11` (from `mac/asm-ar10` `a4f851948`; "As built: AR11"; ARS61 (b), ARS62 (a), the user's): `synth-neon-el-e` (a quarter
+  of synth-neon-el, 142 cases) in the essential subset (+5 to +9 s at night 12's load), and in a64i fcvtn, fcvtl, fcvtxn (half as the
+  narrow type, round to odd) and the fixed-point scvtf, ucvtf, fcvtzs, fcvtzu with #fbits, vector, scalar and general register
+  (`synth-neon-cvt`, 1,000 cases): a64i 95 of 95, coverage 2,176 of 2,176, eval 311, AOT 3,057 / 0 / 13. Proposed ARS63-ARS65. Next:
+  ARS63, ARS64 (the essential time on a quiet host), ARS65, the VM's rows (ARS55, ARS58).
+  Then `asm-ar12` (from `mac/asm-ar11` `5740229b4`; "As built: AR12"; ARS63 (a), ARS64 (c), ARS65 (b), the user's): in a64i the
+  saturating doubling multiplies (sqdmulh, sqrdmulh, sqdmull, sqdmlal, sqdmlsl: vector, scalar, by element) and the saturating shifts
+  and narrows (sqshl, uqshl, sqrshl, uqrshl, sqshlu, sqshrn, sqrshrn, uqshrn, uqrshrn, sqshrun, sqrshrun, sqxtn, uqxtn, sqxtun),
+  FPSR.QC exact (`simdsat.ae`, `synth-neon-sat` 1,092 cases): a64i 96 of 96, coverage 2,394 of 2,394, eval 312, AOT 3,058 / 0 / 13;
+  the essential step +0.7 to +1.0 s with synth-neon-el-e at load 15-19 (ARS64; the quiet run still to do, night 12's gate ran past 12:30). Proposed ARS66, ARS67. Next: ARS66, ARS67, the VM's rows (ARS55, ARS58).
+  Then `asm-ar13` (from `mac/asm-ar12` `ac5722aec`; "As built: AR13"; ARS66 (c), ARS67 (b), ARS64 (c), the user's): a64i's package
+  `:init-order` set to goi's checker's (simdfp.go's variables, missing since AR9; 0 errors in linux/arm64); in a64i NEON's remaining
+  integer lanes (srshl, urshl, pmul, raddhn, rsubhn, pmull, saddlp, uaddlp, sadalp, uadalp, suqadd, usqadd, sqabs, sqneg, shll, rshrn,
+  addp's scalar: `simdint.ae`, `synth-neon-int` 560 cases): a64i 97 of 97, coverage 2,507 of 2,507, eval 313, AOT 3,059 / 0 / 13; of
+  ARMv8.0's integer SIMD only urecpe and ursqrte left; the essential step +1.8 s with synth-neon-el-e after night 12 (load 6-14).
+  Proposed ARS68-ARS70. Next: ARS68 (the estimates and ARMv8.0's FP rest), ARS69, ARS70, the VM's rows (ARS55, ARS58).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
