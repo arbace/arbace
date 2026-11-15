@@ -265,7 +265,7 @@ cstubs_nodes() {
   (
     flock 8
     if [ ! -s "$out" ]; then
-      "$root/bin/ci" musl ensure > "$OI_DIR/cstubs/$k.musl.log" 2>&1 || { cat "$OI_DIR/cstubs/$k.musl.log" >&2; exit 1; }
+      . "$root/bin/lib/ci/musl-hold.bash"; ci_musl_hold > "$OI_DIR/cstubs/$k.musl.log" 2>&1 || { cat "$OI_DIR/cstubs/$k.musl.log" >&2; exit 1; }
       ( . "$root/bin/lib/repr-c/sysroot.bash"; c_sysroot || exit 1
         cd "$dir" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/ocaml/capi/cnodes.ae" "$root" "$out.new" $mode $files ) || exit 1
       mv "$out.new" "$out"
@@ -347,7 +347,19 @@ oi_cpu_secs() {
   LC_ALL=C awk 'function s(t,  a) { gsub(/,/, ".", t); split(t, a, "m"); sub(/s$/, "", a[2]); return a[1] * 60 + a[2] }
        FNR == 2 { n++; t[n] = s($1) + s($2) } END { printf "%.2f\n", t[2] - t[1] }' "$1" "$2"
 }
-export -f oi_wall oi_status oi_cpu_secs
+# oi_limit_kill STATUS CPU WALL [CAP]: whether a limit stopped the run (review 300's finding 1): SIGXCPU's 152; 137 as oi_status reads it (CPU
+# seconds at four fifths of TIMEOUT); 124 only when the run's wall seconds reach nine tenths of the wall cap CAP (default oi_wall), the cap
+# timeout(1) answers 124 at. A program's own exit status 124 earlier (cmdliner's Cmd.Exit.cli_error) is its status, compared as any other
+# with the reference's, and its row carries no "timeout" note
+oi_limit_kill() {
+  case $1 in
+    152) return 0 ;;
+    137) [ "$(oi_status 137 "$2")" = 124 ] ;;
+    124) [ "$(echo "$3 >= ${4:-$(oi_wall)} * 0.9" | bc)" = 1 ] ;;
+    *) return 1 ;;
+  esac
+}
+export -f oi_wall oi_status oi_cpu_secs oi_limit_kill
 
 arbace_exe() {
   if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
@@ -977,8 +989,9 @@ oi_one() {
   [ -n "$note" ] || note=$(hook_note "$d")
   # the check hook in place of the comparison with the reference (OC203 (a)): the row's output its verdict
   [ -z "$ck" ] || hook_check "$id" "$d" "$d/oi.out" "$env"
-  st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
-  [ "$st" = 124 ] && note="timeout ${TIMEOUT}s"
+  local cpu; cpu=$(oi_cpu_secs "$d/cpu0" "$d/cpu1")
+  oi_limit_kill "$st" "$cpu" "$(echo "$t1 - $t0" | bc)" && note="timeout ${TIMEOUT}s"
+  st=$(oi_status "$st" "$cpu")
   [ "$i" -gt 1 ] && [ -f "$d/oi.out.1" ] && note="run $i (arguments $r) differs from run 1${note:+; $note}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
   # keep the outputs that differ, drop the dumps (large)
@@ -1219,7 +1232,9 @@ o2j_alone() {
   esac
   case " ${OI_REDIR:-} " in *" @check=check-program-output "*) hook_check "$id" "$(dirname "$out")" "$out" "$OI_REDIR" ;; esac
   t1=$(date +%s.%N)
-  case $st in 124|137|152) st=timeout ;; esac
+  # 137 and 152 the limits' kills (o2j_alone has no CPU measure: a 137 is read as the CPU limit's); 124 the wall cap's only when the wall
+  # seconds reach it (oi_limit_kill), else the program's own exit status (review 300's finding 1)
+  case $st in 137|152) st=timeout ;; 124) oi_limit_kill 124 0 "$(echo "$t1 - $t0" | bc)" "$(o2j_cpu | cut -d' ' -f2)" && st=timeout ;; esac
   printf '%s\t%s\t%s\n' "$id" "$st" "$(echo "$t1 - $t0" | bc)"
 }
 
@@ -1587,9 +1602,10 @@ c2_programs() {
     esac
     case " $env " in *" @check=check-program-output "*) hook_check "$id" "$d" "$d/o2j.out" "$env" ;; esac
     t1=$(date +%s.%N); times > "$d/cpu1"
-    st=$(oi_status "$st" "$(oi_cpu_secs "$d/cpu0" "$d/cpu1")")
+    local cpu; cpu=$(oi_cpu_secs "$d/cpu0" "$d/cpu1")
     note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
-    [ "$st" = 124 ] && note="timeout ${TIMEOUT}s of CPU"
+    oi_limit_kill "$st" "$cpu" "$(echo "$t1 - $t0" | bc)" && note="timeout ${TIMEOUT}s of CPU"
+    st=$(oi_status "$st" "$cpu")
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/o2j.out" | cut -d' ' -f1)" "$(wc -c < "$d/o2j.out")" "$(echo "$t1 - $t0" | bc)" "$note" >> "$outnew"
   done < "$C2/progs.tsv"
 }
@@ -1849,6 +1865,7 @@ case $cmd in
   own-verdicts) cmd_own_verdicts "$@" ;;
   oi-limits) echo "$TIMEOUT $(oi_wall)" ;;
   oi-status) oi_status "$@" ;;
+  oi-limit-kill) if oi_limit_kill "$@"; then echo timeout; else echo own; fi ;;
   oi-cpu) oi_cpu_secs "$@" ;;
   aot-lib) cmd_aot_lib ;;
   aot-clib) cmd_aot_clib; echo "oi: aot-clib: $(wc -l < "$O2J/clib-missing.txt") missing externals lines, in $C2_LIB" ;;
