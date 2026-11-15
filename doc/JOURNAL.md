@@ -6262,6 +6262,31 @@ poly-kinded tycon's kind arguments now (deferred: the elaborator erases kind arg
 the run corpora), P41 (Typeable's kind arguments), P42 (the testsuite's Typeable programs on the own path). Details:
 doc/haskell/FRONTEND-SURVEY.md, "As built: HF10-P37-P39".
 
+### 2026-11-13: java-jdk: the two parked jdk parts, causes found on slices (the round trip's loop fixed, attr's read limited)
+
+Branch `java-jdk` from mac/next ca3c7aff8, light only (each run at most 2.6 GiB under a watcher) beside the serial rerun.
+doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: the jdk parts' memory and round trip", has the numbers.
+- `repr-java-roundtrip.jdk`: no tool regression. Nothing in `arbace/repr/java/` changed since its last pass (59f546ada); the jdk
+  corpus grew from 906 to 2,277 files at b6a6093af (11-07) and its references were never recorded again: 784 of night 13's 839
+  unexpected entries are new files, the 30 old read failures are the same as 11-05's, the 9 new ones new files. The other 55:
+  `compile_printed`'s six rounds of replacing javac's rejected printed files by their originals were too few for the larger
+  corpus (PKCS12KeyStore.java's errors came in the seventh round), so the last tree did not compile and whole packages' printed
+  classes were missing. Fixed in `bin/lib/repr-java/roundtrip`: until javac accepts the tree, at most 20 rounds, a failure when a
+  round rejects nothing new. Considered: bisecting the jdk forms since 11-05 (the triage's guess); the old files' identical read
+  failures and the round counts made it unnecessary.
+- `repr-java-attr.jdk`: the slices' heap profiles hold no javac object at the end (no chunk's javac or registry is retained); the
+  live heap is 0.28 of the RSS (GOGC 200); one chunk seeing the whole java.base tree passed 2.6 GiB unlimited and ran in 2.08 GiB
+  under GOMEMLIMIT=2000MiB at the same speed. Built: front-check's jdk reads (attr-check, front-check, nojavac-check) and the round
+  trip's jdk reads under `GOMEMLIMIT=${GOMEMLIMIT:-26GiB}`, estimated 27-28 GiB for the whole attr part (jrt-convert's precedent:
+  47.6 -> 31.4 GiB under 28GiB). Considered: fewer threads (doubles the 19 minutes), a parse cache of the side sources shared by
+  the chunks and a bounded check read (both change arbace/repr/java and so the javac tool's key; the second measured no gain).
+- Night commands, not run (each heavy, under `bin/heavy-lock`, after the rerun and the main session's go-ahead), from the worktree
+  with `REPR_JAVA_EXE` the gate's javac tool: `bin/repr-java attr-check --corpus jdk` (expected 27-30 GiB, about 20-25 min; then
+  `:clean-only` lifted and `:mem-gib` from its peak); `bin/repr-java roundtrip --corpus jdk --text --record` (expected about 30-35
+  GiB with javac's c1 compile beside the read, about 35 min; it rewrites test/repr/java/roundtrip/jdk{,-known,-text,-text-known}.edn,
+  to review), then the same without `--record` to pass. Neither moves a key (gate_key unchanged; bin/lib/repr-java is out of the
+  javac key).
+
 ### 2026-11-14: n15-fix, night 13's rerun (`bin/gate --full --concurrent` on next 7658c750c, 495 min, 8 failed)
 
 Branch `n15-fix` from `mac/next` 7658c750c. Each failure was diagnosed from the night's logs (`.tmp/worktrees/next/.tmp/gate/`)
