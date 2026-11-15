@@ -57,5 +57,39 @@ read s e < "$w/second"
 [ $((e - s)) -ge 3 ] || fail "the second reader did not wait ($((e - s)) s)"
 musl fresh || fail "not fresh after two readers"
 echo "musl-lock-test: two readers serialized (second waited $((e - s)) s)"
+# 4. review 300's finding 2: a holder's shared lock (bin/lib/ci/musl-hold.bash's ci_musl_hold, every reader of the cache) keeps a
+# reader's reread out until it ends: the holder holds 6 s, the index is removed under it (stale), the reader starts after 2 s and ends
+# after the holder
+. "$root/bin/lib/ci/musl-hold.bash"
+rm -f "$w/held" "$w/holder.end" "$w/reader"
+( ci_musl_hold > "$w/hold.log" 2>&1 || exit 1; date +%s > "$w/held"; sleep 6; date +%s > "$w/holder.end" ) &
+p1=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$w/held" ] && break; sleep 1; done
+[ -f "$w/held" ] || fail "ci_musl_hold took no lock ($(cat "$w/hold.log"))"
+rm "$CI_MUSL_FORMS/index.edn"
+( s=$(date +%s); musl read > "$w/out.log" 2>&1; e=$(date +%s); echo "$s $e" > "$w/reader" ) &
+p2=$!
+sleep 2
+[ ! -f "$w/reader" ] || fail "a reader reread the cache while a holder held it"
+wait $p1 $p2
+read s e < "$w/reader"
+[ "$e" -ge "$(cat "$w/holder.end")" ] || fail "the reader ended before the holder"
+musl fresh || fail "not fresh after the holder and the reader"
+echo "musl-lock-test: a reader waited for the shared holder ($((e - s)) s)"
+
+# 5. a holder's child that runs `bin/ci musl read` (or ensure) does not wait on its own parent's lock: a fresh cache is read as it
+# is, a stale one fails at once
+( ci_musl_hold > "$w/hold.log" 2>&1 || exit 1
+  s=$(date +%s); musl read > "$w/child1.log" 2>&1 || exit 2
+  rm "$CI_MUSL_FORMS/index.edn"; st=0; musl read > "$w/child2.log" 2>&1 || st=$?
+  e=$(date +%s); [ "$st" = 1 ] || exit 3; [ $((e - s)) -lt 20 ] || exit 4 ) &
+p3=$!
+c=0; while [ -d "/proc/$p3" ] && [ $c -lt 60 ]; do sleep 1; c=$((c + 1)); done
+[ -d "/proc/$p3" ] && { kill "$p3"; fail "a holder's child's read waited on its parent's lock (deadlock)"; }
+st=0; wait $p3 || st=$?
+[ "$st" = 0 ] || fail "a holder's child: status $st (2: a fresh read failed, 3: a stale read did not fail, 4: it waited)"
+grep -q 'held' "$w/child1.log" || fail "a holder's child read the fresh cache again ($(cat "$w/child1.log"))"
+musl ensure > "$w/out.log" 2>&1; musl fresh || fail "not fresh after case 5"
+echo "musl-lock-test: a holder's child reads nothing and never waits on its parent"
 rm -rf "$w"
 echo "musl-lock-test: ok"
