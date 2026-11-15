@@ -6836,3 +6836,24 @@ The keys: `bin/arbace-go --gate-key` 07a904f8b13b… before and after; `test/gat
 next: `bin/lib/repr-java/{front-check,roundtrip}` (out of gate_key and the javac key) and docs. Proof: the essential gate (`bin/gate`)
 passed in 4m07s, 7 steps run (oracle-go as the canary, crops-score and repr-java-closure for the changed repr-java scripts), 53 skipped
 at their keys; `bin/reap`: 49 of 52 cells checked, 3 no check yet, 0 problems; `bin/crops-score --judge --strict`: exit 0.
+
+## 2026-11-15: JCS127's day test (U2 (a)): it fails, to W1
+
+`mac/mac/039-jcs127` (d6870d37c, 11-01, write-ahead: volatile fields of interpreted classes under Rt's striped locks, `CF$VolField`)
+merged onto B0's head b43362b9c in a worktree of its own (branch `jcs127-test`, 7a4650d9b; only the survey conflicted, its "As built:
+JCS127" placed after next's sections). gate_key 07a904f8b13b… -> 8c4d39a049c5… (arbace/classes/interp.ae, arbace/lang/Compiler.ae), as
+the plan said. `bin/arbace-go --gate-build` on the main checkout's stage 0: 36m33s wall (the two-run path: j2g 745 s, build-go 371 s,
+c2j 309 s, then j2g 172 s and the test build 434 s), peak 19.9 GiB. Then the interp level of t03832 (DekkerTest) and the 24 essential
+tests with a volatile field the survey lists (`bin/java-check --levels interp --only ... --save`, the forms from the main checkout's read
+cache with JAVA_CHECK_FORMS_ONLY=1 and B0's javac tool, REPR_JAVA_STALE_OK=1: jcs127 changes no reader source).
+- jcs127's executable: 25 of 25 `load-failed`, "Attempting to call unbound fn: #'arbace.classes.native/compile-top".
+- The control, B0's gate executable (66c29674829e…), same command: 24 pass, t03832 fails as recorded ("Got 5 failed ITERATIONS").
+- The cause: the build's image prepare printed "not prepared: … Syntax error compiling at (arbace/classes/interp.ae:537:3)": the new
+  `volatile-field?` names `ACC_VOLATILE`, whose `def` comes after it, so `arbace.classes.interp` and `arbace.classes.native` were left
+  out of the image (on the executable `arbace.classes.native` loads with no var). The build still ended with status 0 ("aot: 159
+  sources compiled … 0 failed"): a prepare failure does not fail `--gate-build`.
+- Verdict: fail; JCS127 goes to W1, not B1. The one-line fix (the defn moved after the defs) is on `jcs127-test` (ef9937644), pushed
+  to mac, untested (its form count read back, 152 forms; no build: the night's rules start at 18:45 and the disk is at 86%). The next
+  test of it: the same build and the same 25 tests, expecting t03832 to pass a few times in a row and the 24 to stay passing, then
+  `bin/diffcheck` and `bin/java-check --essential`. Considered: rebuilding at once (37 min at 20 GiB into the night's window).
+- The broken build stays in `.tmp/gate-exe/8c4d39a049c567e0253e/` (its key is jcs127-test's 7a4650d9b tree alone; the fix moves the key).
