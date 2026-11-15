@@ -35,7 +35,8 @@ run() {
     local l nm ph ch ne cm
     for l in "$@"; do
       read -r nm ph ch ne cm <<< "$l"
-      printf '%s\trun\t%s\t%s\t%s\t%s\t-\tno\t1\t-\t0\t-\t-\t-\tno\t-\tcheck\t%s\n' "$nm" "k$nm" "$ph" "$ch" "$ne" "$cm"
+      # plan.tsv's columns as gate.plan writes them (GD4 added DECLARED and DISK before CMD, the last)
+      printf '%s\trun\t%s\t%s\t%s\t%s\t-\tno\t1\t-\t0\t-\t-\t-\tno\t-\tcheck\t1\t-\t%s\n' "$nm" "k$nm" "$ph" "$ch" "$ne" "$cm"
     done > "$logs/plan.tsv"
     load_plan
     local p cc pids s
