@@ -6818,3 +6818,21 @@ Proof: `bin/gate` (essential) on `3f9adc624` passed (72m44s; 39 run, 17 skipped 
 the store no longer held, made again). Flagged, not failing: cpp-runtime's build peaked at 6.6 GiB over its declared 3, hsi-essential
 (23m35s) and llvmi-essential (28m39s) over their budgets (the cpp-runtime build beside them). `bin/reap`: 49 of 52 cells checked, 3 no
 check yet, 0 problems, the matrix unchanged (no `--record` needed); `bin/crops-score --judge --strict`: 13 crops, 0 problems.
+
+## 2026-11-15: B0 of the consolidation plan, the no-key units (branch `b0-1115`, from `mac/next` `98b7d7507`)
+
+The user decided the consolidation plan's order and U1-U6 (a) on 2026-11-15, round 41 (`.tmp/consolidation-plan-1115.md`, §5 "B0").
+B0 takes the two units that move no key:
+- `mac/java-jdk` (032335813, 11-13: repr/java's round trip loops until javac accepts the printed tree, at most 20 rounds; the jdk reads
+  of front-check and the round trip under `GOMEMLIMIT=${GOMEMLIMIT:-26GiB}`) merged `--no-ff` (6ba9d9506). One conflict, doc/JOURNAL.md:
+  java-jdk's 11-13 entry placed after next's last 11-13 entry (HF10-P37), both sides kept, nothing else changed.
+- `ocaml-libs1`'s "Decided (2026-11-05, the user: OT11-OT15)" section (69cbbee3b) re-applied to doc/ocaml/DEFERRED-TRIAGE.md after OT15,
+  where next's file still had only "Proposed (OT11-OT15; none decided)" (f9b5bd405): the file moved on next, so the branch's merge
+  conflicts. The Proposed heading is kept as the file's other Proposed headings are, each followed by its Decided section. Considered:
+  amending the heading as the plan's §4 suggests; the file's convention won.
+- review-fix-2's GOI-SPEC note is held for B1, as the plan says.
+
+The keys: `bin/arbace-go --gate-key` 07a904f8b13b… before and after; `test/gate/gate-key-crops-test.bash` passes. The diff against
+next: `bin/lib/repr-java/{front-check,roundtrip}` (out of gate_key and the javac key) and docs. Proof: the essential gate (`bin/gate`)
+passed in 4m07s, 7 steps run (oracle-go as the canary, crops-score and repr-java-closure for the changed repr-java scripts), 53 skipped
+at their keys; `bin/reap`: 49 of 52 cells checked, 3 no check yet, 0 problems; `bin/crops-score --judge --strict`: exit 0.
