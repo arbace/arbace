@@ -2896,7 +2896,7 @@ most 4 processes of this task's).
 
 309's DECISION (a), the user's: os.Root's Mkdir, MkdirAll, Chmod, Chtimes and Lchown were "function not implemented" on a64i, and musl's
 select ENOSYS. On the light lane of the Mac VM (the M2 Max, Linux 7.3.4, at most 4 processes of this task's); every value below is this
-M2's kernel's answer (the probe `.tmp/q314/pr/g.c`, 133 lines, raw arm64 system calls: a64i equal byte for byte, the base 290 lines apart).
+M2's kernel's answer (the probe `.tmp/q314/pr/g.c`, 148 lines, raw arm64 system calls: a64i equal byte for byte, the base 290 lines apart).
 
 - **mkdirat** (arm64 34, x86-64 258; mkdir 83 the same) at any directory descriptor (an O_PATH one's too), in crt; emu's kernel no
   longer takes it (it did at AT_FDCWD alone, ENOSYS elsewhere). The mode as vfs_mkdir's: the permissions and S_ISVTX (01777) less the
