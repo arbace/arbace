@@ -2838,16 +2838,27 @@ Numbering from ARS96. Each with options, the recommended named; none taken.
   stxr passing), sys-4 (excl-svc's lockstep under excl:m: DIFF at the first write), verdict-45, thread-3 (thread-sync's lockstep
   judged as excl-svc's, not threaded).
 
-| check | before | after |
-|---|---|---|
-| review 306's p4 (ldxr/stxr, two pthreads) | 500,282 of 600,000 | **600,000** (10 of 10) |
-| review 306's p6 (musl pthread_mutex) | 347,118 of 400,000 | **400,000** (10 of 10) |
-| `bin/a64i check` eval, AOT, forms, cpu, loader | 128 / 128 each | **131 / 131 each** |
-| lockstep sys, step | 128 / 128 | **129 / 131** (2 :lockstep-threads) |
-| controls (test/asm/controls-a64i.txt) | 153 | **158** |
-| `--essential` | 101 programs | **104** |
-| `[:asm-arm64 :eval]` | 512 / 0 / 0 | **520 / 4 by design / 0** |
-| `[:asm-arm64 :aot]` | 3,090 / 0 / 13 | **3,093 / 0 / 13** |
+On the merge with AR25 (302's `eb933b551`):
 
-`bin/a64i go-check` 8 of 8, `--tools` 3 of 3, table-check ok, goroot-check 1,141 of 1,178 as recorded (gc2.go's :speed flake once
-under load 20, its CPU run 1,505 ms CPU time; alone 183-313 ms, 3 of 3 pass).
+| check | before (`eb933b551`) | after |
+|---|---|---|
+| review 306's p4 (ldxr/stxr, two pthreads) | 500,282 of 600,000 (at `88ba2c365`) | **600,000** (10 of 10) |
+| review 306's p6 (musl pthread_mutex) | 347,118 of 400,000 (at `88ba2c365`) | **400,000** (10 of 10) |
+| `bin/a64i check` eval, AOT, forms, cpu, sys, step, loader | 131 / 131 each | **134 / 134 each** (938 rows) |
+| controls (test/asm/controls-a64i.txt) | 159 | **165** (inject-57..59, sys-4, verdict-45, thread-3) |
+| `--essential` | 104 programs | **107** |
+| `[:asm-arm64 :eval]` | 524 / 0 / 0 | **536 / 0 / 0** |
+| `[:asm-arm64 :aot]` | 3,093 / 0 / 13 | **3,096 / 0 / 13** |
+
+- **goroot-check made load-independent** (`test/asm/a64i-goroot/one.bash`, `check.bash`): (1) a program the record has as :pass is
+  never cut by the CPU's CPU-time cut-off (A64I_GOROOT_CPU_MAX applies only to one with no recorded pass: gc2.go, 0.2 s of CPU time
+  alone, 1.5-2.1 s at load 20, flipped to :speed); (2) a64i's own budget (A64I_GOROOT_TMO, 120 s) is its CPU time (ulimit -t,
+  SIGXCPU a timeout), the wall clock a hang guard of three times it, and a64i runs with GOMAXPROCS=1 (its guest sees one CPU; the
+  host's parallel GC only slowed it: fixedbugs/issue16249.go 104 s of wall time, a timeout at load 19, now 53-56 s of CPU time);
+  the row's note names a64i's CPU time as the budget's measure. Each rule checked on helloworld.go in every run (under
+  A64I_GOROOT_CPU_MAX=-1: pass; after a 3 s sleep under A64I_GOROOT_TMO=2: pass), each failing without its rule, and their controls
+  goroot-4 (no recorded pass: speed) and goroot-5 (a spinning a64i: timeout). fixedbugs/issue22781.go (known :speed): 99 s of CPU time
+  (128 s of wall time at load 14), under the budget, left known. Two whole runs beside other work, load 17-18: 1,141 of 1,178, ok.
+
+`bin/a64i go-check` 8 of 8, `--tools gofmt vet` 2 of 2, `--tools compile` 1 of 1, table-check ok, arbace-check ok (e, repl, ns
+equal to the native's; 4 controls).
