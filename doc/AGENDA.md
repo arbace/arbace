@@ -230,6 +230,10 @@ Six crops are above 90 on all three. What the others still need:
   prohibited, the builtin families' interactions, or-patterns, n+k, rec, mdo, `@a` lambdas, rank-n applications' evidence; the
   libraries 0 worse (ghc-internal's lib-stg 7,961 of 9,931, was 5,734 of 7,789), the front end 483 of 501 testsuite-core programs
   (469 before), 47 of 47 changed programs pass on the own path. P51-P53 taken (b); P54 (the next 18 gaps) proposed.
+  `hs-p54` built P54 (a): fundeps and overlapping instances in the solver, constraint families, givens rewritten,
+  OverloadedStrings and OverloadedLists, sized primitive literals and Show, multi-parameter GND, postfix and tuple sections; the
+  libraries 0 worse (counts unchanged), the front end 500 of 501 testsuite-core programs (483 before), 65 of 65 changed programs
+  pass. P55-P57 taken (b); P58 (T15598, RebindableSyntax's rank-n bind) proposed.
   Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
