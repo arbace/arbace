@@ -6748,3 +6748,48 @@ paths), one record line (test/cpp/codegen/forms.sha256's `hdr-vector`): no gate,
   copied from cpp-s14's, the same key); one `<(...)`; gen-batch's first run read cpp-s13's removed worktree (repeated). The disk stood at
   87-95% for about 10 hours (not this worktree's); the runs waited.
 
+
+## 2026-11-15: batch-1115, the first no-key merge batch (the user's round-31 plan; branch `batch-1115`, from `mac/next` `2060d8771`)
+
+Merged with `git merge --no-ff`, in the plan's order, each checked to leave the keys where `next` has them (`bin/arbace-go
+--gate-key` `07a904f8b13b...`, `arbace_runtime_key` `7cebcc75beef...`, `arbace_javac_key` `09cfb08baf25...`,
+`arbace_javac_rest_key` `5b3a6705bdbf...`; `test/gate/gate-key-crops-test.bash` PASS after each):
+- `mac/299-asm-arm64-ar24` (`151aa8da7`) as `52007974f`: arm64's AR14-AR24 (queue 277-299: a64i-table, a64i-go, a64i-go-tools,
+  a64i-go-compile with 295's cmd/link, 299's goroot-check), ARS82-ARS95 as their commits record them (the user's decision; the branch
+  wrote no journal entries for AR14-AR24: doc/asm/ARM64-SURVEY.md's "As built: AR14" to "As built: AR24" are their account).
+  Conflicts: `bin/repr-asm`'s a64i verbs (the branch's `table-check` kept with next's `rm -rf "$asm_tmp"` before the exec), the journal.
+- `mac/cpp-s15` (`198fa5c3f`) as `ff30398d0`: llvm-eh, cpp-s13, cpp-s14, cpp-s15 (CP386-CP395). Conflict: `test/gate/steps.edn`'s
+  llvmi-aot (next's GD1 weekly part and comment, the branch's `:needs [llvmi-check cpp-runtime]`), the journal.
+- `5a19578e8` (hs-p48's tip; its branch was pruned) as `7747bf43b`: Haskell HF10-P40 to P50, with review-fix-1 as hs-p22b merged it.
+  Conflicts: `test/gate/steps.edn` (haskell-lib-own-base: the branch's command with GD1's `:mem-gib 4` and `:chain haskell-lib`;
+  hsi-check-aot: the branch's own libraries with next's `:start-after hsi-check`; the branch's haskell-lib-own-{deepseq,array,stm}
+  and haskell-lib-stg-own, which `:uses` own-base's outputs, given `:chain haskell-lib` as GD1 gave own-base, so a `--concurrent` run
+  keeps them after their producer; `test/gate/chain-needs-test.bash` passes), the appended sections of doc/llvm/LLVM-CROP-SURVEY.md
+  and doc/ocaml/OCAML-SURVEY.md (both kept, by date), the journal. hs-p54 is not merged (unproven).
+- `mac/rust-rf20` (`1df177766`) as `5ce0513a3`: RF20. Conflicts: doc/rust/FRONTEND-SURVEY.md (review-fix-1's section, then RF20's),
+  the journal.
+- `mac/ocaml-s5` (`056bff9b3`) as `3f9adc624`: OC219 (a), Runtime_events. Conflict: `test/ocaml/check-oi-native.edn`'s
+  runtime-events rows: next's whole-run record had eight, all `class header: include runtime_events`; the branch ran its list
+  (`test/ocaml/oc219.txt`) and recorded five; its four passes and test_user_event_unknown's fail taken, next's class rows kept for
+  test, test_create_cursor_failures and test_instrumented, which the branch did not run (the `:runtime-events` class keeps them until
+  a whole run, as its `:why` says). The survey's appended sections by date, the journal.
+- The journal's conflicts were resolved by date, both sides' entries kept, stable (next's first on a date): no line lost or added
+  (checked line by line against both parents), no new pair out of date order.
+
+Left out:
+- `mac/wasm-wa8` (`1265c602e`): merged, then backed out (`git reset` of the unpushed merge): its paths added to `arbace_crop_paths`
+  change `bin/lib/version.bash`, itself a `gate_key` input (bin/lib), so the merge moved gate_key to `2e53dd8f3175...` and the javac
+  keys (with next's version.bash and the wasm files, the key would be `2f784c83c088...`: a new crop's paths move the key either way).
+  It waits for a key window; its fragment `test/gate/crops/wasm.edn` stays unspliced.
+- `mac/cpp-cp338` (`f13582d5a`): already on next as `cpp-cp338b` (its three commits rebased onto cpp-n12, the 2026-11-11 entry).
+- `mac/mac/201-python-py7-py11` (`ff0c01b2d`): tried and aborted. 13 files conflict: the survey (one 848-line hunk), both
+  divergences files, and code: nine files of `go/arbace/pyctypes` (module.ae 7 hunks, world.ae 8), `go/arbace/py/builtins_ctypes_api.ae`
+  and the generated `go/arbace/clib/ctypestest/nodes.ae`. Next's queue 261 (the ctypes port's rest) and the branch's queues 262-274 (the C
+  API) changed the same functions; the files are Go forms with positions, so they merge as Go (`bin/pyi runtime print`, a three-way
+  merge of the Go text, `runtime read`), with ctypestest's node program built again by `bin/pyi-clib` and pyi's own checks after, none
+  of them in the gate: a merge of its own.
+
+Proof: `bin/gate` (essential) on `3f9adc624` passed (72m44s; 39 run, 17 skipped at their keys, the go-build at the gate's key, which
+the store no longer held, made again). Flagged, not failing: cpp-runtime's build peaked at 6.6 GiB over its declared 3, hsi-essential
+(23m35s) and llvmi-essential (28m39s) over their budgets (the cpp-runtime build beside them). `bin/reap`: 49 of 52 cells checked, 3 no
+check yet, 0 problems, the matrix unchanged (no `--record` needed); `bin/crops-score --judge --strict`: 13 crops, 0 problems.

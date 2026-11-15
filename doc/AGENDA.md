@@ -236,7 +236,12 @@ Six crops are above 90 on all three. What the others still need:
   javac-check's six analysis failures (five variants: four hunks of java-night's, DatagramSocket's cast here). Every verify
   passes; moves gate_key (`4c78a93d1fe3...`) and the javac key (`5bb2040681c2...`). When `next` merges into `java-night`,
   java-night's `DatagramSocket.ae` (F10b) wins.
-- **Waiting**: `mac/201-python-py7-py11` (Python, night 11 then the morning's merge); `java-testlib` (onto `java-night`
+- **batch-1115** (2026-11-15, the user's round-31 no-key batch): asm-arm64 AR14-AR24, C++ cpp-s15 (llvm-eh, cpp-s13-s15),
+  Haskell hs-p48 (HF10-P40-P50), Rust RF20 and OCaml ocaml-s5 (OC219 (a)) merged, keys unmoved, the essential gate passed. Left:
+  `wasm-wa8` (adding its paths to `arbace_crop_paths` changes `bin/lib/version.bash`, a `gate_key` input: it moves gate_key and
+  the javac keys, so it waits for a key window), Python (`mac/mac/201-python-py7-py11`, a merge of its own: next's queue 261 and
+  the branch's 262-274 changed the same pyctypes Go forms), hs-p54 (unproven); cpp-cp338 is on next already as cpp-cp338b.
+- **Waiting**: `mac/201-python-py7-py11` (Python, a separate merge after batch-1115); `java-testlib` (onto `java-night`
   after tonight); `java-invoke` (F15, the next Java night); `window-w2b`, `w-retire`, `eval-speed-w1` (the re-seed W);
   java-props2's commits after the conversion stay on `java-night` for the next Java night.
 - Merged branches were deleted (2026-11-09: local 149 → 65, the mirror's 461 → 250); unmerged work stays on the mirror.
@@ -457,6 +462,11 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   addp's scalar: `simdint.ae`, `synth-neon-int` 560 cases): a64i 97 of 97, coverage 2,507 of 2,507, eval 313, AOT 3,059 / 0 / 13; of
   ARMv8.0's integer SIMD only urecpe and ursqrte left; the essential step +1.8 s with synth-neon-el-e after night 12 (load 6-14).
   Proposed ARS68-ARS70. Next: ARS68 (the estimates and ARMv8.0's FP rest), ARS69, ARS70, the VM's rows (ARS55, ARS58).
+  Then AR14-AR24 (queue 277-299, the Mac VM; doc/asm/ARM64-SURVEY.md, "As built: AR14" to "As built: AR24"; ARS68-ARS95 as their
+  commits record, the user's): a64i's goi table check (`a64i-table`), the rest of ARMv8.0's FP and the later extensions' lanes, Linux's
+  arm64 user ABI (signals, stat, mmap), real Go programs on a64i (`a64i-go`), gofmt and vet (`a64i-go-tools`), cmd/compile, cmd/asm,
+  cmd/pack and cmd/link (`a64i-go-compile`), goroot-check (AR24); a64i check 128 programs, eval 512, AOT 3,090; on next with batch-1115
+  (2026-11-15).
 - Assembly, both arches integrated: `asm-merged` (asm-tg, then asm-ax4b and asm-ar2 merged; doc/asm/AMD64-SURVEY.md, "As built: the
   asm branches integrated"), the one branch for the 11-11 merge in place of the three: REVIEW2's findings fixed (the REX conflict
   resolved by porting llvm-mc's `_rex2`/`_relax_evex` fixup kinds and their CODE_4/CODE_6 relocations, `call *a@tlscall` ported,
