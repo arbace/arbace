@@ -2724,3 +2724,20 @@ Numbering from ARS94. Each with options, the recommended named; none taken.
   execve passed to the host, the child a native process (crt's vfork spawn, as ci's); a process the program makes then runs outside
   a64i, the check's judgment unchanged; (c) the child run by a second a64i (fork's copy of the address space, then exec's loader),
   the whole process tree emulated: the largest.
+
+### As built: ARS94 (a) (2026-11-15; branch `299b-asm-a64i-goroot-step`, from `299-asm-arm64-ar24` `151aa8da7`; the Mac VM)
+
+The user's decision on ARS94: (a). `bin/a64i goroot-check` is a `--full` step `a64i-goroot` in chain asm-arm64-full, as
+a64i-go-compile (d6432df30): its fragment in test/gate/crops/asm.edn, spliced into test/gate/steps.edn.
+
+- **Arm64 hosts only**: the step's command is `case $(uname -m) in aarch64|arm64) bin/a64i goroot-check ;; *) echo ... skipped ;; esac`;
+  the check itself refuses elsewhere (exit 2: this CPU's run is the reference), so on amd64 the step passes at once.
+- `:mem-gib 3` (299 measured no peak; one a64i a job at 3 jobs, and the tools' cold build reached 1.39 GiB in AR23); 333 s wall
+  at 3 jobs on the M2.
+- **Inputs**: `:lib-tools :tools :asm :a64i` (test/asm/ holds goroot-check's own files, its record and classes), goi's linux
+  record `test/goi/check-linux-amd64.edn` (the program list), less `test/asm/a64i-go/`; pins `seed/goroot.sha256` (TamaGo's go) and
+  `seed/goroot-test.sha256` ($GOROOT/test).
+- **Controls**: goroot-1 to goroot-3, `test/asm/a64i-goroot/controls.txt`.
+- Checked on the VM: `gate.crops check` 0 problems, `gate-key-crops-test` PASS, `crops-test` ok, `make check-makefile` ok. `bin/gate
+  --plan` needs a stage 0 this VM lacks for the seed: on the main host `bin/gate --full --plan` should list a64i-goroot in
+  asm-arm64-full.
