@@ -56,6 +56,21 @@
             [arbace.repr.haskell.constfold :as cf]))
 
 (def ^:dynamic *ticks* nil)
+;; HF10-P48 (a): the constraint tuples' superclass selectors count from 0 ($p0CTuple2, $p1CTuple2: GHC.Builtin.Types'
+;; wired-in CTupleN and CSolo, mkConstraintTupleTyCon), every other class's from 1 ($p1Eq)
+(defn- sc-base [cls] (if (and (vector? cls) (= "GHC.Internal.Classes" (nth cls 2 nil)) (re-matches #"CTuple[0-9]+|CSolo" (str (nth cls 3 nil)))) 0 1))
+
+;; HF10-P48 (a): a constraint tuple's dictionary constructor is named as its class (GHC.Builtin.Types' CTupleN, CSolo),
+;; every other class's C:Cls
+(defn- dcon-occ [cls] (if (zero? (sc-base cls)) (nth cls 3) (str "C:" (nth cls 3))))
+(defn- dcon-class
+  "The class whose dictionary constructor g names, or nil"
+  [g]
+  (when (vector? g)
+    (let [o (str (nth g 3 nil))]
+      (cond (str/starts-with? o "C:") ["ext" "tc" (nth g 2) (subs o 2)]
+            (zero? (sc-base ["ext" "tc" (nth g 2 nil) o])) ["ext" "tc" (nth g 2) o]))))
+
 (defn- tick! [] (swap! *ticks* inc))
 
 (def ^:dynamic *exported* #{})
@@ -1321,11 +1336,11 @@
         ops (into {} (for [[cls i] classes
                            :let [ns (or (:nsupers i) (count (:supers i))) fields (+ ns (count (:methods i))) unary (= 1 fields)]
                            entry (concat (map-indexed (fn [k m] [m (+ ns k)]) (:methods i))
-                                         (map (fn [k] [["ext" "var" (nth cls 2) (str "$p" (inc k) (nth cls 3))] k]) (range ns)))]
+                                         (map (fn [k] [["ext" "var" (nth cls 2) (str "$p" (+ k (sc-base cls)) (nth cls 3))] k]) (range ns)))]
                        [(first entry) {:details {:k :classop :index (second entry) :unary unary :cls cls} :arity 1}]))
         dcons (into {} (for [[cls i] classes
                              :let [ns (or (:nsupers i) (count (:supers i))) fields (+ ns (count (:methods i)))]]
-                         [["ext" "var" (nth cls 2) (str "C:" (nth cls 3))] {:details {:k :con :strict (vec (repeat fields false)) :unary (= 1 fields)} :arity fields}]))
+                         [["ext" "var" (nth cls 2) (dcon-occ cls)] {:details {:k :con :strict (vec (repeat fields false)) :unary (= 1 fields)} :arity fields}]))
         cache (atom {})]
     (fn [n]
       (if (contains? @cache n)
@@ -1393,7 +1408,7 @@
   [rhs]
   (let [[bs body] (c/collect-binders rhs)
         [f args] (c/collect-args body)]
-    (when (and (c/gv? f) (str/starts-with? (nth (second f) 3) "C:") (not= 1 (count args)))
+    (when (and (c/gv? f) (dcon-class (second f)) (not= 1 (count args)))
       {:k :dfun :bndrs bs :con (assoc (second f) 1 "data") :args args})))
 
 (defn- let-to-case

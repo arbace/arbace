@@ -135,7 +135,64 @@ Six crops are above 90 on all three. What the others still need:
   qualified binders, guard implications, -O0 constructor layouts, ...; lib-stg 5,533 of 7,639, 0 worse), and the elaborator
   keeps representation kinds (the `kinded-results` hard-code gone); P21 not built: the 13 programs neither set runs are the
   other packages' -O2 ABI and -O0 exception reports, not the programs' (HF10-P28 proposed: P21's proof restated, those to
-  P17); next P28's decision, P21, P19 with P22-P23 (the first own cases: what moves eval and AOT to 1)
+  P17); P28 decided (a) (the user, 2026-11-11); `hs-p22` built P21 (run-check compiled on every package's own interfaces: the
+  whole own set, ghc-internal and base both own, 51 of 63, 0 lost; classed rows `{:runs :all}`, `{:runs :all-base}`: o2-names 7,
+  o0-report 2, hsi-memory 2, hsi 1) and P19 with P22-P23: `bin/hsi check --libs own`, the first own cases (programs on the own
+  interfaces run over the own STG alone; samples, synthetic and testsuite-core: 420 of 764 run own, 412 pass in a merge of three light runs, interim; `check-hsi-own.edn`, `own-fallback.txt`);
+  four elaborator classes (a pattern's IP givens, a field's qualified result, record fields checked, the innermost IP given).
+  `hs-p22b` (review 1111b): the second pattern guard's givens fixed (GuardGivens in run-check, judged by its stdout), own-only
+  failures classed by what fails (`divergences-own.edn`), own-fallback.txt honest and tried (`HSI_OWN_FALLBACK=try`), lib-stg's
+  run classes with outcomes; `check-hsi-own.edn` is INTERIM (a merge of light runs) until the night's whole run at 16 GiB
+  (its header's commands, night 13+).
+  P31 (a) decided and built on `hs-p31`: the eval and AOT cells read `check-hsi-own.edn` / `-aot-own.edn` once whole (not INTERIM; `bin/reap --self-test`), the pack's record until then; the switch is the commit of night command 4 (5), with `bin/reap --record` and `crops-score --record`.
+  P29 and P30 decided (a) (the user, 2026-11-11); `hs-p29` built P29's wiring: the step `haskell-lib-stg-own` (ghc-internal's own
+  STG judged and `--run`, its output `ghc-internal-own.tar`), `haskell-lib-own-base` keeps `base-own.tar`, `hsi-check` and
+  `hsi-check-aot` run `--libs own` on them (`:uses`), crops-score counts `:libs :own` from `check-hsi-own.edn` (not while it is
+  INTERIM: 76.0 stays; projected 80.6, about 85 with the AOT record); P30's plan (P17's packages in dependency order, one GHC
+  window) written; HF10-P31 proposed (the cells read the own records). Next: the night's runs (the survey's night commands).
+  `hs-p17` built P17's first slice (HF10-P30 (a), no GHC): `lib-check --package P --ifaces own` beyond base (dependencies from the
+  `.cabal` files, a list of own pools, every dependency's reexports, Prelude, the package's source directory), DefaultSignatures'
+  `$dm`; deepseq 1/1, array 15/15, stm 10/10 modules elaborate, every binder type GHC's pack holds equal, interface facts 202/211,
+  388/388, 222/222 (`lib-check-own-{deepseq,array,stm}.edn`); lib-stg 26/26 `:ok`, unjudged (no -O0 reference); steps
+  `haskell-lib-own-{deepseq,array,stm}` `:clean-only` until the oracle window (its commands in the steps' comment). P32 and P33
+  decided (a) (the user, 2026-11-12); `hs-p32` built them: the slice gated in `--full` and in `hsi-check`/`hsi-check-aot`'s own
+  libraries, the six own-only failures fixed, none classed (local binders' types for tostg: thawSTArray's copy loop; derived Show's
+  isSym: `()`; unique dictionary-function names: Data.Array.Base's strict and lazy ST instances; `OPTIONS -cpp` ineligible), the 31
+  newly eligible programs 30 pass; ghc-internal's lib-stg 5,545 (0 worse), base's 1,046 bindings compared; default signatures in the
+  own interfaces (an importing module's instance applies `$dm` with their dictionaries). HF10-P34 decided (a) (the user,
+  2026-11-12); `hs-p34` built it: Generic and Generic1 derived as GHC.Tc.Deriv.Generics does (from/to, the `Rep`/`Rep1` family
+  instance with its metadata), DeriveAnyClass's context from the default signatures; the generics programs found five library
+  faults, fixed (pattern synonyms of the module matched as their pattern: symbolVal; SingKind's kind recovered by family inversion;
+  KnownNat/KnownSymbol evidence; data instances by kind named apart; standalone newtype deriving of Monoid (K1 ...)): the five
+  single-module `generics/` run tests pass on the own libraries (none before), 12 of 14 compile tests elaborate; ghc-internal's
+  lib-stg 5,705 of 7,757 (0 worse), GHC.Internal.Generics errors 9 → 0. HF10-P35 (generics/ into the run corpora), P34 (b), P36
+  (pattern-synonym matchers) proposed. P35 and P36 decided (a) (the user, 2026-11-12); `hs-p36` built them: matchers `$mP` and
+  builders `$bP` as GHC.Tc.TyCl.PatSyn makes them, every `psyn` pattern desugared through its matcher (matchPatSyn), inferred
+  synonyms' contexts, record synonyms' construction, update and selectors, across modules through the own interfaces; patsyn/'s 14
+  single-module run tests 13 pass on the own libraries (3 before; T14228: unboxed sums as arguments, HF10-P37); ghc-internal's
+  lib-stg 5,734 of 7,789 (0 worse); generics/ in `:testsuite-core` (708 run tests), judged by their shipped stdout
+  (`own-verdicts-pending.tsv`, `:oracle-pending` where GHC's STG is needed) until the window records GHC's runs. P37-P39 decided (a) (the user, 2026-11-13; `:oracle-pending` accepted); `hs-p37` built them:
+  unboxed sums unarised as GHC's Unarise does (binders, arguments, slot casts, case and let binders, constructor fields; unboxedsums/'s
+  run tests 18 of 19 on the own path, 5 before; T14228 passes, patsyn/ 13 of 13), patsyn/ in `:testsuite-core` (722 run tests, pending
+  by their own verdicts), Typeable evidence of promoted constructors (`$tc'Many`) and functions (`mkTrFun`, the arrow's kind arguments):
+  Type.Reflection's App, Fun and a function's `show` run; ghc-internal's lib-stg 5,734 of 7,789 (0 worse). P40-P42 proposed. P40-P42 decided
+  (a) (the user, 2026-11-13); `hs-p40` built them: unboxedsums/ in `:testsuite-core` (743 programs); Typeable's kind arguments at the
+  use site and the own data types' kinds inferred (kcTyClGroup lite, written into the own interfaces and `$tc` bindings; every module's
+  `$tc'` bindings, classes' TyCons; an explicit forall's binder order), `*`, promoted tuples, literal Typeable: TypeableEq and T14341 pass
+  on the own path, TypeOf and TypeRep but IO's lines (fixed after, not rerun); P43 in part (monad comprehensions, `main`'s type);
+  ghc-internal lib-check 0 worse (3 better), lib-stg 5,734 of 7,789, base as before. The proofs after round 8 stopped at `df /` 89%
+  (the night's gate): night command 1. P43-P45 proposed. P43-P45 decided (a) (the user, 2026-11-14); `hs-p43` built them with P46 and
+  P49 (taken on the way): TransformListComp, ParallelListComp, monad comprehensions' transforms and parallel blocks, CallStack
+  implicit parameters of any name, constraint synonyms in contexts, static pointers (GHC's table keys), withDict's T16646, the own
+  classes' kinds, GADT binders' kind annotations and standalone kind signatures; hs-p40's proofs run: the libraries 0 worse (counts
+  unchanged), the front end 437 of 483 testsuite-core programs (391 of 465 before; 447 with P46, P49), 29 programs more pass on the
+  own path. P47 (Code's signature, (b)), P48 (a variable superclass), P50 (the next gaps) proposed.
+  P48 and P50 decided (a) (the user, 2026-11-14, round 34); `hs-p48` built them: a variable superclass (T23761b's IP shadowing),
+  the constraint tuples' GHC superclass fields, selectors and constructor names, recursive dictionaries, superclass loops
+  prohibited, the builtin families' interactions, or-patterns, n+k, rec, mdo, `@a` lambdas, rank-n applications' evidence; the
+  libraries 0 worse (ghc-internal's lib-stg 7,961 of 9,931, was 5,734 of 7,789), the front end 483 of 501 testsuite-core programs
+  (469 before), 47 of 47 changed programs pass on the own path. P51-P53 taken (b); P54 (the next 18 gaps) proposed.
+  Next: the window (P16's and P17's references, generics/'s runs), then containers.
   Eval: HES90 (2026-11-11, `hs-hes90`): a test with `ignore_stdout` is judged without its stdout, as GHC's driver does (conc065 and
   conc066 pass: 811 programs pass, 0 unclassed).
   ([haskell/HASKELL-EVAL-SURVEY.md](haskell/HASKELL-EVAL-SURVEY.md), [haskell/FRONTEND-SURVEY.md](haskell/FRONTEND-SURVEY.md)).
@@ -262,6 +319,9 @@ W-D1 to W-D13 taken; W-D9 (pruning the disk to 70% before W1) was not accepted, 
   (the gate's build, `bin/goi test`, `check`, the interpreted benchmark) on night 12 or 13, merged after it.
 - W: `eval-speed-w1` (D-W1, eval-speed rebased onto `next` with `java-night`), `w-retire` (R on `window-w2b`).
 - Reviews: today's merged code on `next` (patches for the owners) and an audit of the independence facts.
+  `review-fix-1`: review 1111's eight findings (oi's :init-order and OC216's annotations, Haskell's guard givens and --o0-layout,
+  hsi's Float FMA, RF19's key and attribute precedence, LLVM's section rule and renames) fixed and proven; its night: RF19's
+  rsi-build makes core-attrs.edn again (23 min, 2.3 GB).
 
 - Assembly: `asm-ax1` (AX1's first slice, doc/asm/AMD64-SURVEY.md, "As built: AX1"): repr/asm reads GNU as's AT&T text into
   assembly forms and prints it back byte for byte; musl 32/32, `MC/AsmParser` 139/157 and `MC/X86` 464/621 pass, the rest classed

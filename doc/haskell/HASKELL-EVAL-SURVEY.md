@@ -2390,3 +2390,14 @@ judged without its stdout, as GHC's testsuite driver does: its status and stderr
   conc065 and conc066 now pass (status 0, stderr empty as GHC's), the others unchanged. They left the class `rts`
   (test/haskell/divergences.edn: 6 ids to 4). `bin/hsi divergences`: 908 programs, 811 pass (809 before), 97 in a class, 0 unclassed;
   `bin/reap` 0 problems (matrix recorded), `bin/crops-score --judge --strict` 0.
+
+## As built: review 1111's finding 6, the Float lanes' fused multiply-add (2026-11-11, branch `review-fix-1`)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`, finding 6): hsi-e1's SIMD `fma` computed a Float
+lane as `float32(math.FMA(float64(a), float64(b), float64(c)))`, rounding twice (to 53 bits, then 24), where vfmadd*ps rounds once. It
+now calls `fmaf` (`prim_scalar.ae`: musl 1.2.6's src/math/fmaf.c, the scalar `fmaddFloat#`'s since review 189's F7), on the lanes
+negated first (exact); the Double lanes keep `math.FMA`. A case the double rounding gets wrong (found by a Python search over exact
+fractions): a = 0x1.fb64e2p+0, b = 0x1.78ee6p+0, c = 0x1.e80002p-37: twice rounded 0x1.758a5p+1, once 0x1.758a52p+1. `bin/hsi build`
+builds; T22296 (the testsuite's SIMD test) passes alone; hsi-essential's command below. The vector fma's result itself is not run by any
+recorded program (no test of the corpora uses `fmadd*FloatX*#`).
+hsi-essential's command: 123 programs, 0 not passing in no class, the controls fail as they must (24 min, 0.4 GB).

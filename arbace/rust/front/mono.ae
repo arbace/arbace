@@ -1064,6 +1064,11 @@
           (when (.exists (File. ^String f)) [(parse-rs f) (.getParent (File. ^String f)) f false]))))))
 
 (def ^:private attr-cache (atom {}))
+(def ^:dynamic *once-fallback*
+  "Whether ext-attrs may answer an impl's method by the one function of that name the file's impls hold (RF13); bound false
+  for a path core-attrs.edn knows (review 1111, finding 4: a macro-made method whose name a hand-written method of another
+  impl shares took that one's attributes)"
+  true)
 
 (defn- src-header-names
   "RF14: the names an impl's header gives in the source (each path's last segment in its trait reference and self type, their
@@ -1103,8 +1108,9 @@
 (defn ext-attrs
   "core's (or alloc's) item at the def path P: its attribute names, or nil when the sources do not hold it as an item"
   [^String p]
-  (if (contains? @attr-cache p)
-    (get @attr-cache p)
+  (let [ck (if *once-fallback* p [p :strict])]
+  (if (contains? @attr-cache ck)
+    (get @attr-cache ck)
     (let [r (try
               (let [[crate & segs] (str/split p #"::")
                     root (str *lib-dir* "/" crate "/src")
@@ -1140,15 +1146,16 @@
                                 (when-not want (some #(when (= (second segs) (fn-item-name %)) (attr-strings (fget % :attrs))) its))
                                 ;; RF13: the impls' order in the file is not rustc's disambiguators' everywhere (alloc's vec/mod.rs
                                 ;; counts a `const impl` that rustc's {impl#1} does not): a function the file's impls name once
+                                (when *once-fallback*
                                 (let [hits (for [im (filter #(= 'Impl (item-kind %)) items)
                                                  f (fget (second (fget im :kind)) :items)
                                                  :when (= (second segs) (fn-item-name f))]
                                              f)]
-                                  (when (= 1 (count hits)) (attr-strings (fget (first hits) :attrs)))))))
+                                  (when (= 1 (count hits)) (attr-strings (fget (first hits) :attrs))))))))
                         :else (when-let [[its d f _] (child-mod-items items dir file s)] (recur its d f (rest segs))))))))
               (catch Throwable _ nil))]
-      (swap! attr-cache assoc p r)
-      r)))
+      (swap! attr-cache assoc ck r)
+      r))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; RFP58 (a): the definitions std's interface lacks (private types its public ones reach: stdarch's `#[repr(simd)]` types,
@@ -1336,9 +1343,12 @@
   (cond
     (number? d) {:names (set (local-attrs d)) :known true}
     (contains? *native-attrs* d) {:names (set (get *native-attrs* d)) :known true}
-    :else (let [a (ext-attrs d)
-                ;; RF19: an item core's sources do not show (a macro-made one): its attributes after expansion
-                a (if (and (nil? a) (contains? *macro-attrs* d)) (get *macro-attrs* d) a)]
+    :else (let [;; RF19: an item core's sources do not show (a macro-made one): its attributes after expansion; for such a
+                ;; path the sources' items by index, header or name in its impl first, then the expanded map before RF13's
+                ;; once-named fallback (review 1111, finding 4)
+                a (if (contains? *macro-attrs* d)
+                    (or (binding [*once-fallback* false] (ext-attrs d)) (get *macro-attrs* d))
+                    (ext-attrs d))]
             {:names (set a) :known (some? a)})))
 
 (defn attrs-of

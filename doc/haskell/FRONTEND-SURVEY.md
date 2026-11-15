@@ -3096,3 +3096,1412 @@ The plan's "13 are the programs' -O2 ABI" (stage 3's proof, run-check ≥ 53 on 
   exception reports a class of their own (`:o0-report`) to look at in base's -O0 TopHandler path**; 1-2 days as planned;
   (b) keep "≥ 53" by giving the own ghc-internal GHC's -O2 floated names as aliases (`ioException3`, `reverse1`): mixes the
   ABIs, a list to maintain by hand; rejected. *Recommended: (a)*.
+
+## Decided (the user, 2026-11-11: HF10-P28)
+
+HF10-P28 (a): stage 3's proof restated as "run-check's 63 on the own interfaces ≥ the `all` set's 50, 0 lost"; the 7 programs that
+call ghc-internal's -O2-only names wait for P17 (own -O0 STG of bytestring, directory, file-io, stm); the 3 exception-report
+differences a class of their own, `:o0-report`.
+
+## As built: HF10-P21, P19, P22, P23 (2026-11-11, branch `hs-p22`, from `mac/next` 4b8fc77e3)
+
+By an agent in the light lane (one process at a time under 2 GiB, at most three by day; stage 0 `/root/arbace/target/seed/amd64/arbace`,
+the checkout's sources evaluated; no GHC, no gate run, no network). GHC 9.14.1's sources the specification, from the pinned tarball
+(`compiler/GHC/Tc/Gen/App.hs`'s tcInstFun, `compiler/GHC/Tc/Gen/Expr.hs`'s tcRecordBinds, `compiler/GHC/Tc/Solver/Dict.hs`'s IP givens,
+`libraries/ghc-internal/src/GHC/Internal/Exception/{Type,Backtrace}.hs`; BSD-3, LICENSE.md "GHC").
+
+**Where it stands.** P21's proof (P28 (a)) is met: run-check's 63 compiled on **every package's own interfaces** run 51 on GHC's own
+-O0 libraries (`ghc0`, 50 on ghc-internal's pool alone) and **51 on the whole own set** (`LIB_STG_REPLACE=all`; 50 before), every
+pass of the `all` set's 50 kept, 0 lost. P19 (a) with P22 (a) and P23 (a) built: `bin/hsi check --libs own` runs a program the front end
+can take on the own interfaces alone over the own libraries' STG alone, **the first own cases**: of samples', synthetic's and testsuite-core's 764 programs, **420 run on Arbace's own libraries (412 pass)**, 342 on the pack (74 of them by the fallback list).
+
+### P21 (a): the programs on every package's own interfaces
+
+`bin/repr-haskell run-check`'s `REPR_HASKELL_RUN_IFACES_OVER` takes a list (`DIR:DIR...`; `run-check/over.txt` names each copied
+interface's directory); `lib-stg --ifaces own --run` gives it ghc-internal's pool, its wired-in `GHC.Internal.Prim` (primops.txt.pp's,
+HF10-P18) and base's pool (`lib-check --package base --ifaces own`), 507 interfaces (`LIB_STG_PROG_IFACES=ghc-internal`: the pool
+alone, as before). ghc-prim and ghc-bignum compile nothing of their own (`Dummy`): their modules are reexports, named by the
+pack's `reexports.edn` (GHC.Types → GHC.Internal.Types, GHC.Num.Integer is base's). No pack interface of a boot package is read by
+run-check's programs any more: the pack `haskell-ifaces-ghc-9.14.1` gives only the other packages' (containers, bytestring, ...).
+
+### The classes fixed (each by a run, judged by lib-check and lib-stg `--ifaces own --judge` before the next run)
+
+| class | where it broke | the fix (GHC's rule) |
+|---|---|---|
+| a pattern's implicit parameter | `someExceptionContext (SomeException _) = ?exceptionContext` read the empty context: HasExceptionContext, a synonym of `?exceptionContext :: ExceptionContext`, was not matched by name as HasCallStack is, so the wanted was defaulted (`defaultExceptionContext`); no uncaught exception printed its backtrace on the own libraries (runtime-exceptions) | a constructor pattern's IP givens (`HasCallStack`, `HasExceptionContext`, `?x :: t`) are its alternative's (`ip-pat-env` into `::ip`, `with-ips`); the solver matches either synonym by its name; the module's unscoped existential givens only for `?callStack`, as before (an unscoped `?exceptionContext` took another function's dictionary) |
+| a field of a qualified type | `ceaCollectExceptionAnnotationMechanism cea` (`:: HasCallStack => IO SomeExceptionAnnotation`) applied without its call stack: the action was a function | an application's result of a qualified type is instantiated after its arguments (tcInstFun's final instantiation), HasCallStack's call site the field's, GHC's `OccurrenceOfRecSel` label "a use of `f'" |
+| a record construction's field | `CollectExceptionAnnotationMechanism { ceaCollect... = SomeExceptionAnnotation `fmap` collectBacktraces }` built no abstraction over the call stack | each field checked against its type (tcRecordBinds' checking), a qualified one abstracting its evidence, as the positional constructor already did |
+| the innermost implicit parameter | `errorCallWithCallStackException s stk = ... withFrozenCallStack $ toExceptionWithBacktrace (ErrorCall s) where ?callStack = stk`: the argument's HasCallStack took the `where`'s `?callStack` (stk) instead of the frozen stack withFrozenCallStack gives it: `error`'s backtrace showed collectExceptionAnnotation's and toExceptionWithBacktrace's frames (cgrun016, T11572, 15 testsuite programs) | a qualified argument's IP givens (check-poly's) are in scope ahead of an enclosing `let ?x` (`ip-pat-env`, `with-ips`), GHC's innermost given |
+| GHC.Internal.Prim's unit | on the own libraries alone (no GHC stub of Prim) `void#` was named `main:GHC.Internal.Prim/void#` (samples/Cont: no STG for main:GHC.Internal.Prim) | GHC.Internal.Prim is ghc-internal's whether or not the libraries hold its stub (`tostg/ext-str`) |
+
+lib-stg on the own interfaces 5,533 → **5,536 of 7,639** (Exception.Type 20 → 23 of 42), 0 worse; lib-check own 265 against 265, 0 worse;
+base's 241 and 547 of 1,024, 0 worse; on GHC's interfaces lib-check 265, 0 worse, lib-stg 5,457 → 5,460 of 7,612 (0 worse; its runs 60 of 63, the 59 recorded kept).
+
+### run-check on the own interfaces (P28 (a)'s classes)
+
+| set (`LIB_STG_REPLACE`, the programs on the own interfaces of ghc-internal, Prim and base) | pass of 63 |
+|---|---:|
+| ghc0: GHC's own -O0 STG of the boot libraries | **51** (50 on ghc-internal's pool alone) |
+| all: every ghc-internal module Arbace's own STG | **51**, 0 lost against ghc0 and the recorded `all` 50 (the row re-recorded 50 → 51) |
+| all-base (`LIB_STG_BASE=own`): base's 241 modules own too, no GHC-made STG of the four boot packages | **51**, 0 lost (a new row `{:runs :all-base}`) |
+
+The rows of `lib-stg-own-results.edn` carry `:ifaces` (`:own`: every package's pools) and `:classes` (each non-pass's class);
+`libcheck judge-runs` fails on a non-pass in no class (`run-classes`): `:o2-names` (the other packages' -O2 STG calls ghc-internal's
+-O2-only names: LibBytes, LibIO, LibMisc, LibPosix, LibSystem, LibText, runtime-stm; P17), `:o0-report` (P28 (a)'s class: Exc and
+Trace; with the context restored the report is GHC's text up to the backtrace's line, where `prettySrcLoc` of the own (-O0, boxed)
+ghc-internal meets containers' -O2 `SrcLoc` with UNPACKed `Int#` fields: `case of an algebraic type on int64(629)`; it moves with P17
+too: containers' own -O0 STG), `:hsi-memory` (Loop, runtime-deep at the light runs' 2 GiB), `:hsi` (AsyncRerun). runtime-exceptions,
+the third of P28's report programs, passes.
+
+### P19 (a), P22 (a), P23 (a): `bin/hsi check --libs own`
+
+`bin/hsi check --libs own` (`HSI_LIBS_SET=own`): a program is an own case when the native front end can take it on the own interfaces
+alone (`front_eligible` over a directory of the own interfaces only: every import ghc-internal's or base's, or a reexport of one; no C,
+no foreign stub, no CPP), it is not in `test/haskell/own-fallback.txt` (P23 (a): the list, empty, that may only shrink) and the front
+end compiles it; it runs over the own libraries' STG alone (`HSI_OWN_STG`: ghc-internal's 265 and base's 241 modules, no other
+package, no GHC-made module: a run that needed one would stop) and its own image: `:libs :own`. Every other program runs as `--front
+ghc` runs it (haskell-stg-progs over haskell-stg-libs): `:libs :pack`, `:front` the reason (`:ineligible`, `:fallback`, the stage that
+stopped the front end). `--aot` the same (the own libraries' closures compiled by HE8's per-image cache). Work `.tmp/hsi/check-own`
+(`check-aot-own`); `--record` writes `test/haskell/check-hsi-own.edn` (`-aot-own`) beside the pack's records until the switch (P29).
+
+| corpus (`--libs own`, ARBACE_MEM_GIB=2: the light cap) | programs | own (`:libs :own`) | own pass | pack | pack pass |
+|---|---:|---:|---:|---:|---:|
+| samples, synthetic | 63 | 47 | 43 | 16 | 16 |
+| samples, synthetic, testsuite-core (`test/haskell/check-hsi-own.edn`) | 764 | **420** | **412** | 342 (74 fallback) | 312 |
+
+The 8 own non-passes fail on the pack as well (AsyncRerun, CallConv's Cmm, T24809, AtomicPrimops, T3279, conc037, T22671 at the light
+cap, numsparks001 `:threaded-way`), in their classes of `test/haskell/divergences.edn`. The fallback list's 74, each with its class:
+`:front-run` 49 (the program's own STG: Word's negative literal patterns, T9533; patError's text, dsrun005; C:IP left applied, T246,
+IPRun; `$tcMany` named, TypeableEq; ...: the front end's), `:o0-report` 16 (the uncaught report on the own libraries: `fail` in IO's
+`throwIO` frame, PatternMatchFail's frames), `:light-cap` 7 (2 GiB, 60 s: -O0 libraries are slower and larger; the gate's 16 GiB to
+measure), `:own-lib` 2 (class IP's selector `ip` absent from the own GHC.Internal.Classes: tcrun019, tcrun024). 4 programs the pack
+passes at 16 GiB fail at the light cap on either side (Loop, runtime-deep, readMVar1, fptr02). `--aot --libs own`: samples/Hello and
+synthetic/class-num built and run from the own libraries' STG compiled to Go (`:vs-hsi :same`), the first own AOT cases.
+
+### Independence
+
+Unchanged in the recorded score (76.0): `test/crops/independence.edn`'s eval and AOT facts name the gate's steps `hsi-check` and
+`hsi-check-aot`, which run on the packs; an own case counts when a step runs it (P29). With the night's records the projection is
+eval 0.5 + 0.5 x 420/908 = 0.731 (nofib's 58 eligible not yet run), AOT as eval's share if the same programs build (~0.73), judge unchanged: **independence about 85** ((2 + 0.731 + 0.73 + 0.8) / 5 = 85.2), against 76.0.
+
+### Checks
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` | 265 against 265, **0 worse**; control differs; 13 min, 1.75 GiB |
+| `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` | 5,533 → **5,536 of 7,639**, 0 worse (re-recorded); control 0 of 171; 11 min |
+| `lib-check --package base --ifaces own --judge ...-own-base.edn`, `lib-stg --package base --ifaces own --judge ...` | 241 against 241, 0 worse; 547 of 1,024, 0 worse; controls differ; 4 min each |
+| `LIB_STG_REUSE=1 LIB_STG_REPLACE=all lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run` | ghc0 51, own **51 of 63**, 0 lost; judge-runs: the 51 recorded kept, equal's 50 kept, every non-pass in a class; 20 min, 1.6 GiB |
+| the same with `LIB_STG_BASE=own LIB_STG_SIDES=own` | **51 of 63**, 0 lost (`{:runs :all-base}`); 10 min |
+| `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` | 265 against 265, 0 worse (before the last elaborator change: a night command) |
+| `bin/repr-haskell lib-stg --judge test/haskell/lib-stg-results.edn --run` | 5,457 → 5,460 of 7,612, 0 worse (re-recorded); runs 60 of 63, the 59 recorded kept; 29 min, 1.9 GiB (before the last elaborator change: a night command) |
+| `bin/hsi check --libs own --corpus samples,synthetic,testsuite-core --record` (ARBACE_MEM_GIB=2) | 764 programs: 420 own (412 pass), 342 pack; `check-hsi-own.edn`; 44 min, 2.0 GiB (then the 83 own failures again with the last fix, 9 passing, the 74 left to the fallback list and rerun) |
+| hsi-essential's command | own-verdicts current; 123 programs, 122 pass, 0 unclassed; the four controls that ran fail as they must |
+| haskell-read-essential's command | `bin/repr-haskell test` as expected, controls differ; array, deepseq, containers 51 of 51 at the tree and text levels |
+| `bin/reap`; `bin/crops-score --record`, `--judge --strict` | 0 problems; scores unchanged (Haskell 76.0), exit 0 |
+| `bash test/gate/gate-key-crops-test.bash` | PASS; every changed path is a crop path (`arbace/repr/haskell/`, `bin/lib/hsi/`, `bin/lib/repr-haskell/`) or `bin/repr-haskell` and `test/haskell/`, none in `gate_key`, the runtime key or the seed's |
+
+### Night commands (one at a time; `. .tmp/env.sh`)
+
+1. `ARBACE_MEM_GIB=16 bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record` (the whole
+   eval corpus at the gate's cap; the front end 4 shards of 1.5 GiB, then the runs: about 10 GiB, 60-75 minutes, the heavy
+   lock as hsi-check): the light-cap fallbacks (`:light-cap` 7) and nofib's 58 eligible measured; the list shrunk by hand.
+2. `bin/hsi check --aot --libs own --corpus samples,synthetic,testsuite-core --jobs 2 --record` (8 GiB, about 2 hours: the
+   own libraries' closures compiled once per image key, then each program's build): A, the own AOT cases.
+3. `bin/repr-haskell lib-check --judge test/haskell/lib-check-ghc-internal.edn` (10 min, 1.5 GiB) and `bin/repr-haskell lib-stg
+   --judge test/haskell/lib-stg-results.edn --run` (29 min, 1.9 GiB): the GHC-interface judges after the last elaborator change
+   (the innermost IP given), which they ran before.
+
+### Proposals
+
+- **HF10-P29 The own cases in the gate.** `bin/hsi check --libs own` needs ghc-internal's and base's own interfaces and STG, which
+  today live in a worktree's `.tmp`. (a) **`haskell-lib-check-own` keeps its pool (as now, `ghc-internal-pool.tar`); a new `--full`
+  step `haskell-lib-stg-own` (`lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`, LIB_STG_REPLACE=all: the
+  module rows and the classed `{:runs :all}` row, 2 GiB, about 35 minutes) keeps ghc-internal's own STG as its output
+  (`ghc-internal-stg.tar`, :uses the pool); `haskell-lib-own-base` keeps base's pool and STG too; `hsi-check` and `hsi-check-aot`
+  run `--libs own` with the three tars as `:uses` (`HSI_OWN_IFACES`, `HSI_OWN_STG` taking a tar), recording `:libs` per case in
+  `check-hsi{,-aot}.edn` (the switch: `check-hsi-own.edn` retired); crops-score's eval and AOT facts count the `:libs :own` cases
+  from the records (`:cases {:own [E 1] :pack [M 0.5] :c [87 0.5]}`, E and A read by `crops.score` from the records, not by hand)**;
+  1 day; the night's hsi-check grows by the front end of about 600 programs (4 shards of 1.5 GiB, about 40 minutes); keys: steps
+  and crop paths only (bin/lib/hsi, arbace/repr/haskell: `arbace_crop_paths`), gate_key unmoved. (b) keep `--libs own` a check by
+  hand, its record `check-hsi-own.edn`, the facts' counts written by hand at each merge (drift; the steps cannot agree with them).
+  *Recommended: (a)*.
+- **HF10-P30 P17 scoped: the run corpora's packages own.** The programs that stay `:libs :pack` for an import are the other
+  packages' (containers, array, bytestring, text, stm, mtl, deepseq, directory, filepath, process, time, unix); and the 9 run-check
+  programs of `:o2-names` and `:o0-report` mix those packages' -O2 STG with the -O0 own ghc-internal. (a) **the plan's stage 5 as
+  decided (P17 (a)): `--package P` generalised from base to any installation unit, its own pool and STG, dependency order deepseq,
+  array, stm, containers, template-haskell's reexports, transformers, mtl, os-string, filepath, bytestring, text, time, unix,
+  file-io, directory, process; each with lib-check and lib-stg records and controls; the -O0 references grown at one GHC window
+  (P16, P17's pack, the oracle tier); `--libs own` then takes every own package**; 4-8 days, one oracle window; first slice
+  without GHC: deepseq, array, stm (no -O0 reference: judged by runs only, lib-stg's rows written at the window). (b) only the
+  packages run-check's 9 need (bytestring, directory, file-io, stm, containers and their dependencies): about half the work, the
+  testsuite's other imports stay pack. *Recommended: (a), first slice deepseq, array, stm, then containers*.
+
+## As built: review 1111's fixes to HF10-P20/P21, findings 2 and 8 (2026-11-11, branch `review-fix-1`, from mac/next a7916bb2a)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`). **Finding 2, a pattern guard's givens.**
+HF10-P20's fix (`infer-grhss`, `*guard-w*`) rewrote only the wanteds from the guard's pattern on; but in a clause with givens (a GADT
+match, a signature's `a ~ b`) the GRHS's `*given-eqs*` atom is non-empty, the scrutinee's wanteds (eqT's `Typeable b`, `Typeable c`)
+carry that atom itself as `:geqs`, and `tc-pat` grows it by HRefl's `b ~~ c`: `under-givens` rewrote `Typeable c` to `Typeable b` and
+every comparison held. `infer-guards`' BindStmt now re-points the wanteds made before the pattern under that atom to a snapshot of the
+givens they were made under (the review's second fix). Regression case `test/haskell/eval/front/GuardGivens.hs` (both shapes), its
+expected output `GuardGivens.stdout` written by hand from the program's meaning (GHC was not run: its reference line is for the oracle
+tier's `run-check --record-ref`), run by `REPR_HASKELL_RUN_IFACES=pack HSI_LIBS=$(bin/hsi libs-pack) bin/repr-haskell run-check
+front/GuardGivens` (the program is in no corpus, so run-check reports `:no-ref` and exits 1; its stdout is the proof): next's elaborator
+prints `True` six times, the fix `False True False False True True`. Not fixed: the same aliasing between successive patterns of one
+clause (`infer-matches`, pre-existing, the review's note). **Finding 8, `--o0-layout`'s unknown module.** `con-reps` gave a constructor
+of a module `*units*` does not know the -O0 layout from its type, as the unit's own; it is now another unit's (as `ext-str` names
+it, "main"), the pack's layout. Checks in the table below.
+
+| check | result |
+|---|---|
+| `bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn` (finding 2) | 265 against 265, 0 worse, 0 better; the control differs; 21 min, 1.0 GB |
+| `bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn` (findings 2 and 8) | 5,533 of 7,639 bindings equal, as recorded, 0 worse or missing, 0 better; the control 0 of 171; 21 min, 1.3 GB |
+
+## As built: review 1111b (2026-11-11, branch `hs-p22b`, from `mac/hs-p22` e9de0d3b7 with `mac/review-fix-1` merged)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-pending-hs-rust-fix1.md`, findings #1-#6 on hs-p22 and
+review-fix-1). Each finding, what was done:
+
+- **#1 (two equality-giving guards).** `infer-guards` records `[WI GIVENS-BEFORE]` at every pattern guard that gives equalities
+  (`*guard-w*` held the first's index alone), and `infer-grhss` rewrites the wanteds stretch by stretch
+  (`rewrite-wanteds-by-stretch!`): from WI_k to WI_k+1 by the givens before pattern k+1, the last stretch by the GRHS's final
+  givens, as GHC nests one implication per pattern guard. `GuardGivens.hs` gains `two` (no clause givens: `a ~~ Int`, then
+  `b ~~ c`) and `twoG` (the same after a GADT match); their six lines of `GuardGivens.stdout` written by hand from GHC's semantics
+  (GHC not run). Before the fix (the merged elaborator) lines 7 and 10 printed `True`; after, all twelve lines as expected.
+- **#5 (GuardGivens run by a check).** run-check's default plan takes `test/haskell/eval/front/*.hs` beside samples and synthetic;
+  a program without a line in `ref-ghc914.edn` is judged by its own verdict, its committed `NAME.stdout` with status 0 and no
+  stderr (the negative control takes the same reference); `run-check.edn` records `front/GuardGivens :pass`. So `haskell-lib-stg`'s
+  `--run` (both library sets) and every run-check run it; its GHC reference can be recorded at the oracle window
+  (`run-check --record-ref`), which the judge then prefers.
+- **#3 (own failures hidden by the pack's classes).** `bin/hsi check --libs own` judges a `:libs :own` non-pass by
+  `divergences.edn` only when it fails as `check-hsi.edn`'s line of the program does (kind, status, differs); otherwise it is an
+  own-only failure, in a class of the new `test/haskell/divergences-own.edn` whose `:outcome` is its own and whose `:message` its
+  stderr's first line holds (a failure on the own libraries now records it, `:err`). Classed by what fails (light runs of
+  2026-11-11): AtomicPrimops `:own-memory` (Go's "runtime: out of memory" at the 2 GiB cap in 3-5 s; on the pack killed at the CPU
+  limit at 46 s: not the pack's speed), conc037 `:front-no-main` ("panic: no binding of main::Main/main", the front end's STG lacks
+  main, as conc036's in the fallback list; on the pack only the scheduling order differs), T24809 `:no-reference-own` (GHC's
+  reference did not build; the own front end compiles it).
+- **#6 (lib-stg's run classes by id).** `record-runs` writes each non-pass's `:outcomes` (result, differs, stage) beside
+  `:classes` and keeps a class only for the same outcome; `judge-runs` fails a classed non-pass whose outcome moved. The rows
+  recorded before (`:equal`, `:all`, `:all-base`) have no `:outcomes`: the judge says so and matches them by id until the night's
+  re-record writes them.
+- **#4 (own-fallback.txt).** The header now says what the list is (eligible programs that did not pass on the own libraries in
+  the light runs; 8 of them did not pass on the pack either in that run, each passing in `check-hsi.edn` at 16 GiB); `:light-cap`
+  became `:untried-cap` (over the cap on both, never tried at 16 GiB), `:o0-report` became `:own-report` (P28 (a)'s class was
+  decided for run-check's -O2/-O0 mix, not for own STG alone). "May only shrink" is enforced: `HSI_OWN_FALLBACK=try` runs the
+  listed programs on the own libraries (no `--record`) and fails on one that passes; every `--libs own` run without `--only` fails on
+  a listed id its corpora lack (`HSI_OWN_FALLBACK_LIST` names another list, the mode's own test).
+- **#2 (check-hsi-own.edn).** Not re-recorded by day: its header marks it INTERIM (three light runs over two states merged by id;
+  4 `:libs :pack` lines in no class) and names the night commands that replace it. The "420 own, 412 pass" of "As built: HF10-P21,
+  P19, P22, P23" is that merge, not a run of e9de0d3b7's.
+
+| check | result |
+|---|---|
+| `REPR_HASKELL_RUN_IFACES=pack HSI_LIBS=$(bin/hsi libs-pack) bin/repr-haskell run-check front/GuardGivens` | 1 of 1 pass (its own verdict); the record line added; 1m07, 0.75 GB |
+| the same with the merged elaborator (`typecheck.ae` of the merge commit) | 0 of 1: `:fail :differs [:stdout]`, lines 7 and 10 `True` |
+| `HSI_OWN_FALLBACK=try bin/hsi check --libs own --corpus testsuite-core --only AtomicPrimops,conc037,T9533,T24809` (ARBACE_MEM_GIB=2; hs-p22's own pools) | three in their own classes, T9533 still listed (`:fail :status 0 :differs [:stdout]`), 0 unclassed (exit 1: no negative control in a run of `--only`) |
+| the same mode with a test list naming samples/Hello | "passes on the own libraries and is listed in own-fallback.txt", 1 problem, exit 1 |
+| `judge-runs` on a crafted row with `:outcomes` | a non-pass whose differs moved: "fails otherwise than its class's recorded outcome", exit 1 |
+
+Not run (night, over the 1.5 GiB of night 12's day lane): lib-check and lib-stg `--ifaces own` of ghc-internal and base with this
+elaborator (the multi-guard change may move a binding) and the whole `--libs own` run; the commands are in `check-hsi-own.edn`'s
+header. No key moves (every path is a crop path).
+
+## Decided (the user, 2026-11-11: HF10-P29, HF10-P30)
+
+HF10-P29 (a): the own cases in the gate: a step `haskell-lib-stg-own` keeps ghc-internal's own interfaces and STG as its output,
+`haskell-lib-own-base` base's too, `hsi-check` and `hsi-check-aot` run `--libs own` on them (`:uses`), and crops-score counts the own
+cases from the records. HF10-P30 (a): P17 scoped as stage 5, the run corpora's packages in dependency order (first slice deepseq,
+array, stm, then containers), one GHC oracle window for their references: the plan written, no runs.
+
+## As built: HF10-P29 (2026-11-11, branch `hs-p29`, from `mac/hs-p22b` 8516fcf10)
+
+By an agent in night 12's day lane (one run at a time, each process under 1.5 GiB, MemAvailable at least 12 GiB before a run; stage 0
+`/root/arbace/target/seed/amd64/arbace`; no GHC, no gate run but `--plan`, no network). The wiring only: the heavy first runs (the own
+STG of ghc-internal with its `--run`, hsi's whole check on the own libraries) are a night's, below.
+
+**The steps** (`test/gate/steps.edn`, `--full`, in this order; each `:inputs [:lib-tools :tools :haskell :hsi]`, no GHC host):
+
+| step | `:uses` | command | `:outputs` | `:mem-gib` |
+|---|---|---|---|---:|
+| `haskell-lib-check-own` (unchanged) | | `lib-check --ifaces own --judge ...-own-ghc-internal.edn` | `ghc-internal-pool.tar` | 2 |
+| `haskell-lib-own-base` | `haskell-lib-check-own/ghc-internal-pool.tar` | lib-check and lib-stg `--package base --ifaces own`, now with `LIB_STG_OWN_OUT` | `base-pool.tar`, **`base-own.tar`** | 2 |
+| **`haskell-lib-stg-own`** (new) | the two pools | `LIB_STG_REPLACE=all lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run` | **`ghc-internal-own.tar`** | 2 |
+| `hsi-check` (`:heavy`) | `ghc-internal-own.tar`, `base-own.tar` | `HSI_OWN_TARS=... bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 4` | | 10 |
+| `hsi-check-aot` (`:heavy`) | the same | `... check --aot --libs own ... --jobs 2` | | 8 |
+
+`haskell-lib-stg-own` judges ghc-internal's 265 modules' own STG against GHC's -O0 (the module rows of `lib-stg-own-results.edn`, the
+control `lib-stg-controls.txt`), then runs run-check's programs compiled on the own interfaces of ghc-internal, its wired-in Prim
+and base (base's pool from `haskell-lib-own-base`'s output, `LIB_STG_BASE_POOL_TAR`) on GHC's -O0 libraries and on the whole own
+set (`{:runs :all}` judged: a recorded pass lost, a non-pass in no class or of another outcome, fails). Its pins are
+`haskell-lib-stg`'s with the native inputs'; `hsi-check`'s gain `haskell-ifaces-ghc-9.14.1` (the reexports `--libs own` reads) and
+the native inputs'. `bin/gate --full --plan`: no table error; the planner places `haskell-lib-own-base` and `haskell-lib-stg-own`
+"after" (decided once their producers ran, the outputs' digests in their keys: GT5's early cutoff), and `hsi-check`, `hsi-check-aot`
+"after haskell-lib-stg-own, haskell-lib-own-base".
+
+**The tools.**
+- `bin/repr-haskell lib-stg` (`bin/lib/repr-haskell/lib-stg`): `LIB_STG_OWN_OUT=DIR` (with `--ifaces own`) keeps `DIR/PKG-own.tar`,
+  one deterministic tar (sorted, mtime 0, owner 0) of `pool/` (lib-check `--ifaces own`'s interfaces), `wired/` (ghc-internal's
+  GHC.Internal.Prim, primops.txt.pp's) and `stg/UNIT/` (the run's own STG of every module); `LIB_STG_OWN_POOL_TAR=TAR` (ghc-internal):
+  the closures lib-check left in `.tmp` are used only when their pool, tarred the same way, is TAR byte for byte; else (the producer
+  skipped at its key, a `.tmp` of another state) `lib-check --ifaces own` makes them again (no judge, about 15 minutes, 1.8 GiB) and
+  must then agree, or the run fails; `LIB_STG_BASE_POOL_TAR=TAR` (`--run`): base's pool unpacked from the producer's tar in place of
+  `.tmp/repr-haskell/lib-check/own/base`.
+- `bin/hsi check --libs own` (`bin/lib/hsi/check`): `HSI_OWN_TARS=TAR:TAR...` in place of `HSI_OWN_IFACES` and `HSI_OWN_STG`, each tar
+  unpacked into `WORK/own-tars/N`, its `pool/` and `wired/` the interfaces (in that order: the wired-in Prim last), each `stg/UNIT/`
+  a library directory. The records stay apart from the pack's: `--record` writes `check-hsi-own.edn` (`-aot-own`); `check-hsi.edn`
+  stays the pack's (the own judge compares an own failure with its line, review 1111b's finding 3) and the REAP cells' source.
+
+**crops-score** (`test/crops/score.ae`, `crops.edn`, `independence.edn`): RFP53 (a)'s counting takes Haskell's records. crops.edn's
+`:own-inputs :haskell` is one input, `:libs` (the program compiled on the own interfaces and run over the own libraries' STG alone);
+Haskell's eval fact reads `:case-inputs {:file "test/haskell/check-hsi-own.edn"}`, the AOT fact `check-hsi-aot-own.edn`. The
+records of `bin/hsi check` are one map a line: `input-rows` takes a map row's `:id` with the map as its inputs, `cell-ids` reads the
+`:hsi-check` sources (`check-hsi.edn`, `-aot`) form by form; a case counts 1 when its line is `:libs :own`, the cell's other cases
+0.5. A record whose first line is `;; INTERIM` counts none (`interim?`: review 1111b's mark on `check-hsi-own.edn`, "not to be read as
+a result"): the stated `:cases` stand until the night's whole run re-records it (its `--record` drops the mark). The self-test gains
+the case (4 of 10 `:libs :own` counted 4 own, 6 at 0.5), its control (every program `:libs :pack`: 0 own) and the mark's reading.
+
+**Projection.** With the mark lifted on the interim record (a copy, not committed): eval 0.500 → **0.731** (420 of 908 cases own,
+the rest 0.5), independence **76.0 → 80.6** with AOT still 0.5; with `check-hsi-aot-own.edn` written by the night (the same share, the
+programs that build) AOT about 0.73 and independence **about 85** ((1 + 0.731 + 0.73 + 1 + 0.8) / 5 = 85.2). The recorded score is
+unchanged (76.0) until the night's records.
+
+**Keys.** Every changed path is a crop path or the gate's tables (`bin/lib/hsi/`, `bin/lib/repr-haskell/`, `test/gate/steps.edn`,
+`test/crops/`, `test/haskell/`, the survey): `bin/arbace-go --gate-key` 9accb085d767... on `mac/hs-p22b` and on the branch,
+`test/gate/gate-key-crops-test.bash` passes; the runtime and seed keys untouched (no `arbace/lang`, `go/`, `overlay/`, `jdk/`). The
+steps' own keys: `haskell-lib-check-own` unchanged (its command and inputs as before); `haskell-lib-own-base`'s command changed (it
+reruns once); `haskell-lib-stg-own` new; `hsi-check` and `hsi-check-aot` rekeyed by their commands, pins and `:uses`.
+
+### HF10-P30 (a): P17's plan (written, not run)
+
+**Why.** Of the eval corpora's 908 programs, those that stay `:libs :pack` for an import (not a C file or CPP) import the other
+installed packages; and run-check's 9 non-passes of `:o2-names` and `:o0-report` mix those packages' -O2 STG (GHC's) with the -O0 own
+ghc-internal. Each package made own (its interfaces and STG by the front end, on the own pools below it) moves programs to `:libs
+:own` and those 9 off the mix.
+
+**The generalisation (one change, the base path's).** `lib-check --package P --ifaces own` and `lib-stg --package P --ifaces own`
+already take any installation unit above ghc-internal for the unit id (`installation.edn`) and the driver-grown closures; what is
+base's alone today: (1) `--dep-pools` names ghc-internal's pool only: it becomes every own pool below P, in the order below
+(`LIB_CHECK_DEP_POOL_TAR` a list, each producer's `PKG-pool.tar`); (2) the reexported modules read from ghc-prim's `.cabal` only: every
+dependency's `.cabal` (`reexported-modules`: template-haskell's `GHC.Internal.TH.*`, ghc-boot-th's), its `build-depends` giving the
+order; (3) the judge's GHC interfaces from `haskell-ifaces-ghc-9.14.1` (the programs' closures, 113 of base's 241): the window below
+grows `haskell-lib-ifaces` by every module of P; (4) `--live`'s iface2 runs `-package ghc-internal`: `-package P` (the window's, by
+hand); (5) `hsi check --libs own`'s eligibility (`front_eligible`: an import is own when ghc-internal's, base's or a reexport) reads
+the own pools' module lists instead of the two names; (6) a step per package or one chained step `haskell-lib-own-P` after its
+dependencies' (`:uses` their pools; `LIB_STG_OWN_OUT` its `P-own.tar`, `hsi-check`'s `:uses` growing by one tar a package).
+
+**The order** (the pinned tarball's `.cabal` files, library `build-depends`; ghc-prim and ghc-bignum are reexports, done):
+
+| slice | package | depends on (beyond base) | modules (approx.) | note |
+|---|---|---|---:|---|
+| 1 | deepseq | — | 4 | NFData's Generic instances: deriving at -O0 |
+| 1 | array | — | 11 | `GHC.Arr` reexported from ghc-internal; unboxed arrays' primops |
+| 1 | stm | array | 12 | TVar primops (runtime-stm's `:o2-names`) |
+| 2 | pretty | deepseq | 4 | ghc-boot-th's dependency |
+| 2 | ghc-boot-th, template-haskell | pretty; ghc-internal | ~10 | mostly reexports of `GHC.Internal.TH.*` (`reexported-modules`) |
+| 2 | containers | array, deepseq, template-haskell | 40 | -O2's UNPACKed fields in the pack meet -O0 own code today (`:o0-report`'s `SrcLoc`) |
+| 3 | transformers, mtl | transformers | 35, 25 | |
+| 3 | exceptions | mtl, stm, template-haskell, transformers | 4 | os-string's and filepath's dependency |
+| 4 | bytestring | deepseq, template-haskell (ghc-prim) | 30 | C (`cbits/`): its foreign imports' STG only, the C on ci as hsi runs it |
+| 4 | os-string, filepath | bytestring, deepseq, exceptions, template-haskell | 25, 20 | |
+| 4 | time | deepseq | 50 | C (`cbits/HsTime.c`) |
+| 5 | unix | bytestring, filepath, os-string, time | 60 | hsc2hs modules (made on ci, HFS-I2) |
+| 5 | file-io, directory, process | unix, filepath, os-string, time (deepseq) | 5, 15, 10 | the run corpora's System.* programs (LibIO, LibSystem, LibPosix) |
+| 6 | binary, text | bytestring, containers, array (deepseq, template-haskell) | 30, 70 | text's C (simdutf: C++, out unless cppi takes it) |
+
+First slice without GHC: deepseq, array, stm (judged by lib-check's own rows and the runs: run-check's runtime-stm and the testsuite's
+stm programs; lib-stg's rows written at the window). Then containers, after the window (its -O0 reference).
+
+**The one GHC oracle window** (by hand, the main session, on a host with GHC 9.14.1, `tools/hsdump/GHC_VERSION`; one window, P16's and
+P17's references together; each a commit of its own naming `:ghc`'s identity; then `bin/oracle-records verify haskell` as the tier does):
+
+```
+export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp
+P=deepseq,array,stm,pretty,ghc-boot-th,template-haskell,containers,transformers,mtl,exceptions,bytestring,os-string,filepath,time,unix,file-io,directory,process,binary,text
+# 1. GHC's -O0 STG of the packages, lib-stg's reference (HF10-P1's pack grown; the four boot packages' entries kept)
+HSI_DUMP_OPT=-O0 bin/hsi dumps --record --packages "$P"                       # ~1 h, GHC one module at a time, ~2 GiB
+# 2. GHC's interfaces of every module, the judge's (P16: base's 128 missing; P17: each package), the iface2 verb live
+for p in base ${P//,/ }; do bin/repr-haskell lib-check --live --record-pack --package "$p"; done   # after change (4); ~2 h in all
+# 3. the oracle tier's verify of both packs, and the round trip's GuardGivens reference (review 1111b, #5)
+bin/oracle-records verify haskell stg-libs-O0 lib-ifaces --sample 8
+bin/repr-haskell run-check --record-ref front/GuardGivens
+```
+
+then, without GHC, per package in the order above (night commands, one process at a time, about 1.5-2 GiB, minutes each but
+containers, unix and text, 10-20 minutes): `bin/repr-haskell lib-check --package P --ifaces own --record test/haskell/lib-check-own-P.edn`,
+`lib-stg --package P --ifaces own --record test/haskell/lib-stg-own-P-results.edn`, each with its control (`lib-check-controls-P.tsv`,
+`lib-stg-controls-P.txt`: a module against another's reference), then `bin/hsi check --libs own --record` (the whole corpus at 16 GiB,
+the heavy lock): the newly eligible programs measured, the fallback list grown only by programs that fail on the own libraries.
+Costs: the generalisation 1-2 days, the first slice 1 day, each later slice 1-2 days (the front end's classes it meets), one window.
+
+### Checks (light, night 12's day lane: one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| `bin/gate --full --plan` | exit 0, no table error; `haskell-lib-stg-own` between `haskell-lib-own-base` and `haskell-lib-stg`, decided "after" its two producers; `hsi-check`, `hsi-check-aot` "after haskell-lib-stg-own, haskell-lib-own-base" |
+| `gate.crops check ROOT test/gate/steps.edn` | 0 problems |
+| `bash test/gate/crops-test.bash` | 42 ok, exit 0 |
+| `bash test/gate/gate-key-crops-test.bash` | PASS; `bin/arbace-go --gate-key` 9accb085d767... before and after |
+| `bin/crops-score --self-test` | every test passes, every control fails (the new HF10-P29 case and control among them) |
+| `bin/crops-score --judge --strict` | exit 0; Haskell 76.0 unchanged (eval: "check-hsi-own.edn is marked INTERIM, the stated score"; AOT: "no check-hsi-aot-own.edn yet") |
+| the projection (`--crop haskell` on a copy without the mark, not committed) | eval 0.731, "420 of 908 cases own", independence 80.6 |
+| `LIB_STG_REUSE=1 LIB_STG_OWN_POOL_TAR=... LIB_STG_OWN_OUT=... lib-stg --ifaces own` (hs-p22's own state copied into the worktree's `.tmp`, the pool tar made from it) | "the own closures in .tmp are the producer's pool's"; control 0 of 171; `ghc-internal-own.tar`: 265 interfaces, the wired-in Prim, 265 modules' STG (25.8 MB); 29 s, 0.25 GB |
+| the same for `--package base` | `base-own.tar`: 241 interfaces, 241 modules' STG (`stg/base-4.22.0.0-3875/`); control 0 of 23; 14 s, 0.24 GB |
+| `HSI_OWN_TARS=ghc-internal-own.tar:base-own.tar bin/hsi check --libs own --corpus samples --only samples/Hello,samples/Classes,samples/Arrays` (ARBACE_MEM_GIB=1, one front-end shard at 1.2 GiB; hs-p22's hsi executable, its `simd.ae` one change behind) | 507 own interfaces, 506 modules' STG from the tars; Hello `:libs :own` pass, Arrays `:libs :pack` pass, Classes `:libs :own` "runtime: out of memory" at the 1 GiB cap (passes at 2 GiB in the light runs): exit 1 for it alone; 1m19, 0.7 GB |
+| hsi-essential's command (`own-verdicts --check`, then the 123 programs; ARBACE_MEM_GIB=1, one at a time, hs-p22b's hsi executable, the same sources) | own-verdicts current; 120 pass, 2 fail (synthetic/primops-word, runtime-laziness: "runtime: out of memory" at the 1 GiB cap, the pack path this branch does not change; they pass in the record at 16 GiB), the four controls that ran fail as they must; 24m52, 0.87 GB |
+| `bin/reap`; `bin/crops-score --record`, `--judge --strict` | 0 problems; scores unchanged (Haskell 76.0), exit 0 |
+
+### Night commands (not run; one at a time, in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+The steps' commands by hand, their outputs where the gate would keep them (`O=$PWD/.tmp/p29/outs`); once the branch is in `next`, the
+night's `bin/gate --full` runs the same as steps (about 2.5 hours for the five).
+
+1. `mkdir -p $O/haskell-lib-check-own && env LIB_CHECK_POOL_OUT=$O/haskell-lib-check-own bin/repr-haskell lib-check --ifaces own --judge test/haskell/lib-check-own-ghc-internal.edn`
+   (13-21 min, 1.0-1.8 GB): ghc-internal's pool with this elaborator (review 1111b's multi-guard change judged too).
+2. `mkdir -p $O/haskell-lib-own-base && env LIB_CHECK_DEP_POOL_TAR=$O/haskell-lib-check-own/ghc-internal-pool.tar LIB_CHECK_POOL_OUT=$O/haskell-lib-own-base bin/repr-haskell lib-check --package base --ifaces own --judge test/haskell/lib-check-own-base.edn && env LIB_STG_OWN_OUT=$O/haskell-lib-own-base bin/repr-haskell lib-stg --package base --ifaces own --judge test/haskell/lib-stg-own-base-results.edn`
+   (about 10 min, 1.5 GB): `base-pool.tar`, `base-own.tar`.
+3. `mkdir -p $O/haskell-lib-stg-own && env LIB_STG_OWN_POOL_TAR=$O/haskell-lib-check-own/ghc-internal-pool.tar LIB_STG_BASE_POOL_TAR=$O/haskell-lib-own-base/base-pool.tar LIB_STG_OWN_OUT=$O/haskell-lib-stg-own LIB_STG_REPLACE=all bin/repr-haskell lib-stg --ifaces own --judge test/haskell/lib-stg-own-results.edn --run`
+   (about 35 min: the front end 11-21 min at 1.9 GB, run-check twice with hsi at 2 GiB): the module rows and `{:runs :all}` judged,
+   `ghc-internal-own.tar`. If a row moved with the elaborator: the same with `--record` for that file, reviewed before committing.
+4. `bin/heavy-lock env ARBACE_MEM_GIB=16 HSI_OWN_TARS=$O/haskell-lib-stg-own/ghc-internal-own.tar:$O/haskell-lib-own-base/base-own.tar bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 4 --record`
+   (about 10 GiB, 60-75 min; the front end 4 shards of 1.5 GiB first): `check-hsi-own.edn` re-recorded whole (nofib with it; the
+   INTERIM mark dropped), so crops-score counts it; `:untried-cap` settled; then the same with `HSI_OWN_FALLBACK=try` and no
+   `--record` (about 45 min): a listed program that passes leaves `own-fallback.txt`.
+5. `bin/heavy-lock env ARBACE_MEM_GIB=16 HSI_OWN_TARS=... bin/hsi check --aot --libs own --corpus nofib,samples,synthetic,testsuite-core --jobs 2 --record`
+   (8 GiB, about 2 hours: the own libraries' closures compiled once per image key, then each program's build): `check-hsi-aot-own.edn`,
+   the own AOT cases.
+6. `bin/crops-score --record && bin/crops-score --judge --strict && bin/reap`: Haskell's independence moves (projected 80.6 after 4,
+   about 85 after 5); the scores' commit names the records' commit.
+
+### Proposal
+
+- **HF10-P31 The eval and AOT cells' source.** `bin/reap`'s Haskell eval and AOT cells read `check-hsi.edn` and `check-hsi-aot.edn`,
+  the pack's records (`--libs pack`, by hand); since P29 the gate runs `--libs own`, so the cells' records are no longer what the
+  gate's step runs, and crops-score counts the own cases from a second record. (a) **after the night's whole own records, the cells
+  read `check-hsi-own.edn` and `-aot-own.edn` (every program of the corpora, `:libs own|pack` a line; the same classes with
+  `divergences-own.edn` beside), `check-hsi.edn` kept as the own judge's pack reference (recorded with the pack by hand, as the oracle
+  tier's comparison, P27); crops-score's `:case-inputs` then the cell's own source**; half a day, a reap record; keys unmoved (crop
+  paths). (b) keep two records, the cell on the pack's (the gate's step and the cell disagree on 420 programs' library set). *Recommended:
+  (a)*.
+
+## Decided (the user, 2026-11-11: HF10-P31)
+
+HF10-P31 (a): the cells read the own records once they are whole; `check-hsi.edn` stays the pack's reference, recorded by hand.
+
+## As built: HF10-P31 (2026-11-11, branch `hs-p31`, from `mac/hs-p29` d90827eb0)
+
+- `test/reap/cells.edn`: the Haskell eval and AOT cells' source (`:reader :hsi-check`) gets `:own-file {:file :name :classes}`: eval
+  `check-hsi-own.edn`, classes `divergences.edn` and `divergences-own.edn` (an own-only failure is judged there, hs-p22b); AOT
+  `check-hsi-aot-own.edn`, classes `divergences-aot.edn` and `divergences-own.edn`. The source's `:file` stays the pack's record.
+- `test/reap/main.ae`: `judge-source` takes the source through `hsi-pick`: the own record is read, under its own name and classes,
+  only when `hsi-own-state` of its first line is `:whole`; absent (the AOT record today) or first line `;; INTERIM` (the eval record
+  today): the source is the pack's, unchanged (no score jump from a mixed record). Same mark crops-score's `interim?` reads (P29).
+  `bin/reap --self-test`: the guard's five cases (the states, interim and absent keep the pack's, whole reads the own, a source
+  without `:own-file` untouched); it is the reap step's first command now (`bin/reap --self-test && bin/reap`), and the step's inputs
+  gain `test/haskell/*.edn` (the Haskell records were in no input of it).
+- What switches when: the commit that re-records `check-hsi-own.edn` whole (night command 4, the INTERIM mark dropped) moves the eval
+  cell to the own record at once; likewise `check-hsi-aot-own.edn` (command 5) for the AOT cell. Each such commit also needs `bin/reap
+  --record` (the cell's source name and counts change: the matrix record differs until then, by design) and `bin/crops-score --record`.
+  A whole own record with a program in no class fails `bin/reap` (tried here on the interim record with its mark changed: 764 programs,
+  6 in no class, 11 problems), so the night's classes are written before the record is committed. The AOT own record is judged by
+  `divergences-own.edn`'s eval outcomes beside `divergences-aot.edn`: an AOT-only failure needs a class of `divergences-aot.edn`.
+- Not changed: crops-score's `:case-inputs` (it reads `check-hsi-own.edn` already, P29).
+- Checks (one run at a time, under 1.5 GiB): `bin/reap --self-test` ok; `bin/reap` 0 problems, Haskell eval 811 / 63 / 34 and AOT
+  137 / 1 / 1 as before (the pack's); `bin/crops-score --judge --strict` 0; `gate-key-crops-test` PASS; `bin/gate --plan` reads the
+  table. No key moves (test/ and bin/reap are in no key).
+
+## As built: HF10-P31b (2026-11-12, branch `hs-p31b`, from `mac/hs-p31` cf62b27b4)
+
+The six programs HF10-P31 (a)'s trial of the switch left in no class (samples/Loop, synthetic/runtime-deep, testsuite/codeGen/should_run/
+T16846, testsuite/concurrent/should_run/T21969 and readMVar1, testsuite/ffi/should_run/fptr02), run light (`bin/hsi check --libs own
+--only ID`, ARBACE_MEM_GIB=2, GOMEMLIMIT 1200MiB, one at a time, peak 0.71-0.78 GB; hs-p22's own pools). What fails, for each: Go's
+"runtime: out of memory" in 2 to 9 s (0.82-0.86 GB in use at the `ulimit -v` cap of the light runs), stdout empty, status 2; and none
+of the six runs on the own libraries: Loop, runtime-deep, readMVar1 and fptr02 are eligible but in own-fallback.txt (`:untried-cap`,
+:front :fallback), T16846 and T21969 are `:ineligible` (:libs :pack). So the failure is the pack's run at the light cap, not the
+own libraries'; each passes at 16 GiB in check-hsi.edn.
+
+- Two classes in `test/haskell/divergences-own.edn`, both `:deferred` (the night's whole record at 16 GiB settles them; then they go):
+  `:light-cap` (Loop, runtime-deep: `:result :fail :status 2 :differs [:status :stdout :stderr]`) and `:light-cap-stdout-ok` (the
+  other four: `:differs [:status :stderr]`). No `:message`: a `:libs :pack` line records no `:err`.
+- `bin/lib/hsi/check`'s own judge took only `:libs :own` lines; it takes a `:libs :pack` line too (a line equal to the pack's record in
+  outcome falls through to the pack's classes as before; one that differs, as these do against a passing pack line, needs an own
+  class). Run: Loop "in own class :light-cap", fptr02 "in own class :light-cap-stdout-ok", 0 in no class.
+- The switch tried on a copy of the interim record (first line's mark removed, not committed, restored): `bin/reap` finds no program in
+  no class; its 5 problems are matrix.edn's counts (the cell's numbers move with the own record: Haskell eval deferred 35 against 34
+  recorded and the rest), which the switch's `bin/reap --record` rewrites. On the branch (record as interim): `bin/reap` 0 problems,
+  `bin/crops-score --judge --strict` exit 0.
+- Moves no key of the seed or runtime (`bin/lib/hsi` and test/haskell are crop paths); bin/gate-key not run.
+
+## As built: P17 (first slice) (2026-11-12, branch `hs-p17`, from `mac/hs-p31b` 3727f3ce4)
+
+HF10-P30 (a)'s generalisation that needs no GHC, and its first slice deepseq, array, stm, by an agent in night 12 (one run at a time,
+each process under 1.5 GiB with GOMEMLIMIT 1200MiB, MemAvailable at least 12 GiB before each run; stage 0; no GHC, no gate run but
+`--plan`, no network). The plan's six points, as built:
+
+1. **Dependency pools as a list.** `lib-check --package P --ifaces own` (any installation unit above ghc-internal) takes P's
+   dependencies, transitively and in dependency order, from the pinned tarball's `.cabal` files: `arbace.repr.haskell.target`'s new
+   `package-deps` (verb `deps PKG --src TREE`: NAME, CABAL, the number of exposed modules; each visited unit's `.cabal` finalized as
+   the installation's records are, its library `build-depends`; rts, whose `.cabal` the corpus's tree lacks, has no modules). Each
+   dependency that exposes modules needs its own pool: `LIB_CHECK_DEP_POOL_TAR=TAR:TAR...` (each `DEP-pool.tar`, a producer's
+   `LIB_CHECK_POOL_OUT`; the name gives the package), else `LIB_CHECK_DEP_POOLS` as given, else `.tmp`'s `lib-check/own/DEP/pool`; a
+   missing one is an error naming the command. base's run is the same as before (its dependencies rts, ghc-internal, ghc-prim; the one
+   pool ghc-internal's).
+2. **Every dependency's reexports.** The `.cabal` of every dependency gives its `reexported-modules` (base: ghc-internal's none and
+   ghc-prim's 13, as before; later template-haskell's). lib-check's own run also writes them as `OUT/reexports.edn`, and lib-stg's
+   per-module run reads that file beside the plan's own closures (`stg-one`): deepseq's `import GHC.Tuple (Solo (..))`, ghc-prim's
+   reexport, failed in lib-stg alone without it ("no constructor type for nil").
+3. **Prelude.** A package above base imports Prelude implicitly (the native dump does not name it; the renamer adds the import):
+   the driver's closure seeds Prelude when a dependency's pool holds it (not for base, whose pools lack it).
+4. **The package's source directory.** The dumps' tree is the package's (`src/` for ghc-internal, base, containers; the package's
+   root for deepseq, array, stm): lib-check finds the one lowercase top directory, else the root.
+5. **Eligibility from the own pools.** `bin/hsi check --libs own` already decided eligibility by the own interfaces present
+   (`front_eligible` over WORK/own/if, the copies of every own pool, and the pack's reexports whose target is own); the tars
+   (`HSI_OWN_TARS`) may name any number of packages; `HSI_OWN_PACKAGES=deepseq,array,stm` adds the `.tmp` pools and STG of the
+   packages above base to the defaults.
+6. **One step a package** (`test/gate/steps.edn`, after `haskell-lib-own-base`): `haskell-lib-own-deepseq`, `-array`, `-stm`, each
+   lib-check `--judge test/haskell/lib-check-own-P.edn` with its control `lib-check-controls-P.tsv`, then lib-stg as a measure (no
+   `--judge`: no -O0 reference yet), outputs `P-pool.tar` and `P-own.tar`, `:uses` the pools below (stm: array's). Each has the one
+   part `own` with `:clean-only true`: it runs only in the clean run (`GATE_ALL_PARTS=1`) until the oracle window records P's
+   references. The window's commands are in the steps' comment, as the plan wrote them; after it, the part's `:clean-only` goes,
+   lib-stg gains `--judge test/haskell/lib-stg-own-P-results.edn` (recorded with `--record`), and `hsi-check`, `hsi-check-aot` grow by
+   `P-own.tar` (`:uses`, `HSI_OWN_TARS`). The lib-stg controls `lib-stg-controls-P.txt` are written; they run once a reference exists.
+
+**One elaborator class** met on the way: DefaultSignatures (deepseq's `default rnf :: (Generic a, GNFData Zero (Rep a)) => a -> ()`).
+`class-decl!` keeps the default signatures (`:dsigs`), `default-methods` checks `$dm` at its default signature (its context the
+method's own givens: `$dmrnf :: forall a. NFData a => (Generic a, GNFData Zero (Rep a)) => a -> ()`), and an instance that omits the
+method applies `$dm` to the context's dictionaries solved at its head (GHC.Tc.TyCl.Instance's GenericDM). An importing module's
+instance cannot see the default signature (the interface's class carries only `:defaults` names): a program's `instance NFData T`
+without `rnf` over the own deepseq is not handled yet (P17's next item).
+
+**The first slice** (each `lib-check --package P --ifaces own` on the tars of hs-p29's state: ghc-internal's pool, base's pool, and
+for stm array's; judged against GHC's interfaces of the modules the pack haskell-ifaces-ghc-9.14.1 holds):
+
+| package | modules | elaborate | types equal (of modules GHC's pack holds) | interface facts equal | lib-stg | peak, time |
+|---|---:|---:|---|---|---|---|
+| deepseq | 1 | 1 | 11 of 11 binders (1 of 1) | 202 of 211 (8 GHC's only, 12 ours only) | 1 of 1 :ok, no reference | 0.63 GB, 2m13 + 0m28 |
+| array | 15 | 15 | 107 of 107 binders (9 of 9) | 388 of 388 | 15 of 15 :ok, no reference | 0.62 GB, 2m00 + 0m47 |
+| stm | 10 | 10 | 56 of 56 binders (8 of 8) | 222 of 222 (11 ours only) | 10 of 10 :ok, no reference | 0.59 GB, 1m38 + 0m37 |
+
+deepseq's interface differences are two classes, recorded, not fixed: its data family `RnfArgs` (GHC: an open family whose instances
+are eta-reduced, `R:RnfArgsZeroa`; ours: arity 2 with the variable, `R:RnfArgsZero a0`), and five instances over poly-kinded heads
+(`NFData1 (Sum f g)`, `NFData (Product f g a)`, `Fixed`, `Sum`, `Compose`: GHC's heads carry the kind arguments, ours not). Each
+control differs as it must (deepseq's subject against another package's module, Data.Array: deepseq has one module). The records
+`test/haskell/lib-check-own-{deepseq,array,stm}.edn` are whole runs; lib-stg is a measure (every module `:judge :no-reference`): the
+slice's STG is not judged until the window.
+
+**The programs** (`bin/hsi check --libs own`, HSI_OWN_TARS ghc-internal-own.tar and base-own.tar of hs-p29's state with the slice's
+three `P-own.tar`; ARBACE_MEM_GIB 2, one program at a time; `HSI_FRONT_DRY=1` for the counts): eligible for the own front end **551
+→ 582 of 908** (nofib, samples, synthetic, testsuite-core). The 31 new ones run: **24 pass** (23 on the own libraries, among them
+samples/Arrays, Stm, StmBlock, Deadlock, synthetic/runtime-stm, nofib's kahan, paraffins, tchan, simple and 14 of testsuite's
+arr001-arr019; throwto002 on the pack, the front end's `:typecheck-errors`), **6 fail on the own libraries** where the pack passes, in
+no class yet: arr011, arr015 (an uncaught ErrorCall: array's bounds error at -O0 own), arr014, cgrun026 (hsi: "case of an algebraic
+type on void"), T3207 (stdout differs), cgrun044 ("no binding of main::Main/main"). They do not touch the gate today: `hsi-check`
+takes only ghc-internal-own.tar and base-own.tar, so these programs stay `:ineligible` there. When a package's part is gated (after
+the window) they are its prerequisites: each fixed, or classed in `divergences-own.edn` and listed in `own-fallback.txt`.
+samples/StmBlock needs 2 GiB (Go's out of memory at the 1 GiB cap, as hs-p31b's light-cap programs).
+
+**No regression** (`--package base --ifaces own` on the same ghc-internal pool, with the generalised script, the reexports file and
+the DefaultSignatures change): lib-check 241 modules, 236 elaborate, judge "0 worse, missing or unclassed, 1 better" against
+`lib-check-own-base.edn`, control differs (7m45, 0.68 GB); lib-stg 547 of 1,029 bindings equal (recorded 547), "0 worse or missing, 2
+better", control 0 of 23 (4m13, 0.67 GB). Not re-recorded: the records are the night's (P29's night commands re-record base with the
+current elaborator).
+
+### Checks (light, night 12: one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| lib-check `--package deepseq/array/stm --ifaces own --judge` (records, controls) | exit 0 each; the table above |
+| lib-stg `--package deepseq/array/stm --ifaces own` | exit 0; 1, 15, 10 modules `:ok`, `:judge :no-reference` |
+| lib-check and lib-stg `--package base --ifaces own --judge` | exit 0; 0 worse (1 and 2 better) |
+| `bin/hsi check --libs own --corpus samples,synthetic` on ghc-internal-own.tar and base-own.tar alone (the gate's set; the elaborator change) | exit 0; 45 own (44 pass), 18 pack (16 pass), 0 unclassed, the controls fail as they must: as `check-hsi-own.edn` records them; 2m48, 1.07 GB |
+| `bin/hsi check --libs own` on the 31 newly eligible programs | 24 pass, 6 own-only failures (above), arr001's control fails as it must; 3m13, 0.78 GB |
+| hsi-essential's command (`own-verdicts --check`, the 123 programs; ARBACE_MEM_GIB=1, HSI_JOBS 3 by default) | own-verdicts current; 120 pass, 2 fail (synthetic/primops-word, runtime-laziness: status 2 at the 1 GiB cap, the pack path, as on hs-p29; they pass at 16 GiB in the record), the four controls that ran fail as they must; 17m33, 0.88 GB |
+| `bin/gate --full --plan` | exit 0, no table error; the three steps absent (`:clean-only`); with `GATE_ALL_PARTS=1` they plan "after" their producers (stm after `haskell-lib-own-array.own`) |
+| `gate.crops check ROOT test/gate/steps.edn` | 0 problems |
+| `bash test/gate/crops-test.bash` | ok (42 ok) |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... on `mac/hs-p31b` and on the branch (no key moves: every path a crop path) |
+| `bin/reap --self-test`, `bin/reap` | ok; 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged (Haskell 76.0) |
+
+### Night commands (not run; one at a time, in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+None is needed for the slice (its runs fit the day lane). Once the branch is in `next`: the clean run (`bin/gate --full --clean`, which
+sets `GATE_ALL_PARTS=1`) runs the three steps, about 8 minutes in all under 1 GiB. With P29's night commands 1-2 (ghc-internal's and
+base's pools with the current elaborator), the slice again on those pools, `O=$PWD/.tmp/p29/outs`:
+
+```
+for p in deepseq array stm; do
+  d=$O/haskell-lib-own-$p; mkdir -p $d
+  t=$O/haskell-lib-check-own/ghc-internal-pool.tar:$O/haskell-lib-own-base/base-pool.tar; [ $p = stm ] && t=$t:$O/haskell-lib-own-array/array-pool.tar
+  env LIB_CHECK_DEP_POOL_TAR=$t LIB_CHECK_POOL_OUT=$d bin/repr-haskell lib-check --package $p --ifaces own --judge test/haskell/lib-check-own-$p.edn &&
+  env LIB_STG_OWN_OUT=$d bin/repr-haskell lib-stg --package $p --ifaces own || break
+done   # about 8 minutes, 0.7 GB
+```
+
+### Proposals
+
+- **HF10-P32 The slice in hsi-check before the window.** The slice's lib-check is judged now (GHC's interfaces of 18 of its 26
+  modules in the pack), only its STG waits for the window. (a) **drop the parts' `:clean-only` now (lib-check judged, lib-stg a
+  measure), class or fix the 6 own-only failures above, list the unfixed in `own-fallback.txt`, then add `P-own.tar` to `hsi-check`'s
+  and `hsi-check-aot`'s `:uses` and `HSI_OWN_TARS`: 31 programs more eligible, 24 own passes**; half a day, keys unmoved (crop paths),
+  `--full` grows by about 8 minutes. (b) wait for the window, as the plan wrote (the own STG of the slice is then judged before the
+  programs run on it). *Recommended: (a)*: the runs judge the slice's STG already (23 programs over it pass), and the window's date is
+  open.
+- **HF10-P33 DefaultSignatures across modules.** An instance in another module that omits a method with a default signature (a
+  program's `instance NFData T` over Generic) needs the signature's context; GHC's interface carries it (IfaceClassOp's `GenericDM`),
+  the helper's iface dump does not. (a) **the own interface writes the class's default signatures (`:dsigs`, the method's type in
+  the interface's spelling), the elaborator reads them; the judge compares the class fact without them (GHC's dump lacks them)**;
+  half a day. (b) the helper's iface verb dumps GenericDM too (the oracle window, a pack re-recorded). *Recommended: (a)*, then (b) at
+  the window for the comparison.
+
+## Decided (the user, 2026-11-12: HF10-P32, HF10-P33)
+
+HF10-P32 (a): the deepseq/array/stm slice gated in `hsi-check` now: the three steps' `:clean-only` dropped, the six programs that
+fail only on the own libraries (arr011, arr014, arr015, T3207, cgrun026, cgrun044) fixed if cheap, else classed in
+`divergences-own.edn` by outcome with honest reasons, the `P-own.tar` outputs in `hsi-check`'s and `hsi-check-aot`'s `:uses`.
+HF10-P33 (a): the classes' default signatures written into the own interfaces, so an instance in another module that omits a method
+with a default signature works (a program's `instance NFData T` over Generic).
+
+## As built: HF10-P32, P33 (2026-11-12, branch `hs-p32`, from `mac/hs-p17` fb31a9fe0)
+
+By an agent during night 12's gate (one run at a time, each process under 1.5 GiB with GOMEMLIMIT 1200MiB, MemAvailable at least
+12 GiB before each run; stage 0; no GHC, no gate run but `--plan`, no network). **All six programs are fixed; none is classed.** Each
+was a front-end or eligibility fault that the slice's programs were the first to reach:
+
+| program | what failed on the own libraries | cause | fix |
+|---|---|---|---|
+| arr011, arr015 | `(Array.!): undefined array element` after `//` | ghc-internal's `thawSTArray`: `let copy i# s3# = ... in case copy 0# s2# of s3# -> ...`, an unsigned local function whose result is a `State#`; the elaborator noted no type for a let-bound function (only pattern binders), so tostg took `copy 0# s2#` for a lifted value, the desugarer's bindNonRec made it a lazy `let`, unarisation dropped it: the copy loop never ran | `tc-group` notes every local binder's type (unsigned: the generalised type, the abstracted ones' monomorphic binders too; signed: the signature) in `*ltypes*`, tostg's representations read it |
+| T3207 | prints `(())` for `()` | derived `Show`'s `wrapOpParens` took any non-letter first character as an operator: `deriving instance Show ()` in GHC.Internal.Show printed `"(" ++ "()" ++ ")"` | `deriv.ae`'s `sym?` is GHC.Utils.Lexeme's isSym: an ASCII symbol of `!#$%&*+./<=>?@\^|~-`, a colon, or a non-ASCII Unicode symbol (math, currency, modifier, other) |
+| arr014, cgrun026 | `hsi: case of an algebraic type on void` | Data.Array.Base's `instance MArray (STArray s) e (ST s)` and `... (Lazy.ST s)` both got the dictionary function `$fMArraySTArrayeST`; the lazy one's binding replaced the strict one's, so strict `newArray` ran lazy ST's code | `inst-decl!` names dictionary functions as GHC.Tc.Utils.Monad's chooseUniqueOccTc: a name the module's instances already took gets `0`, `1`, ... appended (GHC's `$fMArraySTArrayeST0`). base had such collisions too: its lib-stg now has 1,046 bindings to compare, not 1,029 |
+| cgrun044 | `no binding of main::Main/main` | `{-# OPTIONS -cpp #-}`: a CPP module the eligibility missed (it looked for `LANGUAGE CPP` and the flags), read as an empty module | `front_eligible` also refuses an `OPTIONS`/`OPTIONS_GHC` pragma with `-cpp` or `-XCPP`: cgrun044 runs on the pack (passes), and so do conc036 (leaves `own-fallback.txt`) and conc037 (fails as on the pack, `divergences.edn`'s class; `divergences-own.edn`'s `:front-no-main` goes, empty) |
+
+Also: `bin/lib/hsi/check`'s default own STG path (`ls ... | head -1` under `pipefail`) failed the whole check when `.tmp` had no
+lib-stg output of base even with `HSI_OWN_TARS` set: the `ls` may fail now.
+
+**HF10-P33.** `ownface.ae` writes a class's `:dsigs` (`[[METHOD TYPE] ...]`, each default signature's type over the class's
+variables in the interface's type forms) when it has any; `typecheck.ae`'s interface reader reads them into the class's `:dsigs` (the
+module-level interface of `typecheck.ae`, a program's own modules', too). An instance that omits the method then applies `$dm` to the
+dictionaries of the signature's context solved at its head, as in the defining module (P17's GenericDM); a signature with type
+variables of its own (NFData1's `liftRnf :: forall a. (Generic1 f, GNFData One (Rep1 f)) => ...`) is taken when its context does not
+mention them. The judge's class fact (`libcheck.ae`'s `cmp-map :classes`) selects `:ntvs :supers :methods :fundeps :defaults`, so
+`:dsigs` is not compared (GHC's dump lacks it; HF10-P33 (b) at the window). Shown by a program (`.tmp/p32/t/G1.hs` in the worktree,
+not committed): a hand-written `instance Generic T` (`type Rep T = D1 ... :+: ...`, `from`, `to`) and `instance NFData T` without
+`rnf`: `evaluate (rnf (T 1 [True, error "forced by rnf"]))` raises the error on the new deepseq interface; on hs-p17's it stops
+(`hsi: case of an algebraic type on <pap main:Main/$fNFDataT>`). `deriving Generic` itself is not built: the elaborator derives
+no Generic (HF10-P34 below), so a program's `deriving (Generic, NFData)` still fails to typecheck (`Rep T` does not reduce).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+| step | result | before (records) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 1 better (GHC.Internal.Exception.Context: errors → ok) | | 0.85 GB, 9m55 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,545 of 7,639 bindings equal, 0 worse, 6 better | 5,536 | 1.17 GB, 11m19 |
+| lib-check `--package base` | 0 worse, 1 better (Data.Functor.Classes: errors → ok) | | 0.69 GB, 4m02 |
+| lib-stg `--package base --judge` | 547 of 1,046 equal, 0 worse, 2 better (Data.Functor.Classes, Data.Foldable1: errors → ok) | 547 of 1,029 | 0.69 GB, 3m47 |
+| lib-check `--package deepseq/array/stm` | as recorded: 202/211, 388/388, 222/222 facts; 0 worse each; controls differ | same | 0.56/0.61/0.53 GB |
+| lib-stg `--package deepseq/array/stm` | 1, 15, 10 modules `:ok` (no reference) | same | 0.55-0.61 GB |
+
+Not re-recorded: the records are the night's (P29's night commands), the betters stay betters until then.
+
+**The programs** (`bin/hsi check --libs own`, ARBACE_MEM_GIB 2, one program at a time, on the five tars made above):
+
+| run | before (hs-p17) | after |
+|---|---|---|
+| the 31 programs the slice made eligible | 24 pass, 6 own-only failures in no class | 30 pass (28 own, 2 pack: throwto002, cgrun044), kahan `:speed` as on the pack; 0 unclassed; 3m00, 0.77 GB |
+| samples, synthetic | 45 own (44 pass), 18 pack (16 pass) | 50 own (49 pass), 13 pack (11 pass); 0 unclassed; the classes as before (AsyncRerun, Loop, runtime-deep); 2m53, 1.07 GB |
+
+**The gate** (`test/gate/steps.edn`): `haskell-lib-own-{deepseq,array,stm}` lose their `:clean-only` part (stm's dependency path is
+`haskell-lib-own-array/array-pool.tar` now, no `.own` part); `hsi-check` and `hsi-check-aot` take the slice's `deepseq-own.tar`,
+`array-own.tar`, `stm-own.tar` in `:uses` and `HSI_OWN_TARS` after ghc-internal's and base's. `--full` grows by the three steps,
+about 6 minutes in all under 0.7 GB (measured above). lib-stg of the slice stays a measure until the window records its -O0 STG.
+Keys: every path a crop path; `bin/arbace-go --gate-key` 314c8e5b04ab... as on `mac/hs-p17`.
+
+### Checks (light, night 12: one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| `bin/hsi check --libs own --only` the 31 newly eligible programs | 30 pass, kahan `:speed`; 0 unclassed; arr001's control fails as it must |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five tars | exit 0; 50 own (49 pass), 13 pack (11 pass), 0 unclassed, the controls fail as they must |
+| hsi-essential's command (ARBACE_MEM_GIB=1) | own-verdicts current; 120 pass, 2 fail (primops-word, runtime-laziness: status 2 at the 1 GiB cap on the pack path, as on hs-p17 and hs-p29; they pass at 16 GiB); 18m05, 0.87 GB |
+| P33's program (a hand-written Generic instance, NFData's default `rnf`) | the error inside the structure is forced by `rnf` (before: hsi stopped) |
+| `bin/gate --full --plan` | exit 0, no table error; the three steps plan "after" their producers, `hsi-check` and `hsi-check-aot` after all five |
+| `gate.crops check ROOT test/gate/steps.edn`; `bash test/gate/crops-test.bash` | 0 problems; ok |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved) |
+| `bin/reap --self-test`, `bin/reap` | ok (5 cases); 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged (Haskell 76.0) |
+
+Not run: testsuite-core's whole own run (about 800 programs; the gate's `hsi-check`, `:heavy`, at night) and `hsi-check-aot`.
+
+### Night commands (not run; in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+None is new. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB, about 1.5 h together) are the whole proof over
+testsuite-core and nofib once the branch is in `next`; P29's night commands record `check-hsi-own.edn` / `-aot-own.edn` whole (their
+lines for cgrun044, conc036, conc037 move to `:front :ineligible :libs :pack`, the slice's programs to `:libs :own`) and re-record
+the lib-check and lib-stg records with the betters above (`lib-stg-own-results.edn` 5,536 → 5,545; base's 1,029 → 1,046 bindings).
+
+### Proposals
+
+- **HF10-P34 DeriveGeneric.** `deriving (Generic)` (and `Generic1`) is not derived by the elaborator, so a program's
+  `deriving (Generic, NFData)` or `instance NFData T` over a derived Generic does not typecheck (`Rep T` does not reduce): deepseq's
+  Generic path works only with a hand-written instance (P33's proof). (a) **derive Generic as GHC.Tc.Deriv.Generics does: the
+  `Rep` family instance (`D1`/`C1`/`S1` with `MetaData`, `MetaCons`, `MetaSel` and their promoted constructors and Symbols, `:+:`
+  and `:*:` balanced as GHC splits them, `Rec0`, `U1`, `V1`), `from` and `to`; Generic1 after**; about a day, judged by the
+  testsuite's `generics/` programs (eligible once derived) and the interfaces' `R:Rep` instances. (b) leave it to a later slice
+  (containers and the run corpora need it little). *Recommended: (a)*, after the window: the generics/ tests are run programs.
+
+## Decided (the user, 2026-11-12: HF10-P34)
+
+HF10-P34 (a), now: DeriveGeneric in the elaborator, Generic (and Generic1 if cheap) derived as GHC.Tc.Deriv.Generics does (the
+`Rep` family instance with its metadata, sums and products balanced as GHC balances them, `from` and `to`), and DeriveAnyClass's
+`deriving (NFData)` over it by P33's default-signature route; judged by the testsuite's `generics/` programs and lib-check where the
+boot libraries derive Generic (0 worse), a program with `deriving (Generic, NFData)` running under hsi on the own path.
+
+## As built: HF10-P34 (2026-11-12, branch `hs-p34`, from `mac/hs-p32` 506aaf7f5)
+
+By an agent during the day of 2026-11-12 under night 12's limits (night 12's gate running: one run at a time, each process under
+1.5 GiB, GOMEMLIMIT 1000MiB, MemAvailable at least 12 GiB before each run; stage 0; no GHC, no gate run but `--plan`, no network).
+
+**Generic and Generic1 derived** (`deriv.ae`'s `gen-generic` and `rep-type`, ported from GHC 9.14.1's
+`compiler/GHC/Tc/Deriv/Generics.hs`; `typecheck.ae`'s `derive-all!`):
+
+- `from x = M1 (case x of ...)`, `to (M1 x) = case x of ...` (mkBindsRep's factored outer M1), each constructor under its
+  `L1`/`R1` nesting (genLR_E, genLR_P: the left half `n div 2`), its fields by `:*:` balanced as foldBal (`U1` when none), each
+  field `M1 (K1 g)`, an unlifted one's URec box (`UInt`, `UChar`, `UDouble`, `UFloat`, `UWord`, `UAddr`); `from1`/`to1` by
+  argTyFold (`Par1`, `Rec1 f`, `f :.: ...` with `Comp1 . fmap` and `fmap ... . unComp1`, `Rec0` else). Locals `g1...` and `x` as
+  GHC names them.
+- The family instance `Rep (T a) = ...` (`Rep1` for Generic1), axiom `Rep_T` (`Rep1_T`) as GHC's, entered in the module's family
+  table before any binding is typed and written to the own interface (`*own-fam-insts*`): `D1`/`C1`/`S1`/`Rec0` as their
+  expansions `M1 D`/`M1 C`/`M1 S`/`K1 R` (kind arguments left out, as the elaborator reads every interface); `MetaData` with the type's
+  name, module, package (the module's unit, an imported type's from its interface's `hsiface/module`) and newtype flag;
+  `MetaCons` with `PrefixI` or `InfixI` of the constructor's fixity (the module's, else its interface's `hsiface/fixities`, `(:)`'s
+  `infixr 5` wired) and the record flag; `MetaSel` with `'Just "label"` or `'Nothing`, the source unpackedness and strictness from
+  the field's bang (the constructor descriptions carry `:bangs` now) and the decided strictness as at -O0 (a bang `DecidedStrict`,
+  never unpacked: the programs' level; the libraries' interfaces, made at -O2, say `DecidedUnpack` for small strict fields, HF10-P34
+  (b) below). The equation's variables are renamed apart from the head's (famenv's matching substitutes to a fixed point).
+- The context: none for Generic, `Functor f` of each composition's outer type for Generic1 (inferConstraints); Generic and
+  Generic1 never by the newtype (GHC's non-coercible classes); a Generic1 GHC cannot derive (the variable under a function's argument)
+  keeps the old empty instance.
+- DeriveAnyClass's context is inferred from the class's default signatures' contexts at the head, simplified by the instances to
+  constraints on variables (inferConstraintsAnyclass; `simplify-pred*`, every argument matched): `data W a = ... deriving (Generic,
+  NFData)` is `instance NFData a => NFData (W a)` (it was `NFData (W a)` with no context, its `$dm` wanting `NFData a` unsolved).
+
+**What the generics programs found beyond deriving** (each fixed; each one of ghc-internal's own STG every program shares):
+
+| fault | effect | fix |
+|---|---|---|
+| a pattern-synonym pattern (`psyn`) was never desugared: the desugarer took it for a wildcard, its variables unbound | ghc-internal's `symbolVal _ = case symbolSing of UnsafeSSymbol x -> x` compiled to a free `x`: `datatypeName`, `selName`, every `symbolVal` | a synonym of the module whose pattern is known and whose contexts are empty is matched as its pattern, the arguments' patterns in its variables' places (the matcher's inlined body); others as before (`$mP` not built) |
+| `SingKind k` unsolved: the elaborator erases kinds, so `fromSing (sing :: Sing nt)` in `instance (...) => Datatype ('MetaData n m p nt)` has no `k` | GHC.Internal.Generics had 9 unsolved `SingKind` (isNewtype, conFixity, conIsRecord, selName, the three selectors' strictness) | `invert-families!`: a deferred `F ?k ~ t` whose family has one equation whose right-hand side can be `t` sets `?k` to its left-hand side (`DemoteRep k ~ Bool`: `k = Bool`), and `F ?k ~ F x` (both stuck) sets `?k = x` when `?k` is in an unsolved wanted (`SingKind (Maybe a)`'s `Just (fromSing a)`); tried when a wanted with a meta is unsolved under its givens and before defaulting. A program GHC accepted has that `k` |
+| `KnownNat`/`KnownSymbol` evidence was `(lit "5")` / a lifted string literal | tostg: "literal not handled: 5"; `$fSingIInfixI`'s `KnownNat` | GHC's EvLit: `NS 5##` (SNat's Natural), `unpackCString# "s"#` (SSymbol's String) |
+| every `data instance Sing (a :: K)` was the representation tycon `R:Sing` | the last instance's constructors replaced the others' (`SFalse` unbound: `isNewtype`) | a pattern with a kind signature spelled as GHC's newFamInstTyConName (`R:SingBoola`, as GHC's own names), and a name already taken gets `0`, `1`, ... |
+| a standalone `deriving instance Monoid c => Monoid (K1 i c p)` on a newtype took the class's defaults | `mempty = mconcat []`, `mconcat = foldr mappend mempty`: a loop (T19819's `Generically T` ran out of memory) | standalone deriving of a class no stock deriving knows, on a newtype with GeneralizedNewtypeDeriving, by the newtype (classes of types only: `Foldable1 (Alt f)` in base's Data.Foldable1 stays as before, else 48 errors) |
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+| step | result | before (hs-p32's run) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 2 better (GHC.Internal.Generics: errors 9 → ok; GHC.Internal.Exception.Context as at hs-p32); interface facts 20,699 of 20,891 equal, 252 of 265 modules every fact | 20,681; 248 of 265 | 0.97 GB, 12m37 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,705 of 7,757 bindings equal, 0 worse, 28 better (TypeLits 14 → 22, TypeNats 5 → 10, TH.Syntax 422 → 476, RTS.Flags 151 → 166, Generics errors → ok, the modules with derived Generic: their `$cfrom`/`$cto`) | 5,545 of 7,639 | 1.13 GB, 14m23 |
+| lib-check `--package base` | 0 worse, 1 better (Data.Functor.Classes, as at hs-p32); interface facts 6,784 of 6,785 | 6,780 of 6,785 | 0.71 GB, 4m42 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | 547 of 1,046 | 0.70 GB, 4m23 |
+| lib-check `--package deepseq/array/stm` | as recorded: 202/211, 388/388, 222/222 facts; 0 worse each; controls differ | same | 0.59/0.61/0.53 GB |
+| lib-stg `--package deepseq/array/stm` | `:ok` (no reference) | same | 0.58-0.62 GB |
+
+On the way (the runs are the branch's fourth; the first three found the faults above): standalone deriving by the newtype for every
+non-stock class made base's Data.Foldable1 worse (`Foldable1 (Alt f)`, a class of type constructors: 48 errors), so it is limited to
+heads that are the newtype at all its parameters. Not re-recorded: the betters stay betters until the night's records.
+
+**The programs.** The testsuite's `generics/` run tests are in the `:testsuite` corpus's run list (`test/haskell/eval/testsuite-run.edn`:
+GFullyStrict, GenNewtype, T10030, T11358, T19819 `compile_and_run`; T5462Yes1, T5462Yes2 `multimod_compile_and_run` with C files,
+`req_c`), but not in `:testsuite-core`'s directories, so not in `bin/hsi check`'s plan, and GHC's runs of them are not recorded
+(`test/haskell/ref-ghc914.edn`, haskell-stg-progs: none). The five single-module ones were run by hand (`.tmp/p34/gen-run.sh` in the
+worktree, not committed: the native front end on the own interfaces of the last `bin/hsi check --libs own`, hsi on the own
+libraries) and judged by their own verdict, the testsuite's golden `NAME.stdout` (exit 0, stdout equal); T5462Yes1/2 are ineligible
+(other modules, C). No program of the run corpora (samples, synthetic, testsuite-core, nofib) derives Generic or uses DeriveAnyClass.
+
+| run | result |
+|---|---|
+| the five single-module `generics/` run tests on the own libraries | 5 pass: GFullyStrict (DeriveAnyClass over Generic, `selDecidedStrictness`), GenNewtype (`isNewtype`), T10030 (`packageName` of Maybe's and Bool's library instances: `ghc-internal`), T11358 (`conFixity`: `Prefix`, `Infix LeftAssociative 9`), T19819 (DerivingVia `Generically T`'s Semigroup and Monoid; its golden file lacks the last newline, which the testsuite driver ignores). Before: none (`Rep T` did not reduce; GenNewtype, T10030, T11358 also needed the library fixes) |
+| the fourteen single-module `generics/` compile tests, the front end alone | 12 elaborate without an error (GenCanDoRep0/1, GenDerivOutput, GenDerivOutput1_0/1_1, T8479, T9563, T10361a/b, T12220, T14266, T25148b); T21185 (a kind-polymorphic Generic1 over a type family) and T25148a (`Assert`'s TypeError) do not |
+| `deriving (Generic, NFData)` programs (`.tmp/p34/t/G4.hs`, `G5.hs` in the worktree) | `force`, `deepseq`, `rnf` of a structure with an error inside caught (deriving NFData by DeriveAnyClass, `NFData a => NFData (W a)` inferred); `to (from x) == x` for sums, records, infix constructors; Generic1's `from1`/`to1` with `Rec1`, `:.:` |
+
+### Checks (light, one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| the five `generics/` run tests on the own libraries (golden `.stdout`) | 5 pass |
+| `bin/hsi check --libs own --only` the 31 programs P32 made eligible and the 9 testsuite-core programs that use TypeLits, KnownNat/KnownSymbol or pattern synonyms (T19289, DataTypeOrd, T16586, T24245, T16646, T19667, TcTypeNatSimpleRun, TcTypeSymbolSimpleRun; T17310 is no run test) | 39 programs: 38 pass, kahan `:speed`; 29 own (28 pass), 10 pack as recorded (the TypeLits programs' `:typecheck-errors` and `:fallback` as in `check-hsi-own.edn`); 0 unclassed; arr001's control fails as it must; 3m11, 0.86 GB |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five new tars | exit 0; 50 own (49 pass), 13 pack (11 pass), as hs-p32; 0 unclassed, the controls fail as they must; 2m55, 1.07 GB |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 3m08, 0.59 GB |
+| `bin/gate --full --plan` | exit 0, no table error |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p32`) |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+Not run: hsi-essential (the pack path, which the elaborator does not touch), testsuite-core's whole own run and `hsi-check-aot` (the
+gate's heavy steps, at night).
+
+### Night commands (not run)
+
+None new. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB) are the whole proof over testsuite-core and nofib once the
+branch is in `next`; the records' re-recording (P29's night commands) takes this branch's betters (lib-check, lib-stg).
+
+### Proposals
+
+- **HF10-P35 the generics programs in the run corpora.** `generics/` is not in `:testsuite-core`, so its five single-module run tests
+  are checked by hand only. (a) **add `generics` to `:testsuite-core`'s directories and record GHC's runs of its tests at the next
+  oracle window** (`bin/hsi record-ref --only`, haskell-stg-progs `--record-progs`: seven programs, about a minute of GHC); until then
+  their own verdicts (the golden `.stdout`) judge them, as `own-verdicts` does for others. (b) leave them out. *Recommended: (a).*
+- **HF10-P34 (b) -O's decided strictness in the libraries.** The libraries' interfaces are GHC's -O2 build's, where a small strict
+  field is `DecidedUnpack` (`-funbox-small-strict-fields`); the own derivation says `DecidedStrict` (the -O0 answer, the programs').
+  Only the `Rep` facts of strict fields in ghc-internal's Heap/Stats modules differ; no run depends on it. (a) **leave it (recorded
+  here)**; (b) port shouldUnpackArgTy's -O decision for the libraries' compilation. *Recommended: (a).*
+- **HF10-P36 pattern-synonym matchers.** A synonym with a context or one imported from another module is still not desugared (the
+  matcher `$mP` is neither built nor called; the pattern binds nothing). (a) **build `$mP` (and `$bP`) as GHC.Tc.TyCl.PatSyn does and
+  desugar `psyn` to a matcher call (GHC.HsToCore.Match's matchPatSyn)**, judged by lib-stg (ghc-internal's synonyms) and the run
+  corpora's PatternSynonyms programs; (b) inline imported synonyms' patterns through the own interfaces. *Recommended: (a).*
+
+## Decided (the user, 2026-11-12: HF10-P36, HF10-P35)
+
+HF10-P36 (a): build pattern-synonym matchers and builders as GHC does (`$mP` with its continuation and failure arguments, `$bP`;
+bidirectional, explicitly bidirectional with where clauses, unidirectional; record pattern synonyms; COMPLETE pragmas' effect on
+the checker if any; required and provided contexts with their dictionaries; across modules through the own interfaces), and
+desugar every `psyn` pattern through its matcher, replacing hs-p34's same-module shortcut. HF10-P35 (a): add `generics/` to
+`:testsuite-core`: the corpus entry and the program list, judged by each test's own `.stdout` now; GHC's recorded runs wait for
+the oracle window (the command written, GHC not run).
+
+## As built: HF10-P36, P35 (2026-11-13, branch `hs-p36`, from `mac/hs-p34` 385276b4f)
+
+By an agent during the RERUN of 2026-11-13 (a serial `bin/gate --full` on `next`): one run at a time, each process under 1.5 GiB
+(GOMEMLIMIT 1000MiB), MemAvailable at least 12 GiB beyond the run; stage 0; no GHC, no gate run, no network. Read from GHC 9.14.1's
+source tarball (`ghc-9.14.1-src.tar.xz`, the corpus pin): `compiler/GHC/Tc/TyCl/PatSyn.hs` (tcPatSynMatcher, mkPatSynBuilder,
+tcPatSynBuilderBind, tcPatToExpr, Note [Pragmas for pattern synonyms]), `GHC/HsToCore/Match.hs` (matchPatSyn, sameGroup's
+`PgSyn`), `GHC/HsToCore/Utils.hs` (mkCoSynCaseMatchResult, mkPatSynCase), and `testsuite/driver/testlib.py` (compare_outputs).
+
+**HF10-P36: matchers and builders** (`typecheck.ae`; `desugar.ae`'s `match-syn`):
+
+- **The matcher** `$mP = \req-dictionaries scrut cont fail -> case scrut of PAT -> cont prov-evidence args; _ -> fail (# #)`, the
+  continuation applied to `(# #)` when the synonym has neither arguments nor provided dictionaries (tcPatSynMatcher's `is_unlifted`),
+  its type `forall r univ. req => res -> (forall ex. prov => args -> r) -> ((# #) -> r) -> r` in the environment. No INLINE: GHC
+  9.14.1 adds one only for a user's pragma on the synonym (Note [Pragmas for pattern synonyms]); the -O0 Simplifier inlines a small
+  matcher within its module as GHC's does (TypeLits' symbolVal: `\d _ -> d`, equal to GHC's).
+- **The builder** `$bP`: an explicitly bidirectional synonym's where clause, an implicitly bidirectional one's pattern as an
+  expression (tcPatToExpr: variables, constructors applied, literals, tuples, lists, unboxed sums, parentheses), checked at
+  `forall univ ex. (req, prov) => args -> res`; a function of `(# #)` when the result is unlifted and there are no arguments and no
+  context (need_dummy_arg: unboxed-wrapper's `pattern P1 = 42#`); none for a unidirectional synonym (its name leaves the value
+  environment). The builders are checked after every binding of the module (tcPatSynBuilderBind's later pass: bidir-explicit-scope's
+  builder uses `foo`, which matches on the synonym). An occurrence of the synonym as an expression is `$bP` (applied to `(# #)` when
+  it takes the dummy).
+- **Every `psyn` pattern through its matcher** (matchPatSyn, mkPatSynCase): consecutive equations on the same synonym at the same
+  required evidence one group (sameGroup's `PgSyn` compares the instantiating types: T11224's `PRead` at Int and at [Int] are two
+  groups, one call each), `$mP req-evidence v (\prov-dictionaries args -> the arguments' match) (\(# #) -> fail)`, the other
+  equations' dictionaries renamed to the first's (matchOneConLike's shift). hs-p34's shortcut (a synonym of the module matched as
+  its pattern) is gone.
+- **Contexts.** A signature's implicitly bound variables the required context mentions are universal (Note [The pattern-synonym
+  signature splitting rule]; T11224's `Read a => () => a -> String` took `a` for an existential). An inferred synonym
+  (tcInferPatSynDecl) quantifies its pattern's wanteds as its required context (`pattern P1 <- 0`: `(Eq a, Num a)`, T9783), and its
+  provided context and existentials are the dictionaries and skolems its constructors bind (tcCollectEx; minimal by superclasses,
+  Note [Remove redundant provided dicts]; ex-prov-run's `pattern P x y <- MkT x y`: `Eq b`). A provided constraint with no type
+  variable is not given beyond its alternative (the module's `*skolem-givens*`: `case natSing @7 of SNat -> ...` solved the
+  scrutinee's own `KnownNat 7` by the alternative's dictionary); the instances solve it.
+- **Records.** `P {f = e}` is `$bP` applied to the fields in order; an update `e {f = x}` of synonym fields is GHC's `case e of P x1
+  .. xn -> $bP x1' .. xn'` through the matcher and builder, the result at another instance of the universals (records-poly-update's
+  `Just True {j = A}`); the selectors `\req-dictionaries ds -> case ds of P{f = x} -> x; _ -> recSelError` match through the
+  matcher (a synonym with a context too; a field whose type mentions an existential has none), their types entered with the
+  synonym, before any use. A synonym's group whose pattern mentions no value of the module is typed first (the renamer's order
+  does not see a record synonym's fields as uses of it: records-run's `main` came before `pattern Bi{a, b}`).
+- **Across modules.** The own interfaces carry the synonyms as before (`patsyn` with univ, req, ex, prov, args, res, fields,
+  builder; an inferred one's contexts now filled); the reader enters `$mP`'s and `$bP`'s types from them (and from GHC's
+  interfaces' iface2 forms), the importing module calls them, and the own STG has their bindings (exported as GHC's). The judge's
+  interface facts leave the derived `$m`/`$b` types out (they are no facts of their own).
+- **COMPLETE pragmas.** No effect on the generated code here: GHC's coverage checker only warns, and the one use in code generation,
+  the matcher's `isIrrefutableHsPat` with `irrefutableConLikeTc` (a pattern on the only member of a COMPLETE set needs no `fail`
+  alternative), changes nothing a run can see (the `fail` alternative is then unreachable); the STG differs from GHC's only for a
+  synonym defined by another such synonym (none in ghc-internal or base).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+| step | result | before (hs-p34) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 2 better (as at hs-p34); interface facts 20,699 of 20,891, 112 ours only (was 114), 252 of 265 modules every fact | 20,699 | 0.95 GB, 12m22 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 bindings equal, 0 worse, 33 better | 5,705 of 7,757 | 1.13 GB, 16m03 |
+| lib-check `--package base` | 0 worse, 1 better; interface facts 6,784 of 6,785 | same | 0.72 GB, 4m46 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.71 GB, 4m30 |
+| lib-check `--package deepseq/array/stm` | as recorded; 0 worse each; controls differ | same | 0.54-0.63 GB |
+| lib-stg `--package deepseq/array/stm` | `:ok` (no reference) | same | 0.57-0.62 GB |
+
+ghc-internal's synonyms' modules (lib-stg, bindings equal to GHC's -O0): TypeLits 14 → 30 of 51, TypeNats 5 → 14 of 23, Natural
+26 → 30 of 32, Tuple 66 → 68 of 68, IO.Encoding.Types 15 → 22 of 23, Data.Typeable.Internal 34 → 37 of 73, Exception 2 → 3 of 11:
+the matchers, builders and record selectors GHC has, and their uses.
+
+**The programs.** The testsuite's `patsyn/should_run` run tests (all.T): 14 `compile_and_run` and T13688 (`multimod_compile_and_run`,
+`req_th`: TemplateHaskell quasi-quotes, ineligible); `ghci` and T11985 are GHCi scripts. All 14 are eligible for the own path (one
+module, imports of base alone). Run by hand (`.tmp/p36/ps-run.sh` in the worktree, not committed: the native front end on the own
+interfaces of the run below, hsi on the own libraries) and judged by their own verdict (exit 0, stdout the golden `NAME.stdout`):
+
+| program | before (hs-p34) | after |
+|---|---|---|
+| eval, ex-prov-run, match | pass (the shortcut) | pass |
+| T9783 | fail (an inferred synonym's context unsolved: `Eq`, `Num`) | pass |
+| match-unboxed | fail (status 0, a wrong stdout) | pass |
+| T11224 | fail (`Read a` taken for existential) | pass |
+| T24552, bidir-explicit, bidir-explicit-scope, unboxed-wrapper | fail (no builder: `no binding of main:Main/First`) | pass |
+| records-run, records-poly-update | fail (no field types, no update) | pass |
+| T14228 | fail (no builder) | fail: an unboxed sum built as a function's argument (`foo (# x | #)` once the builder is inlined; the same program without synonyms fails alike, `.tmp/p36/t/S1.hs`): hsi's lambda binder of a sum is one multi-valued binder, not unarised (HF10-P37 below) |
+
+13 of 14 pass (3 before). A cross-module program (`.tmp/p36/t/X1.hs`: a local synonym with a required context at Int and Double,
+an explicitly bidirectional one with a provided `Show b`, ghc-internal's `SNat` (matcher and builder), `SSymbol`, `Con`, base's
+`NatS#`) passes; Type.Reflection's `App` on `Maybe Int` stops in hsi on `$tcMany` (`no binding of ghc-internal:GHC.Internal.Types/$tcMany`:
+the own STG has no Typeable binding of the promoted `'Many`, on hs-p34 too; not the synonym's).
+
+**HF10-P35: generics/ in `:testsuite-core`.** `test/haskell/eval-corpora.edn`'s `:testsuite-core` takes `"generics"` (708 run tests,
+701 before): GFullyStrict, GenNewtype, T10030, T11358, T19819 (`compile_and_run`), T5462Yes1, T5462Yes2 (`multimod_compile_and_run`,
+`req_c`). GHC's runs of them are not recorded, so `bin/hsi own-verdicts` writes beside `own-verdicts.tsv` the list
+`test/haskell/own-verdicts-pending.tsv` (`--record`, `--check`: the testsuite-core run tests without a line in `ref-ghc914.edn` that
+ship `NAME.stdout`): `bin/hsi check` judges those by their shipped files, compared as the testsuite driver compares them
+(compare_outputs after normalise_output's `modify_lines`, which joins the lines: the last newline not compared; T19819's golden
+file lacks it), `:judge :own :pending true`; a pending program that would need GHC's STG (ineligible for the own path, or on the
+pack) is `:oracle-pending`, not run, counted, in no class and not failing the check (ORS10 (a)'s `:unrecorded` stays a failure for
+every other program). The list empties when record-ref records them. On the own path the five single-module tests pass, the two
+multi-module ones are `:oracle-pending`.
+
+### Checks (light, one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above; run twice, the second on the final code, the same numbers) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| patsyn/'s 14 single-module run tests on the own libraries (golden `.stdout`) | 13 pass (T14228: HF10-P37) |
+| the cross-module program X1 (SNat, SSymbol, Con, NatS#, local synonyms with contexts) | pass |
+| `bin/hsi check --libs own --corpus testsuite-core --only` the 40 testsuite-core programs that use synonyms, TypeLits, Typeable or Type.Reflection, generics/'s 7 and arr001 (the control) | exit 0; 48 programs: 44 pass (16 own, 28 pack), AtomicPrimops and foundation in their classes as recorded, T5462Yes1/2 `:oracle-pending`; every other line as `check-hsi-own.edn` records it; 0 unclassed; arr001's control fails as it must; 3m00, 0.91 GB |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five new tars | exit 0; 50 own (49 pass), 13 pack (11 pass), as hs-p34; 0 unclassed; the controls fail as they must; 7m18, 1.03 GB |
+| hsi-essential's command (ARBACE_MEM_GIB=2, 2 jobs) | exit 0: own-verdicts current (587 own, 10 threaded-only, 7 pending); 123 programs, 122 pass, ffi014 `:threaded-way`; 0 unclassed; controls fail as they must; 20m58, 0.85 GB |
+| `bin/hsi check --corpus testsuite-core --only` generics/'s 7 on the pack path | 7 `:oracle-pending`, 0 unclassed (no control in the selection) |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 3m14, 0.59 GB |
+| `bin/gate --full --plan` | exit 0, no table error |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p34`): every changed path is a crop path or a test record |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night).
+
+### Night commands (not run; the oracle window, GHC; in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+1. GHC's runs of generics/ (about a minute of GHC): `bin/hsi record-ref --corpus testsuite-core --only testsuite/generics/GFullyStrict,testsuite/generics/GenNewtype,testsuite/generics/T10030,testsuite/generics/T11358,testsuite/generics/T19819,testsuite/generics/T5462Yes1,testsuite/generics/T5462Yes2`
+   (into `test/haskell/ref-ghc914.edn`), then their -O0 STG: `bin/hsi check --live --dump-only --record-progs --corpus testsuite-core --only` the same ids
+   (haskell-stg-progs, a commit naming `:ghc`'s identity), then `bin/hsi own-verdicts --record` (the pending list empties; the five
+   whose shipped files are GHC's output move to `own-verdicts.tsv`). Light (under 2 GiB, minutes).
+2. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB) are the whole proof over testsuite-core (with generics) and nofib
+   once the branch is in `next`; the records' re-recording (P29's night commands) takes the betters above.
+
+### Proposals
+
+- **HF10-P37 unboxed sums as arguments.** A function's argument of an unboxed sum type is one binder of several representations in
+  tostg's STG (`["x" [:word :L]]`), and a call passing a sum built in place has no unarised form (T14228, `foo (# x | #)`); GHC's
+  Unarise makes the sum's tag and slots separate arguments and binders (unariseFunArgBinder, ubxSumRepType). (a) **unarise sum
+  binders and arguments as unboxed tuples' are (`*multi*`), with mkUbxSum at the parameter's type**; (b) leave it (one testsuite
+  program). *Recommended: (a)*, small.
+- **HF10-P38 patsyn/ in the run corpora.** `patsyn/should_run` is not in `:testsuite-core`; its 14 single-module programs are checked by
+  hand here. (a) **add it as P35 added generics/ (judged by their own verdicts until the oracle window records them; T13688 needs
+  TemplateHaskell, ineligible)**; (b) leave it. *Recommended: (a)*.
+- **HF10-P39 `$tc'Many`.** The own STG lacks the Typeable binding of the promoted `'Many` (`$tcMany`), so `typeRep`'s kind of a
+  function type stops (Type.Reflection's `App` on `Maybe Int`). (a) **name and bind the promoted constructors' TyCon bindings as GHC's
+  mkPrimTypeableTodos/Typeable binds them**; (b) leave it. *Recommended: (a)*, after checking which promoted constructors are missing.
+
+## As built: HF10-P37-P39 (2026-11-13, branch `hs-p37`, from `mac/hs-p36` 6f8bf239c)
+
+The user's decisions of 2026-11-13: `:oracle-pending` accepted; HF10-P37 (a), P38 (a), P39 (a). By an agent after the RERUN of
+2026-11-13: one run at a time, each process under 1.5 GiB (GOMEMLIMIT 1000MiB), MemAvailable at least 12 GiB beyond the run; stage
+0; no GHC, no gate run, no network. Read from GHC 9.14.1's source tarball (the corpus pin): `compiler/GHC/Stg/Unarise.hs`
+(unariseArgBinder, unariseFunArg, unariseConArg, unariseConArgBinder, unariseSumAlt, mapSumIdBinders, castArgRename, mkCast,
+mkUbxSum, ubxSumRubbishArg, Note [Casting slot arguments]), `compiler/GHC/Builtin/PrimOps/Casts.hs` (getCasts and its helpers),
+`compiler/GHC/Tc/Instance/Class.hs` (doFunTy, doTyConApp, onlyNamedBndrsApplied), `compiler/GHC/Tc/Instance/Typeable.hs`
+(mkTyConRepBinds' splitForAllForAllTyBinders), `libraries/ghc-internal/src/GHC/Internal/Data/Typeable/Internal.hs` (mkTrCon,
+tyConKind, instantiateKindRep, mkTrFun, mkTrApp, typeRepTyCon, splitApps, showTypeable, trMany); BSD-3-Clause, the notice already
+in the files and LICENSE.md.
+
+**HF10-P37: unboxed sums unarised** (`tostg.ae`), as GHC's Unarise does and as hs-p17's unboxed tuples already were:
+
+- **Binders and arguments.** A lambda's binder of an unboxed sum type is its tag's and slots' binders (unariseFunArgBinder's
+  ubxSumRepType: `foo :: (# String | () #) -> IO ()` takes `[ubx :word] [ubx :L]`, was one binder `[:word :L]`), the sum's binder
+  standing for them (`*multi*`, as a tuple's); a sum built as a function's argument (`foo (# x | #)`, T14228's builder inlined) is
+  its unboxed tuple at the parameter's type (mkUbxSum: `foo 1# x`), with-atoms splicing it as a tuple's; a call returning a sum
+  passed as an argument is taken apart by a case, as a tuple-returning call is.
+- **Casts.** A field whose representation is not its slot's is cast (getCasts ported: Int# in a WordSlot `int2Word#`, back
+  `word2Int#`; the sized ints and words, Addr#, Float# in a DoubleSlot): mkUbxSum's castArg on construction, mapSumIdBinders'
+  `case op slot of cst_sum { DEFAULT -> ... }` on a match. Before, a sum with an Int# alternative (`(# Int# | Float# #)`: slots
+  Word, Float) had no rewrite and its case fell to the pattern-match failure.
+- **Other binders.** A case binding a sum (DEFAULT alternatives alone: the desugarer's mkDefaultCase for a sum-typed `let`) binds the
+  tuple's components, its binder standing for them; a `let` of a sum built in place is built at its binder's type; an alternative's
+  field of several representations (an unboxed tuple: `(# (# a, b #) | #)`, or a nested sum) is the tuple of its slots, each cast.
+- **Constructor fields** (unariseConArgs, unariseConArgBinders): a data constructor's field of an unboxed sum's or tuple's type takes
+  its components as fields (the `stg/data` declaration's reps flattened: unboxedsums2's `D (# Int# | Float# #)` is
+  `[:word :word :float]`, marks `:lazy` each), its construction splices the components (the field's sum built at the field's type),
+  its match binds them (the field's binder standing for them); such a constructor is no floatable `rcon`.
+- **Void components.** An unboxed tuple argument's void components (atoms: `(##)`, `void#`, `realWorld#`, a void local) vanish,
+  a tuple of nothing else is one `void#` (unariseFunArg's `MultiVal []`: unarise.hs's `f2 (# (# #), (# #) #)` passed two
+  arguments to a one-binder function). `(##)` itself as an argument stays the global, as GHC's -O0 STG writes it (a first change to
+  `void#` made 8 ghc-internal modules worse, reverted).
+
+**HF10-P38: patsyn/ in `:testsuite-core`** (722 run tests, 708 before): `bin/hsi own-verdicts --record` lists patsyn/should_run's 14
+run tests in `own-verdicts-pending.tsv` (21 lines with generics/'s 7), judged by their shipped stdout; T13688 (TemplateHaskell,
+ineligible for the own path) is `:oracle-pending`.
+
+**HF10-P39: Typeable of promoted constructors and functions** (`typecheck.ae`'s Typeable solver). The bindings were there
+(`promoted-typeable-binds`: GHC.Internal.Types' `$tc'Many`, `$tc'Lifted`, ...): the evidence named them wrong.
+
+- A promoted constructor's evidence is `mkTrCon $tc'O []` (it was `$tcO`: 34 references of the own STG to an unbound `$tc` name,
+  `$tcMany`, `$tcLifted`, `$tcBoxedRep`, `$tc:`, the RuntimeRep and VecCount constructors), GHC.Internal.Prim's tycons'
+  GHC.Internal.Types' `$tcO` (`$tcTYPE` was named in GHC.Internal.Prim).
+- A function type's evidence is `mkTrFun trMany a b` (doFunTy's EvTypeableTrFun; it was `mkTrApp (mkTrApp (mkTrCon $tcFUN []) a) b`),
+  with variables too; the arrow unapplied (`typeRep @(->)`, typeRepTyCon's and funTyCon's) is `mkTrCon $tcFUN [SomeTypeRep 'Many,
+  LiftedRep, LiftedRep]`: `$tcFUN` has three kind arguments (splitForAllForAllTyBinders: m, q, r) and TrTyCon's kind is a strict
+  field, so the empty list stopped on its KindRep's variables (`(Array.!): undefined array element`) whenever a TrFun was shown
+  or its tycon asked.
+- Left open: a poly-kinded tycon's kind arguments in general (`typeRep @Proxy`, `'[]`): the elaborator's types erase kind
+  arguments, so its evidence passes `[]` (HF10-P41 below).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; one at a time):
+
+| step | result | before (hs-p36) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 2 better; facts 20,699 of 20,891 | same | 0.95 GB, 11m52 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 bindings equal, 0 worse, 33 better | same | 1.14 GB, 15m26 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.72 GB, 4m37 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.70 GB, 4m57 |
+| lib-check `--package deepseq/array/stm` | as recorded (202/211, 388/388, 222/222 facts); 0 worse each; controls differ | same | 0.54-0.63 GB |
+| lib-stg `--package deepseq/array/stm` | `:ok` (no reference) | same | 0.58-0.61 GB |
+
+The equal counts do not move: the reference's sums are few at -O0 in ghc-internal and base, and the Typeable references changed
+(Typeable.Internal's `trMany` now `$tc'Many`, Data.Typeable's and Data.Dynamic's `$tcTYPE`, `$tc'BoxedRep`, `$tc'Lifted`) sit in
+bindings that differ for other reasons. A first run with `(##)` as `void#` was 5,715 of 7,789, 8 worse (GHC.Internal.Prim.Exception,
+the Bignum modules, Show, TypeError, ReadP, Conc.Sync): the reference writes `(##)`; reverted, as above.
+
+**The programs** (the native front end on the branch's own libraries, hsi; judged by their own verdict: exit 0, stdout the golden
+file; `.tmp/p37/ps-run.sh` in the worktree, not committed):
+
+| set | before (hs-p36) | after |
+|---|---|---|
+| unboxedsums/'s 19 run tests (all.T's compile_and_run; unboxedsums_unit_tests needs `-package ghc`, ManyUbxSums a generator: left out) | 5 pass (thunk, unpack_sums_1, 3, 4, 8) | 18 pass; unpack_sums_6 imports Data.Time (the time package: no own interfaces), its front end stops |
+| patsyn/should_run's 13 single-module run tests | 12 pass (T14228: no sum unarisation) | 13 pass |
+| T14228 alone, and `.tmp/p36/t/S1.hs` (the same without synonyms) | fail (`unboxed tuple of the wrong size`) | pass |
+| hs-p36's X6 (`case typeRep @(Maybe Int) of App f x`) | fail (`no binding of GHC.Internal.Types/$tcMany`) | pass |
+| Typeable probes `.tmp/p37/ty/T1`-`T9`, `Q1` (App, `show (typeRep @(Int -> Bool))`, `Fun`, `typeRepKind` of Maybe, `typeOf`, `typeRep @'True`, `cast`, `Dynamic`, `SomeTypeRep` equality, `typeRepTyCon` of a function) | T1 stopped at its second line (`(Array.!): undefined array element`) | all pass, the outputs as GHC's documented ones |
+
+The testsuite's own Typeable programs (typecheck/should_run's TypeOf, TypeRep, TypeableEq, T14341, T16646, ...) stay on the pack
+path, as before: the native front end stops on other things (`HsStarTy`, `HsExplicitTupleTy`, Typeable of a type literal; HF10-P42).
+
+
+### Checks (light, one run at a time, under 1.5 GiB)
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg, as the gate runs them (the table above; ghc-internal's lib-stg and base's run three times, the last on the final code, the same numbers but the reverted first) | exit 0 each; 0 worse anywhere; controls differ as they must |
+| unboxedsums/'s 19 run tests, patsyn/'s 13, S1, the Typeable probes, on the branch's own libraries (golden `.stdout`) | 18, 13, pass, 11 of 11 |
+| `bin/hsi own-verdicts --record` | 21 pending tests (generics/'s 7, patsyn/'s 14), 10 threaded-only |
+| `bin/hsi check --libs own --corpus testsuite-core --only` hs-p36's 48 programs and patsyn/'s 14 | exit 0; 62 programs: 57 pass (29 own, 28 pack), AtomicPrimops and foundation in their classes as recorded, T5462Yes1/2 and T13688 `:oracle-pending`; 0 unclassed; arr001's control fails as it must; 3m04, 0.92 GB |
+| `bin/hsi check --libs own --corpus samples,synthetic` on the five new tars | exit 0; 50 own (49 pass), 13 pack (11 pass), as hs-p36; 0 unclassed; the controls fail as they must; 3m15, 1.06 GB |
+| hsi-essential's command (ARBACE_MEM_GIB=2, 2 jobs) | exit 0: own-verdicts current (21 pending); 123 programs, 122 pass, ffi014 `:threaded-way`; 0 unclassed; controls fail as they must; 19m35, 0.84 GB |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 3m14, 0.58 GB |
+| `bin/hsi pins --check` | OK (`:testsuite-core` 722 run tests) |
+| `bin/gate --full --plan` | exit 0, no table error |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p36`): every changed path is a crop path or a test record |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night).
+
+### Night commands (not run; the oracle window, GHC; in the branch's worktree)
+
+1. GHC's runs of patsyn/ with generics/'s (hs-p36's night command 1): `bin/hsi record-ref --corpus testsuite-core --only` the 14
+   patsyn/should_run ids, then `bin/hsi check --live --dump-only --record-progs --corpus testsuite-core --only` the same ids, then
+   `bin/hsi own-verdicts --record`. Light (under 2 GiB, minutes).
+2. The gate's `hsi-check` and `hsi-check-aot` (heavy, 10 and 8 GiB) once the branch is in `next`.
+
+### Proposals
+
+- **HF10-P40 unboxedsums/ in the run corpora.** `unboxedsums/` is not in `:testsuite-core`; 18 of its 19 run tests pass on the own
+  path by hand here. (a) **add it as P35 and P38 added generics/ and patsyn/ (judged by their own verdicts until the oracle window
+  records them)**; (b) leave it. *Recommended: (a)*.
+- **HF10-P41 Typeable's kind arguments.** The elaborator's types erase kind arguments, so a poly-kinded tycon's evidence is
+  `mkTrCon $tcT []` (only the arrow's are written, by hand); TrTyCon's kind is strict, so `typeRep @Proxy`, `typeRep @'[]` or a
+  promoted constructor of a poly-kinded type stops as FUN did. (a) **recover the kind arguments at the use site (the tycon's kind
+  from its interface unified with the argument kinds the elaborator knows, doTyConApp's kind_args) and write them**; (b) leave it
+  until a program needs it. *Recommended: (a)*, after counting the uses in ghc-internal and base.
+- **HF10-P42 the testsuite's Typeable programs on the own path.** typecheck/should_run's TypeOf, TypeRep, TypeableEq, T14341 and
+  T16646 fall back to the pack: the native front end stops on `HsStarTy` (`*` as a kind), `HsExplicitTupleTy` (a promoted tuple),
+  Typeable of a type-level literal (`typeRep @"hi"`, GHC's doTyLit), a skolem unified with Integer. (a) **port those four**; (b)
+  leave them on the pack. *Recommended: (a)*.
+
+
+
+## As built: HF10-P40-P42 (2026-11-13/14, branch `hs-p40`, from `mac/hs-p37` b37527e7d)
+
+The user's decisions of 2026-11-13: HF10-P40 (a), P41 (a), P42 (a). By an agent during the night's RERUN (one run at a time, each
+process under 1.2 GiB, `GOMEMLIMIT=1000MiB`; stage 0; no GHC, no gate run, no network). Read from GHC 9.14.1's source tarball (the
+corpus pin): `compiler/GHC/Tc/Instance/Class.hs` (doTyConApp, doTyLit, doFunTy, onlyNamedBndrsApplied), `compiler/GHC/Tc/TyCl.hs`
+(kcTyClGroup, generaliseTcTyCon), `compiler/GHC/Tc/Instance/Typeable.hs` (todoForTyCons, mkTyConKindRep), `compiler/GHC/HsToCore/Binds.hs`
+(dsEvTypeable's EvTypeableTyLit), `compiler/GHC/HsToCore/ListComp.hs` (dsMonadComp), `compiler/GHC/Tc/Module.hs` (checkMain),
+`libraries/ghc-internal/src/GHC/Internal/Data/Typeable/Internal.hs` (mkTrCon, mkTrApp, instantiateKindRep, runtimeRepTypeRep,
+showTypeable, typeNatTypeRep); BSD-3-Clause, the notice already in the files and LICENSE.md.
+
+**HF10-P40: unboxedsums/ in `:testsuite-core`** (`test/haskell/eval-corpora.edn`; 743 programs planned, 722 before). Its run tests are
+judged by their own verdicts as generics/ and patsyn/ are; `bin/hsi own-verdicts --record` is still to run (below: the disk).
+
+**HF10-P41: Typeable's kind arguments** (`typecheck.ae`). The elaborator erases kind arguments; they are recovered where Typeable
+needs them:
+
+- **At the use site** (`tycon-kind-info`): the tycon's kind instantiated (an interface's kind form, its leading invisible binders the
+  kind arguments; a promoted constructor's type; a class's arity to Constraint; the tuples' and lists'), its visible arguments' kinds
+  (`kind-of`, from their own heads) unified with its parameters', the expected kind of an argument passed down (`'[] @Natural` under
+  `':`), the metas nothing fixes defaulted to Type. `mkTrCon $tcT [SomeTypeRep k...]`; an unboxed tuple's kind arguments are its
+  components' representations; a tuple of constraints is the constraint tuple `CTupleN`.
+- **The own data types' kinds** (`infer-tycon-kinds!`, kcTyClGroup for declarations without a standalone kind signature, the module one
+  group): each parameter a meta (its `(t :: k)` signature's), unified with the constructors' fields (Type), GADT results' arguments,
+  contexts (Constraint), quantified fields' bodies, function and unboxed-tuple components (TYPE r, the representation defaulted to
+  LiftedRep, never generalized: GHC's defaulting of RuntimeRep variables), the rest generalized under PolyKinds (GHC2021's; the
+  module's language through the renamed tree's new `:language`) in order of first occurrence, else Type. The kind is written into the
+  own interface's tycon form (`ownface.ae`: `forall k0. k0 -> Type` for Proxy, the tycon's applications with the kind placeholders, so
+  an importer's kind arity is GHC's) and into the `$tcT` binding (its kind variables' count and KindRep). 29 own tycons of ghc-internal
+  and base come out poly-kinded: Proxy, Const, Compose, Product, Sum, Fixed, `:~:`, `:~~:`, Coercion, Alt, Ap, the Generics
+  representation types, ...; four are more general than GHC's (Q, Code, TExp, SomeKindedTypeRep: a class's or a GADT binder's kind
+  annotation the inference does not read).
+- **Every module's promoted constructors' `$tc'` bindings** (todoForTyCons; GHC.Internal.Types' alone before), the classes' TyCons
+  (`$tcEq`, `$tcCTuple2`), KindReps through synonyms (Type as `krep$*`, Constraint as `krep$Constraint`), promoted constructors written
+  without their quote (`(a :: TYPE DoubleRep)`) as the data constructor's, none through a type family or a promoted constructor of a
+  poly-kinded type. `tc-rep-ref` took only a form's symbol namespace, so every promoted constructor the elaborator named came out `$tcO`.
+- **An explicit forall's binders in their written order** (`sig-type`): `kindedTypeRep :: forall k (a :: k). ...` quantified `a, k` by
+  first occurrence, so `kindedTypeRep @(RuntimeRep -> Type) @TYPE` gave `typeRep @(RuntimeRep -> Type)` and `instantiateKindRep` of
+  any `KindRepTYPE r` stopped (`Ill-kinded type application`): `typeRep @Int#` runs now. GHC.Internal.Data.Typeable.Internal's lib-check
+  errors 30 → 16.
+
+**HF10-P42: the testsuite's Typeable programs' front-end gaps** (`typecheck.ae`): `HsStarTy` is Type, `HsExplicitTupleTy` the promoted
+tuple constructor, Typeable of a type-level literal doTyLit's (`typeNatTypeRep`, `typeSymbolTypeRep`, `typeCharTypeRep` at the
+literal's Known dictionary), and functional-dependency improvement from an instance only fixes metas (T16646's `Reifies (Any @Type) a`
+against `KnownNat n => Reifies n Integer`, an instance GHC does not match by kind).
+
+**The next gaps** (the native front end over testsuite-core's 465 eligible programs before, `.tmp/p40/front-all.sh`: 391 compile, 67
+type errors, 2 STG, 5 stopped; by the first error): MonadComp 9, TransStmt 8, HsStatic 3, `main` without a signature 3, implicit
+CallStack parameters 6, ParStmt 2, the two Word literals past a Long 2, then singletons. Taken here (HF10-P43, below): monad
+comprehensions (dsMonadComp: `return`, `guard b >>`, the do statements' binds), `main`'s type unified with `IO t` before its group is
+generalized (checkMain), the match compiler's literal order as a big integer (CmmSwitchTest64, T10246).
+
+**The libraries again** (`lib-check`, `lib-stg` as the gate's steps run them, each on the pools made before it; the final code's run):
+
+| step | result | before (hs-p37) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 3 better (Typeable.Internal errors 30 → 16, Exception.Context and Generics ok); facts 20,699 of 20,891 | 2 better, same facts | 0.97 GB, 15m04 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 equal, 0 worse, 33 better; every `$tc`/`$tc'`/`$krep` reference bound (2,335) | same | 1.15 GB, 20m08 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.71 GB, 7m18 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.72 GB, 7m41 |
+| deepseq, array, stm | 0 worse each on the previous code (runs 4-7); the final code's run refused by the disk (89%) | as recorded | 0.58-0.63 GB |
+
+Seven rounds were needed: unbound references the new bindings made (`$tcType`, `$tcDoubleRep`, `$tc[]`: the namespace, the
+synonyms, the quote-less constructors) and kinds that came out too general (IO, Endo, JoinWith, DictBox) were found by checking every
+reference of the own STG against its bindings after each round.
+
+**The programs** (the native front end on the branch's own libraries, hsi, each judged by its own verdict; `.tmp/p40/ps-run.sh`):
+
+| program | before (hs-p37) | after |
+|---|---|---|
+| T14341, TypeableEq | own-fallback.txt (`$tcMany`, HF10-P39), Proxy without its kind argument | pass |
+| TypeOf | front end: `HsStarTy`, `HsExplicitTupleTy` | 26 of 27 lines on round 6's libraries (`IO * ()`: IO generalized, fixed in round 7, not rerun) |
+| TypeRep | front end: `HsStarTy`, literal Typeable | 28 lines but `IO`'s two (the same), each other line checked alone (R1-R12 probes: CTuple2, Int#, `(##)`, `(# Int#,Int #)`, Proxy at Constraint, at `RuntimeRep -> *`, at `*`, at `'BoxedRep 'Lifted`, RealWorld, `'[1,2,3]`) |
+| T16646 | front end: a skolem unified with Integer | front end: withDict's `(cls => r)` argument gives no given (`Reifies Any a`, `Given a` unsolved): left, HF10-P44 |
+| mc01 | front end: MonadComp | front end: TransStmt alone (the other MonadComp programs not rerun) |
+| cgrun053, DsStrictLet | front end: `Monad ?` unsolved (`main` without a signature) | front end compiles them (their runs waited for round 8's libraries) |
+
+### Checks
+
+| check | result |
+|---|---|
+| the libraries' lib-check and lib-stg (the table) | exit 0 each, 0 worse; controls differ as they must |
+| the programs above | as the table says |
+
+Not run (stopped by the rules at 02:47 UTC on 2026-11-14: `df /` at 89%, over 85%, filled by the night's gate, not this branch, whose
+`.tmp` is 0.9 GB): the final code's deepseq/array/stm round, TypeOf and TypeRep on round 8's libraries, `bin/hsi own-verdicts
+--record` (unboxedsums' pending lines), the front end's after-count over testsuite-core, samples/synthetic, hsi-essential's and
+haskell-read-essential's commands, `bin/reap`, `bin/crops-score --record` / `--judge --strict`, `bash test/gate/gate-key-crops-test.bash`.
+Every changed path is a crop path (`arbace/repr/haskell/`) or a test record (`test/haskell/eval-corpora.edn`): the keys should not move,
+to be confirmed by that test.
+
+### Night commands (not run; in the branch's worktree, `export ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace TMPDIR=$PWD/.tmp/tmp`)
+
+1. When `df /` is under 85%: `.tmp/p40/chain-small.sh` (deepseq/array/stm, 0.6 GB, 10 min), then `HSI_FRONT_DRY=1 bin/hsi check
+   --libs own --corpus testsuite-core` (composes the own libraries), `.tmp/p40/ps-run.sh $PWD/.tmp/p40/t TypeOf TypeRep TypeableEq T14341`,
+   `bin/hsi own-verdicts --record`, `.tmp/p40/front-all.sh .tmp/hsi/check-own/front/plan.tsv .tmp/p40/after` (1.2 GB, 30 min), then the
+   proofs listed above (hsi-essential's command 0.9 GB, 20 min; the rest light).
+2. GHC's runs of unboxedsums/ with patsyn/'s and generics/'s (hs-p37's night command 1, the oracle window): `bin/hsi record-ref --corpus
+   testsuite-core --only` the ids, `bin/hsi check --live --dump-only --record-progs` the same, `bin/hsi own-verdicts --record`.
+3. `test/haskell/own-fallback.txt`'s T14341 and TypeableEq lines can go (`HSI_OWN_FALLBACK=try` fails on them once they pass): with the
+   gate's whole `hsi-check` own run (heavy, at night).
+
+### Proposals
+
+- **HF10-P43 the next front-end gaps** (taken in part here, (a) by the brief's "keep going"): monad comprehensions, `main`'s type, the
+  literal order. Next by count: TransStmt (TransformListComp, 8), implicit CallStack parameters of any name (`?loc :: CallStack`,
+  isCallStackPred, 6), HsStatic (StaticPointers, 3). (a) **port them in that order**; (b) leave them on the pack. *Recommended: (a)*.
+- **HF10-P44 withDict's polytype argument.** T16646: the `(cls => r)` argument of withDict checked as a polytype gives its context as a
+  given (GHC's tcSkolemise): (a) **do so**; (b) leave T16646 on the pack. *Recommended: (a)*.
+- **HF10-P45 class kinds in the inference.** A class's parameters' kinds (Quasi :: (Type -> Type) -> Constraint) and a GADT binder's kind
+  annotation are not read, so Q, Code, TExp and SomeKindedTypeRep come out more poly-kinded than GHC's (their Typeable shows a kind
+  argument GHC does not): (a) **infer the classes' kinds as the data types' and read the binders' annotations**; (b) leave it.
+  *Recommended: (a)*, no program of the corpora shows it yet.
+
+
+## As built: HF10-P43-P46 (2026-11-14, branch `hs-p43`, from `mac/hs-p40` c3ac830fa)
+
+The user's decisions of 2026-11-14: HF10-P43 (a), P44 (a), P45 (a). By an agent during the night's gate and its rerun (one run at a
+time, each process under 1.2 GiB; stage 0; no GHC, no gate run, no network; runs only while `df /` allowed them). Read from GHC
+9.14.1's source tarball (the corpus pin): `compiler/GHC/Tc/Gen/Match.hs` (tcLcStmt's TransStmt and ParStmt),
+`compiler/GHC/HsToCore/ListComp.hs` (dsTransStmt, mkUnzipBind, deListComp's ParStmt, mkZipBind), `compiler/GHC/Core/Make.hs`
+(mkBigCoreTup, mkChunkified), `compiler/GHC/Tc/Gen/Expr.hs` and `compiler/GHC/HsToCore/Expr.hs` (HsStatic, makeStatic),
+`compiler/GHC/Iface/Tidy/StaticPtrTable.hs` (sptCreateStaticBinds, mkStaticPtrFingerprint), `compiler/GHC/Tc/Solver/Dict.hs` and
+Note [Overview of implicit CallStacks] (isCallStackPred, EvCsPushCall, defaultCallStacks, pickQuantifiablePreds' "never infer a
+CallStack constraint"), `compiler/GHC/Tc/Instance/Class.hs` (matchWithDict), `compiler/GHC/Tc/TyCl.hs` (kcTyClGroup, the standalone
+kind signatures' kcCheckDeclHeader_sig); BSD-3-Clause, the notice already in the files and LICENSE.md. Everything is in `typecheck.ae`.
+
+**HF10-P43 (a): the next front-end gaps.**
+
+- **TransformListComp** (`trans-stmt`): `then f`, `then f by e`, `then group using f`, `then group by e using f` as tcLcStmt and
+  dsTransStmt make them: the inner qualifiers a comprehension of their binders' tuple (`stmts-binders`, collectLStmtsBinders' order;
+  `infer-listcomp` takes a continuation for qualifiers without a LastStmt), `f` typed in the outer scope at `((a -> t) ->) [a] -> [a]`
+  (`[[a]]` for a group) with `a` the tuple, applied to `\tuple -> e` and the inner list, a group's lists of tuples unzipped by
+  mkUnzipBind's `foldr` (strict on both tuples, as GHC's mkTupleCase), the result a generator rebinding the binders (a group's at
+  list types, fresh core binders) for the qualifiers after it. Big tuples are chunked as mkChunkified (64 a tuple).
+- **Implicit CallStack parameters of any name** (`callstack-ip`, `want-at!`, `default-ip`): an occurrence of a function whose context
+  has `?loc :: CallStack` pushes its call site onto `?loc`'s stack (EvCsPushCall, a new wanted of the same name), and any unsolved
+  IP of type CallStack defaults to the empty stack (defaultCallStacks); the generalization already never quantified it (no inner
+  metas). Constraint synonyms in a context are expanded (`ctx-preds`: `type C2 = (?x :: Int, ?y :: Int)`, a constraint tuple's
+  components, `() :: Constraint` none; HasCallStack and HasExceptionContext kept, the solver knows them), and a nullary class's
+  instance solves it (`class Trivial; instance Trivial`).
+- **StaticPointers** (`HsStatic`, `static-ptr!`): `static e` is `fromStaticPtr` (IsStatic p, Typeable t) of `StaticPtr k1 k2 info e`,
+  the key mkStaticPtrFingerprint's (MD5 of `"main:Main:N"`), the info `StaticPtrInfo unit module (line, col)` of the body; a body whose
+  free variables are top-level is bound at the top level (`$sptN`, the static pointer table's entry hsi enters, HES88), one that
+  mentions a local (CgStaticPointers' where-bound `g`, which GHC floats with it) built in place.
+
+**HF10-P44 (a): withDict's polytype argument.** The `(cls => r)` argument was given its context already (check-poly); what T16646
+lacked: an argument checked against a qualified type is checked after the others (`tc-app`: its givens' metas are the other
+arguments' types first, `withGift (\_ -> foo False) (23 :: Int) Proxy`), a type application on a lambda-bound binder of a rank-n
+type takes its quantifiers (`k @Any`), and a functional dependency improves a wanted from a given (`Reifies s a` given, `Reifies s ?b`
+wanted: `?b := a`).
+
+**HF10-P45 (a): kinds the inference reads.** The own classes' kinds (`*classes*`' `:kind`, from the superclasses and the methods'
+types, generalized and defaulted as the data types'; `tycon-kind` reads it: Quasi is `(Type -> Type) -> Constraint`, so Q is
+`Type -> Type`), a GADT constructor's binders' kind annotations (`:gadt :tv-anns`: `forall k (a :: k)`, so SomeKindedTypeRep is
+`Type -> Type`), and a standalone kind signature whose quantifiers all lead (`type TExp :: TYPE r -> Type`, a class's too: DataToTag,
+HasField, Unsatisfiable) the kind as written, not inferred. Code's signature has a forall to the right of an arrow
+(`(Type -> Type) -> forall r. TYPE r -> Type`): left to the inference (HF10-P47).
+
+**HF10-P46 (a), taken here: ParallelListComp in list comprehensions** (`par-stmt`): each block a comprehension of its binders' tuple
+typed in the scope before the qualifier, the blocks zipped (GHC.Internal.List's `zip`, nested to the right), a generator binding all
+of them.
+
+**HF10-P49 (a), taken here: monad comprehensions' transforms and parallel blocks** (`mc-trans-stmt`, `mc-par-stmt`, dsMcStmt's
+TransStmt and ParStmt): the inner statements a comprehension ending in `return` of their binders' tuple (`mc-inner`, a synthetic last
+statement where the binders and the by expression are typed), `using` at `((a -> t) ->) m a -> m a` (`m (m a)` for a group) bound
+by `>>=` to the new binders, a group's each `fmap` of its selector (mkMcUnzipM); parallel blocks `mzip`'ed to the right. Taken after
+the library round: neither extension occurs in ghc-internal, base, deepseq, array or stm, so the libraries' results stand.
+
+**The libraries again** (`.tmp/p40/chain-libs.sh`, as the gate's steps run them; one at a time):
+
+| step | result | before (hs-p40) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 3 better; facts 20,699 of 20,891 | same | 0.99 GB, 12m17 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | 5,734 of 7,789 equal, 0 worse, 33 better | same | 1.17 GB, 15m34 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.73 GB, 4m46 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.73 GB, 4m37 |
+| deepseq, array, stm (lib-check, lib-stg) | 0 worse each; facts 202/211, 388/388, 222/222; controls differ | as recorded (hs-p40's round 7) | 0.55-0.66 GB |
+
+**The programs** (the native front end on these libraries, hsi, each judged by its own verdict; `.tmp/p40/ps-run.sh`):
+
+| program | before | after |
+|---|---|---|
+| dsrun016-022, mc04 (TransStmt) | front end: `qualifier not handled: TransStmt` | 8 of 8 pass |
+| DsStaticPointers, CgStaticPointers, CgStaticPointersNoFullLazyness | front end: HsStatic | 3 of 3 pass (the table's lookups too) |
+| IPLocation, T10845, T10846 | front end: IP `loc` unsolved | 3 of 3; IPLocation's stdout is GHC 9.14.1's recorded run (SHA-256 5583120c..., 608 bytes: f0's empty line, the real lines; the shipped `.stdout` is older, `:expected :differs`) |
+| T14218, T23761 | front end: constraint synonyms, `Trivial` | pass |
+| T23761b | front end | still: `class c => IdCt c` (UndecidableSuperClasses, a variable superclass), HF10-P48 |
+| T16646 | front end: withDict | pass |
+| TypeOf, TypeRep (hs-p40: IO's lines, not rerun) | 26/27, 28 lines | pass |
+| TypeableEq, T14341 | pass | pass |
+| dsrun023, tcrun013 (ParStmt) | front end | pass (dsrun023: 100 binders, chunked tuples) |
+| mc01-03, mc05-08, mc17 (MonadComp's TransStmt, ParStmt) | front end | 8 of 8 pass (HF10-P49, after the after-count below) |
+| negative controls (a program's output against another's expected: dsrun016/dsrun017, dsrun019/dsrun020, DsStaticPointers/CgStaticPointers, T10846/T10845, T16646/T14218; DsStaticPointers' position shifted) | | differ, as they must |
+
+The front end over testsuite-core's eligible programs (`.tmp/p40/front-all.sh`, 26m14, 1.15 GB): **437 compile of 483** (hs-p40:
+391 of 465; unboxedsums/' 18 joined the plan), 41 type errors, the same 5 time out (dsrun011, T5913, TcCoercible, tcrun030,
+tcrun032, as before); no program that compiled before fails now; with HF10-P46's 2 and P49's 8 built after it (each compiled and passing alone), 447. The next gaps by count:
+superclass dictionaries (T21973b, T3731-short, T5751, tcrun033: 4), type-level naturals' and symbols'
+Known* on metas (2), OrPat, NPlusKPat, RecStmt, mdo, InvisPat (1 each).
+
+### Checks
+
+| check | result |
+|---|---|
+| the libraries (the table) | exit 0 each, 0 worse; controls differ as they must |
+| the programs above | as the table says |
+| `bin/hsi own-verdicts --record` | 40 pending tests (unboxedsums/' 19 added), 10 threaded-only |
+| `bin/hsi check --libs own --corpus testsuite-core --only` the 32 programs above with arr001/arr002 (the control) | exit 0; 34 pass (31 own, 3 pack: T23761b, arr001, arr002); 0 unclassed; arr001's control fails as it must; `own-fallback.txt`'s T14341 and TypeableEq lines removed (hs-p40's night command 3: they pass on the own path), own-fallback 0 problems; 0.86 GB, 50 s |
+| `bin/hsi check --libs own --corpus samples,synthetic` (`HSI_OWN_PACKAGES=deepseq,array,stm`) | exit 0; 50 own of 63, 60 pass, the 3 others in their classes, as hs-p37; 0 unclassed; controls fail as they must; 1.08 GB, 2m45 |
+| hsi-essential's command (`ARBACE_MEM_GIB=2`, 2 jobs) | exit 0: own-verdicts current (40 pending); 123 programs, 122 pass, ffi014 `:threaded-way`; 0 unclassed; controls fail as they must |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51 at both levels, controls differ; 0.58 GB, 3m07 |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as `mac/hs-p40`): the changed paths are `arbace/repr/haskell/typecheck.ae`, `test/haskell/own-verdicts-pending.tsv` and `test/haskell/own-fallback.txt` |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged |
+
+### Proposals
+
+- **HF10-P46 ParallelListComp** (a new decision on the way, taken): (a) **port deListComp's ParStmt (zip of the blocks' tuples)**;
+  (b) leave dsrun023 and tcrun013 on the pack. *Recommended and taken: (a)*.
+- **HF10-P47 a standalone kind signature with a forall to the right** (Code :: (Type -> Type) -> forall r. TYPE r -> Type). The
+  elaborator's kinds and the own interfaces' kind placeholders count a tycon's invisible arguments as its leading foralls; Code's
+  r sits between m and a (GHC's tyConBinders m, r, a: `:arity 3`), so the signature is not read and the inference gives
+  `forall k0. (Type -> Type) -> k0 -> Type`. (a) count invisible binders anywhere in the kind (the placeholders at their positions in
+  every application, the readers' kind arity by position); (b) leave Code's kind inferred until a program needs it (no program of the
+  corpora takes Typeable of Code; its interface fact differs from GHC's as before). *Recommended: (b)*, taken: it moves every reader
+  of the own interfaces for one tycon.
+- **HF10-P48 a class whose superclass is its parameter** (T23761b: UndecidableSuperClasses' `class c => IdCt c; instance c => IdCt
+  c`, `type IPInt = IdCt (?ipInt :: Int)`): a given IdCt (?ipInt :: Int) gives ?ipInt through its superclass, a variable constraint
+  instantiated. (a) **the superclass closure takes a :cvar superclass at the class's argument (the given's dictionary's selector)**;
+  (b) leave T23761b on the pack. *Recommended: (a)*, next round (not built here).
+- **HF10-P49 monad comprehensions' transforms and parallel blocks** (a new decision on the way, taken): (a) **port dsMcStmt's
+  TransStmt and ParStmt**; (b) leave mc01-08 and mc17 on the pack. *Recommended and taken: (a)*.
+- **HF10-P50 the next gaps** (by count over the 483: superclass dictionaries of a derived or instance's own class 4, Known* on metas
+  2, OrPat, NPlusKPat, RecStmt, mdo, InvisPat 1 each): (a) **port them in that order**; (b) leave them on the pack. *Recommended: (a)*.
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night), GHC's runs of unboxedsums/, patsyn/
+and generics/ (the oracle window: hs-p40's night command 2).
+
+
+## Decided (the user, 2026-11-14, round 34: HF10-P48, HF10-P50)
+
+HF10-P48 (a): the superclass closure takes a variable superclass (T23761b). HF10-P50 (a): the next gaps in order, superclass
+dictionaries (4), Known* constraints on metas (2), then OrPat, NPlusKPat, RecStmt, mdo, InvisPat, each from GHC 9.14.1's source with
+a probe and a negative control, the libraries 0 worse, the programs judged by their own verdicts. New decisions: proposals with
+options and a recommendation, the recommended one taken.
+
+## As built: HF10-P48, P50 (2026-11-14, branch `hs-p48`, from `mac/hs-p43` 828b14b58)
+
+By an agent during the night gate's rerun (one run at a time, each process under 1.3 GiB; stage 0; no GHC, no gate run, no
+network; the libraries' runs only while `df /` allowed them). Read from GHC 9.14.1's source tarball (the corpus pin):
+`compiler/GHC/Tc/Solver/Dict.hs` (prohibitedSuperClassSolve, Note [Solving superclass constraints], the solved dictionaries of
+Note [Recursive instances and superclasses]), `compiler/GHC/Tc/Solver/InertSet.hs` (updInertDicts, Note [Shadowing of implicit
+parameters]), `compiler/GHC/Builtin/Types.hs` (mkConstraintTupleTyCon: the constraint tuples' data constructor named as the class,
+superclass selectors from 0), `compiler/GHC/Builtin/Types/Literals.hs` (interactTopAdd, interactTopSub, interactTopMul,
+interactTopExp, interactTopAppendSymbol), `compiler/GHC/Tc/Deriv.hs` (deriveTyData: the class's last parameter's kind drops the
+type's arguments), `compiler/GHC/Tc/Gen/Pat.hs` (OrPat, NPlusKPat with instStupidTheta's Integral, InvisPat),
+`compiler/GHC/HsToCore/Match.hs` (matchNPlusK, the or-patterns' alternatives in order), `compiler/GHC/Rename/Expr.hs`
+(rnRecStmtsAndThen, the mdo segments and glomSegments), `compiler/GHC/HsToCore/Expr.hs` (dsDo's RecStmt: mfix of a lazy tuple),
+`compiler/GHC/Tc/Gen/Match.hs` (tcMatchPats' InvisPat), `compiler/GHC/Tc/Gen/App.hs` (tcInstFun); BSD-3-Clause, the notice already
+in the files and LICENSE.md.
+
+**HF10-P48 (a): a variable superclass** (`typecheck.ae`, `tostg.ae`). A class's superclass that is a type variable (`class c => IdCt
+c`; the constraint tuples' `class (c1, c2) => CTuple2 c1 c2`) is `[:cvar [t]]`, a field of the dictionary; the superclass closure of a
+given `IdCt (?ipInt :: Int)` gives `?ipInt :: Int` (its selector), a variable constraint is solved from a given of its own (the
+instance `c => IdCt c`'s superclass), and the IPs a polytype argument's givens give through their superclasses are the innermost
+(check-poly), so a wanted that mentions an implicit parameter a `let ?x` binds is solved there, from the binding and the instances,
+the binding shadowing the enclosing givens (Note [Shadowing of implicit parameters]: T23761b's 7, not 3). A newtype class's
+dictionary constructor on an atom is the atom (`C:IP x`), also at the top level and when the program loaded no interface of IP. The
+constraint tuples now have their GHC superclass fields: their selectors count from 0 (`$p0CTuple2`) and their dictionary
+constructors are named as GHC's wired-in ones (`CTuple2`, `CSolo`), so GHC.Internal.Classes' 2,079 selectors meet GHC's.
+
+**HF10-P50 (a): the next gaps** (`typecheck.ae`; `rename.ae` for n+k, rec and `@a`; `desugar.ae` for views):
+
+- **Superclass dictionaries** (T21973b, T3731-short, T5751, tcrun033): an instance's head may match a skolem (only an instance
+  whose head is a variable there matches it, after the givens: `instance Eq c => ClassLedger c`, `ClassA a String`); a predicate
+  met again while its instance is solved is the dictionary being made, a `letrec` around it (T3731-short's Data Expression needing
+  Data [Expression] needing Data Expression); an instance's superclass is not solved through its own head met again among its
+  context's superclasses (prohibitedSuperClassSolve: T21973b's `Def (D c)` by `Def (D a)`'s instance, not by `ClassLedger c`'s
+  superclass `ClassDecode (D c)`, the dictionary being defined, which looped at run time); a signature's givens' superclass
+  equalities are given (ClassDecode a's `Share a ~ a`), a given equality on a stuck family application rewrites it; a deriving
+  clause of an own class of type constructors (T5751's MonadIO, its kind HF10-P45's) drops the type's last parameter.
+- **Known\* on metas** (TcTypeNatSimpleRun, TcTypeSymbolSimpleRun): the builtin families' top-level interactions on the deferred
+  equalities (`x + y ~ 5` with `y ~ 3`, `x + y ~ 0`, `x * y ~ 1`, `x ^ y ~ z` by exact root or logarithm, `AppendSymbol x y ~ z` by
+  prefix or suffix), also before a binding is generalized (a let pattern binding's metas fixed first, as GHC's eager interactions).
+- **OrPat** (Or5): the alternatives at the scrutinee's type, matched as the view pattern `((\x -> case x of p1 -> True; ...; _ ->
+  False) -> True)`, left to right. On the way, two bugs of view patterns: the view expression was not desugared (a lambda's case
+  was left a `match`, compiled as a literal) and did not see the earlier arguments' binders (`f3 a ((== a) -> True)`).
+- **NPlusKPat** (dsrun004): renamed (n bound, fromInteger, `>=`, `-`), typed with Integral as instStupidTheta, matched as
+  `((\x -> (x >= k, x - k)) -> (True, n))`.
+- **RecStmt and mdo** (T5742, T24411): `rec` renamed with its binders over its statements, desugared as dsDo's `tuple <- mfix (\
+  ~tuple -> do { stmts; return tuple })` (the tuple every binder, chunked by 64), mdo's statements segmented into minimal
+  recursive intervals (a statement using a binder of itself or a later one), each a rec.
+- **InvisPat** (T17594e): `\ @a x -> ...` checked against a polytype binds `a` to the next quantifier's skolem; on the way, an
+  application of a rank-n binder (`f :: forall a. (Num a, Bounded a) => a -> a` applied in `higherRank`) instantiates it with its
+  constraints' evidence applied (split-fun's instantiation dropped it: the dictionaries were missing).
+
+**The libraries again** (`.tmp/p40/chain-libs.sh`, as the gate's steps run them, one at a time, each on the pools made before it;
+the final code's run, the third: the first was stopped when the constraint tuples' numbering was found, the second by `df /` at 86%):
+
+| step | result | before (hs-p43) | peak, time |
+|---|---|---|---|
+| lib-check `--ifaces own` (ghc-internal) | 0 worse, 3 better; facts 20,699 of 20,891 | same | 1.13 GB, 15m52 |
+| lib-stg `--ifaces own --judge` (ghc-internal) | **7,961 of 9,931** bindings equal, 0 worse, 36 better (GHC.Internal.Classes 96 → 2,302 of 2,315: the constraint tuples' selectors and dictionary functions; TypeNats 5 → 14, TypeLits 14 → 30, TH.Syntax 422 → 476, Data.Data 66 → 72, ...) | 5,734 of 7,789, 33 better | 1.20 GB, 17m24 |
+| lib-check `--package base` | 0 worse, 1 better; facts 6,784 of 6,785 | same | 0.73 GB, 5m17 |
+| lib-stg `--package base --judge` | 582 of 1,072 equal, 0 worse, 10 better | same | 0.74 GB, 4m47 |
+| deepseq, array, stm (lib-check, lib-stg) | 0 worse each; facts 202/211, 388/388, 222/222; controls differ | same | 0.56-0.68 GB |
+
+(GHC.Internal.Classes' 2,315 compared bindings were 173: its constraint tuples had no superclass fields, so GHC's 2,080 selectors
+`$p0CTuple2` .. `$p63CTuple64` and `$p0CSolo` were GHC's only; with the fields they were compared and differed by GHC's numbering
+from 0 and its constructor names, then equal.)
+
+**The programs** (the native front end over testsuite-core's 506 eligible programs on the final libraries, `.tmp/p40/front-all.sh`,
+before on hs-p43's code and libraries, after on this branch's; deepseq, array and stm own too, so 23 more are eligible than hs-p43's
+483):
+
+| | before (hs-p43's code) | after |
+|---|---|---|
+| compile (of 501; the same 5 time out) | 469 | **483** |
+| type errors | 32 | 18 |
+| newly compiling | | Or5, T5742, dsrun004, T17594e, T21973b, T23761b, T24411, T3731-short, T5751, TcTypeNatSimpleRun, TcTypeSymbolSimpleRun, tcrun033, and on the way throwto002 and T3500a |
+| compiled before, failing now | | none |
+
+`bin/hsi check --libs own --corpus testsuite-core --only` the 14 with hs-p43's 33 (arr001/arr002 the control): **47 of 47 pass on
+the own libraries**, 0 unclassed; arr001's control fails as it must (1m41, 0.88 GB). The probes (`.tmp/p48/t`, through
+`.tmp/p40/ps-run.sh`, each judged by its own expected output): a variable superclass (`Id (Show a)`), a recursive dictionary (`C T`
+needing `C [T]`), an own constructor class derived through GND, `x + y ~ 10` and `x + y ~ 0` in a let pattern, or-patterns (a
+Maybe, polymorphic literals, list patterns with a guard, a view pattern on an earlier argument, nested or-patterns), a lambda view
+pattern, n+k, `rec` with a let, mdo, `\ @b (x :: b)`: 15 of 15 pass; six negative controls (a probe's output against another's
+expected) differ, as they must.
+
+The next gaps by the first error over the 18: a class constraint left unsolved where an instance head holds a functional
+dependency or a type family (T17104's F, T5759's Container, tcrun028's ConcatPS, tcrun031's C, testeq2's TypeCast: 5), OverloadedStrings in patterns and view patterns (T3126, T3382: `IsString`'s literal patterns, 2), ConstraintKinds' `a =>`
+GADT contexts (tcrun046), Read of a skolem's list (tcrun039), Show of the sized primitive types (ShowPrim), ByteArray's IsList
+(Monoid_ByteArray), a rank-n field (tcrun043, tcrun041), DsPostfixOperators, dsrun015, T15598, T3500b, tcrun034 (1 each).
+
+### Checks
+
+| check | result |
+|---|---|
+| the libraries (the table) | exit 0 each, 0 worse; controls differ as they must |
+| the front end over the 506 (the table) | 483 of 501 compile (469 before), none lost; 33m36, 1.13 GB |
+| `bin/hsi own-verdicts --record` | unchanged: 587 of 908 by their own verdict, 40 pending, 10 threaded-only |
+| `bin/hsi check --libs own --corpus testsuite-core --only` (47 programs) | exit 0; 47 of 47 pass on the own libraries; arr001's control fails as it must |
+| the probes and their controls | 15 of 15 pass; 6 controls differ |
+| `bin/hsi check --libs own --corpus samples,synthetic` (own deepseq, array, stm) | exit 0; 50 own of 63, 62 pass, AsyncRerun in `:async-revert`; 0 unclassed; controls fail as they must; 4m04, peak 7.0 GB (run without `ARBACE_MEM_GIB=2`: a rule slip) |
+| hsi-essential's command (`ARBACE_MEM_GIB=2`, 2 jobs) | exit 0: own-verdicts current; 123 programs, 122 pass, 1 in its class; 0 unclassed; controls fail as they must; 24m15, 0.85 GB |
+| haskell-read-essential's command | exit 0: `repr-haskell test` ok, the round trip 51 of 51, 7 controls differ; 3m34, 0.58 GB |
+| `bin/reap` | 49 of 52 cells checked, 0 problems |
+| `bin/crops-score --record`, `--judge --strict` | exit 0; scores unchanged (no record moved) |
+| `bash test/gate/gate-key-crops-test.bash`; `bin/arbace-go --gate-key` | PASS; 314c8e5b04ab... (unmoved, as hs-p43): the changed paths are `arbace/repr/haskell/` alone |
+
+Not run: testsuite-core's whole own run and `hsi-check-aot` (the gate's heavy steps, at night), GHC's runs of unboxedsums/, patsyn/
+and generics/ (the oracle window), the libraries' records (`lib-stg --record`: 36 modules better in ghc-internal, 10 in base, by
+hand at the next window: `bin/repr-haskell lib-stg --ifaces own --record test/haskell/lib-stg-own-results.edn` and base's).
+
+### Proposals
+
+- **HF10-P51 or-patterns and n+k as view patterns** (taken: the recommendation). GHC's match compiler groups them (PgOr's
+  alternatives sharing one right-hand side, matchNPlusK's `>=` then `-`); here each is a view pattern of a lambda, the same
+  behaviour, other STG. No library uses either. (a) port the groups into `desugar.ae`'s match; (b) keep the view encoding until a
+  library needs GHC's STG. *Recommended and taken: (b)*.
+- **HF10-P52 rec's tuple** (taken). GHC's dsDo tuples `rec_ids ++ later_ids` (the renamer's segment analysis); here every binder of
+  the rec. (a) compute GHC's sets; (b) keep every binder. *Recommended and taken: (b)*: the same behaviour, no library uses rec.
+- **HF10-P53 a skolem against a variable-headed instance** (taken). The instance matching now takes a skolem first argument when
+  no given matches; kinds are erased, so a poly-kinded class's `instance KnownSymbol a => SingI a` would match a skolem of another
+  kind with no given (no program or library showed it: 0 worse). (a) check the instance head's kind when the class is
+  poly-kinded; (b) leave it until a program shows it. *Recommended and taken: (b)*.
+- **HF10-P54 the next gaps** (the 18 above: constraints with fundeps or families in instance heads 5, OverloadedStrings' pattern
+  literals 2, then one each): (a) **port them in that order**, as P50; (b) leave them on the pack. *Recommended: (a)*, next round.

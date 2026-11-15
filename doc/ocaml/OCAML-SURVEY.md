@@ -3691,6 +3691,21 @@ test/ocaml/oc216-suite-compiled.txt` (the lists now with the signal and socket p
 `--record`ed with the same lists, recvfrom_unix's and recvfrom_linux's entries out of aot-compiled-known.edn when they pass (and the
 `:unix-java` class of the compiled levels then empty), a failure's class the day after.
 
+## As built: review 1111's finding 1, oi's `:init-order` again (2026-11-11, branch `review-fix-1`, from mac/next a7916bb2a)
+
+The independent review of 2026-11-11 (`.tmp/reviews/1111/REVIEW-hs-rust-ml-scm-llvm.md`, finding 1): next's merge of oi-table2 took
+OC216's `:init-order` line (b45b8aa4f) and moved only `finObjs`; OC216 had put `stackWordsMode` and `DepthLimit` at positions 3 and 4.
+goi's checker (`arbace/go/check/decl.ae`'s init-order, go/types' rule) orders `stackWordsMode` (`ext_domain.ae`, no package variable
+read) by declaration order after `blake2Sigma`, and `DepthLimit` (`apply.ae`, which depends on it since OC216) right after it, so
+the line is `... blake2IV blake2Sigma stackWordsMode DepthLimit finObjs dummyBuff ...`. The same check found 12 more errors from
+OC216 in `go/arbace/oi`: the six `weak.Make` and five `runtime.AddCleanup` calls of `ext_sys.ae` without their implicit
+instantiation (`:inst [Block]` ... `[Custom]`, `[T (* weakRef)]`) and `marshal.ae`'s `codePap` without `:val 0`; annotations only, the
+Go printed is the same. Proof (`bin/oi table-check` is embed-gaps' verb, not on next: its check run as `test/python/table_check.ae`
+over `arbace/oi` alone through a scratch wrapper that takes `arbace/oi` as a program package, as embed-gaps' `table.ae` does; stage 0,
+0.7 GB, 1 minute a configuration): with the line fixed, the 12 (tamago/amd64); with the annotations fixed and next's line, 1, the
+`:init-order` (tamago/amd64); with both, none in tamago/amd64 and tamago/arm64 (42 files each).
+oi-essential's command (`bin/oi test`, `repl-check --native`, `check --only-list test/ocaml/essential-check.txt`, `own-verdicts --check`) passes on the branch (59 of 59 on both paths, the controls as they must; 50 min beside other runs, 1.1 GB).
+
 ## As built: night 12's strings.ml, a character above U+FFFF taken for a byte mark (2026-11-12, branch `gf-misc`, from `next` `bd6ab3ddd`)
 
 Night 12's `--full` (`ocaml-roundtrip.testsuite`) found testsuite/tests/tool-toplevel/strings.ml's fourth string constant read back

@@ -47,7 +47,14 @@
 #                   installation's (test/haskell/target/installation.edn); GHC's interface of a module the judge's when the
 #                   pack haskell-ifaces-ghc-9.14.1 holds it (113 of base's 241), else none; the control
 #                   test/haskell/lib-check-controls-base.tsv
-#   --package PKG   ghc-internal (default) or base (each base module with Prelude among its imports)
+#                   HF10-P30 (a), P17 (doc/haskell/FRONTEND-SURVEY.md, "As built: P17 (first slice)"): any installation unit above
+#                   base the same way: its dependencies, transitively, from the pinned tarball's .cabal files (arbace.repr.haskell.target
+#                   deps), each one that exposes modules by its own pool (LIB_CHECK_DEP_POOL_TAR=TAR:TAR..., each DEP-pool.tar, or
+#                   .tmp's lib-check/own/DEP/pool), every dependency's reexported modules from its .cabal, Prelude in every closure;
+#                   the dumps' source directory the package's (src/, or its root: deepseq, array, stm); the control
+#                   test/haskell/lib-check-controls-PKG.tsv
+#   --package PKG   ghc-internal (default), base (each base module with Prelude among its imports), or with --ifaces own another
+#                   installation unit (P17: deepseq, array, stm, in dependency order)
 #   --every N       every Nth module of the package (a sample), in file order
 #   --only FILE     the modules FILE names (GHC/Internal/X paths, one a line)
 #   --jobs N        the elaborator's processes (default 1, each under about 1.5 GiB)
@@ -105,12 +112,17 @@ if [ ! -d "$w/nd/src" ] || [ "$(cat "$w/nd.bignum" 2>"$TMPDIR/lib-check-bignum.e
   rm -rf "$w/nd"; cp -r "$nd" "$w/nd"; echo "$bignum" > "$w/nd.bignum"
 fi
 nd=$w/nd
+# P17: the dumps' tree is the package's: its library's source directory (hs-source-dirs) src/ for ghc-internal and base, the
+# package's root for deepseq, array, stm (the modules' directories at the top: a capital first letter); one directory else
+sd=$(cd "$nd" && find . -mindepth 1 -maxdepth 1 -type d -name '[a-z]*' | sed 's|^\./||' | sort)
+case $sd in '') sd=. ;; *$'\n'*) echo "lib-check: $pkg's dumps have more than one source directory ($(echo $sd)): not taken yet" >&2; exit 2 ;; esac
+sdp=$nd/$sd
 # MonadFail's interface too: a failable do pattern's fail is GHC's to find (GHC.Tc.Gen.Match's tcMonadFailOp), not an import
 extra=GHC.Internal.Control.Monad.Fail; [ "$pkg" = base ] && extra="Prelude $extra"
 partial=""
 if [ -n "$only" ]; then cp "$only" "$w/files.txt"; partial=1
 else
-  (cd "$nd" && find src -name '*.edn' ! -name '*.hs-boot.edn' | sed 's|^src/||; s|\.hsc\.edn$||; s|\.hs\.edn$||' | sort) |
+  (cd "$sdp" && find . -name '*.edn' ! -name '*.hs-boot.edn' | sed 's|^\./||; s|\.hsc\.edn$||; s|\.hs\.edn$||' | sort) |
     awk -v n="$every" 'NR % n == 1 || n == 1' > "$w/files.txt"
   [ "$every" = 1 ] || partial=1
 fi
@@ -136,7 +148,7 @@ if [ -n "$live" ]; then
     [ -s "$cl/$m.txt" ] && continue
     t=$(mktemp -d "$TMPDIR/lib-check.XXXXXX")
     # every (mod "M") of the dump: its imports ({-# SOURCE #-} ones too) and its header's
-    imps=$(cat "$nd/src/$f.hs.edn" "$nd/src/$f.hsc.edn" 2>> "$t/err" | grep -a -o '(mod "[A-Za-z0-9_.]*")' | grep -o '"[^"]*"' | tr -d '"' | sort -u | grep -v -x "$m" | tr '\n' ' ' || true)
+    imps=$(cat "$sdp/$f.hs.edn" "$sdp/$f.hsc.edn" 2>> "$t/err" | grep -a -o '(mod "[A-Za-z0-9_.]*")' | grep -o '"[^"]*"' | tr -d '"' | sort -u | grep -v -x "$m" | tr '\n' ' ' || true)
     # shellcheck disable=SC2086
     run_helper -o "$t/if" --ghc -XGHC2021 -package ghc-internal --files $extra $imps > "$t/log" 2>&1 || true
     run_helper -o "$t/own" --ghc -XGHC2021 -package ghc-internal --files "$m" >> "$t/log" 2>&1 || true
@@ -242,7 +254,7 @@ if [ -n "${above:-}" ]; then
 fi
 while read -r f; do
   m=$(echo "$f" | tr / .)
-  d=$nd/src/$f.hs.edn; [ -f "$d" ] || d=$nd/src/$f.hsc.edn
+  d=$sdp/$f.hs.edn; [ -f "$d" ] || d=$sdp/$f.hsc.edn
   if [ -n "${above:-}" ]; then
     mkdir -p "$w/ln/$m"; g=-; [ -n "$gif" ] && [ -f "$gif/$m.iface.edn" ] && g=$gif/$m.iface.edn
     printf '%s\t%s\t%s\t%s\n' "$m" "$d" "$w/ln/$m" "$g" >> "$plan"; continue
@@ -263,19 +275,40 @@ if [ "$ifaces" = own ]; then
     # the installation's unit id (test/haskell/target/installation.edn; ghc-internal's is wired in): Typeable's module records
     unit=$(sed -n "s/^ *\"$pkg\" {:id \"\([^\"]*\)\".*/\1/p" "$root/test/haskell/target/installation.edn" | head -1)
     [ -n "$unit" ] || { echo "lib-check: no unit id of $pkg in test/haskell/target/installation.edn" >&2; exit 1; }
-    deps=${LIB_CHECK_DEP_POOLS:-$root/.tmp/repr-haskell/lib-check/own/ghc-internal/pool}
-    # HF10-P15 (a): ghc-internal's pool from the gate's producer (haskell-lib-check-own's output, GATE_OUTS): unpacked here
+    # HF10-P30 (a), P17: the packages below, transitively, in dependency order (their .cabal files' library build-depends, as the
+    # installation's records name them: arbace.repr.haskell.target deps), from the pinned tarball's tree
+    src=$root/.tmp/repr-haskell/corpus/ghc-9.14.1
+    arbace_tool -m arbace.repr.haskell.target deps "$pkg" --src "$src" > "$ow/deps.tsv" 2> "$ow/deps.err" ||
+      { grep -v '^Reflection warning' "$ow/deps.err" >&2; echo "lib-check: no dependencies of $pkg (bin/repr-haskell corpus fetch)" >&2; exit 2; }
+    # the own pools of the dependencies that expose modules: LIB_CHECK_DEP_POOL_TAR=TAR[:TAR...] (the gate's producers' outputs,
+    # GATE_OUTS, each DEP-pool.tar: HF10-P15 (a)'s for ghc-internal, a package's lib-check LIB_CHECK_POOL_OUT), else
+    # LIB_CHECK_DEP_POOLS=DIR,... (taken as given), else each dependency's lib-check --ifaces own pool in .tmp
+    declare -A dpool=()
     if [ -n "${LIB_CHECK_DEP_POOL_TAR:-}" ]; then
-      [ -f "$LIB_CHECK_DEP_POOL_TAR" ] || { echo "lib-check: no $LIB_CHECK_DEP_POOL_TAR (the producer's own pool)" >&2; exit 1; }
       dd=$root/.tmp/repr-haskell/lib-check/own/$pkg-deps; rm -rf "$dd"; mkdir -p "$dd"
-      tar -C "$dd" -xf "$LIB_CHECK_DEP_POOL_TAR"; deps=$dd/pool
+      IFS=: read -r -a dts <<< "$LIB_CHECK_DEP_POOL_TAR"
+      for t in "${dts[@]}"; do
+        [ -f "$t" ] || { echo "lib-check: no $t (a producer's own pool, LIB_CHECK_DEP_POOL_TAR)" >&2; exit 1; }
+        q=$(basename "$t"); q=${q%-pool.tar}
+        [ "$q" != "$(basename "$t")" ] || { echo "lib-check: $t: LIB_CHECK_DEP_POOL_TAR names PKG-pool.tar files (LIB_CHECK_POOL_OUT's)" >&2; exit 2; }
+        mkdir -p "$dd/$q"; tar -C "$dd/$q" -xf "$t"; dpool[$q]=$dd/$q/pool
+      done
     fi
-    for x in ${deps//,/ }; do [ -f "$x/GHC.Internal.Base.iface.edn" ] || { echo "lib-check --package $pkg --ifaces own: no own pool $x (bin/repr-haskell lib-check --ifaces own first)" >&2; exit 1; }; done
-    # the reexported modules of the packages it depends on (ghc-prim's GHC.Prim, GHC.Types ...: their .cabal files, the
-    # pinned tarball's, as the installation's database lists them)
-    src=$root/.tmp/repr-haskell/corpus/ghc-9.14.1/libraries
-    # (base depends on ghc-internal and ghc-prim alone)
-    cabals=""; for q in ghc-prim; do [ "$q" = "$pkg" ] && continue; [ -f "$src/$q/$q.cabal" ] || { echo "lib-check: $src/$q/$q.cabal is missing (base's reexported modules come from it; bin/repr-haskell corpus fetch)" >&2; exit 2; }; cabals="$cabals${cabals:+,}$src/$q/$q.cabal"; done
+    deps="" cabals="" dnames=""
+    [ -z "${LIB_CHECK_DEP_POOLS:-}" ] || deps=$LIB_CHECK_DEP_POOLS
+    while IFS=$'\t' read -r q cf nm; do
+      [ -n "$q" ] || continue
+      # the reexported modules of every package below (ghc-prim's GHC.Prim, GHC.Types ...; template-haskell's later): its .cabal
+      [ "$cf" = - ] || cabals="$cabals${cabals:+,}$cf"
+      dnames="$dnames${dnames:+, }$q"
+      [ "$nm" -gt 0 ] && [ -z "${LIB_CHECK_DEP_POOLS:-}" ] || continue
+      x=${dpool[$q]:-}; [ -n "$x" ] || [ -n "${LIB_CHECK_DEP_POOL_TAR:-}" ] || x=$root/.tmp/repr-haskell/lib-check/own/$q/pool
+      [ -n "$x" ] && [ -n "$(ls "$x" 2> "$ow/deps.ls")" ] ||
+        { echo "lib-check --package $pkg --ifaces own: no own pool of $q (bin/repr-haskell lib-check --package $q --ifaces own first; in the gate its $q-pool.tar in LIB_CHECK_DEP_POOL_TAR)" >&2; exit 1; }
+      [ "$q" != ghc-internal ] || [ -f "$x/GHC.Internal.Base.iface.edn" ] || { echo "lib-check --package $pkg --ifaces own: $x is no ghc-internal pool (bin/repr-haskell lib-check --ifaces own first)" >&2; exit 1; }
+      deps="$deps${deps:+,}$x" pnames="${pnames:-}${pnames:+, }$q"
+    done < "$ow/deps.tsv"
+    echo "== lib-check --package $pkg --ifaces own: on the own pools of ${pnames:-LIB_CHECK_DEP_POOLS} (the packages below: $dnames)" >&2
   fi
   [ -z "$partial" ] || { echo "lib-check: --ifaces own compiles the whole package in dependency order (no --only, --every)" >&2; exit 2; }
   # HF10-P18 (a): GHC.Internal.Prim, the wired-in interface every closure reads, built by Arbace from the pinned tarball's
@@ -293,7 +326,7 @@ if [ "$ifaces" = own ]; then
   fi
   arbace_tool -m arbace.repr.haskell.libcheck own-order "$plan" > "$ow/order.txt"
   [ -z "${LIB_CHECK_OWN_ONLY:-}" ] || { head -n "$LIB_CHECK_OWN_ONLY" "$ow/order.txt" > "$ow/order.cut"; mv "$ow/order.cut" "$ow/order.txt"; }
-  rm -rf "$ow/pool" "$ow/boot" "$ow/ln" "$ow/work"
+  rm -rf "$ow/pool" "$ow/boot" "$ow/ln" "$ow/work" "$ow/reexports.edn"
   # HF10-P12 (a): a module that defines default methods goes through the -O0 Simplifier, which reads the other modules'
   # constructors from the libraries' STG as lib-stg does (HSI_LIBS, else the pack haskell-stg-libs: bin/hsi libs-pack -O2)
   if [ -n "${HSI_LIBS:-}" ]; then olibs=$HSI_LIBS
@@ -316,7 +349,7 @@ if [ "$ifaces" = own ]; then
   arbace_tool -m arbace.repr.haskell.libcheck rank-own "$ow/results.edn" | tee -a "$ow/rank.txt"
   if [ -n "$record" ]; then
     arbace_tool -m arbace.repr.haskell.libcheck record "$ow/modules.edn" "$record" "$([ -n "$partial" ] && echo partial || echo whole)" \
-      "$(if [ -n "${above:-}" ]; then echo "the front end's own, bottom-up on ghc-internal's own pool (--package $pkg --ifaces own; the judge's: the pack $(oracle_pin_name "$gpin") at $(oracle_pin_sha "$gpin"), the modules it holds)"
+      "$(if [ -n "${above:-}" ]; then echo "the front end's own, bottom-up on the own pools below it (--package $pkg --ifaces own: $dnames; the judge's: the pack $(oracle_pin_name "$gpin") at $(oracle_pin_sha "$gpin"), the modules it holds)"
          else echo "the front end's own, bottom-up (--ifaces own; the judge's: the pack $(oracle_pin_name "$pin") at $(oracle_pin_sha "$pin"))"; fi)"
   fi
   st=0
@@ -376,7 +409,7 @@ if [ -n "$judge" ]; then
   # the judge must find it unequal
   while IFS=$'\t' read -r subj other; do
     case $subj in ''|'#'*) continue ;; esac
-    f=$(echo "$subj" | tr . /); d=$nd/src/$f.hs.edn; [ -f "$d" ] || d=$nd/src/$f.hsc.edn
+    f=$(echo "$subj" | tr . /); d=$sdp/$f.hs.edn; [ -f "$d" ] || d=$sdp/$f.hsc.edn
     [ -f "$pool/$other.iface.edn" ] && [ -f "$d" ] || { echo "lib-check: control $subj/$other: no dump or interface" >&2; st=1; continue; }
     c=$w/control; rm -rf "$c"; mkdir -p "$c"
     sed "s/\"$other\"/\"$subj\"/g" "$pool/$other.iface.edn" > "$c/ref.iface.edn"

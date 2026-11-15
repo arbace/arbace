@@ -106,6 +106,11 @@
         local (str w "/ifl")
         [dirs files] (closure-files ifdir)]
     (.mkdirs (File. ^String w))
+    ;; P17: an own closure (@OUT/ln/M.txt) of a package above base: the packages' reexported modules lib-check --ifaces own
+    ;; wrote (OUT/reexports.edn), for the renamer and the elaborator as lib-check's own run had them
+    (when (str/starts-with? ifdir "@")
+      (let [rx (File. (.getParentFile (.getParentFile (File. ^String (subs ifdir 1)))) "reexports.edn")]
+        (when (.isFile rx) (.mkdirs (File. ^String local)) (spit (str local "/reexports.edn") (slurp rx)))))
     (let [rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*iface-files* files rn/*projection?* false]
                     (rn/rename-file dump nil local))
                   (catch Throwable e {:fail (msg e)}))]
@@ -293,7 +298,10 @@
         ;; own-order's) over the names each interface found mentions, to a fixed point
         members (if (empty? dep-pools)
                   members0
-                  (grow-closure (map #(get aliases % %) (concat members0 (map first (imports-of dump)) ["GHC.Internal.Control.Monad.Fail"]))
+                  (grow-closure (map #(get aliases % %) (concat members0 (map first (imports-of dump)) ["GHC.Internal.Control.Monad.Fail"]
+                                                                ;; P17: a package above base imports Prelude implicitly (the dump
+                                                                ;; does not name it; the renamer adds it): base's pool's
+                                                                (when (some #(.isFile (File. (str % "/Prelude.iface.edn"))) dep-pools) ["Prelude"])))
                                 (fn [x] (second (src x))) nm))
         got (for [x members :when (not= x nm)] [x (src x)])
         files (into {} (for [[x [_ p]] got :when p] [x (.getCanonicalPath (File. ^String p))]))
@@ -307,7 +315,11 @@
                  :missing (vec (sort (keep (fn [[x [k]]] (when (and (= k :missing) (not (contains? units x))) x)) got)))}
         base {:name nm :kind (keyword kind) :closure closure}
         ;; the packages' reexported modules, as the installation's database names them, for the renamer
-        _ (when (seq aliases) (spit (str local "/reexports.edn") (pr-str aliases)))
+        _ (when (seq aliases)
+            (spit (str local "/reexports.edn") (pr-str aliases))
+            ;; P17: the run's too (OUT/reexports.edn), which lib-stg's stg-one reads beside the plan's closures (deepseq's
+            ;; GHC.Tuple, ghc-prim's reexport)
+            (let [f (File. (str out "/reexports.edn"))] (when-not (.isFile f) (spit f (pr-str aliases)))))
         rr (try (binding [rn/*ifdirs* [local] rn/*iface-files* files rn/*projection?* false] (rn/rename-file dump nil local))
                 (catch Throwable e {:fail (msg e)}))]
     (if (:fail rr)
@@ -603,13 +615,46 @@
                    :let [m (read-string l)] :when (= :pass (:result m))]
                (:id m)))))
 
+(defn- run-nonpasses [results-file]
+  (vec (sort (for [l (str/split-lines (slurp results-file)) :when (str/starts-with? l "{")
+                   :let [m (read-string l)] :when (not= :pass (:result m))]
+               (:id m)))))
+
+(defn- run-outcomes
+  "Review 1111b, finding 6: each non-pass's outcome, {ID {:result R :differs [...]}} (what failed, not only that it failed)"
+  [results-file]
+  (into (sorted-map) (for [l (str/split-lines (slurp results-file)) :when (str/starts-with? l "{")
+                           :let [m (read-string l)] :when (not= :pass (:result m))]
+                       [(:id m) (select-keys m [:result :differs :stage])])))
+
+(def run-classes
+  "HF10-P20, P28 (a): the classes of a run row's non-passes (the row's :classes, {ID CLASS}); a non-pass in none fails the judge.
+  :o2-names: it calls a name of ghc-internal only its -O2 build has, from another package's -O2 STG (bytestring, directory,
+  file-io, stm: their own -O0 STG is HF10-P17's); :o0-report: the uncaught exception's report differs on base's -O0 libraries (GHC's
+  own -O0 set, ghc0, prints the same: base's -O0 TopHandler path); :hsi-memory: more than the light runs' 2 GiB; :hsi: hsi's own
+  class (run-check.edn's)"
+  {:o2-names "a name of ghc-internal only its -O2 build has, from another package's -O2 STG (HF10-P17)"
+   :o0-report "the uncaught exception's report on base's -O0 libraries (ghc0 the same)"
+   :hsi-memory "more than the light runs' 2 GiB (run-check.edn's)"
+   :hsi "hsi's own class (run-check.edn's)"})
+
 (defn record-runs
   "HF10-P20: a run of run-check's programs on a library set (lib-stg --ifaces own --run, LIB_STG_REPLACE=SET) as the
   record's row {:runs SET :passes N :of M :ids [...]}, replacing the set's row, the module rows kept"
   [results-file record-file set-name]
   (let [ids (run-passes results-file)
         n (count (filter #(str/starts-with? % "{") (str/split-lines (slurp results-file))))
-        row {:runs (keyword set-name) :passes (count ids) :of n :ids ids}
+        old (some #(when (= (:runs %) (keyword set-name)) %) (run-rows record-file))
+        ;; HF10-P28 (a): each non-pass keeps its class from the set's old row, a new one :unclassed (the judge fails on it);
+        ;; review 1111b (finding 6): kept only when it fails as it did (the old row's :outcomes), else :unclassed
+        outs (run-outcomes results-file)
+        cls (into (sorted-map) (for [i (run-nonpasses results-file)]
+                                 [i (let [c (get-in old [:classes i] :unclassed) o (get-in old [:outcomes i])]
+                                      (if (or (nil? o) (= o (get outs i))) c :unclassed))]))
+        ifaces (System/getenv "LIB_STG_PROG_IFACES")
+        row (cond-> {:runs (keyword set-name) :passes (count ids) :of n :ids ids}
+              (seq cls) (assoc :classes cls :outcomes outs)
+              true (assoc :ifaces (keyword (or ifaces "own"))))
         text (slurp record-file)
         lines (remove (fn [l] (and (str/starts-with? l "{") (let [m (read-string l)] (and (map? m) (= (:runs m) (:runs row))))))
                       (str/split-lines text))]
@@ -624,14 +669,35 @@
         now (set (run-passes results-file))
         mine (get rows (keyword set-name))
         lost (when mine (remove now (:ids mine)))
-        lost-eq (when (and (= set-name "all") (get rows :equal)) (remove now (:ids (get rows :equal))))]
+        ;; (all-base, HF10-P19 (a): base own too, against the all set's row)
+        base-row ({"all" :equal "all-base" :all} set-name)
+        lost-eq (when (and base-row (get rows base-row)) (remove now (:ids (get rows base-row))))
+        ;; HF10-P28 (a): a non-pass of the run in no class of the row's (run-classes) fails; review 1111b (finding 6): in a
+        ;; row with :outcomes, a classed non-pass whose outcome (result, differs, stage) is not the recorded one fails too
+        ;; (a row recorded before them, without :outcomes, is matched by id alone, said below)
+        outs (run-outcomes results-file)
+        moved (when (and mine (:outcomes mine))
+                (filter #(and (contains? run-classes (get-in mine [:classes %])) (not= (get-in mine [:outcomes %]) (get outs %)))
+                        (run-nonpasses results-file)))
+        uncl (when mine (concat (remove #(contains? run-classes (get-in mine [:classes %])) (run-nonpasses results-file)) moved))]
+    (doseq [i moved] (println (str "lib-stg --run: " set-name ": " i " fails otherwise than its class's recorded outcome: "
+                                   (pr-str (get outs i)) ", recorded " (pr-str (get-in mine [:outcomes i])))))
+    (doseq [i uncl :when (not (some #{i} moved))]
+      (println (str "lib-stg --run: " set-name ": " i " does not pass and is in no class (" (pr-str (get-in mine [:classes i])) ")")))
+    (when (and mine (:classes mine) (not (:outcomes mine)))
+      (println (str "lib-stg --run: " set-name ": the row has no :outcomes (recorded before review 1111b): its classes matched by id alone until it is recorded again")))
     (cond
       (nil? mine) (do (println (str "lib-stg --run: UNRECORDED: no row of the " set-name " set in " record-file)) (System/exit 1))
       (or (seq lost) (seq lost-eq))
       (do (println (str "lib-stg --run: " set-name ": " (count now) " pass; lost against the record: " (str/join " " (distinct (concat lost lost-eq)))))
           (System/exit 1))
+      (seq uncl) (do (println (str "lib-stg --run: " set-name ": " (count uncl) " non-passes in no class")) (System/exit 1))
       :else (println (str "lib-stg --run: " set-name ": " (count now) " pass, the " (:passes mine) " recorded kept"
-                          (when lost-eq (str ", every pass of the equal set's " (:passes (get rows :equal)) " kept")))))))
+                          (when lost-eq (str ", every pass of the " (name base-row) " set's " (:passes (get rows base-row)) " kept"))
+                          (when (:classes mine)
+                            (str "; the non-passes by class: "
+                                 (str/join ", " (for [[c n] (sort (frequencies (vals (select-keys (:classes mine) (run-nonpasses results-file)))))]
+                                                  (str (name c) " " n))))))))))
 
 (defn judge-stg
   "A lib-stg run's results against the record: exit status 1 when a module is worse, or (a whole run) one of either is

@@ -181,9 +181,12 @@
   [rr r unit & [dm-over]]
   (let [r (wired r)
         m (:module r)
-        ka (or (:kind-arity r) {})
-        tf (fn [t] (type-form ka t))
         own? (fn [n] (and (ext? n) (= m (nmod n))))
+        ;; HF10-P41 (a): the own type constructors' inferred kind variables are their invisible arguments, written as
+        ;; placeholders as an imported tycon's are (the reader takes them off again by the kind written below)
+        ka (into (or (:kind-arity r) {})
+                 (for [[n ti] (:tycons r) :when (and (own? n) (= :forall (first (:kind ti))))] [n (count (nth (:kind ti) 1))]))
+        tf (fn [t] (type-form ka t))
         exported (set (filter own? (:exported r)))
         genv (:own-genv r)
         types (:types r)
@@ -212,7 +215,9 @@
                           " :tag " (:tag info 1) "})")))
         tycon-forms (for [[n ti] (sort-by (comp ns-str key) tycons) :when (not (str/starts-with? (occ n) "R:"))]
                       (let [ar (count (:tvs ti))]
-                        (str "(tycon " (ns-str n) " \"\" " (:flavour ti) " " (vec* (map ns-str (:cons ti))) " " (kind-of-arity ar)
+                        (str "(tycon " (ns-str n) " \"\" " (:flavour ti) " " (vec* (map ns-str (:cons ti))) " "
+                             ;; HF10-P41 (a): its inferred kind (typecheck/infer-tycon-kinds!), else one of its arity
+                             (if (:kind ti) (type-form ka (:kind ti)) (kind-of-arity ar))
                              " {:roles " (vec* (repeat ar "representational")) " :arity " ar "})")))
         syn-forms (for [[n [tvs rhs]] (sort-by (comp ns-str key) (:syns r)) :when (own? n)]
                     (str "(tycon " (ns-str n) " \"\" synonym [] " (kind-of-arity (count tvs))
@@ -242,6 +247,11 @@
                            " :fundeps " (vec* (for [[l rr*] (:fundeps info)]
                                                 (vec* [(vec* (map #(pr-str (nth (:tvs info) % "?")) l)) (vec* (map #(pr-str (nth (:tvs info) % "?")) rr*))])))
                            " :defaults " (vec* (for [[mn d] (sort-by (comp ns-str key) (:defaults info))] (str "[" (ns-str mn) " " (ns-str d) "]")))
+                           ;; HF10-P33 (a): DefaultSignatures' default signatures (GHC's IfaceClassOp's GenericDM), the method's
+                           ;; default type over the class's variables, so an importing module's instance that omits the method
+                           ;; applies $dm to the context's dictionaries (the judge's class fact leaves them out: GHC's dump lacks them)
+                           (when (seq (:dsigs info))
+                             (str " :dsigs " (vec* (for [[mn t] (sort-by (comp ns-str key) (:dsigs info))] (str "[" (ns-str mn) " " (tf t) "]")))))
                            " :ats []})"))
         patsyn-forms (for [[n ps] (sort-by (comp ns-str key) patsyns) :when (contains? exported n)]
                        (str "(patsyn " (ns-str n)
@@ -268,7 +278,7 @@
                                (str "(dm-unfolding " (ns-str (second b)) " " (pr-str (uniq (get dm-over (second b) (nth b 2)))) ")")))))
         head-occ (fn [t] (case (first t) :tc (occ (second t)) :tv (first (str/split (second t) #"_")) :app (recur (second t)) ""))
         fis (for [[fam e] (:fam-insts r)]
-              (let [ax (if (:data e) (str "D:" (occ (second (:rhs e))) "0") (str "D:R:" (occ fam) (apply str (map head-occ (:lhs e)))))]
+              (let [ax (cond (:ax e) (:ax e) (:data e) (str "D:" (occ (second (:rhs e))) "0") :else (str "D:R:" (occ fam) (apply str (map head-occ (:lhs e)))))]
                 (str "(fam-instance (ext tc " (pr-str m) " " (pr-str ax) ") " (ns-str fam) " " (vec* (concat (kph fam) (map tf (:lhs e)))) " " (tf (:rhs e)) ")")))]
     (str "(hsiface/module " (pr-str m) " {:unit " (pr-str unit) " :verb \"own\" :own 1})\n"
          "(hsiface/exports [" (str/join "\n  " (:exports rr)) "])\n"
