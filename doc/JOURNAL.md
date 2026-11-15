@@ -4481,6 +4481,38 @@ Rule slips: the background launch of the two slice measures redirected to `/dev/
   gate's build of the branch, `bin/goi test` and `check` on it and the interpreted benchmark (stage 0: 59-65 ns a node of a
   list's walk, 184-191 ns a slice load and store) are the night slot `.tmp/p7-goi-fields/goi-fields.sh` (night 12 or 13).
 
+
+## 2026-11-10: C++'s CP338 (a) and CP350 (a), the run corpora's refusals by our route (branch `cpp-cp338`)
+
+- **What**: the user's decisions of 2026-11-10 (about 10:30 UTC: CP338 (a) and CP344-CP351 as recommended), on a branch from
+  mac/cpp-props5 57dd92021. In CP338 (a)'s order (the parser's declines, the threads, the singles, `__complex__`): `main()` with no
+  type as GCC's grokdeclarator takes it (a pedantic diagnostic, dropped without -pedantic-errors); a forward-declared class's scope
+  looking in its definition's (iosfwd's streambuf typedef); C++23's multidimensional subscript; the fences and the lock-free queries;
+  GNU's asm statement parsed into its parts, the empty barrier generated as clang does; `__builtin_clear_padding` as clang 23 writes
+  it; the defaulted secondary comparisons (they had been emitted `unreachable`) and `!=`'s rewritten candidate when none is viable;
+  variable templates' partial specializations and their constants in a type's text; `sizeof...` in a type's text; an alias template
+  as `__make_integer_seq`'s sequence; a non-type pack's parameter type in its own template's scope; ADL through inline namespaces;
+  a main file's typedef of a not-yet-defined template's specialization declared again later; packs through a template template
+  parameter. CP350 (a): under `auto` a program goes to our route when every option is one it models (-D, -U, -I, -fexceptions,
+  -fno-exceptions), and every program by ours is given its options. Clang's behaviour was read from clang 23.1.5's recorded IR (the
+  pack cpp-ir-gxx-dg-run) and clang/lib/CodeGen's CGBuiltin.cpp and CGStmt.cpp at llvmorg-23.1.5 (Apache-2.0 WITH LLVM-exception),
+  GCC's from gcc/cp/decl.cc at gcc-15.2.0 (the pinned tarball); no code ported.
+- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (S5a of the plan).
+- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: CP338 (a) and CP350 (a)"): the 82 programs by our route 57 → 62 generated (none
+  lost); codegen-gen 154 of 154 unchanged; the dg every-10th sample 121 → 122 own passes (variadic-ttp3), none lost; `bin/reap` 0
+  problems after recording the matrix again (cpp-props5's CP328 class move, the same at the base); `bin/crops-score --judge --strict`
+  0 problems. The lowered runtime built by day (198 of 198, peak 2,945 MB in the ci read's chunks) and the five new programs with
+  opt/unroll1.C (its -fno-exceptions) run by our route: 6 of 6 pass by their own verdicts (vbase8-10 a gain: clang rejects it).
+- **Not built**: explicit object parameters, the TLS wrapper, `__complex__`, std::thread's tuple constraints, shared_ptr's
+  `__has_esft_base` SFINAE, pr77550's `_CharT`, library.cpp's variant and any (each refused further on now).
+- **Alternatives considered**: implicit int for any function (GCC 15 makes it a permerror, no-type-2.C); emitting no code for
+  `__builtin_clear_padding` (behaviour the same here, but not clang's IR); deferring every main-file declaration that names an
+  incomplete template (only typedefs and aliases are, as no instantiation is needed for them).
+- **Proposed**: CP355 (-fstrict-enums, -fno-threadsafe-statics modelled), CP353 (CP338's next slices' order), CP354 (the measuring
+  lists' duplicates).
+- **Slips**: two process substitutions (`diff <(sort ...)`) in a throwaway comparison early on, against the day's rules; the first
+  runtime build attempt stopped at the disk rule (83%), retried when the disk was at 78%.
+
 ## 2026-11-11: night 11's Haskell and Scheme failures fixed (branch hs-scm-n12, from mac/next)
 
 Source: .tmp/night12/DIAGNOSIS-N11.md (h-check, h-div, hs-props, hs-props2, la-scm-corpora). Haskell: the six nofib programs whose keys
@@ -4593,37 +4625,6 @@ test_keywordonlyarg` 48 of 48 pass (GOGC=50, peak 1.9 GiB); `bin/reap` 0 problem
   expression type mismatch" verdicts; the night 11 rejected tree's records applied (night 11, `.tmp/night11/rejected/llvm`).
 - CLAUDE.md: bin/reap's matrix has thirteen rows and 52 cells (Haskell, x86-64 and arm64 assembly joined the ten), crops-score thirteen crops;
   a sentence for the assembly crops.
-
-## 2026-11-10: C++'s CP338 (a) and CP350 (a), the run corpora's refusals by our route (branch `cpp-cp338`)
-
-- **What**: the user's decisions of 2026-11-10 (about 10:30 UTC: CP338 (a) and CP344-CP351 as recommended), on a branch from
-  mac/cpp-props5 57dd92021. In CP338 (a)'s order (the parser's declines, the threads, the singles, `__complex__`): `main()` with no
-  type as GCC's grokdeclarator takes it (a pedantic diagnostic, dropped without -pedantic-errors); a forward-declared class's scope
-  looking in its definition's (iosfwd's streambuf typedef); C++23's multidimensional subscript; the fences and the lock-free queries;
-  GNU's asm statement parsed into its parts, the empty barrier generated as clang does; `__builtin_clear_padding` as clang 23 writes
-  it; the defaulted secondary comparisons (they had been emitted `unreachable`) and `!=`'s rewritten candidate when none is viable;
-  variable templates' partial specializations and their constants in a type's text; `sizeof...` in a type's text; an alias template
-  as `__make_integer_seq`'s sequence; a non-type pack's parameter type in its own template's scope; ADL through inline namespaces;
-  a main file's typedef of a not-yet-defined template's specialization declared again later; packs through a template template
-  parameter. CP350 (a): under `auto` a program goes to our route when every option is one it models (-D, -U, -I, -fexceptions,
-  -fno-exceptions), and every program by ours is given its options. Clang's behaviour was read from clang 23.1.5's recorded IR (the
-  pack cpp-ir-gxx-dg-run) and clang/lib/CodeGen's CGBuiltin.cpp and CGStmt.cpp at llvmorg-23.1.5 (Apache-2.0 WITH LLVM-exception),
-  GCC's from gcc/cp/decl.cc at gcc-15.2.0 (the pinned tarball); no code ported.
-- **Why**: C++'s eval and AOT independence after the switch to `auto` counts the programs our route generates (S5a of the plan).
-- **Checked** (light; doc/cpp/CPP-SURVEY.md, "As built: CP338 (a) and CP350 (a)"): the 82 programs by our route 57 → 62 generated (none
-  lost); codegen-gen 154 of 154 unchanged; the dg every-10th sample 121 → 122 own passes (variadic-ttp3), none lost; `bin/reap` 0
-  problems after recording the matrix again (cpp-props5's CP328 class move, the same at the base); `bin/crops-score --judge --strict`
-  0 problems. The lowered runtime built by day (198 of 198, peak 2,945 MB in the ci read's chunks) and the five new programs with
-  opt/unroll1.C (its -fno-exceptions) run by our route: 6 of 6 pass by their own verdicts (vbase8-10 a gain: clang rejects it).
-- **Not built**: explicit object parameters, the TLS wrapper, `__complex__`, std::thread's tuple constraints, shared_ptr's
-  `__has_esft_base` SFINAE, pr77550's `_CharT`, library.cpp's variant and any (each refused further on now).
-- **Alternatives considered**: implicit int for any function (GCC 15 makes it a permerror, no-type-2.C); emitting no code for
-  `__builtin_clear_padding` (behaviour the same here, but not clang's IR); deferring every main-file declaration that names an
-  incomplete template (only typedefs and aliases are, as no instantiation is needed for them).
-- **Proposed**: CP355 (-fstrict-enums, -fno-threadsafe-statics modelled), CP353 (CP338's next slices' order), CP354 (the measuring
-  lists' duplicates).
-- **Slips**: two process substitutions (`diff <(sort ...)`) in a throwaway comparison early on, against the day's rules; the first
-  runtime build attempt stopped at the disk rule (83%), retried when the disk was at 78%.
 
 ## 2026-11-11: cpp-cp338b, cpp-cp338 rebased onto cpp-n12 (branch `cpp-cp338b`, from `mac/cpp-cp338` f13582d5a)
 
@@ -4914,6 +4915,7 @@ expansion would then end the whole expansion, where LLVM goes on with the body's
   A by-hand probe: a macro whose body has an error, invoked twice, beside a stray `.endif`, `.purgem` of an unknown macro and an unclosed
   `.if`, gives five errors in order, the body's at each invocation's place. `bin/reap --record` 49 of 52 cells, 0 problems, the matrix
   unchanged (x86-64 assembly AOT 105 / 0 / 0, arm64 3,005 / 0 / 55); `bin/crops-score --record` unchanged, `--judge --strict` 0.
+
 ## 2026-11-11: HF10-P20 (a) closed: the whole own set runs 50 of 63, every pass of the `equal` set kept; the kinds kept (branch `hs-p21`, from `mac/next` 5d10a92fb)
 
 - Goal (the plan "Haskell on its own libraries", stage 2): `LIB_STG_REPLACE=all` (every ghc-internal module Arbace's own STG)
@@ -5465,6 +5467,25 @@ first. `bin/reap --self-test` in the reap step; the step's inputs gained `test/h
   Left: `try_process`'s associated item bounds, `NeverShortCircuit::wrap_mut_1`'s opaque return type, RF13e's others. `gate_key`
   unmoved (`bin/arbace-go --gate-key` equal; only `arbace/rust/front/` and a test file change); `core-attrs.edn`'s key moves, so the
   night's rsi-build makes it again first. Details: doc/rust/FRONTEND-SURVEY.md, "As built: RF20".
+
+## 2026-11-11: OC219 (a), Runtime_events before OC218 (branch `ocaml-s5`, from next `5d10a92fb`)
+
+- Counted the by-design classes of OCaml's eval and AOT cells from test/reap/matrix.edn (eval: `:runtime-parameters` 19, all `b=1`
+  backtraces; `:c-runtime-internals` 19; `:gc-and-memory` 20; `:runtime-events` 7; `:dynlink` 6; `:backtraces` 4; `:unix-fork` 4;
+  `:obj-representation` 1). Picked `:runtime-events`: four of its seven programs observe only the collections they ask for and their
+  own user events, so OC219 (a) (decided "over OC218's model") was built ahead of OC218 for that part. Alternatives considered: OC217's
+  backtraces (23 programs a level, 5-8 days: not a light slice), `b=1` passed alone (one program a level passes: OC224), Dynlink's
+  init-info (needs a Dynlink unit table: OC220).
+- Built: the library unit (otherlibs/runtime_events/runtime_events.ml of the pinned OCaml 5.5.0 tarball, typed natively by `bin/oi
+  stdlib`'s libs_native as `RELIB`; header.awk's `include runtime_events`; aot-clib's list), oi's `go/arbace/oi/ext_runtime_events.ae` and
+  the AOT runtime's `jdk/ocaml/ocaml/rt/ExtRtEvents.ae`, written anew after runtime/runtime_events.c, gc_ctrl.c, major_gc.c, minor_gc.c and
+  otherlibs/runtime_events/runtime_events_consumer.c (LGPL-2.1 with the linking exception, read for their behaviour, as oi's other
+  externals). The asked collections emit the C runtime's phases (a full major: three cycles, six minors), Gc's externals call them.
+- Results (light, native path): test_caml, test_caml_exception, test_caml_reentry, test_user_event_signal pass at oi and at the light
+  AOT level by their own verdicts; recorded in check-oi-native.edn (`--record --only-list test/ocaml/oc219.txt`). The matrix still reads
+  ocamlc's path until OC185's switch and no host OCaml ran in this lane: completeness 85.3% before and after on the branch; +4 eval
+  programs (about +0.15) after the switch, +4 AOT after the compiled night run. A negative control added (test_caml against
+  test_caml_exception's reference). Proposals OC223 (test_create_cursor_failures under root, `:na`) and OC224 (`b=1` with OC217).
 
 ## 2026-11-12: cpp-s7, cpp-s6's proofs, CP372 (a) and CP373 (a) (branch `cpp-s7`, from `mac/cpp-s6` b14a077c0)
 
