@@ -2732,8 +2732,18 @@ a64i-go-compile (d6432df30): its fragment in test/gate/crops/asm.edn, spliced in
 
 - **Arm64 hosts only**: the step's command is `case $(uname -m) in aarch64|arm64) bin/a64i goroot-check ;; *) echo ... skipped ;; esac`;
   the check itself refuses elsewhere (exit 2: this CPU's run is the reference), so on amd64 the step passes at once.
-- `:mem-gib 3` (299 measured no peak; one a64i a job at 3 jobs, and the tools' cold build reached 1.39 GiB in AR23); 333 s wall
-  at 3 jobs on the M2.
+- `:mem-gib 1`: peak 0.43 GiB (busybox time -v, four runs 0.35-0.43 GiB); 265-295 s wall at 3 jobs on the VM.
+- **Absent on amd64?** The planner's absence rule (`absent`, plan.ae) is the :oracle phase's: a step whose host identity is none.
+  A :full step has no such rule, so the guard stays in the command (the step passes at once off arm64). A rule for it would be a
+  change to plan.ae and the table (a step flag, or an :arm64 host identity): to decide.
+- **CPU time, not wall time** (the flake): one.bash classed `:speed` a program whose native run took over 1,000 ms by the wall
+  clock; gc2.go (339 ms of CPU) flipped under load. It now takes user + sys of the run (bash's `time`). Recorded passes reach
+  339 ms (gc2.go), the next below the cut-off is 213 ms; over it, issue79186 (1,050 ms) and issue19658 (1,102 ms) are near, so
+  issue79186 is in known.edn (:speed) and cannot fail by running just under. issue16016 (20 ms of CPU, over a second of sleeping)
+  now runs and passes: 1,141 of 1,178, the record rewritten (`--record`).
+- **Reruns**: the built programs are kept in `.tmp/a64i/goroot/built/KEY` (1.6 GB), KEY the hash of seed/goroot.sha256, seed/goroot-test.sha256,
+  the Go tree's VERSION, goi's linux record and one.bash (other keys removed; `A64I_GOROOT_NOCACHE=1`): a second run 265 s against 294 s, the
+  a64i runs (700 s of CPU in 3 jobs) being the time.
 - **Inputs**: `:lib-tools :tools :asm :a64i` (test/asm/ holds goroot-check's own files, its record and classes), goi's linux
   record `test/goi/check-linux-amd64.edn` (the program list), less `test/asm/a64i-go/`; pins `seed/goroot.sha256` (TamaGo's go) and
   `seed/goroot-test.sha256` ($GOROOT/test).

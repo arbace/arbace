@@ -32,6 +32,13 @@ genv=(GOROOT="$GOROOT" GOTOOLCHAIN=local GOFLAGS= GOENV=off GOPROXY=off GOEXPERI
   && mv "$W/importcfg.tmp" "$W/importcfg" || { echo "FAIL: a64i goroot-check: go list -export std" >&2; exit 1; }
 TAGS="$(cd "$W" && env "${genv[@]}" "$GOROOT/bin/go" list -f '{{join context.ReleaseTags " "}} {{join context.ToolTags " "}}' runtime) linux arm64 gc test_run"
 export TAGS
+# the built programs kept (W/built/KEY): KEY the hash of the Go tree's pin (seed/goroot.sha256, VERSION), the corpus's ($GOROOT/test's
+# pin, goi's linux record) and one.bash, which builds them; other keys' directories removed; A64I_GOROOT_NOCACHE=1 builds them all
+if [ -z "${A64I_GOROOT_NOCACHE:-}" ]; then
+  key=$(cat "$root/seed/goroot.sha256" "$root/seed/goroot-test.sha256" "$GOROOT/VERSION" "$root/test/goi/check-linux-amd64.edn" "$root/test/asm/a64i-goroot/one.bash" | sha256sum | cut -c1-20)
+  for o in "$W"/built/*; do [ -e "$o" ] && [ "$o" != "$W/built/$key" ] && rm -rf "$o"; done
+  export A64I_GOROOT_BUILT=$W/built/$key
+fi
 # the programs known over a64i's budget (known.edn's :speed rows), not run on a64i
 sed -n 's/^ *\["\([^"]*\)" :speed .*/\1/p' "$root/test/asm/a64i-goroot/known.edn" > "$W/speed.txt"
 export A64I_GOROOT_SPEED=$W/speed.txt

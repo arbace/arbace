@@ -51,6 +51,15 @@ while IFS= read -r line; do
 done < <(awk '/^package /{exit} /^\/\/go:build /{print}' "$g")
 
 dir=$GOROOT/test rdir=$GOROOT/test exe=$t/a.exe
+# the built programs kept by check.bash's key (the Go tree's and the corpus's pins, this script, A64I_GOROOT_BUILT): a program built
+# once is copied back, not built again (a runindir's copy of its directory is made again, the run's working directory)
+if [ -n "${A64I_GOROOT_BUILT:-}" ] && [ -f "$A64I_GOROOT_BUILT/$id.exe" ]; then
+  cp "$A64I_GOROOT_BUILT/$id.exe" "$exe"
+  if [ "$kind" = runindir ]; then
+    d=$GOROOT/test/${p%.go}.dir m=$(basename "$d") rdir=$t/src/$(basename "$d")
+    mkdir -p "$rdir"; cp -R "$d/." "$rdir/"; printf 'module %s\ngo %s\n' "$m" "$modv" > "$rdir/go.mod"
+  fi
+else
 case $kind in
   run)
     if [ ${#flags[@]} = 0 ] && [ ${#args[@]} = 0 ]; then
@@ -103,14 +112,18 @@ case $kind in
     (cd "$rdir" && env "${genv[@]}" GOPATH="$t" "$GOROOT/bin/go" build ${flags[@]+"${flags[@]}"} -o "$exe" .) > "$t/build.log" 2>&1 ;;
   *) row skip "not a run test: $kind" ;;
 esac || row build "$(grep -v '^#' "$t/build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"
+if [ -n "${A64I_GOROOT_BUILT:-}" ]; then mkdir -p "$A64I_GOROOT_BUILT"; cp "$exe" "$A64I_GOROOT_BUILT/$id.exe.$$" && mv "$A64I_GOROOT_BUILT/$id.exe.$$" "$A64I_GOROOT_BUILT/$id.exe"; fi
+fi
 
 head_err() { awk '/^goroutine /{exit} {print}' "$1" | sed -E 's/^\[signal ([A-Z]+): (.*) code=0x[0-9a-f]+ addr=0x[0-9a-f]+ pc=0x[0-9a-f]+\]$/[signal \1: \2 code=X addr=X pc=X]/'; }
-s0=$(date +%s%N); cst=0
-(cd "$rdir" && env "${renv[@]}" PWD="$rdir" timeout -k 5 $((tmo * 3)) "$exe" ${args[@]+"${args[@]}"} > "$t/c.out" 2> "$t/c.err" < /dev/null) || cst=$?
-cs=$(( ($(date +%s%N) - s0) / 1000000 ))
+# the CPU's run is timed by its CPU time (user + sys of the run and its children, bash's time), not the wall clock: under load a
+# program near the cut-off (gc2.go, about 1 s of wall time on the M2) must not change class between runs
+cst=0
+{ TIMEFORMAT='%3U %3S'; time (cd "$rdir" && env "${renv[@]}" PWD="$rdir" timeout -k 5 $((tmo * 3)) "$exe" ${args[@]+"${args[@]}"} > "$t/c.out" 2> "$t/c.err" < /dev/null) ; } 2> "$t/c.time" || cst=$?
+cs=$(awk 'END{printf "%d", ($1 + $2) * 1000 + 0.5}' "$t/c.time")
 case $cst in 124|137) row skip "the CPU's run timed out ($((tmo * 3)) s)" ;; esac
 # speed (AR24): a program known over a64i's budget (known.edn's :speed, A64I_GOROOT_SPEED) is not run on a64i, nor one whose CPU
-# run took over A64I_GOROOT_CPU_MAX ms (default 1000: a64i runs Go's code about a thousand times slower than the M2, so such a
+# run took over A64I_GOROOT_CPU_MAX ms of CPU time (default 1000: a64i runs Go's code about a thousand times slower than the M2, so such a
 # run is far over any budget); an a64i timeout is a failure until known.edn names it
 if grep -qxF "$p" "${A64I_GOROOT_SPEED:-/dev/null}"; then row speed "known over a64i's budget (the CPU's run ${cs} ms)" "cpu ${cs}ms"; fi
 [ "$cs" -le "${A64I_GOROOT_CPU_MAX:-1000}" ] || row speed "the CPU's run ${cs} ms, over ${A64I_GOROOT_CPU_MAX:-1000} ms: a64i not run" "cpu ${cs}ms"
