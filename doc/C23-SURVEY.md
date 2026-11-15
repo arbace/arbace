@@ -5732,3 +5732,76 @@ and torture-compile's limits-fndefn.c, limits-blockid.c and limits-externalid.c.
   - raising those files' budgets (`REPR_C_READ_BUDGET` per file). This only moves the edge, and a budget long enough to
     always pass costs minutes a night.
   - a separate known file for timing classes. This adds a second place to look for the same class.
+
+## As built: CS299, the Python line's three requests (2026-11-12, branch `c-py1`)
+
+On `c-py1` from `mac/next` bd6ab3ddd, main's stage 0 (`ARBACE_HOST_EXE`), during night 12 (one light run at a time, each under
+1.5 GiB). The Mac VM's reports 261 (finding 5) and 269 (finding 2) asked three things of ci, each against gcc. Report 269 was made on
+the 201 branch at a53fe65a9, whose repr/c and ci are of 2026-11-03: before CS275 (b) (ci's read takes a file included inside a
+declaration as the main file's) and LLS21 (a) (ci's `__atomic_*` and `__sync_*`). On next two of the three were mostly there; each
+item is now held by a program of ci-run that checks itself.
+
+- **CS299 (a) `#pragma pack` from an included file.** gcc's pragmas are tokens (extend.texi, "Structure-Layout Pragmas"): a
+  `#pragma pack` lays out the definitions after it whichever file brings it. ci placed the main file's pragmas by offset (CS290 (a))
+  and carried only the re-entered main file's (`MAIN#again`) in the token stream, so a pragma of a header was lost, in a function
+  body (the report's `_ctypes_test_generated.c.h`: Packed1-3 at 16/8 where gcc gives 9/1, 10/2, 12/4) and at the header's file scope
+  too (found here: `#pragma pack(push, 1)` around a header's structure gave 8 bytes for 5).
+  - `arbace.repr.c.pp`: under `*reentry*` (ci's read) every pragma of a file other than the main one is queued for the parser, with
+    the entry it stands in (`[text entry]`).
+  - `arbace.repr.c.convert`: the queue is a TreeMap by token seq, taken by range (`take-pragmas!`). A block takes those after its
+    opening brace before each item, and those before its closing brace after the last item (a pop at a block's end). The pragmas
+    between top-level items (file scope) become `c/pragma` forms of their own entry's unit, in the stream's order among its forms; the
+    checker already runs a unit's `c/pragma` at its `#include` (`check-top`). Before, the queue was drained by the next block whatever
+    came before it, so a re-entered copy's file-scope pragma ran in the next body.
+  - Text levels and musl's read are unchanged (no `*reentry*`: nothing queued). The musl forms are the same bytes.
+- **CS299 (b) gcc's `__atomic` builtins.** On next since LLS21 (a) (`test/c/run/builtin-atomic.c`) but for the generic forms on a
+  non-integer object: `__atomic_store(&float, &v, o)` was refused by the builder ("on an object of type float"). extend.texi: the
+  generic forms work on any type. `arbace.c.build`'s `atomic-call` now moves (and compare-exchange compares) a floating, structure or
+  union object of 1, 2, 4 or 8 bytes as the unsigned integer of its size, its bytes; another size is libatomic's call (refused, as
+  before). The checker already took them.
+- **CS299 `#include` inside a body (item 3).** Already ci's since CS275 (b) (2026-11-06): `bin/ci run` reads a file that includes
+  statements, a table and declarations inside function bodies. No change; the program holds it.
+- **CS299 (c) ci-run's own verdict.** ci-run had none (gcc's recorded run was its reference), and gcc may not be run here. A ci-run
+  program whose first line says `ci-run verdict: exit 0` checks itself (abort on a difference) and is judged by exit 0, its output
+  not compared (`test/c/selfref.ae`'s `verdict`); `merged` adds such a program's entry when `test/c/ref-gcc15.edn` has none. The three
+  new programs are the only ones marked; the 19 older ones stay gcc's. A negative control, `_control/ptr-sub-unsigned-vs-self-check`
+  (`test/c/controls.edn`): ptr-sub-unsigned's run (status 3) against atomic-gcc's own verdict must differ, and does.
+- Programs (`test/c/run/`, README): `pack-in-include.c` (+ `.h`: Packed1 under `ms_struct`, Packed2, Packed4 with a pop before a
+  block's brace, a header's file-scope pack), `include-in-body.c` (+ three `.inc`), `atomic-gcc.c` (+ `.h`: CPython's
+  pyatomic_gcc.h shapes, widths 1 to 8, const objects, float and double by the generic forms, compare-exchange both ways, pointer
+  fetch-add unscaled). The layouts' expected values are the report's gcc 15.2 measurements and gcc's documented rules; no gcc run.
+  `test/c/corpora.edn`'s ci-run `:count` 22 (it said 17 with 19 files). The three and ptr-sub-unsigned.c joined
+  `test/c/essential-check.txt` (the control needs both).
+
+| command | result |
+|---|---|
+| `bin/ci run` before (mac/next) | pack-in-include: H1 8 for 5 (abort); include-in-body: IncPacked 8 for 5 (abort); atomic-gcc: refused (builder), `__atomic_store` on float |
+| `bin/ci run` after | the three exit 0, 0 failing |
+| `bin/ci check --only` the three, ptr-sub-unsigned, pack-in-body, builtin-atomic, ms-struct, nan-to-unsigned | pass 8, the new control differs (210 s, 0.35 GB) |
+| `bin/ci check --corpus ci-run --record` | 22 of 22 pass, three rows added (174 s, 0.43 GB) |
+| `bin/ci check --aot --only` the three | pass 3, compiled = interpreted; rows added by hand in place (267 s, 0.40 GB) |
+| `bin/ci judge-test` | 107 tests, 0 failures (1,052 s, 0.45 GB) |
+| `bin/ci dg --essential` | 92 of 92, the control differs (142 s, 0.38 GB) |
+| `env CI_LINK_CHECK=1 bin/ci check --only test/c/essential-check.txt` (CI_JOBS=1) | 0 failing, ci-run 6 of 6, the four controls differ (1,093 s, 0.61 GB) |
+| `bin/ci check --aot --only test/c/essential-aot.txt` (CI_JOBS=1) | 0 failing, the controls differ (1,046 s, 1.12 GB) |
+| `bin/repr-c check --c23 && bin/ci repl-session` | 59 pass, 3 expected failures, 0 failing; the session passes |
+| `bin/reap --record` | 49 of 52 checked, 0 problems; C eval 2153 to 2156, AOT 2161 to 2164 |
+| `bin/crops-score --record`, `--judge --strict` | C's completeness 0.9598 to 0.9599 (meant 0.9961, independence 0.9970 unchanged); 13 crops, 0 problems |
+
+`bin/reap`'s C eval source checks the record's cases against gcc's reference runs; the three programs have none, so the source names
+them in `:ref-runs-extra` (`test/reap/cells.edn`, read by `test/reap/main.ae`'s `case-problems`).
+
+### Rekeys
+
+Embedded (gate_key, the whole `--full` reruns; the seed's embedded sources too): `arbace/c/build.ae`, `arbace/repr/c/pp.ae`,
+`arbace/repr/c/convert.ae` (`bin/arbace-go --gate-key` 96f51415dfa0... on the branch). The runtime key does not move (arbace/c is
+not in it); `test/gate/gate-key-crops-test.bash` passes. The musl forms' key moves (repr/c): one `bin/ci musl read` (about an hour at
+`CI_THREADS=2`); the forms are the same bytes, nothing of musl's read queues a pragma. The branch's runs used a complete cache of the
+pre-change key copied from another worktree with its key file rewritten (no read here). Outside the keys: `test/c/`, `test/reap/`,
+`test/crops/scores.edn`. So the branch merges after W2 (nights 13-14).
+
+### The night's commands (not run here)
+
+`bin/ci musl read` (or the first C step's ensure; about an hour, under 2 GB at `CI_THREADS=2`), then the gate's C steps; `bin/ci check
+--aot --corpus ci-run` (whole, expected 22 of 22); after the merge, the Python line's `bin/pyi-clib build ctypestest` on next
+(test_generated_data should leave `:ctypes-port`) and pyconfig.h's `__atomic` macros and `bin/pyi-clib`'s `inline=` workaround dropped.

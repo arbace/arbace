@@ -613,7 +613,9 @@ items below are the ones whose work is still ahead or tied to a night.
   proposals SCS29 (one graph per program), SCS30 (SC94 (b)'s half); `scheme-scs30` (2026-11-11): SCS29 (a) kept, SCS30 (a) built: compiled
   libraries installed in psyntax, proved by `si/eval-library` (AOT cell 48 / 3 / 0).
 - **C** ([C23-SURVEY.md](C23-SURVEY.md)): CS281 (a) at W ((c) until); CS275 and CS280, the gmp and pcre2 packs at the next
-  pack recording.
+  pack recording. CS299 (`c-py1`, 2026-11-12: the Python line's requests, an included file's `#pragma pack`, the generic
+  `__atomic` forms on float/double, ci-run's self-checking programs) moves gate_key: it merges after W2 (nights 13-14), then
+  `bin/pyi-clib build ctypestest` on next and the pyconfig.h atomics workaround dropped (Python's line).
 - **The gate** ([GATE-SURVEY.md](GATE-SURVEY.md), [ORACLE-RECORDS-SURVEY.md](ORACLE-RECORDS-SURVEY.md)): GTS252 (a) later;
   GTS249 (b) for the clean run; Python's planner change (`:slice-re`) with GTS240's runner change.
 - **Python** ([python/PYTHON-SURVEY.md](python/PYTHON-SURVEY.md)): the 3.15.2 oracle deferred to the 3.15 move; pyi
