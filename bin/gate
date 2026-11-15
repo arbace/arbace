@@ -38,11 +38,17 @@
 # heavy process alone (GTS31 (b), bin/lib/heavy.bash); --full ends with --prune (GTS34 (a)).
 #
 # Usage: bin/gate [--full] [--rerun]
-#        bin/gate --weekly [--plan] (GDS1 (a), GDS4 (a), GD1; doc/GATE-DIET-SURVEY.md, "As built: GD1") --full with every
-#                                   part (GATE_ALL_PARTS=1): the weekly tier, the :clean-only parts (§4.2's weekly list: the
-#                                   jdk corpora of repr/java's tree checks, rsi-check, haskell-target-probe, llvmi-aot, the
-#                                   fixpoint, programs-full, ...) beside --full's steps, keyed as --full keys them; the night's
-#                                   runner bin/night runs it on the night that starts on Saturday, --nightly on the others
+#        bin/gate --weekly [--plan] (GDS1 (a), GD1; GDS4 (b), GD3; doc/GATE-DIET-SURVEY.md, "As built: GD3") --full with the
+#                                   weekly tier: the steps and parts of :phase :weekly (§4.2's weekly list: the jdk corpora of
+#                                   repr/java's tree checks, rsi-check's, cpp-roundtrip's libstdcxx part, haskell-target-probe,
+#                                   llvmi-aot, the fixpoint, programs-full) beside --full's steps, keyed as --full keys them (a
+#                                   weekly step with :also-changed also runs on another night whose changes touch its files:
+#                                   the fixpoint and programs-full on j2g's, repr/go's and the build's); the parked :clean-only
+#                                   parts are the clean run's alone; the night's runner bin/night runs it on the night that
+#                                   starts on Saturday, --nightly on the others
+#        bin/gate --loads-update [LOGDIR...]  (GD3, GDS9 (a)) test/gate/loads.edn, the steps' load closures, made again from
+#                                   audited runs' logs (NAME.loaded, NAME.paths; default every .tmp/gate-clean/*.logs/gate of
+#                                   the main checkout, oldest first, and .tmp/gate-audit): gate.loads
 #        bin/gate --nightly [--plan] (GT8.4, GT8.7; doc/GATE-SURVEY.md, "As built: GT8.4, GT8.7 (write-ahead)")
 #                                   the nightly tier: --full's steps keyed as --full keys them, each part whose
 #                                   step declares :rotate (and whose corpus has a :subset smaller than it) run as
@@ -66,9 +72,25 @@
 #                                   inputs: an undeclared read fails the audit and names the file
 #                                   (GT4; needs the executables and javac's tool built: bin/gate
 #                                   --full first; a heavy step takes the lock; .tmp/gate-audit/)
-#        bin/gate --prune [--dry-run]  the store of passes trimmed: per step the last 5 and every pass
+#        bin/gate --prune [--dry-run] [--cheap] [--worktrees]  the store of passes trimmed: per step the last 5 and every pass
 #                                   younger than 30 days kept; the executables' directories but the
-#                                   newest 3 of each, older than a day, removed (GTS27)
+#                                   newest 3 of each, older than a day, removed (GTS27); since GD4 (GDS17 (a),
+#                                   doc/GATE-DIET-SURVEY.md, "As built: GD4") every cache of test/gate/caches.edn by its
+#                                   rule (Go's build cache to 8 GiB by the least recently used, TMPDIR's files of two days,
+#                                   goi's tables by key generation, ...), a directory over its :max-entries warned of, this
+#                                   checkout's .tmp entries no row names listed; --cheap the cheap rows alone (every gate's
+#                                   start, a step below the disk floor); --worktrees the main checkout's worktrees merged into
+#                                   mac/next and idle a day, listed (GDS18 (a): the main session removes them)
+#        (GD4, GDS12 (a), GDS13 (a)) the disk and memory policy, every run: before each step the free disk against the floor
+#                                   GATE_DISK_FLOOR (25 GiB) plus the step's :disk-gib; below it the cheap prune, a wait
+#                                   (GATE_DISK_WAIT, 1800 s, the run's, not each step's), then the step deferred (not
+#                                   FAILED, no pass; its dependents with it), retried once the chains are done; a run left
+#                                   with deferred steps ends INCOMPLETE, exit 3; "No space left on device" in a step's log
+#                                   or outputs fails it; each step admitted by the larger of its :mem-gib and 1.1 x its
+#                                   recorded peak (the plan prints UNDER the steps over their declaration in two passes),
+#                                   that figure handed to it as GATE_STEP_MEM_GIB (bin/gate-policy mem caps the tools'
+#                                   GOMEMLIMIT defaults at it), ARBACE_DISK_POLICY=gate (the tools' disk guards yield);
+#                                   --nightly --concurrent runs (bin/night --concurrent)
 #        --rerun                    every check runs (and records its pass), as at a clean run
 #        bin/gate [--full] --plan --builds  the builds the plan needs run first, then the plan on their
 #                                   program units (GTS42 (a)'s demonstrations, bin/gate-demos)
@@ -393,10 +415,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 caller_host_exe=${ARBACE_HOST_EXE-} # --costs only (it reads, keys nothing): the caller's tools' host
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full|--nightly|--weekly] [--oracle] [--rerun] | bin/gate --rotation-status [--days N] | bin/gate [--full] --plan [--builds] | bin/gate [--full] --costs [--last N] [--tsv] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full [--clean] --concurrent [--plan] | bin/gate [--full] --mem-check" >&2; exit 2; }
-oracle= full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
+usage() { echo "usage: bin/gate [--full|--nightly|--weekly] [--oracle] [--rerun] | bin/gate --rotation-status [--days N] | bin/gate [--full] --plan [--builds] | bin/gate [--full] --costs [--last N] [--tsv] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] [--cheap] [--worktrees] | bin/gate [--full] --clean [--tag TAG] [--only STEP,...|failed|changed] [--plan] | bin/gate --pins [FILE] | bin/gate --full|--nightly [--clean] --concurrent [--plan] | bin/gate [--full] --mem-check" >&2; exit 2; }
+oracle= full= plan_only= why= rerun= audit= prune= dry= cheap= wts= clean= clean_tag= pins= pins_out= concurrent= builds= only= outside=
 nightly= weekly= rotation_status= rot_days=
-costs= costs_last=5 costs_fmt=text mem_check=
+costs= costs_last=5 costs_fmt=text mem_check= loads_update=
 steps_arg=() orig_args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
@@ -419,22 +441,29 @@ while [ $# -gt 0 ]; do
     --audit) audit=1; full=1 ;;
     --prune) prune=1 ;;
     --dry-run) dry=--dry-run ;;
+    --cheap) cheap=--cheap ;;
+    --worktrees) wts=--worktrees ;;
     --costs) costs=1 ;;
     --mem-check) mem_check=1 ;;
+    --loads-update) loads_update=1 ;;
     --last) [ $# -ge 2 ] && [ "$2" -gt 0 ] 2>/dev/null || usage; costs_last=$2; shift ;;
     --tsv) costs_fmt=tsv ;;
     -*) usage ;;
-    *) [ -n "$audit" ] || usage; steps_arg+=("$1") ;;
+    *) [ -n "$audit$loads_update" ] || usage; steps_arg+=("$1") ;;
   esac
   shift
 done
 mode=essential; [ -n "$full" ] && mode=full
-# GDS1 (a), GDS4 (a), GD1 (doc/GATE-DIET-SURVEY.md, "As built: GD1"): --weekly, --full with every part (GATE_ALL_PARTS=1): the
-# weekly tier's :clean-only parts beside --full's (keyed as --full keys them); not with --nightly or --clean (which runs every part)
+# GDS1 (a), GD1, GD3 (GDS4 (b); doc/GATE-DIET-SURVEY.md, "As built: GD3"): --weekly, --full with the weekly tier's steps and
+# parts (:phase :weekly, the planner's --weekly), keyed as --full keys them; the parked :clean-only parts not (GD1 had them,
+# GATE_ALL_PARTS=1: they are the clean run's alone again); not with --nightly or --clean (which runs every part and the weekly
+# tier). The clean run, its plan and --audit plan the weekly tier too (plan_weekly)
+plan_weekly=()
 if [ -n "$weekly" ]; then
   [ -n "$nightly$clean$audit" ] && usage
-  export GATE_ALL_PARTS=1
+  plan_weekly=(--weekly)
 fi
+[ -n "$clean$audit${GATE_CLEAN_INNER:-}" ] && plan_weekly=(--weekly)
 # the oracle tier (doc/ORACLE-RECORDS-SURVEY.md, ORS1 (a), ORS8 (a), §3.6): --oracle its :oracle steps alone (gcc on Arbace's
 # output, the records verified), absent where their toolchain is not; --full --oracle beside --full's; never in the clean run
 if [ -n "$oracle" ]; then
@@ -445,14 +474,17 @@ fi
 # rotated part's subset and the night's slice (the night: the day of the run's start less 12 hours, so that a
 # night that crosses midnight is one; GATE_NIGHT gives it); the clean run its subsets alone (GATE_CLEAN_WHOLE=1:
 # whole parts, as --full)
-plan_rot=()
+plan_rot=(${plan_weekly[@]+"${plan_weekly[@]}"})
 if [ -n "$nightly" ]; then
-  [ -n "$clean$concurrent$audit" ] && usage
+  # (GD2: --nightly --concurrent --plan, the nightly tier's plan in the memory lanes; since GD4 a run too, the night's in the
+  # lanes, GDS2 (a): bin/night --concurrent)
+  [ -n "$clean$audit" ] && usage
   mode=nightly; plan_rot=(--night "${GATE_NIGHT:-$(( ($(date +%s) - 43200) / 86400 ))}")
 elif [ -n "$clean" ] && [ -n "$full" ] && [ "${GATE_CLEAN_WHOLE:-}" != 1 ]; then
-  plan_rot=(--rotation subset)
+  plan_rot+=(--rotation subset)
 fi
 [ -n "$builds" ] && [ -z "$plan_only" ] && usage
+{ [ -n "$cheap" ] || [ -n "$wts" ]; } && [ -z "$prune" ] && usage
 [ -n "$clean" ] && { [ -n "$audit$why$prune" ] && usage; }
 # GTS227 (a): --concurrent with --clean (the clean run in the memory lanes), with --plan (the plan and its lanes); not --only
 [ -n "$concurrent" ] && [ -n "$only" ] && usage
@@ -483,6 +515,22 @@ if [ -n "$mem_check" ]; then
   [ -n "$caller_host_exe" ] && export ARBACE_HOST_EXE=$caller_host_exe
   store=${ARBACE_GATE_STORE:-$(arbace_main_checkout "$root")/.tmp/gate-pass}
   GATE_ALL_PARTS=1 arbace_tool -p "$root/test" -m gate.lanes mem-check "$root" "$store" "$root"/test/gate/clean-*.edn
+  exit
+fi
+# --loads-update (GD3, GDS9 (a)): test/gate/loads.edn from audited runs' logs (gate.loads, test/gate/loads.ae); reads the logs
+# and writes that file alone, keys nothing
+if [ -n "$loads_update" ]; then
+  [ -n "$audit$full$plan_only$costs$mem_check" ] && usage
+  . "$root/bin/lib/gate-cache.bash"
+  . "$root/bin/lib/tools.bash"
+  [ -n "$caller_host_exe" ] && export ARBACE_HOST_EXE=$caller_host_exe
+  if [ ${#steps_arg[@]} = 0 ]; then
+    m=$(arbace_main_checkout "$root")
+    # the clean runs' logs, oldest first (a later run's entry for a step replaces an earlier one's), then the latest --audit's
+    for d in $(for d in "$m"/.tmp/gate-clean/*.logs/gate; do [ -d "$d" ] && echo "$(stat -c %Y "$d") $d"; done | sort -n | cut -d' ' -f2); do steps_arg+=("$d"); done
+    [ -d "$m/.tmp/gate-audit" ] && steps_arg+=("$m/.tmp/gate-audit")
+  fi
+  arbace_tool -p "$root/test" -m gate.loads update "$root/test/gate/loads.edn" "${steps_arg[@]}"
   exit
 fi
 
@@ -522,7 +570,8 @@ gate_keep_env() {
     GATE_LANE_MEMAVAIL_KIB) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     # (and the --plan view's durations: another store, more records of walls, the records first)
     GATE_LANES_STORE|GATE_LANES_RECORDS|GATE_LANES_PREFER) return 0 ;;
-    GATE_STEPS|GATE_PROG_UNITS|GATE_JAVAC_PROG_UNITS) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
+    # (GD3: GATE_LOADS, another load closures' file, test/gate/loads.edn's, for the planner's tests)
+    GATE_STEPS|GATE_PROG_UNITS|GATE_JAVAC_PROG_UNITS|GATE_LOADS) [ -n "${ARBACE_GATE_STORE:-}" ] ;;
     # queue 085 (report 084 finding 5, GTS112 (b)): a name a step of the table declares in :env, which its key
     # holds (plan.ae: "env NAME=VALUE" or "env NAME unset"): the frozen JVM's FROZEN_CP, FROZEN_TAG and
     # ARBACE_ORACLE_*, j2g-edge's J2G_FIXTURES and J2G_EDGE_WORK
@@ -557,7 +606,7 @@ gate_declared_env_of() {
 }
 gate_scrub_env() {
   local v dropped=()
-  for v in GATE_STEPS GATE_PROG_UNITS GATE_JAVAC_PROG_UNITS; do
+  for v in GATE_STEPS GATE_PROG_UNITS GATE_JAVAC_PROG_UNITS GATE_LOADS; do
     if [ -n "${!v+x}" ] && [ -z "${ARBACE_GATE_STORE:-}" ]; then
       echo "gate: $v is set (the gate's own tests: another table or the units given) but ARBACE_GATE_STORE is not: its passes would go into the shared store; set ARBACE_GATE_STORE to a store of its own, or unset $v" >&2
       exit 2
@@ -1167,7 +1216,7 @@ stage0_choose() {
   grep -v 'nothing linked' "$TMPDIR/gate-stage0-link.txt" | sed 's/^/     /'
 }
 
-if [ -n "$prune" ]; then gate_prune $dry; exit; fi
+if [ -n "$prune" ]; then gate_prune $dry $cheap $wts; exit; fi
 if [ -n "$audit" ]; then
   stage0_choose
   "${stage0_cmd[@]}" > "$root/.tmp/gate-audit-stage0.log" 2>&1 || { tail -5 "$root/.tmp/gate-audit-stage0.log"; exit 1; }
@@ -1239,9 +1288,10 @@ commit=$(git rev-parse HEAD 2>"$TMPDIR/gate-git.err" || echo unknown)
 dirty=false; [ -z "$(git status --porcelain --untracked-files=no 2>"$TMPDIR/gate-git.err")" ] || dirty=true
 
 echo "== gate$( [ -n "$nightly" ] && echo ' --nightly' || { [ -n "$weekly" ] && echo ' --weekly'; } || { [ -n "$full" ] && echo ' --full'; })$( [ -n "$oracle" ] && echo " --oracle"): $(git log -1 --format='%h %s')"
-# Go's build cache, trimmed by every gate run (bin/lib/gocache.bash)
-. "$root/bin/lib/gocache.bash"
-gocache_trim
+# GD4 (GDS17 (a)): the caches' cheap rules at every gate's start (test/gate/caches.edn: Go's build cache held to its size by
+# the least recently used, not bin/lib/gocache.bash's 90-minute wipe, which the gate's ARBACE_GOCACHE_KEEP_MIN puts at Go's
+# own five days; TMPDIR's old files), and again before a step at most every 5 minutes (gate_cache_cap)
+gate_prune --cheap | tail -1 | sed 's/^/   /'
 
 sampler &
 sampler_pid=$!
@@ -1384,9 +1434,12 @@ if [ -n "$oracle" ]; then
   for n in $(names_of oracle); do report "$n"; done
 fi
 ran=0 skipped=0
+# GD4 (GDS12 (a)): the steps deferred for the disk, run again now that the chains are done (the night's slack)
+disk_retry
 for n in "${order[@]}"; do
-  case $(cat "$logs/$n.status" 2>"$logs/count.err") in skip) skipped=$((skipped + 1)) ;; none|absent) ;; ?*) ran=$((ran + 1)) ;; esac
+  case $(cat "$logs/$n.status" 2>"$logs/count.err") in skip) skipped=$((skipped + 1)) ;; none|absent|deferred) ;; ?*) ran=$((ran + 1)) ;; esac
 done
+deferred=$(deferred_count)
 peak=$(awk -F'\t' '$2 == "gate" && $3 > m {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")
 low=$(awk -F'\t' '$2 == "MemAvailable" && (m == "" || $3 < m) {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")
 echo "   $ran steps run, $skipped skipped; the gate's processes at most $(gib "$peak"), the host's MemAvailable at least $(gib "$low") (.tmp/gate/mem.tsv)"
@@ -1399,5 +1452,10 @@ if [ -n "${GATE_CLEAN_INNER:-}" ]; then
       "${GATE_CLEAN_LOGS_NAME:-}" "$logs/clean-record.edn" "$root" | sed 's/^/   /'
   fi
 fi
-if [ $status = 0 ]; then echo "== gate passed ($(secs "$start"))"; else echo "== gate FAILED ($(secs "$start"))"; fi
+# GD4 (GDS12 (a)): a run that left steps deferred for the disk passed nothing it did not run: incomplete, exit 3 (bin/night
+# fast-forwards nothing), never a failure of theirs
+if [ $status = 0 ] && [ "$deferred" -gt 0 ]; then
+  echo "== gate INCOMPLETE: $deferred step(s) deferred for the disk, the rest passed ($(secs "$start"); .tmp/gate/disk.log)"; exit 3
+fi
+if [ $status = 0 ]; then echo "== gate passed ($(secs "$start"))"; else echo "== gate FAILED ($(secs "$start"))$( [ "$deferred" -gt 0 ] && echo ", $deferred deferred for the disk")"; fi
 exit $status

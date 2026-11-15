@@ -98,7 +98,7 @@ t_notread() {
   printf '(ns x)\n;; see clojure.core/map\n(defn f [] (LOST) 1)\n' > "$d/named/x.ae"
   printf '(ns y)\n(defn f [] (LOST) 1)\n' > "$d/plain/y.ae"
   out=$(lost_rt "$d/named"); expect "notread: no fault, a text naming clojure.* is outside read's image" 0 $?
-  echo "$out" | grep -q "1 outside" && ok "notread: counted outside" || bad "notread: not counted outside: $out"
+  grep -q "1 outside" <<< "$out" && ok "notread: counted outside" || bad "notread: not counted outside: $out"
   out=$(lost_rt "$d/plain" lose); expect "notread: a print fault in a plain file fails" 1 $?
   out=$(lost_rt "$d/named" lose); expect "notread: the same fault in a file naming clojure.* fails" 1 $?
 }
@@ -115,7 +115,7 @@ t_x509() {
   out=$(ARBACE_GOROOT=$g X509ROOTS_TODAY=20261111 "$here/bin/x509roots-vendor" --work "$w" check 2>&1)
   [ ! -e "$w/renamed/stale.txt" ] && ok "x509: check remakes renamed (a stale tree is no original)" || bad "x509: a stale renamed tree was reused"
   [ -f "$w/renamed/x509roots/fallback/bundle/bundle.go" ] && ok "x509: renamed holds the module's package" || bad "x509: renamed lacks the package"
-  echo "$out" | grep -q "snapshot of 20261011, 31 days old at 20261111" && ok "x509: the snapshot's age is noted" || bad "x509: no age note: $out"
+  grep -q "snapshot of 20261011, 31 days old at 20261111" <<< "$out" && ok "x509: the snapshot's age is noted" || bad "x509: no age note: $out"
 }
 
 t_libs() {
@@ -168,14 +168,14 @@ t_only() {
   echo '{:c {"other/q.ae" {:why :text :at "line 1: \"a\" / \"b\""}} :counts {:c {:files 99 :one-way 0 :outside 0}}}' > "$k"
   printf '# the list\n\nsub/z.ae\nno/such.ae\n' > "$l"
   out=$(lost_rt "$d" lose --known "$k" --corpus c --only "$l"); expect "only: unlisted failing file, unlisted known entry and counts do not count" 0 $?
-  echo "$out" | grep -q 'repr-clojure roundtrip c .*: 1 files, 1 equal' && ok "only: counted the listed file alone" || bad "only: counts: $out"
-  echo "$out" | grep -q '1 of the 2 listed files are in this corpus' && ok "only: an unknown id is said" || bad "only: unknown id: $out"
+  grep -q 'repr-clojure roundtrip c .*: 1 files, 1 equal' <<< "$out" && ok "only: counted the listed file alone" || bad "only: counts: $out"
+  grep -q '1 of the 2 listed files are in this corpus' <<< "$out" && ok "only: an unknown id is said" || bad "only: unknown id: $out"
   printf 'sub/y.ae\n' > "$l"
   out=$(lost_rt "$d" lose --known "$k" --corpus c --only "$l"); expect "only: a listed failing file fails" 1 $?
   [ "$(echo "$out" | sed -nE 's/^  NEW   ([^ ]+) - .*$/\1/p')" = sub/y.ae ] && ok "only: the failure line" || bad "only: failure line: $out"
   printf 'other/q.ae\n' > "$l"
   out=$(lost_rt "$d" lose --known "$k" --corpus c --only "$l"); expect "only: a listed known entry that comes back equal is stale" 1 $?
-  echo "$out" | grep -q '^  STALE other/q.ae' && ok "only: the stale line" || bad "only: stale line: $out"
+  grep -q '^  STALE other/q.ae' <<< "$out" && ok "only: the stale line" || bad "only: stale line: $out"
   out=$(rt --ids --from-arbace "$d"); expect "only: --ids" 0 $?
   [ "$out" = "$(printf 'other/q.ae\nsub/y.ae\nsub/z.ae')" ] && ok "only: --ids lists the files" || bad "only: ids: $out"
   "$here/bin/repr-clojure" check --suite --only "$l" > "$scratch/o.out" 2>&1; expect "only: check --suite refuses --only" 2 $?
@@ -191,18 +191,18 @@ t_controls() {
   echo '{:c {} :counts {:c {:files 2 :one-way 0 :outside 0}}}' > "$k"
   echo '[{:id "c/one-vs-two" :corpus :c :subject "one.clj" :reference "two.clj"}]' > "$c"
   out=$(rt --known "$k" --controls "$c" --corpus c "$d"); expect "controls: a crossed pair holds" 0 $?
-  echo "$out" | grep -q '^  CONTROL ok c/one-vs-two - line 1: ' && ok "controls: the ok line" || bad "controls: ok line: $out"
+  grep -q '^  CONTROL ok c/one-vs-two - line 1: ' <<< "$out" && ok "controls: the ok line" || bad "controls: ok line: $out"
   echo '[{:id "c/one-vs-one" :corpus :c :subject "one.clj" :reference "one.clj"}]' > "$c"
   out=$(rt --known "$k" --controls "$c" --corpus c "$d"); expect "controls: a control that passes fails the run" 1 $?
-  echo "$out" | grep -q '^  CONTROL FAILED c/one-vs-one - the comparison passes what differs' && ok "controls: the FAILED line" || bad "controls: FAILED line: $out"
+  grep -q '^  CONTROL FAILED c/one-vs-one - the comparison passes what differs' <<< "$out" && ok "controls: the FAILED line" || bad "controls: FAILED line: $out"
   echo '[{:id "c/one-vs-two" :corpus :c :subject "one.clj" :reference "two.clj"}]' > "$c"
   echo '{:c {"two.clj" {:why :text :at "line 1: \"(ns a.two)\" / \"(ns a.one)\""}} :counts {:c {:files 2 :one-way 0 :outside 0}}}' > "$scratch/ctl/known2.edn"
   out=$(rt --known "$scratch/ctl/known2.edn" --controls "$c" --corpus c "$d"); expect "controls: an excused crossed difference fails the run" 1 $?
-  echo "$out" | grep -q '^  CONTROL FAILED c/one-vs-two - the known entry of two.clj excuses it' && ok "controls: the excused line" || bad "controls: excused line: $out"
+  grep -q '^  CONTROL FAILED c/one-vs-two - the known entry of two.clj excuses it' <<< "$out" && ok "controls: the excused line" || bad "controls: excused line: $out"
   echo '[{:id "c/x" :corpus :c :subject "no.clj" :reference "two.clj"} {:id "o/y" :corpus :other :subject "one.clj" :reference "one.clj"}]' > "$c"
   out=$(rt --known "$k" --controls "$c" --corpus c "$d"); expect "controls: a missing subject is left, another corpus's not judged" 0 $?
-  echo "$out" | grep -q '^  CONTROL left c/x' && ok "controls: the left line" || bad "controls: left line: $out"
-  echo "$out" | grep -q 'o/y' && bad "controls: another corpus's control judged: $out" || ok "controls: another corpus's control not judged"
+  grep -q '^  CONTROL left c/x' <<< "$out" && ok "controls: the left line" || bad "controls: left line: $out"
+  grep -q 'o/y' <<< "$out" && bad "controls: another corpus's control judged: $out" || ok "controls: another corpus's control not judged"
 }
 
 tests=("$@"); [ ${#tests[@]} = 0 ] && tests=(frozen counts notread x509 libs known only controls)

@@ -2,28 +2,32 @@
 # The night's runner (GDS1 (a), GD1; doc/GATE-DIET-SURVEY.md, "As built: GD1"): the gate a night runs on the checkout it is
 # started in (the gate's checkout, the main checkout's .tmp/worktrees/next by the main session's convention), by its tier:
 #   nightly  bin/gate --nightly: --full's steps keyed as --full keys them, each rotated part as its subset and the night's
-#            slice (GT8.4), the :clean-only parts left out; every night but the weekly one
-#   weekly   bin/gate --weekly: --full with every part (GATE_ALL_PARTS=1), the weekly tier's :clean-only parts (GDS4 (a): the
-#            jdk corpora of repr/java's tree checks, rsi-check, cpp-roundtrip's libstdcxx-testsuite-every-40, haskell-target-probe,
-#            llvmi-aot, the fixpoint, programs-full) and the parked ones (GTS19 (a)) beside --full's; the night that starts on
-#            Saturday (UTC; NIGHT_WEEKLY_DAY, date +%u's number, default 6)
+#            slice (GT8.4), the :clean-only parts and the :weekly steps left out (but a :weekly step whose :also-changed files
+#            changed since its latest pass: the fixpoint and programs-full after a change to j2g, repr/go or the build's
+#            scripts); every night but the weekly one
+#   weekly   bin/gate --weekly: --full with the weekly tier, its :phase :weekly steps and parts (GDS4 (b), GD3: the jdk
+#            corpora of repr/java's front and nojavac checks, rsi-check, cpp-roundtrip's libstdcxx-testsuite-every-40,
+#            haskell-target-probe, llvmi-aot, the fixpoint, programs-full) beside --full's, the parked :clean-only parts not
+#            (GTS19 (a): the clean run's); the night that starts on Saturday (UTC; NIGHT_WEEKLY_DAY, date +%u's number, default 6)
 #   auto     (the default) weekly on the weekly night, else nightly. The night is the date of the start less 12 hours, as
 #            bin/gate's GATE_NIGHT, so that a night that crosses midnight is one.
 # The clean run at a tag stays bin/gate --full --clean, by hand (ORS1 (a): with bin/gate --oracle).
 #
 # The contract (what the main session's night slot relies on; the slot's own script under .tmp/ is scratch):
-#   - it starts only when the disk is at most NIGHT_DISK_MAX percent full (default 85), the checkout's tracked files are clean,
+#   - it starts only when the disk is at most NIGHT_DISK_MAX percent full (default 85; over it, after bin/gate --prune --cheap), the checkout's tracked files are clean,
 #     and, with --upstream REMOTE/BRANCH, HEAD is that branch's head after a fetch (a gate on a stale or dirty checkout records
 #     passes nobody merged); else it says why in the progress log and exits 1, running nothing;
 #   - the environment's host and lock variables are dropped (ARBACE_HOST_EXE, ARBACE_HEAVY_CMD, ARBACE_HEAVY_HELD,
 #     GATE_HEAVY_CMD): the gate takes its own (bin/gate's gate_keep_env keeps what chooses only where things are kept);
 #   - one gate, in the foreground of this script, its log LOG/gate.log, the progress LOG/progress.log (a line at the start, the
 #     status and minutes at the end, the FAILED lines), the status LOG/status (the gate's exit status), LOG/tier, LOG/commit;
-#   - with --ff DIR: on a pass, DIR's checked-out branch is fast-forwarded to the commit the gate ran on (git merge --ff-only,
+#   - with --ff DIR: on a pass (a weekly night's too since GD3, unless NIGHT_WEEKLY_FF=0), DIR's checked-out branch is fast-forwarded to the commit the gate ran on (git merge --ff-only,
 #     never a merge commit or a force), then pushed to each --push REMOTE (its branch of the same name); nothing on a failure;
 #   - exit status: the gate's (0 a pass), or 1 when it did not start, or the fast-forward's or a push's failure.
-# Usage: bin/night [--tier auto|nightly|weekly] [--plan] [--upstream REMOTE/BRANCH] [--ff DIR [--push REMOTE]...]
+# Usage: bin/night [--tier auto|nightly|weekly] [--concurrent] [--plan] [--upstream REMOTE/BRANCH] [--ff DIR [--push REMOTE]...]
 #                  [--log DIR] [--detach]
+#   --concurrent  (GD4, GDS2 (a): the night's 6 h of wall in the lanes) bin/gate --TIER --concurrent: the chains at once in the memory
+#             lanes, the host's big lock taken once by the gate for the whole run
 #   --plan    the tier's plan alone (bin/gate --nightly|--weekly --plan), no checks of the checkout, nothing run
 #   --log     the logs' directory (default .tmp/night/NIGHT, NIGHT the night's date)
 #   --detach  the same command started in a new session (setsid nohup), its PID in LOG/run.pid, its output LOG/run.out; stop
@@ -31,12 +35,13 @@
 set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
-usage() { echo "usage: bin/night [--tier auto|nightly|weekly] [--plan] [--upstream REMOTE/BRANCH] [--ff DIR [--push REMOTE]...] [--log DIR] [--detach]" >&2; exit 2; }
-tier=auto plan= upstream= ff= log= detach= push=() args=()
+usage() { echo "usage: bin/night [--tier auto|nightly|weekly] [--concurrent] [--plan] [--upstream REMOTE/BRANCH] [--ff DIR [--push REMOTE]...] [--log DIR] [--detach]" >&2; exit 2; }
+tier=auto concurrent= plan= upstream= ff= log= detach= push=() args=()
 while [ $# -gt 0 ]; do
   case $1 in
     --tier) [ $# -ge 2 ] || usage; tier=$2; args+=("$1" "$2"); shift ;;
     --plan) plan=1 ;;
+    --concurrent) concurrent=--concurrent; args+=("$1") ;;
     --upstream) [ $# -ge 2 ] && [ "${2#*/}" != "$2" ] || usage; upstream=$2; args+=("$1" "$2"); shift ;;
     --ff) [ $# -ge 2 ] && [ -d "$2" ] || usage; ff=$(cd "$2" && pwd); args+=("$1" "$ff"); shift ;;
     --push) [ $# -ge 2 ] || usage; push+=("$2"); args+=("$1" "$2"); shift ;;
@@ -55,8 +60,8 @@ if [ "$tier" = auto ]; then
   if [ "$(date -u -d "@$night_start" +%u)" = "${NIGHT_WEEKLY_DAY:-6}" ]; then tier=weekly; else tier=nightly; fi
 fi
 if [ -n "$plan" ]; then
-  echo "night $night: the $tier tier (bin/gate --$tier --plan)"
-  exec "$root/bin/gate" "--$tier" --plan
+  echo "night $night: the $tier tier (bin/gate --$tier $concurrent --plan)"
+  exec "$root/bin/gate" "--$tier" $concurrent --plan
 fi
 log=${log:-$root/.tmp/night/$night}
 mkdir -p "$log" || exit 1
@@ -71,6 +76,11 @@ say() { echo "== $(date -u +%T) $*" | tee -a "$log/progress.log"; }
 unset ARBACE_HOST_EXE ARBACE_HEAVY_CMD ARBACE_HEAVY_HELD GATE_HEAVY_CMD
 cd "$root" || exit 1
 pct=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
+# GD4 (GDS17 (a)): over it, the caches' cheap rules first (bin/gate --prune --cheap: Go's caches by size, TMPDIR's old files), once
+if [ "$pct" -gt "${NIGHT_DISK_MAX:-85}" ]; then
+  "$root/bin/gate" --prune --cheap > "$log/prune-cheap.log" 2>&1
+  pct=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
+fi
 [ "$pct" -le "${NIGHT_DISK_MAX:-85}" ] || { say "night $night: the disk is at ${pct}% (more than ${NIGHT_DISK_MAX:-85}%): not started"; exit 1; }
 [ -z "$(git status --porcelain --untracked-files=no)" ] || { say "night $night: the checkout is not clean: not started"; exit 1; }
 if [ -n "$upstream" ]; then
@@ -80,14 +90,19 @@ if [ -n "$upstream" ]; then
 fi
 commit=$(git rev-parse HEAD)
 echo "$tier" > "$log/tier"; echo "$commit" > "$log/commit"; rm -f "$log/status"
-say "night $night starts: the $tier tier (bin/gate --$tier) on $(git rev-parse --short=9 HEAD), disk ${pct}%, MemAvailable $(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo) GiB"
+say "night $night starts: the $tier tier (bin/gate --$tier${concurrent:+ $concurrent}) on $(git rev-parse --short=9 HEAD), disk ${pct}%, MemAvailable $(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo) GiB"
 start=$(date +%s)
-"$root/bin/gate" "--$tier" > "$log/gate.log" 2>&1; st=$?
+"$root/bin/gate" "--$tier" $concurrent > "$log/gate.log" 2>&1; st=$?
 echo "$st" > "$log/status"
 say "bin/gate --$tier status $st ($(( ($(date +%s) - start) / 60 )) min); FAILED: $(grep -c '^   FAILED' "$log/gate.log")"
 grep -E '^   FAILED' "$log/gate.log" | cut -c1-160 >> "$log/progress.log"
 [ "$st" = 0 ] || { say "the gate did not pass: nothing fast-forwarded"; exit "$st"; }
 [ -n "$ff" ] || exit 0
+# the user's (1) of 2026-11-13 (GD1's open points): no fast-forward on a weekly night until GD3 builds :phase :weekly. Since GD3
+# (doc/GATE-DIET-SURVEY.md, "As built: GD3") the weekly tier is --full with the :phase :weekly steps and parts, the parked
+# :clean-only parts out of it (the clean run's alone), so a weekly pass fast-forwards as a nightly one does; NIGHT_WEEKLY_FF=0
+# keeps the weekly night from fast-forwarding (the main session's choice, said in the progress log)
+if [ "$tier" = weekly ] && [ "${NIGHT_WEEKLY_FF:-1}" = 0 ]; then say "the weekly tier passed: nothing fast-forwarded (NIGHT_WEEKLY_FF=0)"; exit 0; fi
 branch=$(git -C "$ff" symbolic-ref --short HEAD) || { say "--ff $ff: no branch checked out"; exit 1; }
 git -C "$ff" merge --ff-only -q "$commit" > "$log/ff.log" 2>&1 || { say "--ff $ff: $branch not fast-forwarded to $(git rev-parse --short=9 "$commit") (log $log/ff.log)"; exit 1; }
 say "$branch fast-forwarded to $(git -C "$ff" rev-parse --short=9 HEAD) in $ff"

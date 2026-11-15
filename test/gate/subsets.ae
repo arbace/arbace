@@ -1,0 +1,438 @@
+(ns gate.subsets
+  "GD2 (doc/GATE-DIET-SURVEY.md, GDS5 (a), GDS6 (a), \"As built: GD2\"): the rotation's subsets (GT8.4's NAME.PART.sub, the
+  :subset lists test/gate/plan.ae's rotation-lists reads) made by one stated rule from the committed records, so that anyone
+  regenerates the same bytes. In no key: bin/gate-subsets runs it by hand; the plan reads only the lists it writes.
+
+  The rule (the user, 2026-11-13: \"stratified by area, every test that ever failed or was classed kept, rotation through
+  the rest\"), per rotated part (a corpus):
+    U     the part's universe: the ids record-ids (gate.plan's) gives for the part from its :rotate's :universe
+    K     kept: the :rotate's :always (the negative controls' subjects and references)
+          + the ids a class names explicitly (the level's divergences :tests and :examples; for C and C++'s round trip,
+            where a class takes a file through the level's known file, every non-pass row of the level's record)
+          + the ids that ever failed in the gate's rotation (test/gate/failed-ever.tsv, a snapshot of the store's
+            _rotation/NAME.PART.failed \"fail\" events: `snapshot`)
+          + one representative per class that holds tests of the part only by :match (the lowest SHA-256 of its ids)
+          + the part's unclassified non-passes (none in a record the judges pass)
+    strata U by area (a stable key from the id's path, per crop below); each stratum filled, in ascending SHA-256 of
+          the id (the id as the rotation names it), up to ceil(|stratum| / 5) counting K's members in it
+    subset = K + fill, sorted; K is never dropped (where K alone is above 20% the report says so).
+  The rest rotates through the seven slices (slice-of) as before.
+
+  Areas: Java the corpus's :areas prefix that holds the test's :dir plus the next component of :dir (jdk/java/util,
+  hotspot/jtreg/compiler/c2, langtools/tools/javac/generics; test/java/jls/ one stratum); C the file's directory under the
+  corpus (\".\" a top-level file); repr/go the dump key's first directory, a directory test's `X.dir` dropped (\".\" a
+  top-level package or file); C++ the name's corpus and first directory (gxx-dg/cpp0x, gxx-old-deja/g++.abi).
+
+  -main ROOT SET [--check]     SET java, c, go, cpp or all: the subsets written into their files (test/java/corpora.edn's
+                               :subset-interp, :subset-compiled and :subset; test/c/corpora.edn's :subset-tokens,
+                               :subset-parse, :subset-annot, :subset-roundtrip; test/repr/go/native-check-subsets.edn;
+                               test/cpp/subsets.edn's :subset-roundtrip of cpp-roundtrip's parts and :subset-dg), and a
+                               table of the parts (U, K and its parts, the subset, its fraction); --check: written
+                               nowhere, exit 1 when a file differs from what the rule makes
+  -main ROOT snapshot STORE    test/gate/failed-ever.tsv: its lines and every \"fail\" event of STORE/_rotation/*.failed
+                               (CHECK<TAB>ID, CHECK the rotated part NAME.PART), sorted, each once; never drops a line"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [gate.plan])
+  (:import (java.io File PushbackReader)
+           (java.security MessageDigest)))
+
+;; ---- reading
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- sha256 [^String s]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (.update md (.getBytes s "UTF-8"))
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md)))))
+
+(def ^:private record-ids
+  "the planner's own reading of a universe (gate.plan/record-ids: [file part id-re id-as])"
+  @#'gate.plan/record-ids)
+
+(defn- table-steps [root] (:steps (read-file (str root "/test/gate/steps.edn"))))
+
+(defn- step-parts
+  "STEP's parts (every part, :clean-only ones too) with the :rotate each runs under (the part's own, else the step's)"
+  [steps nm]
+  (let [s (first (filter #(= (str nm) (str (:name %))) steps))]
+    (when-not s (throw (ex-info (str "gate.subsets: no step " nm " in test/gate/steps.edn") {})))
+    (vec (for [p (:parts s) :let [r (or (:rotate p) (:rotate s))] :when r]
+           {:step (str nm) :part (str (:part p)) :rotate r}))))
+
+(defn- failed-ever
+  "test/gate/failed-ever.tsv as {CHECK #{ID}}"
+  [root]
+  (let [f (File. (str root "/test/gate/failed-ever.tsv"))]
+    (if (.isFile f)
+      (reduce (fn [m l] (let [[c id] (str/split l #"\t")] (update m c (fnil conj #{}) id)))
+              {} (remove #(or (str/blank? %) (str/starts-with? % "#")) (str/split-lines (slurp f))))
+      {})))
+
+;; ---- the rule
+
+(defn- quota [n] (quot (+ (long n) 4) 5))
+
+(defn- by-sha [ids] (sort-by (fn [id] [(sha256 id) id]) ids))
+
+(defn- derive-part
+  "the rule over one part: U (the universe, ids), K-PARTS ({:always :classed :failed :reps :unclassed}, sets of ids,
+  restricted to U), AREA (id -> stratum). The subset and its numbers"
+  [u kparts area]
+  (let [uset (set u)
+        kparts (into {} (for [[k v] kparts] [k (set (filter uset v))]))
+        kept (set (apply concat (vals kparts)))
+        strata (group-by area u)
+        fill (for [[_ ids] strata
+                   :let [have (count (filter kept ids))
+                         need (- (quota (count ids)) have)]
+                   :when (pos? need)
+                   id (take need (by-sha (remove kept ids)))]
+               id)
+        sub (vec (sort (distinct (concat kept fill))))
+        over (for [[a ids] (sort strata) :let [h (count (filter kept ids))] :when (> h (quota (count ids)))]
+               [a h (count ids)])]
+    {:u (count u) :k (count kept) :kparts (into (sorted-map) (for [[k v] kparts] [k (count v)]))
+     :strata (count strata) :subset sub :over over}))
+
+(defn- reps
+  "one representative per class: CLASSED is [[id class-id] ...] (each non-pass and its class); EXPLICIT the ids the
+  classes name; the classes none of whose members is named get their member of lowest SHA-256"
+  [classed explicit]
+  (set (for [[_ xs] (group-by second classed)
+             :let [ids (map first xs)]
+             :when (not-any? explicit ids)]
+         (first (by-sha ids)))))
+
+;; ---- Java
+
+(defn- java-at-level? [c level]
+  (cond (:level c) (= level (:level c))
+        (:levels c) (boolean (some #{level} (:levels c)))
+        :else true))
+
+(defn- java-classify
+  "java.check/classify's rule (test/java/check.ae): the first class of the level that names the test or whose :match finds
+  \"RESULT REASON\" (a flaky result only by a ^flaky pattern; :results restricting)"
+  [classes level id result reason]
+  (let [s (str (name result) " " reason)
+        takes? (fn [re] (or (not= :flaky result) (str/starts-with? (str re) "^flaky")))]
+    (or (some (fn [c] (when (and (java-at-level? c level)
+                                 (or (nil? (:results c)) (some #{result} (:results c)))
+                                 (or (some #{id} (:tests c)) (some #(and (takes? %) (re-find % s)) (:match c))))
+                        (:id c)))
+              classes)
+        :unclassified)))
+
+(def ^:private java-keys
+  "each corpora.edn key: the steps rotating over it and the levels whose records and classes it keeps"
+  [{:key :subset-interp :steps ["java-interp"] :levels [:interp]}
+   {:key :subset-compiled :steps ["java-compiled-full"] :levels [:compiled]}
+   ;; java-read, java-classes, java-print and java-diagnostics name no :subset-key: one list, the union of their levels' K
+   {:key :subset :steps ["java-read" "java-classes" "java-print" "java-diagnostics"] :levels [:read :classes :print :diagnostics]}])
+
+(defn- java-dirs
+  "the JDK's passes' :dir, {id dir}, from test/java/ref-jdk26.edn's lines"
+  [root]
+  (into {} (for [l (str/split-lines (slurp (str root "/test/java/ref-jdk26.edn")))
+                 :let [id (second (re-find #"^ \{:id \"(t[0-9]+)\"" l))
+                       d (second (re-find #" :dir \"([^\"]*)\"" l))]
+                 :when (and id d)]
+             [id d])))
+
+(defn- java-area
+  "the stratum of a test: the longest of the corpus's :areas that holds its :dir, plus :dir's next component"
+  [areas dirs id]
+  (let [d (str (get dirs id) "/")
+        a (last (sort-by count (filter #(str/starts-with? d %) areas)))]
+    (if a
+      (let [rest (subs d (count a))
+            nxt (first (remove str/blank? (str/split rest #"/")))]
+        (str a (or nxt "")))
+      (str "?" (get dirs id)))))
+
+(defn- java-plan [root]
+  (let [steps (table-steps root)
+        corpora (:corpora (read-file (str root "/test/java/corpora.edn")))
+        areas (into {} (for [c corpora] [(name (:id c)) (:areas c)]))
+        classes (read-file (str root "/test/java/divergences.edn"))
+        dirs (java-dirs root)
+        fe (failed-ever root)
+        recs (memoize (fn [lv] (let [f (str root "/test/java/check-" (name lv) ".edn")]
+                                 (if (.isFile (File. f)) (read-file f) []))))]
+    (vec (for [{:keys [key steps levels]} java-keys
+               :let [sps (mapcat #(step-parts (table-steps root) %) steps)
+                     parts (distinct (map :part sps))]
+               part parts
+               :let [ps (filter #(= part (:part %)) sps)
+                     r (:rotate (first ps))
+                     u (record-ids (str root "/" (:universe r)) part (:id-re r) (:id-as r))
+                     uset (set u)
+                     always (set (mapcat #(map str (:always (:rotate %))) ps))
+                     failed (set (mapcat #(get fe (str (:step %) "." part)) ps))
+                     explicit (set (for [lv levels c classes :when (java-at-level? c lv)
+                                         id (concat (:tests c) (:examples c))]
+                                     (str id)))
+                     classed (for [lv levels [id _ result reason] (recs lv)
+                                   :when (and (uset id) (not= :pass result))]
+                               [id (java-classify classes lv id result reason)])
+                     unclassed (set (map first (filter #(= :unclassified (second %)) classed)))
+                     rp (reps (remove #(= :unclassified (second %)) classed) explicit)]]
+           (merge {:file "test/java/corpora.edn" :key key :part part :steps steps}
+                  (derive-part u {:always always :classed explicit :failed failed :reps rp :unclassed unclassed}
+                               (partial java-area (get areas part) dirs)))))))
+
+;; ---- C's read checks
+
+(def ^:private c-keys
+  [{:key :subset-tokens :step "c-tokens"}
+   {:key :subset-parse :step "c-parse"}
+   {:key :subset-annot :step "c-annotations"}
+   {:key :subset-roundtrip :step "c-roundtrip"}])
+
+(defn- dir-of [^String path] (let [i (.lastIndexOf path "/")] (if (neg? i) "." (subs path 0 i))))
+
+(defn- c-plan [root]
+  (let [steps (table-steps root)
+        corpora (set (for [m (tree-seq coll? seq (read-file (str root "/test/c/corpora.edn")))
+                           :when (and (map? m) (keyword? (:id m)) (:where m))]
+                       (name (:id m))))
+        fe (failed-ever root)]
+    (vec (for [{:keys [key step]} c-keys
+               {:keys [part rotate]} (step-parts steps step)
+               :when (contains? corpora part)
+               :let [r rotate
+                     f (str root "/" (:universe r))
+                     u (record-ids f part (:id-re r) (:id-as r))
+                     ;; the record's non-passes (:known, :fail): each a file the level's known file and classes hold by name
+                     nonpass (set (for [[id res] (read-file f)
+                                        :let [[c n] (str/split (str id) #" " 2)]
+                                        :when (and (= c part) (not= :pass res))]
+                                    (str c "/" n)))
+                     pre (str part "/")]]
+           (merge {:file "test/c/corpora.edn" :key key :part part :steps [step] :strip pre}
+                  (derive-part u {:always (set (map str (:always r))) :classed nonpass
+                                  :failed (set (get fe (str step "." part)))}
+                               (fn [id] (dir-of (subs id (count pre))))))))))
+
+;; ---- repr/go's native check
+
+(defn- go-area [^String id]
+  (let [key (second (str/split id #"/" 2))
+        ds (remove #(str/ends-with? % ".dir") (butlast (str/split key #"/")))]
+    (or (first ds) ".")))
+
+(defn- go-plan [root]
+  (let [steps (table-steps root)
+        fe (failed-ever root)
+        res (:corpora (read-file (str root "/test/repr/go/native-check-results.edn")))
+        known (set (map str (keys (read-file (str root "/test/repr/go/native-known.edn")))))
+        classes (read-file (str root "/test/repr/go/divergences-read.edn"))
+        classify (fn [s] (or (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes) :unclassified))]
+    (vec (for [{:keys [part rotate]} (step-parts steps "repr-go-native")
+               :let [r rotate
+                     u (record-ids (str root "/" (:universe r)) part (:id-re r) (:id-as r))]
+               :when (seq u)
+               :let [pre (str part "/")
+                     rc (first (filter #(= part (:corpus %)) res))
+                     ;; the non-passes by name: raw-only (the final conversion's failure), extra (the helper's), each its case
+                     ;; string as divergences-read.edn's classes match it
+                     classed (concat (for [[k why] (:raw-only rc)] [(str pre k) (classify (str "raw-only " part ": " why))])
+                                     (for [[k why] (:extra rc)] [(str pre k) (classify (str "extra " part ": " why))]))
+                     unclassed (set (map first (filter #(= :unclassified (second %)) classed)))
+                     explicit (set (filter #(known (subs % (count pre))) u))]]
+           (merge {:file "test/repr/go/native-check-subsets.edn" :key :subset :part part :steps ["repr-go-native"] :strip pre}
+                  (derive-part u {:always (set (map str (:always r))) :classed explicit
+                                  :failed (set (get fe (str "repr-go-native." part)))
+                                  :reps (reps (remove #(= :unclassified (second %)) classed) explicit) :unclassed unclassed}
+                               go-area))))))
+
+;; ---- C++: cpp-roundtrip's parts and cpp-dg's dg-error-own
+
+(defn- cpp-area [^String id]
+  (let [ps (str/split id #"/")] (if (> (count ps) 2) (str (first ps) "/" (second ps)) (first ps))))
+
+(defn- cpp-plan [root]
+  (let [steps (table-steps root)
+        fe (failed-ever root)]
+    (vec (concat
+          (for [{:keys [part rotate]} (step-parts steps "cpp-roundtrip")
+                :let [r rotate f (str root "/" (:universe r))
+                      u (record-ids f part (:id-re r) (:id-as r))
+                      ;; the record's non-pass verdicts ([:known CLASS], :oracle-rejects, ...): each a file a class holds by name
+                      nonpass (set (for [[n v] (:files (read-file f)) :when (not= :pass v)] (str n)))]]
+            (merge {:file "test/cpp/subsets.edn" :key (:subset-key r) :part part :steps ["cpp-roundtrip"]}
+                   (derive-part u {:always (set (map str (:always r))) :classed nonpass
+                                   :failed (set (get fe (str "cpp-roundtrip." part)))}
+                                cpp-area)))
+          ;; dg-error-own: Arbace's own front end judged by each test's own dg-error lines; no class at this level (a recorded
+          ;; own pass that fails, or a control that passes, fails the run), so K is the controls and the failures
+          (for [{:keys [part rotate]} (step-parts steps "cpp-dg")
+                :let [r rotate u (record-ids (str root "/" (:universe r)) part (:id-re r) (:id-as r))]]
+            (merge {:file "test/cpp/subsets.edn" :key (:subset-key r) :part part :steps ["cpp-dg"]}
+                   (derive-part u {:always (set (map str (:always r))) :failed (set (get fe (str "cpp-dg." part)))}
+                                cpp-area)))))))
+
+;; ---- writing: a key's vector replaced in place in the corpus's map (its text elsewhere kept byte for byte)
+
+(defn- scan-end
+  "the index just past the form that opens at I (a [, { or ( at TEXT's I), skipping strings, regexes, comments and
+  character literals"
+  [^String text i]
+  (let [n (count text)]
+    (loop [j (inc i) depth 1]
+      (when (>= j n) (throw (ex-info "gate.subsets: unbalanced form" {:at i})))
+      (let [ch (.charAt text j)]
+        (cond
+          (= ch \") (recur (loop [k (inc j)] (let [c (.charAt text k)] (cond (= c \\) (recur (+ k 2)) (= c \") (inc k) :else (recur (inc k))))) depth)
+          (= ch \;) (recur (let [k (.indexOf text "\n" j)] (if (neg? k) n k)) depth)
+          (= ch \\) (recur (+ j 2) depth)
+          (#{\[ \{ \(} ch) (recur (inc j) (inc depth))
+          (#{\] \} \)} ch) (if (= 1 depth) (inc j) (recur (inc j) (dec depth)))
+          :else (recur (inc j) depth))))))
+
+(defn- map-span
+  "[start end] of the map {:id :ID ...} in TEXT that is not in a comment, or nil"
+  [^String text id]
+  (let [m (re-matcher (re-pattern (str "\\{:id :" (java.util.regex.Pattern/quote (name id)) "(?=[\\s}])")) text)]
+    (loop []
+      (when (.find m)
+        (let [s (.start m)
+              bol (inc (.lastIndexOf text "\n" (int s)))]
+          (if (str/includes? (subs text bol s) ";")
+            (recur)
+            [s (scan-end text s)]))))))
+
+(defn- key-span
+  "[start end] of `:KEY [...]` at the top level of the map TEXT[S, E), or nil"
+  [^String text s e key]
+  (let [kw (str key)]
+    (loop [j (inc s) depth 0]
+      (when (< j (dec e))
+        (let [ch (.charAt text j)]
+          (cond
+            (= ch \") (recur (loop [k (inc j)] (let [c (.charAt text k)] (cond (= c \\) (recur (+ k 2)) (= c \") (inc k) :else (recur (inc k))))) depth)
+            (= ch \;) (recur (.indexOf text "\n" j) depth)
+            (and (zero? depth) (.startsWith text kw j) (Character/isWhitespace (.charAt text (+ j (count kw)))))
+            (let [b (loop [k (+ j (count kw))] (if (Character/isWhitespace (.charAt text k)) (recur (inc k)) k))]
+              (if (= \[ (.charAt text b)) [j (scan-end text b)] (recur (inc j) depth)))
+            (#{\[ \{ \(} ch) (recur (inc j) (inc depth))
+            (#{\] \} \)} ch) (recur (inc j) (dec depth))
+            :else (recur (inc j) depth)))))))
+
+(def ^:private width 130)
+
+(defn- render
+  "`:KEY [\"a\" \"b\" ...]` wrapped at WIDTH columns, its continuation lines under the first id; COL the column of :KEY"
+  [key ids col]
+  (let [head (str key " [")
+        ind (+ col (count head))
+        pad (apply str (repeat ind " "))
+        qs (map pr-str ids)]
+    (if (empty? qs)
+      (str head "]")
+      (loop [qs qs line "" lines []]
+        (if-let [q (first qs)]
+          (if (and (seq line) (> (+ ind (count line) 1 (count q)) width))
+            (recur (rest qs) q (conj lines line))
+            (recur (rest qs) (if (seq line) (str line " " q) q) lines))
+          (str head (str/join (str "\n" pad) (conj lines line)) "]"))))))
+
+(defn- set-key
+  "TEXT with map ID's KEY set to IDS (replaced where it is, else added before the map's end on a line of its own at INDENT;
+  a map not there added before the file's last ]"
+  [^String text id key ids ^String indent]
+  (if-let [[s e] (map-span text id)]
+    (if-let [[ks ke] (key-span text s e key)]
+      (let [col (- ks (inc (.lastIndexOf text "\n" (int ks))))]
+        (str (subs text 0 ks) (render key ids col) (subs text ke)))
+      (str (subs text 0 (dec e)) "\n" indent (render key ids (count indent)) (subs text (dec e))))
+    (let [i (.lastIndexOf text "]")]
+      (str (str/trimr (subs text 0 i)) "\n {:id " id "\n" indent (render key ids (count indent)) "}" (subs text i)))))
+
+(def ^:private go-header
+  (str ";; repr-go-native's rotation subsets (GD2, doc/GATE-DIET-SURVEY.md, \"As built: GD2\"): per corpus of bin/repr-go native-check, the\n"
+       ";; dump keys (KEY of test/repr/go/native-check-ids.edn's CORPUS/KEY) the nightly tier's repr-go-native.CORPUS.sub runs, the rest a\n"
+       ";; seventh a night. Made by bin/gate-subsets go (test/gate/subsets.ae: the controls, the named and ever-failed dumps, one per\n"
+       ";; class of test/repr/go/divergences-read.edn, each area filled to a fifth by SHA-256); `bin/gate-subsets --check` checks it.\n"
+       ";; Read with the Clojure reader.\n"))
+
+(defn- write-file
+  "the new text of FILE with its rows' subsets (rows of one file)"
+  [root file rows]
+  (let [f (str root "/" file)]
+    (if (= file "test/repr/go/native-check-subsets.edn")
+      (reduce (fn [t {:keys [part key subset strip]}]
+                (set-key t (keyword part) key (map #(subs % (count strip)) subset) "  "))
+              (str go-header "[]\n") rows)
+      (let [indent (if (= file "test/cpp/subsets.edn") "  " "   ")]
+        (reduce (fn [t {:keys [part key subset strip]}]
+                  (set-key t (keyword part) key (if strip (map #(subs % (count strip)) subset) subset) indent))
+                (slurp f) rows)))))
+
+;; ---- the report
+
+(defn- pct [a b] (if (pos? b) (format "%.1f%%" (* 100.0 (/ (double a) b))) "-"))
+
+(defn- report [rows]
+  (println "| file | key | part | U | K | K's parts | strata | subset | of U | K above a fifth in |")
+  (println "|---|---|---|---:|---:|---|---:|---:|---:|---|")
+  (doseq [{:keys [file key part u k kparts strata subset over]} rows]
+    (println (str "| " file " | " key " | " part " | " u " | " k " | "
+                  (str/join " " (for [[x n] kparts :when (pos? n)] (str (name x) " " n))) " | " strata " | "
+                  (count subset) " | " (pct (count subset) u) " | "
+                  (str/join ", " (for [[a h n] over] (str a " " h "/" n))) " |"))))
+
+(defn- plan-of [root set]
+  (case set
+    "java" (java-plan root)
+    "c" (c-plan root)
+    "go" (go-plan root)
+    "cpp" (cpp-plan root)
+    "all" (vec (concat (java-plan root) (c-plan root) (go-plan root) (cpp-plan root)))
+    (throw (ex-info (str "gate.subsets: SET is java, c, go, cpp or all, not " set) {}))))
+
+(defn run [root set check?]
+  (let [rows (plan-of root set)
+        diffs (doall
+               (for [[file rs] (group-by :file rows)
+                     :let [t (write-file root file rs)
+                           f (File. (str root "/" file))
+                           old (when (.isFile f) (slurp f))]
+                     :when (not= t old)]
+                 (do (when-not check? (spit f t))
+                     file)))]
+    (report rows)
+    (if check?
+      (if (seq diffs)
+        (do (println (str "gate-subsets: " (str/join ", " diffs) " differ from the rule's subsets (bin/gate-subsets " set " writes them)"))
+            (System/exit 1))
+        (println (str "gate-subsets: the subsets of " set " are the rule's")))
+      (println (str "gate-subsets: " (if (seq diffs) (str "wrote " (str/join ", " diffs)) "nothing changed"))))))
+
+(defn snapshot [root store]
+  (let [out (File. (str root "/test/gate/failed-ever.tsv"))
+        old (if (.isFile out) (remove #(or (str/blank? %) (str/starts-with? % "#")) (str/split-lines (slurp out))) [])
+        d (File. (str store "/_rotation"))
+        new (for [^File f (sort-by #(.getName ^File %) (or (seq (.listFiles d)) []))
+                  :let [n (.getName f)]
+                  :when (str/ends-with? n ".failed")
+                  l (str/split-lines (slurp f))
+                  :let [[_ _ id ev] (str/split l #"\t")]
+                  :when (and id (= "fail" ev))]
+              (str (subs n 0 (- (count n) (count ".failed"))) "\t" id))
+        lines (sort (distinct (concat old new)))]
+    (spit out (str "# the ids that ever failed in the gate's rotation (GD2, test/gate/subsets.ae's K): CHECK<TAB>ID, CHECK a rotated part\n"
+                   "# NAME.PART; each \"fail\" event of the store's _rotation/NAME.PART.failed, bin/gate-subsets snapshot (lines are only added)\n"
+                   (apply str (map #(str % "\n") lines))))
+    (println (str "gate-subsets: test/gate/failed-ever.tsv " (count old) " -> " (count lines) " lines"))))
+
+(defn -main [& args]
+  (let [[root verb & more] args]
+    (cond
+      (= verb "snapshot") (snapshot root (first more))
+      (and root verb) (run root verb (some #{"--check"} more))
+      :else (do (println "usage: gate.subsets ROOT java|c|go|cpp|all [--check] | gate.subsets ROOT snapshot STORE")
+                (System/exit 2)))))

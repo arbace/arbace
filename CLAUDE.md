@@ -651,13 +651,26 @@ Prior art:
   `bin/j2g-edge update`). `--full` is serial by default since GT3 (GTS13 (a); at once its chains overload a 62 GB host:
   REAP9's runs, 2026-10-26). Since GD1 (doc/GATE-DIET-SURVEY.md, GDS1-GDS20 decided 2026-11-13, "As built: GD1") the night
   runs `bin/night` (its header the contract: a clean checkout at its upstream, the disk at most 85%, one gate, a pass
-  fast-forwarding `--ff DIR`): `bin/gate --nightly` (GT8.4's subsets and slices), on the night that starts on Saturday `bin/gate
-  --weekly` (`--full` with every part, `GATE_ALL_PARTS=1`: the `:clean-only` parts are the weekly tier's, the jdk corpora of
-  repr/java's tree checks, rsi-check, haskell-target-probe, llvmi-aot, the fixpoint and programs-full among them); `gate-tests`
+  fast-forwarding `--ff DIR`): `bin/gate --nightly` (GT8.4's subsets and slices; since GD2 every rotated subset by one rule, `bin/gate-subsets`), on the
+  night that starts on Saturday `bin/gate --weekly` (since GD3 `--full` with the `:phase :weekly` steps and parts: the jdk corpora
+  of repr/java's front and nojavac checks, rsi-check, haskell-target-probe, llvmi-aot, the fixpoint and programs-full, these two also
+  on a night whose changes touch their `:also-changed` files; the parked `:clean-only` parts the clean run's alone); since GD3
+  every key holds the epoch `test/gate/epoch` in place of the runner's and planner's text, and an audited step's arbace/ files are
+  its load closure, `test/gate/loads.edn` (`bin/gate --loads-update`); `gate-tests`
   is a `--full` step, CLAUDE.md's own test the essential `claude-md`; each C level's steps key its own records (`:c-records-*`).
-  Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
+  Since GD4 ("As built: GD4") the gate owns the disk and the memory: before each step a free-disk floor (`GATE_DISK_FLOOR`, 25 GiB,
+  plus its `:disk-gib`), below it the cheap prune, a wait shared by the run, then the step `deferred` (retried at the end; a run left
+  with one is INCOMPLETE, exit 3), "No space left on device" in a step's log or outputs a failure; each step admitted by the larger of
+  its `:mem-gib` and 1.1 x its recorded peak (the plan prints UNDER), that figure its `GATE_STEP_MEM_GIB`, under which
+  `bin/gate-policy mem` caps the tools' `GOMEMLIMIT` defaults, and `ARBACE_DISK_POLICY=gate`, under which their disk guards yield;
+  `bin/gate --nightly --concurrent` runs (`bin/night --concurrent`); `test/gate/caches.edn`, every cache with its rule, read by
+  `bin/gate --prune [--dry-run] [--cheap] [--worktrees]` (the cheap rows at every gate's start; the essential `caches-table` holds
+  every `.tmp` name of `bin/` to a row); musl's forms shared by key in the main checkout's `.tmp/shared`; the essential
+  `records-check` (`bin/records-check`: each results file against its known file, `test/records/`; `make hooks` its opt-in pre-commit hook).
+  Logs in `.tmp/gate/`. Every `bin/arbace-go --build`
   first trims Go's build cache of entries unused for 90 minutes (`bin/lib/gocache.bash`,
-  `ARBACE_GOCACHE_KEEP_MIN`). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
+  `ARBACE_GOCACHE_KEEP_MIN`); under the gate, since GD4, that is Go's own five days and the gate caps the cache at 8 GiB by the
+  least recently used (`test/gate/caches.edn`). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
 
 ## Records
 

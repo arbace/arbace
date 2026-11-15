@@ -212,7 +212,7 @@ if [ $st = 0 ] && grep -q 'simulated wall 0:51 (the pre steps and builds 0:02)' 
 else no "the view: status $st: $(cat "$t/view.txt")"; fi
 # bin/gate: --concurrent with --only refused; GATE_LANES=0 with --clean refused
 (cd "$here" && bin/gate --full --clean --concurrent --only x) > "$t/opt1.txt" 2>&1; st1=$?
-(cd "$here" && GATE_LANES=0 bin/gate --full --clean --concurrent --plan) > "$t/opt2.txt" 2>&1; st2=$?
+(cd "$here" && GATE_LOADS=$t/no-loads.edn GATE_LANES=0 bin/gate --full --clean --concurrent --plan) > "$t/opt2.txt" 2>&1; st2=$?
 if [ $st1 = 2 ] && [ $st2 = 2 ]; then ok "bin/gate: --concurrent --only and --clean with GATE_LANES=0 refused"
 else no "bin/gate's options: $st1 $st2: $(head -2 "$t/opt1.txt" "$t/opt2.txt")"; fi
 

@@ -11,7 +11,7 @@ bad() { echo "FAIL $*"; fail=1; }
 for f in bin/lib/gate-run.bash bin/gate; do
   pats=('main/\.tmp/gate-exe' '\${gkey:0:20}'); [ "$f" = bin/gate ] || pats+=('git-common-dir')
   for pat in "${pats[@]}"; do
-    if grep -n -- "$pat" "$here/$f" | grep -v '^[0-9]*:[[:space:]]*#' | grep -q .; then bad "$f still has $pat in code"
+    if grep -q . <<< "$(grep -n -- "$pat" "$here/$f" | grep -v '^[0-9]*:[[:space:]]*#')"; then bad "$f still has $pat in code"
     else ok "$f: no $pat in code"; fi
   done
 done

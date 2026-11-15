@@ -28,6 +28,15 @@ forms=${CI_MUSL_FORMS:-$d/forms}
 key() { (cd "$root" && { find arbace/repr/c.ae arbace/repr/c arbace/c/musl.ae test/c/host c/target -type f | LC_ALL=C sort | xargs sha256sum
                          for h in "$m/obj/include/bits/alltypes.h" "$m/obj/include/bits/syscall.h"; do
                            [ -f "$h" ] && sha256sum < "$h"; done; true; } | sha256sum | cut -d' ' -f1); }
+# shared_dir (GD4): the main checkout's directory of shared forms caches by key (a worktree's or the clean run's clone's main
+# checkout, as tarball's; CI_MUSL_SHARED another)
+shared_dir() {
+  local cmain
+  # (the clean run reads its own: no shared copy is taken or published from its clone)
+  case $root in */.tmp/gate-clean/*) echo "$root/.tmp/ci-musl/no-shared"; return ;; esac
+  cmain=${root%%/.tmp/gate-clean/*}; cmain=${cmain%%/.tmp/worktrees/*}
+  echo "${CI_MUSL_SHARED:-$cmain/.tmp/shared/ci-musl-forms}"
+}
 # fresh: the key is the checkout's and the index exists and lists as many units as the cache holds (night 10, DIAGNOSIS §1: concurrent
 # ensures left a partial index.edn that a fresh key hid)
 keyok() { [ -f "$forms/key" ] && [ "$(cat "$forms/key")" = "$(key)" ]; }
@@ -172,12 +181,28 @@ case ${1:-} in
     if fresh; then echo "musl: the forms cache is fresh, nothing to read"; exit 0; fi
     "$0" prepare
     k=$(key)
+    # GD4 (GDS17 (a), doc/GATE-DIET-SURVEY.md, "As built: GD4"): the forms are content-keyed (no path of the checkout in them), so
+    # one copy at the main checkout's .tmp/shared/ci-musl-forms/KEY serves every worktree at that key (a worktree's read cost
+    # 5 h on 2026-11-13): taken when there and whole (its key, its index listing its units), published after a read here
+    sh=$(shared_dir)/$k
+    case $root in */.tmp/gate-clean/*) CI_MUSL_NO_SHARED=1 ;; esac
+    if [ -z "${CI_MUSL_NO_SHARED:-}" ] && [ "$forms" != "$sh" ] && [ -f "$sh/key" ] && [ "$(cat "$sh/key")" = "$k" ] && [ -f "$sh/index.edn" ] \
+       && [ "$(grep -o ' {:defs ' "$sh/index.edn" | wc -l)" -eq "$(find "$sh/src" -name '*.c.ae' | wc -l)" ]; then
+      rm -rf "${forms:?}.new.$$"; cp -a "$sh" "$forms.new.$$" && rm -rf "${forms:?}" && mv -T "$forms.new.$$" "$forms" \
+        && fresh && { echo "musl: the forms cache taken from $sh (the main checkout's shared copy at this key)"; exit 0; }
+      rm -rf "${forms:?}.new.$$"; echo "musl: the shared copy $sh did not take: reading" >&2
+    fi
     # a stale index alone does not reread the cache: read-all reads what is missing and index makes the index again
     if ! keyok; then
       [ -d "$forms" ] && echo "musl: the forms cache's key is not the checkout's (repr/c or the host changed): reread" >&2
       rm -rf "$forms"
     fi
     cd "$m" && arbace_tool -p "$root" -e "(require 'arbace.c.musl 'arbace.repr.c.host)" \
-      -e "(let [h (arbace.repr.c.host/load-host \"$root/test/c/host\") errs (arbace.c.musl/read-all h \"$root\" ${CI_THREADS:-4})] (doseq [[s e] (sort errs)] (println \"musl: not read:\" s e)) (arbace.c.musl/index \"$root\") (println \"musl: read, the index\" (count errs) \"not read\"))" && printf '%s\n' "$k" > "$forms/key" ;;
+      -e "(let [h (arbace.repr.c.host/load-host \"$root/test/c/host\") errs (arbace.c.musl/read-all h \"$root\" ${CI_THREADS:-4})] (doseq [[s e] (sort errs)] (println \"musl: not read:\" s e)) (arbace.c.musl/index \"$root\") (println \"musl: read, the index\" (count errs) \"not read\"))" && printf '%s\n' "$k" > "$forms/key" || exit 1
+    # GD4: published for the other worktrees at this key (through a temporary name; one that is there is kept)
+    if [ -z "${CI_MUSL_NO_SHARED:-}" ] && [ "$forms" != "$sh" ] && fresh && [ ! -d "$sh" ]; then
+      mkdir -p "$(dirname "$sh")" && cp -a "$forms" "$sh.tmp.$$" && mv -T "$sh.tmp.$$" "$sh" 2>"$TMPDIR/ci-musl-share.err" \
+        && echo "musl: the forms published as $sh" || rm -rf "${sh:?}.tmp.$$"
+    fi ;;
   *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

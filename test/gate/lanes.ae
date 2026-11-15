@@ -126,13 +126,31 @@
 
 ;; ---- the view
 
-(defn- median [xs]
+(defn- median
+  "the median of the passes' walls; of an even count the lower middle one (GD4, gate-gd23's note 6: with two passes the upper
+  one put an outlier, rsi-essential's 19,767 s pass of 2026-11-12, into every plan; the lower keeps a one-off slow run out)"
+  [xs]
   (let [v (vec (sort xs))]
-    (when (seq v) (nth v (quot (count v) 2)))))
+    (when (seq v) (nth v (quot (dec (count v)) 2)))))
+
+(defn- rot-share
+  "GD2: a rotated check's (NAME.PART.sub, NAME.PART.sK: the plan's LOGS/rotation/NAME.rot names its part and universe) share
+  of its part: [part list-size universe-size], or nil"
+  [logs ^String nm]
+  (let [r (java.io.File. (str logs "/rotation/" nm ".rot"))
+        l (java.io.File. (str logs "/rotation/" nm ".list"))]
+    (when (and logs (.isFile r) (.isFile l))
+      (let [kv (into {} (for [x (str/split-lines (slurp (.getPath r))) :let [[k v] (str/split x #"\t" 2)]] [k v]))
+            u (get kv "universe")
+            n (count (remove str/blank? (str/split-lines (slurp (.getPath l)))))]
+        (when (and u (re-matches #"[0-9]+" u) (pos? (Long/parseLong u)) (not= (get kv "slice") "whole"))
+          [(get kv "part") n (Long/parseLong u)])))))
 
 (defn- durations
-  "name -> [seconds source] for the plan's steps"
-  [names store records]
+  "name -> [seconds source] for the plan's steps; a rotated check (GD2) its part's duration times its list's share of the
+  universe, the same rule before and after a subset changes (its own passes ran another list)"
+  ([names store records] (durations names store records nil))
+  ([names store records logs]
   (let [recs (->> records (keep #(try (read-file %) (catch Throwable _ nil))) (filter map?) (sort-by #(str (:date %))))
         rec-wall (reduce (fn [m r] (into m (for [e (:steps r) :when (number? (:wall-s e))] [(:step e) (:wall-s e)]))) {} recs)
         nparts (frequencies (keep #(second (re-matches #"([^.]+)\..+" %)) names))
@@ -145,7 +163,10 @@
                          cands (if prefer-clean
                                  [[rc "clean"] [share "clean share"] [st "store"]]
                                  [[st "store"] [rc "clean"] [share "clean share"]])]]
-               [nm (or (first (filter #(number? (first %)) cands)) [0 "unmeasured"])]))))
+               [nm (or (when-let [[part n u] (rot-share logs nm)]
+                         (let [pd (or (when (and store (not= store "-")) (median (keep :secs (costs/passes store part)))) (rec-wall part))]
+                           (when (number? pd) [(quot (* pd n) u) (str "est. " n "/" u " of " part)])))
+                       (first (filter #(number? (first %)) cands)) [0 "unmeasured"])])))))
 
 (defn- gnum [x] (let [x (double x)] (if (== x (Math/floor x)) (str (long x)) (format "%.1f" x))))
 (defn- hm [s] (format "%d:%02d" (quot (long s) 3600) (quot (mod (long s) 3600) 60)))
@@ -206,7 +227,7 @@
                 :mem (if (= mg "-") 1 (Double/parseDouble mg))
                 :kind (case d "build" "build" "always" "always" nil)})
         names (map :name rows)
-        durs (durations names store records)
+        durs (durations names store records logs)
         ;; GATE_LANES_FULL_SERIAL "serial CHAIN...": --full run serially (bin/gate without GATE_FULL_PARALLEL), the full
         ;; phase's steps one chain in the table's order but the crops' chains named, which run beside it
         fs (System/getenv "GATE_LANES_FULL_SERIAL")

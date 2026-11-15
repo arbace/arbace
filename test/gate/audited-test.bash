@@ -36,7 +36,8 @@ for h in $(cd "$root" && arbace_tool -p "$root/test" -m gate.crops host-names "$
   grep -q ":$h \"" "$t/hosts.edn" || sed -i "\$ s/}\$/ :$h \"$z\"}/" "$t/hosts.edn"
 done
 planned=0
-if (cd "$root" && arbace_tool -p "$root/test" -m gate.plan plan "$root" "$t" "$t/store" full) > "$t/plan.out" 2>&1; then planned=1; fi
+# (GD3: no load closures, GATE_LOADS none: their text scan reads arbace/'s sources, which gate-tests does not declare)
+if (cd "$root" && GATE_LOADS=$t/no-loads.edn arbace_tool -p "$root/test" -m gate.plan plan "$root" "$t" "$t/store" full) > "$t/plan.out" 2>&1; then planned=1; fi
 # decl NAME: the step's declaration line of its material
 decl() { sed -n "/^step $1\$/{n;p;q}" "$t/plan/$1.inputs" 2>/dev/null; }
 

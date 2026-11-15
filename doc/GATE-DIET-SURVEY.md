@@ -692,3 +692,346 @@ All of these pass:
 - `bin/crops-score --judge --strict`.
 
 No gate was run.
+
+## As built: GD2 (branch `gate-gd23`, 2026-11-13)
+
+GD2 makes the nightly tier's subsets with one stated rule (GDS5 (a), GDS6 (a)). `bin/gate-subsets` (`test/gate/subsets.ae`,
+`gate.subsets`; `make gate-subsets`, `make gate-subsets-check`) regenerates the committed lists byte for byte from the records;
+`--check` fails on a difference.
+
+The rule, per rotated part:
+- the universe is the planner's own reading of the `:rotate`'s record (`gate.plan`'s `record-ids`, so the two cannot drift);
+- kept, never dropped: the controls' ids (`:always`); the ids a class of the level names (Java's `:tests` and `:examples`; for C
+  and C++'s round trip every non-pass row of the level's record, its `:known` entries); the ids that ever failed in the rotation
+  (`test/gate/failed-ever.tsv`, a snapshot of the store's `_rotation/*.failed` that `bin/gate-subsets snapshot` only extends: 18
+  lines); one representative per class held by `:match` alone (its member with the lowest SHA-256);
+- then each area is filled to a fifth, ceil(n/5), counting the kept ones, in ascending SHA-256 of the id. The area: for Java the
+  corpus's `:areas` prefix plus `:dir`'s next component (`jdk/java/util`, `hotspot/jtreg/compiler/c2`); for C the file's directory;
+  for repr/go the key's first directory; for C++ the corpus and its first directory.
+
+The rest rotates through the seven slices as before, so a night runs the subset and about a seventh of the rest: some 30% of a corpus.
+
+| part | universe | before | after |
+|---|---|---|---|
+| java-interp.jdk-run (`:subset-interp`) | 1,498 | 1,189 | 304 (20%) |
+| java-compiled-full.jdk-run (`:subset-compiled`) | 1,498 | 1,190 | 304 (20%) |
+| java-interp / -compiled-full .jdk-other | 545 | 490 / 520 | 137 / 157 |
+| java-{interp,compiled-full}.langtools-run | 515 | 136 / 89 | 158 / 159 |
+| java-{interp,compiled-full}.hotspot-compiler | 697 | 100 / 75 | 162 / 161 |
+| java-{read,classes,print}.* (`:subset`, new) | as above | whole | 304, 121, 144, 161, 29, 4 |
+| java-diagnostics.langtools-diagnostics | 1,194 | whole | 239 |
+| c-{tokens,parse,annotations,roundtrip}.torture-execute | 1,672 | whole | 336 |
+| c-{tokens,parse,annotations,roundtrip}.torture-compile | 1,791 | whole | 359 |
+| repr-go-native.test (and the three other test parts) | 1,707 | whole | 346 |
+| repr-go-native.amd64 (and arm64, linux-*) | 378-382 | whole | 93-94 |
+| cpp-dg.dg-error-own | 4,564 | whole | 931 |
+| cpp-roundtrip.gxx-old-deja-every-10, c-c++-common-every-10 | 323, 326 | whole | 72, 71 |
+
+Where the kept ids cover a corpus it still runs whole (gcc-embed's tokens and parse levels: all 47 files `:known`). Small corpora keep
+more than a fifth, as ceil rounds up in small areas (hotspot-runtime 29 of 55). The Java subsets replace GTS205's coverage subsets
+(1,954 and 1,905 tests). java-compiled-full.jdk-run's part declares 31 GiB (night 13's 28.2, ⌈1.1 ×⌉) in place of the step's 50,
+so that no nightly check declares more than 40 GiB but repr-go's 42 (the user's (3)).
+
+`--nightly --concurrent --plan` is now allowed (a plan, never a run), to measure the nightly tier in the memory lanes.
+
+### Before and after (the plans of 2026-11-13, GATE_NIGHT=20405, `--rerun`: every check run)
+
+The base is the branch's first commit (`gate-gd1` plus `bin/night`'s weekly guard). The durations come from the store. One pass is
+left out (the `fixed` columns): rsi-essential's pass of 2026-11-12 03:33, 19,767 s against its other pass's 1,903 s. With two
+passes the view's median is the larger one, so that outlier put 5 h 29 min into every plan. The view now estimates a rotated check as
+its part's duration times its list's share of the universe (`est. N/U of PART`), the same rule before a subset changes and after;
+the base's view used the subsets' own passes.
+
+| plan | checks | serial sum | wall, the essential memory lane | wall, `--concurrent` lanes |
+|---|---|---|---|---|
+| `--nightly`, fixed | 377 → 493 | 17:30 → 14:10 | 12:39 → 8:24 | 7:39 → **3:56** |
+| `--nightly`, the store as it is | 377 → 493 | 22:28 → 19:08 | 17:37 → 13:21 | – → 7:56 |
+| `--full`, fixed | 329 → 331 | 20:26 → 20:53 | 13:42 → 14:09 | 7:01 → 7:09 |
+| `--weekly`, fixed | 358 → 338 | 27:03 → 27:02 | 21:02 → 19:17 | – |
+| essential | 59 → 59 | 2:42 → 2:42 | 0:56 → 0:56 | – |
+
+- The nightly tier is now within GDS2's 6 h of wall in the lanes (3:56), but only with the outlier left out. In the serial model it
+  is still 8:24.
+- `bin/gate --nightly` runs without `--concurrent`. To run in the lanes it needs the runner to accept `--nightly --concurrent`;
+  GD4's runner work decides that.
+- In the nightly plan, Java's share of the steps' minutes fell from 5:56 to 1:57.
+- `--full` grew by two checks, the fixpoint and programs-full: their `:also-changed` files differ from their latest passes. On
+  their first pass after GD3 that is once.
+- `--weekly` lost the parked parts (GD3).
+
+## As built: GD3 (branch `gate-gd23`, 2026-11-13)
+
+The user (2026-11-13) accepted GD1's open points and asked for GD2 and GD3 at once, on one branch from `gate-gd1`. GD3 changes the
+planner (`test/gate/plan.ae`), the audit (`test/gate/audit.ae`), `bin/gate`'s option parsing, `bin/night` and the table. It moves
+every step's key once (the epoch replaces the logic's three files, the closures narrow the file lines) and `gate_key` not at all
+(`126c321af14f…`, `bin/arbace-go --gate-key` on the base and on the branch; `test/gate/gate-key-crops-test.bash` passes).
+
+**GDS11 (a): the epoch.** Every key held the text of `bin/lib/gate-run.bash`, `bin/lib/gate-cache.bash` and `test/gate/plan.ae`.
+It now holds one file instead, `test/gate/epoch`: a number and a dated line why, bumped by hand when a change to the runner, the
+planner or the cache library alters what a step sees (its command line, environment, inputs, or how its verdict is judged). A
+change that alters none of it (a message, the schedule, the plan's printing) drops no pass. `test/gate/plan-logic-test.bash` holds
+the planner to the one line. The bound on a missed bump: gate-tests proves the runner, and the weekly `--full` and the clean run at
+a tag run every check anyway.
+
+**GDS9 (a): the load closures.** `test/gate/loads.edn` holds, per audited step, the files under `arbace/` it read (`:reads`) and the
+namespace families it never loaded (`:never`: `:go` for `arbace.go`, `:c` for `arbace.c` and `arbace.repr.c`). `bin/gate
+--loads-update [LOGDIR...]` (`gate.loads`, `test/gate/loads.ae`) makes it from the audited runs' `NAME.paths` and `NAME.loaded`; by
+default from every clean run's logs of the main checkout, oldest first, then the latest `--audit`. The committed file comes from the
+eleven clean runs of 2026-10-29 to 11-06: 235 steps and parts.
+
+Why the reads and not `:tools`: stage 0 and the executables read a tool namespace from the checkout only to compare it with the
+embedded copy (`RT.load`'s tool source rule), and they read it whenever they load it. A file under `arbace/` that a step never
+reads cannot change what it does. A file whose namespace is not a tool source is never read by stage 0, and it reaches a step only
+through a host's identity (`:gate`, `:prog`), which keys it as before.
+
+For a step with an entry (the step; a rotated check's part or `.sub`; else the union of its step's parts; else its step):
+- its file lines under `arbace/` are the closure: its reads, and every source they name, transitively (each `arbace.NAME` in a
+  source's text whose file exists, and each `(load "PATH")`). The text scan catches a namespace required after the audit, also a
+  `(require 'NS)` in code: `arbace.go.run` loads `arbace.go.escape`, added on 11-06 after the last clean run, that way;
+- on `:prog` or `:javac-prog`, the families it never loaded join its `:never-loads`, so their units leave the host's identity and
+  their sources its files. goi's units (`arbace.go.*`, 14 in each program) leave the key of every program-host step that never ran
+  goi.
+
+A step with no entry keeps its whole declaration. 116 checks of the full plan have none (the crops' steps that joined the table after the
+last clean run: C++, Scheme, OCaml, LLVM IR, Rust, Haskell, asm). The next clean run, or `bin/gate --audit STEP...`, writes their
+logs, and `bin/gate --loads-update` adds them.
+
+The audit holds the closure honest. It declares a step's arbace/ files by the same closure, so a read outside it is undeclared and
+fails the audit, and it holds the step to the augmented `:never-loads`, so a load of a dropped family fails too. The remedy is
+`bin/gate --loads-update` with that run's logs.
+
+**GDS4 (b): `:phase :weekly`.** The weekly tier is now a phase, not `GATE_ALL_PARTS`:
+- a step or a part declares `:phase :weekly`. The planner plans it with `--weekly` (`bin/gate --weekly`, the clean run and its plan,
+  `--audit`) as a `:full` step in the table's order and chain;
+- a `:weekly` step with `:also-changed RULES` also runs on any other night of `--full` or `--nightly` when the files those rules
+  select changed since its latest pass, or it never passed. The rules' files join its key, so the pass's material names them. The
+  fixpoint and programs-full declare `["arbace/j2g/" "arbace/repr/go.ae" "arbace/repr/go/" :build]` (the user's (2)). The plan's
+  why says which files changed;
+- a `:needs`, `:uses` or `:start-after` naming a weekly step a plan leaves out is dropped. The declared `:needs` stay in the key
+  (`:keyed`), so the key is the same on the weekly night and the others;
+- `bin/gate --weekly` no longer sets `GATE_ALL_PARTS=1`. The parked `:clean-only` parts (the user's of 2026-11-12/13: haskell-roundtrip,
+  rust-roundtrip, rsi-check-ui, repr-java-{attr,roundtrip}.jdk, ...) are the clean run's alone again.
+
+GD1's weekly list moved from `:clean-only` to `:phase :weekly`: repr-java-{front,nojavac}.jdk (parts), rsi-check (the step, both
+parts), cpp-roundtrip.libstdcxx-testsuite-every-40 (a part), haskell-target-probe, llvmi-aot, fixpoint and programs-full (whole steps
+again, their one-part `weekly` form gone). `gate.costs` counts a weekly row as the full tier's and leaves it out of the nightly sums
+(marked `(weekly)`). `gate.crops concurrent` takes weekly steps as full ones.
+
+**bin/night's fast-forward on a weekly night.** The user's (1): no fast-forward on a weekly night until `:phase :weekly`. The
+branch's first commit (`e51ba2698`) makes `bin/night` honour that on its own, so it can go ahead of the rest. With `:phase :weekly`
+built and the parked parts out of the weekly tier, a weekly pass fast-forwards again; `NIGHT_WEEKLY_FF=0` keeps it from doing so.
+
+### Fan-out (checks a change to one file reruns; the full plans' material, `--full --plan`; wall night 13's)
+
+| file | before | after |
+|---|---|---|
+| `arbace/go/escape.ae` | 213 checks, 18 h 43 | 149, 15 h 55 |
+| `arbace/go/check.ae` | 214, 19 h 35 | 150, 16 h 48 |
+| `arbace/repr/c.ae`, `arbace/repr/c/annot.ae` | 318, 23 h 03 | 264, 20 h 21 |
+| `arbace/c/run.ae` | 317, 22 h 56 | 263, 20 h 14 |
+| `bin/lib/gate-run.bash` | every check (331) | the 22 that list it |
+| `test/gate/plan.ae` | every check (331) | the 2 that list it (gate-tests, crops-score) |
+| `bin/lib/gate-cache.bash` | every check (331) | the 176 that list it (it is also in `gate_key`) |
+| `test/gate/epoch` | – | every check |
+
+For `arbace/go/escape.ae`, 143 of the 149 list it as a file and 5 see it through `:gate` or `:javac`. Of the 143, 116 have no load
+record: the crops' steps, which joined the table after the last clean run (C++, Scheme, OCaml, LLVM IR, Rust, Haskell, asm). Their
+first audited run (the next clean run, or `bin/gate --audit STEP...` at night) followed by `bin/gate --loads-update` takes them to
+the 27 that do read goi's sources. 66 checks left the fan-out: 51 whose closure holds no goi source, and 15 on `:prog` or
+`:javac-prog` that never loaded goi (its units out of their identity). Two joined it: the fixpoint and programs-full, in the full
+plan this time by their `:also-changed`.
+GD3 also showed what the closures cannot do: `arbace/core.ae` (258) and `arbace/repr/go/print.ae` (236) reach their checks through
+`:gate` and the program hosts' units, which load closures do not touch.
+
+### Checks run on the branch
+
+All of these pass:
+- `bin/gate-tests` (36 tests: 34 in one run, then gate-reads-test and gate-tests-test again after the planner tests of the real table took `GATE_LOADS` none, the closures' text scan reading `arbace/` that gate-tests does not declare), with the new `test/gate/weekly-test.bash`: 19 checks for the weekly phase (a `:weekly` step and part
+  only with `--weekly`; `:also-changed` in and out; a dropped `:needs` kept in the key), the epoch (the planner's text moves no key,
+  the epoch's bump moves every one) and the closures (reads plus the sources they name, a require in code too; a source outside
+  them moves no key; `:never [:go]` takes goi's unit out of a `:prog` identity).
+- `gate.crops check`: 0 problems.
+- `test/gate/crops-test.bash`, `gate-key-crops-test.bash`, `lanes-test.bash`, `rotation-test.bash` (65 of 65),
+  `rotation-controls-test.bash`, `costs-test.bash` and `plan-logic-test.bash`.
+- `bin/gate --full --mem-check`: every declaration holds.
+- `bin/gate-subsets --check`.
+- `make check-makefile`.
+- Every plan above.
+
+No gate was run.
+
+## As built: GD4 (branch `gate-gd4`, from `gate-gd23` `dc685b3df`, 2026-11-13/14)
+
+GD4 is §6's "one policy": the disk and the memory are the gate's, in its runner, and the tools' own guards yield to it (GDS12 (a),
+GDS13 (a)); the caches have one table that the prune reads (GDS17 (a), GDS18 (a)); the records are judged against their known files
+by an essential step (GDS15 (a)). It changes the runner (`bin/lib/gate-run.bash`), the planner (`test/gate/plan.ae`), `bin/gate`'s
+option parsing and summary, `bin/night`, the table, and the tools' guards. `gate_key` is the same before and after (`126c321af14f…`,
+`bin/arbace-go --gate-key` without `ARBACE_HOST_EXE` on `dc685b3df` and on the branch; `test/gate/gate-key-crops-test.bash`
+passes): nothing in `gate_key` moved (no `bin/lib` file but `gate-run.bash`, `ci/` and `repr-c/`, which it leaves out, and no build
+script). The epoch goes from 1 to 2, since every step's environment changes (`GATE_STEP_MEM_GIB`, `ARBACE_DISK_POLICY`,
+`ARBACE_GOCACHE_KEEP_MIN`): every check runs once, the same once as GD3's epoch 1 if the two land together, which neither has yet.
+
+**The disk (GDS12 (a)).**
+- Before each step of the plan (`run_one`'s `disk_admit`) the free disk of the checkout's file system must hold the floor
+  `GATE_DISK_FLOOR` (25 GiB) plus the step's `:disk-gib` (new, optional, in no key: the planner's `DISK-GIB` column).
+- Below it: the prune's cheap rules once a low spell (`gate_prune --cheap`, logged in `.tmp/gate/disk.log`), then a wait for the
+  disk to come back, `GATE_DISK_WAIT` (1800 s) polled every `GATE_DISK_POLL` (30 s). The wait is the run's, counted from the
+  spell's start (`.tmp/gate/disk.low-since`), so a night of low disk defers its later steps at once instead of 30 minutes each.
+- Then the step is `deferred`: no run, no pass, not `FAILED`; a step whose need was deferred is deferred with it. Once the chains are
+  done, `disk_retry` runs the deferred steps again in the plan's order, each checked once without a wait. A run left with deferred
+  steps and nothing failed ends `== gate INCOMPLETE: N step(s) deferred for the disk`, exit 3, so `bin/night` fast-forwards nothing.
+- After a step, "No space left on device" in its log, its failure lines or its outputs (`GATE_OUT`, where Java's levels save) fails
+  it (status 28 when it exited 0), its pass and outputs not recorded, its report saying where. The store held 37 such passes from
+  nights 12 and 13 (Java's level steps, the full disk and the 208,000-entry directory index), each of which this rule turns into a
+  failure.
+- The sampler writes `DiskAvail` beside `MemAvailable` every 5 s in `.tmp/gate/mem.tsv`.
+- The gate exports `ARBACE_DISK_POLICY=gate`. `bin/gate-policy disk-ok PCT` (new, in no key) is cppi's and rsi's light-tier guard
+  now: it yields under the gate and stops past PCT% outside it, as before. A grep of `bin/`, `tools/` and `test/` for `df` and
+  `DISK_MAX` found no third guard; `bin/night`'s 85% start rule stays, and over it `bin/night` now runs `bin/gate --prune --cheap`
+  once before deciding.
+- Each step's `.mem` and so its record keep busybox time's "File system outputs" as `:fs-out-kib`, the material of a measured
+  `:disk-gib` (GDS16's rule 3). No step declares `:disk-gib` yet: the writes are not the net growth (most are temporaries), and a
+  declaration from them alone would defer most of the night at today's 30-37 GiB free.
+
+**The memory (GDS13 (a)).**
+- The planner admits each check by the larger of its `:mem-gib` and 1.1 times the largest peak of its passes (the larger of
+  `:maxrss-kib` and `:tree-peak-kib`), rounded up to half a GiB (`gate.plan/admission`). That figure is plan.tsv's `MEM` column, by
+  which `bin/gate-lane` admits the step in both lane modes and the report flags a peak over it. Two columns join before the command,
+  `DECLARED` (the table's `:mem-gib`) and `DISK-GIB`. An undeclared step with passes is admitted by its record alone.
+- A check whose passes are over its declaration by the margin (10% and 0.5 GiB, `--mem-check`'s) twice or more is printed by the plan
+  as `UNDER  NAME: declared D GiB, N passes above it (the largest P GiB): admitted at A GiB; declare :mem-gib ⌈1.1 × P⌉`, for the
+  morning's table edit.
+- The runner exports the admission into the step as `GATE_STEP_MEM_GIB` (not for an undeclared, unrecorded step).
+  `bin/gate-policy mem DEFAULT` caps a tool's `GOMEMLIMIT` default at it, and prints DEFAULT unchanged outside the gate. It replaces
+  the 29 defaults of 3 GiB and more in rsi, cppi, pyi, ci's and the crops' c2j checks and repr/c's annotations (`${X:-6GiB}` becomes
+  `${X:-$(bin/gate-policy mem 6GiB)}`; a tool's own variable still wins). The 1,500 MiB-and-under defaults (oi, si, repr-ocaml,
+  repr-python, the C++ readers) are left: at or below the admission of any step that runs them. `bin/j2g`'s 20 GiB is left: the file is in
+  `gate_key` (window W). The runner never exports `GOMEMLIMIT` itself: a step's processes run in parallel, and a step-wide soft limit
+  per process would raise the limit of every tool that defaults lower (limit-test holds `bin/lib/limit.bash`'s default too).
+
+**`--nightly --concurrent` as a run.** `bin/gate --nightly --concurrent` runs (GD2 allowed its plan alone), and `bin/night
+--concurrent` (`make night CONCURRENT=1`) runs it, so the night can take the lanes' planned wall. The main session's slot chooses.
+
+**The caches' table (GDS17 (a), GDS18 (a)).** `test/gate/caches.edn` is in no key. It has 97 rows, one per line, and the runner's
+`caches_rows` reads it with awk, so the prune works before stage 0 and with a full disk. caches-test also reads it with the Clojure
+reader. A row names a path (`.tmp/NAME` with a glob, or `{gocache}`), where it is (`:checkout`, `:main` or `:home`), its owner and its
+rule:
+- `[:size G :lru]`: Go's build cache to 8 GiB, `.tmp/gocache` and `.tmp/repr-go-print-cache` to 2 GiB each;
+- `[:age D]`: TMPDIR's files after 2 days, `.tmp/shared` after 30;
+- `[:key-gen N]`: `.tmp/goi-table`'s generations, the newest 2;
+- `[:age-self D]`: the gate's tests' scratch directories;
+- `:builtin`: the store, the executables and ci's runtime, by `gate_prune_store`, GTS27's code unchanged;
+- `:keep`: the clean runs' logs, the packs, the locks and every tool directory whose layout mixes keyed builds with corpora fetched
+  by pin (there is no network at night, so a removed corpus fails the step);
+- `:list`: the worktrees and `keep/`.
+- `:cheap true` marks the rows the cheap tier runs; `:max-entries N` warns of a directory over N (`.tmp/java-check` at 10,000);
+  `:shared true` marks a content-keyed cache kept once by key.
+
+`bin/gate --prune [--dry-run] [--cheap] [--worktrees]` runs the store's prune, then every row, then lists this checkout's `.tmp`
+entries no row names (never removed). `--worktrees` lists the main checkout's worktrees whose branch is merged into `mac/next`
+(`GATE_PRUNE_MERGED`) and whose index is a day old (GDS18 (a): the main session removes them). The cheap tier runs:
+- at every gate's start, in place of `bin/lib/gocache.bash`'s 90-minute wipe;
+- before a step, at most every 5 minutes and one step at a time (`gate_cache_cap`);
+- in `disk_admit`.
+
+The gate exports `ARBACE_GOCACHE_KEEP_MIN=7200` (Go's own five days), so `bin/arbace-go`'s build-time trim, which is in `gate_key`,
+no longer empties the cache under the gate. Outside the gate it still does (window W). The essential step `caches-table`
+(`test/gate/caches-test.bash --coverage`, seconds) holds every `.tmp/NAME` a `bin/` script names (172) to a row. Its inputs are `bin/`
+and the table, so gate-tests' key does not take `bin/` whole.
+
+**Shared by key: musl's forms.** `bin/lib/ci/musl read` takes the main checkout's `.tmp/shared/ci-musl-forms/KEY` when it is there
+and whole (its key, its index listing its units), copying 11 MiB in place of the read that cost a worktree 5 h on 2026-11-13, and
+publishes its own after a read, through a temporary name. The forms hold no checkout path. The clean run's clone neither takes nor
+publishes (`CI_MUSL_NO_SHARED`). `test/c/musl-lock-test.bash` gains the case and keeps its first three cases on their own copy.
+j2g's and repr/go's hosts (197 MiB a worktree, §3.1) were left: their scripts are in `gate_key`.
+
+**records-check (GDS15 (a)).** `bin/records-check` (`records.check`, `test/records/check.ae`; essential step `records-check` on stage
+0, beside reap, seconds; `make records-check`) judges every recorded results file (rows `[ID RESULT REASON]`) against the known file
+that accounts for its non-passes. The pairs are the `:c-known` sources of `test/reap/cells.edn` that have a `:results` (9: C's four,
+C++'s token check, Python's four not recorded yet), and `test/records/pairs.edn` adds what the cells do not say. For C's tree check
+and annotations that is the token level's known file (`:also-known`). The tree check's mutants are excluded, since their `:known`
+goes through a generated list. The problems:
+- known-unlisted: a `:known` row that no section lists. reap does not see this one;
+- stale: a known entry whose row passes;
+- unclassed: a row neither `:pass` nor `:known`;
+- lacking: a known entry missing from results that hold its corpus.
+
+The negative controls always run: on mutated copies, the judge must find each of the four. On the tree as it is, it found 41
+known-unlisted rows:
+- annot's two torture-compile rows, pr33855.c and pr54559.c (§5.2's example);
+- 39 rows of the round trip: 25 objects-macro-body, 6 self-include, 5 eval-limits, 1 run-address, 1 split-declaration.
+
+They are `test/records/accepted.edn`'s: printed and not failed, C's to clear at its next `--record`. An accepted entry that stops
+being a problem fails the check until it is removed, so the list only drains. `bin/records-check --install-hook` (`make hooks`, the
+user's to run) writes an opt-in pre-commit hook that runs the check when a commit touches a known, results or divergences file.
+
+**The plan view's median (gate-gd23's note 6).** An even count of passes takes the lower middle one (`gate.lanes`). With two passes,
+the upper one had put rsi-essential's 19,767 s outlier into every plan.
+
+### Before and after (the plans of 2026-11-14 on `dc685b3df` and on the branch, the same store, GATE_NIGHT=20405, keyed)
+
+| plan | checks | serial sum | wall, the essential memory lane | wall, `--concurrent` lanes |
+|---|---|---|---|---|
+| `--nightly` | 492 → 494 | 18:53 → 13:48 | 12:39 → 8:22 | 9:29 → **4:04** |
+| `--full` | 330 → 332 | 26:52 → 21:03 | 19:36 → 14:43 | – → 7:13 |
+| `--weekly` | – → 340 | – → 25:35 | – → 18:59 | – |
+| essential | 59 → 61 (records-check, caches-table) | 2:44 → 2:38 | 0:56 → 0:56 | – |
+
+These are the plan view's estimates. The drop comes from the median fix: with two passes, an outlier no longer counts. The admission
+changes no duration, only how the lanes pack the steps. In the nightly plan the admission is above the declaration for 31 checks,
+the largest diffcheck's 31 → 36.5 GiB and jrt-convert's 34 → 37. No check is UNDER twice, since GD1 raised the declarations from
+the same store. The real effects of GD4 show only in a run: no ENOSPC-corrupted passes, deferred steps instead of failed ones, and
+Go's cache warm across the night.
+
+`bin/gate --prune --dry-run --worktrees` on the main store, which removed nothing, took 17 s. It found:
+- 2,881 passes, all within the store's rule;
+- Go's build cache under its 8 GiB;
+- `.tmp/java-check/forms-full` with 65,800 entries in one directory, over the 10,000 limit. This is night 12's ext4 risk again, in the
+  unsharded full-forms cache;
+- two merged worktrees idle a day (night12-lb, night12-oc).
+
+### Checks run on the branch
+
+- `bin/gate-tests` (without `GOMEMLIMIT` in the environment): 39 tests, with three new ones:
+  - `disk-policy-test`, 18 checks: the floor, the shared wait, deferred and its dependents, the retry, ENOSPC in a log and in
+    the outputs, `GATE_STEP_MEM_GIB`, `bin/gate-policy`;
+  - `admit-test`, 9 checks: the admission, UNDER, `DECLARED` and `DISK-GIB`, `:disk-gib` in no key;
+  - `caches-test`, 14 checks on a scratch root, main checkout, HOME and Go cache: every rule, `--dry-run`, `--cheap`,
+    `:max-entries`, the unlisted entries, `--worktrees` on a scratch repository. `--coverage` covers 172 names.
+
+  The first run failed costs-test, because the new steps were in no crop: `records-check` and `caches-table` joined `:shared`.
+  It also failed rotation-test, which read the command from column 18; it now reads column 20. With those two, gate-reads-test,
+  which nests them, failed too. The second run: 39 of 39 tests passed, in 50 min 55 s.
+- `bin/records-check`: 9 pairs, 0 problems (41 accepted), its four controls fail as they must.
+- `gate.crops check`: 0 problems. `test/gate/crops-test.bash`, `gate-key-crops-test.bash`, `lanes-test.bash` (50 of 50),
+  `plan-logic-test.bash`, `rotation-test.bash` and `costs-test.bash` pass.
+- Every plan above passed, and so did `bin/gate --clean --plan`, `--full --clean --plan`, `--plan --rerun`, `bin/night --plan` and
+  `bin/night --plan --concurrent`.
+- `make check-makefile` passes. `bin/reap`: 49 of 52 cells checked, 0 problems. `bin/crops-score --judge --strict` exits 0.
+- `test/c/musl-lock-test.bash`'s new case was not run: it reads musl through repr/c on the tools' host, which is heavier than this
+  brief's light runs. It is a night command.
+
+No gate was run.
+
+**Not built (GD4's part of §6 left).** GDS14's may-pass time classes (not in this brief); GDS13's "the morning's table edit takes
+it in" is the main session's, from the plan's UNDER lines; the shared host builds (j2g, repr/go) and `gocache.bash`'s rule outside
+the gate wait for window W (`gate_key`); records-check's count and provenance pairs (repr-clojure's `:counts` need a run to derive;
+the provenance pairs are `bin/provenance-check`'s, essential already); the runner's end trap (§5.4 #17).
+
+## Decided after GD2-GD4 (the user, 2026-11-14, round 33; recorded 2026-11-15 at batch B1's merge)
+
+gate-gd23's six open points (Q1-Q6), as the user answered them:
+
+- **Q1 Coverage** (`test/gate/caches-test.bash --coverage` and the coverage subsets): the weekly tier only.
+- **Q2 cpp-dg** keeps its own passes, by part (no shared pass with the rotated subsets).
+- **Q3 The subsets' rounding**: ceil per area kept (a small area keeps more than a fifth, as GD2 built it).
+- **Q4 repr-java-nojavac.jdk**: weekly, alone under the big lock; the weekly fast-forward waits for it.
+- **Q5 `--nightly --concurrent`**: as GD4 built it; the night slot switches to `bin/night --concurrent` once GD2-GD4 are merged.
+- **Q6 The median**: GD4's lower middle of an even count of passes (`gate.lanes`).
+
+Also decided in round 33:
+
+- **GDS14 (a)** confirmed: a time class is may-pass (a pass is reported, never fails; listed for removal after four rotations'
+  passes), with CPU-second limits. Built after GD3 and GD4 merge, on a branch of its own (gate-gd5).
+- **GD4's three window-W items** (j2g's and repr/go's hosts shared by key; `gocache.bash`'s rule outside the gate; `bin/j2g`'s 20 GiB
+  default through `bin/gate-policy`): all three at W, as they move `gate_key`; not in batch B1.
