@@ -57,10 +57,10 @@ read s e < "$w/second"
 [ $((e - s)) -ge 3 ] || fail "the second reader did not wait ($((e - s)) s)"
 musl fresh || fail "not fresh after two readers"
 echo "musl-lock-test: two readers serialized (second waited $((e - s)) s)"
-# 4. review 300's finding 2: a holder's shared lock (bin/lib/ci/musl-hold.bash's ci_musl_hold, every reader of the cache) keeps a
+# 4. review 300's finding 2: a holder's shared lock (bin/lib/crops/musl-hold.bash's ci_musl_hold, every reader of the cache) keeps a
 # reader's reread out until it ends: the holder holds 6 s, the index is removed under it (stale), the reader starts after 2 s and ends
 # after the holder
-. "$root/bin/lib/ci/musl-hold.bash"
+. "$root/bin/lib/crops/musl-hold.bash"
 rm -f "$w/held" "$w/holder.end" "$w/reader"
 ( ci_musl_hold > "$w/hold.log" 2>&1 || exit 1; date +%s > "$w/held"; sleep 6; date +%s > "$w/holder.end" ) &
 p1=$!
